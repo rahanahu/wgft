@@ -216,3 +216,50 @@ func hasAddr(t *testing.T, name, addr string) bool {
 	}
 	return false
 }
+
+// WireGuard 以外のプロセスが UDP ポートを使っていれば、インタフェースを作らずに中止する(仕様 9 節)。
+func TestEnsureRefusesUDPPortInUse(t *testing.T) {
+	cleanup("wgft0")
+	l, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 51877})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	key, _ := wgtypes.GeneratePrivateKey()
+	_, err = Ensure(Config{Interface: "wgft0", Address: netip.MustParsePrefix("10.99.7.1/24"), ListenPort: 51877, MTU: 1420, PrivateKey: key})
+	var refusal *StartupRefusal
+	if !errors.As(err, &refusal) {
+		t.Fatalf("want StartupRefusal, got %v", err)
+	}
+	if _, e := netlink.LinkByName("wgft0"); e == nil {
+		t.Fatal("wgft0 was created despite the refusal")
+	}
+}
+
+// 鍵の無い状態ファイル(空鍵)では、相手の鍵が空でも所有とみなさない。
+func TestOwnedZeroKey(t *testing.T) {
+	cleanup("wgft0")
+	if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: "wgft0"}}); err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup("wgft0")
+	owned, exists, err := Owned("wgft0", wgtypes.Key{})
+	if err != nil || !exists || owned {
+		t.Fatalf("owned=%v exists=%v err=%v; want owned=false exists=true", owned, exists, err)
+	}
+}
+
+// DeleteLink は WireGuard 以外のリンクを消さない(--adopt-existing の撤去でも)。
+func TestDeleteLinkRefusesNonWireGuard(t *testing.T) {
+	cleanup("wgft0")
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "wgft0"}}); err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup("wgft0")
+	if _, err := DeleteLink("wgft0"); err == nil {
+		t.Fatal("DeleteLink deleted a dummy link named wgft0")
+	}
+	if _, e := netlink.LinkByName("wgft0"); e != nil {
+		t.Fatal("the dummy link is gone")
+	}
+}

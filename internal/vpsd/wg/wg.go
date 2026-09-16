@@ -5,6 +5,8 @@ package wg
 
 import (
 	"fmt"
+	"github.com/rahanahu/wgft/internal/vpsd/check"
+	"github.com/rahanahu/wgft/proto"
 	"net"
 	"net/netip"
 	"strings"
@@ -56,6 +58,16 @@ func (e *StartupRefusal) Error() string {
 // 鍵が一致する(=過去に自分が作った)ときにしか触らない。一致しなければ何も書かずに
 // StartupRefusal を返す(仕様 9 節)。
 func Ensure(cfg Config) (changes []string, err error) {
+	created := false
+	defer func() {
+		// 作ったばかりのインタフェースは、後段で失敗したら残さない(残すと次の起動で「自分のもの」として
+		// 収束はできるが、失敗の原因が消えるまで unit が再起動を繰り返す間、半端な状態が見える)
+		if err != nil && created {
+			if l, e := netlink.LinkByName(cfg.Interface); e == nil {
+				_ = netlink.LinkDel(l)
+			}
+		}
+	}()
 	note := func(f string, a ...any) { changes = append(changes, fmt.Sprintf(f, a...)) }
 
 	c, err := wgctrl.New()
@@ -71,13 +83,21 @@ func Ensure(cfg Config) (changes []string, err error) {
 			return nil, &StartupRefusal{Reason: fmt.Sprintf("listen port %d is already in use by existing WireGuard %q; use --wg-port to choose another port", cfg.ListenPort, name)}
 		}
 	}
+	// WireGuard 以外のプロセスが同じ UDP ポートを bind していても ConfigureDevice が EADDRINUSE で
+	// 失敗する。作ってから失敗すると unit が再起動を繰り返すので、作る前に /proc/net/udp で検出して中止する。
+	if bound, e := check.BoundPorts(); e == nil {
+		if addrs := bound.Conflicts(proto.UDP, proto.PortRange{Lo: uint16(cfg.ListenPort), Hi: uint16(cfg.ListenPort)}); len(addrs) > 0 {
+			if !ownsPort(c, cfg.Interface, cfg.ListenPort) {
+				return nil, &StartupRefusal{Reason: fmt.Sprintf("UDP port %d is already bound by another process on %v; use --wg-port to choose another port", cfg.ListenPort, addrs[uint16(cfg.ListenPort)])}
+			}
+		}
+	}
 	// アドレス帯が他インタフェースと重なると、経路の衝突に加え 6.1 節の conntrack 収束が
 	// 他人の DNAT 済みフローを消しうるので中止する。
 	if refusal := checkAddrOverlap(cfg); refusal != nil {
 		return nil, refusal
 	}
 
-	created := false
 	link, err := netlink.LinkByName(cfg.Interface)
 	if _, notFound := err.(netlink.LinkNotFoundError); notFound {
 		if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: cfg.Interface, MTU: cfg.MTU}}); err != nil {
@@ -218,6 +238,10 @@ func Owned(iface string, expectedKey wgtypes.Key) (owned, exists bool, err error
 	if e != nil {
 		return false, true, e
 	}
+	// 鍵が無い(状態ファイルにサーバ鍵が無い)ときは、相手の鍵が空でも自分のものとはみなさない
+	if expectedKey == (wgtypes.Key{}) {
+		return false, true, nil
+	}
 	return dev.PrivateKey == expectedKey, true, nil
 }
 
@@ -230,6 +254,10 @@ func DeleteLink(iface string) (bool, error) {
 	}
 	if err != nil {
 		return false, err
+	}
+	// --adopt-existing で所有判定を飛ばしても、WireGuard 以外のリンク(同名の veth や bridge)は消さない
+	if link.Type() != "wireguard" {
+		return false, fmt.Errorf("%s is not a WireGuard interface but %s; refusing to delete it", iface, link.Type())
 	}
 	if err := netlink.LinkDel(link); err != nil {
 		return false, fmt.Errorf("delete %s: %w", iface, err)
@@ -268,6 +296,12 @@ func OtherDeviceWithKey(iface string, key wgtypes.Key) (string, bool) {
 }
 
 // portConflict は、iface 以外の WireGuard が port を使っていればその名前を返す。
+// ownsPort は、UDP ポートを bind しているのが自分のインタフェース(再起動後の収束で同じポートを持つ)かを返す。
+func ownsPort(c *wgctrl.Client, iface string, port int) bool {
+	dev, err := c.Device(iface)
+	return err == nil && dev.ListenPort == port
+}
+
 func portConflict(devs []*wgtypes.Device, iface string, port int) (string, bool) {
 	for _, d := range devs {
 		if d.Name != iface && d.ListenPort == port {
