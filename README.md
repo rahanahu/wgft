@@ -243,7 +243,7 @@ Without `--purge`, keys and certificates stay, so restarting the server brings i
 
 ## Status
 
-Alpha, v0.1.0. Verified on the author's own VPS and home network: UDP and TCP reachable from outside, registration through NAT, recovery by re-registration, automatic recovery after a VPS reboot, and teardown. The reboot cost under 30 seconds of downtime. Not yet verified: links with a small MTU, and the Web UI over a real Tailscale network. v0.2.0 is planned to add a user-space mode that runs the VPS side without root.
+Alpha, v0.1.1. Verified on the author's own VPS and home network: UDP and TCP reachable from outside, registration through NAT, recovery by re-registration, automatic recovery after a VPS reboot, and teardown. The reboot cost under 30 seconds of downtime. Not yet verified: links with a small MTU, and the Web UI over a real Tailscale network. v0.2.0 is planned to add a user-space mode that runs the VPS side without root.
 
 ## Documentation
 
