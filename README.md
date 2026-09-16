@@ -45,7 +45,13 @@ For HTTPS, TLS termination and certificates are the job of the reverse proxy at 
 
 One page covers everything: every agent's connection, each rule's status and drop count, warnings, and the nftables table currently in effect. You can add agents and rules and test a TCP rule end to end from the same page. It is available in English and Japanese.
 
-There is no login. The admin API listens on a Unix socket that only root can open, so reach it through an SSH port forward as root: run `ssh -L 8686:/run/wgft/admin.sock root@vps` and browse to `http://localhost:8686` while the session is open. If root cannot log in over SSH, set `WGFT_ADMIN=127.0.0.1:8686` in `server.env` so the API listens on the loopback address of the VPS instead (every local user on the VPS can then reach it), and forward with `ssh -L 8686:127.0.0.1:8686 vps`. If the VPS is on a Tailscale network, set `WGFT_ADMIN_TAILSCALE=true` and open `http://<Tailscale IP of the VPS>:8686` from any device on the tailnet. To use the MagicDNS name instead of the IP, put the name in `WGFT_ADMIN_HOST`.
+There is no login. The admin API does not listen on any TCP port of the VPS; it listens only on the Unix socket `/run/wgft/admin.sock`, which only root can open. From your browser, reach it by forwarding a local port to that socket over SSH. The target of `ssh -L` can be a socket path, not just a port. The socket is owned by root, so log in as root.
+
+```sh
+ssh -L 8686:/run/wgft/admin.sock root@vps
+```
+
+Browse to `http://localhost:8686` while the session is open. If root cannot log in over SSH, set `WGFT_ADMIN=127.0.0.1:8686` in `server.env`. The API then listens on TCP 8686 on the loopback address of the VPS instead of the socket, and `ssh -L 8686:127.0.0.1:8686 vps` forwards to it. With that setting every local user on the VPS can reach the admin API. If the VPS is on a Tailscale network, set `WGFT_ADMIN_TAILSCALE=true` and open `http://<Tailscale IP of the VPS>:8686` from any device on the tailnet. To use the MagicDNS name instead of the IP, put the name in `WGFT_ADMIN_HOST`.
 
 ## Requirements
 
@@ -138,6 +144,20 @@ WGFT_JOIN='<join string from step 2>' wgft agent run --data-dir ~/.wgft
 
 The first start registers the agent and writes `~/.wgft/agent.json`. After that, `wgft agent run --data-dir ~/.wgft` is all you need. The join string is not used again.
 
+To run the agent as a service, use the unit in [deploy/agent.service](deploy/agent.service). It runs as the unprivileged user `wgft`, expects the binary at `/usr/local/bin/wgft`, and reads `/etc/wgft/agent.env`, which only needs the join string.
+
+```sh
+sudo install -m 0755 ~/.local/bin/wgft /usr/local/bin/wgft
+sudo useradd --system --home-dir /var/lib/wgft --shell /usr/sbin/nologin wgft
+sudo mkdir -p /etc/wgft
+printf 'WGFT_JOIN=<join string from step 2>\n' | sudo tee /etc/wgft/agent.env >/dev/null
+sudo chown root:wgft /etc/wgft/agent.env && sudo chmod 0640 /etc/wgft/agent.env
+sudo install -m 0644 deploy/agent.service /etc/systemd/system/wgft-agent.service
+sudo systemctl daemon-reload && sudo systemctl enable --now wgft-agent
+```
+
+The credentials then live in `/var/lib/wgft/agent.json`.
+
 *Docker*
 
 No binary needed. The agent image is published as `ghcr.io/rahanahu/wgft-agent` for amd64 and arm64. Clone the repository for the compose file, edit one line in [deploy/agent.compose.yaml](deploy/agent.compose.yaml), and bring it up. To build the image from source instead, uncomment the `build:` lines in the compose file and add `--build`. If the container cannot reach your LAN targets, uncomment `network_mode: host` in the compose file.
@@ -223,7 +243,7 @@ Without `--purge`, keys and certificates stay, so restarting the server brings i
 
 ## Status
 
-Alpha (v0.1.0). Verified on the author's own VPS and home network: UDP and TCP reachable from outside, registration through NAT, recovery by re-registration, and teardown. Not yet verified: automatic recovery after a VPS reboot, links with a small MTU, and the Web UI over a real Tailscale network. v0.2.0 is planned to add a user-space mode that runs the VPS side without root.
+Alpha, v0.1.0. Verified on the author's own VPS and home network: UDP and TCP reachable from outside, registration through NAT, recovery by re-registration, automatic recovery after a VPS reboot, and teardown. The reboot cost under 30 seconds of downtime. Not yet verified: links with a small MTU, and the Web UI over a real Tailscale network. v0.2.0 is planned to add a user-space mode that runs the VPS side without root.
 
 ## Documentation
 

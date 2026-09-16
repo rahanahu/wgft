@@ -186,7 +186,7 @@ func newRuleLsCmd() *cobra.Command {
 	return ls
 }
 
-// newRuleRmCmd は `rule rm`。複数の ID を 1 バッチで消す。
+// newRuleRmCmd は `rule rm`。複数の ID を 1 バッチで消す。ID は他のサブコマンドと同じく前方一致で受ける。
 func newRuleRmCmd() *cobra.Command {
 	return &cobra.Command{
 		Use: "rm <id>...", Short: "Delete rules", Args: cobra.MinimumNArgs(1),
@@ -195,7 +195,15 @@ func newRuleRmCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Batch(admin.BatchRequest{Delete: args})
+			ids := make([]string, 0, len(args))
+			for _, a := range args {
+				r, err := findRule(c, a)
+				if err != nil {
+					return err
+				}
+				ids = append(ids, r.ID)
+			}
+			res, err := c.Batch(admin.BatchRequest{Delete: ids})
 			if err != nil {
 				return err
 			}

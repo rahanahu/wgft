@@ -45,7 +45,13 @@ HTTPS を公開する場合は、TLS の終端と証明書の管理を自宅側�
 
 ダッシュボードは、エージェントの接続状態、ルールの適用状態と拒否数、警告、適用中の nftables の設定を 1 画面に表示します。エージェントとルールの追加、TCP ルールの接続テストもこの画面から実行できます。表示は日本語と英語を切り替えられます。
 
-ログイン画面はありません。管理 API は root だけが開ける Unix ソケットで待ち受けるため、手元のブラウザからは root で SSH のポート転送をして開きます。`ssh -L 8686:/run/wgft/admin.sock root@vps` で接続したまま `http://localhost:8686` を開きます。root で SSH できない場合は、`server.env` に `WGFT_ADMIN=127.0.0.1:8686` を設定して VPS のループバックアドレスで待ち受けさせ (VPS 上の全ユーザーが管理 API に到達できるようになります)、`ssh -L 8686:127.0.0.1:8686 vps` で転送します。Tailscale を使っている場合は、`WGFT_ADMIN_TAILSCALE=true` を設定すると、tailnet の端末から `http://<VPS の Tailscale IP>:8686` で開けます。MagicDNS の名前で開く場合は、その名前を `WGFT_ADMIN_HOST` に設定します。
+ログイン画面はありません。管理 API は VPS の TCP ポートでは待ち受けず、root だけが開ける Unix ソケット `/run/wgft/admin.sock` だけで待ち受けます。手元のブラウザからは、SSH で手元のポートをそのソケットへ転送して開きます。`ssh -L` の転送先にはポートだけでなくソケットのパスも書けます。ソケットは root 所有なので、root でログインします。
+
+```sh
+ssh -L 8686:/run/wgft/admin.sock root@vps
+```
+
+接続したまま `http://localhost:8686` を開きます。root で SSH できない場合は、`server.env` に `WGFT_ADMIN=127.0.0.1:8686` を設定すると、ソケットの代わりに VPS のループバックアドレスの TCP 8686 で待ち受けるようになり、`ssh -L 8686:127.0.0.1:8686 vps` で転送できます。この設定では VPS 上の全ユーザーが管理 API に到達できるようになります。Tailscale を使っている場合は、`WGFT_ADMIN_TAILSCALE=true` を設定すると、tailnet の端末から `http://<VPS の Tailscale IP>:8686` で開けます。MagicDNS の名前で開く場合は、その名前を `WGFT_ADMIN_HOST` に設定します。
 
 ## 動作環境
 
@@ -136,6 +142,20 @@ WGFT_JOIN='<手順 2 で発行した接続文字列>' wgft agent run --data-dir 
 
 初回の起動で登録が完了し、認証情報が `~/.wgft/agent.json` に保存されます。2 回目以降は接続文字列なしで `wgft agent run --data-dir ~/.wgft` だけで起動できます。
 
+常駐させる場合は、[deploy/agent.service](deploy/agent.service) の unit を使えます。権限を持たない専用ユーザー `wgft` で動き、バイナリは `/usr/local/bin/wgft` を、設定は `/etc/wgft/agent.env` を読みます。設定に要るのは接続文字列だけです。
+
+```sh
+sudo install -m 0755 ~/.local/bin/wgft /usr/local/bin/wgft
+sudo useradd --system --home-dir /var/lib/wgft --shell /usr/sbin/nologin wgft
+sudo mkdir -p /etc/wgft
+printf 'WGFT_JOIN=<手順 2 で発行した接続文字列>\n' | sudo tee /etc/wgft/agent.env >/dev/null
+sudo chown root:wgft /etc/wgft/agent.env && sudo chmod 0640 /etc/wgft/agent.env
+sudo install -m 0644 deploy/agent.service /etc/systemd/system/wgft-agent.service
+sudo systemctl daemon-reload && sudo systemctl enable --now wgft-agent
+```
+
+認証情報は `/var/lib/wgft/agent.json` に保存されます。
+
 *Docker で起動する*
 
 バイナリは不要です。エージェントのイメージは `ghcr.io/rahanahu/wgft-agent` として amd64 と arm64 向けに公開しています。compose ファイルを使うためにリポジトリを取得し、[deploy/agent.compose.yaml](deploy/agent.compose.yaml) の 1 行を書き換えて起動します。イメージをリポジトリからビルドする場合は、compose ファイルの `build:` の行のコメントを外し、コマンドに `--build` を付けます。コンテナから LAN 内の転送先に届かない環境では、compose ファイルの `network_mode: host` のコメントを外します。
@@ -221,7 +241,7 @@ sudo wgft server teardown --purge --yes  # 実行する。--purge を付ける�
 
 ## 開発状況
 
-現在はアルファ版 (v0.1.0) です。作者の実機で、外部からの UDP と TCP の到達、NAT 越しの登録、再登録からの復帰、撤去を確認しました。VPS の再起動からの自動復旧、MTU の小さい回線での動作、実際の Tailscale 経由での Web UI の表示は未確認です。v0.2.0 では、VPS 側を root 権限なしで動かすユーザー空間モードを追加する予定です。
+現在はアルファ版の v0.1.0 です。作者の実機で、外部からの UDP と TCP の到達、NAT 越しの登録、再登録からの復帰、VPS の再起動からの自動復旧、撤去を確認しました。再起動時の停止は 30 秒未満でした。MTU の小さい回線での動作と、実際の Tailscale 経由での Web UI の表示は未確認です。v0.2.0 では、VPS 側を root 権限なしで動かすユーザー空間モードを追加する予定です。
 
 ## ドキュメント
 

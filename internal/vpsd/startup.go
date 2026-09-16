@@ -18,7 +18,7 @@ func serverKey(st *store.Store) (wgtypes.Key, error) {
 		if err != nil {
 			return nil, err
 		}
-		log.Printf("generated the wg0 server key; public key %s", k.PublicKey())
+		log.Printf("generated the WireGuard server key; public key %s", k.PublicKey())
 		return k[:], nil
 	})
 	if err != nil {

@@ -1,0 +1,31 @@
+[Unit]
+Description=wgft agent (home side, user-space WireGuard)
+Documentation=https://github.com/rahanahu/wgft#readme
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+# Settings come from /etc/wgft/agent.env (WGFT_JOIN for the first start); the binary reads it.
+ExecStart=/usr/local/bin/wgft agent run
+Restart=on-failure
+RestartSec=2
+
+# No privileges needed: create the user once with
+#   useradd --system --home-dir /var/lib/wgft --shell /usr/sbin/nologin wgft
+User=wgft
+Group=wgft
+# Credentials (agent.json) live in /var/lib/wgft, the default of --data-dir.
+StateDirectory=wgft
+StateDirectoryMode=0700
+
+# The agent only needs sockets and its state directory. AF_NETLINK is required: wireguard-go
+# watches interface changes over netlink.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

@@ -124,13 +124,17 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 		return nil, err
 	}
 	res, err := d.st.ApplyBatch(d.reserved, func(rules []proto.Rule) ([]proto.Rule, error) {
-		del := map[string]bool{}
-		for _, id := range req.Delete {
-			del[id] = true
-		}
 		byID := map[string]int{}
 		for i, r := range rules {
 			byID[r.ID] = i
+		}
+		// 無い ID の削除は成功扱いにしない(`rule ls` の短縮表示をそのまま渡した場合など)
+		del := map[string]bool{}
+		for _, id := range req.Delete {
+			if _, ok := byID[id]; !ok {
+				return nil, fmt.Errorf("rule %q not found", id)
+			}
+			del[id] = true
 		}
 		for _, u := range req.Upsert {
 			if _, ok := agentAddr[u.Agent]; !ok {
