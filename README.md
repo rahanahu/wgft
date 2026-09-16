@@ -140,14 +140,14 @@ The first start registers the agent and writes `~/.wgft/agent.json`. After that,
 
 *Docker*
 
-No binary needed. Clone the repository, edit one line in [deploy/agent.compose.yaml](deploy/agent.compose.yaml), and bring it up. The image is built from source. If the container cannot reach your LAN targets, uncomment `network_mode: host` in the compose file.
+No binary needed. The agent image is published as `ghcr.io/rahanahu/wgft-agent` for amd64 and arm64. Clone the repository for the compose file, edit one line in [deploy/agent.compose.yaml](deploy/agent.compose.yaml), and bring it up. To build the image from source instead, uncomment the `build:` lines in the compose file and add `--build`. If the container cannot reach your LAN targets, uncomment `network_mode: host` in the compose file.
 
 ```sh
 git clone https://github.com/rahanahu/wgft.git && cd wgft
 # edit this line in deploy/agent.compose.yaml
 #   WGFT_JOIN: "REPLACE_WITH_JOIN_STRING"  -> the join string from step 2, exactly as printed
 # WGFT_NAME is not needed: the agent name comes from the join string. Delete the line or leave it empty.
-docker compose -f deploy/agent.compose.yaml up -d --build
+docker compose -f deploy/agent.compose.yaml up -d
 ```
 
 **4. Add forwarding rules**
@@ -237,4 +237,4 @@ The server runs as root on the VPS. Only three things face the public IP: WireGu
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The licenses of the Go modules compiled into the binary are collected in `THIRD_PARTY_LICENSES.txt`, attached to each release and included in the container image under `/usr/share/doc/wgft/`.

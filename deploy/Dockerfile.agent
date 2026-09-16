@@ -3,19 +3,27 @@
 #
 #   docker build -f deploy/Dockerfile.agent -t wgft-agent:latest .
 #   docker build -f deploy/Dockerfile.agent --build-arg VERSION=v0.1.0 -t wgft-agent:v0.1.0 .
+#   docker buildx build -f deploy/Dockerfile.agent --platform linux/amd64,linux/arm64 ...   # release.yml
 #
-FROM golang:1.26 AS build
+# The build stage runs on the builder's own platform and cross-compiles for the target, so a
+# multi-platform build needs no emulation (Go cross-compiles; the binary is static).
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # VERSION is what `wgft --version` prints; the release workflow passes the git tag.
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/rahanahu/wgft/internal/vpsd.Version=$VERSION" -o /out/wgft ./cmd/wgft
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X github.com/rahanahu/wgft/internal/vpsd.Version=$VERSION" -o /out/wgft ./cmd/wgft
+# License text of every module linked into the binary, shipped next to LICENSE in the image.
+RUN scripts/third-party-licenses.sh /out/THIRD_PARTY_LICENSES.txt
 
 # distroless static: a minimal image with no shell and no package manager. No privileges added.
 FROM gcr.io/distroless/static-debian12:latest
 COPY --from=build /out/wgft /usr/local/bin/wgft
+COPY LICENSE /usr/share/doc/wgft/LICENSE
+COPY --from=build /out/THIRD_PARTY_LICENSES.txt /usr/share/doc/wgft/THIRD_PARTY_LICENSES.txt
 # Where the credentials file (agent.json) lives. Use a named volume so it survives restarts.
 VOLUME ["/var/lib/wgft"]
 ENTRYPOINT ["/usr/local/bin/wgft", "agent", "run"]

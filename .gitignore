@@ -4,8 +4,10 @@
 # Claude Code のローカル設定
 /.claude/
 
-# scripts/build-release.sh の成果物
+# scripts/build-release.sh と GoReleaser の成果物
 /dist/
+# scripts/third-party-licenses.sh の出力 (GoReleaser の before hook)
+/build/
 
 # go build ./cmd/wgft/(引数が単一 main だと cwd に wgft を吐く)
 /wgft

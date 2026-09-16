@@ -7,7 +7,7 @@ The step-by-step procedure is in the [README](../README.md) (Setup section). Thi
 | `server.service` | systemd unit for the VPS-side `server` (`ExecStart=wgft server run`). Runs as root (kernel WireGuard + nftables) |
 | `server.env.example` | Template for `/etc/wgft/server.env`: site-specific settings such as `WGFT_MODE` and `WGFT_WG_ENDPOINT` (`WGFT_*` format) |
 | `Dockerfile.agent` | Container for the home agent. Static binary, unprivileged, no TUN |
-| `agent.compose.yaml` | Docker Compose for the agent: `WGFT_JOIN` / `WGFT_NAME` and the state volume |
+| `agent.compose.yaml` | Docker Compose for the agent: `WGFT_JOIN` / `WGFT_NAME` and the state volume. Pulls `ghcr.io/rahanahu/wgft-agent` (amd64 and arm64, built from `Dockerfile.agent` by the release workflow); `build:` is there, commented out, for building from source |
 
 Binaries are built with `../scripts/build-release.sh` into `dist/wgft-linux-<arch>` (a single file, no CGO).
 

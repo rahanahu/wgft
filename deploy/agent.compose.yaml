@@ -1,6 +1,9 @@
 # Docker Compose for the home agent.
 #
-#   docker compose -f deploy/agent.compose.yaml up -d --build
+#   docker compose -f deploy/agent.compose.yaml up -d
+#
+# The image is pulled from GHCR (amd64 and arm64). To build it from this repository instead,
+# uncomment the build: lines below and add --build to the command above.
 #
 # Notes
 # - No privileges: no --privileged, no cap_add, no devices (user-space netstack, so no TUN).
@@ -14,10 +17,10 @@
 #   empty unless you want to double-check it against the name the join string is bound to.
 services:
   wgft-agent:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.agent
-    image: wgft-agent:latest
+    image: ghcr.io/rahanahu/wgft-agent:latest
+    # build:
+    #   context: ..
+    #   dockerfile: deploy/Dockerfile.agent
     container_name: wgft-agent
     restart: unless-stopped
     environment:

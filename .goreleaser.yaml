@@ -5,6 +5,12 @@
 #
 version: 2
 
+before:
+  hooks:
+    # THIRD_PARTY_LICENSES.txt: license text of every module linked into the binary
+    # (attached below as an extra release file; the image gets the same file from Dockerfile.agent)
+    - scripts/third-party-licenses.sh build/THIRD_PARTY_LICENSES.txt
+
 builds:
   - id: wgft
     main: ./cmd/wgft
@@ -70,6 +76,7 @@ release:
   # 明示的に添付する。
   extra_files:
     - glob: ./dist/*.sha256
+    - glob: ./build/THIRD_PARTY_LICENSES.txt
 
 # GHCR へのエージェントイメージは、このファイルの dockers セクションではなく
 # .github/workflows/release.yml の別ジョブで deploy/Dockerfile.agent を

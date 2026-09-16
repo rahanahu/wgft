@@ -138,14 +138,14 @@ WGFT_JOIN='<手順 2 で発行した接続文字列>' wgft agent run --data-dir 
 
 *Docker で起動する*
 
-バイナリは不要です。リポジトリを取得し、[deploy/agent.compose.yaml](deploy/agent.compose.yaml) の 1 行を書き換えて起動します。イメージはリポジトリからビルドされます。コンテナから LAN 内の転送先に届かない環境では、compose ファイルの `network_mode: host` のコメントを外します。
+バイナリは不要です。エージェントのイメージは `ghcr.io/rahanahu/wgft-agent` として amd64 と arm64 向けに公開しています。compose ファイルを使うためにリポジトリを取得し、[deploy/agent.compose.yaml](deploy/agent.compose.yaml) の 1 行を書き換えて起動します。イメージをリポジトリからビルドする場合は、compose ファイルの `build:` の行のコメントを外し、コマンドに `--build` を付けます。コンテナから LAN 内の転送先に届かない環境では、compose ファイルの `network_mode: host` のコメントを外します。
 
 ```sh
 git clone https://github.com/rahanahu/wgft.git && cd wgft
 # deploy/agent.compose.yaml の次の行を書き換える
 #   WGFT_JOIN: "REPLACE_WITH_JOIN_STRING"  -> 手順 2 で発行した接続文字列をそのまま
 # WGFT_NAME は不要です。エージェントの名前は接続文字列に紐付いています。行は削除するか空のままにします
-docker compose -f deploy/agent.compose.yaml up -d --build
+docker compose -f deploy/agent.compose.yaml up -d
 ```
 
 **4. 転送ルールを追加する**
@@ -235,4 +235,4 @@ VPS 側は root 権限で動きます。公開 IP で待ち受けるのは、Wir
 
 ## ライセンス
 
-[MIT](LICENSE)
+[MIT](LICENSE) です。バイナリに含まれる Go モジュールのライセンスは `THIRD_PARTY_LICENSES.txt` にまとめ、各リリースに添付し、コンテナイメージの `/usr/share/doc/wgft/` にも入れています。
