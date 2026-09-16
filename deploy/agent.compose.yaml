@@ -7,6 +7,12 @@
 #
 # Notes
 # - No privileges: no --privileged, no cap_add, no devices (user-space netstack, so no TUN).
+# - The image runs as uid 65532 (the distroless "nonroot" user), not root. The named volume
+#   below is fine as is: Docker/Podman initialise a named volume from the image directory,
+#   ownership included, so /var/lib/wgft in the volume comes out owned by 65532. If you swap
+#   the volume for a bind mount instead (for example "-v ./data:/var/lib/wgft"), the host
+#   directory must be owned by uid 65532 or otherwise writable by it, since a bind mount keeps
+#   the host directory's own ownership.
 # - Outbound: it must reach the WireGuard port on the VPS (UDP 51820).
 # - LAN: it must reach the forwarding targets (for example 192.168.1.20:25565). The default
 #   bridge network normally reaches the LAN through the host. If it does not, use network_mode: host.
