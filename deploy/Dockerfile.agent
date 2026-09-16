@@ -1,0 +1,21 @@
+# Container for the home agent. It runs user-space wireguard-go + gVisor netstack, so it needs
+# neither a TUN device nor NET_ADMIN. Outbound UDP and reachability to the LAN targets are enough.
+#
+#   docker build -f deploy/Dockerfile.agent -t wgft-agent:latest .
+#   docker build -f deploy/Dockerfile.agent --build-arg VERSION=v0.1.0 -t wgft-agent:v0.1.0 .
+#
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# VERSION is what `wgft --version` prints; the release workflow passes the git tag.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/rahanahu/wgft/internal/vpsd.Version=$VERSION" -o /out/wgft ./cmd/wgft
+
+# distroless static: a minimal image with no shell and no package manager. No privileges added.
+FROM gcr.io/distroless/static-debian12:latest
+COPY --from=build /out/wgft /usr/local/bin/wgft
+# Where the credentials file (agent.json) lives. Use a named volume so it survives restarts.
+VOLUME ["/var/lib/wgft"]
+ENTRYPOINT ["/usr/local/bin/wgft", "agent", "run"]

@@ -1,0 +1,23 @@
+# ルールが 1 つもないとき。固定のチェーンだけを持つ。
+table inet wgft {
+  chain filter_pre {
+    type filter hook prerouting priority -150; policy accept;
+  }
+  chain nat_pre {
+    type nat hook prerouting priority dstnat - 1; policy accept;
+  }
+  chain input {
+    type filter hook input priority filter - 10; policy accept;
+    iifname "wg0" ct state new drop
+  }
+  chain forward {
+    type filter hook forward priority filter - 10; policy accept;
+    iifname "wg0" oifname "wg0" drop
+    oifname "wg0" ct status dnat accept
+    iifname "wg0" ct state established,related accept
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "wg0" ct status dnat masquerade
+  }
+}

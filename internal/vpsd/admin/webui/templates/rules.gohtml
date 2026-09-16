@@ -1,0 +1,55 @@
+{{ define "rules" }}
+<div class="section-head">
+  <div class="title-row"><h2>{{ T .Locale "rules" }}</h2><span class="count">{{ .RuleCount }}</span></div>
+  <div class="toolbar"><span class="muted">{{ T .Locale "gen" }} {{ .Generation }}</span></div>
+</div>
+<div class="table-scroll">
+  <table class="data-table rules-table">
+    <thead>
+      <tr>
+        <th>{{ T .Locale "colProtoPort" }}</th><th>{{ T .Locale "colAgent" }}</th><th>{{ T .Locale "colDest" }}</th><th>{{ T .Locale "colMode" }}</th>
+        <th>{{ T .Locale "colState" }}</th><th>{{ T .Locale "colDenied" }}</th><th>{{ T .Locale "colRestrict" }}</th><th>{{ T .Locale "colActions" }}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ $loc := .Locale }}
+      {{ range $gi, $g := .RuleGroups }}
+      <tr class="group-row">
+        <td colspan="8">
+          <button type="button" class="group-toggle" data-group="g{{ $gi }}" aria-expanded="true">▾</button>
+          <span class="group-name">{{ $g.Label }}</span><span class="count">{{ len $g.Rules }}</span>
+        </td>
+      </tr>
+      {{ range $g.Rules }}
+      <tr class="rule-row" data-group="g{{ $gi }}">
+        <td data-label="{{ T $loc "colProtoPort" }}">
+          <strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> {{ .Ports }}
+          {{ if .Note }}<small class="rule-note">{{ .Note }}</small>{{ end }}
+        </td>
+        <td data-label="{{ T $loc "colAgent" }}">{{ .Agent }}</td>
+        <td data-label="{{ T $loc "colDest" }}" class="mono">{{ .Target }}</td>
+        <td data-label="{{ T $loc "colMode" }}">{{ .Mode }}{{ if .ProxyProtocol }} <small>(PROXY)</small>{{ end }}</td>
+        <td data-label="{{ T $loc "colState" }}"><span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span></td>
+        <td data-label="{{ T $loc "colDenied" }}">{{ .Dropped }}</td>
+        <td data-label="{{ T $loc "colRestrict" }}">{{ .Restriction }}</td>
+        <td data-label="{{ T $loc "colActions" }}">
+          <div class="row-actions">
+            <form method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
+              <button class="small-btn" type="submit">{{ if .Enabled }}{{ T $loc "disable" }}{{ else }}{{ T $loc "enable" }}{{ end }}</button>
+            </form>
+            {{ if .CanCheck }}<a class="small-btn accent" href="/ui/rules/{{ .ID }}/check">{{ T $loc "testConn" }}</a>{{ end }}
+            <a class="small-btn" href="/ui/rules/{{ .ID }}/meta">{{ T $loc "editMeta" }}</a>
+            <form method="post" action="/ui/rules/{{ .ID }}/delete" data-confirm="{{ printf (T $loc "confirmDelete") .Ports }}">
+              <button class="small-btn" type="submit">{{ T $loc "delete" }}</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {{ end }}
+      {{ else }}
+      <tr><td colspan="8" class="muted" style="padding:18px">{{ T $loc "noRules" }}</td></tr>
+      {{ end }}
+    </tbody>
+  </table>
+</div>
+{{ end }}

@@ -1,0 +1,60 @@
+# Lab Caddyfile for the HTTPS check. See lab/caddy/README.md for how to run this and what was verified.
+# Run inside the "home" netns of the lab VM, bound to 192.168.50.2:
+#   caddy run --config /wgft/lab/caddy/Caddyfile --adapter caddyfile
+# The log output directory (/var/log/caddy-lab/) must exist and be writable before starting.
+{
+	# The 443 site below uses "tls internal", which makes Caddy treat it as a managed-TLS
+	# site and, by default, auto-add an HTTP->HTTPS redirect on port 80 (see "optional:
+	# redirect" in lab/caddy/README.md). That redirect would collide with our own plain
+	# HTTP site on port 80 below, so it is switched off for this experiment.
+	auto_https disable_redirects
+
+	# Scope the proxy_protocol listener wrapper to the 443 listener only. Port 80 is
+	# reached through a plain kernel-mode passthrough rule (no --proxy-protocol), so a
+	# global listener_wrappers block would make Caddy wait for a PROXY protocol header
+	# that never arrives on port 80 and break plain HTTP requests.
+	servers 192.168.50.2:443 {
+		listener_wrappers {
+			proxy_protocol {
+				timeout 2s
+				allow 192.168.50.2/32
+			}
+			tls
+		}
+	}
+}
+
+# Caddy matches HTTP requests by Host header / SNI against the site address below, not
+# just by the listener's IP:port. The lab has no DNS, so "home.wgft.lab" is a stand-in for
+# the domain a real deployment would point at the VPS; from the client namespace, use
+# `curl --resolve home.wgft.lab:443:198.51.100.1 ...` (and :80 for the port 80 site) to
+# send that Host header while still connecting to the VPS public IP. See lab/caddy/README.md.
+
+# 443: reached through a "tcp 443 --to 192.168.50.2:443 --proxy --proxy-protocol" rule.
+# tls internal issues a locally-trusted self-signed certificate; there is no way to test
+# ACME (Let's Encrypt) inside the lab (no public DNS, no inbound reachability from outside).
+home.wgft.lab {
+	bind 192.168.50.2
+	tls internal
+
+	log {
+		output file /var/log/caddy-lab/access-443.log
+		format json
+	}
+
+	respond "https ok remote={remote_host}"
+}
+
+# 80: reached through a plain kernel-mode "tcp 80 --to 192.168.50.2:80" rule, no PROXY
+# protocol. The "http://" scheme keeps Caddy from managing TLS or an automatic redirect
+# for this site, so the two sites can be compared independently.
+http://home.wgft.lab {
+	bind 192.168.50.2
+
+	log {
+		output file /var/log/caddy-lab/access-80.log
+		format json
+	}
+
+	respond "http ok remote={remote_host}"
+}

@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# wgft の開発用ラボを操作する(ホストで実行する)。詳しくは lab/README.md。
+set -euo pipefail
+
+VM=${WGFT_LAB_VM:-wgft-lab}
+IMAGE=${WGFT_LAB_IMAGE:-images:debian/12}
+CPU=${WGFT_LAB_CPU:-2}
+MEM=${WGFT_LAB_MEM:-2GiB}
+SNAPSHOT=clean
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+SHARE=/wgft  # VM 内でのリポジトリの場所(読み取り専用)
+NAMESPACES=(client vps homerouter home)
+
+die() { echo "lab: $*" >&2; exit 1; }
+info() { echo "lab: $*" >&2; }
+
+# incus-admin グループへの追加が今のログインセッションに反映されていなくても動くようにする
+if incus info >/dev/null 2>&1; then
+  inc() { incus "$@"; }
+elif getent group incus-admin | cut -d: -f4 | tr ',' '\n' | grep -qx "$(id -un)"; then
+  inc() { sg incus-admin -c "$(printf '%q ' incus "$@")"; }
+else
+  die "incus を操作する権限がない(incus-admin グループに入れてログインし直す)"
+fi
+
+vm_exists() { inc info "$VM" >/dev/null 2>&1; }
+vm_state() { inc list "$VM" -c s -f csv; }
+has_snapshot() { inc snapshot list "$VM" -f csv -c n | grep -qx "$SNAPSHOT"; }
+wait_agent() { timeout 300 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$VM" agent)" || die "VM の agent が起動しない"; }
+# agent は IP アドレスが付く前に応答するので、起動直後に外と通信するなら別に待つ。
+# 付かなくてもトポロジ(VM 内の netns)には影響しないので、止めずに警告だけ出す
+wait_net() { timeout 120 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$VM" ip --interval 2)" || info "VM に IP アドレスが付かない(外部との通信は失敗する)"; }
+in_vm() { inc exec "$VM" --cwd "$SHARE" -- "$@"; }
+
+ensure_running() {
+  vm_exists || die "VM '$VM' がない(lab up で作る)"
+  if [[ $(vm_state) == RUNNING ]]; then
+    wait_agent
+  else
+    inc start "$VM"
+    wait_agent
+    wait_net
+  fi
+}
+
+provision() {
+  info "VM に開発用パッケージを入れる"
+  inc exec "$VM" -- bash -s <<'EOF'
+set -euo pipefail
+# ホストの firewalld / Docker の影響で IPv4 の DNS が引けない場合は、IPv6 の DNS に切り替える(lab/README.md)
+# /etc/resolv.conf は /run(tmpfs)へのシンボリックリンクなので、直接書くと再起動で消える。resolved の設定に書く
+if ! getent hosts deb.debian.org >/dev/null; then
+  echo "IPv4 の DNS が使えないので IPv6 の DNS を使う" >&2
+  if systemctl is-active -q systemd-resolved; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    printf '[Resolve]\nDNS=2001:4860:4860::8888 2606:4700:4700::1111\n' > /etc/systemd/resolved.conf.d/wgft-lab-ipv6-dns.conf
+    systemctl restart systemd-resolved
+  else
+    rm -f /etc/resolv.conf
+    printf 'nameserver 2001:4860:4860::8888\nnameserver 2606:4700:4700::1111\n' > /etc/resolv.conf
+  fi
+  getent hosts deb.debian.org >/dev/null || { echo "IPv6 の DNS でも名前を引けない" >&2; exit 1; }
+fi
+export DEBIAN_FRONTEND=noninteractive
+# 前回の lab up を途中で止めた場合などに、dpkg のロックが空くまで待つ
+apt_opts=(-q -o DPkg::Lock::Timeout=600)
+dpkg --configure -a
+apt-get "${apt_opts[@]}" update
+apt-get "${apt_opts[@]}" install -y --no-install-recommends \
+  nftables iptables wireguard-tools conntrack iproute2 procps tcpdump iperf3 socat curl podman
+mkdir -p /var/lib/wgft-lab && touch /var/lib/wgft-lab/provisioned
+EOF
+}
+
+cmd_up() {
+  if ! vm_exists; then
+    info "VM '$VM' を作る($IMAGE, cpu=$CPU, mem=$MEM)"
+    inc init "$IMAGE" "$VM" --vm -c "limits.cpu=$CPU" -c "limits.memory=$MEM"
+    # 9p はホットプラグできないので、起動前に追加する
+    inc config device add "$VM" repo disk source="$REPO" path="$SHARE" readonly=true
+  fi
+  ensure_running
+  inc exec "$VM" -- test -f /var/lib/wgft-lab/provisioned || provision
+  if ! has_snapshot; then
+    info "スナップショット '$SNAPSHOT' を作る"
+    # 直前の書き込み(provisioned の印など)がディスクに届く前に取ると、巻き戻したときに消える
+    inc exec "$VM" -- sync
+    inc snapshot create "$VM" "$SNAPSHOT"
+  fi
+  cmd_net up
+}
+
+cmd_reset() {
+  vm_exists || die "VM '$VM' がない(lab up で作る)"
+  has_snapshot || die "スナップショット '$SNAPSHOT' がない(lab up で作る)"
+  info "スナップショット '$SNAPSHOT' に戻す"
+  [[ $(vm_state) == STOPPED ]] || inc stop "$VM" --force
+  inc snapshot restore "$VM" "$SNAPSHOT"
+  ensure_running
+  cmd_net up
+}
+
+cmd_destroy() {
+  vm_exists || { info "VM '$VM' はない"; return; }
+  if [[ ${1:-} != --yes ]]; then
+    read -r -p "VM '$VM' とスナップショットを削除する。よい? [y/N] " ans
+    [[ $ans == [yY] ]] || die "中止"
+  fi
+  inc delete "$VM" --force
+}
+
+cmd_net() {
+  case "${1:-}" in
+    up | down | status) ensure_running; in_vm "$SHARE/lab/netns.sh" "$1" ;;
+    *) die "usage: lab net up|down|status" ;;
+  esac
+}
+
+# lab exec <ns|vm> <command...>:VM 内(ns 指定ならその netns 内)で、/wgft を作業ディレクトリにして実行
+cmd_exec() {
+  [[ $# -ge 2 ]] || die "usage: lab exec <$(IFS='|'; echo "${NAMESPACES[*]}")|vm> <command...>"
+  local target=$1; shift
+  ensure_running
+  if [[ $target == vm ]]; then
+    in_vm "$@"
+  else
+    printf '%s\n' "${NAMESPACES[@]}" | grep -qx "$target" || die "不明な ns: $target"
+    in_vm ip netns exec "$target" "$@"
+  fi
+}
+
+cmd_shell() {
+  local target=${1:-vm}
+  if [[ $target == vm ]]; then cmd_exec vm bash; else cmd_exec "$target" bash; fi
+}
+
+# lab build:ホストで静的バイナリを bin/ に作り、VM の /usr/local/bin に install する。
+# 9p 上の bin/ を VM で直接 exec すると、そのバイナリを実行中のプロセスがいる間にホストで上書きしたとき、
+# ページキャッシュに残った古いページと新しいページが混ざって SIGSEGV になる(実験で確認)。
+# install(1) は unlink してから書くので、実行中のプロセスは古い inode のまま動き続け、新しい exec は新しい方を読む
+cmd_build() {
+  [[ -f $REPO/go.mod ]] || die "go.mod がまだない"
+  (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/ ./cmd/... ./tools/...)
+  info "built into $REPO/bin/"
+  if vm_exists && [[ $(vm_state) == RUNNING ]]; then
+    in_vm sh -c 'for b in /wgft/bin/*; do [ -f "$b" ] && [ -x "$b" ] && case "$b" in *.test) ;; *) install -m 0755 "$b" /usr/local/bin/;; esac; done; ls /usr/local/bin/'
+    info "installed into VM /usr/local/bin (use plain command names in the VM)"
+  fi
+}
+
+# lab test <pkg> [ns] [go test flags...]:ホストで build tag lab 付きのテストバイナリを作り、VM の ns(既定 vps)で実行する
+cmd_test() {
+  [[ $# -ge 1 ]] || die "usage: lab test <pkg> [ns] [-test.run ...]"
+  local pkg=${1%/}; shift
+  local ns=vps
+  if [[ $# -ge 1 && $1 != -* ]]; then ns=$1; shift; fi
+  local name="$(basename "$pkg").test"
+  (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -tags lab -o "bin/$name" "./$pkg") || die "テストのビルドに失敗"
+  ensure_running
+  in_vm ip netns exec "$ns" sh -c "cd $SHARE/$pkg && exec $SHARE/bin/$name -test.v $(printf '%q ' "$@")"
+}
+
+cmd_status() {
+  if ! vm_exists; then echo "VM '$VM': absent"; return; fi
+  echo "VM '$VM': $(vm_state)"
+  echo "snapshot '$SNAPSHOT': $(has_snapshot && echo present || echo absent)"
+  [[ $(vm_state) == RUNNING ]] || return 0
+  inc exec "$VM" -- bash -s <<EOF
+mountpoint -q $SHARE && echo "share $SHARE: mounted" || echo "share $SHARE: NOT mounted"
+test -f /var/lib/wgft-lab/provisioned && echo "provisioned: yes" || echo "provisioned: no"
+echo "kernel: \$(uname -r)"
+getent hosts deb.debian.org >/dev/null && echo "dns: ok" || echo "dns: NG"
+ping -4 -c1 -W2 1.1.1.1 >/dev/null 2>&1 && echo "ipv4 internet: ok" || echo "ipv4 internet: NG(lab host-fix を参照)"
+ping -6 -c1 -W2 2001:4860:4860::8888 >/dev/null 2>&1 && echo "ipv6 internet: ok" || echo "ipv6 internet: NG"
+EOF
+  in_vm "$SHARE/lab/netns.sh" status
+}
+
+# lab host-fix:Incus の VM が IPv4 で外に出られるよう、ホストの firewalld と Docker を設定する
+cmd_host_fix() {
+  local cmds=(
+    "firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent"
+    "firewall-cmd --reload"
+    "iptables -C DOCKER-USER -i incusbr0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i incusbr0 -j ACCEPT"
+    "iptables -C DOCKER-USER -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o incusbr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+  )
+  echo "次を sudo で実行する(DOCKER-USER の 2 行はホストの再起動で消える):"
+  printf '  %s\n' "${cmds[@]}"
+  read -r -p "実行する? [y/N] " ans
+  [[ $ans == [yY] ]] || die "中止"
+  for c in "${cmds[@]}"; do sudo bash -c "$c"; done
+}
+
+usage() {
+  cat <<EOF
+usage: lab <command>
+
+  up                  VM を作成・起動し、パッケージ導入、スナップショット作成、netns のトポロジを立てる(冪等)
+  reset               スナップショットに戻し、トポロジを立て直す
+  destroy [--yes]     VM を削除する
+  status              VM、共有、ネットワーク、トポロジの状態
+  net up|down|status  netns のトポロジだけを操作する
+  exec <ns|vm> <cmd>  VM 内(ns 指定ならその netns 内)でコマンドを実行する。作業ディレクトリは $SHARE
+  shell [ns|vm]       VM 内(ns 指定ならその netns 内)で bash を開く
+  build               ホストで ./cmd/... ./tools/... を静的ビルドして bin/ に置き、VM の /usr/local/bin に install する
+  test <pkg> [ns]     build tag lab 付きでテストバイナリを作り、VM の ns(既定 vps)で実行する
+  host-fix            ホストの firewalld / Docker を設定して VM の IPv4 を通す(sudo)
+
+ns: ${NAMESPACES[*]}
+env: WGFT_LAB_VM=$VM WGFT_LAB_IMAGE=$IMAGE WGFT_LAB_CPU=$CPU WGFT_LAB_MEM=$MEM
+EOF
+}
+
+sub=${1:-}; shift || true
+case "$sub" in
+  up) cmd_up ;;
+  reset) cmd_reset ;;
+  destroy) cmd_destroy "$@" ;;
+  status) cmd_status ;;
+  net) cmd_net "$@" ;;
+  exec) cmd_exec "$@" ;;
+  shell) cmd_shell "$@" ;;
+  build) cmd_build ;;
+  test) cmd_test "$@" ;;
+  host-fix) cmd_host_fix ;;
+  "" | -h | --help | help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

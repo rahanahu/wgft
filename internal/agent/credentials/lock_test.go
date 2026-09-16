@@ -1,0 +1,39 @@
+package credentials
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
+
+// 同じプロセス内の flock は同じ open file description を共有しないので、別 open で取り直せば衝突する。
+func TestLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	l, err := Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Acquire(path); !errors.Is(err, ErrLocked) {
+		t.Errorf("second Acquire = %v, want ErrLocked", err)
+	}
+	if locked, _ := IsLocked(path); !locked {
+		t.Error("IsLocked = false while held")
+	}
+	// 別プロセスからも取れない
+	out, err := exec.Command("flock", "-n", LockPath(path), "true").CombinedOutput()
+	if err == nil {
+		t.Errorf("external flock should fail while held: %s", out)
+	}
+	l.Release()
+	if locked, _ := IsLocked(path); locked {
+		t.Error("IsLocked = true after release")
+	}
+	if _, err := Acquire(path); err != nil {
+		t.Errorf("Acquire after release: %v", err)
+	}
+	if info, err := os.Stat(LockPath(path)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("lock file: %v %v", info, err)
+	}
+}

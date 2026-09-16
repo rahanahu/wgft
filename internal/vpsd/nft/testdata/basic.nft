@@ -1,0 +1,37 @@
+# basic.json から期待されるテーブル。
+# r_off は無効、r_proxy はプロキシモードなので行を持たない。set の連番は有効なカーネルモードのルールで数える。
+table inet wgft {
+  set deny_1 { type ipv4_addr; flags interval; elements = { 198.51.100.128/25, 203.0.113.0/24 } }
+  set meter_1 { type ipv4_addr; flags dynamic; timeout 1m; size 65535; }
+  set allow_2 { type ipv4_addr; flags interval; elements = { 192.0.2.0/24, 198.51.100.0/24 } }
+  set meter_2 { type ipv4_addr; flags dynamic; timeout 1m; size 65535; }
+
+  chain filter_pre {
+    type filter hook prerouting priority -150; policy accept;
+    iifname != "wg0" udp dport 2456-2457 ip saddr @deny_1 counter drop comment "wgft:r_udp:deny"
+    iifname != "wg0" udp dport 2456-2457 ct state new add @meter_1 { ip saddr limit rate over 10/second } counter drop comment "wgft:r_udp:per_source"
+    iifname != "wg0" udp dport 2456-2457 ct state new limit rate over 100/second counter drop comment "wgft:r_udp:new_flow"
+    iifname != "wg0" udp dport 2456-2457 limit rate over 5000/second counter drop comment "wgft:r_udp:packet"
+    iifname != "wg0" tcp dport 25565 ip saddr != @allow_2 counter drop comment "wgft:r_tcp:allow"
+    iifname != "wg0" tcp dport 25565 ct state new add @meter_2 { ip saddr limit rate over 30/minute } counter drop comment "wgft:r_tcp:per_source"
+  }
+  chain nat_pre {
+    type nat hook prerouting priority dstnat - 1; policy accept;
+    iifname != "wg0" udp dport 2456-2457 dnat ip to 10.200.0.2 comment "wgft:r_udp:dnat"
+    iifname != "wg0" tcp dport 25565 dnat ip to 10.200.0.3 comment "wgft:r_tcp:dnat"
+  }
+  chain input {
+    type filter hook input priority filter - 10; policy accept;
+    iifname "wg0" ct state new drop
+  }
+  chain forward {
+    type filter hook forward priority filter - 10; policy accept;
+    iifname "wg0" oifname "wg0" drop
+    oifname "wg0" ct status dnat accept
+    iifname "wg0" ct state established,related accept
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "wg0" ct status dnat masquerade
+  }
+}

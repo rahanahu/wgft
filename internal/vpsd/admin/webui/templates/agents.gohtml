@@ -1,0 +1,46 @@
+{{ define "agents" }}
+<div class="section-head">
+  <div class="title-row"><h2>{{ T .Locale "agents" }}</h2><span class="count">{{ len .Agents }}</span></div>
+  <div class="toolbar">
+    <button class="ghost-btn" id="autorefresh-toggle" aria-pressed="true" title="{{ T .Locale "autorefresh" }}">{{ T .Locale "autorefresh" }}</button>
+  </div>
+</div>
+<div class="table-scroll">
+  <table class="data-table agents-table">
+    <thead>
+      <tr>
+        <th>{{ T .Locale "colName" }}</th><th>{{ T .Locale "colState" }}</th><th>{{ T .Locale "colTunnelIP" }}</th>
+        <th>{{ T .Locale "colConn" }}</th><th>{{ T .Locale "colGen" }}</th><th>{{ T .Locale "colHeartbeat" }}</th><th>{{ T .Locale "colWarn" }}</th><th>{{ T .Locale "colActions" }}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ $loc := .Locale }}
+      {{ range .Agents }}
+      <tr {{ if .Attention }}class="attention-row"{{ end }}>
+        <td data-label="{{ T $loc "colName" }}"><div class="entity"><span class="status-dot {{ if not .Connected }}offline{{ end }}"></span><div><strong>{{ .Name }}</strong><small>{{ .Address }}</small></div></div></td>
+        <td data-label="{{ T $loc "colState" }}">
+          <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
+          <small class="stack {{ .TunnelClass }}">{{ T $loc "tunnelPrefix" }}{{ .TunnelLabel }}</small>
+        </td>
+        <td data-label="{{ T $loc "colTunnelIP" }}" class="mono">{{ .Address }}</td>
+        <td data-label="{{ T $loc "colConn" }}">
+          <div class="mono">{{ or .StreamFrom "-" }}</div>
+          <div class="mono muted">WG: {{ or .WGEndpoint "-" }}</div>
+          {{ if .ShowIPCompare }}<small class="{{ .IPCompareClass }}">{{ .IPCompareLabel }}</small>{{ end }}
+        </td>
+        <td data-label="{{ T $loc "colGen" }}">Gen {{ .Generation }}{{ if .Pending }} <span class="badge warning">{{ T $loc "pending" }}</span>{{ end }}</td>
+        <td data-label="{{ T $loc "colHeartbeat" }}" class="{{ .HeartbeatClass }}">{{ .HeartbeatAgo }}</td>
+        <td data-label="{{ T $loc "colWarn" }}">{{ if .WarnCount }}<span class="count danger">{{ .WarnCount }}</span>{{ else }}<span class="muted">-</span>{{ end }}</td>
+        <td data-label="{{ T $loc "colActions" }}">
+          <form method="post" action="/ui/agents/{{ .Name }}/revoke" style="display:inline" data-confirm="{{ printf (T $loc "confirmRevoke") .Name }}">
+            <button class="small-btn" type="submit">{{ T $loc "revoke" }}</button>
+          </form>
+        </td>
+      </tr>
+      {{ else }}
+      <tr><td colspan="8" class="muted" style="padding:18px">{{ T $loc "noAgents" }}</td></tr>
+      {{ end }}
+    </tbody>
+  </table>
+</div>
+{{ end }}

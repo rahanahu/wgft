@@ -1,0 +1,36 @@
+[Unit]
+Description=wgft server (kernel WireGuard + nftables forwarder)
+Documentation=https://github.com/rahanahu/wgft#readme
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Configuration is WGFT_* in /etc/wgft/server.env. The binary reads that file by default, so no
+# EnvironmentFile= here (with it, every value would show up as coming from the environment and
+# the startup printout of "value and source" would be useless).
+ExecStart=/usr/local/bin/wgft server run
+Restart=on-failure
+RestartSec=2
+# A refusal caused by configuration (someone else's WireGuard interface, a port or address
+# clash; exit code 3) does not go away on restart, so do not loop on it.
+RestartPreventExitStatus=3
+
+# Runs as root: it talks to kernel WireGuard (netlink) and nftables.
+# Data lives in /var/lib/wgft (default of --data-dir). StateDirectory creates it with the right mode.
+StateDirectory=wgft
+StateDirectoryMode=0700
+# The admin API Unix socket lives in /run/wgft (default of --admin, unix:///run/wgft/admin.sock).
+# RuntimeDirectory creates it as root:root 0700 and removes it on stop.
+RuntimeDirectory=wgft
+RuntimeDirectoryMode=0700
+
+# Light hardening that does not get in the way of netlink and nft.
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

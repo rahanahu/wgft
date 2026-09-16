@@ -1,0 +1,85 @@
+# GoReleaser v2 の設定。タグ v* を push すると .github/workflows/release.yml から
+# `goreleaser release --clean` を実行する。手元では:
+#
+#   go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean --skip=publish,docker
+#
+version: 2
+
+builds:
+  - id: wgft
+    main: ./cmd/wgft
+    binary: wgft
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    # module パスが wgft から github.com/rahanahu/wgft に変わったら、
+    # 追随済み(2026-09-16)(scripts/build-release.sh と同じ変数)。
+    ldflags:
+      - -s -w -X github.com/rahanahu/wgft/internal/vpsd.Version={{.Version}}
+    hooks:
+      # checksum.split の出力を自前の sha256sum -c 互換ファイルに置き換える
+      # (下の checksum セクションの説明を参照)。
+      post:
+        - cmd: scripts/goreleaser-checksum.sh {{ .Path }} {{ .Os }} {{ .Arch }}
+
+archives:
+  # README の取得コマンドと揃える生バイナリの名前。tar/zip にせず素のバイナリを置く。
+  - id: wgft
+    ids:
+      - wgft
+    formats:
+      - binary
+    name_template: "wgft-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  # GoReleaser の checksum.split: true は、アーティファクトごとに 1 個
+  # ファイルを作るところまでは望みどおりだが、中身がハッシュだけの 1 行で
+  # ファイル名が無く、`sha256sum -c` が「no properly formatted checksum
+  # lines found」で失敗する(internal/pipe/checksums/checksums.go の
+  # refreshOne を確認済み。2026-09-16、GoReleaser v2.18.1)。この形式は
+  # 設定では直せないので、checksum パイプは無効にし、
+  # scripts/goreleaser-checksum.sh を builds の post hook から呼んで
+  # "<sha256>  <ファイル名>" 形式を自前で書く。README の取得コマンドが
+  # 前提にしている検証手順(`sha256sum -c wgft-linux-amd64.sha256`)は
+  # このスクリプトの出力で満たす。
+  disable: true
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^Merge "
+      # commit messages use the fullwidth colon (U+FF1A) after the "TODO"
+      # prefix for housekeeping commits; written as a regex
+      # escape, not the literal character, so this file stays ASCII-only
+      # per scripts/check-ascii-punct.sh.
+      - '^TODO\x{FF1A}'
+
+release:
+  github:
+    owner: rahanahu
+    name: wgft
+  # checksum パイプを無効にした分、.sha256 は release アセットとして
+  # 明示的に添付する。
+  extra_files:
+    - glob: ./dist/*.sha256
+
+# GHCR へのエージェントイメージは、このファイルの dockers セクションではなく
+# .github/workflows/release.yml の別ジョブで deploy/Dockerfile.agent を
+# そのまま docker build & push する(下の決定を参照)。
+#
+# 決定(単一の情報源を保つため): GoReleaser の dockers セクションは、
+# GoReleaser がビルドしたバイナリを Dockerfile に COPY する前提で、
+# 既存の deploy/Dockerfile.agent はソースから `go build` する 2 段階の
+# Dockerfile なので、GoReleaser 用に作り直すと Dockerfile が 2 つ
+# (開発でそのまま docker build できるものと、GoReleaser 専用のもの)に
+# 分かれてしまう。deploy/Dockerfile.agent は `docker build -f
+# deploy/Dockerfile.agent .` だけで誰でもローカルビルドできることの方を
+# 優先し、リリースの GHCR push は release.yml の docker build に任せる。

@@ -1,0 +1,2 @@
+internal/agent/agent.go:log.Printf("already registered; ignoring the provided join string and using the existing permanent token")
+internal/agent/stream.go:log.Printf("stream: permanent token was revoked; retrying in %s", backoff)

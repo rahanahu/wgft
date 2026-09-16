@@ -1,0 +1,132 @@
+{{ define "addrule" }}
+<h2 style="margin-top:0">{{ T .Locale "addRuleTitle" }}</h2>
+{{ if .Error }}<p class="danger-text">{{ .Error }}</p>{{ end }}
+<form method="post" action="/ui/add-rule" class="rule-form" id="rule-form">
+  <div class="flow" aria-hidden="true">
+    <span class="flow-node">{{ T .Locale "flowClient" }}</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node accent">VPS <b id="flow-listen">:{{ T .Locale "fListen" }}</b></span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node" id="flow-agent">{{ T .Locale "flowAgentN" }}</span>
+    <span class="flow-arrow">→</span>
+    <span class="flow-node" id="flow-target">{{ T .Locale "flowTargetN" }}</span>
+  </div>
+
+  <div class="field">
+    <label for="f-agent">{{ T .Locale "fAgent" }}</label>
+    <select id="f-agent" name="agent" required>
+      {{ range .Agents }}<option value="{{ .Name }}">{{ .Name }} ({{ .Address }})</option>{{ else }}<option disabled>{{ T $.Locale "noAgentsOpt" }}</option>{{ end }}
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="f-proto">{{ T .Locale "fProto" }}</label>
+    <select id="f-proto" name="proto"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+  </div>
+
+  <div class="field">
+    <label for="f-listen">{{ T .Locale "fListen" }}</label>
+    <input id="f-listen" class="search" name="listen_port" required placeholder="25565" inputmode="numeric">
+    <small class="field-help">{{ T .Locale "fListenHelp" }}</small>
+  </div>
+
+  <div class="field">
+    <label for="f-target">{{ T .Locale "fDest" }}</label>
+    <input id="f-target" class="search" name="target" required placeholder="192.168.1.20:25565">
+    <small class="field-help">{{ T .Locale "fDestHelp" }}</small>
+  </div>
+
+  <div class="field">
+    <label for="f-group">{{ T .Locale "fGroup" }}</label>
+    <input id="f-group" class="search" name="group" placeholder="minecraft" list="group-list" maxlength="32">
+    <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
+    <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
+  </div>
+
+  <div class="field">
+    <label for="f-note">{{ T .Locale "fNote" }}</label>
+    <input id="f-note" class="search" name="note" maxlength="120">
+    <small class="field-help">{{ T .Locale "fNoteHelp" }}</small>
+  </div>
+
+  <details class="advanced">
+    <summary>{{ T .Locale "fAdvanced" }}</summary>
+    <div class="advanced-body">
+      <label class="mode-opt">
+        <span class="mode-head"><input type="radio" name="vps_mode" value="kernel" checked> {{ T .Locale "fModeKernel" }}</span>
+        <small class="field-help">{{ T .Locale "fModeKernelH" }}</small>
+      </label>
+      <label class="mode-opt">
+        <span class="mode-head"><input type="radio" name="vps_mode" value="proxy"> {{ T .Locale "fModeProxyL" }}</span>
+        <small class="field-help">{{ T .Locale "fModeProxyH" }}</small>
+      </label>
+      <label class="check proxy-only" hidden><input type="checkbox" name="proxy_protocol" value="1"> {{ T .Locale "fProxyProto" }}</label>
+      <label class="check"><input type="checkbox" name="force" value="1"> {{ T .Locale "fForceNew" }}</label>
+    </div>
+  </details>
+
+  <div class="form-actions">
+    <button class="btn primary" type="submit">{{ T .Locale "submitAddRule" }}</button>
+    <a class="btn" href="/">{{ T .Locale "cancel" }}</a>
+  </div>
+</form>
+{{ end }}
+
+{{ define "addagent" }}
+<h2 style="margin-top:0">{{ T .Locale "addAgentTitle" }}</h2>
+{{ if .Error }}<p class="danger-text">{{ .Error }}</p>{{ end }}
+{{ if .JoinString }}
+  <div class="alert warning-alert" style="margin:0 0 14px">
+    <div class="alert-icon">✓</div>
+    <div class="alert-body">
+      <strong>{{ printf (T .Locale "joinIssued") .ExpiresAt }}</strong>
+      <p>{{ T .Locale "joinHelp" }}</p>
+      <pre class="terminal" style="margin:0;white-space:pre-wrap;word-break:break-all">{{ .JoinString }}</pre>
+    </div>
+  </div>
+  <a class="btn" href="/">{{ T .Locale "back" }}</a>
+{{ else }}
+  <form method="post" action="/ui/add-agent" style="display:grid;gap:12px;max-width:420px">
+    <label>{{ T .Locale "fAgentName" }}<input class="search" name="name" required placeholder="home"></label>
+    <div style="display:flex;gap:8px">
+      <button class="btn primary" type="submit">{{ T .Locale "genJoin" }}</button>
+      <a class="btn" href="/">{{ T .Locale "cancel" }}</a>
+    </div>
+  </form>
+{{ end }}
+{{ end }}
+
+{{ define "checkresult" }}
+<h2 style="margin-top:0">{{ T .Locale "checkTitle" }}</h2>
+<p class="muted">{{ printf (T .Locale "checkRuleVia") .RuleLabel .Agent }}</p>
+{{ if .OK }}
+  <div class="alert warning-alert"><div class="alert-icon" style="color:var(--success)">✓</div><div class="alert-body"><strong class="success-text">{{ T .Locale "checkOK" }}</strong><p>{{ .Detail }}</p></div></div>
+{{ else }}
+  <div class="alert danger-alert"><div class="alert-icon">▲</div><div class="alert-body"><strong class="danger-text">{{ .ReachLabel }}</strong><p>{{ .Detail }}</p></div></div>
+{{ end }}
+<p class="muted" style="font-size:12px">{{ T .Locale "checkNote" }}</p>
+<a class="btn" href="/">{{ T .Locale "back" }}</a>
+{{ end }}
+
+{{ define "editmeta" }}
+<h2 style="margin-top:0">{{ T .Locale "editMetaTitle" }}</h2>
+<p class="muted mono">{{ .Ports }}({{ .ID }})</p>
+{{ if .Error }}<p class="danger-text">{{ .Error }}</p>{{ end }}
+<form method="post" action="/ui/rules/{{ .ID }}/meta" class="rule-form">
+  <div class="field">
+    <label for="e-group">{{ T .Locale "fGroup" }}</label>
+    <input id="e-group" class="search" name="group" value="{{ .Group }}" list="group-list" maxlength="32" placeholder="minecraft">
+    <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
+    <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
+  </div>
+  <div class="field">
+    <label for="e-note">{{ T .Locale "fNote" }}</label>
+    <input id="e-note" class="search" name="note" value="{{ .Note }}" maxlength="120">
+    <small class="field-help">{{ T .Locale "fNoteHelp" }}</small>
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" type="submit">{{ T .Locale "save" }}</button>
+    <a class="btn" href="/">{{ T .Locale "cancel" }}</a>
+  </div>
+</form>
+{{ end }}

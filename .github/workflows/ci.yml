@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+      - name: go mod tidy leaves go.mod and go.sum unchanged
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: go vet
+        run: go vet ./...
+      - name: build
+        run: go build ./...
+      - name: test
+        run: go test ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  lint-output:
+    # Keeps tool output English (no Japanese in string literals) and punctuation ASCII
+    # in published files. Lab integration tests need Incus and are not run in CI
+    # (see lab/README.md); they run on a developer VM.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: no Japanese in string literals
+        run: go run ./scripts/check-japanese/
+      - name: ASCII punctuation in public files
+        run: bash scripts/check-ascii-punct.sh
+      - name: no token values in logs
+        run: bash scripts/check-log-tokens.sh

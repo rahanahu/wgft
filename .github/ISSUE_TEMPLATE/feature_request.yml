@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest an idea or an improvement for wgft.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation and why the current behavior does not work for you.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you would like wgft to do instead. Alternatives you considered are welcome too.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that helps, such as your setup (mode, deployment) or related issues.
+    validations:
+      required: false

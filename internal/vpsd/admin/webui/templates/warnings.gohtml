@@ -1,0 +1,23 @@
+{{ define "warnings" }}
+<div class="section-head compact">
+  <div class="title-row"><h2>{{ T .Locale "warningsHead" }}</h2>{{ if .Warnings }}<span class="count danger">{{ len .Warnings }}</span>{{ end }}</div>
+</div>
+{{ $loc := .Locale }}
+{{ range .Warnings }}
+<article class="alert {{ .AlertClass }}">
+  <div class="alert-icon">▲</div>
+  <div class="alert-body">
+    <div class="alert-head"><strong>{{ .Title }}</strong><small>{{ .Ago }}</small></div>
+    <span class="tag">{{ .Agent }}</span>
+    <p>{{ .Body }}</p>
+    {{ if .Detail }}<div class="mono compare">{{ .Detail }}</div>{{ end }}
+    <div class="alert-actions">
+      <form method="post" action="/ui/agents/{{ .Agent }}/dismiss-warning" style="display:inline"><input type="hidden" name="kind" value="{{ .Kind }}"><input type="hidden" name="detail" value="{{ .Detail }}"><button class="btn" type="submit">{{ T $loc "dismiss" }}</button></form>
+      <form method="post" action="/ui/agents/{{ .Agent }}/revoke" style="display:inline" data-confirm="{{ printf (T $loc "confirmRevoke") .Agent }}"><button class="btn danger-outline" type="submit">{{ T $loc "revokeAgent" }}</button></form>
+    </div>
+  </div>
+</article>
+{{ else }}
+<p class="muted" style="margin:0 16px 14px">{{ T $loc "noWarnings" }}</p>
+{{ end }}
+{{ end }}

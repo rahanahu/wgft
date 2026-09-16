@@ -1,0 +1,51 @@
+package proto
+
+import (
+	"net"
+	"strconv"
+)
+
+// WGConfig は全体状態でエージェントに渡す wg の設定(仕様 5.2 節)。
+type WGConfig struct {
+	ServerPubkey     string `json:"server_pubkey"`
+	Endpoint         string `json:"endpoint"` // host:port
+	Address          string `json:"address"`  // 10.200.0.2/24 の形
+	MTU              int    `json:"mtu"`
+	Keepalive        int    `json:"keepalive"`          // 秒
+	UDPTimeout       int    `json:"udp_timeout"`        // VPS の nf_conntrack_udp_timeout(秒)
+	UDPTimeoutStream int    `json:"udp_timeout_stream"` // VPS の nf_conntrack_udp_timeout_stream(秒)
+}
+
+// AgentRule はエージェントに配るルールの部分集合。vps_mode と接続元制限は配らない(仕様 5.3 節)。
+type AgentRule struct {
+	ID         string    `json:"id"`
+	Proto      Proto     `json:"proto"`
+	ListenPort PortRange `json:"listen_port"`
+	Target     string    `json:"target"`
+	Enabled    bool      `json:"enabled"`
+}
+
+// State は vpsd がエージェントに配る全体状態(仕様 5.2 節)。差分ではなく常に全体を送る。
+type State struct {
+	Generation uint64      `json:"generation"`
+	WG         WGConfig    `json:"wg"`
+	Rules      []AgentRule `json:"rules"`
+}
+
+// ForAgent はエージェントに配る部分だけを取り出す。
+func (r *Rule) ForAgent() AgentRule {
+	return AgentRule{ID: r.ID, Proto: r.Proto, ListenPort: r.ListenPort, Target: r.Target, Enabled: r.Enabled}
+}
+
+// EffectiveTarget は listen_port 内のポート p に対応する実効宛先(仕様 7 節)。
+// target のポートに、範囲内での位置を足したもの。p が範囲外なら ok は false。
+func (r AgentRule) EffectiveTarget(p uint16) (target string, ok bool) {
+	if !r.ListenPort.Contains(p) {
+		return "", false
+	}
+	host, port, err := splitTarget(r.Target)
+	if err != nil {
+		return "", false
+	}
+	return net.JoinHostPort(host, strconv.Itoa(int(port)+int(p-r.ListenPort.Lo))), true
+}

@@ -1,0 +1,32 @@
+# Docker Compose for the home agent.
+#
+#   docker compose -f deploy/agent.compose.yaml up -d --build
+#
+# Notes
+# - No privileges: no --privileged, no cap_add, no devices (user-space netstack, so no TUN).
+# - Outbound: it must reach the WireGuard port on the VPS (UDP 51820).
+# - LAN: it must reach the forwarding targets (for example 192.168.1.20:25565). The default
+#   bridge network normally reaches the LAN through the host. If it does not, use network_mode: host.
+# - WGFT_JOIN is the join string printed by `wgft agent join-string` on the VPS, pasted exactly as
+#   printed. It is single-use and consumed on first registration. Once agent.json exists you may
+#   remove the line; if it stays, the agent does not re-register while the credentials file exists.
+# - WGFT_NAME is optional: the agent name comes from the join string. Delete the line or leave it
+#   empty unless you want to double-check it against the name the join string is bound to.
+services:
+  wgft-agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    image: wgft-agent:latest
+    container_name: wgft-agent
+    restart: unless-stopped
+    environment:
+      WGFT_JOIN: "REPLACE_WITH_JOIN_STRING"
+      WGFT_NAME: ""
+    volumes:
+      - wgft-agent-state:/var/lib/wgft
+    # If the container cannot reach the LAN, use this instead of the bridge above:
+    # network_mode: host
+
+volumes:
+  wgft-agent-state:

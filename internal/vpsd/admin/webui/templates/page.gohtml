@@ -1,0 +1,24 @@
+{{ define "page" }}<!doctype html>
+<html lang="{{ .Locale }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>wgft · {{ .Title }}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ .Title }}</div></div>
+      <div class="top-actions"><a class="btn" href="/">{{ T .Locale "back" }}</a></div>
+    </header>
+    <main style="max-width:640px">
+      <section class="panel" style="padding:18px">
+        {{ .Body }}
+      </section>
+    </main>
+  </div>
+</body>
+</html>{{ end }}

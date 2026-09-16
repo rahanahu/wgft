@@ -1,0 +1,96 @@
+name: Bug report
+description: Something on the VPS or the agent is not working as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please do **not** use this
+        form for security vulnerabilities; see [SECURITY.md](../../SECURITY.md)
+        instead.
+
+  - type: input
+    id: vps-os
+    attributes:
+      label: VPS OS and version
+      description: For example, "Debian 12" or "Ubuntu 24.04".
+      placeholder: Debian 12
+    validations:
+      required: true
+
+  - type: input
+    id: uname
+    attributes:
+      label: uname -r
+      description: Output of `uname -r` on the VPS.
+      placeholder: 6.1.0-25-amd64
+    validations:
+      required: true
+
+  - type: input
+    id: nft-version
+    attributes:
+      label: nft --version
+      description: Output of `nft --version` on the VPS.
+      placeholder: nftables v1.0.6
+    validations:
+      required: true
+
+  - type: input
+    id: wgft-version
+    attributes:
+      label: wgft version
+      description: Output of `wgft --version`, on the VPS and, if relevant, on the agent side.
+      placeholder: v0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: run-mode
+    attributes:
+      label: How is the server run?
+      options:
+        - systemd
+        - By hand (foreground, no systemd)
+        - Docker
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: nft-output
+    attributes:
+      label: wgft server nft output
+      description: Output of `wgft server nft` (or `sudo wgft server nft`) on the VPS.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: startup-log
+    attributes:
+      label: Server startup log
+      description: >
+        The vpsd startup log, including the effective configuration printout
+        (`WGFT_*` values and their source). Redact secrets (tokens, keys)
+        before pasting; they should already be masked in the printout.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: agent-log
+    attributes:
+      label: Agent log
+      description: The agent's log around the time the problem happened.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+      description: What you expected, what happened instead, and steps to reproduce if known.
+    validations:
+      required: true
