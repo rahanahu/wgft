@@ -115,7 +115,7 @@ func TestEmitRows(t *testing.T) {
 	if got, want := rec.comments("nat_pre"), []string{Comment("r_udp", "dnat"), Comment("r_tcp", "dnat")}; !reflect.DeepEqual(got, want) {
 		t.Errorf("nat_pre = %v, want %v", got, want)
 	}
-	for chain, n := range map[string]int{"input": 1, "forward": 3, "postrouting": 1} {
+	for chain, n := range map[string]int{"input": 1, "forward": 5, "postrouting": 1} {
 		if got := len(rec.rules[chain]); got != n {
 			t.Errorf("%s has %d rules, want %d", chain, got, n)
 		}

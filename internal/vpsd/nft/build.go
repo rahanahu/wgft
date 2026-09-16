@@ -185,6 +185,10 @@ func emit(e emitter, rules []proto.Rule, cfg Config) error {
 	addRule(forward, "", ifname(expr.MetaKeyIIFNAME, expr.CmpOpEq, wg), ifname(expr.MetaKeyOIFNAME, expr.CmpOpEq, wg), drop)
 	addRule(forward, "", ifname(expr.MetaKeyOIFNAME, expr.CmpOpEq, wg), ctBits(expr.CtKeySTATUS, ipsDstNAT), accept)
 	addRule(forward, "", ifname(expr.MetaKeyIIFNAME, expr.CmpOpEq, wg), ctState(expr.CtStateBitESTABLISHED|expr.CtStateBitRELATED), accept)
+	// wg0 が絡む残りの転送は落とす。wg0 から VPS の他のインタフェース(private NIC、別の VPN)へ出る
+	// 新規フローと、他インタフェースから wg0 へ入る DNAT 以外のフローが対象(仕様 6.1 節)
+	addRule(forward, "", ifname(expr.MetaKeyIIFNAME, expr.CmpOpEq, wg), drop)
+	addRule(forward, "", ifname(expr.MetaKeyOIFNAME, expr.CmpOpEq, wg), drop)
 	// masquerade は DNAT された接続に限定し、VPS 自身の通信には触れない
 	addRule(post, "", ifname(expr.MetaKeyOIFNAME, expr.CmpOpEq, wg), ctBits(expr.CtKeySTATUS, ipsDstNAT), []expr.Any{&expr.Masq{}})
 	return nil

@@ -141,3 +141,36 @@ func TestLeavesOtherTablesAlone(t *testing.T) {
 		t.Errorf("other table changed (handles included)\n--- before\n%s\n--- after\n%s", before, after)
 	}
 }
+
+// forward の取りこぼしが無いこと(仕様 6.1 節):wg インタフェースから VPS の他のインタフェースへ
+// 出る新規フローは、既存ファイアウォールの policy に関係なく wgft のテーブルで落ちる。
+// ラボの vps ns で、home 側に向いた pub1 を wg インタフェースに見立ててテーブルを適用し、
+// home ns から client ns への ping(pub1 → pub0 の転送)が止まること、テーブルを消すと戻ることを見る。
+func TestForwardDropsFromWG(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root が必要")
+	}
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("nft がない")
+	}
+	ping := func() bool {
+		return exec.Command("ip", "netns", "exec", "home", "ping", "-c1", "-W1", "198.51.100.2").Run() == nil
+	}
+	if !ping() {
+		t.Skip("home から client に届かない(ラボのトポロジが無い)")
+	}
+	t.Cleanup(func() { exec.Command("nft", "delete", "table", "inet", TableName).Run() })
+	cfg := Config{WGInterface: "pub1", AgentAddr: map[string]netip.Addr{}}
+	if err := Apply(nil, cfg); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if ping() {
+		t.Fatalf("home -> client still passes through the vps forward chain with the wgft table applied\n%s", nftList(t))
+	}
+	if err := exec.Command("nft", "delete", "table", "inet", TableName).Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !ping() {
+		t.Fatal("home -> client does not recover after deleting the table")
+	}
+}

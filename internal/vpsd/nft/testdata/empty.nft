@@ -15,6 +15,8 @@ table inet wgft {
     iifname "wg0" oifname "wg0" drop
     oifname "wg0" ct status dnat accept
     iifname "wg0" ct state established,related accept
+    iifname "wg0" drop
+    oifname "wg0" drop
   }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
