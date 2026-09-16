@@ -51,7 +51,7 @@ HTTPS を公開する場合は、TLS の終端と証明書の管理を自宅側�
 ssh -L 8686:/run/wgft/admin.sock root@vps
 ```
 
-接続したまま `http://localhost:8686` を開きます。root で SSH できない場合は、`server.env` に `WGFT_ADMIN=127.0.0.1:8686` を設定すると、ソケットの代わりに VPS のループバックアドレスの TCP 8686 で待ち受けるようになり、`ssh -L 8686:127.0.0.1:8686 vps` で転送できます。この設定では VPS 上の全ユーザーが管理 API に到達できるようになります。Tailscale を使っている場合は、`WGFT_ADMIN_TAILSCALE=true` を設定すると、tailnet の端末から `http://<VPS の Tailscale IP>:8686` で開けます。MagicDNS の名前で開く場合は、その名前を `WGFT_ADMIN_HOST` に設定します。
+接続したまま `http://localhost:8686` を開きます。root で SSH できない場合は、`server.env` に `WGFT_ADMIN=127.0.0.1:8686` を設定すると、ソケットの代わりに VPS のループバックアドレスの TCP 8686 で待ち受けるようになり、`ssh -L 8686:127.0.0.1:8686 vps` で転送できます。この設定では VPS 上の全ユーザーが管理 API に到達できるようになります。Tailscale を使っている場合は、`WGFT_ADMIN_TAILSCALE=true` を設定すると、tailnet の端末から `http://<VPS の Tailscale IP>:8686` で開けます。VPS に `tailscale` コマンドがあれば、MagicDNS の名前を自動で検出し、Host としても受け付けます。`WGFT_ADMIN_HOST` には、それ以外の名前を追加します。
 
 ## 動作環境
 

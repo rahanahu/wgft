@@ -551,7 +551,7 @@ VPS 側の無効化でピア・conntrack・割り当てアドレスを回収す�
 管理用 API と Web UI の待ち受け先は `--admin` で選ぶ。独自のパスワードは持たない。
 
 - Unix ソケット(既定 `unix:///run/wgft/admin.sock`、0600、root 所有):VPS 上の CLI は root で直接叩く。手元のブラウザからは SSH のポート転送でソケットを引く(10.3 節)。到達できるのは「VPS の root」と「SSH でその root に入れる人」だけで、どちらも SQLite と wg の鍵を読める立場なので、パスワードを足しても守れる範囲は広がらない
-- `--admin-tailscale`:加えて Tailscale のアドレス(`100.64.0.0/10` の自分のアドレスを起動時に検出)でも待ち受ける。認証、TLS、総当たり対策を Tailscale に任せられ、`vpsd` 側に追加の実装が要らないので、外から触りたい場合はこれを推奨する。tailnet が落ちても SSH で代替できる
+- `--admin-tailscale`:加えて Tailscale のアドレスでも待ち受ける。起動時にまず `tailscale status --json` を実行し、`Self.TailscaleIPs` の最初の IPv4 アドレスと `Self.DNSName`(MagicDNS 名)を使う。`tailscale` コマンドが PATH にない、または失敗したときは、名前が `tailscale` で始まるインタフェース(Linux 版 Tailscale の既定は `tailscale0`)にある `100.64.0.0/10` のアドレスを使う。`100.64.0.0/10` は Tailscale 専用の帯ではなく VPS 事業者が内部網に使っていることがあるため、この帯を持つだけの他のインタフェースは使わない。検出した MagicDNS 名は `Host` の許可リストに自動で加わり、`--admin-host` は追加の名前のためだけに使う。認証、TLS、総当たり対策を Tailscale に任せられ、`vpsd` 側に追加の実装が要らないので、外から触りたい場合はこれを推奨する。tailnet が落ちても SSH で代替できる
 - TCP(`--admin 127.0.0.1:8686` など):Unix ソケットの転送に対応しない SSH クライアントや、ラボ向けに残す。ループバック以外の TCP アドレスに開いた場合、`vpsd` は起動ログに警告を出すだけで止めない
 - `public`:インターネットに公開する。ACME による正規の TLS 証明書、パスキーか TOTP、ログイン試行のレート制限、セッション期限と CSRF 対策を `vpsd` に実装したうえでなければ選べない。v1 では実装しない(13 節)
 
@@ -630,3 +630,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - `vpsd` の用語と設定ファイル名(2026-09-17):`vpsd` を 3 節の用語に加え、本書と内部での呼び名であることを明記。利用者に見える設定ファイルと unit の名前を `server.env`、`server.env.example`、`server.service` に改め(旧 `vpsd.*`)、`agent.env` と対にする。10.3・11a 節を追随
 - forward チェーンの取りこぼしを塞ぐ(2026-09-17、公開前レビューの指摘):6.1 節の forward に、DNAT 済みの accept の後で `iifname "wg0" drop` と `oifname "wg0" drop` を追加。それまでは wg0 から VPS の他のインタフェースへ出る新規フローが既存ファイアウォールの forward の policy 任せで、accept の VPS では盗んだ認証情報で VPS の内側へ片方向のパケットを送れた。5.1 節の「到達できる先がない」の根拠を追随
 - 起動時の衝突検査と撤去の所有判定の穴を塞ぐ(2026-09-17、公開前レビューの指摘):9 節に、WireGuard 以外のプロセスが `--wg-port` を bind している場合の中止(インタフェースを作る前に検出)と、作った直後の失敗でインタフェースを消す扱いを追記。10.3 節の撤去に、空鍵は所有とみなさないこと、`--adopt-existing` でも WireGuard 以外のリンクは消さないことを追記
+- `--admin-tailscale` の検出を tailscaled 優先に変更(2026-09-17):`100.64.0.0/10` は Tailscale 専用の帯ではなく、一部の VPS 事業者が内部網に使うため、アドレスだけで検出すると事業者の内部網に管理用 API が開き得る公開レビューの指摘を受けた。`tailscale status --json` の `Self` を第 1 の情報源にし、コマンドがない・失敗するときだけ、名前が `tailscale` で始まるインタフェースにフォールバックする。検出した MagicDNS 名を `Host` の許可リストへ自動で加え、`--admin-host` は追加の名前専用に改める。11 節を改訂

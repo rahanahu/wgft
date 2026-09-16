@@ -51,7 +51,7 @@ There is no login. The admin API does not listen on any TCP port of the VPS; it 
 ssh -L 8686:/run/wgft/admin.sock root@vps
 ```
 
-Browse to `http://localhost:8686` while the session is open. If root cannot log in over SSH, set `WGFT_ADMIN=127.0.0.1:8686` in `server.env`. The API then listens on TCP 8686 on the loopback address of the VPS instead of the socket, and `ssh -L 8686:127.0.0.1:8686 vps` forwards to it. With that setting every local user on the VPS can reach the admin API. If the VPS is on a Tailscale network, set `WGFT_ADMIN_TAILSCALE=true` and open `http://<Tailscale IP of the VPS>:8686` from any device on the tailnet. To use the MagicDNS name instead of the IP, put the name in `WGFT_ADMIN_HOST`.
+Browse to `http://localhost:8686` while the session is open. If root cannot log in over SSH, set `WGFT_ADMIN=127.0.0.1:8686` in `server.env`. The API then listens on TCP 8686 on the loopback address of the VPS instead of the socket, and `ssh -L 8686:127.0.0.1:8686 vps` forwards to it. With that setting every local user on the VPS can reach the admin API. If the VPS is on a Tailscale network, set `WGFT_ADMIN_TAILSCALE=true` and open `http://<Tailscale IP of the VPS>:8686` from any device on the tailnet. When the `tailscale` CLI is present on the VPS, the MagicDNS name is picked up automatically and accepted as a Host too. `WGFT_ADMIN_HOST` adds further names.
 
 ## Requirements
 
