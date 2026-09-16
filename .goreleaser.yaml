@@ -62,11 +62,7 @@ changelog:
   filters:
     exclude:
       - "^Merge "
-      # commit messages use the fullwidth colon (U+FF1A) after the "TODO"
-      # prefix for housekeeping commits; written as a regex
-      # escape, not the literal character, so this file stays ASCII-only
-      # per scripts/check-ascii-punct.sh.
-      - '^TODO\x{FF1A}'
+      - "^dependabot:"
 
 release:
   github:
