@@ -27,7 +27,7 @@ builds:
     # module パスが wgft から github.com/rahanahu/wgft に変わったら、
     # 追随済み(2026-09-16)(scripts/build-release.sh と同じ変数)。
     ldflags:
-      - -s -w -X github.com/rahanahu/wgft/internal/vpsd.Version={{.Version}}
+      - -s -w -X github.com/rahanahu/wgft/internal/vpsd.Version=v{{.Version}}
     hooks:
       # checksum.split の出力を自前の sha256sum -c 互換ファイルに置き換える
       # (下の checksum セクションの説明を参照)。

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
 
@@ -22,7 +23,7 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "wgft",
 		Short:         "Forward TCP/UDP received at a VPS to home services over WireGuard",
-		Version:       vpsd.Version,
+		Version:       effectiveVersion(),
 		SilenceUsage:  true,
 		SilenceErrors: false,
 	}
@@ -45,7 +46,7 @@ func newVersionCmd() *cobra.Command {
 		Short: "Print the wgft version",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), vpsd.Version)
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), effectiveVersion())
 			return err
 		},
 	}
@@ -59,4 +60,16 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// effectiveVersion は -X で埋めた vpsd.Version を返す。埋められていない(`go install ...@v0.1.0` で
+// 入れた)場合は、モジュールの版をビルド情報から取る。それも無ければ dev のまま。
+func effectiveVersion() string {
+	if vpsd.Version != "dev" {
+		return vpsd.Version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return vpsd.Version
 }
