@@ -4,6 +4,8 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    commit-message:
+      prefix: "build(deps)"
     groups:
       go-minor-patch:
         update-types:
@@ -14,6 +16,8 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    commit-message:
+      prefix: "ci(deps)"
     groups:
       # Action bumps are runtime updates with no usage change, so one PR per week is enough
       actions:

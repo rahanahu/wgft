@@ -62,7 +62,7 @@ changelog:
   filters:
     exclude:
       - "^Merge "
-      - "^dependabot:"
+      - '^(build|ci)\(deps\)'
 
 release:
   github:
