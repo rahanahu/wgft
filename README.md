@@ -195,7 +195,7 @@ sudo wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group g
 sudo wgft rule add --agent home --tcp 443 --to 192.168.1.30:443 --proxy --proxy-protocol
 ```
 
-Open the forwarded ports in the firewall (UDP 2456-2457 and TCP 443 here). Once `sudo wgft agent ls` shows `ok` in the RULES column, you are done. Rules reach the agent within seconds, and adding or removing one never drops sessions in progress. When someone abuses a port, `sudo wgft rule deny add <rule id> 203.0.113.0/24` blocks them, including flows already open. A unique prefix of the rule ID, as `rule ls` prints it, is enough.
+For a port range, `--to` names the first port and the rest follow in order, so 2457 reaches 192.168.1.20:2457 in this example. Open the forwarded ports in the firewall (UDP 2456-2457 and TCP 443 here). Once `sudo wgft agent ls` shows `ok` in the RULES column, you are done. Rules reach the agent within seconds, and adding or removing one never drops sessions in progress. When someone abuses a port, `sudo wgft rule deny add <rule id> 203.0.113.0/24` blocks them, including flows already open. A unique prefix of the rule ID, as `rule ls` prints it, is enough.
 
 **Publishing HTTPS**
 

@@ -188,7 +188,7 @@ func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {
 }
 
 func ruleToView(r *proto.Rule, drops map[string]uint64, locale string) ruleView {
-	v := ruleView{ID: r.ID, Agent: r.Agent, Target: r.Target, Mode: string(r.VPSMode),
+	v := ruleView{ID: r.ID, Agent: r.Agent, Target: r.TargetDisplay(), Mode: string(r.VPSMode),
 		ProxyProtocol: r.ProxyProtocol, Enabled: r.Enabled, Ports: r.ListenPort.String()}
 	v.ProtoUpper = strings.ToUpper(string(r.Proto))
 	if r.Proto == proto.UDP {

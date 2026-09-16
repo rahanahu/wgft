@@ -45,6 +45,16 @@
     var flowListen = document.getElementById("flow-listen");
     var flowAgent = document.getElementById("flow-agent");
     var flowTarget = document.getElementById("flow-target");
+    // A listen port range maps onto the destination starting at its port, one port after another,
+    // so show the destination as host:lo-hi (the same shape as the rules list).
+    function effectiveTarget(listenValue, targetValue) {
+      var range = /^(\d+)-(\d+)$/.exec(listenValue);
+      var hp = /^(.*):(\d+)$/.exec(targetValue);
+      if (!range || !hp) return targetValue;
+      var width = parseInt(range[2], 10) - parseInt(range[1], 10);
+      if (!(width > 0)) return targetValue;
+      return hp[1] + ":" + hp[2] + "-" + (parseInt(hp[2], 10) + width);
+    }
     var listenLabel = flowListen ? flowListen.textContent.replace(/^:/, "") : "";
     var agentLabel = flowAgent ? flowAgent.textContent : "";
     var targetLabel = flowTarget ? flowTarget.textContent : "";
@@ -61,7 +71,7 @@
     function updateFlow() {
       if (flowListen) flowListen.textContent = ":" + (listen && listen.value.trim() ? listen.value.trim() : listenLabel);
       if (flowAgent) flowAgent.textContent = agentName();
-      if (flowTarget) flowTarget.textContent = (target && target.value.trim()) ? target.value.trim() : targetLabel;
+      if (flowTarget) flowTarget.textContent = (target && target.value.trim()) ? effectiveTarget(listen ? listen.value.trim() : "", target.value.trim()) : targetLabel;
     }
     function updateMode() {
       if (proxyOnly) proxyOnly.hidden = !(proxyRadio && proxyRadio.checked);

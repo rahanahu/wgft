@@ -165,3 +165,17 @@ func splitTarget(target string) (host string, port uint16, err error) {
 	}
 	return host, uint16(n), nil
 }
+
+// TargetDisplay は表示用の実効宛先。listen_port が範囲なら、target の先頭ポートから連番で写した
+// 範囲を host:lo-hi の形で返す(仕様 5.3 節)。単一ポートや解釈できない値は target をそのまま返す。
+func (r Rule) TargetDisplay() string {
+	if r.ListenPort.Lo == r.ListenPort.Hi {
+		return r.Target
+	}
+	host, port, err := splitTarget(r.Target)
+	if err != nil {
+		return r.Target
+	}
+	hi := int(port) + int(r.ListenPort.Hi) - int(r.ListenPort.Lo)
+	return net.JoinHostPort(host, strconv.Itoa(int(port))) + "-" + strconv.Itoa(hi)
+}

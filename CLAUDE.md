@@ -54,7 +54,7 @@ nftables や WireGuard の挙動を確かめる使い捨ての実験コードは
 
 README.md と README.ja.md が使う `docs/images/dashboard.png`(英語)と `dashboard.ja.png`(日本語)は、`scripts/screenshot-ui.sh` で撮影します。ラボの VM も実機の VPS も要りません。
 
-このスクリプトは `tools/uidemo` をビルドして 127.0.0.1:8686 に Web UI を起動します。`tools/uidemo` は admin パッケージの公開 API(`New`、`Serve`)だけを使い、固定のサンプルデータ(エージェント 3 台、5 グループのルール、警告 1 件)を返す Backend です。サーバーが起動したら、Headless Firefox で `?lang=en` と `?lang=ja` の 2 枚を撮影し、`docs/images` へ上書きしてからサーバーを止めます。撮影には Firefox(`/usr/bin/firefox`)が要ります。
+このスクリプトは `tools/uidemo` をビルドして 127.0.0.1:8687 に Web UI を起動します。8687 が使われていれば止まります (実機の管理 API を SSH で転送している最中に実機の画面を撮ってしまわないため)。`tools/uidemo` は admin パッケージの公開 API(`New`、`Serve`)だけを使い、固定のサンプルデータ(エージェント 3 台、5 グループのルール、警告 1 件)を返す Backend です。サーバーが起動したら、Headless Firefox で `?lang=en` と `?lang=ja` の 2 枚を撮影し、`docs/images` へ上書きしてからサーバーを止めます。撮影には Firefox(`/usr/bin/firefox`)が要ります。
 
 手順は `bash scripts/screenshot-ui.sh` の実行だけです。Web UI のテンプレートや文言を変えたとき、サンプルデータの形を変えたときは、このコマンドで撮り直し、`git diff --stat` で差分の大きさを確かめてからコミットします。サンプルデータの値そのものは `tools/uidemo/main.go` にあります。
 

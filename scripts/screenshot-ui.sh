@@ -4,7 +4,7 @@
 # docs/images/dashboard.ja.png (Japanese).
 #
 # It builds tools/uidemo, a throwaway program that serves the admin Web UI on
-# 127.0.0.1:8686 with fixed sample data (three agents, five rules, one warning;
+# 127.0.0.1:8687 with fixed sample data (three agents, five rules, one warning;
 # see tools/uidemo/main.go for the exact values), waits for the port to accept
 # connections, captures each locale with headless Firefox using a fresh
 # throwaway profile, then stops the demo server.
@@ -32,13 +32,21 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 firefox_bin="/usr/bin/firefox"
-addr="127.0.0.1:8686"
+addr="127.0.0.1:8687"
 out_dir="docs/images"
 bin_dir="$(mktemp -d)"
 demo_bin="$bin_dir/uidemo"
 
 if [ ! -x "$firefox_bin" ]; then
     echo "screenshot-ui: $firefox_bin not found; install Firefox to take screenshots" >&2
+    exit 1
+fi
+
+# Refuse to run if something already answers on the port: the capture would show that page
+# instead of the demo (for example an SSH forward of a real admin socket).
+if (exec 3<>"/dev/tcp/127.0.0.1/8687") 2>/dev/null; then
+    exec 3<&- 3>&-
+    echo "screenshot-ui: $addr is already in use; stop whatever listens there first" >&2
     exit 1
 fi
 
@@ -57,13 +65,13 @@ trap cleanup EXIT
 
 echo "waiting for $addr..."
 for _ in $(seq 1 50); do
-    if (exec 3<>"/dev/tcp/127.0.0.1/8686") 2>/dev/null; then
+    if (exec 3<>"/dev/tcp/127.0.0.1/8687") 2>/dev/null; then
         exec 3<&- 3>&-
         break
     fi
     sleep 0.2
 done
-if ! (exec 3<>"/dev/tcp/127.0.0.1/8686") 2>/dev/null; then
+if ! (exec 3<>"/dev/tcp/127.0.0.1/8687") 2>/dev/null; then
     echo "screenshot-ui: uidemo did not come up on $addr" >&2
     exit 1
 fi

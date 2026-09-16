@@ -1,6 +1,6 @@
 // Package main は README のスクリーンショット撮影用の使い捨てデモである。
 // internal/vpsd/admin パッケージの公開 API (New, Serve) だけを使い、
-// 固定のサンプルデータを返す Backend で Web UI を 127.0.0.1:8686 (TCP) に立てる。
+// 固定のサンプルデータを返す Backend で Web UI を 127.0.0.1:8687 (TCP) に立てる。
 // nftables や WireGuard には一切触れない。起動は scripts/screenshot-ui.sh から行う想定で、
 // 単体でも `go run ./tools/uidemo` で動く (Ctrl-C で終了)。
 //
@@ -23,7 +23,7 @@ import (
 )
 
 // listenAddr は Web UI の待ち受け先。scripts/screenshot-ui.sh もこの値を使う。
-const listenAddr = "127.0.0.1:8686"
+const listenAddr = "127.0.0.1:8687"
 
 func main() {
 	if err := run(); err != nil {

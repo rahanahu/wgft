@@ -316,3 +316,21 @@ func TestGroupNoteValidation(t *testing.T) {
 		t.Errorf("正当な group/note が弾かれた: %v", err)
 	}
 }
+
+func TestTargetDisplay(t *testing.T) {
+	cases := []struct {
+		lo, hi       uint16
+		target, want string
+	}{
+		{2456, 2457, "192.168.1.20:2456", "192.168.1.20:2456-2457"},
+		{25565, 25565, "192.168.1.20:25565", "192.168.1.20:25565"},
+		{80, 81, "nas.lan:8080", "nas.lan:8080-8081"},
+		{1, 2, "broken", "broken"},
+	}
+	for _, c := range cases {
+		r := Rule{ListenPort: PortRange{Lo: c.lo, Hi: c.hi}, Target: c.target}
+		if got := r.TargetDisplay(); got != c.want {
+			t.Errorf("%d-%d %s: got %q, want %q", c.lo, c.hi, c.target, got, c.want)
+		}
+	}
+}

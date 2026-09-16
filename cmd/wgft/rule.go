@@ -112,7 +112,7 @@ func newRuleAddCmd() *cobra.Command {
 	add.Flags().StringVar(&agent, "agent", "", "agent name")
 	add.Flags().StringVar(&udp, "udp", "", "UDP port to listen on at the VPS; range allowed")
 	add.Flags().StringVar(&tcp, "tcp", "", "TCP port to listen on at the VPS; range allowed")
-	add.Flags().StringVar(&to, "to", "", "target host:port on the home side")
+	add.Flags().StringVar(&to, "to", "", "target host:port on the home side; for a listen port range, the first port (the rest follow in order)")
 	add.Flags().StringVar(&group, "group", "", "group to bundle rules under; optional, alphanumerics and - _ ., up to 32 chars")
 	add.Flags().StringVar(&note, "note", "", "note describing the rule's purpose; optional, up to 120 chars")
 	add.Flags().BoolVar(&proxy, "proxy", false, "server accepts and relays TCP in proxy mode")
@@ -173,7 +173,7 @@ func newRuleLsCmd() *cobra.Command {
 						}
 					}
 					sort.Strings(rates)
-					fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\t%s\t%v\t%d\t%d\t%s\t%d\t%s\n", short(r.ID), r.Agent, r.Proto, r.ListenPort, r.Target, r.VPSMode, r.Enabled,
+					fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\t%s\t%v\t%d\t%d\t%s\t%d\t%s\n", short(r.ID), r.Agent, r.Proto, r.ListenPort, r.TargetDisplay(), r.VPSMode, r.Enabled,
 						len(r.SourceDeny), len(r.SourceAllow), strings.Join(rates, ","), res.Drops[r.ID], truncNote(r.Note))
 				}
 				w.Flush()
