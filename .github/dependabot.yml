@@ -15,7 +15,7 @@ updates:
     schedule:
       interval: weekly
     groups:
-      actions-minor-patch:
-        update-types:
-          - minor
-          - patch
+      # Action bumps are runtime updates with no usage change, so one PR per week is enough
+      actions:
+        patterns:
+          - "*"
