@@ -8,8 +8,10 @@ import (
 func TestCounterLimits(t *testing.T) {
 	a, b, c := netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("192.0.2.3")
 	cnt := &Counter{Total: 3, PerSource: 2}
-	if !cnt.Acquire(a) || !cnt.Acquire(a) {
-		t.Fatal("first two flows of a source must pass")
+	for i := 1; i <= 2; i++ {
+		if !cnt.Acquire(a) {
+			t.Fatalf("flow %d of a source must pass", i)
+		}
 	}
 	if cnt.Acquire(a) {
 		t.Error("third flow of the same source must be refused")
@@ -39,8 +41,13 @@ func TestCounterLimits(t *testing.T) {
 func TestCounterWithoutPerSourceAndNil(t *testing.T) {
 	a := netip.MustParseAddr("10.200.0.1")
 	cnt := &Counter{Total: 2}
-	if !cnt.Acquire(a) || !cnt.Acquire(a) || cnt.Acquire(a) {
-		t.Error("only the total applies")
+	for i := 1; i <= 2; i++ {
+		if !cnt.Acquire(a) {
+			t.Errorf("flow %d must pass: only the total applies", i)
+		}
+	}
+	if cnt.Acquire(a) {
+		t.Error("flow over the total must be refused")
 	}
 	var none *Counter
 	if !none.Acquire(a) {

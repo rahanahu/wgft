@@ -353,8 +353,10 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 		_, err = c.Read(make([]byte, 10))
 		return err == nil
 	}
-	if !ok() || !ok() {
-		t.Fatal("first two sessions must pass")
+	for i := 1; i <= 2; i++ {
+		if !ok() {
+			t.Fatalf("session %d must pass", i)
+		}
 	}
 	if ok() {
 		t.Error("third session from the same source must be dropped")
