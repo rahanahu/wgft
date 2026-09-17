@@ -1,2 +1,3 @@
 internal/agent/agent.go:log.Printf("already registered; ignoring the provided join string and using the existing permanent token")
 internal/agent/stream.go:log.Printf("stream: permanent token was revoked; retrying in %s", backoff)
+internal/agent/stream.go:log.Printf("stream: %v; if the server was rebuilt (teardown --purge), issue a new join string and restart with it in WGFT_JOIN; retrying in %s", err, backoff)
