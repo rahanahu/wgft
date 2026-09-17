@@ -36,7 +36,11 @@ wgft is aimed at workloads where arbitrary TCP/UDP forwarding matters, especiall
 - Web dashboard for agents, rules, warnings, and forwarding state
 - `wgft server teardown` removes only state created by wgft
 
-Compared with products such as Pangolin or Cloudflare Tunnel, wgft deliberately stays narrow: it forwards ports and leaves TLS, SSO, certificates, and application publishing to other software.
+## Why wgft?
+
+wgft was inspired by Pangolin. Pangolin showed how useful the VPS-to-home tunnel model can be, but for game servers and other raw TCP/UDP services I wanted a smaller tool focused on port forwarding.
+
+wgft therefore stays deliberately narrow: WireGuard for the tunnel, nftables for kernel forwarding, and simple TCP/UDP rules. It does not provide TLS termination, SSO, certificate management, or application publishing; those are left to a reverse proxy or other software.
 
 ## Modes
 
