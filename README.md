@@ -146,6 +146,8 @@ This prints a single line like the one below. It can be used once, expires after
 wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e9d0c3a7b2e8d4f1a6c5b9e0d3f7a2c8b1e6d4f9a02
 ```
 
+Once the server is running, the [Web UI](#web-ui) can take the place of the commands. To issue a join string, choose "+ Add agent" on the dashboard, enter the name and generate it. Adding the rules of step 4 is "+ Add rule". Enabling, disabling and deleting rules, editing their group and note, the connection test for TCP rules, revoking an agent and dismissing warnings are available there as well. The deny and allow lists, the rate limits, splitting and merging rules, and replacing all rules from JSON are set with the commands only; the Web UI shows their values and the drop counts.
+
 *Docker*
 
 The server can also run as a container in the userspace mode, instead of the systemd unit above. It needs no root, no kernel WireGuard, and no nftables. `vpsd` holds the tunnel in wireguard-go and a netstack inside its own process, the same design the agent already uses. See docs/design.md section 6.3 for the full comparison with kernel mode; the short version is that stopping the container stops forwarding, where kernel mode leaves wg0 and the nftables table running through a restart. TCP is terminated inside the wgft process rather than passed through unchanged. Flood resistance is that of any userspace proxy. `packet_rate` limits UDP datagrams only, not TCP.

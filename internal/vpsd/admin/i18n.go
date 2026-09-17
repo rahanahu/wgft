@@ -141,7 +141,7 @@ var tr = map[string][2]string{
 	"fAgentName":    {"エージェント名", "Agent name"},
 	"genJoin":       {"接続文字列を生成", "Generate join string"},
 	"joinIssued":    {"接続文字列を発行しました(1 回限り・%s まで)", "Join string issued (one-time, valid until %s)"},
-	"joinHelp":      {"自宅側で WGFT_JOIN にこの文字列を、WGFT_NAME に名前を入れて起動してください。# を含むのでクォートします。第三者に共有しないでください。", "On the home side, set WGFT_JOIN to this string and WGFT_NAME to the name. Quote it (contains #). Do not share it."},
+	"joinHelp":      {"自宅側で WGFT_JOIN にこの文字列を設定して起動してください。名前はこの文字列に紐付いているので、WGFT_NAME は不要です。# を含みます。dotenv のファイルにはクォートせずにそのまま書き、シェルではシングルクォートで囲みます。第三者に共有しないでください。", "On the home side, set WGFT_JOIN to this string and start the agent. The name is bound to the string, so WGFT_NAME is not needed. It contains a #: write it into a dotenv file as it is, without quotes, and wrap it in single quotes in a shell. Do not share it."},
 	// check result
 	"checkTitle":   {"接続テスト", "Connection test"},
 	"checkRuleVia": {"ルール %s(%s 経由)", "Rule %s (via %s)"},
