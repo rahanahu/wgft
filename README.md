@@ -57,20 +57,6 @@ Pick Pangolin when you want to expose web services with authentication and certi
 - Stolen-credential warnings: if the home credentials (`agent.json`) are used from a second place, the dashboard flags it as a source IP mismatch or flapping
 - Clean uninstall: `wgft server teardown` deletes only what wgft created and prints whatever is left for you to revert by hand
 
-## Modes
-
-`wgft server`, the side that runs on the VPS, has two modes. `WGFT_MODE` selects one, and the first start records it. `wgft agent` at home is the same in both, set up the same way.
-
-| | Kernel mode `kernel` | Userspace mode `userspace` |
-|---|---|---|
-| How it forwards | Kernel WireGuard and nftables DNAT | wireguard-go and a netstack inside the wgft process |
-| Root on the VPS | Required | Not required |
-| Kernel and nftables | Kernel 6.1 or newer, nftables 1.0.6 or newer | None |
-| When `wgft server` stops | The WireGuard interface and the nftables table stay, so forwarding continues | Forwarding stops |
-| Where limits are evaluated | In the kernel. Excess traffic never reaches the wgft process | In the wgft process. Dropping excess traffic costs CPU too |
-
-With root on the VPS, use kernel mode. Userspace mode is for a VPS without root, for a kernel without the WireGuard module, and for setups that should live entirely in a container. In userspace mode the `packet` rate limit applies to UDP only. Step 2 of the setup has a part for each mode. [docs/design.md](docs/design.md) section 6.3 has the design-level differences.
-
 ## Web UI
 
 ![wgft dashboard](docs/images/dashboard.png)
@@ -87,9 +73,25 @@ Browse to `http://localhost:8686` while the session is open. If root cannot log 
 
 ## Requirements
 
-Both sides run on Linux. A kernel-mode server additionally needs kernel 6.1 or newer, nftables 1.0.6 or newer, and root; Debian 12, Ubuntu 24.04 and later qualify. A userspace-mode server needs nothing beyond that, and a host that runs Docker is enough. The rest of this paragraph is about kernel mode. WireGuard itself does not have to be installed: the kernel module ships with those kernels, and the server drives it directly without `wg` or `wg-quick`. On a VPS whose kernel lacks the module, the server stops with a message saying so, and userspace mode is the way to run it. The agent needs nothing else: no root, no TUN device.
+Both sides run on Linux. IPv4 only. If you want to reach the VPS by name, point a domain at it. `wgft agent` at home needs nothing else: no root, no TUN device. What `wgft server` needs on the VPS depends on its mode.
 
-IPv4 only. If you want to reach the VPS by name, point a domain at it.
+### Modes
+
+`wgft server` has two modes. `WGFT_MODE` selects one, and the first start records it. `wgft agent` is the same in both, set up the same way.
+
+| | Kernel mode `kernel` | Userspace mode `userspace` |
+|---|---|---|
+| Root on the VPS | Required | Not required |
+| Kernel and nftables | Kernel 6.1 or newer, nftables 1.0.6 or newer | None |
+| How it forwards | Kernel WireGuard and nftables DNAT | wireguard-go and a netstack inside the wgft process |
+| When `wgft server` stops | The WireGuard interface and the nftables table stay, so forwarding continues | Forwarding stops |
+| Where limits are evaluated | In the kernel. Excess traffic never reaches the wgft process | In the wgft process. Dropping excess traffic costs CPU too |
+
+With root on the VPS, use kernel mode. Userspace mode is for a VPS without root, for a kernel without the WireGuard module, and for setups that should live entirely in a container.
+
+Kernel mode only asks for those kernel and nftables versions, whatever the distribution. The author has run it on Debian 12, which sits exactly at the minimum, and on Ubuntu 26.04. It uses the WireGuard that is part of the kernel, so there is no package to install. On a VPS whose kernel lacks the WireGuard module, `wgft server` says so at startup and stops.
+
+In userspace mode the `packet` rate limit applies to UDP only. [docs/design.md](docs/design.md) section 6.3 has the design-level differences.
 
 ## Setup
 
