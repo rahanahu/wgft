@@ -7,8 +7,9 @@ VPS で受けた TCP/UDP を WireGuard 経由で自宅のサービスへ届け�
 
 自宅のサービス(ゲームサーバ、Web サービス)を、固定 IP を持つ VPS 経由でインターネットに公開したい。
 自宅側は NAT 配下でポート開放を避けたいので、自宅から VPS へ WireGuard トンネルを張り、VPS に届いたパケットをトンネル経由で自宅へ転送する。
-これまではトンネル型のリバースプロキシ製品でこの用途を賄っていたが、UDP 転送が製品側の不具合で動かず、WireGuard と nftables を手で組む状態になっていた。
-その手作業をツールに置き換える。
+この構成は Pangolin から着想を得た。Pangolin を使う中で VPS を入口にして自宅サービスを公開する構成の便利さを知った一方、ゲームサーバなどの raw TCP/UDP 転送だけが目的なら、より直接的で小さな構成が欲しくなった。
+また、日本の IPv4 over IPv6 接続の一部では任意の受信 IPv4 ポートを使えない場合があり、VPS を入口にする構成はその制約を避ける用途にも合う。
+そこで WireGuard と nftables を直接組み合わせ、その手作業をツールに置き換える。
 
 置き換え後の全体像は次のとおりである。
 
@@ -683,3 +684,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - systemd の unit を非 root とサンドボックスに変更(2026-09-18):10.3 節に、`DynamicUser=yes` と 2 つの capability で動かすこと、`ProtectKernelTunables` を付けない理由、旧い root の unit からの更新でデータが引き継がれることを追記。11 節と 10.3 節のソケットの所有者の記述を追随。ラボの VM で実際の systemd の unit として起動し、カーネル DNAT の TCP と UDP、443 のプロキシ、`ip_forward` の書き込み、deny、再起動、旧 unit からの更新、`ProtectKernelModules` の下での WireGuard モジュールの自動ロード、撤去を確認。コンテナの compose には `cap_drop: [ALL]`、`no-new-privileges`、`read_only` を追加し、Docker で登録、転送、443 の待ち受けを確認
 - エージェントと CLI を Windows と macOS でビルドできるようにした(2026-09-18):11a 節に OS ごとの既定の置き場所、Linux 以外では `server` を持たないこと、排他ロックの OS ごとの実装、実機では未確認であることを追記。版数の埋め込み先を `internal/vpsd` から OS に依存しない `internal/buildinfo` に移した
 - カーネルの WireGuard モジュールが無い環境での起動(2026-09-18):9 節に、`wireguard-tools` は要らないこと、モジュールが無ければ終了コード 3 で止まりユーザー空間モードへ案内することを追記。それまでは `operation not supported` とだけ出て終了コード 1 になり、unit が再起動を繰り返していた。ラボでモジュールをロード不可にして文言と終了コードを、`wg` コマンドを隠してカーネルモードの結合シナリオが通ることを確認
+- 背景説明を README と整合(2026-09-18):Pangolin から着想を得たこと、raw TCP/UDP に特化した理由、日本の IPv4 over IPv6 回線で任意の受信 IPv4 ポートが使えない場合を背景として明記し、特定製品の不具合を原因とする表現を削除。
