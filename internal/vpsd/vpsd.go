@@ -19,6 +19,7 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/agentapi"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
+	"github.com/rahanahu/wgft/internal/vpsd/srcpolicy"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/internal/vpsd/stream"
 	"github.com/rahanahu/wgft/internal/vpsd/wg"
@@ -238,7 +239,7 @@ func Run(opts Options) error {
 	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{iface: opts.WGInterface}}
 	var uspace *userspaceDataplane
 	if opts.Mode == modeUserspace {
-		uspace = newUserspaceDataplane(allowAllPolicy{})
+		uspace = newUserspaceDataplane(srcpolicy.New(nil))
 		d.dp = uspace
 	}
 	d.reserved = proto.Reserved{opts.WGPort: "WireGuard"}

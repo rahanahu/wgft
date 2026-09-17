@@ -190,12 +190,3 @@ func (u *userspaceDataplane) EnableIPForward(*store.Store) *check.Finding { retu
 func (u *userspaceDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{Dial: u.dial})
 }
-
-// allowAllPolicy は制限の無い評価器(評価器が無いときの既定)。
-type allowAllPolicy struct{}
-
-func (allowAllPolicy) Update([]proto.Rule)                              {}
-func (allowAllPolicy) AdmitFlow(string, netip.Addr, int) (bool, string) { return true, "" }
-func (allowAllPolicy) AdmitPacket(string, int) bool                     { return true }
-func (allowAllPolicy) SourceAllowed(string, netip.Addr) bool            { return true }
-func (allowAllPolicy) Drops() []nft.Drop                                { return nil }
