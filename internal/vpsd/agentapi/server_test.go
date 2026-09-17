@@ -3,6 +3,7 @@ package agentapi
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -413,4 +414,26 @@ func httptestServer(t *testing.T, s *Server) string {
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
 	return "http://" + ln.Addr().String()
+}
+
+// h2 を申し出るクライアントに対しても、サーバは ALPN で h2 を選ばない。
+func TestHTTPServerDoesNotNegotiateHTTP2(t *testing.T) {
+	certSrc := httptest.NewTLSServer(nil)
+	cert := certSrc.TLS.Certificates[0]
+	certSrc.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newHTTPServer("", http.NotFoundHandler(), &tls.Config{Certificates: []tls.Certificate{cert}}, defaultTimeouts)
+	go srv.ServeTLS(ln, "", "")
+	defer srv.Close()
+	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h2", "http/1.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if got := conn.ConnectionState().NegotiatedProtocol; got == "h2" {
+		t.Fatalf("negotiated %q, want http/1.1", got)
+	}
 }

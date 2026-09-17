@@ -77,7 +77,7 @@ func PinnedClient(pin [32]byte) *http.Client {
 		},
 		MinVersion: tls.VersionTLS12,
 	}
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: tc, ForceAttemptHTTP2: true}, Timeout: 15 * time.Second}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: tc}, Timeout: 15 * time.Second} // サーバは HTTP/1.1 だけ
 }
 
 // ErrRegisterRejected は登録が認証で拒否された(トークンが無効、名前違い)。

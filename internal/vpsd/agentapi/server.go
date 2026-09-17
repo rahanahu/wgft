@@ -128,6 +128,10 @@ func newHTTPServer(addr string, h http.Handler, tlsConfig *tls.Config, t serverT
 		ReadTimeout:       t.ReadTimeout,
 		IdleTimeout:       t.IdleTimeout,
 		MaxHeaderBytes:    t.MaxHeaderBytes,
+		// HTTP/2 は使わない。エージェントとの通信は登録の POST と WebSocket(HTTP/1.1 の Upgrade)だけで、
+		// h2 は公開面を広げるだけになる。空でない map を置くと net/http は h2 を広告しない。
+		// 鍵交換の曲線は Go の既定に任せる(既定には耐量子のハイブリッドが含まれ、固定すると外れる)。
+		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 	}
 }
 
