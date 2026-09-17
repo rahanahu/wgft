@@ -57,6 +57,10 @@ func (j *Join) TokenHash() string {
 	return hex.EncodeToString(h[:])
 }
 
+// ErrPinMismatch はサーバ証明書がピンと一致しない。teardown --purge のあとに立て直したサーバか、経路上の
+// 第三者による TLS の終端で起きる。復帰は未使用の WGFT_JOIN による再登録(仕様 5.1 節)。
+var ErrPinMismatch = errors.New("server certificate does not match the pinned hash")
+
 // PinnedClient は証明書の SHA-256 がピンと一致するときだけ通す HTTP クライアント。
 // 通常の検証(CA、ホスト名、期限)は使わない。IP 直打ちでも DNS 名でも同じ接続文字列が使える。
 func PinnedClient(pin [32]byte) *http.Client {
@@ -67,7 +71,7 @@ func PinnedClient(pin [32]byte) *http.Client {
 				return errors.New("no server certificate")
 			}
 			if got := sha256.Sum256(cs.PeerCertificates[0].Raw); got != pin {
-				return fmt.Errorf("server certificate sha256 %x does not match the join string hash", got[:4])
+				return fmt.Errorf("%w (got sha256 %x)", ErrPinMismatch, got[:4])
 			}
 			return nil
 		},

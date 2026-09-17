@@ -277,7 +277,7 @@ sudo wgft server teardown --dry-run      # show what would be removed and what t
 sudo wgft server teardown --purge --yes  # do it; --purge also deletes keys and certificates
 ```
 
-Without `--purge`, keys and certificates stay, so restarting the server brings it back with the same identity and agents simply reconnect. After a `--purge`, a restarted server has new keys and a new certificate, so registered agents cannot reconnect and keep retrying against the certificate mismatch. Delete the credentials file `agent.json` on the home side and register again with a fresh join string. To remove the home side entirely, `docker compose -f deploy/agent.compose.yaml down -v` removes the agent along with its credentials.
+Without `--purge`, keys and certificates stay, so restarting the server brings it back with the same identity and agents simply reconnect. After a `--purge`, a restarted server has new keys and a new certificate, so registered agents cannot reconnect and keep retrying against the certificate mismatch. Issue a fresh join string, set it in `WGFT_JOIN` and restart the agent. The agent detects the changed certificate and registers again, keeping its credentials file `agent.json` and its WireGuard key. Rules were deleted on the server side, so add them again. To remove the home side entirely, `docker compose -f deploy/agent.compose.yaml down -v` removes the agent along with its credentials.
 
 ## Status
 

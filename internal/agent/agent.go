@@ -259,6 +259,24 @@ func (rt *runtime) recover() error {
 	return nil
 }
 
+// joinForNewPin は、ピンの不一致からの再登録に使える接続文字列を返す(仕様 5.1 節)。
+// 未使用で、かつピンが認証情報のピンと違うものだけ。なければ nil。
+func (rt *runtime) joinForNewPin() *Join {
+	if rt.opts.Join == "" {
+		return nil
+	}
+	j, err := ParseJoin(rt.opts.Join)
+	if err != nil {
+		return nil
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if j.TokenHash() == rt.f.UsedJoinTokenSHA256 || hex.EncodeToString(j.Pin[:]) == rt.f.CertSHA256 {
+		return nil
+	}
+	return j
+}
+
 // reconnect は今の stream 接続を切り、バックオフなしで繋ぎ直させる。
 func (rt *runtime) reconnect() {
 	rt.streamMu.Lock()

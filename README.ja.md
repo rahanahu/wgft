@@ -275,7 +275,7 @@ sudo wgft server teardown --dry-run      # 削除するものと、手動で戻�
 sudo wgft server teardown --purge --yes  # 実行する。--purge を付けると鍵と証明書も削除する
 ```
 
-`--purge` を付けなければ鍵と証明書が残るため、server を起動し直せば同じ鍵で復旧し、agent は再接続するだけで済みます。`--purge` で消した後に server を起動し直すと、鍵と証明書が新しくなるため、登録済みの agent は再接続できず、証明書の不一致で接続を試み続けます。そのときは自宅側の認証情報である `agent.json` を削除し、新しい接続文字列で登録し直します。自宅側を丸ごと消すなら `docker compose -f deploy/agent.compose.yaml down -v` で、認証情報を含めて削除できます。
+`--purge` を付けなければ鍵と証明書が残るため、server を起動し直せば同じ鍵で復旧し、agent は再接続するだけで済みます。`--purge` で消した後に server を起動し直すと、鍵と証明書が新しくなるため、登録済みの agent は再接続できず、証明書の不一致で接続を試み続けます。そのときは新しい接続文字列を発行し、`WGFT_JOIN` に設定して agent を起動し直します。agent は証明書が変わったことを検出して登録をやり直し、認証情報の `agent.json` と WireGuard の鍵はそのまま使い続けます。ルールは server 側で消えているので、追加し直します。自宅側を丸ごと消すなら `docker compose -f deploy/agent.compose.yaml down -v` で、認証情報を含めて削除できます。
 
 ## 開発状況
 

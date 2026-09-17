@@ -53,6 +53,17 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 			}
 			backoff = time.Second
 			continue
+		case errors.Is(err, ErrPinMismatch):
+			// 証明書が変わった。未使用でピンの違う WGFT_JOIN があれば再登録し、なければ再接続を続ける
+			if j := rt.joinForNewPin(); j != nil {
+				if rerr := rt.recover(); rerr != nil {
+					log.Printf("stream: %v; re-registration with the provided join string failed: %v; retrying in %s", err, rerr, backoff)
+					break
+				}
+				backoff = time.Second
+				continue
+			}
+			log.Printf("stream: %v; if the server was rebuilt (teardown --purge), issue a new join string and restart with it in WGFT_JOIN; retrying in %s", err, backoff)
 		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseSuperseded):
 			log.Printf("stream: superseded by another connection for the same agent: double start or copied credentials (agent.json); reconnecting in %s", backoff)
 		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseRevoked):
