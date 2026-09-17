@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"sync"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/netpipe"
 )
 
@@ -17,7 +18,11 @@ func (m *Manager) startTCP(l *listener) error {
 		mu    sync.Mutex
 		conns = map[net.Conn]netip.Addr{} // 公開側の接続はその接続元、target 側はゼロ値
 		done  = make(chan struct{})
+		// public は公開側の接続の数(同時フロー数の上限の対象。conns は target 側も含む)
+		public int
+		capLog flowcap.LogGate
 	)
+	l.flows = func() int { mu.Lock(); defer mu.Unlock(); return public }
 	l.sessions = func() int { mu.Lock(); defer mu.Unlock(); return len(conns) }
 	l.sweep = func(keep func(src netip.Addr) bool) int {
 		mu.Lock()
@@ -57,14 +62,25 @@ func (m *Manager) startTCP(l *listener) error {
 				c.Close()
 				continue
 			}
+			// 同時フロー数の上限(仕様 7 節)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
+			if m.ruleFlows(m.ruleOf(l)) >= m.opts.TCPConnsMax || !m.opts.TCPCap.Acquire(src) {
+				c.Close()
+				if capLog.Allow() {
+					m.opts.Logf("tcp %s: connection limit reached; refusing new connections", l.key)
+				}
+				continue
+			}
 			mu.Lock()
 			conns[c] = src
+			public++
 			mu.Unlock()
 			go func() {
 				defer func() {
 					mu.Lock()
 					delete(conns, c)
+					public--
 					mu.Unlock()
+					m.opts.TCPCap.Release(src)
 				}()
 				t, err := m.opts.Dial("tcp", l.target)
 				if err != nil {

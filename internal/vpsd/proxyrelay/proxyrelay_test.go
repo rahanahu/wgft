@@ -9,6 +9,8 @@ import (
 	"time"
 
 	proxyproto "github.com/pires/go-proxyproto"
+
+	"github.com/rahanahu/wgft/internal/flowcap"
 )
 
 // fakeAgent は PROXY protocol を解する受信側(エージェント経由の先の Caddy 相当)。
@@ -140,5 +142,63 @@ func TestRestrictionChangeClosesLive(t *testing.T) {
 		if err != nil {
 			return // 期待どおり閉じられた
 		}
+	}
+}
+
+// 同時接続数の上限(仕様 7 節):超えた接続はエージェントに繋がずに閉じ、既存の接続が閉じれば枠が戻る。
+func TestConnCap(t *testing.T) {
+	agentAddr, ipCh := fakeAgent(t)
+	raw, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cnt := &flowcap.Counter{Total: 10, PerSource: 1}
+	m := New(Options{
+		Listen: func(uint16) (net.Listener, error) { return raw, nil },
+		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
+		Logf:   t.Logf,
+		Cap:    cnt,
+	})
+	t.Cleanup(m.Close)
+	m.Apply([]Rule{rule(true, nil, nil)}) // fakeAgent は PROXY ヘッダが届くまで接続元を返さない
+	dial := func() net.Conn {
+		c, err := net.Dial("tcp", raw.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	reached := func() bool {
+		select {
+		case <-ipCh:
+			return true
+		case <-time.After(300 * time.Millisecond):
+			return false
+		}
+	}
+	c1 := dial()
+	if !reached() {
+		t.Fatal("first connection must reach the agent")
+	}
+	c2 := dial()
+	if reached() {
+		t.Error("connection over the per-source limit reached the agent")
+	}
+	c2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c2.Read(make([]byte, 1)); err != io.EOF {
+		t.Errorf("refused connection: err = %v, want EOF", err)
+	}
+	c1.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for cnt.Len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if cnt.Len() != 0 {
+		t.Fatalf("counter after close = %d, want 0", cnt.Len())
+	}
+	dial()
+	if !reached() {
+		t.Error("connection after a slot was freed must reach the agent")
 	}
 }

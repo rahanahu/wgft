@@ -6,13 +6,51 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/flowcap"
 )
+
+const udpBufMax = 65535
 
 // udpSession は (送信元 IP, 送信元ポート) ごとの、target への接続。
 // エージェントから見た送信元は VPS の masquerade により常に 10.200.0.1 なので、実質は送信元ポートで区別される。
 type udpSession struct {
 	conn     net.Conn
 	lastSeen atomic.Int64 // UnixNano
+}
+
+// ReadWaiter は、バッファを持たずに次のデータグラムの到着を待てる接続。
+// Dial が返す接続がこれを満たせば(vpsd の netstack の接続)、relay はそれを使う。
+// カーネルのソケットは unix なら relay が自前で待つ。
+type ReadWaiter interface {
+	// WaitReadable は次の Read が待たずに戻る状態になるまで待つ。接続が閉じたら誤りを返す
+	WaitReadable() error
+}
+
+func readWaiterOf(c net.Conn) ReadWaiter {
+	if w, ok := c.(ReadWaiter); ok {
+		return w
+	}
+	return kernelReadWaiter(c)
+}
+
+var udpBufPool = sync.Pool{New: func() any { b := make([]byte, udpBufMax); return &b }}
+
+// forwardReply は target からの応答を 1 個読んで公開側へ返す。own が nil ならプールのバッファを借りる。
+func forwardReply(s *udpSession, pc net.PacketConn, from net.Addr, own []byte) bool {
+	rb := own
+	if rb == nil {
+		bp := udpBufPool.Get().(*[]byte)
+		defer udpBufPool.Put(bp)
+		rb = *bp
+	}
+	rn, err := s.conn.Read(rb)
+	if err != nil {
+		return false
+	}
+	s.lastSeen.Store(time.Now().UnixNano())
+	_, err = pc.WriteTo(rb[:rn], from)
+	return err == nil
 }
 
 func (m *Manager) startUDP(l *listener) error {
@@ -24,9 +62,11 @@ func (m *Manager) startUDP(l *listener) error {
 		mu       sync.Mutex
 		sessions = map[string]*udpSession{}
 		done     = make(chan struct{})
+		capLog   flowcap.LogGate
 	)
 	count := func() int { mu.Lock(); defer mu.Unlock(); return len(sessions) }
 	l.sessions = count
+	l.flows = count
 	closeSession := func(k string, s *udpSession) {
 		mu.Lock()
 		if sessions[k] == s {
@@ -93,7 +133,7 @@ func (m *Manager) startUDP(l *listener) error {
 	}()
 
 	go func() {
-		buf := make([]byte, 65535)
+		buf := make([]byte, udpBufMax)
 		for {
 			n, from, err := pc.ReadFrom(buf)
 			if err != nil {
@@ -115,36 +155,43 @@ func (m *Manager) startUDP(l *listener) error {
 				if m.opts.Admit != nil && !m.opts.Admit(m.ruleOf(l), addrOf(from)) {
 					continue
 				}
-				// ルールごとの上限。超えた新規パケットは捨てる(既存セッションは追い出さない)
-				if m.ruleSessions(m.ruleOf(l)) >= m.opts.UDPSessionsMax {
+				// 同時フロー数の上限(仕様 7 節)。超えた新規パケットは捨てる(既存セッションは追い出さない)
+				src := addrOf(from)
+				if m.ruleFlows(m.ruleOf(l)) >= m.opts.UDPSessionsMax || !m.opts.UDPCap.Acquire(src) {
+					if capLog.Allow() {
+						m.opts.Logf("udp %s: session limit reached; dropping new flows", l.key)
+					}
 					continue
 				}
 				// target のホスト名はセッション確立時に解決する(DNS の変更は新規セッションだけに効く)
 				c, err := m.opts.Dial("udp", l.target)
 				if err != nil {
+					m.opts.UDPCap.Release(src)
 					m.opts.Logf("udp %s: dial %s: %v", l.key, l.target, err)
 					continue
 				}
 				s = &udpSession{conn: c}
 				s.lastSeen.Store(time.Now().UnixNano())
 				mu.Lock()
-				if existing := sessions[k]; existing != nil {
-					s.conn.Close()
-					s = existing
-				} else {
-					sessions[k] = s
-				}
+				sessions[k] = s
 				mu.Unlock()
 				go func(k string, s *udpSession, from net.Addr) {
+					defer m.opts.UDPCap.Release(src)
 					defer closeSession(k, s)
-					rb := make([]byte, 65535)
+					// 応答は、届いてからプールのバッファを借りて読む(仕様 7 節)。待つ間はバッファを持たない。
+					// 待てない接続(unix 以外のカーネルのソケット)は、最大長のバッファを持ち続ける
+					w := readWaiterOf(s.conn)
+					var own []byte
+					if w == nil {
+						own = make([]byte, udpBufMax)
+					}
 					for {
-						rn, err := s.conn.Read(rb)
-						if err != nil {
-							return
+						if w != nil {
+							if err := w.WaitReadable(); err != nil {
+								return
+							}
 						}
-						s.lastSeen.Store(time.Now().UnixNano())
-						if _, err := pc.WriteTo(rb[:rn], from); err != nil {
+						if !forwardReply(s, pc, from, own) {
 							return
 						}
 					}

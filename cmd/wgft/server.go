@@ -16,7 +16,7 @@ import (
 
 // serverSpecs は server の設定項目(WGFT_ 名とフラグ別名。仕様 11a 節)。
 func serverSpecs() []spec {
-	return []spec{
+	return append([]spec{
 		{Env: "WGFT_MODE", Flag: "mode", Default: ""},
 		{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: "/var/lib/wgft"},
 		{Env: "WGFT_WG_INTERFACE", Flag: "wg-interface", Default: "wgft0"},
@@ -29,7 +29,7 @@ func serverSpecs() []spec {
 		{Env: "WGFT_ADMIN", Flag: "admin", Default: "unix:///run/wgft/admin.sock"},
 		{Env: "WGFT_ADMIN_TAILSCALE", Flag: "admin-tailscale", Default: "false"},
 		{Env: "WGFT_ADMIN_HOST", Flag: "admin-host", Default: "", Slice: true},
-	}
+	}, limitSpecs()...)
 }
 
 // registerServerFlags は run / check にフラグ別名を付ける。
@@ -47,6 +47,7 @@ func registerServerFlags(f *cobra.Command) {
 	fl.String("admin", "unix:///run/wgft/admin.sock", "admin API listen address, env WGFT_ADMIN; unix:///path or host:port")
 	fl.Bool("admin-tailscale", false, "also listen on the tailnet address, env WGFT_ADMIN_TAILSCALE")
 	fl.StringSlice("admin-host", nil, "extra names allowed by the Host check, env WGFT_ADMIN_HOST, comma-separated")
+	registerLimitFlags(fl)
 	fl.String("config", defaultConfigPath, "dotenv config file")
 }
 
@@ -64,8 +65,13 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 	if err != nil {
 		return vpsd.Options{}, nil, fmt.Errorf("WGFT_MTU: %w", err)
 	}
+	limits, err := limitsFromConfig(c)
+	if err != nil {
+		return vpsd.Options{}, nil, err
+	}
 	stateDir := c.str("WGFT_DATA_DIR")
 	opts := vpsd.Options{
+		Limits:         limits,
 		Mode:           c.str("WGFT_MODE"),
 		DBPath:         stateDir + "/wgft.sqlite",
 		WGInterface:    c.str("WGFT_WG_INTERFACE"),
@@ -110,6 +116,7 @@ listens on a Unix socket (root-owned 0600).`,
 			}
 			fmt.Fprintln(os.Stderr, "effective config:")
 			c.print(os.Stderr)
+			applyMemoryLimit(os.Stderr, opts.Limits, true)
 			return vpsd.Run(opts)
 		},
 	}
@@ -127,6 +134,7 @@ listens on a Unix socket (root-owned 0600).`,
 			}
 			fmt.Println("effective config:")
 			c.print(os.Stdout)
+			applyMemoryLimit(os.Stdout, opts.Limits, false)
 			fmt.Println()
 			return vpsd.Check(opts, os.Stdout)
 		},

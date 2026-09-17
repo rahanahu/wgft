@@ -17,6 +17,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/agent/relay"
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/vpsd/check"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
 	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
@@ -40,6 +41,8 @@ type flowPolicy interface {
 type userspaceDataplane struct {
 	policy flowPolicy
 	relay  *relay.Manager
+	// tcpCap は relay とプロキシモードの中継が共有する TCP の同時接続数(仕様 7 節)
+	tcpCap *flowcap.Counter
 
 	mu  sync.Mutex
 	tun *utun.Tunnel
@@ -56,8 +59,9 @@ func (hostNetwork) ListenTCP(port uint16) (net.Listener, error) {
 	return net.Listen("tcp", ":"+strconv.Itoa(int(port)))
 }
 
-func newUserspaceDataplane(policy flowPolicy) *userspaceDataplane {
-	u := &userspaceDataplane{policy: policy}
+func newUserspaceDataplane(policy flowPolicy, lim flowcap.Limits) *userspaceDataplane {
+	lim = lim.WithDefaults()
+	u := &userspaceDataplane{policy: policy, tcpCap: &flowcap.Counter{Total: lim.TCPTotal, PerSource: flowcap.TCPPerSource}}
 	u.relay = relay.New(hostNetwork{}, relay.Options{
 		UDPIdleTimeout: 120 * time.Second, // conntrack の udp_timeout_stream の既定と同じ
 		Dial:           u.dial,
@@ -67,6 +71,8 @@ func newUserspaceDataplane(policy flowPolicy) *userspaceDataplane {
 			return ok
 		},
 		AdmitPacket: policy.AdmitPacket,
+		UDPCap:      &flowcap.Counter{Total: lim.UDPTotal, PerSource: flowcap.UDPPerSource},
+		TCPCap:      u.tcpCap,
 	})
 	return u
 }

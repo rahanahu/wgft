@@ -130,8 +130,28 @@ func TestServerTunnelWithAgentTunnel(t *testing.T) {
 	for i := range big {
 		big[i] = byte(i)
 	}
+	// UDP の接続は、届くまでバッファを持たずに待てる(仕様 7 節)。届く前は戻らず、届いたら戻る
+	w, ok := u.(interface{ WaitReadable() error })
+	if !ok {
+		t.Fatal("udp conn of the tunnel must implement WaitReadable")
+	}
+	ready := make(chan error, 1)
+	go func() { ready <- w.WaitReadable() }()
+	select {
+	case err := <-ready:
+		t.Fatalf("WaitReadable returned before any datagram: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
 	if _, err := u.Write(big); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatalf("WaitReadable: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitReadable did not return after the reply arrived")
 	}
 	n, err = u.Read(buf)
 	if err != nil {
@@ -155,6 +175,18 @@ func TestServerTunnelWithAgentTunnel(t *testing.T) {
 	u2.Write([]byte("x"))
 	if _, err := u2.Read(buf); err == nil {
 		t.Fatal("agent still reachable after the peer was removed")
+	}
+	// 閉じた接続の WaitReadable は誤りで戻る(relay の読み手の goroutine が終われる)
+	go func() { ready <- u2.(interface{ WaitReadable() error }).WaitReadable() }()
+	time.Sleep(100 * time.Millisecond)
+	u2.Close()
+	select {
+	case err := <-ready:
+		if err == nil {
+			t.Fatal("WaitReadable on a closed conn must fail")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitReadable did not return after Close")
 	}
 	_ = net.IPv4zero
 }

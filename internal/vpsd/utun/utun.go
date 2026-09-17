@@ -18,7 +18,6 @@ import (
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/vpsd/wg"
@@ -37,7 +36,7 @@ type Config struct {
 type Tunnel struct {
 	cfg  Config
 	dev  *device.Device
-	tnet *netstack.Net
+	tnet *netTun
 
 	mu    sync.Mutex
 	peers map[wgtypes.Key]netip.Addr // 宣言済みのピア(SetPeers の差分計算用)
@@ -60,12 +59,12 @@ func New(cfg Config) (*Tunnel, error) {
 	if cfg.MTU <= 0 {
 		cfg.MTU = 1420
 	}
-	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{cfg.Address}, nil, cfg.MTU)
+	tnet, err := createNetTUN(cfg.Address, cfg.MTU)
 	if err != nil {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
 	t := &Tunnel{cfg: cfg, tnet: tnet, peers: map[wgtypes.Key]netip.Addr{}}
-	t.dev = device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "wg: "))
+	t.dev = device.NewDevice(tnet, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "wg: "))
 	ipc := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(cfg.PrivateKey[:]), cfg.ListenPort)
 	if err := t.dev.IpcSet(ipc); err != nil {
 		t.dev.Close()
@@ -171,12 +170,22 @@ func (t *Tunnel) Peers() (map[wgtypes.Key]PeerStatus, error) {
 // DialContext は netstack 越しにエージェントへ TCP 接続する(中継の向きの反転。仕様 6.3 節)。
 // エージェントから見た送信元は t.cfg.Address の一時ポートになる。
 func (t *Tunnel) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	return t.tnet.DialContext(ctx, network, addr)
+	ap, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s: %w", addr, err)
+	}
+	switch network {
+	case "tcp":
+		return t.tnet.dialTCP(ctx, ap)
+	case "udp":
+		return t.tnet.dialUDP(ap)
+	}
+	return nil, fmt.Errorf("dial %s: unknown network %q", addr, network)
 }
 
 // DialUDP は netstack 越しにエージェントの UDP リスナーへつなぐ。
 func (t *Tunnel) DialUDP(raddr netip.AddrPort) (net.Conn, error) {
-	return t.tnet.DialUDP(nil, net.UDPAddrFromAddrPort(raddr))
+	return t.tnet.dialUDP(raddr)
 }
 
 // Close はトンネルを閉じる。

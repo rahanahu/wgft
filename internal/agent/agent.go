@@ -21,14 +21,16 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/agent/relay"
 	"github.com/rahanahu/wgft/internal/agent/tunnel"
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // Options は agent の起動オプション。
 type Options struct {
-	CredentialsPath string // 認証情報ファイル
-	Join            string // 接続文字列(WGFT_JOIN か --join)。初回登録に使う
-	Name            string // エージェント名(WGFT_NAME か --name)。任意。接続文字列の発行時の名前に紐付いているので、与えなければトークンに紐付いた名前で登録される
+	CredentialsPath string         // 認証情報ファイル
+	Join            string         // 接続文字列(WGFT_JOIN か --join)。初回登録に使う
+	Limits          flowcap.Limits // 同時フロー数のプロセス全体の上限(仕様 7 節)。ゼロ値は既定値
+	Name            string         // エージェント名(WGFT_NAME か --name)。任意。接続文字列の発行時の名前に紐付いているので、与えなければトークンに紐付いた名前で登録される
 }
 
 // runtime は動いているエージェント。全体状態を「宣言された状態に収束させる」方式で適用する。
@@ -147,7 +149,7 @@ func (rt *runtime) apply(st *proto.State) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		go tun.Run(ctx)
 		rt.tun, rt.tunCancel, rt.wgCfg = tun, cancel, st.WG
-		rt.rl = relay.New(tun, relay.Options{UDPIdleTimeout: time.Duration(st.WG.UDPTimeoutStream) * time.Second})
+		rt.rl = relay.New(tun, relay.Options{UDPIdleTimeout: time.Duration(st.WG.UDPTimeoutStream) * time.Second, Limits: rt.opts.Limits})
 	}
 	acts := rt.rl.Apply(relay.DesiredFromRules(st.Rules))
 	rt.gen = st.Generation
