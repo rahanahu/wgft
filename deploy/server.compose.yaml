@@ -1,0 +1,50 @@
+# Docker Compose for the VPS-side server, running the userspace mode (docs/design.md section 6.3).
+# No root, no kernel WireGuard, no nftables. For kernel mode, use deploy/server.service instead;
+# it is not supported in a container (see deploy/Dockerfile.server).
+#
+#   docker compose -f deploy/server.compose.yaml up -d
+#
+# The image is pulled from GHCR (amd64 and arm64). To build it from this repository instead,
+# uncomment the build: lines below and add --build to the command above.
+#
+# Notes
+# - No privileges: no --privileged, no cap_add, no devices (user-space netstack, so no TUN).
+# - The image runs as uid 65532 (the distroless "nonroot" user), not root. The named volume
+#   below is fine as is: Docker/Podman initialise a named volume from the image directory,
+#   ownership included, so /var/lib/wgft in the volume comes out owned by 65532.
+# - Ports: WGFT_WG_PORT (default 51820/udp) is where agents' tunnels connect, and 8443/tcp is the
+#   agent API. Both must be reachable from the internet. Every forwarded port (rule add --udp /
+#   --tcp) needs the same: add it below or use network_mode: host.
+# - The simplest way to publish an arbitrary set of forwarded ports without editing this file
+#   for every rule is network_mode: host, commented out below. It also removes any doubt about
+#   Docker's own bridge networking getting in the way of the userspace dataplane.
+# - WGFT_WG_ENDPOINT is required: the host:port that agents dial, this VPS's address plus the
+#   WireGuard UDP port. Edit it before the first start.
+# - Rules and agents are managed with the CLI inside the running container, which reads the same
+#   WGFT_ADMIN as the server and talks to the admin socket in the state volume:
+#     docker compose -f deploy/server.compose.yaml exec wgft-server wgft agent join-string --name home
+#     docker compose -f deploy/server.compose.yaml exec wgft-server wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group game
+#     docker compose -f deploy/server.compose.yaml exec wgft-server wgft agent ls
+services:
+  wgft-server:
+    image: ghcr.io/rahanahu/wgft-server:latest
+    # build:
+    #   context: ..
+    #   dockerfile: deploy/Dockerfile.server
+    container_name: wgft-server
+    restart: unless-stopped
+    environment:
+      WGFT_WG_ENDPOINT: "REPLACE_WITH_vps.example.com:51820"
+    ports:
+      - "51820:51820/udp"
+      - "8443:8443/tcp"
+      # one line per forwarded port or range, matching the rules added with `wgft rule add`
+      - "2456-2457:2456-2457/udp"
+    volumes:
+      - wgft-server-state:/var/lib/wgft
+    # Publishes every port instead of listing them above; the simplest choice when rules change
+    # often. Remove the ports: list above if you use this.
+    # network_mode: host
+
+volumes:
+  wgft-server-state:
