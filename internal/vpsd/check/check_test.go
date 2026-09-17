@@ -163,6 +163,33 @@ func TestMatchPortsAndDNAT(t *testing.T) {
 	}
 }
 
+// TestCollectDNATUnknownReportsFinding は、ポートが読めない DNAT 規則があれば
+// (multiport や未知の式の形)、黙って落とさず Report.Findings に警告を積むことを確かめる。
+// c は nil で渡せる。noPort は Lookup を経由しないので GetSetByName を呼ばない。
+func TestCollectDNATUnknownReportsFinding(t *testing.T) {
+	nat := &expr.NAT{Type: expr.NATTypeDestNAT, Family: unix.NFPROTO_IPV4, RegAddrMin: 1}
+	noPort := append(l4(unix.IPPROTO_TCP), nat)
+	ch := &nftables.Chain{Name: "PREROUTING", Table: &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "nat"}}
+	rl := &nftables.Rule{Exprs: noPort}
+
+	rep := &Report{}
+	rep.collectDNAT(nil, ch, []*nftables.Rule{rl})
+
+	if len(rep.DNATs) != 1 || !rep.DNATs[0].Unknown {
+		t.Fatalf("DNATs = %+v, want 1 unknown entry", rep.DNATs)
+	}
+	if len(rep.Findings) != 1 {
+		t.Fatalf("Findings = %v, want 1 warning about the unreadable port match", rep.Findings)
+	}
+	f := rep.Findings[0]
+	if f.Where != "ip nat PREROUTING" {
+		t.Errorf("Where = %q, want the table/chain of the DNAT rule", f.Where)
+	}
+	if !strings.Contains(f.Problem, "could not be read") {
+		t.Errorf("Problem = %q, want it to say the port match could not be read", f.Problem)
+	}
+}
+
 func TestSuggestionsForms(t *testing.T) {
 	drop := nftables.ChainPolicyDrop
 	ipt := &nftables.Chain{Name: "FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "filter"}, Policy: &drop}
