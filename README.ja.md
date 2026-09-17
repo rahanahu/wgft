@@ -49,8 +49,10 @@ wgft は Pangolin から着想を得ています。Pangolin を使って、VPS �
 | VPS の root 権限 | 必要 | 不要 |
 | カーネル / nftables | Linux 6.1+、nftables 1.0.6+ | 不要 |
 | 転送経路 | カーネル WireGuard + nftables DNAT | wireguard-go + ユーザー空間 netstack |
-| `wgft server` 停止時 | 既存の転送は継続 | 転送も停止 |
+| wgft プロセス停止・クラッシュ時 | 設定済みの転送は継続 | 転送も停止 |
 | レート制限の判定場所 | カーネル | wgft プロセス |
+
+カーネルモードでは、起動後に wgft プロセスがクラッシュまたは再起動しても転送はカーネル側で継続します。ただし VPS 自体を再起動すると WireGuard / nftables の実行時状態が失われるため、wgft が再起動して転送状態を復旧する必要があります。通常運用では付属の systemd unit を有効にしておけば、VPS 再起動後も自動で復旧します。
 
 VPS で root が使える場合はカーネルモードを使います。root やカーネル WireGuard が使えない場合、または server をコンテナ内だけで動かしたい場合はユーザー空間モードを使います。
 
