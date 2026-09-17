@@ -144,6 +144,27 @@ sudo wgft agent join-string --name home
 wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e9d0c3a7b2e8d4f1a6c5b9e0d3f7a2c8b1e6d4f9a02
 ```
 
+*Docker で起動する*
+
+server は、上記の systemd の代わりに、ユーザー空間モードのコンテナとしても起動できます。root 権限もカーネルの WireGuard も nftables も不要です。`vpsd` は、自宅側の agent と同じ構成で、wireguard-go と netstack によるトンネルを自分のプロセス内に持ちます。カーネルモードとの違いは docs/design.md の 6.3 節にまとめてあります。要点は次のとおりです。コンテナを止めると転送も止まります。カーネルモードは wg0 とテーブルが再起動をまたいで残ります。TCP は wgft のプロセスが終端し、そのまま素通しにはなりません。フラッド耐性はユーザー空間の一般的なプロキシと同じです。`packet_rate` は UDP にだけ効き、TCP には効きません。
+
+compose ファイルを使うためにリポジトリを取得し、[deploy/server.compose.yaml](deploy/server.compose.yaml) の `WGFT_WG_ENDPOINT` を書き換えて起動します。
+
+```sh
+git clone https://github.com/rahanahu/wgft.git && cd wgft
+# deploy/server.compose.yaml の次の行を書き換える
+#   WGFT_WG_ENDPOINT: "REPLACE_WITH_vps.example.com:51820"  -> この VPS のアドレスと WireGuard のポート
+docker compose -f deploy/server.compose.yaml up -d
+```
+
+CLI はコンテナの中で実行します。server と同じ `WGFT_ADMIN` を読むため、状態ボリューム内の管理ソケットへ直接届きます。以降のコマンドは、上の接続文字列の発行も含めて、`sudo` の代わりに `docker compose exec` を付けます。
+
+```sh
+docker compose -f deploy/server.compose.yaml exec wgft-server wgft agent join-string --name home
+```
+
+この経路は、ローカルで Podman を使ってビルドしたイメージで確認済みです。公開イメージ `ghcr.io/rahanahu/wgft-server` は次のリリースから使えます。
+
 **3. 自宅に agent を配置する**
 
 自宅側の起動方法は、バイナリと Docker のどちらか一方を選びます。どちらも root 権限は必要ありません。

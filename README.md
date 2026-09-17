@@ -146,6 +146,27 @@ This prints a single line like the one below. It can be used once, expires after
 wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e9d0c3a7b2e8d4f1a6c5b9e0d3f7a2c8b1e6d4f9a02
 ```
 
+*Docker*
+
+The server can also run as a container in the userspace mode, instead of the systemd unit above. It needs no root, no kernel WireGuard, and no nftables. `vpsd` holds the tunnel in wireguard-go and a netstack inside its own process, the same design the agent already uses. See docs/design.md section 6.3 for the full comparison with kernel mode; the short version is that stopping the container stops forwarding, where kernel mode leaves wg0 and the nftables table running through a restart. TCP is terminated inside the wgft process rather than passed through unchanged. Flood resistance is that of any userspace proxy. `packet_rate` limits UDP datagrams only, not TCP.
+
+Clone the repository for the compose file, edit `WGFT_WG_ENDPOINT` in [deploy/server.compose.yaml](deploy/server.compose.yaml), and bring it up.
+
+```sh
+git clone https://github.com/rahanahu/wgft.git && cd wgft
+# edit this line in deploy/server.compose.yaml
+#   WGFT_WG_ENDPOINT: "REPLACE_WITH_vps.example.com:51820"  -> this VPS's address and WireGuard port
+docker compose -f deploy/server.compose.yaml up -d
+```
+
+The CLI runs inside the container, where it reads the same `WGFT_ADMIN` as the server and reaches the admin socket in the state volume directly. From here on, `docker compose exec` replaces `sudo` in front of every command, including the join string above.
+
+```sh
+docker compose -f deploy/server.compose.yaml exec wgft-server wgft agent join-string --name home
+```
+
+This path was verified with the image built locally with Podman; the published image at `ghcr.io/rahanahu/wgft-server` appears with the next release.
+
 **3. Set up the agent at home**
 
 Run the agent either as a plain binary or in Docker. Pick one. Neither needs root.
