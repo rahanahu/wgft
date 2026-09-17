@@ -38,9 +38,9 @@ wgft is aimed at workloads where arbitrary TCP/UDP forwarding matters, especiall
 
 ## Why wgft?
 
-wgft was inspired by Pangolin. Pangolin showed how useful the VPS-to-home tunnel model can be, but for game servers and other raw TCP/UDP services I wanted a smaller tool focused on port forwarding.
+wgft was inspired by Pangolin. Pangolin showed how useful the VPS-to-home tunnel model can be, but for game servers and other raw TCP/UDP services I wanted a smaller tool focused on port forwarding. It is also intended for connections such as Japanese IPv4-over-IPv6 services, where arbitrary inbound IPv4 ports may not be available.
 
-wgft therefore stays deliberately narrow: WireGuard for the tunnel, nftables for kernel forwarding, and simple TCP/UDP rules. It does not provide TLS termination, SSO, certificate management, or application publishing; those are left to a reverse proxy or other software.
+wgft therefore stays deliberately narrow: WireGuard for the tunnel, nftables for kernel forwarding, and simple TCP/UDP rules. wgft manages the WireGuard and wgft-owned nftables state, so you do not have to hand-write the tunnel or DNAT rules. It does not provide TLS termination, SSO, certificate management, or application publishing; those are left to a reverse proxy or other software.
 
 ## Modes
 
