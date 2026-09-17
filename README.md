@@ -24,6 +24,14 @@ flowchart LR
 
 wgft is aimed at workloads where arbitrary TCP/UDP forwarding matters, especially game servers. HTTPS also works, but wgft does not terminate TLS or provide authentication; those stay with your reverse proxy at home.
 
+## Background
+
+wgft was inspired by Pangolin. Using Pangolin showed how convenient it can be to expose services on a home network through a public VPS.
+
+The author's main use case is arbitrary TCP/UDP forwarding, especially game servers. Some IPv4-over-IPv6 services commonly used in Japan share public IPv4 addresses or restrict the available inbound port set, so arbitrary inbound IPv4 ports may not be available at home. A public VPS and WireGuard provide a way around that restriction, but maintaining WireGuard plus NAT and firewall rules by hand is tedious.
+
+wgft is not intended to replace Pangolin. It focuses on the narrower part needed for this use case: L4 TCP/UDP forwarding and management of the WireGuard and nftables setup behind it.
+
 ## Features
 
 - One binary contains the VPS server, home agent, and CLI
@@ -36,7 +44,7 @@ wgft is aimed at workloads where arbitrary TCP/UDP forwarding matters, especiall
 - Web dashboard for agents, rules, warnings, and forwarding state
 - `wgft server teardown` removes only state created by wgft
 
-Compared with products such as Pangolin or Cloudflare Tunnel, wgft deliberately stays narrow: it forwards ports and leaves TLS, SSO, certificates, and application publishing to other software.
+wgft deliberately stays narrow: it forwards ports and leaves TLS, SSO, certificates, and application publishing to other software.
 
 ## Modes
 
