@@ -71,6 +71,16 @@ nftables や WireGuard の挙動を確かめる使い捨ての実験コードは
 - 括弧とコロンは ASCII にします。README では括弧による補足をできるだけ使わず、別の文にします。図は README なら Mermaid にします
 - 試していないことを手順として書きません。ラボか実機で通したものだけを書きます
 
+## コマンドのヘルプとリファレンスの直し方
+
+コマンドの長い説明と使用例は `cmd/wgft/helptext.go` の表にまとめてあります。コマンドの定義には 1 行の `Short` だけを置きます。[docs/cli.md](docs/cli.md) はこのヘルプから生成した文書で、手では編集しません。ヘルプを変えたら、次のコマンドで生成し直して同じコミットに入れます。
+
+```
+go test ./cmd/wgft -run TestCLIDocUpToDate -update
+```
+
+`go test` は docs/cli.md がヘルプと一致しているかを照合するので、生成を忘れると CI が落ちます。実行できるコマンドに使用例が無い場合も、テストが落ちます。ヘルプに挙動を書くときは、ラボで確かめたことだけを書きます。README の日英にあるコマンド一覧の表は手書きなので、コマンドを追加、削除したときは合わせて直します。
+
 ## Web UI のスクリーンショットの撮り直し方
 
 README.md と README.ja.md が使う `docs/images/dashboard.png`(英語)と `dashboard.ja.png`(日本語)は、`scripts/screenshot-ui.sh` で撮影します。ラボの VM も実機の VPS も要りません。

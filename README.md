@@ -279,12 +279,53 @@ sudo wgft server teardown --purge --yes  # do it; --purge also deletes keys and 
 
 Without `--purge`, keys and certificates stay, so restarting the server brings it back with the same identity and agents simply reconnect. After a `--purge`, a restarted server has new keys and a new certificate, so registered agents cannot reconnect and keep retrying against the certificate mismatch. Issue a fresh join string, set it in `WGFT_JOIN` and restart the agent. The agent detects the changed certificate and registers again, keeping its credentials file `agent.json` and its WireGuard key. Rules were deleted on the server side, so add them again. To remove the home side entirely, `docker compose -f deploy/agent.compose.yaml down -v` removes the agent along with its credentials.
 
+## Commands
+
+One binary holds both sides. `wgft <command> --help` explains every command with examples, and [docs/cli.md](docs/cli.md) has the same text in one page. `wgft version` prints the version on either side.
+
+### Commands run on the server side
+
+Run these on the VPS. Those that manage agents and rules talk to the admin API of the running server, so run them as root. With the container, run them inside it with `docker compose exec`, as shown in the Docker section above.
+
+| Command | What it does |
+|---|---|
+| `wgft server run` | Runs the server. The systemd unit and the container image start this |
+| `wgft server check` | Checks the configuration and the environment without starting or changing anything |
+| `wgft server nft` | Prints the nftables table the server has applied |
+| `wgft server teardown` | Removes what wgft created on a stopped server. `--purge` also deletes keys, rules and agents |
+| `wgft agent join-string` | Issues a one-time join string for a new agent |
+| `wgft agent ls` | Lists agents with the state of their stream and tunnel |
+| `wgft agent revoke` | Revokes an agent and reclaims its tunnel address |
+| `wgft agent warnings` | Lists warnings that hint at stolen credentials |
+| `wgft agent dismiss-warning` | Dismisses a warning once it is confirmed legitimate |
+| `wgft rule add` | Adds a forwarding rule for a TCP or UDP port or port range |
+| `wgft rule ls` | Lists rules with their limits and drop counts |
+| `wgft rule rm` | Deletes rules |
+| `wgft rule enable`<br>`wgft rule disable` | Turns a rule on or off without deleting it |
+| `wgft rule set` | Changes the group or note of a rule |
+| `wgft rule deny add`<br>`wgft rule deny rm` | Edits the list of sources a rule drops. Open sessions are cut at once |
+| `wgft rule allow add`<br>`wgft rule allow rm` | Edits the list of sources a rule accepts. While it is empty, every source is accepted |
+| `wgft rule rate per-source`<br>`wgft rule rate new-flow`<br>`wgft rule rate packet` | Sets or clears a rate limit, for example `10/second`, or `none` |
+| `wgft rule split`<br>`wgft rule merge` | Splits a port-range rule in two or joins two adjacent rules, keeping sessions up |
+| `wgft rule import` | Replaces the whole rule set with a JSON file |
+
+### Commands run on the agent side
+
+Run these on the home side, as the user the agent runs as.
+
+| Command | What it does |
+|---|---|
+| `wgft agent run` | Runs the agent. Registers with `WGFT_JOIN` on the first start |
+| `wgft agent pubkey` | Prints the agent's WireGuard public key |
+| `wgft agent rotate-key` | Replaces the agent's WireGuard key pair |
+
 ## Status
 
 Alpha, v0.2.0. Verified on the author's own VPS and home network, in kernel mode: UDP and TCP reachable from outside, registration through NAT, recovery by re-registration, automatic recovery after a VPS reboot, and teardown. The reboot cost under 30 seconds of downtime. A home line with a path MTU of 1460 works with the default tunnel MTU of 1420: the outer packets are fragmented on the way and none were lost. Verified only in the development lab so far: the userspace mode, including the server container, and the unprivileged systemd unit. Not yet verified anywhere: the Web UI over a real Tailscale network. The agent also builds for Windows and macOS, but it has not been run there, so those binaries are not part of the releases.
 
 ## Documentation
 
+- [docs/cli.md](docs/cli.md) - the command reference, generated from the help of every command
 - [docs/design.md](docs/design.md) - the design document, with every decision and its reasoning
 - [docs/architecture.md](docs/architecture.md) - the package layout and the path one operation takes through it
 - [CLAUDE.md](CLAUDE.md) - project conventions: the developer lab, how tests are organized, the CI checks, and how documents are written

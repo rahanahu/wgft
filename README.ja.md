@@ -277,12 +277,53 @@ sudo wgft server teardown --purge --yes  # 実行する。--purge を付ける�
 
 `--purge` を付けなければ鍵と証明書が残るため、server を起動し直せば同じ鍵で復旧し、agent は再接続するだけで済みます。`--purge` で消した後に server を起動し直すと、鍵と証明書が新しくなるため、登録済みの agent は再接続できず、証明書の不一致で接続を試み続けます。そのときは新しい接続文字列を発行し、`WGFT_JOIN` に設定して agent を起動し直します。agent は証明書が変わったことを検出して登録をやり直し、認証情報の `agent.json` と WireGuard の鍵はそのまま使い続けます。ルールは server 側で消えているので、追加し直します。自宅側を丸ごと消すなら `docker compose -f deploy/agent.compose.yaml down -v` で、認証情報を含めて削除できます。
 
+## コマンド一覧
+
+server と agent は同じバイナリです。各コマンドの説明と使用例は `wgft <コマンド> --help` で表示でき、同じ内容を 1 ページにまとめたものが [docs/cli.md](docs/cli.md) にあります。ヘルプと docs/cli.md は英語です。`wgft version` はどちらの側でも版数を表示します。
+
+### server 側で実行するコマンド
+
+VPS 上で実行します。agent とルールを管理するコマンドは、稼働中の server の管理 API を呼び出すので、root として実行します。コンテナで動かしている場合は、Docker の節にあるとおり `docker compose exec` でコンテナの中で実行します。
+
+| コマンド | 内容 |
+|---|---|
+| `wgft server run` | server を起動します。systemd の unit とコンテナイメージはこのコマンドを実行します |
+| `wgft server check` | 設定と環境を検査します。起動も変更もしません |
+| `wgft server nft` | server が適用している nftables のテーブルを表示します |
+| `wgft server teardown` | 停止した server が作ったものを撤去します。`--purge` を付けると鍵、ルール、agent の登録も削除します |
+| `wgft agent join-string` | 新しい agent 用に、1 回だけ使える接続文字列を発行します |
+| `wgft agent ls` | agent の一覧と、stream とトンネルの状態を表示します |
+| `wgft agent revoke` | agent を無効化し、トンネルのアドレスを回収します |
+| `wgft agent warnings` | 認証情報の盗用が疑われる警告を一覧します |
+| `wgft agent dismiss-warning` | 正当な変化だと確認できた警告を消します |
+| `wgft rule add` | TCP か UDP のポート、またはポート範囲の転送ルールを追加します |
+| `wgft rule ls` | ルールの一覧を、制限の設定と drop の累計とともに表示します |
+| `wgft rule rm` | ルールを削除します |
+| `wgft rule enable`<br>`wgft rule disable` | ルールを削除せずに有効化、無効化します |
+| `wgft rule set` | ルールのグループとメモを変更します |
+| `wgft rule deny add`<br>`wgft rule deny rm` | ルールが拒否する接続元の一覧を編集します。通信中のセッションも即座に切れます |
+| `wgft rule allow add`<br>`wgft rule allow rm` | ルールが許可する接続元の一覧を編集します。一覧が空の間は、すべての接続元を許可します |
+| `wgft rule rate per-source`<br>`wgft rule rate new-flow`<br>`wgft rule rate packet` | レート制限を設定または解除します。値は `10/second` のように書き、解除は `none` です |
+| `wgft rule split`<br>`wgft rule merge` | ポート範囲のルールを 2 つに分割、または隣り合う 2 つを統合します。セッションは切れません |
+| `wgft rule import` | ルール全体を JSON ファイルの内容で置き換えます |
+
+### agent 側で実行するコマンド
+
+自宅側で、agent を動かしている利用者として実行します。
+
+| コマンド | 内容 |
+|---|---|
+| `wgft agent run` | agent を起動します。初回の起動では `WGFT_JOIN` で登録します |
+| `wgft agent pubkey` | agent の WireGuard の公開鍵を表示します |
+| `wgft agent rotate-key` | agent の WireGuard の鍵を作り直します |
+
 ## 開発状況
 
 現在はアルファ版の v0.2.0 です。作者の実機ではカーネルモードで、外部からの UDP と TCP の到達、NAT 越しの登録、再登録からの復帰、VPS の再起動からの自動復旧、撤去を確認しました。再起動時の停止は 30 秒未満でした。経路 MTU が 1460 の自宅回線でも、トンネルの MTU は既定の 1420 のままで動きます。外側のパケットは途中で分割されますが、損失はありませんでした。ユーザー空間モードと server のコンテナ、非特権で動く systemd の unit は、開発用のラボでだけ確認しています。実際の Tailscale 経由での Web UI の表示は未確認です。agent は Windows と macOS 向けにもビルドできますが、実機で動かしていないため、Releases には含めていません。
 
 ## ドキュメント
 
+- [docs/cli.md](docs/cli.md) - コマンドのリファレンスです。各コマンドのヘルプから生成しています。英語です
 - [docs/design.md](docs/design.md) - 設計書です。設計の判断とその理由を記載しています
 - [docs/architecture.md](docs/architecture.md) - パッケージの構成と、1 つの操作が通る経路を記載しています
 - [CLAUDE.md](CLAUDE.md) - 開発の約束です。ラボの立て方、テストの分け方、CI の検査、文書の書き方を記載しています

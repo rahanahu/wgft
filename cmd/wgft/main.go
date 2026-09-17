@@ -35,6 +35,7 @@ func newRootCmd() *cobra.Command {
 		newRuleCmd(),
 		newVersionCmd(),
 	)
+	applyHelp(root)
 	return root
 }
 
