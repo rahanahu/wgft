@@ -525,9 +525,11 @@ wgft server nft
 2. VPS のファイアウォールで WireGuard とエージェント用 API のポートを開ける。これは手作業で、`vpsd` は行わない
 3. 起動ログに 6.1 節の警告(forward の `policy drop` など)が出ていれば、提示された行を 1 回だけ足す
 
+同梱の systemd の unit は `vpsd` を root では動かさない。`DynamicUser=yes` で systemd がサービスの寿命だけ非特権の利用者を割り当て、`AmbientCapabilities` で `CAP_NET_ADMIN` と `CAP_NET_BIND_SERVICE` の 2 つだけを渡す。前者はカーネルの WireGuard、nftables、conntrack の netlink と `net.ipv4.ip_forward` の書き込みに、後者はプロキシモードの 1024 未満の待ち受けに使う。ネットワーク系の sysctl は `CAP_NET_ADMIN` があれば root でなくても書けるので、6.1 節の「`vpsd` 自身が 1 にする」はそのまま成り立つ。`ProtectKernelTunables` は `/proc/sys` を読み取り専用にして書き込みを妨げるので付けない。root のままで `/proc/sys` を書き込み可にすると、侵害されたときに root 所有のほかの sysctl まで書き換えられるので、非 root にする意味はここにある。ファイルシステムは `ProtectSystem=strict` で読み取り専用にし、書けるのはデータの置き場と実行時ディレクトリだけにする。システムコールは `@system-service` から `@privileged` と `@resources` を除いたものに絞る。データの置き場の実体は `/var/lib/private/wgft` になり、`/var/lib/wgft` はそこへのシンボリックリンクになる。root で動く旧い unit が作ったディレクトリは、最初の起動で systemd が移して所有者を付け替えるので、unit を差し替えて再起動するだけで更新でき、サーバ鍵も登録済みのエージェントも引き継がれる。root からは従来どおり読めるので、CLI と `teardown` の使い方は変わらない。`systemd-analyze security` の値は 8.6 から 2.0 になった(systemd 252)。
+
 管理 UI と CLI への入り方(11 節)。どの経路でもパスワードの入力は無い:
 
-- VPS 上の CLI:`sudo wgft rule add ...` のように root で叩く。ソケットが root 所有なので、sudo がそのまま認証になる
+- VPS 上の CLI:`sudo wgft rule add ...` のように root で叩く。ソケットを開けるのは root と `vpsd` 自身だけなので、sudo がそのまま認証になる
 - Tailscale を使う場合(推奨):`--admin-tailscale` を付けて起動し、tailnet 内の端末から `http://<VPS の tailnet 名>:8686/` を開く
 - Tailscale が無い、または tailnet が落ちたとき:SSH でソケットを手元に引く。`~/.ssh/config` の該当ホストに `LocalForward 8686 /run/wgft/admin.sock` を書いておけば、`ssh vps` を張るだけで `http://localhost:8686/` が開く
 
@@ -586,7 +588,7 @@ VPS 側の無効化でピア・conntrack・割り当てアドレスを回収す�
 
 管理用 API と Web UI の待ち受け先は `--admin` で選ぶ。独自のパスワードは持たない。ユーザー空間モード(6.3 節)では、転送対象の公開ポートで `vpsd` の Go のコードがインターネットに直接さらされる。カーネルモードではその面はカーネルの DNAT だけで、`vpsd` 自身が受けるのはエージェント用 API とプロキシモードのポートに限られる。
 
-- Unix ソケット(既定 `unix:///run/wgft/admin.sock`、0600、root 所有):VPS 上の CLI は root で直接叩く。手元のブラウザからは SSH のポート転送でソケットを引く(10.3 節)。到達できるのは「VPS の root」と「SSH でその root に入れる人」だけで、どちらも SQLite と wg の鍵を読める立場なので、パスワードを足しても守れる範囲は広がらない
+- Unix ソケット(既定 `unix:///run/wgft/admin.sock`、0600。systemd の unit では `vpsd` の実行利用者が所有し、置き場のディレクトリは 0700 なので、開けるのは root と `vpsd` 自身だけ):VPS 上の CLI は root で直接叩く。手元のブラウザからは SSH のポート転送でソケットを引く(10.3 節)。到達できるのは「VPS の root」と「SSH でその root に入れる人」だけで、どちらも SQLite と wg の鍵を読める立場なので、パスワードを足しても守れる範囲は広がらない
 - `--admin-tailscale`:加えて Tailscale のアドレスでも待ち受ける。起動時にまず `tailscale status --json` を実行し、`Self.TailscaleIPs` の最初の IPv4 アドレスと `Self.DNSName`(MagicDNS 名)を使う。`tailscale` コマンドが PATH にない、または失敗したときは、名前が `tailscale` で始まるインタフェース(Linux 版 Tailscale の既定は `tailscale0`)にある `100.64.0.0/10` のアドレスを使う。`100.64.0.0/10` は Tailscale 専用の帯ではなく VPS 事業者が内部網に使っていることがあるため、この帯を持つだけの他のインタフェースは使わない。検出した MagicDNS 名は `Host` の許可リストに自動で加わり、`--admin-host` は追加の名前のためだけに使う。認証、TLS、総当たり対策を Tailscale に任せられ、`vpsd` 側に追加の実装が要らないので、外から触りたい場合はこれを推奨する。tailnet が落ちても SSH で代替できる
 - TCP(`--admin 127.0.0.1:8686` など):Unix ソケットの転送に対応しない SSH クライアントや、ラボ向けに残す。ループバック以外の TCP アドレスに開いた場合、`vpsd` は起動ログに警告を出すだけで止めない
 - `public`:インターネットに公開する。ACME による正規の TLS 証明書、パスキーか TOTP、ログイン試行のレート制限、セッション期限と CSRF 対策を `vpsd` に実装したうえでなければ選べない。v1 では実装しない(13 節)
@@ -675,3 +677,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - `ip_forward` の警告をルールの件数で弱めない(2026-09-18):6.1 節は、カーネルモードのルールが 0 件なら `ip_forward` を書けなかった警告を情報レベルにとどめるとしていたが、実装は常に警告で、Finding に重大度の区別もない。Findings は起動時に 1 回だけ作り、ルールは起動後に追加できるので、実装の挙動を正として記述を改めた
 - エージェント用 API の HTTP/2 を無効化(2026-09-18):11 節に、TLS 1.2 以上かつ HTTP/1.1 だけで応じること、鍵交換の曲線は Go の既定に従うことを追記
 - conntrack の表の上限を `server check` で表示(2026-09-18):6.1 節に、`nf_conntrack_max` は `vpsd` が変えないこと、`server check` が件数と上限を表示して 65536 未満なら警告すること、レート制限で落としたフローは表を消費しないことを追記
+- systemd の unit を非 root とサンドボックスに変更(2026-09-18):10.3 節に、`DynamicUser=yes` と 2 つの capability で動かすこと、`ProtectKernelTunables` を付けない理由、旧い root の unit からの更新でデータが引き継がれることを追記。11 節と 10.3 節のソケットの所有者の記述を追随。ラボの VM で実際の systemd の unit として起動し、カーネル DNAT の TCP と UDP、443 のプロキシ、`ip_forward` の書き込み、deny、再起動、旧 unit からの更新、`ProtectKernelModules` の下での WireGuard モジュールの自動ロード、撤去を確認。コンテナの compose には `cap_drop: [ALL]`、`no-new-privileges`、`read_only` を追加し、Docker で登録、転送、443 の待ち受けを確認

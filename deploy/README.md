@@ -4,7 +4,7 @@ The step-by-step procedure is in the [README](../README.md) (Setup section). Thi
 
 | File | Purpose |
 | --- | --- |
-| `server.service` | systemd unit for the VPS-side `server` (`ExecStart=wgft server run`). Runs as root (kernel WireGuard + nftables) |
+| `server.service` | systemd unit for the VPS-side `server` (`ExecStart=wgft server run`). Runs as an unprivileged `DynamicUser=` with `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`, sandboxed (kernel WireGuard + nftables) |
 | `server.env.example` | Template for `/etc/wgft/server.env`: site-specific settings such as `WGFT_MODE` and `WGFT_WG_ENDPOINT` (`WGFT_*` format) |
 | `Dockerfile.server` | Container for the server in the userspace mode (docs/design.md section 6.3). Static binary, unprivileged, no nftables, runs as uid 65532 |
 | `server.compose.yaml` | Docker Compose for the server: `WGFT_WG_ENDPOINT` and the state volume. Pulls `ghcr.io/rahanahu/wgft-server` (amd64 and arm64, built from `Dockerfile.server` by the release workflow); `build:` is there, commented out, for building from source |

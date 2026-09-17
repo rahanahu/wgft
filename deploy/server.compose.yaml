@@ -36,6 +36,11 @@ services:
     #   dockerfile: deploy/Dockerfile.server
     container_name: wgft-server
     restart: unless-stopped
+    # No capabilities, no privilege escalation, read-only root file system. The only writable
+    # path is the state volume.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
     environment:
       WGFT_WG_ENDPOINT: "REPLACE_WITH_vps.example.com:51820"
     ports:

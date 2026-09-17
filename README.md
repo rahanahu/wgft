@@ -291,7 +291,7 @@ Alpha, v0.1.1. Verified on the author's own VPS and home network: UDP and TCP re
 
 ## Security
 
-The server runs as root on the VPS. Only three things face the public IP: WireGuard, the agent API, and the forwarded ports. The admin API is never exposed. To report a vulnerability, see [SECURITY.md](SECURITY.md).
+Installing the server needs root on the VPS, but under the provided systemd unit the process itself runs as an unprivileged user that systemd allocates, holding only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`. Only three things face the public IP: WireGuard, the agent API, and the forwarded ports. The admin API is never exposed. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 

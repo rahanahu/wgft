@@ -289,7 +289,7 @@ sudo wgft server teardown --purge --yes  # 実行する。--purge を付ける�
 
 ## セキュリティ
 
-VPS 側は root 権限で動きます。公開 IP で待ち受けるのは、WireGuard、エージェント用 API、転送対象のポートの 3 つだけです。管理 API は公開しません。脆弱性の報告は [SECURITY.md](SECURITY.md) を参照してください。
+VPS 側の導入には root 権限が必要です。ただし、同梱の systemd の unit では、プロセス自体は systemd が割り当てる非特権の利用者で動き、持つ権限は `CAP_NET_ADMIN` と `CAP_NET_BIND_SERVICE` だけです。公開 IP で待ち受けるのは、WireGuard、エージェント用 API、転送対象のポートの 3 つだけです。管理 API は公開しません。脆弱性の報告は [SECURITY.md](SECURITY.md) を参照してください。
 
 ## ライセンス
 

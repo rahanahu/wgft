@@ -29,6 +29,11 @@ services:
     #   dockerfile: deploy/Dockerfile.agent
     container_name: wgft-agent
     restart: unless-stopped
+    # No capabilities, no privilege escalation, read-only root file system. The only writable
+    # path is the state volume.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
     environment:
       WGFT_JOIN: "REPLACE_WITH_JOIN_STRING"
       WGFT_NAME: ""
