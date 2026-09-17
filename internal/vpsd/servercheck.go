@@ -52,6 +52,7 @@ func Check(opts Options, out io.Writer) error {
 		fmt.Fprintln(out, "server database: not present yet, first run; skipping check against records")
 		return nil
 	}
+	printDBModes(out, opts.DBPath)
 	st, err := store.Open(opts.DBPath)
 	if err != nil {
 		fmt.Fprintf(out, "server database: cannot open: %v\n", err)
@@ -68,6 +69,20 @@ func Check(opts Options, out io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func printDBModes(out io.Writer, path string) {
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		fi, err := os.Stat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			fmt.Fprintf(out, "server database file mode: cannot read %s: %v\n", p, err)
+			continue
+		}
+		fmt.Fprintf(out, "server database file mode: %s is %04o\n", p, fi.Mode().Perm())
+	}
 }
 
 // checkMeta は meta の記録と現在値を照合して 1 行出す。

@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 
 	_ "modernc.org/sqlite"
 )
@@ -80,6 +82,13 @@ var migrations = []string{
 
 // Open はファイルを開き(なければ作り)、スキーマを最新にする。
 func Open(path string) (*Store, error) {
+	created, err := ensureCreated(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureMode(path, created); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -97,7 +106,49 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	for _, p := range []string{path + "-wal", path + "-shm"} {
+		if err := ensureMode(p, false); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+func ensureCreated(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, err
+	}
+	if err := f.Close(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func ensureMode(path string, created bool) error {
+	fi, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Perm() == 0o600 {
+		return nil
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	if !created {
+		log.Printf("server database: tightened mode of %s from %04o to 0600", path, fi.Mode().Perm())
+	}
+	return nil
 }
 
 // Close は SQLite を閉じる。
