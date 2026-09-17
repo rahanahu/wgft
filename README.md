@@ -28,9 +28,9 @@ wgft is aimed at workloads where arbitrary TCP/UDP forwarding matters, especiall
 
 wgft was inspired by Pangolin. Using Pangolin showed how convenient it can be to expose services on a home network through a public VPS.
 
-The author's main use case is arbitrary TCP/UDP forwarding, especially game servers. Some IPv4-over-IPv6 services commonly used in Japan share public IPv4 addresses or restrict the available inbound port set, so arbitrary inbound IPv4 ports may not be available at home. A public VPS and WireGuard provide a way around that restriction, but maintaining WireGuard plus NAT and forwarding rules by hand is tedious.
+The author's main use case is arbitrary TCP/UDP forwarding, especially game servers. Some IPv4-over-IPv6 services commonly used in Japan share public IPv4 addresses or restrict the available inbound port set, so arbitrary inbound IPv4 ports may not be available at home.
 
-wgft is not intended to replace Pangolin. It focuses on the narrower part needed for this use case: L4 TCP/UDP forwarding and management of the WireGuard and nftables forwarding state behind it.
+While using Pangolin, the author ran into problems with UDP forwarding through Traefik for game-server traffic and wanted a more direct WireGuard-and-nftables path. Maintaining the NAT and forwarding rules for that setup by hand was tedious, though. wgft is not intended to replace Pangolin; it focuses on the narrower part needed for this use case: L4 TCP/UDP forwarding and management of the WireGuard and nftables forwarding state behind it.
 
 ## Features
 
