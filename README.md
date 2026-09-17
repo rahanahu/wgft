@@ -281,7 +281,7 @@ Without `--purge`, keys and certificates stay, so restarting the server brings i
 
 ## Status
 
-Alpha, v0.1.1. Verified on the author's own VPS and home network: UDP and TCP reachable from outside, registration through NAT, recovery by re-registration, automatic recovery after a VPS reboot, and teardown. The reboot cost under 30 seconds of downtime. Not yet verified: links with a small MTU, and the Web UI over a real Tailscale network. v0.2.0 is planned to add a user-space mode that runs the VPS side without root.
+Alpha, v0.2.0. Verified on the author's own VPS and home network, in kernel mode: UDP and TCP reachable from outside, registration through NAT, recovery by re-registration, automatic recovery after a VPS reboot, and teardown. The reboot cost under 30 seconds of downtime. A home line with a path MTU of 1460 works with the default tunnel MTU of 1420: the outer packets are fragmented on the way and none were lost. Verified only in the development lab so far: the userspace mode, including the server container, and the unprivileged systemd unit. Not yet verified anywhere: the Web UI over a real Tailscale network. The agent also builds for Windows and macOS, but it has not been run there, so those binaries are not part of the releases.
 
 ## Documentation
 
