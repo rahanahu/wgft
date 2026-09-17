@@ -1,5 +1,5 @@
 [Unit]
-Description=wgft server (kernel WireGuard + nftables forwarder)
+Description=wgft server
 Documentation=https://github.com/rahanahu/wgft#readme
 After=network-online.target nss-lookup.target
 Wants=network-online.target
@@ -15,12 +15,12 @@ RestartSec=2
 # A refusal caused by configuration (someone else's WireGuard interface, a port or address
 # clash; exit code 3) does not go away on restart, so do not loop on it.
 RestartPreventExitStatus=3
-# Optional, off by default: a memory cap for this service. The flow caps and the memory soft limit
-# (printed at startup, 216 MiB with the default caps) keep the process below it. If it grows past
-# the cap anyway, the kernel kills this service and nothing else on the VPS, and Restart= above
-# brings it back. Keep the cap above the soft limit. In the lab, in userspace mode with the default
-# flow caps, 300M held under a held-flow attack; a deliberately small 60M was OOM-killed after
-# 8 s of the attack and restarted 2 s later.
+# Optional, off by default: a hard cgroup memory cap for this service. wgft also sets a Go runtime
+# soft limit derived from the flow caps (printed at startup; 216 MiB with the default caps), but a
+# soft limit is not a hard RSS ceiling. If you enable MemoryMax=, keep it above the printed soft
+# limit. In the lab, userspace mode with the default flow caps stayed within 300M under a held-flow
+# attack; a deliberately small 60M limit OOM-killed the service after 8 s and Restart= brought it
+# back 2 s later.
 #MemoryMax=300M
 #MemorySwapMax=0
 
