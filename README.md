@@ -49,8 +49,10 @@ wgft therefore stays deliberately narrow: WireGuard for the tunnel, nftables for
 | Root on the VPS | Required | Not required |
 | Kernel and nftables | Kernel 6.1+, nftables 1.0.6+ | None |
 | Forwarding path | Kernel WireGuard + nftables DNAT | wireguard-go + userspace netstack |
-| If `wgft server` stops | Existing forwarding continues | Forwarding stops |
+| If the wgft process stops or crashes | Configured forwarding continues | Forwarding stops |
 | Rate-limit evaluation | Kernel | wgft process |
+
+In kernel mode, forwarding stays in the kernel if the wgft process crashes or restarts after startup. A VPS reboot clears that runtime state, so wgft must start again to restore forwarding. Keep the provided systemd service enabled for normal operation so reboot recovery happens automatically.
 
 Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container.
 
