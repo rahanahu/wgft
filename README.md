@@ -150,7 +150,7 @@ wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e
 
 The server can also run as a container in the userspace mode, instead of the systemd unit above. It needs no root, no kernel WireGuard, and no nftables. `vpsd` holds the tunnel in wireguard-go and a netstack inside its own process, the same design the agent already uses. See docs/design.md section 6.3 for the full comparison with kernel mode; the short version is that stopping the container stops forwarding, where kernel mode leaves wg0 and the nftables table running through a restart. TCP is terminated inside the wgft process rather than passed through unchanged. Flood resistance is that of any userspace proxy. `packet_rate` limits UDP datagrams only, not TCP.
 
-Clone the repository for the compose file, edit `WGFT_WG_ENDPOINT` in [deploy/server.compose.yaml](deploy/server.compose.yaml), and bring it up.
+Clone the repository for the compose file, edit `WGFT_WG_ENDPOINT` in [deploy/server.compose.yaml](deploy/server.compose.yaml), and bring it up. The compose file publishes ports with `ports:`, and every forwarded port has to be listed there. `network_mode: host` publishes everything without editing the list, but ports below 1024 are then out of reach, because the container keeps the host's restriction on them. With the `ports:` list, 443 works. Both were checked with the image built locally.
 
 ```sh
 git clone https://github.com/rahanahu/wgft.git && cd wgft

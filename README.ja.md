@@ -148,7 +148,7 @@ wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e
 
 server は、上記の systemd の代わりに、ユーザー空間モードのコンテナとしても起動できます。root 権限もカーネルの WireGuard も nftables も不要です。`vpsd` は、自宅側の agent と同じ構成で、wireguard-go と netstack によるトンネルを自分のプロセス内に持ちます。カーネルモードとの違いは docs/design.md の 6.3 節にまとめてあります。要点は次のとおりです。コンテナを止めると転送も止まります。カーネルモードは wg0 とテーブルが再起動をまたいで残ります。TCP は wgft のプロセスが終端し、そのまま素通しにはなりません。フラッド耐性はユーザー空間の一般的なプロキシと同じです。`packet_rate` は UDP にだけ効き、TCP には効きません。
 
-compose ファイルを使うためにリポジトリを取得し、[deploy/server.compose.yaml](deploy/server.compose.yaml) の `WGFT_WG_ENDPOINT` を書き換えて起動します。
+compose ファイルを使うためにリポジトリを取得し、[deploy/server.compose.yaml](deploy/server.compose.yaml) の `WGFT_WG_ENDPOINT` を書き換えて起動します。compose ファイルは `ports:` でポートを公開するため、転送するポートはすべてそこに並べます。`network_mode: host` にすると並べずに済みますが、コンテナがホストの制限を引き継ぐため 1024 未満のポートは使えません。`ports:` の形なら 443 も使えます。どちらも手元でビルドした像で確かめました。
 
 ```sh
 git clone https://github.com/rahanahu/wgft.git && cd wgft

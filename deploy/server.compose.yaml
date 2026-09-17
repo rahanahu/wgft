@@ -17,7 +17,10 @@
 #   --tcp) needs the same: add it below or use network_mode: host.
 # - The simplest way to publish an arbitrary set of forwarded ports without editing this file
 #   for every rule is network_mode: host, commented out below. It also removes any doubt about
-#   Docker's own bridge networking getting in the way of the userspace dataplane.
+#   Docker's own bridge networking getting in the way of the userspace dataplane. Its cost:
+#   the container then runs in the host's network namespace, where the nonroot user cannot bind
+#   ports below 1024 (verified: 443 gives "bind: permission denied"). With the bridge network
+#   and the ports: list, 443 and other low ports work (verified).
 # - WGFT_WG_ENDPOINT is required: the host:port that agents dial, this VPS's address plus the
 #   WireGuard UDP port. Edit it before the first start.
 # - Rules and agents are managed with the CLI inside the running container, which reads the same
@@ -43,7 +46,8 @@ services:
     volumes:
       - wgft-server-state:/var/lib/wgft
     # Publishes every port instead of listing them above; the simplest choice when rules change
-    # often. Remove the ports: list above if you use this.
+    # often. Remove the ports: list above if you use this. Ports below 1024 are not available in
+    # this mode (see the note at the top).
     # network_mode: host
 
 volumes:
