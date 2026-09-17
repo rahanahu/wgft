@@ -80,6 +80,8 @@ sudo wgft server run
 
 Open UDP 51820 and TCP 8443 on the VPS firewall. `wgft server check` also prints any forwarding exceptions required by an existing firewall.
 
+Kernel mode requires IPv4 forwarding. wgft sets `net.ipv4.ip_forward=1` when needed; `wgft server teardown` reports how to revert it.
+
 In another VPS shell, create a one-time join string:
 
 ```sh
