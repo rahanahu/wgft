@@ -69,7 +69,7 @@ Pick Pangolin when you want to expose web services with authentication and certi
 | When `wgft server` stops | The WireGuard interface and the nftables table stay, so forwarding continues | Forwarding stops |
 | Where limits are evaluated | In the kernel. Excess traffic never reaches the wgft process | In the wgft process. Dropping excess traffic costs CPU too |
 
-With root on the VPS, use kernel mode. Userspace mode is for a VPS without root, for a kernel without the WireGuard module, and for setups that should live entirely in a container. In userspace mode the `packet` rate limit applies to UDP only. In step 2 of the setup, the systemd path is kernel mode and the Docker path is userspace mode. [docs/design.md](docs/design.md) section 6.3 has the design-level differences.
+With root on the VPS, use kernel mode. Userspace mode is for a VPS without root, for a kernel without the WireGuard module, and for setups that should live entirely in a container. In userspace mode the `packet` rate limit applies to UDP only. Step 2 of the setup has a part for each mode. [docs/design.md](docs/design.md) section 6.3 has the design-level differences.
 
 ## Web UI
 
@@ -107,7 +107,11 @@ With Go 1.26 or newer, `go install github.com/rahanahu/wgft/cmd/wgft@latest` wor
 
 **2. Set up the server on the VPS**
 
-wgft is configured through `WGFT_*` environment variables, and `/etc/wgft/server.env` is read at startup. [deploy/server.env.example](deploy/server.env.example) lists every key and marks the required ones. The forwarding mode and the address agents connect to are enough to get started.
+The steps depend on the [mode](#modes). With root on the VPS, use kernel mode; without root, or to run in a container, use userspace mode. Both end with issuing a join string, which step 3 needs.
+
+wgft is configured through `WGFT_*` environment variables, and `/etc/wgft/server.env` is read at startup. [deploy/server.env.example](deploy/server.env.example) lists every key and marks the required ones. The mode and the address agents connect to are enough to get started.
+
+*Kernel mode*
 
 ```sh
 sudo install -m 0755 wgft-linux-amd64 /usr/local/bin/wgft
@@ -149,6 +153,38 @@ sudo systemctl enable --now wgft
 
 To try it without a service, `sudo wgft server run` starts it in place.
 
+*Userspace mode*
+
+There are three ways to run userspace mode: as a systemd service, directly as an ordinary user, or in Docker. In each of them, open UDP 51820 for WireGuard, TCP 8443 for the agent API, and the forwarded ports in the firewall. Restarting `wgft server` stops forwarding until the tunnel is up again; in the lab that took 15 seconds.
+
+As a systemd service, follow the kernel mode steps and change only the mode in `server.env`. The unit is the same. `wgft server check` then reports that nftables is not used.
+
+```sh
+printf 'WGFT_MODE=userspace\nWGFT_WG_ENDPOINT=vps.example.com:51820\n' | sudo tee /etc/wgft/server.env
+```
+
+On a VPS without root, keep the settings and the data in a directory of your own and start the server as your user. The admin API socket goes into the same directory. Ports below 1024 are out of reach this way. From here on, `--config ~/wgft/server.env` replaces `sudo` in every command.
+
+```sh
+install -d -m 0700 ~/wgft
+printf 'WGFT_MODE=userspace\nWGFT_WG_ENDPOINT=vps.example.com:51820\nWGFT_DATA_DIR=%s/wgft\nWGFT_ADMIN=unix://%s/wgft/admin.sock\n' "$HOME" "$HOME" > ~/wgft/server.env
+chmod 0600 ~/wgft/server.env
+wgft server run --config ~/wgft/server.env
+```
+
+In Docker, the image has `WGFT_MODE=userspace` set, and userspace mode is the only one a container can run. Clone the repository for the compose file, edit `WGFT_WG_ENDPOINT` in [deploy/server.compose.yaml](deploy/server.compose.yaml), and bring it up. The compose file publishes ports with `ports:`, and every forwarded port has to be listed there. `network_mode: host` publishes everything without editing the list, but ports below 1024 are then out of reach, because the container keeps the host's restriction on them. With the `ports:` list, 443 works. Both were checked with the image built locally.
+
+```sh
+git clone https://github.com/rahanahu/wgft.git && cd wgft
+# edit this line in deploy/server.compose.yaml
+#   WGFT_WG_ENDPOINT: "REPLACE_WITH_vps.example.com:51820"  -> this VPS's address and WireGuard port
+docker compose -f deploy/server.compose.yaml up -d
+```
+
+The CLI runs inside the container, where it reads the same `WGFT_ADMIN` as the server and reaches the admin socket in the state volume directly. From here on, `docker compose -f deploy/server.compose.yaml exec wgft-server` replaces `sudo` in front of every command. The published image `ghcr.io/rahanahu/wgft-server` starts with the v0.2.0 release.
+
+*Issue a join string*
+
 Finally, issue a join string for the home agent:
 
 ```sh
@@ -162,27 +198,6 @@ wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e
 ```
 
 Once the server is running, the [Web UI](#web-ui) can take the place of the commands. To issue a join string, choose "+ Add agent" on the dashboard, enter the name and generate it. Adding the rules of step 4 is "+ Add rule". Enabling, disabling and deleting rules, editing their group and note, the connection test for TCP rules, revoking an agent and dismissing warnings are available there as well. The deny and allow lists, the rate limits, splitting and merging rules, and replacing all rules from JSON are set with the commands only; the Web UI shows their values and the drop counts.
-
-*Docker*
-
-The server can also run as a container in userspace mode, instead of the systemd unit above. The image has `WGFT_MODE=userspace` set. It needs no root, no kernel WireGuard, and no nftables. [Modes](#modes) compares it with kernel mode.
-
-Clone the repository for the compose file, edit `WGFT_WG_ENDPOINT` in [deploy/server.compose.yaml](deploy/server.compose.yaml), and bring it up. The compose file publishes ports with `ports:`, and every forwarded port has to be listed there. `network_mode: host` publishes everything without editing the list, but ports below 1024 are then out of reach, because the container keeps the host's restriction on them. With the `ports:` list, 443 works. Both were checked with the image built locally.
-
-```sh
-git clone https://github.com/rahanahu/wgft.git && cd wgft
-# edit this line in deploy/server.compose.yaml
-#   WGFT_WG_ENDPOINT: "REPLACE_WITH_vps.example.com:51820"  -> this VPS's address and WireGuard port
-docker compose -f deploy/server.compose.yaml up -d
-```
-
-The CLI runs inside the container, where it reads the same `WGFT_ADMIN` as the server and reaches the admin socket in the state volume directly. From here on, `docker compose exec` replaces `sudo` in front of every command, including the join string above.
-
-```sh
-docker compose -f deploy/server.compose.yaml exec wgft-server wgft agent join-string --name home
-```
-
-This path was verified with the image built locally with Podman; the published image at `ghcr.io/rahanahu/wgft-server` appears with the next release.
 
 **3. Set up the agent at home**
 
@@ -302,7 +317,7 @@ One binary holds both sides. `wgft <command> --help` explains every command with
 
 ### Commands run on the server side
 
-Run these on the VPS. Those that manage agents and rules talk to the admin API of the running server, so run them as root. With the container, run them inside it with `docker compose exec`, as shown in the Docker section above.
+Run these on the VPS. Those that manage agents and rules talk to the admin API of the running server, so run them as root. With the container, or with a server started as an ordinary user, put what step 2 names in place of `sudo`.
 
 | Command | What it does |
 |---|---|

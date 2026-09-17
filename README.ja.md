@@ -69,7 +69,7 @@ VPS で動かす `wgft server` には 2 つの動作モードがあります。`
 | `wgft server` を止めたとき | WireGuard のインタフェースと nftables のテーブルが残るので、転送は続きます | 転送も止まります |
 | 制限を判定する場所 | カーネルです。超過分は wgft のプロセスに届きません | wgft のプロセスです。超過分を捨てる処理にも CPU を使います |
 
-root が使える VPS では、カーネルモードを選びます。ユーザー空間モードは、root が使えない VPS、カーネルに WireGuard のモジュールが無い VPS、コンテナだけで完結させたい場合のためのモードです。ユーザー空間モードでは、`packet` のレート制限は UDP にだけ効きます。セットアップの手順 2 では、systemd で起動する手順がカーネルモード、Docker で起動する手順がユーザー空間モードです。設計上の違いの詳細は [docs/design.md](docs/design.md) の 6.3 節にあります。
+root が使える VPS では、カーネルモードを選びます。ユーザー空間モードは、root が使えない VPS、カーネルに WireGuard のモジュールが無い VPS、コンテナだけで完結させたい場合のためのモードです。ユーザー空間モードでは、`packet` のレート制限は UDP にだけ効きます。セットアップの手順 2 は、モードごとに分けて書いてあります。設計上の違いの詳細は [docs/design.md](docs/design.md) の 6.3 節にあります。
 
 ## Web UI
 
@@ -107,7 +107,11 @@ Go 1.26 以上があれば、`go install github.com/rahanahu/wgft/cmd/wgft@lates
 
 **2. VPS に server を配置する**
 
-設定は `WGFT_*` の環境変数で行います。`/etc/wgft/server.env` に書いておくと起動時に読み込まれます。項目の一覧と必須の項目は [deploy/server.env.example](deploy/server.env.example) を参照してください。転送方式と、エージェントが接続する VPS のアドレスを設定すれば起動できます。
+配置の手順は[動作モード](#動作モード)で分かれます。root が使える VPS ではカーネルモード、使えない VPS やコンテナで動かしたい場合はユーザー空間モードを選びます。どちらの手順も、最後に接続文字列を発行して手順 3 へ進みます。
+
+設定は `WGFT_*` の環境変数で行います。`/etc/wgft/server.env` に書いておくと起動時に読み込まれます。項目の一覧と必須の項目は [deploy/server.env.example](deploy/server.env.example) を参照してください。動作モードと、エージェントが接続する VPS のアドレスを設定すれば起動できます。
+
+*カーネルモードで配置する*
 
 ```sh
 sudo install -m 0755 wgft-linux-amd64 /usr/local/bin/wgft
@@ -124,7 +128,7 @@ sudo wgft server check
 
 `check` は次の 3 つを報告します。
 
-- 有効な設定 (転送方式、インタフェース名、WireGuard のポート、アドレス帯) と、前回の起動で記録した値との一致
+- 有効な設定 (動作モード、インタフェース名、WireGuard のポート、アドレス帯) と、前回の起動で記録した値との一致
 - 別の名前で残っている、同じサーバ鍵を持つ WireGuard インタフェース (`WGFT_WG_INTERFACE` を変えた後に残ります)
 - 既存のファイアウォールに追加が必要な行。forward チェーンが `policy drop` の環境 (ufw や Docker を導入した VPS では既定でこの状態です) では、wgft の転送を通すための行を表示します。この行はポートに依存しないため、一度追加すれば、以後ルールを増やしても追加は不要です
 
@@ -147,6 +151,38 @@ sudo systemctl enable --now wgft
 
 常駐させずに試す場合は、`sudo wgft server run` でそのまま起動できます。
 
+*ユーザー空間モードで配置する*
+
+ユーザー空間モードには、systemd で動かす、利用者の権限で直接起動する、Docker で動かす、の 3 通りがあります。どの場合も、WireGuard の UDP 51820、エージェント用 API の TCP 8443、転送するポートをファイアウォールで開けます。`wgft server` を再起動すると、トンネルが張り直されるまで転送が止まります。ラボでは 15 秒で戻りました。
+
+systemd で動かす場合は、カーネルモードと同じ手順で、`server.env` の動作モードだけを変えます。unit も同じものを使います。`wgft server check` は nftables を使わない旨を表示します。
+
+```sh
+printf 'WGFT_MODE=userspace\nWGFT_WG_ENDPOINT=vps.example.com:51820\n' | sudo tee /etc/wgft/server.env
+```
+
+root が使えない VPS では、設定とデータを自分のディレクトリに置き、利用者の権限で起動します。管理 API のソケットも同じディレクトリに置きます。この形では 1024 未満のポートで待ち受けられません。以降のコマンドには、`sudo` の代わりに `--config ~/wgft/server.env` を付けます。
+
+```sh
+install -d -m 0700 ~/wgft
+printf 'WGFT_MODE=userspace\nWGFT_WG_ENDPOINT=vps.example.com:51820\nWGFT_DATA_DIR=%s/wgft\nWGFT_ADMIN=unix://%s/wgft/admin.sock\n' "$HOME" "$HOME" > ~/wgft/server.env
+chmod 0600 ~/wgft/server.env
+wgft server run --config ~/wgft/server.env
+```
+
+Docker で動かす場合は、イメージに `WGFT_MODE=userspace` が設定済みです。コンテナで動かせるのはユーザー空間モードだけです。compose ファイルを使うためにリポジトリを取得し、[deploy/server.compose.yaml](deploy/server.compose.yaml) の `WGFT_WG_ENDPOINT` を書き換えて起動します。compose ファイルは `ports:` でポートを公開するため、転送するポートはすべてそこに並べます。`network_mode: host` にすると並べずに済みますが、コンテナがホストの制限を引き継ぐため 1024 未満のポートは使えません。`ports:` の形なら 443 も使えます。どちらも手元でビルドしたイメージで確かめました。
+
+```sh
+git clone https://github.com/rahanahu/wgft.git && cd wgft
+# deploy/server.compose.yaml の次の行を書き換える
+#   WGFT_WG_ENDPOINT: "REPLACE_WITH_vps.example.com:51820"  -> この VPS のアドレスと WireGuard のポート
+docker compose -f deploy/server.compose.yaml up -d
+```
+
+CLI はコンテナの中で実行します。server と同じ `WGFT_ADMIN` を読むため、状態ボリューム内の管理ソケットへ直接届きます。以降のコマンドには、`sudo` の代わりに `docker compose -f deploy/server.compose.yaml exec wgft-server` を付けます。公開イメージ `ghcr.io/rahanahu/wgft-server` は v0.2.0 のリリースから公開します。
+
+*接続文字列を発行する*
+
 最後に、自宅のエージェント用の接続文字列を発行します。
 
 ```sh
@@ -160,27 +196,6 @@ wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e
 ```
 
 server を起動した後の操作は、コマンドの代わりに [Web UI](#web-ui) でも行えます。接続文字列の発行は、ダッシュボードの「+ エージェントを追加」で名前を入力して生成します。手順 4 のルールの追加は「+ ルールを追加」です。ルールの有効化と無効化、削除、グループとメモの編集、TCP ルールの接続テスト、エージェントの無効化、警告の解除も Web UI から行えます。接続元の拒否と許可の一覧、レート制限、ルールの分割と統合、JSON からの一括置き換えは、コマンドでだけ設定できます。Web UI はそれらの設定値と drop の累計を表示します。
-
-*Docker で起動する*
-
-server は、上記の systemd の代わりに、ユーザー空間モードのコンテナとしても起動できます。イメージには `WGFT_MODE=userspace` が設定済みです。root 権限もカーネルの WireGuard も nftables も不要です。カーネルモードとの違いは[動作モード](#動作モード)の節を参照してください。
-
-compose ファイルを使うためにリポジトリを取得し、[deploy/server.compose.yaml](deploy/server.compose.yaml) の `WGFT_WG_ENDPOINT` を書き換えて起動します。compose ファイルは `ports:` でポートを公開するため、転送するポートはすべてそこに並べます。`network_mode: host` にすると並べずに済みますが、コンテナがホストの制限を引き継ぐため 1024 未満のポートは使えません。`ports:` の形なら 443 も使えます。どちらも手元でビルドしたイメージで確かめました。
-
-```sh
-git clone https://github.com/rahanahu/wgft.git && cd wgft
-# deploy/server.compose.yaml の次の行を書き換える
-#   WGFT_WG_ENDPOINT: "REPLACE_WITH_vps.example.com:51820"  -> この VPS のアドレスと WireGuard のポート
-docker compose -f deploy/server.compose.yaml up -d
-```
-
-CLI はコンテナの中で実行します。server と同じ `WGFT_ADMIN` を読むため、状態ボリューム内の管理ソケットへ直接届きます。以降のコマンドは、上の接続文字列の発行も含めて、`sudo` の代わりに `docker compose exec` を付けます。
-
-```sh
-docker compose -f deploy/server.compose.yaml exec wgft-server wgft agent join-string --name home
-```
-
-この経路は、ローカルで Podman を使ってビルドしたイメージで確認済みです。公開イメージ `ghcr.io/rahanahu/wgft-server` は次のリリースから使えます。
 
 **3. 自宅に agent を配置する**
 
@@ -300,7 +315,7 @@ server と agent は同じバイナリです。各コマンドの説明と使用
 
 ### server 側で実行するコマンド
 
-VPS 上で実行します。agent とルールを管理するコマンドは、稼働中の server の管理 API を呼び出すので、root として実行します。コンテナで動かしている場合は、Docker の節にあるとおり `docker compose exec` でコンテナの中で実行します。
+VPS 上で実行します。agent とルールを管理するコマンドは、稼働中の server の管理 API を呼び出すので、root として実行します。コンテナで動かしている場合と、利用者の権限で直接起動している場合は、手順 2 にあるとおり `sudo` の代わりの指定を付けます。
 
 | コマンド | 内容 |
 |---|---|
