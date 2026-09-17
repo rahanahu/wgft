@@ -29,6 +29,8 @@ lab/lab build                   # ホストで ./cmd/... ./tools/... を bin/ �
 lab/lab test internal/vpsd/nft  # build tag lab 付きのテストを VM の vps ns で実行(root と nft が要るゴールデンテストなど)
 lab/lab exec vps wgft server run ...  # VM では /usr/local/bin の名前で実行する(/wgft/bin を直接 exec しない。下の注意)
 lab/lab shell home              # home ns で bash
+lab/lab exec vm bash /wgft/lab/e2e.sh kernel     # 端から端までのシナリオ(登録、TCP/UDP、PROXY protocol、deny の即時反映、撤去)を PASS/FAIL で
+lab/lab exec vm bash /wgft/lab/e2e.sh userspace  # 同じシナリオをユーザー空間モード(非 root の wgftlab ユーザー)で
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
 lab/lab destroy                 # VM ごと消す
 ```
