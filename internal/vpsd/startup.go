@@ -2,6 +2,7 @@ package vpsd
 
 import (
 	"fmt"
+	"github.com/rahanahu/wgft/internal/vpsd/check"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"log"
 	"os"
@@ -48,19 +49,27 @@ func readNFTVersion() string {
 	return strings.TrimSpace(string(out))
 }
 
+// ipForwardPath は net.ipv4.ip_forward の sysctl ファイル(仕様 6.1 節)。
+const ipForwardPath = "/proc/sys/net/ipv4/ip_forward"
+
 // EnableIPForward は net.ipv4.ip_forward を確認し、1 でなければ 1 にする(仕様 6.1 節)。
 // すでに 1 なら何も書かない。書けなくても落ちず、警告して続ける。1 にした値は 0 に戻さない。
 // 0→1 にしたときは meta に日時を残し、撤去(teardown)で戻す候補として示せるようにする。
-func EnableIPForward(st *store.Store) {
-	const path = "/proc/sys/net/ipv4/ip_forward"
-	if cur, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(cur)) == "1" {
-		return // すでに 1。触らない
+// 書き込みに失敗したときは、他テーブルの policy drop と同じ流儀の Finding を返す。
+// 呼び出し側(Run)がそれをログに出す。成功時、またはすでに 1 のときは nil を返す。
+func EnableIPForward(st *store.Store) *check.Finding {
+	if cur, err := os.ReadFile(ipForwardPath); err == nil && strings.TrimSpace(string(cur)) == "1" {
+		return nil // すでに 1。触らない
 	}
-	if err := os.WriteFile(path, []byte("1\n"), 0); err != nil {
+	if err := os.WriteFile(ipForwardPath, []byte("1\n"), 0); err != nil {
 		// 読み取り専用の /proc や seccomp/LSM で塞がれている場合など。落とさず警告する。
-		log.Printf("warning: cannot set net.ipv4.ip_forward to 1 (%v); for kernel-mode forwarding you must run `sysctl -w net.ipv4.ip_forward=1` by hand", err)
-		return
+		return &check.Finding{
+			Where:   "net.ipv4.ip_forward",
+			Problem: fmt.Sprintf("is 0 and could not be set to 1 (%v); kernel-mode forwarding will not work until this is set", err),
+			Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
+		}
 	}
 	log.Printf("set net.ipv4.ip_forward to 1")
 	_ = st.SetMeta(metaIPForwardSetAt, []byte(time.Now().UTC().Format(time.RFC3339)))
+	return nil
 }

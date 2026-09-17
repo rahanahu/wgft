@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -37,6 +38,7 @@ func Check(opts Options, out io.Writer) error {
 			fmt.Fprintf(out, "  - %s\n", f)
 		}
 	}
+	checkIPForward(out)
 
 	// SQLite があれば、記録済みのモード・アドレス帯との照合と、改名の検出を出す。
 	if _, err := os.Stat(opts.DBPath); err != nil {
@@ -77,4 +79,31 @@ func checkMeta(out io.Writer, st *store.Store, key, label, want string) {
 		return
 	}
 	fmt.Fprintf(out, "warning: %s differs from the record %s; setting is %s\n", label, have, want)
+}
+
+// checkIPForward reports net.ipv4.ip_forward's current value (spec section 6.1).
+// It never writes 1: to stay a read-only check it only probes writability by
+// opening the file O_WRONLY and closing it again without writing, the same test
+// EnableIPForward's real write would face at startup.
+func checkIPForward(out io.Writer) {
+	cur, err := os.ReadFile(ipForwardPath)
+	if err != nil {
+		fmt.Fprintf(out, "ip_forward: cannot read %s: %v\n", ipForwardPath, err)
+		return
+	}
+	val := strings.TrimSpace(string(cur))
+	fmt.Fprintf(out, "ip_forward: %s\n", val)
+	if val == "1" {
+		return
+	}
+	if f, err := os.OpenFile(ipForwardPath, os.O_WRONLY, 0); err != nil {
+		finding := check.Finding{
+			Where:   "net.ipv4.ip_forward",
+			Problem: fmt.Sprintf("is %s and not writable (%v); kernel-mode forwarding needs it at 1", val, err),
+			Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
+		}
+		fmt.Fprintf(out, "  - %s\n", finding)
+	} else {
+		f.Close()
+	}
 }

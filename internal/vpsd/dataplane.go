@@ -42,7 +42,8 @@ type dataplane interface {
 	// Converge は外から入って DNAT されたフローを宣言に収束させ、消した数を返す(仕様 6.1 節)。
 	Converge(rules []ctconv.Rule, wgNet netip.Prefix) (int, error)
 	// EnableIPForward は net.ipv4.ip_forward を 1 にする(仕様 6.1 節)。
-	EnableIPForward(st *store.Store)
+	// 書き込みに失敗すると、policy drop と同じ流儀の Finding を返す(成功時とすでに 1 のときは nil)。
+	EnableIPForward(st *store.Store) *check.Finding
 	// CheckConnectivity は wg 経由でエージェントのリスナーに TCP 接続する疎通確認(仕様 10.1 節)。
 	CheckConnectivity(addr string) conncheck.Result
 }
@@ -70,7 +71,7 @@ func (k *kernelDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]neti
 func (k *kernelDataplane) Converge(rules []ctconv.Rule, wgNet netip.Prefix) (int, error) {
 	return ctconv.Converge(rules, wgNet)
 }
-func (k *kernelDataplane) EnableIPForward(st *store.Store) { EnableIPForward(st) }
+func (k *kernelDataplane) EnableIPForward(st *store.Store) *check.Finding { return EnableIPForward(st) }
 func (k *kernelDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{})
 }

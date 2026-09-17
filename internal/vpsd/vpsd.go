@@ -280,7 +280,9 @@ func Run(opts Options) error {
 	for _, f := range rep.Findings {
 		log.Printf("warning: %s", f)
 	}
-	d.dp.EnableIPForward(st)
+	if f := d.dp.EnableIPForward(st); f != nil {
+		log.Printf("warning: %s", f)
+	}
 	// 起動時に SQLite のルールを適用する(手作業で変えられたテーブルは宣言に戻る)
 	rules, err := st.Rules()
 	if err != nil {
