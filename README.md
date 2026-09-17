@@ -107,6 +107,8 @@ sudo wgft agent ls
 sudo wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group game
 ```
 
+For a port range, `--to` specifies the first destination port. This example maps VPS UDP 2456 to `192.168.1.20:2456` and UDP 2457 to `192.168.1.20:2457`.
+
 Open the forwarded port on the VPS firewall. Once the rule is active, traffic arriving at the VPS is sent through the WireGuard tunnel to the home target.
 
 ## Web UI
