@@ -61,6 +61,11 @@
     var proxyRadio = form.querySelector('input[name="vps_mode"][value="proxy"]');
     var kernelRadio = form.querySelector('input[name="vps_mode"][value="kernel"]');
     var proxyOnly = form.querySelector(".proxy-only");
+    // Userspace mode: a single "PROXY protocol" checkbox replaces the kernel/proxy radio group
+    // (the per-rule kernel/proxy choice has no meaning once the server relays every rule).
+    // The checkbox drives a hidden vps_mode field so the submitted form still carries kernel/proxy.
+    var usProxyCheckbox = document.getElementById("f-proxy-userspace");
+    var usModeHidden = document.getElementById("f-vps-mode-userspace");
 
     function agentName() {
       if (!agent || agent.selectedIndex < 0) return agentLabel;
@@ -76,16 +81,27 @@
     function updateMode() {
       if (proxyOnly) proxyOnly.hidden = !(proxyRadio && proxyRadio.checked);
     }
+    // PROXY protocol requires vps_mode=proxy, which only applies to TCP (proto.Rule.Validate).
+    function updateUserspaceMode() {
+      if (!usProxyCheckbox || !usModeHidden) return;
+      usModeHidden.value = usProxyCheckbox.checked ? "proxy" : "kernel";
+    }
     function updateProto() {
       var udp = proto && proto.value === "udp";
       if (proxyRadio) proxyRadio.disabled = udp;
       if (udp && proxyRadio && proxyRadio.checked && kernelRadio) kernelRadio.checked = true;
+      if (usProxyCheckbox) {
+        usProxyCheckbox.disabled = udp;
+        if (udp && usProxyCheckbox.checked) usProxyCheckbox.checked = false;
+      }
       updateMode();
+      updateUserspaceMode();
     }
     [listen, target].forEach(function (el) { if (el) el.addEventListener("input", updateFlow); });
     if (agent) agent.addEventListener("change", updateFlow);
     if (proto) proto.addEventListener("change", updateProto);
     form.querySelectorAll('input[name="vps_mode"]').forEach(function (r) { r.addEventListener("change", updateMode); });
+    if (usProxyCheckbox) usProxyCheckbox.addEventListener("change", updateUserspaceMode);
     updateFlow();
     updateProto();
   }

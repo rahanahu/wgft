@@ -10,6 +10,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net/netip"
@@ -26,12 +27,17 @@ import (
 const listenAddr = "127.0.0.1:8687"
 
 func main() {
-	if err := run(); err != nil {
+	mode := flag.String("mode", "kernel", "forwarding mode to show in the sample ServerInfo (kernel or userspace)")
+	flag.Parse()
+	if *mode != "kernel" && *mode != "userspace" {
+		log.Fatalf("uidemo: -mode must be kernel or userspace, got %q", *mode)
+	}
+	if err := run(*mode); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run() error {
+func run(mode string) error {
 	dir, err := os.MkdirTemp("", "wgft-uidemo-*")
 	if err != nil {
 		return fmt.Errorf("temp dir: %w", err)
@@ -48,8 +54,8 @@ func run() error {
 	}
 	defer st.Close()
 
-	srv := admin.New(st, newFakeBackend())
-	log.Printf("uidemo: http://%s (fixed sample data, for screenshots only)", listenAddr)
+	srv := admin.New(st, newFakeBackend(mode))
+	log.Printf("uidemo: http://%s (fixed sample data, mode=%s, for screenshots only)", listenAddr, mode)
 	return admin.Serve(listenAddr, srv, false)
 }
 
@@ -95,7 +101,7 @@ type fakeBackend struct {
 	info     admin.ServerInfo
 }
 
-func newFakeBackend() *fakeBackend {
+func newFakeBackend(mode string) *fakeBackend {
 	base := time.Now()
 	rfc := func(d time.Duration) string { return base.Add(d).Format(time.RFC3339) }
 
@@ -169,7 +175,7 @@ func newFakeBackend() *fakeBackend {
 		warnings: []admin.Warning{mismatch},
 		info: admin.ServerInfo{
 			Version:          "v0.1.0-abc1234",
-			Mode:             "kernel",
+			Mode:             mode,
 			StartedAt:        rfc(-(50*time.Hour + 5*time.Minute)), // uptime: 2d 2h
 			WGInterface:      "wgft0",
 			WGAddress:        "10.200.0.1/24",

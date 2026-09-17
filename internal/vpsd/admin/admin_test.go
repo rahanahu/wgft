@@ -15,7 +15,11 @@ import (
 )
 
 // fakeBackend はバッチをそのまま store に流す。nftables には触れない。
-type fakeBackend struct{ st *store.Store }
+// mode は ServerInfo().Mode に使う("" のままなら kernel とみなされる。webui.go の serverMode 参照)。
+type fakeBackend struct {
+	st   *store.Store
+	mode string
+}
 
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.st.Rules() }
 func (b *fakeBackend) Generation() (uint64, error)  { return b.st.Generation() }
@@ -38,7 +42,7 @@ func (b *fakeBackend) AgentState(string) (*proto.State, error) {
 	return &proto.State{Generation: 1}, nil
 }
 func (b *fakeBackend) ServerInfo() (ServerInfo, error) {
-	return ServerInfo{Version: "test", WGInterface: "wgft0", WGPort: 51821, MTU: 1420, Kernel: "6.1.0", NFT: "v1.0.6"}, nil
+	return ServerInfo{Version: "test", Mode: b.mode, WGInterface: "wgft0", WGPort: 51821, MTU: 1420, Kernel: "6.1.0", NFT: "v1.0.6"}, nil
 }
 func (b *fakeBackend) Batch(req BatchRequest) (*store.BatchResult, error) {
 	return b.st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
@@ -52,7 +56,7 @@ func TestHostOriginAndBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	srv := httptest.NewServer(New(st, &fakeBackend{st}))
+	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
 	defer srv.Close()
 
 	// Host 検査:許可されない Host は 403、localhost 系は通る。
@@ -159,7 +163,7 @@ func TestUIRenderLocales(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(st, &fakeBackend{st}))
+	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
 	defer srv.Close()
 
 	get := func(path string) string {
@@ -196,4 +200,53 @@ func TestUIRenderLocales(t *testing.T) {
 			t.Errorf("en %s: missing %q", tc.path, tc.wantEN)
 		}
 	}
+}
+
+// TestAddRuleFormFollowsMode は、ルール追加フォームがサーバーの転送方式(kernel/userspace)に
+// 応じて出し分けることを確かめる(仕様 6.3 節)。userspace ではルールごとの kernel/proxy の
+// 選択に意味が無いので、ラジオ群を出さず PROXY protocol のチェックボックス 1 つにする。
+func TestAddRuleFormFollowsMode(t *testing.T) {
+	get := func(t *testing.T, mode string) string {
+		t.Helper()
+		st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		srv := httptest.NewServer(New(st, &fakeBackend{st: st, mode: mode}))
+		defer srv.Close()
+		resp, err := http.Get(srv.URL + "/ui/add-rule")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /ui/add-rule status = %d, want 200", resp.StatusCode)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+
+	t.Run("kernel", func(t *testing.T) {
+		body := get(t, "kernel")
+		if !strings.Contains(body, `name="vps_mode" value="kernel"`) || !strings.Contains(body, `name="vps_mode" value="proxy"`) {
+			t.Error("kernel mode: expected the vps_mode radio group to be present")
+		}
+		if strings.Contains(body, `id="f-proxy-userspace"`) {
+			t.Error("kernel mode: unexpected userspace PROXY protocol checkbox")
+		}
+	})
+
+	t.Run("userspace", func(t *testing.T) {
+		body := get(t, "userspace")
+		if strings.Contains(body, `name="vps_mode" value="kernel" checked`) || strings.Contains(body, `name="vps_mode" value="proxy"`) {
+			t.Error("userspace mode: the vps_mode radio group must be absent")
+		}
+		if !strings.Contains(body, `id="f-proxy-userspace"`) || !strings.Contains(body, `type="checkbox"`) {
+			t.Error("userspace mode: expected the PROXY protocol checkbox")
+		}
+		if !strings.Contains(body, `id="f-vps-mode-userspace"`) {
+			t.Error("userspace mode: expected the hidden vps_mode field the checkbox drives")
+		}
+	})
 }

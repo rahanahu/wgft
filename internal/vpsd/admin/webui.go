@@ -132,7 +132,7 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 		d.Agents = append(d.Agents, agentToView(a, gen, locale))
 	}
 	d.RuleCount = len(rules)
-	d.RuleGroups = groupRules(rules, drops, locale)
+	d.RuleGroups = groupRules(rules, drops, locale, d.Server.Mode)
 	for _, w := range warns {
 		d.Warnings = append(d.Warnings, warnToView(w, locale))
 	}
@@ -187,8 +187,15 @@ func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {
 	return v
 }
 
-func ruleToView(r *proto.Rule, drops map[string]uint64, locale string) ruleView {
-	v := ruleView{ID: r.ID, Agent: r.Agent, Target: r.TargetDisplay(), Mode: string(r.VPSMode),
+// ruleToView は 1 件のビューを作る。serverMode が "userspace" のときは、ルールごとの
+// vps_mode(kernel/proxy)に意味が無い(仕様 6.3 節。全ルールが server 経由で中継される)ので、
+// 一覧の方式欄は一律 "userspace" にし、PROXY protocol の有無だけを添える。
+func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode string) ruleView {
+	mode := string(r.VPSMode)
+	if serverMode == "userspace" {
+		mode = "userspace"
+	}
+	v := ruleView{ID: r.ID, Agent: r.Agent, Target: r.TargetDisplay(), Mode: mode,
 		ProxyProtocol: r.ProxyProtocol, Enabled: r.Enabled, Ports: r.ListenPort.String()}
 	v.ProtoUpper = strings.ToUpper(string(r.Proto))
 	if r.Proto == proto.UDP {
@@ -212,7 +219,7 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale string) ruleView 
 }
 
 // groupRules は一覧をグループごとにまとめる。空グループ(その他)は最後(仕様 10.1)。
-func groupRules(rules []proto.Rule, drops map[string]uint64, locale string) []ruleGroupView {
+func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode string) []ruleGroupView {
 	idx := map[string]int{}
 	var out []ruleGroupView
 	for i := range rules {
@@ -227,7 +234,7 @@ func groupRules(rules []proto.Rule, drops map[string]uint64, locale string) []ru
 			}
 			out = append(out, ruleGroupView{Group: g, Label: label})
 		}
-		out[j].Rules = append(out[j].Rules, ruleToView(&rules[i], drops, locale))
+		out[j].Rules = append(out[j].Rules, ruleToView(&rules[i], drops, locale, serverMode))
 	}
 	sort.SliceStable(out, func(a, b int) bool {
 		if (out[a].Group == "") != (out[b].Group == "") {
@@ -301,7 +308,17 @@ func (s *Server) uiWarningsPartial(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiAddRuleForm(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups()})
+	s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": s.serverMode()})
+}
+
+// serverMode は現在の転送方式(kernel / userspace)。ServerInfo が引けなければ kernel とみなす
+// (仕様 9 節。記録の無い既存の状態は kernel とみなす規則に合わせる)。
+func (s *Server) serverMode() string {
+	info, err := s.backend.ServerInfo()
+	if err != nil || info.Mode == "" {
+		return string(proto.ModeKernel)
+	}
+	return info.Mode
 }
 
 // existingGroups は既存ルールのグループ名(重複なし・ソート済み)。フォームの候補に使う。
@@ -322,9 +339,10 @@ func (s *Server) existingGroups() []string {
 
 func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
+	mode := s.serverMode()
 	lp, err := proto.ParsePortRange(r.FormValue("listen_port"))
 	if err != nil {
-		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Error": err.Error()})
+		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": mode, "Error": err.Error()})
 		return
 	}
 	rule := proto.Rule{
@@ -335,7 +353,7 @@ func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
 		SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
 	}
 	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rule}, Force: r.FormValue("force") == "1"}); err != nil {
-		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Error": err.Error()})
+		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": mode, "Error": err.Error()})
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)

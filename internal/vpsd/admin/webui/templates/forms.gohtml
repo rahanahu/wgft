@@ -52,6 +52,15 @@
   <details class="advanced">
     <summary>{{ T .Locale "fAdvanced" }}</summary>
     <div class="advanced-body">
+      {{ if eq .Mode "userspace" }}
+      {{/* userspace: server 自身がすべてのルールを中継するので kernel/proxy の選択に意味が無い(仕様 6.3 節)。
+           PROXY protocol の有無だけを持ち、送信時は JS がこの状態を vps_mode(proxy/kernel)にも写す。 */}}
+      <label class="check">
+        <input type="checkbox" id="f-proxy-userspace" name="proxy_protocol" value="1"> {{ T .Locale "fProxyProtoUS" }}
+      </label>
+      <small class="field-help">{{ T .Locale "fProxyProtoUSH" }}</small>
+      <input type="hidden" id="f-vps-mode-userspace" name="vps_mode" value="kernel">
+      {{ else }}
       <label class="mode-opt">
         <span class="mode-head"><input type="radio" name="vps_mode" value="kernel" checked> {{ T .Locale "fModeKernel" }}</span>
         <small class="field-help">{{ T .Locale "fModeKernelH" }}</small>
@@ -61,6 +70,7 @@
         <small class="field-help">{{ T .Locale "fModeProxyH" }}</small>
       </label>
       <label class="check proxy-only" hidden><input type="checkbox" name="proxy_protocol" value="1"> {{ T .Locale "fProxyProto" }}</label>
+      {{ end }}
       <label class="check"><input type="checkbox" name="force" value="1"> {{ T .Locale "fForceNew" }}</label>
     </div>
   </details>

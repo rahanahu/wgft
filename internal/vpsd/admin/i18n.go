@@ -133,6 +133,9 @@ var tr = map[string][2]string{
 	"fModeProxyL":  {"実クライアント IP を渡す", "Pass the real client IP"},
 	"fModeProxyH":  {"server が TCP を終端し、PROXY protocol で実 IP を渡す(TCP のみ)", "server terminates TCP and passes the real IP via PROXY protocol (TCP only)"},
 	"fForceNew":    {"VPS で使用中のポートでも強行する", "Proceed even if the port is already in use on the VPS"},
+	// forms: add rule(ユーザー空間モード。仕様 6.3 節。kernel/proxy の選択に意味が無いので出さない)
+	"fProxyProtoUS":  {"PROXY protocol ヘッダを送る", "Send PROXY protocol header"},
+	"fProxyProtoUSH": {"ユーザー空間モードでは、server がすべてのルールを中継します。オンにすると実クライアント IP を自宅側へ渡します。TCP のルールだけに使えます。", "In userspace mode, the server relays every rule. Turning this on passes the real client IP to the home side. Available for TCP rules only."},
 	// forms: add agent
 	"addAgentTitle": {"エージェントを追加", "Add agent"},
 	"fAgentName":    {"エージェント名", "Agent name"},
