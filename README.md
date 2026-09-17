@@ -28,7 +28,24 @@ flowchart LR
 
 wgft is built for workloads where UDP has to just work: game servers, voice chat, and the like. If a game server is all you forward, the agent is the only thing you run at home.
 
-For HTTPS, TLS termination and certificates are the job of the reverse proxy at home. wgft forwards port 443 untouched and has no certificate or authentication features of its own. If you want SSO, shareable links, or certificates managed from a browser, [Pangolin](https://github.com/fosrl/pangolin) or Cloudflare Tunnel are a better fit.
+For HTTPS, TLS termination and certificates are the job of the reverse proxy at home. wgft forwards port 443 untouched and has no certificate or authentication features of its own. See "How it compares" for how it differs from Pangolin and Cloudflare Tunnel.
+
+## How it compares
+
+wgft, [Pangolin](https://github.com/fosrl/pangolin), and Cloudflare Tunnel all expose a home service through a VPS or an external network. Pangolin is an integrated, self-hosted reverse proxy. It handles certificate issuance, identity-aware access control including SSO, PIN- or passcode-protected links for sharing a resource, and a web dashboard. Cloudflare Tunnel runs a connector at home and connects it to Cloudflare's network, centered on publishing HTTPS applications.
+
+Where wgft is stronger:
+- Light footprint: the VPS side is one static binary and a systemd unit. No Docker, no Traefik, and resident memory in the low tens of MB
+- Kernel-path forwarding: nftables DNAT and the kernel's own WireGuard do the work, so UDP games and any TCP pass through unchanged, and a restart of the wgft process leaves existing flows running
+- Leaves the rest alone: wgft never touches other WireGuard interfaces or nftables tables, and `wgft server teardown` restores the VPS
+- Minimal setup: one env file with a mode and an endpoint, plus rules. No domain or certificate required
+
+Where wgft is weaker:
+- No HTTPS of its own: certificates, SSO, shareable links, and browser-based auth are left to a reverse proxy at home
+- Narrow admin access: the dashboard is reachable only through a root Unix socket, SSH port forwarding, or Tailscale, and there is no multi-user model
+- Flat management: there is no site or user management, only agents and rules
+
+Pick Pangolin when you want to expose web services with authentication and certificates managed for you. Pick wgft when you want to expose a game server or arbitrary ports with the smallest possible moving parts.
 
 ## What you get
 
