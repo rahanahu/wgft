@@ -328,6 +328,11 @@ func (s *Server) postCheck(w http.ResponseWriter, r *http.Request) {
 
 // getNFT は適用中の wgft テーブルをそのまま返す(wgft nft show)。nft の CLI に任せる。
 func (s *Server) getNFT(w http.ResponseWriter, r *http.Request) {
+	if info, err := s.backend.ServerInfo(); err == nil && info.Mode == "userspace" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprintln(w, "userspace mode: nftables is not used; rules are relayed by the wgft process")
+		return
+	}
 	out, err := exec.Command("nft", "list", "table", "inet", "wgft").CombinedOutput()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("nft: %v: %s", err, out))

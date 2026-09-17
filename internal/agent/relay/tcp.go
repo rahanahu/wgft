@@ -2,6 +2,7 @@ package relay
 
 import (
 	"net"
+	"net/netip"
 	"sync"
 
 	"github.com/rahanahu/wgft/internal/netpipe"
@@ -14,10 +15,22 @@ func (m *Manager) startTCP(l *listener) error {
 	}
 	var (
 		mu    sync.Mutex
-		conns = map[net.Conn]struct{}{}
+		conns = map[net.Conn]netip.Addr{} // 公開側の接続はその接続元、target 側はゼロ値
 		done  = make(chan struct{})
 	)
 	l.sessions = func() int { mu.Lock(); defer mu.Unlock(); return len(conns) }
+	l.sweep = func(keep func(src netip.Addr) bool) int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for c, src := range conns {
+			if src.IsValid() && !keep(src) {
+				c.Close()
+				n++
+			}
+		}
+		return n
+	}
 	l.closeF = func() {
 		close(done)
 		ln.Close()
@@ -39,8 +52,13 @@ func (m *Manager) startTCP(l *listener) error {
 				}
 				return
 			}
+			src := addrOf(c.RemoteAddr())
+			if m.opts.Admit != nil && !m.opts.Admit(m.ruleOf(l), src) {
+				c.Close()
+				continue
+			}
 			mu.Lock()
-			conns[c] = struct{}{}
+			conns[c] = src
 			mu.Unlock()
 			go func() {
 				defer func() {
@@ -55,7 +73,7 @@ func (m *Manager) startTCP(l *listener) error {
 					return
 				}
 				mu.Lock()
-				conns[t] = struct{}{}
+				conns[t] = netip.Addr{}
 				mu.Unlock()
 				defer func() {
 					mu.Lock()

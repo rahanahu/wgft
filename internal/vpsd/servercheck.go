@@ -26,7 +26,10 @@ func Check(opts Options, out io.Writer) error {
 	fmt.Fprintf(out, "interface: %s / wg port: %d / address range: %s\n", opts.WGInterface, opts.WGPort, opts.WGAddress)
 
 	// nft の検査(他テーブルの policy drop・DOCKER-USER・DNAT 衝突。仕様 6.1 節)。root が要る。
-	if os.Geteuid() != 0 {
+	// ユーザー空間モードは nftables も ip_forward も使わない(仕様 6.3 節)。
+	if mode == modeUserspace {
+		fmt.Fprintln(out, "nft check: not used in userspace mode (rules are relayed by the wgft process)")
+	} else if os.Geteuid() != 0 {
 		fmt.Fprintln(out, "nft check: skipped because not root; run sudo wgft server check")
 	} else if rep, err := check.Inspect(opts.WGInterface); err != nil {
 		fmt.Fprintf(out, "nft check: cannot run: %v\n", err)
@@ -38,7 +41,9 @@ func Check(opts Options, out io.Writer) error {
 			fmt.Fprintf(out, "  - %s\n", f)
 		}
 	}
-	checkIPForward(out)
+	if mode != modeUserspace {
+		checkIPForward(out)
+	}
 
 	// SQLite があれば、記録済みのモード・アドレス帯との照合と、改名の検出を出す。
 	if _, err := os.Stat(opts.DBPath); err != nil {
@@ -53,7 +58,7 @@ func Check(opts Options, out io.Writer) error {
 	defer st.Close()
 	checkMeta(out, st, modeMeta, "recorded mode", opts.Mode)
 	checkMeta(out, st, wgAddressMeta, "recorded address range", opts.WGAddress)
-	if b, err := st.GetMeta(serverKeyMeta); err == nil {
+	if b, err := st.GetMeta(serverKeyMeta); err == nil && mode != modeUserspace {
 		if k, err := wgtypes.NewKey(b); err == nil {
 			if other, ok := wg.OtherDeviceWithKey(opts.WGInterface, k); ok {
 				fmt.Fprintf(out, "warning: another interface %q with the same server key exists; suspect leftovers from changing WGFT_WG_INTERFACE\n", other)

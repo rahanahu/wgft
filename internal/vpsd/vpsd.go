@@ -236,6 +236,11 @@ func Run(opts Options) error {
 	defer lock.Release()
 
 	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{iface: opts.WGInterface}}
+	var uspace *userspaceDataplane
+	if opts.Mode == modeUserspace {
+		uspace = newUserspaceDataplane(allowAllPolicy{})
+		d.dp = uspace
+	}
 	d.reserved = proto.Reserved{opts.WGPort: "WireGuard"}
 	if ap, err := netip.ParseAddrPort(opts.AdminAddr); err == nil {
 		d.reserved[ap.Port()] = "admin API"
@@ -299,7 +304,11 @@ func Run(opts Options) error {
 	d.flaps = &flapState{hist: map[string]map[string][]ipObs{}}
 	// stream の接続元 IP を接続の事象で記録し、往復を検知する(仕様 5.2 節)
 	d.hub.OnStreamConnect = func(agent, from string) { d.observeFlap(agent, "stream", "stream source", from) }
-	d.proxy = proxyrelay.New(proxyrelay.Options{})
+	proxyOpts := proxyrelay.Options{}
+	if uspace != nil {
+		proxyOpts.Dial = uspace.ProxyDial // ユーザー空間モードでは netstack 越しにエージェントへ
+	}
+	d.proxy = proxyrelay.New(proxyOpts)
 	// 起動時のプロキシ中継の初期化(applyNFT は proxy 作成より前に走るため、ここで一度収束させる)
 	if startupRules, e := st.Rules(); e == nil {
 		_, aa, _ := d.agents()

@@ -67,10 +67,13 @@ func TestReconcileModeAndAddress(t *testing.T) {
 	}
 	st.Close()
 
-	// userspace は v0.1 では未対応
+	// userspace は実装済み(仕様 6.3 節)。新規 SQLite ではそのまま記録される。未知のモードは拒否
 	st = open()
-	if err := reconcileModeAndAddress(st, Options{Mode: "userspace", WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, false); err == nil {
-		t.Error("userspace が拒否されない")
+	if err := reconcileModeAndAddress(st, Options{Mode: "userspace", WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, false); err != nil {
+		t.Errorf("userspace が拒否された: %v", err)
+	}
+	if err := reconcileModeAndAddress(st, Options{Mode: "bogus", WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, true); err == nil {
+		t.Error("未知のモードが拒否されない")
 	}
 	st.Close()
 }

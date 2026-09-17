@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -27,6 +28,11 @@ type Options struct {
 	UDPSessionsMax int           // ルールごとの UDP セッション数の上限(既定 4096)
 	Dial           func(network, addr string) (net.Conn, error)
 	Logf           func(format string, args ...any)
+	// Admit は新しいフロー(TCP の accept、UDP の新しいセッション)を通すか。nil なら全部通す。
+	// VPS 側のユーザー空間モード(仕様 6.3 節)が接続元制限とレート制限をここで判定する。エージェントでは nil。
+	Admit func(ruleID string, src netip.Addr) bool
+	// AdmitPacket は UDP のデータグラム 1 つを通すか(packet_rate)。nil なら全部通す。
+	AdmitPacket func(ruleID string, size int) bool
 }
 
 // Key はリスナーの同一性。
@@ -58,6 +64,8 @@ type listener struct {
 	target string
 	ruleID string
 	closeF func()
+	// sweep は keep が偽を返す接続元のセッションを閉じ、閉じた数を返す(接続元制限の変更の即時反映。仕様 6.2 節)
+	sweep func(keep func(src netip.Addr) bool) int
 	// セッション数(UDP)。ルールごとの上限は Manager が同じルールのリスナーの合計で見る
 	sessions func() int
 	bindErr  error // リスナーを開けなかった(bind 失敗)。Retry で開き直す
@@ -256,6 +264,46 @@ func (m *Manager) Status() []Status {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key.String() < out[j].Key.String() })
 	return out
+}
+
+// CloseSessions は、keep が偽を返す(ルール ID、接続元)のセッションを閉じ、閉じた数を返す。
+// 接続元制限を変えたときに進行中のフローを切るために VPS 側のユーザー空間モードが使う。
+func (m *Manager) CloseSessions(keep func(ruleID string, src netip.Addr) bool) int {
+	m.mu.Lock()
+	ls := make([]*listener, 0, len(m.listeners))
+	for _, l := range m.listeners {
+		ls = append(ls, l)
+	}
+	m.mu.Unlock()
+	n := 0
+	for _, l := range ls {
+		if l.sweep == nil {
+			continue
+		}
+		id := m.ruleOf(l)
+		n += l.sweep(func(src netip.Addr) bool { return keep(id, src) })
+	}
+	return n
+}
+
+// addrOf は接続の相手のアドレスを netip.Addr にする(IPv4 射影は外す)。
+func addrOf(a net.Addr) netip.Addr {
+	var ip net.IP
+	switch v := a.(type) {
+	case *net.TCPAddr:
+		ip = v.IP
+	case *net.UDPAddr:
+		ip = v.IP
+	default:
+		if ap, err := netip.ParseAddrPort(a.String()); err == nil {
+			return ap.Addr().Unmap()
+		}
+		return netip.Addr{}
+	}
+	if addr, ok := netip.AddrFromSlice(ip); ok {
+		return addr.Unmap()
+	}
+	return netip.Addr{}
 }
 
 // Close は全リスナーを閉じる。

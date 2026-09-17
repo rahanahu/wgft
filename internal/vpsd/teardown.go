@@ -60,6 +60,7 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 	var serverKey wgtypes.Key
 	var manual []string
 	haveState := false
+	userspace := false // 記録されたモードが userspace なら、カーネルには消すものが無い(仕様 6.3 節)
 	if _, err := os.Stat(opts.DBPath); err == nil {
 		haveState = true
 		st, err := store.Open(opts.DBPath)
@@ -80,13 +81,16 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 				fmt.Fprintf(out, "warning: recorded wg address %q is invalid; using %s for the conntrack cleanup\n", b, wgNet)
 			}
 		}
-		manual = manualRestoreList(st)
+		if b, e := st.GetMeta(modeMeta); e == nil && string(b) == modeUserspace {
+			userspace = true
+		}
+		manual = manualRestoreList(st, userspace)
 	} else {
 		fmt.Fprintf(out, "server database %s is missing, so assuming the default interface name %s; ownership cannot be confirmed by key, so --adopt-existing is required to delete it\n", opts.DBPath, iface)
 	}
 
 	// 事前判定:wg インタフェースが自分のものでなければ、何も消さずに中止する。
-	if !opts.Adopt {
+	if !opts.Adopt && !userspace {
 		owned, exists, err := wg.Owned(iface, serverKey)
 		if err != nil {
 			return fmt.Errorf("check ownership of wg %s: %w", iface, err)
@@ -96,7 +100,11 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 		}
 	}
 
-	fmt.Fprintf(out, "removing: table inet wgft / wg %s / conntrack entries created by wgft", iface)
+	if userspace {
+		fmt.Fprint(out, "userspace mode: nothing to remove in the kernel (no nftables table, no wg interface)")
+	} else {
+		fmt.Fprintf(out, "removing: table inet wgft / wg %s / conntrack entries created by wgft", iface)
+	}
 	if opts.Purge {
 		fmt.Fprintf(out, " / server database %s incl. -wal and -shm", opts.DBPath)
 	}
@@ -108,6 +116,12 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 	}
 	if opts.Purge && !opts.Yes {
 		return fmt.Errorf("--purge deletes keys and certificates and requires agents to re-register; pass --yes to continue")
+	}
+
+	if userspace {
+		purgeState(opts, out)
+		printManual(out, manual)
+		return nil
 	}
 
 	// 1. table inet wgft(自分のテーブルだけ。既に無ければ何もしない)
@@ -133,23 +147,29 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 	}
 
 	// 4. --purge:状態ファイル(WAL の -wal, -shm と、隣の .lock も)
-	if opts.Purge {
-		targets := []string{opts.DBPath, opts.DBPath + "-wal", opts.DBPath + "-shm", flock.LockPath(opts.DBPath)}
-		for _, p := range targets {
-			if err := os.Remove(p); err == nil {
-				fmt.Fprintf(out, "deleted %s\n", p)
-			} else if !os.IsNotExist(err) {
-				fmt.Fprintf(out, "warning: cannot delete %s (%v)\n", p, err)
-			}
-		}
-	}
+	purgeState(opts, out)
 
 	printManual(out, manual)
 	return nil
 }
 
+// purgeState は --purge のときだけ、サーバのデータベースとその付随ファイルを消す。
+func purgeState(opts TeardownOptions, out io.Writer) {
+	if !opts.Purge {
+		return
+	}
+	targets := []string{opts.DBPath, opts.DBPath + "-wal", opts.DBPath + "-shm", flock.LockPath(opts.DBPath)}
+	for _, p := range targets {
+		if err := os.Remove(p); err == nil {
+			fmt.Fprintf(out, "deleted %s\n", p)
+		} else if !os.IsNotExist(err) {
+			fmt.Fprintf(out, "warning: cannot delete %s (%v)\n", p, err)
+		}
+	}
+}
+
 // manualRestoreList は「手で戻す一覧」を SQLite と meta から具体値で作る。
-func manualRestoreList(st *store.Store) []string {
+func manualRestoreList(st *store.Store, userspace bool) []string {
 	var list []string
 
 	// ファイアウォールで開けたポート
@@ -167,6 +187,11 @@ func manualRestoreList(st *store.Store) []string {
 		if len(ports) > 0 {
 			list = append(list, "close the published ports opened in the firewall, per rule: "+joinComma(ports))
 		}
+	}
+
+	if userspace {
+		list = append(list, "delete by hand the unit or container that ran the server, its env, the binary, and the data directory (remains unless --purge)")
+		return list
 	}
 
 	// ip_forward

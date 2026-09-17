@@ -61,8 +61,12 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 			active++
 		}
 	}
-	log.Printf("applied table inet %s (%d rules, %d enabled in kernel mode, %d agents, %d peers)",
-		nft.TableName, len(rules), active, len(agentAddr), len(peers))
+	if d.opts.Mode == modeUserspace {
+		log.Printf("applied %d rules in userspace mode (%d agents, %d peers)", len(rules), len(agentAddr), len(peers))
+	} else {
+		log.Printf("applied table inet %s (%d rules, %d enabled in kernel mode, %d agents, %d peers)",
+			nft.TableName, len(rules), active, len(agentAddr), len(peers))
+	}
 	// conntrack の収束は必ず nftables の差し替えの後に走らせる(仕様 6.1 節)。
 	// 先に走らせると、旧テーブルで許可されたフローが差し替えまでの間に入る
 	d.converge(rules, agentAddr)

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +34,21 @@ func (m *Manager) startUDP(l *listener) error {
 		}
 		mu.Unlock()
 		s.conn.Close()
+	}
+	l.sweep = func(keep func(src netip.Addr) bool) int {
+		mu.Lock()
+		var victims []*udpSession
+		for k, s := range sessions {
+			if ap, err := netip.ParseAddrPort(k); err == nil && !keep(ap.Addr().Unmap()) {
+				victims = append(victims, s)
+				delete(sessions, k)
+			}
+		}
+		mu.Unlock()
+		for _, s := range victims {
+			s.conn.Close()
+		}
+		return len(victims)
 	}
 	l.closeF = func() {
 		close(done)
@@ -88,11 +104,17 @@ func (m *Manager) startUDP(l *listener) error {
 				}
 				return
 			}
+			if m.opts.AdmitPacket != nil && !m.opts.AdmitPacket(m.ruleOf(l), n) {
+				continue
+			}
 			k := from.String()
 			mu.Lock()
 			s := sessions[k]
 			mu.Unlock()
 			if s == nil {
+				if m.opts.Admit != nil && !m.opts.Admit(m.ruleOf(l), addrOf(from)) {
+					continue
+				}
 				// ルールごとの上限。超えた新規パケットは捨てる(既存セッションは追い出さない)
 				if m.ruleSessions(m.ruleOf(l)) >= m.opts.UDPSessionsMax {
 					continue

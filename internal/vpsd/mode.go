@@ -87,12 +87,13 @@ func reconcileModeAndAddress(st *store.Store, opts Options, hadServerKey bool) e
 	return nil
 }
 
-// checkModeSupported は、v0.1 で動くモードだけを通す。userspace は v0.2.0 で実装予定(仕様 13 節)。
+// checkModeSupported は、実装済みのモードだけを通す(kernel と userspace。仕様 6.1 節と 6.3 節)。
 func checkModeSupported(mode string) error {
-	if mode == modeUserspace {
-		return fmt.Errorf("userspace mode is planned for v0.2.0; only kernel is available now")
+	switch mode {
+	case modeKernel, modeUserspace:
+		return nil
 	}
-	return nil
+	return fmt.Errorf("unknown mode %q", mode)
 }
 
 // modeGate は、記録済み stored と要求 want が食い違うときの関門(3.3 節)。
