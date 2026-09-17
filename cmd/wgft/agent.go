@@ -29,11 +29,11 @@ func ago(s string) string {
 
 // agentSpecs は agent run の設定項目。
 func agentSpecs() []spec {
-	return []spec{
+	return append([]spec{
 		{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir()},
 		{Env: "WGFT_JOIN", Flag: "join", Default: "", Secret: true},
 		{Env: "WGFT_NAME", Flag: "name", Default: ""},
-	}
+	}, limitSpecs()...)
 }
 
 // agentCredentialsPath は WGFT_DATA_DIR から agent.json (認証情報) のパスを決める(home 側コマンド用)。
@@ -80,18 +80,25 @@ optional and normally left unset, since the join string is already bound to a na
 			if err := os.MkdirAll(c.str("WGFT_DATA_DIR"), 0o700); err != nil {
 				return fmt.Errorf("data dir: %w", err)
 			}
+			limits, err := limitsFromConfig(c)
+			if err != nil {
+				return err
+			}
 			opts := agent.Options{
+				Limits:          limits,
 				CredentialsPath: c.str("WGFT_DATA_DIR") + "/agent.json",
 				Join:            c.str("WGFT_JOIN"),
 				Name:            c.str("WGFT_NAME"),
 			}
 			fmt.Fprintln(os.Stderr, "effective config:")
 			c.print(os.Stderr)
+			applyMemoryLimit(os.Stderr, limits, true)
 			return agent.Run(opts)
 		},
 	}
 	rf := run.Flags()
 	rf.String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR; holds agent.json")
+	registerLimitFlags(rf)
 	rf.String("join", "", "join string wgft://host:port/token#sha256:..., env WGFT_JOIN")
 	rf.String("name", "", "agent name, env WGFT_NAME; optional, the join string is already bound to a name")
 	rf.String("config", agentConfigPath, "dotenv config file")

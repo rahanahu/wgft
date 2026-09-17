@@ -249,10 +249,12 @@ wgft agent run --config /etc/wgft/agent.env
 Flags:
 
 ```text
-      --config string     dotenv config file (default "/etc/wgft/agent.env")
-      --data-dir string   data dir, env WGFT_DATA_DIR; holds agent.json (default "/var/lib/wgft")
-      --join string       join string wgft://host:port/token#sha256:..., env WGFT_JOIN
-      --name string       agent name, env WGFT_NAME; optional, the join string is already bound to a name
+      --config string       dotenv config file (default "/etc/wgft/agent.env")
+      --data-dir string     data dir, env WGFT_DATA_DIR; holds agent.json (default "/var/lib/wgft")
+      --join string         join string wgft://host:port/token#sha256:..., env WGFT_JOIN
+      --max-tcp-flows int   process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
+      --max-udp-flows int   process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
+      --name string         agent name, env WGFT_NAME; optional, the join string is already bound to a name
 ```
 
 ## wgft agent warnings
@@ -793,6 +795,8 @@ Flags:
       --agent-api-host string   host:port to embed in the join string, env WGFT_AGENT_API_HOST
       --config string           dotenv config file (default "/etc/wgft/server.env")
       --data-dir string         data dir, env WGFT_DATA_DIR; holds wgft.sqlite (default "/var/lib/wgft")
+      --max-tcp-flows int       process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
+      --max-udp-flows int       process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
       --mode string             forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter
       --mtu int                 wg MTU, env WGFT_MTU (default 1420)
       --wg-address string       wg address range, env WGFT_WG_ADDRESS (default "10.200.0.1/24")
@@ -851,6 +855,8 @@ Flags:
       --agent-api-host string   host:port to embed in the join string, env WGFT_AGENT_API_HOST
       --config string           dotenv config file (default "/etc/wgft/server.env")
       --data-dir string         data dir, env WGFT_DATA_DIR; holds wgft.sqlite (default "/var/lib/wgft")
+      --max-tcp-flows int       process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
+      --max-udp-flows int       process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
       --mode string             forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter
       --mtu int                 wg MTU, env WGFT_MTU (default 1420)
       --wg-address string       wg address range, env WGFT_WG_ADDRESS (default "10.200.0.1/24")

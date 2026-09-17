@@ -13,6 +13,7 @@ import (
 
 	proxyproto "github.com/pires/go-proxyproto"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/netpipe"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -36,6 +37,11 @@ type Options struct {
 	// Dial はエージェントのリスナーへ繋ぐ。既定は net.Dial("tcp", addr)。
 	Dial func(addr string) (net.Conn, error)
 	Logf func(string, ...any)
+	// ConnsMax はルールごとの同時接続数の上限(既定 flowcap.TCPPerRule)。
+	ConnsMax int
+	// Cap はプロセス全体と接続元 IP ごとの上限(仕様 7 節)。nil なら既定値で作る。
+	// ユーザー空間モードの vpsd は relay と同じ Counter を渡し、合計で数える
+	Cap *flowcap.Counter
 }
 
 // Manager は現在のプロキシ中継のリスナー集合を持ち、宣言に収束させる。
@@ -51,6 +57,9 @@ type listener struct {
 	mu     sync.Mutex
 	conns  map[net.Conn]string // 進行中の中継(公開側の接続 → 接続元 IP 文字列)
 	closed bool
+	// pending は上限の枠を取ってから track するまでの接続の数(エージェントへの接続中)
+	pending int
+	capLog  flowcap.LogGate
 }
 
 // New は空の Manager を作る。
@@ -66,6 +75,12 @@ func New(opts Options) *Manager {
 	}
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
+	}
+	if opts.ConnsMax <= 0 {
+		opts.ConnsMax = flowcap.TCPPerRule
+	}
+	if opts.Cap == nil {
+		opts.Cap = &flowcap.Counter{Total: flowcap.TCPTotal, PerSource: flowcap.TCPPerSource}
 	}
 	return &Manager{opts: opts, ls: map[uint16]*listener{}}
 }
@@ -168,6 +183,36 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 		c.Close()
 		return
 	}
+	// 同時フロー数の上限(仕様 7 節)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
+	l.mu.Lock()
+	full := len(l.conns)+l.pending >= m.opts.ConnsMax
+	if !full {
+		l.pending++
+	}
+	l.mu.Unlock()
+	if full || !m.opts.Cap.Acquire(src) {
+		if !full {
+			l.mu.Lock()
+			l.pending--
+			l.mu.Unlock()
+		}
+		c.Close()
+		if l.capLog.Allow() {
+			m.opts.Logf("proxy: %d: connection limit reached; refusing new connections", rule.ListenPort)
+		}
+		return
+	}
+	defer m.opts.Cap.Release(src)
+	pending := true
+	unpend := func() {
+		if pending {
+			pending = false
+			l.mu.Lock()
+			l.pending--
+			l.mu.Unlock()
+		}
+	}
+	defer unpend()
 	up, err := m.opts.Dial(net.JoinHostPort(rule.AgentAddr.String(), itoa(rule.AgentPort)))
 	if err != nil {
 		m.opts.Logf("proxy: %d: cannot connect to agent %s:%d: %v", rule.ListenPort, rule.AgentAddr, rule.AgentPort, err)
@@ -182,6 +227,7 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 			return
 		}
 	}
+	unpend()
 	l.track(c, src)
 	defer l.untrack(c)
 	netpipe.Pipe(c, up)

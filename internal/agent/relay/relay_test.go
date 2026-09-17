@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -305,5 +307,126 @@ func TestUDPNoTargetCheck(t *testing.T) {
 	m.Apply(map[Key]Desired{{proto.UDP, listenPort}: {target, "r1"}})
 	if st := m.Status(); st[0].Err != nil {
 		t.Errorf("UDP は target 確認をしないので ok のはず: %v", st[0].Err)
+	}
+}
+
+// UDP:セッションは待つ間バッファを持たないが、最大長に近い応答も最初の 1 個から欠けずに届く(仕様 7 節)。
+func TestUDPRelayLargeReplyFromFirstDatagram(t *testing.T) {
+	echoAddr, _ := udpEcho(t)
+	port := freePort(t)
+	m := New(loopback{}, Options{Logf: t.Logf})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
+	c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	b := make([]byte, 65535)
+	for _, size := range []int{60000, 3, 2048, 9000} {
+		msg := bytes.Repeat([]byte{byte('a' + size%26)}, size)
+		c.Write(msg)
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := c.Read(b)
+		if err != nil || !bytes.Equal(b[:n], msg) {
+			t.Fatalf("reply of %d bytes: n=%d err=%v", size, n, err)
+		}
+	}
+}
+
+// UDP:プロセス全体と接続元 IP ごとの上限。枠はセッションが閉じると戻る。
+func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
+	echoAddr, _ := udpEcho(t)
+	port := freePort(t)
+	cnt := &flowcap.Counter{Total: 10, PerSource: 2}
+	m := New(loopback{}, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPCap: cnt, Logf: t.Logf})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
+	ok := func() bool {
+		c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		c.Write([]byte("hi"))
+		c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		_, err = c.Read(make([]byte, 10))
+		return err == nil
+	}
+	if !ok() || !ok() {
+		t.Fatal("first two sessions must pass")
+	}
+	if ok() {
+		t.Error("third session from the same source must be dropped")
+	}
+	time.Sleep(500 * time.Millisecond)
+	if cnt.Len() != 0 {
+		t.Errorf("counter after idle = %d, want 0", cnt.Len())
+	}
+	if !ok() {
+		t.Error("a new session must pass after the old ones expired")
+	}
+}
+
+// TCP:ルールごとの上限を超えた接続はすぐ閉じられ、既存の接続は生きている。閉じれば枠が戻る。
+func TestTCPRelayConnCap(t *testing.T) {
+	srv, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	go func() {
+		for {
+			c, err := srv.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer c.Close(); io.Copy(c, c) }()
+		}
+	}()
+	port := freePort(t)
+	cnt := &flowcap.Counter{Total: 10}
+	m := New(loopback{}, Options{TCPConnsMax: 2, TCPCap: cnt, Logf: t.Logf})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.TCP, port}: {srv.Addr().String(), "r1"}})
+	echo := func(c net.Conn) error {
+		c.SetDeadline(time.Now().Add(2 * time.Second))
+		if _, err := c.Write([]byte("x")); err != nil {
+			return err
+		}
+		_, err := io.ReadFull(c, make([]byte, 1))
+		return err
+	}
+	dial := func() net.Conn {
+		c, err := net.Dial("tcp4", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	c1, c2 := dial(), dial()
+	if err := echo(c1); err != nil {
+		t.Fatal(err)
+	}
+	if err := echo(c2); err != nil {
+		t.Fatal(err)
+	}
+	if err := echo(dial()); err == nil {
+		t.Error("third connection must be closed at the limit")
+	}
+	if err := echo(c1); err != nil {
+		t.Errorf("existing connection broken: %v", err)
+	}
+	c2.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for cnt.Len() != 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if cnt.Len() != 1 {
+		t.Fatalf("counter after close = %d, want 1", cnt.Len())
+	}
+	if err := echo(dial()); err != nil {
+		t.Errorf("connection after a slot was freed: %v", err)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/flock"
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/agentapi"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
@@ -184,6 +185,8 @@ type Options struct {
 	AdoptExisting bool
 	// Mode は転送方式 "kernel" / "userspace"(仕様 9・11a 節)。初回に記録し以後は照合する。
 	Mode string
+	// Limits は同時フロー数のプロセス全体の上限(仕様 7 節)。ゼロ値は既定値
+	Limits flowcap.Limits
 }
 
 // Daemon は動いている vpsd。管理用 API の Backend を実装する。
@@ -236,7 +239,7 @@ func Run(opts Options) error {
 	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{iface: opts.WGInterface}}
 	var uspace *userspaceDataplane
 	if opts.Mode == modeUserspace {
-		uspace = newUserspaceDataplane(srcpolicy.New(nil))
+		uspace = newUserspaceDataplane(srcpolicy.New(nil), opts.Limits)
 		d.dp = uspace
 	}
 	d.reserved = proto.Reserved{opts.WGPort: "WireGuard"}
@@ -302,9 +305,11 @@ func Run(opts Options) error {
 	d.flaps = &flapState{hist: map[string]map[string][]ipObs{}}
 	// stream の接続元 IP を接続の事象で記録し、往復を検知する(仕様 5.2 節)
 	d.hub.OnStreamConnect = func(agent, from string) { d.observeFlap(agent, "stream", "stream source", from) }
-	proxyOpts := proxyrelay.Options{}
+	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)
+	proxyOpts := proxyrelay.Options{Cap: &flowcap.Counter{Total: opts.Limits.WithDefaults().TCPTotal, PerSource: flowcap.TCPPerSource}}
 	if uspace != nil {
 		proxyOpts.Dial = uspace.ProxyDial // ユーザー空間モードでは netstack 越しにエージェントへ
+		proxyOpts.Cap = uspace.tcpCap     // 同時接続数は relay と合計で数える(仕様 7 節)
 	}
 	d.proxy = proxyrelay.New(proxyOpts)
 	// 起動時のプロキシ中継の初期化(applyNFT は proxy 作成より前に走るため、ここで一度収束させる)

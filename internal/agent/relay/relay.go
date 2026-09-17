@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -25,9 +26,16 @@ type Network interface {
 // Options は中継の調整値。
 type Options struct {
 	UDPIdleTimeout time.Duration // 無通信でセッションを閉じるまで(全体状態の udp_timeout_stream)
-	UDPSessionsMax int           // ルールごとの UDP セッション数の上限(既定 4096)
-	Dial           func(network, addr string) (net.Conn, error)
-	Logf           func(format string, args ...any)
+	UDPSessionsMax int           // ルールごとの UDP セッション数の上限(既定 flowcap.UDPPerRule)
+	TCPConnsMax    int           // ルールごとの TCP 接続数の上限(既定 flowcap.TCPPerRule)
+	// Limits はプロセス全体の上限(設定値)。UDPCap と TCPCap が nil のときに使う
+	Limits flowcap.Limits
+	// UDPCap と TCPCap はプロセス全体と接続元 IP ごとの上限(仕様 7 節)。nil なら全体の上限だけを Limits から作る。
+	// vpsd はプロキシモードの中継と共有する Counter を渡す
+	UDPCap *flowcap.Counter
+	TCPCap *flowcap.Counter
+	Dial   func(network, addr string) (net.Conn, error)
+	Logf   func(format string, args ...any)
 	// Admit は新しいフロー(TCP の accept、UDP の新しいセッション)を通すか。nil なら全部通す。
 	// VPS 側のユーザー空間モード(仕様 6.3 節)が接続元制限とレート制限をここで判定する。エージェントでは nil。
 	Admit func(ruleID string, src netip.Addr) bool
@@ -66,9 +74,12 @@ type listener struct {
 	closeF func()
 	// sweep は keep が偽を返す接続元のセッションを閉じ、閉じた数を返す(接続元制限の変更の即時反映。仕様 6.2 節)
 	sweep func(keep func(src netip.Addr) bool) int
-	// セッション数(UDP)。ルールごとの上限は Manager が同じルールのリスナーの合計で見る
+	// セッション数(ハートビートの表示用)
 	sessions func() int
-	bindErr  error // リスナーを開けなかった(bind 失敗)。Retry で開き直す
+	// 上限の対象になるフロー数(UDP はセッション、TCP は公開側の接続)。
+	// ルールごとの上限は Manager が同じルールのリスナーの合計で見る
+	flows   func() int
+	bindErr error // リスナーを開けなかった(bind 失敗)。Retry で開き直す
 	// targetErr は TCP ルールで target への接続確認が失敗したときの誤り(仕様 5.2 節)。
 	// リスナー自体は開いているので、Retry では開き直さず再確認だけする
 	targetErr error
@@ -88,7 +99,17 @@ func New(n Network, opts Options) *Manager {
 		opts.UDPIdleTimeout = 120 * time.Second
 	}
 	if opts.UDPSessionsMax <= 0 {
-		opts.UDPSessionsMax = 4096
+		opts.UDPSessionsMax = flowcap.UDPPerRule
+	}
+	if opts.TCPConnsMax <= 0 {
+		opts.TCPConnsMax = flowcap.TCPPerRule
+	}
+	lim := opts.Limits.WithDefaults()
+	if opts.UDPCap == nil {
+		opts.UDPCap = &flowcap.Counter{Total: lim.UDPTotal}
+	}
+	if opts.TCPCap == nil {
+		opts.TCPCap = &flowcap.Counter{Total: lim.TCPTotal}
 	}
 	if opts.Dial == nil {
 		d := &net.Dialer{Timeout: 10 * time.Second}
@@ -190,7 +211,8 @@ func (m *Manager) closeLocked(k Key) {
 }
 
 func (m *Manager) openLocked(k Key, d Desired) {
-	l := &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: func() int { return 0 }}
+	zero := func() int { return 0 }
+	l := &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: zero, flows: zero}
 	var err error
 	switch k.Proto {
 	case proto.UDP:
@@ -315,15 +337,15 @@ func (m *Manager) Close() {
 	}
 }
 
-// ruleSessions は同じルールに所属する全リスナーのセッション合計(上限の判定に使う)。
+// ruleFlows は同じルールに所属する全リスナーのフロー合計(上限の判定に使う)。
 // 分割で移ったリスナーの既存セッションは移動先のルールで数える(仕様 7 節)。
-func (m *Manager) ruleSessions(ruleID string) int {
+func (m *Manager) ruleFlows(ruleID string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
 	for _, l := range m.listeners {
 		if l.ruleID == ruleID {
-			n += l.sessions()
+			n += l.flows()
 		}
 	}
 	return n

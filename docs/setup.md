@@ -15,10 +15,13 @@ The home agent does not need root or a TUN device. Server requirements depend on
 | Forwarding path | Kernel WireGuard + nftables DNAT | wireguard-go + userspace netstack |
 | If the wgft process stops or crashes | Configured forwarding continues | Forwarding stops |
 | Rate-limit evaluation | Kernel | wgft process |
+| Memory of `wgft server` | A few tens of MiB, whatever the number of flows | Grows with the number of flows, up to the flow caps |
 
 In kernel mode, this resilience applies after wgft has created the WireGuard and nftables runtime state. If the wgft process crashes or restarts, that state remains in the kernel and forwarding continues. A VPS reboot clears the runtime state, so the wgft service must start again to rebuild it; keep the provided systemd service enabled for normal operation.
 
 Use kernel mode when you have root on the VPS. Userspace mode is intended for VPS environments without root, kernels without WireGuard support, or container-only deployments.
+
+wgft caps the number of flows it relays at the same time: per rule, per source address, and for the whole process. At a cap, new flows are refused and the existing ones keep working. The process-wide caps are `WGFT_MAX_UDP_FLOWS`, 8192 by default, and `WGFT_MAX_TCP_FLOWS`, 2048 by default. `wgft server` and `wgft agent` both take them. From the two caps wgft derives a soft memory limit for its runtime and prints it at startup. In the lab, a userspace-mode server with every cap filled and a traffic flood on top peaked at 208 MiB with the defaults. With `WGFT_MAX_UDP_FLOWS=2048` and `WGFT_MAX_TCP_FLOWS=1024` it survived the same load inside a 150 MiB memory limit, which is about what a VPS with 256 MiB leaves to wgft. Not yet verified on a real VPS of that size.
 
 ## 1. Install the binary
 
