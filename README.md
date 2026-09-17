@@ -95,7 +95,7 @@ In userspace mode the `packet` rate limit applies to UDP only. [docs/design.md](
 
 ## Setup
 
-**1. Get the binary**
+### 1. Get the binary
 
 A single binary is the server, the agent, and the CLI. Download it from the [releases page](https://github.com/rahanahu/wgft/releases) on both the VPS and the home machine. On arm64, replace `amd64` with `arm64`.
 
@@ -107,13 +107,13 @@ sha256sum -c wgft-linux-amd64.sha256
 
 With Go 1.26 or newer, `go install github.com/rahanahu/wgft/cmd/wgft@latest` works too.
 
-**2. Set up the server on the VPS**
+### 2. Set up the server on the VPS
 
 The steps depend on the [mode](#modes). With root on the VPS, use kernel mode; without root, or to run in a container, use userspace mode. Both end with issuing a join string, which step 3 needs.
 
 wgft is configured through `WGFT_*` environment variables, and `/etc/wgft/server.env` is read at startup. [deploy/server.env.example](deploy/server.env.example) lists every key and marks the required ones. The mode and the address agents connect to are enough to get started.
 
-*Kernel mode*
+#### Kernel mode
 
 ```sh
 sudo install -m 0755 wgft-linux-amd64 /usr/local/bin/wgft
@@ -155,7 +155,7 @@ sudo systemctl enable --now wgft
 
 To try it without a service, `sudo wgft server run` starts it in place.
 
-*Userspace mode*
+#### Userspace mode
 
 There are three ways to run userspace mode: as a systemd service, directly as an ordinary user, or in Docker. In each of them, open UDP 51820 for WireGuard, TCP 8443 for the agent API, and the forwarded ports in the firewall. Restarting `wgft server` stops forwarding until the tunnel is up again; in the lab that took 15 seconds.
 
@@ -185,7 +185,7 @@ docker compose -f deploy/server.compose.yaml up -d
 
 The CLI runs inside the container, where it reads the same `WGFT_ADMIN` as the server and reaches the admin socket in the state volume directly. From here on, `docker compose -f deploy/server.compose.yaml exec wgft-server` replaces `sudo` in front of every command. The published image `ghcr.io/rahanahu/wgft-server` starts with the v0.2.0 release.
 
-*Issue a join string*
+#### Issue a join string
 
 Finally, issue a join string for the home agent:
 
@@ -201,11 +201,11 @@ wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e
 
 Once the server is running, the [Web UI](#web-ui) can take the place of the commands. To issue a join string, choose "+ Add agent" on the dashboard, enter the name and generate it. Adding the rules of step 4 is "+ Add rule". Enabling, disabling and deleting rules, editing their group and note, the connection test for TCP rules, revoking an agent and dismissing warnings are available there as well. The deny and allow lists, the rate limits, splitting and merging rules, and replacing all rules from JSON are set with the commands only; the Web UI shows their values and the drop counts.
 
-**3. Set up the agent at home**
+### 3. Set up the agent at home
 
 Run the agent either as a plain binary or in Docker. Pick one. Neither needs root.
 
-*Plain binary*
+#### As a plain binary
 
 Put the binary from step 1 on your PATH (the commands below use `~/.local/bin`; add it to PATH if it is not there yet) and start it with the join string from step 2. Paste it exactly as printed, starting with `wgft://`, and quote it because it contains a `#`. `--data-dir` is where the credentials (keys and registration details) go.
 
@@ -230,7 +230,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now wgft-agent
 
 The credentials then live in `/var/lib/wgft/agent.json`.
 
-*Docker*
+#### In Docker
 
 No binary needed. The agent image is published as `ghcr.io/rahanahu/wgft-agent` for amd64 and arm64. Clone the repository for the compose file, edit one line in [deploy/agent.compose.yaml](deploy/agent.compose.yaml), and bring it up. To build the image from source instead, uncomment the `build:` lines in the compose file and add `--build`. If the container cannot reach your LAN targets, uncomment `network_mode: host` in the compose file.
 
@@ -242,7 +242,7 @@ git clone https://github.com/rahanahu/wgft.git && cd wgft
 docker compose -f deploy/agent.compose.yaml up -d
 ```
 
-**4. Add forwarding rules**
+### 4. Add forwarding rules
 
 Back on the VPS, confirm the agent registered:
 
@@ -269,7 +269,7 @@ sudo wgft rule add --agent home --tcp 443 --to 192.168.1.30:443 --proxy --proxy-
 
 For a port range, `--to` names the first port and the rest follow in order, so 2457 reaches 192.168.1.20:2457 in this example. Open the forwarded ports in the firewall (UDP 2456-2457 and TCP 443 here). Once `sudo wgft agent ls` shows `ok` in the RULES column, you are done. Rules reach the agent within seconds, and adding or removing one never drops sessions in progress. When someone abuses a port, `sudo wgft rule deny add <rule id> 203.0.113.0/24` blocks them, including flows already open. A unique prefix of the rule ID, as `rule ls` prints it, is enough.
 
-**Publishing HTTPS**
+#### Publishing HTTPS
 
 TLS termination and certificates are handled by the reverse proxy at home; wgft only forwards ports 443 and 80. The setup with Caddy was verified in the lab (`lab/caddy/` has the configuration and the record).
 
@@ -301,7 +301,7 @@ example.com {
 
 With this, `client_ip` in Caddy's access log is the real client address, and Caddy's default HTTP to HTTPS redirect works (verified in the lab). Certificate issuance by Let's Encrypt should work because port 80 on the VPS reaches Caddy, but it cannot be tested in the lab and is unverified; follow Caddy's own documentation.
 
-**5. Uninstalling**
+### 5. Uninstalling
 
 Teardown removes only what wgft created. It does not touch other tables or firewall ports, and it prints a list of anything you need to revert by hand.
 

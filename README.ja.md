@@ -95,7 +95,7 @@ root が使える VPS では、カーネルモードを選びます。ユーザ�
 
 ## セットアップ
 
-**1. バイナリを入手する**
+### 1. バイナリを入手する
 
 1 つのバイナリが server、agent、CLI を兼ねます。VPS と自宅のそれぞれで、[Releases](https://github.com/rahanahu/wgft/releases) から取得します。arm64 のマシンでは `amd64` を `arm64` に読み替えてください。
 
@@ -107,13 +107,13 @@ sha256sum -c wgft-linux-amd64.sha256
 
 Go 1.26 以上があれば、`go install github.com/rahanahu/wgft/cmd/wgft@latest` でもインストールできます。
 
-**2. VPS に server を配置する**
+### 2. VPS に server を配置する
 
 配置の手順は[動作モード](#動作モード)で分かれます。root が使える VPS ではカーネルモード、使えない VPS やコンテナで動かしたい場合はユーザー空間モードを選びます。どちらの手順も、最後に接続文字列を発行して手順 3 へ進みます。
 
 設定は `WGFT_*` の環境変数で行います。`/etc/wgft/server.env` に書いておくと起動時に読み込まれます。項目の一覧と必須の項目は [deploy/server.env.example](deploy/server.env.example) を参照してください。動作モードと、エージェントが接続する VPS のアドレスを設定すれば起動できます。
 
-*カーネルモードで配置する*
+#### カーネルモードで配置する場合
 
 ```sh
 sudo install -m 0755 wgft-linux-amd64 /usr/local/bin/wgft
@@ -153,7 +153,7 @@ sudo systemctl enable --now wgft
 
 常駐させずに試す場合は、`sudo wgft server run` でそのまま起動できます。
 
-*ユーザー空間モードで配置する*
+#### ユーザー空間モードで配置する場合
 
 ユーザー空間モードには、systemd で動かす、利用者の権限で直接起動する、Docker で動かす、の 3 通りがあります。どの場合も、WireGuard の UDP 51820、エージェント用 API の TCP 8443、転送するポートをファイアウォールで開けます。`wgft server` を再起動すると、トンネルが張り直されるまで転送が止まります。ラボでは 15 秒で戻りました。
 
@@ -183,7 +183,7 @@ docker compose -f deploy/server.compose.yaml up -d
 
 CLI はコンテナの中で実行します。server と同じ `WGFT_ADMIN` を読むため、状態ボリューム内の管理ソケットへ直接届きます。以降のコマンドには、`sudo` の代わりに `docker compose -f deploy/server.compose.yaml exec wgft-server` を付けます。公開イメージ `ghcr.io/rahanahu/wgft-server` は v0.2.0 のリリースから公開します。
 
-*接続文字列を発行する*
+#### 接続文字列を発行する
 
 最後に、自宅のエージェント用の接続文字列を発行します。
 
@@ -199,11 +199,11 @@ wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e
 
 server を起動した後の操作は、コマンドの代わりに [Web UI](#web-ui) でも行えます。接続文字列の発行は、ダッシュボードの「+ エージェントを追加」で名前を入力して生成します。手順 4 のルールの追加は「+ ルールを追加」です。ルールの有効化と無効化、削除、グループとメモの編集、TCP ルールの接続テスト、エージェントの無効化、警告の解除も Web UI から行えます。接続元の拒否と許可の一覧、レート制限、ルールの分割と統合、JSON からの一括置き換えは、コマンドでだけ設定できます。Web UI はそれらの設定値と drop の累計を表示します。
 
-**3. 自宅に agent を配置する**
+### 3. 自宅に agent を配置する
 
 自宅側の起動方法は、バイナリと Docker のどちらか一方を選びます。どちらも root 権限は必要ありません。
 
-*バイナリで起動する*
+#### バイナリで起動する場合
 
 取得したバイナリを PATH の通った場所に置き (下のコマンドは `~/.local/bin` を使います。PATH に無ければ追加してください)、手順 2 で発行した接続文字列を渡して起動します。接続文字列は `wgft://` で始まる出力をそのまま貼ります。`#` が含まれるため、シェルではシングルクォートで囲みます。`--data-dir` には、認証情報 (鍵と登録情報) を保存するディレクトリを指定します。
 
@@ -228,7 +228,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now wgft-agent
 
 認証情報は `/var/lib/wgft/agent.json` に保存されます。
 
-*Docker で起動する*
+#### Docker で起動する場合
 
 バイナリは不要です。エージェントのイメージは `ghcr.io/rahanahu/wgft-agent` として amd64 と arm64 向けに公開しています。compose ファイルを使うためにリポジトリを取得し、[deploy/agent.compose.yaml](deploy/agent.compose.yaml) の 1 行を書き換えて起動します。イメージをリポジトリからビルドする場合は、compose ファイルの `build:` の行のコメントを外し、コマンドに `--build` を付けます。コンテナから LAN 内の転送先に届かない環境では、compose ファイルの `network_mode: host` のコメントを外します。
 
@@ -240,7 +240,7 @@ git clone https://github.com/rahanahu/wgft.git && cd wgft
 docker compose -f deploy/agent.compose.yaml up -d
 ```
 
-**4. 転送ルールを追加する**
+### 4. 転送ルールを追加する
 
 VPS で `agent ls` を実行し、エージェントが登録されたことを確認します。
 
@@ -267,7 +267,7 @@ sudo wgft rule add --agent home --tcp 443 --to 192.168.1.30:443 --proxy --proxy-
 
 ポートが範囲のときは、`--to` に先頭のポートを書きます。以降のポートは連番で写り、この例では 2457 が 192.168.1.20:2457 に届きます。転送するポート (この例では UDP 2456-2457 と TCP 443) をファイアウォールで開け、`sudo wgft agent ls` の RULES 列が `ok` になれば完了です。ルールは数秒で自宅側に届き、追加や削除を行っても進行中のセッションは切断されません。不正な接続元があれば、`sudo wgft rule deny add <ルール ID> 203.0.113.0/24` で、通信中のフローを含めて遮断できます。ルール ID は、`rule ls` が表示する先頭部分だけで指定できます。
 
-**HTTPS を出すには**
+#### HTTPS を公開する場合
 
 TLS の終端と証明書は自宅側のリバースプロキシで行い、wgft は 443 番と 80 番を転送するだけです。Caddy を使う場合の構成をラボで確認しました (`lab/caddy/` に設定と記録があります)。
 
@@ -299,7 +299,7 @@ example.com {
 
 この構成で、Caddy のアクセスログの `client_ip` は接続元の実 IP になり、Caddy の既定の HTTP から HTTPS へのリダイレクトも動きます (ラボで確認済み)。Let's Encrypt による証明書の取得は、VPS の 80 番が Caddy に届くため動く見込みですが、ラボでは確認できないため未確認です。Caddy の公式ドキュメントに従ってください。
 
-**5. 撤去する**
+### 5. 撤去する
 
 teardown は wgft が作成したものだけを削除します。他のテーブルやファイアウォールのポートには触れず、手動で戻す項目を一覧で表示します。
 
