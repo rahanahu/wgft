@@ -61,9 +61,11 @@ Pick Pangolin when you want to expose web services with authentication and certi
 
 ![wgft dashboard](docs/images/dashboard.png)
 
-One page covers everything: every agent's connection, each rule's status and drop count, warnings, and the nftables table currently in effect. You can add agents and rules and test a TCP rule end to end from the same page. It is available in English and Japanese.
+One page covers everything: every agent's connection, each rule's status and drop count, warnings, and the nftables table currently in effect. It is available in English and Japanese.
 
-There is no login. The admin API does not listen on any TCP port of the VPS; it listens only on the Unix socket `/run/wgft/admin.sock`, which only root can open. From your browser, reach it by forwarding a local port to that socket over SSH. The target of `ssh -L` can be a socket path, not just a port. The socket is owned by root, so log in as root.
+From this page you can issue join strings, add rules, enable, disable and delete them, edit their group and note, test a TCP rule end to end, revoke an agent and dismiss warnings. The deny and allow lists, the rate limits, splitting and merging rules, and replacing all rules from JSON are set with the [commands](#commands) only; the Web UI shows their values and the drop counts.
+
+There is no login. The admin API does not listen on any TCP port of the VPS; it listens only on the Unix socket `/run/wgft/admin.sock`, which only root and `wgft server` itself can open. From your browser, reach it by logging in over SSH as root and forwarding a local port to that socket. The target of `ssh -L` can be a socket path, not just a port.
 
 ```sh
 ssh -L 8686:/run/wgft/admin.sock root@vps
@@ -187,7 +189,9 @@ The CLI runs inside the container, where it reads the same `WGFT_ADMIN` as the s
 
 #### Issue a join string
 
-Finally, issue a join string for the home agent:
+> From here on, the [Web UI](#web-ui) can take the place of the commands. This guide keeps describing the commands, and says "In the Web UI" where the same step exists there.
+
+Finally, issue a join string for the home agent. In the Web UI, choose "+ Add agent" on the dashboard, enter the name and generate it.
 
 ```sh
 sudo wgft agent join-string --name home
@@ -198,8 +202,6 @@ This prints a single line like the one below. It can be used once, expires after
 ```text
 wgft://vps.example.com:8443/k3Jt8vQwN2mXbL7cR9aZpQ#sha256:3f1c9a0b7d2e4c8a1f6b5e9d0c3a7b2e8d4f1a6c5b9e0d3f7a2c8b1e6d4f9a02
 ```
-
-Once the server is running, the [Web UI](#web-ui) can take the place of the commands. To issue a join string, choose "+ Add agent" on the dashboard, enter the name and generate it. Adding the rules of step 4 is "+ Add rule". Enabling, disabling and deleting rules, editing their group and note, the connection test for TCP rules, revoking an agent and dismissing warnings are available there as well. The deny and allow lists, the rate limits, splitting and merging rules, and replacing all rules from JSON are set with the commands only; the Web UI shows their values and the drop counts.
 
 ### 3. Set up the agent at home
 
@@ -244,7 +246,7 @@ docker compose -f deploy/agent.compose.yaml up -d
 
 ### 4. Add forwarding rules
 
-Back on the VPS, confirm the agent registered:
+Back on the VPS, confirm the agent registered. In the Web UI, the agent list on the dashboard shows the same:
 
 ```sh
 sudo wgft agent ls
@@ -257,7 +259,7 @@ NAME  ADDRESS     STREAM              HEARTBEAT  GEN  TUNNEL  WG_ENDPOINT       
 home  10.200.0.2  203.0.113.10:39222  4s ago     1    ok      203.0.113.10:51820  12s ago
 ```
 
-Now add rules:
+Now add rules. In the Web UI, this is "+ Add rule" on the dashboard.
 
 ```sh
 # game server: UDP 2456-2457 on the VPS -> 192.168.1.20:2456 at home
