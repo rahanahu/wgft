@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -43,6 +44,7 @@ func Check(opts Options, out io.Writer) error {
 	}
 	if mode != modeUserspace {
 		checkIPForward(out)
+		checkConntrack(out)
 	}
 
 	// SQLite があれば、記録済みのモード・アドレス帯との照合と、改名の検出を出す。
@@ -111,4 +113,54 @@ func checkIPForward(out io.Writer) {
 	} else {
 		f.Close()
 	}
+}
+
+// conntrack の表の上限と現在の件数(仕様 6.1 節)。nf_conntrack が未ロードなら読めない。
+var (
+	conntrackMaxPath   = "/proc/sys/net/netfilter/nf_conntrack_max"
+	conntrackCountPath = "/proc/sys/net/netfilter/nf_conntrack_count"
+)
+
+// conntrackMinMax は、これを下回ると警告する nf_conntrack_max。接続元ごとの meter の上限(65535 件)と同じ桁で、
+// メモリの小さい VPS の既定値(16384 など)を拾う。
+const conntrackMinMax = 65536
+
+// checkConntrack は conntrack の表の使用状況を 1 行出し、上限が小さければ警告する。値は変えない。
+func checkConntrack(out io.Writer) {
+	max, err := readProcInt(conntrackMaxPath)
+	if err != nil {
+		fmt.Fprintf(out, "conntrack: cannot read %s: %v; is the nf_conntrack module loaded\n", conntrackMaxPath, err)
+		return
+	}
+	if count, err := readProcInt(conntrackCountPath); err == nil {
+		fmt.Fprintf(out, "conntrack: %d of %d entries in use\n", count, max)
+	} else {
+		fmt.Fprintf(out, "conntrack: max %d entries\n", max)
+	}
+	if f := conntrackFinding(max); f != nil {
+		fmt.Fprintf(out, "  - %s\n", f)
+	}
+}
+
+// conntrackFinding は上限が小さいときの警告を作る。足りていれば nil。
+func conntrackFinding(max int) *check.Finding {
+	if max >= conntrackMinMax {
+		return nil
+	}
+	return &check.Finding{
+		Where:   "net.netfilter.nf_conntrack_max",
+		Problem: fmt.Sprintf("is %d; every forwarded flow takes one entry, so a flood of new flows can fill the table and the kernel then drops new connections for the whole host", max),
+		Suggest: []string{
+			fmt.Sprintf("sysctl -w net.netfilter.nf_conntrack_max=%d", conntrackMinMax*4),
+			"set new_flow_rate on public rules; flows dropped by it are never added to the table",
+		},
+	}
+}
+
+func readProcInt(path string) (int, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(b)))
 }
