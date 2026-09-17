@@ -1,6 +1,6 @@
 # deploy - files for running wgft on real machines
 
-The step-by-step procedure is in the [README](../README.md) (Setup section). This directory holds the files it refers to.
+The step-by-step procedure is in [docs/setup.md](../docs/setup.md). This directory holds the files it refers to.
 
 | File | Purpose |
 | --- | --- |
