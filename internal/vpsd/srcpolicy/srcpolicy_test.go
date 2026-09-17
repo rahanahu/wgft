@@ -1,6 +1,7 @@
 package srcpolicy
 
 import (
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
@@ -156,13 +157,13 @@ func TestAdmitFlow_PerSourceIsolatesSources(t *testing.T) {
 	a := addr(t, "203.0.113.1")
 	b := addr(t, "203.0.113.2")
 
-	for i := 0; i < 2; i++ {
+	for i := 0; i < nftBurst; i++ { // burst の分だけ通る
 		if ok, kind := p.AdmitFlow("r1", a, 10); !ok || kind != "" {
 			t.Fatalf("src A call %d = (%v, %q), want (true, \"\")", i, ok, kind)
 		}
 	}
 	if ok, kind := p.AdmitFlow("r1", a, 10); ok || kind != "per_source" {
-		t.Fatalf("src A 3rd call = (%v, %q), want (false, \"per_source\")", ok, kind)
+		t.Fatalf("src A call after the burst = (%v, %q), want (false, \"per_source\")", ok, kind)
 	}
 
 	// src B のバケットは src A と独立していて、まだ満杯のはずである。
@@ -179,19 +180,16 @@ func TestAdmitFlow_NewFlowSharedAcrossSources(t *testing.T) {
 		NewFlowRate: rate(2, proto.PerSecond),
 	}})
 
-	sources := []netip.Addr{
-		addr(t, "203.0.113.1"),
-		addr(t, "203.0.113.2"),
-		addr(t, "203.0.113.3"),
-	}
-	for i, src := range sources[:2] {
+	// 送信元を変えても同じバケットを消費する。burst の分が尽きたら次の送信元も落ちる
+	for i := 0; i < nftBurst; i++ {
+		src := addr(t, fmt.Sprintf("203.0.113.%d", i+1))
 		if ok, kind := p.AdmitFlow("r1", src, 10); !ok || kind != "" {
 			t.Fatalf("call %d = (%v, %q), want (true, \"\")", i, ok, kind)
 		}
 	}
-	ok, kind := p.AdmitFlow("r1", sources[2], 10)
+	ok, kind := p.AdmitFlow("r1", addr(t, "203.0.113.100"), 10)
 	if ok || kind != "new_flow" {
-		t.Fatalf("3rd distinct source = (%v, %q), want (false, \"new_flow\")", ok, kind)
+		t.Fatalf("distinct source after the burst = (%v, %q), want (false, \"new_flow\")", ok, kind)
 	}
 }
 
@@ -204,11 +202,13 @@ func TestAdmitFlow_RefillsOverTime(t *testing.T) {
 	}})
 
 	src := addr(t, "203.0.113.1")
-	if ok, _ := p.AdmitFlow("r1", src, 10); !ok {
-		t.Fatalf("first call should be admitted")
+	for i := 0; i < nftBurst; i++ {
+		if ok, _ := p.AdmitFlow("r1", src, 10); !ok {
+			t.Fatalf("call %d within the burst should be admitted", i)
+		}
 	}
 	if ok, kind := p.AdmitFlow("r1", src, 10); ok || kind != "new_flow" {
-		t.Fatalf("second call before refill = (%v, %q), want (false, \"new_flow\")", ok, kind)
+		t.Fatalf("call after the burst before refill = (%v, %q), want (false, \"new_flow\")", ok, kind)
 	}
 
 	clock.advance(time.Second)
@@ -234,14 +234,13 @@ func TestAdmitPacket_UsesPacketRateOnly(t *testing.T) {
 		}
 	}
 
-	if ok := p.AdmitPacket("r1", 10); !ok {
-		t.Fatalf("packet 1 should be admitted")
-	}
-	if ok := p.AdmitPacket("r1", 10); !ok {
-		t.Fatalf("packet 2 should be admitted")
+	for i := 0; i < nftBurst; i++ {
+		if ok := p.AdmitPacket("r1", 10); !ok {
+			t.Fatalf("packet %d within the burst should be admitted", i)
+		}
 	}
 	if ok := p.AdmitPacket("r1", 10); ok {
-		t.Fatalf("packet 3 should be dropped (packet_rate exhausted)")
+		t.Fatalf("packet after the burst should be dropped (packet_rate exhausted)")
 	}
 
 	drops := p.Drops()
@@ -323,12 +322,14 @@ func TestUpdate_KeepsStateOfUnchangedRulesAndDropsRemoved(t *testing.T) {
 	p.Update([]proto.Rule{r1, r2})
 
 	src := addr(t, "203.0.113.1")
-	if ok, _ := p.AdmitFlow("r1", src, 10); !ok {
-		t.Fatalf("r1 first call should be admitted")
+	// r1 のバケットを使い切った状態にする(burst の分を通した後、次の呼び出しは per_source で落ちるはず)。
+	for i := 0; i < nftBurst; i++ {
+		if ok, _ := p.AdmitFlow("r1", src, 10); !ok {
+			t.Fatalf("r1 call %d should be admitted", i)
+		}
 	}
-	// r1 のバケットを使い切った状態にする(次の呼び出しは per_source で落ちるはず)。
 	if ok, kind := p.AdmitFlow("r1", src, 10); ok || kind != "per_source" {
-		t.Fatalf("r1 second call = (%v, %q), want (false, \"per_source\")", ok, kind)
+		t.Fatalf("r1 call after the burst = (%v, %q), want (false, \"per_source\")", ok, kind)
 	}
 	p.Drops() // ここまでの drop を捨てて、後の検証をやり直しやすくする
 
@@ -353,7 +354,9 @@ func TestUpdate_RateChangeResetsBucket(t *testing.T) {
 	p.Update([]proto.Rule{r1})
 
 	src := addr(t, "203.0.113.1")
-	p.AdmitFlow("r1", src, 10) // バケットを使い切る
+	for i := 0; i < nftBurst; i++ {
+		p.AdmitFlow("r1", src, 10) // バケットを使い切る
+	}
 
 	r1Changed := proto.Rule{ID: "r1", NewFlowRate: rate(5, proto.PerSecond)}
 	p.Update([]proto.Rule{r1Changed})
@@ -428,8 +431,10 @@ func TestPerSource_IPv6Slash64Keying(t *testing.T) {
 	a2 := addr(t, "2001:db8::2")   // 同じ /64
 	b1 := addr(t, "2001:db8:1::1") // 異なる /64
 
-	if ok, _ := p.AdmitFlow("r1", a1, 10); !ok {
-		t.Fatalf("a1 first call should be admitted")
+	for i := 0; i < nftBurst; i++ {
+		if ok, _ := p.AdmitFlow("r1", a1, 10); !ok {
+			t.Fatalf("a1 call %d should be admitted", i)
+		}
 	}
 	if ok, kind := p.AdmitFlow("r1", a2, 10); ok || kind != "per_source" {
 		t.Fatalf("a2 (same /64 as a1) = (%v, %q), want (false, \"per_source\"): should share a1's bucket", ok, kind)

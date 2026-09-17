@@ -248,8 +248,9 @@ func sourceKey(addr netip.Addr) netip.Addr {
 	return netip.PrefixFrom(addr, 64).Masked().Addr()
 }
 
-// tokenBucket は nftables の `limit rate <count>/<unit>` と同じ振る舞いをする
-// トークンバケットで、burst は count そのもの(nftables の既定と同じ)。
+// tokenBucket は nftables の `limit rate over <count>/<unit>`(burst は nft の既定の 5。nft/build.go の
+// limitOver と同じ)と同じ振る舞いをするトークンバケット。容量は 5 で、count/unit の速さで補充する。
+// ラボでカーネルモードと突き合わせて揃えた(2026-09-17):瞬間的に通るのは 5 個、以後は設定した速さ。
 // golang.org/x/time/rate は壁時計しか使えないため、テストで時計を差し替えられるよう
 // 自前で持つ。呼び出し側の mutex の下でだけ使うので、自身はロックを持たない。
 type tokenBucket struct {
@@ -259,13 +260,15 @@ type tokenBucket struct {
 	last     time.Time
 }
 
+// nftBurst は nftables の limit の既定の burst(パケット数)。
+const nftBurst = 5
+
 func newTokenBucket(r proto.Rate) *tokenBucket {
-	capacity := float64(r.Count)
 	return &tokenBucket{
-		capacity: capacity,
-		refill:   capacity / unitSeconds(r.Unit),
+		capacity: nftBurst,
+		refill:   float64(r.Count) / unitSeconds(r.Unit),
 		// nftables の meter/limit は最初から満杯のバケットで始まる。
-		tokens: capacity,
+		tokens: nftBurst,
 	}
 }
 

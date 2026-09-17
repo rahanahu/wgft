@@ -382,7 +382,7 @@ conntrack の操作は「宣言状態に収束させる」1 手順だけを持�
 
 - サーバ側トンネル:wireguard-go の `device` と `netstack.CreateNetTUN` で、`listen_port` を開き `10.200.0.1` を持つ。サーバ鍵は SQLite の同じ鍵を使う。ピアの追加と削除は `IpcSet`(`public_key`、`allowed_ip`、`remove`)で行い、エンドポイントは指定せずローミングで学習する。ピアの状態(エンドポイント、最終ハンドシェイク、転送量)は `IpcGet` から読み、5.2 節の窃取検知と 10.1 節の表示に使う。wgctrl は使わない
 - 中継:全ルールがプロキシモード相当になる。UDP と TCP は自宅側の中継部品(7 節の `relay.Manager`)の向きを反転して使い、ホストのソケットで listen し、netstack の dial でエージェントの `10.200.0.x:listen_port` へつなぐ。エージェントから見た送信元は `10.200.0.1` の一時ポートになり、カーネルモードの masquerade と同じ見え方である。PROXY protocol 付きの TCP は 6.2 節の中継をそのまま使う。`vps_mode` の kernel と proxy の区別はこのモードでは意味を持たず、PROXY protocol を付けるかどうかだけが残る
-- 接続元制限とレート制限:nftables が無いので Go で判定する。deny、allow、接続元ごとの新規フロー上限(`per_source_rate`。表は 1 分で期限切れ、上限 65535 件で古いものから落とす)、ルール全体の新規フロー上限(`new_flow_rate`)、UDP のデータグラム上限(`packet_rate`)の順で、6.1 節と同じ評価順である。`packet_rate` は UDP にだけ効き、TCP には効かない
+- 接続元制限とレート制限:nftables が無いので Go で判定する。deny、allow、接続元ごとの新規フロー上限(`per_source_rate`。表は 1 分で期限切れ、上限 65535 件で古いものから落とす)、ルール全体の新規フロー上限(`new_flow_rate`)、UDP のデータグラム上限(`packet_rate`)の順で、6.1 節と同じ評価順である。`packet_rate` は UDP にだけ効き、TCP には効かない。3 つとも nftables の `limit rate over` と同じく burst 5 のトークンバケットで、ラボで両モードの通過数と drop の累計が一致することを確かめた(2026-09-17、`lab/rates.sh`)
 - 拒否のカウンタ:Go で数え、カーネルモードと同じ累積の経路(SQLite への加算)に流す。UI と CLI の表示は変わらない
 - 進行中の中継を閉じる契機は 6.2 節と同じ(ルールの削除と無効化、接続元制限の変更、恒久トークンの無効化)。conntrack 収束の代わりに、これが全ルールに効く
 - 起動時の検査:input チェーンが `policy drop` の場合の「`tcp/udp dport <port> accept` を足す」提示だけを行う。forward、`ip_forward`、他テーブルの DNAT、bind 中ポートの `/proc` の検査は行わない(bind の失敗で分かる)
