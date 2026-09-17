@@ -43,6 +43,13 @@ services:
     read_only: true
     environment:
       WGFT_WG_ENDPOINT: "REPLACE_WITH_vps.example.com:51820"
+      # Optional: process-wide caps on concurrent flows (defaults 8192 UDP sessions and 2048 TCP
+      # connections). They bound the memory of the server under an attack that opens flows and
+      # holds them, and the memory soft limit printed at startup is derived from them. Lower them
+      # on a VPS with little memory: in the lab, outside a container, a userspace-mode server
+      # with the values below stayed within a 150 MiB memory limit under such an attack.
+      # WGFT_MAX_UDP_FLOWS: "2048"
+      # WGFT_MAX_TCP_FLOWS: "1024"
     ports:
       - "51820:51820/udp"
       - "8443:8443/tcp"

@@ -37,6 +37,11 @@ services:
     environment:
       WGFT_JOIN: "REPLACE_WITH_JOIN_STRING"
       WGFT_NAME: ""
+      # Optional: process-wide caps on concurrent flows. The values below are the defaults. They
+      # bound the memory of the agent when many flows are opened and held, and the memory soft
+      # limit printed at startup is derived from them. Lower them on a host with little memory.
+      # WGFT_MAX_UDP_FLOWS: "8192"
+      # WGFT_MAX_TCP_FLOWS: "2048"
     volumes:
       - wgft-agent-state:/var/lib/wgft
     # If the container cannot reach the LAN, use this instead of the bridge above:
