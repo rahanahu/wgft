@@ -36,7 +36,11 @@ wgft is aimed at workloads where arbitrary TCP/UDP forwarding matters, especiall
 - Web dashboard for agents, rules, warnings, and forwarding state
 - `wgft server teardown` removes only state created by wgft
 
-Compared with products such as Pangolin or Cloudflare Tunnel, wgft deliberately stays narrow: it forwards ports and leaves TLS, SSO, certificates, and application publishing to other software.
+## Why wgft?
+
+wgft was inspired by Pangolin. Pangolin showed how useful the VPS-to-home tunnel model can be, but for game servers and other raw TCP/UDP services I wanted a smaller tool focused on port forwarding.
+
+wgft therefore stays deliberately narrow: WireGuard for the tunnel, nftables for kernel forwarding, and simple TCP/UDP rules. It does not provide TLS termination, SSO, certificate management, or application publishing; those are left to a reverse proxy or other software.
 
 ## Modes
 
@@ -45,8 +49,10 @@ Compared with products such as Pangolin or Cloudflare Tunnel, wgft deliberately 
 | Root on the VPS | Required | Not required |
 | Kernel and nftables | Kernel 6.1+, nftables 1.0.6+ | None |
 | Forwarding path | Kernel WireGuard + nftables DNAT | wireguard-go + userspace netstack |
-| If `wgft server` stops | Existing forwarding continues | Forwarding stops |
+| If the wgft process stops or crashes | Configured forwarding continues | Forwarding stops |
 | Rate-limit evaluation | Kernel | wgft process |
+
+In kernel mode, forwarding stays in the kernel if the wgft process crashes or restarts after startup. A VPS reboot clears that runtime state, so wgft must start again to restore forwarding. Keep the provided systemd service enabled for normal operation so reboot recovery happens automatically.
 
 Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container.
 

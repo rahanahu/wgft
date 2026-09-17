@@ -36,7 +36,11 @@ wgft は、任意の TCP/UDP ポートをそのまま転送したい用途、特
 - agent、ルール、警告、転送状態を確認できる Web ダッシュボード
 - `wgft server teardown` は wgft が作成した状態だけを削除
 
-Pangolin や Cloudflare Tunnel のような製品と比べ、wgft は意図的に機能を絞っています。ポート転送に専念し、TLS、SSO、証明書、Web アプリ公開機能は他のソフトウェアに任せます。
+## なぜ wgft?
+
+wgft は Pangolin から着想を得ています。Pangolin を使って、VPS を入口に自宅ネットワークへトンネルする構成の便利さを知りました。一方、ゲームサーバなどの raw TCP/UDP 転送だけが目的なら、もっと小さく、ポート転送に特化したツールが欲しいと感じたのが wgft を作ったきっかけです。
+
+そのため wgft は、WireGuard によるトンネル、nftables によるカーネル転送、シンプルな TCP/UDP ルールに機能を絞っています。TLS 終端、SSO、証明書管理、Web アプリ公開は扱わず、リバースプロキシなど別のソフトウェアに任せます。
 
 ## 動作モード
 
@@ -45,8 +49,10 @@ Pangolin や Cloudflare Tunnel のような製品と比べ、wgft は意図的�
 | VPS の root 権限 | 必要 | 不要 |
 | カーネル / nftables | Linux 6.1+、nftables 1.0.6+ | 不要 |
 | 転送経路 | カーネル WireGuard + nftables DNAT | wireguard-go + ユーザー空間 netstack |
-| `wgft server` 停止時 | 既存の転送は継続 | 転送も停止 |
+| wgft プロセス停止・クラッシュ時 | 設定済みの転送は継続 | 転送も停止 |
 | レート制限の判定場所 | カーネル | wgft プロセス |
+
+カーネルモードでは、起動後に wgft プロセスがクラッシュまたは再起動しても転送はカーネル側で継続します。ただし VPS 自体を再起動すると WireGuard / nftables の実行時状態が失われるため、wgft が再起動して転送状態を復旧する必要があります。通常運用では付属の systemd unit を有効にしておけば、VPS 再起動後も自動で復旧します。
 
 VPS で root が使える場合はカーネルモードを使います。root やカーネル WireGuard が使えない場合、または server をコンテナ内だけで動かしたい場合はユーザー空間モードを使います。
 

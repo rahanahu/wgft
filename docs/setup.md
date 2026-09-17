@@ -13,8 +13,10 @@ The home agent does not need root or a TUN device. Server requirements depend on
 | Root on the VPS | Required | Not required |
 | Kernel and nftables | Kernel 6.1+, nftables 1.0.6+ | None |
 | Forwarding path | Kernel WireGuard + nftables DNAT | wireguard-go + userspace netstack |
-| If `wgft server` stops | Existing forwarding continues | Forwarding stops |
+| If the wgft process stops or crashes | Configured forwarding continues | Forwarding stops |
 | Rate-limit evaluation | Kernel | wgft process |
+
+In kernel mode, this resilience applies after wgft has created the WireGuard and nftables runtime state. If the wgft process crashes or restarts, that state remains in the kernel and forwarding continues. A VPS reboot clears the runtime state, so the wgft service must start again to rebuild it; keep the provided systemd service enabled for normal operation.
 
 Use kernel mode when you have root on the VPS. Userspace mode is intended for VPS environments without root, kernels without WireGuard support, or container-only deployments.
 

@@ -13,8 +13,10 @@ VPS 側も自宅側も Linux で動作し、現在は IPv4 のみ対応してい
 | VPS の root 権限 | 必要 | 不要 |
 | カーネル / nftables | Linux 6.1 以上、nftables 1.0.6 以上 | 不要 |
 | 転送経路 | カーネル WireGuard + nftables DNAT | wireguard-go + ユーザー空間 netstack |
-| `wgft server` 停止時 | 既存の転送は継続 | 転送も停止 |
+| wgft プロセス停止・クラッシュ時 | 設定済みの転送は継続 | 転送も停止 |
 | レート制限の判定場所 | カーネル | wgft プロセス |
+
+カーネルモードでは、wgft が WireGuard / nftables の実行時状態を作った後は、wgft プロセスがクラッシュまたは再起動しても、その状態がカーネルに残るため転送は継続します。一方、VPS 自体を再起動すると実行時状態は失われるため、wgft service が再び起動して状態を作り直す必要があります。通常運用では付属の systemd unit を有効にしておいてください。
 
 VPS で root が使えるならカーネルモードを推奨します。ユーザー空間モードは、root が使えない環境、カーネルに WireGuard がない環境、コンテナだけで完結させたい場合向けです。
 
