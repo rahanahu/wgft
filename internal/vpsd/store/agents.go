@@ -36,6 +36,11 @@ type Agent struct {
 // 理由を分けて返すと総当たりの手がかりになるので、外向きには 1 つにまとめる。
 var ErrInvalidToken = errors.New("invalid token")
 
+// ErrAgentAlreadyRegistered は、登録トークンは有効だが、紐付いた名前のエージェントが
+// すでに存在する(仕様 5.1 節)。IssueJoinToken と RevokeAgent が発行済みの未使用トークンを
+// 無効化するので通常は起きないが、起きたときは 500 にせず、呼び出し側が個別に扱えるようにする。
+var ErrAgentAlreadyRegistered = errors.New("agent already registered")
+
 // NewToken は 128 ビットの乱数トークンを base64(URL 安全、パディングなし)で返す。
 func NewToken() (string, error) {
 	b := make([]byte, 16)
@@ -52,6 +57,8 @@ func tokenHash(token string) []byte {
 
 // IssueJoinToken は名前に紐付いた 1 回限りの登録トークンを発行する。
 // 同じ名前のエージェントがすでにいれば拒否する(無効化して名前を空けてから発行する)。
+// 同じ名前に対する以前の未使用トークンはすべて無効化し、新しく発行した 1 本だけを有効にする
+// (発行し直した後は、古い接続文字列が残っていても登録に使えない)。
 func (s *Store) IssueJoinToken(agent string, ttl time.Duration) (string, error) {
 	if agent == "" {
 		return "", errors.New("agent name is empty")
@@ -59,24 +66,38 @@ func (s *Store) IssueJoinToken(agent string, ttl time.Duration) (string, error) 
 	if !ValidAgentName(agent) {
 		return "", fmt.Errorf("agent name %q must match %s (DNS-label style: lowercase letters, digits and hyphens, not starting or ending with a hyphen, 32 characters max)", agent, agentNamePattern)
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
 	var n int
-	if err := s.db.QueryRow("SELECT count(*) FROM agents WHERE name = ?", agent).Scan(&n); err != nil {
+	if err := tx.QueryRow("SELECT count(*) FROM agents WHERE name = ?", agent).Scan(&n); err != nil {
 		return "", err
 	}
 	if n > 0 {
 		return "", fmt.Errorf("agent %q is already registered; revoke it before issuing", agent)
 	}
+	if _, err := tx.Exec("DELETE FROM join_tokens WHERE agent = ? AND used_at IS NULL", agent); err != nil {
+		return "", err
+	}
 	tok, err := NewToken()
 	if err != nil {
 		return "", err
 	}
-	_, err = s.db.Exec("INSERT INTO join_tokens (token_hash, agent, expires_at) VALUES (?, ?, ?)",
-		tokenHash(tok), agent, time.Now().Add(ttl).Unix())
-	return tok, err
+	if _, err := tx.Exec("INSERT INTO join_tokens (token_hash, agent, expires_at) VALUES (?, ?, ?)",
+		tokenHash(tok), agent, time.Now().Add(ttl).Unix()); err != nil {
+		return "", err
+	}
+	return tok, tx.Commit()
 }
 
 // Register は登録トークンを使ってエージェントを作り、恒久トークンを返す(仕様 5.1 節)。
 // name が空ならトークンに紐付いた名前で登録する。name があってトークンに紐付いた名前と違えば ErrInvalidToken。
+// トークンは有効でも、紐付いた名前のエージェントがすでにいれば ErrAgentAlreadyRegistered
+// (IssueJoinToken と RevokeAgent が未使用トークンを無効化するので通常は起きないが、
+// 起きても PRIMARY KEY 違反で 500 にせず、区別できる誤りとして返す)。
 // 返す Agent.Name は確定した名前(トークンに紐付いた名前)。
 // トークンの照合、名前の照合、アドレスの割り当て、トークンの使用済み化を 1 トランザクションで行う。
 func (s *Store) Register(joinToken, name, from string, network netip.Prefix) (permanentToken string, agent *Agent, err error) {
@@ -108,6 +129,13 @@ func (s *Store) Register(joinToken, name, from string, network netip.Prefix) (pe
 		return "", nil, ErrInvalidToken
 	}
 	name = boundName
+	var existing int
+	if err := tx.QueryRow("SELECT count(*) FROM agents WHERE name = ?", name).Scan(&existing); err != nil {
+		return "", nil, err
+	}
+	if existing > 0 {
+		return "", nil, ErrAgentAlreadyRegistered
+	}
 	addr, err := allocateAddress(tx, network)
 	if err != nil {
 		return "", nil, err
@@ -246,16 +274,26 @@ func (s *Store) SetAgentPublicKey(name, publicKey string) error {
 }
 
 // RevokeAgent は恒久トークンを無効化する(エージェントの行ごと消し、アドレスを回収する。仕様 11 節)。
-// 名前は新しい接続文字列で再利用できる。
+// 名前は新しい接続文字列で再利用できる。その名前に対して発行済みの未使用トークンも合わせて
+// 無効化するので、無効化の前に発行され、まだ使われていない古い接続文字列では登録できない。
 func (s *Store) RevokeAgent(name string) error {
-	res, err := s.db.Exec("DELETE FROM agents WHERE name = ?", name)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec("DELETE FROM agents WHERE name = ?", name)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("agent %q not found", name)
 	}
-	return nil
+	if _, err := tx.Exec("DELETE FROM join_tokens WHERE agent = ? AND used_at IS NULL", name); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // PurgeExpiredJoinTokens は期限切れと使用済みの登録トークンを消す。

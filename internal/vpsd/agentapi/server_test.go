@@ -362,6 +362,32 @@ func TestRegisterUniformFailureResponse(t *testing.T) {
 	}
 }
 
+// alreadyRegisteredBackend は Backend の単純な実装。トークンは有効だが、紐付いた名前の
+// エージェントがすでにいる場合を模す(store.ErrAgentAlreadyRegistered)。
+type alreadyRegisteredBackend struct{}
+
+func (alreadyRegisteredBackend) Register(joinToken, name, from string) (string, string, netip.Addr, error) {
+	return "", "", netip.Addr{}, store.ErrAgentAlreadyRegistered
+}
+
+// (f) トークンは有効だが、紐付いた名前のエージェントがすでにいる場合は 409 を返し、500 にしない。
+// store.Register 自体がこの誤りを返すこと(PRIMARY KEY 違反にならないこと)は
+// store パッケージの TestRegisterAgentAlreadyRegistered で確かめている。ここでは
+// ハンドラがその誤りを一様な 401 応答に丸めず、専用の 409 に変換することを確かめる。
+func TestRegisterAlreadyRegisteredNameReturnsConflict(t *testing.T) {
+	s, err := New(newTestStore(t), alreadyRegisteredBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.limiter = newIPLimiter(1000, 1000)
+	srv := httptestServer(t, s)
+
+	resp, body := doRegisterRaw(t, srv, "some-token", "home")
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("status = %d, body = %s, want %d", resp.StatusCode, body, http.StatusConflict)
+	}
+}
+
 // storeRegisterAdapter は *store.Store を agentapi.Backend の形に合わせる(テスト用)。
 type storeRegisterAdapter struct {
 	st      *store.Store

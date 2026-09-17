@@ -154,6 +154,91 @@ func TestJoinTokenExpiry(t *testing.T) {
 	}
 }
 
+// 名前に対して 2 本目のトークンを発行すると、1 本目(未使用)は無効化され、新しい方だけが使える。
+func TestIssueJoinTokenSupersedesPreviousUnused(t *testing.T) {
+	s := openTemp(t)
+	net := netip.MustParsePrefix("10.200.0.0/24")
+
+	tok1, err := s.IssueJoinToken("home", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok2, err := s.IssueJoinToken("home", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok1 == tok2 {
+		t.Fatal("expected two distinct tokens")
+	}
+	// 1 本目はもう無効(古いトークンで登録しても、後から 2 本目で登録したときに
+	// PRIMARY KEY 違反にならない)
+	if _, _, err := s.Register(tok1, "home", "203.0.113.1", net); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("superseded token must be invalid: %v", err)
+	}
+	if _, a, err := s.Register(tok2, "home", "203.0.113.1", net); err != nil || a.Name != "home" {
+		t.Fatalf("newest token must register: %+v %v", a, err)
+	}
+}
+
+// 恒久トークンの無効化は、その名前に対する発行済みの未使用トークンも無効化する。
+// (レースや移行前のデータで、登録済みの名前に対する未使用トークンが残っている場合を
+// 直接作り、無効化がそれを掃除することを確かめる)
+func TestRevokeAgentInvalidatesOutstandingJoinToken(t *testing.T) {
+	s := openTemp(t)
+	net := netip.MustParsePrefix("10.200.0.0/24")
+
+	tok1, err := s.IssueJoinToken("home", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Register(tok1, "home", "203.0.113.1", net); err != nil {
+		t.Fatal(err)
+	}
+	// 未使用の残存トークンを直接作る(通常は起きないが、レースや旧データを模す)
+	leftover, err := NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO join_tokens (token_hash, agent, expires_at) VALUES (?, ?, ?)",
+		tokenHash(leftover), "home", time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeAgent("home"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Register(leftover, "home", "203.0.113.2", net); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("leftover token must be invalid after revoke: %v", err)
+	}
+}
+
+// 有効なトークンでも、紐付いた名前のエージェントがすでにいれば、PRIMARY KEY 違反の
+// 生の SQL 誤りではなく ErrAgentAlreadyRegistered を返す。
+func TestRegisterAgentAlreadyRegistered(t *testing.T) {
+	s := openTemp(t)
+	net := netip.MustParsePrefix("10.200.0.0/24")
+
+	tok1, err := s.IssueJoinToken("home", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Register(tok1, "home", "203.0.113.1", net); err != nil {
+		t.Fatal(err)
+	}
+	// 登録済みの名前に対する 2 本目の有効なトークンを直接作る(レースや旧データを模す。
+	// IssueJoinToken はエージェントが存在する名前への発行を拒否するので、通常のこの経路では作れない)
+	extra, err := NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO join_tokens (token_hash, agent, expires_at) VALUES (?, ?, ?)",
+		tokenHash(extra), "home", time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Register(extra, "home", "203.0.113.2", net); !errors.Is(err, ErrAgentAlreadyRegistered) {
+		t.Errorf("register with a name that already has an agent: %v, want ErrAgentAlreadyRegistered", err)
+	}
+}
+
 func TestAllocateAddressExhaustion(t *testing.T) {
 	s := openTemp(t)
 	net := netip.MustParsePrefix("10.200.0.0/30") // .1 が vpsd、.2 だけ空き、.3 はブロードキャスト

@@ -19,6 +19,8 @@ type Backend interface {
 	// 確定した名前(name が空ならトークンに紐付いた名前)を返す。
 	// トークンが無効(未知・期限切れ・使用済み)、または name がトークンに紐付いた名前と違うときは store.ErrInvalidToken
 	// (理由は分けない。総当たりの手がかりにしない)。
+	// トークンは有効だが、紐付いた名前のエージェントがすでにいるときは store.ErrAgentAlreadyRegistered
+	// (こちらは正規のトークンを持つ側への応答なので、理由を分けて構わない)。
 	Register(joinToken, name, from string) (permanentToken, confirmedName string, addr netip.Addr, err error)
 }
 
@@ -81,6 +83,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrInvalidToken) {
 		// 理由は分けない(総当たりの手がかりにしない)
 		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return
+	}
+	if errors.Is(err, store.ErrAgentAlreadyRegistered) {
+		http.Error(w, "agent already registered", http.StatusConflict)
 		return
 	}
 	if err != nil {
