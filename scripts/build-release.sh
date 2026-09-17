@@ -19,7 +19,7 @@ for arch in "${ARCHES[@]}"; do
   bin="$OUT/wgft-linux-$arch"
   echo "building $bin ($VERSION)"
   CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-    go build -trimpath -ldflags "-s -w -X github.com/rahanahu/wgft/internal/vpsd.Version=$VERSION" \
+    go build -trimpath -ldflags "-s -w -X github.com/rahanahu/wgft/internal/buildinfo.Version=$VERSION" \
     -o "$bin" ./cmd/wgft
   ( cd "$OUT" && sha256sum "$(basename "$bin")" > "$(basename "$bin").sha256" )
 done

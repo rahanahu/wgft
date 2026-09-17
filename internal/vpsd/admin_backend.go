@@ -3,6 +3,7 @@ package vpsd
 import (
 	"errors"
 	"fmt"
+	"github.com/rahanahu/wgft/internal/buildinfo"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -273,7 +274,7 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 		ipf = string(b)
 	}
 	return admin.ServerInfo{
-		Version:          Version,
+		Version:          buildinfo.Version,
 		Mode:             d.opts.Mode,
 		StartedAt:        d.startedAt.UTC().Format(time.RFC3339),
 		WGInterface:      d.opts.WGInterface,

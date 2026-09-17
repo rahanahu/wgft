@@ -12,8 +12,8 @@ import (
 	"github.com/rahanahu/wgft/internal/agent"
 )
 
-// agentConfigPath は agent の dotenv 既定(proposal 3.1 節)。
-const agentConfigPath = "/etc/wgft/agent.env"
+// agentConfigPath は agent の dotenv 既定(仕様 11a 節)。置き場は OS ごと(paths_*.go)。
+var agentConfigPath = joinPath(defaultConfigDir(), "agent.env")
 
 // ago は RFC3339 の時刻を「N 秒前」にする。空なら "-"。
 func ago(s string) string {
@@ -30,7 +30,7 @@ func ago(s string) string {
 // agentSpecs は agent run の設定項目。
 func agentSpecs() []spec {
 	return []spec{
-		{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: "/var/lib/wgft"},
+		{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir()},
 		{Env: "WGFT_JOIN", Flag: "join", Default: "", Secret: true},
 		{Env: "WGFT_NAME", Flag: "name", Default: ""},
 	}
@@ -38,7 +38,7 @@ func agentSpecs() []spec {
 
 // agentCredentialsPath は WGFT_DATA_DIR から agent.json (認証情報) のパスを決める(home 側コマンド用)。
 func agentCredentialsPath(cmd *cobra.Command) (string, error) {
-	c, err := loadConfig(cmd, []spec{{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: "/var/lib/wgft"}}, resolveConfigPath(cmd, agentConfigPath))
+	c, err := loadConfig(cmd, []spec{{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir()}}, resolveConfigPath(cmd, agentConfigPath))
 	if err != nil {
 		return "", err
 	}
@@ -91,7 +91,7 @@ optional and normally left unset, since the join string is already bound to a na
 		},
 	}
 	rf := run.Flags()
-	rf.String("data-dir", "/var/lib/wgft", "data dir, env WGFT_DATA_DIR; holds agent.json")
+	rf.String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR; holds agent.json")
 	rf.String("join", "", "join string wgft://host:port/token#sha256:..., env WGFT_JOIN")
 	rf.String("name", "", "agent name, env WGFT_NAME; optional, the join string is already bound to a name")
 	rf.String("config", agentConfigPath, "dotenv config file")
@@ -113,7 +113,7 @@ optional and normally left unset, since the join string is already bound to a na
 			return nil
 		},
 	}
-	pubkey.Flags().String("data-dir", "/var/lib/wgft", "data dir, env WGFT_DATA_DIR")
+	pubkey.Flags().String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR")
 	pubkey.Flags().String("config", agentConfigPath, "dotenv config file")
 
 	rotate := &cobra.Command{
@@ -133,7 +133,7 @@ optional and normally left unset, since the join string is already bound to a na
 			return nil
 		},
 	}
-	rotate.Flags().String("data-dir", "/var/lib/wgft", "data dir, env WGFT_DATA_DIR")
+	rotate.Flags().String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR")
 	rotate.Flags().String("config", agentConfigPath, "dotenv config file")
 
 	// --- VPS 側(管理用 API 経由) ---

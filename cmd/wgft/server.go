@@ -1,6 +1,9 @@
+//go:build linux
+
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -8,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/vpsd"
+	"github.com/rahanahu/wgft/internal/vpsd/wg"
 )
 
 // serverSpecs は server の設定項目(WGFT_ 名とフラグ別名。仕様 11a 節)。
@@ -177,4 +181,10 @@ reverted automatically; it only prints a list to revert by hand.`,
 	f.BoolVar(&o.Yes, "yes", false, "skip the --purge confirmation")
 	f.BoolVar(&o.Adopt, "adopt-existing", false, "remove wg even when the key does not match or the server database is missing")
 	return cmd
+}
+
+// isStartupRefusal は、設定が原因の起動中止(他人の wg インタフェース、ポートやアドレスの衝突)かを返す。
+func isStartupRefusal(err error) bool {
+	var refusal *wg.StartupRefusal
+	return errors.As(err, &refusal)
 }

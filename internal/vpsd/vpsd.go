@@ -165,9 +165,6 @@ func detectAdminTailscale(ctx context.Context) (ip, dnsName, detail, other strin
 	return "", "", "", iother
 }
 
-// Version はビルド時に -X で埋める(scripts/build-release.sh)。
-var Version = "dev"
-
 // Options は vpsd の起動オプション。
 type Options struct {
 	DBPath       string

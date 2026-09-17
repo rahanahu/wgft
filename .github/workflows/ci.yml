@@ -32,6 +32,14 @@ jobs:
         run: go build ./...
       - name: test
         run: go test ./...
+      # The agent and the CLI also build for Windows and macOS (the server is Linux only). Nothing
+      # is run there; this only keeps those builds from breaking.
+      - name: cross-build for windows and darwin
+        run: |
+          for target in windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/wgft
+            GOOS=${target%/*} GOARCH=${target#*/} go vet ./cmd/... ./internal/agent/... ./internal/flock/...
+          done
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
       - name: govulncheck

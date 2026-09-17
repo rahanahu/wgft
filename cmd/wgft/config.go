@@ -13,8 +13,8 @@ import (
 // どのプロセスも WGFT_* の環境変数で設定する。ファイルはその dotenv、フラグは別名。
 // 優先順位はフラグ > 環境変数 > ファイル > 既定。有効な設定を出所付きで印字する。
 
-// defaultConfigPath は WGFT_CONFIG / --config が無いときに読む dotenv。
-const defaultConfigPath = "/etc/wgft/server.env"
+// defaultConfigPath は WGFT_CONFIG / --config が無いときに読む dotenv。置き場は OS ごと(paths_*.go)。
+var defaultConfigPath = joinPath(defaultConfigDir(), "server.env")
 
 // spec は 1 つの設定項目。Env は WGFT_ 名、Flag は同義のフラグ名、Default は既定の文字列表現。
 // Secret が真なら印字で伏せる。Slice はコンマ区切りの複数値。

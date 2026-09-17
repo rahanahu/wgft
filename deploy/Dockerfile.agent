@@ -15,7 +15,7 @@ COPY . .
 # VERSION is what `wgft --version` prints; the release workflow passes the git tag.
 ARG VERSION=dev
 ARG TARGETOS TARGETARCH
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X github.com/rahanahu/wgft/internal/vpsd.Version=$VERSION" -o /out/wgft ./cmd/wgft
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X github.com/rahanahu/wgft/internal/buildinfo.Version=$VERSION" -o /out/wgft ./cmd/wgft
 # License text of every module linked into the binary, shipped next to LICENSE in the image.
 RUN scripts/third-party-licenses.sh /out/THIRD_PARTY_LICENSES.txt
 # Pre-create the data dir owned by the distroless "nonroot" user (65532:65532). The final stage

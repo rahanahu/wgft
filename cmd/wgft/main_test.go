@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/vpsd"
+	"github.com/rahanahu/wgft/internal/buildinfo"
 )
 
 // --version と `wgft version` はどちらもバージョン文字列だけを出す(前後に
@@ -20,8 +20,8 @@ func TestVersionFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.TrimSpace(buf.String())
-	if got != vpsd.Version {
-		t.Errorf("--version = %q, want %q", got, vpsd.Version)
+	if got != buildinfo.Version {
+		t.Errorf("--version = %q, want %q", got, buildinfo.Version)
 	}
 }
 
@@ -34,7 +34,7 @@ func TestVersionSubcommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.TrimSpace(buf.String())
-	if got != vpsd.Version {
-		t.Errorf("version = %q, want %q", got, vpsd.Version)
+	if got != buildinfo.Version {
+		t.Errorf("version = %q, want %q", got, buildinfo.Version)
 	}
 }

@@ -1,4 +1,4 @@
-// Package flock は、隣の .lock ファイルへの排他 flock(仕様 9 節)。
+// Package flock は、隣の .lock ファイルへの排他ロック(仕様 9 節)。Unix では flock、Windows では LockFileEx。
 // vpsd と agent の両方が、稼働中の検出と外部からの書き換え防止に使う。
 // 状態ファイル自体は rename で置き換わって inode が変わるので、別の .lock に flock をかけ、
 // プロセスが終わるまで開いたままにする。
@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"syscall"
 )
 
 // Lock は取得済みの排他ロック。
@@ -28,9 +27,9 @@ func Acquire(statePath string) (*Lock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lock file: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := tryLock(f); err != nil {
 		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, ErrLocked) {
 			return nil, ErrLocked
 		}
 		return nil, fmt.Errorf("flock: %w", err)

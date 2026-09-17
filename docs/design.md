@@ -622,6 +622,8 @@ systemd の unit では `EnvironmentFile=` を使わない。バイナリが既�
 
 データの置き場所は `WGFT_DATA_DIR`(既定 `/var/lib/wgft`)に統一する。この下に `vpsd` は SQLite ファイルを、`agent` は状態ファイルを置く(9 節)。
 
+既定の置き場所は OS ごとに決める。Linux は上のとおりである。Windows は設定ファイルもデータも `%ProgramData%\wgft` に、macOS は `~/Library/Application Support/wgft` に置く。どの OS でも `--config` と `WGFT_DATA_DIR` で変更できる。Linux 以外のバイナリが持つのはエージェントと CLI だけで、`server` サブコマンドは「Linux でしか動かない」と答えて終わる。`vpsd` はカーネルの WireGuard と nftables に依存するためである。エージェントは wireguard-go と netstack だけで動くので OS を選ばない設計だが、Windows と macOS は現時点ではビルドできることを CI で確かめているだけで、実機での登録、トンネル、中継、再起動からの復旧は未確認である。確認できるまで Releases には含めず、README にも対応とは書かない。二重起動を止める排他ロック(9 節)は、Unix では `flock`、Windows では `LockFileEx` で取り、どちらもファイルを閉じるかプロセスが終わると消える。
+
 設定と状態の線引きは、「変えるのに片付けが要る、または保存済みの値と矛盾しうるもの」を状態として SQLite に置き、それ以外を設定としてファイルに置く、という基準による。エンドポイントやポート、MTU などは編集して再起動すれば変わる設定であり、サーバ鍵、証明書、ルール、エージェントの情報は状態である。動作モード(`WGFT_MODE`)と wg のアドレス帯(`WGFT_WG_ADDRESS`)は値そのものは設定だが、初回起動時に SQLite へ記録し、以後は起動のたびに env の値と照合するという扱いを受ける。どちらも変えると片付けが要る、または保存済みの値と矛盾しうるためである。設定を状態として持たない理由は、人がファイルとして読め、構成管理に置け、SQLite が壊れても復旧できる状態を保つためである。
 
 `WGFT_MODE` は常に指定する。省略すると `kernel` か `userspace` かを指定するよう求めて起動を止め、環境を見て推測することはしない。初回起動では SQLite に記録し、2 回目以降は env の値と SQLite の値を照合する。一致すれば通常どおり起動する。食い違った場合は関門を通し、通れば記録を書き換えて起動し、通らなければ起動を拒否する。関門の中身は次のとおりである。`kernel` から `userspace` へ切り替えるときは、wg インタフェースと `table inet wgft` の残骸が無いことを確かめる。残骸があれば、先に `teardown` するよう案内して拒否する。残骸の有無を確かめるには `CAP_NET_ADMIN` が要るため、確かめられない環境では「確認できない」と警告したうえで、wireguard-go の UDP bind を試みる。この bind がカーネル側の `wgft0` に既に使われているポートと衝突して失敗した場合は、残骸の疑いとして host 上での `teardown` を案内する。`userspace` から `kernel` へ切り替えるときは残骸が生じないため、そのまま通す。モードの記録が無い既存の SQLite は、これまで `kernel` しか存在しなかったことから `kernel` とみなして記録する。`wgft server teardown` はモードの記録に触れない。切り替えの判断は起動時の照合と関門だけで完結する。
@@ -678,3 +680,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - エージェント用 API の HTTP/2 を無効化(2026-09-18):11 節に、TLS 1.2 以上かつ HTTP/1.1 だけで応じること、鍵交換の曲線は Go の既定に従うことを追記
 - conntrack の表の上限を `server check` で表示(2026-09-18):6.1 節に、`nf_conntrack_max` は `vpsd` が変えないこと、`server check` が件数と上限を表示して 65536 未満なら警告すること、レート制限で落としたフローは表を消費しないことを追記
 - systemd の unit を非 root とサンドボックスに変更(2026-09-18):10.3 節に、`DynamicUser=yes` と 2 つの capability で動かすこと、`ProtectKernelTunables` を付けない理由、旧い root の unit からの更新でデータが引き継がれることを追記。11 節と 10.3 節のソケットの所有者の記述を追随。ラボの VM で実際の systemd の unit として起動し、カーネル DNAT の TCP と UDP、443 のプロキシ、`ip_forward` の書き込み、deny、再起動、旧 unit からの更新、`ProtectKernelModules` の下での WireGuard モジュールの自動ロード、撤去を確認。コンテナの compose には `cap_drop: [ALL]`、`no-new-privileges`、`read_only` を追加し、Docker で登録、転送、443 の待ち受けを確認
+- エージェントと CLI を Windows と macOS でビルドできるようにした(2026-09-18):11a 節に OS ごとの既定の置き場所、Linux 以外では `server` を持たないこと、排他ロックの OS ごとの実装、実機では未確認であることを追記。版数の埋め込み先を `internal/vpsd` から OS に依存しない `internal/buildinfo` に移した

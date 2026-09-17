@@ -3,15 +3,13 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
 
-	"github.com/rahanahu/wgft/internal/vpsd"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
+	"github.com/rahanahu/wgft/internal/buildinfo"
 )
 
 // exitConfigRefusal は、他人の wg インタフェースやポート・アドレスの衝突で
@@ -27,7 +25,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: false,
 	}
-	// vpsd.Version is embedded at build time with -X (scripts/build-release.sh,
+	// buildinfo.Version is embedded at build time with -X (scripts/build-release.sh,
 	// .goreleaser.yaml). --version and `wgft version` both print the bare
 	// string (e.g. "v0.1.0" or "dev"), matching what the release assets use.
 	root.SetVersionTemplate("{{.Version}}\n")
@@ -54,22 +52,21 @@ func newVersionCmd() *cobra.Command {
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
-		var refusal *wg.StartupRefusal
-		if errors.As(err, &refusal) {
+		if isStartupRefusal(err) {
 			os.Exit(exitConfigRefusal)
 		}
 		os.Exit(1)
 	}
 }
 
-// effectiveVersion は -X で埋めた vpsd.Version を返す。埋められていない(`go install ...@v0.1.0` で
+// effectiveVersion は -X で埋めた buildinfo.Version を返す。埋められていない(`go install ...@v0.1.0` で
 // 入れた)場合は、モジュールの版をビルド情報から取る。それも無ければ dev のまま。
 func effectiveVersion() string {
-	if vpsd.Version != "dev" {
-		return vpsd.Version
+	if buildinfo.Version != "dev" {
+		return buildinfo.Version
 	}
 	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		return bi.Main.Version
 	}
-	return vpsd.Version
+	return buildinfo.Version
 }
