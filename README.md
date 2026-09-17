@@ -72,7 +72,7 @@ Browse to `http://localhost:8686` while the session is open. If root cannot log 
 
 ## Requirements
 
-Both sides run on Linux. The server additionally needs kernel 6.1 or newer, nftables 1.0.6 or newer (Debian 12, Ubuntu 24.04, or later), and root. The agent needs nothing else: no root, no TUN device.
+Both sides run on Linux. The server additionally needs kernel 6.1 or newer, nftables 1.0.6 or newer (Debian 12, Ubuntu 24.04, or later), and root. WireGuard itself does not have to be installed: the kernel module ships with those kernels, and the server drives it directly without `wg` or `wg-quick`. On a VPS whose kernel lacks the module, the server stops with a message saying so, and the userspace mode described below is the way to run it. The agent needs nothing else: no root, no TUN device.
 
 IPv4 only. If you want to reach the VPS by name, point a domain at it.
 

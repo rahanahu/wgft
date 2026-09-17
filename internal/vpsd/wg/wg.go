@@ -4,6 +4,7 @@
 package wg
 
 import (
+	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/vpsd/check"
 	"github.com/rahanahu/wgft/proto"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -101,6 +103,11 @@ func Ensure(cfg Config) (changes []string, err error) {
 	link, err := netlink.LinkByName(cfg.Interface)
 	if _, notFound := err.(netlink.LinkNotFoundError); notFound {
 		if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: cfg.Interface, MTU: cfg.MTU}}); err != nil {
+			if errors.Is(err, unix.EOPNOTSUPP) {
+				// カーネルが wireguard のリンク種別を知らない(モジュールが無い、ロードできない)。
+				// 再起動しても直らないので、設定起因の中止として扱う(仕様 9 節)。
+				return nil, &StartupRefusal{Reason: fmt.Sprintf("cannot create %s: this kernel has no WireGuard support (the wireguard module is missing or cannot be loaded; `modprobe wireguard` shows why). Kernel mode needs it; on a VPS without it, run the userspace mode instead (WGFT_MODE=userspace)", cfg.Interface)}
+			}
 			return nil, fmt.Errorf("cannot create %s: %w", cfg.Interface, err)
 		}
 		created = true

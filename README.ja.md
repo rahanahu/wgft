@@ -72,7 +72,7 @@ ssh -L 8686:/run/wgft/admin.sock root@vps
 
 ## 動作環境
 
-VPS 側も自宅側も Linux で動きます。加えて server 側には、カーネル 6.1 以上、nftables 1.0.6 以上 (Debian 12、Ubuntu 24.04 以降)、root 権限が必要です。agent 側に追加の要件はなく、root 権限も TUN デバイスも必要ありません。
+VPS 側も自宅側も Linux で動きます。加えて server 側には、カーネル 6.1 以上、nftables 1.0.6 以上 (Debian 12、Ubuntu 24.04 以降)、root 権限が必要です。WireGuard のパッケージを入れる必要はありません。カーネルモジュールはこれらのカーネルに含まれていて、server は `wg` や `wg-quick` を使わずにカーネルを直接操作します。カーネルにモジュールが無い VPS では、server はその旨を表示して止まります。その場合は後述のユーザー空間モードで動かします。agent 側に追加の要件はなく、root 権限も TUN デバイスも必要ありません。
 
 対応するのは IPv4 のみです。名前でアクセスさせる場合は、VPS を指すドメインが必要です。
 
