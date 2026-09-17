@@ -8,7 +8,7 @@ English | [日本語](README.ja.md)
 
 wgft forwards traffic that arrives at a VPS to services on your home network through a WireGuard tunnel. The agent at home dials out to the VPS, so you never open a port on your router, and it works behind CGNAT or double NAT.
 
-The VPS only rewrites the destination address and passes packets on unchanged. A UDP game server and an HTTPS site are the same one-line rule, and TLS certificates and authentication stay with the reverse proxy at home.
+The VPS passes traffic on without looking inside it. A UDP game server and an HTTPS site are the same one-line rule, and TLS certificates and authentication stay with the reverse proxy at home.
 
 ```mermaid
 flowchart LR
@@ -49,12 +49,27 @@ Pick Pangolin when you want to expose web services with authentication and certi
 
 ## What you get
 
-- Kernel-path forwarding: nftables DNAT sends packets straight into the tunnel, with no relay process on the VPS. wgft owns exactly one nftables table and leaves yours alone
+- Two modes: kernel mode when you have root on the VPS, userspace mode when you do not. [Modes](#modes) compares them
+- Kernel-path forwarding: in kernel mode, nftables DNAT sends packets straight into the tunnel, with no relay process on the VPS. wgft owns exactly one nftables table and leaves yours alone
 - Per-rule source control: deny lists, allow lists, and rate limits (new flows, packets, per source). A deny cuts flows already in progress
 - Rule changes without disconnects: adding, removing, or resizing a rule leaves unrelated sessions running
 - Real client IPs at home: a TCP rule in proxy mode adds a PROXY protocol v2 header, which any reverse proxy that speaks it can read
 - Stolen-credential warnings: if the home credentials (`agent.json`) are used from a second place, the dashboard flags it as a source IP mismatch or flapping
 - Clean uninstall: `wgft server teardown` deletes only what wgft created and prints whatever is left for you to revert by hand
+
+## Modes
+
+`wgft server`, the side that runs on the VPS, has two modes. `WGFT_MODE` selects one, and the first start records it. `wgft agent` at home is the same in both, set up the same way.
+
+| | Kernel mode `kernel` | Userspace mode `userspace` |
+|---|---|---|
+| How it forwards | Kernel WireGuard and nftables DNAT | wireguard-go and a netstack inside the wgft process |
+| Root on the VPS | Required | Not required |
+| Kernel and nftables | Kernel 6.1 or newer, nftables 1.0.6 or newer | None |
+| When `wgft server` stops | The WireGuard interface and the nftables table stay, so forwarding continues | Forwarding stops |
+| Where limits are evaluated | In the kernel. Excess traffic never reaches the wgft process | In the wgft process. Dropping excess traffic costs CPU too |
+
+With root on the VPS, use kernel mode. Userspace mode is for a VPS without root, for a kernel without the WireGuard module, and for setups that should live entirely in a container. In userspace mode the `packet` rate limit applies to UDP only. In step 2 of the setup, the systemd path is kernel mode and the Docker path is userspace mode. [docs/design.md](docs/design.md) section 6.3 has the design-level differences.
 
 ## Web UI
 
@@ -72,7 +87,7 @@ Browse to `http://localhost:8686` while the session is open. If root cannot log 
 
 ## Requirements
 
-Both sides run on Linux. The server additionally needs kernel 6.1 or newer, nftables 1.0.6 or newer (Debian 12, Ubuntu 24.04, or later), and root. WireGuard itself does not have to be installed: the kernel module ships with those kernels, and the server drives it directly without `wg` or `wg-quick`. On a VPS whose kernel lacks the module, the server stops with a message saying so, and the userspace mode described below is the way to run it. The agent needs nothing else: no root, no TUN device.
+Both sides run on Linux. A kernel-mode server additionally needs kernel 6.1 or newer, nftables 1.0.6 or newer, and root; Debian 12, Ubuntu 24.04 and later qualify. A userspace-mode server needs nothing beyond that, and a host that runs Docker is enough. The rest of this paragraph is about kernel mode. WireGuard itself does not have to be installed: the kernel module ships with those kernels, and the server drives it directly without `wg` or `wg-quick`. On a VPS whose kernel lacks the module, the server stops with a message saying so, and userspace mode is the way to run it. The agent needs nothing else: no root, no TUN device.
 
 IPv4 only. If you want to reach the VPS by name, point a domain at it.
 
@@ -150,7 +165,7 @@ Once the server is running, the [Web UI](#web-ui) can take the place of the comm
 
 *Docker*
 
-The server can also run as a container in the userspace mode, instead of the systemd unit above. It needs no root, no kernel WireGuard, and no nftables. `vpsd` holds the tunnel in wireguard-go and a netstack inside its own process, the same design the agent already uses. See docs/design.md section 6.3 for the full comparison with kernel mode; the short version is that stopping the container stops forwarding, where kernel mode leaves wg0 and the nftables table running through a restart. TCP is terminated inside the wgft process rather than passed through unchanged. Flood resistance is that of any userspace proxy. `packet_rate` limits UDP datagrams only, not TCP.
+The server can also run as a container in userspace mode, instead of the systemd unit above. The image has `WGFT_MODE=userspace` set. It needs no root, no kernel WireGuard, and no nftables. [Modes](#modes) compares it with kernel mode.
 
 Clone the repository for the compose file, edit `WGFT_WG_ENDPOINT` in [deploy/server.compose.yaml](deploy/server.compose.yaml), and bring it up. The compose file publishes ports with `ports:`, and every forwarded port has to be listed there. `network_mode: host` publishes everything without editing the list, but ports below 1024 are then out of reach, because the container keeps the host's restriction on them. With the `ports:` list, 443 works. Both were checked with the image built locally.
 
