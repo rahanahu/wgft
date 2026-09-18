@@ -125,7 +125,7 @@ func emit(e emitter, rules []proto.Rule, cfg Config) error {
 		agent, ok := cfg.AgentAddr[r.Agent]
 		if !ok {
 			if cfg.Logf != nil {
-				cfg.Logf("rule %s: agent %q is not registered, skipping", r.ID, r.Agent)
+				cfg.Logf("nftables: rule %s: agent %q is not registered, skipping", r.ID, r.Agent)
 			}
 			continue
 		}

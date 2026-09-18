@@ -124,6 +124,9 @@ type BatchRequest struct {
 	// 間に他経路(別の CLI 呼び出しや別タブの Web UI)が割り込む競合を塞ぐためのもの
 	// (仕様 5.4、10.1 節)。Web UI の読み込み確認・適用はこれを使う(webui_import.go)。
 	ExpectedDigest string `json:"expected_digest,omitempty"`
+	// Op はこの変更の出どころ(ログの識別用。例 "ui import"、"cli rule add")。
+	// 空なら Batch の実装が既定("api")を補う。
+	Op string `json:"op,omitempty"`
 }
 
 // ErrBatchConflict は Backend.Batch が ExpectedDigest の不一致で拒んだときの誤り。

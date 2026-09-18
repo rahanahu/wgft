@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -164,5 +166,55 @@ func TestRecoverReplacesPinAndToken(t *testing.T) {
 	}
 	if saved.WGPrivateKey != "keep" {
 		t.Errorf("wg private key changed: %q", saved.WGPrivateKey)
+	}
+}
+
+// versionOrDev と nameOrUnregistered は起動ログの 1 行(wgft <version> agent starting: name <name>, ...)を組み立てる材料。
+func TestVersionOrDev(t *testing.T) {
+	if got := versionOrDev(""); got != "dev" {
+		t.Errorf("versionOrDev(\"\") = %q, want dev", got)
+	}
+	if got := versionOrDev("v1.2.3"); got != "v1.2.3" {
+		t.Errorf("versionOrDev(v1.2.3) = %q, want v1.2.3", got)
+	}
+}
+
+func TestNameOrUnregistered(t *testing.T) {
+	if got := nameOrUnregistered(""); got != "not registered yet" {
+		t.Errorf("nameOrUnregistered(\"\") = %q, want %q", got, "not registered yet")
+	}
+	if got := nameOrUnregistered("home"); got != "home" {
+		t.Errorf("nameOrUnregistered(home) = %q, want home", got)
+	}
+}
+
+// logStatus は 30 秒ごとに呼ばれる定期ログ(heartbeat と同じ内容)なので、状態が変わらない間は黙り、
+// ジャーナルを埋めない(仕様の運用ログの節)。
+func TestLogStatusDedup(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0) // 時刻を外し、行数だけを見る
+	defer func() { log.SetOutput(old); log.SetFlags(oldFlags) }()
+
+	rt := &runtime{}
+	rt.logStatus()
+	first := buf.String()
+	if first == "" {
+		t.Fatal("first call must log the status")
+	}
+
+	rt.logStatus() // 状態が同じなら何も足さない
+	if got := buf.String(); got != first {
+		t.Errorf("unchanged status logged again:\nfirst: %q\nafter: %q", first, got)
+	}
+
+	rt.mu.Lock()
+	rt.gen = 5
+	rt.mu.Unlock()
+	rt.logStatus() // 世代が変われば出す
+	if got := buf.String(); got == first {
+		t.Error("changed status (generation) was not logged")
 	}
 }

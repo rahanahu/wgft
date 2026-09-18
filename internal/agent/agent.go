@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/netip"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"sync"
@@ -31,6 +32,7 @@ type Options struct {
 	Join            string         // 接続文字列(WGFT_JOIN か --join)。初回登録に使う
 	Limits          flowcap.Limits // 同時フロー数のプロセス全体の上限(仕様 7 節)。ゼロ値は既定値
 	Name            string         // エージェント名(WGFT_NAME か --name)。任意。接続文字列の発行時の名前に紐付いているので、与えなければトークンに紐付いた名前で登録される
+	Version         string         // 起動ログに出す wgft の版(cmd 側の effectiveVersion())。空なら "dev" として出す
 }
 
 // runtime は動いているエージェント。全体状態を「宣言された状態に収束させる」方式で適用する。
@@ -50,6 +52,10 @@ type runtime struct {
 	streamMu     sync.Mutex
 	streamCancel context.CancelFunc // 今の stream 接続を切る(rotate-key で張り直すとき)
 	reconnectNow bool               // 切った直後はバックオフせずに繋ぎ直す
+
+	// lastStatusLines は logStatus が前回出した内容(30 秒ごとの定期ログの重複を防ぐ。Run のループの
+	// 単一の goroutine からしか呼ばれないので、別途の mutex は持たない)
+	lastStatusLines []string
 }
 
 // Run は認証情報ファイルを読み、登録を確かめ、トンネルとリスナーを立て、stream に繋ぎ、シグナルまで動く。
@@ -65,6 +71,7 @@ func Run(opts Options) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("wgft %s agent starting: name %s, data dir %s", versionOrDev(opts.Version), nameOrUnregistered(f.Name), filepath.Dir(opts.CredentialsPath))
 	created, err := f.EnsureKey()
 	if err != nil {
 		return err
@@ -140,11 +147,11 @@ func (rt *runtime) apply(st *proto.State) error {
 		rt.closeLocked()
 		cfg, err := tunnelConfig(rt.priv, st.WG)
 		if err != nil {
-			return err
+			return fmt.Errorf("wireguard: %w", err)
 		}
 		tun, err := tunnel.New(cfg)
 		if err != nil {
-			return err
+			return fmt.Errorf("wireguard: %w", err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		go tun.Run(ctx)
@@ -220,11 +227,21 @@ func (rt *runtime) heartbeat() proto.Heartbeat {
 	return hb
 }
 
+// logStatus は 30 秒ごとに呼ばれる(Run のティッカー)。毎回は出さず、前回のログと同じ内容なら黙る
+// (トンネルとルールの状態が変わらない定常運転でジャーナルを埋めないため)。
 func (rt *runtime) logStatus() {
 	hb := rt.heartbeat()
-	log.Printf("generation %d tunnel=%s %s endpoint=%s", hb.Generation, hb.Tunnel.State, hb.Tunnel.Reason, hb.Tunnel.Endpoint)
+	lines := make([]string, 0, 1+len(hb.Rules))
+	lines = append(lines, fmt.Sprintf("generation %d tunnel=%s %s endpoint=%s", hb.Generation, hb.Tunnel.State, hb.Tunnel.Reason, hb.Tunnel.Endpoint))
 	for _, r := range hb.Rules {
-		log.Printf("rule %s %s %s", r.ID, r.State, r.Reason)
+		lines = append(lines, fmt.Sprintf("rule %s %s %s", r.ID, r.State, r.Reason))
+	}
+	if reflect.DeepEqual(lines, rt.lastStatusLines) {
+		return
+	}
+	rt.lastStatusLines = lines
+	for _, l := range lines {
+		log.Printf("%s", l)
 	}
 }
 
@@ -349,6 +366,23 @@ func tunnelConfig(priv wgtypes.Key, w proto.WGConfig) (tunnel.Config, error) {
 		Address: addr.Addr(), ServerAddress: server, MTU: w.MTU,
 		Keepalive: time.Duration(w.Keepalive) * time.Second,
 	}, nil
+}
+
+// versionOrDev は起動ログに出す版。cmd 側から渡らなければ(単体テストなど)"dev" とする。
+func versionOrDev(v string) string {
+	if v == "" {
+		return "dev"
+	}
+	return v
+}
+
+// nameOrUnregistered は起動ログに出すエージェント名。まだ登録前(認証情報ファイルに名前がない)なら
+// その旨を出す(仕様 5.1 節の初回登録より前)。
+func nameOrUnregistered(name string) string {
+	if name == "" {
+		return "not registered yet"
+	}
+	return name
 }
 
 // PublicKey は認証情報ファイルの鍵(なければ生成して保存)の公開鍵を返す。

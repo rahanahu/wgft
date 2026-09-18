@@ -65,6 +65,11 @@ func (d *Daemon) SetPublicKey(agent string, key wgtypes.Key) error {
 	if err := d.st.SetAgentPublicKey(agent, key.String()); err != nil {
 		return err
 	}
+	if cur.PublicKey == "" {
+		log.Printf("agent %s declared its public key", agent)
+	} else {
+		log.Printf("agent %s rotated its public key", agent)
+	}
 	return d.reconcileWG()
 }
 

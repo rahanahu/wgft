@@ -60,6 +60,9 @@ type listener struct {
 	// pending は上限の枠を取ってから track するまでの接続の数(エージェントへの接続中)
 	pending int
 	capLog  flowcap.LogGate
+	// dialLog はエージェントへの接続失敗のログを絞る(agent 側が落ちている間、公開ポートへの
+	// 接続のたびに 1 行出ると高頻度になりうるため。仕様 10.4 節)。
+	dialLog flowcap.LogGate
 }
 
 // New は空の Manager を作る。
@@ -217,7 +220,9 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 	defer unpend()
 	up, err := m.opts.Dial(net.JoinHostPort(rule.AgentAddr.String(), itoa(rule.AgentPort)))
 	if err != nil {
-		m.opts.Logf("proxy: %d: cannot connect to agent %s:%d: %v", rule.ListenPort, rule.AgentAddr, rule.AgentPort, err)
+		if l.dialLog.Allow() {
+			m.opts.Logf("proxy: %d: cannot connect to agent %s:%d: %v", rule.ListenPort, rule.AgentAddr, rule.AgentPort, err)
+		}
 		c.Close()
 		return
 	}

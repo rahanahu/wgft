@@ -358,6 +358,26 @@ example.com {
 
 `allow` には wgft agent が動いているホストのアドレスを指定します。Caddy から見た TCP peer はそのホストになるためです。
 
+## ログを見る
+
+server とエージェントは、ログを標準エラー出力に書き、独自のログファイルを持ちません。同梱の systemd の unit では、journald がログを保存します。
+
+```sh
+sudo journalctl -u wgft -b            # server、直近の起動以降
+sudo journalctl -u wgft-agent -f      # エージェント、新しい行を追う
+sudo journalctl -u wgft --since "1 hour ago"
+```
+
+Docker では `docker compose -f deploy/server.compose.yaml logs` か、コンテナに対する `docker logs` を使います。
+
+server は起動が完了した時点で、版、モード、世代、ルールとエージェントの件数を 1 行に出します。ルールの変更が成功するたびに、`cli rule add` や `ui import` のような操作の出所、対象のルールの ID、結果の世代を 1 行に出します。ルールの変更だけを一覧にするコマンドは次のとおりです。
+
+```sh
+sudo journalctl -u wgft | grep 'rules: '
+```
+
+wgft は個々のパケットや成功したフローをログに出しません。接続文字列、トークン、秘密鍵もログに出しません。
+
 ## 削除する
 
 サービスを停止し、まず削除内容を確認します。

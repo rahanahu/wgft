@@ -188,6 +188,8 @@ type Options struct {
 	Mode string
 	// Limits は同時フロー数のプロセス全体の上限(仕様 7 節)。ゼロ値は既定値
 	Limits flowcap.Limits
+	// Version は起動ログに出す wgft のバージョン(cmd/wgft の effectiveVersion)。空なら省く。
+	Version string
 }
 
 // Daemon は動いている vpsd。管理用 API の Backend を実装する。
@@ -263,6 +265,14 @@ func Run(opts Options) error {
 	if err := reconcileModeAndAddress(st, opts, hadServerKey); err != nil {
 		return err
 	}
+	// ログに出すモードは、この起動で実際に使う値(WGFT_MODE 未指定なら記録済みの値)を
+	// SQLite から読み直して使う。opts.Mode は未指定なら空のままなので、それを出すと
+	// 空欄のログになる(reconcileModeAndAddress の「WGFT_MODE unset」の分岐参照)。
+	recordedMode, err := st.GetMeta(modeMeta)
+	if err != nil {
+		return fmt.Errorf("reading recorded mode: %w", err)
+	}
+	mode := string(recordedMode)
 	if d.serverKey, err = serverKey(st); err != nil {
 		return err
 	}
@@ -303,6 +313,16 @@ func Run(opts Options) error {
 	if err := d.applyNFT(rules); err != nil {
 		return err
 	}
+	gen, err := st.Generation()
+	if err != nil {
+		return err
+	}
+	_, agentAddr, err := d.agents()
+	if err != nil {
+		return err
+	}
+	log.Printf("wgft %s server started: mode %s, interface %s, generation %d, %d rules, %d agents",
+		opts.Version, mode, opts.WGInterface, gen, len(rules), len(agentAddr))
 	if d.agentAPI, err = agentapi.New(st, d); err != nil {
 		return fmt.Errorf("agent API: %w", err)
 	}

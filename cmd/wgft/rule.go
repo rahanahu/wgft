@@ -101,7 +101,7 @@ func newRuleAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{r}, Force: force})
+			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{r}, Force: force, Op: "cli rule add"})
 			if err != nil {
 				return err
 			}
@@ -203,7 +203,7 @@ func newRuleRmCmd() *cobra.Command {
 				}
 				ids = append(ids, r.ID)
 			}
-			res, err := c.Batch(admin.BatchRequest{Delete: ids})
+			res, err := c.Batch(admin.BatchRequest{Delete: ids, Op: "cli rule rm"})
 			if err != nil {
 				return err
 			}
@@ -227,7 +227,7 @@ func newRuleEnableCmd(use string, enabled bool) *cobra.Command {
 				return err
 			}
 			r.Enabled = enabled
-			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{*r}})
+			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{*r}, Op: "cli rule " + use})
 			if err != nil {
 				return err
 			}
@@ -261,7 +261,7 @@ func newRuleSplitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{head, tail}})
+			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{head, tail}, Op: "cli rule split"})
 			if err != nil {
 				return err
 			}
@@ -296,7 +296,7 @@ func newRuleMergeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{merged}, Delete: []string{b.ID}})
+			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{merged}, Delete: []string{b.ID}, Op: "cli rule merge"})
 			if err != nil {
 				return err
 			}
@@ -339,7 +339,7 @@ func newRuleImportCmd() *cobra.Command {
 			// 変更しても、それを黙って上書きせず誤りにする(Web UI の読み込み確認・適用と
 			// 同じ保証。仕様 5.4、10.1 節)。
 			del := proto.DeletedIDs(proto.DiffRules(cur.Rules, rules))
-			res, err := c.Batch(admin.BatchRequest{Upsert: rules, Delete: del, Force: force, ExpectedDigest: proto.RulesDigest(cur.Rules)})
+			res, err := c.Batch(admin.BatchRequest{Upsert: rules, Delete: del, Force: force, ExpectedDigest: proto.RulesDigest(cur.Rules), Op: "cli rule import"})
 			if err != nil {
 				return err
 			}
@@ -352,8 +352,9 @@ func newRuleImportCmd() *cobra.Command {
 }
 
 // newRestrictionCmd は接続元制限(deny / allow の CIDR、レート)を変える共通形。
-// 配る内容は変わらないので世代は上がらない(仕様 5.3 節)。
-func newRestrictionCmd(use, short string, edit func(r *proto.Rule, args []string) error, nargs cobra.PositionalArgs) *cobra.Command {
+// 配る内容は変わらないので世代は上がらない(仕様 5.3 節)。op はログの出どころ
+// ("cli rule deny add" など。仕様 10.4 節の rules ログ)。
+func newRestrictionCmd(use, short, op string, edit func(r *proto.Rule, args []string) error, nargs cobra.PositionalArgs) *cobra.Command {
 	return &cobra.Command{
 		Use: use, Short: short, Args: nargs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -368,7 +369,7 @@ func newRestrictionCmd(use, short string, edit func(r *proto.Rule, args []string
 			if err := edit(r, args[1:]); err != nil {
 				return err
 			}
-			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{*r}})
+			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{*r}, Op: op})
 			if err != nil {
 				return err
 			}
@@ -386,12 +387,12 @@ func newRestrictionCmd(use, short string, edit func(r *proto.Rule, args []string
 func newRuleDenyCmd() *cobra.Command {
 	deny := &cobra.Command{Use: "deny", Short: "Manage the deny list source_deny"}
 	deny.AddCommand(
-		newRestrictionCmd("add <id> <cidr>...", "add deny CIDRs; active flows are cut immediately", func(r *proto.Rule, a []string) error {
+		newRestrictionCmd("add <id> <cidr>...", "add deny CIDRs; active flows are cut immediately", "cli rule deny add", func(r *proto.Rule, a []string) error {
 			ps, err := proto.ParseSources(a)
 			r.SourceDeny = proto.AddSources(r.SourceDeny, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
-		newRestrictionCmd("rm <id> <cidr>...", "remove deny CIDRs", func(r *proto.Rule, a []string) error {
+		newRestrictionCmd("rm <id> <cidr>...", "remove deny CIDRs", "cli rule deny rm", func(r *proto.Rule, a []string) error {
 			ps, err := proto.ParseSources(a)
 			r.SourceDeny = proto.RemoveSources(r.SourceDeny, ps)
 			return err
@@ -404,12 +405,12 @@ func newRuleDenyCmd() *cobra.Command {
 func newRuleAllowCmd() *cobra.Command {
 	allow := &cobra.Command{Use: "allow", Short: "Manage the allow list source_allow; when non-empty, drop everything except the listed CIDRs"}
 	allow.AddCommand(
-		newRestrictionCmd("add <id> <cidr>...", "add allow CIDRs", func(r *proto.Rule, a []string) error {
+		newRestrictionCmd("add <id> <cidr>...", "add allow CIDRs", "cli rule allow add", func(r *proto.Rule, a []string) error {
 			ps, err := proto.ParseSources(a)
 			r.SourceAllow = proto.AddSources(r.SourceAllow, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
-		newRestrictionCmd("rm <id> <cidr>...", "remove allow CIDRs", func(r *proto.Rule, a []string) error {
+		newRestrictionCmd("rm <id> <cidr>...", "remove allow CIDRs", "cli rule allow rm", func(r *proto.Rule, a []string) error {
 			ps, err := proto.ParseSources(a)
 			r.SourceAllow = proto.RemoveSources(r.SourceAllow, ps)
 			return err
@@ -420,8 +421,8 @@ func newRuleAllowCmd() *cobra.Command {
 
 // newRuleRateCmd は `rule rate new-flow|packet|per-source`。none か off で解除する。
 func newRuleRateCmd() *cobra.Command {
-	setRate := func(use, short string, set func(r *proto.Rule, rate *proto.Rate)) *cobra.Command {
-		return newRestrictionCmd(use, short, func(r *proto.Rule, a []string) error {
+	setRate := func(use, short, op string, set func(r *proto.Rule, rate *proto.Rate)) *cobra.Command {
+		return newRestrictionCmd(use, short, op, func(r *proto.Rule, a []string) error {
 			if a[0] == "none" || a[0] == "off" {
 				set(r, nil)
 				return nil
@@ -436,9 +437,9 @@ func newRuleRateCmd() *cobra.Command {
 	}
 	rate := &cobra.Command{Use: "rate", Short: "Configure rate limits in N/second; none to clear"}
 	rate.AddCommand(
-		setRate("new-flow <id> <rate>", "cap on new flows for the whole rule", func(r *proto.Rule, v *proto.Rate) { r.NewFlowRate = v }),
-		setRate("packet <id> <rate>", "cap on packets for the whole rule", func(r *proto.Rule, v *proto.Rate) { r.PacketRate = v }),
-		setRate("per-source <id> <rate>", "cap on new flows per source IP", func(r *proto.Rule, v *proto.Rate) { r.PerSourceRate = v }),
+		setRate("new-flow <id> <rate>", "cap on new flows for the whole rule", "cli rule rate new-flow", func(r *proto.Rule, v *proto.Rate) { r.NewFlowRate = v }),
+		setRate("packet <id> <rate>", "cap on packets for the whole rule", "cli rule rate packet", func(r *proto.Rule, v *proto.Rate) { r.PacketRate = v }),
+		setRate("per-source <id> <rate>", "cap on new flows per source IP", "cli rule rate per-source", func(r *proto.Rule, v *proto.Rate) { r.PerSourceRate = v }),
 	)
 	return rate
 }
@@ -471,7 +472,7 @@ func newRuleSetCmd() *cobra.Command {
 			if err := r.Validate(); err != nil {
 				return err
 			}
-			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{*r}})
+			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{*r}, Op: "cli rule set"})
 			if err != nil {
 				return err
 			}

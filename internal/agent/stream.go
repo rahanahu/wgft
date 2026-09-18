@@ -109,6 +109,7 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 	if err := writeJSON(ctx, ws, proto.Message{Type: proto.MsgPublicKey, PublicKey: rt.priv.PublicKey().String()}); err != nil {
 		return err
 	}
+	log.Printf("stream: connected to %s; public key sent", f.Endpoint)
 
 	// ハートビート
 	hbCtx, hbCancel := context.WithCancel(ctx)

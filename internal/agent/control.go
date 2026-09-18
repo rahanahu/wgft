@@ -87,9 +87,12 @@ func (rt *runtime) rotateKey() (wgtypes.Key, error) {
 	log.Printf("regenerated wg key pair; public key: %s", key.PublicKey())
 	if last != nil {
 		if err := rt.apply(last); err != nil {
-			log.Printf("tunnel with the new key: %v", err)
+			log.Printf("wireguard: rebuild tunnel with the new key: %v", err)
+		} else {
+			log.Printf("wireguard: tunnel rebuilt with the new key")
 		}
 	}
+	// stream を張り直すと streamOnce が新しい公開鍵を送る(stream: connected to ... で確認できる)
 	rt.reconnect()
 	return key.PublicKey(), nil
 }

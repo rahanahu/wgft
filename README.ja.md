@@ -60,7 +60,7 @@ VPS 側は Linux で動作します。自宅側の agent は Windows amd64 で�
 
 ## クイックスタート
 
-ここでは最も一般的な構成として、Linux VPS 上のカーネルモードと、自宅側の通常バイナリ agent を使います。ユーザー空間モード、Docker、systemd の詳細、firewall、HTTPS、削除方法は [セットアップガイド](docs/setup.ja.md) を参照してください。
+ここでは最も一般的な構成として、Linux VPS 上のカーネルモードと、自宅側の通常バイナリ agent を使います。ユーザー空間モード、Docker、systemd の詳細、firewall、HTTPS、ログ、削除方法は [セットアップガイド](docs/setup.ja.md) を参照してください。
 
 ### 1. wgft を入手する
 
@@ -160,7 +160,7 @@ ssh -L 8686:/run/wgft/admin.sock root@vps
 
 ## ドキュメント
 
-- [セットアップガイド](docs/setup.ja.md) - カーネル / ユーザー空間モード、root なし運用、Docker、systemd、HTTPS、Web UI、削除方法
+- [セットアップガイド](docs/setup.ja.md) - カーネル / ユーザー空間モード、root なし運用、Docker、systemd、HTTPS、Web UI、ログ、削除方法
 - [CLI リファレンス](docs/cli.md) - 各コマンドと使用例
 - [設計](docs/design.md) - プロトコル、セキュリティ、転送動作、設計判断
 - [アーキテクチャ](docs/architecture.md) - package 構成と処理経路

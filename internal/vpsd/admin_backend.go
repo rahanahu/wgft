@@ -81,6 +81,7 @@ func (d *Daemon) JoinString(name string) (admin.JoinStringResponse, error) {
 		return admin.JoinStringResponse{}, err
 	}
 	fp := d.agentAPI.Fingerprint()
+	log.Printf("issued a join string for agent %s", name)
 	return admin.JoinStringResponse{
 		JoinString: fmt.Sprintf("wgft://%s/%s#sha256:%x", host, tok, fp[:]),
 		ExpiresAt:  time.Now().Add(joinTokenTTL).Format(time.RFC3339),
@@ -124,6 +125,9 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// added/updated/deleted は成功ログ用(batchSummary)。mutate は ApplyBatch から 1 回だけ
+	// 呼ばれる(store.ApplyBatch にリトライは無い)ので、ここで直接埋めてよい。
+	var added, updated, deleted []string
 	res, err := d.st.ApplyBatch(d.reserved, func(rules []proto.Rule) ([]proto.Rule, error) {
 		// ExpectedDigest の照合は、rules(このトランザクションが読んだ「今の」集合)に対して
 		// 行う。読み取りと変更の間に他経路が割り込む余地が無いので、Web UI の読み込み確認・
@@ -132,6 +136,7 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 		if req.ExpectedDigest != "" && proto.RulesDigest(rules) != req.ExpectedDigest {
 			return nil, admin.ErrBatchConflict
 		}
+		added, updated, deleted = nil, nil, nil
 		byID := map[string]int{}
 		for i, r := range rules {
 			byID[r.ID] = i
@@ -143,16 +148,22 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 				return nil, fmt.Errorf("rule %q not found", id)
 			}
 			del[id] = true
+			deleted = append(deleted, id)
 		}
 		for _, u := range req.Upsert {
 			if _, ok := agentAddr[u.Agent]; !ok {
 				return nil, fmt.Errorf("rule %s: agent %q is not registered", u.ID, u.Agent)
 			}
 			if i, ok := byID[u.ID]; ok {
+				// 読み込みは変わっていない行も upsert に含むので、中身が変わった行だけを記録する
+				if proto.RulesDigest([]proto.Rule{rules[i]}) != proto.RulesDigest([]proto.Rule{u}) {
+					updated = append(updated, u.ID)
+				}
 				rules[i] = u
 			} else {
 				byID[u.ID] = len(rules)
 				rules = append(rules, u)
+				added = append(added, u.ID)
 			}
 		}
 		out := rules[:0]
@@ -172,7 +183,10 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 変更は SQLite に確定済みなので、データプレーンへの適用に失敗しても記録を残す
+	log.Print(batchSummary(req.Op, added, updated, deleted, res.Generation, res.Changed))
 	if err := d.applyNFT(res.Rules); err != nil {
+		log.Printf("rules: %s: applying the data plane failed: %v", opOrAPI(req.Op), err)
 		return nil, err
 	}
 	if res.Changed {
@@ -219,7 +233,11 @@ func (d *Daemon) AgentState(agent string) (*proto.State, error) {
 
 // DismissWarning は警告を消す(管理者が正当と確認したとき。仕様 5.2 節)。
 func (d *Daemon) DismissWarning(agent, kind, detail string) error {
-	return d.st.ClearWarning(agent, kind, detail)
+	if err := d.st.ClearWarning(agent, kind, detail); err != nil {
+		return err
+	}
+	log.Printf("dismissed warning %s for agent %s", kind, agent)
+	return nil
 }
 
 // CheckConnectivity は TCP ルールの疎通確認(仕様 10.1 節)。vpsd から wg0 経由でエージェントの
