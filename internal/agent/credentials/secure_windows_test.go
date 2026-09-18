@@ -234,6 +234,29 @@ func TestLoadTightensExistingLooseFile(t *testing.T) {
 	assertProtectedTo3(t, path)
 }
 
+// TestCreateSecureTempHasProtectedDACLAtCreation は、createSecureTemp が返すファイルが、
+// 作成した直後(他の呼び出しを何も挟まない時点)で、既に保護 DACL(SYSTEM・
+// BUILTIN\Administrators・今の実行者だけ)になっていることを確かめる。os.CreateTemp して
+// から SecureFile で締め直す旧い手順では、締め直すまでの間、緩い(親から継承した)ACL の
+// ままハンドルを開ける窓があった(レビュー指摘)。この窓が無いことを、作成直後の 1 点だけを
+// 見て確認する。
+func TestCreateSecureTempHasProtectedDACLAtCreation(t *testing.T) {
+	dir := t.TempDir()
+	// setLooseDACL でディレクトリ自体を緩くしておく。作成直後の DACL が保護されているのが
+	// createSecureTemp 自身の仕事であって、たまたまディレクトリが厳しいからではないことを
+	// はっきりさせるため。
+	setLooseDACL(t, dir)
+
+	tmp, err := createSecureTemp(dir, ".wgft-state-*")
+	if err != nil {
+		t.Fatalf("createSecureTemp: %v", err)
+	}
+	defer tmp.Close()
+	defer os.Remove(tmp.Name())
+
+	assertProtectedTo3(t, tmp.Name())
+}
+
 // TestSaveSecuresTempFileBeforeRename は、Save が秘密を書く前に一時ファイルを締め、
 // 同じディレクトリ内での rename がその DACL をそのまま持ち越すことを確かめる
 // (design.md 11a 節が前提にしている挙動)。
