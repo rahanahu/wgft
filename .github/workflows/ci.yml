@@ -60,6 +60,34 @@ jobs:
       - name: test
         run: go test ./internal/agent/... ./internal/flock/... ./cmd/wgft/...
 
+  release-snapshot:
+    # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,
+    # so nothing else in CI exercises .goreleaser.yaml, its hooks (scripts/third-party-licenses.sh,
+    # scripts/goreleaser-checksum.sh), or the asset names those hooks produce. This job runs the
+    # same GoReleaser in snapshot mode on every push and PR and checks the resulting dist/ against
+    # the released asset names, so a mismatch like #22's wgft-windows-amd64.sha256 naming a file
+    # actually published as wgft-windows-amd64.exe fails here instead of only being caught by
+    # someone running a snapshot by hand.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # goreleaser needs full history and tags for the changelog and `git describe`,
+          # same as release.yml.
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.x"
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          # Same action version and GoReleaser version constraint as release.yml, so this
+          # job and the real release run the same GoReleaser.
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish
+      - name: verify released assets and their checksums
+        run: bash scripts/check-release-assets.sh dist
+
   lint-output:
     # Keeps tool output English (no Japanese in string literals) and punctuation ASCII
     # in published files. Lab integration tests need Incus and are not run in CI
