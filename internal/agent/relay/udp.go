@@ -63,6 +63,7 @@ func (m *Manager) startUDP(l *listener) error {
 		sessions = map[string]*udpSession{}
 		done     = make(chan struct{})
 		capLog   flowcap.LogGate
+		writeLog flowcap.LogGate // 宛先への書き込み失敗。上限のログとは別に 1 分に 1 回まで
 	)
 	count := func() int { mu.Lock(); defer mu.Unlock(); return len(sessions) }
 	l.sessions = count
@@ -170,6 +171,7 @@ func (m *Manager) startUDP(l *listener) error {
 					m.opts.Logf("udp %s: dial %s: %v", l.key, l.target, err)
 					continue
 				}
+				raiseUDPSendBuffer(c)
 				s = &udpSession{conn: c}
 				s.lastSeen.Store(time.Now().UnixNano())
 				mu.Lock()
@@ -199,6 +201,9 @@ func (m *Manager) startUDP(l *listener) error {
 			}
 			s.lastSeen.Store(time.Now().UnixNano())
 			if _, err := s.conn.Write(buf[:n]); err != nil {
+				if writeLog.Allow() {
+					m.opts.Logf("udp %s: write %d bytes to %s: %v; closing session", l.key, n, l.target, err)
+				}
 				closeSession(k, s)
 			}
 		}
