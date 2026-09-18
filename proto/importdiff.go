@@ -88,8 +88,19 @@ func DeletedIDs(diff []RuleChange) []string {
 // 確認ページ(仕様 10.1 節)が、確認を表示した時点の全体と適用しようとする時点の
 // 全体を比べ、CLI からの変更などによる食い違いを検出するために使う。group、note、
 // 接続元制限、レートの変更は世代を上げない(5.3 節)ため、世代だけの照合では見逃す。
+// 空の接続元リストは nil と空スライスのどちらでも同じ値にする。JSON では null と []
+// に分かれるが意味は同じで、経路(ストアの複製、API の JSON の往復)によって表現が
+// 揺れると、変更が無いのに食い違いと判定してしまうため。
 func RulesDigest(rules []Rule) string {
 	sorted := append([]Rule(nil), rules...)
+	for i := range sorted {
+		if len(sorted[i].SourceAllow) == 0 {
+			sorted[i].SourceAllow = nil
+		}
+		if len(sorted[i].SourceDeny) == 0 {
+			sorted[i].SourceDeny = nil
+		}
+	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	b, err := json.Marshal(sorted)
 	if err != nil {

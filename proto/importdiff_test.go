@@ -181,3 +181,16 @@ func TestDiffRulesSourceSetReplaceSameCount(t *testing.T) {
 		t.Errorf("source_deny change = %q -> %q, want the actual CIDRs, not counts", found.Old, found.New)
 	}
 }
+
+// TestRulesDigestIgnoresNilVersusEmptySources は、空の接続元リストの表現(nil と空スライス)
+// だけが違うルール集合が同じ digest になることを確かめる。
+func TestRulesDigestIgnoresNilVersusEmptySources(t *testing.T) {
+	a := []Rule{{ID: "r_1", SourceAllow: nil, SourceDeny: nil}}
+	b := []Rule{{ID: "r_1", SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{}}}
+	if RulesDigest(a) != RulesDigest(b) {
+		t.Fatal("digest differs between nil and empty source lists")
+	}
+	if b[0].SourceAllow == nil {
+		t.Fatal("RulesDigest modified its input")
+	}
+}
