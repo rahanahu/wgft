@@ -56,7 +56,7 @@ In kernel mode, forwarding stays in the kernel if the wgft process crashes or re
 
 Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container.
 
-Both sides currently run on Linux and wgft is IPv4-only. The home agent does not need root or a TUN device.
+The VPS side runs on Linux. The home agent also runs on Windows. macOS is not supported yet because it has not been verified on a real machine. wgft is IPv4-only. The home agent does not need root or a TUN device, and no administrator rights on Windows.
 
 ## Quick start
 
@@ -105,6 +105,18 @@ WGFT_JOIN='<join string>' ~/.local/bin/wgft agent run --data-dir ~/.wgft
 ```
 
 The credentials are stored in `~/.wgft/agent.json`; the join string is needed only for the first registration.
+
+On Windows, download `wgft-windows-amd64.exe` from the [Releases page](https://github.com/rahanahu/wgft/releases). Open PowerShell in the folder it was saved to, for example Downloads, and run:
+
+```powershell
+Rename-Item wgft-windows-amd64.exe wgft.exe
+$env:WGFT_JOIN = '<join string>'
+.\wgft.exe agent run
+```
+
+The join string contains `#`, so it needs single quotes.
+
+Later starts need only `.\wgft.exe agent run`; the saved credentials are reused. Windows Defender Firewall may prompt to allow `wgft.exe` on the first start. The tunnel keeps working whether you allow or cancel that prompt, because the agent only makes outbound connections. Stop the agent with Ctrl+C or by closing the window. Credentials are stored in `%ProgramData%\wgft\agent.json` and no administrator rights are needed. wgft installs no Windows service, so keeping the agent running across logons is up to you. A shortcut in the Startup folder is one untested option. See the [setup guide](docs/setup.md#run-the-agent-on-windows) for details.
 
 ### 4. Add a rule
 

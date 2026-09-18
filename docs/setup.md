@@ -4,7 +4,7 @@ This guide contains the detailed installation and operating steps that are inten
 
 ## Requirements
 
-Both sides run on Linux and wgft is currently IPv4-only.
+The VPS side runs on Linux. The home agent also runs on Windows. macOS is not supported yet because it has not been verified on a real machine. wgft is currently IPv4-only.
 
 The home agent does not need root or a TUN device. Server requirements depend on the selected mode:
 
@@ -163,6 +163,26 @@ The first successful registration writes `~/.wgft/agent.json`. Later starts need
 ```sh
 wgft agent run --data-dir ~/.wgft
 ```
+
+### Run the agent on Windows
+
+Download `wgft-windows-amd64.exe` from the [Releases page](https://github.com/rahanahu/wgft/releases). Open PowerShell in the folder it was saved to, for example Downloads, and run:
+
+```powershell
+Rename-Item wgft-windows-amd64.exe wgft.exe
+$env:WGFT_JOIN = '<join string>'
+.\wgft.exe agent run
+```
+
+The join string contains `#`, so PowerShell needs it in single quotes. The first successful registration writes `%ProgramData%\wgft\agent.json`; the default location needs no administrator rights. Later starts need only:
+
+```powershell
+.\wgft.exe agent run
+```
+
+Windows Defender Firewall may prompt to allow `wgft.exe` on the first start, because wireguard-go listens on UDP on all interfaces. This was verified on Windows 11: the tunnel and relay keep working whether that prompt is allowed or cancelled, including across WireGuard key rotations, because the agent only makes outbound connections. Stop the agent with Ctrl+C or by closing the console window; a later start recovers and reuses the saved credentials.
+
+wgft installs no Windows service, scheduled task, or tray icon. `agent run` runs as whichever user starts it, the way many game servers run on a gaming PC. Keeping it running across logons, for example with a shortcut in the Startup folder, is left to you; this has not been tested.
 
 ### Run the agent with systemd
 

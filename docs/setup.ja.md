@@ -4,7 +4,7 @@
 
 ## 動作環境
 
-VPS 側も自宅側も Linux で動作し、現在は IPv4 のみ対応しています。
+VPS 側は Linux で動作します。自宅側の agent は Windows でも動作します。macOS はまだ対応していません。実機での確認がまだ済んでいないためです。wgft は現在 IPv4 のみに対応しています。
 
 自宅側のエージェントには root 権限も TUN デバイスも不要です。VPS 側の要件は動作モードで変わります。
 
@@ -163,6 +163,26 @@ WGFT_JOIN='<join string>' ~/.local/bin/wgft agent run --data-dir ~/.wgft
 ```sh
 wgft agent run --data-dir ~/.wgft
 ```
+
+### Windows で agent を実行する
+
+[Releases ページ](https://github.com/rahanahu/wgft/releases) から `wgft-windows-amd64.exe` を取得します。ファイルを保存したフォルダで PowerShell を開きます。例えば Downloads フォルダです。次を実行します。
+
+```powershell
+Rename-Item wgft-windows-amd64.exe wgft.exe
+$env:WGFT_JOIN = '<join string>'
+.\wgft.exe agent run
+```
+
+join string は `#` を含むため、PowerShell では単一引用符で囲みます。初回登録に成功すると `%ProgramData%\wgft\agent.json` が作成されます。既定のこの場所は管理者権限を必要としません。2 回目以降は次だけで起動できます。
+
+```powershell
+.\wgft.exe agent run
+```
+
+wireguard-go が UDP をすべてのインタフェースで待ち受けるため、初回起動時に Windows Defender Firewall が `wgft.exe` の受信を許可するかどうかのダイアログを出すことがあります。Windows 11 の実機で、このダイアログを許可してもキャンセルしても、WireGuard の鍵の再交換をまたいでトンネルと中継が動作し続けることを確認しました。agent は外向きの接続だけを使うためです。停止は Ctrl+C を押すか、コンソールのウィンドウを閉じます。次の起動では保存済みの認証情報を使って復帰します。
+
+wgft は Windows のサービスもタスクスケジューラも通知領域への常駐も持ちません。`agent run` は起動した利用者の権限で動作し、ゲーミング PC の多くのゲームサーバーと同じ動き方です。ログオンのたびに自動で起動させるかどうかは利用者に任されています。スタートアップフォルダへの登録はその一例ですが、未確認です。
 
 ### systemd で起動する
 

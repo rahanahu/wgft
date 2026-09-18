@@ -48,12 +48,13 @@ jobs:
       - name: download the released binaries
         run: |
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir rel \
-            --pattern wgft-linux-amd64 --pattern wgft-linux-arm64
+            --pattern wgft-linux-amd64 --pattern wgft-linux-arm64 --pattern wgft-windows-amd64.exe
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             rel/wgft-linux-amd64
             rel/wgft-linux-arm64
+            rel/wgft-windows-amd64.exe
       # SBOM from the module information embedded in each Go binary
       - uses: anchore/sbom-action@v0
         with:
@@ -69,6 +70,13 @@ jobs:
           output-file: rel/wgft-linux-arm64.spdx.json
           upload-artifact: false
           upload-release-assets: false
+      - uses: anchore/sbom-action@v0
+        with:
+          file: rel/wgft-windows-amd64.exe
+          format: spdx-json
+          output-file: rel/wgft-windows-amd64.exe.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
       - uses: actions/attest-sbom@v4
         with:
           subject-path: rel/wgft-linux-amd64
@@ -77,6 +85,10 @@ jobs:
         with:
           subject-path: rel/wgft-linux-arm64
           sbom-path: rel/wgft-linux-arm64.spdx.json
+      - uses: actions/attest-sbom@v4
+        with:
+          subject-path: rel/wgft-windows-amd64.exe
+          sbom-path: rel/wgft-windows-amd64.exe.spdx.json
       - name: attach the SBOMs to the release
         run: gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" rel/*.spdx.json
 
