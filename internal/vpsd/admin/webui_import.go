@@ -19,6 +19,14 @@ import (
 // 上限(admin.go の postBatch)と同じ 1 MiB を使う。
 const importMaxBytes = 1 << 20
 
+// importApplyMaxBytes は確認ページの適用(uiImportApply)が受ける POST 本体の上限。
+// 確認ページはアップロードした内容を hidden の "content" フィールドに
+// application/x-www-form-urlencoded で入れて送り返すため、content 中の `"` `{` `:` `/` の
+// ような文字は 1 バイトが %XX の 3 バイトに膨れる。importMaxBytes 分の内容が全部膨れた場合
+// (3 倍)に、force・generation・digest の分の余裕(64 KiB)を足した値を本体の上限にする。
+// デコード後の content 自身が importMaxBytes に収まることは uiImportApply が別途見る。
+const importApplyMaxBytes = 3*importMaxBytes + 64<<10
+
 // importChangeView は読み込みの確認ページの 1 行(仕様 10.1 節)。
 type importChangeView struct {
 	Kind    string // added / changed / deleted / unchanged(CSS のクラスにも使う)
@@ -294,12 +302,16 @@ func boolLabel(s, locale string) string {
 // 事前照合をすり抜けた食い違いも ErrBatchConflict で拒む。ここではその誤りを、
 // 事前照合が拒んだときと同じ「再アップロードを求める」画面に写す。
 func (s *Server) uiImportApply(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, importMaxBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, importApplyMaxBytes)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	locale := resolveLocale(w, r)
+	if len(r.FormValue("content")) > importMaxBytes {
+		http.Error(w, "import content exceeds the 1 MiB limit", http.StatusRequestEntityTooLarge)
+		return
+	}
 	var desired []proto.Rule
 	if err := json.Unmarshal([]byte(r.FormValue("content")), &desired); err != nil {
 		http.Error(w, "invalid import content: "+err.Error(), http.StatusBadRequest)

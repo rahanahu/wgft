@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"html"
 	"io"
 	"mime/multipart"
@@ -372,5 +373,100 @@ func TestImportConfirmLocales(t *testing.T) {
 		if !strings.Contains(string(page), tc.want) {
 			t.Errorf("%s: missing %q: %s", tc.lang, tc.want, page)
 		}
+	}
+}
+
+// manyRulesJSON marshals n distinct, valid kernel-mode UDP rules on agent "home" (registered
+// by fakeBackend's default) starting at port lo. It is used to build a rule set whose raw JSON
+// stays under importMaxBytes but whose application/x-www-form-urlencoded encoding (as sent by
+// the confirm page's hidden "content" field) does not, because JSON's own punctuation ("{}:,)
+// percent-encodes to 3 bytes each.
+func manyRulesJSON(t *testing.T, n int, lo uint16) []byte {
+	t.Helper()
+	rules := make([]proto.Rule, n)
+	for i := 0; i < n; i++ {
+		port := lo + uint16(i)
+		rules[i] = proto.Rule{
+			ID: fmt.Sprintf("r_%05d", i), Agent: "home", Proto: proto.UDP,
+			ListenPort: proto.PortRange{Lo: port, Hi: port}, Target: fmt.Sprintf("192.168.1.20:%d", port),
+			VPSMode: proto.ModeKernel, Enabled: true,
+		}
+	}
+	b, err := json.Marshal(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestImportApplyBodyLimitSurvivesURLEncoding は、確認ページのアップロード自体は
+// importMaxBytes(1 MiB)未満でも、適用時に hidden の "content" フィールドを
+// application/x-www-form-urlencoded で送ると JSON の punctuation が %XX に膨れて 1 MiB を
+// 超えうることの再現である(レビューの指摘)。修正前は適用の MaxBytesReader が upload と同じ
+// importMaxBytes だったため、この POST は "http: request body too large" で失敗した。
+func TestImportApplyBodyLimitSurvivesURLEncoding(t *testing.T) {
+	srv, st := newImportTestServer(t)
+
+	body := manyRulesJSON(t, 3000, 20000) // raw ~837 KB (< importMaxBytes)、url エンコードで ~1.31 MB (> importMaxBytes)
+	if len(body) >= importMaxBytes {
+		t.Fatalf("fixture raw JSON is %d bytes, want it under importMaxBytes (%d) to fit the initial upload", len(body), importMaxBytes)
+	}
+
+	confirm := multipartUpload(t, srv.URL+"/ui/rules/import?lang=en", "rules.json", body)
+	page, _ := io.ReadAll(confirm.Body)
+	confirm.Body.Close()
+	if confirm.StatusCode != http.StatusOK {
+		t.Fatalf("confirm status = %d, want 200: %s", confirm.StatusCode, page)
+	}
+	fields := extractHiddenFields(t, string(page))
+
+	form := url.Values{"content": {fields["content"]}, "generation": {fields["generation"]}, "digest": {fields["digest"]}}
+	if encoded := len(form.Encode()); encoded <= importMaxBytes {
+		t.Fatalf("fixture's url-encoded form is %d bytes, want it over importMaxBytes (%d) to reproduce the finding", encoded, importMaxBytes)
+	} else if encoded >= importApplyMaxBytes {
+		t.Fatalf("fixture's url-encoded form is %d bytes, want it under importApplyMaxBytes (%d)", encoded, importApplyMaxBytes)
+	}
+
+	resp, err := http.PostForm(srv.URL+"/ui/rules/import/apply?lang=en", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if req := resp.Request; req == nil || req.URL.Path != "/" {
+		t.Fatalf("apply must succeed and redirect to the dashboard, got %v (body: %s)", req, respBody)
+	}
+	after, err := st.Rules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 3000 {
+		t.Errorf("apply did not replace the rule set with the uploaded 3000 rules: got %d", len(after))
+	}
+}
+
+// TestImportApplyRejectsOversizedContent は、適用の本体上限を url エンコードの膨張分だけ
+// 広げても、デコード後の content 自身は importMaxBytes に収まらなければならないことを
+// 確かめる(レビューの指摘)。content がそれ単体で 1 MiB を超える場合は、他の hidden
+// フィールドの分の余裕があっても明確な誤りとして拒む。
+func TestImportApplyRejectsOversizedContent(t *testing.T) {
+	srv, _ := newImportTestServer(t)
+
+	// 単純な英数字は url エンコードでほぼ膨らまないので、importMaxBytes 超えを content 自身の
+	// 大きさだけで起こす(importApplyMaxBytes の余裕には収まる)。
+	oversized := strings.Repeat("a", importMaxBytes+1024)
+	form := url.Values{"content": {oversized}, "generation": {"0"}, "digest": {""}}
+	if encoded := len(form.Encode()); encoded >= importApplyMaxBytes {
+		t.Fatalf("fixture is %d bytes, want it under importApplyMaxBytes (%d) so the MaxBytesReader isn't what rejects it", encoded, importApplyMaxBytes)
+	}
+
+	resp, err := http.PostForm(srv.URL+"/ui/rules/import/apply?lang=en", form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want %d (import content exceeds the 1 MiB limit): %s", resp.StatusCode, http.StatusRequestEntityTooLarge, respBody)
 	}
 }
