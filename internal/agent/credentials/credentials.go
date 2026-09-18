@@ -27,11 +27,19 @@ type Credentials struct {
 	LastState           *proto.State `json:"last_state"`             // 最後に処理した全体状態
 }
 
-// Load はファイルを読む。なければ os.ErrNotExist。
+// Load はファイルを読む。なければ os.ErrNotExist。Windows では、この修正より前に緩い ACL の
+// 下で作られていた既存のファイルがありうるため、読むたびに secureExisting で単独に締め直す
+// (仕様 9・11a 節)。隣のファイルやディレクトリには触れない。Unix では secureExisting は
+// 何もしない no-op で、この修正の前後で Load の挙動は変わらない(Unix の chmod はこの修正
+// より前から機能しており、締め直す理由が無いうえ、管理者が意図して絞った権限を緩めたり、
+// ファイルを所有しない構成で失敗させたりしないため)。
 func Load(path string) (*Credentials, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	if err := secureExisting(path); err != nil {
+		return nil, fmt.Errorf("secure credentials file: %w", err)
 	}
 	var f Credentials
 	if err := json.Unmarshal(b, &f); err != nil {
@@ -49,7 +57,8 @@ func LoadOrNew(path string) (*Credentials, error) {
 	return f, err
 }
 
-// Save は一時ファイルに書いて rename する。パーミッションは 0600。
+// Save は一時ファイルに書いて rename する。パーミッションは 0600(Windows は保護 DACL。
+// 仕様 9・11a 節)。
 func (f *Credentials) Save(path string) error {
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -62,7 +71,10 @@ func (f *Credentials) Save(path string) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // rename に成功していれば何も起きない
-	if err := tmp.Chmod(0o600); err != nil {
+	// 秘密を書き込む前に、この一時ファイルだけを締める。同じディレクトリ内での rename は
+	// このファイル自身の DACL(Windows)・パーミッション(Unix)をそのまま持ち越すので、
+	// 緩い ACL のまま秘密が書かれる期間は生じない。
+	if err := SecureFile(tmpName); err != nil {
 		tmp.Close()
 		return err
 	}

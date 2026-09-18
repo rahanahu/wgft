@@ -31,7 +31,15 @@ func (rt *runtime) serveControl(ctx context.Context) {
 		log.Printf("cannot open control socket %s: %v; rotate-key only works while the agent is stopped", path, err)
 		return
 	}
-	os.Chmod(path, 0o600)
+	// credentials.SecureSocket はこのソケットだけを単独で締める(Windows は保護 DACL で
+	// 失敗を伝える。Unix はこの修正より前と同じく 0600 の chmod で、失敗は無視する。
+	// 仕様 9・11a 節)。秘密は持たないが、agent.json と同じ基準にそろえる。
+	if err := credentials.SecureSocket(path); err != nil {
+		log.Printf("cannot secure control socket %s: %v; rotate-key only works while the agent is stopped", path, err)
+		ln.Close()
+		os.Remove(path)
+		return
+	}
 	go func() { <-ctx.Done(); ln.Close(); os.Remove(path) }()
 	for {
 		c, err := ln.Accept()
