@@ -85,6 +85,33 @@ func TestDotenvSyntax(t *testing.T) {
 	if _, err := parseDotenv(mk("WGFT_NAME=a b\n")); err == nil {
 		t.Error("空白入りの値がエラーにならない")
 	}
+	// 構文の誤りはどれも設定起因で、終了コード 3(仕様 11a 節)
+	for _, body := range []string{"not a pair\n", " WGFT_NAME=x\n", "WGFT_NAME='x'\n", "WGFT_NAME=a b\n"} {
+		_, err := parseDotenv(mk(body))
+		if got := exitCode(err); err == nil || got != exitConfigRefusal {
+			t.Errorf("%q: err=%v exitCode=%d, want %d", body, err, got, exitConfigRefusal)
+		}
+	}
+}
+
+// 値の誤り(同時フロー数の上限の範囲外)は終了コード 3。範囲内は通る。
+func TestLimitsOutOfRangeExitCode(t *testing.T) {
+	for _, v := range []string{"abc", "15", "65536"} {
+		t.Setenv("WGFT_MAX_UDP_FLOWS", v)
+		c, err := loadConfig(&cobra.Command{}, limitSpecs(), filepath.Join(t.TempDir(), "none.env"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = limitsFromConfig(c)
+		if got := exitCode(err); err == nil || got != exitConfigRefusal {
+			t.Errorf("WGFT_MAX_UDP_FLOWS=%s: err=%v exitCode=%d, want %d", v, err, got, exitConfigRefusal)
+		}
+	}
+	t.Setenv("WGFT_MAX_UDP_FLOWS", "2048")
+	c, _ := loadConfig(&cobra.Command{}, limitSpecs(), filepath.Join(t.TempDir(), "none.env"))
+	if l, err := limitsFromConfig(c); err != nil || l.UDPTotal != 2048 {
+		t.Errorf("in range: %+v %v", l, err)
+	}
 }
 
 // 読めない設定ファイルは終了コード 3 になり、server.env なら直し方(chmod 0644)を添える。

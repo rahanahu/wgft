@@ -59,11 +59,11 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 	}
 	port, err := strconv.ParseUint(c.str("WGFT_WG_PORT"), 10, 16)
 	if err != nil {
-		return vpsd.Options{}, nil, fmt.Errorf("WGFT_WG_PORT: %w", err)
+		return vpsd.Options{}, nil, configErrorf("WGFT_WG_PORT: %q is not a port number", c.str("WGFT_WG_PORT"))
 	}
 	mtu, err := strconv.Atoi(c.str("WGFT_MTU"))
 	if err != nil {
-		return vpsd.Options{}, nil, fmt.Errorf("WGFT_MTU: %w", err)
+		return vpsd.Options{}, nil, configErrorf("WGFT_MTU: %q is not an integer", c.str("WGFT_MTU"))
 	}
 	limits, err := limitsFromConfig(c)
 	if err != nil {
@@ -107,7 +107,7 @@ listens on a Unix socket (root-owned 0600).`,
 				return err
 			}
 			if opts.WGEndpoint == "" {
-				return fmt.Errorf("WGFT_WG_ENDPOINT (--wg-endpoint) is required: the host:port that agents connect to, for example vps.example.com:51820")
+				return configErrorf("WGFT_WG_ENDPOINT (--wg-endpoint) is required: the host:port that agents connect to, for example vps.example.com:51820")
 			}
 			adopt, _ := cmd.Flags().GetBool("adopt-existing")
 			opts.AdoptExisting = adopt

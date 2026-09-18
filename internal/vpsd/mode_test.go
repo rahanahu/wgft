@@ -1,10 +1,12 @@
 package vpsd
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/vpsd/store"
+	"github.com/rahanahu/wgft/internal/vpsd/wg"
 )
 
 // modeGate:kernel→userspace は残骸ありで拒否・なしで許可・不明で許可(bind へ)、userspace→kernel は許可。
@@ -45,8 +47,8 @@ func TestReconcileModeAndAddress(t *testing.T) {
 	// 2 回目:アドレス帯を変えると拒否
 	opts2 := opts
 	opts2.WGAddress = "10.201.0.1/24"
-	if err := reconcileModeAndAddress(st, opts2, true); err == nil {
-		t.Error("アドレス帯の変更が拒否されない")
+	if err := reconcileModeAndAddress(st, opts2, true); !isRefusal(err) {
+		t.Errorf("アドレス帯の変更が設定起因の拒否にならない: %v", err)
 	}
 	st.Close()
 
@@ -62,8 +64,11 @@ func TestReconcileModeAndAddress(t *testing.T) {
 
 	// 新規 SQLite(hadServerKey=false)で Mode 未指定 → エラー
 	st = open()
-	if err := reconcileModeAndAddress(st, Options{WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, false); err == nil {
-		t.Error("新規で Mode 未指定がエラーにならない")
+	if err := reconcileModeAndAddress(st, Options{WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, false); !isRefusal(err) {
+		t.Errorf("新規で Mode 未指定が設定起因の拒否にならない: %v", err)
+	}
+	if err := reconcileModeAndAddress(st, Options{Mode: "bogus", WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, false); !isRefusal(err) {
+		t.Errorf("新規で不正な Mode が設定起因の拒否にならない: %v", err)
 	}
 	st.Close()
 
@@ -72,8 +77,14 @@ func TestReconcileModeAndAddress(t *testing.T) {
 	if err := reconcileModeAndAddress(st, Options{Mode: "userspace", WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, false); err != nil {
 		t.Errorf("userspace が拒否された: %v", err)
 	}
-	if err := reconcileModeAndAddress(st, Options{Mode: "bogus", WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, true); err == nil {
-		t.Error("未知のモードが拒否されない")
+	if err := reconcileModeAndAddress(st, Options{Mode: "bogus", WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, true); !isRefusal(err) {
+		t.Errorf("未知のモードが設定起因の拒否にならない: %v", err)
 	}
 	st.Close()
+}
+
+// isRefusal は、err が設定起因の拒否(終了コード 3 に写すもの。仕様 11a 節)かを返す。
+func isRefusal(err error) bool {
+	var r *wg.StartupRefusal
+	return errors.As(err, &r)
 }

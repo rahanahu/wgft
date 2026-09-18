@@ -57,10 +57,23 @@ func (e *configUnreadableError) Error() string {
 
 func (e *configUnreadableError) Unwrap() error { return e.err }
 
-// isConfigUnreadable は、err が読めない設定ファイルによるものかを返す。
-func isConfigUnreadable(err error) bool {
-	var e *configUnreadableError
-	return errors.As(err, &e)
+// configError は設定ファイルの構文や設定値の誤り。読めないファイルと同じく再起動しても直らないので、
+// main が終了コード 3 にする(仕様 11a 節)。
+type configError struct{ err error }
+
+func (e *configError) Error() string { return e.err.Error() }
+func (e *configError) Unwrap() error { return e.err }
+
+// configErrorf は fmt.Errorf と同じ書式で configError を作る。
+func configErrorf(format string, args ...any) error {
+	return &configError{err: fmt.Errorf(format, args...)}
+}
+
+// isConfigError は、err が設定起因(読めない設定ファイル、構文や値の誤り)かを返す。
+func isConfigError(err error) bool {
+	var u *configUnreadableError
+	var c *configError
+	return errors.As(err, &u) || errors.As(err, &c)
 }
 
 // parseDotenv は最小構文の dotenv を読む(3.1 節)。
@@ -85,18 +98,18 @@ func parseDotenv(path string) (map[string]string, error) {
 		}
 		eq := strings.IndexByte(s, '=')
 		if eq <= 0 {
-			return nil, fmt.Errorf("%s:%d: not in KEY=value form: %q", path, i+1, line)
+			return nil, configErrorf("%s:%d: not in KEY=value form: %q", path, i+1, line)
 		}
 		key := s[:eq]
 		val := s[eq+1:]
 		if key != strings.TrimSpace(key) || strings.ContainsAny(key, " \t") {
-			return nil, fmt.Errorf("%s:%d: key name may not contain whitespace: %q", path, i+1, key)
+			return nil, configErrorf("%s:%d: key name may not contain whitespace: %q", path, i+1, key)
 		}
 		if strings.HasPrefix(val, "\"") || strings.HasPrefix(val, "'") {
-			return nil, fmt.Errorf("%s:%d: do not quote values; Docker keeps quotes as part of the value: %q", path, i+1, val)
+			return nil, configErrorf("%s:%d: do not quote values; Docker keeps quotes as part of the value: %q", path, i+1, val)
 		}
 		if strings.ContainsAny(val, " \t") {
-			return nil, fmt.Errorf("%s:%d: value may not contain whitespace: %q", path, i+1, val)
+			return nil, configErrorf("%s:%d: value may not contain whitespace: %q", path, i+1, val)
 		}
 		out[key] = val
 	}
