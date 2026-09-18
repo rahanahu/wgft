@@ -19,6 +19,19 @@ func isJapanese(r rune) bool {
 	return unicode.In(r, unicode.Hiragana, unicode.Katakana, unicode.Han)
 }
 
+// exemptFromJapaneseCheck skips the Web UI i18n files. filepath.Walk yields
+// backslashes on Windows, so the old HasSuffix(path, "/i18n.go") check missed
+// them and reported Japanese literals that are supposed to be excluded.
+func exemptFromJapaneseCheck(path string) bool {
+	p := filepath.ToSlash(path)
+	p = strings.ReplaceAll(p, `\`, "/")
+	base := p
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		base = p[i+1:]
+	}
+	return base == "i18n.go" || base == "webui.go"
+}
+
 func main() {
 	root := "."
 	if len(os.Args) > 1 {
@@ -39,7 +52,7 @@ func main() {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		if strings.HasSuffix(path, "/i18n.go") || strings.HasSuffix(path, "/webui.go") {
+		if exemptFromJapaneseCheck(path) {
 			return nil // Web UI の表示テキスト層(JA/EN)は対象外
 		}
 		fset := token.NewFileSet()
