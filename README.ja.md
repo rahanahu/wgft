@@ -56,7 +56,7 @@ wgft は Pangolin から着想を得ています。Pangolin を使って、VPS �
 
 VPS で root が使える場合はカーネルモードを使います。root やカーネル WireGuard が使えない場合、または server をコンテナ内だけで動かしたい場合はユーザー空間モードを使います。
 
-VPS 側も自宅側も現在は Linux / IPv4 のみ対応しています。自宅側 agent には root 権限も TUN デバイスも不要です。
+VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。macOS はまだ対応していません。実機での確認がまだ済んでいないためです。wgft は IPv4 のみに対応しています。自宅側の agent には root 権限も TUN デバイスも不要で、Windows でも管理者権限は不要です。
 
 ## クイックスタート
 
@@ -64,14 +64,14 @@ VPS 側も自宅側も現在は Linux / IPv4 のみ対応しています。自�
 
 ### 1. wgft を入手する
 
-VPS と自宅マシンの両方で release バイナリを取得します。
+Linux では release バイナリを取得します。
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64
 chmod +x wgft-linux-amd64
 ```
 
-arm64 環境では `amd64` を `arm64` に置き換えてください。
+Linux の arm64 環境では `amd64` を `arm64` に置き換えてください。Windows での取得手順は手順 3 で説明します。
 
 ### 2. VPS 側 server を起動する
 
@@ -105,6 +105,18 @@ WGFT_JOIN='<join string>' ~/.local/bin/wgft agent run --data-dir ~/.wgft
 ```
 
 認証情報は `~/.wgft/agent.json` に保存されます。join string が必要なのは初回登録時だけです。
+
+Windows では、[Releases ページ](https://github.com/rahanahu/wgft/releases) から `wgft-windows-amd64.exe` を取得します。ファイルを保存したフォルダで PowerShell を開きます。例えば Downloads フォルダです。次を実行します。
+
+```powershell
+Rename-Item wgft-windows-amd64.exe wgft.exe
+$env:WGFT_JOIN = '<join string>'
+.\wgft.exe agent run
+```
+
+join string は `#` を含むため、単一引用符で囲みます。
+
+2 回目以降は `.\wgft.exe agent run` だけで起動でき、保存済みの認証情報を使います。初回起動時、Windows Defender Firewall が `wgft.exe` の受信を許可するかどうかのダイアログを出すことがあります。agent は外向きの接続だけを使うため、許可してもキャンセルしてもトンネルは動作し続けます。停止は Ctrl+C を押すか、コンソールのウィンドウを閉じます。認証情報は `%ProgramData%\wgft\agent.json` に保存され、管理者権限は不要です。wgft は Windows のサービスを持たないため、ログオンのたびに自動で起動させるかどうかは利用者が決めます。スタートアップフォルダへの登録は未確認の選択肢の 1 つです。詳しくは[セットアップガイド](docs/setup.ja.md#windows-で-agent-を実行する)を参照してください。
 
 ### 4. 転送ルールを追加する
 

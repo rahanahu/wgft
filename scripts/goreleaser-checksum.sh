@@ -15,12 +15,20 @@
 # されない。GoReleaser は ctx.Artifacts に登録した実体だけを送る)。
 #
 #   scripts/goreleaser-checksum.sh <built-binary-path> <os> <arch>
+#
+# windows では .goreleaser.yaml の archives(format: binary)が公開する
+# アセット名の拡張子 .exe をそのまま保つ(wgft-windows-amd64.exe。
+# `goreleaser release --snapshot` で確認済み)。ここで作る名前もそれに
+# 合わせないと、release アセットに対する `sha256sum -c` が失敗する。
 set -euo pipefail
 
 path="$1"
 os="$2"
 arch="$3"
 name="wgft-$os-$arch"
+if [ "$os" = "windows" ]; then
+  name="$name.exe"
+fi
 
 mkdir -p dist
 cp "$path" "dist/$name"

@@ -56,7 +56,7 @@ In kernel mode, forwarding stays in the kernel if the wgft process crashes or re
 
 Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container.
 
-Both sides currently run on Linux and wgft is IPv4-only. The home agent does not need root or a TUN device.
+The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11. macOS is not supported yet because it has not been verified on a real machine. wgft is IPv4-only. The home agent does not need root or a TUN device, and no administrator rights on Windows.
 
 ## Quick start
 
@@ -64,14 +64,14 @@ This is the shortest path for the common setup: kernel mode on a Linux VPS and a
 
 ### 1. Install wgft
 
-Download the release binary on both machines:
+On Linux, download the release binary:
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64
 chmod +x wgft-linux-amd64
 ```
 
-Use `arm64` instead of `amd64` on arm64 systems.
+Use `arm64` instead of `amd64` on Linux arm64 systems. Windows installation is covered in step 3 below.
 
 ### 2. Start the VPS server
 
@@ -105,6 +105,18 @@ WGFT_JOIN='<join string>' ~/.local/bin/wgft agent run --data-dir ~/.wgft
 ```
 
 The credentials are stored in `~/.wgft/agent.json`; the join string is needed only for the first registration.
+
+On Windows, download `wgft-windows-amd64.exe` from the [Releases page](https://github.com/rahanahu/wgft/releases). Open PowerShell in the folder it was saved to, for example Downloads, and run:
+
+```powershell
+Rename-Item wgft-windows-amd64.exe wgft.exe
+$env:WGFT_JOIN = '<join string>'
+.\wgft.exe agent run
+```
+
+The join string contains `#`, so it needs single quotes.
+
+Later starts need only `.\wgft.exe agent run`; the saved credentials are reused. Windows Defender Firewall may prompt to allow `wgft.exe` on the first start. The tunnel keeps working whether you allow or cancel that prompt, because the agent only makes outbound connections. Stop the agent with Ctrl+C or by closing the window. Credentials are stored in `%ProgramData%\wgft\agent.json` and no administrator rights are needed. wgft installs no Windows service, so keeping the agent running across logons is up to you. A shortcut in the Startup folder is one untested option. See the [setup guide](docs/setup.md#run-the-agent-on-windows) for details.
 
 ### 4. Add a rule
 

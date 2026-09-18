@@ -19,9 +19,17 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
+      - windows
     goarch:
       - amd64
       - arm64
+    ignore:
+      # Windows は実機(Windows 11)で検証済みの amd64 だけを公開する。arm64 は
+      # macOS と同じくビルドできることを CI で確かめているだけで未検証のため、
+      # linux/arm64 はそのまま残し windows/arm64 だけを除く(11a 節、macOS は
+      # goos に無いので darwin/* は元から作られない)。
+      - goos: windows
+        goarch: arm64
     flags:
       - -trimpath
     # module パスが wgft から github.com/rahanahu/wgft に変わったら、
@@ -36,6 +44,8 @@ builds:
 
 archives:
   # README の取得コマンドと揃える生バイナリの名前。tar/zip にせず素のバイナリを置く。
+  # Windows は binary format でも GoReleaser がバイナリの拡張子(.exe)を保つため、
+  # 素の名前は wgft-windows-amd64.exe になる(手元の --snapshot で確認済み)。
   - id: wgft
     ids:
       - wgft
