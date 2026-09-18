@@ -124,7 +124,7 @@ h2 { font-size: 18px; margin: 0; }
 .compare { font-size: 12px; margin-bottom: 10px; }
 .alert-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .firewall-panel { padding-bottom: 12px; }
-.firewall-details summary { cursor: pointer; list-style: none; }
+.firewall-details summary { cursor: pointer; list-style: none; justify-content: flex-start; gap: 6px; }
 .firewall-details summary::-webkit-details-marker { display: none; }
 .firewall-details summary::before { content: "▸ "; color: var(--muted); }
 .firewall-details[open] summary::before { content: "▾ "; }

@@ -424,9 +424,10 @@ func restrictionSummary(r *proto.Rule, locale string) string {
 	if len(r.SourceAllow) > 0 {
 		parts = append(parts, fmt.Sprintf(T(locale, "allowN"), len(r.SourceAllow)))
 	}
-	for label, rate := range map[string]*proto.Rate{T(locale, "rateNewFlow"): r.NewFlowRate, T(locale, "ratePkt"): r.PacketRate, T(locale, "rateSource"): r.PerSourceRate} {
+	// 単位は詳細ページと同じく訳す(日本語で "10/second" と英語が混ざらないように)
+	for key, rate := range map[string]*proto.Rate{"rateNewFlow": r.NewFlowRate, "ratePkt": r.PacketRate, "rateSource": r.PerSourceRate} {
 		if rate != nil {
-			parts = append(parts, label+" "+rate.String())
+			parts = append(parts, fmt.Sprintf(T(locale, key), rate.Count, unitLabel(locale, string(rate.Unit))))
 		}
 	}
 	sort.Strings(parts)

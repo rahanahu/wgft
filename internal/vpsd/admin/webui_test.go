@@ -332,3 +332,28 @@ func TestMergeSection(t *testing.T) {
 		t.Errorf("mergeBlockerLabel(BlockDenyList, ja) = %q, want %q", got, "拒否リストが違う")
 	}
 }
+
+// TestRestrictionSummaryUnits は、一覧の接続元制限の要約でレートの単位が表示言語に
+// 合わせて訳され、日本語に "second" などの英語が混ざらないことを確かめる。
+func TestRestrictionSummaryUnits(t *testing.T) {
+	r := proto.Rule{
+		PerSourceRate: &proto.Rate{Count: 10, Unit: proto.PerSecond},
+		NewFlowRate:   &proto.Rate{Count: 100, Unit: proto.PerMinute},
+		PacketRate:    &proto.Rate{Count: 5000, Unit: proto.PerSecond},
+	}
+	cases := map[string][]string{
+		"ja": {"接続元ごと 10 本/秒", "全体 100 本/分", "パケット 5000 個/秒"},
+		"en": {"per source 10/second", "whole rule 100/minute", "packets 5000/second"},
+	}
+	for locale, wants := range cases {
+		got := restrictionSummary(&r, locale)
+		for _, w := range wants {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: summary %q does not contain %q", locale, got, w)
+			}
+		}
+		if locale == "ja" && strings.Contains(got, "second") {
+			t.Errorf("ja: summary %q still has an English unit", got)
+		}
+	}
+}

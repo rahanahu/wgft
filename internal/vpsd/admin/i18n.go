@@ -94,9 +94,9 @@ var tr = map[string][2]string{
 	"save":         {"保存", "Save"},
 	"denyN":        {"拒否 %d", "%d denied"},
 	"allowN":       {"許可のみ %d", "allow-only %d"},
-	"rateNewFlow":  {"新規フロー", "new flows"},
-	"ratePkt":      {"パケット", "packets"},
-	"rateSource":   {"接続元ごと", "per source"},
+	"rateNewFlow":  {"全体 %[1]d 本/%[2]s", "whole rule %[1]d/%[2]s"},
+	"ratePkt":      {"パケット %[1]d 個/%[2]s", "packets %[1]d/%[2]s"},
+	"rateSource":   {"接続元ごと %[1]d 本/%[2]s", "per source %[1]d/%[2]s"},
 	"noNftTable":   {"(wgft テーブルなし、または nft を読めません)", "(no wgft table, or nft not readable)"},
 	// warnings
 	"warningsHead":      {"警告", "Warnings"},
