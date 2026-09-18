@@ -5,6 +5,7 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -116,6 +117,56 @@ type BatchRequest struct {
 	Upsert []proto.Rule `json:"upsert"` // ID があれば置き換え、なければ追加
 	Delete []string     `json:"delete"` // ID
 	Force  bool         `json:"force"`  // bind 中のポートとの衝突を無視する
+	// ExpectedDigest は任意(空なら検査しない、既存の呼び出し元と互換)。指定すると、
+	// Batch はこのバッチが変更しようとしている今のルール集合の proto.RulesDigest と
+	// 一致するかを、読み取りと変更を 1 トランザクション/1 ロックの内側で照合する。
+	// 一致しなければ何も変えず ErrBatchConflict を返す。読み取ってから Batch を呼ぶまでの
+	// 間に他経路(別の CLI 呼び出しや別タブの Web UI)が割り込む競合を塞ぐためのもの
+	// (仕様 5.4、10.1 節)。Web UI の読み込み確認・適用はこれを使う(webui_import.go)。
+	ExpectedDigest string `json:"expected_digest,omitempty"`
+}
+
+// ErrBatchConflict は Backend.Batch が ExpectedDigest の不一致で拒んだときの誤り。
+// 管理用 API は HTTP 409 に写し、Web UI の読み込み確認はこれを、確認ページを描いた後に
+// 変わった場合と同じ「re-upload を求める」画面に写す(webui_import.go の uiImportApply)。
+var ErrBatchConflict = errors.New("rules changed since the expected digest was read")
+
+// ApplyBatchToRules は ExpectedDigest を照合したうえで、req の upsert/delete を rules に
+// ID で当てはめた結果を返す(ID があれば置き換え、なければ追加。delete は最後に外す)。
+// 本物の Backend(internal/vpsd の Daemon.Batch)はエージェントの登録確認や nftables への
+// 反映、同じ ExpectedDigest の照合も行うが、ここにはその一部が無い。fake や demo の
+// Backend 実装(admin_test.go の fakeBackend、tools/uidemo のもの)が、CLI/Web UI から見た
+// 見た目だけを本物に合わせるために共有する組み立てである。store.ApplyBatch の mutate に
+// そのまま渡せる ([]proto.Rule, error) を返す形にしているのは、rules がその関数の中で
+// 読み取る「今の」集合そのもの(トランザクションの内側)であることを利用して、
+// ExpectedDigest の照合を読み取りと変更の間に割り込みの余地なく行うためである。
+func ApplyBatchToRules(rules []proto.Rule, req BatchRequest) ([]proto.Rule, error) {
+	if req.ExpectedDigest != "" && proto.RulesDigest(rules) != req.ExpectedDigest {
+		return nil, ErrBatchConflict
+	}
+	del := make(map[string]bool, len(req.Delete))
+	for _, id := range req.Delete {
+		del[id] = true
+	}
+	kept := make([]proto.Rule, 0, len(rules))
+	for _, r := range rules {
+		if !del[r.ID] {
+			kept = append(kept, r)
+		}
+	}
+	byID := make(map[string]int, len(kept))
+	for i, r := range kept {
+		byID[r.ID] = i
+	}
+	for _, u := range req.Upsert {
+		if i, ok := byID[u.ID]; ok {
+			kept[i] = u
+		} else {
+			byID[u.ID] = len(kept)
+			kept = append(kept, u)
+		}
+	}
+	return kept, nil
 }
 
 // BatchResponse はバッチの結果。
@@ -240,6 +291,10 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.backend.Batch(req)
 	if err != nil {
+		if errors.Is(err, ErrBatchConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}

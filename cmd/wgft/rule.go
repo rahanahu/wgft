@@ -238,6 +238,7 @@ func newRuleEnableCmd(use string, enabled bool) *cobra.Command {
 }
 
 // newRuleSplitCmd は `rule split`。範囲を 1 バッチで 2 つに分け、実効宛先を変えないのでセッションは残る(仕様 5.4、7 節)。
+// 組み立てと検査は proto.Rule.Split が持ち、CLI と Web UI の分割区画で共有する(仕様 10.1、10.2 節)。
 func newRuleSplitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "split <id> <port>",
@@ -252,21 +253,14 @@ func newRuleSplitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			at, err := proto.ParsePortRange(args[1])
-			if err != nil || at.Lo != at.Hi {
-				return fmt.Errorf("split point must be a single port")
+			at, err := proto.ParseSplitPoint(args[1])
+			if err != nil {
+				return err
 			}
-			if at.Lo <= r.ListenPort.Lo || at.Lo > r.ListenPort.Hi {
-				return fmt.Errorf("split point %d must be inside range %s, excluding the first port", at.Lo, r.ListenPort)
+			head, tail, err := r.Split(at, newRuleID())
+			if err != nil {
+				return err
 			}
-			head := *r
-			head.ListenPort = proto.PortRange{Lo: r.ListenPort.Lo, Hi: at.Lo - 1}
-			tail := *r
-			tail.ID = newRuleID()
-			tail.ListenPort = proto.PortRange{Lo: at.Lo, Hi: r.ListenPort.Hi}
-			// 後半の target は、元の target のポートに範囲内での位置を足したもの(実効宛先を変えない)
-			eff, _ := r.ForAgent().EffectiveTarget(at.Lo)
-			tail.Target = eff
 			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{head, tail}})
 			if err != nil {
 				return err
@@ -278,6 +272,8 @@ func newRuleSplitCmd() *cobra.Command {
 }
 
 // newRuleMergeCmd は `rule merge`。隣接する 2 つを 1 バッチで 1 つにする。
+// 組み立てと検査は proto.Merge が持ち、CLI と Web UI の統合区画で共有する(仕様 10.1、10.2 節)。
+// 統合したルールは id1 の ID・group・note・拒否/許可リスト・レート・enabled を保つ。
 func newRuleMergeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "merge <id1> <id2>",
@@ -296,17 +292,10 @@ func newRuleMergeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if a.ListenPort.Lo > b.ListenPort.Lo {
-				a, b = b, a
+			merged, err := proto.Merge(*a, *b)
+			if err != nil {
+				return err
 			}
-			if a.Agent != b.Agent || a.Proto != b.Proto || a.VPSMode != b.VPSMode || a.ListenPort.Hi+1 != b.ListenPort.Lo {
-				return fmt.Errorf("rules must share the same agent, protocol, and mode, and have adjacent ranges")
-			}
-			if eff, _ := a.ForAgent().EffectiveTarget(a.ListenPort.Hi); eff == "" || nextPort(eff) != b.Target {
-				return fmt.Errorf("effective targets are not contiguous after %s and %s", a.Target, b.Target)
-			}
-			merged := *a
-			merged.ListenPort.Hi = b.ListenPort.Hi
 			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{merged}, Delete: []string{b.ID}})
 			if err != nil {
 				return err
@@ -331,6 +320,11 @@ func newRuleImportCmd() *cobra.Command {
 			if err := json.Unmarshal(b, &rules); err != nil {
 				return err
 			}
+			for i := range rules {
+				if rules[i].ID == "" {
+					rules[i].ID = newRuleID()
+				}
+			}
 			c, err := adminClient(cmd)
 			if err != nil {
 				return err
@@ -339,20 +333,13 @@ func newRuleImportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			keep := map[string]bool{}
-			for i := range rules {
-				if rules[i].ID == "" {
-					rules[i].ID = newRuleID()
-				}
-				keep[rules[i].ID] = true
-			}
-			var del []string
-			for _, r := range cur.Rules {
-				if !keep[r.ID] {
-					del = append(del, r.ID)
-				}
-			}
-			res, err := c.Batch(admin.BatchRequest{Upsert: rules, Delete: del, Force: force})
+			// 削除対象の抽出は proto.DiffRules/DeletedIDs を Web UI の読み込み確認・適用
+			// (仕様 10.1 節)と共有する。ExpectedDigest には今読んだ cur.Rules のハッシュを
+			// 渡し、この読み取りと Batch の間に他経路(別の CLI 呼び出しや Web UI)が割り込んで
+			// 変更しても、それを黙って上書きせず誤りにする(Web UI の読み込み確認・適用と
+			// 同じ保証。仕様 5.4、10.1 節)。
+			del := proto.DeletedIDs(proto.DiffRules(cur.Rules, rules))
+			res, err := c.Batch(admin.BatchRequest{Upsert: rules, Delete: del, Force: force, ExpectedDigest: proto.RulesDigest(cur.Rules)})
 			if err != nil {
 				return err
 			}
@@ -400,13 +387,13 @@ func newRuleDenyCmd() *cobra.Command {
 	deny := &cobra.Command{Use: "deny", Short: "Manage the deny list source_deny"}
 	deny.AddCommand(
 		newRestrictionCmd("add <id> <cidr>...", "add deny CIDRs; active flows are cut immediately", func(r *proto.Rule, a []string) error {
-			ps, err := parseCIDRs(a)
-			r.SourceDeny = append(r.SourceDeny, ps...)
+			ps, err := proto.ParseSources(a)
+			r.SourceDeny = proto.AddSources(r.SourceDeny, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
 		newRestrictionCmd("rm <id> <cidr>...", "remove deny CIDRs", func(r *proto.Rule, a []string) error {
-			ps, err := parseCIDRs(a)
-			r.SourceDeny = removePrefixes(r.SourceDeny, ps)
+			ps, err := proto.ParseSources(a)
+			r.SourceDeny = proto.RemoveSources(r.SourceDeny, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
 	)
@@ -418,13 +405,13 @@ func newRuleAllowCmd() *cobra.Command {
 	allow := &cobra.Command{Use: "allow", Short: "Manage the allow list source_allow; when non-empty, drop everything except the listed CIDRs"}
 	allow.AddCommand(
 		newRestrictionCmd("add <id> <cidr>...", "add allow CIDRs", func(r *proto.Rule, a []string) error {
-			ps, err := parseCIDRs(a)
-			r.SourceAllow = append(r.SourceAllow, ps...)
+			ps, err := proto.ParseSources(a)
+			r.SourceAllow = proto.AddSources(r.SourceAllow, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
 		newRestrictionCmd("rm <id> <cidr>...", "remove allow CIDRs", func(r *proto.Rule, a []string) error {
-			ps, err := parseCIDRs(a)
-			r.SourceAllow = removePrefixes(r.SourceAllow, ps)
+			ps, err := proto.ParseSources(a)
+			r.SourceAllow = proto.RemoveSources(r.SourceAllow, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
 	)
@@ -501,40 +488,6 @@ func newRuleSetCmd() *cobra.Command {
 	return set
 }
 
-// parseCIDRs は CIDR の列を解釈する。単一 IP も /32 として受ける。
-func parseCIDRs(args []string) ([]netip.Prefix, error) {
-	var out []netip.Prefix
-	for _, a := range args {
-		p, err := netip.ParsePrefix(a)
-		if err != nil {
-			ip, err2 := netip.ParseAddr(a)
-			if err2 != nil {
-				return nil, fmt.Errorf("%q is neither a CIDR nor an IP", a)
-			}
-			p = netip.PrefixFrom(ip, ip.BitLen())
-		}
-		out = append(out, p.Masked())
-	}
-	return out, nil
-}
-
-// removePrefixes は list から rm に含まれる CIDR を除く。
-func removePrefixes(list []netip.Prefix, rm []netip.Prefix) []netip.Prefix {
-	var out []netip.Prefix
-	for _, p := range list {
-		keep := true
-		for _, r := range rm {
-			if p == r {
-				keep = false
-			}
-		}
-		if keep {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // short はルール ID を短く表示する(先頭 12 文字)。findRule が前方一致で受けるので選択には困らない。
 func short(id string) string {
 	if len(id) > 12 {
@@ -574,15 +527,4 @@ func findRule(c *admin.Client, id string) (*proto.Rule, error) {
 		return nil, fmt.Errorf("rule %q not found", id)
 	}
 	return nil, fmt.Errorf("rule %q matches multiple rules", id)
-}
-
-// nextPort は host:port の port を 1 つ進める。
-func nextPort(hostport string) string {
-	i := strings.LastIndex(hostport, ":")
-	if i < 0 {
-		return hostport
-	}
-	var p int
-	fmt.Sscanf(hostport[i+1:], "%d", &p)
-	return fmt.Sprintf("%s:%d", hostport[:i], p+1)
 }

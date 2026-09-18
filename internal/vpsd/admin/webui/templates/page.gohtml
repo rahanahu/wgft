@@ -14,7 +14,7 @@
       <div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ .Title }}</div></div>
       <div class="top-actions"><a class="btn" href="/">{{ T .Locale "back" }}</a></div>
     </header>
-    <main style="max-width:640px">
+    <main style="max-width:{{ if .Wide }}900{{ else }}640{{ end }}px">
       <section class="panel" style="padding:18px">
         {{ .Body }}
       </section>

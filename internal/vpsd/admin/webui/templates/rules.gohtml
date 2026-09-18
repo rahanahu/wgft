@@ -1,7 +1,11 @@
 {{ define "rules" }}
 <div class="section-head">
   <div class="title-row"><h2>{{ T .Locale "rules" }}</h2><span class="count">{{ .RuleCount }}</span></div>
-  <div class="toolbar"><span class="muted">{{ T .Locale "gen" }} {{ .Generation }}</span></div>
+  <div class="toolbar">
+    <span class="muted">{{ T .Locale "gen" }} {{ .Generation }}</span>
+    <a class="small-btn" href="/ui/rules/export">{{ T .Locale "exportRules" }}</a>
+    <a class="small-btn" href="/ui/rules/import">{{ T .Locale "importRules" }}</a>
+  </div>
 </div>
 <div class="table-scroll">
   <table class="data-table rules-table">
@@ -18,6 +22,7 @@
         <td colspan="8">
           <button type="button" class="group-toggle" data-group="g{{ $gi }}" aria-expanded="true">▾</button>
           <span class="group-name">{{ $g.Label }}</span><span class="count">{{ len $g.Rules }}</span>
+          {{ if $g.ErrorCount }}<span class="count danger">{{ printf (T $loc "groupErrN") $g.ErrorCount }}</span>{{ end }}
         </td>
       </tr>
       {{ range $g.Rules }}
@@ -29,7 +34,10 @@
         <td data-label="{{ T $loc "colAgent" }}">{{ .Agent }}</td>
         <td data-label="{{ T $loc "colDest" }}" class="mono">{{ .Target }}</td>
         <td data-label="{{ T $loc "colMode" }}">{{ .Mode }}{{ if .ProxyProtocol }} <small>(PROXY)</small>{{ end }}</td>
-        <td data-label="{{ T $loc "colState" }}"><span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span></td>
+        <td data-label="{{ T $loc "colState" }}">
+          <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
+          {{ if .StateReason }}<small class="danger-text">{{ .StateReason }}</small>{{ end }}
+        </td>
         <td data-label="{{ T $loc "colDenied" }}">{{ .Dropped }}</td>
         <td data-label="{{ T $loc "colRestrict" }}">{{ .Restriction }}</td>
         <td data-label="{{ T $loc "colActions" }}">
@@ -38,7 +46,7 @@
               <button class="small-btn" type="submit">{{ if .Enabled }}{{ T $loc "disable" }}{{ else }}{{ T $loc "enable" }}{{ end }}</button>
             </form>
             {{ if .CanCheck }}<a class="small-btn accent" href="/ui/rules/{{ .ID }}/check">{{ T $loc "testConn" }}</a>{{ end }}
-            <a class="small-btn" href="/ui/rules/{{ .ID }}/meta">{{ T $loc "editMeta" }}</a>
+            <a class="small-btn" href="/ui/rules/{{ .ID }}">{{ T $loc "detailLink" }}</a>
             <form method="post" action="/ui/rules/{{ .ID }}/delete" data-confirm="{{ printf (T $loc "confirmDelete") .Ports }}">
               <button class="small-btn" type="submit">{{ T $loc "delete" }}</button>
             </form>

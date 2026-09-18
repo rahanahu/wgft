@@ -7,7 +7,6 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
-	"net/netip"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -20,6 +19,13 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
+// このファイルは Web UI のルーティング、ダッシュボードの組み立てと描画、および
+// renderHTML/renderPage/redirectOrError のような、他のページも使う共通の補助を持つ。
+// ルール追加・詳細ページ(meta、拒否/許可リスト、レート、有効無効)は webui_rule.go、
+// 分割・統合は webui_splitmerge.go、ルールの適用状態の判定は webui_state.go、
+// エージェントの追加・無効化・警告の削除は webui_agent.go、ルールの書き出し・読み込みは
+// webui_import.go に分ける。
+
 func newULID() string { return ulid.Make().String() }
 
 //go:embed webui/templates/*.gohtml
@@ -28,7 +34,7 @@ var tmplFS embed.FS
 //go:embed webui/static/*
 var staticFS embed.FS
 
-var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
+var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
 
 // registerUI は Web UI のルートを mux に足す(認証は ServeHTTP でかかる)。
 func (s *Server) registerUI() {
@@ -41,9 +47,20 @@ func (s *Server) registerUI() {
 	s.mux.HandleFunc("POST /ui/add-rule", s.uiAddRule)
 	s.mux.HandleFunc("GET /ui/add-agent", s.uiAddAgentForm)
 	s.mux.HandleFunc("POST /ui/add-agent", s.uiAddAgent)
+	s.mux.HandleFunc("GET /ui/rules/export", s.uiRulesExport)
+	s.mux.HandleFunc("GET /ui/rules/import", s.uiImportForm)
+	s.mux.HandleFunc("POST /ui/rules/import", s.uiImportConfirm)
+	s.mux.HandleFunc("POST /ui/rules/import/apply", s.uiImportApply)
 	s.mux.HandleFunc("GET /ui/rules/{id}/check", s.uiCheck)
-	s.mux.HandleFunc("GET /ui/rules/{id}/meta", s.uiEditMetaForm)
+	s.mux.HandleFunc("GET /ui/rules/{id}", s.uiRuleDetail)
 	s.mux.HandleFunc("POST /ui/rules/{id}/meta", s.uiEditMeta)
+	s.mux.HandleFunc("POST /ui/rules/{id}/deny/add", s.uiDenyAdd)
+	s.mux.HandleFunc("POST /ui/rules/{id}/deny/rm", s.uiDenyRm)
+	s.mux.HandleFunc("POST /ui/rules/{id}/allow/add", s.uiAllowAdd)
+	s.mux.HandleFunc("POST /ui/rules/{id}/allow/rm", s.uiAllowRm)
+	s.mux.HandleFunc("POST /ui/rules/{id}/rates", s.uiSetRates)
+	s.mux.HandleFunc("POST /ui/rules/{id}/split", s.uiRuleSplit)
+	s.mux.HandleFunc("POST /ui/rules/{id}/merge", s.uiRuleMerge)
 	s.mux.HandleFunc("POST /ui/rules/{id}/enable", s.uiRuleEnable)
 	s.mux.HandleFunc("POST /ui/rules/{id}/disable", s.uiRuleDisable)
 	s.mux.HandleFunc("POST /ui/rules/{id}/delete", s.uiRuleDelete)
@@ -51,7 +68,7 @@ func (s *Server) registerUI() {
 	s.mux.HandleFunc("POST /ui/agents/{name}/dismiss-warning", s.uiDismissWarning)
 }
 
-// ---- ビューモデル ----
+// ---- ビューモデル(ダッシュボード) ----
 
 type dashData struct {
 	Locale       string
@@ -82,6 +99,8 @@ type agentView struct {
 	IPCompareClass, IPCompareLabel        string
 	Pending                               bool
 	HeartbeatAgo, HeartbeatClass          string
+	HandshakeAgo                          string
+	PublicKey, PublicKeyShort             string
 	WarnCount                             int
 	Attention                             bool
 }
@@ -91,16 +110,19 @@ type ruleView struct {
 	ProtoUpper, ProtoClass, Ports    string
 	ProxyProtocol, Enabled, CanCheck bool
 	StateBadge, StateLabel           string
+	StateReason                      string
 	Dropped                          string
 	Restriction                      string
 	Note                             string
 }
 
-// ruleGroupView は一覧のグループ 1 つ分。
+// ruleGroupView は一覧のグループ 1 つ分。ErrorCount はグループが畳まれていても見出しに
+// 出す error 状態のルール数(仕様 10.1 節)。
 type ruleGroupView struct {
-	Group string
-	Label string
-	Rules []ruleView
+	Group      string
+	Label      string
+	Rules      []ruleView
+	ErrorCount int
 }
 
 type warnView struct {
@@ -131,20 +153,28 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 		}
 		d.Agents = append(d.Agents, agentToView(a, gen, locale))
 	}
+	agentIdx := buildAgentIndex(agents)
 	d.RuleCount = len(rules)
-	d.RuleGroups = groupRules(rules, drops, locale, d.Server.Mode)
+	var ruleErrors int
+	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, agentIdx)
 	for _, w := range warns {
 		d.Warnings = append(d.Warnings, warnToView(w, locale))
 	}
-	d.Health = health(len(agents), online, len(rules), len(warns), locale)
+	d.Health = health(len(agents), online, len(rules), len(warns), ruleErrors, locale)
 	return d, nil
 }
 
-func health(total, online, rules, warnings int, locale string) healthView {
-	if warnings > 0 {
-		return healthView{OK: false, Class: "", Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryWarn"), online, total, rules, warnings)}
+func health(total, online, rules, warnings, ruleErrors int, locale string) healthView {
+	switch {
+	case ruleErrors > 0 && warnings > 0:
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErrWarn"), online, total, rules, ruleErrors, warnings)}
+	case ruleErrors > 0:
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErr"), online, total, rules, ruleErrors)}
+	case warnings > 0:
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryWarn"), online, total, rules, warnings)}
+	default:
+		return healthView{OK: true, Class: "success", Title: T(locale, "healthOK"), Summary: fmt.Sprintf(T(locale, "summaryOK"), online, total, rules)}
 	}
-	return healthView{OK: true, Class: "success", Title: T(locale, "healthOK"), Summary: fmt.Sprintf(T(locale, "summaryOK"), online, total, rules)}
 }
 
 func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {
@@ -181,16 +211,30 @@ func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {
 	if a.Connected && staleHeartbeat(a.LastHeartbeat) {
 		v.HeartbeatClass = "warning-text"
 	}
+	v.HandshakeAgo = agoStr(a.LastHandshake, locale)
+	v.PublicKey = a.PublicKey
+	v.PublicKeyShort = pubKeyShort(a.PublicKey)
 	if len(a.Warnings) > 0 {
 		v.Attention = true
 	}
 	return v
 }
 
+// pubKeyShort は公開鍵の先頭だけを一覧に出す用に切る(全体は title 属性に持たせる。
+// `agent pubkey` の出力と見比べられれば足りるので、これで確定はしない)。
+func pubKeyShort(key string) string {
+	const n = 12
+	if len(key) <= n {
+		return key
+	}
+	return key[:n] + "…"
+}
+
 // ruleToView は 1 件のビューを作る。serverMode が "userspace" のときは、ルールごとの
 // vps_mode(kernel/proxy)に意味が無い(仕様 6.3 節。全ルールが server 経由で中継される)ので、
-// 一覧の方式欄は一律 "userspace" にし、PROXY protocol の有無だけを添える。
-func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode string) ruleView {
+// 一覧の方式欄は一律 "userspace" にし、PROXY protocol の有無だけを添える。適用状態は
+// ruleRunState がエージェントの直近のハートビートから判定する(仕様 10.1 節)。
+func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus) ruleView {
 	mode := string(r.VPSMode)
 	if serverMode == "userspace" {
 		mode = "userspace"
@@ -203,14 +247,7 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode strin
 	} else {
 		v.ProtoClass = "tcp"
 	}
-	switch {
-	case !r.Enabled:
-		v.StateBadge, v.StateLabel = "neutral", T(locale, "disabled")
-	default:
-		// 適用状態はエージェントのハートビート由来だが、UI 一覧では有効=適用済みとして扱い、
-		// error はエージェント一覧側で見せる(簡潔さのため)。将来、ルールごとの error を引き当てる
-		v.StateBadge, v.StateLabel = "success", T(locale, "applied")
-	}
+	v.StateBadge, v.StateLabel, v.StateReason = ruleRunState(r, latestGen, agents, locale)
 	v.CanCheck = r.Enabled && r.Proto == proto.TCP
 	v.Dropped = strconv.FormatUint(drops[r.ID], 10)
 	v.Restriction = restrictionSummary(r, locale)
@@ -219,9 +256,11 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode strin
 }
 
 // groupRules は一覧をグループごとにまとめる。空グループ(その他)は最後(仕様 10.1)。
-func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode string) []ruleGroupView {
+// 戻り値の 2 つ目は全体の error 状態のルール数(ヘッダの全体ヘルスに使う)。
+func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus) ([]ruleGroupView, int) {
 	idx := map[string]int{}
 	var out []ruleGroupView
+	totalErrors := 0
 	for i := range rules {
 		g := rules[i].Group
 		j, ok := idx[g]
@@ -234,7 +273,12 @@ func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode 
 			}
 			out = append(out, ruleGroupView{Group: g, Label: label})
 		}
-		out[j].Rules = append(out[j].Rules, ruleToView(&rules[i], drops, locale, serverMode))
+		v := ruleToView(&rules[i], drops, locale, serverMode, latestGen, agents)
+		if v.StateBadge == "danger" {
+			out[j].ErrorCount++
+			totalErrors++
+		}
+		out[j].Rules = append(out[j].Rules, v)
 	}
 	sort.SliceStable(out, func(a, b int) bool {
 		if (out[a].Group == "") != (out[b].Group == "") {
@@ -242,7 +286,7 @@ func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode 
 		}
 		return out[a].Group < out[b].Group
 	})
-	return out
+	return out, totalErrors
 }
 
 func restrictionSummary(r *proto.Rule, locale string) string {
@@ -253,9 +297,10 @@ func restrictionSummary(r *proto.Rule, locale string) string {
 	if len(r.SourceAllow) > 0 {
 		parts = append(parts, fmt.Sprintf(T(locale, "allowN"), len(r.SourceAllow)))
 	}
-	for label, rate := range map[string]*proto.Rate{T(locale, "rateNewFlow"): r.NewFlowRate, T(locale, "ratePkt"): r.PacketRate, T(locale, "rateSource"): r.PerSourceRate} {
+	// 単位は詳細ページと同じく訳す(日本語で "10/second" と英語が混ざらないように)
+	for key, rate := range map[string]*proto.Rate{"rateNewFlow": r.NewFlowRate, "ratePkt": r.PacketRate, "rateSource": r.PerSourceRate} {
 		if rate != nil {
-			parts = append(parts, label+" "+rate.String())
+			parts = append(parts, fmt.Sprintf(T(locale, key), rate.Count, unitLabel(locale, string(rate.Unit))))
 		}
 	}
 	sort.Strings(parts)
@@ -278,7 +323,7 @@ func warnToView(w Warning, locale string) warnView {
 	return v
 }
 
-// ---- ハンドラ ----
+// ---- ハンドラ(ダッシュボードとその部分更新) ----
 
 func (s *Server) uiDashboard(w http.ResponseWriter, r *http.Request) {
 	d, err := s.buildDash(resolveLocale(w, r))
@@ -307,58 +352,6 @@ func (s *Server) uiWarningsPartial(w http.ResponseWriter, r *http.Request) {
 	s.renderHTML(w, "warnings", d)
 }
 
-func (s *Server) uiAddRuleForm(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": s.serverMode()})
-}
-
-// serverMode は現在の転送方式(kernel / userspace)。ServerInfo が引けなければ kernel とみなす
-// (仕様 9 節。記録の無い既存の状態は kernel とみなす規則に合わせる)。
-func (s *Server) serverMode() string {
-	info, err := s.backend.ServerInfo()
-	if err != nil || info.Mode == "" {
-		return string(proto.ModeKernel)
-	}
-	return info.Mode
-}
-
-// existingGroups は既存ルールのグループ名(重複なし・ソート済み)。フォームの候補に使う。
-func (s *Server) existingGroups() []string {
-	rules, _ := s.backend.Rules()
-	seen := map[string]bool{}
-	var out []string
-	for i := range rules {
-		g := rules[i].Group
-		if g != "" && !seen[g] {
-			seen[g] = true
-			out = append(out, g)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	mode := s.serverMode()
-	lp, err := proto.ParsePortRange(r.FormValue("listen_port"))
-	if err != nil {
-		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": mode, "Error": err.Error()})
-		return
-	}
-	rule := proto.Rule{
-		ID: "r_" + newULID(), Agent: r.FormValue("agent"), Proto: proto.Proto(r.FormValue("proto")),
-		Group: strings.TrimSpace(r.FormValue("group")), Note: strings.TrimSpace(r.FormValue("note")),
-		ListenPort: lp, Target: r.FormValue("target"), VPSMode: proto.VPSMode(r.FormValue("vps_mode")),
-		ProxyProtocol: r.FormValue("proxy_protocol") == "1", Enabled: true,
-		SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
-	}
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rule}, Force: r.FormValue("force") == "1"}); err != nil {
-		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": mode, "Error": err.Error()})
-		return
-	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
 // findRule は ID で 1 件返す。
 func (s *Server) findRule(id string) (proto.Rule, bool) {
 	rules, _ := s.backend.Rules()
@@ -370,99 +363,18 @@ func (s *Server) findRule(id string) (proto.Rule, bool) {
 	return proto.Rule{}, false
 }
 
-func (s *Server) metaData(rule proto.Rule, extra map[string]any) map[string]any {
-	d := map[string]any{"ID": rule.ID, "Ports": rule.ListenPort.String(), "Group": rule.Group, "Note": rule.Note, "Groups": s.existingGroups()}
-	for k, v := range extra {
-		d[k] = v
-	}
-	return d
-}
-
-func (s *Server) uiEditMetaForm(w http.ResponseWriter, r *http.Request) {
-	rule, ok := s.findRule(r.PathValue("id"))
+// findRuleOr404 は findRule の 404 応答つき版。ルール詳細ページの各ハンドラ(meta、
+// deny/allow、rates、split、merge の self 側)が繰り返す「無ければ 404 を書いて戻る」を
+// まとめる。呼び出し側は ok を見て return するのは変わらず、分岐そのものは隠さない。
+func (s *Server) findRuleOr404(w http.ResponseWriter, id string) (proto.Rule, bool) {
+	rule, ok := s.findRule(id)
 	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
-		return
 	}
-	s.renderPage(w, r, "editMetaTitle", "editmeta", s.metaData(rule, nil))
+	return rule, ok
 }
 
-func (s *Server) uiEditMeta(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	rule, ok := s.findRule(r.PathValue("id"))
-	if !ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	rule.Group = strings.TrimSpace(r.FormValue("group"))
-	rule.Note = strings.TrimSpace(r.FormValue("note"))
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rule}}); err != nil {
-		s.renderPage(w, r, "editMetaTitle", "editmeta", s.metaData(rule, map[string]any{"Error": err.Error()}))
-		return
-	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
-func (s *Server) uiAddAgentForm(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, r, "addAgentTitle", "addagent", map[string]any{})
-}
-
-func (s *Server) uiAddAgent(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	res, err := s.backend.JoinString(r.FormValue("name"))
-	if err != nil {
-		s.renderPage(w, r, "addAgentTitle", "addagent", map[string]any{"Error": err.Error()})
-		return
-	}
-	s.renderPage(w, r, "addAgentTitle", "addagent", map[string]any{"JoinString": res.JoinString, "ExpiresAt": res.ExpiresAt})
-}
-
-func (s *Server) uiCheck(w http.ResponseWriter, r *http.Request) {
-	locale := resolveLocale(w, r)
-	id := r.PathValue("id")
-	res, err := s.backend.CheckConnectivity(id)
-	data := map[string]any{"RuleLabel": id, "Agent": ""}
-	if err != nil {
-		data["OK"], data["ReachLabel"], data["Detail"] = false, T(locale, "checkFailed"), err.Error()
-	} else {
-		data["OK"], data["Detail"] = res.OK, res.Detail
-		data["ReachLabel"] = reachLabel(res.Reach, locale)
-	}
-	s.renderPage(w, r, "checkTitle", "checkresult", data)
-}
-
-func (s *Server) uiRuleEnable(w http.ResponseWriter, r *http.Request)  { s.setEnabled(w, r, true) }
-func (s *Server) uiRuleDisable(w http.ResponseWriter, r *http.Request) { s.setEnabled(w, r, false) }
-
-func (s *Server) setEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
-	id := r.PathValue("id")
-	rules, err := s.backend.Rules()
-	if err == nil {
-		for i := range rules {
-			if rules[i].ID == id {
-				rules[i].Enabled = enabled
-				_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rules[i]}})
-				break
-			}
-		}
-	}
-	s.redirectOrError(w, r, err)
-}
-
-func (s *Server) uiRuleDelete(w http.ResponseWriter, r *http.Request) {
-	_, err := s.backend.Batch(BatchRequest{Delete: []string{r.PathValue("id")}})
-	s.redirectOrError(w, r, err)
-}
-
-func (s *Server) uiRevoke(w http.ResponseWriter, r *http.Request) {
-	s.redirectOrError(w, r, s.backend.Revoke(r.PathValue("name")))
-}
-func (s *Server) uiDismissWarning(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	s.redirectOrError(w, r, s.backend.DismissWarning(r.PathValue("name"), r.FormValue("kind"), r.FormValue("detail")))
-}
-
-// ---- 補助 ----
+// ---- 補助(ページ描画・リダイレクト。他のページも使う) ----
 
 func (s *Server) agentsOrNil() []AgentInfo {
 	a, _ := s.backend.Agents()
@@ -491,11 +403,16 @@ func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, titleKey, bo
 }
 
 func (s *Server) redirectOrError(w http.ResponseWriter, r *http.Request, err error) {
+	s.redirectOrErrorTo(w, r, "/", err)
+}
+
+// redirectOrErrorTo は redirectOrError の宛先を選べる版(ルール詳細ページへ戻すときに使う)。
+func (s *Server) redirectOrErrorTo(w http.ResponseWriter, r *http.Request, to string, err error) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, to, http.StatusSeeOther)
 }
 
 // serverView はダッシュボード上部の「サーバー」帯。
@@ -617,14 +534,4 @@ func agoStr(rfc3339, locale string) string {
 func staleHeartbeat(rfc3339 string) bool {
 	t, err := time.Parse(time.RFC3339, rfc3339)
 	return err == nil && time.Since(t) > 90*time.Second
-}
-
-func reachLabel(reach, locale string) string {
-	switch reach {
-	case "agent":
-		return T(locale, "reachAgent")
-	case "none":
-		return T(locale, "reachNone")
-	}
-	return T(locale, "reachOther")
 }

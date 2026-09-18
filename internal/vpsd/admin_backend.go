@@ -125,6 +125,13 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 		return nil, err
 	}
 	res, err := d.st.ApplyBatch(d.reserved, func(rules []proto.Rule) ([]proto.Rule, error) {
+		// ExpectedDigest の照合は、rules(このトランザクションが読んだ「今の」集合)に対して
+		// 行う。読み取りと変更の間に他経路が割り込む余地が無いので、Web UI の読み込み確認・
+		// 適用のように、確認を描いた時点から適用までに間がある操作で、その間の別経路の変更を
+		// 見逃さず塞げる(仕様 5.4、10.1 節)。
+		if req.ExpectedDigest != "" && proto.RulesDigest(rules) != req.ExpectedDigest {
+			return nil, admin.ErrBatchConflict
+		}
 		byID := map[string]int{}
 		for i, r := range rules {
 			byID[r.ID] = i

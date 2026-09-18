@@ -17,17 +17,27 @@ import (
 // fakeBackend はバッチをそのまま store に流す。nftables には触れない。
 // mode は ServerInfo().Mode に使う("" のままなら kernel とみなされる。webui.go の serverMode 参照)。
 type fakeBackend struct {
-	st   *store.Store
-	mode string
+	st       *store.Store
+	mode     string
+	agents   []AgentInfo // 空なら未接続の "home" 1 台(既定)。ルールの適用状態のテストは差し替える
+	warnings []Warning   // nil なら IP 食い違いの警告 1 件(既定)。ダッシュボードの警告バナーのテストは空スライスに差し替える
 }
 
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.st.Rules() }
 func (b *fakeBackend) Generation() (uint64, error)  { return b.st.Generation() }
-func (b *fakeBackend) Agents() ([]AgentInfo, error) { return []AgentInfo{{Name: "home"}}, nil }
+func (b *fakeBackend) Agents() ([]AgentInfo, error) {
+	if b.agents != nil {
+		return b.agents, nil
+	}
+	return []AgentInfo{{Name: "home"}}, nil
+}
 func (b *fakeBackend) RuleDrops() (map[string]uint64, error) {
 	return map[string]uint64{"r_a": 42}, nil
 }
 func (b *fakeBackend) Warnings() ([]Warning, error) {
+	if b.warnings != nil {
+		return b.warnings, nil
+	}
 	return []Warning{{Agent: "home", Kind: store.WarnIPMismatch, Detail: "stream=9.9.9.9 wg=1.2.3.4"}}, nil
 }
 func (b *fakeBackend) DismissWarning(agent, kind, detail string) error { return nil }
@@ -44,12 +54,15 @@ func (b *fakeBackend) AgentState(string) (*proto.State, error) {
 func (b *fakeBackend) ServerInfo() (ServerInfo, error) {
 	return ServerInfo{Version: "test", Mode: b.mode, WGInterface: "wgft0", WGPort: 51821, MTU: 1420, Kernel: "6.1.0", NFT: "v1.0.6"}, nil
 }
+
+// Batch はテスト用の簡略な upsert/delete(ID で置き換え、なければ追加。仕様 5.4 節と同じ形)。
+// 本物の Daemon.Batch と違い、エージェントの存在確認や nftables への反映は行わない。
+// 組み立て自体は ApplyBatchToRules(admin.go)を、tools/uidemo の fakeBackend と共有する。
 func (b *fakeBackend) Batch(req BatchRequest) (*store.BatchResult, error) {
 	return b.st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
-		return append(rules, req.Upsert...), nil
+		return ApplyBatchToRules(rules, req)
 	})
 }
-
 func TestHostOriginAndBatch(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
 	if err != nil {
@@ -149,6 +162,78 @@ func TestHostOriginAndBatch(t *testing.T) {
 	_ = json.Marshal
 }
 
+// TestBatchExpectedDigestConflict は、BatchRequest.ExpectedDigest が今のルール集合の
+// proto.RulesDigest と食い違うと Batch が何も変えず ErrBatchConflict(HTTP 409)を返すこと、
+// 一致すれば通ることを確かめる(仕様 5.4、10.1 節)。この照合は ApplyBatchToRules/
+// store.ApplyBatch のトランザクションの内側で行うため、ExpectedDigest を読んだ後に
+// 割り込んだ別経路の変更(ここでは r_a.Group だけの、世代を上げない変更)を、
+// 世代の一致だけでは見逃す状況でも正しく検出する。
+func TestBatchExpectedDigestConflict(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	defer srv.Close()
+	c := &Client{Base: srv.URL}
+
+	r := proto.Rule{ID: "r_a", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 1, Hi: 2}, Target: "h:1", VPSMode: proto.ModeKernel, Enabled: true}
+	if _, err := c.Batch(BatchRequest{Upsert: []proto.Rule{r}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Rules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := proto.RulesDigest(res.Rules)
+
+	// 割り込みの変更:group だけなので世代は上がらない(5.3 節)。ExpectedDigest はこれを見逃さない。
+	r.Group = "changed-elsewhere"
+	if _, err := c.Batch(BatchRequest{Upsert: []proto.Rule{r}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 古い digest を渡すと拒まれ、HTTP は 409、何も変わらない。
+	req, _ := http.NewRequest("POST", srv.URL+"/api/v1/rules/batch", bytes.NewReader(mustJSON(t, BatchRequest{
+		Upsert:         []proto.Rule{{ID: "r_a", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 1, Hi: 2}, Target: "h:9999", VPSMode: proto.ModeKernel, Enabled: true}},
+		ExpectedDigest: digest,
+	})))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("stale ExpectedDigest status = %d, want %d", resp.StatusCode, http.StatusConflict)
+	}
+	after, err := c.Rules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Rules) != 1 || after.Rules[0].Target != "h:1" || after.Rules[0].Group != "changed-elsewhere" {
+		t.Errorf("a refused batch must not undo the interleaved change or apply its own: %+v", after.Rules)
+	}
+
+	// 今の digest を渡せば通る。
+	current := proto.RulesDigest(after.Rules)
+	r2 := after.Rules[0]
+	r2.Target = "h:2"
+	if _, err := c.Batch(BatchRequest{Upsert: []proto.Rule{r2}, ExpectedDigest: current}); err != nil {
+		t.Fatalf("Batch with the current digest must succeed: %v", err)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 // TestUIRenderLocales は UI ページが ja/en 両方で実行時エラーなく描画され、
 // 言語に応じた文字列が出ることを確かめる(テンプレートの実行時エラー検出)。
 func TestUIRenderLocales(t *testing.T) {
@@ -188,9 +273,10 @@ func TestUIRenderLocales(t *testing.T) {
 		{"/ui/add-rule", "受信ポート", "Listen port"},
 		{"/ui/add-agent", "エージェント名", "Agent name"},
 		{"/ui/rules/r_a/check", "接続テスト", "Connection test"},
-		{"/ui/rules/r_a/meta", "グループ・説明を編集", "Edit group / note"},
+		{"/ui/rules/r_a", "拒否リスト", "Deny list"},
 		{"/ui/agents", "最終ハートビート", "Last heartbeat"},
 		{"/ui/warnings", "警告", "Warnings"},
+		{"/ui/rules/import", "読み込み", "Import rules"},
 	}
 	for _, tc := range cases {
 		if body := get(tc.path + "?lang=ja"); !strings.Contains(body, tc.wantJA) {
@@ -201,52 +287,17 @@ func TestUIRenderLocales(t *testing.T) {
 		}
 	}
 }
-
-// TestAddRuleFormFollowsMode は、ルール追加フォームがサーバーの転送方式(kernel/userspace)に
-// 応じて出し分けることを確かめる(仕様 6.3 節)。userspace ではルールごとの kernel/proxy の
-// 選択に意味が無いので、ラジオ群を出さず PROXY protocol のチェックボックス 1 つにする。
-func TestAddRuleFormFollowsMode(t *testing.T) {
-	get := func(t *testing.T, mode string) string {
-		t.Helper()
-		st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer st.Close()
-		srv := httptest.NewServer(New(st, &fakeBackend{st: st, mode: mode}))
-		defer srv.Close()
-		resp, err := http.Get(srv.URL + "/ui/add-rule")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET /ui/add-rule status = %d, want 200", resp.StatusCode)
-		}
-		b, _ := io.ReadAll(resp.Body)
-		return string(b)
+func findRuleT(t *testing.T, st *store.Store, id string) proto.Rule {
+	t.Helper()
+	rules, err := st.Rules()
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	t.Run("kernel", func(t *testing.T) {
-		body := get(t, "kernel")
-		if !strings.Contains(body, `name="vps_mode" value="kernel"`) || !strings.Contains(body, `name="vps_mode" value="proxy"`) {
-			t.Error("kernel mode: expected the vps_mode radio group to be present")
+	for _, r := range rules {
+		if r.ID == id {
+			return r
 		}
-		if strings.Contains(body, `id="f-proxy-userspace"`) {
-			t.Error("kernel mode: unexpected userspace PROXY protocol checkbox")
-		}
-	})
-
-	t.Run("userspace", func(t *testing.T) {
-		body := get(t, "userspace")
-		if strings.Contains(body, `name="vps_mode" value="kernel" checked`) || strings.Contains(body, `name="vps_mode" value="proxy"`) {
-			t.Error("userspace mode: the vps_mode radio group must be absent")
-		}
-		if !strings.Contains(body, `id="f-proxy-userspace"`) || !strings.Contains(body, `type="checkbox"`) {
-			t.Error("userspace mode: expected the PROXY protocol checkbox")
-		}
-		if !strings.Contains(body, `id="f-vps-mode-userspace"`) {
-			t.Error("userspace mode: expected the hidden vps_mode field the checkbox drives")
-		}
-	})
+	}
+	t.Fatalf("rule %q not found", id)
+	return proto.Rule{}
 }

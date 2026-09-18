@@ -122,9 +122,56 @@
     });
   }
 
+  // レート制限の各行：「制限しない」を選ぶと数値と単位を無効にする（見た目の補助。判定は
+  // nolimit の値そのもので行うので、この JS が動かなくても保存の挙動は変わらない）。
+  function initRateForm() {
+    document.querySelectorAll(".rate-row").forEach(function (row) {
+      var checkbox = row.querySelector('input[type="checkbox"]');
+      var count = row.querySelector('input[type="number"]');
+      var unit = row.querySelector("select");
+      if (!checkbox || !count || !unit) return;
+      function sync() {
+        count.disabled = checkbox.checked;
+        unit.disabled = checkbox.checked;
+      }
+      checkbox.addEventListener("change", sync);
+      sync();
+    });
+  }
+
+  // ルール詳細ページの分割区画:選んだ位置での 2 つの結果(受信範囲→宛先範囲)を、送信前に
+  // その場で計算して見せる(仕様 10.1 節)。無効な値(範囲外)なら何も出さない。
+  function initSplitForm() {
+    var form = document.getElementById("split-form");
+    if (!form) return;
+    var select = document.getElementById("split-at");
+    var preview = document.getElementById("split-preview");
+    var lo = parseInt(form.dataset.listenLo, 10);
+    var hi = parseInt(form.dataset.listenHi, 10);
+    var host = form.dataset.targetHost;
+    var port = parseInt(form.dataset.targetPort, 10);
+    function rangeStr(a, b) { return a === b ? String(a) : a + "-" + b; }
+    function update() {
+      var at = select && parseInt(select.value, 10);
+      if (!preview) return;
+      if (!(at > lo && at <= hi) || !host || isNaN(port)) {
+        preview.textContent = "";
+        return;
+      }
+      var headHiPort = port + (at - 1 - lo);
+      var tailLoPort = port + (at - lo);
+      var tailHiPort = port + (hi - lo);
+      preview.textContent =
+        rangeStr(lo, at - 1) + " → " + host + ":" + rangeStr(port, headHiPort) +
+        "   /   " + rangeStr(at, hi) + " → " + host + ":" + rangeStr(tailLoPort, tailHiPort);
+    }
+    if (select) select.addEventListener("change", update);
+    update();
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function () { start(); confirmForms(); initRuleForm(); initRuleGroups(); });
+    document.addEventListener("DOMContentLoaded", function () { start(); confirmForms(); initRuleForm(); initRuleGroups(); initRateForm(); initSplitForm(); });
   } else {
-    start(); confirmForms(); initRuleForm(); initRuleGroups();
+    start(); confirmForms(); initRuleForm(); initRuleGroups(); initRateForm(); initSplitForm();
   }
 })();

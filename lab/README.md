@@ -32,6 +32,8 @@ lab/lab shell home              # home ns で bash
 lab/lab exec vm bash /wgft/lab/e2e.sh kernel     # 端から端までのシナリオ(登録、TCP/UDP、PROXY protocol、deny の即時反映、撤去)を PASS/FAIL で
 lab/lab exec vm bash /wgft/lab/e2e.sh userspace  # 同じシナリオをユーザー空間モード(非 root の wgftlab ユーザー)で
 lab/lab exec vm bash /wgft/lab/rates.sh kernel   # レート制限の実負荷(packet、per-source、new-flow)。userspace も同じ
+lab/lab exec vm bash /wgft/lab/split-merge.sh kernel   # Web UI の分割・統合。流れている UDP セッションが切れないことを確認。userspace も同じ
+lab/lab exec vm bash /wgft/lab/import-export.sh kernel # Web UI の書き出しと読み込み。確認画面の差分、確認後の変更による適用の拒否を確認。userspace も同じ
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
 lab/lab destroy                 # VM ごと消す
 ```
