@@ -2,7 +2,6 @@ package credentials
 
 import (
 	"errors"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -34,10 +33,11 @@ func TestLock(t *testing.T) {
 	if locked, _ := IsLocked(path); locked {
 		t.Error("IsLocked = true after release")
 	}
-	if _, err := Acquire(path); err != nil {
+	again, err := Acquire(path)
+	if err != nil {
 		t.Errorf("Acquire after release: %v", err)
+	} else {
+		defer again.Release() // TempDir の掃除が開いたハンドルで失敗しないように、放す
 	}
-	if info, err := os.Stat(LockPath(path)); err != nil || info.Mode().Perm() != 0o600 {
-		t.Errorf("lock file: %v %v", info, err)
-	}
+	assertFileSecured(t, LockPath(path))
 }
