@@ -6,6 +6,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"net/url"
+	"os"
 
 	_ "modernc.org/sqlite"
 )
@@ -78,8 +81,15 @@ var migrations = []string{
 	ALTER TABLE agents DROP COLUMN stream_blocked`,
 }
 
-// Open はファイルを開き(なければ作り)、スキーマを最新にする。
+// Open はファイルを開き(なければ 0600 で作り)、スキーマを最新にする。本体と WAL の補助ファイルに
+// グループかその他の権限があれば外す(仕様 9 節)。
 func Open(path string) (*Store, error) {
+	if err := ensureCreated(path); err != nil {
+		return nil, err
+	}
+	if err := narrowMode(path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -97,7 +107,86 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	for _, p := range []string{path + "-wal", path + "-shm"} {
+		if err := narrowMode(p); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// OpenReadOnly は、何も変えずに読むために開く(server check 用。仕様 9 節)。スキーマの移行、
+// journal_mode の設定、権限の変更をしない。mode=ro だけでは SQLite が WAL の補助ファイルを作って
+// 閉じた後も残すので、補助ファイルが無い(server が止まっていて全データが本体にある)ときは
+// immutable=1 でロックも補助ファイルも使わずに読む。補助ファイルがあれば mode=ro で、WAL にだけある
+// 書き込みも読む。どちらも書き込みは拒否される。
+func OpenReadOnly(path string) (*Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	q := "mode=ro&_pragma=busy_timeout(5000)"
+	if !exists(path+"-wal") && !exists(path+"-shm") {
+		q += "&immutable=1"
+	}
+	u := url.URL{Scheme: "file", Path: path, RawQuery: q}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if version > len(migrations) {
+		db.Close()
+		return nil, fmt.Errorf("SQLite schema version %d is newer than this binary, which supports up to %d", version, len(migrations))
+	}
+	return &Store{db: db, filePath: path}, nil
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// ensureCreated は、本体が無ければ 0600 で作る。umask は権限を狭めることしかないので、作った後に直す必要はない。
+func ensureCreated(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// ExtraPerm は、0600(所有者の読み書き)に含まれない権限。グループとその他の権限と、所有者の実行権がこれに当たる。
+func ExtraPerm(m os.FileMode) os.FileMode { return m.Perm() &^ 0o600 }
+
+// narrowMode は、ファイルがあれば ExtraPerm の権限だけを外す。所有者の権限は変えないので、
+// 0644 は 0600 になり、管理者が 0400 にしたファイルは 0400 のまま残る(仕様 9 節)。
+func narrowMode(path string) error {
+	fi, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	old := fi.Mode().Perm()
+	if ExtraPerm(old) == 0 {
+		return nil
+	}
+	narrowed := old &^ ExtraPerm(old)
+	if err := os.Chmod(path, narrowed); err != nil {
+		return err
+	}
+	log.Printf("server database: narrowed mode of %s from %04o to %04o", path, old, narrowed)
+	return nil
 }
 
 // Close は SQLite を閉じる。
