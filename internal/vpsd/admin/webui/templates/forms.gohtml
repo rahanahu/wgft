@@ -202,29 +202,54 @@
 </section>
 
 <section class="detail-section">
-  <h3>{{ T .Locale "rateHead" }}</h3>
+  <div class="title-row"><h3>{{ T .Locale "rateHead" }}</h3><small class="muted">{{ printf (T .Locale "rateDroppedFmt") .Dropped }}</small></div>
   <p class="field-help">{{ T .Locale "rateHelp" }}</p>
   {{ if .RateError }}<p class="danger-text">{{ .RateError }}</p>{{ end }}
+  {{ $loc := .Locale }}
   <form method="post" action="/ui/rules/{{ .ID }}/rates" class="rate-form">
-    <div class="rate-row">
-      <span class="rate-label">{{ T .Locale "ratePerSourceHead" }}</span>
-      <input type="number" min="1" name="per_source_count" value="{{ .Rates.PerSource.Count }}">
-      <select name="per_source_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.PerSource.Unit }}selected{{ end }}>{{ $u }}</option>{{ end }}</select>
-      <label class="check"><input type="checkbox" name="per_source_nolimit" value="1" {{ if .Rates.PerSource.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+    <div class="rate-field">
+      <div class="rate-row">
+        <span class="rate-label">{{ T .Locale "ratePerSourceHead" }}</span>
+        <input type="number" min="1" name="per_source_count" value="{{ .Rates.PerSource.Count }}">
+        <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
+        <select name="per_source_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.PerSource.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
+        <label class="check"><input type="checkbox" name="per_source_nolimit" value="1" {{ if .Rates.PerSource.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+      </div>
+      <p class="field-help">{{ T .Locale "ratePerSourceHelp" }}</p>
+      {{ if and (not .Rates.PerSource.NoLimit) .Rates.PerSource.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPerSourceFmt") (UnitLabel $loc .Rates.PerSource.Unit) .Rates.PerSource.Count }}</p>{{ end }}
     </div>
-    <div class="rate-row">
-      <span class="rate-label">{{ T .Locale "rateNewFlowHead" }}</span>
-      <input type="number" min="1" name="new_flow_count" value="{{ .Rates.NewFlow.Count }}">
-      <select name="new_flow_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.NewFlow.Unit }}selected{{ end }}>{{ $u }}</option>{{ end }}</select>
-      <label class="check"><input type="checkbox" name="new_flow_nolimit" value="1" {{ if .Rates.NewFlow.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+
+    <div class="rate-field">
+      <div class="rate-row">
+        <span class="rate-label">{{ T .Locale "rateNewFlowHead" }}</span>
+        <input type="number" min="1" name="new_flow_count" value="{{ .Rates.NewFlow.Count }}">
+        <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
+        <select name="new_flow_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.NewFlow.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
+        <label class="check"><input type="checkbox" name="new_flow_nolimit" value="1" {{ if .Rates.NewFlow.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+      </div>
+      <p class="field-help">{{ T .Locale "rateNewFlowHelp" }}</p>
+      {{ if and (not .Rates.NewFlow.NoLimit) .Rates.NewFlow.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryWholeFmt") (UnitLabel $loc .Rates.NewFlow.Unit) .Rates.NewFlow.Count }}</p>{{ end }}
     </div>
-    <div class="rate-row">
-      <span class="rate-label">{{ T .Locale "ratePacketHead" }}</span>
-      <input type="number" min="1" name="packet_count" value="{{ .Rates.Packet.Count }}">
-      <select name="packet_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.Packet.Unit }}selected{{ end }}>{{ $u }}</option>{{ end }}</select>
-      <label class="check"><input type="checkbox" name="packet_nolimit" value="1" {{ if .Rates.Packet.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
-    </div>
-    {{ if .ShowPacketNote }}<p class="field-help">{{ T .Locale "packetUserspaceNote" }}</p>{{ end }}
+
+    {{ $hasPacket := and (not .Rates.Packet.NoLimit) .Rates.Packet.Count }}
+    <details class="advanced" {{ if $hasPacket }}open{{ end }}>
+      <summary>{{ T .Locale "ratePacketDetails" }}</summary>
+      <div class="advanced-body">
+        <div class="rate-field">
+          <div class="rate-row">
+            <span class="rate-label">{{ T .Locale "ratePacketHead" }}</span>
+            <input type="number" min="1" name="packet_count" value="{{ .Rates.Packet.Count }}">
+            <span class="rate-unit-word">{{ T .Locale "ratePacketWord" }}</span> /
+            <select name="packet_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.Packet.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
+            <label class="check"><input type="checkbox" name="packet_nolimit" value="1" {{ if .Rates.Packet.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+          </div>
+          <p class="field-help">{{ T .Locale "ratePacketHelp" }}</p>
+          {{ if $hasPacket }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPacketFmt") (UnitLabel $loc .Rates.Packet.Unit) .Rates.Packet.Count }}</p>{{ end }}
+          {{ if .ShowPacketNote }}<p class="field-help">{{ T .Locale "packetUserspaceNote" }}</p>{{ end }}
+        </div>
+      </div>
+    </details>
+
     <div class="form-actions"><button class="btn primary" type="submit">{{ T .Locale "save" }}</button></div>
   </form>
 </section>

@@ -29,7 +29,7 @@ var tmplFS embed.FS
 //go:embed webui/static/*
 var staticFS embed.FS
 
-var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
+var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
 
 // registerUI は Web UI のルートを mux に足す(認証は ServeHTTP でかかる)。
 func (s *Server) registerUI() {
@@ -145,6 +145,7 @@ type ruleDetailData struct {
 	RateError              string
 	Units                  []string
 	ShowPacketNote         bool
+	Dropped                string // このルールの累積 drop 数(一覧の「拒否数」と同じ値。レート制限の見出しに添える)
 
 	// 分割。範囲でないルールでは CanSplit が false になり、区画そのものを出さない。
 	CanSplit           bool
@@ -185,6 +186,25 @@ type rateFieldView struct {
 }
 
 var rateUnits = []string{string(proto.PerSecond), string(proto.PerMinute), string(proto.PerHour), string(proto.PerDay), string(proto.PerWeek)}
+
+// rateUnitKeys は proto.RateUnit の値(second など、フォームに送信する値そのもの)を、
+// 表示用の訳語キー(秒など)に対応させる。
+var rateUnitKeys = map[string]string{
+	string(proto.PerSecond): "unitSecond",
+	string(proto.PerMinute): "unitMinute",
+	string(proto.PerHour):   "unitHour",
+	string(proto.PerDay):    "unitDay",
+	string(proto.PerWeek):   "unitWeek",
+}
+
+// unitLabel はレート単位の表示語を返す(テンプレート関数 UnitLabel)。送信する value 属性は
+// proto.RateUnit の値のままで変えない(10.1 節)。
+func unitLabel(locale, unit string) string {
+	if key, ok := rateUnitKeys[unit]; ok {
+		return T(locale, key)
+	}
+	return unit
+}
 
 func (s *Server) buildDash(locale string) (dashData, error) {
 	agents, err := s.backend.Agents()
@@ -545,6 +565,9 @@ func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
 		Rates:           rateFormFrom(rule),
 		Units:           rateUnits,
 		ShowPacketNote:  serverMode == "userspace" && rule.Proto == proto.TCP,
+	}
+	if drops, err := s.backend.RuleDrops(); err == nil {
+		d.Dropped = strconv.FormatUint(drops[rule.ID], 10)
 	}
 	gen, _ := s.backend.Generation()
 	agents, _ := s.backend.Agents()

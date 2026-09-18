@@ -201,10 +201,13 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 .inline-form { display: flex; gap: 10px; align-items: flex-end; max-width: 480px; }
 .inline-form .field { flex: 1; }
 .inline-form textarea { width: 100%; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); padding: 8px 10px; font: inherit; resize: vertical; }
-.rate-form { display: grid; gap: 12px; max-width: 560px; }
+.rate-form { display: grid; gap: 14px; max-width: 560px; }
+.rate-field { display: grid; gap: 4px; }
 .rate-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rate-label { min-width: 220px; font-weight: 600; font-size: 13px; }
 .rate-row input[type="number"] { width: 90px; }
+.rate-unit-word { color: var(--muted); font-size: 13px; }
+.rate-summary { margin: 0; font-size: 13px; font-weight: 600; color: var(--accent-strong); }
 .split-form { max-width: 480px; }
 .split-preview { min-height: 1.4em; }
 .merge-list { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; max-width: 640px; }

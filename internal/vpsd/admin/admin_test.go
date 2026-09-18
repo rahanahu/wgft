@@ -655,6 +655,80 @@ func TestRuleDetailRates(t *testing.T) {
 	}
 }
 
+// TestRuleDetailRateWording は、レート制限の見出しと補足文言(10.1 節。パケット制限を
+// 接続数の制限と誤読されないための言い直し)を確かめる。見出しの言い直し、このルールの
+// 累積 drop 数(一覧と同じ値)、パケット欄が既定では折りたたまれていて値が入っていると
+// 開くこと、値を入れた欄に読み上げの一文が付くことを、ja/en 両方で見る。
+func TestRuleDetailRateWording(t *testing.T) {
+	srv, _ := newDetailTestServer(t)
+
+	get := func(lang string) string { return getBody(t, srv.URL+"/ui/rules/r_a?lang="+lang) }
+
+	ja, en := get("ja"), get("en")
+	for _, tc := range []struct{ ja, en string }{
+		{"1 つの接続元からの新しい接続", "New connections per source"},
+		{"ルール全体の新しい接続", "New connections for the whole rule"},
+		{"パケット (通信中のデータも含む)", "Packets (including ongoing traffic)"},
+		{"拒否 42 件", "42 dropped"}, // fakeBackend.RuleDrops: r_a=42
+	} {
+		if !strings.Contains(ja, tc.ja) {
+			t.Errorf("ja: missing %q", tc.ja)
+		}
+		if !strings.Contains(en, tc.en) {
+			t.Errorf("en: missing %q", tc.en)
+		}
+	}
+	// no rate set yet: the packet section stays collapsed and no summary sentence appears
+	if strings.Contains(ja, `class="advanced" open`) {
+		t.Error("packet details must be collapsed when no packet limit is set")
+	}
+	if strings.Contains(ja, "本まで") || strings.Contains(en, "Up to") {
+		t.Error("no summary sentence should appear before a rate is set")
+	}
+
+	// setting per_source only: its summary sentence reads back the value
+	resp, err := http.PostForm(srv.URL+"/ui/rules/r_a/rates", url.Values{
+		"per_source_count": {"10"}, "per_source_unit": {"minute"},
+		"new_flow_nolimit": {"1"}, "new_flow_unit": {"second"},
+		"packet_nolimit": {"1"}, "packet_unit": {"second"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	ja, en = get("ja"), get("en")
+	if !strings.Contains(ja, "1 つの接続元から 1 分に 10 本まで") {
+		t.Errorf("ja: missing the per-source summary sentence: %s", ja)
+	}
+	if !strings.Contains(en, "Up to 10 new connections per minute from one source") {
+		t.Errorf("en: missing the per-source summary sentence: %s", en)
+	}
+	if strings.Contains(ja, `class="advanced" open`) {
+		t.Error("packet details must stay collapsed while packet_rate has no limit")
+	}
+
+	// setting packet_rate opens the (otherwise collapsed) packet section by default
+	resp, err = http.PostForm(srv.URL+"/ui/rules/r_a/rates", url.Values{
+		"per_source_nolimit": {"1"}, "per_source_unit": {"second"},
+		"new_flow_nolimit": {"1"}, "new_flow_unit": {"second"},
+		"packet_count": {"500"}, "packet_unit": {"second"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	ja, en = get("ja"), get("en")
+	if !strings.Contains(ja, `class="advanced" open`) {
+		t.Error("packet details must open by default once packet_rate has a value")
+	}
+	if !strings.Contains(ja, "1 秒に 500 個まで") {
+		t.Errorf("ja: missing the packet summary sentence: %s", ja)
+	}
+	if !strings.Contains(en, "Up to 500 packets per second") {
+		t.Errorf("en: missing the packet summary sentence: %s", en)
+	}
+}
+
 // TestRuleDetailMeta は、詳細ページに取り込まれたグループ/説明の編集がルール詳細ページへ戻ることを確かめる。
 func TestRuleDetailMeta(t *testing.T) {
 	srv, st := newDetailTestServer(t)
