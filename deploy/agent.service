@@ -9,6 +9,10 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/wgft agent run
 Restart=on-failure
 RestartSec=2
+# An agent.env that exists but cannot be read (for example not group wgft, or mode 0600) is a
+# configuration error: the agent exits with code 3 and says how to fix it. Restarting does not
+# help, so do not loop on it.
+RestartPreventExitStatus=3
 
 # No privileges needed: create the user once with
 #   useradd --system --home-dir /var/lib/wgft --shell /usr/sbin/nologin wgft
