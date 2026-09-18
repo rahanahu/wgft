@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/credentials"
 )
 
 // agentConfigPath は agent の dotenv 既定(仕様 11a 節)。置き場は OS ごと(paths_*.go)。
@@ -77,7 +78,7 @@ optional and normally left unset, since the join string is already bound to a na
 			if err != nil {
 				return withUnreadableHint(err, agentUnreadableHint)
 			}
-			if err := os.MkdirAll(c.str("WGFT_DATA_DIR"), 0o700); err != nil {
+			if err := credentials.EnsureDataDir(c.str("WGFT_DATA_DIR")); err != nil {
 				return fmt.Errorf("data dir: %w", err)
 			}
 			limits, err := limitsFromConfig(c)

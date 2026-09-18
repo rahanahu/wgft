@@ -2,7 +2,6 @@ package credentials
 
 import (
 	"errors"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -18,6 +17,10 @@ func TestLock(t *testing.T) {
 	if _, err := Acquire(path); !errors.Is(err, ErrLocked) {
 		t.Errorf("second Acquire = %v, want ErrLocked", err)
 	}
+	// 利用者に見える呼び名は「認証情報ファイル」であって、flock 内部の「状態ファイル」ではない。
+	if got := ErrLocked.Error(); got != "credentials file is in use by another process" {
+		t.Errorf("ErrLocked = %q, want the credentials file wording", got)
+	}
 	if locked, _ := IsLocked(path); !locked {
 		t.Error("IsLocked = false while held")
 	}
@@ -30,10 +33,11 @@ func TestLock(t *testing.T) {
 	if locked, _ := IsLocked(path); locked {
 		t.Error("IsLocked = true after release")
 	}
-	if _, err := Acquire(path); err != nil {
+	again, err := Acquire(path)
+	if err != nil {
 		t.Errorf("Acquire after release: %v", err)
+	} else {
+		defer again.Release() // TempDir の掃除が開いたハンドルで失敗しないように、放す
 	}
-	if info, err := os.Stat(LockPath(path)); err != nil || info.Mode().Perm() != 0o600 {
-		t.Errorf("lock file: %v %v", info, err)
-	}
+	assertFileSecured(t, LockPath(path))
 }

@@ -15,8 +15,10 @@ type Lock struct {
 	f *os.File
 }
 
-// ErrLocked は別のプロセスがロックを持っている。
-var ErrLocked = errors.New("state file is in use by another process")
+// ErrLocked は別のプロセスがロックを持っている。flock は状態ファイルの呼び名を知らない
+// 汎用のパッケージなので、文言は中立にする。利用者に見える呼び名(credentials の
+// 「認証情報ファイル」、vpsd の「サーバのデータベース」)への言い換えは呼び出し側で行う。
+var ErrLocked = errors.New("locked by another process")
 
 // LockPath は状態ファイルに対応するロックファイルの場所。
 func LockPath(statePath string) string { return statePath + ".lock" }

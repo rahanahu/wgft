@@ -14,6 +14,7 @@ package vpsd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/flowcap"
@@ -230,7 +231,12 @@ func Run(opts Options) error {
 	}
 
 	// 起動ロック。二重起動を防ぎ、teardown が「vpsd 稼働中」を検出できるようにする(仕様 9 節)。
+	// flock は状態ファイルの呼び名を知らない汎用パッケージなので、ここで利用者向けの
+	// 呼び名(サーバのデータベース)に言い換える。
 	lock, err := flock.Acquire(opts.DBPath)
+	if errors.Is(err, flock.ErrLocked) {
+		return errors.New("server database is in use by another process")
+	}
 	if err != nil {
 		return fmt.Errorf("startup lock: %w", err)
 	}

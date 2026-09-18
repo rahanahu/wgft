@@ -1,7 +1,6 @@
 package credentials
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -23,10 +22,7 @@ func TestRoundTripAndKey(t *testing.T) {
 	if err := f.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("perm = %o, want 600", info.Mode().Perm())
-	}
+	assertFileSecured(t, path)
 	if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".wgft-state-*")); len(matches) != 0 {
 		t.Errorf("temp file left behind: %v", matches)
 	}
