@@ -53,7 +53,8 @@ func Check(opts Options, out io.Writer) error {
 		return nil
 	}
 	printDBModes(out, opts.DBPath)
-	st, err := store.Open(opts.DBPath)
+	// 読み取り専用で開く。store.Open は権限を狭め、スキーマを移行するので、check では使わない(仕様 9 節)
+	st, err := store.OpenReadOnly(opts.DBPath)
 	if err != nil {
 		fmt.Fprintf(out, "server database: cannot open: %v\n", err)
 		return nil
@@ -71,6 +72,8 @@ func Check(opts Options, out io.Writer) error {
 	return nil
 }
 
+// printDBModes は、SQLite の本体と WAL の補助ファイルの権限を 1 行ずつ出す。0600 より広ければ、
+// 次の起動で server が狭めることを添える(check 自身は変えない)。
 func printDBModes(out io.Writer, path string) {
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
 		fi, err := os.Stat(p)
@@ -81,7 +84,12 @@ func printDBModes(out io.Writer, path string) {
 			fmt.Fprintf(out, "server database file mode: cannot read %s: %v\n", p, err)
 			continue
 		}
-		fmt.Fprintf(out, "server database file mode: %s is %04o\n", p, fi.Mode().Perm())
+		perm := fi.Mode().Perm()
+		if store.ExtraPerm(perm) != 0 {
+			fmt.Fprintf(out, "server database file mode: %s is %04o; the server narrows it to %04o on its next start\n", p, perm, perm&^store.ExtraPerm(perm))
+			continue
+		}
+		fmt.Fprintf(out, "server database file mode: %s is %04o\n", p, perm)
 	}
 }
 
