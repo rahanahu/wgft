@@ -334,9 +334,12 @@ func newRuleImportCmd() *cobra.Command {
 				return err
 			}
 			// 削除対象の抽出は proto.DiffRules/DeletedIDs を Web UI の読み込み確認・適用
-			// (仕様 10.1 節)と共有する。
+			// (仕様 10.1 節)と共有する。ExpectedDigest には今読んだ cur.Rules のハッシュを
+			// 渡し、この読み取りと Batch の間に他経路(別の CLI 呼び出しや Web UI)が割り込んで
+			// 変更しても、それを黙って上書きせず誤りにする(Web UI の読み込み確認・適用と
+			// 同じ保証。仕様 5.4、10.1 節)。
 			del := proto.DeletedIDs(proto.DiffRules(cur.Rules, rules))
-			res, err := c.Batch(admin.BatchRequest{Upsert: rules, Delete: del, Force: force})
+			res, err := c.Batch(admin.BatchRequest{Upsert: rules, Delete: del, Force: force, ExpectedDigest: proto.RulesDigest(cur.Rules)})
 			if err != nil {
 				return err
 			}

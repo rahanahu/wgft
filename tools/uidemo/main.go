@@ -262,7 +262,11 @@ func (b *fakeBackend) Generation() (uint64, error)  { return 42, nil }
 // stays fixed at 42 (ServerInfo/AgentState below match), since the demo has no real
 // generation tracking.
 func (b *fakeBackend) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
-	b.rules = admin.ApplyBatchToRules(b.rules, req)
+	rules, err := admin.ApplyBatchToRules(b.rules, req)
+	if err != nil {
+		return nil, err
+	}
+	b.rules = rules
 	return &store.BatchResult{Rules: b.rules, Generation: 42, Changed: len(req.Upsert) > 0 || len(req.Delete) > 0}, nil
 }
 

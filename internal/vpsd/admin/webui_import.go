@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -281,9 +282,17 @@ func boolLabel(s, locale string) string {
 }
 
 // uiImportApply は確認ページの適用(仕様 10.1 節)。確認ページを描いた時点の世代と
-// ルール集合全体のハッシュ(proto.RulesDigest)を、適用時の今の値と比べる。group、note、
-// 接続元制限、レートだけの変更は世代を上げない(5.3 節)ため、世代だけの照合では見逃すので
-// ハッシュも見る。一致しなければ何も変えず、再アップロードを求める。
+// ルール集合全体のハッシュ(proto.RulesDigest)を、適用時の今の値と比べる事前照合を、
+// バッチを組み立てる前に安価に行い、食い違いがあれば分かりやすい再アップロードの案内を
+// 出す。group、note、接続元制限、レートだけの変更は世代を上げない(5.3 節)ため、
+// 世代だけの照合では見逃すのでハッシュも見る。
+//
+// この事前照合と Batch の呼び出しの間には、他経路の変更が割り込む狭い窓が残る
+// (読み取りと変更が 1 つのロック/トランザクションでないため)。実際に見逃さない保証は
+// Batch に渡す BatchRequest.ExpectedDigest が持つ。Batch はこれを、変更しようとしている
+// 今のルール集合の読み取りと同じトランザクション/ロックの内側で照合するため、
+// 事前照合をすり抜けた食い違いも ErrBatchConflict で拒む。ここではその誤りを、
+// 事前照合が拒んだときと同じ「再アップロードを求める」画面に写す。
 func (s *Server) uiImportApply(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, importMaxBytes)
 	if err := r.ParseForm(); err != nil {
@@ -302,12 +311,20 @@ func (s *Server) uiImportApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	gen, _ := s.backend.Generation()
-	if strconv.FormatUint(gen, 10) != r.FormValue("generation") || proto.RulesDigest(current) != r.FormValue("digest") {
+	digest := r.FormValue("digest")
+	stale := func() {
 		s.renderImportPage(w, locale, "importConfirmTitle", "importstale", map[string]any{"Locale": locale})
+	}
+	if strconv.FormatUint(gen, 10) != r.FormValue("generation") || proto.RulesDigest(current) != digest {
+		stale()
 		return
 	}
 	del := proto.DeletedIDs(proto.DiffRules(current, desired))
-	if _, err := s.backend.Batch(BatchRequest{Upsert: desired, Delete: del, Force: r.FormValue("force") == "1"}); err != nil {
+	if _, err := s.backend.Batch(BatchRequest{Upsert: desired, Delete: del, Force: r.FormValue("force") == "1", ExpectedDigest: digest}); err != nil {
+		if errors.Is(err, ErrBatchConflict) {
+			stale()
+			return
+		}
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}

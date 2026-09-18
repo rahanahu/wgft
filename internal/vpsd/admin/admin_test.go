@@ -60,7 +60,7 @@ func (b *fakeBackend) ServerInfo() (ServerInfo, error) {
 // 組み立て自体は ApplyBatchToRules(admin.go)を、tools/uidemo の fakeBackend と共有する。
 func (b *fakeBackend) Batch(req BatchRequest) (*store.BatchResult, error) {
 	return b.st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
-		return ApplyBatchToRules(rules, req), nil
+		return ApplyBatchToRules(rules, req)
 	})
 }
 func TestHostOriginAndBatch(t *testing.T) {
@@ -160,6 +160,78 @@ func TestHostOriginAndBatch(t *testing.T) {
 		t.Errorf("revoke: %v", err)
 	}
 	_ = json.Marshal
+}
+
+// TestBatchExpectedDigestConflict は、BatchRequest.ExpectedDigest が今のルール集合の
+// proto.RulesDigest と食い違うと Batch が何も変えず ErrBatchConflict(HTTP 409)を返すこと、
+// 一致すれば通ることを確かめる(仕様 5.4、10.1 節)。この照合は ApplyBatchToRules/
+// store.ApplyBatch のトランザクションの内側で行うため、ExpectedDigest を読んだ後に
+// 割り込んだ別経路の変更(ここでは r_a.Group だけの、世代を上げない変更)を、
+// 世代の一致だけでは見逃す状況でも正しく検出する。
+func TestBatchExpectedDigestConflict(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	defer srv.Close()
+	c := &Client{Base: srv.URL}
+
+	r := proto.Rule{ID: "r_a", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 1, Hi: 2}, Target: "h:1", VPSMode: proto.ModeKernel, Enabled: true}
+	if _, err := c.Batch(BatchRequest{Upsert: []proto.Rule{r}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Rules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := proto.RulesDigest(res.Rules)
+
+	// 割り込みの変更:group だけなので世代は上がらない(5.3 節)。ExpectedDigest はこれを見逃さない。
+	r.Group = "changed-elsewhere"
+	if _, err := c.Batch(BatchRequest{Upsert: []proto.Rule{r}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 古い digest を渡すと拒まれ、HTTP は 409、何も変わらない。
+	req, _ := http.NewRequest("POST", srv.URL+"/api/v1/rules/batch", bytes.NewReader(mustJSON(t, BatchRequest{
+		Upsert:         []proto.Rule{{ID: "r_a", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 1, Hi: 2}, Target: "h:9999", VPSMode: proto.ModeKernel, Enabled: true}},
+		ExpectedDigest: digest,
+	})))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("stale ExpectedDigest status = %d, want %d", resp.StatusCode, http.StatusConflict)
+	}
+	after, err := c.Rules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Rules) != 1 || after.Rules[0].Target != "h:1" || after.Rules[0].Group != "changed-elsewhere" {
+		t.Errorf("a refused batch must not undo the interleaved change or apply its own: %+v", after.Rules)
+	}
+
+	// 今の digest を渡せば通る。
+	current := proto.RulesDigest(after.Rules)
+	r2 := after.Rules[0]
+	r2.Target = "h:2"
+	if _, err := c.Batch(BatchRequest{Upsert: []proto.Rule{r2}, ExpectedDigest: current}); err != nil {
+		t.Fatalf("Batch with the current digest must succeed: %v", err)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestUIRenderLocales は UI ページが ja/en 両方で実行時エラーなく描画され、

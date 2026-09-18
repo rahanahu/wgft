@@ -285,6 +285,71 @@ func TestImportApplyAndStaleRefusal(t *testing.T) {
 	}
 }
 
+// conflictOnceBackend は fakeBackend を包み、ExpectedDigest 付きの最初の Batch 呼び出しだけを
+// ErrBatchConflict で拒む。確認ページの事前照合(世代とハッシュの一致)を通り抜けた後、
+// Batch を呼ぶまでの狭い窓に別経路の書き込みが割り込んだ場合を模す
+// (webui_import.go の uiImportApply のコメント、仕様 10.1 節)。
+type conflictOnceBackend struct {
+	*fakeBackend
+	tripped bool
+}
+
+func (b *conflictOnceBackend) Batch(req BatchRequest) (*store.BatchResult, error) {
+	if !b.tripped && req.ExpectedDigest != "" {
+		b.tripped = true
+		return nil, ErrBatchConflict
+	}
+	return b.fakeBackend.Batch(req)
+}
+
+// TestImportApplyMapsBatchConflictToStalePage は、事前照合を通り抜けた後に Batch 自身が
+// ExpectedDigest の不一致(ErrBatchConflict)で拒む場合も、事前照合が拒んだときと同じ
+// 「確認ページを表示した後に変わった」再アップロードの案内になることを確かめる。
+// この経路は、事前照合と Batch 呼び出しの間の競合の窓を、BatchRequest.ExpectedDigest が
+// 実際に塞いでいることの確認である。
+func TestImportApplyMapsBatchConflictToStalePage(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, proto.Rule{ID: "r_keep", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 443, Hi: 443}, Target: "192.168.1.30:443", VPSMode: proto.ModeKernel, Enabled: true}), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &conflictOnceBackend{fakeBackend: &fakeBackend{st: st}}
+	srv := httptest.NewServer(New(st, backend))
+	t.Cleanup(srv.Close)
+
+	desired := []proto.Rule{
+		{ID: "r_keep", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 443, Hi: 443}, Target: "192.168.1.31:443", VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	body, err := json.Marshal(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm := multipartUpload(t, srv.URL+"/ui/rules/import?lang=en", "rules.json", body)
+	page, _ := io.ReadAll(confirm.Body)
+	confirm.Body.Close()
+	fields := extractHiddenFields(t, string(page))
+
+	applyResp, err := http.PostForm(srv.URL+"/ui/rules/import/apply?lang=en", url.Values{
+		"content": {fields["content"]}, "generation": {fields["generation"]}, "digest": {fields["digest"]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer applyResp.Body.Close()
+	applyPage, _ := io.ReadAll(applyResp.Body)
+	if !strings.Contains(string(applyPage), "changed after this confirmation") {
+		t.Errorf("a Batch-level ErrBatchConflict must render the same re-upload page as the handler's own pre-check: %s", applyPage)
+	}
+	if r := findRuleT(t, st, "r_keep"); r.Target != "192.168.1.30:443" {
+		t.Errorf("a refused apply must not change anything: target = %q", r.Target)
+	}
+}
+
 // TestImportConfirmLocales は確認ページが ja/en 両方で実行時エラーなく描画され、
 // 言語に応じた件数の文言が出ることを確かめる。
 func TestImportConfirmLocales(t *testing.T) {
