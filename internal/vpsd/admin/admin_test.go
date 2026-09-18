@@ -19,13 +19,19 @@ import (
 // fakeBackend はバッチをそのまま store に流す。nftables には触れない。
 // mode は ServerInfo().Mode に使う("" のままなら kernel とみなされる。webui.go の serverMode 参照)。
 type fakeBackend struct {
-	st   *store.Store
-	mode string
+	st     *store.Store
+	mode   string
+	agents []AgentInfo // 空なら未接続の "home" 1 台(既定)。ルールの適用状態のテストは差し替える
 }
 
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.st.Rules() }
 func (b *fakeBackend) Generation() (uint64, error)  { return b.st.Generation() }
-func (b *fakeBackend) Agents() ([]AgentInfo, error) { return []AgentInfo{{Name: "home"}}, nil }
+func (b *fakeBackend) Agents() ([]AgentInfo, error) {
+	if b.agents != nil {
+		return b.agents, nil
+	}
+	return []AgentInfo{{Name: "home"}}, nil
+}
 func (b *fakeBackend) RuleDrops() (map[string]uint64, error) {
 	return map[string]uint64{"r_a": 42}, nil
 }

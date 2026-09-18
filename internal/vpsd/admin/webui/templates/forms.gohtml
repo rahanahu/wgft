@@ -132,6 +132,7 @@
       <button class="small-btn" type="submit">{{ if .Enabled }}{{ T .Locale "disable" }}{{ else }}{{ T .Locale "enable" }}{{ end }}</button>
     </form>
   </div>
+  {{ if .StateReason }}<p class="danger-text">{{ .StateReason }}</p>{{ end }}
   {{ if .Note }}<p class="muted">{{ .Note }}</p>{{ end }}
 </div>
 

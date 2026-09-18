@@ -114,22 +114,39 @@ func newFakeBackend(mode string) *fakeBackend {
 
 	agents := []admin.AgentInfo{
 		{
+			// generation 42 matches Generation() below, and it reports every rule it
+			// owns, so r_mc_tcp25565 shows "applied" while r_valheim_udp shows "error"
+			// with a realistic bind failure.
 			Name: "home", Address: "10.200.0.2", CreatedAt: rfc(-72 * time.Hour),
 			Connected: true, StreamFrom: "203.0.113.10:51820", WGEndpoint: "203.0.113.10:51820",
 			LastHeartbeat: rfc(-5 * time.Second), Generation: 42,
+			PublicKey: "HhYgfQgcVISS51VHjdkVxdPeCdaDL3P+vgm9soc8MLQ=", LastHandshake: rfc(-40 * time.Second),
 			Tunnel: proto.TunnelStatus{State: proto.StatusOK, Endpoint: "203.0.113.10:51820"},
+			Rules: []proto.RuleStatus{
+				{ID: "r_mc_tcp25565", State: proto.StatusOK},
+				{ID: "r_valheim_udp", State: proto.StatusError, Reason: "listen udp :2456: bind: address already in use"},
+			},
 		},
 		{
+			// disconnected, so r_mc_tcp8080 shows "agent offline" regardless of Rules.
 			Name: "office", Address: "10.200.0.3", CreatedAt: rfc(-48 * time.Hour),
 			Connected: false, StreamFrom: "203.0.113.24:41220", WGEndpoint: "198.51.100.9:51820",
 			LastHeartbeat: rfc(-3 * time.Minute), Generation: 40,
+			PublicKey: "Z50DXIe02Z4jmIIULTXv8vct6DA04NgcDKgxLdm6ytI=", LastHandshake: rfc(-6 * time.Minute),
 			Warnings: []admin.Warning{mismatch},
 		},
 		{
+			// generation 40 is behind Generation() (42), so both of its rules show
+			// "pending" no matter what Rules below says.
 			Name: "lab", Address: "10.200.0.4", CreatedAt: rfc(-24 * time.Hour),
 			Connected: true, StreamFrom: "192.0.2.55:51820", WGEndpoint: "192.0.2.55:51820",
-			LastHeartbeat: rfc(-12 * time.Second), Generation: 42,
+			LastHeartbeat: rfc(-12 * time.Second), Generation: 40,
+			PublicKey: "qJzBQ+ilV8EQ9749TxyIY1sB1jRieCYDU33kUi6aAPg=", LastHandshake: rfc(-18 * time.Second),
 			Tunnel: proto.TunnelStatus{State: proto.StatusOK, Endpoint: "192.0.2.55:51820"},
+			Rules: []proto.RuleStatus{
+				{ID: "r_lab_udp19132", State: proto.StatusOK},
+				{ID: "r_lab_tcp22", State: proto.StatusOK},
+			},
 		},
 	}
 

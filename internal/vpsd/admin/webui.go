@@ -87,6 +87,8 @@ type agentView struct {
 	IPCompareClass, IPCompareLabel        string
 	Pending                               bool
 	HeartbeatAgo, HeartbeatClass          string
+	HandshakeAgo                          string
+	PublicKey, PublicKeyShort             string
 	WarnCount                             int
 	Attention                             bool
 }
@@ -96,16 +98,19 @@ type ruleView struct {
 	ProtoUpper, ProtoClass, Ports    string
 	ProxyProtocol, Enabled, CanCheck bool
 	StateBadge, StateLabel           string
+	StateReason                      string
 	Dropped                          string
 	Restriction                      string
 	Note                             string
 }
 
-// ruleGroupView は一覧のグループ 1 つ分。
+// ruleGroupView は一覧のグループ 1 つ分。ErrorCount はグループが畳まれていても見出しに
+// 出す error 状態のルール数(仕様 10.1 節)。
 type ruleGroupView struct {
-	Group string
-	Label string
-	Rules []ruleView
+	Group      string
+	Label      string
+	Rules      []ruleView
+	ErrorCount int
 }
 
 type warnView struct {
@@ -120,6 +125,7 @@ type ruleDetailData struct {
 	Agent, Target, Mode    string
 	Enabled                bool
 	StateBadge, StateLabel string
+	StateReason            string
 	Note, Group            string
 	Groups                 []string
 	MetaError              string
@@ -179,20 +185,78 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 		}
 		d.Agents = append(d.Agents, agentToView(a, gen, locale))
 	}
+	agentIdx := buildAgentIndex(agents)
 	d.RuleCount = len(rules)
-	d.RuleGroups = groupRules(rules, drops, locale, d.Server.Mode)
+	var ruleErrors int
+	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, agentIdx)
 	for _, w := range warns {
 		d.Warnings = append(d.Warnings, warnToView(w, locale))
 	}
-	d.Health = health(len(agents), online, len(rules), len(warns), locale)
+	d.Health = health(len(agents), online, len(rules), len(warns), ruleErrors, locale)
 	return d, nil
 }
 
-func health(total, online, rules, warnings int, locale string) healthView {
-	if warnings > 0 {
-		return healthView{OK: false, Class: "", Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryWarn"), online, total, rules, warnings)}
+func health(total, online, rules, warnings, ruleErrors int, locale string) healthView {
+	switch {
+	case ruleErrors > 0 && warnings > 0:
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErrWarn"), online, total, rules, ruleErrors, warnings)}
+	case ruleErrors > 0:
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErr"), online, total, rules, ruleErrors)}
+	case warnings > 0:
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryWarn"), online, total, rules, warnings)}
+	default:
+		return healthView{OK: true, Class: "success", Title: T(locale, "healthOK"), Summary: fmt.Sprintf(T(locale, "summaryOK"), online, total, rules)}
 	}
-	return healthView{OK: true, Class: "success", Title: T(locale, "healthOK"), Summary: fmt.Sprintf(T(locale, "summaryOK"), online, total, rules)}
+}
+
+// ruleAgentStatus はエージェント 1 台の直近のハートビートから引く、ルールの適用状態の
+// 判定に要る部分だけの写し(仕様 10.1 節)。
+type ruleAgentStatus struct {
+	Connected  bool
+	Generation uint64
+	Rules      map[string]proto.RuleStatus
+}
+
+// buildAgentIndex はエージェント名 → ruleAgentStatus の表を作る。ruleRunState がこれで
+// ルールの持ち主のエージェントを引く。
+func buildAgentIndex(agents []AgentInfo) map[string]ruleAgentStatus {
+	idx := make(map[string]ruleAgentStatus, len(agents))
+	for _, a := range agents {
+		rs := make(map[string]proto.RuleStatus, len(a.Rules))
+		for _, r := range a.Rules {
+			rs[r.ID] = r
+		}
+		idx[a.Name] = ruleAgentStatus{Connected: a.Connected, Generation: a.Generation, Rules: rs}
+	}
+	return idx
+}
+
+// ruleRunState はルールの適用状態を、持ち主のエージェントの直近のハートビートから
+// 判定する(仕様 10.1 節)。無効なルールはエージェントへ配らないので、
+// ハートビートの内容に関わらず disabled のままにする。判定の優先順位は、
+// エージェント未登録・未接続が最優先、次に世代の古さ(反映待ち)、最後にエージェントが
+// 報告したそのルールの状態(ok/error)である。世代が最新なのにエージェントがまだその
+// ルールを報告していない場合(追加直後など)も反映待ちとして扱う。
+func ruleRunState(r *proto.Rule, latestGen uint64, agents map[string]ruleAgentStatus, locale string) (badge, label, reason string) {
+	if !r.Enabled {
+		return "neutral", T(locale, "disabled"), ""
+	}
+	a, ok := agents[r.Agent]
+	if !ok || !a.Connected {
+		return "neutral", T(locale, "agentOffline"), ""
+	}
+	if latestGen > 0 && a.Generation != latestGen {
+		return "warning", T(locale, "pending"), ""
+	}
+	rs, reported := a.Rules[r.ID]
+	switch {
+	case !reported:
+		return "warning", T(locale, "pending"), ""
+	case rs.State == proto.StatusError:
+		return "danger", T(locale, "stateError"), rs.Reason
+	default:
+		return "success", T(locale, "applied"), ""
+	}
 }
 
 func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {
@@ -229,16 +293,30 @@ func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {
 	if a.Connected && staleHeartbeat(a.LastHeartbeat) {
 		v.HeartbeatClass = "warning-text"
 	}
+	v.HandshakeAgo = agoStr(a.LastHandshake, locale)
+	v.PublicKey = a.PublicKey
+	v.PublicKeyShort = pubKeyShort(a.PublicKey)
 	if len(a.Warnings) > 0 {
 		v.Attention = true
 	}
 	return v
 }
 
+// pubKeyShort は公開鍵の先頭だけを一覧に出す用に切る(全体は title 属性に持たせる。
+// `agent pubkey` の出力と見比べられれば足りるので、これで確定はしない)。
+func pubKeyShort(key string) string {
+	const n = 12
+	if len(key) <= n {
+		return key
+	}
+	return key[:n] + "…"
+}
+
 // ruleToView は 1 件のビューを作る。serverMode が "userspace" のときは、ルールごとの
 // vps_mode(kernel/proxy)に意味が無い(仕様 6.3 節。全ルールが server 経由で中継される)ので、
-// 一覧の方式欄は一律 "userspace" にし、PROXY protocol の有無だけを添える。
-func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode string) ruleView {
+// 一覧の方式欄は一律 "userspace" にし、PROXY protocol の有無だけを添える。適用状態は
+// ruleRunState がエージェントの直近のハートビートから判定する(仕様 10.1 節)。
+func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus) ruleView {
 	mode := string(r.VPSMode)
 	if serverMode == "userspace" {
 		mode = "userspace"
@@ -251,14 +329,7 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode strin
 	} else {
 		v.ProtoClass = "tcp"
 	}
-	switch {
-	case !r.Enabled:
-		v.StateBadge, v.StateLabel = "neutral", T(locale, "disabled")
-	default:
-		// 適用状態はエージェントのハートビート由来だが、UI 一覧では有効=適用済みとして扱い、
-		// error はエージェント一覧側で見せる(簡潔さのため)。将来、ルールごとの error を引き当てる
-		v.StateBadge, v.StateLabel = "success", T(locale, "applied")
-	}
+	v.StateBadge, v.StateLabel, v.StateReason = ruleRunState(r, latestGen, agents, locale)
 	v.CanCheck = r.Enabled && r.Proto == proto.TCP
 	v.Dropped = strconv.FormatUint(drops[r.ID], 10)
 	v.Restriction = restrictionSummary(r, locale)
@@ -267,9 +338,11 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode strin
 }
 
 // groupRules は一覧をグループごとにまとめる。空グループ(その他)は最後(仕様 10.1)。
-func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode string) []ruleGroupView {
+// 戻り値の 2 つ目は全体の error 状態のルール数(ヘッダの全体ヘルスに使う)。
+func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus) ([]ruleGroupView, int) {
 	idx := map[string]int{}
 	var out []ruleGroupView
+	totalErrors := 0
 	for i := range rules {
 		g := rules[i].Group
 		j, ok := idx[g]
@@ -282,7 +355,12 @@ func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode 
 			}
 			out = append(out, ruleGroupView{Group: g, Label: label})
 		}
-		out[j].Rules = append(out[j].Rules, ruleToView(&rules[i], drops, locale, serverMode))
+		v := ruleToView(&rules[i], drops, locale, serverMode, latestGen, agents)
+		if v.StateBadge == "danger" {
+			out[j].ErrorCount++
+			totalErrors++
+		}
+		out[j].Rules = append(out[j].Rules, v)
 	}
 	sort.SliceStable(out, func(a, b int) bool {
 		if (out[a].Group == "") != (out[b].Group == "") {
@@ -290,7 +368,7 @@ func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode 
 		}
 		return out[a].Group < out[b].Group
 	})
-	return out
+	return out, totalErrors
 }
 
 func restrictionSummary(r *proto.Rule, locale string) string {
@@ -443,11 +521,9 @@ func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
 		Units:           rateUnits,
 		ShowPacketNote:  serverMode == "userspace" && rule.Proto == proto.TCP,
 	}
-	if rule.Enabled {
-		d.StateBadge, d.StateLabel = "success", T(locale, "applied")
-	} else {
-		d.StateBadge, d.StateLabel = "neutral", T(locale, "disabled")
-	}
+	gen, _ := s.backend.Generation()
+	agents, _ := s.backend.Agents()
+	d.StateBadge, d.StateLabel, d.StateReason = ruleRunState(&rule, gen, buildAgentIndex(agents), locale)
 	return d
 }
 

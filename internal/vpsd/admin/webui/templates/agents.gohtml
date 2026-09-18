@@ -17,7 +17,7 @@
       {{ $loc := .Locale }}
       {{ range .Agents }}
       <tr {{ if .Attention }}class="attention-row"{{ end }}>
-        <td data-label="{{ T $loc "colName" }}"><div class="entity"><span class="status-dot {{ if not .Connected }}offline{{ end }}"></span><div><strong>{{ .Name }}</strong><small>{{ .Address }}</small></div></div></td>
+        <td data-label="{{ T $loc "colName" }}"><div class="entity"><span class="status-dot {{ if not .Connected }}offline{{ end }}"></span><div><strong>{{ .Name }}</strong><small>{{ .Address }}</small>{{ if .PublicKeyShort }}<small class="mono muted" title="{{ .PublicKey }}">{{ .PublicKeyShort }}</small>{{ end }}</div></div></td>
         <td data-label="{{ T $loc "colState" }}">
           <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
           <small class="stack {{ .TunnelClass }}">{{ T $loc "tunnelPrefix" }}{{ .TunnelLabel }}</small>
@@ -26,6 +26,7 @@
         <td data-label="{{ T $loc "colConn" }}">
           <div class="mono">{{ or .StreamFrom "-" }}</div>
           <div class="mono muted">WG: {{ or .WGEndpoint "-" }}</div>
+          <div class="muted">{{ T $loc "handshakePrefix" }}{{ .HandshakeAgo }}</div>
           {{ if .ShowIPCompare }}<small class="{{ .IPCompareClass }}">{{ .IPCompareLabel }}</small>{{ end }}
         </td>
         <td data-label="{{ T $loc "colGen" }}">Gen {{ .Generation }}{{ if .Pending }} <span class="badge warning">{{ T $loc "pending" }}</span>{{ end }}</td>
