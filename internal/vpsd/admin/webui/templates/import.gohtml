@@ -1,0 +1,58 @@
+{{ define "importform" }}
+<h2 style="margin-top:0">{{ T .Locale "importTitle" }}</h2>
+{{ if .Error }}<p class="danger-text">{{ .Error }}</p>{{ end }}
+<form method="post" action="/ui/rules/import" enctype="multipart/form-data" style="display:grid;gap:12px;max-width:420px">
+  <label>{{ T .Locale "importChooseFile" }}<input type="file" name="file" accept=".json,application/json" required></label>
+  <label class="check"><input type="checkbox" name="force" value="1"> {{ T .Locale "fForce" }}</label>
+  <div style="display:flex;gap:8px">
+    <button class="btn primary" type="submit">{{ T .Locale "importSubmit" }}</button>
+    <a class="btn" href="/">{{ T .Locale "cancel" }}</a>
+  </div>
+</form>
+{{ end }}
+
+{{ define "importconfirm" }}
+<p class="muted"><a href="/ui/rules/import">{{ T .Locale "importRules" }}</a> · <a href="/">{{ T .Locale "back" }}</a></p>
+<h2 style="margin-top:0">{{ T .Locale "importConfirmTitle" }}</h2>
+<p class="mono">{{ .FileName }}</p>
+<p class="import-counts">
+  <span class="count">{{ printf (T .Locale "importAddedN") .Added }}</span>
+  <span class="count">{{ printf (T .Locale "importChangedN") .Changed }}</span>
+  <span class="count">{{ printf (T .Locale "importDeletedN") .Deleted }}</span>
+  <span class="count">{{ printf (T .Locale "importUnchangedN") .Unchanged }}</span>
+</p>
+{{ if .Issues }}
+<div class="alert danger-alert">
+  <div class="alert-icon">&#9650;</div>
+  <div class="alert-body">
+    <strong>{{ T .Locale "importIssuesHead" }}</strong>
+    <ul>{{ range .Issues }}<li>{{ . }}</li>{{ end }}</ul>
+  </div>
+</div>
+{{ end }}
+<ul class="import-diff-list">
+  {{ range .Changes }}
+  <li class="import-change {{ .Kind }}">
+    <span class="import-symbol">{{ .Symbol }}</span> <span class="mono">{{ .Summary }}</span>
+    {{ if .Note }}<p class="muted">{{ .Note }}</p>{{ end }}
+    {{ if .Details }}<ul>{{ range .Details }}<li>{{ . }}</li>{{ end }}</ul>{{ end }}
+  </li>
+  {{ end }}
+</ul>
+<form method="post" action="/ui/rules/import/apply" {{ if .HasDeletions }}data-confirm="{{ T .Locale "confirmImportApply" }}"{{ end }}>
+  <input type="hidden" name="content" value="{{ .Content }}">
+  <input type="hidden" name="generation" value="{{ .Generation }}">
+  <input type="hidden" name="digest" value="{{ .Digest }}">
+  <label class="check"><input type="checkbox" name="force" value="1" {{ if .Force }}checked{{ end }}> {{ T .Locale "fForce" }}</label>
+  <div class="form-actions">
+    <button class="btn primary" type="submit" {{ if not .CanApply }}disabled{{ end }}>{{ T .Locale "importApply" }}</button>
+    <a class="btn" href="/">{{ T .Locale "cancel" }}</a>
+  </div>
+</form>
+{{ end }}
+
+{{ define "importstale" }}
+<h2 style="margin-top:0">{{ T .Locale "importConfirmTitle" }}</h2>
+<p class="danger-text">{{ T .Locale "importStale" }}</p>
+<a class="btn" href="/ui/rules/import">{{ T .Locale "importRules" }}</a>
+{{ end }}

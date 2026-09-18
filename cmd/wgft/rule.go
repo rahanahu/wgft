@@ -320,6 +320,11 @@ func newRuleImportCmd() *cobra.Command {
 			if err := json.Unmarshal(b, &rules); err != nil {
 				return err
 			}
+			for i := range rules {
+				if rules[i].ID == "" {
+					rules[i].ID = newRuleID()
+				}
+			}
 			c, err := adminClient(cmd)
 			if err != nil {
 				return err
@@ -328,19 +333,9 @@ func newRuleImportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			keep := map[string]bool{}
-			for i := range rules {
-				if rules[i].ID == "" {
-					rules[i].ID = newRuleID()
-				}
-				keep[rules[i].ID] = true
-			}
-			var del []string
-			for _, r := range cur.Rules {
-				if !keep[r.ID] {
-					del = append(del, r.ID)
-				}
-			}
+			// 削除対象の抽出は proto.DiffRules/DeletedIDs を Web UI の読み込み確認・適用
+			// (仕様 10.1 節)と共有する。
+			del := proto.DeletedIDs(proto.DiffRules(cur.Rules, rules))
 			res, err := c.Batch(admin.BatchRequest{Upsert: rules, Delete: del, Force: force})
 			if err != nil {
 				return err

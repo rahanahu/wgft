@@ -1,7 +1,11 @@
 {{ define "rules" }}
 <div class="section-head">
   <div class="title-row"><h2>{{ T .Locale "rules" }}</h2><span class="count">{{ .RuleCount }}</span></div>
-  <div class="toolbar"><span class="muted">{{ T .Locale "gen" }} {{ .Generation }}</span></div>
+  <div class="toolbar">
+    <span class="muted">{{ T .Locale "gen" }} {{ .Generation }}</span>
+    <a class="small-btn" href="/ui/rules/export">{{ T .Locale "exportRules" }}</a>
+    <a class="small-btn" href="/ui/rules/import">{{ T .Locale "importRules" }}</a>
+  </div>
 </div>
 <div class="table-scroll">
   <table class="data-table rules-table">

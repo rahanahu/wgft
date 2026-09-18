@@ -211,6 +211,15 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 .merge-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }
 .merge-list li form { margin: 0; }
 
+/* 読み込みの確認ページ */
+.import-counts { display: flex; gap: 8px; flex-wrap: wrap; }
+.import-diff-list { list-style: none; margin: 0 0 14px; padding: 0; display: grid; gap: 6px; max-width: 640px; }
+.import-diff-list li { padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }
+.import-diff-list li ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.import-diff-list .added { border-left: 3px solid var(--success); }
+.import-diff-list .changed { border-left: 3px solid var(--accent); }
+.import-diff-list .deleted { border-left: 3px solid var(--danger); }
+
 /* サーバー情報の帯（ダッシュボード上部） */
 .server-strip { display: flex; flex-wrap: wrap; gap: 12px 26px; padding: 4px 16px 16px; }
 .sv { display: flex; flex-direction: column; gap: 2px; }
