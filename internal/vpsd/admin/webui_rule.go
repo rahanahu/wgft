@@ -182,8 +182,11 @@ func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
 	d.CanSplit = rule.ListenPort.IsRange()
 	if d.CanSplit {
 		d.ListenLo, d.ListenHi = rule.ListenPort.Lo, rule.ListenPort.Hi
-		for p := rule.ListenPort.Lo + 1; p <= rule.ListenPort.Hi; p++ {
-			d.SplitPorts = append(d.SplitPorts, p)
+		// int で回す。p を uint16 のまま Hi(最大 65535)まで回すと、p が 65535 に達した
+		// 直後の p++ が 0 に折り返り、p <= Hi が恒に真になって無限ループになる
+		// (listen_port=65534-65535 のようなルールの詳細ページを開くと再現する)。
+		for p := int(rule.ListenPort.Lo) + 1; p <= int(rule.ListenPort.Hi); p++ {
+			d.SplitPorts = append(d.SplitPorts, uint16(p))
 		}
 		if host, portStr, err := net.SplitHostPort(rule.Target); err == nil {
 			if port, err := strconv.ParseUint(portStr, 10, 16); err == nil {

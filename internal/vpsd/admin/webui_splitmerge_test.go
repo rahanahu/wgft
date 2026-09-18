@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -67,6 +68,42 @@ func TestRuleDetailShowsSplitAndMergeSections(t *testing.T) {
 	}
 	if strings.Contains(s, `value="r_c"`) {
 		t.Errorf("merge section must not offer r_c (not adjacent to r_a): %s", s)
+	}
+}
+
+// TestRuleDetailSplitPortsAtUint16Boundary は、listen_port が uint16 の最大値を含む
+// 範囲(65534-65535)のルールの詳細ページを開いても固まらないことを確かめる。分割位置の
+// 選択肢を Lo+1 から Hi まで uint16 のまま回すと、p が 65535 に達した直後の p++ が 0 に
+// 折り返り、p <= Hi(65535)が恒に真になって無限ループになるため、client の Timeout で
+// その場合は必ず失敗させる。
+func TestRuleDetailSplitPortsAtUint16Boundary(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, proto.Rule{
+			ID: "r_edge", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 65534, Hi: 65535},
+			Target: "192.168.1.20:65534", VPSMode: proto.ModeKernel, Enabled: true,
+			SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
+		}), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	t.Cleanup(srv.Close)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(srv.URL + "/ui/rules/r_edge?lang=en")
+	if err != nil {
+		t.Fatalf("opening the detail page for listen_port=65534-65535 did not return in time (uint16 wraparound infinite loop?): %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, `<option value="65535">65535</option>`) {
+		t.Errorf("split section missing the boundary port 65535: %s", s)
 	}
 }
 
