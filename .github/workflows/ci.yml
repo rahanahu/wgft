@@ -45,6 +45,21 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+  windows-test:
+    # Runs the packages that actually build and pass on native Windows today: the agent
+    # (including its credentials/ACL handling), flock, and the CLI. internal/vpsd and its
+    # subpackages are Linux-only (kernel WireGuard, nftables) and are not part of this job;
+    # the build-test job's cross-build step already keeps ./cmd/wgft buildable for Windows,
+    # this job additionally runs the Windows-specific code paths.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.x"
+      - name: test
+        run: go test ./internal/agent/... ./internal/flock/... ./cmd/wgft/...
+
   lint-output:
     # Keeps tool output English (no Japanese in string literals) and punctuation ASCII
     # in published files. Lab integration tests need Incus and are not run in CI
