@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -81,6 +85,89 @@ func TestDotenvSyntax(t *testing.T) {
 	// 値に空白はエラー
 	if _, err := parseDotenv(mk("WGFT_NAME=a b\n")); err == nil {
 		t.Error("空白入りの値がエラーにならない")
+	}
+	// 構文の誤りはどれも設定起因で、終了コード 3(仕様 11a 節)
+	for _, body := range []string{"not a pair\n", " WGFT_NAME=x\n", "WGFT_NAME='x'\n", "WGFT_NAME=a b\n"} {
+		_, err := parseDotenv(mk(body))
+		if got := exitCode(err); err == nil || got != exitConfigRefusal {
+			t.Errorf("%q: err=%v exitCode=%d, want %d", body, err, got, exitConfigRefusal)
+		}
+	}
+}
+
+// 値の誤り(同時フロー数の上限の範囲外)は終了コード 3。範囲内は通る。
+func TestLimitsOutOfRangeExitCode(t *testing.T) {
+	for _, v := range []string{"abc", "15", "65536"} {
+		t.Setenv("WGFT_MAX_UDP_FLOWS", v)
+		c, err := loadConfig(&cobra.Command{}, limitSpecs(), filepath.Join(t.TempDir(), "none.env"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = limitsFromConfig(c)
+		if got := exitCode(err); err == nil || got != exitConfigRefusal {
+			t.Errorf("WGFT_MAX_UDP_FLOWS=%s: err=%v exitCode=%d, want %d", v, err, got, exitConfigRefusal)
+		}
+	}
+	t.Setenv("WGFT_MAX_UDP_FLOWS", "2048")
+	c, _ := loadConfig(&cobra.Command{}, limitSpecs(), filepath.Join(t.TempDir(), "none.env"))
+	if l, err := limitsFromConfig(c); err != nil || l.UDPTotal != 2048 {
+		t.Errorf("in range: %+v %v", l, err)
+	}
+}
+
+// 読めない設定ファイルは終了コード 3。読み取りの層はファイル名で直し方を決めない。無いファイルはエラーにしない。
+func TestConfigUnreadable(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs Unix permissions and a non-root user")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "server.env")
+	if err := os.WriteFile(p, []byte("WGFT_MODE=kernel\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := parseDotenv(p)
+	if err == nil {
+		t.Fatal("読めないファイルがエラーにならない")
+	}
+	if strings.Contains(err.Error(), "0644") {
+		t.Errorf("読み取りの層がファイル名から 0644 を勧めている: %v", err)
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("元のエラーを包んでいない: %v", err)
+	}
+	if got := exitCode(fmt.Errorf("server: %w", err)); got != exitConfigRefusal {
+		t.Errorf("exitCode = %d, want %d", got, exitConfigRefusal)
+	}
+	if m, err := parseDotenv(filepath.Join(dir, "none.env")); err != nil || len(m) != 0 {
+		t.Errorf("無いファイル: %v %v", m, err)
+	}
+	if got := exitCode(errors.New("boom")); got != 1 {
+		t.Errorf("exitCode(other) = %d, want 1", got)
+	}
+}
+
+// agent は、読めないファイルが server.env という名前でも 0644 を勧めない(WGFT_JOIN を含みうる)。
+func TestAgentUnreadableHint(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs Unix permissions and a non-root user")
+	}
+	p := filepath.Join(t.TempDir(), "server.env")
+	if err := os.WriteFile(p, []byte("WGFT_JOIN=wgft://h:1/tok#sha256:ab\n"), 0); err != nil {
+		t.Fatal(err)
+	}
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "run", "--config", p, "--data-dir", t.TempDir()})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	if got := exitCode(err); err == nil || got != exitConfigRefusal {
+		t.Fatalf("err=%v exitCode=%d, want %d", err, got, exitConfigRefusal)
+	}
+	if strings.Contains(err.Error(), "0644") || !strings.Contains(err.Error(), "chmod 0640 "+p) {
+		t.Errorf("agent の直し方が違う: %v", err)
 	}
 }
 

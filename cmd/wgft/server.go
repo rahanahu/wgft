@@ -55,15 +55,15 @@ func registerServerFlags(f *cobra.Command) {
 func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 	c, err := loadConfig(cmd, serverSpecs(), resolveConfigPath(cmd, defaultConfigPath))
 	if err != nil {
-		return vpsd.Options{}, nil, err
+		return vpsd.Options{}, nil, withUnreadableHint(err, serverUnreadableHint)
 	}
 	port, err := strconv.ParseUint(c.str("WGFT_WG_PORT"), 10, 16)
 	if err != nil {
-		return vpsd.Options{}, nil, fmt.Errorf("WGFT_WG_PORT: %w", err)
+		return vpsd.Options{}, nil, configErrorf("WGFT_WG_PORT: %q is not a port number", c.str("WGFT_WG_PORT"))
 	}
 	mtu, err := strconv.Atoi(c.str("WGFT_MTU"))
 	if err != nil {
-		return vpsd.Options{}, nil, fmt.Errorf("WGFT_MTU: %w", err)
+		return vpsd.Options{}, nil, configErrorf("WGFT_MTU: %q is not an integer", c.str("WGFT_MTU"))
 	}
 	limits, err := limitsFromConfig(c)
 	if err != nil {
@@ -107,7 +107,7 @@ listens on a Unix socket (root-owned 0600).`,
 				return err
 			}
 			if opts.WGEndpoint == "" {
-				return fmt.Errorf("WGFT_WG_ENDPOINT (--wg-endpoint) is required: the host:port that agents connect to, for example vps.example.com:51820")
+				return configErrorf("WGFT_WG_ENDPOINT (--wg-endpoint) is required: the host:port that agents connect to, for example vps.example.com:51820")
 			}
 			adopt, _ := cmd.Flags().GetBool("adopt-existing")
 			opts.AdoptExisting = adopt
@@ -189,6 +189,12 @@ reverted automatically; it only prints a list to revert by hand.`,
 	f.BoolVar(&o.Yes, "yes", false, "skip the --purge confirmation")
 	f.BoolVar(&o.Adopt, "adopt-existing", false, "remove wg even when the key does not match or the server database is missing")
 	return cmd
+}
+
+// serverUnreadableHint は、server が設定ファイルを読めないときの直し方。server の設定項目に秘密は無いが、
+// 同じファイルに agent の WGFT_JOIN を書くこともできるので、0644 は server の設定だけのファイルに限って勧める(仕様 11a 節)。
+func serverUnreadableHint(path string) string {
+	return fmt.Sprintf("The provided server.service runs as an unprivileged user. If the file holds only server settings, which are not secret, make it readable: chmod 0644 %s", path)
 }
 
 // isStartupRefusal は、設定が原因の起動中止(他人の wg インタフェース、ポートやアドレスの衝突)かを返す。

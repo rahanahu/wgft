@@ -34,7 +34,7 @@ func limitsFromConfig(c *config) (flowcap.Limits, error) {
 	}{{"WGFT_MAX_UDP_FLOWS", &l.UDPTotal}, {"WGFT_MAX_TCP_FLOWS", &l.TCPTotal}} {
 		n, err := strconv.Atoi(c.str(f.env))
 		if err != nil || n < flowcap.TotalMin || n > flowcap.TotalMax {
-			return l, fmt.Errorf("%s: %q is not an integer between %d and %d", f.env, c.str(f.env), flowcap.TotalMin, flowcap.TotalMax)
+			return l, configErrorf("%s: %q is not an integer between %d and %d", f.env, c.str(f.env), flowcap.TotalMin, flowcap.TotalMax)
 		}
 		*f.dst = n
 	}

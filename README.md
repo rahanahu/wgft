@@ -79,10 +79,12 @@ Use `arm64` instead of `amd64` on arm64 systems.
 sudo install -m 0755 wgft-linux-amd64 /usr/local/bin/wgft
 sudo mkdir -p /etc/wgft
 printf 'WGFT_MODE=kernel\nWGFT_WG_ENDPOINT=vps.example.com:51820\n' | sudo tee /etc/wgft/server.env
-sudo chmod 0600 /etc/wgft/server.env
+sudo chmod 0644 /etc/wgft/server.env
 sudo wgft server check
 sudo wgft server run
 ```
+
+`server.env` is intentionally readable by all users: it contains no secrets, and the provided systemd service runs as a dynamic unprivileged user.
 
 Open UDP 51820 and TCP 8443 on the VPS firewall. `wgft server check` also prints any forwarding exceptions required by an existing firewall.
 

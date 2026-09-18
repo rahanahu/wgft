@@ -55,7 +55,7 @@ wgft は `WGFT_*` 環境変数で設定します。systemd 構成では `/etc/wg
 sudo install -m 0755 wgft-linux-amd64 /usr/local/bin/wgft
 sudo mkdir -p /etc/wgft
 printf 'WGFT_MODE=kernel\nWGFT_WG_ENDPOINT=vps.example.com:51820\n' | sudo tee /etc/wgft/server.env
-sudo chmod 0600 /etc/wgft/server.env
+sudo chmod 0644 /etc/wgft/server.env
 ```
 
 初回起動前に設定を確認します。
@@ -89,6 +89,8 @@ sudo install -m 0644 deploy/server.service /etc/systemd/system/wgft.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now wgft
 ```
+
+`/etc/wgft/server.env` は秘密情報を含まず、付属の service は非特権の動的ユーザーで動作するため、意図的に 0644 にします。旧版のセットアップ手順でインストールした環境では 0600 のままになっている場合があるため、service の起動・再起動前に `sudo chmod 0644 /etc/wgft/server.env` を実行してください。root で動作する旧 unit から移行する場合も同様です。
 
 手動で試す場合:
 

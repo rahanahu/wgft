@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -38,6 +39,54 @@ type config struct {
 	specs []spec
 }
 
+// configUnreadableError は、設定ファイルがあるのに権限で読めないこと。設定起因の失敗なので
+// 再起動しても直らない。main が終了コード 3 にして、unit の再起動の繰り返しを止める(仕様 11a 節)。
+// 直し方(hint)は読み取りの層では決めない。同じファイルを server と agent で共有でき、中身を読めない以上
+// 秘密の有無も分からないので、どの権限にすべきかは呼び出し側のコマンドが知っている範囲で添える。
+type configUnreadableError struct {
+	path string
+	err  error
+	hint string
+}
+
+func (e *configUnreadableError) Error() string {
+	s := fmt.Sprintf("%v; the user wgft runs as cannot read it", e.err)
+	if e.hint != "" {
+		s += ". " + e.hint
+	}
+	return s
+}
+
+func (e *configUnreadableError) Unwrap() error { return e.err }
+
+// withUnreadableHint は、err が読めない設定ファイルによるものなら直し方を添える。それ以外はそのまま返す。
+func withUnreadableHint(err error, hint func(path string) string) error {
+	var e *configUnreadableError
+	if errors.As(err, &e) {
+		e.hint = hint(e.path)
+	}
+	return err
+}
+
+// configError は設定ファイルの構文や設定値の誤り。読めないファイルと同じく再起動しても直らないので、
+// main が終了コード 3 にする(仕様 11a 節)。
+type configError struct{ err error }
+
+func (e *configError) Error() string { return e.err.Error() }
+func (e *configError) Unwrap() error { return e.err }
+
+// configErrorf は fmt.Errorf と同じ書式で configError を作る。
+func configErrorf(format string, args ...any) error {
+	return &configError{err: fmt.Errorf(format, args...)}
+}
+
+// isConfigError は、err が設定起因(読めない設定ファイル、構文や値の誤り)かを返す。
+func isConfigError(err error) bool {
+	var u *configUnreadableError
+	var c *configError
+	return errors.As(err, &u) || errors.As(err, &c)
+}
+
 // parseDotenv は最小構文の dotenv を読む(3.1 節)。
 // 「KEY=value 1 行、行頭の # だけコメント、引用符なし、値に空白なし」。
 // 引用符で始まる値と、値に空白を含むものはエラー(Docker との食い違いを黙って通さない)。
@@ -46,6 +95,9 @@ func parseDotenv(path string) (map[string]string, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]string{}, nil
+		}
+		if os.IsPermission(err) {
+			return nil, &configUnreadableError{path: path, err: err}
 		}
 		return nil, err
 	}
@@ -57,18 +109,18 @@ func parseDotenv(path string) (map[string]string, error) {
 		}
 		eq := strings.IndexByte(s, '=')
 		if eq <= 0 {
-			return nil, fmt.Errorf("%s:%d: not in KEY=value form: %q", path, i+1, line)
+			return nil, configErrorf("%s:%d: not in KEY=value form: %q", path, i+1, line)
 		}
 		key := s[:eq]
 		val := s[eq+1:]
 		if key != strings.TrimSpace(key) || strings.ContainsAny(key, " \t") {
-			return nil, fmt.Errorf("%s:%d: key name may not contain whitespace: %q", path, i+1, key)
+			return nil, configErrorf("%s:%d: key name may not contain whitespace: %q", path, i+1, key)
 		}
 		if strings.HasPrefix(val, "\"") || strings.HasPrefix(val, "'") {
-			return nil, fmt.Errorf("%s:%d: do not quote values; Docker keeps quotes as part of the value: %q", path, i+1, val)
+			return nil, configErrorf("%s:%d: do not quote values; Docker keeps quotes as part of the value: %q", path, i+1, val)
 		}
 		if strings.ContainsAny(val, " \t") {
-			return nil, fmt.Errorf("%s:%d: value may not contain whitespace: %q", path, i+1, val)
+			return nil, configErrorf("%s:%d: value may not contain whitespace: %q", path, i+1, val)
 		}
 		out[key] = val
 	}

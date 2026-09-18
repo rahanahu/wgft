@@ -12,8 +12,10 @@ Type=simple
 ExecStart=/usr/local/bin/wgft server run
 Restart=on-failure
 RestartSec=2
-# A refusal caused by configuration (someone else's WireGuard interface, a port or address
-# clash; exit code 3) does not go away on restart, so do not loop on it.
+# A refusal caused by configuration exits with code 3 and says how to fix it: someone else's
+# WireGuard interface, a port or address clash, a mode or address range that differs from the
+# recorded one, an unreadable server.env, a syntax error in it, or an invalid or missing value.
+# It does not go away on restart, so do not loop on it.
 RestartPreventExitStatus=3
 # Optional, off by default: a hard cgroup memory cap for this service. wgft also sets a Go runtime
 # soft limit derived from the flow caps (printed at startup; 216 MiB with the default caps), but a
