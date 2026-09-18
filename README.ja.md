@@ -56,7 +56,7 @@ wgft は Pangolin から着想を得ています。Pangolin を使って、VPS �
 
 VPS で root が使える場合はカーネルモードを使います。root やカーネル WireGuard が使えない場合、または server をコンテナ内だけで動かしたい場合はユーザー空間モードを使います。
 
-VPS 側は Linux で動作します。自宅側の agent は Windows でも動作します。macOS はまだ対応していません。実機での確認がまだ済んでいないためです。wgft は IPv4 のみに対応しています。自宅側の agent には root 権限も TUN デバイスも不要で、Windows でも管理者権限は不要です。
+VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。macOS はまだ対応していません。実機での確認がまだ済んでいないためです。wgft は IPv4 のみに対応しています。自宅側の agent には root 権限も TUN デバイスも不要で、Windows でも管理者権限は不要です。
 
 ## クイックスタート
 
@@ -64,14 +64,14 @@ VPS 側は Linux で動作します。自宅側の agent は Windows でも動�
 
 ### 1. wgft を入手する
 
-VPS と自宅マシンの両方で release バイナリを取得します。
+Linux では release バイナリを取得します。
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64
 chmod +x wgft-linux-amd64
 ```
 
-arm64 環境では `amd64` を `arm64` に置き換えてください。
+Linux の arm64 環境では `amd64` を `arm64` に置き換えてください。Windows での取得手順は手順 3 で説明します。
 
 ### 2. VPS 側 server を起動する
 

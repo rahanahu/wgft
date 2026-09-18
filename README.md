@@ -56,7 +56,7 @@ In kernel mode, forwarding stays in the kernel if the wgft process crashes or re
 
 Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container.
 
-The VPS side runs on Linux. The home agent also runs on Windows. macOS is not supported yet because it has not been verified on a real machine. wgft is IPv4-only. The home agent does not need root or a TUN device, and no administrator rights on Windows.
+The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11. macOS is not supported yet because it has not been verified on a real machine. wgft is IPv4-only. The home agent does not need root or a TUN device, and no administrator rights on Windows.
 
 ## Quick start
 
@@ -64,14 +64,14 @@ This is the shortest path for the common setup: kernel mode on a Linux VPS and a
 
 ### 1. Install wgft
 
-Download the release binary on both machines:
+On Linux, download the release binary:
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64
 chmod +x wgft-linux-amd64
 ```
 
-Use `arm64` instead of `amd64` on arm64 systems.
+Use `arm64` instead of `amd64` on Linux arm64 systems. Windows installation is covered in step 3 below.
 
 ### 2. Start the VPS server
 
