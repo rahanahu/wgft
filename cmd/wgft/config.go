@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -42,20 +41,32 @@ type config struct {
 
 // configUnreadableError は、設定ファイルがあるのに権限で読めないこと。設定起因の失敗なので
 // 再起動しても直らない。main が終了コード 3 にして、unit の再起動の繰り返しを止める(仕様 11a 節)。
+// 直し方(hint)は読み取りの層では決めない。同じファイルを server と agent で共有でき、中身を読めない以上
+// 秘密の有無も分からないので、どの権限にすべきかは呼び出し側のコマンドが知っている範囲で添える。
 type configUnreadableError struct {
 	path string
 	err  error
+	hint string
 }
 
 func (e *configUnreadableError) Error() string {
-	// 同梱の server.service は DynamicUser= の非特権の利用者で動く。server.env に秘密は無いので 0644 で足りる。
-	if filepath.Base(e.path) == "server.env" {
-		return fmt.Sprintf("%v; the user wgft runs as cannot read it (the provided server.service uses an unprivileged user). The file holds no secrets, so make it readable: chmod 0644 %s", e.err, e.path)
+	s := fmt.Sprintf("%v; the user wgft runs as cannot read it", e.err)
+	if e.hint != "" {
+		s += ". " + e.hint
 	}
-	return fmt.Sprintf("%v; make the file readable by the user wgft runs as", e.err)
+	return s
 }
 
 func (e *configUnreadableError) Unwrap() error { return e.err }
+
+// withUnreadableHint は、err が読めない設定ファイルによるものなら直し方を添える。それ以外はそのまま返す。
+func withUnreadableHint(err error, hint func(path string) string) error {
+	var e *configUnreadableError
+	if errors.As(err, &e) {
+		e.hint = hint(e.path)
+	}
+	return err
+}
 
 // configError は設定ファイルの構文や設定値の誤り。読めないファイルと同じく再起動しても直らないので、
 // main が終了コード 3 にする(仕様 11a 節)。

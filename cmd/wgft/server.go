@@ -55,7 +55,7 @@ func registerServerFlags(f *cobra.Command) {
 func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 	c, err := loadConfig(cmd, serverSpecs(), resolveConfigPath(cmd, defaultConfigPath))
 	if err != nil {
-		return vpsd.Options{}, nil, err
+		return vpsd.Options{}, nil, withUnreadableHint(err, serverUnreadableHint)
 	}
 	port, err := strconv.ParseUint(c.str("WGFT_WG_PORT"), 10, 16)
 	if err != nil {
@@ -189,6 +189,12 @@ reverted automatically; it only prints a list to revert by hand.`,
 	f.BoolVar(&o.Yes, "yes", false, "skip the --purge confirmation")
 	f.BoolVar(&o.Adopt, "adopt-existing", false, "remove wg even when the key does not match or the server database is missing")
 	return cmd
+}
+
+// serverUnreadableHint は、server が設定ファイルを読めないときの直し方。server の設定項目に秘密は無いが、
+// 同じファイルに agent の WGFT_JOIN を書くこともできるので、0644 は server の設定だけのファイルに限って勧める(仕様 11a 節)。
+func serverUnreadableHint(path string) string {
+	return fmt.Sprintf("The provided server.service runs as an unprivileged user. If the file holds only server settings, which are not secret, make it readable: chmod 0644 %s", path)
 }
 
 // isStartupRefusal は、設定が原因の起動中止(他人の wg インタフェース、ポートやアドレスの衝突)かを返す。

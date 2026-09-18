@@ -3,7 +3,10 @@
 package main
 
 import (
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -28,8 +31,8 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 			}
 			root := newRootCmd()
 			root.SetArgs(append([]string{"server", "run", "--mode", "kernel", "--config", none, "--data-dir", t.TempDir()}, tc.args...))
-			root.SetOut(new(discard))
-			root.SetErr(new(discard))
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
 			err := root.Execute()
 			if got := exitCode(err); err == nil || got != exitConfigRefusal {
 				t.Errorf("err=%v exitCode=%d, want %d", err, got, exitConfigRefusal)
@@ -38,6 +41,24 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 	}
 }
 
-type discard struct{}
-
-func (*discard) Write(p []byte) (int, error) { return len(p), nil }
+// server は、読めない設定ファイルに条件付きで 0644 を勧める(server の設定だけのファイルなら秘密は無い)。
+func TestServerUnreadableHint(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("needs a non-root user")
+	}
+	p := filepath.Join(t.TempDir(), "wgft.env")
+	if err := os.WriteFile(p, []byte("WGFT_MODE=kernel\n"), 0); err != nil {
+		t.Fatal(err)
+	}
+	root := newRootCmd()
+	root.SetArgs([]string{"server", "run", "--config", p, "--data-dir", t.TempDir()})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	if got := exitCode(err); err == nil || got != exitConfigRefusal {
+		t.Fatalf("err=%v exitCode=%d, want %d", err, got, exitConfigRefusal)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "only server settings") || !strings.Contains(msg, "chmod 0644 "+p) {
+		t.Errorf("server の直し方が違う: %v", err)
+	}
+}

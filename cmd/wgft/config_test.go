@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -114,8 +115,7 @@ func TestLimitsOutOfRangeExitCode(t *testing.T) {
 	}
 }
 
-// 読めない設定ファイルは終了コード 3 になり、server.env なら直し方(chmod 0644)を添える。
-// 無いファイルは従来どおりエラーにしない。
+// 読めない設定ファイルは終了コード 3。読み取りの層はファイル名で直し方を決めない。無いファイルはエラーにしない。
 func TestConfigUnreadable(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("needs Unix permissions and a non-root user")
@@ -132,8 +132,8 @@ func TestConfigUnreadable(t *testing.T) {
 	if err == nil {
 		t.Fatal("読めないファイルがエラーにならない")
 	}
-	if !strings.Contains(err.Error(), "chmod 0644 "+p) {
-		t.Errorf("直し方が無い: %v", err)
+	if strings.Contains(err.Error(), "0644") {
+		t.Errorf("読み取りの層がファイル名から 0644 を勧めている: %v", err)
 	}
 	if !errors.Is(err, os.ErrPermission) {
 		t.Errorf("元のエラーを包んでいない: %v", err)
@@ -141,18 +141,33 @@ func TestConfigUnreadable(t *testing.T) {
 	if got := exitCode(fmt.Errorf("server: %w", err)); got != exitConfigRefusal {
 		t.Errorf("exitCode = %d, want %d", got, exitConfigRefusal)
 	}
-
-	other := filepath.Join(dir, "agent.env")
-	os.WriteFile(other, nil, 0)
-	if _, err := parseDotenv(other); err == nil || strings.Contains(err.Error(), "0644") {
-		t.Errorf("agent.env に 0644 を勧めている、またはエラーにならない: %v", err)
-	}
-
 	if m, err := parseDotenv(filepath.Join(dir, "none.env")); err != nil || len(m) != 0 {
 		t.Errorf("無いファイル: %v %v", m, err)
 	}
 	if got := exitCode(errors.New("boom")); got != 1 {
 		t.Errorf("exitCode(other) = %d, want 1", got)
+	}
+}
+
+// agent は、読めないファイルが server.env という名前でも 0644 を勧めない(WGFT_JOIN を含みうる)。
+func TestAgentUnreadableHint(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs Unix permissions and a non-root user")
+	}
+	p := filepath.Join(t.TempDir(), "server.env")
+	if err := os.WriteFile(p, []byte("WGFT_JOIN=wgft://h:1/tok#sha256:ab\n"), 0); err != nil {
+		t.Fatal(err)
+	}
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "run", "--config", p, "--data-dir", t.TempDir()})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	if got := exitCode(err); err == nil || got != exitConfigRefusal {
+		t.Fatalf("err=%v exitCode=%d, want %d", err, got, exitConfigRefusal)
+	}
+	if strings.Contains(err.Error(), "0644") || !strings.Contains(err.Error(), "chmod 0640 "+p) {
+		t.Errorf("agent の直し方が違う: %v", err)
 	}
 }
 
