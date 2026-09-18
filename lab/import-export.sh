@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # import-export.sh drives the Web UI's rule export/import (POST /ui/rules/export,
-# /ui/rules/import, /ui/rules/import/apply) in kernel mode. It checks that:
+# /ui/rules/import, /ui/rules/import/apply) in kernel or userspace mode. It checks that:
 #   - the file the UI exports is exactly what the CLI's `rule import` reads, and a file
 #     built from `rule ls --json`'s array is exactly what the UI's importer reads;
 #   - uploading a file with one rule missing shows that deletion on the confirmation
@@ -14,9 +14,13 @@
 #     on the confirmation page as changed, with the added/removed CIDR, not as unchanged.
 # Uses the same background-server, curl-driven method as split-merge.sh.
 #
-#   lab/lab exec vm bash /wgft/lab/import-export.sh
+#   lab/lab exec vm bash /wgft/lab/import-export.sh kernel
+#   lab/lab exec vm bash /wgft/lab/import-export.sh userspace
 # Requires `lab/lab build` and the netns topology (`lab/lab up` / `lab/lab net up`).
 set -u
+mode=${1:-kernel}
+case "$mode" in kernel|userspace) ;; *) echo "usage: import-export.sh kernel|userspace" >&2; exit 2;; esac
+
 DATA=/tmp/wgft-importexport-server
 ADATA=/tmp/wgft-importexport-agent
 ADMIN=127.0.0.1:8686
@@ -53,8 +57,15 @@ cleanup() {
 
 cleanup
 mkdir -p "$DATA"
-echo "== start server"
-vps setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+if [ "$mode" = userspace ]; then
+  id wgftlab >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin wgftlab
+  chown wgftlab "$DATA"
+  run_server="runuser -u wgftlab -- wgft server run"
+else
+  run_server="wgft server run"
+fi
+echo "== $mode: start server"
+vps setsid nohup $run_server --mode "$mode" --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
   > /tmp/wgft-importexport-server.log 2>&1 < /dev/null &
 disown
 sleep 3
@@ -151,5 +162,5 @@ out=$(vps wgft server teardown --data-dir "$DATA" --purge --yes 2>&1)
 check "teardown runs" "deleted $DATA/wgft.sqlite" "$out"
 kill_all
 rm -rf "$DATA" "$ADATA" "$RULES" /tmp/wgft-importexport-confirm*.html
-if [ "$fail" = 0 ]; then echo "== ALL PASS"; else echo "== FAILURES"; fi
+if [ "$fail" = 0 ]; then echo "== $mode: ALL PASS"; else echo "== $mode: FAILURES"; fi
 exit "$fail"
