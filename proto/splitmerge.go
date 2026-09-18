@@ -68,15 +68,12 @@ const (
 	// 2 ポート以上の範囲に広げるため、proxy は単一ポート運用(Rule.Validate)の下では
 	// 組み合わせを問わず常に統合できない(仕様 5.4、6.2 節)
 	BlockProxyRange MergeBlocker = "proxy_range"
-	// BlockProxyProtocol は Web UI が候補を絞るための追加検査(下記コメント)だが、
-	// proxy_protocol は vps_mode=proxy でしか立てられない(Rule.Validate)ため、
-	// 到達する組み合わせは BlockProxyRange より先に必ずそちらで止まる。ここでは、
-	// 将来 proxy の範囲を許すようになった場合に備えて残す
-	BlockProxyProtocol MergeBlocker = "proxy_protocol"
-	BlockDenyList      MergeBlocker = "deny_list"
-	BlockAllowList     MergeBlocker = "allow_list"
-	BlockRates         MergeBlocker = "rates"
-	BlockEnabled       MergeBlocker = "enabled"
+	// proxy_protocol は vps_mode=proxy でしか立てられない(Rule.Validate)ので、
+	// 違いは BlockProxyRange で先に止まり、専用の理由は持たない
+	BlockDenyList  MergeBlocker = "deny_list"
+	BlockAllowList MergeBlocker = "allow_list"
+	BlockRates     MergeBlocker = "rates"
+	BlockEnabled   MergeBlocker = "enabled"
 )
 
 // FindMergeBlocker は a と b(順不同)が統合できない最初の理由を返す。すべて揃えば
@@ -108,8 +105,6 @@ func FindMergeBlocker(a, b Rule) MergeBlocker {
 		return BlockProxyRange
 	}
 	switch {
-	case lo.ProxyProtocol != hi.ProxyProtocol:
-		return BlockProxyProtocol
 	case !equalPrefixSet(lo.SourceDeny, hi.SourceDeny):
 		return BlockDenyList
 	case !equalPrefixSet(lo.SourceAllow, hi.SourceAllow):
@@ -138,8 +133,6 @@ func (b MergeBlocker) errText() string {
 		return "effective targets are not contiguous"
 	case BlockProxyRange:
 		return "vps_mode=proxy rules cannot be merged into a port range"
-	case BlockProxyProtocol:
-		return "proxy_protocol differs"
 	case BlockDenyList:
 		return "deny list differs"
 	case BlockAllowList:

@@ -68,17 +68,16 @@ func mergeCandidateToView(r proto.Rule, reason string) mergeCandidateView {
 }
 
 var mergeBlockerKeys = map[proto.MergeBlocker]string{
-	proto.BlockAgent:         "mbAgent",
-	proto.BlockProto:         "mbProto",
-	proto.BlockMode:          "mbMode",
-	proto.BlockNotAdjacent:   "mbNotAdjacent",
-	proto.BlockTargetGap:     "mbTargetGap",
-	proto.BlockProxyRange:    "mbProxyRange",
-	proto.BlockProxyProtocol: "mbProxyProtocol",
-	proto.BlockDenyList:      "mbDenyList",
-	proto.BlockAllowList:     "mbAllowList",
-	proto.BlockRates:         "mbRates",
-	proto.BlockEnabled:       "mbEnabled",
+	proto.BlockAgent:       "mbAgent",
+	proto.BlockProto:       "mbProto",
+	proto.BlockMode:        "mbMode",
+	proto.BlockNotAdjacent: "mbNotAdjacent",
+	proto.BlockTargetGap:   "mbTargetGap",
+	proto.BlockProxyRange:  "mbProxyRange",
+	proto.BlockDenyList:    "mbDenyList",
+	proto.BlockAllowList:   "mbAllowList",
+	proto.BlockRates:       "mbRates",
+	proto.BlockEnabled:     "mbEnabled",
 }
 
 // mergeBlockerLabel は proto.MergeBlocker を、統合区画に出す訳済みの短い理由に変える。

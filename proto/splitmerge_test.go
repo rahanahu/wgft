@@ -127,9 +127,7 @@ func TestFindMergeBlocker(t *testing.T) {
 		{"実効宛先が連続していない", func(a, b *Rule) { b.Target = "192.168.1.20:9999" }, BlockTargetGap},
 		// vps_mode=proxy はどんな 2 つの組でも統合できない(統合すると必ず範囲になり、
 		// proxy は単一ポート運用のため)。この組み合わせは差がある値(旧テストは
-		// proxy_protocol)を問わず BlockProxyRange が先に返る。proxy_protocol は
-		// vps_mode=proxy でしか立てられない(Rule.Validate)ので、BlockProxyProtocol は
-		// 有効なルールの組では実質到達しない
+		// proxy_protocol)を問わず BlockProxyRange が先に返る
 		{"proxy はどんな組でも統合できない(TCP proxy の組で片方だけ proxy_protocol を付ける)", func(a, b *Rule) {
 			a.Proto, b.Proto = TCP, TCP
 			a.VPSMode, b.VPSMode = ModeProxy, ModeProxy
