@@ -19,8 +19,9 @@ func (m *Manager) startTCP(l *listener) error {
 		conns = map[net.Conn]netip.Addr{} // 公開側の接続はその接続元、target 側はゼロ値
 		done  = make(chan struct{})
 		// public は公開側の接続の数(同時フロー数の上限の対象。conns は target 側も含む)
-		public int
-		capLog flowcap.LogGate
+		public  int
+		capLog  flowcap.LogGate // 上限で拒んだログの頻度
+		dialLog flowcap.LogGate // target への dial 失敗のログの頻度(target が落ちている間、接続のたびに鳴らさない)
 	)
 	l.flows = func() int { mu.Lock(); defer mu.Unlock(); return public }
 	l.sessions = func() int { mu.Lock(); defer mu.Unlock(); return len(conns) }
@@ -84,7 +85,9 @@ func (m *Manager) startTCP(l *listener) error {
 				}()
 				t, err := m.opts.Dial("tcp", l.target)
 				if err != nil {
-					m.opts.Logf("tcp %s: dial %s: %v", l.key, l.target, err)
+					if dialLog.Allow() {
+						m.opts.Logf("tcp %s: dial %s: %v", l.key, l.target, err)
+					}
 					c.Close()
 					return
 				}

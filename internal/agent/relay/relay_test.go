@@ -442,6 +442,70 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 	}
 }
 
+// TCP:target への dial が続けて失敗しても、失敗ログは 1 分に 1 回までに絞る(高頻度失敗経路のレート制限)。
+func TestTCPDialFailureLogRateLimited(t *testing.T) {
+	var dialLogs atomic.Int32
+	port := freePort(t)
+	m := New(loopback{}, Options{
+		Dial: func(network, addr string) (net.Conn, error) { return nil, fmt.Errorf("connection refused") },
+		Logf: func(format string, args ...any) {
+			if strings.Contains(format, "dial") {
+				dialLogs.Add(1)
+			}
+		},
+	})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.TCP, port}: {"127.0.0.1:1", "r1"}})
+	for i := 0; i < 5; i++ {
+		c, err := net.DialTCP("tcp4", nil, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Close()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for dialLogs.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // 追加の(誤って絞られていない)ログが来るなら、その分の猶予
+	if n := dialLogs.Load(); n != 1 {
+		t.Errorf("dial failure log count = %d, want 1 (rate-limited to once per minute)", n)
+	}
+}
+
+// UDP:target への dial が続けて失敗しても、失敗ログは 1 分に 1 回までに絞る。
+func TestUDPDialFailureLogRateLimited(t *testing.T) {
+	var dialLogs atomic.Int32
+	port := freePort(t)
+	m := New(loopback{}, Options{
+		Dial: func(network, addr string) (net.Conn, error) { return nil, fmt.Errorf("connection refused") },
+		Logf: func(format string, args ...any) {
+			if strings.Contains(format, "dial") {
+				dialLogs.Add(1)
+			}
+		},
+	})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.UDP, port}: {"127.0.0.1:1", "r1"}})
+	for i := 0; i < 5; i++ {
+		// 送信元ポートが毎回違うので、target への dial はそのたびに新しいセッションとして試みられる
+		c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Write([]byte("x"))
+		c.Close()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for dialLogs.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := dialLogs.Load(); n != 1 {
+		t.Errorf("dial failure log count = %d, want 1 (rate-limited to once per minute)", n)
+	}
+}
+
 // TCP:ルールごとの上限を超えた接続はすぐ閉じられ、既存の接続は生きている。閉じれば枠が戻る。
 func TestTCPRelayConnCap(t *testing.T) {
 	srv, err := net.Listen("tcp4", "127.0.0.1:0")
