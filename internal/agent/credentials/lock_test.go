@@ -18,6 +18,10 @@ func TestLock(t *testing.T) {
 	if _, err := Acquire(path); !errors.Is(err, ErrLocked) {
 		t.Errorf("second Acquire = %v, want ErrLocked", err)
 	}
+	// 利用者に見える呼び名は「認証情報ファイル」であって、flock 内部の「状態ファイル」ではない。
+	if got := ErrLocked.Error(); got != "credentials file is in use by another process" {
+		t.Errorf("ErrLocked = %q, want the credentials file wording", got)
+	}
 	if locked, _ := IsLocked(path); !locked {
 		t.Error("IsLocked = false while held")
 	}
