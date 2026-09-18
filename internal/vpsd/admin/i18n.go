@@ -246,7 +246,7 @@ var tr = map[string][2]string{
 	"diffFieldPerSourceRate": {"接続元ごとの制限", "per-source rate"},
 	"diffFieldEnabled":       {"有効無効", "enabled"},
 	"diffValueFmt":           {"%s %s → %s", "%s %s → %s"},
-	"diffCountFmt":           {"%s %s 件 → %s 件", "%s %s → %s entries"},
+	"diffSetFmt":             {"%s %s", "%s %s"},
 	"boolYes":                {"あり", "yes"},
 	"boolNo":                 {"なし", "no"},
 }

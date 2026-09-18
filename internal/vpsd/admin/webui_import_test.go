@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -152,6 +153,45 @@ func TestImportConfirmShowsDiff(t *testing.T) {
 	}
 	if strings.Contains(s, `type="submit" disabled`) {
 		t.Errorf("a diff with no issues must not withhold the apply button: %s", s)
+	}
+}
+
+// TestImportConfirmShowsSourceSetContent は、拒否リストの CIDR を同じ件数のまま別のものへ
+// 差し替えた読み込みが、確認ページに実際の CIDR の増減("+198.51.100.0/24 -203.0.113.0/24"
+// のような形)を出すことを確かめる(仕様 10.1 節)。件数だけを見ていた頃は、件数が変わらない
+// ためこの変更が unchanged と誤って表示されていた。
+func TestImportConfirmShowsSourceSetContent(t *testing.T) {
+	srv, st := newImportTestServer(t)
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		for i := range rules {
+			if rules[i].ID == "r_keep" {
+				rules[i].SourceDeny = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}
+			}
+		}
+		return rules, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	desired := []proto.Rule{
+		{ID: "r_keep", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 443, Hi: 443}, Target: "192.168.1.30:443", VPSMode: proto.ModeKernel, Enabled: true,
+			SourceDeny: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}},
+		{ID: "r_gone", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 27015, Hi: 27015}, Target: "192.168.1.30:27015", VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	body, err := json.Marshal(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp := multipartUpload(t, srv.URL+"/ui/rules/import?lang=en", "rules.json", body)
+	defer resp.Body.Close()
+	page, _ := io.ReadAll(resp.Body)
+	s := html.UnescapeString(string(page))
+	if !strings.Contains(s, "Changed 1") || strings.Contains(s, "Unchanged 2") {
+		t.Errorf("a same-count deny-list replacement must show as changed, not unchanged: %s", s)
+	}
+	if !strings.Contains(s, "+198.51.100.0/24") || !strings.Contains(s, "-203.0.113.0/24") {
+		t.Errorf("confirm page must show the added/removed CIDRs, not just a count: %s", s)
 	}
 }
 

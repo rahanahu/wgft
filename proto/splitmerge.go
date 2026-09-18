@@ -162,16 +162,33 @@ func nextPort(hostport string) string {
 	return fmt.Sprintf("%s:%d", hostport[:i], p+1)
 }
 
+// equalPrefixSet は a と b を集合として比べる(仕様 10.1、10.2 節。FindMergeBlocker と
+// importdiff.go の fieldChanges が使う)。順序を無視するだけでなく、比べる前に重複を払う。
+// 旧い CLI は同一 CIDR の重複エントリを許していたため、長さだけを見て一方向の包含を確かめる
+// 形では [A, A] と [A, B] を等しいと誤判定しうる(長さが同じ 2 で、A は互いに含まれるため)。
+// 重複を払った上で両方向の包含(≒長さと包含の一致)を見ることで、この誤判定を塞ぐ。
 func equalPrefixSet(a, b []netip.Prefix) bool {
-	if len(a) != len(b) {
+	da, db := dedupPrefixes(a), dedupPrefixes(b)
+	if len(da) != len(db) {
 		return false
 	}
-	for _, p := range a {
-		if !containsPrefix(b, p) {
+	for _, p := range da {
+		if !containsPrefix(db, p) {
 			return false
 		}
 	}
 	return true
+}
+
+// dedupPrefixes は list から重複する CIDR を払い、初出の順で返す。
+func dedupPrefixes(list []netip.Prefix) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(list))
+	for _, p := range list {
+		if !containsPrefix(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func equalRate(a, b *Rate) bool {

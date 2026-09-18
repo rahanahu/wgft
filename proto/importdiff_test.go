@@ -82,8 +82,8 @@ func TestDiffRulesFieldChanges(t *testing.T) {
 		{"target", func(r Rule) Rule { r.Target = "h2:2456"; return r }, "target", "h:2456-2457", "h2:2456-2457"},
 		{"vps_mode", func(r Rule) Rule { r.Proto = TCP; r.VPSMode = ModeProxy; return r }, "vps_mode", "kernel", "proxy"},
 		{"proxy_protocol", func(r Rule) Rule { r.Proto = TCP; r.VPSMode = ModeProxy; r.ProxyProtocol = true; return r }, "proxy_protocol", "false", "true"},
-		{"source_deny", func(r Rule) Rule { r.SourceDeny = []netip.Prefix{mustPrefix(t, "203.0.113.0/24")}; return r }, "source_deny", "0", "1"},
-		{"source_allow", func(r Rule) Rule { r.SourceAllow = []netip.Prefix{mustPrefix(t, "198.51.100.0/24")}; return r }, "source_allow", "0", "1"},
+		{"source_deny", func(r Rule) Rule { r.SourceDeny = []netip.Prefix{mustPrefix(t, "203.0.113.0/24")}; return r }, "source_deny", "", "203.0.113.0/24"},
+		{"source_allow", func(r Rule) Rule { r.SourceAllow = []netip.Prefix{mustPrefix(t, "198.51.100.0/24")}; return r }, "source_allow", "", "198.51.100.0/24"},
 		{"new_flow_rate", func(r Rule) Rule { r.NewFlowRate = &tenPerMin; return r }, "new_flow_rate", "", "10/minute"},
 		{"enabled", func(r Rule) Rule { r.Enabled = false; return r }, "enabled", "true", "false"},
 	}
@@ -149,5 +149,35 @@ func TestRulesDigestStableAcrossOrderAndChangesOnContent(t *testing.T) {
 
 	if RulesDigest(nil) != RulesDigest([]Rule{}) {
 		t.Error("digest of nil and empty slice must match")
+	}
+}
+
+// TestDiffRulesSourceSetReplaceSameCount は、拒否リストの CIDR を同じ件数のまま別のものに
+// 差し替えても changed になり、Old/New に実際の CIDR(件数でなく)が入ることを確かめる
+// (仕様 10.1 節の確認ページが内容を示すための入力)。件数だけを Old/New にしていた頃は、
+// 件数が同じままなので add() の等値検査で FieldChange そのものが落ちていた。
+func TestDiffRulesSourceSetReplaceSameCount(t *testing.T) {
+	base := Rule{
+		ID: "r_a", Agent: "home", Proto: TCP, ListenPort: PortRange{Lo: 443, Hi: 443}, Target: "h:443", Enabled: true,
+		SourceDeny: []netip.Prefix{mustPrefix(t, "203.0.113.0/24")},
+	}
+	next := base
+	next.SourceDeny = []netip.Prefix{mustPrefix(t, "198.51.100.0/24")}
+
+	diff := DiffRules([]Rule{base}, []Rule{next})
+	if len(diff) != 1 || diff[0].Kind != ChangeChanged {
+		t.Fatalf("diff = %+v, want a single changed row even though the CIDR count is unchanged", diff)
+	}
+	var found *FieldChange
+	for i := range diff[0].FieldChanges {
+		if diff[0].FieldChanges[i].Field == "source_deny" {
+			found = &diff[0].FieldChanges[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no source_deny field change for a same-count CIDR replacement: %+v", diff[0].FieldChanges)
+	}
+	if found.Old != "203.0.113.0/24" || found.New != "198.51.100.0/24" {
+		t.Errorf("source_deny change = %q -> %q, want the actual CIDRs, not counts", found.Old, found.New)
 	}
 }

@@ -104,6 +104,12 @@ func TestFindMergeBlocker(t *testing.T) {
 		}, BlockProxyProtocol},
 		{"拒否リストが違う", func(a, b *Rule) { b.SourceDeny = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")} }, BlockDenyList},
 		{"許可リストが違う", func(a, b *Rule) { b.SourceAllow = []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")} }, BlockAllowList},
+		// 旧い CLI が許していた重複エントリがあっても、長さだけでなく重複を払った内容で比べる
+		// (a は同じ CIDR を 2 度、b は別の CIDR を含むので、実際には異なる集合)。
+		{"拒否リストに重複があり、長さは同じでも内容が違う", func(a, b *Rule) {
+			a.SourceDeny = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("203.0.113.0/24")}
+			b.SourceDeny = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("198.51.100.0/24")}
+		}, BlockDenyList},
 		{"レートが違う", func(a, b *Rule) { r := Rate{Count: 10, Unit: PerSecond}; b.NewFlowRate = &r }, BlockRates},
 		{"enabled が違う", func(a, b *Rule) { b.Enabled = false }, BlockEnabled},
 	}

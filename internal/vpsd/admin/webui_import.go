@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -208,7 +209,7 @@ func fieldChangeText(fc proto.FieldChange, locale string) string {
 	label := T(locale, diffFieldLabelKey[fc.Field])
 	switch fc.Field {
 	case "source_deny", "source_allow":
-		return fmt.Sprintf(T(locale, "diffCountFmt"), label, fc.Old, fc.New)
+		return fmt.Sprintf(T(locale, "diffSetFmt"), label, sourceSetDiffText(fc.Old, fc.New))
 	case "group", "note":
 		return fmt.Sprintf(T(locale, "diffValueFmt"), label, orNoneLabel(fc.Old, locale), orNoneLabel(fc.New, locale))
 	case "proxy_protocol", "enabled":
@@ -218,6 +219,44 @@ func fieldChangeText(fc proto.FieldChange, locale string) string {
 	default:
 		return fmt.Sprintf(T(locale, "diffValueFmt"), label, fc.Old, fc.New)
 	}
+}
+
+// sourceSetDiffText は proto.FieldChange の Old/New(拒否/許可リストなら、CIDR をソートして
+// ", " でつないだ一覧。proto.joinPrefixes が作る)を前後で比べ、"+追加された CIDR -外れた CIDR"
+// の短い一覧にする。件数が同じ入れ替え(例:203.0.113.0/24 を 198.51.100.0/24 に差し替え)でも
+// 内容の変化がそのまま見えるようにするための表示専用の整形である。
+func sourceSetDiffText(oldCSV, newCSV string) string {
+	oldSet, newSet := splitCIDRSet(oldCSV), splitCIDRSet(newCSV)
+	var added, removed []string
+	for _, p := range newSet {
+		if !containsStr(oldSet, p) {
+			added = append(added, "+"+p)
+		}
+	}
+	for _, p := range oldSet {
+		if !containsStr(newSet, p) {
+			removed = append(removed, "-"+p)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return strings.Join(append(added, removed...), " ")
+}
+
+func splitCIDRSet(csv string) []string {
+	if csv == "" {
+		return nil
+	}
+	return strings.Split(csv, ", ")
+}
+
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func orNoneLabel(s, locale string) string {

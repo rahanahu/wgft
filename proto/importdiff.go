@@ -4,8 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/netip"
 	"sort"
-	"strconv"
+	"strings"
 )
 
 // ChangeKind は読み込み確認(仕様 10.1 節)の 1 行の種別。
@@ -113,11 +114,14 @@ func fieldChanges(prev, next Rule) []FieldChange {
 	add("target", prev.TargetDisplay(), next.TargetDisplay())
 	add("vps_mode", string(prev.VPSMode), string(next.VPSMode))
 	add("proxy_protocol", boolField(prev.ProxyProtocol), boolField(next.ProxyProtocol))
+	// 拒否/許可リストは集合として比べる(equalPrefixSet)。件数が同じでも内容が入れ替わって
+	// いれば差分とし、Old/New には件数でなく CIDR そのものの一覧を持たせる(add はここでは
+	// 使わない。件数が同じ入れ替えでは old==new の文字列になり、add の等値検査で落ちるため)。
 	if !equalPrefixSet(prev.SourceDeny, next.SourceDeny) {
-		add("source_deny", strconv.Itoa(len(prev.SourceDeny)), strconv.Itoa(len(next.SourceDeny)))
+		out = append(out, FieldChange{Field: "source_deny", Old: joinPrefixes(prev.SourceDeny), New: joinPrefixes(next.SourceDeny)})
 	}
 	if !equalPrefixSet(prev.SourceAllow, next.SourceAllow) {
-		add("source_allow", strconv.Itoa(len(prev.SourceAllow)), strconv.Itoa(len(next.SourceAllow)))
+		out = append(out, FieldChange{Field: "source_allow", Old: joinPrefixes(prev.SourceAllow), New: joinPrefixes(next.SourceAllow)})
 	}
 	add("new_flow_rate", rateField(prev.NewFlowRate), rateField(next.NewFlowRate))
 	add("packet_rate", rateField(prev.PacketRate), rateField(next.PacketRate))
@@ -138,4 +142,19 @@ func rateField(r *Rate) string {
 		return ""
 	}
 	return r.String()
+}
+
+// joinPrefixes は拒否/許可リストの FieldChange.Old/New に持たせる表示用の値。CIDR を
+// 文字列でソートして ", " でつなぐ(空なら空文字列)。Web UI(fieldChangeText)がこれを
+// 前後で比べ、増えた・減った CIDR だけを確認ページに出す。
+func joinPrefixes(list []netip.Prefix) string {
+	if len(list) == 0 {
+		return ""
+	}
+	strs := make([]string, len(list))
+	for i, p := range list {
+		strs[i] = p.String()
+	}
+	sort.Strings(strs)
+	return strings.Join(strs, ", ")
 }
