@@ -244,6 +244,48 @@ func TestOverallHealthIncludesRuleErrors(t *testing.T) {
 	}
 }
 
+// TestDashboardWarningsLayout はダッシュボードの単一カラム化(仕様 10.1 節)のうち、
+// 警告の出し分けを確かめる。0 件のときはバナーを描かず(全体ヘルスの見出しで件数を示すのに
+// 十分)、リフレッシュ先の要素(#warnings)だけは残ること。1 件以上のときはバナーが出て、
+// ヘッダの警告件数が #warnings へのリンクになることを見る。
+func TestDashboardWarningsLayout(t *testing.T) {
+	newSrv := func(t *testing.T, warns []Warning) *httptest.Server {
+		t.Helper()
+		st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		srv := httptest.NewServer(New(st, &fakeBackend{st: st, warnings: warns}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	// 0 件:バナーは描かず、5 秒ごとの自動更新先の要素だけ残る
+	body := getBody(t, newSrv(t, []Warning{}).URL+"/?lang=en")
+	if !strings.Contains(body, `id="warnings" data-refresh="/ui/warnings"`) {
+		t.Error("missing the #warnings refresh target when there are no warnings")
+	}
+	if strings.Contains(body, "warnings-banner") {
+		t.Error("the warnings banner must not render when there are no warnings")
+	}
+	if strings.Contains(body, "warn-jump") {
+		t.Error("the header must not link to #warnings when there are no warnings")
+	}
+
+	// 1 件以上:バナーが出て、ヘッダの件数が #warnings へのリンクになる
+	body = getBody(t, newSrv(t, []Warning{{Agent: "home", Kind: store.WarnIPMismatch, Detail: "stream=9.9.9.9 wg=1.2.3.4"}}).URL+"/?lang=en")
+	if !strings.Contains(body, "warnings-banner") {
+		t.Error("the warnings banner must render when there is a warning")
+	}
+	if !strings.Contains(body, `class="badge danger warn-jump" href="#warnings"`) {
+		t.Errorf("the header warning count must link to #warnings: %s", body)
+	}
+	if !strings.Contains(body, "1 warnings") {
+		t.Errorf("missing the header warning count: %s", body)
+	}
+}
+
 // TestMergeSection は統合区画のビュー組み立て(仕様 10.1 節)を確かめる。r_a に、
 // 統合できる隣接ルール(r_b)と統合できない隣接ルール(r_c、拒否リストが違う)の両方が
 // あるとき、候補には合う方だけが出て、理由は出ない(候補が 1 つでもあれば理由は出さない)。

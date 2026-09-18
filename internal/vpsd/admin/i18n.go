@@ -100,6 +100,7 @@ var tr = map[string][2]string{
 	"noNftTable":   {"(wgft テーブルなし、または nft を読めません)", "(no wgft table, or nft not readable)"},
 	// warnings
 	"warningsHead":      {"警告", "Warnings"},
+	"warnLinkFmt":       {"警告 %d 件", "%d warnings"},
 	"noWarnings":        {"異常なし", "No issues"},
 	"dismiss":           {"警告を消す", "Dismiss"},
 	"revokeAgent":       {"エージェントを無効化", "Revoke agent"},

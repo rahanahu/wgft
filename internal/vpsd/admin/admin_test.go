@@ -20,9 +20,10 @@ import (
 // fakeBackend はバッチをそのまま store に流す。nftables には触れない。
 // mode は ServerInfo().Mode に使う("" のままなら kernel とみなされる。webui.go の serverMode 参照)。
 type fakeBackend struct {
-	st     *store.Store
-	mode   string
-	agents []AgentInfo // 空なら未接続の "home" 1 台(既定)。ルールの適用状態のテストは差し替える
+	st       *store.Store
+	mode     string
+	agents   []AgentInfo // 空なら未接続の "home" 1 台(既定)。ルールの適用状態のテストは差し替える
+	warnings []Warning   // nil なら IP 食い違いの警告 1 件(既定)。ダッシュボードの警告バナーのテストは空スライスに差し替える
 }
 
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.st.Rules() }
@@ -37,6 +38,9 @@ func (b *fakeBackend) RuleDrops() (map[string]uint64, error) {
 	return map[string]uint64{"r_a": 42}, nil
 }
 func (b *fakeBackend) Warnings() ([]Warning, error) {
+	if b.warnings != nil {
+		return b.warnings, nil
+	}
 	return []Warning{{Agent: "home", Kind: store.WarnIPMismatch, Detail: "stream=9.9.9.9 wg=1.2.3.4"}}, nil
 }
 func (b *fakeBackend) DismissWarning(agent, kind, detail string) error { return nil }
