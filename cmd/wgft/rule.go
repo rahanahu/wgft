@@ -400,13 +400,13 @@ func newRuleDenyCmd() *cobra.Command {
 	deny := &cobra.Command{Use: "deny", Short: "Manage the deny list source_deny"}
 	deny.AddCommand(
 		newRestrictionCmd("add <id> <cidr>...", "add deny CIDRs; active flows are cut immediately", func(r *proto.Rule, a []string) error {
-			ps, err := parseCIDRs(a)
-			r.SourceDeny = append(r.SourceDeny, ps...)
+			ps, err := proto.ParseSources(a)
+			r.SourceDeny = proto.AddSources(r.SourceDeny, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
 		newRestrictionCmd("rm <id> <cidr>...", "remove deny CIDRs", func(r *proto.Rule, a []string) error {
-			ps, err := parseCIDRs(a)
-			r.SourceDeny = removePrefixes(r.SourceDeny, ps)
+			ps, err := proto.ParseSources(a)
+			r.SourceDeny = proto.RemoveSources(r.SourceDeny, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
 	)
@@ -418,13 +418,13 @@ func newRuleAllowCmd() *cobra.Command {
 	allow := &cobra.Command{Use: "allow", Short: "Manage the allow list source_allow; when non-empty, drop everything except the listed CIDRs"}
 	allow.AddCommand(
 		newRestrictionCmd("add <id> <cidr>...", "add allow CIDRs", func(r *proto.Rule, a []string) error {
-			ps, err := parseCIDRs(a)
-			r.SourceAllow = append(r.SourceAllow, ps...)
+			ps, err := proto.ParseSources(a)
+			r.SourceAllow = proto.AddSources(r.SourceAllow, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
 		newRestrictionCmd("rm <id> <cidr>...", "remove allow CIDRs", func(r *proto.Rule, a []string) error {
-			ps, err := parseCIDRs(a)
-			r.SourceAllow = removePrefixes(r.SourceAllow, ps)
+			ps, err := proto.ParseSources(a)
+			r.SourceAllow = proto.RemoveSources(r.SourceAllow, ps)
 			return err
 		}, cobra.MinimumNArgs(2)),
 	)
@@ -499,40 +499,6 @@ func newRuleSetCmd() *cobra.Command {
 	set.Flags().StringVar(&setGroup, "group", "", `group ("" to clear)`)
 	set.Flags().StringVar(&setNote, "note", "", `note ("" to clear)`)
 	return set
-}
-
-// parseCIDRs は CIDR の列を解釈する。単一 IP も /32 として受ける。
-func parseCIDRs(args []string) ([]netip.Prefix, error) {
-	var out []netip.Prefix
-	for _, a := range args {
-		p, err := netip.ParsePrefix(a)
-		if err != nil {
-			ip, err2 := netip.ParseAddr(a)
-			if err2 != nil {
-				return nil, fmt.Errorf("%q is neither a CIDR nor an IP", a)
-			}
-			p = netip.PrefixFrom(ip, ip.BitLen())
-		}
-		out = append(out, p.Masked())
-	}
-	return out, nil
-}
-
-// removePrefixes は list から rm に含まれる CIDR を除く。
-func removePrefixes(list []netip.Prefix, rm []netip.Prefix) []netip.Prefix {
-	var out []netip.Prefix
-	for _, p := range list {
-		keep := true
-		for _, r := range rm {
-			if p == r {
-				keep = false
-			}
-		}
-		if keep {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // short はルール ID を短く表示する(先頭 12 文字)。findRule が前方一致で受けるので選択には困らない。

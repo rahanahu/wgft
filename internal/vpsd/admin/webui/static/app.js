@@ -122,9 +122,26 @@
     });
   }
 
+  // レート制限の各行：「制限しない」を選ぶと数値と単位を無効にする（見た目の補助。判定は
+  // nolimit の値そのもので行うので、この JS が動かなくても保存の挙動は変わらない）。
+  function initRateForm() {
+    document.querySelectorAll(".rate-row").forEach(function (row) {
+      var checkbox = row.querySelector('input[type="checkbox"]');
+      var count = row.querySelector('input[type="number"]');
+      var unit = row.querySelector("select");
+      if (!checkbox || !count || !unit) return;
+      function sync() {
+        count.disabled = checkbox.checked;
+        unit.disabled = checkbox.checked;
+      }
+      checkbox.addEventListener("change", sync);
+      sync();
+    });
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function () { start(); confirmForms(); initRuleForm(); initRuleGroups(); });
+    document.addEventListener("DOMContentLoaded", function () { start(); confirmForms(); initRuleForm(); initRuleGroups(); initRateForm(); });
   } else {
-    start(); confirmForms(); initRuleForm(); initRuleGroups();
+    start(); confirmForms(); initRuleForm(); initRuleGroups(); initRateForm();
   }
 })();

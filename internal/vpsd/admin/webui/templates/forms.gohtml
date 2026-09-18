@@ -49,6 +49,8 @@
     <small class="field-help">{{ T .Locale "fNoteHelp" }}</small>
   </div>
 
+  <label class="check"><input type="checkbox" name="disabled" value="1"> {{ T .Locale "fAddDisabled" }}</label>
+
   <details class="advanced">
     <summary>{{ T .Locale "fAdvanced" }}</summary>
     <div class="advanced-body">
@@ -118,25 +120,111 @@
 <a class="btn" href="/">{{ T .Locale "back" }}</a>
 {{ end }}
 
-{{ define "editmeta" }}
-<h2 style="margin-top:0">{{ T .Locale "editMetaTitle" }}</h2>
-<p class="muted mono">{{ .Ports }}({{ .ID }})</p>
-{{ if .Error }}<p class="danger-text">{{ .Error }}</p>{{ end }}
-<form method="post" action="/ui/rules/{{ .ID }}/meta" class="rule-form">
-  <div class="field">
-    <label for="e-group">{{ T .Locale "fGroup" }}</label>
-    <input id="e-group" class="search" name="group" value="{{ .Group }}" list="group-list" maxlength="32" placeholder="minecraft">
-    <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
-    <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
+{{ define "ruledetail" }}
+<p class="muted"><a href="/">{{ T .Locale "back" }}</a></p>
+<div class="rule-detail-head">
+  <div class="rule-summary">
+    <strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> <span class="mono">{{ .Ports }}</span>
+    <span class="flow-arrow">→</span> {{ .Agent }} <span class="mono">{{ .Target }}</span>
+    <span class="badge neutral">{{ .Mode }}</span>
+    <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
+    <form method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
+      <button class="small-btn" type="submit">{{ if .Enabled }}{{ T .Locale "disable" }}{{ else }}{{ T .Locale "enable" }}{{ end }}</button>
+    </form>
   </div>
-  <div class="field">
-    <label for="e-note">{{ T .Locale "fNote" }}</label>
-    <input id="e-note" class="search" name="note" value="{{ .Note }}" maxlength="120">
-    <small class="field-help">{{ T .Locale "fNoteHelp" }}</small>
-  </div>
-  <div class="form-actions">
-    <button class="btn primary" type="submit">{{ T .Locale "save" }}</button>
-    <a class="btn" href="/">{{ T .Locale "cancel" }}</a>
-  </div>
-</form>
+  {{ if .Note }}<p class="muted">{{ .Note }}</p>{{ end }}
+</div>
+
+<section class="detail-section">
+  <h3>{{ T .Locale "metaHead" }}</h3>
+  {{ if .MetaError }}<p class="danger-text">{{ .MetaError }}</p>{{ end }}
+  <form method="post" action="/ui/rules/{{ .ID }}/meta" class="rule-form">
+    <div class="field">
+      <label for="e-group">{{ T .Locale "fGroup" }}</label>
+      <input id="e-group" class="search" name="group" value="{{ .Group }}" list="group-list" maxlength="32" placeholder="minecraft">
+      <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
+      <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
+    </div>
+    <div class="field">
+      <label for="e-note">{{ T .Locale "fNote" }}</label>
+      <input id="e-note" class="search" name="note" value="{{ .Note }}" maxlength="120">
+      <small class="field-help">{{ T .Locale "fNoteHelp" }}</small>
+    </div>
+    <div class="form-actions"><button class="btn primary" type="submit">{{ T .Locale "save" }}</button></div>
+  </form>
+</section>
+
+<section class="detail-section">
+  <h3>{{ T .Locale "denyListHead" }}</h3>
+  <p class="field-help">{{ T .Locale "denyListHelp" }}</p>
+  {{ if .DenyError }}<p class="danger-text">{{ .DenyError }}</p>{{ end }}
+  <ul class="cidr-list">
+    {{ range .DenyList }}
+    <li><span class="mono">{{ .CIDR }}</span>
+      <form method="post" action="/ui/rules/{{ $.ID }}/deny/rm">
+        <input type="hidden" name="cidr" value="{{ .CIDR }}">
+        <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
+      </form>
+    </li>
+    {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
+  </ul>
+  <form method="post" action="/ui/rules/{{ .ID }}/deny/add" class="inline-form">
+    <div class="field">
+      <textarea name="cidrs" rows="3" placeholder="203.0.113.7&#10;198.51.100.0/24">{{ .DenyInput }}</textarea>
+      <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
+    </div>
+    <button class="btn" type="submit">{{ T .Locale "add" }}</button>
+  </form>
+</section>
+
+<section class="detail-section">
+  <h3>{{ T .Locale "allowListHead" }}</h3>
+  <p class="field-help">{{ T .Locale "allowListHelp" }}</p>
+  {{ if .AllowError }}<p class="danger-text">{{ .AllowError }}</p>{{ end }}
+  <ul class="cidr-list">
+    {{ range .AllowList }}
+    <li><span class="mono">{{ .CIDR }}</span>
+      <form method="post" action="/ui/rules/{{ $.ID }}/allow/rm" {{ if .Confirm }}data-confirm="{{ T $.Locale "confirmAllowLast" }}"{{ end }}>
+        <input type="hidden" name="cidr" value="{{ .CIDR }}">
+        <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
+      </form>
+    </li>
+    {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
+  </ul>
+  <form method="post" action="/ui/rules/{{ .ID }}/allow/add" class="inline-form" {{ if .AllowConfirmAdd }}data-confirm="{{ T .Locale "confirmAllowFirst" }}"{{ end }}>
+    <div class="field">
+      <textarea name="cidrs" rows="3" placeholder="203.0.113.7">{{ .AllowInput }}</textarea>
+      <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
+    </div>
+    <button class="btn" type="submit">{{ T .Locale "add" }}</button>
+  </form>
+</section>
+
+<section class="detail-section">
+  <h3>{{ T .Locale "rateHead" }}</h3>
+  <p class="field-help">{{ T .Locale "rateHelp" }}</p>
+  {{ if .RateError }}<p class="danger-text">{{ .RateError }}</p>{{ end }}
+  <form method="post" action="/ui/rules/{{ .ID }}/rates" class="rate-form">
+    <div class="rate-row">
+      <span class="rate-label">{{ T .Locale "ratePerSourceHead" }}</span>
+      <input type="number" min="1" name="per_source_count" value="{{ .Rates.PerSource.Count }}">
+      <select name="per_source_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.PerSource.Unit }}selected{{ end }}>{{ $u }}</option>{{ end }}</select>
+      <label class="check"><input type="checkbox" name="per_source_nolimit" value="1" {{ if .Rates.PerSource.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+    </div>
+    <div class="rate-row">
+      <span class="rate-label">{{ T .Locale "rateNewFlowHead" }}</span>
+      <input type="number" min="1" name="new_flow_count" value="{{ .Rates.NewFlow.Count }}">
+      <select name="new_flow_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.NewFlow.Unit }}selected{{ end }}>{{ $u }}</option>{{ end }}</select>
+      <label class="check"><input type="checkbox" name="new_flow_nolimit" value="1" {{ if .Rates.NewFlow.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+    </div>
+    <div class="rate-row">
+      <span class="rate-label">{{ T .Locale "ratePacketHead" }}</span>
+      <input type="number" min="1" name="packet_count" value="{{ .Rates.Packet.Count }}">
+      <select name="packet_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.Packet.Unit }}selected{{ end }}>{{ $u }}</option>{{ end }}</select>
+      <label class="check"><input type="checkbox" name="packet_nolimit" value="1" {{ if .Rates.Packet.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+    </div>
+    {{ if .ShowPacketNote }}<p class="field-help">{{ T .Locale "packetUserspaceNote" }}</p>{{ end }}
+    <div class="form-actions"><button class="btn primary" type="submit">{{ T .Locale "save" }}</button></div>
+  </form>
+</section>
 {{ end }}

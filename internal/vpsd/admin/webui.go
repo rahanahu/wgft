@@ -42,8 +42,13 @@ func (s *Server) registerUI() {
 	s.mux.HandleFunc("GET /ui/add-agent", s.uiAddAgentForm)
 	s.mux.HandleFunc("POST /ui/add-agent", s.uiAddAgent)
 	s.mux.HandleFunc("GET /ui/rules/{id}/check", s.uiCheck)
-	s.mux.HandleFunc("GET /ui/rules/{id}/meta", s.uiEditMetaForm)
+	s.mux.HandleFunc("GET /ui/rules/{id}", s.uiRuleDetail)
 	s.mux.HandleFunc("POST /ui/rules/{id}/meta", s.uiEditMeta)
+	s.mux.HandleFunc("POST /ui/rules/{id}/deny/add", s.uiDenyAdd)
+	s.mux.HandleFunc("POST /ui/rules/{id}/deny/rm", s.uiDenyRm)
+	s.mux.HandleFunc("POST /ui/rules/{id}/allow/add", s.uiAllowAdd)
+	s.mux.HandleFunc("POST /ui/rules/{id}/allow/rm", s.uiAllowRm)
+	s.mux.HandleFunc("POST /ui/rules/{id}/rates", s.uiSetRates)
 	s.mux.HandleFunc("POST /ui/rules/{id}/enable", s.uiRuleEnable)
 	s.mux.HandleFunc("POST /ui/rules/{id}/disable", s.uiRuleDisable)
 	s.mux.HandleFunc("POST /ui/rules/{id}/delete", s.uiRuleDelete)
@@ -106,6 +111,49 @@ type ruleGroupView struct {
 type warnView struct {
 	Agent, Kind, Title, Body, Detail, Ago, AlertClass string
 }
+
+// ruleDetailData はルール詳細ページ(/ui/rules/{id})のビュー(仕様 10.1 節)。
+type ruleDetailData struct {
+	Locale                 string
+	ID, Ports              string
+	ProtoUpper, ProtoClass string
+	Agent, Target, Mode    string
+	Enabled                bool
+	StateBadge, StateLabel string
+	Note, Group            string
+	Groups                 []string
+	MetaError              string
+	DenyList               []sourceItemView
+	DenyInput, DenyError   string
+	AllowList              []sourceItemView
+	AllowInput, AllowError string
+	AllowConfirmAdd        bool
+	Rates                  rateFormView
+	RateError              string
+	Units                  []string
+	ShowPacketNote         bool
+}
+
+// sourceItemView は拒否/許可リストの 1 行。Confirm はこの行を外す操作に確認を要るかどうか
+// (許可リストの最後の 1 件だけ。仕様 10.1 節)。
+type sourceItemView struct {
+	CIDR    string
+	Confirm bool
+}
+
+// rateFormView はレート制限区画の 3 つの入力欄。
+type rateFormView struct {
+	PerSource, NewFlow, Packet rateFieldView
+}
+
+// rateFieldView は 1 つのレート欄。NoLimit なら Count/Unit は表示のみで送信されない。
+type rateFieldView struct {
+	Count   string
+	Unit    string
+	NoLimit bool
+}
+
+var rateUnits = []string{string(proto.PerSecond), string(proto.PerMinute), string(proto.PerHour), string(proto.PerDay), string(proto.PerWeek)}
 
 func (s *Server) buildDash(locale string) (dashData, error) {
 	agents, err := s.backend.Agents()
@@ -349,7 +397,7 @@ func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
 		ID: "r_" + newULID(), Agent: r.FormValue("agent"), Proto: proto.Proto(r.FormValue("proto")),
 		Group: strings.TrimSpace(r.FormValue("group")), Note: strings.TrimSpace(r.FormValue("note")),
 		ListenPort: lp, Target: r.FormValue("target"), VPSMode: proto.VPSMode(r.FormValue("vps_mode")),
-		ProxyProtocol: r.FormValue("proxy_protocol") == "1", Enabled: true,
+		ProxyProtocol: r.FormValue("proxy_protocol") == "1", Enabled: r.FormValue("disabled") != "1",
 		SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
 	}
 	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rule}, Force: r.FormValue("force") == "1"}); err != nil {
@@ -370,37 +418,229 @@ func (s *Server) findRule(id string) (proto.Rule, bool) {
 	return proto.Rule{}, false
 }
 
-func (s *Server) metaData(rule proto.Rule, extra map[string]any) map[string]any {
-	d := map[string]any{"ID": rule.ID, "Ports": rule.ListenPort.String(), "Group": rule.Group, "Note": rule.Note, "Groups": s.existingGroups()}
-	for k, v := range extra {
-		d[k] = v
+// ---- ルール詳細ページ(仕様 10.1 節) ----
+
+// ruleDetailView はルール詳細ページのビューを組み立てる。
+func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
+	mode := string(rule.VPSMode)
+	serverMode := s.serverMode()
+	if serverMode == "userspace" {
+		mode = "userspace"
+	}
+	protoClass := "tcp"
+	if rule.Proto == proto.UDP {
+		protoClass = "udp"
+	}
+	d := ruleDetailData{
+		Locale: locale, ID: rule.ID, Ports: rule.ListenPort.String(),
+		ProtoUpper: strings.ToUpper(string(rule.Proto)), ProtoClass: protoClass,
+		Agent: rule.Agent, Target: rule.TargetDisplay(), Mode: mode, Enabled: rule.Enabled,
+		Note: rule.Note, Group: rule.Group, Groups: s.existingGroups(),
+		DenyList:        sourceItems(rule.SourceDeny, false),
+		AllowList:       sourceItems(rule.SourceAllow, len(rule.SourceAllow) == 1),
+		AllowConfirmAdd: len(rule.SourceAllow) == 0,
+		Rates:           rateFormFrom(rule),
+		Units:           rateUnits,
+		ShowPacketNote:  serverMode == "userspace" && rule.Proto == proto.TCP,
+	}
+	if rule.Enabled {
+		d.StateBadge, d.StateLabel = "success", T(locale, "applied")
+	} else {
+		d.StateBadge, d.StateLabel = "neutral", T(locale, "disabled")
 	}
 	return d
 }
 
-func (s *Server) uiEditMetaForm(w http.ResponseWriter, r *http.Request) {
+func sourceItems(list []netip.Prefix, confirmEach bool) []sourceItemView {
+	out := make([]sourceItemView, 0, len(list))
+	for _, p := range list {
+		out = append(out, sourceItemView{CIDR: p.String(), Confirm: confirmEach})
+	}
+	return out
+}
+
+func rateFieldFrom(r *proto.Rate) rateFieldView {
+	if r == nil {
+		return rateFieldView{Unit: string(proto.PerSecond), NoLimit: true}
+	}
+	return rateFieldView{Count: strconv.FormatUint(r.Count, 10), Unit: string(r.Unit)}
+}
+
+func rateFormFrom(rule proto.Rule) rateFormView {
+	return rateFormView{
+		PerSource: rateFieldFrom(rule.PerSourceRate),
+		NewFlow:   rateFieldFrom(rule.NewFlowRate),
+		Packet:    rateFieldFrom(rule.PacketRate),
+	}
+}
+
+// renderDetailPage はルール詳細ページを描画する(page テンプレートの Wide 版)。
+func (s *Server) renderDetailPage(w http.ResponseWriter, locale string, data ruleDetailData) {
+	var inner bytes.Buffer
+	if err := uiTmpl.ExecuteTemplate(&inner, "ruledetail", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.renderHTML(w, "page", map[string]any{"Locale": locale, "Title": T(locale, "ruleDetailTitle"), "Body": template.HTML(inner.String()), "Wide": true})
+}
+
+func (s *Server) uiRuleDetail(w http.ResponseWriter, r *http.Request) {
+	locale := resolveLocale(w, r)
 	rule, ok := s.findRule(r.PathValue("id"))
 	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	s.renderPage(w, r, "editMetaTitle", "editmeta", s.metaData(rule, nil))
+	s.renderDetailPage(w, locale, s.ruleDetailView(rule, locale))
 }
 
 func (s *Server) uiEditMeta(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	locale := resolveLocale(w, r)
+	rule, ok := s.findRule(r.PathValue("id"))
+	if !ok {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	updated := rule
+	updated.Group = strings.TrimSpace(r.FormValue("group"))
+	updated.Note = strings.TrimSpace(r.FormValue("note"))
+	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}}); err != nil {
+		d := s.ruleDetailView(rule, locale)
+		d.MetaError, d.Group, d.Note = err.Error(), updated.Group, updated.Note
+		s.renderDetailPage(w, locale, d)
+		return
+	}
+	http.Redirect(w, r, "/ui/rules/"+rule.ID, http.StatusSeeOther)
+}
+
+// uiDenyAdd / uiDenyRm / uiAllowAdd / uiAllowRm は拒否・許可リストの追加・削除を扱う。
+// 複数行を一括で受け、不正な行が 1 つでもあれば何も保存せず入力を残す(仕様 10.1 節)。
+func (s *Server) uiDenyAdd(w http.ResponseWriter, r *http.Request)  { s.uiSourceAdd(w, r, false) }
+func (s *Server) uiDenyRm(w http.ResponseWriter, r *http.Request)   { s.uiSourceRm(w, r, false) }
+func (s *Server) uiAllowAdd(w http.ResponseWriter, r *http.Request) { s.uiSourceAdd(w, r, true) }
+func (s *Server) uiAllowRm(w http.ResponseWriter, r *http.Request)  { s.uiSourceRm(w, r, true) }
+
+func (s *Server) uiSourceAdd(w http.ResponseWriter, r *http.Request, allow bool) {
+	r.ParseForm()
+	locale := resolveLocale(w, r)
+	rule, ok := s.findRule(r.PathValue("id"))
+	if !ok {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	input := r.FormValue("cidrs")
+	ps, err := proto.ParseSourceLines(input)
+	if err != nil {
+		s.renderSourceError(w, locale, rule, allow, input, err)
+		return
+	}
+	updated := rule
+	if allow {
+		updated.SourceAllow = proto.AddSources(rule.SourceAllow, ps)
+	} else {
+		updated.SourceDeny = proto.AddSources(rule.SourceDeny, ps)
+	}
+	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}}); err != nil {
+		s.renderSourceError(w, locale, rule, allow, input, err)
+		return
+	}
+	http.Redirect(w, r, "/ui/rules/"+rule.ID, http.StatusSeeOther)
+}
+
+func (s *Server) uiSourceRm(w http.ResponseWriter, r *http.Request, allow bool) {
 	r.ParseForm()
 	rule, ok := s.findRule(r.PathValue("id"))
 	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	rule.Group = strings.TrimSpace(r.FormValue("group"))
-	rule.Note = strings.TrimSpace(r.FormValue("note"))
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rule}}); err != nil {
-		s.renderPage(w, r, "editMetaTitle", "editmeta", s.metaData(rule, map[string]any{"Error": err.Error()}))
+	p, err := proto.ParseSource(r.FormValue("cidr"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	updated := rule
+	if allow {
+		updated.SourceAllow = proto.RemoveSources(rule.SourceAllow, []netip.Prefix{p})
+	} else {
+		updated.SourceDeny = proto.RemoveSources(rule.SourceDeny, []netip.Prefix{p})
+	}
+	_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}})
+	s.redirectOrErrorTo(w, r, "/ui/rules/"+rule.ID, err)
+}
+
+func (s *Server) renderSourceError(w http.ResponseWriter, locale string, rule proto.Rule, allow bool, input string, err error) {
+	d := s.ruleDetailView(rule, locale)
+	if allow {
+		d.AllowError, d.AllowInput = err.Error(), input
+	} else {
+		d.DenyError, d.DenyInput = err.Error(), input
+	}
+	s.renderDetailPage(w, locale, d)
+}
+
+// uiSetRates はレート制限の 3 欄を 1 フォームで保存する。値が無く「制限しない」も外れている欄は
+// 誤りとして扱い、何も保存しない。
+func (s *Server) uiSetRates(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	locale := resolveLocale(w, r)
+	rule, ok := s.findRule(r.PathValue("id"))
+	if !ok {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	perSource, errPS := s.parseRateField(r, "per_source", T(locale, "ratePerSourceHead"), locale)
+	newFlow, errNF := s.parseRateField(r, "new_flow", T(locale, "rateNewFlowHead"), locale)
+	packet, errPkt := s.parseRateField(r, "packet", T(locale, "ratePacketHead"), locale)
+	if err := firstErr(errPS, errNF, errPkt); err != nil {
+		d := s.ruleDetailView(rule, locale)
+		d.RateError, d.Rates = err.Error(), s.rateFormFromRequest(r)
+		s.renderDetailPage(w, locale, d)
+		return
+	}
+	updated := rule
+	updated.PerSourceRate, updated.NewFlowRate, updated.PacketRate = perSource, newFlow, packet
+	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}}); err != nil {
+		d := s.ruleDetailView(rule, locale)
+		d.RateError, d.Rates = err.Error(), s.rateFormFromRequest(r)
+		s.renderDetailPage(w, locale, d)
+		return
+	}
+	http.Redirect(w, r, "/ui/rules/"+rule.ID, http.StatusSeeOther)
+}
+
+// parseRateField は 1 つのレート欄(<prefix>_count、<prefix>_unit、<prefix>_nolimit)を解釈する。
+// label はエラーメッセージに使う、その欄の訳済みの見出し。
+func (s *Server) parseRateField(r *http.Request, prefix, label, locale string) (*proto.Rate, error) {
+	if r.FormValue(prefix+"_nolimit") == "1" {
+		return nil, nil
+	}
+	count := strings.TrimSpace(r.FormValue(prefix + "_count"))
+	if count == "" {
+		return nil, fmt.Errorf("%s: %s", label, T(locale, "rateRequired"))
+	}
+	rate, err := proto.ParseRate(count + "/" + r.FormValue(prefix+"_unit"))
+	if err != nil {
+		return nil, err
+	}
+	return &rate, nil
+}
+
+func (s *Server) rateFormFromRequest(r *http.Request) rateFormView {
+	field := func(prefix string) rateFieldView {
+		return rateFieldView{Count: r.FormValue(prefix + "_count"), Unit: r.FormValue(prefix + "_unit"), NoLimit: r.FormValue(prefix+"_nolimit") == "1"}
+	}
+	return rateFormView{PerSource: field("per_source"), NewFlow: field("new_flow"), Packet: field("packet")}
+}
+
+func firstErr(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 func (s *Server) uiAddAgentForm(w http.ResponseWriter, r *http.Request) {
@@ -491,11 +731,16 @@ func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, titleKey, bo
 }
 
 func (s *Server) redirectOrError(w http.ResponseWriter, r *http.Request, err error) {
+	s.redirectOrErrorTo(w, r, "/", err)
+}
+
+// redirectOrErrorTo は redirectOrError の宛先を選べる版(ルール詳細ページへ戻すときに使う)。
+func (s *Server) redirectOrErrorTo(w http.ResponseWriter, r *http.Request, to string, err error) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, to, http.StatusSeeOther)
 }
 
 // serverView はダッシュボード上部の「サーバー」帯。

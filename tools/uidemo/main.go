@@ -151,10 +151,13 @@ func newFakeBackend(mode string) *fakeBackend {
 			Target: "192.168.1.20:2456", VPSMode: proto.ModeKernel, Enabled: true,
 		},
 		{
+			// deny, allow, and a rate together, so the rule detail page has content
+			// in every one of its sections when inspected manually.
 			ID: "r_lab_udp19132", Agent: "lab",
 			Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 19132, Hi: 19132},
 			Target: "192.168.1.30:19132", VPSMode: proto.ModeKernel, Enabled: true,
 			SourceDeny:    []netip.Prefix{netip.MustParsePrefix("203.0.113.50/32")},
+			SourceAllow:   []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")},
 			PerSourceRate: &proto.Rate{Count: 10, Unit: proto.PerSecond},
 		},
 		{
