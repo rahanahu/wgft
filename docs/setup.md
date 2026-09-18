@@ -4,7 +4,7 @@ This guide contains the detailed installation and operating steps that are inten
 
 ## Requirements
 
-The VPS side runs on Linux. The home agent also runs on Windows. macOS is not supported yet because it has not been verified on a real machine. wgft is currently IPv4-only.
+The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11. macOS is not supported yet because it has not been verified on a real machine. wgft is currently IPv4-only.
 
 The home agent does not need root or a TUN device. Server requirements depend on the selected mode:
 
