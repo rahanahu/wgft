@@ -55,7 +55,7 @@ Install the binary and create the minimal configuration:
 sudo install -m 0755 wgft-linux-amd64 /usr/local/bin/wgft
 sudo mkdir -p /etc/wgft
 printf 'WGFT_MODE=kernel\nWGFT_WG_ENDPOINT=vps.example.com:51820\n' | sudo tee /etc/wgft/server.env
-sudo chmod 0600 /etc/wgft/server.env
+sudo chmod 0644 /etc/wgft/server.env
 ```
 
 Check the configuration before the first start:
@@ -89,6 +89,8 @@ sudo install -m 0644 deploy/server.service /etc/systemd/system/wgft.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now wgft
 ```
+
+The service runs as an unprivileged user, so `/etc/wgft/server.env` must stay readable (mode 0644). When replacing an older unit that ran as root, run `sudo chmod 0644 /etc/wgft/server.env` before the restart if the file is mode 0600. The data directory and the server key carry over.
 
 For an interactive test instead:
 

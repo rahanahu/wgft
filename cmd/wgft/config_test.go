@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -81,6 +84,48 @@ func TestDotenvSyntax(t *testing.T) {
 	// 値に空白はエラー
 	if _, err := parseDotenv(mk("WGFT_NAME=a b\n")); err == nil {
 		t.Error("空白入りの値がエラーにならない")
+	}
+}
+
+// 読めない設定ファイルは終了コード 3 になり、server.env なら直し方(chmod 0644)を添える。
+// 無いファイルは従来どおりエラーにしない。
+func TestConfigUnreadable(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs Unix permissions and a non-root user")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "server.env")
+	if err := os.WriteFile(p, []byte("WGFT_MODE=kernel\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := parseDotenv(p)
+	if err == nil {
+		t.Fatal("読めないファイルがエラーにならない")
+	}
+	if !strings.Contains(err.Error(), "chmod 0644 "+p) {
+		t.Errorf("直し方が無い: %v", err)
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("元のエラーを包んでいない: %v", err)
+	}
+	if got := exitCode(fmt.Errorf("server: %w", err)); got != exitConfigRefusal {
+		t.Errorf("exitCode = %d, want %d", got, exitConfigRefusal)
+	}
+
+	other := filepath.Join(dir, "agent.env")
+	os.WriteFile(other, nil, 0)
+	if _, err := parseDotenv(other); err == nil || strings.Contains(err.Error(), "0644") {
+		t.Errorf("agent.env に 0644 を勧めている、またはエラーにならない: %v", err)
+	}
+
+	if m, err := parseDotenv(filepath.Join(dir, "none.env")); err != nil || len(m) != 0 {
+		t.Errorf("無いファイル: %v %v", m, err)
+	}
+	if got := exitCode(errors.New("boom")); got != 1 {
+		t.Errorf("exitCode(other) = %d, want 1", got)
 	}
 }
 

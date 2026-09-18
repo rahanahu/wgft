@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -38,6 +40,29 @@ type config struct {
 	specs []spec
 }
 
+// configUnreadableError は、設定ファイルがあるのに権限で読めないこと。設定起因の失敗なので
+// 再起動しても直らない。main が終了コード 3 にして、unit の再起動の繰り返しを止める(仕様 11a 節)。
+type configUnreadableError struct {
+	path string
+	err  error
+}
+
+func (e *configUnreadableError) Error() string {
+	// 同梱の server.service は DynamicUser= の非特権の利用者で動く。server.env に秘密は無いので 0644 で足りる。
+	if filepath.Base(e.path) == "server.env" {
+		return fmt.Sprintf("%v; the user wgft runs as cannot read it (the provided server.service uses an unprivileged user). The file holds no secrets, so make it readable: chmod 0644 %s", e.err, e.path)
+	}
+	return fmt.Sprintf("%v; make the file readable by the user wgft runs as", e.err)
+}
+
+func (e *configUnreadableError) Unwrap() error { return e.err }
+
+// isConfigUnreadable は、err が読めない設定ファイルによるものかを返す。
+func isConfigUnreadable(err error) bool {
+	var e *configUnreadableError
+	return errors.As(err, &e)
+}
+
 // parseDotenv は最小構文の dotenv を読む(3.1 節)。
 // 「KEY=value 1 行、行頭の # だけコメント、引用符なし、値に空白なし」。
 // 引用符で始まる値と、値に空白を含むものはエラー(Docker との食い違いを黙って通さない)。
@@ -46,6 +71,9 @@ func parseDotenv(path string) (map[string]string, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]string{}, nil
+		}
+		if os.IsPermission(err) {
+			return nil, &configUnreadableError{path: path, err: err}
 		}
 		return nil, err
 	}
