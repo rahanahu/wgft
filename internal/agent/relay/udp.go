@@ -179,7 +179,7 @@ func (m *Manager) startUDP(l *listener) error {
 					defer m.opts.UDPCap.Release(src)
 					defer closeSession(k, s)
 					// 応答は、届いてからプールのバッファを借りて読む(仕様 7 節)。待つ間はバッファを持たない。
-					// 待てない接続(unix 以外のカーネルのソケット)は、最大長のバッファを持ち続ける
+					// 待てない接続(unix でも windows でもないカーネルのソケット)は、最大長のバッファを持ち続ける
 					w := readWaiterOf(s.conn)
 					var own []byte
 					if w == nil {
