@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
-	"net"
 	"net/http"
-	"net/netip"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -20,6 +18,13 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
+
+// このファイルは Web UI のルーティング、ダッシュボードの組み立てと描画、および
+// renderHTML/renderPage/redirectOrError のような、他のページも使う共通の補助を持つ。
+// ルール追加・詳細ページ(meta、拒否/許可リスト、レート、有効無効)は webui_rule.go、
+// 分割・統合は webui_splitmerge.go、ルールの適用状態の判定は webui_state.go、
+// エージェントの追加・無効化・警告の削除は webui_agent.go、ルールの書き出し・読み込みは
+// webui_import.go に分ける。
 
 func newULID() string { return ulid.Make().String() }
 
@@ -63,7 +68,7 @@ func (s *Server) registerUI() {
 	s.mux.HandleFunc("POST /ui/agents/{name}/dismiss-warning", s.uiDismissWarning)
 }
 
-// ---- ビューモデル ----
+// ---- ビューモデル(ダッシュボード) ----
 
 type dashData struct {
 	Locale       string
@@ -124,88 +129,6 @@ type warnView struct {
 	Agent, Kind, Title, Body, Detail, Ago, AlertClass string
 }
 
-// ruleDetailData はルール詳細ページ(/ui/rules/{id})のビュー(仕様 10.1 節)。
-type ruleDetailData struct {
-	Locale                 string
-	ID, Ports              string
-	ProtoUpper, ProtoClass string
-	Agent, Target, Mode    string
-	Enabled                bool
-	StateBadge, StateLabel string
-	StateReason            string
-	Note, Group            string
-	Groups                 []string
-	MetaError              string
-	DenyList               []sourceItemView
-	DenyInput, DenyError   string
-	AllowList              []sourceItemView
-	AllowInput, AllowError string
-	AllowConfirmAdd        bool
-	Rates                  rateFormView
-	RateError              string
-	Units                  []string
-	ShowPacketNote         bool
-	Dropped                string // このルールの累積 drop 数(一覧の「拒否数」と同じ値。レート制限の見出しに添える)
-
-	// 分割。範囲でないルールでは CanSplit が false になり、区画そのものを出さない。
-	CanSplit           bool
-	SplitPorts         []uint16 // at に選べるポート(範囲の 2 番目から末尾まで)
-	ListenLo, ListenHi uint16
-	TargetHost         string
-	TargetPort         uint16
-	SplitError         string
-
-	// 統合。候補が無ければ、隣接する(が統合できない)ルールのうち近い方の理由を出す。
-	MergeCandidates []mergeCandidateView
-	MergeBlocked    *mergeCandidateView // 候補が無いときの、理由付きの隣接ルール(無ければ nil)
-	MergeError      string
-}
-
-// mergeCandidateView は統合区画の 1 行。候補ならボタンを、候補でなければ Reason を持つ。
-type mergeCandidateView struct {
-	ID, Ports, Target, Reason string
-}
-
-// sourceItemView は拒否/許可リストの 1 行。Confirm はこの行を外す操作に確認を要るかどうか
-// (許可リストの最後の 1 件だけ。仕様 10.1 節)。
-type sourceItemView struct {
-	CIDR    string
-	Confirm bool
-}
-
-// rateFormView はレート制限区画の 3 つの入力欄。
-type rateFormView struct {
-	PerSource, NewFlow, Packet rateFieldView
-}
-
-// rateFieldView は 1 つのレート欄。NoLimit なら Count/Unit は表示のみで送信されない。
-type rateFieldView struct {
-	Count   string
-	Unit    string
-	NoLimit bool
-}
-
-var rateUnits = []string{string(proto.PerSecond), string(proto.PerMinute), string(proto.PerHour), string(proto.PerDay), string(proto.PerWeek)}
-
-// rateUnitKeys は proto.RateUnit の値(second など、フォームに送信する値そのもの)を、
-// 表示用の訳語キー(秒など)に対応させる。
-var rateUnitKeys = map[string]string{
-	string(proto.PerSecond): "unitSecond",
-	string(proto.PerMinute): "unitMinute",
-	string(proto.PerHour):   "unitHour",
-	string(proto.PerDay):    "unitDay",
-	string(proto.PerWeek):   "unitWeek",
-}
-
-// unitLabel はレート単位の表示語を返す(テンプレート関数 UnitLabel)。送信する value 属性は
-// proto.RateUnit の値のままで変えない(10.1 節)。
-func unitLabel(locale, unit string) string {
-	if key, ok := rateUnitKeys[unit]; ok {
-		return T(locale, key)
-	}
-	return unit
-}
-
 func (s *Server) buildDash(locale string) (dashData, error) {
 	agents, err := s.backend.Agents()
 	if err != nil {
@@ -251,56 +174,6 @@ func health(total, online, rules, warnings, ruleErrors int, locale string) healt
 		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryWarn"), online, total, rules, warnings)}
 	default:
 		return healthView{OK: true, Class: "success", Title: T(locale, "healthOK"), Summary: fmt.Sprintf(T(locale, "summaryOK"), online, total, rules)}
-	}
-}
-
-// ruleAgentStatus はエージェント 1 台の直近のハートビートから引く、ルールの適用状態の
-// 判定に要る部分だけの写し(仕様 10.1 節)。
-type ruleAgentStatus struct {
-	Connected  bool
-	Generation uint64
-	Rules      map[string]proto.RuleStatus
-}
-
-// buildAgentIndex はエージェント名 → ruleAgentStatus の表を作る。ruleRunState がこれで
-// ルールの持ち主のエージェントを引く。
-func buildAgentIndex(agents []AgentInfo) map[string]ruleAgentStatus {
-	idx := make(map[string]ruleAgentStatus, len(agents))
-	for _, a := range agents {
-		rs := make(map[string]proto.RuleStatus, len(a.Rules))
-		for _, r := range a.Rules {
-			rs[r.ID] = r
-		}
-		idx[a.Name] = ruleAgentStatus{Connected: a.Connected, Generation: a.Generation, Rules: rs}
-	}
-	return idx
-}
-
-// ruleRunState はルールの適用状態を、持ち主のエージェントの直近のハートビートから
-// 判定する(仕様 10.1 節)。無効なルールはエージェントへ配らないので、
-// ハートビートの内容に関わらず disabled のままにする。判定の優先順位は、
-// エージェント未登録・未接続が最優先、次に世代の古さ(反映待ち)、最後にエージェントが
-// 報告したそのルールの状態(ok/error)である。世代が最新なのにエージェントがまだその
-// ルールを報告していない場合(追加直後など)も反映待ちとして扱う。
-func ruleRunState(r *proto.Rule, latestGen uint64, agents map[string]ruleAgentStatus, locale string) (badge, label, reason string) {
-	if !r.Enabled {
-		return "neutral", T(locale, "disabled"), ""
-	}
-	a, ok := agents[r.Agent]
-	if !ok || !a.Connected {
-		return "neutral", T(locale, "agentOffline"), ""
-	}
-	if latestGen > 0 && a.Generation != latestGen {
-		return "warning", T(locale, "pending"), ""
-	}
-	rs, reported := a.Rules[r.ID]
-	switch {
-	case !reported:
-		return "warning", T(locale, "pending"), ""
-	case rs.State == proto.StatusError:
-		return "danger", T(locale, "stateError"), rs.Reason
-	default:
-		return "success", T(locale, "applied"), ""
 	}
 }
 
@@ -450,7 +323,7 @@ func warnToView(w Warning, locale string) warnView {
 	return v
 }
 
-// ---- ハンドラ ----
+// ---- ハンドラ(ダッシュボードとその部分更新) ----
 
 func (s *Server) uiDashboard(w http.ResponseWriter, r *http.Request) {
 	d, err := s.buildDash(resolveLocale(w, r))
@@ -479,58 +352,6 @@ func (s *Server) uiWarningsPartial(w http.ResponseWriter, r *http.Request) {
 	s.renderHTML(w, "warnings", d)
 }
 
-func (s *Server) uiAddRuleForm(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": s.serverMode()})
-}
-
-// serverMode は現在の転送方式(kernel / userspace)。ServerInfo が引けなければ kernel とみなす
-// (仕様 9 節。記録の無い既存の状態は kernel とみなす規則に合わせる)。
-func (s *Server) serverMode() string {
-	info, err := s.backend.ServerInfo()
-	if err != nil || info.Mode == "" {
-		return string(proto.ModeKernel)
-	}
-	return info.Mode
-}
-
-// existingGroups は既存ルールのグループ名(重複なし・ソート済み)。フォームの候補に使う。
-func (s *Server) existingGroups() []string {
-	rules, _ := s.backend.Rules()
-	seen := map[string]bool{}
-	var out []string
-	for i := range rules {
-		g := rules[i].Group
-		if g != "" && !seen[g] {
-			seen[g] = true
-			out = append(out, g)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	mode := s.serverMode()
-	lp, err := proto.ParsePortRange(r.FormValue("listen_port"))
-	if err != nil {
-		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": mode, "Error": err.Error()})
-		return
-	}
-	rule := proto.Rule{
-		ID: "r_" + newULID(), Agent: r.FormValue("agent"), Proto: proto.Proto(r.FormValue("proto")),
-		Group: strings.TrimSpace(r.FormValue("group")), Note: strings.TrimSpace(r.FormValue("note")),
-		ListenPort: lp, Target: r.FormValue("target"), VPSMode: proto.VPSMode(r.FormValue("vps_mode")),
-		ProxyProtocol: r.FormValue("proxy_protocol") == "1", Enabled: r.FormValue("disabled") != "1",
-		SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
-	}
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rule}, Force: r.FormValue("force") == "1"}); err != nil {
-		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": mode, "Error": err.Error()})
-		return
-	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
 // findRule は ID で 1 件返す。
 func (s *Server) findRule(id string) (proto.Rule, bool) {
 	rules, _ := s.backend.Rules()
@@ -542,439 +363,18 @@ func (s *Server) findRule(id string) (proto.Rule, bool) {
 	return proto.Rule{}, false
 }
 
-// ---- ルール詳細ページ(仕様 10.1 節) ----
-
-// ruleDetailView はルール詳細ページのビューを組み立てる。
-func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
-	mode := string(rule.VPSMode)
-	serverMode := s.serverMode()
-	if serverMode == "userspace" {
-		mode = "userspace"
-	}
-	protoClass := "tcp"
-	if rule.Proto == proto.UDP {
-		protoClass = "udp"
-	}
-	d := ruleDetailData{
-		Locale: locale, ID: rule.ID, Ports: rule.ListenPort.String(),
-		ProtoUpper: strings.ToUpper(string(rule.Proto)), ProtoClass: protoClass,
-		Agent: rule.Agent, Target: rule.TargetDisplay(), Mode: mode, Enabled: rule.Enabled,
-		Note: rule.Note, Group: rule.Group, Groups: s.existingGroups(),
-		DenyList:        sourceItems(rule.SourceDeny, false),
-		AllowList:       sourceItems(rule.SourceAllow, len(rule.SourceAllow) == 1),
-		AllowConfirmAdd: len(rule.SourceAllow) == 0,
-		Rates:           rateFormFrom(rule),
-		Units:           rateUnits,
-		ShowPacketNote:  serverMode == "userspace" && rule.Proto == proto.TCP,
-	}
-	if drops, err := s.backend.RuleDrops(); err == nil {
-		d.Dropped = strconv.FormatUint(drops[rule.ID], 10)
-	}
-	gen, _ := s.backend.Generation()
-	agents, _ := s.backend.Agents()
-	d.StateBadge, d.StateLabel, d.StateReason = ruleRunState(&rule, gen, buildAgentIndex(agents), locale)
-
-	d.CanSplit = rule.ListenPort.IsRange()
-	if d.CanSplit {
-		d.ListenLo, d.ListenHi = rule.ListenPort.Lo, rule.ListenPort.Hi
-		for p := rule.ListenPort.Lo + 1; p <= rule.ListenPort.Hi; p++ {
-			d.SplitPorts = append(d.SplitPorts, p)
-		}
-		if host, portStr, err := net.SplitHostPort(rule.Target); err == nil {
-			if port, err := strconv.ParseUint(portStr, 10, 16); err == nil {
-				d.TargetHost, d.TargetPort = host, uint16(port)
-			}
-		}
-	}
-
-	rules, _ := s.backend.Rules()
-	d.MergeCandidates, d.MergeBlocked = mergeSection(rule, rules, locale)
-	return d
-}
-
-// mergeSection は統合区画のビューを組み立てる(仕様 10.1 節)。同じプロトコルの
-// 他のルールから listen_port が直接隣接するもの(直前・直後、それぞれ最大 1 件)を探し、
-// proto.FindMergeBlocker が BlockNone を返すものを候補として全部出す。候補が 1 つも
-// 無く、隣接ルールがあるときは、直前を優先してその理由を 1 件だけ出す。
-func mergeSection(rule proto.Rule, all []proto.Rule, locale string) (candidates []mergeCandidateView, blocked *mergeCandidateView) {
-	below, above := mergeNeighbors(rule, all)
-	for _, n := range []*proto.Rule{below, above} {
-		if n == nil {
-			continue
-		}
-		if proto.FindMergeBlocker(rule, *n) == proto.BlockNone {
-			candidates = append(candidates, mergeCandidateToView(*n, ""))
-		}
-	}
-	if len(candidates) > 0 {
-		return candidates, nil
-	}
-	nearest := below
-	if nearest == nil {
-		nearest = above
-	}
-	if nearest == nil {
-		return nil, nil
-	}
-	v := mergeCandidateToView(*nearest, mergeBlockerLabel(proto.FindMergeBlocker(rule, *nearest), locale))
-	return nil, &v
-}
-
-// mergeNeighbors は rule と同じプロトコルの他のルールから、listen_port の範囲が直接
-// 隣接するものを探す。プロトコルの名前空間はポートごとに独立なので他は見ない(仕様 5.3
-// 節)。範囲は重ならない制約(proto.ValidateRules)があるので、直前・直後それぞれ最大 1 件。
-func mergeNeighbors(rule proto.Rule, all []proto.Rule) (below, above *proto.Rule) {
-	for i := range all {
-		o := &all[i]
-		if o.ID == rule.ID || o.Proto != rule.Proto {
-			continue
-		}
-		switch {
-		case o.ListenPort.Hi+1 == rule.ListenPort.Lo:
-			below = o
-		case rule.ListenPort.Hi+1 == o.ListenPort.Lo:
-			above = o
-		}
-	}
-	return below, above
-}
-
-func mergeCandidateToView(r proto.Rule, reason string) mergeCandidateView {
-	return mergeCandidateView{ID: r.ID, Ports: r.ListenPort.String(), Target: r.TargetDisplay(), Reason: reason}
-}
-
-var mergeBlockerKeys = map[proto.MergeBlocker]string{
-	proto.BlockAgent:         "mbAgent",
-	proto.BlockProto:         "mbProto",
-	proto.BlockMode:          "mbMode",
-	proto.BlockNotAdjacent:   "mbNotAdjacent",
-	proto.BlockTargetGap:     "mbTargetGap",
-	proto.BlockProxyProtocol: "mbProxyProtocol",
-	proto.BlockDenyList:      "mbDenyList",
-	proto.BlockAllowList:     "mbAllowList",
-	proto.BlockRates:         "mbRates",
-	proto.BlockEnabled:       "mbEnabled",
-}
-
-// mergeBlockerLabel は proto.MergeBlocker を、統合区画に出す訳済みの短い理由に変える。
-func mergeBlockerLabel(blk proto.MergeBlocker, locale string) string {
-	if key, ok := mergeBlockerKeys[blk]; ok {
-		return T(locale, key)
-	}
-	return string(blk)
-}
-
-func sourceItems(list []netip.Prefix, confirmEach bool) []sourceItemView {
-	out := make([]sourceItemView, 0, len(list))
-	for _, p := range list {
-		out = append(out, sourceItemView{CIDR: p.String(), Confirm: confirmEach})
-	}
-	return out
-}
-
-func rateFieldFrom(r *proto.Rate) rateFieldView {
-	if r == nil {
-		return rateFieldView{Unit: string(proto.PerSecond), NoLimit: true}
-	}
-	return rateFieldView{Count: strconv.FormatUint(r.Count, 10), Unit: string(r.Unit)}
-}
-
-func rateFormFrom(rule proto.Rule) rateFormView {
-	return rateFormView{
-		PerSource: rateFieldFrom(rule.PerSourceRate),
-		NewFlow:   rateFieldFrom(rule.NewFlowRate),
-		Packet:    rateFieldFrom(rule.PacketRate),
-	}
-}
-
-// renderDetailPage はルール詳細ページを描画する(page テンプレートの Wide 版)。
-func (s *Server) renderDetailPage(w http.ResponseWriter, locale string, data ruleDetailData) {
-	var inner bytes.Buffer
-	if err := uiTmpl.ExecuteTemplate(&inner, "ruledetail", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.renderHTML(w, "page", map[string]any{"Locale": locale, "Title": T(locale, "ruleDetailTitle"), "Body": template.HTML(inner.String()), "Wide": true})
-}
-
-func (s *Server) uiRuleDetail(w http.ResponseWriter, r *http.Request) {
-	locale := resolveLocale(w, r)
-	rule, ok := s.findRule(r.PathValue("id"))
+// findRuleOr404 は findRule の 404 応答つき版。ルール詳細ページの各ハンドラ(meta、
+// deny/allow、rates、split、merge の self 側)が繰り返す「無ければ 404 を書いて戻る」を
+// まとめる。呼び出し側は ok を見て return するのは変わらず、分岐そのものは隠さない。
+func (s *Server) findRuleOr404(w http.ResponseWriter, id string) (proto.Rule, bool) {
+	rule, ok := s.findRule(id)
 	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
-		return
 	}
-	s.renderDetailPage(w, locale, s.ruleDetailView(rule, locale))
+	return rule, ok
 }
 
-func (s *Server) uiEditMeta(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	locale := resolveLocale(w, r)
-	rule, ok := s.findRule(r.PathValue("id"))
-	if !ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	updated := rule
-	updated.Group = strings.TrimSpace(r.FormValue("group"))
-	updated.Note = strings.TrimSpace(r.FormValue("note"))
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}}); err != nil {
-		d := s.ruleDetailView(rule, locale)
-		d.MetaError, d.Group, d.Note = err.Error(), updated.Group, updated.Note
-		s.renderDetailPage(w, locale, d)
-		return
-	}
-	http.Redirect(w, r, "/ui/rules/"+rule.ID, http.StatusSeeOther)
-}
-
-// uiDenyAdd / uiDenyRm / uiAllowAdd / uiAllowRm は拒否・許可リストの追加・削除を扱う。
-// 複数行を一括で受け、不正な行が 1 つでもあれば何も保存せず入力を残す(仕様 10.1 節)。
-func (s *Server) uiDenyAdd(w http.ResponseWriter, r *http.Request)  { s.uiSourceAdd(w, r, false) }
-func (s *Server) uiDenyRm(w http.ResponseWriter, r *http.Request)   { s.uiSourceRm(w, r, false) }
-func (s *Server) uiAllowAdd(w http.ResponseWriter, r *http.Request) { s.uiSourceAdd(w, r, true) }
-func (s *Server) uiAllowRm(w http.ResponseWriter, r *http.Request)  { s.uiSourceRm(w, r, true) }
-
-func (s *Server) uiSourceAdd(w http.ResponseWriter, r *http.Request, allow bool) {
-	r.ParseForm()
-	locale := resolveLocale(w, r)
-	rule, ok := s.findRule(r.PathValue("id"))
-	if !ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	input := r.FormValue("cidrs")
-	ps, err := proto.ParseSourceLines(input)
-	if err != nil {
-		s.renderSourceError(w, locale, rule, allow, input, err)
-		return
-	}
-	updated := rule
-	if allow {
-		updated.SourceAllow = proto.AddSources(rule.SourceAllow, ps)
-	} else {
-		updated.SourceDeny = proto.AddSources(rule.SourceDeny, ps)
-	}
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}}); err != nil {
-		s.renderSourceError(w, locale, rule, allow, input, err)
-		return
-	}
-	http.Redirect(w, r, "/ui/rules/"+rule.ID, http.StatusSeeOther)
-}
-
-func (s *Server) uiSourceRm(w http.ResponseWriter, r *http.Request, allow bool) {
-	r.ParseForm()
-	rule, ok := s.findRule(r.PathValue("id"))
-	if !ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	p, err := proto.ParseSource(r.FormValue("cidr"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	updated := rule
-	if allow {
-		updated.SourceAllow = proto.RemoveSources(rule.SourceAllow, []netip.Prefix{p})
-	} else {
-		updated.SourceDeny = proto.RemoveSources(rule.SourceDeny, []netip.Prefix{p})
-	}
-	_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}})
-	s.redirectOrErrorTo(w, r, "/ui/rules/"+rule.ID, err)
-}
-
-func (s *Server) renderSourceError(w http.ResponseWriter, locale string, rule proto.Rule, allow bool, input string, err error) {
-	d := s.ruleDetailView(rule, locale)
-	if allow {
-		d.AllowError, d.AllowInput = err.Error(), input
-	} else {
-		d.DenyError, d.DenyInput = err.Error(), input
-	}
-	s.renderDetailPage(w, locale, d)
-}
-
-// uiSetRates はレート制限の 3 欄を 1 フォームで保存する。値が無く「制限しない」も外れている欄は
-// 誤りとして扱い、何も保存しない。
-func (s *Server) uiSetRates(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	locale := resolveLocale(w, r)
-	rule, ok := s.findRule(r.PathValue("id"))
-	if !ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	perSource, errPS := s.parseRateField(r, "per_source", T(locale, "ratePerSourceHead"), locale)
-	newFlow, errNF := s.parseRateField(r, "new_flow", T(locale, "rateNewFlowHead"), locale)
-	packet, errPkt := s.parseRateField(r, "packet", T(locale, "ratePacketHead"), locale)
-	if err := firstErr(errPS, errNF, errPkt); err != nil {
-		d := s.ruleDetailView(rule, locale)
-		d.RateError, d.Rates = err.Error(), s.rateFormFromRequest(r)
-		s.renderDetailPage(w, locale, d)
-		return
-	}
-	updated := rule
-	updated.PerSourceRate, updated.NewFlowRate, updated.PacketRate = perSource, newFlow, packet
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}}); err != nil {
-		d := s.ruleDetailView(rule, locale)
-		d.RateError, d.Rates = err.Error(), s.rateFormFromRequest(r)
-		s.renderDetailPage(w, locale, d)
-		return
-	}
-	http.Redirect(w, r, "/ui/rules/"+rule.ID, http.StatusSeeOther)
-}
-
-// uiRuleSplit は分割区画の送信(仕様 10.1 節)。head は元の ID のまま残るので、
-// 分割後も同じ /ui/rules/{id} に戻る(CLI の `rule split` と同じ組み立て:proto.Rule.Split)。
-func (s *Server) uiRuleSplit(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	locale := resolveLocale(w, r)
-	rule, ok := s.findRule(r.PathValue("id"))
-	if !ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	at, err := proto.ParsePortRange(r.FormValue("at"))
-	if err != nil || at.Lo != at.Hi {
-		err = fmt.Errorf("split point must be a single port")
-	}
-	var head, tail proto.Rule
-	if err == nil {
-		head, tail, err = rule.Split(at, "r_"+newULID())
-	}
-	if err == nil {
-		_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{head, tail}})
-	}
-	if err != nil {
-		d := s.ruleDetailView(rule, locale)
-		d.SplitError = err.Error()
-		s.renderDetailPage(w, locale, d)
-		return
-	}
-	http.Redirect(w, r, "/ui/rules/"+head.ID, http.StatusSeeOther)
-}
-
-// uiRuleMerge は統合区画の送信(仕様 10.1 節)。このルール(パスの ID)が self、
-// フォームの other が消える方(proto.Merge と同じ組み立て)。統合後はこのルールの ID の
-// ままなので、同じ /ui/rules/{id} に戻る。
-func (s *Server) uiRuleMerge(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	locale := resolveLocale(w, r)
-	rule, ok := s.findRule(r.PathValue("id"))
-	if !ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	other, ok := s.findRule(r.FormValue("other"))
-	if !ok {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	merged, err := proto.Merge(rule, other)
-	if err == nil {
-		_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{merged}, Delete: []string{other.ID}})
-	}
-	if err != nil {
-		d := s.ruleDetailView(rule, locale)
-		d.MergeError = err.Error()
-		s.renderDetailPage(w, locale, d)
-		return
-	}
-	http.Redirect(w, r, "/ui/rules/"+merged.ID, http.StatusSeeOther)
-}
-
-// parseRateField は 1 つのレート欄(<prefix>_count、<prefix>_unit、<prefix>_nolimit)を解釈する。
-// label はエラーメッセージに使う、その欄の訳済みの見出し。
-func (s *Server) parseRateField(r *http.Request, prefix, label, locale string) (*proto.Rate, error) {
-	if r.FormValue(prefix+"_nolimit") == "1" {
-		return nil, nil
-	}
-	count := strings.TrimSpace(r.FormValue(prefix + "_count"))
-	if count == "" {
-		return nil, fmt.Errorf("%s: %s", label, T(locale, "rateRequired"))
-	}
-	rate, err := proto.ParseRate(count + "/" + r.FormValue(prefix+"_unit"))
-	if err != nil {
-		return nil, err
-	}
-	return &rate, nil
-}
-
-func (s *Server) rateFormFromRequest(r *http.Request) rateFormView {
-	field := func(prefix string) rateFieldView {
-		return rateFieldView{Count: r.FormValue(prefix + "_count"), Unit: r.FormValue(prefix + "_unit"), NoLimit: r.FormValue(prefix+"_nolimit") == "1"}
-	}
-	return rateFormView{PerSource: field("per_source"), NewFlow: field("new_flow"), Packet: field("packet")}
-}
-
-func firstErr(errs ...error) error {
-	for _, e := range errs {
-		if e != nil {
-			return e
-		}
-	}
-	return nil
-}
-
-func (s *Server) uiAddAgentForm(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, r, "addAgentTitle", "addagent", map[string]any{})
-}
-
-func (s *Server) uiAddAgent(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	res, err := s.backend.JoinString(r.FormValue("name"))
-	if err != nil {
-		s.renderPage(w, r, "addAgentTitle", "addagent", map[string]any{"Error": err.Error()})
-		return
-	}
-	s.renderPage(w, r, "addAgentTitle", "addagent", map[string]any{"JoinString": res.JoinString, "ExpiresAt": res.ExpiresAt})
-}
-
-func (s *Server) uiCheck(w http.ResponseWriter, r *http.Request) {
-	locale := resolveLocale(w, r)
-	id := r.PathValue("id")
-	res, err := s.backend.CheckConnectivity(id)
-	data := map[string]any{"RuleLabel": id, "Agent": ""}
-	if err != nil {
-		data["OK"], data["ReachLabel"], data["Detail"] = false, T(locale, "checkFailed"), err.Error()
-	} else {
-		data["OK"], data["Detail"] = res.OK, res.Detail
-		data["ReachLabel"] = reachLabel(res.Reach, locale)
-	}
-	s.renderPage(w, r, "checkTitle", "checkresult", data)
-}
-
-func (s *Server) uiRuleEnable(w http.ResponseWriter, r *http.Request)  { s.setEnabled(w, r, true) }
-func (s *Server) uiRuleDisable(w http.ResponseWriter, r *http.Request) { s.setEnabled(w, r, false) }
-
-func (s *Server) setEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
-	id := r.PathValue("id")
-	rules, err := s.backend.Rules()
-	if err == nil {
-		for i := range rules {
-			if rules[i].ID == id {
-				rules[i].Enabled = enabled
-				_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rules[i]}})
-				break
-			}
-		}
-	}
-	s.redirectOrError(w, r, err)
-}
-
-func (s *Server) uiRuleDelete(w http.ResponseWriter, r *http.Request) {
-	_, err := s.backend.Batch(BatchRequest{Delete: []string{r.PathValue("id")}})
-	s.redirectOrError(w, r, err)
-}
-
-func (s *Server) uiRevoke(w http.ResponseWriter, r *http.Request) {
-	s.redirectOrError(w, r, s.backend.Revoke(r.PathValue("name")))
-}
-func (s *Server) uiDismissWarning(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	s.redirectOrError(w, r, s.backend.DismissWarning(r.PathValue("name"), r.FormValue("kind"), r.FormValue("detail")))
-}
-
-// ---- 補助 ----
+// ---- 補助(ページ描画・リダイレクト。他のページも使う) ----
 
 func (s *Server) agentsOrNil() []AgentInfo {
 	a, _ := s.backend.Agents()
@@ -1134,14 +534,4 @@ func agoStr(rfc3339, locale string) string {
 func staleHeartbeat(rfc3339 string) bool {
 	t, err := time.Parse(time.RFC3339, rfc3339)
 	return err == nil && time.Since(t) > 90*time.Second
-}
-
-func reachLabel(reach, locale string) string {
-	switch reach {
-	case "agent":
-		return T(locale, "reachAgent")
-	case "none":
-		return T(locale, "reachNone")
-	}
-	return T(locale, "reachOther")
 }

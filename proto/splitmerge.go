@@ -7,6 +7,19 @@ import (
 	"strings"
 )
 
+// ParseSplitPoint は分割位置の入力(CLI の引数、Web UI のフォーム値)を解釈する
+// (仕様 10.1、10.2 節。CLI の `rule split` と Web UI の分割区画が共有する)。
+// 解釈できないか、範囲でなく単一ポートでない入力は、どちらも同じ
+// "split point must be a single port" で誤りとする(Rule.Split 自身の範囲外検査とは別に、
+// 呼び出し側が Split を呼ぶ前に共通の形で弾む)。
+func ParseSplitPoint(s string) (PortRange, error) {
+	at, err := ParsePortRange(s)
+	if err != nil || at.Lo != at.Hi {
+		return PortRange{}, errors.New("split point must be a single port")
+	}
+	return at, nil
+}
+
 // Split は範囲の listen_port を持つルールを、ポート at の直前で 2 つに割る
 // (仕様 10.1、10.2 節。CLI の `rule split` と Web UI の分割区画が共有する)。
 // head は元の ID を保ち [Lo, at-1] を、tail は tailID を新たな ID として [at, Hi] を持つ。

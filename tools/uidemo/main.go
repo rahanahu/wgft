@@ -256,35 +256,13 @@ func newFakeBackend(mode string) *fakeBackend {
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.rules, nil }
 func (b *fakeBackend) Generation() (uint64, error)  { return 42, nil }
 
-// Batch applies upsert/delete to the in-memory sample rules the same way
-// internal/vpsd/admin_test.go's fakeBackend does, so the "Import" confirmation page
-// (tools/uidemo) can actually apply against the demo data. Generation stays
-// fixed at 42 (ServerInfo/AgentState below match), since the demo has no real
+// Batch applies upsert/delete to the in-memory sample rules via admin.ApplyBatchToRules,
+// the same helper internal/vpsd/admin_test.go's fakeBackend uses, so the "Import"
+// confirmation page (tools/uidemo) can actually apply against the demo data. Generation
+// stays fixed at 42 (ServerInfo/AgentState below match), since the demo has no real
 // generation tracking.
 func (b *fakeBackend) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
-	del := make(map[string]bool, len(req.Delete))
-	for _, id := range req.Delete {
-		del[id] = true
-	}
-	kept := make([]proto.Rule, 0, len(b.rules))
-	for _, r := range b.rules {
-		if !del[r.ID] {
-			kept = append(kept, r)
-		}
-	}
-	byID := make(map[string]int, len(kept))
-	for i, r := range kept {
-		byID[r.ID] = i
-	}
-	for _, u := range req.Upsert {
-		if i, ok := byID[u.ID]; ok {
-			kept[i] = u
-		} else {
-			byID[u.ID] = len(kept)
-			kept = append(kept, u)
-		}
-	}
-	b.rules = kept
+	b.rules = admin.ApplyBatchToRules(b.rules, req)
 	return &store.BatchResult{Rules: b.rules, Generation: 42, Changed: len(req.Upsert) > 0 || len(req.Delete) > 0}, nil
 }
 

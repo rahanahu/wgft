@@ -1,11 +1,9 @@
 package admin
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -150,7 +148,6 @@ func newStateTestServer(t *testing.T) *httptest.Server {
 	t.Cleanup(srv.Close)
 	return srv
 }
-
 func getBody(t *testing.T, url string) string {
 	t.Helper()
 	resp, err := http.Get(url)
@@ -283,53 +280,6 @@ func TestDashboardWarningsLayout(t *testing.T) {
 	}
 	if !strings.Contains(body, "1 warnings") {
 		t.Errorf("missing the header warning count: %s", body)
-	}
-}
-
-// TestMergeSection は統合区画のビュー組み立て(仕様 10.1 節)を確かめる。r_a に、
-// 統合できる隣接ルール(r_b)と統合できない隣接ルール(r_c、拒否リストが違う)の両方が
-// あるとき、候補には合う方だけが出て、理由は出ない(候補が 1 つでもあれば理由は出さない)。
-// r_e には隣接ルールが無く候補も理由も出ない。r_g には統合できない隣接ルール(r_f)しか
-// 無いので、候補は空で理由が出る。
-func TestMergeSection(t *testing.T) {
-	base := func(id string, lo, hi uint16, targetPort int) proto.Rule {
-		return proto.Rule{
-			ID: id, Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: lo, Hi: hi},
-			Target: fmt.Sprintf("192.168.1.20:%d", targetPort), VPSMode: proto.ModeKernel, Enabled: true,
-		}
-	}
-	rA := base("r_a", 2456, 2457, 2456)
-	rB := base("r_b", 2458, 2459, 2458) // r_a と揃っていて隣接:候補
-	rC := base("r_c", 2460, 2461, 2460)
-	rC.SourceDeny = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")} // r_b の上に隣接、拒否リストが違う
-	rE := base("r_e", 3000, 3000, 3000)                                     // 隣接ルールなし
-	rF := base("r_f", 3100, 3101, 3100)
-	rG := base("r_g", 3102, 3102, 3102)
-	rG.Enabled = false // r_f の上に隣接、enabled が違う(候補は無く理由だけ出る)
-	all := []proto.Rule{rA, rB, rC, rE, rF, rG}
-
-	cands, blocked := mergeSection(rA, all, "en")
-	if len(cands) != 1 || cands[0].ID != "r_b" {
-		t.Fatalf("r_a candidates = %+v, want just r_b", cands)
-	}
-	if blocked != nil {
-		t.Errorf("r_a: blocked = %+v, want nil (a candidate exists)", blocked)
-	}
-
-	cands, blocked = mergeSection(rE, all, "en")
-	if len(cands) != 0 || blocked != nil {
-		t.Errorf("r_e (no neighbors): candidates = %+v, blocked = %+v, want both empty", cands, blocked)
-	}
-
-	cands, blocked = mergeSection(rG, all, "en")
-	if len(cands) != 0 {
-		t.Errorf("r_g candidates = %+v, want none", cands)
-	}
-	if blocked == nil || blocked.ID != "r_f" || blocked.Reason != "enabled state differs" {
-		t.Fatalf("r_g blocked = %+v, want r_f with reason %q", blocked, "enabled state differs")
-	}
-	if got := mergeBlockerLabel(proto.BlockDenyList, "ja"); got != "拒否リストが違う" {
-		t.Errorf("mergeBlockerLabel(BlockDenyList, ja) = %q, want %q", got, "拒否リストが違う")
 	}
 }
 

@@ -118,6 +118,38 @@ type BatchRequest struct {
 	Force  bool         `json:"force"`  // bind 中のポートとの衝突を無視する
 }
 
+// ApplyBatchToRules は req の upsert/delete を rules に ID で当てはめた結果を返す
+// (ID があれば置き換え、なければ追加。delete は最後に外す)。本物の Backend
+// (internal/vpsd の Daemon.Batch)はエージェントの登録確認や nftables への反映も
+// 行うが、ここにはそれが無い。fake や demo の Backend 実装(admin_test.go の
+// fakeBackend、tools/uidemo のもの)が、CLI/Web UI から見た見た目だけを本物に
+// 合わせるために共有する、副作用の無い組み立てである。
+func ApplyBatchToRules(rules []proto.Rule, req BatchRequest) []proto.Rule {
+	del := make(map[string]bool, len(req.Delete))
+	for _, id := range req.Delete {
+		del[id] = true
+	}
+	kept := make([]proto.Rule, 0, len(rules))
+	for _, r := range rules {
+		if !del[r.ID] {
+			kept = append(kept, r)
+		}
+	}
+	byID := make(map[string]int, len(kept))
+	for i, r := range kept {
+		byID[r.ID] = i
+	}
+	for _, u := range req.Upsert {
+		if i, ok := byID[u.ID]; ok {
+			kept[i] = u
+		} else {
+			byID[u.ID] = len(kept)
+			kept = append(kept, u)
+		}
+	}
+	return kept
+}
+
 // BatchResponse はバッチの結果。
 type BatchResponse struct {
 	Generation uint64            `json:"generation"`

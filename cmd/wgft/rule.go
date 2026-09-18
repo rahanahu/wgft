@@ -253,9 +253,9 @@ func newRuleSplitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			at, err := proto.ParsePortRange(args[1])
-			if err != nil || at.Lo != at.Hi {
-				return fmt.Errorf("split point must be a single port")
+			at, err := proto.ParseSplitPoint(args[1])
+			if err != nil {
+				return err
 			}
 			head, tail, err := r.Split(at, newRuleID())
 			if err != nil {
