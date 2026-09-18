@@ -75,7 +75,7 @@ optional and normally left unset, since the join string is already bound to a na
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := loadConfig(cmd, agentSpecs(), resolveConfigPath(cmd, agentConfigPath))
 			if err != nil {
-				return err
+				return withUnreadableHint(err, agentUnreadableHint)
 			}
 			if err := os.MkdirAll(c.str("WGFT_DATA_DIR"), 0o700); err != nil {
 				return fmt.Errorf("data dir: %w", err)
@@ -279,4 +279,10 @@ optional and normally left unset, since the join string is already bound to a na
 
 	cmd.AddCommand(run, pubkey, rotate, joinString, ls, revoke, warnings, dismiss)
 	return cmd
+}
+
+// agentUnreadableHint は、agent が設定ファイルを読めないときの直し方。agent の設定は WGFT_JOIN を含みうるので、
+// 全員に読ませる権限は勧めず、agent の利用者のグループにだけ読ませる(仕様 11a 節)。
+func agentUnreadableHint(path string) string {
+	return fmt.Sprintf("It may hold WGFT_JOIN, so let only the agent's group read it; with the provided agent.service: chown root:wgft %s && chmod 0640 %s", path, path)
 }

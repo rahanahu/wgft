@@ -12,8 +12,8 @@ import (
 	"github.com/rahanahu/wgft/internal/buildinfo"
 )
 
-// exitConfigRefusal は、他人の wg インタフェースやポート・アドレスの衝突で
-// 起動を中止したときの終了コード。systemd の RestartPreventExitStatus に入れて、
+// exitConfigRefusal は、設定が原因で起動を中止したときの終了コード。他人の wg インタフェースやポート・
+// アドレスの衝突、モードやアドレス帯の照合による拒否、読めない設定ファイル、構文や値の誤りが当たる(仕様 11a 節)。systemd の RestartPreventExitStatus に入れて、
 // 設定ミスで再起動ループにならないようにする。
 const exitConfigRefusal = 3
 
@@ -53,11 +53,16 @@ func newVersionCmd() *cobra.Command {
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
-		if isStartupRefusal(err) {
-			os.Exit(exitConfigRefusal)
-		}
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+// exitCode は Execute の失敗を終了コードに振り分ける。設定起因で再起動しても直らないものは 3。
+func exitCode(err error) int {
+	if isStartupRefusal(err) || isConfigError(err) {
+		return exitConfigRefusal
+	}
+	return 1
 }
 
 // effectiveVersion は -X で埋めた buildinfo.Version を返す。埋められていない(`go install ...@v0.1.0` で

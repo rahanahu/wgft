@@ -19,6 +19,7 @@ const (
 )
 
 // reconcileModeAndAddress は、モードとアドレス帯を SQLite に記録し、以後は起動のたびに照合する。
+// 設定が原因の拒否は wg.StartupRefusal で返し、終了コード 3 に写させる(仕様 11a 節)。SQLite の誤りはそのまま返す。
 // hadServerKey は「この起動より前に SQLite が使われていたか」(サーバ鍵の有無で判断)。
 func reconcileModeAndAddress(st *store.Store, opts Options, hadServerKey bool) error {
 	// --- モード ---
@@ -32,11 +33,11 @@ func reconcileModeAndAddress(st *store.Store, opts Options, hadServerKey bool) e
 				mode = modeKernel
 				log.Printf("existing state file with no recorded mode; recording it as kernel")
 			} else {
-				return fmt.Errorf("set WGFT_MODE (--mode) to kernel or userspace")
+				return &wg.StartupRefusal{Reason: "set WGFT_MODE (--mode) to kernel or userspace"}
 			}
 		}
 		if mode != modeKernel && mode != modeUserspace {
-			return fmt.Errorf("WGFT_MODE must be kernel or userspace (%q)", mode)
+			return &wg.StartupRefusal{Reason: fmt.Sprintf("WGFT_MODE must be kernel or userspace (%q)", mode)}
 		}
 		if err := checkModeSupported(mode); err != nil {
 			return err
@@ -58,7 +59,7 @@ func reconcileModeAndAddress(st *store.Store, opts Options, hadServerKey bool) e
 			residue, known := wgResidue(opts.WGInterface)
 			allow, reason := modeGate(have, want, residue, known)
 			if !allow {
-				return fmt.Errorf("changing mode from %s to %s: %s", have, want, reason)
+				return &wg.StartupRefusal{Reason: fmt.Sprintf("changing mode from %s to %s: %s", have, want, reason)}
 			}
 			log.Printf("changing mode from %s to %s (%s)", have, want, reason)
 			if err := st.SetMeta(modeMeta, []byte(want)); err != nil {
@@ -81,7 +82,7 @@ func reconcileModeAndAddress(st *store.Store, opts Options, hadServerKey bool) e
 		return fmt.Errorf("checking address range: %w", err)
 	default:
 		if string(addr) != opts.WGAddress {
-			return fmt.Errorf("wg address range differs from the recorded one (%s vs %s); changing it needs teardown --purge and re-registration", addr, opts.WGAddress)
+			return &wg.StartupRefusal{Reason: fmt.Sprintf("wg address range differs from the recorded one (%s vs %s); changing it needs teardown --purge and re-registration", addr, opts.WGAddress)}
 		}
 	}
 	return nil
@@ -93,7 +94,7 @@ func checkModeSupported(mode string) error {
 	case modeKernel, modeUserspace:
 		return nil
 	}
-	return fmt.Errorf("unknown mode %q", mode)
+	return &wg.StartupRefusal{Reason: fmt.Sprintf("unknown mode %q", mode)}
 }
 
 // modeGate は、記録済み stored と要求 want が食い違うときの関門(3.3 節)。
