@@ -90,7 +90,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now wgft
 ```
 
-The service runs as an unprivileged user, so `/etc/wgft/server.env` must stay readable (mode 0644). When replacing an older unit that ran as root, run `sudo chmod 0644 /etc/wgft/server.env` before the restart if the file is mode 0600. The data directory and the server key carry over.
+`/etc/wgft/server.env` is intentionally mode 0644 because it contains no secrets and the provided service runs as an unprivileged dynamic user. If you installed wgft using an older setup guide, the file may still be mode 0600. Run `sudo chmod 0644 /etc/wgft/server.env` before starting or restarting the service. This also applies when migrating from an older root-running unit.
 
 For an interactive test instead:
 

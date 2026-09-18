@@ -90,7 +90,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now wgft
 ```
 
-この unit は非特権の利用者で動くので、`/etc/wgft/server.env` はその利用者が読める 0644 のままにします。root で動く旧い unit から差し替える場合、ファイルが 0600 なら、再起動の前に `sudo chmod 0644 /etc/wgft/server.env` を実行します。データの置き場とサーバ鍵は引き継がれます。
+`/etc/wgft/server.env` は秘密情報を含まず、付属の service は非特権の動的ユーザーで動作するため、意図的に 0644 にします。旧版のセットアップ手順でインストールした環境では 0600 のままになっている場合があるため、service の起動・再起動前に `sudo chmod 0644 /etc/wgft/server.env` を実行してください。root で動作する旧 unit から移行する場合も同様です。
 
 手動で試す場合:
 
