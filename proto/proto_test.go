@@ -376,3 +376,21 @@ func TestTargetDisplay(t *testing.T) {
 		}
 	}
 }
+
+// TestUnchangedIDs は、同じ ID・同じ内容の行だけが「変わっていない」と判定され、
+// 空の接続元リストの nil と空スライスの違いは変更とみなさないことを確かめる。
+func TestUnchangedIDs(t *testing.T) {
+	base := Rule{ID: "r_1", Agent: "home", Proto: TCP, ListenPort: PortRange{443, 443}, Target: "192.168.1.30:443", VPSMode: ModeKernel, Enabled: true}
+	emptyLists := base
+	emptyLists.SourceAllow, emptyLists.SourceDeny = []netip.Prefix{}, []netip.Prefix{}
+	noted := base
+	noted.ID, noted.Note = "r_2", "changed"
+	before := []Rule{base, {ID: "r_2", Agent: "home", Proto: TCP, ListenPort: PortRange{444, 444}, Target: "192.168.1.30:444", VPSMode: ModeKernel, Enabled: true}}
+	got := UnchangedIDs([]Rule{emptyLists, noted}, before)
+	if !got["r_1"] {
+		t.Error("r_1 differs from before only in nil versus empty lists, but is not reported unchanged")
+	}
+	if got["r_2"] {
+		t.Error("r_2 has a different note and port, but is reported unchanged")
+	}
+}

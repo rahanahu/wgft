@@ -141,17 +141,36 @@ func ValidateRules(rules []Rule, reserved Reserved) error {
 // 全体に対して行う(これらは以前から常に全体を検査していたため、検査対象から外しても保存された
 // データが既に満たしている)。
 func ValidateUpsert(rules, before []Rule, reserved Reserved) error {
+	return validateRuleSet(rules, reserved, UnchangedIDs(rules, before))
+}
+
+// UnchangedIDs は rules のうち、before に同じ ID で同じ内容の行がある ID の集合を返す。
+// ValidateUpsert と、Web UI の読み込みの確認ページ(仕様 10.1 節)が、どの行に
+// Rule.Validate() を掛け直すかを同じ規則で決めるために使う。空の接続元リストは nil と
+// 空スライスを同じとみなす(経路によって表現が揺れるため。RulesDigest と同じ扱い)。
+func UnchangedIDs(rules, before []Rule) map[string]bool {
 	beforeByID := make(map[string]Rule, len(before))
 	for _, b := range before {
-		beforeByID[b.ID] = b
+		beforeByID[b.ID] = normalizeSources(b)
 	}
 	unchanged := make(map[string]bool, len(rules))
 	for _, r := range rules {
-		if b, ok := beforeByID[r.ID]; ok && reflect.DeepEqual(r, b) {
+		if b, ok := beforeByID[r.ID]; ok && reflect.DeepEqual(normalizeSources(r), b) {
 			unchanged[r.ID] = true
 		}
 	}
-	return validateRuleSet(rules, reserved, unchanged)
+	return unchanged
+}
+
+// normalizeSources は空の接続元リストを nil にそろえた写しを返す。
+func normalizeSources(r Rule) Rule {
+	if len(r.SourceAllow) == 0 {
+		r.SourceAllow = nil
+	}
+	if len(r.SourceDeny) == 0 {
+		r.SourceDeny = nil
+	}
+	return r
 }
 
 func validateRuleSet(rules []Rule, reserved Reserved, skipValidate map[string]bool) error {

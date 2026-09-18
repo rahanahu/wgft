@@ -470,3 +470,31 @@ func TestImportApplyRejectsOversizedContent(t *testing.T) {
 		t.Errorf("status = %d, want %d (import content exceeds the 1 MiB limit): %s", resp.StatusCode, http.StatusRequestEntityTooLarge, respBody)
 	}
 }
+
+// TestImportIssuesGrandfathersUnchangedLegacyRow は、後から増えた検査(proxy の範囲の拒否)に
+// 落ちる古い行があっても、その行を変えない読み込みは確認画面で止めず、その行を変える
+// 読み込みだけを止めることを確かめる。適用時のバッチ(proto.ValidateUpsert)と同じ規則である。
+func TestImportIssuesGrandfathersUnchangedLegacyRow(t *testing.T) {
+	legacy := proto.Rule{ID: "r_legacy", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 443, Hi: 444},
+		Target: "192.168.1.30:443", VPSMode: proto.ModeProxy, Enabled: true}
+	other := proto.Rule{ID: "r_other", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 2456, Hi: 2456},
+		Target: "192.168.1.20:2456", VPSMode: proto.ModeKernel, Enabled: true}
+	if legacy.Validate() == nil {
+		t.Fatal("test premise: a proxy range must fail Rule.Validate")
+	}
+	current := []proto.Rule{legacy, other}
+	agents := map[string]bool{"home": true}
+
+	otherNoted := other
+	otherNoted.Note = "only the note changes"
+	if got := importIssues([]proto.Rule{legacy, otherNoted}, current, agents); len(got) != 0 {
+		t.Errorf("import that leaves the legacy row alone is withheld: %v", got)
+	}
+
+	legacyNoted := legacy
+	legacyNoted.Note = "touching the legacy row"
+	got := importIssues([]proto.Rule{legacyNoted, other}, current, agents)
+	if len(got) != 1 || !strings.Contains(got[0], "r_legacy") {
+		t.Errorf("import that changes the legacy row should report it once, got %v", got)
+	}
+}

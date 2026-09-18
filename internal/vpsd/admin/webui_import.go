@@ -132,7 +132,7 @@ func (s *Server) renderImportConfirm(w http.ResponseWriter, locale, filename str
 	data := importConfirmData{
 		Locale: locale, FileName: filename, Force: force,
 		Content: string(content), Generation: strconv.FormatUint(gen, 10), Digest: proto.RulesDigest(current),
-		Issues: importIssues(desired, agentNames),
+		Issues: importIssues(desired, current, agentNames),
 	}
 	for _, c := range proto.DiffRules(current, desired) {
 		switch c.Kind {
@@ -156,19 +156,29 @@ func (s *Server) renderImportConfirm(w http.ResponseWriter, locale, filename str
 
 // importIssues は、適用ボタンを出さない条件(仕様 10.1 節)を集める。未登録の
 // エージェントを指すルールと、Rule.Validate / 全体の重複・重なりに落ちるルールである。
-func importIssues(desired []proto.Rule, agents map[string]bool) []string {
+// Rule.Validate は、適用時のバッチ(proto.ValidateUpsert)と同じく、current から変わって
+// いない行には掛けない。後から増えた検査に落ちる古い行(例:proxy の範囲)があっても、
+// その行を変えない読み込みは CLI と同じく適用できる。
+func importIssues(desired, current []proto.Rule, agents map[string]bool) []string {
 	var out []string
+	unchanged := proto.UnchangedIDs(desired, current)
 	for _, r := range desired {
-		if err := r.Validate(); err != nil {
-			out = append(out, fmt.Sprintf("rule %s: %v", r.ID, err))
-			continue
+		if !unchanged[r.ID] {
+			if err := r.Validate(); err != nil {
+				out = append(out, fmt.Sprintf("rule %s: %v", r.ID, err))
+				continue
+			}
 		}
 		if !agents[r.Agent] {
 			out = append(out, fmt.Sprintf("rule %s: agent %q is not registered", r.ID, r.Agent))
 		}
 	}
-	if err := proto.ValidateRules(desired, nil); err != nil {
-		out = append(out, err.Error())
+	// 行ごとの誤りが無いときだけ全体の検査(ID の重複、重なり)を足す。行ごとの誤りを
+	// 全体の検査がもう一度報告して、同じ行が 2 回出るのを避ける
+	if len(out) == 0 {
+		if err := proto.ValidateUpsert(desired, current, nil); err != nil {
+			out = append(out, err.Error())
+		}
 	}
 	return out
 }

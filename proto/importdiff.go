@@ -92,14 +92,9 @@ func DeletedIDs(diff []RuleChange) []string {
 // に分かれるが意味は同じで、経路(ストアの複製、API の JSON の往復)によって表現が
 // 揺れると、変更が無いのに食い違いと判定してしまうため。
 func RulesDigest(rules []Rule) string {
-	sorted := append([]Rule(nil), rules...)
-	for i := range sorted {
-		if len(sorted[i].SourceAllow) == 0 {
-			sorted[i].SourceAllow = nil
-		}
-		if len(sorted[i].SourceDeny) == 0 {
-			sorted[i].SourceDeny = nil
-		}
+	sorted := make([]Rule, len(rules))
+	for i, r := range rules {
+		sorted[i] = normalizeSources(r)
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	b, err := json.Marshal(sorted)
