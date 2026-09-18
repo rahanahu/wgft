@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"reflect"
 	"strconv"
 	"unicode/utf8"
 )
@@ -92,6 +93,11 @@ func (r *Rule) Validate() error {
 		if r.Proto != TCP {
 			return errors.New("vps_mode=proxy can only be used with tcp")
 		}
+		// proxy は単一ポート運用(proxyrelay.FromRules、userspace モードでも同じ経路。仕様
+		// 6.2、6.3 節)。範囲を許すと先頭ポート以外が中継されないまま黙って失われるため拒否する
+		if r.ListenPort.IsRange() {
+			return fmt.Errorf("vps_mode=proxy cannot span a port range (listen_port %s); use a single port", r.ListenPort)
+		}
 	default:
 		return fmt.Errorf("vps_mode %q is neither kernel nor proxy", r.VPSMode)
 	}
@@ -122,11 +128,40 @@ type Reserved map[uint16]string
 // listen_port の重複はプロトコルごとに、有効無効を問わず見る(無効なルールを有効に戻したときに衝突させないため)。
 // 予約ポートはプロトコルを問わず拒否する。
 func ValidateRules(rules []Rule, reserved Reserved) error {
+	return validateRuleSet(rules, reserved, nil)
+}
+
+// ValidateUpsert は ValidateRules と同じだが、before と ID・内容がまったく同じ行には
+// Rule.Validate() を掛け直さない(5.4 節)。store.ApplyBatch はバッチのたびに rules 全体を
+// この関数で検査するため、Rule.Validate() に検査を後から増やすと、増やす前から保存されていた
+// 触っていない行のせいで、以後の無関係なバッチまで失敗しかねない(例:proxy の範囲を拒否する
+// 検査を追加した後、それ以前に作られた proxy の範囲ルールが 1 件あるだけで、他のルールの
+// 有効無効を切り替えるだけのバッチも失敗する)。before に無い(新規)行や、値が変わった行は
+// 通常どおり検査する。ID の重複・予約ポート・listen_port の重なりは before の有無に関わらず
+// 全体に対して行う(これらは以前から常に全体を検査していたため、検査対象から外しても保存された
+// データが既に満たしている)。
+func ValidateUpsert(rules, before []Rule, reserved Reserved) error {
+	beforeByID := make(map[string]Rule, len(before))
+	for _, b := range before {
+		beforeByID[b.ID] = b
+	}
+	unchanged := make(map[string]bool, len(rules))
+	for _, r := range rules {
+		if b, ok := beforeByID[r.ID]; ok && reflect.DeepEqual(r, b) {
+			unchanged[r.ID] = true
+		}
+	}
+	return validateRuleSet(rules, reserved, unchanged)
+}
+
+func validateRuleSet(rules []Rule, reserved Reserved, skipValidate map[string]bool) error {
 	ids := make(map[string]bool, len(rules))
 	for i := range rules {
 		r := &rules[i]
-		if err := r.Validate(); err != nil {
-			return fmt.Errorf("rule %s: %w", r.ID, err)
+		if !skipValidate[r.ID] {
+			if err := r.Validate(); err != nil {
+				return fmt.Errorf("rule %s: %w", r.ID, err)
+			}
 		}
 		if ids[r.ID] {
 			return fmt.Errorf("rule ID %s is duplicated", r.ID)

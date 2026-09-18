@@ -73,6 +73,7 @@ var mergeBlockerKeys = map[proto.MergeBlocker]string{
 	proto.BlockMode:          "mbMode",
 	proto.BlockNotAdjacent:   "mbNotAdjacent",
 	proto.BlockTargetGap:     "mbTargetGap",
+	proto.BlockProxyRange:    "mbProxyRange",
 	proto.BlockProxyProtocol: "mbProxyProtocol",
 	proto.BlockDenyList:      "mbDenyList",
 	proto.BlockAllowList:     "mbAllowList",

@@ -209,6 +209,7 @@ var tr = map[string][2]string{
 	"mbMode":          {"方式が違う", "mode differs"},
 	"mbNotAdjacent":   {"隣接していない", "not adjacent"},
 	"mbTargetGap":     {"実効宛先が連続していない", "targets are not contiguous"},
+	"mbProxyRange":    {"プロキシは範囲に統合できない", "proxy mode is single-port only"},
 	"mbProxyProtocol": {"PROXY protocol の有無が違う", "PROXY protocol differs"},
 	"mbDenyList":      {"拒否リストが違う", "deny list differs"},
 	"mbAllowList":     {"許可リストが違う", "allow list differs"},

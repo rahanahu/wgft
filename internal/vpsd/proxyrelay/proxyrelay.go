@@ -97,7 +97,9 @@ func FromRules(rules []proto.Rule, agentAddr map[string]netip.Addr) []Rule {
 		if !ok {
 			continue
 		}
-		// proxy は単一ポート運用(範囲は listen_port の先頭を使う)
+		// proxy は単一ポート運用。proto.Rule.Validate は新規・変更のルールで範囲を拒否するが、
+		// それ以前に保存された範囲のルールは proto.ValidateUpsert が検査対象から外すのでここを
+		// 通り得る。安全側として先頭ポートだけを使う(仕様 5.4、6.2 節)
 		out = append(out, Rule{
 			ID: r.ID, ListenPort: r.ListenPort.Lo, AgentAddr: addr, AgentPort: r.ListenPort.Lo,
 			ProxyProtocol: r.ProxyProtocol, SourceDeny: r.SourceDeny, SourceAllow: r.SourceAllow, Agent: r.Agent,

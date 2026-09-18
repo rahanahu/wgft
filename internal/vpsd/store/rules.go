@@ -88,7 +88,10 @@ func (s *Store) ApplyBatch(reserved proto.Reserved, mutate func(rules []proto.Ru
 	if err != nil {
 		return nil, err
 	}
-	if err := proto.ValidateRules(after, reserved); err != nil {
+	// before と ID・内容が同じ行は Rule.Validate() を掛け直さない(proto.ValidateUpsert)。
+	// Rule.Validate() に検査を後から増やしても、既に保存されていた触っていない行を検査対象から
+	// 外すことで、無関係なバッチまで失敗させない(仕様 5.4 節、改訂の記録参照)
+	if err := proto.ValidateUpsert(after, before, reserved); err != nil {
 		return nil, err
 	}
 	gen, err := generationTx(tx)

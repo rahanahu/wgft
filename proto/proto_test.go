@@ -123,6 +123,11 @@ func TestRuleValidate(t *testing.T) {
 		{"実効宛先が溢れる", func(r *Rule) { r.ListenPort = PortRange{1, 2}; r.Target = "h:65535" }, "exceeds 65535"},
 		{"vps_mode が不正", func(r *Rule) { r.VPSMode = "nat" }, "vps_mode"},
 		{"proxy で udp", func(r *Rule) { r.VPSMode = ModeProxy }, "can only be used with tcp"},
+		{"proxy が範囲", func(r *Rule) {
+			r.Proto = TCP
+			r.ListenPort = PortRange{443, 444}
+			r.VPSMode = ModeProxy
+		}, "cannot span a port range"},
 		{"proxy_protocol を kernel で", func(r *Rule) { r.ProxyProtocol = true }, "proxy_protocol"},
 		{"source_deny が IPv6", func(r *Rule) { r.SourceDeny = []netip.Prefix{netip.MustParsePrefix("2001:db8::/32")} }, "IPv4"},
 		{"source_allow が無効", func(r *Rule) { r.SourceAllow = []netip.Prefix{{}} }, "IPv4"},
@@ -184,6 +189,43 @@ func TestValidateRules(t *testing.T) {
 				t.Fatalf("ValidateRules() = %v, want error containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestValidateUpsertGrandfathersUnchanged は、ValidateUpsert が before と ID・内容の
+// 変わらない行に Rule.Validate() を掛け直さないことを確かめる(5.4 節)。proxy の範囲を
+// 拒否する検査を Rule.Validate() に追加した後も、それ以前に保存された proxy の範囲ルールが
+// 1 件あるだけで、他のルールしか触っていないバッチまで失敗させないための仕組みである。
+func TestValidateUpsertGrandfathersUnchanged(t *testing.T) {
+	legacy := validRule()
+	legacy.ID, legacy.Proto, legacy.ListenPort, legacy.VPSMode = "legacy", TCP, PortRange{443, 444}, ModeProxy
+	other := validRule()
+	other.ID, other.Proto, other.ListenPort = "other", UDP, PortRange{2456, 2457}
+
+	// legacy 単体では Validate に落ちる(前提の確認)
+	if err := legacy.Validate(); err == nil {
+		t.Fatal("legacy proxy range rule unexpectedly passed Validate(); fix the test fixture")
+	}
+
+	// legacy をそのままに、無関係な other だけを変えるバッチは通る
+	before := []Rule{legacy, other}
+	changedOther := other
+	changedOther.Enabled = false
+	after := []Rule{legacy, changedOther}
+	if err := ValidateUpsert(after, before, nil); err != nil {
+		t.Errorf("an unrelated batch must not fail because of an untouched legacy row: %v", err)
+	}
+
+	// ValidateRules(全体検査)なら同じ集合が落ちることも確認しておく(対比用)
+	if err := ValidateRules(after, nil); err == nil {
+		t.Error("ValidateRules() should still reject the legacy row when checking the whole set")
+	}
+
+	// legacy 自身を変えるバッチは、変えた後の内容が Validate に落ちるので拒む
+	changedLegacy := legacy
+	changedLegacy.Note = "touched"
+	if err := ValidateUpsert([]Rule{changedLegacy, other}, before, nil); err == nil {
+		t.Error("touching the legacy row must re-run Validate() and fail")
 	}
 }
 

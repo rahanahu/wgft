@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -146,6 +147,51 @@ func TestApplyBatchPreservesEmptyVsNilSourceLists(t *testing.T) {
 	}
 	if after[0].SourceAllow == nil || after[0].SourceDeny == nil {
 		t.Errorf("an unrelated batch turned the empty source lists into nil: %+v", after[0])
+	}
+}
+
+// TestApplyBatchGrandfathersUntouchedLegacyRow は、proto.Rule.Validate() に検査を後から
+// 追加しても(ここでは proxy の範囲を拒否する検査)、それ以前に保存された、検査に落ちる行を
+// 触っていないバッチまで失敗させないことを確かめる(仕様 5.4 節、proto.ValidateUpsert)。
+// 直接 SQL を書いて legacy な行を作るのは、この検査を追加した後の ApplyBatch では同じ行を
+// 通常の経路で作れないため(意図どおり拒否される)。
+func TestApplyBatchGrandfathersUntouchedLegacyRow(t *testing.T) {
+	s := openTemp(t)
+	legacy := proto.Rule{
+		ID: "legacy", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 443, Hi: 444},
+		Target: "192.168.1.20:443", VPSMode: proto.ModeProxy, Enabled: true,
+	}
+	if err := legacy.Validate(); err == nil {
+		t.Fatal("fixture must be invalid under the current Rule.Validate(); update the test")
+	}
+	js, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO rules (id, position, json) VALUES (?, 0, ?)", legacy.ID, string(js)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 無関係なルールを足すだけのバッチは、legacy に触れないので通る
+	if _, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		return append(r, rule("a", proto.UDP, 2456, 2457, "h:2456")), nil
+	}); err != nil {
+		t.Fatalf("an unrelated batch must not fail because of an untouched legacy row: %v", err)
+	}
+	if rules, _ := s.Rules(); len(rules) != 2 {
+		t.Fatalf("legacy row must survive untouched: %+v", rules)
+	}
+
+	// legacy 自身を変えるバッチは、変えた後の内容が Validate() に落ちるので拒む
+	if _, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		for i := range r {
+			if r[i].ID == "legacy" {
+				r[i].Note = "touched"
+			}
+		}
+		return r, nil
+	}); err == nil {
+		t.Error("touching the legacy row must re-run Validate() and fail")
 	}
 }
 

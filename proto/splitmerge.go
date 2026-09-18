@@ -25,6 +25,11 @@ func ParseSplitPoint(s string) (PortRange, error) {
 // head は元の ID を保ち [Lo, at-1] を、tail は tailID を新たな ID として [at, Hi] を持つ。
 // どちらの実効宛先も元のままなので(仕様 5.4、7 節)、通信中のセッションは切れない。
 // at は単一ポートで、範囲の先頭を除く内側でなければならない。
+// vps_mode=proxy のルールは単一ポート運用(Rule.Validate)なので、head・tail の両方が
+// 単一ポートに収まる分割だけを受け付ける(2 ポートの範囲を境界で割る場合だけ両方が単一
+// ポートになる)。3 ポート以上の proxy の範囲は、この関数を後から検査を増やす前に作られた
+// 既存データとしてしか存在しえず、単発の分割では単一ポートまで割り切れないので拒否する。
+// 直す手段は削除して単一ポートずつ作り直すことになる(改訂の記録参照)。
 func (r Rule) Split(at PortRange, tailID string) (head, tail Rule, err error) {
 	if at.Lo != at.Hi {
 		return Rule{}, Rule{}, errors.New("split point must be a single port")
@@ -37,6 +42,9 @@ func (r Rule) Split(at PortRange, tailID string) (head, tail Rule, err error) {
 	tail = r
 	tail.ID = tailID
 	tail.ListenPort = PortRange{Lo: at.Lo, Hi: r.ListenPort.Hi}
+	if r.VPSMode == ModeProxy && (head.ListenPort.IsRange() || tail.ListenPort.IsRange()) {
+		return Rule{}, Rule{}, fmt.Errorf("split point %d would leave a vps_mode=proxy piece spanning a port range; delete and recreate the pieces as single ports instead", at.Lo)
+	}
 	// 後半の target は、元の target のポートに範囲内での位置を足したもの(実効宛先を変えない)
 	eff, _ := r.ForAgent().EffectiveTarget(at.Lo)
 	tail.Target = eff
@@ -50,12 +58,20 @@ type MergeBlocker string
 
 const (
 	// BlockNone は理由が無い、つまり統合できることを表す。
-	BlockNone          MergeBlocker = ""
-	BlockAgent         MergeBlocker = "agent"
-	BlockProto         MergeBlocker = "proto"
-	BlockMode          MergeBlocker = "mode"
-	BlockNotAdjacent   MergeBlocker = "not_adjacent"
-	BlockTargetGap     MergeBlocker = "target_gap"
+	BlockNone        MergeBlocker = ""
+	BlockAgent       MergeBlocker = "agent"
+	BlockProto       MergeBlocker = "proto"
+	BlockMode        MergeBlocker = "mode"
+	BlockNotAdjacent MergeBlocker = "not_adjacent"
+	BlockTargetGap   MergeBlocker = "target_gap"
+	// BlockProxyRange は vps_mode=proxy の 2 つの統合を表す。統合は listen_port を必ず
+	// 2 ポート以上の範囲に広げるため、proxy は単一ポート運用(Rule.Validate)の下では
+	// 組み合わせを問わず常に統合できない(仕様 5.4、6.2 節)
+	BlockProxyRange MergeBlocker = "proxy_range"
+	// BlockProxyProtocol は Web UI が候補を絞るための追加検査(下記コメント)だが、
+	// proxy_protocol は vps_mode=proxy でしか立てられない(Rule.Validate)ため、
+	// 到達する組み合わせは BlockProxyRange より先に必ずそちらで止まる。ここでは、
+	// 将来 proxy の範囲を許すようになった場合に備えて残す
 	BlockProxyProtocol MergeBlocker = "proxy_protocol"
 	BlockDenyList      MergeBlocker = "deny_list"
 	BlockAllowList     MergeBlocker = "allow_list"
@@ -87,6 +103,10 @@ func FindMergeBlocker(a, b Rule) MergeBlocker {
 	if eff, ok := lo.ForAgent().EffectiveTarget(lo.ListenPort.Hi); !ok || eff == "" || nextPort(eff) != hi.Target {
 		return BlockTargetGap
 	}
+	// mode は既に揃っている(上の switch)ので lo だけ見ればよい
+	if lo.VPSMode == ModeProxy {
+		return BlockProxyRange
+	}
 	switch {
 	case lo.ProxyProtocol != hi.ProxyProtocol:
 		return BlockProxyProtocol
@@ -116,6 +136,8 @@ func (b MergeBlocker) errText() string {
 		return "listen ranges are not adjacent"
 	case BlockTargetGap:
 		return "effective targets are not contiguous"
+	case BlockProxyRange:
+		return "vps_mode=proxy rules cannot be merged into a port range"
 	case BlockProxyProtocol:
 		return "proxy_protocol differs"
 	case BlockDenyList:

@@ -34,6 +34,34 @@ func TestRuleSplit(t *testing.T) {
 	}
 }
 
+// TestRuleSplitProxyRange は、vps_mode=proxy のルールの分割が、両側とも単一ポートになる
+// 場合(2 ポートの範囲を境界で割る)だけ受け付け、片側でも範囲が残る分割(3 ポート以上の
+// 範囲。単一ポート運用にする前から保存されていた既存データとしてしか存在しえない)は
+// 拒否することを確かめる(5.4 節)。
+func TestRuleSplitProxyRange(t *testing.T) {
+	twoWide := validRule()
+	twoWide.Proto, twoWide.VPSMode = TCP, ModeProxy
+	twoWide.ListenPort, twoWide.Target = PortRange{443, 444}, "192.168.1.20:443"
+
+	head, tail, err := twoWide.Split(PortRange{444, 444}, "r_tail")
+	if err != nil {
+		t.Fatalf("splitting a 2-wide proxy range at its only valid point must succeed: %v", err)
+	}
+	if head.ListenPort.IsRange() || tail.ListenPort.IsRange() {
+		t.Errorf("both pieces must be single ports: head=%v tail=%v", head.ListenPort, tail.ListenPort)
+	}
+
+	threeWide := validRule()
+	threeWide.Proto, threeWide.VPSMode = TCP, ModeProxy
+	threeWide.ListenPort, threeWide.Target = PortRange{443, 445}, "192.168.1.20:443"
+
+	for _, at := range []PortRange{{444, 444}, {445, 445}} {
+		if _, _, err := threeWide.Split(at, "r_tail"); err == nil {
+			t.Errorf("splitting a 3-wide proxy range at %v must fail (one side would stay a range)", at)
+		}
+	}
+}
+
 // TestMerge は統合が self の ID・その他の項目を保ち、listen_port と実効宛先だけを広げることを
 // 確かめる。id1/id2 のどちらが下位ポートかに関わらず self が残る(仕様 10.1、10.2 節)。
 func TestMerge(t *testing.T) {
@@ -97,11 +125,20 @@ func TestFindMergeBlocker(t *testing.T) {
 		}, BlockMode},
 		{"隣接していない", func(a, b *Rule) { b.ListenPort = PortRange{2470, 2471} }, BlockNotAdjacent},
 		{"実効宛先が連続していない", func(a, b *Rule) { b.Target = "192.168.1.20:9999" }, BlockTargetGap},
-		{"proxy_protocol が違う(TCP proxy の組で片方だけ付ける)", func(a, b *Rule) {
+		// vps_mode=proxy はどんな 2 つの組でも統合できない(統合すると必ず範囲になり、
+		// proxy は単一ポート運用のため)。この組み合わせは差がある値(旧テストは
+		// proxy_protocol)を問わず BlockProxyRange が先に返る。proxy_protocol は
+		// vps_mode=proxy でしか立てられない(Rule.Validate)ので、BlockProxyProtocol は
+		// 有効なルールの組では実質到達しない
+		{"proxy はどんな組でも統合できない(TCP proxy の組で片方だけ proxy_protocol を付ける)", func(a, b *Rule) {
 			a.Proto, b.Proto = TCP, TCP
 			a.VPSMode, b.VPSMode = ModeProxy, ModeProxy
 			b.ProxyProtocol = true
-		}, BlockProxyProtocol},
+		}, BlockProxyRange},
+		{"proxy はどんな組でも統合できない(他の値がすべて揃っていても)", func(a, b *Rule) {
+			a.Proto, b.Proto = TCP, TCP
+			a.VPSMode, b.VPSMode = ModeProxy, ModeProxy
+		}, BlockProxyRange},
 		{"拒否リストが違う", func(a, b *Rule) { b.SourceDeny = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")} }, BlockDenyList},
 		{"許可リストが違う", func(a, b *Rule) { b.SourceAllow = []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")} }, BlockAllowList},
 		// 旧い CLI が許していた重複エントリがあっても、長さだけでなく重複を払った内容で比べる
