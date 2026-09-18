@@ -78,10 +78,10 @@ const (
 
 // FindMergeBlocker は a と b(順不同)が統合できない最初の理由を返す。すべて揃えば
 // BlockNone(統合できる)を返す。listen_port が小さい方を lo、大きい方を hi として、
-// エージェント、プロトコル、方式、隣接、実効宛先の連続、PROXY protocol、拒否/許可
-// リスト、3 つのレート、enabled の順に見る。後半の 5 つは Merge 自身の検査ではなく
-// (統合すると self の値だけが残るため)、Web UI が「値の同じ隣接ルールだけを候補に
-// 出す」ために追加で見る項目である。
+// エージェント、プロトコル、方式、隣接、実効宛先の連続、proxy かどうか、拒否/許可
+// リスト、3 つのレート、enabled の順に見る。統合すると self の値だけが残るので、
+// 拒否/許可リストから enabled までが揃わない組を統合すると、もう一方の設定が黙って
+// 失われる。Merge も Web UI の候補の絞り込みも、この関数で同じ判定をする。
 func FindMergeBlocker(a, b Rule) MergeBlocker {
 	lo, hi := a, b
 	if lo.ListenPort.Lo > hi.ListenPort.Lo {
