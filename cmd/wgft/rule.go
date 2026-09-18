@@ -238,6 +238,7 @@ func newRuleEnableCmd(use string, enabled bool) *cobra.Command {
 }
 
 // newRuleSplitCmd は `rule split`。範囲を 1 バッチで 2 つに分け、実効宛先を変えないのでセッションは残る(仕様 5.4、7 節)。
+// 組み立てと検査は proto.Rule.Split が持ち、CLI と Web UI の分割区画で共有する(仕様 10.1、10.2 節)。
 func newRuleSplitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "split <id> <port>",
@@ -256,17 +257,10 @@ func newRuleSplitCmd() *cobra.Command {
 			if err != nil || at.Lo != at.Hi {
 				return fmt.Errorf("split point must be a single port")
 			}
-			if at.Lo <= r.ListenPort.Lo || at.Lo > r.ListenPort.Hi {
-				return fmt.Errorf("split point %d must be inside range %s, excluding the first port", at.Lo, r.ListenPort)
+			head, tail, err := r.Split(at, newRuleID())
+			if err != nil {
+				return err
 			}
-			head := *r
-			head.ListenPort = proto.PortRange{Lo: r.ListenPort.Lo, Hi: at.Lo - 1}
-			tail := *r
-			tail.ID = newRuleID()
-			tail.ListenPort = proto.PortRange{Lo: at.Lo, Hi: r.ListenPort.Hi}
-			// 後半の target は、元の target のポートに範囲内での位置を足したもの(実効宛先を変えない)
-			eff, _ := r.ForAgent().EffectiveTarget(at.Lo)
-			tail.Target = eff
 			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{head, tail}})
 			if err != nil {
 				return err
@@ -278,6 +272,8 @@ func newRuleSplitCmd() *cobra.Command {
 }
 
 // newRuleMergeCmd は `rule merge`。隣接する 2 つを 1 バッチで 1 つにする。
+// 組み立てと検査は proto.Merge が持ち、CLI と Web UI の統合区画で共有する(仕様 10.1、10.2 節)。
+// 統合したルールは id1 の ID・group・note・拒否/許可リスト・レート・enabled を保つ。
 func newRuleMergeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "merge <id1> <id2>",
@@ -296,17 +292,10 @@ func newRuleMergeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if a.ListenPort.Lo > b.ListenPort.Lo {
-				a, b = b, a
+			merged, err := proto.Merge(*a, *b)
+			if err != nil {
+				return err
 			}
-			if a.Agent != b.Agent || a.Proto != b.Proto || a.VPSMode != b.VPSMode || a.ListenPort.Hi+1 != b.ListenPort.Lo {
-				return fmt.Errorf("rules must share the same agent, protocol, and mode, and have adjacent ranges")
-			}
-			if eff, _ := a.ForAgent().EffectiveTarget(a.ListenPort.Hi); eff == "" || nextPort(eff) != b.Target {
-				return fmt.Errorf("effective targets are not contiguous after %s and %s", a.Target, b.Target)
-			}
-			merged := *a
-			merged.ListenPort.Hi = b.ListenPort.Hi
 			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{merged}, Delete: []string{b.ID}})
 			if err != nil {
 				return err
@@ -540,15 +529,4 @@ func findRule(c *admin.Client, id string) (*proto.Rule, error) {
 		return nil, fmt.Errorf("rule %q not found", id)
 	}
 	return nil, fmt.Errorf("rule %q matches multiple rules", id)
-}
-
-// nextPort は host:port の port を 1 つ進める。
-func nextPort(hostport string) string {
-	i := strings.LastIndex(hostport, ":")
-	if i < 0 {
-		return hostport
-	}
-	var p int
-	fmt.Sscanf(hostport[i+1:], "%d", &p)
-	return fmt.Sprintf("%s:%d", hostport[:i], p+1)
 }

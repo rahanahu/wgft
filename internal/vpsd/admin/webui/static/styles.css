@@ -205,6 +205,11 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 .rate-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rate-label { min-width: 220px; font-weight: 600; font-size: 13px; }
 .rate-row input[type="number"] { width: 90px; }
+.split-form { max-width: 480px; }
+.split-preview { min-height: 1.4em; }
+.merge-list { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; max-width: 640px; }
+.merge-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }
+.merge-list li form { margin: 0; }
 
 /* サーバー情報の帯（ダッシュボード上部） */
 .server-strip { display: flex; flex-wrap: wrap; gap: 12px 26px; padding: 4px 16px 16px; }

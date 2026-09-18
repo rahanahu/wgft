@@ -71,7 +71,7 @@ func installFakeNFT(dir string) error {
 	return os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// fakeNFTScript is the fake `nft` binary's output: a plausible ruleset for the three
+// fakeNFTScript is the fake `nft` binary's output: a plausible ruleset for the
 // kernel-mode rules in the sample data below (the two proxy-mode rules are not DNAT'd).
 const fakeNFTScript = `#!/bin/sh
 cat <<'NFT'
@@ -79,8 +79,12 @@ table inet wgft {
 	chain prerouting {
 		type nat hook prerouting priority dstnat;
 		iif != "wgft0" udp dport 2456-2457 dnat ip to 192.168.1.20:2456
+		iif != "wgft0" udp dport 2458-2459 dnat ip to 192.168.1.20:2458
 		iif != "wgft0" tcp dport 8080 dnat ip to 192.168.1.10:8080
+		iif != "wgft0" tcp dport 8081 dnat ip to 192.168.1.30:8081
 		iif != "wgft0" udp dport 19132 dnat ip to 192.168.1.30:19132
+		iif != "wgft0" udp dport 30000-30001 dnat ip to 192.168.1.40:30000
+		iif != "wgft0" udp dport 30002-30003 dnat ip to 192.168.1.40:30002
 	}
 	chain postrouting {
 		type nat hook postrouting priority srcnat;
@@ -91,8 +95,10 @@ NFT
 `
 
 // fakeBackend implements admin.Backend with fixed sample data: three agents (home,
-// office, lab), five rules across two named groups plus one ungrouped, one
-// ip-mismatch warning, and a server info block.
+// office, lab), nine rules across two named groups plus one ungrouped, one
+// ip-mismatch warning, and a server info block. Among the rules, r_valheim_udp and
+// r_valheim_udp2 are adjacent and mergeable; r_lab_udp30000 and
+// r_lab_udp30002 are adjacent but not (their deny lists differ).
 type fakeBackend struct {
 	agents   []admin.AgentInfo
 	rules    []proto.Rule
@@ -115,8 +121,10 @@ func newFakeBackend(mode string) *fakeBackend {
 	agents := []admin.AgentInfo{
 		{
 			// generation 42 matches Generation() below, and it reports every rule it
-			// owns, so r_mc_tcp25565 shows "applied" while r_valheim_udp shows "error"
-			// with a realistic bind failure.
+			// owns, so r_mc_tcp25565, r_valheim_udp and r_valheim_udp2 show "applied"
+			// while r_home_tcp8081 shows "error" with a realistic dial failure from
+			// checkTarget (relay.Manager). A listen bind conflict can't happen
+			// here: the agent's listener lives on its own netstack (design 7 section).
 			Name: "home", Address: "10.200.0.2", CreatedAt: rfc(-72 * time.Hour),
 			Connected: true, StreamFrom: "203.0.113.10:51820", WGEndpoint: "203.0.113.10:51820",
 			LastHeartbeat: rfc(-5 * time.Second), Generation: 42,
@@ -124,7 +132,9 @@ func newFakeBackend(mode string) *fakeBackend {
 			Tunnel: proto.TunnelStatus{State: proto.StatusOK, Endpoint: "203.0.113.10:51820"},
 			Rules: []proto.RuleStatus{
 				{ID: "r_mc_tcp25565", State: proto.StatusOK},
-				{ID: "r_valheim_udp", State: proto.StatusError, Reason: "listen udp :2456: bind: address already in use"},
+				{ID: "r_valheim_udp", State: proto.StatusOK},
+				{ID: "r_valheim_udp2", State: proto.StatusOK},
+				{ID: "r_home_tcp8081", State: proto.StatusError, Reason: "tcp/8081: dial tcp 192.168.1.30:8081: connect: connection refused"},
 			},
 		},
 		{
@@ -168,6 +178,21 @@ func newFakeBackend(mode string) *fakeBackend {
 			Target: "192.168.1.20:2456", VPSMode: proto.ModeKernel, Enabled: true,
 		},
 		{
+			// Adjacent to r_valheim_udp above with everything else equal (agent, proto,
+			// mode, proxy_protocol, lists, rates, enabled), so the rule detail page's
+			// merge section offers each as the other's candidate.
+			ID: "r_valheim_udp2", Agent: "home", Group: "valheim", Note: "extra port for the weekend server",
+			Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 2458, Hi: 2459},
+			Target: "192.168.1.20:2458", VPSMode: proto.ModeKernel, Enabled: true,
+		},
+		{
+			// A TCP rule with nothing listening on its target, for a realistic error
+			// state (see the home agent's Rules above).
+			ID: "r_home_tcp8081", Agent: "home", Note: "extra web port",
+			Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 8081, Hi: 8081},
+			Target: "192.168.1.30:8081", VPSMode: proto.ModeKernel, Enabled: true,
+		},
+		{
 			// deny, allow, and a rate together, so the rule detail page has content
 			// in every one of its sections when inspected manually.
 			ID: "r_lab_udp19132", Agent: "lab",
@@ -181,6 +206,20 @@ func newFakeBackend(mode string) *fakeBackend {
 			ID: "r_lab_tcp22", Agent: "lab",
 			Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 22, Hi: 22},
 			Target: "192.168.1.2:22", VPSMode: proto.ModeProxy, Enabled: false,
+		},
+		{
+			// Adjacent range rules that cannot merge (their deny lists differ), so the
+			// rule detail page's merge section shows a reason instead of a
+			// candidate for both r_lab_udp30000 and r_lab_udp30002.
+			ID: "r_lab_udp30000", Agent: "lab", Note: "test range A",
+			Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 30000, Hi: 30001},
+			Target: "192.168.1.40:30000", VPSMode: proto.ModeKernel, Enabled: true,
+		},
+		{
+			ID: "r_lab_udp30002", Agent: "lab", Note: "test range B",
+			Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 30002, Hi: 30003},
+			Target: "192.168.1.40:30002", VPSMode: proto.ModeKernel, Enabled: true,
+			SourceDeny: []netip.Prefix{netip.MustParsePrefix("203.0.113.90/32")},
 		},
 	}
 

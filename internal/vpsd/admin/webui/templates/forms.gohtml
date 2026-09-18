@@ -228,4 +228,48 @@
     <div class="form-actions"><button class="btn primary" type="submit">{{ T .Locale "save" }}</button></div>
   </form>
 </section>
+
+{{ if .CanSplit }}
+<section class="detail-section">
+  <h3>{{ T .Locale "splitHead" }}</h3>
+  <p class="field-help">{{ T .Locale "splitHelp" }}</p>
+  {{ if .SplitError }}<p class="danger-text">{{ .SplitError }}</p>{{ end }}
+  <form method="post" action="/ui/rules/{{ .ID }}/split" class="split-form" id="split-form"
+        data-listen-lo="{{ .ListenLo }}" data-listen-hi="{{ .ListenHi }}"
+        data-target-host="{{ .TargetHost }}" data-target-port="{{ .TargetPort }}">
+    <div class="field">
+      <label for="split-at">{{ T .Locale "splitAt" }}</label>
+      <select id="split-at" name="at">
+        {{ range .SplitPorts }}<option value="{{ . }}">{{ . }}</option>{{ end }}
+      </select>
+    </div>
+    <p id="split-preview" class="mono split-preview"></p>
+    <div class="form-actions"><button class="btn primary" type="submit">{{ T .Locale "splitSubmit" }}</button></div>
+  </form>
+</section>
+{{ end }}
+
+<section class="detail-section">
+  <h3>{{ T .Locale "mergeHead" }}</h3>
+  <p class="field-help">{{ T .Locale "mergeHelp" }}</p>
+  {{ if .MergeError }}<p class="danger-text">{{ .MergeError }}</p>{{ end }}
+  {{ if .MergeCandidates }}
+  <ul class="merge-list">
+    {{ range .MergeCandidates }}
+    <li>
+      <span><strong class="proto {{ $.ProtoClass }}">{{ $.ProtoUpper }}</strong> <span class="mono">{{ .Ports }}</span>
+        <span class="flow-arrow">→</span> <span class="mono">{{ .Target }}</span></span>
+      <form method="post" action="/ui/rules/{{ $.ID }}/merge">
+        <input type="hidden" name="other" value="{{ .ID }}">
+        <button class="btn" type="submit">{{ T $.Locale "mergeWithThis" }}</button>
+      </form>
+    </li>
+    {{ end }}
+  </ul>
+  {{ else if .MergeBlocked }}
+  <p class="muted">{{ printf (T .Locale "mergeBlockedFmt") .MergeBlocked.Ports .MergeBlocked.Target .MergeBlocked.Reason }}</p>
+  {{ else }}
+  <p class="muted">{{ T .Locale "mergeNoNeighbor" }}</p>
+  {{ end }}
+</section>
 {{ end }}

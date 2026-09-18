@@ -52,6 +52,9 @@ func (r PortRange) Len() int { return int(r.Hi) - int(r.Lo) + 1 }
 
 func (r PortRange) Contains(p uint16) bool { return r.Lo <= p && p <= r.Hi }
 
+// IsRange は単一ポートでなく範囲かどうかを返す。Rule.Split の前提(仕様 10.1 節)。
+func (r PortRange) IsRange() bool { return r.Lo != r.Hi }
+
 func (r PortRange) Overlaps(o PortRange) bool { return r.Lo <= o.Hi && o.Lo <= r.Hi }
 
 func (r PortRange) MarshalText() ([]byte, error) { return []byte(r.String()), nil }

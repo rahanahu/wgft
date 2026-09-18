@@ -178,6 +178,26 @@ var tr = map[string][2]string{
 	"rateRequired":        {"値を入力するか、「制限しない」を選んでください", "enter a value, or choose \"no limit\""},
 	"packetUserspaceNote": {"ユーザー空間モードの TCP ルールでは、パケットの制限は効きません。", "In userspace mode, the packet limit has no effect on TCP rules."},
 	"fAddDisabled":        {"無効のまま追加する", "Add in a disabled state"},
+	// rule detail page: split / merge
+	"splitHead":       {"分割", "Split"},
+	"splitHelp":       {"分割する位置を選ぶと、結果の 2 つのルールをすぐ下に示します。実効宛先は変わらないので、通信中のセッションは切れません。", "Choose where to split; the two resulting rules are previewed below. Effective targets don't move, so active sessions stay up."},
+	"splitAt":         {"この直前で分ける", "Split just before"},
+	"splitSubmit":     {"分割する", "Split"},
+	"mergeHead":       {"統合", "Merge"},
+	"mergeHelp":       {"隣接していて、エージェント、プロトコル、方式、PROXY protocol、拒否/許可リスト、レート、有効無効がすべて同じルールだけを候補にします。", "Only adjacent rules whose agent, protocol, mode, PROXY protocol, source lists, rates, and enabled state all match are offered as candidates."},
+	"mergeWithThis":   {"このルールと統合", "Merge with this rule"},
+	"mergeNoNeighbor": {"listen_port が隣接するルールがありません。", "No rule has an adjacent listen_port."},
+	"mergeBlockedFmt": {"隣接する %s → %s とは統合できません(%s)。", "Cannot merge with the adjacent %s → %s (%s)."},
+	"mbAgent":         {"エージェントが違う", "agent differs"},
+	"mbProto":         {"プロトコルが違う", "protocol differs"},
+	"mbMode":          {"方式が違う", "mode differs"},
+	"mbNotAdjacent":   {"隣接していない", "not adjacent"},
+	"mbTargetGap":     {"実効宛先が連続していない", "targets are not contiguous"},
+	"mbProxyProtocol": {"PROXY protocol の有無が違う", "PROXY protocol differs"},
+	"mbDenyList":      {"拒否リストが違う", "deny list differs"},
+	"mbAllowList":     {"許可リストが違う", "allow list differs"},
+	"mbRates":         {"レート制限が違う", "rate limits differ"},
+	"mbEnabled":       {"有効無効が違う", "enabled state differs"},
 }
 
 // T はキーの訳を返す。未知のキーはキーそのものを返す。
