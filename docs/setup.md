@@ -4,7 +4,7 @@ This guide contains the detailed installation and operating steps that are inten
 
 ## Requirements
 
-The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11. macOS is not supported yet because it has not been verified on a real machine. wgft is currently IPv4-only.
+The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11, and on macOS on Apple silicon, verified on macOS 27. Intel Macs are not supported. wgft is currently IPv4-only.
 
 The home agent does not need root or a TUN device. Server requirements depend on the selected mode:
 
@@ -35,7 +35,7 @@ curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-am
 sha256sum -c wgft-linux-amd64.sha256
 ```
 
-Use `arm64` instead of `amd64` on arm64 systems.
+Use `arm64` instead of `amd64` on arm64 systems. Windows and macOS are covered in [Run the agent on Windows](#run-the-agent-on-windows) and [Run the agent on macOS](#run-the-agent-on-macos).
 
 With Go 1.26 or newer:
 
@@ -183,6 +183,68 @@ The join string contains `#`, so PowerShell needs it in single quotes. The first
 Windows Defender Firewall may prompt to allow `wgft.exe` on the first start, because wireguard-go listens on UDP on all interfaces. This was verified on Windows 11: the tunnel and relay keep working whether that prompt is allowed or cancelled, including across WireGuard key rotations, because the agent only makes outbound connections. Stop the agent with Ctrl+C or by closing the console window; a later start recovers and reuses the saved credentials.
 
 wgft installs no Windows service, scheduled task, or tray icon. `agent run` runs as whichever user starts it, the way many game servers run on a gaming PC. Keeping it running across logons, for example with a shortcut in the Startup folder, is left to you; this has not been tested.
+
+### Run the agent on macOS
+
+The macOS build is for Apple silicon (arm64) and was verified on macOS 27. Intel Macs are not supported. Download it with `curl` in Terminal:
+
+```sh
+curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-darwin-arm64
+curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-darwin-arm64.sha256
+shasum -a 256 -c wgft-darwin-arm64.sha256
+sudo mkdir -p /usr/local/bin
+sudo install -m 0755 wgft-darwin-arm64 /usr/local/bin/wgft
+```
+
+Files downloaded with `curl` carry no quarantine mark. A web browser adds that mark, and Gatekeeper blocks a binary that carries it and is not notarized by Apple, which is the case for wgft. `/usr/local/bin` may not exist on Apple silicon Macs; `mkdir -p` creates it.
+
+Register once from Terminal:
+
+```sh
+WGFT_JOIN='<join string>' /usr/local/bin/wgft agent run
+```
+
+The first successful registration prints `registered as agent <name>` and writes `~/Library/Application Support/wgft/agent.json`. The directory is created with mode 0700 and the file with mode 0600. Press Ctrl+C to stop this foreground agent before installing the daemon below; the credentials stay in `agent.json`. The daemon and a terminal agent cannot run at the same time, because the second one refuses to start with `credentials file is in use by another process`.
+
+To keep the agent running, install [deploy/io.github.rahanahu.wgft.agent.plist](../deploy/io.github.rahanahu.wgft.agent.plist) as a LaunchDaemon. It runs `wgft agent run` with your user's rights through `UserName`, not as root, and points `WGFT_DATA_DIR` at the same `~/Library/Application Support/wgft`. Replace the `YOUR_USER` placeholders with your user name and home directory, then install and load it:
+
+```sh
+curl -LO https://raw.githubusercontent.com/rahanahu/wgft/main/deploy/io.github.rahanahu.wgft.agent.plist
+sed -e "s|/Users/YOUR_USER|$HOME|g" -e "s|YOUR_USER|$(id -un)|g" io.github.rahanahu.wgft.agent.plist > wgft-agent.plist
+plutil -lint wgft-agent.plist
+sudo install -m 0644 -o root -g wheel wgft-agent.plist /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
+```
+
+The plist is readable by every user, so it holds no join string; the first registration above is done from Terminal for that reason. Check that the daemon is running and read its log:
+
+```sh
+sudo launchctl print system/io.github.rahanahu.wgft.agent | grep -E 'state|pid'
+tail -f ~/Library/Logs/wgft-agent.log
+```
+
+On the VPS, `sudo wgft agent ls` shows `ok` in the `TUNNEL` column once the tunnel is up. launchd restarts the agent when it exits with an error or is killed, at most once every 10 seconds (`ThrottleInterval`). launchd has no counterpart to the systemd unit's `RestartPreventExitStatus=3`, so a configuration error, which exits with code 3, is presumably restarted in the same way; this has not been tested. Check the log if the agent keeps restarting.
+
+Stop the daemon with:
+
+```sh
+sudo launchctl bootout system/io.github.rahanahu.wgft.agent
+```
+
+The plist stays in `/Library/LaunchDaemons`, so the daemon starts again at the next boot. To remove it for good, also run `sudo rm /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist`.
+
+To upgrade, download the new `wgft-darwin-arm64` as above, then:
+
+```sh
+sudo launchctl bootout system/io.github.rahanahu.wgft.agent
+sudo install -m 0755 wgft-darwin-arm64 /usr/local/bin/wgft
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
+```
+
+Two macOS behaviors shape this setup:
+
+- Local Network privacy: started as a LaunchAgent from `~/Library/LaunchAgents`, the agent reached the default gateway, but connections to other LAN hosts failed with `connect: no route to host` and no permission dialog appeared. The same binary reached those hosts over UDP and TCP when started from Terminal, which passes on Terminal's own permission, and when run as a LaunchDaemon with `UserName` set to the same user, as this plist does. Attributing the failure to Local Network privacy is an inference from the symptoms; no system log entry confirmed it. `brew services` also uses LaunchAgents, so it may hit the same problem; this has not been tested.
+- FileVault: with FileVault on, the LaunchDaemon started only when the user first logged in after a reboot, not at boot. It logged `network is unreachable` for about 15 seconds and then connected by itself. Starting at boot without a login when FileVault is off, and keeping running after logout, have not been tested.
 
 ### Run the agent with systemd
 

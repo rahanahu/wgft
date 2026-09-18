@@ -56,7 +56,7 @@ In kernel mode, forwarding stays in the kernel if the wgft process crashes or re
 
 Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container.
 
-The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11. macOS is not supported yet because it has not been verified on a real machine. wgft is IPv4-only. The home agent does not need root or a TUN device, and no administrator rights on Windows.
+The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11, and on macOS on Apple silicon, verified on macOS 27. Intel Macs are not supported. wgft is IPv4-only. The home agent does not need root or a TUN device, and no administrator rights on Windows. On macOS it runs with your user's rights.
 
 ## Quick start
 
@@ -71,7 +71,7 @@ curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-am
 chmod +x wgft-linux-amd64
 ```
 
-Use `arm64` instead of `amd64` on Linux arm64 systems. Windows installation is covered in step 3 below.
+Use `arm64` instead of `amd64` on Linux arm64 systems. Windows and macOS installation is covered in step 3 below.
 
 ### 2. Start the VPS server
 
@@ -117,6 +117,19 @@ $env:WGFT_JOIN = '<join string>'
 The join string contains `#`, so it needs single quotes.
 
 Later starts need only `.\wgft.exe agent run`; the saved credentials are reused. Windows Defender Firewall may prompt to allow `wgft.exe` on the first start. The tunnel keeps working whether you allow or cancel that prompt, because the agent only makes outbound connections. Stop the agent with Ctrl+C or by closing the window. Credentials are stored in `%ProgramData%\wgft\agent.json` and no administrator rights are needed. wgft installs no Windows service, so keeping the agent running across logons is up to you. A shortcut in the Startup folder is one untested option. See the [setup guide](docs/setup.md#run-the-agent-on-windows) for details.
+
+On macOS, download the binary with `curl` in Terminal, install it, and register once:
+
+```sh
+curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-darwin-arm64
+sudo mkdir -p /usr/local/bin
+sudo install -m 0755 wgft-darwin-arm64 /usr/local/bin/wgft
+WGFT_JOIN='<join string>' /usr/local/bin/wgft agent run
+```
+
+Use `curl` rather than a web browser. A browser marks the download as quarantined, and Gatekeeper blocks a binary that carries that mark and is not notarized by Apple, which is the case for wgft. `/usr/local/bin` may not exist on Apple silicon Macs, which is why the `mkdir` is there. Credentials are stored in `~/Library/Application Support/wgft/agent.json`.
+
+To keep the agent running, stop it with Ctrl+C after it prints `registered as agent`, and install it as a LaunchDaemon with [deploy/io.github.rahanahu.wgft.agent.plist](deploy/io.github.rahanahu.wgft.agent.plist). The daemon runs with your user's rights and uses the same credentials. Do not use a LaunchAgent: started that way, the agent could not reach other hosts on the LAN, most likely because of macOS Local Network privacy. On a Mac with FileVault on, the daemon starts only after the first login following a reboot. See the [setup guide](docs/setup.md#run-the-agent-on-macos) for the steps.
 
 ### 4. Add a rule
 
