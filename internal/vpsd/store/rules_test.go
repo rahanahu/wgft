@@ -108,6 +108,47 @@ func TestMutateCannotLeakIntoStore(t *testing.T) {
 	}
 }
 
+// TestApplyBatchPreservesEmptyVsNilSourceLists は、mutate に渡す前の防御的コピー
+// (cloneRules)が、空だが nil でない SourceAllow/SourceDeny(rule add や Web UI が明示的に
+// 設定する []netip.Prefix{})を nil に取り違えないことを確かめる。append([]netip.Prefix(nil),
+// p...) は p が空でも非 nil であれば結果を nil にしてしまうため、無関係なフィールド(ここでは
+// target)だけを変えるバッチを経由するだけで、保存される JSON が "source_allow":[] から
+// "source_allow":null に静かに変わってしまっていた。proto.RulesDigest はこの JSON をハッシュ
+// するため、この取り違えは BatchRequest.ExpectedDigest の照合(admin_backend.go)を、
+// 何も変わっていないのに拒む食い違いにもつながる。
+func TestApplyBatchPreservesEmptyVsNilSourceLists(t *testing.T) {
+	s := openTemp(t)
+	r := rule("a", proto.UDP, 2456, 2456, "h:2456")
+	r.SourceAllow, r.SourceDeny = []netip.Prefix{}, []netip.Prefix{}
+	if _, err := s.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, r), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.Rules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before[0].SourceAllow == nil || before[0].SourceDeny == nil {
+		t.Fatalf("initial rule lost its non-nil empty source lists: %+v", before[0])
+	}
+
+	// target だけを変える、無関係なバッチ(SourceAllow/SourceDeny に触れない)。
+	if _, err := s.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		rules[0].Target = "h:9999"
+		return rules, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.Rules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after[0].SourceAllow == nil || after[0].SourceDeny == nil {
+		t.Errorf("an unrelated batch turned the empty source lists into nil: %+v", after[0])
+	}
+}
+
 var errShort = &shortErr{}
 
 type shortErr struct{}

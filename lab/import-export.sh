@@ -9,7 +9,9 @@
 #     section, but does change the rule set's content) made between the confirmation
 #     page and the apply refuses the apply, because proto.RulesDigest no longer matches;
 #   - applying for real removes the deleted rule and forwarding through the surviving
-#     rule keeps working.
+#     rule keeps working;
+#   - replacing a rule's one deny CIDR with a different one (same count, 1 for 1) shows up
+#     on the confirmation page as changed, with the added/removed CIDR, not as unchanged.
 # Uses the same background-server, curl-driven method as split-merge.sh.
 #
 #   lab/lab exec vm bash /wgft/lab/import-export.sh
@@ -116,6 +118,32 @@ check "r2 is gone, r1 remains" "1" "$(rule_count)"
 sleep 1
 check "udp through r1 still works after the import" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:2456')"
 check "r2's port is gone" "" "$(client 'echo hi | socat -t 2 - UDP:198.51.100.1:2555' 2>&1)"
+
+echo "== a same-count deny-list replacement must show as changed, with the CIDRs, not unchanged"
+# Give r1 a real deny entry so the next upload can replace it 1-for-1 (same count).
+vps wgft rule deny add "$r1" 203.0.113.0/24 --admin "$ADMIN" >/dev/null
+ACL_RULES=/tmp/wgft-importexport-acl.json
+vps curl -s -o "$ACL_RULES" "http://$ADMIN/ui/rules/export"
+python3 -c "
+import json
+rules = json.load(open('$ACL_RULES'))
+for r in rules:
+    if r['id'] == '$r1':
+        r['source_deny'] = ['198.51.100.0/24']
+json.dump(rules, open('$ACL_RULES', 'w'))
+"
+vps curl -s -F "file=@$ACL_RULES;type=application/json" "http://$ADMIN/ui/rules/import?lang=en" > /tmp/wgft-importexport-confirm-acl.html
+# html/template escapes "+" as &#43; in attribute/text context; unescape before matching.
+confirm_acl=$(python3 -c "import html; print(html.unescape(open('/tmp/wgft-importexport-confirm-acl.html').read()))")
+check "same-count deny-list replacement shows as changed" "Changed 1" "$confirm_acl"
+check "confirm page shows the added CIDR" "+198.51.100.0/24" "$confirm_acl"
+check "confirm page shows the removed CIDR" "-203.0.113.0/24" "$confirm_acl"
+if [[ "$confirm_acl" == *"Unchanged 1"* ]]; then
+  echo "FAIL  same-count deny-list replacement must not also count as unchanged: $confirm_acl"; fail=1
+else
+  echo "PASS  same-count deny-list replacement must not also count as unchanged"
+fi
+rm -f "$ACL_RULES" /tmp/wgft-importexport-confirm-acl.html
 
 echo "== teardown"
 kill_server

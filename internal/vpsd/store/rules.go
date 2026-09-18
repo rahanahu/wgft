@@ -129,12 +129,27 @@ func agentView(rules []proto.Rule) []proto.AgentRule {
 	return out
 }
 
+// clonePrefixes copies p, preserving the nil/non-nil distinction: append([]netip.Prefix(nil),
+// p...) collapses a non-nil, empty p (e.g. rule add/webui setting SourceAllow: []netip.Prefix{}
+// explicitly) to nil, because appending zero elements to a nil slice just returns that nil
+// slice. That silent flip changes what gets persisted (JSON "[]" -> "null") on any unrelated
+// batch touching the rule, and, since proto.RulesDigest hashes the JSON, would make a digest
+// computed against a cloned "before" differ from one computed against the same rules read
+// without cloning (as BatchRequest.ExpectedDigest's check does; found while exercising it in
+// lab/import-export.sh).
+func clonePrefixes(p []netip.Prefix) []netip.Prefix {
+	if p == nil {
+		return nil
+	}
+	return append([]netip.Prefix{}, p...)
+}
+
 func cloneRules(rules []proto.Rule) []proto.Rule {
 	out := make([]proto.Rule, len(rules))
 	for i, r := range rules {
 		out[i] = r
-		out[i].SourceAllow = append([]netip.Prefix(nil), r.SourceAllow...)
-		out[i].SourceDeny = append([]netip.Prefix(nil), r.SourceDeny...)
+		out[i].SourceAllow = clonePrefixes(r.SourceAllow)
+		out[i].SourceDeny = clonePrefixes(r.SourceDeny)
 		if r.NewFlowRate != nil {
 			v := *r.NewFlowRate
 			out[i].NewFlowRate = &v
