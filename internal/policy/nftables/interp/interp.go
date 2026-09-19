@@ -131,7 +131,7 @@ func (in *Interpreter) Eval(now time.Duration, p Packet) (Verdict, error) {
 		if r.Match.CtStateNew && !isNew {
 			continue
 		}
-		if r.Stmt.UsesSource() && !p.Src.Is4() {
+		if (r.Match.IPv4 || r.Stmt.UsesSource()) && !p.Src.Is4() {
 			continue // meta nfproto ipv4 に一致しない
 		}
 		hit, err := in.stmt(i, r.Stmt, now, p, isNew, &added)

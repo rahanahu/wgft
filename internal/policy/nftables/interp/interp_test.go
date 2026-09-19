@@ -107,3 +107,25 @@ func TestBucketRefill(t *testing.T) {
 		t.Fatal("one token is refilled after exactly the cost")
 	}
 }
+
+// meta nfproto ipv4 を持つ集約の limit の行は IPv6 のパケットに一致せず、トークンを使わない。
+// 持たない行は IPv6 のパケットにも一致する(inet のテーブルの挙動)。
+func TestIPv4MatchKeepsIPv6OffAggregateLimits(t *testing.T) {
+	r := proto.Rate{Count: 1, Unit: proto.PerHour}
+	for _, v4 := range []bool{true, false} {
+		row := udpRow("new_flow", true, polnft.Stmt{Kind: polnft.StmtLimit, Rate: r, Burst: 1})
+		row.Match.IPv4 = v4
+		in, err := New(polnft.Program{Rows: []polnft.Row{row}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		v6 := Packet{Proto: proto.UDP, DstPort: 53, Src: netip.MustParseAddr("2001:db8::1"), Flow: "v6"}
+		if mustEval(t, in, 0, v6) {
+			t.Fatalf("IPv4=%v: the IPv6 packet was dropped before the bucket was spent", v4)
+		}
+		// burst 1:IPv6 のパケットがトークンを使っていなければ、IPv4 のフローが通る
+		if got := mustEval(t, in, 0, pkt("198.51.100.1", "a1")); got != !v4 {
+			t.Errorf("IPv4=%v: the IPv4 flow after an IPv6 one dropped = %v, want %v", v4, got, !v4)
+		}
+	}
+}

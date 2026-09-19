@@ -1,0 +1,50 @@
+{
+  "comment": "v1 handles IPv4 only. IPv6 flows to rules with new_flow_rate and packet_rate are not forwarded and not counted, and spend no tokens: in the kernel every admission row, the aggregate rate rows included, matches IPv4 packets only and `dnat ip to` does not map IPv6 packets; the Go evaluator refuses non-IPv4 sources before any step. After the IPv6 flood, IPv4 traffic still gets the full burst of each rate.",
+  "policy": {
+    "rules": [
+      {"id": "r_new", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": "1/minute", "packet_rate": null},
+      {"id": "r_pkt", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": "1/minute"},
+      {"id": "r_tcp", "proto": "tcp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": "1/minute", "packet_rate": null}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_new", "src": "2001:db8::1", "flow": "x1", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_new", "src": "2001:db8::2", "flow": "x2", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_new", "src": "2001:db8::3", "flow": "x3", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_new", "src": "2001:db8::4", "flow": "x4", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_new", "src": "2001:db8::5", "flow": "x5", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_new", "src": "2001:db8::6", "flow": "x6", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_pkt", "src": "2001:db8::1", "flow": "y1", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_pkt", "src": "2001:db8::1", "flow": "y1", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_pkt", "src": "2001:db8::1", "flow": "y1", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_pkt", "src": "2001:db8::1", "flow": "y1", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_pkt", "src": "2001:db8::1", "flow": "y1", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_pkt", "src": "2001:db8::1", "flow": "y1", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "2001:db8::7", "flow": "z1", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "2001:db8::8", "flow": "z2", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "2001:db8::9", "flow": "z3", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "2001:db8::a", "flow": "z4", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "2001:db8::b", "flow": "z5", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "2001:db8::c", "flow": "z6", "want": "drop"},
+    {"at_ms": 10, "op": "flow", "rule": "r_new", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_new", "src": "198.51.100.2", "flow": "a2", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_new", "src": "198.51.100.3", "flow": "a3", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_new", "src": "198.51.100.4", "flow": "a4", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_new", "src": "198.51.100.5", "flow": "a5", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_new", "src": "198.51.100.6", "flow": "a6", "want": "drop:new_flow"},
+    {"at_ms": 10, "op": "flow", "rule": "r_pkt", "src": "198.51.100.1", "flow": "p1", "want": "admit"},
+    {"at_ms": 10, "op": "packet", "rule": "r_pkt", "src": "198.51.100.1", "flow": "p1", "want": "admit"},
+    {"at_ms": 10, "op": "packet", "rule": "r_pkt", "src": "198.51.100.1", "flow": "p1", "want": "admit"},
+    {"at_ms": 10, "op": "packet", "rule": "r_pkt", "src": "198.51.100.1", "flow": "p1", "want": "admit"},
+    {"at_ms": 10, "op": "packet", "rule": "r_pkt", "src": "198.51.100.1", "flow": "p1", "want": "admit"},
+    {"at_ms": 10, "op": "packet", "rule": "r_pkt", "src": "198.51.100.1", "flow": "p1", "want": "drop:packet"},
+    {"at_ms": 10, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "t1", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_tcp", "src": "198.51.100.2", "flow": "t2", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_tcp", "src": "198.51.100.3", "flow": "t3", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_tcp", "src": "198.51.100.4", "flow": "t4", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_tcp", "src": "198.51.100.5", "flow": "t5", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_tcp", "src": "198.51.100.6", "flow": "t6", "want": "drop:new_flow"}
+  ],
+  "want_drops": {"r_new": {"new_flow": 1}, "r_pkt": {"packet": 1}, "r_tcp": {"new_flow": 1}},
+  "tolerances": []
+}

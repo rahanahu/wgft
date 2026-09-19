@@ -56,6 +56,11 @@ type Match struct {
 	Proto      proto.Proto
 	Ports      proto.PortRange
 	CtStateNew bool // `ct state new`。成立済みのフローのパケットには一致しない
+	// IPv4 は `meta nfproto ipv4`。IPv4 のパケットにだけ一致する。v1 の Admission Policy の行は、
+	// 送信元を読まない集約のレートの行を含めて、すべて持つ(設計文書 7a.9 節「IPv4 だけを扱う v1 の
+	// 守り」)。inet のテーブルでは、これが無いと IPv6 のパケットが集約のトークンを使い、IPv4 の
+	// 通信の new_flow_rate と packet_rate を締め出せる
+	IPv4 bool
 }
 
 // StmtKind は行の文の種類。
@@ -84,7 +89,8 @@ type Stmt struct {
 	Count uint32     // StmtPerSourceCtCount
 }
 
-// UsesSource は文が `ip saddr`(IPv4 の送信元)を読むかを返す。読む行は IPv4 のパケットにだけ一致する。
+// UsesSource は文が `ip saddr`(IPv4 の送信元)を読むかを返す。読む行は Match.IPv4 に関わらず、
+// IPv4 のパケットにだけ一致する(nft が `ip saddr` の前に `meta nfproto ipv4` を置く)。
 func (s Stmt) UsesSource() bool { return s.Kind != StmtLimit }
 
 // Row は filter_pre の行 1 つ。文が一致すれば `counter drop` する。判定は常に drop なので、

@@ -206,11 +206,16 @@ func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Conf
 			if row.Match.CtStateNew {
 				ct = ctState(expr.CtStateBitNEW)
 			}
-			var saddr []expr.Any
-			if row.Stmt.UsesSource() {
-				saddr = ipv4Saddr()
+			// Admission Policy の行は IPv4 のパケットにだけ一致する(設計文書 7a.9 節)。送信元を読む行は
+			// `ip saddr` の前に、読まない集約のレートの行は文の前に `meta nfproto ipv4` を置く
+			var v4 []expr.Any
+			if row.Match.IPv4 || row.Stmt.UsesSource() {
+				v4 = nfprotoIPv4()
 			}
-			addRule(filterPre, row.Comment, from, ct, saddr, stmt, counterDrop())
+			if row.Stmt.UsesSource() {
+				v4 = append(v4, ipv4Saddr()...)
+			}
+			addRule(filterPre, row.Comment, from, ct, v4, stmt, counterDrop())
 		}
 		if pp.Forwarding == model.Relay {
 			// Relay のルールは vpsd が受けて中継する(6.2 節)ので DNAT を持たない
@@ -275,11 +280,17 @@ func ifname(key expr.MetaKey, op expr.CmpOp, name string) []expr.Any {
 	return []expr.Any{&expr.Meta{Key: key, Register: 1}, &expr.Cmp{Op: op, Register: 1, Data: b}}
 }
 
-// ipv4Saddr は `ip saddr`。inet テーブルなので `meta nfproto ipv4` の比較を先に入れる。
-func ipv4Saddr() []expr.Any {
+// nfprotoIPv4 は `meta nfproto ipv4`。inet テーブルでは `ip saddr` の前にも要る。
+func nfprotoIPv4() []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
+	}
+}
+
+// ipv4Saddr は `ip saddr` の読み出し。呼び出し側が先に nfprotoIPv4 を置く。
+func ipv4Saddr() []expr.Any {
+	return []expr.Any{
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 12, Len: 4},
 	}
 }

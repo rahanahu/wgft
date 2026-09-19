@@ -11,6 +11,7 @@ import (
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
 	"github.com/google/nftables/userdata"
+	"golang.org/x/sys/unix"
 
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
@@ -186,6 +187,23 @@ func TestEmitRows(t *testing.T) {
 	}
 	if tcpFlowLines != 2 {
 		t.Errorf("found %d TCP src_flow lines, want 2 (r_proxy and r_tcp)", tcpFlowLines)
+	}
+
+	// どの Admission Policy の行も IPv4 のパケットにだけ一致する。送信元を読まない集約のレートの行
+	// (new_flow、packet)も meta nfproto ipv4 を持つ(設計文書 7a.9 節)
+	for _, r := range rec.rules["filter_pre"] {
+		c, _ := userdata.GetString(r.UserData, userdata.TypeComment)
+		n := 0
+		for i, e := range r.Exprs {
+			if m, ok := e.(*expr.Meta); ok && m.Key == expr.MetaKeyNFPROTO && i+1 < len(r.Exprs) {
+				if cmp, ok := r.Exprs[i+1].(*expr.Cmp); ok && cmp.Op == expr.CmpOpEq && len(cmp.Data) == 1 && cmp.Data[0] == unix.NFPROTO_IPV4 {
+					n++
+				}
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s has %d meta nfproto ipv4 matches, want 1", c, n)
+		}
 	}
 
 	// allow の lookup は反転(!=)、deny は反転しない

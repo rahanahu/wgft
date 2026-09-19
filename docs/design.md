@@ -314,9 +314,10 @@ table inet wgft {
     iifname != "wg0" udp dport 2456-2457 ip saddr @deny_1 counter drop
     iifname != "wg0" udp dport 2456-2457 ct state new add @meter_1 { ip saddr limit rate over 10/second } counter drop
     iifname != "wg0" udp dport 2456-2457 ct state new add @flows_udp { ip saddr ct count over 256 } counter drop
-    iifname != "wg0" udp dport 2456-2457 ct state new limit rate over 100/second counter drop
+    # 送信元を読まない集約のレートの行も IPv4 のパケットにだけ一致させる(7a.9 節)。無いと IPv6 のパケットがトークンを使う
+    iifname != "wg0" udp dport 2456-2457 ct state new meta nfproto ipv4 limit rate over 100/second counter drop
     # packet_rate を設定したルールの場合(5.3 節の例は null なので、実際には生成しない)
-    iifname != "wg0" udp dport 2456-2457 limit rate over 5000/second counter drop
+    iifname != "wg0" udp dport 2456-2457 meta nfproto ipv4 limit rate over 5000/second counter drop
     iifname != "wg0" tcp dport 25565 ct state new add @flows_tcp { ip saddr ct count over 128 } counter drop
   }
   chain nat_pre {
@@ -800,7 +801,7 @@ TCP のルールの `packet_rate` は、ルールの書き出しと読み込み�
 
 #### IPv4 だけを扱う v1 の守り
 
-v1 は IPv4 だけを扱い(4 節)、IPv4 でない送信元を拒む(fail-closed)。userspace では 2 重に守る。1 つ目の守りとして、userspace と `Relay` の listener を IPv4 だけで開く(`tcp4`、`udp4`)。移行の手順 3 より前の listener は IPv6 でも待ち受けており(`net.Listen("tcp", ":port")` など)、VPS が IPv6 を持つと、IPv6 の送信元は IPv4 の CIDR だけを並べた deny に一致せずに通った。2 つ目の守りとして、Go の評価器自身が、IPv4 射影のアドレスを IPv4 に戻した後、IPv4 でない送信元を拒む。評価器は listener の開き方に頼らない。kernel では、IPv6 のパケットは DNAT されないが、今の行のうち IPv4 に限っているのは送信元を読む行(deny、allow、送信元ごとの新規フローレート、送信元ごとの同時フロー数の上限)だけである。送信元を読まない集約のレートの行(`new_flow_rate`、`packet_rate`)は `inet` のテーブルで IPv6 のパケットにも一致するので、判定するポートへの IPv6 のフラッドが集約のトークンを使い、IPv4 の正規の通信の新規フローとパケットを落とせる。このため、kernel の Admission Policy のすべての行に `meta nfproto ipv4` を付け、送信元の set を使わない集約のレートの行も IPv4 のパケットだけに一致させる。IPv6 への対応は、同じ IR と両方のコンパイラに IPv6 の set を加える形で行う(13 節)。
+v1 は IPv4 だけを扱い(4 節)、IPv4 でない送信元を拒む(fail-closed)。userspace では 2 重に守る。1 つ目の守りとして、userspace と `Relay` の listener を IPv4 だけで開く(`tcp4`、`udp4`)。移行の手順 3 より前の listener は IPv6 でも待ち受けており(`net.Listen("tcp", ":port")` など)、VPS が IPv6 を持つと、IPv6 の送信元は IPv4 の CIDR だけを並べた deny に一致せずに通った。2 つ目の守りとして、Go の評価器自身が、IPv4 射影のアドレスを IPv4 に戻した後、IPv4 でない送信元を拒む。評価器は listener の開き方に頼らない。kernel では、IPv6 のパケットは DNAT されないが、移行の手順 3 より前の行のうち IPv4 に限っていたのは送信元を読む行(deny、allow、送信元ごとの新規フローレート、送信元ごとの同時フロー数の上限)だけだった。送信元を読まない集約のレートの行(`new_flow_rate`、`packet_rate`)は `inet` のテーブルで IPv6 のパケットにも一致したので、判定するポートへの IPv6 のフラッドが集約のトークンを使い、IPv4 の正規の通信の新規フローとパケットを落とせた。このため、kernel の Admission Policy のすべての行に `meta nfproto ipv4` を付け、送信元の set を使わない集約のレートの行も IPv4 のパケットだけに一致させる。IPv6 への対応は、同じ IR と両方のコンパイラに IPv6 の set を加える形で行う(13 節)。
 
 #### nftables へのコンパイルの約束
 
@@ -854,7 +855,7 @@ fixture は `internal/policy/testdata/admission/*.json` に置き、1 ファイ�
 等価性の検査は `go test ./internal/policy/...` の単体テストで、root もネットワーク名前空間も要らず、CI でも走る。検査は、各 fixture について次の手順を踏む。
 
 1. `goengine` で評価器を作り、仮想の時計で出来事を順に流す。出来事は本番の中継と同じ呼び出しに写す。`flow` は `AdmitFlow`(`Relay` のルールは、手順 4 までは `AdmitSourceFlow`)、`packet` は `AdmitPacket`、`end` は手形の返却である。各出来事の `Decision` を `want` に、評価器の drop カウンタを `want_drops` に照らす
-2. `policy/nftables` で行の列を作り、テスト専用の解釈器で同じ出来事を流す。解釈器は、interval の set の照合、動的 set への `add` と要素ごとの `limit`、`ct count`(フローの `end` で数から抜ける)、集約の `limit`、`ct state new`(フローの最初のパケットだけが一致する)、カウンタを模し、どの行(段とカウンタの種類)がパケットを落としたかを `want` に、行のカウンタを `want_drops` に照らす。解釈器は IR を読まずに行の列だけを入力にするので、コンパイラの誤り(行の順序、行の抜け、`ct state new` の付け忘れ、コメントの誤り)を拾える。後の行や `ct count` の行が落とした新しいフローは conntrack に確定しないので、解釈器はそのフローをその場で `ct count` の数から抜く。カーネルでは、この要素は次の gc で抜ける。IR に無いルール ID の出来事は、どの行にも一致せず、DNAT も待ち受けも無いポートへ送るので、検査の側が `drop` と判定する
+2. `policy/nftables` で行の列を作り、テスト専用の解釈器で同じ出来事を流す。解釈器は、interval の set の照合、動的 set への `add` と要素ごとの `limit`、`ct count`(フローの `end` で数から抜ける)、集約の `limit`、`ct state new`(フローの最初のパケットだけが一致する)、カウンタを模し、どの行(段とカウンタの種類)がパケットを落としたかを `want` に、行のカウンタを `want_drops` に照らす。解釈器は IR を読まずに行の列だけを入力にするので、コンパイラの誤り(行の順序、行の抜け、`ct state new` の付け忘れ、コメントの誤り)を拾える。後の行や `ct count` の行が落とした新しいフローは conntrack に確定しないので、解釈器はそのフローをその場で `ct count` の数から抜く。カーネルでは、この要素は次の gc で抜ける。IR に無いルール ID の出来事は、どの行にも一致せず、DNAT も待ち受けも無いポートへ送るので、検査の側が `drop` と判定する。IPv4 でない送信元の出来事も、どの行にも一致せず、`dnat ip to` に写されず、IPv4 だけで開く待ち受けにも届かないので、検査の側が `drop` と判定する。どちらも、行が落としたら誤りとして報告する
 3. 2 つの結果を互いにも照らす。`engines` で 1 つの評価器に限った暫定の fixture は照らさない
 
 fixture の読み込みと検査の手順は `internal/policy/admissiontest` に、解釈器は `internal/policy/nftables/interp` に置く。どちらも本番のコードからは import しない。評価器は `admissiontest.Engine` を実装して差し込み、`goengine` も同じ fixture を同じ手順で流す。
@@ -1462,3 +1463,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - Admission Policy の Go の評価器を置く(2026-09-20、7a.9 節の移行の手順 3):`internal/policy/goengine` を加え、共有 fixture を解釈器と同じ手順で流すようにした。評価器は `policy.Order` を回し、拒んだ段より後の状態を消費しない。送信元ごとの同時フロー数の枠は手形として返し、後の段が拒んだときはその場で返す。IR に無いルール ID と、IPv4 射影を戻した後に IPv4 でない送信元は、drop に数えずに拒む。7a.9 節の未決事項だった許容差の及ぶ出来事の書き方は、fixture に書かないことに決めた。実装ごとの `want` を加えると、どちらの実装が正しいかを fixture が決めなくなるためである。`tolerances` は避けた許容差を示すだけになり、実装どうしの照合を省かない。移行の途中で kernel と userspace の挙動が意図して異なる場面(TCP のルールの `packet_rate`)は、暫定の fixture に照らす評価器を `engines` で限り、userspace の挙動を書いた暫定の fixture を 1 本加えた。`Relay` のルールの暫定の fixture は、userspace モードでも同じ挙動になるので、両方の評価器に照らす。userspace モードの `Relay` の中継のために、送信元ごとの同時フロー数の段だけを判定する `AdmitSourceFlow` を手順 4 までの入口として加えた
 - userspace の中継を Go の評価器に切り替える(2026-09-20、7a.9 節の移行の手順 3):userspace backend の中継は `srcpolicy` の代わりに `goengine` で判定するようにした。UDP の中継は、新しいセッションの最初のデータグラムをすべての段で、成立済みのセッションのデータグラムを `packet_rate` だけで判定する。これまでは全データグラムを最初に `packet_rate` で判定しており、deny の送信元のフラッドが正規のセッションのトークンを使っていた。送信元ごとの同時フロー数は評価器が数え、`new_flow_rate` より先に判定し、拒んだフローを `src_flow` の drop に数える。これまでは `flowcap.Counter` が `new_flow_rate` の後で数え、drop に数えていなかった。`flowcap.Counter` はプロセス全体の数だけを数える。userspace モードの `Relay` の中継は `AdmitSourceFlow` で送信元ごとの枠を取り、`Transparent` の TCP のルールと同じ数に入れる。IR に無いルール ID を通していた既定は拒む側に変えた。ルールの変更の後に成立済みのセッションを閉じる判定でも、IR に無いルール ID は拒む。`Retiring` の UDP の待ち受けのセッションには `packet_rate` を適用しない。評価器の更新と中継の待ち受けの更新は不可分ではないので、所属ルール ID だけが変わる待ち受け(分割と統合)とルールを消す待ち受けでは、その間に届いた新しいフローと成立済みのセッションのデータグラムが IR に無いルール ID として拒まれる。評価器を先に更新するのは、新しい待ち受けが方針の公開より前に中継を始めないためで、この間は拒む側に倒れる。未確認:この間の長さ。ラボでは測っていない
 - userspace と `Relay` の listener を IPv4 だけで開く(2026-09-20、7a.9 節の移行の手順 3):userspace backend の中継のホストの待ち受けを `udp4`、`tcp4` に、`proxyrelay` の待ち受けを `tcp4` に変えた。`proxyrelay` は kernel モードでも同じ待ち受けを使うので、kernel モードの `Relay` のルールも IPv6 で待ち受けなくなる。これまでは VPS が IPv6 を持つと、IPv6 の送信元が IPv4 の CIDR だけを並べた deny に一致せずに届いた。単体テストで、IPv6 のループバックから待ち受けに届かないことを確かめた
+- kernel の Admission Policy の行をすべて IPv4 に限る(2026-09-20、7a.9 節の移行の手順 3、所有者の設計レビューを受けて):kernel モードの `table inet wgft` では、送信元を読む行(deny、allow、per_source、src_flow)だけが `ip saddr` の前の `meta nfproto ipv4` で IPv4 に限られ、集約のレートの行(new_flow、packet)は IPv6 のパケットにも一致していた。このため、判定を付けるポートへの IPv6 のフラッドが、IPv4 の通信の `new_flow_rate` と `packet_rate` のトークンを使い切れた。手順 2 はこの挙動をそのまま引き継いでいた。行の列の一致条件に IPv4 の印を加え、コンパイラがすべての行に付け、`internal/dataplane/linuxkernel/nft` が `meta nfproto ipv4` に写すようにした。`new_flow_rate` か `packet_rate` を持つルールでは生成するテーブルが変わり、`testdata/basic.nft` もこの行を含む形に改めた。解釈器は IPv4 の印を持つ行を IPv6 のパケットに一致させない。IPv6 の送信元の出来事は、kernel では行に一致せず DNAT もされず、Go の評価器では拒まれるので、両方の評価器で `drop` になる。この一致を使い、IPv6 のフローがトークンを使わず、後の IPv4 の通信が各レートの burst を使い切れることを確かめる fixture を加えた。許容差は要らない

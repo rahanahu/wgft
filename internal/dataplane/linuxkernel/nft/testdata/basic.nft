@@ -4,6 +4,8 @@
 # で決まる。set の連番は Transparent(カーネルモード)のルールだけで数える。
 # flows_udp / flows_tcp はプロトコルごとに 1 つで、接続元 IP ごとの同時フロー数の上限
 # (仕様 6.1, 7 節)を全ルールで共有する。
+# 送信元を読まない集約のレートの行(new_flow、packet)も meta nfproto ipv4 を持ち、IPv6 のパケットは
+# トークンを使わない(設計文書 7a.9 節)。
 table inet wgft {
   set flows_tcp { type ipv4_addr; flags dynamic; size 65535; }
   set allow_1 { type ipv4_addr; flags interval; elements = { 192.0.2.0/24, 198.51.100.0/24 } }
@@ -21,8 +23,8 @@ table inet wgft {
     iifname != "wg0" udp dport 2456-2457 ip saddr @deny_2 counter drop comment "wgft:r_udp:deny"
     iifname != "wg0" udp dport 2456-2457 ct state new add @meter_2 { ip saddr limit rate over 10/second } counter drop comment "wgft:r_udp:per_source"
     iifname != "wg0" udp dport 2456-2457 ct state new add @flows_udp { ip saddr ct count over 256 } counter drop comment "wgft:r_udp:src_flow"
-    iifname != "wg0" udp dport 2456-2457 ct state new limit rate over 100/second counter drop comment "wgft:r_udp:new_flow"
-    iifname != "wg0" udp dport 2456-2457 limit rate over 5000/second counter drop comment "wgft:r_udp:packet"
+    iifname != "wg0" udp dport 2456-2457 ct state new meta nfproto ipv4 limit rate over 100/second counter drop comment "wgft:r_udp:new_flow"
+    iifname != "wg0" udp dport 2456-2457 meta nfproto ipv4 limit rate over 5000/second counter drop comment "wgft:r_udp:packet"
   }
   chain nat_pre {
     type nat hook prerouting priority dstnat - 1; policy accept;
