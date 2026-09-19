@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"runtime"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -131,14 +133,54 @@ func TestSourceDenyAtAccept(t *testing.T) {
 	c := dialPublic()
 	defer c.Close()
 	c.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := io.ReadAll(c); err != nil {
-		// 接続は即閉じられる(読みは EOF/エラーで終わる)
+	// 拒否は SetLinger(0) の RST で即座に終える(仕様 6.3 節、design.md 7a.10 節 Phase 6 移行手順 3)。
+	// グレースフルクローズ(通常の Close)なら次の Read は io.EOF になるので、そうでないことを見る。
+	if _, err := c.Read(make([]byte, 1)); !isReset(err) {
+		t.Errorf("refused (source deny) connection: err = %v, want connection reset by peer", err)
 	}
 	select {
 	case <-ipCh:
 		t.Error("拒否された接続がエージェントに届いた")
 	case <-time.After(300 * time.Millisecond):
 	}
+}
+
+// 通常に終わる中継は、拒否と違って RST を送らず、これまでどおりグレースフルクローズ(EOF)で
+// 終わることを確かめる(design.md 7a.10 節 Phase 6 移行手順 3。拒否だけが変わり、成立した中継の
+// 通常のクローズは変えない)。
+func TestNormalCloseEndsWithEOF(t *testing.T) {
+	agentAddr, ipCh := fakeAgent(t)
+	m, dialPublic := managerFor(t, agentAddr)
+	m.Apply([]Rule{rule(false, nil, nil)})
+	c := dialPublic()
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(3 * time.Second))
+	c.Write([]byte("hi\n"))
+	select {
+	case <-ipCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent did not receive the connection")
+	}
+	out, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil || out != "echo:hi\n" {
+		t.Fatalf("echo = %q, err = %v", out, err)
+	}
+	// fakeAgent は書き終えたら自分の側を閉じる。ハーフクローズ越しに伝わるのは FIN(EOF)であって
+	// RST ではないことを見る。
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Errorf("normal close: err = %v, want io.EOF", err)
+	}
+}
+
+// isReset は接続が RST で切られた誤りかを見る。Windows の WSAECONNRESET (10054) は
+// syscall.ECONNRESET と別の値なので、数値でも比べる
+// (internal/dataplane/userspace/relay の同名のテストヘルパーと同じ考え方)。
+func isReset(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	return errno == syscall.ECONNRESET || (runtime.GOOS == "windows" && errno == 10054)
 }
 
 func TestRestrictionChangeClosesLive(t *testing.T) {
@@ -207,8 +249,10 @@ func TestConnCap(t *testing.T) {
 		t.Error("connection over the per-source limit reached the agent")
 	}
 	c2.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := c2.Read(make([]byte, 1)); err != io.EOF {
-		t.Errorf("refused connection: err = %v, want EOF", err)
+	// 上限を超えた接続は SetLinger(0) の RST で即座に終える(仕様 6.3 節、design.md 7a.10 節
+	// Phase 6 移行手順 3)。以前はグレースフルクローズ(io.EOF)だった
+	if _, err := c2.Read(make([]byte, 1)); !isReset(err) {
+		t.Errorf("refused connection: err = %v, want connection reset by peer", err)
 	}
 	c1.Close()
 	deadline := time.Now().Add(2 * time.Second)

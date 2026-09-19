@@ -78,6 +78,20 @@ type listener struct {
 	dialLog flowcap.LogGate
 }
 
+// abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う(接続元制限、
+// 同時フロー数の上限)。通常の Close はグレースフルクローズ(FIN の後 TIME_WAIT)になるが、ここは実
+// ソケット(net.Listen で開く公開側の accept)なので、SetLinger(0) で RST を送って即座に終える
+// (仕様 6.3 節「実ソケットでも拒否は SetLinger(0) の RST で閉じ」)。フラッドの間に不要な TIME_WAIT の TCP 状態を大量に残さず、
+// その分のカーネル資源を保持し続けないためで、成立した中継の通常のクローズ(ハーフクローズを保つ)には使わない。
+// internal/dataplane/userspace/relay の同名の考え方(abortRefused)と揃えているが、proxyrelay の
+// accept は常に実ソケットで netstack の aborter を持たないため、ここでは *net.TCPConn だけを扱う。
+func abortRefused(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		tc.SetLinger(0)
+	}
+	c.Close()
+}
+
 // New は空の Manager を作る。
 func New(opts Options) *Manager {
 	if opts.Listen == nil {
@@ -314,7 +328,7 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 	l.mu.Unlock()
 	// 接続元制限(vpsd が受け付け時に判定する。プロキシは DNAT を通らないので nftables では効かない)
 	if !sourceAllowed(src, rule) {
-		c.Close()
+		abortRefused(c)
 		return
 	}
 	// 同時フロー数の上限(仕様 7 節)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
@@ -330,7 +344,7 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 			l.pending--
 			l.mu.Unlock()
 		}
-		c.Close()
+		abortRefused(c)
 		if l.capLog.Allow() {
 			m.opts.Logf("proxy: %d: connection limit reached; refusing new connections", rule.ListenPort)
 		}
