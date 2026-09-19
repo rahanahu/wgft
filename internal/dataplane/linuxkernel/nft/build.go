@@ -25,7 +25,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
-	"github.com/rahanahu/wgft/internal/policy"
+	polnft "github.com/rahanahu/wgft/internal/policy/nftables"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -116,7 +116,8 @@ func DeleteTable() error {
 
 // Comment はルールの行に付けるコメント。差し替えのたびにハンドルは振り直されるので、
 // カウンタの持ち主はこのコメントで特定する。
-func Comment(ruleID, kind string) string { return "wgft:" + ruleID + ":" + kind }
+// 形式は internal/policy/nftables.Comment が決める。
+func Comment(ruleID, kind string) string { return polnft.Comment(ruleID, kind) }
 
 func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Config) error {
 	t := &nftables.Table{Family: nftables.TableFamilyINet, Name: TableName}
@@ -147,97 +148,86 @@ func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Conf
 		e.AddRule(r)
 	}
 
-	// 接続元 IP ごとの同時フロー数の上限(仕様 6.1, 7 節)。プロトコルごとに 1 つの動的 set を
-	// そのプロトコルの全ルールで共有し、初めてそのプロトコルのルールに出会ったときだけ作る。
-	// 上限の値は Plan.Admission.PerSourceFlowCaps(設計文書 7a.5 節)から取る。
-	caps := plan.Admission.PerSourceFlowCaps
-	flowSets := map[proto.Proto]*nftables.Set{}
-	addFlowCap := func(ruleID string, p proto.Proto, from []expr.Any) error {
-		cap := caps.ForProto(p)
-		if cap <= 0 {
-			return nil
-		}
-		if flowSets[p] == nil {
-			s, err := addFlowCapSet(e, t, p)
-			if err != nil {
-				return fmt.Errorf("rule %s: %w", ruleID, err)
-			}
-			flowSets[p] = s
-		}
-		fs := flowSets[p]
-		addRule(filterPre, Comment(ruleID, "src_flow"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
-			[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: fs.Name, SetID: fs.ID,
-				Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{connlimitOver(uint32(cap))}}},
-			counterDrop())
-		return nil
-	}
-
+	// 送信元制限とレートの行は、IR(Plan.Admission)を internal/policy/nftables がコンパイルした
+	// 行の列から写す(設計文書 7a.9 節)。判定を付けるポートは、Transparent のポートと、vpsd が
+	// 待ち受けを開けている Relay のポートである。bind に失敗した Relay のポートに行を置くと、同じ
+	// ポートで待ち受ける別のプロセスへの通信に wgft の上限を掛けてしまうため(仕様 6.1 節)。
+	//
 	// Plan.Ports は無効なルールとエージェントが未登録のルールを既に除き、
 	// (Proto, ListenPort.Lo, RuleID) の順に並んでいる(internal/planner.Build)。この順が
-	// table の行の順になる(以前のルール集合の格納順とは変わりうる。設計文書 7a.8 節 Phase 3)。
-	// Transparent(カーネルモード)のルールだけが set の連番 n を進める。set 名はルール ID ではなく連番。
-	// Relay(プロキシモード)のルールは vpsd が受けて中継する(6.2 節)ので DNAT も接続元制限の行も
-	// 持たないが、接続元 IP ごとの同時フロー数だけは同じ set で数え、Transparent のルールとの合計にする(7 節)
-	n := 0
+	// table の行の順になる(設計文書 7a.8 節 Phase 3)。
+	var judged []polnft.Port
 	for _, pp := range plan.Ports {
-		from := match(wg, pp.Proto, pp.ListenPort)
-		if pp.Forwarding == model.Relay {
-			if relayListening[pp.ListenPort.Lo] {
-				if err := addFlowCap(pp.RuleID, pp.Proto, from); err != nil {
+		if pp.Forwarding == model.Relay && !relayListening[pp.ListenPort.Lo] {
+			continue
+		}
+		judged = append(judged, polnft.Port{RuleID: pp.RuleID, Proto: pp.Proto, Ports: pp.ListenPort, Forwarding: pp.Forwarding})
+	}
+	prog, err := polnft.Compile(plan.Admission, judged)
+	if err != nil {
+		return err
+	}
+
+	// set は、行が初めて参照した時点で宣言する。こうすると set と行を送る順が、ポートごとに
+	// set と行を並べて送っていた以前の生成と同じになる。
+	sets := map[string]*nftables.Set{}
+	setFor := func(ruleID, name string) (*nftables.Set, error) {
+		if s := sets[name]; s != nil {
+			return s, nil
+		}
+		decl, ok := prog.Set(name)
+		if !ok {
+			return nil, fmt.Errorf("rule %s: row refers to undeclared set %s", ruleID, name)
+		}
+		s, err := addSet(e, t, decl)
+		if err != nil {
+			return nil, fmt.Errorf("rule %s: %w", ruleID, err)
+		}
+		sets[name] = s
+		return s, nil
+	}
+
+	next := 0 // prog.Rows のうち、まだ写していない最初の行
+	for _, pp := range plan.Ports {
+		for ; next < len(prog.Rows) && prog.Rows[next].RuleID == pp.RuleID; next++ {
+			row := prog.Rows[next]
+			from := match(wg, row.Match.Proto, row.Match.Ports)
+			var s *nftables.Set
+			if row.Stmt.Set != "" {
+				if s, err = setFor(row.RuleID, row.Stmt.Set); err != nil {
 					return err
 				}
 			}
+			stmt, err := rowStmt(row.Stmt, s)
+			if err != nil {
+				return fmt.Errorf("rule %s: %w", row.RuleID, err)
+			}
+			var ct []expr.Any
+			if row.Match.CtStateNew {
+				ct = ctState(expr.CtStateBitNEW)
+			}
+			var saddr []expr.Any
+			if row.Stmt.UsesSource() {
+				saddr = ipv4Saddr()
+			}
+			addRule(filterPre, row.Comment, from, ct, saddr, stmt, counterDrop())
+		}
+		if pp.Forwarding == model.Relay {
+			// Relay のルールは vpsd が受けて中継する(6.2 節)ので DNAT を持たない
 			continue
-		}
-		n++
-		pol := pp.Policy
-
-		// 評価順は deny、allow、接続元ごとの meter、接続元ごとの同時フロー数の上限、
-		// 新規フローの集約上限、パケットの集約上限(設計文書 7a.2 節の Order のとおり)。
-		// 空の allow に != を書くと全送信元が落ちるので、allow が空なら set も行も作らない。
-		if len(pol.SourceDeny) > 0 {
-			s, err := addIntervalSet(e, t, fmt.Sprintf("deny_%d", n), pol.SourceDeny)
-			if err != nil {
-				return fmt.Errorf("rule %s: %w", pp.RuleID, err)
-			}
-			addRule(filterPre, Comment(pp.RuleID, "deny"), from, ipv4Saddr(), lookup(s, false), counterDrop())
-		}
-		if len(pol.SourceAllow) > 0 {
-			s, err := addIntervalSet(e, t, fmt.Sprintf("allow_%d", n), pol.SourceAllow)
-			if err != nil {
-				return fmt.Errorf("rule %s: %w", pp.RuleID, err)
-			}
-			addRule(filterPre, Comment(pp.RuleID, "allow"), from, ipv4Saddr(), lookup(s, true), counterDrop())
-		}
-		if pol.PerSourceRate != nil {
-			meter := &nftables.Set{Table: t, Name: fmt.Sprintf("meter_%d", n), KeyType: nftables.TypeIPAddr,
-				Dynamic: true, HasTimeout: true, Timeout: policy.PerSourceTableTTL, Size: policy.PerSourceTableSize}
-			if err := e.AddSet(meter, nil); err != nil {
-				return fmt.Errorf("rule %s: meter: %w", pp.RuleID, err)
-			}
-			addRule(filterPre, Comment(pp.RuleID, "per_source"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
-				[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: meter.Name, SetID: meter.ID,
-					Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{limitOver(*pol.PerSourceRate)}}},
-				counterDrop())
-		}
-		if err := addFlowCap(pp.RuleID, pp.Proto, from); err != nil {
-			return err
-		}
-		if pol.NewFlowRate != nil {
-			addRule(filterPre, Comment(pp.RuleID, "new_flow"), from, ctState(expr.CtStateBitNEW),
-				[]expr.Any{limitOver(*pol.NewFlowRate)}, counterDrop())
-		}
-		if pol.PacketRate != nil {
-			addRule(filterPre, Comment(pp.RuleID, "packet"), from, []expr.Any{limitOver(*pol.PacketRate)}, counterDrop())
 		}
 
 		// DNAT では宛先アドレスだけを書き換え、ポートは書き換えない。
 		// target のポートへの写し替えはエージェント側で行う(仕様 7 節の実効宛先)。
 		a4 := pp.AgentAddr.As4()
-		addRule(natPre, Comment(pp.RuleID, "dnat"), from, []expr.Any{
+		addRule(natPre, Comment(pp.RuleID, "dnat"), match(wg, pp.Proto, pp.ListenPort), []expr.Any{
 			&expr.Immediate{Register: 1, Data: a4[:]},
 			&expr.NAT{Type: expr.NATTypeDestNAT, Family: unix.NFPROTO_IPV4, RegAddrMin: 1},
 		})
+	}
+	if next != len(prog.Rows) {
+		// 行はポートの順に並ぶので、ここに来るのは Plan.Ports に無いルールの行だけである
+		return fmt.Errorf("rule %s: admission row does not follow the port order", prog.Rows[next].RuleID)
 	}
 
 	const ipsDstNAT = 0x20 // IPS_DST_NAT:ct status dnat
@@ -314,34 +304,18 @@ func counterDrop() []expr.Any {
 	return []expr.Any{&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictDrop}}
 }
 
-// limitOver は `limit rate over N/unit`。burst は policy.TokenBucketBurst(nft の既定値の 5。
-// design.md 7a.9 節「IR の形」の評価の定数)。
-func limitOver(r proto.Rate) *expr.Limit {
+// limitOver は `limit rate over N/unit burst B packets`。burst は行の列が持つ値
+// (policy.TokenBucketBurst。nft の既定値の 5。design.md 7a.9 節「IR の形」の評価の定数)。
+func limitOver(r proto.Rate, burst uint32) (*expr.Limit, error) {
 	units := map[proto.RateUnit]expr.LimitTime{
 		proto.PerSecond: expr.LimitTimeSecond, proto.PerMinute: expr.LimitTimeMinute,
 		proto.PerHour: expr.LimitTimeHour, proto.PerDay: expr.LimitTimeDay, proto.PerWeek: expr.LimitTimeWeek,
 	}
-	return &expr.Limit{Type: expr.LimitTypePkts, Rate: r.Count, Over: true, Unit: units[r.Unit], Burst: policy.TokenBucketBurst}
-}
-
-// flowSetName はプロトコルごとに共有する接続元フロー数の set の名前。ルール ID に依存しない
-// 固定名でよい(deny_N や meter_N と違い、プロトコルごとに 1 つしか作らないため)。
-func flowSetName(p proto.Proto) string {
-	if p == proto.TCP {
-		return "flows_tcp"
+	u, ok := units[r.Unit]
+	if !ok {
+		return nil, fmt.Errorf("rate %s has an unknown unit", r)
 	}
-	return "flows_udp"
-}
-
-// addFlowCapSet は接続元 IP ごとの同時フロー数を数える動的 set を作る。
-// ct count は conntrack のエントリの生死で状態が消えるので、meter の set と違い timeout を持たせない
-// (timeout を持つ set に ct count を組み合わせると nftables が操作を拒む)。
-func addFlowCapSet(e emitter, t *nftables.Table, p proto.Proto) (*nftables.Set, error) {
-	s := &nftables.Set{Table: t, Name: flowSetName(p), KeyType: nftables.TypeIPAddr, Dynamic: true, Size: policy.FlowSetSize}
-	if err := e.AddSet(s, nil); err != nil {
-		return nil, fmt.Errorf("flow cap set %s: %w", s.Name, err)
-	}
-	return s, nil
+	return &expr.Limit{Type: expr.LimitTypePkts, Rate: r.Count, Over: true, Unit: u, Burst: burst}, nil
 }
 
 // connlimitOver は `ct count over N`。Flags の NFT_CONNLIMIT_F_INV が「over」に当たる。
@@ -349,12 +323,66 @@ func connlimitOver(n uint32) *expr.Connlimit {
 	return &expr.Connlimit{Count: n, Flags: expr.NFT_CONNLIMIT_F_INV}
 }
 
-func addIntervalSet(e emitter, t *nftables.Table, name string, prefixes []netip.Prefix) (*nftables.Set, error) {
-	s := &nftables.Set{Table: t, Name: name, KeyType: nftables.TypeIPAddr, Interval: true}
-	if err := e.AddSet(s, intervalElements(prefixes)); err != nil {
-		return nil, fmt.Errorf("set %s: %w", name, err)
+// rowStmt は行の文を nftables の式へ写す。s は文が参照する set(参照しない文では nil)。
+func rowStmt(st polnft.Stmt, s *nftables.Set) ([]expr.Any, error) {
+	switch st.Kind {
+	case polnft.StmtSourceInSet:
+		return lookup(s, false), nil
+	case polnft.StmtSourceNotInSet:
+		return lookup(s, true), nil
+	case polnft.StmtPerSourceLimit:
+		l, err := limitOver(st.Rate, st.Burst)
+		if err != nil {
+			return nil, err
+		}
+		return dynsetAdd(s, l), nil
+	case polnft.StmtPerSourceCtCount:
+		return dynsetAdd(s, connlimitOver(st.Count)), nil
+	case polnft.StmtLimit:
+		l, err := limitOver(st.Rate, st.Burst)
+		if err != nil {
+			return nil, err
+		}
+		return []expr.Any{l}, nil
+	default:
+		return nil, fmt.Errorf("unknown admission statement %d", st.Kind)
 	}
-	return s, nil
+}
+
+// dynsetAdd は `add @set { ip saddr <e> }`。キーはレジスタ 1 に読んだ ip saddr である。
+func dynsetAdd(s *nftables.Set, e expr.Any) []expr.Any {
+	return []expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: s.Name, SetID: s.ID,
+		Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{e}}}
+}
+
+// addSet は行の列の set の宣言を nftables の set にする。キーはどれも IPv4 の送信元アドレスである。
+// 同時フロー数の set(SetFlowCount)は、ct count は conntrack のエントリの生死で状態が消えるので、
+// meter の set と違い timeout を持たせない(timeout を持つ set に ct count を組み合わせると
+// nftables が操作を拒む)。
+func addSet(e emitter, t *nftables.Table, d polnft.Set) (*nftables.Set, error) {
+	switch d.Kind {
+	case polnft.SetInterval:
+		s := &nftables.Set{Table: t, Name: d.Name, KeyType: nftables.TypeIPAddr, Interval: true}
+		if err := e.AddSet(s, intervalElements(d.Elements)); err != nil {
+			return nil, fmt.Errorf("set %s: %w", d.Name, err)
+		}
+		return s, nil
+	case polnft.SetMeter:
+		s := &nftables.Set{Table: t, Name: d.Name, KeyType: nftables.TypeIPAddr,
+			Dynamic: true, HasTimeout: true, Timeout: d.Timeout, Size: uint32(d.Size)}
+		if err := e.AddSet(s, nil); err != nil {
+			return nil, fmt.Errorf("meter: %w", err)
+		}
+		return s, nil
+	case polnft.SetFlowCount:
+		s := &nftables.Set{Table: t, Name: d.Name, KeyType: nftables.TypeIPAddr, Dynamic: true, Size: uint32(d.Size)}
+		if err := e.AddSet(s, nil); err != nil {
+			return nil, fmt.Errorf("flow cap set %s: %w", d.Name, err)
+		}
+		return s, nil
+	default:
+		return nil, fmt.Errorf("set %s: unknown kind %d", d.Name, d.Kind)
+	}
 }
 
 // intervalElements は CIDR の集合を `flags interval` の set の要素にする。
