@@ -1,0 +1,28 @@
+{
+  "comment": "per_source_rate 10/second: each source has its own bucket of 5 that starts full and refills one flow per 100ms. It applies to new flows only.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": "10/second", "new_flow_rate": null, "packet_rate": null}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a3", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a4", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a5", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a6", "want": "drop:per_source"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.2", "flow": "b1", "want": "admit"},
+    {"at_ms": 150, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a7", "want": "admit"},
+    {"at_ms": 160, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a8", "want": "drop:per_source"},
+    {"at_ms": 170, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 170, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 170, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 170, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 170, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 170, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 180, "op": "flow", "rule": "r_udp", "src": "198.51.100.2", "flow": "b2", "want": "admit"}
+  ],
+  "want_drops": {"r_udp": {"per_source": 2}},
+  "tolerances": []
+}

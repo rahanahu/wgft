@@ -1,0 +1,19 @@
+{
+  "comment": "A per-source concurrent flow cap of 0 disables the cap for that protocol only.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null},
+      {"id": "r_tcp", "proto": "tcp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null}
+    ],
+    "per_source_flow_caps": {"udp": 0, "tcp": 1}
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "u1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "u2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "u3", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "t1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "t2", "want": "drop:src_flow"}
+  ],
+  "want_drops": {"r_tcp": {"src_flow": 1}},
+  "tolerances": []
+}

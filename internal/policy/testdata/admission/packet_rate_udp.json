@@ -1,0 +1,24 @@
+{
+  "comment": "packet_rate 10/second on a UDP rule: one bucket of 5 for every datagram of the rule, including the first datagram of a new flow, refilling one datagram per 100ms.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": "10/second"}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a", "want": "drop:packet"},
+    {"at_ms": 150, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a", "want": "admit"},
+    {"at_ms": 160, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a", "want": "drop:packet"},
+    {"at_ms": 170, "op": "flow", "rule": "r_udp", "src": "198.51.100.2", "flow": "b", "want": "drop:packet"},
+    {"at_ms": 300, "op": "flow", "rule": "r_udp", "src": "198.51.100.2", "flow": "b", "want": "admit"},
+    {"at_ms": 350, "op": "packet", "rule": "r_udp", "src": "198.51.100.2", "flow": "b", "want": "admit"},
+    {"at_ms": 360, "op": "packet", "rule": "r_udp", "src": "198.51.100.2", "flow": "b", "want": "drop:packet"}
+  ],
+  "want_drops": {"r_udp": {"packet": 4}},
+  "tolerances": []
+}

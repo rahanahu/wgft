@@ -1,0 +1,21 @@
+{
+  "comment": "Today's kernel behaviour for packet_rate on a TCP rule: the packet row counts every TCP packet, the first packet of a connection included. Migration step 5 removes the packet row from TCP rules; this fixture is then rewritten so that every packet is admitted.",
+  "interim_until_step": 5,
+  "policy": {
+    "rules": [
+      {"id": "r_tcp", "proto": "tcp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": "10/second"}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
+    {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "drop:packet"},
+    {"at_ms": 150, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
+    {"at_ms": 160, "op": "flow", "rule": "r_tcp", "src": "198.51.100.2", "flow": "d", "want": "drop:packet"}
+  ],
+  "want_drops": {"r_tcp": {"packet": 2}},
+  "tolerances": []
+}

@@ -1,0 +1,21 @@
+{
+  "comment": "Source deny and allow lists on UDP and TCP rules. Deny and allow apply to every packet, and a source outside a non-empty allow list is dropped.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": ["198.51.100.0/24", "192.0.2.0/24"], "source_deny": ["203.0.113.0/24"], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null},
+      {"id": "r_tcp", "proto": "tcp", "forwarding": "transparent", "source_allow": [], "source_deny": ["203.0.113.0/24"], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.7", "flow": "u1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "192.0.2.9", "flow": "u2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "203.0.113.5", "flow": "u3", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "10.1.2.3", "flow": "u4", "want": "drop:allow"},
+    {"at_ms": 10, "op": "packet", "rule": "r_udp", "src": "198.51.100.7", "flow": "u1", "want": "admit"},
+    {"at_ms": 20, "op": "flow", "rule": "r_tcp", "src": "203.0.113.200", "flow": "t1", "want": "drop:deny"},
+    {"at_ms": 20, "op": "flow", "rule": "r_tcp", "src": "10.1.2.3", "flow": "t2", "want": "admit"},
+    {"at_ms": 30, "op": "packet", "rule": "r_tcp", "src": "10.1.2.3", "flow": "t2", "want": "admit"}
+  ],
+  "want_drops": {"r_udp": {"deny": 1, "allow": 1}, "r_tcp": {"deny": 1}},
+  "tolerances": []
+}
