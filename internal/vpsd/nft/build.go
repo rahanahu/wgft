@@ -33,6 +33,10 @@ type Config struct {
 	// 0 はそのプロトコルの上限を無効にし、対応する set も行も生成しない
 	UDPPerSourceCap int
 	TCPPerSourceCap int
+	// ProxyListening は、vpsd がプロキシモードの待ち受けを実際に開いているポート。プロキシモードの
+	// ルールは、ここにあるポートだけに接続元 IP ごとの上限の行を持つ。bind に失敗したポートでは、
+	// 同じポートの別のプロセスへの通信に wgft の上限を掛けてしまうため(仕様 6.1 節)。nil なら行を持たない
+	ProxyListening map[uint16]bool
 	// Logf は AgentAddr にないエージェントのルールを飛ばしたときの記録先。nil なら黙って飛ばす
 	Logf func(format string, args ...any)
 }
@@ -122,12 +126,44 @@ func emit(e emitter, rules []proto.Rule, cfg Config) error {
 	// 接続元 IP ごとの同時フロー数の上限(仕様 6.1, 7 節)。プロトコルごとに 1 つの動的 set を
 	// そのプロトコルの全ルールで共有し、初めてそのプロトコルのルールに出会ったときだけ作る。
 	flowSets := map[proto.Proto]*nftables.Set{}
+	addFlowCap := func(r *proto.Rule, from []expr.Any) error {
+		cap := cfg.perSourceCap(r.Proto)
+		if cap <= 0 {
+			return nil
+		}
+		if flowSets[r.Proto] == nil {
+			s, err := addFlowCapSet(e, t, r.Proto)
+			if err != nil {
+				return fmt.Errorf("rule %s: %w", r.ID, err)
+			}
+			flowSets[r.Proto] = s
+		}
+		fs := flowSets[r.Proto]
+		addRule(filterPre, Comment(r.ID, "src_flow"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
+			[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: fs.Name, SetID: fs.ID,
+				Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{connlimitOver(uint32(cap))}}},
+			counterDrop())
+		return nil
+	}
 
 	// カーネルモードで有効なルールだけが行を持つ。set 名はルール ID ではなく連番。
+	// プロキシモードのルールは vpsd が受けて中継する(6.2 節)ので DNAT も接続元制限の行も持たないが、
+	// 接続元 IP ごとの同時フロー数だけは同じ set で数え、カーネルモードのルールとの合計にする(7 節)
 	n := 0
 	for i := range rules {
 		r := &rules[i]
-		if !r.Enabled || r.VPSMode != proto.ModeKernel {
+		if !r.Enabled {
+			continue
+		}
+		if r.VPSMode == proto.ModeProxy {
+			if _, ok := cfg.AgentAddr[r.Agent]; ok && cfg.ProxyListening[r.ListenPort.Lo] {
+				if err := addFlowCap(r, match(wg, r.Proto, r.ListenPort)); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if r.VPSMode != proto.ModeKernel {
 			continue
 		}
 		// 無効化されたエージェントのルールは行を持たない(テーブル全体が組めなくなるよりよい)
@@ -169,19 +205,8 @@ func emit(e emitter, rules []proto.Rule, cfg Config) error {
 					Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{limitOver(*r.PerSourceRate)}}},
 				counterDrop())
 		}
-		if cap := cfg.perSourceCap(r.Proto); cap > 0 {
-			if flowSets[r.Proto] == nil {
-				s, err := addFlowCapSet(e, t, r.Proto)
-				if err != nil {
-					return fmt.Errorf("rule %s: %w", r.ID, err)
-				}
-				flowSets[r.Proto] = s
-			}
-			fs := flowSets[r.Proto]
-			addRule(filterPre, Comment(r.ID, "src_flow"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
-				[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: fs.Name, SetID: fs.ID,
-					Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{connlimitOver(uint32(cap))}}},
-				counterDrop())
+		if err := addFlowCap(r, from); err != nil {
+			return err
 		}
 		if r.NewFlowRate != nil {
 			addRule(filterPre, Comment(r.ID, "new_flow"), from, ctState(expr.CtStateBitNEW),

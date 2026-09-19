@@ -167,7 +167,7 @@ func (u *userspaceDataplane) ReadDrops() ([]nft.Drop, error) { return u.policy.D
 
 // ApplyNFT はルール集合をリスナーの宣言に写す。プロキシモード(PROXY protocol)のルールは
 // Daemon の proxyrelay が受け持つので、ここでは vps_mode = kernel のルールだけを開く。
-func (u *userspaceDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr) error {
+func (u *userspaceDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, _ map[uint16]bool) error {
 	u.policy.Update(rules)
 	desired := map[relay.Key]relay.Desired{}
 	for i := range rules {

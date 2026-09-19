@@ -310,6 +310,15 @@ func Run(opts Options) error {
 	if f := d.dp.EnableIPForward(st); f != nil {
 		log.Printf("warning: %s", f)
 	}
+	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)。接続元 IP ごとの数は、
+	// nftables の flows_tcp がカーネルモードのルールと合わせて数える(6.1、7 節)ので、ここでは数えない。
+	// 起動時の applyNFT が待ち受けを開き、開けたポートだけに上限の行を付けるよう、先に作る
+	proxyOpts := proxyrelay.Options{Cap: &flowcap.Counter{Total: opts.Limits.WithDefaults().TCPTotal}}
+	if uspace != nil {
+		proxyOpts.Dial = uspace.ProxyDial // ユーザー空間モードでは netstack 越しにエージェントへ
+		proxyOpts.Cap = uspace.tcpCap     // 同時接続数は relay と合計で数える(仕様 7 節)
+	}
+	d.proxy = proxyrelay.New(proxyOpts)
 	// 起動時に SQLite のルールを適用する(手作業で変えられたテーブルは宣言に戻る)
 	rules, err := st.Rules()
 	if err != nil {
@@ -326,19 +335,6 @@ func Run(opts Options) error {
 	d.flaps = &flapState{hist: map[string]map[string][]ipObs{}}
 	// stream の接続元 IP を接続の事象で記録し、往復を検知する(仕様 5.2 節)
 	d.hub.OnStreamConnect = func(agent, from string) { d.observeFlap(agent, "stream", "stream source", from) }
-	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)
-	proxyOpts := proxyrelay.Options{Cap: &flowcap.Counter{Total: opts.Limits.WithDefaults().TCPTotal, PerSource: opts.Limits.TCPPerSourceCap()}}
-	if uspace != nil {
-		proxyOpts.Dial = uspace.ProxyDial // ユーザー空間モードでは netstack 越しにエージェントへ
-		proxyOpts.Cap = uspace.tcpCap     // 同時接続数は relay と合計で数える(仕様 7 節)
-	}
-	d.proxy = proxyrelay.New(proxyOpts)
-	// 起動時のプロキシ中継の初期化(applyNFT は proxy 作成より前に走るため、ここで一度収束させる)
-	if startupRules, e := st.Rules(); e == nil {
-		_, aa, _ := d.agents()
-		d.proxy.Apply(proxyrelay.FromRules(startupRules, aa))
-		d.proxyInputHints(startupRules)
-	}
 	d.agentAPI.Handle("GET /api/v1/agents/stream", d.hub.ServeHTTP)
 	_ = st.PurgeExpiredJoinTokens()
 

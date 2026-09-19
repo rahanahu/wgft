@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -60,8 +61,10 @@ func (r *recorder) comments(chain string) []string {
 
 // testCfg は既定の接続元 IP ごとの上限(仕様 7 節。UDP 256、TCP 128)を明示して使う。
 // nft.Config はここでは既定値を推測しないので、CLI の設定層と同じ値を明示するテスト側の責務である。
+// basic.json の r_proxy(443)は、待ち受けを開けている前提にする。
 var testCfg = Config{WGInterface: "wg0", AgentAddr: map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")},
-	UDPPerSourceCap: flowcap.UDPPerSource, TCPPerSourceCap: flowcap.TCPPerSource}
+	UDPPerSourceCap: flowcap.UDPPerSource, TCPPerSourceCap: flowcap.TCPPerSource,
+	ProxyListening: map[uint16]bool{443: true}}
 
 func rate(s string) *proto.Rate {
 	r, err := proto.ParseRate(s)
@@ -97,15 +100,15 @@ func TestEmitRows(t *testing.T) {
 		t.Errorf("chains = %v, want %v", rec.chains, want)
 	}
 
-	// 無効なルールとプロキシモードのルールは set も行も持たない。set 名の連番は有効なカーネルモードのルールで数える
+	// 無効なルールは set も行も持たない。プロキシモードのルールは src_flow の行だけを持つ。set 名の連番は有効なカーネルモードのルールで数える
 	var setNames []string
 	for _, op := range rec.ops {
 		if strings.HasPrefix(op, "AddSet ") {
 			setNames = append(setNames, strings.TrimPrefix(op, "AddSet "))
 		}
 	}
-	// flows_udp / flows_tcp は、そのプロトコルの最初の有効なカーネルモードのルールでだけ作る
-	if want := []string{"deny_1", "meter_1", "flows_udp", "allow_2", "flows_tcp"}; !reflect.DeepEqual(setNames, want) {
+	// flows_udp / flows_tcp は、そのプロトコルの最初の有効なルール(プロキシモードを含む)でだけ作る
+	if want := []string{"deny_1", "meter_1", "flows_udp", "flows_tcp", "allow_2"}; !reflect.DeepEqual(setNames, want) {
 		t.Errorf("sets = %v, want %v", setNames, want)
 	}
 
@@ -113,6 +116,7 @@ func TestEmitRows(t *testing.T) {
 	// src_flow は接続元 IP ごとの同時フロー数の上限で、プロトコルごとに常に出る
 	wantPre := []string{
 		Comment("r_udp", "deny"), Comment("r_udp", "per_source"), Comment("r_udp", "src_flow"), Comment("r_udp", "new_flow"),
+		Comment("r_proxy", "src_flow"),
 		Comment("r_tcp", "allow"), Comment("r_tcp", "src_flow"), Comment("r_tcp", "packet"),
 	}
 	if got := rec.comments("filter_pre"); !reflect.DeepEqual(got, wantPre) {
@@ -127,9 +131,28 @@ func TestEmitRows(t *testing.T) {
 		}
 	}
 
+	// プロキシモードのルールの src_flow は、カーネルモードの TCP のルールと同じ flows_tcp で数える
+	// (接続元 IP ごとの上限は全ルールの合計。仕様 7 節)
+	tcpFlowLines := 0
+	for _, r := range rec.rules["filter_pre"] {
+		c, _ := userdata.GetString(r.UserData, userdata.TypeComment)
+		if c != Comment("r_proxy", "src_flow") && c != Comment("r_tcp", "src_flow") {
+			continue
+		}
+		tcpFlowLines++
+		for _, e := range r.Exprs {
+			if d, ok := e.(*expr.Dynset); ok && d.SetName != "flows_tcp" {
+				t.Errorf("%s uses set %s, want flows_tcp", c, d.SetName)
+			}
+		}
+	}
+	if tcpFlowLines != 2 {
+		t.Errorf("found %d TCP src_flow lines, want 2 (r_proxy and r_tcp)", tcpFlowLines)
+	}
+
 	// allow の lookup は反転(!=)、deny は反転しない
 	assertLookupInvert(t, rec.rules["filter_pre"][0], false)
-	assertLookupInvert(t, rec.rules["filter_pre"][4], true)
+	assertLookupInvert(t, rec.rules["filter_pre"][5], true)
 
 	// DNAT は宛先アドレスだけ(ポートのレジスタは使わない)
 	for _, r := range rec.rules["nat_pre"] {
@@ -373,3 +396,31 @@ func TestMatchPortForms(t *testing.T) {
 }
 
 func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} }
+
+// プロキシモードのルールは、vpsd が待ち受けを開けているポートにだけ接続元 IP ごとの上限の行を持つ。
+// bind に失敗したポートに行を残すと、同じポートの別のプロセスへの通信に上限が掛かる(仕様 6.1 節)。
+func TestFlowCapProxyOnlyWhenListening(t *testing.T) {
+	rules := []proto.Rule{
+		{ID: "r_proxy", Agent: "home", Proto: proto.TCP, ListenPort: pr(443, 443), Target: "192.168.1.30:443",
+			VPSMode: proto.ModeProxy, Enabled: true},
+		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
+			VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	for _, listening := range []map[uint16]bool{nil, {}, {8443: true}} {
+		cfg := testCfg
+		cfg.ProxyListening = listening
+		rec := newRecorder()
+		if err := emit(rec, rules, cfg); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range rec.comments("filter_pre") {
+			if c == Comment("r_proxy", "src_flow") {
+				t.Errorf("ProxyListening=%v: r_proxy has a src_flow line although its listener is not open", listening)
+			}
+		}
+		// カーネルモードの TCP のルールの行は、プロキシの待ち受けに関係なく残る
+		if !slices.Contains(rec.comments("filter_pre"), Comment("r_tcp", "src_flow")) {
+			t.Errorf("ProxyListening=%v: r_tcp lost its src_flow line", listening)
+		}
+	}
+}

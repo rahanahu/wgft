@@ -111,27 +111,30 @@ func FromRules(rules []proto.Rule, agentAddr map[string]netip.Addr) []Rule {
 	return out
 }
 
-// Apply は宣言に収束させる。新しい中継を開き、消えたものは閉じ、
-// 残るものは接続元制限を更新して、許可されなくなった進行中の接続を閉じる(仕様 6.2 節)。
-func (m *Manager) Apply(rules []Rule) {
+// Apply は宣言に収束させる(Prepare の直後に Commit する)。
+func (m *Manager) Apply(rules []Rule) { m.Prepare(rules).Commit() }
+
+// Prepared は、Prepare で開いた新しい待ち受けを、Commit か Rollback まで保留する(仕様 6.1、6.2 節)。
+// nftables の差し替えが失敗したときに、待ち受けと nftables の片方だけが新しい状態になるのを防ぐ。
+type Prepared struct {
+	m      *Manager
+	want   map[uint16]Rule
+	opened map[uint16]net.Listener
+	done   bool
+}
+
+// Prepare は、宣言のうちまだ開いていない待ち受けだけを開く。既存の待ち受けは閉じず、
+// 新しい待ち受けも Commit まで中継を始めない。bind に失敗したポートはログに出して飛ばし、
+// 次の Prepare で開き直す。
+func (m *Manager) Prepare(rules []Rule) *Prepared {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	want := map[uint16]Rule{}
+	p := &Prepared{m: m, want: map[uint16]Rule{}, opened: map[uint16]net.Listener{}}
 	for _, r := range rules {
-		want[r.ListenPort] = r
+		p.want[r.ListenPort] = r
 	}
-	// 消えたものを閉じる
-	for port, l := range m.ls {
-		if _, ok := want[port]; !ok {
-			l.close()
-			delete(m.ls, port)
-			m.opts.Logf("proxy: closed relay for %d", port)
-		}
-	}
-	// 開く・更新する
-	for port, r := range want {
-		if l, ok := m.ls[port]; ok {
-			l.updateRestriction(r)
+	for port := range p.want {
+		if _, ok := m.ls[port]; ok {
 			continue
 		}
 		ln, err := m.opts.Listen(port)
@@ -139,10 +142,70 @@ func (m *Manager) Apply(rules []Rule) {
 			m.opts.Logf("proxy: cannot open listener for %d: %v", port, err)
 			continue
 		}
+		p.opened[port] = ln
+	}
+	return p
+}
+
+// Listening は、Commit した後に待ち受けているポート(残る待ち受けと、新しく開けた待ち受け)。
+// 消えるポートと bind に失敗したポートは含まない。nftables の接続元 IP ごとの上限の行はこのポートにだけ付ける。
+func (p *Prepared) Listening() map[uint16]bool {
+	p.m.mu.Lock()
+	defer p.m.mu.Unlock()
+	out := map[uint16]bool{}
+	for port := range p.want {
+		if _, ok := p.m.ls[port]; ok {
+			out[port] = true
+		}
+	}
+	for port := range p.opened {
+		out[port] = true
+	}
+	return out
+}
+
+// Commit は、新しい待ち受けで中継を始め、宣言から消えた待ち受けを閉じ、残るものの接続元制限を
+// 更新して、許可されなくなった進行中の接続を閉じる(仕様 6.2 節)。
+func (p *Prepared) Commit() {
+	if p.done {
+		return
+	}
+	p.done = true
+	m := p.m
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for port, l := range m.ls {
+		if _, ok := p.want[port]; !ok {
+			l.close()
+			delete(m.ls, port)
+			m.opts.Logf("proxy: closed relay for %d", port)
+		}
+	}
+	for port, r := range p.want {
+		if l, ok := m.ls[port]; ok {
+			l.updateRestriction(r)
+			continue
+		}
+		ln, ok := p.opened[port]
+		if !ok {
+			continue
+		}
 		l := &listener{rule: r, ln: ln, conns: map[net.Conn]string{}}
 		m.ls[port] = l
 		go m.serve(l)
 		m.opts.Logf("proxy: opened relay %d -> %s:%d proxy_protocol=%v", port, r.AgentAddr, r.AgentPort, r.ProxyProtocol)
+	}
+}
+
+// Rollback は Prepare で開いた待ち受けを閉じる。既存の待ち受けには触らない。
+func (p *Prepared) Rollback() {
+	if p.done {
+		return
+	}
+	p.done = true
+	for port, ln := range p.opened {
+		ln.Close()
+		p.m.opts.Logf("proxy: released listener for %d (dataplane apply failed)", port)
 	}
 }
 
