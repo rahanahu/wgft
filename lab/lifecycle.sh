@@ -36,10 +36,14 @@
 #      and for the agent (which relays every connection regardless of the server's mode).
 #
 # Requires `lab/lab build` (wgft and echo in /usr/local/bin of the VM) and the netns topology
-# (`lab/lab net up`). Leftovers from earlier runs are killed first. Waits for the admin API
-# (and for agent registration) to respond instead of using fixed sleeps wherever the timing of
-# a check matters; short fixed sleeps remain where a nftables/conntrack change just needs to
-# take effect, matching e2e.sh and friends.
+# (`lab/lab net up`). Leftovers from earlier runs are killed first. Wherever a step waits on
+# something observable (the admin API answering, an agent registering, a rule's dataplane effect,
+# a log line, a process exiting), it polls for that condition instead of a fixed sleep, with
+# wait_until where the assertion right after re-checks the same condition (so a timeout still
+# surfaces as that assertion's normal FAIL), or must_wait, which fails on its own on a timeout,
+# where nothing downstream would otherwise notice. A fixed sleep remains only where the check
+# deliberately waits for wall-clock time to pass (a session held mid-flow before a restart, a
+# few real seconds of downtime); those are each commented at the call site.
 set -u
 ulimit -n 100000 2>/dev/null || true  # check 5 floods thousands of sockets from the client
 mode=${1:-kernel}
@@ -78,11 +82,62 @@ okcheck() { # okcheck <label> <ok-if-true 1/0>
 }
 skip() { echo "SKIP  $1 (does not apply to $mode mode)"; }
 
+# wait_until <timeout-seconds> <command...>: polls <command...> (a plain command or a function
+# defined in this script; it runs directly, not through a subshell, so a function sees the rest
+# of this script's other functions and variables) every 0.2s until it exits 0, or until
+# <timeout-seconds> (a whole number) elapses. Returns non-zero on timeout so that the caller's
+# own, unchanged assertion (the check/okcheck/absent right after) runs anyway and reports its
+# usual FAIL; wait_until itself never prints PASS/FAIL and never turns a real failure into a
+# silent pass.
+wait_until() {
+  local timeout=$1; shift
+  local tries=$((timeout * 5)) i
+  for ((i = 0; i < tries; i++)); do
+    "$@" >/dev/null 2>&1 && return 0
+    sleep 0.2
+  done
+  return 1
+}
+# must_wait <label> <timeout-seconds> <command...>: like wait_until, but for a wait whose
+# condition is NOT re-checked by the assertion that follows it (an unrelated or differently-named
+# rule, a process actually having exited, a log line that a later assertion does not also grep
+# for). Without this, a timeout would fall through to the next step in whatever state things
+# happened to be in, and a later, unrelated assertion could still pass "by accident" even though
+# the thing this wait was actually confirming never happened (the script does not run with
+# `set -e`, so a bare wait_until's non-zero return is otherwise ignored). On timeout this prints
+# FAIL and sets fail=1 itself, the same way check/okcheck/absent do.
+must_wait() {
+  local label=$1 timeout=$2; shift 2
+  if wait_until "$timeout" "$@"; then
+    return 0
+  fi
+  echo "FAIL  $label: timed out"
+  fail=1
+  return 1
+}
+
 vps() { ip netns exec vps "$@"; }
 client() { ip netns exec client bash -c "$1"; }
 
-wait_admin() { for _ in $(seq 1 60); do vps wgft agent ls --admin "$ADMIN" >/dev/null 2>&1 && return 0; sleep 0.5; done; echo "!! admin api did not come up" >&2; return 1; }
-wait_agent() { for _ in $(seq 1 60); do vps wgft agent ls --admin "$ADMIN" 2>/dev/null | tail -1 | grep -q "$1" && return 0; sleep 0.5; done; echo "!! agent $1 did not register" >&2; return 1; }
+admin_up() { vps wgft agent ls --admin "$ADMIN" >/dev/null 2>&1; }
+wait_admin() { wait_until 30 admin_up || { echo "!! admin api did not come up" >&2; return 1; }; }
+agent_registered() { vps wgft agent ls --admin "$ADMIN" 2>/dev/null | tail -1 | grep -q "$1"; }
+wait_agent() { wait_until 30 agent_registered "$1" || { echo "!! agent $1 did not register" >&2; return 1; }; }
+
+# tcp_probe_ok/udp_probe_ok <port>: a single short-timeout round trip through tools/echo, used to
+# poll for "the rule just added/retargeted actually forwards" instead of guessing how long that
+# takes; the check right after this always redoes the same probe (with its own, unchanged
+# timeout) to produce the value it asserts on.
+tcp_probe_ok() { [[ "$(client "echo hi | socat -t 1 - TCP:198.51.100.1:$1" 2>/dev/null)" == *tcp-echo* ]]; }
+udp_probe_ok() { [[ "$(client "echo hi | socat -t 1 - UDP:198.51.100.1:$1" 2>/dev/null)" == *udp-echo* ]]; }
+# tcp_flow_gone/tcp_flow_up <port>: flows_established (defined below) reaching 0 / at least 1.
+tcp_flow_gone() { [ "$(flows_established "$1")" = 0 ]; }
+tcp_flow_up() { [ "$(flows_established "$1")" -ge 1 ]; }
+# log_has <log-file> <substring>: the log already contains the line an okcheck/check is about to
+# grep for, so we stop polling the moment the server has actually written it.
+log_has() { grep -q "$2" "$1" 2>/dev/null; }
+# proc_gone <pid>: the process no longer exists (kill_server and check3b's foreign nft -i use it).
+proc_gone() { ! kill -0 "$1" 2>/dev/null; }
 
 ensure_wgftlab() { id wgftlab >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin wgftlab; }
 
@@ -101,12 +156,16 @@ start_server() {
   disown
 }
 kill_server() {
+  local p
   for p in $(pgrep -x wgft); do
-    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' server run' && kill "$p"
+    if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' server run'; then
+      kill "$p"
+      must_wait "kill_server: pid $p (server run) exited" 5 proc_gone "$p"
+    fi
   done
-  sleep 1
 }
-kill_all() { pkill -x wgft; pkill -x echo; pkill -x socat; sleep 1; }
+none_running() { ! pgrep -x wgft >/dev/null 2>&1 && ! pgrep -x echo >/dev/null 2>&1 && ! pgrep -x socat >/dev/null 2>&1; }
+kill_all() { pkill -x wgft; pkill -x echo; pkill -x socat; must_wait "kill_all: leftover wgft/echo/socat processes gone" 5 none_running; }
 reset_kernel_state() {
   vps ip link del wgft0 2>/dev/null
   vps nft delete table inet wgft 2>/dev/null
@@ -135,6 +194,29 @@ for r in d['rules']:
 json.dump(d['rules'], open('$f', 'w'))
 "
   vps wgft rule import "$f" --admin "$ADMIN" >/dev/null
+}
+# rule_field <rule-id> <json-field>: that field's current value for that rule, via the admin
+# API's own JSON, or empty if the rule is gone. `rule add`/`rule set`/`rule rm`/`rule import` all
+# apply synchronously (the server writes to SQLite and pushes to nftables before the CLI
+# returns), so this and rule_absent below almost always match on their first poll; they still go
+# through wait_until, not a bare check, so a genuine regression in that synchronicity reports the
+# usual FAIL instead of racing.
+rule_field() {
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for r in d['rules']:
+    if r['id'] == '$1':
+        print(r.get('$2', ''))
+"
+}
+rule_field_is() { [ "$(rule_field "$1" "$2")" = "$3" ]; }
+rule_absent() {
+  ! vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+sys.exit(0 if any(r['id'] == '$1' for r in d['rules']) else 1)
+"
 }
 rss_mib() { awk '/VmRSS/{print int($2/1024)}' "/proc/$1/status" 2>/dev/null; }
 # find_wgft_pid <substring>: the pid of the "wgft" process whose cmdline contains <substring>
@@ -224,71 +306,119 @@ print('summary oks=%d fails=%d failed_rounds=%s' % (oks, len(fails), ','.join(ma
 PYEOF
   cat > "$PY/flood.py" <<'PYEOF'
 # flood.py udp|tcp <dst-ip> <dst-port> <src-ips-csv> <attempts-per-src> [hold-seconds]
-# Opens sockets from each of several source addresses (threaded), optionally holds them open
-# for <hold-seconds> before closing, and prints "<kind>: attempted=<n> established=<n>" (tcp)
-# or "<kind>: attempted=<n> answered=<n>" (udp). Used to fill and overflow the flow caps.
-import socket, sys, threading, time
+# Opens sockets from each of several source addresses, all non-blocking and driven from one
+# selectors.DefaultSelector event loop instead of one OS thread per socket: at the thousands of
+# attempts check 5 needs to fill and overflow the flow caps, a thread per socket makes Python's
+# GIL and per-thread setup cost the dominant wall-clock cost, not the actual network round trip
+# (measured: ~70s of a ~90s check for 5460 UDP attempts, before this rewrote it). Optionally
+# holds established TCP connections open for <hold-seconds> before closing, and prints
+# "<kind>: attempted=<n> established=<n>" (tcp) or "<kind>: attempted=<n> answered=<n>" (udp).
+import selectors
+import socket
+import sys
+import time
 
 kind, dst, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
 srcs = sys.argv[4].split(',')
 per = int(sys.argv[5])
 hold = float(sys.argv[6]) if len(sys.argv) > 6 else 0
-
-socks = []
-lock = threading.Lock()
-
-
-def one(src):
-    if kind == 'udp':
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.bind((src, 0))
-        s.settimeout(0.3)
-        s.sendto(b'f', (dst, port))
-    else:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind((src, 0))
-        s.settimeout(2)
-        try:
-            s.connect((dst, port))
-        except OSError:
-            s.close()
-            return
-    with lock:
-        socks.append(s)
-
-
-threads = []
-for src in srcs:
-    for _ in range(per):
-        t = threading.Thread(target=one, args=(src,))
-        threads.append(t)
-        t.start()
-        if len(threads) % 100 == 0:
-            time.sleep(0.02)
-for t in threads:
-    t.join()
+attempted = len(srcs) * per
 
 if kind == 'udp':
-    time.sleep(1.5)
-    answered = 0
-    for s in socks:
-        s.settimeout(0.05)
+    socks = []
+    for src in srcs:
+        for _ in range(per):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.bind((src, 0))
+            s.setblocking(False)
+            socks.append(s)
+    # a plain send-them-all-at-once loop is fast enough to overwhelm the userspace relay's own
+    # per-packet processing (measured: bursting all 5460 sends dropped the answered count to a
+    # small fraction of the per-rule cap, well under what a paced send reliably delivers), so
+    # this paces sends in small batches, the same shape as the old thread-per-socket version's
+    # incidental pacing (its thread creation overhead alone spread sends out, without meaning to).
+    for i, s in enumerate(socks):
         try:
-            s.recvfrom(2048)
-            answered += 1
+            s.sendto(b'f', (dst, port))
         except OSError:
             pass
-    print('udp: attempted=%d answered=%d' % (len(srcs) * per, answered))
-else:
-    print('tcp: attempted=%d established=%d' % (len(srcs) * per, len(socks)))
+        if (i + 1) % 200 == 0:
+            time.sleep(0.05)
 
-if hold:
-    time.sleep(hold)
-for s in socks:
-    try:
+    sel = selectors.DefaultSelector()
+    for s in socks:
+        sel.register(s, selectors.EVENT_READ)
+    answered = 0
+    deadline = time.monotonic() + 2.5
+    while sel.get_map():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        events = sel.select(timeout=remaining)
+        if not events:
+            break
+        for key, _ in events:
+            sel.unregister(key.fileobj)
+            try:
+                key.fileobj.recvfrom(2048)
+                answered += 1
+            except OSError:
+                pass
+    print('udp: attempted=%d answered=%d' % (attempted, answered))
+    for s in socks:
         s.close()
-    except OSError:
-        pass
+else:
+    sel = selectors.DefaultSelector()
+    for src in srcs:
+        for _ in range(per):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind((src, 0))
+            except OSError:
+                s.close()
+                continue
+            s.setblocking(False)
+            try:
+                s.connect((dst, port))
+            except BlockingIOError:
+                pass
+            except OSError:
+                s.close()
+                continue
+            sel.register(s, selectors.EVENT_WRITE)
+
+    established = []
+    deadline = time.monotonic() + 5
+    while sel.get_map():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        events = sel.select(timeout=remaining)
+        if not events:
+            break
+        for key, _ in events:
+            s = key.fileobj
+            sel.unregister(s)
+            if s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0:
+                s.setblocking(True)
+                established.append(s)
+            else:
+                s.close()
+    for key in list(sel.get_map().values()):
+        key.fileobj.close()
+
+    # flush=True: the shell side must_waits for this exact line to appear in the (redirected to a
+    # file) log while this process is still running and holding connections open, before it
+    # samples RSS; stdout to a file is fully buffered by default, so without an explicit flush
+    # the line could sit unwritten until this process exits, well after the hold is over.
+    print('tcp: attempted=%d established=%d' % (attempted, len(established)), flush=True)
+    if hold:
+        time.sleep(hold)
+    for s in established:
+        try:
+            s.close()
+        except OSError:
+            pass
 PYEOF
 }
 
@@ -312,7 +442,10 @@ check1() {
 
   vps wgft rule add --agent home --tcp 39980 --to 192.168.50.3:25580 --admin "$ADMIN" >/dev/null
   vps wgft rule add --agent home --udp 27020 --to 192.168.50.3:19150 --admin "$ADMIN" >/dev/null
-  sleep 2
+  # bare wait_until: re-checked immediately below by the check() calls, which redo the exact
+  # same probe with their own (unchanged) timeout and would FAIL on the unmatched substring.
+  wait_until 10 tcp_probe_ok 39980
+  wait_until 10 udp_probe_ok 27020
   check "tcp works before the restart" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39980')"
   check "udp works before the restart" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27020')"
 
@@ -324,8 +457,29 @@ check1() {
     > /tmp/wgft-lifecycle-c1-udp.log 2>&1 < /dev/null &
   local udp_pid=$!
 
+  # deliberate: the point of this check is a restart while the sessions are mid-flow, not just
+  # freshly established, so give tcpprobe/udpprobe (0.5s per round) a few rounds' head start
+  # before we pull the server out from under them.
   sleep 2
+  local old_pid; old_pid=$(find_wgft_pid 'server run')
   kill_server
+  # kill_server's own must_wait already fails loudly if a matched pid does not die in time, but
+  # it silently does nothing if pgrep/cmdline never matched the process in the first place; this
+  # is the general safety net for "the server is actually stopped" that the rest of this block
+  # (wg0/nft/conntrack while stopped) assumes.
+  okcheck "no wgft server run process remains after kill_server" "$([ -z "$(find_wgft_pid 'server run')" ] && echo 1 || echo 0)"
+  if [ -n "$(find_wgft_pid 'server run')" ]; then
+    # The server did not stop, so nothing below about "while the server is stopped" can be
+    # checked, and waiting on it would only hang. Stop here (the FAILs above already record it),
+    # force the leftovers down (SIGCONT first, in case it is stopped rather than running) and clean up.
+    echo "   the server did not stop; skipping the rest of check 1"
+    kill "$tcp_pid" "$udp_pid" 2>/dev/null
+    pkill -CONT -x wgft; pkill -KILL -x wgft; pkill -x echo; pkill -x socat
+    wait "$tcp_pid" "$udp_pid" 2>/dev/null
+    vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+    rm -rf "$DATA" "$ADATA"
+    return
+  fi
   if [ "$mode" = kernel ]; then
     okcheck "wg0 still present while the server is stopped" "$(vps ip link show wgft0 >/dev/null 2>&1 && echo 1 || echo 0)"
     okcheck "table inet wgft still present while the server is stopped" "$(vps nft list table inet wgft >/dev/null 2>&1 && echo 1 || echo 0)"
@@ -337,12 +491,21 @@ check1() {
     before_line=$(vps conntrack -L -p tcp --dport 39980 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | head -1)
     before_sport=$(echo "$before_line" | grep -oE 'sport=[0-9]+' | head -1)
   fi
+  # deliberate: the design claim under test is that wg0/table inet wgft/conntrack outlive vpsd
+  # while it is stopped for a real stretch of wall-clock time, not just for an instant.
   sleep 5
   start_server "$DATA" /tmp/wgft-lifecycle-c1-server2.log
   if ! wait_admin; then echo "FAIL  check1: admin api never came back up after the restart"; fail=1; fi
+  # wait_admin only proves *an* admin API answered; if kill_server's process check above had a
+  # gap, that could still be the pre-restart process. Confirm it is actually the new one.
+  local new_pid; new_pid=$(find_wgft_pid 'server run')
+  okcheck "the restarted server is a new process, not the pre-restart one (old=$old_pid new=$new_pid)" \
+    "$([ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ] && echo 1 || echo 0)"
 
   if [ "$mode" = kernel ]; then
-    sleep 1
+    # bare wait_until: re-checked immediately below, since a timed-out (still empty or stale)
+    # after_sport would fail to match before_sport in the check() that follows.
+    wait_until 5 tcp_flow_up 39980
     local after_line after_sport
     after_line=$(vps conntrack -L -p tcp --dport 39980 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | head -1)
     after_sport=$(echo "$after_line" | grep -oE 'sport=[0-9]+' | head -1)
@@ -400,7 +563,9 @@ check2() {
   local a_tcp a_udp
   a_tcp=$(vps wgft rule add --agent home --tcp 39982 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   a_udp=$(vps wgft rule add --agent home --udp 27022 --to 192.168.50.3:19151 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
-  sleep 2
+  # bare wait_until: re-checked immediately below by the check() calls (same probe, same port).
+  wait_until 10 tcp_probe_ok 39982
+  wait_until 10 udp_probe_ok 27022
   check "tcp on A works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39982')"
   check "udp on A works before anything" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27022')"
 
@@ -413,18 +578,22 @@ check2() {
     > /tmp/wgft-lifecycle-c2-udpA.log 2>&1 < /dev/null &
   local udp_pid=$!
 
+  # each of these confirms the churn on B (and A's own note edit) actually applied before moving
+  # on; none of it is re-checked by anything else (the only assertions left in this block test
+  # A's flows surviving, not B's state), so a timeout here must fail loudly on its own or the
+  # whole point of exercising "B's churn happened, and A survived it" would be lost silently.
   local b
   b=$(vps wgft rule add --agent home --tcp 39990 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
-  sleep 1
+  must_wait "check2: rule B add applied" 3 rule_field_is "$b" target "192.168.50.3:25581"
   set_target "$b" 192.168.50.3:25582
-  sleep 1
+  must_wait "check2: rule B retarget applied" 3 rule_field_is "$b" target "192.168.50.3:25582"
   vps wgft rule disable "$b" --admin "$ADMIN" >/dev/null
-  sleep 1
+  must_wait "check2: rule B disable applied" 3 rule_field_is "$b" enabled "False"
   vps wgft rule rm "$b" --admin "$ADMIN" >/dev/null
-  sleep 1
+  must_wait "check2: rule B delete applied" 3 rule_absent "$b"
   vps wgft rule set "$a_tcp" --group lifecycle --note "changed mid-flow" --admin "$ADMIN" >/dev/null
   vps wgft rule set "$a_udp" --group lifecycle --note "changed mid-flow" --admin "$ADMIN" >/dev/null
-  sleep 1
+  must_wait "check2: A's own note edit applied" 3 rule_field_is "$a_udp" note "changed mid-flow"
 
   wait "$tcp_pid" "$udp_pid" 2>/dev/null
   local want_bytes=$((rounds * 10))
@@ -435,37 +604,45 @@ check2() {
   local a_tcp2 a_udp2
   a_tcp2=$(vps wgft rule add --agent home --tcp 39983 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   a_udp2=$(vps wgft rule add --agent home --udp 27023 --to 192.168.50.3:19151 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
-  sleep 2
+  # bare wait_until below: each is re-checked by the "before"/"after" comparison a couple of
+  # lines later, since before/after both come straight from flows_established() and a timed-out
+  # wait leaves them at whatever value that produces (0 when the rule was never ready, unchanged
+  # when the cut never happened), which the check() right after "before=1 after=0" catches.
+  wait_until 10 tcp_probe_ok 39983
   client 'python3 -c "
 import socket, time
 s = socket.create_connection((\"198.51.100.1\", 39983), timeout=5); s.send(b\"x\"); time.sleep(6)
 "' &
-  sleep 2
+  wait_until 5 tcp_flow_up 39983
   local before after
   before=$(flows_established 39983)
   set_target "$a_tcp2" 192.168.50.3:25599
-  sleep 2
+  wait_until 5 tcp_flow_gone 39983
   after=$(flows_established 39983)
   wait
   check "changing A's target cuts A's open tcp session" "before=1 after=0" "before=$before after=$after"
 
   check "udp on the second A still worked before the target change" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27023')"
   set_target "$a_udp2" 192.168.50.3:19199
-  sleep 1
+  # bare wait_until: re-checked by the absent() call right after, since a target that never
+  # actually changed would still answer with "udp-echo", which absent() treats as a failure.
+  wait_until 3 rule_field_is "$a_udp2" target "192.168.50.3:19199"
   absent "changing A's target silences its udp flow" "udp-echo" "$(client 'echo hi | socat -t 2 - UDP:198.51.100.1:27023' 2>&1)"
 
   echo "-- deleting A cuts its flows too"
   local a_tcp3
   a_tcp3=$(vps wgft rule add --agent home --tcp 39984 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
-  sleep 2
+  # bare wait_until below: same reasoning as the a_tcp2 block above (before/after feed straight
+  # into the "before=1 after=0" check that follows).
+  wait_until 10 tcp_probe_ok 39984
   client 'python3 -c "
 import socket, time
 s = socket.create_connection((\"198.51.100.1\", 39984), timeout=5); s.send(b\"x\"); time.sleep(6)
 "' &
-  sleep 2
+  wait_until 5 tcp_flow_up 39984
   before=$(flows_established 39984)
   vps wgft rule rm "$a_tcp3" --admin "$ADMIN" >/dev/null
-  sleep 2
+  wait_until 5 tcp_flow_gone 39984
   after=$(flows_established 39984)
   wait
   check "deleting A cuts A's open tcp session" "before=1 after=0" "before=$before after=$after"
@@ -497,20 +674,28 @@ check3() {
   if ! wait_agent home; then echo "FAIL  check3 setup: agent never registered"; fail=1; return; fi
 
   src_flow_lines() { vps nft list table inet wgft 2>/dev/null | grep -c "dport 8461 .*src_flow"; }
-  squat() { vps setsid nohup socat TCP-LISTEN:8461,reuseaddr,fork EXEC:/bin/cat > /tmp/wgft-lifecycle-c3-squat.log 2>&1 < /dev/null & disown; sleep 0.5; }
-  unsquat() { pkill -x socat; sleep 0.5; }
+  src_flow_present() { [ "$(src_flow_lines)" -ge 1 ]; }
+  port_listening() { vps ss -ltn 2>/dev/null | grep -q ":$1 "; }
+  port_free() { ! port_listening "$1"; }
+  # squat/unsquat's own waits are bare: if socat never actually bound (or never actually freed)
+  # 8461, the very next block's okcheck/check would see the opposite of what it expects (an
+  # accounting line where there should be none, or none where one should appear) and FAIL.
+  squat() { vps setsid nohup socat TCP-LISTEN:8461,reuseaddr,fork EXEC:/bin/cat > /tmp/wgft-lifecycle-c3-squat.log 2>&1 < /dev/null & disown; wait_until 3 port_listening 8461; }
+  unsquat() { pkill -x socat; wait_until 3 port_free 8461; }
 
   echo "-- rule creation while another process owns 8461"
   squat
   vps wgft rule add --agent home --tcp 8461 --to 192.168.50.3:25590 --proxy --admin "$ADMIN" >/dev/null
-  sleep 2
+  # bare wait_until: re-checked by the check() right after (same log, same substring).
+  wait_until 5 log_has /tmp/wgft-lifecycle-c3-server.log "cannot open listener for 8461"
   okcheck "no nft accounting line while the port is squatted" "$([ "$(src_flow_lines)" = 0 ] && echo 1 || echo 0)"
   check "bind failure is logged" "cannot open listener for 8461" "$(grep -o 'cannot open listener for 8461.*' /tmp/wgft-lifecycle-c3-server.log | tail -1)"
 
   echo "-- the port is freed; the next apply opens it"
   unsquat
   vps wgft rule add --agent home --tcp 39985 --to 192.168.50.3:25590 --admin "$ADMIN" >/dev/null
-  sleep 2
+  # bare wait_until: re-checked by the okcheck right after (same src_flow_lines condition).
+  wait_until 5 src_flow_present
   okcheck "nft accounting line appears once the port is free" "$([ "$(src_flow_lines)" -ge 1 ] && echo 1 || echo 0)"
 
   echo "-- restart while another process owns 8461"
@@ -518,7 +703,11 @@ check3() {
   squat
   start_server "$DATA" /tmp/wgft-lifecycle-c3-server2.log
   if ! wait_admin; then echo "FAIL  check3: admin api never came back up"; fail=1; return; fi
-  sleep 2
+  # must_wait: the okcheck right after asserts accounting-line *absence*, a different condition
+  # that a startup apply which simply had not run yet would also satisfy; without confirming the
+  # bind-retry was actually logged, that okcheck could pass without the restart path having been
+  # exercised at all.
+  must_wait "check3: restart-while-squatted bind failure logged" 5 log_has /tmp/wgft-lifecycle-c3-server2.log "cannot open listener for 8461"
   okcheck "no nft accounting line after a restart while squatted" "$([ "$(src_flow_lines)" = 0 ] && echo 1 || echo 0)"
 
   echo "-- restart with the port free"
@@ -526,7 +715,8 @@ check3() {
   unsquat
   start_server "$DATA" /tmp/wgft-lifecycle-c3-server3.log
   if ! wait_admin; then echo "FAIL  check3: admin api never came back up"; fail=1; return; fi
-  sleep 2
+  # bare wait_until: re-checked by the okcheck right after (same src_flow_lines condition).
+  wait_until 5 src_flow_present
   okcheck "nft accounting line appears after a restart with the port free" "$([ "$(src_flow_lines)" -ge 1 ] && echo 1 || echo 0)"
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
@@ -560,7 +750,8 @@ check3b() {
 
   local r_del
   r_del=$(vps wgft rule add --agent home --tcp 8462 --to 192.168.50.3:25597 --proxy --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
-  sleep 2
+  # bare wait_until: re-checked by the check() right after (same probe, same port).
+  wait_until 10 tcp_probe_ok 8462
   check "the soon-to-be-deleted proxy rule works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:8462')"
 
   echo "-- another process claims ownership of table inet wgft (nft -i fed through a fifo kept open, so it never sees EOF and keeps holding the table)"
@@ -568,9 +759,22 @@ check3b() {
   rm -f /tmp/wgft-lifecycle-c3b-fifo /tmp/wgft-lifecycle-c3b-owner.log
   mkfifo /tmp/wgft-lifecycle-c3b-fifo
   vps bash -c 'exec 3<>/tmp/wgft-lifecycle-c3b-fifo; nft -i <&3 >/tmp/wgft-lifecycle-c3b-owner.log 2>&1 &'
-  sleep 1
+  nft_i_ready() { vps pgrep -x nft >/dev/null 2>&1; }
+  # must_wait, and bail out here rather than falling through: the next line's `echo ... > fifo`
+  # is a plain write-only open on a named pipe, which blocks until some reader has it open. If
+  # nft -i never actually started (never became the reader), that write would hang this whole
+  # script forever instead of just failing this check, which no downstream assertion could ever
+  # turn into a normal FAIL.
+  if ! must_wait "check3b: nft -i reading the fifo" 3 nft_i_ready; then
+    rm -f /tmp/wgft-lifecycle-c3b-fifo /tmp/wgft-lifecycle-c3b-owner.log
+    kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+    rm -rf "$DATA" "$ADATA"
+    return
+  fi
   echo 'add table inet wgft { flags owner; }' > /tmp/wgft-lifecycle-c3b-fifo
-  sleep 1
+  foreign_owner_table_present() { vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner'; }
+  # bare wait_until: re-checked by the okcheck right after (same condition).
+  wait_until 5 foreign_owner_table_present
   local owner_pid; owner_pid=$(vps pgrep -x nft | head -1)
   okcheck "a foreign table with flags owner exists before we provoke the swap failure" \
     "$(vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner' && echo 1 || echo 0)"
@@ -578,7 +782,9 @@ check3b() {
   echo "-- delete the existing proxy rule and add a new one while the table is owned by someone else"
   vps wgft rule rm "$r_del" --admin "$ADMIN" >/dev/null 2>&1
   vps wgft rule add --agent home --tcp 8463 --to 192.168.50.3:25597 --proxy --admin "$ADMIN" >/dev/null 2>&1
-  sleep 1
+  # bare wait_until: re-checked by "the swap failure is logged" check() a few lines down (same
+  # log, same substring).
+  wait_until 5 log_has /tmp/wgft-lifecycle-c3b-server.log "failed to apply nftables"
   local r_add
   r_add=$(vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
@@ -595,25 +801,28 @@ for r in d['rules']:
 
   echo "-- the owner process exits; the next apply converges"
   [ -n "$owner_pid" ] && kill "$owner_pid" 2>/dev/null
-  sleep 1
+  # must_wait: if the owner never actually exits, the table stays foreign-owned and every apply
+  # from here on keeps failing for the same old reason, which the checks below could otherwise
+  # misread as some other, unrelated problem instead of "the owner never left".
+  must_wait "check3b: foreign nft -i (owner pid $owner_pid) exited" 5 proc_gone "$owner_pid"
   # `rule set --note` would not do here: a note-only edit does not change the agent-facing view
   # (design 5.3/5.4), so it neither bumps the generation nor pushes full state to the agent, and
   # the agent would never learn to open its own listener for the new rule. disable+enable does
   # (design 7: enabled toggles a listener's presence in the declared state).
   vps wgft rule disable "$r_add" --admin "$ADMIN" >/dev/null 2>&1
-  sleep 1
+  # must_wait: nothing downstream re-checks "enabled" itself (the checks below test connection
+  # behaviour), so a disable that silently never applied would not be caught any other way.
+  must_wait "check3b: rule (re)add disable applied" 3 rule_field_is "$r_add" enabled "False"
   vps wgft rule enable "$r_add" --admin "$ADMIN" >/dev/null 2>&1
-  sleep 2
+  tcp_refused() { [[ "$(client "echo hi | socat -t 1 - TCP:198.51.100.1:$1" 2>&1)" == *"Connection refused"* ]]; }
+  # bare wait_until: re-checked by the check() right after (same probe, same port).
+  wait_until 10 tcp_refused 8462
   check "once the owner is gone, the deleted rule's listener is finally closed" "Connection refused" "$(client 'echo hi | socat -t 2 - TCP:198.51.100.1:8462' 2>&1)"
   # the agent only opens its own local listener for the new rule once it receives the full state
   # over the stream, a round trip through the WG tunnel; poll instead of trusting a fixed sleep.
-  local got=""
-  for _ in $(seq 1 10); do
-    got=$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:8463')
-    [[ "$got" == *tcp-echo* ]] && break
-    sleep 1
-  done
-  check "once the owner is gone, the newly-added rule now actually works" "tcp-echo" "$got"
+  # bare wait_until: re-checked by the check() right after (same probe, same port).
+  wait_until 10 tcp_probe_ok 8463
+  check "once the owner is gone, the newly-added rule now actually works" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:8463')"
 
   rm -f /tmp/wgft-lifecycle-c3b-fifo /tmp/wgft-lifecycle-c3b-owner.log
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
@@ -703,18 +912,31 @@ check5_server_memory() {
     else
       vps wgft rule add --agent home --udp 27040 --to 192.168.50.3:19160 --admin "$ADMIN" >/dev/null
       vps wgft rule add --agent home --tcp 39995 --to 192.168.50.3:25595 --admin "$ADMIN" >/dev/null
-      sleep 2
+      # bare wait_until: a rule that was never actually ready surfaces downstream as an
+      # out-of-range held/answered count (0, not 1000..1024 or 3900..4096), which the okchecks
+      # below correctly turn into a FAIL.
+      wait_until 10 tcp_probe_ok 39995
+      wait_until 10 udp_probe_ok 27040
       local spid; spid=$(find_wgft_pid 'server run')
 
       local udp_out; udp_out=$(ip netns exec client python3 "$PY/flood.py" udp 198.51.100.1 27040 "$addrs" 260)
       echo "   $udp_out"
-      ip netns exec client python3 "$PY/flood.py" tcp 198.51.100.1 39995 "$addrs" 60 12 > /tmp/wgft-lifecycle-c5s-tcpflood.log 2>&1 &
+      ip netns exec client python3 "$PY/flood.py" tcp 198.51.100.1 39995 "$addrs" 60 5 > /tmp/wgft-lifecycle-c5s-tcpflood.log 2>&1 &
       local flood_pid=$!
-      sleep 7
       # a client-side connect() can succeed (three-way handshake done) even for an over-cap
       # connection that the relay accepts and immediately RSTs, so the flood's own "established"
       # count is not trustworthy; count on the accepting
       # side instead: the VPS's public listener, which vpsd itself holds in userspace mode.
+      c5s_held_near_cap() { [ "$(vps ss -tn state established '( sport = :39995 )' | grep -c ':39995')" -ge 1000 ]; }
+      # must_wait, in order: first confirm the flood has finished *attempting* every one of its
+      # 1260 connections (flood.py only prints this once every attempt has completed or failed,
+      # not just once the cap is reached), then confirm the accepting side has settled on a held
+      # count near the cap. Sampling RSS before both of these could catch the relay mid-flight,
+      # before it has finished accepting-and-immediately-rejecting the over-cap connections,
+      # which is exactly the memory-growth-under-continued-rejection regression this check
+      # exists to catch (RSS sampled too early could simply miss it).
+      must_wait "check5 (server): tcp flood finished attempting all connections" 10 log_has /tmp/wgft-lifecycle-c5s-tcpflood.log "tcp: attempted="
+      must_wait "check5 (server): tcp held count reaches the per-rule cap" 10 c5s_held_near_cap
       local held; held=$(vps ss -tn state established '( sport = :39995 )' | grep -c ':39995')
       local rss; rss=$(rss_mib "$spid")
       wait "$flood_pid"
@@ -762,18 +984,26 @@ check5_agent_memory() {
     else
       vps wgft rule add --agent home --udp 27041 --to 192.168.50.3:19161 --admin "$ADMIN" >/dev/null
       vps wgft rule add --agent home --tcp 39996 --to 192.168.50.3:25596 --admin "$ADMIN" >/dev/null
-      sleep 2
+      # bare wait_until: a rule that was never actually ready surfaces downstream as an
+      # out-of-range held/answered count (0, not 1000..1024 or 3900..4096), which the okchecks
+      # below correctly turn into a FAIL.
+      wait_until 10 tcp_probe_ok 39996
+      wait_until 10 udp_probe_ok 27041
       local apid; apid=$(find_wgft_pid 'agent run')
 
       local udp_out; udp_out=$(ip netns exec client python3 "$PY/flood.py" udp 198.51.100.1 27041 "$addrs" 260)
       echo "   $udp_out"
-      ip netns exec client python3 "$PY/flood.py" tcp 198.51.100.1 39996 "$addrs" 60 12 > /tmp/wgft-lifecycle-c5a-tcpflood.log 2>&1 &
+      ip netns exec client python3 "$PY/flood.py" tcp 198.51.100.1 39996 "$addrs" 60 5 > /tmp/wgft-lifecycle-c5a-tcpflood.log 2>&1 &
       local flood_pid=$!
-      sleep 7
       # count in the home netns: the agent's own accepting side (10.200.0.2:39996) lives inside
       # its userspace netstack, not a real Linux socket, so `ss` cannot see it; the agent's
       # outgoing dial to the target on the lan host is a real socket there, one per held
       # connection, selected by the target's port as the peer (dport).
+      c5a_held_near_cap() { [ "$(ip netns exec home ss -tn state established '( dport = :25596 )' | grep -c ':25596')" -ge 1000 ]; }
+      # must_wait, in order: see check5_server_memory's identical comment above (finish
+      # attempting every connection, only then confirm the held count, only then sample RSS).
+      must_wait "check5 (agent): tcp flood finished attempting all connections" 10 log_has /tmp/wgft-lifecycle-c5a-tcpflood.log "tcp: attempted="
+      must_wait "check5 (agent): tcp held count reaches the per-rule cap" 10 c5a_held_near_cap
       local held; held=$(ip netns exec home ss -tn state established '( dport = :25596 )' | grep -c ':25596')
       local rss; rss=$(rss_mib "$apid")
       wait "$flood_pid"
