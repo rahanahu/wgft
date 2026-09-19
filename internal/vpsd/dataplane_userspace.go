@@ -169,6 +169,19 @@ func (u *userspaceDataplane) ReadDrops() ([]nft.Drop, error) { return u.policy.D
 // Daemon の proxyrelay が受け持つので、ここでは vps_mode = kernel のルールだけを開く。
 func (u *userspaceDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, _ map[uint16]bool) error {
 	u.policy.Update(rules)
+	u.relay.Apply(userspaceRelayTargets(rules, agentAddr))
+	return nil
+}
+
+// userspaceRelayTargets は、有効な vps_mode = kernel のルール(Forwarding = Transparent。
+// design.md 6.3 節)から、範囲内の個々のポートごとに 1 つの relay.Desired を組み立てる。宛先は
+// エージェントの同じポート(design.md 6.1 節「DNAT では宛先アドレスだけを書き換え、ポートは
+// 書き換えない」と同じ規則が中継にも適用される)。プロキシモードのルールは Daemon の
+// proxyrelay が受け持つのでここには含めない。ApplyNFT から切り出した純粋な関数で、
+// receiver の状態を読まないので、internal/planner の Plan と直接突き合わせて検査できる
+// (internal/planner/equivalence_test.go 相当の検査は internal/vpsd のテストが行う。
+// design.md 7a.8 節 Phase 1 の「生成される...転送挙動が変更前と一致する」の一部)。
+func userspaceRelayTargets(rules []proto.Rule, agentAddr map[string]netip.Addr) map[relay.Key]relay.Desired {
 	desired := map[relay.Key]relay.Desired{}
 	for i := range rules {
 		r := &rules[i]
@@ -183,8 +196,7 @@ func (u *userspaceDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]n
 			desired[relay.Key{Proto: r.Proto, Port: uint16(p)}] = relay.Desired{Target: net.JoinHostPort(addr.String(), strconv.Itoa(p)), RuleID: r.ID}
 		}
 	}
-	u.relay.Apply(desired)
-	return nil
+	return desired
 }
 
 // Converge は接続元制限を満たさなくなった進行中のセッションを閉じる(conntrack 収束の代わり。仕様 6.3 節)。
