@@ -58,6 +58,12 @@ func (m *Manager) startUDP(l *listener) error {
 	if err != nil {
 		return err
 	}
+	m.serveUDP(l, pc)
+	return nil
+}
+
+// serveUDP は開いたソケット pc で中継を始める。Prepare で開いたソケットは Commit でここに渡る。
+func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 	var (
 		mu       sync.Mutex
 		sessions = map[string]*udpSession{}
@@ -92,6 +98,10 @@ func (m *Manager) startUDP(l *listener) error {
 		}
 		return len(victims)
 	}
+	// UDP には待ち受けと成立済みのフローの区別が無く、セッションの応答も同じソケットから返すので、
+	// stopAccept はソケットを閉じず、新しい送信元からのデータグラムを捨てるだけにする(設計文書 7a.3 節)。
+	l.accepting.Store(true)
+	l.stopAccept = func() { l.accepting.Store(false) }
 	l.closeF = func() {
 		close(done)
 		pc.Close()
@@ -154,6 +164,9 @@ func (m *Manager) startUDP(l *listener) error {
 			s := sessions[k]
 			mu.Unlock()
 			if s == nil {
+				if !l.accepting.Load() {
+					continue
+				}
 				if m.opts.Admit != nil && !m.opts.Admit(m.ruleOf(l), addrOf(from)) {
 					continue
 				}
@@ -166,11 +179,12 @@ func (m *Manager) startUDP(l *listener) error {
 					continue
 				}
 				// target のホスト名はセッション確立時に解決する(DNS の変更は新規セッションだけに効く)
-				c, err := m.opts.Dial("udp", l.target)
+				target := m.targetOf(l)
+				c, err := m.opts.Dial("udp", target)
 				if err != nil {
 					m.opts.UDPCap.Release(src)
 					if dialLog.Allow() {
-						m.opts.Logf("udp %s: dial %s: %v", l.key, l.target, err)
+						m.opts.Logf("udp %s: dial %s: %v", l.key, target, err)
 					}
 					continue
 				}
@@ -205,11 +219,10 @@ func (m *Manager) startUDP(l *listener) error {
 			s.lastSeen.Store(time.Now().UnixNano())
 			if _, err := s.conn.Write(buf[:n]); err != nil {
 				if writeLog.Allow() {
-					m.opts.Logf("udp %s: write %d bytes to %s: %v; closing session", l.key, n, l.target, err)
+					m.opts.Logf("udp %s: write %d bytes to %s: %v; closing session", l.key, n, m.targetOf(l), err)
 				}
 				closeSession(k, s)
 			}
 		}
 	}()
-	return nil
 }
