@@ -19,6 +19,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
@@ -28,6 +29,9 @@ import (
 
 // Options は agent の起動オプション。
 type Options struct {
+	// AllowTargets は接続してよい宛先の許可一覧(仕様 7 節、WGFT_AGENT_ALLOW_TARGETS)。
+	// nil なら制限せず、vpsd が配るどの宛先へも接続する
+	AllowTargets    *allowtargets.List
 	CredentialsPath string          // 認証情報ファイル
 	Join            string          // 接続文字列(WGFT_JOIN か --join)。初回登録に使う
 	Limits          resource.Limits // 同時フロー数のプロセス全体の予算(仕様 7 節)。ゼロ値は既定値
@@ -78,6 +82,7 @@ func Run(opts Options) error {
 		return err
 	}
 	log.Printf("wgft %s agent starting: name %s, data dir %s", versionOrDev(opts.Version), nameOrUnregistered(f.Name), filepath.Dir(opts.CredentialsPath))
+	logAllowTargets(opts.AllowTargets)
 	created, err := f.EnsureKey()
 	if err != nil {
 		return err
@@ -167,7 +172,7 @@ func (rt *runtime) apply(st *proto.State) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		go tun.Run(ctx)
 		rt.tun, rt.tunCancel, rt.wgCfg = tun, cancel, st.WG
-		rt.rl = relay.New(tun, relay.Options{UDPIdleTimeout: time.Duration(st.WG.UDPTimeoutStream) * time.Second, Limits: rt.opts.Limits})
+		rt.rl = relay.New(tun, rt.relayOptions(st))
 	}
 	acts := rt.rl.Apply(relay.DesiredFromRules(st.Rules))
 	rt.gen = st.Generation
@@ -177,6 +182,30 @@ func (rt *runtime) apply(st *proto.State) error {
 	}
 	log.Printf("applied generation %d (%d actions, %d listeners)", st.Generation, len(acts), len(rt.rl.Status()))
 	return firstErr
+}
+
+// relayOptions は中継の調整値を作る。宛先の許可一覧があれば、中継が宛先へ接続するときに
+// 使う判定として渡す(仕様 7 節)。一覧が無ければ渡さないので、中継の挙動は一覧の導入前と同じになる。
+func (rt *runtime) relayOptions(st *proto.State) relay.Options {
+	o := relay.Options{
+		UDPIdleTimeout: time.Duration(st.WG.UDPTimeoutStream) * time.Second,
+		Limits:         rt.opts.Limits,
+	}
+	if rt.opts.AllowTargets != nil {
+		o.AllowTarget = rt.opts.AllowTargets.Allows
+		o.AllowTargetSource = allowtargets.Env
+	}
+	return o
+}
+
+// logAllowTargets は宛先の許可一覧の有無を起動時に 1 行で出す(仕様 7 節)。
+// 一覧が無いときに何も出さないと、制限が無いことが運用者に見えないので、無いことも出す。
+func logAllowTargets(l *allowtargets.List) {
+	if l == nil {
+		log.Printf("no target allowlist (%s is not set); the server can direct this agent to any address it can reach", allowtargets.Env)
+		return
+	}
+	log.Printf("target allowlist %s=%s; the server can direct this agent only to these addresses", allowtargets.Env, l)
 }
 
 func (rt *runtime) closeLocked() {

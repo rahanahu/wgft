@@ -187,7 +187,7 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 		}
 		if k.Proto == proto.TCP {
 			if err := m.checkTarget(d.Target); err != nil {
-				l.targetErr = err
+				setTargetErrLocked(l, err)
 				m.opts.Logf("listener %s: cannot connect to target %s: %v", k, d.Target, err)
 			}
 		}

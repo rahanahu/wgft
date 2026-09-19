@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 )
 
@@ -34,7 +35,18 @@ func agentSpecs() []spec {
 		{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir()},
 		{Env: "WGFT_JOIN", Flag: "join", Default: "", Secret: true},
 		{Env: "WGFT_NAME", Flag: "name", Default: ""},
+		{Env: allowtargets.Env, Flag: "agent-allow-targets", Default: "", Slice: true},
 	}, limitSpecs()...)
+}
+
+// allowTargetsFromConfig は宛先の許可一覧を読む(仕様 7 節)。構文の誤りは、他の値の誤りと同じく
+// 設定起因の失敗として扱い、終了コード 3 で止める(仕様 11a 節)。値が無ければ nil を返す(制限なし)。
+func allowTargetsFromConfig(c *config) (*allowtargets.List, error) {
+	l, err := allowtargets.Parse(c.str(allowtargets.Env))
+	if err != nil {
+		return nil, &configError{err: err}
+	}
+	return l, nil
 }
 
 // agentCredentialsPath は WGFT_DATA_DIR から agent.json (認証情報) のパスを決める(home 側コマンド用)。
@@ -82,7 +94,12 @@ On the VPS (against the admin API):
 			if err != nil {
 				return err
 			}
+			allow, err := allowTargetsFromConfig(c)
+			if err != nil {
+				return err
+			}
 			opts := agent.Options{
+				AllowTargets:    allow,
 				Limits:          limits,
 				CredentialsPath: c.str("WGFT_DATA_DIR") + "/agent.json",
 				Join:            c.str("WGFT_JOIN"),
@@ -100,6 +117,8 @@ On the VPS (against the admin API):
 	registerLimitFlags(rf)
 	rf.String("join", "", "join string wgft://host:port/token#sha256:..., env WGFT_JOIN")
 	rf.String("name", "", "agent name, env WGFT_NAME; optional, the join string is already bound to a name")
+	rf.String("agent-allow-targets", "",
+		"comma-separated targets the server may send traffic to, env "+allowtargets.Env+"; entries are CIDR, CIDR:port or CIDR:lo-hi; unset means no restriction")
 	rf.String("config", agentConfigPath, "dotenv config file")
 
 	pubkey := &cobra.Command{

@@ -176,6 +176,8 @@ Alpha, v0.4.0. Kernel mode has been verified on the author's VPS/home setup for 
 
 The provided server systemd unit runs wgft as an unprivileged user with only the capabilities needed for forwarding. The public surface is WireGuard, the agent API, and ports you explicitly forward; the admin API is local-only by default.
 
+The agent connects to whatever target the server sends it, so `WGFT_AGENT_ALLOW_TARGETS` on the agent host restricts that to the LAN addresses you list, keeping a compromised server out of the rest of the LAN.
+
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License

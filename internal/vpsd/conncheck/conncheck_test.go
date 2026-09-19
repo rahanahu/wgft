@@ -1,11 +1,17 @@
 package conncheck
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
+	"net/netip"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // pipeConn はテスト用の net.Conn。Read の挙動を制御する。
@@ -62,5 +68,44 @@ func TestCheck(t *testing.T) {
 				t.Errorf("got OK=%v reach=%s (%s), want OK=%v reach=%s", r.OK, r.Reach, r.Detail, tt.wantOK, tt.wantReach)
 			}
 		})
+	}
+}
+
+// loopbackNet はエージェントの中継を模す Network。本番の netstack の代わりに 127.0.0.1 に開く。
+type loopbackNet struct{}
+
+func (loopbackNet) ListenUDP(port uint16) (net.PacketConn, error) {
+	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+}
+
+func (loopbackNet) ListenTCP(port uint16) (net.Listener, error) {
+	return net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+}
+
+// 疎通確認はエージェントの中継を通るので、エージェントの宛先の許可一覧に従う(仕様 7 節)。
+// 一覧の外の宛先へのルールでは中継が接続を拒み、確認は「エージェントまでは届くが宛先に届かない」になる。
+func TestCheckObeysAgentAllowList(t *testing.T) {
+	m := relay.New(loopbackNet{}, relay.Options{
+		Logf:              t.Logf,
+		AllowTarget:       func(ap netip.AddrPort) bool { return false },
+		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
+		LookupTarget: func(ctx context.Context, host string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		},
+	})
+	defer m.Close()
+	ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	ln.Close() // 中継の待ち受けに使うポートを空ける
+	m.Apply(map[relay.Key]relay.Desired{{Proto: proto.TCP, Port: port}: {Target: "nas.lan:25565", RuleID: "r1"}})
+
+	// 拒否は RST なので、結果は「エージェントまでは届く」か、RST が接続の途中に届いた場合の
+	// 「届かない」のどちらにもなる。どちらでも疎通は失敗で、宛先には届かない
+	r := Check(net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))), Options{ObserveTime: time.Second})
+	if r.OK || (r.Reach != ReachAgent && r.Reach != ReachNone) {
+		t.Errorf("got OK=%v reach=%s (%s), want OK=false and reach %s or %s", r.OK, r.Reach, r.Detail, ReachAgent, ReachNone)
 	}
 }

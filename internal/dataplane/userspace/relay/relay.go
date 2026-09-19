@@ -8,6 +8,7 @@
 package relay
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -47,6 +48,16 @@ type Options struct {
 	Admit func(ruleID string, src netip.Addr, size int) (release func(), ok bool)
 	// AdmitPacket は成立済みの UDP セッションのデータグラム 1 つを通すか(packet_rate)。nil なら全部通す。
 	AdmitPacket func(ruleID string, size int) bool
+	// AllowTarget は宛先への接続を許すかを判定する(エージェントの宛先の許可一覧。設計文書 7 節)。
+	// nil なら制限せず、宛先の名前解決も中継では行わない。nil でなければ、TCP の接続 1 本ごと、
+	// UDP のセッション 1 つごとに、実際に接続するアドレスとポートで呼ぶ。エージェントだけが渡す
+	AllowTarget func(netip.AddrPort) bool
+	// AllowTargetSource は許可一覧の出どころ。拒否の理由に添える(エージェントでは
+	// WGFT_AGENT_ALLOW_TARGETS)。AllowTarget が nil なら使わない
+	AllowTargetSource string
+	// LookupTarget は宛先のホスト名を解決する。nil なら net.DefaultResolver。AllowTarget を
+	// 渡したときだけ使う(許可一覧は実際に接続するアドレスで判定するため)
+	LookupTarget func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
 // Key はリスナーの同一性。
@@ -108,6 +119,10 @@ type listener struct {
 	// targetErr は TCP ルールで target への接続確認が失敗したときの誤り(仕様 5.2 節)。
 	// リスナー自体は開いているので、Retry では開き直さず再確認だけする
 	targetErr error
+	// allowDenied は targetErr が今、宛先の許可一覧による拒否かどうか(設計文書 7 節)。
+	// 接続ごとに呼ばれる noteTargetAllowErr が、状態が変わらないときに Manager の錠を
+	// 取らずに済ませるための印で、targetErr と合わせて setTargetErrLocked が更新する
+	allowDenied atomic.Bool
 }
 
 // err は報告する状態。bind 失敗が優先(リスナーがないので)。
@@ -244,14 +259,17 @@ func (m *Manager) newListener(k Key, d Desired) *listener {
 
 func (m *Manager) openLocked(k Key, d Desired) {
 	l := m.newListener(k, d)
-	var err error
-	switch k.Proto {
-	case proto.UDP:
-		err = m.startUDP(l)
-	case proto.TCP:
-		err = m.startTCP(l)
-	default:
-		err = fmt.Errorf("unknown proto %q", k.Proto)
+	// 許可一覧の外にある IP リテラルの宛先は、待ち受けを開かずに理由を報告する(設計文書 7 節)
+	err := m.allowedAtApply(d.Target)
+	if err == nil {
+		switch k.Proto {
+		case proto.UDP:
+			err = m.startUDP(l)
+		case proto.TCP:
+			err = m.startTCP(l)
+		default:
+			err = fmt.Errorf("unknown proto %q", k.Proto)
+		}
 	}
 	if err != nil {
 		// 開けなくても登録しておき、状態として見せる。次の Apply(再試行)で開き直す
@@ -261,7 +279,7 @@ func (m *Manager) openLocked(k Key, d Desired) {
 	} else {
 		m.opts.Logf("listener %s -> %s opened; rule %s", k, d.Target, d.RuleID)
 		if k.Proto == proto.TCP {
-			l.targetErr = m.checkTarget(l.target)
+			setTargetErrLocked(l, m.checkTarget(l.target))
 			if l.targetErr != nil {
 				m.opts.Logf("listener %s: cannot connect to target %s: %v", k, l.target, l.targetErr)
 			}
@@ -271,8 +289,9 @@ func (m *Manager) openLocked(k Key, d Desired) {
 }
 
 // checkTarget は TCP の target へ試し接続する(接続してすぐ閉じる)。UDP は到達確認ができないので呼ばない。
+// 許可一覧があれば、この試し接続も一覧に従う(一覧の外のアドレスへ接続を試みないため)。
 func (m *Manager) checkTarget(target string) error {
-	c, err := m.opts.Dial("tcp", target)
+	c, err := m.dialTarget("tcp", target)
 	if err != nil {
 		return err
 	}
@@ -294,7 +313,7 @@ func (m *Manager) Retry() {
 			continue
 		}
 		if k.Proto == proto.TCP {
-			l.targetErr = m.checkTarget(l.target)
+			setTargetErrLocked(l, m.checkTarget(l.target))
 		}
 	}
 }
