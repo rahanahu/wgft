@@ -16,6 +16,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/netpipe"
+	"github.com/rahanahu/wgft/internal/policy"
 )
 
 // Rule は中継 1 つ分の宣言。
@@ -461,21 +462,11 @@ func (l *listener) close() {
 	l.mu.Unlock()
 }
 
+// sourceAllowed の deny/allow の判定は internal/policy.RulePolicy.SourceAllowed に委ねる
+// (design.md 7a.9 節「Phase 5 の移行の手順」1:4 か所に分かれていた同じ判定を IR の 1 実装へ
+// 集約する最初の 1 か所)。
 func sourceAllowed(src netip.Addr, r Rule) bool {
-	for _, p := range r.SourceDeny {
-		if p.Contains(src) {
-			return false
-		}
-	}
-	if len(r.SourceAllow) == 0 {
-		return true
-	}
-	for _, p := range r.SourceAllow {
-		if p.Contains(src) {
-			return true
-		}
-	}
-	return false
+	return policy.RulePolicy{SourceDeny: r.SourceDeny, SourceAllow: r.SourceAllow}.SourceAllowed(src)
 }
 
 func ipOf(a net.Addr) netip.Addr {

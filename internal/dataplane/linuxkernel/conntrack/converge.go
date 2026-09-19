@@ -11,6 +11,7 @@ import (
 	"github.com/ti-mo/conntrack"
 
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -110,25 +111,14 @@ func allowed(f conntrack.Flow, rules []Rule) bool {
 	return false
 }
 
-// sourceAllowed は deny / allow の判定(deny が先)。Keep があればそれに従う。
+// sourceAllowed は deny / allow の判定(deny が先)。Keep があればそれに従う。deny/allow の判定
+// そのものは internal/policy.RulePolicy.SourceAllowed に委ねる(design.md 7a.9 節「Phase 5 の
+// 移行の手順」1:4 か所に分かれていた同じ判定を IR の 1 実装へ集約する最初の 1 か所)。
 func sourceAllowed(src netip.Addr, r Rule) bool {
 	if r.Keep != nil {
 		return r.Keep(src)
 	}
-	for _, p := range r.SourceDeny {
-		if p.Contains(src) {
-			return false
-		}
-	}
-	if len(r.SourceAllow) == 0 {
-		return true
-	}
-	for _, p := range r.SourceAllow {
-		if p.Contains(src) {
-			return true
-		}
-	}
-	return false
+	return policy.RulePolicy{SourceDeny: r.SourceDeny, SourceAllow: r.SourceAllow}.SourceAllowed(src)
 }
 
 func protoOf(n uint8) proto.Proto {
