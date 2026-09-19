@@ -38,7 +38,7 @@ jobs:
         run: |
           for target in windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/wgft
-            GOOS=${target%/*} GOARCH=${target#*/} go vet ./cmd/... ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/flock/...
+            GOOS=${target%/*} GOARCH=${target#*/} go vet ./cmd/... ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/flock/...
           done
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
@@ -59,7 +59,7 @@ jobs:
         with:
           go-version: "1.26.x"
       - name: test
-        run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/flock/... ./cmd/wgft/...
+        run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/flock/... ./cmd/wgft/...
 
   release-snapshot:
     # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,
