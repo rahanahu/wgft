@@ -204,7 +204,8 @@ func PeersEqual(a, b []Peer) bool {
 // disappears before the new dispatch is published. A key in both keeps want's address. A peer of
 // have whose address want gives to another key (an agent that rotated its key, or an address
 // reused after a revoke) is left out: one address routes to one peer only, and it is the declared
-// one.
+// one. A peer of have without a valid address (one Observe found with an AllowedIPs set wgft does
+// not declare) is left out too: it is not a peer an old dispatch routes to.
 func PeerUnion(want, have []Peer) []Peer {
 	out := append([]Peer(nil), want...)
 	seen := make(map[wgtypes.Key]bool, len(want)+len(have))
@@ -214,7 +215,7 @@ func PeerUnion(want, have []Peer) []Peer {
 		claimed[p.Address] = true
 	}
 	for _, p := range have {
-		if !seen[p.PublicKey] && !claimed[p.Address] {
+		if !seen[p.PublicKey] && !claimed[p.Address] && p.Address.IsValid() {
 			out = append(out, p)
 			seen[p.PublicKey] = true
 		}

@@ -109,10 +109,16 @@ func New(opts Options) *Backend {
 	return &Backend{iface: opts.Interface, adoptExisting: opts.AdoptExisting, ops: realOps{}}
 }
 
+// wgConfig maps cfg to the wg package's declaration. A peer without a valid address (an observed
+// peer whose AllowedIPs wgft did not declare) is left out, so restoring an observed peer set
+// removes it instead of configuring an empty allowed IP.
 func (b *Backend) wgConfig(cfg dataplane.WGConfig, keepPeers bool) wg.Config {
-	peers := make([]wg.Peer, len(cfg.Peers))
-	for i, p := range cfg.Peers {
-		peers[i] = wg.Peer{PublicKey: p.PublicKey, Address: p.Address}
+	peers := make([]wg.Peer, 0, len(cfg.Peers))
+	for _, p := range cfg.Peers {
+		if !p.Address.IsValid() {
+			continue
+		}
+		peers = append(peers, wg.Peer{PublicKey: p.PublicKey, Address: p.Address})
 	}
 	return wg.Config{
 		Interface: b.iface, PrivateKey: cfg.PrivateKey, ListenPort: cfg.ListenPort,
