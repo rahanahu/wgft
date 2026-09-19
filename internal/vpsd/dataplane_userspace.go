@@ -65,9 +65,9 @@ func (u *userspaceDataplane) InputPortSuggestions(port uint16) ([]string, error)
 
 func (u *userspaceDataplane) ReadDrops() ([]dataplane.Drop, error) { return u.b.ReadDrops() }
 
-// participant は Backend そのもの。ルール集合は読まない(Backend は Plan だけから組み立てる)。
+// participant は Backend そのもの。Backend は Plan だけから組み立てる。
 // プロキシモード(Relay)のルールは Daemon の proxyrelay が受け持ち、Backend は Transparent のルールだけを開く。
-func (u *userspaceDataplane) participant([]proto.Rule, map[string]netip.Addr) dataplane.Participant {
+func (u *userspaceDataplane) participant() dataplane.Participant {
 	return u.b
 }
 

@@ -62,7 +62,7 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 	// 待ち受けを閉じて旧い待ち受けと旧いテーブルを揃えたまま残し、成功したら中継を始めて不要な待ち受けを
 	// 閉じる(frontend の Commit。仕様 6.1 節)
 	plan := d.buildPlan(rules, agentAddr)
-	rt := reconcile.Runtime{Dataplane: d.dp.participant(rules, agentAddr)}
+	rt := reconcile.Runtime{Dataplane: d.dp.participant()}
 	if d.proxy != nil {
 		rt.Frontend = relayFrontend{d.proxy}
 	}
@@ -148,6 +148,15 @@ func (d *Daemon) buildPlan(rules []proto.Rule, agentAddr map[string]netip.Addr) 
 		if err != nil {
 			log.Printf("leaving a rule out of the data plane: %v", err)
 			continue
+		}
+		// Planner (Build) は無効なルールと、宛先の分からないエージェントのルールを黙って Plan.Ports
+		// から外す。以前は kernel backend の nft.emit だけがこの後者を記録していたが(Relay のルールは
+		// 記録していなかった)、Plan がその区別を吸収した今は、組み立ての入り口であるここで
+		// Forwarding を問わず一様に記録する(設計文書 7a.8 節 Phase 3)。
+		if m.Enabled {
+			if _, ok := agentAddr[m.Agent]; !ok {
+				log.Printf("rule %s: agent %q is not registered, skipping", m.ID, m.Agent)
+			}
 		}
 		normalized = append(normalized, m)
 	}

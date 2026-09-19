@@ -17,6 +17,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/flock"
+	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/vpsd/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
@@ -84,7 +85,7 @@ func TestTeardownRemovesOwnOnly(t *testing.T) {
 	path := setupStore(t, "wgft0", key)
 	mkWG(t, "wgft0", key, "10.200.0.1/24")  // 自分
 	mkWG(t, "wg0", foreign, "10.99.0.1/24") // 他人
-	if err := nft.Apply(nil, nft.Config{WGInterface: "wgft0", AgentAddr: nil}); err != nil {
+	if err := nft.Apply(planner.Plan{}, nil, nft.Config{WGInterface: "wgft0"}); err != nil {
 		t.Fatalf("wgft テーブル作成: %v", err)
 	}
 
@@ -116,7 +117,7 @@ func TestTeardownRefusesForeignInterface(t *testing.T) {
 	other, _ := wgtypes.GeneratePrivateKey()
 	path := setupStore(t, "wgft0", key)
 	mkWG(t, "wgft0", other, "10.200.0.1/24") // 鍵が meta と一致しない
-	_ = nft.Apply(nil, nft.Config{WGInterface: "wgft0", AgentAddr: nil})
+	_ = nft.Apply(planner.Plan{}, nil, nft.Config{WGInterface: "wgft0"})
 
 	var buf bytes.Buffer
 	err := Teardown(TeardownOptions{DBPath: path}, &buf)
@@ -158,7 +159,7 @@ func TestTeardownDryRun(t *testing.T) {
 	key, _ := wgtypes.GeneratePrivateKey()
 	path := setupStore(t, "wgft0", key)
 	mkWG(t, "wgft0", key, "10.200.0.1/24")
-	_ = nft.Apply(nil, nft.Config{WGInterface: "wgft0", AgentAddr: nil})
+	_ = nft.Apply(planner.Plan{}, nil, nft.Config{WGInterface: "wgft0"})
 	defer exec.Command("nft", "delete", "table", "inet", "wgft").Run()
 
 	var buf bytes.Buffer

@@ -246,11 +246,7 @@ func Run(opts Options) error {
 	}
 	defer lock.Release()
 
-	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{
-		iface:           opts.WGInterface,
-		udpPerSourceCap: opts.Limits.UDPPerSourceCap(),
-		tcpPerSourceCap: opts.Limits.TCPPerSourceCap(),
-	}}
+	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{iface: opts.WGInterface}}
 	d.reserved = proto.Reserved{opts.WGPort: "WireGuard"}
 	if ap, err := netip.ParseAddrPort(opts.AdminAddr); err == nil {
 		d.reserved[ap.Port()] = "admin API"

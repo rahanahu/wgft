@@ -2,7 +2,6 @@ package nft
 
 import (
 	"encoding/binary"
-	"fmt"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -14,6 +13,8 @@ import (
 	"github.com/google/nftables/userdata"
 
 	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/model"
+	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -59,12 +60,25 @@ func (r *recorder) comments(chain string) []string {
 	return out
 }
 
-// testCfg は既定の接続元 IP ごとの上限(仕様 7 節。UDP 256、TCP 128)を明示して使う。
-// nft.Config はここでは既定値を推測しないので、CLI の設定層と同じ値を明示するテスト側の責務である。
-// basic.json の r_proxy(443)は、待ち受けを開けている前提にする。
-var testCfg = Config{WGInterface: "wg0", AgentAddr: map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")},
-	UDPPerSourceCap: flowcap.UDPPerSource, TCPPerSourceCap: flowcap.TCPPerSource,
-	ProxyListening: map[uint16]bool{443: true}}
+// row は chain のうち comment に一致する行を返す。emit は Plan.Ports の順(Proto, ListenPort.Lo,
+// RuleID)で行を出すので、set の連番と違って個々の行の位置はルール ID から探す方が安定する。
+func (r *recorder) row(t *testing.T, chain, comment string) *nftables.Rule {
+	t.Helper()
+	for _, rule := range r.rules[chain] {
+		if c, _ := userdata.GetString(rule.UserData, userdata.TypeComment); c == comment {
+			return rule
+		}
+	}
+	t.Fatalf("%s has no row with comment %q", chain, comment)
+	return nil
+}
+
+// testCfg は wg インタフェース名だけを持つ(接続元 IP ごとの上限は Plan.Admission から、
+// エージェントのアドレスと Relay の待ち受けは Plan と relayListening から来る。設計文書 7a.8 節 Phase 3)。
+var testCfg = Config{WGInterface: "wg0"}
+
+// testAgentAddr は "home" だけを登録済みにする(testCfg 時代のデフォルトを引き継ぐ)。
+var testAgentAddr = map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")}
 
 func rate(s string) *proto.Rate {
 	r, err := proto.ParseRate(s)
@@ -72,6 +86,25 @@ func rate(s string) *proto.Rate {
 		panic(err)
 	}
 	return &r
+}
+
+// buildTestPlan は、書き込み時の検査を経ずに proto.Rule から直接 Plan を組み立てる
+// (internal/vpsd/apply.go の buildPlan と同じ経路。テストの都合で proto.ValidateRules は掛けない)。
+func buildTestPlan(t *testing.T, rules []proto.Rule, agentAddr map[string]netip.Addr, limits flowcap.Limits) planner.Plan {
+	t.Helper()
+	normalized := make([]model.Rule, 0, len(rules))
+	for _, r := range rules {
+		m, err := model.FromProto(r)
+		if err != nil {
+			t.Fatalf("model.FromProto(%s): %v", r.ID, err)
+		}
+		normalized = append(normalized, m)
+	}
+	agents := make([]planner.Agent, 0, len(agentAddr))
+	for name, a := range agentAddr {
+		agents = append(agents, planner.Agent{Name: name, Addr: a})
+	}
+	return planner.Build(planner.Input{Rules: normalized, Limits: limits, Agents: agents})
 }
 
 func TestEmitRows(t *testing.T) {
@@ -88,8 +121,10 @@ func TestEmitRows(t *testing.T) {
 			VPSMode: proto.ModeKernel, Enabled: true,
 			SourceAllow: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, PacketRate: rate("5000/second")},
 	}
+	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{})
+	relayListening := map[uint16]bool{443: true}
 	rec := newRecorder()
-	if err := emit(rec, rules, testCfg); err != nil {
+	if err := emit(rec, plan, relayListening, testCfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -100,7 +135,10 @@ func TestEmitRows(t *testing.T) {
 		t.Errorf("chains = %v, want %v", rec.chains, want)
 	}
 
-	// 無効なルールは set も行も持たない。プロキシモードのルールは src_flow の行だけを持つ。set 名の連番は有効なカーネルモードのルールで数える
+	// 無効なルールと未登録のエージェントのルールは Plan.Ports に現れないので、set も行も持たない。
+	// Relay(プロキシモード)のルールは src_flow の行だけを持つ。set 名の連番は Transparent の
+	// ルールだけで数える。Plan.Ports は (Proto, ListenPort.Lo, RuleID) の順なので、行の順は
+	// r_proxy(tcp/443) → r_tcp(tcp/25565) → r_udp(udp/2456) になる(設計文書 7a.8 節 Phase 3)。
 	var setNames []string
 	for _, op := range rec.ops {
 		if strings.HasPrefix(op, "AddSet ") {
@@ -108,21 +146,21 @@ func TestEmitRows(t *testing.T) {
 		}
 	}
 	// flows_udp / flows_tcp は、そのプロトコルの最初の有効なルール(プロキシモードを含む)でだけ作る
-	if want := []string{"deny_1", "meter_1", "flows_udp", "flows_tcp", "allow_2"}; !reflect.DeepEqual(setNames, want) {
+	if want := []string{"flows_tcp", "allow_1", "deny_2", "meter_2", "flows_udp"}; !reflect.DeepEqual(setNames, want) {
 		t.Errorf("sets = %v, want %v", setNames, want)
 	}
 
 	// 行の順序:deny、allow、per_source、src_flow、new_flow、packet。空・未設定のものは出ない。
 	// src_flow は接続元 IP ごとの同時フロー数の上限で、プロトコルごとに常に出る
 	wantPre := []string{
-		Comment("r_udp", "deny"), Comment("r_udp", "per_source"), Comment("r_udp", "src_flow"), Comment("r_udp", "new_flow"),
 		Comment("r_proxy", "src_flow"),
 		Comment("r_tcp", "allow"), Comment("r_tcp", "src_flow"), Comment("r_tcp", "packet"),
+		Comment("r_udp", "deny"), Comment("r_udp", "per_source"), Comment("r_udp", "src_flow"), Comment("r_udp", "new_flow"),
 	}
 	if got := rec.comments("filter_pre"); !reflect.DeepEqual(got, wantPre) {
 		t.Errorf("filter_pre = %v, want %v", got, wantPre)
 	}
-	if got, want := rec.comments("nat_pre"), []string{Comment("r_udp", "dnat"), Comment("r_tcp", "dnat")}; !reflect.DeepEqual(got, want) {
+	if got, want := rec.comments("nat_pre"), []string{Comment("r_tcp", "dnat"), Comment("r_udp", "dnat")}; !reflect.DeepEqual(got, want) {
 		t.Errorf("nat_pre = %v, want %v", got, want)
 	}
 	for chain, n := range map[string]int{"input": 1, "forward": 5, "postrouting": 1} {
@@ -151,8 +189,8 @@ func TestEmitRows(t *testing.T) {
 	}
 
 	// allow の lookup は反転(!=)、deny は反転しない
-	assertLookupInvert(t, rec.rules["filter_pre"][0], false)
-	assertLookupInvert(t, rec.rules["filter_pre"][5], true)
+	assertLookupInvert(t, rec.row(t, "filter_pre", Comment("r_udp", "deny")), false)
+	assertLookupInvert(t, rec.row(t, "filter_pre", Comment("r_tcp", "allow")), true)
 
 	// DNAT は宛先アドレスだけ(ポートのレジスタは使わない)
 	for _, r := range rec.rules["nat_pre"] {
@@ -188,8 +226,9 @@ func TestFlowCapSharedAcrossRules(t *testing.T) {
 		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
 			VPSMode: proto.ModeKernel, Enabled: true},
 	}
+	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{})
 	rec := newRecorder()
-	if err := emit(rec, rules, testCfg); err != nil {
+	if err := emit(rec, plan, nil, testCfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -199,13 +238,14 @@ func TestFlowCapSharedAcrossRules(t *testing.T) {
 			setNames = append(setNames, strings.TrimPrefix(op, "AddSet "))
 		}
 	}
-	// flows_udp は 1 回しか作らない(2 つ目の UDP ルールでは作り直さない)
-	if want := []string{"flows_udp", "flows_tcp"}; !reflect.DeepEqual(setNames, want) {
+	// flows_udp は 1 回しか作らない(2 つ目の UDP ルールでは作り直さない)。Plan.Ports の順で
+	// TCP のルール(25565)が先に来るので、flows_tcp が先にできる
+	if want := []string{"flows_tcp", "flows_udp"}; !reflect.DeepEqual(setNames, want) {
 		t.Errorf("sets = %v, want %v (must not create flows_udp twice)", setNames, want)
 	}
 
-	dyn1 := findDynset(t, rec.rules["filter_pre"][0]) // r_udp1 の src_flow の唯一の行
-	dyn2 := findDynset(t, rec.rules["filter_pre"][1]) // r_udp2 の src_flow の唯一の行
+	dyn1 := findDynset(t, rec.row(t, "filter_pre", Comment("r_udp1", "src_flow")))
+	dyn2 := findDynset(t, rec.row(t, "filter_pre", Comment("r_udp2", "src_flow")))
 	if dyn1.SetName != dyn2.SetName {
 		t.Errorf("two udp rules must share one set: %q vs %q", dyn1.SetName, dyn2.SetName)
 	}
@@ -216,7 +256,7 @@ func TestFlowCapSharedAcrossRules(t *testing.T) {
 		t.Errorf("udp cap = %+v, want count 256 with the over flag", got)
 	}
 
-	dyn3 := findDynset(t, rec.rules["filter_pre"][2]) // r_tcp の src_flow
+	dyn3 := findDynset(t, rec.row(t, "filter_pre", Comment("r_tcp", "src_flow")))
 	if dyn3.SetName != "flows_tcp" {
 		t.Errorf("set name = %q, want flows_tcp", dyn3.SetName)
 	}
@@ -268,10 +308,10 @@ func TestFlowCapZeroDisablesProtocol(t *testing.T) {
 		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
 			VPSMode: proto.ModeKernel, Enabled: true},
 	}
-	cfg := testCfg
-	cfg.UDPPerSourceCap = 0 // TCP は既定のまま(256/128)
+	// TCP は既定のまま(256/128)、UDP だけ外す
+	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{UDPPerSource: flowcap.PerSourceOff})
 	rec := newRecorder()
-	if err := emit(rec, rules, cfg); err != nil {
+	if err := emit(rec, plan, nil, testCfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -289,9 +329,9 @@ func TestFlowCapZeroDisablesProtocol(t *testing.T) {
 	}
 
 	// 両方 0 なら set も行も 1 つも作らない
-	cfg.TCPPerSourceCap = 0
+	plan2 := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{UDPPerSource: flowcap.PerSourceOff, TCPPerSource: flowcap.PerSourceOff})
 	rec2 := newRecorder()
-	if err := emit(rec2, rules, cfg); err != nil {
+	if err := emit(rec2, plan2, nil, testCfg); err != nil {
 		t.Fatal(err)
 	}
 	for _, op := range rec2.ops {
@@ -310,30 +350,14 @@ func TestFlowCapCustomValue(t *testing.T) {
 		{ID: "r_udp", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2456), Target: "192.168.1.20:2456",
 			VPSMode: proto.ModeKernel, Enabled: true},
 	}
-	cfg := testCfg
-	cfg.UDPPerSourceCap = 200
+	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{UDPPerSource: 200})
 	rec := newRecorder()
-	if err := emit(rec, rules, cfg); err != nil {
+	if err := emit(rec, plan, nil, testCfg); err != nil {
 		t.Fatal(err)
 	}
 	dyn := findDynset(t, rec.rules["filter_pre"][0])
 	if got := connlimitOf(t, dyn); got.Count != 200 {
 		t.Errorf("udp cap = %+v, want count 200", got)
-	}
-}
-
-func TestEmitUnknownAgent(t *testing.T) {
-	rules := []proto.Rule{{ID: "r", Agent: "nobody", Proto: proto.UDP, ListenPort: pr(1, 1),
-		Target: "h:1", VPSMode: proto.ModeKernel, Enabled: true}}
-	rec := newRecorder()
-	var logged string
-	cfg := testCfg
-	cfg.Logf = func(f string, a ...any) { logged = fmt.Sprintf(f, a...) }
-	if err := emit(rec, rules, cfg); err != nil {
-		t.Fatal(err)
-	}
-	if len(rec.rules["nat_pre"]) != 0 || !strings.Contains(logged, "nobody") {
-		t.Errorf("unknown agent must be skipped with a log: rows=%d logged=%q", len(rec.rules["nat_pre"]), logged)
 	}
 }
 
@@ -406,21 +430,20 @@ func TestFlowCapProxyOnlyWhenListening(t *testing.T) {
 		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
 			VPSMode: proto.ModeKernel, Enabled: true},
 	}
+	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{})
 	for _, listening := range []map[uint16]bool{nil, {}, {8443: true}} {
-		cfg := testCfg
-		cfg.ProxyListening = listening
 		rec := newRecorder()
-		if err := emit(rec, rules, cfg); err != nil {
+		if err := emit(rec, plan, listening, testCfg); err != nil {
 			t.Fatal(err)
 		}
 		for _, c := range rec.comments("filter_pre") {
 			if c == Comment("r_proxy", "src_flow") {
-				t.Errorf("ProxyListening=%v: r_proxy has a src_flow line although its listener is not open", listening)
+				t.Errorf("relayListening=%v: r_proxy has a src_flow line although its listener is not open", listening)
 			}
 		}
 		// カーネルモードの TCP のルールの行は、プロキシの待ち受けに関係なく残る
 		if !slices.Contains(rec.comments("filter_pre"), Comment("r_tcp", "src_flow")) {
-			t.Errorf("ProxyListening=%v: r_tcp lost its src_flow line", listening)
+			t.Errorf("relayListening=%v: r_tcp lost its src_flow line", listening)
 		}
 	}
 }

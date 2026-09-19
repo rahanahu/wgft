@@ -1,7 +1,6 @@
 package vpsd
 
 import (
-	"log"
 	"net/netip"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -14,7 +13,6 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/internal/vpsd/wg"
-	"github.com/rahanahu/wgft/proto"
 )
 
 // serverDataplane は VPS 側の転送面を Daemon から見た形。Daemon がカーネルや外部の状態を触るときは、
@@ -24,8 +22,8 @@ import (
 // 他テーブルの検査や ip_forward のような、ユーザー空間モードでは何もしないホスト側の検査を受け持つ。
 //
 // メソッドの形はいまのカーネル実装の型(wg.Config、check.Report など)をそのまま出している。
-// participant と Converge は、カーネル実装が読むルール集合と、Backend が読む Plan の両方を受け取る。
-// カーネル実装が Plan から組み立てるようになる Phase 3 で、ルール集合の引数は無くなる。
+// participant は、どちらの実装も Plan だけから table inet wgft(または userspace の宣言)を組み立てる
+// (設計文書 7a.8 節 Phase 3)。rules と agentAddr の引数は、ログの件数表示のためだけに applyNFT が残す。
 type serverDataplane interface {
 	// EnsureWG は wg インタフェースを宣言(鍵、ポート、アドレス、MTU、ピア集合)に収束させ、行った変更を返す(仕様 9 節)。
 	EnsureWG(cfg wg.Config) ([]string, error)
@@ -45,8 +43,8 @@ type serverDataplane interface {
 	ReadDrops() ([]dataplane.Drop, error)
 	// participant は、Runtime の dataplane の participant を返す(設計文書 7a.2 節)。その Commit が転送の
 	// 宣言を 1 回で公開する(カーネルでは table inet wgft の 1 トランザクションの差し替え。仕様 6.1 節)。
-	// rules と agentAddr はカーネル実装だけが読む、この適用のルール集合
-	participant(rules []proto.Rule, agentAddr map[string]netip.Addr) dataplane.Participant
+	// 組み立ての元になる Plan は Runtime.Apply が dataplane.Desired 経由で渡す
+	participant() dataplane.Participant
 	// Converge は外から入った進行中のフローを宣言に収束させ、消した数を返す(仕様 6.1、6.3 節)。
 	Converge(rules []ctconv.Rule, wgNet netip.Prefix, plan planner.Plan) (int, error)
 	// EnableIPForward は net.ipv4.ip_forward を 1 にする(仕様 6.1 節)。
@@ -59,10 +57,6 @@ type serverDataplane interface {
 // kernelDataplane はカーネルの WireGuard と nftables と conntrack を使う転送面。
 type kernelDataplane struct {
 	iface string // wg インタフェース名(既定 wgft0)
-	// udpPerSourceCap と tcpPerSourceCap は接続元 IP ごとの同時フロー数の上限(仕様 7, 11a 節)。
-	// 0 はそのプロトコルの上限を無効にする
-	udpPerSourceCap int
-	tcpPerSourceCap int
 }
 
 func (k *kernelDataplane) EnsureWG(cfg wg.Config) ([]string, error) { return wg.Ensure(cfg) }
@@ -88,38 +82,29 @@ func (k *kernelDataplane) ReadDrops() ([]dataplane.Drop, error) {
 	return out, nil
 }
 
-// participant は、この適用のルール集合から table inet wgft を組み立てる participant を返す。
-// カーネル実装は Phase 3(設計文書 7a.8 節)で Plan から組み立てる形に移すまで、ルール集合と、
-// 起動時に受け取った接続元 IP ごとの上限を読む。Plan は読まない。
-func (k *kernelDataplane) participant(rules []proto.Rule, agentAddr map[string]netip.Addr) dataplane.Participant {
-	return kernelTable{k: k, rules: rules, agentAddr: agentAddr}
+// participant は table inet wgft を Plan から組み立てる participant を返す(設計文書 7a.8 節 Phase 3)。
+func (k *kernelDataplane) participant() dataplane.Participant {
+	return kernelTable{k: k}
 }
 
 // kernelTable は、table inet wgft の 1 回の差し替えを Runtime の dataplane の participant にする。
-type kernelTable struct {
-	k         *kernelDataplane
-	rules     []proto.Rule
-	agentAddr map[string]netip.Addr
-}
+type kernelTable struct{ k *kernelDataplane }
 
 // Prepare は何も確保しない。nft.Apply が組み立てと差し替えを 1 回で行い、組み立ての失敗でも
 // 差し替えの失敗でも何も公開しない(旧いテーブルのまま残る)ので、Commit だけで dataplane の
-// Commit の契約を満たす。組み立ての失敗を Prepare へ分けるのは Phase 3 の仕事である。
+// Commit の契約を満たす(design.md 7a.2 節:kernel backend は一度の nftables トランザクションで
+// 不可分に公開するので、これで Prepare/Commit の契約を満たす)。
 func (t kernelTable) Prepare(d dataplane.Desired) (dataplane.Prepared, error) {
-	return &kernelTablePrepared{t: t, relayListening: d.RelayListening}, nil
+	return &kernelTablePrepared{t: t, desired: d}, nil
 }
 
 type kernelTablePrepared struct {
-	t              kernelTable
-	relayListening map[uint16]bool
+	t       kernelTable
+	desired dataplane.Desired
 }
 
 func (p *kernelTablePrepared) Commit() error {
-	k := p.t.k
-	return nft.Apply(p.t.rules, nft.Config{
-		WGInterface: k.iface, AgentAddr: p.t.agentAddr, Logf: log.Printf,
-		UDPPerSourceCap: k.udpPerSourceCap, TCPPerSourceCap: k.tcpPerSourceCap, ProxyListening: p.relayListening,
-	})
+	return nft.Apply(p.desired.Plan, p.desired.RelayListening, nft.Config{WGInterface: p.t.k.iface})
 }
 
 // Rollback は何もしない。Prepare は何も確保せず、失敗した Commit は何も公開していない。
