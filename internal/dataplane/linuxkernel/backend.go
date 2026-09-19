@@ -3,7 +3,11 @@
 // convergence (linuxkernel/conntrack), behind the same dataplane.Backend interface the userspace
 // Backend implements. It never imports internal/vpsd or internal/agent (design.md 7a.7 節;
 // internal/dataplane/deps_test.go checks this), so the future agent kernel backend (Phase 7) can
-// reuse it as is.
+// reuse its common kernel components: WireGuard, the platform checks, and the nft and conntrack
+// primitives. The table built here (public ports DNATed to an agent's wg address) and the
+// convergence of those DNATed flows are server-specific; the agent needs its own nft and conntrack
+// path (DNAT to the LAN target, MASQUERADE toward the LAN, agent-side convergence), to be added in
+// this package next to the server's.
 //
 // Backend's Prepare stages nothing: nft.Apply's build-then-Flush is one atomic kernel operation
 // (design.md 7a.2 節), so there is nothing reversible to separate out yet, and Commit alone already
