@@ -36,6 +36,10 @@ type Config struct {
 	// AdoptExisting が真のときだけ、鍵の一致しない既存インタフェースを引き継ぐ。
 	// 既定は偽で、他人のインタフェースは収束させず StartupRefusal で中止する。
 	AdoptExisting bool
+	// KeepPeers が真のとき、ピアには触れず(Peers は読まない)、インタフェース、鍵、ポート、
+	// アドレス、MTU だけを収束させる。起動時のインタフェースの立ち上げに使い、ピアの変更は
+	// 公開の前後に分けて行うトランザクションに任せる(設計文書 7a.3 節)。
+	KeepPeers bool
 }
 
 // StartupRefusal は、他人の wg インタフェースやポート・アドレスの衝突を見つけて
@@ -189,7 +193,11 @@ func Ensure(cfg Config) (changes []string, err error) {
 	for _, p := range cfg.Peers {
 		wantPeers[p.PublicKey] = []net.IPNet{*prefixToIPNet(netip.PrefixFrom(p.Address, 32))}
 	}
-	for _, p := range dev.Peers {
+	devPeers := dev.Peers
+	if cfg.KeepPeers {
+		devPeers, cfg.Peers = nil, nil
+	}
+	for _, p := range devPeers {
 		ips, ok := wantPeers[p.PublicKey]
 		if !ok {
 			wc.Peers = append(wc.Peers, wgtypes.PeerConfig{PublicKey: p.PublicKey, Remove: true})

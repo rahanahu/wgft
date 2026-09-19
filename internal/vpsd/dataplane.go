@@ -6,7 +6,6 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
-	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
@@ -18,14 +17,16 @@ import (
 // 検査(internal/platform/linux)を受け持つ(design.md 7a.7、7a.8 節 Phase 3)。userspaceDataplane
 // (仕様 6.3 節)は internal/dataplane/userspace の Backend を包む、同じ形の薄い層である。
 //
-// 両方の Backend が dataplane.Backend(EnsureWG、WGStatus、Converge、ReadDrops、Dial、Participant)
-// を実装するので、このインタフェースのその部分はほぼ素通しになる。それ以外のメソッド
+// 両方の Backend が dataplane.Backend(EnsureDevice、WGStatus、Dial、Participant)を実装するので、
+// このインタフェースのその部分はほぼ素通しになる。ピアの変更、drop カウンタ、conntrack の収束は
+// Participant のトランザクションの一部で、ここには無い(設計文書 7a.3 節)。それ以外のメソッド
 // (OtherDeviceWithKey、ReadUDPTimeouts、Inspect、BoundPorts、InputPortSuggestions、EnableIPForward、
 // CheckConnectivity)は、Backend の外の host 側検査や vpsd の都合(store への記録)を持つので、
 // dataplane.Backend には無い。
 type serverDataplane interface {
-	// EnsureWG は wg インタフェースを宣言(鍵、ポート、アドレス、MTU、ピア集合)に収束させ、行った変更を返す(仕様 9 節)。
-	EnsureWG(cfg dataplane.WGConfig) ([]string, error)
+	// EnsureDevice は起動時に wg インタフェースを立ち上げ、ピア以外(鍵、ポート、アドレス、MTU)を宣言に
+	// 収束させ、行った変更を返す(仕様 9 節)。ピアはトランザクションが収束させる。
+	EnsureDevice(cfg dataplane.WGConfig) ([]string, error)
 	// WGStatus は wg インタフェースの現在のピア(エンドポイント、最終ハンドシェイク)を返す。
 	WGStatus() (*wgtypes.Device, error)
 	// OtherDeviceWithKey は同じサーバ鍵を持つ別名の WireGuard デバイスがあればその名前を返す(インタフェース名の変更の検出)。
@@ -38,14 +39,10 @@ type serverDataplane interface {
 	BoundPorts() (linux.Bound, error)
 	// InputPortSuggestions は、プロキシモードの公開ポートが input で塞がれていれば足す行を返す(仕様 6.2 節)。
 	InputPortSuggestions(port uint16) ([]string, error)
-	// ReadDrops は差し替え直前の drop カウンタを読む(仕様 6.1 節)。
-	ReadDrops() ([]dataplane.Drop, error)
 	// participant は、Runtime の dataplane の participant を返す(設計文書 7a.2 節)。その Commit が転送の
 	// 宣言を 1 回で公開する(カーネルでは table inet wgft の 1 トランザクションの差し替え。仕様 6.1 節)。
 	// 組み立ての元になる Plan は Runtime.Apply が dataplane.Desired 経由で渡す
 	participant() dataplane.Participant
-	// Converge は外から入った進行中のフローを Plan に収束させ、消した数を返す(仕様 6.1、6.3 節)。
-	Converge(plan planner.Plan) (int, error)
 	// EnableIPForward は net.ipv4.ip_forward を 1 にする(仕様 6.1 節)。
 	// 書き込みに失敗すると、policy drop と同じ流儀の Finding を返す(成功時とすでに 1 のときは nil)。
 	EnableIPForward(st *store.Store) *linux.Finding
@@ -61,8 +58,8 @@ type kernelDataplane struct {
 	b     *linuxkernel.Backend
 }
 
-func (k *kernelDataplane) EnsureWG(cfg dataplane.WGConfig) ([]string, error) {
-	return k.b.EnsureWG(cfg)
+func (k *kernelDataplane) EnsureDevice(cfg dataplane.WGConfig) ([]string, error) {
+	return k.b.EnsureDevice(cfg)
 }
 func (k *kernelDataplane) WGStatus() (*wgtypes.Device, error) { return k.b.WGStatus() }
 func (k *kernelDataplane) OtherDeviceWithKey(key wgtypes.Key) (string, bool) {
@@ -78,9 +75,7 @@ func (k *kernelDataplane) BoundPorts() (linux.Bound, error) { return linux.Bound
 func (k *kernelDataplane) InputPortSuggestions(port uint16) ([]string, error) {
 	return linux.InputPortSuggestions(port, nft.TableName)
 }
-func (k *kernelDataplane) ReadDrops() ([]dataplane.Drop, error)           { return k.b.ReadDrops() }
 func (k *kernelDataplane) participant() dataplane.Participant             { return k.b }
-func (k *kernelDataplane) Converge(plan planner.Plan) (int, error)        { return k.b.Converge(plan) }
 func (k *kernelDataplane) EnableIPForward(st *store.Store) *linux.Finding { return EnableIPForward(st) }
 func (k *kernelDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{})

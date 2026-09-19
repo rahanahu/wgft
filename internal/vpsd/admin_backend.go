@@ -96,7 +96,8 @@ func (d *Daemon) JoinString(name string) (admin.JoinStringResponse, error) {
 }
 
 // Revoke は恒久トークンを無効化し、ピアを消し、アドレスを回収する(仕様 11 節)。
-// そのエージェントのルールは残るが、行を持たなくなる。中継は CloseAgent で閉じ、ピアと nftables は再収束で消す。
+// そのエージェントのルールは残るが、行を持たなくなる。中継は CloseAgent で閉じ、ピアと nftables は
+// 1 つのトランザクション(applyNFT)で消す。ピアはテーブルの差し替えの後に外れる(設計文書 7a.3 節)。
 func (d *Daemon) Revoke(name string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -109,9 +110,6 @@ func (d *Daemon) Revoke(name string) error {
 	d.hub.Disconnect(name, proto.CloseRevoked, "revoked")
 	if d.proxy != nil {
 		d.proxy.CloseAgent(name)
-	}
-	if err := d.reconcileWG(); err != nil {
-		return err
 	}
 	rules, err := d.st.Rules()
 	if err != nil {

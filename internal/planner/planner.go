@@ -198,3 +198,36 @@ func (p Plan) byForwarding(f model.Forwarding) []PortPlan {
 	}
 	return out
 }
+
+// Without returns a copy of p that forwards none of the rules in ids: their ports and their
+// Admission entries are left out, everything else (generation, peers, per-source caps) is kept.
+// The Runtime uses it to publish a fail-closed Plan, one where the rules whose Prepare failed
+// have no dispatch at all (design.md 7a.3 節). p itself is not modified.
+func (p Plan) Without(ids map[string]bool) Plan {
+	if len(ids) == 0 {
+		return p
+	}
+	out := Plan{Generation: p.Generation, Peers: p.Peers,
+		Admission: policy.Policy{PerSourceFlowCaps: p.Admission.PerSourceFlowCaps}}
+	for _, pp := range p.Ports {
+		if !ids[pp.RuleID] {
+			out.Ports = append(out.Ports, pp)
+		}
+	}
+	for _, rp := range p.Admission.Rules {
+		if !ids[rp.RuleID] {
+			out.Admission.Rules = append(out.Admission.Rules, rp)
+		}
+	}
+	return out
+}
+
+// Port returns the PortPlan of ruleID, if the Plan forwards it.
+func (p Plan) Port(ruleID string) (PortPlan, bool) {
+	for _, pp := range p.Ports {
+		if pp.RuleID == ruleID {
+			return pp, true
+		}
+	}
+	return PortPlan{}, false
+}

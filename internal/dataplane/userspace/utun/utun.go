@@ -191,3 +191,14 @@ func (t *Tunnel) DialUDP(raddr netip.AddrPort) (net.Conn, error) {
 
 // Close はトンネルを閉じる。
 func (t *Tunnel) Close() { t.dev.Close() }
+
+// DeclaredPeers は SetPeers で宣言済みのピア集合を返す(Backend の Observe が使う)。
+func (t *Tunnel) DeclaredPeers() []dataplane.Peer {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]dataplane.Peer, 0, len(t.peers))
+	for k, addr := range t.peers {
+		out = append(out, dataplane.Peer{PublicKey: k, Address: addr})
+	}
+	return out
+}

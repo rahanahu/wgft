@@ -11,7 +11,6 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace"
-	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
@@ -23,10 +22,10 @@ type userspaceDataplane struct {
 	b *userspace.Backend
 }
 
-// EnsureWG は Backend にそのまま渡す。インタフェース名と AdoptExisting はカーネルの wg
+// EnsureDevice は Backend にそのまま渡す。インタフェース名と AdoptExisting はカーネルの wg
 // インタフェースだけの性質で、dataplane.WGConfig には無い(その doc コメントのとおり)。
-func (u *userspaceDataplane) EnsureWG(cfg dataplane.WGConfig) ([]string, error) {
-	return u.b.EnsureWG(cfg)
+func (u *userspaceDataplane) EnsureDevice(cfg dataplane.WGConfig) ([]string, error) {
+	return u.b.EnsureDevice(cfg)
 }
 
 func (u *userspaceDataplane) WGStatus() (*wgtypes.Device, error) { return u.b.WGStatus() }
@@ -57,17 +56,10 @@ func (u *userspaceDataplane) InputPortSuggestions(port uint16) ([]string, error)
 	return lines, nil
 }
 
-func (u *userspaceDataplane) ReadDrops() ([]dataplane.Drop, error) { return u.b.ReadDrops() }
-
 // participant は Backend そのもの。Backend は Plan だけから組み立てる。
 // プロキシモード(Relay)のルールは Daemon の proxyrelay が受け持ち、Backend は Transparent のルールだけを開く。
 func (u *userspaceDataplane) participant() dataplane.Participant {
 	return u.b
-}
-
-// Converge は接続元制限を満たさなくなった進行中のセッションを閉じる(conntrack 収束の代わり。仕様 6.3 節)。
-func (u *userspaceDataplane) Converge(plan planner.Plan) (int, error) {
-	return u.b.Converge(plan)
 }
 
 func (u *userspaceDataplane) EnableIPForward(*store.Store) *linux.Finding { return nil }
