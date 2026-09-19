@@ -55,8 +55,16 @@ MARGIN_MIB=100
 fail=0
 
 check() { # check <label> <expected-substring> <actual>
+  # an empty expected substring matches anything, so it would always pass; refuse it
+  if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3'"; fail=1; fi
 }
+absent() { # absent <label> <substring-that-must-not-appear> <actual>
+  if [ -z "$2" ]; then echo "FAIL  $1: empty substring (test bug)"; fail=1; return; fi
+  if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1"; fi
+}
+# field <name> <text>: the integer after "<name>=" in text, or empty
+field() { echo "$2" | grep -oE "$1=[0-9]+" | head -1 | cut -d= -f2; }
 okcheck() { # okcheck <label> <ok-if-true 1/0>
   if [ "$2" = "1" ]; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1; fi
 }
@@ -330,6 +338,7 @@ check1() {
     local after_line after_sport
     after_line=$(vps conntrack -L -p tcp --dport 39980 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | head -1)
     after_sport=$(echo "$after_line" | grep -oE 'sport=[0-9]+' | head -1)
+    okcheck "the tcp conntrack entry is found before the restart" "$([ -n "$before_sport" ] && echo 1 || echo 0)"
     check "the same tcp conntrack entry (same source port) persists across the restart" "$before_sport" "$after_sport"
   fi
 
@@ -435,7 +444,7 @@ s = socket.create_connection((\"198.51.100.1\", 39983), timeout=5); s.send(b\"x\
   check "udp on the second A still worked before the target change" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27023')"
   set_target "$a_udp2" 192.168.50.3:19199
   sleep 1
-  check "changing A's target silences its udp flow" "" "$(client 'echo hi | socat -t 2 - UDP:198.51.100.1:27023' 2>&1)"
+  absent "changing A's target silences its udp flow" "udp-echo" "$(client 'echo hi | socat -t 2 - UDP:198.51.100.1:27023' 2>&1)"
 
   echo "-- deleting A cuts its flows too"
   local a_tcp3
@@ -574,7 +583,7 @@ for r in d['rules']:
   check "the deleted rule's listener is kept (fail-static; only Commit closes removed listeners, and it did not run)" \
     "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:8462')"
   check "the newly-added rule's listener is not left open (Rollback closed what Prepare opened)" \
-    "" "$(client 'echo hi | socat -t 2 - TCP:198.51.100.1:8463' 2>&1)"
+    "Connection refused" "$(client 'echo hi | socat -t 2 - TCP:198.51.100.1:8463' 2>&1)"
 
   echo "-- the owner process exits; the next apply converges"
   [ -n "$owner_pid" ] && kill "$owner_pid" 2>/dev/null
@@ -587,7 +596,7 @@ for r in d['rules']:
   sleep 1
   vps wgft rule enable "$r_add" --admin "$ADMIN" >/dev/null 2>&1
   sleep 2
-  check "once the owner is gone, the deleted rule's listener is finally closed" "" "$(client 'echo hi | socat -t 2 - TCP:198.51.100.1:8462' 2>&1)"
+  check "once the owner is gone, the deleted rule's listener is finally closed" "Connection refused" "$(client 'echo hi | socat -t 2 - TCP:198.51.100.1:8462' 2>&1)"
   # the agent only opens its own local listener for the new rule once it receives the full state
   # over the stream, a round trip through the WG tunnel; poll instead of trusting a fixed sleep.
   local got=""
@@ -704,6 +713,13 @@ check5_server_memory() {
       echo "   $(cat /tmp/wgft-lifecycle-c5s-tcpflood.log)"
       echo "   tcp connections actually held (ss on the accepting side, not client-side connect success): $held"
       echo "   server RSS while flooded past caps: ${rss:-unknown} MiB (soft limit $SOFT_LIMIT_MIB MiB, margin $MARGIN_MIB MiB)"
+      # the RSS bound only means something if the caps were actually reached: one rule, 21
+      # sources x 60 TCP (per-rule cap 1024) and x 260 UDP (per-rule cap 4096) with the defaults
+      okcheck "server: the tcp flood actually fills the per-rule cap (held $held of 1024)" \
+        "$([ "$held" -ge 1000 ] && [ "$held" -le 1024 ] && echo 1 || echo 0)"
+      local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
+      okcheck "server: the udp flood fills the per-rule cap and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge 3900 ] && [ "$udp_ans" -le 4096 ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "server RSS stays under the soft limit plus margin while flooded past the default caps" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((SOFT_LIMIT_MIB + MARGIN_MIB))" ] && echo 1 || echo 0)"
       check "server logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' /tmp/wgft-lifecycle-c5s-server.log)"
@@ -756,6 +772,13 @@ check5_agent_memory() {
       echo "   $(cat /tmp/wgft-lifecycle-c5a-tcpflood.log)"
       echo "   tcp connections actually held (ss on the agent's own listener, not client-side connect success): $held"
       echo "   agent RSS while flooded past caps: ${rss:-unknown} MiB (soft limit $SOFT_LIMIT_MIB MiB, margin $MARGIN_MIB MiB)"
+      # the RSS bound only means something if the caps were actually reached: one rule, 21
+      # sources x 60 TCP (per-rule cap 1024) and x 260 UDP (per-rule cap 4096) with the defaults
+      okcheck "agent: the tcp flood actually fills the per-rule cap (held $held of 1024)" \
+        "$([ "$held" -ge 1000 ] && [ "$held" -le 1024 ] && echo 1 || echo 0)"
+      local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
+      okcheck "agent: the udp flood fills the per-rule cap and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge 3900 ] && [ "$udp_ans" -le 4096 ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "agent RSS stays under the soft limit plus margin while flooded past the default caps" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((SOFT_LIMIT_MIB + MARGIN_MIB))" ] && echo 1 || echo 0)"
       check "agent logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' /tmp/wgft-lifecycle-c5a-agent.log)"
