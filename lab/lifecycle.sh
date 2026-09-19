@@ -34,6 +34,38 @@
 #   5. under the default flow caps (design 7 section), holding and flooding past them keeps RSS
 #      under the derived memory soft limit plus a margin, for the userspace server's own relay
 #      and for the agent (which relays every connection regardless of the server's mode).
+#   6. rule-local (Prepare) failures are fail-closed, not backend-wide (design 7a.3 section): a.
+#      kernel mode, a squatted proxy port reports that one rule not_active with a bind-failed
+#      reason, without blocking an unrelated rule's active state or the active generation, and
+#      without an nft accounting line for the squatted port. b. kernel mode, retargeting an
+#      established proxy rule onto a squatted port reports it not_active with drift.retiring, and
+#      refuses new connections on the old port, but (since listen_port also changes) the agent's
+#      own port-based reconciliation (design 7) closes the established sessions through it, by
+#      design, not a Phase 4 gap. c. kernel mode, the same port-change closure for a Transparent
+#      rule moved to a fail-closed Relay on a different, squatted port. f. userspace mode, one
+#      squatted port of a range rule fails the whole range's bind (no partial listen). h. kernel
+#      mode, flipping only vps_mode (not listen_port) on an established Transparent rule to a
+#      fail-closed Relay on the same, now-squatted port: the agent's declaration never changes, so
+#      its established DNAT session survives the fail-closed attempt end to end (conntrack stays
+#      ESTABLISHED, full byte count keeps flowing) until a source_deny actually covers it (Retire).
+#   7. kernel mode only: backend-wide (Commit) failures (design 7a.3 section). d. holding table
+#      inet wgft as another process (as check 3b) and then changing one rule and deleting another
+#      leaves every rule pending (the held table lost their rows) with apply_error set, and the
+#      deleted rule listed in drift.active_only, all without advancing the active generation;
+#      once the obstruction is gone the next apply converges (generations equal, drift empty).
+#      e. a known number of deny drops read just before a failed swap are not accumulated twice
+#      once the next swap succeeds (internal/vpsd/apply.go's accumulateDrops).
+#   8. a rule-local bind failure recovers on its own via the 30s retry (design 7a.3 section)
+#      once the squatted port is freed, without any other change, and a retry that would publish
+#      nothing new does not replace the nft table (kernel mode: `nft -a list table inet wgft`
+#      handles are unchanged across a 35s window while still squatted).
+#   9. kernel mode only: kernel state changed outside wgft is restored (design 7a.3 section,
+#      実際の状態への収束). `nft flush ruleset` and `nft delete table inet wgft` are each noticed
+#      through the nftables change notifications and republished within a few seconds with one
+#      log line; with nothing changed (and after an unrelated table's churn) the table's rule
+#      handles stay the same across a full retry interval; a table held by another process
+#      (flags owner) leaves an admin change pending until the holder exits, after which the
+#      pending generation is published and delivered to the agent without any admin change.
 #
 # Requires `lab/lab build` (wgft and echo in /usr/local/bin of the VM) and the netns topology
 # (`lab/lab net up`). Leftovers from earlier runs are killed first. Wherever a step waits on
@@ -49,8 +81,8 @@ ulimit -n 100000 2>/dev/null || true  # check 5 floods thousands of sockets from
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: lifecycle.sh kernel|userspace [check...]" >&2; exit 2;; esac
 shift || true
-# Optional check names after the mode (1 2 3 3b 4 5) run only those checks; none runs all of them.
-ALL_CHECKS="1 2 3 3b 4 5"
+# Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9) run only those checks; none runs all.
+ALL_CHECKS="1 2 3 3b 4 5 6 7 8 9"
 CHECKS="${*:-$ALL_CHECKS}"
 for c in $CHECKS; do
   case " $ALL_CHECKS " in *" $c "*) ;; *) echo "lifecycle.sh: unknown check '$c' (use: $ALL_CHECKS)" >&2; exit 2;; esac
@@ -218,6 +250,148 @@ d = json.load(sys.stdin)
 sys.exit(0 if any(r['id'] == '$1' for r in d['rules']) else 1)
 "
 }
+# set_listen_port <rule-id> <new-port>: changes one rule's listen_port via export + `rule import`,
+# the same technique set_target uses (design 5.4: `rule set` only touches group/note).
+set_listen_port() {
+  local id=$1 port=$2 f=/tmp/wgft-lifecycle-setport.json
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for r in d['rules']:
+    if r['id'] == '$id':
+        r['listen_port'] = '$port'
+json.dump(d['rules'], open('$f', 'w'))
+"
+  vps wgft rule import "$f" --admin "$ADMIN" >/dev/null
+}
+# retarget_as_proxy <rule-id> <new-port>: changes one rule's vps_mode to proxy (Relay) and
+# listen_port in the same batch, the way an admin turning a Transparent rule into a Relay rule
+# on a new port would (design 7a.2: vps_mode/proxy_protocol map to Forwarding).
+retarget_as_proxy() {
+  local id=$1 port=$2 f=/tmp/wgft-lifecycle-setproxy.json
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for r in d['rules']:
+    if r['id'] == '$id':
+        r['listen_port'] = '$port'
+        r['vps_mode'] = 'proxy'
+json.dump(d['rules'], open('$f', 'w'))
+"
+  vps wgft rule import "$f" --admin "$ADMIN" >/dev/null
+}
+# retarget_same_port_as_proxy <rule-id>: changes only vps_mode to proxy, leaving listen_port and
+# target untouched. The agent's own declared rule (id, proto, listen_port, target, enabled; design
+# 5.3/6.2) does not change at all, so this is the one way to give a rule a rule-local (Prepare)
+# failure without the agent's own port-based reconciliation (design 7) touching its listener.
+retarget_same_port_as_proxy() {
+  local id=$1 f=/tmp/wgft-lifecycle-setproxysameport.json
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for r in d['rules']:
+    if r['id'] == '$id':
+        r['vps_mode'] = 'proxy'
+json.dump(d['rules'], open('$f', 'w'))
+"
+  vps wgft rule import "$f" --admin "$ADMIN" >/dev/null
+}
+# add_source_deny <rule-id> <cidr>: appends one CIDR to a rule's source_deny via export + import.
+add_source_deny() {
+  local id=$1 cidr=$2 f=/tmp/wgft-lifecycle-setdeny.json
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for r in d['rules']:
+    if r['id'] == '$id':
+        r.setdefault('source_deny', []).append('$cidr')
+json.dump(d['rules'], open('$f', 'w'))
+"
+  vps wgft rule import "$f" --admin "$ADMIN" >/dev/null
+}
+# remove_source_deny <rule-id> <cidr>: removes one CIDR from a rule's source_deny via export + import.
+remove_source_deny() {
+  local id=$1 cidr=$2 f=/tmp/wgft-lifecycle-undeny.json
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for r in d['rules']:
+    if r['id'] == '$id':
+        r['source_deny'] = [c for c in (r.get('source_deny') or []) if c != '$cidr']
+json.dump(d['rules'], open('$f', 'w'))
+"
+  vps wgft rule import "$f" --admin "$ADMIN" >/dev/null
+}
+# retarget_and_delete <rule-id-to-retarget> <new-target> <rule-id-to-delete>: one `rule import`
+# batch that both retargets one rule and removes another, so both land in the same transaction
+# (design 7a.3: a backend-wide failure affects everything a transaction was carrying).
+retarget_and_delete() {
+  local id=$1 target=$2 delid=$3 f=/tmp/wgft-lifecycle-c7-import.json
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+out = []
+for r in d['rules']:
+    if r['id'] == '$delid':
+        continue
+    if r['id'] == '$id':
+        r['target'] = '$target'
+    out.append(r)
+json.dump(out, open('$f', 'w'))
+"
+  vps wgft rule import "$f" --admin "$ADMIN" >/dev/null 2>&1
+}
+# rule_state_field <rule-id> <apply_state|reason|active_generation>: that field of
+# rule_states[<rule-id>] in the admin API's own JSON (design 7a.3 節), or empty if the rule has no
+# reported state yet.
+rule_state_field() {
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+st = d.get('rule_states', {}).get('$1', {})
+print(st.get('$2', ''))
+"
+}
+rule_state_is() { [ "$(rule_state_field "$1" "$2")" = "$3" ]; }
+rule_state_reason_has() { case "$(rule_state_field "$1" reason)" in *"$2"*) return 0;; *) return 1;; esac; }
+# apply_top_field <desired_generation|active_generation|apply_error>: that top-level field of the
+# admin API's rules response.
+apply_top_field() {
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+v = d.get('$1', '')
+print(v if v is not None else '')
+"
+}
+generations_equal() {
+  local d a; d=$(apply_top_field desired_generation); a=$(apply_top_field active_generation)
+  [ -n "$d" ] && [ "$d" = "$a" ]
+}
+# drift_has <active_only|retiring> <rule-id>: that rule id appears in drift.<kind> (design 7a.3 節).
+drift_has() {
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+items = d.get('drift', {}).get('$1', [])
+sys.exit(0 if any(x['rule_id'] == '$2' for x in items) else 1)
+"
+}
+drift_empty() {
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+sys.exit(0 if len(d.get('drift', {}).get('$1', [])) == 0 else 1)
+"
+}
+# rule_drops <rule-id>: that rule's cumulative drop packet count (admin API's `drops`), or empty.
+rule_drops() {
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('drops', {}).get('$1', ''))
+"
+}
 rss_mib() { awk '/VmRSS/{print int($2/1024)}' "/proc/$1/status" 2>/dev/null; }
 # find_wgft_pid <substring>: the pid of the "wgft" process whose cmdline contains <substring>
 # (e.g. "server run" or "agent run"). Matches on the exact comm name first (pgrep -x wgft, safe
@@ -238,17 +412,22 @@ find_wgft_pid() {
 write_helpers() {
   mkdir -p "$PY"
   cat > "$PY/tcpprobe.py" <<'PYEOF'
-# tcpprobe.py <dst-ip> <port> <rounds> <interval>
+# tcpprobe.py <dst-ip> <port> <rounds> <interval> [src-ip]
 # Connects once, sends a 10-byte chunk every <interval> seconds for <rounds> rounds without
 # closing, then half-closes and reads tools/echo's final "tcp-echo ... got=<n>; ..." reply.
 # Prints "sent=<bytes> broke_at=<round-or-None> got=<reply-or-error>": whether every byte sent
 # across the whole session (including any window where the peer might have been unreachable)
-# was actually delivered is the end-to-end proof, not just that sendall() did not raise.
+# was actually delivered is the end-to-end proof, not just that sendall() did not raise. The
+# optional src-ip binds the client socket to one of the client netns's addresses, so two calls
+# from different addresses can be told apart on the accepting side (check6's Retire scenario).
 import socket, sys, time
 
 dst, port, rounds, interval = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
+src = sys.argv[5] if len(sys.argv) > 5 else None
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.settimeout(5)
+if src:
+    s.bind((src, 0))
 try:
     s.connect((dst, port))
 except OSError as e:
@@ -755,7 +934,10 @@ check3b() {
   check "the soon-to-be-deleted proxy rule works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:8462')"
 
   echo "-- another process claims ownership of table inet wgft (nft -i fed through a fifo kept open, so it never sees EOF and keeps holding the table)"
-  vps nft delete table inet wgft
+  # The replacement is one nftables transaction (add, delete, add with flags owner on one line), not
+  # a separate `nft delete table` first: the server notices a deleted table within a second and
+  # republishes it (design 7a.3 section, 実際の状態への収束), and an existing table cannot be given
+  # an owner afterwards.
   rm -f /tmp/wgft-lifecycle-c3b-fifo /tmp/wgft-lifecycle-c3b-owner.log
   mkfifo /tmp/wgft-lifecycle-c3b-fifo
   vps bash -c 'exec 3<>/tmp/wgft-lifecycle-c3b-fifo; nft -i <&3 >/tmp/wgft-lifecycle-c3b-owner.log 2>&1 &'
@@ -771,7 +953,7 @@ check3b() {
     rm -rf "$DATA" "$ADATA"
     return
   fi
-  echo 'add table inet wgft { flags owner; }' > /tmp/wgft-lifecycle-c3b-fifo
+  echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > /tmp/wgft-lifecycle-c3b-fifo
   foreign_owner_table_present() { vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner'; }
   # bare wait_until: re-checked by the okcheck right after (same condition).
   wait_until 5 foreign_owner_table_present
@@ -1040,6 +1222,588 @@ check5() {
   else
     skip "agent memory under flood (already exercised via the faster kernel-mode forwarding path in the kernel run, to keep this check short)"
   fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 6: rule-local (Prepare) failures are fail-closed, not backend-wide (design 7a.3 節). A
+# squatted proxy port reports only that one rule not_active, without blocking an unrelated rule's
+# active state or the active generation, and without an nft accounting line for the squatted
+# port (a). Retargeting an established proxy rule onto a squatted port keeps its established
+# connections going (Retiring/StopAccepting), refuses new ones, and a source_deny added
+# afterwards (Retire) closes only the sessions it newly refuses (b). Turning an established
+# Transparent rule into a fail-closed Relay on a squatted port keeps its established DNAT session
+# in conntrack (c). Userspace mode only has the range-rule case: one squatted port fails the
+# whole range's bind, since the staged Prepare opens all of a rule's ports or none (f).
+# ---------------------------------------------------------------------------------------------
+check6() {
+  echo "== $mode: check 6: rule-local bind failures are fail-closed, not backend-wide"
+  local DATA=/tmp/wgft-lifecycle-c6 ADATA=/tmp/wgft-lifecycle-c6-agent
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+
+  start_server "$DATA" /tmp/wgft-lifecycle-c6-server.log
+  if ! wait_admin; then echo "FAIL  check6 setup: admin api never came up"; fail=1; return; fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c6-agent.log 2>&1 < /dev/null &
+  disown
+  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25620,25621,25622,25623,25624 \
+    > /tmp/wgft-lifecycle-c6-echo.log 2>&1 < /dev/null &
+  disown
+  if ! wait_agent home; then echo "FAIL  check6 setup: agent never registered"; fail=1; return; fi
+
+  port_listening() { vps ss -ltn 2>/dev/null | grep -q ":$1 "; }
+  port_free() { ! port_listening "$1"; }
+  # squat_port/unsquat_port <port>: same technique as check3's squat, parameterized. unsquat_port
+  # kills every squatting socat, which is safe here since check6 only ever squats one port at a
+  # time (each sub-scenario frees its own before the next squats a different one).
+  squat_port() {
+    vps setsid nohup socat "TCP-LISTEN:$1,reuseaddr,fork" EXEC:/bin/cat \
+      > "/tmp/wgft-lifecycle-c6-squat-$1.log" 2>&1 < /dev/null &
+    disown
+    wait_until 3 port_listening "$1"
+  }
+  unsquat_port() { pkill -x socat; wait_until 3 port_free "$1"; }
+  src_flow_for_port() { vps nft list table inet wgft 2>/dev/null | grep -c "dport $1 .*src_flow"; }
+  tcp_refused() { [[ "$(client "echo hi | socat -t 1 - TCP:198.51.100.1:$1" 2>&1)" == *"Connection refused"* ]]; }
+
+  if [ "$mode" = kernel ]; then
+    echo "-- a. a squatted proxy port is a rule-local (not backend-wide) failure"
+    local ctrl bad
+    ctrl=$(vps wgft rule add --agent home --tcp 39997 --to 192.168.50.3:25620 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+    wait_until 10 tcp_probe_ok 39997
+    check "the control rule works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39997')"
+    squat_port 8471
+    bad=$(vps wgft rule add --agent home --tcp 8471 --to 192.168.50.3:25621 --proxy --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+    # bare wait_until: re-checked by the okcheck/check calls right after (same rule_state field).
+    wait_until 5 rule_state_is "$bad" apply_state not_active
+    okcheck "the squatted rule reports not_active" "$(rule_state_is "$bad" apply_state not_active && echo 1 || echo 0)"
+    check "its reason names the bind failure" "bind failed" "$(rule_state_field "$bad" reason)"
+    okcheck "the unrelated control rule is unaffected (stays active)" "$(rule_state_is "$ctrl" apply_state active && echo 1 || echo 0)"
+    okcheck "the active generation still advances to the desired generation" "$(generations_equal && echo 1 || echo 0)"
+    okcheck "no nft accounting line exists for the squatted port" "$([ "$(src_flow_for_port 8471)" = 0 ] && echo 1 || echo 0)"
+    unsquat_port 8471
+    vps wgft rule rm "$bad" --admin "$ADMIN" >/dev/null; vps wgft rule rm "$ctrl" --admin "$ADMIN" >/dev/null
+
+    echo "-- b. a fail-closed Relay: not_active, drift.retiring, refuses new connections to the old port"
+    # NOTE: retargeting a proxy rule's listen_port is the only way to provoke a rule-local bind
+    # failure for it, but listen_port is also the agent's own declared listener key (design 5.3,
+    # 6.2: the agent only ever receives id, proto, listen_port, target, enabled and listens on the
+    # same port as the VPS). A listen_port change is therefore, by design, reconciled by the agent
+    # like any other port change (design 7's port-based reconciliation table: the old port "現在に
+    # あって宣言にない: 閉じる", including its in-flight TCP connections, before the new one opens) -
+    # this closes the very sessions the VPS side's own Retiring/StopAccepting bookkeeping otherwise
+    # keeps open, but it is intended agent behaviour, not a Phase 4 gap (see scenario h below for a
+    # same-port Transparent-to-Relay conversion, where the agent's declaration never changes and
+    # the established session does survive end to end). Verified in the lab: vpsd's own log reports
+    # "closed 0 connections its new declaration refuses" (it kept everything on its side), while
+    # the agent's log for the same moment reports a plain "listener tcp/<port> closed" and both an
+    # already-established session and a second one from a different, never-denied source break
+    # within well under a second of the retarget, before any source_deny is even added. This check
+    # asserts that expected, port-change-driven cut so it stays a reliable regression oracle.
+    ip netns exec client ip addr add 198.51.100.9/24 dev eth0 2>/dev/null
+    local r; r=$(vps wgft rule add --agent home --tcp 8472 --to 192.168.50.3:25622 --proxy --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+    wait_until 10 tcp_probe_ok 8472
+    local rounds=20 interval=0.4
+    ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 8472 "$rounds" "$interval" 198.51.100.2 \
+      > /tmp/wgft-lifecycle-c6-s1.log 2>&1 < /dev/null &
+    local s1_pid=$!
+    ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 8472 "$rounds" "$interval" 198.51.100.9 \
+      > /tmp/wgft-lifecycle-c6-s2.log 2>&1 < /dev/null &
+    local s2_pid=$!
+    # deliberate: give both sessions a couple of rounds so they are actually established (and past
+    # their first send) before the retarget below fail-closes the rule mid-flow.
+    sleep 1.5
+    squat_port 8473
+    retarget_as_proxy "$r" 8473
+    must_wait "check6b: rule retargeted to the squatted port is reported not_active" 5 rule_state_is "$r" apply_state not_active
+    check "its reason names the bind failure" "bind failed" "$(rule_state_field "$r" reason)"
+    okcheck "the old port is listed as retiring" "$(drift_has retiring "$r" && echo 1 || echo 0)"
+    okcheck "a new connection to the old port is refused (StopAccepting closed the listener)" \
+      "$(tcp_refused 8472 && echo 1 || echo 0)"
+    wait "$s1_pid" "$s2_pid" 2>/dev/null
+    local s1log s2log; s1log=$(cat /tmp/wgft-lifecycle-c6-s1.log); s2log=$(cat /tmp/wgft-lifecycle-c6-s2.log)
+    if [[ "$s1log" == *"got=$((rounds * 10));"* ]] || [[ "$s2log" == *"got=$((rounds * 10));"* ]]; then
+      echo "FAIL  an established session survived the listen_port change (expected the agent's own port-based reconciliation, design 7, to close it)"; fail=1
+    else
+      echo "PASS  both established sessions are cut by the listen_port change, including the one from a never-denied source (the agent's own listener close on any port change, design 7; not the VPS's Retire); s1: $s1log; s2: $s2log"
+    fi
+    unsquat_port 8473
+    vps wgft rule rm "$r" --admin "$ADMIN" >/dev/null
+    ip netns exec client ip addr del 198.51.100.9/24 dev eth0 2>/dev/null
+
+    echo "-- c. a kernel Transparent rule moved to a different port as a fail-closed Relay: not_active, but the old port change closes its established session (same design-7 port reconciliation as b)"
+    # NOTE: this retargets both listen_port and vps_mode at once (a Transparent rule's port is
+    # never bound on the VPS host, design 6.1, so squatting its current port alone would not fail
+    # anything; converting to Relay is what gives it a rule-local Prepare failure to fail-closed
+    # on). Since the port also changes here, the same design-7 port-based agent reconciliation as
+    # scenario b applies (close the old port's connections, then try the new one), independently
+    # of the VPS side's own conntrack convergence. Verified in the lab: the vpsd-side conntrack
+    # entry for the pre-existing DNAT session moves from ESTABLISHED to CLOSE right after the
+    # retarget (a real FIN/RST, not an expiry). Scenario h below isolates the same-port case (only
+    # vps_mode changes), where the agent's declaration is untouched and the session does survive.
+    local t; t=$(vps wgft rule add --agent home --tcp 39998 --to 192.168.50.3:25623 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+    wait_until 10 tcp_probe_ok 39998
+    local rounds2=16 interval2=0.4
+    ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 39998 "$rounds2" "$interval2" \
+      > /tmp/wgft-lifecycle-c6-c.log 2>&1 < /dev/null &
+    local c_pid=$!
+    wait_until 5 tcp_flow_up 39998
+    squat_port 8474
+    retarget_as_proxy "$t" 8474
+    must_wait "check6c: the retargeted rule is reported not_active" 5 rule_state_is "$t" apply_state not_active
+    check "its reason names the bind failure" "bind failed" "$(rule_state_field "$t" reason)"
+    wait "$c_pid" 2>/dev/null
+    local clog; clog=$(cat /tmp/wgft-lifecycle-c6-c.log)
+    if [[ "$clog" == *"got=$((rounds2 * 10));"* ]]; then
+      echo "FAIL  the established DNAT session survived the port change (expected the agent's own port-based reconciliation, design 7, to close it)"; fail=1
+    else
+      echo "PASS  the established DNAT session is cut by the port change (same design-7 agent reconciliation as scenario b, not a VPS-side bug); log: $clog"
+    fi
+    unsquat_port 8474
+    vps wgft rule rm "$t" --admin "$ADMIN" >/dev/null
+
+    echo "-- h. a same-port Transparent-to-Relay conversion: the agent's declaration never changes, so its established session survives the fail-closed Relay attempt end to end; Retire still cuts it once a source_deny actually covers it"
+    # Unlike b/c, this keeps listen_port (and target) fixed and flips only vps_mode, so the agent
+    # never sees a different declared rule (design 5.3/6.2: it only ever receives id, proto,
+    # listen_port, target, enabled) and does not touch its listener at all. A Transparent rule's
+    # port is never bound on the VPS host (design 6.1: pure DNAT), so squatting it first does not
+    # conflict with anything until the retarget asks proxyrelay to bind it. This is Phase 4's
+    # "Relay のルールを fail-closed にしても安全な成立済みの TCP 接続が残ること" criterion isolated
+    # from the agent's own (intended, design 7) port-change behaviour exercised in b/c.
+    local h; h=$(vps wgft rule add --agent home --tcp 39996 --to 192.168.50.3:25624 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+    wait_until 10 tcp_probe_ok 39996
+    # conntrack accounting (per netns) makes the entry's packet counter visible, so the hold below
+    # can tell a session that keeps carrying data from an entry that merely stays ESTABLISHED. It
+    # only applies to entries created after it is set, so it is set before the session starts.
+    local acct_before; acct_before=$(vps sysctl -n net.netfilter.nf_conntrack_acct)
+    vps sysctl -qw net.netfilter.nf_conntrack_acct=1
+    # h_orig_packets: the orig-direction packet count of the session's conntrack entry (the one
+    # with source port $h_before_sport), or empty when there is no such entry.
+    h_orig_packets() {
+      vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 -o extended 2>/dev/null \
+        | grep ESTABLISHED | grep -- "$h_before_sport " | grep -oE 'packets=[0-9]+' | head -1 | cut -d= -f2
+    }
+    # 50 rounds at 0.4s (20s) outlasts the retarget, its checks, the 3s hold and the source_deny.
+    local rounds3=50 interval3=0.4
+    ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 39996 "$rounds3" "$interval3" \
+      > /tmp/wgft-lifecycle-c6-h.log 2>&1 < /dev/null &
+    local h_pid=$!
+    wait_until 5 tcp_flow_up 39996
+    local h_before_sport; h_before_sport=$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | grep -oE 'sport=[0-9]+' | head -1)
+    squat_port 39996
+    retarget_same_port_as_proxy "$h"
+    must_wait "check6h: the same-port Transparent->Relay is reported not_active" 5 rule_state_is "$h" apply_state not_active
+    check "its reason names the bind failure" "bind failed" "$(rule_state_field "$h" reason)"
+    okcheck "the port is listed as retiring" "$(drift_has retiring "$h" && echo 1 || echo 0)"
+    absent "a new connection gets no reply from wgft's target while the rule is not_active (no dispatch is published for it)" \
+      "tcp-echo" "$(client 'echo hi | socat -t 2 - TCP:198.51.100.1:39996' 2>&1)"
+    okcheck "the established session is still running (not yet broken) right after the retarget" \
+      "$([ ! -s /tmp/wgft-lifecycle-c6-h.log ] && echo 1 || echo 0)"
+    okcheck "its conntrack entry is still ESTABLISHED" \
+      "$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep -q ESTABLISHED && echo 1 || echo 0)"
+    local h_after_sport; h_after_sport=$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | grep -oE 'sport=[0-9]+' | head -1)
+    check "it is the same conntrack entry (same source port), not a new one" "$h_before_sport" "$h_after_sport"
+    echo "-- the session keeps carrying data while the rule stays not_active (held 3s, then asserted again)"
+    local pk_before; pk_before=$(h_orig_packets)
+    # deliberate: survival over time is the point, so wall-clock time has to pass here.
+    sleep 3
+    local pk_after; pk_after=$(h_orig_packets)
+    okcheck "after the hold, the same entry (source port ${h_before_sport#sport=}) is still ESTABLISHED" \
+      "$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | grep -q -- "$h_before_sport " && echo 1 || echo 0)"
+    okcheck "after the hold, data is still flowing: the entry's packet counter grew ($pk_before -> $pk_after)" \
+      "$([ -n "$pk_before" ] && [ -n "$pk_after" ] && [ "$pk_after" -gt "$pk_before" ] && echo 1 || echo 0)"
+    okcheck "after the hold, the client session has not ended" "$([ ! -s /tmp/wgft-lifecycle-c6-h.log ] && echo 1 || echo 0)"
+    echo "-- adding a source_deny that covers the session's source cuts it (Retire); the source was allowed by both the old and the new policy until now"
+    add_source_deny "$h" 198.51.100.2/32
+    # must_wait: nothing downstream re-checks the conntrack entry itself before the final log
+    # check, which only inspects the client-side python process's own (possibly slower, TCP-
+    # timeout-bound) view of the break.
+    must_wait "check6h: the established session's conntrack entry is removed once denied" 10 tcp_flow_gone 39996
+    wait "$h_pid" 2>/dev/null
+    local hlog; hlog=$(cat /tmp/wgft-lifecycle-c6-h.log)
+    if [[ "$hlog" == *"got=$((rounds3 * 10));"* ]]; then
+      echo "FAIL  the session should have been cut once the source_deny covered it, not run to completion: $hlog"; fail=1
+    else
+      echo "PASS  the session, safe while not_active, is cut once a source_deny actually covers its source (Retire); log: $hlog"
+    fi
+    vps sysctl -qw net.netfilter.nf_conntrack_acct="$acct_before"
+    echo "-- recovery: with the deny removed and the port freed, the rule becomes active as Relay on its own and serves new connections"
+    remove_source_deny "$h" 198.51.100.2/32
+    deny_removed() { ! rule_field "$h" source_deny | grep -q 198.51.100.2; }
+    must_wait "check6h: the source_deny is removed" 3 deny_removed
+    unsquat_port 39996
+    # must_wait: 45s covers one full 30s retry interval plus slack; nothing else changes the rule.
+    must_wait "check6h: the rule becomes active (as Relay) via the retry" 45 rule_state_is "$h" apply_state active
+    check "it is a Relay rule now" "proxy" "$(rule_field "$h" vps_mode)"
+    # bare wait_until: re-checked by the check() right after (same probe, same port).
+    wait_until 10 tcp_probe_ok 39996
+    check "a new connection gets tcp-echo through the proxy" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39996')"
+    vps wgft rule rm "$h" --admin "$ADMIN" >/dev/null
+  else
+    skip "proxy bind failures and Relay fail-closed semantics (proxy mode's public listener and nft DNAT only exist in kernel mode, design 6.1/6.2/7a.3)"
+  fi
+
+  if [ "$mode" = userspace ]; then
+    echo "-- f. one squatted port of a range rule fails the whole range's bind (no partial listen)"
+    squat_port 25631
+    local f; f=$(vps wgft rule add --agent home --tcp 25630-25632 --to 192.168.50.3:25630 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+    must_wait "check6f: the range rule is reported not_active" 5 rule_state_is "$f" apply_state not_active
+    check "its reason names the bind failure" "bind failed" "$(rule_state_field "$f" reason)"
+    # 25631 itself shows as listening (our own squat holds it); the check is that wgft did not
+    # also bind the other two ports of the range on top of it (no partial listen).
+    okcheck "the two free ports of the range are not bound by wgft (no partial listen)" \
+      "$([ "$(vps ss -ltn | grep -cE ':(25630|25632) ')" = 0 ] && echo 1 || echo 0)"
+    unsquat_port 25631
+    vps wgft rule rm "$f" --admin "$ADMIN" >/dev/null
+  else
+    skip "range-rule all-or-nothing bind (userspace-only: kernel Transparent ranges are plain nft DNAT with no bind involved, design 6.1)"
+  fi
+
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 7: backend-wide (Commit) failures (design 7a.3 節), kernel mode only: the foreign-owner
+# table-swap failure this exercises is the same nft transaction check3b uses, which only exists
+# in the kernel backend. d: holding table inet wgft as another process and then changing one rule
+# and deleting another leaves the rules pending with apply_error set (the held table lost their
+# rows), and the deleted rule listed in drift.active_only, all without advancing the active
+# generation; once the obstruction is gone the next apply converges. e: a known number of deny
+# drops read just before a failed swap are not accumulated twice once the next swap succeeds.
+# ---------------------------------------------------------------------------------------------
+check7() {
+  echo "== $mode: check 7: backend-wide failures leave rules pending, list drift, and do not double count drops"
+  if [ "$mode" != kernel ]; then
+    skip "backend-wide nftables swap failures (the foreign-table-owner technique this exercises only applies to the kernel backend's nft transaction)"
+    return
+  fi
+  local DATA=/tmp/wgft-lifecycle-c7 ADATA=/tmp/wgft-lifecycle-c7-agent
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+
+  start_server "$DATA" /tmp/wgft-lifecycle-c7-server.log
+  if ! wait_admin; then echo "FAIL  check7 setup: admin api never came up"; fail=1; return; fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c7-agent.log 2>&1 < /dev/null &
+  disown
+  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25640 -udp 19190 \
+    > /tmp/wgft-lifecycle-c7-echo.log 2>&1 < /dev/null &
+  disown
+  if ! wait_agent home; then echo "FAIL  check7 setup: agent never registered"; fail=1; return; fi
+
+  # hold_table/release_table: the same foreign-owner technique check3b uses (nft -i fed through a
+  # fifo kept open, so it never sees EOF and keeps holding the table), factored out here since
+  # check7 uses it twice (scenarios d and e).
+  nft_i_ready() { vps pgrep -x nft >/dev/null 2>&1; }
+  foreign_owner_table_present() { vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner'; }
+  # The replacement is one nftables transaction, for the same reason as in check3b.
+  hold_table() {
+    rm -f /tmp/wgft-lifecycle-c7-fifo /tmp/wgft-lifecycle-c7-owner.log
+    mkfifo /tmp/wgft-lifecycle-c7-fifo
+    vps bash -c 'exec 3<>/tmp/wgft-lifecycle-c7-fifo; nft -i <&3 >/tmp/wgft-lifecycle-c7-owner.log 2>&1 &'
+    # must_wait, and bail out here rather than falling through: the next line's write to the fifo
+    # blocks until some reader has it open, so a nft -i that never actually started would hang the
+    # whole script instead of just failing this check (same reasoning as check3b's own hold).
+    must_wait "check7: nft -i reading the fifo" 3 nft_i_ready || return 1
+    echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > /tmp/wgft-lifecycle-c7-fifo
+    must_wait "check7: a foreign owner table exists" 5 foreign_owner_table_present
+  }
+  release_table() {
+    local owner_pid; owner_pid=$(vps pgrep -x nft | head -1)
+    [ -n "$owner_pid" ] && kill "$owner_pid" 2>/dev/null
+    must_wait "check7: the foreign nft -i (owner pid $owner_pid) exited" 5 proc_gone "$owner_pid"
+    rm -f /tmp/wgft-lifecycle-c7-fifo /tmp/wgft-lifecycle-c7-owner.log
+  }
+  apply_error_set() { [ -n "$(apply_top_field apply_error)" ]; }
+  all_active() { rule_state_is "$z" apply_state active && rule_state_is "$x" apply_state active && rule_state_is "$y" apply_state active; }
+
+  echo "-- d. a backend-wide failure leaves the rules pending and a deleted rule in drift.active_only"
+  local z x y
+  z=$(vps wgft rule add --agent home --tcp 39999 --to 192.168.50.3:25640 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  x=$(vps wgft rule add --agent home --tcp 8480 --to 192.168.50.3:25640 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  y=$(vps wgft rule add --agent home --tcp 8481 --to 192.168.50.3:25640 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  must_wait "check7: z, x and y all start active" 5 all_active
+
+  if ! hold_table; then
+    kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+    rm -rf "$DATA" "$ADATA"; return
+  fi
+  retarget_and_delete "$x" 192.168.50.3:25641 "$y"
+  # bare wait_until: re-checked by the check() right after (same field).
+  wait_until 5 apply_error_set
+  check "apply_error reports the failed swap" "operation not permitted" "$(apply_top_field apply_error)"
+  check "the swap failure is logged" "failed to apply nftables" "$(tail -5 /tmp/wgft-lifecycle-c7-server.log)"
+  okcheck "desired_generation is now ahead of active_generation" \
+    "$([ "$(apply_top_field desired_generation)" != "$(apply_top_field active_generation)" ] && echo 1 || echo 0)"
+  okcheck "the retargeted rule x is pending, not silently active or not_active" \
+    "$(rule_state_is "$x" apply_state pending && echo 1 || echo 0)"
+  # Holding the table replaces its contents, which the server notices as drift (design 7a.3 section,
+  # 実際の状態への収束): z's rows are gone and cannot be republished, so z is honestly pending
+  # too, not active. That an untouched rule stays active through a backend-wide failure that
+  # leaves the table alone is covered by internal/reconcile's unit tests.
+  # bare wait_until: re-checked by the okcheck right after (same condition). The drift is noticed
+  # asynchronously, a moment after the hold.
+  wait_until 5 rule_state_is "$z" apply_state pending
+  okcheck "the untouched control rule z is pending as well, since the held table no longer has its rows" \
+    "$(rule_state_is "$z" apply_state pending && echo 1 || echo 0)"
+  okcheck "the deleted rule y is listed as still-active drift" "$(drift_has active_only "$y" && echo 1 || echo 0)"
+
+  echo "-- once the owner is gone, the next apply converges: generations match again and drift clears"
+  release_table
+  # disable+enable x, the same trick check3b uses, to force a real (non-retry) apply once the
+  # obstruction is gone, since a note-only edit would not push new state (design 5.3/5.4).
+  vps wgft rule disable "$x" --admin "$ADMIN" >/dev/null 2>&1
+  must_wait "check7: disabling x applied" 3 rule_field_is "$x" enabled "False"
+  vps wgft rule enable "$x" --admin "$ADMIN" >/dev/null 2>&1
+  must_wait "check7: x is active again" 10 rule_state_is "$x" apply_state active
+  okcheck "generations are equal again after the recovering apply" "$(generations_equal && echo 1 || echo 0)"
+  okcheck "drift.active_only is empty again" "$(drift_empty active_only && echo 1 || echo 0)"
+  okcheck "drift.retiring is empty" "$(drift_empty retiring && echo 1 || echo 0)"
+  vps wgft rule rm "$x" --admin "$ADMIN" >/dev/null 2>&1
+
+  echo "-- e. drop counters read just before a failed swap are not accumulated twice once the next swap succeeds"
+  local denysrc=203.0.113.50 flood_n=40
+  local w; w=$(vps wgft rule add --agent home --udp 27050 --to 192.168.50.3:19190 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  wait_until 10 udp_probe_ok 27050
+  add_source_deny "$w" "$denysrc/32"
+  deny_applied() { rule_field "$w" source_deny | grep -q "$denysrc"; }
+  must_wait "check7e: source_deny applied" 3 deny_applied
+  ip netns exec client ip addr add "$denysrc/24" dev eth0 2>/dev/null
+  ip netns exec client python3 "$PY/flood.py" udp 198.51.100.1 27050 "$denysrc" "$flood_n" \
+    > /tmp/wgft-lifecycle-c7-flood.log 2>&1
+  echo "   $(cat /tmp/wgft-lifecycle-c7-flood.log)"
+  # committing the flood's drops via a normal (non-seized) apply first is deliberate: nftables has
+  # no way to hand table inet wgft to a foreign owner without deleting it first (as hold_table
+  # does), which would destroy its live counters along with it. Reading them into the store via an
+  # ordinary apply, on a rule unrelated to w, before the table is ever seized, is what lets the
+  # failed-then-successful swap below be a clean test of "not accumulated twice" rather than of
+  # data loss (confirmed by hand in the lab: seizing before this step reads back 0, not flood_n).
+  vps wgft rule disable "$z" --admin "$ADMIN" >/dev/null 2>&1
+  vps wgft rule enable "$z" --admin "$ADMIN" >/dev/null 2>&1
+  drops_committed() { [ "$(rule_drops "$w")" = "$flood_n" ]; }
+  must_wait "check7e: the flood's drops are committed" 5 drops_committed
+  local before; before=$(rule_drops "$w"); [ -z "$before" ] && before=0
+  check "the flood's drops are committed exactly once before any swap failure" "$flood_n" "$before"
+
+  if ! hold_table; then
+    kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+    rm -rf "$DATA" "$ADATA"; return
+  fi
+  vps wgft rule disable "$z" --admin "$ADMIN" >/dev/null 2>&1
+  wait_until 5 apply_error_set
+  check "apply_error reports the failed swap (drop counters were read but the swap, and any commit, did not happen)" \
+    "operation not permitted" "$(apply_top_field apply_error)"
+  release_table
+  vps wgft rule enable "$z" --admin "$ADMIN" >/dev/null 2>&1
+  must_wait "check7e: z is active again after the successful swap" 10 rule_state_is "$z" apply_state active
+  local after; after=$(rule_drops "$w"); [ -z "$after" ] && after=0
+  check "the rule's cumulative drops still equal exactly what was sent, not double counted" "$flood_n" "$after"
+
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 8: a rule-local bind failure recovers on its own via the 30s retry (design 7a.3 節,
+# internal/vpsd/apply.go's retryOnce) once the squatted port is freed, without any other change,
+# and a retry that would publish nothing new does not replace the nft table (kernel mode:
+# `nft -a list table inet wgft` handles are unchanged across a window while still squatted). Runs
+# in both modes since the retry loop and its no-op check are backend-agnostic; only the handle
+# comparison itself is kernel-specific (userspace has no nftables table).
+# ---------------------------------------------------------------------------------------------
+check8() {
+  echo "== $mode: check 8: a rule-local bind failure recovers via the 30s retry; a no-op retry does not replace the nft table"
+  local DATA=/tmp/wgft-lifecycle-c8 ADATA=/tmp/wgft-lifecycle-c8-agent
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+
+  start_server "$DATA" /tmp/wgft-lifecycle-c8-server.log
+  if ! wait_admin; then echo "FAIL  check8 setup: admin api never came up"; fail=1; return; fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c8-agent.log 2>&1 < /dev/null &
+  disown
+  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25650 \
+    > /tmp/wgft-lifecycle-c8-echo.log 2>&1 < /dev/null &
+  disown
+  if ! wait_agent home; then echo "FAIL  check8 setup: agent never registered"; fail=1; return; fi
+
+  local port=8490
+  port_listening() { vps ss -ltn 2>/dev/null | grep -q ":$port "; }
+  port_free() { ! port_listening; }
+  squat() {
+    vps setsid nohup socat "TCP-LISTEN:$port,reuseaddr,fork" EXEC:/bin/cat \
+      > /tmp/wgft-lifecycle-c8-squat.log 2>&1 < /dev/null &
+    disown
+    wait_until 3 port_listening
+  }
+  unsquat() { pkill -x socat; wait_until 3 port_free; }
+
+  squat
+  local r
+  if [ "$mode" = kernel ]; then
+    r=$(vps wgft rule add --agent home --tcp "$port" --to 192.168.50.3:25650 --proxy --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  else
+    r=$(vps wgft rule add --agent home --tcp "$port" --to 192.168.50.3:25650 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  fi
+  must_wait "check8: the squatted rule is reported not_active" 5 rule_state_is "$r" apply_state not_active
+  check "its reason names the bind failure" "bind failed" "$(rule_state_field "$r" reason)"
+  local fail_line
+  if [ "$mode" = kernel ]; then fail_line="cannot open listener for $port:"; else fail_line="listener tcp/$port:"; fi
+  fail_log_count() {
+    if [ "$mode" = kernel ]; then
+      grep -c "$fail_line" /tmp/wgft-lifecycle-c8-server.log
+    else
+      grep "$fail_line" /tmp/wgft-lifecycle-c8-server.log | grep -vc "opened after"
+    fi
+  }
+  okcheck "the bind failure is logged exactly once so far" "$([ "$(fail_log_count)" = 1 ] && echo 1 || echo 0)"
+
+  local before_handles=""
+  if [ "$mode" = kernel ]; then before_handles=$(vps nft -a list table inet wgft 2>/dev/null); fi
+  # deliberate: retries run every 30s from server startup (design 7a.3), so a 35s wait guarantees
+  # at least one retry tick lands while the port is still squatted, without depending on exactly
+  # when in that cycle the rule was added.
+  sleep 35
+  okcheck "the rule is still not_active after a no-op retry window" "$(rule_state_is "$r" apply_state not_active && echo 1 || echo 0)"
+  okcheck "the bind failure is still logged exactly once (the no-op retry did not re-log it)" \
+    "$([ "$(fail_log_count)" = 1 ] && echo 1 || echo 0)"
+  if [ "$mode" = kernel ]; then
+    local after_handles; after_handles=$(vps nft -a list table inet wgft 2>/dev/null)
+    check "a no-op retry does not replace table inet wgft (handles are unchanged)" "$before_handles" "$after_handles"
+  else
+    skip "nft table handle stability (userspace mode has no nftables table)"
+  fi
+
+  unsquat
+  # must_wait: ~40s covers one full retry interval plus scheduling slack; nothing else changes the
+  # rule, so recovery can only come from the retry loop noticing the port is free.
+  must_wait "check8: the rule recovers to active within ~40s via the retry, with no other change" 45 rule_state_is "$r" apply_state active
+  check "it actually forwards once active" "tcp-echo" "$(client "echo hi | socat -t 3 - TCP:198.51.100.1:$port")"
+  local recover_line
+  if [ "$mode" = kernel ]; then recover_line="$port: listener opened after"; else recover_line="listener tcp/$port: opened after"; fi
+  okcheck "the recovery is logged exactly once" "$([ "$(grep -c "$recover_line" /tmp/wgft-lifecycle-c8-server.log)" = 1 ] && echo 1 || echo 0)"
+  okcheck "the rule-level recovery is logged exactly once" \
+    "$([ "$(grep -c "rule $r: no longer failing" /tmp/wgft-lifecycle-c8-server.log)" = 1 ] && echo 1 || echo 0)"
+
+  vps wgft rule rm "$r" --admin "$ADMIN" >/dev/null 2>&1
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 9: kernel state changed outside wgft is restored (design 7a.3 節, 実際の状態への収束),
+# kernel mode only. The nftables change notifications wake the server, which observes the table
+# and republishes it when it differs from what it committed; with nothing changed it commits
+# nothing. A table held by another process (flags owner) disappears without any notification
+# when that process exits, so the release is picked up by the 30s retry instead.
+# ---------------------------------------------------------------------------------------------
+check9() {
+  echo "== $mode: check 9: kernel state changed outside wgft is restored"
+  if [ "$mode" != kernel ]; then
+    skip "restoring table inet wgft (userspace mode keeps its dataplane inside the process, with no kernel state to lose, design 6.3/7a.3)"
+    return
+  fi
+  local DATA=/tmp/wgft-lifecycle-c9 ADATA=/tmp/wgft-lifecycle-c9-agent LOG=/tmp/wgft-lifecycle-c9-server.log
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+
+  start_server "$DATA" "$LOG"
+  if ! wait_admin; then echo "FAIL  check9 setup: admin api never came up"; fail=1; return; fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c9-agent.log 2>&1 < /dev/null &
+  disown
+  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25660 > /tmp/wgft-lifecycle-c9-echo.log 2>&1 < /dev/null &
+  disown
+  if ! wait_agent home; then echo "FAIL  check9 setup: agent never registered"; fail=1; return; fi
+
+  local r; r=$(vps wgft rule add --agent home --tcp 39990 --to 192.168.50.3:25660 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  # bare wait_until: re-checked by the check() right after (same probe, same port).
+  wait_until 10 tcp_probe_ok 39990
+  check "the rule forwards before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39990')"
+  drift_lines() { grep -c "data plane changed outside wgft" "$LOG"; }
+  applied_lines() { grep -c "applied table inet wgft" "$LOG"; }
+
+  echo "-- a. nft flush ruleset (what a reload of an nftables.conf starting with flush ruleset does)"
+  vps nft flush ruleset
+  # must_wait: the change notification wakes the server within a debounce of 250ms; 5s is slack.
+  must_wait "check9a: forwarding is back within 5s of the flush" 5 tcp_probe_ok 39990
+  check "the rule forwards again after the flush" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39990')"
+  check "one log line names what drifted" "data plane changed outside wgft (table inet wgft is missing)" "$(grep "data plane changed" "$LOG")"
+  okcheck "exactly one drift line so far" "$([ "$(drift_lines)" = 1 ] && echo 1 || echo 0)"
+
+  echo "-- b. nft delete table inet wgft"
+  vps nft delete table inet wgft
+  must_wait "check9b: forwarding is back within 5s of the delete" 5 tcp_probe_ok 39990
+  check "the rule forwards again after the delete" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39990')"
+  okcheck "exactly one more drift line" "$([ "$(drift_lines)" = 2 ] && echo 1 || echo 0)"
+
+  echo "-- c. with nothing of wgft's changed, nothing is republished (another table's churn included)"
+  # table_handles: every line of the table that carries a handle (table, chains, sets, rules), without
+  # the elements of the dynamic sets (flows_tcp, meters), which change with traffic alone.
+  table_handles() { vps nft -a list table inet wgft 2>/dev/null | grep '# handle'; }
+  local before_handles before_applied; before_handles=$(table_handles)
+  before_applied=$(applied_lines)
+  vps nft add table ip wgft-lifecycle-unrelated
+  vps nft add chain ip wgft-lifecycle-unrelated c
+  vps nft delete table ip wgft-lifecycle-unrelated
+  # deliberate: nothing observable happens when nothing is republished, so a full 30s retry
+  # interval plus slack has to pass to show that neither the notifications of wgft's own commits,
+  # nor another table's changes, nor the retry timer replace the table.
+  sleep 35
+  check "table inet wgft's handles are unchanged" "$before_handles" "$(table_handles)"
+  okcheck "no apply was logged in the window" "$([ "$(applied_lines)" = "$before_applied" ] && echo 1 || echo 0)"
+  okcheck "no drift line was logged in the window" "$([ "$(drift_lines)" = 2 ] && echo 1 || echo 0)"
+
+  echo "-- d. a table held by another process leaves an admin change pending until the holder exits"
+  # Same foreign-owner technique as check3b/check7, as one nftables transaction.
+  rm -f /tmp/wgft-lifecycle-c9-fifo /tmp/wgft-lifecycle-c9-owner.log
+  mkfifo /tmp/wgft-lifecycle-c9-fifo
+  vps bash -c 'exec 3<>/tmp/wgft-lifecycle-c9-fifo; nft -i <&3 >/tmp/wgft-lifecycle-c9-owner.log 2>&1 &'
+  nft_i_ready() { vps pgrep -x nft >/dev/null 2>&1; }
+  if ! must_wait "check9: nft -i reading the fifo" 3 nft_i_ready; then
+    rm -f /tmp/wgft-lifecycle-c9-fifo
+    kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+    rm -rf "$DATA" "$ADATA"; return
+  fi
+  echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > /tmp/wgft-lifecycle-c9-fifo
+  foreign_owner_table_present() { vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner'; }
+  must_wait "check9: a foreign owner table exists" 5 foreign_owner_table_present
+  local owner_pid; owner_pid=$(vps pgrep -x nft | head -1)
+  vps wgft rule add --agent home --tcp 39991 --to 192.168.50.3:25660 --admin "$ADMIN" >/dev/null 2>&1
+  local r2; r2=$(vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for r in d['rules']:
+    if r['listen_port'] == '39991':
+        print(r['id'])
+")
+  apply_error_set() { [ -n "$(apply_top_field apply_error)" ]; }
+  # bare wait_until: re-checked by the check() right after (same field).
+  wait_until 5 apply_error_set
+  check "apply_error reports the held table" "operation not permitted" "$(apply_top_field apply_error)"
+  okcheck "the added rule is pending" "$(rule_state_is "$r2" apply_state pending && echo 1 || echo 0)"
+  okcheck "desired_generation is ahead of active_generation" \
+    "$([ "$(apply_top_field desired_generation)" != "$(apply_top_field active_generation)" ] && echo 1 || echo 0)"
+  local log_before; log_before=$(wc -l < "$LOG")
+  [ -n "$owner_pid" ] && kill "$owner_pid" 2>/dev/null
+  must_wait "check9: the foreign nft -i (owner pid $owner_pid) exited" 5 proc_gone "$owner_pid"
+  rm -f /tmp/wgft-lifecycle-c9-fifo /tmp/wgft-lifecycle-c9-owner.log
+  # must_wait: the release sends no notification, so the 30s retry picks it up; 45s is one full
+  # interval plus slack. No admin change is made from here on.
+  must_wait "check9d: the pending generation is published without an admin change" 45 generations_equal
+  okcheck "the added rule is active" "$(rule_state_is "$r2" apply_state active && echo 1 || echo 0)"
+  okcheck "the first rule is active" "$(rule_state_is "$r" apply_state active && echo 1 || echo 0)"
+  okcheck "no admin change was logged after the release" \
+    "$(tail -n +"$((log_before + 1))" "$LOG" | grep -q "rules: cli" && echo 0 || echo 1)"
+  # bare wait_until: re-checked by the check() right after. The agent opens its listener for the
+  # new rule once the published generation is delivered over the stream.
+  wait_until 10 tcp_probe_ok 39991
+  check "the rule added while the table was held forwards end to end" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39991')"
+  check "the first rule forwards again" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39990')"
+
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"
 }
 
 # ---------------------------------------------------------------------------------------------
