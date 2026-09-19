@@ -577,7 +577,7 @@ WireGuard のピアの変更、drop カウンタの読み出し、公開の後�
 | `proto.Rule` の `VPSMode`/`ProxyProtocol` | `Rule` + `Forwarding` + `SourceMetadata` | 外部 JSON の `vps_mode`/`proxy_protocol` は変えず、アダプタで写す |
 | `proto.ValidateRules`/`ValidateUpsert`/`UnchangedIDs` | normalize/validate | 変更のない行を検査し直さない規則を引き継ぐ |
 | `internal/dataplane/linuxkernel/nft` の評価順ロジック(deny・allow・per_source・flow-cap・new_flow・packet。Phase 3 で `internal/vpsd/nft` から移した) | `AdmissionPolicy` の nftables コンパイラ | IR からnftables 式を生成する部分だけを残す |
-| `internal/dataplane/userspace/srcpolicy`(Phase 2 で `internal/vpsd/srcpolicy` から移した) | `AdmissionPolicy` の Go 評価器 | nftables の評価順を手で模す実装をやめ、IR 由来の 1 実装に統合する |
+| `internal/dataplane/userspace/srcpolicy`(Phase 2 で `internal/vpsd/srcpolicy` から移した) | `AdmissionPolicy` の Go 評価器 | nftables の評価順を手で模す実装をやめ、IR 由来の 1 実装に統合する。Phase 5 の移行の手順 3 で `internal/policy/goengine` に置き換わり、手順 5 で package ごと削除した |
 | `internal/dataplane/linuxkernel/conntrack`(Phase 3 で `internal/vpsd/conntrack` から移した)の `allowed()` | 同上を呼び出す側 | 許可判定の再実装をやめ、共通の評価器を呼ぶ |
 | `internal/vpsd/proxyrelay` の `sourceAllowed()` | 同上を呼び出す側 | 同上 |
 | `internal/vpsd/proxyrelay` の `Prepare`/`Commit`/`Rollback` | frontend の最初の transaction participant | `Relay` の listener 集合を、`Runtime` の frontend participant として一般化する |
@@ -782,7 +782,7 @@ Phase 5 では、`internal/policy` の IR を 2 つの対象へコンパイル�
 
 `policy.Policy` は、ルールごとの `RulePolicy`(ルール ID、プロトコル、`source_allow`、`source_deny`、3 つのレート)と、プロトコルごとの `PerSourceFlowCaps` を持つ。この形は Phase 1 のままで、Phase 5 では次を IR に加える。
 
-- 評価の定数:トークンバケットの burst(5)、送信元ごとの表の期限(1 分)と大きさ(65535)、同時フロー数の set の大きさ(65535)を、`internal/policy` の定数として 1 か所に持つ。今は `nft` と `srcpolicy` が同じ値をそれぞれ書いている
+- 評価の定数:トークンバケットの burst(5)、送信元ごとの表の期限(1 分)と大きさ(65535)、同時フロー数の set の大きさ(65535)を、`internal/policy` の定数として 1 か所に持つ。以前は `nft` と `srcpolicy`(Phase 5 の移行の手順 5 で削除)が同じ値をそれぞれ書いていた
 - 段と drop の種類の対応:`Order` の各段は、drop カウンタの種類(`deny`、`allow`、`per_source`、`src_flow`、`new_flow`、`packet`)を 1 つずつ持つ。この文字列は SQLite に累積する drop の種類なので、今の値を変えない
 - 段の適用範囲:`deny` と `allow` は、外から入るフローのすべてのパケットに効く。`per_source_rate`、送信元ごとの同時フロー数の上限、`new_flow_rate` は、TCP と UDP の新しいフローに効く。`packet_rate` は UDP のデータグラムだけに効く(後述)
 - CIDR の正規化:`policy.Build` が `source_allow` と `source_deny` の CIDR をマスクし、重なりと隣接を併合して昇順に並べる。今は nftables の set を作るときだけ併合しており(`intervalElements`)、Go の評価器は併合前の一覧を走査している。deny と allow の両方に含まれる送信元は、deny が先に評価されるので拒まれる
@@ -815,13 +815,13 @@ v1 は IPv4 だけを扱い(4 節)、IPv4 でない送信元を拒む(fail-close
 
 #### Go の評価器へのコンパイルの約束
 
-`internal/policy/goengine` は、IR から評価器を作り、`internal/dataplane/userspace/srcpolicy` を置き換える。評価器の判定は `Decision` の値(考え方としては `Decision{Allow bool; Kind DropKind}`)を返し、拒んだときは拒んだ段の drop の種類を `Kind` に持つ。drop カウンタも評価器が数え、呼び出し側(中継)は drop の種類を決めない。
+`internal/policy/goengine` は、IR から評価器を作る。nftables の評価順を手で模していた旧い `internal/dataplane/userspace/srcpolicy` は Phase 5 で削除した(移行の手順 3 と 5)。評価器の判定は `Decision` の値(考え方としては `Decision{Allow bool; Kind DropKind}`)を返し、拒んだときは拒んだ段の drop の種類を `Kind` に持つ。drop カウンタも評価器が数え、呼び出し側(中継)は drop の種類を決めない。
 
 - `AdmitFlow`:新しいフロー(TCP の accept、UDP の新しいセッションの最初のデータグラム)を `Order` の全段で判定する。送信元ごとの同時フロー数の段を通ったときは枠を取り、フローの終わりに枠を返すための手形を返す。後の段か Resource Guard が拒んだときは、その場で枠を返す
 - `AdmitPacket`:成立済みの UDP セッションのデータグラムを `packet_rate` の段で判定する。`Retiring` の UDP の待ち受け(7a.3 節)のセッションには呼ばない。そのルールは公開した方針に無く、IR に無いルール ID として拒まれるためである。kernel モードでも、fail-closed にしたルールの成立済みのフローは、そのルールの行が無いテーブルを通るので、`packet_rate` を受けない
 - `SourceAllowed`:成立済みのフローを残すかを deny と allow だけで判定する(7a.3 節の `Retiring`、ルール変更の後にセッションを閉じる判定)
 - `Update`:状態を引き継ぐ規則は 7a.4 節のままである。直前の宣言にあって新しい宣言に無いルール(削除、無効化、分割と統合で消えた ID、fail-closed にしたルール)は、次の `Update` まで旧い方針のまま判定を続ける(退いたルール)。評価器の更新と中継の待ち受けの更新(所属ルール ID の付け替え、待ち受けの閉鎖、`Retiring` への移行)は不可分ではなく、userspace モードの `Relay` の待ち受けは dataplane の `Commit` の後の frontend の `Commit` で付け替わる。この間に旧い ID で届く新しいフローを、IR に無いルール ID として拒まないためである。分割と統合は既存のセッションを切らない(7 節)だけでなく、新しいフローも拒まない。待ち受けの更新は同じトランザクションの中で終わり、旧い ID で受け付ける待ち受けは残らないので、次の `Update` で退いたルールを捨てる。退いたルールの状態は引き継がず、同じ ID が宣言に戻れば新しく作る
-- `Drops`:段ごとの drop を返して 0 に戻す(今の `srcpolicy.Drops` と同じ経路)
+- `Drops`:段ごとの drop を返して 0 に戻す(旧い `srcpolicy.Drops` と同じ経路)
 - IR に無いルール ID と IPv4 でない送信元:拒み、drop には数えない。退いたルール(`Update`)は IR に無いルール ID に含めない。移行の手順 3 より前の `srcpolicy` は未知のルール ID を通していた。listener は、そのルールの IR を公開した後にだけ中継を始める(7a.3 節)ので、正しい実装では起きない。起きたときに通さないためである
 
 Phase 5 の前の userspace の実装は、次の 3 点で IR の意味と食い違っていた。最初の 2 つは移行の手順 3、3 つ目は手順 4 で直した。

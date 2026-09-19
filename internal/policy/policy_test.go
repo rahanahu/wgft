@@ -37,8 +37,8 @@ func TestOrderMatchesDesign(t *testing.T) {
 
 // TestStepDropKindMatchesPersistedStrings pins the exact drop-counter strings design.md 7a.9 節
 // requires (deny, allow, per_source, src_flow, new_flow, packet): the ones
-// internal/dataplane/linuxkernel/nft and internal/dataplane/userspace/srcpolicy already write into
-// the counters vpsd accumulates in SQLite (7 節). Every step must map to one of these, no step may
+// internal/dataplane/linuxkernel/nft and internal/policy/goengine write into the counters vpsd
+// accumulates in SQLite (7 節). Every step must map to one of these, no step may
 // share a kind with another, and the set must be exactly these six.
 func TestStepDropKindMatchesPersistedStrings(t *testing.T) {
 	want := map[Step]string{

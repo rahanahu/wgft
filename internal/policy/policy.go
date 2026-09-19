@@ -26,8 +26,9 @@ import (
 
 // 評価の定数(設計文書 7a.9 節「IR の形」)。トークンバケットの burst、接続元ごとの表の期限と
 // 大きさ、同時フロー数の set の大きさは、どの実装でも変えない仕様値なので、この 1 か所だけに書く。
-// 今は internal/dataplane/linuxkernel/nft と internal/dataplane/userspace/srcpolicy が
-// それぞれ同じ値を書いていたので、両方をこの定数を使う形に直す(Phase 5 移行の手順 1)。
+// 以前は internal/dataplane/linuxkernel/nft と internal/dataplane/userspace/srcpolicy(Phase 5 の
+// 移行の手順 5 で削除)がそれぞれ同じ値を書いていたので、両方をこの定数を使う形に直した
+// (Phase 5 移行の手順 1)。
 const (
 	// TokenBucketBurst is nftables' `limit rate over` burst (nft の既定値)。userspace の
 	// トークンバケットは、ラボでカーネルモードと通過数・drop 数の累計が一致することを確かめた
@@ -83,7 +84,7 @@ func (s Step) String() string {
 }
 
 // DropKind is the drop-counter kind persisted for this step's rejections (design.md 7a.9 節「段と
-// drop の種類の対応」): the exact strings nft と srcpolicy already write to their drop counters,
+// drop の種類の対応」): the exact strings nft and goengine write to their drop counters,
 // which vpsd accumulates into SQLite (7 節 "各 drop のカウンタは...SQLite に累積する")。This
 // method only names the mapping in one place; it does not change any of the strings themselves.
 func (s Step) DropKind() string {
