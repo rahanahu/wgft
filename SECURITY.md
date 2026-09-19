@@ -65,6 +65,16 @@ The setting is optional and unset by default, which means no restriction. It
 limits which addresses can be reached, not what happens at an address that is
 on the list.
 
+## Rotating the agent API certificate
+
+The server generates the agent API certificate on its first start, and every
+agent pins its fingerprint when it registers. wgft v1 has no way to replace
+that certificate while agents keep running. If its private key leaks, the
+remedy is `wgft server teardown --purge` followed by registering every agent
+again with a fresh join string, which carries the new fingerprint. The private
+key lives in the server database next to the WireGuard server key and the agent
+tokens, so protecting that file protects all three.
+
 ## Areas of particular interest
 
 wgft is exposed on the public internet in three ways: the WireGuard
