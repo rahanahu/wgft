@@ -27,6 +27,9 @@ type fakeKernel struct {
 	wgErr    func(peers []wg.Peer) error
 	devPeers []wg.Peer
 	rules    []conntrack.Rule
+	// dev and table are what inspect and fingerprint read back (drift_test.go).
+	dev   wg.DeviceState
+	table string // fingerprint of the table; "" means the table is missing
 }
 
 func (k *fakeKernel) ensureWG(cfg wg.Config) ([]string, error) {
@@ -86,6 +89,10 @@ func (k *fakeKernel) converge(rules []conntrack.Rule, _ netip.Prefix) (int, erro
 	k.rules = rules
 	return 0, nil
 }
+
+func (k *fakeKernel) inspect(string) (wg.DeviceState, error) { return k.dev, nil }
+
+func (k *fakeKernel) fingerprint() (string, bool, error) { return k.table, k.table != "", nil }
 
 func newTestBackend(k *fakeKernel) *Backend {
 	return &Backend{iface: "wgft0", ops: k, network: netip.MustParsePrefix("10.200.0.0/24")}

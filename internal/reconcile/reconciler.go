@@ -62,8 +62,10 @@ type Status struct {
 	// LastError is the backend-wide failure of the last transaction, empty when it committed.
 	LastError string
 	// NeedsRetry is true while Desired is not fully Active for a reason a retry can fix: the last
-	// transaction failed as a whole, or some rule's Prepare failed (design.md 7a.3 節: 再試行).
-	// Rules not forwarded on purpose (disabled, agent not registered, invalid row) do not count.
+	// transaction failed as a whole, or some rule's Prepare failed (design.md 7a.3 節: 再試行). The
+	// control plane retries these on a timer, since what clears them (a port being freed, another
+	// process releasing table inet wgft when it exits) sends no notification. Rules not forwarded on
+	// purpose (disabled, agent not registered, invalid row) do not count.
 	NeedsRetry bool
 }
 
@@ -105,7 +107,14 @@ type Reconciler struct {
 	retiring map[string]dataplane.Retiring
 	// published is what the last committed transaction published; nil before the first.
 	published *Published
-	status    Status
+	// resync is set when an Observe after a Commit found drift (or could not read the state): the
+	// next transaction republishes the whole Plan and converges the device as a whole, whatever
+	// Retry says, and is cleared when it commits (design.md 7a.3 節: 実際の状態への収束).
+	resync bool
+	// last is the Desired value of the last Reconcile, for the status a failed Observe reports.
+	last    Input
+	hasLast bool
+	status  Status
 }
 
 // New returns a Reconciler that drives rt. Nothing is Active until its first transaction commits.
@@ -128,6 +137,7 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 	defer r.mu.Unlock()
 	r.status.DesiredGeneration = in.Plan.Generation
 	r.status.Reconciled = true
+	r.last, r.hasLast = in, true
 	if !r.observed {
 		obs, err := r.rt.Dataplane.Observe()
 		if err != nil {
@@ -144,8 +154,8 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 	for id, pp := range r.active {
 		previous[id] = pp
 	}
-	tx := Tx{Plan: in.Plan, WG: in.WG, ActivePeers: r.activePeers, Previous: previous}
-	if in.Retry {
+	tx := Tx{Plan: in.Plan, WG: in.WG, ActivePeers: r.activePeers, Previous: previous, Resync: r.resync}
+	if in.Retry && !r.resync {
 		tx.Unchanged = r.published
 	}
 	out, err := r.rt.Apply(tx)
@@ -179,6 +189,7 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 	if in.WG != nil {
 		r.activePeers = in.WG.Peers
 	}
+	r.resync = false
 	r.status.ActiveGeneration = gen
 	r.status.LastError = ""
 	r.status.NeedsRetry = len(out.Failed) > 0
@@ -188,7 +199,48 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 	return out, nil
 }
 
+// Observe compares the actual state of the dataplane with what the last transaction committed
+// (design.md 7a.3 節: 実際の状態への収束). The control plane calls it after the dataplane's change
+// notifications and periodically as a safety net against missed ones.
+//
+// drift is what the dataplane reported drifted, returned only when it is newly found, for one log
+// line. due tells whether a transaction should run now: the state drifted (now, or earlier and
+// the republication has not committed yet), or the last transaction failed as a whole, which the
+// change that caused the notification may have cleared. An
+// Observe that finds nothing changed and no failure pending is not due, so nothing is prepared or
+// committed and the nftables meters and ct count sets are kept.
+//
+// An error (the state could not be read, or a resource wgft converges is held by someone else) is
+// recorded like a backend-wide failure, with every rule reported pending, and the next transaction
+// republishes as after drift.
+func (r *Reconciler) Observe() (drift []string, due bool, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.published == nil {
+		// まだ何も commit していないので、比べる相手が無い。最初のトランザクションの失敗だけを試し直す
+		return nil, r.status.LastError != "", nil
+	}
+	obs, err := r.rt.Dataplane.Observe()
+	if err != nil {
+		r.resync = true
+		if r.hasLast {
+			r.fail(r.last, err)
+		}
+		return nil, false, err
+	}
+	if len(obs.Drift) > 0 {
+		if !r.resync {
+			drift = obs.Drift
+		}
+		r.resync = true
+		r.activePeers = obs.Peers
+	}
+	return drift, r.resync || r.status.LastError != "", nil
+}
+
 // fail records a backend-wide failure: Active, its generation and the retiring set are unchanged.
+// While a drift is not republished yet (resync), every rule of the Plan is reported pending: what
+// was Active may no longer be forwarding.
 func (r *Reconciler) fail(in Input, err error) {
 	r.status.LastError = err.Error()
 	r.status.NeedsRetry = true
@@ -213,7 +265,7 @@ func (r *Reconciler) ruleStates(in Input, failed map[string]error, backendErr er
 		case failed[pp.RuleID] != nil:
 			st.State, st.Reason = NotActive, failed[pp.RuleID].Error()
 		case backendErr != nil:
-			if cur, ok := r.active[pp.RuleID]; !ok || !reflect.DeepEqual(cur, pp) {
+			if cur, ok := r.active[pp.RuleID]; r.resync || !ok || !reflect.DeepEqual(cur, pp) {
 				st.State, st.Reason = Pending, backendErr.Error()
 			}
 		}

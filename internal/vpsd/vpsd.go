@@ -224,6 +224,9 @@ type Daemon struct {
 	// notActive はログに記録済みのルール単位の失敗(ルール ID → 理由)。同じ失敗を再試行のたびに
 	// ログへ出さないために持つ(apply.go の ruleFailureLog)
 	notActive map[string]string
+	// lastConvergeErr は observeOnce と retryOnce が直前に出した失敗の行。同じ失敗を通知や再試行の
+	// たびに出さないために持つ(apply.go の logConverge)。
+	lastConvergeErr string
 }
 
 // Run は起動して、シグナルまで動く。
@@ -399,7 +402,7 @@ func Run(opts Options) error {
 	go func() { errc <- fmt.Errorf("admin API: %w", admin.ServeListener(adminLn, srv)) }()
 	go func() { errc <- fmt.Errorf("agent API: %w", d.agentAPI.ServeListener(agentLn)) }()
 	go d.watchIPMismatch(ctx)
-	go d.retryLoop(ctx)
+	go d.convergeLoop(ctx)
 	select {
 	case <-ctx.Done():
 		log.Printf("shutting down; keeping wg0 and the table")

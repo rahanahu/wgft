@@ -69,6 +69,9 @@ type Tx struct {
 	// that changes nothing does not replace the nftables table and reset its meters and ct count
 	// sets (design.md 7a.3 節).
 	Unchanged *Published
+	// Resync asks the dataplane to converge as a whole after drift (dataplane.Desired.Resync). A
+	// resync transaction always commits, even when Unchanged matches.
+	Resync bool
 }
 
 // Published is what a committed transaction published.
@@ -113,7 +116,7 @@ type Outcome struct {
 func (r Runtime) Apply(tx Tx) (Outcome, error) {
 	out := Outcome{Failed: map[string]error{}}
 	var fp FrontendPrepared
-	d := dataplane.Desired{Plan: tx.Plan, WG: tx.WG, ActivePeers: tx.ActivePeers}
+	d := dataplane.Desired{Plan: tx.Plan, WG: tx.WG, ActivePeers: tx.ActivePeers, Resync: tx.Resync}
 	if r.Frontend != nil {
 		var err error
 		if fp, err = r.Frontend.Prepare(tx.Plan); err != nil {
@@ -138,7 +141,7 @@ func (r Runtime) Apply(tx Tx) (Outcome, error) {
 	out.Retiring = retiring(tx, out.Failed)
 	out.Published = tx.Plan.Without(ids(out.Failed))
 	out.Listening = d.RelayListening
-	if tx.Unchanged != nil && !d.PeersChanged() && samePublication(*tx.Unchanged, out) {
+	if tx.Unchanged != nil && !tx.Resync && !d.PeersChanged() && samePublication(*tx.Unchanged, out) {
 		dp.Rollback()
 		if fp != nil {
 			fp.Rollback()

@@ -57,12 +57,13 @@ type fakeDataplane struct {
 	committed  dataplane.Committed
 	retiring   []dataplane.Retiring
 	observes   int
+	drift      []string // what Observe reports drifted
 }
 
 func (d *fakeDataplane) Observe() (dataplane.Observed, error) {
 	d.observes++
 	d.rec.add("dataplane.Observe")
-	return dataplane.Observed{Peers: d.observed}, d.observeErr
+	return dataplane.Observed{Peers: d.observed, Drift: d.drift}, d.observeErr
 }
 
 func (d *fakeDataplane) Prepare(in dataplane.Desired) (dataplane.Prepared, error) {

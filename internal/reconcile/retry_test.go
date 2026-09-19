@@ -67,8 +67,9 @@ func TestRetrySkipsUnchangedPublication(t *testing.T) {
 	}
 }
 
-// A backend-wide failure asks for a retry too; the retry after it publishes (nothing matched the
-// failed attempt), and a success clears the request.
+// A backend-wide failure asks for a retry too (another process releasing table inet wgft sends no
+// notification), and Observe after a change notification reports it due; the retry after it
+// publishes (nothing matched the failed attempt), and a success clears the request.
 func TestRetryAfterBackendFailure(t *testing.T) {
 	rec := &recorder{}
 	dp := &fakeDataplane{rec: rec}
@@ -85,8 +86,11 @@ func TestRetryAfterBackendFailure(t *testing.T) {
 	if _, err := r.Reconcile(in); err == nil {
 		t.Fatal("want the failure")
 	}
-	if !r.Status().NeedsRetry {
-		t.Fatal("a backend-wide failure must ask for a retry")
+	if st := r.Status(); !st.NeedsRetry || st.LastError == "" {
+		t.Fatalf("after a backend-wide failure: NeedsRetry %v, LastError %q; want both", st.NeedsRetry, st.LastError)
+	}
+	if _, due, err := r.Observe(); err != nil || !due {
+		t.Fatalf("Observe after a backend-wide failure: due %v, err %v; want due", due, err)
 	}
 	dp.commitErr = nil
 	in.Retry = true
@@ -94,7 +98,10 @@ func TestRetryAfterBackendFailure(t *testing.T) {
 	if err != nil || out.NoOp {
 		t.Fatalf("retry after a failure: NoOp %v, err %v, want a commit", out.NoOp, err)
 	}
-	if st := r.Status(); st.NeedsRetry || st.ActiveGeneration != 2 {
-		t.Errorf("after the retry: NeedsRetry %v, active generation %d", st.NeedsRetry, st.ActiveGeneration)
+	if st := r.Status(); st.NeedsRetry || st.LastError != "" || st.ActiveGeneration != 2 {
+		t.Errorf("after the retry: NeedsRetry %v, LastError %q, active generation %d", st.NeedsRetry, st.LastError, st.ActiveGeneration)
+	}
+	if _, due, _ := r.Observe(); due {
+		t.Error("Observe after the recovery must not be due")
 	}
 }

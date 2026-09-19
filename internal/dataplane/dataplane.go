@@ -12,6 +12,7 @@
 package dataplane
 
 import (
+	"context"
 	"net"
 	"net/netip"
 
@@ -42,6 +43,11 @@ type Desired struct {
 	// publication, and Rollback restores this set (design.md 7a.3 節: WireGuard のピアは、公開の
 	// 前に足し、公開をやめた後に消す).
 	ActivePeers []Peer
+	// Resync is set when an Observe found that the state the last Commit left has drifted
+	// (Observed.Drift). Prepare then converges the whole WireGuard device to WG (creating it if it is
+	// gone, and its key, listen port, address, MTU and peers), not only the peer changes (design.md
+	// 7a.3 節: 実際の状態への収束).
+	Resync bool
 }
 
 // PeersChanged reports whether d asks for a different peer set than the device has now.
@@ -50,10 +56,16 @@ func (d Desired) PeersChanged() bool {
 }
 
 // Observed is what Observe reads back from the dataplane itself, independent of what this process
-// has committed so far (design.md 7a.3 節: 再起動時の Observe).
+// has committed so far (design.md 7a.3 節: 再起動時の Observe、実際の状態への収束).
 type Observed struct {
-	// Peers is the WireGuard peer set the device has now.
+	// Peers is the WireGuard peer set the device has now (none when the device is gone).
 	Peers []Peer
+	// Drift lists, one short phrase each, what of the state the last successful Commit left the
+	// dataplane no longer has as committed: for the kernel backend, table inet wgft missing or
+	// changed, the wg interface missing, or its key, listen port, address, up state or peers
+	// changed. Empty before the first Commit, when nothing drifted, and always for a dataplane
+	// whose state lives only inside the process (userspace).
+	Drift []string
 }
 
 // Retiring is a rule made fail-closed (design.md 7a.3 節): its replacement could not be prepared,
@@ -86,9 +98,12 @@ func RetiringByRule(retiring []Retiring) map[string]Retiring {
 // Participant is the dataplane side of the Runtime's fixed order (design.md 7a.2 節). Every
 // Backend is one; internal/reconcile depends only on this narrow interface.
 type Participant interface {
-	// Observe reads what the dataplane has now. The Reconciler calls it once, before its first
-	// transaction, since a restarted process does not know what the previous one left behind
-	// (design.md 7a.3 節).
+	// Observe reads what the dataplane has now. The Reconciler calls it before its first
+	// transaction, since a restarted process does not know what the previous one left behind, and
+	// afterwards whenever the control plane checks the actual state against what was committed
+	// (design.md 7a.3 節: 実際の状態への収束). It must be cheap (a few netlink reads) and must not
+	// change anything. An error means the state could not be read, or that a resource wgft
+	// converges is now held by someone else and must be left alone (design.md 9 節: 所有判定).
 	Observe() (Observed, error)
 	// Prepare stages d without publishing it. Everything that can fail belongs here (design.md 7a.2
 	// 節): binding listeners, building the nftables transaction, adding WireGuard peers. An error is
@@ -96,6 +111,18 @@ type Participant interface {
 	// the frontend. A failure confined to one rule (a listener that cannot bind) is not an error:
 	// the rule is reported by Prepared.Failed and left out of what Commit publishes.
 	Prepare(d Desired) (Prepared, error)
+}
+
+// Sensor is implemented by a Backend whose state something outside wgft can change (the kernel
+// backend: nftables and the wg interface). It only wakes the control plane: the control plane
+// then Observes the actual state and converges if it differs. What a notification says is never
+// acted on (design.md 7a.3 節: 実際の状態への収束).
+type Sensor interface {
+	// Watch subscribes to the kernel's change notifications and calls wake after each one, until
+	// ctx is done (then it returns nil) or the subscription fails (then it returns the error, having
+	// called wake once more, since a failure such as a receive buffer overflow can lose
+	// notifications). wake must not block. The caller restarts Watch after a failure.
+	Watch(ctx context.Context, wake func()) error
 }
 
 // Prepared is one staged dataplane change, finished by exactly one of Commit or Rollback.

@@ -17,7 +17,7 @@ import (
 	"log"
 	"net/netip"
 	"sort"
-	"time"
+	"strings"
 )
 
 // bringUpWG は起動時に wg インタフェースを立ち上げ、ピア以外(鍵、ポート、アドレス、MTU)を宣言に
@@ -83,39 +83,91 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 	return err
 }
 
-// retryInterval は、宣言がすべて Active になっていないあいだに適用をやり直す間隔(設計文書 7a.3 節)。
-// エージェントの待ち受けの再試行(仕様 5.2 節)と同じ 30 秒にする。
-const retryInterval = 30 * time.Second
-
-// retryLoop は、Reconciler が再試行を求めているあいだ(ルールの Prepare の失敗か、backend 全体の
-// 失敗)、retryInterval ごとに SQLite の宣言を適用し直す。前回と同じものを公開するだけの再試行は
-// 何も commit しないので、nftables のテーブルを差し替えず、meter と ct count の状態を保つ。
-func (d *Daemon) retryLoop(ctx context.Context) {
-	t := time.NewTicker(retryInterval)
-	defer t.Stop()
-	for {
+// convergeLoop は、管理者の操作を待たずに宣言へ収束させる(設計文書 7a.3 節:実際の状態への収束、
+// 再試行)。kernel backend は dataplane.Sensor として nftables とリンクとアドレスの変更の通知を
+// 受け取り、通知があれば(まとめて 1 回)observeOnce が実際の状態を読み、直前の Commit と食い違えば
+// 公開し直す。通知の取りこぼしと WireGuard のピアの変更(通知が無い)には 5 分ごとの observeOnce が
+// 備える。ルールの Prepare の失敗(bind)と backend 全体の失敗は、解消しても通知が来ない(ポートが
+// 空く、table inet wgft を保持していたプロセスが終わる)ので、30 秒ごとの retryOnce が試し直す。
+// userspace backend は Sensor を持たないので、通知を購読しない。
+func (d *Daemon) convergeLoop(ctx context.Context) {
+	wake := make(chan struct{}, 1)
+	poke := func() {
 		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
+		case wake <- struct{}{}:
+		default:
 		}
-		d.retryOnce()
 	}
+	if s, ok := d.dp.participant().(dataplane.Sensor); ok {
+		go reconcile.Watch(ctx, s, poke, reconcile.DefaultBackoff, log.Printf)
+	}
+	reconcile.DefaultTriggers.Run(ctx, wake, d.observeOnce, d.retryOnce)
 }
 
+// observeOnce は、Reconciler の Observe で実際の状態を直前の Commit と比べ、食い違い(またはまだ
+// 公開できていない backend 全体の失敗)があれば SQLite の宣言を適用し直す。食い違いの無い
+// observeOnce は何も commit しないので、nftables のテーブルを差し替えず、meter と ct count の状態を
+// 保つ。同じ失敗は続くあいだ 1 行だけログに出す。
+func (d *Daemon) observeOnce() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.rec == nil {
+		return
+	}
+	drift, due, err := d.rec.Observe()
+	if err != nil {
+		d.logConverge(fmt.Sprintf("checking the data plane: %v", err))
+		return
+	}
+	if len(drift) > 0 {
+		log.Printf("data plane changed outside wgft (%s); applying the rules again", strings.Join(drift, "; "))
+	}
+	if !due {
+		d.logConverge("")
+		return
+	}
+	d.reapply()
+}
+
+// logConverge は、observeOnce の失敗の行を、前回と違うときだけ出す。空の msg は失敗が終わったことを
+// 記録する。通知は他のテーブルの変更でも来るので、失敗が続くあいだ通知のたびに出すとログが溢れる。
+func (d *Daemon) logConverge(msg string) {
+	if msg != "" && msg != d.lastConvergeErr {
+		log.Print(msg)
+	}
+	d.lastConvergeErr = msg
+}
+
+// retryOnce は、宣言がすべて Active になっていないあいだ(ルールの Prepare の失敗か、backend 全体の
+// 失敗)、30 秒ごと(reconcile.DefaultTriggers.Retry。エージェントの待ち受けの再試行、仕様 5.2 節と
+// 同じ間隔)に SQLite の宣言を適用し直す。前回と同じものを公開するだけの再試行は何も commit しない
+// ので、nftables のテーブルを差し替えず、meter と ct count の状態を保つ。
 func (d *Daemon) retryOnce() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.rec == nil || !d.rec.Status().NeedsRetry {
 		return
 	}
+	d.reapply()
+}
+
+// reapply は SQLite の宣言を再試行として適用する(前回と同じものを公開するだけなら commit しない)。
+// 管理者の変更が backend 全体の失敗で公開できなかった場合、その変更はエージェントにも配られていない
+// (admin_backend.go の Batch は適用の失敗で配信を省く)。再試行がその世代を公開したら、ここで配る。
+func (d *Daemon) reapply() {
 	rules, err := d.st.Rules()
 	if err != nil {
-		log.Printf("retrying the data plane: %v", err)
+		d.logConverge(fmt.Sprintf("applying the rules again: %v", err))
 		return
 	}
+	before := d.rec.Status().ActiveGeneration
 	if _, err := d.apply(rules, true); err != nil {
-		log.Printf("retrying the data plane: %v", err)
+		d.logConverge(fmt.Sprintf("applying the rules again: %v", err))
+		return
+	}
+	d.logConverge("")
+	if d.rec.Status().ActiveGeneration != before && d.hub != nil {
+		go d.hub.PushAll()
 	}
 }
 
