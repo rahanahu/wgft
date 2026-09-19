@@ -2,7 +2,7 @@
 
 package nft
 
-// ゴールデンテスト。ラボの vps ns で root として実行する(lab/lab test internal/vpsd/nft)。
+// ゴールデンテスト。ラボの vps ns で root として実行する(lab/lab test internal/dataplane/linuxkernel/nft)。
 // testdata/<case>.json のルールから生成したテーブルの `nft list` が、
 // testdata/<case>.nft を `nft -f` で流したものと一致することを確かめる。
 

@@ -13,10 +13,11 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// TestRelayRulesMatchFromRules checks that the Relay declaration vpsd now builds from the Plan
-// (relayRules) equals the one it built from the stored rules before Phase 2
-// (proxyrelay.FromRules; design.md 7a.8 節: no behaviour change). Both sides are the real functions.
-func TestRelayRulesMatchFromRules(t *testing.T) {
+// TestRelayRulesFromPlan checks that relayRules builds the Relay declaration from a Plan the way
+// design.md 6.2 節 describes: one entry per enabled, TCP, Relay rule whose agent is registered
+// (disabled rules, rules of unregistered agents, and Transparent rules are left out), carrying the
+// admission policy fields (SourceDeny/SourceAllow) and the ProxyV2 flag through unchanged.
+func TestRelayRulesFromPlan(t *testing.T) {
 	pr := func(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} }
 	cidr := netip.MustParsePrefix
 	rules := []proto.Rule{
@@ -45,14 +46,17 @@ func TestRelayRulesMatchFromRules(t *testing.T) {
 	}
 	plan := planner.Build(planner.Input{Rules: normalized, Limits: flowcap.Limits{}, Agents: agents})
 
-	got, want := relayRules(plan.Relay()), proxyrelay.FromRules(rules, agentAddr)
+	got := relayRules(plan.Relay())
+	want := []proxyrelay.Rule{
+		{ID: "r_plain", ListenPort: 443, AgentAddr: netip.MustParseAddr("10.200.0.2"), AgentPort: 443,
+			SourceAllow: []netip.Prefix{cidr("198.51.100.0/24")}, Agent: "home"},
+		{ID: "r_pp", ListenPort: 8443, AgentAddr: netip.MustParseAddr("10.200.0.3"), AgentPort: 8443,
+			ProxyProtocol: true, SourceDeny: []netip.Prefix{cidr("203.0.113.0/24")}, Agent: "office"},
+	}
 	byID := func(rs []proxyrelay.Rule) { sort.Slice(rs, func(i, j int) bool { return rs[i].ID < rs[j].ID }) }
 	byID(got)
 	byID(want)
-	if len(want) != 2 {
-		t.Fatalf("fixture: FromRules gave %d rules, want 2", len(want))
-	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("relayRules(plan.Relay()) = %+v\nwant proxyrelay.FromRules(...) = %+v", got, want)
+		t.Fatalf("relayRules(plan.Relay()) = %+v\nwant %+v", got, want)
 	}
 }

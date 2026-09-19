@@ -8,10 +8,10 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/platform/linux"
-	"github.com/rahanahu/wgft/internal/vpsd/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 )
 
 // Check は起動せずに、そのモードで必要な検査を走らせて結果を書く読み取り専用コマンド

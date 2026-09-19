@@ -6,8 +6,6 @@ package vpsd
 // 何もしないホスト側の検査(他テーブル、bind 中のポート、ip_forward)だけを受け持つ。
 
 import (
-	"net/netip"
-
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
@@ -15,9 +13,7 @@ import (
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
-	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -26,15 +22,10 @@ type userspaceDataplane struct {
 	b *userspace.Backend
 }
 
-// EnsureWG は wg.Config のうち Backend の宣言に当たる部分を渡す。インタフェース名と
-// AdoptExisting はカーネルの wg インタフェースだけの性質なので使わない。
-func (u *userspaceDataplane) EnsureWG(cfg wg.Config) ([]string, error) {
-	peers := make([]dataplane.Peer, len(cfg.Peers))
-	for i, p := range cfg.Peers {
-		peers[i] = dataplane.Peer{PublicKey: p.PublicKey, Address: p.Address}
-	}
-	return u.b.EnsureWG(dataplane.WGConfig{PrivateKey: cfg.PrivateKey, ListenPort: cfg.ListenPort,
-		Address: cfg.Address, MTU: cfg.MTU, Peers: peers})
+// EnsureWG は Backend にそのまま渡す。インタフェース名と AdoptExisting はカーネルの wg
+// インタフェースだけの性質で、dataplane.WGConfig には無い(その doc コメントのとおり)。
+func (u *userspaceDataplane) EnsureWG(cfg dataplane.WGConfig) ([]string, error) {
+	return u.b.EnsureWG(cfg)
 }
 
 func (u *userspaceDataplane) WGStatus() (*wgtypes.Device, error) { return u.b.WGStatus() }
@@ -73,7 +64,7 @@ func (u *userspaceDataplane) participant() dataplane.Participant {
 }
 
 // Converge は接続元制限を満たさなくなった進行中のセッションを閉じる(conntrack 収束の代わり。仕様 6.3 節)。
-func (u *userspaceDataplane) Converge(_ []ctconv.Rule, _ netip.Prefix, plan planner.Plan) (int, error) {
+func (u *userspaceDataplane) Converge(plan planner.Plan) (int, error) {
 	return u.b.Converge(plan)
 }
 

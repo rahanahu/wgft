@@ -1,6 +1,7 @@
-// Package wg は VPS 側の WireGuard インタフェース(wg0)を宣言に収束させる(仕様 4, 9 節)。
-// インタフェースの作成とアドレス・MTU は netlink で、鍵・ポート・ピアは wgctrl で扱う。
-// 停止時には何も削除しない。
+// Package wg は VPS(および将来の agent の kernel backend、Phase 7)の WireGuard インタフェースを
+// 宣言に収束させる(仕様 4, 9 節、設計文書 7a.7 節)。インタフェースの作成とアドレス・MTU は
+// netlink で、鍵・ポート・ピアは wgctrl で扱う。停止時には何も削除しない。internal/vpsd を
+// import しない(internal/platform/linux の bind 中ポート検査だけを使う)。
 package wg
 
 import (

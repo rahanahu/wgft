@@ -1,4 +1,5 @@
 // Package nft は、Plan から VPS の table inet wgft を組み立てて適用する(仕様 6.1 節、設計文書 7a.2 節)。
+// internal/dataplane/linuxkernel の nftables 実装で、internal/vpsd を import しない(設計文書 7a.7 節)。
 //
 // Apply/emit は internal/planner.Plan と、frontend が実際に待ち受けている Relay ポートの集合
 // (design.md 7a.2 節の dataplane.Desired.RelayListening に当たる Runtime 側の入力)だけから組み立てる。

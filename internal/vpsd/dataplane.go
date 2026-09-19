@@ -1,32 +1,31 @@
 package vpsd
 
 import (
-	"net/netip"
-
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
-	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
-	"github.com/rahanahu/wgft/internal/vpsd/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 )
 
 // serverDataplane は VPS 側の転送面を Daemon から見た形。Daemon がカーネルや外部の状態を触るときは、
-// 必ずここを通る。実装は 2 つある。kernelDataplane(nftables の DNAT とカーネル WireGuard、仕様 6.1 節)は
-// まだこのパッケージの中にあり、Phase 3(設計文書 7a.8 節)で internal/dataplane/linuxkernel へ移す。
-// userspaceDataplane(仕様 6.3 節)は internal/dataplane/userspace の Backend を包むだけの薄い層で、
-// 他テーブルの検査や ip_forward のような、ユーザー空間モードでは何もしないホスト側の検査を受け持つ。
+// 必ずここを通る。実装は 2 つある。kernelDataplane は internal/dataplane/linuxkernel.Backend を
+// 包むだけの薄い層で、他テーブルの検査や ip_forward のような、Backend の役目ではない host 側の
+// 検査(internal/platform/linux)を受け持つ(design.md 7a.7、7a.8 節 Phase 3)。userspaceDataplane
+// (仕様 6.3 節)は internal/dataplane/userspace の Backend を包む、同じ形の薄い層である。
 //
-// メソッドの形はいまのカーネル実装の型(wg.Config、linux.Report など)をそのまま出している。
-// participant は、どちらの実装も Plan だけから table inet wgft(または userspace の宣言)を組み立てる
-// (設計文書 7a.8 節 Phase 3)。rules と agentAddr の引数は、ログの件数表示のためだけに applyNFT が残す。
+// 両方の Backend が dataplane.Backend(EnsureWG、WGStatus、Converge、ReadDrops、Dial、Participant)
+// を実装するので、このインタフェースのその部分はほぼ素通しになる。それ以外のメソッド
+// (OtherDeviceWithKey、ReadUDPTimeouts、Inspect、BoundPorts、InputPortSuggestions、EnableIPForward、
+// CheckConnectivity)は、Backend の外の host 側検査や vpsd の都合(store への記録)を持つので、
+// dataplane.Backend には無い。
 type serverDataplane interface {
 	// EnsureWG は wg インタフェースを宣言(鍵、ポート、アドレス、MTU、ピア集合)に収束させ、行った変更を返す(仕様 9 節)。
-	EnsureWG(cfg wg.Config) ([]string, error)
+	EnsureWG(cfg dataplane.WGConfig) ([]string, error)
 	// WGStatus は wg インタフェースの現在のピア(エンドポイント、最終ハンドシェイク)を返す。
 	WGStatus() (*wgtypes.Device, error)
 	// OtherDeviceWithKey は同じサーバ鍵を持つ別名の WireGuard デバイスがあればその名前を返す(インタフェース名の変更の検出)。
@@ -45,8 +44,8 @@ type serverDataplane interface {
 	// 宣言を 1 回で公開する(カーネルでは table inet wgft の 1 トランザクションの差し替え。仕様 6.1 節)。
 	// 組み立ての元になる Plan は Runtime.Apply が dataplane.Desired 経由で渡す
 	participant() dataplane.Participant
-	// Converge は外から入った進行中のフローを宣言に収束させ、消した数を返す(仕様 6.1、6.3 節)。
-	Converge(rules []ctconv.Rule, wgNet netip.Prefix, plan planner.Plan) (int, error)
+	// Converge は外から入った進行中のフローを Plan に収束させ、消した数を返す(仕様 6.1、6.3 節)。
+	Converge(plan planner.Plan) (int, error)
 	// EnableIPForward は net.ipv4.ip_forward を 1 にする(仕様 6.1 節)。
 	// 書き込みに失敗すると、policy drop と同じ流儀の Finding を返す(成功時とすでに 1 のときは nil)。
 	EnableIPForward(st *store.Store) *linux.Finding
@@ -54,15 +53,20 @@ type serverDataplane interface {
 	CheckConnectivity(addr string) conncheck.Result
 }
 
-// kernelDataplane はカーネルの WireGuard と nftables と conntrack を使う転送面。
+// kernelDataplane はカーネルの WireGuard と nftables と conntrack を使う転送面。実際の収束と適用は
+// internal/dataplane/linuxkernel.Backend が持ち、ここは host 側の検査(internal/platform/linux)を
+// 添えるだけの薄い層である(design.md 7a.8 節 Phase 3)。
 type kernelDataplane struct {
-	iface string // wg インタフェース名(既定 wgft0)
+	iface string // wg インタフェース名(既定 wgft0)。Inspect/BoundPorts/InputPortSuggestions が使う
+	b     *linuxkernel.Backend
 }
 
-func (k *kernelDataplane) EnsureWG(cfg wg.Config) ([]string, error) { return wg.Ensure(cfg) }
-func (k *kernelDataplane) WGStatus() (*wgtypes.Device, error)       { return wg.Status(k.iface) }
+func (k *kernelDataplane) EnsureWG(cfg dataplane.WGConfig) ([]string, error) {
+	return k.b.EnsureWG(cfg)
+}
+func (k *kernelDataplane) WGStatus() (*wgtypes.Device, error) { return k.b.WGStatus() }
 func (k *kernelDataplane) OtherDeviceWithKey(key wgtypes.Key) (string, bool) {
-	return wg.OtherDeviceWithKey(k.iface, key)
+	return k.b.OtherDeviceWithKey(key)
 }
 func (k *kernelDataplane) ReadUDPTimeouts() (linux.UDPTimeouts, error) {
 	return linux.ReadUDPTimeouts()
@@ -74,48 +78,9 @@ func (k *kernelDataplane) BoundPorts() (linux.Bound, error) { return linux.Bound
 func (k *kernelDataplane) InputPortSuggestions(port uint16) ([]string, error) {
 	return linux.InputPortSuggestions(port, nft.TableName)
 }
-func (k *kernelDataplane) ReadDrops() ([]dataplane.Drop, error) {
-	drops, err := nft.ReadDrops()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]dataplane.Drop, len(drops))
-	for i, d := range drops {
-		out[i] = dataplane.Drop{RuleID: d.RuleID, Kind: d.Kind, Packets: d.Packets, Bytes: d.Bytes}
-	}
-	return out, nil
-}
-
-// participant は table inet wgft を Plan から組み立てる participant を返す(設計文書 7a.8 節 Phase 3)。
-func (k *kernelDataplane) participant() dataplane.Participant {
-	return kernelTable{k: k}
-}
-
-// kernelTable は、table inet wgft の 1 回の差し替えを Runtime の dataplane の participant にする。
-type kernelTable struct{ k *kernelDataplane }
-
-// Prepare は何も確保しない。nft.Apply が組み立てと差し替えを 1 回で行い、組み立ての失敗でも
-// 差し替えの失敗でも何も公開しない(旧いテーブルのまま残る)ので、Commit だけで dataplane の
-// Commit の契約を満たす(design.md 7a.2 節:kernel backend は一度の nftables トランザクションで
-// 不可分に公開するので、これで Prepare/Commit の契約を満たす)。
-func (t kernelTable) Prepare(d dataplane.Desired) (dataplane.Prepared, error) {
-	return &kernelTablePrepared{t: t, desired: d}, nil
-}
-
-type kernelTablePrepared struct {
-	t       kernelTable
-	desired dataplane.Desired
-}
-
-func (p *kernelTablePrepared) Commit() error {
-	return nft.Apply(p.desired.Plan, p.desired.RelayListening, nft.Config{WGInterface: p.t.k.iface})
-}
-
-// Rollback は何もしない。Prepare は何も確保せず、失敗した Commit は何も公開していない。
-func (p *kernelTablePrepared) Rollback() {}
-func (k *kernelDataplane) Converge(rules []ctconv.Rule, wgNet netip.Prefix, _ planner.Plan) (int, error) {
-	return ctconv.Converge(rules, wgNet)
-}
+func (k *kernelDataplane) ReadDrops() ([]dataplane.Drop, error)           { return k.b.ReadDrops() }
+func (k *kernelDataplane) participant() dataplane.Participant             { return k.b }
+func (k *kernelDataplane) Converge(plan planner.Plan) (int, error)        { return k.b.Converge(plan) }
 func (k *kernelDataplane) EnableIPForward(st *store.Store) *linux.Finding { return EnableIPForward(st) }
 func (k *kernelDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{})

@@ -122,10 +122,18 @@ func packagesUnder(t *testing.T, root, dir string) []string {
 // import graph, so a stray import fails the tests rather than waiting for a review:
 //
 //   - nothing under internal/dataplane or internal/reconcile imports a control plane
-//     (internal/vpsd, internal/agent or their subpackages);
+//     (internal/vpsd, internal/agent or their subpackages): this is what keeps
+//     internal/dataplane/linuxkernel free of internal/vpsd (design.md 7a.8 節 Phase 3's completion
+//     criterion), the same way it already kept internal/dataplane/userspace free of it since Phase 2;
 //   - internal/dataplane (the interface package) and internal/reconcile import no dataplane
 //     implementation;
-//   - a dataplane implementation imports no other dataplane implementation.
+//   - a dataplane implementation (userspace, linuxkernel, and their subpackages: nft, wg, conntrack,
+//     relay, srcpolicy, utun, ...) imports no other dataplane implementation.
+//
+// The walk is generic over the implementation directories under internal/dataplane, so a future
+// implementation (e.g. the agent's kernel backend reusing linuxkernel, design.md 7a.8 節 Phase 7)
+// is checked without editing this test; the explicit count below only guards against the walk
+// silently covering zero packages if internal/dataplane's layout changes.
 func TestDependencyDirection(t *testing.T) {
 	root := moduleRoot(t)
 	pkgs := append(packagesUnder(t, root, "internal/dataplane"), packagesUnder(t, root, "internal/reconcile")...)
@@ -141,8 +149,10 @@ func TestDependencyDirection(t *testing.T) {
 		name, _, _ := strings.Cut(rest, "/")
 		return module + "/internal/dataplane/" + name
 	}
+	seenImpl := map[string]bool{}
 	for _, pkg := range pkgs {
 		own := impl(pkg)
+		seenImpl[own] = true
 		for _, dep := range deps(t, root, pkg) {
 			for _, cp := range []string{"/internal/vpsd", "/internal/agent"} {
 				if dep == module+cp || strings.HasPrefix(dep, module+cp+"/") {
@@ -152,6 +162,11 @@ func TestDependencyDirection(t *testing.T) {
 			if d := impl(dep); d != "" && d != own {
 				t.Errorf("%s imports the dataplane implementation %s (design.md 7a.7 節)", pkg, dep)
 			}
+		}
+	}
+	for _, want := range []string{module + "/internal/dataplane/userspace", module + "/internal/dataplane/linuxkernel"} {
+		if !seenImpl[want] {
+			t.Errorf("expected to find and check packages under %s, found none; did it move?", want)
 		}
 	}
 }

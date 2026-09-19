@@ -16,9 +16,9 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/planner"
-	"github.com/rahanahu/wgft/internal/vpsd/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
 

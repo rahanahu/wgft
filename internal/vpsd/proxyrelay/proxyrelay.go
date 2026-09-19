@@ -15,7 +15,6 @@ import (
 
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/netpipe"
-	"github.com/rahanahu/wgft/proto"
 )
 
 // Rule は中継 1 つ分の宣言。
@@ -86,31 +85,6 @@ func New(opts Options) *Manager {
 		opts.ConnsMax = flowcap.Limits{TCPTotal: opts.Cap.Total}.TCPPerRuleCap()
 	}
 	return &Manager{opts: opts, ls: map[uint16]*listener{}}
-}
-
-// FromRules は、有効なプロキシモードの TCP ルールから中継の宣言を作る。Phase 2(設計文書 7a.8 節)から
-// vpsd は Plan の Relay のポートから宣言を作り、この関数はそれと同じ宣言になることを確かめる基準として
-// 残る(internal/vpsd の relayfrontend_test.go と internal/planner の equivalence_test.go)。
-func FromRules(rules []proto.Rule, agentAddr map[string]netip.Addr) []Rule {
-	var out []Rule
-	for i := range rules {
-		r := &rules[i]
-		if !r.Enabled || r.VPSMode != proto.ModeProxy || r.Proto != proto.TCP {
-			continue
-		}
-		addr, ok := agentAddr[r.Agent]
-		if !ok {
-			continue
-		}
-		// proxy は単一ポート運用。proto.Rule.Validate は新規・変更のルールで範囲を拒否するが、
-		// それ以前に保存された範囲のルールは proto.ValidateUpsert が検査対象から外すのでここを
-		// 通り得る。安全側として先頭ポートだけを使う(仕様 5.4、6.2 節)
-		out = append(out, Rule{
-			ID: r.ID, ListenPort: r.ListenPort.Lo, AgentAddr: addr, AgentPort: r.ListenPort.Lo,
-			ProxyProtocol: r.ProxyProtocol, SourceDeny: r.SourceDeny, SourceAllow: r.SourceAllow, Agent: r.Agent,
-		})
-	}
-	return out
 }
 
 // Apply は宣言に収束させる(Prepare の直後に Commit する)。

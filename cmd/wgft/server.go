@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/vpsd"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 )
 
 // serverSpecs は server の設定項目(WGFT_ 名とフラグ別名。仕様 11a 節)。

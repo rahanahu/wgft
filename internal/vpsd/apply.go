@@ -4,15 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/reconcile"
-	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
-	"github.com/rahanahu/wgft/internal/vpsd/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 	"github.com/rahanahu/wgft/proto"
 	"log"
 	"net/netip"
@@ -24,9 +23,8 @@ func (d *Daemon) reconcileWG() error {
 	if err != nil {
 		return err
 	}
-	changes, err := d.dp.EnsureWG(wg.Config{
-		Interface: d.opts.WGInterface, PrivateKey: d.serverKey, ListenPort: int(d.opts.WGPort),
-		Address: d.network, MTU: d.opts.MTU, Peers: peers, AdoptExisting: d.opts.AdoptExisting,
+	changes, err := d.dp.EnsureWG(dataplane.WGConfig{
+		PrivateKey: d.serverKey, ListenPort: int(d.opts.WGPort), Address: d.network, MTU: d.opts.MTU, Peers: peers,
 	})
 	if err != nil {
 		// 所有判定・衝突による中止は、専用の終了コードに写せるようそのまま返す(wg0: で包まない)。
@@ -83,7 +81,7 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 	}
 	// conntrack の収束は必ず nftables の差し替えの後に走らせる(仕様 6.1 節)。
 	// 先に走らせると、旧テーブルで許可されたフローが差し替えまでの間に入る
-	d.converge(rules, agentAddr, plan)
+	d.converge(plan)
 	if d.proxy != nil {
 		d.proxyInputHints(rules)
 	}
@@ -101,15 +99,15 @@ func (f relayFrontend) Prepare(plan planner.Plan) (reconcile.FrontendPrepared, e
 }
 
 // relayRules は、Plan の Relay のポートのうち TCP のものから中継の宣言を作る。Plan は無効なルールと、
-// アドレスの分からないエージェントのルールを既に含まないので、Phase 2 より前に使っていた
-// proxyrelay.FromRules と同じ宣言になる(relayfrontend_test.go)。
+// アドレスの分からないエージェントのルールを既に含まないので、ここで検査し直さない
+// (relayfrontend_test.go の TestRelayRulesFromPlan)。
 func relayRules(ports []planner.PortPlan) []proxyrelay.Rule {
 	var out []proxyrelay.Rule
 	for _, pp := range ports {
 		if pp.Forwarding != model.Relay || pp.Proto != proto.TCP {
 			continue
 		}
-		// proxy は単一ポート運用。範囲のルールは先頭ポートだけを使う(FromRules と同じ理由。仕様 5.4、6.2 節)
+		// proxy は単一ポート運用。範囲のルールは先頭ポートだけを使う(仕様 5.4、6.2 節)
 		out = append(out, proxyrelay.Rule{
 			ID: pp.RuleID, ListenPort: pp.ListenPort.Lo, AgentAddr: pp.AgentAddr, AgentPort: pp.ListenPort.Lo,
 			ProxyProtocol: pp.SourceMetadata == model.ProxyV2,
@@ -167,23 +165,12 @@ func (d *Daemon) buildPlan(rules []proto.Rule, agentAddr map[string]netip.Addr) 
 	return planner.Build(planner.Input{Rules: normalized, Limits: d.opts.Limits, Agents: agents})
 }
 
-// converge は外から入って DNAT されたフローを、現在のカーネルモードの有効なルールに収束させる(仕様 6.1 節)。
+// converge は外から入って DNAT されたフローを Plan の Transparent なルールに収束させる(仕様 6.1 節)。
 // ユーザー空間モードでは、接続元制限を満たさなくなったセッションを閉じる(仕様 6.3 節)。
-func (d *Daemon) converge(rules []proto.Rule, agentAddr map[string]netip.Addr, plan planner.Plan) {
-	var crules []ctconv.Rule
-	for i := range rules {
-		r := &rules[i]
-		if !r.Enabled || r.VPSMode != proto.ModeKernel {
-			continue
-		}
-		addr, ok := agentAddr[r.Agent]
-		if !ok {
-			continue
-		}
-		crules = append(crules, ctconv.Rule{Proto: r.Proto, ListenPort: r.ListenPort, AgentAddr: addr,
-			SourceDeny: r.SourceDeny, SourceAllow: r.SourceAllow})
-	}
-	if n, err := d.dp.Converge(crules, d.network, plan); err != nil {
+// フィルタ(無効なルール、未登録のエージェント)は Plan.Transparent() が既に済ませている
+// (design.md 7a.8 節 Phase 3: internal/dataplane/linuxkernel/conntrack.RulesFromPlan)。
+func (d *Daemon) converge(plan planner.Plan) {
+	if n, err := d.dp.Converge(plan); err != nil {
 		log.Printf("conntrack converge: %v", err)
 	} else if n > 0 {
 		log.Printf("conntrack: removed %d unneeded flows", n)
