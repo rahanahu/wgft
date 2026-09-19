@@ -1,8 +1,10 @@
 package reconcile
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
@@ -60,6 +62,9 @@ type Status struct {
 	// and the established flows they still admit are kept until they end.
 	Retiring []Resource
 	// LastError is the backend-wide failure of the last transaction, empty when it committed.
+	// While a repair is pending (the transaction published, but a step after the publication
+	// failed), it says so and names the failure; the rules stay active (design.md 7a.3 節: 戻れない
+	// 地点の後の修復).
 	LastError string
 	// NeedsRetry is true while Desired is not fully Active for a reason a retry can fix: the last
 	// transaction failed as a whole, or some rule's Prepare failed (design.md 7a.3 節: 再試行). The
@@ -111,6 +116,10 @@ type Reconciler struct {
 	// next transaction republishes the whole Plan and converges the device as a whole, whatever
 	// Retry says, and is cleared when it commits (design.md 7a.3 節: 実際の状態への収束).
 	resync bool
+	// repair is set while the last transaction published but left a repair pending
+	// (dataplane.Committed.RepairPending; design.md 7a.3 節: 戻れない地点の後の修復). A retry then
+	// runs the dataplane's Repair even when it would publish the same again.
+	repair bool
 	// last is the Desired value of the last Reconcile, for the status a failed Observe reports.
 	last    Input
 	hasLast bool
@@ -154,14 +163,36 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 	for id, pp := range r.active {
 		previous[id] = pp
 	}
+	var drift []string
+	if in.Retry && r.repair && !r.resync && r.published != nil {
+		// 修復の再試行は、まず実際の状態を確かめる。食い違い(読み直せなかったテーブルを含む)が
+		// あれば、修復の手順だけでなく公開し直す(design.md 7a.3 節: 戻れない地点の後の修復)
+		obs, err := r.rt.Dataplane.Observe()
+		if err != nil {
+			r.resync = true
+			r.fail(in, err)
+			return Outcome{}, err
+		}
+		if len(obs.Drift) > 0 {
+			drift = obs.Drift
+			r.resync = true
+			r.activePeers = obs.Peers
+		}
+	}
 	tx := Tx{Plan: in.Plan, WG: in.WG, ActivePeers: r.activePeers, Previous: previous, Resync: r.resync}
 	if in.Retry && !r.resync {
 		tx.Unchanged = r.published
 	}
 	out, err := r.rt.Apply(tx)
+	out.Drift = drift
 	if err != nil {
 		r.fail(in, err)
 		return out, err
+	}
+	if out.NoOp && r.repair {
+		// 公開は前回と同じなので差し替えず、残っている修復の手順だけを走らせる
+		out.Committed = r.rt.Dataplane.Repair()
+		out.Repaired = true
 	}
 	r.published = &Published{Plan: out.Published, Listening: out.Listening, Failed: ids(out.Failed)}
 	gen := in.Plan.Generation
@@ -190,13 +221,30 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 		r.activePeers = in.WG.Peers
 	}
 	r.resync = false
+	r.repair = out.Committed.RepairPending
 	r.status.ActiveGeneration = gen
 	r.status.LastError = ""
-	r.status.NeedsRetry = len(out.Failed) > 0
+	if r.repair {
+		r.status.LastError = repairError(gen, out.Committed.Errors)
+	}
+	r.status.NeedsRetry = len(out.Failed) > 0 || r.repair
 	r.status.Rules = r.ruleStates(in, out.Failed, nil)
 	r.status.ActiveOnly = r.activeOnly(in)
 	r.status.Retiring = r.retiringResources()
 	return out, nil
+}
+
+// repairError is the status's LastError while a repair is pending: the publication happened, but a
+// step after it failed (design.md 7a.3 節: 戻れない地点の後の修復).
+func repairError(gen uint64, errs []error) string {
+	msgs := make([]string, 0, len(errs))
+	for _, e := range errs {
+		msgs = append(msgs, e.Error())
+	}
+	if len(msgs) == 0 {
+		msgs = append(msgs, "a repair is still pending")
+	}
+	return fmt.Sprintf("published generation %d, but a repair after the publication failed: %s", gen, strings.Join(msgs, "; "))
 }
 
 // Observe compares the actual state of the dataplane with what the last transaction committed

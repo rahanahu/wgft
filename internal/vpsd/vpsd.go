@@ -227,6 +227,9 @@ type Daemon struct {
 	// lastConvergeErr は observeOnce と retryOnce が直前に出した失敗の行。同じ失敗を通知や再試行の
 	// たびに出さないために持つ(apply.go の logConverge)。
 	lastConvergeErr string
+	// lastRepairErr は、戻れない地点の後の修復が残っているあいだの失敗の行。同じ失敗を再試行の
+	// たびに出さないために持つ(apply.go の logRepair)。
+	lastRepairErr string
 }
 
 // Run は起動して、シグナルまで動く。

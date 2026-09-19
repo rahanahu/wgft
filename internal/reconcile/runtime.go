@@ -97,8 +97,13 @@ type Outcome struct {
 	// frontend were rolled back, and Committed is empty.
 	NoOp bool
 	// Committed is what the dataplane's Commit reported (drop counters, WireGuard changes,
-	// convergence).
+	// convergence), or, when Repaired, what its Repair reported.
 	Committed dataplane.Committed
+	// Repaired is set when nothing was published (NoOp) but the dataplane's Repair ran the
+	// repairs a previous Commit left pending (design.md 7a.3 節: 戻れない地点の後の修復).
+	Repaired bool
+	// Drift is what a repair retry's Observe found drifted, which made it republish.
+	Drift []string
 }
 
 // Apply runs one transaction in the fixed order of design.md 7a.2 節:

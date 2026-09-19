@@ -51,6 +51,12 @@ type Backend struct {
 	mu  sync.Mutex
 	tun *utun.Tunnel
 	cfg dataplane.WGConfig // the declaration the tunnel was brought up with
+
+	// pendingPeers is the peer set whose removal the last Commit or Repair failed to finish; nil when
+	// no repair is pending (design.md 7a.3 節: 戻れない地点の後の修復). The Reconciler serializes
+	// Prepare, Commit and Repair.
+	pendingPeers []dataplane.Peer
+	repairPeers  bool
 }
 
 var _ dataplane.Backend = (*Backend)(nil)
@@ -239,12 +245,12 @@ func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, e
 		keep[r.Previous.RuleID] = r.SourceAllowed
 	}
 	p.staged.Commit(keep)
-	if p.peersChanged {
-		changes, err := b.setPeers(p.desired.WG.Peers)
-		if err != nil {
-			c.Errors = append(c.Errors, fmt.Errorf("userspace tunnel: removing peers: %w", err))
-		}
-		c.WGChanges = append(c.WGChanges, changes...)
+	// ピアの削除が残っていれば、ピアの集合が変わらなくても公開の後で宣言に収束させる
+	peersPending := b.repairPeers
+	b.pendingPeers, b.repairPeers = nil, false
+	if p.desired.WG != nil && (p.peersChanged || peersPending) {
+		b.pendingPeers, b.repairPeers = append([]dataplane.Peer(nil), p.desired.WG.Peers...), true
+		b.repairOnce(&c)
 	}
 	c.Closed = b.relay.CloseSessions(func(ruleID string, src netip.Addr) bool {
 		if k, ok := keep[ruleID]; ok {
@@ -253,6 +259,30 @@ func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, e
 		return b.policy.SourceAllowed(ruleID, src)
 	})
 	return c, nil
+}
+
+// repairOnce removes the peers the declaration dropped (the pending repair), keeping it pending
+// when it fails.
+func (b *Backend) repairOnce(c *dataplane.Committed) {
+	if !b.repairPeers {
+		return
+	}
+	changes, err := b.setPeers(b.pendingPeers)
+	c.WGChanges = append(c.WGChanges, changes...)
+	if err != nil {
+		c.Errors = append(c.Errors, fmt.Errorf("userspace tunnel: removing peers: %w", err))
+		c.RepairPending = true
+		return
+	}
+	b.pendingPeers, b.repairPeers = nil, false
+}
+
+// Repair reruns a peer removal the last Commit or Repair left failed (design.md 7a.3 節: 戻れない
+// 地点の後の修復). Closing the relay sessions cannot fail, so it is never a repair.
+func (b *Backend) Repair() dataplane.Committed {
+	var c dataplane.Committed
+	b.repairOnce(&c)
+	return c
 }
 
 // Rollback closes the listeners Prepare bound and restores the peer set it changed.

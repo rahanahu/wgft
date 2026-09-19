@@ -48,8 +48,9 @@ type ApplyStatus struct {
 	ActiveGeneration  uint64
 	Rules             map[string]RuleApply
 	Drift             Drift
-	// LastError is the failure of the last transaction that failed as a whole, empty after a
-	// successful one.
+	// LastError is the failure of the last transaction that failed as a whole, or, when it
+	// published but a repair after the publication failed, that failure (design.md 7a.3 節: 戻れない
+	// 地点の後の修復). Empty once everything succeeded.
 	LastError string
 }
 

@@ -111,6 +111,13 @@ type Participant interface {
 	// the frontend. A failure confined to one rule (a listener that cannot bind) is not an error:
 	// the rule is reported by Prepared.Failed and left out of what Commit publishes.
 	Prepare(d Desired) (Prepared, error)
+	// Repair reruns the repairs the last Commit (or Repair) left failed, without publishing
+	// anything again: for the kernel backend, removing peers and the conntrack convergence, so the
+	// nftables table is not replaced and its meters and ct count sets are kept (design.md 7a.3 節:
+	// 戻れない地点の後の修復). A failed read-back of the published table is not repaired here: the
+	// next Observe reports it as drift, which republishes. RepairPending in the result stays set
+	// while anything is still pending. It does nothing when nothing is pending.
+	Repair() Committed
 }
 
 // Sensor is implemented by a Backend whose state something outside wgft can change (the kernel
@@ -157,8 +164,15 @@ type Committed struct {
 	// Closed is how many established flows the convergence after the publication closed.
 	Closed int
 	// Errors are the failures after the point of no return (reading the drop counters, removing
-	// peers, convergence). They are logged; the next transaction retries what they left behind.
+	// peers, convergence, reading back what was published). They are logged.
 	Errors []error
+	// RepairPending is set while a step after the point of no return failed in a way that a retry
+	// can repair (design.md 7a.3 節: 戻れない地点の後の修復): removing the peers the declaration
+	// dropped, the convergence of established flows, or reading back what was published. The
+	// Reconciler then asks for a retry, which runs Participant.Repair even when it would publish
+	// the same again. A failure to read the drop counters is not a repair: the replaced state is
+	// gone and its counters cannot be read any more.
+	RepairPending bool
 }
 
 // Backend is one DataplaneMode's dataplane (design.md 7a.2 節: "Backend は kernel と userspace の

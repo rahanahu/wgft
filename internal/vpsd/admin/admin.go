@@ -192,7 +192,7 @@ type BatchResponse struct {
 	ActiveGeneration  *uint64              `json:"active_generation,omitempty"`
 	RuleStates        map[string]RuleApply `json:"rule_states,omitempty"` // rule_id → 適用状態
 	Drift             *Drift               `json:"drift,omitempty"`
-	ApplyError        string               `json:"apply_error,omitempty"` // 最後の適用の backend 全体の失敗
+	ApplyError        string               `json:"apply_error,omitempty"` // 最後の適用の backend 全体の失敗か、公開の後の修復の失敗
 }
 
 // ErrorBody は失敗時の本文。
