@@ -49,6 +49,10 @@ type serverDataplane interface {
 	// EnableIPForward は net.ipv4.ip_forward を 1 にする(仕様 6.1 節)。
 	// 書き込みに失敗すると、policy drop と同じ流儀の Finding を返す(成功時とすでに 1 のときは nil)。
 	EnableIPForward(st *store.Store) *linux.Finding
+	// ConntrackWarning は nf_conntrack_max が wgft の推奨する最低値を下回っているときの、起動ログ
+	// 向けの短い警告を返す(足りていれば空文字。設計文書 7a.10 節「kernel 側の保護」)。
+	// カーネルの conntrack を使わないユーザー空間モードでは常に空文字を返す。
+	ConntrackWarning() string
 	// CheckConnectivity は wg 経由でエージェントのリスナーに TCP 接続する疎通確認(仕様 10.1 節)。
 	CheckConnectivity(addr string) conncheck.Result
 }
@@ -82,4 +86,15 @@ func (k *kernelDataplane) participant() dataplane.Participant             { retu
 func (k *kernelDataplane) EnableIPForward(st *store.Store) *linux.Finding { return EnableIPForward(st) }
 func (k *kernelDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{})
+}
+
+// ConntrackWarning reads the conntrack table's current limit and returns the short startup
+// warning when it is below linux.ConntrackMinMax. A read failure (module not loaded, no
+// permission) is not fatal at startup; `server check` reports it in detail instead.
+func (k *kernelDataplane) ConntrackWarning() string {
+	usage, err := linux.ReadConntrackUsage()
+	if err != nil {
+		return ""
+	}
+	return usage.StartupWarning()
 }

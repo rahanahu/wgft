@@ -65,6 +65,10 @@ func (u *userspaceDataplane) participant() dataplane.Participant {
 
 func (u *userspaceDataplane) EnableIPForward(*store.Store) *linux.Finding { return nil }
 
+// ConntrackWarning は空文字を返す。ユーザー空間モードはカーネルの conntrack を使わないので、
+// nf_conntrack_max の大小に意味が無い(仕様 6.3 節)。
+func (u *userspaceDataplane) ConntrackWarning() string { return "" }
+
 func (u *userspaceDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{Dial: u.b.Dial})
 }

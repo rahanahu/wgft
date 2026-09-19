@@ -1011,18 +1011,20 @@ kernel 側の Resource Guard は、観測して提示するだけで、値を変
 kernel 側で Resource Guard が行うことは次のとおりである。
 
 - conntrack の表の上限と件数の読み取り:`internal/platform/linux` の `ReadConntrackUsage` が `nf_conntrack_max` と `nf_conntrack_count` を読む。`server check` は今のとおり件数と上限を表示し、上限が 65536 未満なら、上げる sysctl と `new_flow_rate` の設定を提示する。実際の VPS(メモリ 462 MB)では、上限は 4096 で、この提示が出た。6.1 節が例に挙げた 16384 より小さい上限の VPS もある
-- 起動時の Finding:今の判定は `server check` を実行したときにしか出ない。Phase 6 では、同じ判定を `ip_forward` と同じ起動時の Findings として UI とログにも出す。`server check` を実行しない運用者にも、表が小さいことを UI で示すためである
-- 提示する値:今の提示は `nf_conntrack_max=262144` である。Phase 6 では、ラボで conntrack のエントリ 1 件のカーネルのメモリを測り(未確認)、65536 以上の値を、その値で表が埋まったときのカーネルのメモリと合わせて提示する。今の 262144 は、メモリの小さい VPS では表が埋まったときのカーネルのメモリが大きい可能性がある
+- 起動時の Finding:以前は `server check` を実行したときにしか出なかった。Phase 6 のこの段で、同じ判定を `ip_forward` と同じ起動時のログにも出すようにした。`server check` を実行しない運用者にも気付けるようにするためである。管理用 API と Web UI への表示は、他の nftables の Finding(`ip_forward` を含む)と同じくこの段の対象外であり、今もログだけである
+- 提示する値:以前の提示は `nf_conntrack_max=262144` だった。所有者の決定により、`server check` と起動時の Finding のどちらも、メモリの数値(MiB、エントリ 1 件のバイト数、bucket 数のいずれも)を出さない。提示する値は 65536 に改めた。判定の閾値も同じ 65536 である
+
+  観測:Debian 12 / Linux 6.1 のラボで約 6 万件を埋めて測ったところ、DNAT を伴う conntrack のエントリは 1 件あたり約 384 バイト(本体 256 バイトと NAT の拡張 128 バイト)、NAT を伴わないエントリは約 256 バイトだった。ほかにハッシュ表の費用がある。これは kernel の版、設定、エントリの種類で変わるので、wgft の診断の出力にも推奨値の計算にも使わない。65536 はメモリの量から出した値ではなく、wgft が運用上の最低の推奨値として定める
 - set の大きさ:`meter_N` と `flows_udp`/`flows_tcp` の大きさ(65535)は、Phase 5 から IR の定数である(7a.9 節)。埋まったときの劣化(送信元ごとの制限が外れ、集約上限に委ねる)は 6.1 節のとおりで、Phase 6 は変えない。set の要素数は監視しない
 
 kernel 側で Resource Guard が行わないことは次のとおりである。
 
 - `nf_conntrack_max` と `nf_conntrack_buckets` を書き換えない(6.1 節)
-- ホストのメモリの量から提示する値を計算しない。提示は判定の閾値とエントリの費用という固定の情報だけから作る
+- ホストのメモリの量から提示する値を計算しない。提示は判定の閾値(65536)という固定の値だけから作り、メモリの数値(MiB、エントリの費用、bucket 数)は出さない
 - wgft のポート全体の同時フロー数を `ct count` で抑える行を加えない。この上限は利用者の設定項目にない新しい通信方針になり、`flows_udp`/`flows_tcp` と同じくテーブルの差し替えで数がリセットされる。`new_flow_rate` と conntrack の表の上限という既存の手段で足りる
 - ルールごとの隔離を持たない(7a.5 節)
 
-kernel モードの `Relay` のルールの接続は、`vpsd` のソケットが終端するので、Go の側の Resource Guard(`proxyrelay` の TCP のプール)で数える。同じ接続は、公開側と wg0 側で conntrack のエントリを 2 件使う(未確認)。
+kernel モードの `Relay` のルールの接続は、`vpsd` のソケットが終端するので、Go の側の Resource Guard(`proxyrelay` の TCP のプール)で数える。同じ接続は、公開側と wg0 側で conntrack のエントリを 2 件使う(ラボで確認した)。`Transparent` なルールの接続は、DNAT だけを経由するので 1 件のエントリを使う(同じラボで確認した)。
 
 #### agent への適用
 
@@ -1040,7 +1042,7 @@ agent の kernel dataplane(Phase 7)では、kernel 側の保護を server と同
 2. `resource.Pool` を置き、ルールごとの上限を今の値のまま `Pool` で判定する。`relay.Manager` の `ruleFlows` による判定と、`proxyrelay` の listener ごとの `ConnsMax` の判定を置き換える。今の `relay.Manager` は、ルールごとの数を読んでからプロセス全体の枠を取るまでを 1 つの排他の中で行わないので、範囲のルールの複数の listener が同時に受け付けると、ルールごとの上限をわずかに超えうる。`Pool` は両方を 1 つの排他の中で判定するので、この超過が無くなる。拒否の理由ごとの数とログの文言もこの段で加える。完了条件は、同じ入力の列に対して、今の実装と通す・拒むが一致する単体テストを通すことである
 3. `proxyrelay` が accept の後に拒む接続(Admission Policy の拒否と Resource Guard の拒否)を、`SetLinger(0)` による RST で閉じる。今は通常の `Close` で閉じており、6.3 節の「実ソケットでも拒否は `SetLinger(0)` の RST で閉じ」という記述と食い違っている。`relay` の TCP の拒否(`abortRefused`)と同じ閉じ方にそろえる
 4. 判定を隔離予約の式(`C = ceil(T/2)`)に切り替え、コードから従来の下限の定数(`UDPPerRuleFloor`、`TCPPerRuleFloor`)を削除する。7 節の同時フロー数の上限の表と説明、6.2 節と 6.3 節の関連する記述、`lab/lifecycle.sh` の check 5 と `lab/connlimit.sh` の説明を同じコミットで改める。7 節の「ルールごとの上限はプロセス全体の上限の半分になるので、この目安でも 1024 UDP・512 TCP を 1 ルールが保持できる」は、今の実装(2048 と 1024)と食い違っている。この段で、「ルールが 2 本以上あると、ルール 1 本の上限はプロセス全体の上限の半分(切り上げ)になるので、この目安では 1 ルールが 1024 UDP・512 TCP を保持できる。ルールが 1 本なら、プロセス全体の上限のすべてを保持できる」の旨に書き改める。7 節の表と説明からも、下限(4096、1024)の記述を除く
-5. admin API に `flow_budget` と `resource_refusals` を加え、`nf_conntrack_max` の判定を起動時の Findings にも出す。ラボで conntrack のエントリ 1 件のカーネルのメモリを測り、`server check` と起動時の Finding の提示を、65536 以上の値とそのメモリを示す形に改める
+5. `nf_conntrack_max` が 65536 未満のときの判定を、`ip_forward` と同じ起動時のログにも出す。`server check` と起動時の Finding の提示は、メモリの数値 を出さず、65536 を wgft の運用上の推奨値として示す形に改める(完了)。admin API への `flow_budget` と `resource_refusals` の追加は、手順 2 で `resource.Pool` ができてから行う
 
 #### 利用者から見て変わらないものと変わるもの
 
@@ -1054,7 +1056,7 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 - 上限で拒んだことのログの文言が、理由(`budget`、`rule_cap`、`reserve`)で分かれる
 - `proxyrelay` が拒む接続は、クライアントから RST として見える
 - admin API の応答に `flow_budget` と `resource_refusals` が加わり、`rule ls --json` の出力にも同じキーが増える
-- `nf_conntrack_max` が 65536 未満なら、起動時の Findings として UI とログにも警告が出る。`server check` と警告が提示する値は、エントリ 1 件のメモリを添えた形に変わる
+- `nf_conntrack_max` が 65536 未満なら、起動時のログにも警告が出る(管理用 API と Web UI は、他の nftables の Finding と同じく対象外)。`server check` が提示する値は 262144 から 65536 に変わり、メモリの数値 は出さない
 
 #### ホストで確かめることとラボで確かめること
 
@@ -1076,7 +1078,6 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 - ルール間の隔離:同じ check 5 に、2 本と 3 本のルールで 1 本にフラッドを掛けたまま、他のルールが予約まで新しいフローを通せることと、既存のフローが切れないことを確かめる場面を加える。これが 7a.8 節の Phase 6 の完了条件である
 - 既定より小さい予算の隔離:`WGFT_MAX_TCP_FLOWS=1024` の agent で、ルールが 2 本のとき 1 本が 512 本で止まり、他方が新しい接続を通せること。`WGFT_MAX_TCP_FLOWS=1500` でも、1 本が 750 本で止まること(今は 1024 本)
 - 送信元ごとの上限との組み合わせ:`lab/connlimit.sh` は Admission Policy の試験なので結果は変わらない。agent のルールごとの上限を「`WGFT_MAX_TCP_FLOWS` の半分」と書いた説明を改める
-- kernel モードの `Relay` のルールの接続が conntrack のエントリを何件使うか、conntrack のエントリ 1 件のカーネルのメモリ
 
 ## 8. 接続元 IP の扱い
 
@@ -1454,4 +1455,5 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - Admission Policy の nftables コンパイラを置く(2026-09-20、7a.9 節の移行の手順 2):`internal/policy/nftables` が IR と判定を付けるポートの列から行の列を作り、`internal/dataplane/linuxkernel/nft` の `emit` はその行の列を式へ写す形にした。行の列は、set の宣言と、一致条件、文、コメントを持つ行からなる素の Go のデータである。段の順序は `policy.Order` を回して決まり、コンパイラは順序を持たない。生成した netlink のメッセージのバイト列が置き換えの前後で一致することを、`basic.json` を含む 7 つの設定で確かめた。行の列を実行する解釈器と、`internal/policy/testdata/admission` の fixture 16 本を加えた。fixture の形式に、場面の説明 `comment`、暫定の fixture の印 `interim_until_step`、数えない拒否を表す `want` の値 `drop`、許容差の識別子を加えた。`Relay` のポートの行と TCP の `packet` の行は今の kernel の挙動のまま残し、その fixture に手順 4 と 5 の印を付けた。許容差を挙げた fixture で実装ごとの結果の違いをどう書くかは決めておらず、7a.9 節の未決事項に加えた。解釈器の模型とカーネルの一致はホストでは確かめられず、7a.9 節のとおりラボで確かめる
 - kernel の Admission Policy の行を IPv4 に限る(2026-09-20、7a.9 節、レビュー反映):7a.9 節は「kernel の行は IPv4 の送信元だけに一致する」としていたが、今の nftables の行で IPv4 に限っているのは送信元を読む行だけで、集約の `new_flow_rate` と `packet_rate` の行は IPv6 のパケットにも一致し、IPv6 のフラッドで IPv4 の通信のトークンを使い切れることが分かった。移行の手順 3 で、すべての行に `meta nfproto ipv4` を付けることにした。未確認:ラボでの IPv6 の経路での再現
 - `proxyrelay` の拒否を RST で閉じる(2026-09-20、7a.10 節の Phase 6 移行手順 3):`internal/vpsd/proxyrelay` は、接続元制限と同時フロー数の上限による拒否を通常の `Close` で閉じており、6.3 節の「実ソケットでも拒否は `SetLinger(0)` の RST で閉じ」という記述と食い違っていた(改訂の記録 2026-09-20「Resource Guard の再設計を定める」で見つけた食い違いの 1 つ)。`internal/dataplane/userspace/relay` の `abortRefused`(実ソケットでは `SetLinger(0)` の後に `Close`)と同じ考え方を `proxyrelay` にも実装した。`relay` パッケージは並行する別の変更の対象だったため、依存を増やさずコードを写す形にした。ホストの単体テストで、拒んだ接続(接続元制限、同時フロー数の上限)がループバックで `ECONNRESET` を返すことと、成立して通常に終わる中継は変わらず `io.EOF` で終わることを確かめた。6.2 節に、この 2 つの拒否がどちらも accept の直後に `SetLinger(0)` の RST で閉じることを追記した。
+- conntrack の Finding からメモリの数値を落とす(2026-09-20、7a.10 節の Phase 6 移行手順 5):`server check` と起動時の Finding が示す `nf_conntrack_max` の推奨値は、以前の計画ではラボでのメモリの実測を添えて示すことにしていたが、所有者の決定によりメモリの数値(MiB、エントリ 1 件のバイト数、bucket 数)を一切出さない形に改めた。提示する値と判定の閾値はどちらも 65536 とし、これは wgft が運用上の最低の推奨値として定める値であって、カーネルにとって正しい値ではない。以前の提示 `nf_conntrack_max=262144` はやめた。`nf_conntrack_max` が 65536 未満のときの警告を、`ip_forward` と同じく起動時のログにも出すようにした。管理用 API と Web UI への表示は、他の nftables の Finding と同じく対象外のままである。ラボ(Debian 12 / Linux 6.1)で conntrack のエントリの費用を実測した。約 6 万件を埋めて測ったところ、DNAT を伴うエントリは 1 件あたり約 384 バイト(本体 256 バイトと NAT の拡張 128 バイト)、NAT を伴わないエントリは約 256 バイトで、ほかにハッシュ表の費用がある。この値は kernel の版、設定、エントリの種類で変わるため、診断の出力にも推奨値の計算にも使わない。同じラボで、kernel モードの `Relay` の接続は conntrack のエントリを 2 件、`Transparent` の接続は 1 件使うことも確かめた。admin API への `flow_budget` と `resource_refusals` の追加は、手順 2 で `resource.Pool` ができてから行う。未確認:netstack の握手途中の TCP の数の上限など、他の未確認の点は変わらない
 - 旧版への戻しを互換性の契約から外す(2026-09-20、7a.6 節):外部契約の表の「既存のデータの置き場からの更新」に、更新の経路は保証し、旧版への戻しは契約に含めないことを明記した。戻しは各版で観測した挙動だけを記録し、戻す必要があるときは更新の前に取ったデータの置き場のバックアップから戻す。戻しを約束すると、SQLite のスキーマ、migration、知らないフィールドの保存、状態ファイル、wire protocol の変更が旧い版の読み方に永久に縛られるためである。リリース候補の試験(docs/testing.md の D6)も、更新だけを確かめ、戻しは挙動の記録にとどめる

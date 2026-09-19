@@ -28,7 +28,9 @@ func TestCheckConntrackOutput(t *testing.T) {
 	os.WriteFile(linux.ConntrackCountPath, []byte("212\n"), 0o600)
 	out.Reset()
 	checkConntrack(&out)
-	if got := out.String(); !strings.Contains(got, "conntrack: 212 of 16384 entries in use") || !strings.Contains(got, "  - net.netfilter.nf_conntrack_max: is 16384") {
+	if got := out.String(); !strings.Contains(got, "conntrack: 212 of 16384 entries in use") ||
+		!strings.Contains(got, "wgft recommends at least 65536") ||
+		!strings.Contains(got, "suggested: sysctl -w net.netfilter.nf_conntrack_max=65536") {
 		t.Errorf("small table: got %q", got)
 	}
 
