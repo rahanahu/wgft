@@ -9,7 +9,7 @@ MEM=${WGFT_LAB_MEM:-2GiB}
 SNAPSHOT=clean
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 SHARE=/wgft  # VM 内でのリポジトリの場所(読み取り専用)
-NAMESPACES=(client vps homerouter home)
+NAMESPACES=(client vps homerouter home lan)
 
 die() { echo "lab: $*" >&2; exit 1; }
 info() { echo "lab: $*" >&2; }

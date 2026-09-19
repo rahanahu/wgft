@@ -43,10 +43,10 @@ sleep 3
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
 WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-rates-agent.log 2>&1 < /dev/null &
 disown
-ip netns exec home setsid nohup echo -udp 19132 > /tmp/wgft-rates-echo.log 2>&1 < /dev/null &
+ip netns exec lan setsid nohup echo -udp 19132 > /tmp/wgft-rates-echo.log 2>&1 < /dev/null &
 disown
 sleep 6
-u=$(vps wgft rule add --agent home --udp 27015 --to 192.168.50.2:19132 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
+u=$(vps wgft rule add --agent home --udp 27015 --to 192.168.50.3:19132 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
 sleep 4
 ip netns exec client ip addr add 198.51.100.3/24 dev "$(ip netns exec client ip -o -4 route show default | awk '{print $5}')" 2>/dev/null
 
