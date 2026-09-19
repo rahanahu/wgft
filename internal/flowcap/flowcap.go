@@ -9,28 +9,48 @@ import (
 	"time"
 )
 
-// 仕様 7 節の値。プロセス全体の上限だけが設定項目(WGFT_MAX_UDP_FLOWS、WGFT_MAX_TCP_FLOWS)で、ここはその既定値。
+// 仕様 7 節の値。プロセス全体の上限(WGFT_MAX_UDP_FLOWS、WGFT_MAX_TCP_FLOWS)と、
+// 接続元 IP ごとの上限(WGFT_MAX_UDP_FLOWS_PER_SOURCE、WGFT_MAX_TCP_FLOWS_PER_SOURCE。
+// vpsd だけの設定。11a 節)が設定項目で、ここはその既定値。ルールごとの上限は設定項目ではなく、
+// プロセス全体の上限から導く(Limits.UDPPerRuleCap、TCPPerRuleCap)。
 const (
-	UDPPerRule   = 4096
 	UDPTotal     = 8192
 	UDPPerSource = 256
-	TCPPerRule   = 1024
 	TCPTotal     = 2048
 	TCPPerSource = 128
+
+	// ルールごとの上限の下限。設定項目にする前の固定値で、全体の上限を下げた構成で
+	// ルール 1 本の上限が以前より下がらないようにする(Limits.UDPPerRuleCap)
+	UDPPerRuleFloor = 4096
+	TCPPerRuleFloor = 1024
 
 	// プロセス全体の上限に設定できる範囲
 	TotalMin = 16
 	TotalMax = 65535
 )
 
-// Limits はプロセス全体の上限(設定値)。ゼロ値の項目は既定値を使う。
+// Limits はプロセス全体と、接続元 IP ごとの上限(設定値)。どの項目もゼロ値なら既定値を使う
+// (WithDefaults)。接続元ごとの上限を外すときは PerSourceOff を入れる。設定の 0(上限なし)は
+// 設定層がこれに写す。ゼロ値を「上限なし」にすると、設定層を通らずに組み立てた Limits で
+// 守りが黙って外れるためである。
 type Limits struct {
-	UDPTotal int
-	TCPTotal int
+	UDPTotal     int
+	TCPTotal     int
+	UDPPerSource int
+	TCPPerSource int
 }
+
+// PerSourceOff は Limits.UDPPerSource/TCPPerSource で、接続元 IP ごとの上限を外すことを表す。
+const PerSourceOff = -1
 
 // WithDefaults はゼロ値の項目を既定値で埋める。
 func (l Limits) WithDefaults() Limits {
+	if l.UDPPerSource == 0 {
+		l.UDPPerSource = UDPPerSource
+	}
+	if l.TCPPerSource == 0 {
+		l.TCPPerSource = TCPPerSource
+	}
 	if l.UDPTotal <= 0 {
 		l.UDPTotal = UDPTotal
 	}
@@ -39,6 +59,19 @@ func (l Limits) WithDefaults() Limits {
 	}
 	return l
 }
+
+// UDPPerSourceCap と TCPPerSourceCap は、接続元 IP ごとの上限の実効値。0 は数えない
+// (Counter.PerSource と nft.Config の約束に合わせる)。
+func (l Limits) UDPPerSourceCap() int { return max(l.WithDefaults().UDPPerSource, 0) }
+func (l Limits) TCPPerSourceCap() int { return max(l.WithDefaults().TCPPerSource, 0) }
+
+// UDPPerRuleCap と TCPPerRuleCap は、ルールごとの同時フロー数の上限をプロセス全体の上限から
+// 導く(仕様 7 節)。全体の半分とするが、以前の固定値と全体の上限の小さいほうを下回らない。
+// 全体を上げれば一緒に上がり、既定や全体を下げた構成では以前と同じ値になる。
+func (l Limits) UDPPerRuleCap() int { return perRuleCap(l.WithDefaults().UDPTotal, UDPPerRuleFloor) }
+func (l Limits) TCPPerRuleCap() int { return perRuleCap(l.WithDefaults().TCPTotal, TCPPerRuleFloor) }
+
+func perRuleCap(total, floor int) int { return max(total/2, min(floor, total), 1) }
 
 // MemoryLimit は、この上限で動くプロセスに設定するメモリのソフト上限(バイト)。
 // 係数はラボの実測からの定数で、ホストのメモリの量は見ない(仕様 7 節)。
@@ -50,7 +83,7 @@ func (l Limits) MemoryLimit() int64 {
 // Counter はプロセス全体と接続元 IP ごとのフロー数を数える。ゼロ値は上限なし。
 type Counter struct {
 	Total     int // プロセス全体の上限。0 は上限なし
-	PerSource int // 接続元 IP ごとの上限。0 は数えない(エージェント)
+	PerSource int // 接続元 IP ごとの上限。0 は数えない(エージェント、または設定で無効にした場合)
 
 	mu    sync.Mutex
 	total int

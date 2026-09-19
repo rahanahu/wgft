@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/rahanahu/wgft/internal/flowcap"
 )
 
 func testSpecs() []spec {
@@ -112,6 +114,52 @@ func TestLimitsOutOfRangeExitCode(t *testing.T) {
 	c, _ := loadConfig(&cobra.Command{}, limitSpecs(), filepath.Join(t.TempDir(), "none.env"))
 	if l, err := limitsFromConfig(c); err != nil || l.UDPTotal != 2048 {
 		t.Errorf("in range: %+v %v", l, err)
+	}
+}
+
+// 接続元 IP ごとの上限(server だけの設定)は、0 が正当な値(上限なし)である点が
+// プロセス全体の上限と異なる。既定値、0、範囲外、負の値を確かめる。
+func TestPerSourceLimitsFromConfig(t *testing.T) {
+	load := func() *config {
+		c, err := loadConfig(&cobra.Command{}, perSourceLimitSpecs(), filepath.Join(t.TempDir(), "none.env"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+
+	// 既定値(未設定):UDP 256、TCP 128
+	c := load()
+	udp, tcp, err := perSourceLimitsFromConfig(c)
+	if err != nil || udp != 256 || tcp != 128 {
+		t.Errorf("defaults: udp=%d tcp=%d err=%v, want 256 128 <nil>", udp, tcp, err)
+	}
+
+	// 0 は上限なしで、エラーにならない。ゼロ値は既定値の意味なので flowcap.PerSourceOff に写す
+	t.Setenv("WGFT_MAX_UDP_FLOWS_PER_SOURCE", "0")
+	t.Setenv("WGFT_MAX_TCP_FLOWS_PER_SOURCE", "0")
+	c = load()
+	udp, tcp, err = perSourceLimitsFromConfig(c)
+	if err != nil || udp != flowcap.PerSourceOff || tcp != flowcap.PerSourceOff {
+		t.Errorf("zero: udp=%d tcp=%d err=%v, want %d %d <nil>", udp, tcp, err, flowcap.PerSourceOff, flowcap.PerSourceOff)
+	}
+
+	// 任意の正の値も通る(既定と異なる値を明示できる)
+	t.Setenv("WGFT_MAX_UDP_FLOWS_PER_SOURCE", "200")
+	c = load()
+	udp, _, err = perSourceLimitsFromConfig(c)
+	if err != nil || udp != 200 {
+		t.Errorf("custom: udp=%d err=%v, want 200 <nil>", udp, err)
+	}
+
+	// 負の値、非整数、範囲外は設定エラー(終了コード 3)
+	for _, v := range []string{"-1", "abc", "65536"} {
+		t.Setenv("WGFT_MAX_UDP_FLOWS_PER_SOURCE", v)
+		c = load()
+		_, _, err := perSourceLimitsFromConfig(c)
+		if got := exitCode(err); err == nil || got != exitConfigRefusal {
+			t.Errorf("WGFT_MAX_UDP_FLOWS_PER_SOURCE=%s: err=%v exitCode=%d, want %d", v, err, got, exitConfigRefusal)
+		}
 	}
 }
 

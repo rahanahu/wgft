@@ -38,7 +38,8 @@ type dataplane interface {
 	// ReadDrops は差し替え直前の drop カウンタを読む(仕様 6.1 節)。
 	ReadDrops() ([]nft.Drop, error)
 	// ApplyNFT はルール集合から table inet wgft を組み立て、1 トランザクションで差し替える(仕様 6.1 節)。
-	ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr) error
+	// proxyListening はプロキシモードの待ち受けを開けているポート(接続元 IP ごとの上限の行を付ける対象)
+	ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, proxyListening map[uint16]bool) error
 	// Converge は外から入って DNAT されたフローを宣言に収束させ、消した数を返す(仕様 6.1 節)。
 	Converge(rules []ctconv.Rule, wgNet netip.Prefix) (int, error)
 	// EnableIPForward は net.ipv4.ip_forward を 1 にする(仕様 6.1 節)。
@@ -51,6 +52,10 @@ type dataplane interface {
 // kernelDataplane はカーネルの WireGuard と nftables と conntrack を使う転送面。
 type kernelDataplane struct {
 	iface string // wg インタフェース名(既定 wgft0)
+	// udpPerSourceCap と tcpPerSourceCap は接続元 IP ごとの同時フロー数の上限(仕様 7, 11a 節)。
+	// 0 はそのプロトコルの上限を無効にする
+	udpPerSourceCap int
+	tcpPerSourceCap int
 }
 
 func (k *kernelDataplane) EnsureWG(cfg wg.Config) ([]string, error) { return wg.Ensure(cfg) }
@@ -65,8 +70,11 @@ func (k *kernelDataplane) InputPortSuggestions(port uint16) ([]string, error) {
 	return check.InputPortSuggestions(port)
 }
 func (k *kernelDataplane) ReadDrops() ([]nft.Drop, error) { return nft.ReadDrops() }
-func (k *kernelDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr) error {
-	return nft.Apply(rules, nft.Config{WGInterface: k.iface, AgentAddr: agentAddr, Logf: log.Printf})
+func (k *kernelDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, proxyListening map[uint16]bool) error {
+	return nft.Apply(rules, nft.Config{
+		WGInterface: k.iface, AgentAddr: agentAddr, Logf: log.Printf,
+		UDPPerSourceCap: k.udpPerSourceCap, TCPPerSourceCap: k.tcpPerSourceCap, ProxyListening: proxyListening,
+	})
 }
 func (k *kernelDataplane) Converge(rules []ctconv.Rule, wgNet netip.Prefix) (int, error) {
 	return ctconv.Converge(rules, wgNet)

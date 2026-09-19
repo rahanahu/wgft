@@ -52,8 +52,23 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 			log.Printf("accumulating drop counters: %v", err)
 		}
 	}
-	if err := d.dp.ApplyNFT(rules, agentAddr); err != nil {
+	// プロキシモードの新しい待ち受けを先に開き(Prepare)、開けたポートだけに nftables の
+	// 接続元 IP ごとの上限の行を付ける。nftables の差し替えが失敗したら新しい待ち受けを閉じて
+	// 旧い待ち受けと旧いテーブルを揃えたまま残し、成功したら中継を始めて不要な待ち受けを閉じる(仕様 6.1 節)
+	var prepared *proxyrelay.Prepared
+	var proxyListening map[uint16]bool
+	if d.proxy != nil {
+		prepared = d.proxy.Prepare(proxyrelay.FromRules(rules, agentAddr))
+		proxyListening = prepared.Listening()
+	}
+	if err := d.dp.ApplyNFT(rules, agentAddr, proxyListening); err != nil {
+		if prepared != nil {
+			prepared.Rollback()
+		}
 		return fmt.Errorf("failed to apply nftables: %w", err)
+	}
+	if prepared != nil {
+		prepared.Commit()
 	}
 	active := 0
 	for _, r := range rules {
@@ -71,7 +86,6 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 	// 先に走らせると、旧テーブルで許可されたフローが差し替えまでの間に入る
 	d.converge(rules, agentAddr)
 	if d.proxy != nil {
-		d.proxy.Apply(proxyrelay.FromRules(rules, agentAddr))
 		d.proxyInputHints(rules)
 	}
 	return nil

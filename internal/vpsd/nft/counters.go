@@ -9,7 +9,7 @@ import (
 // Drop はルールごと・種類ごとの累積 drop 数(コメントで識別する)。
 type Drop struct {
 	RuleID  string
-	Kind    string // deny | allow | per_source | new_flow | packet
+	Kind    string // deny | allow | per_source | src_flow | new_flow | packet
 	Packets uint64
 	Bytes   uint64
 }

@@ -61,7 +61,7 @@ func (hostNetwork) ListenTCP(port uint16) (net.Listener, error) {
 
 func newUserspaceDataplane(policy flowPolicy, lim flowcap.Limits) *userspaceDataplane {
 	lim = lim.WithDefaults()
-	u := &userspaceDataplane{policy: policy, tcpCap: &flowcap.Counter{Total: lim.TCPTotal, PerSource: flowcap.TCPPerSource}}
+	u := &userspaceDataplane{policy: policy, tcpCap: &flowcap.Counter{Total: lim.TCPTotal, PerSource: lim.TCPPerSourceCap()}}
 	u.relay = relay.New(hostNetwork{}, relay.Options{
 		UDPIdleTimeout: 120 * time.Second, // conntrack の udp_timeout_stream の既定と同じ
 		Dial:           u.dial,
@@ -71,7 +71,8 @@ func newUserspaceDataplane(policy flowPolicy, lim flowcap.Limits) *userspaceData
 			return ok
 		},
 		AdmitPacket: policy.AdmitPacket,
-		UDPCap:      &flowcap.Counter{Total: lim.UDPTotal, PerSource: flowcap.UDPPerSource},
+		Limits:      lim,
+		UDPCap:      &flowcap.Counter{Total: lim.UDPTotal, PerSource: lim.UDPPerSourceCap()},
 		TCPCap:      u.tcpCap,
 	})
 	return u
@@ -166,7 +167,7 @@ func (u *userspaceDataplane) ReadDrops() ([]nft.Drop, error) { return u.policy.D
 
 // ApplyNFT はルール集合をリスナーの宣言に写す。プロキシモード(PROXY protocol)のルールは
 // Daemon の proxyrelay が受け持つので、ここでは vps_mode = kernel のルールだけを開く。
-func (u *userspaceDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr) error {
+func (u *userspaceDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, _ map[uint16]bool) error {
 	u.policy.Update(rules)
 	desired := map[relay.Key]relay.Desired{}
 	for i := range rules {

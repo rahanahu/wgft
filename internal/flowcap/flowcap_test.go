@@ -72,3 +72,59 @@ func TestMemoryLimit(t *testing.T) {
 		t.Errorf("small limit = %d MiB, want 100", got)
 	}
 }
+
+// ルールごとの上限はプロセス全体の上限の半分で、以前の値を下回らない(仕様 7 節)。既定の上限では、
+// この仕組みを導入する前の固定値(UDP 4096、TCP 1024)と一致する。
+func TestPerRuleCap(t *testing.T) {
+	if got := (Limits{}).UDPPerRuleCap(); got != 4096 {
+		t.Errorf("default UDPPerRuleCap = %d, want 4096", got)
+	}
+	if got := (Limits{}).TCPPerRuleCap(); got != 1024 {
+		t.Errorf("default TCPPerRuleCap = %d, want 1024", got)
+	}
+	// 全体を上げれば半分まで上がる
+	if got := (Limits{UDPTotal: 20000}).UDPPerRuleCap(); got != 10000 {
+		t.Errorf("UDPPerRuleCap(20000) = %d, want 10000", got)
+	}
+	if got := (Limits{TCPTotal: 8000}).TCPPerRuleCap(); got != 4000 {
+		t.Errorf("TCPPerRuleCap(8000) = %d, want 4000", got)
+	}
+	// 全体を下げた構成では、以前の値(固定値と全体の小さいほう)を下回らない
+	for _, c := range []struct{ total, want int }{{2048, 2048}, {4096, 4096}, {6000, 4096}, {TotalMin, TotalMin}} {
+		if got := (Limits{UDPTotal: c.total}).UDPPerRuleCap(); got != c.want {
+			t.Errorf("UDPPerRuleCap(%d) = %d, want %d", c.total, got, c.want)
+		}
+	}
+	if got := (Limits{TCPTotal: 512}).TCPPerRuleCap(); got != 512 {
+		t.Errorf("TCPPerRuleCap(512) = %d, want 512", got)
+	}
+}
+
+// 接続元ごとの上限は、ゼロ値なら既定値、PerSourceOff なら上限なし(実効値 0)になる。
+// ゼロ値の Limits で守りが外れないことを確かめる。
+func TestPerSourceCap(t *testing.T) {
+	var zero Limits
+	if zero.UDPPerSourceCap() != UDPPerSource || zero.TCPPerSourceCap() != TCPPerSource {
+		t.Errorf("zero Limits: got %d/%d, want the defaults %d/%d", zero.UDPPerSourceCap(), zero.TCPPerSourceCap(), UDPPerSource, TCPPerSource)
+	}
+	off := Limits{UDPPerSource: PerSourceOff, TCPPerSource: PerSourceOff}
+	if off.UDPPerSourceCap() != 0 || off.TCPPerSourceCap() != 0 {
+		t.Errorf("PerSourceOff: got %d/%d, want 0/0", off.UDPPerSourceCap(), off.TCPPerSourceCap())
+	}
+	set := Limits{UDPPerSource: 999, TCPPerSource: 111}
+	if set.UDPPerSourceCap() != 999 || set.TCPPerSourceCap() != 111 {
+		t.Errorf("explicit values: got %d/%d, want 999/111", set.UDPPerSourceCap(), set.TCPPerSourceCap())
+	}
+}
+
+// Counter は PerSource が 0 なら接続元ごとに数えない(上限なし)。設定で無効にした場合と
+// エージェント(元々 PerSource を渡さない)の両方に当てはまる。
+func TestCounterPerSourceZeroMeansUnlimited(t *testing.T) {
+	a := netip.MustParseAddr("192.0.2.1")
+	cnt := &Counter{Total: 1000, PerSource: 0}
+	for i := 0; i < 500; i++ {
+		if !cnt.Acquire(a) {
+			t.Fatalf("flow %d from the same source must pass when PerSource is 0", i)
+		}
+	}
+}

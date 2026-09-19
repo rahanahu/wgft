@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/google/nftables/expr"
 	"github.com/google/nftables/userdata"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -57,7 +59,12 @@ func (r *recorder) comments(chain string) []string {
 	return out
 }
 
-var testCfg = Config{WGInterface: "wg0", AgentAddr: map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")}}
+// testCfg は既定の接続元 IP ごとの上限(仕様 7 節。UDP 256、TCP 128)を明示して使う。
+// nft.Config はここでは既定値を推測しないので、CLI の設定層と同じ値を明示するテスト側の責務である。
+// basic.json の r_proxy(443)は、待ち受けを開けている前提にする。
+var testCfg = Config{WGInterface: "wg0", AgentAddr: map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")},
+	UDPPerSourceCap: flowcap.UDPPerSource, TCPPerSourceCap: flowcap.TCPPerSource,
+	ProxyListening: map[uint16]bool{443: true}}
 
 func rate(s string) *proto.Rate {
 	r, err := proto.ParseRate(s)
@@ -93,21 +100,24 @@ func TestEmitRows(t *testing.T) {
 		t.Errorf("chains = %v, want %v", rec.chains, want)
 	}
 
-	// 無効なルールとプロキシモードのルールは set も行も持たない。set 名の連番は有効なカーネルモードのルールで数える
+	// 無効なルールは set も行も持たない。プロキシモードのルールは src_flow の行だけを持つ。set 名の連番は有効なカーネルモードのルールで数える
 	var setNames []string
 	for _, op := range rec.ops {
 		if strings.HasPrefix(op, "AddSet ") {
 			setNames = append(setNames, strings.TrimPrefix(op, "AddSet "))
 		}
 	}
-	if want := []string{"deny_1", "meter_1", "allow_2"}; !reflect.DeepEqual(setNames, want) {
+	// flows_udp / flows_tcp は、そのプロトコルの最初の有効なルール(プロキシモードを含む)でだけ作る
+	if want := []string{"deny_1", "meter_1", "flows_udp", "flows_tcp", "allow_2"}; !reflect.DeepEqual(setNames, want) {
 		t.Errorf("sets = %v, want %v", setNames, want)
 	}
 
-	// 行の順序:deny、allow、per_source、new_flow、packet。空・未設定のものは出ない
+	// 行の順序:deny、allow、per_source、src_flow、new_flow、packet。空・未設定のものは出ない。
+	// src_flow は接続元 IP ごとの同時フロー数の上限で、プロトコルごとに常に出る
 	wantPre := []string{
-		Comment("r_udp", "deny"), Comment("r_udp", "per_source"), Comment("r_udp", "new_flow"),
-		Comment("r_tcp", "allow"), Comment("r_tcp", "packet"),
+		Comment("r_udp", "deny"), Comment("r_udp", "per_source"), Comment("r_udp", "src_flow"), Comment("r_udp", "new_flow"),
+		Comment("r_proxy", "src_flow"),
+		Comment("r_tcp", "allow"), Comment("r_tcp", "src_flow"), Comment("r_tcp", "packet"),
 	}
 	if got := rec.comments("filter_pre"); !reflect.DeepEqual(got, wantPre) {
 		t.Errorf("filter_pre = %v, want %v", got, wantPre)
@@ -121,9 +131,28 @@ func TestEmitRows(t *testing.T) {
 		}
 	}
 
+	// プロキシモードのルールの src_flow は、カーネルモードの TCP のルールと同じ flows_tcp で数える
+	// (接続元 IP ごとの上限は全ルールの合計。仕様 7 節)
+	tcpFlowLines := 0
+	for _, r := range rec.rules["filter_pre"] {
+		c, _ := userdata.GetString(r.UserData, userdata.TypeComment)
+		if c != Comment("r_proxy", "src_flow") && c != Comment("r_tcp", "src_flow") {
+			continue
+		}
+		tcpFlowLines++
+		for _, e := range r.Exprs {
+			if d, ok := e.(*expr.Dynset); ok && d.SetName != "flows_tcp" {
+				t.Errorf("%s uses set %s, want flows_tcp", c, d.SetName)
+			}
+		}
+	}
+	if tcpFlowLines != 2 {
+		t.Errorf("found %d TCP src_flow lines, want 2 (r_proxy and r_tcp)", tcpFlowLines)
+	}
+
 	// allow の lookup は反転(!=)、deny は反転しない
 	assertLookupInvert(t, rec.rules["filter_pre"][0], false)
-	assertLookupInvert(t, rec.rules["filter_pre"][3], true)
+	assertLookupInvert(t, rec.rules["filter_pre"][5], true)
 
 	// DNAT は宛先アドレスだけ(ポートのレジスタは使わない)
 	for _, r := range rec.rules["nat_pre"] {
@@ -146,6 +175,151 @@ func assertLookupInvert(t *testing.T, r *nftables.Rule, want bool) {
 		}
 	}
 	t.Errorf("rule has no lookup")
+}
+
+// 接続元 IP ごとの同時フロー数の上限(仕様 6.1, 7 節)は、プロトコルごとに 1 つの set を
+// 全ルールで共有し、値は udp 256 / tcp 128 で、ct state new のときだけ効く。
+func TestFlowCapSharedAcrossRules(t *testing.T) {
+	rules := []proto.Rule{
+		{ID: "r_udp1", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2456), Target: "192.168.1.20:2456",
+			VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_udp2", Agent: "home", Proto: proto.UDP, ListenPort: pr(2457, 2457), Target: "192.168.1.20:2457",
+			VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
+			VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	rec := newRecorder()
+	if err := emit(rec, rules, testCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var setNames []string
+	for _, op := range rec.ops {
+		if strings.HasPrefix(op, "AddSet ") {
+			setNames = append(setNames, strings.TrimPrefix(op, "AddSet "))
+		}
+	}
+	// flows_udp は 1 回しか作らない(2 つ目の UDP ルールでは作り直さない)
+	if want := []string{"flows_udp", "flows_tcp"}; !reflect.DeepEqual(setNames, want) {
+		t.Errorf("sets = %v, want %v (must not create flows_udp twice)", setNames, want)
+	}
+
+	dyn1 := findDynset(t, rec.rules["filter_pre"][0]) // r_udp1 の src_flow の唯一の行
+	dyn2 := findDynset(t, rec.rules["filter_pre"][1]) // r_udp2 の src_flow の唯一の行
+	if dyn1.SetName != dyn2.SetName {
+		t.Errorf("two udp rules must share one set: %q vs %q", dyn1.SetName, dyn2.SetName)
+	}
+	if dyn1.SetName != "flows_udp" {
+		t.Errorf("set name = %q, want flows_udp", dyn1.SetName)
+	}
+	if got := connlimitOf(t, dyn1); got.Count != 256 || got.Flags != expr.NFT_CONNLIMIT_F_INV {
+		t.Errorf("udp cap = %+v, want count 256 with the over flag", got)
+	}
+
+	dyn3 := findDynset(t, rec.rules["filter_pre"][2]) // r_tcp の src_flow
+	if dyn3.SetName != "flows_tcp" {
+		t.Errorf("set name = %q, want flows_tcp", dyn3.SetName)
+	}
+	if got := connlimitOf(t, dyn3); got.Count != 128 || got.Flags != expr.NFT_CONNLIMIT_F_INV {
+		t.Errorf("tcp cap = %+v, want count 128 with the over flag", got)
+	}
+
+	// 3 行とも ct state new に限る(既存のフローを追い出さない)
+	for i, r := range rec.rules["filter_pre"] {
+		found := false
+		for _, e := range r.Exprs {
+			if ct, ok := e.(*expr.Ct); ok && ct.Key == expr.CtKeySTATE {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("filter_pre[%d] has no ct state match", i)
+		}
+	}
+}
+
+func findDynset(t *testing.T, r *nftables.Rule) *expr.Dynset {
+	t.Helper()
+	for _, e := range r.Exprs {
+		if d, ok := e.(*expr.Dynset); ok {
+			return d
+		}
+	}
+	t.Fatal("rule has no dynset")
+	return nil
+}
+
+func connlimitOf(t *testing.T, d *expr.Dynset) *expr.Connlimit {
+	t.Helper()
+	for _, e := range d.Exprs {
+		if c, ok := e.(*expr.Connlimit); ok {
+			return c
+		}
+	}
+	t.Fatal("dynset has no connlimit")
+	return nil
+}
+
+// 0 はそのプロトコルの接続元 IP ごとの上限を無効にし、set も src_flow の行も作らない(仕様 6.1, 7, 11a 節)。
+func TestFlowCapZeroDisablesProtocol(t *testing.T) {
+	rules := []proto.Rule{
+		{ID: "r_udp", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2456), Target: "192.168.1.20:2456",
+			VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
+			VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	cfg := testCfg
+	cfg.UDPPerSourceCap = 0 // TCP は既定のまま(256/128)
+	rec := newRecorder()
+	if err := emit(rec, rules, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var setNames []string
+	for _, op := range rec.ops {
+		if strings.HasPrefix(op, "AddSet ") {
+			setNames = append(setNames, strings.TrimPrefix(op, "AddSet "))
+		}
+	}
+	if want := []string{"flows_tcp"}; !reflect.DeepEqual(setNames, want) {
+		t.Errorf("sets = %v, want %v (flows_udp must not be created when the cap is 0)", setNames, want)
+	}
+	if got, want := rec.comments("filter_pre"), []string{Comment("r_tcp", "src_flow")}; !reflect.DeepEqual(got, want) {
+		t.Errorf("filter_pre comments = %v, want %v (no src_flow row for udp)", got, want)
+	}
+
+	// 両方 0 なら set も行も 1 つも作らない
+	cfg.TCPPerSourceCap = 0
+	rec2 := newRecorder()
+	if err := emit(rec2, rules, cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range rec2.ops {
+		if strings.HasPrefix(op, "AddSet ") {
+			t.Errorf("no set expected when both caps are 0, got %s", op)
+		}
+	}
+	if got := rec2.comments("filter_pre"); len(got) != 0 {
+		t.Errorf("no src_flow rows expected when both caps are 0, got %v", got)
+	}
+}
+
+// カーネルモードも設定値(既定と異なる値)をそのまま使う。
+func TestFlowCapCustomValue(t *testing.T) {
+	rules := []proto.Rule{
+		{ID: "r_udp", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2456), Target: "192.168.1.20:2456",
+			VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	cfg := testCfg
+	cfg.UDPPerSourceCap = 200
+	rec := newRecorder()
+	if err := emit(rec, rules, cfg); err != nil {
+		t.Fatal(err)
+	}
+	dyn := findDynset(t, rec.rules["filter_pre"][0])
+	if got := connlimitOf(t, dyn); got.Count != 200 {
+		t.Errorf("udp cap = %+v, want count 200", got)
+	}
 }
 
 func TestEmitUnknownAgent(t *testing.T) {
@@ -222,3 +396,31 @@ func TestMatchPortForms(t *testing.T) {
 }
 
 func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} }
+
+// プロキシモードのルールは、vpsd が待ち受けを開けているポートにだけ接続元 IP ごとの上限の行を持つ。
+// bind に失敗したポートに行を残すと、同じポートの別のプロセスへの通信に上限が掛かる(仕様 6.1 節)。
+func TestFlowCapProxyOnlyWhenListening(t *testing.T) {
+	rules := []proto.Rule{
+		{ID: "r_proxy", Agent: "home", Proto: proto.TCP, ListenPort: pr(443, 443), Target: "192.168.1.30:443",
+			VPSMode: proto.ModeProxy, Enabled: true},
+		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
+			VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	for _, listening := range []map[uint16]bool{nil, {}, {8443: true}} {
+		cfg := testCfg
+		cfg.ProxyListening = listening
+		rec := newRecorder()
+		if err := emit(rec, rules, cfg); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range rec.comments("filter_pre") {
+			if c == Comment("r_proxy", "src_flow") {
+				t.Errorf("ProxyListening=%v: r_proxy has a src_flow line although its listener is not open", listening)
+			}
+		}
+		// カーネルモードの TCP のルールの行は、プロキシの待ち受けに関係なく残る
+		if !slices.Contains(rec.comments("filter_pre"), Comment("r_tcp", "src_flow")) {
+			t.Errorf("ProxyListening=%v: r_tcp lost its src_flow line", listening)
+		}
+	}
+}

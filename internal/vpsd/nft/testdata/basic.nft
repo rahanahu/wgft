@@ -1,8 +1,13 @@
 # basic.json から期待されるテーブル。
-# r_off は無効、r_proxy はプロキシモードなので行を持たない。set の連番は有効なカーネルモードのルールで数える。
+# r_off は無効なので行を持たない。r_proxy はプロキシモードなので、接続元 IP ごとの同時フロー数の行だけを持つ。
+# set の連番は有効なカーネルモードのルールで数える。
+# flows_udp / flows_tcp はプロトコルごとに 1 つで、接続元 IP ごとの同時フロー数の上限
+# (仕様 6.1, 7 節)を全ルールで共有する。
 table inet wgft {
   set deny_1 { type ipv4_addr; flags interval; elements = { 198.51.100.128/25, 203.0.113.0/24 } }
   set meter_1 { type ipv4_addr; flags dynamic; timeout 1m; size 65535; }
+  set flows_udp { type ipv4_addr; flags dynamic; size 65535; }
+  set flows_tcp { type ipv4_addr; flags dynamic; size 65535; }
   set allow_2 { type ipv4_addr; flags interval; elements = { 192.0.2.0/24, 198.51.100.0/24 } }
   set meter_2 { type ipv4_addr; flags dynamic; timeout 1m; size 65535; }
 
@@ -10,10 +15,13 @@ table inet wgft {
     type filter hook prerouting priority -150; policy accept;
     iifname != "wg0" udp dport 2456-2457 ip saddr @deny_1 counter drop comment "wgft:r_udp:deny"
     iifname != "wg0" udp dport 2456-2457 ct state new add @meter_1 { ip saddr limit rate over 10/second } counter drop comment "wgft:r_udp:per_source"
+    iifname != "wg0" udp dport 2456-2457 ct state new add @flows_udp { ip saddr ct count over 256 } counter drop comment "wgft:r_udp:src_flow"
     iifname != "wg0" udp dport 2456-2457 ct state new limit rate over 100/second counter drop comment "wgft:r_udp:new_flow"
     iifname != "wg0" udp dport 2456-2457 limit rate over 5000/second counter drop comment "wgft:r_udp:packet"
+    iifname != "wg0" tcp dport 443 ct state new add @flows_tcp { ip saddr ct count over 128 } counter drop comment "wgft:r_proxy:src_flow"
     iifname != "wg0" tcp dport 25565 ip saddr != @allow_2 counter drop comment "wgft:r_tcp:allow"
     iifname != "wg0" tcp dport 25565 ct state new add @meter_2 { ip saddr limit rate over 30/minute } counter drop comment "wgft:r_tcp:per_source"
+    iifname != "wg0" tcp dport 25565 ct state new add @flows_tcp { ip saddr ct count over 128 } counter drop comment "wgft:r_tcp:src_flow"
   }
   chain nat_pre {
     type nat hook prerouting priority dstnat - 1; policy accept;

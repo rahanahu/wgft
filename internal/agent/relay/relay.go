@@ -26,9 +26,10 @@ type Network interface {
 // Options は中継の調整値。
 type Options struct {
 	UDPIdleTimeout time.Duration // 無通信でセッションを閉じるまで(全体状態の udp_timeout_stream)
-	UDPSessionsMax int           // ルールごとの UDP セッション数の上限(既定 flowcap.UDPPerRule)
-	TCPConnsMax    int           // ルールごとの TCP 接続数の上限(既定 flowcap.TCPPerRule)
-	// Limits はプロセス全体の上限(設定値)。UDPCap と TCPCap が nil のときに使う
+	UDPSessionsMax int           // ルールごとの UDP セッション数の上限(既定は Limits.UDPPerRuleCap)
+	TCPConnsMax    int           // ルールごとの TCP 接続数の上限(既定は Limits.TCPPerRuleCap)
+	// Limits はプロセス全体の上限(設定値)。UDPCap と TCPCap、UDPSessionsMax と TCPConnsMax の
+	// 既定値を導くのに使う
 	Limits flowcap.Limits
 	// UDPCap と TCPCap はプロセス全体と接続元 IP ごとの上限(仕様 7 節)。nil なら全体の上限だけを Limits から作る。
 	// vpsd はプロキシモードの中継と共有する Counter を渡す
@@ -98,13 +99,13 @@ func New(n Network, opts Options) *Manager {
 	if opts.UDPIdleTimeout <= 0 {
 		opts.UDPIdleTimeout = 120 * time.Second
 	}
+	lim := opts.Limits.WithDefaults()
 	if opts.UDPSessionsMax <= 0 {
-		opts.UDPSessionsMax = flowcap.UDPPerRule
+		opts.UDPSessionsMax = lim.UDPPerRuleCap()
 	}
 	if opts.TCPConnsMax <= 0 {
-		opts.TCPConnsMax = flowcap.TCPPerRule
+		opts.TCPConnsMax = lim.TCPPerRuleCap()
 	}
-	lim := opts.Limits.WithDefaults()
 	if opts.UDPCap == nil {
 		opts.UDPCap = &flowcap.Counter{Total: lim.UDPTotal}
 	}

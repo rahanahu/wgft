@@ -28,6 +28,15 @@ const TableName = "wgft"
 type Config struct {
 	WGInterface string                // wg0
 	AgentAddr   map[string]netip.Addr // エージェント名 → wg0 上のアドレス
+	// UDPPerSourceCap と TCPPerSourceCap は接続元 IP ごとの同時フロー数の上限(仕様 7, 11a 節の
+	// 設定値。既に解決済みの具体的な値を受け取り、ここでは既定値を推測しない)。
+	// 0 はそのプロトコルの上限を無効にし、対応する set も行も生成しない
+	UDPPerSourceCap int
+	TCPPerSourceCap int
+	// ProxyListening は、vpsd がプロキシモードの待ち受けを実際に開いているポート。プロキシモードの
+	// ルールは、ここにあるポートだけに接続元 IP ごとの上限の行を持つ。bind に失敗したポートでは、
+	// 同じポートの別のプロセスへの通信に wgft の上限を掛けてしまうため(仕様 6.1 節)。nil なら行を持たない
+	ProxyListening map[uint16]bool
 	// Logf は AgentAddr にないエージェントのルールを飛ばしたときの記録先。nil なら黙って飛ばす
 	Logf func(format string, args ...any)
 }
@@ -114,11 +123,47 @@ func emit(e emitter, rules []proto.Rule, cfg Config) error {
 		e.AddRule(r)
 	}
 
+	// 接続元 IP ごとの同時フロー数の上限(仕様 6.1, 7 節)。プロトコルごとに 1 つの動的 set を
+	// そのプロトコルの全ルールで共有し、初めてそのプロトコルのルールに出会ったときだけ作る。
+	flowSets := map[proto.Proto]*nftables.Set{}
+	addFlowCap := func(r *proto.Rule, from []expr.Any) error {
+		cap := cfg.perSourceCap(r.Proto)
+		if cap <= 0 {
+			return nil
+		}
+		if flowSets[r.Proto] == nil {
+			s, err := addFlowCapSet(e, t, r.Proto)
+			if err != nil {
+				return fmt.Errorf("rule %s: %w", r.ID, err)
+			}
+			flowSets[r.Proto] = s
+		}
+		fs := flowSets[r.Proto]
+		addRule(filterPre, Comment(r.ID, "src_flow"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
+			[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: fs.Name, SetID: fs.ID,
+				Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{connlimitOver(uint32(cap))}}},
+			counterDrop())
+		return nil
+	}
+
 	// カーネルモードで有効なルールだけが行を持つ。set 名はルール ID ではなく連番。
+	// プロキシモードのルールは vpsd が受けて中継する(6.2 節)ので DNAT も接続元制限の行も持たないが、
+	// 接続元 IP ごとの同時フロー数だけは同じ set で数え、カーネルモードのルールとの合計にする(7 節)
 	n := 0
 	for i := range rules {
 		r := &rules[i]
-		if !r.Enabled || r.VPSMode != proto.ModeKernel {
+		if !r.Enabled {
+			continue
+		}
+		if r.VPSMode == proto.ModeProxy {
+			if _, ok := cfg.AgentAddr[r.Agent]; ok && cfg.ProxyListening[r.ListenPort.Lo] {
+				if err := addFlowCap(r, match(wg, r.Proto, r.ListenPort)); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if r.VPSMode != proto.ModeKernel {
 			continue
 		}
 		// 無効化されたエージェントのルールは行を持たない(テーブル全体が組めなくなるよりよい)
@@ -132,7 +177,8 @@ func emit(e emitter, rules []proto.Rule, cfg Config) error {
 		n++
 		from := match(wg, r.Proto, r.ListenPort)
 
-		// 評価順は deny、allow、接続元ごとの meter、新規フローの集約上限、パケットの集約上限。
+		// 評価順は deny、allow、接続元ごとの meter、接続元ごとの同時フロー数の上限、
+		// 新規フローの集約上限、パケットの集約上限。
 		// 空の allow に != を書くと全送信元が落ちるので、allow が空なら set も行も作らない。
 		if len(r.SourceDeny) > 0 {
 			s, err := addIntervalSet(e, t, fmt.Sprintf("deny_%d", n), r.SourceDeny)
@@ -158,6 +204,9 @@ func emit(e emitter, rules []proto.Rule, cfg Config) error {
 				[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: meter.Name, SetID: meter.ID,
 					Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{limitOver(*r.PerSourceRate)}}},
 				counterDrop())
+		}
+		if err := addFlowCap(r, from); err != nil {
+			return err
 		}
 		if r.NewFlowRate != nil {
 			addRule(filterPre, Comment(r.ID, "new_flow"), from, ctState(expr.CtStateBitNEW),
@@ -257,6 +306,40 @@ func limitOver(r proto.Rate) *expr.Limit {
 		proto.PerHour: expr.LimitTimeHour, proto.PerDay: expr.LimitTimeDay, proto.PerWeek: expr.LimitTimeWeek,
 	}
 	return &expr.Limit{Type: expr.LimitTypePkts, Rate: r.Count, Over: true, Unit: units[r.Unit], Burst: 5}
+}
+
+// flowSetName はプロトコルごとに共有する接続元フロー数の set の名前。ルール ID に依存しない
+// 固定名でよい(deny_N や meter_N と違い、プロトコルごとに 1 つしか作らないため)。
+func flowSetName(p proto.Proto) string {
+	if p == proto.TCP {
+		return "flows_tcp"
+	}
+	return "flows_udp"
+}
+
+// perSourceCap は cfg に渡された、接続元 IP ごとの同時フロー数の上限(仕様 7, 11a 節の設定値)。
+// 0 はそのプロトコルの上限を無効にする。値の既定はここでは決めない(呼び出し側が解決済みの値を渡す)。
+func (cfg Config) perSourceCap(p proto.Proto) int {
+	if p == proto.TCP {
+		return cfg.TCPPerSourceCap
+	}
+	return cfg.UDPPerSourceCap
+}
+
+// addFlowCapSet は接続元 IP ごとの同時フロー数を数える動的 set を作る。
+// ct count は conntrack のエントリの生死で状態が消えるので、meter の set と違い timeout を持たせない
+// (timeout を持つ set に ct count を組み合わせると nftables が操作を拒む)。
+func addFlowCapSet(e emitter, t *nftables.Table, p proto.Proto) (*nftables.Set, error) {
+	s := &nftables.Set{Table: t, Name: flowSetName(p), KeyType: nftables.TypeIPAddr, Dynamic: true, Size: 65535}
+	if err := e.AddSet(s, nil); err != nil {
+		return nil, fmt.Errorf("flow cap set %s: %w", s.Name, err)
+	}
+	return s, nil
+}
+
+// connlimitOver は `ct count over N`。Flags の NFT_CONNLIMIT_F_INV が「over」に当たる。
+func connlimitOver(n uint32) *expr.Connlimit {
+	return &expr.Connlimit{Count: n, Flags: expr.NFT_CONNLIMIT_F_INV}
 }
 
 func addIntervalSet(e emitter, t *nftables.Table, name string, prefixes []netip.Prefix) (*nftables.Set, error) {
