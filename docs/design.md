@@ -756,7 +756,7 @@ proto/                   外部契約としての wire スキーマ(既存フィ
 
 ### 7a.8 移行の段取り
 
-各段階は、今のラボの結合テスト(`lab/e2e.sh`、rate、connlimit、split-merge、import-export)と、策定中の lifecycle テスト(再起動中の転送継続、無関係なフローを切らないこと、proxy の bind 失敗が nftables に漏れないこと、teardown が wgft の物だけを消すこと、上限到達時にメモリが上限内であること)を、その段階の終わりに通すことを共通の完了条件とする。以下は各段階に固有の完了条件だけを示す。
+各段階は、今のラボの結合テスト(`lab/e2e.sh`、rate、connlimit、split-merge、import-export)と、策定中の lifecycle テスト(再起動中の転送継続、無関係なフローを切らないこと、proxy の bind 失敗が nftables に漏れないこと、teardown が wgft の物だけを消すこと、上限到達時にメモリが上限内であること)を、その段階の終わりに通すことを共通の完了条件とする。段階の終わりに流すテストの一覧と、段階の途中で変更の領域ごとに流すテストは [docs/testing.md](testing.md) の C 類と B 類に定める。以下は各段階に固有の完了条件だけを示す。
 
 - **Phase 1(model/policy/plan)**:既存の Rule と State を内部モデルへ normalize し(外部形式からのアダプタを含む)、`AdmissionPolicy` の IR、`Plan`、`Planner` を作る。dataplane の挙動は変えない。完了条件:純粋な単体テストが model/policy/planner を覆い、生成される nftables の内容と userspace の転送挙動が変更前と一致する
 - **wire protocol の版と機能の交渉**:全体状態の形を変える前に入れる。完了条件:旧 agent と新 server、新 agent と旧 server の組み合わせで、通常の rolling upgrade がラボで通る
