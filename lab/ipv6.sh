@@ -73,8 +73,8 @@ wait_until() {
 }
 admin_up() { vps wgft agent ls --admin "$ADMIN" >/dev/null 2>&1; }
 agent_registered() { vps wgft agent ls --admin "$ADMIN" 2>/dev/null | tail -1 | grep -q home; }
-tcp4_probe_ok() { [[ "$(client "echo hi | socat -t 1 -T 8 - TCP:198.51.100.1:$1" 2>/dev/null)" == *tcp-echo* ]]; }
-udp4_probe_ok() { [[ "$(client "echo hi | socat -t 1 -T 8 - UDP:198.51.100.1:$1" 2>/dev/null)" == *udp-echo* ]]; }
+tcp4_probe_ok() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 8 - TCP:198.51.100.1:$1" 2>/dev/null)" == *tcp-echo* ]]; }
+udp4_probe_ok() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 8 - UDP:198.51.100.1:$1" 2>/dev/null)" == *udp-echo* ]]; }
 
 cleanup
 mkdir -p "$DATA"
@@ -104,17 +104,17 @@ wait_until 10 udp4_probe_ok 27019
 wait_until 10 tcp4_probe_ok 8447
 
 echo "== $mode: ipv4 works before any ipv6 traffic (transparent tcp/udp and a relay port)"
-check "transparent tcp works over ipv4 before" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39975')"
-check "transparent udp works over ipv4 before" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:27019')"
-check "relay tcp works over ipv4 before" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:8447')"
+check "transparent tcp works over ipv4 before" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39975')"
+check "transparent udp works over ipv4 before" "udp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:27019')"
+check "relay tcp works over ipv4 before" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:8447')"
 
 echo "== $mode: an ipv6 source is not forwarded"
 not_forwarded "ipv6 tcp (transparent) is not forwarded" "tcp-echo" \
-  "$(client "echo hi | socat -t 2 -T 8 - TCP6:[$VPS6]:39975 2>&1")"
+  "$(client "echo hi | timeout -k 5 20 socat -t 2 -T 8 - TCP6:[$VPS6]:39975 2>&1")"
 not_forwarded "ipv6 udp (transparent) is not forwarded" "udp-echo" \
-  "$(client "echo hi | socat -t 2 -T 8 - UDP6:[$VPS6]:27019 2>&1")"
+  "$(client "echo hi | timeout -k 5 20 socat -t 2 -T 8 - UDP6:[$VPS6]:27019 2>&1")"
 not_forwarded "ipv6 tcp (relay) is not forwarded" "tcp-echo" \
-  "$(client "echo hi | socat -t 2 -T 8 - TCP6:[$VPS6]:8447 2>&1")"
+  "$(client "echo hi | timeout -k 5 20 socat -t 2 -T 8 - TCP6:[$VPS6]:8447 2>&1")"
 
 # flows <family 4|6> <src-ip> <dst-ip> <port> <n>: opens n UDP sockets from src-ip (a distinct
 # source port each), sends one datagram from each to dst-ip:port, and counts sockets that got an
@@ -222,9 +222,9 @@ okcheck "ipv4 keeps its full packet-rate allowance right after the ipv6 flood (a
 vps wgft rule rate packet "$u" none --admin "$ADMIN" >/dev/null; sleep 2
 
 echo "== $mode: ipv4 still works after the ipv6 traffic"
-check "transparent tcp works over ipv4 after" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39975')"
-check "transparent udp works over ipv4 after" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:27019')"
-check "relay tcp works over ipv4 after" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:8447')"
+check "transparent tcp works over ipv4 after" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39975')"
+check "transparent udp works over ipv4 after" "udp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:27019')"
+check "relay tcp works over ipv4 after" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:8447')"
 
 echo "== $mode: teardown"
 cleanup
