@@ -1,59 +1,42 @@
 package flowcap
 
 import (
-	"net/netip"
 	"testing"
 )
 
-func TestCounterLimits(t *testing.T) {
-	a, b, c := netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("192.0.2.3")
-	cnt := &Counter{Total: 3, PerSource: 2}
-	for i := 1; i <= 2; i++ {
-		if !cnt.Acquire(a) {
-			t.Fatalf("flow %d of a source must pass", i)
-		}
-	}
-	if cnt.Acquire(a) {
-		t.Error("third flow of the same source must be refused")
-	}
-	if !cnt.Acquire(b) {
-		t.Error("another source must pass")
-	}
-	if cnt.Acquire(c) {
-		t.Error("flow over the total must be refused")
-	}
-	if cnt.Len() != 3 {
-		t.Errorf("Len = %d, want 3 (refused flows are not counted)", cnt.Len())
-	}
-	cnt.Release(a)
-	if !cnt.Acquire(c) {
-		t.Error("a released slot must be reusable")
-	}
-	cnt.Release(a)
-	cnt.Release(b)
-	cnt.Release(c)
-	if cnt.Len() != 0 || len(cnt.bySrc) != 0 {
-		t.Errorf("after release: Len = %d, bySrc = %v", cnt.Len(), cnt.bySrc)
-	}
-}
-
-// エージェントは接続元ごとに数えない。nil はどこも制限しない。
-func TestCounterWithoutPerSourceAndNil(t *testing.T) {
-	a := netip.MustParseAddr("10.200.0.1")
+func TestCounterTotalAndNil(t *testing.T) {
 	cnt := &Counter{Total: 2}
 	for i := 1; i <= 2; i++ {
-		if !cnt.Acquire(a) {
-			t.Errorf("flow %d must pass: only the total applies", i)
+		if !cnt.Acquire() {
+			t.Fatalf("flow %d must pass", i)
 		}
 	}
-	if cnt.Acquire(a) {
+	if cnt.Acquire() {
 		t.Error("flow over the total must be refused")
 	}
+	if cnt.Len() != 2 {
+		t.Errorf("Len = %d, want 2 (refused flows are not counted)", cnt.Len())
+	}
+	cnt.Release()
+	if !cnt.Acquire() {
+		t.Error("a released slot must be reusable")
+	}
+	cnt.Release()
+	cnt.Release()
+	if cnt.Len() != 0 {
+		t.Errorf("after release: Len = %d", cnt.Len())
+	}
+	unlimited := &Counter{}
+	for i := 0; i < 500; i++ {
+		if !unlimited.Acquire() {
+			t.Fatalf("flow %d must pass with no total", i)
+		}
+	}
 	var none *Counter
-	if !none.Acquire(a) {
+	if !none.Acquire() {
 		t.Error("nil counter must admit")
 	}
-	none.Release(a)
+	none.Release()
 }
 
 func TestLogGate(t *testing.T) {
@@ -115,48 +98,4 @@ func TestPerSourceCap(t *testing.T) {
 	if set.UDPPerSourceCap() != 999 || set.TCPPerSourceCap() != 111 {
 		t.Errorf("explicit values: got %d/%d, want 999/111", set.UDPPerSourceCap(), set.TCPPerSourceCap())
 	}
-}
-
-// Counter は PerSource が 0 なら接続元ごとに数えない(上限なし)。設定で無効にした場合と
-// エージェント(元々 PerSource を渡さない)の両方に当てはまる。
-func TestCounterPerSourceZeroMeansUnlimited(t *testing.T) {
-	a := netip.MustParseAddr("192.0.2.1")
-	cnt := &Counter{Total: 1000, PerSource: 0}
-	for i := 0; i < 500; i++ {
-		if !cnt.Acquire(a) {
-			t.Fatalf("flow %d from the same source must pass when PerSource is 0", i)
-		}
-	}
-}
-
-// 接続元ごとの上限は動作中に変えられる。上限なしの間に数えたフローも、上限を付けた後の判定に入る。
-func TestCounterSetPerSource(t *testing.T) {
-	a := netip.MustParseAddr("192.0.2.1")
-	cnt := &Counter{}
-	for i := 0; i < 3; i++ {
-		if !cnt.Acquire(a) {
-			t.Fatalf("flow %d must pass without a per-source cap", i+1)
-		}
-	}
-	cnt.SetPerSource(2)
-	if cnt.Acquire(a) {
-		t.Fatal("with 3 flows held, a cap of 2 must refuse a new flow")
-	}
-	cnt.Release(a)
-	cnt.Release(a)
-	if !cnt.Acquire(a) {
-		t.Fatal("with 1 flow held, a cap of 2 must admit a new flow")
-	}
-	cnt.SetPerSource(0)
-	if !cnt.Acquire(a) {
-		t.Fatal("cap 0 means no per-source cap")
-	}
-	for i := 0; i < 3; i++ {
-		cnt.Release(a)
-	}
-	if cnt.Len() != 0 || len(cnt.bySrc) != 0 {
-		t.Fatalf("after release: Len = %d, bySrc = %v", cnt.Len(), cnt.bySrc)
-	}
-	var none *Counter
-	none.SetPerSource(1)
 }

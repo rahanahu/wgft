@@ -1,7 +1,7 @@
 {
-  "comment": "Today's kernel behaviour for packet_rate on a TCP rule: the packet row counts every TCP packet, the first packet of a connection included. Userspace mode has never applied packet_rate to TCP (tcp_packet_rate_userspace_until_step5), so only the nftables evaluator runs this fixture. Migration step 5 removes the packet row from TCP rules; this fixture is then removed and the userspace one applies to both evaluators.",
+  "comment": "Userspace behaviour for packet_rate on a TCP rule: packet_rate applies to UDP datagrams only, so every TCP connection and packet is admitted and nothing is counted. This is the final behaviour of both modes (design 7a.9). Until migration step 5 removes the kernel's packet row from TCP rules (tcp_packet_rate_until_step5), only the Go evaluator runs this fixture; step 5 then renames it, without the interim fields, so that both evaluators run it.",
   "interim_until_step": 5,
-  "engines": ["nftables"],
+  "engines": ["goengine"],
   "policy": {
     "rules": [
       {"id": "r_tcp", "proto": "tcp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": "10/second"}
@@ -13,10 +13,10 @@
     {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
     {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
     {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
-    {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "drop:packet"},
+    {"at_ms": 0, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
     {"at_ms": 150, "op": "packet", "rule": "r_tcp", "src": "198.51.100.1", "flow": "c", "want": "admit"},
-    {"at_ms": 160, "op": "flow", "rule": "r_tcp", "src": "198.51.100.2", "flow": "d", "want": "drop:packet"}
+    {"at_ms": 160, "op": "flow", "rule": "r_tcp", "src": "198.51.100.2", "flow": "d", "want": "admit"}
   ],
-  "want_drops": {"r_tcp": {"packet": 2}},
+  "want_drops": {},
   "tolerances": []
 }

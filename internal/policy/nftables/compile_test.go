@@ -140,3 +140,28 @@ func TestCompileRejectsPortWithoutPolicy(t *testing.T) {
 		t.Fatal("Compile accepted a port whose protocol differs from its policy")
 	}
 }
+
+// どの行も IPv4 のパケットにだけ一致する。送信元を読まない集約のレートの行も含む(設計文書 7a.9 節)。
+func TestCompileRowsMatchIPv4Only(t *testing.T) {
+	ports := []Port{
+		port("r_relay", proto.TCP, 443, model.Relay),
+		port("r_tcp", proto.TCP, 25565, model.Transparent),
+		port("r_udp", proto.UDP, 2456, model.Transparent),
+	}
+	prog, err := Compile(fullPolicy(), ports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := 0
+	for _, r := range prog.Rows {
+		if !r.Match.IPv4 {
+			t.Errorf("row %s does not match IPv4 only", r.Comment)
+		}
+		if r.Stmt.Kind == StmtLimit {
+			limits++
+		}
+	}
+	if limits == 0 {
+		t.Fatal("the policy compiled to no aggregate rate row; the test covers nothing")
+	}
+}

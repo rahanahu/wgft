@@ -96,12 +96,19 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				return
 			}
 			src := addrOf(c.RemoteAddr())
-			if m.opts.Admit != nil && !m.opts.Admit(m.ruleOf(l), src) {
-				abortRefused(c)
-				continue
+			ruleID := m.ruleOf(l)
+			release := func() {}
+			if m.opts.Admit != nil {
+				rel, ok := m.opts.Admit(ruleID, src, 0)
+				if !ok {
+					abortRefused(c)
+					continue
+				}
+				release = rel
 			}
-			// 同時フロー数の上限(仕様 7 節)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
-			if m.ruleFlows(m.ruleOf(l)) >= m.opts.TCPConnsMax || !m.opts.TCPCap.Acquire(src) {
+			// 同時フロー数の上限(仕様 7 節、Resource Guard)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
+			if m.ruleFlows(ruleID) >= m.opts.TCPConnsMax || !m.opts.TCPCap.Acquire() {
+				release()
 				abortRefused(c)
 				if capLog.Allow() {
 					m.opts.Logf("tcp %s: connection limit reached; refusing new connections", l.key)
@@ -118,7 +125,8 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					delete(conns, c)
 					public--
 					mu.Unlock()
-					m.opts.TCPCap.Release(src)
+					m.opts.TCPCap.Release()
+					release()
 				}()
 				target := m.targetOf(l)
 				t, err := m.opts.Dial("tcp", target)

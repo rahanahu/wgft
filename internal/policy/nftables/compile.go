@@ -17,6 +17,9 @@ import (
 // (空の set に != を書くと全送信元が落ちる)。レートが未設定なら行を作らない。同時フロー数の上限が
 // 0 のプロトコルには set も行も作らない。
 //
+// どの行も IPv4 のパケットにだけ一致する(Match.IPv4)。v1 は IPv4 だけを扱い、IPv6 のパケットは
+// DNAT されないので、判定もトークンの消費もしない。
+//
 // set の名前は deny_N、allow_N、meter_N(N は Transparent のポートだけで数える連番)と、プロトコル
 // ごとに 1 つを全ルールで共有する flows_udp、flows_tcp である。
 //
@@ -91,7 +94,7 @@ func (c *compiler) row(pt Port, step policy.Step, ctNew bool, st Stmt) {
 	kind := step.DropKind()
 	c.prog.Rows = append(c.prog.Rows, Row{
 		RuleID: pt.RuleID, Step: step, Kind: kind, Comment: Comment(pt.RuleID, kind),
-		Match: Match{Proto: pt.Proto, Ports: pt.Ports, CtStateNew: ctNew},
+		Match: Match{Proto: pt.Proto, Ports: pt.Ports, CtStateNew: ctNew, IPv4: true},
 		Stmt:  st,
 	})
 }

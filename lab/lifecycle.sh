@@ -160,8 +160,12 @@ wait_agent() { wait_until 30 agent_registered "$1" || { echo "!! agent $1 did no
 # poll for "the rule just added/retargeted actually forwards" instead of guessing how long that
 # takes; the check right after this always redoes the same probe (with its own, unchanged
 # timeout) to produce the value it asserts on.
-tcp_probe_ok() { [[ "$(client "echo hi | socat -t 1 - TCP:198.51.100.1:$1" 2>/dev/null)" == *tcp-echo* ]]; }
-udp_probe_ok() { [[ "$(client "echo hi | socat -t 1 - UDP:198.51.100.1:$1" 2>/dev/null)" == *udp-echo* ]]; }
+# 一発の probe には socat の -T (全体の無通信タイムアウト) も付ける。-t は片方が EOF に達した後の
+# 待ち時間でしかなく、EOF に達しないまま相手の応答を待ち続けると socat は終わらない。最初の probe の
+# SYN が、まだ peer を足していない wgft0 で落ちて再送になったとき、この状態で 10 分以上止まる例を
+# ラボで観測した (echo は相手の EOF を受けてから返すため、両側が待ち合う)。
+tcp_probe_ok() { [[ "$(client "echo hi | socat -t 1 -T 10 - TCP:198.51.100.1:$1" 2>/dev/null)" == *tcp-echo* ]]; }
+udp_probe_ok() { [[ "$(client "echo hi | socat -t 1 -T 10 - UDP:198.51.100.1:$1" 2>/dev/null)" == *udp-echo* ]]; }
 # tcp_flow_gone/tcp_flow_up <port>: flows_established (defined below) reaching 0 / at least 1.
 tcp_flow_gone() { [ "$(flows_established "$1")" = 0 ]; }
 tcp_flow_up() { [ "$(flows_established "$1")" -ge 1 ]; }
@@ -625,8 +629,8 @@ check1() {
   # same probe with their own (unchanged) timeout and would FAIL on the unmatched substring.
   wait_until 10 tcp_probe_ok 39980
   wait_until 10 udp_probe_ok 27020
-  check "tcp works before the restart" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39980')"
-  check "udp works before the restart" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27020')"
+  check "tcp works before the restart" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39980')"
+  check "udp works before the restart" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:27020')"
 
   local rounds=20 interval=0.5
   ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 39980 "$rounds" "$interval" \
@@ -713,8 +717,8 @@ check1() {
   fi
 
   echo "-- new flows work after the restart, in both modes"
-  check "new tcp flow works after restart" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39980')"
-  check "new udp flow works after restart" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27020')"
+  check "new tcp flow works after restart" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39980')"
+  check "new udp flow works after restart" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:27020')"
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"
@@ -745,8 +749,8 @@ check2() {
   # bare wait_until: re-checked immediately below by the check() calls (same probe, same port).
   wait_until 10 tcp_probe_ok 39982
   wait_until 10 udp_probe_ok 27022
-  check "tcp on A works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39982')"
-  check "udp on A works before anything" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27022')"
+  check "tcp on A works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39982')"
+  check "udp on A works before anything" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:27022')"
 
   echo "-- add / retarget / disable / delete an unrelated rule B, and edit A's own group/note"
   local rounds=16 interval=0.5
@@ -801,12 +805,12 @@ s = socket.create_connection((\"198.51.100.1\", 39983), timeout=5); s.send(b\"x\
   wait
   check "changing A's target cuts A's open tcp session" "before=1 after=0" "before=$before after=$after"
 
-  check "udp on the second A still worked before the target change" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27023')"
+  check "udp on the second A still worked before the target change" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:27023')"
   set_target "$a_udp2" 192.168.50.3:19199
   # bare wait_until: re-checked by the absent() call right after, since a target that never
   # actually changed would still answer with "udp-echo", which absent() treats as a failure.
   wait_until 3 rule_field_is "$a_udp2" target "192.168.50.3:19199"
-  absent "changing A's target silences its udp flow" "udp-echo" "$(client 'echo hi | socat -t 2 - UDP:198.51.100.1:27023' 2>&1)"
+  absent "changing A's target silences its udp flow" "udp-echo" "$(client 'echo hi | socat -t 2 -T 10 - UDP:198.51.100.1:27023' 2>&1)"
 
   echo "-- deleting A cuts its flows too"
   local a_tcp3
@@ -931,7 +935,7 @@ check3b() {
   r_del=$(vps wgft rule add --agent home --tcp 8462 --to 192.168.50.3:25597 --proxy --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   # bare wait_until: re-checked by the check() right after (same probe, same port).
   wait_until 10 tcp_probe_ok 8462
-  check "the soon-to-be-deleted proxy rule works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:8462')"
+  check "the soon-to-be-deleted proxy rule works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:8462')"
 
   echo "-- another process claims ownership of table inet wgft (nft -i fed through a fifo kept open, so it never sees EOF and keeps holding the table)"
   # The replacement is one nftables transaction (add, delete, add with flags owner on one line), not
@@ -977,9 +981,9 @@ for r in d['rules']:
 ")
   check "the swap failure is logged" "failed to apply nftables" "$(tail -8 /tmp/wgft-lifecycle-c3b-server.log)"
   check "the deleted rule's listener is kept (fail-static; only Commit closes removed listeners, and it did not run)" \
-    "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:8462')"
+    "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:8462')"
   check "the newly-added rule's listener is not left open (Rollback closed what Prepare opened)" \
-    "Connection refused" "$(client 'echo hi | socat -t 2 - TCP:198.51.100.1:8463' 2>&1)"
+    "Connection refused" "$(client 'echo hi | socat -t 2 -T 10 - TCP:198.51.100.1:8463' 2>&1)"
 
   echo "-- the owner process exits; the next apply converges"
   [ -n "$owner_pid" ] && kill "$owner_pid" 2>/dev/null
@@ -996,15 +1000,15 @@ for r in d['rules']:
   # behaviour), so a disable that silently never applied would not be caught any other way.
   must_wait "check3b: rule (re)add disable applied" 3 rule_field_is "$r_add" enabled "False"
   vps wgft rule enable "$r_add" --admin "$ADMIN" >/dev/null 2>&1
-  tcp_refused() { [[ "$(client "echo hi | socat -t 1 - TCP:198.51.100.1:$1" 2>&1)" == *"Connection refused"* ]]; }
+  tcp_refused() { [[ "$(client "echo hi | socat -t 1 -T 10 - TCP:198.51.100.1:$1" 2>&1)" == *"Connection refused"* ]]; }
   # bare wait_until: re-checked by the check() right after (same probe, same port).
   wait_until 10 tcp_refused 8462
-  check "once the owner is gone, the deleted rule's listener is finally closed" "Connection refused" "$(client 'echo hi | socat -t 2 - TCP:198.51.100.1:8462' 2>&1)"
+  check "once the owner is gone, the deleted rule's listener is finally closed" "Connection refused" "$(client 'echo hi | socat -t 2 -T 10 - TCP:198.51.100.1:8462' 2>&1)"
   # the agent only opens its own local listener for the new rule once it receives the full state
   # over the stream, a round trip through the WG tunnel; poll instead of trusting a fixed sleep.
   # bare wait_until: re-checked by the check() right after (same probe, same port).
   wait_until 10 tcp_probe_ok 8463
-  check "once the owner is gone, the newly-added rule now actually works" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:8463')"
+  check "once the owner is gone, the newly-added rule now actually works" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:8463')"
 
   rm -f /tmp/wgft-lifecycle-c3b-fifo /tmp/wgft-lifecycle-c3b-owner.log
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
@@ -1264,14 +1268,14 @@ check6() {
   }
   unsquat_port() { pkill -x socat; wait_until 3 port_free "$1"; }
   src_flow_for_port() { vps nft list table inet wgft 2>/dev/null | grep -c "dport $1 .*src_flow"; }
-  tcp_refused() { [[ "$(client "echo hi | socat -t 1 - TCP:198.51.100.1:$1" 2>&1)" == *"Connection refused"* ]]; }
+  tcp_refused() { [[ "$(client "echo hi | socat -t 1 -T 10 - TCP:198.51.100.1:$1" 2>&1)" == *"Connection refused"* ]]; }
 
   if [ "$mode" = kernel ]; then
     echo "-- a. a squatted proxy port is a rule-local (not backend-wide) failure"
     local ctrl bad
     ctrl=$(vps wgft rule add --agent home --tcp 39997 --to 192.168.50.3:25620 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
     wait_until 10 tcp_probe_ok 39997
-    check "the control rule works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39997')"
+    check "the control rule works before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39997')"
     squat_port 8471
     bad=$(vps wgft rule add --agent home --tcp 8471 --to 192.168.50.3:25621 --proxy --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
     # bare wait_until: re-checked by the okcheck/check calls right after (same rule_state field).
@@ -1396,7 +1400,7 @@ check6() {
     check "its reason names the bind failure" "bind failed" "$(rule_state_field "$h" reason)"
     okcheck "the port is listed as retiring" "$(drift_has retiring "$h" && echo 1 || echo 0)"
     absent "a new connection gets no reply from wgft's target while the rule is not_active (no dispatch is published for it)" \
-      "tcp-echo" "$(client 'echo hi | socat -t 2 - TCP:198.51.100.1:39996' 2>&1)"
+      "tcp-echo" "$(client 'echo hi | socat -t 2 -T 10 - TCP:198.51.100.1:39996' 2>&1)"
     okcheck "the established session is still running (not yet broken) right after the retarget" \
       "$([ ! -s /tmp/wgft-lifecycle-c6-h.log ] && echo 1 || echo 0)"
     okcheck "its conntrack entry is still ESTABLISHED" \
@@ -1437,7 +1441,7 @@ check6() {
     check "it is a Relay rule now" "proxy" "$(rule_field "$h" vps_mode)"
     # bare wait_until: re-checked by the check() right after (same probe, same port).
     wait_until 10 tcp_probe_ok 39996
-    check "a new connection gets tcp-echo through the proxy" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39996')"
+    check "a new connection gets tcp-echo through the proxy" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39996')"
     vps wgft rule rm "$h" --admin "$ADMIN" >/dev/null
   else
     skip "proxy bind failures and Relay fail-closed semantics (proxy mode's public listener and nft DNAT only exist in kernel mode, design 6.1/6.2/7a.3)"
@@ -1679,7 +1683,7 @@ check8() {
   # must_wait: ~40s covers one full retry interval plus scheduling slack; nothing else changes the
   # rule, so recovery can only come from the retry loop noticing the port is free.
   must_wait "check8: the rule recovers to active within ~40s via the retry, with no other change" 45 rule_state_is "$r" apply_state active
-  check "it actually forwards once active" "tcp-echo" "$(client "echo hi | socat -t 3 - TCP:198.51.100.1:$port")"
+  check "it actually forwards once active" "tcp-echo" "$(client "echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:$port")"
   local recover_line
   if [ "$mode" = kernel ]; then recover_line="$port: listener opened after"; else recover_line="listener tcp/$port: opened after"; fi
   okcheck "the recovery is logged exactly once" "$([ "$(grep -c "$recover_line" /tmp/wgft-lifecycle-c8-server.log)" = 1 ] && echo 1 || echo 0)"
@@ -1720,7 +1724,7 @@ check9() {
   local r; r=$(vps wgft rule add --agent home --tcp 39990 --to 192.168.50.3:25660 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   # bare wait_until: re-checked by the check() right after (same probe, same port).
   wait_until 10 tcp_probe_ok 39990
-  check "the rule forwards before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39990')"
+  check "the rule forwards before anything" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39990')"
   drift_lines() { grep -c "data plane changed outside wgft" "$LOG"; }
   applied_lines() { grep -c "applied table inet wgft" "$LOG"; }
 
@@ -1728,14 +1732,14 @@ check9() {
   vps nft flush ruleset
   # must_wait: the change notification wakes the server within a debounce of 250ms; 5s is slack.
   must_wait "check9a: forwarding is back within 5s of the flush" 5 tcp_probe_ok 39990
-  check "the rule forwards again after the flush" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39990')"
+  check "the rule forwards again after the flush" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39990')"
   check "one log line names what drifted" "data plane changed outside wgft (table inet wgft is missing)" "$(grep "data plane changed" "$LOG")"
   okcheck "exactly one drift line so far" "$([ "$(drift_lines)" = 1 ] && echo 1 || echo 0)"
 
   echo "-- b. nft delete table inet wgft"
   vps nft delete table inet wgft
   must_wait "check9b: forwarding is back within 5s of the delete" 5 tcp_probe_ok 39990
-  check "the rule forwards again after the delete" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39990')"
+  check "the rule forwards again after the delete" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39990')"
   okcheck "exactly one more drift line" "$([ "$(drift_lines)" = 2 ] && echo 1 || echo 0)"
 
   echo "-- c. with nothing of wgft's changed, nothing is republished (another table's churn included)"
@@ -1799,8 +1803,8 @@ for r in d['rules']:
   # bare wait_until: re-checked by the check() right after. The agent opens its listener for the
   # new rule once the published generation is delivered over the stream.
   wait_until 10 tcp_probe_ok 39991
-  check "the rule added while the table was held forwards end to end" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39991')"
-  check "the first rule forwards again" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39990')"
+  check "the rule added while the table was held forwards end to end" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39991')"
+  check "the first rule forwards again" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39990')"
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"

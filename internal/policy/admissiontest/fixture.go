@@ -1,9 +1,9 @@
 // Package admissiontest は、Admission Policy の共有 fixture(internal/policy/testdata/admission)を
 // 読み、評価器に流して照らすテスト用の部品である(設計文書 7a.9 節「fixture の形式と等価性の検査」)。
 //
-// 評価器は Engine の実装として差し込む。今は nftables の行の列を解釈器で実行する実装
-// (internal/policy/nftables の fixture のテスト)だけがあり、Go の評価器(goengine、移行の手順 3)は
-// 同じ Engine を実装して同じ fixture を流す。本番のコードはこのパッケージを import しない。
+// 評価器は Engine の実装として差し込む。nftables の行の列を解釈器で実行する実装
+// (internal/policy/nftables/interp)と、Go の評価器(internal/policy/goengine)の 2 つが、同じ
+// fixture を同じ手順で流す。本番のコードはこのパッケージを import しない。
 package admissiontest
 
 import (
@@ -30,13 +30,17 @@ type Fixture struct {
 	Name string `json:"-"`
 	// Comment は場面の説明。
 	Comment string `json:"comment"`
-	// InterimUntilStep が 0 でなければ、その fixture は移行の途中の kernel の挙動を書いた暫定の
-	// ものであり、7a.9 節「Phase 5 の移行の手順」のその番号の段で書き直す。
-	InterimUntilStep int                          `json:"interim_until_step"`
-	Policy           Policy                       `json:"policy"`
-	Events           []Event                      `json:"events"`
-	WantDrops        map[string]map[string]uint64 `json:"want_drops"`
-	Tolerances       []string                     `json:"tolerances"`
+	// InterimUntilStep が 0 でなければ、その fixture は移行の途中の挙動を書いた暫定のものであり、
+	// 7a.9 節「Phase 5 の移行の手順」のその番号の段で書き直す。
+	InterimUntilStep int `json:"interim_until_step"`
+	// Engines は、暫定の fixture が照らす評価器の名前(EngineNFTables、EngineGo)。空ならすべての評価器に
+	// 照らす。移行の途中で kernel と userspace の挙動が意図して異なる場面にだけ使い、暫定の fixture に
+	// しか書けない。
+	Engines    []string                     `json:"engines"`
+	Policy     Policy                       `json:"policy"`
+	Events     []Event                      `json:"events"`
+	WantDrops  map[string]map[string]uint64 `json:"want_drops"`
+	Tolerances []string                     `json:"tolerances"`
 }
 
 // Policy は fixture のルールの一覧と、送信元ごとの同時フロー数の上限。
@@ -83,6 +87,17 @@ type Event struct {
 	// Want は admit、drop:<種類>、または drop(drop カウンタに数えない拒否。IR に無いルール ID)。
 	// end では空にする。
 	Want string `json:"want"`
+}
+
+// 評価器の名前(Fixture.Engines の値)。
+const (
+	EngineNFTables = "nftables" // internal/policy/nftables の行の列を解釈器で実行する
+	EngineGo       = "goengine" // internal/policy/goengine
+)
+
+// AppliesTo は fixture を name の評価器に照らすか。
+func (fx *Fixture) AppliesTo(name string) bool {
+	return len(fx.Engines) == 0 || slices.Contains(fx.Engines, name)
 }
 
 // Admit と Drop は Want と Engine の結果の値。
@@ -211,6 +226,14 @@ func (fx *Fixture) validate() error {
 		if !slices.Contains(Tolerances, tol) {
 			return fmt.Errorf("unknown tolerance %q", tol)
 		}
+	}
+	for _, name := range fx.Engines {
+		if name != EngineNFTables && name != EngineGo {
+			return fmt.Errorf("engines: unknown evaluator %q", name)
+		}
+	}
+	if len(fx.Engines) > 0 && fx.InterimUntilStep == 0 {
+		return fmt.Errorf("only an interim fixture may name the evaluators it applies to")
 	}
 	if fx.InterimUntilStep != 0 {
 		if fx.InterimUntilStep < 3 || fx.InterimUntilStep > 5 {

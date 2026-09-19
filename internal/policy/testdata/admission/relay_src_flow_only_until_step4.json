@@ -1,5 +1,5 @@
 {
-  "comment": "Today's kernel behaviour for a Relay rule: its listening port has only the src_flow row, counted in the same flows_tcp as Transparent TCP rules, so its per_source_rate and new_flow_rate have no effect. Migration step 4 gives Relay ports every row; this fixture is then rewritten so that the flows after the fifth are dropped by new_flow_rate.",
+  "comment": "Today's behaviour for a Relay rule in both modes: in kernel mode its listening port has only the src_flow row, counted in the same flows_tcp as Transparent TCP rules; in userspace mode the Relay frontend asks the Go evaluator for the src_flow step only (AdmitSourceFlow), counted in the same per-source count as Transparent TCP rules. Its per_source_rate and new_flow_rate have no effect. Migration step 4 gives Relay ports every step; this fixture is then rewritten so that the flows after the fifth are dropped by new_flow_rate.",
   "interim_until_step": 4,
   "policy": {
     "rules": [

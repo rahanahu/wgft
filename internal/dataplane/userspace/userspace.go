@@ -1,11 +1,12 @@
 // Package userspace is the userspace dataplane Backend (design.md 6.3, 7a.7 節). It uses neither
 // kernel WireGuard nor nftables nor conntrack: a wireguard-go + netstack tunnel (utun), the Go
-// admission evaluator (srcpolicy) in place of nftables, and the shared relay (relay) turned around
-// so that it accepts on the host's public ports and dials the agents through the netstack.
+// admission evaluator (internal/policy/goengine) in place of nftables, and the shared relay (relay)
+// turned around so that it accepts on the host's public ports and dials the agents through the
+// netstack.
 //
 // Everything the Backend converges to comes from the Plan it is given (design.md 7a.2 節):
-// Transparent ports become relay listeners, Plan.Admission feeds the evaluator and the per-source
-// flow caps. Only process-wide budgets (Resource Guard, design.md 7a.5 節) are fixed at New.
+// Transparent ports become relay listeners, Plan.Admission feeds the evaluator, per-source flow caps
+// included. Only process-wide budgets (Resource Guard, design.md 7a.5 節) are fixed at New.
 package userspace
 
 import (
@@ -22,10 +23,10 @@ import (
 
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
-	"github.com/rahanahu/wgft/internal/dataplane/userspace/srcpolicy"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/utun"
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/policy/goengine"
 )
 
 // Options configures a Backend.
@@ -41,11 +42,12 @@ type Options struct {
 // Backend is the userspace dataplane. It implements dataplane.Backend.
 type Backend struct {
 	logf   func(format string, args ...any)
-	policy *srcpolicy.Policy
+	policy *goengine.Engine
 	relay  *relay.Manager
 	udpCap *flowcap.Counter
 	// tcpCap is shared by the relay and the server's Relay frontend (proxyrelay): in userspace mode
-	// both count against the same TCP budget (design.md 7 節).
+	// both count against the same process-wide TCP budget (design.md 7 節). The per-source count is
+	// the evaluator's, which the Relay frontend reaches through AdmitRelayFlow.
 	tcpCap *flowcap.Counter
 
 	mu  sync.Mutex
@@ -61,19 +63,21 @@ type Backend struct {
 
 var _ dataplane.Backend = (*Backend)(nil)
 
-// hostNetwork opens the relay's listeners on all host addresses (the public ports).
+// hostNetwork opens the relay's listeners on all host IPv4 addresses (the public ports). v1 handles
+// IPv4 only (design.md 4, 7a.9 節): a dual-stack listener would let an IPv6 source past deny lists
+// that hold IPv4 prefixes only. The evaluator also refuses non-IPv4 sources on its own.
 type hostNetwork struct{}
 
 func (hostNetwork) ListenUDP(port uint16) (net.PacketConn, error) {
-	return net.ListenUDP("udp", &net.UDPAddr{Port: int(port)})
+	return net.ListenUDP("udp4", &net.UDPAddr{Port: int(port)})
 }
 func (hostNetwork) ListenTCP(port uint16) (net.Listener, error) {
-	return net.Listen("tcp", ":"+strconv.Itoa(int(port)))
+	return net.Listen("tcp4", ":"+strconv.Itoa(int(port)))
 }
 
 // New builds a Backend with no tunnel and no listeners; EnsureDevice brings the tunnel up, the
-// first Prepare binds the listeners and its Commit serves them. The per-source caps are off until
-// that first Commit sets them from its Plan, before any listener serves.
+// first Prepare binds the listeners and its Commit serves them. The evaluator rejects every flow
+// until that first Commit gives it the Plan's admission policy, before any listener serves.
 func New(opts Options) *Backend {
 	lim := opts.Limits.WithDefaults()
 	logf := opts.Logf
@@ -82,7 +86,7 @@ func New(opts Options) *Backend {
 	}
 	b := &Backend{
 		logf:   logf,
-		policy: srcpolicy.New(nil),
+		policy: goengine.New(nil),
 		udpCap: &flowcap.Counter{Total: lim.UDPTotal},
 		tcpCap: &flowcap.Counter{Total: lim.TCPTotal},
 	}
@@ -90,11 +94,11 @@ func New(opts Options) *Backend {
 		UDPIdleTimeout: 120 * time.Second, // the default of conntrack's udp_timeout_stream
 		Dial:           b.Dial,
 		Logf:           logf,
-		Admit: func(ruleID string, src netip.Addr) bool {
-			ok, _ := b.policy.AdmitFlow(ruleID, src, 0)
-			return ok
+		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) {
+			d, t := b.policy.AdmitFlow(ruleID, src, size)
+			return t.Release, d.Allow
 		},
-		AdmitPacket: b.policy.AdmitPacket,
+		AdmitPacket: func(ruleID string, size int) bool { return b.policy.AdmitPacket(ruleID, size).Allow },
 		Limits:      lim,
 		UDPCap:      b.udpCap,
 		TCPCap:      b.tcpCap,
@@ -103,8 +107,19 @@ func New(opts Options) *Backend {
 }
 
 // TCPCounter is the TCP flow counter the relay uses. The server hands it to its Relay frontend so
-// that both count against one TCP budget, per source included, in userspace mode (design.md 7 節).
+// that both count against one process-wide TCP budget in userspace mode (design.md 7 節).
 func (b *Backend) TCPCounter() *flowcap.Counter { return b.tcpCap }
+
+// AdmitRelayFlow judges a new connection of the server's Relay frontend (proxyrelay) in userspace
+// mode by the per-source concurrent-flow step only, so that Relay connections share the per-source
+// count with the Transparent TCP rules (design.md 6.3 節). When it admits, the caller calls release
+// once when the connection ends, or at once when the connection is refused later. Until migration
+// step 4 of design.md 7a.9 節 the Relay frontend judges deny and allow itself and applies no rates,
+// as the kernel's Relay ports have only the src_flow row.
+func (b *Backend) AdmitRelayFlow(ruleID string, src netip.Addr) (release func(), ok bool) {
+	d, t := b.policy.AdmitSourceFlow(ruleID, src)
+	return t.Release, d.Allow
+}
 
 // Dial connects to an agent through the netstack. The relay, the server's Relay frontend and the
 // connectivity check all dial with it.
@@ -195,8 +210,8 @@ func (b *Backend) WGStatus() (*wgtypes.Device, error) {
 // to change the peers is backend-wide and returned as the error.
 //
 // d.RelayListening is not used: the kernel backend needs it to give Relay ports per-source flow
-// rows (design.md 6.1 節), while in userspace mode the Relay frontend counts per source itself
-// through the shared TCPCounter.
+// rows (design.md 6.1 節), while in userspace mode the Relay frontend asks the evaluator through
+// AdmitRelayFlow.
 func (b *Backend) Prepare(d dataplane.Desired) (dataplane.Prepared, error) {
 	p := &prepared{b: b, desired: d, peersChanged: d.PeersChanged()}
 	if p.peersChanged {
@@ -222,8 +237,8 @@ type prepared struct {
 
 func (p *prepared) Failed() map[string]error { return p.staged.Failed() }
 
-// Commit publishes the Plan without its failed rules: the evaluator's rules and the per-source
-// flow caps first, then the relay's listener set, so that no new listener serves before its
+// Commit publishes the Plan without its failed rules: the evaluator's admission policy (the
+// per-source flow caps included) first, then the relay's listener set, so that no new listener serves before its
 // admission policy is in place. It then removes the peers the declaration dropped and closes the
 // relay sessions the published policy no longer admits (in place of conntrack convergence,
 // design.md 6.3 節); a retiring rule's sessions are judged by its Retiring value (design.md 7a.3
@@ -231,15 +246,12 @@ func (p *prepared) Failed() map[string]error { return p.staged.Failed() }
 func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, error) {
 	b := p.b
 	p.done = true
-	c := dataplane.Committed{Drops: b.policy.Drops(), WGChanges: p.wgChanges}
+	c := dataplane.Committed{Drops: drops(b.policy.Drops()), WGChanges: p.wgChanges}
 	failed := make(map[string]bool, len(p.staged.Failed()))
 	for id := range p.staged.Failed() {
 		failed[id] = true
 	}
-	adm := p.desired.Plan.Without(failed).Admission
-	b.policy.Update(adm.Rules)
-	b.udpCap.SetPerSource(adm.PerSourceFlowCaps.UDP)
-	b.tcpCap.SetPerSource(adm.PerSourceFlowCaps.TCP)
+	b.policy.Update(p.desired.Plan.Without(failed).Admission)
 	keep := make(map[string]func(netip.Addr) bool, len(retiring))
 	for _, r := range retiring {
 		keep[r.Previous.RuleID] = r.SourceAllowed
@@ -259,6 +271,18 @@ func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, e
 		return b.policy.SourceAllowed(ruleID, src)
 	})
 	return c, nil
+}
+
+// drops converts the evaluator's drop counts into the dataplane's.
+func drops(in []goengine.Drop) []dataplane.Drop {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]dataplane.Drop, len(in))
+	for i, d := range in {
+		out[i] = dataplane.Drop{RuleID: d.RuleID, Kind: d.Kind, Packets: d.Packets, Bytes: d.Bytes}
+	}
+	return out
 }
 
 // repairOnce removes the peers the declaration dropped (the pending repair), keeping it pending

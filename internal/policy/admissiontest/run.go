@@ -56,13 +56,11 @@ func Run(t *testing.T, fx *Fixture, newEngine NewEngine) Result {
 }
 
 // Compare は同じ fixture を 2 つの Engine に流した結果を互いに照らす(設計文書 7a.9 節の手順 3)。
-// tolerances を挙げた fixture では、許容差が及ぶ出来事の結果が実装ごとに違いうるので、ここでは
-// 照らさず、それぞれの want と want_drops への照合(Run)だけに任せる。
+// fixture は許容差が及ぶ出来事を書かない(7a.9 節「未決事項」を移行の手順 3 で決めた)ので、
+// tolerances を挙げた fixture も照らす。tolerances は、その場面がどの許容差を避けて出来事を
+// 置いたかを示す。
 func Compare(t *testing.T, fx *Fixture, nameA string, a Result, nameB string, b Result) {
 	t.Helper()
-	if len(fx.Tolerances) > 0 {
-		return
-	}
 	if !slices.Equal(a.Outcomes, b.Outcomes) {
 		t.Errorf("%s: outcomes differ\n%s: %v\n%s: %v", fx.Name, nameA, a.Outcomes, nameB, b.Outcomes)
 	}
