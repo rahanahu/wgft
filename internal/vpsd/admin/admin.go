@@ -94,6 +94,13 @@ type AgentInfo struct {
 	Generation    uint64             `json:"generation"` // 処理済み世代
 	Tunnel        proto.TunnelStatus `json:"tunnel"`
 	Rules         []proto.RuleStatus `json:"rules,omitempty"`
+	// 版の交渉(仕様 7a.6 節)。未接続、または接続が legacy v0 なら ProtocolVersion は 0 で、
+	// AgentProtocolLegacy が true な場合だけ「legacy v0 と判定した」ことを示す(未接続との違いは
+	// Connected を見る)
+	ProtocolVersion     int  `json:"protocol_version,omitempty"`
+	AgentProtocolLegacy bool `json:"agent_protocol_legacy,omitempty"`
+	AgentProtocolMin    int  `json:"agent_protocol_min,omitempty"`
+	AgentProtocolMax    int  `json:"agent_protocol_max,omitempty"`
 	// wg
 	WGEndpoint    string `json:"wg_endpoint,omitempty"`
 	LastHandshake string `json:"last_handshake,omitempty"`

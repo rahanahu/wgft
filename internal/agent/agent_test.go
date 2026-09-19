@@ -349,11 +349,13 @@ func TestRunHeartbeatsStopsFollowUpAfterTimeout(t *testing.T) {
 }
 
 // newTestStreamServer は vpsd 側の stream(仕様 5.2 節)の薄いなりすまし。公開鍵の受信までは検証せず、
-// test から送った全体状態をそのまま転送し、エージェントが送るハートビートを hbCh へ流す。
-func newTestStreamServer(t *testing.T) (srv *httptest.Server, pin [32]byte, stateCh chan<- *proto.State, hbCh <-chan *proto.Heartbeat) {
+// test から送った全体状態をそのまま転送し、エージェントが送るハートビートを hbCh へ流し、
+// 受け取った最初のメッセージ(pubkey、版と機能の交渉を含む)を firstCh へ流す。
+func newTestStreamServer(t *testing.T) (srv *httptest.Server, pin [32]byte, stateCh chan<- *proto.State, hbCh <-chan *proto.Heartbeat, firstCh <-chan proto.Message) {
 	t.Helper()
 	states := make(chan *proto.State)
 	heartbeats := make(chan *proto.Heartbeat, 8)
+	firsts := make(chan proto.Message, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/agents/stream", func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
@@ -365,6 +367,10 @@ func newTestStreamServer(t *testing.T) (srv *httptest.Server, pin [32]byte, stat
 		var first proto.Message
 		if _, b, err := ws.Read(ctx); err != nil || json.Unmarshal(b, &first) != nil || first.Type != proto.MsgPublicKey {
 			return
+		}
+		select {
+		case firsts <- first:
+		default:
 		}
 		go func() {
 			for {
@@ -405,14 +411,14 @@ func newTestStreamServer(t *testing.T) (srv *httptest.Server, pin [32]byte, stat
 	srv = httptest.NewTLSServer(mux)
 	t.Cleanup(srv.Close)
 	pin = sha256.Sum256(srv.Certificate().Raw)
-	return srv, pin, states, heartbeats
+	return srv, pin, states, heartbeats, firsts
 }
 
 // streamOnce は、stream の接続直後に全体状態を適用した直後と、以後の世代を適用するたびにも
 // ハートビートを送る(30 秒のティッカーを待たない。仕様 5.2 節)。ここではティッカーを実質無効にした
 // runtime を使い、適用のたびにハートビートが届くことだけを確かめる。
 func TestStreamOnceSendsHeartbeatAfterApply(t *testing.T) {
-	srv, pin, stateCh, hbCh := newTestStreamServer(t)
+	srv, pin, stateCh, hbCh, _ := newTestStreamServer(t)
 
 	priv, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
@@ -456,4 +462,116 @@ func TestStreamOnceSendsHeartbeatAfterApply(t *testing.T) {
 	// 2 つ目の世代を適用した直後にも、ティッカーを待たずに次のハートビートが届く。
 	stateCh <- &proto.State{Generation: 2, WG: proto.WGConfig{ServerPubkey: "not-a-valid-key"}}
 	waitHeartbeat(0)
+}
+
+// TestStreamOnceSendsProtocolRange は、agent が pubkey メッセージに話せる版の範囲と、
+// 空(だが非 nil)の capabilities を載せることを確かめる(仕様 7a.6 節)。
+func TestStreamOnceSendsProtocolRange(t *testing.T) {
+	srv, pin, _, _, firstCh := newTestStreamServer(t)
+
+	priv, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &runtime{
+		f: &credentials.Credentials{
+			Endpoint:       strings.TrimPrefix(srv.URL, "https://"),
+			CertSHA256:     hex.EncodeToString(pin[:]),
+			PermanentToken: "tok",
+		},
+		priv:              priv,
+		heartbeatInterval: time.Hour,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rt.streamOnce(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	select {
+	case m := <-firstCh:
+		if m.ProtocolMin == nil || *m.ProtocolMin != proto.SupportedProtocol.Min {
+			t.Errorf("protocol_min = %v, want %d", m.ProtocolMin, proto.SupportedProtocol.Min)
+		}
+		if m.ProtocolMax == nil || *m.ProtocolMax != proto.SupportedProtocol.Max {
+			t.Errorf("protocol_max = %v, want %d", m.ProtocolMax, proto.SupportedProtocol.Max)
+		}
+		if m.Capabilities == nil {
+			t.Error("capabilities: want a non-nil (possibly empty) array, got nil (indistinguishable from a legacy v0 agent)")
+		} else if len(*m.Capabilities) != 0 {
+			t.Errorf("capabilities = %v, want empty", *m.Capabilities)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no pubkey message received within 5s")
+	}
+}
+
+// TestStreamOnceRejectsOutOfRangeServerVersion confirms the agent disconnects (returning an
+// error, which streamLoop then logs and retries with the normal backoff) if the server claims
+// to have selected a protocol version outside the agent's own supported range -- a defensive
+// check, since a correct server only ever selects from the intersection (spec 7a.6 section).
+func TestStreamOnceRejectsOutOfRangeServerVersion(t *testing.T) {
+	srv, pin, stateCh, _, _ := newTestStreamServer(t)
+
+	priv, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &runtime{
+		f: &credentials.Credentials{
+			Endpoint:       strings.TrimPrefix(srv.URL, "https://"),
+			CertSHA256:     hex.EncodeToString(pin[:]),
+			PermanentToken: "tok",
+		},
+		priv:              priv,
+		heartbeatInterval: time.Hour,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- rt.streamOnce(ctx) }()
+
+	outOfRange := 5
+	stateCh <- &proto.State{Generation: 1, ServerProtocolVersion: &outOfRange, WG: proto.WGConfig{ServerPubkey: "not-a-valid-key"}}
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "outside the agent's supported range") {
+			t.Errorf("streamOnce error = %v, want a message about the out-of-range version", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamOnce did not return after an out-of-range server_protocol_version")
+	}
+}
+
+// TestCheckServerProtocolVersion is a table test for the pure validation function used above.
+func TestCheckServerProtocolVersion(t *testing.T) {
+	local := proto.ProtocolRange{Min: 1, Max: 1}
+	inRange := 1
+	outOfRange := 2
+	zero := 0
+	negative := -1
+	tests := []struct {
+		name    string
+		st      *proto.State
+		wantErr bool
+	}{
+		{"legacy v0 state (no field): nothing to check", &proto.State{}, false},
+		{"in range", &proto.State{ServerProtocolVersion: &inRange}, false},
+		{"out of range", &proto.State{ServerProtocolVersion: &outOfRange}, true},
+		// Versions start at 1 (design 7a.6); 0 or negative is not a valid numbered version at
+		// all, distinct from a valid version that happens to fall outside the agent's range.
+		{"zero: not a valid numbered version", &proto.State{ServerProtocolVersion: &zero}, true},
+		{"negative: not a valid numbered version", &proto.State{ServerProtocolVersion: &negative}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkServerProtocolVersion(local, tt.st)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("checkServerProtocolVersion() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
 }
