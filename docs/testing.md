@@ -27,7 +27,7 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 
 ## 変更の契機と対象のパス
 
-次の表の契機に当たるパスを PR が変えたときは、B 類の列のテストのうち実装済みのものを流します。新設の B 類 (B7 から B10) は、実装されるまで契機に当たっても流しません。1 つのパスが複数の契機に当たる場合は、当たる契機のテストをすべて流します。ラボの一式の列は、開発の途中で流し直す確認を選ぶための目安で、マージの前にはラボの一式のすべてを流します。
+次の表の契機に当たるパスを PR が変えたときは、B 類の列のテストのうち実装済みのものを流します。新設の B 類 (B7 から B9) は、実装されるまで契機に当たっても流しません。1 つのパスが複数の契機に当たる場合は、当たる契機のテストをすべて流します。ラボの一式の列は、開発の途中で流し直す確認を選ぶための目安で、マージの前にはラボの一式のすべてを流します。
 
 | 契機 | 対象のパス | B 類 | ラボの一式のうち開発の途中で選ぶ確認 |
 |---|---|---|---|
@@ -42,7 +42,7 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 | `protocol` | `proto/stream.go`、`proto/state.go`、`proto/version.go`、`internal/vpsd/stream/**`、`internal/vpsd/agentapi/**`、`internal/agent/**` | B7 | L1、L4 |
 | `agent-platform` | `internal/agent/**`、`internal/flock/**`、`internal/dataplane/userspace/relay/**`、`internal/dataplane/userspace/tunnel/**`、`cmd/wgft/**`、`*_windows.go`、`*_darwin.go` | B4、B8 | L1 |
 | `deploy` | `deploy/*.service`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
-| `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
+| `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
 | `phase` | 7a.8 節の段階の完了 | C 類 | すべて |
 | `rc` | リリースの候補の版 | 「リリース候補ごと」の項目 | すべて |
@@ -120,7 +120,7 @@ netns のトポロジを組む `lab/netns.sh` は Incus に依存しないので
 | B7 | 版の組み合わせ (新設) | 旧 agent と新 server、新 agent と旧 server、legacy v0 の組で登録や全体状態の配信が壊れること | ラボ (直前のリリースのバイナリを置く) | `protocol`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 数分 (見込み) | 自動 (新設) |
 | B8 | macOS の runner での単体テスト (新設) | macOS でだけ通る経路 (UDP の送信バッファ、既定の置き場所) の退行 | CI (macOS の runner) | `agent-platform`、`rc` | 契機に当たる PR の更新ごと | 数分 (見込み) | 自動 (新設) |
 | B9 | 配布物の VM 試験 (新設) | 同梱の unit で起動しないこと、VM の再起動の後に転送が戻らないこと、設定の誤りで再起動を繰り返すこと | 2 台の VM (server と agent) | `deploy`、`rc` | 契機に当たる PR ごとに 1 つのディストリビューションで、リリース候補ごとに 3 つのディストリビューションで | 10 分前後 (見込み) | 自動 (新設) |
-| B10 | Docker のイメージの疎通 (新設) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (CI の runner かラボの VM) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 数分 (見込み) | 自動 (新設) |
+| B10 | Docker のイメージの疎通 (`scripts/docker-smoke.sh`) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (ホスト、CI の runner、ラボの VM のどれでも可) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | キャッシュが温まっていれば約 8 秒、初回はイメージの取得を含めて約 30 秒 | 自動 (開発者が起動) |
 
 ### C 類 (段階の完了の関門)
 
@@ -261,16 +261,6 @@ v1 の前に 1 回流し、以後は関係する領域を変えたときにだ�
 - 契機:`deploy`、`rc`
 - 自動化:自動です
 - v1:必須で、リリース候補ごとの項目です。README は、同梱の unit による再起動からの復旧と、3 つのディストリビューションへの対応をうたっています。今のラボの導入の手順 (apt) では Fedora の VM を立てられないので、v1 での Fedora の確認はこの試験が兼ねます
-
-### B10 Docker のイメージの疎通
-
-- 内容:`deploy/Dockerfile.server` と `deploy/Dockerfile.agent` から作ったイメージで、同梱の compose の設定に沿って server (userspace モード) と agent を起動し、TCP と UDP が転送されることと、非 root (uid 65532) で動くことを確かめます
-- 足りない理由:ラボのスクリプトはバイナリを直接起動し、イメージを使いません。リリースのワークフローはイメージを作って公開するだけで、起動を確かめません
-- 環境:Docker か Podman のある Linux (CI の runner、またはラボの VM) です
-- 時期:契機に当たる PR ごとと、リリース候補ごとに流します
-- 契機:`build`、`rc`
-- 自動化:自動です
-- v1:必須で、リリース候補ごとの項目です。イメージは公開の配布物であり、Dockerfile の誤りは B5 の GoReleaser の検査では捉えられません
 
 ### C1 悪い条件のネットワーク
 
