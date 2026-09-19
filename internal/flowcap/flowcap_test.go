@@ -128,3 +128,35 @@ func TestCounterPerSourceZeroMeansUnlimited(t *testing.T) {
 		}
 	}
 }
+
+// 接続元ごとの上限は動作中に変えられる。上限なしの間に数えたフローも、上限を付けた後の判定に入る。
+func TestCounterSetPerSource(t *testing.T) {
+	a := netip.MustParseAddr("192.0.2.1")
+	cnt := &Counter{}
+	for i := 0; i < 3; i++ {
+		if !cnt.Acquire(a) {
+			t.Fatalf("flow %d must pass without a per-source cap", i+1)
+		}
+	}
+	cnt.SetPerSource(2)
+	if cnt.Acquire(a) {
+		t.Fatal("with 3 flows held, a cap of 2 must refuse a new flow")
+	}
+	cnt.Release(a)
+	cnt.Release(a)
+	if !cnt.Acquire(a) {
+		t.Fatal("with 1 flow held, a cap of 2 must admit a new flow")
+	}
+	cnt.SetPerSource(0)
+	if !cnt.Acquire(a) {
+		t.Fatal("cap 0 means no per-source cap")
+	}
+	for i := 0; i < 3; i++ {
+		cnt.Release(a)
+	}
+	if cnt.Len() != 0 || len(cnt.bySrc) != 0 {
+		t.Fatalf("after release: Len = %d, bySrc = %v", cnt.Len(), cnt.bySrc)
+	}
+	var none *Counter
+	none.SetPerSource(1)
+}
