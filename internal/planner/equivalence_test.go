@@ -22,8 +22,9 @@ import (
 // (not a transcription) and live next to it instead, because both are unexported and package-local:
 //   - kernel DNAT: internal/vpsd/nft/equivalence_test.go, which runs the real emit() against the
 //     in-memory recorder from build_test.go.
-//   - userspace relay: internal/vpsd/dataplane_userspace_equivalence_test.go, which calls the
-//     unexported userspaceRelayTargets function extracted from userspaceDataplane.ApplyNFT.
+//   - userspace relay: since Phase 2 the userspace Backend builds its listener set from the Plan
+//     itself; internal/dataplane/userspace/relaytargets_test.go pins that set to the one the
+//     pre-Backend rule-based code produced for the same fixture.
 func equivalenceFixture() (rules []proto.Rule, agentAddr map[string]netip.Addr) {
 	rate := func(s string) *proto.Rate {
 		r, err := proto.ParseRate(s)

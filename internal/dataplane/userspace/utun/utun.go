@@ -20,8 +20,8 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/nettun"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 )
 
 // Config はサーバ側トンネルの宣言。
@@ -80,9 +80,9 @@ func New(cfg Config) (*Tunnel, error) {
 }
 
 // SetPeers は宣言のピア集合に収束させる(足りないものを足し、余分を消す)。
-// カーネルモードの wg.Ensure のピア部分に相当し、変えた点を返す。
+// カーネルモードの wg.Ensure(internal/vpsd/wg)のピア部分に相当し、変えた点を返す。
 // ピアのエンドポイントは指定しない(エージェントからの握手でローミング学習する)。
-func (t *Tunnel) SetPeers(peers []wg.Peer) (changes []string, err error) {
+func (t *Tunnel) SetPeers(peers []dataplane.Peer) (changes []string, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	want := make(map[wgtypes.Key]netip.Addr, len(peers))

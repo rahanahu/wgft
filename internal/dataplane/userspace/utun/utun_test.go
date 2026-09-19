@@ -11,7 +11,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/agent/tunnel"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
+	"github.com/rahanahu/wgft/internal/dataplane"
 )
 
 // プロセス内でサーバ側トンネルと、エージェント側の tunnel を実 UDP(127.0.0.1)で繋ぐ。
@@ -81,7 +81,7 @@ func TestServerTunnelWithAgentTunnel(t *testing.T) {
 	}()
 
 	// 1. ピアを足す → エージェントの握手(再送は 5 秒後)を待つ
-	if _, err := srv.SetPeers([]wg.Peer{{PublicKey: ck.PublicKey(), Address: netip.MustParseAddr("10.200.0.2")}}); err != nil {
+	if _, err := srv.SetPeers([]dataplane.Peer{{PublicKey: ck.PublicKey(), Address: netip.MustParseAddr("10.200.0.2")}}); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(20 * time.Second)

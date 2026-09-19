@@ -6,6 +6,8 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/vpsd/check"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
 	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
@@ -15,12 +17,16 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// dataplane は VPS 側の転送面。Daemon がカーネルや外部の状態を触るときは、必ずここを通る。
-// 唯一の実装は kernelDataplane(nftables の DNAT とカーネル WireGuard、仕様 6.1 節)で、
-// ユーザー空間モード(仕様 13 節)はこの後ろに wireguard-go と netstack の実装を並べる。
-// メソッドの形はいまのカーネル実装の型(wg.Config、check.Report など)をそのまま出しており、
-// ユーザー空間実装を足すときに、両方に共通する形へ整える。
-type dataplane interface {
+// serverDataplane は VPS 側の転送面を Daemon から見た形。Daemon がカーネルや外部の状態を触るときは、
+// 必ずここを通る。実装は 2 つある。kernelDataplane(nftables の DNAT とカーネル WireGuard、仕様 6.1 節)は
+// まだこのパッケージの中にあり、Phase 3(設計文書 7a.8 節)で internal/dataplane/linuxkernel へ移す。
+// userspaceDataplane(仕様 6.3 節)は internal/dataplane/userspace の Backend を包むだけの薄い層で、
+// 他テーブルの検査や ip_forward のような、ユーザー空間モードでは何もしないホスト側の検査を受け持つ。
+//
+// メソッドの形はいまのカーネル実装の型(wg.Config、check.Report など)をそのまま出している。
+// ApplyNFT と Converge は、カーネル実装が読むルール集合と、Backend が読む Plan の両方を受け取る。
+// カーネル実装が Plan から組み立てるようになる Phase 3 で、ルール集合の引数は無くなる。
+type serverDataplane interface {
 	// EnsureWG は wg インタフェースを宣言(鍵、ポート、アドレス、MTU、ピア集合)に収束させ、行った変更を返す(仕様 9 節)。
 	EnsureWG(cfg wg.Config) ([]string, error)
 	// WGStatus は wg インタフェースの現在のピア(エンドポイント、最終ハンドシェイク)を返す。
@@ -36,12 +42,12 @@ type dataplane interface {
 	// InputPortSuggestions は、プロキシモードの公開ポートが input で塞がれていれば足す行を返す(仕様 6.2 節)。
 	InputPortSuggestions(port uint16) ([]string, error)
 	// ReadDrops は差し替え直前の drop カウンタを読む(仕様 6.1 節)。
-	ReadDrops() ([]nft.Drop, error)
-	// ApplyNFT はルール集合から table inet wgft を組み立て、1 トランザクションで差し替える(仕様 6.1 節)。
+	ReadDrops() ([]dataplane.Drop, error)
+	// ApplyNFT は転送の宣言を 1 回で公開する(カーネルでは table inet wgft の 1 トランザクションの差し替え。仕様 6.1 節)。
 	// proxyListening はプロキシモードの待ち受けを開けているポート(接続元 IP ごとの上限の行を付ける対象)
-	ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, proxyListening map[uint16]bool) error
-	// Converge は外から入って DNAT されたフローを宣言に収束させ、消した数を返す(仕様 6.1 節)。
-	Converge(rules []ctconv.Rule, wgNet netip.Prefix) (int, error)
+	ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, proxyListening map[uint16]bool, plan planner.Plan) error
+	// Converge は外から入った進行中のフローを宣言に収束させ、消した数を返す(仕様 6.1、6.3 節)。
+	Converge(rules []ctconv.Rule, wgNet netip.Prefix, plan planner.Plan) (int, error)
 	// EnableIPForward は net.ipv4.ip_forward を 1 にする(仕様 6.1 節)。
 	// 書き込みに失敗すると、policy drop と同じ流儀の Finding を返す(成功時とすでに 1 のときは nil)。
 	EnableIPForward(st *store.Store) *check.Finding
@@ -69,14 +75,26 @@ func (k *kernelDataplane) BoundPorts() (check.Bound, error)         { return che
 func (k *kernelDataplane) InputPortSuggestions(port uint16) ([]string, error) {
 	return check.InputPortSuggestions(port)
 }
-func (k *kernelDataplane) ReadDrops() ([]nft.Drop, error) { return nft.ReadDrops() }
-func (k *kernelDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, proxyListening map[uint16]bool) error {
+func (k *kernelDataplane) ReadDrops() ([]dataplane.Drop, error) {
+	drops, err := nft.ReadDrops()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dataplane.Drop, len(drops))
+	for i, d := range drops {
+		out[i] = dataplane.Drop{RuleID: d.RuleID, Kind: d.Kind, Packets: d.Packets, Bytes: d.Bytes}
+	}
+	return out, nil
+}
+
+// ApplyNFT は、Phase 3 までカーネル実装が組み立てに使うルール集合から table inet wgft を作る。plan は読まない。
+func (k *kernelDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, proxyListening map[uint16]bool, _ planner.Plan) error {
 	return nft.Apply(rules, nft.Config{
 		WGInterface: k.iface, AgentAddr: agentAddr, Logf: log.Printf,
 		UDPPerSourceCap: k.udpPerSourceCap, TCPPerSourceCap: k.tcpPerSourceCap, ProxyListening: proxyListening,
 	})
 }
-func (k *kernelDataplane) Converge(rules []ctconv.Rule, wgNet netip.Prefix) (int, error) {
+func (k *kernelDataplane) Converge(rules []ctconv.Rule, wgNet netip.Prefix, _ planner.Plan) (int, error) {
 	return ctconv.Converge(rules, wgNet)
 }
 func (k *kernelDataplane) EnableIPForward(st *store.Store) *check.Finding { return EnableIPForward(st) }

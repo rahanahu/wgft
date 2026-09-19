@@ -5,7 +5,7 @@
 #   lab/lab exec vm bash /wgft/lab/connlimit.sh
 #
 # This limit only exists in kernel mode (userspace mode already enforces it in Go, see
-# internal/flowcap and internal/vpsd/srcpolicy, and is covered by their unit tests). The script:
+# internal/flowcap and internal/dataplane/userspace/srcpolicy, and is covered by their unit tests). The script:
 #
 #   - opens far more than 128 concurrent TCP connections and 256 concurrent UDP flows from one
 #     source address, and checks that close to (but not over) the cap gets through while the

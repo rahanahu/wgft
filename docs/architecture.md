@@ -9,6 +9,7 @@ wgft のコードは、設計文書([docs/design.md](design.md))の各節が扱�
 | `internal/vpsd/nft` | 6.1 | ルール集合から `table inet wgft` を組み立て、1 トランザクションで適用します |
 | `internal/vpsd/conntrack` | 6.1(収束) | 外から入って DNAT されたフローを宣言状態に収束させます |
 | `internal/vpsd/proxyrelay` | 6.2 | プロキシモードのルールについて、vpsd が受けた TCP をエージェントへ中継します |
+| `internal/dataplane/userspace` | 6.3 | `vpsd` のユーザー空間モードの転送面です。wireguard-go と netstack のトンネル(`utun`)、接続元制限とレート制限の評価器(`srcpolicy`)、中継(`relay`)を束ね、`internal/planner` の `Plan` から待ち受けと評価器を組み立てます |
 | `internal/dataplane/userspace/relay` | 6.3, 7 | エージェントの netstack 上のリスナーと LAN 内 `target` への中継を持ちます。`vpsd` のユーザー空間モードも、公開ポートの待ち受けと netstack 越しのエージェントへの中継に同じパッケージを使います |
 | `internal/vpsd/stream` | 5.2 | エージェントごとの stream(WebSocket)を持ち、全体状態の配信とハートビートの記録を行います |
 | `internal/vpsd/agentapi` | 5.1 | エージェント用 API(登録と stream の公開エンドポイント、自己署名証明書)を持ちます |

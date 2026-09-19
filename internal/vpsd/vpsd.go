@@ -4,6 +4,7 @@
 // ファイルの分け方:
 //   - vpsd.go: Options、Daemon、Run(起動の配線)
 //   - dataplane.go: 転送面(カーネルの wg・nftables・conntrack)へのインタフェースとカーネル実装
+//   - dataplane_userspace.go: ユーザー空間モードの転送面(internal/dataplane/userspace の Backend)を包む層
 //   - apply.go: wg とルールの収束(reconcileWG、applyNFT、converge)
 //   - admin_backend.go: 管理用 API(admin.Backend)の実装
 //   - agent_backend.go: 登録(agentapi.Backend)と stream(stream.Backend)の実装
@@ -16,12 +17,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/agentapi"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
-	"github.com/rahanahu/wgft/internal/vpsd/srcpolicy"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/internal/vpsd/stream"
 	"github.com/rahanahu/wgft/internal/vpsd/wg"
@@ -212,8 +213,8 @@ type Daemon struct {
 
 	mu sync.Mutex // ルール・エージェントの変更と、wg0・nftables の適用を直列化する
 
-	// dp は転送面。カーネル(nftables + カーネル WireGuard)が唯一の実装で、v0.2.0 でユーザー空間実装を並べる(仕様 13 節)
-	dp dataplane
+	// dp は転送面。カーネル(nftables + カーネル WireGuard、仕様 6.1 節)とユーザー空間(仕様 6.3 節)の 2 つの実装がある
+	dp serverDataplane
 }
 
 // Run は起動して、シグナルまで動く。
@@ -250,10 +251,10 @@ func Run(opts Options) error {
 		udpPerSourceCap: opts.Limits.UDPPerSourceCap(),
 		tcpPerSourceCap: opts.Limits.TCPPerSourceCap(),
 	}}
-	var uspace *userspaceDataplane
+	var uspace *userspace.Backend
 	if opts.Mode == modeUserspace {
-		uspace = newUserspaceDataplane(srcpolicy.New(nil), opts.Limits)
-		d.dp = uspace
+		uspace = userspace.New(userspace.Options{Limits: opts.Limits})
+		d.dp = &userspaceDataplane{b: uspace}
 	}
 	d.reserved = proto.Reserved{opts.WGPort: "WireGuard"}
 	if ap, err := netip.ParseAddrPort(opts.AdminAddr); err == nil {
@@ -315,8 +316,9 @@ func Run(opts Options) error {
 	// 起動時の applyNFT が待ち受けを開き、開けたポートだけに上限の行を付けるよう、先に作る
 	proxyOpts := proxyrelay.Options{Cap: &flowcap.Counter{Total: opts.Limits.WithDefaults().TCPTotal}}
 	if uspace != nil {
-		proxyOpts.Dial = uspace.ProxyDial // ユーザー空間モードでは netstack 越しにエージェントへ
-		proxyOpts.Cap = uspace.tcpCap     // 同時接続数は relay と合計で数える(仕様 7 節)
+		// ユーザー空間モードでは netstack 越しにエージェントへ
+		proxyOpts.Dial = func(addr string) (net.Conn, error) { return uspace.Dial("tcp", addr) }
+		proxyOpts.Cap = uspace.TCPCounter() // 同時接続数は relay と合計で数える(仕様 7 節)
 	}
 	d.proxy = proxyrelay.New(proxyOpts)
 	// 起動時に SQLite のルールを適用する(手作業で変えられたテーブルは宣言に戻る)

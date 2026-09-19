@@ -2,6 +2,10 @@
 // 接続元制限とレート制限を Go で評価する。カーネルモードで nftables が担う評価順
 // (deny、allow、接続元ごとの meter、新規フローの集約上限、パケットの集約上限。
 // design.md 6.1 節)を、userspace の中継の手前で同じ順に再現する。
+//
+// 入力は Plan が持つ AdmissionPolicy の IR(internal/policy の RulePolicy)である。IR から
+// 評価器を組み立てる 1 実装への統合(design.md 7a.8 節の Phase 5)までは、評価順をこの
+// パッケージが手で持つ。
 package srcpolicy
 
 import (
@@ -11,7 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/vpsd/nft"
+	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -27,7 +32,7 @@ type Policy struct {
 	mu    sync.Mutex
 	now   func() time.Time
 	rules map[string]*ruleState
-	drops map[dropKey]*nft.Drop
+	drops map[dropKey]*dataplane.Drop
 }
 
 type dropKey struct {
@@ -59,26 +64,28 @@ func New(now func() time.Time) *Policy {
 	return &Policy{
 		now:   now,
 		rules: make(map[string]*ruleState),
-		drops: make(map[dropKey]*nft.Drop),
+		drops: make(map[dropKey]*dataplane.Drop),
 	}
 }
 
-// Update はルール集合から方針を作り直す。消えたルールの状態(接続元の表、バケット)は
-// 捨て、残ったルールのうち、レートの設定(Count と Unit)が変わっていないものは
+// Update は Plan が持つ AdmissionPolicy の IR のルール(転送するルール、つまり有効でエージェントが
+// 登録済みのルールだけを持つ。internal/planner の Build)から方針を作り直す。消えたルール(削除、
+// 無効化、エージェントの登録の取り消しで転送しなくなったルール)の状態(接続元の表、
+// バケット)は捨て、残ったルールのうち、レートの設定(Count と Unit)が変わっていないものは
 // バケットと接続元の表をそのまま引き継ぐ。allow/deny の一覧は毎回差し替える(進行中の
 // 判定に対する影響は SourceAllowed の呼び出し側が扱う)。
-func (p *Policy) Update(rules []proto.Rule) {
+func (p *Policy) Update(rules []policy.RulePolicy) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	next := make(map[string]*ruleState, len(rules))
 	for _, r := range rules {
-		next[r.ID] = buildRuleState(r, p.rules[r.ID])
+		next[r.RuleID] = buildRuleState(r, p.rules[r.RuleID])
 	}
 	p.rules = next
 }
 
-func buildRuleState(r proto.Rule, old *ruleState) *ruleState {
+func buildRuleState(r policy.RulePolicy, old *ruleState) *ruleState {
 	rs := &ruleState{
 		allow: r.SourceAllow,
 		deny:  r.SourceDeny,
@@ -196,14 +203,14 @@ func (p *Policy) SourceAllowed(ruleID string, src netip.Addr) bool {
 
 // Drops は前回の呼び出し以降に数えた drop を返して 0 に戻す。nft.ReadDrops がテーブル
 // 差し替えの直前にカーネルのカウンタを読むのと同じ扱いで、呼び出し側が SQLite へ累積する。
-func (p *Policy) Drops() []nft.Drop {
+func (p *Policy) Drops() []dataplane.Drop {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if len(p.drops) == 0 {
 		return nil
 	}
-	out := make([]nft.Drop, 0, len(p.drops))
+	out := make([]dataplane.Drop, 0, len(p.drops))
 	for _, d := range p.drops {
 		out = append(out, *d)
 	}
@@ -213,7 +220,7 @@ func (p *Policy) Drops() []nft.Drop {
 		}
 		return out[i].Kind < out[j].Kind
 	})
-	p.drops = make(map[dropKey]*nft.Drop)
+	p.drops = make(map[dropKey]*dataplane.Drop)
 	return out
 }
 
@@ -221,7 +228,7 @@ func (p *Policy) recordDropLocked(ruleID, kind string, size int) {
 	k := dropKey{ruleID, kind}
 	d := p.drops[k]
 	if d == nil {
-		d = &nft.Drop{RuleID: ruleID, Kind: kind}
+		d = &dataplane.Drop{RuleID: ruleID, Kind: kind}
 		p.drops[k] = d
 	}
 	d.Packets++
