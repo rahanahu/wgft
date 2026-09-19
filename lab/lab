@@ -24,7 +24,8 @@ else
 fi
 
 vm_exists() { inc info "$VM" >/dev/null 2>&1; }
-vm_state() { inc list "$VM" -c s -f csv; }
+# `incus list <名前>` は前方一致なので、wgft-lab が wgft-lab2 も拾う。名前の完全一致で絞る
+vm_state() { inc list -c ns -f csv | awk -F, -v vm="$VM" '$1 == vm { print $2 }'; }
 has_snapshot() { inc snapshot list "$VM" -f csv -c n | grep -qx "$SNAPSHOT"; }
 wait_agent() { timeout 300 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$VM" agent)" || die "VM の agent が起動しない"; }
 # agent は IP アドレスが付く前に応答するので、起動直後に外と通信するなら別に待つ。
