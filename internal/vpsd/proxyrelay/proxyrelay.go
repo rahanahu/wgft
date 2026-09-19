@@ -52,6 +52,15 @@ type Manager struct {
 	// retiring は fail-closed にしたルールの待ち受け(待ち受けソケットは閉じ、成立済みの接続だけを
 	// 持つ。設計文書 7a.3 節の StopAccepting と Retire)。
 	retiring []*listener
+	// bindFail は bind に失敗し続けているポートの、最後に記録した理由と失敗の回数。適用は 30 秒ごとに
+	// 再試行されるので、同じ理由の失敗はログに 1 回だけ出し、開けたときに 1 回だけ回復を出す。
+	bindFail map[uint16]*failure
+}
+
+// failure は bind の失敗が続いている 1 つのポートの記録。
+type failure struct {
+	reason   string
+	attempts int
 }
 
 type listener struct {
@@ -88,7 +97,7 @@ func New(opts Options) *Manager {
 	if opts.ConnsMax <= 0 {
 		opts.ConnsMax = flowcap.Limits{TCPTotal: opts.Cap.Total}.TCPPerRuleCap()
 	}
-	return &Manager{opts: opts, ls: map[uint16]*listener{}}
+	return &Manager{opts: opts, ls: map[uint16]*listener{}, bindFail: map[uint16]*failure{}}
 }
 
 // Apply は宣言に収束させる(Prepare の直後に Commit する)。
@@ -120,11 +129,26 @@ func (m *Manager) Prepare(rules []Rule) *Prepared {
 		}
 		ln, err := m.opts.Listen(port)
 		if err != nil {
-			m.opts.Logf("proxy: cannot open listener for %d: %v", port, err)
+			f := m.bindFail[port]
+			if f == nil {
+				f = &failure{}
+				m.bindFail[port] = f
+			}
+			f.attempts++
+			if f.reason != err.Error() {
+				f.reason = err.Error()
+				m.opts.Logf("proxy: cannot open listener for %d: %v", port, err)
+			}
 			p.failed[p.want[port].ID] = fmt.Errorf("bind failed: %w", err)
 			continue
 		}
 		p.opened[port] = ln
+	}
+	// 宣言から消えたポートの失敗の記録は捨てる
+	for port := range m.bindFail {
+		if _, ok := p.want[port]; !ok {
+			delete(m.bindFail, port)
+		}
 	}
 	return p
 }
@@ -207,6 +231,10 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 		m.ls[port] = l
 		go m.serve(l)
 		m.opts.Logf("proxy: opened relay %d -> %s:%d proxy_protocol=%v", port, r.AgentAddr, r.AgentPort, r.ProxyProtocol)
+		if f := m.bindFail[port]; f != nil {
+			m.opts.Logf("proxy: %d: listener opened after %d failed attempts", port, f.attempts)
+			delete(m.bindFail, port)
+		}
 	}
 }
 

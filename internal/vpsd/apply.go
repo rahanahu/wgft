@@ -152,13 +152,10 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 	for _, e := range out.Committed.Errors {
 		log.Printf("%v", e)
 	}
-	ids := make([]string, 0, len(out.Failed))
-	for id := range out.Failed {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		log.Printf("rule %s: not active: %v", id, out.Failed[id])
+	var lines []string
+	d.notActive, lines = ruleFailureLog(d.notActive, out.Failed)
+	for _, l := range lines {
+		log.Print(l)
 	}
 	active := 0
 	for _, r := range rules {
@@ -179,6 +176,38 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 		d.proxyInputHints(rules)
 	}
 	return out, nil
+}
+
+// ruleFailureLog は、ルール単位の失敗のうちログに出す行を決める。prev は前回までに記録した失敗
+// (ルール ID → 理由)。失敗が始まったとき、理由が変わったときに 1 行、失敗していたルールが失敗しなく
+// なったときに 1 行だけ出す。適用は 30 秒ごとに再試行されるので、同じ失敗を毎回出すとログが溢れる。
+// 今の理由は管理用 API と Web UI の状態で見える(設計文書 7a.3 節)。
+func ruleFailureLog(prev map[string]string, failed map[string]error) (map[string]string, []string) {
+	next := make(map[string]string, len(failed))
+	var lines []string
+	ids := make([]string, 0, len(failed))
+	for id := range failed {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		reason := failed[id].Error()
+		next[id] = reason
+		if prev[id] != reason {
+			lines = append(lines, fmt.Sprintf("rule %s: not active: %s", id, reason))
+		}
+	}
+	var recovered []string
+	for id := range prev {
+		if _, still := next[id]; !still {
+			recovered = append(recovered, id)
+		}
+	}
+	sort.Strings(recovered)
+	for _, id := range recovered {
+		lines = append(lines, fmt.Sprintf("rule %s: no longer failing", id))
+	}
+	return next, lines
 }
 
 // relayFrontend はプロキシモードの中継(proxyrelay)を Runtime の frontend の participant にする

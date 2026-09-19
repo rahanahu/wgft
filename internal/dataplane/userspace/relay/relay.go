@@ -73,6 +73,15 @@ type Manager struct {
 	// retiring は fail-closed にしたルールの待ち受け(新しいフローを受けず、成立済みのフローだけを
 	// 残す。設計文書 7a.3 節)。Prepare/Commit の経路(vpsd のユーザー空間モード)だけが使う。
 	retiring map[Key]*listener
+	// bindFail は Prepare の経路で bind に失敗し続けているキーの記録。同じ理由の失敗はログに 1 回だけ
+	// 出し、開けたときに 1 回だけ回復を出す(適用は 30 秒ごとに再試行されるため)。
+	bindFail map[Key]*bindFailure
+}
+
+// bindFailure は bind の失敗が続いている 1 つのキーの記録。
+type bindFailure struct {
+	reason   string
+	attempts int
 }
 
 type listener struct {
@@ -131,7 +140,7 @@ func New(n Network, opts Options) *Manager {
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
 	}
-	return &Manager{net: n, opts: opts, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}}
+	return &Manager{net: n, opts: opts, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}}
 }
 
 // DesiredFromRules は全体状態のルールから、ポートごとの宣言値を計算する。

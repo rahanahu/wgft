@@ -74,11 +74,26 @@ func (m *Manager) Prepare(desired map[Key]Desired) *Staged {
 		}
 		sock, err := m.bind(k)
 		if err != nil {
-			m.opts.Logf("listener %s: %v", k, err)
+			f := m.bindFail[k]
+			if f == nil {
+				f = &bindFailure{}
+				m.bindFail[k] = f
+			}
+			f.attempts++
+			if f.reason != err.Error() {
+				f.reason = err.Error()
+				m.opts.Logf("listener %s: %v", k, err)
+			}
 			s.failed[d.RuleID] = fmt.Errorf("bind failed: %w", err)
 			continue
 		}
 		s.opened[k] = sock
+	}
+	// 宣言から消えたキーの失敗の記録は捨てる
+	for k := range m.bindFail {
+		if _, ok := desired[k]; !ok {
+			delete(m.bindFail, k)
+		}
 	}
 	for k, d := range desired {
 		if _, bad := s.failed[d.RuleID]; bad {
@@ -164,6 +179,10 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 		}
 		m.listeners[k] = l
 		m.opts.Logf("listener %s -> %s opened; rule %s", k, d.Target, d.RuleID)
+		if f := m.bindFail[k]; f != nil {
+			m.opts.Logf("listener %s: opened after %d failed attempts", k, f.attempts)
+			delete(m.bindFail, k)
+		}
 		if k.Proto == proto.TCP {
 			if err := m.checkTarget(d.Target); err != nil {
 				l.targetErr = err

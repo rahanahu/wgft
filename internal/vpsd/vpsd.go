@@ -221,6 +221,9 @@ type Daemon struct {
 	// rec は dp とプロキシモードの中継を 1 つのトランザクションで駆動し、Desired と Active を持つ
 	// (設計文書 7a.3 節)。最初の applyNFT で作る
 	rec *reconcile.Reconciler
+	// notActive はログに記録済みのルール単位の失敗(ルール ID → 理由)。同じ失敗を再試行のたびに
+	// ログへ出さないために持つ(apply.go の ruleFailureLog)
+	notActive map[string]string
 }
 
 // Run は起動して、シグナルまで動く。
