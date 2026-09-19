@@ -1,7 +1,5 @@
 {
-  "comment": "Userspace behaviour for packet_rate on a TCP rule: packet_rate applies to UDP datagrams only, so every TCP connection and packet is admitted and nothing is counted. This is the final behaviour of both modes (design 7a.9). Until migration step 5 removes the kernel's packet row from TCP rules (tcp_packet_rate_until_step5), only the Go evaluator runs this fixture; step 5 then renames it, without the interim fields, so that both evaluators run it.",
-  "interim_until_step": 5,
-  "engines": ["goengine"],
+  "comment": "packet_rate applies to UDP datagrams only (design.md 7a.9); a TCP rule keeps accepting and storing the value for import/export compatibility, but every connection and packet is admitted and nothing is counted. Both evaluators run this fixture.",
   "policy": {
     "rules": [
       {"id": "r_tcp", "proto": "tcp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": "10/second"}

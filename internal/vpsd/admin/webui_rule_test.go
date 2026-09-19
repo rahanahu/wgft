@@ -324,6 +324,63 @@ func TestRuleDetailRateWording(t *testing.T) {
 	}
 }
 
+// TestRuleDetailPacketRateTCPNotice は、TCP のルールに packet_rate があるとき、詳細ページと
+// レート区画に「TCP には効かない」旨(design.md 7a.9 節。CLI の旨と文言を揃える)が出ること、
+// UDP のルールやレートの無い TCP のルールには出ないこと、他の欄を保存しても保存済みの
+// packet_rate が消えないことを確かめる。フォームは入力欄自体を無効にしない(disabled にすると
+// ブラウザがその欄を送らず、他の欄の保存ごと拒まれるか、値を静かに消しかねないため)。
+func TestRuleDetailPacketRateTCPNotice(t *testing.T) {
+	srv, st := newDetailTestServer(t)
+
+	rate := proto.Rate{Count: 500, Unit: proto.PerSecond}
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, proto.Rule{
+			ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565},
+			Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true,
+			SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
+			PacketRate: &rate,
+		}), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// TCP + packet_rate: the notice renders in both locales, and the kernel-mode default
+	// server (newDetailTestServer's fakeBackend leaves mode == "") also shows it, not just
+	// userspace mode.
+	ja, en := getBody(t, srv.URL+"/ui/rules/r_tcp?lang=ja"), getBody(t, srv.URL+"/ui/rules/r_tcp?lang=en")
+	if !strings.Contains(ja, T("ja", "packetTCPNoEffectNote")) {
+		t.Errorf("ja: TCP rule detail page must show the packet_rate notice: %s", ja)
+	}
+	if !strings.Contains(en, "packet_rate is stored but has no effect on TCP rules") {
+		t.Errorf("en: TCP rule detail page must show the packet_rate notice: %s", en)
+	}
+
+	// r_a is UDP (no packet_rate at all in this fixture): no notice.
+	udpBody := getBody(t, srv.URL+"/ui/rules/r_a?lang=en")
+	if strings.Contains(udpBody, T("en", "packetTCPNoEffectNote")) {
+		t.Errorf("a UDP rule must not show the TCP packet_rate notice: %s", udpBody)
+	}
+
+	// saving the rate form (per_source changes, packet field resubmits its current value
+	// since it is not disabled) must keep the stored packet_rate.
+	resp, err := http.PostForm(srv.URL+"/ui/rules/r_tcp/rates", url.Values{
+		"per_source_count": {"5"}, "per_source_unit": {"minute"},
+		"new_flow_nolimit": {"1"}, "new_flow_unit": {"second"},
+		"packet_count": {"500"}, "packet_unit": {"second"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	r := findRuleT(t, st, "r_tcp")
+	if r.PacketRate == nil || r.PacketRate.String() != "500/second" {
+		t.Fatalf("packet_rate must survive saving the other rate fields: %+v", r.PacketRate)
+	}
+	if r.PerSourceRate == nil || r.PerSourceRate.String() != "5/minute" {
+		t.Fatalf("per_source_rate = %v, want 5/minute", r.PerSourceRate)
+	}
+}
+
 // TestRuleDetailMeta は、詳細ページに取り込まれたグループ/説明の編集がルール詳細ページへ戻ることを確かめる。
 func TestRuleDetailMeta(t *testing.T) {
 	srv, st := newDetailTestServer(t)

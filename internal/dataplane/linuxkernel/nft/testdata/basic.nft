@@ -6,6 +6,8 @@
 # (仕様 6.1, 7 節)を全ルールで共有する。
 # 送信元を読まない集約のレートの行(new_flow、packet)も meta nfproto ipv4 を持ち、IPv6 のパケットは
 # トークンを使わない(設計文書 7a.9 節)。
+# r_tcp は packet_rate を持つが、TCP のルールには packet の行を作らないので、この値はテーブルに現れない
+# (設計文書 7a.9 節「TCP の packet_rate」)。
 table inet wgft {
   set deny_1 { type ipv4_addr; flags interval; elements = { 203.0.113.0/24 } }
   set flows_tcp { type ipv4_addr; flags dynamic; size 65535; }

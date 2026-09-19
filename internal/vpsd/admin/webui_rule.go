@@ -170,7 +170,10 @@ func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
 		AllowConfirmAdd: len(rule.SourceAllow) == 0,
 		Rates:           rateFormFrom(rule),
 		Units:           rateUnits,
-		ShowPacketNote:  serverMode == "userspace" && rule.Proto == proto.TCP,
+		// packet_rate は UDP のデータグラムだけに効く。kernel モードは移行の途中で、
+		// TCP のルールにもまだ packet の行を付けているが、旨の表示はその行の削除を
+		// 待たずに入れる(design.md 7a.9 節。CLI 側の判定と文言を揃える)。
+		ShowPacketNote: rule.Proto == proto.TCP,
 	}
 	if drops, err := s.backend.RuleDrops(); err == nil {
 		d.Dropped = strconv.FormatUint(drops[rule.ID], 10)

@@ -34,6 +34,8 @@ func fullPolicy() policy.Policy {
 				PerSourceRate: rate("10/second"), NewFlowRate: rate("100/second"), PacketRate: rate("5000/second")},
 			{RuleID: "r_relay", Proto: proto.TCP, SourceDeny: []netip.Prefix{pfx("203.0.113.0/24")},
 				PerSourceRate: rate("1/minute"), NewFlowRate: rate("1/minute")},
+			// r_tcp が持つ PacketRate は TCP のルールには効かないので、行を作らないことを確かめる
+			// (設計文書 7a.9 節「TCP の packet_rate」)。値そのものは受け付けて保存する。
 			{RuleID: "r_tcp", Proto: proto.TCP, SourceAllow: []netip.Prefix{pfx("192.0.2.0/24")}, PacketRate: rate("10/second")},
 		},
 	}
@@ -65,11 +67,12 @@ func TestCompileRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Relay のポートも Transparent と同じ段の行を持ち、set の連番を進める。TCP のルールも packet の
-	// 行を持つ(移行の手順 5 まで)。
+	// Relay のポートも Transparent と同じ段の行を持ち、set の連番を進める。TCP のルール(r_tcp)は
+	// PacketRate を持つが、packet の行は作らない(設計文書 7a.9 節「TCP の packet_rate」)。UDP の
+	// ルール(r_udp)は変わらず packet の行を持つ。
 	want := []string{
 		"wgft:r_relay:deny", "wgft:r_relay:per_source", "wgft:r_relay:src_flow", "wgft:r_relay:new_flow",
-		"wgft:r_tcp:allow", "wgft:r_tcp:src_flow", "wgft:r_tcp:packet",
+		"wgft:r_tcp:allow", "wgft:r_tcp:src_flow",
 		"wgft:r_udp:deny", "wgft:r_udp:allow", "wgft:r_udp:per_source", "wgft:r_udp:src_flow",
 		"wgft:r_udp:new_flow", "wgft:r_udp:packet",
 	}

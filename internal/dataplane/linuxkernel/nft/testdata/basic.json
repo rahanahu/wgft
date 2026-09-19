@@ -25,7 +25,7 @@
     "source_allow": ["198.51.100.0/24", "192.0.2.0/24"],
     "source_deny": [],
     "new_flow_rate": null,
-    "packet_rate": null,
+    "packet_rate": "10/second",
     "per_source_rate": "30/minute",
     "enabled": true
   },

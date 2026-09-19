@@ -635,9 +635,9 @@ Flags inherited from parent commands:
 
 ## wgft rule rate packet
 
-Cap the packets of the whole rule. In kernel mode it counts every packet of
-the rule; in userspace mode it applies to UDP datagrams only and has no effect
-on TCP rules.
+Cap the packets of the whole rule. It applies to UDP datagrams only, in both
+kernel and userspace mode. A TCP rule still accepts and stores the value, for
+import/export compatibility, but it has no effect.
 
 ```text
 wgft rule rate packet <id> <rate>

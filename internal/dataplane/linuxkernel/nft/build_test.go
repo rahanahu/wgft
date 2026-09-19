@@ -152,10 +152,11 @@ func TestEmitRows(t *testing.T) {
 	}
 
 	// 行の順序:deny、allow、per_source、src_flow、new_flow、packet。空・未設定のものは出ない。
-	// src_flow は接続元 IP ごとの同時フロー数の上限で、プロトコルごとに常に出る
+	// src_flow は接続元 IP ごとの同時フロー数の上限で、プロトコルごとに常に出る。r_tcp は
+	// PacketRate を持つが、TCP のルールには packet の行を作らない(設計文書 7a.9 節)。
 	wantPre := []string{
 		Comment("r_proxy", "allow"), Comment("r_proxy", "src_flow"),
-		Comment("r_tcp", "allow"), Comment("r_tcp", "src_flow"), Comment("r_tcp", "packet"),
+		Comment("r_tcp", "allow"), Comment("r_tcp", "src_flow"),
 		Comment("r_udp", "deny"), Comment("r_udp", "per_source"), Comment("r_udp", "src_flow"), Comment("r_udp", "new_flow"),
 	}
 	if got := rec.comments("filter_pre"); !reflect.DeepEqual(got, wantPre) {
