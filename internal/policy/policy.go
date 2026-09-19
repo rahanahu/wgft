@@ -14,6 +14,7 @@ package policy
 import (
 	"fmt"
 	"net/netip"
+	"sort"
 
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
@@ -84,6 +85,16 @@ type PerSourceFlowCaps struct {
 	TCP int
 }
 
+// ForProto returns the cap for p (UDP or TCP). Callers that need "the per-source cap for this
+// rule's protocol" (e.g. a compiler, or a test deriving the src_flow set from a Policy) should use
+// this instead of switching on proto.Proto themselves.
+func (c PerSourceFlowCaps) ForProto(p proto.Proto) int {
+	if p == proto.TCP {
+		return c.TCP
+	}
+	return c.UDP
+}
+
 // RulePolicy is the admission policy declared by one rule (design.md 6.1, 7a.2 節): source
 // allow/deny and the three rate limits. The per-source concurrent flow cap is not repeated here
 // because every rule of a protocol shares the same counter (Policy.PerSourceFlowCaps), it is not a
@@ -121,6 +132,10 @@ type Policy struct {
 // property (whether an agent is known, whether a listener bound). Phase 1 has no Runtime, so Build
 // applies only the rule-level condition; joining rules to actually-owned ports is
 // internal/planner's job (and, from Phase 4 onward, Prepare/Commit's).
+//
+// Build is deterministic: Policy.Rules is always sorted by RuleID, regardless of the input rules'
+// order, so a Policy embedded in a larger deterministic structure (internal/planner.Plan.Admission)
+// does not reintroduce input-order dependence.
 func Build(rules []model.Rule, limits flowcap.Limits) Policy {
 	p := Policy{PerSourceFlowCaps: PerSourceFlowCaps{UDP: limits.UDPPerSourceCap(), TCP: limits.TCPPerSourceCap()}}
 	for _, r := range rules {
@@ -133,5 +148,6 @@ func Build(rules []model.Rule, limits flowcap.Limits) Policy {
 			PerSourceRate: r.PerSourceRate, NewFlowRate: r.NewFlowRate, PacketRate: r.PacketRate,
 		})
 	}
+	sort.Slice(p.Rules, func(i, j int) bool { return p.Rules[i].RuleID < p.Rules[j].RuleID })
 	return p
 }

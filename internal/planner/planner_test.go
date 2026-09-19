@@ -54,6 +54,40 @@ func TestBuildJoinsPolicy(t *testing.T) {
 	if pp.Policy.RuleID != "r1" || pp.Policy.NewFlowRate == nil || *pp.Policy.NewFlowRate != *rate("50/second") {
 		t.Fatalf("Build().Ports[0].Policy = %+v", pp.Policy)
 	}
+	// PortPlan.Policy must be the same value as the matching Plan.Admission.Rules entry (a view of
+	// it, not a second source of truth); see PortPlan.Policy's doc comment.
+	if len(got.Admission.Rules) != 1 || !reflect.DeepEqual(got.Admission.Rules[0], pp.Policy) {
+		t.Fatalf("Plan.Admission.Rules = %+v, want it to contain exactly Ports[0].Policy = %+v", got.Admission.Rules, pp.Policy)
+	}
+	if got.Admission.PerSourceFlowCaps.UDP != 256 || got.Admission.PerSourceFlowCaps.TCP != 128 {
+		t.Fatalf("Plan.Admission.PerSourceFlowCaps = %+v, want {256 128}", got.Admission.PerSourceFlowCaps)
+	}
+}
+
+// TestBuildAdmissionCarriesPerSourceFlowCaps は、Plan.Admission が
+// WGFT_MAX_*_FLOWS_PER_SOURCE(flowcap.Limits 経由)の値を運ぶことを確かめる。ゼロ値の
+// flowcap.Limits{} は「上限なし」ではなく既定値(256/128)を意味し(internal/flowcap が
+// Limits 自身について直した規約と同じ)、flowcap.PerSourceOff は明示的に無効にする。
+// この解決は internal/policy.Build が行うので、ここでは Plan がその結果をそのまま運ぶことだけを見る。
+func TestBuildAdmissionCarriesPerSourceFlowCaps(t *testing.T) {
+	in := func(limits flowcap.Limits) Input {
+		return Input{
+			Rules:  []model.Rule{{ID: "r1", Agent: "home", Proto: proto.UDP, ListenPort: pr(1000, 1000), Enabled: true}},
+			Limits: limits,
+			Agents: []Agent{{Name: "home", Addr: addr("10.200.0.2")}},
+		}
+	}
+
+	if got := Build(in(flowcap.Limits{})).Admission.PerSourceFlowCaps; got.UDP != flowcap.UDPPerSource || got.TCP != flowcap.TCPPerSource {
+		t.Fatalf("Build(zero Limits{}).Admission.PerSourceFlowCaps = %+v, want the defaults {%d %d}",
+			got, flowcap.UDPPerSource, flowcap.TCPPerSource)
+	}
+	if got := Build(in(flowcap.Limits{UDPPerSource: flowcap.PerSourceOff, TCPPerSource: flowcap.PerSourceOff})).Admission.PerSourceFlowCaps; got.UDP != 0 || got.TCP != 0 {
+		t.Fatalf("Build(PerSourceOff).Admission.PerSourceFlowCaps = %+v, want {0 0}", got)
+	}
+	if got := Build(in(flowcap.Limits{UDPPerSource: 300, TCPPerSource: 150})).Admission.PerSourceFlowCaps; got.UDP != 300 || got.TCP != 150 {
+		t.Fatalf("Build(explicit Limits).Admission.PerSourceFlowCaps = %+v, want {300 150}", got)
+	}
 }
 
 // TestBuildDeterministic は、入力ルールとエージェントの順序をどう変えても、Plan.Ports は

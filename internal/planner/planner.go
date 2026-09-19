@@ -66,8 +66,12 @@ type PortPlan struct {
 	// 6.2/6.3 節 dials the agent at the same listen port too), so ListenPort doubles as the
 	// agent-side port; there is no separate "route port" field.
 	AgentAddr netip.Addr
-	// Policy is this rule's AdmissionPolicy entry (source allow/deny and the three rate limits).
-	// The zero value means the rule declared none of them, matching policy.Build's convention.
+	// Policy is this rule's AdmissionPolicy entry (source allow/deny and the three rate limits). It
+	// is a copy of the matching entry in Plan.Admission.Rules (same RuleID), kept here too as a
+	// convenience view for callers that already have a PortPlan and want its policy without
+	// searching Plan.Admission.Rules; Plan.Admission is the single source of truth both are built
+	// from (see Build). The zero value means the rule declared none of them, matching
+	// policy.Build's convention.
 	Policy policy.RulePolicy
 }
 
@@ -84,10 +88,18 @@ type Peer struct {
 // WireGuard peer set (design.md 7a.2 節): backend-independent data a Backend (design.md 7a.7 節,
 // Phase 2/3) reads to converge. internal/planner never calls into a Backend; the dependency is
 // one-directional.
+//
+// Admission is the whole AdmissionPolicy IR (internal/policy), not just its rule-level entries: a
+// Backend given only a Plan must be able to compile admission policy end to end, including the
+// per-source concurrent flow caps (design.md 7a.5 節), without reaching back into whatever built
+// the Plan. This is also what the future nftables/Go-evaluator compilers (Phase 5, design.md 7a.8
+// 節) will compile from. PortPlan.Policy is a per-port copy of the matching Admission.Rules entry,
+// not a second, independently-computed value; see PortPlan.Policy's doc comment.
 type Plan struct {
 	Generation uint64
 	Ports      []PortPlan
 	Peers      []Peer
+	Admission  policy.Policy
 }
 
 // Build derives a Plan from normalized rules, admission policy settings, and agent addresses
@@ -113,7 +125,7 @@ func Build(in Input) Plan {
 		polByRuleID[rp.RuleID] = rp
 	}
 
-	plan := Plan{Generation: in.Generation}
+	plan := Plan{Generation: in.Generation, Admission: pol}
 	for _, r := range in.Rules {
 		if !r.Enabled {
 			continue
