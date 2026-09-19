@@ -256,6 +256,9 @@ func TestConnCap(t *testing.T) {
 	m.Apply([]Rule{rule(true, nil, nil)}) // fakeAgent は PROXY ヘッダが届くまで接続元を返さない
 	dial := func() net.Conn {
 		c, err := net.Dial("tcp", raw.Addr().String())
+		if isReset(err) {
+			return resetConn{err: err} // 拒否の RST が connect の戻る前に届いた(managerFor と同じ扱い)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
