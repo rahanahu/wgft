@@ -212,15 +212,20 @@ func (b *Backend) Observe() (dataplane.Observed, error) {
 	if err != nil {
 		return dataplane.Observed{}, fmt.Errorf("table inet %s: %w", nft.TableName, err)
 	}
-	drift, err := driftOf(b.iface, *b.last, dev, fp, present)
+	drift, err := driftOf(b.iface, *b.last, dev, fp, present, b.pending.peers != nil)
 	if err != nil {
 		return dataplane.Observed{}, err
 	}
 	return dataplane.Observed{Peers: devicePeers(dev), Drift: drift}, nil
 }
 
-// driftOf compares what Observe read with what the last Commit left.
-func driftOf(iface string, last committed, dev wg.DeviceState, fp string, present bool) ([]string, error) {
+// driftOf compares what Observe read with what the last Commit left. While a peer removal is a
+// pending repair (peersPending), a peer set that differs from the declaration is that known repair,
+// not drift: Repair converges the peers to the whole declaration (fixing a peer someone else changed
+// too) without replacing the table, whereas drift would republish it and reset its meters and ct
+// count sets on every retry (design.md 7a.3 節: 戻れない地点の後の修復). Every other difference is
+// still drift.
+func driftOf(iface string, last committed, dev wg.DeviceState, fp string, present, peersPending bool) ([]string, error) {
 	var drift []string
 	switch {
 	case !present:
@@ -253,7 +258,7 @@ func driftOf(iface string, last committed, dev wg.DeviceState, fp string, presen
 		drift = append(drift, fmt.Sprintf("%s is down", iface))
 	}
 	want := declaredPeers(w.Peers)
-	if have := devicePeers(dev); !dataplane.PeersEqual(have, want) {
+	if have := devicePeers(dev); !peersPending && !dataplane.PeersEqual(have, want) {
 		drift = append(drift, fmt.Sprintf("%s has %d peers that differ from the %d declared", iface, len(have), len(want)))
 	}
 	return drift, nil

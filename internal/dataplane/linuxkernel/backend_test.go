@@ -47,6 +47,7 @@ func (k *fakeKernel) ensureWG(cfg wg.Config) ([]string, error) {
 		}
 	}
 	k.devPeers = cfg.Peers
+	k.dev.Peers = cfg.Peers // what inspect reads back from now on
 	return []string{"peers " + peerAddrs(cfg.Peers)}, nil
 }
 
