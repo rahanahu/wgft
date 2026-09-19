@@ -752,7 +752,7 @@ proto/                   外部契約としての wire スキーマ(既存フィ
 
 `internal/flowcap` は Phase 6 まで改称しない。既に共有された正しい置き場所にあるため名前だけの問題であり、`AdmissionLimits`/`ResourceLimits` への型の分割(7a.5 節)と同じ Phase でまとめて整理する。
 
-未決:`frontend` の package の分け方は決めていない。選択肢は、`transparent`/`relay` の 2 package に分ける、`Forwarding` の値で分岐する 1 package にまとめる、userspace 側は `dataplane/userspace` に畳み込む、の 3 つである。kernel backend 側の Transparent は nftables の DNAT だけで完結し、独立したコードを持たないため、実質的な package 化の対象は Relay だけになる。Phase 5 は Relay の受け付けの判定だけを変え、package は動かさない(7a.9 節の未決 4)。
+未決:`frontend` の package の分け方は決めていない。選択肢は、`transparent`/`relay` の 2 package に分ける、`Forwarding` の値で分岐する 1 package にまとめる、userspace 側は `dataplane/userspace` に畳み込む、の 3 つである。kernel backend 側の Transparent は nftables の DNAT だけで完結し、独立したコードを持たないため、実質的な package 化の対象は Relay だけになる。Phase 5 は Relay の受け付けの判定だけを変え、package は動かさない(7a.9 節の未決事項)。
 
 ### 7a.8 移行の段取り
 
@@ -771,54 +771,68 @@ proto/                   外部契約としての wire スキーマ(既存フィ
 
 Phase 5 では、`internal/policy` の IR を 2 つの対象へコンパイルする。kernel の対象は nftables の行の列、userspace の対象は Go の評価器である。両者が同じ判定をすることは、ホストの単体テストで動く共有 fixture で確かめる。
 
+`Forwarding` は通信を届ける方法を選び、Admission Policy は入口で通信を通すかどうかを決める。両者は別の軸であり、`Forwarding` の値によって Admission Policy の意味は変わらない。`Relay` のルールも `Transparent` のルールと同じ Admission Policy のすべての段を持つ。
+
 #### IR の形
 
 `policy.Policy` は、ルールごとの `RulePolicy`(ルール ID、プロトコル、`source_allow`、`source_deny`、3 つのレート)と、プロトコルごとの `PerSourceFlowCaps` を持つ。この形は Phase 1 のままで、Phase 5 では次を IR に加える。
 
 - 評価の定数:トークンバケットの burst(5)、送信元ごとの表の期限(1 分)と大きさ(65535)、同時フロー数の set の大きさ(65535)を、`internal/policy` の定数として 1 か所に持つ。今は `nft` と `srcpolicy` が同じ値をそれぞれ書いている
 - 段と drop の種類の対応:`Order` の各段は、drop カウンタの種類(`deny`、`allow`、`per_source`、`src_flow`、`new_flow`、`packet`)を 1 つずつ持つ。この文字列は SQLite に累積する drop の種類なので、今の値を変えない
-- 段の適用範囲:`deny` と `allow` はフローのすべてのパケットに効く。`per_source`、`src_flow`、`new_flow` は新しいフローだけに効く。`packet` は外から入るすべてのパケットに効く(TCP の扱いは未決 2)
+- 段の適用範囲:`deny` と `allow` は、外から入るフローのすべてのパケットに効く。`per_source_rate`、送信元ごとの同時フロー数の上限、`new_flow_rate` は、TCP と UDP の新しいフローに効く。`packet_rate` は UDP のデータグラムだけに効く(後述)
 - CIDR の正規化:`policy.Build` が `source_allow` と `source_deny` の CIDR をマスクし、重なりと隣接を併合して昇順に並べる。今は nftables の set を作るときだけ併合しており(`intervalElements`)、Go の評価器は併合前の一覧を走査している。deny と allow の両方に含まれる送信元は、deny が先に評価されるので拒まれる
-- 送信元のアドレス:IPv4 だけを扱う(4 節。`source_allow` と `source_deny` も IPv4 しか受け付けない)。IPv4 射影の IPv6 アドレスは、評価の前に IPv4 へ戻す
+- 送信元のアドレス:v1 は IPv4 だけを扱い、IPv4 でない送信元を拒む(後述)
 
-IR が表せないものは、ポートと宛先(DNAT と listener。`Plan` が持つ)、送信元ごとのパケットレート、バイト単位のレート、IPv6 の送信元、ルールごとの同時フロー数とプロセス全体の予算(Resource Guard。7a.5 節)、時間帯や送信元の地域による条件である。これらを加えるときは、IR の段、両方のコンパイラ、fixture を同じ変更で直す。
+評価順は、deny、allow、送信元ごとの新規フローレート、送信元ごとの同時フロー数の上限、集約の新規フローレート、パケットレートの順である。この順序は IR の `Order` だけが持ち、両方のコンパイラは `Order` を順に回して、段の順序を自分では持たない。ある段がフローかパケットを拒んだとき、それより後の段の状態は消費されない。deny と allow で拒んだ送信元はレートのトークンを使わず、同時フロー数の上限で拒んだフローは `new_flow_rate` のトークンを使わない。IR に無いルール ID のフローは拒む(fail-closed)。
 
-状態を持つ段(`per_source`、`src_flow`、`new_flow`、`packet`)は、1 つのフローにつき 1 か所だけで評価する。評価する場所は `DataplaneMode` で決まり、`Forwarding` では決まらない。kernel モードでは、`Transparent` のポートと、待ち受けを開けている `Relay` のポートの両方を nftables が判定する。userspace モードでは、両方を Go の評価器が判定する。kernel モードの `Relay` の中継は状態を持つ段を評価せず、`RulePolicy.SourceAllowed` による状態を持たない確認だけを残し、drop カウンタには数えない。
+IR が表せないものは、ポートと宛先(DNAT と listener。`Plan` が持つ)、送信元ごとのパケットレート、バイト単位のレート、TCP のパケットレート、IPv6 の送信元、ルールごとの同時フロー数とプロセス全体の予算(Resource Guard。7a.5 節)、時間帯や送信元の地域による条件である。これらを加えるときは、IR の段、両方のコンパイラ、fixture を同じ変更で直す。
+
+状態を持つ段(送信元ごとの新規フローレート、同時フロー数の上限、集約の新規フローレート、パケットレート)は、1 つのフローにつき 1 か所だけで評価する。評価する場所は `DataplaneMode` で決まり、`Forwarding` では決まらない。kernel モードでは、`Transparent` のポートと、待ち受けを開けている `Relay` のポートの両方を nftables が判定する。userspace モードでは、両方を Go の評価器が判定する。kernel モードの `Relay` の中継は状態を持つ段を評価せず、`RulePolicy.SourceAllowed` による状態を持たない確認だけを残し、drop カウンタには数えない。
+
+#### TCP の packet_rate
+
+`packet_rate` は UDP のデータグラムだけに効く。TCP のパケットの数は ACK と再送も含み、MSS やオフロードによってアプリケーションのバイト数とも対応しない。落としても TCP が再送するだけで、流量の制限としての意味を持たない。そのため kernel のコンパイラも、TCP のルールには `packet` の行を作らない。今の kernel モードは TCP のルールにも `packet` の行を付けているので、この値を使っていた TCP のルールでは挙動が変わる。
+
+TCP のルールの `packet_rate` は、ルールの書き出しと読み込みの互換のため、今までどおり受け付けて保存し、新しく設定する操作も拒まない。CLI は、TCP のルールに `packet_rate` があるとき、`packet_rate is stored but has no effect on TCP rules` の旨を示す。Web UI は同じ旨を示し、TCP のルールの入力欄を無効にしてよいが、保存済みの値を消してはならない。
+
+#### IPv4 だけを扱う v1 の守り
+
+v1 は IPv4 だけを扱い(4 節)、IPv4 でない送信元を 2 重に拒む(fail-closed)。1 つ目の守りとして、userspace と `Relay` の listener を IPv4 だけで開く(`tcp4`、`udp4`)。今の listener は IPv6 でも待ち受けており(`net.Listen("tcp", ":port")` など)、VPS が IPv6 を持つと、IPv6 の送信元は IPv4 の CIDR だけを並べた deny に一致せずに通る。2 つ目の守りとして、Go の評価器自身が、IPv4 射影のアドレスを IPv4 に戻した後、IPv4 でない送信元を拒む。評価器は listener の開き方に頼らない。kernel の行は IPv4 の送信元だけに一致し、IPv6 のパケットは DNAT されない。IPv6 への対応は、同じ IR と両方のコンパイラに IPv6 の set を加える形で行う(13 節)。
 
 #### nftables へのコンパイルの約束
 
 `internal/policy/nftables` は、IR と、判定を付けるポートの集合(`Plan` の `Transparent` のポートと、frontend が待ち受けを開けている `Relay` のポート)を受け取り、行の列を返す。行は、一致条件(プロトコル、ポート範囲、`ct state new` の有無、送信元の set)、文(set の照合、送信元ごとの `limit`、`ct count`、集約の `limit`)、カウンタのコメント(`wgft:<ルール ID>:<種類>`)、判定(drop)を持つ Go のデータで、google/nftables を import しない。`internal/dataplane/linuxkernel/nft` は、この行の列を nftables の式へ写し、DNAT、input、forward、postrouting の行を加える。
 
-- 行の順序:ポートは `Plan` の順、段は `Order` の順に並べる。コンパイラは `Order` を順に回し、段の順序を自分では持たない
-- 行を作らない条件:allow が空なら set も行も作らない。レートが未設定なら行を作らない。同時フロー数の上限が 0 のプロトコルには set も行も作らない(6.1 節のまま)
-- set の名前:`deny_N`、`allow_N`、`meter_N`、`flows_udp`、`flows_tcp` の名前と連番の振り方を変えない。`Transparent` だけの設定では、生成するテーブルが今の `testdata/basic.nft` と一致する
+- 行の順序:ポートは `Plan` の順、段は `Order` の順に並べる
+- 行を作らない条件:allow が空なら set も行も作らない。レートが未設定なら行を作らない。同時フロー数の上限が 0 のプロトコルには set も行も作らない(6.1 節のまま)。TCP のルールには `packet` の行を作らない
+- set の名前:`deny_N`、`allow_N`、`meter_N`、`flows_udp`、`flows_tcp` の名前と連番の振り方を変えない。`packet_rate` を持つ TCP のルールが無く、`Transparent` だけの設定では、生成するテーブルが今の `testdata/basic.nft` と一致する
 - `Relay` のポート:`Transparent` と同じ段の行を付ける。今は `src_flow` の行だけである。`Relay` のルールも set の連番を進めるので、`Relay` のルールを含む設定では `wgft server nft` の表示の番号が変わる
 
 #### Go の評価器へのコンパイルの約束
 
-`internal/policy/goengine` は、IR から評価器を作り、`internal/dataplane/userspace/srcpolicy` を置き換える。評価器も `Order` を順に回して判定する。
+`internal/policy/goengine` は、IR から評価器を作り、`internal/dataplane/userspace/srcpolicy` を置き換える。評価器の判定は `Decision` の値(考え方としては `Decision{Allow bool; Kind DropKind}`)を返し、拒んだときは拒んだ段の drop の種類を `Kind` に持つ。drop カウンタも評価器が数え、呼び出し側(中継)は drop の種類を決めない。
 
-- `AdmitFlow`:新しいフロー(TCP の accept、UDP の新しいセッションの最初のデータグラム)を `Order` の全段で判定する。`src_flow` の段を通ったときは送信元ごとの同時フロー数の枠を取り、フローの終わりに枠を返すための手形を返す。後の段(`new_flow`、`packet`)か Resource Guard が拒んだときは、その場で枠を返す
-- `AdmitPacket`:成立済みの UDP セッションのデータグラムを `packet` の段で判定する
+- `AdmitFlow`:新しいフロー(TCP の accept、UDP の新しいセッションの最初のデータグラム)を `Order` の全段で判定する。送信元ごとの同時フロー数の段を通ったときは枠を取り、フローの終わりに枠を返すための手形を返す。後の段か Resource Guard が拒んだときは、その場で枠を返す
+- `AdmitPacket`:成立済みの UDP セッションのデータグラムを `packet_rate` の段で判定する
 - `SourceAllowed`:成立済みのフローを残すかを deny と allow だけで判定する(7a.3 節の `Retiring`、ルール変更の後にセッションを閉じる判定)
 - `Update`:状態を引き継ぐ規則は 7a.4 節のままである
 - `Drops`:段ごとの drop を返して 0 に戻す(今の `srcpolicy.Drops` と同じ経路)
-- 未知のルール ID:拒み、drop には数えない。今は通している。listener は、そのルールの IR を公開した後にだけ中継を始める(7a.3 節)ので、正しい実装では起きない。起きたときに通さないためである
+- IR に無いルール ID と IPv4 でない送信元:拒み、drop には数えない。今は未知のルール ID を通している。listener は、そのルールの IR を公開した後にだけ中継を始める(7a.3 節)ので、正しい実装では起きない。起きたときに通さないためである
 
-今の userspace の実装は、次の 3 点で 6.1 節の意味と食い違っており、Phase 5 で直す。
+今の userspace の実装は、次の 3 点で IR の意味と食い違っており、Phase 5 で直す。
 
 - `packet_rate` の位置:UDP の中継は、セッションの有無を見る前に、すべてのデータグラムを `packet_rate` で判定している(`relay/udp.go`)。deny の送信元のデータグラムも `packet` のトークンを使うため、deny の送信元からのフラッドが、正規の成立済みセッションのデータグラムを落としうる。nftables では deny の行が先に落とすので、この問題は起きない
-- 送信元ごとの同時フロー数の上限の位置:今は `AdmitFlow` の後に `flowcap.Counter.Acquire` で判定しており、`new_flow` より後になる。上限で拒んだフローも `new_flow` のトークンを使い、drop カウンタにも数えない
-- `Relay` の受け付け:userspace モードの `proxyrelay` は deny と allow だけを判定し、レートを評価しない。kernel モードも `src_flow` の行しか付けないので、`Relay` のルールのレートは両モードで効いていない(未決 1)
+- 送信元ごとの同時フロー数の上限の位置:今は `AdmitFlow` の後に `flowcap.Counter.Acquire` で判定しており、`new_flow_rate` より後になる。上限で拒んだフローも `new_flow_rate` のトークンを使い、drop カウンタにも数えない
+- `Relay` の受け付け:userspace モードの `proxyrelay` は deny と allow だけを判定し、レートを評価しない。kernel モードも `src_flow` の行しか付けないので、`Relay` のルールのレートは両モードで効いていない
 
 #### 許容差の扱い
 
-避けられない差は、名前付きの許容差として定める。fixture は、7a.4 節と本節に挙げた名前でしか差を許さない。7a.4 節の 4 つに次を加える。
+避けられない差は、名前付きの許容差として定める。fixture は、7a.4 節と本節に挙げた名前でしか差を許さない。等価性が覆うのは、判定(通すか落とすか)、落とした理由(drop の種類)、drop カウンタ、レートと同時フロー数の状態である。拒否がネットワーク上でどう見えるかは覆わない。7a.4 節の 4 つに次を加える。
 
-- 新しいフローの数え方:kernel は `ct state new` のパケットを数える。応答が返る前の同じ UDP フローの 2 つ目以降のパケットと、TCP の SYN の再送も、新しいフローとして `per_source` と `new_flow` のトークンを使い、drop にも数えられる。Go はセッションか接続 1 つを 1 回と数える。userspace の TCP はホストのカーネルが握手を終えた後に判定するので、握手を終えない SYN は評価器に届かない
-- 拒否の見え方:kernel は黙って捨てる。userspace の TCP は、accept の後に RST で閉じる(7a.5 節)
+- 拒否の見え方:kernel モードは nftables でパケットを捨てるので、クライアントには時間切れとして見える。userspace モードの TCP は accept の後に閉じる(7a.5 節)ので、クライアントには RST か EOF として見える。`Relay` のルールにも同じ差がある。fixture はネットワーク上の見え方を比べない
+- 新しいフローの数え方:kernel は `ct state new` のパケットを数える。応答が返る前の同じ UDP フローの 2 つ目以降のパケットと、TCP の SYN の再送も、新しいフローとして送信元ごとと集約の新規フローレートのトークンを使い、drop にも数えられる。Go はセッションか接続 1 つを 1 回と数える。userspace の TCP はホストのカーネルが握手を終えた後に判定するので、握手を終えない SYN は評価器に届かない
 - drop カウンタの単位:kernel は L3 のパケット数とバイト数を数える。Go は、UDP のデータグラム 1 つ(バイト数は中身の長さ)と TCP の接続 1 つ(バイト数は 0)を 1 パケットと数える。fixture はパケット数だけを比べ、バイト数は比べない
-- 送信元ごとの表の期限と溢れ:kernel の meter の要素は、`add` で作った時点から 1 分で消える(`add` が期限を延ばさないことは未確認)。Go は最後に触れてから 1 分で消す。表が 65535 件で埋まると、kernel は新しい送信元の `add` が失敗して `per_source` の制限が外れ(6.1 節)、Go は最も長く触れていない送信元を捨てて制限を続ける。Go の挙動は許可を広げない側にあるので、kernel に揃えない
+- 送信元ごとの表の期限と溢れ:kernel の meter の要素は、`add` で作った時点から 1 分で消える(`add` が期限を延ばさないことは未確認)。Go は最後に触れてから 1 分で消す。表が 65535 件で埋まると、kernel は新しい送信元の `add` が失敗して送信元ごとの新規フローレートの制限が外れ(6.1 節)、Go は最も長く触れていない送信元を捨てて制限を続ける。Go の挙動は許可を広げない側にあるので、kernel に揃えない
 - 補充の境界:両者は同じトークンバケット(容量 5、満杯から始まり、count/unit の速さで補充する)を持つ。ただし、トークンがちょうど補充される時刻での判定は、kernel の時計の粒度に依存する(未確認)。fixture の出来事は、補充の時刻から補充間隔の 10% 以上離して置く
 
 #### fixture の形式と等価性の検査
@@ -832,11 +846,11 @@ fixture は `internal/policy/testdata/admission/*.json` に置き、1 ファイ�
 
 等価性の検査は `go test ./internal/policy/...` の単体テストで、root もネットワーク名前空間も要らず、CI でも走る。検査は、各 fixture について次の手順を踏む。
 
-1. `goengine` で評価器を作り、仮想の時計で出来事を順に流す
-2. `policy/nftables` で行の列を作り、テスト専用の解釈器で同じ出来事を流す。解釈器は、interval の set の照合、動的 set への `add` と要素ごとの `limit`、`ct count`(フローの `end` で数から抜ける)、集約の `limit`、`ct state new`(フローの最初のパケットだけが一致する)、カウンタを模す。解釈器は IR を読まずに行の列だけを入力にするので、コンパイラの誤り(行の順序、行の抜け、`ct state new` の付け忘れ、コメントの誤り)を拾える
-3. 2 つの結果をそれぞれ `want` と `want_drops` に照らし、`tolerances` の範囲で互いにも照らす
+1. `goengine` で評価器を作り、仮想の時計で出来事を順に流す。各出来事の `Decision` を `want` に、評価器の drop カウンタを `want_drops` に照らす
+2. `policy/nftables` で行の列を作り、テスト専用の解釈器で同じ出来事を流す。解釈器は、interval の set の照合、動的 set への `add` と要素ごとの `limit`、`ct count`(フローの `end` で数から抜ける)、集約の `limit`、`ct state new`(フローの最初のパケットだけが一致する)、カウンタを模し、どの行(段とカウンタの種類)がパケットを落としたかを `want` に、行のカウンタを `want_drops` に照らす。解釈器は IR を読まずに行の列だけを入力にするので、コンパイラの誤り(行の順序、行の抜け、`ct state new` の付け忘れ、コメントの誤り)を拾える
+3. 2 つの結果を、`tolerances` の範囲で互いにも照らす
 
-fixture は次の場面を覆う。deny と allow の一覧、CIDR の重なりと隣接、deny と allow の両方に含まれる送信元、空の allow、各レートの burst と補充、送信元ごとの表による送信元の分離、同時フロー数の上限のルール間での合算とフローの終わりによる解放、段の順序(deny の送信元が `packet` と `new_flow` のトークンを使わないこと、同時フロー数の上限で拒んだフローが `new_flow` のトークンを使わないこと)、`Relay` のルール、各段の drop カウンタ、IPv4 射影のアドレスである。
+fixture は次の場面を覆う。deny と allow の一覧、CIDR の重なりと隣接、deny と allow の両方に含まれる送信元、空の allow、各レートの burst と補充、送信元ごとの表による送信元の分離、同時フロー数の上限のルール間での合算とフローの終わりによる解放、段の順序(deny の送信元がレートのトークンを使わないこと、同時フロー数の上限で拒んだフローが `new_flow_rate` のトークンを使わないこと)、`Relay` のルール、TCP のルールの `packet_rate` が効かないこと、各段の drop カウンタ、IPv4 射影のアドレス、IR に無いルール ID である。IPv6 の送信元は kernel の行に一致しないので、評価器の単体テストで拒むことを確かめる。
 
 解釈器は kernel の挙動の模型なので、kernel との一致はホストでは確かめられない。次のことはラボでだけ確かめる。
 
@@ -846,35 +860,34 @@ fixture は次の場面を覆う。deny と allow の一覧、CIDR の重なり�
 
 #### Phase 5 の移行の手順
 
-各段は、7a.8 節の共通の完了条件を満たしてから次へ進む。6.1、6.2、6.3 節の記述は、挙動を変える段のコミットで合わせて改める。
+各段は、7a.8 節の共通の完了条件を満たしてから次へ進む。6.1、6.2、6.3 節と 5.3 節の記述は、挙動を変える段のコミットで合わせて改める。
 
 1. `internal/policy` に評価の定数、段と drop の種類の対応、CIDR の正規化を置く。`conntrack` と `proxyrelay` の `sourceAllowed` を `RulePolicy.SourceAllowed` に置き換える。挙動は変えない
 2. `internal/policy/nftables` と解釈器と fixture を置き、`internal/dataplane/linuxkernel/nft` の `emit` の送信元制限とレートの部分を置き換える。完了条件は、`testdata/basic.nft` とゴールデンテストが変わらず、今の kernel の挙動を書いた fixture がすべて通ることである
-3. `internal/policy/goengine` を置き、`srcpolicy` と中継の中の判定の呼び出しを置き換える。前項の userspace の食い違いのうち最初の 2 つを直し、同じ fixture を通す。送信元ごとの同時フロー数は評価器が数え、`flowcap.Counter` はプロセス全体の数だけを数える
-4. `Relay` に共通の ingress を適用する。kernel モードでは待ち受けを開けている `Relay` のポートに全段の行を付け、userspace モードでは `proxyrelay` の受け付けで `AdmitFlow` を呼ぶ
-5. 未決 2、未決 3 の決定を反映し、`srcpolicy` を削除する
+3. `internal/policy/goengine` を置き、`srcpolicy` と中継の中の判定の呼び出しを置き換える。前項の userspace の食い違いのうち最初の 2 つを直し、同じ fixture を通す。送信元ごとの同時フロー数は評価器が数え、`flowcap.Counter` はプロセス全体の数だけを数える。評価器は IPv4 でない送信元を拒み、listener を IPv4 だけで開く
+4. `Relay` に Admission Policy のすべての段を適用する。kernel モードでは待ち受けを開けている `Relay` のポートに全段の行を付け、userspace モードでは `proxyrelay` の受け付けで `AdmitFlow` を呼ぶ
+5. TCP のルールの `packet` の行をやめ、CLI と Web UI に `packet_rate` が TCP では効かない旨を示し、`srcpolicy` を削除する
 
 #### 利用者から見て変わらないものと変わるもの
 
-CLI のコマンドとフラグ、`WGFT_*`、機械向けの CLI 出力、ルールの書き出しと読み込みの形式、admin API v1、join string と agent/server の通信は変わらない(7a.6 節)。Admission Policy は server の中だけで評価し、エージェントには配らない(5.3 節)ので、全体状態も変わらない。drop の種類の文字列、SQLite への累積、`Transparent` のルールの nftables の行も変わらない。
+CLI のコマンドとフラグ、`WGFT_*`、機械向けの CLI 出力、ルールの書き出しと読み込みの形式、admin API v1、join string と agent/server の通信は変わらない(7a.6 節)。Admission Policy は server の中だけで評価し、エージェントには配らない(5.3 節)ので、全体状態も変わらない。drop の種類の文字列、SQLite への累積、`Transparent` の UDP のルールの nftables の行も変わらない。
 
-次の挙動は、6.1 節の意味に揃える修正として変わる。
+次の挙動は、IR の意味に揃える修正として変わる。
 
 - userspace モードの UDP で、deny と allow で拒む送信元のデータグラムが、`packet_rate` のトークンを使わなくなる
 - userspace モードで、送信元ごとの同時フロー数の上限が `new_flow_rate` より先に判定され、`src_flow` の drop として数えられる
-- `Relay` のルールに `per_source_rate` と `new_flow_rate` が効き、deny と allow を含めて drop カウンタに数えられる(未決 1)
+- `Relay` のルールに `per_source_rate` と `new_flow_rate` が効き、deny と allow を含めて drop カウンタに数えられる。既にレートを書いた `Relay` のルールでは、更新の後に初めて制限が効き始める
 - kernel モードの `Relay` のルールで拒む接続は、accept の後に閉じられる代わりに、nftables で黙って捨てられる
+- kernel モードで、TCP のルールの `packet_rate` が効かなくなる
+- userspace と `Relay` の listener が IPv6 で待ち受けなくなり、IPv6 の送信元は届かなくなる
 
 #### Phase 6 との境界
 
 Phase 5 が扱うのは、IR の 6 つの段だけである。Resource Guard(プロセス全体の予算、ルールごとの隔離、メモリの上限、kernel の conntrack の保護)は、Admission Policy がフローを通した後にだけ判定する。その拒否は Admission Policy の drop の種類に数えず、fixture にも含めない。kernel でも、conntrack の表が溢れてフローが落ちるのは prerouting の判定の後なので、この順序は両モードで同じである。Phase 5 は、送信元ごとの同時フロー数を数える場所を `flowcap.Counter` から評価器へ移すだけで、`flowcap.Limits` の型の分割、`internal/flowcap` の改称、ルールごとの隔離の方式は Phase 6 に残す。
 
-#### 所有者の判断を要する未決事項
+#### 未決事項
 
-1. `Relay` のルールのレート:今は両モードとも、`vps_mode=proxy` のルールの `per_source_rate`、`new_flow_rate`、`packet_rate` を黙って無視している。推奨は、共通の ingress で `Transparent` と同じ意味で効かせることである。5.3 節のスキーマはこの 3 つを転送方式で区別しておらず、7a.1 節の原則 1 にも合う。既にレートを書いた `Relay` のルールでは、更新の後に初めて制限が効き始める
-2. TCP のルールの `packet_rate`:kernel は外から入る TCP のすべてのパケットに効かせ、userspace は効かせない(6.3 節)。userspace の中継はストリームを扱うので、パケットを数えられない。推奨は、IR の `packet` の段を UDP だけのものと定め、kernel も TCP のルールに行を付けないことである。検査で拒むと、保存済みのルールと書き出したファイルが読めなくなる(7a.6 節の外部契約)ので、値は受け付けて保存し、Web UI で TCP では効かないことを示す。kernel モードで TCP の流量の制限としてこの値を使っている利用者には、挙動の変更になる
-3. IPv6 の送信元:IR は IPv4 だけを扱うが、userspace の listener と `Relay` の listener は IPv6 でも待ち受ける(`net.Listen("tcp", ":port")` など)。VPS が IPv6 を持つと、IPv6 の送信元は IPv4 の CIDR だけを並べた deny に一致せずに通る。kernel モードの `Relay` では、`flows_tcp` のキーが IPv4 で中継の側も数えないので、IPv6 の送信元の同時フロー数は数えられない。推奨は、listener を IPv4 だけで開き(`tcp4`、`udp4`)、評価器も IPv4 でない送信元を拒むことである。IPv6 への対応は、13 節の未決事項として、IR に段と set を加える形で扱う
-4. `frontend` の package の分け方(7a.7 節):Phase 5 は `Relay` の受け付けの判定だけを変えるので、package を動かす必要がない。推奨は、Phase 5 では決めず、agent の kernel dataplane(Phase 7)の前に決めることである
+- `frontend` の package の分け方(7a.7 節):Phase 5 は `Relay` の受け付けの判定だけを変えるので、package を動かす必要がない。推奨は、Phase 5 では決めず、agent の kernel dataplane(Phase 7)の前に決めることである
 
 ## 8. 接続元 IP の扱い
 
@@ -1161,6 +1174,7 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 ## 13. 未決事項
 
 - IPv6 の扱い(VPS に v6 があるなら prerouting に `ip6` を足すだけで済む可能性が高いが、自宅側の宛先指定と絡む)
+- IPv6 の送信元の Admission Policy。v1 は IPv4 でない送信元を拒む(7a.9 節)。対応するときは、同じ IR と両方のコンパイラに IPv6 の set を加える
 - 1 つの `listen_port` に対する複数エージェントへの振り分け(フェイルオーバー用途。v1 では 1 ルール 1 エージェント)
 - エージェント用 API の証明書ローテーション。全体状態に「次の証明書ハッシュ」を載せ、エージェントがピン留め経路で受け取ったものだけを状態ファイルに追記する方式を想定している
 - 拒否リストを外部のブロックリストから自動更新するか
@@ -1245,4 +1259,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - 再試行のログを絞る(2026-09-20、7a.3 節):失敗し続けるルールが 30 秒ごとの再試行のたびに bind の失敗をログに出し、1 つのポートで 1 日あたり約 2,900 行になっていた。ルール単位の失敗は、始まったときと理由が変わったときに 1 行、回復したときに 1 行だけ出すことにした。単体テストで、同じ失敗を繰り返しても 1 行だけ出ることと、回復の行を確かめた
 - wgft の外で変えられたカーネルの状態へ収束させる(2026-09-20、7a.3 節):ラボで、kernel モードの server が転送している最中に `nft flush ruleset` を実行すると、`table inet wgft` が消えたまま次の管理者の変更まで戻らず、ログにも何も出なかった。30 秒ごとの再試行は `Desired` がすべて `Active` のときは何もせず、カーネルの実際の状態を読む経路が無かったためである。多くの VPS の `/etc/nftables.conf` は `flush ruleset` で始まるので、`systemctl reload nftables` でも同じことが起きる。宣言が変わったときだけ適用する方式から、`Desired` と実際の状態が食い違えばいつでも収束させる方式に改めた。契機は nftables、リンク、IPv4 アドレスの変更の通知で、通知のたびに `Observe` でテーブルの指紋と wg インタフェースの鍵、ポート、アドレス、up の状態、ピアを直前の `Commit` と比べ、食い違えば `Plan` の全体を 1 回だけ公開し直す。通知の取りこぼしに備えて 5 分ごとにも `Observe` する。ラボで分かったことは次のとおりである。`wg set` によるピアと待ち受けポートの変更は netlink の通知を生まないので、安全網が拾う。`flags owner` でテーブルを保持したプロセスが終わってテーブルが消えても nftables の通知は届かないので、backend 全体の失敗は 30 秒ごとの再試行の対象に残した。backend 全体の失敗で配られなかった世代は、試し直しで公開したときにエージェントへ配ることにした。単体テストで、食い違いがあれば 1 回だけ公開し直すこと、食い違いが無ければ何も commit しないこと、自身の `Commit` の直後の `Observe` が食い違いを報告しないこと、他人のインタフェースに触れないこと、userspace backend が通知を購読せず食い違いを報告しないこと、通知のまとめ、安全網、購読の張り直しを確かめた。ラボで、`nft flush ruleset`、`nft delete table inet wgft`、行の削除の後に 1 秒以内に転送が戻ること、`ip link del wgft0` の後にインタフェースが作り直され、エージェントの次のハンドシェイクで転送が戻ること、食い違いの無いあいだルールのハンドルが変わらないこと、他のテーブルの変更で公開し直さないこと、保持の解放の後に `pending` の世代が公開されることを確かめた。未確認:受信バッファの溢れと購読の張り直しのラボでの再現、Linux 6.1 より新しいカーネルでの通知の有無
 - 戻れない地点の後の失敗を試し直す(2026-09-20、7a.3 節、レビュー反映):kernel backend の `Commit` は、nftables の差し替えの後の conntrack の収束、ピアの削除、指紋の読み直しの失敗をログに出すだけで、`Reconciler` はそのトランザクションを完全な成功として扱っていた。ルールを削除した直後に conntrack の収束が失敗すると、新しいフローは止まるが、成立済みのフローは旧い DNAT のまま流れ続け、conntrack は `Observe` の比較の対象ではなく、再試行も走らないので、無関係な次の変更まで直らなかった。指紋の読み直しが失敗すると、それ以降テーブルの食い違いを検出できなかった。これらを修復として `Committed` に明示し、`Reconciler` に「公開済みで修復が残っている」状態を加え、`NeedsRetry` と `apply_error` で示すことにした。修復の再試行は、公開が同じでもテーブルを差し替えずに修復の手順だけを走らせる。指紋の読み直しの失敗は食い違いとして扱い、公開し直す。drop カウンタの読み出しの失敗は修復にしない。単体テストで、3 つの修復の失敗がそれぞれ再試行を求め、同じ公開の再試行が修復を走らせてから状態を戻すこと、修復の無い同じ公開の再試行が何も commit しないことを確かめた。未確認:ラボでの conntrack の収束の失敗の再現
-- Admission Policy のコンパイラを定める(2026-09-20、7a.8 節の Phase 5):7a.9 節を新設した。IR には評価の定数(burst、送信元ごとの表の期限と大きさ、set の大きさ)、段と drop の種類の対応、CIDR の正規化を加え、IPv4 だけを扱うことを明記した。nftables のコンパイラは google/nftables に依存しない行の列を返し、`internal/dataplane/linuxkernel/nft` がそれを式へ写す形にした。行の列をホストで実行できる解釈器に流せるようにし、共有 fixture で Go の評価器との一致を root なしの単体テストで確かめるためである。状態を持つ段は、`DataplaneMode` で決まる 1 か所だけで評価することにした。コードを読んで、今の実装が 6.1 節の意味と食い違う点を見つけた。userspace の UDP の中継は deny より前に `packet_rate` を判定する。userspace の送信元ごとの同時フロー数の上限は `new_flow_rate` の後に判定され、drop に数えられない。`Relay` のルールのレートは両モードで効いていない。TCP のルールの `packet_rate` は kernel だけで効く。userspace と `Relay` の listener は IPv6 でも待ち受ける。前の 2 つは Phase 5 で直し、後の 3 つは所有者の判断を要する未決事項として推奨とともに挙げた。避けられない差(応答前の UDP パケットと SYN の再送の数え方、拒否の見え方、drop カウンタの単位、送信元ごとの表の期限と溢れ、補充の境界)は名前付きの許容差とし、fixture はその名前でしか差を許さないことにした。Resource Guard の判定は Admission Policy がフローを通した後に置き、その拒否は fixture に含めない。未確認:kernel の meter の要素の期限が `add` で延びないこと、トークンがちょうど補充される時刻での kernel の判定、解釈器の模型と kernel の一致(ラボで確かめる)
+- Admission Policy のコンパイラを定める(2026-09-20、7a.8 節の Phase 5):7a.9 節を新設した。IR には評価の定数(burst、送信元ごとの表の期限と大きさ、set の大きさ)、段と drop の種類の対応、CIDR の正規化を加えた。評価順は IR の `Order` だけが持ち、ある段が拒んだときは後の段の状態を消費せず、IR に無いルール ID は拒むことを約束にした。`Forwarding` は届け方、Admission Policy は入口の規則であり、両者を混ぜない。nftables のコンパイラは google/nftables に依存しない行の列を返し、`internal/dataplane/linuxkernel/nft` がそれを式へ写す形にした。行の列をホストで実行できる解釈器に流し、共有 fixture で Go の評価器との一致を root なしの単体テストで確かめるためである。Go の評価器は拒んだ段を示す `Decision` を返し、drop も自分で数える。状態を持つ段は、`DataplaneMode` で決まる 1 か所だけで評価する。コードを読んで、今の実装が IR の意味と食い違う点を見つけた。userspace の UDP の中継は deny より前に `packet_rate` を判定する。userspace の送信元ごとの同時フロー数の上限は `new_flow_rate` の後に判定され、drop に数えられない。`Relay` のルールのレートは両モードで効いていない。TCP のルールの `packet_rate` は kernel だけで効く。userspace と `Relay` の listener は IPv6 でも待ち受ける。後の 3 つについて、所有者の決定は次のとおりである。`Relay` のルールには Admission Policy のすべての段を適用する。`packet_rate` は UDP のデータグラムだけに効かせ、TCP のルールの値は受け付けて保存したまま、効かないことを CLI と Web UI で示す(TCP のパケット数は ACK と再送を含み、落としても再送を招くだけのため)。v1 は IPv4 だけを扱い、listener を IPv4 だけで開き、評価器自身も IPv4 でない送信元を拒む。IPv6 の送信元への対応は 13 節に加えた。避けられない差(拒否のネットワーク上の見え方、応答前の UDP パケットと SYN の再送の数え方、drop カウンタの単位、送信元ごとの表の期限と溢れ、補充の境界)は名前付きの許容差とし、等価性は判定、drop の種類、drop カウンタ、レートと同時フロー数の状態を覆い、見え方は覆わないことにした。Resource Guard の判定は Admission Policy がフローを通した後に置き、その拒否は fixture に含めない。未決:`frontend` の package の分け方(Phase 7 の前に決める)。未確認:kernel の meter の要素の期限が `add` で延びないこと、トークンがちょうど補充される時刻での kernel の判定、解釈器の模型と kernel の一致(ラボで確かめる)
