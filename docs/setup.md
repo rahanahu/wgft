@@ -66,7 +66,7 @@ Check the configuration before the first start:
 sudo wgft server check
 ```
 
-`check` reports the effective settings, detects a leftover WireGuard interface using the same server key, and prints any forwarding rules your existing firewall must allow.
+`check` reports the effective settings, detects a leftover WireGuard interface using the same server key, and prints any forwarding rules your existing firewall must allow. It also warns if the host's own input firewall would block wgft's own ports (WireGuard and the agent API), and suggests the exact line to add; it never edits the firewall itself.
 
 wgft does not edit your existing firewall. It enables `net.ipv4.ip_forward=1` when needed; teardown reports how to revert it.
 

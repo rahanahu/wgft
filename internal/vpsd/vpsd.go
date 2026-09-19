@@ -313,6 +313,17 @@ func Run(opts Options) error {
 	for _, f := range rep.Findings {
 		log.Printf("warning: %s", f)
 	}
+	// 自分の待ち受けポート(WireGuard の UDP と agent API の TCP)も、同じ input firewall の検査に
+	// 含める(仕様 4・6.1 節。実機の Debian 13 で見つかった。改訂の記録参照)。proxyInputHints と
+	// 同じく、読めなければ黙って省く(非 root や、userspace モードで nftables が無い場合)
+	for _, t := range ownPortTargets(opts) {
+		if lines, err := d.dp.InputPortSuggestions(t.port, t.proto); err == nil && len(lines) > 0 {
+			log.Printf("warning: input firewall blocks the %s port %d/%s; add the following:", t.purpose, t.port, t.proto)
+			for _, l := range lines {
+				log.Printf("    %s", l)
+			}
+		}
+	}
 	if f := d.dp.EnableIPForward(st); f != nil {
 		log.Printf("warning: %s", f)
 	}

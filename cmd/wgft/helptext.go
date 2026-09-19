@@ -230,9 +230,11 @@ WireGuard) it exits with code 3.`,
 	"server check": {
 		Long: `Check the configuration and the environment without starting or changing
 anything: the effective value and source of every setting, other nftables
-tables that would drop or steal forwarded traffic, net.ipv4.ip_forward, the
-size of the connection tracking table, and the recorded mode and address range.
-Run it as root; without root the nftables part is skipped.`,
+tables that would drop or steal forwarded traffic, whether the host's own
+input firewall would block wgft's own ports (WireGuard and the agent API),
+net.ipv4.ip_forward, the size of the connection tracking table, and the
+recorded mode and address range. Run it as root; without root the nftables
+and firewall parts are skipped.`,
 		Example: `  sudo wgft server check`,
 	},
 	"server nft": {

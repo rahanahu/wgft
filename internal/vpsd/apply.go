@@ -124,7 +124,7 @@ func (d *Daemon) proxyInputHints(rules []proto.Rule) {
 		if !r.Enabled || r.VPSMode != proto.ModeProxy {
 			continue
 		}
-		if lines, err := d.dp.InputPortSuggestions(r.ListenPort.Lo); err == nil && len(lines) > 0 {
+		if lines, err := d.dp.InputPortSuggestions(r.ListenPort.Lo, proto.TCP); err == nil && len(lines) > 0 {
 			log.Printf("warning: proxy rule %s public port %d is blocked at input; add the following:", r.ID, r.ListenPort.Lo)
 			for _, l := range lines {
 				log.Printf("    %s", l)

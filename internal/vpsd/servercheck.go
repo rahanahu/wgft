@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // Check は起動せずに、そのモードで必要な検査を走らせて結果を書く読み取り専用コマンド
@@ -27,9 +30,10 @@ func Check(opts Options, out io.Writer) error {
 
 	// nft の検査(他テーブルの policy drop・DOCKER-USER・DNAT 衝突。仕様 6.1 節)。root が要る。
 	// ユーザー空間モードは nftables も ip_forward も使わない(仕様 6.3 節)。
+	root := os.Geteuid() == 0
 	if mode == modeUserspace {
 		fmt.Fprintln(out, "nft check: not used in userspace mode (rules are relayed by the wgft process)")
-	} else if os.Geteuid() != 0 {
+	} else if !root {
 		fmt.Fprintln(out, "nft check: skipped because not root; run sudo wgft server check")
 	} else if rep, err := linux.Inspect(opts.WGInterface, nft.TableName); err != nil {
 		fmt.Fprintf(out, "nft check: cannot run: %v\n", err)
@@ -44,6 +48,14 @@ func Check(opts Options, out io.Writer) error {
 	if mode != modeUserspace {
 		checkIPForward(out)
 		checkConntrack(out)
+	}
+	// own ports の検査:host の input firewall が vpsd 自身の待ち受けポート(WireGuard の UDP と
+	// agent API の TCP)を塞いでいないか。host の input firewall はモードに関係しない層なので、
+	// userspace モードでも実行する(実機の Debian 13 で見つかった。改訂の記録参照)。
+	if !root {
+		fmt.Fprintln(out, "own ports check: skipped because not root; run sudo wgft server check")
+	} else {
+		checkOwnPorts(out, opts)
 	}
 
 	// SQLite があれば、記録済みのモード・アドレス帯との照合と、改名の検出を出す。
@@ -69,6 +81,58 @@ func Check(opts Options, out io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// ownPortTarget は、input firewall との突き合わせ対象にする vpsd 自身の待ち受けポート 1 つ。
+type ownPortTarget struct {
+	purpose string // ログとエラーメッセージに出す呼び名("WireGuard"、"agent API")
+	proto   proto.Proto
+	port    uint16
+}
+
+// ownPortTargets は、host の input firewall と突き合わせる vpsd 自身の待ち受けポートを列挙する
+// (仕様 4 節「VPS で外に開けるポートは次の 3 種類だけ」のうち、転送対象のポートを除く 2 つ)。
+// 管理用 API(WGFT_ADMIN)は含めない。既定は Unix ソケットで、host:port にした場合も
+// localhost や Tailscale のアドレスで使う想定であり(11 節)、インターネットから直接受ける
+// ポートではないため、input firewall を開ける提示の対象にする理由が無い。
+func ownPortTargets(opts Options) []ownPortTarget {
+	targets := []ownPortTarget{{purpose: "WireGuard", proto: proto.UDP, port: opts.WGPort}}
+	if _, portStr, err := net.SplitHostPort(opts.AgentAPIAddr); err == nil {
+		if v, err := strconv.ParseUint(portStr, 10, 16); err == nil {
+			targets = append(targets, ownPortTarget{purpose: "agent API", proto: proto.TCP, port: uint16(v)})
+		}
+	}
+	return targets
+}
+
+// checkOwnPorts は、ownPortTargets の各ポートが host の input firewall で塞がれていないかを
+// linux.InputPortSuggestions で確かめ、他の nft check と同じ Finding の形で表示する。呼び出し元は
+// 事前に root を確かめておく(nftables の読み取りに要るため)。
+func checkOwnPorts(out io.Writer, opts Options) {
+	var findings []linux.Finding
+	for _, t := range ownPortTargets(opts) {
+		lines, err := linux.InputPortSuggestions(t.port, t.proto, nft.TableName)
+		if err != nil {
+			fmt.Fprintf(out, "own ports check (%s %d/%s): cannot run: %v\n", t.purpose, t.port, t.proto, err)
+			continue
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		findings = append(findings, linux.Finding{
+			Where:   "input firewall",
+			Problem: fmt.Sprintf("blocks the %s port %d/%s; no agent could ever reach it from outside", t.purpose, t.port, t.proto),
+			Suggest: lines,
+		})
+	}
+	if len(findings) == 0 {
+		fmt.Fprintln(out, "own ports check: no problems")
+		return
+	}
+	fmt.Fprintln(out, "own ports check: the following needs attention:")
+	for _, f := range findings {
+		fmt.Fprintf(out, "  - %s\n", f)
+	}
 }
 
 // printDBModes は、SQLite の本体と WAL の補助ファイルの権限を 1 行ずつ出す。0600 より広ければ、

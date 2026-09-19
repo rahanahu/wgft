@@ -190,6 +190,50 @@ func TestCollectDNATUnknownReportsFinding(t *testing.T) {
 	}
 }
 
+// TestInputPortSuggestionOwnPorts は、実機の Debian 13 で見つかった構成
+// (input が policy drop で、`iif lo accept`、established の accept、SSH の
+// `tcp dport 22 accept` しか無い)を模して、vpsd 自身の待ち受けポート
+// (WireGuard の UDP 51820、agent API の TCP 8443)への提示を確かめる。
+func TestInputPortSuggestionOwnPorts(t *testing.T) {
+	drop := nftables.ChainPolicyDrop
+	ch := &nftables.Chain{Name: "input", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "filter"}, Policy: &drop}
+	sshAccept := append(append(l4(unix.IPPROTO_TCP), dport(), &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(22)}), &expr.Verdict{Kind: expr.VerdictAccept})
+	rules := []*nftables.Rule{
+		{Exprs: append(ifname(expr.MetaKeyIIFNAME, "lo"), &expr.Verdict{Kind: expr.VerdictAccept})},
+		{Exprs: []expr.Any{&expr.Ct{Register: 1, Key: expr.CtKeySTATE}, &expr.Lookup{SourceRegister: 1, SetName: "__set0"}, &expr.Verdict{Kind: expr.VerdictAccept}}},
+		{Exprs: sshAccept},
+	}
+
+	if got := inputPortSuggestion(ch, rules, 51820, proto.UDP); len(got) != 1 || got[0] != "nft insert rule inet filter input udp dport 51820 accept" {
+		t.Errorf("udp 51820 (WireGuard): %v", got)
+	}
+	if got := inputPortSuggestion(ch, rules, 8443, proto.TCP); len(got) != 1 || got[0] != "nft insert rule inet filter input tcp dport 8443 accept" {
+		t.Errorf("tcp 8443 (agent API): %v", got)
+	}
+	// SSH の 22/tcp 自体はすでに accept 済みなので、提示しない
+	if got := inputPortSuggestion(ch, rules, 22, proto.TCP); len(got) != 0 {
+		t.Errorf("tcp 22 already accepted: %v, want none", got)
+	}
+
+	// 同じチェーンが WireGuard と agent API もすでに accept していれば、どちらも提示しない
+	wgAccept := append(append(l4(unix.IPPROTO_UDP), dport(), &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(51820)}), &expr.Verdict{Kind: expr.VerdictAccept})
+	apiAccept := append(append(l4(unix.IPPROTO_TCP), dport(), &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(8443)}), &expr.Verdict{Kind: expr.VerdictAccept})
+	rulesAccepted := append(append([]*nftables.Rule{}, rules...), &nftables.Rule{Exprs: wgAccept}, &nftables.Rule{Exprs: apiAccept})
+	if got := inputPortSuggestion(ch, rulesAccepted, 51820, proto.UDP); len(got) != 0 {
+		t.Errorf("udp 51820 already accepted: %v, want none", got)
+	}
+	if got := inputPortSuggestion(ch, rulesAccepted, 8443, proto.TCP); len(got) != 0 {
+		t.Errorf("tcp 8443 already accepted: %v, want none", got)
+	}
+
+	// policy accept のチェーンは、そもそも既定で落とさないので提示しない
+	accept := nftables.ChainPolicyAccept
+	openCh := &nftables.Chain{Name: "input", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "filter"}, Policy: &accept}
+	if got := inputPortSuggestion(openCh, nil, 51820, proto.UDP); len(got) != 0 {
+		t.Errorf("policy accept chain: %v, want none", got)
+	}
+}
+
 func TestSuggestionsForms(t *testing.T) {
 	drop := nftables.ChainPolicyDrop
 	ipt := &nftables.Chain{Name: "FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "filter"}, Policy: &drop}
