@@ -37,6 +37,7 @@ lab/lab exec vm bash /wgft/lab/split-merge.sh kernel   # Web UI の分割・統�
 lab/lab exec vm bash /wgft/lab/import-export.sh kernel # Web UI の書き出しと読み込み。確認画面の差分、確認後の変更による適用の拒否を確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、ルールの増減、撤去、プロキシの bind 失敗、既定の上限下でのメモリ、ルール単位/backend 全体の適用失敗と再試行を確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 6 7 8 9)を並べると、その確認だけを流す
+lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定するポートに届かず、集約のレートのトークンも使わないことを確認。userspace も同じ
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
 lab/lab destroy                 # VM ごと消す
 ```
@@ -78,13 +79,17 @@ home と lan は homerouter の中のブリッジ(br0)にぶら下がる、同�
 
 | ns | IF | アドレス | 役割 |
 |---|---|---|---|
-| client | eth0 | 198.51.100.2/24 | インターネット上の利用者 |
-| vps | pub0 | 198.51.100.1/24 | 公開 IF(client 側) |
+| client | eth0 | 198.51.100.2/24、2001:db8::2/64 | インターネット上の利用者 |
+| vps | pub0 | 198.51.100.1/24、2001:db8::1/64 | 公開 IF(client 側) |
 | vps | pub1 | 203.0.113.1/24 | 公開 IF(自宅側。WireGuard とエージェント API の宛先) |
 | homerouter | wan0 | 203.0.113.2/24 | 自宅ルータの WAN。home と lan の通信はこのアドレスに masquerade される |
 | homerouter | br0 | 192.168.50.1/24 | 自宅 LAN のブリッジ(lan0 = home 側、lan1 = lan 側) |
 | home | eth0 | 192.168.50.2/24 | エージェント |
 | lan | eth0 | 192.168.50.3/24 | LAN 上の別ホスト(ゲームサーバ役。ゲートウェイは homerouter) |
+
+client と vps だけが IPv6(ドキュメント用のプレフィクス `2001:db8::/32`)も持つ。homerouter より
+先には IPv6 の経路も宛先も無い。wgft は v1 では IPv4 だけを扱い、IPv6 の送信元を拒む(設計文書
+7a.9 節)。この IPv6 アドレスは、その守りを `lab/ipv6.sh` で実際のパケットで確かめるためにある。
 
 - `vps` の `ip_forward` は設定しない。`vpsd` が起動時に設定する(仕様 6.1 節)
 - netns はメモリ上にしかないので、VM を再起動すると消える。`lab up` か `lab net up` で立て直す

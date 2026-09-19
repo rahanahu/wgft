@@ -20,6 +20,12 @@ HR_LAN=192.168.50.1        # homerouter の LAN(br0)
 HOME_ADDR=192.168.50.2     # home の eth0(エージェント)
 LAN_ADDR=192.168.50.3      # lan の eth0(LAN 上の別ホスト。ゲートウェイは homerouter)
 
+# client - vps の間だけ IPv6 を持たせる(ドキュメント用のプレフィクス 2001:db8::/32。L13:
+# wgft は v1 では IPv4 だけを扱い、IPv6 の送信元を拒む。設計文書 7a.9 節)。homerouter より先には
+# IPv6 の経路も宛先も無いので、home と lan には加えない。
+CLIENT_ADDR6=2001:db8::2   # client の eth0
+VPS_PUB0_6=2001:db8::1     # vps の client 側(公開 IF)
+
 die() { echo "netns.sh: $*" >&2; exit 1; }
 
 # veth の両端を別々の ns に置いて up する: link <ns1> <if1> <ns2> <if2>
@@ -46,6 +52,11 @@ up() {
   ip -n client addr add "$CLIENT_ADDR/24" dev eth0
   ip -n vps addr add "$VPS_PUB0/24" dev pub0
   ip -n client route add default via "$VPS_PUB0"
+  # nodad: skip duplicate address detection. The link has exactly the 2 peers we assign here, so
+  # DAD only adds a race between this script's own check() (right below) and the ~1s the address
+  # would otherwise sit tentative.
+  ip -n client addr add "$CLIENT_ADDR6/64" dev eth0 nodad
+  ip -n vps addr add "$VPS_PUB0_6/64" dev pub0 nodad
 
   link vps pub1 homerouter wan0
   ip -n vps addr add "$VPS_PUB1/24" dev pub1
@@ -82,6 +93,7 @@ NFT
 
 check() {
   ip netns exec client ping -c1 -W2 "$VPS_PUB0" >/dev/null || die "client -> vps に届かない"
+  ip netns exec client ping -6 -c1 -W2 "$VPS_PUB0_6" >/dev/null || die "client -> vps に ipv6 で届かない"
   ip netns exec home ping -c1 -W2 "$HR_LAN" >/dev/null || die "home -> homerouter に届かない"
   ip netns exec lan ping -c1 -W2 "$HR_LAN" >/dev/null || die "lan -> homerouter に届かない"
   ip netns exec lan ping -c1 -W2 "$HOME_ADDR" >/dev/null || die "lan -> home に届かない(br0 のブリッジ)"
