@@ -67,17 +67,22 @@ WGFT_LAB_IMAGE=images:ubuntu/24.04 WGFT_LAB_VM=wgft-lab-ubuntu lab/lab up
 ## トポロジ
 
 ```
-client ── vps ── homerouter(NAT) ── home
+client ── vps ── homerouter(NAT) ─┬─ home(エージェント)
+                                  └─ lan(自宅 LAN 上の別ホスト)
 ```
+
+home と lan は homerouter の中のブリッジ(br0)にぶら下がる、同じ自宅 LAN セグメントの 2 台。
+実際の自宅と同じく、lan のデフォルトゲートウェイはエージェントの host(home)ではなく homerouter。
 
 | ns | IF | アドレス | 役割 |
 |---|---|---|---|
 | client | eth0 | 198.51.100.2/24 | インターネット上の利用者 |
 | vps | pub0 | 198.51.100.1/24 | 公開 IF(client 側) |
 | vps | pub1 | 203.0.113.1/24 | 公開 IF(自宅側。WireGuard とエージェント API の宛先) |
-| homerouter | wan0 | 203.0.113.2/24 | 自宅ルータの WAN。home の通信はこのアドレスに masquerade される |
-| homerouter | lan0 | 192.168.50.1/24 | 自宅 LAN |
-| home | eth0 | 192.168.50.2/24 | エージェントと自宅のサービス |
+| homerouter | wan0 | 203.0.113.2/24 | 自宅ルータの WAN。home と lan の通信はこのアドレスに masquerade される |
+| homerouter | br0 | 192.168.50.1/24 | 自宅 LAN のブリッジ(lan0 = home 側、lan1 = lan 側) |
+| home | eth0 | 192.168.50.2/24 | エージェント |
+| lan | eth0 | 192.168.50.3/24 | LAN 上の別ホスト(ゲームサーバ役。ゲートウェイは homerouter) |
 
 - `vps` の `ip_forward` は設定しない。`vpsd` が起動時に設定する(仕様 6.1 節)
 - netns はメモリ上にしかないので、VM を再起動すると消える。`lab up` か `lab net up` で立て直す

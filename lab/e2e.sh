@@ -56,16 +56,16 @@ check "server up" "admin api" "$(grep -o 'admin api' /tmp/wgft-e2e-server.log | 
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
 WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-e2e-agent.log 2>&1 < /dev/null &
 disown
-ip netns exec home setsid nohup echo -tcp 25565 -udp 19132 > /tmp/wgft-e2e-echo.log 2>&1 < /dev/null &
+ip netns exec lan setsid nohup echo -tcp 25565 -udp 19132 > /tmp/wgft-e2e-echo.log 2>&1 < /dev/null &
 disown
-ip netns exec home setsid nohup ppecho -addr 192.168.50.2:8444 > /tmp/wgft-e2e-ppecho.log 2>&1 < /dev/null &
+ip netns exec lan setsid nohup ppecho -addr 192.168.50.3:8444 > /tmp/wgft-e2e-ppecho.log 2>&1 < /dev/null &
 disown
 sleep 6
 check "agent registered" "home" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)"
 
-t=$(vps wgft rule add --agent home --tcp 39971 --to 192.168.50.2:25565 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
-u=$(vps wgft rule add --agent home --udp 27015 --to 192.168.50.2:19132 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
-vps wgft rule add --agent home --tcp 8444 --to 192.168.50.2:8444 --proxy --proxy-protocol --admin "$ADMIN" >/dev/null
+t=$(vps wgft rule add --agent home --tcp 39971 --to 192.168.50.3:25565 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
+u=$(vps wgft rule add --agent home --udp 27015 --to 192.168.50.3:19132 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
+vps wgft rule add --agent home --tcp 8444 --to 192.168.50.3:8444 --proxy --proxy-protocol --admin "$ADMIN" >/dev/null
 sleep 5
 check "tcp through the VPS" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39971')"
 check "udp through the VPS" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27015')"

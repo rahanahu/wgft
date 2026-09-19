@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # wgft ラボのトポロジを netns で組む。VM 内か CI 上で root として実行する(Incus には依存しない)。
 #
-#   client ── vps ── homerouter(NAT) ── home
+#   client ── vps ── homerouter(NAT) ─┬─ home(エージェント)
+#                                     └─ lan(自宅 LAN 上の別ホスト。ゲームサーバ役)
+#
+# home と lan は homerouter の中の 1 つのブリッジ(br0)にぶら下がる、同じ自宅 LAN セグメント。
 #
 # 使い方: netns.sh up | down | status
 set -euo pipefail
 
-NAMESPACES=(client vps homerouter home)
+NAMESPACES=(client vps homerouter home lan)
 
 # アドレス(ドキュメント用のアドレス帯を使い、実在の経路と衝突させない)
 CLIENT_ADDR=198.51.100.2   # client の eth0
 VPS_PUB0=198.51.100.1      # vps の client 側(公開 IF)
 VPS_PUB1=203.0.113.1       # vps の homerouter 側(公開 IF。WireGuard とエージェント API の宛先)
 HR_WAN=203.0.113.2         # homerouter の WAN(home の通信はこのアドレスに masquerade される)
-HR_LAN=192.168.50.1        # homerouter の LAN
-HOME_ADDR=192.168.50.2     # home の eth0
+HR_LAN=192.168.50.1        # homerouter の LAN(br0)
+HOME_ADDR=192.168.50.2     # home の eth0(エージェント)
+LAN_ADDR=192.168.50.3      # lan の eth0(LAN 上の別ホスト。ゲートウェイは homerouter)
 
 die() { echo "netns.sh: $*" >&2; exit 1; }
 
@@ -48,10 +52,18 @@ up() {
   ip -n homerouter addr add "$HR_WAN/24" dev wan0
   ip -n homerouter route add default via "$VPS_PUB1"
 
+  # homerouter の LAN 側はブリッジ(br0)。home(エージェント)と lan(別ホスト)を同じセグメントに乗せる
   link homerouter lan0 home eth0
-  ip -n homerouter addr add "$HR_LAN/24" dev lan0
+  link homerouter lan1 lan eth0
+  ip -n homerouter link add br0 type bridge
+  ip -n homerouter link set lan0 master br0
+  ip -n homerouter link set lan1 master br0
+  ip -n homerouter link set br0 up
+  ip -n homerouter addr add "$HR_LAN/24" dev br0
   ip -n home addr add "$HOME_ADDR/24" dev eth0
   ip -n home route add default via "$HR_LAN"
+  ip -n lan addr add "$LAN_ADDR/24" dev eth0
+  ip -n lan route add default via "$HR_LAN"
 
   ip netns exec homerouter sysctl -qw net.ipv4.ip_forward=1
   # nft 1.0.6(Debian 12)は入れ子を 1 行で書くと構文エラーになるので複数行で書く
@@ -71,6 +83,8 @@ NFT
 check() {
   ip netns exec client ping -c1 -W2 "$VPS_PUB0" >/dev/null || die "client -> vps に届かない"
   ip netns exec home ping -c1 -W2 "$HR_LAN" >/dev/null || die "home -> homerouter に届かない"
+  ip netns exec lan ping -c1 -W2 "$HR_LAN" >/dev/null || die "lan -> homerouter に届かない"
+  ip netns exec lan ping -c1 -W2 "$HOME_ADDR" >/dev/null || die "lan -> home に届かない(br0 のブリッジ)"
   ip netns exec homerouter ping -c1 -W2 "$VPS_PUB1" >/dev/null || die "homerouter -> vps に届かない"
   echo "lab topology is up"
 }
