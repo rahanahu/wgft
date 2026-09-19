@@ -35,6 +35,7 @@ lab/lab exec vm bash /wgft/lab/rates.sh kernel   # レート制限の実負荷(p
 lab/lab exec vm bash /wgft/lab/connlimit.sh      # カーネルモードの接続元 IP ごとの同時フロー数の上限(ct count)。userspace には無い機能なので kernel だけ
 lab/lab exec vm bash /wgft/lab/split-merge.sh kernel   # Web UI の分割・統合。流れている UDP セッションが切れないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/import-export.sh kernel # Web UI の書き出しと読み込み。確認画面の差分、確認後の変更による適用の拒否を確認。userspace も同じ
+lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、ルールの増減、撤去、プロキシの bind 失敗、既定の上限下でのメモリを確認。userspace も同じ
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
 lab/lab destroy                 # VM ごと消す
 ```
