@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/google/nftables"
@@ -68,13 +69,14 @@ func (r *Report) DNATConflicts(p proto.Proto, pr proto.PortRange) []DNAT {
 	return out
 }
 
-// InputPortSuggestions は、input の base chain が既定で落とす構成で、かつ port/proto への明示的な
-// accept がまだ無いとき、その accept を足す行を提示する。呼び出し元は 2 種類ある。プロキシモードの
-// 公開ポート(vpsd 自身が中継で受けるポート。仕様 6.2 節)と、vpsd 自身が待ち受ける 2 つのポート
-// (WireGuard の UDP、agent API の TCP。仕様 4 節)である。後者は実機の Debian 13(input が policy
-// drop で SSH の TCP 22 しか accept していない構成)で見つかった。改訂の記録を参照。
+// InputPortSuggestions は、input の base chain が既定で落とす構成で、かつ pr/proto への明示的な
+// accept がまだ無いとき、その accept を足す行を提示する。呼び出し元は 3 種類ある。カーネルモードの
+// プロキシルール(vpsd 自身が中継で受けるポート。単一ポートに限る。仕様 6.2 節)、ユーザー空間モードの
+// 全ルール(範囲を含む。仕様 6.3 節)、vpsd 自身が待ち受ける 2 つのポート(WireGuard の UDP、
+// agent API の TCP。仕様 4 節)である。最後のものは実機の Debian 13(input が policy drop で SSH の
+// TCP 22 しか accept していない構成)で見つかった。改訂の記録を参照。
 // ownTable は自分の table(kernel backend では table inet wgft)の名前で、検査から除く。
-func InputPortSuggestions(port uint16, p proto.Proto, ownTable string) ([]string, error) {
+func InputPortSuggestions(pr proto.PortRange, p proto.Proto, ownTable string) ([]string, error) {
 	c, err := nftables.New()
 	if err != nil {
 		return nil, err
@@ -92,18 +94,18 @@ func InputPortSuggestions(port uint16, p proto.Proto, ownTable string) ([]string
 		if err != nil {
 			continue
 		}
-		out = append(out, inputPortSuggestion(ch, rules, port, p)...)
+		out = append(out, inputPortSuggestion(ch, rules, pr, p)...)
 	}
 	return out, nil
 }
 
 // inputPortSuggestion は InputPortSuggestions の 1 チェーン分の判定。実の nftables 接続を要らなく
 // して、テストが手作りの chain と rules だけで確かめられるように分けてある。
-func inputPortSuggestion(ch *nftables.Chain, rules []*nftables.Rule, port uint16, p proto.Proto) []string {
+func inputPortSuggestion(ch *nftables.Chain, rules []*nftables.Rule, pr proto.PortRange, p proto.Proto) []string {
 	if blocks, _ := blocksByDefault(ch, rules); !blocks {
 		return nil
 	}
-	if acceptsPort(rules, p, port) {
+	if acceptsPort(rules, p, pr) {
 		return nil
 	}
 	if iptablesManaged(ch) {
@@ -111,20 +113,32 @@ func inputPortSuggestion(ch *nftables.Chain, rules []*nftables.Rule, port uint16
 		if ch.Table.Family == nftables.TableFamilyIPv6 {
 			bin = "ip6tables"
 		}
-		return []string{fmt.Sprintf("%s -I %s -p %s --dport %d -j ACCEPT", bin, ch.Name, p, port)}
+		return []string{fmt.Sprintf("%s -I %s -p %s --dport %s -j ACCEPT", bin, ch.Name, p, dportArg(pr, true))}
 	}
-	return []string{fmt.Sprintf("nft insert rule %s %s %s %s dport %d accept", familyName(ch.Table.Family), ch.Table.Name, ch.Name, p, port)}
+	return []string{fmt.Sprintf("nft insert rule %s %s %s %s dport %s accept", familyName(ch.Table.Family), ch.Table.Name, ch.Name, p, dportArg(pr, false))}
 }
 
-// acceptsPort は、rules がすでに proto/port への明示的な accept(手で足した `tcp dport 8443
-// accept` など)を持つかを判定する。持っていれば、二重になる提示を出さない。ポートの一致条件が
-// 読めない規則は一致とみなさない。読めない規則を「accept 済み」扱いにすると、実際は塞がれている
-// 場合に見逃すためである。
-func acceptsPort(rules []*nftables.Rule, p proto.Proto, port uint16) bool {
-	want := proto.PortRange{Lo: port, Hi: port}
+// dportArg は pr を dport の引数の文字列にする。単一ポートはそのまま、範囲は書式が違う。
+// nft は "40000-40010"(proto.PortRange.String と同じ)、iptables は "40000:40010" を使う。
+func dportArg(pr proto.PortRange, iptablesStyle bool) string {
+	if !pr.IsRange() {
+		return strconv.Itoa(int(pr.Lo))
+	}
+	if iptablesStyle {
+		return fmt.Sprintf("%d:%d", pr.Lo, pr.Hi)
+	}
+	return pr.String()
+}
+
+// acceptsPort は、rules がすでに proto/pr への明示的な accept(手で足した `tcp dport 8443
+// accept` など)を持つかを判定する。持っていれば、二重になる提示を出さない。範囲のルールは、
+// 既存の accept の範囲が pr を丸ごと含む場合だけ済んだ扱いにする。一部だけ accept された範囲を
+// 済んだ扱いにすると、残りの部分が塞がれたままになるためである。ポートの一致条件が読めない規則は
+// 一致とみなさない。読めない規則を「accept 済み」扱いにすると、実際は塞がれている場合に見逃すためである。
+func acceptsPort(rules []*nftables.Rule, p proto.Proto, pr proto.PortRange) bool {
 	for _, rl := range rules {
 		rp, ports, unknown := matchPorts(nil, nil, rl.Exprs)
-		if unknown || rp != p || !ports.Overlaps(want) {
+		if unknown || rp != p || ports.Lo > pr.Lo || pr.Hi > ports.Hi {
 			continue
 		}
 		if ruleVerdictAccept(rl.Exprs) {

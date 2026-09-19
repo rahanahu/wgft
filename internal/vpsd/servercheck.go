@@ -71,8 +71,18 @@ func Check(opts Options, out io.Writer) error {
 		return nil
 	}
 	defer st.Close()
-	checkMeta(out, st, modeMeta, "recorded mode", opts.Mode)
+	checkRecordedMode(out, st, opts.Mode)
 	checkMeta(out, st, wgAddressMeta, "recorded address range", opts.WGAddress)
+	// rule ports の検査:個々のルールの listen port が host の input firewall で塞がれていないか。
+	// own ports check と同じく root が要り、rules は SQLite からしか読めないのでここで行う
+	// (実機の Debian 13、ユーザー空間モードで見つかった。改訂の記録参照)。
+	if !root {
+		fmt.Fprintln(out, "rule ports check: skipped because not root; run sudo wgft server check")
+	} else if rules, err := st.Rules(); err != nil {
+		fmt.Fprintf(out, "rule ports check: cannot read rules: %v\n", err)
+	} else {
+		checkRulePorts(out, rules, mode)
+	}
 	if b, err := st.GetMeta(serverKeyMeta); err == nil && mode != modeUserspace {
 		if k, err := wgtypes.NewKey(b); err == nil {
 			if other, ok := wg.OtherDeviceWithKey(opts.WGInterface, k); ok {
@@ -111,7 +121,7 @@ func ownPortTargets(opts Options) []ownPortTarget {
 func checkOwnPorts(out io.Writer, opts Options) {
 	var findings []linux.Finding
 	for _, t := range ownPortTargets(opts) {
-		lines, err := linux.InputPortSuggestions(t.port, t.proto, nft.TableName)
+		lines, err := linux.InputPortSuggestions(proto.PortRange{Lo: t.port, Hi: t.port}, t.proto, nft.TableName)
 		if err != nil {
 			fmt.Fprintf(out, "own ports check (%s %d/%s): cannot run: %v\n", t.purpose, t.port, t.proto, err)
 			continue
@@ -130,6 +140,44 @@ func checkOwnPorts(out io.Writer, opts Options) {
 		return
 	}
 	fmt.Fprintln(out, "own ports check: the following needs attention:")
+	for _, f := range findings {
+		fmt.Fprintf(out, "  - %s\n", f)
+	}
+}
+
+// checkRulePorts は、host の input firewall が個々のルールの listen port を塞いでいないかを確かめる。
+// カーネルモードでは、host のソケットで受けるのはプロキシモード(Relay。TCP のみ)のルールだけで、
+// Transparent なルールは他テーブルの DNAT と forward を経由し input を通らない(仕様 6.1・6.2 節)。
+// ユーザー空間モードは vps_mode の区別に意味を持たず、有効なルールすべてが host のソケットで受ける
+// 中継になるため、全ルールを対象にする(仕様 6.3 節)。判定は apply.go の proxyInputHints と同じ。
+func checkRulePorts(out io.Writer, rules []proto.Rule, mode string) {
+	var findings []linux.Finding
+	for _, r := range rules {
+		if !r.Enabled {
+			continue
+		}
+		if mode != modeUserspace && r.VPSMode != proto.ModeProxy {
+			continue
+		}
+		lines, err := linux.InputPortSuggestions(r.ListenPort, r.Proto, nft.TableName)
+		if err != nil {
+			fmt.Fprintf(out, "rule ports check (%s %s/%s): cannot run: %v\n", r.ID, r.ListenPort, r.Proto, err)
+			continue
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		findings = append(findings, linux.Finding{
+			Where:   "input firewall",
+			Problem: fmt.Sprintf("blocks rule %s's port %s/%s; the server binds it on the host, so a client would get no answer", r.ID, r.ListenPort, r.Proto),
+			Suggest: lines,
+		})
+	}
+	if len(findings) == 0 {
+		fmt.Fprintln(out, "rule ports check: no problems")
+		return
+	}
+	fmt.Fprintln(out, "rule ports check: the following needs attention:")
 	for _, f := range findings {
 		fmt.Fprintf(out, "  - %s\n", f)
 	}
@@ -154,6 +202,26 @@ func printDBModes(out io.Writer, path string) {
 		}
 		fmt.Fprintf(out, "server database file mode: %s is %04o\n", p, perm)
 	}
+}
+
+// checkRecordedMode は、記録済みのモードと今回の設定を照合して 1 行出す。食い違いがあっても
+// ここでは拒否しない。実際にモードを切り替えられるかどうかは、次の `server run` で
+// reconcileModeAndAddress の関門(mode.go の modeGate)が決める。
+func checkRecordedMode(out io.Writer, st *store.Store, want string) {
+	have, err := st.GetMeta(modeMeta)
+	if errors.Is(err, store.ErrNotFound) {
+		fmt.Fprintln(out, "recorded mode: not recorded")
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(out, "recorded mode: cannot read: %v\n", err)
+		return
+	}
+	if want == "" || string(have) == want {
+		fmt.Fprintf(out, "recorded mode: %s\n", have)
+		return
+	}
+	fmt.Fprintf(out, "warning: the recorded mode is %s but the setting is %s; the mode change gate runs at start\n", have, want)
 }
 
 // checkMeta は meta の記録と現在値を照合して 1 行出す。

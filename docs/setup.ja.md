@@ -66,7 +66,7 @@ sudo chmod 0644 /etc/wgft/server.env
 sudo wgft server check
 ```
 
-`check` は、有効な設定、同じ server key を持つ WireGuard インタフェースの残骸、既存 firewall に必要な forwarding 許可を表示します。加えて、host 自身の input firewall が wgft 自身のポート(WireGuard と agent API)を塞いでいないかも検査し、足す行を提示します。firewall 自体は変更しません。
+`check` は、有効な設定、同じ server key を持つ WireGuard インタフェースの残骸、既存 firewall に必要な forwarding 許可を表示します。加えて、host 自身の input firewall が wgft 自身のポート(WireGuard と agent API)や、wgft が host 上で受けるルールの listen port(カーネルモードはプロキシモードのルール、ユーザー空間モードは全ルール)を塞いでいないかも検査し、足す行を提示します。firewall 自体は変更しません。
 
 wgft は既存の firewall 設定を変更しません。カーネルモードでは IPv4 forwarding が必要なため、必要に応じて `net.ipv4.ip_forward=1` を有効にします。`wgft server teardown` は、元に戻す必要がある設定も表示します。
 

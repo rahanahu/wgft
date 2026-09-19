@@ -1,8 +1,11 @@
 package vpsd
 
 import (
+	"bytes"
+	"path/filepath"
 	"testing"
 
+	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -24,5 +27,31 @@ func TestOwnPortTargets(t *testing.T) {
 		if target.purpose == "admin API" {
 			t.Errorf("admin API must not be a target: %+v", got)
 		}
+	}
+}
+
+// TestCheckRecordedModeWording は、記録済みモードと設定の食い違いを知らせる文言を確かめる。
+func TestCheckRecordedModeWording(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wgft.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMeta(modeMeta, []byte(modeKernel)); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	checkRecordedMode(&out, st, modeUserspace)
+	want := "warning: the recorded mode is kernel but the setting is userspace; the mode change gate runs at start\n"
+	if got := out.String(); got != want {
+		t.Errorf("mismatch wording = %q, want %q", got, want)
+	}
+
+	out.Reset()
+	checkRecordedMode(&out, st, modeKernel)
+	if got := out.String(); got != "recorded mode: kernel\n" {
+		t.Errorf("matching mode = %q", got)
 	}
 }
