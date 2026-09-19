@@ -20,16 +20,20 @@ builds:
     goos:
       - linux
       - windows
+      - darwin
     goarch:
       - amd64
       - arm64
     ignore:
       # Windows は実機(Windows 11)で検証済みの amd64 だけを公開する。arm64 は
-      # macOS と同じくビルドできることを CI で確かめているだけで未検証のため、
-      # linux/arm64 はそのまま残し windows/arm64 だけを除く(11a 節、macOS は
-      # goos に無いので darwin/* は元から作られない)。
+      # ビルドできることを CI で確かめているだけで未検証のため、linux/arm64 は
+      # そのまま残し windows/arm64 だけを除く(11a 節)。
       - goos: windows
         goarch: arm64
+      # macOS は実機(macOS 27、Apple シリコン)で検証済みの arm64 だけを公開する。
+      # Intel Mac は対象にせず、darwin/amd64 は作らない(11a 節)。
+      - goos: darwin
+        goarch: amd64
     flags:
       - -trimpath
     # module パスが wgft から github.com/rahanahu/wgft に変わったら、
@@ -46,6 +50,7 @@ archives:
   # README の取得コマンドと揃える生バイナリの名前。tar/zip にせず素のバイナリを置く。
   # Windows は binary format でも GoReleaser がバイナリの拡張子(.exe)を保つため、
   # 素の名前は wgft-windows-amd64.exe になる(手元の --snapshot で確認済み)。
+  # macOS は拡張子を持たないので wgft-darwin-arm64 になる。
   - id: wgft
     ids:
       - wgft

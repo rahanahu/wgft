@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd daemon for the wgft home agent on macOS (docs/setup.md, "Run the agent on macOS").
+
+  Replace every YOUR_USER with your macOS short user name (`id -un`) before installing, and
+  check that /Users/YOUR_USER is your home directory (`echo $HOME`).
+
+  It is a LaunchDaemon on purpose, not a LaunchAgent: started as a LaunchAgent, the agent
+  could reach the default gateway but not other LAN hosts (macOS Local Network privacy,
+  docs/design.md section 11a). UserName makes it run with your rights, not as root, and it uses
+  the same data directory as `wgft agent run` started from your terminal.
+
+  Install as /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist, owned by root:wheel,
+  mode 0644. The file is readable by every user, so never put WGFT_JOIN here: register once
+  from the terminal first; the credentials then stay in agent.json.
+
+  With FileVault on, it starts only after the first login following a reboot.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.rahanahu.wgft.agent</string>
+
+	<!-- Run as this user (replace YOUR_USER). -->
+	<key>UserName</key>
+	<string>YOUR_USER</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/wgft</string>
+		<string>agent</string>
+		<string>run</string>
+	</array>
+
+	<!-- The data directory is set explicitly (replace YOUR_USER), so the daemon uses the same
+	     directory as `wgft agent run` started from your terminal, whatever the default resolves
+	     to. It holds agent.json. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>WGFT_DATA_DIR</key>
+		<string>/Users/YOUR_USER/Library/Application Support/wgft</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Restart when the agent exits with an error or is killed, at most once every
+	     ThrottleInterval seconds. launchd has no counterpart to RestartPreventExitStatus=3 in
+	     agent.service, so a configuration error (exit code 3) is presumably restarted too
+	     (not tested). -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<!-- Log in your own ~/Library/Logs (replace YOUR_USER). launchd sets HOME for a job with
+	     UserName but does not expand ~ in plist strings, so the path is spelled out. launchd
+	     does not rotate this file. -->
+	<key>StandardOutPath</key>
+	<string>/Users/YOUR_USER/Library/Logs/wgft-agent.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/YOUR_USER/Library/Logs/wgft-agent.log</string>
+</dict>
+</plist>

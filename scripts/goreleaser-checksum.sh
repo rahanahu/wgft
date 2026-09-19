@@ -20,6 +20,8 @@
 # アセット名の拡張子 .exe をそのまま保つ(wgft-windows-amd64.exe。
 # `goreleaser release --snapshot` で確認済み)。ここで作る名前もそれに
 # 合わせないと、release アセットに対する `sha256sum -c` が失敗する。
+# darwin は拡張子を持たないので wgft-darwin-arm64 のままでよい(同じく
+# --snapshot で確認済み。macOS では `shasum -a 256 -c` で検証できる)。
 set -euo pipefail
 
 path="$1"

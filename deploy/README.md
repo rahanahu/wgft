@@ -11,6 +11,7 @@ The step-by-step procedure is in [docs/setup.md](../docs/setup.md). This directo
 | `agent.service` | systemd unit for the home agent as a plain binary. Runs as the unprivileged user `wgft`; `/etc/wgft/agent.env` holds `WGFT_JOIN` for the first start |
 | `Dockerfile.agent` | Container for the home agent. Static binary, unprivileged, no TUN, runs as uid 65532 |
 | `agent.compose.yaml` | Docker Compose for the agent: `WGFT_JOIN` / `WGFT_NAME` and the state volume. Pulls `ghcr.io/rahanahu/wgft-agent` (amd64 and arm64, built from `Dockerfile.agent` by the release workflow); `build:` is there, commented out, for building from source |
+| `io.github.rahanahu.wgft.agent.plist` | launchd LaunchDaemon for the home agent on macOS (`wgft agent run`, label `io.github.rahanahu.wgft.agent`). Runs with the rights of the user named in `UserName`, not as root, with `WGFT_DATA_DIR` in that user's `~/Library/Application Support/wgft`. Replace `YOUR_USER` before installing; it holds no `WGFT_JOIN`, so register once from Terminal first. A LaunchDaemon rather than a LaunchAgent because a LaunchAgent could not reach other LAN hosts (docs/design.md section 11a) |
 
 Binaries are built with `../scripts/build-release.sh` into `dist/wgft-linux-<arch>` (a single file, no CGO).
 
@@ -34,6 +35,11 @@ docker compose -f deploy/agent.compose.yaml down -v
 # with the bare binary, stop it and remove the credentials file (agent.json) and its neighbours
 # from the directory you passed to --data-dir (the README uses ~/.wgft; the default is /var/lib/wgft)
 #   rm -f ~/.wgft/agent.json ~/.wgft/agent.json.lock ~/.wgft/agent.json.sock
+# on macOS with the LaunchDaemon, unload it and remove the plist; the credentials are in
+# ~/Library/Application Support/wgft
+#   sudo launchctl bootout system/io.github.rahanahu.wgft.agent
+#   sudo rm /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
+#   rm -f ~/Library/Application\ Support/wgft/agent.json ~/Library/Application\ Support/wgft/agent.json.lock ~/Library/Application\ Support/wgft/agent.json.sock
 ```
 
 If you run `wgft agent revoke <name>` on the VPS first, a running agent stops with 401 and its peer, conntrack entries and assigned address are reclaimed.

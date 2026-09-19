@@ -2,12 +2,14 @@ package relay
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,11 +22,21 @@ import (
 type loopback struct{}
 
 func (loopback) ListenUDP(port uint16) (net.PacketConn, error) {
-	return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	if err == nil {
+		bigSendBuffer(c)
+	}
+	return c, err
 }
+
 func (loopback) ListenTCP(port uint16) (net.Listener, error) {
 	return net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
 }
+
+// bigSendBuffer はテスト側のソケットで 65535 バイトまでのデータグラムを書けるようにする。
+// macOS の既定の SO_SNDBUF(9216 バイト)では大きい書き込みが EMSGSIZE で失敗し、
+// relay の宛先側ではなくテスト側で落ちてしまう。production の公開側は netstack なので、この制限を受けない。
+func bigSendBuffer(c *net.UDPConn) { c.SetWriteBuffer(udpBufMax) }
 
 func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} }
 
@@ -108,6 +120,7 @@ func udpEcho(t *testing.T) (addr string, packets *atomic.Int64) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { pc.Close() })
+	bigSendBuffer(pc)
 	packets = new(atomic.Int64)
 	go func() {
 		b := make([]byte, 65535)
@@ -322,6 +335,7 @@ func TestUDPRelayLargeReplyFromFirstDatagram(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
+	bigSendBuffer(c)
 	b := make([]byte, 65535)
 	for _, size := range []int{60000, 3, 2048, 9000} {
 		msg := bytes.Repeat([]byte{byte('a' + size%26)}, size)
@@ -331,6 +345,64 @@ func TestUDPRelayLargeReplyFromFirstDatagram(t *testing.T) {
 		if err != nil || !bytes.Equal(b[:n], msg) {
 			t.Fatalf("reply of %d bytes: n=%d err=%v", size, n, err)
 		}
+	}
+}
+
+// failWriteConn は書き込みが常に失敗する宛先側の接続。テスト用。
+type failWriteConn struct{ net.Conn }
+
+func (failWriteConn) Write([]byte) (int, error) { return 0, errors.New("injected write failure") }
+
+// UDP:宛先への書き込みの失敗はセッションを閉じ、ログはリスナーごとに 1 分に 1 回までに絞る。
+func TestUDPRelayWriteFailureLogged(t *testing.T) {
+	echoAddr, _ := udpEcho(t)
+	port := freePort(t)
+	var (
+		mu    sync.Mutex
+		lines []string
+		dials atomic.Int64
+	)
+	logf := func(format string, a ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, a...))
+	}
+	dial := func(network, addr string) (net.Conn, error) {
+		c, err := net.Dial(network, addr)
+		if err != nil {
+			return nil, err
+		}
+		dials.Add(1)
+		return failWriteConn{c}, nil
+	}
+	m := New(loopback{}, Options{Logf: logf, Dial: dial})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
+	c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	// 失敗のたびにセッションが閉じるので、同じ送信元からの 3 個はそれぞれ新しいセッションを張る。
+	// 3 回目の Dial が見えた時点で、1 回目の書き込みとそのログは済んでいる
+	deadline := time.Now().Add(2 * time.Second)
+	for dials.Load() < 3 && time.Now().Before(deadline) {
+		c.Write([]byte("x"))
+		time.Sleep(20 * time.Millisecond)
+	}
+	if dials.Load() < 3 {
+		t.Fatalf("dials = %d, want a new session per failed write", dials.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var n int
+	for _, l := range lines {
+		if strings.Contains(l, "injected write failure") && strings.Contains(l, "closing session") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("write failure logged %d times, want 1; log: %q", n, lines)
 	}
 }
 

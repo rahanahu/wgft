@@ -4,7 +4,7 @@
 
 ## 動作環境
 
-VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。macOS はまだ対応していません。実機での確認がまだ済んでいないためです。wgft は現在 IPv4 のみに対応しています。
+VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。Apple シリコンの macOS でも動作し、macOS 27 で実機確認済みです。Intel Mac には対応していません。wgft は現在 IPv4 のみに対応しています。
 
 自宅側のエージェントには root 権限も TUN デバイスも不要です。VPS 側の要件は動作モードで変わります。
 
@@ -35,7 +35,7 @@ curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-am
 sha256sum -c wgft-linux-amd64.sha256
 ```
 
-arm64 環境では `amd64` を `arm64` に置き換えてください。
+arm64 環境では `amd64` を `arm64` に置き換えてください。Windows と macOS での手順は、[Windows で agent を実行する](#windows-で-agent-を実行する)と[macOS で agent を実行する](#macos-で-agent-を実行する)で説明します。
 
 Go 1.26 以上があれば次でもインストールできます。
 
@@ -183,6 +183,68 @@ join string は `#` を含むため、PowerShell では単一引用符で囲み�
 wireguard-go が UDP をすべてのインタフェースで待ち受けるため、初回起動時に Windows Defender Firewall が `wgft.exe` の受信を許可するかどうかのダイアログを出すことがあります。Windows 11 の実機で、このダイアログを許可してもキャンセルしても、WireGuard の鍵の再交換をまたいでトンネルと中継が動作し続けることを確認しました。agent は外向きの接続だけを使うためです。停止は Ctrl+C を押すか、コンソールのウィンドウを閉じます。次の起動では保存済みの認証情報を使って復帰します。
 
 wgft は Windows のサービスもタスクスケジューラも通知領域への常駐も持ちません。`agent run` は起動した利用者の権限で動作し、ゲーミング PC の多くのゲームサーバーと同じ動き方です。ログオンのたびに自動で起動させるかどうかは利用者に任されています。スタートアップフォルダへの登録はその一例ですが、未確認です。
+
+### macOS で agent を実行する
+
+macOS 版は Apple シリコン (arm64) 向けで、macOS 27 で実機確認済みです。Intel Mac には対応していません。ターミナルで `curl` を使って取得します。
+
+```sh
+curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-darwin-arm64
+curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-darwin-arm64.sha256
+shasum -a 256 -c wgft-darwin-arm64.sha256
+sudo mkdir -p /usr/local/bin
+sudo install -m 0755 wgft-darwin-arm64 /usr/local/bin/wgft
+```
+
+`curl` で取得したファイルには quarantine 属性が付きません。Web ブラウザで取得するとこの属性が付き、Gatekeeper は、この属性が付いていて Apple の公証 (notarization) を受けていないバイナリの起動を止めます。wgft は公証を受けていません。Apple シリコンの Mac には `/usr/local/bin` が無い場合があるため、`mkdir -p` で作成します。
+
+ターミナルから 1 回だけ登録します。
+
+```sh
+WGFT_JOIN='<join string>' /usr/local/bin/wgft agent run
+```
+
+初回登録に成功すると、`registered as agent <name>` が表示され、`~/Library/Application Support/wgft/agent.json` が作成されます。ディレクトリの権限は 0700、ファイルの権限は 0600 です。下の LaunchDaemon を登録する前に、Ctrl+C でこの agent を止めます。認証情報は `agent.json` に残ります。LaunchDaemon とターミナルの agent は同時に動かせません。後から起動した側が `credentials file is in use by another process` を表示して起動を止めるためです。
+
+agent を常駐させる場合は、[deploy/io.github.rahanahu.wgft.agent.plist](../deploy/io.github.rahanahu.wgft.agent.plist) を LaunchDaemon として登録します。この LaunchDaemon は `UserName` により root ではなく利用者の権限で `wgft agent run` を実行し、`WGFT_DATA_DIR` で同じ `~/Library/Application Support/wgft` を指します。プレースホルダ `YOUR_USER` を利用者名とホームディレクトリに置き換えてから、インストールして読み込みます。
+
+```sh
+curl -LO https://raw.githubusercontent.com/rahanahu/wgft/main/deploy/io.github.rahanahu.wgft.agent.plist
+sed -e "s|/Users/YOUR_USER|$HOME|g" -e "s|YOUR_USER|$(id -un)|g" io.github.rahanahu.wgft.agent.plist > wgft-agent.plist
+plutil -lint wgft-agent.plist
+sudo install -m 0644 -o root -g wheel wgft-agent.plist /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
+```
+
+plist はすべての利用者が読めるため、join string を書きません。このため、初回登録は上のとおりターミナルから行います。LaunchDaemon の動作とログは次で確認します。
+
+```sh
+sudo launchctl print system/io.github.rahanahu.wgft.agent | grep -E 'state|pid'
+tail -f ~/Library/Logs/wgft-agent.log
+```
+
+トンネルが確立すると、VPS 側の `sudo wgft agent ls` の `TUNNEL` 列が `ok` になります。agent がエラーで終了した場合や強制終了された場合、launchd は agent を再起動します。再起動の間隔は最短で 10 秒 (`ThrottleInterval`) です。launchd には systemd の unit の `RestartPreventExitStatus=3` に当たる設定が無いため、終了コード 3 で終わる設定の誤りでも同じく再起動を繰り返すと推測していますが、未確認です。再起動を繰り返す場合はログを確認します。
+
+LaunchDaemon は次で止めます。
+
+```sh
+sudo launchctl bootout system/io.github.rahanahu.wgft.agent
+```
+
+plist は `/Library/LaunchDaemons` に残るため、次の起動時に LaunchDaemon は再び起動します。登録を解除するには、続けて `sudo rm /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist` を実行します。
+
+更新するには、上と同じ手順で新しい `wgft-darwin-arm64` を取得してから、次を実行します。
+
+```sh
+sudo launchctl bootout system/io.github.rahanahu.wgft.agent
+sudo install -m 0755 wgft-darwin-arm64 /usr/local/bin/wgft
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
+```
+
+この構成は、macOS の次の 2 つの挙動に合わせたものです。
+
+- ローカルネットワークのプライバシー保護: `~/Library/LaunchAgents` の LaunchAgent として起動した agent は、デフォルトゲートウェイには接続できましたが、LAN 内の他のホストへの接続は `connect: no route to host` で失敗し、許可を求めるダイアログも表示されませんでした。同じバイナリをターミナルから起動した場合と、`UserName` に同じ利用者を指定した LaunchDaemon として起動した場合は、どちらも UDP と TCP でそのホストに接続できました。ターミナルから起動したプロセスは、ターミナル自身の許可を引き継ぎます。失敗の原因をローカルネットワークのプライバシー保護とする判断は症状からの推測で、裏付けるシステムログは見つかっていません。`brew services` も LaunchAgent を使うため同じ問題が起きる可能性がありますが、未確認です。
+- FileVault: FileVault を有効にした Mac では、再起動後、LaunchDaemon は起動時ではなく利用者が最初にログインした時点で起動しました。その後約 15 秒 `network is unreachable` を記録し、自動で接続しました。FileVault を無効にした Mac でログインせずに起動時から動くかどうかと、ログアウト後も動き続けるかどうかは未確認です。
 
 ### systemd で起動する
 

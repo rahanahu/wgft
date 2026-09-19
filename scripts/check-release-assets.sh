@@ -19,8 +19,8 @@
 #
 # The expected_names list below is the single place to add a new OS/arch: keep it in sync
 # with builds.goos/goarch/ignore and archives.name_template in .goreleaser.yaml. macOS
-# (darwin) support is planned; add its "wgft-darwin-<arch>" name here once
-# .goreleaser.yaml builds it.
+# (darwin) is published for arm64 only (darwin/amd64 is in builds.ignore), as
+# wgft-darwin-arm64 with no extension.
 set -euo pipefail
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -39,6 +39,7 @@ fi
 expected_names=(
   "wgft-linux-amd64"
   "wgft-linux-arm64"
+  "wgft-darwin-arm64"
   "wgft-windows-amd64.exe"
 )
 
