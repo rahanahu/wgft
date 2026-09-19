@@ -239,6 +239,14 @@ func TestInputPortSuggestionOwnPorts(t *testing.T) {
 		t.Errorf("tcp 8443 already accepted: %v, want none", got)
 	}
 
+	// set を使う accept(`tcp dport { 22, 8443 } accept`)は中身を読まずに「読めない規則」とし、
+	// panic せず、accept 済みともみなさずに提示する
+	rulesSet := append(append([]*nftables.Rule{}, rules...), &nftables.Rule{Exprs: append(append(l4(unix.IPPROTO_TCP), dport(),
+		&expr.Lookup{SourceRegister: 1, SetName: "__set1"}), &expr.Verdict{Kind: expr.VerdictAccept})})
+	if got := inputPortSuggestion(ch, rulesSet, singlePort(8443), proto.TCP); len(got) != 1 || got[0] != "nft insert rule inet filter input tcp dport 8443 accept" {
+		t.Errorf("tcp 8443 behind a set accept: %v, want the suggestion", got)
+	}
+
 	// policy accept のチェーンは、そもそも既定で落とさないので提示しない
 	accept := nftables.ChainPolicyAccept
 	openCh := &nftables.Chain{Name: "input", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "filter"}, Policy: &accept}

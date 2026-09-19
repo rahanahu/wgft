@@ -135,6 +135,8 @@ func dportArg(pr proto.PortRange, iptablesStyle bool) string {
 // 既存の accept の範囲が pr を丸ごと含む場合だけ済んだ扱いにする。一部だけ accept された範囲を
 // 済んだ扱いにすると、残りの部分が塞がれたままになるためである。ポートの一致条件が読めない規則は
 // 一致とみなさない。読めない規則を「accept 済み」扱いにすると、実際は塞がれている場合に見逃すためである。
+// set を使う accept(`tcp dport { 22, 8443 } accept`)も読めない規則として扱う。set の中身を最小から
+// 最大の範囲に丸めると、set に無いポートまで accept 済みと判定してしまうためである。
 func acceptsPort(rules []*nftables.Rule, p proto.Proto, pr proto.PortRange) bool {
 	for _, rl := range rules {
 		rp, ports, unknown := matchPorts(nil, nil, rl.Exprs)
@@ -442,6 +444,11 @@ func matchPorts(c *nftables.Conn, t *nftables.Table, exprs []expr.Any) (p proto.
 			wantPort = false
 		case *expr.Lookup:
 			if wantPort {
+				// set の中身を読む接続が無い(acceptsPort のように規則の式だけで判定する)ときは、
+				// 読めない一致条件として返す。nil の接続で set を引くと panic する
+				if c == nil || t == nil {
+					return p, ports, true
+				}
 				// 無名 set のポート集合。読めれば最小-最大の範囲として扱う(荒いが安全側)
 				lo, hi, ok := setPortBounds(c, t, x.SetName)
 				if ok {
