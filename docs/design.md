@@ -685,7 +685,7 @@ Resource Guard
 userspace 側の Resource Guard の予算は次のとおりである。
 
 - プロセス全体の TCP/UDP 予算:`WGFT_MAX_UDP_FLOWS`/`WGFT_MAX_TCP_FLOWS`(7 節)
-- ルールごとの隔離:設定項目にはせず、プロセス全体の予算から導く内部の値とする。当面は「プロセス全体の半分、ただし従来の固定値(UDP 4096、TCP 1024)を下回らない」という今の計算式(`flowcap.Limits` の `UDPPerRuleCap`/`TCPPerRuleCap`)を暫定として維持する。Phase 6 では、1 本のルールなら空いている予算をほぼ使い切れ、複数のルールが競合するときだけ他ルールの最低限を守る、共有プールと隔離予約の方式に置き換える。隔離予約は admission 時の予約であって保証ではない。既存のフローを公平化のために強制的に追い出すことはしない。新しいルールの予約分が既存のフローで既に埋まっている場合、その予約は既存のフローが終わるまで満たされない
+- ルールごとの隔離:設定項目にはせず、プロセス全体の予算から導く内部の値とする。当面は「プロセス全体の半分、ただし従来の固定値(UDP 4096、TCP 1024)を下回らない」という今の計算式(`flowcap.Limits` の `UDPPerRuleCap`/`TCPPerRuleCap`)を暫定として維持する。Phase 6 では、1 本のルールなら空いている予算をほぼ使い切れ、複数のルールが競合するときだけ他ルールの最低限を守る、共有プールと隔離予約の方式に置き換える(式と既定値は 7a.10 節)。隔離予約は admission 時の予約であって保証ではない。既存のフローを公平化のために強制的に追い出すことはしない。新しいルールの予約分が既存のフローで既に埋まっている場合、その予約は既存のフローが終わるまで満たされない
 - メモリのソフト上限:予算から導く値をランタイムに設定する(`flowcap.Limits.MemoryLimit`)
 - 拒否した TCP の即時終了:accept 直後に RST で終える(`internal/nettun.TCPConn.Abort`)。通常の `Close` は gVisor の TIME_WAIT にエンドポイントを残し、上限を超えたフラッドの間ヒープが増え続けることを、生きているヒープの直接計測で確認している(ラボでの計測、2026-09-19)
 - UDP の無通信タイムアウト:全体状態の `udp_timeout_stream` に従う(7 節)
@@ -764,7 +764,7 @@ proto/                   外部契約としての wire スキーマ(既存フィ
 - **Phase 3(VPS kernel backend 化)**:WireGuard、nftables、conntrack、sysctl、所有判定を `internal/vpsd` から `internal/dataplane/linuxkernel` へ切り離す。完了条件:`internal/dataplane/linuxkernel` から `internal/vpsd` への import が無いことをビルドで確かめられ、停止時に残し起動時に収束する今の挙動を保つ
 - **Phase 4(トランザクショナルな収束)**:`Desired`/`Prepared`/`Active`/`Retiring`、`Prepare`/`Commit`/`Rollback`(7a.3 節の範囲)、世代、失敗からの回復、再起動時の収束を導入する。ルール単位の fail-closed は、nftables の全体差し替え(6.1 節)にそのルールの新しい dispatch を含めないことで実現し、差し替え中のルールだけを部分的に書き換える仕組みは作らない。完了条件:backend 全体に及ぶ失敗が `Active` 世代を進めないこと、ルール単位の prepare 失敗はそのルールだけを理由付きの `not_active` のまま見えるようにし、他のルールの `Active` 化と世代の前進を妨げないこと、置き換えに失敗したルールが他のルールの commit 後に新規フローを拒むこと(fail-closed)、`Desired` に無いのに残っている資源が `active_only`/`retiring` として見えること、`Relay` のルールを fail-closed にしても安全な成立済みの TCP 接続が残ることを、新設の lifecycle テストで確かめる
 - **Phase 5(共通の Admission Policy)**:nftables コンパイラと Go の評価器を 1 つの IR から作る形に統合し、4 か所に分かれていた許可拒否の判定(`internal/dataplane/linuxkernel/nft`、`internal/dataplane/userspace/srcpolicy`、`internal/dataplane/linuxkernel/conntrack` の `sourceAllowed`、`internal/vpsd/proxyrelay` の `sourceAllowed`)を IR と 2 つのコンパイラへ集約する。kernel dataplane では `Transparent` と `Relay` の分岐より前に共通の ingress 層を置く。IR の形、各コンパイラの約束、許容差、fixture、移行の手順は 7a.9 節に定める。完了条件:同じ入力に対して両コンパイラが 7a.4 節と 7a.9 節の許容差の範囲内で一致することを共有 fixture で確かめ、既存の connlimit などのラボテストを保つ
-- **Phase 6(Resource Guard の再設計)**:`flowcap.Limits` が混ぜている送信元ごとの上限(Admission Policy)とプロセス全体の予算(Resource Guard)を `AdmissionLimits` と `ResourceLimits` に分ける。ルールごとの隔離を、共有プールと隔離予約の方式に置き換える。隔離予約は admission 時の予約であり、既存のフローを追い出す保証ではない。kernel 側の保護(conntrack の表、set の大きさ)は、userspace の計算式を再利用しない形のまま整理する。完了条件:1 本のルールなら空いている予算をほぼ使い切れ、複数のルールが競合するときだけ他ルールの最低限を守り、既存のフローを公平化のために切らないことを、ラボで確かめる
+- **Phase 6(Resource Guard の再設計)**:`flowcap.Limits` が混ぜている送信元ごとの上限(Admission Policy)とプロセス全体の予算(Resource Guard)を `AdmissionLimits` と `ResourceLimits` に分ける。ルールごとの隔離を、共有プールと隔離予約の方式に置き換える。隔離予約は admission 時の予約であり、既存のフローを追い出す保証ではない。kernel 側の保護(conntrack の表、set の大きさ)は、userspace の計算式を再利用しない形のまま整理する。型、式、拒否の報告、移行の手順は 7a.10 節に定める。完了条件:1 本のルールなら空いている予算をほぼ使い切れ、複数のルールが競合するときだけ他ルールの最低限を守り、既存のフローを公平化のために切らないことを、ラボで確かめる
 - **Phase 7(agent の kernel dataplane、v1.1 以降)**:上記の構造の上に、Linux agent の kernel backend を、`internal/dataplane/linuxkernel` の共通の部品を再利用し、agent に固有の nftables と conntrack の経路を同じ package に足す形で追加する。ラボで手作業で組んだ検証(2026-09-19)から、範囲のルールは無名 map の DNAT で表すこと、`DynamicUser` と `CAP_NET_ADMIN` のサンドボックスで足りること(`ProtectKernelTunables` は `ip_forward` の書き込みを妨げるため付けないこと)、実物の Docker の `DOCKER-USER` への追加行が Docker の再起動をまたいで残ること、複数 LAN セグメントを持つ自宅では `rp_filter` の strict が転送を壊しうること(`conf.all` と個別インタフェースの値は、より厳しい方が勝つ)が分かっている。agent の kernel dataplane をラボで試作した結果(2026-09-19)からは、agent の停止中も既存と新規のフローが続くこと、変更の無い再起動で conntrack が保たれること、マシンの再起動の後に保存した状態から stream に接続する前に組み直せること、LAN の target に設定変更が要らず MASQUERADE が要ることが分かっている。同じ試作で、自宅側に conntrack の収束が要ること(7a.3 節)、agent は `ip_forward` を明示して設定する必要があること、userspace と kernel の切り替えには約 1 から 2 秒の断があることも分かった。これらは実装の前提として使えるが、詳しい受け入れ条件は agent の kernel dataplane の機能自体の文書に譲る
 
 ### 7a.9 Admission Policy のコンパイラ
@@ -888,6 +888,187 @@ Phase 5 が扱うのは、IR の 6 つの段だけである。Resource Guard(プ
 #### 未決事項
 
 - `frontend` の package の分け方(7a.7 節):Phase 5 は `Relay` の受け付けの判定だけを変えるので、package を動かす必要がない。推奨は、Phase 5 では決めず、agent の kernel dataplane(Phase 7)の前に決めることである
+
+### 7a.10 Resource Guard の再設計
+
+Phase 6 では、`internal/flowcap` を `internal/resource` に改め、Resource Guard(7a.5 節)を Admission Policy から型の上でも切り離す。userspace のルールごとの隔離は、共有プールと隔離予約の方式に置き換える。kernel 側は conntrack の表と set の大きさを観測して提示するだけで、新しい強制は加えない。Phase 6 は、Phase 5(7a.9 節)の移行の手順 3 で送信元ごとの同時フロー数を評価器へ移した後のコードから始める。
+
+#### 判定の位置と範囲
+
+Resource Guard は、Admission Policy がフローを通した後にだけ判定する(7a.9 節の Phase 6 との境界)。Go の側で判定する場所は、`relay.Manager` の UDP の新しいセッションと TCP の accept、`internal/vpsd/proxyrelay` の accept の 3 つである。Admission Policy がフローを通した時点で、そのフローはレートのトークンと送信元ごとの同時フロー数の枠を使っている。Resource Guard が拒んだときは、評価器が返した手形で送信元ごとの枠をその場で返し(7a.9 節の `AdmitFlow`)、レートのトークンは返さない。kernel でも、conntrack の表が溢れて落ちるフローは prerouting の meter のトークンを既に使っているので、両モードで同じ扱いになる。
+
+Resource Guard の対象は次の 4 つである。
+
+- プロセス全体のフロー予算:`WGFT_MAX_UDP_FLOWS`/`WGFT_MAX_TCP_FLOWS`(7 節)の値で、Go が保持するフローの合計を抑える
+- ルールごとの隔離:1 つのルールへのフラッドが予算を使い切り、他のルールの新しいフローまで止めることを防ぐ。後述の共有プールと隔離予約で実現する
+- メモリ:予算から導くソフト上限をランタイムに設定する(後述)
+- kernel の資源:conntrack の表と nftables の set の大きさを観測し、足りなければ提示する(後述)
+
+#### 型の分割
+
+`flowcap.Limits` は、次の 2 つの型に分ける。
+
+| 型 | 置き場所 | 持つもの | 使う側 |
+|---|---|---|---|
+| `AdmissionLimits` | `internal/policy` | `UDPPerSource`、`TCPPerSource`、無効を表す `PerSourceOff`、既定値(256、128)、実効値を返す `UDPPerSourceCap`/`TCPPerSourceCap` | `policy.Build`、`planner.Input`、server の設定層 |
+| `resource.Limits`(7a.5 節の `ResourceLimits`) | `internal/resource` | `UDPTotal`、`TCPTotal`、設定できる範囲(`TotalMin`、`TotalMax`)、既定値(8192、2048)、`MemoryLimit` | userspace backend、`proxyrelay`、agent、`cmd/wgft` のメモリの設定 |
+
+`resource.Limits` は、7a.5 節が `ResourceLimits` と呼んだ型である。package の名前と型の名前が重ならないよう、型は `Limits` とする。ゼロ値の項目を既定値で埋める規則(`WithDefaults`)は、両方の型が今の `flowcap.Limits` からそのまま引き継ぐ。ゼロ値を「上限なし」にしないのは、設定層を通らずに組み立てた値で守りが黙って外れるためである。
+
+`flowcap.Counter` は `resource.Pool` に置き換える。Phase 5 の後の `Counter` はプロセス全体の数だけを数えており、ルールごとの数は `relay.Manager` と `proxyrelay` がそれぞれ listener の数から別に数えている。`Pool` は両方を 1 つの排他の中で数える。上限で拒んだことのログを間引く `flowcap.LogGate` は、宛先への dial の失敗のログにも使うので `internal/resource` には置かず、小さな package `internal/lograte` へ移す。
+
+`cmd/wgft` の設定層は、`WGFT_MAX_*_FLOWS` から `resource.Limits` を、`WGFT_MAX_*_FLOWS_PER_SOURCE` から `AdmissionLimits` を作る。server は両方を、agent は `resource.Limits` だけを受け取る。設定項目の名前、範囲の検査、エラーの文言は変えない。
+
+#### 共有プールと隔離予約
+
+`resource.Pool` は、プロトコルごとに 1 つずつ作る、プロセス全体のフロー予算である。フローは listener(プロトコルとポート)に付けて数え、listener からルールへの対応を `Pool` が持つ。ルールのフロー数は、そのルールの listener のフロー数の合計である。ルールの分割と統合で listener の所属ルールが変わると、その listener の既存のフローは移動先のルールで数える(7 節の規則のまま)。
+
+プールの値は次の記号で定める。
+
+- `T`:プロセス全体の予算(`resource.Limits` の `UDPTotal` または `TCPTotal`)
+- `C`:ルールが 2 本以上あるときの、ルール 1 本の上限。どの `T` でも `ceil(T/2)` である。残りの `floor(T/2)` は他のルールの予約に回る。半分を切り上げるのは、`N = 2` でも `N × q ≤ T` を保つためである(例:`T = 5` なら `C = 3`、予約は 2)
+- `A`:新しいフローを受け付けているルールの集合。そのプロトコルの listener を 1 つ以上開いていて、`Retiring` でないルールである。bind に失敗して listener を持たないルールと、`Retiring` のルール(7a.3 節)は含めない
+- `N`:`A` のルールの数
+- `q`:ルール 1 本あたりの隔離予約。`N` が 2 以上なら `floor((T - C) / (N - 1))`、すなわち `floor(floor(T/2) / (N - 1))` で、`N` が 1 なら 0 である
+- `u`:プロセス全体のフロー数。`u_r`:ルール `r` のフロー数。`Retiring` のルールのフローも `u` に含める
+
+ルール `r` の新しいフローは、`u < T` であり、かつ次のどちらかを満たすときに通す。
+
+1. `u_r < q`(自分の予約の内側にいる)
+2. `T - u - Σ max(0, q - u_s) ≥ 1`。和は `A` のうち `r` 以外のルール `s` を取る(他のルールの予約の未使用分を残しても、空きが 1 つ以上ある)
+
+`u < T` を満たさないときの拒否の理由は `budget`、2 つ目の条件を満たさないときの理由は `reserve` である。
+
+この式は次の性質を持つ。
+
+- ルールが 1 本(`N = 1`)なら、そのルールは予算 `T` のすべてを使える
+- ルールが 2 本以上あり、他のルールがフローを持たないとき、1 本のルールが持てるフローの最大は `T - (N - 1) × q` で、`C` を下回らない(`(N - 1) × q ≤ floor(T/2)` による)
+- `N × q ≤ T` が常に成り立つ(`T - C ≤ floor(T/2) ≤ T × (N - 1) / N` による)。そのため、`A` が変わらないあいだに通したフローだけなら、予約の内側にいるルールは必ず自分の予約まで新しいフローを通せる
+- 予約は admission の判定にだけ使い、既存のフローを追い出さない。ルールの追加で `N` が増えて `q` が減ったとき、あるいは統合でルールのフロー数が予約を超えたとき、他のルールの予約の未使用分が空きより大きくなることがある。そのあいだ、予約の内側にいるルールは `u < T` の範囲で先着順に通し、予約を超えているルールは既存のフローが終わるまで新しいフローを拒まれる。新しいルールの予約は、既存のフローが終わって空きが戻るまで満たされない
+
+`A` と `q` は、トランザクションの `Commit`(7a.2 節の戻れない地点の後)で更新する。更新はメモリの上の値の置き換えだけで失敗しないので、frontend の `Commit` の「失敗してはならない」という約束に合う。既に数えているフローには触れない。
+
+1 回の判定は `A` のルールの数に比例する計算を 1 つの排他の中で行う。ルールの本数は管理者が決める値で、攻撃者からは増やせない。
+
+#### 既定値と今の挙動との対応
+
+隔離予約の式は、次の 2 点だけから成る。追加の設定項目は持たない。
+
+- ルールが 1 本なら、そのルールは予算 `T` のすべてを使える(`N = 1` では `q = 0`)
+- ルールが 2 本以上なら、ルール 1 本は `C = ceil(T/2)` で止まり、残りの `floor(T/2)` を他のルールの予約に残す
+
+今の実装のルールごとの上限は `max(floor(T/2), min(F, T))` で、`F` は設定項目にする前の固定値(UDP 4096、TCP 1024)である。`F` は実際の資源の境界ではなく、以前の実装から引き継いだ定数なので、Phase 6 の式には使わない。既定の予算はちょうど `T = 2F`(UDP 8192、TCP 2048)であり、`C` は今の上限と同じ値(4096、1024)になる。`T` が既定以上なら、`C` は今の上限と同じか、`T` が奇数のときだけ 1 大きい。ルールが 2 本以上の構成でルール 1 本の上限が下がるのは、`T` が既定より小さい場合だけである。`T` が `F` 以下なら今の上限 `T` が `ceil(T/2)` に、`F` と `2F` のあいだなら今の上限 `F` が `ceil(T/2)` に下がり(UDP 6000 なら 4096 が 3000)、代わりにルール間の隔離を持つ。
+
+| 予算 `T` | 今のルールごとの上限 | `C` | `N = 1` の上限 | `N = 2` の `q` と 1 本の上限 | `N = 3` の `q` と 1 本の上限 |
+|---|---|---|---|---|---|
+| UDP 2048(256 MiB の VPS の目安) | 2048 | 1024 | 2048 | 1024、1024 | 512、1024 |
+| UDP 4096 | 4096 | 2048 | 4096 | 2048、2048 | 1024、2048 |
+| UDP 6000 | 4096 | 3000 | 6000 | 3000、3000 | 1500、3000 |
+| UDP 8192(既定) | 4096 | 4096 | 8192 | 4096、4096 | 2048、4096 |
+| UDP 16384 | 8192 | 8192 | 16384 | 8192、8192 | 4096、8192 |
+| TCP 1024(256 MiB の VPS の目安) | 1024 | 512 | 1024 | 512、512 | 256、512 |
+| TCP 2048(既定) | 1024 | 1024 | 2048 | 1024、1024 | 512、1024 |
+
+表の「1 本の上限」は、他のルールがフローを持たないときの値である。今の挙動との違いは 3 つである。ルールが 1 本なら、今のルールごとの上限ではなく `T` まで保持できる。ルールが 3 本以上なら、2 本のルールがフラッドを受けても、残りのルールは `q` まで新しいフローを通せる(今は 2 本で `T` を使い切れるので、3 本目は 1 つも通せない)。`T` が既定より小さく、ルールが 2 本以上の構成では、ルール 1 本の上限が下がり、代わりにルール間の隔離を持つ(`T` が `F` 以下なら、今はルール間の隔離を持たない)。`T` が既定以上で、ルールが 2 本の構成では、挙動は今と変わらない。
+
+隔離予約には費用がある。ルールが 2 本以上あると、フローを持たないルールの予約も空きから除くので、他のルールが使っていなくても、1 本のルールが持てる数は `C` で止まる。フローを持たないルールの予約を使わせるには、そのルールがフローを持ち始めたときに他のルールのフローを追い出す必要があり、7a.5 節が禁じている。7a.8 節の完了条件のうち「1 本のルールなら空いている予算をほぼ使い切れ」は、ルールが 1 本(`N = 1`)の構成を指す。
+
+#### 拒否の報告
+
+Resource Guard の拒否は、Admission Policy の drop の種類(`deny`、`allow`、`per_source`、`src_flow`、`new_flow`、`packet`)に数えない。SQLite に累積する drop カウンタにも、admin API の `drops` にも、7a.9 節の fixture にも含めない。drop カウンタは利用者が設定した通信方針による拒否を表し、Resource Guard の拒否は wgft 自身の資源の都合による拒否なので、混ぜると利用者が方針の効き方を読み違えるためである。
+
+`resource.Pool` は、ルールごと、理由(`budget`、`reserve`)ごとの拒否の数を、プロセスが起動してからの累計としてメモリに持つ。SQLite には保存しない。資源の逼迫は今の状態を示す情報であり、再起動をまたいで累積しても意味を持たないためである。
+
+ログは、今と同じく listener ごとに 1 分に 1 回までとし、文言で理由を分ける。例は次のとおりである。
+
+```
+udp/2456: flow budget full (8192 of 8192 in use in this process); dropping new flows
+udp/2456: rule r1 holds 4096 flows and the rest of the budget is reserved for 1 other rule; dropping new flows
+```
+
+admin API には、既存のフィールドを変えずに次の 2 つを加える。`GET /api/v1/rules` と `POST /api/v1/rules/batch` の応答に、プロトコルごとの `in_use` と `limit` を持つ `flow_budget` と、ルール ID から理由ごとの拒否の数への表 `resource_refusals` を加える。Web UI の表示は Phase 6 では変えない。`rule ls --json` は応答をそのまま出力するので、同じキーが増える。kernel モードの server が数えるのは `Relay` のルールの TCP だけであり、`Transparent` のフローは conntrack が持つので、これらのフィールドには現れない。
+
+#### メモリの上限との関係
+
+メモリのソフト上限は、`resource.Limits` の `MemoryLimit` だけから導く。式(`32 MiB + 12 KiB × UDPTotal + 44 KiB × TCPTotal`)、`GOMEMLIMIT` を優先する規則、起動ログと `server check` の `memory soft limit:` の行は変えない。隔離予約は予算 `T` の内側での配分なので、保持するフローの合計の最大もメモリのソフト上限も変わらない。ルールが 1 本の構成では、1 本のルールへのフラッドで予算 `T` のすべてが埋まりうる。そのときの RSS は、今の「全部の上限を埋めた」場合の計測(7 節、既定の上限で約 210 MiB)に近づく。この値はソフト上限の設計が既に前提にしている。
+
+kernel モードの server は Go で UDP のフローを持たないが、ソフト上限の式は UDP の項を含めたままにする。ソフト上限は GC の回収の目安であって、メモリを確保する値ではないため、実際より大きくても害が無い。式をモードで変えると、同じ設定で起動ログの値がモードによって変わる。
+
+Resource Guard は、ヒープの量を見て新しいフローを拒む判定を持たない。フロー数の予算が保持分を抑え、ソフト上限が GC による膨張を抑える、という今の 2 段の役割を変えない。gVisor の状態量のうち、フラグメントの再組み立てのバッファは gVisor の定数で固定されており(7 節)、拒んだ TCP の TIME_WAIT は RST で閉じて残さない(7a.5 節)。Phase 6 はこの 2 つに新しい上限を加えない。netstack の握手途中の TCP の数に上限が効いているかは未確認である。
+
+#### kernel 側の保護
+
+kernel 側の Resource Guard は、観測して提示するだけで、値を変えず、強制も加えない。wgft の方針は、環境を見て挙動を推測せず、明示された値に従うか、提示して止まることである。conntrack の表はホスト全体の資源であり、wgft 以外の通信も同じ表を使うので、wgft が上限を決める立場にない。
+
+kernel 側で Resource Guard が行うことは次のとおりである。
+
+- conntrack の表の上限と件数の読み取り:`internal/platform/linux` の `ReadConntrackUsage` が `nf_conntrack_max` と `nf_conntrack_count` を読む。`server check` は今のとおり件数と上限を表示し、上限が 65536 未満なら、上げる sysctl と `new_flow_rate` の設定を提示する。実際の VPS(メモリ 462 MB)では、上限は 4096 で、この提示が出た。6.1 節が例に挙げた 16384 より小さい上限の VPS もある
+- 起動時の Finding:今の判定は `server check` を実行したときにしか出ない。Phase 6 では、同じ判定を `ip_forward` と同じ起動時の Findings として UI とログにも出す。`server check` を実行しない運用者にも、表が小さいことを UI で示すためである
+- 提示する値:今の提示は `nf_conntrack_max=262144` である。Phase 6 では、ラボで conntrack のエントリ 1 件のカーネルのメモリを測り(未確認)、65536 以上の値を、その値で表が埋まったときのカーネルのメモリと合わせて提示する。今の 262144 は、メモリの小さい VPS では表が埋まったときのカーネルのメモリが大きい可能性がある
+- set の大きさ:`meter_N` と `flows_udp`/`flows_tcp` の大きさ(65535)は、Phase 5 から IR の定数である(7a.9 節)。埋まったときの劣化(送信元ごとの制限が外れ、集約上限に委ねる)は 6.1 節のとおりで、Phase 6 は変えない。set の要素数は監視しない
+
+kernel 側で Resource Guard が行わないことは次のとおりである。
+
+- `nf_conntrack_max` と `nf_conntrack_buckets` を書き換えない(6.1 節)
+- ホストのメモリの量から提示する値を計算しない。提示は判定の閾値とエントリの費用という固定の情報だけから作る
+- wgft のポート全体の同時フロー数を `ct count` で抑える行を加えない。この上限は利用者の設定項目にない新しい通信方針になり、`flows_udp`/`flows_tcp` と同じくテーブルの差し替えで数がリセットされる。`new_flow_rate` と conntrack の表の上限という既存の手段で足りる
+- ルールごとの隔離を持たない(7a.5 節)
+
+kernel モードの `Relay` のルールの接続は、`vpsd` のソケットが終端するので、Go の側の Resource Guard(`proxyrelay` の TCP のプール)で数える。同じ接続は、公開側と wg0 側で conntrack のエントリを 2 件使う(未確認)。
+
+#### agent への適用
+
+agent の userspace dataplane は server と同じ `relay.Manager` を使うので、共有プールと隔離予約、拒否の数とログ、メモリのソフト上限をそのまま使う。agent の `A` は、全体状態のうちその agent のルールで、listener を開けているものである。予約の計算は agent が自分の `resource.Limits` と自分のルールの集合だけから行うので、全体状態にも join protocol にも何も加えない。agent には `AdmissionLimits` が無い。agent から見た送信元は常に `10.200.0.1` であり(7 節)、Admission Policy は server だけで評価するためである。
+
+agent の拒否の数は、Phase 6 では agent のログにだけ出す。ハートビートには加えない。ハートビートに加えるには wire protocol に加算的なフィールドと capability を加える必要があり(7a.6 節)、版と capability の規則の検証を伴う変更は Phase 6 の範囲より大きいためである。
+
+agent の kernel dataplane(Phase 7)では、kernel 側の保護を server と同じく `internal/platform/linux` の読み取りと提示で行い、ルールごとの隔離は持たない。
+
+#### Phase 6 の移行の手順
+
+各段は、7a.8 節の共通の完了条件を満たしてから次へ進む。最初の 2 段は、並行した取得の超過を除いて挙動を変えない。
+
+1. 型を分ける。`internal/flowcap` を `internal/resource` に改め、`AdmissionLimits` を `internal/policy` へ、`LogGate` を `internal/lograte` へ移す。`cmd/wgft`、`planner.Input`、`policy.Build`、userspace backend、`proxyrelay`、agent の `Options` を新しい型に書き換える。完了条件は、`MemoryLimit` の値(既定で 216 MiB、2048 と 1024 で 100 MiB)と、設定層の検査とエラーの文言が変わらないことである
+2. `resource.Pool` を置き、ルールごとの上限を今の値のまま `Pool` で判定する。`relay.Manager` の `ruleFlows` による判定と、`proxyrelay` の listener ごとの `ConnsMax` の判定を置き換える。今の `relay.Manager` は、ルールごとの数を読んでからプロセス全体の枠を取るまでを 1 つの排他の中で行わないので、範囲のルールの複数の listener が同時に受け付けると、ルールごとの上限をわずかに超えうる。`Pool` は両方を 1 つの排他の中で判定するので、この超過が無くなる。拒否の理由ごとの数とログの文言もこの段で加える。完了条件は、同じ入力の列に対して、今の実装と通す・拒むが一致する単体テストを通すことである
+3. `proxyrelay` が accept の後に拒む接続(Admission Policy の拒否と Resource Guard の拒否)を、`SetLinger(0)` による RST で閉じる。今は通常の `Close` で閉じており、6.3 節の「実ソケットでも拒否は `SetLinger(0)` の RST で閉じ」という記述と食い違っている。`relay` の TCP の拒否(`abortRefused`)と同じ閉じ方にそろえる
+4. 判定を隔離予約の式(`C = ceil(T/2)`)に切り替え、コードから従来の下限の定数(`UDPPerRuleFloor`、`TCPPerRuleFloor`)を削除する。7 節の同時フロー数の上限の表と説明、6.2 節と 6.3 節の関連する記述、`lab/lifecycle.sh` の check 5 と `lab/connlimit.sh` の説明を同じコミットで改める。7 節の「ルールごとの上限はプロセス全体の上限の半分になるので、この目安でも 1024 UDP・512 TCP を 1 ルールが保持できる」は、今の実装(2048 と 1024)と食い違っている。この段で、「ルールが 2 本以上あると、ルール 1 本の上限はプロセス全体の上限の半分(切り上げ)になるので、この目安では 1 ルールが 1024 UDP・512 TCP を保持できる。ルールが 1 本なら、プロセス全体の上限のすべてを保持できる」の旨に書き改める。7 節の表と説明からも、下限(4096、1024)の記述を除く
+5. admin API に `flow_budget` と `resource_refusals` を加え、`nf_conntrack_max` の判定を起動時の Findings にも出す。ラボで conntrack のエントリ 1 件のカーネルのメモリを測り、`server check` と起動時の Finding の提示を、65536 以上の値とそのメモリを示す形に改める
+
+#### 利用者から見て変わらないものと変わるもの
+
+CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、`WGFT_MAX_UDP_FLOWS_PER_SOURCE`、`WGFT_MAX_TCP_FLOWS_PER_SOURCE` の意味と既定値と範囲、`GOMEMLIMIT` の扱い、メモリのソフト上限の値、機械向けの CLI 出力、ルールの書き出しと読み込みの形式、admin API v1 の既存のフィールド、join string と agent/server の通信、drop の種類とカウンタは変わらない。`T` が既定以上の構成でルールが 2 本なら、ルールごとに保持できる数も変わらない(`T` が奇数のときだけ 1 増える)。
+
+次の挙動が変わる。
+
+- ルールが 1 本の構成では、そのルールが予算 `T` のすべてを保持できる(既定で UDP 8192、TCP 2048。今は 4096、1024)
+- ルールが 3 本以上の構成では、2 本以上のルールがフラッドを受けても、残りのルールが予約の分だけ新しいフローを通せる
+- `T` が既定より小さい構成でルールが 2 本以上なら、ルール 1 本の上限が `ceil(T/2)` に下がる。対象は、`T` が従来の固定値以下の構成(256 MiB の VPS の目安の UDP 2048、TCP 1024 を含む。今の上限は `T`)と、従来の固定値と既定のあいだの構成(UDP 4097 から 8191、TCP 1025 から 2047。今の上限は従来の固定値)である。代わりに、1 本のルールへのフラッドの最中も、他のルールが新しいフローを通せる
+- 上限で拒んだことのログの文言が、理由(`budget`、`reserve`)で分かれる
+- `proxyrelay` が拒む接続は、クライアントから RST として見える
+- admin API の応答に `flow_budget` と `resource_refusals` が加わり、`rule ls --json` の出力にも同じキーが増える
+- `nf_conntrack_max` が 65536 未満なら、起動時の Findings として UI とログにも警告が出る。`server check` と警告が提示する値は、エントリ 1 件のメモリを添えた形に変わる
+
+#### ホストで確かめることとラボで確かめること
+
+`resource.Pool` は OS に触れない純粋な Go の型なので、式の性質はホストの単体テスト(`go test ./internal/resource/...`)で確かめ、CI でも走らせる。対象は次のとおりである。
+
+- `N = 1` で `T` まで通すこと、他のルールがフローを持たないときに 1 本のルールが `T - (N - 1) × q` まで通し、それが `C` を下回らないこと
+- `TotalMin` から `TotalMax` までのすべての `T` で `C = ceil(T/2)` になり、既定以上の `T` で `C` が今のルールごとの上限を下回らないこと
+- `TotalMin` から `TotalMax` までのすべての `T` と、1 から数百までの `N` で `N × q ≤ T` が成り立つこと
+- 予約の内側にいるルールが、他のルールのフラッドの最中も予約まで通せること
+- `A` の更新と統合で既存のフローを追い出さず、予約を超えたルールが既存のフローが終わるまで拒まれること
+- listener の所属ルールが変わったときに、既存のフローが移動先のルールで数えられること
+- 拒否の理由と数、並行した取得と返却(`-race`)
+- 手順 2 で、今の実装と通す・拒むが一致すること、手順 3 で `proxyrelay` の拒否が RST になること(ループバックのソケットで確かめられる)
+- `MemoryLimit` の値、設定層の検査、`nf_conntrack_max` の判定と提示の文言(`/proc` の読み取り先を差し替えるテストが今もある)
+
+次のことはラボでだけ確かめる。
+
+- RSS の上限:`lab/lifecycle.sh` の check 5 を、1 本のルールを予算 `T` まで埋めてそれを超えるフラッドを重ねる形に改め(今は `C` までを埋める前提で、保持数が 1024 と 4096 を超えないことを確かめている)、server のユーザー空間モードと agent の RSS がソフト上限と余裕の和の内側にあることを確かめる
+- ルール間の隔離:同じ check 5 に、2 本と 3 本のルールで 1 本にフラッドを掛けたまま、他のルールが予約まで新しいフローを通せることと、既存のフローが切れないことを確かめる場面を加える。これが 7a.8 節の Phase 6 の完了条件である
+- 既定より小さい予算の隔離:`WGFT_MAX_TCP_FLOWS=1024` の agent で、ルールが 2 本のとき 1 本が 512 本で止まり、他方が新しい接続を通せること。`WGFT_MAX_TCP_FLOWS=1500` でも、1 本が 750 本で止まること(今は 1024 本)
+- 送信元ごとの上限との組み合わせ:`lab/connlimit.sh` は Admission Policy の試験なので結果は変わらない。agent のルールごとの上限を「`WGFT_MAX_TCP_FLOWS` の半分」と書いた説明を改める
+- kernel モードの `Relay` のルールの接続が conntrack のエントリを何件使うか、conntrack のエントリ 1 件のカーネルのメモリ
 
 ## 8. 接続元 IP の扱い
 
@@ -1260,3 +1441,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - wgft の外で変えられたカーネルの状態へ収束させる(2026-09-20、7a.3 節):ラボで、kernel モードの server が転送している最中に `nft flush ruleset` を実行すると、`table inet wgft` が消えたまま次の管理者の変更まで戻らず、ログにも何も出なかった。30 秒ごとの再試行は `Desired` がすべて `Active` のときは何もせず、カーネルの実際の状態を読む経路が無かったためである。多くの VPS の `/etc/nftables.conf` は `flush ruleset` で始まるので、`systemctl reload nftables` でも同じことが起きる。宣言が変わったときだけ適用する方式から、`Desired` と実際の状態が食い違えばいつでも収束させる方式に改めた。契機は nftables、リンク、IPv4 アドレスの変更の通知で、通知のたびに `Observe` でテーブルの指紋と wg インタフェースの鍵、ポート、アドレス、up の状態、ピアを直前の `Commit` と比べ、食い違えば `Plan` の全体を 1 回だけ公開し直す。通知の取りこぼしに備えて 5 分ごとにも `Observe` する。ラボで分かったことは次のとおりである。`wg set` によるピアと待ち受けポートの変更は netlink の通知を生まないので、安全網が拾う。`flags owner` でテーブルを保持したプロセスが終わってテーブルが消えても nftables の通知は届かないので、backend 全体の失敗は 30 秒ごとの再試行の対象に残した。backend 全体の失敗で配られなかった世代は、試し直しで公開したときにエージェントへ配ることにした。単体テストで、食い違いがあれば 1 回だけ公開し直すこと、食い違いが無ければ何も commit しないこと、自身の `Commit` の直後の `Observe` が食い違いを報告しないこと、他人のインタフェースに触れないこと、userspace backend が通知を購読せず食い違いを報告しないこと、通知のまとめ、安全網、購読の張り直しを確かめた。ラボで、`nft flush ruleset`、`nft delete table inet wgft`、行の削除の後に 1 秒以内に転送が戻ること、`ip link del wgft0` の後にインタフェースが作り直され、エージェントの次のハンドシェイクで転送が戻ること、食い違いの無いあいだルールのハンドルが変わらないこと、他のテーブルの変更で公開し直さないこと、保持の解放の後に `pending` の世代が公開されることを確かめた。未確認:受信バッファの溢れと購読の張り直しのラボでの再現、Linux 6.1 より新しいカーネルでの通知の有無
 - 戻れない地点の後の失敗を試し直す(2026-09-20、7a.3 節、レビュー反映):kernel backend の `Commit` は、nftables の差し替えの後の conntrack の収束、ピアの削除、指紋の読み直しの失敗をログに出すだけで、`Reconciler` はそのトランザクションを完全な成功として扱っていた。ルールを削除した直後に conntrack の収束が失敗すると、新しいフローは止まるが、成立済みのフローは旧い DNAT のまま流れ続け、conntrack は `Observe` の比較の対象ではなく、再試行も走らないので、無関係な次の変更まで直らなかった。指紋の読み直しが失敗すると、それ以降テーブルの食い違いを検出できなかった。これらを修復として `Committed` に明示し、`Reconciler` に「公開済みで修復が残っている」状態を加え、`NeedsRetry` と `apply_error` で示すことにした。修復の再試行は、公開が同じでもテーブルを差し替えずに修復の手順だけを走らせる。指紋の読み直しの失敗は食い違いとして扱い、公開し直す。drop カウンタの読み出しの失敗は修復にしない。単体テストで、3 つの修復の失敗がそれぞれ再試行を求め、同じ公開の再試行が修復を走らせてから状態を戻すこと、修復の無い同じ公開の再試行が何も commit しないことを確かめた。未確認:ラボでの conntrack の収束の失敗の再現
 - Admission Policy のコンパイラを定める(2026-09-20、7a.8 節の Phase 5):7a.9 節を新設した。IR には評価の定数(burst、送信元ごとの表の期限と大きさ、set の大きさ)、段と drop の種類の対応、CIDR の正規化を加えた。評価順は IR の `Order` だけが持ち、ある段が拒んだときは後の段の状態を消費せず、IR に無いルール ID は拒むことを約束にした。`Forwarding` は届け方、Admission Policy は入口の規則であり、両者を混ぜない。nftables のコンパイラは google/nftables に依存しない行の列を返し、`internal/dataplane/linuxkernel/nft` がそれを式へ写す形にした。行の列をホストで実行できる解釈器に流し、共有 fixture で Go の評価器との一致を root なしの単体テストで確かめるためである。Go の評価器は拒んだ段を示す `Decision` を返し、drop も自分で数える。状態を持つ段は、`DataplaneMode` で決まる 1 か所だけで評価する。コードを読んで、今の実装が IR の意味と食い違う点を見つけた。userspace の UDP の中継は deny より前に `packet_rate` を判定する。userspace の送信元ごとの同時フロー数の上限は `new_flow_rate` の後に判定され、drop に数えられない。`Relay` のルールのレートは両モードで効いていない。TCP のルールの `packet_rate` は kernel だけで効く。userspace と `Relay` の listener は IPv6 でも待ち受ける。後の 3 つについて、所有者の決定は次のとおりである。`Relay` のルールには Admission Policy のすべての段を適用する。`packet_rate` は UDP のデータグラムだけに効かせ、TCP のルールの値は受け付けて保存したまま、効かないことを CLI と Web UI で示す(TCP のパケット数は ACK と再送を含み、落としても再送を招くだけのため)。v1 は IPv4 だけを扱い、listener を IPv4 だけで開き、評価器自身も IPv4 でない送信元を拒む。IPv6 の送信元への対応は 13 節に加えた。避けられない差(拒否のネットワーク上の見え方、応答前の UDP パケットと SYN の再送の数え方、drop カウンタの単位、送信元ごとの表の期限と溢れ、補充の境界)は名前付きの許容差とし、等価性は判定、drop の種類、drop カウンタ、レートと同時フロー数の状態を覆い、見え方は覆わないことにした。Resource Guard の判定は Admission Policy がフローを通した後に置き、その拒否は fixture に含めない。未決:`frontend` の package の分け方(Phase 7 の前に決める)。未確認:kernel の meter の要素の期限が `add` で延びないこと、トークンがちょうど補充される時刻での kernel の判定、解釈器の模型と kernel の一致(ラボで確かめる)
+- Resource Guard の再設計を定める(2026-09-20、7a.8 節の Phase 6):7a.10 節を新設した。`flowcap.Limits` を、送信元ごとの上限を持つ `policy.AdmissionLimits` と、プロセス全体の予算とメモリのソフト上限を持つ `resource.Limits` に分け、`internal/flowcap` を `internal/resource` に改める。ルールごとの隔離は、プロトコルごとの `resource.Pool` で、プロセス全体の予算を共有プールとし、受け付け中のルールに隔離予約 `floor((T - C) / (N - 1))` を持たせる形にした。予約は admission の判定にだけ使い、既存のフローを追い出さない。Resource Guard の拒否は Admission Policy の drop に数えず、理由(`budget`、`reserve`)ごとの数をメモリに持ち、ログの文言で理由を分ける。メモリのソフト上限の式と `GOMEMLIMIT` の扱いは変えない。kernel 側は conntrack の表の上限と件数を読んで提示するだけで、値を変えず、新しい強制も加えない。実際の VPS(メモリ 462 MB)では `nf_conntrack_max` が 4096 で、`server check` がこれを上げる提示を出した。agent は同じ `Pool` を使い、予約の計算に全体状態も join protocol も使わない。コードを読んで、今の実装の 3 つの食い違いを見つけ、移行の手順に修正を入れた。`relay.Manager` はルールごとの数の確認とプロセス全体の枠の取得を 1 つの排他の中で行わず、範囲のルールでルールごとの上限をわずかに超えうる(`Pool` で直す)。`proxyrelay` は拒む接続を通常の `Close` で閉じ、6.3 節の RST と食い違う。7 節の「256 MiB の VPS の目安でも 1024 UDP・512 TCP を 1 ルールが保持できる」は、今の式(2048 と 1024)と食い違う。所有者の決定は次のとおりである。隔離予約は上記の式とする。ルールが 2 本以上あるときのルール 1 本の上限は、どの予算でも `C = ceil(T/2)` とし、残りの `floor(T/2)` を他のルールの予約に回す。ルールが 1 本なら予算のすべてを使える。従来の固定値(UDP 4096、TCP 1024)は式に使わない。1 つの式で表し、以前の実装から引き継いだ定数のところで上限が段差を持たないようにするためである。既定の予算はちょうど固定値の 2 倍なので既定の構成の上限は変わらず、上限が下がるのは予算を既定より小さくした複数ルールの構成(UDP 6000 なら 4096 が 3000)だけで、所有者はその範囲でより強い隔離を選んだ。admin API に `flow_budget` と `resource_refusals` を加え、Web UI は Phase 6 では変えない。agent の拒否の数はハートビートで送らず、ログにだけ出す。`nf_conntrack_max` が小さいときの警告を、`ip_forward` と同じく起動時にも出す。提示する値は、ラボでエントリ 1 件の費用を測ったうえで 65536 以上とし、費用を添え、ホストのメモリの量からは計算しない。kernel モードに wgft のポート全体の `ct count` の上限は加えない。未確認:conntrack のエントリ 1 件のカーネルのメモリ、kernel モードの `Relay` の接続が使う conntrack のエントリの数、netstack の握手途中の TCP の数の上限
