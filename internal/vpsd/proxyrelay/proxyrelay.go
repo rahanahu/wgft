@@ -81,8 +81,8 @@ type listener struct {
 // abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う(接続元制限、
 // 同時フロー数の上限)。通常の Close はグレースフルクローズ(FIN の後 TIME_WAIT)になるが、ここは実
 // ソケット(net.Listen で開く公開側の accept)なので、SetLinger(0) で RST を送って即座に終える
-// (仕様 6.3 節「実ソケットでも拒否は SetLinger(0) の RST で閉じ」)。フラッドの間にエフェメラルポート
-// を浪費しないためで、成立した中継の通常のクローズ(ハーフクローズを保つ)には使わない。
+// (仕様 6.3 節「実ソケットでも拒否は SetLinger(0) の RST で閉じ」)。フラッドの間に不要な TIME_WAIT の TCP 状態を大量に残さず、
+// その分のカーネル資源を保持し続けないためで、成立した中継の通常のクローズ(ハーフクローズを保つ)には使わない。
 // internal/dataplane/userspace/relay の同名の考え方(abortRefused)と揃えているが、proxyrelay の
 // accept は常に実ソケットで netstack の aborter を持たないため、ここでは *net.TCPConn だけを扱う。
 func abortRefused(c net.Conn) {
