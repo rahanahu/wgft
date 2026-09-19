@@ -16,10 +16,10 @@ wgft のコードは、設計文書([docs/design.md](design.md))の各節が扱�
 | `internal/reconcile` | 7a.2 | frontend(プロキシモードの中継)と dataplane を固定の順序で適用する `Runtime` を持ちます |
 | `internal/dataplane/userspace` | 6.3 | `vpsd` のユーザー空間モードの転送面です。wireguard-go と netstack のトンネル(`utun`)、接続元制限とレート制限の評価器(`srcpolicy`)、中継(`relay`)を束ね、`internal/planner` の `Plan` から待ち受けと評価器を組み立てます |
 | `internal/dataplane/userspace/relay` | 6.3, 7 | エージェントの netstack 上のリスナーと LAN 内 `target` への中継を持ちます。`vpsd` のユーザー空間モードも、公開ポートの待ち受けと netstack 越しのエージェントへの中継に同じパッケージを使います |
+| `internal/dataplane/userspace/tunnel` | 7 | エージェント側が wireguard-go と gVisor の netstack でユーザー空間に持つトンネルです。`internal/dataplane/userspace/utun`(vpsd 側)と対になります |
 | `internal/vpsd/stream` | 5.2 | エージェントごとの stream(WebSocket)を持ち、全体状態の配信とハートビートの記録を行います |
 | `internal/vpsd/agentapi` | 5.1 | エージェント用 API(登録と stream の公開エンドポイント、自己署名証明書)を持ちます |
 | `internal/vpsd/store` | 9 | vpsd の永続状態を SQLite 1 ファイルに保存します |
-| `internal/agent/tunnel` | 7 | wireguard-go と gVisor の netstack でユーザー空間にトンネルを持ちます |
 | `internal/agent/credentials` | 9 | エージェントの認証情報ファイル(`agent.json`)を扱います。設計文書では状態ファイルと呼びます |
 | `internal/vpsd/admin` | 10, 11 | 管理用 API と Web UI を持ちます。既定は Unix ソケットで待ち受けます |
 | `internal/vpsd/conncheck` | 10.1 | 管理者が UI から行う疎通確認(vpsd からエージェントのリスナーへの TCP 接続)を持ちます |
@@ -52,7 +52,7 @@ CLI の `wgft rule add`(`cmd/wgft/rule.go` の `newRuleAddCmd`)は `proto.Rule` 
 
 `internal/agent` の `Run`(`agent.go`)は、まず `credentials.Acquire` で認証情報ファイルの隣の `.lock` に排他をかけ、二重起動を検出します。続けて `credentials.LoadOrNew` で `agent.json` を読み、鍵が無ければ生成し、未登録であれば `ensureRegistered` が `WGFT_JOIN` を使って初回登録を行います。
 
-認証情報ファイルに前回の全体状態(`LastState`)が残っていれば、`runtime.apply` が `internal/agent/tunnel` の `New` でトンネルを先に立て、`internal/dataplane/userspace/relay` の `Manager.Apply` でリスナーを開きます。これは、vpsd が停止中でも VPS 側に wg ピアが残っていれば転送が復旧するようにするための順序です。
+認証情報ファイルに前回の全体状態(`LastState`)が残っていれば、`runtime.apply` が `internal/dataplane/userspace/tunnel` の `New` でトンネルを先に立て、`internal/dataplane/userspace/relay` の `Manager.Apply` でリスナーを開きます。これは、vpsd が停止中でも VPS 側に wg ピアが残っていれば転送が復旧するようにするための順序です。
 
 並行して `internal/agent/stream.go` の `streamLoop` が vpsd の `/api/v1/agents/stream` に WebSocket で接続し、恒久トークンで認証したうえで自分の wg 公開鍵を宣言します。
 
