@@ -38,7 +38,7 @@ jobs:
         run: |
           for target in windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/wgft
-            GOOS=${target%/*} GOARCH=${target#*/} go vet ./cmd/... ./internal/agent/... ./internal/flock/...
+            GOOS=${target%/*} GOARCH=${target#*/} go vet ./cmd/... ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/flock/...
           done
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
@@ -47,7 +47,8 @@ jobs:
 
   windows-test:
     # Runs the packages that actually build and pass on native Windows today: the agent
-    # (including its credentials/ACL handling), flock, and the CLI. internal/vpsd and its
+    # (including its credentials/ACL handling), the relay it shares with the server's userspace
+    # mode, flock, and the CLI. internal/vpsd and its
     # subpackages are Linux-only (kernel WireGuard, nftables) and are not part of this job;
     # the build-test job's cross-build step already keeps ./cmd/wgft buildable for Windows,
     # this job additionally runs the Windows-specific code paths.
@@ -58,7 +59,7 @@ jobs:
         with:
           go-version: "1.26.x"
       - name: test
-        run: go test ./internal/agent/... ./internal/flock/... ./cmd/wgft/...
+        run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/flock/... ./cmd/wgft/...
 
   release-snapshot:
     # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,
