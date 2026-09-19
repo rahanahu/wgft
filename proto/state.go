@@ -30,6 +30,12 @@ type State struct {
 	Generation uint64      `json:"generation"`
 	WG         WGConfig    `json:"wg"`
 	Rules      []AgentRule `json:"rules"`
+
+	// ServerProtocolVersion/ServerCapabilities は、その stream 接続で選んだ版と server の機能
+	// (仕様 7a.6 節)。agent が legacy v0 なら vpsd はこのフィールドを載せない(nil のまま)。
+	// *[]string にしてあるのは Message.Capabilities と同じ理由(空配列と不在の区別)
+	ServerProtocolVersion *int      `json:"server_protocol_version,omitempty"`
+	ServerCapabilities    *[]string `json:"server_capabilities,omitempty"`
 }
 
 // ForAgent はエージェントに配る部分だけを取り出す。

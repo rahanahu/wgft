@@ -47,10 +47,17 @@ func (b *fakeBackend) SetPublicKey(agent string, key wgtypes.Key) error {
 	b.keys[agent] = key
 	return nil
 }
-func (b *fakeBackend) StateFor(agent string) (*proto.State, error) {
+func (b *fakeBackend) StateFor(agent string, sel proto.Negotiated) (*proto.State, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return &proto.State{Generation: b.gen, WG: proto.WGConfig{Address: "10.200.0.2/24"}}, nil
+	st := &proto.State{Generation: b.gen, WG: proto.WGConfig{Address: "10.200.0.2/24"}}
+	if !sel.Legacy {
+		version := sel.Version
+		caps := proto.SupportedCapabilities
+		st.ServerProtocolVersion = &version
+		st.ServerCapabilities = &caps
+	}
+	return st, nil
 }
 func dial(t *testing.T, url, token string) (*websocket.Conn, *http.Response, error) {
 	t.Helper()
@@ -237,5 +244,115 @@ func TestHeartbeatResetsTimeout(t *testing.T) {
 	}
 	if !h.Status("home").Connected {
 		t.Error("connection kept alive by heartbeats must stay connected")
+	}
+}
+
+// intPtr/strSlicePtr build the pointer types Message uses to distinguish "absent" from
+// "present but empty" (proto/stream.go).
+func intPtr(i int) *int                { return &i }
+func strSlicePtr(s []string) *[]string { return &s }
+
+// TestStreamProtocolNegotiationV1 confirms a v1 agent (protocol_min/max=1) gets the version
+// it asked for back on the state message, and that the hub records it (spec 7a.6 section).
+func TestStreamProtocolNegotiationV1(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, gen: 1}
+	h := New(b)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	key, _ := wgtypes.GeneratePrivateKey()
+	c, _, err := dial(t, url, "tok-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	sendJSON(t, c, proto.Message{
+		Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String(),
+		ProtocolMin: intPtr(1), ProtocolMax: intPtr(1), Capabilities: strSlicePtr(nil),
+	})
+	m, err := readMsg(t, c)
+	if err != nil || m.Type != proto.MsgState {
+		t.Fatalf("first state: %+v %v", m, err)
+	}
+	if m.State.ServerProtocolVersion == nil || *m.State.ServerProtocolVersion != 1 {
+		t.Errorf("want server_protocol_version=1, got %v", m.State.ServerProtocolVersion)
+	}
+	if m.State.ServerCapabilities == nil {
+		t.Errorf("want a non-nil (possibly empty) server_capabilities, got nil")
+	}
+	st := h.Status("home")
+	if st.Protocol.Legacy || st.Protocol.Version != 1 || st.Protocol.AgentMin != 1 || st.Protocol.AgentMax != 1 {
+		t.Errorf("hub did not record the negotiated protocol: %+v", st.Protocol)
+	}
+}
+
+// TestStreamProtocolNegotiationLegacy confirms a pubkey message without protocol_min/max (an
+// old agent) is treated as legacy v0: the state it receives carries no version fields, and the
+// hub records it as legacy (spec 7a.6 section).
+func TestStreamProtocolNegotiationLegacy(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, gen: 1}
+	h := New(b)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	key, _ := wgtypes.GeneratePrivateKey()
+	c, _, err := dial(t, url, "tok-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	sendJSON(t, c, proto.Message{Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String()})
+	m, err := readMsg(t, c)
+	if err != nil || m.Type != proto.MsgState {
+		t.Fatalf("first state: %+v %v", m, err)
+	}
+	if m.State.ServerProtocolVersion != nil {
+		t.Errorf("legacy agent: want no server_protocol_version, got %v", *m.State.ServerProtocolVersion)
+	}
+	if m.State.ServerCapabilities != nil {
+		t.Errorf("legacy agent: want no server_capabilities, got %v", *m.State.ServerCapabilities)
+	}
+	if st := h.Status("home"); !st.Protocol.Legacy {
+		t.Errorf("hub did not record the agent as legacy: %+v", st.Protocol)
+	}
+}
+
+// TestStreamProtocolMismatch confirms that an agent whose declared range does not overlap the
+// server's is refused with CloseProtocolMismatch naming both ranges, and is never registered as
+// connected (spec 7a.6 section: "共通部分が無ければ、server は双方の範囲を示すエラーで stream を断る").
+func TestStreamProtocolMismatch(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, gen: 1}
+	h := New(b)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	key, _ := wgtypes.GeneratePrivateKey()
+	c, _, err := dial(t, url, "tok-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	sendJSON(t, c, proto.Message{
+		Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String(),
+		ProtocolMin: intPtr(2), ProtocolMax: intPtr(2),
+	})
+	_, err = readMsg(t, c)
+	if websocket.CloseStatus(err) != websocket.StatusCode(proto.CloseProtocolMismatch) {
+		t.Fatalf("want CloseProtocolMismatch, got %v", err)
+	}
+	var ce websocket.CloseError
+	if errors.As(err, &ce) {
+		if !strings.Contains(ce.Reason, "[1,1]") || !strings.Contains(ce.Reason, "[2,2]") {
+			t.Errorf("close reason should name both ranges: %q", ce.Reason)
+		}
+	}
+	if h.Status("home").Connected {
+		t.Error("a version-mismatched agent must not be registered as connected")
 	}
 }

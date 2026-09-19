@@ -73,4 +73,18 @@ func (d *Daemon) SetPublicKey(agent string, key wgtypes.Key) error {
 	return d.reconcileWG()
 }
 
-func (d *Daemon) StateFor(agent string) (*proto.State, error) { return d.AgentState(agent) }
+// StateFor は stream.Backend の実装。AgentState が組み立てた全体状態に、sel(この接続で交渉した
+// 版と機能。仕様 7a.6 節)を足す。sel.Legacy な agent には版のフィールドを載せない(今の形のまま)。
+func (d *Daemon) StateFor(agent string, sel proto.Negotiated) (*proto.State, error) {
+	st, err := d.AgentState(agent)
+	if err != nil {
+		return nil, err
+	}
+	if !sel.Legacy {
+		version := sel.Version
+		caps := proto.SupportedCapabilities
+		st.ServerProtocolVersion = &version
+		st.ServerCapabilities = &caps
+	}
+	return st, nil
+}

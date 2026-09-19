@@ -68,6 +68,10 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 			log.Printf("stream: superseded by another connection for the same agent: double start or copied credentials (agent.json); reconnecting in %s", backoff)
 		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseRevoked):
 			log.Printf("stream: permanent token was revoked; retrying in %s", backoff)
+		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseProtocolMismatch):
+			// 版の範囲に共通部分が無い(仕様 7a.6 節)。通常のバックオフで再接続を続ける
+			// (どちらかを上げない限り解決しないが、無闇に速く再試行しても意味が無い)
+			log.Printf("stream: %v; the agent or server needs an upgrade to share a protocol version; retrying in %s", err, backoff)
 		default:
 			log.Printf("stream: disconnected: %v; reconnecting in %s", err, backoff)
 		}
@@ -106,7 +110,14 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 	defer ws.CloseNow()
 	ws.SetReadLimit(4 << 20)
 
-	if err := writeJSON(ctx, ws, proto.Message{Type: proto.MsgPublicKey, PublicKey: rt.priv.PublicKey().String()}); err != nil {
+	// 版と機能の交渉(仕様 7a.6 節)。agent は話せる範囲を毎回そのまま宣言する。今のところ
+	// capabilities の語彙は無いので常に空配列を送り、legacy v0(語彙が無いこと自体)とは区別する
+	protoMin, protoMax := proto.SupportedProtocol.Min, proto.SupportedProtocol.Max
+	caps := proto.SupportedCapabilities
+	if err := writeJSON(ctx, ws, proto.Message{
+		Type: proto.MsgPublicKey, PublicKey: rt.priv.PublicKey().String(),
+		ProtocolMin: &protoMin, ProtocolMax: &protoMax, Capabilities: &caps,
+	}); err != nil {
 		return err
 	}
 	log.Printf("stream: connected to %s; public key sent", f.Endpoint)
@@ -143,6 +154,14 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 		if m.Type != proto.MsgState || m.State == nil {
 			continue
 		}
+		if first {
+			// 版の交渉の検査とログは、この接続で受け取る最初の全体状態でだけ行う
+			// (以後の全体状態も同じ版で来るはずなので、メッセージごとには行わない。仕様 7a.6 節)
+			if err := checkServerProtocolVersion(proto.SupportedProtocol, m.State); err != nil {
+				return err
+			}
+			log.Printf("stream: server selected protocol %s", protocolLabelForState(m.State))
+		}
 		if !first && m.State.Generation < rt.generation() {
 			log.Printf("stream: generation %d is older than local %d; dropping", m.State.Generation, rt.generation())
 			continue
@@ -153,6 +172,29 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 		}
 		notifyNonBlocking(applyNotify)
 	}
+}
+
+// checkServerProtocolVersion は、server が選んだ版(state.ServerProtocolVersion)が agent 自身の
+// 範囲に入っていることを確かめる(仕様 7a.6 節)。フィールドが無ければ legacy v0 の server なので
+// 検査しない。server は本来 local と agent の範囲の共通部分からしか選ばないので、ここでの失敗は
+// server の実装違反を示す防御的な検査である。
+func checkServerProtocolVersion(local proto.ProtocolRange, st *proto.State) error {
+	if st.ServerProtocolVersion == nil {
+		return nil
+	}
+	v := *st.ServerProtocolVersion
+	if v < local.Min || v > local.Max {
+		return fmt.Errorf("server selected protocol version %d, outside the agent's supported range [%d,%d]", v, local.Min, local.Max)
+	}
+	return nil
+}
+
+// protocolLabelForState はログ用の短い表記("legacy v0" または "v1")。
+func protocolLabelForState(st *proto.State) string {
+	if st.ServerProtocolVersion == nil {
+		return "legacy v0"
+	}
+	return fmt.Sprintf("v%d", *st.ServerProtocolVersion)
 }
 
 // notifyNonBlocking はサイズ 1 のチャネルへ待たずに知らせる。既に 1 件溜まっていれば何もしない

@@ -16,6 +16,14 @@ type Message struct {
 	PublicKey string     `json:"public_key,omitempty"` // MsgPublicKey:wg 公開鍵(base64)
 	State     *State     `json:"state,omitempty"`      // MsgState
 	Heartbeat *Heartbeat `json:"heartbeat,omitempty"`  // MsgHeartbeat
+
+	// ProtocolMin/ProtocolMax/Capabilities は MsgPublicKey に載る版と機能の交渉(仕様 7a.6 節)。
+	// ポインタと *[]string にしてあるのは、フィールドが無いこと(legacy v0 の agent)と、
+	// 空配列(版はあるが追加の機能は無い)を JSON の上で区別するため。encoding/json の
+	// omitempty は空スライスも「空」として省いてしまうので、[]string のままでは区別できない
+	ProtocolMin  *int      `json:"protocol_min,omitempty"`
+	ProtocolMax  *int      `json:"protocol_max,omitempty"`
+	Capabilities *[]string `json:"capabilities,omitempty"`
 }
 
 // Heartbeat はエージェントの状態(仕様 5.2 節)。
@@ -51,4 +59,5 @@ const (
 	CloseSuperseded       = 4000 // 同じエージェントの新しい接続に置き換わった
 	CloseRevoked          = 4001 // 恒久トークンが無効化された
 	CloseHeartbeatTimeout = 4002 // ハートビート(30 秒間隔)が 90 秒間届かなかった
+	CloseProtocolMismatch = 4003 // 版の範囲(protocol_min/protocol_max)の共通部分が無い(仕様 7a.6 節)
 )

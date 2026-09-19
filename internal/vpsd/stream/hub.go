@@ -31,8 +31,10 @@ type Backend interface {
 	OtherAgentHasKey(agent string, key wgtypes.Key) (bool, error)
 	// SetPublicKey は宣言された公開鍵を保存し、wg0 のピアを置き換える(初回なら作る)。
 	SetPublicKey(agent string, key wgtypes.Key) error
-	// StateFor はそのエージェントに配る全体状態。
-	StateFor(agent string) (*proto.State, error)
+	// StateFor はそのエージェントに配る全体状態。sel はその stream 接続で選んだ版と、agent が
+	// 宣言した機能(仕様 7a.6 節)。sel.Legacy なら agent は legacy v0 なので、実装は
+	// server_protocol_version/server_capabilities を全体状態に載せない
+	StateFor(agent string, sel proto.Negotiated) (*proto.State, error)
 }
 
 // Status は vpsd が UI に見せる、エージェントごとの stream の状態。
@@ -42,6 +44,8 @@ type Status struct {
 	ConnectedAt   time.Time
 	LastHeartbeat time.Time
 	Heartbeat     *proto.Heartbeat
+	// Protocol はこの接続で交渉した版(仕様 7a.6 節)。未接続なら zero 値(Legacy=false, Version=0)
+	Protocol proto.Negotiated
 }
 
 type conn struct {
@@ -50,6 +54,9 @@ type conn struct {
 	cancel   context.CancelFunc
 	sendMu   sync.Mutex
 	timedOut atomic.Bool // heartbeatTimer が閉じた(ログの重複を避けるための印)
+	// sel はこの接続で交渉した版と機能。serve() が接続の確立前に一度だけ設定し、以後は
+	// 読み取り専用として扱う(Push からも参照するが、書き込みは無いので mu は要らない)
+	sel proto.Negotiated
 }
 
 // heartbeatInterval はエージェントがハートビートを送る間隔(仕様 5.2 節)。
@@ -162,6 +169,18 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		return
 	}
 
+	// 2a. 版の交渉(仕様 7a.6 節)。pubkey に protocol_min/protocol_max が無ければ legacy v0 として
+	// 扱い、範囲の検査はしない。共通部分が無ければ、ピアの置き換えに進まず双方の範囲を示して断る
+	sel, ok := negotiateVersion(first)
+	if !ok {
+		reason := fmt.Sprintf("no overlapping protocol version: server supports [%d,%d], agent supports [%d,%d]",
+			proto.SupportedProtocol.Min, proto.SupportedProtocol.Max, *first.ProtocolMin, *first.ProtocolMax)
+		log.Printf("stream: %s: %s; refusing", agent, reason)
+		ws.Close(websocket.StatusCode(proto.CloseProtocolMismatch), reason)
+		return
+	}
+	c.sel = sel
+
 	// 3-5 は同一エージェントで直列化:ピアの置き換え → 旧接続の切断 → 全体状態の送信
 	lock := h.agentLock(agent)
 	lock.Lock()
@@ -182,12 +201,12 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		log.Printf("stream: %s: closing old connection (%s) as superseded", agent, old.from)
 	}
 	h.conns[agent] = c
-	h.status[agent] = &Status{Connected: true, StreamFrom: from, ConnectedAt: time.Now()}
+	h.status[agent] = &Status{Connected: true, StreamFrom: from, ConnectedAt: time.Now(), Protocol: sel}
 	h.mu.Unlock()
 	if h.OnStreamConnect != nil {
 		h.OnStreamConnect(agent, from)
 	}
-	st, err := h.backend.StateFor(agent)
+	st, err := h.backend.StateFor(agent, sel)
 	if err == nil {
 		err = c.send(ctx, proto.Message{Type: proto.MsgState, State: st})
 	}
@@ -197,7 +216,8 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		h.drop(agent, c)
 		return
 	}
-	log.Printf("stream: %s connected (%s, sent generation %d)", agent, from, st.Generation)
+	// 選んだ版は接続ごとに 1 回だけログに出す(仕様 7a.6 節。メッセージごとには出さない)
+	log.Printf("stream: %s connected (%s, protocol %s, sent generation %d)", agent, from, protocolLabel(sel), st.Generation)
 
 	// ハートビートを受け続ける。期限内にメッセージが来なければ vpsd 側から理由コード付きで閉じる。
 	// readJSON の ctx を期限で切ると、このライブラリは内部で無条件に接続を閉じてしまい
@@ -251,7 +271,7 @@ func (h *Hub) Push(agent string) {
 	if c == nil {
 		return
 	}
-	st, err := h.backend.StateFor(agent)
+	st, err := h.backend.StateFor(agent, c.sel)
 	if err != nil {
 		log.Printf("stream: %s: state: %v", agent, err)
 		return
@@ -304,6 +324,35 @@ func (c *conn) send(ctx context.Context, m proto.Message) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	return c.ws.Write(ctx, websocket.MessageText, b)
+}
+
+// negotiateVersion は pubkey メッセージから、この接続の版と機能を決める(仕様 7a.6 節)。
+// m に protocol_min/protocol_max が無ければ legacy v0 とみなし、ok は常に true。両方あれば
+// proto.SupportedProtocol との共通部分の最大を選ぶ。共通部分が無ければ ok は false で、
+// 呼び出し元は m.ProtocolMin/m.ProtocolMax(非 nil であることは保証される)を使って断りの
+// メッセージを組み立てる。
+func negotiateVersion(m proto.Message) (sel proto.Negotiated, ok bool) {
+	if m.ProtocolMin == nil || m.ProtocolMax == nil {
+		return proto.Negotiated{Legacy: true}, true
+	}
+	remote := proto.ProtocolRange{Min: *m.ProtocolMin, Max: *m.ProtocolMax}
+	version, overlap := proto.SelectProtocolVersion(proto.SupportedProtocol, remote)
+	if !overlap {
+		return proto.Negotiated{}, false
+	}
+	sel = proto.Negotiated{Version: version, AgentMin: remote.Min, AgentMax: remote.Max}
+	if m.Capabilities != nil {
+		sel.Capabilities = *m.Capabilities
+	}
+	return sel, true
+}
+
+// protocolLabel はログ用の短い表記("legacy v0" または "v1")。
+func protocolLabel(sel proto.Negotiated) string {
+	if sel.Legacy {
+		return "legacy v0"
+	}
+	return fmt.Sprintf("v%d", sel.Version)
 }
 
 func readJSON(ctx context.Context, ws *websocket.Conn, v any) error {

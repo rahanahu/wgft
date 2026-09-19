@@ -41,6 +41,13 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 			info.Tunnel = st.Heartbeat.Tunnel
 			info.Rules = st.Heartbeat.Rules
 		}
+		if st.Connected {
+			// 版の交渉(仕様 7a.6 節)。観測用の加算フィールドで、管理用 API の契約は変えない
+			info.ProtocolVersion = st.Protocol.Version
+			info.AgentProtocolLegacy = st.Protocol.Legacy
+			info.AgentProtocolMin = st.Protocol.AgentMin
+			info.AgentProtocolMax = st.Protocol.AgentMax
+		}
 		if dev != nil && a.PublicKey != "" {
 			for _, p := range dev.Peers {
 				if p.PublicKey.String() == a.PublicKey {

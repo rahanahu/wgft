@@ -139,14 +139,24 @@ stream は双方向で、エージェントは自分の公開鍵を、`vpsd` は
 
 接続時:
 
-- エージェントは `/api/v1/agents/stream` に WebSocket で接続し、恒久トークンで認証したのち、最初のメッセージで自分の wg 公開鍵を送る
+- エージェントは `/api/v1/agents/stream` に WebSocket で接続し、恒久トークンで認証したのち、最初のメッセージ(`pubkey`)で自分の wg 公開鍵と、話せる版の範囲・機能を送る(版と機能の交渉。下記)
 - `vpsd` は宣言された公開鍵を検証する。32 バイトの正しい形式であること、他のエージェントの保存値ともサーバ公開鍵とも一致しないことを確認し、違えば接続を拒否する。同じ公開鍵のピアを 2 つ持てず、後から設定したピアが先のピアを上書きするため、他エージェントの鍵を受け入れるとそのトンネルが壊れる
+- `vpsd` は agent の範囲と自分の範囲の共通部分を取り、この接続の版を決める。共通部分が無ければ、ピアの置き換えに進まず双方の範囲を示すエラーで接続を拒否する(下記)
 - `vpsd` は保存している公開鍵と違えば、そのエージェントのピアを新しい公開鍵で置き換える。初回接続ならピアを作る
-- `vpsd` は続けて全体状態を送る
+- `vpsd` は続けて全体状態を送る。全体状態には、この接続で選んだ版と `vpsd` の機能を含める(下記)
 
-処理の順序は、認証、鍵の検証、ピアの置き換え、旧接続の切断、全体状態の送信で固定する。
-鍵の検証に失敗した接続は旧接続に影響を与えない。
+処理の順序は、認証、鍵の検証、版と機能の交渉、ピアの置き換え、旧接続の切断、全体状態の送信で固定する。
+鍵の検証と版の交渉に失敗した接続は旧接続に影響を与えない。
 同一エージェントの接続処理は `vpsd` 内で直列化する。
+
+版と機能の交渉(仕様の正本は 7a.6 節。ここでは stream の手順としての要点だけを書く):
+
+- `pubkey` メッセージは、話せる版の範囲を整数 `protocol_min`/`protocol_max` で、機能を文字列の配列 `capabilities` で持つ。両方のフィールドが無ければ、そのエージェントは版のフィールドを持たない legacy v0 として扱い、共通部分の計算はしない
+- `vpsd` は `protocol_min`/`protocol_max` があれば、`proto.SupportedProtocol`(現在は 1 から 1)との共通部分のうち最大の版をこの接続の版として選ぶ。共通部分が無ければ、専用の WebSocket の理由コードで、双方の範囲を含む理由文字列を添えて閉じる。エージェントは指数バックオフ(通常の再接続と同じ)で再接続を続けるだけで、版を上げない限り解決しない
+- 全体状態(`state`)は、agent が legacy v0 でない限り、選んだ版を整数 `server_protocol_version` で、`vpsd` の機能を文字列の配列 `server_capabilities` で持つ。legacy v0 の agent にはどちらのフィールドも載せない(今の形のまま送る)
+- `capabilities`/`server_capabilities` は、空配列(版はあるが追加の機能は無い)とフィールドの不在(legacy v0)を区別する。両者を JSON の `omitempty` だけで区別すると空配列も省かれてしまうため、実装はポインタ型で持つ
+- エージェントは、返ってきた `server_protocol_version`(フィールドがあれば)が自分の範囲に入っていることを確かめる。外れていれば接続を切り、通常のバックオフで再接続する(server の実装が誤って範囲外の版を選んだ場合の防御であり、通常は起きない)
+- 選んだ版は、接続ごとに 1 回だけ両側のログに出す(メッセージごとには出さない)
 
 stream はエージェントごとに 1 本だけである。
 
@@ -194,9 +204,13 @@ stream はエージェントごとに 1 本だけである。
     "udp_timeout": 30,
     "udp_timeout_stream": 120
   },
-  "rules": [ ... ]
+  "rules": [ ... ],
+  "server_protocol_version": 1,
+  "server_capabilities": []
 }
 ```
+
+`server_protocol_version`/`server_capabilities` は、agent が legacy v0 なら載らない(上記)。`pubkey` メッセージの側も同じ形で `protocol_min`/`protocol_max`/`capabilities` を持つ(7a.6 節)。
 
 ### 5.3 ルールのスキーマ
 
@@ -1066,3 +1080,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - 内部アーキテクチャの再設計を追加(2026-09-19、v1.0 の前に再設計するという決定を受けて):7a 節を新設した。Rule から Forwarding(Transparent/Relay)、SourceMetadata(None/ProxyV2)、DataplaneMode(Kernel/Userspace)を分け、「kernel」という語をルール単位の選択と server・agent 全体の選択の両方に使わないようにした。転送の意味(vps_mode)と送信元の情報(proxy_protocol)は今の外部仕様でも別の軸(vps_mode=proxy かつ proxy_protocol=false/true はどちらも有効)なので、内部モデルも 2 つの型に分け、外部表現をロスなく写せるようにした。送信元制限とレートをまとめた Admission Policy という中間表現を導入し、今は `internal/vpsd/nft`、`internal/vpsd/srcpolicy`、`internal/vpsd/conntrack` の `allowed`、`internal/vpsd/proxyrelay` の `sourceAllowed` の 4 か所に分かれている許可拒否の判定を、1 つの IR から 2 つのコンパイラ(nftables、Go)を作る形に集約する計画にした。送信元 IP ごとの同時フロー数の上限(`WGFT_MAX_*_FLOWS_PER_SOURCE`)は Admission Policy に一本化し(kernel は `ct count`、userspace は Go のカウンタで同じ方針を実装する)、Resource Guard はプロセス全体の予算・メモリ・ルールごとの隔離・kernel の conntrack とシステムの予算に絞った。今の `flowcap.Limits` はこの 2 つを混ぜているため、Phase 6 で `AdmissionLimits` と `ResourceLimits` に分けることにし、それまで `internal/flowcap` の名前は変えない。Resource Guard に kernel/userspace 共通の Go interface は持たせない。Desired・Validated・Prepared・Active・Retiring の状態遷移を定め、Prepare は元に戻せる資源の確保、Commit は nftables の 1 トランザクションと Active 世代の更新に限り、汎用の 2 相コミットは持たないことにした。この区別は、プロキシの listener 管理が新しい待ち受けを先に開き差し替えの成否で開閉を分ける今の実装(6.1 節)を一般化したものである。失敗の粒度は失敗の範囲で決めることに確定した。1 つの listener の bind や 1 つの target の名前解決のようなルールに閉じた失敗は、そのルールだけを fail-closed(他のルールの commit 後に新規フローを拒む。既存のフローは安全なら Retiring として残す)にして他のルールの Active 化と世代の前進を妨げず、共有資源や backend 全体に及ぶ失敗(共有 set が作れない、WireGuard の設定誤り、nftables のトランザクション誤り)は世代全体を commit しないことにした。fail-closed は、nftables が全体を毎回組み立てて差し替える性質(6.1 節)を使い、次の全体差し替えにそのルールの新しい dispatch を含めないだけで実現でき、部分的な nft の書き換えは要らない。admin API v1 にはルールごとの `apply_state`・`reason`・`desired_generation`・`active_generation` と、`Desired` に無いのに残っている資源(`active_only`/`retiring`)を観測する経路を加算的に追加することにした。外部契約(CLI、`WGFT_*`、rule import/export、admin API v1、agent/server の通信、既存データの置き場からの更新)は維持し、agent と server が別々に更新される前提で、agent の `pubkey` メッセージへの `protocol_version`/`capabilities`、server の `state` メッセージへの `server_protocol_version`/`server_capabilities` という対称な追加による版と機能の交渉を設けることにした。フィールドの不在は版 0、空の配列は「版はあるが追加機能は無い」を表し、両者を混同しない。旧い agent のサポートは製品の版ではなく `protocol_version` で決め、server は現在と直前の 2 つの版を必ず支え、`protocol_version` の無い(0 の)agent は v1.0.x の間は必ず支えて v1.1 以降で落としてよく、capability の追加だけでは版を上げず、旧い agent が新機能を表せない場合は黙って downgrade せずそのルールを理由付きの not active にすることにした。Reconciler は共有 package `internal/reconcile` に置き、Observe → diff → Prepare → Commit の骨格を server と agent で共有することにした。package 配置は `internal/model`、`internal/policy`、`internal/planner`、`internal/resource`、`internal/reconcile`、`internal/dataplane/{userspace,linuxkernel}`、`internal/frontend`、`internal/platform/{linux,windows,darwin}` を目標とし、`internal/dataplane/linuxkernel` が `internal/vpsd` に依存しない一方向の依存規則を定め、agent の kernel dataplane(v1.1 以降)が同じ実装を再利用できるようにした。移行は model/policy/plan、wire protocol の版交渉、userspace backend 化、VPS kernel backend 化、トランザクショナルな収束、共通の Admission Policy、Resource Guard の再設計の順に進め、各段階で既存のラボの結合テストと策定中の lifecycle テストを通す。未決:`capabilities`/`server_capabilities` の語彙(機能を追加する時点で個別に定める)、ルールごとの隔離を共有プールと隔離予約へ置き換える具体式(Phase 6、隔離予約は admission 時の予約であり既存フローを追い出す保証にはしない)、`frontend` の package の分け方(Phase 5 で実装しながら決める)
 - Runtime として frontend と dataplane の participant を束ねる(2026-09-19、レビュー反映):7a.2、7a.3、7a.7 を改めた。`Backend`(kernel/userspace の dataplane)と、Observe/Prepare/Commit/Rollback を持つ transaction の participant は別の概念であり、`Relay` の listener 集合のような frontend 側の資源も participant になりうる。`Reconciler` は `Backend` を直接駆動せず、frontend と dataplane の participant を固定順序(frontend の `Prepare` → dataplane の `Commit` → frontend の `Commit`、失敗時は逆順の `Rollback`)で束ねた `Runtime` を駆動する形に改めた。今の `internal/vpsd/proxyrelay` の `Prepare`/`Commit`/`Rollback` と `apply.go` の呼び出し順(`proxyrelay.Prepare` → `dp.ApplyNFT` → `proxyrelay.Commit`/`Rollback`)がその実例である。`Commit` の定義も「nftables の 1 トランザクション」から「dataplane と frontend の participant が用意した状態を公開し `Active` を更新すること(kernel backend ではその中核が nftables の 1 トランザクション)」という backend 非依存の言い方に改めた。`internal/reconcile` は participant の interface だけを知り、`frontend`/`dataplane` の具体的な実装には依存しないという依存規則を 7a.7 節に追加した。`Relay` のルールを fail-closed にする操作を `StopAccepting`(待ち受けだけを閉じる)と `Retire`(安全でなくなった接続だけを閉じ、残りは自然に終わるまで待つ)に分け、ルールのこの 2 つは fail-closed のときにだけ使い、ルールの削除と無効化は今と同じく成立済みの接続も切る(kernel の conntrack 収束と同じ)。fail-closed にしたルールについては、conntrack の収束も直前の `Active` の値で判定し、安全な成立済みフローを消さないことにした。wire protocol は、`server_protocol_version` が server の実装する最新版ではなく、その接続で agent と server が互いに支える最大の版であることを明記し、agent 側も現在と直前の版の server を扱えるという対称な rolling upgrade の条件を加えた
 - 版の範囲と Commit の戻れない地点(2026-09-19、レビュー反映):7a.6 節の版の交渉を、agent が話せる版の範囲(`protocol_min`、`protocol_max`)を送り、server が共通部分の最大を選ぶ形に改めた。agent が 1 つの版しか送らない形では、旧い server と共通に話せる版を server が計算できないためである。版の番号は 1 から始め、版のフィールドを持たない今の実装は legacy v0 として、番号の付いた版の履歴とは別に v1.0.x の間だけ支える。7a.2 節に、Runtime の手順の戻れない地点を定めた。失敗しうる処理はすべて `Prepare` に置き、dataplane の `Commit` の成功を戻れない地点とし、frontend の `Commit` は失敗せず何度呼んでも同じ結果になるものに限る。戻れない地点の直後のクラッシュは、再起動時の収束で直す。対応表の `internal/flowcap` の行を、Admission Policy と Resource Guard の両方を持つ今の実態に合わせた
+- 版と機能の交渉を実装(2026-09-19、7a.6 節の実装):5.2 節に、`pubkey`/`state` メッセージへのフィールド追加(`protocol_min`/`protocol_max`/`capabilities`、`server_protocol_version`/`server_capabilities`)と、共通部分が無い場合の拒否、legacy v0 の扱いを追記した。版の範囲は `proto.SupportedProtocol` の 1 か所に持たせ、選ぶ処理は `proto.SelectProtocolVersion` の 1 関数に集約したので、v2 を加える変更はこの 2 か所の値を広げるだけで済む形にした。空配列と不在の区別は、`capabilities`/`server_capabilities`/`server_protocol_version` を `*[]string`/`*int` のポインタで持たせることで表した(`encoding/json` の `omitempty` は空スライスも省いてしまうため)。`vpsd` の stream hub は、選んだ版と agent の宣言した範囲を接続ごとに記録し、管理用 API のエージェント一覧に加算的なフィールド(`protocol_version`、`agent_protocol_legacy`、`agent_protocol_min`/`max`)として出す。`agent ls` の表の列は変えていない。選んだ版は接続ごとに 1 回だけ両側のログに出す。ラボ(Incus VM、カーネルモード)で、新しい `wgft` と、公開前の直近コミットから別途ビルドした旧い `wgft`(版のフィールドを持たない)を組み合わせ、新 server と旧 agent、旧 server と新 agent、新旧同士の 3 通りで、登録・TCP・UDP の転送が通ることと、新しい側のログに 1 回だけ「protocol legacy v0」または「protocol v1」が出ることを確認した。共通部分が無い場合の拒否(双方の範囲を含む理由での切断)は、実機バイナリの版の範囲を通常の設定では変えられないため、ラボでは作れず、`proto.SelectProtocolVersion` と stream hub の交渉処理(`negotiateVersion`)のユニットテストだけで確かめた。既存の `lab/e2e.sh` と `lab/lifecycle.sh` はカーネル・ユーザー空間の両モードで通した(このラボ VM は直前に `lan` host を加えたトポロジ変更が未反映だったため、`lab/lab up` でトポロジを作り直してから流した)。未確認:v2 を実際に追加する変更が、設計どおり範囲を広げるだけで済むこと(コードレビューでの確認にとどまる)
