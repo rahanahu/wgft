@@ -40,9 +40,15 @@ type Options struct {
 	Logf func(string, ...any)
 	// ConnsMax はルールごとの同時接続数の上限(既定は Cap.Total から flowcap.Limits.TCPPerRuleCap で導く)。
 	ConnsMax int
-	// Cap はプロセス全体と接続元 IP ごとの上限(仕様 7 節)。nil なら既定値で作る。
+	// Cap はプロセス全体の上限(仕様 7 節、Resource Guard)。nil なら既定値で作る。
 	// ユーザー空間モードの vpsd は relay と同じ Counter を渡し、合計で数える
 	Cap *flowcap.Counter
+	// AdmitSource は新しい接続を、送信元ごとの同時フロー数の上限で判定する(Admission Policy)。通すときは
+	// 枠を返す release も返し、中継は接続の終わりに 1 回呼ぶ。後の上限(Resource Guard)で拒んだときも
+	// 呼ぶ。ユーザー空間モードの vpsd は Go の評価器(userspace.Backend.AdmitRelayFlow)を渡し、
+	// Transparent の TCP のルールと同じ数に入れる。nil なら判定しない。カーネルモードでは nftables の
+	// flows_tcp が数える(仕様 6.1 節)
+	AdmitSource func(ruleID string, src netip.Addr) (release func(), ok bool)
 }
 
 // Manager は現在のプロキシ中継のリスナー集合を持ち、宣言に収束させる。
@@ -107,7 +113,7 @@ func New(opts Options) *Manager {
 		opts.Logf = log.Printf
 	}
 	if opts.Cap == nil {
-		opts.Cap = &flowcap.Counter{Total: flowcap.TCPTotal, PerSource: flowcap.TCPPerSource}
+		opts.Cap = &flowcap.Counter{Total: flowcap.TCPTotal}
 	}
 	if opts.ConnsMax <= 0 {
 		opts.ConnsMax = flowcap.Limits{TCPTotal: opts.Cap.Total}.TCPPerRuleCap()
@@ -331,14 +337,24 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 		abortRefused(c)
 		return
 	}
-	// 同時フロー数の上限(仕様 7 節)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
+	// 送信元ごとの同時フロー数の上限(Admission Policy)。ユーザー空間モードだけ Go の評価器が判定し、
+	// 拒んだ接続を src_flow の drop として数える
+	if m.opts.AdmitSource != nil {
+		release, ok := m.opts.AdmitSource(rule.ID, src)
+		if !ok {
+			abortRefused(c)
+			return
+		}
+		defer release()
+	}
+	// 同時フロー数の上限(仕様 7 節、Resource Guard)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
 	l.mu.Lock()
 	full := len(l.conns)+l.pending >= m.opts.ConnsMax
 	if !full {
 		l.pending++
 	}
 	l.mu.Unlock()
-	if full || !m.opts.Cap.Acquire(src) {
+	if full || !m.opts.Cap.Acquire() {
 		if !full {
 			l.mu.Lock()
 			l.pending--
@@ -350,7 +366,7 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 		}
 		return
 	}
-	defer m.opts.Cap.Release(src)
+	defer m.opts.Cap.Release()
 	pending := true
 	unpend := func() {
 		if pending {

@@ -3,9 +3,10 @@
 // (deny、allow、接続元ごとの meter、新規フローの集約上限、パケットの集約上限。
 // design.md 6.1 節)を、userspace の中継の手前で同じ順に再現する。
 //
-// 入力は Plan が持つ AdmissionPolicy の IR(internal/policy の RulePolicy)である。IR から
-// 評価器を組み立てる 1 実装への統合(design.md 7a.8 節の Phase 5)までは、評価順をこの
-// パッケージが手で持つ。
+// 入力は Plan が持つ AdmissionPolicy の IR(internal/policy の RulePolicy)である。
+//
+// Deprecated: design.md 7a.9 節の移行の手順 3 から、userspace の中継は internal/policy/goengine で
+// 判定し、このパッケージを使わない。手順 5 で削除する。
 package srcpolicy
 
 import (

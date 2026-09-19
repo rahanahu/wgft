@@ -353,6 +353,8 @@ func Run(opts Options) error {
 		// ユーザー空間モードでは netstack 越しにエージェントへ
 		proxyOpts.Dial = func(addr string) (net.Conn, error) { return uspace.Dial("tcp", addr) }
 		proxyOpts.Cap = uspace.TCPCounter() // 同時接続数は relay と合計で数える(仕様 7 節)
+		// 接続元 IP ごとの同時接続数は Go の評価器が、Transparent の TCP のルールと合わせて数える(6.3 節)
+		proxyOpts.AdmitSource = uspace.AdmitRelayFlow
 	}
 	d.proxy = proxyrelay.New(proxyOpts)
 	// 起動時に SQLite のルールを適用する(手作業で変えられたテーブルは宣言に戻る)

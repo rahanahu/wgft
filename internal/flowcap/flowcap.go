@@ -4,7 +4,6 @@
 package flowcap
 
 import (
-	"net/netip"
 	"sync"
 	"time"
 )
@@ -60,8 +59,8 @@ func (l Limits) WithDefaults() Limits {
 	return l
 }
 
-// UDPPerSourceCap と TCPPerSourceCap は、接続元 IP ごとの上限の実効値。0 は数えない
-// (Counter.PerSource と nft.Config の約束に合わせる)。
+// UDPPerSourceCap と TCPPerSourceCap は、接続元 IP ごとの上限の実効値。0 は上限なし
+// (policy.PerSourceFlowCaps の約束に合わせる)。
 func (l Limits) UDPPerSourceCap() int { return max(l.WithDefaults().UDPPerSource, 0) }
 func (l Limits) TCPPerSourceCap() int { return max(l.WithDefaults().TCPPerSource, 0) }
 
@@ -80,21 +79,19 @@ func (l Limits) MemoryLimit() int64 {
 	return 32<<20 + int64(l.UDPTotal)*(12<<10) + int64(l.TCPTotal)*(44<<10)
 }
 
-// Counter はプロセス全体と接続元 IP ごとのフロー数を数える。ゼロ値は上限なし。
-// 接続元 IP ごとの数は上限の有無にかかわらず常に数えるので、上限は SetPerSource で
-// 動作中に変えられる(変えた後の Acquire から新しい上限で判定する)。
+// Counter はプロセス全体のフロー数を数える(Resource Guard の予算。設計文書 7a.5 節)。ゼロ値は上限なし。
+// 接続元 IP ごとの同時フロー数は Admission Policy に属し、userspace モードでは Go の評価器
+// (internal/policy/goengine)が数える。Counter は数えない(設計文書 7a.9 節の移行の手順 3)。
 type Counter struct {
-	Total     int // プロセス全体の上限。0 は上限なし
-	PerSource int // 接続元 IP ごとの上限の初期値。0 は上限なし(エージェント、または設定で無効にした場合)
+	Total int // プロセス全体の上限。0 は上限なし
 
 	mu    sync.Mutex
 	total int
-	bySrc map[netip.Addr]int
 }
 
 // Acquire はフロー 1 つ分の枠を取る。上限に達していれば偽を返し、何も数えない。
-// 真を返したら、フローの終了時に同じ src で Release を 1 回呼ぶ。nil の Counter は常に真を返す。
-func (c *Counter) Acquire(src netip.Addr) bool {
+// 真を返したら、フローの終了時に Release を 1 回呼ぶ。nil の Counter は常に真を返す。
+func (c *Counter) Acquire() bool {
 	if c == nil {
 		return true
 	}
@@ -103,41 +100,18 @@ func (c *Counter) Acquire(src netip.Addr) bool {
 	if c.Total > 0 && c.total >= c.Total {
 		return false
 	}
-	if c.PerSource > 0 && c.bySrc[src] >= c.PerSource {
-		return false
-	}
-	if c.bySrc == nil {
-		c.bySrc = map[netip.Addr]int{}
-	}
-	c.bySrc[src]++
 	c.total++
 	return true
 }
 
-// SetPerSource は接続元 IP ごとの上限を変える。0 は上限なし。既に数えているフローは
-// 追い出さず、上限を超えている接続元は、フローが減って下回るまで新しいフローを拒まれる。
-func (c *Counter) SetPerSource(n int) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.PerSource = n
-}
-
 // Release は Acquire で取った枠を返す。
-func (c *Counter) Release(src netip.Addr) {
+func (c *Counter) Release() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.total--
-	if n := c.bySrc[src]; n <= 1 {
-		delete(c.bySrc, src)
-	} else {
-		c.bySrc[src] = n - 1
-	}
 }
 
 // Len は現在のフロー数。

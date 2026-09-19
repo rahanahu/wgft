@@ -5,7 +5,7 @@
 #   lab/lab exec vm bash /wgft/lab/rates.sh userspace
 #
 # For each limit it prints what got through, so kernel mode (nftables limit/meter) and userspace
-# mode (srcpolicy) can be compared side by side:
+# mode (the Go evaluator, internal/policy/goengine) can be compared side by side:
 #   packet      one flow sends 500 datagrams as fast as it can; how many echoes come back
 #   per-source  20 flows (distinct source ports) from one address, then 5 flows from a second
 #               address; how many flows get an answer from each

@@ -16,6 +16,9 @@ import (
 	proxyproto "github.com/pires/go-proxyproto"
 
 	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/policy"
+	"github.com/rahanahu/wgft/internal/policy/goengine"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // ルールごとの上限は、明示しなければ Cap.Total から導く(flowcap.Limits.TCPPerRuleCap、仕様 7 節)。
@@ -215,12 +218,19 @@ func TestConnCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cnt := &flowcap.Counter{Total: 10, PerSource: 1}
+	// ユーザー空間モードと同じく、接続元 IP ごとの上限は Go の評価器が数える
+	cnt := &flowcap.Counter{Total: 10}
+	eng := goengine.New(nil)
+	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r", Proto: proto.TCP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{TCP: 1}})
 	m := New(Options{
 		Listen: func(uint16) (net.Listener, error) { return raw, nil },
 		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
 		Logf:   testLogf(t),
 		Cap:    cnt,
+		AdmitSource: func(ruleID string, src netip.Addr) (func(), bool) {
+			d, tk := eng.AdmitSourceFlow(ruleID, src)
+			return tk.Release, d.Allow
+		},
 	})
 	t.Cleanup(m.Close)
 	m.Apply([]Rule{rule(true, nil, nil)}) // fakeAgent は PROXY ヘッダが届くまで接続元を返さない
@@ -262,9 +272,19 @@ func TestConnCap(t *testing.T) {
 	if cnt.Len() != 0 {
 		t.Fatalf("counter after close = %d, want 0", cnt.Len())
 	}
-	dial()
-	if !reached() {
-		t.Error("connection after a slot was freed must reach the agent")
+	if d := eng.Drops(); len(d) != 1 || d[0].RuleID != "r" || d[0].Kind != "src_flow" || d[0].Packets != 1 {
+		t.Errorf("drops = %+v, want one src_flow drop of rule r", d)
+	}
+	// 評価器の枠は接続の後始末で返るので、返るまで試し直す
+	for retry := 0; ; retry++ {
+		dial()
+		if reached() {
+			break
+		}
+		if retry == 5 {
+			t.Error("connection after a slot was freed must reach the agent")
+			break
+		}
 	}
 }
 

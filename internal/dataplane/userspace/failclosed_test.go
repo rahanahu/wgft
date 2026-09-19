@@ -63,9 +63,9 @@ func TestPrepareBindFailureIsFailClosed(t *testing.T) {
 	if len(st) != 1 || st[0].RuleID != "r_free" {
 		t.Errorf("listeners = %+v, want only r_free", st)
 	}
-	// the failed rule's policy is not installed: its deny list would otherwise be the only thing
-	// that refuses 203.0.113.9 for it
-	if !b.policy.SourceAllowed("r_blocked", netip.MustParseAddr("203.0.113.9")) {
-		t.Error("the failed rule's admission policy was installed")
+	// the failed rule's policy is not installed, so the evaluator refuses its flows fail-closed and
+	// counts no drop, even for a source its policy would admit
+	if d, _ := b.policy.AdmitFlow("r_blocked", netip.MustParseAddr("198.51.100.1"), 0); d.Allow || d.Kind != "" {
+		t.Errorf("a flow of the failed rule: %+v; want an uncounted refusal (its admission policy was installed)", d)
 	}
 }

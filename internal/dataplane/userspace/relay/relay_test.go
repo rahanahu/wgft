@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/policy"
+	"github.com/rahanahu/wgft/internal/policy/goengine"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -430,12 +432,19 @@ func TestUDPRelayWriteFailureLogged(t *testing.T) {
 	}
 }
 
-// UDP:プロセス全体と接続元 IP ごとの上限。枠はセッションが閉じると戻る。
+// UDP:接続元 IP ごとの上限(Admit、VPS 側では Go の評価器)とプロセス全体の上限。どちらの枠も
+// セッションが閉じると戻る。
 func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	port := freePort(t)
-	cnt := &flowcap.Counter{Total: 10, PerSource: 2}
-	m := New(loopback{}, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPCap: cnt, Logf: t.Logf})
+	cnt := &flowcap.Counter{Total: 10}
+	eng := goengine.New(nil)
+	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{UDP: 2}})
+	m := New(loopback{}, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPCap: cnt, Logf: t.Logf,
+		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) {
+			d, tk := eng.AdmitFlow(ruleID, src, size)
+			return tk.Release, d.Allow
+		}})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 	ok := func() bool {
@@ -456,6 +465,9 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 	}
 	if ok() {
 		t.Error("third session from the same source must be dropped")
+	}
+	if d := eng.Drops(); len(d) != 1 || d[0].Kind != "src_flow" || d[0].Packets != 1 {
+		t.Errorf("drops = %+v, want one src_flow drop", d)
 	}
 	time.Sleep(500 * time.Millisecond)
 	if cnt.Len() != 0 {
@@ -601,7 +613,7 @@ func TestTCPRelayConnCap(t *testing.T) {
 func TestTCPRelayRefusalIsAborted(t *testing.T) {
 	port := freePort(t)
 	m := New(loopback{}, Options{
-		Admit: func(ruleID string, src netip.Addr) bool { return false },
+		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) { return nil, false },
 		Logf:  t.Logf,
 	})
 	defer m.Close()
@@ -630,4 +642,66 @@ func isReset(err error) bool {
 		return false
 	}
 	return errno == syscall.ECONNRESET || (runtime.GOOS == "windows" && errno == 10054)
+}
+
+// UDP:deny で拒む送信元のデータグラムは packet_rate のトークンを使わない(設計文書 7a.9 節)。
+// 新しいセッションの最初のデータグラムは Admit がすべての段で判定し、成立済みのセッションの
+// データグラムだけを AdmitPacket が packet_rate で判定する。以前は全データグラムを最初に
+// packet_rate で判定していたので、deny の送信元のフラッドが正規のセッションのトークンを使っていた。
+func TestUDPDeniedSourceSpendsNoPacketTokens(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS does not configure 127.0.0.2 by default")
+	}
+	echoAddr, _ := udpEcho(t)
+	port := freePort(t)
+	eng := goengine.New(nil)
+	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP,
+		SourceDeny: []netip.Prefix{netip.MustParsePrefix("127.0.0.2/32")},
+		PacketRate: &proto.Rate{Count: 1, Unit: proto.PerHour}}}})
+	m := New(loopback{}, Options{Logf: t.Logf,
+		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) {
+			d, tk := eng.AdmitFlow(ruleID, src, size)
+			return tk.Release, d.Allow
+		},
+		AdmitPacket: func(ruleID string, size int) bool { return eng.AdmitPacket(ruleID, size).Allow },
+	})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
+	dst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)}
+	denied, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2)}, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer denied.Close()
+	for range 20 {
+		denied.Write([]byte("x"))
+	}
+	time.Sleep(200 * time.Millisecond)
+	c, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	echoed := func() bool {
+		c.Write([]byte("hi"))
+		c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		_, err := c.Read(make([]byte, 10))
+		return err == nil
+	}
+	// burst 5:最初のデータグラム(Admit)と、成立済みのセッションの 4 つ(AdmitPacket)
+	for i := 1; i <= 5; i++ {
+		if !echoed() {
+			t.Fatalf("datagram %d of the allowed source was dropped; the denied flood spent the packet tokens", i)
+		}
+	}
+	if echoed() {
+		t.Error("the sixth datagram must be dropped by packet_rate")
+	}
+	got := map[string]uint64{}
+	for _, d := range eng.Drops() {
+		got[d.Kind] = d.Packets
+	}
+	if got["deny"] != 20 || got["packet"] != 1 || len(got) != 2 {
+		t.Errorf("drops = %v, want deny 20 and packet 1", got)
+	}
 }

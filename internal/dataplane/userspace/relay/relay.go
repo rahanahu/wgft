@@ -35,16 +35,20 @@ type Options struct {
 	// Limits はプロセス全体の上限(設定値)。UDPCap と TCPCap、UDPSessionsMax と TCPConnsMax の
 	// 既定値を導くのに使う
 	Limits flowcap.Limits
-	// UDPCap と TCPCap はプロセス全体と接続元 IP ごとの上限(仕様 7 節)。nil なら全体の上限だけを Limits から作る。
+	// UDPCap と TCPCap はプロセス全体の上限(仕様 7 節、Resource Guard)。nil なら Limits から作る。
 	// vpsd はプロキシモードの中継と共有する Counter を渡す
 	UDPCap *flowcap.Counter
 	TCPCap *flowcap.Counter
 	Dial   func(network, addr string) (net.Conn, error)
 	Logf   func(format string, args ...any)
-	// Admit は新しいフロー(TCP の accept、UDP の新しいセッション)を通すか。nil なら全部通す。
-	// VPS 側のユーザー空間モード(仕様 6.3 節)が接続元制限とレート制限をここで判定する。エージェントでは nil。
-	Admit func(ruleID string, src netip.Addr) bool
-	// AdmitPacket は UDP のデータグラム 1 つを通すか(packet_rate)。nil なら全部通す。
+	// Admit は新しいフロー(TCP の accept、UDP の新しいセッションの最初のデータグラム)を通すかを、
+	// Admission Policy のすべての段で判定する(設計文書 7a.9 節の AdmitFlow)。size は最初のパケットの
+	// 大きさ(UDP はデータグラムの長さ、TCP は 0)。通すときは、送信元ごとの同時フロー数の枠を返す
+	// release も返し、中継はフローの終わりに 1 回呼ぶ。後の Resource Guard(ルールごとの上限、
+	// プロセス全体の上限)が拒んだときも、その場で呼ぶ。nil なら全部通す。
+	// VPS 側のユーザー空間モード(仕様 6.3 節)が使う。エージェントでは nil。
+	Admit func(ruleID string, src netip.Addr, size int) (release func(), ok bool)
+	// AdmitPacket は成立済みの UDP セッションのデータグラム 1 つを通すか(packet_rate)。nil なら全部通す。
 	AdmitPacket func(ruleID string, size int) bool
 }
 

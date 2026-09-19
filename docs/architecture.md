@@ -14,7 +14,8 @@ wgft のコードは、設計文書([docs/design.md](design.md))の各節が扱�
 | `internal/platform/linux` | 6.1(起動時検査)、4 | Linux ホスト側の前段検査と sysctl です。bind 中のポートとの衝突、他テーブルの forward / input の遮断、他テーブルの同ポート DNAT の検査、`ip_forward` と conntrack テーブルの sysctl、conntrack の UDP タイムアウトの読み取りを持ちます。`internal/dataplane/linuxkernel` からも呼ばれ、`internal/vpsd` を import しません |
 | `internal/vpsd/proxyrelay` | 6.2 | プロキシモードのルールについて、vpsd が受けた TCP をエージェントへ中継します |
 | `internal/reconcile` | 7a.2 | frontend(プロキシモードの中継)と dataplane を固定の順序で適用する `Runtime` を持ちます |
-| `internal/dataplane/userspace` | 6.3 | `vpsd` のユーザー空間モードの転送面です。wireguard-go と netstack のトンネル(`utun`)、接続元制限とレート制限の評価器(`srcpolicy`)、中継(`relay`)を束ね、`internal/planner` の `Plan` から待ち受けと評価器を組み立てます |
+| `internal/dataplane/userspace` | 6.3 | `vpsd` のユーザー空間モードの転送面です。wireguard-go と netstack のトンネル(`utun`)、中継(`relay`)を束ね、接続元制限とレート制限を `internal/policy/goengine` の評価器で判定し、`internal/planner` の `Plan` から待ち受けと評価器を組み立てます |
+| `internal/policy/goengine` | 6.3, 7a.9 | Admission Policy の IR から作る Go の評価器です。userspace モードの中継が、新しいフローと成立済みの UDP セッションのデータグラムをこの評価器で判定します。送信元ごとの同時フロー数と drop カウンタもこの評価器が数えます |
 | `internal/dataplane/userspace/relay` | 6.3, 7 | エージェントの netstack 上のリスナーと LAN 内 `target` への中継を持ちます。`vpsd` のユーザー空間モードも、公開ポートの待ち受けと netstack 越しのエージェントへの中継に同じパッケージを使います |
 | `internal/dataplane/userspace/tunnel` | 7 | エージェント側が wireguard-go と gVisor の netstack でユーザー空間に持つトンネルです。`internal/dataplane/userspace/utun`(vpsd 側)と対になります |
 | `internal/vpsd/stream` | 5.2 | エージェントごとの stream(WebSocket)を持ち、全体状態の配信とハートビートの記録を行います |

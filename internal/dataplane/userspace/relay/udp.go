@@ -156,9 +156,6 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				}
 				return
 			}
-			if m.opts.AdmitPacket != nil && !m.opts.AdmitPacket(m.ruleOf(l), n) {
-				continue
-			}
 			k := from.String()
 			mu.Lock()
 			s := sessions[k]
@@ -167,12 +164,22 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				if !l.accepting.Load() {
 					continue
 				}
-				if m.opts.Admit != nil && !m.opts.Admit(m.ruleOf(l), addrOf(from)) {
-					continue
-				}
-				// 同時フロー数の上限(仕様 7 節)。超えた新規パケットは捨てる(既存セッションは追い出さない)
+				// 新しいセッションの最初のデータグラムは、Admission Policy のすべての段(packet_rate を
+				// 含む)で判定する。送信元の拒否と許可で落としたデータグラムは、後の段のトークンを使わない
+				// (設計文書 7a.9 節)
 				src := addrOf(from)
-				if m.ruleFlows(m.ruleOf(l)) >= m.opts.UDPSessionsMax || !m.opts.UDPCap.Acquire(src) {
+				ruleID := m.ruleOf(l)
+				release := func() {}
+				if m.opts.Admit != nil {
+					rel, ok := m.opts.Admit(ruleID, src, n)
+					if !ok {
+						continue
+					}
+					release = rel
+				}
+				// 同時フロー数の上限(仕様 7 節、Resource Guard)。超えた新規パケットは捨てる(既存セッションは追い出さない)
+				if m.ruleFlows(ruleID) >= m.opts.UDPSessionsMax || !m.opts.UDPCap.Acquire() {
+					release()
 					if capLog.Allow() {
 						m.opts.Logf("udp %s: session limit reached; dropping new flows", l.key)
 					}
@@ -182,7 +189,8 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				target := m.targetOf(l)
 				c, err := m.opts.Dial("udp", target)
 				if err != nil {
-					m.opts.UDPCap.Release(src)
+					m.opts.UDPCap.Release()
+					release()
 					if dialLog.Allow() {
 						m.opts.Logf("udp %s: dial %s: %v", l.key, target, err)
 					}
@@ -195,7 +203,8 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				sessions[k] = s
 				mu.Unlock()
 				go func(k string, s *udpSession, from net.Addr) {
-					defer m.opts.UDPCap.Release(src)
+					defer release()
+					defer m.opts.UDPCap.Release()
 					defer closeSession(k, s)
 					// 応答は、届いてからプールのバッファを借りて読む(仕様 7 節)。待つ間はバッファを持たない。
 					// 待てない接続(unix でも windows でもないカーネルのソケット)は、最大長のバッファを持ち続ける
@@ -215,6 +224,11 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 						}
 					}
 				}(k, s, from)
+			} else if m.opts.AdmitPacket != nil && l.accepting.Load() && !m.opts.AdmitPacket(m.ruleOf(l), n) {
+				// 成立済みのセッションのデータグラムは packet_rate だけで判定する。Retiring の待ち受け
+				// (accepting が偽)のルールは公開した方針に無いので判定しない。kernel モードでも、
+				// fail-closed にしたルールの成立済みのフローは、そのルールの行が無いテーブルを通る
+				continue
 			}
 			s.lastSeen.Store(time.Now().UnixNano())
 			if _, err := s.conn.Write(buf[:n]); err != nil {
