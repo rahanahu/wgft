@@ -10,7 +10,7 @@ VPS 側のカーネル機能(nftables、WireGuard、conntrack)を、ホストを
 | nftables、wg0、conntrack が絡む実験と、端から端までの結合テスト | Incus の VM(`wgft-lab`)の中の netns |
 
 - ホストや Docker でカーネル機能を試すと、ホストのカーネルのバージョン、読み込まれるモジュール、Docker が有効にする `br_netfilter` 経由のホストのルールと conntrack が結果に混ざる。VM に閉じ込めて切り分ける
-- Docker は開発環境には使わない。使うのはエージェントの配布用イメージを確かめるときだけ
+- Docker は開発環境には使わない。使うのは server とエージェントの配布用イメージを確かめるときだけ(`scripts/docker-smoke.sh`)
 - VM は 1 台。トポロジは VM 内の netns で組むので、同じ `netns.sh` を CI でも使える
 - ホストのリポジトリを VM の `/wgft` に**読み取り専用**で共有する。ホストでビルドし、VM で実行する
 

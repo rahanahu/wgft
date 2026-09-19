@@ -21,7 +21,7 @@
 # are published to the host, since docs/setup.md documents those as the ones that must be
 # reachable from outside the container.
 #
-# Requires Docker (or Podman: WGFT_SMOKE_DOCKER=podman), a Go toolchain to build the disposable
+# Requires Docker (or Podman: WGFT_SMOKE_DOCKER=podman; the bind mount is labelled with :Z for SELinux), a Go toolchain to build the disposable
 # echo target (tools/echo; the server and agent images are always built by their own Dockerfile,
 # never on the host), and socat for the traffic check (already a lab/ dependency, see
 # lab/e2e.sh). Cleans up every container, volume, network and temp file it creates, including
@@ -104,7 +104,7 @@ echo "PASS  build server, agent and echo target"
 "$DOCKER" network create "$net" >/dev/null
 
 "$DOCKER" run -d --name "$echosvc" --network "$net" --network-alias echo \
-  -v "$tmp/echo":/echo:ro --entrypoint /echo \
+  -v "$tmp/echo":/echo:ro,Z --entrypoint /echo \
   gcr.io/distroless/static-debian12:latest -tcp 25565 -udp 25566 >/dev/null
 
 if retry 15 bash -c "'$DOCKER' logs '$echosvc' 2>&1 | grep -q 'udp .*25566'"; then
@@ -116,10 +116,11 @@ else
 fi
 
 "$DOCKER" volume create "$server_vol" >/dev/null
+# 公開するのは転送するポートだけで、127.0.0.1 に限る(既定では全部のインタフェースに公開される)
 "$DOCKER" run -d --name "$server" --network "$net" --network-alias server \
   --cap-drop ALL --security-opt no-new-privileges --read-only \
   -e WGFT_WG_ENDPOINT="$server:51820" \
-  -p 39971/tcp -p 27015/udp \
+  -p 127.0.0.1::39971/tcp -p 127.0.0.1::27015/udp \
   -v "$server_vol":/var/lib/wgft \
   "$server_img" >/dev/null
 
