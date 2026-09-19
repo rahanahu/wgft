@@ -7,7 +7,7 @@ To regenerate after changing the help: `go test ./cmd/wgft -run TestCLIDocUpToDa
 
 | Command | What it does |
 |---|---|
-| [`wgft agent dismiss-warning`](#wgft-agent-dismiss-warning) | Dismiss a warning |
+| [`wgft agent dismiss-warning`](#wgft-agent-dismiss-warning) | Dismiss a warning once confirmed legitimate |
 | [`wgft agent join-string`](#wgft-agent-join-string) | Issue an agent join string |
 | [`wgft agent ls`](#wgft-agent-ls) | List registered agents |
 | [`wgft agent pubkey`](#wgft-agent-pubkey) | Print the wg public key |
