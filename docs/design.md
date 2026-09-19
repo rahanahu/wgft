@@ -573,7 +573,7 @@ normalize/validate は、外部の `Rule` を受け取り、構造的な検査(�
 | `internal/vpsd/conntrack` | kernel `Backend` の conntrack 収束 | |
 | `internal/vpsd/check` | `platform/linux` の前段検査 | kernel `Backend` に同梱しない。agent の kernel backend(Phase 7)からも同じ検査を呼ぶため |
 | `internal/flowcap` | Admission Policy の上限と `Resource Guard`(Phase 6 で分ける) | 今の `Limits` は接続元ごとの上限(Admission Policy)と全体の予算(Resource Guard)の両方を持つ(7a.5 節) |
-| `internal/agent/relay` の `plan`/`Action` | `internal/reconcile` の骨格のひな型 | この型を server と agent で共有する `internal/reconcile` に一般化する |
+| `internal/dataplane/userspace/relay`(Phase 2 で `internal/agent/relay` から移した)の `plan`/`Action` | `internal/reconcile` の骨格のひな型 | この型を server と agent で共有する `internal/reconcile` に一般化する |
 | `internal/agent/tunnel`、`internal/vpsd/utun`、`internal/nettun` | userspace `Backend` の下位実装 | プラットフォーム配線そのままだが、置き場所を vpsd/agent 専用から共有へ移す |
 | `internal/vpsd/agentapi`、`internal/vpsd/stream`、`internal/vpsd/store`、`internal/vpsd/admin` | `vpsd` の制御プレーン | 変更なし(登録、配信、永続化、admin API) |
 | `internal/agent/credentials` | `agent` の制御プレーン | 変更なし |

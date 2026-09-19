@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/agent/relay"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"

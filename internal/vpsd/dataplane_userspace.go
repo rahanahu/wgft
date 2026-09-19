@@ -16,7 +16,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	"github.com/rahanahu/wgft/internal/agent/relay"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/vpsd/check"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
