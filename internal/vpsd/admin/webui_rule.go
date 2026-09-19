@@ -177,7 +177,7 @@ func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
 	}
 	gen, _ := s.backend.Generation()
 	agents, _ := s.backend.Agents()
-	d.StateBadge, d.StateLabel, d.StateReason = ruleRunState(&rule, gen, buildAgentIndex(agents), locale)
+	d.StateBadge, d.StateLabel, d.StateReason = ruleRunState(&rule, gen, buildAgentIndex(agents), s.serverApply(), locale)
 
 	d.CanSplit = rule.ListenPort.IsRange()
 	if d.CanSplit {

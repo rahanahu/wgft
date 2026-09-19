@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/buildinfo"
+	"github.com/rahanahu/wgft/internal/reconcile"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -321,4 +322,37 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 		UDPTimeout:       d.timeouts.Timeout,
 		UDPTimeoutStream: d.timeouts.TimeoutStream,
 	}, nil
+}
+
+// ApplyStatus は admin.ApplyStatusBackend の実装。Reconciler が持つ Desired と Active の対応
+// (設計文書 7a.3 節)を管理用 API の形に写す。最初の適用を試みるまでは false を返す。
+func (d *Daemon) ApplyStatus() (admin.ApplyStatus, bool) {
+	d.mu.Lock()
+	rec := d.rec
+	d.mu.Unlock()
+	if rec == nil {
+		return admin.ApplyStatus{}, false
+	}
+	st := rec.Status()
+	if !st.Reconciled {
+		return admin.ApplyStatus{}, false
+	}
+	return applyStatusToAdmin(st), true
+}
+
+func applyStatusToAdmin(st reconcile.Status) admin.ApplyStatus {
+	out := admin.ApplyStatus{DesiredGeneration: st.DesiredGeneration, ActiveGeneration: st.ActiveGeneration,
+		Rules: make(map[string]admin.RuleApply, len(st.Rules)), LastError: st.LastError}
+	for id, rs := range st.Rules {
+		out.Rules[id] = admin.RuleApply{ApplyState: string(rs.State), Reason: rs.Reason, ActiveGeneration: rs.ActiveGeneration}
+	}
+	conv := func(rs []reconcile.Resource) []admin.DriftResource {
+		res := make([]admin.DriftResource, 0, len(rs))
+		for _, r := range rs {
+			res = append(res, admin.DriftResource{RuleID: r.RuleID, Proto: r.Proto, ListenPort: r.ListenPort, Forwarding: r.Forwarding})
+		}
+		return res
+	}
+	out.Drift = admin.Drift{ActiveOnly: conv(st.ActiveOnly), Retiring: conv(st.Retiring)}
+	return out
 }

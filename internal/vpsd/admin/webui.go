@@ -156,7 +156,7 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 	agentIdx := buildAgentIndex(agents)
 	d.RuleCount = len(rules)
 	var ruleErrors int
-	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, agentIdx)
+	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, agentIdx, s.serverApply())
 	for _, w := range warns {
 		d.Warnings = append(d.Warnings, warnToView(w, locale))
 	}
@@ -234,7 +234,7 @@ func pubKeyShort(key string) string {
 // vps_mode(kernel/proxy)に意味が無い(仕様 6.3 節。全ルールが server 経由で中継される)ので、
 // 一覧の方式欄は一律 "userspace" にし、PROXY protocol の有無だけを添える。適用状態は
 // ruleRunState がエージェントの直近のハートビートから判定する(仕様 10.1 節)。
-func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus) ruleView {
+func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus, server map[string]RuleApply) ruleView {
 	mode := string(r.VPSMode)
 	if serverMode == "userspace" {
 		mode = "userspace"
@@ -247,7 +247,7 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode strin
 	} else {
 		v.ProtoClass = "tcp"
 	}
-	v.StateBadge, v.StateLabel, v.StateReason = ruleRunState(r, latestGen, agents, locale)
+	v.StateBadge, v.StateLabel, v.StateReason = ruleRunState(r, latestGen, agents, server, locale)
 	v.CanCheck = r.Enabled && r.Proto == proto.TCP
 	v.Dropped = strconv.FormatUint(drops[r.ID], 10)
 	v.Restriction = restrictionSummary(r, locale)
@@ -257,7 +257,7 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode strin
 
 // groupRules は一覧をグループごとにまとめる。空グループ(その他)は最後(仕様 10.1)。
 // 戻り値の 2 つ目は全体の error 状態のルール数(ヘッダの全体ヘルスに使う)。
-func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus) ([]ruleGroupView, int) {
+func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus, server map[string]RuleApply) ([]ruleGroupView, int) {
 	idx := map[string]int{}
 	var out []ruleGroupView
 	totalErrors := 0
@@ -273,7 +273,7 @@ func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode 
 			}
 			out = append(out, ruleGroupView{Group: g, Label: label})
 		}
-		v := ruleToView(&rules[i], drops, locale, serverMode, latestGen, agents)
+		v := ruleToView(&rules[i], drops, locale, serverMode, latestGen, agents, server)
 		if v.StateBadge == "danger" {
 			out[j].ErrorCount++
 			totalErrors++
