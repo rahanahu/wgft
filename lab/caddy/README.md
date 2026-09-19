@@ -8,7 +8,7 @@ HTTPS を出す手順を実リバースプロキシで確かめるために、�
 Debian 12 (bookworm) の apt パッケージの Caddy は 2.6.2 で、`caddy list-modules` に
 `caddy.listeners.proxy_protocol` が出てきません(モジュールが未登録)。当初の予定は「apt の
 caddy (2.6 系)」でしたが、この版には PROXY protocol の listener wrapper 自体が入っておらず、
-実験 1 (実 IP の伝達) が確かめられません。Caddy 公式の apt リポジトリ (Cloudsmith 配信) を
+実 IP の伝達を確かめられません。Caddy 公式の apt リポジトリ (Cloudsmith 配信) を
 追加し、同じく apt 経由で 2.11.4 に上げたところ `caddy.listeners.proxy_protocol` が使えるように
 なりました。ラボはこの時点で IPv6 のみ外に出られる状態でしたが、`dl.cloudsmith.io` は IPv6 で
 届きます。手順は次のとおりです。
