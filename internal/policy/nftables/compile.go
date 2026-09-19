@@ -20,8 +20,16 @@ import (
 // どの行も IPv4 のパケットにだけ一致する(Match.IPv4)。v1 は IPv4 だけを扱い、IPv6 のパケットは
 // DNAT されないので、判定もトークンの消費もしない。
 //
-// set の名前は deny_N、allow_N、meter_N(N は Transparent のポートだけで数える連番)と、プロトコル
-// ごとに 1 つを全ルールで共有する flows_udp、flows_tcp である。
+// Transparent のポートと Relay のポートは、同じ段の行を同じ順で持つ(設計文書 7a.9 節「`Forwarding`
+// の値によって Admission Policy の意味は変わらない」)。Relay のポートは、frontend が待ち受けを
+// 開けているものだけを呼び出し側が渡す。
+//
+// set の名前は deny_N、allow_N、meter_N(N は ports の順に振る連番)と、プロトコルごとに 1 つを
+// 全ルールで共有する flows_udp、flows_tcp である。
+//
+// TCP のルールも packet の行を持つ。設計文書 7a.9 節「TCP の packet_rate」は TCP に packet の行を
+// 作らないと定めており、移行の手順 5 でやめる。fixture の interim_until_step が印を付けている
+// (internal/policy/testdata/admission)。
 //
 // ports の各ルール ID は IR(pol.Rules)に無ければならない。無ければ誤りを返す。IR に無いルールの
 // ポートに判定の無い行を置くと、そのポートの通信を送信元の制限なしに通してしまうためである。
@@ -41,39 +49,20 @@ func Compile(pol policy.Policy, ports []Port) (Program, error) {
 			return Program{}, fmt.Errorf("rule %s: port protocol %s differs from the policy's %s", pt.RuleID, pt.Proto, rp.Proto)
 		}
 		switch pt.Forwarding {
-		case model.Transparent:
-			// set の連番は Transparent のポートだけが進める(今の wgft server nft の表示の番号を保つ)。
-			// Relay のポートに全段の行を付ける移行の手順 4 で、Relay のポートも連番を進める。
+		case model.Transparent, model.Relay:
+			// set の連番は、判定を付けるポートの順に進める。Relay のポートも Transparent と同じ段の
+			// 行を持つので、同じように連番を進める(設計文書 6.1 節)。
 			n++
-		case model.Relay:
 		default:
 			return Program{}, fmt.Errorf("rule %s: unknown forwarding %v", pt.RuleID, pt.Forwarding)
 		}
 		for _, step := range policy.Order {
-			if !interimStepApplies(pt, step) {
-				continue
-			}
 			if err := c.step(step, pt, rp, n); err != nil {
 				return Program{}, fmt.Errorf("rule %s: %w", pt.RuleID, err)
 			}
 		}
 	}
 	return c.prog, nil
-}
-
-// interimStepApplies は、移行の途中(設計文書 7a.9 節「Phase 5 の移行の手順」の手順 2 と 3)の
-// kernel の挙動を保つための制限である。最終の設計とは次の 2 点が違う。
-//
-//   - Relay のポートは、送信元ごとの同時フロー数の上限の行だけを持つ。移行の手順 4 で、Relay の
-//     ポートにも全段の行を付ける(この関数から Relay の分岐を取り除く)
-//   - TCP のルールも packet の行を持つ。移行の手順 5 で、TCP のルールの packet の行をやめる
-//
-// どちらも fixture の interim_until_step で印を付けている(internal/policy/testdata/admission)。
-func interimStepApplies(pt Port, step policy.Step) bool {
-	if pt.Forwarding == model.Relay {
-		return step == policy.StepPerSourceConcurrentFlows
-	}
-	return true
 }
 
 type compiler struct {

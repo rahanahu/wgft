@@ -12,22 +12,18 @@ import (
 // newGoEngine は、fixture の IR から internal/policy/goengine の評価器を作り、仮想の時計で出来事を
 // 流す admissiontest.Engine を作る(設計文書 7a.9 節の検査の手順 1)。
 //
-// 出来事は本番の中継と同じ呼び出しに写す。Transparent のルールの新しいフローは AdmitFlow、Relay の
-// ルールの新しい接続は、移行の手順 4 までは userspace モードの Relay の中継と同じく AdmitSourceFlow、
-// 成立済みのフローのパケットは AdmitPacket(TCP のルールでは判定しない)、フローの終わりは枠の
-// Release である。
+// 出来事は本番の中継と同じ呼び出しに写す。新しいフローは AdmitFlow(Transparent のルールも Relay の
+// ルールも同じ入口を使う。設計文書 7a.9 節)、成立済みのフローのパケットは AdmitPacket(TCP の
+// ルールでは判定しない)、フローの終わりは枠の Release である。
 func newGoEngine(fx *admissiontest.Fixture) (admissiontest.Engine, error) {
 	plan, err := fx.Plan()
 	if err != nil {
 		return nil, err
 	}
-	g := &goEngine{relay: map[string]bool{}, tickets: map[string]*goengine.Ticket{}, base: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	g := &goEngine{tickets: map[string]*goengine.Ticket{}, base: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	g.clock = g.base
 	g.e = goengine.New(func() time.Time { return g.clock })
 	g.e.Update(plan.Admission)
-	for _, r := range fx.Policy.Rules {
-		g.relay[r.ID] = r.Forwarding == "relay"
-	}
 	return g, nil
 }
 
@@ -35,7 +31,6 @@ type goEngine struct {
 	e       *goengine.Engine
 	base    time.Time
 	clock   time.Time
-	relay   map[string]bool
 	tickets map[string]*goengine.Ticket // 成立済みのフロー
 }
 
@@ -51,13 +46,8 @@ func (g *goEngine) Handle(at time.Duration, ev admissiontest.Event) (string, err
 		if established {
 			return "", fmt.Errorf("flow %s is already established", ev.Flow)
 		}
-		src := netip.MustParseAddr(ev.Src)
-		var d goengine.Decision
-		if g.relay[ev.Rule] {
-			d, t = g.e.AdmitSourceFlow(ev.Rule, src)
-		} else {
-			d, t = g.e.AdmitFlow(ev.Rule, src, 0)
-		}
+		d, tk := g.e.AdmitFlow(ev.Rule, netip.MustParseAddr(ev.Src), 0)
+		t = tk
 		if d.Allow {
 			g.tickets[ev.Flow] = t
 		}

@@ -65,10 +65,10 @@ func TestCompileRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Relay のポートは src_flow の行だけを持つ(移行の手順 4 まで)。TCP のルールも packet の行を
-	// 持つ(移行の手順 5 まで)。set の連番は Transparent のポートだけで数える。
+	// Relay のポートも Transparent と同じ段の行を持ち、set の連番を進める。TCP のルールも packet の
+	// 行を持つ(移行の手順 5 まで)。
 	want := []string{
-		"wgft:r_relay:src_flow",
+		"wgft:r_relay:deny", "wgft:r_relay:per_source", "wgft:r_relay:src_flow", "wgft:r_relay:new_flow",
 		"wgft:r_tcp:allow", "wgft:r_tcp:src_flow", "wgft:r_tcp:packet",
 		"wgft:r_udp:deny", "wgft:r_udp:allow", "wgft:r_udp:per_source", "wgft:r_udp:src_flow",
 		"wgft:r_udp:new_flow", "wgft:r_udp:packet",
@@ -76,7 +76,7 @@ func TestCompileRows(t *testing.T) {
 	if got := comments(prog); !reflect.DeepEqual(got, want) {
 		t.Errorf("rows = %v\nwant %v", got, want)
 	}
-	if got, want := setNames(prog), []string{"flows_tcp", "allow_1", "deny_2", "allow_2", "meter_2", "flows_udp"}; !reflect.DeepEqual(got, want) {
+	if got, want := setNames(prog), []string{"deny_1", "meter_1", "flows_tcp", "allow_2", "deny_3", "allow_3", "meter_3", "flows_udp"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("sets = %v, want %v", got, want)
 	}
 	// ct state new は送信元ごとの新規フローレート、同時フロー数の上限、集約の新規フローレートの行だけ

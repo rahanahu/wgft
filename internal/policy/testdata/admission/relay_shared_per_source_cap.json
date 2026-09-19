@@ -1,0 +1,25 @@
+{
+  "comment": "The per-source concurrent flow cap is one count per protocol, shared by every rule: a Relay rule's connections and a Transparent TCP rule's connections add up in the same flows_tcp set in kernel mode and in the same evaluator count in userspace mode. A Relay rule gets every Admission Policy step, so its refusals are counted as src_flow drops of that rule, and a slot freed by either rule lets the other open a new flow.",
+  "policy": {
+    "rules": [
+      {"id": "r_relay", "proto": "tcp", "forwarding": "relay", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null},
+      {"id": "r_tcp", "proto": "tcp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null}
+    ],
+    "per_source_flow_caps": {"tcp": 2}
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "a2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.1", "flow": "a3", "want": "drop:src_flow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "a4", "want": "drop:src_flow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.2", "flow": "b1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.2", "flow": "b2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.2", "flow": "b3", "want": "drop:src_flow"},
+    {"at_ms": 10, "op": "end", "rule": "r_tcp", "src": "198.51.100.1", "flow": "a2"},
+    {"at_ms": 20, "op": "flow", "rule": "r_relay", "src": "198.51.100.1", "flow": "a5", "want": "admit"},
+    {"at_ms": 30, "op": "end", "rule": "r_relay", "src": "198.51.100.1", "flow": "a1"},
+    {"at_ms": 40, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "a6", "want": "admit"}
+  ],
+  "want_drops": {"r_relay": {"src_flow": 2}, "r_tcp": {"src_flow": 1}},
+  "tolerances": []
+}

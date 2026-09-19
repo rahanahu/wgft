@@ -1,27 +1,29 @@
 # basic.json から期待されるテーブル。
-# r_off は無効なので行を持たない。r_proxy はプロキシモードなので、接続元 IP ごとの同時フロー数の行だけを持つ。
-# set の連番と行の順序は、Plan.Ports の並び順(Proto, ListenPort.Lo, RuleID。internal/planner.Build)
-# で決まる。set の連番は Transparent(カーネルモード)のルールだけで数える。
+# r_off は無効なので行を持たない。r_proxy はプロキシモードだが、待ち受けを開けているので Transparent の
+# ルールと同じ段の行を持つ(仕様 6.1 節)。set の連番と行の順序は、Plan.Ports の並び順
+# (Proto, ListenPort.Lo, RuleID。internal/planner.Build)で決まり、プロキシモードのルールも連番を進める。
 # flows_udp / flows_tcp はプロトコルごとに 1 つで、接続元 IP ごとの同時フロー数の上限
 # (仕様 6.1, 7 節)を全ルールで共有する。
 # 送信元を読まない集約のレートの行(new_flow、packet)も meta nfproto ipv4 を持ち、IPv6 のパケットは
 # トークンを使わない(設計文書 7a.9 節)。
 table inet wgft {
+  set deny_1 { type ipv4_addr; flags interval; elements = { 203.0.113.0/24 } }
   set flows_tcp { type ipv4_addr; flags dynamic; size 65535; }
-  set allow_1 { type ipv4_addr; flags interval; elements = { 192.0.2.0/24, 198.51.100.0/24 } }
-  set meter_1 { type ipv4_addr; flags dynamic; timeout 1m; size 65535; }
-  set deny_2 { type ipv4_addr; flags interval; elements = { 198.51.100.128/25, 203.0.113.0/24 } }
+  set allow_2 { type ipv4_addr; flags interval; elements = { 192.0.2.0/24, 198.51.100.0/24 } }
   set meter_2 { type ipv4_addr; flags dynamic; timeout 1m; size 65535; }
+  set deny_3 { type ipv4_addr; flags interval; elements = { 198.51.100.128/25, 203.0.113.0/24 } }
+  set meter_3 { type ipv4_addr; flags dynamic; timeout 1m; size 65535; }
   set flows_udp { type ipv4_addr; flags dynamic; size 65535; }
 
   chain filter_pre {
     type filter hook prerouting priority -150; policy accept;
+    iifname != "wg0" tcp dport 443 ip saddr @deny_1 counter drop comment "wgft:r_proxy:deny"
     iifname != "wg0" tcp dport 443 ct state new add @flows_tcp { ip saddr ct count over 128 } counter drop comment "wgft:r_proxy:src_flow"
-    iifname != "wg0" tcp dport 25565 ip saddr != @allow_1 counter drop comment "wgft:r_tcp:allow"
-    iifname != "wg0" tcp dport 25565 ct state new add @meter_1 { ip saddr limit rate over 30/minute } counter drop comment "wgft:r_tcp:per_source"
+    iifname != "wg0" tcp dport 25565 ip saddr != @allow_2 counter drop comment "wgft:r_tcp:allow"
+    iifname != "wg0" tcp dport 25565 ct state new add @meter_2 { ip saddr limit rate over 30/minute } counter drop comment "wgft:r_tcp:per_source"
     iifname != "wg0" tcp dport 25565 ct state new add @flows_tcp { ip saddr ct count over 128 } counter drop comment "wgft:r_tcp:src_flow"
-    iifname != "wg0" udp dport 2456-2457 ip saddr @deny_2 counter drop comment "wgft:r_udp:deny"
-    iifname != "wg0" udp dport 2456-2457 ct state new add @meter_2 { ip saddr limit rate over 10/second } counter drop comment "wgft:r_udp:per_source"
+    iifname != "wg0" udp dport 2456-2457 ip saddr @deny_3 counter drop comment "wgft:r_udp:deny"
+    iifname != "wg0" udp dport 2456-2457 ct state new add @meter_3 { ip saddr limit rate over 10/second } counter drop comment "wgft:r_udp:per_source"
     iifname != "wg0" udp dport 2456-2457 ct state new add @flows_udp { ip saddr ct count over 256 } counter drop comment "wgft:r_udp:src_flow"
     iifname != "wg0" udp dport 2456-2457 ct state new meta nfproto ipv4 limit rate over 100/second counter drop comment "wgft:r_udp:new_flow"
     iifname != "wg0" udp dport 2456-2457 meta nfproto ipv4 limit rate over 5000/second counter drop comment "wgft:r_udp:packet"

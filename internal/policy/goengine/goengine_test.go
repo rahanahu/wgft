@@ -28,7 +28,7 @@ var (
 
 func udpRule(id string) policy.RulePolicy { return policy.RulePolicy{RuleID: id, Proto: proto.UDP} }
 
-// must は AdmitFlow と AdmitSourceFlow の結果が通す判定であることを確かめ、Ticket を返す。
+// must は AdmitFlow の結果が通す判定であることを確かめ、Ticket を返す。
 func must(t *testing.T) func(Decision, *Ticket) *Ticket {
 	t.Helper()
 	return func(d Decision, tk *Ticket) *Ticket {
@@ -45,9 +45,6 @@ func TestUnknownRuleFailsClosedUncounted(t *testing.T) {
 	e.Update(policy.Policy{Rules: []policy.RulePolicy{udpRule("r1")}})
 	if d, tk := e.AdmitFlow("r_missing", src1, 10); d.Allow || d.Kind != "" || tk != nil {
 		t.Errorf("AdmitFlow(unknown) = %+v, %v; want an uncounted reject", d, tk)
-	}
-	if d, _ := e.AdmitSourceFlow("r_missing", src1); d.Allow || d.Kind != "" {
-		t.Errorf("AdmitSourceFlow(unknown) = %+v; want an uncounted reject", d)
 	}
 	if d := e.AdmitPacket("r_missing", 10); d.Allow || d.Kind != "" {
 		t.Errorf("AdmitPacket(unknown) = %+v; want an uncounted reject", d)
@@ -74,9 +71,6 @@ func TestNonIPv4SourceFailsClosedUncounted(t *testing.T) {
 		a := netip.MustParseAddr(s)
 		if d, tk := e.AdmitFlow("r1", a, 10); d.Allow || d.Kind != "" || tk != nil {
 			t.Errorf("AdmitFlow(%s) = %+v; want an uncounted reject", s, d)
-		}
-		if d, _ := e.AdmitSourceFlow("r1", a); d.Allow || d.Kind != "" {
-			t.Errorf("AdmitSourceFlow(%s) = %+v; want an uncounted reject", s, d)
 		}
 		if e.SourceAllowed("r1", a) {
 			t.Errorf("SourceAllowed(%s) = true; want false", s)
@@ -137,27 +131,37 @@ func TestLaterStepReleasesSlot(t *testing.T) {
 	}
 }
 
-// 送信元ごとの同時フロー数はプロトコルごとに全ルールで合算し、Relay の接続(AdmitSourceFlow)も
-// Transparent の TCP と同じ数に入る。
+// 送信元ごとの同時フロー数はプロトコルごとに全ルールで合算し、Relay のルールの接続も Transparent の
+// TCP と同じ数に入る。Relay のルールも AdmitFlow で全段を判定するので、送信元の拒否とレートも効く。
 func TestSourceFlowSharedAcrossRulesAndRelay(t *testing.T) {
 	e := New(newClock().now)
 	tcp := policy.RulePolicy{RuleID: "r_tcp", Proto: proto.TCP}
-	relay := policy.RulePolicy{RuleID: "r_relay", Proto: proto.TCP, NewFlowRate: rate(1, proto.PerHour), SourceDeny: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}}
+	relay := policy.RulePolicy{RuleID: "r_relay", Proto: proto.TCP, NewFlowRate: rate(1, proto.PerHour), SourceDeny: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}}
 	e.Update(policy.Policy{Rules: []policy.RulePolicy{tcp, relay, udpRule("r_udp")}, PerSourceFlowCaps: policy.PerSourceFlowCaps{UDP: 1, TCP: 2}})
 	a := must(t)(e.AdmitFlow("r_tcp", src1, 0))
-	// AdmitSourceFlow は送信元の拒否もレートも評価しない(移行の手順 4 まで)
-	b := must(t)(e.AdmitSourceFlow("r_relay", src1))
-	if d, _ := e.AdmitSourceFlow("r_relay", src1); d.Kind != "src_flow" {
+	b := must(t)(e.AdmitFlow("r_relay", src1, 0))
+	if d, _ := e.AdmitFlow("r_relay", src1, 0); d.Kind != "src_flow" {
 		t.Errorf("third TCP flow = %+v; want drop:src_flow", d)
 	}
 	if d, _ := e.AdmitFlow("r_tcp", src1, 0); d.Kind != "src_flow" {
 		t.Errorf("third TCP flow = %+v; want drop:src_flow", d)
+	}
+	// Relay のルールの deny とレートも効く。deny の送信元は枠を取らないので、src2 の枠は空いたまま
+	if d, _ := e.AdmitFlow("r_relay", netip.MustParseAddr("203.0.113.9"), 0); d.Kind != "deny" {
+		t.Errorf("a denied source of the Relay rule = %+v; want drop:deny", d)
 	}
 	must(t)(e.AdmitFlow("r_udp", src1, 0)) // UDP は別に数える
 	must(t)(e.AdmitFlow("r_tcp", src2, 0)) // 送信元ごと
 	b.Release()
 	must(t)(e.AdmitFlow("r_tcp", src1, 0))
 	a.Release()
+	// Relay のルールの new_flow_rate は 1/hour で、burst の 5 本を b と合わせて使い切る
+	for range policy.TokenBucketBurst - 1 {
+		must(t)(e.AdmitFlow("r_relay", src2, 0)).Release()
+	}
+	if d, tk := e.AdmitFlow("r_relay", src2, 0); d.Kind != "new_flow" || tk != nil {
+		t.Errorf("the Relay rule over its new_flow_rate = %+v, %v; want drop:new_flow with no ticket", d, tk)
+	}
 }
 
 // 上限を Update で下げても成立済みのフローは追い出さず、数は引き継ぐ。0 は上限なし。
