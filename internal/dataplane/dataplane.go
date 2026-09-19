@@ -34,16 +34,23 @@ type Desired struct {
 // Participant is the dataplane side of the Runtime's fixed order (design.md 7a.2 節). Every
 // Backend is one; internal/reconcile depends only on this narrow interface.
 type Participant interface {
-	// Prepare stages d without publishing it. Everything that can fail belongs here (design.md
-	// 7a.2 節). An error means nothing was staged and the caller rolls back the frontend.
+	// Prepare stages d without publishing it. The contract of design.md 7a.2 節 is that everything
+	// that can fail belongs here; the kernel backend meets it, the userspace backend does not yet
+	// (see Prepared.Commit). An error means nothing was staged and the caller rolls back the
+	// frontend.
 	Prepare(d Desired) (Prepared, error)
 }
 
 // Prepared is one staged dataplane change, finished by exactly one of Commit or Rollback.
 type Prepared interface {
-	// Commit publishes the staged change as one atomic step (for the kernel backend, one nftables
-	// transaction). On error nothing of it is published and the previous state keeps forwarding,
-	// so the Runtime can still roll back. Success is the point of no return (design.md 7a.2 節).
+	// Commit publishes the staged change. Success is the point of no return (design.md 7a.2 節).
+	// The kernel backend publishes as one atomic step (one nftables transaction): on error nothing
+	// of it is published and the previous state keeps forwarding, so the Runtime can still roll
+	// back. The userspace backend does not give that guarantee yet: to keep the behaviour from
+	// before the Backend existed, its Commit binds and starts serving each listener, and a port
+	// that fails to bind is logged and retried rather than failing the Commit, so the change can
+	// be applied partly without an error. Phase 4 (design.md 7a.3, 7a.8 節) moves binding into
+	// Prepare so every backend meets the atomic contract.
 	Commit() error
 	// Rollback releases what Prepare staged. It is called when Commit was not reached or failed,
 	// never after a successful Commit, and cannot fail.
@@ -67,7 +74,10 @@ type Backend interface {
 	// Converge closes established flows the committed Plan no longer admits and returns how many
 	// it closed (design.md 6.1, 6.3, 7a.3 節). It runs after the Runtime's Commit.
 	Converge(p planner.Plan) (int, error)
-	// ReadDrops returns the drop counters accumulated since the previous call and resets them.
+	// ReadDrops reads the drop counters of the current dataplane. The kernel backend only reads:
+	// its counters are reset by the next successful table replacement, so if that replacement
+	// fails, the next ReadDrops returns the same counts again. The userspace backend drains its
+	// counters on read. Phase 4 ties reading the counters to the commit.
 	ReadDrops() ([]Drop, error)
 	// Dial connects to addr (an agent's wg address and port) through the tunnel.
 	Dial(network, addr string) (net.Conn, error)
