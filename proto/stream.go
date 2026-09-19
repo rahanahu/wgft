@@ -60,4 +60,10 @@ const (
 	CloseRevoked          = 4001 // 恒久トークンが無効化された
 	CloseHeartbeatTimeout = 4002 // ハートビート(30 秒間隔)が 90 秒間届かなかった
 	CloseProtocolMismatch = 4003 // 版の範囲(protocol_min/protocol_max)の共通部分が無い(仕様 7a.6 節)
+	// CloseProtocolMalformed は、版の advertisement 自体が壊れている場合(protocol_min/
+	// protocol_max の片方だけがある、または Min < 1 か Min > Max の無効な範囲)。
+	// CloseProtocolMismatch(双方とも正当な範囲を宣言したが共通部分が無い)とは原因が異なる。
+	// 前者は相手の実装の不具合、後者は版を上げれば直る正常な状態なので、コードでも区別できる
+	// ようにした(仕様 7a.6 節)。
+	CloseProtocolMalformed = 4004
 )

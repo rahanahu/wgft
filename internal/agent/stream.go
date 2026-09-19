@@ -174,15 +174,21 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 	}
 }
 
-// checkServerProtocolVersion は、server が選んだ版(state.ServerProtocolVersion)が agent 自身の
-// 範囲に入っていることを確かめる(仕様 7a.6 節)。フィールドが無ければ legacy v0 の server なので
-// 検査しない。server は本来 local と agent の範囲の共通部分からしか選ばないので、ここでの失敗は
-// server の実装違反を示す防御的な検査である。
+// checkServerProtocolVersion は、server が選んだ版(state.ServerProtocolVersion)が、番号の付いた
+// 版として意味を持ち(1 以上)、かつ agent 自身の範囲に入っていることを確かめる(仕様 7a.6 節)。
+// フィールドが無ければ legacy v0 の server なので検査しない。server は本来、版 1 以上かつ
+// local と agent の範囲の共通部分からしか選ばないので、ここでの失敗は server の実装違反を
+// 示す防御的な検査である。1 未満は、agent の範囲がたまたま [1,1] でなくなった場合(将来
+// v1 を落として [2,2] になるなど)でも「範囲外」ではなく「そもそも版として無効」だとログで
+// 区別できるよう、範囲の検査より先に見る。
 func checkServerProtocolVersion(local proto.ProtocolRange, st *proto.State) error {
 	if st.ServerProtocolVersion == nil {
 		return nil
 	}
 	v := *st.ServerProtocolVersion
+	if v < 1 {
+		return fmt.Errorf("server selected protocol version %d, which is not a valid numbered version (versions start at 1)", v)
+	}
 	if v < local.Min || v > local.Max {
 		return fmt.Errorf("server selected protocol version %d, outside the agent's supported range [%d,%d]", v, local.Min, local.Max)
 	}

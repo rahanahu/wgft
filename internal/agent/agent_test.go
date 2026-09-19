@@ -551,6 +551,8 @@ func TestCheckServerProtocolVersion(t *testing.T) {
 	local := proto.ProtocolRange{Min: 1, Max: 1}
 	inRange := 1
 	outOfRange := 2
+	zero := 0
+	negative := -1
 	tests := []struct {
 		name    string
 		st      *proto.State
@@ -559,6 +561,10 @@ func TestCheckServerProtocolVersion(t *testing.T) {
 		{"legacy v0 state (no field): nothing to check", &proto.State{}, false},
 		{"in range", &proto.State{ServerProtocolVersion: &inRange}, false},
 		{"out of range", &proto.State{ServerProtocolVersion: &outOfRange}, true},
+		// Versions start at 1 (design 7a.6); 0 or negative is not a valid numbered version at
+		// all, distinct from a valid version that happens to fall outside the agent's range.
+		{"zero: not a valid numbered version", &proto.State{ServerProtocolVersion: &zero}, true},
+		{"negative: not a valid numbered version", &proto.State{ServerProtocolVersion: &negative}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

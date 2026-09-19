@@ -169,14 +169,18 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		return
 	}
 
-	// 2a. 版の交渉(仕様 7a.6 節)。pubkey に protocol_min/protocol_max が無ければ legacy v0 として
-	// 扱い、範囲の検査はしない。共通部分が無ければ、ピアの置き換えに進まず双方の範囲を示して断る
-	sel, ok := negotiateVersion(first)
+	// 2a. 版の交渉(仕様 7a.6 節)。pubkey に protocol_min/protocol_max が両方とも無ければ legacy
+	// v0 として扱う。片方だけ無い、または範囲そのものが無効(Min<1 か Min>Max)なら advertisement
+	// が壊れているとみなし、共通部分が無い場合とはコード(CloseProtocolMalformed)を分けて断る。
+	// どちらの場合も、ピアの置き換えに進まず理由を示して断る
+	sel, ok, malformed, reason := negotiateVersion(first)
 	if !ok {
-		reason := fmt.Sprintf("no overlapping protocol version: server supports [%d,%d], agent supports [%d,%d]",
-			proto.SupportedProtocol.Min, proto.SupportedProtocol.Max, *first.ProtocolMin, *first.ProtocolMax)
+		code := proto.CloseProtocolMismatch
+		if malformed {
+			code = proto.CloseProtocolMalformed
+		}
 		log.Printf("stream: %s: %s; refusing", agent, reason)
-		ws.Close(websocket.StatusCode(proto.CloseProtocolMismatch), reason)
+		ws.Close(websocket.StatusCode(code), reason)
 		return
 	}
 	c.sel = sel
@@ -327,24 +331,45 @@ func (c *conn) send(ctx context.Context, m proto.Message) error {
 }
 
 // negotiateVersion は pubkey メッセージから、この接続の版と機能を決める(仕様 7a.6 節)。
-// m に protocol_min/protocol_max が無ければ legacy v0 とみなし、ok は常に true。両方あれば
-// proto.SupportedProtocol との共通部分の最大を選ぶ。共通部分が無ければ ok は false で、
-// 呼び出し元は m.ProtocolMin/m.ProtocolMax(非 nil であることは保証される)を使って断りの
-// メッセージを組み立てる。
-func negotiateVersion(m proto.Message) (sel proto.Negotiated, ok bool) {
-	if m.ProtocolMin == nil || m.ProtocolMax == nil {
-		return proto.Negotiated{Legacy: true}, true
+// ok が true なのは、legacy v0(protocol_min/protocol_max が両方とも無い)と、両方の範囲が
+// 有効で共通部分がある場合だけ。ok が false のとき、malformed は原因を区別する:
+//
+//   - true:advertisement 自体が壊れている(片方のフィールドだけがある、または Min<1 か
+//     Min>Max の無効な範囲)。相手の実装の不具合であり、版を上げても直らない
+//   - false:双方とも有効な範囲を宣言したが共通部分が無い。版を上げれば直る
+//
+// reason は ok が false のときだけ意味を持つ、そのまま WebSocket の close reason に使える
+// 文字列。呼び出し元は first.ProtocolMin/first.ProtocolMax を自分で読み直す必要が無い
+// (malformed の場合は片方が nil のことがあるため、直接 deref すると panic しうる)。
+func negotiateVersion(m proto.Message) (sel proto.Negotiated, ok bool, malformed bool, reason string) {
+	switch {
+	case m.ProtocolMin == nil && m.ProtocolMax == nil:
+		return proto.Negotiated{Legacy: true}, true, false, ""
+	case m.ProtocolMin == nil || m.ProtocolMax == nil:
+		missing, present := "protocol_max", "protocol_min"
+		if m.ProtocolMin == nil {
+			missing, present = "protocol_min", "protocol_max"
+		}
+		reason = fmt.Sprintf("malformed protocol advertisement: %s is present but %s is missing", present, missing)
+		return proto.Negotiated{}, false, true, reason
 	}
 	remote := proto.ProtocolRange{Min: *m.ProtocolMin, Max: *m.ProtocolMax}
+	if !remote.Valid() {
+		reason = fmt.Sprintf("malformed protocol advertisement: invalid range [%d,%d] (protocol_min must be at least 1 and at most protocol_max)",
+			remote.Min, remote.Max)
+		return proto.Negotiated{}, false, true, reason
+	}
 	version, overlap := proto.SelectProtocolVersion(proto.SupportedProtocol, remote)
 	if !overlap {
-		return proto.Negotiated{}, false
+		reason = fmt.Sprintf("no overlapping protocol version: server supports [%d,%d], agent supports [%d,%d]",
+			proto.SupportedProtocol.Min, proto.SupportedProtocol.Max, remote.Min, remote.Max)
+		return proto.Negotiated{}, false, false, reason
 	}
 	sel = proto.Negotiated{Version: version, AgentMin: remote.Min, AgentMax: remote.Max}
 	if m.Capabilities != nil {
 		sel.Capabilities = *m.Capabilities
 	}
-	return sel, true
+	return sel, true, false, ""
 }
 
 // protocolLabel はログ用の短い表記("legacy v0" または "v1")。

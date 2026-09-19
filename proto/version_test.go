@@ -21,6 +21,13 @@ func TestSelectProtocolVersion(t *testing.T) {
 		{"no overlap, remote strictly ahead", ProtocolRange{1, 1}, ProtocolRange{2, 3}, 0, false},
 		{"no overlap, remote strictly behind", ProtocolRange{5, 6}, ProtocolRange{1, 2}, 0, false},
 		{"malformed remote range (min > max) treated as no overlap", ProtocolRange{1, 1}, ProtocolRange{5, 2}, 0, false},
+		// An invalid range must never be selected from, even when a naive interval
+		// intersection would otherwise pick a version out of it (regression: {Min:0,Max:1}
+		// intersected with {1,1} used to yield 1, silently accepting version 0 as in-range).
+		{"invalid local range (min 0) never yields a version", ProtocolRange{0, 1}, ProtocolRange{1, 1}, 0, false},
+		{"invalid remote range (min 0) never yields a version", ProtocolRange{1, 1}, ProtocolRange{0, 1}, 0, false},
+		{"invalid local range (min > max) never yields a version", ProtocolRange{2, 1}, ProtocolRange{1, 2}, 0, false},
+		{"both ranges invalid", ProtocolRange{0, 0}, ProtocolRange{-1, 0}, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -28,6 +35,29 @@ func TestSelectProtocolVersion(t *testing.T) {
 			if gotVersion != tt.wantVersion || gotOK != tt.wantOK {
 				t.Errorf("SelectProtocolVersion(%+v, %+v) = (%d, %v), want (%d, %v)",
 					tt.local, tt.remote, gotVersion, gotOK, tt.wantVersion, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestProtocolRangeValid(t *testing.T) {
+	tests := []struct {
+		name string
+		r    ProtocolRange
+		want bool
+	}{
+		{"single version at the floor", ProtocolRange{1, 1}, true},
+		{"wider valid range", ProtocolRange{1, 5}, true},
+		{"valid range not starting at 1", ProtocolRange{3, 5}, true},
+		{"min below 1 (zero)", ProtocolRange{0, 1}, false},
+		{"min below 1 (negative)", ProtocolRange{-1, 1}, false},
+		{"min greater than max", ProtocolRange{2, 1}, false},
+		{"both zero", ProtocolRange{0, 0}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.r.Valid(); got != tt.want {
+				t.Errorf("%+v.Valid() = %v, want %v", tt.r, got, tt.want)
 			}
 		})
 	}
