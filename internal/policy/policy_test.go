@@ -226,3 +226,16 @@ func TestBuildNormalizesSourcePrefixes(t *testing.T) {
 		t.Errorf("Build().Rules[0].SourceDeny = %v, want %v (masked)", got.Rules[0].SourceDeny, wantDeny)
 	}
 }
+
+func TestNormalizePrefixesKeepsNonIPv4(t *testing.T) {
+	in := []netip.Prefix{
+		netip.MustParsePrefix("2001:db8::/64"),
+		netip.MustParsePrefix("192.0.2.0/25"),
+		netip.MustParsePrefix("192.0.2.128/25"),
+	}
+	got := NormalizePrefixes(in)
+	want := []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("2001:db8::/64")}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("NormalizePrefixes = %v, want %v", got, want)
+	}
+}

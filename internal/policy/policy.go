@@ -212,16 +212,22 @@ func Build(rules []model.Rule, limits flowcap.Limits) Policy {
 // nftables compiler's own interval merge is idempotent on an already-normalized input, and
 // SourceAllowed/matchesAny-style scans give the same verdict either way.
 //
-// v1 is IPv4-only (design.md 4, 7a.9 節); prefixes are assumed to already be IPv4 (proto.Rule's
-// validation rejects non-IPv4 source_allow/source_deny entries before they reach this package).
+// v1 is IPv4-only (design.md 4, 7a.9 節). proto.Rule's validation rejects non-IPv4 source_allow/
+// source_deny entries, so only IPv4 prefixes are expected here; any other prefix is kept, masked but
+// not merged, after the IPv4 ones instead of being dropped or crashing the merge.
 func NormalizePrefixes(prefixes []netip.Prefix) []netip.Prefix {
 	if len(prefixes) == 0 {
 		return nil
 	}
 	type span struct{ lo, hi uint64 } // hi は排他的(nft/build.go の intervalElements と同じ形)
 	spans := make([]span, 0, len(prefixes))
+	var other []netip.Prefix // IPv4 でないもの。検証で弾かれるはずだが、来ても panic せず併合せずに残す
 	for _, p := range prefixes {
 		p = p.Masked()
+		if !p.Addr().Is4() {
+			other = append(other, p)
+			continue
+		}
 		lo := uint64(binary.BigEndian.Uint32(p.Addr().AsSlice()))
 		spans = append(spans, span{lo, lo + 1<<(32-p.Bits())})
 	}
@@ -241,7 +247,7 @@ func NormalizePrefixes(prefixes []netip.Prefix) []netip.Prefix {
 	for _, s := range merged {
 		out = append(out, spanToPrefixes(s.lo, s.hi)...)
 	}
-	return out
+	return append(out, other...)
 }
 
 // spanToPrefixes decomposes the IPv4 address range [lo, hi) into the minimal list of CIDR blocks
