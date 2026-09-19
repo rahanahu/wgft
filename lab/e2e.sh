@@ -67,10 +67,10 @@ t=$(vps wgft rule add --agent home --tcp 39971 --to 192.168.50.3:25565 --admin "
 u=$(vps wgft rule add --agent home --udp 27015 --to 192.168.50.3:19132 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
 vps wgft rule add --agent home --tcp 8444 --to 192.168.50.3:8444 --proxy --proxy-protocol --admin "$ADMIN" >/dev/null
 sleep 5
-check "tcp through the VPS" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39971')"
-check "udp through the VPS" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:27015')"
-check "3000-byte udp" "len=3000" "$(client 'head -c 3000 /dev/zero | tr "\0" a | socat -t 3 - UDP:198.51.100.1:27015')"
-check "proxy protocol carries the client ip" "198.51.100.2" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:8444' | head -1)"
+check "tcp through the VPS" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39971')"
+check "udp through the VPS" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:27015')"
+check "3000-byte udp" "len=3000" "$(client 'head -c 3000 /dev/zero | tr "\0" a | socat -t 3 -T 10 - UDP:198.51.100.1:27015')"
+check "proxy protocol carries the client ip" "198.51.100.2" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:8444' | head -1)"
 
 # deny: a TCP session opened before the deny must be cut at once. Seen from the VPS: in kernel
 # mode the conntrack entry of the flow disappears (its later packets hit the deny rule), in
@@ -94,9 +94,9 @@ sleep 1
 after=$(flows)
 wait
 check "deny cuts the open tcp session" "before=1 after=0" "before=$before after=$after"
-check "deny silences udp" "0" "$(client 'echo hi | socat -t 2 - UDP:198.51.100.1:27015' | wc -c)"
+check "deny silences udp" "0" "$(client 'echo hi | socat -t 2 -T 10 - UDP:198.51.100.1:27015' | wc -c)"
 vps wgft rule deny rm "$t" 198.51.100.2/32 --admin "$ADMIN" >/dev/null; sleep 1
-check "tcp again after deny rm" "tcp-echo" "$(client 'echo hi | socat -t 3 - TCP:198.51.100.1:39971')"
+check "tcp again after deny rm" "tcp-echo" "$(client 'echo hi | socat -t 3 -T 10 - TCP:198.51.100.1:39971')"
 
 echo "== $mode: teardown"
 kill_server

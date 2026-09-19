@@ -65,12 +65,12 @@ check "agent registered" "home" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)
 
 r=$(vps wgft rule add --agent home --udp 2456-2457 --to 192.168.50.2:19132 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
 sleep 2
-check "udp through the VPS before split" "udp-echo" "$(client 'echo hi | socat -t 3 - UDP:198.51.100.1:2456')"
+check "udp through the VPS before split" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:2456')"
 
 # A session flowing on port 2456 (the range's first port; the split point below is
 # 2457, so 2456's effective target never moves) throughout the split and the merge.
 client 'ok=0; bad=0; for i in $(seq 1 24); do
-  out=$(echo "n$i" | socat -t 1 - UDP:198.51.100.1:2456)
+  out=$(echo "n$i" | socat -t 1 -T 10 - UDP:198.51.100.1:2456)
   if [[ "$out" == *udp-echo* ]]; then ok=$((ok+1)); else bad=$((bad+1)); fi
   sleep 0.25
 done; echo "ok=$ok bad=$bad"' > /tmp/wgft-splitmerge-flow.log 2>&1 &
