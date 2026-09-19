@@ -1,11 +1,9 @@
 package planner
 
 import (
-	"net"
 	"net/netip"
 	"reflect"
 	"sort"
-	"strconv"
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/model"
@@ -13,22 +11,19 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// This file proves the Phase 1 "no behaviour change" completion criterion (design.md 7a.8 節):
-// the set of ports/rules Planner.Build classifies as kernel DNAT, vpsd-terminated relay, or
-// userspace relay equals what today's code, unmodified, derives from the same proto.Rule set.
+// This file proves the Phase 1 "no behaviour change" completion criterion (design.md 7a.8 節) for
+// the vpsd-terminated relay: Plan.Relay() equals proxyrelay.FromRules, the exported function
+// internal/vpsd/apply.go actually calls to build the proxy relay's declaration, in both kernel and
+// userspace dataplane modes (internal/vpsd/vpsd.go wires the same proxyrelay.Manager either way;
+// only its Dial func differs). proxyrelay.FromRules is called directly here, not transcribed, so a
+// future change to its filter shows up as a failing assertion.
 //
-//   - kernel DNAT: compared against the same rule-level filter internal/vpsd/nft.emit applies
-//     before it emits a DNAT row (r.Enabled && r.VPSMode == proto.ModeKernel && agent known;
-//     internal/vpsd/nft/build.go's main loop). nft.emit itself is not called (it needs a real or
-//     recorded nftables.Conn); the filter is the "current behaviour" this test locks down.
-//   - vpsd-terminated relay: compared directly against proxyrelay.FromRules, the exported function
-//     internal/vpsd/apply.go actually calls to build the proxy relay's declaration, in both kernel
-//     and userspace dataplane modes (internal/vpsd/vpsd.go wires the same proxyrelay.Manager either
-//     way; only its Dial func differs).
-//   - userspace relay: compared against a reproduction of internal/vpsd/dataplane_userspace.go's
-//     ApplyNFT loop (unexported method on an unexported type, so it cannot be called directly);
-//     the reproduction is transcribed verbatim from that loop and cited by name so a future change
-//     to ApplyNFT's filter is visible as a diff here too.
+// The matching checks for kernel DNAT and the userspace relay also call the real production code
+// (not a transcription) and live next to it instead, because both are unexported and package-local:
+//   - kernel DNAT: internal/vpsd/nft/equivalence_test.go, which runs the real emit() against the
+//     in-memory recorder from build_test.go.
+//   - userspace relay: internal/vpsd/dataplane_userspace_equivalence_test.go, which calls the
+//     unexported userspaceRelayTargets function extracted from userspaceDataplane.ApplyNFT.
 func equivalenceFixture() (rules []proto.Rule, agentAddr map[string]netip.Addr) {
 	rate := func(s string) *proto.Rate {
 		r, err := proto.ParseRate(s)
@@ -82,43 +77,6 @@ func buildPlan(t *testing.T, rules []proto.Rule, agentAddr map[string]netip.Addr
 	return Build(Input{Generation: 1, Rules: normalized, Agents: agents})
 }
 
-// TestEquivalenceKernelDNAT locks down that Plan.Transparent() names exactly the rules that
-// internal/vpsd/nft.emit's main loop would give a DNAT row (design.md 6.1 節), for the
-// DataplaneMode=Kernel case: r.Enabled && r.VPSMode == proto.ModeKernel && the agent is known.
-func TestEquivalenceKernelDNAT(t *testing.T) {
-	rules, agentAddr := equivalenceFixture()
-	plan := buildPlan(t, rules, agentAddr)
-
-	type route struct {
-		proto  proto.Proto
-		port   proto.PortRange
-		target netip.Addr
-	}
-	want := map[string]route{}
-	for _, r := range rules {
-		if !r.Enabled || r.VPSMode != proto.ModeKernel {
-			continue
-		}
-		a, ok := agentAddr[r.Agent]
-		if !ok {
-			continue
-		}
-		want[r.ID] = route{r.Proto, r.ListenPort, a}
-	}
-
-	got := map[string]route{}
-	for _, pp := range plan.Transparent() {
-		got[pp.RuleID] = route{pp.Proto, pp.ListenPort, pp.AgentAddr}
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Plan.Transparent() ports = %+v, want %+v", got, want)
-	}
-	// Cross-check: every enabled, known-agent rule is exactly one of Transparent or Relay, never both.
-	if got, want := len(plan.Transparent())+len(plan.Relay()), len(plan.Ports); got != want {
-		t.Fatalf("Transparent+Relay = %d ports, want %d (Plan.Ports total)", got, want)
-	}
-}
-
 // TestEquivalenceVPSDRelay locks down that Plan.Relay() equals proxyrelay.FromRules on the same
 // input, field for field (design.md 6.2 節). proxyrelay.FromRules is the function
 // internal/vpsd/apply.go actually calls before every nftables apply, in both kernel and userspace
@@ -145,45 +103,13 @@ func TestEquivalenceVPSDRelay(t *testing.T) {
 	}
 }
 
-// referenceUserspacePorts reproduces internal/vpsd/dataplane_userspace.go's ApplyNFT loop
-// (design.md 6.3 節): for every enabled, non-proxy rule whose agent is known, one relay.Desired
-// entry per individual port in the range, target = agent address at that same port. Transcribed
-// verbatim (down to the JoinHostPort/Itoa calls) rather than imported, because ApplyNFT is an
-// unexported method on an unexported type; a change to that loop's filter should show up as a
-// failing assertion here, prompting the same change to be made to this reference.
-func referenceUserspacePorts(rules []proto.Rule, agentAddr map[string]netip.Addr) map[string]string {
-	desired := map[string]string{}
-	for i := range rules {
-		r := &rules[i]
-		if !r.Enabled || r.VPSMode == proto.ModeProxy {
-			continue
-		}
-		a, ok := agentAddr[r.Agent]
-		if !ok {
-			continue
-		}
-		for p := int(r.ListenPort.Lo); p <= int(r.ListenPort.Hi); p++ {
-			desired[string(r.Proto)+"/"+strconv.Itoa(p)] = net.JoinHostPort(a.String(), strconv.Itoa(p))
-		}
-	}
-	return desired
-}
-
-// TestEquivalenceUserspaceRelay locks down that Plan.Transparent(), expanded one port at a time,
-// equals referenceUserspacePorts on the same input (design.md 6.3 節, DataplaneMode=Userspace case).
-func TestEquivalenceUserspaceRelay(t *testing.T) {
+// TestEquivalenceTransparentRelayPartition cross-checks that every enabled, known-agent rule ends
+// up as exactly one of Transparent or Relay, never both and never neither (the port classification
+// itself is proved equivalent to today's code by the tests cited in the package doc comment above).
+func TestEquivalenceTransparentRelayPartition(t *testing.T) {
 	rules, agentAddr := equivalenceFixture()
 	plan := buildPlan(t, rules, agentAddr)
-
-	want := referenceUserspacePorts(rules, agentAddr)
-
-	got := map[string]string{}
-	for _, pp := range plan.Transparent() {
-		for p := int(pp.ListenPort.Lo); p <= int(pp.ListenPort.Hi); p++ {
-			got[string(pp.Proto)+"/"+strconv.Itoa(p)] = net.JoinHostPort(pp.AgentAddr.String(), strconv.Itoa(p))
-		}
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Plan.Transparent() expanded per-port = %+v, want %+v", got, want)
+	if got, want := len(plan.Transparent())+len(plan.Relay()), len(plan.Ports); got != want {
+		t.Fatalf("Transparent+Relay = %d ports, want %d (Plan.Ports total)", got, want)
 	}
 }
