@@ -100,14 +100,16 @@ func TestEmitRows(t *testing.T) {
 			setNames = append(setNames, strings.TrimPrefix(op, "AddSet "))
 		}
 	}
-	if want := []string{"deny_1", "meter_1", "allow_2"}; !reflect.DeepEqual(setNames, want) {
+	// flows_udp / flows_tcp は、そのプロトコルの最初の有効なカーネルモードのルールでだけ作る
+	if want := []string{"deny_1", "meter_1", "flows_udp", "allow_2", "flows_tcp"}; !reflect.DeepEqual(setNames, want) {
 		t.Errorf("sets = %v, want %v", setNames, want)
 	}
 
-	// 行の順序:deny、allow、per_source、new_flow、packet。空・未設定のものは出ない
+	// 行の順序:deny、allow、per_source、src_flow、new_flow、packet。空・未設定のものは出ない。
+	// src_flow は接続元 IP ごとの同時フロー数の上限で、プロトコルごとに常に出る
 	wantPre := []string{
-		Comment("r_udp", "deny"), Comment("r_udp", "per_source"), Comment("r_udp", "new_flow"),
-		Comment("r_tcp", "allow"), Comment("r_tcp", "packet"),
+		Comment("r_udp", "deny"), Comment("r_udp", "per_source"), Comment("r_udp", "src_flow"), Comment("r_udp", "new_flow"),
+		Comment("r_tcp", "allow"), Comment("r_tcp", "src_flow"), Comment("r_tcp", "packet"),
 	}
 	if got := rec.comments("filter_pre"); !reflect.DeepEqual(got, wantPre) {
 		t.Errorf("filter_pre = %v, want %v", got, wantPre)
@@ -123,7 +125,7 @@ func TestEmitRows(t *testing.T) {
 
 	// allow の lookup は反転(!=)、deny は反転しない
 	assertLookupInvert(t, rec.rules["filter_pre"][0], false)
-	assertLookupInvert(t, rec.rules["filter_pre"][3], true)
+	assertLookupInvert(t, rec.rules["filter_pre"][4], true)
 
 	// DNAT は宛先アドレスだけ(ポートのレジスタは使わない)
 	for _, r := range rec.rules["nat_pre"] {
@@ -146,6 +148,89 @@ func assertLookupInvert(t *testing.T, r *nftables.Rule, want bool) {
 		}
 	}
 	t.Errorf("rule has no lookup")
+}
+
+// 接続元 IP ごとの同時フロー数の上限(仕様 6.1, 7 節)は、プロトコルごとに 1 つの set を
+// 全ルールで共有し、値は udp 256 / tcp 128 で、ct state new のときだけ効く。
+func TestFlowCapSharedAcrossRules(t *testing.T) {
+	rules := []proto.Rule{
+		{ID: "r_udp1", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2456), Target: "192.168.1.20:2456",
+			VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_udp2", Agent: "home", Proto: proto.UDP, ListenPort: pr(2457, 2457), Target: "192.168.1.20:2457",
+			VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
+			VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	rec := newRecorder()
+	if err := emit(rec, rules, testCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var setNames []string
+	for _, op := range rec.ops {
+		if strings.HasPrefix(op, "AddSet ") {
+			setNames = append(setNames, strings.TrimPrefix(op, "AddSet "))
+		}
+	}
+	// flows_udp は 1 回しか作らない(2 つ目の UDP ルールでは作り直さない)
+	if want := []string{"flows_udp", "flows_tcp"}; !reflect.DeepEqual(setNames, want) {
+		t.Errorf("sets = %v, want %v (must not create flows_udp twice)", setNames, want)
+	}
+
+	dyn1 := findDynset(t, rec.rules["filter_pre"][0]) // r_udp1 の src_flow の唯一の行
+	dyn2 := findDynset(t, rec.rules["filter_pre"][1]) // r_udp2 の src_flow の唯一の行
+	if dyn1.SetName != dyn2.SetName {
+		t.Errorf("two udp rules must share one set: %q vs %q", dyn1.SetName, dyn2.SetName)
+	}
+	if dyn1.SetName != "flows_udp" {
+		t.Errorf("set name = %q, want flows_udp", dyn1.SetName)
+	}
+	if got := connlimitOf(t, dyn1); got.Count != 256 || got.Flags != expr.NFT_CONNLIMIT_F_INV {
+		t.Errorf("udp cap = %+v, want count 256 with the over flag", got)
+	}
+
+	dyn3 := findDynset(t, rec.rules["filter_pre"][2]) // r_tcp の src_flow
+	if dyn3.SetName != "flows_tcp" {
+		t.Errorf("set name = %q, want flows_tcp", dyn3.SetName)
+	}
+	if got := connlimitOf(t, dyn3); got.Count != 128 || got.Flags != expr.NFT_CONNLIMIT_F_INV {
+		t.Errorf("tcp cap = %+v, want count 128 with the over flag", got)
+	}
+
+	// 3 行とも ct state new に限る(既存のフローを追い出さない)
+	for i, r := range rec.rules["filter_pre"] {
+		found := false
+		for _, e := range r.Exprs {
+			if ct, ok := e.(*expr.Ct); ok && ct.Key == expr.CtKeySTATE {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("filter_pre[%d] has no ct state match", i)
+		}
+	}
+}
+
+func findDynset(t *testing.T, r *nftables.Rule) *expr.Dynset {
+	t.Helper()
+	for _, e := range r.Exprs {
+		if d, ok := e.(*expr.Dynset); ok {
+			return d
+		}
+	}
+	t.Fatal("rule has no dynset")
+	return nil
+}
+
+func connlimitOf(t *testing.T, d *expr.Dynset) *expr.Connlimit {
+	t.Helper()
+	for _, e := range d.Exprs {
+		if c, ok := e.(*expr.Connlimit); ok {
+			return c
+		}
+	}
+	t.Fatal("dynset has no connlimit")
+	return nil
 }
 
 func TestEmitUnknownAgent(t *testing.T) {
