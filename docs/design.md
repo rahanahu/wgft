@@ -820,6 +820,7 @@ v1 は IPv4 だけを扱い(4 節)、IPv4 でない送信元を拒む(fail-close
 - `SourceAllowed`:成立済みのフローを残すかを deny と allow だけで判定する(7a.3 節の `Retiring`、ルール変更の後にセッションを閉じる判定)
 - `Update`:状態を引き継ぐ規則は 7a.4 節のままである
 - `Drops`:段ごとの drop を返して 0 に戻す(今の `srcpolicy.Drops` と同じ経路)
+- `AdmitSourceFlow`:userspace モードの `Relay` の中継の新しい接続を、送信元ごとの同時フロー数の段だけで判定し、`AdmitFlow` と同じ手形を返す。移行の手順 3 から 4 までの間だけの入口である。手順 3 で送信元ごとの同時フロー数を評価器が数えるようになるので、`Relay` の接続を `Transparent` の TCP と同じ数に入れ続けるために要る(6.3 節)。送信元の許可拒否は今までどおり `Relay` の中継が判定し、drop に数えない。kernel モードの `Relay` のポートに `src_flow` の行だけがあるのと同じ扱いである。手順 4 で `AdmitFlow` に置き換える
 - IR に無いルール ID と IPv4 でない送信元:拒み、drop には数えない。今は未知のルール ID を通している。listener は、そのルールの IR を公開した後にだけ中継を始める(7a.3 節)ので、正しい実装では起きない。起きたときに通さないためである
 
 今の userspace の実装は、次の 3 点で IR の意味と食い違っており、Phase 5 で直す。
@@ -843,17 +844,18 @@ v1 は IPv4 だけを扱い(4 節)、IPv4 でない送信元を拒む(fail-close
 fixture は `internal/policy/testdata/admission/*.json` に置き、1 ファイルが 1 つの場面を表す。
 
 - `comment`:場面の説明
-- `interim_until_step`:移行の途中の kernel の挙動を書いた暫定の fixture に付ける、書き直す段の番号(後述の「Phase 5 の移行の手順」の番号)。暫定の fixture の名前は `_until_step<番号>` で終える。最終の設計どおりの fixture では省く
+- `interim_until_step`:移行の途中の挙動を書いた暫定の fixture に付ける、書き直す段の番号(後述の「Phase 5 の移行の手順」の番号)。暫定の fixture の名前は `_until_step<番号>` で終える。最終の設計どおりの fixture では省く
+- `engines`:暫定の fixture を照らす評価器の名前(`nftables`、`goengine`)の一覧。省くとすべての評価器に照らす。移行の途中で kernel と userspace の挙動が意図して異なる場面にだけ使い、暫定の fixture にしか書けない。今の例は TCP のルールの `packet_rate` で、kernel の挙動を書いた fixture は `nftables` に、userspace の挙動(最終の設計どおり)を書いた fixture は `goengine` に限る。手順 5 で kernel の側を消し、userspace の側から暫定の印を外す
 - `policy`:ルールの一覧(`id`、`proto`、`forwarding`、`source_allow`、`source_deny`、`per_source_rate`、`new_flow_rate`、`packet_rate`。`forwarding` は `transparent` か `relay` で、ほかの値の書き方は 5.3 節と同じ)と、`per_source_flow_caps`(`udp`、`tcp`。省いた項目は既定値、0 は上限なし)。ポートと宛先は IR の外にあるので書かない。検査の側がルールごとに 1 つのポートを振り、本番と同じ `Planner` で `Plan` を組み立てる
 - `events`:時刻順の出来事の列。各出来事は、`at_ms`(仮想の時計の時刻)、`op`(`flow` は新しいフローの最初のパケット、`packet` は成立済みのフローのパケット、`end` はフローの終わり)、`rule`、`src`、`flow`(フローの名前)、`want`(`admit`、`drop:<種類>`、または `drop`)を持つ。`drop` は drop カウンタに数えない拒否で、IR に無いルール ID に使う。`end` は `want` を持たない
 - `want_drops`:最後に読む drop カウンタ(ルール ID と種類からパケット数への表)
-- `tolerances`:その fixture が使う許容差の名前の一覧。空なら完全な一致を求める。名前は、7a.4 節の 4 つを順に `udp_flow_counting`、`timeout_asymmetry`、`token_bucket_granularity`、`table_replacement_reset`、本節の 5 つを順に `rejection_visibility`、`new_flow_counting`、`drop_counter_units`、`per_source_table_expiry`、`refill_boundary` と書く
+- `tolerances`:その場面が避けた許容差の名前の一覧。fixture は許容差の及ぶ出来事を書かない(補充の境界なら、出来事を補充の時刻から離して置く)ので、この一覧があっても判定と drop カウンタの完全な一致を求める。名前は、7a.4 節の 4 つを順に `udp_flow_counting`、`timeout_asymmetry`、`token_bucket_granularity`、`table_replacement_reset`、本節の 5 つを順に `rejection_visibility`、`new_flow_counting`、`drop_counter_units`、`per_source_table_expiry`、`refill_boundary` と書く
 
 等価性の検査は `go test ./internal/policy/...` の単体テストで、root もネットワーク名前空間も要らず、CI でも走る。検査は、各 fixture について次の手順を踏む。
 
-1. `goengine` で評価器を作り、仮想の時計で出来事を順に流す。各出来事の `Decision` を `want` に、評価器の drop カウンタを `want_drops` に照らす
+1. `goengine` で評価器を作り、仮想の時計で出来事を順に流す。出来事は本番の中継と同じ呼び出しに写す。`flow` は `AdmitFlow`(`Relay` のルールは、手順 4 までは `AdmitSourceFlow`)、`packet` は `AdmitPacket`、`end` は手形の返却である。各出来事の `Decision` を `want` に、評価器の drop カウンタを `want_drops` に照らす
 2. `policy/nftables` で行の列を作り、テスト専用の解釈器で同じ出来事を流す。解釈器は、interval の set の照合、動的 set への `add` と要素ごとの `limit`、`ct count`(フローの `end` で数から抜ける)、集約の `limit`、`ct state new`(フローの最初のパケットだけが一致する)、カウンタを模し、どの行(段とカウンタの種類)がパケットを落としたかを `want` に、行のカウンタを `want_drops` に照らす。解釈器は IR を読まずに行の列だけを入力にするので、コンパイラの誤り(行の順序、行の抜け、`ct state new` の付け忘れ、コメントの誤り)を拾える。後の行や `ct count` の行が落とした新しいフローは conntrack に確定しないので、解釈器はそのフローをその場で `ct count` の数から抜く。カーネルでは、この要素は次の gc で抜ける。IR に無いルール ID の出来事は、どの行にも一致せず、DNAT も待ち受けも無いポートへ送るので、検査の側が `drop` と判定する
-3. 2 つの結果を、`tolerances` の範囲で互いにも照らす
+3. 2 つの結果を互いにも照らす。`engines` で 1 つの評価器に限った暫定の fixture は照らさない
 
 fixture の読み込みと検査の手順は `internal/policy/admissiontest` に、解釈器は `internal/policy/nftables/interp` に置く。どちらも本番のコードからは import しない。評価器は `admissiontest.Engine` を実装して差し込み、`goengine` も同じ fixture を同じ手順で流す。
 
@@ -894,7 +896,6 @@ Phase 5 が扱うのは、IR の 6 つの段だけである。Resource Guard(プ
 
 #### 未決事項
 
-- 許容差の及ぶ出来事の書き方:`want` は出来事ごとに 1 つなので、許容差によって実装ごとに結果が変わる出来事は今の形式では書けない。今の fixture はどれも `tolerances` が空である。実装ごとの `want` を加えるか、許容差の及ぶ出来事を fixture に書かないかは、`goengine` を置く手順 3 で決める。それまで、`tolerances` を挙げた fixture は実装どうしの照合を省き、各実装を `want` と `want_drops` だけに照らす
 - `frontend` の package の分け方(7a.7 節):Phase 5 は `Relay` の受け付けの判定だけを変えるので、package を動かす必要がない。推奨は、Phase 5 では決めず、agent の kernel dataplane(Phase 7)の前に決めることである
 
 ### 7a.10 Resource Guard の再設計
@@ -1457,3 +1458,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - `proxyrelay` の拒否を RST で閉じる(2026-09-20、7a.10 節の Phase 6 移行手順 3):`internal/vpsd/proxyrelay` は、接続元制限と同時フロー数の上限による拒否を通常の `Close` で閉じており、6.3 節の「実ソケットでも拒否は `SetLinger(0)` の RST で閉じ」という記述と食い違っていた(改訂の記録 2026-09-20「Resource Guard の再設計を定める」で見つけた食い違いの 1 つ)。`internal/dataplane/userspace/relay` の `abortRefused`(実ソケットでは `SetLinger(0)` の後に `Close`)と同じ考え方を `proxyrelay` にも実装した。`relay` パッケージは並行する別の変更の対象だったため、依存を増やさずコードを写す形にした。ホストの単体テストで、拒んだ接続(接続元制限、同時フロー数の上限)がループバックで `ECONNRESET` を返すことと、成立して通常に終わる中継は変わらず `io.EOF` で終わることを確かめた。6.2 節に、この 2 つの拒否がどちらも accept の直後に `SetLinger(0)` の RST で閉じることを追記した。
 - conntrack の Finding からメモリの数値を落とす(2026-09-20、7a.10 節の Phase 6 移行手順 5):`server check` と起動時の Finding が示す `nf_conntrack_max` の推奨値は、以前の計画ではラボでのメモリの実測を添えて示すことにしていたが、所有者の決定によりメモリの数値(MiB、エントリ 1 件のバイト数、bucket 数)を一切出さない形に改めた。提示する値と判定の閾値はどちらも 65536 とし、これは wgft が運用上の最低の推奨値として定める値であって、カーネルにとって正しい値ではない。以前の提示 `nf_conntrack_max=262144` はやめた。`nf_conntrack_max` が 65536 未満のときの警告を、`ip_forward` と同じく起動時のログにも出すようにした。管理用 API と Web UI への表示は、他の nftables の Finding と同じく対象外のままである。ラボ(Debian 12 / Linux 6.1)で conntrack のエントリの費用を実測した。約 6 万件を埋めて測ったところ、DNAT を伴うエントリは 1 件あたり約 384 バイト(本体 256 バイトと NAT の拡張 128 バイト)、NAT を伴わないエントリは約 256 バイトで、ほかにハッシュ表の費用がある。この値は kernel の版、設定、エントリの種類で変わるため、診断の出力にも推奨値の計算にも使わない。同じラボで、kernel モードの `Relay` の接続は conntrack のエントリを 2 件、`Transparent` の接続は 1 件使うことも確かめた。admin API への `flow_budget` と `resource_refusals` の追加は、手順 2 で `resource.Pool` ができてから行う。未確認:netstack の握手途中の TCP の数の上限など、他の未確認の点は変わらない
 - 旧版への戻しを互換性の契約から外す(2026-09-20、7a.6 節):外部契約の表の「既存のデータの置き場からの更新」に、更新の経路は保証し、旧版への戻しは契約に含めないことを明記した。戻しは各版で観測した挙動だけを記録し、戻す必要があるときは更新の前に取ったデータの置き場のバックアップから戻す。戻しを約束すると、SQLite のスキーマ、migration、知らないフィールドの保存、状態ファイル、wire protocol の変更が旧い版の読み方に永久に縛られるためである。リリース候補の試験(docs/testing.md の D6)も、更新だけを確かめ、戻しは挙動の記録にとどめる
+- Admission Policy の Go の評価器を置く(2026-09-20、7a.9 節の移行の手順 3):`internal/policy/goengine` を加え、共有 fixture を解釈器と同じ手順で流すようにした。評価器は `policy.Order` を回し、拒んだ段より後の状態を消費しない。送信元ごとの同時フロー数の枠は手形として返し、後の段が拒んだときはその場で返す。IR に無いルール ID と、IPv4 射影を戻した後に IPv4 でない送信元は、drop に数えずに拒む。7a.9 節の未決事項だった許容差の及ぶ出来事の書き方は、fixture に書かないことに決めた。実装ごとの `want` を加えると、どちらの実装が正しいかを fixture が決めなくなるためである。`tolerances` は避けた許容差を示すだけになり、実装どうしの照合を省かない。移行の途中で kernel と userspace の挙動が意図して異なる場面(TCP のルールの `packet_rate`)は、暫定の fixture に照らす評価器を `engines` で限り、userspace の挙動を書いた暫定の fixture を 1 本加えた。`Relay` のルールの暫定の fixture は、userspace モードでも同じ挙動になるので、両方の評価器に照らす。userspace モードの `Relay` の中継のために、送信元ごとの同時フロー数の段だけを判定する `AdmitSourceFlow` を手順 4 までの入口として加えた
