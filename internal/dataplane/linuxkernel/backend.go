@@ -110,15 +110,27 @@ type Backend struct {
 	// compares the actual state with it (design.md 7a.3 節: 実際の状態への収束). The Reconciler
 	// serializes Observe, Prepare and Commit, so it needs no lock of its own.
 	last *committed
+	// pending holds the repairs the last Commit or Repair left failed (design.md 7a.3 節: 戻れない
+	// 地点の後の修復). A new Commit reruns every step, so it starts over.
+	pending repairs
 }
 
 // committed is what one successful Commit left in the kernel.
 type committed struct {
 	// wg is the WireGuard declaration the device was converged to; nil when the Commit had none.
 	wg *dataplane.WGConfig
-	// table is nft.Fingerprint read right after the publication; empty when it could not be read,
-	// in which case Observe only checks that the table exists.
+	// table is nft.Fingerprint read right after the publication. Empty means unknown (the read-back
+	// failed): Observe then reports drift, so the next transaction republishes and reads it back.
 	table string
+}
+
+// repairs are the steps after the point of no return that failed and a retry can rerun.
+type repairs struct {
+	// peers is the declaration whose peer removal failed; nil when none is pending.
+	peers *dataplane.WGConfig
+	// converge is set when the conntrack convergence failed; rules is what it judges against.
+	converge bool
+	rules    []conntrack.Rule
 }
 
 var _ dataplane.Backend = (*Backend)(nil)
@@ -213,7 +225,10 @@ func driftOf(iface string, last committed, dev wg.DeviceState, fp string, presen
 	switch {
 	case !present:
 		drift = append(drift, fmt.Sprintf("table inet %s is missing", nft.TableName))
-	case last.table != "" && fp != last.table:
+	case last.table == "":
+		// 基準が分からない(直前の読み直しが失敗した)。一致とはみなさず、公開し直して読み直す
+		drift = append(drift, fmt.Sprintf("table inet %s was not read back after the last publication", nft.TableName))
+	case fp != last.table:
 		drift = append(drift, fmt.Sprintf("table inet %s was changed", nft.TableName))
 	}
 	if last.wg == nil {
@@ -274,7 +289,7 @@ func declaredPeers(peers []dataplane.Peer) []dataplane.Peer {
 // changes converge it: created if it is gone, and its key, listen port, address, MTU and peers set
 // back to d.WG (design.md 7a.3 節: 実際の状態への収束).
 func (b *Backend) Prepare(d dataplane.Desired) (dataplane.Prepared, error) {
-	p := &prepared{b: b, desired: d, peersChanged: d.PeersChanged() || (d.Resync && d.WG != nil)}
+	p := &prepared{b: b, desired: d, peersChanged: d.WG != nil && (d.PeersChanged() || d.Resync)}
 	if p.peersChanged {
 		changes, err := b.ops.ensureWG(b.wgConfig(d.WG.WithPeers(dataplane.PeerUnion(d.WG.Peers, d.ActivePeers)), false))
 		if err != nil {
@@ -334,25 +349,64 @@ func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, e
 			c.Drops = append(c.Drops, dataplane.Drop{RuleID: dr.RuleID, Kind: dr.Kind, Packets: dr.Packets, Bytes: dr.Bytes})
 		}
 	}
-	if p.peersChanged {
-		changes, err := b.ops.ensureWG(b.wgConfig(*d.WG, false))
-		if err != nil {
-			c.Errors = append(c.Errors, fmt.Errorf("%s: removing peers: %w", b.iface, err))
-		}
-		c.WGChanges = append(c.WGChanges, changes...)
+	// この Commit が修復の手順をすべて含むので、残っていた修復はここで数え直す。ピアの削除が残って
+	// いれば、ピアの集合が変わらなくても公開の後で宣言に収束させる(公開の前の Prepare では触らない。
+	// 失敗しても、この公開を妨げないため)
+	peersPending := b.pending.peers != nil
+	b.pending = repairs{}
+	if d.WG != nil && (p.peersChanged || peersPending) {
+		w := d.WG.WithPeers(append([]dataplane.Peer(nil), d.WG.Peers...))
+		b.pending.peers = &w
 	}
 	if d.WG != nil {
 		b.network = d.WG.Address.Masked()
 	}
 	// conntrack の収束は必ずテーブルの差し替えの後に走らせる(仕様 6.1 節)。先に走らせると、
 	// 旧テーブルで許可されたフローが差し替えまでの間に入る
-	n, err := b.ops.converge(ConvergeRules(d.Plan, retiring), b.network)
-	if err != nil {
-		c.Errors = append(c.Errors, fmt.Errorf("conntrack converge: %w", err))
-	}
-	c.Closed = n
+	b.pending.converge, b.pending.rules = true, ConvergeRules(d.Plan, retiring)
+	b.runRepairs(&c)
 	b.last = b.readBack(d, &c)
+	c.RepairPending = b.repairPending()
 	return c, nil
+}
+
+// runRepairs runs the pending repairs (the peer removal, then the conntrack convergence) and
+// keeps pending only the ones that failed.
+func (b *Backend) runRepairs(c *dataplane.Committed) {
+	if w := b.pending.peers; w != nil {
+		changes, err := b.ops.ensureWG(b.wgConfig(*w, false))
+		c.WGChanges = append(c.WGChanges, changes...)
+		if err != nil {
+			c.Errors = append(c.Errors, fmt.Errorf("%s: removing peers: %w", b.iface, err))
+		} else {
+			b.pending.peers = nil
+		}
+	}
+	if b.pending.converge {
+		n, err := b.ops.converge(b.pending.rules, b.network)
+		c.Closed += n
+		if err != nil {
+			c.Errors = append(c.Errors, fmt.Errorf("conntrack converge: %w", err))
+		} else {
+			b.pending.converge, b.pending.rules = false, nil
+		}
+	}
+}
+
+// repairPending reports whether a repair is still pending, the unknown read-back included.
+func (b *Backend) repairPending() bool {
+	return b.pending.peers != nil || b.pending.converge || (b.last != nil && b.last.table == "")
+}
+
+// Repair reruns the peer removal and the conntrack convergence the last Commit or Repair left
+// failed, without replacing the table (design.md 7a.3 節: 戻れない地点の後の修復). An unknown
+// read-back stays pending: Observe reports it as drift, and the resulting republication reads the
+// table back.
+func (b *Backend) Repair() dataplane.Committed {
+	var c dataplane.Committed
+	b.runRepairs(&c)
+	c.RepairPending = b.repairPending()
+	return c
 }
 
 // readBack records what a successful Commit left, for Observe to compare the kernel with.
@@ -369,7 +423,9 @@ func (b *Backend) readBack(d dataplane.Desired, c *dataplane.Committed) *committ
 	switch {
 	case err != nil:
 		c.Errors = append(c.Errors, fmt.Errorf("reading back table inet %s: %w", nft.TableName, err))
-	case present:
+	case !present:
+		c.Errors = append(c.Errors, fmt.Errorf("reading back table inet %s: the table is missing right after its publication", nft.TableName))
+	default:
 		last.table = fp
 	}
 	return last

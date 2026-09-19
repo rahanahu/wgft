@@ -30,6 +30,9 @@ type fakeKernel struct {
 	// dev and table are what inspect and fingerprint read back (drift_test.go).
 	dev   wg.DeviceState
 	table string // fingerprint of the table; "" means the table is missing
+	// convergeErr and fpErr make the conntrack convergence and the read-back fail (repair_test.go).
+	convergeErr error
+	fpErr       error
 }
 
 func (k *fakeKernel) ensureWG(cfg wg.Config) ([]string, error) {
@@ -87,12 +90,20 @@ func (k *fakeKernel) readDrops() ([]nft.Drop, error) {
 func (k *fakeKernel) converge(rules []conntrack.Rule, _ netip.Prefix) (int, error) {
 	k.calls = append(k.calls, "converge")
 	k.rules = rules
-	return 0, nil
+	if k.convergeErr != nil {
+		return 0, k.convergeErr
+	}
+	return 1, nil
 }
 
 func (k *fakeKernel) inspect(string) (wg.DeviceState, error) { return k.dev, nil }
 
-func (k *fakeKernel) fingerprint() (string, bool, error) { return k.table, k.table != "", nil }
+func (k *fakeKernel) fingerprint() (string, bool, error) {
+	if k.fpErr != nil {
+		return "", false, k.fpErr
+	}
+	return k.table, k.table != "", nil
+}
 
 func newTestBackend(k *fakeKernel) *Backend {
 	return &Backend{iface: "wgft0", ops: k, network: netip.MustParsePrefix("10.200.0.0/24")}

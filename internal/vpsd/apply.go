@@ -188,7 +188,19 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 	if err != nil {
 		return out, fmt.Errorf("failed to apply nftables: %w", err)
 	}
+	if len(out.Drift) > 0 {
+		log.Printf("data plane changed outside wgft (%s); applying the rules again", strings.Join(out.Drift, "; "))
+	}
+	// ルール単位の失敗の行は、何も commit しない再試行でも決める。理由が変わったときの 1 行を落とさない
+	var lines []string
+	d.notActive, lines = ruleFailureLog(d.notActive, out.Failed)
+	for _, l := range lines {
+		log.Print(l)
+	}
 	if out.NoOp {
+		if out.Repaired {
+			d.logRepair(out.Committed, true)
+		}
 		return out, nil
 	}
 	// 差し替えの直前に読んだ drop カウンタ(前回の差し替え以降の増分)を SQLite に累積する(仕様 6.1 節)。
@@ -198,17 +210,7 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 			log.Printf("accumulating drop counters: %v", err)
 		}
 	}
-	for _, c := range out.Committed.WGChanges {
-		log.Printf("%s: %s", d.opts.WGInterface, c)
-	}
-	for _, e := range out.Committed.Errors {
-		log.Printf("%v", e)
-	}
-	var lines []string
-	d.notActive, lines = ruleFailureLog(d.notActive, out.Failed)
-	for _, l := range lines {
-		log.Print(l)
-	}
+	d.logRepair(out.Committed, retry)
 	active := 0
 	for _, r := range rules {
 		if r.Enabled && r.VPSMode == proto.ModeKernel {
@@ -221,13 +223,39 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 		log.Printf("applied table inet %s (%d rules, %d enabled in kernel mode, %d agents, %d peers)",
 			nft.TableName, len(rules), active, len(agentAddr), len(wgCfg.Peers))
 	}
-	if out.Committed.Closed > 0 {
-		log.Printf("conntrack: removed %d unneeded flows", out.Committed.Closed)
-	}
 	if d.proxy != nil {
 		d.proxyInputHints(rules)
 	}
 	return out, nil
+}
+
+// logRepair は、Commit か修復の再試行(dataplane の Repair)が戻れない地点の後に行ったことをログに
+// 出す(設計文書 7a.3 節:戻れない地点の後の修復)。再試行(retry)では、前回と同じ失敗を再試行の
+// たびには出さない。修復が済んだときに 1 行出す。
+func (d *Daemon) logRepair(c dataplane.Committed, retry bool) {
+	for _, ch := range c.WGChanges {
+		log.Printf("%s: %s", d.opts.WGInterface, ch)
+	}
+	msgs := make([]string, 0, len(c.Errors))
+	for _, e := range c.Errors {
+		msgs = append(msgs, e.Error())
+	}
+	msg := strings.Join(msgs, "; ")
+	if msg != "" && (!retry || msg != d.lastRepairErr) {
+		for _, m := range msgs {
+			log.Print(m)
+		}
+	}
+	if c.Closed > 0 {
+		log.Printf("conntrack: removed %d unneeded flows", c.Closed)
+	}
+	switch {
+	case c.RepairPending:
+		d.lastRepairErr = msg
+	case d.lastRepairErr != "":
+		log.Printf("repaired what failed after the last publication")
+		d.lastRepairErr = ""
+	}
 }
 
 // ruleFailureLog は、ルール単位の失敗のうちログに出す行を決める。prev は前回までに記録した失敗
