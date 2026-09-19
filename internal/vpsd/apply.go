@@ -117,15 +117,22 @@ func relayRules(ports []planner.PortPlan) []proxyrelay.Rule {
 	return out
 }
 
-// proxyInputHints は、プロキシモードの公開ポートが既定 drop の input で塞がれていれば提示する。
+// proxyInputHints は、vpsd 自身が host のソケットで受けるルールの公開ポートが既定 drop の input で
+// 塞がれていれば提示する。カーネルモードでは、host のソケットで受けるのはプロキシモード(Relay。
+// TCP のみ)のルールだけで、Transparent なルールは他テーブルの DNAT + forward を経由し input を
+// 通らない(仕様 6.1・6.2 節)。ユーザー空間モードでは vps_mode の区別に意味が無く、全ルールが
+// host のソケットで受ける中継になるため、有効なルールすべてを対象にする(仕様 6.3 節)。
 func (d *Daemon) proxyInputHints(rules []proto.Rule) {
 	for i := range rules {
 		r := &rules[i]
-		if !r.Enabled || r.VPSMode != proto.ModeProxy {
+		if !r.Enabled {
 			continue
 		}
-		if lines, err := d.dp.InputPortSuggestions(r.ListenPort.Lo); err == nil && len(lines) > 0 {
-			log.Printf("warning: proxy rule %s public port %d is blocked at input; add the following:", r.ID, r.ListenPort.Lo)
+		if d.opts.Mode != modeUserspace && r.VPSMode != proto.ModeProxy {
+			continue
+		}
+		if lines, err := d.dp.InputPortSuggestions(r.ListenPort, r.Proto); err == nil && len(lines) > 0 {
+			log.Printf("warning: rule %s public port %s/%s is blocked at input; add the following:", r.ID, r.ListenPort, r.Proto)
 			for _, l := range lines {
 				log.Printf("    %s", l)
 			}

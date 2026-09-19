@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // Check は起動せずに、そのモードで必要な検査を走らせて結果を書く読み取り専用コマンド
@@ -27,9 +30,10 @@ func Check(opts Options, out io.Writer) error {
 
 	// nft の検査(他テーブルの policy drop・DOCKER-USER・DNAT 衝突。仕様 6.1 節)。root が要る。
 	// ユーザー空間モードは nftables も ip_forward も使わない(仕様 6.3 節)。
+	root := os.Geteuid() == 0
 	if mode == modeUserspace {
 		fmt.Fprintln(out, "nft check: not used in userspace mode (rules are relayed by the wgft process)")
-	} else if os.Geteuid() != 0 {
+	} else if !root {
 		fmt.Fprintln(out, "nft check: skipped because not root; run sudo wgft server check")
 	} else if rep, err := linux.Inspect(opts.WGInterface, nft.TableName); err != nil {
 		fmt.Fprintf(out, "nft check: cannot run: %v\n", err)
@@ -45,6 +49,14 @@ func Check(opts Options, out io.Writer) error {
 		checkIPForward(out)
 		checkConntrack(out)
 	}
+	// own ports の検査:host の input firewall が vpsd 自身の待ち受けポート(WireGuard の UDP と
+	// agent API の TCP)を塞いでいないか。host の input firewall はモードに関係しない層なので、
+	// userspace モードでも実行する(実機の Debian 13 で見つかった。改訂の記録参照)。
+	if !root {
+		fmt.Fprintln(out, "own ports check: skipped because not root; run sudo wgft server check")
+	} else {
+		checkOwnPorts(out, opts)
+	}
 
 	// SQLite があれば、記録済みのモード・アドレス帯との照合と、改名の検出を出す。
 	if _, err := os.Stat(opts.DBPath); err != nil {
@@ -59,8 +71,18 @@ func Check(opts Options, out io.Writer) error {
 		return nil
 	}
 	defer st.Close()
-	checkMeta(out, st, modeMeta, "recorded mode", opts.Mode)
+	checkRecordedMode(out, st, opts.Mode)
 	checkMeta(out, st, wgAddressMeta, "recorded address range", opts.WGAddress)
+	// rule ports の検査:個々のルールの listen port が host の input firewall で塞がれていないか。
+	// own ports check と同じく root が要り、rules は SQLite からしか読めないのでここで行う
+	// (実機の Debian 13、ユーザー空間モードで見つかった。改訂の記録参照)。
+	if !root {
+		fmt.Fprintln(out, "rule ports check: skipped because not root; run sudo wgft server check")
+	} else if rules, err := st.Rules(); err != nil {
+		fmt.Fprintf(out, "rule ports check: cannot read rules: %v\n", err)
+	} else {
+		checkRulePorts(out, rules, mode)
+	}
 	if b, err := st.GetMeta(serverKeyMeta); err == nil && mode != modeUserspace {
 		if k, err := wgtypes.NewKey(b); err == nil {
 			if other, ok := wg.OtherDeviceWithKey(opts.WGInterface, k); ok {
@@ -69,6 +91,96 @@ func Check(opts Options, out io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// ownPortTarget は、input firewall との突き合わせ対象にする vpsd 自身の待ち受けポート 1 つ。
+type ownPortTarget struct {
+	purpose string // ログとエラーメッセージに出す呼び名("WireGuard"、"agent API")
+	proto   proto.Proto
+	port    uint16
+}
+
+// ownPortTargets は、host の input firewall と突き合わせる vpsd 自身の待ち受けポートを列挙する
+// (仕様 4 節「VPS で外に開けるポートは次の 3 種類だけ」のうち、転送対象のポートを除く 2 つ)。
+// 管理用 API(WGFT_ADMIN)は含めない。既定は Unix ソケットで、host:port にした場合も
+// localhost や Tailscale のアドレスで使う想定であり(11 節)、インターネットから直接受ける
+// ポートではないため、input firewall を開ける提示の対象にする理由が無い。
+func ownPortTargets(opts Options) []ownPortTarget {
+	targets := []ownPortTarget{{purpose: "WireGuard", proto: proto.UDP, port: opts.WGPort}}
+	if _, portStr, err := net.SplitHostPort(opts.AgentAPIAddr); err == nil {
+		if v, err := strconv.ParseUint(portStr, 10, 16); err == nil {
+			targets = append(targets, ownPortTarget{purpose: "agent API", proto: proto.TCP, port: uint16(v)})
+		}
+	}
+	return targets
+}
+
+// checkOwnPorts は、ownPortTargets の各ポートが host の input firewall で塞がれていないかを
+// linux.InputPortSuggestions で確かめ、他の nft check と同じ Finding の形で表示する。呼び出し元は
+// 事前に root を確かめておく(nftables の読み取りに要るため)。
+func checkOwnPorts(out io.Writer, opts Options) {
+	var findings []linux.Finding
+	for _, t := range ownPortTargets(opts) {
+		lines, err := linux.InputPortSuggestions(proto.PortRange{Lo: t.port, Hi: t.port}, t.proto, nft.TableName)
+		if err != nil {
+			fmt.Fprintf(out, "own ports check (%s %d/%s): cannot run: %v\n", t.purpose, t.port, t.proto, err)
+			continue
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		findings = append(findings, linux.Finding{
+			Where:   "input firewall",
+			Problem: fmt.Sprintf("blocks the %s port %d/%s; no agent could ever reach it from outside", t.purpose, t.port, t.proto),
+			Suggest: lines,
+		})
+	}
+	if len(findings) == 0 {
+		fmt.Fprintln(out, "own ports check: no problems")
+		return
+	}
+	fmt.Fprintln(out, "own ports check: the following needs attention:")
+	for _, f := range findings {
+		fmt.Fprintf(out, "  - %s\n", f)
+	}
+}
+
+// checkRulePorts は、host の input firewall が個々のルールの listen port を塞いでいないかを確かめる。
+// カーネルモードでは、host のソケットで受けるのはプロキシモード(Relay。TCP のみ)のルールだけで、
+// Transparent なルールは他テーブルの DNAT と forward を経由し input を通らない(仕様 6.1・6.2 節)。
+// ユーザー空間モードは vps_mode の区別に意味を持たず、有効なルールすべてが host のソケットで受ける
+// 中継になるため、全ルールを対象にする(仕様 6.3 節)。判定は apply.go の proxyInputHints と同じ。
+func checkRulePorts(out io.Writer, rules []proto.Rule, mode string) {
+	var findings []linux.Finding
+	for _, r := range rules {
+		if !r.Enabled {
+			continue
+		}
+		if mode != modeUserspace && r.VPSMode != proto.ModeProxy {
+			continue
+		}
+		lines, err := linux.InputPortSuggestions(r.ListenPort, r.Proto, nft.TableName)
+		if err != nil {
+			fmt.Fprintf(out, "rule ports check (%s %s/%s): cannot run: %v\n", r.ID, r.ListenPort, r.Proto, err)
+			continue
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		findings = append(findings, linux.Finding{
+			Where:   "input firewall",
+			Problem: fmt.Sprintf("blocks rule %s's port %s/%s; the server binds it on the host, so a client would get no answer", r.ID, r.ListenPort, r.Proto),
+			Suggest: lines,
+		})
+	}
+	if len(findings) == 0 {
+		fmt.Fprintln(out, "rule ports check: no problems")
+		return
+	}
+	fmt.Fprintln(out, "rule ports check: the following needs attention:")
+	for _, f := range findings {
+		fmt.Fprintf(out, "  - %s\n", f)
+	}
 }
 
 // printDBModes は、SQLite の本体と WAL の補助ファイルの権限を 1 行ずつ出す。0600 より広ければ、
@@ -90,6 +202,26 @@ func printDBModes(out io.Writer, path string) {
 		}
 		fmt.Fprintf(out, "server database file mode: %s is %04o\n", p, perm)
 	}
+}
+
+// checkRecordedMode は、記録済みのモードと今回の設定を照合して 1 行出す。食い違いがあっても
+// ここでは拒否しない。実際にモードを切り替えられるかどうかは、次の `server run` で
+// reconcileModeAndAddress の関門(mode.go の modeGate)が決める。
+func checkRecordedMode(out io.Writer, st *store.Store, want string) {
+	have, err := st.GetMeta(modeMeta)
+	if errors.Is(err, store.ErrNotFound) {
+		fmt.Fprintln(out, "recorded mode: not recorded")
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(out, "recorded mode: cannot read: %v\n", err)
+		return
+	}
+	if want == "" || string(have) == want {
+		fmt.Fprintf(out, "recorded mode: %s\n", have)
+		return
+	}
+	fmt.Fprintf(out, "warning: the recorded mode is %s but the setting is %s; the mode change gate runs at start\n", have, want)
 }
 
 // checkMeta は meta の記録と現在値を照合して 1 行出す。

@@ -10,6 +10,7 @@ import (
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // serverDataplane は VPS 側の転送面を Daemon から見た形。Daemon がカーネルや外部の状態を触るときは、
@@ -36,8 +37,10 @@ type serverDataplane interface {
 	Inspect() (*linux.Report, error)
 	// BoundPorts は VPS 上で bind 中のポート(SSH の締め出しを防ぐ検査。仕様 5.3 節)。
 	BoundPorts() (linux.Bound, error)
-	// InputPortSuggestions は、プロキシモードの公開ポートが input で塞がれていれば足す行を返す(仕様 6.2 節)。
-	InputPortSuggestions(port uint16) ([]string, error)
+	// InputPortSuggestions は、指定した proto/pr(範囲でもよい)が input で塞がれていれば足す行を
+	// 返す。プロキシモードの公開ポート(仕様 6.2 節)と、vpsd 自身の待ち受けポート(WireGuard の
+	// UDP、agent API の TCP。仕様 4 節)の両方に使う。
+	InputPortSuggestions(pr proto.PortRange, p proto.Proto) ([]string, error)
 	// ReadDrops は差し替え直前の drop カウンタを読む(仕様 6.1 節)。
 	ReadDrops() ([]dataplane.Drop, error)
 	// participant は、Runtime の dataplane の participant を返す(設計文書 7a.2 節)。その Commit が転送の
@@ -75,8 +78,8 @@ func (k *kernelDataplane) Inspect() (*linux.Report, error) {
 	return linux.Inspect(k.iface, nft.TableName)
 }
 func (k *kernelDataplane) BoundPorts() (linux.Bound, error) { return linux.BoundPorts() }
-func (k *kernelDataplane) InputPortSuggestions(port uint16) ([]string, error) {
-	return linux.InputPortSuggestions(port, nft.TableName)
+func (k *kernelDataplane) InputPortSuggestions(pr proto.PortRange, p proto.Proto) ([]string, error) {
+	return linux.InputPortSuggestions(pr, p, nft.TableName)
 }
 func (k *kernelDataplane) ReadDrops() ([]dataplane.Drop, error)           { return k.b.ReadDrops() }
 func (k *kernelDataplane) participant() dataplane.Participant             { return k.b }

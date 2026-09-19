@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/google/nftables"
@@ -68,10 +69,14 @@ func (r *Report) DNATConflicts(p proto.Proto, pr proto.PortRange) []DNAT {
 	return out
 }
 
-// InputPortSuggestions は、input の base chain が既定で落とす構成のとき、その TCP ポートへの
-// accept を足す行を提示する(プロキシモードは vpsd 自身が公開ポートで受けるため。仕様 6.2 節)。
+// InputPortSuggestions は、input の base chain が既定で落とす構成で、かつ pr/proto への明示的な
+// accept がまだ無いとき、その accept を足す行を提示する。呼び出し元は 3 種類ある。カーネルモードの
+// プロキシルール(vpsd 自身が中継で受けるポート。単一ポートに限る。仕様 6.2 節)、ユーザー空間モードの
+// 全ルール(範囲を含む。仕様 6.3 節)、vpsd 自身が待ち受ける 2 つのポート(WireGuard の UDP、
+// agent API の TCP。仕様 4 節)である。最後のものは実機の Debian 13(input が policy drop で SSH の
+// TCP 22 しか accept していない構成)で見つかった。改訂の記録を参照。
 // ownTable は自分の table(kernel backend では table inet wgft)の名前で、検査から除く。
-func InputPortSuggestions(port uint16, ownTable string) ([]string, error) {
+func InputPortSuggestions(pr proto.PortRange, p proto.Proto, ownTable string) ([]string, error) {
 	c, err := nftables.New()
 	if err != nil {
 		return nil, err
@@ -89,20 +94,70 @@ func InputPortSuggestions(port uint16, ownTable string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		if blocks, _ := blocksByDefault(ch, rules); !blocks {
-			continue
-		}
-		if iptablesManaged(ch) {
-			bin := "iptables"
-			if ch.Table.Family == nftables.TableFamilyIPv6 {
-				bin = "ip6tables"
-			}
-			out = append(out, fmt.Sprintf("%s -I %s -p tcp --dport %d -j ACCEPT", bin, ch.Name, port))
-		} else {
-			out = append(out, fmt.Sprintf("nft insert rule %s %s %s tcp dport %d accept", familyName(ch.Table.Family), ch.Table.Name, ch.Name, port))
-		}
+		out = append(out, inputPortSuggestion(ch, rules, pr, p)...)
 	}
 	return out, nil
+}
+
+// inputPortSuggestion は InputPortSuggestions の 1 チェーン分の判定。実の nftables 接続を要らなく
+// して、テストが手作りの chain と rules だけで確かめられるように分けてある。
+func inputPortSuggestion(ch *nftables.Chain, rules []*nftables.Rule, pr proto.PortRange, p proto.Proto) []string {
+	if blocks, _ := blocksByDefault(ch, rules); !blocks {
+		return nil
+	}
+	if acceptsPort(rules, p, pr) {
+		return nil
+	}
+	if iptablesManaged(ch) {
+		bin := "iptables"
+		if ch.Table.Family == nftables.TableFamilyIPv6 {
+			bin = "ip6tables"
+		}
+		return []string{fmt.Sprintf("%s -I %s -p %s --dport %s -j ACCEPT", bin, ch.Name, p, dportArg(pr, true))}
+	}
+	return []string{fmt.Sprintf("nft insert rule %s %s %s %s dport %s accept", familyName(ch.Table.Family), ch.Table.Name, ch.Name, p, dportArg(pr, false))}
+}
+
+// dportArg は pr を dport の引数の文字列にする。単一ポートはそのまま、範囲は書式が違う。
+// nft は "40000-40010"(proto.PortRange.String と同じ)、iptables は "40000:40010" を使う。
+func dportArg(pr proto.PortRange, iptablesStyle bool) string {
+	if !pr.IsRange() {
+		return strconv.Itoa(int(pr.Lo))
+	}
+	if iptablesStyle {
+		return fmt.Sprintf("%d:%d", pr.Lo, pr.Hi)
+	}
+	return pr.String()
+}
+
+// acceptsPort は、rules がすでに proto/pr への明示的な accept(手で足した `tcp dport 8443
+// accept` など)を持つかを判定する。持っていれば、二重になる提示を出さない。範囲のルールは、
+// 既存の accept の範囲が pr を丸ごと含む場合だけ済んだ扱いにする。一部だけ accept された範囲を
+// 済んだ扱いにすると、残りの部分が塞がれたままになるためである。ポートの一致条件が読めない規則は
+// 一致とみなさない。読めない規則を「accept 済み」扱いにすると、実際は塞がれている場合に見逃すためである。
+// set を使う accept(`tcp dport { 22, 8443 } accept`)も読めない規則として扱う。set の中身を最小から
+// 最大の範囲に丸めると、set に無いポートまで accept 済みと判定してしまうためである。
+func acceptsPort(rules []*nftables.Rule, p proto.Proto, pr proto.PortRange) bool {
+	for _, rl := range rules {
+		rp, ports, unknown := matchPorts(nil, nil, rl.Exprs)
+		if unknown || rp != p || ports.Lo > pr.Lo || pr.Hi > ports.Hi {
+			continue
+		}
+		if ruleVerdictAccept(rl.Exprs) {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleVerdictAccept は、exprs の中に accept の verdict があるかを見る(counter や log を挟んでいてもよい)。
+func ruleVerdictAccept(exprs []expr.Any) bool {
+	for _, e := range exprs {
+		if v, ok := e.(*expr.Verdict); ok {
+			return v.Kind == expr.VerdictAccept
+		}
+	}
+	return false
 }
 
 // Inspect は wgft(または agent の kernel backend)以外の全テーブルの base chain を調べる。
@@ -389,6 +444,11 @@ func matchPorts(c *nftables.Conn, t *nftables.Table, exprs []expr.Any) (p proto.
 			wantPort = false
 		case *expr.Lookup:
 			if wantPort {
+				// set の中身を読む接続が無い(acceptsPort のように規則の式だけで判定する)ときは、
+				// 読めない一致条件として返す。nil の接続で set を引くと panic する
+				if c == nil || t == nil {
+					return p, ports, true
+				}
 				// 無名 set のポート集合。読めれば最小-最大の範囲として扱う(荒いが安全側)
 				lo, hi, ok := setPortBounds(c, t, x.SetName)
 				if ok {

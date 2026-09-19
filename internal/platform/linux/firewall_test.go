@@ -190,6 +190,99 @@ func TestCollectDNATUnknownReportsFinding(t *testing.T) {
 	}
 }
 
+// singlePort is a 1-port proto.PortRange, the shape wgft's own ports and proxy-mode rules use.
+func singlePort(p uint16) proto.PortRange { return proto.PortRange{Lo: p, Hi: p} }
+
+// acceptExpr builds the exprs of an `l4proto dport N accept` rule, the same shape nft compiles a
+// native "tcp dport 8443 accept" style rule to (see matchPorts).
+func acceptExpr(l4proto byte, port uint16) []expr.Any {
+	return append(append(l4(l4proto), dport(), &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(port)}), &expr.Verdict{Kind: expr.VerdictAccept})
+}
+
+// acceptRangeExpr builds the exprs of an `l4proto dport lo-hi accept` rule.
+func acceptRangeExpr(l4proto byte, lo, hi uint16) []expr.Any {
+	return append(append(l4(l4proto), dport(), &expr.Range{Op: expr.CmpOpEq, Register: 1, FromData: binaryutil.BigEndian.PutUint16(lo), ToData: binaryutil.BigEndian.PutUint16(hi)}), &expr.Verdict{Kind: expr.VerdictAccept})
+}
+
+// TestInputPortSuggestionOwnPorts は、実機の Debian 13 で見つかった構成
+// (input が policy drop で、`iif lo accept`、established の accept、SSH の
+// `tcp dport 22 accept` しか無い)を模して、vpsd 自身の待ち受けポート
+// (WireGuard の UDP 51820、agent API の TCP 8443)への提示を確かめる。
+func TestInputPortSuggestionOwnPorts(t *testing.T) {
+	drop := nftables.ChainPolicyDrop
+	ch := &nftables.Chain{Name: "input", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "filter"}, Policy: &drop}
+	rules := []*nftables.Rule{
+		{Exprs: append(ifname(expr.MetaKeyIIFNAME, "lo"), &expr.Verdict{Kind: expr.VerdictAccept})},
+		{Exprs: []expr.Any{&expr.Ct{Register: 1, Key: expr.CtKeySTATE}, &expr.Lookup{SourceRegister: 1, SetName: "__set0"}, &expr.Verdict{Kind: expr.VerdictAccept}}},
+		{Exprs: acceptExpr(unix.IPPROTO_TCP, 22)},
+	}
+
+	if got := inputPortSuggestion(ch, rules, singlePort(51820), proto.UDP); len(got) != 1 || got[0] != "nft insert rule inet filter input udp dport 51820 accept" {
+		t.Errorf("udp 51820 (WireGuard): %v", got)
+	}
+	if got := inputPortSuggestion(ch, rules, singlePort(8443), proto.TCP); len(got) != 1 || got[0] != "nft insert rule inet filter input tcp dport 8443 accept" {
+		t.Errorf("tcp 8443 (agent API): %v", got)
+	}
+	// SSH の 22/tcp 自体はすでに accept 済みなので、提示しない
+	if got := inputPortSuggestion(ch, rules, singlePort(22), proto.TCP); len(got) != 0 {
+		t.Errorf("tcp 22 already accepted: %v, want none", got)
+	}
+
+	// 同じチェーンが WireGuard と agent API もすでに accept していれば、どちらも提示しない
+	rulesAccepted := append(append([]*nftables.Rule{}, rules...),
+		&nftables.Rule{Exprs: acceptExpr(unix.IPPROTO_UDP, 51820)},
+		&nftables.Rule{Exprs: acceptExpr(unix.IPPROTO_TCP, 8443)})
+	if got := inputPortSuggestion(ch, rulesAccepted, singlePort(51820), proto.UDP); len(got) != 0 {
+		t.Errorf("udp 51820 already accepted: %v, want none", got)
+	}
+	if got := inputPortSuggestion(ch, rulesAccepted, singlePort(8443), proto.TCP); len(got) != 0 {
+		t.Errorf("tcp 8443 already accepted: %v, want none", got)
+	}
+
+	// set を使う accept(`tcp dport { 22, 8443 } accept`)は中身を読まずに「読めない規則」とし、
+	// panic せず、accept 済みともみなさずに提示する
+	rulesSet := append(append([]*nftables.Rule{}, rules...), &nftables.Rule{Exprs: append(append(l4(unix.IPPROTO_TCP), dport(),
+		&expr.Lookup{SourceRegister: 1, SetName: "__set1"}), &expr.Verdict{Kind: expr.VerdictAccept})})
+	if got := inputPortSuggestion(ch, rulesSet, singlePort(8443), proto.TCP); len(got) != 1 || got[0] != "nft insert rule inet filter input tcp dport 8443 accept" {
+		t.Errorf("tcp 8443 behind a set accept: %v, want the suggestion", got)
+	}
+
+	// policy accept のチェーンは、そもそも既定で落とさないので提示しない
+	accept := nftables.ChainPolicyAccept
+	openCh := &nftables.Chain{Name: "input", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "filter"}, Policy: &accept}
+	if got := inputPortSuggestion(openCh, nil, singlePort(51820), proto.UDP); len(got) != 0 {
+		t.Errorf("policy accept chain: %v, want none", got)
+	}
+}
+
+// TestInputPortSuggestionRulePorts は、ユーザー空間モードの全ルール検査(範囲を含む)と、
+// カーネルモードのプロキシルール(単一ポート)を模す。iptables-managed(Docker 風)のチェーンでは
+// 範囲の書式が nft と違う(コロン区切り)ことも確かめる。
+func TestInputPortSuggestionRulePorts(t *testing.T) {
+	drop := nftables.ChainPolicyDrop
+	nftCh := &nftables.Chain{Name: "input", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "filter"}, Policy: &drop}
+	rng := proto.PortRange{Lo: 40000, Hi: 40010}
+
+	if got := inputPortSuggestion(nftCh, nil, rng, proto.TCP); len(got) != 1 || got[0] != "nft insert rule inet filter input tcp dport 40000-40010 accept" {
+		t.Errorf("tcp range 40000-40010: %v", got)
+	}
+	// 範囲の一部だけ accept された規則では、まだ塞がっている残りの分を提示する
+	partial := []*nftables.Rule{{Exprs: acceptRangeExpr(unix.IPPROTO_TCP, 40000, 40005)}}
+	if got := inputPortSuggestion(nftCh, partial, rng, proto.TCP); len(got) != 1 {
+		t.Errorf("partially accepted range must still warn: %v", got)
+	}
+	// 範囲全体を含む accept があれば、もう提示しない
+	full := []*nftables.Rule{{Exprs: acceptRangeExpr(unix.IPPROTO_TCP, 39000, 41000)}}
+	if got := inputPortSuggestion(nftCh, full, rng, proto.TCP); len(got) != 0 {
+		t.Errorf("range fully covered by an existing accept: %v, want none", got)
+	}
+
+	iptCh := &nftables.Chain{Name: "INPUT", Table: &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "filter"}, Policy: &drop}
+	if got := inputPortSuggestion(iptCh, nil, rng, proto.UDP); len(got) != 1 || got[0] != "iptables -I INPUT -p udp --dport 40000:40010 -j ACCEPT" {
+		t.Errorf("iptables-style range: %v", got)
+	}
+}
+
 func TestSuggestionsForms(t *testing.T) {
 	drop := nftables.ChainPolicyDrop
 	ipt := &nftables.Chain{Name: "FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "filter"}, Policy: &drop}
