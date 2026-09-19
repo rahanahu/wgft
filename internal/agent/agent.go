@@ -42,6 +42,12 @@ type runtime struct {
 	priv              wgtypes.Key
 	heartbeatInterval time.Duration
 
+	// handshakeRetryInterval と handshakeRetryTimeout は、適用直後のハートビートがハンドシェイク待ちの
+	// 誤りを報告したときの追送りの間隔と期限(仕様 5.2 節)。既定はそれぞれ 1 秒と 10 秒。テストで
+	// 短くできるよう runtime に持たせる。handshakeRetryInterval が 0 以下なら追送りしない
+	handshakeRetryInterval time.Duration
+	handshakeRetryTimeout  time.Duration
+
 	mu        sync.Mutex
 	tun       *tunnel.Tunnel
 	tunCancel context.CancelFunc
@@ -88,7 +94,12 @@ func Run(opts Options) error {
 	if err := ensureRegistered(f, opts); err != nil {
 		return err
 	}
-	rt := &runtime{opts: opts, f: f, priv: priv, heartbeatInterval: 30 * time.Second}
+	rt := &runtime{
+		opts: opts, f: f, priv: priv,
+		heartbeatInterval:      30 * time.Second,
+		handshakeRetryInterval: time.Second,
+		handshakeRetryTimeout:  10 * time.Second,
+	}
 	defer rt.close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -190,6 +201,10 @@ func (rt *runtime) close() {
 }
 
 // heartbeat は処理済み世代、トンネルの状態、ルールごとの状態をまとめる(仕様 5.2 節)。
+// reasonHandshakePending は、トンネルはあるが WireGuard のハンドシェイクがまだ済んでいないときの理由。
+// 適用直後の追送り(needsHandshakeFollowUp)がこの値で判定するので、文言を変えるときは両方に効く。
+const reasonHandshakePending = "handshake not established"
+
 func (rt *runtime) heartbeat() proto.Heartbeat {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -206,7 +221,7 @@ func (rt *runtime) heartbeat() proto.Heartbeat {
 	if ts.Err != nil {
 		hb.Tunnel.State, hb.Tunnel.Reason = proto.StatusError, ts.Err.Error()
 	} else if ts.LastHandshake.IsZero() {
-		hb.Tunnel.State, hb.Tunnel.Reason = proto.StatusError, "handshake not established"
+		hb.Tunnel.State, hb.Tunnel.Reason = proto.StatusError, reasonHandshakePending
 	}
 	// ルールの状態は所属リスナーの合成。1 つでも error なら error
 	byRule := map[string]*proto.RuleStatus{}

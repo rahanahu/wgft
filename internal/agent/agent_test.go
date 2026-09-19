@@ -13,9 +13,15 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // newTestRegisterServer は登録 API のなりすまし(仕様 5.1 節)。渡された name が空でなければ
@@ -217,4 +223,237 @@ func TestLogStatusDedup(t *testing.T) {
 	if got := buf.String(); got == first {
 		t.Error("changed status (generation) was not logged")
 	}
+}
+
+// notifyNonBlocking は、streamOnce のハートビート goroutine への通知をサイズ 1 のチャネルにまとめる
+// (仕様 5.2 節)。読み出される前に何度呼んでも高々 1 件しか溜まらないことを確かめる。
+func TestNotifyNonBlockingCoalesces(t *testing.T) {
+	ch := make(chan struct{}, 1)
+	for i := 0; i < 5; i++ {
+		notifyNonBlocking(ch) // 詰まっていても待たない。ブロックすればテストがタイムアウトする
+	}
+	if len(ch) != 1 {
+		t.Fatalf("len(ch) = %d, want 1 after a burst of notifications", len(ch))
+	}
+	select {
+	case <-ch:
+	default:
+		t.Fatal("expected exactly one pending notification")
+	}
+	select {
+	case <-ch:
+		t.Fatal("channel should be empty after a single receive")
+	default:
+	}
+
+	// 消費した後にまた呼べば、次の通知が届く
+	notifyNonBlocking(ch)
+	select {
+	case <-ch:
+	default:
+		t.Fatal("expected a fresh notification after the channel was drained")
+	}
+}
+
+// needsHandshakeFollowUp は、ハンドシェイク待ちの誤りだけを追送りの対象にする(仕様 5.2 節)。
+// トンネルが無い、bind に失敗した、といった本当の誤りは対象にしない。
+func TestNeedsHandshakeFollowUp(t *testing.T) {
+	cases := []struct {
+		name string
+		t    proto.TunnelStatus
+		want bool
+	}{
+		{"ok", proto.TunnelStatus{State: proto.StatusOK}, false},
+		{"handshake not established", proto.TunnelStatus{State: proto.StatusError, Reason: reasonHandshakePending}, true},
+		{"no tunnel", proto.TunnelStatus{State: proto.StatusError, Reason: "no tunnel; full state not received"}, false},
+		{"real tunnel error", proto.TunnelStatus{State: proto.StatusError, Reason: "wireguard: listen: address already in use"}, false},
+	}
+	for _, c := range cases {
+		if got := needsHandshakeFollowUp(c.t); got != c.want {
+			t.Errorf("%s: needsHandshakeFollowUp = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// runHeartbeats は、適用直後の送信(notify)がハンドシェイク待ちを報告した間だけ、通常のティッカーを
+// 待たずに retryInterval ごとに送り直し、ハンドシェイクが済んだ次の送信で止まる(仕様 5.2 節)。
+func TestRunHeartbeatsFollowsUpUntilHandshake(t *testing.T) {
+	var calls int
+	established := false // 3 回目の送信からハンドシェイクが済んだことにする
+	sendCh := make(chan proto.Heartbeat, 10)
+	send := func() (proto.Heartbeat, bool) {
+		calls++
+		if calls >= 3 {
+			established = true
+		}
+		hb := proto.Heartbeat{Generation: uint64(calls)}
+		if established {
+			hb.Tunnel = proto.TunnelStatus{State: proto.StatusOK}
+		} else {
+			hb.Tunnel = proto.TunnelStatus{State: proto.StatusError, Reason: reasonHandshakePending}
+		}
+		sendCh <- hb
+		return hb, true
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	tick := make(chan time.Time) // 使わない。ティッカーでは追送りが起きないことの対照
+	notify := make(chan struct{}, 1)
+	go runHeartbeats(done, tick, notify, 5*time.Millisecond, time.Second, send)
+
+	notify <- struct{}{}
+
+	// 送信 1、2 回目はまだハンドシェイク待ちなので追送りが続き、3 回目で済む
+	for i := 0; i < 3; i++ {
+		select {
+		case hb := <-sendCh:
+			if i < 2 && hb.Tunnel.State != proto.StatusError {
+				t.Fatalf("send %d: tunnel = %+v, want a handshake-not-established error", i+1, hb.Tunnel)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("send %d: no follow-up heartbeat arrived", i+1)
+		}
+	}
+	select {
+	case hb := <-sendCh:
+		t.Fatalf("unexpected extra heartbeat after the handshake was established: %+v", hb)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// ハンドシェイクが最後まで済まなければ、追送りは retryTimeout で止まり、後始末して通常のティッカー待ちに戻る。
+func TestRunHeartbeatsStopsFollowUpAfterTimeout(t *testing.T) {
+	var calls atomic.Int32
+	send := func() (proto.Heartbeat, bool) {
+		calls.Add(1)
+		return proto.Heartbeat{Tunnel: proto.TunnelStatus{State: proto.StatusError, Reason: reasonHandshakePending}}, true
+	}
+
+	done := make(chan struct{})
+	tick := make(chan time.Time)
+	notify := make(chan struct{}, 1)
+	go runHeartbeats(done, tick, notify, 5*time.Millisecond, 30*time.Millisecond, send)
+
+	notify <- struct{}{}
+	time.Sleep(200 * time.Millisecond) // retryTimeout(30ms)をまたぐ間、追送りが続くのを待つ
+	stopped := calls.Load()
+	time.Sleep(100 * time.Millisecond) // 追送りが止まっていれば、この間に送信は増えない
+	close(done)
+	if got := calls.Load(); got != stopped {
+		t.Errorf("follow-up did not stop after the timeout: calls went from %d to %d", stopped, got)
+	}
+	if stopped < 2 {
+		t.Fatalf("expected more than one follow-up heartbeat before the timeout, got %d", stopped)
+	}
+}
+
+// newTestStreamServer は vpsd 側の stream(仕様 5.2 節)の薄いなりすまし。公開鍵の受信までは検証せず、
+// test から送った全体状態をそのまま転送し、エージェントが送るハートビートを hbCh へ流す。
+func newTestStreamServer(t *testing.T) (srv *httptest.Server, pin [32]byte, stateCh chan<- *proto.State, hbCh <-chan *proto.Heartbeat) {
+	t.Helper()
+	states := make(chan *proto.State)
+	heartbeats := make(chan *proto.Heartbeat, 8)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/stream", func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		ctx := r.Context()
+		var first proto.Message
+		if _, b, err := ws.Read(ctx); err != nil || json.Unmarshal(b, &first) != nil || first.Type != proto.MsgPublicKey {
+			return
+		}
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case st, ok := <-states:
+					if !ok {
+						return
+					}
+					b, _ := json.Marshal(proto.Message{Type: proto.MsgState, State: st})
+					wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					err := ws.Write(wctx, websocket.MessageText, b)
+					cancel()
+					if err != nil {
+						return
+					}
+				}
+			}
+		}()
+		for {
+			_, b, err := ws.Read(ctx)
+			if err != nil {
+				return
+			}
+			var m proto.Message
+			if json.Unmarshal(b, &m) != nil {
+				continue
+			}
+			if m.Type == proto.MsgHeartbeat && m.Heartbeat != nil {
+				select {
+				case heartbeats <- m.Heartbeat:
+				default:
+				}
+			}
+		}
+	})
+	srv = httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	pin = sha256.Sum256(srv.Certificate().Raw)
+	return srv, pin, states, heartbeats
+}
+
+// streamOnce は、stream の接続直後に全体状態を適用した直後と、以後の世代を適用するたびにも
+// ハートビートを送る(30 秒のティッカーを待たない。仕様 5.2 節)。ここではティッカーを実質無効にした
+// runtime を使い、適用のたびにハートビートが届くことだけを確かめる。
+func TestStreamOnceSendsHeartbeatAfterApply(t *testing.T) {
+	srv, pin, stateCh, hbCh := newTestStreamServer(t)
+
+	priv, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &runtime{
+		f: &credentials.Credentials{
+			Endpoint:       strings.TrimPrefix(srv.URL, "https://"),
+			CertSHA256:     hex.EncodeToString(pin[:]),
+			PermanentToken: "tok",
+		},
+		priv:              priv,
+		heartbeatInterval: time.Hour, // 十分長くし、ティッカーではなく適用の通知で届くことを確かめる
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rt.streamOnce(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	waitHeartbeat := func(wantGen uint64) {
+		t.Helper()
+		select {
+		case hb := <-hbCh:
+			if hb.Generation != wantGen {
+				t.Errorf("heartbeat generation = %d, want %d", hb.Generation, wantGen)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no heartbeat within 5s of applying a state; it must not wait for the 30s ticker")
+		}
+	}
+
+	// wg の公開鍵が不正なので apply は早期に失敗し、世代は進まない。それでも接続直後の適用の
+	// 直後にハートビートが届くことを確かめる(登録直後・再接続直後に空の行が最大 30 秒見える不具合の再現条件)。
+	stateCh <- &proto.State{Generation: 1, WG: proto.WGConfig{ServerPubkey: "not-a-valid-key"}}
+	waitHeartbeat(0)
+
+	// 2 つ目の世代を適用した直後にも、ティッカーを待たずに次のハートビートが届く。
+	stateCh <- &proto.State{Generation: 2, WG: proto.WGConfig{ServerPubkey: "not-a-valid-key"}}
+	waitHeartbeat(0)
 }
