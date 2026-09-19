@@ -251,11 +251,6 @@ func Run(opts Options) error {
 		udpPerSourceCap: opts.Limits.UDPPerSourceCap(),
 		tcpPerSourceCap: opts.Limits.TCPPerSourceCap(),
 	}}
-	var uspace *userspace.Backend
-	if opts.Mode == modeUserspace {
-		uspace = userspace.New(userspace.Options{Limits: opts.Limits})
-		d.dp = &userspaceDataplane{b: uspace}
-	}
 	d.reserved = proto.Reserved{opts.WGPort: "WireGuard"}
 	if ap, err := netip.ParseAddrPort(opts.AdminAddr); err == nil {
 		d.reserved[ap.Port()] = "admin API"
@@ -279,6 +274,15 @@ func Run(opts Options) error {
 		return fmt.Errorf("reading recorded mode: %w", err)
 	}
 	mode := string(recordedMode)
+	// データプレーンは、この起動で実際に使うモード(記録済みの値)で選ぶ。WGFT_MODE を指定しない
+	// 再起動では opts.Mode が空なので、それで選ぶと記録が userspace でも kernel のデータプレーンになる。
+	// ログ(apply.go)と管理用 API(admin_backend.go)が見る d.opts.Mode も同じ値にそろえる
+	d.opts.Mode = mode
+	var uspace *userspace.Backend
+	if mode == modeUserspace {
+		uspace = userspace.New(userspace.Options{Limits: opts.Limits})
+		d.dp = &userspaceDataplane{b: uspace}
+	}
 	if d.serverKey, err = serverKey(st); err != nil {
 		return err
 	}
