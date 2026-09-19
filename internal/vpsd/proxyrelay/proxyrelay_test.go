@@ -84,6 +84,12 @@ func managerFor(t *testing.T, agentAddr string) (*Manager, func() net.Conn) {
 	t.Cleanup(m.Close)
 	dialPublic := func() net.Conn {
 		c, err := net.Dial("tcp", pubAddr)
+		if isReset(err) {
+			// 拒否の RST(SetLinger(0))は、loopback では connect が戻る前に届くことがある。
+			// Dial の reset も、Dial の後の Read の reset も同じ拒否なので、Read がその reset を
+			// 返す接続にして渡す。成立するはずの接続がこれを受け取れば、Write や Read で落ちる。
+			return resetConn{err: err}
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,6 +144,7 @@ func TestSourceDenyAtAccept(t *testing.T) {
 	c.SetReadDeadline(time.Now().Add(2 * time.Second))
 	// 拒否は SetLinger(0) の RST で即座に終える(仕様 6.3 節、design.md 7a.10 節 Phase 6 移行手順 3)。
 	// グレースフルクローズ(通常の Close)なら次の Read は io.EOF になるので、そうでないことを見る。
+	// RST が connect の戻る前に届いた場合は、dialPublic が同じ reset を Read で返す接続を渡す。
 	if _, err := c.Read(make([]byte, 1)); !isReset(err) {
 		t.Errorf("refused (source deny) connection: err = %v, want connection reset by peer", err)
 	}
@@ -178,6 +185,19 @@ func TestNormalCloseEndsWithEOF(t *testing.T) {
 // isReset は接続が RST で切られた誤りかを見る。Windows の WSAECONNRESET (10054) は
 // syscall.ECONNRESET と別の値なので、数値でも比べる
 // (internal/dataplane/userspace/relay の同名のテストヘルパーと同じ考え方)。
+// resetConn は、Dial の時点で reset された接続の代わり。どの操作もその reset を返す。
+type resetConn struct {
+	net.Conn
+	err error
+}
+
+func (c resetConn) Read([]byte) (int, error)         { return 0, c.err }
+func (c resetConn) Write([]byte) (int, error)        { return 0, c.err }
+func (c resetConn) Close() error                     { return nil }
+func (c resetConn) SetDeadline(time.Time) error      { return nil }
+func (c resetConn) SetReadDeadline(time.Time) error  { return nil }
+func (c resetConn) SetWriteDeadline(time.Time) error { return nil }
+
 func isReset(err error) bool {
 	var errno syscall.Errno
 	if !errors.As(err, &errno) {
@@ -312,6 +332,9 @@ func admissionManager(t *testing.T, eng *goengine.Engine) (dial func() net.Conn,
 	m.Apply([]Rule{rule(true, nil, nil)}) // fakeAgent は PROXY ヘッダが届くまで接続元を返さない
 	dial = func() net.Conn {
 		c, err := net.Dial("tcp", raw.Addr().String())
+		if isReset(err) {
+			return resetConn{err: err} // 拒否の RST が connect の戻る前に届いた(managerFor と同じ扱い)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
