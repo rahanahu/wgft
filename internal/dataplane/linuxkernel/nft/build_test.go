@@ -137,8 +137,8 @@ func TestEmitRows(t *testing.T) {
 	}
 
 	// 無効なルールと未登録のエージェントのルールは Plan.Ports に現れないので、set も行も持たない。
-	// Relay(プロキシモード)のルールは src_flow の行だけを持つ。set 名の連番は Transparent の
-	// ルールだけで数える。Plan.Ports は (Proto, ListenPort.Lo, RuleID) の順なので、行の順は
+	// Relay(プロキシモード)のルールは、待ち受けを開けているポートに Transparent と同じ段の行を
+	// 持ち、set 名の連番も進める。Plan.Ports は (Proto, ListenPort.Lo, RuleID) の順なので、行の順は
 	// r_proxy(tcp/443) → r_tcp(tcp/25565) → r_udp(udp/2456) になる(設計文書 7a.8 節 Phase 3)。
 	var setNames []string
 	for _, op := range rec.ops {
@@ -147,14 +147,14 @@ func TestEmitRows(t *testing.T) {
 		}
 	}
 	// flows_udp / flows_tcp は、そのプロトコルの最初の有効なルール(プロキシモードを含む)でだけ作る
-	if want := []string{"flows_tcp", "allow_1", "deny_2", "meter_2", "flows_udp"}; !reflect.DeepEqual(setNames, want) {
+	if want := []string{"allow_1", "flows_tcp", "allow_2", "deny_3", "meter_3", "flows_udp"}; !reflect.DeepEqual(setNames, want) {
 		t.Errorf("sets = %v, want %v", setNames, want)
 	}
 
 	// 行の順序:deny、allow、per_source、src_flow、new_flow、packet。空・未設定のものは出ない。
 	// src_flow は接続元 IP ごとの同時フロー数の上限で、プロトコルごとに常に出る
 	wantPre := []string{
-		Comment("r_proxy", "src_flow"),
+		Comment("r_proxy", "allow"), Comment("r_proxy", "src_flow"),
 		Comment("r_tcp", "allow"), Comment("r_tcp", "src_flow"), Comment("r_tcp", "packet"),
 		Comment("r_udp", "deny"), Comment("r_udp", "per_source"), Comment("r_udp", "src_flow"), Comment("r_udp", "new_flow"),
 	}

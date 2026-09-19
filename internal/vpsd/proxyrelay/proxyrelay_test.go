@@ -84,6 +84,12 @@ func managerFor(t *testing.T, agentAddr string) (*Manager, func() net.Conn) {
 	t.Cleanup(m.Close)
 	dialPublic := func() net.Conn {
 		c, err := net.Dial("tcp", pubAddr)
+		if isReset(err) {
+			// 拒否の RST(SetLinger(0))は、loopback では connect が戻る前に届くことがある。
+			// Dial の reset も、Dial の後の Read の reset も同じ拒否なので、Read がその reset を
+			// 返す接続にして渡す。成立するはずの接続がこれを受け取れば、Write や Read で落ちる。
+			return resetConn{err: err}
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,6 +144,7 @@ func TestSourceDenyAtAccept(t *testing.T) {
 	c.SetReadDeadline(time.Now().Add(2 * time.Second))
 	// 拒否は SetLinger(0) の RST で即座に終える(仕様 6.3 節、design.md 7a.10 節 Phase 6 移行手順 3)。
 	// グレースフルクローズ(通常の Close)なら次の Read は io.EOF になるので、そうでないことを見る。
+	// RST が connect の戻る前に届いた場合は、dialPublic が同じ reset を Read で返す接続を渡す。
 	if _, err := c.Read(make([]byte, 1)); !isReset(err) {
 		t.Errorf("refused (source deny) connection: err = %v, want connection reset by peer", err)
 	}
@@ -178,6 +185,19 @@ func TestNormalCloseEndsWithEOF(t *testing.T) {
 // isReset は接続が RST で切られた誤りかを見る。Windows の WSAECONNRESET (10054) は
 // syscall.ECONNRESET と別の値なので、数値でも比べる
 // (internal/dataplane/userspace/relay の同名のテストヘルパーと同じ考え方)。
+// resetConn は、Dial の時点で reset された接続の代わり。どの操作もその reset を返す。
+type resetConn struct {
+	net.Conn
+	err error
+}
+
+func (c resetConn) Read([]byte) (int, error)         { return 0, c.err }
+func (c resetConn) Write([]byte) (int, error)        { return 0, c.err }
+func (c resetConn) Close() error                     { return nil }
+func (c resetConn) SetDeadline(time.Time) error      { return nil }
+func (c resetConn) SetReadDeadline(time.Time) error  { return nil }
+func (c resetConn) SetWriteDeadline(time.Time) error { return nil }
+
 func isReset(err error) bool {
 	var errno syscall.Errno
 	if !errors.As(err, &errno) {
@@ -218,7 +238,7 @@ func TestConnCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// ユーザー空間モードと同じく、接続元 IP ごとの上限は Go の評価器が数える
+	// ユーザー空間モードと同じく、Admission Policy は Go の評価器が判定する
 	cnt := &flowcap.Counter{Total: 10}
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r", Proto: proto.TCP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{TCP: 1}})
@@ -227,8 +247,8 @@ func TestConnCap(t *testing.T) {
 		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
 		Logf:   testLogf(t),
 		Cap:    cnt,
-		AdmitSource: func(ruleID string, src netip.Addr) (func(), bool) {
-			d, tk := eng.AdmitSourceFlow(ruleID, src)
+		Admit: func(ruleID string, src netip.Addr) (func(), bool) {
+			d, tk := eng.AdmitFlow(ruleID, src, 0)
 			return tk.Release, d.Allow
 		},
 	})
@@ -286,6 +306,113 @@ func TestConnCap(t *testing.T) {
 			break
 		}
 	}
+}
+
+// admissionManager は、ユーザー空間モードの Relay の中継と同じ配線(Admission Policy のすべての段を
+// Go の評価器が判定する。仕様 6.2 節)の Manager を作り、公開側へつなぐ関数と、その接続がエージェント
+// まで届いたかを返す関数を返す。
+func admissionManager(t *testing.T, eng *goengine.Engine) (dial func() net.Conn, reached func() bool) {
+	t.Helper()
+	agentAddr, ipCh := fakeAgent(t)
+	raw, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(Options{
+		Listen: func(uint16) (net.Listener, error) { return raw, nil },
+		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
+		Logf:   testLogf(t),
+		Cap:    &flowcap.Counter{Total: 10},
+		Admit: func(ruleID string, src netip.Addr) (func(), bool) {
+			d, tk := eng.AdmitFlow(ruleID, src, 0)
+			return tk.Release, d.Allow
+		},
+	})
+	t.Cleanup(m.Close)
+	m.Apply([]Rule{rule(true, nil, nil)}) // fakeAgent は PROXY ヘッダが届くまで接続元を返さない
+	dial = func() net.Conn {
+		c, err := net.Dial("tcp", raw.Addr().String())
+		if isReset(err) {
+			return resetConn{err: err} // 拒否の RST が connect の戻る前に届いた(managerFor と同じ扱い)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	reached = func() bool {
+		select {
+		case <-ipCh:
+			return true
+		case <-time.After(300 * time.Millisecond):
+			return false
+		}
+	}
+	return dial, reached
+}
+
+// wantRefused は、拒んだ接続が SetLinger(0) の RST で閉じられ、エージェントに届いていないことを
+// 確かめる。読みが RST を返した時点で、評価器の判定と drop の記録は済んでいる。
+func wantRefused(t *testing.T, c net.Conn, reached func() bool) {
+	t.Helper()
+	if reached() {
+		t.Error("a refused connection reached the agent")
+	}
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); !isReset(err) {
+		t.Errorf("refused connection: err = %v, want connection reset by peer", err)
+	}
+}
+
+// ユーザー空間モードの Relay の中継は、送信元の許可拒否も評価器に判定させ、deny の drop に数える
+// (仕様 6.2 節)。中継の宣言そのものには deny を置かないので、拒んだのは評価器である。
+func TestRelayDenyJudgedByEvaluator(t *testing.T) {
+	eng := goengine.New(nil)
+	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r", Proto: proto.TCP,
+		SourceDeny: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}}}})
+	dial, reached := admissionManager(t, eng)
+	wantRefused(t, dial(), reached)
+	if d := eng.Drops(); len(d) != 1 || d[0].RuleID != "r" || d[0].Kind != "deny" || d[0].Packets != 1 {
+		t.Errorf("drops = %+v, want one deny drop of rule r", d)
+	}
+}
+
+// Relay のルールのレートも効き(仕様 6.2 節)、拒んだ接続は new_flow の drop に数え、送信元ごとの
+// 同時フロー数の枠を返す。枠を返さないと、上限 1 のこの場面で次のフローが src_flow で落ちる。
+func TestRelayRateRefusalCountsAndReleasesTicket(t *testing.T) {
+	eng := goengine.New(nil)
+	eng.Update(policy.Policy{
+		Rules:             []policy.RulePolicy{{RuleID: "r", Proto: proto.TCP, NewFlowRate: rateOf(t, "1/minute")}},
+		PerSourceFlowCaps: policy.PerSourceFlowCaps{TCP: 1},
+	})
+	// new_flow_rate の burst を使い切る。枠は都度返すので、送信元ごとの数は 0 に戻る
+	src := netip.MustParseAddr("127.0.0.1")
+	for range policy.TokenBucketBurst {
+		d, tk := eng.AdmitFlow("r", src, 0)
+		if !d.Allow {
+			t.Fatalf("draining the burst: %+v", d)
+		}
+		tk.Release()
+	}
+	dial, reached := admissionManager(t, eng)
+	wantRefused(t, dial(), reached)
+	if d := eng.Drops(); len(d) != 1 || d[0].RuleID != "r" || d[0].Kind != "new_flow" || d[0].Packets != 1 {
+		t.Errorf("drops = %+v, want one new_flow drop of rule r", d)
+	}
+	// 枠が返っていれば、次のフローは送信元ごとの上限ではなく new_flow で落ちる
+	if d, _ := eng.AdmitFlow("r", src, 0); d.Kind != "new_flow" {
+		t.Errorf("the flow after a rate refusal = %+v, want drop:new_flow (the ticket was not released)", d)
+	}
+}
+
+func rateOf(t *testing.T, s string) *proto.Rate {
+	t.Helper()
+	r, err := proto.ParseRate(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &r
 }
 
 // twoPhase は、ポートごとに loopback の待ち受けを開く Manager と、そのポートに今つながるかを返す。

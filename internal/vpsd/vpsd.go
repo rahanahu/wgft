@@ -345,16 +345,17 @@ func Run(opts Options) error {
 	if w := d.dp.ConntrackWarning(); w != "" {
 		log.Printf("warning: %s", w)
 	}
-	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)。接続元 IP ごとの数は、
-	// nftables の flows_tcp がカーネルモードのルールと合わせて数える(6.1、7 節)ので、ここでは数えない。
-	// 起動時の applyNFT が待ち受けを開き、開けたポートだけに上限の行を付けるよう、先に作る
+	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)。Admission Policy は、待ち受けを
+	// 開けたポートに付ける nftables の行が判定する(6.1、7 節)ので、中継では判定しない。起動時の
+	// applyNFT が待ち受けを開き、開けたポートだけに行を付けるよう、先に作る
 	proxyOpts := proxyrelay.Options{Cap: &flowcap.Counter{Total: opts.Limits.WithDefaults().TCPTotal}}
 	if uspace != nil {
 		// ユーザー空間モードでは netstack 越しにエージェントへ
 		proxyOpts.Dial = func(addr string) (net.Conn, error) { return uspace.Dial("tcp", addr) }
 		proxyOpts.Cap = uspace.TCPCounter() // 同時接続数は relay と合計で数える(仕様 7 節)
-		// 接続元 IP ごとの同時接続数は Go の評価器が、Transparent の TCP のルールと合わせて数える(6.3 節)
-		proxyOpts.AdmitSource = uspace.AdmitRelayFlow
+		// Admission Policy のすべての段を Go の評価器が判定する。接続元 IP ごとの同時接続数は、
+		// Transparent の TCP のルールと合わせて数える(6.2、6.3 節)
+		proxyOpts.Admit = uspace.AdmitRelayFlow
 	}
 	d.proxy = proxyrelay.New(proxyOpts)
 	// 起動時に SQLite のルールを適用する(手作業で変えられたテーブルは宣言に戻る)

@@ -1,5 +1,5 @@
 // Package proxyrelay は vpsd 側のプロキシモードの中継(仕様 6.2 節)。
-// vps_mode=proxy のルールについて、vpsd が公開ポートで TCP を受け、接続元制限を判定し、
+// vps_mode=proxy のルールについて、vpsd が公開ポートで TCP を受け、Admission Policy で判定し、
 // (proxy_protocol なら)PROXY protocol v2 ヘッダを先頭に付けて、wg0 経由でエージェントの
 // リスナー(10.200.0.x:listen_port)へ中継する。中継はハーフクローズを保つ。
 package proxyrelay
@@ -45,12 +45,14 @@ type Options struct {
 	// Cap はプロセス全体の上限(仕様 7 節、Resource Guard)。nil なら既定値で作る。
 	// ユーザー空間モードの vpsd は relay と同じ Counter を渡し、合計で数える
 	Cap *flowcap.Counter
-	// AdmitSource は新しい接続を、送信元ごとの同時フロー数の上限で判定する(Admission Policy)。通すときは
-	// 枠を返す release も返し、中継は接続の終わりに 1 回呼ぶ。後の上限(Resource Guard)で拒んだときも
-	// 呼ぶ。ユーザー空間モードの vpsd は Go の評価器(userspace.Backend.AdmitRelayFlow)を渡し、
-	// Transparent の TCP のルールと同じ数に入れる。nil なら判定しない。カーネルモードでは nftables の
-	// flows_tcp が数える(仕様 6.1 節)
-	AdmitSource func(ruleID string, src netip.Addr) (release func(), ok bool)
+	// Admit は新しい接続を Admission Policy のすべての段(deny、allow、3 つのレート、送信元ごとの
+	// 同時フロー数の上限)で判定し、拒んだ段の drop を数える。通すときは枠を返す release も返し、
+	// 中継は接続の終わりに 1 回呼ぶ。後の上限(Resource Guard)で拒んだときも呼ぶ。
+	//
+	// ユーザー空間モードの vpsd は Go の評価器(userspace.Backend.AdmitRelayFlow)を渡す。カーネル
+	// モードでは nil で、段は nftables が待ち受けを開けているポートの行で評価する(仕様 6.1 節)。
+	// nil のときに中継に残るのは、deny と allow の状態を持たない確認だけである(仕様 6.2 節)
+	Admit func(ruleID string, src netip.Addr) (release func(), ok bool)
 }
 
 // Manager は現在のプロキシ中継のリスナー集合を持ち、宣言に収束させる。
@@ -86,11 +88,12 @@ type listener struct {
 	dialLog flowcap.LogGate
 }
 
-// abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う(接続元制限、
-// 同時フロー数の上限)。通常の Close はグレースフルクローズ(FIN の後 TIME_WAIT)になるが、ここは実
-// ソケット(net.Listen で開く公開側の accept)なので、SetLinger(0) で RST を送って即座に終える
-// (仕様 6.3 節「実ソケットでも拒否は SetLinger(0) の RST で閉じ」)。フラッドの間に不要な TIME_WAIT の TCP 状態を大量に残さず、
-// その分のカーネル資源を保持し続けないためで、成立した中継の通常のクローズ(ハーフクローズを保つ)には使わない。
+// abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う
+// (Admission Policy と、ルールごととプロセス全体の同時フロー数の上限)。通常の Close はグレースフル
+// クローズ(FIN の後 TIME_WAIT)になるが、ここは実ソケット(net.Listen で開く公開側の accept)なので、
+// SetLinger(0) で RST を送って即座に終える(仕様 6.3 節「実ソケットでも拒否は SetLinger(0) の RST で
+// 閉じ」)。フラッドの間に不要な TIME_WAIT の TCP 状態を大量に残さず、その分のカーネル資源を保持し
+// 続けないためで、成立した中継の通常のクローズ(ハーフクローズを保つ)には使わない。
 // internal/dataplane/userspace/relay の同名の考え方(abortRefused)と揃えているが、proxyrelay の
 // accept は常に実ソケットで netstack の aborter を持たないため、ここでは *net.TCPConn だけを扱う。
 func abortRefused(c net.Conn) {
@@ -334,20 +337,19 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 	l.mu.Lock()
 	rule := l.rule
 	l.mu.Unlock()
-	// 接続元制限(vpsd が受け付け時に判定する。プロキシは DNAT を通らないので nftables では効かない)
-	if !sourceAllowed(src, rule) {
-		abortRefused(c)
-		return
-	}
-	// 送信元ごとの同時フロー数の上限(Admission Policy)。ユーザー空間モードだけ Go の評価器が判定し、
-	// 拒んだ接続を src_flow の drop として数える
-	if m.opts.AdmitSource != nil {
-		release, ok := m.opts.AdmitSource(rule.ID, src)
+	// Admission Policy(仕様 6.2 節)。ユーザー空間モードでは Go の評価器がすべての段を判定し、
+	// 拒んだ段の drop を数える。カーネルモードでは nftables が状態を持つ段を判定してパケットを捨てる
+	// ので、ここに残るのは deny と allow の状態を持たない確認だけで、その拒否は drop に数えない
+	if m.opts.Admit != nil {
+		release, ok := m.opts.Admit(rule.ID, src)
 		if !ok {
 			abortRefused(c)
 			return
 		}
 		defer release()
+	} else if !sourceAllowed(src, rule) {
+		abortRefused(c)
+		return
 	}
 	// 同時フロー数の上限(仕様 7 節、Resource Guard)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
 	l.mu.Lock()
@@ -496,7 +498,8 @@ func (l *listener) close() {
 
 // sourceAllowed の deny/allow の判定は internal/policy.RulePolicy.SourceAllowed に委ねる
 // (design.md 7a.9 節「Phase 5 の移行の手順」1:4 か所に分かれていた同じ判定を IR の 1 実装へ
-// 集約する最初の 1 か所)。
+// 集約する最初の 1 か所)。カーネルモードの受け付けと、成立済みの接続を残すかの判定(updateRestriction、
+// retire)で使う。ユーザー空間モードの受け付けは Options.Admit が判定する。
 func sourceAllowed(src netip.Addr, r Rule) bool {
 	return policy.RulePolicy{SourceDeny: r.SourceDeny, SourceAllow: r.SourceAllow}.SourceAllowed(src)
 }

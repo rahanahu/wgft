@@ -1,0 +1,23 @@
+{
+  "comment": "A Relay rule gets every Admission Policy step, so its source lists and its two flow rates apply and are counted: deny first, then allow, then the per-source rate, then the rule-wide new_flow_rate. packet_rate is left unset because it has no effect on a TCP rule. The per-source concurrent flow cap is off so that it refuses nothing before the rates do.",
+  "policy": {
+    "rules": [
+      {"id": "r_relay", "proto": "tcp", "forwarding": "relay", "source_allow": ["198.51.100.0/24"], "source_deny": ["198.51.100.99/32"], "per_source_rate": "10/second", "new_flow_rate": "2/second", "packet_rate": null}
+    ],
+    "per_source_flow_caps": {"tcp": 0}
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.99", "flow": "x1", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "203.0.113.1", "flow": "y1", "want": "drop:allow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.1", "flow": "a2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.1", "flow": "a3", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.1", "flow": "a4", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.1", "flow": "a5", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_relay", "src": "198.51.100.1", "flow": "a6", "want": "drop:per_source"},
+    {"at_ms": 10, "op": "flow", "rule": "r_relay", "src": "198.51.100.2", "flow": "b1", "want": "drop:new_flow"},
+    {"at_ms": 750, "op": "flow", "rule": "r_relay", "src": "198.51.100.3", "flow": "c1", "want": "admit"}
+  ],
+  "want_drops": {"r_relay": {"deny": 1, "allow": 1, "per_source": 1, "new_flow": 1}},
+  "tolerances": []
+}

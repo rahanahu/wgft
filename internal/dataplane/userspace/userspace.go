@@ -111,13 +111,16 @@ func New(opts Options) *Backend {
 func (b *Backend) TCPCounter() *flowcap.Counter { return b.tcpCap }
 
 // AdmitRelayFlow judges a new connection of the server's Relay frontend (proxyrelay) in userspace
-// mode by the per-source concurrent-flow step only, so that Relay connections share the per-source
+// mode by every Admission Policy step, exactly as a Transparent TCP connection is judged: Forwarding
+// picks how a flow is carried, not whether it is admitted (design.md 7a.9 節). The evaluator counts
+// the drop of whichever step refuses, and Relay connections share the per-source concurrent-flow
 // count with the Transparent TCP rules (design.md 6.3 節). When it admits, the caller calls release
-// once when the connection ends, or at once when the connection is refused later. Until migration
-// step 4 of design.md 7a.9 節 the Relay frontend judges deny and allow itself and applies no rates,
-// as the kernel's Relay ports have only the src_flow row.
+// once when the connection ends, or at once when a later limit (Resource Guard) refuses it.
+//
+// The size is 0 because a refused TCP connection counts as one packet of zero bytes (design.md 7a.9
+// 節の許容差 drop_counter_units).
 func (b *Backend) AdmitRelayFlow(ruleID string, src netip.Addr) (release func(), ok bool) {
-	d, t := b.policy.AdmitSourceFlow(ruleID, src)
+	d, t := b.policy.AdmitFlow(ruleID, src, 0)
 	return t.Release, d.Allow
 }
 

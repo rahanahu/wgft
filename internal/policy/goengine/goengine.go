@@ -185,28 +185,14 @@ func (e *Engine) releaseLocked(k flowKey) {
 // policy.Order の全段で判定する。size はそのフローの最初のパケットの大きさで、拒んだときの drop の
 // バイト数になる(UDP はデータグラムの長さ、TCP は 0)。
 //
+// userspace モードの Transparent の中継と Relay の中継(internal/vpsd/proxyrelay)は、どちらもこの
+// 1 つの入口を使う。Forwarding の値によって Admission Policy の意味は変わらない(設計文書 7a.9 節)。
+//
 // 通したときは、送信元ごとの同時フロー数の枠を持つ Ticket を返す。呼び出し側はフローの終わりに
 // Release を呼ぶ。後の Resource Guard(プロセス全体の予算、ルールごとの隔離)が拒んだとき、あるいは
 // フローを始められなかったときも、その場で Release を呼ぶ。拒んだときの Ticket は nil で、段の途中で
 // 取った枠は評価器が既に返している。
 func (e *Engine) AdmitFlow(ruleID string, src netip.Addr, size int) (Decision, *Ticket) {
-	return e.admit(ruleID, src, size, policy.Order)
-}
-
-// relayOrder は AdmitSourceFlow が評価する段。
-var relayOrder = []policy.Step{policy.StepPerSourceConcurrentFlows}
-
-// AdmitSourceFlow は、userspace モードの Relay の中継(internal/vpsd/proxyrelay)の新しい接続を、
-// 送信元ごとの同時フロー数の段だけで判定する。Relay の中継は、送信元の許可拒否を自分で判定し、
-// レートを評価しない。kernel モードの Relay のポートに src_flow の行だけがあるのと同じ扱いで、
-// 設計文書 7a.9 節の移行の手順 4 で AdmitFlow に置き換える。それまでも、Relay の接続は Transparent の
-// TCP のルールと同じ送信元ごとの数に入る(設計文書 6.3 節)。IR に無いルール ID と IPv4 でない
-// 送信元は、AdmitFlow と同じく drop に数えずに拒む。
-func (e *Engine) AdmitSourceFlow(ruleID string, src netip.Addr) (Decision, *Ticket) {
-	return e.admit(ruleID, src, 0, relayOrder)
-}
-
-func (e *Engine) admit(ruleID string, src netip.Addr, size int, order []policy.Step) (Decision, *Ticket) {
 	src = src.Unmap()
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -222,7 +208,7 @@ func (e *Engine) admit(ruleID string, src netip.Addr, size int, order []policy.S
 		}
 		return now
 	}
-	for _, step := range order {
+	for _, step := range policy.Order {
 		if e.passLocked(rs, step, src, clock, &t) {
 			continue
 		}
@@ -238,8 +224,8 @@ func (e *Engine) admit(ruleID string, src netip.Addr, size int, order []policy.S
 		return Decision{Kind: kind}, nil
 	}
 	if t == nil {
-		// 送信元ごとの同時フロー数の段を評価しない順序は無いが、呼び出し側が常に Release を
-		// 呼べるよう、空の Ticket を返す
+		// policy.Order は送信元ごとの同時フロー数の段を必ず含むので、ここには来ない。呼び出し側が
+		// 常に Release を呼べるよう、念のため空の Ticket を返す
 		t = &Ticket{e: e}
 	}
 	return allow, t

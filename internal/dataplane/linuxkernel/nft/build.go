@@ -52,9 +52,9 @@ type emitter interface {
 // 生成の途中で失敗すると未送信のメッセージが Conn に残るので、Conn は呼び出しごとに作って捨てる。
 //
 // relayListening は、vpsd がプロキシモードの待ち受けを実際に開いているポート(design.md 7a.2 節の
-// dataplane.Desired.RelayListening)。Relay のルールは、ここにあるポートだけに接続元 IP ごとの
-// 上限の行を持つ。bind に失敗したポートでは、同じポートの別のプロセスへの通信に wgft の上限を
-// 掛けてしまうため(仕様 6.1 節)。nil なら行を持たない。
+// dataplane.Desired.RelayListening)。Relay のルールは、ここにあるポートだけに Admission Policy の
+// 行を持つ。bind に失敗したポートでは、同じポートの別のプロセスへの通信に wgft の判定を掛けて
+// しまうため(仕様 6.1 節)。nil なら行を持たない。
 //
 // Apply は Stage と Flush を続けて行う。kernel backend は 2 つを Prepare と Commit に分けて呼ぶ
 // (design.md 7a.2 節)。
@@ -150,8 +150,9 @@ func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Conf
 
 	// 送信元制限とレートの行は、IR(Plan.Admission)を internal/policy/nftables がコンパイルした
 	// 行の列から写す(設計文書 7a.9 節)。判定を付けるポートは、Transparent のポートと、vpsd が
-	// 待ち受けを開けている Relay のポートである。bind に失敗した Relay のポートに行を置くと、同じ
-	// ポートで待ち受ける別のプロセスへの通信に wgft の上限を掛けてしまうため(仕様 6.1 節)。
+	// 待ち受けを開けている Relay のポートで、どちらも同じ段の行を持つ。bind に失敗した Relay の
+	// ポートに行を置くと、同じポートで待ち受ける別のプロセスへの通信に wgft の判定を掛けて
+	// しまうため(仕様 6.1 節)。
 	//
 	// Plan.Ports は無効なルールとエージェントが未登録のルールを既に除き、
 	// (Proto, ListenPort.Lo, RuleID) の順に並んでいる(internal/planner.Build)。この順が
