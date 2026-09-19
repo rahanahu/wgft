@@ -233,7 +233,7 @@ optional and normally left unset, since the join string is already bound to a na
 	addAdminFlag(revoke)
 
 	warnings := &cobra.Command{
-		Use: "warnings", Short: "list theft-detection warnings; VPS side; spec section 5.2", Args: cobra.NoArgs,
+		Use: "warnings", Short: "list theft-detection warnings; VPS side", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := adminClient(cmd)
 			if err != nil {
@@ -260,7 +260,7 @@ optional and normally left unset, since the join string is already bound to a na
 	addAdminFlag(warnings)
 
 	dismiss := &cobra.Command{
-		Use: "dismiss-warning <name> <kind> [detail]", Short: "dismiss a warning; VPS side; once confirmed legitimate, spec section 5.2", Args: cobra.RangeArgs(2, 3),
+		Use: "dismiss-warning <name> <kind> [detail]", Short: "dismiss a warning once confirmed legitimate; VPS side", Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := adminClient(cmd)
 			if err != nil {

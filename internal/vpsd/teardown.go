@@ -84,7 +84,7 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 		if b, e := st.GetMeta(modeMeta); e == nil && string(b) == modeUserspace {
 			userspace = true
 		}
-		manual = manualRestoreList(st, userspace)
+		manual = manualRestoreList(st, userspace, iface)
 	} else {
 		fmt.Fprintf(out, "server database %s is missing, so assuming the default interface name %s; ownership cannot be confirmed by key, so --adopt-existing is required to delete it\n", opts.DBPath, iface)
 	}
@@ -169,7 +169,7 @@ func purgeState(opts TeardownOptions, out io.Writer) {
 }
 
 // manualRestoreList は「手で戻す一覧」を SQLite と meta から具体値で作る。
-func manualRestoreList(st *store.Store, userspace bool) []string {
+func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 	var list []string
 
 	// ファイアウォールで開けたポート
@@ -202,7 +202,7 @@ func manualRestoreList(st *store.Store, userspace bool) []string {
 	}
 
 	// 他テーブルの wg 参照行(自動では戻さない。所在を案内)
-	list = append(list, "if you added lines to other tables as suggested in section 6.1, e.g. `oifname \"wg0\" ...` for DOCKER-USER or FORWARD, restore them by hand; check their location with `nft list ruleset | grep wg`")
+	list = append(list, "if you added lines to other tables as server check suggested, e.g. `oifname \""+iface+"\" ...` for DOCKER-USER or FORWARD, restore them by hand; check their location with `nft list ruleset | grep "+iface+"`")
 
 	// wgft が置いたものではないファイル
 	list = append(list, "delete by hand the systemd unit and env (/etc/systemd/system/wgft.service, /etc/wgft/), the binary (/usr/local/bin/wgft), and the state directory (/var/lib/wgft, remains unless --purge)")
