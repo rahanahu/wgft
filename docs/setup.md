@@ -29,7 +29,7 @@ To keep one rule from taking all of the capacity, wgft also caps each rule inter
 
 ## 1. Install the binary
 
-The same binary contains the server, agent, and CLI.
+The same binary contains the server, agent, and CLI. Minimal images, such as some VPS templates and Proxmox LXC templates, do not include `curl`; install it first, for example `sudo apt install curl`.
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64
@@ -66,7 +66,7 @@ Check the configuration before the first start:
 sudo wgft server check
 ```
 
-`check` reports the effective settings, detects a leftover WireGuard interface using the same server key, and prints any forwarding rules your existing firewall must allow.
+`check` reports the effective settings, detects a leftover WireGuard interface using the same server key, and prints any forwarding rules your existing firewall must allow. It also warns if the host's own input firewall would block wgft's own ports (WireGuard and the agent API) or a rule's listen port that wgft itself binds on the host (proxy-mode rules in kernel mode, every rule in userspace mode), and suggests the exact line to add; it never edits the firewall itself.
 
 wgft does not edit your existing firewall. It enables `net.ipv4.ip_forward=1` when needed; teardown reports how to revert it.
 

@@ -47,9 +47,10 @@ func (u *userspaceDataplane) BoundPorts() (linux.Bound, error) {
 
 // InputPortSuggestions は input が policy drop なら足す行を返す。nftables を読めない(非 root)ときは提示しない。
 // userspace モードは自分の nftables テーブルを作らないが、kernel モードから切り替えた後に残った
-// table inet wgft を他人のファイアウォールと取り違えないよう、kernel モードと同じく検査から除く
-func (u *userspaceDataplane) InputPortSuggestions(port uint16) ([]string, error) {
-	lines, err := linux.InputPortSuggestions(port, nft.TableName)
+// table inet wgft を他人のファイアウォールと取り違えないよう、kernel モードと同じく検査から除く。
+// host の input firewall はモードに関係しない層なので、userspace モードでも同じ検査を行う(仕様 6.3 節)
+func (u *userspaceDataplane) InputPortSuggestions(pr proto.PortRange, p proto.Proto) ([]string, error) {
+	lines, err := linux.InputPortSuggestions(pr, p, nft.TableName)
 	if err != nil {
 		return nil, nil
 	}
