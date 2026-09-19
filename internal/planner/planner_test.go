@@ -28,6 +28,18 @@ func TestBuildSkipsDisabledAndUnknownAgent(t *testing.T) {
 	if len(got.Ports) != 1 || got.Ports[0].RuleID != "r_on" {
 		t.Fatalf("Build().Ports = %+v, want only r_on", got.Ports)
 	}
+	// Admission.Rules follows Ports: a disabled rule or a rule of an unregistered agent must not
+	// carry admission policy into the Plan, while the global per-source caps stay.
+	var ids []string
+	for _, rp := range got.Admission.Rules {
+		ids = append(ids, rp.RuleID)
+	}
+	if len(ids) != 1 || ids[0] != "r_on" {
+		t.Errorf("Build().Admission.Rules IDs = %v, want only r_on", ids)
+	}
+	if got.Admission.PerSourceFlowCaps.UDP != flowcap.UDPPerSource || got.Admission.PerSourceFlowCaps.TCP != flowcap.TCPPerSource {
+		t.Errorf("Build().Admission.PerSourceFlowCaps = %+v, want the defaults", got.Admission.PerSourceFlowCaps)
+	}
 }
 
 func TestBuildJoinsPolicy(t *testing.T) {

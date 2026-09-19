@@ -89,7 +89,9 @@ type Peer struct {
 // Phase 2/3) reads to converge. internal/planner never calls into a Backend; the dependency is
 // one-directional.
 //
-// Admission is the whole AdmissionPolicy IR (internal/policy), not just its rule-level entries: a
+// Admission is the AdmissionPolicy IR (internal/policy) for what this Plan forwards: its Rules hold
+// only the rules that have an entry in Ports (disabled rules and rules of unregistered agents are
+// left out), and PerSourceFlowCaps holds the global caps. It is not just the rule-level entries: a
 // Backend given only a Plan must be able to compile admission policy end to end, including the
 // per-source concurrent flow caps (design.md 7a.5 節), without reaching back into whatever built
 // the Plan. This is also what the future nftables/Go-evaluator compilers (Phase 5, design.md 7a.8
@@ -125,7 +127,7 @@ func Build(in Input) Plan {
 		polByRuleID[rp.RuleID] = rp
 	}
 
-	plan := Plan{Generation: in.Generation, Admission: pol}
+	plan := Plan{Generation: in.Generation, Admission: policy.Policy{PerSourceFlowCaps: pol.PerSourceFlowCaps}}
 	for _, r := range in.Rules {
 		if !r.Enabled {
 			continue
@@ -140,6 +142,20 @@ func Build(in Input) Plan {
 			Target: r.Target, AgentAddr: addr, Policy: polByRuleID[r.ID],
 		})
 	}
+	// Admission.Rules keeps only the rules that got a port above (enabled, agent registered), in
+	// policy.Build's order. A rule that wgft does not forward must not carry admission policy: a
+	// Backend compiling Plan.Admission would otherwise put policy on a port nothing forwards
+	// (design.md 7a.4 節). PerSourceFlowCaps stays the global value.
+	owned := make(map[string]bool, len(plan.Ports))
+	for _, p := range plan.Ports {
+		owned[p.RuleID] = true
+	}
+	for _, rp := range pol.Rules {
+		if owned[rp.RuleID] {
+			plan.Admission.Rules = append(plan.Admission.Rules, rp)
+		}
+	}
+
 	sort.Slice(plan.Ports, func(i, j int) bool {
 		a, b := plan.Ports[i], plan.Ports[j]
 		if a.Proto != b.Proto {
