@@ -586,7 +586,7 @@ WireGuard のピアの変更、drop カウンタの読み出し、公開の後�
 | `internal/platform/linux`(Phase 3 で `internal/vpsd/check` から移した) | host 側の前段検査 | kernel `Backend` に同梱しない。agent の kernel backend(Phase 7)からも同じ検査を呼ぶため。`ip_forward` の確認・書き込み、conntrack テーブルの大きさ、conntrack の UDP タイムアウトの読み取り(旧 `internal/vpsd/wg` の一部)もここに合わせて移した |
 | `internal/flowcap` | Admission Policy の上限と `Resource Guard`(Phase 6 で分ける) | 今の `Limits` は接続元ごとの上限(Admission Policy)と全体の予算(Resource Guard)の両方を持つ(7a.5 節) |
 | `internal/dataplane/userspace/relay`(Phase 2 で `internal/agent/relay` から移した)の `plan`/`Action` | `internal/reconcile` の骨格のひな型 | この型を server と agent で共有する `internal/reconcile` に一般化する |
-| `internal/agent/tunnel`、`internal/dataplane/userspace/utun`(Phase 2 で `internal/vpsd/utun` から移した)、`internal/nettun` | userspace `Backend` の下位実装 | プラットフォーム配線そのままだが、置き場所を vpsd/agent 専用から共有へ移す。`internal/agent/tunnel` は agent の再構成と合わせて移す |
+| `internal/dataplane/userspace/tunnel`(`internal/agent/tunnel` から移した)、`internal/dataplane/userspace/utun`(Phase 2 で `internal/vpsd/utun` から移した)、`internal/nettun` | userspace `Backend` の下位実装 | プラットフォーム配線そのままである |
 | `internal/vpsd/agentapi`、`internal/vpsd/stream`、`internal/vpsd/store`、`internal/vpsd/admin` | `vpsd` の制御プレーン | 変更なし(登録、配信、永続化、admin API) |
 | `internal/agent/credentials` | `agent` の制御プレーン | 変更なし |
 
