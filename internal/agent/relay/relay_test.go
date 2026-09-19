@@ -8,10 +8,12 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -583,7 +585,12 @@ func TestTCPRelayRefusalIsAborted(t *testing.T) {
 	})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, port}: {"127.0.0.1:1", "r1"}})
+	// RST は Read で届くとは限らない。accept の直後に送るので、DialTCP が戻る前に届けば
+	// DialTCP 自体が reset で失敗する。どちらも正しい拒否として扱う。
 	c, err := net.DialTCP("tcp4", nil, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	if isReset(err) {
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,4 +599,14 @@ func TestTCPRelayRefusalIsAborted(t *testing.T) {
 	if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, io.EOF) {
 		t.Fatalf("a refused connection must be aborted (RST), not closed gracefully (EOF); got %v", err)
 	}
+}
+
+// isReset は接続が RST で切られた誤りかを見る。Windows の WSAECONNRESET (10054) は
+// syscall.ECONNRESET と別の値なので、数値でも比べる。
+func isReset(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	return errno == syscall.ECONNRESET || (runtime.GOOS == "windows" && errno == 10054)
 }
