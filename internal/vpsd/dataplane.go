@@ -51,6 +51,10 @@ type dataplane interface {
 // kernelDataplane はカーネルの WireGuard と nftables と conntrack を使う転送面。
 type kernelDataplane struct {
 	iface string // wg インタフェース名(既定 wgft0)
+	// udpPerSourceCap と tcpPerSourceCap は接続元 IP ごとの同時フロー数の上限(仕様 7, 11a 節)。
+	// 0 はそのプロトコルの上限を無効にする
+	udpPerSourceCap int
+	tcpPerSourceCap int
 }
 
 func (k *kernelDataplane) EnsureWG(cfg wg.Config) ([]string, error) { return wg.Ensure(cfg) }
@@ -66,7 +70,10 @@ func (k *kernelDataplane) InputPortSuggestions(port uint16) ([]string, error) {
 }
 func (k *kernelDataplane) ReadDrops() ([]nft.Drop, error) { return nft.ReadDrops() }
 func (k *kernelDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr) error {
-	return nft.Apply(rules, nft.Config{WGInterface: k.iface, AgentAddr: agentAddr, Logf: log.Printf})
+	return nft.Apply(rules, nft.Config{
+		WGInterface: k.iface, AgentAddr: agentAddr, Logf: log.Printf,
+		UDPPerSourceCap: k.udpPerSourceCap, TCPPerSourceCap: k.tcpPerSourceCap,
+	})
 }
 func (k *kernelDataplane) Converge(rules []ctconv.Rule, wgNet netip.Prefix) (int, error) {
 	return ctconv.Converge(rules, wgNet)

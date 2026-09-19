@@ -43,6 +43,27 @@ func bigSendBuffer(c *net.UDPConn) { c.SetWriteBuffer(udpBufMax) }
 
 func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} }
 
+// ルールごとの上限は、明示しなければ Limits から導く(flowcap.Limits.UDPPerRuleCap、仕様 7 節)。
+func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
+	m := New(loopback{}, Options{Limits: flowcap.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: t.Logf})
+	if m.opts.UDPSessionsMax != 10000 {
+		t.Errorf("UDPSessionsMax = %d, want 10000 (half of UDPTotal)", m.opts.UDPSessionsMax)
+	}
+	if m.opts.TCPConnsMax != 2000 {
+		t.Errorf("TCPConnsMax = %d, want 2000 (half of TCPTotal)", m.opts.TCPConnsMax)
+	}
+	// 何も渡さなければ既定の全体上限(8192, 2048)から導く、導入前の固定値と同じ値になる
+	m = New(loopback{}, Options{Logf: t.Logf})
+	if m.opts.UDPSessionsMax != 4096 || m.opts.TCPConnsMax != 1024 {
+		t.Errorf("default caps: udp=%d tcp=%d, want 4096 1024", m.opts.UDPSessionsMax, m.opts.TCPConnsMax)
+	}
+	// 呼び出し側が明示すれば、それが勝つ(導出値は使わない)
+	m = New(loopback{}, Options{Limits: flowcap.Limits{UDPTotal: 40}, UDPSessionsMax: 5, Logf: t.Logf})
+	if m.opts.UDPSessionsMax != 5 {
+		t.Errorf("explicit UDPSessionsMax = %d, want 5 (must not be overridden by the derived default)", m.opts.UDPSessionsMax)
+	}
+}
+
 func TestDesiredFromRules(t *testing.T) {
 	rules := []proto.AgentRule{
 		{ID: "a", Proto: proto.UDP, ListenPort: pr(2456, 2458), Target: "192.168.1.20:3000", Enabled: true},

@@ -13,6 +13,24 @@ import (
 	"github.com/rahanahu/wgft/internal/flowcap"
 )
 
+// ルールごとの上限は、明示しなければ Cap.Total から導く(flowcap.Limits.TCPPerRuleCap、仕様 7 節)。
+func TestConnsMaxDefaultsFromCapTotal(t *testing.T) {
+	m := New(Options{Cap: &flowcap.Counter{Total: 4000}})
+	if m.opts.ConnsMax != 2000 {
+		t.Errorf("ConnsMax = %d, want 2000 (half of Cap.Total)", m.opts.ConnsMax)
+	}
+	// Cap を渡さなければ既定の flowcap.TCPTotal(2048)から導き、導入前の固定値(1024)と一致する
+	m = New(Options{})
+	if m.opts.ConnsMax != 1024 {
+		t.Errorf("default ConnsMax = %d, want 1024", m.opts.ConnsMax)
+	}
+	// 呼び出し側が明示すれば、それが勝つ
+	m = New(Options{Cap: &flowcap.Counter{Total: 40}, ConnsMax: 3})
+	if m.opts.ConnsMax != 3 {
+		t.Errorf("explicit ConnsMax = %d, want 3 (must not be overridden by the derived default)", m.opts.ConnsMax)
+	}
+}
+
 // fakeAgent は PROXY protocol を解する受信側(エージェント経由の先の Caddy 相当)。
 // 受けた接続の「元クライアント IP」を ipCh に流し、受け取った行をそのまま返す。
 func fakeAgent(t *testing.T) (addr string, ipCh chan string) {

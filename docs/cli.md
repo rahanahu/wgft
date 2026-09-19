@@ -788,21 +788,23 @@ sudo wgft server check
 Flags:
 
 ```text
-      --admin string            admin API listen address, env WGFT_ADMIN; unix:///path or host:port (default "unix:///run/wgft/admin.sock")
-      --admin-host strings      extra names allowed by the Host check, env WGFT_ADMIN_HOST, comma-separated
-      --admin-tailscale         also listen on the tailnet address, env WGFT_ADMIN_TAILSCALE
-      --agent-api string        agent API listen address, env WGFT_AGENT_API, public (default "0.0.0.0:8443")
-      --agent-api-host string   host:port to embed in the join string, env WGFT_AGENT_API_HOST
-      --config string           dotenv config file (default "/etc/wgft/server.env")
-      --data-dir string         data dir, env WGFT_DATA_DIR; holds wgft.sqlite (default "/var/lib/wgft")
-      --max-tcp-flows int       process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
-      --max-udp-flows int       process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
-      --mode string             forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter
-      --mtu int                 wg MTU, env WGFT_MTU (default 1420)
-      --wg-address string       wg address range, env WGFT_WG_ADDRESS (default "10.200.0.1/24")
-      --wg-endpoint string      WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT
-      --wg-interface string     WireGuard interface name, env WGFT_WG_INTERFACE (default "wgft0")
-      --wg-port uint16          WireGuard listen UDP port, env WGFT_WG_PORT (default 51820)
+      --admin string                   admin API listen address, env WGFT_ADMIN; unix:///path or host:port (default "unix:///run/wgft/admin.sock")
+      --admin-host strings             extra names allowed by the Host check, env WGFT_ADMIN_HOST, comma-separated
+      --admin-tailscale                also listen on the tailnet address, env WGFT_ADMIN_TAILSCALE
+      --agent-api string               agent API listen address, env WGFT_AGENT_API, public (default "0.0.0.0:8443")
+      --agent-api-host string          host:port to embed in the join string, env WGFT_AGENT_API_HOST
+      --config string                  dotenv config file (default "/etc/wgft/server.env")
+      --data-dir string                data dir, env WGFT_DATA_DIR; holds wgft.sqlite (default "/var/lib/wgft")
+      --max-tcp-flows int              process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
+      --max-tcp-flows-per-source int   cap on concurrent TCP connections from one source address, summed over all rules, env WGFT_MAX_TCP_FLOWS_PER_SOURCE; 0 disables the per-source cap (default 128)
+      --max-udp-flows int              process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
+      --max-udp-flows-per-source int   cap on concurrent UDP sessions from one source address, summed over all rules, env WGFT_MAX_UDP_FLOWS_PER_SOURCE; 0 disables the per-source cap (default 256)
+      --mode string                    forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter
+      --mtu int                        wg MTU, env WGFT_MTU (default 1420)
+      --wg-address string              wg address range, env WGFT_WG_ADDRESS (default "10.200.0.1/24")
+      --wg-endpoint string             WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT
+      --wg-interface string            WireGuard interface name, env WGFT_WG_INTERFACE (default "wgft0")
+      --wg-port uint16                 WireGuard listen UDP port, env WGFT_WG_PORT (default 51820)
 ```
 
 ## wgft server nft
@@ -847,22 +849,24 @@ wgft server run --mode userspace --wg-endpoint vps.example.com:51820
 Flags:
 
 ```text
-      --admin string            admin API listen address, env WGFT_ADMIN; unix:///path or host:port (default "unix:///run/wgft/admin.sock")
-      --admin-host strings      extra names allowed by the Host check, env WGFT_ADMIN_HOST, comma-separated
-      --admin-tailscale         also listen on the tailnet address, env WGFT_ADMIN_TAILSCALE
-      --adopt-existing          adopt an existing interface whose key does not match; default is to treat it as someone else's and abort
-      --agent-api string        agent API listen address, env WGFT_AGENT_API, public (default "0.0.0.0:8443")
-      --agent-api-host string   host:port to embed in the join string, env WGFT_AGENT_API_HOST
-      --config string           dotenv config file (default "/etc/wgft/server.env")
-      --data-dir string         data dir, env WGFT_DATA_DIR; holds wgft.sqlite (default "/var/lib/wgft")
-      --max-tcp-flows int       process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
-      --max-udp-flows int       process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
-      --mode string             forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter
-      --mtu int                 wg MTU, env WGFT_MTU (default 1420)
-      --wg-address string       wg address range, env WGFT_WG_ADDRESS (default "10.200.0.1/24")
-      --wg-endpoint string      WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT
-      --wg-interface string     WireGuard interface name, env WGFT_WG_INTERFACE (default "wgft0")
-      --wg-port uint16          WireGuard listen UDP port, env WGFT_WG_PORT (default 51820)
+      --admin string                   admin API listen address, env WGFT_ADMIN; unix:///path or host:port (default "unix:///run/wgft/admin.sock")
+      --admin-host strings             extra names allowed by the Host check, env WGFT_ADMIN_HOST, comma-separated
+      --admin-tailscale                also listen on the tailnet address, env WGFT_ADMIN_TAILSCALE
+      --adopt-existing                 adopt an existing interface whose key does not match; default is to treat it as someone else's and abort
+      --agent-api string               agent API listen address, env WGFT_AGENT_API, public (default "0.0.0.0:8443")
+      --agent-api-host string          host:port to embed in the join string, env WGFT_AGENT_API_HOST
+      --config string                  dotenv config file (default "/etc/wgft/server.env")
+      --data-dir string                data dir, env WGFT_DATA_DIR; holds wgft.sqlite (default "/var/lib/wgft")
+      --max-tcp-flows int              process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
+      --max-tcp-flows-per-source int   cap on concurrent TCP connections from one source address, summed over all rules, env WGFT_MAX_TCP_FLOWS_PER_SOURCE; 0 disables the per-source cap (default 128)
+      --max-udp-flows int              process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
+      --max-udp-flows-per-source int   cap on concurrent UDP sessions from one source address, summed over all rules, env WGFT_MAX_UDP_FLOWS_PER_SOURCE; 0 disables the per-source cap (default 256)
+      --mode string                    forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter
+      --mtu int                        wg MTU, env WGFT_MTU (default 1420)
+      --wg-address string              wg address range, env WGFT_WG_ADDRESS (default "10.200.0.1/24")
+      --wg-endpoint string             WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT
+      --wg-interface string            WireGuard interface name, env WGFT_WG_INTERFACE (default "wgft0")
+      --wg-port uint16                 WireGuard listen UDP port, env WGFT_WG_PORT (default 51820)
 ```
 
 ## wgft server teardown

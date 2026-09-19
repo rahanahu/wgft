@@ -29,7 +29,7 @@ func serverSpecs() []spec {
 		{Env: "WGFT_ADMIN", Flag: "admin", Default: "unix:///run/wgft/admin.sock"},
 		{Env: "WGFT_ADMIN_TAILSCALE", Flag: "admin-tailscale", Default: "false"},
 		{Env: "WGFT_ADMIN_HOST", Flag: "admin-host", Default: "", Slice: true},
-	}, limitSpecs()...)
+	}, append(limitSpecs(), perSourceLimitSpecs()...)...)
 }
 
 // registerServerFlags は run / check にフラグ別名を付ける。
@@ -48,6 +48,7 @@ func registerServerFlags(f *cobra.Command) {
 	fl.Bool("admin-tailscale", false, "also listen on the tailnet address, env WGFT_ADMIN_TAILSCALE")
 	fl.StringSlice("admin-host", nil, "extra names allowed by the Host check, env WGFT_ADMIN_HOST, comma-separated")
 	registerLimitFlags(fl)
+	registerPerSourceLimitFlags(fl)
 	fl.String("config", defaultConfigPath, "dotenv config file")
 }
 
@@ -66,6 +67,10 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 		return vpsd.Options{}, nil, configErrorf("WGFT_MTU: %q is not an integer", c.str("WGFT_MTU"))
 	}
 	limits, err := limitsFromConfig(c)
+	if err != nil {
+		return vpsd.Options{}, nil, err
+	}
+	limits.UDPPerSource, limits.TCPPerSource, err = perSourceLimitsFromConfig(c)
 	if err != nil {
 		return vpsd.Options{}, nil, err
 	}

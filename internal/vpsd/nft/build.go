@@ -18,7 +18,6 @@ import (
 	"github.com/google/nftables/userdata"
 	"golang.org/x/sys/unix"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -29,6 +28,11 @@ const TableName = "wgft"
 type Config struct {
 	WGInterface string                // wg0
 	AgentAddr   map[string]netip.Addr // エージェント名 → wg0 上のアドレス
+	// UDPPerSourceCap と TCPPerSourceCap は接続元 IP ごとの同時フロー数の上限(仕様 7, 11a 節の
+	// 設定値。既に解決済みの具体的な値を受け取り、ここでは既定値を推測しない)。
+	// 0 はそのプロトコルの上限を無効にし、対応する set も行も生成しない
+	UDPPerSourceCap int
+	TCPPerSourceCap int
 	// Logf は AgentAddr にないエージェントのルールを飛ばしたときの記録先。nil なら黙って飛ばす
 	Logf func(format string, args ...any)
 }
@@ -165,18 +169,20 @@ func emit(e emitter, rules []proto.Rule, cfg Config) error {
 					Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{limitOver(*r.PerSourceRate)}}},
 				counterDrop())
 		}
-		if flowSets[r.Proto] == nil {
-			s, err := addFlowCapSet(e, t, r.Proto)
-			if err != nil {
-				return fmt.Errorf("rule %s: %w", r.ID, err)
+		if cap := cfg.perSourceCap(r.Proto); cap > 0 {
+			if flowSets[r.Proto] == nil {
+				s, err := addFlowCapSet(e, t, r.Proto)
+				if err != nil {
+					return fmt.Errorf("rule %s: %w", r.ID, err)
+				}
+				flowSets[r.Proto] = s
 			}
-			flowSets[r.Proto] = s
+			fs := flowSets[r.Proto]
+			addRule(filterPre, Comment(r.ID, "src_flow"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
+				[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: fs.Name, SetID: fs.ID,
+					Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{connlimitOver(uint32(cap))}}},
+				counterDrop())
 		}
-		fs := flowSets[r.Proto]
-		addRule(filterPre, Comment(r.ID, "src_flow"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
-			[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: fs.Name, SetID: fs.ID,
-				Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{connlimitOver(perSourceFlowCap(r.Proto))}}},
-			counterDrop())
 		if r.NewFlowRate != nil {
 			addRule(filterPre, Comment(r.ID, "new_flow"), from, ctState(expr.CtStateBitNEW),
 				[]expr.Any{limitOver(*r.NewFlowRate)}, counterDrop())
@@ -286,12 +292,13 @@ func flowSetName(p proto.Proto) string {
 	return "flows_udp"
 }
 
-// perSourceFlowCap は接続元 IP ごとの同時フロー数の上限(仕様 7 節と同じ値。flowcap が定義元)。
-func perSourceFlowCap(p proto.Proto) uint32 {
+// perSourceCap は cfg に渡された、接続元 IP ごとの同時フロー数の上限(仕様 7, 11a 節の設定値)。
+// 0 はそのプロトコルの上限を無効にする。値の既定はここでは決めない(呼び出し側が解決済みの値を渡す)。
+func (cfg Config) perSourceCap(p proto.Proto) int {
 	if p == proto.TCP {
-		return uint32(flowcap.TCPPerSource)
+		return cfg.TCPPerSourceCap
 	}
-	return uint32(flowcap.UDPPerSource)
+	return cfg.UDPPerSourceCap
 }
 
 // addFlowCapSet は接続元 IP ごとの同時フロー数を数える動的 set を作る。

@@ -61,7 +61,7 @@ func (hostNetwork) ListenTCP(port uint16) (net.Listener, error) {
 
 func newUserspaceDataplane(policy flowPolicy, lim flowcap.Limits) *userspaceDataplane {
 	lim = lim.WithDefaults()
-	u := &userspaceDataplane{policy: policy, tcpCap: &flowcap.Counter{Total: lim.TCPTotal, PerSource: flowcap.TCPPerSource}}
+	u := &userspaceDataplane{policy: policy, tcpCap: &flowcap.Counter{Total: lim.TCPTotal, PerSource: lim.TCPPerSourceCap()}}
 	u.relay = relay.New(hostNetwork{}, relay.Options{
 		UDPIdleTimeout: 120 * time.Second, // conntrack の udp_timeout_stream の既定と同じ
 		Dial:           u.dial,
@@ -71,7 +71,8 @@ func newUserspaceDataplane(policy flowPolicy, lim flowcap.Limits) *userspaceData
 			return ok
 		},
 		AdmitPacket: policy.AdmitPacket,
-		UDPCap:      &flowcap.Counter{Total: lim.UDPTotal, PerSource: flowcap.UDPPerSource},
+		Limits:      lim,
+		UDPCap:      &flowcap.Counter{Total: lim.UDPTotal, PerSource: lim.UDPPerSourceCap()},
 		TCPCap:      u.tcpCap,
 	})
 	return u

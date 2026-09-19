@@ -186,7 +186,8 @@ type Options struct {
 	AdoptExisting bool
 	// Mode は転送方式 "kernel" / "userspace"(仕様 9・11a 節)。初回に記録し以後は照合する。
 	Mode string
-	// Limits は同時フロー数のプロセス全体の上限(仕様 7 節)。ゼロ値は既定値
+	// Limits は同時フロー数のプロセス全体の上限と、vpsd だけの接続元 IP ごとの上限(仕様 7 節)。
+	// ゼロ値の項目は既定値。接続元ごとの上限を外すのは flowcap.PerSourceOff
 	Limits flowcap.Limits
 	// Version は起動ログに出す wgft のバージョン(cmd/wgft の effectiveVersion)。空なら省く。
 	Version string
@@ -244,7 +245,11 @@ func Run(opts Options) error {
 	}
 	defer lock.Release()
 
-	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{iface: opts.WGInterface}}
+	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{
+		iface:           opts.WGInterface,
+		udpPerSourceCap: opts.Limits.UDPPerSourceCap(),
+		tcpPerSourceCap: opts.Limits.TCPPerSourceCap(),
+	}}
 	var uspace *userspaceDataplane
 	if opts.Mode == modeUserspace {
 		uspace = newUserspaceDataplane(srcpolicy.New(nil), opts.Limits)
@@ -322,7 +327,7 @@ func Run(opts Options) error {
 	// stream の接続元 IP を接続の事象で記録し、往復を検知する(仕様 5.2 節)
 	d.hub.OnStreamConnect = func(agent, from string) { d.observeFlap(agent, "stream", "stream source", from) }
 	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)
-	proxyOpts := proxyrelay.Options{Cap: &flowcap.Counter{Total: opts.Limits.WithDefaults().TCPTotal, PerSource: flowcap.TCPPerSource}}
+	proxyOpts := proxyrelay.Options{Cap: &flowcap.Counter{Total: opts.Limits.WithDefaults().TCPTotal, PerSource: opts.Limits.TCPPerSourceCap()}}
 	if uspace != nil {
 		proxyOpts.Dial = uspace.ProxyDial // ユーザー空間モードでは netstack 越しにエージェントへ
 		proxyOpts.Cap = uspace.tcpCap     // 同時接続数は relay と合計で数える(仕様 7 節)

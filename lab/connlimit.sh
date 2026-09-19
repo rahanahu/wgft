@@ -15,6 +15,11 @@
 #   - keeps the first few connections/flows accepted from the first address open while the flood
 #     continues, then exchanges data on them afterwards, to check the cap never evicts an
 #     existing flow (only ct state new is subject to the cap)
+#   - restarts the server (keeping the same rules and agent) with WGFT_MAX_TCP_FLOWS_PER_SOURCE=200
+#     and checks the cap follows the setting instead of staying at the default 128. This value
+#     stays well under the agent's own per-rule cap (half of WGFT_MAX_TCP_FLOWS, 1024 by default),
+#     which also applies since the agent relays every kernel-mode DNAT'd connection to the LAN
+#     target (design section 7), so the kernel per-source cap is the only thing being isolated
 #
 # Requires `lab/lab build` (wgft and echo in /usr/local/bin of the VM) and the netns topology
 # (`lab/lab net up`). Leftovers from earlier runs are killed first.
@@ -30,6 +35,14 @@ check() { # check <label> <ok-if-true>
 vps() { ip netns exec vps "$@"; }
 client() { ip netns exec client bash -c "$1"; }
 kill_all() { pkill -x wgft; pkill -x echo; sleep 1; }
+# kill_server stops only the server (wgft server run), leaving the agent and echo listener up,
+# so the second phase can restart the server alone with a different setting.
+kill_server() {
+  for p in $(pgrep -x wgft); do
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' server run' && kill "$p"
+  done
+  sleep 1
+}
 cleanup() {
   kill_all
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
@@ -174,6 +187,19 @@ echo "   answered: $udp2_answered"
 check "udp: a second source is not locked out by the first source's cap" "$([ "$udp2_answered" -eq 5 ] && echo 1 || echo 0)"
 vps conntrack -D -p udp -s 198.51.100.2 >/dev/null 2>&1
 check "udp: the set element is freed once its conntrack entries are gone" "$(freed flows_udp 198.51.100.2 10)"
+
+echo "== restarting the server alone with WGFT_MAX_TCP_FLOWS_PER_SOURCE=200 (same rules, same agent)"
+kill_server
+vps env WGFT_MAX_TCP_FLOWS_PER_SOURCE=200 setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+  > /tmp/wgft-connlimit-server2.log 2>&1 < /dev/null &
+disown
+sleep 3
+
+echo "== tcp: 220 connections from 198.51.100.2 (cap now 200, was 128)"
+read -r tcp_established3 _ _ <<< "$(tcp_flood 198.51.100.2 220)"
+echo "   established: $tcp_established3"
+check "tcp per-source cap follows WGFT_MAX_TCP_FLOWS_PER_SOURCE=200, not the default 128" \
+  "$([ "$tcp_established3" -le 200 ] && [ "$tcp_established3" -ge 180 ] && echo 1 || echo 0)"
 
 cleanup
 if [ "$fail" = 1 ]; then echo "== connlimit: FAIL"; exit 1; fi

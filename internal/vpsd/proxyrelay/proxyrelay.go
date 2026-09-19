@@ -37,7 +37,7 @@ type Options struct {
 	// Dial はエージェントのリスナーへ繋ぐ。既定は net.Dial("tcp", addr)。
 	Dial func(addr string) (net.Conn, error)
 	Logf func(string, ...any)
-	// ConnsMax はルールごとの同時接続数の上限(既定 flowcap.TCPPerRule)。
+	// ConnsMax はルールごとの同時接続数の上限(既定は Cap.Total から flowcap.Limits.TCPPerRuleCap で導く)。
 	ConnsMax int
 	// Cap はプロセス全体と接続元 IP ごとの上限(仕様 7 節)。nil なら既定値で作る。
 	// ユーザー空間モードの vpsd は relay と同じ Counter を渡し、合計で数える
@@ -79,11 +79,11 @@ func New(opts Options) *Manager {
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
 	}
-	if opts.ConnsMax <= 0 {
-		opts.ConnsMax = flowcap.TCPPerRule
-	}
 	if opts.Cap == nil {
 		opts.Cap = &flowcap.Counter{Total: flowcap.TCPTotal, PerSource: flowcap.TCPPerSource}
+	}
+	if opts.ConnsMax <= 0 {
+		opts.ConnsMax = flowcap.Limits{TCPTotal: opts.Cap.Total}.TCPPerRuleCap()
 	}
 	return &Manager{opts: opts, ls: map[uint16]*listener{}}
 }

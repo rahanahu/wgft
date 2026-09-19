@@ -12,6 +12,7 @@ import (
 	"github.com/google/nftables/expr"
 	"github.com/google/nftables/userdata"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -57,7 +58,10 @@ func (r *recorder) comments(chain string) []string {
 	return out
 }
 
-var testCfg = Config{WGInterface: "wg0", AgentAddr: map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")}}
+// testCfg は既定の接続元 IP ごとの上限(仕様 7 節。UDP 256、TCP 128)を明示して使う。
+// nft.Config はここでは既定値を推測しないので、CLI の設定層と同じ値を明示するテスト側の責務である。
+var testCfg = Config{WGInterface: "wg0", AgentAddr: map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")},
+	UDPPerSourceCap: flowcap.UDPPerSource, TCPPerSourceCap: flowcap.TCPPerSource}
 
 func rate(s string) *proto.Rate {
 	r, err := proto.ParseRate(s)
@@ -231,6 +235,68 @@ func connlimitOf(t *testing.T, d *expr.Dynset) *expr.Connlimit {
 	}
 	t.Fatal("dynset has no connlimit")
 	return nil
+}
+
+// 0 はそのプロトコルの接続元 IP ごとの上限を無効にし、set も src_flow の行も作らない(仕様 6.1, 7, 11a 節)。
+func TestFlowCapZeroDisablesProtocol(t *testing.T) {
+	rules := []proto.Rule{
+		{ID: "r_udp", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2456), Target: "192.168.1.20:2456",
+			VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
+			VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	cfg := testCfg
+	cfg.UDPPerSourceCap = 0 // TCP は既定のまま(256/128)
+	rec := newRecorder()
+	if err := emit(rec, rules, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var setNames []string
+	for _, op := range rec.ops {
+		if strings.HasPrefix(op, "AddSet ") {
+			setNames = append(setNames, strings.TrimPrefix(op, "AddSet "))
+		}
+	}
+	if want := []string{"flows_tcp"}; !reflect.DeepEqual(setNames, want) {
+		t.Errorf("sets = %v, want %v (flows_udp must not be created when the cap is 0)", setNames, want)
+	}
+	if got, want := rec.comments("filter_pre"), []string{Comment("r_tcp", "src_flow")}; !reflect.DeepEqual(got, want) {
+		t.Errorf("filter_pre comments = %v, want %v (no src_flow row for udp)", got, want)
+	}
+
+	// 両方 0 なら set も行も 1 つも作らない
+	cfg.TCPPerSourceCap = 0
+	rec2 := newRecorder()
+	if err := emit(rec2, rules, cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range rec2.ops {
+		if strings.HasPrefix(op, "AddSet ") {
+			t.Errorf("no set expected when both caps are 0, got %s", op)
+		}
+	}
+	if got := rec2.comments("filter_pre"); len(got) != 0 {
+		t.Errorf("no src_flow rows expected when both caps are 0, got %v", got)
+	}
+}
+
+// カーネルモードも設定値(既定と異なる値)をそのまま使う。
+func TestFlowCapCustomValue(t *testing.T) {
+	rules := []proto.Rule{
+		{ID: "r_udp", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2456), Target: "192.168.1.20:2456",
+			VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	cfg := testCfg
+	cfg.UDPPerSourceCap = 200
+	rec := newRecorder()
+	if err := emit(rec, rules, cfg); err != nil {
+		t.Fatal(err)
+	}
+	dyn := findDynset(t, rec.rules["filter_pre"][0])
+	if got := connlimitOf(t, dyn); got.Count != 200 {
+		t.Errorf("udp cap = %+v, want count 200", got)
+	}
 }
 
 func TestEmitUnknownAgent(t *testing.T) {
