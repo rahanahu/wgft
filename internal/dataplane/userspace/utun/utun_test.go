@@ -10,8 +10,8 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	"github.com/rahanahu/wgft/internal/agent/tunnel"
 	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
 )
 
 // プロセス内でサーバ側トンネルと、エージェント側の tunnel を実 UDP(127.0.0.1)で繋ぐ。

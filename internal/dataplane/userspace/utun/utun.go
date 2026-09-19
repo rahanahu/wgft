@@ -1,7 +1,7 @@
 // Package utun は、ユーザー空間モード(仕様 6.3 節)の VPS 側トンネル。
 // wireguard-go の device と gVisor の netstack で listen_port を開き、10.200.0.1 を持つ。
 // ピアの足し引きは IpcSet、状態の読み取りは IpcGet で行い、wgctrl もカーネルも使わない。
-// エージェント側の internal/agent/tunnel と対になる。
+// エージェント側の internal/dataplane/userspace/tunnel と対になる。
 package utun
 
 import (

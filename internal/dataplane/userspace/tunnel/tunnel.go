@@ -1,5 +1,6 @@
-// Package tunnel は、wireguard-go と gVisor の netstack でユーザー空間に持つトンネル(仕様 7 節)。
-// カーネルの設定は変更しないので、特権も NET_ADMIN も要らない。
+// Package tunnel は、エージェント側が wireguard-go と gVisor の netstack でユーザー空間に持つトンネル
+// (仕様 7 節)。カーネルの設定は変更しないので、特権も NET_ADMIN も要らない。VPS 側の
+// internal/dataplane/userspace/utun と対になる。
 package tunnel
 
 import (
