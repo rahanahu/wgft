@@ -63,7 +63,7 @@ VPS から自宅へのポート転送に必要な nftables と WireGuard の手�
 - **状態ファイル**:エージェントが恒久トークン、wg の秘密鍵、証明書のハッシュ、最後の全体状態を保存するファイル(`agent.json`。9 節)。本書と内部では状態ファイルと呼び、利用者に見える文言(UI、CLI、README)では**認証情報**(英語は credentials)と呼ぶ。`vpsd` 側の SQLite は別物で、利用者向けにはサーバのデータベースと呼ぶ
 - **stream**:エージェントが `vpsd` に張る常時接続(WebSocket)。全体状態の配信、公開鍵の宣言、ハートビートに使う(5.2 節)
 - **エージェント用 API** と **管理用 API**:`vpsd` が持つ 2 つの HTTP リスナー。前者は公開でエージェントの登録と stream だけを受け、後者は Unix ソケット(既定)か Tailscale のアドレスで Web UI と CLI が使う(5 節、11 節)
-- **カーネルモード** と **プロキシモード**:VPS 側の転送方式。前者は nftables の DNAT でカーネルが転送し、後者は `vpsd` 自身が TCP を受けて中継する(6 節)。ルールごとに `vps_mode` で選ぶ
+- **カーネルモード** と **プロキシモード**:VPS 側の転送方式。前者は nftables の DNAT でカーネルが転送し、後者は `vpsd` 自身が TCP を受けて中継する(6 節)。ルールごとに `vps_mode` で選ぶ。内部の実装ではこの選択を `Frontend` という型で表し、server・agent 全体の転送方式(`DataplaneMode`。11a 節の `WGFT_MODE`)と区別する(7a 節)
 - **疎通確認**:管理者が UI から、`vpsd` 経由で自宅の `target` に届くかを試す操作(10.1 節)
 
 ## 4. ネットワーク
@@ -482,6 +482,198 @@ conntrack の操作は「宣言状態に収束させる」1 手順だけを持�
 カーネルモードを持たない理由は、自宅側にも nftables と `ip_forward` の設定を要求し、6.1 節と同じ他チェーンとの干渉問題を自宅側にも持ち込むためである。
 性能面では、想定する用途(ゲームサーバの UDP、数 Mbps)に対して netstack の処理能力は十分に余裕がある。
 
+## 7a. 内部アーキテクチャ
+
+6 節と 7 節が定める外部から見た挙動(送信元制限、レート制限、2 つのデータプレーン)は変えない。対象は内部の package・型・interface・DB スキーマで、互換は求めない。v1.0 の前に適用する再設計である。
+
+### 7a.1 原則と優先順位
+
+内部アーキテクチャは、次の 3 つの原則に従う。
+
+1. 通信方針はグローバルである。送信元の許可と拒否、送信元ごとの新規フローのレート、ルール全体の新規フローレートとパケットレート、送信元ごとの同時フロー数の上限は、kernel dataplane、userspace dataplane、proxy frontend のどれで実装しても同じ意味を持つ
+2. 資源の保護はローカルである。Go のヒープと gVisor の状態量の上限、userspace の TCP・UDP フロー予算、ルール間の資源隔離、カーネルの conntrack 資源の保護は、backend ごとに異なる実装で構わない
+3. 状態の変更はトランザクショナルである。SQLite に保存しただけのルールを、nftables や listener へ無条件に active として公開しない
+
+判断に迷う場面の優先順位は次のとおりで、上位が下位に優先する。
+
+1. 誤った通信を許可・遮断しない
+2. 既存の通信を不用意に切らない
+3. 部分的な失敗から安全に回復できる
+4. 再起動やクラッシュのあと、宣言した状態へ収束できる
+5. 通信方針の意味が backend に依存しない
+6. backend 固有の資源保護を適切に行う
+7. コード量
+8. 内部 API との互換性
+
+### 7a.2 層と責務
+
+ドメインモデルは backend の実装詳細を持たない。`Rule` は ID、プロトコル、待ち受けポート、宛先、所属エージェントだけを持ち、転送方式は別の型で表す。
+
+- `Frontend`:ルールが外部にどう見えるかを選ぶ。`Transparent`(素通し。今の `vps_mode=kernel`)と `ProxyV2`(PROXY protocol 付きの TCP 中継。今の `vps_mode=proxy`)の 2 値を持つ。もう一方の軸である `DataplaneMode` と紛れる「kernel」という語を、ルール単位の選択には使わない
+- `DataplaneMode`:server 全体、あるいは agent 全体の転送方式を選ぶ。`Kernel` と `Userspace` の 2 値を持ち、今の `WGFT_MODE` に当たる
+
+外部の表現(rule import/export の JSON、CLI のフラグ、admin API のリクエスト)は変えない。`vps_mode` フィールドの値 `kernel`/`proxy` は、normalize 時に `Frontend` の `Transparent`/`ProxyV2` へ写し、書き出し時に戻す。この写像は、外部契約である `proto.Rule` と内部モデルの `Rule` の間のアダプタが持つ。
+
+normalize/validate は、外部の `Rule` を受け取り、構造的な検査(ポート範囲の重なり、予約ポート、`proxy_protocol` は `ProxyV2` でしか立てられない、など)をしたうえで内部モデルへ写す。今の `proto.ValidateRules`/`ValidateUpsert`/`UnchangedIDs` が持つ「変更のない行を検査し直さない」規則は、この層に引き継ぐ。
+
+`AdmissionPolicy` は、送信元の許可拒否、送信元ごとの新規フローレート、ルール全体の新規フローレートとパケットレート、送信元ごとの同時フロー数の上限をまとめた中間表現である。kernel の nftables 式、userspace の Go の評価器は、どちらもこの IR から作る。評価順(拒否、許可、送信元ごとの上限、送信元ごとの同時フロー数の上限、集約の新規フローレート、集約のパケットレート。今の 6.1 節の順序をそのまま踏襲する)は、IR の一部として 1 か所にだけ書く。
+
+`Planner` は、normalize したルール集合と `AdmissionPolicy` から `Plan` を組み立てる。OS、nftables、gVisor の実装詳細を知らない。`Plan` は、宣言した世代番号、送信元制限を含む ingress の計画、宛先までの経路の集合、WireGuard のピア集合を持つ、backend に依存しないデータである。
+
+`Reconciler` は、`Backend` が返す現在の状態(`Observe`)と `Plan` を突き合わせ、必要な変更だけを `Backend` に適用させる。`Backend` は kernel と userspace の 2 つを持ち、それぞれが OS、nftables、netstack などの実装詳細を隠す。
+
+`Resource Guard` は、`AdmissionPolicy` と分けて持つ、wgft 自身と OS の資源を守るための予算である(7a.5 節)。
+
+`Frontend` の実装は `Transparent` と `ProxyV2` の待ち受けと中継を持つ。userspace backend では両者は同じ中継コードを使い、`ProxyV2` だけが PROXY protocol ヘッダを付ける違いになる(6.3 節のとおり)。kernel backend では `Transparent` は nftables の DNAT で完結し、`ProxyV2` は `vpsd` 自身の TCP リスナーを要する。
+
+現在の実装から新しい層への対応は次のとおりである。
+
+| 現在の実装 | 新しい層 | 備考 |
+|---|---|---|
+| `proto.Rule` の `VPSMode`/`ProxyProtocol` | `Rule` + `Frontend` | 外部 JSON の `vps_mode` は変えず、アダプタで写す |
+| `proto.ValidateRules`/`ValidateUpsert`/`UnchangedIDs` | normalize/validate | 変更のない行を検査し直さない規則を引き継ぐ |
+| `internal/vpsd/nft` の評価順ロジック(deny・allow・per_source・flow-cap・new_flow・packet) | `AdmissionPolicy` の nftables コンパイラ | IR からnftables 式を生成する部分だけを残す |
+| `internal/vpsd/srcpolicy` | `AdmissionPolicy` の Go 評価器 | nftables の評価順を手で模す実装をやめ、IR 由来の 1 実装に統合する |
+| `internal/vpsd/conntrack` の `allowed()` | 同上を呼び出す側 | 許可判定の再実装をやめ、共通の評価器を呼ぶ |
+| `internal/vpsd/proxyrelay` の `sourceAllowed()` | 同上を呼び出す側 | 同上 |
+| `internal/vpsd/apply.go` の `applyNFT`/`converge` | `Planner`(Plan 生成) + `Reconciler`(適用) | 1 関数に融合していた計画と適用を分ける |
+| `internal/vpsd/dataplane.go` の `dataplane` interface | kernel `Backend` | `ApplyNFT` の直接呼び出しを Prepare/Commit/Rollback に置き換える |
+| `internal/vpsd/dataplane_userspace.go` | userspace `Backend` | |
+| `internal/vpsd/wg`(`Ensure` の差分適用) | kernel `Backend` の WireGuard 収束 | 現在の値と宣言を突き合わせて差分だけ変える実装なので、ほぼそのまま引き継ぐ |
+| `internal/vpsd/conntrack` | kernel `Backend` の conntrack 収束 | |
+| `internal/vpsd/check` | `platform/linux` の前段検査 | kernel `Backend` に同梱しない。agent の kernel backend(Phase 7)からも同じ検査を呼ぶため |
+| `internal/flowcap` | `Resource Guard` | 既に kernel/userspace 両方が使う共有の予算計算をそのまま引き継ぐ |
+| `internal/agent/relay` の `plan`/`Action` | `Planner`/`Reconciler` の型のひな型 | この型を VPS 側の nftables Planner にも広げる |
+| `internal/agent/tunnel`、`internal/vpsd/utun`、`internal/nettun` | userspace `Backend` の下位実装 | プラットフォーム配線そのままだが、置き場所を vpsd/agent 専用から共有へ移す |
+| `internal/vpsd/agentapi`、`internal/vpsd/stream`、`internal/vpsd/store`、`internal/vpsd/admin` | `vpsd` の制御プレーン | 変更なし(登録、配信、永続化、admin API) |
+| `internal/agent/credentials` | `agent` の制御プレーン | 変更なし |
+
+### 7a.3 状態遷移と失敗の意味論
+
+ルール 1 本、あるいは WireGuard のピア 1 つは、次の 5 つの状態を遷移する。
+
+- `Desired`:管理用 API のバッチ操作で SQLite に保存された状態。世代を 1 つ進める(5.4 節)
+- `Validated`:normalize/validate を通り、内部モデルに写った状態
+- `Prepared`:元に戻せる資源を確保した状態。listener の bind、名前解決がこれに当たる
+- `Active`:nftables または userspace の dataplane へ公開され、実際に転送している状態
+- `Retiring`:宣言から消えたが、既存の conntrack エントリやセッションがまだ残っている状態
+
+`Prepare` は元に戻せる資源だけを取る。listener の bind、ホスト名の名前解決がこれに当たり、失敗すればそのルールだけが `Active` にならず、他のルールの `Prepare`・`Commit` を妨げない。`Commit` は、nftables の 1 トランザクションと `Active` 世代の更新をまとめて行う。WireGuard のピアは、公開の前に足し、公開をやめた後に消す順序で扱う。汎用の 2 相コミットは持たない。
+
+この区別の具体例は、proxy frontend の listener 管理に既にある(6.1 節)。ルール変更を適用するとき、新しく追加されたポートの listener だけを先に開き(`Prepare`)、既存の listener はそのまま残す。新しく開いた listener はこの時点では中継を始めない。nftables へ渡す計画は、開き終えた後の listener 集合(残るもの + 新しく開いたもの。削除されるポートは除く)から組み立てる。dataplane への適用が失敗すれば、新しく開いた listener を閉じて(`Rollback`)、旧い listener と旧い nftables テーブルの組み合わせのまま保つ。成功すれば、新しい listener で中継を始め、削除対象の listener を閉じ、残る listener の制限を更新する(`Commit`)。
+
+6.1 節が述べるとおり、この手順でも SQLite には新しい宣言(`Desired`)が既に保存されているのに、nftables への適用(`Commit`)だけが失敗する瞬間が生じる。今の実装は、この失敗を `log.Printf` で記録し、その場の管理用 API 呼び出しへのエラー応答として返すだけである(`internal/vpsd/apply.go` の `applyNFT`、`admin_backend.go` の `Batch`)。呼び出し元がその応答を見送れば、SQLite に保存された宣言と実際に転送しているルールとの食い違いは、どこにも残らない。これが埋めるべき隙間である。
+
+新しいアーキテクチャでは、制御プレーンが `Desired` と `Active` の両方を持つ。admin API・CLI・Web UI はルール集合を `Desired` の値で示しつつ、ルールごとに適用状態(`active`、`pending`、または理由付きの `not active`)を添えて返す。dataplane への適用は、その時点の宣言を normalize/validate した結果から組み立てた `Plan` を渡し、再起動時の収束も `Desired` との差分で行う(9 節の突き合わせと同じ)。`Active` は「直近の `Commit` が成功して実際に転送している値」を指す、読み取り専用の派生値である。admin API v1 には、bind 失敗の理由(例:`bind failed: address in use`)を含むルールごとの `not active` 状態を、既存のフィールドは変えない加算的な変更として追加し、Web UI にも表示する。今はこの理由がログにしか残らない。
+
+失敗の意味論は、失敗の及ぶ範囲によって次の 2 つに分かれる。
+
+- ルール単位で閉じる失敗(bind の衝突、名前解決の失敗):そのルールだけが `Desired` のまま `Active` にならず、理由を添えて `not active` と報告する。他のルールの `Prepare`・`Commit` は妨げず、`Active` 世代は進む(6.1 節の、待ち受けを開けたポートだけに admission policy の行を付ける規則と同じ考え方である)
+- backend 全体に及ぶ失敗(nftables のトランザクション誤り、WireGuard の設定誤りなど):`Commit` 全体を中止し、`Active` 世代を進めない。nftables の 1 トランザクションはカーネル側で原子的なので、失敗すればテーブル全体が旧のまま残る。新しく開いた listener があれば `Rollback` する
+- 適用途中のクラッシュ:再起動時に `Observe`(9 節の突き合わせ)を行い、`Desired` との差分だけを `Prepare`・`Commit` し直す。kernel dataplane は停止していた間も wg0 とテーブルを残すため(9 節)、収束は差分だけで済む
+- 通常のシャットダウンと明示的な撤去(`teardown`)は別の操作である。通常のシャットダウンは制御プレーンだけを止め、kernel dataplane は残す。撤去は wgft が作った資源だけを消す(10.3 節)。この区別は今の server の kernel モードが既に満たしているので、崩さずに引き継ぐ
+- conntrack を伴う更新:ルールの変更後、既存のフローで新しい宣言に合わないものを `Retiring` として消す(6.1 節の conntrack 収束)。この判定は失敗時の意味論ではなく、`Active` 化の直後に必ず行う収束である。収束は kernel backend の責務で、server だけの機能にしない。agent の kernel dataplane を手で組んだ試作では、この収束が無いと、宛先を変えたルールの既存フローが旧い宛先へ流れ続け、消したルールのフローの conntrack が残った(TCP は最長 5 日)
+
+未決:上の 2 分類(ルール単位の失敗は他のルールを巻き込まず `Active` 世代を進める、backend 全体の失敗は世代ごと止める)を正式な規則にするか、prepare のどんな失敗でも全体を止める all-or-nothing にするかは決めていない。前者を推奨する。理由は 7a.1 節の優先順位の 1 から 3(誤った通信を許可・遮断しない、既存の通信を不用意に切らない、部分的な失敗から安全に回復できる)にある。1 つの塞がったポートが無関係なルールの変更まで止めることは、これらの優先度に反する。
+
+### 7a.4 Admission Policy と入口の分岐
+
+kernel dataplane では、`Transparent` と `ProxyV2` への分岐より前に、共通の ingress 層を置く。対象は、wgft が実際に待ち受けを開けている、または DNAT を持つポートだけである。この層は、送信元の許可拒否、送信元ごとの同時フロー数の上限、集約のレートを、`Transparent` と `ProxyV2` のルールに同じ意味で適用する。この考え方は、送信元 IP ごとの同時フロー数の上限をプロキシモードのルールにも同じ `flows_tcp` の set で数える今の実装に、既に部分的に表れている(6.1 節)。bind に失敗したポートには行を付けない規則も、そのまま引き継ぐ。
+
+同じ意味を持つはずの `AdmissionPolicy` でも、kernel の nftables コンパイラと userspace の Go 評価器のあいだには、実装の単位から来る許容差がある。これらは意味の違いではなく実装の単位の違いとして文書化し、共有 fixture で確かめる(7a.8 節の Phase 5)。
+
+- UDP の 1 フローの数え方:kernel は conntrack のエントリ数を `ct count` で数える。userspace は `relay.Manager` が持つセッション数を数える。両者は「今生きているフロー数」の近似として一致するが、テーブル差し替え直後の扱いは次の項で述べるとおり異なる
+- タイムアウトの非対称:VPS の conntrack の `udp_timeout`(既定 30 秒)と、agent 側のセッションタイムアウト(全体状態の `udp_timeout_stream`)は非対称である(4 節、7 節)。この非対称は既に文書化された許容差として扱う
+- トークンバケットの粒度:nftables の `limit rate over` は burst 5 で動く。userspace の評価器はこれを模した固定 burst 5 のトークンバケットを持ち、ラボでカーネルモードと通過数・drop 数の累計が一致することを確かめている(2026-09-17)。IR はこの burst 値を仕様の一部として持ち、実装ごとに変えない
+- テーブル差し替えによる ct count/meter のリセット:kernel は nftables のテーブル差し替えのたびに `flows_udp`/`flows_tcp` の set を作り直すため、差し替え前からのフローは新しい set の数に入らない(6.1 節)。userspace の評価器(`srcpolicy.Policy.Update`)は、ルール ID が引き続き存在し、かつそのレートの値が変わっていない限り、バケットと送信元表を引き継ぐ。ルール ID が変わる操作(分割・統合)やレートの値そのものを変える操作では、そのルールの状態だけを作り直す。適用のたびに評価器全体を作り直すわけではないため、無関係な他ルールの状態はリセットされない。差し替えは管理者の操作か server の起動でしか起きないため、この差は許容する
+
+### 7a.5 Resource Guard
+
+`AdmissionPolicy` と `Resource Guard` は別の subsystem である。前者は利用者が設定するルールの意味を表し、後者は wgft 自身と OS の資源を守る。
+
+userspace 側の予算は次のとおりである。
+
+- プロセス全体の TCP/UDP 予算:`WGFT_MAX_UDP_FLOWS`/`WGFT_MAX_TCP_FLOWS`(7 節)
+- 送信元 IP ごとの予算:`vpsd` だけが持つ `WGFT_MAX_UDP_FLOWS_PER_SOURCE`/`WGFT_MAX_TCP_FLOWS_PER_SOURCE`
+- ルールごとの隔離:設定項目にはせず、プロセス全体の予算から導く内部の値とする。当面は「プロセス全体の半分、ただし従来の固定値(UDP 4096、TCP 1024)を下回らない」という今の計算式(`flowcap.Limits` の `UDPPerRuleCap`/`TCPPerRuleCap`)を暫定として維持する。1 本のルールなら空いている予算をほぼ使い切れ、複数のルールが競合するときだけ他ルールの最低限を守り、既存のフローは公平化のために切らない、という共有プールと隔離予約の方式は 7a.8 節の Phase 6 で置き換える対象とし、それまでは暫定の式を変えない
+- メモリのソフト上限:予算から導く値をランタイムに設定する(`flowcap.Limits.MemoryLimit`)
+- 拒否した TCP の即時終了:accept 直後に RST で終える(`internal/nettun.TCPConn.Abort`)。通常の `Close` は gVisor の TIME_WAIT にエンドポイントを残し、上限を超えたフラッドの間ヒープが増え続けることを、生きているヒープの直接計測で確認している(実験 13、2026-09-19)
+- UDP の無通信タイムアウト:全体状態の `udp_timeout_stream` に従う(7 節)
+
+kernel 側の保護は、userspace の計算式を再利用しない。conntrack の表の大きさ、nftables の set の大きさ、カーネルのメモリ圧を基準にする。今の実装は既にこの原則に沿っており、kernel の送信元ごとの同時フロー数の上限(UDP 256、TCP 128)は userspace と同じ既定値を使うが、これは値の一致であって式の共有ではない。kernel には userspace の「ルールごと」に当たる概念(プロセス全体を割った値)が無く、送信元ごとの上限をプロトコルごとに全ルールで共有する set だけを持つ。この違いは今後も残す。
+
+未決:`Resource Guard` を kernel と userspace で 1 枚の Go interface(`Acquire`/`Release` 相当)に被せるか、「同じ設定値を使うが実装は別々」という今の関係を保つかは決めていない。後者を選ぶ根拠は本節で述べたとおりだが、interface 化による恩恵(テストの共有など)との比較は Phase 6 で検討する。
+
+### 7a.6 外部契約と互換性
+
+内部の package、型、interface、DB のスキーマは互換を求めない。次の境界は契約として維持する。
+
+| 契約 | 維持の方法 |
+|---|---|
+| CLI のコマンドとフラグの意味 | 変えない。`cmd/wgft` は `admin.Client` と Options を介するだけなので、内部の再構成の影響を受けない |
+| 文書化した `WGFT_*` | 変えない。`WGFT_MODE` は `DataplaneMode` の外部名として残す |
+| 機械向けの CLI 出力 | 変えない |
+| ルールの書き出しと読み込みの形式 | 変えない。`vps_mode` の値 `kernel`/`proxy` は、normalize 時に `Frontend` へ写すアダプタを通すだけで、JSON の形は変わらない |
+| admin API v1 | 既存のリクエストとレスポンスの意味は変えない。ルールごとの適用状態のような新しい情報は加算的にだけ追加する(7a.3 節) |
+| join string と agent/server の通信 | 既存のメッセージの意味は変えず、版と機能の交渉を加算的なフィールドとして追加する(下記) |
+| 既存のデータの置き場からの更新 | SQLite と状態ファイルは自動の migration で吸収する |
+
+wire protocol の版と機能の交渉は、既存のメッセージへ次の 2 つを追加するだけで足りる。
+
+- agent が送る最初のメッセージ(`pubkey`)に、`protocol_version`(整数)と `capabilities`(文字列の配列)を追加する
+- server が送る全体状態(`state`)に、`server_capabilities`(文字列の配列)を追加する
+
+Go の `encoding/json` は、構造体に無いフィールドを黙って無視して読み進める。したがって、版を送らない旧い agent と通信する新しい server は、`protocol_version` が 0(未送信)の agent として扱い、今の全機能をそのまま提供する。版を送る新しい agent が旧い server と通信した場合、旧い server は `protocol_version` と `capabilities` を無視するだけで済み、agent は応答に `server_capabilities` が無いことから旧い server だと判断し、今の機能だけを使う。どちらの組み合わせも、既存の JSON の後方互換性だけで成立し、専用のネゴシエーションのラウンドトリップを新設する必要はない。
+
+server は、送信先の agent が宣言した `protocol_version` に応じた形で全体状態を組み立てる。同じルール集合でも、stream 接続ごとに、新しい agent には新しい形を、旧い agent には旧い形を作り分けられるため、全体状態の形そのものを変える機能追加でも、旧い agent との互換を保ったまま進められる。
+
+未決:`capabilities` の語彙(将来の差分配信、複数エージェントへの振り分けなど、どの機能をどの文字列で表すか)は、その機能を追加する時点で個別に定める。どこまで旧い agent への配信を打ち切るか(サポートを終える基準)も決めていない。候補は「直前のマイナーリリースの agent までは配信を続ける」であるが、リリース間隔と運用実態を見てから決める。
+
+外部の表現が新しいモデルと根本から矛盾する例は、今のところ見つかっていない。`vps_mode`、`proxy_protocol` を含め、既存の外部表現はすべて内部モデルへ写せている。今後そのような矛盾が見つかった場合は、旧い形式を読めるアダプタを用意したうえで新しい形式を正とする、という規則を適用する。
+
+### 7a.7 package 配置
+
+目標とする配置は次のとおりである。
+
+```
+internal/
+  model/                 Rule、Frontend、DataplaneMode、normalize/validate
+  policy/                AdmissionPolicy(IR)
+  policy/nftables/       IR から nftables 式へのコンパイラ
+  policy/goengine/       IR から Go の評価器へのコンパイラ
+  planner/               Planner、Plan
+  resource/              Resource Guard(予算、カウンタ)
+  dataplane/             Backend interface(Observe、Prepare、Commit、Rollback)
+  dataplane/userspace/   wireguard-go + netstack + 中継
+  dataplane/linuxkernel/ カーネルの WireGuard、nftables、conntrack、所有判定
+  frontend/              Transparent/ProxyV2 の待ち受けと中継(package の分け方は未決。下記)
+  platform/linux/        sysctl、capability、他ファイアウォールとの衝突の検査
+  platform/windows/      ACL の保護
+  platform/darwin/       launchd まわりの配線
+  vpsd/                  制御プレーン(登録、stream、SQLite、admin API)
+  agent/                 制御プレーン(認証情報、stream クライアント、rotate-key)
+proto/                   外部契約としての wire スキーマ(既存フィールドの意味は変えず、加算のみ許す)
+```
+
+依存の向きは一方向である。`model`、`policy`、`planner`、`resource` は OS、nftables、gVisor を知らない純粋な Go の型と関数だけを持ち、`dataplane/*`、`frontend/*`、`platform/*` を一切 import しない。`dataplane/*` と `frontend/*` は `model`、`policy`、`resource`、`platform/*` を import できるが、互いには依存しない。`vpsd` と `agent` は上記すべてを import できる唯一の層である。この向きにより `internal/dataplane/linuxkernel` が `internal/vpsd` に依存しない構造になり、agent の kernel backend(7a.8 節の Phase 7)が server の kernel backend の実装をそのまま再利用できる。
+
+未決:`internal/flowcap` を `internal/resource` へ改称するか、現在の名前のまま `resource` の役割を担わせるかは実装時に決める。既に共有された正しい置き場所にあるため、名前だけの問題である。
+
+未決:`frontend` の package の分け方も決めていない。選択肢は、`transparent`/`proxyv2` の 2 package に分ける、`Frontend` の値で分岐する 1 package にまとめる、userspace 側は `dataplane/userspace` に畳み込む、の 3 つである。kernel backend 側の Transparent は nftables の DNAT だけで完結し、独立したコードを持たないため、実質的な package 化の対象は ProxyV2 だけになる。Phase 5 で実装しながら決める。
+
+### 7a.8 移行の段取り
+
+各段階は、今のラボの結合テスト(`lab/e2e.sh`、rate、connlimit、split-merge、import-export)と、策定中の lifecycle テスト(再起動中の転送継続、無関係なフローを切らないこと、proxy の bind 失敗が nftables に漏れないこと、teardown が wgft の物だけを消すこと、上限到達時にメモリが上限内であること)を、その段階の終わりに通すことを共通の完了条件とする。以下は各段階に固有の完了条件だけを示す。
+
+- **Phase 1(model/policy/plan)**:既存の Rule と State を内部モデルへ normalize し(外部形式からのアダプタを含む)、`AdmissionPolicy` の IR、`Plan`、`Planner` を作る。dataplane の挙動は変えない。完了条件:純粋な単体テストが model/policy/planner を覆い、生成される nftables の内容と userspace の転送挙動が変更前と一致する
+- **wire protocol の版と機能の交渉**:全体状態の形を変える前に入れる。完了条件:旧 agent と新 server、新 agent と旧 server の組み合わせで、通常の rolling upgrade がラボで通る
+- **Phase 2(userspace backend 化)**:userspace の中継と proxy を `Backend` の後ろへ移す。完了条件:挙動を変えず、基準のテストを通す
+- **Phase 3(VPS kernel backend 化)**:WireGuard、nftables、conntrack、sysctl、所有判定を `internal/vpsd` から `internal/dataplane/linuxkernel` へ切り離す。完了条件:`internal/dataplane/linuxkernel` から `internal/vpsd` への import が無いことをビルドで確かめられ、停止時に残し起動時に収束する今の挙動を保つ
+- **Phase 4(トランザクショナルな収束)**:`Desired`/`Prepared`/`Active`/`Retiring`、`Prepare`/`Commit`/`Rollback`(7a.3 節の範囲)、世代、失敗からの回復、再起動時の収束を導入する。完了条件:backend 全体に及ぶ失敗が `Active` 世代を進めないこと、ルール単位の prepare 失敗はそのルールだけを理由付きの `not active` のまま見えるようにし、他のルールの `Active` 化と世代の前進を妨げないことを、新設の lifecycle テストで確かめる
+- **Phase 5(共通の Admission Policy)**:nftables コンパイラと Go の評価器を 1 つの IR から作る形に統合し、4 か所に分かれていた許可拒否の判定(`internal/vpsd/nft`、`internal/vpsd/srcpolicy`、`internal/vpsd/conntrack` の `allowed`、`internal/vpsd/proxyrelay` の `sourceAllowed`)を 2 つのコンパイラへ集約する。kernel dataplane では `Transparent` と `ProxyV2` の分岐より前に共通の ingress 層を置く。完了条件:同じ入力に対して両コンパイラが 7a.4 節の許容差の範囲内で一致することを共有 fixture で確かめ、既存の connlimit などのラボテストを保つ
+- **Phase 6(Resource Guard の再設計)**:通信方針から資源保護を分離する(7a.5 節のとおり、多くは既に分離されている)。ルールごとの隔離を、共有プールと隔離予約の方式に置き換える。kernel 側の保護(conntrack の表、set の大きさ)は、userspace の計算式を再利用しない形のまま整理する。完了条件:1 本のルールなら空いている予算をほぼ使い切れ、複数のルールが競合するときだけ他ルールの最低限を守り、既存のフローを公平化のために切らないことを、ラボで確かめる
+- **Phase 7(agent の kernel dataplane、v1.1 以降)**:上記の構造の上に、Linux agent の kernel backend を `internal/dataplane/linuxkernel` の再利用として追加する。手作業の検証(実験 15、16)から、範囲のルールは無名 map の DNAT で表すこと、`DynamicUser` と `CAP_NET_ADMIN` のサンドボックスで足りること(`ProtectKernelTunables` は `ip_forward` の書き込みを妨げるため付けないこと)、実物の Docker の `DOCKER-USER` への追加行が Docker の再起動をまたいで残ること、複数 LAN セグメントを持つ自宅では `rp_filter` の strict が転送を壊しうること(`conf.all` と個別インタフェースの値は、より厳しい方が勝つ)が分かっている。agent の kernel dataplane を試作した結果(実験 17)からは、agent の停止中も既存と新規のフローが続くこと、変更の無い再起動で conntrack が保たれること、マシンの再起動の後に保存した状態から stream に接続する前に組み直せること、LAN の target に設定変更が要らず MASQUERADE が要ることが分かっている。同じ試作で、自宅側に conntrack の収束が要ること(7a.3 節)、agent は `ip_forward` を明示して設定する必要があること、userspace と kernel の切り替えには約 1 から 2 秒の断があることも分かった。これらは実装の前提として使えるが、詳しい受け入れ条件は agent の kernel dataplane の機能自体の文書に譲る
+
 ## 8. 接続元 IP の扱い
 
 サービスから見た接続元は、VPS 側の masquerade と自宅側の中継のため、常にエージェントのアドレスになる。
@@ -834,3 +1026,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - カーネルモードに接続元 IP ごとの同時フロー数の上限を追加(2026-09-19、13 節の未決事項の解消):カーネルモードの VPS には、1 つの IP がエージェントのルールごとの上限を埋めて他の利用者を締め出すことへの備えが無かった。6.1 節に、7 節と同じ値(UDP 256、TCP 128)を、プロトコルごとに全ルールで共有する動的 set と `ct count over` で数える行を加えた。meter と同じく `ct state new` にだけ効かせ、集約上限より前に置く。落とした数は既存の drop カウンタと同じ経路で累積する。ラボ(`lab/connlimit.sh`、カーネルモード)で、1 つの送信元が TCP 128 本と UDP 256 フローで止まり、上限の前に張った接続が生き残り、上限に達した送信元がいる間も別の送信元が通り、フローが消えると set の要素も消えることを確かめた。テーブルの差し替えの後は既存のフローが数に入らず、上限を超えて開けることも確かめ、6.1 節に許容する理由を書いた。timeout を持つ set と `ct count` の組み合わせは、カーネルが `Operation not supported` で拒むことも確かめた
 - 同時フロー数の上限を設定項目にする(2026-09-19):接続元 IP ごとの上限(前項)とルールごとの上限が固定値だったため、メモリに余裕がある運用者がプロセス全体の上限(`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`)を上げても、この 2 つの上限で頭打ちになっていた。ルールごとの上限は、プロセス全体の上限から導く内部の値に改めた(7 節)。全体の半分を基本とし、以前の固定値と全体の上限の小さいほうを下回らない。既定値と全体を下げた構成では以前と同じ値になり、全体を上げたときだけ一緒に上がる。半分だけにすると、全体を下げてルールを 1 本だけ持つ構成で上限が以前の半分に下がるため、下限を設けた。利用者向けの文書には式を書かず、ルールごとの上限が内部にあることだけを書く。接続元 IP ごとの上限は、`vpsd` だけが受け取る新しい設定項目 `WGFT_MAX_UDP_FLOWS_PER_SOURCE`(既定 256)と `WGFT_MAX_TCP_FLOWS_PER_SOURCE`(既定 128)にした。0 はそのプロトコルの上限を無効にする値で、プロセス全体の上限と違い正当な設定値として扱う。カーネルモードでは 0 のプロトコルに `flows_udp` / `flows_tcp` の set も行も生成しない。エージェントは接続元ごとに数えないため、この設定項目を持たない。接続元 IP ごとの上限は、上げたい場合にプロセス全体の上限と別に明示する必要があり、自動では連動させない(環境や他の設定値からの推測を避ける方針)。6.1・7・11a 節を改訂した。ラボ(カーネルモード)で、`WGFT_MAX_TCP_FLOWS_PER_SOURCE=200` で起動し直すと 1 つの送信元が 200 本で止まり、0 にすると `flows_tcp` の set が作られず 1 つの送信元から 300 本すべてが通ることを確かめた(`lab/connlimit.sh` に 200 の段を加えた)。ユーザー空間モードでも、200 で 1 つの送信元が 200 本で止まり、0 で 300 本すべてが通った。ルールごとの上限は、エージェントの全体の上限を 4000 にすると 2000 本、1500 にすると下限の 1024 本で止まった
 - プロキシモードのルールも接続元 IP ごとの上限の合計に含める(2026-09-19、レビューの指摘):カーネルモードでは、カーネルモードのルールは nftables の `flows_tcp` で、プロキシモードのルールは `vpsd` の中継の中で、接続元 IP ごとの数を別々に数えていた。このため同じ送信元が両方のルールに上限ずつ、TCP で合計 256 本まで開けて、「全ルールの合計」という 7 節の定義と食い違っていた。6.1 節を改め、プロキシモードのルールにも `src_flow` の行を生成して同じ `flows_tcp` で数え、中継の側では接続元ごとに数えないことにした。行を付けるのは待ち受けを開けたポートだけにした。bind に失敗したときに行が残ると、同じポートの別のプロセスへの通信に上限が掛かるためである(これもレビューの指摘)。そのため、起動時と適用のたびに、プロキシの新しい待ち受けを先に開き、nftables の差し替えが成功してから中継を始めて旧い待ち受けを閉じ、失敗したら新しい待ち受けを閉じる 2 段の手順に改めた(これもレビューの指摘。差し替えの失敗で、閉じた待ち受けの行だけが残ることを防ぐ)。6.2 節を追随させた。ユーザー空間モードは、中継とプロキシモードのルールが同じ数え方を共有していたので影響がない
+- 内部アーキテクチャの再設計を追加(2026-09-19、v1.0 の前に再設計するという決定を受けて):7a 節を新設した。Rule から Frontend(Transparent/ProxyV2)と DataplaneMode(Kernel/Userspace)を分け、「kernel」という語をルール単位の選択と server・agent 全体の選択の両方に使わないようにした。送信元制限とレートをまとめた Admission Policy という中間表現を導入し、今は `internal/vpsd/nft`、`internal/vpsd/srcpolicy`、`internal/vpsd/conntrack` の `allowed`、`internal/vpsd/proxyrelay` の `sourceAllowed` の 4 か所に分かれている許可拒否の判定を、1 つの IR から 2 つのコンパイラ(nftables、Go)を作る形に集約する計画にした。Desired・Validated・Prepared・Active・Retiring の状態遷移を定め、Prepare は元に戻せる資源の確保、Commit は nftables の 1 トランザクションと Active 世代の更新に限り、汎用の 2 相コミットは持たないことにした。この区別は、プロキシの listener 管理が新しい待ち受けを先に開き差し替えの成否で開閉を分ける今の実装(6.1 節)を一般化したものである。Resource Guard を Admission Policy と別 subsystem として明文化し、ルールごとの隔離は当面「全体の半分、旧い固定値を下回らない」という今の式(`flowcap.Limits`)を暫定として残すことにした。外部契約(CLI、`WGFT_*`、rule import/export、admin API v1、agent/server の通信、既存データの置き場からの更新)は維持し、agent と server が別々に更新される前提で、`pubkey` メッセージへの `protocol_version`/`capabilities`、`state` メッセージへの `server_capabilities` の追加による版と機能の交渉を設けることにした。どちらも既存の JSON の後方互換性だけで足りるため、専用のラウンドトリップは新設しない。package 配置は `internal/model`、`internal/policy`、`internal/planner`、`internal/resource`、`internal/dataplane/{userspace,linuxkernel}`、`internal/frontend/{transparent,proxyv2}`、`internal/platform/{linux,windows,darwin}` を目標とし、`internal/dataplane/linuxkernel` が `internal/vpsd` に依存しない一方向の依存規則を定め、agent の kernel dataplane(v1.1 以降)が同じ実装を再利用できるようにした。移行は model/policy/plan、wire protocol の版交渉、userspace backend 化、VPS kernel backend 化、トランザクショナルな収束、共通の Admission Policy、Resource Guard の再設計の順に進め、各段階で既存のラボの結合テストと策定中の lifecycle テストを通す。未決:`internal/flowcap` を `internal/resource` へ改称するか、Resource Guard を kernel と userspace で 1 枚の interface に被せるか、`capabilities` の語彙、ルールごとの隔離を共有プールと隔離予約へ置き換える具体式、`frontend` の package の分け方。加えて、ルール単位の prepare 失敗は他のルールを巻き込まず `Active` 世代を進めるが backend 全体に及ぶ失敗は世代ごと止めるという規則を正式に採るか all-or-nothing にするか(前者を推奨)、どこまで旧い agent への配信を打ち切るかも未決のまま残した
