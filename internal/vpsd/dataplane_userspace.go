@@ -13,7 +13,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace"
 	"github.com/rahanahu/wgft/internal/planner"
-	"github.com/rahanahu/wgft/internal/vpsd/check"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
 	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
@@ -42,21 +42,22 @@ func (u *userspaceDataplane) WGStatus() (*wgtypes.Device, error) { return u.b.WG
 func (u *userspaceDataplane) OtherDeviceWithKey(wgtypes.Key) (string, bool) { return "", false }
 
 // ReadUDPTimeouts はカーネルの conntrack を使わないので、既定値をそのまま配る(エージェントの UDP セッションの期限)。
-func (u *userspaceDataplane) ReadUDPTimeouts() (wg.UDPTimeouts, error) {
-	return wg.UDPTimeouts{Timeout: 30, TimeoutStream: 120}, nil
+func (u *userspaceDataplane) ReadUDPTimeouts() (linux.UDPTimeouts, error) {
+	return linux.UDPTimeouts{Timeout: 30, TimeoutStream: 120}, nil
 }
 
 // Inspect は他テーブルの検査を行わない(nftables を使わない。仕様 6.3 節)。
-func (u *userspaceDataplane) Inspect() (*check.Report, error) { return &check.Report{}, nil }
+func (u *userspaceDataplane) Inspect() (*linux.Report, error) { return &linux.Report{}, nil }
 
 // BoundPorts は空。bind の失敗がそのまま分かる(仕様 6.3 節)。
-func (u *userspaceDataplane) BoundPorts() (check.Bound, error) {
-	return check.Bound{proto.TCP: {}, proto.UDP: {}}, nil
+func (u *userspaceDataplane) BoundPorts() (linux.Bound, error) {
+	return linux.Bound{proto.TCP: {}, proto.UDP: {}}, nil
 }
 
 // InputPortSuggestions は input が policy drop なら足す行を返す。nftables を読めない(非 root)ときは提示しない。
+// userspace モードは自分の nftables テーブルを持たないので、除く table 名は無い("")
 func (u *userspaceDataplane) InputPortSuggestions(port uint16) ([]string, error) {
-	lines, err := check.InputPortSuggestions(port)
+	lines, err := linux.InputPortSuggestions(port, "")
 	if err != nil {
 		return nil, nil
 	}
@@ -76,7 +77,7 @@ func (u *userspaceDataplane) Converge(_ []ctconv.Rule, _ netip.Prefix, plan plan
 	return u.b.Converge(plan)
 }
 
-func (u *userspaceDataplane) EnableIPForward(*store.Store) *check.Finding { return nil }
+func (u *userspaceDataplane) EnableIPForward(*store.Store) *linux.Finding { return nil }
 
 func (u *userspaceDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{Dial: u.b.Dial})

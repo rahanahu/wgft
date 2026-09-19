@@ -20,6 +20,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/userspace"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/agentapi"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
@@ -199,7 +200,7 @@ type Daemon struct {
 	opts      Options
 	st        *store.Store
 	reserved  proto.Reserved
-	timeouts  wg.UDPTimeouts
+	timeouts  linux.UDPTimeouts
 	serverKey wgtypes.Key
 
 	network   netip.Prefix // 10.200.0.0/24

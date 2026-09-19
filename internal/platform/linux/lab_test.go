@@ -1,8 +1,8 @@
 //go:build lab
 
-package check
+package linux
 
-// ラボの vps ns で root として実行する(lab/lab test internal/vpsd/check)。
+// ラボの vps ns で root として実行する(lab/lab test internal/platform/linux)。
 // iptables-nft(Docker 風)とネイティブ nft(firewalld 風)の疑似環境を自分で作って検査する。
 
 import (
@@ -72,7 +72,7 @@ func TestInspectSynthetic(t *testing.T) {
 		t.Fatalf("nft -f: %v\n%s", err, out)
 	}
 
-	rep, err := Inspect("wg0")
+	rep, err := Inspect("wg0", "wgft")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,6 @@
-// Package check は、ルールの追加や起動時に行う VPS 側の検査(仕様 5.3, 6.1 節)。
-// bind 中のポートとの衝突、他テーブルの forward / input の遮断、他テーブルの同ポート DNAT を見る。
-// 自動では何も書き換えず、拒否か警告と提示に留める。
-package check
+package linux
+
+// bind 中のポートの検査(仕様 5.3, 6.1 節)。自動では何も書き換えず、拒否か警告と提示に留める。
 
 import (
 	"bufio"

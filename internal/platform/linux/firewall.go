@@ -1,4 +1,12 @@
-package check
+// Package linux は、VPS と(将来の Phase 7 の)agent の kernel backend が共通に使う、Linux ホスト側の
+// 前段検査と sysctl の読み書きを持つ(設計文書 7a.7 節)。他テーブルの forward/input/DNAT の検査、
+// bind 中のポートの検査、ip_forward と conntrack テーブルの sysctl がここに属する。自動では何も
+// 書き換えず(ip_forward を除く。EnableIPForward のみ)、拒否か警告と提示に留める。
+//
+// このパッケージは internal/dataplane/linuxkernel を import しない(その逆に、linuxkernel がこの
+// パッケージを import する)。table inet wgft のような、カーネル backend の実装詳細である名前は
+// 引数として受け取り、自分では知らない。
+package linux
 
 import (
 	"encoding/binary"
@@ -11,7 +19,6 @@ import (
 	"github.com/google/nftables/xt"
 	"golang.org/x/sys/unix"
 
-	"github.com/rahanahu/wgft/internal/vpsd/nft"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -63,7 +70,8 @@ func (r *Report) DNATConflicts(p proto.Proto, pr proto.PortRange) []DNAT {
 
 // InputPortSuggestions は、input の base chain が既定で落とす構成のとき、その TCP ポートへの
 // accept を足す行を提示する(プロキシモードは vpsd 自身が公開ポートで受けるため。仕様 6.2 節)。
-func InputPortSuggestions(port uint16) ([]string, error) {
+// ownTable は自分の table(kernel backend では table inet wgft)の名前で、検査から除く。
+func InputPortSuggestions(port uint16, ownTable string) ([]string, error) {
 	c, err := nftables.New()
 	if err != nil {
 		return nil, err
@@ -74,7 +82,7 @@ func InputPortSuggestions(port uint16) ([]string, error) {
 	}
 	var out []string
 	for _, ch := range chains {
-		if ch.Hooknum == nil || *ch.Hooknum != unix.NF_INET_LOCAL_IN || ch.Type != nftables.ChainTypeFilter || ch.Table.Name == nft.TableName {
+		if ch.Hooknum == nil || *ch.Hooknum != unix.NF_INET_LOCAL_IN || ch.Type != nftables.ChainTypeFilter || ch.Table.Name == ownTable {
 			continue
 		}
 		rules, err := c.GetRules(ch.Table, ch)
@@ -97,8 +105,9 @@ func InputPortSuggestions(port uint16) ([]string, error) {
 	return out, nil
 }
 
-// Inspect は wgft 以外の全テーブルの base chain を調べる。
-func Inspect(wgIface string) (*Report, error) {
+// Inspect は wgft(または agent の kernel backend)以外の全テーブルの base chain を調べる。
+// ownTable は自分の table の名前で、検査から除く。
+func Inspect(wgIface, ownTable string) (*Report, error) {
 	c, err := nftables.New()
 	if err != nil {
 		return nil, err
@@ -109,7 +118,7 @@ func Inspect(wgIface string) (*Report, error) {
 	}
 	rep := &Report{}
 	for _, ch := range chains {
-		if ch.Hooknum == nil || ch.Table.Name == nft.TableName {
+		if ch.Hooknum == nil || ch.Table.Name == ownTable {
 			continue
 		}
 		rules, err := c.GetRules(ch.Table, ch)

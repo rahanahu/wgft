@@ -6,8 +6,8 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/reconcile"
-	"github.com/rahanahu/wgft/internal/vpsd/check"
 	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
 	"github.com/rahanahu/wgft/internal/vpsd/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
@@ -207,7 +207,7 @@ func (d *Daemon) accumulateDrops(drops []dataplane.Drop) error {
 
 // checkRule は、他テーブルの同じポートの DNAT(常に拒否)と、VPS 上で bind 中のポート
 // (--force で上書き可)との衝突を見る(仕様 5.3, 6.1 節)。
-func (d *Daemon) checkRule(r *proto.Rule, rep *check.Report, force bool) error {
+func (d *Daemon) checkRule(r *proto.Rule, rep *linux.Report, force bool) error {
 	if !r.Enabled || r.VPSMode != proto.ModeKernel {
 		return nil
 	}

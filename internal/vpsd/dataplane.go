@@ -7,7 +7,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/planner"
-	"github.com/rahanahu/wgft/internal/vpsd/check"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
 	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
 	"github.com/rahanahu/wgft/internal/vpsd/nft"
@@ -21,7 +21,7 @@ import (
 // userspaceDataplane(仕様 6.3 節)は internal/dataplane/userspace の Backend を包むだけの薄い層で、
 // 他テーブルの検査や ip_forward のような、ユーザー空間モードでは何もしないホスト側の検査を受け持つ。
 //
-// メソッドの形はいまのカーネル実装の型(wg.Config、check.Report など)をそのまま出している。
+// メソッドの形はいまのカーネル実装の型(wg.Config、linux.Report など)をそのまま出している。
 // participant は、どちらの実装も Plan だけから table inet wgft(または userspace の宣言)を組み立てる
 // (設計文書 7a.8 節 Phase 3)。rules と agentAddr の引数は、ログの件数表示のためだけに applyNFT が残す。
 type serverDataplane interface {
@@ -32,11 +32,11 @@ type serverDataplane interface {
 	// OtherDeviceWithKey は同じサーバ鍵を持つ別名の WireGuard デバイスがあればその名前を返す(インタフェース名の変更の検出)。
 	OtherDeviceWithKey(key wgtypes.Key) (string, bool)
 	// ReadUDPTimeouts は conntrack の UDP タイムアウト 2 値を読む(全体状態でエージェントに配る。仕様 4 節)。
-	ReadUDPTimeouts() (wg.UDPTimeouts, error)
+	ReadUDPTimeouts() (linux.UDPTimeouts, error)
 	// Inspect は他テーブルの forward / input / DNAT の検査(仕様 6.1 節)。起動時と rule add 時に使う。
-	Inspect() (*check.Report, error)
+	Inspect() (*linux.Report, error)
 	// BoundPorts は VPS 上で bind 中のポート(SSH の締め出しを防ぐ検査。仕様 5.3 節)。
-	BoundPorts() (check.Bound, error)
+	BoundPorts() (linux.Bound, error)
 	// InputPortSuggestions は、プロキシモードの公開ポートが input で塞がれていれば足す行を返す(仕様 6.2 節)。
 	InputPortSuggestions(port uint16) ([]string, error)
 	// ReadDrops は差し替え直前の drop カウンタを読む(仕様 6.1 節)。
@@ -49,7 +49,7 @@ type serverDataplane interface {
 	Converge(rules []ctconv.Rule, wgNet netip.Prefix, plan planner.Plan) (int, error)
 	// EnableIPForward は net.ipv4.ip_forward を 1 にする(仕様 6.1 節)。
 	// 書き込みに失敗すると、policy drop と同じ流儀の Finding を返す(成功時とすでに 1 のときは nil)。
-	EnableIPForward(st *store.Store) *check.Finding
+	EnableIPForward(st *store.Store) *linux.Finding
 	// CheckConnectivity は wg 経由でエージェントのリスナーに TCP 接続する疎通確認(仕様 10.1 節)。
 	CheckConnectivity(addr string) conncheck.Result
 }
@@ -64,11 +64,15 @@ func (k *kernelDataplane) WGStatus() (*wgtypes.Device, error)       { return wg.
 func (k *kernelDataplane) OtherDeviceWithKey(key wgtypes.Key) (string, bool) {
 	return wg.OtherDeviceWithKey(k.iface, key)
 }
-func (k *kernelDataplane) ReadUDPTimeouts() (wg.UDPTimeouts, error) { return wg.ReadUDPTimeouts() }
-func (k *kernelDataplane) Inspect() (*check.Report, error)          { return check.Inspect(k.iface) }
-func (k *kernelDataplane) BoundPorts() (check.Bound, error)         { return check.BoundPorts() }
+func (k *kernelDataplane) ReadUDPTimeouts() (linux.UDPTimeouts, error) {
+	return linux.ReadUDPTimeouts()
+}
+func (k *kernelDataplane) Inspect() (*linux.Report, error) {
+	return linux.Inspect(k.iface, nft.TableName)
+}
+func (k *kernelDataplane) BoundPorts() (linux.Bound, error) { return linux.BoundPorts() }
 func (k *kernelDataplane) InputPortSuggestions(port uint16) ([]string, error) {
-	return check.InputPortSuggestions(port)
+	return linux.InputPortSuggestions(port, nft.TableName)
 }
 func (k *kernelDataplane) ReadDrops() ([]dataplane.Drop, error) {
 	drops, err := nft.ReadDrops()
@@ -112,7 +116,7 @@ func (p *kernelTablePrepared) Rollback() {}
 func (k *kernelDataplane) Converge(rules []ctconv.Rule, wgNet netip.Prefix, _ planner.Plan) (int, error) {
 	return ctconv.Converge(rules, wgNet)
 }
-func (k *kernelDataplane) EnableIPForward(st *store.Store) *check.Finding { return EnableIPForward(st) }
+func (k *kernelDataplane) EnableIPForward(st *store.Store) *linux.Finding { return EnableIPForward(st) }
 func (k *kernelDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{})
 }
