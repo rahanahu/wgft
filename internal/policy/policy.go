@@ -12,13 +12,40 @@
 package policy
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math/bits"
 	"net/netip"
 	"sort"
+	"time"
 
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/proto"
+)
+
+// 評価の定数(設計文書 7a.9 節「IR の形」)。トークンバケットの burst、接続元ごとの表の期限と
+// 大きさ、同時フロー数の set の大きさは、どの実装でも変えない仕様値なので、この 1 か所だけに書く。
+// 今は internal/dataplane/linuxkernel/nft と internal/dataplane/userspace/srcpolicy が
+// それぞれ同じ値を書いていたので、両方をこの定数を使う形に直す(Phase 5 移行の手順 1)。
+const (
+	// TokenBucketBurst is nftables' `limit rate over` burst (nft の既定値)。userspace の
+	// トークンバケットは、ラボでカーネルモードと通過数・drop 数の累計が一致することを確かめた
+	// 固定 burst 5 で、この値を模している(design.md 7a.4 節「トークンバケットの粒度」)。
+	TokenBucketBurst = 5
+
+	// PerSourceTableTTL is how long an idle entry stays in a per-source rate-limit table: the
+	// nftables meter's timeout, and the Go evaluator's per-source table (design.md 6.1, 7a.4 節)。
+	PerSourceTableTTL = time.Minute
+
+	// PerSourceTableSize is the maximum number of distinct sources a per-source rate-limit table
+	// holds at once: the nftables meter's set size, and the Go evaluator's per-source table cap
+	// (design.md 6.1, 7a.4 節)。
+	PerSourceTableSize = 65535
+
+	// FlowSetSize is the size of the set that counts per-source concurrent flows: nftables'
+	// flows_tcp/flows_udp, and the Go evaluator's equivalent (design.md 6.1 節)。
+	FlowSetSize = 65535
 )
 
 // Step は入口の判定 1 つを表す。評価順は設計文書 6.1 節(deny、allow、接続元ごとの meter、
@@ -52,6 +79,29 @@ func (s Step) String() string {
 		return "aggregate_packet_rate"
 	default:
 		return fmt.Sprintf("Step(%d)", int(s))
+	}
+}
+
+// DropKind is the drop-counter kind persisted for this step's rejections (design.md 7a.9 節「段と
+// drop の種類の対応」): the exact strings nft と srcpolicy already write to their drop counters,
+// which vpsd accumulates into SQLite (7 節 "各 drop のカウンタは...SQLite に累積する")。This
+// method only names the mapping in one place; it does not change any of the strings themselves.
+func (s Step) DropKind() string {
+	switch s {
+	case StepSourceDeny:
+		return "deny"
+	case StepSourceAllow:
+		return "allow"
+	case StepPerSourceRate:
+		return "per_source"
+	case StepPerSourceConcurrentFlows:
+		return "src_flow"
+	case StepAggregateNewFlowRate:
+		return "new_flow"
+	case StepAggregatePacketRate:
+		return "packet"
+	default:
+		return ""
 	}
 }
 
@@ -145,12 +195,75 @@ func Build(rules []model.Rule, limits flowcap.Limits) Policy {
 		}
 		p.Rules = append(p.Rules, RulePolicy{
 			RuleID: r.ID, Proto: r.Proto,
-			SourceAllow: r.SourceAllow, SourceDeny: r.SourceDeny,
+			SourceAllow: NormalizePrefixes(r.SourceAllow), SourceDeny: NormalizePrefixes(r.SourceDeny),
 			PerSourceRate: r.PerSourceRate, NewFlowRate: r.NewFlowRate, PacketRate: r.PacketRate,
 		})
 	}
 	sort.Slice(p.Rules, func(i, j int) bool { return p.Rules[i].RuleID < p.Rules[j].RuleID })
 	return p
+}
+
+// NormalizePrefixes masks each prefix, merges overlapping and adjacent ranges, and returns the
+// result sorted ascending by address (design.md 7a.9 節「CIDR の正規化」). Build calls this for
+// source_allow and source_deny so the IR itself carries the normalized form; previously only the
+// nftables set construction merged (intervalElements in internal/dataplane/linuxkernel/nft), while
+// the Go evaluator walked the un-merged list. Merging never changes which sources match (it only
+// removes redundant/adjacent boundaries), so this is behavior-preserving for both compilers: the
+// nftables compiler's own interval merge is idempotent on an already-normalized input, and
+// SourceAllowed/matchesAny-style scans give the same verdict either way.
+//
+// v1 is IPv4-only (design.md 4, 7a.9 節); prefixes are assumed to already be IPv4 (proto.Rule's
+// validation rejects non-IPv4 source_allow/source_deny entries before they reach this package).
+func NormalizePrefixes(prefixes []netip.Prefix) []netip.Prefix {
+	if len(prefixes) == 0 {
+		return nil
+	}
+	type span struct{ lo, hi uint64 } // hi は排他的(nft/build.go の intervalElements と同じ形)
+	spans := make([]span, 0, len(prefixes))
+	for _, p := range prefixes {
+		p = p.Masked()
+		lo := uint64(binary.BigEndian.Uint32(p.Addr().AsSlice()))
+		spans = append(spans, span{lo, lo + 1<<(32-p.Bits())})
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].lo < spans[j].lo })
+	merged := spans[:0]
+	for _, s := range spans {
+		if n := len(merged); n > 0 && s.lo <= merged[n-1].hi {
+			if s.hi > merged[n-1].hi {
+				merged[n-1].hi = s.hi
+			}
+			continue
+		}
+		merged = append(merged, s)
+	}
+
+	var out []netip.Prefix
+	for _, s := range merged {
+		out = append(out, spanToPrefixes(s.lo, s.hi)...)
+	}
+	return out
+}
+
+// spanToPrefixes decomposes the IPv4 address range [lo, hi) into the minimal list of CIDR blocks
+// that cover exactly that range (the standard range-to-CIDR algorithm): repeatedly take, at the
+// current lo, the largest power-of-two block that both starts at lo (its trailing zero bits) and
+// fits within what remains of the range.
+func spanToPrefixes(lo, hi uint64) []netip.Prefix {
+	var out []netip.Prefix
+	for lo < hi {
+		block := bits.TrailingZeros64(lo)
+		if block > 32 {
+			block = 32 // lo == 0 の場合、TrailingZeros64 は 64 を返す
+		}
+		for block > 0 && uint64(1)<<uint(block) > hi-lo {
+			block--
+		}
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], uint32(lo))
+		out = append(out, netip.PrefixFrom(netip.AddrFrom4(b), 32-block))
+		lo += uint64(1) << uint(block)
+	}
+	return out
 }
 
 // SourceAllowed reports whether src passes the rule's source deny and allow lists (deny first; an

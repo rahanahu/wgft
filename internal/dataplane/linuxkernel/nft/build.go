@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
-	"time"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -124,10 +124,10 @@ func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Conf
 	e.DelTable(t)
 	t = e.AddTable(t)
 
-	policy := nftables.ChainPolicyAccept
+	chainPolicy := nftables.ChainPolicyAccept
 	chain := func(name string, typ nftables.ChainType, hook *nftables.ChainHook, prio int32) *nftables.Chain {
 		return e.AddChain(&nftables.Chain{Name: name, Table: t, Type: typ, Hooknum: hook,
-			Priority: nftables.ChainPriorityRef(nftables.ChainPriority(prio)), Policy: &policy})
+			Priority: nftables.ChainPriorityRef(nftables.ChainPriority(prio)), Policy: &chainPolicy})
 	}
 	// 接続元制限とレート制限は nat ではなく filter の prerouting に置く。
 	// nat のチェーンはフローの最初のパケットしか通らないので、通信中のフローに効かないため。
@@ -211,7 +211,7 @@ func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Conf
 		}
 		if pol.PerSourceRate != nil {
 			meter := &nftables.Set{Table: t, Name: fmt.Sprintf("meter_%d", n), KeyType: nftables.TypeIPAddr,
-				Dynamic: true, HasTimeout: true, Timeout: time.Minute, Size: 65535}
+				Dynamic: true, HasTimeout: true, Timeout: policy.PerSourceTableTTL, Size: policy.PerSourceTableSize}
 			if err := e.AddSet(meter, nil); err != nil {
 				return fmt.Errorf("rule %s: meter: %w", pp.RuleID, err)
 			}
@@ -314,13 +314,14 @@ func counterDrop() []expr.Any {
 	return []expr.Any{&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictDrop}}
 }
 
-// limitOver は `limit rate over N/unit`。burst は nft の既定値の 5。
+// limitOver は `limit rate over N/unit`。burst は policy.TokenBucketBurst(nft の既定値の 5。
+// design.md 7a.9 節「IR の形」の評価の定数)。
 func limitOver(r proto.Rate) *expr.Limit {
 	units := map[proto.RateUnit]expr.LimitTime{
 		proto.PerSecond: expr.LimitTimeSecond, proto.PerMinute: expr.LimitTimeMinute,
 		proto.PerHour: expr.LimitTimeHour, proto.PerDay: expr.LimitTimeDay, proto.PerWeek: expr.LimitTimeWeek,
 	}
-	return &expr.Limit{Type: expr.LimitTypePkts, Rate: r.Count, Over: true, Unit: units[r.Unit], Burst: 5}
+	return &expr.Limit{Type: expr.LimitTypePkts, Rate: r.Count, Over: true, Unit: units[r.Unit], Burst: policy.TokenBucketBurst}
 }
 
 // flowSetName はプロトコルごとに共有する接続元フロー数の set の名前。ルール ID に依存しない
@@ -336,7 +337,7 @@ func flowSetName(p proto.Proto) string {
 // ct count は conntrack のエントリの生死で状態が消えるので、meter の set と違い timeout を持たせない
 // (timeout を持つ set に ct count を組み合わせると nftables が操作を拒む)。
 func addFlowCapSet(e emitter, t *nftables.Table, p proto.Proto) (*nftables.Set, error) {
-	s := &nftables.Set{Table: t, Name: flowSetName(p), KeyType: nftables.TypeIPAddr, Dynamic: true, Size: 65535}
+	s := &nftables.Set{Table: t, Name: flowSetName(p), KeyType: nftables.TypeIPAddr, Dynamic: true, Size: policy.FlowSetSize}
 	if err := e.AddSet(s, nil); err != nil {
 		return nil, fmt.Errorf("flow cap set %s: %w", s.Name, err)
 	}

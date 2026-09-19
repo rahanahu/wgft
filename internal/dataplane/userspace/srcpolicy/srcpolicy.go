@@ -21,9 +21,10 @@ import (
 )
 
 // 接続元ごとの meter の上限(design.md 6.1 節の set と同じ、1 分で期限切れ、上限 65535)。
+// 値は internal/policy の評価の定数(design.md 7a.9 節)から取り、この package が独自に持たない。
 const (
-	perSourceCap = 65535
-	perSourceTTL = time.Minute
+	perSourceCap = policy.PerSourceTableSize
+	perSourceTTL = policy.PerSourceTableTTL
 )
 
 // Policy はルール集合から作る評価器。AdmitFlow、AdmitPacket、SourceAllowed、Drops が
@@ -267,8 +268,9 @@ type tokenBucket struct {
 	last     time.Time
 }
 
-// nftBurst は nftables の limit の既定の burst(パケット数)。
-const nftBurst = 5
+// nftBurst は nftables の limit の既定の burst(パケット数)。internal/policy の評価の定数
+// (design.md 7a.9 節)から取る。
+const nftBurst = policy.TokenBucketBurst
 
 func newTokenBucket(r proto.Rate) *tokenBucket {
 	return &tokenBucket{
