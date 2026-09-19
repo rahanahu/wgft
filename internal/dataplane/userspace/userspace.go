@@ -63,14 +63,16 @@ type Backend struct {
 
 var _ dataplane.Backend = (*Backend)(nil)
 
-// hostNetwork opens the relay's listeners on all host addresses (the public ports).
+// hostNetwork opens the relay's listeners on all host IPv4 addresses (the public ports). v1 handles
+// IPv4 only (design.md 4, 7a.9 節): a dual-stack listener would let an IPv6 source past deny lists
+// that hold IPv4 prefixes only. The evaluator also refuses non-IPv4 sources on its own.
 type hostNetwork struct{}
 
 func (hostNetwork) ListenUDP(port uint16) (net.PacketConn, error) {
-	return net.ListenUDP("udp", &net.UDPAddr{Port: int(port)})
+	return net.ListenUDP("udp4", &net.UDPAddr{Port: int(port)})
 }
 func (hostNetwork) ListenTCP(port uint16) (net.Listener, error) {
-	return net.Listen("tcp", ":"+strconv.Itoa(int(port)))
+	return net.Listen("tcp4", ":"+strconv.Itoa(int(port)))
 }
 
 // New builds a Backend with no tunnel and no listeners; EnsureDevice brings the tunnel up, the

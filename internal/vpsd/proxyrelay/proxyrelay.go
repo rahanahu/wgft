@@ -33,7 +33,9 @@ type Rule struct {
 
 // Options は依存の差し替え(テスト用)。
 type Options struct {
-	// Listen は公開側の待ち受けを開く。既定は net.Listen("tcp", ":port")。
+	// Listen は公開側の待ち受けを開く。既定は net.Listen("tcp4", ":port")。v1 は IPv4 だけを扱い
+	// (設計文書 4、7a.9 節)、IPv6 の送信元は IPv4 の CIDR だけを並べた deny に一致せずに通るので、
+	// IPv6 では待ち受けない。
 	Listen func(port uint16) (net.Listener, error)
 	// Dial はエージェントのリスナーへ繋ぐ。既定は net.Dial("tcp", addr)。
 	Dial func(addr string) (net.Conn, error)
@@ -102,7 +104,7 @@ func abortRefused(c net.Conn) {
 func New(opts Options) *Manager {
 	if opts.Listen == nil {
 		opts.Listen = func(port uint16) (net.Listener, error) {
-			return net.Listen("tcp", net.JoinHostPort("", itoa(port)))
+			return net.Listen("tcp4", net.JoinHostPort("", itoa(port)))
 		}
 	}
 	if opts.Dial == nil {
