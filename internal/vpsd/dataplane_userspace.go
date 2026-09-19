@@ -65,18 +65,10 @@ func (u *userspaceDataplane) InputPortSuggestions(port uint16) ([]string, error)
 
 func (u *userspaceDataplane) ReadDrops() ([]dataplane.Drop, error) { return u.b.ReadDrops() }
 
-// ApplyNFT は Plan を Backend に渡して公開する。ルール集合は読まない(Backend は Plan だけから組み立てる)。
+// participant は Backend そのもの。ルール集合は読まない(Backend は Plan だけから組み立てる)。
 // プロキシモード(Relay)のルールは Daemon の proxyrelay が受け持ち、Backend は Transparent のルールだけを開く。
-func (u *userspaceDataplane) ApplyNFT(_ []proto.Rule, _ map[string]netip.Addr, proxyListening map[uint16]bool, plan planner.Plan) error {
-	p, err := u.b.Prepare(dataplane.Desired{Plan: plan, RelayListening: proxyListening})
-	if err != nil {
-		return err
-	}
-	if err := p.Commit(); err != nil {
-		p.Rollback()
-		return err
-	}
-	return nil
+func (u *userspaceDataplane) participant([]proto.Rule, map[string]netip.Addr) dataplane.Participant {
+	return u.b
 }
 
 // Converge は接続元制限を満たさなくなった進行中のセッションを閉じる(conntrack 収束の代わり。仕様 6.3 節)。

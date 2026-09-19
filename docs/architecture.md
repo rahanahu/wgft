@@ -9,6 +9,7 @@ wgft のコードは、設計文書([docs/design.md](design.md))の各節が扱�
 | `internal/vpsd/nft` | 6.1 | ルール集合から `table inet wgft` を組み立て、1 トランザクションで適用します |
 | `internal/vpsd/conntrack` | 6.1(収束) | 外から入って DNAT されたフローを宣言状態に収束させます |
 | `internal/vpsd/proxyrelay` | 6.2 | プロキシモードのルールについて、vpsd が受けた TCP をエージェントへ中継します |
+| `internal/reconcile` | 7a.2 | frontend(プロキシモードの中継)と dataplane を固定の順序で適用する `Runtime` を持ちます |
 | `internal/dataplane/userspace` | 6.3 | `vpsd` のユーザー空間モードの転送面です。wireguard-go と netstack のトンネル(`utun`)、接続元制限とレート制限の評価器(`srcpolicy`)、中継(`relay`)を束ね、`internal/planner` の `Plan` から待ち受けと評価器を組み立てます |
 | `internal/dataplane/userspace/relay` | 6.3, 7 | エージェントの netstack 上のリスナーと LAN 内 `target` への中継を持ちます。`vpsd` のユーザー空間モードも、公開ポートの待ち受けと netstack 越しのエージェントへの中継に同じパッケージを使います |
 | `internal/vpsd/stream` | 5.2 | エージェントごとの stream(WebSocket)を持ち、全体状態の配信とハートビートの記録を行います |
@@ -37,7 +38,7 @@ CLI の `wgft rule add`(`cmd/wgft/rule.go` の `newRuleAddCmd`)は `proto.Rule` 
 
 `Daemon.Batch` は `internal/vpsd/store/rules.go` の `Store.ApplyBatch` を呼び、追加・変更・削除を 1 トランザクションで保存します。世代はこの保存で 1 つ進みます。
 
-保存が成功すると、`Daemon.applyNFT`(`internal/vpsd/vpsd.go`)が `internal/vpsd/nft` の `Apply` を呼び、`table inet wgft` をまるごと差し替えます。
+保存が成功すると、`Daemon.applyNFT`(`internal/vpsd/apply.go`)が `internal/planner` の `Plan` を組み立て、`internal/reconcile` の `Runtime` で適用します。`Runtime` は、プロキシモードの新しい待ち受けを先に開き、`internal/vpsd/nft` の `Apply` で `table inet wgft` をまるごと差し替え、成功したら中継を始めます。差し替えが失敗したら、新しく開いた待ち受けを閉じます。
 
 `applyNFT` はテーブルの差し替えの直後に `Daemon.converge` を呼び、`internal/vpsd/conntrack` の `Converge` で、新しい宣言に合わない DNAT 済みフローを削除します。この順序は、先に conntrack を収束させると旧テーブルで許可されたフローが差し替えまでの間に入ってしまうために保たれています。
 

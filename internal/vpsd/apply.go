@@ -6,6 +6,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/reconcile"
 	"github.com/rahanahu/wgft/internal/vpsd/check"
 	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
 	"github.com/rahanahu/wgft/internal/vpsd/nft"
@@ -55,24 +56,18 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 			log.Printf("accumulating drop counters: %v", err)
 		}
 	}
-	// プロキシモードの新しい待ち受けを先に開き(Prepare)、開けたポートだけに nftables の
-	// 接続元 IP ごとの上限の行を付ける。nftables の差し替えが失敗したら新しい待ち受けを閉じて
-	// 旧い待ち受けと旧いテーブルを揃えたまま残し、成功したら中継を始めて不要な待ち受けを閉じる(仕様 6.1 節)
+	// Runtime が固定の順序で適用する(設計文書 7a.2 節)。プロキシモードの新しい待ち受けを先に開き
+	// (frontend の Prepare)、開けたポートだけに nftables の接続元 IP ごとの上限の行を付ける
+	// (dataplane の Prepare への入力)。nftables の差し替え(dataplane の Commit)が失敗したら新しい
+	// 待ち受けを閉じて旧い待ち受けと旧いテーブルを揃えたまま残し、成功したら中継を始めて不要な待ち受けを
+	// 閉じる(frontend の Commit。仕様 6.1 節)
 	plan := d.buildPlan(rules, agentAddr)
-	var prepared *proxyrelay.Prepared
-	var proxyListening map[uint16]bool
+	rt := reconcile.Runtime{Dataplane: d.dp.participant(rules, agentAddr)}
 	if d.proxy != nil {
-		prepared = d.proxy.Prepare(proxyrelay.FromRules(rules, agentAddr))
-		proxyListening = prepared.Listening()
+		rt.Frontend = relayFrontend{d.proxy}
 	}
-	if err := d.dp.ApplyNFT(rules, agentAddr, proxyListening, plan); err != nil {
-		if prepared != nil {
-			prepared.Rollback()
-		}
+	if err := rt.Apply(plan); err != nil {
 		return fmt.Errorf("failed to apply nftables: %w", err)
-	}
-	if prepared != nil {
-		prepared.Commit()
 	}
 	active := 0
 	for _, r := range rules {
@@ -93,6 +88,35 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 		d.proxyInputHints(rules)
 	}
 	return nil
+}
+
+// relayFrontend はプロキシモードの中継(proxyrelay)を Runtime の frontend の participant にする
+// (設計文書 7a.2 節)。proxyrelay の Prepare は bind に失敗したポートをログに出して飛ばすだけで、
+// 全体としては失敗しない。*proxyrelay.Prepared の Commit は失敗せず、2 回目以降は何もしないので、
+// 戻れない地点の後に呼ぶ frontend の Commit の契約を満たす。
+type relayFrontend struct{ m *proxyrelay.Manager }
+
+func (f relayFrontend) Prepare(plan planner.Plan) (reconcile.FrontendPrepared, error) {
+	return f.m.Prepare(relayRules(plan.Relay())), nil
+}
+
+// relayRules は、Plan の Relay のポートのうち TCP のものから中継の宣言を作る。Plan は無効なルールと、
+// アドレスの分からないエージェントのルールを既に含まないので、Phase 2 より前に使っていた
+// proxyrelay.FromRules と同じ宣言になる(relayfrontend_test.go)。
+func relayRules(ports []planner.PortPlan) []proxyrelay.Rule {
+	var out []proxyrelay.Rule
+	for _, pp := range ports {
+		if pp.Forwarding != model.Relay || pp.Proto != proto.TCP {
+			continue
+		}
+		// proxy は単一ポート運用。範囲のルールは先頭ポートだけを使う(FromRules と同じ理由。仕様 5.4、6.2 節)
+		out = append(out, proxyrelay.Rule{
+			ID: pp.RuleID, ListenPort: pp.ListenPort.Lo, AgentAddr: pp.AgentAddr, AgentPort: pp.ListenPort.Lo,
+			ProxyProtocol: pp.SourceMetadata == model.ProxyV2,
+			SourceDeny:    pp.Policy.SourceDeny, SourceAllow: pp.Policy.SourceAllow, Agent: pp.Agent,
+		})
+	}
+	return out
 }
 
 // proxyInputHints は、プロキシモードの公開ポートが既定 drop の input で塞がれていれば提示する。
