@@ -64,7 +64,7 @@ This is the shortest path for the common setup: kernel mode on a Linux VPS and a
 
 ### 1. Install wgft
 
-On Linux, download the release binary:
+On Linux, download the release binary. Minimal images, such as some VPS templates and Proxmox LXC templates, do not include `curl`; install it first, for example `sudo apt install curl`.
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64

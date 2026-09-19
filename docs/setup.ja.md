@@ -29,7 +29,7 @@ VPS で root が使えるならカーネルモードを推奨します。ユー�
 
 ## 1. バイナリをインストールする
 
-同じバイナリに server、agent、CLI が含まれています。
+同じバイナリに server、agent、CLI が含まれています。VPS のイメージや Proxmox の LXC テンプレートのような最小構成のイメージは、curl を含まないことがあります。あらかじめ `sudo apt install curl` のように導入してください。
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64

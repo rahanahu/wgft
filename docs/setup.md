@@ -29,7 +29,7 @@ To keep one rule from taking all of the capacity, wgft also caps each rule inter
 
 ## 1. Install the binary
 
-The same binary contains the server, agent, and CLI.
+The same binary contains the server, agent, and CLI. Minimal images, such as some VPS templates and Proxmox LXC templates, do not include `curl`; install it first, for example `sudo apt install curl`.
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64

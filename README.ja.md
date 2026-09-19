@@ -64,7 +64,7 @@ VPS 側は Linux で動作します。自宅側の agent は Windows amd64 で�
 
 ### 1. wgft を入手する
 
-Linux では release バイナリを取得します。
+Linux では release バイナリを取得します。VPS のイメージや Proxmox の LXC テンプレートのような最小構成のイメージは、curl を含まないことがあります。あらかじめ `sudo apt install curl` のように導入してください。
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64
