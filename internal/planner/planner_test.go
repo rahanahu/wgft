@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
-	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -37,7 +37,7 @@ func TestBuildJoinsPolicy(t *testing.T) {
 			{ID: "r1", Agent: "home", Proto: proto.TCP, ListenPort: pr(443, 443), Target: "192.168.1.1:443",
 				Forwarding: model.Relay, SourceMetadata: model.ProxyV2, Enabled: true, NewFlowRate: rate("50/second")},
 		},
-		Policy: policy.Settings{UDPPerSourceFlows: 256, TCPPerSourceFlows: 128},
+		Limits: flowcap.Limits{UDPPerSource: 256, TCPPerSource: 128},
 		Agents: []Agent{{Name: "home", Addr: addr("10.200.0.2")}},
 	}
 	got := Build(in)

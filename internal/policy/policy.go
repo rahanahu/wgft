@@ -6,14 +6,16 @@
 // この 1 つの IR から作る。このパッケージ自身はコンパイラも評価器も持たない、データと評価順だけの
 // 表現である。
 //
-// このパッケージは純粋で、proto(外部契約)と internal/model だけを import する。dataplane、
-// frontend、platform、vpsd、agent のどの package も import しない(設計文書 7a.7 節)。
+// このパッケージは純粋で、proto(外部契約)、internal/model、internal/flowcap(OS を知らない
+// カウンタと上限の計算だけを持つ)だけを import する。dataplane、frontend、platform、vpsd、agent
+// のどの package も import しない(設計文書 7a.7 節)。
 package policy
 
 import (
 	"fmt"
 	"net/netip"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -63,21 +65,20 @@ var Order = []Step{
 	StepAggregatePacketRate,
 }
 
-// Settings holds the admission-policy inputs that come from server configuration rather than from
-// rules: the per-source concurrent flow cap (WGFT_MAX_*_FLOWS_PER_SOURCE). design.md 7a.5 節
-// places this cap in AdmissionPolicy, not Resource Guard, because it is a policy for how one
-// source may use the published services, not a protection of wgft's own resources.
+// PerSourceFlowCaps is the admission-policy input that comes from server configuration rather than
+// from rules: the per-source concurrent flow cap (WGFT_MAX_*_FLOWS_PER_SOURCE), one value per
+// protocol because flows_udp/flows_tcp (design.md 6.1 節) are each one set shared by every rule of
+// that protocol, not a per-rule value. design.md 7a.5 節 places this cap in AdmissionPolicy, not
+// Resource Guard, because it is a policy for how one source may use the published services, not a
+// protection of wgft's own resources.
 //
-// The values here are already-resolved effective values (0 disables the cap for that protocol).
-// This package does not know about WGFT_* parsing or defaults; the caller resolves those the same
-// way internal/vpsd/nft.Config.UDPPerSourceCap/TCPPerSourceCap and internal/flowcap.Limits do today.
-type Settings struct {
-	UDPPerSourceFlows int
-	TCPPerSourceFlows int
-}
-
-// PerSourceFlowCaps is Settings carried into the IR (design.md 6.1 節: flows_udp/flows_tcp are one
-// set per protocol, shared by every rule of that protocol, not a per-rule value).
+// UDP and TCP are already-resolved effective values (0 disables the cap for that protocol). Build
+// takes a flowcap.Limits and resolves these through Limits.UDPPerSourceCap()/TCPPerSourceCap()
+// instead of taking raw ints here, precisely so that a zero-value input means "use the default"
+// (256/128) rather than "no cap": internal/flowcap fixed exactly this zero-value footgun for
+// Limits itself, and duplicating a second, independently-zero-value-sensitive type in this package
+// would reintroduce it. Importing internal/flowcap does not violate design.md 7a.7 節's "no OS,
+// nftables, or gVisor" rule for this package; flowcap is pure Go (counters and derived limits).
 type PerSourceFlowCaps struct {
 	UDP int
 	TCP int
@@ -104,17 +105,24 @@ type Policy struct {
 	PerSourceFlowCaps PerSourceFlowCaps
 }
 
-// Build derives the AdmissionPolicy IR from a normalized rule set and settings (design.md 7a.2
-// 節). Only enabled rules participate, matching the rule-level condition every current
-// implementation applies (internal/vpsd/nft.emit, internal/vpsd/srcpolicy.Policy.Update).
+// Build derives the AdmissionPolicy IR from a normalized rule set and the per-source concurrent
+// flow cap settings (design.md 7a.2 節). Only enabled rules participate, matching the rule-level
+// condition every current implementation applies (internal/vpsd/nft.emit,
+// internal/vpsd/srcpolicy.Policy.Update).
+//
+// limits is resolved through flowcap.Limits.UDPPerSourceCap()/TCPPerSourceCap(), so a zero-value
+// flowcap.Limits{} yields the default caps (256/128), and flowcap.PerSourceOff explicitly disables
+// one protocol's cap, exactly like every other consumer of flowcap.Limits (see PerSourceFlowCaps's
+// doc comment). Only the two per-source fields of limits matter here; its process-wide totals
+// belong to Resource Guard (design.md 7a.5 節), not AdmissionPolicy.
 //
 // design.md 7a.4 節 further restricts the kernel ingress layer to ports wgft has actually bound or
 // DNATed ("wgft が実際に待ち受けを開けている、または DNAT を持つポートだけ"), which is a Runtime
 // property (whether an agent is known, whether a listener bound). Phase 1 has no Runtime, so Build
 // applies only the rule-level condition; joining rules to actually-owned ports is
 // internal/planner's job (and, from Phase 4 onward, Prepare/Commit's).
-func Build(rules []model.Rule, settings Settings) Policy {
-	p := Policy{PerSourceFlowCaps: PerSourceFlowCaps{UDP: settings.UDPPerSourceFlows, TCP: settings.TCPPerSourceFlows}}
+func Build(rules []model.Rule, limits flowcap.Limits) Policy {
+	p := Policy{PerSourceFlowCaps: PerSourceFlowCaps{UDP: limits.UDPPerSourceCap(), TCP: limits.TCPPerSourceCap()}}
 	for _, r := range rules {
 		if !r.Enabled {
 			continue

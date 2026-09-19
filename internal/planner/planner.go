@@ -6,15 +6,16 @@
 // come later; design.md 7a.7 節 assigns them to internal/dataplane, internal/frontend and
 // internal/reconcile). It only computes what should exist, never applies anything.
 //
-// This package is pure: it imports internal/model, internal/policy and proto (the external
-// contract), and nothing from dataplane/frontend/platform/vpsd/agent or OS-specific packages
-// (design.md 7a.7 節).
+// This package is pure: it imports internal/model, internal/policy, internal/flowcap (OS-free
+// counters and limits) and proto (the external contract), and nothing from
+// dataplane/frontend/platform/vpsd/agent or OS-specific packages (design.md 7a.7 節).
 package planner
 
 import (
 	"net/netip"
 	"sort"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
@@ -28,11 +29,14 @@ type Agent struct {
 	Addr netip.Addr
 }
 
-// Input is everything Build needs to produce a Plan.
+// Input is everything Build needs to produce a Plan. Limits is the per-source concurrent flow cap
+// setting (WGFT_MAX_*_FLOWS_PER_SOURCE; design.md 7a.5 節); Build passes it straight to
+// policy.Build, so a zero-value Limits{} means "use the default caps" (see PerSourceFlowCaps's doc
+// comment in internal/policy), never "no cap".
 type Input struct {
 	Generation uint64
 	Rules      []model.Rule
-	Policy     policy.Settings
+	Limits     flowcap.Limits
 	Agents     []Agent
 }
 
@@ -103,7 +107,7 @@ func Build(in Input) Plan {
 		addrByAgent[a.Name] = a.Addr
 	}
 
-	pol := policy.Build(in.Rules, in.Policy)
+	pol := policy.Build(in.Rules, in.Limits)
 	polByRuleID := make(map[string]policy.RulePolicy, len(pol.Rules))
 	for _, rp := range pol.Rules {
 		polByRuleID[rp.RuleID] = rp
