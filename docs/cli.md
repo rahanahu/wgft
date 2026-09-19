@@ -7,7 +7,7 @@ To regenerate after changing the help: `go test ./cmd/wgft -run TestCLIDocUpToDa
 
 | Command | What it does |
 |---|---|
-| [`wgft agent dismiss-warning`](#wgft-agent-dismiss-warning) | Dismiss a warning |
+| [`wgft agent dismiss-warning`](#wgft-agent-dismiss-warning) | Dismiss a warning once confirmed legitimate |
 | [`wgft agent join-string`](#wgft-agent-join-string) | Issue an agent join string |
 | [`wgft agent ls`](#wgft-agent-ls) | List registered agents |
 | [`wgft agent pubkey`](#wgft-agent-pubkey) | Print the wg public key |
@@ -771,9 +771,12 @@ server itself can open its socket.
 
 Check the configuration and the environment without starting or changing
 anything: the effective value and source of every setting, other nftables
-tables that would drop or steal forwarded traffic, net.ipv4.ip_forward, the
-size of the connection tracking table, and the recorded mode and address range.
-Run it as root; without root the nftables part is skipped.
+tables that would drop or steal forwarded traffic, whether the host's own
+input firewall would block wgft's ports (WireGuard, the agent API, and any
+rule's listen port that wgft itself binds: proxy-mode rules in kernel mode,
+every rule in userspace mode), net.ipv4.ip_forward, the size of the
+connection tracking table, and the recorded mode and address range. Run it
+as root; without root the nftables and firewall parts are skipped.
 
 ```text
 wgft server check [flags]

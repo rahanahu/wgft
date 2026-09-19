@@ -64,7 +64,7 @@ VPS 側は Linux で動作します。自宅側の agent は Windows amd64 で�
 
 ### 1. wgft を入手する
 
-Linux では release バイナリを取得します。
+Linux では release バイナリを取得します。VPS のイメージや Proxmox の LXC テンプレートのような最小構成のイメージは、curl を含まないことがあります。あらかじめ `sudo apt install curl` のように導入してください。
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64
@@ -86,7 +86,7 @@ sudo wgft server run
 
 `server.env` は、意図的に全員が読める権限にします。秘密の値を含まず、付属の systemd の service は非特権の動的な利用者で動くためです。
 
-VPS の firewall で UDP 51820 と TCP 8443 を開けてください。`wgft server check` は、既存 firewall に追加で必要な forwarding 許可も表示します。
+VPS の firewall で UDP 51820 と TCP 8443 を開けてください。`wgft server check` は、既存 firewall に追加で必要な forwarding 許可を表示するほか、host 自身の input firewall が wgft 自身のポートやルールの listen port を塞ぐ場合に警告します。
 
 カーネルモードでは IPv4 forwarding が必要です。wgft は必要に応じて `net.ipv4.ip_forward=1` を設定し、`wgft server teardown` は元に戻す方法を表示します。
 
@@ -170,7 +170,7 @@ ssh -L 8686:/run/wgft/admin.sock root@vps
 
 ## 開発状況
 
-Alpha、v0.3.0。カーネルモードは作者の VPS / 自宅環境で UDP/TCP 転送、NAT 越え、再接続、VPS 再起動からの復旧、teardown を確認済みです。ユーザー空間モードは開発環境で確認済みです。中継フローはルール単位、接続元単位、プロセス単位で上限を設け、負荷時のメモリ使用量を制限します。実装や構成の詳細は設計・セットアップ文書を参照してください。
+Alpha、v0.4.0。カーネルモードは作者の VPS / 自宅環境で UDP/TCP 転送、NAT 越え、再接続、VPS 再起動からの復旧、teardown を確認済みです。ユーザー空間モードは開発環境と VPS で確認済みです。中継フローはルール単位、接続元単位、プロセス単位で上限を設け、負荷時のメモリ使用量を制限します。実装や構成の詳細は設計・セットアップ文書を参照してください。
 
 ## セキュリティ
 

@@ -450,7 +450,7 @@ func Listen(addr string, warnNonLoopback bool) (net.Listener, error) {
 		return ln, nil
 	}
 	if warnNonLoopback && !isLoopbackAddr(addr) {
-		log.Printf("warning: admin api opened on non-loopback %s; SSH port forwarding or Tailscale recommended, spec section 11", addr)
+		log.Printf("warning: admin api opened on non-loopback %s; SSH port forwarding or Tailscale is recommended", addr)
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
