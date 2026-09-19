@@ -1,0 +1,24 @@
+{
+  "comment": "Flows dropped by the per-source concurrent flow cap use no new_flow tokens, while the earlier per-source rate step has already used its token.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": "1/minute", "new_flow_rate": "1/minute", "packet_rate": null}
+    ],
+    "per_source_flow_caps": {"udp": 1}
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a2", "want": "drop:src_flow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a3", "want": "drop:src_flow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a4", "want": "drop:src_flow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a5", "want": "drop:src_flow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a6", "want": "drop:per_source"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.11", "flow": "b1", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.12", "flow": "b2", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.13", "flow": "b3", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.14", "flow": "b4", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.15", "flow": "b5", "want": "drop:new_flow"}
+  ],
+  "want_drops": {"r_udp": {"src_flow": 4, "per_source": 1, "new_flow": 1}},
+  "tolerances": []
+}

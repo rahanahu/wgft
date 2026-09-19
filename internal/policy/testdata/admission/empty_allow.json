@@ -1,0 +1,18 @@
+{
+  "comment": "An empty allow list admits every source; only the deny list restricts.",
+  "policy": {
+    "rules": [
+      {"id": "r_open", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null},
+      {"id": "r_deny_only", "proto": "tcp", "forwarding": "transparent", "source_allow": [], "source_deny": ["203.0.113.0/24"], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_open", "src": "0.0.0.1", "flow": "o1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_open", "src": "203.0.113.1", "flow": "o2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_open", "src": "255.255.255.254", "flow": "o3", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_deny_only", "src": "198.51.100.1", "flow": "t1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_deny_only", "src": "203.0.113.1", "flow": "t2", "want": "drop:deny"}
+  ],
+  "want_drops": {"r_deny_only": {"deny": 1}},
+  "tolerances": []
+}

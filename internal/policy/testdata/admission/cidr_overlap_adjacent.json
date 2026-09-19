@@ -1,0 +1,26 @@
+{
+  "comment": "Overlapping and adjacent CIDRs in deny and allow lists match exactly the union of their ranges, including both ends of each merged range.",
+  "policy": {
+    "rules": [
+      {"id": "r_deny", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": ["10.0.0.0/25", "10.0.0.128/25", "10.0.0.0/24", "172.16.0.0/16", "172.16.5.0/24"], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null},
+      {"id": "r_allow", "proto": "udp", "forwarding": "transparent", "source_allow": ["192.0.2.0/25", "192.0.2.128/25"], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_deny", "src": "10.0.0.0", "flow": "d1", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_deny", "src": "10.0.0.127", "flow": "d2", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_deny", "src": "10.0.0.128", "flow": "d3", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_deny", "src": "10.0.0.255", "flow": "d4", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_deny", "src": "10.0.1.0", "flow": "d5", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_deny", "src": "9.255.255.255", "flow": "d6", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_deny", "src": "172.16.255.255", "flow": "d7", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_deny", "src": "172.17.0.0", "flow": "d8", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_allow", "src": "192.0.2.0", "flow": "a1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_allow", "src": "192.0.2.200", "flow": "a2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_allow", "src": "192.0.2.255", "flow": "a3", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_allow", "src": "192.0.3.0", "flow": "a4", "want": "drop:allow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_allow", "src": "192.0.1.255", "flow": "a5", "want": "drop:allow"}
+  ],
+  "want_drops": {"r_deny": {"deny": 5}, "r_allow": {"allow": 2}},
+  "tolerances": []
+}

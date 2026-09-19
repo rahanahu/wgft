@@ -1,0 +1,16 @@
+{
+  "comment": "An IPv4-mapped IPv6 source (::ffff:a.b.c.d, the form Go sockets report) is judged as its IPv4 address.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": ["198.51.100.0/24"], "source_deny": ["203.0.113.0/24"], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "::ffff:203.0.113.5", "flow": "m1", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "::ffff:198.51.100.5", "flow": "m2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "::ffff:10.0.0.1", "flow": "m3", "want": "drop:allow"},
+    {"at_ms": 10, "op": "packet", "rule": "r_udp", "src": "::ffff:198.51.100.5", "flow": "m2", "want": "admit"}
+  ],
+  "want_drops": {"r_udp": {"deny": 1, "allow": 1}},
+  "tolerances": []
+}

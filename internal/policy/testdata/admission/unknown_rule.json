@@ -1,0 +1,14 @@
+{
+  "comment": "A flow for a rule ID that is not in the IR is rejected (fail-closed) and counted in no drop counter.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_missing", "src": "198.51.100.1", "flow": "x1", "want": "drop"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "u1", "want": "admit"}
+  ],
+  "want_drops": {},
+  "tolerances": []
+}

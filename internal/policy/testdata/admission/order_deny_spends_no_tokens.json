@@ -1,0 +1,30 @@
+{
+  "comment": "Sources dropped by deny or allow use no per-source, new_flow or packet tokens: after a flood from them, allowed sources still get the full bursts.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": ["198.51.100.0/24"], "source_deny": ["203.0.113.0/24"], "per_source_rate": "1/minute", "new_flow_rate": "1/minute", "packet_rate": "1/minute"}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "203.0.113.1", "flow": "x1", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "203.0.113.1", "flow": "x2", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "203.0.113.2", "flow": "x3", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "203.0.113.3", "flow": "x4", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "203.0.113.4", "flow": "x5", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "203.0.113.5", "flow": "x6", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "10.0.0.1", "flow": "y1", "want": "drop:allow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "10.0.0.2", "flow": "y2", "want": "drop:allow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "10.0.0.3", "flow": "y3", "want": "drop:allow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "10.0.0.4", "flow": "y4", "want": "drop:allow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "10.0.0.5", "flow": "y5", "want": "drop:allow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "10.0.0.6", "flow": "y6", "want": "drop:allow"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a2", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a3", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a4", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a5", "want": "admit"},
+    {"at_ms": 10, "op": "flow", "rule": "r_udp", "src": "198.51.100.2", "flow": "b1", "want": "drop:new_flow"}
+  ],
+  "want_drops": {"r_udp": {"deny": 6, "allow": 6, "new_flow": 1}},
+  "tolerances": []
+}

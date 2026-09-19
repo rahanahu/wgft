@@ -1,0 +1,27 @@
+{
+  "comment": "One rule with every step: each step drops exactly one packet, so each drop counter of the rule counts 1 and no other step's counter moves.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": ["198.51.100.0/24"], "source_deny": ["203.0.113.0/24"], "per_source_rate": "1/minute", "new_flow_rate": "1/minute", "packet_rate": "1/minute"}
+    ],
+    "per_source_flow_caps": {"udp": 2}
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "203.0.113.1", "flow": "d1", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "10.0.0.1", "flow": "x1", "want": "drop:allow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a3", "want": "drop:src_flow"},
+    {"at_ms": 0, "op": "end", "rule": "r_udp", "src": "198.51.100.1", "flow": "a1"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a4", "want": "admit"},
+    {"at_ms": 0, "op": "end", "rule": "r_udp", "src": "198.51.100.1", "flow": "a4"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a5", "want": "admit"},
+    {"at_ms": 0, "op": "end", "rule": "r_udp", "src": "198.51.100.1", "flow": "a5"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.1", "flow": "a6", "want": "drop:per_source"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.2", "flow": "b1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.2", "flow": "b2", "want": "drop:new_flow"},
+    {"at_ms": 0, "op": "packet", "rule": "r_udp", "src": "198.51.100.1", "flow": "a2", "want": "drop:packet"}
+  ],
+  "want_drops": {"r_udp": {"deny": 1, "allow": 1, "src_flow": 1, "per_source": 1, "new_flow": 1, "packet": 1}},
+  "tolerances": []
+}

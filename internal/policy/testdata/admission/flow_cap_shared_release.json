@@ -1,0 +1,28 @@
+{
+  "comment": "The per-source concurrent flow cap is one count per protocol, summed over every rule of that protocol, and a flow's end releases its slot. Established flows are never evicted.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp1", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null},
+      {"id": "r_udp2", "proto": "udp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null},
+      {"id": "r_tcp", "proto": "tcp", "forwarding": "transparent", "source_allow": [], "source_deny": [], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null}
+    ],
+    "per_source_flow_caps": {"udp": 2, "tcp": 1}
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp1", "src": "198.51.100.1", "flow": "a1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp2", "src": "198.51.100.1", "flow": "a2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp1", "src": "198.51.100.1", "flow": "a3", "want": "drop:src_flow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp2", "src": "198.51.100.1", "flow": "a4", "want": "drop:src_flow"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp1", "src": "198.51.100.2", "flow": "b1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "t1", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "t2", "want": "drop:src_flow"},
+    {"at_ms": 10, "op": "packet", "rule": "r_udp2", "src": "198.51.100.1", "flow": "a2", "want": "admit"},
+    {"at_ms": 20, "op": "end", "rule": "r_udp1", "src": "198.51.100.1", "flow": "a1"},
+    {"at_ms": 30, "op": "flow", "rule": "r_udp2", "src": "198.51.100.1", "flow": "a5", "want": "admit"},
+    {"at_ms": 40, "op": "flow", "rule": "r_udp1", "src": "198.51.100.1", "flow": "a6", "want": "drop:src_flow"},
+    {"at_ms": 50, "op": "end", "rule": "r_tcp", "src": "198.51.100.1", "flow": "t1"},
+    {"at_ms": 60, "op": "flow", "rule": "r_tcp", "src": "198.51.100.1", "flow": "t3", "want": "admit"}
+  ],
+  "want_drops": {"r_udp1": {"src_flow": 2}, "r_udp2": {"src_flow": 1}, "r_tcp": {"src_flow": 1}},
+  "tolerances": []
+}

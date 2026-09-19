@@ -1,0 +1,15 @@
+{
+  "comment": "A source in both the deny and the allow list is dropped as deny, because deny is evaluated first.",
+  "policy": {
+    "rules": [
+      {"id": "r_udp", "proto": "udp", "forwarding": "transparent", "source_allow": ["198.51.100.0/24"], "source_deny": ["198.51.100.0/28"], "per_source_rate": null, "new_flow_rate": null, "packet_rate": null}
+    ]
+  },
+  "events": [
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.5", "flow": "f1", "want": "drop:deny"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "198.51.100.20", "flow": "f2", "want": "admit"},
+    {"at_ms": 0, "op": "flow", "rule": "r_udp", "src": "203.0.113.1", "flow": "f3", "want": "drop:allow"}
+  ],
+  "want_drops": {"r_udp": {"deny": 1, "allow": 1}},
+  "tolerances": []
+}
