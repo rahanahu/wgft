@@ -74,7 +74,7 @@ func managerFor(t *testing.T, agentAddr string) (*Manager, func() net.Conn) {
 	m := New(Options{
 		Listen: func(uint16) (net.Listener, error) { return raw, nil },
 		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
-		Logf:   t.Logf,
+		Logf:   testLogf(t),
 	})
 	t.Cleanup(m.Close)
 	dialPublic := func() net.Conn {
@@ -177,7 +177,7 @@ func TestConnCap(t *testing.T) {
 	m := New(Options{
 		Listen: func(uint16) (net.Listener, error) { return raw, nil },
 		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
-		Logf:   t.Logf,
+		Logf:   testLogf(t),
 		Cap:    cnt,
 	})
 	t.Cleanup(m.Close)
@@ -244,7 +244,7 @@ func twoPhase(t *testing.T, busy map[uint16]bool) (*Manager, func(uint16) bool) 
 			return ln, err
 		},
 		Dial: func(string) (net.Conn, error) { return nil, errors.New("no agent in this test") },
-		Logf: t.Logf,
+		Logf: testLogf(t),
 	})
 	t.Cleanup(m.Close)
 	open := func(port uint16) bool {
@@ -329,5 +329,25 @@ func TestCommitClosesRemovedAndRetriesFailedBind(t *testing.T) {
 	p.Commit()
 	if !open(9443) {
 		t.Error("9443 was not opened once the port was free")
+	}
+}
+
+// testLogf は t.Logf を包み、テストの後始末が始まった後のログを捨てる。Manager の goroutine は
+// 待ち受けを閉じた後にもログを書くことがあり、t.Logf がテストの終了後に呼ばれると
+// "Log in goroutine after test has completed" でテストが失敗するためである。
+func testLogf(t *testing.T) func(string, ...any) {
+	var mu sync.Mutex
+	done := false
+	t.Cleanup(func() {
+		mu.Lock()
+		done = true
+		mu.Unlock()
+	})
+	return func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !done {
+			t.Logf(format, args...)
+		}
 	}
 }
