@@ -7,6 +7,7 @@
 #
 #   lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel
 #   lab/lab exec vm bash /wgft/lab/lifecycle.sh userspace
+#   lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b   # only checks 3 and 3b
 #
 # Checks:
 #   1. server restart: kernel mode keeps forwarding an established TCP session and a UDP
@@ -42,7 +43,14 @@
 set -u
 ulimit -n 100000 2>/dev/null || true  # check 5 floods thousands of sockets from the client
 mode=${1:-kernel}
-case "$mode" in kernel|userspace) ;; *) echo "usage: lifecycle.sh kernel|userspace" >&2; exit 2;; esac
+case "$mode" in kernel|userspace) ;; *) echo "usage: lifecycle.sh kernel|userspace [check...]" >&2; exit 2;; esac
+shift || true
+# Optional check names after the mode (1 2 3 3b 4 5) run only those checks; none runs all of them.
+ALL_CHECKS="1 2 3 3b 4 5"
+CHECKS="${*:-$ALL_CHECKS}"
+for c in $CHECKS; do
+  case " $ALL_CHECKS " in *" $c "*) ;; *) echo "lifecycle.sh: unknown check '$c' (use: $ALL_CHECKS)" >&2; exit 2;; esac
+done
 
 ADMIN=127.0.0.1:8686
 PY=/tmp/wgft-lifecycle-py
@@ -808,14 +816,10 @@ check5() {
 write_helpers
 kill_all
 reset_kernel_state
-check1
-check2
-check3
-check3b
-check4
-check5
+for c in $CHECKS; do "check$c"; done
 kill_all
 reset_kernel_state
 
-if [ "$fail" = 0 ]; then echo "== $mode: ALL PASS"; else echo "== $mode: FAILURES"; fi
+label="$mode"; [ "$CHECKS" != "$ALL_CHECKS" ] && label="$mode (checks $CHECKS)"
+if [ "$fail" = 0 ]; then echo "== $label: ALL PASS"; else echo "== $label: FAILURES"; fi
 exit "$fail"
