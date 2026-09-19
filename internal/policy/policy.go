@@ -152,3 +152,24 @@ func Build(rules []model.Rule, limits flowcap.Limits) Policy {
 	sort.Slice(p.Rules, func(i, j int) bool { return p.Rules[i].RuleID < p.Rules[j].RuleID })
 	return p
 }
+
+// SourceAllowed reports whether src passes the rule's source deny and allow lists (deny first; an
+// empty allow list admits every source). Rate limits are left out: they only concern new flows,
+// while this answers whether an established flow is still admitted, for example when a
+// fail-closed rule decides which of its established flows to keep (design.md 7a.3 節).
+func (r RulePolicy) SourceAllowed(src netip.Addr) bool {
+	for _, p := range r.SourceDeny {
+		if p.Contains(src) {
+			return false
+		}
+	}
+	if len(r.SourceAllow) == 0 {
+		return true
+	}
+	for _, p := range r.SourceAllow {
+		if p.Contains(src) {
+			return true
+		}
+	}
+	return false
+}

@@ -301,7 +301,7 @@ func TestRollbackKeepsOldListeners(t *testing.T) {
 		t.Error("after Rollback the old listener 8443 is gone")
 	}
 	// Rollback の後の Commit は何もしない
-	p.Commit()
+	p.Commit(nil)
 	if !open(8443) || open(8444) {
 		t.Error("Commit after Rollback changed the listeners")
 	}
@@ -314,7 +314,7 @@ func TestCommitClosesRemovedAndRetriesFailedBind(t *testing.T) {
 	m, open := twoPhase(t, busy)
 	m.Apply([]Rule{ruleOn("old", 8443)})
 	p := m.Prepare([]Rule{ruleOn("new", 8444), ruleOn("busy", 9443)})
-	p.Commit()
+	p.Commit(nil)
 	if open(8443) {
 		t.Error("after Commit the removed listener 8443 is still open")
 	}
@@ -326,7 +326,7 @@ func TestCommitClosesRemovedAndRetriesFailedBind(t *testing.T) {
 	if got := p.Listening(); !reflect.DeepEqual(got, map[uint16]bool{8444: true, 9443: true}) {
 		t.Errorf("after the port is freed: Listening = %v, want 8444 and 9443", got)
 	}
-	p.Commit()
+	p.Commit(nil)
 	if !open(9443) {
 		t.Error("9443 was not opened once the port was free")
 	}

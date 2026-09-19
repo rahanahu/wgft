@@ -36,6 +36,10 @@ type Config struct {
 	// AdoptExisting が真のときだけ、鍵の一致しない既存インタフェースを引き継ぐ。
 	// 既定は偽で、他人のインタフェースは収束させず StartupRefusal で中止する。
 	AdoptExisting bool
+	// KeepPeers が真のとき、ピアには触れず(Peers は読まない)、インタフェース、鍵、ポート、
+	// アドレス、MTU だけを収束させる。起動時のインタフェースの立ち上げに使い、ピアの変更は
+	// 公開の前後に分けて行うトランザクションに任せる(設計文書 7a.3 節)。
+	KeepPeers bool
 }
 
 // StartupRefusal は、他人の wg インタフェースやポート・アドレスの衝突を見つけて
@@ -189,7 +193,11 @@ func Ensure(cfg Config) (changes []string, err error) {
 	for _, p := range cfg.Peers {
 		wantPeers[p.PublicKey] = []net.IPNet{*prefixToIPNet(netip.PrefixFrom(p.Address, 32))}
 	}
-	for _, p := range dev.Peers {
+	devPeers := dev.Peers
+	if cfg.KeepPeers {
+		devPeers, cfg.Peers = nil, nil
+	}
+	for _, p := range devPeers {
 		ips, ok := wantPeers[p.PublicKey]
 		if !ok {
 			wc.Peers = append(wc.Peers, wgtypes.PeerConfig{PublicKey: p.PublicKey, Remove: true})
@@ -405,4 +413,68 @@ func sameIPNets(a, b []net.IPNet) bool {
 		}
 	}
 	return true
+}
+
+// DeviceState is what Inspect reads back of iface: enough to tell whether it still is what the
+// last transaction converged it to (design.md 7a.3 節: 実際の状態への収束).
+type DeviceState struct {
+	Exists bool
+	// Kind is the link type ("wireguard" for a WireGuard device).
+	Kind string
+	// The rest is read only for a WireGuard device.
+	PrivateKey wgtypes.Key
+	ListenPort int
+	Addresses  []netip.Prefix // IPv4 only, as Ensure converges them
+	Up         bool
+	Peers      []Peer // a peer whose AllowedIPs is not exactly one /32 has an invalid Address
+}
+
+// Inspect reads iface without changing anything: whether it exists, its link type and, for a
+// WireGuard device, its key, listen port, IPv4 addresses, up flag and peers. It is a few netlink
+// reads, cheap enough for every Observe.
+func Inspect(iface string) (DeviceState, error) {
+	link, err := netlink.LinkByName(iface)
+	if _, nf := err.(netlink.LinkNotFoundError); nf {
+		return DeviceState{}, nil
+	}
+	if err != nil {
+		return DeviceState{}, err
+	}
+	st := DeviceState{Exists: true, Kind: link.Type()}
+	if st.Kind != "wireguard" {
+		return st, nil
+	}
+	st.Up = link.Attrs().Flags&net.FlagUp != 0
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return DeviceState{}, err
+	}
+	for _, a := range addrs {
+		if p, ok := netip.AddrFromSlice(a.IPNet.IP); ok {
+			ones, _ := a.IPNet.Mask.Size()
+			st.Addresses = append(st.Addresses, netip.PrefixFrom(p.Unmap(), ones))
+		}
+	}
+	c, err := wgctrl.New()
+	if err != nil {
+		return DeviceState{}, fmt.Errorf("wgctrl: %w", err)
+	}
+	defer c.Close()
+	dev, err := c.Device(iface)
+	if err != nil {
+		return DeviceState{}, fmt.Errorf("read %s: %w", iface, err)
+	}
+	st.PrivateKey, st.ListenPort = dev.PrivateKey, dev.ListenPort
+	for _, p := range dev.Peers {
+		var addr netip.Addr
+		if len(p.AllowedIPs) == 1 {
+			if ones, bits := p.AllowedIPs[0].Mask.Size(); ones == 32 && bits == 32 {
+				if a, ok := netip.AddrFromSlice(p.AllowedIPs[0].IP); ok {
+					addr = a.Unmap()
+				}
+			}
+		}
+		st.Peers = append(st.Peers, Peer{PublicKey: p.PublicKey, Address: addr})
+	}
+	return st, nil
 }

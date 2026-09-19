@@ -51,6 +51,12 @@ type Backend struct {
 	mu  sync.Mutex
 	tun *utun.Tunnel
 	cfg dataplane.WGConfig // the declaration the tunnel was brought up with
+
+	// pendingPeers is the peer set whose removal the last Commit or Repair failed to finish; nil when
+	// no repair is pending (design.md 7a.3 節: 戻れない地点の後の修復). The Reconciler serializes
+	// Prepare, Commit and Repair.
+	pendingPeers []dataplane.Peer
+	repairPeers  bool
 }
 
 var _ dataplane.Backend = (*Backend)(nil)
@@ -65,9 +71,9 @@ func (hostNetwork) ListenTCP(port uint16) (net.Listener, error) {
 	return net.Listen("tcp", ":"+strconv.Itoa(int(port)))
 }
 
-// New builds a Backend with no tunnel and no listeners; EnsureWG brings the tunnel up and the
-// first Commit opens the listeners. The per-source caps are off until that first Commit sets them
-// from its Plan, before it opens any listener.
+// New builds a Backend with no tunnel and no listeners; EnsureDevice brings the tunnel up, the
+// first Prepare binds the listeners and its Commit serves them. The per-source caps are off until
+// that first Commit sets them from its Plan, before any listener serves.
 func New(opts Options) *Backend {
 	lim := opts.Limits.WithDefaults()
 	logf := opts.Logf
@@ -114,11 +120,11 @@ func (b *Backend) Dial(network, addr string) (net.Conn, error) {
 	return t.DialContext(ctx, network, addr)
 }
 
-// EnsureWG brings the tunnel up on first use and converges its peer set.
-func (b *Backend) EnsureWG(cfg dataplane.WGConfig) ([]string, error) {
+// EnsureDevice brings the tunnel up on first use. The peers are converged by the transactions
+// (dataplane.Desired.WG), not here.
+func (b *Backend) EnsureDevice(cfg dataplane.WGConfig) ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	var changes []string
 	if b.tun == nil {
 		t, err := utun.New(utun.Config{PrivateKey: cfg.PrivateKey, ListenPort: uint16(cfg.ListenPort), Address: cfg.Address.Addr(), MTU: cfg.MTU, Logf: b.logf})
 		if err != nil {
@@ -126,17 +132,37 @@ func (b *Backend) EnsureWG(cfg dataplane.WGConfig) ([]string, error) {
 		}
 		b.tun = t
 		b.cfg = cfg
-		changes = append(changes, fmt.Sprintf("userspace tunnel up on port %d", cfg.ListenPort))
-	} else if b.cfg.ListenPort != cfg.ListenPort || b.cfg.PrivateKey != cfg.PrivateKey || b.cfg.Address != cfg.Address || b.cfg.MTU != cfg.MTU {
+		return []string{fmt.Sprintf("userspace tunnel up on port %d", cfg.ListenPort)}, nil
+	}
+	if b.cfg.ListenPort != cfg.ListenPort || b.cfg.PrivateKey != cfg.PrivateKey || b.cfg.Address != cfg.Address || b.cfg.MTU != cfg.MTU {
 		// The key, port, address and MTU are fixed at startup, so this does not happen; refuse
 		// rather than keep a tunnel that no longer matches the declaration.
 		return nil, fmt.Errorf("userspace tunnel: key, port, address or MTU changed while running; restart the server")
 	}
-	peerChanges, err := b.tun.SetPeers(cfg.Peers)
-	if err != nil {
-		return nil, err
+	return nil, nil
+}
+
+// setPeers converges the tunnel's peer set to peers.
+func (b *Backend) setPeers(peers []dataplane.Peer) ([]string, error) {
+	b.mu.Lock()
+	t := b.tun
+	b.mu.Unlock()
+	if t == nil {
+		return nil, fmt.Errorf("tunnel is not up")
 	}
-	return append(changes, peerChanges...), nil
+	return t.SetPeers(peers)
+}
+
+// Observe reports the peers the tunnel has. The tunnel lives only as long as the process, so after
+// a restart it has none until the first transaction.
+func (b *Backend) Observe() (dataplane.Observed, error) {
+	b.mu.Lock()
+	t := b.tun
+	b.mu.Unlock()
+	if t == nil {
+		return dataplane.Observed{}, nil
+	}
+	return dataplane.Observed{Peers: t.DeclaredPeers()}, nil
 }
 
 // WGStatus reports the tunnel in the shape wgctrl returns for a kernel device.
@@ -162,40 +188,114 @@ func (b *Backend) WGStatus() (*wgtypes.Device, error) {
 	return dev, nil
 }
 
-// ReadDrops returns what the evaluator dropped since the previous call.
-func (b *Backend) ReadDrops() ([]dataplane.Drop, error) { return b.policy.Drops(), nil }
-
-// Prepare stages d. The userspace backend has no reversible stage yet: relay.Manager.Apply binds
-// and starts serving each port in one step, and a port that fails to bind is recorded and retried
-// by the relay rather than failing the whole change. So Prepare only keeps the Plan and cannot
-// fail, and Commit does the work and cannot fail either. This is how the userspace mode applied
-// rules before the Backend existed; Phase 4 (design.md 7a.3, 7a.8 節) moves binding into Prepare.
+// Prepare stages d (design.md 7a.2 節): it adds the peers d newly declares, and binds the host
+// listeners of the Transparent ports that are not open yet, without serving them. A rule with a
+// port that cannot be bound is a rule-local failure (design.md 7a.3 節): it is reported by
+// Failed, none of its ports is staged, and Commit leaves it out of the evaluator too. A failure
+// to change the peers is backend-wide and returned as the error.
 //
 // d.RelayListening is not used: the kernel backend needs it to give Relay ports per-source flow
 // rows (design.md 6.1 節), while in userspace mode the Relay frontend counts per source itself
 // through the shared TCPCounter.
 func (b *Backend) Prepare(d dataplane.Desired) (dataplane.Prepared, error) {
-	return &prepared{b: b, plan: d.Plan}, nil
+	p := &prepared{b: b, desired: d, peersChanged: d.PeersChanged()}
+	if p.peersChanged {
+		changes, err := b.setPeers(dataplane.PeerUnion(d.WG.Peers, d.ActivePeers))
+		if err != nil {
+			_, _ = b.setPeers(d.ActivePeers)
+			return nil, fmt.Errorf("userspace tunnel: %w", err)
+		}
+		p.wgChanges = changes
+	}
+	p.staged = b.relay.Prepare(relayTargets(d.Plan))
+	return p, nil
 }
 
 type prepared struct {
-	b    *Backend
-	plan planner.Plan
+	b            *Backend
+	desired      dataplane.Desired
+	peersChanged bool
+	wgChanges    []string
+	staged       *relay.Staged
+	done         bool
 }
 
-// Commit publishes the Plan: the evaluator's rules and the per-source flow caps first, then the
-// relay's listener set, so that no new listener serves before its admission policy is in place.
-func (p *prepared) Commit() error {
-	adm := p.plan.Admission
-	p.b.policy.Update(adm.Rules)
-	p.b.udpCap.SetPerSource(adm.PerSourceFlowCaps.UDP)
-	p.b.tcpCap.SetPerSource(adm.PerSourceFlowCaps.TCP)
-	p.b.relay.Apply(relayTargets(p.plan))
-	return nil
+func (p *prepared) Failed() map[string]error { return p.staged.Failed() }
+
+// Commit publishes the Plan without its failed rules: the evaluator's rules and the per-source
+// flow caps first, then the relay's listener set, so that no new listener serves before its
+// admission policy is in place. It then removes the peers the declaration dropped and closes the
+// relay sessions the published policy no longer admits (in place of conntrack convergence,
+// design.md 6.3 節); a retiring rule's sessions are judged by its Retiring value (design.md 7a.3
+// 節). Nothing here can fail the Commit.
+func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, error) {
+	b := p.b
+	p.done = true
+	c := dataplane.Committed{Drops: b.policy.Drops(), WGChanges: p.wgChanges}
+	failed := make(map[string]bool, len(p.staged.Failed()))
+	for id := range p.staged.Failed() {
+		failed[id] = true
+	}
+	adm := p.desired.Plan.Without(failed).Admission
+	b.policy.Update(adm.Rules)
+	b.udpCap.SetPerSource(adm.PerSourceFlowCaps.UDP)
+	b.tcpCap.SetPerSource(adm.PerSourceFlowCaps.TCP)
+	keep := make(map[string]func(netip.Addr) bool, len(retiring))
+	for _, r := range retiring {
+		keep[r.Previous.RuleID] = r.SourceAllowed
+	}
+	p.staged.Commit(keep)
+	// ピアの削除が残っていれば、ピアの集合が変わらなくても公開の後で宣言に収束させる
+	peersPending := b.repairPeers
+	b.pendingPeers, b.repairPeers = nil, false
+	if p.desired.WG != nil && (p.peersChanged || peersPending) {
+		b.pendingPeers, b.repairPeers = append([]dataplane.Peer(nil), p.desired.WG.Peers...), true
+		b.repairOnce(&c)
+	}
+	c.Closed = b.relay.CloseSessions(func(ruleID string, src netip.Addr) bool {
+		if k, ok := keep[ruleID]; ok {
+			return k(src)
+		}
+		return b.policy.SourceAllowed(ruleID, src)
+	})
+	return c, nil
 }
 
-// Rollback has nothing to release: Prepare staged nothing but the Plan it kept.
-func (p *prepared) Rollback() {}
+// repairOnce removes the peers the declaration dropped (the pending repair), keeping it pending
+// when it fails.
+func (b *Backend) repairOnce(c *dataplane.Committed) {
+	if !b.repairPeers {
+		return
+	}
+	changes, err := b.setPeers(b.pendingPeers)
+	c.WGChanges = append(c.WGChanges, changes...)
+	if err != nil {
+		c.Errors = append(c.Errors, fmt.Errorf("userspace tunnel: removing peers: %w", err))
+		c.RepairPending = true
+		return
+	}
+	b.pendingPeers, b.repairPeers = nil, false
+}
+
+// Repair reruns a peer removal the last Commit or Repair left failed (design.md 7a.3 節: 戻れない
+// 地点の後の修復). Closing the relay sessions cannot fail, so it is never a repair.
+func (b *Backend) Repair() dataplane.Committed {
+	var c dataplane.Committed
+	b.repairOnce(&c)
+	return c
+}
+
+// Rollback closes the listeners Prepare bound and restores the peer set it changed.
+func (p *prepared) Rollback() {
+	if p.done {
+		return
+	}
+	p.done = true
+	p.staged.Rollback()
+	if p.peersChanged {
+		_, _ = p.b.setPeers(p.desired.ActivePeers)
+	}
+}
 
 // relayTargets expands the Plan's Transparent ports (vps_mode = kernel rules, design.md 6.3 節)
 // into one relay.Desired per individual port, since the userspace relay opens one listener per
@@ -212,11 +312,4 @@ func relayTargets(plan planner.Plan) map[relay.Key]relay.Desired {
 		}
 	}
 	return desired
-}
-
-// Converge closes the relay sessions the committed admission policy no longer allows (in place of
-// conntrack convergence, design.md 6.3 節). It reads the policy Commit installed, so it does not
-// need the Plan again.
-func (b *Backend) Converge(planner.Plan) (int, error) {
-	return b.relay.CloseSessions(b.policy.SourceAllowed), nil
 }

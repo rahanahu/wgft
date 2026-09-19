@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rahanahu/wgft/internal/flowcap"
@@ -69,6 +70,18 @@ type Manager struct {
 
 	mu        sync.Mutex
 	listeners map[Key]*listener
+	// retiring は fail-closed にしたルールの待ち受け(新しいフローを受けず、成立済みのフローだけを
+	// 残す。設計文書 7a.3 節)。Prepare/Commit の経路(vpsd のユーザー空間モード)だけが使う。
+	retiring map[Key]*listener
+	// bindFail は Prepare の経路で bind に失敗し続けているキーの記録。同じ理由の失敗はログに 1 回だけ
+	// 出し、開けたときに 1 回だけ回復を出す(適用は 30 秒ごとに再試行されるため)。
+	bindFail map[Key]*bindFailure
+}
+
+// bindFailure は bind の失敗が続いている 1 つのキーの記録。
+type bindFailure struct {
+	reason   string
+	attempts int
 }
 
 type listener struct {
@@ -76,6 +89,11 @@ type listener struct {
 	target string
 	ruleID string
 	closeF func()
+	// stopAccept は新しいフローの受け付けだけをやめ、成立済みのフローを残す(TCP は待ち受けソケットを
+	// 閉じ、UDP は新しい送信元のデータグラムを捨てる)。
+	stopAccept func()
+	// accepting は UDP が新しいセッションを作るか(stopAccept で偽になる)。
+	accepting atomic.Bool
 	// sweep は keep が偽を返す接続元のセッションを閉じ、閉じた数を返す(接続元制限の変更の即時反映。仕様 6.2 節)
 	sweep func(keep func(src netip.Addr) bool) int
 	// セッション数(ハートビートの表示用)
@@ -122,7 +140,7 @@ func New(n Network, opts Options) *Manager {
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
 	}
-	return &Manager{net: n, opts: opts, listeners: map[Key]*listener{}}
+	return &Manager{net: n, opts: opts, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}}
 }
 
 // DesiredFromRules は全体状態のルールから、ポートごとの宣言値を計算する。
@@ -332,12 +350,16 @@ func addrOf(a net.Addr) netip.Addr {
 	return netip.Addr{}
 }
 
-// Close は全リスナーを閉じる。
+// Close は全リスナーを閉じる。Retiring の待ち受けも閉じる。
 func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k := range m.listeners {
 		m.closeLocked(k)
+	}
+	for k, l := range m.retiring {
+		l.closeF()
+		delete(m.retiring, k)
 	}
 }
 
@@ -353,6 +375,14 @@ func (m *Manager) ruleFlows(ruleID string) int {
 		}
 	}
 	return n
+}
+
+// targetOf は現在の実効宛先(Prepare/Commit の経路では宛先の変更を待ち受けを開き直さずに
+// 反映するので、その都度読む)。
+func (m *Manager) targetOf(l *listener) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return l.target
 }
 
 // ruleOf は現在の所属ルール ID(relabel で変わりうるので、その都度読む)。

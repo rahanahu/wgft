@@ -95,7 +95,7 @@ func TestRuleRunState(t *testing.T) {
 	for _, tc := range cases {
 		for i, locale := range []string{"ja", "en"} {
 			t.Run(tc.name+"/"+locale, func(t *testing.T) {
-				badge, label, reason := ruleRunState(tc.rule, tc.latestGen, tc.agents, locale)
+				badge, label, reason := ruleRunState(tc.rule, tc.latestGen, tc.agents, nil, locale)
 				if badge != tc.wantBadge {
 					t.Errorf("badge = %q, want %q", badge, tc.wantBadge)
 				}

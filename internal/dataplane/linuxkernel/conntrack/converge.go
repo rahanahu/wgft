@@ -21,6 +21,9 @@ type Rule struct {
 	AgentAddr   netip.Addr // DNAT 先(エージェントのアドレス)
 	SourceDeny  []netip.Prefix
 	SourceAllow []netip.Prefix
+	// Keep は、nil でなければ SourceDeny と SourceAllow の代わりに接続元を判定する。fail-closed に
+	// したルールの直前の Active の値を、新しい宣言の接続元制限とあわせて判定するのに使う(設計文書 7a.3 節)。
+	Keep func(src netip.Addr) bool
 }
 
 // RulesFromPlan は、Plan の Transparent(カーネルモード)のポートから収束の判定材料を作る
@@ -107,8 +110,11 @@ func allowed(f conntrack.Flow, rules []Rule) bool {
 	return false
 }
 
-// sourceAllowed は deny / allow の判定(deny が先)。
+// sourceAllowed は deny / allow の判定(deny が先)。Keep があればそれに従う。
 func sourceAllowed(src netip.Addr, r Rule) bool {
+	if r.Keep != nil {
+		return r.Keep(src)
+	}
 	for _, p := range r.SourceDeny {
 		if p.Contains(src) {
 			return false

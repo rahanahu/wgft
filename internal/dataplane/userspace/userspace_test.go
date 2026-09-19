@@ -34,7 +34,7 @@ func TestCommitTakesAdmissionFromPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	if err := p.Commit(); err != nil {
+	if _, err := p.Commit(nil); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	if ok, _ := b.policy.AdmitFlow("r_proxy", netip.MustParseAddr("203.0.113.9"), 0); ok {

@@ -50,8 +50,9 @@ func (d *Daemon) OtherAgentHasKey(agent string, key wgtypes.Key) (bool, error) {
 	return false, nil
 }
 
-// SetPublicKey は宣言された公開鍵を保存し、wg0 のピアを置き換える(初回なら作る)。
-// 公開鍵が変われば古いピアは Ensure が消す。テーブルは変わらない(アドレスは同じ)。
+// SetPublicKey は宣言された公開鍵を保存し、wg0 のピアを置き換える(初回なら作る)。ピアの変更は
+// トランザクション(applyNFT)の一部で、新しいピアをテーブルの差し替えの前に足し、古いピアを差し替えの
+// 後に外す(設計文書 7a.3 節)。テーブルの中身は変わらない(アドレスは同じ)が、差し替えは行う。
 func (d *Daemon) SetPublicKey(agent string, key wgtypes.Key) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -70,7 +71,11 @@ func (d *Daemon) SetPublicKey(agent string, key wgtypes.Key) error {
 	} else {
 		log.Printf("agent %s rotated its public key", agent)
 	}
-	return d.reconcileWG()
+	rules, err := d.st.Rules()
+	if err != nil {
+		return err
+	}
+	return d.applyNFT(rules)
 }
 
 // StateFor は stream.Backend の実装。AgentState が組み立てた全体状態に、sel(この接続で交渉した

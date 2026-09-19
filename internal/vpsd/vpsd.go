@@ -5,7 +5,7 @@
 //   - vpsd.go: Options、Daemon、Run(起動の配線)
 //   - dataplane.go: 転送面(カーネルの wg・nftables・conntrack)へのインタフェースとカーネル実装
 //   - dataplane_userspace.go: ユーザー空間モードの転送面(internal/dataplane/userspace の Backend)を包む層
-//   - apply.go: wg とルールの収束(reconcileWG、applyNFT、converge)
+//   - apply.go: wg の立ち上げとルールの適用(bringUpWG、applyNFT。Reconciler が駆動する)
 //   - admin_backend.go: 管理用 API(admin.Backend)の実装
 //   - agent_backend.go: 登録(agentapi.Backend)と stream(stream.Backend)の実装
 //   - watch.go: 窃取検知(IP の食い違いと往復。仕様 5.2 節)
@@ -23,6 +23,7 @@ import (
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/platform/linux"
+	"github.com/rahanahu/wgft/internal/reconcile"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/agentapi"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
@@ -217,6 +218,18 @@ type Daemon struct {
 
 	// dp は転送面。カーネル(nftables + カーネル WireGuard、仕様 6.1 節)とユーザー空間(仕様 6.3 節)の 2 つの実装がある
 	dp serverDataplane
+	// rec は dp とプロキシモードの中継を 1 つのトランザクションで駆動し、Desired と Active を持つ
+	// (設計文書 7a.3 節)。最初の applyNFT で作る
+	rec *reconcile.Reconciler
+	// notActive はログに記録済みのルール単位の失敗(ルール ID → 理由)。同じ失敗を再試行のたびに
+	// ログへ出さないために持つ(apply.go の ruleFailureLog)
+	notActive map[string]string
+	// lastConvergeErr は observeOnce と retryOnce が直前に出した失敗の行。同じ失敗を通知や再試行の
+	// たびに出さないために持つ(apply.go の logConverge)。
+	lastConvergeErr string
+	// lastRepairErr は、戻れない地点の後の修復が残っているあいだの失敗の行。同じ失敗を再試行の
+	// たびに出さないために持つ(apply.go の logRepair)。
+	lastRepairErr string
 }
 
 // Run は起動して、シグナルまで動く。
@@ -293,7 +306,7 @@ func Run(opts Options) error {
 	if d.network, err = netip.ParsePrefix(opts.WGAddress); err != nil {
 		return fmt.Errorf("--wg-address %q: %w", opts.WGAddress, err)
 	}
-	if err := d.reconcileWG(); err != nil {
+	if err := d.bringUpWG(); err != nil {
 		return err
 	}
 	// teardown が --state だけで正しいインタフェース名とポートを知れるよう meta に残す。
@@ -403,6 +416,7 @@ func Run(opts Options) error {
 	go func() { errc <- fmt.Errorf("admin API: %w", admin.ServeListener(adminLn, srv)) }()
 	go func() { errc <- fmt.Errorf("agent API: %w", d.agentAPI.ServeListener(agentLn)) }()
 	go d.watchIPMismatch(ctx)
+	go d.convergeLoop(ctx)
 	select {
 	case <-ctx.Done():
 		log.Printf("shutting down; keeping wg0 and the table")
@@ -414,7 +428,7 @@ func Run(opts Options) error {
 
 // agents は SQLite のエージェントから、wg のピア集合と名前 → アドレスの表を作る。
 // 公開鍵が未宣言(stream に一度も来ていない)のエージェントはアドレスだけ持ち、ピアにはならない。
-// dataplane.Peer を直接返すので、両方の Backend の EnsureWG(dataplane.WGConfig)にそのまま渡せる
+// dataplane.Peer を直接返すので、両方の Backend の dataplane.WGConfig にそのまま渡せる
 // (design.md 7a.8 節 Phase 3: カーネル固有の wg.Peer への変換は kernelDataplane の役目ではなくなった)。
 func (d *Daemon) agents() ([]dataplane.Peer, map[string]netip.Addr, error) {
 	list, err := d.st.Agents()

@@ -185,6 +185,14 @@ type BatchResponse struct {
 	Changed    bool              `json:"changed"`
 	Rules      []proto.Rule      `json:"rules"`
 	Drops      map[string]uint64 `json:"drops,omitempty"` // rule_id → 累積 drop パケット数
+	// 以下は server のデータプレーンへの適用状態(設計文書 7a.3 節)。v1 への加算で、報告を持たない
+	// Backend では省く。DesiredGeneration は最後に適用を試みた宣言の世代、ActiveGeneration は
+	// 最後に成功した適用の世代(backend 全体の失敗では進まない)。
+	DesiredGeneration *uint64              `json:"desired_generation,omitempty"`
+	ActiveGeneration  *uint64              `json:"active_generation,omitempty"`
+	RuleStates        map[string]RuleApply `json:"rule_states,omitempty"` // rule_id → 適用状態
+	Drift             *Drift               `json:"drift,omitempty"`
+	ApplyError        string               `json:"apply_error,omitempty"` // 最後の適用の backend 全体の失敗か、公開の後の修復の失敗
 }
 
 // ErrorBody は失敗時の本文。
@@ -290,7 +298,9 @@ func (s *Server) getRules(w http.ResponseWriter, r *http.Request) {
 	}
 	gen, _ := s.backend.Generation()
 	drops, _ := s.backend.RuleDrops()
-	writeJSON(w, http.StatusOK, BatchResponse{Generation: gen, Rules: rules, Drops: drops})
+	resp := BatchResponse{Generation: gen, Rules: rules, Drops: drops}
+	s.withApply(&resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
@@ -308,7 +318,9 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, BatchResponse{Generation: res.Generation, Changed: res.Changed, Rules: res.Rules})
+	resp := BatchResponse{Generation: res.Generation, Changed: res.Changed, Rules: res.Rules}
+	s.withApply(&resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) getAgents(w http.ResponseWriter, r *http.Request) {

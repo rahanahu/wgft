@@ -38,10 +38,17 @@ func (m *Manager) startTCP(l *listener) error {
 	if err != nil {
 		return err
 	}
+	m.serveTCP(l, ln)
+	return nil
+}
+
+// serveTCP は開いた待ち受け ln で中継を始める。Prepare で開いた待ち受けは Commit でここに渡る。
+func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 	var (
 		mu    sync.Mutex
 		conns = map[net.Conn]netip.Addr{} // 公開側の接続はその接続元、target 側はゼロ値
 		done  = make(chan struct{})
+		once  sync.Once
 		// public は公開側の接続の数(同時フロー数の上限の対象。conns は target 側も含む)
 		public  int
 		capLog  flowcap.LogGate // 上限で拒んだログの頻度
@@ -61,8 +68,14 @@ func (m *Manager) startTCP(l *listener) error {
 		}
 		return n
 	}
+	// stopAccept は待ち受けソケットだけを閉じ、中継中の接続には触れない(fail-closed にしたルールの
+	// Retiring。設計文書 7a.3 節)。
+	l.stopAccept = func() {
+		once.Do(func() { close(done) })
+		ln.Close()
+	}
 	l.closeF = func() {
-		close(done)
+		once.Do(func() { close(done) })
 		ln.Close()
 		// 中継中の TCP 接続もすべて閉じる(仕様 7 節:ポートが宣言から消えたとき)
 		mu.Lock()
@@ -107,10 +120,11 @@ func (m *Manager) startTCP(l *listener) error {
 					mu.Unlock()
 					m.opts.TCPCap.Release(src)
 				}()
-				t, err := m.opts.Dial("tcp", l.target)
+				target := m.targetOf(l)
+				t, err := m.opts.Dial("tcp", target)
 				if err != nil {
 					if dialLog.Allow() {
-						m.opts.Logf("tcp %s: dial %s: %v", l.key, l.target, err)
+						m.opts.Logf("tcp %s: dial %s: %v", l.key, target, err)
 					}
 					c.Close()
 					return
@@ -127,5 +141,4 @@ func (m *Manager) startTCP(l *listener) error {
 			}()
 		}
 	}()
-	return nil
 }

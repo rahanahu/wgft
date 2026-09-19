@@ -56,19 +56,38 @@ type emitter interface {
 // 上限の行を持つ。bind に失敗したポートでは、同じポートの別のプロセスへの通信に wgft の上限を
 // 掛けてしまうため(仕様 6.1 節)。nil なら行を持たない。
 //
-// これは Prepare/Commit の契約(design.md 7a.2 節)のうち Commit の部分でしかない:組み立てが
-// 失敗しても Flush していないので何も公開されず、Flush 自体はカーネル側で不可分なので、
-// 失敗すれば旧いテーブルのまま残る。kernel backend の Prepare が何も確保しないのはこのため。
+// Apply は Stage と Flush を続けて行う。kernel backend は 2 つを Prepare と Commit に分けて呼ぶ
+// (design.md 7a.2 節)。
 func Apply(plan planner.Plan, relayListening map[uint16]bool, cfg Config) error {
-	conn, err := nftables.New()
+	s, err := Stage(plan, relayListening, cfg)
 	if err != nil {
-		return fmt.Errorf("cannot connect to nftables: %w", err)
-	}
-	if err := emit(conn, plan, relayListening, cfg); err != nil {
 		return err
 	}
-	return conn.Flush()
+	return s.Flush()
 }
+
+// Staged は、組み立て終えてまだ送っていないテーブルの差し替え(1 トランザクション分のメッセージ)。
+type Staged struct {
+	conn *nftables.Conn
+}
+
+// Stage はテーブルの差し替えを組み立てるが、送らない(kernel backend の Prepare。design.md 7a.2 節)。
+// 組み立ての誤りはここで返り、何も公開されない。捨てるときは何もしなくてよい(Conn は送るまで
+// カーネルに何も書かない)。
+func Stage(plan planner.Plan, relayListening map[uint16]bool, cfg Config) (*Staged, error) {
+	conn, err := nftables.New()
+	if err != nil {
+		return nil, fmt.Errorf("cannot connect to nftables: %w", err)
+	}
+	if err := emit(conn, plan, relayListening, cfg); err != nil {
+		return nil, err
+	}
+	return &Staged{conn: conn}, nil
+}
+
+// Flush は組み立てた差し替えを 1 トランザクションで送る(kernel backend の Commit)。Flush は
+// カーネル側で不可分なので、失敗すれば旧いテーブルのまま残る。
+func (s *Staged) Flush() error { return s.conn.Flush() }
 
 // DeleteTable は table inet wgft を削除する。他のテーブルには触れない。
 // すでに無ければ何もしない(撤去を手作業の途中からでも走らせられるように)。
