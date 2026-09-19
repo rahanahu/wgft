@@ -13,14 +13,17 @@ import (
 // A key that keeps failing to bind on the staged path is logged once, not on every retry, and
 // once more when it opens.
 func TestStagedBindFailureLoggedOnce(t *testing.T) {
-	port := freePort(t)
-	blocker, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	// bind the blocker itself on port 0 and read back the assigned port, instead of picking a
+	// number with freePort and then binding it: nothing else can ever steal a number that was
+	// never released.
+	blocker, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	port := uint16(blocker.Addr().(*net.TCPAddr).Port)
 	var mu sync.Mutex
 	var lines []string
-	m := New(loopback{}, Options{Logf: func(f string, a ...any) {
+	m := New(&loopback{}, Options{Logf: func(f string, a ...any) {
 		mu.Lock()
 		lines = append(lines, fmt.Sprintf(f, a...))
 		mu.Unlock()
