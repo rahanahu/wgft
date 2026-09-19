@@ -118,7 +118,6 @@ func newRuleAddCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("added %s at generation %d\n", r.ID, res.Generation)
-			notePacketRateTCP(&r)
 			return nil
 		},
 	}

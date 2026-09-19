@@ -334,12 +334,19 @@ func TestRuleDetailPacketRateTCPNotice(t *testing.T) {
 
 	rate := proto.Rate{Count: 500, Unit: proto.PerSecond}
 	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
-		return append(rules, proto.Rule{
-			ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565},
-			Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true,
-			SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
-			PacketRate: &rate,
-		}), nil
+		return append(rules,
+			proto.Rule{
+				ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565},
+				Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true,
+				SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
+				PacketRate: &rate,
+			},
+			proto.Rule{
+				ID: "r_tcp_norate", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25566, Hi: 25566},
+				Target: "192.168.1.20:25566", VPSMode: proto.ModeKernel, Enabled: true,
+				SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
+			},
+		), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -359,6 +366,13 @@ func TestRuleDetailPacketRateTCPNotice(t *testing.T) {
 	udpBody := getBody(t, srv.URL+"/ui/rules/r_a?lang=en")
 	if strings.Contains(udpBody, T("en", "packetTCPNoEffectNote")) {
 		t.Errorf("a UDP rule must not show the TCP packet_rate notice: %s", udpBody)
+	}
+
+	// r_tcp_norate is TCP but has no stored packet_rate: no notice either. The notice
+	// must depend on a stored packet_rate, not merely on the protocol being TCP.
+	tcpNoRateBody := getBody(t, srv.URL+"/ui/rules/r_tcp_norate?lang=en")
+	if strings.Contains(tcpNoRateBody, T("en", "packetTCPNoEffectNote")) {
+		t.Errorf("a TCP rule without a stored packet_rate must not show the notice: %s", tcpNoRateBody)
 	}
 
 	// saving the rate form (per_source changes, packet field resubmits its current value

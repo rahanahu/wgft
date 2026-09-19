@@ -102,10 +102,11 @@ func runRuleCmd(t *testing.T, adminURL string, args ...string) (stdout, stderr s
 	return stdout, stderr, err
 }
 
-// TestRuleAddTCPPacketRateNotice は、TCP のルールを packet_rate 付きで追加すると、
-// packet_rate が TCP に効かない旨を 1 回示すことを確かめる(design.md 7a.9 節)。
-// この経路では rule add は packet_rate を直接受け取れないので、rule rate packet で付ける。
-func TestRuleAddTCPPacketRateNotice(t *testing.T) {
+// TestRuleRatePacketAndLsTCPNotice は、TCP のルールに packet_rate を付けると
+// `rule rate packet` と `rule ls` の両方が、packet_rate が TCP に効かない旨を stderr に
+// 示すことを確かめる(design.md 7a.9 節)。rule add は packet_rate を直接受け取れないので
+// (旨を出す経路ではない)、rule rate packet で付ける。
+func TestRuleRatePacketAndLsTCPNotice(t *testing.T) {
 	adminURL, _ := newRuleCLITestServer(t)
 
 	_, _, err := runRuleCmd(t, adminURL, "add", "--agent", "home", "--tcp", "25565", "--to", "192.168.1.20:25565")
@@ -113,18 +114,18 @@ func TestRuleAddTCPPacketRateNotice(t *testing.T) {
 		t.Fatalf("rule add: %v", err)
 	}
 
-	// packet_rate が無い TCP のルールでは旨を出さない
-	res, _, err := runRuleCmd(t, adminURL, "ls")
+	// packet_rate が無い TCP のルールでは、rule ls は旨を stderr にも出さない
+	_, stderr, err := runRuleCmd(t, adminURL, "ls")
 	if err != nil {
 		t.Fatalf("rule ls: %v", err)
 	}
-	if strings.Contains(res, "no effect on TCP") {
-		t.Errorf("a TCP rule without packet_rate must not trigger the notice: %s", res)
+	if strings.Contains(stderr, "no effect on TCP") {
+		t.Errorf("a TCP rule without packet_rate must not trigger the notice: stderr=%q", stderr)
 	}
 
 	// rule rate packet で TCP のルールに packet_rate を付けると、その場で旨が出る
 	id := firstRuleID(t, adminURL)
-	_, stderr, err := runRuleCmd(t, adminURL, "rate", "packet", id, "500/second")
+	_, stderr, err = runRuleCmd(t, adminURL, "rate", "packet", id, "500/second")
 	if err != nil {
 		t.Fatalf("rule rate packet: %v", err)
 	}
