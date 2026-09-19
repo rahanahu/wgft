@@ -84,7 +84,7 @@ func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
 		ProxyProtocol: r.FormValue("proxy_protocol") == "1", Enabled: r.FormValue("disabled") != "1",
 		SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
 	}
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rule}, Force: r.FormValue("force") == "1"}); err != nil {
+	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rule}, Force: r.FormValue("force") == "1", Op: "ui add"}); err != nil {
 		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": mode, "Error": err.Error()})
 		return
 	}
@@ -252,7 +252,7 @@ func (s *Server) uiEditMeta(w http.ResponseWriter, r *http.Request) {
 	updated := rule
 	updated.Group = strings.TrimSpace(r.FormValue("group"))
 	updated.Note = strings.TrimSpace(r.FormValue("note"))
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}}); err != nil {
+	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}, Op: "ui edit"}); err != nil {
 		d := s.ruleDetailView(rule, locale)
 		d.MetaError, d.Group, d.Note = err.Error(), updated.Group, updated.Note
 		s.renderDetailPage(w, locale, d)
@@ -287,7 +287,7 @@ func (s *Server) uiSourceAdd(w http.ResponseWriter, r *http.Request, allow bool)
 	} else {
 		updated.SourceDeny = proto.AddSources(rule.SourceDeny, ps)
 	}
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}}); err != nil {
+	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}, Op: "ui edit"}); err != nil {
 		s.renderSourceError(w, locale, rule, allow, input, err)
 		return
 	}
@@ -311,7 +311,7 @@ func (s *Server) uiSourceRm(w http.ResponseWriter, r *http.Request, allow bool) 
 	} else {
 		updated.SourceDeny = proto.RemoveSources(rule.SourceDeny, []netip.Prefix{p})
 	}
-	_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}})
+	_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}, Op: "ui edit"})
 	s.redirectOrErrorTo(w, r, "/ui/rules/"+rule.ID, err)
 }
 
@@ -348,7 +348,7 @@ func (s *Server) uiSetRates(w http.ResponseWriter, r *http.Request) {
 	}
 	updated := rule
 	updated.PerSourceRate, updated.NewFlowRate, updated.PacketRate = perSource, newFlow, packet
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}}); err != nil {
+	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}, Op: "ui edit"}); err != nil {
 		renderRatesError(err)
 		return
 	}
@@ -416,13 +416,17 @@ func (s *Server) uiRuleEnable(w http.ResponseWriter, r *http.Request)  { s.setEn
 func (s *Server) uiRuleDisable(w http.ResponseWriter, r *http.Request) { s.setEnabled(w, r, false) }
 
 func (s *Server) setEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
+	op := "ui disable"
+	if enabled {
+		op = "ui enable"
+	}
 	id := r.PathValue("id")
 	rules, err := s.backend.Rules()
 	if err == nil {
 		for i := range rules {
 			if rules[i].ID == id {
 				rules[i].Enabled = enabled
-				_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rules[i]}})
+				_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rules[i]}, Op: op})
 				break
 			}
 		}
@@ -431,6 +435,6 @@ func (s *Server) setEnabled(w http.ResponseWriter, r *http.Request, enabled bool
 }
 
 func (s *Server) uiRuleDelete(w http.ResponseWriter, r *http.Request) {
-	_, err := s.backend.Batch(BatchRequest{Delete: []string{r.PathValue("id")}})
+	_, err := s.backend.Batch(BatchRequest{Delete: []string{r.PathValue("id")}, Op: "ui delete"})
 	s.redirectOrError(w, r, err)
 }

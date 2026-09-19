@@ -135,11 +135,30 @@ func newHTTPServer(addr string, h http.Handler, tlsConfig *tls.Config, t serverT
 	}
 }
 
-// Serve は TLS で待ち受ける(公開)。
+// Serve は TLS で待ち受け、そのまま応答を続ける(公開。Listen と ServeListener を続けて呼ぶ)。
 func (s *Server) Serve(addr string) error {
+	ln, err := s.Listen(addr)
+	if err != nil {
+		return err
+	}
+	return s.ServeListener(ln)
+}
+
+// Listen は addr の TCP で待ち受けを開く。TLS は ServeListener が掛ける。待ち受けを開くところまでを
+// 応答と分けるのは、vpsd が全部の待ち受けを開けてから起動完了のログを出すため(仕様 10.4 節)。
+func (s *Server) Listen(addr string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	fp := s.Fingerprint()
 	log.Printf("agent api: https://%s; certificate sha256:%x...", addr, fp[:4])
+	return ln, nil
+}
+
+// ServeListener は Listen で開いた待ち受けで TLS の応答を続ける。
+func (s *Server) ServeListener(ln net.Listener) error {
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{s.cert}, MinVersion: tls.VersionTLS12}
-	srv := newHTTPServer(addr, s, tlsConfig, defaultTimeouts)
-	return srv.ListenAndServeTLS("", "")
+	srv := newHTTPServer(ln.Addr().String(), s, tlsConfig, defaultTimeouts)
+	return srv.ServeTLS(ln, "", "")
 }

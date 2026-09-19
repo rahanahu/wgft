@@ -72,6 +72,7 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 	stateDir := c.str("WGFT_DATA_DIR")
 	opts := vpsd.Options{
 		Limits:         limits,
+		Version:        effectiveVersion(),
 		Mode:           c.str("WGFT_MODE"),
 		DBPath:         stateDir + "/wgft.sqlite",
 		WGInterface:    c.str("WGFT_WG_INTERFACE"),

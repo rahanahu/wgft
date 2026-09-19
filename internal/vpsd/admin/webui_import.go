@@ -342,7 +342,7 @@ func (s *Server) uiImportApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	del := proto.DeletedIDs(proto.DiffRules(current, desired))
-	if _, err := s.backend.Batch(BatchRequest{Upsert: desired, Delete: del, Force: r.FormValue("force") == "1", ExpectedDigest: digest}); err != nil {
+	if _, err := s.backend.Batch(BatchRequest{Upsert: desired, Delete: del, Force: r.FormValue("force") == "1", ExpectedDigest: digest, Op: "ui import"}); err != nil {
 		if errors.Is(err, ErrBatchConflict) {
 			stale()
 			return

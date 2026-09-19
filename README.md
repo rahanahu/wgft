@@ -60,7 +60,7 @@ The VPS side runs on Linux. The home agent also runs on Windows amd64, verified 
 
 ## Quick start
 
-This is the shortest path for the common setup: kernel mode on a Linux VPS and a plain binary agent at home. For userspace mode, Docker, systemd details, firewall notes, HTTPS, and teardown, see the [setup guide](docs/setup.md).
+This is the shortest path for the common setup: kernel mode on a Linux VPS and a plain binary agent at home. For userspace mode, Docker, systemd details, firewall notes, HTTPS, logs, and teardown, see the [setup guide](docs/setup.md).
 
 ### 1. Install wgft
 
@@ -160,7 +160,7 @@ Then open `http://localhost:8686`. Other admin access options are documented in 
 
 ## Documentation
 
-- [Setup guide](docs/setup.md) - kernel/userspace modes, rootless operation, Docker, systemd, HTTPS, Web UI access, and teardown
+- [Setup guide](docs/setup.md) - kernel/userspace modes, rootless operation, Docker, systemd, HTTPS, Web UI access, logs, and teardown
 - [CLI reference](docs/cli.md) - generated command reference with examples
 - [Design](docs/design.md) - protocol, security, forwarding behavior, and design decisions
 - [Architecture](docs/architecture.md) - package layout and code paths

@@ -62,8 +62,9 @@ func (m *Manager) startUDP(l *listener) error {
 		mu       sync.Mutex
 		sessions = map[string]*udpSession{}
 		done     = make(chan struct{})
-		capLog   flowcap.LogGate
+		capLog   flowcap.LogGate // 上限で拒んだログの頻度
 		writeLog flowcap.LogGate // 宛先への書き込み失敗。上限のログとは別に 1 分に 1 回まで
+		dialLog  flowcap.LogGate // target への dial 失敗のログの頻度(target が落ちている間、新規セッションのたびに鳴らさない)
 	)
 	count := func() int { mu.Lock(); defer mu.Unlock(); return len(sessions) }
 	l.sessions = count
@@ -168,7 +169,9 @@ func (m *Manager) startUDP(l *listener) error {
 				c, err := m.opts.Dial("udp", l.target)
 				if err != nil {
 					m.opts.UDPCap.Release(src)
-					m.opts.Logf("udp %s: dial %s: %v", l.key, l.target, err)
+					if dialLog.Allow() {
+						m.opts.Logf("udp %s: dial %s: %v", l.key, l.target, err)
+					}
 					continue
 				}
 				raiseUDPSendBuffer(c)

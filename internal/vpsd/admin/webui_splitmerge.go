@@ -103,7 +103,7 @@ func (s *Server) uiRuleSplit(w http.ResponseWriter, r *http.Request) {
 		head, tail, err = rule.Split(at, "r_"+newULID())
 	}
 	if err == nil {
-		_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{head, tail}})
+		_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{head, tail}, Op: "ui split"})
 	}
 	if err != nil {
 		d := s.ruleDetailView(rule, locale)
@@ -130,7 +130,7 @@ func (s *Server) uiRuleMerge(w http.ResponseWriter, r *http.Request) {
 	}
 	merged, err := proto.Merge(rule, other)
 	if err == nil {
-		_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{merged}, Delete: []string{other.ID}})
+		_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{merged}, Delete: []string{other.ID}, Op: "ui merge"})
 	}
 	if err != nil {
 		d := s.ruleDetailView(rule, locale)

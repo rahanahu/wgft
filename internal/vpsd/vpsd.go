@@ -188,6 +188,8 @@ type Options struct {
 	Mode string
 	// Limits は同時フロー数のプロセス全体の上限(仕様 7 節)。ゼロ値は既定値
 	Limits flowcap.Limits
+	// Version は起動ログに出す wgft のバージョン(cmd/wgft の effectiveVersion)。空なら省く。
+	Version string
 }
 
 // Daemon は動いている vpsd。管理用 API の Backend を実装する。
@@ -263,6 +265,14 @@ func Run(opts Options) error {
 	if err := reconcileModeAndAddress(st, opts, hadServerKey); err != nil {
 		return err
 	}
+	// ログに出すモードは、この起動で実際に使う値(WGFT_MODE 未指定なら記録済みの値)を
+	// SQLite から読み直して使う。opts.Mode は未指定なら空のままなので、それを出すと
+	// 空欄のログになる(reconcileModeAndAddress の「WGFT_MODE unset」の分岐参照)。
+	recordedMode, err := st.GetMeta(modeMeta)
+	if err != nil {
+		return fmt.Errorf("reading recorded mode: %w", err)
+	}
+	mode := string(recordedMode)
 	if d.serverKey, err = serverKey(st); err != nil {
 		return err
 	}
@@ -339,16 +349,40 @@ func Run(opts Options) error {
 				srv.AllowedHosts = append(srv.AllowedHosts, dnsName)
 			}
 			tsAddr := net.JoinHostPort(ip, adminTailscalePort)
+			tsLn, err := admin.Listen(tsAddr, false)
+			if err != nil {
+				return fmt.Errorf("admin API tailscale: %w", err)
+			}
 			log.Printf("also listening for the admin API on Tailscale %s (%s)", tsAddr, detail)
-			go func() { errc <- fmt.Errorf("admin API tailscale: %w", admin.Serve(tsAddr, srv, false)) }()
+			go func() { errc <- fmt.Errorf("admin API tailscale: %w", admin.ServeListener(tsLn, srv)) }()
 		} else if other != "" {
 			log.Printf("warning: --admin-tailscale set but %s has a 100.64.0.0/10 address and is not a Tailscale interface; the admin API is NOT listening there", other)
 		} else {
 			log.Printf("warning: --admin-tailscale set but no tailnet address (100.64.0.0/10) found")
 		}
 	}
-	go func() { errc <- fmt.Errorf("admin API: %w", admin.Serve(opts.AdminAddr, srv, true)) }()
-	go func() { errc <- fmt.Errorf("agent API: %w", d.agentAPI.Serve(opts.AgentAPIAddr)) }()
+	adminLn, err := admin.Listen(opts.AdminAddr, true)
+	if err != nil {
+		return fmt.Errorf("admin API: %w", err)
+	}
+	agentLn, err := d.agentAPI.Listen(opts.AgentAPIAddr)
+	if err != nil {
+		return fmt.Errorf("agent API: %w", err)
+	}
+	// 起動完了の行は、データプレーンの適用と全部の待ち受けが済んでから出す(仕様 10.4 節)。
+	// これより前に失敗すれば、この行は出ずにプロセスが終わる
+	gen, err := st.Generation()
+	if err != nil {
+		return err
+	}
+	_, agentAddr, err := d.agents()
+	if err != nil {
+		return err
+	}
+	log.Printf("wgft %s server started: mode %s, interface %s, generation %d, %d rules, %d agents",
+		opts.Version, mode, opts.WGInterface, gen, len(rules), len(agentAddr))
+	go func() { errc <- fmt.Errorf("admin API: %w", admin.ServeListener(adminLn, srv)) }()
+	go func() { errc <- fmt.Errorf("agent API: %w", d.agentAPI.ServeListener(agentLn)) }()
 	go d.watchIPMismatch(ctx)
 	select {
 	case <-ctx.Done():

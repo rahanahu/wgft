@@ -358,6 +358,26 @@ example.com {
 
 The `allow` address should be the host running the wgft agent, which is the TCP peer seen by Caddy.
 
+## Logs
+
+The server and the agent write their logs to stderr and keep no log files of their own. With the provided systemd units, journald stores them:
+
+```sh
+sudo journalctl -u wgft -b            # server, since the last boot
+sudo journalctl -u wgft-agent -f      # agent, follow new lines
+sudo journalctl -u wgft --since "1 hour ago"
+```
+
+In Docker, use `docker compose -f deploy/server.compose.yaml logs` or `docker logs` on the container.
+
+Once the data plane is applied and the admin and agent APIs are listening, the server logs one `server started` line with its version, mode, generation, and the number of rules and agents. If that line is missing, startup failed; the lines before it show where. Each successful rule change is logged with its origin, such as `cli rule add` or `ui import`, the affected rule IDs, and the resulting generation. To list only rule changes:
+
+```sh
+sudo journalctl -u wgft | grep 'rules: '
+```
+
+wgft does not log individual packets or successful flows, and never logs join strings, tokens, or private keys.
+
 ## Teardown
 
 Stop the service and inspect what would be removed:

@@ -90,6 +90,7 @@ optional and normally left unset, since the join string is already bound to a na
 				CredentialsPath: c.str("WGFT_DATA_DIR") + "/agent.json",
 				Join:            c.str("WGFT_JOIN"),
 				Name:            c.str("WGFT_NAME"),
+				Version:         effectiveVersion(),
 			}
 			fmt.Fprintln(os.Stderr, "effective config:")
 			c.print(os.Stderr)
