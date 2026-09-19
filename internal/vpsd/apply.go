@@ -95,8 +95,15 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 type relayFrontend struct{ m *proxyrelay.Manager }
 
 func (f relayFrontend) Prepare(plan planner.Plan) (reconcile.FrontendPrepared, error) {
-	return f.m.Prepare(relayRules(plan.Relay())), nil
+	return relayPrepared{f.m.Prepare(relayRules(plan.Relay()))}, nil
 }
+
+// relayPrepared は *proxyrelay.Prepared を frontend の Prepared にする。Retiring にするルール
+// (StopAccepting と Retire。設計文書 7a.3 節)はまだ渡さないので、宣言から消えた待ち受けは
+// 今までどおり成立済みの接続とともに閉じる。
+type relayPrepared struct{ *proxyrelay.Prepared }
+
+func (p relayPrepared) Commit() { p.Prepared.Commit(nil) }
 
 // relayRules は、Plan の Relay のポートのうち TCP のものから中継の宣言を作る。Plan は無効なルールと、
 // アドレスの分からないエージェントのルールを既に含まないので、ここで検査し直さない
