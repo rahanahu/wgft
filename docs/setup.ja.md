@@ -370,7 +370,7 @@ sudo journalctl -u wgft --since "1 hour ago"
 
 Docker では `docker compose -f deploy/server.compose.yaml logs` か、コンテナに対する `docker logs` を使います。
 
-server は起動が完了した時点で、版、モード、世代、ルールとエージェントの件数を 1 行に出します。ルールの変更が成功するたびに、`cli rule add` や `ui import` のような操作の出所、対象のルールの ID、結果の世代を 1 行に出します。ルールの変更だけを一覧にするコマンドは次のとおりです。
+server は、データプレーンの適用が済み、管理用 API とエージェント用 API の待ち受けを開けた時点で、版、モード、世代、ルールとエージェントの件数を `server started` の 1 行に出します。この行が無ければ起動に失敗しています。失敗した箇所は、直前の行に出ます。ルールの変更が成功するたびに、`cli rule add` や `ui import` のような操作の出所、対象のルールの ID、結果の世代を 1 行に出します。ルールの変更だけを一覧にするコマンドは次のとおりです。
 
 ```sh
 sudo journalctl -u wgft | grep 'rules: '

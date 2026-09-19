@@ -400,29 +400,50 @@ func (s *Server) getNFT(w http.ResponseWriter, r *http.Request) {
 	w.Write(out)
 }
 
-// Serve は addr で待ち受ける。addr が unix:// で始まれば Unix ソケット(0600、root 所有)、
-// それ以外は TCP。warnNonLoopback が真で TCP がループバックでなければ起動ログに警告する。
+// Serve は addr で待ち受け、そのまま応答を続ける(Listen と ServeListener を続けて呼ぶ)。
 func Serve(addr string, h http.Handler, warnNonLoopback bool) error {
+	ln, err := Listen(addr, warnNonLoopback)
+	if err != nil {
+		return err
+	}
+	return ServeListener(ln, h)
+}
+
+// Listen は addr で待ち受けを開く。addr が unix:// で始まれば Unix ソケット(0600、root 所有)、
+// それ以外は TCP。warnNonLoopback が真で TCP がループバックでなければ起動ログに警告する。
+// 待ち受けを開くところまでを応答と分けるのは、vpsd が全部の待ち受けを開けてから起動完了の
+// ログを出すため(仕様 10.4 節)。
+func Listen(addr string, warnNonLoopback bool) (net.Listener, error) {
 	if socket, ok := strings.CutPrefix(addr, "unix://"); ok {
 		if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
-			return err
+			return nil, err
 		}
 		_ = os.Remove(socket) // 古いソケットを掃除
 		ln, err := net.Listen("unix", socket)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := os.Chmod(socket, 0o600); err != nil {
-			return err
+			ln.Close()
+			return nil, err
 		}
 		log.Printf("admin api: unix://%s (0600)", socket)
-		return (&http.Server{Handler: h}).Serve(ln)
+		return ln, nil
 	}
 	if warnNonLoopback && !isLoopbackAddr(addr) {
 		log.Printf("warning: admin api opened on non-loopback %s; SSH port forwarding or Tailscale recommended, spec section 11", addr)
 	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	log.Printf("admin api: http://%s", addr)
-	return (&http.Server{Addr: addr, Handler: h}).ListenAndServe()
+	return ln, nil
+}
+
+// ServeListener は Listen で開いた待ち受けで応答を続ける。
+func ServeListener(ln net.Listener, h http.Handler) error {
+	return (&http.Server{Handler: h}).Serve(ln)
 }
 
 func isLoopbackAddr(addr string) bool {

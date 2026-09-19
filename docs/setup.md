@@ -370,7 +370,7 @@ sudo journalctl -u wgft --since "1 hour ago"
 
 In Docker, use `docker compose -f deploy/server.compose.yaml logs` or `docker logs` on the container.
 
-The server logs one line when startup completes, with its version, mode, generation, and the number of rules and agents. Each successful rule change is logged with its origin, such as `cli rule add` or `ui import`, the affected rule IDs, and the resulting generation. To list only rule changes:
+Once the data plane is applied and the admin and agent APIs are listening, the server logs one `server started` line with its version, mode, generation, and the number of rules and agents. If that line is missing, startup failed; the lines before it show where. Each successful rule change is logged with its origin, such as `cli rule add` or `ui import`, the affected rule IDs, and the resulting generation. To list only rule changes:
 
 ```sh
 sudo journalctl -u wgft | grep 'rules: '
