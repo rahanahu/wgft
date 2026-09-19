@@ -20,6 +20,7 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/nettun"
 	"github.com/rahanahu/wgft/internal/vpsd/wg"
 )
 
@@ -36,7 +37,7 @@ type Config struct {
 type Tunnel struct {
 	cfg  Config
 	dev  *device.Device
-	tnet *netTun
+	tnet *nettun.Device
 
 	mu    sync.Mutex
 	peers map[wgtypes.Key]netip.Addr // 宣言済みのピア(SetPeers の差分計算用)
@@ -59,7 +60,7 @@ func New(cfg Config) (*Tunnel, error) {
 	if cfg.MTU <= 0 {
 		cfg.MTU = 1420
 	}
-	tnet, err := createNetTUN(cfg.Address, cfg.MTU)
+	tnet, err := nettun.Create(cfg.Address, cfg.MTU)
 	if err != nil {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
@@ -176,16 +177,16 @@ func (t *Tunnel) DialContext(ctx context.Context, network, addr string) (net.Con
 	}
 	switch network {
 	case "tcp":
-		return t.tnet.dialTCP(ctx, ap)
+		return t.tnet.DialTCP(ctx, ap)
 	case "udp":
-		return t.tnet.dialUDP(ap)
+		return t.tnet.DialUDP(ap)
 	}
 	return nil, fmt.Errorf("dial %s: unknown network %q", addr, network)
 }
 
 // DialUDP は netstack 越しにエージェントの UDP リスナーへつなぐ。
 func (t *Tunnel) DialUDP(raddr netip.AddrPort) (net.Conn, error) {
-	return t.tnet.dialUDP(raddr)
+	return t.tnet.DialUDP(raddr)
 }
 
 // Close はトンネルを閉じる。

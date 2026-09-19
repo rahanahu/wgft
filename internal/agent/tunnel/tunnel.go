@@ -20,8 +20,9 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/rahanahu/wgft/internal/nettun"
 )
 
 // Config はトンネルの宣言。全体状態の wg 節から作る。
@@ -40,7 +41,7 @@ type Config struct {
 type Tunnel struct {
 	cfg  Config
 	dev  *device.Device
-	tnet *netstack.Net
+	tnet *nettun.Device
 
 	mu       sync.Mutex
 	endpoint netip.AddrPort
@@ -64,12 +65,12 @@ func New(cfg Config) (*Tunnel, error) {
 	if cfg.Keepalive <= 0 {
 		cfg.Keepalive = 25 * time.Second
 	}
-	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{cfg.Address}, nil, cfg.MTU)
+	tnet, err := nettun.Create(cfg.Address, cfg.MTU)
 	if err != nil {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
 	t := &Tunnel{cfg: cfg, tnet: tnet}
-	t.dev = device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "wg: "))
+	t.dev = device.NewDevice(tnet, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "wg: "))
 
 	ep, err := resolve(cfg.Endpoint)
 	if err != nil {
@@ -99,12 +100,13 @@ func New(cfg Config) (*Tunnel, error) {
 
 // ListenUDP / ListenTCP は relay.Network の実装。
 func (t *Tunnel) ListenUDP(port uint16) (net.PacketConn, error) {
-	return t.tnet.ListenUDPAddrPort(netip.AddrPortFrom(t.cfg.Address, port))
+	return t.tnet.ListenUDP(netip.AddrPortFrom(t.cfg.Address, port))
 }
 
-// ListenTCP は netstack 上の自分のアドレスで TCP を待ち受ける。
+// ListenTCP は netstack 上の自分のアドレスで TCP を待ち受ける。返す net.Listener の Accept は
+// *nettun.TCPConn を返し、上限で拒む接続を Abort (RST) できる(仕様 7 節、GitHub issue #25)。
 func (t *Tunnel) ListenTCP(port uint16) (net.Listener, error) {
-	return t.tnet.ListenTCPAddrPort(netip.AddrPortFrom(t.cfg.Address, port))
+	return t.tnet.ListenTCP(netip.AddrPortFrom(t.cfg.Address, port))
 }
 
 // Status は IpcGet から最終ハンドシェイクと転送量を読む。
@@ -185,7 +187,7 @@ func (t *Tunnel) Run(ctx context.Context) {
 
 // Ping は vpsd のアドレスへ ICMP echo を 1 つ送り、往復時間を返す。
 func (t *Tunnel) Ping(timeout time.Duration) (time.Duration, error) {
-	pc, err := t.tnet.DialPingAddr(t.cfg.Address, t.cfg.ServerAddress)
+	pc, err := t.tnet.DialPing(t.cfg.Address, t.cfg.ServerAddress)
 	if err != nil {
 		return 0, err
 	}

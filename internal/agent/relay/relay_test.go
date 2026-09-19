@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"reflect"
 	"strconv"
 	"strings"
@@ -566,5 +567,29 @@ func TestTCPRelayConnCap(t *testing.T) {
 	}
 	if err := echo(dial()); err != nil {
 		t.Errorf("connection after a slot was freed: %v", err)
+	}
+}
+
+// TCP:拒んだ接続は RST で即座に閉じ(abortRefused)、通常の Close によるグレースフルクローズ
+// (FIN、その後 TIME_WAIT。GitHub issue #25)ではないことを確かめる。loopback{} の Accept は
+// *net.TCPConn を返すので、SetLinger(0) の経路(nettun.TCPConn を持たない環境。仕様 7 節の
+// vpsd のホストソケット側と同じ)を通る。グレースフルクローズなら次の Read は io.EOF、
+// RST ならそれ以外の誤りになる。
+func TestTCPRelayRefusalIsAborted(t *testing.T) {
+	port := freePort(t)
+	m := New(loopback{}, Options{
+		Admit: func(ruleID string, src netip.Addr) bool { return false },
+		Logf:  t.Logf,
+	})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.TCP, port}: {"127.0.0.1:1", "r1"}})
+	c, err := net.DialTCP("tcp4", nil, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("a refused connection must be aborted (RST), not closed gracefully (EOF); got %v", err)
 	}
 }
