@@ -32,9 +32,15 @@ ADMIN=127.0.0.1:8686
 CLIENT6=2001:db8::2
 VPS6=2001:db8::1
 fail=0
-check() { # check <label> <expected-substring> <actual>
+check() { # check <label> <expected-substring> <actual>: for a marker string (e.g. tcp-echo), not
+  # a number. Substring matching a number is wrong ("10" contains "0"); use eqcheck for those.
   if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3'"; fail=1; fi
+}
+eqcheck() { # eqcheck <label> <want> <got>: integers must be equal. An empty or non-numeric $3
+  # (a probe that crashed or printed nothing) makes `-eq` itself fail, which the else branch below
+  # reports as FAIL, not a silent pass.
+  if [ "$2" -eq "$3" ] 2>/dev/null; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
 }
 not_forwarded() { # not_forwarded <label> <forbidden-substring> <actual>: the inverse of check.
   if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1 (got '$3')"; fi
@@ -180,12 +186,12 @@ before=$(drops "$u")
 flows 6 "$CLIENT6" "$VPS6" 27019 40 >/dev/null
 bump_apply
 after=$(drops "$u")
-check "ipv6 flood alone does not add to the rule's drop counter" "$before" "$after"
+eqcheck "ipv6 flood alone does not add to the rule's drop counter" "$before" "$after"
 
 # bump_apply above also reset the meter (see its comment), so this flood starts from a fresh
 # bucket; nothing else may apply between here and the allowance check right after it.
 v6_answered=$(flows 6 "$CLIENT6" "$VPS6" 27019 40)
-check "ipv6 flood (40 new flows) answers none of them" "0" "$v6_answered"
+eqcheck "ipv6 flood (40 new flows) answers none of them" 0 "$v6_answered"
 v4_answered=$(flows 4 198.51.100.2 198.51.100.1 27019 6)
 okcheck "ipv4 keeps its full new-flow allowance right after the ipv6 flood (answered=$v4_answered, want>=5 of 6)" \
   "$([ "$v4_answered" -ge 5 ] && echo 1 || echo 0)"
@@ -206,10 +212,10 @@ before=$(drops "$u")
 burst 6 "$CLIENT6" "$VPS6" 27019 300 >/dev/null
 bump_apply
 after=$(drops "$u")
-check "ipv6 flood alone does not add to the rule's drop counter (packet_rate)" "$before" "$after"
+eqcheck "ipv6 flood alone does not add to the rule's drop counter (packet_rate)" "$before" "$after"
 
 v6_burst=$(burst 6 "$CLIENT6" "$VPS6" 27019 300)
-check "ipv6 flood (300 datagrams) answers none of them" "0" "$v6_burst"
+eqcheck "ipv6 flood (300 datagrams) answers none of them" 0 "$v6_burst"
 v4_burst=$(burst 4 198.51.100.2 198.51.100.1 27019 5)
 okcheck "ipv4 keeps its full packet-rate allowance right after the ipv6 flood (answered=$v4_burst, want>=4 of 5; token bucket burst is 5)" \
   "$([ "$v4_burst" -ge 4 ] && echo 1 || echo 0)"
