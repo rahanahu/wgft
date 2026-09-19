@@ -9,6 +9,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace"
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/platform/linux"
@@ -46,9 +47,10 @@ func (u *userspaceDataplane) BoundPorts() (linux.Bound, error) {
 }
 
 // InputPortSuggestions は input が policy drop なら足す行を返す。nftables を読めない(非 root)ときは提示しない。
-// userspace モードは自分の nftables テーブルを持たないので、除く table 名は無い("")
+// userspace モードは自分の nftables テーブルを作らないが、kernel モードから切り替えた後に残った
+// table inet wgft を他人のファイアウォールと取り違えないよう、kernel モードと同じく検査から除く
 func (u *userspaceDataplane) InputPortSuggestions(port uint16) ([]string, error) {
-	lines, err := linux.InputPortSuggestions(port, "")
+	lines, err := linux.InputPortSuggestions(port, nft.TableName)
 	if err != nil {
 		return nil, nil
 	}
