@@ -86,8 +86,10 @@ var (
 	ConntrackCountPath = "/proc/sys/net/netfilter/nf_conntrack_count"
 )
 
-// ConntrackMinMax は、これを下回ると ConntrackUsage.Finding が警告する nf_conntrack_max。
-// 接続元ごとの meter の上限(65535 件)と同じ桁で、メモリの小さい VPS の既定値(16384 など)を拾う。
+// ConntrackMinMax は、これを下回ると ConntrackUsage.Finding/StartupWarning が警告する
+// nf_conntrack_max。メモリの量から出した値ではなく、wgft が運用上の最低の推奨値として定める
+// (設計文書 7a.10 節「kernel 側の保護」)。接続元ごとの meter の上限(65535 件)と同じ桁で、
+// メモリの小さい VPS の既定値(16384 など)を拾う。
 const ConntrackMinMax = 65536
 
 // ConntrackUsage は conntrack テーブルの使用状況。Count は nf_conntrack_count が読めたときだけ有効
@@ -112,19 +114,34 @@ func ReadConntrackUsage() (ConntrackUsage, error) {
 	return u, nil
 }
 
-// Finding は上限が小さいときの警告を作る。足りていれば nil。
+// Finding は上限が小さいときの警告を作る。足りていれば nil。メモリの figures(MiB、エントリ 1 件の
+// バイト数、bucket 数)は出さない。ラボで測った値は kernel の版、設定、エントリの種類で変わるため、
+// 提示には使わない(設計文書 7a.10 節「kernel 側の保護」)。65536 は wgft が運用上の最低の推奨値と
+// して定める値であり、カーネルにとって正しい値という意味ではない。
 func (u ConntrackUsage) Finding() *Finding {
 	if u.Max >= ConntrackMinMax {
 		return nil
 	}
 	return &Finding{
-		Where:   "net.netfilter.nf_conntrack_max",
-		Problem: fmt.Sprintf("is %d; every forwarded flow takes one entry, so a flood of new flows can fill the table and the kernel then drops new connections for the whole host", u.Max),
+		Where:   "nf_conntrack_max",
+		Problem: fmt.Sprintf("is low; wgft recommends at least %d", ConntrackMinMax),
 		Suggest: []string{
-			fmt.Sprintf("sysctl -w net.netfilter.nf_conntrack_max=%d", ConntrackMinMax*4),
-			"set new_flow_rate on public rules; flows dropped by it are never added to the table",
+			"a full conntrack table can cause the host to reject new connections",
+			fmt.Sprintf("suggested: sysctl -w net.netfilter.nf_conntrack_max=%d", ConntrackMinMax),
+			"increasing this limit also increases potential kernel memory use",
+			"consider new_flow_rate on public rules to limit new-flow pressure",
 		},
 	}
+}
+
+// StartupWarning は Finding と同じ判定を、server の起動ログ向けの短い 1 行にする。上限が足りて
+// いれば空文字を返す。ip_forward と同じ場所(Run が起動時に検査する Findings)で使う
+// (設計文書 7a.10 節)。
+func (u ConntrackUsage) StartupWarning() string {
+	if u.Max >= ConntrackMinMax {
+		return ""
+	}
+	return fmt.Sprintf("nf_conntrack_max=%d is below wgft's recommended minimum of %d; a full conntrack table can reject new connections for the whole host", u.Max, ConntrackMinMax)
 }
 
 func readProcInt(path string) (int, error) {

@@ -340,6 +340,11 @@ func Run(opts Options) error {
 	if f := d.dp.EnableIPForward(st); f != nil {
 		log.Printf("warning: %s", f)
 	}
+	// conntrack の表が小さいときの警告(仕様 7a.10 節)。`server check` を実行しない運用者にも
+	// 気付けるよう、ip_forward と同じく起動時のログに出す。
+	if w := d.dp.ConntrackWarning(); w != "" {
+		log.Printf("warning: %s", w)
+	}
 	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)。接続元 IP ごとの数は、
 	// nftables の flows_tcp がカーネルモードのルールと合わせて数える(6.1、7 節)ので、ここでは数えない。
 	// 起動時の applyNFT が待ち受けを開き、開けたポートだけに上限の行を付けるよう、先に作る
