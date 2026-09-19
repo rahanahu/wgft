@@ -161,6 +161,47 @@ func TestSourceFlowSharedAcrossRulesAndRelay(t *testing.T) {
 }
 
 // 上限を Update で下げても成立済みのフローは追い出さず、数は引き継ぐ。0 は上限なし。
+// 宣言から消えたルールは、次の Update まで旧い方針で判定を続ける(分割と統合で待ち受けの所属ルール
+// ID を付け替えるまでの間、旧い ID の新しいフローを拒まないため)。その次の Update で拒むようになり、
+// 宣言に戻れば状態を新しく作る。一度も宣言に無かった ID は、最初から拒む。
+func TestRemovedRuleRetiresForOneUpdate(t *testing.T) {
+	e := New(newClock().now)
+	old := udpRule("r_old")
+	old.SourceDeny = []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}
+	old.NewFlowRate = rate(1, proto.PerHour)
+	e.Update(policy.Policy{Rules: []policy.RulePolicy{old}})
+	for range policy.TokenBucketBurst {
+		must(t)(e.AdmitFlow("r_old", src1, 0)).Release()
+	}
+	// 分割:r_old が r_a と r_b に置き換わる
+	split := policy.Policy{Rules: []policy.RulePolicy{udpRule("r_a"), udpRule("r_b")}}
+	e.Update(split)
+	if d, _ := e.AdmitFlow("r_old", src1, 0); d.Kind != "new_flow" {
+		t.Errorf("r_old right after the split = %+v; want its old policy (drop:new_flow), not a refusal as unknown", d)
+	}
+	if d, _ := e.AdmitFlow("r_old", netip.MustParseAddr("203.0.113.9"), 0); d.Kind != "deny" {
+		t.Errorf("r_old right after the split, denied source = %+v; want drop:deny", d)
+	}
+	if !e.SourceAllowed("r_old", src1) {
+		t.Error("SourceAllowed(r_old) right after the split = false")
+	}
+	if d, _ := e.AdmitFlow("r_never", src1, 0); d.Allow || d.Kind != "" {
+		t.Errorf("a rule ID never declared = %+v; want an uncounted refusal", d)
+	}
+	e.Update(split)
+	if d, _ := e.AdmitFlow("r_old", src1, 0); d.Allow || d.Kind != "" {
+		t.Errorf("r_old one Update later = %+v; want an uncounted refusal", d)
+	}
+	// 退いたルールの状態は引き継がない(使い切った new_flow のバケットは新しくなる)
+	e.Update(policy.Policy{Rules: []policy.RulePolicy{old}})
+	for range policy.TokenBucketBurst {
+		must(t)(e.AdmitFlow("r_old", src1, 0)).Release()
+	}
+	e.Update(policy.Policy{Rules: []policy.RulePolicy{udpRule("r_a")}})
+	e.Update(policy.Policy{Rules: []policy.RulePolicy{old}})
+	must(t)(e.AdmitFlow("r_old", src1, 0))
+}
+
 func TestUpdateKeepsFlowCounts(t *testing.T) {
 	e := New(newClock().now)
 	rules := []policy.RulePolicy{udpRule("r1")}

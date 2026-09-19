@@ -68,6 +68,9 @@ type dropKey struct {
 // のリセット」)。
 type ruleState struct {
 	rp policy.RulePolicy
+	// retired は、直前の Update の宣言にあって今の宣言に無いルール。次の Update までだけ、その旧い
+	// 方針で判定を続ける(Update の説明)。
+	retired bool
 
 	perSource *sourceTable
 	newFlow   *tokenBucket
@@ -89,15 +92,34 @@ func New(now func() time.Time) *Engine {
 }
 
 // Update は IR から評価器を作り直す。p.Rules は転送するルール(有効で、エージェントが登録済みで、
-// fail-closed にしていないもの)だけを持つ。消えたルールの状態は捨て、残ったルールのうちレートの値が
-// 変わっていないものは、そのバケットと送信元の表を引き継ぐ。送信元ごとの同時フロー数は捨てずに
-// 引き継ぎ、新しい上限で次の判定から数える(成立済みのフローは追い出さない)。
+// fail-closed にしていないもの)だけを持つ。残ったルールのうちレートの値が変わっていないものは、
+// そのバケットと送信元の表を引き継ぐ。送信元ごとの同時フロー数は捨てずに引き継ぎ、新しい上限で次の
+// 判定から数える(成立済みのフローは追い出さない)。
+//
+// 直前の宣言にあって p に無いルール(削除、無効化、分割と統合で ID が消えたルール、fail-closed に
+// したルール)は、すぐには忘れず、次の Update まで旧い方針のまま判定を続ける(退いたルール)。
+// 評価器の更新と中継の待ち受けの更新(所属ルール ID の付け替え、待ち受けの閉鎖、Retiring への移行)は
+// 不可分ではないので、その間に旧い ID で届く新しいフローを、IR に無いルール ID として拒まないためで
+// ある(設計文書 7a.9 節)。待ち受けの更新は同じトランザクションの中で済み、旧い ID で受け付ける
+// 待ち受けは残らないので、次の Update で退いたルールを捨てる。退いたルールの状態は引き継がず、同じ
+// ID が宣言に戻れば状態を新しく作る(設計文書 7a.4 節)。一度も宣言に無かったルール ID は拒む。
 func (e *Engine) Update(p policy.Policy) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	next := make(map[string]*ruleState, len(p.Rules))
 	for _, rp := range p.Rules {
-		next[rp.RuleID] = buildRuleState(rp, e.rules[rp.RuleID])
+		old := e.rules[rp.RuleID]
+		if old != nil && old.retired {
+			old = nil
+		}
+		next[rp.RuleID] = buildRuleState(rp, old)
+	}
+	for id, rs := range e.rules {
+		if _, ok := next[id]; ok || rs.retired {
+			continue
+		}
+		rs.retired = true
+		next[id] = rs
 	}
 	e.rules = next
 	e.caps = p.PerSourceFlowCaps
