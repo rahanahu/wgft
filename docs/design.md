@@ -865,7 +865,7 @@ fixture は次の場面を覆う。deny と allow の一覧、CIDR の重なり�
 解釈器は kernel の挙動の模型なので、kernel との一致はホストでは確かめられない。次のことはラボでだけ確かめる。
 
 - 行の列から作った式の `nft list` が、同じ内容を `nft -f` で流したものと一致すること(今の `lab_test.go` のゴールデンテスト)
-- 実際のパケットでの通過数と drop 数。`lab/rates.sh` と `lab/connlimit.sh` を両モードで流し、`Relay` のルールのレートを確かめる場面を加える
+- 実際のパケットでの通過数と drop 数。`lab/rates.sh` と `lab/connlimit.sh` を両モードで流す。`lab/rates.sh` には `Relay` のルールの 2 つのレートを確かめる場面がある
 - 許容差に挙げた未確認の点(meter の期限、補充の境界、応答前の UDP のパケットの数え方)
 
 #### Phase 5 の移行の手順
