@@ -7,7 +7,7 @@ import "time"
 const (
 	MsgPublicKey = "pubkey"    // エージェント → vpsd。接続直後の最初のメッセージ
 	MsgState     = "state"     // vpsd → エージェント。差分ではなく全体
-	MsgHeartbeat = "heartbeat" // エージェント → vpsd。30 秒ごと
+	MsgHeartbeat = "heartbeat" // エージェント → vpsd。30 秒ごとと、全体状態の適用直後
 )
 
 // Message は stream の 1 メッセージ。

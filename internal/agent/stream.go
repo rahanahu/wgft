@@ -111,23 +111,21 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 	}
 	log.Printf("stream: connected to %s; public key sent", f.Endpoint)
 
-	// ハートビート
+	// ハートビート。30 秒ごとに送るのに加え、stream の接続直後に全体状態を適用した直後と、
+	// 以後の世代を適用するたびにも送る(仕様 5.2 節)。applyNotify はサイズ 1 の非ブロッキング通知で、
+	// 適用が連続してもハートビートの送信は高々 1 回にまとめる。この goroutine が ws への唯一の書き手であり
+	// (読み側の for ループは公開鍵の送信より後は読むだけ)、書き込みが競合することはない。
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
+	applyNotify := make(chan struct{}, 1)
 	go func() {
 		t := time.NewTicker(rt.heartbeatInterval)
 		defer t.Stop()
-		for {
-			select {
-			case <-hbCtx.Done():
-				return
-			case <-t.C:
-				hb := rt.heartbeat()
-				if err := writeJSON(hbCtx, ws, proto.Message{Type: proto.MsgHeartbeat, Heartbeat: &hb}); err != nil {
-					return
-				}
-			}
+		send := func() (proto.Heartbeat, bool) {
+			hb := rt.heartbeat()
+			return hb, writeJSON(hbCtx, ws, proto.Message{Type: proto.MsgHeartbeat, Heartbeat: &hb}) == nil
 		}
+		runHeartbeats(hbCtx.Done(), t.C, applyNotify, rt.handshakeRetryInterval, rt.handshakeRetryTimeout, send)
 	}()
 
 	// 世代の比較は同一接続内に限る。最初の全体状態は世代に関わらず必ず適用する
@@ -153,7 +151,77 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 		if err := rt.apply(m.State); err != nil {
 			log.Printf("stream: applying generation %d: %v", m.State.Generation, err)
 		}
+		notifyNonBlocking(applyNotify)
 	}
+}
+
+// notifyNonBlocking はサイズ 1 のチャネルへ待たずに知らせる。既に 1 件溜まっていれば何もしない
+// (直近の 1 回分だけを送るコアレシング。仕様 5.2 節のハートビートの節を参照)。
+func notifyNonBlocking(ch chan<- struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// runHeartbeats はハートビートの送信を担う。tick は 30 秒ごとの通常間隔、notify は全体状態の適用直後の
+// 通知(サイズ 1 の非ブロッキングチャネル)。send は 1 回分の送信を行い、送った内容と成功可否を返す。
+// 呼び出し元がこれを唯一の goroutine から呼ぶことで、ws への書き込みを直列に保つ。
+//
+// 適用直後の送信(仕様 5.2 節)は、トンネルを張り直した直後で WireGuard のハンドシェイクがまだ済んで
+// いない場合、"handshake not established" の誤りをそのまま報告してしまう。stream は公開の HTTPS を
+// 通り、wg のトンネルを経由しないため、apply はハンドシェイクの完了を待たずに戻るからである。
+// これを避けるため、適用直後の送信がこの状態を報告した場合に限り、済むまで retryInterval ごとに
+// 最長 retryTimeout まで送り直す(retryInterval が 0 以下なら追送りしない)。定期の 30 秒ごとの送信では
+// 追送りしない。トンネルの本当の誤り(ハンドシェイク待ち以外)は 1 回報告するだけで、そのつど 10 回近い
+// 追送りを起こさない。
+func runHeartbeats(done <-chan struct{}, tick <-chan time.Time, notify <-chan struct{}, retryInterval, retryTimeout time.Duration, send func() (proto.Heartbeat, bool)) {
+	followUpUntilHandshake := func() bool {
+		if retryInterval <= 0 {
+			return true
+		}
+		deadline := time.Now().Add(retryTimeout)
+		retry := time.NewTicker(retryInterval)
+		defer retry.Stop()
+		for {
+			select {
+			case <-done:
+				return false
+			case <-retry.C:
+				hb, ok := send()
+				if !ok {
+					return false
+				}
+				if !needsHandshakeFollowUp(hb.Tunnel) || !time.Now().Before(deadline) {
+					return true
+				}
+			}
+		}
+	}
+	for {
+		select {
+		case <-done:
+			return
+		case <-tick:
+			if _, ok := send(); !ok {
+				return
+			}
+		case <-notify:
+			hb, ok := send()
+			if !ok {
+				return
+			}
+			if needsHandshakeFollowUp(hb.Tunnel) && !followUpUntilHandshake() {
+				return
+			}
+		}
+	}
+}
+
+// needsHandshakeFollowUp は、ハートビートのトンネル状態がハンドシェイク待ちによる誤りかどうかを見る
+// (仕様 5.2 節)。トンネルが無い、bind に失敗した、といった本当の誤りとは区別する。
+func needsHandshakeFollowUp(t proto.TunnelStatus) bool {
+	return t.State == proto.StatusError && t.Reason == reasonHandshakePending
 }
 
 func writeJSON(ctx context.Context, ws *websocket.Conn, m proto.Message) error {
