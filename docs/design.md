@@ -707,7 +707,7 @@ Resource Guard に kernel と userspace で共通の Go interface は持たせ�
 | ルールの書き出しと読み込みの形式 | 変えない。`vps_mode`/`proxy_protocol` の値は、normalize 時に `Forwarding`/`SourceMetadata` へ写すアダプタを通すだけで、JSON の形は変わらない |
 | admin API v1 | 既存のリクエストとレスポンスの意味は変えない。ルールごとの適用状態のような新しい情報は加算的にだけ追加する(7a.3 節) |
 | join string と agent/server の通信 | 既存のメッセージの意味は変えず、版と機能の交渉を加算的なフィールドとして追加する(下記) |
-| 既存のデータの置き場からの更新 | SQLite と状態ファイルは自動の migration で吸収する |
+| 既存のデータの置き場からの更新 | SQLite と状態ファイルは自動の migration で吸収する。旧版への戻しは契約に含めない(下記) |
 
 wire protocol の版と機能の交渉は、既存のメッセージへ次のフィールドを追加するだけで足りる。
 
@@ -721,6 +721,8 @@ wire protocol の版と機能の交渉は、既存のメッセージへ次のフ
 どこまで旧い実装を支えるかは、製品の版ではなく版の番号で決める。server と agent は、番号の付いた版のうち現在の版と直前の版の 2 つを必ず支える。これにより、通常の rolling upgrade(server と agent のどちらを先に上げても)が通る。legacy v0 はこの版の履歴に含めない特例で、server と agent の双方が v1.0.x の間は必ず支え、v1.1 以降は落としてよい。capability を追加しただけでは版を上げない。既存の版で意味を後方互換に表せなくなったときだけ上げる。旧い実装が新しい機能を表せない場合は、黙って旧い挙動へ downgrade せず、そのルールを理由付きの `not_active`(例:`agent does not support capability X`)にする。通信方針はどの agent の版でも同じ意味を持つべきだからである(7a.1 節の原則 1)。
 
 `capabilities`/`server_capabilities` の語彙(将来の差分配信、複数エージェントへの振り分けなど、どの機能をどの文字列で表すか)は、その機能を追加する時点で個別に定める。
+
+更新の経路は保証する。旧版への戻しは互換性の契約に含めず、各版で観測した挙動だけを記録する。戻す必要があるときは、更新の前に取ったデータの置き場のバックアップから戻す。戻しを約束すると、SQLite のスキーマ、migration、知らないフィールドの保存、状態ファイル、wire protocol の変更を、旧い版が読める形に永久に縛ることになるためである。wire protocol の直前の版との互換は、上記の rolling upgrade のために別に支えるもので、データの置き場を旧い版へ戻せることは意味しない。
 
 外部の表現が新しいモデルと根本から矛盾する例は、今のところ見つかっていない。`vps_mode`、`proxy_protocol` を含め、既存の外部表現はすべて内部モデルへ写せている。今後そのような矛盾が見つかった場合は、旧い形式を読めるアダプタを用意したうえで新しい形式を正とする、という規則を適用する。
 
@@ -757,7 +759,7 @@ proto/                   外部契約としての wire スキーマ(既存フィ
 
 ### 7a.8 移行の段取り
 
-各段階は、今のラボの結合テスト(`lab/e2e.sh`、rate、connlimit、split-merge、import-export)と、策定中の lifecycle テスト(再起動中の転送継続、無関係なフローを切らないこと、proxy の bind 失敗が nftables に漏れないこと、teardown が wgft の物だけを消すこと、上限到達時にメモリが上限内であること)を、その段階の終わりに通すことを共通の完了条件とする。以下は各段階に固有の完了条件だけを示す。
+各段階は、今のラボの結合テスト(`lab/e2e.sh`、rate、connlimit、split-merge、import-export)と、策定中の lifecycle テスト(再起動中の転送継続、無関係なフローを切らないこと、proxy の bind 失敗が nftables に漏れないこと、teardown が wgft の物だけを消すこと、上限到達時にメモリが上限内であること)を、その段階の終わりに通すことを共通の完了条件とする。どのテストをどの変更と時点で流すか(コードを変える PR ではマージの前にラボの一式を流すことを含む)は [docs/testing.md](testing.md) に定める。以下は各段階に固有の完了条件だけを示す。
 
 - **Phase 1(model/policy/plan)**:既存の Rule と State を内部モデルへ normalize し(外部形式からのアダプタを含む)、`AdmissionPolicy` の IR、`Plan`、`Planner` を作る。dataplane の挙動は変えない。完了条件:純粋な単体テストが model/policy/planner を覆い、生成される nftables の内容と userspace の転送挙動が変更前と一致する
 - **wire protocol の版と機能の交渉**:全体状態の形を変える前に入れる。完了条件:旧 agent と新 server、新 agent と旧 server の組み合わせで、通常の rolling upgrade がラボで通る
@@ -1454,3 +1456,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - kernel の Admission Policy の行を IPv4 に限る(2026-09-20、7a.9 節、レビュー反映):7a.9 節は「kernel の行は IPv4 の送信元だけに一致する」としていたが、今の nftables の行で IPv4 に限っているのは送信元を読む行だけで、集約の `new_flow_rate` と `packet_rate` の行は IPv6 のパケットにも一致し、IPv6 のフラッドで IPv4 の通信のトークンを使い切れることが分かった。移行の手順 3 で、すべての行に `meta nfproto ipv4` を付けることにした。未確認:ラボでの IPv6 の経路での再現
 - `proxyrelay` の拒否を RST で閉じる(2026-09-20、7a.10 節の Phase 6 移行手順 3):`internal/vpsd/proxyrelay` は、接続元制限と同時フロー数の上限による拒否を通常の `Close` で閉じており、6.3 節の「実ソケットでも拒否は `SetLinger(0)` の RST で閉じ」という記述と食い違っていた(改訂の記録 2026-09-20「Resource Guard の再設計を定める」で見つけた食い違いの 1 つ)。`internal/dataplane/userspace/relay` の `abortRefused`(実ソケットでは `SetLinger(0)` の後に `Close`)と同じ考え方を `proxyrelay` にも実装した。`relay` パッケージは並行する別の変更の対象だったため、依存を増やさずコードを写す形にした。ホストの単体テストで、拒んだ接続(接続元制限、同時フロー数の上限)がループバックで `ECONNRESET` を返すことと、成立して通常に終わる中継は変わらず `io.EOF` で終わることを確かめた。6.2 節に、この 2 つの拒否がどちらも accept の直後に `SetLinger(0)` の RST で閉じることを追記した。
 - conntrack の Finding からメモリの数値を落とす(2026-09-20、7a.10 節の Phase 6 移行手順 5):`server check` と起動時の Finding が示す `nf_conntrack_max` の推奨値は、以前の計画ではラボでのメモリの実測を添えて示すことにしていたが、所有者の決定によりメモリの数値(MiB、エントリ 1 件のバイト数、bucket 数)を一切出さない形に改めた。提示する値と判定の閾値はどちらも 65536 とし、これは wgft が運用上の最低の推奨値として定める値であって、カーネルにとって正しい値ではない。以前の提示 `nf_conntrack_max=262144` はやめた。`nf_conntrack_max` が 65536 未満のときの警告を、`ip_forward` と同じく起動時のログにも出すようにした。管理用 API と Web UI への表示は、他の nftables の Finding と同じく対象外のままである。ラボ(Debian 12 / Linux 6.1)で conntrack のエントリの費用を実測した。約 6 万件を埋めて測ったところ、DNAT を伴うエントリは 1 件あたり約 384 バイト(本体 256 バイトと NAT の拡張 128 バイト)、NAT を伴わないエントリは約 256 バイトで、ほかにハッシュ表の費用がある。この値は kernel の版、設定、エントリの種類で変わるため、診断の出力にも推奨値の計算にも使わない。同じラボで、kernel モードの `Relay` の接続は conntrack のエントリを 2 件、`Transparent` の接続は 1 件使うことも確かめた。admin API への `flow_budget` と `resource_refusals` の追加は、手順 2 で `resource.Pool` ができてから行う。未確認:netstack の握手途中の TCP の数の上限など、他の未確認の点は変わらない
+- 旧版への戻しを互換性の契約から外す(2026-09-20、7a.6 節):外部契約の表の「既存のデータの置き場からの更新」に、更新の経路は保証し、旧版への戻しは契約に含めないことを明記した。戻しは各版で観測した挙動だけを記録し、戻す必要があるときは更新の前に取ったデータの置き場のバックアップから戻す。戻しを約束すると、SQLite のスキーマ、migration、知らないフィールドの保存、状態ファイル、wire protocol の変更が旧い版の読み方に永久に縛られるためである。リリース候補の試験(docs/testing.md の D6)も、更新だけを確かめ、戻しは挙動の記録にとどめる
