@@ -9,6 +9,7 @@
 package reconcile
 
 import (
+	"reflect"
 	"sort"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
@@ -62,6 +63,19 @@ type Tx struct {
 	// Previous is, per rule ID, the value each rule last had Active: what a rule whose Prepare fails
 	// in this transaction retires to (design.md 7a.3 節).
 	Previous map[string]planner.PortPlan
+	// Unchanged, when set, is what the last committed transaction published. If this transaction
+	// would publish exactly the same (same Plan apart from the generation, same listening set, same
+	// failed rules, no peer change), the Runtime rolls it back instead of committing, so a retry
+	// that changes nothing does not replace the nftables table and reset its meters and ct count
+	// sets (design.md 7a.3 節).
+	Unchanged *Published
+}
+
+// Published is what a committed transaction published.
+type Published struct {
+	Plan      planner.Plan
+	Listening map[uint16]bool
+	Failed    map[string]bool
 }
 
 // Outcome is what a transaction did.
@@ -74,6 +88,11 @@ type Outcome struct {
 	Retiring []dataplane.Retiring
 	// Published is the Plan the dataplane published: Tx.Plan without the failed rules.
 	Published planner.Plan
+	// Listening is the frontend's listening set the dataplane was given.
+	Listening map[uint16]bool
+	// NoOp is true when Tx.Unchanged matched and nothing was committed: the dataplane and the
+	// frontend were rolled back, and Committed is empty.
+	NoOp bool
 	// Committed is what the dataplane's Commit reported (drop counters, WireGuard changes,
 	// convergence).
 	Committed dataplane.Committed
@@ -117,6 +136,16 @@ func (r Runtime) Apply(tx Tx) (Outcome, error) {
 		out.Failed[id] = e
 	}
 	out.Retiring = retiring(tx, out.Failed)
+	out.Published = tx.Plan.Without(ids(out.Failed))
+	out.Listening = d.RelayListening
+	if tx.Unchanged != nil && !d.PeersChanged() && samePublication(*tx.Unchanged, out) {
+		dp.Rollback()
+		if fp != nil {
+			fp.Rollback()
+		}
+		out.NoOp = true
+		return out, nil
+	}
 	committed, err := dp.Commit(out.Retiring)
 	if err != nil {
 		dp.Rollback()
@@ -128,9 +157,28 @@ func (r Runtime) Apply(tx Tx) (Outcome, error) {
 	if fp != nil {
 		fp.Commit(out.Retiring)
 	}
-	out.Published = tx.Plan.Without(ids(out.Failed))
 	out.Committed = committed
 	return out, nil
+}
+
+// samePublication reports whether out would publish what last already did.
+func samePublication(last Published, out Outcome) bool {
+	a, b := last.Plan, out.Published
+	a.Generation, b.Generation = 0, 0
+	if !reflect.DeepEqual(a, b) || len(last.Listening) != len(out.Listening) || len(last.Failed) != len(out.Failed) {
+		return false
+	}
+	for p := range out.Listening {
+		if !last.Listening[p] {
+			return false
+		}
+	}
+	for id := range out.Failed {
+		if !last.Failed[id] {
+			return false
+		}
+	}
+	return true
 }
 
 func ids(failed map[string]error) map[string]bool {

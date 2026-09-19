@@ -61,6 +61,10 @@ type Status struct {
 	Retiring []Resource
 	// LastError is the backend-wide failure of the last transaction, empty when it committed.
 	LastError string
+	// NeedsRetry is true while Desired is not fully Active for a reason a retry can fix: the last
+	// transaction failed as a whole, or some rule's Prepare failed (design.md 7a.3 節: 再試行).
+	// Rules not forwarded on purpose (disabled, agent not registered, invalid row) do not count.
+	NeedsRetry bool
 }
 
 // Input is one reconcile request: the Desired value.
@@ -73,6 +77,10 @@ type Input struct {
 	// reason (disabled, agent not registered, invalid stored row). Rules in neither Plan nor
 	// Excluded are not part of the Desired set.
 	Excluded map[string]string
+	// Retry marks a periodic retry: if it would publish exactly what the last committed
+	// transaction published, nothing is committed (Outcome.NoOp). A change made by an operator is
+	// always published, as before.
+	Retry bool
 }
 
 // Reconciler drives a Runtime: Observe (once), diff against Active, Prepare, Commit (design.md
@@ -95,7 +103,9 @@ type Reconciler struct {
 	activeGen map[string]uint64
 	// retiring is, by rule ID, the previous Active value of each fail-closed rule.
 	retiring map[string]dataplane.Retiring
-	status   Status
+	// published is what the last committed transaction published; nil before the first.
+	published *Published
+	status    Status
 }
 
 // New returns a Reconciler that drives rt. Nothing is Active until its first transaction commits.
@@ -134,11 +144,16 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 	for id, pp := range r.active {
 		previous[id] = pp
 	}
-	out, err := r.rt.Apply(Tx{Plan: in.Plan, WG: in.WG, ActivePeers: r.activePeers, Previous: previous})
+	tx := Tx{Plan: in.Plan, WG: in.WG, ActivePeers: r.activePeers, Previous: previous}
+	if in.Retry {
+		tx.Unchanged = r.published
+	}
+	out, err := r.rt.Apply(tx)
 	if err != nil {
 		r.fail(in, err)
 		return out, err
 	}
+	r.published = &Published{Plan: out.Published, Listening: out.Listening, Failed: ids(out.Failed)}
 	gen := in.Plan.Generation
 	active := make(map[string]planner.PortPlan, len(out.Published.Ports))
 	for _, pp := range out.Published.Ports {
@@ -166,6 +181,7 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 	}
 	r.status.ActiveGeneration = gen
 	r.status.LastError = ""
+	r.status.NeedsRetry = len(out.Failed) > 0
 	r.status.Rules = r.ruleStates(in, out.Failed, nil)
 	r.status.ActiveOnly = r.activeOnly(in)
 	r.status.Retiring = r.retiringResources()
@@ -175,6 +191,7 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 // fail records a backend-wide failure: Active, its generation and the retiring set are unchanged.
 func (r *Reconciler) fail(in Input, err error) {
 	r.status.LastError = err.Error()
+	r.status.NeedsRetry = true
 	r.status.Rules = r.ruleStates(in, nil, err)
 	r.status.ActiveOnly = r.activeOnly(in)
 	r.status.Retiring = r.retiringResources()

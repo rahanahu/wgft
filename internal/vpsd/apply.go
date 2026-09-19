@@ -1,6 +1,7 @@
 package vpsd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/dataplane"
@@ -16,6 +17,7 @@ import (
 	"log"
 	"net/netip"
 	"sort"
+	"time"
 )
 
 // bringUpWG は起動時に wg インタフェースを立ち上げ、ピア以外(鍵、ポート、アドレス、MTU)を宣言に
@@ -77,19 +79,65 @@ func (d *Daemon) reconciler() *reconcile.Reconciler {
 // ルール単位の失敗(待ち受けの bind)はエラーにしない。そのルールだけを理由付きの not_active にし、
 // 新規のフローを拒み(fail-closed)、安全な成立済みのフローを Retiring として残す(設計文書 7a.3 節)。
 func (d *Daemon) applyNFT(rules []proto.Rule) error {
+	_, err := d.apply(rules, false)
+	return err
+}
+
+// retryInterval は、宣言がすべて Active になっていないあいだに適用をやり直す間隔(設計文書 7a.3 節)。
+// エージェントの待ち受けの再試行(仕様 5.2 節)と同じ 30 秒にする。
+const retryInterval = 30 * time.Second
+
+// retryLoop は、Reconciler が再試行を求めているあいだ(ルールの Prepare の失敗か、backend 全体の
+// 失敗)、retryInterval ごとに SQLite の宣言を適用し直す。前回と同じものを公開するだけの再試行は
+// 何も commit しないので、nftables のテーブルを差し替えず、meter と ct count の状態を保つ。
+func (d *Daemon) retryLoop(ctx context.Context) {
+	t := time.NewTicker(retryInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		d.retryOnce()
+	}
+}
+
+func (d *Daemon) retryOnce() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.rec == nil || !d.rec.Status().NeedsRetry {
+		return
+	}
+	rules, err := d.st.Rules()
+	if err != nil {
+		log.Printf("retrying the data plane: %v", err)
+		return
+	}
+	if _, err := d.apply(rules, true); err != nil {
+		log.Printf("retrying the data plane: %v", err)
+	}
+}
+
+// apply は applyNFT の本体。retry が真なら、前回と同じものを公開するだけのときに何も commit せず、
+// ログも出さない。
+func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error) {
 	wgCfg, agentAddr, err := d.wgConfig()
 	if err != nil {
-		return err
+		return reconcile.Outcome{}, err
 	}
 	gen, err := d.st.Generation()
 	if err != nil {
-		return err
+		return reconcile.Outcome{}, err
 	}
 	plan, excluded := d.buildPlan(rules, agentAddr)
 	plan.Generation = gen
-	out, err := d.reconciler().Reconcile(reconcile.Input{Plan: plan, WG: wgCfg, Excluded: excluded})
+	out, err := d.reconciler().Reconcile(reconcile.Input{Plan: plan, WG: wgCfg, Excluded: excluded, Retry: retry})
 	if err != nil {
-		return fmt.Errorf("failed to apply nftables: %w", err)
+		return out, fmt.Errorf("failed to apply nftables: %w", err)
+	}
+	if out.NoOp {
+		return out, nil
 	}
 	// 差し替えの直前に読んだ drop カウンタ(前回の差し替え以降の増分)を SQLite に累積する(仕様 6.1 節)。
 	// 差し替えが成功したときだけ返るので、失敗した差し替えのカウンタを二重に数えない
@@ -130,7 +178,7 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 	if d.proxy != nil {
 		d.proxyInputHints(rules)
 	}
-	return nil
+	return out, nil
 }
 
 // relayFrontend はプロキシモードの中継(proxyrelay)を Runtime の frontend の participant にする

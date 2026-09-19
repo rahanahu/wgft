@@ -396,6 +396,7 @@ func Run(opts Options) error {
 	go func() { errc <- fmt.Errorf("admin API: %w", admin.ServeListener(adminLn, srv)) }()
 	go func() { errc <- fmt.Errorf("agent API: %w", d.agentAPI.ServeListener(agentLn)) }()
 	go d.watchIPMismatch(ctx)
+	go d.retryLoop(ctx)
 	select {
 	case <-ctx.Done():
 		log.Printf("shutting down; keeping wg0 and the table")
