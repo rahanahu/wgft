@@ -88,7 +88,9 @@ func New(opts Options) *Manager {
 	return &Manager{opts: opts, ls: map[uint16]*listener{}}
 }
 
-// FromRules は、有効なプロキシモードの TCP ルールから中継の宣言を作る。
+// FromRules は、有効なプロキシモードの TCP ルールから中継の宣言を作る。Phase 2(設計文書 7a.8 節)から
+// vpsd は Plan の Relay のポートから宣言を作り、この関数はそれと同じ宣言になることを確かめる基準として
+// 残る(internal/vpsd の relayfrontend_test.go と internal/planner の equivalence_test.go)。
 func FromRules(rules []proto.Rule, agentAddr map[string]netip.Addr) []Rule {
 	var out []Rule
 	for i := range rules {

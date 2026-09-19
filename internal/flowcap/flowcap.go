@@ -81,9 +81,11 @@ func (l Limits) MemoryLimit() int64 {
 }
 
 // Counter はプロセス全体と接続元 IP ごとのフロー数を数える。ゼロ値は上限なし。
+// 接続元 IP ごとの数は上限の有無にかかわらず常に数えるので、上限は SetPerSource で
+// 動作中に変えられる(変えた後の Acquire から新しい上限で判定する)。
 type Counter struct {
 	Total     int // プロセス全体の上限。0 は上限なし
-	PerSource int // 接続元 IP ごとの上限。0 は数えない(エージェント、または設定で無効にした場合)
+	PerSource int // 接続元 IP ごとの上限の初期値。0 は上限なし(エージェント、または設定で無効にした場合)
 
 	mu    sync.Mutex
 	total int
@@ -101,17 +103,26 @@ func (c *Counter) Acquire(src netip.Addr) bool {
 	if c.Total > 0 && c.total >= c.Total {
 		return false
 	}
-	if c.PerSource > 0 {
-		if c.bySrc[src] >= c.PerSource {
-			return false
-		}
-		if c.bySrc == nil {
-			c.bySrc = map[netip.Addr]int{}
-		}
-		c.bySrc[src]++
+	if c.PerSource > 0 && c.bySrc[src] >= c.PerSource {
+		return false
 	}
+	if c.bySrc == nil {
+		c.bySrc = map[netip.Addr]int{}
+	}
+	c.bySrc[src]++
 	c.total++
 	return true
+}
+
+// SetPerSource は接続元 IP ごとの上限を変える。0 は上限なし。既に数えているフローは
+// 追い出さず、上限を超えている接続元は、フローが減って下回るまで新しいフローを拒まれる。
+func (c *Counter) SetPerSource(n int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.PerSource = n
 }
 
 // Release は Acquire で取った枠を返す。
@@ -122,12 +133,10 @@ func (c *Counter) Release(src netip.Addr) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.total--
-	if c.PerSource > 0 {
-		if n := c.bySrc[src]; n <= 1 {
-			delete(c.bySrc, src)
-		} else {
-			c.bySrc[src] = n - 1
-		}
+	if n := c.bySrc[src]; n <= 1 {
+		delete(c.bySrc, src)
+	} else {
+		c.bySrc[src] = n - 1
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -59,7 +60,7 @@ func TestAdmitFlow_UnknownRuleAdmits(t *testing.T) {
 
 func TestAdmitFlow_NoListsNoRatesAdmitsEverything(t *testing.T) {
 	p := New(newFakeClock().now)
-	p.Update([]proto.Rule{{ID: "r1"}})
+	p.Update([]policy.RulePolicy{{RuleID: "r1"}})
 
 	for i := 0; i < 100; i++ {
 		ok, kind := p.AdmitFlow("r1", addr(t, "203.0.113.1"), 40)
@@ -75,8 +76,8 @@ func TestAdmitFlow_NoListsNoRatesAdmitsEverything(t *testing.T) {
 func TestAdmitFlow_DenyList(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:         "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:     "r1",
 		SourceDeny: prefixes(t, "203.0.113.0/24"),
 	}})
 
@@ -93,8 +94,8 @@ func TestAdmitFlow_DenyList(t *testing.T) {
 func TestAdmitFlow_AllowList(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:          "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:      "r1",
 		SourceAllow: prefixes(t, "10.0.0.0/24"),
 	}})
 
@@ -114,8 +115,8 @@ func TestAdmitFlow_AllowList(t *testing.T) {
 func TestAdmitFlow_DenyPrecedesLimits(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:          "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:      "r1",
 		SourceDeny:  prefixes(t, "203.0.113.0/24"),
 		NewFlowRate: rate(1, proto.PerSecond),
 	}})
@@ -149,8 +150,8 @@ func TestAdmitFlow_DenyPrecedesLimits(t *testing.T) {
 func TestAdmitFlow_PerSourceIsolatesSources(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:            "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:        "r1",
 		PerSourceRate: rate(2, proto.PerSecond),
 	}})
 
@@ -175,8 +176,8 @@ func TestAdmitFlow_PerSourceIsolatesSources(t *testing.T) {
 func TestAdmitFlow_NewFlowSharedAcrossSources(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:          "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:      "r1",
 		NewFlowRate: rate(2, proto.PerSecond),
 	}})
 
@@ -196,8 +197,8 @@ func TestAdmitFlow_NewFlowSharedAcrossSources(t *testing.T) {
 func TestAdmitFlow_RefillsOverTime(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:          "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:      "r1",
 		NewFlowRate: rate(1, proto.PerSecond),
 	}})
 
@@ -220,8 +221,8 @@ func TestAdmitFlow_RefillsOverTime(t *testing.T) {
 func TestAdmitPacket_UsesPacketRateOnly(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:         "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:     "r1",
 		PacketRate: rate(2, proto.PerSecond),
 	}})
 
@@ -252,7 +253,7 @@ func TestAdmitPacket_UsesPacketRateOnly(t *testing.T) {
 func TestAdmitPacket_UnknownOrUnsetAdmits(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{ID: "r1"}})
+	p.Update([]policy.RulePolicy{{RuleID: "r1"}})
 
 	if ok := p.AdmitPacket("r1", 10); !ok {
 		t.Fatalf("rule without packet_rate should admit")
@@ -265,8 +266,8 @@ func TestAdmitPacket_UnknownOrUnsetAdmits(t *testing.T) {
 func TestDrops_AccumulatesAndResets(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:         "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:     "r1",
 		SourceDeny: prefixes(t, "203.0.113.0/24"),
 	}})
 
@@ -294,8 +295,8 @@ func TestDrops_AccumulatesAndResets(t *testing.T) {
 func TestSourceAllowed(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:          "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:      "r1",
 		SourceAllow: prefixes(t, "10.0.0.0/24"),
 		SourceDeny:  prefixes(t, "10.0.0.128/28"),
 	}})
@@ -317,9 +318,9 @@ func TestSourceAllowed(t *testing.T) {
 func TestUpdate_KeepsStateOfUnchangedRulesAndDropsRemoved(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	r1 := proto.Rule{ID: "r1", PerSourceRate: rate(1, proto.PerSecond)}
-	r2 := proto.Rule{ID: "r2", NewFlowRate: rate(1, proto.PerSecond)}
-	p.Update([]proto.Rule{r1, r2})
+	r1 := policy.RulePolicy{RuleID: "r1", PerSourceRate: rate(1, proto.PerSecond)}
+	r2 := policy.RulePolicy{RuleID: "r2", NewFlowRate: rate(1, proto.PerSecond)}
+	p.Update([]policy.RulePolicy{r1, r2})
 
 	src := addr(t, "203.0.113.1")
 	// r1 のバケットを使い切った状態にする(burst の分を通した後、次の呼び出しは per_source で落ちるはず)。
@@ -334,7 +335,7 @@ func TestUpdate_KeepsStateOfUnchangedRulesAndDropsRemoved(t *testing.T) {
 	p.Drops() // ここまでの drop を捨てて、後の検証をやり直しやすくする
 
 	// r1 と同じ設定のまま Update し直す。r2 は消える。
-	p.Update([]proto.Rule{r1})
+	p.Update([]policy.RulePolicy{r1})
 
 	// r1 は消費済みの状態が保たれ、時間が経っていないので依然として落ちる。
 	if ok, kind := p.AdmitFlow("r1", src, 10); ok || kind != "per_source" {
@@ -350,16 +351,16 @@ func TestUpdate_KeepsStateOfUnchangedRulesAndDropsRemoved(t *testing.T) {
 func TestUpdate_RateChangeResetsBucket(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	r1 := proto.Rule{ID: "r1", NewFlowRate: rate(1, proto.PerSecond)}
-	p.Update([]proto.Rule{r1})
+	r1 := policy.RulePolicy{RuleID: "r1", NewFlowRate: rate(1, proto.PerSecond)}
+	p.Update([]policy.RulePolicy{r1})
 
 	src := addr(t, "203.0.113.1")
 	for i := 0; i < nftBurst; i++ {
 		p.AdmitFlow("r1", src, 10) // バケットを使い切る
 	}
 
-	r1Changed := proto.Rule{ID: "r1", NewFlowRate: rate(5, proto.PerSecond)}
-	p.Update([]proto.Rule{r1Changed})
+	r1Changed := policy.RulePolicy{RuleID: "r1", NewFlowRate: rate(5, proto.PerSecond)}
+	p.Update([]policy.RulePolicy{r1Changed})
 
 	// レートが変わった(容量が増えた)ので、新しいバケットで満杯から始まるはずである。
 	if ok, kind := p.AdmitFlow("r1", src, 10); !ok || kind != "" {
@@ -422,8 +423,8 @@ func TestSourceTable_ExpiresAfterTTL(t *testing.T) {
 func TestPerSource_IPv6Slash64Keying(t *testing.T) {
 	clock := newFakeClock()
 	p := New(clock.now)
-	p.Update([]proto.Rule{{
-		ID:            "r1",
+	p.Update([]policy.RulePolicy{{
+		RuleID:        "r1",
 		PerSourceRate: rate(1, proto.PerSecond),
 	}})
 

@@ -1,143 +1,43 @@
 package vpsd
 
-// ユーザー空間モードの転送面(仕様 6.3 節)。カーネルの WireGuard、nftables、conntrack を使わず、
-// wireguard-go + netstack のトンネル(utun)と、ホストのソケットで受けて netstack 越しに
-// エージェントへ渡す中継(relay.Manager の向きの反転)で同じ dataplane インタフェースを満たす。
+// ユーザー空間モードの転送面(仕様 6.3 節)を Daemon に見せる薄い層。転送そのもの(wireguard-go と
+// netstack のトンネル、中継、接続元制限とレート制限の評価器)は internal/dataplane/userspace の
+// Backend が持ち、ここは Daemon の serverDataplane の形に合わせることと、ユーザー空間モードでは
+// 何もしないホスト側の検査(他テーブル、bind 中のポート、ip_forward)だけを受け持つ。
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"net"
 	"net/netip"
-	"strconv"
-	"sync"
-	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	"github.com/rahanahu/wgft/internal/agent/relay"
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace"
+	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/vpsd/check"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
 	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
-	"github.com/rahanahu/wgft/internal/vpsd/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
-	"github.com/rahanahu/wgft/internal/vpsd/utun"
 	"github.com/rahanahu/wgft/internal/vpsd/wg"
 	"github.com/rahanahu/wgft/proto"
 )
 
-// flowPolicy は接続元制限とレート制限の評価器(nftables の代わり。仕様 6.3 節)。
-type flowPolicy interface {
-	Update(rules []proto.Rule)
-	AdmitFlow(ruleID string, src netip.Addr, size int) (ok bool, kind string)
-	AdmitPacket(ruleID string, size int) bool
-	SourceAllowed(ruleID string, src netip.Addr) bool
-	Drops() []nft.Drop
-}
-
 // userspaceDataplane はユーザー空間モードの転送面。
 type userspaceDataplane struct {
-	policy flowPolicy
-	relay  *relay.Manager
-	// tcpCap は relay とプロキシモードの中継が共有する TCP の同時接続数(仕様 7 節)
-	tcpCap *flowcap.Counter
-
-	mu  sync.Mutex
-	tun *utun.Tunnel
-	cfg wg.Config // 直近の宣言(鍵、ポート、アドレス)
+	b *userspace.Backend
 }
 
-// hostNetwork はホストの全アドレスでリスナーを開く(公開ポート)。
-type hostNetwork struct{}
-
-func (hostNetwork) ListenUDP(port uint16) (net.PacketConn, error) {
-	return net.ListenUDP("udp", &net.UDPAddr{Port: int(port)})
-}
-func (hostNetwork) ListenTCP(port uint16) (net.Listener, error) {
-	return net.Listen("tcp", ":"+strconv.Itoa(int(port)))
-}
-
-func newUserspaceDataplane(policy flowPolicy, lim flowcap.Limits) *userspaceDataplane {
-	lim = lim.WithDefaults()
-	u := &userspaceDataplane{policy: policy, tcpCap: &flowcap.Counter{Total: lim.TCPTotal, PerSource: lim.TCPPerSourceCap()}}
-	u.relay = relay.New(hostNetwork{}, relay.Options{
-		UDPIdleTimeout: 120 * time.Second, // conntrack の udp_timeout_stream の既定と同じ
-		Dial:           u.dial,
-		Logf:           log.Printf,
-		Admit: func(ruleID string, src netip.Addr) bool {
-			ok, _ := policy.AdmitFlow(ruleID, src, 0)
-			return ok
-		},
-		AdmitPacket: policy.AdmitPacket,
-		Limits:      lim,
-		UDPCap:      &flowcap.Counter{Total: lim.UDPTotal, PerSource: lim.UDPPerSourceCap()},
-		TCPCap:      u.tcpCap,
-	})
-	return u
-}
-
-// dial は netstack 越しにエージェントのリスナーへつなぐ(relay と conncheck の Dial)。
-func (u *userspaceDataplane) dial(network, addr string) (net.Conn, error) {
-	u.mu.Lock()
-	t := u.tun
-	u.mu.Unlock()
-	if t == nil {
-		return nil, fmt.Errorf("tunnel is not up")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return t.DialContext(ctx, network, addr)
-}
-
-// ProxyDial はプロキシモードの中継(PROXY protocol 付き TCP)が使う Dial。
-func (u *userspaceDataplane) ProxyDial(addr string) (net.Conn, error) { return u.dial("tcp", addr) }
-
+// EnsureWG は wg.Config のうち Backend の宣言に当たる部分を渡す。インタフェース名と
+// AdoptExisting はカーネルの wg インタフェースだけの性質なので使わない。
 func (u *userspaceDataplane) EnsureWG(cfg wg.Config) ([]string, error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	var changes []string
-	if u.tun == nil {
-		t, err := utun.New(utun.Config{PrivateKey: cfg.PrivateKey, ListenPort: uint16(cfg.ListenPort), Address: cfg.Address.Addr(), MTU: cfg.MTU, Logf: log.Printf})
-		if err != nil {
-			return nil, err
-		}
-		u.tun = t
-		u.cfg = cfg
-		changes = append(changes, fmt.Sprintf("userspace tunnel up on port %d", cfg.ListenPort))
-	} else if u.cfg.ListenPort != cfg.ListenPort || u.cfg.PrivateKey != cfg.PrivateKey || u.cfg.Address != cfg.Address || u.cfg.MTU != cfg.MTU {
-		// 起動後に鍵やポートが変わることは無い(設定は起動時に固定)。念のため拒否する
-		return nil, fmt.Errorf("userspace tunnel: key, port, address or MTU changed while running; restart the server")
+	peers := make([]dataplane.Peer, len(cfg.Peers))
+	for i, p := range cfg.Peers {
+		peers[i] = dataplane.Peer{PublicKey: p.PublicKey, Address: p.Address}
 	}
-	peerChanges, err := u.tun.SetPeers(cfg.Peers)
-	if err != nil {
-		return nil, err
-	}
-	return append(changes, peerChanges...), nil
+	return u.b.EnsureWG(dataplane.WGConfig{PrivateKey: cfg.PrivateKey, ListenPort: cfg.ListenPort,
+		Address: cfg.Address, MTU: cfg.MTU, Peers: peers})
 }
 
-func (u *userspaceDataplane) WGStatus() (*wgtypes.Device, error) {
-	u.mu.Lock()
-	t, cfg := u.tun, u.cfg
-	u.mu.Unlock()
-	if t == nil {
-		return nil, fmt.Errorf("tunnel is not up")
-	}
-	peers, err := t.Peers()
-	if err != nil {
-		return nil, err
-	}
-	dev := &wgtypes.Device{Name: "userspace", Type: wgtypes.Userspace, PrivateKey: cfg.PrivateKey, PublicKey: cfg.PrivateKey.PublicKey(), ListenPort: cfg.ListenPort}
-	for _, p := range peers {
-		wp := wgtypes.Peer{PublicKey: p.PublicKey, LastHandshakeTime: p.LastHandshake, ReceiveBytes: p.RxBytes, TransmitBytes: p.TxBytes}
-		if p.Endpoint.IsValid() {
-			wp.Endpoint = net.UDPAddrFromAddrPort(p.Endpoint)
-		}
-		dev.Peers = append(dev.Peers, wp)
-	}
-	return dev, nil
-}
+func (u *userspaceDataplane) WGStatus() (*wgtypes.Device, error) { return u.b.WGStatus() }
 
 func (u *userspaceDataplane) OtherDeviceWithKey(wgtypes.Key) (string, bool) { return "", false }
 
@@ -163,49 +63,21 @@ func (u *userspaceDataplane) InputPortSuggestions(port uint16) ([]string, error)
 	return lines, nil
 }
 
-func (u *userspaceDataplane) ReadDrops() ([]nft.Drop, error) { return u.policy.Drops(), nil }
+func (u *userspaceDataplane) ReadDrops() ([]dataplane.Drop, error) { return u.b.ReadDrops() }
 
-// ApplyNFT はルール集合をリスナーの宣言に写す。プロキシモード(PROXY protocol)のルールは
-// Daemon の proxyrelay が受け持つので、ここでは vps_mode = kernel のルールだけを開く。
-func (u *userspaceDataplane) ApplyNFT(rules []proto.Rule, agentAddr map[string]netip.Addr, _ map[uint16]bool) error {
-	u.policy.Update(rules)
-	u.relay.Apply(userspaceRelayTargets(rules, agentAddr))
-	return nil
-}
-
-// userspaceRelayTargets は、有効な vps_mode = kernel のルール(Forwarding = Transparent。
-// design.md 6.3 節)から、範囲内の個々のポートごとに 1 つの relay.Desired を組み立てる。宛先は
-// エージェントの同じポート(design.md 6.1 節「DNAT では宛先アドレスだけを書き換え、ポートは
-// 書き換えない」と同じ規則が中継にも適用される)。プロキシモードのルールは Daemon の
-// proxyrelay が受け持つのでここには含めない。ApplyNFT から切り出した純粋な関数で、
-// receiver の状態を読まないので、internal/planner の Plan と直接突き合わせて検査できる
-// (internal/planner/equivalence_test.go 相当の検査は internal/vpsd のテストが行う。
-// design.md 7a.8 節 Phase 1 の「生成される...転送挙動が変更前と一致する」の一部)。
-func userspaceRelayTargets(rules []proto.Rule, agentAddr map[string]netip.Addr) map[relay.Key]relay.Desired {
-	desired := map[relay.Key]relay.Desired{}
-	for i := range rules {
-		r := &rules[i]
-		if !r.Enabled || r.VPSMode == proto.ModeProxy {
-			continue
-		}
-		addr, ok := agentAddr[r.Agent]
-		if !ok {
-			continue
-		}
-		for p := int(r.ListenPort.Lo); p <= int(r.ListenPort.Hi); p++ {
-			desired[relay.Key{Proto: r.Proto, Port: uint16(p)}] = relay.Desired{Target: net.JoinHostPort(addr.String(), strconv.Itoa(p)), RuleID: r.ID}
-		}
-	}
-	return desired
+// participant は Backend そのもの。ルール集合は読まない(Backend は Plan だけから組み立てる)。
+// プロキシモード(Relay)のルールは Daemon の proxyrelay が受け持ち、Backend は Transparent のルールだけを開く。
+func (u *userspaceDataplane) participant([]proto.Rule, map[string]netip.Addr) dataplane.Participant {
+	return u.b
 }
 
 // Converge は接続元制限を満たさなくなった進行中のセッションを閉じる(conntrack 収束の代わり。仕様 6.3 節)。
-func (u *userspaceDataplane) Converge([]ctconv.Rule, netip.Prefix) (int, error) {
-	return u.relay.CloseSessions(u.policy.SourceAllowed), nil
+func (u *userspaceDataplane) Converge(_ []ctconv.Rule, _ netip.Prefix, plan planner.Plan) (int, error) {
+	return u.b.Converge(plan)
 }
 
 func (u *userspaceDataplane) EnableIPForward(*store.Store) *check.Finding { return nil }
 
 func (u *userspaceDataplane) CheckConnectivity(addr string) conncheck.Result {
-	return conncheck.Check(addr, conncheck.Options{Dial: u.dial})
+	return conncheck.Check(addr, conncheck.Options{Dial: u.b.Dial})
 }

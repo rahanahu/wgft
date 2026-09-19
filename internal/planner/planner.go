@@ -112,9 +112,9 @@ type Plan struct {
 // A rule is left out of Plan.Ports when it is disabled, or when its agent is not in Input.Agents.
 // This matches what every current dataplane already does before it can forward anything:
 // internal/vpsd/nft.emit skips a rule when cfg.AgentAddr[r.Agent] is not found (and always skips
-// !r.Enabled), internal/vpsd/proxyrelay.FromRules does the same, and
-// internal/vpsd/dataplane_userspace.go's ApplyNFT does the same for its relay.Desired map. A rule
-// cannot be forwarded to an agent wgft does not know the address of.
+// !r.Enabled), internal/vpsd/proxyrelay.FromRules does the same, and so did the userspace relay's
+// rule-based listener set before Phase 2 (the userspace Backend now reads this Plan instead). A
+// rule cannot be forwarded to an agent wgft does not know the address of.
 func Build(in Input) Plan {
 	addrByAgent := make(map[string]netip.Addr, len(in.Agents))
 	for _, a := range in.Agents {

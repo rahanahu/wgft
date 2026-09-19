@@ -118,8 +118,8 @@ type Policy struct {
 
 // Build derives the AdmissionPolicy IR from a normalized rule set and the per-source concurrent
 // flow cap settings (design.md 7a.2 節). Only enabled rules participate, matching the rule-level
-// condition every current implementation applies (internal/vpsd/nft.emit,
-// internal/vpsd/srcpolicy.Policy.Update).
+// condition internal/vpsd/nft.emit applies; internal/dataplane/userspace/srcpolicy.Policy.Update
+// takes these entries directly.
 //
 // limits is resolved through flowcap.Limits.UDPPerSourceCap()/TCPPerSourceCap(), so a zero-value
 // flowcap.Limits{} yields the default caps (256/128), and flowcap.PerSourceOff explicitly disables

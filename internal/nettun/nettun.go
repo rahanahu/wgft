@@ -1,5 +1,5 @@
 // Package nettun は、エージェントのトンネル(internal/agent/tunnel)とサーバのユーザー空間モードの
-// トンネル(internal/vpsd/utun)が共有する、netstack と TUN の接着部。どちらも wireguard-go の
+// トンネル(internal/dataplane/userspace/utun)が共有する、netstack と TUN の接着部。どちらも wireguard-go の
 // device を支える gVisor の stack.Stack への直接アクセスを要る。サーバ側は UDP の応答をバッファ
 // なしで待つため(waiter.Queue)、エージェント側は拒んだ TCP 接続を RST で即座に終える(Abort)
 // ため(listen.go)である。wireguard-go 自身の tun/netstack パッケージは組み立てた stack を

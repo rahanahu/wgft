@@ -3,6 +3,10 @@ package vpsd
 import (
 	"errors"
 	"fmt"
+	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/model"
+	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/reconcile"
 	"github.com/rahanahu/wgft/internal/vpsd/check"
 	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
 	"github.com/rahanahu/wgft/internal/vpsd/nft"
@@ -52,23 +56,18 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 			log.Printf("accumulating drop counters: %v", err)
 		}
 	}
-	// プロキシモードの新しい待ち受けを先に開き(Prepare)、開けたポートだけに nftables の
-	// 接続元 IP ごとの上限の行を付ける。nftables の差し替えが失敗したら新しい待ち受けを閉じて
-	// 旧い待ち受けと旧いテーブルを揃えたまま残し、成功したら中継を始めて不要な待ち受けを閉じる(仕様 6.1 節)
-	var prepared *proxyrelay.Prepared
-	var proxyListening map[uint16]bool
+	// Runtime が固定の順序で適用する(設計文書 7a.2 節)。プロキシモードの新しい待ち受けを先に開き
+	// (frontend の Prepare)、開けたポートだけに nftables の接続元 IP ごとの上限の行を付ける
+	// (dataplane の Prepare への入力)。nftables の差し替え(dataplane の Commit)が失敗したら新しい
+	// 待ち受けを閉じて旧い待ち受けと旧いテーブルを揃えたまま残し、成功したら中継を始めて不要な待ち受けを
+	// 閉じる(frontend の Commit。仕様 6.1 節)
+	plan := d.buildPlan(rules, agentAddr)
+	rt := reconcile.Runtime{Dataplane: d.dp.participant(rules, agentAddr)}
 	if d.proxy != nil {
-		prepared = d.proxy.Prepare(proxyrelay.FromRules(rules, agentAddr))
-		proxyListening = prepared.Listening()
+		rt.Frontend = relayFrontend{d.proxy}
 	}
-	if err := d.dp.ApplyNFT(rules, agentAddr, proxyListening); err != nil {
-		if prepared != nil {
-			prepared.Rollback()
-		}
+	if err := rt.Apply(plan); err != nil {
 		return fmt.Errorf("failed to apply nftables: %w", err)
-	}
-	if prepared != nil {
-		prepared.Commit()
 	}
 	active := 0
 	for _, r := range rules {
@@ -84,11 +83,40 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 	}
 	// conntrack の収束は必ず nftables の差し替えの後に走らせる(仕様 6.1 節)。
 	// 先に走らせると、旧テーブルで許可されたフローが差し替えまでの間に入る
-	d.converge(rules, agentAddr)
+	d.converge(rules, agentAddr, plan)
 	if d.proxy != nil {
 		d.proxyInputHints(rules)
 	}
 	return nil
+}
+
+// relayFrontend はプロキシモードの中継(proxyrelay)を Runtime の frontend の participant にする
+// (設計文書 7a.2 節)。proxyrelay の Prepare は bind に失敗したポートをログに出して飛ばすだけで、
+// 全体としては失敗しない。*proxyrelay.Prepared の Commit は失敗せず、2 回目以降は何もしないので、
+// 戻れない地点の後に呼ぶ frontend の Commit の契約を満たす。
+type relayFrontend struct{ m *proxyrelay.Manager }
+
+func (f relayFrontend) Prepare(plan planner.Plan) (reconcile.FrontendPrepared, error) {
+	return f.m.Prepare(relayRules(plan.Relay())), nil
+}
+
+// relayRules は、Plan の Relay のポートのうち TCP のものから中継の宣言を作る。Plan は無効なルールと、
+// アドレスの分からないエージェントのルールを既に含まないので、Phase 2 より前に使っていた
+// proxyrelay.FromRules と同じ宣言になる(relayfrontend_test.go)。
+func relayRules(ports []planner.PortPlan) []proxyrelay.Rule {
+	var out []proxyrelay.Rule
+	for _, pp := range ports {
+		if pp.Forwarding != model.Relay || pp.Proto != proto.TCP {
+			continue
+		}
+		// proxy は単一ポート運用。範囲のルールは先頭ポートだけを使う(FromRules と同じ理由。仕様 5.4、6.2 節)
+		out = append(out, proxyrelay.Rule{
+			ID: pp.RuleID, ListenPort: pp.ListenPort.Lo, AgentAddr: pp.AgentAddr, AgentPort: pp.ListenPort.Lo,
+			ProxyProtocol: pp.SourceMetadata == model.ProxyV2,
+			SourceDeny:    pp.Policy.SourceDeny, SourceAllow: pp.Policy.SourceAllow, Agent: pp.Agent,
+		})
+	}
+	return out
 }
 
 // proxyInputHints は、プロキシモードの公開ポートが既定 drop の input で塞がれていれば提示する。
@@ -107,8 +135,32 @@ func (d *Daemon) proxyInputHints(rules []proto.Rule) {
 	}
 }
 
+// buildPlan は、保存済みのルール集合とエージェントのアドレスから Plan を組み立てる(設計文書 7a.2 節)。
+// ルールは書き込みのときに検査済みなので、ここでは検査し直さずに内部モデルへ写すだけにする。
+// 検査し直すと、検査の規則が厳しくなる前に保存された行(proto.ValidateUpsert が検査し直さない行。
+// 仕様 5.4 節)で適用そのものが止まるためである。写せない行(vps_mode と proxy_protocol の組み合わせが
+// 無効な行)は書き込みの検査を通らないので現れないはずだが、現れたらログに出して Plan から外す。
+// 世代(Plan.Generation)は Phase 4 の Reconciler が使うまで入れない。
+func (d *Daemon) buildPlan(rules []proto.Rule, agentAddr map[string]netip.Addr) planner.Plan {
+	normalized := make([]model.Rule, 0, len(rules))
+	for _, r := range rules {
+		m, err := model.FromProto(r)
+		if err != nil {
+			log.Printf("leaving a rule out of the data plane: %v", err)
+			continue
+		}
+		normalized = append(normalized, m)
+	}
+	agents := make([]planner.Agent, 0, len(agentAddr))
+	for name, addr := range agentAddr {
+		agents = append(agents, planner.Agent{Name: name, Addr: addr})
+	}
+	return planner.Build(planner.Input{Rules: normalized, Limits: d.opts.Limits, Agents: agents})
+}
+
 // converge は外から入って DNAT されたフローを、現在のカーネルモードの有効なルールに収束させる(仕様 6.1 節)。
-func (d *Daemon) converge(rules []proto.Rule, agentAddr map[string]netip.Addr) {
+// ユーザー空間モードでは、接続元制限を満たさなくなったセッションを閉じる(仕様 6.3 節)。
+func (d *Daemon) converge(rules []proto.Rule, agentAddr map[string]netip.Addr, plan planner.Plan) {
 	var crules []ctconv.Rule
 	for i := range rules {
 		r := &rules[i]
@@ -122,7 +174,7 @@ func (d *Daemon) converge(rules []proto.Rule, agentAddr map[string]netip.Addr) {
 		crules = append(crules, ctconv.Rule{Proto: r.Proto, ListenPort: r.ListenPort, AgentAddr: addr,
 			SourceDeny: r.SourceDeny, SourceAllow: r.SourceAllow})
 	}
-	if n, err := d.dp.Converge(crules, d.network); err != nil {
+	if n, err := d.dp.Converge(crules, d.network, plan); err != nil {
 		log.Printf("conntrack converge: %v", err)
 	} else if n > 0 {
 		log.Printf("conntrack: removed %d unneeded flows", n)
@@ -130,7 +182,7 @@ func (d *Daemon) converge(rules []proto.Rule, agentAddr map[string]netip.Addr) {
 }
 
 // accumulateDrops は今回読んだカウンタ(前回の適用以降の増分そのもの)を累積する。
-func (d *Daemon) accumulateDrops(drops []nft.Drop) error {
+func (d *Daemon) accumulateDrops(drops []dataplane.Drop) error {
 	deltas := make([]store.DropDelta, 0, len(drops))
 	for _, dr := range drops {
 		if dr.Packets == 0 {

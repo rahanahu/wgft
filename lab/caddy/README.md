@@ -82,7 +82,7 @@ disown
 
 - プロキシモードの中継 (`internal/vpsd/proxyrelay/proxyrelay.go`) は、vpsd から
   `10.200.0.2:443`(エージェントのリスナー、wg0 経由)へ TCP 接続して PROXY protocol v2 ヘッダを
-  書き込みますが、それを受けたエージェント側の TCP リレー (`internal/agent/relay/tcp.go`) は
+  書き込みますが、それを受けたエージェント側の TCP リレー (`internal/dataplane/userspace/relay/tcp.go`) は
   受け取ったバイト列をそのまま**新しいローカルの TCP 接続**として `192.168.50.2:443`(Caddy)へ
   つなぎ直します(`net.Dial` の既定実装、home ns 内の自分自身への接続)。Caddy が実際に受け取る
   TCP の相手は、この最後の接続の送信元である home ns 自身のアドレス `192.168.50.2` です。
