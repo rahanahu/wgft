@@ -93,7 +93,7 @@ func (r *Rule) Validate() error {
 		if r.Proto != TCP {
 			return errors.New("vps_mode=proxy can only be used with tcp")
 		}
-		// proxy は単一ポート運用(proxyrelay.FromRules、userspace モードでも同じ経路。仕様
+		// proxy は単一ポート運用(vpsd の relayRules、userspace モードでも同じ経路。仕様
 		// 6.2、6.3 節)。範囲を許すと先頭ポート以外が中継されないまま黙って失われるため拒否する
 		if r.ListenPort.IsRange() {
 			return fmt.Errorf("vps_mode=proxy cannot span a port range (listen_port %s); use a single port", r.ListenPort)

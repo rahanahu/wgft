@@ -17,15 +17,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/agentapi"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/internal/vpsd/stream"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 	"github.com/rahanahu/wgft/proto"
 	"log"
 	"net"
@@ -199,7 +201,7 @@ type Daemon struct {
 	opts      Options
 	st        *store.Store
 	reserved  proto.Reserved
-	timeouts  wg.UDPTimeouts
+	timeouts  linux.UDPTimeouts
 	serverKey wgtypes.Key
 
 	network   netip.Prefix // 10.200.0.0/24
@@ -247,9 +249,8 @@ func Run(opts Options) error {
 	defer lock.Release()
 
 	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{
-		iface:           opts.WGInterface,
-		udpPerSourceCap: opts.Limits.UDPPerSourceCap(),
-		tcpPerSourceCap: opts.Limits.TCPPerSourceCap(),
+		iface: opts.WGInterface,
+		b:     linuxkernel.New(linuxkernel.Options{Interface: opts.WGInterface, AdoptExisting: opts.AdoptExisting}),
 	}}
 	d.reserved = proto.Reserved{opts.WGPort: "WireGuard"}
 	if ap, err := netip.ParseAddrPort(opts.AdminAddr); err == nil {
@@ -402,12 +403,14 @@ func Run(opts Options) error {
 
 // agents は SQLite のエージェントから、wg のピア集合と名前 → アドレスの表を作る。
 // 公開鍵が未宣言(stream に一度も来ていない)のエージェントはアドレスだけ持ち、ピアにはならない。
-func (d *Daemon) agents() ([]wg.Peer, map[string]netip.Addr, error) {
+// dataplane.Peer を直接返すので、両方の Backend の EnsureWG(dataplane.WGConfig)にそのまま渡せる
+// (design.md 7a.8 節 Phase 3: カーネル固有の wg.Peer への変換は kernelDataplane の役目ではなくなった)。
+func (d *Daemon) agents() ([]dataplane.Peer, map[string]netip.Addr, error) {
 	list, err := d.st.Agents()
 	if err != nil {
 		return nil, nil, err
 	}
-	var peers []wg.Peer
+	var peers []dataplane.Peer
 	addr := make(map[string]netip.Addr, len(list))
 	for _, a := range list {
 		addr[a.Name] = a.Address
@@ -419,7 +422,7 @@ func (d *Daemon) agents() ([]wg.Peer, map[string]netip.Addr, error) {
 			log.Printf("agent %s has an invalid public key: %v", a.Name, err)
 			continue
 		}
-		peers = append(peers, wg.Peer{PublicKey: key, Address: a.Address})
+		peers = append(peers, dataplane.Peer{PublicKey: key, Address: a.Address})
 	}
 	return peers, addr, nil
 }

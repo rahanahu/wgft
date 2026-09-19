@@ -1,4 +1,4 @@
-package check
+package linux
 
 import (
 	"net/netip"

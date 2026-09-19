@@ -11,20 +11,21 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// This file proves the Phase 1 "no behaviour change" completion criterion (design.md 7a.8 節) for
-// the vpsd-terminated relay: Plan.Relay() equals proxyrelay.FromRules, the exported function
-// internal/vpsd/apply.go actually calls to build the proxy relay's declaration, in both kernel and
-// userspace dataplane modes (internal/vpsd/vpsd.go wires the same proxyrelay.Manager either way;
-// only its Dial func differs). proxyrelay.FromRules is called directly here, not transcribed, so a
-// future change to its filter shows up as a failing assertion.
+// This file pins Plan.Relay()'s field-for-field shape for the vpsd-terminated relay (design.md 6.2
+// 節): one entry per enabled, TCP, Relay rule whose agent is registered, and no entry for disabled
+// rules, rules of unregistered agents, or Transparent rules. Through Phase 2 this compared
+// Plan.Relay() against proxyrelay.FromRules, the pre-Plan rules-based function vpsd used to build
+// the same declaration; Phase 3 (design.md 7a.8 節) removed that function since internal/vpsd/apply.go
+// has built the Relay declaration from the Plan alone since Phase 2, leaving nothing left to
+// reconcile against. The fixture and its expected rule set stay, now compared directly.
 //
-// The matching checks for kernel DNAT and the userspace relay also call the real production code
-// (not a transcription) and live next to it instead, because both are unexported and package-local:
-//   - kernel DNAT: internal/vpsd/nft/equivalence_test.go, which runs the real emit() against the
-//     in-memory recorder from build_test.go.
-//   - userspace relay: since Phase 2 the userspace Backend builds its listener set from the Plan
-//     itself; internal/dataplane/userspace/relaytargets_test.go pins that set to the one the
-//     pre-Backend rule-based code produced for the same fixture.
+// The matching checks for kernel DNAT and the userspace relay live next to the code they check,
+// because both are unexported and package-local:
+//   - kernel DNAT: internal/dataplane/linuxkernel/nft's own tests (TestEmitRows and friends) pin
+//     emit()'s output against fixed Plan fixtures directly, since emit() takes only a Plan
+//     (design.md 7a.8 節 Phase 3: no separate rules-based path is left to reconcile against either).
+//   - userspace relay: internal/dataplane/userspace/relaytargets_test.go pins the userspace
+//     Backend's Plan-derived listener set.
 func equivalenceFixture() (rules []proto.Rule, agentAddr map[string]netip.Addr) {
 	rate := func(s string) *proto.Rate {
 		r, err := proto.ParseRate(s)
@@ -78,15 +79,19 @@ func buildPlan(t *testing.T, rules []proto.Rule, agentAddr map[string]netip.Addr
 	return Build(Input{Generation: 1, Rules: normalized, Agents: agents})
 }
 
-// TestEquivalenceVPSDRelay locks down that Plan.Relay() equals proxyrelay.FromRules on the same
-// input, field for field (design.md 6.2 節). proxyrelay.FromRules is the function
-// internal/vpsd/apply.go actually calls before every nftables apply, in both kernel and userspace
-// dataplane modes (internal/vpsd/vpsd.go builds one proxyrelay.Manager for both; only Dial differs).
-func TestEquivalenceVPSDRelay(t *testing.T) {
+// TestPlanRelayFields locks down Plan.Relay() converted to a proxyrelay.Rule declaration, field for
+// field (design.md 6.2 節): only the two enabled, TCP, Relay rules of a registered agent
+// (r_proxy_plain, r_proxy_proxyproto) get an entry.
+func TestPlanRelayFields(t *testing.T) {
 	rules, agentAddr := equivalenceFixture()
 	plan := buildPlan(t, rules, agentAddr)
 
-	want := proxyrelay.FromRules(rules, agentAddr)
+	want := []proxyrelay.Rule{
+		{ID: "r_proxy_plain", ListenPort: 443, AgentAddr: agentAddr["home"], AgentPort: 443,
+			SourceAllow: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, Agent: "home"},
+		{ID: "r_proxy_proxyproto", ListenPort: 8443, AgentAddr: agentAddr["office"], AgentPort: 8443,
+			ProxyProtocol: true, Agent: "office"},
+	}
 	sort.Slice(want, func(i, j int) bool { return want[i].ID < want[j].ID })
 
 	var got []proxyrelay.Rule
@@ -100,7 +105,7 @@ func TestEquivalenceVPSDRelay(t *testing.T) {
 	sort.Slice(got, func(i, j int) bool { return got[i].ID < got[j].ID })
 
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Plan.Relay() converted to []proxyrelay.Rule = %+v, want proxyrelay.FromRules(...) = %+v", got, want)
+		t.Fatalf("Plan.Relay() converted to []proxyrelay.Rule = %+v, want %+v", got, want)
 	}
 }
 

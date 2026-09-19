@@ -5,14 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
-	"strings"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	"github.com/rahanahu/wgft/internal/vpsd/check"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 )
 
 // Check は起動せずに、そのモードで必要な検査を走らせて結果を書く読み取り専用コマンド
@@ -32,7 +31,7 @@ func Check(opts Options, out io.Writer) error {
 		fmt.Fprintln(out, "nft check: not used in userspace mode (rules are relayed by the wgft process)")
 	} else if os.Geteuid() != 0 {
 		fmt.Fprintln(out, "nft check: skipped because not root; run sudo wgft server check")
-	} else if rep, err := check.Inspect(opts.WGInterface); err != nil {
+	} else if rep, err := linux.Inspect(opts.WGInterface, nft.TableName); err != nil {
 		fmt.Fprintf(out, "nft check: cannot run: %v\n", err)
 	} else if len(rep.Findings) == 0 {
 		fmt.Fprintln(out, "nft check: no problems")
@@ -111,79 +110,44 @@ func checkMeta(out io.Writer, st *store.Store, key, label, want string) {
 	fmt.Fprintf(out, "warning: %s differs from the record %s; setting is %s\n", label, have, want)
 }
 
-// checkIPForward reports net.ipv4.ip_forward's current value (spec section 6.1).
-// It never writes 1: to stay a read-only check it only probes writability by
-// opening the file O_WRONLY and closing it again without writing, the same test
-// EnableIPForward's real write would face at startup.
+// checkIPForward reports net.ipv4.ip_forward's current value (spec section 6.1). It never writes
+// 1 itself: internal/platform/linux.IPForwardStatus stays read-only, only probing writability the
+// same way EnableIPForward's real write would face at startup.
 func checkIPForward(out io.Writer) {
-	cur, err := os.ReadFile(ipForwardPath)
+	val, openErr, err := linux.IPForwardStatus()
 	if err != nil {
-		fmt.Fprintf(out, "ip_forward: cannot read %s: %v\n", ipForwardPath, err)
+		fmt.Fprintf(out, "ip_forward: cannot read %s: %v\n", linux.IPForwardPath, err)
 		return
 	}
-	val := strings.TrimSpace(string(cur))
 	fmt.Fprintf(out, "ip_forward: %s\n", val)
 	if val == "1" {
 		return
 	}
-	if f, err := os.OpenFile(ipForwardPath, os.O_WRONLY, 0); err != nil {
-		finding := check.Finding{
+	if openErr != nil {
+		finding := linux.Finding{
 			Where:   "net.ipv4.ip_forward",
-			Problem: fmt.Sprintf("is %s and not writable (%v); kernel-mode forwarding needs it at 1", val, err),
+			Problem: fmt.Sprintf("is %s and not writable (%v); kernel-mode forwarding needs it at 1", val, openErr),
 			Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
 		}
 		fmt.Fprintf(out, "  - %s\n", finding)
-	} else {
-		f.Close()
 	}
 }
-
-// conntrack の表の上限と現在の件数(仕様 6.1 節)。nf_conntrack が未ロードなら読めない。
-var (
-	conntrackMaxPath   = "/proc/sys/net/netfilter/nf_conntrack_max"
-	conntrackCountPath = "/proc/sys/net/netfilter/nf_conntrack_count"
-)
-
-// conntrackMinMax は、これを下回ると警告する nf_conntrack_max。接続元ごとの meter の上限(65535 件)と同じ桁で、
-// メモリの小さい VPS の既定値(16384 など)を拾う。
-const conntrackMinMax = 65536
 
 // checkConntrack は conntrack の表の使用状況を 1 行出し、上限が小さければ警告する。値は変えない。
+// 実際の読み取りと閾値の判定は internal/platform/linux が持つ(agent の kernel backend でも使う
+// ため。設計文書 7a.7 節)。
 func checkConntrack(out io.Writer) {
-	max, err := readProcInt(conntrackMaxPath)
+	usage, err := linux.ReadConntrackUsage()
 	if err != nil {
-		fmt.Fprintf(out, "conntrack: cannot read %s: %v; is the nf_conntrack module loaded\n", conntrackMaxPath, err)
+		fmt.Fprintf(out, "conntrack: cannot read %s: %v; is the nf_conntrack module loaded\n", linux.ConntrackMaxPath, err)
 		return
 	}
-	if count, err := readProcInt(conntrackCountPath); err == nil {
-		fmt.Fprintf(out, "conntrack: %d of %d entries in use\n", count, max)
+	if usage.HaveCount {
+		fmt.Fprintf(out, "conntrack: %d of %d entries in use\n", usage.Count, usage.Max)
 	} else {
-		fmt.Fprintf(out, "conntrack: max %d entries\n", max)
+		fmt.Fprintf(out, "conntrack: max %d entries\n", usage.Max)
 	}
-	if f := conntrackFinding(max); f != nil {
+	if f := usage.Finding(); f != nil {
 		fmt.Fprintf(out, "  - %s\n", f)
 	}
-}
-
-// conntrackFinding は上限が小さいときの警告を作る。足りていれば nil。
-func conntrackFinding(max int) *check.Finding {
-	if max >= conntrackMinMax {
-		return nil
-	}
-	return &check.Finding{
-		Where:   "net.netfilter.nf_conntrack_max",
-		Problem: fmt.Sprintf("is %d; every forwarded flow takes one entry, so a flood of new flows can fill the table and the kernel then drops new connections for the whole host", max),
-		Suggest: []string{
-			fmt.Sprintf("sysctl -w net.netfilter.nf_conntrack_max=%d", conntrackMinMax*4),
-			"set new_flow_rate on public rules; flows dropped by it are never added to the table",
-		},
-	}
-}
-
-func readProcInt(path string) (int, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(strings.TrimSpace(string(b)))
 }

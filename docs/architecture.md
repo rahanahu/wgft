@@ -6,8 +6,12 @@ wgft のコードは、設計文書([docs/design.md](design.md))の各節が扱�
 
 | パッケージ | 実装する節 | 役割 |
 | --- | --- | --- |
-| `internal/vpsd/nft` | 6.1 | ルール集合から `table inet wgft` を組み立て、1 トランザクションで適用します |
-| `internal/vpsd/conntrack` | 6.1(収束) | 外から入って DNAT されたフローを宣言状態に収束させます |
+| `internal/dataplane` | 7a.2, 7a.7 | dataplane `Backend` の契約(`Prepare`/`Commit`/`Rollback`、`EnsureWG`、`Converge`、`ReadDrops`、`Dial`)だけを持つ、インタフェース専用のパッケージです |
+| `internal/dataplane/linuxkernel` | 6.1, 7a.7 | kernel dataplane の `Backend` です。カーネルの WireGuard(`wg`)、nftables(`nft`)、conntrack 収束(`conntrack`)を束ね、`internal/vpsd` を import しません(将来の agent の kernel backend、7a.8 節 Phase 7 も同じ実装を使います) |
+| `internal/dataplane/linuxkernel/nft` | 6.1 | `internal/planner` の `Plan` から `table inet wgft` を組み立て、1 トランザクションで適用します |
+| `internal/dataplane/linuxkernel/conntrack` | 6.1(収束) | 外から入って DNAT されたフローを `Plan` の Transparent なルールに収束させます |
+| `internal/dataplane/linuxkernel/wg` | 4, 9 | wg0 インタフェースを宣言に収束させます(所有判定、アドレス・MTU・鍵・ピアの突き合わせ) |
+| `internal/platform/linux` | 6.1(起動時検査)、4 | Linux ホスト側の前段検査と sysctl です。bind 中のポートとの衝突、他テーブルの forward / input の遮断、他テーブルの同ポート DNAT の検査、`ip_forward` と conntrack テーブルの sysctl、conntrack の UDP タイムアウトの読み取りを持ちます。`internal/dataplane/linuxkernel` からも呼ばれ、`internal/vpsd` を import しません |
 | `internal/vpsd/proxyrelay` | 6.2 | プロキシモードのルールについて、vpsd が受けた TCP をエージェントへ中継します |
 | `internal/reconcile` | 7a.2 | frontend(プロキシモードの中継)と dataplane を固定の順序で適用する `Runtime` を持ちます |
 | `internal/dataplane/userspace` | 6.3 | `vpsd` のユーザー空間モードの転送面です。wireguard-go と netstack のトンネル(`utun`)、接続元制限とレート制限の評価器(`srcpolicy`)、中継(`relay`)を束ね、`internal/planner` の `Plan` から待ち受けと評価器を組み立てます |
@@ -15,8 +19,6 @@ wgft のコードは、設計文書([docs/design.md](design.md))の各節が扱�
 | `internal/vpsd/stream` | 5.2 | エージェントごとの stream(WebSocket)を持ち、全体状態の配信とハートビートの記録を行います |
 | `internal/vpsd/agentapi` | 5.1 | エージェント用 API(登録と stream の公開エンドポイント、自己署名証明書)を持ちます |
 | `internal/vpsd/store` | 9 | vpsd の永続状態を SQLite 1 ファイルに保存します |
-| `internal/vpsd/check` | 6.1(起動時検査) | bind 中のポートとの衝突、他テーブルの forward / input の遮断、他テーブルの同ポート DNAT を検査します |
-| `internal/vpsd/wg` | 4, 9 | wg0 インタフェースを宣言に収束させます(所有判定、アドレス・MTU・鍵・ピアの突き合わせ) |
 | `internal/agent/tunnel` | 7 | wireguard-go と gVisor の netstack でユーザー空間にトンネルを持ちます |
 | `internal/agent/credentials` | 9 | エージェントの認証情報ファイル(`agent.json`)を扱います。設計文書では状態ファイルと呼びます |
 | `internal/vpsd/admin` | 10, 11 | 管理用 API と Web UI を持ちます。既定は Unix ソケットで待ち受けます |
@@ -38,9 +40,9 @@ CLI の `wgft rule add`(`cmd/wgft/rule.go` の `newRuleAddCmd`)は `proto.Rule` 
 
 `Daemon.Batch` は `internal/vpsd/store/rules.go` の `Store.ApplyBatch` を呼び、追加・変更・削除を 1 トランザクションで保存します。世代はこの保存で 1 つ進みます。
 
-保存が成功すると、`Daemon.applyNFT`(`internal/vpsd/apply.go`)が `internal/planner` の `Plan` を組み立て、`internal/reconcile` の `Runtime` で適用します。`Runtime` は、プロキシモードの新しい待ち受けを先に開き、`internal/vpsd/nft` の `Apply` で `table inet wgft` をまるごと差し替え、成功したら中継を始めます。差し替えが失敗したら、新しく開いた待ち受けを閉じます。
+保存が成功すると、`Daemon.applyNFT`(`internal/vpsd/apply.go`)が `internal/planner` の `Plan` を組み立て、`internal/reconcile` の `Runtime` で適用します。`Runtime` は、プロキシモードの新しい待ち受けを先に開き、kernel dataplane の `Backend`(`internal/dataplane/linuxkernel`)の `Commit` が `internal/dataplane/linuxkernel/nft` の `Apply` で `table inet wgft` をまるごと差し替え、成功したら中継を始めます。差し替えが失敗したら、新しく開いた待ち受けを閉じます。
 
-`applyNFT` はテーブルの差し替えの直後に `Daemon.converge` を呼び、`internal/vpsd/conntrack` の `Converge` で、新しい宣言に合わない DNAT 済みフローを削除します。この順序は、先に conntrack を収束させると旧テーブルで許可されたフローが差し替えまでの間に入ってしまうために保たれています。
+`applyNFT` はテーブルの差し替えの直後に `Daemon.converge` を呼び、`Backend.Converge` が `internal/dataplane/linuxkernel/conntrack` の `Converge` で、新しい宣言に合わない DNAT 済みフローを削除します。この順序は、先に conntrack を収束させると旧テーブルで許可されたフローが差し替えまでの間に入ってしまうために保たれています。
 
 変更があった場合、`Daemon.Batch` は `internal/vpsd/stream` の `Hub.PushAll` を呼び、接続中の全エージェントへ新しい全体状態を配ります。
 

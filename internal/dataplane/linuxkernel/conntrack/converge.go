@@ -1,5 +1,7 @@
-// Package conntrack は、外から入って DNAT されたフローを宣言状態に収束させる(仕様 6.1 節)。
-// 「宣言状態に収束させる」1 手順だけを持つ:Dump → 判定 → 削除。nftables テーブルの差し替えの後に走らせる。
+// Package conntrack は、外から入って DNAT されたフローを Plan に収束させる(仕様 6.1 節、
+// 設計文書 7a.8 節 Phase 3)。「宣言状態に収束させる」1 手順だけを持つ:Dump → 判定 → 削除。
+// nftables テーブルの差し替えの後に走らせる。internal/dataplane/linuxkernel の一部で、
+// internal/vpsd を import しない(設計文書 7a.7 節)。
 package conntrack
 
 import (
@@ -8,6 +10,7 @@ import (
 
 	"github.com/ti-mo/conntrack"
 
+	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -18,6 +21,19 @@ type Rule struct {
 	AgentAddr   netip.Addr // DNAT 先(エージェントのアドレス)
 	SourceDeny  []netip.Prefix
 	SourceAllow []netip.Prefix
+}
+
+// RulesFromPlan は、Plan の Transparent(カーネルモード)のポートから収束の判定材料を作る
+// (design.md 6.1, 7a.8 節 Phase 3)。Plan.Ports は無効なルールとエージェントが未登録のルールを
+// 既に除いているので、ここでは検査し直さない。
+func RulesFromPlan(plan planner.Plan) []Rule {
+	ports := plan.Transparent()
+	rules := make([]Rule, len(ports))
+	for i, pp := range ports {
+		rules[i] = Rule{Proto: pp.Proto, ListenPort: pp.ListenPort, AgentAddr: pp.AgentAddr,
+			SourceDeny: pp.Policy.SourceDeny, SourceAllow: pp.Policy.SourceAllow}
+	}
+	return rules
 }
 
 // dumper と deleter は ti-mo/conntrack.Conn の使う部分。テストで差し替える。

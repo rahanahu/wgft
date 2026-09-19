@@ -6,8 +6,8 @@ import (
 	"log"
 	"strings"
 
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 )
 
 // モードとアドレス帯の初回記録・照合(仕様 9・11a 節)。

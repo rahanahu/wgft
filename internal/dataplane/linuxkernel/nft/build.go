@@ -1,4 +1,10 @@
-// Package nft は、ルール集合から VPS の table inet wgft を組み立てて適用する(仕様 6.1 節)。
+// Package nft は、Plan から VPS の table inet wgft を組み立てて適用する(仕様 6.1 節、設計文書 7a.2 節)。
+// internal/dataplane/linuxkernel の nftables 実装で、internal/vpsd を import しない(設計文書 7a.7 節)。
+//
+// Apply/emit は internal/planner.Plan と、frontend が実際に待ち受けている Relay ポートの集合
+// (design.md 7a.2 節の dataplane.Desired.RelayListening に当たる Runtime 側の入力)だけから組み立てる。
+// Plan は無効なルールとエージェントが未登録のルールを既に除いているので、ここでは検査し直さない
+// (設計文書 7a.8 節 Phase 3:「ルール集合から nftables を組み立てる」から「Plan から組み立てる」への移行)。
 //
 // nft が暗黙に足す条件(udp dport の前の meta l4proto、ip saddr の前の meta nfproto)を
 // 自分で入れ、ポート範囲は nft と同じく gte / lte の 2 つの比較で表す。
@@ -18,27 +24,17 @@ import (
 	"github.com/google/nftables/userdata"
 	"golang.org/x/sys/unix"
 
+	"github.com/rahanahu/wgft/internal/model"
+	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // TableName は vpsd 専用のテーブル名。他のテーブルには一切触れない。
 const TableName = "wgft"
 
-// Config は生成に必要な、ルール以外の情報。
+// Config は生成に必要な、Plan 以外の情報。
 type Config struct {
-	WGInterface string                // wg0
-	AgentAddr   map[string]netip.Addr // エージェント名 → wg0 上のアドレス
-	// UDPPerSourceCap と TCPPerSourceCap は接続元 IP ごとの同時フロー数の上限(仕様 7, 11a 節の
-	// 設定値。既に解決済みの具体的な値を受け取り、ここでは既定値を推測しない)。
-	// 0 はそのプロトコルの上限を無効にし、対応する set も行も生成しない
-	UDPPerSourceCap int
-	TCPPerSourceCap int
-	// ProxyListening は、vpsd がプロキシモードの待ち受けを実際に開いているポート。プロキシモードの
-	// ルールは、ここにあるポートだけに接続元 IP ごとの上限の行を持つ。bind に失敗したポートでは、
-	// 同じポートの別のプロセスへの通信に wgft の上限を掛けてしまうため(仕様 6.1 節)。nil なら行を持たない
-	ProxyListening map[uint16]bool
-	// Logf は AgentAddr にないエージェントのルールを飛ばしたときの記録先。nil なら黙って飛ばす
-	Logf func(format string, args ...any)
+	WGInterface string // wg0
 }
 
 // emitter は nftables.Conn のうち生成に使う部分。テストでは記録するだけの実装に差し替える。
@@ -54,12 +50,21 @@ type emitter interface {
 // 「空テーブルの追加 → 削除 → 定義」の順にするので、テーブルがまだない初回でも失敗しない。
 // conntrack のエントリは差し替えの影響を受けず、既存のセッションは切れない。
 // 生成の途中で失敗すると未送信のメッセージが Conn に残るので、Conn は呼び出しごとに作って捨てる。
-func Apply(rules []proto.Rule, cfg Config) error {
+//
+// relayListening は、vpsd がプロキシモードの待ち受けを実際に開いているポート(design.md 7a.2 節の
+// dataplane.Desired.RelayListening)。Relay のルールは、ここにあるポートだけに接続元 IP ごとの
+// 上限の行を持つ。bind に失敗したポートでは、同じポートの別のプロセスへの通信に wgft の上限を
+// 掛けてしまうため(仕様 6.1 節)。nil なら行を持たない。
+//
+// これは Prepare/Commit の契約(design.md 7a.2 節)のうち Commit の部分でしかない:組み立てが
+// 失敗しても Flush していないので何も公開されず、Flush 自体はカーネル側で不可分なので、
+// 失敗すれば旧いテーブルのまま残る。kernel backend の Prepare が何も確保しないのはこのため。
+func Apply(plan planner.Plan, relayListening map[uint16]bool, cfg Config) error {
 	conn, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("cannot connect to nftables: %w", err)
 	}
-	if err := emit(conn, rules, cfg); err != nil {
+	if err := emit(conn, plan, relayListening, cfg); err != nil {
 		return err
 	}
 	return conn.Flush()
@@ -94,7 +99,7 @@ func DeleteTable() error {
 // カウンタの持ち主はこのコメントで特定する。
 func Comment(ruleID, kind string) string { return "wgft:" + ruleID + ":" + kind }
 
-func emit(e emitter, rules []proto.Rule, cfg Config) error {
+func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Config) error {
 	t := &nftables.Table{Family: nftables.TableFamilyINet, Name: TableName}
 	e.AddTable(t)
 	e.DelTable(t)
@@ -125,101 +130,92 @@ func emit(e emitter, rules []proto.Rule, cfg Config) error {
 
 	// 接続元 IP ごとの同時フロー数の上限(仕様 6.1, 7 節)。プロトコルごとに 1 つの動的 set を
 	// そのプロトコルの全ルールで共有し、初めてそのプロトコルのルールに出会ったときだけ作る。
+	// 上限の値は Plan.Admission.PerSourceFlowCaps(設計文書 7a.5 節)から取る。
+	caps := plan.Admission.PerSourceFlowCaps
 	flowSets := map[proto.Proto]*nftables.Set{}
-	addFlowCap := func(r *proto.Rule, from []expr.Any) error {
-		cap := cfg.perSourceCap(r.Proto)
+	addFlowCap := func(ruleID string, p proto.Proto, from []expr.Any) error {
+		cap := caps.ForProto(p)
 		if cap <= 0 {
 			return nil
 		}
-		if flowSets[r.Proto] == nil {
-			s, err := addFlowCapSet(e, t, r.Proto)
+		if flowSets[p] == nil {
+			s, err := addFlowCapSet(e, t, p)
 			if err != nil {
-				return fmt.Errorf("rule %s: %w", r.ID, err)
+				return fmt.Errorf("rule %s: %w", ruleID, err)
 			}
-			flowSets[r.Proto] = s
+			flowSets[p] = s
 		}
-		fs := flowSets[r.Proto]
-		addRule(filterPre, Comment(r.ID, "src_flow"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
+		fs := flowSets[p]
+		addRule(filterPre, Comment(ruleID, "src_flow"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
 			[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: fs.Name, SetID: fs.ID,
 				Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{connlimitOver(uint32(cap))}}},
 			counterDrop())
 		return nil
 	}
 
-	// カーネルモードで有効なルールだけが行を持つ。set 名はルール ID ではなく連番。
-	// プロキシモードのルールは vpsd が受けて中継する(6.2 節)ので DNAT も接続元制限の行も持たないが、
-	// 接続元 IP ごとの同時フロー数だけは同じ set で数え、カーネルモードのルールとの合計にする(7 節)
+	// Plan.Ports は無効なルールとエージェントが未登録のルールを既に除き、
+	// (Proto, ListenPort.Lo, RuleID) の順に並んでいる(internal/planner.Build)。この順が
+	// table の行の順になる(以前のルール集合の格納順とは変わりうる。設計文書 7a.8 節 Phase 3)。
+	// Transparent(カーネルモード)のルールだけが set の連番 n を進める。set 名はルール ID ではなく連番。
+	// Relay(プロキシモード)のルールは vpsd が受けて中継する(6.2 節)ので DNAT も接続元制限の行も
+	// 持たないが、接続元 IP ごとの同時フロー数だけは同じ set で数え、Transparent のルールとの合計にする(7 節)
 	n := 0
-	for i := range rules {
-		r := &rules[i]
-		if !r.Enabled {
-			continue
-		}
-		if r.VPSMode == proto.ModeProxy {
-			if _, ok := cfg.AgentAddr[r.Agent]; ok && cfg.ProxyListening[r.ListenPort.Lo] {
-				if err := addFlowCap(r, match(wg, r.Proto, r.ListenPort)); err != nil {
+	for _, pp := range plan.Ports {
+		from := match(wg, pp.Proto, pp.ListenPort)
+		if pp.Forwarding == model.Relay {
+			if relayListening[pp.ListenPort.Lo] {
+				if err := addFlowCap(pp.RuleID, pp.Proto, from); err != nil {
 					return err
 				}
 			}
 			continue
 		}
-		if r.VPSMode != proto.ModeKernel {
-			continue
-		}
-		// 無効化されたエージェントのルールは行を持たない(テーブル全体が組めなくなるよりよい)
-		agent, ok := cfg.AgentAddr[r.Agent]
-		if !ok {
-			if cfg.Logf != nil {
-				cfg.Logf("nftables: rule %s: agent %q is not registered, skipping", r.ID, r.Agent)
-			}
-			continue
-		}
 		n++
-		from := match(wg, r.Proto, r.ListenPort)
+		pol := pp.Policy
 
 		// 評価順は deny、allow、接続元ごとの meter、接続元ごとの同時フロー数の上限、
-		// 新規フローの集約上限、パケットの集約上限。
+		// 新規フローの集約上限、パケットの集約上限(設計文書 7a.2 節の Order のとおり)。
 		// 空の allow に != を書くと全送信元が落ちるので、allow が空なら set も行も作らない。
-		if len(r.SourceDeny) > 0 {
-			s, err := addIntervalSet(e, t, fmt.Sprintf("deny_%d", n), r.SourceDeny)
+		if len(pol.SourceDeny) > 0 {
+			s, err := addIntervalSet(e, t, fmt.Sprintf("deny_%d", n), pol.SourceDeny)
 			if err != nil {
-				return fmt.Errorf("rule %s: %w", r.ID, err)
+				return fmt.Errorf("rule %s: %w", pp.RuleID, err)
 			}
-			addRule(filterPre, Comment(r.ID, "deny"), from, ipv4Saddr(), lookup(s, false), counterDrop())
+			addRule(filterPre, Comment(pp.RuleID, "deny"), from, ipv4Saddr(), lookup(s, false), counterDrop())
 		}
-		if len(r.SourceAllow) > 0 {
-			s, err := addIntervalSet(e, t, fmt.Sprintf("allow_%d", n), r.SourceAllow)
+		if len(pol.SourceAllow) > 0 {
+			s, err := addIntervalSet(e, t, fmt.Sprintf("allow_%d", n), pol.SourceAllow)
 			if err != nil {
-				return fmt.Errorf("rule %s: %w", r.ID, err)
+				return fmt.Errorf("rule %s: %w", pp.RuleID, err)
 			}
-			addRule(filterPre, Comment(r.ID, "allow"), from, ipv4Saddr(), lookup(s, true), counterDrop())
+			addRule(filterPre, Comment(pp.RuleID, "allow"), from, ipv4Saddr(), lookup(s, true), counterDrop())
 		}
-		if r.PerSourceRate != nil {
+		if pol.PerSourceRate != nil {
 			meter := &nftables.Set{Table: t, Name: fmt.Sprintf("meter_%d", n), KeyType: nftables.TypeIPAddr,
 				Dynamic: true, HasTimeout: true, Timeout: time.Minute, Size: 65535}
 			if err := e.AddSet(meter, nil); err != nil {
-				return fmt.Errorf("rule %s: meter: %w", r.ID, err)
+				return fmt.Errorf("rule %s: meter: %w", pp.RuleID, err)
 			}
-			addRule(filterPre, Comment(r.ID, "per_source"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
+			addRule(filterPre, Comment(pp.RuleID, "per_source"), from, ctState(expr.CtStateBitNEW), ipv4Saddr(),
 				[]expr.Any{&expr.Dynset{SrcRegKey: 1, SetName: meter.Name, SetID: meter.ID,
-					Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{limitOver(*r.PerSourceRate)}}},
+					Operation: unix.NFT_DYNSET_OP_ADD, Exprs: []expr.Any{limitOver(*pol.PerSourceRate)}}},
 				counterDrop())
 		}
-		if err := addFlowCap(r, from); err != nil {
+		if err := addFlowCap(pp.RuleID, pp.Proto, from); err != nil {
 			return err
 		}
-		if r.NewFlowRate != nil {
-			addRule(filterPre, Comment(r.ID, "new_flow"), from, ctState(expr.CtStateBitNEW),
-				[]expr.Any{limitOver(*r.NewFlowRate)}, counterDrop())
+		if pol.NewFlowRate != nil {
+			addRule(filterPre, Comment(pp.RuleID, "new_flow"), from, ctState(expr.CtStateBitNEW),
+				[]expr.Any{limitOver(*pol.NewFlowRate)}, counterDrop())
 		}
-		if r.PacketRate != nil {
-			addRule(filterPre, Comment(r.ID, "packet"), from, []expr.Any{limitOver(*r.PacketRate)}, counterDrop())
+		if pol.PacketRate != nil {
+			addRule(filterPre, Comment(pp.RuleID, "packet"), from, []expr.Any{limitOver(*pol.PacketRate)}, counterDrop())
 		}
 
 		// DNAT では宛先アドレスだけを書き換え、ポートは書き換えない。
 		// target のポートへの写し替えはエージェント側で行う(仕様 7 節の実効宛先)。
-		a4 := agent.As4()
-		addRule(natPre, Comment(r.ID, "dnat"), from, []expr.Any{
+		a4 := pp.AgentAddr.As4()
+		addRule(natPre, Comment(pp.RuleID, "dnat"), from, []expr.Any{
 			&expr.Immediate{Register: 1, Data: a4[:]},
 			&expr.NAT{Type: expr.NATTypeDestNAT, Family: unix.NFPROTO_IPV4, RegAddrMin: 1},
 		})
@@ -315,15 +311,6 @@ func flowSetName(p proto.Proto) string {
 		return "flows_tcp"
 	}
 	return "flows_udp"
-}
-
-// perSourceCap は cfg に渡された、接続元 IP ごとの同時フロー数の上限(仕様 7, 11a 節の設定値)。
-// 0 はそのプロトコルの上限を無効にする。値の既定はここでは決めない(呼び出し側が解決済みの値を渡す)。
-func (cfg Config) perSourceCap(p proto.Proto) int {
-	if p == proto.TCP {
-		return cfg.TCPPerSourceCap
-	}
-	return cfg.UDPPerSourceCap
 }
 
 // addFlowCapSet は接続元 IP ごとの同時フロー数を数える動的 set を作る。

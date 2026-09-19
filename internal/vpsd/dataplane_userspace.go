@@ -6,18 +6,15 @@ package vpsd
 // 何もしないホスト側の検査(他テーブル、bind 中のポート、ip_forward)だけを受け持つ。
 
 import (
-	"net/netip"
-
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace"
 	"github.com/rahanahu/wgft/internal/planner"
-	"github.com/rahanahu/wgft/internal/vpsd/check"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
-	ctconv "github.com/rahanahu/wgft/internal/vpsd/conntrack"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
-	"github.com/rahanahu/wgft/internal/vpsd/wg"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -26,15 +23,10 @@ type userspaceDataplane struct {
 	b *userspace.Backend
 }
 
-// EnsureWG は wg.Config のうち Backend の宣言に当たる部分を渡す。インタフェース名と
-// AdoptExisting はカーネルの wg インタフェースだけの性質なので使わない。
-func (u *userspaceDataplane) EnsureWG(cfg wg.Config) ([]string, error) {
-	peers := make([]dataplane.Peer, len(cfg.Peers))
-	for i, p := range cfg.Peers {
-		peers[i] = dataplane.Peer{PublicKey: p.PublicKey, Address: p.Address}
-	}
-	return u.b.EnsureWG(dataplane.WGConfig{PrivateKey: cfg.PrivateKey, ListenPort: cfg.ListenPort,
-		Address: cfg.Address, MTU: cfg.MTU, Peers: peers})
+// EnsureWG は Backend にそのまま渡す。インタフェース名と AdoptExisting はカーネルの wg
+// インタフェースだけの性質で、dataplane.WGConfig には無い(その doc コメントのとおり)。
+func (u *userspaceDataplane) EnsureWG(cfg dataplane.WGConfig) ([]string, error) {
+	return u.b.EnsureWG(cfg)
 }
 
 func (u *userspaceDataplane) WGStatus() (*wgtypes.Device, error) { return u.b.WGStatus() }
@@ -42,21 +34,23 @@ func (u *userspaceDataplane) WGStatus() (*wgtypes.Device, error) { return u.b.WG
 func (u *userspaceDataplane) OtherDeviceWithKey(wgtypes.Key) (string, bool) { return "", false }
 
 // ReadUDPTimeouts はカーネルの conntrack を使わないので、既定値をそのまま配る(エージェントの UDP セッションの期限)。
-func (u *userspaceDataplane) ReadUDPTimeouts() (wg.UDPTimeouts, error) {
-	return wg.UDPTimeouts{Timeout: 30, TimeoutStream: 120}, nil
+func (u *userspaceDataplane) ReadUDPTimeouts() (linux.UDPTimeouts, error) {
+	return linux.UDPTimeouts{Timeout: 30, TimeoutStream: 120}, nil
 }
 
 // Inspect は他テーブルの検査を行わない(nftables を使わない。仕様 6.3 節)。
-func (u *userspaceDataplane) Inspect() (*check.Report, error) { return &check.Report{}, nil }
+func (u *userspaceDataplane) Inspect() (*linux.Report, error) { return &linux.Report{}, nil }
 
 // BoundPorts は空。bind の失敗がそのまま分かる(仕様 6.3 節)。
-func (u *userspaceDataplane) BoundPorts() (check.Bound, error) {
-	return check.Bound{proto.TCP: {}, proto.UDP: {}}, nil
+func (u *userspaceDataplane) BoundPorts() (linux.Bound, error) {
+	return linux.Bound{proto.TCP: {}, proto.UDP: {}}, nil
 }
 
 // InputPortSuggestions は input が policy drop なら足す行を返す。nftables を読めない(非 root)ときは提示しない。
+// userspace モードは自分の nftables テーブルを作らないが、kernel モードから切り替えた後に残った
+// table inet wgft を他人のファイアウォールと取り違えないよう、kernel モードと同じく検査から除く
 func (u *userspaceDataplane) InputPortSuggestions(port uint16) ([]string, error) {
-	lines, err := check.InputPortSuggestions(port)
+	lines, err := linux.InputPortSuggestions(port, nft.TableName)
 	if err != nil {
 		return nil, nil
 	}
@@ -65,18 +59,18 @@ func (u *userspaceDataplane) InputPortSuggestions(port uint16) ([]string, error)
 
 func (u *userspaceDataplane) ReadDrops() ([]dataplane.Drop, error) { return u.b.ReadDrops() }
 
-// participant は Backend そのもの。ルール集合は読まない(Backend は Plan だけから組み立てる)。
+// participant は Backend そのもの。Backend は Plan だけから組み立てる。
 // プロキシモード(Relay)のルールは Daemon の proxyrelay が受け持ち、Backend は Transparent のルールだけを開く。
-func (u *userspaceDataplane) participant([]proto.Rule, map[string]netip.Addr) dataplane.Participant {
+func (u *userspaceDataplane) participant() dataplane.Participant {
 	return u.b
 }
 
 // Converge は接続元制限を満たさなくなった進行中のセッションを閉じる(conntrack 収束の代わり。仕様 6.3 節)。
-func (u *userspaceDataplane) Converge(_ []ctconv.Rule, _ netip.Prefix, plan planner.Plan) (int, error) {
+func (u *userspaceDataplane) Converge(plan planner.Plan) (int, error) {
 	return u.b.Converge(plan)
 }
 
-func (u *userspaceDataplane) EnableIPForward(*store.Store) *check.Finding { return nil }
+func (u *userspaceDataplane) EnableIPForward(*store.Store) *linux.Finding { return nil }
 
 func (u *userspaceDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{Dial: u.b.Dial})

@@ -1,12 +1,13 @@
-// Package wg は VPS 側の WireGuard インタフェース(wg0)を宣言に収束させる(仕様 4, 9 節)。
-// インタフェースの作成とアドレス・MTU は netlink で、鍵・ポート・ピアは wgctrl で扱う。
-// 停止時には何も削除しない。
+// Package wg は VPS(および将来の agent の kernel backend、Phase 7)の WireGuard インタフェースを
+// 宣言に収束させる(仕様 4, 9 節、設計文書 7a.7 節)。インタフェースの作成とアドレス・MTU は
+// netlink で、鍵・ポート・ピアは wgctrl で扱う。停止時には何も削除しない。internal/vpsd を
+// import しない(internal/platform/linux の bind 中ポート検査だけを使う)。
 package wg
 
 import (
 	"errors"
 	"fmt"
-	"github.com/rahanahu/wgft/internal/vpsd/check"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/proto"
 	"net"
 	"net/netip"
@@ -87,7 +88,7 @@ func Ensure(cfg Config) (changes []string, err error) {
 	}
 	// WireGuard 以外のプロセスが同じ UDP ポートを bind していても ConfigureDevice が EADDRINUSE で
 	// 失敗する。作ってから失敗すると unit が再起動を繰り返すので、作る前に /proc/net/udp で検出して中止する。
-	if bound, e := check.BoundPorts(); e == nil {
+	if bound, e := linux.BoundPorts(); e == nil {
 		if addrs := bound.Conflicts(proto.UDP, proto.PortRange{Lo: uint16(cfg.ListenPort), Hi: uint16(cfg.ListenPort)}); len(addrs) > 0 {
 			if !ownsPort(c, cfg.Interface, cfg.ListenPort) {
 				return nil, &StartupRefusal{Reason: fmt.Sprintf("UDP port %d is already bound by another process on %v; use --wg-port to choose another port", cfg.ListenPort, addrs[uint16(cfg.ListenPort)])}

@@ -2,7 +2,7 @@ package vpsd
 
 import (
 	"fmt"
-	"github.com/rahanahu/wgft/internal/vpsd/check"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"log"
 	"os"
@@ -49,27 +49,26 @@ func readNFTVersion() string {
 	return strings.TrimSpace(string(out))
 }
 
-// ipForwardPath は net.ipv4.ip_forward の sysctl ファイル(仕様 6.1 節)。
-const ipForwardPath = "/proc/sys/net/ipv4/ip_forward"
-
-// EnableIPForward は net.ipv4.ip_forward を確認し、1 でなければ 1 にする(仕様 6.1 節)。
-// すでに 1 なら何も書かない。書けなくても落ちず、警告して続ける。1 にした値は 0 に戻さない。
-// 0→1 にしたときは meta に日時を残し、撤去(teardown)で戻す候補として示せるようにする。
+// EnableIPForward は net.ipv4.ip_forward を確認し、1 でなければ 1 にする(仕様 6.1 節)。実際の
+// 読み書きは internal/platform/linux.EnableIPForward が持つ(agent の kernel backend でも使う
+// ため。設計文書 7a.7 節)。すでに 1 なら何も書かない。書けなくても落ちず、警告して続ける。
+// 1 にした値は 0 に戻さない。0→1 にしたときは meta に日時を残し、撤去(teardown)で戻す候補として
+// 示せるようにする(この記録は store を知らない platform/linux の役目ではなく、ここで行う)。
 // 書き込みに失敗したときは、他テーブルの policy drop と同じ流儀の Finding を返す。
 // 呼び出し側(Run)がそれをログに出す。成功時、またはすでに 1 のときは nil を返す。
-func EnableIPForward(st *store.Store) *check.Finding {
-	if cur, err := os.ReadFile(ipForwardPath); err == nil && strings.TrimSpace(string(cur)) == "1" {
-		return nil // すでに 1。触らない
-	}
-	if err := os.WriteFile(ipForwardPath, []byte("1\n"), 0); err != nil {
+func EnableIPForward(st *store.Store) *linux.Finding {
+	changed, err := linux.EnableIPForward()
+	if err != nil {
 		// 読み取り専用の /proc や seccomp/LSM で塞がれている場合など。落とさず警告する。
-		return &check.Finding{
+		return &linux.Finding{
 			Where:   "net.ipv4.ip_forward",
 			Problem: fmt.Sprintf("is 0 and could not be set to 1 (%v); kernel-mode forwarding will not work until this is set", err),
 			Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
 		}
 	}
-	log.Printf("set net.ipv4.ip_forward to 1")
-	_ = st.SetMeta(metaIPForwardSetAt, []byte(time.Now().UTC().Format(time.RFC3339)))
+	if changed {
+		log.Printf("set net.ipv4.ip_forward to 1")
+		_ = st.SetMeta(metaIPForwardSetAt, []byte(time.Now().UTC().Format(time.RFC3339)))
+	}
 	return nil
 }

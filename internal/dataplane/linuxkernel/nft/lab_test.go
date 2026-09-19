@@ -2,7 +2,7 @@
 
 package nft
 
-// ゴールデンテスト。ラボの vps ns で root として実行する(lab/lab test internal/vpsd/nft)。
+// ゴールデンテスト。ラボの vps ns で root として実行する(lab/lab test internal/dataplane/linuxkernel/nft)。
 // testdata/<case>.json のルールから生成したテーブルの `nft list` が、
 // testdata/<case>.nft を `nft -f` で流したものと一致することを確かめる。
 
@@ -16,8 +16,27 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/model"
+	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/proto"
 )
+
+// planFromRules は、書き込み時と同じ検査を経て proto.Rule から Plan を組み立てる(internal/vpsd/apply.go
+// の buildPlan と同じ経路)。limits のゼロ値は接続元 IP ごとの上限の既定値(UDP 256、TCP 128。仕様 7 節)
+// を使う(internal/policy.Build の約束)。
+func planFromRules(t *testing.T, rules []proto.Rule, agentAddr map[string]netip.Addr, limits flowcap.Limits) planner.Plan {
+	t.Helper()
+	normalized, err := model.NormalizeRules(rules, nil)
+	if err != nil {
+		t.Fatalf("model.NormalizeRules: %v", err)
+	}
+	agents := make([]planner.Agent, 0, len(agentAddr))
+	for name, a := range agentAddr {
+		agents = append(agents, planner.Agent{Name: name, Addr: a})
+	}
+	return planner.Build(planner.Input{Rules: normalized, Limits: limits, Agents: agents})
+}
 
 var counterRe = regexp.MustCompile(`counter packets \d+ bytes \d+`)
 
@@ -54,8 +73,10 @@ func TestGolden(t *testing.T) {
 	}
 	t.Cleanup(func() { exec.Command("nft", "delete", "table", "inet", TableName).Run() })
 
-	cfg := Config{WGInterface: "wg0", AgentAddr: map[string]netip.Addr{
-		"home": netip.MustParseAddr("10.200.0.2"), "office": netip.MustParseAddr("10.200.0.3")}}
+	cfg := Config{WGInterface: "wg0"}
+	agentAddr := map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2"), "office": netip.MustParseAddr("10.200.0.3")}
+	// basic.json の r_proxy(tcp/443)は、待ち受けを開けている前提にする(仕様 6.1 節)。
+	relayListening := map[uint16]bool{443: true}
 	cases, _ := filepath.Glob("testdata/*.json")
 	if len(cases) == 0 {
 		t.Fatal("testdata がない")
@@ -71,13 +92,12 @@ func TestGolden(t *testing.T) {
 			if err := json.Unmarshal(raw, &rules); err != nil {
 				t.Fatal(err)
 			}
-			if err := proto.ValidateRules(rules, nil); err != nil {
-				t.Fatal(err)
-			}
+			plan := planFromRules(t, rules, agentAddr, flowcap.Limits{})
+
 			nftFile(t, strings.TrimSuffix(jsonPath, ".json")+".nft")
 			want := nftList(t)
 
-			if err := Apply(rules, cfg); err != nil {
+			if err := Apply(plan, relayListening, cfg); err != nil {
 				t.Fatalf("Apply: %v", err)
 			}
 			got := nftList(t)
@@ -85,7 +105,7 @@ func TestGolden(t *testing.T) {
 				t.Errorf("nft list differs\n--- want (nft -f)\n%s\n--- got (google/nftables)\n%s", want, got)
 			}
 			// もう一度適用しても同じ(テーブルがある状態からの差し替え)
-			if err := Apply(rules, cfg); err != nil {
+			if err := Apply(plan, relayListening, cfg); err != nil {
 				t.Fatalf("Apply again: %v", err)
 			}
 			if again := nftList(t); again != want {
@@ -131,9 +151,10 @@ func TestLeavesOtherTablesAlone(t *testing.T) {
 	before := list()
 	rules := []proto.Rule{{ID: "r", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 9999, Hi: 9999},
 		Target: "192.168.1.1:9999", VPSMode: proto.ModeKernel, Enabled: true}}
-	cfg := Config{WGInterface: "wg0", AgentAddr: map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")}}
+	plan := planFromRules(t, rules, map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")}, flowcap.Limits{})
+	cfg := Config{WGInterface: "wg0"}
 	for i := 0; i < 2; i++ {
-		if err := Apply(rules, cfg); err != nil {
+		if err := Apply(plan, nil, cfg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -160,8 +181,8 @@ func TestForwardDropsFromWG(t *testing.T) {
 		t.Skip("home から client に届かない(ラボのトポロジが無い)")
 	}
 	t.Cleanup(func() { exec.Command("nft", "delete", "table", "inet", TableName).Run() })
-	cfg := Config{WGInterface: "pub1", AgentAddr: map[string]netip.Addr{}}
-	if err := Apply(nil, cfg); err != nil {
+	cfg := Config{WGInterface: "pub1"}
+	if err := Apply(planner.Plan{}, nil, cfg); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if ping() {

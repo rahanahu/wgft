@@ -2,7 +2,7 @@
 
 package wg
 
-// ラボの vps ns で root として実行する(lab/lab test internal/vpsd/wg)。
+// ラボの vps ns で root として実行する(lab/lab test internal/dataplane/linuxkernel/wg)。
 // 既存の「他人の wg」を作った状態で Ensure の所有判定・衝突検出・引き継ぎを確かめる。
 
 import (
