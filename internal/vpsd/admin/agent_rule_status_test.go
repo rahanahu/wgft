@@ -2,25 +2,25 @@ package admin
 
 import (
 	"encoding/json"
-	"errors"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/vpsd/store"
+	"github.com/rahanahu/wgft/proto"
 )
 
-// agentRuleStatusBackend is a fakeBackend that also reports each rule's agent-side status.
+// agentRuleStatusBackend is a fakeBackend that also reports each rule's agent-side status. It
+// ignores the rules argument and returns a fixed map: these tests exercise the handler's plumbing
+// (JSON shape, optional-interface gating), not the rule-to-agent matching logic, which
+// internal/vpsd/admin_backend_test.go covers against a real Daemon and a real stream.Hub.
 type agentRuleStatusBackend struct {
 	*fakeBackend
 	status map[string]AgentRuleStatus
-	err    error
 }
 
-func (b *agentRuleStatusBackend) AgentRuleStatuses() (map[string]AgentRuleStatus, error) {
-	return b.status, b.err
+func (b *agentRuleStatusBackend) AgentRuleStatuses([]proto.Rule) map[string]AgentRuleStatus {
+	return b.status
 }
 
 // AgentRuleStates is additive to API v1 (design.md 5.2、7a.11 節): the rules response keeps its
@@ -78,32 +78,11 @@ func TestRulesResponseAgentRuleStates(t *testing.T) {
 	}
 }
 
-// A store failure reading the agent list must fail the whole response (500), matching the
-// fail-closed rule for apply-state information (design.md 10.5 節): a silently omitted field would
-// look exactly like a Backend that does not implement the interface, not like a read that failed.
-func TestRulesResponseAgentRuleStatesReadFailure(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	backend := &agentRuleStatusBackend{fakeBackend: &fakeBackend{st: st}, err: errors.New("database is locked")}
-	srv := httptest.NewServer(New(backend))
-	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/api/v1/rules")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", resp.StatusCode)
-	}
-}
-
 // TestAgentRuleStatusJSONShape pins the AgentRuleStatus JSON shape directly. This package cannot
 // import internal/vpsd (internal/vpsd already imports internal/vpsd/admin, so that would be a
-// dependency cycle), so the Daemon implementation that sources these values from a rule's agent's
-// heartbeat is instead covered by internal/vpsd/admin_backend_test.go.
+// dependency cycle), so the Daemon implementation that sources these values from a rule's own
+// agent's heartbeat is instead covered by internal/vpsd/admin_backend_test.go, against a real
+// stream.Hub.
 func TestAgentRuleStatusJSONShape(t *testing.T) {
 	s := AgentRuleStatus{Agent: "home", State: "error", Reason: "target is not allowed", At: "2026-09-21T10:00:00Z", Connected: true}
 	b, err := json.Marshal(s)

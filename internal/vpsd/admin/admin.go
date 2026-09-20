@@ -334,10 +334,7 @@ func (s *Server) getRules(w http.ResponseWriter, r *http.Request) {
 	resp := BatchResponse{Generation: gen, Rules: rules, Drops: drops}
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)
-	if err := s.withAgentRuleStatus(&resp); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	s.withAgentRuleStatus(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -359,10 +356,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	resp := BatchResponse{Generation: res.Generation, Changed: res.Changed, Rules: res.Rules}
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)
-	if err := s.withAgentRuleStatus(&resp); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	s.withAgentRuleStatus(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 

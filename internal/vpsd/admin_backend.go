@@ -410,33 +410,38 @@ func (d *Daemon) ResourceStatus() admin.ResourceStatus {
 }
 
 // AgentRuleStatuses is admin.AgentRuleStatusBackend's implementation (design.md 5.2、7a.11 節): each
-// rule's agent-side status (its owning agent's own report of that rule, from the heartbeat), keyed
-// by rule ID. It draws on the same per-agent stream state Agents() reads Tunnel/Rules from, so a
-// disconnected agent's entries are its last report before the stream dropped (Connected is false;
-// design.md 5.2 節 says these are history, not a current value). Reads the registered-agent list the
-// same way Agents() does, and fails the same way on a store error (design.md 10.5 節、フェイルクローズ):
-// this is apply-state information an operator reads as "all clear" when absent, so a read failure
-// must not look like a Backend that simply does not report it.
-func (d *Daemon) AgentRuleStatuses() (map[string]admin.AgentRuleStatus, error) {
-	list, err := d.st.Agents()
-	if err != nil {
-		return nil, fmt.Errorf("reading agents: %w", err)
-	}
+// of rules' agent-side status, keyed by rule ID, from the per-agent stream state Agents() also reads
+// Tunnel/Rules from. rules is the rule set already read for this response (admin.go passes
+// resp.Rules), so this needs no store read of its own and cannot fail.
+//
+// A rule's status comes only from its own agent (r.Agent), by looking that one agent's cached
+// heartbeat up for an entry with that rule's ID - never by collecting every agent's heartbeat and
+// keying by rule ID regardless of which agent reported it. The latter looked plausible but was
+// wrong: a disconnected agent keeps its last heartbeat's content (design.md 5.2 節), so if a rule
+// moved to a different agent, or was deleted, while its old agent was offline, that old agent's
+// stale heartbeat can still list the rule's ID. Looking a rule up by its own current agent means a
+// moved rule always shows its new agent's live status, and a deleted rule's ID never appears at all
+// (it is simply not in rules any more, so it is never looked up).
+func (d *Daemon) AgentRuleStatuses(rules []proto.Rule) map[string]admin.AgentRuleStatus {
 	out := map[string]admin.AgentRuleStatus{}
-	for _, a := range list {
-		st := d.hub.Status(a.Name)
+	for _, rule := range rules {
+		st := d.hub.Status(rule.Agent)
 		if st.Heartbeat == nil {
 			continue
 		}
-		var at string
-		if !st.LastHeartbeat.IsZero() {
-			at = st.LastHeartbeat.Format(time.RFC3339)
-		}
-		for _, r := range st.Heartbeat.Rules {
-			out[r.ID] = admin.AgentRuleStatus{Agent: a.Name, State: r.State, Reason: r.Reason, At: at, Connected: st.Connected}
+		for _, rs := range st.Heartbeat.Rules {
+			if rs.ID != rule.ID {
+				continue
+			}
+			var at string
+			if !st.LastHeartbeat.IsZero() {
+				at = st.LastHeartbeat.Format(time.RFC3339)
+			}
+			out[rule.ID] = admin.AgentRuleStatus{Agent: rule.Agent, State: rs.State, Reason: rs.Reason, At: at, Connected: st.Connected}
+			break
 		}
 	}
-	return out, nil
+	return out
 }
 
 // neverZero returns nil for 0 ("never published"; design.md 7a.11 節) and a pointer to g otherwise.

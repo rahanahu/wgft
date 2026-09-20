@@ -9,6 +9,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // このファイルは、ルールごとの agent 側の状態(design.md 5.2、7a.11 節)が `rule ls` の人間向け表
@@ -25,8 +26,8 @@ type agentStateRuleBackend struct {
 	status map[string]admin.AgentRuleStatus
 }
 
-func (b *agentStateRuleBackend) AgentRuleStatuses() (map[string]admin.AgentRuleStatus, error) {
-	return b.status, nil
+func (b *agentStateRuleBackend) AgentRuleStatuses([]proto.Rule) map[string]admin.AgentRuleStatus {
+	return b.status
 }
 
 func TestRuleLsShowsAgentRuleState(t *testing.T) {

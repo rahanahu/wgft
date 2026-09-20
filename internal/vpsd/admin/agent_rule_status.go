@@ -1,5 +1,7 @@
 package admin
 
+import "github.com/rahanahu/wgft/proto"
+
 // このファイルは、ルールごとの agent 側の状態(設計文書 5.2、7a.11 節)を管理用 API v1 に
 // 加算的に載せる型を持つ。既存のフィールドの意味は変えない(7a.6 節)。
 //
@@ -11,9 +13,9 @@ package admin
 // AgentRuleStates はこれを rule_id をキーに引けるようにする。
 
 // AgentRuleStatus is one rule's agent-side status (design.md 5.2, 7a.11 節), sourced from the
-// proto.RuleStatus entries the rule's agent sends in its heartbeat. It complements RuleStates (the
-// server's own apply state, apply.go) and ResourceRefusals (Resource Guard, resource_status.go) with
-// what only `agent ls` and the Web UI showed until now.
+// proto.RuleStatus entries the rule's own agent (proto.Rule.Agent) sends in its heartbeat. It
+// complements RuleStates (the server's own apply state, apply.go) and ResourceRefusals (Resource
+// Guard, resource_status.go) with what only `agent ls` and the Web UI showed until now.
 type AgentRuleStatus struct {
 	// Agent is the name of the rule's agent (proto.Rule.Agent), the one that reported this status.
 	Agent string `json:"agent"`
@@ -36,26 +38,32 @@ type AgentRuleStatus struct {
 // optional: a Backend without it (a fake or demo Backend, e.g.) serves the rules without the added
 // field.
 type AgentRuleStatusBackend interface {
-	// AgentRuleStatuses returns the status of every rule its agent has reported at least once, by
-	// rule ID. A rule its agent never reported (the agent never connected, or has not processed that
-	// rule yet) is simply absent, not present with a zero value, matching ResourceStatus.Refusals.
-	AgentRuleStatuses() (map[string]AgentRuleStatus, error)
+	// AgentRuleStatuses returns the agent-side status of each of rules, by rule ID. rules is the
+	// rule set already read for this response (getRules/postBatch pass resp.Rules), so this needs no
+	// store read of its own.
+	//
+	// A rule's status comes only from its OWN agent (r.Agent), never from a different agent that
+	// happens to also list the same rule ID in a stale cached heartbeat. This matters because a
+	// disconnected agent keeps its last heartbeat's content (design.md 5.2 節): if a rule moves from
+	// agent A to agent B while A is offline, or is deleted while its agent is offline, A's old
+	// heartbeat can still list that rule ID. Looking it up by the rule's current agent, rather than
+	// scanning every agent that ever mentioned the ID, is what keeps a moved rule showing B's live
+	// status (not A's stale one) and keeps a deleted rule's ID from appearing at all (it is no longer
+	// in rules, so it is never looked up).
+	//
+	// A rule its own agent has never reported is simply absent, not present with a zero value,
+	// matching ResourceStatus.Refusals.
+	AgentRuleStatuses(rules []proto.Rule) map[string]AgentRuleStatus
 }
 
 // withAgentRuleStatus adds agent_rule_states to a rules response, when the Backend reports it
-// (design.md 5.2, 7a.11 節; additive to API v1). It returns the Backend's error, if any: the
-// underlying read (the registered-agent list) is the same one GET /api/v1/agents fails the whole
-// response over, so a failure here fails this response too rather than silently omitting a status
-// report an operator would otherwise read as "all clear" (design.md 10.5 節、フェイルクローズ).
-func (s *Server) withAgentRuleStatus(resp *BatchResponse) error {
+// (design.md 5.2, 7a.11 節; additive to API v1). It passes resp.Rules, the rule set already read for
+// this response, so the Backend can look each rule's status up by that rule's own current agent
+// rather than needing a read of its own.
+func (s *Server) withAgentRuleStatus(resp *BatchResponse) {
 	b, ok := s.backend.(AgentRuleStatusBackend)
 	if !ok {
-		return nil
+		return
 	}
-	st, err := b.AgentRuleStatuses()
-	if err != nil {
-		return err
-	}
-	resp.AgentRuleStates = st
-	return nil
+	resp.AgentRuleStates = b.AgentRuleStatuses(resp.Rules)
 }
