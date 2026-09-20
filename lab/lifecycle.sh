@@ -31,9 +31,26 @@
 #      (design 10.3 section). internal/vpsd/teardown_lab_test.go already covers this at the
 #      package level (`lab/lab test internal/vpsd`); this check drives the same scenario
 #      through the CLI, in the netns topology, end to end.
-#   5. under the default flow caps (design 7 section), holding and flooding past them keeps RSS
-#      under the derived memory soft limit plus a margin, for the userspace server's own relay
-#      and for the agent (which relays every connection regardless of the server's mode).
+#   5. under HALF the default flow caps (design 7, 7a.10 sections), holding and flooding past them
+#      keeps RSS under the derived memory soft limit plus a margin, for the userspace server's own
+#      relay and for the agent (which relays every connection regardless of the server's mode). The
+#      budget is halved so that one rule alone (which may now hold the whole budget, design 7a.10)
+#      can be filled by a flood from the client namespace's own address space.
+#   5b. the same RSS bound, but under the DEFAULT (unhalved) flow caps, so the memory soft limit's
+#      designed-for figure (design 7a.10: about 210 MiB against a 216 MiB limit) is exercised by an
+#      actual single-rule flood rather than only by the halved-budget check 5. Needs roughly twice
+#      check 5's source addresses, since one address can supply at most the per-source caps (256
+#      UDP, 128 TCP) toward the larger default budgets (8192 UDP, 2048 TCP).
+#   5c. Resource Guard isolation with 2 rules (design 7a.10 節): flooding one TCP rule to its
+#      per-rule cap C does not stop a second rule from opening new connections up to its reserve q,
+#      and does not evict the first rule's held connections. With 2 rules C and q are equal, so the
+#      refusal reason is rule_cap for both rules.
+#   5d. the same isolation with 3 rules: q is now below C, so the two rules left un-flooded are
+#      each refused by reason reserve once they reach q, while the flooded rule is still refused by
+#      rule_cap at C.
+#   5e. isolation still holds under a budget smaller than the built-in default (design 7a.10 節's
+#      own examples, WGFT_MAX_TCP_FLOWS=1024 and 1500 on the agent): 5c's 2-rule case already runs
+#      at 1024 (check 5's halved TCP budget); 5e repeats it at 1500.
 #   6. rule-local (Prepare) failures are fail-closed, not backend-wide (design 7a.3 section): a.
 #      kernel mode, a squatted proxy port reports that one rule not_active with a bind-failed
 #      reason, without blocking an unrelated rule's active state or the active generation, and
@@ -82,7 +99,7 @@ mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: lifecycle.sh kernel|userspace [check...]" >&2; exit 2;; esac
 shift || true
 # Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9) run only those checks; none runs all.
-ALL_CHECKS="1 2 3 3b 4 5 6 7 8 9"
+ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9"
 CHECKS="${*:-$ALL_CHECKS}"
 for c in $CHECKS; do
   case " $ALL_CHECKS " in *" $c "*) ;; *) echo "lifecycle.sh: unknown check '$c' (use: $ALL_CHECKS)" >&2; exit 2;; esac
@@ -1274,6 +1291,458 @@ check5() {
     check5_agent_memory
   else
     skip "agent memory under flood (already exercised via the faster kernel-mode forwarding path in the kernel run, to keep this check short)"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 5b: memory stays bounded when one rule fills the DEFAULT (unhalved) flow budget (design
+# 7, 7a.10 節). Same shape as check 5, but without C5_FLOW_FLAGS, so the budget is the built-in
+# default (8192 UDP, 2048 TCP) and the soft limit is the built-in default (216 MiB). Needs roughly
+# twice check 5's source addresses (42, not 21): one address can supply at most the per-source caps
+# (256 UDP, 128 TCP) toward these larger totals.
+#
+# EXCLUSIVE-HEAVY: like check 5 itself, 5b/5c/5d/5e all flood thousands of connections/datagrams
+# from the client namespace and read RSS and held-connection counts under that load. None of them
+# is safe to run at the same time as another CPU- or memory-bound check (this file's own check 5,
+# each other, or a flood elsewhere in the VM) - a shared CPU would blur the RSS and held-count
+# bounds these checks assert on. They are, however, independent of every check OUTSIDE this file's
+# check 5 family (1-4, 6-9), which do not flood, so those remain parallel-safe against these.
+#
+# check 5b through 5e (this whole block) are written for the lab's upcoming move to several
+# sandboxes per VM: every file they write lives under $WORKDIR (default /tmp, override with
+# WGFT_LIFECYCLE_WORKDIR so two sandboxes in one VM never share a path), every network namespace
+# is named through a variable (NS_VPS/NS_CLIENT/NS_HOME/NS_LAN, default vps/client/home/lan)
+# instead of literally, and every process one of these checks starts directly (a kernel-mode
+# server, the agent, the lan echo target, each flood.py) is killed by the pid this script captured
+# for it with plain $!, never by pkill/pgrep across the whole VM. That capture only works because
+# each of those is spawned as a direct `ip netns exec "$NS_x" ...` command in the background, with
+# nothing else in the pipeline: bash only skips the extra fork it would otherwise take for a
+# backgrounded job when the job is a single external command with no shell function in the way
+# (confirmed against this bash: a background call THROUGH a wrapper function, even one that is
+# itself just a single external command, still forks - $! then names the function's own subshell,
+# not the program it runs, so killing it leaves the real process behind as an orphan). That is
+# also why vps()/client() above are never used to launch a backgrounded process that a check needs
+# to kill precisely: check 5's own find_wgft_pid (pgrep-based) exists for exactly this reason, not
+# only for the userspace server's runuser hop. This block avoids find_wgft_pid entirely by not
+# routing any backgrounded launch through a function; existing checks 1-9 are not touched.
+# ---------------------------------------------------------------------------------------------
+WORKDIR=${WGFT_LIFECYCLE_WORKDIR:-/tmp}
+NS_VPS=${NS_VPS:-vps}
+NS_CLIENT=${NS_CLIENT:-client}
+NS_HOME=${NS_HOME:-home}
+NS_LAN=${NS_LAN:-lan}
+
+DEFAULT_UDP_BUDGET=8192
+DEFAULT_TCP_BUDGET=2048
+# design 7: 32 MiB + 12 KiB * 8192 + 44 KiB * 2048 = 216 MiB.
+DEFAULT_SOFT_LIMIT_MIB=216
+# Same reasoning as check 5's MARGIN_MIB: absorbs GC catching up, not a real regression. design
+# 7a.10 節 notes this configuration's RSS should already sit close to the soft limit (about 210
+# MiB), so this margin is generous on purpose.
+DEFAULT_MARGIN_MIB=100
+
+# addrs_add <first> <last>: adds 198.51.100.<first> through 198.51.100.<last> to the client's eth0
+# and prints them as a comma-separated list (flood.py's <src-ips-csv> form). addrs_del undoes it.
+# Not backgrounded, so going through the NS_CLIENT variable directly (rather than client(), which
+# is a function - see this block's header comment) loses nothing.
+addrs_add() {
+  local i out=""
+  for i in $(seq "$1" "$2"); do
+    ip netns exec "$NS_CLIENT" ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null
+    out+="198.51.100.$i,"
+  done
+  echo "${out%,}"
+}
+addrs_del() {
+  local i
+  for i in $(seq "$1" "$2"); do ip netns exec "$NS_CLIENT" ip addr del "198.51.100.$i/24" dev eth0 2>/dev/null; done
+}
+
+check5b_server_default_memory() {
+  echo "-- the userspace server's own relay, default (unhalved) budget"
+  local DATA="$WORKDIR/wgft-lifecycle-c5bs" ADATA="$WORKDIR/wgft-lifecycle-c5bs-agent"
+  vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+  local addrs; addrs=$(addrs_add 10 51)
+  local agent_pid="" echo_pid="" flood_pid=""
+
+  # start_server (existing helper) runs the userspace server as user wgftlab via runuser, which
+  # forks; its own pid is not capturable with $! (see this block's header comment), so this one
+  # process is found with the existing find_wgft_pid (pgrep-based, the same technique check 5
+  # itself uses for the same reason).
+  start_server "$DATA" "$WORKDIR/wgft-lifecycle-c5bs-server.log"
+  if ! wait_admin; then
+    echo "FAIL  check5b (server) setup: admin api never came up"; fail=1
+    local spid; spid=$(find_wgft_pid 'server run'); [ -n "$spid" ] && kill "$spid" 2>/dev/null
+  else
+    local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+    WGFT_JOIN="$join" ip netns exec "$NS_HOME" setsid nohup wgft agent run --data-dir "$ADATA" > "$WORKDIR/wgft-lifecycle-c5bs-agent.log" 2>&1 < /dev/null &
+    agent_pid=$!
+    ip netns exec "$NS_LAN" setsid nohup echo -bind 192.168.50.3 -tcp 25597 -udp 19162 > "$WORKDIR/wgft-lifecycle-c5bs-echo.log" 2>&1 < /dev/null &
+    echo_pid=$!
+    if ! wait_agent home; then echo "FAIL  check5b (server) setup: agent never registered"; fail=1
+    else
+      vps wgft rule add --agent home --udp 27050 --to 192.168.50.3:19162 --admin "$ADMIN" >/dev/null
+      vps wgft rule add --agent home --tcp 39998 --to 192.168.50.3:25597 --admin "$ADMIN" >/dev/null
+      wait_until 10 tcp_probe_ok 39998
+      wait_until 10 udp_probe_ok 27050
+      local spid; spid=$(find_wgft_pid 'server run')
+
+      local udp_out; udp_out=$(ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" udp 198.51.100.1 27050 "$addrs" 260)
+      echo "   $udp_out"
+      ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 39998 "$addrs" 60 5 > "$WORKDIR/wgft-lifecycle-c5bs-tcpflood.log" 2>&1 &
+      flood_pid=$!
+      c5bs_held_near_budget() { [ "$(vps ss -tn state established '( sport = :39998 )' | grep -c ':39998')" -ge $((DEFAULT_TCP_BUDGET - 48)) ]; }
+      must_wait "check5b (server): tcp flood finished attempting all connections" 15 log_has "$WORKDIR/wgft-lifecycle-c5bs-tcpflood.log" "tcp: attempted="
+      must_wait "check5b (server): tcp held count reaches the default flow budget" 15 c5bs_held_near_budget
+      local held; held=$(vps ss -tn state established '( sport = :39998 )' | grep -c ':39998')
+      local rss; rss=$(rss_mib "$spid")
+      wait "$flood_pid" 2>/dev/null; flood_pid=""
+      echo "   $(cat "$WORKDIR/wgft-lifecycle-c5bs-tcpflood.log")"
+      echo "   tcp connections actually held: $held"
+      echo "   server RSS while flooded past the default flow budget: ${rss:-unknown} MiB (soft limit $DEFAULT_SOFT_LIMIT_MIB MiB, margin $DEFAULT_MARGIN_MIB MiB)"
+      okcheck "server: one rule's tcp flood fills the default flow budget (held $held of $DEFAULT_TCP_BUDGET)" \
+        "$([ "$held" -ge $((DEFAULT_TCP_BUDGET - 48)) ] && [ "$held" -le "$DEFAULT_TCP_BUDGET" ] && echo 1 || echo 0)"
+      local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
+      okcheck "server: one rule's udp flood fills the default flow budget and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le "$DEFAULT_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
+      okcheck "server RSS stays under the default soft limit plus margin while flooded past the default flow budget" \
+        "$([ -n "${rss:-}" ] && [ "$rss" -le "$((DEFAULT_SOFT_LIMIT_MIB + DEFAULT_MARGIN_MIB))" ] && echo 1 || echo 0)"
+      check "server logs its derived memory soft limit at start" "memory soft limit: $DEFAULT_SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' "$WORKDIR/wgft-lifecycle-c5bs-server.log")"
+      [ -n "$spid" ] && kill "$spid" 2>/dev/null && must_wait "check5b (server): server pid $spid exited" 5 proc_gone "$spid"
+    fi
+  fi
+
+  [ -n "$flood_pid" ] && kill "$flood_pid" 2>/dev/null
+  [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null && must_wait "check5b (server): agent pid $agent_pid exited" 5 proc_gone "$agent_pid"
+  [ -n "$echo_pid" ] && kill "$echo_pid" 2>/dev/null
+  addrs_del 10 51
+  vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
+  rm -rf "$DATA" "$ADATA"
+}
+
+check5b_agent_default_memory() {
+  echo "-- the agent (via the faster kernel-mode forwarding path), default (unhalved) budget"
+  local DATA="$WORKDIR/wgft-lifecycle-c5ba" ADATA="$WORKDIR/wgft-lifecycle-c5ba-agent"
+  vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+  local addrs; addrs=$(addrs_add 10 51)
+  local server_pid="" agent_pid="" echo_pid="" flood_pid=""
+
+  ip netns exec "$NS_VPS" setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+    > "$WORKDIR/wgft-lifecycle-c5ba-server.log" 2>&1 < /dev/null &
+  server_pid=$!
+  if ! wait_admin; then
+    echo "FAIL  check5b (agent) setup: admin api never came up"; fail=1
+  else
+    local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+    WGFT_JOIN="$join" ip netns exec "$NS_HOME" setsid nohup wgft agent run --data-dir "$ADATA" > "$WORKDIR/wgft-lifecycle-c5ba-agent.log" 2>&1 < /dev/null &
+    agent_pid=$!
+    ip netns exec "$NS_LAN" setsid nohup echo -bind 192.168.50.3 -tcp 25598 -udp 19163 > "$WORKDIR/wgft-lifecycle-c5ba-echo.log" 2>&1 < /dev/null &
+    echo_pid=$!
+    if ! wait_agent home; then echo "FAIL  check5b (agent) setup: agent never registered"; fail=1
+    else
+      vps wgft rule add --agent home --udp 27051 --to 192.168.50.3:19163 --admin "$ADMIN" >/dev/null
+      vps wgft rule add --agent home --tcp 39999 --to 192.168.50.3:25598 --admin "$ADMIN" >/dev/null
+      wait_until 10 tcp_probe_ok 39999
+      wait_until 10 udp_probe_ok 27051
+
+      local udp_out; udp_out=$(ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" udp 198.51.100.1 27051 "$addrs" 260)
+      echo "   $udp_out"
+      ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 39999 "$addrs" 60 5 > "$WORKDIR/wgft-lifecycle-c5ba-tcpflood.log" 2>&1 &
+      flood_pid=$!
+      c5ba_held_near_budget() { [ "$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25598 )' | grep -c ':25598')" -ge $((DEFAULT_TCP_BUDGET - 48)) ]; }
+      must_wait "check5b (agent): tcp flood finished attempting all connections" 15 log_has "$WORKDIR/wgft-lifecycle-c5ba-tcpflood.log" "tcp: attempted="
+      must_wait "check5b (agent): tcp held count reaches the default flow budget" 15 c5ba_held_near_budget
+      local held; held=$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25598 )' | grep -c ':25598')
+      local rss; rss=$(rss_mib "$agent_pid")
+      wait "$flood_pid" 2>/dev/null; flood_pid=""
+      echo "   $(cat "$WORKDIR/wgft-lifecycle-c5ba-tcpflood.log")"
+      echo "   tcp connections actually held: $held"
+      echo "   agent RSS while flooded past the default flow budget: ${rss:-unknown} MiB (soft limit $DEFAULT_SOFT_LIMIT_MIB MiB, margin $DEFAULT_MARGIN_MIB MiB)"
+      okcheck "agent: one rule's tcp flood fills the default flow budget (held $held of $DEFAULT_TCP_BUDGET)" \
+        "$([ "$held" -ge $((DEFAULT_TCP_BUDGET - 48)) ] && [ "$held" -le "$DEFAULT_TCP_BUDGET" ] && echo 1 || echo 0)"
+      local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
+      okcheck "agent: one rule's udp flood fills the default flow budget and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le "$DEFAULT_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
+      okcheck "agent RSS stays under the default soft limit plus margin while flooded past the default flow budget" \
+        "$([ -n "${rss:-}" ] && [ "$rss" -le "$((DEFAULT_SOFT_LIMIT_MIB + DEFAULT_MARGIN_MIB))" ] && echo 1 || echo 0)"
+      check "agent logs its derived memory soft limit at start" "memory soft limit: $DEFAULT_SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' "$WORKDIR/wgft-lifecycle-c5ba-agent.log")"
+    fi
+  fi
+
+  [ -n "$flood_pid" ] && kill "$flood_pid" 2>/dev/null
+  [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null && must_wait "check5b (agent): agent pid $agent_pid exited" 5 proc_gone "$agent_pid"
+  [ -n "$echo_pid" ] && kill "$echo_pid" 2>/dev/null
+  [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null && must_wait "check5b (agent): server pid $server_pid exited" 5 proc_gone "$server_pid"
+  addrs_del 10 51
+  vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"
+}
+
+check5b() {
+  echo "== $mode: check 5b: memory stays bounded under the default (unhalved) flow budget"
+  if [ "$mode" = userspace ]; then
+    check5b_server_default_memory
+  else
+    skip "the userspace server's own relay memory (kernel mode holds no per-flow state in vpsd, design 6.1)"
+  fi
+  if [ "$mode" = kernel ]; then
+    check5b_agent_default_memory
+  else
+    skip "agent memory under flood (already exercised via the faster kernel-mode forwarding path in the kernel run)"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 5c/5d: Resource Guard isolation (design 7a.10 節). Flooding one TCP rule of an N-rule
+# configuration to its per-rule cap C = ceil(T/2) does not stop the OTHER rules from opening new
+# connections up to their own reserve q, and does not evict the flooded rule's held connections.
+# The flooded rule (A, filled first while the total is still short of T) is refused by reason
+# rule_cap once it reaches C. Because C + q always equals T exactly for 2 rules (C = ceil(T/2), q =
+# floor(T/2), and a ceiling and a floor of the same half always sum to the whole - confirmed in the
+# lab, not assumed: internal/resource.Pool checks the total budget before the per-rule cap, design
+# 7a.10 節's stated order), the LAST rule to fill always exhausts the total at the very moment it
+# reaches its own share, so its refusal is reason budget, never rule_cap or reserve, regardless of
+# which of the two reasons would otherwise apply. With 3 rules and this budget (1024, so q=256
+# divides q*2 evenly into C), the same coincidence hits the last of the two un-flooded rules; the
+# other one fills first, while the total is still short of T, and is refused by reason reserve as
+# design 7a.10 節 states. So check 5c (2 rules) shows rule_cap then budget, and check 5d (3 rules)
+# shows rule_cap, then reserve, then budget - all three reasons the Pool can report, each on a real
+# connection. Both checks run against the userspace server's own relay pool
+# (kernel mode holds no per-flow Resource Guard state for a Transparent rule, design 6.1, 7a.10
+# 節; the equivalent scene for the agent, which always uses the same resource.Pool regardless of
+# the server's mode, is check 5e's small-budget case). All rules share one lan echo backend (one
+# port is enough: each rule's listen port is what ss below counts on, not the target).
+# ---------------------------------------------------------------------------------------------
+resource_isolation_case() {
+  local tag=$1 nrules=$2 q=$3
+  local c=512  # ceil(1024/2), independent of N (check 5's halved TCP budget, C5_FLOW_FLAGS)
+  local DATA="$WORKDIR/wgft-lifecycle-$tag" ADATA="$WORKDIR/wgft-lifecycle-$tag-agent"
+  local LOG="$WORKDIR/wgft-lifecycle-$tag-server.log"
+  local agent_pid="" echo_pid=""
+  vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+  local addrs; addrs=$(addrs_add 10 30)
+
+  # start_server: see check5b_server_default_memory's comment on find_wgft_pid (runuser forks).
+  start_server "$DATA" "$LOG" "${C5_FLOW_FLAGS[@]}"
+  if ! wait_admin; then
+    echo "FAIL  $tag setup: admin api never came up"; fail=1; addrs_del 10 30
+    local spid; spid=$(find_wgft_pid 'server run'); [ -n "$spid" ] && kill "$spid" 2>/dev/null
+    vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; rm -rf "$DATA" "$ADATA"
+    return
+  fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  WGFT_JOIN="$join" ip netns exec "$NS_HOME" setsid nohup wgft agent run --data-dir "$ADATA" "${ADATA_EXTRA_FLAGS[@]}" > "$WORKDIR/wgft-lifecycle-$tag-agent.log" 2>&1 < /dev/null &
+  agent_pid=$!
+  ip netns exec "$NS_LAN" setsid nohup echo -bind 192.168.50.3 -tcp 25599 > "$WORKDIR/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
+  echo_pid=$!
+  if ! wait_agent home; then
+    echo "FAIL  $tag setup: agent never registered"; fail=1; addrs_del 10 30
+    kill "$agent_pid" "$echo_pid" 2>/dev/null
+    local spid; spid=$(find_wgft_pid 'server run'); [ -n "$spid" ] && kill "$spid" 2>/dev/null
+    vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; rm -rf "$DATA" "$ADATA"
+    return
+  fi
+
+  local -a ports=() ids=()
+  local i port id
+  for i in $(seq 0 $((nrules - 1))); do
+    port=$((39900 + i))
+    id=$(vps wgft rule add --agent home --tcp "$port" --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+    ports+=("$port"); ids+=("$id")
+  done
+  for port in "${ports[@]}"; do wait_until 10 tcp_probe_ok "$port"; done
+
+  ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 "${ports[0]}" "$addrs" 40 25 \
+    > "$WORKDIR/wgft-lifecycle-$tag-floodA.log" 2>&1 &
+  local pidA=$!
+  # Wait for the flood to finish ATTEMPTING every connection before reading ss: accept() makes a
+  # socket ESTABLISHED at the OS level before this relay's own goroutine has run the admission
+  # check and possibly closed it again, so sampling mid-burst can catch a transient overshoot
+  # (observed in the lab: held briefly read as the full attempted count, not the cap) that has
+  # nothing to do with whether the cap actually holds once the relay catches up. Same fix as check
+  # 5's own must_wait pair (finish attempting, only then check the held count).
+  must_wait "$tag: rule A's flood finished attempting all connections" 10 log_has "$WORKDIR/wgft-lifecycle-$tag-floodA.log" "tcp: attempted="
+  c5_iso_a_held() { [ "$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")" -ge $((c - 24)) ]; }
+  must_wait "$tag: rule A's flood reaches its per-rule cap C=$c" 10 c5_iso_a_held
+  local heldA; heldA=$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")
+
+  local -a otherPids=() otherHeld=()
+  for i in $(seq 1 $((nrules - 1))); do
+    local p=${ports[$i]}
+    ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 "$p" "$addrs" 40 10 \
+      > "$WORKDIR/wgft-lifecycle-$tag-flood$i.log" 2>&1 &
+    otherPids+=($!)
+    must_wait "$tag: rule $((i + 1))'s flood finished attempting all connections" 10 log_has "$WORKDIR/wgft-lifecycle-$tag-flood$i.log" "tcp: attempted="
+    c5_iso_other_held() { [ "$(vps ss -tn state established "( sport = :$p )" | grep -c ":$p")" -ge $((q - 24)) ]; }
+    must_wait "$tag: rule $((i + 1)) (${ids[$i]}) opens new connections up to its reserve q=$q while A is flooded" 10 c5_iso_other_held
+    # captured HERE, before any wait below closes these connections back down
+    otherHeld+=("$(vps ss -tn state established "( sport = :$p )" | grep -c ":$p")")
+  done
+  local heldA_after; heldA_after=$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")
+  wait "$pidA" "${otherPids[@]}" 2>/dev/null
+
+  local held_desc="A(${ids[0]})=$heldA"
+  for i in $(seq 1 $((nrules - 1))); do held_desc+=" $((i + 1))(${ids[$i]})=${otherHeld[$((i - 1))]}"; done
+  echo "   $tag: held $held_desc (before/after A: $heldA/$heldA_after; C=$c q=$q)"
+  okcheck "$tag: rule A (flooded) is refused at its per-rule cap" \
+    "$([ "$heldA" -ge $((c - 24)) ] && [ "$heldA" -le "$c" ] && echo 1 || echo 0)"
+  eqcheck "$tag: rule A's held connections are not evicted by the other rule(s)' admission" "$heldA" "$heldA_after"
+  # The rule_cap and reserve messages both start "rule <id> holds <n> flows", so matching only
+  # that much would pass for either reason (caught by this block's own teeth proof: disabling the
+  # rule_cap check in internal/resource/pool.go left this check passing on the reserve message
+  # alone, since a 2-rule config's C and q are equal - see this commit's body). Matching rule_cap's
+  # own, further text ("and the rest of the budget is reserved for", not reserve's "above its
+  # reserve of") is what actually tells the two reasons apart.
+  check "$tag: rule A's refusal is logged with reason rule_cap, not reserve" \
+    "and the rest of the budget is reserved for" "$(grep "rule ${ids[0]} holds" "$LOG")"
+  for i in $(seq 1 $((nrules - 1))); do
+    local hb=${otherHeld[$((i - 1))]}
+    okcheck "$tag: rule $((i + 1)) opens new connections up to its reserve while A is flooded (held $hb of $q)" \
+      "$([ "$hb" -ge $((q - 24)) ] && [ "$hb" -le "$q" ] && echo 1 || echo 0)"
+  done
+  # The last "other" rule to fill always coincides with exhausting the whole budget (this
+  # function's block comment explains why), so its refusal is reason budget - a message that
+  # names the listener (proto/port), not the rule id, so it is matched by port instead. Every
+  # earlier "other" rule fills while the total is still short of T and is refused by reason
+  # reserve, matched by rule id like rule A's rule_cap refusal above.
+  for i in $(seq 1 $((nrules - 1))); do
+    if [ "$i" = $((nrules - 1)) ]; then
+      check "$tag: rule $((i + 1)) (the last to fill) is refused by reason budget, not reserve or rule_cap" \
+        "flow budget full (" "$(grep "tcp/${ports[$i]}:" "$LOG")"
+    else
+      check "$tag: rule $((i + 1))'s refusal is reason reserve (q is below C, and the total is not yet full)" \
+        "above its reserve of $q" "$(grep "rule ${ids[$i]} holds" "$LOG")"
+    fi
+  done
+
+  addrs_del 10 30
+  kill "$agent_pid" "$echo_pid" 2>/dev/null
+  must_wait "$tag: agent pid $agent_pid exited" 5 proc_gone "$agent_pid"
+  local spid; spid=$(find_wgft_pid 'server run'); [ -n "$spid" ] && kill "$spid" 2>/dev/null
+  vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
+  rm -rf "$DATA" "$ADATA"
+}
+
+check5c() {
+  echo "== $mode: check 5c: Resource Guard isolation with 2 rules"
+  if [ "$mode" = userspace ]; then
+    ADATA_EXTRA_FLAGS=()
+    resource_isolation_case c5c-server 2 512
+  else
+    skip "exercised against the userspace server's own relay pool only (see check 5c/5d/5e's block comment)"
+  fi
+}
+
+check5d() {
+  echo "== $mode: check 5d: Resource Guard isolation with 3 rules"
+  if [ "$mode" = userspace ]; then
+    ADATA_EXTRA_FLAGS=()
+    resource_isolation_case c5d-server 3 256
+  else
+    skip "exercised against the userspace server's own relay pool only (see check 5c/5d/5e's block comment)"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 5e: isolation holds under a budget smaller than the built-in default, on the AGENT (design
+# 7a.10 節's own examples): WGFT_MAX_TCP_FLOWS=1024 (2 rules: one stops at 512, the other opens up
+# to 512) and WGFT_MAX_TCP_FLOWS=1500 (2 rules: one stops at 750, the other opens up to 750). The
+# 1024 case is exactly check 5c's budget, but exercised on the agent (kernel-mode server) instead
+# of the userspace server, which is the process design 7a.10 節 names; the 1500 case adds the
+# second value the design section calls out. Each rule dials a DIFFERENT lan target port, so the
+# agent's own outgoing dial (counted with ss in the home namespace, the same technique check 5's
+# check5_agent_memory uses) can tell the two rules' held connections apart. The server here is a
+# directly-spawned kernel-mode process, so its pid is a genuine, capturable $! like the agent's
+# and the echo target's - no find_wgft_pid needed anywhere in this one.
+# ---------------------------------------------------------------------------------------------
+agent_isolation_case() {
+  local tag=$1 tcp_total=$2 c=$3 q=$4
+  local DATA="$WORKDIR/wgft-lifecycle-$tag" ADATA="$WORKDIR/wgft-lifecycle-$tag-agent"
+  local server_pid="" agent_pid="" echo_pid=""
+  vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+  local addrs; addrs=$(addrs_add 10 30)
+
+  ip netns exec "$NS_VPS" setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+    > "$WORKDIR/wgft-lifecycle-$tag-server.log" 2>&1 < /dev/null &
+  server_pid=$!
+  if ! wait_admin; then
+    echo "FAIL  $tag setup: admin api never came up"; fail=1; addrs_del 10 30
+    kill "$server_pid" 2>/dev/null
+    vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state; rm -rf "$DATA" "$ADATA"
+    return
+  fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  local LOG="$WORKDIR/wgft-lifecycle-$tag-agent.log"
+  WGFT_JOIN="$join" ip netns exec "$NS_HOME" setsid nohup wgft agent run --data-dir "$ADATA" --max-tcp-flows "$tcp_total" \
+    > "$LOG" 2>&1 < /dev/null &
+  agent_pid=$!
+  ip netns exec "$NS_LAN" setsid nohup echo -bind 192.168.50.3 -tcp 25599,25600 > "$WORKDIR/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
+  echo_pid=$!
+  if ! wait_agent home; then
+    echo "FAIL  $tag setup: agent never registered"; fail=1; addrs_del 10 30
+    kill "$agent_pid" "$echo_pid" "$server_pid" 2>/dev/null
+    vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state; rm -rf "$DATA" "$ADATA"
+    return
+  fi
+
+  local idA idB
+  idA=$(vps wgft rule add --agent home --tcp 39910 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  idB=$(vps wgft rule add --agent home --tcp 39911 --to 192.168.50.3:25600 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  wait_until 10 tcp_probe_ok 39910
+  wait_until 10 tcp_probe_ok 39911
+
+  ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 39910 "$addrs" 40 25 \
+    > "$WORKDIR/wgft-lifecycle-$tag-floodA.log" 2>&1 &
+  local pidA=$!
+  # Wait for the flood to finish attempting before reading ss: see resource_isolation_case's
+  # identical comment (accept() marks a socket ESTABLISHED before this relay's own admission
+  # check can close an over-cap one, so sampling mid-burst can catch a transient overshoot).
+  must_wait "$tag: rule A's flood finished attempting all connections" 10 log_has "$WORKDIR/wgft-lifecycle-$tag-floodA.log" "tcp: attempted="
+  a_held() { [ "$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25599 )' | grep -c ':25599')" -ge $((c - 24)) ]; }
+  must_wait "$tag: rule A's flood reaches its per-rule cap C=$c" 10 a_held
+  local heldA; heldA=$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25599 )' | grep -c ':25599')
+
+  ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 39911 "$addrs" 40 10 \
+    > "$WORKDIR/wgft-lifecycle-$tag-floodB.log" 2>&1 &
+  local pidB=$!
+  must_wait "$tag: rule B's flood finished attempting all connections" 10 log_has "$WORKDIR/wgft-lifecycle-$tag-floodB.log" "tcp: attempted="
+  b_held() { [ "$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25600 )' | grep -c ':25600')" -ge $((q - 24)) ]; }
+  must_wait "$tag: rule B opens new connections up to its reserve q=$q while A is flooded" 10 b_held
+  local heldB; heldB=$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25600 )' | grep -c ':25600')
+  local heldA_after; heldA_after=$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25599 )' | grep -c ':25599')
+  wait "$pidA" "$pidB" 2>/dev/null
+
+  echo "   $tag (WGFT_MAX_TCP_FLOWS=$tcp_total): rule A held $heldA before / $heldA_after after, rule B held $heldB (C=$c q=$q)"
+  okcheck "$tag: rule A (flooded) is refused at its per-rule cap" \
+    "$([ "$heldA" -ge $((c - 24)) ] && [ "$heldA" -le "$c" ] && echo 1 || echo 0)"
+  okcheck "$tag: rule B opens new connections up to its reserve while A is flooded" \
+    "$([ "$heldB" -ge $((q - 24)) ] && [ "$heldB" -le "$q" ] && echo 1 || echo 0)"
+  eqcheck "$tag: rule A's held connections are not evicted by rule B's admission" "$heldA" "$heldA_after"
+  # See resource_isolation_case's identical comment: rule_cap and reserve messages share the same
+  # "rule <id> holds <n> flows" prefix, so the further, rule_cap-only text is what actually tells
+  # them apart.
+  check "$tag: rule A's refusal is logged with reason rule_cap, not reserve" \
+    "and the rest of the budget is reserved for" "$(grep "rule $idA holds" "$LOG")"
+
+  addrs_del 10 30
+  kill "$agent_pid" "$echo_pid" 2>/dev/null
+  must_wait "$tag: agent pid $agent_pid exited" 5 proc_gone "$agent_pid"
+  kill "$server_pid" 2>/dev/null
+  vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"
+}
+
+check5e() {
+  echo "== $mode: check 5e: isolation under a budget smaller than the default, on the agent"
+  if [ "$mode" = kernel ]; then
+    agent_isolation_case c5e-1024 1024 512 512
+    agent_isolation_case c5e-1500 1500 750 750
+  else
+    skip "the small-budget agent scenario runs via the kernel-mode server (see check 5c/5d/5e's block comment)"
   fi
 }
 

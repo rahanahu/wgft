@@ -31,12 +31,12 @@ lab/lab exec vps wgft server run ...  # VM では /usr/local/bin の名前で実
 lab/lab shell home              # home ns で bash
 lab/lab exec vm bash /wgft/lab/e2e.sh kernel     # 端から端までのシナリオ(登録、TCP/UDP、PROXY protocol、deny の即時反映、撤去)を PASS/FAIL で
 lab/lab exec vm bash /wgft/lab/e2e.sh userspace  # 同じシナリオをユーザー空間モード(非 root の wgftlab ユーザー)で
-lab/lab exec vm bash /wgft/lab/rates.sh kernel   # レート制限の実負荷(packet、per-source、new-flow)。userspace も同じ
+lab/lab exec vm bash /wgft/lab/rates.sh kernel   # 3 つのレートと Relay ルールのレートの実際の通過数、拒否の順序、TCP への packet_rate 無効を PASS/FAIL で。userspace も同じ
 lab/lab exec vm bash /wgft/lab/connlimit.sh      # カーネルモードの接続元 IP ごとの同時フロー数の上限(ct count)。userspace には無い機能なので kernel だけ
 lab/lab exec vm bash /wgft/lab/split-merge.sh kernel   # Web UI の分割・統合。流れている UDP セッションが切れないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/import-export.sh kernel # Web UI の書き出しと読み込み。確認画面の差分、確認後の変更による適用の拒否を確認。userspace も同じ
-lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、ルールの増減、撤去、プロキシの bind 失敗、既定の上限下でのメモリ、ルール単位/backend 全体の適用失敗と再試行を確認。userspace も同じ
-lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 6 7 8 9)を並べると、その確認だけを流す
+lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、ルールの増減、撤去、プロキシの bind 失敗、既定と半分の予算下でのメモリ、Resource Guard のルール間の隔離、ルール単位/backend 全体の適用失敗と再試行を確認。userspace も同じ
+lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9)を並べると、その確認だけを流す
 lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定するポートに届かず、集約のレートのトークンも使わないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/version-skew.sh         # 版の組み合わせ(新旧の server・agent、legacy v0)。旧いバイナリは GitHub の Releases から取得しキャッシュする(スクリプト冒頭のコメント参照)
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
