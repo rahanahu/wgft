@@ -439,11 +439,23 @@ func (d *Daemon) AgentRuleStatuses() (map[string]admin.AgentRuleStatus, error) {
 	return out, nil
 }
 
+// neverZero returns nil for 0 ("never published"; design.md 7a.11 節) and a pointer to g otherwise.
+// Generation 0 itself is a real, reachable value (9 節: the generation is 0 while there are no
+// rules), so the zero value cannot double as "never published"; a rule whose forwarding value has
+// genuinely never been published is instead simply absent (rule_states[id].active_generation is
+// omitted, not present as 0 or null).
+func neverZero(g uint64) *uint64 {
+	if g == 0 {
+		return nil
+	}
+	return &g
+}
+
 func applyStatusToAdmin(st reconcile.Status) admin.ApplyStatus {
 	out := admin.ApplyStatus{DesiredGeneration: st.DesiredGeneration, ActiveGeneration: st.ActiveGeneration,
 		Rules: make(map[string]admin.RuleApply, len(st.Rules)), LastError: st.LastError}
 	for id, rs := range st.Rules {
-		out.Rules[id] = admin.RuleApply{ApplyState: string(rs.State), Reason: rs.Reason, ActiveGeneration: rs.ActiveGeneration}
+		out.Rules[id] = admin.RuleApply{ApplyState: string(rs.State), Reason: rs.Reason, ActiveGeneration: neverZero(rs.ActiveGeneration)}
 	}
 	conv := func(rs []reconcile.Resource) []admin.DriftResource {
 		res := make([]admin.DriftResource, 0, len(rs))
