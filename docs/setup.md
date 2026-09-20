@@ -41,7 +41,7 @@ sha256sum -c wgft-linux-amd64.sha256
 
 Use `arm64` instead of `amd64` on arm64 systems. Windows and macOS are covered in [Run the agent on Windows](#run-the-agent-on-windows) and [Run the agent on macOS](#run-the-agent-on-macos).
 
-With Go 1.26 or newer:
+With Go 1.27 or newer:
 
 ```sh
 go install github.com/rahanahu/wgft/cmd/wgft@latest
