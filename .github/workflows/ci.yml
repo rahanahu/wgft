@@ -1,27 +1,49 @@
 name: CI
 
 # Trigger names in the comments below are the ones docs/testing.md's "変更の契機と対象のパス"
-# table defines. Only two of that table's triggers gate a job that actually runs on GitHub's
-# runners; the rest gate lab-only B-class tests (B1, B2, B3, B7, B9, B10) that need Incus and
-# never run here. The path globs below are copied from that table, so the table and this file
-# can be compared line by line:
+# table defines, except go_code (see below). Two of that table's triggers gate a job that
+# actually runs on GitHub's runners; the rest gate lab-only B-class tests (B1, B2, B3, B7, B9,
+# B10) that need Incus and never run here.
 #
-#   agent-platform -> internal/agent/**, internal/flock/**,
-#                     internal/dataplane/userspace/relay/**, internal/dataplane/userspace/tunnel/**,
-#                     cmd/wgft/**, **/*_windows.go, **/*_darwin.go
-#                     (also **/*_unix.go here: every existing *_unix.go and //go:build-tagged
-#                     file already lives under one of the directories above, but a future one
-#                     might not, and this filter only widens what runs, never narrows it)
-#                     -> gates windows-test (B4), macos-test (B8)
-#   build          -> .goreleaser.yaml, scripts/build-release.sh, scripts/goreleaser-checksum.sh,
-#                     scripts/third-party-licenses.sh, scripts/check-release-assets.sh,
-#                     scripts/docker-smoke.sh, deploy/Dockerfile.*, deploy/*.compose.yaml,
-#                     go.mod, go.sum, .github/workflows/**
-#                     -> gates release-snapshot (B5), govulncheck (B6)
+#   go_code -> **/*.go, go.mod, go.sum -> gates windows-test (B4), macos-test (B8)
+#
+#     This is wider than the table's own agent-platform trigger (internal/agent/**,
+#     internal/flock/**, internal/dataplane/userspace/relay/**,
+#     internal/dataplane/userspace/tunnel/**, cmd/wgft/**, *_windows.go, *_darwin.go), which
+#     stays the correct definition for the manual, real-machine tests (D1, D2, E4, E5) that
+#     exercise things a CI runner cannot (ACLs, sleep/resume, launchd, adapter changes). For
+#     the two CI jobs, agent-platform is not safe: they run cmd/wgft's and internal/agent's
+#     own test suites, and those tests build a real server-side store, admin backend, and
+#     model, so a change anywhere in the packages those import (internal/vpsd/store,
+#     internal/vpsd/admin, proto, internal/model, internal/policy, internal/resource,
+#     internal/nettun, and more) can change what runs on Windows or macOS, and that import
+#     graph is too large and too easily extended to track by hand as a path list. A change
+#     outside the platform-specific files can still break only one OS: for example, code that
+#     builds a filesystem path or a file: URI with forward slashes works on Linux and macOS
+#     but not on Windows, and only a job that actually runs on Windows catches it. Because of
+#     this, windows-test and macos-test run on any change that touches a .go file or the
+#     module (go.mod, go.sum), and are skipped only when a change touches no Go code at all
+#     (documents, lab scripts, deploy/ text files, images).
+#
+#   build    -> .goreleaser.yaml, scripts/build-release.sh, scripts/goreleaser-checksum.sh,
+#               scripts/third-party-licenses.sh, scripts/check-release-assets.sh,
+#               scripts/docker-smoke.sh, deploy/Dockerfile.*, deploy/*.compose.yaml,
+#               go.mod, go.sum, .github/workflows/**
+#               -> gates release-snapshot (B5) as docs/testing.md's table says, unwidened:
+#               B5's risk is GoReleaser's own configuration, hooks and asset naming, which an
+#               ordinary Go source change does not touch; that a plain code change still
+#               compiles is already checked by build-test's build and cross-build steps,
+#               which run on every push and pull request regardless of path.
+#               -> also gates govulncheck (B6), OR'd with go_code above: B6's risk is a known
+#               vulnerability becoming reachable, which depends on the whole call graph, so a
+#               Go source change can change the result without touching go.mod or go.sum.
+#               This second part widens the table's own build-only mapping for B6, for the
+#               same reachability reason as go_code above.
 #
 # A change to .github/workflows/** (the `workflows` filter below) additionally forces every
-# gated job to run, on top of what `build` already covers: a ci.yml change can change how the
-# other jobs behave, so path filtering must not be trusted to judge its own correctness.
+# gated job to run, on top of what `build` and `go_code` already cover: a ci.yml change can
+# change how the other jobs behave, so path filtering must not be trusted to judge its own
+# correctness.
 #
 # build-test (A1, A2, A5, A6, A7) and lint-output (A8) are not gated: they are the cheap
 # checks that docs/testing.md's A class runs on every PR regardless of what changed.
@@ -58,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run_all: ${{ steps.decide.outputs.run_all }}
-      agent_platform: ${{ steps.filter.outputs.agent_platform }}
+      go_code: ${{ steps.filter.outputs.go_code }}
       build: ${{ steps.filter.outputs.build }}
     steps:
       - uses: actions/checkout@v7
@@ -80,15 +102,10 @@ jobs:
           filters: |
             workflows:
               - '.github/workflows/**'
-            agent_platform:
-              - 'internal/agent/**'
-              - 'internal/flock/**'
-              - 'internal/dataplane/userspace/relay/**'
-              - 'internal/dataplane/userspace/tunnel/**'
-              - 'cmd/wgft/**'
-              - '**/*_windows.go'
-              - '**/*_darwin.go'
-              - '**/*_unix.go'
+            go_code:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
             build:
               - '.goreleaser.yaml'
               - 'scripts/build-release.sh'
@@ -174,16 +191,17 @@ jobs:
     # the build-test job's cross-build step already keeps ./cmd/wgft buildable for Windows,
     # this job additionally runs the Windows-specific code paths.
     #
-    # Gated by the agent-platform trigger (B4, see the header comment). Runs whenever the
-    # changes job could not tell (run_all, including its own failure) or the agent-platform
-    # filter matched; !cancelled() keeps this from being auto-skipped just because `changes`
-    # was skipped or failed, which is the default behaviour for a job with `needs:`.
+    # Gated by go_code, not by the table's agent-platform trigger (B4, see the header
+    # comment for why). Runs whenever the changes job could not tell (run_all, including
+    # its own failure) or a .go file, go.mod or go.sum changed; !cancelled() keeps this
+    # from being auto-skipped just because `changes` was skipped or failed, which is the
+    # default behaviour for a job with `needs:`.
     needs: changes
     if: >-
       !cancelled() && github.event_name != 'schedule' && (
         needs.changes.result != 'success' ||
         needs.changes.outputs.run_all == 'true' ||
-        needs.changes.outputs.agent_platform == 'true'
+        needs.changes.outputs.go_code == 'true'
       )
     runs-on: windows-latest
     steps:
@@ -207,7 +225,7 @@ jobs:
       !cancelled() && github.event_name != 'schedule' && (
         needs.changes.result != 'success' ||
         needs.changes.outputs.run_all == 'true' ||
-        needs.changes.outputs.agent_platform == 'true'
+        needs.changes.outputs.go_code == 'true'
       )
     runs-on: macos-latest
     steps:
@@ -227,7 +245,8 @@ jobs:
     # actually published as wgft-windows-amd64.exe fails here instead of only being caught by
     # someone running a snapshot by hand.
     #
-    # Gated by the build trigger (B5, see the header comment).
+    # Gated by the build trigger only, not go_code (B5, see the header comment for why an
+    # ordinary Go source change does not need this job).
     needs: changes
     if: >-
       !cancelled() && github.event_name != 'schedule' && (
@@ -256,19 +275,22 @@ jobs:
         run: bash scripts/check-release-assets.sh dist
 
   govulncheck:
-    # Known-vulnerability scan of the module graph (B6). Gated by the build trigger like
-    # release-snapshot above, plus two triggers of its own: the weekly schedule and a
-    # manual workflow_dispatch (both checked directly against github.event_name, not
-    # through the changes job, since neither has a meaningful diff to filter). A scheduled
-    # failure is not silent: GitHub emails the repository owner when a scheduled workflow
-    # run fails, without any extra bot or issue-creation step.
+    # Known-vulnerability scan of the module graph (B6). Gated by the build trigger and by
+    # go_code (see the header comment: a Go source change can make an existing vulnerable
+    # dependency reachable without touching go.mod or go.sum), plus two triggers of its
+    # own: the weekly schedule and a manual workflow_dispatch (both checked directly
+    # against github.event_name, not through the changes job, since neither has a
+    # meaningful diff to filter). A scheduled failure is not silent: GitHub emails the
+    # repository owner when a scheduled workflow run fails, without any extra bot or
+    # issue-creation step.
     needs: changes
     if: >-
       !cancelled() && (
         github.event_name == 'schedule' ||
         needs.changes.result != 'success' ||
         needs.changes.outputs.run_all == 'true' ||
-        needs.changes.outputs.build == 'true'
+        needs.changes.outputs.build == 'true' ||
+        needs.changes.outputs.go_code == 'true'
       )
     runs-on: ubuntu-latest
     steps:
