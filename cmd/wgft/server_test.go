@@ -73,6 +73,23 @@ func TestConntrackReadFailureExitsWithConfigRefusal(t *testing.T) {
 	}
 }
 
+// Kernel mode started without root or CAP_NET_ADMIN used to fail at the first privileged netlink
+// or wgctrl call with a generic EPERM/EACCES, exit code 1, so the shipped server.service
+// (Restart=on-failure, RestartSec=2, RestartPreventExitStatus=3, which does not include 1)
+// restarted it every 2 seconds forever until someone reinstalled the unit correctly or switched to
+// userspace mode. internal/dataplane/linuxkernel/wg.classifyPrivilege now wraps that class of
+// error as a *wg.StartupRefusal (docs/design.md 9, 11a 節), which must map to exit code 3 like the
+// other startup refusals.
+func TestServerPrivilegeErrorExitsWithConfigRefusal(t *testing.T) {
+	err := &wg.StartupRefusal{Reason: "kernel mode needs CAP_NET_ADMIN: operation not permitted. Run as root or with that capability, as the shipped server.service does (AmbientCapabilities=CAP_NET_ADMIN), or set WGFT_MODE=userspace, which needs neither"}
+	if !isStartupRefusal(err) {
+		t.Errorf("isStartupRefusal(%v) = false, want true", err)
+	}
+	if got := exitCode(err); got != exitConfigRefusal {
+		t.Errorf("exitCode(%v) = %d, want %d", err, got, exitConfigRefusal)
+	}
+}
+
 // buildServerOptions は、接続元 IP ごとの上限(server だけの設定)を
 // vpsd.Options.AdmissionLimits まで運ぶ。既定値、明示した値、0(上限なし)を確かめる(仕様 7, 11a 節)。
 func TestServerOptionsPerSourceLimits(t *testing.T) {
