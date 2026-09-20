@@ -21,6 +21,8 @@ In kernel mode, this resilience applies after wgft has created the WireGuard and
 
 Use kernel mode when you have root on the VPS. Userspace mode is intended for VPS environments without root, kernels without WireGuard support, or container-only deployments.
 
+Kernel mode also relies on the host's conntrack table. `wgft server check` and the startup log warn if `nf_conntrack_max` is below wgft's recommended minimum of 65536, and suggest `sysctl -w net.netfilter.nf_conntrack_max=65536` to raise it.
+
 Flows are capped at three levels: per rule, per source address, and process-wide. The agent cannot distinguish the original source address, so it applies only the per-rule and process-wide caps. In userspace mode, `wgft server` applies all three in Go. In kernel mode, a DNAT rule's traffic passes straight through nftables and never reaches `wgft server`, so only the per-source cap applies there, via nftables `ct count`; a proxy-mode rule's TCP connections terminate at `wgft server` itself even in kernel mode, so those get all three levels, counted the same way as in userspace mode. At a cap, new flows are refused and existing ones keep working. In kernel mode the home agent still relays the flows and is subject to its own caps.
 
 The process-wide caps are `WGFT_MAX_UDP_FLOWS`, 8192 by default, and `WGFT_MAX_TCP_FLOWS`, 2048 by default. Server and agent are separate processes, so configure them separately when needed. From the two values wgft derives a Go runtime soft memory limit and prints it at startup. In the lab, a userspace-mode server with the default caps filled plus a traffic flood peaked at 208 MiB RSS. With `WGFT_MAX_UDP_FLOWS=2048` and `WGFT_MAX_TCP_FLOWS=1024`, the same load ran inside a 150 MiB cgroup limit. This has not yet been verified on a real 256 MiB VPS. With systemd, the provided unit also contains a commented `MemoryMax=` example; if enabled, keep it above the soft limit printed at startup.
@@ -244,6 +246,8 @@ sudo launchctl bootout system/io.github.rahanahu.wgft.agent
 sudo install -m 0755 wgft-darwin-arm64 /usr/local/bin/wgft
 sudo launchctl bootstrap system /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
 ```
+
+wgft supports upgrading in place, but reverting to an older version afterward is not promised. Back up `~/Library/Application Support/wgft` before upgrading so you can restore it if you need to move back.
 
 Two macOS behaviors shape this setup:
 
