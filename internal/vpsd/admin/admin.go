@@ -319,8 +319,16 @@ func (s *Server) getRules(w http.ResponseWriter, r *http.Request) {
 	if rules == nil {
 		rules = []proto.Rule{}
 	}
-	gen, _ := s.backend.Generation()
-	drops, _ := s.backend.RuleDrops()
+	gen, err := s.backend.Generation()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	drops, err := s.backend.RuleDrops()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	resp := BatchResponse{Generation: gen, Rules: rules, Drops: drops}
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)

@@ -1,9 +1,11 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,14 +19,25 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
+// errBackendFailure simulates a genuine backend failure (e.g. a SQLite error), as opposed to a
+// routine authentication rejection or a real duplicate public key.
+var errBackendFailure = errors.New("simulated backend failure")
+
 type fakeBackend struct {
 	mu     sync.Mutex
 	server wgtypes.Key
 	keys   map[string]wgtypes.Key
 	gen    uint64
+	// authErr / keyCheckErr, when set, make Authenticate / OtherAgentHasKey fail with this error
+	// regardless of the token or key, for the backend-failure tests below.
+	authErr     error
+	keyCheckErr error
 }
 
 func (b *fakeBackend) Authenticate(tok string) (string, error) {
+	if b.authErr != nil {
+		return "", b.authErr
+	}
 	if strings.HasPrefix(tok, "tok-") {
 		return strings.TrimPrefix(tok, "tok-"), nil
 	}
@@ -34,6 +47,9 @@ func (b *fakeBackend) ServerPublicKey() wgtypes.Key { return b.server.PublicKey(
 func (b *fakeBackend) OtherAgentHasKey(agent string, key wgtypes.Key) (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.keyCheckErr != nil {
+		return false, b.keyCheckErr
+	}
 	for n, k := range b.keys {
 		if n != agent && k == key {
 			return true, nil
@@ -213,6 +229,64 @@ func TestHeartbeatTimeout(t *testing.T) {
 	}
 	if h.Status("home").Connected {
 		t.Error("timed-out connection must be dropped")
+	}
+}
+
+// TestAuthenticateBackendErrorIsNotUnauthorized は、Authenticate が(無効なトークンではなく)
+// backend 自身の失敗で誤りを返したとき、日常的な認証拒否と同じ無言の 401 にしないことを確かめる。
+// 直す前は両方が同じ 401 で、原因はログに残らなかった。
+func TestAuthenticateBackendErrorIsNotUnauthorized(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, authErr: errBackendFailure}
+	h := New(b)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	_, resp, err := dial(t, url, "tok-home")
+	if err == nil || resp == nil || resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("backend failure during authenticate: want 500, got resp=%v err=%v", resp, err)
+	}
+	if !strings.Contains(buf.String(), "authenticate") || !strings.Contains(buf.String(), errBackendFailure.Error()) {
+		t.Errorf("expected the backend failure to be logged with its cause, got %q", buf.String())
+	}
+}
+
+// TestOtherAgentHasKeyBackendErrorIsNotDuplicateKey は、OtherAgentHasKey が backend 自身の失敗
+// (SQLite のエラーなど)で誤りを返したとき、「公開鍵が別のエージェントのものである」という
+// 窃取を示す文言で閉じないことを確かめる。直す前は err != nil || dup が 1 つに畳まれ、
+// backend の失敗が窃取の文言になり、ログにも残らなかった。
+func TestOtherAgentHasKeyBackendErrorIsNotDuplicateKey(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, keyCheckErr: errBackendFailure}
+	h := New(b)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	key, _ := wgtypes.GeneratePrivateKey()
+	c, _, err := dial(t, url, "tok-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	sendJSON(t, c, proto.Message{Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String()})
+	_, err = readMsg(t, c)
+	if websocket.CloseStatus(err) != websocket.StatusInternalError {
+		t.Errorf("backend failure during the duplicate-key check: want an internal-error close (so the agent retries with backoff instead of re-enrolling), got %v", err)
+	}
+	if !strings.Contains(buf.String(), "checking public key") || !strings.Contains(buf.String(), errBackendFailure.Error()) {
+		t.Errorf("expected the backend failure to be logged with its cause, got %q", buf.String())
 	}
 }
 

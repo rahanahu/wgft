@@ -17,11 +17,31 @@ import (
 )
 
 // Rules / Generation / Agents / JoinString / Revoke は admin.Backend の実装。
-func (d *Daemon) Rules() ([]proto.Rule, error) { return d.st.Rules() }
+// 操作名を付けて包むのは、admin.go の 500 応答が err.Error() をそのまま本文にするため。
+// 包まないと運用者は "database is locked" のような文言だけを見て、どの読み取りが失敗したか分からない。
+func (d *Daemon) Rules() ([]proto.Rule, error) {
+	rules, err := d.st.Rules()
+	if err != nil {
+		return nil, fmt.Errorf("reading rules: %w", err)
+	}
+	return rules, nil
+}
 
-func (d *Daemon) Generation() (uint64, error) { return d.st.Generation() }
+func (d *Daemon) Generation() (uint64, error) {
+	gen, err := d.st.Generation()
+	if err != nil {
+		return 0, fmt.Errorf("reading generation: %w", err)
+	}
+	return gen, nil
+}
 
-func (d *Daemon) RuleDrops() (map[string]uint64, error) { return d.st.RuleDrops() }
+func (d *Daemon) RuleDrops() (map[string]uint64, error) {
+	drops, err := d.st.RuleDrops()
+	if err != nil {
+		return nil, fmt.Errorf("reading rule drops: %w", err)
+	}
+	return drops, nil
+}
 
 func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 	list, err := d.st.Agents()
@@ -62,7 +82,12 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 				}
 			}
 		}
-		if ws, err := d.st.AgentWarnings(a.Name); err == nil {
+		if ws, err := d.st.AgentWarnings(a.Name); err != nil {
+			// fail open: 1 エージェントの警告が読めなくても agent 一覧そのものは返す(仕様どおり)。
+			// ただし黙って空にはせず、原因をログに残す。運用者は WARN 列と dashboard の警告数が
+			// 実際より少ないことに気づけない代わりに、ログでその欠落に気づける
+			log.Printf("agent %s: reading warnings: %v", a.Name, err)
+		} else {
 			for _, w := range ws {
 				info.Warnings = append(info.Warnings, admin.Warning{Agent: w.Agent, Kind: w.Kind, Detail: w.Detail, At: w.CreatedAt.Format(time.RFC3339)})
 			}
