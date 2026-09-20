@@ -33,8 +33,9 @@ type Options struct {
 	UDPIdleTimeout time.Duration // 無通信でセッションを閉じるまで(全体状態の udp_timeout_stream)
 	// Limits はプロセス全体の予算(設定値)。UDPPool と TCPPool の既定値を導くのに使う
 	Limits resource.Limits
-	// UDPPool と TCPPool はプロセス全体の予算とルールごとの上限(仕様 7 節、Resource Guard)。
-	// nil なら Limits から作る。vpsd はプロキシモードの中継と共有する Pool を渡す
+	// UDPPool と TCPPool はプロセス全体の予算と、そこから導くルールごとの上限と隔離予約
+	// (仕様 7 節、設計文書 7a.10 節の Resource Guard)。nil なら Limits から作る。
+	// vpsd はプロキシモードの中継と共有する Pool を渡す
 	UDPPool *resource.Pool
 	TCPPool *resource.Pool
 	Dial    func(network, addr string) (net.Conn, error)
@@ -42,8 +43,8 @@ type Options struct {
 	// Admit は新しいフロー(TCP の accept、UDP の新しいセッションの最初のデータグラム)を通すかを、
 	// Admission Policy のすべての段で判定する(設計文書 7a.9 節の AdmitFlow)。size は最初のパケットの
 	// 大きさ(UDP はデータグラムの長さ、TCP は 0)。通すときは、送信元ごとの同時フロー数の枠を返す
-	// release も返し、中継はフローの終わりに 1 回呼ぶ。後の Resource Guard(ルールごとの上限、
-	// プロセス全体の上限)が拒んだときも、その場で呼ぶ。nil なら全部通す。
+	// release も返し、中継はフローの終わりに 1 回呼ぶ。後の Resource Guard(プロセス全体の予算、
+	// ルール 1 本の上限、隔離予約)が拒んだときも、その場で呼ぶ。nil なら全部通す。
 	// VPS 側のユーザー空間モード(仕様 6.3 節)が使う。エージェントでは nil。
 	Admit func(ruleID string, src netip.Addr, size int) (release func(), ok bool)
 	// AdmitPacket は成立済みの UDP セッションのデータグラム 1 つを通すか(packet_rate)。nil なら全部通す。
@@ -110,7 +111,7 @@ type listener struct {
 	sweep func(keep func(src netip.Addr) bool) int
 	// セッション数(ハートビートの表示用)
 	sessions func() int
-	// budget は Resource Guard の枠(プロセス全体の予算とルールごとの上限。設計文書 7a.10 節)。
+	// budget は Resource Guard の枠(プロセス全体の予算と隔離予約。設計文書 7a.10 節)。
 	// 上限の対象になるフロー(UDP はセッション、TCP は公開側の接続)を 1 つずつここで取る。
 	// ルールごとの数は Pool が同じルールの待ち受けの合計で見るので、分割と統合で所属ルールが
 	// 変わったリスナーの既存のフローは移動先のルールで数える(仕様 7 節)
@@ -140,10 +141,10 @@ func New(n Network, opts Options) *Manager {
 	}
 	lim := opts.Limits.WithDefaults()
 	if opts.UDPPool == nil {
-		opts.UDPPool = resource.NewPool(lim.UDPTotal, lim.UDPPerRuleCap())
+		opts.UDPPool = resource.NewPool(lim.UDPTotal)
 	}
 	if opts.TCPPool == nil {
-		opts.TCPPool = resource.NewPool(lim.TCPTotal, lim.TCPPerRuleCap())
+		opts.TCPPool = resource.NewPool(lim.TCPTotal)
 	}
 	if opts.Dial == nil {
 		d := &net.Dialer{Timeout: 10 * time.Second}
@@ -246,37 +247,45 @@ func (m *Manager) closeLocked(k Key) {
 	}
 }
 
-// newListener は待ち受け 1 つ分の記録を作り、Resource Guard の枠を登録する。中継を始めるのは
-// startUDP/startTCP(Apply の経路)と serveUDP/serveTCP(Prepare/Commit の経路)である。
+// newListener は待ち受け 1 つ分の記録を作り、Resource Guard の枠を受け付けていない状態で登録する。
+// そのルールが受け付けているルールの集合 A に入るのは、呼び出し側が bind の済んだソケットを持って
+// budget.Accept を呼んだ時点である(設計文書 7a.10 節)。中継を始めるのは serveUDP/serveTCP で、
+// Accept より後に始める。
 func (m *Manager) newListener(k Key, d Desired) *listener {
 	zero := func() int { return 0 }
 	pool := m.opts.UDPPool
 	if k.Proto == proto.TCP {
 		pool = m.opts.TCPPool
 	}
-	return &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: zero, budget: pool.Listener(d.RuleID)}
+	return &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: zero, budget: pool.PendingListener(d.RuleID)}
 }
 
+// openLocked は待ち受けを 1 つ開いて中継を始める(Apply の経路)。bind を先に行い、開けてから
+// Resource Guard の枠を受け付けにする。逆の順にすると、bind の最中と bind に失敗した待ち受けの
+// ルールが A に入り、その間だけ他のルールの予約が減る(設計文書 7a.10 節の A の定義)。
 func (m *Manager) openLocked(k Key, d Desired) {
-	l := m.newListener(k, d)
 	// 許可一覧の外にある IP リテラルの宛先は、待ち受けを開かずに理由を報告する(設計文書 7 節)
+	var sock boundSocket
 	err := m.allowedAtApply(d.Target)
 	if err == nil {
-		switch k.Proto {
-		case proto.UDP:
-			err = m.startUDP(l)
-		case proto.TCP:
-			err = m.startTCP(l)
-		default:
-			err = fmt.Errorf("unknown proto %q", k.Proto)
-		}
+		sock, err = m.bind(k)
 	}
+	l := m.newListener(k, d)
 	if err != nil {
-		// 開けなくても登録しておき、状態として見せる。次の Apply(再試行)で開き直す
+		// 開けなくても登録しておき、状態として見せる。次の Apply(再試行)で開き直す。枠は
+		// 受け付けていないままなので、このルールは A に入らない
 		l.bindErr = err
 		l.closeF = func() {}
 		m.opts.Logf("listener %s: %v", k, err)
 	} else {
+		// 受け付けを先に始めてから中継を始める。逆の順にすると、A に入る前に来たフローが
+		// ルールごとの数に入らない
+		l.budget.Accept()
+		if sock.pc != nil {
+			m.serveUDP(l, sock.pc)
+		} else {
+			m.serveTCP(l, sock.ln)
+		}
 		m.opts.Logf("listener %s -> %s opened; rule %s", k, d.Target, d.RuleID)
 		if k.Proto == proto.TCP {
 			setTargetErrLocked(l, m.checkTarget(l.target))

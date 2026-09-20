@@ -17,9 +17,10 @@
 #     existing flow (only ct state new is subject to the cap)
 #   - restarts the server (keeping the same rules and agent) with WGFT_MAX_TCP_FLOWS_PER_SOURCE=200
 #     and checks the cap follows the setting instead of staying at the default 128. This value
-#     stays well under the agent's own per-rule cap (half of WGFT_MAX_TCP_FLOWS, 1024 by default),
-#     which also applies since the agent relays every kernel-mode DNAT'd connection to the LAN
-#     target (design section 7), so the kernel per-source cap is the only thing being isolated
+#     stays well under the agent's own flow budget (WGFT_MAX_TCP_FLOWS, 2048 by default, all of
+#     which a single rule may hold; design section 7a.10), which also applies since the agent
+#     relays every kernel-mode DNAT'd connection to the LAN target (design section 7), so the
+#     kernel per-source cap is the only thing being isolated
 #
 # Requires `lab/lab build` (wgft and echo in /usr/local/bin of the VM) and the netns topology
 # (`lab/lab net up`). Leftovers from earlier runs are killed first.

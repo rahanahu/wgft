@@ -53,16 +53,8 @@ func forwardReply(s *udpSession, pc net.PacketConn, from net.Addr, own []byte) b
 	return err == nil
 }
 
-func (m *Manager) startUDP(l *listener) error {
-	pc, err := m.net.ListenUDP(l.key.Port)
-	if err != nil {
-		return err
-	}
-	m.serveUDP(l, pc)
-	return nil
-}
-
-// serveUDP は開いたソケット pc で中継を始める。Prepare で開いたソケットは Commit でここに渡る。
+// serveUDP は開いたソケット pc で中継を始める。bind は呼び出し側(Apply の経路の openLocked と、
+// Prepare/Commit の経路の Prepare)が済ませてある。
 func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 	var (
 		mu       sync.Mutex
@@ -176,9 +168,9 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					}
 					release = rel
 				}
-				// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算とルールごとの
-				// 上限を Pool が 1 つの排他の中で判定する。超えた新規パケットは捨てる(既存セッションは
-				// 追い出さない)
+				// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の
+				// 上限、他のルールの隔離予約を Pool が 1 つの排他の中で判定する。拒んだ新規パケットは
+				// 捨てる(既存セッションは追い出さない)
 				if ref, ok := l.budget.Acquire(); !ok {
 					release()
 					if capLog.Allow() {

@@ -352,7 +352,7 @@ func Run(opts Options) error {
 	// 開けたポートに付ける nftables の行が判定する(6.1、7 節)ので、中継では判定しない。起動時の
 	// applyNFT が待ち受けを開き、開けたポートだけに行を付けるよう、先に作る
 	lim := opts.Limits.WithDefaults()
-	proxyOpts := proxyrelay.Options{Pool: resource.NewPool(lim.TCPTotal, lim.TCPPerRuleCap())}
+	proxyOpts := proxyrelay.Options{Pool: resource.NewPool(lim.TCPTotal)}
 	if uspace != nil {
 		// ユーザー空間モードでは netstack 越しにエージェントへ
 		proxyOpts.Dial = func(addr string) (net.Conn, error) { return uspace.Dial("tcp", addr) }

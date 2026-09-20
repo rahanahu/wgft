@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -62,14 +63,20 @@ func TestNoAllowListDialsTargetAsIs(t *testing.T) {
 // 許可一覧の外にある IP リテラルの宛先は、待ち受けを開かず、理由付きの error として見える(仕様 5.2、7 節)。
 func TestApplyDeniesLiteralTargetOutsideList(t *testing.T) {
 	var netw neverListen
+	pool := resource.NewPool(10)
 	m := New(&netw, Options{
 		Logf:              t.Logf,
+		TCPPool:           pool,
 		AllowTarget:       allowList("192.168.1.20:25565"),
 		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
 		Dial:              func(network, addr string) (net.Conn, error) { t.Errorf("dialed %s", addr); return nil, nil },
 	})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, 39972}: {"192.168.1.1:22", "r1"}})
+	// 待ち受けを開かないルールは、受け付けているルールの集合 A に入らない(設計文書 7a.10 節)
+	if got := pool.Rules(); got != 0 {
+		t.Errorf("accepting rules for a denied target = %d, want 0", got)
+	}
 	st := m.Status()
 	if len(st) != 1 || st[0].Err == nil {
 		t.Fatalf("status = %+v, want an error", st)
@@ -87,6 +94,9 @@ func TestApplyDeniesLiteralTargetOutsideList(t *testing.T) {
 	}
 	if n := netw.opened.Load(); n != 0 {
 		t.Errorf("tried to open a listener %d times, want 0 for a denied target", n)
+	}
+	if got := pool.Rules(); got != 0 {
+		t.Errorf("accepting rules for a denied target after Retry = %d, want 0", got)
 	}
 }
 

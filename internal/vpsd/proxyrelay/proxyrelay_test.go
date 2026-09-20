@@ -21,8 +21,8 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// Pool を渡さなければ、既定の予算(resource.TCPTotal、2048)とそこから導くルールごとの上限
-// (resource.Limits.TCPPerRuleCap、仕様 7 節)で作る。上限は導入前の固定値(1024)と一致する。
+// Pool を渡さなければ、既定の予算(resource.TCPTotal、2048)とそこから導くルール 1 本の上限
+// (ceil(T/2)、設計文書 7a.10 節)で作る。既定の予算での上限は、置き換えた式の値(1024)と一致する。
 func TestPoolDefaultsFromTheDefaultBudget(t *testing.T) {
 	m := New(Options{})
 	if got := m.opts.Pool.Total(); got != 2048 {
@@ -32,7 +32,7 @@ func TestPoolDefaultsFromTheDefaultBudget(t *testing.T) {
 		t.Errorf("default rule cap = %d, want 1024", got)
 	}
 	// 呼び出し側が渡した Pool は、そのまま使う
-	pool := resource.NewPool(40, 3)
+	pool := resource.NewPool(40)
 	m = New(Options{Pool: pool})
 	if m.opts.Pool != pool {
 		t.Error("an explicit Pool must not be replaced by the derived default")
@@ -239,7 +239,7 @@ func TestConnCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ユーザー空間モードと同じく、Admission Policy は Go の評価器が判定する
-	pool := resource.NewPool(10, 0)
+	pool := resource.NewPool(10)
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r", Proto: proto.TCP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{TCP: 1}})
 	m := New(Options{
@@ -325,7 +325,7 @@ func admissionManager(t *testing.T, eng *goengine.Engine) (dial func() net.Conn,
 		Listen: func(uint16) (net.Listener, error) { return raw, nil },
 		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
 		Logf:   testLogf(t),
-		Pool:   resource.NewPool(10, 0),
+		Pool:   resource.NewPool(10),
 		Admit: func(ruleID string, src netip.Addr) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, 0)
 			return tk.Release, d.Allow
@@ -543,5 +543,50 @@ func testLogf(t *testing.T) func(string, ...any) {
 		if !done {
 			t.Logf(format, args...)
 		}
+	}
+}
+
+// 待ち受けを開けなかったルールは、受け付けているルールの集合 A に入らない。枠は Prepare で bind の
+// 済んだ待ち受けにだけ付け、中継を始める前に付ける(設計文書 7a.10 節)。
+func TestOnlyBoundListenersJoinTheAcceptingRules(t *testing.T) {
+	busy := map[uint16]bool{9443: true}
+	pool := resource.NewPool(10) // ルールが 1 本なら 10、2 本ならルール 1 本は ceil(10/2) = 5
+	m := New(Options{
+		Listen: func(port uint16) (net.Listener, error) {
+			if busy[port] {
+				return nil, errors.New("address already in use")
+			}
+			return net.Listen("tcp4", "127.0.0.1:0")
+		},
+		Dial: func(string) (net.Conn, error) { return nil, errors.New("no agent in this test") },
+		Logf: testLogf(t),
+		Pool: pool,
+	})
+	t.Cleanup(m.Close)
+	m.Apply([]Rule{ruleOn("ok", 8443), ruleOn("busy", 9443)})
+	if got := pool.Rules(); got != 1 {
+		t.Fatalf("accepting rules = %d, want 1 (the busy port's rule must stay out)", got)
+	}
+	if got := pool.Reserve(); got != 0 {
+		t.Errorf("reserve = %d, want 0 (only one rule accepts)", got)
+	}
+	// 開けたルールは予算のすべてを使える。ここで拒まれるなら、開けなかったルールが A に入っている
+	probe := pool.Listener("ok")
+	for i := range 10 {
+		if ref, admitted := probe.Acquire(); !admitted {
+			t.Fatalf("flow %d of the budget was refused with %q", i+1, ref.Reason)
+		}
+	}
+	for range 10 {
+		probe.Release()
+	}
+	// ポートが空いて開けた時点で、そのルールが A に入る
+	delete(busy, 9443)
+	m.Apply([]Rule{ruleOn("ok", 8443), ruleOn("busy", 9443)})
+	if got := pool.Rules(); got != 2 {
+		t.Errorf("accepting rules after the port was freed = %d, want 2", got)
+	}
+	if got := pool.Reserve(); got != 5 {
+		t.Errorf("reserve with two rules = %d, want 5", got)
 	}
 }

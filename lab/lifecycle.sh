@@ -90,11 +90,19 @@ done
 
 ADMIN=127.0.0.1:8686
 PY=/tmp/wgft-lifecycle-py
-# design 7: 32 MiB + 12 KiB * WGFT_MAX_UDP_FLOWS(8192, default) + 44 KiB * WGFT_MAX_TCP_FLOWS(2048, default).
-SOFT_LIMIT_MIB=216
-# RSS is expected to sit well under the soft limit here, since each check only fills one rule
-# (capped at half the process-wide total) rather than every rule at once; the margin exists to
-# absorb Go's GC catching up rather than to paper over a real regression.
+# check 5 runs the server and the agent with half the default flow budgets, so that the flood it
+# can generate from one client namespace fills the whole process-wide budget and goes past it.
+# One rule may hold the entire budget (design 7a.10: the per-rule cap of ceil(T/2) only applies
+# once two or more rules accept new flows), so filling it needs a budget the flood can reach.
+C5_FLOW_FLAGS=(--max-udp-flows 4096 --max-tcp-flows 1024)
+C5_UDP_BUDGET=4096
+C5_TCP_BUDGET=1024
+# design 7: 32 MiB + 12 KiB * WGFT_MAX_UDP_FLOWS + 44 KiB * WGFT_MAX_TCP_FLOWS, so 124 MiB for the
+# budgets above (the default budgets give 216 MiB).
+SOFT_LIMIT_MIB=124
+# The margin absorbs Go's GC catching up rather than papering over a real regression: the flows
+# held at the budget cost about 86 MiB (4096 UDP sessions at ~14 KiB, 1024 TCP connections at
+# ~30 to 55 KiB, design 7), and the soft limit is what holds the rest down.
 MARGIN_MIB=100
 fail=0
 
@@ -214,16 +222,18 @@ proc_gone() { ! kill -0 "$1" 2>/dev/null; }
 
 ensure_wgftlab() { id wgftlab >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin wgftlab; }
 
-# start_server <data-dir> <log-file>: starts `wgft server run` in $mode, backgrounded.
+# start_server <data-dir> <log-file> [extra server flags...]: starts `wgft server run` in $mode,
+# backgrounded.
 start_server() {
   local data=$1 log=$2
+  shift 2
   if [ "$mode" = userspace ]; then
     ensure_wgftlab
     chown wgftlab "$data"
-    vps setsid nohup runuser -u wgftlab -- wgft server run --mode "$mode" --data-dir "$data" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+    vps setsid nohup runuser -u wgftlab -- wgft server run --mode "$mode" --data-dir "$data" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" "$@" \
       > "$log" 2>&1 < /dev/null &
   else
-    vps setsid nohup wgft server run --mode "$mode" --data-dir "$data" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+    vps setsid nohup wgft server run --mode "$mode" --data-dir "$data" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" "$@" \
       > "$log" 2>&1 < /dev/null &
   fi
   disown
@@ -554,7 +564,7 @@ if kind == 'udp':
             socks.append(s)
     # a plain send-them-all-at-once loop is fast enough to overwhelm the userspace relay's own
     # per-packet processing (measured: bursting all 5460 sends dropped the answered count to a
-    # small fraction of the per-rule cap, well under what a paced send reliably delivers), so
+    # small fraction of the flow budget, well under what a paced send reliably delivers), so
     # this paces sends in small batches, the same shape as the old thread-per-socket version's
     # incidental pacing (its thread creation overhead alone spread sends out, without meaning to).
     for i, s in enumerate(socks):
@@ -1112,7 +1122,7 @@ NFT
 }
 
 # ---------------------------------------------------------------------------------------------
-# check 5: memory stays bounded under the default flow caps (design 7)
+# check 5: memory stays bounded when one rule fills the whole flow budget (design 7, 7a.10)
 # ---------------------------------------------------------------------------------------------
 check5_server_memory() {
   echo "-- the userspace server's own relay"
@@ -1123,11 +1133,11 @@ check5_server_memory() {
   for i in $(seq 10 30); do ip netns exec client ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null; addrs+="198.51.100.$i,"; done
   addrs=${addrs%,}
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c5s-server.log
+  start_server "$DATA" /tmp/wgft-lifecycle-c5s-server.log "${C5_FLOW_FLAGS[@]}"
   if ! wait_admin; then echo "FAIL  check5 (server) setup: admin api never came up"; fail=1
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c5s-agent.log 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > /tmp/wgft-lifecycle-c5s-agent.log 2>&1 < /dev/null &
     disown
     ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25595 -udp 19160 > /tmp/wgft-lifecycle-c5s-echo.log 2>&1 < /dev/null &
     disown
@@ -1136,8 +1146,8 @@ check5_server_memory() {
       vps wgft rule add --agent home --udp 27040 --to 192.168.50.3:19160 --admin "$ADMIN" >/dev/null
       vps wgft rule add --agent home --tcp 39995 --to 192.168.50.3:25595 --admin "$ADMIN" >/dev/null
       # bare wait_until: a rule that was never actually ready surfaces downstream as an
-      # out-of-range held/answered count (0, not 1000..1024 or 3900..4096), which the okchecks
-      # below correctly turn into a FAIL.
+      # out-of-range held/answered count (0, not near the TCP and UDP budgets), which the
+      # okchecks below correctly turn into a FAIL.
       wait_until 10 tcp_probe_ok 39995
       wait_until 10 udp_probe_ok 27040
       local spid; spid=$(find_wgft_pid 'server run')
@@ -1150,7 +1160,7 @@ check5_server_memory() {
       # connection that the relay accepts and immediately RSTs, so the flood's own "established"
       # count is not trustworthy; count on the accepting
       # side instead: the VPS's public listener, which vpsd itself holds in userspace mode.
-      c5s_held_near_cap() { [ "$(vps ss -tn state established '( sport = :39995 )' | grep -c ':39995')" -ge 1000 ]; }
+      c5s_held_near_budget() { [ "$(vps ss -tn state established '( sport = :39995 )' | grep -c ':39995')" -ge $((C5_TCP_BUDGET - 24)) ]; }
       # must_wait, in order: first confirm the flood has finished *attempting* every one of its
       # 1260 connections (flood.py only prints this once every attempt has completed or failed,
       # not just once the cap is reached), then confirm the accepting side has settled on a held
@@ -1159,21 +1169,22 @@ check5_server_memory() {
       # which is exactly the memory-growth-under-continued-rejection regression this check
       # exists to catch (RSS sampled too early could simply miss it).
       must_wait "check5 (server): tcp flood finished attempting all connections" 10 log_has /tmp/wgft-lifecycle-c5s-tcpflood.log "tcp: attempted="
-      must_wait "check5 (server): tcp held count reaches the per-rule cap" 10 c5s_held_near_cap
+      must_wait "check5 (server): tcp held count reaches the whole flow budget" 10 c5s_held_near_budget
       local held; held=$(vps ss -tn state established '( sport = :39995 )' | grep -c ':39995')
       local rss; rss=$(rss_mib "$spid")
       wait "$flood_pid"
       echo "   $(cat /tmp/wgft-lifecycle-c5s-tcpflood.log)"
       echo "   tcp connections actually held (ss on the accepting side, not client-side connect success): $held"
-      echo "   server RSS while flooded past caps: ${rss:-unknown} MiB (soft limit $SOFT_LIMIT_MIB MiB, margin $MARGIN_MIB MiB)"
-      # the RSS bound only means something if the caps were actually reached: one rule, 21
-      # sources x 60 TCP (per-rule cap 1024) and x 260 UDP (per-rule cap 4096) with the defaults
-      okcheck "server: the tcp flood actually fills the per-rule cap (held $held of 1024)" \
-        "$([ "$held" -ge 1000 ] && [ "$held" -le 1024 ] && echo 1 || echo 0)"
+      echo "   server RSS while flooded past its flow budget: ${rss:-unknown} MiB (soft limit $SOFT_LIMIT_MIB MiB, margin $MARGIN_MIB MiB)"
+      # the RSS bound only means something if the budget was actually filled: one rule holding
+      # all of it, from 21 sources x 60 TCP (budget 1024) and x 260 UDP (budget 4096). Both
+      # floods stay under the per-source caps (128 TCP, 256 UDP), so the budget is what refuses
+      okcheck "server: one rule's tcp flood fills the whole flow budget (held $held of $C5_TCP_BUDGET)" \
+        "$([ "$held" -ge $((C5_TCP_BUDGET - 24)) ] && [ "$held" -le "$C5_TCP_BUDGET" ] && echo 1 || echo 0)"
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
-      okcheck "server: the udp flood fills the per-rule cap and is refused beyond it (answered $udp_ans of $udp_att)" \
-        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge 3900 ] && [ "$udp_ans" -le 4096 ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
-      okcheck "server RSS stays under the soft limit plus margin while flooded past the default caps" \
+      okcheck "server: one rule's udp flood fills the whole flow budget and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le "$C5_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
+      okcheck "server RSS stays under the soft limit plus margin while flooded past its flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((SOFT_LIMIT_MIB + MARGIN_MIB))" ] && echo 1 || echo 0)"
       check "server logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' /tmp/wgft-lifecycle-c5s-server.log)"
     fi
@@ -1199,7 +1210,7 @@ check5_agent_memory() {
   if ! wait_admin; then echo "FAIL  check5 (agent) setup: admin api never came up"; fail=1
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c5a-agent.log 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > /tmp/wgft-lifecycle-c5a-agent.log 2>&1 < /dev/null &
     disown
     ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25596 -udp 19161 > /tmp/wgft-lifecycle-c5a-echo.log 2>&1 < /dev/null &
     disown
@@ -1208,8 +1219,8 @@ check5_agent_memory() {
       vps wgft rule add --agent home --udp 27041 --to 192.168.50.3:19161 --admin "$ADMIN" >/dev/null
       vps wgft rule add --agent home --tcp 39996 --to 192.168.50.3:25596 --admin "$ADMIN" >/dev/null
       # bare wait_until: a rule that was never actually ready surfaces downstream as an
-      # out-of-range held/answered count (0, not 1000..1024 or 3900..4096), which the okchecks
-      # below correctly turn into a FAIL.
+      # out-of-range held/answered count (0, not near the TCP and UDP budgets), which the
+      # okchecks below correctly turn into a FAIL.
       wait_until 10 tcp_probe_ok 39996
       wait_until 10 udp_probe_ok 27041
       local apid; apid=$(find_wgft_pid 'agent run')
@@ -1222,25 +1233,26 @@ check5_agent_memory() {
       # its userspace netstack, not a real Linux socket, so `ss` cannot see it; the agent's
       # outgoing dial to the target on the lan host is a real socket there, one per held
       # connection, selected by the target's port as the peer (dport).
-      c5a_held_near_cap() { [ "$(ip netns exec home ss -tn state established '( dport = :25596 )' | grep -c ':25596')" -ge 1000 ]; }
+      c5a_held_near_budget() { [ "$(ip netns exec home ss -tn state established '( dport = :25596 )' | grep -c ':25596')" -ge $((C5_TCP_BUDGET - 24)) ]; }
       # must_wait, in order: see check5_server_memory's identical comment above (finish
       # attempting every connection, only then confirm the held count, only then sample RSS).
       must_wait "check5 (agent): tcp flood finished attempting all connections" 10 log_has /tmp/wgft-lifecycle-c5a-tcpflood.log "tcp: attempted="
-      must_wait "check5 (agent): tcp held count reaches the per-rule cap" 10 c5a_held_near_cap
+      must_wait "check5 (agent): tcp held count reaches the whole flow budget" 10 c5a_held_near_budget
       local held; held=$(ip netns exec home ss -tn state established '( dport = :25596 )' | grep -c ':25596')
       local rss; rss=$(rss_mib "$apid")
       wait "$flood_pid"
       echo "   $(cat /tmp/wgft-lifecycle-c5a-tcpflood.log)"
       echo "   tcp connections actually held (ss on the agent's own listener, not client-side connect success): $held"
-      echo "   agent RSS while flooded past caps: ${rss:-unknown} MiB (soft limit $SOFT_LIMIT_MIB MiB, margin $MARGIN_MIB MiB)"
-      # the RSS bound only means something if the caps were actually reached: one rule, 21
-      # sources x 60 TCP (per-rule cap 1024) and x 260 UDP (per-rule cap 4096) with the defaults
-      okcheck "agent: the tcp flood actually fills the per-rule cap (held $held of 1024)" \
-        "$([ "$held" -ge 1000 ] && [ "$held" -le 1024 ] && echo 1 || echo 0)"
+      echo "   agent RSS while flooded past its flow budget: ${rss:-unknown} MiB (soft limit $SOFT_LIMIT_MIB MiB, margin $MARGIN_MIB MiB)"
+      # the RSS bound only means something if the budget was actually filled: one rule holding
+      # all of it, from 21 sources x 60 TCP (budget 1024) and x 260 UDP (budget 4096). Both
+      # floods stay under the per-source caps (128 TCP, 256 UDP), so the budget is what refuses
+      okcheck "agent: one rule's tcp flood fills the whole flow budget (held $held of $C5_TCP_BUDGET)" \
+        "$([ "$held" -ge $((C5_TCP_BUDGET - 24)) ] && [ "$held" -le "$C5_TCP_BUDGET" ] && echo 1 || echo 0)"
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
-      okcheck "agent: the udp flood fills the per-rule cap and is refused beyond it (answered $udp_ans of $udp_att)" \
-        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge 3900 ] && [ "$udp_ans" -le 4096 ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
-      okcheck "agent RSS stays under the soft limit plus margin while flooded past the default caps" \
+      okcheck "agent: one rule's udp flood fills the whole flow budget and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le "$C5_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
+      okcheck "agent RSS stays under the soft limit plus margin while flooded past its flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((SOFT_LIMIT_MIB + MARGIN_MIB))" ] && echo 1 || echo 0)"
       check "agent logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' /tmp/wgft-lifecycle-c5a-agent.log)"
     fi
@@ -1252,7 +1264,7 @@ check5_agent_memory() {
 }
 
 check5() {
-  echo "== $mode: check 5: memory stays bounded under the default flow caps"
+  echo "== $mode: check 5: memory stays bounded when one rule fills the whole flow budget"
   if [ "$mode" = userspace ]; then
     check5_server_memory
   else

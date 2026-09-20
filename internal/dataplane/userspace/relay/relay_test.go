@@ -126,9 +126,9 @@ func bigSendBuffer(c *net.UDPConn) { c.SetWriteBuffer(udpBufMax) }
 
 func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} }
 
-// 予算とルールごとの上限は、Pool を渡さなければ Limits から導く(resource.Limits.UDPPerRuleCap、
-// 仕様 7 節)。
-func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
+// 予算とルール 1 本の上限は、Pool を渡さなければ Limits から導く(上限は ceil(T/2)。
+// 設計文書 7a.10 節)。
+func TestRuleCapDefaultsFromLimits(t *testing.T) {
 	m := New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: t.Logf})
 	if got := m.opts.UDPPool.RuleCap(); got != 10000 {
 		t.Errorf("UDP rule cap = %d, want 10000 (half of UDPTotal)", got)
@@ -142,13 +142,13 @@ func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
 	if got := m.opts.TCPPool.Total(); got != 4000 {
 		t.Errorf("TCP budget = %d, want 4000", got)
 	}
-	// 何も渡さなければ既定の全体上限(8192, 2048)から導く、導入前の固定値と同じ値になる
+	// 何も渡さなければ既定の予算(8192, 2048)から導く。置き換えた式の値と同じ値になる
 	m = New(&loopback{}, Options{Logf: t.Logf})
 	if udp, tcp := m.opts.UDPPool.RuleCap(), m.opts.TCPPool.RuleCap(); udp != 4096 || tcp != 1024 {
 		t.Errorf("default rule caps: udp=%d tcp=%d, want 4096 1024", udp, tcp)
 	}
 	// 呼び出し側が Pool を渡せば、それを使う(導出値は使わない)
-	pool := resource.NewPool(40, 5)
+	pool := resource.NewPool(40)
 	m = New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 40}, UDPPool: pool, Logf: t.Logf})
 	if m.opts.UDPPool != pool {
 		t.Error("an explicit UDPPool must not be replaced by the derived default")
@@ -280,7 +280,7 @@ func TestUDPRelaySessionsAndIdle(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: resource.NewPool(0, 2), Logf: t.Logf})
+	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: resource.NewPool(2), Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 
@@ -309,7 +309,7 @@ func TestUDPRelaySessionsAndIdle(t *testing.T) {
 	if n := m.Status()[0].Sessions; n != 2 {
 		t.Errorf("sessions = %d, want 2", n)
 	}
-	// 3 つ目はルールの上限(2)で捨てられる。既存は生きている
+	// 3 つ目は予算(2。ルールが 1 本なので予算のすべてがこのルールの上限)で捨てられる。既存は生きている
 	c3.SetDeadline(time.Now().Add(300 * time.Millisecond))
 	if _, err := roundtrip(c3, "over"); err == nil {
 		t.Error("third session should be dropped at limit")
@@ -550,7 +550,7 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	pool := resource.NewPool(10, 0)
+	pool := resource.NewPool(10)
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{UDP: 2}})
 	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: pool, Logf: t.Logf,
@@ -675,10 +675,15 @@ func TestTCPRelayConnCap(t *testing.T) {
 	}()
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
-	pool := resource.NewPool(10, 2)
+	other := reserveTCP(t, lb)
+	// 予算 4 でルールが 2 本なので、ルール 1 本の上限は ceil(4/2) = 2(設計文書 7a.10 節)
+	pool := resource.NewPool(4)
 	m := New(lb, Options{TCPPool: pool, Logf: t.Logf})
 	defer m.Close()
-	m.Apply(map[Key]Desired{{proto.TCP, port}: {srv.Addr().String(), "r1"}})
+	m.Apply(map[Key]Desired{
+		{proto.TCP, port}:  {srv.Addr().String(), "r1"},
+		{proto.TCP, other}: {srv.Addr().String(), "r2"},
+	})
 	echo := func(c net.Conn) error {
 		c.SetDeadline(time.Now().Add(2 * time.Second))
 		if _, err := c.Write([]byte("x")); err != nil {
@@ -836,5 +841,217 @@ func TestUDPDeniedSourceSpendsNoPacketTokens(t *testing.T) {
 	}
 	if got["deny"] != 20 || got["packet"] != 1 || len(got) != 2 {
 		t.Errorf("drops = %v, want deny 20 and packet 1", got)
+	}
+}
+
+// gatedNet は bind を止められる Network。gatedPort の bind は gate を閉じるまで戻らず、そのあいだ
+// テストは Resource Guard の状態を観測できる。failPort の bind は必ず失敗する。他のポートは
+// loopback にそのまま任せる。
+type gatedNet struct {
+	*loopback
+	gatedPort uint16
+	gate      chan struct{}
+	started   chan struct{} // gatedPort の bind に入ったことを 1 回だけ知らせる
+	failPort  uint16
+}
+
+func (g *gatedNet) ListenUDP(port uint16) (net.PacketConn, error) {
+	if err := g.hold(port); err != nil {
+		return nil, err
+	}
+	return g.loopback.ListenUDP(port)
+}
+
+func (g *gatedNet) ListenTCP(port uint16) (net.Listener, error) {
+	if err := g.hold(port); err != nil {
+		return nil, err
+	}
+	return g.loopback.ListenTCP(port)
+}
+
+func (g *gatedNet) hold(port uint16) error {
+	if g.gatedPort != 0 && port == g.gatedPort {
+		select {
+		case g.started <- struct{}{}:
+		default:
+		}
+		<-g.gate
+	}
+	if g.failPort != 0 && port == g.failPort {
+		return fmt.Errorf("bind refused by the test")
+	}
+	return nil
+}
+
+// waitGatedBind は gatedNet の bind が始まるのを待つ。始まらなければテストを落とす。
+func waitGatedBind(t *testing.T, g *gatedNet) {
+	t.Helper()
+	select {
+	case <-g.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the gated bind never started")
+	}
+}
+
+// bind の最中のルールは、受け付けているルールの集合 A に入らない(設計文書 7a.10 節)。入れると、
+// bind が戻るまでのあいだ N が増えて他のルールの予約が減り、既にあるルールが新しいフローを
+// ルール 1 本の上限や予約で拒まれる。
+func TestApplyKeepsTheAcceptingRulesWhileABindIsPending(t *testing.T) {
+	echoAddr, _ := udpEcho(t)
+	lb := &loopback{}
+	open := reserveUDP(t, lb)
+	pending := reserveUDP(t, lb)
+	g := &gatedNet{loopback: lb, gatedPort: pending, gate: make(chan struct{}), started: make(chan struct{}, 1)}
+	pool := resource.NewPool(10) // ルールが 1 本なら 10、2 本ならルール 1 本は ceil(10/2) = 5
+	m := New(g, Options{UDPPool: pool, Logf: t.Logf})
+	// 後始末は登録の逆順に走るので、gate を開ける後始末を後から登録して先に走らせる。テストが
+	// t.Fatalf で抜けても、bind の途中で止まった Apply が Manager の錠を握ったままにならない
+	t.Cleanup(m.Close)
+	release := sync.OnceFunc(func() { close(g.gate) })
+	t.Cleanup(release)
+	m.Apply(map[Key]Desired{{proto.UDP, open}: {echoAddr, "r1"}})
+	if got := pool.Rules(); got != 1 {
+		t.Fatalf("accepting rules after the first apply = %d, want 1", got)
+	}
+	// probe は r1 の 2 つ目の待ち受けの枠。r1 が A にただ 1 つのルールであるあいだは、予算のすべてを
+	// 取れる。誤って pending のルールが A に入れば、6 本目から rule_cap で拒まれる
+	probe := pool.Listener("r1")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.Apply(map[Key]Desired{{proto.UDP, open}: {echoAddr, "r1"}, {proto.UDP, pending}: {echoAddr, "r2"}})
+	}()
+	waitGatedBind(t, g)
+	var seenRules, seenReserve []int
+	for range 10 {
+		seenRules = append(seenRules, pool.Rules())
+		seenReserve = append(seenReserve, pool.Reserve())
+		if ref, admitted := probe.Acquire(); !admitted {
+			t.Fatalf("rule r1 was refused with %q while another rule's bind was still pending (in use %d of %d)",
+				ref.Reason, ref.InUse, ref.Total)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for i, n := range seenRules {
+		if n != 1 || seenReserve[i] != 0 {
+			t.Fatalf("sample %d while a bind was pending: %d accepting rules, reserve %d; want 1 and 0",
+				i, n, seenReserve[i])
+		}
+	}
+	if got := pool.InUse(); got != 10 {
+		t.Fatalf("InUse = %d, want 10 (r1 took the whole budget while the bind was pending)", got)
+	}
+	release()
+	<-done
+	// bind が成功した時点で、そのルールが A に入る
+	if got, want := pool.Rules(), 2; got != want {
+		t.Errorf("accepting rules after the bind succeeded = %d, want %d", got, want)
+	}
+	if got, want := pool.Reserve(), 5; got != want {
+		t.Errorf("reserve after the bind succeeded = %d, want %d", got, want)
+	}
+	for _, st := range m.Status() {
+		if st.Err != nil {
+			t.Errorf("listener %s: %v", st.Key, st.Err)
+		}
+	}
+}
+
+// bind に失敗したルールは、どの時点でも A に入らない。失敗までのあいだも N は動かない。
+func TestApplyFailedBindNeverEntersTheAcceptingRules(t *testing.T) {
+	echoAddr, _ := udpEcho(t)
+	lb := &loopback{}
+	open := reserveUDP(t, lb)
+	bad := reserveUDP(t, lb)
+	// 同じポートを gate と失敗の対象にする。gate を開けるまで bind の最中を観測でき、開けたら失敗する
+	g := &gatedNet{loopback: lb, gatedPort: bad, gate: make(chan struct{}), started: make(chan struct{}, 1), failPort: bad}
+	pool := resource.NewPool(10)
+	m := New(g, Options{UDPPool: pool, Logf: t.Logf})
+	t.Cleanup(m.Close)
+	release := sync.OnceFunc(func() { close(g.gate) })
+	t.Cleanup(release)
+	m.Apply(map[Key]Desired{{proto.UDP, open}: {echoAddr, "r1"}})
+	probe := pool.Listener("r1")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.Apply(map[Key]Desired{{proto.UDP, open}: {echoAddr, "r1"}, {proto.UDP, bad}: {echoAddr, "r2"}})
+	}()
+	waitGatedBind(t, g)
+	var seen []int
+	for range 10 {
+		seen = append(seen, pool.Rules())
+		time.Sleep(time.Millisecond)
+	}
+	release()
+	<-done
+	seen = append(seen, pool.Rules())
+	for i, n := range seen {
+		if n != 1 {
+			t.Fatalf("sample %d: %d accepting rules, want 1 (the failing bind must never join A)", i, n)
+		}
+	}
+	if got := pool.Reserve(); got != 0 {
+		t.Errorf("reserve = %d, want 0 (only one rule accepts)", got)
+	}
+	// r1 は予算のすべてを取れる。ここで拒まれるなら、失敗した bind のルールが A に入っている
+	if n, ref := acquireN(probe, 10); n != 10 {
+		t.Errorf("r1 admitted %d flows, want the whole budget of 10 (refused with %q)", n, ref.Reason)
+	}
+	// 失敗は状態として見え、再試行しても A には入らない
+	var failed int
+	for _, st := range m.Status() {
+		if st.Err != nil {
+			failed++
+		}
+	}
+	if failed != 1 {
+		t.Errorf("%d listeners report an error, want 1", failed)
+	}
+	m.Retry()
+	if got := pool.Rules(); got != 1 {
+		t.Errorf("accepting rules after Retry with the bind still failing = %d, want 1", got)
+	}
+}
+
+// acquireN は n 回続けて枠を取り、通った数と最後の拒否を返す(resource の同名の補助と同じ形)。
+func acquireN(l *resource.Listener, n int) (int, resource.Refusal) {
+	passed := 0
+	var last resource.Refusal
+	for range n {
+		ref, admitted := l.Acquire()
+		if !admitted {
+			last = ref
+			continue
+		}
+		passed++
+	}
+	return passed, last
+}
+
+// 後から bind が成功した待ち受けは、その時点で A に入る(Retry。設計文書 7a.10 節)。
+func TestRetryEntersTheAcceptingRulesWhenTheBindSucceeds(t *testing.T) {
+	blocker, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(blocker.LocalAddr().(*net.UDPAddr).Port)
+	pool := resource.NewPool(10)
+	m := New(&loopback{}, Options{UDPPool: pool, Logf: t.Logf})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.UDP, port}: {"127.0.0.1:9", "r1"}})
+	if st := m.Status(); len(st) != 1 || st[0].Err == nil {
+		t.Fatalf("status = %+v, want an error", st)
+	}
+	if got := pool.Rules(); got != 0 {
+		t.Fatalf("accepting rules with the only bind failing = %d, want 0", got)
+	}
+	blocker.Close()
+	m.Retry()
+	if st := m.Status(); st[0].Err != nil {
+		t.Fatalf("after retry: %v", st[0].Err)
+	}
+	if got := pool.Rules(); got != 1 {
+		t.Errorf("accepting rules after the retry opened the listener = %d, want 1", got)
 	}
 }

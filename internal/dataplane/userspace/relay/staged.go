@@ -174,6 +174,10 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 	for k, sock := range s.opened {
 		d := s.desired[k]
 		l := m.newListener(k, d)
+		// ソケットは Prepare で bind してあるので、中継を始める前に受け付けにする。この順で、
+		// 受け付けているルールの集合 A に入る待ち受けは開けたものだけになり、A に入る前に
+		// フローを受けることもない(設計文書 7a.10 節)
+		l.budget.Accept()
 		if sock.pc != nil {
 			m.serveUDP(l, sock.pc)
 		} else {

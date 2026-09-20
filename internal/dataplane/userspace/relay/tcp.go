@@ -34,16 +34,8 @@ func abortRefused(c net.Conn) {
 	}
 }
 
-func (m *Manager) startTCP(l *listener) error {
-	ln, err := m.net.ListenTCP(l.key.Port)
-	if err != nil {
-		return err
-	}
-	m.serveTCP(l, ln)
-	return nil
-}
-
-// serveTCP は開いた待ち受け ln で中継を始める。Prepare で開いた待ち受けは Commit でここに渡る。
+// serveTCP は開いた待ち受け ln で中継を始める。bind は呼び出し側(Apply の経路の openLocked と、
+// Prepare/Commit の経路の Prepare)が済ませてある。
 func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 	var (
 		mu    sync.Mutex
@@ -106,8 +98,9 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				}
 				release = rel
 			}
-			// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算とルールごとの上限を
-			// Pool が 1 つの排他の中で判定する。超えた接続はすぐ閉じる(既存の接続は追い出さない)
+			// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の上限、
+			// 他のルールの隔離予約を Pool が 1 つの排他の中で判定する。拒んだ接続はすぐ閉じる
+			// (既存の接続は追い出さない)
 			if ref, ok := l.budget.Acquire(); !ok {
 				release()
 				abortRefused(c)
