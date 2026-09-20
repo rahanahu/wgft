@@ -20,5 +20,3 @@ func newServerCmd() *cobra.Command {
 		},
 	}
 }
-
-func isStartupRefusal(error) bool { return false }

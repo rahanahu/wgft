@@ -3,7 +3,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/vpsd"
 )
 
@@ -56,31 +54,66 @@ func registerServerFlags(f *cobra.Command) {
 }
 
 // buildServerOptions は設定層から vpsd.Options を組む。
+//
+// ここが server の「入口」である(設計文書 11b 節)。値だけから判定できる誤りは、wg インタフェース、
+// 待ち受け、サーバのデータベースに触れる前に、すべてここで終了コード 3 の拒否にする。入口を通り抜けた
+// 値が起動の後半(net.Listen、netip.ParsePrefix、netlink の書き込み)で初めて失敗すると、そこでは
+// 環境由来の失敗と区別が付かず、終了コード 1 の再起動の繰り返しになる。同じ穴が 3 回見つかっている
+// (WGFT_WG_ADDRESS、WGFT_AGENT_API の unix://、WGFT_AGENT_API のポート)。設定項目を足すときは、
+// この関数に検査を足し、cmd/wgft/server_test.go の TestEveryServerSettingIsCheckedAtTheDoor の表に
+// 壊れた値を 1 つ加える。
 func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
-	c, err := loadConfig(cmd, serverSpecs(), resolveConfigPath(cmd, defaultConfigPath))
+	configPath := resolveConfigPath(cmd, defaultConfigPath)
+	c, err := loadConfig(cmd, serverSpecs(), configPath)
 	if err != nil {
-		return vpsd.Options{}, nil, withUnreadableHint(err, serverUnreadableHint)
+		return vpsd.Options{}, nil, withUnreadableHint(err, configPath, serverUnreadableHint)
+	}
+	// WGFT_MODE は、値そのものの誤り(kernel でも userspace でもない)だけをここで弾く。初回に
+	// 必須であることと、記録との食い違いの関門は、記録を読める internal/vpsd が判定する(9・11a 節)。
+	if m := c.str("WGFT_MODE"); m != "" && m != "kernel" && m != "userspace" {
+		return vpsd.Options{}, nil, configErrorf("WGFT_MODE", "must be kernel or userspace, not %q", m)
+	}
+	if strings.TrimSpace(c.str("WGFT_DATA_DIR")) == "" {
+		return vpsd.Options{}, nil, configErrorf("WGFT_DATA_DIR", "is empty; give the directory that holds wgft.sqlite, for example /var/lib/wgft")
+	}
+	if err := validateInterfaceName("WGFT_WG_INTERFACE", c.str("WGFT_WG_INTERFACE")); err != nil {
+		return vpsd.Options{}, nil, err
 	}
 	port, err := strconv.ParseUint(c.str("WGFT_WG_PORT"), 10, 16)
-	if err != nil {
-		return vpsd.Options{}, nil, configErrorf("WGFT_WG_PORT: %q is not a port number", c.str("WGFT_WG_PORT"))
+	if err != nil || port == 0 {
+		return vpsd.Options{}, nil, configErrorf("WGFT_WG_PORT", "%q is not a UDP port between 1 and 65535", c.str("WGFT_WG_PORT"))
 	}
+	// MTU の範囲も値だけで判定できる。範囲の外の値は netlink の LinkSetMTU が EINVAL で返すだけで、
+	// 環境由来の失敗と区別が付かない。下限は IPv4 の実用の最小、上限はジャンボフレームに合わせる。
 	mtu, err := strconv.Atoi(c.str("WGFT_MTU"))
-	if err != nil {
-		return vpsd.Options{}, nil, configErrorf("WGFT_MTU: %q is not an integer", c.str("WGFT_MTU"))
+	if err != nil || mtu < minMTU || mtu > maxMTU {
+		return vpsd.Options{}, nil, configErrorf("WGFT_MTU", "%q is not an integer between %d and %d", c.str("WGFT_MTU"), minMTU, maxMTU)
 	}
 	// WGFT_WG_ADDRESS の構文は、値そのものが原因の失敗であり、環境には触れていないここで弾く。
-	// これを弾かずに進むと internal/vpsd.Run の netip.ParsePrefix まで届き、そこは設定の値の誤りと
-	// 環境由来の失敗を終了コードで区別する層より後なので、ただのエラー(終了コード 1)になって
-	// systemd に再起動され続けていた(cmd/wgft/server_test.go の TestServerConfigErrorsExitCode、
-	// 設計文書 11a 節)。食い違い(記録済みの帯との不一致)の判定は従来どおり internal/vpsd 側で行う。
+	// これを弾かずに進むと internal/vpsd.Run の netip.ParsePrefix まで届く(改訂の記録 2026-09-20)。
+	// 食い違い(記録済みの帯との不一致)の判定は従来どおり internal/vpsd 側で行う。
 	if _, err := netip.ParsePrefix(c.str("WGFT_WG_ADDRESS")); err != nil {
-		return vpsd.Options{}, nil, configErrorf("WGFT_WG_ADDRESS: %q is not a valid address/prefix such as 10.200.0.1/24: %v", c.str("WGFT_WG_ADDRESS"), err)
+		return vpsd.Options{}, nil, configErrorf("WGFT_WG_ADDRESS", "%q is not a valid address/prefix such as 10.200.0.1/24: %v", c.str("WGFT_WG_ADDRESS"), err)
 	}
 	if err := validateListenAddr("WGFT_AGENT_API", c.str("WGFT_AGENT_API"), false); err != nil {
 		return vpsd.Options{}, nil, err
 	}
 	if err := validateListenAddr("WGFT_ADMIN", c.str("WGFT_ADMIN"), true); err != nil {
+		return vpsd.Options{}, nil, err
+	}
+	// エンドポイントと接続文字列のホストは、待ち受けには使わないが、値の形が違えば接続文字列が
+	// 作れず、エージェントはトンネルを張れない。起動してから気付く項目にせず、入口で弾く。
+	if v := c.str("WGFT_WG_ENDPOINT"); v != "" {
+		if err := validateHostPort("WGFT_WG_ENDPOINT", v); err != nil {
+			return vpsd.Options{}, nil, err
+		}
+	}
+	if v := c.str("WGFT_AGENT_API_HOST"); v != "" {
+		if err := validateHostPort("WGFT_AGENT_API_HOST", v); err != nil {
+			return vpsd.Options{}, nil, err
+		}
+	}
+	if err := validateBool("WGFT_ADMIN_TAILSCALE", c.str("WGFT_ADMIN_TAILSCALE")); err != nil {
 		return vpsd.Options{}, nil, err
 	}
 	limits, err := limitsFromConfig(c)
@@ -121,27 +154,27 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 // error is indistinguishable from a genuine environment problem (a port already in use, an
 // address not yet configured) and becomes exit code 1: the shipped unit's Restart=on-failure
 // loops on it forever even though a syntax error never fixes itself by retrying
-// (docs/design.md 11a 節). A real bind failure (EADDRINUSE and similar) still reaches net.Listen
+// (docs/design.md 11b 節). A real bind failure (EADDRINUSE and similar) still reaches net.Listen
 // unchanged and keeps exit code 1, since retrying that can genuinely help.
 func validateListenAddr(env, val string, allowUnix bool) error {
 	if socket, ok := strings.CutPrefix(val, "unix://"); ok {
 		if !allowUnix {
-			return configErrorf("%s: %q is a unix socket, but this listener is TCP only; give host:port", env, val)
+			return configErrorf(env, "%q is a unix socket, but this listener is TCP only; give host:port", val)
 		}
 		if socket == "" {
-			return configErrorf("%s: %q has no socket path after unix://", env, val)
+			return configErrorf(env, "%q has no socket path after unix://", val)
 		}
 		return nil
 	}
 	_, port, err := net.SplitHostPort(val)
 	if err != nil {
-		return configErrorf("%s: %q is not a valid host:port: %v", env, val, err)
+		return configErrorf(env, "%q is not a valid host:port: %v", val, err)
 	}
 	if port == "" {
-		return configErrorf("%s: %q has no port", env, val)
+		return configErrorf(env, "%q has no port", val)
 	}
 	if _, err := net.LookupPort("tcp", port); err != nil {
-		return configErrorf("%s: %q has an invalid port: %v", env, val, err)
+		return configErrorf(env, "%q has an invalid port: %v", val, err)
 	}
 	return nil
 }
@@ -164,8 +197,10 @@ listens on a Unix socket (root-owned 0600).`,
 			if err != nil {
 				return err
 			}
+			// 必須なのは run だけである。check は設定と環境を見るだけなので、エンドポイントが
+			// 決まっていない段階でも動く(10.3 節の初回セットアップの順序)。
 			if opts.WGEndpoint == "" {
-				return configErrorf("WGFT_WG_ENDPOINT (--wg-endpoint) is required: the host:port that agents connect to, for example vps.example.com:51820")
+				return configErrorf("WGFT_WG_ENDPOINT", "is required (--wg-endpoint): the host:port that agents connect to, for example vps.example.com:51820")
 			}
 			adopt, _ := cmd.Flags().GetBool("adopt-existing")
 			opts.AdoptExisting = adopt
@@ -255,8 +290,10 @@ func serverUnreadableHint(path string) string {
 	return fmt.Sprintf("The provided server.service runs as an unprivileged user. If the file holds only server settings, which are not secret, make it readable: chmod 0644 %s", path)
 }
 
-// isStartupRefusal は、設定が原因の起動中止(他人の wg インタフェース、ポートやアドレスの衝突)かを返す。
-func isStartupRefusal(err error) bool {
-	var refusal *wg.StartupRefusal
-	return errors.As(err, &refusal)
-}
+// minMTU と maxMTU は WGFT_MTU の範囲(入口の検査)。下限は IPv4 のホストが必ず扱える 576、
+// 上限はジャンボフレームの 9216 である。範囲の外の値はカーネルが EINVAL で返すだけなので、
+// 環境由来の失敗と区別が付く形で入口で弾く。
+const (
+	minMTU = 576
+	maxMTU = 9216
+)

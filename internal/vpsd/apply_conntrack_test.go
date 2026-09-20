@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/platform/linux"
+	"github.com/rahanahu/wgft/internal/startup"
 )
 
 // TestApplyThenReadConntrackOrder proves the fix for the startup bug found on a module-less
@@ -77,14 +77,14 @@ func TestApplyThenReadConntrackApplyFailureStopsBeforeRead(t *testing.T) {
 	}
 }
 
-// TestApplyThenReadConntrackReadFailureAfterApplyIsStartupRefusal is the regression test for the
-// production bug: on a host where nf_conntrack never loads even once the table is applied (not
-// the auto-load case, a genuinely broken environment), the failure must become a
-// *wg.StartupRefusal so cmd/wgft's exitCode maps it to exit 3 (systemd's
-// RestartPreventExitStatus=3), not the generic exit 1 that let the real unit restart every 2
-// seconds. warn must not run either: there is nothing meaningful to log once ReadUDPTimeouts has
-// already failed for the same sysctl family.
-func TestApplyThenReadConntrackReadFailureAfterApplyIsStartupRefusal(t *testing.T) {
+// TestApplyThenReadConntrackReadFailureAfterApplyIsRetryable pins the 2026-09-21 decision
+// (design.md 11b 節) on a read that still fails after the table is applied: it stays an ordinary
+// error, so the unit keeps restarting on it. It was a startup refusal (exit code 3) for a day, on
+// the assumption that a read failing after the write is permanent, but no real environment where
+// that happens has been seen, and a namespace or a masked /proc/sys can make it heal by itself. The
+// asymmetric rule settles the doubtful case as exit code 1. warn must not run either: there is
+// nothing meaningful to log once ReadUDPTimeouts has already failed for the same sysctl family.
+func TestApplyThenReadConntrackReadFailureAfterApplyIsRetryable(t *testing.T) {
 	warnCalled := false
 	readErr := errors.New("open /proc/sys/net/netfilter/nf_conntrack_udp_timeout: no such file or directory")
 	_, err := applyThenReadConntrack(
@@ -95,12 +95,14 @@ func TestApplyThenReadConntrackReadFailureAfterApplyIsStartupRefusal(t *testing.
 	if err == nil {
 		t.Fatal("want an error, got nil")
 	}
-	var refusal *wg.StartupRefusal
-	if !errors.As(err, &refusal) {
-		t.Fatalf("err = %v (%T), want a *wg.StartupRefusal", err, err)
+	if startup.IsRefusal(err) {
+		t.Fatalf("err = %v, want an ordinary (retryable) error, not a startup refusal", err)
 	}
-	if !strings.Contains(refusal.Reason, "table inet wgft") || !strings.Contains(refusal.Reason, readErr.Error()) {
-		t.Errorf("reason = %q, want it to name table inet wgft and wrap %q", refusal.Reason, readErr)
+	if !errors.Is(err, readErr) {
+		t.Errorf("err = %v, want it to wrap %v for diagnosis", err, readErr)
+	}
+	if !strings.Contains(err.Error(), "table inet wgft") {
+		t.Errorf("err = %q, want it to say the read happened after the table was applied", err)
 	}
 	if warnCalled {
 		t.Error("warn must not be called when the conntrack read itself failed")

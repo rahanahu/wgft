@@ -13,6 +13,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/platform/linux"
+	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -221,7 +222,9 @@ func checkRecordedMode(out io.Writer, st *store.Store, want string) {
 		fmt.Fprintf(out, "recorded mode: %s\n", have)
 		return
 	}
-	fmt.Fprintf(out, "warning: the recorded mode is %s but the setting is %s; the mode change gate runs at start\n", have, want)
+	// 種別を添えて、起動が止まる場合にどの拒否になるかを運用者に見せる(設計文書 11b 節)。
+	fmt.Fprintf(out, "warning: the recorded mode is %s but the setting is %s; the mode change gate runs at start and refuses with [%s] if leftovers of the old mode remain\n",
+		have, want, startup.CategoryModeGate)
 }
 
 // checkMeta は meta の記録と現在値を照合して 1 行出す。
@@ -239,7 +242,10 @@ func checkMeta(out io.Writer, st *store.Store, key, label, want string) {
 		fmt.Fprintf(out, "%s: %s\n", label, have)
 		return
 	}
-	fmt.Fprintf(out, "warning: %s differs from the record %s; setting is %s\n", label, have, want)
+	// 記録との食い違いは、起動のたびに conflict の拒否になる。teardown --purge と再登録が要ることは
+	// 起動時のエラーが示すので、ここでは種別だけを添える(設計文書 11b 節)。
+	fmt.Fprintf(out, "warning: %s differs from the record %s; setting is %s; the server refuses to start with [%s]\n",
+		label, have, want, startup.CategoryConflict)
 }
 
 // checkIPForward reports net.ipv4.ip_forward's current value (spec section 6.1). It never writes
@@ -273,8 +279,9 @@ func checkIPForward(out io.Writer) {
 // ホストは再起動のたびに)では、`server check` はテーブルを何も適用しないので読めない。これは
 // カーネルモードの起動を止める条件ではない。`wgft server run` は自分の table inet wgft を適用した
 // 後にこの値を読み、その適用の netlink 書き込みが nf_conntrack を自動ロードするため
-// (internal/vpsd/vpsd.go の Run、設計文書 11a 節に追記した項目)、読めない状態はそれだけでは
-// 起動を妨げない。適用の後もなお読めない場合だけ、`server run` は専用の終了コード(3)で止まる。
+// (internal/vpsd/vpsd.go の Run)、読めない状態はそれだけでは起動を妨げない。適用の後もなお
+// 読めない場合は、再試行で直りうる失敗として終了コード 1 で終わり、unit が起動し直す
+// (設計文書 11b 節)。
 func checkConntrack(out io.Writer) {
 	usage, err := linux.ReadConntrackUsage()
 	if err != nil {

@@ -1,13 +1,15 @@
 package main
 
 import (
-	"errors"
 	"fmt"
+	"net"
 	"os"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/rahanahu/wgft/internal/startup"
 )
 
 // 設定層(仕様 11a 節)。
@@ -39,52 +41,80 @@ type config struct {
 	specs []spec
 }
 
-// configUnreadableError は、設定ファイルがあるのに権限で読めないこと。設定起因の失敗なので
-// 再起動しても直らない。main が終了コード 3 にして、unit の再起動の繰り返しを止める(仕様 11a 節)。
-// 直し方(hint)は読み取りの層では決めない。同じファイルを server と agent で共有でき、中身を読めない以上
-// 秘密の有無も分からないので、どの権限にすべきかは呼び出し側のコマンドが知っている範囲で添える。
-type configUnreadableError struct {
-	path string
-	err  error
-	hint string
+// unreadableConfigFile は、設定ファイルがあるのに権限で読めないことを config の拒否として返す
+// (設計文書 11b 節)。ファイル名を Subject に持ち、直し方(Hint)は読み取りの層では決めない。
+// 同じファイルを server と agent で共有でき、中身を読めない以上秘密の有無も分からないので、
+// どの権限にすべきかは呼び出し側のコマンドが知っている範囲で添える。
+func unreadableConfigFile(path string, err error) *startup.Refusal {
+	// 元のエラーを包んだままにする。呼び出し側とテストが errors.Is(err, os.ErrPermission) で
+	// 読めない理由を確かめられるようにするためである。
+	return startup.Config(path, "%v; the user wgft runs as cannot read it", err).Wrapping(err)
 }
 
-func (e *configUnreadableError) Error() string {
-	s := fmt.Sprintf("%v; the user wgft runs as cannot read it", e.err)
-	if e.hint != "" {
-		s += ". " + e.hint
-	}
-	return s
-}
-
-func (e *configUnreadableError) Unwrap() error { return e.err }
-
-// withUnreadableHint は、err が読めない設定ファイルによるものなら直し方を添える。それ以外はそのまま返す。
-func withUnreadableHint(err error, hint func(path string) string) error {
-	var e *configUnreadableError
-	if errors.As(err, &e) {
-		e.hint = hint(e.path)
+// withUnreadableHint は、err が path を読めなかったことによる拒否なら直し方を添える。
+// それ以外はそのまま返す。読めないファイルの拒否は Subject にそのファイルのパスを持つので、
+// 呼び出し側が渡した path と突き合わせて見分ける。
+func withUnreadableHint(err error, path string, hint func(path string) string) error {
+	if r := startup.Of(err); r != nil && r.Subject == path {
+		r.Hint = hint(path)
 	}
 	return err
 }
 
-// configError は設定ファイルの構文や設定値の誤り。読めないファイルと同じく再起動しても直らないので、
-// main が終了コード 3 にする(仕様 11a 節)。
-type configError struct{ err error }
-
-func (e *configError) Error() string { return e.err.Error() }
-func (e *configError) Unwrap() error { return e.err }
-
-// configErrorf は fmt.Errorf と同じ書式で configError を作る。
-func configErrorf(format string, args ...any) error {
-	return &configError{err: fmt.Errorf(format, args...)}
+// configErrorf は、設定の値の誤りを config の拒否にする。subject は WGFT_ 名で、文言はその名前を
+// 繰り返さずに書く(Error がすでに種別と対象を出す)。
+func configErrorf(subject, format string, args ...any) error {
+	return startup.Config(subject, format, args...)
 }
 
-// isConfigError は、err が設定起因(読めない設定ファイル、構文や値の誤り)かを返す。
-func isConfigError(err error) bool {
-	var u *configUnreadableError
-	var c *configError
-	return errors.As(err, &u) || errors.As(err, &c)
+// 入口で使う値だけの検査(設計文書 11b 節)。どれも環境を見ず、値の形だけを判定する。
+
+// validateHostPort は、値が host:port の形で、ホストが空でなく、ポートが解決できることを確かめる。
+// 待ち受けには使わない項目(WGFT_WG_ENDPOINT、WGFT_AGENT_API_HOST)に使う。
+func validateHostPort(env, val string) error {
+	host, port, err := net.SplitHostPort(val)
+	if err != nil {
+		return configErrorf(env, "%q is not host:port, for example vps.example.com:51820: %v", val, err)
+	}
+	if host == "" {
+		return configErrorf(env, "%q has no host; agents connect to this name or address", val)
+	}
+	if port == "" {
+		return configErrorf(env, "%q has no port", val)
+	}
+	if _, err := net.LookupPort("tcp", port); err != nil {
+		return configErrorf(env, "%q has an invalid port: %v", val, err)
+	}
+	return nil
+}
+
+// validateBool は、真偽値の設定に綴りの誤りを通さない。かつては 1/true/yes/on 以外のすべてを偽と
+// して黙って受けていたので、WGFT_ADMIN_TAILSCALE=ture のような誤りが、設定したつもりの機能を
+// 黙って無効にしていた。守りや待ち受けを左右する設定であり、黙って無効にするより止めるほうが安全である。
+func validateBool(env, val string) error {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "", "1", "true", "yes", "on", "0", "false", "no", "off":
+		return nil
+	}
+	return configErrorf(env, "%q is not a boolean; write true or false", val)
+}
+
+// validateInterfaceName は、カーネルが受け付けないインタフェース名を入口で弾く。判定はカーネルの
+// dev_valid_name と同じで、空でないこと、15 バイト以内、"." と ".." でないこと、'/'、':'、空白を
+// 含まないことである。これを通さずに進むと netlink の LinkAdd が EINVAL で返るだけで、環境由来の
+// 失敗と区別が付かない。
+func validateInterfaceName(env, name string) error {
+	switch {
+	case name == "":
+		return configErrorf(env, "is empty; give the WireGuard interface name, for example wgft0")
+	case len(name) > 15:
+		return configErrorf(env, "%q is longer than the 15 bytes the kernel allows for an interface name", name)
+	case name == "." || name == "..":
+		return configErrorf(env, "%q is not a usable interface name", name)
+	case strings.ContainsAny(name, "/: \t\n\v\f\r"):
+		return configErrorf(env, "%q contains a character the kernel rejects in an interface name (/, : or whitespace)", name)
+	}
+	return nil
 }
 
 // parseDotenv は最小構文の dotenv を読む(3.1 節)。
@@ -97,11 +127,14 @@ func parseDotenv(path string) (map[string]string, error) {
 			return map[string]string{}, nil
 		}
 		if os.IsPermission(err) {
-			return nil, &configUnreadableError{path: path, err: err}
+			return nil, unreadableConfigFile(path, err)
 		}
 		return nil, err
 	}
 	out := map[string]string{}
+	// 構文の誤りの Subject は "ファイル:行" にする。読めないファイルの拒否(Subject はファイル名)と
+	// 区別が付き、withUnreadableHint が権限の直し方を構文の誤りに添えてしまうことがない。
+	at := func(i int) string { return fmt.Sprintf("%s:%d", path, i+1) }
 	for i, line := range strings.Split(string(b), "\n") {
 		s := strings.TrimRight(line, "\r")
 		if s == "" || strings.HasPrefix(s, "#") {
@@ -109,18 +142,18 @@ func parseDotenv(path string) (map[string]string, error) {
 		}
 		eq := strings.IndexByte(s, '=')
 		if eq <= 0 {
-			return nil, configErrorf("%s:%d: not in KEY=value form: %q", path, i+1, line)
+			return nil, configErrorf(at(i), "not in KEY=value form: %q", line)
 		}
 		key := s[:eq]
 		val := s[eq+1:]
 		if key != strings.TrimSpace(key) || strings.ContainsAny(key, " \t") {
-			return nil, configErrorf("%s:%d: key name may not contain whitespace: %q", path, i+1, key)
+			return nil, configErrorf(at(i), "key name may not contain whitespace: %q", key)
 		}
 		if strings.HasPrefix(val, "\"") || strings.HasPrefix(val, "'") {
-			return nil, configErrorf("%s:%d: do not quote values; Docker keeps quotes as part of the value: %q", path, i+1, val)
+			return nil, configErrorf(at(i), "do not quote values; Docker keeps quotes as part of the value: %q", val)
 		}
 		if strings.ContainsAny(val, " \t") {
-			return nil, configErrorf("%s:%d: value may not contain whitespace: %q", path, i+1, val)
+			return nil, configErrorf(at(i), "value may not contain whitespace: %q", val)
 		}
 		out[key] = val
 	}

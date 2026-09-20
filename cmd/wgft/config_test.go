@@ -9,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/policy"
+	"github.com/rahanahu/wgft/internal/startup"
 )
 
 func testSpecs() []spec {
@@ -89,11 +91,11 @@ func TestDotenvSyntax(t *testing.T) {
 	if _, err := parseDotenv(mk("WGFT_NAME=a b\n")); err == nil {
 		t.Error("空白入りの値がエラーにならない")
 	}
-	// 構文の誤りはどれも設定起因で、終了コード 3(仕様 11a 節)
+	// 構文の誤りはどれも config の拒否で、終了コード 3(設計文書 11b 節)
 	for _, body := range []string{"not a pair\n", " WGFT_NAME=x\n", "WGFT_NAME='x'\n", "WGFT_NAME=a b\n"} {
 		_, err := parseDotenv(mk(body))
-		if got := exitCode(err); err == nil || got != exitConfigRefusal {
-			t.Errorf("%q: err=%v exitCode=%d, want %d", body, err, got, exitConfigRefusal)
+		if got := exitCode(err); err == nil || got != exitRefusal {
+			t.Errorf("%q: err=%v exitCode=%d, want %d", body, err, got, exitRefusal)
 		}
 	}
 }
@@ -107,8 +109,14 @@ func TestLimitsOutOfRangeExitCode(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = limitsFromConfig(c)
-		if got := exitCode(err); err == nil || got != exitConfigRefusal {
-			t.Errorf("WGFT_MAX_UDP_FLOWS=%s: err=%v exitCode=%d, want %d", v, err, got, exitConfigRefusal)
+		if got := exitCode(err); err == nil || got != exitRefusal {
+			t.Errorf("WGFT_MAX_UDP_FLOWS=%s: err=%v exitCode=%d, want %d", v, err, got, exitRefusal)
+		}
+		// 文言も確かめる。拒否は種別と対象を Error() が出すので、呼び出し側は対象を第 1 引数で渡す。
+		// 書式の引数をずらすと Reason が壊れるが、終了コードだけを見るテストでは気付けない。
+		r := startup.Of(err)
+		if r == nil || r.Subject != "WGFT_MAX_UDP_FLOWS" || !strings.Contains(r.Reason, strconv.Quote(v)) {
+			t.Errorf("WGFT_MAX_UDP_FLOWS=%s: refusal = %v, want the setting as the subject and the value in the reason", v, r)
 		}
 	}
 	t.Setenv("WGFT_MAX_UDP_FLOWS", "2048")
@@ -132,8 +140,8 @@ func TestAllowTargetsFromConfig(t *testing.T) {
 	for _, v := range []string{"192.168.1.0/33", "192.168.1.20:0", "nas.lan:25565", ","} {
 		t.Setenv("WGFT_AGENT_ALLOW_TARGETS", v)
 		_, err := allowTargetsFromConfig(load())
-		if got := exitCode(err); err == nil || got != exitConfigRefusal {
-			t.Errorf("WGFT_AGENT_ALLOW_TARGETS=%s: err=%v exitCode=%d, want %d", v, err, got, exitConfigRefusal)
+		if got := exitCode(err); err == nil || got != exitRefusal {
+			t.Errorf("WGFT_AGENT_ALLOW_TARGETS=%s: err=%v exitCode=%d, want %d", v, err, got, exitRefusal)
 		}
 	}
 	t.Setenv("WGFT_AGENT_ALLOW_TARGETS", "192.168.1.0/24:2456-2458")
@@ -190,8 +198,8 @@ func TestPerSourceLimitsFromConfig(t *testing.T) {
 		t.Setenv("WGFT_MAX_UDP_FLOWS_PER_SOURCE", v)
 		c = load()
 		_, err := perSourceLimitsFromConfig(c)
-		if got := exitCode(err); err == nil || got != exitConfigRefusal {
-			t.Errorf("WGFT_MAX_UDP_FLOWS_PER_SOURCE=%s: err=%v exitCode=%d, want %d", v, err, got, exitConfigRefusal)
+		if got := exitCode(err); err == nil || got != exitRefusal {
+			t.Errorf("WGFT_MAX_UDP_FLOWS_PER_SOURCE=%s: err=%v exitCode=%d, want %d", v, err, got, exitRefusal)
 		}
 	}
 }
@@ -219,8 +227,8 @@ func TestConfigUnreadable(t *testing.T) {
 	if !errors.Is(err, os.ErrPermission) {
 		t.Errorf("元のエラーを包んでいない: %v", err)
 	}
-	if got := exitCode(fmt.Errorf("server: %w", err)); got != exitConfigRefusal {
-		t.Errorf("exitCode = %d, want %d", got, exitConfigRefusal)
+	if got := exitCode(fmt.Errorf("server: %w", err)); got != exitRefusal {
+		t.Errorf("exitCode = %d, want %d", got, exitRefusal)
 	}
 	if m, err := parseDotenv(filepath.Join(dir, "none.env")); err != nil || len(m) != 0 {
 		t.Errorf("無いファイル: %v %v", m, err)
@@ -244,8 +252,8 @@ func TestAgentUnreadableHint(t *testing.T) {
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)
 	err := root.Execute()
-	if got := exitCode(err); err == nil || got != exitConfigRefusal {
-		t.Fatalf("err=%v exitCode=%d, want %d", err, got, exitConfigRefusal)
+	if got := exitCode(err); err == nil || got != exitRefusal {
+		t.Fatalf("err=%v exitCode=%d, want %d", err, got, exitRefusal)
 	}
 	if strings.Contains(err.Error(), "0644") || !strings.Contains(err.Error(), "chmod 0640 "+p) {
 		t.Errorf("agent の直し方が違う: %v", err)

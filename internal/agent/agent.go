@@ -5,7 +5,6 @@ package agent
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log"
 	"net/netip"
@@ -24,6 +23,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
 	"github.com/rahanahu/wgft/internal/resource"
+	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -292,16 +292,18 @@ func (rt *runtime) logStatus() {
 // recover は stream の認証が拒否(401)されたときの復帰経路(仕様 5.1 節)。
 // WGFT_JOIN があり、使用済みでなければ初回登録をやり直す。認証情報ファイルは登録が成功した時点で置き換え、
 // 失敗したら既存のファイルを残したまま止まる(期限切れのトークンで鍵まで失わないため)。
+// この 3 つの分岐は、ensureRegistered の同じ 3 つと同じ理由で拒否として返す。稼働中に起きても、
+// 直すには運用者が新しい接続文字列を発行するしかなく、再起動の繰り返しでは直らない(設計文書 11b 節)。
 func (rt *runtime) recover() error {
 	if rt.opts.Join == "" {
-		return errors.New("permanent token was revoked; provide a new join string via WGFT_JOIN and restart")
+		return startup.Config("WGFT_JOIN", "permanent token was revoked; provide a new join string via WGFT_JOIN and restart")
 	}
 	j, err := ParseJoin(rt.opts.Join)
 	if err != nil {
-		return err
+		return startup.Config("WGFT_JOIN", "%v", err)
 	}
 	if j.TokenHash() == rt.f.UsedJoinTokenSHA256 {
-		return errors.New("permanent token was revoked and the local join string is already used; issue a new join string and replace WGFT_JOIN")
+		return startup.Conflict("WGFT_JOIN", "permanent token was revoked and the local join string is already used; issue a new join string and replace WGFT_JOIN")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -350,19 +352,6 @@ func (rt *runtime) reconnect() {
 	}
 }
 
-// ConfigRefusal marks an ensureRegistered failure caused by WGFT_JOIN itself (missing on a first
-// run, malformed, or already spent), never by the environment, so retrying it can never help.
-// cmd/wgft maps it to the same exit code as vpsd's *wg.StartupRefusal (docs/design.md 9, 11a 節),
-// so the shipped agent.service's RestartPreventExitStatus=3 stops systemd from restarting it every
-// 2 seconds forever. Before this, ensureRegistered returned these as plain errors, indistinguishable
-// from a Register network failure (which does deserve the restart loop, since the VPS or network
-// may recover), so both became the generic exit code 1. A stale WGFT_JOIN left in a compose file
-// once the agent is already registered is deliberately not covered here (11a 節): ensureRegistered
-// never reaches this path in that case, it only logs and returns nil above.
-type ConfigRefusal struct{ Reason string }
-
-func (e *ConfigRefusal) Error() string { return e.Reason }
-
 // ensureRegistered は初回登録を行う(仕様 5.1 節)。恒久トークンがあれば何もしない。
 // WGFT_JOIN が compose に残ったまま再起動されるのが普通なので、使用済みの接続文字列は黙って無視する。
 // WGFT_NAME / --name は任意。接続文字列の発行時の名前に紐付いているので、与えなければトークンに
@@ -379,15 +368,19 @@ func ensureRegistered(f *credentials.Credentials, opts Options) error {
 		}
 		return nil
 	}
+	// この 3 つはどれも再試行では直らない。cmd/wgft は *startup.Refusal を終了コード 3 に写すので、
+	// 同梱の agent.service の RestartPreventExitStatus=3 が 2 秒おきの再起動を止める。値だけから
+	// 判定できる 2 つ目(構文)を入口ではなく登録の直前で判定するのは、登録済みの agent では
+	// compose に残った古い WGFT_JOIN を読まないためである(設計文書 11a・11b 節)。
 	if opts.Join == "" {
-		return &ConfigRefusal{Reason: "not registered and no join string; provide via WGFT_JOIN or --join"}
+		return startup.Config("WGFT_JOIN", "not registered and no join string; provide via WGFT_JOIN or --join")
 	}
 	j, err := ParseJoin(opts.Join)
 	if err != nil {
-		return &ConfigRefusal{Reason: err.Error()}
+		return startup.Config("WGFT_JOIN", "%v", err)
 	}
 	if j.TokenHash() == f.UsedJoinTokenSHA256 {
-		return &ConfigRefusal{Reason: "this join string is already used; issue a new join string"}
+		return startup.Conflict("WGFT_JOIN", "this join string is already used; issue a new join string")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

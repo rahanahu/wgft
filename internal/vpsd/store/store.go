@@ -278,7 +278,7 @@ func OpenReadOnly(path string) (*Store, error) {
 	}
 	if version > len(migrations) {
 		db.Close()
-		return nil, fmt.Errorf("SQLite schema version %d is newer than this binary, which supports up to %d", version, len(migrations))
+		return nil, fmt.Errorf("%w: version %d, while this binary supports up to %d", ErrSchemaNewer, version, len(migrations))
 	}
 	return &Store{db: db, filePath: path}, nil
 }
@@ -328,13 +328,19 @@ func narrowMode(path string) error {
 // Close は SQLite を閉じる。
 func (s *Store) Close() error { return s.db.Close() }
 
+// ErrSchemaNewer is returned by Open when the database was written by a newer wgft, whose schema
+// this binary does not know. The caller (internal/vpsd.Run) turns it into a startup refusal: no
+// amount of restarting teaches an older binary a newer schema, only installing that binary again or
+// restoring a copy of the database does (design.md 11b 節).
+var ErrSchemaNewer = errors.New("server database schema is newer than this binary")
+
 func (s *Store) migrate() error {
 	var version int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
 	if version > len(migrations) {
-		return fmt.Errorf("SQLite schema version %d is newer than this binary, which supports up to %d", version, len(migrations))
+		return fmt.Errorf("%w: version %d, while this binary supports up to %d", ErrSchemaNewer, version, len(migrations))
 	}
 	for i := version; i < len(migrations); i++ {
 		tx, err := s.db.Begin()

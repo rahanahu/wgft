@@ -1,11 +1,10 @@
 package vpsd
 
 import (
-	"errors"
 	"path/filepath"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
+	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
 
@@ -83,8 +82,27 @@ func TestReconcileModeAndAddress(t *testing.T) {
 	st.Close()
 }
 
-// isRefusal は、err が設定起因の拒否(終了コード 3 に写すもの。仕様 11a 節)かを返す。
-func isRefusal(err error) bool {
-	var r *wg.StartupRefusal
-	return errors.As(err, &r)
+// isRefusal は、err が起動の拒否(終了コード 3 に写すもの。設計文書 11b 節)かを返す。
+func isRefusal(err error) bool { return startup.IsRefusal(err) }
+
+// 拒否の種別は診断のために残る(設計文書 11b 節)。アドレス帯の食い違いは conflict、モードの
+// 値そのものの誤りと初回の欠落は config である。
+func TestReconcileRefusalCategories(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	opts := Options{Mode: "kernel", WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
+	if err := reconcileModeAndAddress(st, opts, false); err != nil {
+		t.Fatal(err)
+	}
+	changed := opts
+	changed.WGAddress = "10.201.0.1/24"
+	if r := startup.Of(reconcileModeAndAddress(st, changed, true)); r == nil || r.Category != startup.CategoryConflict || r.Subject != "WGFT_WG_ADDRESS" {
+		t.Errorf("アドレス帯の食い違い = %v, want conflict WGFT_WG_ADDRESS", r)
+	}
+	if r := startup.Of(checkModeSupported("bogus")); r == nil || r.Category != startup.CategoryConfig || r.Subject != "WGFT_MODE" {
+		t.Errorf("未知のモード = %v, want config WGFT_MODE", r)
+	}
 }

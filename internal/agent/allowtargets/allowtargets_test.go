@@ -62,7 +62,7 @@ func TestParseSetButNoEntriesIsAnError(t *testing.T) {
 	}
 }
 
-// 構文の誤りは誤りとして返す。呼び出し側は終了コード 3 の設定の誤りにする(仕様 11a 節)。
+// 構文の誤りは誤りとして返す。呼び出し側は終了コード 3 の config の拒否にする(設計文書 11b 節)。
 func TestParseInvalid(t *testing.T) {
 	for _, s := range []string{
 		"192.168.1.0/33",
