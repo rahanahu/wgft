@@ -17,13 +17,26 @@
 # Combinations (name used on the command line in parentheses):
 #   legacy      (legacy)      current server build, v0.3.0 agent. v0.3.0 predates version
 #                             negotiation entirely (no protocol_min/protocol_max/capabilities in
-#                             its pubkey message at all), so this is the legacy v0 case.
-#   old agent   (old-agent)   current server build, v0.4.0 agent (the immediately-previous
-#                             release; it already speaks protocol v1).
-#   old server  (old-server)  v0.4.0 server, current agent build.
+#                             its pubkey message at all), so this is the legacy v0 case. Design
+#                             7a.6 keeps this a permanent, not a rolling, requirement: legacy v0
+#                             must be supported by both sides for as long as the product is in
+#                             the v1.0.x line (7a.6's own wording), so LEGACY_VERSION stays
+#                             v0.3.0 - the only release that predates negotiation - regardless of
+#                             which release OLD_AGENT_VERSION points at.
+#   old agent   (old-agent)   current server build, OLD_AGENT_VERSION agent (the
+#                             immediately-previous release; it already speaks protocol v1).
+#   old server  (old-server)  OLD_AGENT_VERSION server, current agent build.
 #   baseline    (baseline)    current server build, current agent build (both v1); a sanity
 #                             check that the harness itself works, run last so a failure here
 #                             says the script is wrong rather than the version combinations.
+#
+# OLD_AGENT_VERSION (below) tracks whichever release is immediately previous to the current
+# build, not a fixed protocol version: design 7a.6 promises interoperability between the current
+# and immediately-previous NUMBERED protocol version, and every release from v0.4.0 onward speaks
+# the same protocol v1 (no v2 has been introduced yet), so old-agent/old-server exist to exercise
+# an actual previous release's registration/forwarding/reconnect behaviour, not to add protocol
+# coverage a unit test does not already have. It moves forward with each release: v0.5.0 as of
+# this revision (main is v0.5.1 plus nothing yet), v0.4.0 previously.
 #
 # v0.3.0 predates the "stream: server selected protocol ..." log line by design (it has no
 # concept of a negotiated version to log), so the legacy combination only checks the server's own
@@ -39,16 +52,17 @@
 # mismatched ranges as a table-driven unit test (docs/design.md's revision record entry for the
 # version negotiation feature has the detail on why the lab could not reach this either).
 #
-# Old binaries: v0.4.0 and v0.3.0 (wgft-linux-amd64) are downloaded from the GitHub release
-# assets of this repository and checked against the published .sha256 file. A download is cached
-# under $CACHE (below) so the two combinations that both need v0.4.0 do not fetch it twice, and so
-# a repeat run of this script in the same VM does not re-download at all. Nothing is added to the
-# repository. Some hosts' Incus VMs have no outbound IPv4 on the bridge and GitHub has no IPv6
-# (lab/README.md's "VM が IPv4 で外に出られない"); on such a host, place the verified release
-# binaries and their .sha256 files (named exactly wgft-v0.4.0 / wgft-v0.3.0, matching what a
-# successful download would leave) in $CACHE before running this script. This script only fetches
-# what is not already cached there, so pre-staged files are used as they are. The download and
-# verification itself (fetch_release) lives in lab/oldrelease.sh, shared with lab/upgrade.sh (D4).
+# Old binaries: OLD_AGENT_VERSION and v0.3.0 (wgft-linux-amd64) are downloaded from the GitHub
+# release assets of this repository and checked against the published .sha256 file. A download is
+# cached under $CACHE (below) so the two combinations that both need OLD_AGENT_VERSION do not
+# fetch it twice, and so a repeat run of this script in the same VM does not re-download at all.
+# Nothing is added to the repository. Some hosts' Incus VMs have no outbound IPv4 on the bridge
+# and GitHub has no IPv6 (lab/README.md's "VM が IPv4 で外に出られない"); on such a host, place
+# the verified release binaries and their .sha256 files (named exactly wgft-v$OLD_AGENT_VERSION /
+# wgft-v0.3.0, matching what a successful download would leave) in $CACHE before running this
+# script. This script only fetches what is not already cached there, so pre-staged files are used
+# as they are. The download and verification itself (fetch_release) lives in lab/oldrelease.sh,
+# shared with lab/upgrade.sh (D4).
 #
 # Requires `lab/lab build` (wgft in /usr/local/bin of the VM) and the netns topology (`lab/lab
 # net up`). Runs the server in kernel mode only; version negotiation does not depend on the
@@ -57,8 +71,10 @@
 set -u
 
 GH_REPO=rahanahu/wgft
-OLD_AGENT_VERSION=0.4.0  # previous release: already speaks protocol v1 (design 7a.6)
-LEGACY_VERSION=0.3.0     # predates version negotiation entirely: legacy v0
+OLD_AGENT_VERSION=0.5.0  # immediately-previous release: already speaks protocol v1 (design 7a.6)
+LEGACY_VERSION=0.3.0     # predates version negotiation entirely: legacy v0. Fixed regardless of
+  # OLD_AGENT_VERSION (see the "legacy" combination's own comment above): design 7a.6 requires
+  # legacy v0 support through v1.0.x, and v0.3.0 is the only release that is actually legacy v0.
 . "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
 CACHE=/tmp/wgft-version-skew-cache
 ADMIN=127.0.0.1:8686
