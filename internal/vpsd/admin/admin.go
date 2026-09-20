@@ -194,6 +194,10 @@ type BatchResponse struct {
 	RuleStates        map[string]RuleApply `json:"rule_states,omitempty"` // rule_id → 適用状態
 	Drift             *Drift               `json:"drift,omitempty"`
 	ApplyError        string               `json:"apply_error,omitempty"` // 最後の適用の backend 全体の失敗か、公開の後の修復の失敗
+	// FlowBudget と ResourceRefusals は Resource Guard の状態(設計文書 7a.10 節「拒否の報告」)。
+	// v1 への加算で、報告を持たない Backend では省く(resource_status.go の withResourceStatus)。
+	FlowBudget       map[proto.Proto]FlowBudget   `json:"flow_budget,omitempty"`
+	ResourceRefusals map[string]map[string]uint64 `json:"resource_refusals,omitempty"`
 }
 
 // ErrorBody は失敗時の本文。
@@ -319,6 +323,7 @@ func (s *Server) getRules(w http.ResponseWriter, r *http.Request) {
 	drops, _ := s.backend.RuleDrops()
 	resp := BatchResponse{Generation: gen, Rules: rules, Drops: drops}
 	s.withApply(&resp)
+	s.withResourceStatus(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -339,6 +344,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := BatchResponse{Generation: res.Generation, Changed: res.Changed, Rules: res.Rules}
 	s.withApply(&resp)
+	s.withResourceStatus(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 

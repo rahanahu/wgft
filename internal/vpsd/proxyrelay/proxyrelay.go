@@ -127,6 +127,12 @@ func New(opts Options) *Manager {
 	return &Manager{opts: opts, ls: map[uint16]*listener{}, bindFail: map[uint16]*failure{}}
 }
 
+// Pool is the TCP flow budget this Manager judges new connections against (design.md 7a.10 節
+// 「拒否の報告」). The admin API reads it to report Resource Guard's status (in_use, limit and the
+// per-rule, per-reason refusal counts); it is never nil (New fills a default when Options.Pool is
+// nil).
+func (m *Manager) Pool() *resource.Pool { return m.opts.Pool }
+
 // Apply は宣言に収束させる(Prepare の直後に Commit する)。
 func (m *Manager) Apply(rules []Rule) { m.Prepare(rules).Commit(nil) }
 
