@@ -172,7 +172,13 @@ wgft agent run --data-dir ~/.wgft
 
 ### Run the agent on Windows
 
-Download `wgft-windows-amd64.exe` from the [Releases page](https://github.com/rahanahu/wgft/releases). Open PowerShell in the folder it was saved to, for example Downloads, and run:
+Download `wgft-windows-amd64.exe` and `wgft-windows-amd64.exe.sha256` from the [Releases page](https://github.com/rahanahu/wgft/releases). Open PowerShell in the folder they were saved to, for example Downloads, and verify the download:
+
+```powershell
+(Get-FileHash -Algorithm SHA256 .\wgft-windows-amd64.exe).Hash -eq (Get-Content .\wgft-windows-amd64.exe.sha256).Split(' ')[0]
+```
+
+This prints `True` when the hash matches. PowerShell's `-eq` compares strings case-insensitively, which matters here because `Get-FileHash` returns the hash in uppercase while the published `.sha256` file has it in lowercase. Then run:
 
 ```powershell
 Rename-Item wgft-windows-amd64.exe wgft.exe
