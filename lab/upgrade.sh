@@ -47,26 +47,26 @@
 # topology (`lab/lab net up`). Runs kernel and userspace mode; v0.4.0 supports both.
 #
 # SANDBOX-READY / PARALLEL-SAFE: every file this script writes lives under $WORK (one variable,
-# defaulting under /tmp), and the netns names are variables (today's fixed topology names by
-# default). It never does a VM-wide process lookup (no pkill by name, no pgrep, no ps/grep over
-# the whole process table), and - this is the precise guarantee - it never signals a process it
-# did not itself start in THIS run. stop_server/stop_agent/stop_targets only ever act on pids
-# this exact script instance holds in a variable right now (SERVER_PID and friends), the moment
-# after starting them; there is no restart and no window for pid reuse to matter there. leaf_pid
-# additionally resolves that pid's real descendant through /proc/<pid>/task/<pid>/children (still
-# scoped to that one pid, never a table-wide scan) so those functions wait for the actual target
-# process to exit, not just its wrapper (see leaf_pid's own comment). Across runs, stale_cleanup
-# reads pids a PREVIOUS run of this script left in $WORK/pid.*, but it never signals or waits on
-# any of them, verified or not: it only reports what it finds (naming the process and the exact
-# command to stop it, when the record's boot id and process start time verify it is a genuine,
-# still-running leftover) and removes the stale record. If any leftover verified as still
-# running, the whole run refuses to continue instead of risking a collision (see stale_cleanup's
-# own comment for exactly what would collide and why that is worse than stopping). Deliberately
-# kept small: this is a verified-identity detect-and-report safety net for running this one
-# script directly, not a general-purpose reaper; owning a whole sandbox's leftovers is the coming
-# lab harness's job. The one thing that is NOT yet sandboxed is the netns topology itself
-# (client/vps/home/lan are one shared set per VM today, same as every other lab/*.sh script);
-# that is a lab/netns.sh limitation this script does not attempt to fix.
+# defaulting under /tmp), and the netns names and every port/address are variables (today's fixed
+# topology and ports by default). It never does a VM-wide process lookup (no pkill by name, no
+# pgrep, no ps/grep over the whole process table; the one exception is ss run INSIDE one netns at a
+# time, see resource_check), and it never signals a process it did not itself start in THIS run.
+# stop_server/stop_agent/stop_targets only ever act on pids this exact instance holds in a variable
+# right now, the moment after starting them, resolved through leaf_pid to their real descendant so
+# they wait for the actual target process to exit, not just its wrapper - there is no restart and
+# no window for pid reuse to matter there (see leaf_pid's own comment). Across runs, stale_cleanup
+# checks for two kinds of leftover from a PREVIOUS run of this script, but never signals or waits
+# on either, verified or not: it only reports what it finds and removes the stale record.
+# report_stale verifies the wrapper and leaf pids $WORK/pid.* recorded (boot id and process start
+# time, so pid reuse cannot fool it); resource_check looks for the vps WireGuard interface,
+# nftables table, and any port this run binds already being held (see both functions' own
+# comments). If either finds a live leftover, the whole run refuses to continue instead of risking
+# a collision (see stale_cleanup's own comment for exactly what would collide and why that is worse
+# than stopping). Deliberately kept small: this is a verified detect-and-report safety net for
+# running this one script directly, not a general-purpose reaper; owning a whole sandbox's
+# leftovers is the coming lab harness's job. The one thing that is NOT yet sandboxed is the netns
+# topology itself (client/vps/home/lan are one shared set per VM today, same as every other
+# lab/*.sh script); that is a lab/netns.sh limitation this script does not attempt to fix.
 set -u
 # job control (set -m) is needed for term_group below: without it, a non-interactive bash script
 # never gives a background job its own process group (every "cmd &" just stays in the script's
@@ -98,6 +98,13 @@ NS_LAN=${WGFT_NS_LAN:-lan}
 ADMIN=${WGFT_UPGRADE_ADMIN:-127.0.0.1:8686}
 WG_ENDPOINT=203.0.113.1:51820
 LAN_ADDR=192.168.50.3
+# WG_INTERFACE/WG_PORT/AGENT_API: wgft's own defaults (cmd/wgft/server.go), made explicit here -
+# and passed to start_server below - instead of left implicit, so resource_check (stale_cleanup's
+# leftover-resource check) has a single source of truth for what it looks for in the vps
+# namespace, rather than a second, independently-hardcoded copy of the same constants.
+WG_INTERFACE=wgft0
+WG_PORT=51820
+AGENT_API=0.0.0.0:8443
 
 # VPS-side listen ports and LAN-side target ports for the seven representative rules (§ scenario
 # step 1). Chosen not to collide with any other lab/*.sh script's hardcoded ports, though that
@@ -197,13 +204,17 @@ leaf_pid() {
 # they only ever act on SERVER_PID and friends, in-memory variables of the one script instance
 # that just started that exact process a few seconds earlier - there is no restart, no file, and
 # no gap for reuse. stale_cleanup is different: it reads pids that a *previous, possibly long-dead*
-# run of this script left in $WORK/pid.*, so before signalling one it must verify that pid is
-# still the exact process this tooling started, not a stranger that happens to have the same
-# number now. The two facts that make a pid this specific are the kernel boot id (a pid space is
-# only reused within one boot) and the process's own start time in clock ticks since boot (a field
-# the kernel assigns once at fork and never reuses for a different process within the same boot,
-# unlike the pid number itself). record_pid writes both alongside the pid; read_pid_record reads
-# them back; proc_start_time is how both sides compute the same value.
+# run of this script left in $WORK/pid.*, so before reporting one it must verify that pid is still
+# the exact process this tooling started, not a stranger that happens to have the same number now.
+# The two facts that make a pid this specific are the kernel boot id (a pid space is only reused
+# within one boot) and the process's own start time in clock ticks since boot (a field the kernel
+# assigns once at fork and never reuses for a different process within the same boot, unlike the
+# pid number itself). record_pid writes both, for the backgrounded job's own pid AND (when
+# different) its leaf_pid, since a job that goes through a wrapper - "vps CMD &" backgrounds a
+# bash function call, which forks a subshell before CMD - can exit that wrapper on its own,
+# independently of the real process underneath, leaving nothing at the wrapper's pid to verify
+# while the real process is still running (seen in the lab: the leftover this check exists for).
+# read_pid_record reads both back; proc_start_time is how both sides compute the same value.
 boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
 # proc_start_time <pid>: field 22 (starttime) of /proc/<pid>/stat, in clock ticks since boot.
 # Parsed robustly: comm (field 2) is whatever the process named itself and can itself contain
@@ -219,45 +230,62 @@ proc_start_time() {
   [ "$#" -ge 20 ] || return 1
   echo "${20}"
 }
-# record_pid <file> <pid>: writes <pid>, the current boot id and <pid>'s own start time, one per
-# line. A process too short-lived to still exist by the time this reads /proc/<pid>/stat (should
-# not happen; nothing here forks-and-immediately-execs anything unusual) leaves the start-time
-# line empty, which read_pid_record below treats the same as any other unverifiable record.
+# record_pid <file> <pid>: writes <pid>, its boot id and start time (lines 1-3), then - only when
+# leaf_pid resolves to something other than <pid> itself - the same three facts for the leaf (lines
+# 4-6). The leaf is given a moment to stabilise first (leaf_pid immediately after fork can still
+# see an incomplete tree): poll until two reads agree, bounded, so this never blocks indefinitely.
+# A process too short-lived to still exist by the time this reads /proc/<pid>/stat (should not
+# happen) leaves that start-time line empty, which read_pid_record below treats the same as any
+# other unverifiable record.
 record_pid() {
-  local file=$1 pid=$2
+  local file=$1 pid=$2 prev cur i
+  prev=$(leaf_pid "$pid")
+  for i in 1 2 3 4 5; do
+    sleep 0.2
+    cur=$(leaf_pid "$pid")
+    [ "$cur" = "$prev" ] && break
+    prev=$cur
+  done
   { echo "$pid"; boot_id; proc_start_time "$pid" 2>/dev/null; } > "$file"
+  if [ -n "$cur" ] && [ "$cur" != "$pid" ]; then
+    { echo "$cur"; boot_id; proc_start_time "$cur" 2>/dev/null; } >> "$file"
+  fi
 }
-# read_pid_record <file>: on success, sets REC_PID/REC_BOOT/REC_START and returns 0; otherwise
-# (missing file, fewer than 3 lines, or any of the three empty - including a pid file in the
-# pid-only format this script used before this identity check existed) returns 1 with all three
-# unset, which the caller must treat as "cannot verify, so do not act on it".
+# read_pid_record <file>: on success, sets REC_PID/REC_BOOT/REC_START (the wrapper) and returns 0;
+# otherwise (missing file, fewer than 3 lines, or any of the three empty - including a pid file in
+# the pid-only format this script used before this identity check existed) returns 1 with all
+# three unset, which the caller must treat as "cannot verify, so do not act on it". A record with a
+# separately-recorded leaf (lines 4-6; see record_pid) additionally sets REC_LEAF_PID/
+# REC_LEAF_BOOT/REC_LEAF_START; a record with no leaf lines (no extra fork happened, or this file
+# predates leaf recording) leaves all three empty, which the caller treats as "no leaf to check".
 read_pid_record() {
   REC_PID=""; REC_BOOT=""; REC_START=""
+  REC_LEAF_PID=""; REC_LEAF_BOOT=""; REC_LEAF_START=""
   local file=$1
   [ -f "$file" ] || return 1
-  { read -r REC_PID; read -r REC_BOOT; read -r REC_START; } < "$file" 2>/dev/null
+  { read -r REC_PID; read -r REC_BOOT; read -r REC_START
+    read -r REC_LEAF_PID; read -r REC_LEAF_BOOT; read -r REC_LEAF_START; } < "$file" 2>/dev/null
   [ -n "$REC_PID" ] && [ -n "$REC_BOOT" ] && [ -n "$REC_START" ]
 }
 
 # stale_cleanup: on entry, NEVER signals or waits on anything (the owner's call: even a
-# fully-verified leftover only gets reported, never killed, by this script). For each pid file
-# under $WORK left by a previous run, report_stale below prints exactly one line describing what
-# it found; when no record is a live leftover, stale_cleanup then rebuilds $WORK empty, which
-# removes the records. If, and only
-# if, at least one record turned out to be a genuine, still-running leftover of an earlier run of
-# this exact script (boot id and process start time both still match), this refuses to continue:
-# it prints what to run to stop it and exits 3, leaving $WORK and the records in place so that
-# every rerun refuses again until the leftover is gone. The reason it stops instead of just reporting and
-# carrying on is what actually collides if it does not. $WORK is not what collides: a run that
-# does start rebuilds it empty first. What does collide: the vps/home/lan
-# network namespaces are shared for the whole VM (not sandboxed; see the header comment), and
-# every port and address this script uses is a fixed constant in that shared namespace (the
-# admin API at $ADMIN, the agent API, every P_* listen port) - a leftover server or agent still
-# holding any of those would make this run's own start_server/start_agent either fail to bind, or
-# silently succeed by binding nothing while the OLD process keeps answering, which would let this
-# run's very first checks read the leftover's state instead of its own and pass or fail for the
-# wrong reason. That risk is exactly what a fresh run cannot tell apart from a real regression,
-# so this stops rather than let it happen quietly.
+# fully-verified leftover only gets reported, never killed, by this script). It checks two
+# independent kinds of leftover from an earlier run of this exact script: report_stale verifies
+# each $WORK/pid.* record's wrapper AND leaf identity (see record_pid/report_stale); resource_check
+# looks for the kernel/network state that outlives any process by design (the WireGuard interface
+# and nftables table a clean vpsd stop deliberately leaves behind, plus anything already listening
+# on a port this run needs). If neither finds anything, $WORK is rebuilt empty. If either does,
+# this refuses to continue: it prints exactly what to run to remove it and exits 3, leaving $WORK
+# and the records in place so every rerun refuses again until the leftover is actually gone.
+# Removing the records before refusing would make the next rerun see nothing, start, and collide.
+# The reason this stops instead of just reporting and carrying on: the vps/home/lan namespaces and
+# every port/address this script uses (the admin API at $ADMIN, the agent API, the WireGuard
+# interface and port, every P_*/T_* target port) are fixed constants in a VM-wide shared namespace
+# (not sandboxed; see the header comment). A leftover holding any of them would make this run's own
+# start_server/start_agent/start_targets either fail to bind, or silently succeed by binding
+# nothing while the leftover keeps answering - letting this run's checks read the leftover's state
+# instead of its own, and pass or fail for the wrong reason. A fresh run cannot tell that apart from
+# a real regression, so this stops rather than risk it quietly.
 stale_cleanup() {
   local f found=0
   if [ -d "$WORK" ]; then
@@ -266,55 +294,124 @@ stale_cleanup() {
       report_stale "$f" || found=1
     done
   fi
-  # A leftover that is still running keeps its record, and $WORK is left as it is: the refusal has
-  # to repeat on every rerun until the leftover is gone. Removing the record here would make the
-  # next rerun see nothing, start, and collide with the leftover in exactly the way described above.
+  resource_check || found=1
   if [ "$found" = 1 ]; then
-    echo "stale_cleanup: refusing to start: at least one leftover reported above is still running and would collide with this run's own server/agent in the shared vps/home/lan namespaces (see this function's own comment for why). Stop it with the command printed above, then rerun." >&2
+    echo "stale_cleanup: refusing to start: at least one leftover reported above would collide with this run's own server/agent/targets in the shared vps/home/lan namespaces (see this function's own comment for why). Remove it with the command(s) printed above, then rerun." >&2
     exit 3
   fi
   rm -rf "$WORK"
   mkdir -p "$WORK" "$CACHE"
 }
+# verify_identity <pid> <boot> <start>: echoes one of "alive" (pid still exists, same boot, exact
+# same start time - this IS the recorded process), "gone" (pid no longer exists), "reused" (pid
+# exists but its start time differs: an unrelated process now has that number), or "rebooted" (the
+# recorded boot id is not this boot, so the pid number means nothing here regardless of the pid's
+# current state). Purely a read; never signals anything.
+verify_identity() {
+  local pid=$1 boot=$2 start=$3 cur_start
+  [ "$boot" = "$(boot_id)" ] || { echo rebooted; return; }
+  cur_start=$(proc_start_time "$pid")
+  [ -n "$cur_start" ] || { echo gone; return; }
+  [ "$cur_start" = "$start" ] && echo alive || echo reused
+}
 # report_stale <pid-file>: the one place a pid read back from a file (rather than an in-memory
 # variable of this running script) is ever even looked at; it only ever reports, never signals or
-# waits on it - see stale_cleanup's own comment for why and for what happens after. Returns 1 if
-# the record is a genuine, still-running leftover of an earlier run of this exact script (boot id
-# and start time both verified to match), so the caller can decide whether it is safe to
-# continue; returns 0 for every other case (already gone, reused, unreadable or old-format
-# record), all of which are safe to ignore.
+# waits on it. A record holds two identities to check independently (see record_pid): the wrapper
+# ("vps CMD &"'s own $!) and, when the fork underneath it was resolved at record time, the leaf.
+# Checking them independently matters because the wrapper can exit on its own well before the leaf
+# does (seen in the lab: a SIGKILL'd server's wrapper was already gone while the real "server run"
+# process it had forked was still up, still holding the WireGuard interface, the admin API and the
+# agent API) - a leftover leaf with a dead wrapper is still a leftover. Returns 1 if either
+# verifies alive, so the caller knows not to continue; returns 0 only when both are gone, reused or
+# from a previous boot, which is safe to ignore.
 report_stale() {
-  local file=$1 pid boot start cur_boot cur_start real cmdline
+  local file=$1 wstatus lstatus cmdline
   if ! read_pid_record "$file"; then
     echo "stale_cleanup: $file has no verifiable pid record (missing, unreadable, or the old pid-only format); nothing to report, removing the record"
     return 0
   fi
-  pid=$REC_PID; boot=$REC_BOOT; start=$REC_START
-  cur_boot=$(boot_id)
-  if [ "$boot" != "$cur_boot" ]; then
-    echo "stale_cleanup: $file recorded boot id $boot but this boot is $cur_boot (host rebooted since); pid $pid may since have been reused, ignoring it"
+  wstatus=$(verify_identity "$REC_PID" "$REC_BOOT" "$REC_START")
+  lstatus=""
+  [ -n "$REC_LEAF_PID" ] && lstatus=$(verify_identity "$REC_LEAF_PID" "$REC_LEAF_BOOT" "$REC_LEAF_START")
+
+  if [ "$wstatus" != alive ] && [ "$lstatus" != alive ]; then
+    echo "stale_cleanup: $file: wrapper pid $REC_PID is $wstatus${REC_LEAF_PID:+, leaf pid $REC_LEAF_PID is ${lstatus:-gone}}; nothing to report"
     return 0
   fi
-  cur_start=$(proc_start_time "$pid")
-  if [ -z "$cur_start" ]; then
-    echo "stale_cleanup: $file's pid $pid no longer exists; nothing to report"
-    return 0
+
+  echo "stale_cleanup: LEFTOVER - $file is still running from an earlier run of this script"
+  if [ "$wstatus" = alive ]; then
+    cmdline=$(tr '\0' ' ' < "/proc/$REC_PID/cmdline" 2>/dev/null)
+    echo "  wrapper pid $REC_PID is alive (boot id and start time verified); cmdline: ${cmdline:-<unreadable>}"
+  elif [ -n "$REC_LEAF_PID" ]; then
+    echo "  wrapper pid $REC_PID is $wstatus (its group leader is gone)"
   fi
-  if [ "$cur_start" != "$start" ]; then
-    echo "stale_cleanup: $file's pid $pid exists but started at $cur_start, recorded $start (the pid number was reused by an unrelated process); ignoring it"
-    return 0
+  if [ "$lstatus" = alive ]; then
+    cmdline=$(tr '\0' ' ' < "/proc/$REC_LEAF_PID/cmdline" 2>/dev/null)
+    echo "  real process pid $REC_LEAF_PID is alive (boot id and start time verified); cmdline: ${cmdline:-<unreadable>}"
+  elif [ -n "$REC_LEAF_PID" ]; then
+    echo "  real process pid $REC_LEAF_PID is $lstatus"
   fi
-  # verified: this is the exact process this tooling started, in this same boot, never reaped,
-  # and it is still running right now. Report it in full; do not touch it.
-  real=$(leaf_pid "$pid")
-  cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
-  echo "stale_cleanup: LEFTOVER - $file's pid $pid is still running from an earlier run of this script (boot id and start time match)"
-  echo "  cmdline: ${cmdline:-<unreadable, process may have just exited>}"
-  if [ -n "$real" ] && [ "$real" != "$pid" ]; then
-    echo "  real process (resolved via leaf_pid, for your information only): $real"
+
+  if [ "$wstatus" = alive ]; then
+    # the wrapper itself verified alive, so it is genuinely still the group leader: a group kill
+    # reaches it and everything it forked, including the leaf, in one signal.
+    echo "  to stop it yourself: kill -- -$REC_PID   (falls back to a plain 'kill $REC_PID' if that pid is not its own process group leader)"
+  else
+    # the wrapper is gone; only the leaf verified alive, orphaned and no longer any process's
+    # group leader (see this function's own comment), so a group kill would signal nothing or the
+    # wrong group. A plain kill of the specific verified pid is the correct, unambiguous command.
+    echo "  the group leader (the wrapper) is gone; to stop it yourself: kill $REC_LEAF_PID"
   fi
-  echo "  to stop it yourself: kill -- -$pid   (falls back to a plain 'kill $pid' if that pid is not its own process group leader)"
   return 1
+}
+# resource_check: what stale_cleanup's pid-based checks above cannot see, because it outlives every
+# process by design or was never this script's own process to begin with. Kernel mode's WireGuard
+# interface and nftables table are deliberately left running through a clean vpsd stop (design 9,
+# 10.3), so no pid, however verified, ever points at them; a leftover on any port this run binds is
+# equally invisible to a pid check if it was started some other way. All three are checked with
+# ip/nft/ss run INSIDE the netns (never a VM-wide process lookup), using this script's own
+# variables for every name and port so this can never drift from what start_server/start_targets
+# actually use. Returns 1 (having printed what to remove) if anything is found; 0 on a clean
+# vps/lan.
+resource_check() {
+  local found=0
+  if vps ip link show "$WG_INTERFACE" >/dev/null 2>&1; then
+    echo "stale_cleanup: LEFTOVER - WireGuard interface $WG_INTERFACE exists in $NS_VPS (outlives vpsd by design; not tied to any pid)"
+    echo "  to remove it yourself: ip -n $NS_VPS link del $WG_INTERFACE"
+    found=1
+  fi
+  if vps nft list table inet wgft >/dev/null 2>&1; then
+    echo "stale_cleanup: LEFTOVER - nftables table inet wgft exists in $NS_VPS (outlives vpsd by design; not tied to any pid)"
+    echo "  to remove it yourself: ip netns exec $NS_VPS nft delete table inet wgft"
+    found=1
+  fi
+  local spec ns proto port
+  for spec in \
+    "$NS_VPS tcp ${ADMIN##*:} the admin API" \
+    "$NS_VPS tcp ${AGENT_API##*:} the agent API" \
+    "$NS_VPS udp $WG_PORT the WireGuard port" \
+    "$NS_LAN tcp $T_TCP a target port" "$NS_LAN tcp $T_ACL a target port" \
+    "$NS_LAN tcp $T_RATES a target port" "$NS_LAN tcp $T_DISABLED a target port" \
+    "$NS_LAN tcp $T_RELAY a target port" \
+    "$NS_LAN udp $T_UDP a target port" "$NS_LAN udp $T_RANGE_LO a target port" \
+    "$NS_LAN udp $((T_RANGE_LO + 1)) a target port" "$NS_LAN udp $((T_RANGE_LO + 2)) a target port"
+  do
+    set -- $spec; ns=$1 proto=$2 port=$3
+    if port_listening "$ns" "$proto" "$port"; then
+      echo "stale_cleanup: LEFTOVER - something is already listening on $ns:$proto/$port ($4 $5 $6), not started by this run"
+      echo "  to inspect and stop it yourself: ip netns exec $ns ss -${proto:0:1}lnp | grep ':$port ' ; then stop that process, or reset the lab VM (lab/lab reset)"
+      found=1
+    fi
+  done
+  [ "$found" = 0 ]
+}
+# port_listening <ns> <tcp|udp> <port>: true if something is bound to <port> inside <ns>, checked
+# with ss run inside that one namespace only (never a VM-wide process lookup).
+port_listening() {
+  local ns=$1 proto=$2 port=$3 flag=tln
+  [ "$proto" = udp ] && flag=uln
+  ip netns exec "$ns" ss "-$flag" "( sport = :$port )" 2>/dev/null | tail -n +2 | grep -q .
 }
 
 ensure_wgftlab() { id wgftlab >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin wgftlab; }
@@ -329,9 +426,11 @@ start_server() {
     ensure_wgftlab
     chown wgftlab "$data"
     vps runuser -u wgftlab -- "$bin" server run --mode "$mode" --data-dir "$data" --wg-endpoint "$WG_ENDPOINT" --admin "$ADMIN" \
+      --wg-interface "$WG_INTERFACE" --wg-port "$WG_PORT" --agent-api "$AGENT_API" \
       > "$log" 2>&1 < /dev/null &
   else
     vps "$bin" server run --mode "$mode" --data-dir "$data" --wg-endpoint "$WG_ENDPOINT" --admin "$ADMIN" \
+      --wg-interface "$WG_INTERFACE" --wg-port "$WG_PORT" --agent-api "$AGENT_API" \
       > "$log" 2>&1 < /dev/null &
   fi
   SERVER_PID=$!
