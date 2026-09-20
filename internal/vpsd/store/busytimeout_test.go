@@ -129,6 +129,17 @@ func TestIsSQLiteBusyCodeMatchesExtendedForms(t *testing.T) {
 // Open is still blocked, removes that dependency on a background goroutine's wall-clock wake-up
 // entirely: this test now holds the lock for as long as it takes to make and check one non-blocking
 // observation, not for any fixed duration.
+//
+// The blocker connection's own COMMIT (its RESERVED-to-EXCLUSIVE promotion) needs busy_timeout
+// set on it too, for a reason unrelated to Open's retry window: Open's retry loop opens a fresh
+// connection roughly every 20ms and reads PRAGMA user_version off it (a brief SHARED lock) before
+// finding the file still busy. Under scheduler contention that SHARED hold can stretch long
+// enough to collide with this goroutine's own COMMIT; a connection without busy_timeout fails
+// such a collision immediately (SQLite's default retry is none), which surfaced as this test
+// itself failing with "database is locked (SQLITE_BUSY)" at the COMMIT below, not as Open failing.
+// Reproduced directly: 4 of 280 runs, under 4 concurrent `go test -race` loads on unrelated
+// packages, failed this way, always in well under a second, confirming it is this collision and
+// not Open's 5s window (production's Open is unaffected; this is the test's other connection).
 func TestOpenWaitsOutAHeldLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wgft.sqlite")
 	// Open のロック待ちを試すには、Open 自身が最初に開く「まっさらな」ファイルが要る。ensureCreated と
@@ -151,6 +162,19 @@ func TestOpenWaitsOutAHeldLock(t *testing.T) {
 		t.Fatalf("blocker conn: %v", err)
 	}
 	defer conn.Close()
+	// この接続にも busy_timeout を効かせておく。理由は Open の retry を試すためではなく、この
+	// 接続自身が後で出す COMMIT (RESERVED から EXCLUSIVE への昇格) を守るため。Open は 20ms
+	// おきに新しい接続を開いて PRAGMA user_version を読み(一瞬の SHARED ロック)、それに
+	// 失敗して初めて次の接続を試みる。ホストの CPU が詰まっているとき、そのどれかの SHARED
+	// ロックの解放がスケジューラの都合で伸び、ちょうどこの COMMIT の昇格とぶつかることがある。
+	// busy_timeout を持たない接続の COMMIT は、SQLite の既定 (リトライ 0) でこの一瞬の衝突にも
+	// 即座に失敗するため、以前はこの COMMIT 自体が "database is locked (SQLITE_BUSY)" で
+	// 失敗することがあった (4 並列の CPU 負荷の下で 280 回中 4 回、再現して確認: エラーも
+	// 発生までの時間もここで固定した想定と一致し、Open 自身の 5 秒の再試行窓には無関係だった)。
+	// ここで busy_timeout を設定すれば、この一瞬の衝突は COMMIT 自身のリトライで吸収される。
+	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
+		t.Fatalf("set busy_timeout on the blocker connection: %v", err)
+	}
 	// BEGIN IMMEDIATE がロックを掴む地点。journal_mode を WAL に変えるにはこのファイルへの排他アクセスが
 	// 要るので、Open 側の最初の接続確立はこのロックとぶつかる。
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
