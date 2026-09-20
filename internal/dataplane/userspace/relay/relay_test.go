@@ -126,24 +126,32 @@ func bigSendBuffer(c *net.UDPConn) { c.SetWriteBuffer(udpBufMax) }
 
 func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} }
 
-// ルールごとの上限は、明示しなければ Limits から導く(resource.Limits.UDPPerRuleCap、仕様 7 節)。
+// 予算とルールごとの上限は、Pool を渡さなければ Limits から導く(resource.Limits.UDPPerRuleCap、
+// 仕様 7 節)。
 func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
 	m := New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: t.Logf})
-	if m.opts.UDPSessionsMax != 10000 {
-		t.Errorf("UDPSessionsMax = %d, want 10000 (half of UDPTotal)", m.opts.UDPSessionsMax)
+	if got := m.opts.UDPPool.RuleCap(); got != 10000 {
+		t.Errorf("UDP rule cap = %d, want 10000 (half of UDPTotal)", got)
 	}
-	if m.opts.TCPConnsMax != 2000 {
-		t.Errorf("TCPConnsMax = %d, want 2000 (half of TCPTotal)", m.opts.TCPConnsMax)
+	if got := m.opts.UDPPool.Total(); got != 20000 {
+		t.Errorf("UDP budget = %d, want 20000", got)
+	}
+	if got := m.opts.TCPPool.RuleCap(); got != 2000 {
+		t.Errorf("TCP rule cap = %d, want 2000 (half of TCPTotal)", got)
+	}
+	if got := m.opts.TCPPool.Total(); got != 4000 {
+		t.Errorf("TCP budget = %d, want 4000", got)
 	}
 	// 何も渡さなければ既定の全体上限(8192, 2048)から導く、導入前の固定値と同じ値になる
 	m = New(&loopback{}, Options{Logf: t.Logf})
-	if m.opts.UDPSessionsMax != 4096 || m.opts.TCPConnsMax != 1024 {
-		t.Errorf("default caps: udp=%d tcp=%d, want 4096 1024", m.opts.UDPSessionsMax, m.opts.TCPConnsMax)
+	if udp, tcp := m.opts.UDPPool.RuleCap(), m.opts.TCPPool.RuleCap(); udp != 4096 || tcp != 1024 {
+		t.Errorf("default rule caps: udp=%d tcp=%d, want 4096 1024", udp, tcp)
 	}
-	// 呼び出し側が明示すれば、それが勝つ(導出値は使わない)
-	m = New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 40}, UDPSessionsMax: 5, Logf: t.Logf})
-	if m.opts.UDPSessionsMax != 5 {
-		t.Errorf("explicit UDPSessionsMax = %d, want 5 (must not be overridden by the derived default)", m.opts.UDPSessionsMax)
+	// 呼び出し側が Pool を渡せば、それを使う(導出値は使わない)
+	pool := resource.NewPool(40, 5)
+	m = New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 40}, UDPPool: pool, Logf: t.Logf})
+	if m.opts.UDPPool != pool {
+		t.Error("an explicit UDPPool must not be replaced by the derived default")
 	}
 }
 
@@ -272,7 +280,7 @@ func TestUDPRelaySessionsAndIdle(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPSessionsMax: 2, Logf: t.Logf})
+	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: resource.NewPool(0, 2), Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 
@@ -542,10 +550,10 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	cnt := &resource.Counter{Total: 10}
+	pool := resource.NewPool(10, 0)
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{UDP: 2}})
-	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPCap: cnt, Logf: t.Logf,
+	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: pool, Logf: t.Logf,
 		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, size)
 			return tk.Release, d.Allow
@@ -575,8 +583,8 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 		t.Errorf("drops = %+v, want one src_flow drop", d)
 	}
 	time.Sleep(500 * time.Millisecond)
-	if cnt.Len() != 0 {
-		t.Errorf("counter after idle = %d, want 0", cnt.Len())
+	if pool.InUse() != 0 {
+		t.Errorf("flows in use after idle = %d, want 0", pool.InUse())
 	}
 	if !ok() {
 		t.Error("a new session must pass after the old ones expired")
@@ -667,8 +675,8 @@ func TestTCPRelayConnCap(t *testing.T) {
 	}()
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
-	cnt := &resource.Counter{Total: 10}
-	m := New(lb, Options{TCPConnsMax: 2, TCPCap: cnt, Logf: t.Logf})
+	pool := resource.NewPool(10, 2)
+	m := New(lb, Options{TCPPool: pool, Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, port}: {srv.Addr().String(), "r1"}})
 	echo := func(c net.Conn) error {
@@ -717,11 +725,11 @@ func TestTCPRelayConnCap(t *testing.T) {
 	}
 	c2.Close()
 	deadline := time.Now().Add(2 * time.Second)
-	for cnt.Len() != 1 && time.Now().Before(deadline) {
+	for pool.InUse() != 1 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if cnt.Len() != 1 {
-		t.Fatalf("counter after close = %d, want 1", cnt.Len())
+	if pool.InUse() != 1 {
+		t.Fatalf("flows in use after close = %d, want 1", pool.InUse())
 	}
 	if err := echo(dial()); err != nil {
 		t.Errorf("connection after a slot was freed: %v", err)

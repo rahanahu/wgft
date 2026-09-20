@@ -148,6 +148,7 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 		l := m.retiring[k]
 		delete(m.retiring, k)
 		l.accepting.Store(true)
+		l.budget.Accept()
 		m.listeners[k] = l
 		m.opts.Logf("listener %s accepting again", k)
 	}
@@ -162,16 +163,17 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 			}
 		case d.Target != l.target:
 			l.target, l.ruleID = d.Target, d.RuleID
+			l.budget.SetRule(d.RuleID)
 			n := l.sweep(func(netip.Addr) bool { return false })
 			m.opts.Logf("listener %s -> %s retargeted; rule %s; closed %d sessions", k, d.Target, d.RuleID, n)
 		case d.RuleID != l.ruleID:
 			l.ruleID = d.RuleID
+			l.budget.SetRule(d.RuleID)
 		}
 	}
 	for k, sock := range s.opened {
 		d := s.desired[k]
-		zero := func() int { return 0 }
-		l := &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: zero, flows: zero}
+		l := m.newListener(k, d)
 		if sock.pc != nil {
 			m.serveUDP(l, sock.pc)
 		} else {
@@ -197,6 +199,7 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 		keep, r := retiring[l.ruleID]
 		if !r {
 			l.closeF()
+			l.budget.Close()
 			delete(m.retiring, k)
 			m.opts.Logf("listener %s closed (rule %s is no longer retiring)", k, l.ruleID)
 			continue
@@ -204,6 +207,7 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 		l.sweep(func(src netip.Addr) bool { return keep(src) })
 		if l.sessions() == 0 {
 			l.closeF()
+			l.budget.Close()
 			delete(m.retiring, k)
 			m.opts.Logf("listener %s closed (no established flows left)", k)
 		}
@@ -217,10 +221,15 @@ func (m *Manager) retireLocked(k Key, l *listener, keep func(src netip.Addr) boo
 	delete(m.listeners, k)
 	if old, ok := m.retiring[k]; ok {
 		old.closeF()
+		old.budget.Close()
 	}
 	if l.stopAccept != nil {
 		l.stopAccept()
 	}
+	// Retiring の待ち受けのフローは、プロセス全体の数には残り、ルールごとの数からは外れる
+	// (設計文書 7a.10 節の A)。そのルールの待ち受けはすべて Retiring になるので、ルールごとの
+	// 上限の判定はこの待ち受けを見ない
+	l.budget.StopAccepting()
 	n := 0
 	if l.sweep != nil {
 		n = l.sweep(keep)

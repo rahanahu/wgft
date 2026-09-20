@@ -21,21 +21,21 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// ルールごとの上限は、明示しなければ Cap.Total から導く(resource.Limits.TCPPerRuleCap、仕様 7 節)。
-func TestConnsMaxDefaultsFromCapTotal(t *testing.T) {
-	m := New(Options{Cap: &resource.Counter{Total: 4000}})
-	if m.opts.ConnsMax != 2000 {
-		t.Errorf("ConnsMax = %d, want 2000 (half of Cap.Total)", m.opts.ConnsMax)
+// Pool を渡さなければ、既定の予算(resource.TCPTotal、2048)とそこから導くルールごとの上限
+// (resource.Limits.TCPPerRuleCap、仕様 7 節)で作る。上限は導入前の固定値(1024)と一致する。
+func TestPoolDefaultsFromTheDefaultBudget(t *testing.T) {
+	m := New(Options{})
+	if got := m.opts.Pool.Total(); got != 2048 {
+		t.Errorf("default budget = %d, want 2048", got)
 	}
-	// Cap を渡さなければ既定の resource.TCPTotal(2048)から導き、導入前の固定値(1024)と一致する
-	m = New(Options{})
-	if m.opts.ConnsMax != 1024 {
-		t.Errorf("default ConnsMax = %d, want 1024", m.opts.ConnsMax)
+	if got := m.opts.Pool.RuleCap(); got != 1024 {
+		t.Errorf("default rule cap = %d, want 1024", got)
 	}
-	// 呼び出し側が明示すれば、それが勝つ
-	m = New(Options{Cap: &resource.Counter{Total: 40}, ConnsMax: 3})
-	if m.opts.ConnsMax != 3 {
-		t.Errorf("explicit ConnsMax = %d, want 3 (must not be overridden by the derived default)", m.opts.ConnsMax)
+	// 呼び出し側が渡した Pool は、そのまま使う
+	pool := resource.NewPool(40, 3)
+	m = New(Options{Pool: pool})
+	if m.opts.Pool != pool {
+		t.Error("an explicit Pool must not be replaced by the derived default")
 	}
 }
 
@@ -239,14 +239,14 @@ func TestConnCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ユーザー空間モードと同じく、Admission Policy は Go の評価器が判定する
-	cnt := &resource.Counter{Total: 10}
+	pool := resource.NewPool(10, 0)
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r", Proto: proto.TCP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{TCP: 1}})
 	m := New(Options{
 		Listen: func(uint16) (net.Listener, error) { return raw, nil },
 		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
 		Logf:   testLogf(t),
-		Cap:    cnt,
+		Pool:   pool,
 		Admit: func(ruleID string, src netip.Addr) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, 0)
 			return tk.Release, d.Allow
@@ -289,11 +289,11 @@ func TestConnCap(t *testing.T) {
 	}
 	c1.Close()
 	deadline := time.Now().Add(2 * time.Second)
-	for cnt.Len() != 0 && time.Now().Before(deadline) {
+	for pool.InUse() != 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if cnt.Len() != 0 {
-		t.Fatalf("counter after close = %d, want 0", cnt.Len())
+	if pool.InUse() != 0 {
+		t.Fatalf("flows in use after close = %d, want 0", pool.InUse())
 	}
 	if d := eng.Drops(); len(d) != 1 || d[0].RuleID != "r" || d[0].Kind != "src_flow" || d[0].Packets != 1 {
 		t.Errorf("drops = %+v, want one src_flow drop of rule r", d)
@@ -325,7 +325,7 @@ func admissionManager(t *testing.T, eng *goengine.Engine) (dial func() net.Conn,
 		Listen: func(uint16) (net.Listener, error) { return raw, nil },
 		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
 		Logf:   testLogf(t),
-		Cap:    &resource.Counter{Total: 10},
+		Pool:   resource.NewPool(10, 0),
 		Admit: func(ruleID string, src netip.Addr) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, 0)
 			return tk.Release, d.Allow

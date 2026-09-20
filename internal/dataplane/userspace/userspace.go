@@ -42,14 +42,15 @@ type Options struct {
 
 // Backend is the userspace dataplane. It implements dataplane.Backend.
 type Backend struct {
-	logf   func(format string, args ...any)
-	policy *goengine.Engine
-	relay  *relay.Manager
-	udpCap *resource.Counter
-	// tcpCap is shared by the relay and the server's Relay frontend (proxyrelay): in userspace mode
-	// both count against the same process-wide TCP budget (design.md 7 節). The per-source count is
-	// the evaluator's, which the Relay frontend reaches through AdmitRelayFlow.
-	tcpCap *resource.Counter
+	logf    func(format string, args ...any)
+	policy  *goengine.Engine
+	relay   *relay.Manager
+	udpPool *resource.Pool
+	// tcpPool is shared by the relay and the server's Relay frontend (proxyrelay): in userspace mode
+	// both count against the same process-wide TCP budget and the same per-rule cap (design.md 7,
+	// 7a.10 節). The per-source count is the evaluator's, which the Relay frontend reaches through
+	// AdmitRelayFlow.
+	tcpPool *resource.Pool
 
 	mu  sync.Mutex
 	tun *utun.Tunnel
@@ -86,10 +87,10 @@ func New(opts Options) *Backend {
 		logf = log.Printf
 	}
 	b := &Backend{
-		logf:   logf,
-		policy: goengine.New(nil),
-		udpCap: &resource.Counter{Total: lim.UDPTotal},
-		tcpCap: &resource.Counter{Total: lim.TCPTotal},
+		logf:    logf,
+		policy:  goengine.New(nil),
+		udpPool: resource.NewPool(lim.UDPTotal, lim.UDPPerRuleCap()),
+		tcpPool: resource.NewPool(lim.TCPTotal, lim.TCPPerRuleCap()),
 	}
 	b.relay = relay.New(hostNetwork{}, relay.Options{
 		UDPIdleTimeout: 120 * time.Second, // the default of conntrack's udp_timeout_stream
@@ -100,16 +101,17 @@ func New(opts Options) *Backend {
 			return t.Release, d.Allow
 		},
 		AdmitPacket: func(ruleID string, size int) bool { return b.policy.AdmitPacket(ruleID, size).Allow },
-		Limits:      lim,
-		UDPCap:      b.udpCap,
-		TCPCap:      b.tcpCap,
+		// 予算は Backend が作った Pool そのもので、Limits は渡さない(Pool を渡すと使われないため)
+		UDPPool: b.udpPool,
+		TCPPool: b.tcpPool,
 	})
 	return b
 }
 
-// TCPCounter is the TCP flow counter the relay uses. The server hands it to its Relay frontend so
-// that both count against one process-wide TCP budget in userspace mode (design.md 7 節).
-func (b *Backend) TCPCounter() *resource.Counter { return b.tcpCap }
+// TCPPool is the TCP flow budget the relay uses. The server hands it to its Relay frontend so that
+// both count against one process-wide TCP budget, and against one per-rule cap, in userspace mode
+// (design.md 7, 7a.10 節).
+func (b *Backend) TCPPool() *resource.Pool { return b.tcpPool }
 
 // AdmitRelayFlow judges a new connection of the server's Relay frontend (proxyrelay) in userspace
 // mode by every Admission Policy step, exactly as a Transparent TCP connection is judged: Forwarding

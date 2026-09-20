@@ -74,7 +74,6 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 	)
 	count := func() int { mu.Lock(); defer mu.Unlock(); return len(sessions) }
 	l.sessions = count
-	l.flows = count
 	closeSession := func(k string, s *udpSession) {
 		mu.Lock()
 		if sessions[k] == s {
@@ -177,11 +176,13 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					}
 					release = rel
 				}
-				// 同時フロー数の上限(仕様 7 節、Resource Guard)。超えた新規パケットは捨てる(既存セッションは追い出さない)
-				if m.ruleFlows(ruleID) >= m.opts.UDPSessionsMax || !m.opts.UDPCap.Acquire() {
+				// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算とルールごとの
+				// 上限を Pool が 1 つの排他の中で判定する。超えた新規パケットは捨てる(既存セッションは
+				// 追い出さない)
+				if ref, ok := l.budget.Acquire(); !ok {
 					release()
 					if capLog.Allow() {
-						m.opts.Logf("udp %s: session limit reached; dropping new flows", l.key)
+						m.opts.Logf("%s: %s; dropping new flows", l.key, ref)
 					}
 					continue
 				}
@@ -189,7 +190,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				target := m.targetOf(l)
 				c, err := m.opts.Dial("udp", target)
 				if err != nil {
-					m.opts.UDPCap.Release()
+					l.budget.Release()
 					release()
 					if dialLog.Allow() {
 						m.opts.Logf("udp %s: dial %s: %v", l.key, target, err)
@@ -204,7 +205,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				mu.Unlock()
 				go func(k string, s *udpSession, from net.Addr) {
 					defer release()
-					defer m.opts.UDPCap.Release()
+					defer l.budget.Release()
 					defer closeSession(k, s)
 					// 応答は、届いてからプールのバッファを借りて読む(仕様 7 節)。待つ間はバッファを持たない。
 					// 待てない接続(unix でも windows でもないカーネルのソケット)は、最大長のバッファを持ち続ける

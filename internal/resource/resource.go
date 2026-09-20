@@ -1,15 +1,11 @@
 // Package resource は Resource Guard(設計文書 7a.5、7a.10 節)。wgft 自身が保持するフローの
 // プロセス全体の予算と、その予算から導くルールごとの隔離とメモリのソフト上限を持つ。
 // エージェントの中継(relay)と vpsd のプロキシモードの中継(proxyrelay)が共有する。
-// ルールごとの上限は、所属ルールが変わりうるので呼び出し側がリスナーの現在値で数える。
+// プロセス全体の数とルールごとの数は、Pool が 1 つの排他の中で数える。
 //
 // 利用者が設定する通信方針(送信元ごとの同時フロー数の上限)は Admission Policy に属し、
 // internal/policy の AdmissionLimits が持つ(設計文書 7a.10 節の型の分割)。
 package resource
-
-import (
-	"sync"
-)
 
 // 仕様 7 節の値。プロセス全体の上限(WGFT_MAX_UDP_FLOWS、WGFT_MAX_TCP_FLOWS)が設定項目で、
 // ここはその既定値。ルールごとの上限は設定項目ではなく、プロセス全体の上限から導く
@@ -59,49 +55,4 @@ func perRuleCap(total, floor int) int { return max(total/2, min(floor, total), 1
 func (l Limits) MemoryLimit() int64 {
 	l = l.WithDefaults()
 	return 32<<20 + int64(l.UDPTotal)*(12<<10) + int64(l.TCPTotal)*(44<<10)
-}
-
-// Counter はプロセス全体のフロー数を数える(Resource Guard の予算。設計文書 7a.5 節)。ゼロ値は上限なし。
-// 接続元 IP ごとの同時フロー数は Admission Policy に属し、userspace モードでは Go の評価器
-// (internal/policy/goengine)が数える。Counter は数えない(設計文書 7a.9 節の移行の手順 3)。
-type Counter struct {
-	Total int // プロセス全体の上限。0 は上限なし
-
-	mu    sync.Mutex
-	total int
-}
-
-// Acquire はフロー 1 つ分の枠を取る。上限に達していれば偽を返し、何も数えない。
-// 真を返したら、フローの終了時に Release を 1 回呼ぶ。nil の Counter は常に真を返す。
-func (c *Counter) Acquire() bool {
-	if c == nil {
-		return true
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.Total > 0 && c.total >= c.Total {
-		return false
-	}
-	c.total++
-	return true
-}
-
-// Release は Acquire で取った枠を返す。
-func (c *Counter) Release() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.total--
-}
-
-// Len は現在のフロー数。
-func (c *Counter) Len() int {
-	if c == nil {
-		return 0
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.total
 }

@@ -4,41 +4,6 @@ import (
 	"testing"
 )
 
-func TestCounterTotalAndNil(t *testing.T) {
-	cnt := &Counter{Total: 2}
-	for i := 1; i <= 2; i++ {
-		if !cnt.Acquire() {
-			t.Fatalf("flow %d must pass", i)
-		}
-	}
-	if cnt.Acquire() {
-		t.Error("flow over the total must be refused")
-	}
-	if cnt.Len() != 2 {
-		t.Errorf("Len = %d, want 2 (refused flows are not counted)", cnt.Len())
-	}
-	cnt.Release()
-	if !cnt.Acquire() {
-		t.Error("a released slot must be reusable")
-	}
-	cnt.Release()
-	cnt.Release()
-	if cnt.Len() != 0 {
-		t.Errorf("after release: Len = %d", cnt.Len())
-	}
-	unlimited := &Counter{}
-	for i := 0; i < 500; i++ {
-		if !unlimited.Acquire() {
-			t.Fatalf("flow %d must pass with no total", i)
-		}
-	}
-	var none *Counter
-	if !none.Acquire() {
-		t.Error("nil counter must admit")
-	}
-	none.Release()
-}
-
 // 既定の上限と、256 MiB の VPS 向けの目安でのソフト上限(仕様 7 節の値)。
 func TestMemoryLimit(t *testing.T) {
 	if got := (Limits{}).MemoryLimit() >> 20; got != 216 {
