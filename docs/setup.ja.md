@@ -41,7 +41,7 @@ sha256sum -c wgft-linux-amd64.sha256
 
 arm64 環境では `amd64` を `arm64` に置き換えてください。Windows と macOS での手順は、[Windows で agent を実行する](#windows-で-agent-を実行する)と[macOS で agent を実行する](#macos-で-agent-を実行する)で説明します。
 
-Go 1.26 以上があれば次でもインストールできます。
+Go 1.27 以上があれば次でもインストールできます。
 
 ```sh
 go install github.com/rahanahu/wgft/cmd/wgft@latest

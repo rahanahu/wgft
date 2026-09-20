@@ -18,7 +18,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ln := &proxyproto.Listener{Listener: raw, Policy: func(net.Addr) (proxyproto.Policy, error) { return proxyproto.USE, nil }}
+	ln := &proxyproto.Listener{Listener: raw, ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) { return proxyproto.USE, nil }}
 	log.Printf("ppecho listening on %s", *addr)
 	for {
 		c, err := ln.Accept()
