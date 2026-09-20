@@ -469,17 +469,13 @@ retry 30 ping -c1 -W1 "$server_ip" || { cat "$tmp/netstatic.server.log" >&2; ech
 retry 30 ping -c1 -W1 "$agent_ip" || { cat "$tmp/netstatic.agent.log" >&2; echo "FAIL  $agent_vm: static IP $agent_ip never came up"; exit 1; }
 echo "PASS  static IPv4 on $bridge_cidr: server=$server_ip agent=$agent_ip"
 
-# Open firewalld's ports if the image ships it active; never installed, only configured with the
-# tool already on the image, exactly as docs/setup.md's firewalld example shows. Checked live
-# (another agent's report, folded in here): images:fedora/44 does NOT ship firewalld active, or
-# even installed (`rpm -q firewalld` finds nothing) - that is true of a Fedora Server/Workstation
-# install, not of this minimal cloud image, so the header comment's old claim that "Fedora does by
-# default" was wrong for this image and this function's firewalld branch has most likely never
-# fired in a B9 Fedora run. The same image also ships no SELinux policy (getenforce: Disabled; no
-# selinux-policy package, though /sys/fs/selinux is mounted), so an SELinux-enforcing image is
-# equally unconfirmed. Both the firewalld-active and the SELinux-enforcing cases are UNCONFIRMED by
-# any B9 run to date; fixing the image or adding either package is out of scope here (this test
-# does not apt-get anything into a VM - see the "No package is installed inside a VM" note above).
+# Open firewalld's ports if the image has it active; never installed, only configured with the
+# tool already on the image, exactly as docs/setup.md's firewalld example shows. A Fedora Server
+# or Workstation install has firewalld active by default, but the Incus image images:fedora/44
+# that this script launches ships neither firewalld (`rpm -q firewalld` finds nothing) nor an
+# SELinux policy (getenforce: Disabled; no selinux-policy package, though /sys/fs/selinux is
+# mounted). On that image this function does nothing, so a host with firewalld active and a host
+# with SELinux enforcing are both UNVERIFIED by this script.
 open_firewall() { # open_firewall <vm> <port-flags...>
   if incus exec "$1" -- systemctl is-active -q firewalld 2>/dev/null; then
     shift
