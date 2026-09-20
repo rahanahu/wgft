@@ -177,6 +177,9 @@ func cmdRun(args []string) error {
 	if len(scenarios) == 0 {
 		return fmt.Errorf("no scenario given (e.g. \"e2e.sh kernel\", or \"all\" for the manifest)")
 	}
+	if err := validateRunCounts(*parallel, *repeat); err != nil {
+		return err
+	}
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must run as root")
 	}
@@ -210,6 +213,11 @@ func cmdRun(args []string) error {
 				n++
 			}
 		}
+	}
+	// 流すジョブが 1 つも無い run を成功にしない。マージの前の関門に使う道具なので、
+	// 「流したつもりで exit 0」を作らない
+	if len(plan) == 0 {
+		return fmt.Errorf("nothing to run: the plan is empty (check the manifest's default column, or pass -with-optional)")
 	}
 	outDir := *out
 	if outDir == "" {
@@ -395,6 +403,19 @@ func cmdRun(args []string) error {
 	// ラボの道具は非 0 を等しく失敗として扱い、別の番号は「失敗ではない」と読まれかねない
 	if sum.Fail > 0 || sum.Interrupted || len(sum.LeftoverFailures) > 0 {
 		os.Exit(1)
+	}
+	return nil
+}
+
+// validateRunCounts は -parallel と -repeat の範囲を確かめる。-parallel 0 は worker を 1 つも
+// 作らないので parallel のジョブが流れず、-repeat 0 は plan を空にするので、どちらも何も確かめずに
+// exit 0 になる。入口で弾く。
+func validateRunCounts(parallel, repeat int) error {
+	if parallel < 1 {
+		return fmt.Errorf("-parallel must be at least 1, got %d", parallel)
+	}
+	if repeat < 1 {
+		return fmt.Errorf("-repeat must be at least 1, got %d", repeat)
 	}
 	return nil
 }
