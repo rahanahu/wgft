@@ -242,13 +242,14 @@ read_pid_record() {
 # stale_cleanup: on entry, NEVER signals or waits on anything (the owner's call: even a
 # fully-verified leftover only gets reported, never killed, by this script). For each pid file
 # under $WORK left by a previous run, report_stale below prints exactly one line describing what
-# it found and removes the record; stale_cleanup then always rebuilds $WORK empty. If, and only
+# it found; when no record is a live leftover, stale_cleanup then rebuilds $WORK empty, which
+# removes the records. If, and only
 # if, at least one record turned out to be a genuine, still-running leftover of an earlier run of
 # this exact script (boot id and process start time both still match), this refuses to continue:
-# it prints what to run to stop it and exits 3. The reason it stops instead of just reporting and
-# carrying on is what actually collides if it does not. $WORK itself never collides (it is always
-# rebuilt empty here, whether or not a leftover is found); a leftover's own data directory under
-# the OLD $WORK is orphaned, not corrupted, by that rebuild. What does collide: the vps/home/lan
+# it prints what to run to stop it and exits 3, leaving $WORK and the records in place so that
+# every rerun refuses again until the leftover is gone. The reason it stops instead of just reporting and
+# carrying on is what actually collides if it does not. $WORK is not what collides: a run that
+# does start rebuilds it empty first. What does collide: the vps/home/lan
 # network namespaces are shared for the whole VM (not sandboxed; see the header comment), and
 # every port and address this script uses is a fixed constant in that shared namespace (the
 # admin API at $ADMIN, the agent API, every P_* listen port) - a leftover server or agent still
@@ -265,12 +266,15 @@ stale_cleanup() {
       report_stale "$f" || found=1
     done
   fi
-  rm -rf "$WORK"
-  mkdir -p "$WORK" "$CACHE"
+  # A leftover that is still running keeps its record, and $WORK is left as it is: the refusal has
+  # to repeat on every rerun until the leftover is gone. Removing the record here would make the
+  # next rerun see nothing, start, and collide with the leftover in exactly the way described above.
   if [ "$found" = 1 ]; then
     echo "stale_cleanup: refusing to start: at least one leftover reported above is still running and would collide with this run's own server/agent in the shared vps/home/lan namespaces (see this function's own comment for why). Stop it with the command printed above, then rerun." >&2
     exit 3
   fi
+  rm -rf "$WORK"
+  mkdir -p "$WORK" "$CACHE"
 }
 # report_stale <pid-file>: the one place a pid read back from a file (rather than an in-memory
 # variable of this running script) is ever even looked at; it only ever reports, never signals or
