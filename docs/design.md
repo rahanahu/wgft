@@ -1085,6 +1085,95 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 - 既定より小さい予算の隔離:`WGFT_MAX_TCP_FLOWS=1024` の agent で、ルールが 2 本のとき 1 本が 512 本で止まり、他方が新しい接続を通せること。`WGFT_MAX_TCP_FLOWS=1500` でも、1 本が 750 本で止まること(今は 1024 本)
 - 送信元ごとの上限との組み合わせ:`lab/connlimit.sh` は Admission Policy の試験なので結果は変わらない。agent のルールごとの上限を「`WGFT_MAX_TCP_FLOWS` の半分」と書いた説明を改める
 
+### 7a.11 v1.0 の互換性契約(サーフェスごとの一覧)
+
+7a.6 節は外部契約として維持する対象を一覧にした。v1.0 のリリース後は、そこに挙げた境界の外側にあるすべての変更が互換性の判断の対象になる。この節は、公開しているサーフェスごとに、v1.0 が保つ約束、保たない約束、そのうち機械可読な安定した契約はどこまでか、そして自由に変えてよい人間向けの表示はどこかを分けて示す。目的はすべてを固定することではなく、どこを固定しどこを固定しないかを名指しすることにある(2026-09-21、所有者の決定)。
+
+サーフェスを横断する規則は次の 4 つである。
+
+- 加算(新しいフィールド、新しいルート、新しい列、新しい列挙値)は互換である。既存の名前の変更・削除・意味の変更は互換でない
+- 人間が読むための表示(CLI の表形式の出力、ログの行、Web UI の HTML と文言)は、それ自体では契約でない。自動化が読んでよいのは、各節が明示した機械可読な形だけである
+- 「互換」とは、rolling upgrade(5.2・7a.6 節)の間、新旧のプロセスが同時に存在する期間をどちらの順で越えても、古い側が新しい側の追加を読み飛ばして動作を続けられることを指す。両側が永久にすべての版を読めることではない
+- 終了コードの意味の契約は、9 節・11a 節で別途定める(この文書と並行して改訂中である)。この節はそこを参照するだけで、値そのものはここでは扱わない
+
+以下、サーフェスごとに保つものと保たないものを示す。
+
+**管理用 API(`/api/v1/...`)。** 契約の対象は `/api/v1/` 配下の JSON ルートだけであり、`/`・`/ui/...`・`/static/...`(Web UI)は含めない(後述)。
+
+| メソッドとパス | 用途 |
+|---|---|
+| `GET /api/v1/rules` | ルール一覧と適用状態 |
+| `POST /api/v1/rules/batch` | ルールの追加・変更・削除(5.4 節) |
+| `GET /api/v1/agents` | エージェント一覧 |
+| `POST /api/v1/agents/join-string` | 接続文字列の発行 |
+| `DELETE /api/v1/agents/{name}` | 恒久トークンの無効化 |
+| `GET /api/v1/warnings` | 窃取検知の警告一覧 |
+| `POST /api/v1/agents/{name}/dismiss-warning` | 警告を消す |
+| `GET /api/v1/agents/{name}/state` | 1 エージェントの状態 |
+| `POST /api/v1/rules/{id}/check` | TCP 疎通確認 |
+| `GET /api/v1/nft` | 適用中の `table inet wgft` を表示 |
+
+保つものは、各ルートの意味と、リクエスト・レスポンスの型にある既存フィールドの名前と意味、既存の HTTP ステータスコードの使い分けである。
+
+| コード | 契機 |
+|---|---|
+| 200 | 通常の成功 |
+| 204 | `DELETE /api/v1/agents/{name}`、`POST .../dismiss-warning` の成功 |
+| 400 | リクエスト本文の構文誤り・必須項目の欠落 |
+| 403 | Host・Origin の検査による拒否(11 節) |
+| 404 | `GET /api/v1/agents/{name}/state` での不明なエージェント名 |
+| 409 | `POST /api/v1/rules/batch` が `ErrBatchConflict`(5.4 節)のとき |
+| 422 | バッチ・検証のその他の失敗 |
+| 500 | バックエンドの読み取り・書き込みの失敗 |
+
+管理用 API には独自の認証が無いため 401 は使わない。エージェント用 API の登録(`POST /api/v1/agents/register`)と stream は別の契約で、無効なトークンを 401、二重登録を 409、送信元ごとのレート制限を 429、backend 自体の失敗(SQLite の一時的な失敗など)を 500 で区別する。日常的な認証拒否と backend 自体の失敗を同じコードにしないことが契約であり、これを取り違えると無効化されていない agent が誤って復帰経路(5.1 節)に入る。
+
+`BatchResponse` の `desired_generation`・`active_generation`・`rule_states`・`drift`・`apply_error`・`flow_budget`・`resource_refusals` は、それぞれ `ApplyStatusBackend`・`ResourceStatusBackend` を実装する Backend のときだけ加わる加算的なフィールドで、実装しない Backend(`fakeBackend`、`tools/uidemo`)には現れない。「実装すれば増える、しなければ元の応答のまま」という形自体が契約であり、今後の加算もこの形を保つ。`rule ls` の REFUSED 列と `resource_refusals` は Resource Guard によるフロー予算の拒否だけを数え、`WGFT_AGENT_ALLOW_TARGETS`(7・11a 節)によるエージェント側の宛先拒否は含まない。その理由は今のところ `agent ls` の RULES 列と Web UI にだけ現れる。契約としては両者の今の意味を保つだけであり、エージェント側の拒否理由を管理用 API に加算的に載せて一本化するかどうかは、まだ約束していない今後の判断である。
+
+保たないものは、このバージョン(v1)にまだ無いフィールドの追加そのものを制限しないことである。`GET /api/v1/nft` だけは `text/plain` を返し、他の `/api/v1/*` が JSON を返すのと揃っていない。これは一貫性を欠く実装であり、契約として追認したものではない(下記「保つのが難しい約束」)。
+
+機械可読な契約は上表のルートと各レスポンス型の既存フィールドである。人間向け(自由に変更してよいもの)は `ErrorBody` の `message` の具体的な言い回しである。
+
+**Web UI(`/`、`/ui/...`、`/static/...`)。** 保つものは無い。ダッシュボードの URL 構成、`/ui/rules/{id}` のようなパス、フォームのフィールド名、`?lang=` と言語 cookie、HTML の構造は、テンプレートの都合で理由なく変わってよい。`GET /ui/rules/export` だけは JSON を返すが、これは CLI の `rule import` と同じ配列を人が手元で編集して読み込むための書き出しであり、`proto.Rule` の JSON 形(ルールのスキーマ、5.3 節)を経由した契約であって `/ui/` 自体の契約ではない。Web UI を自動化の対象にする場合は `/api/v1/...` を直接呼ぶべきで、`/ui/...` の HTML を解析すべきでない。
+
+**CLI のコマンドとフラグ。** 保つものは、コマンド名とサブコマンドの構成(`server`・`agent`・`rule`・`version` とその下位)、フラグの名前と意味、`--json` を持つコマンド(`rule ls`・`agent ls`)がその出力を持ち続けることである。
+
+保たないものは、表形式の人間向け出力(列の並びと幅、`last:` のような接頭辞、REFUSED や DROPPED の見せ方)と、`--help`・`docs/cli.md` の文面である。
+
+機械可読な契約は `--json` の出力だけである。`rule ls --json` は `admin.BatchResponse` を、`agent ls --json` は `[]admin.AgentInfo` を、CLI 側で別の型に写さずそのまま出力する。つまり CLI の `--json` 契約は上記の管理用 API の契約そのものであり、二重に管理しない。ここから導かれる規則は次のとおりである。
+
+- フィールドは v1 の中で追加されるだけで、名前が変わったり削除されたりしない
+- 消費者は知らないフィールドを無視しなければならない(`encoding/json` の既定の振る舞いに合わせる)
+- 人間向けの表(`rule ls`・`agent ls` の素の出力)は自動化が読んではならない情報であり、どの列が何を意味するかは `--help` の文面と同じ扱いで自由に変わる
+- `--json` の出力のうち表に現れない項目(`rule ls --json` の `rule_states`・`drift`・`desired_generation`・`active_generation`、`agent ls --json` の `public_key`・`registered_from`・`created_at`・`agent_protocol_*`・`warnings` の詳細)も同じ契約の対象であり、情報量が多い分だけ自動化に向く
+
+**設定(`WGFT_*`)。** 11a 節が定める名前と意味を維持する。同じ名前をフラグとファイル(dotenv)の両方から渡せることと、優先順位(フラグ、環境変数、ファイル、既定の順)も契約に含む。`--force`・`--purge`・`--adopt-existing`・`--yes`・`--dry-run` の 5 つは 1 回限りの操作なので、これらに対応する `WGFT_*` を新設しないことも契約に含む(11a 節)。
+
+保たないものは、値の構文検査の追加・強化である。検査を新設・強化して今まで通っていた誤った値を拒むようにすることは、11a 節の「設定起因の失敗は終了コード 3」の原則に沿う限り互換の維持とみなす。値そのものの意味を変えることは互換でない。
+
+**ログ出力。** 契約は無い。秘密(登録トークン、恒久トークン、秘密鍵、`Authorization`、接続文字列全体)をログに出さないことは 10.4 節の約束だが、これは互換性の契約ではなく安全側の性質である。行の書式、語順、`journalctl` で拾える語彙は、いつでも変えてよい。`scripts/check-log-tokens.sh` は CI の内部検査であり、トークンらしき文字列がログに紛れていないかを人が確認した一覧と照合するだけで、ログの形式を外部に約束するものではない。`journalctl -u wgft | grep 'rules: '`(docs/setup.md)のような固定の接頭辞に頼る運用があっても、それは wgft の契約ではなく運用側の前提である。
+
+**agent-server の wire protocol と capability。** 7a.6 節が定めるとおり、`pubkey`(agent → server)と `state`(server → agent)の既存フィールドの意味は変えない。版の交渉の仕組み(`protocol_min`/`protocol_max`/`capabilities`、`server_protocol_version`/`server_capabilities`、legacy v0)そのものが契約であり、これによって将来の版で全体状態の形を変えても、直前の版までの実装と rolling upgrade できる。保つものは、`pubkey`/`state` の JSON フィールド名と型、legacy v0 の判定規則(両方のフィールドが無ければ legacy)、malformed な advertisement と共通部分が無い場合を別の WebSocket close コード(`4003`/`4004`、`proto/stream.go`)で区別することである。保たないものは capability 文字列の語彙(まだ何も定義されていない)と、エージェント用 API のエラー文言である。
+
+現在の値は `proto.SupportedProtocol = {Min: 1, Max: 1}` であり、番号の付いた版は v1 の 1 つしか存在しない。`capabilities`/`server_capabilities` の語彙も `proto.SupportedCapabilities` が空配列で、まだ 1 つも定義されていない。したがって「現在の版と直前の版の 2 つを必ず支える」という 7a.6 節の約束は、今のところ実地で確かめようがない。v2 が実際に生まれ、それに対する v1 との rolling upgrade をラボで確かめるまで、この約束は設計上の意図であって検証済みの事実ではない(下記「保つのが難しい約束」)。
+
+**サーバのデータベースとエージェントの認証情報ファイル。** 保つものは、更新の経路(SQLite の migration が自動で吸収する。`internal/vpsd/store` は `PRAGMA user_version` で管理し、今のバイナリが対応する版より新しい DB を開こうとした場合は原因を示して起動を拒む)と、データの置き場所(`WGFT_DATA_DIR`、11a 節)およびファイル名(`agent.json`、サーバのデータベースファイル)である。
+
+保たないものは、旧版への戻し(7a.6 節で既に契約から除外済み)と、DB のテーブル定義や `agent.json` の JSON の内部の形である。エージェントの認証情報ファイルは知らないフィールドを保存し直さない。読み書きのたびに `Credentials` 構造体に無いキーは消えるため、手で編集したファイルや将来の版が足したフィールドを今の版が読み書きすると失われうる。認証情報ファイルを人が編集する運用は元から想定していないので、これは許容する。
+
+**ファイルの権限と所有者。** 方針が 2 つに分かれていることをここに明記する。サーバのデータベースファイルと WAL の補助ファイルは、起動のたびに group・other の権限を積極的に締め直す(9 節)。エージェントの認証情報ファイルは Unix では締め直さない(管理者が絞った権限を緩めないため)一方、Windows では DACL を起動のたびに締め直す(11a 節)。`server.env`(0644 推奨)・`agent.env`(0640 推奨)はどちらも chmod で強制せず、`agent.env` が秘密(`WGFT_JOIN`)を含みかつ other から読める場合にだけ 1 行警告する。つまりこれらの推奨パーミッションは契約ではなく推奨であり、警告を出すかどうかの規則だけが契約である。
+
+**`deploy/` の同梱物。** 保つものは、systemd の unit ファイル名(`server.service`・`agent.service`。それぞれの中身にある `ExecStart`・`RestartPreventExitStatus=3`)、compose ファイルが使う環境変数名とボリュームパス、macOS の plist の `Label`(`io.github.rahanahu.wgft.agent`)である。保たないものは、サンドボックス化の詳細(`ProtectSystem=strict` などの個々の設定)で、守りを強める変更は互換の維持とみなす。
+
+**リリース成果物とコンテナイメージ。** 保つものは、バイナリ名の形式 `wgft-{os}-{arch}`(Windows だけ `.exe` が付く)と、対応する `.sha256`・`.spdx.json` が付くこと、コンテナイメージ名 `ghcr.io/rahanahu/wgft-server`・`ghcr.io/rahanahu/wgft-agent` とその版タグ(`vX.Y.Z`)である。保たないものは、`:latest` タグの中身(常に最新の版を指すので固定した参照ではない)と、対応する OS・アーキテクチャの組み合わせ(11a 節が明記するとおり、実機で検証できた組み合わせだけを増減する)である。
+
+**Go モジュールとパッケージ(`proto/`、`cmd/`)。** `proto/` は `internal/` の外にあるため Go のコードとして外部から import できるが、README(英日とも)はこれをライブラリとして使えるとは謳っておらず、CLI とコンテナイメージだけを配布物として説明している。この文書は `proto/` の Go の型・関数を外部向けの API とは約束しない。約束しているのは `proto` パッケージが生成する JSON の形(ルールのスキーマ、wire protocol のメッセージ)であり、それは上記の各節で個別に契約している。Go のシグネチャの変更(フィールドの型、メソッドの追加)はこの節の対象外である。
+
+保つのが難しい約束をまとめる。
+
+- 「現在の版と直前の版の wire protocol を必ず支える」は、番号の付いた版が v1 しか存在しないため、実地では未検証である
+- `GET /api/v1/nft` だけが JSON を返さない不揃いは、契約として追認する前に直すか、例外として明記するかを決める必要がある
+
 ## 8. 接続元 IP の扱い
 
 サービスから見た接続元は、VPS 側の masquerade と自宅側の中継のため、常にエージェントのアドレスになる。
@@ -1531,3 +1620,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - 移行の完了後の構造の点検と、v1.0 までの内部構造の固定(2026-09-21、7a.7 節):Phase 1 から 6 の移行が終わった後に、層の分け方を点検した。`internal/model`、`internal/policy` とその下位、`internal/planner` がモジュールの中で import するのは `proto` と互いだけで、`internal/resource` と `internal/lograte` はモジュールの中の何も import しない。7a.7 節が宣言する 5 つの依存の規則は `internal/dataplane/deps_test.go` がすべて検査する。移行のための分岐、旧い名前、暫定の fixture は、コードにもラボにも残っていない。PONR の順序は `reconcile.Runtime.Apply` の 1 か所に、Admission Policy の評価順は `policy.Order` の 1 か所にある。実装が 1 つで呼び出しが 1 か所の interface も点検したが、どれも依存の向きを保つか、管理 API への加算を型で保証する役目を持つので残した。点検で見つかったのは、使われない型と引数、設計文書と実装の食い違い、同じ役目の小さな仕組みの重複で、構造の変更を要するものは無かった。この結果を受けて、v1.0 のリリースまで package の境界、依存の向き、層の間の interface、新しい抽象の層の追加を原則として固定する。固定の対象、対象外、例外の条件は [CLAUDE.md](../CLAUDE.md) の「v1.0 までの内部構造の固定」に置く。未確認:点検はコードと設計文書を読んで行ったもので、実際の利用から見える構造の問題は v1.0 の後に扱う
 - macOS の実機での確認と結果の反映(2026-09-21、issue #88 の D2 と E5):リリース v0.5.1 の `wgft-darwin-arm64` を Apple シリコンの Mac(macOS 27.0)で、実機の VPS(v0.5.1、カーネルモード)に対して確認した。`curl` で取得したファイルに隔離の属性が付かず Gatekeeper に止められないこと、ターミナルからの登録と認証情報ファイルの権限(ディレクトリ 0700、ファイル 0600)、`TUNNEL` の `ok`、LaunchDaemon からの起動と `kill -9` の後の再起動、Mac 自身と LAN の他のホストへの TCP と UDP の中継、12000 バイトのデータグラムが欠けずに届くこと、`WGFT_AGENT_ALLOW_TARGETS` の一覧の内と外の扱いと `RULES` 列に出る理由、env ファイルの権限の警告(0644 で出て 0640 で出ない)、認証情報も `WGFT_JOIN` も無いときの終了コード 3、切断したエージェントの `last:` 付きの表示、server の再起動からの復帰(約 2 秒)、Wi-Fi の切断と再接続からの復帰(次の 30 秒報告で `ok`)、蓋を閉じたスリープからの復帰(復帰の 3 秒後に再接続、プロセスは同一)、Mac の再起動(最初のログインの後にデーモンが起動し、ターミナルを触らずに中継が戻る)が通った。失敗した項目は無い。この確認を受けて 3 点を本書とセットアップガイドに直した。(1) 終了コード 3 で終わったときの launchd の挙動は、見込みどおり `ThrottleInterval` の間隔で再起動を繰り返すことだった(60 秒のあいだに 6 回起動し、`last exit code = 3`、`state = spawn scheduled`)。11a 節の未確認の一覧から外し、systemd と違って設定の誤りに気付く手段がログだけになることを書いた。(2) TCP の待ち受けを開いたときの `target` への試し接続(`checkTarget`)は、実装にはあったが本書に無かった。宛先からは中身の無い接続 1 本に見えること、宛先が未起動なら `cannot connect to target` がルールの `error` として出て次の報告で消えることを 7 節に書いた。ラボは宛先を先に起動するため気付かず、実機で宛先より先にルールを足して分かった。(3) FileVault を有効にした Mac が再起動の後に `network is unreachable` を出し続ける長さは、その Mac のネットワークが上がるまでの時間で決まる。2026-09-19 の確認の十数秒に対し、今回の Mac は Wi-Fi の接続もログインの後に始まるため約 60 秒だった。11a 節の記述をこの形に直した。未確認:新しいバイナリを置いた直後の 1 回目の試し接続だけが LAN の他のホストに対して `no route to host` で失敗し以後は再現しなかった理由、FileVault を無効にした Mac でログインせずに起動時から動くかどうか、ログアウトの後の動作、ブラウザで取得した隔離の属性付きのバイナリを Gatekeeper が止めること、macOS のアプリケーションファイアウォールを有効にした場合の挙動(今回の Mac では無効だった)、ターミナルからの確認の一部を Terminal.app ではなく同じ利用者の別の端末プロセスから起動したため、Terminal.app のローカルネットワークの許可を引き継ぐ経路そのものは確かめていないこと
 - 読み取り失敗を捏造した値に変えない規範の追加と適用(2026-09-21、5.2・10.3・10.5 節):「backend の失敗の原因を残し、古いエージェントの状態を古いと分かる形で示す」直しの後も、同じ形の discard(`x, _ := ...`)と、失敗を「無い」・「0」として先へ進める分岐が admin/webui.go、webui_rule.go、webui_import.go、admin_backend.go、watch.go、teardown.go、store/agents.go、conncheck.go、admin/client.go、mode.go に残っていた。10.5 節に、宛先(ログ・管理用 API・CLI・Web UI)ごとの見せ方と、窃取検知・適用状態の表示・読み込み確認ページの世代照合についてのフェイルオープン/フェイルクローズの方針を追加し、次の箇所を直した。`buildDash` は Generation・RuleDrops・Warnings の失敗を Agents・Rules と同じく 500 で返すようにした(以前は世代 0・空の一覧のまま 200 を返していた)。`findRule`(ルール詳細ページの各操作が使う)は Rules の読み取り自体の失敗を、そのルールが無い 404 と区別して 500 で返す。`ruleDetailView` はエラーを返せる形に変え、RuleDrops・Generation・Agents・Rules のいずれかが失敗したときに、拒否数・適用状態・統合候補を捏造せず呼び出し元(詳細ページ、meta・拒否/許可リスト・レート・分割・統合の各保存後の再描画)を 500 に落とす。ルール追加フォームは Agents の失敗時に「エージェント未登録」という別の正当な状態(空の選択肢)と取り違えないよう 500 で返す。グループ名の候補(datalist)は保存に関わらない補助的な一覧なので、失敗しても空の候補のままフォームは出すが、原因はログに残す。読み込みの確認ページとその適用(`webui_import.go`)は Generation・Agents の失敗を 500 にした。世代の読み取りが失敗した値をそのまま確認ページへ埋め込むと、適用時の再照合(10.1 節)が同じ失敗による捏造値どうしの偶然の一致を「一致した」と読んでしまう恐れがあったため。`admin_backend.go` の `Agents()` は wg のピア状態の読み取りが失敗しても一覧そのものは返す(フェイルオープン、原因をログに残す)。理由はエンドポイント IP・最終ハンドシェイクが表示用の値で、窃取検知の正本は 5.2 節の 15 秒ごとの監視だからである。その監視自体(`watchIPMismatch`)も、テストできるよう 1 回分の判定を `ipMismatchTick` に分け、wg 状態かエージェント一覧の読み取りが失敗した回は判定を飛ばしつつ原因をログに残すようにした(以前は無言で飛ばしていた)。`teardown.go` の `recordTeardownHints`(撤去用の手掛かりを起動のたびに記録する)は書き込みの失敗を、`Teardown` 自身は記録が無い・読めない場合に既定名 `wgft0` を仮定する旨を、それぞれログと出力に出すようにした。`startup.go` の `EnableIPForward` も、`ip_forward` を 0→1 にした記録の書き込み失敗をログに残す(記録が無いと撤去の「手で戻す一覧」が「変えていない」と誤って言うため)。`store/agents.go` の `agentBy`・`Agents()` は、保存されたアドレスが解釈できない行を零アドレスのまま先へ進めず読み取り全体を失敗にする(零アドレスは wg のピアの AllowedIPs にそのまま使われる)。`allocateAddress` も同じ理由で、解釈できない行を「使われていない」とみなして新しいエージェントに同じアドレスを割り当てることを避け、割り当てを拒む。`conncheck.go` の `isConnReset`・`friendlyDialErr` と `admin/client.go` のソケット権限判定、`mode.go` の `wgResidue`(`classifyWGResidue` に分離)は、文字列一致(`strings.Contains(err.Error(), ...)`)を、`syscall.ECONNRESET`/`ECONNREFUSED`/`EHOSTUNREACH`/`ENETUNREACH`、`os.ErrPermission`、`os.ErrNotExist` への型判定(`errors.Is`)に置き換えた。無関係な失敗の文面がたまたま同じ語(reset、refused、permission denied、not found)を含む場合に誤って分類していた分を直す。`os.ErrPermission`・`os.ErrNotExist` はそれぞれ syscall・wgctrl が Linux・Windows・macOS の全部で portable に保証する sentinel であることを確認した(`admin/client.go` は CLI が使うので 3 OS 向けにビルドされる)。ホストの単体テストで、各箇所について直す前は失敗する形(文字列一致では拾えない/誤って拾う入力を使う)で確かめた。判断として残したもの:`stream/hub.go`・`agentapi/server.go` の `net.SplitHostPort(r.RemoteAddr)`(Go の HTTP サーバーが渡す値は常にこの形式であることに拠る)、`proxyrelay.go` の `ipOf` が解釈できない `net.Addr` で零アドレスへ倒す分岐(実際に起き得ない入力に加え、零アドレスは接続元制限の側で既に拒否側に倒れる)、`agentapi/ratelimit.go` の `ipLimiterKey` が解釈できない入力を生の文字列のまま鍵にする分岐(レート制限そのものは効き続ける、既存の実装からの踏襲と明記済み)、`startup.go` の `readKernel`・`readNFTVersion` が失敗時に空文字列を返す分岐(表示専用の診断値で、空欄は捏造した値ではなく「不明」として見分けが付く)は、いずれも理由を添えて変えなかった。未確認:実機・ラボでの確認は今回の作業では行っていない(コーディネーターの判断でホストの単体テストまでに留めた)。wgctrl の `Device()` が実機のさまざまな失敗(権限、netlink の一時的な詰まりなど)でどのような文面のエラーを返すかも、ライブラリのコメントと単体テストのフェイクでしか確かめていない
+- v1.0 の互換性契約をサーフェスごとに明文化(2026-09-21、所有者の決定):7a.6 節は外部契約の一覧を持つが、「すべてを凍結する」のか「約束する範囲だけを凍結する」のかを名指ししていなかった。所有者の方針(すべてを凍結するのが目的ではない)に沿って、7a.11 節を追加し、管理用 API・Web UI・CLI・設定・ログ出力・wire protocol・サーバの DB とエージェントの認証情報ファイル・ファイルの権限・`deploy/` の同梱物・リリース成果物とコンテナイメージ・Go モジュールのそれぞれについて、保つもの・保たないもの・機械可読な契約・自由に変えてよい人間向けの表示を分けて書いた。コードを読んで確かめたことは次のとおりである。管理用 API(`internal/vpsd/admin`)には独自の認証が無く 401 を使わない(403 は Host/Origin の検査による拒否)。`GET /api/v1/rules` のバックエンド失敗を 500 にした v0.5.1 の修正は管理用 API 自身の話で、401 を 500 に変えた修正はエージェント用 API の stream 認証(`internal/vpsd/stream/hub.go`)の話であり、この 2 つを混同していた最初の前提を訂正した。`rule ls --json`(`cmd/wgft/rule.go`)と `agent ls --json`(`cmd/wgft/agent.go`)は CLI 独自の型を持たず、管理用 API のレスポンス型(`admin.BatchResponse`、`[]admin.AgentInfo`)をそのまま出力するため、CLI の `--json` 契約は管理用 API v1 の契約と同一であると明記した。`proto.SupportedProtocol` が今も `{Min:1, Max:1}` で、`capabilities` の語彙(`proto.SupportedCapabilities`)が空であることを確認し、「現在の版と直前の版の wire protocol を必ず支える」という 7a.6 節の約束は、番号の付いた版が v1 しか無いため実地では未検証であると明記した。`GET /api/v1/nft` だけが `text/plain` を返し他の `/api/v1/*` と揃っていないことも、契約として追認する前に判断が要る点として残した。`proto/` は `internal/` の外にあり Go として import できるが、README(英日とも)がライブラリとしての利用を謳っていないため、Go の API としては約束しないことにした(判断)。`rule ls` の REFUSED 列(Resource Guard のフロー予算の拒否だけを数える)と、`WGFT_AGENT_ALLOW_TARGETS` によるエージェント側の拒否理由(`agent ls` の RULES 列と Web UI にだけ現れる、v0.5.0/v0.5.1 の既知の問題)が今も別々であることを明記し、一本化は今後の判断として約束の対象外にした。終了コードの意味の契約は、別の作業が 9 節・11a 節で並行して定めているため、この節では値を決めず参照だけにした。サーバの DB とエージェントの認証情報ファイル、ファイルの権限、`deploy/` の同梱物、リリース成果物とコンテナイメージ、README の記述は、コードとリリースワークフロー(`.goreleaser.yaml`、`.github/workflows/release.yml`)を読んで確かめた。README.md・README.ja.md と `cmd/wgft/helptext.go` は変更していない。CLAUDE.md の約束どおり CLI のヘルプは `docs/cli.md` の生成元であり `cmd/wgft` は他の作業が並行して触れているため、「`--json` は自動化向け、表は人間向け」という一文をヘルプに足すかどうかは今回は判断を保留し、要否と要る場合の生成・ラボの要否を所有者に委ねる。未確認:番号の付いた版が 2 つ以上になったときに、実際に rolling upgrade が成り立つこと
