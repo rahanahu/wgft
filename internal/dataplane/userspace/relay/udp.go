@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/lograte"
 )
 
 const udpBufMax = 65535
@@ -68,9 +68,9 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 		mu       sync.Mutex
 		sessions = map[string]*udpSession{}
 		done     = make(chan struct{})
-		capLog   flowcap.LogGate // 上限で拒んだログの頻度
-		writeLog flowcap.LogGate // 宛先への書き込み失敗。上限のログとは別に 1 分に 1 回まで
-		dialLog  flowcap.LogGate // target への dial 失敗のログの頻度(target が落ちている間、新規セッションのたびに鳴らさない)
+		capLog   lograte.Gate // 上限で拒んだログの頻度
+		writeLog lograte.Gate // 宛先への書き込み失敗。上限のログとは別に 1 分に 1 回まで
+		dialLog  lograte.Gate // target への dial 失敗のログの頻度(target が落ちている間、新規セッションのたびに鳴らさない)
 	)
 	count := func() int { mu.Lock(); defer mu.Unlock(); return len(sessions) }
 	l.sessions = count

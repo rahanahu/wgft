@@ -587,7 +587,7 @@ WireGuard のピアの変更、drop カウンタの読み出し、公開の後�
 | `internal/dataplane/linuxkernel/wg`(Phase 3 で `internal/vpsd/wg` から移した。`Ensure` の差分適用) | kernel `Backend` の WireGuard 収束 | 現在の値と宣言を突き合わせて差分だけ変える実装なので、ほぼそのまま引き継いだ。インタフェース名と `--adopt-existing` は `Backend` の構築時の値になり、`dataplane.WGConfig`(宣言)には含めない |
 | `internal/dataplane/linuxkernel/conntrack`(Phase 3 で `internal/vpsd/conntrack` から移した) | kernel `Backend` の conntrack 収束 | `Backend.Converge` が `RulesFromPlan` で `Plan` の Transparent なポートから収束の判定材料を作る。呼び出し側(`vpsd`)はもうルール集合を組み立て直さない |
 | `internal/platform/linux`(Phase 3 で `internal/vpsd/check` から移した) | host 側の前段検査 | kernel `Backend` に同梱しない。agent の kernel backend(Phase 7)からも同じ検査を呼ぶため。`ip_forward` の確認・書き込み、conntrack テーブルの大きさ、conntrack の UDP タイムアウトの読み取り(旧 `internal/vpsd/wg` の一部)もここに合わせて移した |
-| `internal/flowcap` | Admission Policy の上限と `Resource Guard`(Phase 6 で分ける) | 今の `Limits` は接続元ごとの上限(Admission Policy)と全体の予算(Resource Guard)の両方を持つ(7a.5 節) |
+| `internal/resource`(Phase 6 の移行の手順 1 で `internal/flowcap` から改めた) | `Resource Guard` | `Limits` はプロセス全体の予算だけを持つ。接続元ごとの上限は `internal/policy` の `AdmissionLimits` へ、ログを間引く門は `internal/lograte` へ移した(7a.5、7a.10 節) |
 | `internal/dataplane/userspace/relay`(Phase 2 で `internal/agent/relay` から移した)の `plan`/`Action` | `internal/reconcile` の骨格のひな型 | この型を server と agent で共有する `internal/reconcile` に一般化する |
 | `internal/dataplane/userspace/tunnel`(`internal/agent/tunnel` から移した)、`internal/dataplane/userspace/utun`(Phase 2 で `internal/vpsd/utun` から移した)、`internal/nettun` | userspace `Backend` の下位実装 | プラットフォーム配線そのままである |
 | `internal/vpsd/agentapi`、`internal/vpsd/stream`、`internal/vpsd/store`、`internal/vpsd/admin` | `vpsd` の制御プレーン | 変更なし(登録、配信、永続化、admin API) |
@@ -683,13 +683,13 @@ Resource Guard
   kernel の conntrack・システムの予算
 ```
 
-今の `flowcap.Limits` は、送信元ごとの上限(Admission Policy)とプロセス全体の予算(Resource Guard)という別の関心事を 1 つの型に混ぜている。Phase 6 で `AdmissionLimits`(送信元ごとの上限)と `ResourceLimits`(プロセス全体の予算、ルールごとの隔離)に分ける。
+以前の `flowcap.Limits` は、送信元ごとの上限(Admission Policy)とプロセス全体の予算(Resource Guard)という別の関心事を 1 つの型に混ぜていた。Phase 6 の移行の手順 1 で、`policy.AdmissionLimits`(送信元ごとの上限)と `resource.Limits`(プロセス全体の予算、ルールごとの隔離)に分けた。
 
 userspace 側の Resource Guard の予算は次のとおりである。
 
 - プロセス全体の TCP/UDP 予算:`WGFT_MAX_UDP_FLOWS`/`WGFT_MAX_TCP_FLOWS`(7 節)
-- ルールごとの隔離:設定項目にはせず、プロセス全体の予算から導く内部の値とする。当面は「プロセス全体の半分、ただし従来の固定値(UDP 4096、TCP 1024)を下回らない」という今の計算式(`flowcap.Limits` の `UDPPerRuleCap`/`TCPPerRuleCap`)を暫定として維持する。Phase 6 では、1 本のルールなら空いている予算をほぼ使い切れ、複数のルールが競合するときだけ他ルールの最低限を守る、共有プールと隔離予約の方式に置き換える(式と既定値は 7a.10 節)。隔離予約は admission 時の予約であって保証ではない。既存のフローを公平化のために強制的に追い出すことはしない。新しいルールの予約分が既存のフローで既に埋まっている場合、その予約は既存のフローが終わるまで満たされない
-- メモリのソフト上限:予算から導く値をランタイムに設定する(`flowcap.Limits.MemoryLimit`)
+- ルールごとの隔離:設定項目にはせず、プロセス全体の予算から導く内部の値とする。当面は「プロセス全体の半分、ただし従来の固定値(UDP 4096、TCP 1024)を下回らない」という今の計算式(`resource.Limits` の `UDPPerRuleCap`/`TCPPerRuleCap`)を暫定として維持する。Phase 6 では、1 本のルールなら空いている予算をほぼ使い切れ、複数のルールが競合するときだけ他ルールの最低限を守る、共有プールと隔離予約の方式に置き換える(式と既定値は 7a.10 節)。隔離予約は admission 時の予約であって保証ではない。既存のフローを公平化のために強制的に追い出すことはしない。新しいルールの予約分が既存のフローで既に埋まっている場合、その予約は既存のフローが終わるまで満たされない
+- メモリのソフト上限:予算から導く値をランタイムに設定する(`resource.Limits.MemoryLimit`)
 - 拒否した TCP の即時終了:accept 直後に RST で終える(`internal/nettun.TCPConn.Abort`)。通常の `Close` は gVisor の TIME_WAIT にエンドポイントを残し、上限を超えたフラッドの間ヒープが増え続けることを、生きているヒープの直接計測で確認している(ラボでの計測、2026-09-19)
 - UDP の無通信タイムアウト:全体状態の `udp_timeout_stream` に従う(7 節)
 
@@ -740,6 +740,7 @@ internal/
   policy/goengine/       IR から Go の評価器へのコンパイラ
   planner/               Planner、Plan
   resource/              Resource Guard(予算、カウンタ)
+  lograte/               同じ理由で繰り返すログを間引く門(7a.10 節)
   reconcile/             Observe -> diff -> Prepare -> Commit の骨格(server と agent で共有)
   dataplane/             Backend interface(Observe、Prepare、Commit、Rollback)
   dataplane/userspace/   wireguard-go + netstack + 中継
@@ -755,7 +756,7 @@ proto/                   外部契約としての wire スキーマ(既存フィ
 
 依存の向きは一方向である。`model`、`policy`、`planner`、`resource` は OS、nftables、gVisor を知らない純粋な Go の型と関数だけを持ち、`dataplane/*`、`frontend/*`、`platform/*` を一切 import しない。`reconcile` は `planner` の `Plan` と、`Runtime` を組み立てる participant の interface(dataplane の `Backend`、frontend の資源)だけを使い、`dataplane/userspace`・`dataplane/linuxkernel`・`frontend` の具体的な実装には依存しない。`dataplane/*` と `frontend/*` は `model`、`policy`、`planner`、`resource`、`platform/*` を import できるが、互いには依存しない。`planner` を含めるのは、`Backend` が収束先を `Plan` と実行時の入力(frontend が待ち受けているポートの集合など)だけから受け取り、設定やルール集合を別の経路から読まないためである。`vpsd` と `agent` は上記すべてを import できる唯一の層であり、起動時に `frontend` と `dataplane` の実装から `Runtime` を組み立て、`reconcile` に渡す。この向きにより `internal/dataplane/linuxkernel` が `internal/vpsd` に依存しない構造になり、agent の kernel backend(7a.8 節の Phase 7)が server の kernel backend の共通の部品(WireGuard、host 側の検査、nftables と conntrack の基本操作)を再利用できる。VPS 用の table(公開ポートから agent への DNAT)とその収束は server に固有で、agent には LAN の宛先への DNAT、LAN 側への MASQUERADE、agent 側の conntrack 収束という別の経路を同じ package に足す。
 
-`internal/flowcap` は Phase 6 まで改称しない。既に共有された正しい置き場所にあるため名前だけの問題であり、`AdmissionLimits`/`ResourceLimits` への型の分割(7a.5 節)と同じ Phase でまとめて整理する。
+`internal/flowcap` は、Phase 6 の移行の手順 1 で `internal/resource` に改めた。送信元ごとの上限を `internal/policy` の `AdmissionLimits` へ、上限で拒んだログを間引く門を `internal/lograte` へ移し、`internal/resource` には Resource Guard の予算だけを残した(7a.10 節)。
 
 未決:`frontend` の package の分け方は決めていない。選択肢は、`transparent`/`relay` の 2 package に分ける、`Forwarding` の値で分岐する 1 package にまとめる、userspace 側は `dataplane/userspace` に畳み込む、の 3 つである。kernel backend 側の Transparent は nftables の DNAT だけで完結し、独立したコードを持たないため、実質的な package 化の対象は Relay だけになる。Phase 5 は Relay の受け付けの判定だけを変え、package は動かさない(7a.9 節の未決事項)。
 
@@ -1481,3 +1482,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - CLI の管理用 API クライアントにタイムアウトを付ける(2026-09-20、10.2 節、セキュリティ点検の指摘):`admin.Client` は `http.DefaultClient` かソケット直結の `http.Client{}` を使い、どちらもタイムアウトが無かった。サーバが応答せずに止まると、`wgft rule ls` のようなコマンドが診断も出さずに永久に待ち続けた。既定のクライアントに 30 秒のタイムアウトを付け、`net.Error` かつ `Timeout()` なエラーは、アドレスと待った時間を添えた文言に置き換えた。CLI からの呼び出しはどれも束縛された応答(バッチの本文、ルール一覧、5 秒の dial 期限を持つ疎通確認)を待つだけなので、30 秒はどの正当な呼び出しも壊さない。テストで、既定のクライアント(TCP と Unix ソケットの両方)にタイムアウトが付くこと、`HTTP` を注入した呼び出し元はその設定のまま使われること、応答しないサーバに対して打ち切りのエラーが "did not respond" を含むことを確かめた
 - Web UI と管理用 API に防御的な応答ヘッダを付ける(2026-09-20、11 節、セキュリティ点検の指摘):応答には Host・Origin の検査だけがあり、`X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy`、`Content-Security-Policy`、`Cache-Control` のいずれも付いていなかった。テンプレートを読み、`<script>`・`<style>` のインラインは無く、`style` 属性のインラインだけがあることを確かめたうえで、`ServeHTTP` の先頭で全応答に 4 つのヘッダを付け、`/static/` 以外には `Cache-Control: no-store` も付けるようにした。単体テストで、Web UI と JSON のどちらの応答にも 4 つのヘッダが付くこと、`/static/` は `no-store` を強制されないことを確かめた。`scripts/screenshot-ui.sh` で撮り直し、`docs/images/dashboard.png` の差分は表示中の経過時間の秒数だけで、ヘッダによる見た目の変化は無いことを確認した(コミットはしていない)
 - secret を含む dotenv の緩いパーミッションを警告する(2026-09-20、11a 節、セキュリティ点検の指摘):`agent.env` が group か other から読める状態のまま置かれても、agent は何も言わずに起動していた。secret な spec(`WGFT_JOIN`)の値がファイルから読まれていて、かつそのファイルが other から読めるとき、起動時に英語で 1 行だけ警告するようにした。判定は other のビット(`0o007`)だけを見て、group のビットは対象にしない。`agent.env` の推奨パーミッションはすでに 0640(root 所有、グループ `wgft`)であり、これは固定の `User=wgft` で動く unit のための意図した共有であって穴ではないため、点検の指摘にあった group も含む判定(`0o077`)をそのまま実装すると、この推奨どおりに設定した環境でも起動のたびに警告が出てしまう。secret を持たない `server.env` はどのパーミッションでも警告の対象にならない(その設定に `Secret: true` な spec が無いため)。Windows では行わない(11a 節に既にある DACL の扱いと別枠のため)。単体テストで、world 権限(0644、0602)は警告し、0640 と 0600 は警告しないこと、値が環境変数から来た場合と secret な spec を持たない config は警告しないこと、`loadConfig` から実際に呼ばれることを確かめた
+- Resource Guard の型を分ける(2026-09-20、7a.10 節の Phase 6 移行手順 1):`internal/flowcap` を `internal/resource` に改め、送信元ごとの上限を `internal/policy` の `AdmissionLimits` へ、上限で拒んだログを間引く門を `internal/lograte` の `Gate` へ移した。`resource.Limits` はプロセス全体の予算(`UDPTotal`、`TCPTotal`)と、そこから導くルールごとの上限とメモリのソフト上限だけを持つ。`vpsd.Options` は 2 つの型を別の項目(`Limits` と `AdmissionLimits`)で受け取り、agent は `resource.Limits` だけを受け取る。`planner.Input.Limits` と `policy.Build` の引数は `policy.AdmissionLimits` になった。`internal/policy` は `internal/flowcap` への依存が無くなり、純粋な Go の型だけを import する。判定の式は変えていないので、挙動は変わらない。単体テストで、メモリのソフト上限の値(既定で 216 MiB、2048 と 1024 で 100 MiB)、ルールごとの上限の値、設定層の検査とエラーの文言が変わらないことを確かめた。7a.2 節の対応表、7a.5 節、7a.7 節の package 配置と改称の段落、docs/testing.md の `admission` と `resource` の契機の対象パスを、移動に合わせて書き直した

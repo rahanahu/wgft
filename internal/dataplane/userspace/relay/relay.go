@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -34,11 +34,11 @@ type Options struct {
 	TCPConnsMax    int           // ルールごとの TCP 接続数の上限(既定は Limits.TCPPerRuleCap)
 	// Limits はプロセス全体の上限(設定値)。UDPCap と TCPCap、UDPSessionsMax と TCPConnsMax の
 	// 既定値を導くのに使う
-	Limits flowcap.Limits
+	Limits resource.Limits
 	// UDPCap と TCPCap はプロセス全体の上限(仕様 7 節、Resource Guard)。nil なら Limits から作る。
 	// vpsd はプロキシモードの中継と共有する Counter を渡す
-	UDPCap *flowcap.Counter
-	TCPCap *flowcap.Counter
+	UDPCap *resource.Counter
+	TCPCap *resource.Counter
 	Dial   func(network, addr string) (net.Conn, error)
 	Logf   func(format string, args ...any)
 	// Admit は新しいフロー(TCP の accept、UDP の新しいセッションの最初のデータグラム)を通すかを、
@@ -132,10 +132,10 @@ func New(n Network, opts Options) *Manager {
 		opts.TCPConnsMax = lim.TCPPerRuleCap()
 	}
 	if opts.UDPCap == nil {
-		opts.UDPCap = &flowcap.Counter{Total: lim.UDPTotal}
+		opts.UDPCap = &resource.Counter{Total: lim.UDPTotal}
 	}
 	if opts.TCPCap == nil {
-		opts.TCPCap = &flowcap.Counter{Total: lim.TCPTotal}
+		opts.TCPCap = &resource.Counter{Total: lim.TCPTotal}
 	}
 	if opts.Dial == nil {
 		d := &net.Dialer{Timeout: 10 * time.Second}

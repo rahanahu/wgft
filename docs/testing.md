@@ -33,8 +33,8 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 |---|---|---|---|
 | `nft-emit` | `internal/policy/nftables/**`、`internal/dataplane/linuxkernel/nft/**`、`internal/policy/*.go`、`internal/planner/**` | B1 | L2、L3 (kernel モード) |
 | `kernel` | `internal/dataplane/linuxkernel/**`、`internal/platform/linux/**`、`internal/vpsd/teardown.go`、`lab/netns.sh`、`lab/lab` | B1、B2 | L2、L4、L5、L7、L10 (kernel モード) |
-| `admission` | `internal/policy/**`、`internal/flowcap/**` (Phase 6 までは送信元ごとの上限を含むため)、`proto/rate.go`、`proto/source.go` | B1 | L2、L3、L13 |
-| `resource` | `internal/flowcap/**`、`internal/resource/**` (Phase 6 で置く)、`internal/dataplane/userspace/**`、`internal/netpipe/**`、`internal/nettun/**`、`cmd/wgft/limits.go` | 無し (C5 と C6 は次の段階の完了時に流し直す) | L8 (両モード) |
+| `admission` | `internal/policy/**`、`proto/rate.go`、`proto/source.go` | B1 | L2、L3、L13 |
+| `resource` | `internal/resource/**`、`internal/lograte/**`、`internal/dataplane/userspace/**`、`internal/netpipe/**`、`internal/nettun/**`、`cmd/wgft/limits.go` | 無し (C5 と C6 は次の段階の完了時に流し直す) | L8 (両モード) |
 | `reconcile` | `internal/reconcile/**`、`internal/planner/**`、`internal/model/**`、`internal/dataplane/*.go`、`internal/vpsd/apply.go`、`internal/vpsd/watch.go`、`internal/vpsd/dataplane*.go` | 無し (C2 は次の段階の完了時に流し直す) | L4、L5、L6、L9、L10 (両モード) |
 | `relay` | `internal/vpsd/proxyrelay/**` | B3 | L1、L3、L6、L9、L13 |
 | `userspace` | `internal/dataplane/userspace/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` | 無し | L1、L3、L4、L8 (userspace モード) |

@@ -15,25 +15,25 @@ import (
 
 	proxyproto "github.com/pires/go-proxyproto"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/internal/policy/goengine"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
 
-// ルールごとの上限は、明示しなければ Cap.Total から導く(flowcap.Limits.TCPPerRuleCap、仕様 7 節)。
+// ルールごとの上限は、明示しなければ Cap.Total から導く(resource.Limits.TCPPerRuleCap、仕様 7 節)。
 func TestConnsMaxDefaultsFromCapTotal(t *testing.T) {
-	m := New(Options{Cap: &flowcap.Counter{Total: 4000}})
+	m := New(Options{Cap: &resource.Counter{Total: 4000}})
 	if m.opts.ConnsMax != 2000 {
 		t.Errorf("ConnsMax = %d, want 2000 (half of Cap.Total)", m.opts.ConnsMax)
 	}
-	// Cap を渡さなければ既定の flowcap.TCPTotal(2048)から導き、導入前の固定値(1024)と一致する
+	// Cap を渡さなければ既定の resource.TCPTotal(2048)から導き、導入前の固定値(1024)と一致する
 	m = New(Options{})
 	if m.opts.ConnsMax != 1024 {
 		t.Errorf("default ConnsMax = %d, want 1024", m.opts.ConnsMax)
 	}
 	// 呼び出し側が明示すれば、それが勝つ
-	m = New(Options{Cap: &flowcap.Counter{Total: 40}, ConnsMax: 3})
+	m = New(Options{Cap: &resource.Counter{Total: 40}, ConnsMax: 3})
 	if m.opts.ConnsMax != 3 {
 		t.Errorf("explicit ConnsMax = %d, want 3 (must not be overridden by the derived default)", m.opts.ConnsMax)
 	}
@@ -239,7 +239,7 @@ func TestConnCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ユーザー空間モードと同じく、Admission Policy は Go の評価器が判定する
-	cnt := &flowcap.Counter{Total: 10}
+	cnt := &resource.Counter{Total: 10}
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r", Proto: proto.TCP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{TCP: 1}})
 	m := New(Options{
@@ -325,7 +325,7 @@ func admissionManager(t *testing.T, eng *goengine.Engine) (dial func() net.Conn,
 		Listen: func(uint16) (net.Listener, error) { return raw, nil },
 		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
 		Logf:   testLogf(t),
-		Cap:    &flowcap.Counter{Total: 10},
+		Cap:    &resource.Counter{Total: 10},
 		Admit: func(ruleID string, src netip.Addr) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, 0)
 			return tk.Release, d.Allow

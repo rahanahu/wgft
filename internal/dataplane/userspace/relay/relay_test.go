@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/internal/policy/goengine"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -126,9 +126,9 @@ func bigSendBuffer(c *net.UDPConn) { c.SetWriteBuffer(udpBufMax) }
 
 func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} }
 
-// ルールごとの上限は、明示しなければ Limits から導く(flowcap.Limits.UDPPerRuleCap、仕様 7 節)。
+// ルールごとの上限は、明示しなければ Limits から導く(resource.Limits.UDPPerRuleCap、仕様 7 節)。
 func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
-	m := New(&loopback{}, Options{Limits: flowcap.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: t.Logf})
+	m := New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: t.Logf})
 	if m.opts.UDPSessionsMax != 10000 {
 		t.Errorf("UDPSessionsMax = %d, want 10000 (half of UDPTotal)", m.opts.UDPSessionsMax)
 	}
@@ -141,7 +141,7 @@ func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
 		t.Errorf("default caps: udp=%d tcp=%d, want 4096 1024", m.opts.UDPSessionsMax, m.opts.TCPConnsMax)
 	}
 	// 呼び出し側が明示すれば、それが勝つ(導出値は使わない)
-	m = New(&loopback{}, Options{Limits: flowcap.Limits{UDPTotal: 40}, UDPSessionsMax: 5, Logf: t.Logf})
+	m = New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 40}, UDPSessionsMax: 5, Logf: t.Logf})
 	if m.opts.UDPSessionsMax != 5 {
 		t.Errorf("explicit UDPSessionsMax = %d, want 5 (must not be overridden by the derived default)", m.opts.UDPSessionsMax)
 	}
@@ -542,7 +542,7 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	cnt := &flowcap.Counter{Total: 10}
+	cnt := &resource.Counter{Total: 10}
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{UDP: 2}})
 	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPCap: cnt, Logf: t.Logf,
@@ -667,7 +667,7 @@ func TestTCPRelayConnCap(t *testing.T) {
 	}()
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
-	cnt := &flowcap.Counter{Total: 10}
+	cnt := &resource.Counter{Total: 10}
 	m := New(lb, Options{TCPConnsMax: 2, TCPCap: cnt, Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, port}: {srv.Addr().String(), "r1"}})

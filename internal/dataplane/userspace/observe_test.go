@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/planner"
 )
 
@@ -13,7 +12,7 @@ import (
 // Commit reports no drift, so the periodic Observe never republishes (design.md 7a.3 節: 実際の
 // 状態への収束).
 func TestUserspaceHasNoDrift(t *testing.T) {
-	b := New(Options{Limits: flowcap.Limits{UDPPerSource: 1, TCPPerSource: 1}})
+	b := New(Options{})
 	if _, ok := any(b).(dataplane.Sensor); ok {
 		t.Error("the userspace backend must not watch kernel notifications")
 	}

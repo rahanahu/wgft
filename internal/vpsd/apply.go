@@ -390,7 +390,7 @@ func (d *Daemon) buildPlan(rules []proto.Rule, agentAddr map[string]netip.Addr) 
 	for name, addr := range agentAddr {
 		agents = append(agents, planner.Agent{Name: name, Addr: addr})
 	}
-	return planner.Build(planner.Input{Rules: normalized, Limits: d.opts.Limits, Agents: agents}), excluded
+	return planner.Build(planner.Input{Rules: normalized, Limits: d.opts.AdmissionLimits, Agents: agents}), excluded
 }
 
 // accumulateDrops は今回読んだカウンタ(前回の適用以降の増分そのもの)を累積する。

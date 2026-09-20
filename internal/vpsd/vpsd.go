@@ -21,9 +21,10 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace"
 	"github.com/rahanahu/wgft/internal/flock"
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/platform/linux"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/internal/reconcile"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/agentapi"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
@@ -190,9 +191,11 @@ type Options struct {
 	AdoptExisting bool
 	// Mode は転送方式 "kernel" / "userspace"(仕様 9・11a 節)。初回に記録し以後は照合する。
 	Mode string
-	// Limits は同時フロー数のプロセス全体の上限と、vpsd だけの接続元 IP ごとの上限(仕様 7 節)。
-	// ゼロ値の項目は既定値。接続元ごとの上限を外すのは flowcap.PerSourceOff
-	Limits flowcap.Limits
+	// Limits は同時フロー数のプロセス全体の予算(仕様 7 節、Resource Guard)。ゼロ値の項目は既定値
+	Limits resource.Limits
+	// AdmissionLimits は vpsd だけが持つ接続元 IP ごとの上限(仕様 7 節、Admission Policy)。
+	// ゼロ値の項目は既定値。上限を外すのは policy.PerSourceOff
+	AdmissionLimits policy.AdmissionLimits
 	// Version は起動ログに出す wgft のバージョン(cmd/wgft の effectiveVersion)。空なら省く。
 	Version string
 }
@@ -348,7 +351,7 @@ func Run(opts Options) error {
 	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)。Admission Policy は、待ち受けを
 	// 開けたポートに付ける nftables の行が判定する(6.1、7 節)ので、中継では判定しない。起動時の
 	// applyNFT が待ち受けを開き、開けたポートだけに行を付けるよう、先に作る
-	proxyOpts := proxyrelay.Options{Cap: &flowcap.Counter{Total: opts.Limits.WithDefaults().TCPTotal}}
+	proxyOpts := proxyrelay.Options{Cap: &resource.Counter{Total: opts.Limits.WithDefaults().TCPTotal}}
 	if uspace != nil {
 		// ユーザー空間モードでは netstack 越しにエージェントへ
 		proxyOpts.Dial = func(addr string) (net.Conn, error) { return uspace.Dial("tcp", addr) }

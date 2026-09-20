@@ -13,7 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/policy"
 )
 
 func testSpecs() []spec {
@@ -130,33 +130,33 @@ func TestPerSourceLimitsFromConfig(t *testing.T) {
 
 	// 既定値(未設定):UDP 256、TCP 128
 	c := load()
-	udp, tcp, err := perSourceLimitsFromConfig(c)
-	if err != nil || udp != 256 || tcp != 128 {
-		t.Errorf("defaults: udp=%d tcp=%d err=%v, want 256 128 <nil>", udp, tcp, err)
+	l, err := perSourceLimitsFromConfig(c)
+	if err != nil || l.UDPPerSource != 256 || l.TCPPerSource != 128 {
+		t.Errorf("defaults: udp=%d tcp=%d err=%v, want 256 128 <nil>", l.UDPPerSource, l.TCPPerSource, err)
 	}
 
-	// 0 は上限なしで、エラーにならない。ゼロ値は既定値の意味なので flowcap.PerSourceOff に写す
+	// 0 は上限なしで、エラーにならない。ゼロ値は既定値の意味なので policy.PerSourceOff に写す
 	t.Setenv("WGFT_MAX_UDP_FLOWS_PER_SOURCE", "0")
 	t.Setenv("WGFT_MAX_TCP_FLOWS_PER_SOURCE", "0")
 	c = load()
-	udp, tcp, err = perSourceLimitsFromConfig(c)
-	if err != nil || udp != flowcap.PerSourceOff || tcp != flowcap.PerSourceOff {
-		t.Errorf("zero: udp=%d tcp=%d err=%v, want %d %d <nil>", udp, tcp, err, flowcap.PerSourceOff, flowcap.PerSourceOff)
+	l, err = perSourceLimitsFromConfig(c)
+	if err != nil || l.UDPPerSource != policy.PerSourceOff || l.TCPPerSource != policy.PerSourceOff {
+		t.Errorf("zero: udp=%d tcp=%d err=%v, want %d %d <nil>", l.UDPPerSource, l.TCPPerSource, err, policy.PerSourceOff, policy.PerSourceOff)
 	}
 
 	// 任意の正の値も通る(既定と異なる値を明示できる)
 	t.Setenv("WGFT_MAX_UDP_FLOWS_PER_SOURCE", "200")
 	c = load()
-	udp, _, err = perSourceLimitsFromConfig(c)
-	if err != nil || udp != 200 {
-		t.Errorf("custom: udp=%d err=%v, want 200 <nil>", udp, err)
+	l, err = perSourceLimitsFromConfig(c)
+	if err != nil || l.UDPPerSource != 200 {
+		t.Errorf("custom: udp=%d err=%v, want 200 <nil>", l.UDPPerSource, err)
 	}
 
 	// 負の値、非整数、範囲外は設定エラー(終了コード 3)
 	for _, v := range []string{"-1", "abc", "65536"} {
 		t.Setenv("WGFT_MAX_UDP_FLOWS_PER_SOURCE", v)
 		c = load()
-		_, _, err := perSourceLimitsFromConfig(c)
+		_, err := perSourceLimitsFromConfig(c)
 		if got := exitCode(err); err == nil || got != exitConfigRefusal {
 			t.Errorf("WGFT_MAX_UDP_FLOWS_PER_SOURCE=%s: err=%v exitCode=%d, want %d", v, err, got, exitConfigRefusal)
 		}

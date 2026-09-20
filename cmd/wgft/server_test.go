@@ -44,8 +44,8 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 	}
 }
 
-// buildServerOptions は、接続元 IP ごとの上限(server だけの設定)を vpsd.Options.Limits まで
-// 運ぶ。既定値、明示した値、0(上限なし)を確かめる(仕様 7, 11a 節)。
+// buildServerOptions は、接続元 IP ごとの上限(server だけの設定)を
+// vpsd.Options.AdmissionLimits まで運ぶ。既定値、明示した値、0(上限なし)を確かめる(仕様 7, 11a 節)。
 func TestServerOptionsPerSourceLimits(t *testing.T) {
 	build := func(t *testing.T, env map[string]string) (udp, tcp int) {
 		none := filepath.Join(t.TempDir(), "none.env")
@@ -62,7 +62,7 @@ func TestServerOptionsPerSourceLimits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return opts.Limits.UDPPerSourceCap(), opts.Limits.TCPPerSourceCap()
+		return opts.AdmissionLimits.UDPPerSourceCap(), opts.AdmissionLimits.TCPPerSourceCap()
 	}
 
 	// t.Setenv persists for the rest of a test, so each case needs its own subtest (fresh t)

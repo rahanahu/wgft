@@ -16,16 +16,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // planFromRules は、書き込み時と同じ検査を経て proto.Rule から Plan を組み立てる(internal/vpsd/apply.go
 // の buildPlan と同じ経路)。limits のゼロ値は接続元 IP ごとの上限の既定値(UDP 256、TCP 128。仕様 7 節)
 // を使う(internal/policy.Build の約束)。
-func planFromRules(t *testing.T, rules []proto.Rule, agentAddr map[string]netip.Addr, limits flowcap.Limits) planner.Plan {
+func planFromRules(t *testing.T, rules []proto.Rule, agentAddr map[string]netip.Addr, limits policy.AdmissionLimits) planner.Plan {
 	t.Helper()
 	normalized, err := model.NormalizeRules(rules, nil)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestGolden(t *testing.T) {
 			if err := json.Unmarshal(raw, &rules); err != nil {
 				t.Fatal(err)
 			}
-			plan := planFromRules(t, rules, agentAddr, flowcap.Limits{})
+			plan := planFromRules(t, rules, agentAddr, policy.AdmissionLimits{})
 
 			nftFile(t, strings.TrimSuffix(jsonPath, ".json")+".nft")
 			want := nftList(t)
@@ -151,7 +151,7 @@ func TestLeavesOtherTablesAlone(t *testing.T) {
 	before := list()
 	rules := []proto.Rule{{ID: "r", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 9999, Hi: 9999},
 		Target: "192.168.1.1:9999", VPSMode: proto.ModeKernel, Enabled: true}}
-	plan := planFromRules(t, rules, map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")}, flowcap.Limits{})
+	plan := planFromRules(t, rules, map[string]netip.Addr{"home": netip.MustParseAddr("10.200.0.2")}, policy.AdmissionLimits{})
 	cfg := Config{WGInterface: "wg0"}
 	for i := 0; i < 2; i++ {
 		if err := Apply(plan, nil, cfg); err != nil {

@@ -9,32 +9,33 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/policy"
+	"github.com/rahanahu/wgft/internal/resource"
 )
 
 // limitSpecs は同時フロー数のプロセス全体の上限(仕様 7 節、11a 節)。server と agent が共有する。
 func limitSpecs() []spec {
 	return []spec{
-		{Env: "WGFT_MAX_UDP_FLOWS", Flag: "max-udp-flows", Default: strconv.Itoa(flowcap.UDPTotal)},
-		{Env: "WGFT_MAX_TCP_FLOWS", Flag: "max-tcp-flows", Default: strconv.Itoa(flowcap.TCPTotal)},
+		{Env: "WGFT_MAX_UDP_FLOWS", Flag: "max-udp-flows", Default: strconv.Itoa(resource.UDPTotal)},
+		{Env: "WGFT_MAX_TCP_FLOWS", Flag: "max-tcp-flows", Default: strconv.Itoa(resource.TCPTotal)},
 	}
 }
 
 func registerLimitFlags(fl *pflag.FlagSet) {
-	fl.Int("max-udp-flows", flowcap.UDPTotal, "process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory")
-	fl.Int("max-tcp-flows", flowcap.TCPTotal, "process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory")
+	fl.Int("max-udp-flows", resource.UDPTotal, "process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory")
+	fl.Int("max-tcp-flows", resource.TCPTotal, "process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory")
 }
 
 // limitsFromConfig は設定値を読み、範囲を確かめる。
-func limitsFromConfig(c *config) (flowcap.Limits, error) {
-	var l flowcap.Limits
+func limitsFromConfig(c *config) (resource.Limits, error) {
+	var l resource.Limits
 	for _, f := range []struct {
 		env string
 		dst *int
 	}{{"WGFT_MAX_UDP_FLOWS", &l.UDPTotal}, {"WGFT_MAX_TCP_FLOWS", &l.TCPTotal}} {
 		n, err := strconv.Atoi(c.str(f.env))
-		if err != nil || n < flowcap.TotalMin || n > flowcap.TotalMax {
-			return l, configErrorf("%s: %q is not an integer between %d and %d", f.env, c.str(f.env), flowcap.TotalMin, flowcap.TotalMax)
+		if err != nil || n < resource.TotalMin || n > resource.TotalMax {
+			return l, configErrorf("%s: %q is not an integer between %d and %d", f.env, c.str(f.env), resource.TotalMin, resource.TotalMax)
 		}
 		*f.dst = n
 	}
@@ -46,43 +47,46 @@ func limitsFromConfig(c *config) (flowcap.Limits, error) {
 // 接続元ごとに数えず、この設定を持たない。
 func perSourceLimitSpecs() []spec {
 	return []spec{
-		{Env: "WGFT_MAX_UDP_FLOWS_PER_SOURCE", Flag: "max-udp-flows-per-source", Default: strconv.Itoa(flowcap.UDPPerSource)},
-		{Env: "WGFT_MAX_TCP_FLOWS_PER_SOURCE", Flag: "max-tcp-flows-per-source", Default: strconv.Itoa(flowcap.TCPPerSource)},
+		{Env: "WGFT_MAX_UDP_FLOWS_PER_SOURCE", Flag: "max-udp-flows-per-source", Default: strconv.Itoa(policy.UDPPerSource)},
+		{Env: "WGFT_MAX_TCP_FLOWS_PER_SOURCE", Flag: "max-tcp-flows-per-source", Default: strconv.Itoa(policy.TCPPerSource)},
 	}
 }
 
 func registerPerSourceLimitFlags(fl *pflag.FlagSet) {
-	fl.Int("max-udp-flows-per-source", flowcap.UDPPerSource,
+	fl.Int("max-udp-flows-per-source", policy.UDPPerSource,
 		"cap on concurrent UDP sessions from one source address, summed over all rules, env WGFT_MAX_UDP_FLOWS_PER_SOURCE; 0 disables the per-source cap")
-	fl.Int("max-tcp-flows-per-source", flowcap.TCPPerSource,
+	fl.Int("max-tcp-flows-per-source", policy.TCPPerSource,
 		"cap on concurrent TCP connections from one source address, summed over all rules, env WGFT_MAX_TCP_FLOWS_PER_SOURCE; 0 disables the per-source cap")
 }
 
 // perSourceLimitsFromConfig reads and validates WGFT_MAX_*_FLOWS_PER_SOURCE. Unlike the
 // process-wide caps, 0 is a valid value here: it disables the per-source cap for that protocol.
-// It is returned as flowcap.PerSourceOff, because a zero Limits field means the default.
-// Anything else must be between 1 and flowcap.TotalMax; negative values are a config error.
-func perSourceLimitsFromConfig(c *config) (udpPerSource, tcpPerSource int, err error) {
+// It is returned as policy.PerSourceOff, because a zero AdmissionLimits field means the default.
+// Anything else must be between 1 and resource.TotalMax; negative values are a config error. That
+// upper bound is the process-wide budget's maximum: the two settings have shared one bound since
+// the per-source cap was introduced, and a per-source cap above the whole budget has no effect.
+func perSourceLimitsFromConfig(c *config) (policy.AdmissionLimits, error) {
+	var l policy.AdmissionLimits
 	for _, f := range []struct {
 		env string
 		dst *int
-	}{{"WGFT_MAX_UDP_FLOWS_PER_SOURCE", &udpPerSource}, {"WGFT_MAX_TCP_FLOWS_PER_SOURCE", &tcpPerSource}} {
+	}{{"WGFT_MAX_UDP_FLOWS_PER_SOURCE", &l.UDPPerSource}, {"WGFT_MAX_TCP_FLOWS_PER_SOURCE", &l.TCPPerSource}} {
 		n, err := strconv.Atoi(c.str(f.env))
-		if err != nil || n < 0 || n > flowcap.TotalMax {
-			return 0, 0, configErrorf("%s: %q is not an integer between 0 and %d (0 disables the per-source cap)", f.env, c.str(f.env), flowcap.TotalMax)
+		if err != nil || n < 0 || n > resource.TotalMax {
+			return policy.AdmissionLimits{}, configErrorf("%s: %q is not an integer between 0 and %d (0 disables the per-source cap)", f.env, c.str(f.env), resource.TotalMax)
 		}
 		if n == 0 {
-			n = flowcap.PerSourceOff
+			n = policy.PerSourceOff
 		}
 		*f.dst = n
 	}
-	return udpPerSource, tcpPerSource, nil
+	return l, nil
 }
 
 // applyMemoryLimit は、上限から計算したメモリのソフト上限を Go のランタイムに設定する(仕様 7 節)。
 // 運用者が GOMEMLIMIT を設定していれば、ランタイムが既にその値を使っているので触らない。
 // apply が偽なら値を印字するだけ(server check)。
-func applyMemoryLimit(w io.Writer, l flowcap.Limits, apply bool) {
+func applyMemoryLimit(w io.Writer, l resource.Limits, apply bool) {
 	if v := os.Getenv("GOMEMLIMIT"); v != "" {
 		fmt.Fprintf(w, "memory soft limit: GOMEMLIMIT=%s (set by the environment)\n", v)
 		return

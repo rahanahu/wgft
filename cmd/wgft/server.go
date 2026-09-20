@@ -70,26 +70,27 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 	if err != nil {
 		return vpsd.Options{}, nil, err
 	}
-	limits.UDPPerSource, limits.TCPPerSource, err = perSourceLimitsFromConfig(c)
+	admission, err := perSourceLimitsFromConfig(c)
 	if err != nil {
 		return vpsd.Options{}, nil, err
 	}
 	stateDir := c.str("WGFT_DATA_DIR")
 	opts := vpsd.Options{
-		Limits:         limits,
-		Version:        effectiveVersion(),
-		Mode:           c.str("WGFT_MODE"),
-		DBPath:         stateDir + "/wgft.sqlite",
-		WGInterface:    c.str("WGFT_WG_INTERFACE"),
-		WGPort:         uint16(port),
-		WGAddress:      c.str("WGFT_WG_ADDRESS"),
-		WGEndpoint:     c.str("WGFT_WG_ENDPOINT"),
-		MTU:            mtu,
-		AgentAPIAddr:   c.str("WGFT_AGENT_API"),
-		AgentAPIHost:   c.str("WGFT_AGENT_API_HOST"),
-		AdminAddr:      c.str("WGFT_ADMIN"),
-		AdminTailscale: c.boolVal("WGFT_ADMIN_TAILSCALE"),
-		AdminHost:      c.slice("WGFT_ADMIN_HOST"),
+		Limits:          limits,
+		AdmissionLimits: admission,
+		Version:         effectiveVersion(),
+		Mode:            c.str("WGFT_MODE"),
+		DBPath:          stateDir + "/wgft.sqlite",
+		WGInterface:     c.str("WGFT_WG_INTERFACE"),
+		WGPort:          uint16(port),
+		WGAddress:       c.str("WGFT_WG_ADDRESS"),
+		WGEndpoint:      c.str("WGFT_WG_ENDPOINT"),
+		MTU:             mtu,
+		AgentAPIAddr:    c.str("WGFT_AGENT_API"),
+		AgentAPIHost:    c.str("WGFT_AGENT_API_HOST"),
+		AdminAddr:       c.str("WGFT_ADMIN"),
+		AdminTailscale:  c.boolVal("WGFT_ADMIN_TAILSCALE"),
+		AdminHost:       c.slice("WGFT_ADMIN_HOST"),
 	}
 	return opts, c, nil
 }

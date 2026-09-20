@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -47,7 +47,7 @@ func TestPrepareBindFailureIsFailClosed(t *testing.T) {
 	plan := planner.Build(planner.Input{Rules: rules,
 		Agents: []planner.Agent{{Name: "home", Addr: netip.MustParseAddr("10.200.0.2")}}})
 
-	b := New(Options{Limits: flowcap.Limits{}, Logf: t.Logf})
+	b := New(Options{Limits: resource.Limits{}, Logf: t.Logf})
 	defer b.relay.Close()
 	p, err := b.Prepare(dataplane.Desired{Plan: plan})
 	if err != nil {

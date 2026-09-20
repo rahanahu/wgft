@@ -6,9 +6,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -44,7 +44,7 @@ func TestRelayRulesFromPlan(t *testing.T) {
 	for name, a := range agentAddr {
 		agents = append(agents, planner.Agent{Name: name, Addr: a})
 	}
-	plan := planner.Build(planner.Input{Rules: normalized, Limits: flowcap.Limits{}, Agents: agents})
+	plan := planner.Build(planner.Input{Rules: normalized, Limits: policy.AdmissionLimits{}, Agents: agents})
 
 	got := relayRules(plan.Relay())
 	want := []proxyrelay.Rule{

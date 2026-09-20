@@ -1,4 +1,4 @@
-package flowcap
+package resource
 
 import (
 	"testing"
@@ -39,13 +39,6 @@ func TestCounterTotalAndNil(t *testing.T) {
 	none.Release()
 }
 
-func TestLogGate(t *testing.T) {
-	var g LogGate
-	if !g.Allow() || g.Allow() {
-		t.Error("the gate must open once per minute")
-	}
-}
-
 // 既定の上限と、256 MiB の VPS 向けの目安でのソフト上限(仕様 7 節の値)。
 func TestMemoryLimit(t *testing.T) {
 	if got := (Limits{}).MemoryLimit() >> 20; got != 216 {
@@ -80,22 +73,5 @@ func TestPerRuleCap(t *testing.T) {
 	}
 	if got := (Limits{TCPTotal: 512}).TCPPerRuleCap(); got != 512 {
 		t.Errorf("TCPPerRuleCap(512) = %d, want 512", got)
-	}
-}
-
-// 接続元ごとの上限は、ゼロ値なら既定値、PerSourceOff なら上限なし(実効値 0)になる。
-// ゼロ値の Limits で守りが外れないことを確かめる。
-func TestPerSourceCap(t *testing.T) {
-	var zero Limits
-	if zero.UDPPerSourceCap() != UDPPerSource || zero.TCPPerSourceCap() != TCPPerSource {
-		t.Errorf("zero Limits: got %d/%d, want the defaults %d/%d", zero.UDPPerSourceCap(), zero.TCPPerSourceCap(), UDPPerSource, TCPPerSource)
-	}
-	off := Limits{UDPPerSource: PerSourceOff, TCPPerSource: PerSourceOff}
-	if off.UDPPerSourceCap() != 0 || off.TCPPerSourceCap() != 0 {
-		t.Errorf("PerSourceOff: got %d/%d, want 0/0", off.UDPPerSourceCap(), off.TCPPerSourceCap())
-	}
-	set := Limits{UDPPerSource: 999, TCPPerSource: 111}
-	if set.UDPPerSourceCap() != 999 || set.TCPPerSourceCap() != 111 {
-		t.Errorf("explicit values: got %d/%d, want 999/111", set.UDPPerSourceCap(), set.TCPPerSourceCap())
 	}
 }

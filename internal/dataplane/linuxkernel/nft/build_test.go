@@ -13,9 +13,9 @@ import (
 	"github.com/google/nftables/userdata"
 	"golang.org/x/sys/unix"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -91,7 +91,7 @@ func rate(s string) *proto.Rate {
 
 // buildTestPlan は、書き込み時の検査を経ずに proto.Rule から直接 Plan を組み立てる
 // (internal/vpsd/apply.go の buildPlan と同じ経路。テストの都合で proto.ValidateRules は掛けない)。
-func buildTestPlan(t *testing.T, rules []proto.Rule, agentAddr map[string]netip.Addr, limits flowcap.Limits) planner.Plan {
+func buildTestPlan(t *testing.T, rules []proto.Rule, agentAddr map[string]netip.Addr, limits policy.AdmissionLimits) planner.Plan {
 	t.Helper()
 	normalized := make([]model.Rule, 0, len(rules))
 	for _, r := range rules {
@@ -122,7 +122,7 @@ func TestEmitRows(t *testing.T) {
 			VPSMode: proto.ModeKernel, Enabled: true,
 			SourceAllow: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, PacketRate: rate("5000/second")},
 	}
-	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{})
+	plan := buildTestPlan(t, rules, testAgentAddr, policy.AdmissionLimits{})
 	relayListening := map[uint16]bool{443: true}
 	rec := newRecorder()
 	if err := emit(rec, plan, relayListening, testCfg); err != nil {
@@ -245,7 +245,7 @@ func TestFlowCapSharedAcrossRules(t *testing.T) {
 		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
 			VPSMode: proto.ModeKernel, Enabled: true},
 	}
-	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{})
+	plan := buildTestPlan(t, rules, testAgentAddr, policy.AdmissionLimits{})
 	rec := newRecorder()
 	if err := emit(rec, plan, nil, testCfg); err != nil {
 		t.Fatal(err)
@@ -328,7 +328,7 @@ func TestFlowCapZeroDisablesProtocol(t *testing.T) {
 			VPSMode: proto.ModeKernel, Enabled: true},
 	}
 	// TCP は既定のまま(256/128)、UDP だけ外す
-	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{UDPPerSource: flowcap.PerSourceOff})
+	plan := buildTestPlan(t, rules, testAgentAddr, policy.AdmissionLimits{UDPPerSource: policy.PerSourceOff})
 	rec := newRecorder()
 	if err := emit(rec, plan, nil, testCfg); err != nil {
 		t.Fatal(err)
@@ -348,7 +348,7 @@ func TestFlowCapZeroDisablesProtocol(t *testing.T) {
 	}
 
 	// 両方 0 なら set も行も 1 つも作らない
-	plan2 := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{UDPPerSource: flowcap.PerSourceOff, TCPPerSource: flowcap.PerSourceOff})
+	plan2 := buildTestPlan(t, rules, testAgentAddr, policy.AdmissionLimits{UDPPerSource: policy.PerSourceOff, TCPPerSource: policy.PerSourceOff})
 	rec2 := newRecorder()
 	if err := emit(rec2, plan2, nil, testCfg); err != nil {
 		t.Fatal(err)
@@ -369,7 +369,7 @@ func TestFlowCapCustomValue(t *testing.T) {
 		{ID: "r_udp", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2456), Target: "192.168.1.20:2456",
 			VPSMode: proto.ModeKernel, Enabled: true},
 	}
-	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{UDPPerSource: 200})
+	plan := buildTestPlan(t, rules, testAgentAddr, policy.AdmissionLimits{UDPPerSource: 200})
 	rec := newRecorder()
 	if err := emit(rec, plan, nil, testCfg); err != nil {
 		t.Fatal(err)
@@ -449,7 +449,7 @@ func TestFlowCapProxyOnlyWhenListening(t *testing.T) {
 		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
 			VPSMode: proto.ModeKernel, Enabled: true},
 	}
-	plan := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{})
+	plan := buildTestPlan(t, rules, testAgentAddr, policy.AdmissionLimits{})
 	for _, listening := range []map[uint16]bool{nil, {}, {8443: true}} {
 		rec := newRecorder()
 		if err := emit(rec, plan, listening, testCfg); err != nil {

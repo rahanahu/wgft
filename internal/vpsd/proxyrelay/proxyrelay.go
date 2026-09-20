@@ -14,9 +14,10 @@ import (
 
 	proxyproto "github.com/pires/go-proxyproto"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/netpipe"
 	"github.com/rahanahu/wgft/internal/policy"
+	"github.com/rahanahu/wgft/internal/resource"
 )
 
 // Rule は中継 1 つ分の宣言。
@@ -40,11 +41,11 @@ type Options struct {
 	// Dial はエージェントのリスナーへ繋ぐ。既定は net.Dial("tcp", addr)。
 	Dial func(addr string) (net.Conn, error)
 	Logf func(string, ...any)
-	// ConnsMax はルールごとの同時接続数の上限(既定は Cap.Total から flowcap.Limits.TCPPerRuleCap で導く)。
+	// ConnsMax はルールごとの同時接続数の上限(既定は Cap.Total から resource.Limits.TCPPerRuleCap で導く)。
 	ConnsMax int
 	// Cap はプロセス全体の上限(仕様 7 節、Resource Guard)。nil なら既定値で作る。
 	// ユーザー空間モードの vpsd は relay と同じ Counter を渡し、合計で数える
-	Cap *flowcap.Counter
+	Cap *resource.Counter
 	// Admit は新しい接続を Admission Policy のすべての段(deny、allow、3 つのレート、送信元ごとの
 	// 同時フロー数の上限)で判定し、拒んだ段の drop を数える。通すときは枠を返す release も返し、
 	// 中継は接続の終わりに 1 回呼ぶ。後の上限(Resource Guard)で拒んだときも呼ぶ。
@@ -82,10 +83,10 @@ type listener struct {
 	closed bool
 	// pending は上限の枠を取ってから track するまでの接続の数(エージェントへの接続中)
 	pending int
-	capLog  flowcap.LogGate
+	capLog  lograte.Gate
 	// dialLog はエージェントへの接続失敗のログを絞る(agent 側が落ちている間、公開ポートへの
 	// 接続のたびに 1 行出ると高頻度になりうるため。仕様 10.4 節)。
-	dialLog flowcap.LogGate
+	dialLog lograte.Gate
 }
 
 // abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う
@@ -118,10 +119,10 @@ func New(opts Options) *Manager {
 		opts.Logf = log.Printf
 	}
 	if opts.Cap == nil {
-		opts.Cap = &flowcap.Counter{Total: flowcap.TCPTotal}
+		opts.Cap = &resource.Counter{Total: resource.TCPTotal}
 	}
 	if opts.ConnsMax <= 0 {
-		opts.ConnsMax = flowcap.Limits{TCPTotal: opts.Cap.Total}.TCPPerRuleCap()
+		opts.ConnsMax = resource.Limits{TCPTotal: opts.Cap.Total}.TCPPerRuleCap()
 	}
 	return &Manager{opts: opts, ls: map[uint16]*listener{}, bindFail: map[uint16]*failure{}}
 }

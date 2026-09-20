@@ -5,7 +5,7 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/netpipe"
 )
 
@@ -51,8 +51,8 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		once  sync.Once
 		// public は公開側の接続の数(同時フロー数の上限の対象。conns は target 側も含む)
 		public  int
-		capLog  flowcap.LogGate // 上限で拒んだログの頻度
-		dialLog flowcap.LogGate // target への dial 失敗のログの頻度(target が落ちている間、接続のたびに鳴らさない)
+		capLog  lograte.Gate // 上限で拒んだログの頻度
+		dialLog lograte.Gate // target への dial 失敗のログの頻度(target が落ちている間、接続のたびに鳴らさない)
 	)
 	l.flows = func() int { mu.Lock(); defer mu.Unlock(); return public }
 	l.sessions = func() int { mu.Lock(); defer mu.Unlock(); return len(conns) }

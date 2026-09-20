@@ -24,17 +24,18 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/utun"
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/policy/goengine"
+	"github.com/rahanahu/wgft/internal/resource"
 )
 
 // Options configures a Backend.
 type Options struct {
 	// Limits gives the process-wide flow budgets and the per-rule isolation derived from them
-	// (design.md 7 節 and 7a.5 節, Resource Guard). Its per-source caps are not read here: those
-	// are Admission Policy and come with every Plan (Plan.Admission.PerSourceFlowCaps).
-	Limits flowcap.Limits
+	// (design.md 7 節 and 7a.5 節, Resource Guard). The per-source caps are Admission Policy, a
+	// separate type (policy.AdmissionLimits) that comes with every Plan
+	// (Plan.Admission.PerSourceFlowCaps), not a field of this one.
+	Limits resource.Limits
 	// Logf is where the Backend and its tunnel log. nil means log.Printf.
 	Logf func(format string, args ...any)
 }
@@ -44,11 +45,11 @@ type Backend struct {
 	logf   func(format string, args ...any)
 	policy *goengine.Engine
 	relay  *relay.Manager
-	udpCap *flowcap.Counter
+	udpCap *resource.Counter
 	// tcpCap is shared by the relay and the server's Relay frontend (proxyrelay): in userspace mode
 	// both count against the same process-wide TCP budget (design.md 7 節). The per-source count is
 	// the evaluator's, which the Relay frontend reaches through AdmitRelayFlow.
-	tcpCap *flowcap.Counter
+	tcpCap *resource.Counter
 
 	mu  sync.Mutex
 	tun *utun.Tunnel
@@ -87,8 +88,8 @@ func New(opts Options) *Backend {
 	b := &Backend{
 		logf:   logf,
 		policy: goengine.New(nil),
-		udpCap: &flowcap.Counter{Total: lim.UDPTotal},
-		tcpCap: &flowcap.Counter{Total: lim.TCPTotal},
+		udpCap: &resource.Counter{Total: lim.UDPTotal},
+		tcpCap: &resource.Counter{Total: lim.TCPTotal},
 	}
 	b.relay = relay.New(hostNetwork{}, relay.Options{
 		UDPIdleTimeout: 120 * time.Second, // the default of conntrack's udp_timeout_stream
@@ -108,7 +109,7 @@ func New(opts Options) *Backend {
 
 // TCPCounter is the TCP flow counter the relay uses. The server hands it to its Relay frontend so
 // that both count against one process-wide TCP budget in userspace mode (design.md 7 節).
-func (b *Backend) TCPCounter() *flowcap.Counter { return b.tcpCap }
+func (b *Backend) TCPCounter() *resource.Counter { return b.tcpCap }
 
 // AdmitRelayFlow judges a new connection of the server's Relay frontend (proxyrelay) in userspace
 // mode by every Admission Policy step, exactly as a Transparent TCP connection is judged: Forwarding
