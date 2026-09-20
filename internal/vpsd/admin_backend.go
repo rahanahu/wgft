@@ -48,7 +48,14 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	dev, _ := d.dp.WGStatus()
+	// dev が nil のままだと、以下のループは WGEndpoint/LastHandshake を空のまま返す
+	// (エージェント一覧のその列が空欄になるだけで、一覧そのものは失敗させない。design.md
+	// 10.5 節。5.2 節の窃取検知の 15 秒ごとの読み取りが正本の監視で、ここは表示用)。
+	// 原因は毎回ログに残し、恒常的な失敗が journal で追えるようにする。
+	dev, err := d.dp.WGStatus()
+	if err != nil {
+		log.Printf("agents: reading wg status: %v", err)
+	}
 	out := make([]admin.AgentInfo, 0, len(list))
 	for _, a := range list {
 		info := admin.AgentInfo{Name: a.Name, Address: a.Address.String(), PublicKey: a.PublicKey,

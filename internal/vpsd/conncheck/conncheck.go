@@ -11,7 +11,7 @@ import (
 	"errors"
 	"io"
 	"net"
-	"strings"
+	"syscall"
 	"time"
 )
 
@@ -88,18 +88,20 @@ func isTimeout(err error) bool {
 }
 
 func isConnReset(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "reset")
+	return errors.Is(err, syscall.ECONNRESET)
 }
 
+// friendlyDialErr は dial の失敗を運用者向けの短い文にする。Linux でしか動かない package なので
+// (internal/vpsd はカーネルの netlink を直接使う。CLAUDE.md の 7a.7 節)、syscall の型で判定して
+// 差し支えない。errors.Is は net.OpError・os.SyscallError を辿って元の errno まで見る
 func friendlyDialErr(err error) string {
-	s := err.Error()
 	switch {
-	case strings.Contains(s, "refused"):
+	case errors.Is(err, syscall.ECONNREFUSED):
 		return "the agent's listener refused the connection; rule may not be applied"
-	case strings.Contains(s, "timeout") || strings.Contains(s, "i/o timeout"):
+	case isTimeout(err):
 		return "cannot reach the agent; tunnel is down or agent is offline"
-	case strings.Contains(s, "no route"):
+	case errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH):
 		return "no route to the agent; tunnel not established"
 	}
-	return s
+	return err.Error()
 }

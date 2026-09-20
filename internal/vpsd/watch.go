@@ -24,43 +24,56 @@ func (d *Daemon) watchIPMismatch(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		dev, err := d.dp.WGStatus()
-		if err != nil {
+		d.ipMismatchTick(counts)
+	}
+}
+
+// ipMismatchTick is one 15-second observation, split out of watchIPMismatch so it can be
+// unit-tested directly (the ticker itself is not injectable, and this package has no netlink
+// test double to drive a real 15-second wait). counts is mutated in place, matching the loop's
+// state carried across ticks.
+func (d *Daemon) ipMismatchTick(counts map[string]int) {
+	dev, err := d.dp.WGStatus()
+	if err != nil {
+		// この回の判定を飛ばす(design.md 5.2・10.5 節のフェイルオープン)。原因はログに
+		// 残し、持続する失敗が journal から見えるようにする(15 秒間隔なので、要求の
+		// たびに増える種類のログではない)。
+		log.Printf("ip mismatch watch: reading wg status: %v", err)
+		return
+	}
+	now := time.Now()
+	endpoint := map[string]string{} // pubkey → 最近(3 分以内)ハンドシェイクしたエンドポイント IP
+	for _, p := range dev.Peers {
+		if p.Endpoint == nil || p.LastHandshakeTime.IsZero() || now.Sub(p.LastHandshakeTime) > 3*time.Minute {
 			continue
 		}
-		now := time.Now()
-		endpoint := map[string]string{} // pubkey → 最近(3 分以内)ハンドシェイクしたエンドポイント IP
-		for _, p := range dev.Peers {
-			if p.Endpoint == nil || p.LastHandshakeTime.IsZero() || now.Sub(p.LastHandshakeTime) > 3*time.Minute {
-				continue
-			}
-			if ip, ok := netip.AddrFromSlice(p.Endpoint.IP); ok {
-				endpoint[p.PublicKey.String()] = ip.Unmap().String()
-			}
+		if ip, ok := netip.AddrFromSlice(p.Endpoint.IP); ok {
+			endpoint[p.PublicKey.String()] = ip.Unmap().String()
 		}
-		list, err := d.st.Agents()
-		if err != nil {
-			continue
+	}
+	list, err := d.st.Agents()
+	if err != nil {
+		log.Printf("ip mismatch watch: reading agents: %v", err)
+		return
+	}
+	for _, a := range list {
+		streamIP := ""
+		st := d.hub.Status(a.Name)
+		if st.Connected && !st.LastHeartbeat.IsZero() && now.Sub(st.LastHeartbeat) <= 45*time.Second {
+			streamIP = st.StreamFrom
 		}
-		for _, a := range list {
-			streamIP := ""
-			st := d.hub.Status(a.Name)
-			if st.Connected && !st.LastHeartbeat.IsZero() && now.Sub(st.LastHeartbeat) <= 45*time.Second {
-				streamIP = st.StreamFrom
-			}
-			wgIP := ""
-			if a.PublicKey != "" {
-				wgIP = endpoint[a.PublicKey]
-			}
-			// 第 2 判定:wg エンドポイント IP の往復。stream 側は hub の接続事象で記録する(仕様 5.2 節)
-			d.observeFlap(a.Name, "wg", "wg endpoint", wgIP)
-			n, warn := ipMismatchStep(counts[a.Name], streamIP, wgIP)
-			counts[a.Name] = n
-			if warn {
-				detail := fmt.Sprintf("stream %s / wg %s", streamIP, wgIP)
-				if err := d.st.AddWarning(a.Name, store.WarnIPMismatch, detail); err == nil {
-					log.Printf("agent %s: detected IP mismatch: %s", a.Name, detail)
-				}
+		wgIP := ""
+		if a.PublicKey != "" {
+			wgIP = endpoint[a.PublicKey]
+		}
+		// 第 2 判定:wg エンドポイント IP の往復。stream 側は hub の接続事象で記録する(仕様 5.2 節)
+		d.observeFlap(a.Name, "wg", "wg endpoint", wgIP)
+		n, warn := ipMismatchStep(counts[a.Name], streamIP, wgIP)
+		counts[a.Name] = n
+		if warn {
+			detail := fmt.Sprintf("stream %s / wg %s", streamIP, wgIP)
+			if err := d.st.AddWarning(a.Name, store.WarnIPMismatch, detail); err == nil {
+				log.Printf("agent %s: detected IP mismatch: %s", a.Name, detail)
 			}
 		}
 	}

@@ -6,7 +6,9 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -48,10 +50,10 @@ func TestCheck(t *testing.T) {
 		wantOK    bool
 		wantReach string
 	}{
-		{"接続できない(refused)", errors.New("connect: connection refused"), nil, nil, false, ReachNone},
-		{"接続できない(timeout)", errors.New("dial tcp: i/o timeout"), nil, nil, false, ReachNone},
+		{"接続できない(refused)", &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}, nil, nil, false, ReachNone},
+		{"接続できない(timeout)", timeoutErr{}, nil, nil, false, ReachNone},
 		{"接続後すぐ EOF(target 不達)", nil, io.EOF, nil, false, ReachAgent},
-		{"接続後 reset(target 不達)", nil, errors.New("read: connection reset by peer"), nil, false, ReachAgent},
+		{"接続後 reset(target 不達)", nil, &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}, nil, false, ReachAgent},
 		{"無言で生存(到達)", nil, timeoutErr{}, nil, true, ReachTarget},
 		{"バナーを返す(到達)", nil, nil, []byte("SSH-2.0"), true, ReachTarget},
 	}
@@ -68,6 +70,47 @@ func TestCheck(t *testing.T) {
 				t.Errorf("got OK=%v reach=%s (%s), want OK=%v reach=%s", r.OK, r.Reach, r.Detail, tt.wantOK, tt.wantReach)
 			}
 		})
+	}
+}
+
+// TestIsConnReset は、判定を errno の型で行い、文面がたまたま "reset" を含むだけの無関係な
+// エラーを誤って ECONNRESET と見なさないことを確かめる(design.md 10.5 節。分類できない失敗を、
+// 分かっている失敗のふりで見せてはならない、と同じ考え方)。
+func TestIsConnReset(t *testing.T) {
+	real := &net.OpError{Op: "read", Net: "tcp", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}
+	if !isConnReset(real) {
+		t.Error("a wrapped ECONNRESET must be recognized")
+	}
+	notReset := errors.New("upstream proxy reset the session for an unrelated administrative reason")
+	if isConnReset(notReset) {
+		t.Error("an error that merely mentions \"reset\" in its text must not be misclassified as ECONNRESET")
+	}
+}
+
+// TestFriendlyDialErr は、型による判定が正しい文言を選ぶことと、分類できない/分類が文面と
+// 食い違うエラーでは元のエラー文をそのまま出す(捏造した分類を返さない)ことを確かめる。
+func TestFriendlyDialErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"refused", &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}, "the agent's listener refused the connection; rule may not be applied"},
+		{"timeout", timeoutErr{}, "cannot reach the agent; tunnel is down or agent is offline"},
+		{"no route", &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.EHOSTUNREACH}}, "no route to the agent; tunnel not established"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := friendlyDialErr(tt.err); got != tt.want {
+				t.Errorf("friendlyDialErr(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+	// 文面には "refused" を含むが、実際には ECONNREFUSED ではないエラー。文字列一致だと
+	// 誤って接続拒否の定型文に変わっていた。型で見れば元の文をそのまま出す。
+	other := errors.New("dial tcp 10.200.0.2:2456: some middlebox refused to route around a firewall rule")
+	if got := friendlyDialErr(other); got != other.Error() {
+		t.Errorf("friendlyDialErr(%v) = %q, want the raw error text unchanged", other, got)
 	}
 }
 

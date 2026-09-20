@@ -106,7 +106,10 @@ func (s *Server) uiRuleSplit(w http.ResponseWriter, r *http.Request) {
 		_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{head, tail}, Op: "ui split"})
 	}
 	if err != nil {
-		d := s.ruleDetailView(rule, locale)
+		d, ok := s.renderRuleDetailOrError(w, locale, rule)
+		if !ok {
+			return
+		}
 		d.SplitError = err.Error()
 		s.renderDetailPage(w, locale, d)
 		return
@@ -133,7 +136,10 @@ func (s *Server) uiRuleMerge(w http.ResponseWriter, r *http.Request) {
 		_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{merged}, Delete: []string{other.ID}, Op: "ui merge"})
 	}
 	if err != nil {
-		d := s.ruleDetailView(rule, locale)
+		d, ok := s.renderRuleDetailOrError(w, locale, rule)
+		if !ok {
+			return
+		}
 		d.MergeError = err.Error()
 		s.renderDetailPage(w, locale, d)
 		return

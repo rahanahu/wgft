@@ -7,6 +7,7 @@ package vpsd
 import (
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -31,11 +32,22 @@ const (
 	metaIPForwardSetAt = "ip_forward_set_by_wgft_at"
 )
 
+// recordTeardownHints records the values `wgft server teardown` needs (10.3 節) to find what to
+// remove without a --wg-interface flag of its own. A write failure here is not fatal to startup
+// (this hint is only ever read by a later, separate teardown run), but it must not be silent: an
+// operator who never sees it in the log has no way to know teardown may later have to guess
+// (design.md 10.5・10.3 節).
 func recordTeardownHints(st *store.Store, opts Options) {
-	_ = st.SetMeta(metaWGInterface, []byte(opts.WGInterface))
-	_ = st.SetMeta(metaWGPort, []byte(strconv.Itoa(int(opts.WGPort))))
+	if err := st.SetMeta(metaWGInterface, []byte(opts.WGInterface)); err != nil {
+		log.Printf("warning: recording the wg interface name for teardown failed: %v; a later `wgft server teardown` may not find %s and will say so", err, opts.WGInterface)
+	}
+	if err := st.SetMeta(metaWGPort, []byte(strconv.Itoa(int(opts.WGPort)))); err != nil {
+		log.Printf("warning: recording the wg port for teardown's manual-restore list failed: %v", err)
+	}
 	if _, port, err := net.SplitHostPort(opts.AgentAPIAddr); err == nil {
-		_ = st.SetMeta(metaAgentAPIPort, []byte(port))
+		if err := st.SetMeta(metaAgentAPIPort, []byte(port)); err != nil {
+			log.Printf("warning: recording the agent API port for teardown's manual-restore list failed: %v", err)
+		}
 	}
 }
 
@@ -71,6 +83,12 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 		defer st.Close()
 		if b, e := st.GetMeta(metaWGInterface); e == nil && len(b) > 0 {
 			iface = string(b)
+		} else {
+			// 記録が無い(recordTeardownHints が一度も成功していない)か読めない場合、既定名を
+			// 仮定していることを出力に出す。黙って仮定すると、--adopt-existing(鍵の一致を
+			// 見ずに削除する)と組み合わさったとき、実際とは無関係な同名のインタフェースを
+			// 消しかねない(design.md 10.3・10.5 節)。
+			fmt.Fprintf(out, "warning: no recorded wg interface name in the server database (%v); assuming the default %s; if the server used a different --wg-interface, this teardown will not find it, and --adopt-existing could delete an unrelated interface named %s\n", e, iface, iface)
 		}
 		if b, e := st.GetMeta(serverKeyMeta); e == nil && len(b) == wgtypes.KeyLen {
 			serverKey, _ = wgtypes.NewKey(b)

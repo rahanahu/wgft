@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -78,7 +79,11 @@ func (c *Client) do(method, path string, in, out any) error {
 	}
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		if strings.Contains(err.Error(), "permission denied") {
+		// os.ErrPermission is the portable sentinel: on Linux and macOS, syscall.Errno.Is maps
+		// EACCES/EPERM to it, and on Windows the same happens for ERROR_ACCESS_DENIED, so this
+		// works across every OS this package builds for. A string match risked misreading any
+		// dial error whose text happened to mention "permission denied" for an unrelated reason.
+		if errors.Is(err, os.ErrPermission) {
 			return fmt.Errorf("cannot access the admin api socket; run with sudo: %w", err)
 		}
 		var netErr net.Error

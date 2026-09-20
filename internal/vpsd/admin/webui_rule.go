@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"html/template"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -49,9 +50,15 @@ func (s *Server) serverMode() string {
 	return info.Mode
 }
 
-// existingGroups は既存ルールのグループ名(重複なし・ソート済み)。フォームの候補に使う。
+// existingGroups は既存ルールのグループ名(重複なし・ソート済み)。フォームの候補(datalist)に
+// 使うだけの補助で、無ければ入力を妨げない。読み取りが失敗したら候補を出さずログに残す
+// (design.md 10.5 節。ページ全体を止めるほどの読み取りではない)。
 func (s *Server) existingGroups() []string {
-	rules, _ := s.backend.Rules()
+	rules, err := s.backend.Rules()
+	if err != nil {
+		log.Printf("add-rule form: reading groups: %v", err)
+		return nil
+	}
 	seen := map[string]bool{}
 	var out []string
 	for i := range rules {
@@ -66,7 +73,24 @@ func (s *Server) existingGroups() []string {
 }
 
 func (s *Server) uiAddRuleForm(w http.ResponseWriter, r *http.Request) {
-	s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": s.serverMode()})
+	agents, err := s.backend.Agents()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": agents, "Groups": s.existingGroups(), "Mode": s.serverMode()})
+}
+
+// renderAddRuleError re-renders the add-rule form with a validation/save error. The agent
+// dropdown must reflect the real agent list, not a silent empty one (design.md 10.5 節): if
+// Agents() itself fails here, this answers 500 instead of a form that looks like no agents exist.
+func (s *Server) renderAddRuleError(w http.ResponseWriter, r *http.Request, mode, formErr string) {
+	agents, err := s.backend.Agents()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": agents, "Groups": s.existingGroups(), "Mode": mode, "Error": formErr})
 }
 
 func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +98,7 @@ func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
 	mode := s.serverMode()
 	lp, err := proto.ParsePortRange(r.FormValue("listen_port"))
 	if err != nil {
-		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": mode, "Error": err.Error()})
+		s.renderAddRuleError(w, r, mode, err.Error())
 		return
 	}
 	rule := proto.Rule{
@@ -85,7 +109,7 @@ func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
 		SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
 	}
 	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{rule}, Force: r.FormValue("force") == "1", Op: "ui add"}); err != nil {
-		s.renderPage(w, r, "addRuleTitle", "addrule", map[string]any{"Agents": s.agentsOrNil(), "Groups": s.existingGroups(), "Mode": mode, "Error": err.Error()})
+		s.renderAddRuleError(w, r, mode, err.Error())
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -149,8 +173,9 @@ type rateFieldView struct {
 	NoLimit bool
 }
 
-// ruleDetailView はルール詳細ページのビューを組み立てる。
-func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
+// ruleDetailView はルール詳細ページのビューを組み立てる。RuleDrops/Generation/Agents/Rules の
+// いずれかが読めなければ、拒否数・適用状態・統合候補を捏造せずエラーを返す(design.md 10.5 節)。
+func (s *Server) ruleDetailView(rule proto.Rule, locale string) (ruleDetailData, error) {
 	mode := string(rule.VPSMode)
 	serverMode := s.serverMode()
 	if serverMode == "userspace" {
@@ -175,11 +200,19 @@ func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
 		// 判定と文言を揃える)。
 		ShowPacketNote: rule.Proto == proto.TCP && rule.PacketRate != nil,
 	}
-	if drops, err := s.backend.RuleDrops(); err == nil {
-		d.Dropped = strconv.FormatUint(drops[rule.ID], 10)
+	drops, err := s.backend.RuleDrops()
+	if err != nil {
+		return ruleDetailData{}, err
 	}
-	gen, _ := s.backend.Generation()
-	agents, _ := s.backend.Agents()
+	d.Dropped = strconv.FormatUint(drops[rule.ID], 10)
+	gen, err := s.backend.Generation()
+	if err != nil {
+		return ruleDetailData{}, err
+	}
+	agents, err := s.backend.Agents()
+	if err != nil {
+		return ruleDetailData{}, err
+	}
 	d.StateBadge, d.StateLabel, d.StateReason = ruleRunState(&rule, gen, buildAgentIndex(agents), s.serverApply(), locale)
 
 	d.CanSplit = rule.ListenPort.IsRange()
@@ -198,9 +231,23 @@ func (s *Server) ruleDetailView(rule proto.Rule, locale string) ruleDetailData {
 		}
 	}
 
-	rules, _ := s.backend.Rules()
+	rules, err := s.backend.Rules()
+	if err != nil {
+		return ruleDetailData{}, err
+	}
 	d.MergeCandidates, d.MergeBlocked = mergeSection(rule, rules, locale)
-	return d
+	return d, nil
+}
+
+// renderRuleDetailOrError builds the rule detail view and either answers 500 (returning ok=false)
+// or hands the caller the built data to render or amend (e.g. to add a form error and redraw).
+func (s *Server) renderRuleDetailOrError(w http.ResponseWriter, locale string, rule proto.Rule) (ruleDetailData, bool) {
+	d, err := s.ruleDetailView(rule, locale)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return ruleDetailData{}, false
+	}
+	return d, true
 }
 
 func sourceItems(list []netip.Prefix, confirmEach bool) []sourceItemView {
@@ -242,7 +289,11 @@ func (s *Server) uiRuleDetail(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.renderDetailPage(w, locale, s.ruleDetailView(rule, locale))
+	d, ok := s.renderRuleDetailOrError(w, locale, rule)
+	if !ok {
+		return
+	}
+	s.renderDetailPage(w, locale, d)
 }
 
 func (s *Server) uiEditMeta(w http.ResponseWriter, r *http.Request) {
@@ -256,7 +307,10 @@ func (s *Server) uiEditMeta(w http.ResponseWriter, r *http.Request) {
 	updated.Group = strings.TrimSpace(r.FormValue("group"))
 	updated.Note = strings.TrimSpace(r.FormValue("note"))
 	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}, Op: "ui edit"}); err != nil {
-		d := s.ruleDetailView(rule, locale)
+		d, ok := s.renderRuleDetailOrError(w, locale, rule)
+		if !ok {
+			return
+		}
 		d.MetaError, d.Group, d.Note = err.Error(), updated.Group, updated.Note
 		s.renderDetailPage(w, locale, d)
 		return
@@ -319,7 +373,10 @@ func (s *Server) uiSourceRm(w http.ResponseWriter, r *http.Request, allow bool) 
 }
 
 func (s *Server) renderSourceError(w http.ResponseWriter, locale string, rule proto.Rule, allow bool, input string, err error) {
-	d := s.ruleDetailView(rule, locale)
+	d, ok := s.renderRuleDetailOrError(w, locale, rule)
+	if !ok {
+		return
+	}
 	if allow {
 		d.AllowError, d.AllowInput = err.Error(), input
 	} else {
@@ -338,7 +395,10 @@ func (s *Server) uiSetRates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	renderRatesError := func(err error) {
-		d := s.ruleDetailView(rule, locale)
+		d, ok := s.renderRuleDetailOrError(w, locale, rule)
+		if !ok {
+			return
+		}
 		d.RateError, d.Rates = err.Error(), s.rateFormFromRequest(r)
 		s.renderDetailPage(w, locale, d)
 	}
