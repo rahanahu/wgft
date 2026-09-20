@@ -23,7 +23,7 @@ func TestRoundTripAndKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFileSecured(t, path)
-	if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".wgft-state-*")); len(matches) != 0 {
+	if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".wgft-credentials-*")); len(matches) != 0 {
 		t.Errorf("temp file left behind: %v", matches)
 	}
 

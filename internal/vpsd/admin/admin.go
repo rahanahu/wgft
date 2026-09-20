@@ -207,7 +207,6 @@ type ErrorBody struct {
 
 // Server は管理用 API の HTTP ハンドラ。
 type Server struct {
-	st      *store.Store
 	backend Backend
 	mux     *http.ServeMux
 	// AllowedHosts は localhost / 127.0.0.1 / [::1] に加えて許可する Host(tailnet 名・IP、--admin-host)。
@@ -215,8 +214,8 @@ type Server struct {
 }
 
 // New はハンドラを組み立てる。
-func New(st *store.Store, backend Backend) *Server {
-	s := &Server{st: st, backend: backend, mux: http.NewServeMux()}
+func New(backend Backend) *Server {
+	s := &Server{backend: backend, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /api/v1/rules", s.getRules)
 	s.mux.HandleFunc("POST /api/v1/rules/batch", s.postBatch)
 	s.mux.HandleFunc("GET /api/v1/agents", s.getAgents)

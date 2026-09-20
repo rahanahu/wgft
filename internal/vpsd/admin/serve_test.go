@@ -114,7 +114,7 @@ func TestSecurityHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	defer srv.Close()
 
 	for _, path := range []string{"/", "/api/v1/rules"} {

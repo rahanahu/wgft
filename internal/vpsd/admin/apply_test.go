@@ -24,7 +24,7 @@ func (b *applyBackend) ApplyStatus() (ApplyStatus, bool) { return b.status, b.ok
 
 func getRulesJSON(t *testing.T, backend Backend, st *store.Store) map[string]json.RawMessage {
 	t.Helper()
-	srv := httptest.NewServer(New(st, backend))
+	srv := httptest.NewServer(New(backend))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL + "/api/v1/rules")
 	if err != nil {

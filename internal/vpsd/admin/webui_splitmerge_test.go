@@ -42,7 +42,7 @@ func newSplitMergeTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	t.Cleanup(srv.Close)
 	return srv, st
 }
@@ -91,7 +91,7 @@ func TestRuleDetailSplitPortsAtUint16Boundary(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	t.Cleanup(srv.Close)
 
 	client := &http.Client{Timeout: 5 * time.Second}

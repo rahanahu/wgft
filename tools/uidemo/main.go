@@ -48,13 +48,7 @@ func run(mode string) error {
 		return fmt.Errorf("fake nft: %w", err)
 	}
 
-	st, err := store.Open(filepath.Join(dir, "demo.sqlite"))
-	if err != nil {
-		return fmt.Errorf("store: %w", err)
-	}
-	defer st.Close()
-
-	srv := admin.New(st, newFakeBackend(mode))
+	srv := admin.New(newFakeBackend(mode))
 	log.Printf("uidemo: http://%s (fixed sample data, mode=%s, for screenshots only)", listenAddr, mode)
 	return admin.Serve(listenAddr, srv, false)
 }

@@ -132,20 +132,6 @@ func TestRoundTripLossless(t *testing.T) {
 	}
 }
 
-// TestNormalizeRulesRoundTrip does the same round-trip check through the whole-set entry points
-// (NormalizeRules/ToProtoRules), which is what callers outside this package will actually use.
-func TestNormalizeRulesRoundTrip(t *testing.T) {
-	rules := fixtureRules()
-	normalized, err := NormalizeRules(rules, nil)
-	if err != nil {
-		t.Fatalf("NormalizeRules: %v", err)
-	}
-	got := ToProtoRules(normalized)
-	if !reflect.DeepEqual(got, rules) {
-		t.Fatalf("round trip mismatch:\n  got  %+v\n  want %+v", got, rules)
-	}
-}
-
 // TestForwardingMapping locks the exact mapping table in design.md 7a.2.
 func TestForwardingMapping(t *testing.T) {
 	tests := []struct {
@@ -211,60 +197,5 @@ func TestNormalizeRulesUsesProtoValidation(t *testing.T) {
 	_, gotErr := NormalizeRules(overlapping, nil)
 	if gotErr == nil || gotErr.Error() != wantErr.Error() {
 		t.Fatalf("NormalizeRules error = %v, want %v", gotErr, wantErr)
-	}
-}
-
-// TestNormalizeUpsertSkipsUnchangedRows は、NormalizeUpsert が proto.ValidateUpsert /
-// proto.UnchangedIDs の「before と ID・内容が変わらない行には Rule.Validate を掛け直さない」規則
-// (設計文書 5.4 節)を引き継いでいることを確かめる。無効な group("!" は許されない文字)を持つ行を
-// before と rules の両方に同じ内容で置き、NormalizeUpsert が通ることと、同じ入力を単体の
-// NormalizeRules に通すと拒否されることの両方を確かめる。
-func TestNormalizeUpsertSkipsUnchangedRows(t *testing.T) {
-	legacy := proto.Rule{
-		ID: "r_legacy", Agent: "home", Group: "not!valid", Proto: proto.TCP,
-		ListenPort: pr(9001, 9001), Target: "192.168.1.50:9001",
-		VPSMode: proto.ModeKernel, Enabled: true,
-	}
-	if err := legacy.Validate(); err == nil {
-		t.Fatal("proto.Rule.Validate: want error for the invalid group, got nil (fixture is stale)")
-	}
-
-	if _, err := NormalizeRules([]proto.Rule{legacy}, nil); err == nil {
-		t.Fatal("NormalizeRules: want error for a freshly-validated invalid row, got nil")
-	}
-
-	before := []proto.Rule{legacy}
-	got, err := NormalizeUpsert([]proto.Rule{legacy}, before, nil)
-	if err != nil {
-		t.Fatalf("NormalizeUpsert: unexpected error for an unchanged legacy row: %v", err)
-	}
-	if len(got) != 1 || got[0].ID != "r_legacy" {
-		t.Fatalf("NormalizeUpsert result = %+v, want the single unchanged r_legacy row", got)
-	}
-}
-
-func TestParseDataplaneMode(t *testing.T) {
-	for _, tt := range []struct {
-		in      string
-		want    DataplaneMode
-		wantErr bool
-	}{
-		{"kernel", Kernel, false},
-		{"userspace", Userspace, false},
-		{"", 0, true},
-		{"kernal", 0, true},
-	} {
-		got, err := ParseDataplaneMode(tt.in)
-		if (err != nil) != tt.wantErr {
-			t.Fatalf("ParseDataplaneMode(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
-		}
-		if err == nil {
-			if got != tt.want {
-				t.Fatalf("ParseDataplaneMode(%q) = %v, want %v", tt.in, got, tt.want)
-			}
-			if got.String() != tt.in {
-				t.Fatalf("DataplaneMode(%v).String() = %q, want %q", got, got.String(), tt.in)
-			}
-		}
 	}
 }

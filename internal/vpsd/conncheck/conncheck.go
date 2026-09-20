@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -87,33 +88,17 @@ func isTimeout(err error) bool {
 }
 
 func isConnReset(err error) bool {
-	return err != nil && (errString(err) != "" && contains(errString(err), "reset"))
-}
-
-func errString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	return err != nil && strings.Contains(err.Error(), "reset")
 }
 
 func friendlyDialErr(err error) string {
 	s := err.Error()
 	switch {
-	case contains(s, "refused"):
+	case strings.Contains(s, "refused"):
 		return "the agent's listener refused the connection; rule may not be applied"
-	case contains(s, "timeout") || contains(s, "i/o timeout"):
+	case strings.Contains(s, "timeout") || strings.Contains(s, "i/o timeout"):
 		return "cannot reach the agent; tunnel is down or agent is offline"
-	case contains(s, "no route"):
+	case strings.Contains(s, "no route"):
 		return "no route to the agent; tunnel not established"
 	}
 	return s

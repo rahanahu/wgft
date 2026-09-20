@@ -8,8 +8,8 @@ package model
 import "fmt"
 
 // Forwarding はルール 1 本の転送の意味を選ぶ(設計文書 7a.2 節)。
-// DataplaneMode(server・agent 全体の転送方式)と紛れる「kernel」という語を、
-// ルール単位の選択には使わない。
+// server・agent 全体の転送方式(今の WGFT_MODE。internal/vpsd が持つ文字列の語彙で、この
+// パッケージの型ではない)と紛れる「kernel」という語を、ルール単位の選択には使わない。
 type Forwarding int
 
 const (
@@ -49,40 +49,5 @@ func (m SourceMetadata) String() string {
 		return "proxy-v2"
 	default:
 		return fmt.Sprintf("SourceMetadata(%d)", int(m))
-	}
-}
-
-// DataplaneMode は server 全体、あるいは agent 全体の転送方式を選ぶ(設計文書 7a.2 節)。
-// 今の WGFT_MODE に当たる、ルールではなくプロセス単位の値である。
-type DataplaneMode int
-
-const (
-	// Kernel はカーネルの nftables と WireGuard を使う(今の WGFT_MODE=kernel)。
-	Kernel DataplaneMode = iota
-	// Userspace は wireguard-go と gVisor の netstack だけを使う(今の WGFT_MODE=userspace)。
-	Userspace
-)
-
-func (m DataplaneMode) String() string {
-	switch m {
-	case Kernel:
-		return "kernel"
-	case Userspace:
-		return "userspace"
-	default:
-		return fmt.Sprintf("DataplaneMode(%d)", int(m))
-	}
-}
-
-// ParseDataplaneMode は WGFT_MODE の値("kernel"/"userspace")を解釈する。
-// この 2 語は外部契約(設計文書 7a.6 節)なので、DataplaneMode.String() と対にして変えない。
-func ParseDataplaneMode(s string) (DataplaneMode, error) {
-	switch s {
-	case "kernel":
-		return Kernel, nil
-	case "userspace":
-		return Userspace, nil
-	default:
-		return 0, fmt.Errorf("mode %q is neither kernel nor userspace", s)
 	}
 }
