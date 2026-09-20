@@ -227,7 +227,9 @@ v1 の前に 1 回流し、以後は関係する領域を変えたときにだ�
 
 v1 の条件のうち、公式に対応をうたう 3 つのディストリビューションでの配布物の確認 (B9) は、`scripts/dist-vm.sh` として実装済みで、Debian 12、Ubuntu 24.04、Fedora 44 のいずれでも確かめました。版の組み合わせ (B7) は `lab/version-skew.sh` として実装済みです。ただし、旧い側が表せない機能のルールを理由付きの `not_active` にすることの確認だけは、該当する capability がまだ無いため未了です (後述の「B7 の not_active の確認」)。
 
-別のディストリビューションでのラボの一式 (C4) のうち、Ubuntu 24.04 での実行は完了しました。カーネル 6.8.0、nftables v1.0.9 の Ubuntu 24.04 の Lab Host VM で `labhost run -parallel 8 all` を流し、同じコミットの既定の Debian 12 (カーネル 6.1.0、nftables v1.0.6) の結果と比較したところ、判定はどちらも PASS 291、FAIL 0、SKIP 16 で一致し、確認ごとの PASS と SKIP の数も一致しました。C4 が挙げていた、新しいカーネルと nftables の版による挙動の違い (通知の出方、`ct count` の値、式の表記) は、今回流した一式の範囲では表れませんでした。もっと大きな規模や、この 2 つより新しいカーネルと nftables での挙動は未確認です。Fedora での実行は未了で、v1.1 以降でよい項目のままです。
+別のディストリビューションでのラボの一式 (C4) のうち、Ubuntu 24.04 での実行は完了しました。カーネル 6.8.0、nftables v1.0.9 の Ubuntu 24.04 の Lab Host VM で `labhost run -parallel 8 all` を流し、同じコミットの既定の Debian 12 (カーネル 6.1.0、nftables v1.0.6) の結果と比較したところ、判定はどちらも PASS 291、FAIL 0、SKIP 16 で一致し、確認ごとの PASS と SKIP の数も一致しました。C4 が挙げていた、新しいカーネルと nftables の版による挙動の違い (通知の出方、`ct count` の値、式の表記) は、今回流した一式の範囲では表れませんでした。もっと大きな規模や、この 2 つより新しいカーネルと nftables での挙動は未確認です。
+
+Fedora 44 (カーネル 7.2.5、nftables v1.1.6) でも同じ一式を既定の設定で流し、こちらも PASS 291、FAIL 0、SKIP 16 で、確認ごとの数も Debian 12 と一致しました。ただし Incus の `images:fedora/44` イメージには、`firewalld` と SELinux のポリシー (`selinux-policy` 一式) がどちらも入っておらず、`getenforce` は Disabled でした (`/sys/fs/selinux` はマウントされているので、カーネル自体は SELinux に対応していますが、適用するポリシーが無い状態です)。実機の Fedora Server や Workstation は既定でこの両方が有効なので、今回の一式はその条件を再現していません。SELinux が enforcing の状態と firewalld が動く状態でラボのトポロジと一式が通ることは未確認で、確かめるには `selinux-policy-targeted` と `policycoreutils` の導入、relabel、再起動による enforcing 化、`firewalld` の導入と有効化を、`lab/lab` の外で別途行う必要があります。Fedora への対応は v1.1 以降でよい項目のままなので、この未確認の点は v1 の関門には含めません。
 
 ## 更新と戻しの約束
 
@@ -285,7 +287,7 @@ v1 の条件のうち、公式に対応をうたう 3 つのディストリビ�
 - 時期:v1 の前に一度流し、以後は関係する変更 (kernel 側の経路) を含む段階の完了時に流し直します
 - 契機:`kernel`、`phase`
 - 自動化:自動です。開発者が起動します
-- v1:Ubuntu 24.04 での実行は必須で、v1 の前に 1 回の項目です。この項目は満たしました (結果は後述の「v1 の項目と繰り返しの頻度」の節)。Fedora への対応は v1.1 以降でよい項目のままです
+- v1:Ubuntu 24.04 での実行は必須で、v1 の前に 1 回の項目です。この項目は満たしました (結果は後述の「v1 の項目と繰り返しの頻度」の節)。Fedora への対応は v1.1 以降でよい項目のままで、既定の設定での一式は流しましたが、SELinux が enforcing の状態と firewalld が動く状態での確認は未確認です (同節)
 
 ### C5 長時間の TCP と UDP
 

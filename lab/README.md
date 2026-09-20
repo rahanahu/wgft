@@ -72,10 +72,13 @@ WGFT_LAB_IMAGE=images:ubuntu/24.04 WGFT_LAB_VM=wgft-lab-ubuntu lab/lab up
 WGFT_LAB_IMAGE=images:fedora/44 WGFT_LAB_VM=wgft-lab-fedora lab/lab up
 ```
 
-Ubuntu 24.04(カーネル 6.8.0、nftables v1.0.9)は、`labhost run -parallel 8 all` の判定が既定の
-Debian 12(カーネル 6.1.0、nftables v1.0.6)と一致する(PASS 291、FAIL 0、SKIP 16、確認ごとの内訳も
-一致)ことを確かめてある([docs/testing.md](../docs/testing.md) の C4)。Fedora は `lab/lab up` で
-立てられるが、一式を流した結果はまだこの文書に書けるところまで確かめていない。
+Ubuntu 24.04(カーネル 6.8.0、nftables v1.0.9)と Fedora 44(カーネル 7.2.5、nftables v1.1.6)は、
+どちらも `labhost run -parallel 8 all` の判定が既定の Debian 12(カーネル 6.1.0、nftables v1.0.6)と
+一致する(PASS 291、FAIL 0、SKIP 16、確認ごとの内訳も一致)ことを確かめてある
+([docs/testing.md](../docs/testing.md) の C4)。ただし Incus の `images:fedora/44` イメージには
+`firewalld` も SELinux のポリシーも既定で入っていないので、この確認は firewalld が動かず SELinux も
+enforcing でない状態で流したものである。その 2 つが実機の Fedora のように有効な状態でラボが動くかは
+未確認で、詳細は [docs/testing.md](../docs/testing.md) の C4 にある。
 
 ## トポロジ
 
