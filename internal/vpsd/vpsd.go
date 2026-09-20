@@ -317,9 +317,6 @@ func Run(opts Options) error {
 	d.startedAt = time.Now()
 	d.kernel = readKernel()
 	d.nftVer = readNFTVersion()
-	if d.timeouts, err = d.dp.ReadUDPTimeouts(); err != nil {
-		return err
-	}
 
 	// 他テーブルの検査(仕様 6.1 節)。起動時は警告と提示だけで、自動では書き換えない
 	rep, err := d.dp.Inspect()
@@ -343,11 +340,6 @@ func Run(opts Options) error {
 	if f := d.dp.EnableIPForward(st); f != nil {
 		log.Printf("warning: %s", f)
 	}
-	// conntrack の表が小さいときの警告(仕様 7a.10 節)。`server check` を実行しない運用者にも
-	// 気付けるよう、ip_forward と同じく起動時のログに出す。
-	if w := d.dp.ConntrackWarning(); w != "" {
-		log.Printf("warning: %s", w)
-	}
 	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)。Admission Policy は、待ち受けを
 	// 開けたポートに付ける nftables の行が判定する(6.1、7 節)ので、中継では判定しない。起動時の
 	// applyNFT が待ち受けを開き、開けたポートだけに行を付けるよう、先に作る
@@ -367,7 +359,13 @@ func Run(opts Options) error {
 	if err != nil {
 		return err
 	}
-	if err := d.applyNFT(rules); err != nil {
+	// テーブルの適用、続いて conntrack の UDP タイムアウトと表の大きさの警告を読む。この順序と、
+	// 適用後もなお読めない場合の扱いは apply.go の applyThenReadConntrack を見よ(設計文書 11a 節)。
+	if d.timeouts, err = applyThenReadConntrack(
+		func() error { return d.applyNFT(rules) },
+		d.dp.ReadUDPTimeouts,
+		d.dp.ConntrackWarning,
+	); err != nil {
 		return err
 	}
 	if d.agentAPI, err = agentapi.New(st, d); err != nil {

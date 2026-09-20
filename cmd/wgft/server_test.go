@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 )
 
 // server の値の誤りと必須の値の欠落は、システムに触る前に終了コード 3 で止まる(仕様 11a 節)。
@@ -41,6 +43,24 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 				t.Errorf("err=%v exitCode=%d, want %d", err, got, exitConfigRefusal)
 			}
 		})
+	}
+}
+
+// A conntrack read that still fails after table inet wgft is applied (internal/vpsd's
+// applyThenReadConntrack, docs/design.md 改訂の記録 2026-09-20) is a permanent environment
+// problem, not one retrying fixes, so vpsd.Run wraps it as a *wg.StartupRefusal. This must map to
+// exit code 3 like the other startup refusals (an unrecognized wg interface, a bound WireGuard
+// port, no WireGuard kernel support), so the shipped server.service's
+// RestartPreventExitStatus=3 stops systemd from restarting it every 2 seconds forever, instead of
+// the generic exit code 1 ReadUDPTimeouts's error used to produce (the actual production bug:
+// found on a module-less Debian 12 lab VM, 83 restarts in about 3 minutes before this fix).
+func TestConntrackReadFailureExitsWithConfigRefusal(t *testing.T) {
+	err := &wg.StartupRefusal{Reason: "reading the conntrack UDP timeouts after applying table inet wgft: read /proc/sys/net/netfilter/nf_conntrack_udp_timeout: no such file or directory"}
+	if !isStartupRefusal(err) {
+		t.Errorf("isStartupRefusal(%v) = false, want true", err)
+	}
+	if got := exitCode(err); got != exitConfigRefusal {
+		t.Errorf("exitCode(%v) = %d, want %d", err, got, exitConfigRefusal)
 	}
 }
 

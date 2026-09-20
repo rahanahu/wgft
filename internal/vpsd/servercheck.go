@@ -268,10 +268,27 @@ func checkIPForward(out io.Writer) {
 // checkConntrack は conntrack の表の使用状況を 1 行出し、上限が小さければ警告する。値は変えない。
 // 実際の読み取りと閾値の判定は internal/platform/linux が持つ(agent の kernel backend でも使う
 // ため。設計文書 7a.7 節)。
+//
+// nf_conntrack が一度もロードされていないホスト(新規インストール、他にロードする常駐が無い
+// ホストは再起動のたびに)では、`server check` はテーブルを何も適用しないので読めない。これは
+// カーネルモードの起動を止める条件ではない。`wgft server run` は自分の table inet wgft を適用した
+// 後にこの値を読み、その適用の netlink 書き込みが nf_conntrack を自動ロードするため
+// (internal/vpsd/vpsd.go の Run、設計文書 11a 節に追記した項目)、読めない状態はそれだけでは
+// 起動を妨げない。適用の後もなお読めない場合だけ、`server run` は専用の終了コード(3)で止まる。
 func checkConntrack(out io.Writer) {
 	usage, err := linux.ReadConntrackUsage()
 	if err != nil {
-		fmt.Fprintf(out, "conntrack: cannot read %s: %v; is the nf_conntrack module loaded\n", linux.ConntrackMaxPath, err)
+		finding := linux.Finding{
+			Where:   "nf_conntrack_max",
+			Problem: fmt.Sprintf("cannot read %s: %v", linux.ConntrackMaxPath, err),
+			Suggest: []string{
+				"expected when nf_conntrack has never loaded on this host (a fresh install, or every boot if nothing else loads it first)",
+				"harmless for kernel mode: `server run` loads nf_conntrack itself when it applies table inet wgft, before it reads this value",
+				"the actual limit and usage cannot be shown before that first start; run server check again afterwards to see them",
+			},
+		}
+		fmt.Fprintln(out, "conntrack: cannot read yet")
+		fmt.Fprintf(out, "  - %s\n", finding)
 		return
 	}
 	if usage.HaveCount {
