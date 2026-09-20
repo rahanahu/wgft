@@ -57,6 +57,30 @@ nftables や WireGuard の挙動を確かめる使い捨ての実験コードは
 
 `.github/workflows/ci.yml` は push と pull request のたびに次を検査します。`gofmt -l` によるフォーマットの確認、`go vet`、ビルドと `go test ./...`、`staticcheck` による静的解析、文字列リテラルへの日本語混入の検査([scripts/check-japanese](scripts/check-japanese/)。ツールの出力は英語だけを使う約束のためです)、公開対象ファイルの全角記号の検査([scripts/check-ascii-punct.sh](scripts/check-ascii-punct.sh))です。ラボの結合テストは Incus の VM を必要とするため、CI には含まれません。
 
+## v1.0 までの内部構造の固定
+
+v1.0 をリリースするまで、内部構造は原則として固定します。package の分け方と層の分け方は、移行の完了後に点検し、現時点で変更する実利が無いことを確かめました。点検の結果は [docs/design.md](docs/design.md) の「改訂の記録」にあります。
+
+固定の対象は次の 4 つです。
+
+- package の境界
+- 依存の向き。規範は [docs/design.md](docs/design.md) の 7a.7 節で、`internal/dataplane/deps_test.go` が検査します
+- 層の間の interface
+- 新しい抽象の層の追加
+
+次の変更は、固定の対象に含めません。
+
+- 不具合の修正
+- package の内部の整理
+- テスト、ラボ、テストの harness
+- 文書
+- 依存の更新
+- 運用者に見える文言
+
+固定の対象を変更できるのは、再現できる実害を具体的に示せる場合だけです。実害は、不具合、テストのフレーク、レビューで 2 回以上見つかった同じ種類の誤りのいずれかです。コードが整うことは、変更の理由にしません。変更するときは、実害をプルリクエストの本文に引用します。
+
+作業の途中で固定の対象に当たる改善を見つけたときは、変更せずにプルリクエストの本文か Issue に記録します。
+
 ## コードと出力の約束
 
 - ツールの出力 (ログ、エラー、CLI のヘルプと結果) は英語だけで書きます。i18n は持ちません。Web UI だけが `internal/vpsd/admin/i18n.go` で日英を切り替えます。コードのコメントは日本語のままで構いません
