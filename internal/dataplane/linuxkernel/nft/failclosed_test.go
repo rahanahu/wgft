@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -20,7 +20,7 @@ func TestEmitOmitsFailClosedRule(t *testing.T) {
 		{ID: "r_ok", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565",
 			VPSMode: proto.ModeKernel, Enabled: true},
 	}
-	full := buildTestPlan(t, rules, testAgentAddr, flowcap.Limits{})
+	full := buildTestPlan(t, rules, testAgentAddr, policy.AdmissionLimits{})
 	rec := newRecorder()
 	if err := emit(rec, full, nil, testCfg); err != nil {
 		t.Fatal(err)

@@ -14,9 +14,10 @@ import (
 
 	proxyproto "github.com/pires/go-proxyproto"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/netpipe"
 	"github.com/rahanahu/wgft/internal/policy"
+	"github.com/rahanahu/wgft/internal/resource"
 )
 
 // Rule は中継 1 つ分の宣言。
@@ -40,11 +41,9 @@ type Options struct {
 	// Dial はエージェントのリスナーへ繋ぐ。既定は net.Dial("tcp", addr)。
 	Dial func(addr string) (net.Conn, error)
 	Logf func(string, ...any)
-	// ConnsMax はルールごとの同時接続数の上限(既定は Cap.Total から flowcap.Limits.TCPPerRuleCap で導く)。
-	ConnsMax int
-	// Cap はプロセス全体の上限(仕様 7 節、Resource Guard)。nil なら既定値で作る。
-	// ユーザー空間モードの vpsd は relay と同じ Counter を渡し、合計で数える
-	Cap *flowcap.Counter
+	// Pool はプロセス全体の予算とルールごとの上限(仕様 7 節、Resource Guard)。nil なら既定値で作る。
+	// ユーザー空間モードの vpsd は relay と同じ Pool を渡し、合計で数える
+	Pool *resource.Pool
 	// Admit は新しい接続を Admission Policy のすべての段(deny、allow、3 つのレート、送信元ごとの
 	// 同時フロー数の上限)で判定し、拒んだ段の drop を数える。通すときは枠を返す release も返し、
 	// 中継は接続の終わりに 1 回呼ぶ。後の上限(Resource Guard)で拒んだときも呼ぶ。
@@ -80,12 +79,15 @@ type listener struct {
 	mu     sync.Mutex
 	conns  map[net.Conn]string // 進行中の中継(公開側の接続 → 接続元 IP 文字列)
 	closed bool
-	// pending は上限の枠を取ってから track するまでの接続の数(エージェントへの接続中)
+	// pending は枠を取ってから track するまでの接続の数(エージェントへの接続中)。Retiring の
+	// 待ち受けを閉じてよいか(idle)の判定に使う
 	pending int
-	capLog  flowcap.LogGate
+	// budget は Resource Guard の枠(プロセス全体の予算とルールごとの上限。設計文書 7a.10 節)
+	budget *resource.Listener
+	capLog lograte.Gate
 	// dialLog はエージェントへの接続失敗のログを絞る(agent 側が落ちている間、公開ポートへの
 	// 接続のたびに 1 行出ると高頻度になりうるため。仕様 10.4 節)。
-	dialLog flowcap.LogGate
+	dialLog lograte.Gate
 }
 
 // abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う
@@ -117,11 +119,9 @@ func New(opts Options) *Manager {
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
 	}
-	if opts.Cap == nil {
-		opts.Cap = &flowcap.Counter{Total: flowcap.TCPTotal}
-	}
-	if opts.ConnsMax <= 0 {
-		opts.ConnsMax = flowcap.Limits{TCPTotal: opts.Cap.Total}.TCPPerRuleCap()
+	if opts.Pool == nil {
+		lim := resource.Limits{}.WithDefaults()
+		opts.Pool = resource.NewPool(lim.TCPTotal, lim.TCPPerRuleCap())
 	}
 	return &Manager{opts: opts, ls: map[uint16]*listener{}, bindFail: map[uint16]*failure{}}
 }
@@ -253,7 +253,7 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 		if !ok {
 			continue
 		}
-		l := &listener{rule: r, ln: ln, conns: map[net.Conn]string{}}
+		l := &listener{rule: r, ln: ln, conns: map[net.Conn]string{}, budget: m.opts.Pool.Listener(r.ID)}
 		m.ls[port] = l
 		go m.serve(l)
 		m.opts.Logf("proxy: opened relay %d -> %s:%d proxy_protocol=%v", port, r.AgentAddr, r.AgentPort, r.ProxyProtocol)
@@ -351,26 +351,20 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 		abortRefused(c)
 		return
 	}
-	// 同時フロー数の上限(仕様 7 節、Resource Guard)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
-	l.mu.Lock()
-	full := len(l.conns)+l.pending >= m.opts.ConnsMax
-	if !full {
-		l.pending++
-	}
-	l.mu.Unlock()
-	if full || !m.opts.Cap.Acquire() {
-		if !full {
-			l.mu.Lock()
-			l.pending--
-			l.mu.Unlock()
-		}
+	// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算とルールごとの上限を Pool が
+	// 1 つの排他の中で判定する。超えた接続はすぐ閉じる(既存の接続は追い出さない)
+	ref, ok := l.budget.Acquire()
+	if !ok {
 		abortRefused(c)
 		if l.capLog.Allow() {
-			m.opts.Logf("proxy: %d: connection limit reached; refusing new connections", rule.ListenPort)
+			m.opts.Logf("proxy: %d: %s; refusing new connections", rule.ListenPort, ref)
 		}
 		return
 	}
-	defer m.opts.Cap.Release()
+	defer l.budget.Release()
+	l.mu.Lock()
+	l.pending++
+	l.mu.Unlock()
 	pending := true
 	unpend := func() {
 		if pending {
@@ -410,6 +404,8 @@ func (l *listener) updateRestriction(r Rule) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.rule.ID, l.rule.Agent = r.ID, r.Agent
+	// 分割と統合で所属ルールが変わっても、既存の接続は移動先のルールで数える(仕様 7 節)
+	l.budget.SetRule(r.ID)
 	l.rule.SourceDeny, l.rule.SourceAllow = r.SourceDeny, r.SourceAllow
 	l.rule.ProxyProtocol, l.rule.AgentAddr, l.rule.AgentPort = r.ProxyProtocol, r.AgentAddr, r.AgentPort
 	for c, srcStr := range l.conns {
@@ -464,10 +460,12 @@ func (l *listener) idle() bool {
 
 // stopAccepting は待ち受けソケットだけを閉じ、成立済みの接続には触れない(設計文書 7a.3 節の
 // StopAccepting)。触れなかった接続は Retiring になり、自然に終わるまで中継を続ける。
+// 残る接続はプロセス全体の数に入り続け、ルールごとの数からは外れる(設計文書 7a.10 節の A)。
 func (l *listener) stopAccepting() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.ln.Close()
+	l.budget.StopAccepting()
 }
 
 // retire は keep が偽を返す接続元の接続だけを閉じ、閉じた数を返す(設計文書 7a.3 節の Retire)。
@@ -489,6 +487,8 @@ func (l *listener) close() {
 	l.mu.Lock()
 	l.closed = true
 	l.ln.Close()
+	// 閉じ終えていない接続の枠は、中継の goroutine が Release を呼ぶまでプロセス全体の数に残る
+	l.budget.Close()
 	for c := range l.conns {
 		c.Close()
 	}

@@ -6,7 +6,7 @@
 // この 1 つの IR から作る。このパッケージ自身はコンパイラも評価器も持たない、データと評価順だけの
 // 表現である。
 //
-// このパッケージは純粋で、proto(外部契約)、internal/model、internal/flowcap(OS を知らない
+// このパッケージは純粋で、proto(外部契約)、internal/model(OS を知らない
 // カウンタと上限の計算だけを持つ)だけを import する。dataplane、frontend、platform、vpsd、agent
 // のどの package も import しない(設計文書 7a.7 節)。
 package policy
@@ -19,7 +19,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -125,12 +124,10 @@ var Order = []Step{
 // protection of wgft's own resources.
 //
 // UDP and TCP are already-resolved effective values (0 disables the cap for that protocol). Build
-// takes a flowcap.Limits and resolves these through Limits.UDPPerSourceCap()/TCPPerSourceCap()
-// instead of taking raw ints here, precisely so that a zero-value input means "use the default"
-// (256/128) rather than "no cap": internal/flowcap fixed exactly this zero-value footgun for
-// Limits itself, and duplicating a second, independently-zero-value-sensitive type in this package
-// would reintroduce it. Importing internal/flowcap does not violate design.md 7a.7 節's "no OS,
-// nftables, or gVisor" rule for this package; flowcap is pure Go (counters and derived limits).
+// takes an AdmissionLimits and resolves these through UDPPerSourceCap()/TCPPerSourceCap() instead
+// of taking raw ints here, precisely so that a zero-value input means "use the default" (256/128)
+// rather than "no cap": AdmissionLimits fixes exactly this zero-value footgun, and duplicating a
+// second, independently-zero-value-sensitive type in this package would reintroduce it.
 type PerSourceFlowCaps struct {
 	UDP int
 	TCP int
@@ -172,11 +169,10 @@ type Policy struct {
 // condition internal/dataplane/linuxkernel/nft.emit applies to the ports it draws from this Policy
 // (via Plan.Admission); internal/policy/goengine.Engine.Update takes this Policy directly.
 //
-// limits is resolved through flowcap.Limits.UDPPerSourceCap()/TCPPerSourceCap(), so a zero-value
-// flowcap.Limits{} yields the default caps (256/128), and flowcap.PerSourceOff explicitly disables
-// one protocol's cap, exactly like every other consumer of flowcap.Limits (see PerSourceFlowCaps's
-// doc comment). Only the two per-source fields of limits matter here; its process-wide totals
-// belong to Resource Guard (design.md 7a.5 節), not AdmissionPolicy.
+// limits is resolved through AdmissionLimits.UDPPerSourceCap()/TCPPerSourceCap(), so a zero-value
+// AdmissionLimits{} yields the default caps (256/128), and PerSourceOff explicitly disables one
+// protocol's cap (see PerSourceFlowCaps's doc comment). The process-wide flow budget is not here
+// at all: it belongs to Resource Guard (internal/resource; design.md 7a.5, 7a.10 節).
 //
 // design.md 7a.4 節 further restricts the kernel ingress layer to ports wgft has actually bound or
 // DNATed ("wgft が実際に待ち受けを開けている、または DNAT を持つポートだけ"), which is a Runtime
@@ -187,7 +183,7 @@ type Policy struct {
 // Build is deterministic: Policy.Rules is always sorted by RuleID, regardless of the input rules'
 // order, so a Policy embedded in a larger deterministic structure (internal/planner.Plan.Admission)
 // does not reintroduce input-order dependence.
-func Build(rules []model.Rule, limits flowcap.Limits) Policy {
+func Build(rules []model.Rule, limits AdmissionLimits) Policy {
 	p := Policy{PerSourceFlowCaps: PerSourceFlowCaps{UDP: limits.UDPPerSourceCap(), TCP: limits.TCPPerSourceCap()}}
 	for _, r := range rules {
 		if !r.Enabled {

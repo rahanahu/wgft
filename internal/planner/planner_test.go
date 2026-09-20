@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -37,7 +37,7 @@ func TestBuildSkipsDisabledAndUnknownAgent(t *testing.T) {
 	if len(ids) != 1 || ids[0] != "r_on" {
 		t.Errorf("Build().Admission.Rules IDs = %v, want only r_on", ids)
 	}
-	if got.Admission.PerSourceFlowCaps.UDP != flowcap.UDPPerSource || got.Admission.PerSourceFlowCaps.TCP != flowcap.TCPPerSource {
+	if got.Admission.PerSourceFlowCaps.UDP != policy.UDPPerSource || got.Admission.PerSourceFlowCaps.TCP != policy.TCPPerSource {
 		t.Errorf("Build().Admission.PerSourceFlowCaps = %+v, want the defaults", got.Admission.PerSourceFlowCaps)
 	}
 }
@@ -49,7 +49,7 @@ func TestBuildJoinsPolicy(t *testing.T) {
 			{ID: "r1", Agent: "home", Proto: proto.TCP, ListenPort: pr(443, 443), Target: "192.168.1.1:443",
 				Forwarding: model.Relay, SourceMetadata: model.ProxyV2, Enabled: true, NewFlowRate: rate("50/second")},
 		},
-		Limits: flowcap.Limits{UDPPerSource: 256, TCPPerSource: 128},
+		Limits: policy.AdmissionLimits{UDPPerSource: 256, TCPPerSource: 128},
 		Agents: []Agent{{Name: "home", Addr: addr("10.200.0.2")}},
 	}
 	got := Build(in)
@@ -77,12 +77,12 @@ func TestBuildJoinsPolicy(t *testing.T) {
 }
 
 // TestBuildAdmissionCarriesPerSourceFlowCaps は、Plan.Admission が
-// WGFT_MAX_*_FLOWS_PER_SOURCE(flowcap.Limits 経由)の値を運ぶことを確かめる。ゼロ値の
-// flowcap.Limits{} は「上限なし」ではなく既定値(256/128)を意味し(internal/flowcap が
-// Limits 自身について直した規約と同じ)、flowcap.PerSourceOff は明示的に無効にする。
+// WGFT_MAX_*_FLOWS_PER_SOURCE(policy.AdmissionLimits 経由)の値を運ぶことを確かめる。ゼロ値の
+// policy.AdmissionLimits{} は「上限なし」ではなく既定値(256/128)を意味し、
+// policy.PerSourceOff は明示的に無効にする。
 // この解決は internal/policy.Build が行うので、ここでは Plan がその結果をそのまま運ぶことだけを見る。
 func TestBuildAdmissionCarriesPerSourceFlowCaps(t *testing.T) {
-	in := func(limits flowcap.Limits) Input {
+	in := func(limits policy.AdmissionLimits) Input {
 		return Input{
 			Rules:  []model.Rule{{ID: "r1", Agent: "home", Proto: proto.UDP, ListenPort: pr(1000, 1000), Enabled: true}},
 			Limits: limits,
@@ -90,14 +90,14 @@ func TestBuildAdmissionCarriesPerSourceFlowCaps(t *testing.T) {
 		}
 	}
 
-	if got := Build(in(flowcap.Limits{})).Admission.PerSourceFlowCaps; got.UDP != flowcap.UDPPerSource || got.TCP != flowcap.TCPPerSource {
+	if got := Build(in(policy.AdmissionLimits{})).Admission.PerSourceFlowCaps; got.UDP != policy.UDPPerSource || got.TCP != policy.TCPPerSource {
 		t.Fatalf("Build(zero Limits{}).Admission.PerSourceFlowCaps = %+v, want the defaults {%d %d}",
-			got, flowcap.UDPPerSource, flowcap.TCPPerSource)
+			got, policy.UDPPerSource, policy.TCPPerSource)
 	}
-	if got := Build(in(flowcap.Limits{UDPPerSource: flowcap.PerSourceOff, TCPPerSource: flowcap.PerSourceOff})).Admission.PerSourceFlowCaps; got.UDP != 0 || got.TCP != 0 {
+	if got := Build(in(policy.AdmissionLimits{UDPPerSource: policy.PerSourceOff, TCPPerSource: policy.PerSourceOff})).Admission.PerSourceFlowCaps; got.UDP != 0 || got.TCP != 0 {
 		t.Fatalf("Build(PerSourceOff).Admission.PerSourceFlowCaps = %+v, want {0 0}", got)
 	}
-	if got := Build(in(flowcap.Limits{UDPPerSource: 300, TCPPerSource: 150})).Admission.PerSourceFlowCaps; got.UDP != 300 || got.TCP != 150 {
+	if got := Build(in(policy.AdmissionLimits{UDPPerSource: 300, TCPPerSource: 150})).Admission.PerSourceFlowCaps; got.UDP != 300 || got.TCP != 150 {
 		t.Fatalf("Build(explicit Limits).Admission.PerSourceFlowCaps = %+v, want {300 150}", got)
 	}
 }

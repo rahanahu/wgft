@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -25,11 +25,11 @@ func TestCommitTakesAdmissionFromPlan(t *testing.T) {
 	}
 	plan := planner.Build(planner.Input{
 		Rules:  rules,
-		Limits: flowcap.Limits{UDPPerSource: 7, TCPPerSource: flowcap.PerSourceOff},
+		Limits: policy.AdmissionLimits{UDPPerSource: 7, TCPPerSource: policy.PerSourceOff},
 		Agents: []planner.Agent{{Name: "home", Addr: netip.MustParseAddr("10.200.0.2")}},
 	})
 
-	b := New(Options{Limits: flowcap.Limits{UDPPerSource: 1, TCPPerSource: 1}})
+	b := New(Options{})
 	p, err := b.Prepare(dataplane.Desired{Plan: plan})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
@@ -43,8 +43,9 @@ func TestCommitTakesAdmissionFromPlan(t *testing.T) {
 	if d, _ := b.policy.AdmitFlow("r_proxy", netip.MustParseAddr("198.51.100.1"), 0); !d.Allow {
 		t.Error("a source outside source_deny must be admitted")
 	}
-	// The per-source caps come from the Plan (TCP off), not from Options.Limits (1): 200 concurrent
-	// Relay connections from one source, above both 1 and the default 128, are all admitted.
+	// The per-source caps come from the Plan (TCP off): Options carries the Resource Guard budget
+	// only (resource.Limits has no per-source field at all; design.md 7a.10 節). 200 concurrent Relay
+	// connections from one source, above the default 128, are all admitted.
 	for i := range 200 {
 		if _, ok := b.AdmitRelayFlow("r_proxy", netip.MustParseAddr("198.51.100.1")); !ok {
 			t.Fatalf("Relay connection %d refused; the Plan turns the TCP per-source cap off", i+1)

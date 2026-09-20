@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -36,7 +36,7 @@ func TestRelayTargetsFromPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("model.NormalizeRules: %v", err)
 	}
-	plan := planner.Build(planner.Input{Rules: normalized, Limits: flowcap.Limits{}, Agents: []planner.Agent{
+	plan := planner.Build(planner.Input{Rules: normalized, Limits: policy.AdmissionLimits{}, Agents: []planner.Agent{
 		{Name: "home", Addr: netip.MustParseAddr("10.200.0.2")},
 		{Name: "office", Addr: netip.MustParseAddr("10.200.0.3")},
 	}})

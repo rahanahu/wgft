@@ -22,17 +22,17 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // Options は agent の起動オプション。
 type Options struct {
-	CredentialsPath string         // 認証情報ファイル
-	Join            string         // 接続文字列(WGFT_JOIN か --join)。初回登録に使う
-	Limits          flowcap.Limits // 同時フロー数のプロセス全体の上限(仕様 7 節)。ゼロ値は既定値
-	Name            string         // エージェント名(WGFT_NAME か --name)。任意。接続文字列の発行時の名前に紐付いているので、与えなければトークンに紐付いた名前で登録される
-	Version         string         // 起動ログに出す wgft の版(cmd 側の effectiveVersion())。空なら "dev" として出す
+	CredentialsPath string          // 認証情報ファイル
+	Join            string          // 接続文字列(WGFT_JOIN か --join)。初回登録に使う
+	Limits          resource.Limits // 同時フロー数のプロセス全体の予算(仕様 7 節)。ゼロ値は既定値
+	Name            string          // エージェント名(WGFT_NAME か --name)。任意。接続文字列の発行時の名前に紐付いているので、与えなければトークンに紐付いた名前で登録される
+	Version         string          // 起動ログに出す wgft の版(cmd 側の effectiveVersion())。空なら "dev" として出す
 }
 
 // runtime は動いているエージェント。全体状態を「宣言された状態に収束させる」方式で適用する。

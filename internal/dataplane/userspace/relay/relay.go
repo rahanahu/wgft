@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -30,17 +30,14 @@ type Network interface {
 // Options は中継の調整値。
 type Options struct {
 	UDPIdleTimeout time.Duration // 無通信でセッションを閉じるまで(全体状態の udp_timeout_stream)
-	UDPSessionsMax int           // ルールごとの UDP セッション数の上限(既定は Limits.UDPPerRuleCap)
-	TCPConnsMax    int           // ルールごとの TCP 接続数の上限(既定は Limits.TCPPerRuleCap)
-	// Limits はプロセス全体の上限(設定値)。UDPCap と TCPCap、UDPSessionsMax と TCPConnsMax の
-	// 既定値を導くのに使う
-	Limits flowcap.Limits
-	// UDPCap と TCPCap はプロセス全体の上限(仕様 7 節、Resource Guard)。nil なら Limits から作る。
-	// vpsd はプロキシモードの中継と共有する Counter を渡す
-	UDPCap *flowcap.Counter
-	TCPCap *flowcap.Counter
-	Dial   func(network, addr string) (net.Conn, error)
-	Logf   func(format string, args ...any)
+	// Limits はプロセス全体の予算(設定値)。UDPPool と TCPPool の既定値を導くのに使う
+	Limits resource.Limits
+	// UDPPool と TCPPool はプロセス全体の予算とルールごとの上限(仕様 7 節、Resource Guard)。
+	// nil なら Limits から作る。vpsd はプロキシモードの中継と共有する Pool を渡す
+	UDPPool *resource.Pool
+	TCPPool *resource.Pool
+	Dial    func(network, addr string) (net.Conn, error)
+	Logf    func(format string, args ...any)
 	// Admit は新しいフロー(TCP の accept、UDP の新しいセッションの最初のデータグラム)を通すかを、
 	// Admission Policy のすべての段で判定する(設計文書 7a.9 節の AdmitFlow)。size は最初のパケットの
 	// 大きさ(UDP はデータグラムの長さ、TCP は 0)。通すときは、送信元ごとの同時フロー数の枠を返す
@@ -102,9 +99,11 @@ type listener struct {
 	sweep func(keep func(src netip.Addr) bool) int
 	// セッション数(ハートビートの表示用)
 	sessions func() int
-	// 上限の対象になるフロー数(UDP はセッション、TCP は公開側の接続)。
-	// ルールごとの上限は Manager が同じルールのリスナーの合計で見る
-	flows   func() int
+	// budget は Resource Guard の枠(プロセス全体の予算とルールごとの上限。設計文書 7a.10 節)。
+	// 上限の対象になるフロー(UDP はセッション、TCP は公開側の接続)を 1 つずつここで取る。
+	// ルールごとの数は Pool が同じルールの待ち受けの合計で見るので、分割と統合で所属ルールが
+	// 変わったリスナーの既存のフローは移動先のルールで数える(仕様 7 節)
+	budget  *resource.Listener
 	bindErr error // リスナーを開けなかった(bind 失敗)。Retry で開き直す
 	// targetErr は TCP ルールで target への接続確認が失敗したときの誤り(仕様 5.2 節)。
 	// リスナー自体は開いているので、Retry では開き直さず再確認だけする
@@ -125,17 +124,11 @@ func New(n Network, opts Options) *Manager {
 		opts.UDPIdleTimeout = 120 * time.Second
 	}
 	lim := opts.Limits.WithDefaults()
-	if opts.UDPSessionsMax <= 0 {
-		opts.UDPSessionsMax = lim.UDPPerRuleCap()
+	if opts.UDPPool == nil {
+		opts.UDPPool = resource.NewPool(lim.UDPTotal, lim.UDPPerRuleCap())
 	}
-	if opts.TCPConnsMax <= 0 {
-		opts.TCPConnsMax = lim.TCPPerRuleCap()
-	}
-	if opts.UDPCap == nil {
-		opts.UDPCap = &flowcap.Counter{Total: lim.UDPTotal}
-	}
-	if opts.TCPCap == nil {
-		opts.TCPCap = &flowcap.Counter{Total: lim.TCPTotal}
+	if opts.TCPPool == nil {
+		opts.TCPPool = resource.NewPool(lim.TCPTotal, lim.TCPPerRuleCap())
 	}
 	if opts.Dial == nil {
 		d := &net.Dialer{Timeout: 10 * time.Second}
@@ -221,6 +214,7 @@ func (m *Manager) Apply(desired map[Key]Desired) []Action {
 			m.openLocked(a.Key, d)
 		case "relabel":
 			m.listeners[a.Key].ruleID = d.RuleID
+			m.listeners[a.Key].budget.SetRule(d.RuleID)
 		case "open":
 			m.openLocked(a.Key, d)
 		}
@@ -231,14 +225,25 @@ func (m *Manager) Apply(desired map[Key]Desired) []Action {
 func (m *Manager) closeLocked(k Key) {
 	if l, ok := m.listeners[k]; ok {
 		l.closeF()
+		l.budget.Close()
 		delete(m.listeners, k)
 		m.opts.Logf("listener %s closed", k)
 	}
 }
 
-func (m *Manager) openLocked(k Key, d Desired) {
+// newListener は待ち受け 1 つ分の記録を作り、Resource Guard の枠を登録する。中継を始めるのは
+// startUDP/startTCP(Apply の経路)と serveUDP/serveTCP(Prepare/Commit の経路)である。
+func (m *Manager) newListener(k Key, d Desired) *listener {
 	zero := func() int { return 0 }
-	l := &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: zero, flows: zero}
+	pool := m.opts.UDPPool
+	if k.Proto == proto.TCP {
+		pool = m.opts.TCPPool
+	}
+	return &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: zero, budget: pool.Listener(d.RuleID)}
+}
+
+func (m *Manager) openLocked(k Key, d Desired) {
+	l := m.newListener(k, d)
 	var err error
 	switch k.Proto {
 	case proto.UDP:
@@ -283,6 +288,7 @@ func (m *Manager) Retry() {
 	for k, l := range m.listeners {
 		if l.bindErr != nil {
 			d := Desired{Target: l.target, RuleID: l.ruleID}
+			l.budget.Close()
 			delete(m.listeners, k)
 			m.openLocked(k, d)
 			continue
@@ -363,22 +369,9 @@ func (m *Manager) Close() {
 	}
 	for k, l := range m.retiring {
 		l.closeF()
+		l.budget.Close()
 		delete(m.retiring, k)
 	}
-}
-
-// ruleFlows は同じルールに所属する全リスナーのフロー合計(上限の判定に使う)。
-// 分割で移ったリスナーの既存セッションは移動先のルールで数える(仕様 7 節)。
-func (m *Manager) ruleFlows(ruleID string) int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	n := 0
-	for _, l := range m.listeners {
-		if l.ruleID == ruleID {
-			n += l.flows()
-		}
-	}
-	return n
 }
 
 // targetOf は現在の実効宛先(Prepare/Commit の経路では宛先の変更を待ち受けを開き直さずに

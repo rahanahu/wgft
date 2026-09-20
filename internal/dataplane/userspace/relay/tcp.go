@@ -5,7 +5,7 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/netpipe"
 )
 
@@ -51,10 +51,9 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		once  sync.Once
 		// public は公開側の接続の数(同時フロー数の上限の対象。conns は target 側も含む)
 		public  int
-		capLog  flowcap.LogGate // 上限で拒んだログの頻度
-		dialLog flowcap.LogGate // target への dial 失敗のログの頻度(target が落ちている間、接続のたびに鳴らさない)
+		capLog  lograte.Gate // 上限で拒んだログの頻度
+		dialLog lograte.Gate // target への dial 失敗のログの頻度(target が落ちている間、接続のたびに鳴らさない)
 	)
-	l.flows = func() int { mu.Lock(); defer mu.Unlock(); return public }
 	l.sessions = func() int { mu.Lock(); defer mu.Unlock(); return len(conns) }
 	l.sweep = func(keep func(src netip.Addr) bool) int {
 		mu.Lock()
@@ -106,12 +105,13 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				}
 				release = rel
 			}
-			// 同時フロー数の上限(仕様 7 節、Resource Guard)。超えた接続はすぐ閉じる(既存の接続は追い出さない)
-			if m.ruleFlows(ruleID) >= m.opts.TCPConnsMax || !m.opts.TCPCap.Acquire() {
+			// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算とルールごとの上限を
+			// Pool が 1 つの排他の中で判定する。超えた接続はすぐ閉じる(既存の接続は追い出さない)
+			if ref, ok := l.budget.Acquire(); !ok {
 				release()
 				abortRefused(c)
 				if capLog.Allow() {
-					m.opts.Logf("tcp %s: connection limit reached; refusing new connections", l.key)
+					m.opts.Logf("%s: %s; refusing new connections", l.key, ref)
 				}
 				continue
 			}
@@ -125,7 +125,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					delete(conns, c)
 					public--
 					mu.Unlock()
-					m.opts.TCPCap.Release()
+					l.budget.Release()
 					release()
 				}()
 				target := m.targetOf(l)

@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/policy"
@@ -245,7 +244,7 @@ const FirstPort = 20000
 // Plan は fixture のルールから Plan を組み立てる(internal/planner.Build。本番と同じ経路で、
 // Plan.Admission が IR になる)。どのルールも登録済みのエージェントに属し、有効である。
 func (fx *Fixture) Plan() (planner.Plan, error) {
-	limits := flowcap.Limits{}
+	limits := policy.AdmissionLimits{}
 	if c := fx.Policy.PerSourceFlowCaps.UDP; c != nil {
 		limits.UDPPerSource = capSetting(*c)
 	}
@@ -271,10 +270,10 @@ func (fx *Fixture) Plan() (planner.Plan, error) {
 		Agents: []planner.Agent{{Name: "agent", Addr: netip.MustParseAddr("10.200.0.2")}}}), nil
 }
 
-// capSetting は fixture の上限を flowcap.Limits の値へ写す(0 は上限なし)。
+// capSetting は fixture の上限を policy.AdmissionLimits の値へ写す(0 は上限なし)。
 func capSetting(c int) int {
 	if c == 0 {
-		return flowcap.PerSourceOff
+		return policy.PerSourceOff
 	}
 	return c
 }

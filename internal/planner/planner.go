@@ -6,8 +6,8 @@
 // come later; design.md 7a.7 節 assigns them to internal/dataplane, internal/frontend and
 // internal/reconcile). It only computes what should exist, never applies anything.
 //
-// This package is pure: it imports internal/model, internal/policy, internal/flowcap (OS-free
-// counters and limits) and proto (the external contract), and nothing from
+// This package is pure: it imports internal/model, internal/policy (OS-free types, admission
+// limits included) and proto (the external contract), and nothing from
 // dataplane/frontend/platform/vpsd/agent or OS-specific packages (design.md 7a.7 節).
 package planner
 
@@ -15,7 +15,6 @@ import (
 	"net/netip"
 	"sort"
 
-	"github.com/rahanahu/wgft/internal/flowcap"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
@@ -30,13 +29,14 @@ type Agent struct {
 }
 
 // Input is everything Build needs to produce a Plan. Limits is the per-source concurrent flow cap
-// setting (WGFT_MAX_*_FLOWS_PER_SOURCE; design.md 7a.5 節); Build passes it straight to
-// policy.Build, so a zero-value Limits{} means "use the default caps" (see PerSourceFlowCaps's doc
-// comment in internal/policy), never "no cap".
+// setting (WGFT_MAX_*_FLOWS_PER_SOURCE; design.md 7a.5, 7a.10 節); Build passes it straight to
+// policy.Build, so a zero-value AdmissionLimits{} means "use the default caps" (see
+// PerSourceFlowCaps's doc comment in internal/policy), never "no cap". The process-wide flow
+// budget belongs to Resource Guard (internal/resource) and is no Planner input.
 type Input struct {
 	Generation uint64
 	Rules      []model.Rule
-	Limits     flowcap.Limits
+	Limits     policy.AdmissionLimits
 	Agents     []Agent
 }
 
