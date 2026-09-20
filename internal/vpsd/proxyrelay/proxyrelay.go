@@ -27,9 +27,11 @@ type Rule struct {
 	AgentAddr     netip.Addr
 	AgentPort     uint16 // エージェントのリスナー(= listen_port の先頭)
 	ProxyProtocol bool
-	SourceDeny    []netip.Prefix
-	SourceAllow   []netip.Prefix
-	Agent         string
+	// Policy は、この中継の接続元 deny/allow(design.md 7a.9 節)。planner.PortPlan.Policy の写しで、
+	// 接続元以外のレート等の項目は proxyrelay が判定に使わない(Options.Admit がユーザー空間モードで
+	// 全段を判定し、カーネルモードは nftables が判定する。仕様 6.1、6.2 節)
+	Policy policy.RulePolicy
+	Agent  string
 }
 
 // Options は依存の差し替え(テスト用)。
@@ -417,7 +419,7 @@ func (l *listener) updateRestriction(r Rule) {
 	l.rule.ID, l.rule.Agent = r.ID, r.Agent
 	// 分割と統合で所属ルールが変わっても、既存の接続は移動先のルールで数える(仕様 7 節)
 	l.budget.SetRule(r.ID)
-	l.rule.SourceDeny, l.rule.SourceAllow = r.SourceDeny, r.SourceAllow
+	l.rule.Policy = r.Policy
 	l.rule.ProxyProtocol, l.rule.AgentAddr, l.rule.AgentPort = r.ProxyProtocol, r.AgentAddr, r.AgentPort
 	for c, srcStr := range l.conns {
 		src, err := netip.ParseAddr(srcStr)
@@ -512,7 +514,7 @@ func (l *listener) close() {
 // 集約する最初の 1 か所)。カーネルモードの受け付けと、成立済みの接続を残すかの判定(updateRestriction、
 // retire)で使う。ユーザー空間モードの受け付けは Options.Admit が判定する。
 func sourceAllowed(src netip.Addr, r Rule) bool {
-	return policy.RulePolicy{SourceDeny: r.SourceDeny, SourceAllow: r.SourceAllow}.SourceAllowed(src)
+	return r.Policy.SourceAllowed(src)
 }
 
 func ipOf(a net.Addr) netip.Addr {

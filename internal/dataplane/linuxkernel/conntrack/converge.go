@@ -17,12 +17,13 @@ import (
 
 // Rule は収束の判定に使う、ルールの部分集合。カーネルモードで有効なものだけを渡す。
 type Rule struct {
-	Proto       proto.Proto
-	ListenPort  proto.PortRange
-	AgentAddr   netip.Addr // DNAT 先(エージェントのアドレス)
-	SourceDeny  []netip.Prefix
-	SourceAllow []netip.Prefix
-	// Keep は、nil でなければ SourceDeny と SourceAllow の代わりに接続元を判定する。fail-closed に
+	Proto      proto.Proto
+	ListenPort proto.PortRange
+	AgentAddr  netip.Addr // DNAT 先(エージェントのアドレス)
+	// Policy は接続元 deny/allow(design.md 7a.9 節)。planner.PortPlan.Policy の写しで、接続元以外の
+	// レート等の項目はこの収束の判定に使わない。
+	Policy policy.RulePolicy
+	// Keep は、nil でなければ Policy の deny/allow の代わりに接続元を判定する。fail-closed に
 	// したルールの直前の Active の値を、新しい宣言の接続元制限とあわせて判定するのに使う(設計文書 7a.3 節)。
 	Keep func(src netip.Addr) bool
 }
@@ -34,8 +35,7 @@ func RulesFromPlan(plan planner.Plan) []Rule {
 	ports := plan.Transparent()
 	rules := make([]Rule, len(ports))
 	for i, pp := range ports {
-		rules[i] = Rule{Proto: pp.Proto, ListenPort: pp.ListenPort, AgentAddr: pp.AgentAddr,
-			SourceDeny: pp.Policy.SourceDeny, SourceAllow: pp.Policy.SourceAllow}
+		rules[i] = Rule{Proto: pp.Proto, ListenPort: pp.ListenPort, AgentAddr: pp.AgentAddr, Policy: pp.Policy}
 	}
 	return rules
 }
@@ -118,7 +118,7 @@ func sourceAllowed(src netip.Addr, r Rule) bool {
 	if r.Keep != nil {
 		return r.Keep(src)
 	}
-	return policy.RulePolicy{SourceDeny: r.SourceDeny, SourceAllow: r.SourceAllow}.SourceAllowed(src)
+	return r.Policy.SourceAllowed(src)
 }
 
 func protoOf(n uint8) proto.Proto {

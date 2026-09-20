@@ -7,6 +7,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -30,7 +31,9 @@ func TestRulesFromPlan(t *testing.T) {
 		t.Fatalf("RulesFromPlan = %+v, want 1 rule (only the Transparent, enabled one)", got)
 	}
 	want := Rule{Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 2456, Hi: 2456},
-		AgentAddr: netip.MustParseAddr("10.200.0.2"), SourceDeny: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}}
+		AgentAddr: netip.MustParseAddr("10.200.0.2"),
+		Policy: policy.RulePolicy{RuleID: "r_kernel", Proto: proto.UDP,
+			SourceDeny: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}}}
 	if !reflect.DeepEqual(got[0], want) {
 		t.Errorf("RulesFromPlan()[0] = %+v, want %+v", got[0], want)
 	}

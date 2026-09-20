@@ -32,10 +32,10 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
-// moduleImports returns the in-module packages the non-test Go files of pkg import directly. Files
-// for every GOOS are read, so the result is a superset of any one build's imports. The files are
-// opened by this process, so `go test` re-runs the test when any of them changes.
-func moduleImports(t *testing.T, root, pkg string) []string {
+// directImports returns every package (in the module or not) the non-test Go files of pkg import
+// directly. Files for every GOOS are read, so the result is a superset of any one build's imports.
+// The files are opened by this process, so `go test` re-runs the test when any of them changes.
+func directImports(t *testing.T, root, pkg string) []string {
 	t.Helper()
 	dir := filepath.Join(root, strings.TrimPrefix(pkg, module))
 	entries, err := os.ReadDir(dir)
@@ -57,9 +57,7 @@ func moduleImports(t *testing.T, root, pkg string) []string {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if path == module || strings.HasPrefix(path, module+"/") {
-				seen[path] = true
-			}
+			seen[path] = true
 		}
 	}
 	var out []string
@@ -67,6 +65,18 @@ func moduleImports(t *testing.T, root, pkg string) []string {
 		out = append(out, p)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// moduleImports returns the in-module packages among directImports(t, root, pkg).
+func moduleImports(t *testing.T, root, pkg string) []string {
+	t.Helper()
+	var out []string
+	for _, path := range directImports(t, root, pkg) {
+		if path == module || strings.HasPrefix(path, module+"/") {
+			out = append(out, path)
+		}
+	}
 	return out
 }
 
@@ -167,6 +177,88 @@ func TestDependencyDirection(t *testing.T) {
 	for _, want := range []string{module + "/internal/dataplane/userspace", module + "/internal/dataplane/linuxkernel"} {
 		if !seenImpl[want] {
 			t.Errorf("expected to find and check packages under %s, found none; did it move?", want)
+		}
+	}
+}
+
+// TestPureLayersStayPure checks design.md 7a.7 節's rule that internal/model, internal/policy (and
+// its sub-packages, the nftables-row and Go-evaluator Admission Policy compilers, design.md 7a.7
+// 節's package layout) and internal/planner "know nothing about the OS, nftables, or gVisor": inside
+// the module, they import only proto and each other, never dataplane/*, frontend/*, platform/*,
+// vpsd or agent. internal/resource and internal/lograte are even stricter and import nothing at all
+// from the module (design.md 7a.7 節: "internal/resource と internal/lograte はモジュール内の何も
+// import しない").
+func TestPureLayersStayPure(t *testing.T) {
+	root := moduleRoot(t)
+	var pure []string
+	pure = append(pure, packagesUnder(t, root, "internal/model")...)
+	pure = append(pure, packagesUnder(t, root, "internal/policy")...)
+	pure = append(pure, packagesUnder(t, root, "internal/planner")...)
+	if len(pure) < 3 {
+		t.Fatalf("found packages %v; expected at least internal/model, internal/policy and internal/planner", pure)
+	}
+	allowed := map[string]bool{module + "/proto": true}
+	for _, p := range pure {
+		allowed[p] = true
+	}
+	for _, pkg := range pure {
+		for _, dep := range moduleImports(t, root, pkg) {
+			if !allowed[dep] {
+				t.Errorf("%s imports %s, neither proto nor another pure layer (design.md 7a.7 節)", pkg, dep)
+			}
+		}
+	}
+
+	for _, name := range []string{"internal/resource", "internal/lograte"} {
+		pkgs := packagesUnder(t, root, name)
+		if len(pkgs) == 0 {
+			t.Fatalf("found no packages under %s; did it move?", name)
+		}
+		for _, pkg := range pkgs {
+			if deps := moduleImports(t, root, pkg); len(deps) > 0 {
+				t.Errorf("%s imports %v from the module; design.md 7a.7 節 says it imports nothing from the module", pkg, deps)
+			}
+		}
+	}
+}
+
+// TestPolicyNftablesDoesNotImportGoogleNftables checks design.md 7a.9 節's rule that
+// internal/policy/nftables ("IR から nftables の行の列へのコンパイラ(google/nftables を import
+// しない。7a.9 節)") produces a row program and stays out of netlink: only the kernel backend,
+// internal/dataplane/linuxkernel/nft, imports google/nftables.
+func TestPolicyNftablesDoesNotImportGoogleNftables(t *testing.T) {
+	root := moduleRoot(t)
+	const pkg = module + "/internal/policy/nftables"
+	for _, dep := range directImports(t, root, pkg) {
+		if dep == "github.com/google/nftables" || strings.HasPrefix(dep, "github.com/google/nftables/") {
+			t.Errorf("%s imports %s (design.md 7a.9 節: it produces a row program; only the kernel backend talks to netlink)", pkg, dep)
+		}
+	}
+}
+
+// TestVpsdSubpackagesDoNotImportVpsd checks design.md 7a.7 節's rule that internal/vpsd's own
+// sub-packages never import internal/vpsd itself: the daemon (internal/vpsd) implements the
+// sub-packages' interfaces (Backend and friends), so an upward import would defeat that and, for
+// internal/dataplane/linuxkernel reused by an agent kernel backend (design.md 7a.8 節 Phase 7),
+// would pull the server's control plane in with it.
+func TestVpsdSubpackagesDoNotImportVpsd(t *testing.T) {
+	root := moduleRoot(t)
+	const vpsd = module + "/internal/vpsd"
+	pkgs := packagesUnder(t, root, "internal/vpsd")
+	var sub []string
+	for _, pkg := range pkgs {
+		if pkg != vpsd {
+			sub = append(sub, pkg)
+		}
+	}
+	if len(sub) == 0 {
+		t.Fatalf("found no sub-packages under internal/vpsd (only %v); did they move?", pkgs)
+	}
+	for _, pkg := range sub {
+		for _, dep := range deps(t, root, pkg) {
+			if dep == vpsd {
+				t.Errorf("%s imports %s (design.md 7a.7 節: a vpsd sub-package must not import vpsd itself)", pkg, dep)
+			}
 		}
 	}
 }

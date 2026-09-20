@@ -44,13 +44,11 @@ type Pool struct {
 
 	mu    sync.Mutex
 	inUse int // u
-	// listeners は登録している待ち受けと、閉じた後もまだフローを返し終えていない待ち受け。
-	// 不変条件の検算(checkInvariants)のために持つ。
-	listeners map[*Listener]struct{}
 	// accepting は集合 A。受け付けているルールから、その待ち受けの数とフロー数への表。
 	accepting map[string]*ruleFlows
-	reserve   int // q
 	// shortfall は Σ max(0, q - u_s)。和は A のすべてのルールを取る(判定では r の分を引く)。
+	// q 自体は値のために持たず、reserveFor(total, len(accepting)) の場で求める(引き算 1 回と
+	// 除算 1 回で済むため)。shortfall は q に依存するので、A(と q)が変わるときだけ作り直す。
 	shortfall int
 	refusals  map[string]map[Reason]uint64
 }
@@ -66,7 +64,6 @@ func NewPool(total int) *Pool {
 	return &Pool{
 		total:     total,
 		ruleCap:   ruleCapFor(total),
-		listeners: map[*Listener]struct{}{},
 		accepting: map[string]*ruleFlows{},
 		refusals:  map[string]map[Reason]uint64{},
 	}
@@ -105,7 +102,7 @@ func (p *Pool) Rules() int {
 func (p *Pool) Reserve() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.reserve
+	return reserveFor(p.total, len(p.accepting))
 }
 
 // InUse は今保持しているフローの数 u。受け付けをやめた待ち受けと、閉じた待ち受けの残りのフローも含む。
@@ -142,21 +139,28 @@ func (p *Pool) Refusals() map[string]map[Reason]uint64 {
 
 // Listener は待ち受け 1 つ分の枠を Pool に登録する。呼び出し側は待ち受けを閉じるときに Close を呼ぶ。
 // この handle は登録した時点で新しいフローを受け付けている状態になり、そのルールは A に入る。
-// ソケットを bind する前に handle が要る呼び出し側は、代わりに PendingListener を使う。
+// bind をまだ試みていない、または bind の成否に関わらず handle を保ちたい呼び出し側は、代わりに
+// PendingListener を使う。
 func (p *Pool) Listener(ruleID string) *Listener { return p.listener(ruleID, true) }
 
-// PendingListener は、まだ新しいフローを受け付けられない待ち受けの枠を登録する。ソケットの bind が
-// 済む前に handle が要る呼び出し側が使い、bind が成功してから、中継を始める前に Accept を呼ぶ。
-// そのルールは Accept を呼ぶまで A に入らない。A は開けた待ち受けを持つルールの集合なので
-// (設計文書 7a.10 節)、bind の最中の待ち受けと bind に失敗した待ち受けが、その間だけ N を増やして
-// 他のルールの予約を減らすことを防ぐ。
+// PendingListener は、まだ新しいフローを受け付けられない待ち受けの枠を登録する。そのルールは Accept
+// を呼ぶまで A に入らない。A は開けた待ち受けを持つルールの集合なので(設計文書 7a.10 節)、bind の
+// 最中の待ち受けと bind に失敗した待ち受けが、その間だけ N を増やして他のルールの予約を減らすことを
+// 防ぐ。
+//
+// 2026-09-20 より前はこの handle をソケットの bind の前に作る設計だったが、今の本番の呼び出し側は
+// どちらも bind を試みた後に handle を作る。relay.Manager.newListener は bind の成否に関わらず
+// handle を作り(30 秒ごとの Retry が失敗した待ち受けを扱えるようにするため)、成功したときだけ
+// Accept を呼ぶ。proxyrelay は逆に、bind に失敗したポートには handle を一切作らず(Prepare の時点で
+// 開けたポートだけを Commit で登録し、Listener を直接使う)、Pending の状態を経ない。どちらの形でも
+// bind が終わる前や失敗した待ち受けのルールを N に数えないことに変わりは無く、Pending の状態は
+// この防止のために残す。
 func (p *Pool) PendingListener(ruleID string) *Listener { return p.listener(ruleID, false) }
 
 func (p *Pool) listener(ruleID string, accepting bool) *Listener {
 	l := &Listener{p: p, rule: ruleID, accepting: accepting, open: true}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.listeners[l] = struct{}{}
 	p.attachLocked(l)
 	return l
 }
@@ -194,15 +198,13 @@ func (l *Listener) Acquire() (Refusal, bool) {
 			return p.refuseLocked(ReasonRuleCap, l, ruleFlows), false
 		}
 		// 自分の予約の内側にいないときは、他のルールの予約の未使用分を残しても空きが要る
-		if ruleFlows >= p.reserve && p.total-p.inUse-p.otherReserveLocked(l) < 1 {
+		q := reserveFor(p.total, len(p.accepting))
+		if ruleFlows >= q && p.total-p.inUse-p.otherReserveLocked(l, q) < 1 {
 			return p.refuseLocked(ReasonReserve, l, ruleFlows), false
 		}
 	}
 	p.inUse++
 	l.flows++
-	// 閉じた待ち受けは、フローを返し終えた時点で一覧から外れている。中継が閉じ終える前に取った枠も
-	// プロセス全体の数に入るので、その待ち受けを一覧に戻して数え直せる状態を保つ
-	p.listeners[l] = struct{}{}
 	if l.counted {
 		p.addRuleFlowsLocked(l.rule, 1)
 	}
@@ -222,9 +224,6 @@ func (l *Listener) Release() {
 	p.inUse--
 	if l.counted {
 		p.addRuleFlowsLocked(l.rule, -1)
-	}
-	if !l.open && l.flows == 0 {
-		delete(p.listeners, l)
 	}
 }
 
@@ -281,9 +280,6 @@ func (l *Listener) Close() {
 	}
 	l.open = false
 	p.detachLocked(l)
-	if l.flows == 0 {
-		delete(p.listeners, l)
-	}
 }
 
 // ruleFlowsForLocked は判定に使う u_r。受け付けている待ち受けの合計で、判定する待ち受け自身が
@@ -299,21 +295,25 @@ func (p *Pool) ruleFlowsForLocked(l *Listener) int {
 	return n
 }
 
-// otherReserveLocked は Σ max(0, q - u_s)(和は A のうち l のルール以外)。
-func (p *Pool) otherReserveLocked(l *Listener) int {
+// otherReserveLocked は Σ max(0, q - u_s)(和は A のうち l のルール以外)。q は呼び出し側が
+// (Acquire の判定と同じ)len(p.accepting) から求めた値を渡す。
+func (p *Pool) otherReserveLocked(l *Listener, q int) int {
 	n := p.shortfall
 	if st := p.accepting[l.rule]; st != nil {
-		n -= shortfallOf(p.reserve, st.flows)
+		n -= shortfallOf(q, st.flows)
 	}
 	return n
 }
 
 // addRuleFlowsLocked はルールのフロー数を delta だけ動かし、予約の未使用分の合計を合わせる。
+// フローの取得と返却の経路(Acquire、Release)だけが呼ぶので、A の大きさに関わらず一定の手間で
+// 済ませる。N は変わらないので、q はここでは変わらない。
 func (p *Pool) addRuleFlowsLocked(rule string, delta int) {
 	st := p.accepting[rule]
-	p.shortfall -= shortfallOf(p.reserve, st.flows)
+	q := reserveFor(p.total, len(p.accepting))
+	p.shortfall -= shortfallOf(q, st.flows)
 	st.flows += delta
-	p.shortfall += shortfallOf(p.reserve, st.flows)
+	p.shortfall += shortfallOf(q, st.flows)
 }
 
 // detachLocked は待ち受けのフローをルールごとの数から外す(閉鎖、受け付けの停止、付け替えの前)。
@@ -321,17 +321,24 @@ func (p *Pool) detachLocked(l *Listener) {
 	if !l.counted {
 		return
 	}
+	before := len(p.accepting)
 	st := p.accepting[l.rule]
-	p.shortfall -= shortfallOf(p.reserve, st.flows)
+	q := reserveFor(p.total, before)
+	p.shortfall -= shortfallOf(q, st.flows)
 	st.flows -= l.flows
 	st.listeners--
 	if st.listeners == 0 {
 		delete(p.accepting, l.rule)
 	} else {
-		p.shortfall += shortfallOf(p.reserve, st.flows)
+		p.shortfall += shortfallOf(q, st.flows)
 	}
 	l.counted = false
-	p.refreshReserveLocked()
+	// N (と、それから導く q)が変わるのは、ルールが A から外れたときだけである。そのときだけ、
+	// 残る全ルールの予約の未使用分を新しい q で作り直す(設計文書 7a.10 節: A のルールの数に
+	// 比例する計算は A と q が変わるときだけ行う)。
+	if len(p.accepting) != before {
+		p.refreshShortfallLocked()
+	}
 }
 
 // attachLocked は待ち受けのフローをルールごとの数に入れる(登録、受け付けの再開、付け替えの後)。
@@ -339,27 +346,30 @@ func (p *Pool) attachLocked(l *Listener) {
 	if l.counted || !l.open || !l.accepting {
 		return
 	}
+	before := len(p.accepting)
 	st := p.accepting[l.rule]
+	q := reserveFor(p.total, before)
 	if st == nil {
 		st = &ruleFlows{}
 		p.accepting[l.rule] = st
 	} else {
-		p.shortfall -= shortfallOf(p.reserve, st.flows)
+		p.shortfall -= shortfallOf(q, st.flows)
 	}
 	st.flows += l.flows
 	st.listeners++
-	p.shortfall += shortfallOf(p.reserve, st.flows)
 	l.counted = true
-	p.refreshReserveLocked()
+	if len(p.accepting) != before {
+		// 新しいルールが A に入り、N(と q)が変わった。全ルールぶん作り直す
+		p.refreshShortfallLocked()
+	} else {
+		p.shortfall += shortfallOf(q, st.flows)
+	}
 }
 
-// refreshReserveLocked は N から q を計算し直し、変わっていれば予約の未使用分の合計を作り直す。
-func (p *Pool) refreshReserveLocked() {
+// refreshShortfallLocked は今の N から q を求め、Σ max(0, q - u_s) を全ルールぶん作り直す。
+// attachLocked と detachLocked から、N が実際に変わったときだけ呼ぶ。
+func (p *Pool) refreshShortfallLocked() {
 	q := reserveFor(p.total, len(p.accepting))
-	if q == p.reserve {
-		return
-	}
-	p.reserve = q
 	p.shortfall = 0
 	for _, st := range p.accepting {
 		p.shortfall += shortfallOf(q, st.flows)
@@ -372,70 +382,6 @@ func shortfallOf(reserve, flows int) int {
 		return 0
 	}
 	return reserve - flows
-}
-
-// checkInvariants は、足し引きで保っている数(u、u_r、q、予約の未使用分の合計)を待ち受けの一覧から
-// 作り直して突き合わせる。単体テストが操作の列のあいだに呼び、running total のずれを見つける。
-func (p *Pool) checkInvariants() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	inUse := 0
-	want := map[string]*ruleFlows{}
-	for l := range p.listeners {
-		if l.flows < 0 {
-			return fmt.Errorf("a listener of rule %s holds %d flows", l.rule, l.flows)
-		}
-		if !l.open && l.flows == 0 {
-			return fmt.Errorf("a closed listener of rule %s with no flows left is still registered", l.rule)
-		}
-		if l.counted != (l.open && l.accepting) {
-			return fmt.Errorf("a listener of rule %s: counted=%v, open=%v, accepting=%v", l.rule, l.counted, l.open, l.accepting)
-		}
-		inUse += l.flows
-		if !l.counted {
-			continue
-		}
-		st := want[l.rule]
-		if st == nil {
-			st = &ruleFlows{}
-			want[l.rule] = st
-		}
-		st.flows += l.flows
-		st.listeners++
-	}
-	if inUse != p.inUse {
-		return fmt.Errorf("InUse = %d, the listeners hold %d flows", p.inUse, inUse)
-	}
-	if p.total > 0 && p.inUse > p.total {
-		return fmt.Errorf("InUse = %d, over the budget of %d", p.inUse, p.total)
-	}
-	if len(want) != len(p.accepting) {
-		return fmt.Errorf("%d accepting rules, the listeners belong to %d", len(p.accepting), len(want))
-	}
-	for rule, st := range want {
-		got := p.accepting[rule]
-		if got == nil {
-			return fmt.Errorf("rule %s is missing from the accepting rules", rule)
-		}
-		if got.flows != st.flows || got.listeners != st.listeners {
-			return fmt.Errorf("rule %s holds %d flows in %d listeners, the listeners say %d in %d",
-				rule, got.flows, got.listeners, st.flows, st.listeners)
-		}
-	}
-	if q := reserveFor(p.total, len(want)); q != p.reserve {
-		return fmt.Errorf("reserve = %d, want %d for %d rules of a budget of %d", p.reserve, q, len(want), p.total)
-	}
-	short := 0
-	for _, st := range want {
-		short += shortfallOf(p.reserve, st.flows)
-	}
-	if short != p.shortfall {
-		return fmt.Errorf("the unused reserve sums to %d, recomputed %d", p.shortfall, short)
-	}
-	if p.total > 0 && len(want)*p.reserve > p.total {
-		return fmt.Errorf("%d rules of a reserve of %d each do not fit in the budget of %d", len(want), p.reserve, p.total)
-	}
-	return nil
 }
 
 func (p *Pool) refuseLocked(reason Reason, l *Listener, ruleFlows int) Refusal {
@@ -455,7 +401,7 @@ func (p *Pool) refuseLocked(reason Reason, l *Listener, ruleFlows int) Refusal {
 		Reason: reason, RuleID: l.rule,
 		InUse: p.inUse, Total: p.total,
 		RuleFlows: ruleFlows, RuleCap: p.ruleCap,
-		Reserve: p.reserve, OtherRules: others,
+		Reserve: reserveFor(p.total, len(p.accepting)), OtherRules: others,
 	}
 }
 

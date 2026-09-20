@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/model"
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -88,9 +89,10 @@ func TestPlanRelayFields(t *testing.T) {
 
 	want := []proxyrelay.Rule{
 		{ID: "r_proxy_plain", ListenPort: 443, AgentAddr: agentAddr["home"], AgentPort: 443,
-			SourceAllow: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, Agent: "home"},
+			Policy: policy.RulePolicy{RuleID: "r_proxy_plain", Proto: proto.TCP,
+				SourceAllow: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}}, Agent: "home"},
 		{ID: "r_proxy_proxyproto", ListenPort: 8443, AgentAddr: agentAddr["office"], AgentPort: 8443,
-			ProxyProtocol: true, Agent: "office"},
+			ProxyProtocol: true, Policy: policy.RulePolicy{RuleID: "r_proxy_proxyproto", Proto: proto.TCP}, Agent: "office"},
 	}
 	sort.Slice(want, func(i, j int) bool { return want[i].ID < want[j].ID })
 
@@ -99,7 +101,7 @@ func TestPlanRelayFields(t *testing.T) {
 		got = append(got, proxyrelay.Rule{
 			ID: pp.RuleID, ListenPort: pp.ListenPort.Lo, AgentAddr: pp.AgentAddr, AgentPort: pp.ListenPort.Lo,
 			ProxyProtocol: pp.SourceMetadata == model.ProxyV2,
-			SourceDeny:    pp.Policy.SourceDeny, SourceAllow: pp.Policy.SourceAllow, Agent: pp.Agent,
+			Policy:        pp.Policy, Agent: pp.Agent,
 		})
 	}
 	sort.Slice(got, func(i, j int) bool { return got[i].ID < got[j].ID })

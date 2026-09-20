@@ -363,7 +363,7 @@ func relayRules(ports []planner.PortPlan) []proxyrelay.Rule {
 		out = append(out, proxyrelay.Rule{
 			ID: pp.RuleID, ListenPort: pp.ListenPort.Lo, AgentAddr: pp.AgentAddr, AgentPort: pp.ListenPort.Lo,
 			ProxyProtocol: pp.SourceMetadata == model.ProxyV2,
-			SourceDeny:    pp.Policy.SourceDeny, SourceAllow: pp.Policy.SourceAllow, Agent: pp.Agent,
+			Policy:        pp.Policy, Agent: pp.Agent,
 		})
 	}
 	return out

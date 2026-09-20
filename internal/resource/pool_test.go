@@ -7,6 +7,115 @@ import (
 	"testing"
 )
 
+// trackedPool is a test-only wrapper around Pool that records every Listener and PendingListener
+// it creates, so checkInvariants can recompute Pool's running totals (u, u_r, q, the unused-reserve
+// sum) from scratch without pool.go itself carrying a registry of live listeners; that bookkeeping
+// existed in production only so tests could recompute it (design.md 7a.10 節), and now lives here
+// instead. Tests create trackedPool the same way they used to create *Pool (newTrackedPool in place
+// of NewPool); every other Pool method is promoted unchanged through the embedded *Pool.
+type trackedPool struct {
+	*Pool
+	mu sync.Mutex
+	ls []*Listener
+}
+
+func newTrackedPool(total int) *trackedPool {
+	return &trackedPool{Pool: NewPool(total)}
+}
+
+func (tp *trackedPool) track(l *Listener) *Listener {
+	tp.mu.Lock()
+	tp.ls = append(tp.ls, l)
+	tp.mu.Unlock()
+	return l
+}
+
+func (tp *trackedPool) Listener(ruleID string) *Listener {
+	return tp.track(tp.Pool.Listener(ruleID))
+}
+
+func (tp *trackedPool) PendingListener(ruleID string) *Listener {
+	return tp.track(tp.Pool.PendingListener(ruleID))
+}
+
+func (tp *trackedPool) checkInvariants() error {
+	tp.mu.Lock()
+	ls := append([]*Listener(nil), tp.ls...)
+	tp.mu.Unlock()
+	return checkInvariants(tp.Pool, ls)
+}
+
+// checkInvariants recomputes the numbers Pool keeps by addition and subtraction (u, u_r, q, the
+// unused-reserve sum) from the listeners a test created, and compares them against what Pool
+// reports. It plays the role pool.go's own checkInvariants used to play before that bookkeeping
+// moved to the test side: the hot path (Acquire,
+// Release) no longer maintains a registry of listeners, so this function is handed one instead.
+//
+// A tracked listener that is closed and has released every flow is never removed from the slice
+// (unlike the old production registry, which forgot it): that removal was a memory-bound
+// implementation detail of the registry itself, not a behaviour Pool promises, so recomputing from
+// a list that keeps every listener ever created is equivalent for every check below (a fully
+// drained, closed listener contributes 0 flows and is never counted, so it cannot skew any sum).
+func checkInvariants(p *Pool, listeners []*Listener) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	inUse := 0
+	want := map[string]*ruleFlows{}
+	for _, l := range listeners {
+		if l.flows < 0 {
+			return fmt.Errorf("a listener of rule %s holds %d flows", l.rule, l.flows)
+		}
+		if l.counted != (l.open && l.accepting) {
+			return fmt.Errorf("a listener of rule %s: counted=%v, open=%v, accepting=%v", l.rule, l.counted, l.open, l.accepting)
+		}
+		inUse += l.flows
+		if !l.counted {
+			continue
+		}
+		st := want[l.rule]
+		if st == nil {
+			st = &ruleFlows{}
+			want[l.rule] = st
+		}
+		st.flows += l.flows
+		st.listeners++
+	}
+	if inUse != p.inUse {
+		return fmt.Errorf("InUse = %d, the listeners hold %d flows", p.inUse, inUse)
+	}
+	if p.total > 0 && p.inUse > p.total {
+		return fmt.Errorf("InUse = %d, over the budget of %d", p.inUse, p.total)
+	}
+	if len(want) != len(p.accepting) {
+		return fmt.Errorf("%d accepting rules, the listeners belong to %d", len(p.accepting), len(want))
+	}
+	for rule, st := range want {
+		got := p.accepting[rule]
+		if got == nil {
+			return fmt.Errorf("rule %s is missing from the accepting rules", rule)
+		}
+		if got.flows != st.flows || got.listeners != st.listeners {
+			return fmt.Errorf("rule %s holds %d flows in %d listeners, the listeners say %d in %d",
+				rule, got.flows, got.listeners, st.flows, st.listeners)
+		}
+	}
+	reserve := reserveFor(p.total, len(want))
+	if got := reserveFor(p.total, len(p.accepting)); got != reserve {
+		return fmt.Errorf("reserve = %d, want %d for %d rules of a budget of %d", got, reserve, len(want), p.total)
+	}
+	short := 0
+	for _, st := range want {
+		short += shortfallOf(reserve, st.flows)
+	}
+	if short != p.shortfall {
+		return fmt.Errorf("the unused reserve sums to %d, recomputed %d", p.shortfall, short)
+	}
+	if p.total > 0 && len(want)*reserve > p.total {
+		return fmt.Errorf("%d rules of a reserve of %d each do not fit in the budget of %d", len(want), reserve, p.total)
+	}
+	return nil
+}
+
 // acquireN は n 回続けて枠を取り、通った数と最後の拒否を返す。
 func acquireN(l *Listener, n int) (int, Refusal) {
 	passed := 0
@@ -35,7 +144,7 @@ func fillUp(t *testing.T, l *Listener, limit int) (int, Refusal) {
 }
 
 // ok は不変条件の検算。running total が待ち受けの一覧と合っていることを確かめる。
-func ok(t *testing.T, p *Pool) {
+func ok(t *testing.T, p *trackedPool) {
 	t.Helper()
 	if err := p.checkInvariants(); err != nil {
 		t.Fatalf("pool invariants: %v", err)
@@ -45,7 +154,7 @@ func ok(t *testing.T, p *Pool) {
 // ルールが 1 本なら、そのルールは予算 T のすべてを使える(設計文書 7a.10 節)。
 func TestPoolOneRuleUsesTheWholeBudget(t *testing.T) {
 	for _, total := range []int{1, 2, 3, 15, 16, 17, 100, 101, 2048, 8192} {
-		p := NewPool(total)
+		p := newTrackedPool(total)
 		l := p.Listener("r1")
 		passed, ref := fillUp(t, l, total+1)
 		if passed != total {
@@ -63,7 +172,7 @@ func TestPoolOneRuleUsesTheWholeBudget(t *testing.T) {
 
 // プロセス全体の予算の拒否は budget で、返した枠は使い直せる。
 func TestPoolBudget(t *testing.T) {
-	p := NewPool(3)
+	p := newTrackedPool(3)
 	l := p.Listener("r1")
 	passed, ref := acquireN(l, 5)
 	if passed != 3 {
@@ -90,7 +199,7 @@ func TestPoolBudget(t *testing.T) {
 
 // ルール 1 本の上限 C は、そのルールの待ち受けの合計で見る。他のルールは自分の予約を使える。
 func TestPoolRuleCapSumsTheRuleListeners(t *testing.T) {
-	p := NewPool(10) // C = 5、ルールが 2 本なら q = 5
+	p := newTrackedPool(10) // C = 5、ルールが 2 本なら q = 5
 	a1 := p.Listener("r1")
 	a2 := p.Listener("r1")
 	b := p.Listener("r2")
@@ -125,7 +234,7 @@ func TestPoolRuleCapSumsTheRuleListeners(t *testing.T) {
 // 判定の順序は、予算、ルール 1 本の上限、隔離予約である(設計文書 7a.10 節の条件の並び)。
 func TestPoolReasonPrecedence(t *testing.T) {
 	// 予算が尽きているときは、ルール 1 本の上限に達していても budget
-	p := NewPool(2) // C = 1
+	p := newTrackedPool(2) // C = 1
 	a, b := p.Listener("r1"), p.Listener("r2")
 	if _, admitted := a.Acquire(); !admitted {
 		t.Fatal("r1's first flow must pass")
@@ -139,7 +248,7 @@ func TestPoolReasonPrecedence(t *testing.T) {
 	ok(t, p)
 
 	// 上限に達しているルールは、空きがあり、他のルールの予約が余っていても rule_cap
-	p2 := NewPool(10) // C = 5、N = 3 で q = 2
+	p2 := newTrackedPool(10) // C = 5、N = 3 で q = 2
 	c := p2.Listener("r1")
 	p2.Listener("r2")
 	p2.Listener("r3")
@@ -159,7 +268,7 @@ func TestPoolReasonPrecedence(t *testing.T) {
 // 自分の予約を超えたルールは、残りの空きが他のルールの予約で埋まっていれば reserve で拒まれる。
 // 予約の内側にいるルールは、そのあいだも予約まで通せる。
 func TestPoolReserveKeepsRoomForTheOtherRules(t *testing.T) {
-	p := NewPool(10) // C = 5、N = 3 で q = 2
+	p := newTrackedPool(10) // C = 5、N = 3 で q = 2
 	a, b, c := p.Listener("r1"), p.Listener("r2"), p.Listener("r3")
 	if p.Reserve() != 2 {
 		t.Fatalf("reserve = %d, want 2", p.Reserve())
@@ -195,7 +304,7 @@ func TestPoolFloodedRuleStopsAtTheCap(t *testing.T) {
 	totals := []int{1, 2, 3, 4, 5, 7, 16, 17, 63, 100, 101, 255, 256, 1024, 2048, 8192, TotalMax}
 	for _, total := range totals {
 		for _, rules := range []int{2, 3, 4, 7, 16, 100, 300} {
-			p := NewPool(total)
+			p := newTrackedPool(total)
 			flooded := p.Listener("r1")
 			for i := 1; i < rules; i++ {
 				p.Listener(fmt.Sprintf("r%d", i+1))
@@ -269,7 +378,7 @@ func TestReserveTimesRulesFitsTheBudget(t *testing.T) {
 func TestPoolReserveIsReachableUnderAFlood(t *testing.T) {
 	for _, total := range []int{16, 17, 100, 101, 1024, 2048} {
 		for _, rules := range []int{2, 3, 5, 8, 33} {
-			p := NewPool(total)
+			p := newTrackedPool(total)
 			ls := make([]*Listener, rules)
 			for i := range ls {
 				ls[i] = p.Listener(fmt.Sprintf("r%d", i+1))
@@ -290,7 +399,7 @@ func TestPoolReserveIsReachableUnderAFlood(t *testing.T) {
 // 分割と統合で所属ルールが変わった待ち受けの既存のフローは、移動先のルールで数える(仕様 7 節)。
 // 統合で移動先のルールが上限を超えても既存のフローは追い出さず、新しいフローだけを拒む。
 func TestPoolSetRuleMovesExistingFlows(t *testing.T) {
-	p := NewPool(10) // N = 3 で C = 5、q = 2
+	p := newTrackedPool(10) // N = 3 で C = 5、q = 2
 	a, b, c := p.Listener("r1"), p.Listener("r2"), p.Listener("r3")
 	if n, _ := acquireN(a, 4); n != 4 {
 		t.Fatalf("r1 admitted %d flows, want 4", n)
@@ -332,7 +441,7 @@ func TestPoolSetRuleMovesExistingFlows(t *testing.T) {
 // 受け付けをやめた待ち受け(Retiring)のフローは、プロセス全体の数に残り、ルールごとの数から外れる。
 // そのルールは受け付けているルールの集合から外れるので、残りのルールの予約は増える。
 func TestPoolStopAcceptingKeepsTheFlowsInTheBudget(t *testing.T) {
-	p := NewPool(10)
+	p := newTrackedPool(10)
 	retiring := p.Listener("r1")
 	other := p.Listener("r2")
 	if p.Reserve() != 5 {
@@ -369,7 +478,7 @@ func TestPoolStopAcceptingKeepsTheFlowsInTheBudget(t *testing.T) {
 
 // 閉じた待ち受けの残りのフローは、Release を呼ぶまでプロセス全体の数に残る。
 func TestPoolCloseKeepsFlowsUntilRelease(t *testing.T) {
-	p := NewPool(4)
+	p := newTrackedPool(4)
 	l := p.Listener("r1")
 	if n, _ := acquireN(l, 2); n != 2 {
 		t.Fatal("the first two flows must pass")
@@ -399,7 +508,7 @@ func TestPoolCloseKeepsFlowsUntilRelease(t *testing.T) {
 
 // 枠を取っていない Release は数を負にしない。負にすると、以後の判定が予算を過大に空いていると見る。
 func TestPoolReleaseNeverGoesNegative(t *testing.T) {
-	p := NewPool(2)
+	p := newTrackedPool(2)
 	l := p.Listener("r1")
 	l.Release()
 	l.Release()
@@ -414,7 +523,7 @@ func TestPoolReleaseNeverGoesNegative(t *testing.T) {
 
 // 拒否の数は、ルールごと、理由ごとに数える。3 つの理由を混ぜても取り違えない。
 func TestPoolRefusalCounters(t *testing.T) {
-	p := NewPool(10) // C = 5、N = 3 で q = 2
+	p := newTrackedPool(10) // C = 5、N = 3 で q = 2
 	a, b, c := p.Listener("r1"), p.Listener("r2"), p.Listener("r3")
 	acquireN(a, 4) // 4 本通る
 	acquireN(b, 6) // 4 本通り、2 本は reserve(r3 の予約の分だけ空きが残る)
@@ -439,7 +548,7 @@ func TestPoolRefusalCounters(t *testing.T) {
 	ok(t, p)
 
 	// ルール 1 本の上限の拒否も、同じ表に理由ごとに積む
-	p2 := NewPool(10)
+	p2 := newTrackedPool(10)
 	d := p2.Listener("r1")
 	p2.Listener("r2")
 	acquireN(d, 7) // 5 本通り(上限)、2 本は rule_cap
@@ -451,7 +560,7 @@ func TestPoolRefusalCounters(t *testing.T) {
 
 // ログの文言は理由で分かれる(設計文書 7a.10 節の「拒否の報告」)。
 func TestRefusalMessages(t *testing.T) {
-	p := NewPool(1)
+	p := newTrackedPool(1)
 	l := p.Listener("r1")
 	if _, admitted := l.Acquire(); !admitted {
 		t.Fatal("the first flow must pass")
@@ -462,7 +571,7 @@ func TestRefusalMessages(t *testing.T) {
 	}
 
 	// 既定の UDP の予算でルールが 2 本、1 本が上限まで持ったときの行(設計文書 7a.10 節の例)
-	p2 := NewPool(UDPTotal)
+	p2 := newTrackedPool(UDPTotal)
 	l2 := p2.Listener("r1")
 	p2.Listener("r2")
 	acquireN(l2, UDPTotal/2+1)
@@ -473,7 +582,7 @@ func TestRefusalMessages(t *testing.T) {
 	}
 
 	// 予約による拒否の行
-	p3 := NewPool(10)
+	p3 := newTrackedPool(10)
 	a, b, c := p3.Listener("r1"), p3.Listener("r2"), p3.Listener("r3")
 	acquireN(a, 4)
 	acquireN(b, 4)
@@ -592,7 +701,7 @@ func (m *model) release(i int) {
 func TestPoolMatchesTheFormula(t *testing.T) {
 	for _, total := range []int{20, 8, 30, 12, 1, 16, 47} {
 		rnd := rand.New(rand.NewPCG(1, uint64(total)))
-		pool := NewPool(total)
+		pool := newTrackedPool(total)
 		m := &model{total: total}
 		var ls []*Listener
 		var held []int
@@ -678,7 +787,7 @@ func TestPoolMatchesTheFormula(t *testing.T) {
 // Acquire と Release を並行に呼んでも、数は壊れず、予算を超えない(-race で流す)。
 func TestPoolConcurrentAcquireRelease(t *testing.T) {
 	const total, workers, rounds = 40, 16, 500
-	p := NewPool(total)
+	p := newTrackedPool(total)
 	ls := []*Listener{p.Listener("r1"), p.Listener("r1"), p.Listener("r2"), p.Listener("r3")}
 	var wg sync.WaitGroup
 	for w := range workers {
@@ -707,7 +816,7 @@ func TestPoolConcurrentAcquireRelease(t *testing.T) {
 	}
 	ok(t, p)
 	// 予算はそのまま残っている。1 本のルールだけを使い、予算のすべてを取り直せることを確かめる
-	p2 := NewPool(total)
+	p2 := newTrackedPool(total)
 	l := p2.Listener("solo")
 	if n, _ := acquireN(l, total+1); n != total {
 		t.Errorf("only %d of the %d flows fit after the concurrent run", n, total)
@@ -717,7 +826,7 @@ func TestPoolConcurrentAcquireRelease(t *testing.T) {
 
 // 並行した取得と返却の最中に待ち受けの集合が変わっても、数はずれない(-race で流す)。
 func TestPoolConcurrentRuleSetChanges(t *testing.T) {
-	p := NewPool(64)
+	p := newTrackedPool(64)
 	var wg sync.WaitGroup
 	for w := range 8 {
 		wg.Add(1)
@@ -755,7 +864,7 @@ func TestPoolConcurrentRuleSetChanges(t *testing.T) {
 // bind の済んでいない待ち受けの枠(PendingListener)は、Accept を呼ぶまで受け付けているルールの
 // 集合 A に入らない。枠を取れば予算は使うが、ルールごとの数には入らない(設計文書 7a.10 節)。
 func TestPoolPendingListenerStaysOutOfTheAcceptingRules(t *testing.T) {
-	p := NewPool(10)
+	p := newTrackedPool(10)
 	held := p.Listener("r1")
 	if n, _ := acquireN(held, 3); n != 3 {
 		t.Fatalf("r1 admitted %d flows, want 3", n)
@@ -799,4 +908,29 @@ func TestPoolPendingListenerStaysOutOfTheAcceptingRules(t *testing.T) {
 		t.Errorf("RuleFlows(r2) after Accept = %d, want 1", got)
 	}
 	ok(t, p)
+}
+
+// BenchmarkAcquireRelease measures the cost of the hot path (Acquire used to do a per-flow map
+// write kept only for an invariant check, which has since moved to pool_test.go). It uses the plain Pool, not trackedPool, since the tracking
+// wrapper exists only to help tests and would skew the measurement. The rule count varies because
+// ruleFlowsForLocked, the rule_cap check and the reserve check all read len(p.accepting).
+func BenchmarkAcquireRelease(b *testing.B) {
+	for _, rules := range []int{1, 32, 1024} {
+		b.Run(fmt.Sprintf("rules=%d", rules), func(b *testing.B) {
+			p := NewPool(TotalMax)
+			var l *Listener
+			for i := range rules {
+				ln := p.Listener(fmt.Sprintf("r%d", i))
+				if i == 0 {
+					l = ln
+				}
+			}
+			b.ResetTimer()
+			for range b.N {
+				if _, ok := l.Acquire(); ok {
+					l.Release()
+				}
+			}
+		})
+	}
 }
