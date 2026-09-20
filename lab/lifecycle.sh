@@ -107,6 +107,21 @@ absent() { # absent <label> <substring-that-must-not-appear> <actual>
   if [ -z "$2" ]; then echo "FAIL  $1: empty substring (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1"; fi
 }
+eqcheck() { # eqcheck <label> <want> <got>: integers must be equal. check()'s substring match is
+  # wrong for a bare number ("40" is a substring of "140"), which this replaces. An empty or
+  # non-numeric $3 (a probe that crashed or printed nothing) makes `-eq` itself fail, which the
+  # else branch below reports as FAIL, not a silent pass. Same helper, same behaviour, as
+  # lab/ipv6.sh's eqcheck of the same name.
+  if [ "$2" -eq "$3" ] 2>/dev/null; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
+}
+strcheck() { # strcheck <label> <want> <got>: exact string equality, for values check()'s substring
+  # match would be wrong for even though they are not bare integers (`-eq` cannot compare them):
+  # a source port like "sport=100" is itself a substring of "sport=1005", and an nft table dump
+  # that grew can still contain the old, shorter dump verbatim.
+  # an empty want would make two failed captures ("" = "") pass; refuse it like check() does
+  if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug or a capture that returned nothing)"; fail=1; return; fi
+  if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
+}
 # field <name> <text>: the integer after "<name>=" in text, or empty
 field() { echo "$2" | grep -oE "$1=[0-9]+" | head -1 | cut -d= -f2; }
 okcheck() { # okcheck <label> <ok-if-true 1/0>
@@ -693,7 +708,7 @@ check1() {
     after_line=$(vps conntrack -L -p tcp --dport 39980 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | head -1)
     after_sport=$(echo "$after_line" | grep -oE 'sport=[0-9]+' | head -1)
     okcheck "the tcp conntrack entry is found before the restart" "$([ -n "$before_sport" ] && echo 1 || echo 0)"
-    check "the same tcp conntrack entry (same source port) persists across the restart" "$before_sport" "$after_sport"
+    strcheck "the same tcp conntrack entry (same source port) persists across the restart" "$before_sport" "$after_sport"
   fi
 
   wait "$tcp_pid" "$udp_pid" 2>/dev/null
@@ -1406,7 +1421,7 @@ check6() {
     okcheck "its conntrack entry is still ESTABLISHED" \
       "$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep -q ESTABLISHED && echo 1 || echo 0)"
     local h_after_sport; h_after_sport=$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | grep -oE 'sport=[0-9]+' | head -1)
-    check "it is the same conntrack entry (same source port), not a new one" "$h_before_sport" "$h_after_sport"
+    strcheck "it is the same conntrack entry (same source port), not a new one" "$h_before_sport" "$h_after_sport"
     echo "-- the session keeps carrying data while the rule stays not_active (held 3s, then asserted again)"
     local pk_before; pk_before=$(h_orig_packets)
     # deliberate: survival over time is the point, so wall-clock time has to pass here.
@@ -1588,7 +1603,7 @@ check7() {
   drops_committed() { [ "$(rule_drops "$w")" = "$flood_n" ]; }
   must_wait "check7e: the flood's drops are committed" 5 drops_committed
   local before; before=$(rule_drops "$w"); [ -z "$before" ] && before=0
-  check "the flood's drops are committed exactly once before any swap failure" "$flood_n" "$before"
+  eqcheck "the flood's drops are committed exactly once before any swap failure" "$flood_n" "$before"
 
   if ! hold_table; then
     kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
@@ -1602,7 +1617,7 @@ check7() {
   vps wgft rule enable "$z" --admin "$ADMIN" >/dev/null 2>&1
   must_wait "check7e: z is active again after the successful swap" 10 rule_state_is "$z" apply_state active
   local after; after=$(rule_drops "$w"); [ -z "$after" ] && after=0
-  check "the rule's cumulative drops still equal exactly what was sent, not double counted" "$flood_n" "$after"
+  eqcheck "the rule's cumulative drops still equal exactly what was sent, not double counted" "$flood_n" "$after"
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"
@@ -1674,7 +1689,7 @@ check8() {
     "$([ "$(fail_log_count)" = 1 ] && echo 1 || echo 0)"
   if [ "$mode" = kernel ]; then
     local after_handles; after_handles=$(vps nft -a list table inet wgft 2>/dev/null)
-    check "a no-op retry does not replace table inet wgft (handles are unchanged)" "$before_handles" "$after_handles"
+    strcheck "a no-op retry does not replace table inet wgft (handles are unchanged)" "$before_handles" "$after_handles"
   else
     skip "nft table handle stability (userspace mode has no nftables table)"
   fi
@@ -1755,7 +1770,7 @@ check9() {
   # interval plus slack has to pass to show that neither the notifications of wgft's own commits,
   # nor another table's changes, nor the retry timer replace the table.
   sleep 35
-  check "table inet wgft's handles are unchanged" "$before_handles" "$(table_handles)"
+  strcheck "table inet wgft's handles are unchanged" "$before_handles" "$(table_handles)"
   okcheck "no apply was logged in the window" "$([ "$(applied_lines)" = "$before_applied" ] && echo 1 || echo 0)"
   okcheck "no drift line was logged in the window" "$([ "$(drift_lines)" = 2 ] && echo 1 || echo 0)"
 
