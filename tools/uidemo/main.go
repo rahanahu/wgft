@@ -138,11 +138,16 @@ func newFakeBackend(mode string) *fakeBackend {
 			},
 		},
 		{
-			// disconnected, so r_mc_tcp8080 shows "agent offline" regardless of Rules.
+			// disconnected, so r_mc_tcp8080 shows "agent offline" regardless of Rules. Tunnel
+			// and StreamFrom/WGEndpoint are the last heartbeat before the stream dropped
+			// (design 5.2 section); Connected: false must keep the dashboard from drawing
+			// them as current (tunnel "OK", a live IP match/mismatch): the tunnel shows as a
+			// stale last report, and the IP comparison (both values are history) is hidden.
 			Name: "office", Address: "10.200.0.3", CreatedAt: rfc(-48 * time.Hour),
 			Connected: false, StreamFrom: "203.0.113.24:41220", WGEndpoint: "198.51.100.9:51820",
 			LastHeartbeat: rfc(-3 * time.Minute), Generation: 40,
 			PublicKey: "Z50DXIe02Z4jmIIULTXv8vct6DA04NgcDKgxLdm6ytI=", LastHandshake: rfc(-6 * time.Minute),
+			Tunnel:   proto.TunnelStatus{State: proto.StatusOK, Endpoint: "198.51.100.9:51820"},
 			Warnings: []admin.Warning{mismatch},
 		},
 		{

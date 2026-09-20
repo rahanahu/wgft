@@ -220,6 +220,18 @@ On the VPS (against the admin API):
 				if rules == "" && len(a.Rules) > 0 {
 					rules = fmt.Sprintf("%d ok", len(a.Rules))
 				}
+				// a.Tunnel and a.Rules keep the last heartbeat's content after the stream drops
+				// (design.md 5.2 section); without this, a disconnected agent still prints TUNNEL
+				// ok and a clean RULES count. Prefix both with "last:" so they read as history, not
+				// as the current state; HEARTBEAT already shows how old that history is.
+				if !a.Connected {
+					if tun != "" {
+						tun = "last:" + tun
+					}
+					if rules != "" {
+						rules = "last:" + rules
+					}
+				}
 				warn := ""
 				if n := len(a.Warnings); n > 0 {
 					warn = fmt.Sprintf("%d", n)

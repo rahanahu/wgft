@@ -45,8 +45,12 @@ is, without quotes.`,
 
 Columns: STREAM is the address the agent's control connection comes from,
 HEARTBEAT its age, GEN the rule generation the agent has applied, TUNNEL ok or
-error, WG_ENDPOINT and HANDSHAKE the WireGuard peer as the VPS sees it, RULES how
-many rules the agent reports as working, WARN the number of open warnings.`,
+error, WG_ENDPOINT and HANDSHAKE the WireGuard peer as the VPS sees it, RULES
+lists id:reason for the rules currently failing, or "N ok" once none are, WARN
+the number of open warnings. When an agent is disconnected (STREAM shows -),
+TUNNEL and RULES are its last report before the stream dropped, prefixed with
+"last:"; they are not the current state. HEARTBEAT shows how long ago that
+report was.`,
 		Example: `  wgft agent ls
   wgft agent ls --json`,
 	},

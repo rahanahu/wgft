@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -129,7 +130,16 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	agent, err := h.backend.Authenticate(tok)
 	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		// トークンが無効(未知・期限切れ・使用済み)なのと、backend 自体が失敗した(SQLite の
+		// エラーなど)のとは分ける。前者だけが日常的に起きる想定の応答で、ログは残さない。
+		// 後者は原因をログに残し、agent には一時的な失敗として答える(agent 側は再登録ではなく
+		// バックオフで再試行する。internal/agent/stream.go の default 分岐)
+		if errors.Is(err, ErrUnauthorized) || errors.Is(err, store.ErrInvalidToken) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		log.Printf("stream: authenticate: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	from, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -164,7 +174,16 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		ws.Close(websocket.StatusPolicyViolation, "public key equals server key")
 		return
 	}
-	if dup, err := h.backend.OtherAgentHasKey(agent, key); err != nil || dup {
+	dup, err := h.backend.OtherAgentHasKey(agent, key)
+	if err != nil {
+		// backend の失敗(SQLite のエラーなど)を「鍵が他のエージェントのもの」という
+		// 窃取を示す文言で答えてはいけない。原因はログに残し、agent には一時的な失敗として
+		// 答える(SetPublicKey の失敗と同じ形。agent はバックオフで再試行する)
+		log.Printf("stream: %s: checking public key: %v", agent, err)
+		ws.Close(websocket.StatusInternalError, "internal error")
+		return
+	}
+	if dup {
 		ws.Close(websocket.StatusPolicyViolation, "public key belongs to another agent")
 		return
 	}
