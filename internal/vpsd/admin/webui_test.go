@@ -249,7 +249,7 @@ func TestAgentListDisconnectedShowsStaleNotLive(t *testing.T) {
 		Name: "office", Connected: false, LastHeartbeat: old,
 		// Same IP on both sides: were Connected ignored, this would render as a live IP match.
 		StreamFrom: "203.0.113.24:41220", WGEndpoint: "203.0.113.24:51820",
-		Tunnel: proto.TunnelStatus{State: proto.StatusOK},
+		Tunnel: TunnelStatus{State: proto.StatusOK},
 	}}
 	srv := httptest.NewServer(New(&fakeBackend{st: st, agents: agents}))
 	defer srv.Close()

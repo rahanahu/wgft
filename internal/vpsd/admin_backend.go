@@ -67,7 +67,7 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 		}
 		if st.Heartbeat != nil {
 			info.Generation = st.Heartbeat.Generation
-			info.Tunnel = st.Heartbeat.Tunnel
+			info.Tunnel = admin.TunnelStatusView(st.Heartbeat.Tunnel)
 			info.Rules = st.Heartbeat.Rules
 		}
 		if st.Connected {

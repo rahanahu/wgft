@@ -93,7 +93,7 @@ type AgentInfo struct {
 	StreamFrom    string             `json:"stream_from,omitempty"`
 	LastHeartbeat string             `json:"last_heartbeat,omitempty"`
 	Generation    uint64             `json:"generation"` // 処理済み世代
-	Tunnel        proto.TunnelStatus `json:"tunnel"`
+	Tunnel        TunnelStatus       `json:"tunnel"`     // tunnelview.go: wire の proto.TunnelStatus とは別の見せ方(7a.11 節)
 	Rules         []proto.RuleStatus `json:"rules,omitempty"`
 	// 版の交渉(仕様 7a.6 節)。未接続、または接続が legacy v0 なら ProtocolVersion は 0 で、
 	// AgentProtocolLegacy が true な場合だけ「legacy v0 と判定した」ことを示す(未接続との違いは
