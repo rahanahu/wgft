@@ -229,7 +229,7 @@ sudo launchctl print system/io.github.rahanahu.wgft.agent | grep -E 'state|pid'
 tail -f ~/Library/Logs/wgft-agent.log
 ```
 
-トンネルが確立すると、VPS 側の `sudo wgft agent ls` の `TUNNEL` 列が `ok` になります。agent がエラーで終了した場合や強制終了された場合、launchd は agent を再起動します。再起動の間隔は最短で 10 秒 (`ThrottleInterval`) です。launchd には systemd の unit の `RestartPreventExitStatus=3` に当たる設定が無いため、終了コード 3 で終わる設定の誤りでも同じく再起動を繰り返すと推測していますが、未確認です。再起動を繰り返す場合はログを確認します。
+トンネルが確立すると、VPS 側の `sudo wgft agent ls` の `TUNNEL` 列が `ok` になります。agent がエラーで終了した場合や強制終了された場合、launchd は agent を再起動します。再起動の間隔は最短で 10 秒 (`ThrottleInterval`) です。launchd には systemd の unit の `RestartPreventExitStatus=3` に当たる設定が無く、終了コード 3 で終わる設定の誤りでも同じ間隔で再起動を繰り返します。macOS 27 で確認しました。設定の誤りが残っている間、agent は 10 秒ごとに起動と失敗を繰り返し、`launchctl print` は `last exit code = 3` と `state = spawn scheduled` を示します。これ以外にデーモンの異常を示すものはありません。再起動を繰り返す場合はログを確認します。
 
 LaunchDaemon は次で止めます。
 
@@ -251,8 +251,8 @@ wgft は更新の経路を保証しますが、更新後に旧版へ戻すこと
 
 この構成は、macOS の次の 2 つの挙動に合わせたものです。
 
-- ローカルネットワークのプライバシー保護: `~/Library/LaunchAgents` の LaunchAgent として起動した agent は、デフォルトゲートウェイには接続できましたが、LAN 内の他のホストへの接続は `connect: no route to host` で失敗し、許可を求めるダイアログも表示されませんでした。同じバイナリをターミナルから起動した場合と、`UserName` に同じ利用者を指定した LaunchDaemon として起動した場合は、どちらも UDP と TCP でそのホストに接続できました。ターミナルから起動したプロセスは、ターミナル自身の許可を引き継ぎます。失敗の原因をローカルネットワークのプライバシー保護とする判断は症状からの推測で、裏付けるシステムログは見つかっていません。`brew services` も LaunchAgent を使うため同じ問題が起きる可能性がありますが、未確認です。
-- FileVault: FileVault を有効にした Mac では、再起動後、LaunchDaemon は起動時ではなく利用者が最初にログインした時点で起動しました。その後約 15 秒 `network is unreachable` を記録し、自動で接続しました。FileVault を無効にした Mac でログインせずに起動時から動くかどうかと、ログアウト後も動き続けるかどうかは未確認です。
+- ローカルネットワークのプライバシー保護: `~/Library/LaunchAgents` の LaunchAgent として起動した agent は、デフォルトゲートウェイには接続できましたが、LAN 内の他のホストへの接続は `connect: no route to host` で失敗し、許可を求めるダイアログも表示されませんでした。同じバイナリをターミナルから起動した場合と、`UserName` に同じ利用者を指定した LaunchDaemon として起動した場合は、どちらも UDP と TCP でそのホストに接続できました。ターミナルから起動したプロセスは、ターミナル自身の許可を引き継ぎます。失敗の原因をローカルネットワークのプライバシー保護とする判断は症状からの推測で、裏付けるシステムログは見つかっていません。`brew services` も LaunchAgent を使うため同じ問題が起きる可能性がありますが、未確認です。macOS 27 では、インストール直後のバイナリが LAN 内の他のホストへ行う最初の接続だけが同じ `connect: no route to host` で失敗し、その後の接続はすべて成功しました。1 回だけ失敗した理由は分かっていません。
+- FileVault: FileVault を有効にした Mac では、再起動後、LaunchDaemon は起動時ではなく利用者が最初にログインした時点で起動しました。その後、その Mac 自身のネットワークが使えるようになるまで `network is unreachable` を記録し、その後は自動で接続しました。この待ち時間は、ある Mac では約 15 秒、Wi-Fi の接続もログイン後に始まる Mac では約 60 秒でした。FileVault を無効にした Mac でログインせずに起動時から動くかどうかと、ログアウト後も動き続けるかどうかは未確認です。
 
 ### systemd で起動する
 
@@ -323,6 +323,8 @@ sudo wgft rule add --agent home --tcp 443 --to 192.168.1.30:443 --proxy --proxy-
 ```
 
 転送対象のポートは VPS の firewall 側でも開けてください。
+
+エージェントは、新しいルールのために TCP の待ち受けを開くとき、転送先へ 1 回だけ試し接続してすぐ閉じます。接続を拒む転送先を、通信が来る前に報告するためです。転送先からは、データを運ばない接続 1 本に見えます。転送先が待ち受けていない間、`wgft agent ls` はそのルールを `RULES` 列に `cannot connect to target` として示します。この状態は、転送先が起動してから 30 秒以内、エージェントの次の報告で消えます。UDP のルールにこの確認はありません。データグラムは、送っても届いたかどうかが分からないためです。
 
 ルールを追加・変更しても、無関係な既存セッションは切断されません。接続元 allow/deny やレート制限は CLI から設定できます。詳しくは [cli.md](cli.md) を参照してください。
 
