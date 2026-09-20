@@ -60,6 +60,7 @@ var tr = map[string][2]string{
 	"tunnelOK":        {"OK", "OK"},
 	"tunnelError":     {"エラー", "Error"},
 	"tunnelNone":      {"-", "-"},
+	"tunnelStale":     {"最終報告(切断中)", "Last reported (disconnected)"},
 	"ipMatch":         {"✓ IP 一致", "✓ IP match"},
 	"ipMismatch":      {"▲ IP 不一致", "▲ IP mismatch"},
 	"pending":         {"反映待ち", "Pending"},

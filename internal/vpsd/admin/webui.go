@@ -186,29 +186,38 @@ func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {
 		v.StateBadge, v.StateLabel = "neutral", T(locale, "offline")
 		v.Attention = true
 	}
-	switch a.Tunnel.State {
-	case proto.StatusOK:
+	// a.Tunnel と a.StreamFrom/a.WGEndpoint は stream が切れても最後のハートビートの値を
+	// 残したままなので(design.md 5.2 節)、Connected を見ずに描くと何日も前の "OK" や
+	// IP の一致がそのまま今の状態に見える。切断していれば、その値を最後の報告として
+	// 古いままの色(muted)で示す。ok に見える描画はしない
+	switch {
+	case !a.Connected:
+		v.TunnelClass, v.TunnelLabel = "muted", T(locale, "tunnelStale")
+	case a.Tunnel.State == proto.StatusOK:
 		v.TunnelClass, v.TunnelLabel = "success-text", T(locale, "tunnelOK")
-	case proto.StatusError:
+	case a.Tunnel.State == proto.StatusError:
 		v.TunnelClass, v.TunnelLabel, v.Attention = "danger-text", T(locale, "tunnelError"), true
 	default:
 		v.TunnelClass, v.TunnelLabel = "muted", T(locale, "tunnelNone")
 	}
-	// stream の接続元 IP と WG エンドポイント IP の食い違い(窃取の兆候)
-	sIP, wIP := ipOnly(a.StreamFrom), ipOnly(a.WGEndpoint)
-	if sIP != "" && wIP != "" {
-		v.ShowIPCompare = true
-		if sIP == wIP {
-			v.IPCompareClass, v.IPCompareLabel = "success-text", T(locale, "ipMatch")
-		} else {
-			v.IPCompareClass, v.IPCompareLabel, v.Attention = "warning-text", T(locale, "ipMismatch"), true
+	// stream の接続元 IP と WG エンドポイント IP の食い違い(窃取の兆候)。切断していれば
+	// 両方とも履歴の値なので、比較そのものを出さない(IP match/mismatch のどちらも今を語らない)
+	if a.Connected {
+		sIP, wIP := ipOnly(a.StreamFrom), ipOnly(a.WGEndpoint)
+		if sIP != "" && wIP != "" {
+			v.ShowIPCompare = true
+			if sIP == wIP {
+				v.IPCompareClass, v.IPCompareLabel = "success-text", T(locale, "ipMatch")
+			} else {
+				v.IPCompareClass, v.IPCompareLabel, v.Attention = "warning-text", T(locale, "ipMismatch"), true
+			}
 		}
 	}
 	if a.Connected && latestGen > 0 && a.Generation != latestGen {
 		v.Pending, v.Attention = true, true
 	}
 	v.HeartbeatAgo = agoStr(a.LastHeartbeat, locale)
-	if a.Connected && staleHeartbeat(a.LastHeartbeat) {
+	if staleHeartbeat(a.LastHeartbeat) {
 		v.HeartbeatClass = "warning-text"
 	}
 	v.HandshakeAgo = agoStr(a.LastHandshake, locale)

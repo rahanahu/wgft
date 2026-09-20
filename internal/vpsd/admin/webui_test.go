@@ -230,6 +230,47 @@ func TestAgentListShowsHandshakeAndPubKey(t *testing.T) {
 	}
 }
 
+// TestAgentListDisconnectedShowsStaleNotLive confirms that a disconnected agent's last
+// heartbeat (design.md 5.2 節: `vpsd` keeps Tunnel/StreamFrom/WGEndpoint after Connected
+// goes false, for diagnosis) is drawn as a stale last report, not as the current state.
+// Before the fix: the tunnel switch and the IP comparison in agentToView (webui.go) ignored
+// Connected, so a disconnected agent with a healthy last heartbeat and matching IPs showed a
+// live "OK" tunnel and a live IP match; and the heartbeat staleness color required Connected
+// to be true, so a very old heartbeat used the normal (non-stale) color. Checked in both
+// languages since the labels are localized (i18n.go).
+func TestAgentListDisconnectedShowsStaleNotLive(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	old := time.Now().Add(-3 * time.Hour).Format(time.RFC3339)
+	agents := []AgentInfo{{
+		Name: "office", Connected: false, LastHeartbeat: old,
+		// Same IP on both sides: were Connected ignored, this would render as a live IP match.
+		StreamFrom: "203.0.113.24:41220", WGEndpoint: "203.0.113.24:51820",
+		Tunnel: proto.TunnelStatus{State: proto.StatusOK},
+	}}
+	srv := httptest.NewServer(New(st, &fakeBackend{st: st, agents: agents}))
+	defer srv.Close()
+
+	for _, lang := range []string{"ja", "en"} {
+		body := getBody(t, srv.URL+"/?lang="+lang)
+		if !strings.Contains(body, T(lang, "tunnelStale")) {
+			t.Errorf("%s: disconnected agent's tunnel must show the stale-report label %q, body:\n%s", lang, T(lang, "tunnelStale"), body)
+		}
+		if strings.Contains(body, `stack success-text`) {
+			t.Errorf("%s: disconnected agent's tunnel must not use the live-OK color (stack success-text)", lang)
+		}
+		if strings.Contains(body, T(lang, "ipMatch")) || strings.Contains(body, T(lang, "ipMismatch")) {
+			t.Errorf("%s: disconnected agent must not show an IP comparison; both IPs are history", lang)
+		}
+		if !strings.Contains(body, `class="warning-text">`+agoStr(old, lang)+`<`) {
+			t.Errorf("%s: disconnected agent's 3-hour-old heartbeat must show the stale color, body:\n%s", lang, body)
+		}
+	}
+}
+
 // TestOverallHealthIncludesRuleErrors はヘッダの全体ヘルスの要約に error のルール件数が
 // 入ることを確かめる(仕様 10.1 節)。
 func TestOverallHealthIncludesRuleErrors(t *testing.T) {
