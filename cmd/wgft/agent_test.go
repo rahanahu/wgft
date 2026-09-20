@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -11,7 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/spf13/cobra"
+
+	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -204,11 +208,10 @@ func TestAgentLsConnectedStillShowsLiveState(t *testing.T) {
 }
 
 // WGFT_JOIN 自体が原因の起動中止(初回登録前の欠落、構文の誤り)は、ネットワークに触る前に
-// 終了コード 3 で止まる(仕様 11a 節)。以前は internal/agent.ensureRegistered がプレーンな error を
-// 返すだけで、cmd/wgft のどこもそれを *configError や *wg.StartupRefusal に写していなかったため、
-// 終了コード 1 になり、同梱の agent.service(Restart=on-failure、RestartSec=2、
-// RestartPreventExitStatus=3。この値を含まない)が 2 秒おきに再起動を繰り返していた。
-// agent run を cobra 経由で実行し、実際の CLI の経路で確かめる。
+// 終了コード 3 で止まる(設計文書 11b 節)。以前は internal/agent.ensureRegistered がプレーンな error を
+// 返すだけで、cmd/wgft のどこもそれを拒否に写していなかったため、終了コード 1 になり、同梱の
+// agent.service(Restart=on-failure、RestartSec=2、RestartPreventExitStatus=3。この値を含まない)が
+// 2 秒おきに再起動を繰り返していた。agent run を cobra 経由で実行し、実際の CLI の経路で確かめる。
 func TestAgentJoinErrorsExitCode(t *testing.T) {
 	none := filepath.Join(t.TempDir(), "none.env")
 	cases := []struct {
@@ -227,37 +230,116 @@ func TestAgentJoinErrorsExitCode(t *testing.T) {
 			root.SetOut(io.Discard)
 			root.SetErr(io.Discard)
 			err := root.Execute()
-			if got := exitCode(err); err == nil || got != exitConfigRefusal {
-				t.Errorf("err=%v exitCode=%d, want %d", err, got, exitConfigRefusal)
+			if got := exitCode(err); err == nil || got != exitRefusal {
+				t.Errorf("err=%v exitCode=%d, want %d", err, got, exitRefusal)
 			}
-			if !isAgentConfigRefusal(err) {
-				t.Errorf("isAgentConfigRefusal(%v) = false, want true", err)
+			r := startup.Of(err)
+			if r == nil || r.Subject != "WGFT_JOIN" {
+				t.Errorf("refusal = %v, want one about WGFT_JOIN", r)
 			}
 		})
 	}
 }
 
-// TestAgentConfigRefusalExitsWithConfigRefusal is the unit-level counterpart of
-// server_test.go's TestConntrackReadFailureExitsWithConfigRefusal, checking isAgentConfigRefusal
-// and exitCode directly against internal/agent.ConfigRefusal.
-func TestAgentConfigRefusalExitsWithConfigRefusal(t *testing.T) {
-	err := &agent.ConfigRefusal{Reason: "not registered and no join string; provide via WGFT_JOIN or --join"}
-	if !isAgentConfigRefusal(err) {
-		t.Errorf("isAgentConfigRefusal(%v) = false, want true", err)
+// TestEveryAgentSettingIsCheckedAtTheDoor is the agent's counterpart of server_test.go's
+// TestEveryServerSettingIsCheckedAtTheDoor: it walks every WGFT_* setting agent run reads
+// (agentSpecs, so a new setting shows up here on its own) and requires a malformed value for each
+// one to exit 3 at the door. The two settings that cannot be judged from the value alone are listed
+// with the reason, so adding a setting without deciding this fails the test (docs/design.md 11b 節).
+func TestEveryAgentSettingIsCheckedAtTheDoor(t *testing.T) {
+	bad := map[string]string{
+		"WGFT_DATA_DIR":      "  ",
+		"WGFT_JOIN":          "",
+		"WGFT_NAME":          "",
+		allowtargets.Env:     "192.168.1.0/33",
+		"WGFT_MAX_UDP_FLOWS": "0",
+		"WGFT_MAX_TCP_FLOWS": "one",
 	}
-	if got := exitCode(err); got != exitConfigRefusal {
-		t.Errorf("exitCode(%v) = %d, want %d", err, got, exitConfigRefusal)
+	noBadValue := map[string]string{
+		"WGFT_JOIN": "malformed is judged at registration, not at the door: a registered agent never reads a stale value (11a 節), so refusing here would stop an agent that works",
+		"WGFT_NAME": "the naming rule lives in the server (internal/vpsd/store); the registration API's HTTP 400 becomes the config refusal",
 	}
-	// sanity: confirm the type really is what isAgentConfigRefusal looks for.
-	var refusal *agent.ConfigRefusal
-	if !errors.As(error(err), &refusal) {
-		t.Fatal("sanity: err is not a *agent.ConfigRefusal")
+	for _, sp := range agentSpecs() {
+		if _, ok := bad[sp.Env]; !ok {
+			t.Errorf("%s is read by agentSpecs but has no malformed value in this table; add one, or add a reason to noBadValue", sp.Env)
+		}
 	}
-	// a plain error, and nil, must not be misclassified.
-	if isAgentConfigRefusal(errors.New("network unreachable")) {
-		t.Error("isAgentConfigRefusal(plain error) = true, want false")
+	for _, sp := range agentSpecs() {
+		value := bad[sp.Env]
+		if value == "" {
+			if _, ok := noBadValue[sp.Env]; !ok {
+				t.Errorf("%s has an empty malformed value and no reason in noBadValue", sp.Env)
+			}
+			continue
+		}
+		t.Run(sp.Env, func(t *testing.T) {
+			t.Setenv(sp.Env, value)
+			root := newRootCmd()
+			root.SetArgs([]string{"agent", "run", "--config", filepath.Join(t.TempDir(), "none.env"), "--data-dir", t.TempDir()})
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			done := make(chan error, 1)
+			go func() { done <- root.Execute() }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(30 * time.Second):
+				t.Fatalf("%s=%q: agent run did not return; the door does not check this setting", sp.Env, value)
+			}
+			if got := exitCode(err); err == nil || got != exitRefusal {
+				t.Fatalf("%s=%q: err=%v exitCode=%d, want %d", sp.Env, value, err, got, exitRefusal)
+			}
+			if r := startup.Of(err); r == nil || r.Category != startup.CategoryConfig {
+				t.Errorf("%s=%q: refusal = %v, want category %q", sp.Env, value, r, startup.CategoryConfig)
+			}
+		})
 	}
-	if isAgentConfigRefusal(nil) {
-		t.Error("isAgentConfigRefusal(nil) = true, want false")
+}
+
+// 登録済みの agent は、compose に残った壊れた WGFT_JOIN では止まらない(設計文書 11a・11b 節)。
+// 値だけから構文の誤りは分かるが、その値を使うかどうかは認証情報ファイルで決まるので、入口では
+// 警告だけを出す。ここでは、登録済みの認証情報を置いたうえで、拒否にならないことを確かめる。
+// agent.Run はこの後で stream に接続しようとして失敗するが、その失敗は拒否ではない。
+func TestRegisteredAgentIsNotRefusedForMalformedJoin(t *testing.T) {
+	dir := t.TempDir()
+	// 到達できないエンドポイントを持つ登録済みの認証情報。stream の接続は失敗するが、それは
+	// 再試行で直りうる失敗なので終了コード 1 である。
+	body := `{"name":"home","endpoint":"127.0.0.1:1","cert_sha256":"` + strings.Repeat("ab", 32) + `","permanent_token":"tok"}`
+	if err := os.WriteFile(filepath.Join(dir, "agent.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WGFT_JOIN", "not-a-join-string")
+	cmd := &cobra.Command{Use: "run", RunE: func(*cobra.Command, []string) error { return nil }}
+	cmd.Flags().String("data-dir", dir, "")
+	cmd.Flags().String("join", "", "")
+	cmd.Flags().String("name", "", "")
+	cmd.Flags().String("agent-allow-targets", "", "")
+	cmd.Flags().String("config", filepath.Join(dir, "none.env"), "")
+	registerLimitFlags(cmd.Flags())
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := buildAgentOptions(cmd)
+	if err != nil {
+		t.Fatalf("buildAgentOptions = %v, want no refusal for a stale malformed join on a registered agent", err)
+	}
+	if opts.Join != "not-a-join-string" {
+		t.Errorf("opts.Join = %q, want the value passed through unchanged", opts.Join)
+	}
+}
+
+// TestAgentRefusalExitsWithRefusalCode is the unit-level counterpart: a refusal from any layer maps
+// to exit code 3, and an ordinary error to 1, through the single check in exitCode.
+func TestAgentRefusalExitsWithRefusalCode(t *testing.T) {
+	err := startup.Config("WGFT_JOIN", "not registered and no join string; provide via WGFT_JOIN or --join")
+	if got := exitCode(err); got != exitRefusal {
+		t.Errorf("exitCode(%v) = %d, want %d", err, got, exitRefusal)
+	}
+	// wrapping must not hide it: the agent wraps a re-registration refusal with context.
+	if got := exitCode(fmt.Errorf("re-register failed: %w", err)); got != exitRefusal {
+		t.Errorf("exitCode(wrapped) = %d, want %d", got, exitRefusal)
+	}
+	if got := exitCode(errors.New("network unreachable")); got != 1 {
+		t.Errorf("exitCode(plain error) = %d, want 1", got)
 	}
 }

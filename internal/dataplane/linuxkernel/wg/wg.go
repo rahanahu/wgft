@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/platform/linux"
+	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
 	"net"
 	"net/netip"
@@ -35,7 +36,7 @@ type Config struct {
 	MTU        int
 	Peers      []Peer
 	// AdoptExisting が真のときだけ、鍵の一致しない既存インタフェースを引き継ぐ。
-	// 既定は偽で、他人のインタフェースは収束させず StartupRefusal で中止する。
+	// 既定は偽で、他人のインタフェースは収束させず、何も書かずに中止する。
 	AdoptExisting bool
 	// KeepPeers が真のとき、ピアには触れず(Peers は読まない)、インタフェース、鍵、ポート、
 	// アドレス、MTU だけを収束させる。起動時のインタフェースの立ち上げに使い、ピアの変更は
@@ -43,47 +44,42 @@ type Config struct {
 	KeepPeers bool
 }
 
-// StartupRefusal は、他人の wg インタフェースやポート・アドレスの衝突を見つけて
-// 収束を拒み、起動を中止させる理由。呼び出し側はこれを専用の終了コードに写す。
-// 何も書き換える前に返るので、既存の設定は無傷のままである。
-type StartupRefusal struct {
-	Reason string
-	DryRun []string // そのまま収束していたら加えていた変更(壊す前に見せる)
-}
-
-// Error は中止の理由と、収束するはずだった差分のドライランを 1 つの文にする。
-func (e *StartupRefusal) Error() string {
-	s := "refusing to start: " + e.Reason
-	if len(e.DryRun) > 0 {
-		s += ". would have converged by changing: " + strings.Join(e.DryRun, " / ")
+// conflictError は、他の所有者が持っている資源との衝突。何も書き換える前に返るので、既存の設定は
+// 無傷のままである。相手(他人の wg インタフェース、そのポートを bind しているプロセス、帯の重なる
+// インタフェース)が資源を手放せば、次の起動では通るので、起動の拒否(*startup.Refusal、終了コード 3)
+// ではなく普通のエラー(終了コード 1)として返し、unit の再起動に任せる(設計文書 11b 節)。
+// 拒否にすると、衝突が消えた後も運用者が手を入れるまで転送が戻らない。
+// DryRun は、そのまま収束していたら加えていた変更(壊す前に見せる)。
+func conflictError(dryRun []string, format string, a ...any) error {
+	s := fmt.Sprintf(format, a...)
+	if len(dryRun) > 0 {
+		s += ". would have converged by changing: " + strings.Join(dryRun, " / ")
 	}
-	return s
+	return errors.New(s)
 }
 
 // classifyPrivilege turns a permission failure from a privileged netlink or wgctrl call (creating
-// the interface, setting its MTU/address/key/port/peers, bringing it up) into a *StartupRefusal
+// the interface, setting its MTU/address/key/port/peers, bringing it up) into a startup refusal
 // naming the two ways out, instead of the generic error that used to reach cmd/wgft as exit code 1
 // (shipped server.service's Restart=on-failure, RestartSec=2 then loops on it forever, since
 // running unprivileged never fixes itself by retrying). Any other error, or nil, passes through
 // unchanged. This is checked once, in Ensure's cleanup defer below, rather than at each of the
 // several write call sites above, because any of them can be the first one that needs
-// CAP_NET_ADMIN depending on whether the interface already exists (design.md 9, 11a 節,
-// 改訂の記録 2026-09-20).
+// CAP_NET_ADMIN depending on whether the interface already exists (design.md 9, 11b 節,
+// 改訂の記録 2026-09-20). The category is prerequisite: a process's capabilities are fixed when it
+// is executed, so the same unit will always exec it the same way.
 func classifyPrivilege(err error) error {
 	if err == nil || !errors.Is(err, os.ErrPermission) {
 		return err
 	}
-	return &StartupRefusal{Reason: fmt.Sprintf(
-		"kernel mode needs CAP_NET_ADMIN: %v. Run as root or with that capability, as the shipped server.service does (AmbientCapabilities=CAP_NET_ADMIN), or set WGFT_MODE=userspace, which needs neither",
-		err,
-	)}
+	return startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN: %v. Run as root or with that capability, as the shipped server.service does (AmbientCapabilities=CAP_NET_ADMIN), or set WGFT_MODE=userspace, which needs neither", err)
 }
 
 // Ensure は wg0 を宣言に収束させ、変えた点を返す。なければ作り、あれば差分だけ直す。
 // 手作業で変えられたアドレス、MTU、ポート、ピア、秘密鍵はここで宣言に戻る。
 // ただし収束するのは「自分が作ったインタフェース」だけで、既存の同名インタフェースは
 // 鍵が一致する(=過去に自分が作った)ときにしか触らない。一致しなければ何も書かずに
-// StartupRefusal を返す(仕様 9 節)。
+// conflictError を返す(仕様 9 節)。
 func Ensure(cfg Config) (changes []string, err error) {
 	created := false
 	defer func() {
@@ -114,22 +110,22 @@ func Ensure(cfg Config) (changes []string, err error) {
 	// そのまま起動しても ConfigureDevice が EADDRINUSE で失敗するので、先に中止する。
 	if devs, e := c.Devices(); e == nil {
 		if name, conflict := portConflict(devs, cfg.Interface, cfg.ListenPort); conflict {
-			return nil, &StartupRefusal{Reason: fmt.Sprintf("listen port %d is already in use by existing WireGuard %q; use --wg-port to choose another port", cfg.ListenPort, name)}
+			return nil, conflictError(nil, "listen port %d is already in use by existing WireGuard %q; use --wg-port to choose another port", cfg.ListenPort, name)
 		}
 	}
 	// WireGuard 以外のプロセスが同じ UDP ポートを bind していても ConfigureDevice が EADDRINUSE で
-	// 失敗する。作ってから失敗すると unit が再起動を繰り返すので、作る前に /proc/net/udp で検出して中止する。
+	// 失敗する。作ってから失敗すると半端な状態が残るので、作る前に /proc/net/udp で検出して中止する。
 	if bound, e := linux.BoundPorts(); e == nil {
 		if addrs := bound.Conflicts(proto.UDP, proto.PortRange{Lo: uint16(cfg.ListenPort), Hi: uint16(cfg.ListenPort)}); len(addrs) > 0 {
 			if !ownsPort(c, cfg.Interface, cfg.ListenPort) {
-				return nil, &StartupRefusal{Reason: fmt.Sprintf("UDP port %d is already bound by another process on %v; use --wg-port to choose another port", cfg.ListenPort, addrs[uint16(cfg.ListenPort)])}
+				return nil, conflictError(nil, "UDP port %d is already bound by another process on %v; use --wg-port to choose another port", cfg.ListenPort, addrs[uint16(cfg.ListenPort)])
 			}
 		}
 	}
 	// アドレス帯が他インタフェースと重なると、経路の衝突に加え 6.1 節の conntrack 収束が
 	// 他人の DNAT 済みフローを消しうるので中止する。
-	if refusal := checkAddrOverlap(cfg); refusal != nil {
-		return nil, refusal
+	if conflict := checkAddrOverlap(cfg); conflict != nil {
+		return nil, conflict
 	}
 
 	link, err := netlink.LinkByName(cfg.Interface)
@@ -137,8 +133,10 @@ func Ensure(cfg Config) (changes []string, err error) {
 		if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: cfg.Interface, MTU: cfg.MTU}}); err != nil {
 			if errors.Is(err, unix.EOPNOTSUPP) {
 				// カーネルが wireguard のリンク種別を知らない(モジュールが無い、ロードできない)。
-				// 再起動しても直らないので、設定起因の中止として扱う(仕様 9 節)。
-				return nil, &StartupRefusal{Reason: fmt.Sprintf("cannot create %s: this kernel has no WireGuard support (the wireguard module is missing or cannot be loaded; `modprobe wireguard` shows why). Kernel mode needs it; on a VPS without it, run the userspace mode instead (WGFT_MODE=userspace)", cfg.Interface)}
+				// LinkAdd 自体が自動ロードを試した後なので、再起動では現れない。運用者が
+				// モジュールを入れるか別のカーネルで起動するまで同じ結果になるので、
+				// prerequisite の拒否として扱う(仕様 9 節、設計文書 11b 節)。
+				return nil, startup.Prerequisite("wireguard module", "cannot create %s: this kernel has no WireGuard support (the wireguard module is missing or cannot be loaded; `modprobe wireguard` shows why). Kernel mode needs it; on a VPS without it, run the userspace mode instead (WGFT_MODE=userspace)", cfg.Interface)
 			}
 			return nil, fmt.Errorf("cannot create %s: %w", cfg.Interface, err)
 		}
@@ -163,10 +161,8 @@ func Ensure(cfg Config) (changes []string, err error) {
 			return nil, fmt.Errorf("read %s: %w", cfg.Interface, err)
 		}
 		if dev.PrivateKey != cfg.PrivateKey && !cfg.AdoptExisting {
-			return nil, &StartupRefusal{
-				Reason: fmt.Sprintf("%s already exists but was not created by wgft, key does not match; use --wg-interface to pick another name, disable the unit bringing that wg up, or pass --adopt-existing to adopt it on purpose", cfg.Interface),
-				DryRun: planChanges(link, dev, cfg),
-			}
+			return nil, conflictError(planChanges(link, dev, cfg),
+				"%s already exists but was not created by wgft, key does not match; use --wg-interface to pick another name, disable the unit bringing that wg up, or pass --adopt-existing to adopt it on purpose", cfg.Interface)
 		}
 	}
 
@@ -355,8 +351,8 @@ func portConflict(devs []*wgtypes.Device, iface string, port int) (string, bool)
 }
 
 // checkAddrOverlap は、cfg.Address の帯(/24)が cfg.Interface 以外のインタフェースの
-// アドレスと重なっていれば StartupRefusal を返す。検査できなければ黙って通す。
-func checkAddrOverlap(cfg Config) *StartupRefusal {
+// アドレスと重なっていれば conflictError を返す。検査できなければ黙って通す。
+func checkAddrOverlap(cfg Config) error {
 	links, err := netlink.LinkList()
 	if err != nil {
 		return nil
@@ -376,7 +372,7 @@ func checkAddrOverlap(cfg Config) *StartupRefusal {
 				continue
 			}
 			if band.Contains(ip.Unmap()) {
-				return &StartupRefusal{Reason: fmt.Sprintf("address range %s overlaps with existing interface %q address %s; use --wg-address to choose another range", cfg.Address, l.Attrs().Name, a.IP)}
+				return conflictError(nil, "address range %s overlaps with existing interface %q address %s; use --wg-address to choose another range", cfg.Address, l.Attrs().Name, a.IP)
 			}
 		}
 	}

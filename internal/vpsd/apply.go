@@ -2,15 +2,14 @@ package vpsd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
-	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/reconcile"
+	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -31,9 +30,9 @@ func (d *Daemon) bringUpWG() error {
 	}
 	changes, err := d.dp.EnsureDevice(*cfg)
 	if err != nil {
-		// 所有判定・衝突による中止は、専用の終了コードに写せるようそのまま返す(wg0: で包まない)。
-		var refusal *wg.StartupRefusal
-		if errors.As(err, &refusal) {
+		// 起動の拒否は、種別と対象を自分で文言に持つので、インタフェース名で包まずそのまま返す
+		// (設計文書 11b 節)。再試行で直りうる失敗は、どのインタフェースの話かを添えて返す。
+		if startup.IsRefusal(err) {
 			return err
 		}
 		return fmt.Errorf("%s: %w", d.opts.WGInterface, err)
@@ -97,22 +96,23 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 // agent APIs, which start listening later in Run, so this reordering does not affect Phase 4's
 // convergence order or its point-of-no-return guarantees.
 //
-// A read failure once the table is applied is not a missing module load (the write already
-// happened): it is a permanent environment problem (this sysctl path does not exist on this
-// kernel, or is not readable), so it is wrapped as a *wg.StartupRefusal, matching the exit-code
-// classification design.md 11a 節 already gives the analogous "no WireGuard support" failure in
-// wg.Ensure. That keeps systemd's RestartPreventExitStatus=3 from looping forever on a failure
-// that retrying cannot fix, instead of the generic error (exit code 1) ReadUDPTimeouts previously
-// became.
+// A read failure once the table is applied is an ordinary error (exit code 1), so the unit keeps
+// restarting on it. It was a startup refusal (exit code 3) between 2026-09-20 and this change, on
+// the assumption that a read failing after the write is permanent. That assumption is not provable:
+// the sysctl may be missing because nf_conntrack registered it in another network namespace, or
+// because the container runtime masks /proc/sys until it is remounted, and no real environment
+// where it keeps failing after the apply has ever been seen (the old behaviour was only exercised
+// with a fake). design.md 11b 節's asymmetric rule settles the doubtful case as exit code 1: a
+// noisy restart loop is recoverable, a wrong exit code 3 keeps the server down for good. Kernel
+// mode's forwarding stays up across those restarts, since the table is already applied when this
+// read runs.
 func applyThenReadConntrack(apply func() error, readTimeouts func() (linux.UDPTimeouts, error), warn func() string) (linux.UDPTimeouts, error) {
 	if err := apply(); err != nil {
 		return linux.UDPTimeouts{}, err
 	}
 	t, err := readTimeouts()
 	if err != nil {
-		return linux.UDPTimeouts{}, &wg.StartupRefusal{
-			Reason: fmt.Sprintf("reading the conntrack UDP timeouts after applying table inet %s: %v", nft.TableName, err),
-		}
+		return linux.UDPTimeouts{}, fmt.Errorf("reading the conntrack UDP timeouts after applying table inet %s: %w", nft.TableName, err)
 	}
 	if w := warn(); w != "" {
 		log.Printf("warning: %s", w)

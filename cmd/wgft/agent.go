@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -40,13 +42,57 @@ func agentSpecs() []spec {
 }
 
 // allowTargetsFromConfig は宛先の許可一覧を読む(仕様 7 節)。構文の誤りは、他の値の誤りと同じく
-// 設定起因の失敗として扱い、終了コード 3 で止める(仕様 11a 節)。値が無ければ nil を返す(制限なし)。
+// 入口での config の拒否として扱い、終了コード 3 で止める(設計文書 11b 節)。
+// 値が無ければ nil を返す(制限なし)。
 func allowTargetsFromConfig(c *config) (*allowtargets.List, error) {
 	l, err := allowtargets.Parse(c.str(allowtargets.Env))
 	if err != nil {
-		return nil, &configError{err: err}
+		return nil, configErrorf(allowtargets.Env, "%v", err)
 	}
 	return l, nil
+}
+
+// buildAgentOptions は agent run の「入口」である(設計文書 11b 節)。値だけから判定できる誤りは、
+// 認証情報ファイル、トンネル、待ち受けに触れる前にすべてここで拒否する。設定項目を足すときは、
+// ここに検査を足し、cmd/wgft/agent_test.go の TestEveryAgentSettingIsCheckedAtTheDoor の表に
+// 壊れた値を 1 つ加える。
+//
+// WGFT_JOIN の構文だけは例外で、internal/agent の ensureRegistered が登録の直前に判定する。
+// 登録済みの agent は compose に残った古い WGFT_JOIN を読まないので(11a 節が意図的に許す居座り)、
+// 入口で構文を拒否すると、今まで動いていた agent が値の誤りだけで止まる。値が使われるかどうかが
+// 認証情報ファイルの中身で決まるため、値だけからは判定できない項目である。誤りに気付けるよう、
+// 入口では警告を 1 行出す。
+func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
+	configPath := resolveConfigPath(cmd, agentConfigPath)
+	c, err := loadConfig(cmd, agentSpecs(), configPath)
+	if err != nil {
+		return agent.Options{}, nil, withUnreadableHint(err, configPath, agentUnreadableHint)
+	}
+	if strings.TrimSpace(c.str("WGFT_DATA_DIR")) == "" {
+		return agent.Options{}, nil, configErrorf("WGFT_DATA_DIR", "is empty; give the directory that holds agent.json")
+	}
+	limits, err := limitsFromConfig(c)
+	if err != nil {
+		return agent.Options{}, nil, err
+	}
+	allow, err := allowTargetsFromConfig(c)
+	if err != nil {
+		return agent.Options{}, nil, err
+	}
+	join := c.str("WGFT_JOIN")
+	if join != "" {
+		if _, err := agent.ParseJoin(join); err != nil {
+			log.Printf("warning: WGFT_JOIN is malformed (%v); it is used only for a first registration or after a revocation, so this agent starts if it is already registered", err)
+		}
+	}
+	return agent.Options{
+		AllowTargets:    allow,
+		Limits:          limits,
+		CredentialsPath: c.str("WGFT_DATA_DIR") + "/agent.json",
+		Join:            join,
+		Name:            c.str("WGFT_NAME"),
+		Version:         effectiveVersion(),
+	}, c, nil
 }
 
 // agentCredentialsPath は WGFT_DATA_DIR から agent.json (認証情報) のパスを決める(home 側コマンド用)。
@@ -83,32 +129,16 @@ On the VPS (against the admin API):
 		Short: "run the agent; agent host",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := loadConfig(cmd, agentSpecs(), resolveConfigPath(cmd, agentConfigPath))
+			opts, c, err := buildAgentOptions(cmd)
 			if err != nil {
-				return withUnreadableHint(err, agentUnreadableHint)
+				return err
 			}
 			if err := credentials.EnsureDataDir(c.str("WGFT_DATA_DIR")); err != nil {
 				return fmt.Errorf("data dir: %w", err)
 			}
-			limits, err := limitsFromConfig(c)
-			if err != nil {
-				return err
-			}
-			allow, err := allowTargetsFromConfig(c)
-			if err != nil {
-				return err
-			}
-			opts := agent.Options{
-				AllowTargets:    allow,
-				Limits:          limits,
-				CredentialsPath: c.str("WGFT_DATA_DIR") + "/agent.json",
-				Join:            c.str("WGFT_JOIN"),
-				Name:            c.str("WGFT_NAME"),
-				Version:         effectiveVersion(),
-			}
 			fmt.Fprintln(os.Stderr, "effective config:")
 			c.print(os.Stderr)
-			applyMemoryLimit(os.Stderr, limits, true)
+			applyMemoryLimit(os.Stderr, opts.Limits, true)
 			return agent.Run(opts)
 		},
 	}

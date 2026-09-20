@@ -11,9 +11,11 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/wgft agent run
 Restart=on-failure
 RestartSec=2
-# A configuration error exits with code 3 and says how to fix it: an agent.env that exists but
-# cannot be read (a root-owned file without group read permission, for example root:wgft mode
-# 0600), a syntax error in it, or an invalid value. Restarting does not help, so do not loop on it.
+# A failure a restart cannot fix exits with code 3, names its category and says how to fix it: an
+# agent.env that exists but cannot be read (a root-owned file without group read permission, for
+# example root:wgft mode 0600), a syntax error in it, an invalid value, a missing join string on a
+# first start (config), a join string the server rejects as spent or bound to a name already
+# registered (conflict). A VPS that is unreachable, or answers 429 or 5xx, exits 1 and is retried here.
 RestartPreventExitStatus=3
 
 # No privileges needed: create the user once with

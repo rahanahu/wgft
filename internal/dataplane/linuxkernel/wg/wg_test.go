@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/rahanahu/wgft/internal/startup"
 )
 
 func TestPortConflict(t *testing.T) {
@@ -29,24 +31,29 @@ func TestPortConflict(t *testing.T) {
 	}
 }
 
-func TestStartupRefusalError(t *testing.T) {
-	e := &StartupRefusal{Reason: "wg0 は既存だが wgft のものではない", DryRun: []string{"replace the private key", "delete peer X"}}
+// 他の所有者との衝突は、相手が資源を手放せば次の起動で通るので、起動の拒否(終了コード 3)ではなく
+// 普通のエラー(終了コード 1)である(設計文書 11b 節)。ドライランの差分は文面に残す。
+func TestConflictError(t *testing.T) {
+	e := conflictError([]string{"replace the private key", "delete peer X"}, "wg0 already exists but was not created by wgft")
 	s := e.Error()
-	if !strings.Contains(s, "refusing to start") || !strings.Contains(s, "replace the private key") || !strings.Contains(s, "delete peer X") {
+	if !strings.Contains(s, "was not created by wgft") || !strings.Contains(s, "replace the private key") || !strings.Contains(s, "delete peer X") {
 		t.Errorf("Error() の文面が不足: %s", s)
 	}
-	// DryRun が空なら差分の節は出さない。
-	if strings.Contains((&StartupRefusal{Reason: "x"}).Error(), "would have converged") {
-		t.Error("DryRun 空なのに差分節が出た")
+	if startup.IsRefusal(e) {
+		t.Error("資源の衝突が起動の拒否になっている(再試行で直りうるので終了コード 1 のはず)")
+	}
+	// ドライランが空なら差分の節は出さない。
+	if strings.Contains(conflictError(nil, "x").Error(), "would have converged") {
+		t.Error("ドライラン空なのに差分節が出た")
 	}
 }
 
 // TestClassifyPrivilege is the regression test for kernel mode started without root or
-// CAP_NET_ADMIN (docs/design.md 9, 11a 節): nothing checked privileges before the first privileged
+// CAP_NET_ADMIN (docs/design.md 9, 11b 節): nothing checked privileges before the first privileged
 // netlink or wgctrl write, so the generic EPERM/EACCES reached cmd/wgft as exit code 1, and the
 // shipped server.service (Restart=on-failure, RestartSec=2, RestartPreventExitStatus=3, which does
 // not include 1) restarted it every 2 seconds forever. classifyPrivilege must turn exactly that
-// class of error into a *StartupRefusal (exit code 3 via cmd/wgft's isStartupRefusal) and leave
+// class of error into a prerequisite refusal (exit code 3 via cmd/wgft's exitCode) and leave
 // every other error, including nil, alone.
 func TestClassifyPrivilege(t *testing.T) {
 	if got := classifyPrivilege(nil); got != nil {
@@ -61,9 +68,12 @@ func TestClassifyPrivilege(t *testing.T) {
 	for _, errno := range []syscall.Errno{syscall.EPERM, syscall.EACCES} {
 		wrapped := fmt.Errorf("netlink: %w", errno)
 		got := classifyPrivilege(wrapped)
-		var refusal *StartupRefusal
-		if !errors.As(got, &refusal) {
-			t.Fatalf("classifyPrivilege(%v) = %v (%T), want a *StartupRefusal", errno, got, got)
+		refusal := startup.Of(got)
+		if refusal == nil {
+			t.Fatalf("classifyPrivilege(%v) = %v (%T), want a *startup.Refusal", errno, got, got)
+		}
+		if refusal.Category != startup.CategoryPrerequisite {
+			t.Errorf("category = %q, want %q", refusal.Category, startup.CategoryPrerequisite)
 		}
 		if !strings.Contains(refusal.Reason, "CAP_NET_ADMIN") {
 			t.Errorf("reason = %q, want it to name CAP_NET_ADMIN", refusal.Reason)
@@ -79,9 +89,9 @@ func TestClassifyPrivilege(t *testing.T) {
 		}
 	}
 
-	// An already-classified StartupRefusal must not be reclassified or wrapped again.
-	already := &StartupRefusal{Reason: "wg0 already exists but was not created by wgft"}
+	// An already-classified refusal must not be reclassified or wrapped again.
+	already := startup.Prerequisite("wireguard module", "this kernel has no WireGuard support")
 	if got := classifyPrivilege(already); got != error(already) {
-		t.Errorf("classifyPrivilege(already-a-StartupRefusal) = %v, want it unchanged", got)
+		t.Errorf("classifyPrivilege(already-a-refusal) = %v, want it unchanged", got)
 	}
 }

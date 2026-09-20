@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/startup"
 )
 
 // Join は接続文字列 wgft://host:port/token#sha256:<hex> の中身(仕様 5.1 節)。
@@ -98,9 +100,20 @@ func Register(ctx context.Context, j *Join, name string) (permanentToken, addres
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	// The server's answer says whether a retry can help. 401, 400 and 409 are judgements on the
+	// values this agent sent, and no number of restarts changes them: the token is spent or expired,
+	// the name breaks the naming rule, or that name is taken. They become startup refusals (exit
+	// code 3), so the shipped agent.service stops retrying instead of asking the registration API
+	// every 2 seconds forever. Everything else - 429 from the API's own rate limit, a 5xx, an
+	// unreachable VPS - stays an ordinary error (exit code 1), because the next attempt may work
+	// (design.md 11b 節).
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		return "", "", "", ErrRegisterRejected
+		return "", "", "", startup.Conflict("WGFT_JOIN", "%v. Issue a new join string on the VPS (wgft agent join-string) and replace WGFT_JOIN", ErrRegisterRejected)
+	case resp.StatusCode == http.StatusBadRequest:
+		return "", "", "", startup.Config("WGFT_NAME", "the registration API rejected the request (HTTP 400: %s); an agent name may hold only lowercase letters, digits and hyphens, at most 32 of them, and may not begin or end with a hyphen", bytes.TrimSpace(data))
+	case resp.StatusCode == http.StatusConflict:
+		return "", "", "", startup.Conflict("WGFT_JOIN", "an agent is already registered under the name this join string carries (HTTP 409: %s); revoke it on the VPS (wgft agent revoke <name>) or issue a join string for another name", bytes.TrimSpace(data))
 	case resp.StatusCode != http.StatusOK:
 		return "", "", "", fmt.Errorf("registration API: HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(data))
 	}

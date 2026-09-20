@@ -6,14 +6,16 @@ package wg
 // 既存の「他人の wg」を作った状態で Ensure の所有判定・衝突検出・引き継ぎを確かめる。
 
 import (
-	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/rahanahu/wgft/internal/startup"
 )
 
 func cleanup(names ...string) {
@@ -126,12 +128,15 @@ func TestEnsureRefusesForeign(t *testing.T) {
 		Interface: "wg0", PrivateKey: sk, ListenPort: 51820,
 		Address: netip.MustParsePrefix("10.200.0.1/24"), MTU: 1420,
 	})
-	var refusal *StartupRefusal
-	if !errors.As(err, &refusal) {
-		t.Fatalf("拒否されなかった: %v", err)
+	// 資源の衝突は、相手が消えれば次の起動で通るので拒否(終了コード 3)にはしない(設計文書 11b 節)。
+	if err == nil {
+		t.Fatal("拒否されなかった")
 	}
-	if len(refusal.DryRun) == 0 {
-		t.Error("ドライランの差分が空")
+	if startup.IsRefusal(err) {
+		t.Fatalf("他人のインタフェースとの衝突が起動の拒否になっている: %v", err)
+	}
+	if !strings.Contains(err.Error(), "would have converged") {
+		t.Errorf("ドライランの差分が文面に無い: %v", err)
 	}
 	// wg0 は原状のまま(鍵・ピア・アドレス)。
 	d := device(t, "wg0")
@@ -174,9 +179,11 @@ func TestEnsurePortConflict(t *testing.T) {
 		Interface: "wgft0", PrivateKey: serverKey(t), ListenPort: 51820,
 		Address: netip.MustParsePrefix("10.200.0.1/24"), MTU: 1420,
 	})
-	var refusal *StartupRefusal
-	if !errors.As(err, &refusal) {
-		t.Fatalf("ポート衝突で拒否されなかった: %v", err)
+	if err == nil {
+		t.Fatal("ポート衝突で中止されなかった")
+	}
+	if startup.IsRefusal(err) {
+		t.Fatalf("ポートの衝突が起動の拒否になっている: %v", err)
 	}
 	if _, e := netlink.LinkByName("wgft0"); e == nil {
 		t.Error("拒否したのに wgft0 を作ってしまった")
@@ -193,9 +200,11 @@ func TestEnsureAddrOverlap(t *testing.T) {
 		Interface: "wgft0", PrivateKey: serverKey(t), ListenPort: 51821,
 		Address: netip.MustParsePrefix("10.200.0.1/24"), MTU: 1420,
 	})
-	var refusal *StartupRefusal
-	if !errors.As(err, &refusal) {
-		t.Fatalf("アドレス重なりで拒否されなかった: %v", err)
+	if err == nil {
+		t.Fatal("アドレス重なりで中止されなかった")
+	}
+	if startup.IsRefusal(err) {
+		t.Fatalf("アドレスの重なりが起動の拒否になっている: %v", err)
 	}
 }
 
@@ -227,9 +236,11 @@ func TestEnsureRefusesUDPPortInUse(t *testing.T) {
 	defer l.Close()
 	key, _ := wgtypes.GeneratePrivateKey()
 	_, err = Ensure(Config{Interface: "wgft0", Address: netip.MustParsePrefix("10.99.7.1/24"), ListenPort: 51877, MTU: 1420, PrivateKey: key})
-	var refusal *StartupRefusal
-	if !errors.As(err, &refusal) {
-		t.Fatalf("want StartupRefusal, got %v", err)
+	if err == nil {
+		t.Fatal("UDP ポートを他のプロセスが使っているのに中止されなかった")
+	}
+	if startup.IsRefusal(err) {
+		t.Fatalf("UDP ポートの衝突が起動の拒否になっている: %v", err)
 	}
 	if _, e := netlink.LinkByName("wgft0"); e == nil {
 		t.Fatal("wgft0 was created despite the refusal")

@@ -44,7 +44,9 @@ func TestCheckRecordedModeWording(t *testing.T) {
 
 	var out bytes.Buffer
 	checkRecordedMode(&out, st, modeUserspace)
-	want := "warning: the recorded mode is kernel but the setting is userspace; the mode change gate runs at start\n"
+	// 文言には拒否の種別を添える(設計文書 11b 節)。運用者が check の出力だけで、起動が止まる場合の
+	// 種別を選べるようにするためである。
+	want := "warning: the recorded mode is kernel but the setting is userspace; the mode change gate runs at start and refuses with [mode-gate] if leftovers of the old mode remain\n"
 	if got := out.String(); got != want {
 		t.Errorf("mismatch wording = %q, want %q", got, want)
 	}

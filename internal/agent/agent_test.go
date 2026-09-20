@@ -23,6 +23,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -118,8 +119,10 @@ func TestEnsureRegisteredKeepsStoredNameOnMismatch(t *testing.T) {
 // to return a plain error from ensureRegistered, which cmd/wgft could not distinguish from a
 // Register network failure, so both became the generic exit code 1 and the shipped
 // agent.service's Restart=on-failure looped on it every 2 seconds forever even though none of
-// these three retry themselves into working. They must now come back as *ConfigRefusal.
-func TestEnsureRegisteredJoinFailuresAreConfigRefusal(t *testing.T) {
+// these three retry themselves into working. They must now come back as startup refusals, with the
+// category that says why (design.md 11b 節): a missing or malformed value is config, a spent token
+// is conflict, since only an operator issuing a new join string clears it.
+func TestEnsureRegisteredJoinFailuresAreRefusals(t *testing.T) {
 	_, usedJoin := newTestRegisterServer(t, "home")
 	usedJ, err := ParseJoin(usedJoin)
 	if err != nil {
@@ -129,17 +132,21 @@ func TestEnsureRegisteredJoinFailuresAreConfigRefusal(t *testing.T) {
 		name string
 		f    *credentials.Credentials
 		opts Options
+		want startup.Category
 	}{
-		{"not registered, no join", &credentials.Credentials{}, Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json")}},
-		{"malformed join", &credentials.Credentials{}, Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Join: "not-a-join-string"}},
-		{"already-used join", &credentials.Credentials{UsedJoinTokenSHA256: usedJ.TokenHash()}, Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Join: usedJoin}},
+		{"not registered, no join", &credentials.Credentials{}, Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json")}, startup.CategoryConfig},
+		{"malformed join", &credentials.Credentials{}, Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Join: "not-a-join-string"}, startup.CategoryConfig},
+		{"already-used join", &credentials.Credentials{UsedJoinTokenSHA256: usedJ.TokenHash()}, Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Join: usedJoin}, startup.CategoryConflict},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ensureRegistered(tc.f, tc.opts)
-			var refusal *ConfigRefusal
-			if !errors.As(err, &refusal) {
-				t.Fatalf("ensureRegistered = %v (%T), want a *ConfigRefusal", err, err)
+			refusal := startup.Of(err)
+			if refusal == nil {
+				t.Fatalf("ensureRegistered = %v (%T), want a *startup.Refusal", err, err)
+			}
+			if refusal.Category != tc.want || refusal.Subject != "WGFT_JOIN" {
+				t.Errorf("refusal = [%s %s], want [%s WGFT_JOIN]", refusal.Category, refusal.Subject, tc.want)
 			}
 		})
 	}

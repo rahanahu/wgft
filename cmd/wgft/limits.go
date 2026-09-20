@@ -35,7 +35,7 @@ func limitsFromConfig(c *config) (resource.Limits, error) {
 	}{{"WGFT_MAX_UDP_FLOWS", &l.UDPTotal}, {"WGFT_MAX_TCP_FLOWS", &l.TCPTotal}} {
 		n, err := strconv.Atoi(c.str(f.env))
 		if err != nil || n < resource.TotalMin || n > resource.TotalMax {
-			return l, configErrorf("%s: %q is not an integer between %d and %d", f.env, c.str(f.env), resource.TotalMin, resource.TotalMax)
+			return l, configErrorf(f.env, "%q is not an integer between %d and %d", c.str(f.env), resource.TotalMin, resource.TotalMax)
 		}
 		*f.dst = n
 	}
@@ -73,7 +73,7 @@ func perSourceLimitsFromConfig(c *config) (policy.AdmissionLimits, error) {
 	}{{"WGFT_MAX_UDP_FLOWS_PER_SOURCE", &l.UDPPerSource}, {"WGFT_MAX_TCP_FLOWS_PER_SOURCE", &l.TCPPerSource}} {
 		n, err := strconv.Atoi(c.str(f.env))
 		if err != nil || n < 0 || n > resource.TotalMax {
-			return policy.AdmissionLimits{}, configErrorf("%s: %q is not an integer between 0 and %d (0 disables the per-source cap)", f.env, c.str(f.env), resource.TotalMax)
+			return policy.AdmissionLimits{}, configErrorf(f.env, "%q is not an integer between 0 and %d (0 disables the per-source cap)", c.str(f.env), resource.TotalMax)
 		}
 		if n == 0 {
 			n = policy.PerSourceOff

@@ -25,6 +25,7 @@ import (
 	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/internal/reconcile"
 	"github.com/rahanahu/wgft/internal/resource"
+	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/agentapi"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
@@ -238,6 +239,11 @@ type Daemon struct {
 // Run は起動して、シグナルまで動く。
 func Run(opts Options) error {
 	st, err := store.Open(opts.DBPath)
+	if errors.Is(err, store.ErrSchemaNewer) {
+		// 新しい版が書いたデータベースは、この版では読めない。運用者がその版を入れ直すか
+		// 控えを戻すまで同じ結果になるので、prerequisite の拒否にする(設計文書 11b 節)。
+		return startup.Prerequisite("server database", "%s: %v. Install the newer wgft again, or restore a copy of the database taken with this version", opts.DBPath, err)
+	}
 	if err != nil {
 		return fmt.Errorf("server database %s: %w", opts.DBPath, err)
 	}
@@ -306,8 +312,11 @@ func Run(opts Options) error {
 	if other, ok := d.dp.OtherDeviceWithKey(d.serverKey); ok {
 		log.Printf("warning: another WireGuard device %q with the same server key exists; suspect leftovers from changing WGFT_WG_INTERFACE, remove it with server teardown", other)
 	}
+	// 構文は入口(cmd/wgft の buildServerOptions)で弾いてあるので、ここへ届くのは入口を通らない
+	// 呼び出しだけである。二重の守りとして、届いた場合も設定の値の誤りとして拒否する
+	// (設計文書 11b 節。かつてはここがただのエラーで、終了コード 1 の再起動の繰り返しになっていた)。
 	if d.network, err = netip.ParsePrefix(opts.WGAddress); err != nil {
-		return fmt.Errorf("--wg-address %q: %w", opts.WGAddress, err)
+		return startup.Config("WGFT_WG_ADDRESS", "%q is not a valid address/prefix such as 10.200.0.1/24: %v", opts.WGAddress, err)
 	}
 	if err := d.bringUpWG(); err != nil {
 		return err
@@ -360,7 +369,7 @@ func Run(opts Options) error {
 		return err
 	}
 	// テーブルの適用、続いて conntrack の UDP タイムアウトと表の大きさの警告を読む。この順序と、
-	// 適用後もなお読めない場合の扱いは apply.go の applyThenReadConntrack を見よ(設計文書 11a 節)。
+	// 適用後もなお読めない場合の扱いは apply.go の applyThenReadConntrack を見よ(設計文書 11b 節)。
 	if d.timeouts, err = applyThenReadConntrack(
 		func() error { return d.applyNFT(rules) },
 		d.dp.ReadUDPTimeouts,

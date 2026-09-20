@@ -3,21 +3,21 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
 
-	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/buildinfo"
+	"github.com/rahanahu/wgft/internal/startup"
 )
 
-// exitConfigRefusal は、設定が原因で起動を中止したときの終了コード。他人の wg インタフェースやポート・
-// アドレスの衝突、モードやアドレス帯の照合による拒否、読めない設定ファイル、構文や値の誤りが当たる(仕様 11a 節)。systemd の RestartPreventExitStatus に入れて、
-// 設定ミスで再起動ループにならないようにする。
-const exitConfigRefusal = 3
+// exitRefusal は、再起動では直らない失敗で起動を中止したときの終了コード。設計文書 11b 節の
+// 4 つの種別(config、prerequisite、conflict、mode-gate)がここに写る。同梱の unit は
+// RestartPreventExitStatus に入れているので、systemd はこの終了コードでは再起動しない。
+// それ以外の失敗は終了コード 1 にして、unit の再起動に任せる。
+const exitRefusal = 3
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
@@ -59,20 +59,15 @@ func main() {
 	}
 }
 
-// exitCode は Execute の失敗を終了コードに振り分ける。設定起因で再起動しても直らないものは 3。
+// exitCode は Execute の失敗を終了コードに振り分ける。判定は 1 か所、1 つの型で済む。起動の拒否
+// (*startup.Refusal)は 3、それ以外は 1 である。server も agent も、どの層も同じ型を返す
+// (設計文書 11b 節)。かつては wg.StartupRefusal、cmd の configError、agent.ConfigRefusal の
+// 3 つを並べて見ており、新しい失敗を足すときに写し忘れる余地があった。
 func exitCode(err error) int {
-	if isStartupRefusal(err) || isConfigError(err) || isAgentConfigRefusal(err) {
-		return exitConfigRefusal
+	if startup.IsRefusal(err) {
+		return exitRefusal
 	}
 	return 1
-}
-
-// isAgentConfigRefusal は、agent の WGFT_JOIN 自体が原因の起動中止(欠落、構文の誤り、使用済み)かを返す
-// (internal/agent.ConfigRefusal、仕様 11a 節)。internal/agent はどの OS 向けビルドにも入るので、
-// isStartupRefusal と違って build tag で分ける必要が無い。
-func isAgentConfigRefusal(err error) bool {
-	var refusal *agent.ConfigRefusal
-	return errors.As(err, &refusal)
 }
 
 // effectiveVersion は -X で埋めた buildinfo.Version を返す。埋められていない(`go install ...@v0.1.0` で

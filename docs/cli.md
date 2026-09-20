@@ -858,9 +858,11 @@ Flags:
 ## wgft server run
 
 Run the server in the foreground. This is what the systemd unit and the
-container image start. On a conflict that a restart cannot fix (someone else's
-WireGuard interface, a port or address already in use, a kernel without
-WireGuard) it exits with code 3.
+container image start. On a failure a restart cannot fix it exits with code 3
+and names the category: config for a bad value, prerequisite for a missing
+kernel module or capability, conflict with a recorded value, mode-gate for a
+mode change that needs a teardown. Everything else exits 1 for the unit to
+retry, including a port or interface another owner still holds.
 
 ```text
 wgft server run [flags]
