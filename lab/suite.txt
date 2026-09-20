@@ -1,0 +1,82 @@
+# suite.txt lists every lab check with the class that decides how it may be scheduled.
+# tools/labhost reads it for `labhost run all`.
+#
+# Format, one job per line:  <class> <default> <scenario> [args...]
+#
+#   class    parallel         may run beside any number of other parallel jobs, each in its own
+#                             sandbox. Nothing it touches is shared outside its own namespaces
+#                             and its own workdir.
+#            exclusive-heavy  runs alone in the Lab Host VM: the value it asserts on, or the value
+#                             a person reads from it, is a measurement of memory or of achieved
+#                             rate, and a neighbour is one confounder too many.
+#            exclusive-timing runs alone in the Lab Host VM: it asserts on what does or does not
+#                             happen inside a wall-clock window, and measurably flakes when it
+#                             shares the VM even though CPU is not saturated.
+#            exclusive-global runs alone in the Lab Host VM: it changes a value a network namespace
+#                             does not isolate, such as net.netfilter.nf_conntrack_max or the
+#                             conntrack hash size. No check needs this class today; the class
+#                             exists so that a check that starts changing such a value has a home.
+#   default  yes              part of `labhost run all`
+#            no               run it by naming it (it needs something the Lab Host cannot always
+#                             provide, e.g. release binaries fetched from the network)
+#
+# The set of jobs with default=yes covers exactly what the per-test suite covers: both modes of
+# e2e, ipv6, rates and lifecycle, plus split-merge, import-export and connlimit in the one mode
+# each of them has. lifecycle is listed per check, so a check can have its own class.
+#
+# The check 5 family floods thousands of connections and datagrams. 5, 5b and 5e read RSS under that
+# load and run alone. 5c and 5d assert on an admission decision instead, and 20 repetitions of each
+# in a pool of eight sandboxes, overlapping each other, passed with identical held counts, so they
+# run in the pool.
+
+parallel         yes  e2e.sh kernel
+parallel         yes  e2e.sh userspace
+parallel         yes  ipv6.sh kernel
+parallel         yes  ipv6.sh userspace
+parallel         yes  split-merge.sh kernel
+parallel         yes  import-export.sh kernel
+
+parallel         yes  lifecycle.sh kernel 1
+parallel         yes  lifecycle.sh kernel 2
+parallel         yes  lifecycle.sh kernel 3
+parallel         yes  lifecycle.sh kernel 3b
+parallel         yes  lifecycle.sh kernel 4
+exclusive-heavy  yes  lifecycle.sh kernel 5
+exclusive-heavy  yes  lifecycle.sh kernel 5b
+parallel         yes  lifecycle.sh kernel 5c
+parallel         yes  lifecycle.sh kernel 5d
+exclusive-heavy  yes  lifecycle.sh kernel 5e
+parallel         yes  lifecycle.sh kernel 6
+parallel         yes  lifecycle.sh kernel 7
+parallel         yes  lifecycle.sh kernel 8
+# check 9c asserts that nothing is applied during a 35 s window with nothing changed. Measured:
+# 20 of 20 runs pass alone, 17 of 20 in a pool of 8, with the same failure each time
+# ("no apply was logged in the window"), so it runs alone.
+exclusive-timing yes  lifecycle.sh kernel 9
+
+parallel         yes  lifecycle.sh userspace 1
+parallel         yes  lifecycle.sh userspace 2
+parallel         yes  lifecycle.sh userspace 3
+parallel         yes  lifecycle.sh userspace 3b
+parallel         yes  lifecycle.sh userspace 4
+exclusive-heavy  yes  lifecycle.sh userspace 5
+exclusive-heavy  yes  lifecycle.sh userspace 5b
+parallel         yes  lifecycle.sh userspace 5c
+parallel         yes  lifecycle.sh userspace 5d
+exclusive-heavy  yes  lifecycle.sh userspace 5e
+parallel         yes  lifecycle.sh userspace 6
+parallel         yes  lifecycle.sh userspace 7
+parallel         yes  lifecycle.sh userspace 8
+exclusive-timing yes  lifecycle.sh userspace 9
+
+exclusive-heavy  yes  rates.sh kernel
+exclusive-heavy  yes  rates.sh userspace
+# connlimit.sh opens 160 to 320 concurrent flows, but what it asserts on is a kernel-side
+# per-source cap: three rounds beside 0, 4 and 8 sandboxes gave byte-identical counts and the
+# same 12 PASS lines, so it belongs in the pool.
+parallel         yes  connlimit.sh
+
+# version-skew.sh needs the v0.3.0 and v0.4.0 release binaries. A lab VM on a host without
+# outbound IPv4 cannot fetch them (GitHub has no IPv6), so they have to be staged into the VM
+# first, and the check is opt-in for that reason, exactly as it is in the per-VM suite today.
+parallel         no   version-skew.sh
