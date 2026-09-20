@@ -141,8 +141,19 @@ func (p *Pool) Refusals() map[string]map[Reason]uint64 {
 }
 
 // Listener は待ち受け 1 つ分の枠を Pool に登録する。呼び出し側は待ち受けを閉じるときに Close を呼ぶ。
-func (p *Pool) Listener(ruleID string) *Listener {
-	l := &Listener{p: p, rule: ruleID, accepting: true, open: true}
+// この handle は登録した時点で新しいフローを受け付けている状態になり、そのルールは A に入る。
+// ソケットを bind する前に handle が要る呼び出し側は、代わりに PendingListener を使う。
+func (p *Pool) Listener(ruleID string) *Listener { return p.listener(ruleID, true) }
+
+// PendingListener は、まだ新しいフローを受け付けられない待ち受けの枠を登録する。ソケットの bind が
+// 済む前に handle が要る呼び出し側が使い、bind が成功してから、中継を始める前に Accept を呼ぶ。
+// そのルールは Accept を呼ぶまで A に入らない。A は開けた待ち受けを持つルールの集合なので
+// (設計文書 7a.10 節)、bind の最中の待ち受けと bind に失敗した待ち受けが、その間だけ N を増やして
+// 他のルールの予約を減らすことを防ぐ。
+func (p *Pool) PendingListener(ruleID string) *Listener { return p.listener(ruleID, false) }
+
+func (p *Pool) listener(ruleID string, accepting bool) *Listener {
+	l := &Listener{p: p, rule: ruleID, accepting: accepting, open: true}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.listeners[l] = struct{}{}
@@ -164,6 +175,12 @@ type Listener struct {
 
 // Acquire はフロー 1 つ分の枠を取る。取れたら真を返し、呼び出し側はフローの終わりに Release を
 // 1 回呼ぶ。取れなければ理由を返し、何も数えない。拒否は理由ごとの数に 1 を足す。
+//
+// 判定は数の帳簿だけを見るので、受け付けていない handle(Retiring と、bind の済んでいない
+// PendingListener)でも枠は取れる。取った枠はプロセス全体の数 u に入り、ルールごとの数 u_r には
+// 入らず、そのルールを A にも入れない。中継は、待ち受けを Retiring にするときにソケットを閉じ、
+// bind が済んで Accept を呼んでから中継を始めるので、この状態で Acquire を呼ぶのは、閉じる直前に
+// accept してしまったフローだけである。
 func (l *Listener) Acquire() (Refusal, bool) {
 	p := l.p
 	p.mu.Lock()

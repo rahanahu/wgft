@@ -247,41 +247,45 @@ func (m *Manager) closeLocked(k Key) {
 	}
 }
 
-// newListener は待ち受け 1 つ分の記録を作り、Resource Guard の枠を登録する。中継を始めるのは
-// startUDP/startTCP(Apply の経路)と serveUDP/serveTCP(Prepare/Commit の経路)である。
+// newListener は待ち受け 1 つ分の記録を作り、Resource Guard の枠を受け付けていない状態で登録する。
+// そのルールが受け付けているルールの集合 A に入るのは、呼び出し側が bind の済んだソケットを持って
+// budget.Accept を呼んだ時点である(設計文書 7a.10 節)。中継を始めるのは serveUDP/serveTCP で、
+// Accept より後に始める。
 func (m *Manager) newListener(k Key, d Desired) *listener {
 	zero := func() int { return 0 }
 	pool := m.opts.UDPPool
 	if k.Proto == proto.TCP {
 		pool = m.opts.TCPPool
 	}
-	return &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: zero, budget: pool.Listener(d.RuleID)}
+	return &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: zero, budget: pool.PendingListener(d.RuleID)}
 }
 
+// openLocked は待ち受けを 1 つ開いて中継を始める(Apply の経路)。bind を先に行い、開けてから
+// Resource Guard の枠を受け付けにする。逆の順にすると、bind の最中と bind に失敗した待ち受けの
+// ルールが A に入り、その間だけ他のルールの予約が減る(設計文書 7a.10 節の A の定義)。
 func (m *Manager) openLocked(k Key, d Desired) {
-	l := m.newListener(k, d)
 	// 許可一覧の外にある IP リテラルの宛先は、待ち受けを開かずに理由を報告する(設計文書 7 節)
+	var sock boundSocket
 	err := m.allowedAtApply(d.Target)
 	if err == nil {
-		switch k.Proto {
-		case proto.UDP:
-			err = m.startUDP(l)
-		case proto.TCP:
-			err = m.startTCP(l)
-		default:
-			err = fmt.Errorf("unknown proto %q", k.Proto)
-		}
+		sock, err = m.bind(k)
 	}
+	l := m.newListener(k, d)
 	if err != nil {
-		// 開けなくても登録しておき、状態として見せる。次の Apply(再試行)で開き直す
+		// 開けなくても登録しておき、状態として見せる。次の Apply(再試行)で開き直す。枠は
+		// 受け付けていないままなので、このルールは A に入らない
 		l.bindErr = err
 		l.closeF = func() {}
-		// 開けなかった待ち受けは新しいフローを受け付けないので、隔離予約の集合 A から外す
-		// (設計文書 7a.10 節:bind に失敗して待ち受けを持たないルールは A に含めない)。
-		// 再試行は待ち受けを作り直すので、受け付けの再開はここでは要らない
-		l.budget.StopAccepting()
 		m.opts.Logf("listener %s: %v", k, err)
 	} else {
+		// 受け付けを先に始めてから中継を始める。逆の順にすると、A に入る前に来たフローが
+		// ルールごとの数に入らない
+		l.budget.Accept()
+		if sock.pc != nil {
+			m.serveUDP(l, sock.pc)
+		} else {
+			m.serveTCP(l, sock.ln)
+		}
 		m.opts.Logf("listener %s -> %s opened; rule %s", k, d.Target, d.RuleID)
 		if k.Proto == proto.TCP {
 			setTargetErrLocked(l, m.checkTarget(l.target))

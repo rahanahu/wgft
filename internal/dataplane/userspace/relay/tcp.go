@@ -34,16 +34,8 @@ func abortRefused(c net.Conn) {
 	}
 }
 
-func (m *Manager) startTCP(l *listener) error {
-	ln, err := m.net.ListenTCP(l.key.Port)
-	if err != nil {
-		return err
-	}
-	m.serveTCP(l, ln)
-	return nil
-}
-
-// serveTCP は開いた待ち受け ln で中継を始める。Prepare で開いた待ち受けは Commit でここに渡る。
+// serveTCP は開いた待ち受け ln で中継を始める。bind は呼び出し側(Apply の経路の openLocked と、
+// Prepare/Commit の経路の Prepare)が済ませてある。
 func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 	var (
 		mu    sync.Mutex

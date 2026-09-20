@@ -254,6 +254,9 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 		if !ok {
 			continue
 		}
+		// 枠は bind の済んだ待ち受けにだけ付け、中継を始める前に付ける。Prepare で bind に失敗した
+		// ポートはここに来ないので、そのルールは受け付けているルールの集合 A に入らない
+		// (設計文書 7a.10 節)
 		l := &listener{rule: r, ln: ln, conns: map[net.Conn]string{}, budget: m.opts.Pool.Listener(r.ID)}
 		m.ls[port] = l
 		go m.serve(l)

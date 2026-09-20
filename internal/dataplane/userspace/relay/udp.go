@@ -53,16 +53,8 @@ func forwardReply(s *udpSession, pc net.PacketConn, from net.Addr, own []byte) b
 	return err == nil
 }
 
-func (m *Manager) startUDP(l *listener) error {
-	pc, err := m.net.ListenUDP(l.key.Port)
-	if err != nil {
-		return err
-	}
-	m.serveUDP(l, pc)
-	return nil
-}
-
-// serveUDP は開いたソケット pc で中継を始める。Prepare で開いたソケットは Commit でここに渡る。
+// serveUDP は開いたソケット pc で中継を始める。bind は呼び出し側(Apply の経路の openLocked と、
+// Prepare/Commit の経路の Prepare)が済ませてある。
 func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 	var (
 		mu       sync.Mutex

@@ -751,3 +751,52 @@ func TestPoolConcurrentRuleSetChanges(t *testing.T) {
 	}
 	ok(t, p)
 }
+
+// bind の済んでいない待ち受けの枠(PendingListener)は、Accept を呼ぶまで受け付けているルールの
+// 集合 A に入らない。枠を取れば予算は使うが、ルールごとの数には入らない(設計文書 7a.10 節)。
+func TestPoolPendingListenerStaysOutOfTheAcceptingRules(t *testing.T) {
+	p := NewPool(10)
+	held := p.Listener("r1")
+	if n, _ := acquireN(held, 3); n != 3 {
+		t.Fatalf("r1 admitted %d flows, want 3", n)
+	}
+	if p.Rules() != 1 || p.Reserve() != 0 {
+		t.Fatalf("rules = %d, reserve = %d, want 1 and 0", p.Rules(), p.Reserve())
+	}
+	pending := p.PendingListener("r2")
+	if p.Rules() != 1 || p.Reserve() != 0 {
+		t.Errorf("rules = %d, reserve = %d after a pending listener, want 1 and 0", p.Rules(), p.Reserve())
+	}
+	if got := p.RuleFlows("r2"); got != 0 {
+		t.Errorf("RuleFlows(r2) = %d, want 0", got)
+	}
+	// r1 は A に 1 本だけのルールなので、予算のすべてを使える
+	if n, ref := acquireN(held, 7); n != 7 {
+		t.Errorf("r1 admitted %d of the remaining budget, want 7 (refused with %q)", n, ref.Reason)
+	}
+	held.Release()
+	// 受け付けていない枠でも判定は数の帳簿だけを見るので、枠は取れる。取ったフローは予算に入り、
+	// ルールごとの数には入らず、ルールを A にも入れない
+	if _, admitted := pending.Acquire(); !admitted {
+		t.Error("a pending listener must still be able to take a slot (a flow accepted just before the socket was ready)")
+	}
+	if p.InUse() != 10 {
+		t.Errorf("InUse = %d, want 10", p.InUse())
+	}
+	if got := p.RuleFlows("r2"); got != 0 {
+		t.Errorf("RuleFlows(r2) = %d, want 0 (a pending listener is out of the rule's count)", got)
+	}
+	if p.Rules() != 1 {
+		t.Errorf("rules = %d, want 1 (a pending listener does not join A by taking a slot)", p.Rules())
+	}
+	ok(t, p)
+	// Accept で A に入り、そのフローがルールごとの数に入る
+	pending.Accept()
+	if p.Rules() != 2 || p.Reserve() != 5 {
+		t.Errorf("rules = %d, reserve = %d after Accept, want 2 and 5", p.Rules(), p.Reserve())
+	}
+	if got := p.RuleFlows("r2"); got != 1 {
+		t.Errorf("RuleFlows(r2) after Accept = %d, want 1", got)
+	}
+	ok(t, p)
+}
