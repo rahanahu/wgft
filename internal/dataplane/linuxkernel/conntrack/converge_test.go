@@ -6,6 +6,7 @@ import (
 
 	"github.com/ti-mo/conntrack"
 
+	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -43,9 +44,9 @@ func TestConverge(t *testing.T) {
 	office := netip.MustParseAddr("10.200.0.3")
 	rules := []Rule{
 		{Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 2456, Hi: 2457}, AgentAddr: home,
-			SourceDeny: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}},
+			Policy: policy.RulePolicy{SourceDeny: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}}},
 		{Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, AgentAddr: office,
-			SourceAllow: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}},
+			Policy: policy.RulePolicy{SourceAllow: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}}},
 	}
 
 	tests := []struct {

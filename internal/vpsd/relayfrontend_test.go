@@ -49,9 +49,11 @@ func TestRelayRulesFromPlan(t *testing.T) {
 	got := relayRules(plan.Relay())
 	want := []proxyrelay.Rule{
 		{ID: "r_plain", ListenPort: 443, AgentAddr: netip.MustParseAddr("10.200.0.2"), AgentPort: 443,
-			SourceAllow: []netip.Prefix{cidr("198.51.100.0/24")}, Agent: "home"},
+			Policy: policy.RulePolicy{RuleID: "r_plain", Proto: proto.TCP,
+				SourceAllow: []netip.Prefix{cidr("198.51.100.0/24")}}, Agent: "home"},
 		{ID: "r_pp", ListenPort: 8443, AgentAddr: netip.MustParseAddr("10.200.0.3"), AgentPort: 8443,
-			ProxyProtocol: true, SourceDeny: []netip.Prefix{cidr("203.0.113.0/24")}, Agent: "office"},
+			ProxyProtocol: true, Policy: policy.RulePolicy{RuleID: "r_pp", Proto: proto.TCP,
+				SourceDeny: []netip.Prefix{cidr("203.0.113.0/24")}}, Agent: "office"},
 	}
 	byID := func(rs []proxyrelay.Rule) { sort.Slice(rs, func(i, j int) bool { return rs[i].ID < rs[j].ID }) }
 	byID(got)

@@ -3,6 +3,8 @@ package conntrack
 import (
 	"net/netip"
 	"testing"
+
+	"github.com/rahanahu/wgft/internal/policy"
 )
 
 // TestSourceAllowed pins today's behavior of sourceAllowed before design.md 7a.9 節's Phase 5
@@ -22,12 +24,12 @@ func TestSourceAllowed(t *testing.T) {
 		want bool
 	}{
 		{"no deny, no allow: everything admitted", src("192.0.2.1"), Rule{}, true},
-		{"denied source is rejected", src("203.0.113.9"), Rule{SourceDeny: deny}, false},
-		{"non-denied source with empty allow is admitted", src("192.0.2.1"), Rule{SourceDeny: deny}, true},
-		{"allowed source is admitted", src("198.51.100.9"), Rule{SourceAllow: allow}, true},
-		{"source outside a non-empty allow is rejected", src("192.0.2.1"), Rule{SourceAllow: allow}, false},
+		{"denied source is rejected", src("203.0.113.9"), Rule{Policy: policy.RulePolicy{SourceDeny: deny}}, false},
+		{"non-denied source with empty allow is admitted", src("192.0.2.1"), Rule{Policy: policy.RulePolicy{SourceDeny: deny}}, true},
+		{"allowed source is admitted", src("198.51.100.9"), Rule{Policy: policy.RulePolicy{SourceAllow: allow}}, true},
+		{"source outside a non-empty allow is rejected", src("192.0.2.1"), Rule{Policy: policy.RulePolicy{SourceAllow: allow}}, false},
 		{"deny wins when a source is in both deny and allow",
-			src("198.51.100.9"), Rule{SourceDeny: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, SourceAllow: allow}, false},
+			src("198.51.100.9"), Rule{Policy: policy.RulePolicy{SourceDeny: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, SourceAllow: allow}}, false},
 		// netip.Prefix.Contains does not unmap an IPv4-in-IPv6 address before comparing against an
 		// IPv4 (32-bit) prefix, so it never matches one (confirmed against the real netip package,
 		// not assumed): an IPv4-mapped source slips past an IPv4 deny list, and fails to match an
@@ -37,13 +39,13 @@ func TestSourceAllowed(t *testing.T) {
 		// replacement with policy.RulePolicy.SourceAllowed (which uses the same bare Contains, no
 		// unmap) reproduces it exactly rather than "fixing" it as an incidental behavior change.
 		{"IPv4-mapped source is not caught by an IPv4 deny prefix (Contains does not unmap)",
-			netip.MustParseAddr("::ffff:203.0.113.9"), Rule{SourceDeny: deny}, true},
+			netip.MustParseAddr("::ffff:203.0.113.9"), Rule{Policy: policy.RulePolicy{SourceDeny: deny}}, true},
 		{"IPv4-mapped source does not match an IPv4 allow prefix (Contains does not unmap)",
-			netip.MustParseAddr("::ffff:198.51.100.9"), Rule{SourceAllow: allow}, false},
+			netip.MustParseAddr("::ffff:198.51.100.9"), Rule{Policy: policy.RulePolicy{SourceAllow: allow}}, false},
 		{"Keep overrides deny/allow when set (kept even though deny would reject)",
-			src("203.0.113.9"), Rule{SourceDeny: deny, Keep: func(netip.Addr) bool { return true }}, true},
+			src("203.0.113.9"), Rule{Policy: policy.RulePolicy{SourceDeny: deny}, Keep: func(netip.Addr) bool { return true }}, true},
 		{"Keep overrides deny/allow when set (rejected even though allow would admit)",
-			src("198.51.100.9"), Rule{SourceAllow: allow, Keep: func(netip.Addr) bool { return false }}, false},
+			src("198.51.100.9"), Rule{Policy: policy.RulePolicy{SourceAllow: allow}, Keep: func(netip.Addr) bool { return false }}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

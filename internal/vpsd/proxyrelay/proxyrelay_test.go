@@ -100,7 +100,7 @@ func managerFor(t *testing.T, agentAddr string) (*Manager, func() net.Conn) {
 
 func rule(pp bool, deny, allow []string) Rule {
 	return Rule{ID: "r", ListenPort: 443, AgentAddr: netip.MustParseAddr("10.200.0.2"), AgentPort: 25565,
-		ProxyProtocol: pp, Agent: "home", SourceDeny: prefixes(deny), SourceAllow: prefixes(allow)}
+		ProxyProtocol: pp, Agent: "home", Policy: policy.RulePolicy{SourceDeny: prefixes(deny), SourceAllow: prefixes(allow)}}
 }
 func prefixes(ss []string) []netip.Prefix {
 	var out []netip.Prefix
