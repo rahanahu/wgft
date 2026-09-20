@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -185,7 +186,7 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 			ports = append(ports, portRangeString(rules[i].Proto, rules[i].ListenPort))
 		}
 		if len(ports) > 0 {
-			list = append(list, "close the published ports opened in the firewall, per rule: "+joinComma(ports))
+			list = append(list, "close the published ports opened in the firewall, per rule: "+strings.Join(ports, ", "))
 		}
 	}
 
@@ -225,15 +226,4 @@ func portRangeString(p proto.Proto, r proto.PortRange) string {
 		return fmt.Sprintf("%s/%d", p, r.Lo)
 	}
 	return fmt.Sprintf("%s/%d-%d", p, r.Lo, r.Hi)
-}
-
-func joinComma(ss []string) string {
-	out := ""
-	for i, s := range ss {
-		if i > 0 {
-			out += ", "
-		}
-		out += s
-	}
-	return out
 }
