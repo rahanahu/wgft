@@ -39,6 +39,7 @@ lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、�
 lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9)を並べると、その確認だけを流す
 lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定するポートに届かず、集約のレートのトークンも使わないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/version-skew.sh         # 版の組み合わせ(新旧の server・agent、legacy v0)。旧いバイナリは GitHub の Releases から取得しキャッシュする(スクリプト冒頭のコメント参照)
+lab/lab exec vm bash /wgft/lab/upgrade.sh kernel       # 旧版からの更新(D4)。直前のリリースのデータに現在のビルドを重ね、ルール・鍵・認証情報が保たれ、転送が戻ることを確認。userspace も同じ
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
 lab/lab destroy                 # VM ごと消す
 ```

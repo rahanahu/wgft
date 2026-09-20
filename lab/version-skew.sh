@@ -47,7 +47,8 @@
 # (lab/README.md's "VM が IPv4 で外に出られない"); on such a host, place the verified release
 # binaries and their .sha256 files (named exactly wgft-v0.4.0 / wgft-v0.3.0, matching what a
 # successful download would leave) in $CACHE before running this script. This script only fetches
-# what is not already cached there, so pre-staged files are used as they are.
+# what is not already cached there, so pre-staged files are used as they are. The download and
+# verification itself (fetch_release) lives in lab/oldrelease.sh, shared with lab/upgrade.sh (D4).
 #
 # Requires `lab/lab build` (wgft in /usr/local/bin of the VM) and the netns topology (`lab/lab
 # net up`). Runs the server in kernel mode only; version negotiation does not depend on the
@@ -98,49 +99,12 @@ wait_until() {
   done
 }
 
-# fetch_release <version> <out-path>: downloads the linux-amd64 release binary for a tagged
-# version into <out-path>, verified against the published .sha256. A cached, already-verified
-# <out-path> (from an earlier combination in this run, an earlier run in this VM, or a file
-# pre-staged with `incus file push`; see the header comment) is reused without touching the
-# network. Retries for a few minutes, so a slow or momentarily flaky network (or a pre-stage that
-# lands a little late) does not fail the whole script on one bad round trip.
-fetch_release() {
-  local ver=$1 out=$2 url
-  url="https://github.com/$GH_REPO/releases/download/v$ver/wgft-linux-amd64"
-  already_cached() {
-    [ -s "$out" ] && [ -s "$out.sha256" ] || return 1
-    [ "$(awk '{print $1}' "$out.sha256")" = "$(sha256sum "$out" | awk '{print $1}')" ]
-  }
-  if already_cached; then
-    chmod +x "$out"
-    return 0
-  fi
-  local i
-  for ((i = 0; i < 40; i++)); do
-    # the temp names carry this shell's pid: the cache is shared by every sandbox in the VM,
-    # and two copies fetching the same version must not write the same temp file
-    local tmp=$out.tmp.$$ shatmp=$out.sha256.tmp.$$
-    if curl -fsSL --connect-timeout 5 --max-time 30 -o "$tmp" "$url" \
-      && curl -fsSL --connect-timeout 5 --max-time 30 -o "$shatmp" "$url.sha256"; then
-      local want got
-      want=$(awk '{print $1}' "$shatmp")
-      got=$(sha256sum "$tmp" | awk '{print $1}')
-      if [ -n "$want" ] && [ "$want" = "$got" ]; then
-        mv "$tmp" "$out"; mv "$shatmp" "$out.sha256"; chmod +x "$out"
-        return 0
-      fi
-      echo "version-skew: sha256 mismatch for v$ver (want $want got $got)" >&2
-      rm -f "$tmp" "$shatmp"
-      return 1
-    fi
-    # covers both a transient network hiccup and the "pre-staged by incus file push while this
-    # loop is already running" race; already_cached() below re-checks the same path each round.
-    rm -f "$tmp" "$shatmp"
-    already_cached && { chmod +x "$out"; return 0; }
-    sleep 5
-  done
-  return 1
-}
+# fetch_release (download-and-verify a tagged release binary, with caching and retries) is
+# shared with lab/upgrade.sh (D4, docs/testing.md), which needs the same previous-release binary;
+# see lab/oldrelease.sh's header comment for why it is factored out instead of kept inline here.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lab/oldrelease.sh
+. "$SCRIPT_DIR/oldrelease.sh"
 
 # kill_all resets the server/agent under test between combinations. It deliberately leaves the
 # shared LAN echo target (started once, below) running; that target is only killed at the very
