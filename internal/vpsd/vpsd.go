@@ -438,7 +438,11 @@ func Run(opts Options) error {
 	go d.convergeLoop(ctx)
 	select {
 	case <-ctx.Done():
-		log.Printf("shutting down; keeping interface %s and the table", opts.WGInterface)
+		if d.opts.Mode == modeUserspace {
+			log.Printf("shutting down")
+		} else {
+			log.Printf("shutting down; keeping interface %s and the table", opts.WGInterface)
+		}
 		return nil
 	case err := <-errc:
 		return err

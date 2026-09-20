@@ -115,7 +115,7 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 			return fmt.Errorf("check ownership of wg %s: %w", iface, err)
 		}
 		if exists && !owned {
-			return fmt.Errorf("wg %s was not created by wgft, key does not match%s; refusing to avoid deleting someone else's wg; pass --adopt-existing to adopt and delete it", iface, map[bool]string{true: "; no state file", false: ""}[!haveState])
+			return fmt.Errorf("wg %s was not created by wgft, key does not match%s; refusing to avoid deleting someone else's wg; pass --adopt-existing to adopt and delete it", iface, map[bool]string{true: "; no server database", false: ""}[!haveState])
 		}
 	}
 
