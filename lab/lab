@@ -50,6 +50,8 @@ provision() {
 set -euo pipefail
 # ホストの firewalld / Docker の影響で IPv4 の DNS が引けない場合は、IPv6 の DNS に切り替える(lab/README.md)
 # /etc/resolv.conf は /run(tmpfs)へのシンボリックリンクなので、直接書くと再起動で消える。resolved の設定に書く
+# deb.debian.org はここでは到達性を確かめるための外部ホスト名で、パッケージの取得先とは関係ない
+# (dnf 系のディストリでも、resolved の設定を直す判断にそのまま使える)
 if ! getent hosts deb.debian.org >/dev/null; then
   echo "IPv4 の DNS が使えないので IPv6 の DNS を使う" >&2
   if systemctl is-active -q systemd-resolved; then
@@ -62,13 +64,34 @@ if ! getent hosts deb.debian.org >/dev/null; then
   fi
   getent hosts deb.debian.org >/dev/null || { echo "IPv6 の DNS でも名前を引けない" >&2; exit 1; }
 fi
-export DEBIAN_FRONTEND=noninteractive
-# 前回の lab up を途中で止めた場合などに、dpkg のロックが空くまで待つ
-apt_opts=(-q -o DPkg::Lock::Timeout=600)
-dpkg --configure -a
-apt-get "${apt_opts[@]}" update
-apt-get "${apt_opts[@]}" install -y --no-install-recommends \
-  nftables iptables wireguard-tools conntrack iproute2 procps tcpdump iperf3 socat curl podman
+
+# パッケージ名とパッケージ管理コマンドはディストリごとに違う。/etc/os-release の ID で分ける。
+# Debian の分岐は元のコマンド列のまま(既定のイメージの挙動を変えない)。ID_LIKE ではなく ID を
+# 見るのは、Ubuntu を Debian と同じ枝に、素の Fedora だけを dnf の枝に、明示的に振り分けるため
+. /etc/os-release
+case "$ID" in
+  debian | ubuntu)
+    export DEBIAN_FRONTEND=noninteractive
+    # 前回の lab up を途中で止めた場合などに、dpkg のロックが空くまで待つ
+    apt_opts=(-q -o DPkg::Lock::Timeout=600)
+    dpkg --configure -a
+    apt-get "${apt_opts[@]}" update
+    apt-get "${apt_opts[@]}" install -y --no-install-recommends \
+      nftables iptables wireguard-tools conntrack iproute2 procps tcpdump iperf3 socat curl podman
+    ;;
+  fedora)
+    # conntrack のコマンドは conntrack-tools、iproute2 相当は iproute、procps 相当は procps-ng という
+    # パッケージ名になる。python3 は lab の各シナリオが使うが、Fedora の Cloud Base イメージには
+    # 既定で入っていないため、ここで明示的に入れる(Debian 系は既定のイメージに入っている)
+    dnf -y makecache
+    dnf -y install \
+      nftables iptables wireguard-tools conntrack-tools iproute procps-ng tcpdump iperf3 socat curl podman python3
+    ;;
+  *)
+    echo "lab: 未対応のディストリ(/etc/os-release の ID=$ID)。lab/lab の provision() に分岐を足す" >&2
+    exit 1
+    ;;
+esac
 mkdir -p /var/lib/wgft-lab && touch /var/lib/wgft-lab/provisioned
 EOF
 }

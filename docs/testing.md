@@ -235,6 +235,10 @@ v1 の前に 1 回流し、以後は関係する領域を変えたときにだ�
 
 v1 の条件のうち、公式に対応をうたう 3 つのディストリビューションでの配布物の確認 (B9) は、`scripts/dist-vm.sh` として実装済みで、Debian 12、Ubuntu 24.04、Fedora 44 のいずれでも確かめました。版の組み合わせ (B7) は `lab/version-skew.sh` として実装済みです。ただし、旧い側が表せない機能のルールを理由付きの `not_active` にすることの確認だけは、該当する capability がまだ無いため未了です (後述の「B7 の not_active の確認」)。
 
+別のディストリビューションでのラボの一式 (C4) のうち、Ubuntu 24.04 での実行は完了しました。カーネル 6.8.0、nftables v1.0.9 の Ubuntu 24.04 の Lab Host VM で `labhost run -parallel 8 all` を流し、同じコミットの既定の Debian 12 (カーネル 6.1.0、nftables v1.0.6) の結果と比較したところ、判定はどちらも PASS 291、FAIL 0、SKIP 16 で一致し、確認ごとの PASS と SKIP の数も一致しました。C4 が挙げていた、新しいカーネルと nftables の版による挙動の違い (通知の出方、`ct count` の値、式の表記) は、今回流した一式の範囲では表れませんでした。もっと大きな規模や、この 2 つより新しいカーネルと nftables での挙動は未確認です。
+
+Fedora 44 (カーネル 7.2.5、nftables v1.1.6) でも同じ一式を既定の設定で流し、こちらも PASS 291、FAIL 0、SKIP 16 で、確認ごとの数も Debian 12 と一致しました。ただし Incus の `images:fedora/44` イメージには、`firewalld` と SELinux のポリシー (`selinux-policy` 一式) がどちらも入っておらず、`getenforce` は Disabled でした (`/sys/fs/selinux` はマウントされているので、カーネル自体は SELinux に対応していますが、適用するポリシーが無い状態です)。実機の Fedora Server や Workstation は既定でこの両方が有効なので、今回の一式はその条件を再現していません。SELinux が enforcing の状態と firewalld が動く状態でラボのトポロジと一式が通ることは未確認で、確かめるには `selinux-policy-targeted` と `policycoreutils` の導入、relabel、再起動による enforcing 化、`firewalld` の導入と有効化を、`lab/lab` の外で別途行う必要があります。Fedora への対応は v1.1 以降でよい項目のままなので、この未確認の点は v1 の関門には含めません。
+
 ## 更新と戻しの約束
 
 更新の経路は保証します。旧版への戻しは互換性の契約に含めず、各版で観測した挙動だけを記録します。戻す必要があるときは、更新の前に取ったデータの置き場のバックアップから戻します。戻しを約束すると、サーバのデータベースのスキーマ、migration、知らないフィールドの保存、状態ファイル、wire protocol の変更を、旧い版が読める形に永久に縛るためです ([設計文書](design.md) 7a.6 節)。D4 はこの約束に従い、更新を確かめ、戻しについては挙動を記録するだけにします。
@@ -287,11 +291,11 @@ v1 の条件のうち、公式に対応をうたう 3 つのディストリビ�
 
 - 内容:A9 と同じ一式を、既定の Debian 12 (対応の下限) 以外のイメージの VM で流します
 - 足りない理由:既定のラボは Debian 12 だけなので、新しいカーネルと nftables での挙動の違い (通知の出方、`nft list` の表記) を確かめません
-- 環境:`WGFT_LAB_IMAGE` で別のイメージを選んだ Lab Host VM です。ディストリビューションごとに 1 台の Lab Host VM を立て、その中で一式を `labhost run -parallel N all` で流します。Ubuntu 24.04 は今の導入の手順で立てられます。Fedora は、`lab/lab` の導入が apt を使うので立てられません
+- 環境:`WGFT_LAB_IMAGE` で別のイメージを選んだ Lab Host VM です。ディストリビューションごとに 1 台の Lab Host VM を立て、その中で一式を `labhost run -parallel N all` で流します。`lab/lab` は `/etc/os-release` の ID でパッケージ管理コマンドとパッケージ名を振り分けるので、Ubuntu 24.04 と Fedora のどちらも今の導入の手順 (`lab/lab up`) で立てられます
 - 時期:v1 の前に一度流し、以後は関係する変更 (kernel 側の経路) を含む段階の完了時に流し直します
 - 契機:`kernel`、`phase`
 - 自動化:自動です。開発者が起動します
-- v1:Ubuntu 24.04 での実行は必須で、v1 の前に 1 回の項目です。`lab/lab` の Fedora への対応は v1.1 以降でよい項目で、v1 での Fedora の確認は B9 が兼ねます
+- v1:Ubuntu 24.04 での実行は必須で、v1 の前に 1 回の項目です。この項目は満たしました (結果は後述の「v1 の項目と繰り返しの頻度」の節)。Fedora への対応は v1.1 以降でよい項目のままで、既定の設定での一式は流しましたが、SELinux が enforcing の状態と firewalld が動く状態での確認は未確認です (同節)
 
 ### C5 長時間の TCP と UDP
 
