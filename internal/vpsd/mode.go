@@ -33,7 +33,7 @@ func reconcileModeAndAddress(st *store.Store, opts Options, hadServerKey bool) e
 		if mode == "" {
 			if hadServerKey {
 				mode = modeKernel
-				log.Printf("existing state file with no recorded mode; recording it as kernel")
+				log.Printf("existing server database with no recorded mode; recording it as kernel")
 			} else {
 				// 値が無いことは値だけからは判定できない。記録の有無を見て初めて必須になるので、
 				// 入口(cmd/wgft の buildServerOptions)ではなく、ここで判定する(設計文書 11b 節)。
