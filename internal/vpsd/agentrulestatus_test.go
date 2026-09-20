@@ -208,14 +208,64 @@ func TestAgentRuleStatusesOmitsDeletedRuleID(t *testing.T) {
 	}
 }
 
-// TestAgentRuleStatusesEmptyBeforeAnyHeartbeat confirms a rule whose agent has not sent a heartbeat
-// yet (hub.Status returns a zero Status, Heartbeat == nil) is simply absent, not present with a
-// zero value (design.md 5.2、7a.11 節, matching ResourceStatus.Refusals' convention).
-func TestAgentRuleStatusesEmptyBeforeAnyHeartbeat(t *testing.T) {
+// TestAgentRuleStatusesNeverConnected confirms a rule whose agent has never connected at all (hub.Status
+// returns the zero Status: Connected false, Heartbeat nil) still gets an entry - Agent and Connected
+// present, State/Reason/At absent - rather than being left out of the map (2026-09-21, owner's
+// decision; design.md 7a.11 節). An absent map entry would be indistinguishable from a Backend that
+// does not implement AgentRuleStatusBackend at all. This same code path also covers a revoked
+// agent's name (stream.Hub.Disconnect deletes its status entirely, design.md 5.1、5.2 節) or any
+// other name the hub has simply never seen: Hub.Status returns the same zero value for all of them.
+func TestAgentRuleStatusesNeverConnected(t *testing.T) {
 	d := &Daemon{hub: stream.New(nil)}
 	rules := []proto.Rule{{ID: "r_a", Agent: "home"}}
 	got := d.AgentRuleStatuses(rules)
-	if len(got) != 0 {
-		t.Errorf("AgentRuleStatuses(...) = %+v, want none before any heartbeat", got)
+	st, ok := got["r_a"]
+	if !ok {
+		t.Fatal("r_a missing from AgentRuleStatuses(): every current rule must get an entry")
+	}
+	if st.Agent != "home" || st.Connected {
+		t.Errorf("r_a = %+v, want Agent home, Connected false", st)
+	}
+	if st.State != "" || st.Reason != "" || st.At != "" {
+		t.Errorf("r_a = %+v, want State/Reason/At all empty (never reported)", st)
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"r_a":{"agent":"home","connected":false}}`; string(b) != want {
+		t.Errorf("JSON = %s\nwant  %s", b, want)
+	}
+}
+
+// TestAgentRuleStatusesConnectedButNotYetReported confirms a rule whose agent IS connected, but whose
+// latest heartbeat simply does not list this particular rule yet (e.g. it was just added and the
+// agent has not applied/reported on it yet), gets an entry with Connected true and State/Reason/At
+// all absent - not mistaken for an error, and not left out of the map (2026-09-21, owner's decision;
+// design.md 7a.11 節).
+func TestAgentRuleStatusesConnectedButNotYetReported(t *testing.T) {
+	h, url := newTestHub(t)
+	hb := proto.Heartbeat{Generation: 1, Tunnel: proto.TunnelStatus{State: proto.StatusOK},
+		Rules: []proto.RuleStatus{{ID: "r_a", State: proto.StatusOK}}} // r_new is not in here
+	c := connectAgent(t, h, url, "home", hb)
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	d := &Daemon{hub: h}
+	rules := []proto.Rule{{ID: "r_a", Agent: "home"}, {ID: "r_new", Agent: "home"}}
+	got := d.AgentRuleStatuses(rules)
+
+	st, ok := got["r_new"]
+	if !ok {
+		t.Fatal("r_new missing from AgentRuleStatuses(): every current rule must get an entry")
+	}
+	if st.Agent != "home" || !st.Connected {
+		t.Errorf("r_new = %+v, want Agent home, Connected true (the agent is online)", st)
+	}
+	if st.State != "" || st.Reason != "" || st.At != "" {
+		t.Errorf("r_new = %+v, want State/Reason/At all empty (this agent has not reported it yet)", st)
+	}
+	// The control: r_a, which the same heartbeat does list, still reports normally.
+	if ra := got["r_a"]; ra.State != proto.StatusOK || !ra.Connected {
+		t.Errorf("r_a = %+v, want state ok, connected true", ra)
 	}
 }

@@ -16,31 +16,53 @@ import "github.com/rahanahu/wgft/proto"
 // proto.RuleStatus entries the rule's own agent (proto.Rule.Agent) sends in its heartbeat. It
 // complements RuleStates (the server's own apply state, apply.go) and ResourceRefusals (Resource
 // Guard, resource_status.go) with what only `agent ls` and the Web UI showed until now.
+//
+// Every current rule gets an entry (2026-09-21, owner's decision): a rule id absent from
+// agent_rule_states as a whole means the Backend does not implement AgentRuleStatusBackend at all,
+// not "this particular rule was never reported" - if entries were only added once a report arrived,
+// the two would be indistinguishable from the JSON alone. State/Reason/At are therefore omitted
+// (via omitempty), not defaulted to a fabricated value, when the agent has not reported this rule
+// yet: State only ever holds the agent's own vocabulary ("ok"/"error"), so a server-invented value
+// such as "unknown" or "pending" in the same field would blur who said what, and an absent key
+// already means "not observed" throughout this API (design.md 7a.11 節). Agent/Connected are always
+// present regardless, since Connected alone already answers "should I expect a report soon" (an
+// offline agent will not report; a connected one may not have gotten to this rule yet).
 type AgentRuleStatus struct {
-	// Agent is the name of the rule's agent (proto.Rule.Agent), the one that reported this status.
+	// Agent is the name of the rule's current agent (proto.Rule.Agent). Always present, even when
+	// that name is no longer a registered agent (e.g. revoked): the rule still names it, and looking
+	// it up simply finds no connection.
 	Agent string `json:"agent"`
 	// State is "ok" or "error" (proto.StatusOK/StatusError); an open set, like every other state
-	// field in this API (7a.11 節).
-	State string `json:"state"`
+	// field in this API (7a.11 節). Omitted when the agent has not reported this rule yet, whether or
+	// not it is connected: read State's absence together with Connected (below).
+	State string `json:"state,omitempty"`
 	// Reason explains an error state: the agent's own refusal of the target
 	// (WGFT_AGENT_ALLOW_TARGETS), a listener bind failure, or a failed TCP connectivity check.
 	Reason string `json:"reason,omitempty"`
-	// At is the reporting agent's last heartbeat (RFC3339), matching AgentInfo.LastHeartbeat.
+	// At is the reporting agent's last heartbeat (RFC3339), matching AgentInfo.LastHeartbeat. Omitted
+	// along with State when nothing was reported.
 	At string `json:"at,omitempty"`
-	// Connected is whether the reporting agent's stream is connected right now. When false,
-	// State/Reason/At are that agent's last report before the stream dropped, not a current value
-	// (design.md 5.2 節); a consumer must not draw them as current.
+	// Connected is whether the rule's current agent's stream is connected right now, always present.
+	// The three readings (design.md 5.2, 7a.11 節):
+	//   - State present, Connected true: a live report from the agent that owns this rule now.
+	//   - State present, Connected false: that agent's last report before its stream dropped; history,
+	//     not a current value (design.md 5.2 節) - a consumer must not draw it as current.
+	//   - State absent: the agent has not reported this rule yet. Connected true means it is online
+	//     and may still get to it; Connected false means it is offline (or has never connected at
+	//     all, e.g. a revoked agent's name, or one never registered) and nothing will arrive soon.
 	Connected bool `json:"connected"`
 }
 
 // AgentRuleStatusBackend is implemented by a Backend that can report every rule's agent-side status.
 // It is a separate interface, like ApplyStatusBackend and ResourceStatusBackend, so the report stays
 // optional: a Backend without it (a fake or demo Backend, e.g.) serves the rules without the added
-// field.
+// field at all - the only way a consumer can tell "this Backend does not report agent status" apart
+// from "every rule was reported and fine", now that every current rule gets an entry.
 type AgentRuleStatusBackend interface {
-	// AgentRuleStatuses returns the agent-side status of each of rules, by rule ID. rules is the
-	// rule set already read for this response (getRules/postBatch pass resp.Rules), so this needs no
-	// store read of its own.
+	// AgentRuleStatuses returns an entry for every one of rules, by rule ID - never fewer, since an
+	// absent id would be indistinguishable from omitting the whole field (see AgentRuleStatus). rules
+	// is the rule set already read for this response (getRules/postBatch pass resp.Rules), so this
+	// needs no store read of its own.
 	//
 	// A rule's status comes only from its OWN agent (r.Agent), never from a different agent that
 	// happens to also list the same rule ID in a stale cached heartbeat. This matters because a
@@ -50,9 +72,6 @@ type AgentRuleStatusBackend interface {
 	// scanning every agent that ever mentioned the ID, is what keeps a moved rule showing B's live
 	// status (not A's stale one) and keeps a deleted rule's ID from appearing at all (it is no longer
 	// in rules, so it is never looked up).
-	//
-	// A rule its own agent has never reported is simply absent, not present with a zero value,
-	// matching ResourceStatus.Refusals.
 	AgentRuleStatuses(rules []proto.Rule) map[string]AgentRuleStatus
 }
 

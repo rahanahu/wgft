@@ -422,24 +422,31 @@ func (d *Daemon) ResourceStatus() admin.ResourceStatus {
 // stale heartbeat can still list the rule's ID. Looking a rule up by its own current agent means a
 // moved rule always shows its new agent's live status, and a deleted rule's ID never appears at all
 // (it is simply not in rules any more, so it is never looked up).
+//
+// Every rule gets an entry, whether or not its agent has reported it yet (2026-09-21, owner's
+// decision; design.md 7a.11 節): otherwise a rule id absent from the result would be indistinguishable
+// from this Backend not implementing the interface at all. d.hub.Status of an agent name the hub has
+// never seen - never registered, or revoked (stream.Hub.Disconnect removes its entry entirely) -
+// returns the zero Status (Connected false, Heartbeat nil), so that case falls out of the same code
+// path with no special-casing.
 func (d *Daemon) AgentRuleStatuses(rules []proto.Rule) map[string]admin.AgentRuleStatus {
-	out := map[string]admin.AgentRuleStatus{}
+	out := make(map[string]admin.AgentRuleStatus, len(rules))
 	for _, rule := range rules {
 		st := d.hub.Status(rule.Agent)
-		if st.Heartbeat == nil {
-			continue
-		}
-		for _, rs := range st.Heartbeat.Rules {
-			if rs.ID != rule.ID {
-				continue
+		entry := admin.AgentRuleStatus{Agent: rule.Agent, Connected: st.Connected}
+		if st.Heartbeat != nil {
+			for _, rs := range st.Heartbeat.Rules {
+				if rs.ID != rule.ID {
+					continue
+				}
+				entry.State, entry.Reason = rs.State, rs.Reason
+				if !st.LastHeartbeat.IsZero() {
+					entry.At = st.LastHeartbeat.Format(time.RFC3339)
+				}
+				break
 			}
-			var at string
-			if !st.LastHeartbeat.IsZero() {
-				at = st.LastHeartbeat.Format(time.RFC3339)
-			}
-			out[rule.ID] = admin.AgentRuleStatus{Agent: rule.Agent, State: rs.State, Reason: rs.Reason, At: at, Connected: st.Connected}
-			break
 		}
+		out[rule.ID] = entry
 	}
 	return out
 }

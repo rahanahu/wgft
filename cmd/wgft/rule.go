@@ -552,18 +552,25 @@ func resourceRefusalTotal(refusals map[string]map[string]uint64, ruleID string) 
 }
 
 // agentRuleNote renders one rule's agent-side status for the human `rule ls` table (design.md 10.1,
-// 7a.11 節): "-" if its agent never reported this rule, "ok" if it did and the rule is fine, or
-// "error: <reason>" otherwise. A "last:" prefix marks a disconnected agent's last report as history,
-// matching `agent ls`'s RULES column (design.md 5.2 節). This is unrelated to REFUSED, which counts
-// Resource Guard's own refusals, not the agent's.
+// 7a.11 節): "ok" if its agent reported it fine, "error: <reason>" if it reported an error, or "-" if
+// nothing has been reported yet (whether or not the agent is connected). A "last:" prefix marks a
+// disconnected agent's status as history, matching `agent ls`'s RULES column (design.md 5.2 節): for
+// a never-reported rule this reads as "last:-" (the agent went offline, or never connected, before
+// reporting on it). Backend without the optional interface at all (states is nil) reads the same as
+// "-": the table is not a contract, so it need not distinguish "not implemented" from "connected,
+// not yet reported" the way the JSON does. This is unrelated to REFUSED, which counts Resource
+// Guard's own refusals, not the agent's.
 func agentRuleNote(states map[string]admin.AgentRuleStatus, ruleID string) string {
 	st, ok := states[ruleID]
 	if !ok {
 		return "-"
 	}
-	note := st.State
-	if st.State != proto.StatusOK {
-		note = "error: " + st.Reason
+	note := "-"
+	if st.State != "" {
+		note = st.State
+		if st.State != proto.StatusOK {
+			note = "error: " + st.Reason
+		}
 	}
 	if !st.Connected {
 		note = "last:" + note

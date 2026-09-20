@@ -46,13 +46,64 @@ func TestRuleLsShowsAgentRuleState(t *testing.T) {
 	}
 	id := firstRuleID(t, adminURL)
 
-	// Before any report, no error text appears and the JSON field has no entry for this rule.
+	// Before any report at all (the Backend's map has no entry for this rule id, as if
+	// AgentRuleStatusBackend were not implemented), the table shows "-" and no error text.
 	stdout, _, err := runRuleCmd(t, adminURL, "ls")
 	if err != nil {
 		t.Fatalf("rule ls: %v", err)
 	}
 	if strings.Contains(stdout, "error:") {
 		t.Errorf("rule ls before any agent report must not show an error, stdout:\n%s", stdout)
+	}
+
+	// The agent is connected but has not reported this rule yet (2026-09-21, owner's decision: every
+	// current rule gets an entry, State/Reason/At absent, Connected reflecting the hub). The table
+	// must show "-", not "error: " (State being empty is not itself an error).
+	backend.status[id] = admin.AgentRuleStatus{Agent: "home", Connected: true}
+	stdout, _, err = runRuleCmd(t, adminURL, "ls")
+	if err != nil {
+		t.Fatalf("rule ls: %v", err)
+	}
+	if strings.Contains(stdout, "error:") {
+		t.Errorf("a connected, not-yet-reported rule must not show an error, stdout:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "last:") {
+		t.Errorf("a connected agent's not-yet-reported rule must not carry the last: prefix, stdout:\n%s", stdout)
+	}
+
+	// rule ls --json, for the same not-yet-reported-but-connected state, must show only "agent" and
+	// "connected" - no "state", "reason" or "at" key at all (--json pretty-prints, so compare the
+	// decoded field set rather than the raw bytes).
+	jsonOut, _, err := runRuleCmd(t, adminURL, "ls", "--json")
+	if err != nil {
+		t.Fatalf("rule ls --json: %v", err)
+	}
+	var raw struct {
+		AgentRuleStates map[string]map[string]json.RawMessage `json:"agent_rule_states"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &raw); err != nil {
+		t.Fatalf("decoding rule ls --json output: %v\n%s", err, jsonOut)
+	}
+	entry := raw.AgentRuleStates[id]
+	if len(entry) != 2 {
+		t.Fatalf("agent_rule_states[%s] = %v, want exactly the keys agent and connected", id, entry)
+	}
+	if string(entry["agent"]) != `"home"` || string(entry["connected"]) != "true" {
+		t.Errorf("agent_rule_states[%s] = %v, want agent=home connected=true", id, entry)
+	}
+	if _, ok := entry["state"]; ok {
+		t.Errorf("agent_rule_states[%s] has a state key, want none (never reported): %v", id, entry)
+	}
+
+	// The agent has never connected (or was revoked): same absent State, but Connected false, so the
+	// table marks it as history with the last: prefix, reading "last:-".
+	backend.status[id] = admin.AgentRuleStatus{Agent: "home", Connected: false}
+	stdout, _, err = runRuleCmd(t, adminURL, "ls")
+	if err != nil {
+		t.Fatalf("rule ls: %v", err)
+	}
+	if !strings.Contains(stdout, "last:-") {
+		t.Errorf("an offline agent that never reported this rule must show last:-, stdout:\n%s", stdout)
 	}
 
 	// The agent refused the target (WGFT_AGENT_ALLOW_TARGETS): connected, error.
@@ -81,7 +132,7 @@ func TestRuleLsShowsAgentRuleState(t *testing.T) {
 	}
 
 	// rule ls --json carries the same information machine-readably, under agent_rule_states.
-	jsonOut, _, err := runRuleCmd(t, adminURL, "ls", "--json")
+	jsonOut, _, err = runRuleCmd(t, adminURL, "ls", "--json")
 	if err != nil {
 		t.Fatalf("rule ls --json: %v", err)
 	}
