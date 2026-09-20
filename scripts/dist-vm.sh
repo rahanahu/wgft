@@ -92,16 +92,20 @@
 # (binary + a self-computed sha256 file, verified with "sha256sum -c" inside each VM exactly as
 # docs/setup.md step 1 shows), not from the source tree.
 #
+# One run at a time, host-wide: a host lock (see the "host-wide mutual exclusion" section below,
+# right after the -h/--help handling) refuses a second concurrent dist-vm.sh outright, with no
+# wait, before it creates anything. This is separate from, and not bypassed by, --force.
+#
 # VM budget: creates at most 2 VMs, named wgft-dist-<id>-server / -agent (a prefix distinct from
 # lab/'s wgft-eph- ephemeral VMs and the shared wgft-lab* dev VMs), and never touches an instance
 # it did not create. Before launching, it checks the host's total running instance count (shared
 # with everyone else's lab VMs, not just this script's own) and its 1-minute load average, and
 # REFUSES to start (exit 2) if the host is at or over 15 running instances or a load average of
-# 16, after a short wait-and-recheck window; --force skips the check and starts anyway. A
-# developer who wants to run a second or third distribution must let one run finish (its own trap
-# deletes its 2 VMs) before starting the next; this script never runs two distributions' VMs at
-# once itself. Cleans up on exit, INT and TERM; --keep-failed leaves the two VMs behind
-# (undeleted) when a check failed, for inspection.
+# 16, after a short wait-and-recheck window; --force skips only this capacity check and starts
+# anyway. Cleans up on exit, INT and TERM; --keep-failed leaves the two VMs behind (undeleted)
+# whenever this run's own exit code is non-zero, for inspection - not just when a check inside the
+# run explicitly failed, so an early failure (a VM that never finished launching, for example)
+# is kept too.
 set -u
 cd "$(dirname "$0")/.."
 REPO=$(pwd)
@@ -127,6 +131,69 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "dist-vm: '$1' not found" >&2
 need incus
 need go
 need ping
+need flock
+
+# --- host-wide mutual exclusion: only one dist-vm.sh run at a time -------------------------------
+# Serialises the whole of B9 per host. Static IP selection below picks a free address by pinging
+# for one (a TOCTOU race), so two concurrent runs could pick the same address; the simplest fix is
+# to never let two runs overlap at all. Acquired here, before the capacity check and the artefact
+# build, so a refused run costs nothing (no tmp dir, no build, no VM). Held open for this
+# process's entire lifetime and only ever released by the kernel closing the fd, which happens on
+# any exit path, including SIGKILL, so there is no stale-lock state to clean up and no pid file
+# that needs to be trusted for the locking decision itself (the pid this script writes into the
+# lock file below is for a human to read with `cat`, nothing more; a second flock(2) call is what
+# actually decides "in use", so a stale value there cannot cause a false "in use" reading).
+# --force bypasses only the capacity check below, never this lock: a second concurrent run would
+# still race on IP addresses regardless of host load, which --force says nothing about.
+#
+# Fd inheritance: bash does not mark fds opened with `exec {var}<>file` close-on-exec (checked
+# empirically; no fcntl/CLOEXEC builtin exists to change that), so EVERY external command this
+# script runs (sleep, incus, ping, ...) inherits LOCK_FD by default. That is harmless as long as
+# this script is the one waiting for each of those commands to finish, which is true everywhere
+# except: the two `reboot_and_wait ... &` background jobs in check 3c, which explicitly close
+# their inherited copy first (they could otherwise keep running, and keep the lock, well after a
+# killed parent is gone); and the three sleeps of 20s or 60s (in check_capacity and check 4), which
+# do the same with a per-command `{LOCK_FD}>&-` redirection, since those are long enough to matter.
+# The many remaining short waits (1-5s, mostly one `sleep 1` per iteration of retry() and similar
+# loops) are left alone: if this script is killed with SIGKILL at the exact instant one of them is
+# running, that one process becomes a harmless orphan holding a copy of the lock for at most a few
+# seconds until it exits on its own, after which the lock is genuinely free - a documented, bounded
+# trade-off rather than an unbounded stale lock, and not worth chasing down every call site for.
+#
+# Lock path: ${XDG_RUNTIME_DIR:-/tmp}/wgft-dist-vm.lock. XDG_RUNTIME_DIR is per-user (mode 0700,
+# usually tmpfs, cleared at logout), so two DIFFERENT users on this host running dist-vm.sh at the
+# same time would each get their own lock file and would NOT exclude each other. Accepted: this
+# host's B9 runs are all done by developers and agents operating as the same Unix user (see
+# lab/README.md's account model), so a second, different user racing this one on static IP
+# selection is already an unsupported scenario this script does not otherwise guard against
+# either (see the "Networking workaround" note above). A single fixed /tmp path shared by every
+# user would over-serialise unrelated users' runs instead, which is worse for the common case here.
+LOCK_PATH="${XDG_RUNTIME_DIR:-/tmp}/wgft-dist-vm.lock"
+# <> (not >): must not truncate a file another, currently-lock-holding run might read from or
+# write to; this process only ever writes to it after flock below proves it is the sole holder.
+exec {LOCK_FD}<>"$LOCK_PATH" || { echo "dist-vm: cannot open lock file $LOCK_PATH" >&2; exit 2; }
+if ! flock -n "$LOCK_FD"; then
+  holder=$(cat "$LOCK_PATH" 2>/dev/null)
+  echo "dist-vm: another dist-vm.sh run holds the lock ($LOCK_PATH)${holder:+, pid $holder}; refusing to start (this run does not wait for it to finish)." >&2
+  exit 4
+fi
+printf '%s\n' "$$" >"$LOCK_PATH"
+
+# Leftover wgft-dist-* VMs from a run that was killed with SIGKILL (which cannot run its own
+# cleanup trap, so its VMs outlive it) do not stale-lock the run above - the flock already proved
+# no dist-vm.sh is currently running - but they do sit around consuming the shared VM budget.
+# Report them by name; never delete them here automatically, since a name match alone is not proof
+# by itself. The pid embedded in the name (wgft-dist-<timestamp>-<pid>-server/agent) is: if that
+# pid is not running, the VM is provably not owned by any live dist-vm.sh (pid reuse by the OS
+# aside, which is rare enough not to guard against here).
+for leftover in $(incus list -c n -f csv 2>/dev/null | grep -E '^wgft-dist-[0-9]+-[0-9]+-(server|agent)$'); do
+  leftover_pid=${leftover%-server}
+  leftover_pid=${leftover_pid%-agent}
+  leftover_pid=${leftover_pid##*-}
+  if ! kill -0 "$leftover_pid" 2>/dev/null; then
+    echo "dist-vm: warning: leftover VM '$leftover' from a dist-vm.sh run whose pid $leftover_pid is no longer running (likely killed with SIGKILL); delete it with: incus delete -f $leftover" >&2
+  fi
+done
 
 id="$(date +%Y%m%d%H%M%S)-$$"
 server_vm="wgft-dist-$id-server"
@@ -169,10 +236,14 @@ retry() { # retry <timeout-seconds> <command...>: polls once a second up to the 
 
 # cleanup runs on EXIT, INT and TERM. It never deletes a VM this run did not create, and it never
 # backgrounds the VMs' owning shell (bash ignores SIGINT in a background job), so INT/TERM here
-# hits this script's own trap directly.
+# hits this script's own trap directly. --keep-failed triggers on $rc (this run's actual exit
+# code), not just $fail: several early failures (a VM failing to launch, the incus agent never
+# coming up, no free static IP, and others) exit 1 directly, before $fail is ever touched, so
+# checking $fail alone would silently drop --keep-failed for exactly the early-failure case it is
+# most useful for (inspecting a VM that failed between creation and a full install).
 cleanup() {
   local rc=$?
-  if [ "$fail" != 0 ] && [ "$KEEP_FAILED" = 1 ]; then
+  if { [ "$fail" != 0 ] || [ "$rc" != 0 ]; } && [ "$KEEP_FAILED" = 1 ]; then
     echo "dist-vm: --keep-failed: leaving $server_vm and $agent_vm for inspection" >&2
   else
     incus delete -f "$server_vm" "$agent_vm" >/dev/null 2>&1
@@ -211,7 +282,13 @@ check_capacity() {
       return 1
     fi
     echo "dist-vm: host busy (running=$n load1=$load1); waiting 60s and rechecking (up to $((300 - waited))s more)..." >&2
-    sleep 60
+    # {LOCK_FD}>&- here (and on the two other long sleeps below): sleep(1) is a separate forked
+    # process that would otherwise inherit LOCK_FD and, if this script were killed with SIGKILL
+    # while it is running, would keep the host lock held on its own for up to its own duration.
+    # Closing the fd just for this one command keeps the main shell's own copy (and the lock)
+    # untouched. See the header comment for why the many short (1-5s) sleeps elsewhere are not
+    # worth doing this for.
+    sleep 60 {LOCK_FD}>&-
     waited=$((waited + 60))
   done
 }
@@ -638,10 +715,21 @@ fi
 verify_forwarding_after_reboot "rebooting the agent VM alone"
 
 echo "== check 3c: reboot both VMs"
-reboot_and_wait "$server_vm" 120 &
+# Each backgrounded call forks this shell, inheriting LOCK_FD; close that copy immediately so an
+# orphaned child (if this script were killed before the "wait"s below return) could never keep the
+# host lock held after the main process is gone.
+{ exec {LOCK_FD}>&-; reboot_and_wait "$server_vm" 120; } &
 p1=$!
-reboot_and_wait "$agent_vm" 120 &
+{ exec {LOCK_FD}>&-; reboot_and_wait "$agent_vm" 120; } &
 p2=$!
+# A plain "wait $p1; wait $p2" here would block for up to 120s with this script's own INT/TERM
+# traps NOT firing: per POSIX, a shell defers a pending trap until "wait" for an asynchronous list
+# returns (checked empirically against this bash too - not a bug, standard behaviour), so Ctrl-C
+# during this specific check would otherwise go unnoticed for up to two minutes. Poll instead: each
+# `sleep 1` is itself a plain foreground child that terminates immediately on SIGINT/SIGTERM (both
+# are sent to this whole process group), which hands control straight back to this shell and lets
+# the pending trap run right away.
+while kill -0 "$p1" 2>/dev/null || kill -0 "$p2" 2>/dev/null; do sleep 1; done
 r1=0; r2=0
 wait "$p1" || r1=$?
 wait "$p2" || r2=$?
@@ -680,7 +768,7 @@ exitstatus=$(incus exec "$server_vm" -- systemctl show -p ExecMainStatus --value
 check "check4: invalid config leaves the unit failed, not active" "failed" "$active"
 eqcheck "check4: invalid config exits with code 3" "3" "$exitstatus"
 before=$(incus exec "$server_vm" -- systemctl show -p NRestarts --value wgft 2>&1)
-sleep 60
+sleep 60 {LOCK_FD}>&- # see the comment on the same pattern in check_capacity above
 after=$(incus exec "$server_vm" -- systemctl show -p NRestarts --value wgft 2>&1)
 eqcheck "check4: no restart loop over 1 minute (NRestarts unchanged)" "$before" "$after"
 
@@ -691,7 +779,7 @@ incus exec "$server_vm" -- systemctl daemon-reload
 incus exec "$server_vm" -- systemctl reset-failed wgft >/dev/null 2>&1
 before=$(incus exec "$server_vm" -- systemctl show -p NRestarts --value wgft 2>&1)
 incus exec "$server_vm" -- systemctl restart wgft
-sleep 20
+sleep 20 {LOCK_FD}>&- # see the comment on the same pattern in check_capacity above
 after=$(incus exec "$server_vm" -- systemctl show -p NRestarts --value wgft 2>&1)
 if [ "$after" -gt "$before" ] 2>/dev/null; then
   teeth_pass "removing RestartPreventExitStatus=3 loops on the same bad config ($before -> $after restarts in 20s)"
