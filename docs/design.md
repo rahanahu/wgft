@@ -1089,9 +1089,10 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 
 7a.6 節は外部契約として維持する対象を一覧にした。v1.0 のリリース後は、そこに挙げた境界の外側にあるすべての変更が互換性の判断の対象になる。この節は、公開しているサーフェスごとに、v1.0 が保つ約束、保たない約束、そのうち機械可読な安定した契約はどこまでか、そして自由に変えてよい人間向けの表示はどこかを分けて示す。目的はすべてを固定することではなく、どこを固定しどこを固定しないかを名指しすることにある(2026-09-21、所有者の決定)。
 
-サーフェスを横断する規則は次の 4 つである。
+サーフェスを横断する規則は次の 5 つである。
 
-- 加算(新しいフィールド、新しいルート、新しい列、新しい列挙値)は互換である。既存の名前の変更・削除・意味の変更は互換でない
+- 加算(新しいフィールド、新しいルート、新しい列)は、既存の利用者がそれを無視できるサーフェスでは互換である。既存の名前の変更・削除・意味の変更は互換でない
+- 既存のフィールドの新しい列挙値と値域の拡大は、加算と同じには扱わない。未知のフィールドは読み飛ばせるが、既知のフィールドの未知の値は読み飛ばせないためである。互換とするのは、そのサーフェスが未知の値を許容すると明記している場合だけで、扱いは各サーフェスの項で定める
 - 人間が読むための表示(CLI の表形式の出力、ログの行、Web UI の HTML と文言)は、それ自体では契約でない。自動化が読んでよいのは、各節が明示した機械可読な形だけである
 - 「互換」とは、rolling upgrade(5.2・7a.6 節)の間、新旧のプロセスが同時に存在する期間をどちらの順で越えても、古い側が新しい側の追加を読み飛ばして動作を続けられることを指す。両側が永久にすべての版を読めることではない
 - 終了コードの意味の契約は、9 節・11a 節で別途定める(この文書と並行して改訂中である)。この節はそこを参照するだけで、値そのものはここでは扱わない
@@ -1144,6 +1145,7 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 
 - フィールドは v1 の中で追加されるだけで、名前が変わったり削除されたりしない
 - 消費者は知らないフィールドを無視しなければならない(`encoding/json` の既定の振る舞いに合わせる)
+- 列挙値を持つフィールド(`rule_states` の `apply_state`、`tunnel` と `rules` の `state`、`resource_refusals` の理由のキー、警告の `kind`)は、v1 の中で値が増えうる開いた集合である。消費者は知らない値を「不明」として扱い、失敗にしてはならない。この条件のもとで、値の追加は互換である。既存の値の意味は変えない。リクエストに書く側の列挙値(ルールの `proto`、`vps_mode`)は閉じた集合で、値の追加は新しい機能の追加として扱う
 - 人間向けの表(`rule ls`・`agent ls` の素の出力)は自動化が読んではならない情報であり、どの列が何を意味するかは `--help` の文面と同じ扱いで自由に変わる
 - `--json` の出力のうち表に現れない項目(`rule ls --json` の `rule_states`・`drift`・`desired_generation`・`active_generation`、`agent ls --json` の `public_key`・`registered_from`・`created_at`・`agent_protocol_*`・`warnings` の詳細)も同じ契約の対象であり、情報量が多い分だけ自動化に向く
 
@@ -1153,7 +1155,7 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 
 **ログ出力。** 契約は無い。秘密(登録トークン、恒久トークン、秘密鍵、`Authorization`、接続文字列全体)をログに出さないことは 10.4 節の約束だが、これは互換性の契約ではなく安全側の性質である。行の書式、語順、`journalctl` で拾える語彙は、いつでも変えてよい。`scripts/check-log-tokens.sh` は CI の内部検査であり、トークンらしき文字列がログに紛れていないかを人が確認した一覧と照合するだけで、ログの形式を外部に約束するものではない。`journalctl -u wgft | grep 'rules: '`(docs/setup.md)のような固定の接頭辞に頼る運用があっても、それは wgft の契約ではなく運用側の前提である。
 
-**agent-server の wire protocol と capability。** 7a.6 節が定めるとおり、`pubkey`(agent → server)と `state`(server → agent)の既存フィールドの意味は変えない。版の交渉の仕組み(`protocol_min`/`protocol_max`/`capabilities`、`server_protocol_version`/`server_capabilities`、legacy v0)そのものが契約であり、これによって将来の版で全体状態の形を変えても、直前の版までの実装と rolling upgrade できる。保つものは、`pubkey`/`state` の JSON フィールド名と型、legacy v0 の判定規則(両方のフィールドが無ければ legacy)、malformed な advertisement と共通部分が無い場合を別の WebSocket close コード(`4003`/`4004`、`proto/stream.go`)で区別することである。保たないものは capability 文字列の語彙(まだ何も定義されていない)と、エージェント用 API のエラー文言である。
+**agent-server の wire protocol と capability。** 7a.6 節が定めるとおり、`pubkey`(agent → server)と `state`(server → agent)の既存フィールドの意味は変えない。版の交渉の仕組み(`protocol_min`/`protocol_max`/`capabilities`、`server_protocol_version`/`server_capabilities`、legacy v0)そのものが契約であり、これによって将来の版で全体状態の形を変えても、直前の版までの実装と rolling upgrade できる。保つものは、`pubkey`/`state` の JSON フィールド名と型、legacy v0 の判定規則(両方のフィールドが無ければ legacy)、malformed な advertisement と共通部分が無い場合を別の WebSocket close コード(`4003`/`4004`、`proto/stream.go`)で区別することである。保たないものは capability 文字列の語彙(まだ何も定義されていない)と、エージェント用 API のエラー文言である。既存のフィールドに新しい値を足すことは、wire の上では加算として扱わない。受け取る側の旧い実装がその値を許容すると確かめられていなければ、capability で交渉する変更として扱う(7a.6 節。旧い側が表せないルールは理由付きの `not_active` にする)。
 
 現在の値は `proto.SupportedProtocol = {Min: 1, Max: 1}` であり、番号の付いた版は v1 の 1 つしか存在しない。`capabilities`/`server_capabilities` の語彙も `proto.SupportedCapabilities` が空配列で、まだ 1 つも定義されていない。したがって「現在の版と直前の版の 2 つを必ず支える」という 7a.6 節の約束は、今のところ実地で確かめようがない。v2 が実際に生まれ、それに対する v1 との rolling upgrade をラボで確かめるまで、この約束は設計上の意図であって検証済みの事実ではない(下記「保つのが難しい約束」)。
 
