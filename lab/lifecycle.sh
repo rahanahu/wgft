@@ -168,8 +168,26 @@ client() { ip netns exec client bash -c "$1"; }
 
 admin_up() { vps wgft agent ls --admin "$ADMIN" >/dev/null 2>&1; }
 wait_admin() { wait_until 30 admin_up || { echo "!! admin api did not come up" >&2; return 1; }; }
-agent_registered() { vps wgft agent ls --admin "$ADMIN" 2>/dev/null | tail -1 | grep -q "$1"; }
-wait_agent() { wait_until 30 agent_registered "$1" || { echo "!! agent $1 did not register" >&2; return 1; }; }
+# agent_registered <name>: true once the agent's control stream has registered under <name> AND
+# its WireGuard peer has actually handshaken (agent ls --json's last_handshake, which
+# internal/vpsd/admin_backend.go's Agents() reads straight off the live wg device, in both modes:
+# kernel's real wg0 and userspace's wireguard-go). The name alone shows up as soon as the stream
+# registers, well before wgft0 has a peer for it, so a probe fired right after a name-only wait can
+# lose its very first SYN into a still-peerless interface; tcp_probe_ok's own comment further down
+# describes a run where that raced into a 10+ minute hang. Goes through --json rather than the
+# plain table: agent ls pads its columns with spaces via tabwriter, not tabs, so the printed
+# HANDSHAKE column cannot be matched reliably by position or delimiter.
+agent_registered() {
+  vps wgft agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    agents = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if any(a.get('name') == '$1' and a.get('last_handshake') for a in agents) else 1)
+"
+}
+wait_agent() { wait_until 30 agent_registered "$1" || { echo "!! agent $1 did not register (or its WireGuard peer never handshaked)" >&2; return 1; }; }
 
 # tcp_probe_ok/udp_probe_ok <port>: a single short-timeout round trip through tools/echo, used to
 # poll for "the rule just added/retargeted actually forwards" instead of guessing how long that

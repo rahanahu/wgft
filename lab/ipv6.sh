@@ -72,7 +72,23 @@ wait_until() {
   return 1
 }
 admin_up() { vps wgft agent ls --admin "$ADMIN" >/dev/null 2>&1; }
-agent_registered() { vps wgft agent ls --admin "$ADMIN" 2>/dev/null | tail -1 | grep -q home; }
+# agent_registered: true once "home"'s control stream has registered AND its WireGuard peer has
+# actually handshaken (agent ls --json's last_handshake, read straight off the live wg device in
+# both modes). The name alone shows up as soon as the stream registers, well before wgft0 has a
+# peer for it, so a probe fired right after a name-only wait can lose its first SYN into a
+# still-peerless interface. Goes through --json rather than the plain table: agent ls pads its
+# columns with spaces via tabwriter, not tabs, so the printed HANDSHAKE column cannot be matched
+# reliably by position.
+agent_registered() {
+  vps wgft agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    agents = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if any(a.get('name') == 'home' and a.get('last_handshake') for a in agents) else 1)
+"
+}
 tcp4_probe_ok() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 8 - TCP:198.51.100.1:$1" 2>/dev/null)" == *tcp-echo* ]]; }
 udp4_probe_ok() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 8 - UDP:198.51.100.1:$1" 2>/dev/null)" == *udp-echo* ]]; }
 
