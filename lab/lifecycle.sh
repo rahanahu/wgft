@@ -1964,7 +1964,17 @@ check6() {
     remove_source_deny "$h" 198.51.100.2/32
     deny_removed() { ! rule_field "$h" source_deny | grep -q 198.51.100.2; }
     must_wait "check6h: the source_deny is removed" 3 deny_removed
-    unsquat_port 39996
+    # unsquat_port's own wait is bare elsewhere in this check (a/b/c/f) because the very next
+    # assertion there re-checks the same port, so a squat that has not actually released yet shows
+    # up as that assertion's own FAIL (see unsquat_port's comment above). Here the next step is a
+    # different condition on a 45s retry budget (apply_state active), which would not surface a
+    # still-squatted port as its own failure; it would instead consume one of the 30s retry's
+    # attempts on a doomed rebind and need a second interval, overrunning the budget. So the port's
+    # release is confirmed on its own, with a clear FAIL if it does not converge, before that
+    # budget starts (owner's decision 2026-09-21, docs/testing.md: converge, then enter the
+    # budget/window).
+    sandbox_kill_named socat
+    must_wait "check6h: the squatted port is actually free before the retry budget starts" 10 port_free 39996
     # must_wait: 45s covers one full 30s retry interval plus slack; nothing else changes the rule.
     must_wait "check6h: the rule becomes active (as Relay) via the retry" 45 rule_state_is "$h" apply_state active
     check "it is a Relay rule now" "proxy" "$(rule_field "$h" vps_mode)"
@@ -2256,6 +2266,10 @@ check9() {
   check "the rule forwards before anything" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39990')"
   drift_lines() { grep -c "data plane changed outside wgft" "$LOG"; }
   applied_lines() { grep -c "applied table inet wgft" "$LOG"; }
+  # applied_before_ab/drift_before_ab: the counts before a and b run, so the convergence gate
+  # below (before section c's window) can tell that BOTH of their own repairs, not merely one of
+  # them, have already been logged (see that gate's comment).
+  local applied_before_ab drift_before_ab; applied_before_ab=$(applied_lines); drift_before_ab=$(drift_lines)
 
   echo "-- a. nft flush ruleset (what a reload of an nftables.conf starting with flush ruleset does)"
   vps nft flush ruleset
@@ -2270,6 +2284,22 @@ check9() {
   must_wait "check9b: forwarding is back within 5s of the delete" 5 tcp_probe_ok 39990
   check "the rule forwards again after the delete" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39990')"
   okcheck "exactly one more drift line" "$([ "$(drift_lines)" = 2 ] && echo 1 || echo 0)"
+
+  # Convergence gate before the negative-claim window in c (owner's decision 2026-09-21,
+  # docs/testing.md: reach and converge before entering an observation interval). Forwarding
+  # coming back in a and b only shows that their kernel-side commits went through; each commit's
+  # own "applied table inet wgft" log line is written by the same goroutine right after, and under
+  # CPU contention (a shared Lab Host VM, or this whole suite running at once) that write has been
+  # measured lagging behind forwarding by more than the 250ms debounce. A late line from a or b
+  # landing inside c's window used to be misread as an unexplained apply ("no apply was logged in
+  # the window": alone 20/20, in a pool of 8 17/20, in the whole suite 18/20), which is why check 9
+  # was exclusive-timing. Waiting for applied_lines/drift_lines to actually reach a's and b's
+  # expected counts (not just for forwarding) before taking the window's baseline removes that
+  # bleed without changing what c asserts.
+  applied_and_drift_settled() {
+    [ "$(applied_lines)" -ge "$((applied_before_ab + 2))" ] && [ "$(drift_lines)" -ge "$((drift_before_ab + 2))" ]
+  }
+  must_wait "check9c setup: a's and b's own repairs are both logged, not just forwarding" 10 applied_and_drift_settled
 
   echo "-- c. with nothing of wgft's changed, nothing is republished (another table's churn included)"
   # table_handles: every line of the table that carries a handle (table, chains, sets, rules), without
