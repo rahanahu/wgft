@@ -43,7 +43,7 @@ func Load(path string) (*Credentials, error) {
 	}
 	var f Credentials
 	if err := json.Unmarshal(b, &f); err != nil {
-		return nil, fmt.Errorf("state file %s: %w", path, err)
+		return nil, fmt.Errorf("credentials file %s: %w", path, err)
 	}
 	return &f, nil
 }
@@ -69,9 +69,9 @@ func (f *Credentials) Save(path string) error {
 	// (os.CreateTemp してから締め直すのでは、締め直すまでの間に別の利用者がハンドルを開けて
 	// しまう窓ができ、後から DACL を締めても取り消せない。レビュー指摘、仕様 11a 節)。
 	// Unix では os.CreateTemp そのもので、作成の瞬間から 0600 であることに変わりはない。
-	tmp, err := createSecureTemp(dir, ".wgft-state-*")
+	tmp, err := createSecureTemp(dir, ".wgft-credentials-*")
 	if err != nil {
-		return fmt.Errorf("create temp state file: %w", err)
+		return fmt.Errorf("create temp credentials file: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // rename に成功していれば何も起きない
