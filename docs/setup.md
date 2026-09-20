@@ -280,6 +280,22 @@ docker compose -f deploy/agent.compose.yaml up -d
 
 If the container cannot reach LAN targets, enable `network_mode: host` in the compose file.
 
+### Restrict the agent to the LAN addresses it needs
+
+The agent connects to whatever target the server sends it, so an attacker who takes over the VPS could point it at any address on your LAN. `WGFT_AGENT_ALLOW_TARGETS` lists the addresses the agent may connect to:
+
+```sh
+WGFT_AGENT_ALLOW_TARGETS=192.168.1.20:25565,192.168.1.21:2456-2458 wgft agent run --data-dir ~/.wgft
+```
+
+With systemd, write it next to `WGFT_JOIN` in `/etc/wgft/agent.env`:
+
+```sh
+printf 'WGFT_AGENT_ALLOW_TARGETS=192.168.1.20:25565,192.168.1.21:2456-2458\n' | sudo tee -a /etc/wgft/agent.env >/dev/null
+```
+
+Entries are comma-separated and each one is `CIDR`, `CIDR:port` or `CIDR:lo-hi`. A bare address means that one host, and an entry without a port allows all of its ports. An IPv6 entry with a port needs brackets, as in `[2001:db8::/32]:8080`. The agent checks the address it is about to connect to, so a target that is a hostname is checked after it has been resolved, on every new connection and UDP session. A rule whose literal target falls outside the list gets no listener and shows as an error with the reason in `wgft agent ls` and the Web UI; for a port range, only the ports outside the list stay closed. Leaving the setting unset, the default, means no restriction. An invalid value stops the agent at startup with exit code 3, and so does a value that holds no entries at all, such as a lone comma: a security setting must not turn itself off silently.
+
 ## 4. Add forwarding rules
 
 Verify that the agent is connected:

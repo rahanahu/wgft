@@ -6,6 +6,8 @@ Wants=network-online.target
 
 [Service]
 # Settings come from /etc/wgft/agent.env (WGFT_JOIN for the first start); the binary reads it.
+# WGFT_AGENT_ALLOW_TARGETS in the same file restricts the LAN addresses the agent connects to, for
+# example WGFT_AGENT_ALLOW_TARGETS=192.168.1.20:25565 (SECURITY.md); unset means no restriction.
 ExecStart=/usr/local/bin/wgft agent run
 Restart=on-failure
 RestartSec=2

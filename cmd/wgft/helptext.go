@@ -97,9 +97,15 @@ optional and normally left unset, since the join string is already bound to a na
 
 WGFT_JOIN is a secret. Prefer setting it as an environment variable or in the
 dotenv file (--config); the --join flag leaves it visible to other local
-users via ps and in shell history.`,
+users via ps and in shell history.
+
+WGFT_AGENT_ALLOW_TARGETS limits the addresses this agent connects to, so that
+a compromised server cannot use it to reach the rest of the LAN. Entries are
+comma-separated CIDR, CIDR:port or CIDR:lo-hi; a bare address means one host.
+Unset means no limit.`,
 		Example: `  WGFT_JOIN='wgft://vps.example.com:8443/TOKEN#sha256:...' wgft agent run
-  wgft agent run --config /etc/wgft/agent.env`,
+  wgft agent run --config /etc/wgft/agent.env
+  WGFT_AGENT_ALLOW_TARGETS=192.168.1.20:25565,192.168.1.21:2456-2458 wgft agent run`,
 	},
 	"rule add": {
 		Long: `Add a forwarding rule. Give exactly one of --tcp and --udp. A port range

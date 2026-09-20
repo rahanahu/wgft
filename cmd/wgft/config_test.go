@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -114,6 +115,38 @@ func TestLimitsOutOfRangeExitCode(t *testing.T) {
 	c, _ := loadConfig(&cobra.Command{}, limitSpecs(), filepath.Join(t.TempDir(), "none.env"))
 	if l, err := limitsFromConfig(c); err != nil || l.UDPTotal != 2048 {
 		t.Errorf("in range: %+v %v", l, err)
+	}
+}
+
+// 宛先の許可一覧(エージェントだけの設定)の構文の誤りは、上限の範囲外と同じく終了コード 3 で止める
+// (仕様 11a 節)。値が無ければ制限なし(nil)になる。
+func TestAllowTargetsFromConfig(t *testing.T) {
+	load := func() *config {
+		c, err := loadConfig(&cobra.Command{}, agentSpecs(), filepath.Join(t.TempDir(), "none.env"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	// 最後の "," は、値はあるのに項目が無い一覧。守りの設定なので黙って制限なしにしない
+	for _, v := range []string{"192.168.1.0/33", "192.168.1.20:0", "nas.lan:25565", ","} {
+		t.Setenv("WGFT_AGENT_ALLOW_TARGETS", v)
+		_, err := allowTargetsFromConfig(load())
+		if got := exitCode(err); err == nil || got != exitConfigRefusal {
+			t.Errorf("WGFT_AGENT_ALLOW_TARGETS=%s: err=%v exitCode=%d, want %d", v, err, got, exitConfigRefusal)
+		}
+	}
+	t.Setenv("WGFT_AGENT_ALLOW_TARGETS", "192.168.1.0/24:2456-2458")
+	l, err := allowTargetsFromConfig(load())
+	if err != nil || l == nil {
+		t.Fatalf("valid list: %v %v", l, err)
+	}
+	if !l.Allows(netip.MustParseAddrPort("192.168.1.20:2457")) {
+		t.Error("the listed target must be allowed")
+	}
+	t.Setenv("WGFT_AGENT_ALLOW_TARGETS", "")
+	if l, err := allowTargetsFromConfig(load()); err != nil || l != nil {
+		t.Errorf("unset list = %v %v, want nil (no restriction)", l, err)
 	}
 }
 

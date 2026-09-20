@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"sync"
@@ -129,12 +130,19 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					release()
 				}()
 				target := m.targetOf(l)
-				t, err := m.opts.Dial("tcp", target)
+				t, err := m.dialTarget("tcp", target)
+				m.noteTargetAllowErr(l, err)
 				if err != nil {
 					if dialLog.Allow() {
 						m.opts.Logf("tcp %s: dial %s: %v", l.key, target, err)
 					}
-					c.Close()
+					// 許可一覧による拒否は、上限や接続元の拒否と同じく RST で即座に終える。
+					// 宛先が落ちているなどの失敗は今までどおり通常の close にする
+					if errors.Is(err, ErrTargetNotAllowed) {
+						abortRefused(c)
+					} else {
+						c.Close()
+					}
 					return
 				}
 				mu.Lock()

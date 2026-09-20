@@ -176,6 +176,8 @@ Alpha、v0.4.0。カーネルモードは作者の VPS / 自宅環境で UDP/TCP
 
 付属の server 用 systemd unit では、wgft は転送に必要な capability だけを持つ非特権ユーザーとして動作します。外部へ公開されるのは WireGuard、agent API、明示的に転送したポートだけで、管理 API は既定ではローカル専用です。
 
+agent は server が配る転送先へそのまま接続します。agent 側の `WGFT_AGENT_ALLOW_TARGETS` は接続先を列挙したアドレスだけに絞り、奪われた server を LAN の他のホストから遠ざけます。
+
 脆弱性の報告方法は [SECURITY.md](SECURITY.md) を参照してください。
 
 ## ライセンス

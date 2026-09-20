@@ -186,9 +186,11 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					}
 					continue
 				}
-				// target のホスト名はセッション確立時に解決する(DNS の変更は新規セッションだけに効く)
+				// target のホスト名はセッション確立時に解決する(DNS の変更は新規セッションだけに効く)。
+				// 許可一覧があれば、解決したアドレスで判定し、一覧の外ならデータグラムを捨てる(設計文書 7 節)
 				target := m.targetOf(l)
-				c, err := m.opts.Dial("udp", target)
+				c, err := m.dialTarget("udp", target)
+				m.noteTargetAllowErr(l, err)
 				if err != nil {
 					l.budget.Release()
 					release()

@@ -21,6 +21,8 @@
 #   remove the line; if it stays, the agent does not re-register while the credentials file exists.
 # - WGFT_NAME is optional: the agent name comes from the join string. Delete the line or leave it
 #   empty unless you want to double-check it against the name the join string is bound to.
+# - WGFT_AGENT_ALLOW_TARGETS restricts the addresses this agent connects to, so that a compromised
+#   server cannot use it to reach the rest of the LAN (SECURITY.md). Unset means no restriction.
 services:
   wgft-agent:
     image: ghcr.io/rahanahu/wgft-agent:latest
@@ -37,6 +39,9 @@ services:
     environment:
       WGFT_JOIN: "REPLACE_WITH_JOIN_STRING"
       WGFT_NAME: ""
+      # Optional: the LAN addresses this agent may connect to. Entries are comma-separated CIDR,
+      # CIDR:port or CIDR:lo-hi; a bare address means that one host. Unset means no restriction.
+      # WGFT_AGENT_ALLOW_TARGETS: "192.168.1.20:25565,192.168.1.21:2456-2458"
       # Optional: process-wide caps on concurrent flows. The values below are the defaults. They
       # bound the memory of the agent when many flows are opened and held, and the memory soft
       # limit printed at startup is derived from them. Lower them on a host with little memory.

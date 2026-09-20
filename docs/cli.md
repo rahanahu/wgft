@@ -242,6 +242,11 @@ WGFT_JOIN is a secret. Prefer setting it as an environment variable or in the
 dotenv file (--config); the --join flag leaves it visible to other local
 users via ps and in shell history.
 
+WGFT_AGENT_ALLOW_TARGETS limits the addresses this agent connects to, so that
+a compromised server cannot use it to reach the rest of the LAN. Entries are
+comma-separated CIDR, CIDR:port or CIDR:lo-hi; a bare address means one host.
+Unset means no limit.
+
 ```text
 wgft agent run [flags]
 ```
@@ -251,17 +256,19 @@ Examples:
 ```sh
 WGFT_JOIN='wgft://vps.example.com:8443/TOKEN#sha256:...' wgft agent run
 wgft agent run --config /etc/wgft/agent.env
+WGFT_AGENT_ALLOW_TARGETS=192.168.1.20:25565,192.168.1.21:2456-2458 wgft agent run
 ```
 
 Flags:
 
 ```text
-      --config string       dotenv config file (default "/etc/wgft/agent.env")
-      --data-dir string     data dir, env WGFT_DATA_DIR; holds agent.json (default "/var/lib/wgft")
-      --join string         join string wgft://host:port/token#sha256:..., env WGFT_JOIN
-      --max-tcp-flows int   process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
-      --max-udp-flows int   process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
-      --name string         agent name, env WGFT_NAME; optional, the join string is already bound to a name
+      --agent-allow-targets string   comma-separated targets the server may send traffic to, env WGFT_AGENT_ALLOW_TARGETS; entries are CIDR, CIDR:port or CIDR:lo-hi; unset means no restriction
+      --config string                dotenv config file (default "/etc/wgft/agent.env")
+      --data-dir string              data dir, env WGFT_DATA_DIR; holds agent.json (default "/var/lib/wgft")
+      --join string                  join string wgft://host:port/token#sha256:..., env WGFT_JOIN
+      --max-tcp-flows int            process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
+      --max-udp-flows int            process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
+      --name string                  agent name, env WGFT_NAME; optional, the join string is already bound to a name
 ```
 
 ## wgft agent warnings
