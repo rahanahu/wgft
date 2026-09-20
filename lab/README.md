@@ -130,3 +130,183 @@ Fedora のホストで firewalld と Docker が動いていると、VM は IPv6 
 ## 確認済み:実 Caddy での HTTPS 経路
 
 home ns で実際に Caddy を動かして PROXY protocol、80 の素通し、TLS の終端、拒否の即時反映を確かめた記録は [lab/caddy/README.md](caddy/README.md) を参照。
+
+## Sandbox: 1 台の VM の中で並べる隔離の単位
+
+確認を隔てる単位は Sandbox です。VM は OS とカーネルを与える Lab Host で、その中に使い捨ての
+Sandbox を並べます。
+
+```
+Lab Host VM
+|- Sandbox A: wgft-<id>-client, -vps, -router, -home, -lan, -runner, 作業ディレクトリ、自分のプロセス
+|- Sandbox B: ...
+```
+
+network namespace がすでに隔てているものは、Sandbox ごとに分けません。インタフェース名
+(`wgft0`)、アドレス、待ち受けポート、`127.0.0.1:8686`、WireGuard のポート、`table inet wgft`、
+conntrack のテーブルは、Sandbox ごとに同じ値を同時に使えます。分けるのは、network namespace が
+隔てないものだけです。データディレクトリ、ログ、scratch ファイルの置き場 (`/tmp/wgft-lab/<id>/`)
+と、プロセスの所有です。
+
+Sandbox の発行、トポロジの構築、プロセスの所有、後片付け、並列実行、結果の集約は
+[tools/labhost](../tools/labhost) が担います。ホストで `lab/lab build` がビルドして VM の
+`/usr/local/bin` に入れるので、VM の中では名前だけで実行します。
+
+### 確認の流し方
+
+```sh
+lab/lab exec vm labhost run "e2e.sh kernel"                                 # 1 つの確認
+lab/lab exec vm labhost run -parallel 4 "e2e.sh kernel" "ipv6.sh kernel"    # いくつかの確認を並列に
+lab/lab exec vm labhost run -parallel 4 -repeat 20 "e2e.sh kernel"          # 同じ確認を 20 回
+lab/lab exec vm labhost run -parallel 8 all                                 # 一式 (lab/suite.txt)
+lab/lab exec vm labhost list                                                # 今ある Sandbox
+lab/lab exec vm labhost create                                              # 手作業用に 1 つ作る
+lab/lab exec vm labhost gc                                                  # 死んだ実行の残骸の片付け
+lab/lab exec vm labhost run -wait 10m -parallel 8 all                       # 他の run が終わるまで待つ
+```
+
+`run` と `gc` は、Lab Host VM ごとに 1 つのロック (`/run/wgft-labhost.lock`) を取ります。2 つ目の
+`run` は既定では待たずに断り、ロックファイルの場所と持ち主の PID を示します。`-wait <期間>` を付けた
+ときだけ、その期間まで順番を待ちます。単独で流す分類が約束するのは「Lab Host VM の中で単独」なので、
+2 つの `run` が同時に走ると、一方の単独の仕事が他方のどの仕事とでも重なります。ロックの実体は
+カーネルの flock で、持ち主が SIGKILL で死んでも残りません。`create` と `destroy` は名指しした
+Sandbox 1 つだけを扱う手作業の道具なので、ロックを取りません。`run` が持っている Sandbox を
+名指ししない限り、いつでも使えます。
+
+`run all` は [lab/suite.txt](suite.txt) を読みます。`parallel` に分類された確認を大きさ
+`-parallel` のプールで流し、そのあと `exclusive-*` に分類された確認を 1 つずつ流します。`run all` が流すのは `suite.txt` の `default` の列が yes の確認だけです。
+`version-skew.sh` は Lab Host VM からリリースのバイナリを取得できる場合に限る確認なので、
+`default` は no とし、名指ししたときだけ流れます。
+
+終了コードが 0 になるのは、すべての仕事が成功し、中断されず、後片付けの漏れが無かったときだけです。
+確認がすべて PASS でも、netns、プロセス、作業ディレクトリ、root netns のリンクのどれかが残っていれば
+非 0 で終わり、`LEFTOVER FAILURE` の行が何が残ったかを挙げます。片付けの正しさは harness 自身の
+責任なので、シナリオの失敗と同じ扱いにしています。`-keep-failed` で意図して残した作業ディレクトリは
+漏れに数えません。
+
+出力の最後に、確認ごとの PASS、FAIL、SKIP の行数が並びます。従来の 1 確認 1 VM の流し方と
+同じ確認が流れたことは、この行数の一致で確かめられます。
+
+### 確認の分類
+
+[lab/suite.txt](suite.txt) が確認ごとに持つ分類は 4 つです。
+
+| 分類 | 意味 | 対象 |
+|---|---|---|
+| `parallel` | 他の Sandbox と同時に流せます。触るものが自分の namespace と自分の作業ディレクトリの中に閉じます | `e2e.sh`、`ipv6.sh`、`split-merge.sh`、`import-export.sh`、`connlimit.sh`、`version-skew.sh`、`lifecycle.sh` の check 1 2 3 3b 4 5c 5d 6 7 8 |
+| `exclusive-heavy` | Lab Host VM の中で単独で流します。主張の根拠になる値そのものが、メモリか到達頻度の測定値です | `lifecycle.sh` の check 5、5b、5e、`rates.sh` |
+| `exclusive-timing` | Lab Host VM の中で単独で流します。壁時計の窓の中で何が起きないかを主張するので、同じ VM を分け合うと失敗します | `lifecycle.sh` の check 9 |
+| `exclusive-global` | Lab Host VM の中で単独で流します。network namespace が隔てない値を変えます | 該当する確認は今はありません |
+
+`lifecycle.sh` の check 5c と check 5d は、主張の根拠が到達頻度でもメモリでもなく、ルールごとの受け付けの判定です。8 つの Sandbox のプールの中で、しかも 5c と 5d が同時に流れる状態で、20 回ずつ流して 160 件のすべてが成功し、保持数も毎回同じでした。この測定により、分類は `parallel` です。
+
+`rates.sh` と `lifecycle.sh` の check 5 を単独で流す理由は、隣の Sandbox が結果を壊すからではなく、読む値が測定値そのものだからです。ラボでの実測では、両方とも隣に 4 つと 8 つの Sandbox がある状態でも同じ判定を出しました。check 5 の RSS は 85 MiB から 110 MiB の幅に収まり、上限の 224 MiB に対して半分以上の余裕がありました。`rates.sh` の上限なしの到達数は 500 回中 405 回から 500 回の幅で動きますが、隣の Sandbox の数とは相関しませんでした。`connlimit.sh` は 9 回の実行で 1 つの値も動かなかったので、`parallel` に分類しています。
+
+`nf_conntrack_max` と conntrack のハッシュの大きさは VM 全体で 1 つの値です。network namespace の
+中からの書き込みはカーネルが拒みます。この値を変える確認を新たに作るときは `exclusive-global` に
+入れます。`nf_conntrack_acct` は namespace ごとの値なので、`lifecycle.sh` の check 6 の扱いは
+`parallel` のままです。
+
+`lifecycle.sh` の check 8 と check 9 は、server の 30 秒の再試行に合わせた 45 秒の壁時計の
+budget を持ちます。実際の待ちは、単独で流したときも、8 並列のプールの中で流したときも、
+`exclusive-heavy` の確認を隣で流したときも 24 秒から 25 秒で、並列で延びませんでした。
+余裕は約 20 秒あるので、check 8 の分類は `parallel` です。
+
+check 9 の分類は `exclusive-timing` です。check 9c は、何も変えていない 35 秒の窓の間に適用が
+1 度も記録されないことを主張します。窓が始まる瞬間に Sandbox が落ち着いていることが前提なので、
+VM を分け合うと前の段の収束が窓に食い込みます。実測は、単独で 20 回中 20 回成功、8 並列のプールで
+20 回中 17 回成功、一式の中で 20 回中 18 回成功で、失敗はいつも
+`no apply was logged in the window` でした。check 6 は、100 回のうち 1 回だけ同じ種類の失敗
+(45 秒の待ちの時間切れ) を出しました。単独では 40 回中 40 回成功しているので、分類は `parallel` の
+ままにしていますが、再発するなら次に `exclusive-timing` へ移す確認です。
+
+`lifecycle.sh` の check 9c と check 6h を、窓の始まりで収束を待つ形に直せば、
+check 9 を `parallel` に戻せる見込みです。主張の内容を変える改訂になるので、この変更では
+行っていません (未確認)。
+
+### 失敗した Sandbox の調べ方
+
+```sh
+lab/lab exec vm labhost run -keep-failed -parallel 4 all
+```
+
+`-keep-failed` は、失敗した Sandbox の作業ディレクトリを残します。実行ごとの置き場
+`/tmp/wgft-lab/run-<日時>/` には、確認ごとのログ (`logs/`)、1 秒ごとのメモリと load average の
+記録 (`metrics.csv`)、結果の一覧 (`summary.json`) が残ります。network namespace とプロセスは、
+成功しても失敗しても片付けます。残った作業ディレクトリは `labhost gc` が消します。
+
+### 後片付け
+
+- **`pkill -x wgft` のような VM 全体への kill は使いません。** Sandbox は自分の namespace の
+  中のプロセスだけを止めます。`ip netns pids <ns>` が `setsid nohup` で切り離された孫まで
+  数え上げるので、cgroup も PID の記録も要りません
+- 確認の shell 自身は、トポロジに加わらない 6 つ目の namespace (`-runner`) の中で動きます。
+  harness が SIGKILL で死んで shell が孤児として残っても、`gc` がその孤児を見つけられます
+- 止める順序はプロセス、network namespace、作業ディレクトリの順です。namespace を先に消すと、
+  プロセスは名前の無い namespace に残って動き続けます
+- `gc` は `wgft-<id>-` の名前の namespace と作業ディレクトリを探し、持ち主のいない Sandbox を
+  片付けます。持ち主の有無は作業ディレクトリのロックで判別するので、流れている Sandbox には
+  触りません
+- SIGINT で harness を止めると、harness 自身が自分の Sandbox を片付けます。SIGKILL で止めると
+  harness は片付けられないので、namespace、プロセス、作業ディレクトリが残ります。`run` は
+  流し始めに毎回 `gc` を呼ぶので、前回 SIGKILL で終わった残骸は次の `run` の前に消えます。
+  すぐに残骸を消したいときは `labhost gc` を単独で呼びます。`gc` も Lab Host のロックを取るので、
+  流れている `run` があるときは断ります
+
+### シナリオ側の約束
+
+確認は shell のまま動かします。Sandbox の値は環境変数で渡し、[lab/sandbox.sh](sandbox.sh) が
+受け取ります。
+
+| 環境変数 | 内容 | 既定 |
+|---|---|---|
+| `WGFT_LAB_CLIENT_NS` | client の network namespace の名前 | `client` |
+| `WGFT_LAB_VPS_NS` | vps の network namespace の名前 | `vps` |
+| `WGFT_LAB_ROUTER_NS` | homerouter の network namespace の名前 | `homerouter` |
+| `WGFT_LAB_HOME_NS` | home の network namespace の名前 | `home` |
+| `WGFT_LAB_LAN_NS` | lan の network namespace の名前 | `lan` |
+| `WGFT_LAB_WORKDIR` | データディレクトリ、ログ、scratch ファイルの置き場 | `/tmp` |
+| `WGFT_LAB_SANDBOX` | Sandbox の ID。設定されているときだけ後片付けが Sandbox の範囲に閉じます | 空 |
+
+これらの変数が未設定のときの既定は、従来の共有トポロジと `/tmp` なので、
+`lab/lab exec vm bash /wgft/lab/e2e.sh kernel` の流し方は変わりません。従来の 1 確認 1 VM の
+流し方も、そのまま残っています。
+
+新しい確認を Sandbox で流せるようにする手順は 3 つです。
+
+1. `. "$(dirname "$0")/sandbox.sh"` を読み込みます
+2. 固定の `/tmp/...` の道を `$W/...` に変えます。データディレクトリ、ログ、scratch ファイル、
+   fifo、鍵のファイルのすべてが対象です
+3. network namespace の名前を `$VPS_NS` などの変数から取り、プロセスの停止を
+   `sandbox_kill_named`、`sandbox_pids_named`、`sandbox_any_named`、`sandbox_kill_cmdline` に
+   置き換えます。`pkill`、`pgrep`、`pidof` は VM 全体を見るので使いません
+
+`lab/netns.sh` は同じ 5 つの変数を読み、名前を変えたトポロジを何組でも組めます。veth は
+`ip link add ... netns X peer name ... netns Y` で両端を目的の namespace に直接作るので、
+並行して組んでも root namespace で名前が衝突する瞬間がありません。
+
+`version-skew.sh` の取得キャッシュ (`/tmp/wgft-version-skew-cache`) は、Lab Host VM で 1 つだけ
+持つ共有の置き場のままです。同じ版を同時に取りに行っても壊れないよう、書き手ごとに別の一時
+ファイルを同じディレクトリに作り、`mv` で置き換えます。
+
+### Lab Host VM の大きさ
+
+Sandbox が 1 つ増えるごとにメモリはおよそ 47 MiB 増えます。ラボでの実測では、2 vCPU / 2 GiB の
+Lab Host VM のまま Sandbox を 32 個まで並列に流せ、そのときのピークのメモリは 1828 MiB 中
+1808 MiB でした。メモリの上限に近づくのはこの並列数からで、それ以上に増やすには
+`WGFT_LAB_MEM` を大きくする必要があります。
+
+一式を並列数 8 で流すだけなら、`lab/lab up` が既定で作る 2 vCPU / 2 GiB の VM で足ります。
+10 回の実測は 337.5 秒から 338.3 秒、ピークのメモリは 808 MiB から 836 MiB、CPU は 33 秒でした。
+8 vCPU / 8 GiB の VM で同じ一式を流しても速くはなりませんでした。制約はメモリで、CPU ではありません。
+
+一式の所要時間のうち約 240 秒は、単独で流す 10 個の確認を 1 つずつ流す時間です。Lab Host VM を 2 台にして、1 台に並列のプール、もう 1 台に単独の待ち行列を割り当てると、一式は約 240 秒に縮む見込みです (未確認)。
+
+CPU は、この実測の範囲では制約になっていません。2 vCPU のまま並列数を 1 から 32 まで上げても、
+1 つあたりの確認の壁時計の時間はほぼ変わらず (約 39 秒から 42 秒)、並列数に応じて全体の時間が
+ほぼ線形に縮みました。Lab Host VM の大きさを決める要因はメモリであり、CPU ではありません。
+
+`incus config set <vm> limits.cpu` と `limits.memory` による実行中の Incus VM への設定変更は、
+Incus 側では受け付けられても、ゲスト側の `nproc` と `MemTotal` には反映されないことをラボで
+確かめました。Lab Host VM を大きくするときは、`WGFT_LAB_CPU` と `WGFT_LAB_MEM` を設定してから
+`lab/lab up` を実行し、VM を新しく作り直します。
