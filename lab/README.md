@@ -63,11 +63,19 @@ VM 名やイメージは環境変数で変えられる(`WGFT_LAB_VM`、`WGFT_LAB
 
 wgft が対応するのは **カーネル 6.1 以上、nftables 1.0.6 以上**(Debian 12、Ubuntu 24.04、Fedora 44 以降)。
 既定の VM イメージ `images:debian/12` はこの下限そのもので、ここで通ったものは新しい環境でも通る見込み。
-別のディストリで確かめたいときは 2 台目を立てる。
+別のディストリで確かめたいときは、`WGFT_LAB_IMAGE` と `WGFT_LAB_VM` を変えて 2 台目を立てる。
+`lab/lab up` の導入(`provision()`)は `/etc/os-release` の `ID` でパッケージ管理コマンドとパッケージ名を
+振り分けるので、Debian 系(apt)と Fedora(dnf)のどちらの VM でも同じ 1 コマンドで立てられる。
 
 ```sh
 WGFT_LAB_IMAGE=images:ubuntu/24.04 WGFT_LAB_VM=wgft-lab-ubuntu lab/lab up
+WGFT_LAB_IMAGE=images:fedora/44 WGFT_LAB_VM=wgft-lab-fedora lab/lab up
 ```
+
+Ubuntu 24.04(カーネル 6.8.0、nftables v1.0.9)は、`labhost run -parallel 8 all` の判定が既定の
+Debian 12(カーネル 6.1.0、nftables v1.0.6)と一致する(PASS 291、FAIL 0、SKIP 16、確認ごとの内訳も
+一致)ことを確かめてある([docs/testing.md](../docs/testing.md) の C4)。Fedora は `lab/lab up` で
+立てられるが、一式を流した結果はまだこの文書に書けるところまで確かめていない。
 
 ## トポロジ
 
