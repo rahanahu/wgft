@@ -229,7 +229,7 @@ sudo launchctl print system/io.github.rahanahu.wgft.agent | grep -E 'state|pid'
 tail -f ~/Library/Logs/wgft-agent.log
 ```
 
-On the VPS, `sudo wgft agent ls` shows `ok` in the `TUNNEL` column once the tunnel is up. launchd restarts the agent when it exits with an error or is killed, at most once every 10 seconds (`ThrottleInterval`). launchd has no counterpart to the systemd unit's `RestartPreventExitStatus=3`, so a configuration error, which exits with code 3, is presumably restarted in the same way; this has not been tested. Check the log if the agent keeps restarting.
+On the VPS, `sudo wgft agent ls` shows `ok` in the `TUNNEL` column once the tunnel is up. launchd restarts the agent when it exits with an error or is killed, at most once every 10 seconds (`ThrottleInterval`). launchd has no counterpart to the systemd unit's `RestartPreventExitStatus=3`, and a configuration error, which exits with code 3, is restarted on the same interval, as checked on macOS 27. The agent then starts and fails every 10 seconds for as long as the error stands, `launchctl print` reports `last exit code = 3` and `state = spawn scheduled`, and nothing else marks the daemon as broken. Check the log if the agent keeps restarting.
 
 Stop the daemon with:
 
@@ -251,8 +251,8 @@ wgft supports upgrading in place, but reverting to an older version afterward is
 
 Two macOS behaviors shape this setup:
 
-- Local Network privacy: started as a LaunchAgent from `~/Library/LaunchAgents`, the agent reached the default gateway, but connections to other LAN hosts failed with `connect: no route to host` and no permission dialog appeared. The same binary reached those hosts over UDP and TCP when started from Terminal, which passes on Terminal's own permission, and when run as a LaunchDaemon with `UserName` set to the same user, as this plist does. Attributing the failure to Local Network privacy is an inference from the symptoms; no system log entry confirmed it. `brew services` also uses LaunchAgents, so it may hit the same problem; this has not been tested.
-- FileVault: with FileVault on, the LaunchDaemon started only when the user first logged in after a reboot, not at boot. It logged `network is unreachable` for about 15 seconds and then connected by itself. Starting at boot without a login when FileVault is off, and keeping running after logout, have not been tested.
+- Local Network privacy: started as a LaunchAgent from `~/Library/LaunchAgents`, the agent reached the default gateway, but connections to other LAN hosts failed with `connect: no route to host` and no permission dialog appeared. The same binary reached those hosts over UDP and TCP when started from Terminal, which passes on Terminal's own permission, and when run as a LaunchDaemon with `UserName` set to the same user, as this plist does. Attributing the failure to Local Network privacy is an inference from the symptoms; no system log entry confirmed it. `brew services` also uses LaunchAgents, so it may hit the same problem; this has not been tested. On macOS 27, the first connection a freshly installed binary made to another LAN host failed once with the same `connect: no route to host`, and every later connection to that host succeeded. Why it failed only once is not known.
+- FileVault: with FileVault on, the LaunchDaemon started only when the user first logged in after a reboot, not at boot. It logged `network is unreachable` until the Mac's own network came up, then connected by itself. That wait was about 15 seconds on one Mac and about 60 seconds on a Mac whose Wi-Fi also connects only after login. Starting at boot without a login when FileVault is off, and keeping running after logout, have not been tested.
 
 ### Run the agent with systemd
 
@@ -323,6 +323,8 @@ sudo wgft rule add --agent home --tcp 443 --to 192.168.1.30:443 --proxy --proxy-
 ```
 
 Open the forwarded ports in the VPS firewall as well.
+
+When the agent opens a TCP listener for a new rule, it makes one trial connection to the target and closes it at once, so that a target which refuses connections is reported before any traffic arrives. The target sees one connection carrying no data. While nothing listens there, `wgft agent ls` shows the rule under `RULES` with `cannot connect to target`, and that state clears at the agent's next report, within 30 seconds of the target coming up. UDP rules carry no such check, because a datagram that is sent tells nothing about whether it arrived.
 
 Rules are distributed to the agent without disconnecting unrelated sessions. Source allow/deny lists and rate limits can be managed through the CLI; see [cli.md](cli.md).
 
