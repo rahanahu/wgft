@@ -26,20 +26,21 @@
 # (`lab/lab net up`). Leftovers from earlier runs are killed first.
 set -u
 
-DATA=/tmp/wgft-connlimit-server
-ADATA=/tmp/wgft-connlimit-agent
+. "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
+DATA=$W/wgft-connlimit-server
+ADATA=$W/wgft-connlimit-agent
 ADMIN=127.0.0.1:8686
 fail=0
 check() { # check <label> <ok-if-true>
   if [ "$2" = "1" ]; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1; fi
 }
-vps() { ip netns exec vps "$@"; }
-client() { ip netns exec client bash -c "$1"; }
-kill_all() { pkill -x wgft; pkill -x echo; sleep 1; }
+vps() { ip netns exec "$VPS_NS" "$@"; }
+client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
+kill_all() { sandbox_kill_named wgft echo; sleep 1; }
 # kill_server stops only the server (wgft server run), leaving the agent and echo listener up,
 # so the second phase can restart the server alone with a different setting.
 kill_server() {
-  for p in $(pgrep -x wgft); do
+  for p in $(sandbox_wgft_pids); do
     tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' server run' && kill "$p"
   done
   sleep 1
@@ -50,25 +51,25 @@ cleanup() {
   vps ip link del wgft0 2>/dev/null
   vps nft delete table inet wgft 2>/dev/null
   rm -rf "$DATA" "$ADATA"
-  ip netns exec client ip addr del 198.51.100.3/24 dev "$(ip netns exec client ip -o -4 route show default | awk '{print $5}')" 2>/dev/null
+  ip netns exec "$CLIENT_NS" ip addr del 198.51.100.3/24 dev "$(ip netns exec "$CLIENT_NS" ip -o -4 route show default | awk '{print $5}')" 2>/dev/null
 }
 
 cleanup
 mkdir -p "$DATA"
 vps setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-  > /tmp/wgft-connlimit-server.log 2>&1 < /dev/null &
+  > $W/wgft-connlimit-server.log 2>&1 < /dev/null &
 disown
 sleep 3
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-connlimit-agent.log 2>&1 < /dev/null &
+WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-connlimit-agent.log 2>&1 < /dev/null &
 disown
-ip netns exec lan setsid nohup echo -tcp 25567 -udp 19134 > /tmp/wgft-connlimit-echo.log 2>&1 < /dev/null &
+ip netns exec "$LAN_NS" setsid nohup echo -tcp 25567 -udp 19134 > $W/wgft-connlimit-echo.log 2>&1 < /dev/null &
 disown
 sleep 6
 tcp_rule=$(vps wgft rule add --agent home --tcp 28016 --to 192.168.50.3:25567 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
 udp_rule=$(vps wgft rule add --agent home --udp 28017 --to 192.168.50.3:19134 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
 sleep 4
-ip netns exec client ip addr add 198.51.100.3/24 dev "$(ip netns exec client ip -o -4 route show default | awk '{print $5}')" 2>/dev/null
+ip netns exec "$CLIENT_NS" ip addr add 198.51.100.3/24 dev "$(ip netns exec "$CLIENT_NS" ip -o -4 route show default | awk '{print $5}')" 2>/dev/null
 
 # drops <rule-id>: the live src_flow counter in nftables. `rule ls` shows the drops accumulated in
 # SQLite, which vpsd only updates right before a table swap (design section 6.1), so it stays 0 here.
@@ -192,7 +193,7 @@ check "udp: the set element is freed once its conntrack entries are gone" "$(fre
 echo "== restarting the server alone with WGFT_MAX_TCP_FLOWS_PER_SOURCE=200 (same rules, same agent)"
 kill_server
 vps env WGFT_MAX_TCP_FLOWS_PER_SOURCE=200 setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-  > /tmp/wgft-connlimit-server2.log 2>&1 < /dev/null &
+  > $W/wgft-connlimit-server2.log 2>&1 < /dev/null &
 disown
 sleep 3
 

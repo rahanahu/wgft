@@ -9,7 +9,15 @@
 # 使い方: netns.sh up | down | status
 set -euo pipefail
 
-NAMESPACES=(client vps homerouter home lan)
+# netns の名前は環境変数で差し替えられる。未設定なら今までと同じ名前を使うので、共有の
+# トポロジを組む使い方 (lab/lab net up) は変わらない。名前を変えると、同じトポロジを 1 台の VM の
+# 中に何組でも並べられる (netns の中ではインタフェース名もアドレスもポートも使い回せる)。
+CLIENT_NS=${WGFT_LAB_CLIENT_NS:-client}
+VPS_NS=${WGFT_LAB_VPS_NS:-vps}
+ROUTER_NS=${WGFT_LAB_ROUTER_NS:-homerouter}
+HOME_NS=${WGFT_LAB_HOME_NS:-home}
+LAN_NS=${WGFT_LAB_LAN_NS:-lan}
+NAMESPACES=("$CLIENT_NS" "$VPS_NS" "$ROUTER_NS" "$HOME_NS" "$LAN_NS")
 
 # アドレス(ドキュメント用のアドレス帯を使い、実在の経路と衝突させない)
 CLIENT_ADDR=198.51.100.2   # client の eth0
@@ -48,37 +56,37 @@ up() {
     ip -n "$ns" link set lo up
   done
 
-  link client eth0 vps pub0
-  ip -n client addr add "$CLIENT_ADDR/24" dev eth0
-  ip -n vps addr add "$VPS_PUB0/24" dev pub0
-  ip -n client route add default via "$VPS_PUB0"
+  link "$CLIENT_NS" eth0 "$VPS_NS" pub0
+  ip -n "$CLIENT_NS" addr add "$CLIENT_ADDR/24" dev eth0
+  ip -n "$VPS_NS" addr add "$VPS_PUB0/24" dev pub0
+  ip -n "$CLIENT_NS" route add default via "$VPS_PUB0"
   # nodad: skip duplicate address detection. The link has exactly the 2 peers we assign here, so
   # DAD only adds a race between this script's own check() (right below) and the ~1s the address
   # would otherwise sit tentative.
-  ip -n client addr add "$CLIENT_ADDR6/64" dev eth0 nodad
-  ip -n vps addr add "$VPS_PUB0_6/64" dev pub0 nodad
+  ip -n "$CLIENT_NS" addr add "$CLIENT_ADDR6/64" dev eth0 nodad
+  ip -n "$VPS_NS" addr add "$VPS_PUB0_6/64" dev pub0 nodad
 
-  link vps pub1 homerouter wan0
-  ip -n vps addr add "$VPS_PUB1/24" dev pub1
-  ip -n homerouter addr add "$HR_WAN/24" dev wan0
-  ip -n homerouter route add default via "$VPS_PUB1"
+  link "$VPS_NS" pub1 "$ROUTER_NS" wan0
+  ip -n "$VPS_NS" addr add "$VPS_PUB1/24" dev pub1
+  ip -n "$ROUTER_NS" addr add "$HR_WAN/24" dev wan0
+  ip -n "$ROUTER_NS" route add default via "$VPS_PUB1"
 
   # homerouter の LAN 側はブリッジ(br0)。home(エージェント)と lan(別ホスト)を同じセグメントに乗せる
-  link homerouter lan0 home eth0
-  link homerouter lan1 lan eth0
-  ip -n homerouter link add br0 type bridge
-  ip -n homerouter link set lan0 master br0
-  ip -n homerouter link set lan1 master br0
-  ip -n homerouter link set br0 up
-  ip -n homerouter addr add "$HR_LAN/24" dev br0
-  ip -n home addr add "$HOME_ADDR/24" dev eth0
-  ip -n home route add default via "$HR_LAN"
-  ip -n lan addr add "$LAN_ADDR/24" dev eth0
-  ip -n lan route add default via "$HR_LAN"
+  link "$ROUTER_NS" lan0 "$HOME_NS" eth0
+  link "$ROUTER_NS" lan1 "$LAN_NS" eth0
+  ip -n "$ROUTER_NS" link add br0 type bridge
+  ip -n "$ROUTER_NS" link set lan0 master br0
+  ip -n "$ROUTER_NS" link set lan1 master br0
+  ip -n "$ROUTER_NS" link set br0 up
+  ip -n "$ROUTER_NS" addr add "$HR_LAN/24" dev br0
+  ip -n "$HOME_NS" addr add "$HOME_ADDR/24" dev eth0
+  ip -n "$HOME_NS" route add default via "$HR_LAN"
+  ip -n "$LAN_NS" addr add "$LAN_ADDR/24" dev eth0
+  ip -n "$LAN_NS" route add default via "$HR_LAN"
 
-  ip netns exec homerouter sysctl -qw net.ipv4.ip_forward=1
+  ip netns exec "$ROUTER_NS" sysctl -qw net.ipv4.ip_forward=1
   # nft 1.0.6(Debian 12)は入れ子を 1 行で書くと構文エラーになるので複数行で書く
-  ip netns exec homerouter nft -f - <<'NFT'
+  ip netns exec "$ROUTER_NS" nft -f - <<'NFT'
 table ip nat {
   chain postrouting {
     type nat hook postrouting priority srcnat;
@@ -92,12 +100,12 @@ NFT
 }
 
 check() {
-  ip netns exec client ping -c1 -W2 "$VPS_PUB0" >/dev/null || die "client -> vps に届かない"
-  ip netns exec client ping -6 -c1 -W2 "$VPS_PUB0_6" >/dev/null || die "client -> vps に ipv6 で届かない"
-  ip netns exec home ping -c1 -W2 "$HR_LAN" >/dev/null || die "home -> homerouter に届かない"
-  ip netns exec lan ping -c1 -W2 "$HR_LAN" >/dev/null || die "lan -> homerouter に届かない"
-  ip netns exec lan ping -c1 -W2 "$HOME_ADDR" >/dev/null || die "lan -> home に届かない(br0 のブリッジ)"
-  ip netns exec homerouter ping -c1 -W2 "$VPS_PUB1" >/dev/null || die "homerouter -> vps に届かない"
+  ip netns exec "$CLIENT_NS" ping -c1 -W2 "$VPS_PUB0" >/dev/null || die "client -> vps に届かない"
+  ip netns exec "$CLIENT_NS" ping -6 -c1 -W2 "$VPS_PUB0_6" >/dev/null || die "client -> vps に ipv6 で届かない"
+  ip netns exec "$HOME_NS" ping -c1 -W2 "$HR_LAN" >/dev/null || die "home -> homerouter に届かない"
+  ip netns exec "$LAN_NS" ping -c1 -W2 "$HR_LAN" >/dev/null || die "lan -> homerouter に届かない"
+  ip netns exec "$LAN_NS" ping -c1 -W2 "$HOME_ADDR" >/dev/null || die "lan -> home に届かない(br0 のブリッジ)"
+  ip netns exec "$ROUTER_NS" ping -c1 -W2 "$VPS_PUB1" >/dev/null || die "homerouter -> vps に届かない"
   echo "lab topology is up"
 }
 

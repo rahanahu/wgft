@@ -41,8 +41,9 @@ set -u
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: rates.sh kernel|userspace" >&2; exit 2;; esac
 
-DATA=/tmp/wgft-rates-server
-ADATA=/tmp/wgft-rates-agent
+. "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
+DATA=$W/wgft-rates-server
+ADATA=$W/wgft-rates-agent
 ADMIN=127.0.0.1:8686
 fail=0
 
@@ -63,9 +64,9 @@ bound() {
     "$([ -n "$got" ] && [ "$got" -ge "$min" ] 2>/dev/null && [ "$got" -le "$max" ] 2>/dev/null && echo 1 || echo 0)"
 }
 
-vps() { ip netns exec vps "$@"; }
-client() { ip netns exec client bash -c "$1"; }
-kill_all() { pkill -x wgft; pkill -x echo; pkill -x socat; sleep 1; }
+vps() { ip netns exec "$VPS_NS" "$@"; }
+client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
+kill_all() { sandbox_kill_named wgft echo socat; sleep 1; }
 cleanup() {
   kill_all
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
@@ -111,13 +112,13 @@ else
   run_server="wgft server run"
 fi
 vps setsid nohup $run_server --mode "$mode" --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-  > /tmp/wgft-rates-server.log 2>&1 < /dev/null &
+  > $W/wgft-rates-server.log 2>&1 < /dev/null &
 disown
 if ! wait_until 30 admin_up; then echo "FAIL  setup: admin api did not come up"; fail=1; fi
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-rates-agent.log 2>&1 < /dev/null &
+WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-rates-agent.log 2>&1 < /dev/null &
 disown
-ip netns exec lan setsid nohup echo -udp 19132 -tcp 19133 > /tmp/wgft-rates-echo.log 2>&1 < /dev/null &
+ip netns exec "$LAN_NS" setsid nohup echo -udp 19132 -tcp 19133 > $W/wgft-rates-echo.log 2>&1 < /dev/null &
 disown
 if ! wait_until 30 agent_registered; then echo "FAIL  setup: agent never registered"; fail=1; fi
 u=$(vps wgft rule add --agent home --udp 27015 --to 192.168.50.3:19132 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
@@ -127,7 +128,7 @@ wait_until 15 tcp_probe_ok 27016
 # .3 through .9: extra client-side source addresses for the per-source, aggregate and ordering
 # blocks below (each needs traffic that is distinguishable, or independent, by source address).
 for i in 3 4 5 6 7 8 9; do
-  ip netns exec client ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null
+  ip netns exec "$CLIENT_NS" ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null
 done
 
 # flows <src-ip> <n>: open n UDP sockets from src-ip, send one datagram each, count sockets that
@@ -290,9 +291,9 @@ d = json.load(sys.stdin)
 for r in d['rules']:
     if r['id'] == '$u':
         r.setdefault('source_deny', []).append('198.51.100.4/32')
-json.dump(d['rules'], open('/tmp/wgft-rates-deny.json', 'w'))
+json.dump(d['rules'], open('$W/wgft-rates-deny.json', 'w'))
 "
-vps wgft rule import /tmp/wgft-rates-deny.json --admin "$ADMIN" >/dev/null
+vps wgft rule import $W/wgft-rates-deny.json --admin "$ADMIN" >/dev/null
 vps wgft rule rate new-flow "$u" 8/minute --admin "$ADMIN" >/dev/null; sleep 2
 before=$(drops)
 denied_answered=$(flows 198.51.100.4 20)
@@ -316,9 +317,9 @@ d = json.load(sys.stdin)
 for r in d['rules']:
     if r['id'] == '$u':
         r['source_deny'] = [c for c in (r.get('source_deny') or []) if c != '198.51.100.4/32']
-json.dump(d['rules'], open('/tmp/wgft-rates-undeny.json', 'w'))
+json.dump(d['rules'], open('$W/wgft-rates-undeny.json', 'w'))
 "
-vps wgft rule import /tmp/wgft-rates-undeny.json --admin "$ADMIN" >/dev/null
+vps wgft rule import $W/wgft-rates-undeny.json --admin "$ADMIN" >/dev/null
 sleep 2
 
 echo "== $mode: packet_rate stored on a TCP (Relay) rule has no effect (design 7a.9 節)"
@@ -351,7 +352,7 @@ bound "relay new-flow: aggregate stays within the token-bucket bound" "$relay_ne
 vps wgft rule rate new-flow "$p" none --admin "$ADMIN" >/dev/null; sleep 2
 
 for i in 3 4 5 6 7 8 9; do
-  ip netns exec client ip addr del "198.51.100.$i/24" dev eth0 2>/dev/null
+  ip netns exec "$CLIENT_NS" ip addr del "198.51.100.$i/24" dev eth0 2>/dev/null
 done
 cleanup
 if [ "$fail" = 0 ]; then echo "== $mode: ALL PASS"; else echo "== $mode: FAILURES"; fi

@@ -105,8 +105,9 @@ for c in $CHECKS; do
   case " $ALL_CHECKS " in *" $c "*) ;; *) echo "lifecycle.sh: unknown check '$c' (use: $ALL_CHECKS)" >&2; exit 2;; esac
 done
 
+. "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
 ADMIN=127.0.0.1:8686
-PY=/tmp/wgft-lifecycle-py
+PY=$W/wgft-lifecycle-py
 # check 5 runs the server and the agent with half the default flow budgets, so that the flood it
 # can generate from one client namespace fills the whole process-wide budget and goes past it.
 # One rule may hold the entire budget (design 7a.10: the per-rule cap of ceil(T/2) only applies
@@ -165,12 +166,24 @@ skip() { echo "SKIP  $1 (does not apply to $mode mode)"; }
 # whole lab runs into multi-minute hangs. Returns non-zero on timeout so that the caller's own,
 # unchanged assertion (the check/okcheck/absent right after) runs anyway and reports its usual
 # FAIL; wait_until itself never prints PASS/FAIL and never turns a real failure into a silent pass.
+# WGFT_LAB_WAIT_LOG=1 makes every wait print how long it actually took against the timeout it was
+# given ("WAIT 12/45 ..."). The margin a wait has left is what decides whether a check can share a
+# VM with others, and only a measurement shows it. Off by default, so the output of a normal run is
+# unchanged; the line never starts with PASS, FAIL or SKIP, so it is not counted as a verdict.
+WAIT_LOG=${WGFT_LAB_WAIT_LOG:-}
 wait_until() {
   local timeout=$1; shift
   local deadline=$((SECONDS + timeout))
+  local start=$SECONDS
   while :; do
-    "$@" >/dev/null 2>&1 && return 0
-    (( SECONDS >= deadline )) && return 1
+    if "$@" >/dev/null 2>&1; then
+      [ -n "$WAIT_LOG" ] && echo "WAIT $((SECONDS - start))/$timeout ok $*"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      [ -n "$WAIT_LOG" ] && echo "WAIT $((SECONDS - start))/$timeout timeout $*"
+      return 1
+    fi
     sleep 0.2
   done
 }
@@ -192,8 +205,8 @@ must_wait() {
   return 1
 }
 
-vps() { ip netns exec vps "$@"; }
-client() { ip netns exec client bash -c "$1"; }
+vps() { ip netns exec "$VPS_NS" "$@"; }
+client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
 
 admin_up() { vps wgft agent ls --admin "$ADMIN" >/dev/null 2>&1; }
 wait_admin() { wait_until 30 admin_up || { echo "!! admin api did not come up" >&2; return 1; }; }
@@ -257,15 +270,15 @@ start_server() {
 }
 kill_server() {
   local p
-  for p in $(pgrep -x wgft); do
+  for p in $(sandbox_wgft_pids); do
     if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' server run'; then
       kill "$p"
       must_wait "kill_server: pid $p (server run) exited" 5 proc_gone "$p"
     fi
   done
 }
-none_running() { ! pgrep -x wgft >/dev/null 2>&1 && ! pgrep -x echo >/dev/null 2>&1 && ! pgrep -x socat >/dev/null 2>&1; }
-kill_all() { pkill -x wgft; pkill -x echo; pkill -x socat; must_wait "kill_all: leftover wgft/echo/socat processes gone" 5 none_running; }
+none_running() { ! sandbox_any_named wgft echo socat; }
+kill_all() { sandbox_kill_named wgft echo socat; must_wait "kill_all: leftover wgft/echo/socat processes gone" 5 none_running; }
 reset_kernel_state() {
   vps ip link del wgft0 2>/dev/null
   vps nft delete table inet wgft 2>/dev/null
@@ -284,7 +297,7 @@ flows_established() {
 # set_target <rule-id> <new-target>: changes one rule's target via export + `rule import`
 # (a full-set batch upsert), since the CLI's `rule set` only touches group/note (design 5.4).
 set_target() {
-  local id=$1 target=$2 f=/tmp/wgft-lifecycle-settarget.json
+  local id=$1 target=$2 f=$W/wgft-lifecycle-settarget.json
   vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -321,7 +334,7 @@ sys.exit(0 if any(r['id'] == '$1' for r in d['rules']) else 1)
 # set_listen_port <rule-id> <new-port>: changes one rule's listen_port via export + `rule import`,
 # the same technique set_target uses (design 5.4: `rule set` only touches group/note).
 set_listen_port() {
-  local id=$1 port=$2 f=/tmp/wgft-lifecycle-setport.json
+  local id=$1 port=$2 f=$W/wgft-lifecycle-setport.json
   vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -336,7 +349,7 @@ json.dump(d['rules'], open('$f', 'w'))
 # listen_port in the same batch, the way an admin turning a Transparent rule into a Relay rule
 # on a new port would (design 7a.2: vps_mode/proxy_protocol map to Forwarding).
 retarget_as_proxy() {
-  local id=$1 port=$2 f=/tmp/wgft-lifecycle-setproxy.json
+  local id=$1 port=$2 f=$W/wgft-lifecycle-setproxy.json
   vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -353,7 +366,7 @@ json.dump(d['rules'], open('$f', 'w'))
 # 5.3/6.2) does not change at all, so this is the one way to give a rule a rule-local (Prepare)
 # failure without the agent's own port-based reconciliation (design 7) touching its listener.
 retarget_same_port_as_proxy() {
-  local id=$1 f=/tmp/wgft-lifecycle-setproxysameport.json
+  local id=$1 f=$W/wgft-lifecycle-setproxysameport.json
   vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -366,7 +379,7 @@ json.dump(d['rules'], open('$f', 'w'))
 }
 # add_source_deny <rule-id> <cidr>: appends one CIDR to a rule's source_deny via export + import.
 add_source_deny() {
-  local id=$1 cidr=$2 f=/tmp/wgft-lifecycle-setdeny.json
+  local id=$1 cidr=$2 f=$W/wgft-lifecycle-setdeny.json
   vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -379,7 +392,7 @@ json.dump(d['rules'], open('$f', 'w'))
 }
 # remove_source_deny <rule-id> <cidr>: removes one CIDR from a rule's source_deny via export + import.
 remove_source_deny() {
-  local id=$1 cidr=$2 f=/tmp/wgft-lifecycle-undeny.json
+  local id=$1 cidr=$2 f=$W/wgft-lifecycle-undeny.json
   vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -394,7 +407,7 @@ json.dump(d['rules'], open('$f', 'w'))
 # batch that both retargets one rule and removes another, so both land in the same transaction
 # (design 7a.3: a backend-wide failure affects everything a transaction was carrying).
 retarget_and_delete() {
-  local id=$1 target=$2 delid=$3 f=/tmp/wgft-lifecycle-c7-import.json
+  local id=$1 target=$2 delid=$3 f=$W/wgft-lifecycle-c7-import.json
   vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -462,13 +475,14 @@ print(d.get('drops', {}).get('$1', ''))
 }
 rss_mib() { awk '/VmRSS/{print int($2/1024)}' "/proc/$1/status" 2>/dev/null; }
 # find_wgft_pid <substring>: the pid of the "wgft" process whose cmdline contains <substring>
-# (e.g. "server run" or "agent run"). Matches on the exact comm name first (pgrep -x wgft, safe
-# against any wrapping shell or helper process that happens to have the same words in its own
+# (e.g. "server run" or "agent run"). Matches on the exact comm name first (sandbox_wgft_pids,
+# safe against any wrapping shell or helper process that happens to have the same words in its own
 # argv, e.g. `runuser -u wgftlab -- wgft server run ...` or incus's own exec plumbing) and only
-# then greps cmdline, the same technique kill_server() uses.
+# then greps cmdline, the same technique kill_server() uses. In a sandbox the candidates come from
+# that sandbox's namespaces; outside one they come from `pgrep -x wgft`, as before.
 find_wgft_pid() {
   local p
-  for p in $(pgrep -x wgft); do
+  for p in $(sandbox_wgft_pids); do
     if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q " $1"; then echo "$p"; return; fi
   done
 }
@@ -674,16 +688,16 @@ PYEOF
 # ---------------------------------------------------------------------------------------------
 check1() {
   echo "== $mode: check 1: server restart keeps (kernel) or drops (userspace) in-flight flows"
-  local DATA=/tmp/wgft-lifecycle-c1 ADATA=/tmp/wgft-lifecycle-c1-agent
+  local DATA=$W/wgft-lifecycle-c1 ADATA=$W/wgft-lifecycle-c1-agent
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c1-server.log
+  start_server "$DATA" $W/wgft-lifecycle-c1-server.log
   if ! wait_admin; then echo "FAIL  check1 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c1-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c1-agent.log 2>&1 < /dev/null &
   disown
-  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25580 -udp 19150 > /tmp/wgft-lifecycle-c1-echo.log 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25580 -udp 19150 > $W/wgft-lifecycle-c1-echo.log 2>&1 < /dev/null &
   disown
   if ! wait_agent home; then echo "FAIL  check1 setup: agent never registered"; fail=1; return; fi
 
@@ -697,11 +711,11 @@ check1() {
   check "udp works before the restart" "udp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:27020')"
 
   local rounds=20 interval=0.5
-  ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 39980 "$rounds" "$interval" \
-    > /tmp/wgft-lifecycle-c1-tcp.log 2>&1 < /dev/null &
+  ip netns exec "$CLIENT_NS" python3 "$PY/tcpprobe.py" 198.51.100.1 39980 "$rounds" "$interval" \
+    > $W/wgft-lifecycle-c1-tcp.log 2>&1 < /dev/null &
   local tcp_pid=$!
-  ip netns exec client python3 "$PY/udpprobe.py" 198.51.100.1 27020 "$rounds" "$interval" \
-    > /tmp/wgft-lifecycle-c1-udp.log 2>&1 < /dev/null &
+  ip netns exec "$CLIENT_NS" python3 "$PY/udpprobe.py" 198.51.100.1 27020 "$rounds" "$interval" \
+    > $W/wgft-lifecycle-c1-udp.log 2>&1 < /dev/null &
   local udp_pid=$!
 
   # deliberate: the point of this check is a restart while the sessions are mid-flow, not just
@@ -711,7 +725,7 @@ check1() {
   local old_pid; old_pid=$(find_wgft_pid 'server run')
   kill_server
   # kill_server's own must_wait already fails loudly if a matched pid does not die in time, but
-  # it silently does nothing if pgrep/cmdline never matched the process in the first place; this
+  # it silently does nothing if the pid lookup or cmdline never matched the process at all; this
   # is the general safety net for "the server is actually stopped" that the rest of this block
   # (wg0/nft/conntrack while stopped) assumes.
   okcheck "no wgft server run process remains after kill_server" "$([ -z "$(find_wgft_pid 'server run')" ] && echo 1 || echo 0)"
@@ -721,7 +735,7 @@ check1() {
     # force the leftovers down (SIGCONT first, in case it is stopped rather than running) and clean up.
     echo "   the server did not stop; skipping the rest of check 1"
     kill "$tcp_pid" "$udp_pid" 2>/dev/null
-    pkill -CONT -x wgft; pkill -KILL -x wgft; pkill -x echo; pkill -x socat
+    sandbox_kill_named -CONT wgft; sandbox_kill_named -KILL wgft; sandbox_kill_named echo socat
     wait "$tcp_pid" "$udp_pid" 2>/dev/null
     vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
     rm -rf "$DATA" "$ADATA"
@@ -741,7 +755,7 @@ check1() {
   # deliberate: the design claim under test is that wg0/table inet wgft/conntrack outlive vpsd
   # while it is stopped for a real stretch of wall-clock time, not just for an instant.
   sleep 5
-  start_server "$DATA" /tmp/wgft-lifecycle-c1-server2.log
+  start_server "$DATA" $W/wgft-lifecycle-c1-server2.log
   if ! wait_admin; then echo "FAIL  check1: admin api never came back up after the restart"; fail=1; fi
   # wait_admin only proves *an* admin API answered; if kill_server's process check above had a
   # gap, that could still be the pre-restart process. Confirm it is actually the new one.
@@ -763,16 +777,16 @@ check1() {
   wait "$tcp_pid" "$udp_pid" 2>/dev/null
   local want_bytes=$((rounds * 10))
   if [ "$mode" = kernel ]; then
-    check "tcp session survives the restart unbroken (full byte count delivered)" "got=$want_bytes;" "$(cat /tmp/wgft-lifecycle-c1-tcp.log)"
-    check "udp stream survives the restart unbroken" "oks=$rounds fails=0" "$(cat /tmp/wgft-lifecycle-c1-udp.log)"
+    check "tcp session survives the restart unbroken (full byte count delivered)" "got=$want_bytes;" "$(cat $W/wgft-lifecycle-c1-tcp.log)"
+    check "udp stream survives the restart unbroken" "oks=$rounds fails=0" "$(cat $W/wgft-lifecycle-c1-udp.log)"
   else
-    local tcp_log; tcp_log=$(cat /tmp/wgft-lifecycle-c1-tcp.log)
+    local tcp_log; tcp_log=$(cat $W/wgft-lifecycle-c1-tcp.log)
     if [[ "$tcp_log" == *"got=$want_bytes;"* ]]; then
       echo "FAIL  userspace tcp session should not survive the stop uninterrupted"; fail=1
     else
       echo "PASS  userspace tcp session does not survive the stop uninterrupted (matches design 6.3: vpsd を止めると転送も止まる); log: $tcp_log"
     fi
-    local udp_log; udp_log=$(cat /tmp/wgft-lifecycle-c1-udp.log)
+    local udp_log; udp_log=$(cat $W/wgft-lifecycle-c1-udp.log)
     if [[ "$udp_log" == *"fails=0"* ]]; then
       echo "FAIL  userspace udp stream should have seen failures while the server was stopped"; fail=1
     else
@@ -794,16 +808,16 @@ check1() {
 # ---------------------------------------------------------------------------------------------
 check2() {
   echo "== $mode: check 2: unrelated rule churn does not cut A; changing A's target or deleting A does"
-  local DATA=/tmp/wgft-lifecycle-c2 ADATA=/tmp/wgft-lifecycle-c2-agent
+  local DATA=$W/wgft-lifecycle-c2 ADATA=$W/wgft-lifecycle-c2-agent
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c2-server.log
+  start_server "$DATA" $W/wgft-lifecycle-c2-server.log
   if ! wait_admin; then echo "FAIL  check2 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c2-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c2-agent.log 2>&1 < /dev/null &
   disown
-  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25581 -udp 19151 > /tmp/wgft-lifecycle-c2-echo.log 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25581 -udp 19151 > $W/wgft-lifecycle-c2-echo.log 2>&1 < /dev/null &
   disown
   if ! wait_agent home; then echo "FAIL  check2 setup: agent never registered"; fail=1; return; fi
 
@@ -818,11 +832,11 @@ check2() {
 
   echo "-- add / retarget / disable / delete an unrelated rule B, and edit A's own group/note"
   local rounds=16 interval=0.5
-  ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 39982 "$rounds" "$interval" \
-    > /tmp/wgft-lifecycle-c2-tcpA.log 2>&1 < /dev/null &
+  ip netns exec "$CLIENT_NS" python3 "$PY/tcpprobe.py" 198.51.100.1 39982 "$rounds" "$interval" \
+    > $W/wgft-lifecycle-c2-tcpA.log 2>&1 < /dev/null &
   local tcp_pid=$!
-  ip netns exec client python3 "$PY/udpprobe.py" 198.51.100.1 27022 "$rounds" "$interval" \
-    > /tmp/wgft-lifecycle-c2-udpA.log 2>&1 < /dev/null &
+  ip netns exec "$CLIENT_NS" python3 "$PY/udpprobe.py" 198.51.100.1 27022 "$rounds" "$interval" \
+    > $W/wgft-lifecycle-c2-udpA.log 2>&1 < /dev/null &
   local udp_pid=$!
 
   # each of these confirms the churn on B (and A's own note edit) actually applied before moving
@@ -844,8 +858,8 @@ check2() {
 
   wait "$tcp_pid" "$udp_pid" 2>/dev/null
   local want_bytes=$((rounds * 10))
-  check "tcp on A survives add/retarget/disable/delete of B and A's own note edit" "got=$want_bytes;" "$(cat /tmp/wgft-lifecycle-c2-tcpA.log)"
-  check "udp on A survives the same churn" "oks=$rounds fails=0" "$(cat /tmp/wgft-lifecycle-c2-udpA.log)"
+  check "tcp on A survives add/retarget/disable/delete of B and A's own note edit" "got=$want_bytes;" "$(cat $W/wgft-lifecycle-c2-tcpA.log)"
+  check "udp on A survives the same churn" "oks=$rounds fails=0" "$(cat $W/wgft-lifecycle-c2-udpA.log)"
 
   echo "-- changing A's own target does cut its flows (design 6.1 convergence / design 7 reconciliation)"
   local a_tcp2 a_udp2
@@ -907,16 +921,16 @@ check3() {
     skip "proxy bind-failure nft accounting (proxy mode's nft lines only exist in kernel mode, design 6.1/6.2)"
     return
   fi
-  local DATA=/tmp/wgft-lifecycle-c3 ADATA=/tmp/wgft-lifecycle-c3-agent
+  local DATA=$W/wgft-lifecycle-c3 ADATA=$W/wgft-lifecycle-c3-agent
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c3-server.log
+  start_server "$DATA" $W/wgft-lifecycle-c3-server.log
   if ! wait_admin; then echo "FAIL  check3 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c3-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c3-agent.log 2>&1 < /dev/null &
   disown
-  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25590 > /tmp/wgft-lifecycle-c3-echo.log 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25590 > $W/wgft-lifecycle-c3-echo.log 2>&1 < /dev/null &
   disown
   if ! wait_agent home; then echo "FAIL  check3 setup: agent never registered"; fail=1; return; fi
 
@@ -927,16 +941,16 @@ check3() {
   # squat/unsquat's own waits are bare: if socat never actually bound (or never actually freed)
   # 8461, the very next block's okcheck/check would see the opposite of what it expects (an
   # accounting line where there should be none, or none where one should appear) and FAIL.
-  squat() { vps setsid nohup socat TCP-LISTEN:8461,reuseaddr,fork EXEC:/bin/cat > /tmp/wgft-lifecycle-c3-squat.log 2>&1 < /dev/null & disown; wait_until 3 port_listening 8461; }
-  unsquat() { pkill -x socat; wait_until 3 port_free 8461; }
+  squat() { vps setsid nohup socat TCP-LISTEN:8461,reuseaddr,fork EXEC:/bin/cat > $W/wgft-lifecycle-c3-squat.log 2>&1 < /dev/null & disown; wait_until 3 port_listening 8461; }
+  unsquat() { sandbox_kill_named socat; wait_until 3 port_free 8461; }
 
   echo "-- rule creation while another process owns 8461"
   squat
   vps wgft rule add --agent home --tcp 8461 --to 192.168.50.3:25590 --proxy --admin "$ADMIN" >/dev/null
   # bare wait_until: re-checked by the check() right after (same log, same substring).
-  wait_until 5 log_has /tmp/wgft-lifecycle-c3-server.log "cannot open listener for 8461"
+  wait_until 5 log_has $W/wgft-lifecycle-c3-server.log "cannot open listener for 8461"
   okcheck "no nft accounting line while the port is squatted" "$([ "$(src_flow_lines)" = 0 ] && echo 1 || echo 0)"
-  check "bind failure is logged" "cannot open listener for 8461" "$(grep -o 'cannot open listener for 8461.*' /tmp/wgft-lifecycle-c3-server.log | tail -1)"
+  check "bind failure is logged" "cannot open listener for 8461" "$(grep -o 'cannot open listener for 8461.*' $W/wgft-lifecycle-c3-server.log | tail -1)"
 
   echo "-- the port is freed; the next apply opens it"
   unsquat
@@ -948,19 +962,19 @@ check3() {
   echo "-- restart while another process owns 8461"
   kill_server
   squat
-  start_server "$DATA" /tmp/wgft-lifecycle-c3-server2.log
+  start_server "$DATA" $W/wgft-lifecycle-c3-server2.log
   if ! wait_admin; then echo "FAIL  check3: admin api never came back up"; fail=1; return; fi
   # must_wait: the okcheck right after asserts accounting-line *absence*, a different condition
   # that a startup apply which simply had not run yet would also satisfy; without confirming the
   # bind-retry was actually logged, that okcheck could pass without the restart path having been
   # exercised at all.
-  must_wait "check3: restart-while-squatted bind failure logged" 5 log_has /tmp/wgft-lifecycle-c3-server2.log "cannot open listener for 8461"
+  must_wait "check3: restart-while-squatted bind failure logged" 5 log_has $W/wgft-lifecycle-c3-server2.log "cannot open listener for 8461"
   okcheck "no nft accounting line after a restart while squatted" "$([ "$(src_flow_lines)" = 0 ] && echo 1 || echo 0)"
 
   echo "-- restart with the port free"
   kill_server
   unsquat
-  start_server "$DATA" /tmp/wgft-lifecycle-c3-server3.log
+  start_server "$DATA" $W/wgft-lifecycle-c3-server3.log
   if ! wait_admin; then echo "FAIL  check3: admin api never came back up"; fail=1; return; fi
   # bare wait_until: re-checked by the okcheck right after (same src_flow_lines condition).
   wait_until 5 src_flow_present
@@ -982,16 +996,16 @@ check3b() {
     skip "table-swap rollback (the nft two-phase apply this exercises only exists in kernel mode)"
     return
   fi
-  local DATA=/tmp/wgft-lifecycle-c3b ADATA=/tmp/wgft-lifecycle-c3b-agent
+  local DATA=$W/wgft-lifecycle-c3b ADATA=$W/wgft-lifecycle-c3b-agent
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c3b-server.log
+  start_server "$DATA" $W/wgft-lifecycle-c3b-server.log
   if ! wait_admin; then echo "FAIL  check3b setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c3b-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c3b-agent.log 2>&1 < /dev/null &
   disown
-  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25597 > /tmp/wgft-lifecycle-c3b-echo.log 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25597 > $W/wgft-lifecycle-c3b-echo.log 2>&1 < /dev/null &
   disown
   if ! wait_agent home; then echo "FAIL  check3b setup: agent never registered"; fail=1; return; fi
 
@@ -1006,26 +1020,26 @@ check3b() {
   # a separate `nft delete table` first: the server notices a deleted table within a second and
   # republishes it (design 7a.3 section, 実際の状態への収束), and an existing table cannot be given
   # an owner afterwards.
-  rm -f /tmp/wgft-lifecycle-c3b-fifo /tmp/wgft-lifecycle-c3b-owner.log
-  mkfifo /tmp/wgft-lifecycle-c3b-fifo
-  vps bash -c 'exec 3<>/tmp/wgft-lifecycle-c3b-fifo; nft -i <&3 >/tmp/wgft-lifecycle-c3b-owner.log 2>&1 &'
-  nft_i_ready() { vps pgrep -x nft >/dev/null 2>&1; }
+  rm -f $W/wgft-lifecycle-c3b-fifo $W/wgft-lifecycle-c3b-owner.log
+  mkfifo $W/wgft-lifecycle-c3b-fifo
+  vps bash -c "exec 3<>$W/wgft-lifecycle-c3b-fifo; nft -i <&3 >$W/wgft-lifecycle-c3b-owner.log 2>&1 &"
+  nft_i_ready() { sandbox_any_named nft; }
   # must_wait, and bail out here rather than falling through: the next line's `echo ... > fifo`
   # is a plain write-only open on a named pipe, which blocks until some reader has it open. If
   # nft -i never actually started (never became the reader), that write would hang this whole
   # script forever instead of just failing this check, which no downstream assertion could ever
   # turn into a normal FAIL.
   if ! must_wait "check3b: nft -i reading the fifo" 3 nft_i_ready; then
-    rm -f /tmp/wgft-lifecycle-c3b-fifo /tmp/wgft-lifecycle-c3b-owner.log
+    rm -f $W/wgft-lifecycle-c3b-fifo $W/wgft-lifecycle-c3b-owner.log
     kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
     rm -rf "$DATA" "$ADATA"
     return
   fi
-  echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > /tmp/wgft-lifecycle-c3b-fifo
+  echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > $W/wgft-lifecycle-c3b-fifo
   foreign_owner_table_present() { vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner'; }
   # bare wait_until: re-checked by the okcheck right after (same condition).
   wait_until 5 foreign_owner_table_present
-  local owner_pid; owner_pid=$(vps pgrep -x nft | head -1)
+  local owner_pid; owner_pid=$(sandbox_pids_named nft | head -1)
   okcheck "a foreign table with flags owner exists before we provoke the swap failure" \
     "$(vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner' && echo 1 || echo 0)"
 
@@ -1034,7 +1048,7 @@ check3b() {
   vps wgft rule add --agent home --tcp 8463 --to 192.168.50.3:25597 --proxy --admin "$ADMIN" >/dev/null 2>&1
   # bare wait_until: re-checked by "the swap failure is logged" check() a few lines down (same
   # log, same substring).
-  wait_until 5 log_has /tmp/wgft-lifecycle-c3b-server.log "failed to apply nftables"
+  wait_until 5 log_has $W/wgft-lifecycle-c3b-server.log "failed to apply nftables"
   local r_add
   r_add=$(vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
@@ -1043,7 +1057,7 @@ for r in d['rules']:
     if r['listen_port'] == '8463':
         print(r['id'])
 ")
-  check "the swap failure is logged" "failed to apply nftables" "$(tail -8 /tmp/wgft-lifecycle-c3b-server.log)"
+  check "the swap failure is logged" "failed to apply nftables" "$(tail -8 $W/wgft-lifecycle-c3b-server.log)"
   check "the deleted rule's listener is kept (fail-static; only Commit closes removed listeners, and it did not run)" \
     "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:8462')"
   check "the newly-added rule's listener is not left open (Rollback closed what Prepare opened)" \
@@ -1074,7 +1088,7 @@ for r in d['rules']:
   wait_until 10 tcp_probe_ok 8463
   check "once the owner is gone, the newly-added rule now actually works" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:8463')"
 
-  rm -f /tmp/wgft-lifecycle-c3b-fifo /tmp/wgft-lifecycle-c3b-owner.log
+  rm -f $W/wgft-lifecycle-c3b-fifo $W/wgft-lifecycle-c3b-owner.log
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"
 }
@@ -1089,18 +1103,18 @@ check4() {
     skip "teardown of wg0/table inet wgft (userspace mode's teardown only ever purges the database)"
     return
   fi
-  local DATA=/tmp/wgft-lifecycle-c4
+  local DATA=$W/wgft-lifecycle-c4
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA"; mkdir -p "$DATA"
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c4-server.log
+  start_server "$DATA" $W/wgft-lifecycle-c4-server.log
   if ! wait_admin; then echo "FAIL  check4 setup: admin api never came up"; fail=1; return; fi
   kill_server
 
   echo "-- creating a foreign wg interface (wg9) and a foreign nft table with a rule"
-  (umask 077; vps wg genkey > /tmp/wgft-lifecycle-c4-foreignkey)
+  (umask 077; vps wg genkey > $W/wgft-lifecycle-c4-foreignkey)
   vps ip link add wg9 type wireguard
-  vps wg set wg9 private-key /tmp/wgft-lifecycle-c4-foreignkey
+  vps wg set wg9 private-key $W/wgft-lifecycle-c4-foreignkey
   vps ip addr add 10.99.0.1/24 dev wg9
   vps ip link set wg9 up
   vps nft -f - <<'NFT'
@@ -1122,7 +1136,7 @@ NFT
   okcheck "server database is kept without --purge" "$([ -f "$DATA/wgft.sqlite" ] && echo 1 || echo 0)"
 
   echo "-- restart (recreates wgft0/table from the retained database), stop, teardown --purge"
-  start_server "$DATA" /tmp/wgft-lifecycle-c4-server2.log
+  start_server "$DATA" $W/wgft-lifecycle-c4-server2.log
   if ! wait_admin; then echo "FAIL  check4: admin api never came back up for the second cycle"; fail=1; return; fi
   kill_server
   local out2; out2=$(vps wgft server teardown --data-dir "$DATA" --purge --yes 2>&1)
@@ -1135,7 +1149,7 @@ NFT
 
   vps ip link del wg9 2>/dev/null
   vps nft delete table ip foreigntest 2>/dev/null
-  kill_all; rm -rf "$DATA" /tmp/wgft-lifecycle-c4-foreignkey
+  kill_all; rm -rf "$DATA" $W/wgft-lifecycle-c4-foreignkey
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -1143,20 +1157,20 @@ NFT
 # ---------------------------------------------------------------------------------------------
 check5_server_memory() {
   echo "-- the userspace server's own relay"
-  local DATA=/tmp/wgft-lifecycle-c5s ADATA=/tmp/wgft-lifecycle-c5s-agent
+  local DATA=$W/wgft-lifecycle-c5s ADATA=$W/wgft-lifecycle-c5s-agent
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
   local i addrs=""
-  for i in $(seq 10 30); do ip netns exec client ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null; addrs+="198.51.100.$i,"; done
+  for i in $(seq 10 30); do ip netns exec "$CLIENT_NS" ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null; addrs+="198.51.100.$i,"; done
   addrs=${addrs%,}
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c5s-server.log "${C5_FLOW_FLAGS[@]}"
+  start_server "$DATA" $W/wgft-lifecycle-c5s-server.log "${C5_FLOW_FLAGS[@]}"
   if ! wait_admin; then echo "FAIL  check5 (server) setup: admin api never came up"; fail=1
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > /tmp/wgft-lifecycle-c5s-agent.log 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > $W/wgft-lifecycle-c5s-agent.log 2>&1 < /dev/null &
     disown
-    ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25595 -udp 19160 > /tmp/wgft-lifecycle-c5s-echo.log 2>&1 < /dev/null &
+    ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25595 -udp 19160 > $W/wgft-lifecycle-c5s-echo.log 2>&1 < /dev/null &
     disown
     if ! wait_agent home; then echo "FAIL  check5 (server) setup: agent never registered"; fail=1
     else
@@ -1169,9 +1183,9 @@ check5_server_memory() {
       wait_until 10 udp_probe_ok 27040
       local spid; spid=$(find_wgft_pid 'server run')
 
-      local udp_out; udp_out=$(ip netns exec client python3 "$PY/flood.py" udp 198.51.100.1 27040 "$addrs" 260)
+      local udp_out; udp_out=$(ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" udp 198.51.100.1 27040 "$addrs" 260)
       echo "   $udp_out"
-      ip netns exec client python3 "$PY/flood.py" tcp 198.51.100.1 39995 "$addrs" 60 5 > /tmp/wgft-lifecycle-c5s-tcpflood.log 2>&1 &
+      ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 39995 "$addrs" 60 5 > $W/wgft-lifecycle-c5s-tcpflood.log 2>&1 &
       local flood_pid=$!
       # a client-side connect() can succeed (three-way handshake done) even for an over-cap
       # connection that the relay accepts and immediately RSTs, so the flood's own "established"
@@ -1185,12 +1199,12 @@ check5_server_memory() {
       # before it has finished accepting-and-immediately-rejecting the over-cap connections,
       # which is exactly the memory-growth-under-continued-rejection regression this check
       # exists to catch (RSS sampled too early could simply miss it).
-      must_wait "check5 (server): tcp flood finished attempting all connections" 10 log_has /tmp/wgft-lifecycle-c5s-tcpflood.log "tcp: attempted="
+      must_wait "check5 (server): tcp flood finished attempting all connections" 10 log_has $W/wgft-lifecycle-c5s-tcpflood.log "tcp: attempted="
       must_wait "check5 (server): tcp held count reaches the whole flow budget" 10 c5s_held_near_budget
       local held; held=$(vps ss -tn state established '( sport = :39995 )' | grep -c ':39995')
       local rss; rss=$(rss_mib "$spid")
       wait "$flood_pid"
-      echo "   $(cat /tmp/wgft-lifecycle-c5s-tcpflood.log)"
+      echo "   $(cat $W/wgft-lifecycle-c5s-tcpflood.log)"
       echo "   tcp connections actually held (ss on the accepting side, not client-side connect success): $held"
       echo "   server RSS while flooded past its flow budget: ${rss:-unknown} MiB (soft limit $SOFT_LIMIT_MIB MiB, margin $MARGIN_MIB MiB)"
       # the RSS bound only means something if the budget was actually filled: one rule holding
@@ -1203,33 +1217,33 @@ check5_server_memory() {
         "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le "$C5_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "server RSS stays under the soft limit plus margin while flooded past its flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((SOFT_LIMIT_MIB + MARGIN_MIB))" ] && echo 1 || echo 0)"
-      check "server logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' /tmp/wgft-lifecycle-c5s-server.log)"
+      check "server logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' $W/wgft-lifecycle-c5s-server.log)"
     fi
   fi
 
-  for i in $(seq 10 30); do ip netns exec client ip addr del "198.51.100.$i/24" dev eth0 2>/dev/null; done
+  for i in $(seq 10 30); do ip netns exec "$CLIENT_NS" ip addr del "198.51.100.$i/24" dev eth0 2>/dev/null; done
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
   rm -rf "$DATA" "$ADATA"
 }
 
 check5_agent_memory() {
   echo "-- the agent (via the faster kernel-mode forwarding path)"
-  local DATA=/tmp/wgft-lifecycle-c5a ADATA=/tmp/wgft-lifecycle-c5a-agent
+  local DATA=$W/wgft-lifecycle-c5a ADATA=$W/wgft-lifecycle-c5a-agent
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
   local i addrs=""
-  for i in $(seq 10 30); do ip netns exec client ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null; addrs+="198.51.100.$i,"; done
+  for i in $(seq 10 30); do ip netns exec "$CLIENT_NS" ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null; addrs+="198.51.100.$i,"; done
   addrs=${addrs%,}
 
   vps setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-    > /tmp/wgft-lifecycle-c5a-server.log 2>&1 < /dev/null &
+    > $W/wgft-lifecycle-c5a-server.log 2>&1 < /dev/null &
   disown
   if ! wait_admin; then echo "FAIL  check5 (agent) setup: admin api never came up"; fail=1
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > /tmp/wgft-lifecycle-c5a-agent.log 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > $W/wgft-lifecycle-c5a-agent.log 2>&1 < /dev/null &
     disown
-    ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25596 -udp 19161 > /tmp/wgft-lifecycle-c5a-echo.log 2>&1 < /dev/null &
+    ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25596 -udp 19161 > $W/wgft-lifecycle-c5a-echo.log 2>&1 < /dev/null &
     disown
     if ! wait_agent home; then echo "FAIL  check5 (agent) setup: agent never registered"; fail=1
     else
@@ -1242,23 +1256,23 @@ check5_agent_memory() {
       wait_until 10 udp_probe_ok 27041
       local apid; apid=$(find_wgft_pid 'agent run')
 
-      local udp_out; udp_out=$(ip netns exec client python3 "$PY/flood.py" udp 198.51.100.1 27041 "$addrs" 260)
+      local udp_out; udp_out=$(ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" udp 198.51.100.1 27041 "$addrs" 260)
       echo "   $udp_out"
-      ip netns exec client python3 "$PY/flood.py" tcp 198.51.100.1 39996 "$addrs" 60 5 > /tmp/wgft-lifecycle-c5a-tcpflood.log 2>&1 &
+      ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 39996 "$addrs" 60 5 > $W/wgft-lifecycle-c5a-tcpflood.log 2>&1 &
       local flood_pid=$!
       # count in the home netns: the agent's own accepting side (10.200.0.2:39996) lives inside
       # its userspace netstack, not a real Linux socket, so `ss` cannot see it; the agent's
       # outgoing dial to the target on the lan host is a real socket there, one per held
       # connection, selected by the target's port as the peer (dport).
-      c5a_held_near_budget() { [ "$(ip netns exec home ss -tn state established '( dport = :25596 )' | grep -c ':25596')" -ge $((C5_TCP_BUDGET - 24)) ]; }
+      c5a_held_near_budget() { [ "$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25596 )' | grep -c ':25596')" -ge $((C5_TCP_BUDGET - 24)) ]; }
       # must_wait, in order: see check5_server_memory's identical comment above (finish
       # attempting every connection, only then confirm the held count, only then sample RSS).
-      must_wait "check5 (agent): tcp flood finished attempting all connections" 10 log_has /tmp/wgft-lifecycle-c5a-tcpflood.log "tcp: attempted="
+      must_wait "check5 (agent): tcp flood finished attempting all connections" 10 log_has $W/wgft-lifecycle-c5a-tcpflood.log "tcp: attempted="
       must_wait "check5 (agent): tcp held count reaches the whole flow budget" 10 c5a_held_near_budget
-      local held; held=$(ip netns exec home ss -tn state established '( dport = :25596 )' | grep -c ':25596')
+      local held; held=$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25596 )' | grep -c ':25596')
       local rss; rss=$(rss_mib "$apid")
       wait "$flood_pid"
-      echo "   $(cat /tmp/wgft-lifecycle-c5a-tcpflood.log)"
+      echo "   $(cat $W/wgft-lifecycle-c5a-tcpflood.log)"
       echo "   tcp connections actually held (ss on the agent's own listener, not client-side connect success): $held"
       echo "   agent RSS while flooded past its flow budget: ${rss:-unknown} MiB (soft limit $SOFT_LIMIT_MIB MiB, margin $MARGIN_MIB MiB)"
       # the RSS bound only means something if the budget was actually filled: one rule holding
@@ -1271,11 +1285,11 @@ check5_agent_memory() {
         "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le "$C5_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "agent RSS stays under the soft limit plus margin while flooded past its flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((SOFT_LIMIT_MIB + MARGIN_MIB))" ] && echo 1 || echo 0)"
-      check "agent logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' /tmp/wgft-lifecycle-c5a-agent.log)"
+      check "agent logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' $W/wgft-lifecycle-c5a-agent.log)"
     fi
   fi
 
-  for i in $(seq 10 30); do ip netns exec client ip addr del "198.51.100.$i/24" dev eth0 2>/dev/null; done
+  for i in $(seq 10 30); do ip netns exec "$CLIENT_NS" ip addr del "198.51.100.$i/24" dev eth0 2>/dev/null; done
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"
 }
@@ -1302,16 +1316,19 @@ check5() {
 # (256 UDP, 128 TCP) toward these larger totals.
 #
 # EXCLUSIVE-HEAVY: like check 5 itself, 5b/5c/5d/5e all flood thousands of connections/datagrams
-# from the client namespace and read RSS and held-connection counts under that load. None of them
-# is safe to run at the same time as another CPU- or memory-bound check (this file's own check 5,
-# each other, or a flood elsewhere in the VM) - a shared CPU would blur the RSS and held-count
-# bounds these checks assert on. They are, however, independent of every check OUTSIDE this file's
-# check 5 family (1-4, 6-9), which do not flood, so those remain parallel-safe against these.
+# from the client namespace under load. The ones that read RSS (5, 5b and 5e) must not run at the
+# same time as another CPU- or memory-bound check (each other, or a flood elsewhere in the VM): a
+# shared CPU would blur the RSS bound they assert on. 5c and 5d were measured rather than assumed:
+# what they assert on is an admission decision (each rule's held count against its reserve), not a
+# rate or an RSS, and 20 repetitions of each inside a pool of eight sandboxes - including the two of
+# them overlapping each other - passed every time with identical held counts, so they may share the
+# VM. Every check in this family is independent of the checks OUTSIDE it (1-4, 6-9), which do not
+# flood.
 #
 # check 5b through 5e (this whole block) are written for the lab's upcoming move to several
-# sandboxes per VM: every file they write lives under $WORKDIR (default /tmp, override with
-# WGFT_LIFECYCLE_WORKDIR so two sandboxes in one VM never share a path), every network namespace
-# is named through a variable (NS_VPS/NS_CLIENT/NS_HOME/NS_LAN, default vps/client/home/lan)
+# sandboxes per VM: every file they write lives under $W (lab/sandbox.sh sets it from
+# WGFT_LAB_WORKDIR, default /tmp, so two sandboxes in one VM never share a path), every network
+# namespace is named through a variable ($VPS_NS, $CLIENT_NS, $HOME_NS, $LAN_NS)
 # instead of literally, and every process one of these checks starts directly (a kernel-mode
 # server, the agent, the lan echo target, each flood.py) is killed by the pid this script captured
 # for it with plain $!, never by pkill/pgrep across the whole VM. That capture only works because
@@ -1326,12 +1343,6 @@ check5() {
 # only for the userspace server's runuser hop. This block avoids find_wgft_pid entirely by not
 # routing any backgrounded launch through a function; existing checks 1-9 are not touched.
 # ---------------------------------------------------------------------------------------------
-WORKDIR=${WGFT_LIFECYCLE_WORKDIR:-/tmp}
-NS_VPS=${NS_VPS:-vps}
-NS_CLIENT=${NS_CLIENT:-client}
-NS_HOME=${NS_HOME:-home}
-NS_LAN=${NS_LAN:-lan}
-
 DEFAULT_UDP_BUDGET=8192
 DEFAULT_TCP_BUDGET=2048
 # design 7: 32 MiB + 12 KiB * 8192 + 44 KiB * 2048 = 216 MiB.
@@ -1343,24 +1354,24 @@ DEFAULT_MARGIN_MIB=100
 
 # addrs_add <first> <last>: adds 198.51.100.<first> through 198.51.100.<last> to the client's eth0
 # and prints them as a comma-separated list (flood.py's <src-ips-csv> form). addrs_del undoes it.
-# Not backgrounded, so going through the NS_CLIENT variable directly (rather than client(), which
+# Not backgrounded, so going through the CLIENT_NS variable directly (rather than client(), which
 # is a function - see this block's header comment) loses nothing.
 addrs_add() {
   local i out=""
   for i in $(seq "$1" "$2"); do
-    ip netns exec "$NS_CLIENT" ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null
+    ip netns exec "$CLIENT_NS" ip addr add "198.51.100.$i/24" dev eth0 2>/dev/null
     out+="198.51.100.$i,"
   done
   echo "${out%,}"
 }
 addrs_del() {
   local i
-  for i in $(seq "$1" "$2"); do ip netns exec "$NS_CLIENT" ip addr del "198.51.100.$i/24" dev eth0 2>/dev/null; done
+  for i in $(seq "$1" "$2"); do ip netns exec "$CLIENT_NS" ip addr del "198.51.100.$i/24" dev eth0 2>/dev/null; done
 }
 
 check5b_server_default_memory() {
   echo "-- the userspace server's own relay, default (unhalved) budget"
-  local DATA="$WORKDIR/wgft-lifecycle-c5bs" ADATA="$WORKDIR/wgft-lifecycle-c5bs-agent"
+  local DATA="$W/wgft-lifecycle-c5bs" ADATA="$W/wgft-lifecycle-c5bs-agent"
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
   local addrs; addrs=$(addrs_add 10 51)
@@ -1370,15 +1381,15 @@ check5b_server_default_memory() {
   # forks; its own pid is not capturable with $! (see this block's header comment), so this one
   # process is found with the existing find_wgft_pid (pgrep-based, the same technique check 5
   # itself uses for the same reason).
-  start_server "$DATA" "$WORKDIR/wgft-lifecycle-c5bs-server.log"
+  start_server "$DATA" "$W/wgft-lifecycle-c5bs-server.log"
   if ! wait_admin; then
     echo "FAIL  check5b (server) setup: admin api never came up"; fail=1
     local spid; spid=$(find_wgft_pid 'server run'); [ -n "$spid" ] && kill "$spid" 2>/dev/null
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec "$NS_HOME" setsid nohup wgft agent run --data-dir "$ADATA" > "$WORKDIR/wgft-lifecycle-c5bs-agent.log" 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$W/wgft-lifecycle-c5bs-agent.log" 2>&1 < /dev/null &
     agent_pid=$!
-    ip netns exec "$NS_LAN" setsid nohup echo -bind 192.168.50.3 -tcp 25597 -udp 19162 > "$WORKDIR/wgft-lifecycle-c5bs-echo.log" 2>&1 < /dev/null &
+    ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25597 -udp 19162 > "$W/wgft-lifecycle-c5bs-echo.log" 2>&1 < /dev/null &
     echo_pid=$!
     if ! wait_agent home; then echo "FAIL  check5b (server) setup: agent never registered"; fail=1
     else
@@ -1388,17 +1399,17 @@ check5b_server_default_memory() {
       wait_until 10 udp_probe_ok 27050
       local spid; spid=$(find_wgft_pid 'server run')
 
-      local udp_out; udp_out=$(ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" udp 198.51.100.1 27050 "$addrs" 260)
+      local udp_out; udp_out=$(ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" udp 198.51.100.1 27050 "$addrs" 260)
       echo "   $udp_out"
-      ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 39998 "$addrs" 60 5 > "$WORKDIR/wgft-lifecycle-c5bs-tcpflood.log" 2>&1 &
+      ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 39998 "$addrs" 60 5 > "$W/wgft-lifecycle-c5bs-tcpflood.log" 2>&1 &
       flood_pid=$!
       c5bs_held_near_budget() { [ "$(vps ss -tn state established '( sport = :39998 )' | grep -c ':39998')" -ge $((DEFAULT_TCP_BUDGET - 48)) ]; }
-      must_wait "check5b (server): tcp flood finished attempting all connections" 15 log_has "$WORKDIR/wgft-lifecycle-c5bs-tcpflood.log" "tcp: attempted="
+      must_wait "check5b (server): tcp flood finished attempting all connections" 15 log_has "$W/wgft-lifecycle-c5bs-tcpflood.log" "tcp: attempted="
       must_wait "check5b (server): tcp held count reaches the default flow budget" 15 c5bs_held_near_budget
       local held; held=$(vps ss -tn state established '( sport = :39998 )' | grep -c ':39998')
       local rss; rss=$(rss_mib "$spid")
       wait "$flood_pid" 2>/dev/null; flood_pid=""
-      echo "   $(cat "$WORKDIR/wgft-lifecycle-c5bs-tcpflood.log")"
+      echo "   $(cat "$W/wgft-lifecycle-c5bs-tcpflood.log")"
       echo "   tcp connections actually held: $held"
       echo "   server RSS while flooded past the default flow budget: ${rss:-unknown} MiB (soft limit $DEFAULT_SOFT_LIMIT_MIB MiB, margin $DEFAULT_MARGIN_MIB MiB)"
       okcheck "server: one rule's tcp flood fills the default flow budget (held $held of $DEFAULT_TCP_BUDGET)" \
@@ -1408,7 +1419,7 @@ check5b_server_default_memory() {
         "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le "$DEFAULT_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "server RSS stays under the default soft limit plus margin while flooded past the default flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((DEFAULT_SOFT_LIMIT_MIB + DEFAULT_MARGIN_MIB))" ] && echo 1 || echo 0)"
-      check "server logs its derived memory soft limit at start" "memory soft limit: $DEFAULT_SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' "$WORKDIR/wgft-lifecycle-c5bs-server.log")"
+      check "server logs its derived memory soft limit at start" "memory soft limit: $DEFAULT_SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' "$W/wgft-lifecycle-c5bs-server.log")"
       [ -n "$spid" ] && kill "$spid" 2>/dev/null && must_wait "check5b (server): server pid $spid exited" 5 proc_gone "$spid"
     fi
   fi
@@ -1423,22 +1434,22 @@ check5b_server_default_memory() {
 
 check5b_agent_default_memory() {
   echo "-- the agent (via the faster kernel-mode forwarding path), default (unhalved) budget"
-  local DATA="$WORKDIR/wgft-lifecycle-c5ba" ADATA="$WORKDIR/wgft-lifecycle-c5ba-agent"
+  local DATA="$W/wgft-lifecycle-c5ba" ADATA="$W/wgft-lifecycle-c5ba-agent"
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
   local addrs; addrs=$(addrs_add 10 51)
   local server_pid="" agent_pid="" echo_pid="" flood_pid=""
 
-  ip netns exec "$NS_VPS" setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-    > "$WORKDIR/wgft-lifecycle-c5ba-server.log" 2>&1 < /dev/null &
+  ip netns exec "$VPS_NS" setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+    > "$W/wgft-lifecycle-c5ba-server.log" 2>&1 < /dev/null &
   server_pid=$!
   if ! wait_admin; then
     echo "FAIL  check5b (agent) setup: admin api never came up"; fail=1
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec "$NS_HOME" setsid nohup wgft agent run --data-dir "$ADATA" > "$WORKDIR/wgft-lifecycle-c5ba-agent.log" 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$W/wgft-lifecycle-c5ba-agent.log" 2>&1 < /dev/null &
     agent_pid=$!
-    ip netns exec "$NS_LAN" setsid nohup echo -bind 192.168.50.3 -tcp 25598 -udp 19163 > "$WORKDIR/wgft-lifecycle-c5ba-echo.log" 2>&1 < /dev/null &
+    ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25598 -udp 19163 > "$W/wgft-lifecycle-c5ba-echo.log" 2>&1 < /dev/null &
     echo_pid=$!
     if ! wait_agent home; then echo "FAIL  check5b (agent) setup: agent never registered"; fail=1
     else
@@ -1447,17 +1458,17 @@ check5b_agent_default_memory() {
       wait_until 10 tcp_probe_ok 39999
       wait_until 10 udp_probe_ok 27051
 
-      local udp_out; udp_out=$(ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" udp 198.51.100.1 27051 "$addrs" 260)
+      local udp_out; udp_out=$(ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" udp 198.51.100.1 27051 "$addrs" 260)
       echo "   $udp_out"
-      ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 39999 "$addrs" 60 5 > "$WORKDIR/wgft-lifecycle-c5ba-tcpflood.log" 2>&1 &
+      ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 39999 "$addrs" 60 5 > "$W/wgft-lifecycle-c5ba-tcpflood.log" 2>&1 &
       flood_pid=$!
-      c5ba_held_near_budget() { [ "$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25598 )' | grep -c ':25598')" -ge $((DEFAULT_TCP_BUDGET - 48)) ]; }
-      must_wait "check5b (agent): tcp flood finished attempting all connections" 15 log_has "$WORKDIR/wgft-lifecycle-c5ba-tcpflood.log" "tcp: attempted="
+      c5ba_held_near_budget() { [ "$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25598 )' | grep -c ':25598')" -ge $((DEFAULT_TCP_BUDGET - 48)) ]; }
+      must_wait "check5b (agent): tcp flood finished attempting all connections" 15 log_has "$W/wgft-lifecycle-c5ba-tcpflood.log" "tcp: attempted="
       must_wait "check5b (agent): tcp held count reaches the default flow budget" 15 c5ba_held_near_budget
-      local held; held=$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25598 )' | grep -c ':25598')
+      local held; held=$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25598 )' | grep -c ':25598')
       local rss; rss=$(rss_mib "$agent_pid")
       wait "$flood_pid" 2>/dev/null; flood_pid=""
-      echo "   $(cat "$WORKDIR/wgft-lifecycle-c5ba-tcpflood.log")"
+      echo "   $(cat "$W/wgft-lifecycle-c5ba-tcpflood.log")"
       echo "   tcp connections actually held: $held"
       echo "   agent RSS while flooded past the default flow budget: ${rss:-unknown} MiB (soft limit $DEFAULT_SOFT_LIMIT_MIB MiB, margin $DEFAULT_MARGIN_MIB MiB)"
       okcheck "agent: one rule's tcp flood fills the default flow budget (held $held of $DEFAULT_TCP_BUDGET)" \
@@ -1467,7 +1478,7 @@ check5b_agent_default_memory() {
         "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le "$DEFAULT_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "agent RSS stays under the default soft limit plus margin while flooded past the default flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((DEFAULT_SOFT_LIMIT_MIB + DEFAULT_MARGIN_MIB))" ] && echo 1 || echo 0)"
-      check "agent logs its derived memory soft limit at start" "memory soft limit: $DEFAULT_SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' "$WORKDIR/wgft-lifecycle-c5ba-agent.log")"
+      check "agent logs its derived memory soft limit at start" "memory soft limit: $DEFAULT_SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' "$W/wgft-lifecycle-c5ba-agent.log")"
     fi
   fi
 
@@ -1518,8 +1529,8 @@ check5b() {
 resource_isolation_case() {
   local tag=$1 nrules=$2 q=$3
   local c=512  # ceil(1024/2), independent of N (check 5's halved TCP budget, C5_FLOW_FLAGS)
-  local DATA="$WORKDIR/wgft-lifecycle-$tag" ADATA="$WORKDIR/wgft-lifecycle-$tag-agent"
-  local LOG="$WORKDIR/wgft-lifecycle-$tag-server.log"
+  local DATA="$W/wgft-lifecycle-$tag" ADATA="$W/wgft-lifecycle-$tag-agent"
+  local LOG="$W/wgft-lifecycle-$tag-server.log"
   local agent_pid="" echo_pid=""
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
@@ -1534,9 +1545,9 @@ resource_isolation_case() {
     return
   fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$NS_HOME" setsid nohup wgft agent run --data-dir "$ADATA" "${ADATA_EXTRA_FLAGS[@]}" > "$WORKDIR/wgft-lifecycle-$tag-agent.log" 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" "${ADATA_EXTRA_FLAGS[@]}" > "$W/wgft-lifecycle-$tag-agent.log" 2>&1 < /dev/null &
   agent_pid=$!
-  ip netns exec "$NS_LAN" setsid nohup echo -bind 192.168.50.3 -tcp 25599 > "$WORKDIR/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25599 > "$W/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
   echo_pid=$!
   if ! wait_agent home; then
     echo "FAIL  $tag setup: agent never registered"; fail=1; addrs_del 10 30
@@ -1555,8 +1566,8 @@ resource_isolation_case() {
   done
   for port in "${ports[@]}"; do wait_until 10 tcp_probe_ok "$port"; done
 
-  ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 "${ports[0]}" "$addrs" 40 25 \
-    > "$WORKDIR/wgft-lifecycle-$tag-floodA.log" 2>&1 &
+  ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 "${ports[0]}" "$addrs" 40 25 \
+    > "$W/wgft-lifecycle-$tag-floodA.log" 2>&1 &
   local pidA=$!
   # Wait for the flood to finish ATTEMPTING every connection before reading ss: accept() makes a
   # socket ESTABLISHED at the OS level before this relay's own goroutine has run the admission
@@ -1564,7 +1575,7 @@ resource_isolation_case() {
   # (observed in the lab: held briefly read as the full attempted count, not the cap) that has
   # nothing to do with whether the cap actually holds once the relay catches up. Same fix as check
   # 5's own must_wait pair (finish attempting, only then check the held count).
-  must_wait "$tag: rule A's flood finished attempting all connections" 10 log_has "$WORKDIR/wgft-lifecycle-$tag-floodA.log" "tcp: attempted="
+  must_wait "$tag: rule A's flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-floodA.log" "tcp: attempted="
   c5_iso_a_held() { [ "$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")" -ge $((c - 24)) ]; }
   must_wait "$tag: rule A's flood reaches its per-rule cap C=$c" 10 c5_iso_a_held
   local heldA; heldA=$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")
@@ -1572,10 +1583,10 @@ resource_isolation_case() {
   local -a otherPids=() otherHeld=()
   for i in $(seq 1 $((nrules - 1))); do
     local p=${ports[$i]}
-    ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 "$p" "$addrs" 40 10 \
-      > "$WORKDIR/wgft-lifecycle-$tag-flood$i.log" 2>&1 &
+    ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 "$p" "$addrs" 40 10 \
+      > "$W/wgft-lifecycle-$tag-flood$i.log" 2>&1 &
     otherPids+=($!)
-    must_wait "$tag: rule $((i + 1))'s flood finished attempting all connections" 10 log_has "$WORKDIR/wgft-lifecycle-$tag-flood$i.log" "tcp: attempted="
+    must_wait "$tag: rule $((i + 1))'s flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-flood$i.log" "tcp: attempted="
     c5_iso_other_held() { [ "$(vps ss -tn state established "( sport = :$p )" | grep -c ":$p")" -ge $((q - 24)) ]; }
     must_wait "$tag: rule $((i + 1)) (${ids[$i]}) opens new connections up to its reserve q=$q while A is flooded" 10 c5_iso_other_held
     # captured HERE, before any wait below closes these connections back down
@@ -1660,14 +1671,14 @@ check5d() {
 # ---------------------------------------------------------------------------------------------
 agent_isolation_case() {
   local tag=$1 tcp_total=$2 c=$3 q=$4
-  local DATA="$WORKDIR/wgft-lifecycle-$tag" ADATA="$WORKDIR/wgft-lifecycle-$tag-agent"
+  local DATA="$W/wgft-lifecycle-$tag" ADATA="$W/wgft-lifecycle-$tag-agent"
   local server_pid="" agent_pid="" echo_pid=""
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
   local addrs; addrs=$(addrs_add 10 30)
 
-  ip netns exec "$NS_VPS" setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-    > "$WORKDIR/wgft-lifecycle-$tag-server.log" 2>&1 < /dev/null &
+  ip netns exec "$VPS_NS" setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+    > "$W/wgft-lifecycle-$tag-server.log" 2>&1 < /dev/null &
   server_pid=$!
   if ! wait_admin; then
     echo "FAIL  $tag setup: admin api never came up"; fail=1; addrs_del 10 30
@@ -1676,11 +1687,11 @@ agent_isolation_case() {
     return
   fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  local LOG="$WORKDIR/wgft-lifecycle-$tag-agent.log"
-  WGFT_JOIN="$join" ip netns exec "$NS_HOME" setsid nohup wgft agent run --data-dir "$ADATA" --max-tcp-flows "$tcp_total" \
+  local LOG="$W/wgft-lifecycle-$tag-agent.log"
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" --max-tcp-flows "$tcp_total" \
     > "$LOG" 2>&1 < /dev/null &
   agent_pid=$!
-  ip netns exec "$NS_LAN" setsid nohup echo -bind 192.168.50.3 -tcp 25599,25600 > "$WORKDIR/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25599,25600 > "$W/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
   echo_pid=$!
   if ! wait_agent home; then
     echo "FAIL  $tag setup: agent never registered"; fail=1; addrs_del 10 30
@@ -1695,25 +1706,25 @@ agent_isolation_case() {
   wait_until 10 tcp_probe_ok 39910
   wait_until 10 tcp_probe_ok 39911
 
-  ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 39910 "$addrs" 40 25 \
-    > "$WORKDIR/wgft-lifecycle-$tag-floodA.log" 2>&1 &
+  ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 39910 "$addrs" 40 25 \
+    > "$W/wgft-lifecycle-$tag-floodA.log" 2>&1 &
   local pidA=$!
   # Wait for the flood to finish attempting before reading ss: see resource_isolation_case's
   # identical comment (accept() marks a socket ESTABLISHED before this relay's own admission
   # check can close an over-cap one, so sampling mid-burst can catch a transient overshoot).
-  must_wait "$tag: rule A's flood finished attempting all connections" 10 log_has "$WORKDIR/wgft-lifecycle-$tag-floodA.log" "tcp: attempted="
-  a_held() { [ "$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25599 )' | grep -c ':25599')" -ge $((c - 24)) ]; }
+  must_wait "$tag: rule A's flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-floodA.log" "tcp: attempted="
+  a_held() { [ "$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25599 )' | grep -c ':25599')" -ge $((c - 24)) ]; }
   must_wait "$tag: rule A's flood reaches its per-rule cap C=$c" 10 a_held
-  local heldA; heldA=$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25599 )' | grep -c ':25599')
+  local heldA; heldA=$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25599 )' | grep -c ':25599')
 
-  ip netns exec "$NS_CLIENT" python3 "$PY/flood.py" tcp 198.51.100.1 39911 "$addrs" 40 10 \
-    > "$WORKDIR/wgft-lifecycle-$tag-floodB.log" 2>&1 &
+  ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 39911 "$addrs" 40 10 \
+    > "$W/wgft-lifecycle-$tag-floodB.log" 2>&1 &
   local pidB=$!
-  must_wait "$tag: rule B's flood finished attempting all connections" 10 log_has "$WORKDIR/wgft-lifecycle-$tag-floodB.log" "tcp: attempted="
-  b_held() { [ "$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25600 )' | grep -c ':25600')" -ge $((q - 24)) ]; }
+  must_wait "$tag: rule B's flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-floodB.log" "tcp: attempted="
+  b_held() { [ "$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25600 )' | grep -c ':25600')" -ge $((q - 24)) ]; }
   must_wait "$tag: rule B opens new connections up to its reserve q=$q while A is flooded" 10 b_held
-  local heldB; heldB=$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25600 )' | grep -c ':25600')
-  local heldA_after; heldA_after=$(ip netns exec "$NS_HOME" ss -tn state established '( dport = :25599 )' | grep -c ':25599')
+  local heldB; heldB=$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25600 )' | grep -c ':25600')
+  local heldA_after; heldA_after=$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25599 )' | grep -c ':25599')
   wait "$pidA" "$pidB" 2>/dev/null
 
   echo "   $tag (WGFT_MAX_TCP_FLOWS=$tcp_total): rule A held $heldA before / $heldA_after after, rule B held $heldB (C=$c q=$q)"
@@ -1759,17 +1770,17 @@ check5e() {
 # ---------------------------------------------------------------------------------------------
 check6() {
   echo "== $mode: check 6: rule-local bind failures are fail-closed, not backend-wide"
-  local DATA=/tmp/wgft-lifecycle-c6 ADATA=/tmp/wgft-lifecycle-c6-agent
+  local DATA=$W/wgft-lifecycle-c6 ADATA=$W/wgft-lifecycle-c6-agent
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c6-server.log
+  start_server "$DATA" $W/wgft-lifecycle-c6-server.log
   if ! wait_admin; then echo "FAIL  check6 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c6-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c6-agent.log 2>&1 < /dev/null &
   disown
-  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25620,25621,25622,25623,25624 \
-    > /tmp/wgft-lifecycle-c6-echo.log 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25620,25621,25622,25623,25624 \
+    > $W/wgft-lifecycle-c6-echo.log 2>&1 < /dev/null &
   disown
   if ! wait_agent home; then echo "FAIL  check6 setup: agent never registered"; fail=1; return; fi
 
@@ -1780,11 +1791,11 @@ check6() {
   # time (each sub-scenario frees its own before the next squats a different one).
   squat_port() {
     vps setsid nohup socat "TCP-LISTEN:$1,reuseaddr,fork" EXEC:/bin/cat \
-      > "/tmp/wgft-lifecycle-c6-squat-$1.log" 2>&1 < /dev/null &
+      > "$W/wgft-lifecycle-c6-squat-$1.log" 2>&1 < /dev/null &
     disown
     wait_until 3 port_listening "$1"
   }
-  unsquat_port() { pkill -x socat; wait_until 3 port_free "$1"; }
+  unsquat_port() { sandbox_kill_named socat; wait_until 3 port_free "$1"; }
   src_flow_for_port() { vps nft list table inet wgft 2>/dev/null | grep -c "dport $1 .*src_flow"; }
   tcp_refused() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 10 - TCP:198.51.100.1:$1" 2>&1)" == *"Connection refused"* ]]; }
 
@@ -1822,15 +1833,15 @@ check6() {
     # already-established session and a second one from a different, never-denied source break
     # within well under a second of the retarget, before any source_deny is even added. This check
     # asserts that expected, port-change-driven cut so it stays a reliable regression oracle.
-    ip netns exec client ip addr add 198.51.100.9/24 dev eth0 2>/dev/null
+    ip netns exec "$CLIENT_NS" ip addr add 198.51.100.9/24 dev eth0 2>/dev/null
     local r; r=$(vps wgft rule add --agent home --tcp 8472 --to 192.168.50.3:25622 --proxy --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
     wait_until 10 tcp_probe_ok 8472
     local rounds=20 interval=0.4
-    ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 8472 "$rounds" "$interval" 198.51.100.2 \
-      > /tmp/wgft-lifecycle-c6-s1.log 2>&1 < /dev/null &
+    ip netns exec "$CLIENT_NS" python3 "$PY/tcpprobe.py" 198.51.100.1 8472 "$rounds" "$interval" 198.51.100.2 \
+      > $W/wgft-lifecycle-c6-s1.log 2>&1 < /dev/null &
     local s1_pid=$!
-    ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 8472 "$rounds" "$interval" 198.51.100.9 \
-      > /tmp/wgft-lifecycle-c6-s2.log 2>&1 < /dev/null &
+    ip netns exec "$CLIENT_NS" python3 "$PY/tcpprobe.py" 198.51.100.1 8472 "$rounds" "$interval" 198.51.100.9 \
+      > $W/wgft-lifecycle-c6-s2.log 2>&1 < /dev/null &
     local s2_pid=$!
     # deliberate: give both sessions a couple of rounds so they are actually established (and past
     # their first send) before the retarget below fail-closes the rule mid-flow.
@@ -1843,7 +1854,7 @@ check6() {
     okcheck "a new connection to the old port is refused (StopAccepting closed the listener)" \
       "$(tcp_refused 8472 && echo 1 || echo 0)"
     wait "$s1_pid" "$s2_pid" 2>/dev/null
-    local s1log s2log; s1log=$(cat /tmp/wgft-lifecycle-c6-s1.log); s2log=$(cat /tmp/wgft-lifecycle-c6-s2.log)
+    local s1log s2log; s1log=$(cat $W/wgft-lifecycle-c6-s1.log); s2log=$(cat $W/wgft-lifecycle-c6-s2.log)
     if [[ "$s1log" == *"got=$((rounds * 10));"* ]] || [[ "$s2log" == *"got=$((rounds * 10));"* ]]; then
       echo "FAIL  an established session survived the listen_port change (expected the agent's own port-based reconciliation, design 7, to close it)"; fail=1
     else
@@ -1851,7 +1862,7 @@ check6() {
     fi
     unsquat_port 8473
     vps wgft rule rm "$r" --admin "$ADMIN" >/dev/null
-    ip netns exec client ip addr del 198.51.100.9/24 dev eth0 2>/dev/null
+    ip netns exec "$CLIENT_NS" ip addr del 198.51.100.9/24 dev eth0 2>/dev/null
 
     echo "-- c. a kernel Transparent rule moved to a different port as a fail-closed Relay: not_active, but the old port change closes its established session (same design-7 port reconciliation as b)"
     # NOTE: this retargets both listen_port and vps_mode at once (a Transparent rule's port is
@@ -1866,8 +1877,8 @@ check6() {
     local t; t=$(vps wgft rule add --agent home --tcp 39998 --to 192.168.50.3:25623 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
     wait_until 10 tcp_probe_ok 39998
     local rounds2=16 interval2=0.4
-    ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 39998 "$rounds2" "$interval2" \
-      > /tmp/wgft-lifecycle-c6-c.log 2>&1 < /dev/null &
+    ip netns exec "$CLIENT_NS" python3 "$PY/tcpprobe.py" 198.51.100.1 39998 "$rounds2" "$interval2" \
+      > $W/wgft-lifecycle-c6-c.log 2>&1 < /dev/null &
     local c_pid=$!
     wait_until 5 tcp_flow_up 39998
     squat_port 8474
@@ -1875,7 +1886,7 @@ check6() {
     must_wait "check6c: the retargeted rule is reported not_active" 5 rule_state_is "$t" apply_state not_active
     check "its reason names the bind failure" "bind failed" "$(rule_state_field "$t" reason)"
     wait "$c_pid" 2>/dev/null
-    local clog; clog=$(cat /tmp/wgft-lifecycle-c6-c.log)
+    local clog; clog=$(cat $W/wgft-lifecycle-c6-c.log)
     if [[ "$clog" == *"got=$((rounds2 * 10));"* ]]; then
       echo "FAIL  the established DNAT session survived the port change (expected the agent's own port-based reconciliation, design 7, to close it)"; fail=1
     else
@@ -1907,8 +1918,8 @@ check6() {
     }
     # 50 rounds at 0.4s (20s) outlasts the retarget, its checks, the 3s hold and the source_deny.
     local rounds3=50 interval3=0.4
-    ip netns exec client python3 "$PY/tcpprobe.py" 198.51.100.1 39996 "$rounds3" "$interval3" \
-      > /tmp/wgft-lifecycle-c6-h.log 2>&1 < /dev/null &
+    ip netns exec "$CLIENT_NS" python3 "$PY/tcpprobe.py" 198.51.100.1 39996 "$rounds3" "$interval3" \
+      > $W/wgft-lifecycle-c6-h.log 2>&1 < /dev/null &
     local h_pid=$!
     wait_until 5 tcp_flow_up 39996
     local h_before_sport; h_before_sport=$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | grep -oE 'sport=[0-9]+' | head -1)
@@ -1920,7 +1931,7 @@ check6() {
     absent "a new connection gets no reply from wgft's target while the rule is not_active (no dispatch is published for it)" \
       "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 2 -T 10 - TCP:198.51.100.1:39996' 2>&1)"
     okcheck "the established session is still running (not yet broken) right after the retarget" \
-      "$([ ! -s /tmp/wgft-lifecycle-c6-h.log ] && echo 1 || echo 0)"
+      "$([ ! -s $W/wgft-lifecycle-c6-h.log ] && echo 1 || echo 0)"
     okcheck "its conntrack entry is still ESTABLISHED" \
       "$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep -q ESTABLISHED && echo 1 || echo 0)"
     local h_after_sport; h_after_sport=$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | grep -oE 'sport=[0-9]+' | head -1)
@@ -1934,7 +1945,7 @@ check6() {
       "$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | grep -q -- "$h_before_sport " && echo 1 || echo 0)"
     okcheck "after the hold, data is still flowing: the entry's packet counter grew ($pk_before -> $pk_after)" \
       "$([ -n "$pk_before" ] && [ -n "$pk_after" ] && [ "$pk_after" -gt "$pk_before" ] && echo 1 || echo 0)"
-    okcheck "after the hold, the client session has not ended" "$([ ! -s /tmp/wgft-lifecycle-c6-h.log ] && echo 1 || echo 0)"
+    okcheck "after the hold, the client session has not ended" "$([ ! -s $W/wgft-lifecycle-c6-h.log ] && echo 1 || echo 0)"
     echo "-- adding a source_deny that covers the session's source cuts it (Retire); the source was allowed by both the old and the new policy until now"
     add_source_deny "$h" 198.51.100.2/32
     # must_wait: nothing downstream re-checks the conntrack entry itself before the final log
@@ -1942,7 +1953,7 @@ check6() {
     # timeout-bound) view of the break.
     must_wait "check6h: the established session's conntrack entry is removed once denied" 10 tcp_flow_gone 39996
     wait "$h_pid" 2>/dev/null
-    local hlog; hlog=$(cat /tmp/wgft-lifecycle-c6-h.log)
+    local hlog; hlog=$(cat $W/wgft-lifecycle-c6-h.log)
     if [[ "$hlog" == *"got=$((rounds3 * 10));"* ]]; then
       echo "FAIL  the session should have been cut once the source_deny covered it, not run to completion: $hlog"; fail=1
     else
@@ -2000,42 +2011,42 @@ check7() {
     skip "backend-wide nftables swap failures (the foreign-table-owner technique this exercises only applies to the kernel backend's nft transaction)"
     return
   fi
-  local DATA=/tmp/wgft-lifecycle-c7 ADATA=/tmp/wgft-lifecycle-c7-agent
+  local DATA=$W/wgft-lifecycle-c7 ADATA=$W/wgft-lifecycle-c7-agent
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c7-server.log
+  start_server "$DATA" $W/wgft-lifecycle-c7-server.log
   if ! wait_admin; then echo "FAIL  check7 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c7-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c7-agent.log 2>&1 < /dev/null &
   disown
-  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25640 -udp 19190 \
-    > /tmp/wgft-lifecycle-c7-echo.log 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25640 -udp 19190 \
+    > $W/wgft-lifecycle-c7-echo.log 2>&1 < /dev/null &
   disown
   if ! wait_agent home; then echo "FAIL  check7 setup: agent never registered"; fail=1; return; fi
 
   # hold_table/release_table: the same foreign-owner technique check3b uses (nft -i fed through a
   # fifo kept open, so it never sees EOF and keeps holding the table), factored out here since
   # check7 uses it twice (scenarios d and e).
-  nft_i_ready() { vps pgrep -x nft >/dev/null 2>&1; }
+  nft_i_ready() { sandbox_any_named nft; }
   foreign_owner_table_present() { vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner'; }
   # The replacement is one nftables transaction, for the same reason as in check3b.
   hold_table() {
-    rm -f /tmp/wgft-lifecycle-c7-fifo /tmp/wgft-lifecycle-c7-owner.log
-    mkfifo /tmp/wgft-lifecycle-c7-fifo
-    vps bash -c 'exec 3<>/tmp/wgft-lifecycle-c7-fifo; nft -i <&3 >/tmp/wgft-lifecycle-c7-owner.log 2>&1 &'
+    rm -f $W/wgft-lifecycle-c7-fifo $W/wgft-lifecycle-c7-owner.log
+    mkfifo $W/wgft-lifecycle-c7-fifo
+    vps bash -c "exec 3<>$W/wgft-lifecycle-c7-fifo; nft -i <&3 >$W/wgft-lifecycle-c7-owner.log 2>&1 &"
     # must_wait, and bail out here rather than falling through: the next line's write to the fifo
     # blocks until some reader has it open, so a nft -i that never actually started would hang the
     # whole script instead of just failing this check (same reasoning as check3b's own hold).
     must_wait "check7: nft -i reading the fifo" 3 nft_i_ready || return 1
-    echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > /tmp/wgft-lifecycle-c7-fifo
+    echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > $W/wgft-lifecycle-c7-fifo
     must_wait "check7: a foreign owner table exists" 5 foreign_owner_table_present
   }
   release_table() {
-    local owner_pid; owner_pid=$(vps pgrep -x nft | head -1)
+    local owner_pid; owner_pid=$(sandbox_pids_named nft | head -1)
     [ -n "$owner_pid" ] && kill "$owner_pid" 2>/dev/null
     must_wait "check7: the foreign nft -i (owner pid $owner_pid) exited" 5 proc_gone "$owner_pid"
-    rm -f /tmp/wgft-lifecycle-c7-fifo /tmp/wgft-lifecycle-c7-owner.log
+    rm -f $W/wgft-lifecycle-c7-fifo $W/wgft-lifecycle-c7-owner.log
   }
   apply_error_set() { [ -n "$(apply_top_field apply_error)" ]; }
   all_active() { rule_state_is "$z" apply_state active && rule_state_is "$x" apply_state active && rule_state_is "$y" apply_state active; }
@@ -2055,7 +2066,7 @@ check7() {
   # bare wait_until: re-checked by the check() right after (same field).
   wait_until 5 apply_error_set
   check "apply_error reports the failed swap" "operation not permitted" "$(apply_top_field apply_error)"
-  check "the swap failure is logged" "failed to apply nftables" "$(tail -5 /tmp/wgft-lifecycle-c7-server.log)"
+  check "the swap failure is logged" "failed to apply nftables" "$(tail -5 $W/wgft-lifecycle-c7-server.log)"
   okcheck "desired_generation is now ahead of active_generation" \
     "$([ "$(apply_top_field desired_generation)" != "$(apply_top_field active_generation)" ] && echo 1 || echo 0)"
   okcheck "the retargeted rule x is pending, not silently active or not_active" \
@@ -2091,10 +2102,10 @@ check7() {
   add_source_deny "$w" "$denysrc/32"
   deny_applied() { rule_field "$w" source_deny | grep -q "$denysrc"; }
   must_wait "check7e: source_deny applied" 3 deny_applied
-  ip netns exec client ip addr add "$denysrc/24" dev eth0 2>/dev/null
-  ip netns exec client python3 "$PY/flood.py" udp 198.51.100.1 27050 "$denysrc" "$flood_n" \
-    > /tmp/wgft-lifecycle-c7-flood.log 2>&1
-  echo "   $(cat /tmp/wgft-lifecycle-c7-flood.log)"
+  ip netns exec "$CLIENT_NS" ip addr add "$denysrc/24" dev eth0 2>/dev/null
+  ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" udp 198.51.100.1 27050 "$denysrc" "$flood_n" \
+    > $W/wgft-lifecycle-c7-flood.log 2>&1
+  echo "   $(cat $W/wgft-lifecycle-c7-flood.log)"
   # committing the flood's drops via a normal (non-seized) apply first is deliberate: nftables has
   # no way to hand table inet wgft to a foreign owner without deleting it first (as hold_table
   # does), which would destroy its live counters along with it. Reading them into the store via an
@@ -2136,17 +2147,17 @@ check7() {
 # ---------------------------------------------------------------------------------------------
 check8() {
   echo "== $mode: check 8: a rule-local bind failure recovers via the 30s retry; a no-op retry does not replace the nft table"
-  local DATA=/tmp/wgft-lifecycle-c8 ADATA=/tmp/wgft-lifecycle-c8-agent
+  local DATA=$W/wgft-lifecycle-c8 ADATA=$W/wgft-lifecycle-c8-agent
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
 
-  start_server "$DATA" /tmp/wgft-lifecycle-c8-server.log
+  start_server "$DATA" $W/wgft-lifecycle-c8-server.log
   if ! wait_admin; then echo "FAIL  check8 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c8-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c8-agent.log 2>&1 < /dev/null &
   disown
-  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25650 \
-    > /tmp/wgft-lifecycle-c8-echo.log 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25650 \
+    > $W/wgft-lifecycle-c8-echo.log 2>&1 < /dev/null &
   disown
   if ! wait_agent home; then echo "FAIL  check8 setup: agent never registered"; fail=1; return; fi
 
@@ -2155,11 +2166,11 @@ check8() {
   port_free() { ! port_listening; }
   squat() {
     vps setsid nohup socat "TCP-LISTEN:$port,reuseaddr,fork" EXEC:/bin/cat \
-      > /tmp/wgft-lifecycle-c8-squat.log 2>&1 < /dev/null &
+      > $W/wgft-lifecycle-c8-squat.log 2>&1 < /dev/null &
     disown
     wait_until 3 port_listening
   }
-  unsquat() { pkill -x socat; wait_until 3 port_free; }
+  unsquat() { sandbox_kill_named socat; wait_until 3 port_free; }
 
   squat
   local r
@@ -2174,9 +2185,9 @@ check8() {
   if [ "$mode" = kernel ]; then fail_line="cannot open listener for $port:"; else fail_line="listener tcp/$port:"; fi
   fail_log_count() {
     if [ "$mode" = kernel ]; then
-      grep -c "$fail_line" /tmp/wgft-lifecycle-c8-server.log
+      grep -c "$fail_line" $W/wgft-lifecycle-c8-server.log
     else
-      grep "$fail_line" /tmp/wgft-lifecycle-c8-server.log | grep -vc "opened after"
+      grep "$fail_line" $W/wgft-lifecycle-c8-server.log | grep -vc "opened after"
     fi
   }
   okcheck "the bind failure is logged exactly once so far" "$([ "$(fail_log_count)" = 1 ] && echo 1 || echo 0)"
@@ -2204,9 +2215,9 @@ check8() {
   check "it actually forwards once active" "tcp-echo" "$(client "echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:$port")"
   local recover_line
   if [ "$mode" = kernel ]; then recover_line="$port: listener opened after"; else recover_line="listener tcp/$port: opened after"; fi
-  okcheck "the recovery is logged exactly once" "$([ "$(grep -c "$recover_line" /tmp/wgft-lifecycle-c8-server.log)" = 1 ] && echo 1 || echo 0)"
+  okcheck "the recovery is logged exactly once" "$([ "$(grep -c "$recover_line" $W/wgft-lifecycle-c8-server.log)" = 1 ] && echo 1 || echo 0)"
   okcheck "the rule-level recovery is logged exactly once" \
-    "$([ "$(grep -c "rule $r: no longer failing" /tmp/wgft-lifecycle-c8-server.log)" = 1 ] && echo 1 || echo 0)"
+    "$([ "$(grep -c "rule $r: no longer failing" $W/wgft-lifecycle-c8-server.log)" = 1 ] && echo 1 || echo 0)"
 
   vps wgft rule rm "$r" --admin "$ADMIN" >/dev/null 2>&1
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
@@ -2226,16 +2237,16 @@ check9() {
     skip "restoring table inet wgft (userspace mode keeps its dataplane inside the process, with no kernel state to lose, design 6.3/7a.3)"
     return
   fi
-  local DATA=/tmp/wgft-lifecycle-c9 ADATA=/tmp/wgft-lifecycle-c9-agent LOG=/tmp/wgft-lifecycle-c9-server.log
+  local DATA=$W/wgft-lifecycle-c9 ADATA=$W/wgft-lifecycle-c9-agent LOG=$W/wgft-lifecycle-c9-server.log
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
 
   start_server "$DATA" "$LOG"
   if ! wait_admin; then echo "FAIL  check9 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-lifecycle-c9-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c9-agent.log 2>&1 < /dev/null &
   disown
-  ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp 25660 > /tmp/wgft-lifecycle-c9-echo.log 2>&1 < /dev/null &
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25660 > $W/wgft-lifecycle-c9-echo.log 2>&1 < /dev/null &
   disown
   if ! wait_agent home; then echo "FAIL  check9 setup: agent never registered"; fail=1; return; fi
 
@@ -2279,19 +2290,19 @@ check9() {
 
   echo "-- d. a table held by another process leaves an admin change pending until the holder exits"
   # Same foreign-owner technique as check3b/check7, as one nftables transaction.
-  rm -f /tmp/wgft-lifecycle-c9-fifo /tmp/wgft-lifecycle-c9-owner.log
-  mkfifo /tmp/wgft-lifecycle-c9-fifo
-  vps bash -c 'exec 3<>/tmp/wgft-lifecycle-c9-fifo; nft -i <&3 >/tmp/wgft-lifecycle-c9-owner.log 2>&1 &'
-  nft_i_ready() { vps pgrep -x nft >/dev/null 2>&1; }
+  rm -f $W/wgft-lifecycle-c9-fifo $W/wgft-lifecycle-c9-owner.log
+  mkfifo $W/wgft-lifecycle-c9-fifo
+  vps bash -c "exec 3<>$W/wgft-lifecycle-c9-fifo; nft -i <&3 >$W/wgft-lifecycle-c9-owner.log 2>&1 &"
+  nft_i_ready() { sandbox_any_named nft; }
   if ! must_wait "check9: nft -i reading the fifo" 3 nft_i_ready; then
-    rm -f /tmp/wgft-lifecycle-c9-fifo
+    rm -f $W/wgft-lifecycle-c9-fifo
     kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
     rm -rf "$DATA" "$ADATA"; return
   fi
-  echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > /tmp/wgft-lifecycle-c9-fifo
+  echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > $W/wgft-lifecycle-c9-fifo
   foreign_owner_table_present() { vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner'; }
   must_wait "check9: a foreign owner table exists" 5 foreign_owner_table_present
-  local owner_pid; owner_pid=$(vps pgrep -x nft | head -1)
+  local owner_pid; owner_pid=$(sandbox_pids_named nft | head -1)
   vps wgft rule add --agent home --tcp 39991 --to 192.168.50.3:25660 --admin "$ADMIN" >/dev/null 2>&1
   local r2; r2=$(vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
@@ -2310,7 +2321,7 @@ for r in d['rules']:
   local log_before; log_before=$(wc -l < "$LOG")
   [ -n "$owner_pid" ] && kill "$owner_pid" 2>/dev/null
   must_wait "check9: the foreign nft -i (owner pid $owner_pid) exited" 5 proc_gone "$owner_pid"
-  rm -f /tmp/wgft-lifecycle-c9-fifo /tmp/wgft-lifecycle-c9-owner.log
+  rm -f $W/wgft-lifecycle-c9-fifo $W/wgft-lifecycle-c9-owner.log
   # must_wait: the release sends no notification, so the 30s retry picks it up; 45s is one full
   # interval plus slack. No admin change is made from here on.
   must_wait "check9d: the pending generation is published without an admin change" 45 generations_equal

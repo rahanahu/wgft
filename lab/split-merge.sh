@@ -15,8 +15,9 @@ set -u
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: split-merge.sh kernel|userspace" >&2; exit 2;; esac
 
-DATA=/tmp/wgft-splitmerge-server
-ADATA=/tmp/wgft-splitmerge-agent
+. "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
+DATA=$W/wgft-splitmerge-server
+ADATA=$W/wgft-splitmerge-agent
 ADMIN=127.0.0.1:8686
 fail=0
 check() { # check <label> <expected-substring> <actual>
@@ -31,11 +32,11 @@ strcheck() { # strcheck <label> <want> <got>: exact string equality, for a liste
   if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug or a capture that returned nothing)"; fail=1; return; fi
   if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
 }
-vps() { ip netns exec vps "$@"; }
-client() { ip netns exec client bash -c "$1"; }
-kill_all() { pkill -x wgft; pkill -x echo; sleep 1; }
+vps() { ip netns exec "$VPS_NS" "$@"; }
+client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
+kill_all() { sandbox_kill_named wgft echo; sleep 1; }
 kill_server() {
-  for p in $(pgrep -x wgft); do
+  for p in $(sandbox_wgft_pids); do
     tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' server run' && kill "$p"
   done
   sleep 1
@@ -45,7 +46,7 @@ cleanup() {
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
   vps ip link del wgft0 2>/dev/null
   vps nft delete table inet wgft 2>/dev/null
-  rm -rf "$DATA" "$ADATA" /tmp/wgft-splitmerge-flow.log
+  rm -rf "$DATA" "$ADATA" $W/wgft-splitmerge-flow.log
 }
 
 cleanup
@@ -59,15 +60,15 @@ else
 fi
 echo "== $mode: start server"
 vps setsid nohup $run_server --mode "$mode" --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-  > /tmp/wgft-splitmerge-server.log 2>&1 < /dev/null &
+  > $W/wgft-splitmerge-server.log 2>&1 < /dev/null &
 disown
 sleep 3
-check "server up" "admin api" "$(grep -o 'admin api' /tmp/wgft-splitmerge-server.log | head -1)"
+check "server up" "admin api" "$(grep -o 'admin api' $W/wgft-splitmerge-server.log | head -1)"
 
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-splitmerge-agent.log 2>&1 < /dev/null &
+WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-splitmerge-agent.log 2>&1 < /dev/null &
 disown
-ip netns exec home setsid nohup echo -udp 19132 > /tmp/wgft-splitmerge-echo.log 2>&1 < /dev/null &
+ip netns exec "$HOME_NS" setsid nohup echo -udp 19132 > $W/wgft-splitmerge-echo.log 2>&1 < /dev/null &
 disown
 sleep 6
 check "agent registered" "home" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)"
@@ -82,7 +83,7 @@ client 'ok=0; bad=0; for i in $(seq 1 24); do
   out=$(echo "n$i" | timeout -k 5 20 socat -t 1 -T 10 - UDP:198.51.100.1:2456)
   if [[ "$out" == *udp-echo* ]]; then ok=$((ok+1)); else bad=$((bad+1)); fi
   sleep 0.25
-done; echo "ok=$ok bad=$bad"' > /tmp/wgft-splitmerge-flow.log 2>&1 &
+done; echo "ok=$ok bad=$bad"' > $W/wgft-splitmerge-flow.log 2>&1 &
 flow_pid=$!
 sleep 1
 
@@ -114,7 +115,7 @@ check "merge via the web UI redirects" "303" "$merge_code"
 strcheck "merge restored the 2456-2457 range under the original id" "2456-2457" "$(listen_port_of "$r")"
 
 wait "$flow_pid"
-flow_result=$(cat /tmp/wgft-splitmerge-flow.log)
+flow_result=$(cat $W/wgft-splitmerge-flow.log)
 check "the flow on port 2456 saw no failed round-trip during split+merge" "bad=0" "$flow_result"
 
 echo "== $mode: teardown"
@@ -126,6 +127,6 @@ else
 fi
 check "teardown runs" "deleted $DATA/wgft.sqlite" "$out"
 kill_all
-rm -rf "$DATA" "$ADATA" /tmp/wgft-splitmerge-flow.log
+rm -rf "$DATA" "$ADATA" $W/wgft-splitmerge-flow.log
 if [ "$fail" = 0 ]; then echo "== $mode: ALL PASS"; else echo "== $mode: FAILURES"; fi
 exit "$fail"

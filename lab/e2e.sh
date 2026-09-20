@@ -14,8 +14,13 @@ set -u
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: e2e.sh kernel|userspace" >&2; exit 2;; esac
 
-DATA=/tmp/wgft-e2e-server
-ADATA=/tmp/wgft-e2e-agent
+. "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
+DATA=$W/wgft-e2e-server
+ADATA=$W/wgft-e2e-agent
+SLOG=$W/wgft-e2e-server.log
+ALOG=$W/wgft-e2e-agent.log
+ELOG=$W/wgft-e2e-echo.log
+PLOG=$W/wgft-e2e-ppecho.log
 ADMIN=127.0.0.1:8686
 fail=0
 check() { # check <label> <expected-substring> <actual>
@@ -31,11 +36,11 @@ not_forwarded() { # not_forwarded <label> <forbidden-substring> <actual>: the in
   if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1 (got '$3')"; fi
 }
-vps() { ip netns exec vps "$@"; }
-client() { ip netns exec client bash -c "$1"; }
-kill_all() { pkill -x wgft; pkill -x echo; pkill -x ppecho; pkill -x socat; sleep 1; }
+vps() { ip netns exec "$VPS_NS" "$@"; }
+client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
+kill_all() { sandbox_kill_named wgft echo ppecho socat; sleep 1; }
 kill_server() {
-  for p in $(pgrep -x wgft); do
+  for p in $(sandbox_wgft_pids); do
     tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' server run' && kill "$p"
   done
   sleep 1
@@ -59,10 +64,10 @@ else
 fi
 echo "== $mode: start server"
 vps setsid nohup $run_server --mode "$mode" --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-  > /tmp/wgft-e2e-server.log 2>&1 < /dev/null &
+  > "$SLOG" 2>&1 < /dev/null &
 disown
 sleep 3
-check "server up" "admin api" "$(grep -o 'admin api' /tmp/wgft-e2e-server.log | head -1)"
+check "server up" "admin api" "$(grep -o 'admin api' "$SLOG" | head -1)"
 
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
 # The agent's target allowlist holds exactly the three targets the rules below use (design section
@@ -70,11 +75,11 @@ join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | hea
 # list: a rule to it would forward if the allowlist were absent, so the refusal check has teeth.
 ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.3:8444
 WGFT_JOIN="$join" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
-  ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-e2e-agent.log 2>&1 < /dev/null &
+  ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$ALOG" 2>&1 < /dev/null &
 disown
-ip netns exec lan setsid nohup echo -tcp 25565,25567 -udp 19132 > /tmp/wgft-e2e-echo.log 2>&1 < /dev/null &
+ip netns exec "$LAN_NS" setsid nohup echo -tcp 25565,25567 -udp 19132 > "$ELOG" 2>&1 < /dev/null &
 disown
-ip netns exec lan setsid nohup ppecho -addr 192.168.50.3:8444 > /tmp/wgft-e2e-ppecho.log 2>&1 < /dev/null &
+ip netns exec "$LAN_NS" setsid nohup ppecho -addr 192.168.50.3:8444 > "$PLOG" 2>&1 < /dev/null &
 disown
 sleep 6
 check "agent registered" "home" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)"

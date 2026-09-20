@@ -26,8 +26,9 @@ set -u
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: ipv6.sh kernel|userspace" >&2; exit 2;; esac
 
-DATA=/tmp/wgft-ipv6-server
-ADATA=/tmp/wgft-ipv6-agent
+. "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
+DATA=$W/wgft-ipv6-server
+ADATA=$W/wgft-ipv6-agent
 ADMIN=127.0.0.1:8686
 CLIENT6=2001:db8::2
 VPS6=2001:db8::1
@@ -48,9 +49,9 @@ not_forwarded() { # not_forwarded <label> <forbidden-substring> <actual>: the in
 okcheck() { # okcheck <label> <ok-if-true 1/0>
   if [ "$2" = "1" ]; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1; fi
 }
-vps() { ip netns exec vps "$@"; }
-client() { ip netns exec client bash -c "$1"; }
-kill_all() { pkill -x wgft; pkill -x echo; pkill -x socat; sleep 1; }
+vps() { ip netns exec "$VPS_NS" "$@"; }
+client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
+kill_all() { sandbox_kill_named wgft echo socat; sleep 1; }
 cleanup() {
   kill_all
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
@@ -105,13 +106,13 @@ else
   run_server="wgft server run"
 fi
 vps setsid nohup $run_server --mode "$mode" --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-  > /tmp/wgft-ipv6-server.log 2>&1 < /dev/null &
+  > $W/wgft-ipv6-server.log 2>&1 < /dev/null &
 disown
 if ! wait_until 30 admin_up; then echo "FAIL  setup: admin api did not come up"; fail=1; fi
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-ipv6-agent.log 2>&1 < /dev/null &
+WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-ipv6-agent.log 2>&1 < /dev/null &
 disown
-ip netns exec lan setsid nohup echo -tcp 25566 -udp 19140 > /tmp/wgft-ipv6-echo.log 2>&1 < /dev/null &
+ip netns exec "$LAN_NS" setsid nohup echo -tcp 25566 -udp 19140 > $W/wgft-ipv6-echo.log 2>&1 < /dev/null &
 disown
 if ! wait_until 30 agent_registered; then echo "FAIL  setup: agent never registered"; fail=1; fi
 
