@@ -37,6 +37,11 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 		// 衝突しないように分けて、目的の値だけを壊す。
 		{"agent api missing port", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51821", "WGFT_ADMIN": "unix:///tmp/wgft-test-agent-api-missing-port-admin.sock", "WGFT_AGENT_API": "0.0.0.0"}, []string{"--mode", "userspace"}},
 		{"admin missing port", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51822", "WGFT_ADMIN": "127.0.0.1"}, []string{"--mode", "userspace"}},
+		// agent API は TCP だけで待ち受ける(agentapi.Listen)。unix:// を通すと net.Listen("tcp", "unix://...") まで
+		// 届いて終了コード 1 になり、unit が再起動を繰り返す
+		{"agent api unix socket", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51823", "WGFT_ADMIN": "unix:///tmp/wgft-test-agent-api-unix-admin.sock", "WGFT_AGENT_API": "unix:///tmp/wgft-test-agent-api.sock"}, []string{"--mode", "userspace"}},
+		{"agent api bad port", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51824", "WGFT_ADMIN": "unix:///tmp/wgft-test-agent-api-bad-port-admin.sock", "WGFT_AGENT_API": "0.0.0.0:notaport"}, []string{"--mode", "userspace"}},
+		{"admin unix without a path", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51825", "WGFT_ADMIN": "unix://"}, []string{"--mode", "userspace"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,5 +155,37 @@ func TestServerUnreadableHint(t *testing.T) {
 	}
 	if msg := err.Error(); !strings.Contains(msg, "only server settings") || !strings.Contains(msg, "chmod 0644 "+p) {
 		t.Errorf("server の直し方が違う: %v", err)
+	}
+}
+
+// validateListenAddr の受け付けと拒否の境目。unix:// を受け付けるのは、Unix ソケットで待ち受けられる
+// 管理 API だけである。
+func TestValidateListenAddr(t *testing.T) {
+	for _, tc := range []struct {
+		val       string
+		allowUnix bool
+		ok        bool
+	}{
+		{"0.0.0.0:8443", false, true},
+		{":8443", false, true},
+		{"[::1]:8686", true, true},
+		{"127.0.0.1:8686", true, true},
+		{"unix:///run/wgft/admin.sock", true, true},
+		{"unix:///run/wgft/admin.sock", false, false},
+		{"unix://", true, false},
+		{"unix://", false, false},
+		{"0.0.0.0", false, false},
+		{"0.0.0.0:", false, false},
+		{"0.0.0.0:notaport", false, false},
+		{"0.0.0.0:70000", false, false},
+		{"", true, false},
+	} {
+		err := validateListenAddr("WGFT_X", tc.val, tc.allowUnix)
+		if (err == nil) != tc.ok {
+			t.Errorf("validateListenAddr(%q, allowUnix=%v) = %v, want ok=%v", tc.val, tc.allowUnix, err, tc.ok)
+		}
+		if err != nil && !isConfigError(err) {
+			t.Errorf("validateListenAddr(%q): %v is not a config error", tc.val, err)
+		}
 	}
 }
