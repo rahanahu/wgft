@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -41,7 +41,7 @@ jobs:
             GOOS=${target%/*} GOARCH=${target#*/} go vet ./cmd/... ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/flock/...
           done
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - name: test
         run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/flock/... ./cmd/wgft/...
 
@@ -72,7 +72,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - name: test
         run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/flock/... ./cmd/wgft/...
 
@@ -93,7 +93,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
@@ -113,7 +113,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - name: no Japanese in string literals
         run: go run ./scripts/check-japanese/
       - name: ASCII punctuation in public files
