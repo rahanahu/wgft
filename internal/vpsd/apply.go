@@ -223,6 +223,11 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 	plan.Generation = gen
 	out, err := d.reconciler().Reconcile(reconcile.Input{Plan: plan, WG: wgCfg, Excluded: excluded, Retry: retry})
 	if err != nil {
+		// This is the one failure path for both modes (design.md 7a.2 節の Runtime), but only the
+		// kernel backend's Commit is an nftables transaction; userspace has no nftables to blame.
+		if d.opts.Mode == modeUserspace {
+			return out, fmt.Errorf("failed to apply the userspace dataplane: %w", err)
+		}
 		return out, fmt.Errorf("failed to apply nftables: %w", err)
 	}
 	if len(out.Drift) > 0 {
