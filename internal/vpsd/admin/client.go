@@ -4,14 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/rahanahu/wgft/proto"
 )
+
+// clientTimeout は Client の既定の HTTP タイムアウト(仕様 11 節)。CLI のどの操作も、この時間内で
+// 終わる応答しか待たない。管理用 API の応答はどれも束縛されている(バッチの本文の上限、ルール
+// 一覧、TCP の疎通確認は server 側の dial の期限が既定 5 秒)ので、30 秒はどの正当な呼び出しにも
+// 十分な余裕がある。HTTP を明示的に注入した呼び出し元(テストなど)はこの既定を受けない。
+const clientTimeout = 30 * time.Second
 
 // Client は CLI が使う管理用 API のクライアント。Base は http://host:port か
 // unix:///path/to.sock(Unix ソケット。既定)。パスワードは持たない(仕様 11 節)。
@@ -33,19 +41,23 @@ func (c *Client) requestURL(path string) string {
 	return base + path
 }
 
-// httpClient は Base に応じたクライアント。unix:// はソケットへダイヤルする。
+// httpClient は Base に応じたクライアント。unix:// はソケットへダイヤルする。既定は clientTimeout
+// で打ち切る(HTTP を注入していれば、それをそのまま使い、打ち切らない)。
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
 	if socket, ok := strings.CutPrefix(c.Base, "unix://"); ok {
-		return &http.Client{Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		return &http.Client{
+			Timeout: clientTimeout,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+				},
 			},
-		}}
+		}
 	}
-	return http.DefaultClient
+	return &http.Client{Timeout: clientTimeout}
 }
 
 func (c *Client) do(method, path string, in, out any) error {
@@ -68,6 +80,10 @@ func (c *Client) do(method, path string, in, out any) error {
 	if err != nil {
 		if strings.Contains(err.Error(), "permission denied") {
 			return fmt.Errorf("cannot access the admin api socket; run with sudo: %w", err)
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return fmt.Errorf("admin api %s did not respond within %s; the server may be stuck or overloaded: %w", c.Base, clientTimeout, err)
 		}
 		return fmt.Errorf("cannot connect to admin api %s; this command is used against the admin api on the VPS, is server run running: %w", c.Base, err)
 	}

@@ -1163,6 +1163,8 @@ wgft server nft
 ```
 
 `rule ls` は `group` ごとにまとめて表示し、各ルールの `note` も出す。`rule add` の `--group` と `--note` は省略できる。`rule set` は既存ルールの `group` と `note` だけを ID そのままで変える(転送に影響せず世代も上げない)。`--group ""` で外す。
+
+CLI が管理用 API に出す HTTP リクエストには固定のタイムアウト(30 秒)がある。サーバが応答しない場合は待ち続けず、そのアドレスと待った時間を添えたエラーで止まる。管理用 API の応答はどれも束縛されている(バッチの本文の上限、ルール一覧、TCP の疎通確認は server 側の dial の期限が既定 5 秒)ので、この時間はどの正当な呼び出しにも十分な余裕がある。
 `server nft` は適用中の `wgft` テーブルをそのまま表示し、手で確認したいときに使う。
 
 ### 10.3 運用の流れ
@@ -1473,3 +1475,4 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 - `internal/dataplane/userspace/srcpolicy` を削除する(2026-09-20、7a.9 節の移行の手順 5):Phase 5 の移行の手順 3 から使われなくなり `Deprecated` の印を付けていた package を削除し、Phase 5(共通の Admission Policy)の移行の手順をすべて終えた。参照していたコメント(`internal/policy/policy.go`、`internal/policy/policy_test.go`、`internal/dataplane/deps_test.go`)と、`docs/testing.md` の `admission` 契機の対象パスの一覧を、削除に合わせて書き直した
 - エージェント用 API の同時接続数に上限を設ける(2026-09-20、11 節、セキュリティ点検の指摘):登録と stream の待ち受けに ReadHeaderTimeout などの期限はあったが、同時に張れる接続の数には上限が無く、正常に見える接続を大量に張るだけの単純な DoS で塞ぎ得た。`golang.org/x/net/netutil.LimitListener`(既存の直接の依存。`internal/dataplane/userspace/tunnel` が icmp/ipv4 で使っている)で同時接続数を 4096 に抑えた。上限は数百台のエージェントの stream に十分な余裕を持たせた固定値で、11a 節の設定項目にはしない。単体テストで、上限ちょうどまでは接続が処理されること、上限を超えた接続は拒否や切断ではなく accept を待つだけで応答が来ないこと、待っている間も上限内の接続(stream に見立てた)は切れないこと、1 本閉じて枠が空けば待っていた接続がそのまま処理されることを確かめた
 - TCP で開いた管理用 API に http.Server の期限を付ける(2026-09-20、11 節、セキュリティ点検の指摘):Unix ソケットと TCP のどちらの待ち受けも `(&http.Server{Handler: h}).Serve(ln)` で、期限が一切無かった。ヘッダや本文を送り終えない接続、応答を受け取らない keep-alive 接続が、ループバックの `--admin` や `--admin-tailscale` を塞ぎ得た。ln が Unix ソケットか TCP かで分け、TCP のときだけ ReadHeaderTimeout(10 秒)・ReadTimeout(30 秒)・WriteTimeout(30 秒)・IdleTimeout(120 秒)を付けた。管理用 API の応答はどれも束縛されている(バッチの本文、ルール一覧の書き出し、読み込みの確認)ため、WriteTimeout を付けても正常な応答を中断しない。単体テストで、TCP の待ち受けには 4 つの期限がすべて付き、Unix ソケットには付かないこと、ヘッダの途中で止まる接続が ReadHeaderTimeout で切れること、何もしない keep-alive 接続が IdleTimeout で切れることを確かめた
+- CLI の管理用 API クライアントにタイムアウトを付ける(2026-09-20、10.2 節、セキュリティ点検の指摘):`admin.Client` は `http.DefaultClient` かソケット直結の `http.Client{}` を使い、どちらもタイムアウトが無かった。サーバが応答せずに止まると、`wgft rule ls` のようなコマンドが診断も出さずに永久に待ち続けた。既定のクライアントに 30 秒のタイムアウトを付け、`net.Error` かつ `Timeout()` なエラーは、アドレスと待った時間を添えた文言に置き換えた。CLI からの呼び出しはどれも束縛された応答(バッチの本文、ルール一覧、5 秒の dial 期限を持つ疎通確認)を待つだけなので、30 秒はどの正当な呼び出しも壊さない。テストで、既定のクライアント(TCP と Unix ソケットの両方)にタイムアウトが付くこと、`HTTP` を注入した呼び出し元はその設定のまま使われること、応答しないサーバに対して打ち切りのエラーが "did not respond" を含むことを確かめた
