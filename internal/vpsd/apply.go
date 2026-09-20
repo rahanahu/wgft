@@ -83,6 +83,43 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 	return err
 }
 
+// applyThenReadConntrack applies the rules and, only once they are applied, reads the conntrack
+// UDP timeouts and the conntrack-table-size warning. apply, readTimeouts and warn are passed in
+// (rather than reached through *Daemon) so the ordering and error handling here can be unit
+// tested with fakes, without a real store, kernel or nftables (apply_test.go).
+//
+// Order matters: kernel mode's table inet wgft contains ct expressions, and applying it over
+// netlink is what makes the kernel auto-load nf_conntrack (and nft_ct, nf_nat) on a host where
+// nothing else has loaded it yet, the same as `nft` would. Reading the sysctls first fails there
+// (a fresh install, or every boot on a host where nothing else loads the module first); moving the
+// read after apply fixed it in the lab with no modprobe. Nothing before this point in Run consumes
+// the timeouts or the warning: their only other use, in admin_backend.go, serves the admin and
+// agent APIs, which start listening later in Run, so this reordering does not affect Phase 4's
+// convergence order or its point-of-no-return guarantees.
+//
+// A read failure once the table is applied is not a missing module load (the write already
+// happened): it is a permanent environment problem (this sysctl path does not exist on this
+// kernel, or is not readable), so it is wrapped as a *wg.StartupRefusal, matching the exit-code
+// classification design.md 11a 節 already gives the analogous "no WireGuard support" failure in
+// wg.Ensure. That keeps systemd's RestartPreventExitStatus=3 from looping forever on a failure
+// that retrying cannot fix, instead of the generic error (exit code 1) ReadUDPTimeouts previously
+// became.
+func applyThenReadConntrack(apply func() error, readTimeouts func() (linux.UDPTimeouts, error), warn func() string) (linux.UDPTimeouts, error) {
+	if err := apply(); err != nil {
+		return linux.UDPTimeouts{}, err
+	}
+	t, err := readTimeouts()
+	if err != nil {
+		return linux.UDPTimeouts{}, &wg.StartupRefusal{
+			Reason: fmt.Sprintf("reading the conntrack UDP timeouts after applying table inet %s: %v", nft.TableName, err),
+		}
+	}
+	if w := warn(); w != "" {
+		log.Printf("warning: %s", w)
+	}
+	return t, nil
+}
+
 // convergeLoop は、管理者の操作を待たずに宣言へ収束させる(設計文書 7a.3 節:実際の状態への収束、
 // 再試行)。kernel backend は dataplane.Sensor として nftables とリンクとアドレスの変更の通知を
 // 受け取り、通知があれば(まとめて 1 回)observeOnce が実際の状態を読み、直前の Commit と食い違えば

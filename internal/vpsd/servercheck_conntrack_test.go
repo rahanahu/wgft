@@ -20,8 +20,11 @@ func TestCheckConntrackOutput(t *testing.T) {
 
 	var out bytes.Buffer
 	checkConntrack(&out)
-	if !strings.Contains(out.String(), "is the nf_conntrack module loaded") {
-		t.Errorf("missing files: got %q", out.String())
+	got := out.String()
+	if !strings.Contains(got, "conntrack: cannot read yet") ||
+		!strings.Contains(got, "nf_conntrack_max: cannot read") ||
+		!strings.Contains(got, "harmless for kernel mode") {
+		t.Errorf("missing files: got %q", got)
 	}
 
 	os.WriteFile(linux.ConntrackMaxPath, []byte("16384\n"), 0o600)
