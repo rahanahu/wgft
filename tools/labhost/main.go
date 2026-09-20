@@ -83,7 +83,14 @@ func usage() {
   destroy <ID>                         destroy one sandbox
 
 run flags: -parallel N -repeat R -timeout DUR -keep-failed -no-gc -out DIR -prefix P -root DIR
-           -repo DIR -manifest FILE -with-optional
+           -repo DIR -manifest FILE -with-optional -run-lock PATH -wait DUR
+gc flags:  -prefix P -root DIR -keep-workdirs -run-lock PATH -wait DUR
+
+One run per Lab Host VM: run and gc take a lock (`+defaultRunLock+`.lock by default) and refuse at
+once if another run holds it; -wait DUR queues instead. create and destroy act on the one sandbox
+you name and do not take the lock, so do not point them at a sandbox a run owns.
+A run exits non-zero if any job failed, if it was interrupted, or if anything was left behind
+(namespace, process, workdir or link): cleaning up is the harness's own job.
 `)
 }
 
@@ -144,6 +151,7 @@ type summary struct {
 	LeftoverWorkdirs []string          `json:"leftover_workdirs,omitempty"`
 	LeftoverProcs    []string          `json:"leftover_processes,omitempty"`
 	LeftoverLinks    []string          `json:"leftover_links,omitempty"`
+	LeftoverFailures []string          `json:"leftover_failures,omitempty"`
 	Results          []jobResult       `json:"results"`
 }
 
@@ -159,6 +167,8 @@ func cmdRun(args []string) error {
 	root := fs.String("root", defaultRoot, "directory holding the sandbox workdirs")
 	repo := fs.String("repo", defaultRepo, "repository root inside the VM")
 	manifest := fs.String("manifest", "", "manifest for `run all` (default <repo>/"+manifestPath+")")
+	runLockPath := fs.String("run-lock", defaultRunLock, "base path of the Lab Host lock that keeps one run per VM")
+	wait := fs.Duration("wait", 0, "wait this long for the Lab Host lock instead of refusing at once")
 	withOptional := fs.Bool("with-optional", false, "also run the manifest's default=no jobs")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -208,6 +218,14 @@ func cmdRun(args []string) error {
 	if err := os.MkdirAll(filepath.Join(outDir, "logs"), 0o755); err != nil {
 		return err
 	}
+	// 単独で流す分類が約束する「VM の中で単独」を守るため、run は Lab Host ごとのロックを
+	// gc より先に取り、最後まで持つ。持ち主が SIGKILL で死んでもカーネルが解放する
+	lock, err := acquireRunLock(*runLockPath, *wait)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+
 	if !*noGC {
 		rep := GC(*prefix, *root, false)
 		b, _ := json.Marshal(rep)
@@ -365,13 +383,17 @@ func cmdRun(args []string) error {
 	sum.PeakMemUsedKB, sum.PeakLoad1 = peakUsed, peakLoad
 	sum.Interrupted = ctx.Err() != nil
 	sum.LeftoverNS, sum.LeftoverWorkdirs, sum.LeftoverProcs, sum.LeftoverLinks = leakCheck(*prefix, *root)
+	sum.LeftoverFailures = leftoverFailures(&sum)
 
 	b, _ := json.MarshalIndent(sum, "", "  ")
 	if err := os.WriteFile(filepath.Join(outDir, "summary.json"), b, 0o644); err != nil {
 		return err
 	}
 	printSummary(&sum, outDir)
-	if sum.Fail > 0 || sum.Interrupted {
+	// 後片付けに漏れがあれば、確認がすべて PASS でも run は失敗である。片付けの正しさは
+	// harness 自身の責任で、漏れは次の run を汚す。終了コードはシナリオの失敗と同じ 1 にする。
+	// ラボの道具は非 0 を等しく失敗として扱い、別の番号は「失敗ではない」と読まれかねない
+	if sum.Fail > 0 || sum.Interrupted || len(sum.LeftoverFailures) > 0 {
 		os.Exit(1)
 	}
 	return nil
@@ -425,12 +447,22 @@ func cmdGC(args []string) error {
 	prefix := fs.String("prefix", defaultPrefix, "namespace name prefix")
 	root := fs.String("root", defaultRoot, "directory holding the sandbox workdirs")
 	keep := fs.Bool("keep-workdirs", false, "keep the workdirs of the sandboxes it collects")
+	runLockPath := fs.String("run-lock", defaultRunLock, "base path of the Lab Host lock that keeps one run per VM")
+	wait := fs.Duration("wait", 0, "wait this long for the Lab Host lock instead of refusing at once")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must run as root")
 	}
+	// gc の走査は prefix だけを頼りにするので、同じ prefix で別の -root を使う run が居ると、
+	// 生きている Sandbox の作業ディレクトリのロックを見つけられない。run と同じロックを取ることで、
+	// gc が生きている netns を消す道を塞ぐ
+	lock, err := acquireRunLock(*runLockPath, *wait)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	rep := GC(*prefix, *root, *keep)
 	b, _ := json.MarshalIndent(rep, "", "  ")
 	fmt.Println(string(b))
@@ -557,11 +589,17 @@ func leakCheck(prefix, root string) (ns, workdirs, procs, links []string) {
 			ns = append(ns, n)
 		}
 	}
+	// Sandbox の作業ディレクトリは sandbox.lock を持つ。この印で見分けるので、-out で指定した
+	// 実行ごとの置き場や、人が置いた別のディレクトリを取り違えない
 	if ents, err := os.ReadDir(root); err == nil {
 		for _, e := range ents {
-			if e.IsDir() && !strings.HasPrefix(e.Name(), "run-") {
-				workdirs = append(workdirs, e.Name())
+			if !e.IsDir() {
+				continue
 			}
+			if _, err := os.Stat(filepath.Join(root, e.Name(), "sandbox.lock")); err != nil {
+				continue
+			}
+			workdirs = append(workdirs, e.Name())
 		}
 	}
 	// VM 全体に wgft/echo/ppecho/socat が残っていないか。数えるだけで、止めはしない
@@ -593,6 +631,46 @@ func leakCheck(prefix, root string) (ns, workdirs, procs, links []string) {
 	return ns, workdirs, procs, links
 }
 
+// leftoverFailures は summary から後片付けの漏れを数え上げる。純粋な関数なので、判定だけを
+// 単体テストで確かめられる。-keep-failed で意図して残した作業ディレクトリは漏れではないので、
+// その Sandbox の ID を除く。
+func leftoverFailures(s *summary) []string {
+	kept := map[string]bool{}
+	for _, r := range s.Results {
+		if r.Cleanup.WorkdirKept && r.SandboxID != "" {
+			kept[r.SandboxID] = true
+		}
+	}
+	var out []string
+	if len(s.LeftoverNS) > 0 {
+		out = append(out, "namespaces left behind: "+strings.Join(s.LeftoverNS, " "))
+	}
+	var leakedDirs []string
+	for _, d := range s.LeftoverWorkdirs {
+		if !kept[d] {
+			leakedDirs = append(leakedDirs, d)
+		}
+	}
+	if len(leakedDirs) > 0 {
+		out = append(out, "workdirs left behind: "+strings.Join(leakedDirs, " "))
+	}
+	if len(s.LeftoverProcs) > 0 {
+		out = append(out, "processes left behind: "+strings.Join(s.LeftoverProcs, " "))
+	}
+	if len(s.LeftoverLinks) > 0 {
+		out = append(out, "links left behind in the root namespace: "+strings.Join(s.LeftoverLinks, " "))
+	}
+	// 仕事ごとの後片付けが自分で漏れを報告した場合も漏れとして数える。あとの gc が消せるかどうかは
+	// 関係がない。片付けきれなかったこと自体が harness の不具合である
+	for _, r := range s.Results {
+		if len(r.Cleanup.LeftoverNS) > 0 || len(r.Cleanup.LeftoverPid) > 0 || len(r.Cleanup.Errs) > 0 {
+			out = append(out, fmt.Sprintf("job %d (%s, sandbox %s) could not finish its cleanup: namespaces=%v pids=%v errors=%v",
+				r.Index, r.Scenario, r.SandboxID, r.Cleanup.LeftoverNS, r.Cleanup.LeftoverPid, r.Cleanup.Errs))
+		}
+	}
+	return out
+}
+
 func printSummary(s *summary, outDir string) {
 	fmt.Printf("\n== labhost run: %d jobs, parallel=%d, pass=%d fail=%d, wall=%.1fs\n", s.Jobs, s.Parallel, s.Pass, s.Fail, s.WallSec)
 	fmt.Printf("   vm: vcpus=%d cpu_seconds=%.1f mem_total=%dMiB peak_mem_used=%dMiB peak_load1=%.2f\n",
@@ -619,6 +697,9 @@ func printSummary(s *summary, outDir string) {
 		fmt.Printf("   %-30s runs=%d PASS=%d FAIL=%d SKIP=%d\n", v.Scenario, v.Runs, v.PassLines, v.FailLines, v.SkipLines)
 	}
 	fmt.Printf("   leftovers: namespaces=%v workdirs=%v processes=%v links=%v\n", s.LeftoverNS, s.LeftoverWorkdirs, s.LeftoverProcs, s.LeftoverLinks)
+	for _, f := range s.LeftoverFailures {
+		fmt.Printf("   LEFTOVER FAILURE (the harness did not clean up; not a scenario failure): %s\n", f)
+	}
 	for _, r := range s.Results {
 		if r.Exit != 0 || r.SetupErr != "" || len(r.Cleanup.LeftoverNS) > 0 || len(r.Cleanup.LeftoverPid) > 0 {
 			fmt.Printf("   FAIL %d %s id=%s exit=%d timeout=%v setup=%q log=%s cleanup=%+v\n",
