@@ -245,7 +245,7 @@
           </div>
           <p class="field-help">{{ T .Locale "ratePacketHelp" }}</p>
           {{ if $hasPacket }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPacketFmt") (UnitLabel $loc .Rates.Packet.Unit) .Rates.Packet.Count }}</p>{{ end }}
-          {{ if .ShowPacketNote }}<p class="field-help">{{ T .Locale "packetUserspaceNote" }}</p>{{ end }}
+          {{ if .ShowPacketNote }}<p class="field-help">{{ T .Locale "packetTCPNoEffectNote" }}</p>{{ end }}
         </div>
       </div>
     </details>

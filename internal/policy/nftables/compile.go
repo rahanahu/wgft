@@ -15,7 +15,7 @@ import (
 //
 // 行を作らない条件は次のとおりで、6.1 節のままである。deny と allow が空なら set も行も作らない
 // (空の set に != を書くと全送信元が落ちる)。レートが未設定なら行を作らない。同時フロー数の上限が
-// 0 のプロトコルには set も行も作らない。
+// 0 のプロトコルには set も行も作らない。packet_rate は TCP のルールでは行を作らない(後述)。
 //
 // どの行も IPv4 のパケットにだけ一致する(Match.IPv4)。v1 は IPv4 だけを扱い、IPv6 のパケットは
 // DNAT されないので、判定もトークンの消費もしない。
@@ -27,9 +27,9 @@ import (
 // set の名前は deny_N、allow_N、meter_N(N は ports の順に振る連番)と、プロトコルごとに 1 つを
 // 全ルールで共有する flows_udp、flows_tcp である。
 //
-// TCP のルールも packet の行を持つ。設計文書 7a.9 節「TCP の packet_rate」は TCP に packet の行を
-// 作らないと定めており、移行の手順 5 でやめる。fixture の interim_until_step が印を付けている
-// (internal/policy/testdata/admission)。
+// TCP のルールは packet の行を持たない(設計文書 7a.9 節「TCP の packet_rate」、移行の手順 5)。
+// packet_rate の値そのものは書き出しと読み込みの互換のために受け付けて保存するが、行を作らないので
+// カーネルでは何も落とさない。
 //
 // ports の各ルール ID は IR(pol.Rules)に無ければならない。無ければ誤りを返す。IR に無いルールの
 // ポートに判定の無い行を置くと、そのポートの通信を送信元の制限なしに通してしまうためである。
@@ -130,7 +130,9 @@ func (c *compiler) step(step policy.Step, pt Port, rp policy.RulePolicy, n int) 
 		}
 		c.row(pt, step, true, Stmt{Kind: StmtLimit, Rate: *rp.NewFlowRate, Burst: burst})
 	case policy.StepAggregatePacketRate:
-		if rp.PacketRate == nil {
+		// packet_rate は UDP のデータグラムだけに効く(設計文書 7a.9 節「TCP の packet_rate」)。
+		// TCP のルールの値は受け付けて保存するが、行は作らない。
+		if rp.PacketRate == nil || pt.Proto != proto.UDP {
 			return nil
 		}
 		c.row(pt, step, false, Stmt{Kind: StmtLimit, Rate: *rp.PacketRate, Burst: burst})

@@ -34,6 +34,18 @@ func addAdminFlag(c *cobra.Command) {
 
 func newRuleID() string { return "r_" + ulid.Make().String() }
 
+// packetRateTCPNotice は、TCP のルールで packet_rate を保存する CLI の出力に付ける旨
+// (design.md 7a.9 節。書き出しと読み込みの互換のため値そのものは受け付けて保存するが、
+// TCP には効かない)。Web UI の同じ旨(packetTCPNoEffectNote)と文言を揃える。
+const packetRateTCPNotice = "note: packet_rate is stored but has no effect on TCP rules"
+
+// notePacketRateTCP は、r が TCP かつ packet_rate を持つときだけ旨を stderr に 1 行出す。
+func notePacketRateTCP(r *proto.Rule) {
+	if r.Proto == proto.TCP && r.PacketRate != nil {
+		fmt.Fprintln(os.Stderr, packetRateTCPNotice)
+	}
+}
+
 // newRuleCmd は `wgft rule` の木を組み立てる。サブコマンドはそれぞれ newRuleXxxCmd が作る。
 func newRuleCmd() *cobra.Command {
 	root := &cobra.Command{Use: "rule", Short: "Manage forwarding rules via the admin API"}
@@ -145,11 +157,15 @@ func newRuleLsCmd() *cobra.Command {
 			}
 			byGroup := map[string][]proto.Rule{}
 			var groups []string
+			hasTCPPacketRate := false
 			for _, r := range res.Rules {
 				if _, ok := byGroup[r.Group]; !ok {
 					groups = append(groups, r.Group)
 				}
 				byGroup[r.Group] = append(byGroup[r.Group], r)
+				if r.Proto == proto.TCP && r.PacketRate != nil {
+					hasTCPPacketRate = true
+				}
 			}
 			sort.Slice(groups, func(i, j int) bool {
 				if (groups[i] == "") != (groups[j] == "") {
@@ -179,6 +195,9 @@ func newRuleLsCmd() *cobra.Command {
 				w.Flush()
 			}
 			fmt.Printf("generation %d\n", res.Generation)
+			if hasTCPPacketRate {
+				fmt.Fprintln(os.Stderr, packetRateTCPNotice)
+			}
 			return nil
 		},
 	}
@@ -344,6 +363,12 @@ func newRuleImportCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("replaced with %d rules at generation %d\n", len(res.Rules), res.Generation)
+			for _, r := range rules {
+				if r.Proto == proto.TCP && r.PacketRate != nil {
+					fmt.Fprintln(os.Stderr, packetRateTCPNotice)
+					break
+				}
+			}
 			return nil
 		},
 	}
@@ -353,8 +378,10 @@ func newRuleImportCmd() *cobra.Command {
 
 // newRestrictionCmd は接続元制限(deny / allow の CIDR、レート)を変える共通形。
 // 配る内容は変わらないので世代は上がらない(仕様 5.3 節)。op はログの出どころ
-// ("cli rule deny add" など。仕様 10.4 節の rules ログ)。
-func newRestrictionCmd(use, short, op string, edit func(r *proto.Rule, args []string) error, nargs cobra.PositionalArgs) *cobra.Command {
+// ("cli rule deny add" など。仕様 10.4 節の rules ログ)。after は成功後に結果のルールを
+// 見て追加の出力をする任意のフック(例:packet_rate の TCP への旨。呼び出し元の大半は
+// 要らないので省略できる)。
+func newRestrictionCmd(use, short, op string, edit func(r *proto.Rule, args []string) error, nargs cobra.PositionalArgs, after ...func(r *proto.Rule)) *cobra.Command {
 	return &cobra.Command{
 		Use: use, Short: short, Args: nargs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -377,6 +404,9 @@ func newRestrictionCmd(use, short, op string, edit func(r *proto.Rule, args []st
 				fmt.Printf("applied at generation %d\n", res.Generation)
 			} else {
 				fmt.Println("applied; generation unchanged")
+			}
+			for _, fn := range after {
+				fn(r)
 			}
 			return nil
 		},
@@ -421,7 +451,7 @@ func newRuleAllowCmd() *cobra.Command {
 
 // newRuleRateCmd は `rule rate new-flow|packet|per-source`。none か off で解除する。
 func newRuleRateCmd() *cobra.Command {
-	setRate := func(use, short, op string, set func(r *proto.Rule, rate *proto.Rate)) *cobra.Command {
+	setRate := func(use, short, op string, set func(r *proto.Rule, rate *proto.Rate), after ...func(r *proto.Rule)) *cobra.Command {
 		return newRestrictionCmd(use, short, op, func(r *proto.Rule, a []string) error {
 			if a[0] == "none" || a[0] == "off" {
 				set(r, nil)
@@ -433,12 +463,12 @@ func newRuleRateCmd() *cobra.Command {
 			}
 			set(r, &rate)
 			return nil
-		}, cobra.ExactArgs(2))
+		}, cobra.ExactArgs(2), after...)
 	}
 	rate := &cobra.Command{Use: "rate", Short: "Configure rate limits in N/second; none to clear"}
 	rate.AddCommand(
 		setRate("new-flow <id> <rate>", "cap on new flows for the whole rule", "cli rule rate new-flow", func(r *proto.Rule, v *proto.Rate) { r.NewFlowRate = v }),
-		setRate("packet <id> <rate>", "cap on packets for the whole rule", "cli rule rate packet", func(r *proto.Rule, v *proto.Rate) { r.PacketRate = v }),
+		setRate("packet <id> <rate>", "cap on packets for the whole rule", "cli rule rate packet", func(r *proto.Rule, v *proto.Rate) { r.PacketRate = v }, notePacketRateTCP),
 		setRate("per-source <id> <rate>", "cap on new flows per source IP", "cli rule rate per-source", func(r *proto.Rule, v *proto.Rate) { r.PerSourceRate = v }),
 	)
 	return rate

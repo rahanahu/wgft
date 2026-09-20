@@ -195,7 +195,7 @@ var tr = map[string][2]string{
 	"rateSummaryPacketFmt":    {"1 %[1]sに %[2]s 個まで", "Up to %[2]s packets per %[1]s"},
 	"noLimit":                 {"制限しない", "No limit"},
 	"rateRequired":            {"値を入力するか、「制限しない」を選んでください", "enter a value, or choose \"no limit\""},
-	"packetUserspaceNote":     {"ユーザー空間モードの TCP ルールでは、パケットの制限は効きません。", "In userspace mode, the packet limit has no effect on TCP rules."},
+	"packetTCPNoEffectNote":   {"TCP のルールでは、保存した packet_rate の値は効果を持ちません。", "packet_rate is stored but has no effect on TCP rules."},
 	"fAddDisabled":            {"無効のまま追加する", "Add in a disabled state"},
 	// rule detail page: split / merge
 	"splitHead":       {"分割", "Split"},

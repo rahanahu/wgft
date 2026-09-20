@@ -29,14 +29,7 @@ type Fixture struct {
 	// Name はファイル名から .json を除いたもの。
 	Name string `json:"-"`
 	// Comment は場面の説明。
-	Comment string `json:"comment"`
-	// InterimUntilStep が 0 でなければ、その fixture は移行の途中の挙動を書いた暫定のものであり、
-	// 7a.9 節「Phase 5 の移行の手順」のその番号の段で書き直す。
-	InterimUntilStep int `json:"interim_until_step"`
-	// Engines は、暫定の fixture が照らす評価器の名前(EngineNFTables、EngineGo)。空ならすべての評価器に
-	// 照らす。移行の途中で kernel と userspace の挙動が意図して異なる場面にだけ使い、暫定の fixture に
-	// しか書けない。
-	Engines    []string                     `json:"engines"`
+	Comment    string                       `json:"comment"`
 	Policy     Policy                       `json:"policy"`
 	Events     []Event                      `json:"events"`
 	WantDrops  map[string]map[string]uint64 `json:"want_drops"`
@@ -89,16 +82,11 @@ type Event struct {
 	Want string `json:"want"`
 }
 
-// 評価器の名前(Fixture.Engines の値)。
+// 評価器の名前。TestAdmissionFixtures が結果を報告するときの見出しに使う。
 const (
 	EngineNFTables = "nftables" // internal/policy/nftables の行の列を解釈器で実行する
 	EngineGo       = "goengine" // internal/policy/goengine
 )
-
-// AppliesTo は fixture を name の評価器に照らすか。
-func (fx *Fixture) AppliesTo(name string) bool {
-	return len(fx.Engines) == 0 || slices.Contains(fx.Engines, name)
-}
 
 // Admit と Drop は Want と Engine の結果の値。
 const (
@@ -225,23 +213,6 @@ func (fx *Fixture) validate() error {
 	for _, tol := range fx.Tolerances {
 		if !slices.Contains(Tolerances, tol) {
 			return fmt.Errorf("unknown tolerance %q", tol)
-		}
-	}
-	for _, name := range fx.Engines {
-		if name != EngineNFTables && name != EngineGo {
-			return fmt.Errorf("engines: unknown evaluator %q", name)
-		}
-	}
-	if len(fx.Engines) > 0 && fx.InterimUntilStep == 0 {
-		return fmt.Errorf("only an interim fixture may name the evaluators it applies to")
-	}
-	if fx.InterimUntilStep != 0 {
-		if fx.InterimUntilStep < 3 || fx.InterimUntilStep > 5 {
-			return fmt.Errorf("interim_until_step %d is not a later migration step (3 to 5)", fx.InterimUntilStep)
-		}
-		// 暫定の fixture は、書き直す段を名前でも示す
-		if suffix := fmt.Sprintf("_until_step%d", fx.InterimUntilStep); !strings.HasSuffix(fx.Name, suffix) {
-			return fmt.Errorf("an interim fixture's name must end in %s", suffix)
 		}
 	}
 	return nil

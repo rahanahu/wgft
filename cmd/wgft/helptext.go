@@ -181,9 +181,9 @@ as the home line.`,
 		Example: `  wgft rule rate new-flow r_01M2R009 100/second`,
 	},
 	"rule rate packet": {
-		Long: `Cap the packets of the whole rule. In kernel mode it counts every packet of
-the rule; in userspace mode it applies to UDP datagrams only and has no effect
-on TCP rules.`,
+		Long: `Cap the packets of the whole rule. It applies to UDP datagrams only, in both
+kernel and userspace mode. A TCP rule still accepts and stores the value, for
+import/export compatibility, but it has no effect.`,
 		Example: `  wgft rule rate packet r_01M2R009 5000/second`,
 	},
 	"rule split": {

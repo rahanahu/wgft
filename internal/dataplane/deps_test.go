@@ -128,7 +128,7 @@ func packagesUnder(t *testing.T, root, dir string) []string {
 //   - internal/dataplane (the interface package) and internal/reconcile import no dataplane
 //     implementation;
 //   - a dataplane implementation (userspace, linuxkernel, and their subpackages: nft, wg, conntrack,
-//     relay, srcpolicy, utun, ...) imports no other dataplane implementation.
+//     relay, utun, ...) imports no other dataplane implementation.
 //
 // The walk is generic over the implementation directories under internal/dataplane, so a future
 // implementation (e.g. the agent's kernel backend reusing linuxkernel, design.md 7a.8 節 Phase 7)
