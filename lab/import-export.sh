@@ -27,7 +27,13 @@ ADMIN=127.0.0.1:8686
 RULES=/tmp/wgft-importexport-rules.json
 fail=0
 check() { # check <label> <expected-substring> <actual>
+  # an empty expected substring matches anything, so it would always pass; refuse it
+  if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3'"; fail=1; fi
+}
+absent() { # absent <label> <substring-that-must-not-appear> <actual>
+  if [ -z "$2" ]; then echo "FAIL  $1: empty substring (test bug)"; fail=1; return; fi
+  if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1"; fi
 }
 vps() { ip netns exec vps "$@"; }
 client() { ip netns exec client bash -c "$1"; }
@@ -82,7 +88,7 @@ check "agent registered" "home" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)
 r1=$(vps wgft rule add --agent home --udp 2456 --to 192.168.50.2:19132 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
 r2=$(vps wgft rule add --agent home --udp 2555 --to 192.168.50.2:19132 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
 sleep 2
-check "udp through r1 before anything" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:2456')"
+check "udp through r1 before anything" "udp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:2456')"
 
 echo "== export/import round trip with the CLI"
 vps curl -s -o "$RULES" "http://$ADMIN/ui/rules/export"
@@ -127,8 +133,9 @@ check "apply redirects (deletion applied)" "303" "$apply_code"
 check "r2 is gone, r1 remains" "1" "$(rule_count)"
 
 sleep 1
-check "udp through r1 still works after the import" "udp-echo" "$(client 'echo hi | socat -t 3 -T 10 - UDP:198.51.100.1:2456')"
-check "r2's port is gone" "" "$(client 'echo hi | socat -t 2 -T 10 - UDP:198.51.100.1:2555' 2>&1)"
+check "udp through r1 still works after the import" "udp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:2456')"
+out=$(client 'echo hi | timeout -k 5 20 socat -t 2 -T 10 - UDP:198.51.100.1:2555' 2>&1)
+absent "r2's port is gone" "udp-echo" "$out"
 
 echo "== a same-count deny-list replacement must show as changed, with the CIDRs, not unchanged"
 # Give r1 a real deny entry so the next upload can replace it 1-for-1 (same count).

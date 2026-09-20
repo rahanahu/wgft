@@ -51,14 +51,24 @@ func echoLine(c net.Conn, msg string) (string, error) {
 // Prepare binds without serving; a rule with one port that cannot be bound fails as a whole and
 // none of its ports is kept bound (design.md 7a.3 節: a partial range is never forwarded).
 func TestStagedBindFailureFailsWholeRule(t *testing.T) {
-	blocked := freePort(t)
-	blocker, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(blocked)})
+	// bind the blocker itself on port 0 and read back the assigned port, instead of picking a
+	// number with freePort and then binding it: nothing else can ever steal a number that was
+	// never released.
+	blocker, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blocker.Close()
-	free, other := freePort(t), freePort(t)
-	m := New(loopback{}, Options{Logf: t.Logf})
+	blocked := uint16(blocker.Addr().(*net.TCPAddr).Port)
+	lb := &loopback{}
+	// free と blocked belong to the same rule, and Prepare skips binding a rule's later ports once
+	// an earlier one has already failed (design.md 7a.3 節). Depending on which port sorts first,
+	// Manager may never claim free's reservation at all, so free stays with plain freePort (its own,
+	// separate, and much smaller race) rather than a held-open reservation that this test's own
+	// re-bind check below would then find still in use.
+	free := freePort(t)
+	other := reserveTCP(t, lb)
+	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 
 	s := m.Prepare(map[Key]Desired{
@@ -89,8 +99,9 @@ func TestStagedBindFailureFailsWholeRule(t *testing.T) {
 // Rollback closes what Prepare bound and leaves the serving listeners alone.
 func TestStagedRollback(t *testing.T) {
 	echo := tcpEcho(t)
-	oldPort, newPort := freePort(t), freePort(t)
-	m := New(loopback{}, Options{Logf: t.Logf})
+	lb := &loopback{}
+	oldPort, newPort := reserveTCP(t, lb), reserveTCP(t, lb)
+	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Prepare(map[Key]Desired{{proto.TCP, oldPort}: {echo, "r_old"}}).Commit(nil)
 	s := m.Prepare(map[Key]Desired{{proto.TCP, newPort}: {echo, "r_new"}})
@@ -116,13 +127,18 @@ func TestStagedRollback(t *testing.T) {
 // closed (design.md 7a.3 節).
 func TestStagedRetiringTCP(t *testing.T) {
 	echo := tcpEcho(t)
-	port, blocked := freePort(t), freePort(t)
-	blocker, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(blocked)})
+	lb := &loopback{}
+	port := reserveTCP(t, lb)
+	// bind the blocker itself on port 0 and read back the assigned port, instead of picking a
+	// number with freePort and then binding it: nothing else can ever steal a number that was
+	// never released.
+	blocker, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blocker.Close()
-	m := New(loopback{}, Options{Logf: t.Logf})
+	blocked := uint16(blocker.Addr().(*net.TCPAddr).Port)
+	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Prepare(map[Key]Desired{{proto.TCP, port}: {echo, "r_x"}}).Commit(nil)
 	c, err := dialLoopback(port)
@@ -166,13 +182,18 @@ func TestStagedRetiringTCP(t *testing.T) {
 // sources, and serves again when the declaration takes the port back.
 func TestStagedRetiringUDP(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
-	port, blocked := freePort(t), freePort(t)
-	blocker, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(blocked)})
+	lb := &loopback{}
+	port := reserveUDP(t, lb)
+	// bind the blocker itself on port 0 and read back the assigned port, instead of picking a
+	// number with freePort and then binding it: nothing else can ever steal a number that was
+	// never released.
+	blocker, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blocker.Close()
-	m := New(loopback{}, Options{Logf: t.Logf})
+	blocked := uint16(blocker.LocalAddr().(*net.UDPAddr).Port)
+	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Prepare(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r_u"}}).Commit(nil)
 	dial := func() *net.UDPConn {

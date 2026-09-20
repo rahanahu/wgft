@@ -23,10 +23,28 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// loopback はホストの 127.0.0.1 に開く Network。テスト用。
-type loopback struct{}
+// loopback はホストの 127.0.0.1 に開く Network。テスト用。reserveTCP と reserveUDP で前もって
+// port 0 に bind しておいたソケットは、Manager が同じ番号で ListenTCP/ListenUDP を呼んだときに
+// そのまま渡す。freePort のように番号だけを渡して一度閉じると、Manager が実際に bind するまでの
+// 隙間を他のプロセスが奪える(この隙間により、UDP で一度 CI が "address already in use" で落ちた。
+// design.md 改訂の記録)。開いたまま持ち回れば、その隙間ができない。
+type loopback struct {
+	mu  sync.Mutex
+	tcp map[uint16]*net.TCPListener
+	udp map[uint16]*net.UDPConn
+}
 
-func (loopback) ListenUDP(port uint16) (net.PacketConn, error) {
+func (lb *loopback) ListenUDP(port uint16) (net.PacketConn, error) {
+	lb.mu.Lock()
+	c, reserved := lb.udp[port]
+	if reserved {
+		delete(lb.udp, port)
+	}
+	lb.mu.Unlock()
+	if reserved {
+		bigSendBuffer(c)
+		return c, nil
+	}
 	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
 	if err == nil {
 		bigSendBuffer(c)
@@ -34,8 +52,71 @@ func (loopback) ListenUDP(port uint16) (net.PacketConn, error) {
 	return c, err
 }
 
-func (loopback) ListenTCP(port uint16) (net.Listener, error) {
+func (lb *loopback) ListenTCP(port uint16) (net.Listener, error) {
+	lb.mu.Lock()
+	l, reserved := lb.tcp[port]
+	if reserved {
+		delete(lb.tcp, port)
+	}
+	lb.mu.Unlock()
+	if reserved {
+		return l, nil
+	}
 	return net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+}
+
+// reserveTCP は空いている TCP ポートを選び、Manager がそのポートで ListenTCP を呼ぶまで開いたまま
+// lb に持たせる。freePort と違い、選んでから実際の bind までの間を他のプロセスに奪われない。
+// Manager がついに一度も claim しなければ、テストの終わりに lb 自身が閉じる。
+func reserveTCP(t *testing.T, lb *loopback) uint16 {
+	t.Helper()
+	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(l.Addr().(*net.TCPAddr).Port)
+	lb.mu.Lock()
+	if lb.tcp == nil {
+		lb.tcp = map[uint16]*net.TCPListener{}
+	}
+	lb.tcp[port] = l
+	lb.mu.Unlock()
+	t.Cleanup(func() {
+		lb.mu.Lock()
+		l, ok := lb.tcp[port]
+		delete(lb.tcp, port)
+		lb.mu.Unlock()
+		if ok {
+			l.Close()
+		}
+	})
+	return port
+}
+
+// reserveUDP は reserveTCP の UDP 版。
+func reserveUDP(t *testing.T, lb *loopback) uint16 {
+	t.Helper()
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(c.LocalAddr().(*net.UDPAddr).Port)
+	lb.mu.Lock()
+	if lb.udp == nil {
+		lb.udp = map[uint16]*net.UDPConn{}
+	}
+	lb.udp[port] = c
+	lb.mu.Unlock()
+	t.Cleanup(func() {
+		lb.mu.Lock()
+		c, ok := lb.udp[port]
+		delete(lb.udp, port)
+		lb.mu.Unlock()
+		if ok {
+			c.Close()
+		}
+	})
+	return port
 }
 
 // bigSendBuffer はテスト側のソケットで 65535 バイトまでのデータグラムを書けるようにする。
@@ -47,7 +128,7 @@ func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} 
 
 // ルールごとの上限は、明示しなければ Limits から導く(flowcap.Limits.UDPPerRuleCap、仕様 7 節)。
 func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
-	m := New(loopback{}, Options{Limits: flowcap.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: t.Logf})
+	m := New(&loopback{}, Options{Limits: flowcap.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: t.Logf})
 	if m.opts.UDPSessionsMax != 10000 {
 		t.Errorf("UDPSessionsMax = %d, want 10000 (half of UDPTotal)", m.opts.UDPSessionsMax)
 	}
@@ -55,12 +136,12 @@ func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
 		t.Errorf("TCPConnsMax = %d, want 2000 (half of TCPTotal)", m.opts.TCPConnsMax)
 	}
 	// 何も渡さなければ既定の全体上限(8192, 2048)から導く、導入前の固定値と同じ値になる
-	m = New(loopback{}, Options{Logf: t.Logf})
+	m = New(&loopback{}, Options{Logf: t.Logf})
 	if m.opts.UDPSessionsMax != 4096 || m.opts.TCPConnsMax != 1024 {
 		t.Errorf("default caps: udp=%d tcp=%d, want 4096 1024", m.opts.UDPSessionsMax, m.opts.TCPConnsMax)
 	}
 	// 呼び出し側が明示すれば、それが勝つ(導出値は使わない)
-	m = New(loopback{}, Options{Limits: flowcap.Limits{UDPTotal: 40}, UDPSessionsMax: 5, Logf: t.Logf})
+	m = New(&loopback{}, Options{Limits: flowcap.Limits{UDPTotal: 40}, UDPSessionsMax: 5, Logf: t.Logf})
 	if m.opts.UDPSessionsMax != 5 {
 		t.Errorf("explicit UDPSessionsMax = %d, want 5 (must not be overridden by the derived default)", m.opts.UDPSessionsMax)
 	}
@@ -162,6 +243,20 @@ func udpEcho(t *testing.T) (addr string, packets *atomic.Int64) {
 	return pc.LocalAddr().String(), packets
 }
 
+// freePort binds port 0, reads back the number the kernel assigned, and closes the socket so the
+// caller can bind that same number again later. That gap is a real (if rare) race: something else
+// can grab the number before the caller's real bind (this is exactly the freePort race
+// reserveTCP/reserveUDP close for tests that hand the port straight to Manager, and binding the
+// blocker itself on port 0 closes for tests that deliberately squat the port; see the callers of
+// each). freePort itself is now used only where the number must legitimately be unbound when
+// picked and only bound for real afterwards by someone other than Manager, so there is nothing to
+// hold open in the meantime: TestStagedBindFailureFailsWholeRule's `free` (Manager may never claim
+// it at all, since Prepare skips a rule's later ports once an earlier one of the same rule already
+// failed, so a held-open reservation could still be sitting there when the test's own re-bind
+// check runs), TestTCPTargetCheck's target port (deliberately unreachable at first; a real server
+// only binds it later, in the test itself, to prove the target coming back is noticed), and the
+// UDP destinations that stay unreachable for the whole test in TestUDPNoTargetCheck and
+// readwait_windows_test.go.
 func freePort(t *testing.T) uint16 {
 	t.Helper()
 	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -175,8 +270,9 @@ func freePort(t *testing.T) uint16 {
 
 func TestUDPRelaySessionsAndIdle(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
-	port := freePort(t)
-	m := New(loopback{}, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPSessionsMax: 2, Logf: t.Logf})
+	lb := &loopback{}
+	port := reserveUDP(t, lb)
+	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPSessionsMax: 2, Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 
@@ -245,8 +341,9 @@ func TestTCPRelayHalfClose(t *testing.T) {
 			}()
 		}
 	}()
-	port := freePort(t)
-	m := New(loopback{}, Options{Logf: t.Logf})
+	lb := &loopback{}
+	port := reserveTCP(t, lb)
+	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, port}: {srv.Addr().String(), "r1"}})
 
@@ -275,12 +372,15 @@ func TestTCPRelayHalfClose(t *testing.T) {
 
 // 開けないポート(使用中)は error として残り、Retry で開き直す。
 func TestOpenFailureAndRetry(t *testing.T) {
-	port := freePort(t)
-	blocker, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	// bind the blocker itself on port 0 and read back the assigned port, instead of picking a
+	// number with freePort and then binding it: nothing else can ever steal a number that was
+	// never released.
+	blocker, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(loopback{}, Options{Logf: t.Logf})
+	port := uint16(blocker.LocalAddr().(*net.UDPAddr).Port)
+	m := New(&loopback{}, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {"127.0.0.1:9", "r1"}})
 	if st := m.Status(); len(st) != 1 || st[0].Err == nil {
@@ -298,8 +398,9 @@ func TestTCPTargetCheck(t *testing.T) {
 	// まだ誰も listen していないポートを target にする(接続拒否)
 	targetPort := freePort(t)
 	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(targetPort)))
-	listenPort := freePort(t)
-	m := New(loopback{}, Options{Logf: t.Logf})
+	lb := &loopback{}
+	listenPort := reserveTCP(t, lb)
+	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, listenPort}: {target, "r1"}})
 
@@ -340,8 +441,9 @@ func TestTCPTargetCheck(t *testing.T) {
 // UDP ルールは target への接続確認をしない(到達確認ができないので、bind できれば ok)。
 func TestUDPNoTargetCheck(t *testing.T) {
 	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(freePort(t)))) // 誰も listen していない UDP 宛先
-	listenPort := freePort(t)
-	m := New(loopback{}, Options{Logf: t.Logf})
+	lb := &loopback{}
+	listenPort := reserveUDP(t, lb)
+	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, listenPort}: {target, "r1"}})
 	if st := m.Status(); st[0].Err != nil {
@@ -352,8 +454,9 @@ func TestUDPNoTargetCheck(t *testing.T) {
 // UDP:セッションは待つ間バッファを持たないが、最大長に近い応答も最初の 1 個から欠けずに届く(仕様 7 節)。
 func TestUDPRelayLargeReplyFromFirstDatagram(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
-	port := freePort(t)
-	m := New(loopback{}, Options{Logf: t.Logf})
+	lb := &loopback{}
+	port := reserveUDP(t, lb)
+	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 	c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
@@ -382,7 +485,8 @@ func (failWriteConn) Write([]byte) (int, error) { return 0, errors.New("injected
 // UDP:宛先への書き込みの失敗はセッションを閉じ、ログはリスナーごとに 1 分に 1 回までに絞る。
 func TestUDPRelayWriteFailureLogged(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
-	port := freePort(t)
+	lb := &loopback{}
+	port := reserveUDP(t, lb)
 	var (
 		mu    sync.Mutex
 		lines []string
@@ -401,7 +505,7 @@ func TestUDPRelayWriteFailureLogged(t *testing.T) {
 		dials.Add(1)
 		return failWriteConn{c}, nil
 	}
-	m := New(loopback{}, Options{Logf: logf, Dial: dial})
+	m := New(lb, Options{Logf: logf, Dial: dial})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 	c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
@@ -436,11 +540,12 @@ func TestUDPRelayWriteFailureLogged(t *testing.T) {
 // セッションが閉じると戻る。
 func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
-	port := freePort(t)
+	lb := &loopback{}
+	port := reserveUDP(t, lb)
 	cnt := &flowcap.Counter{Total: 10}
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{UDP: 2}})
-	m := New(loopback{}, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPCap: cnt, Logf: t.Logf,
+	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPCap: cnt, Logf: t.Logf,
 		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, size)
 			return tk.Release, d.Allow
@@ -481,8 +586,9 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 // TCP:target への dial が続けて失敗しても、失敗ログは 1 分に 1 回までに絞る(高頻度失敗経路のレート制限)。
 func TestTCPDialFailureLogRateLimited(t *testing.T) {
 	var dialLogs atomic.Int32
-	port := freePort(t)
-	m := New(loopback{}, Options{
+	lb := &loopback{}
+	port := reserveTCP(t, lb)
+	m := New(lb, Options{
 		Dial: func(network, addr string) (net.Conn, error) { return nil, fmt.Errorf("connection refused") },
 		Logf: func(format string, args ...any) {
 			if strings.Contains(format, "dial") {
@@ -512,8 +618,9 @@ func TestTCPDialFailureLogRateLimited(t *testing.T) {
 // UDP:target への dial が続けて失敗しても、失敗ログは 1 分に 1 回までに絞る。
 func TestUDPDialFailureLogRateLimited(t *testing.T) {
 	var dialLogs atomic.Int32
-	port := freePort(t)
-	m := New(loopback{}, Options{
+	lb := &loopback{}
+	port := reserveUDP(t, lb)
+	m := New(lb, Options{
 		Dial: func(network, addr string) (net.Conn, error) { return nil, fmt.Errorf("connection refused") },
 		Logf: func(format string, args ...any) {
 			if strings.Contains(format, "dial") {
@@ -558,9 +665,10 @@ func TestTCPRelayConnCap(t *testing.T) {
 			go func() { defer c.Close(); io.Copy(c, c) }()
 		}
 	}()
-	port := freePort(t)
+	lb := &loopback{}
+	port := reserveTCP(t, lb)
 	cnt := &flowcap.Counter{Total: 10}
-	m := New(loopback{}, Options{TCPConnsMax: 2, TCPCap: cnt, Logf: t.Logf})
+	m := New(lb, Options{TCPConnsMax: 2, TCPCap: cnt, Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, port}: {srv.Addr().String(), "r1"}})
 	echo := func(c net.Conn) error {
@@ -579,6 +687,21 @@ func TestTCPRelayConnCap(t *testing.T) {
 		t.Cleanup(func() { c.Close() })
 		return c
 	}
+	// dialMaybeRefused is for a connection expected to be refused at the limit. Refusals end with
+	// SetLinger(0) and an RST (abortRefused, design.md 7a.10 節 Phase 6 移行手順 3); on loopback
+	// that RST can reach the client either before connect() returns or only on the first read
+	// afterwards, so both shapes of the refusal are legitimate.
+	dialMaybeRefused := func() (net.Conn, bool) {
+		c, err := net.Dial("tcp4", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
+		if err != nil {
+			if isReset(err) {
+				return nil, true
+			}
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c, false
+	}
 	c1, c2 := dial(), dial()
 	if err := echo(c1); err != nil {
 		t.Fatal(err)
@@ -586,7 +709,7 @@ func TestTCPRelayConnCap(t *testing.T) {
 	if err := echo(c2); err != nil {
 		t.Fatal(err)
 	}
-	if err := echo(dial()); err == nil {
+	if c3, refusedAtDial := dialMaybeRefused(); !refusedAtDial && echo(c3) == nil {
 		t.Error("third connection must be closed at the limit")
 	}
 	if err := echo(c1); err != nil {
@@ -611,8 +734,9 @@ func TestTCPRelayConnCap(t *testing.T) {
 // vpsd のホストソケット側と同じ)を通る。グレースフルクローズなら次の Read は io.EOF、
 // RST ならそれ以外の誤りになる。
 func TestTCPRelayRefusalIsAborted(t *testing.T) {
-	port := freePort(t)
-	m := New(loopback{}, Options{
+	lb := &loopback{}
+	port := reserveTCP(t, lb)
+	m := New(lb, Options{
 		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) { return nil, false },
 		Logf:  t.Logf,
 	})
@@ -653,12 +777,13 @@ func TestUDPDeniedSourceSpendsNoPacketTokens(t *testing.T) {
 		t.Skip("macOS does not configure 127.0.0.2 by default")
 	}
 	echoAddr, _ := udpEcho(t)
-	port := freePort(t)
+	lb := &loopback{}
+	port := reserveUDP(t, lb)
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP,
 		SourceDeny: []netip.Prefix{netip.MustParsePrefix("127.0.0.2/32")},
 		PacketRate: &proto.Rate{Count: 1, Unit: proto.PerHour}}}})
-	m := New(loopback{}, Options{Logf: t.Logf,
+	m := New(lb, Options{Logf: t.Logf,
 		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, size)
 			return tk.Release, d.Allow
