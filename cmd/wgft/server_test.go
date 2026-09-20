@@ -28,6 +28,15 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 		{"flows", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_MAX_TCP_FLOWS": "0"}, nil},
 		{"per-source flows", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_MAX_UDP_FLOWS_PER_SOURCE": "-1"}, nil},
 		{"no endpoint", map[string]string{"WGFT_WG_ENDPOINT": ""}, nil},
+		{"wg address not a prefix", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_ADDRESS": "not-an-address"}, nil},
+		{"wg address missing prefix length", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_ADDRESS": "10.200.0.1"}, nil},
+		// userspace モード:agent-api/admin の構文の誤りは applyNFT より後(admin.Listen/agentAPI.Listen)
+		// でしか気付けなかったので、kernel モードで確かめると非 root では bringUpWG の CAP_NET_ADMIN 不足
+		// (classifyPrivilege)で先に終了コード 3 になり、この構文検査を実際には試さないまま通ってしまう
+		// (手を動かして確認した)。WGFT_ADMIN を非特権で書ける unix ソケットにし、wg のポートをサブテスト間で
+		// 衝突しないように分けて、目的の値だけを壊す。
+		{"agent api missing port", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51821", "WGFT_ADMIN": "unix:///tmp/wgft-test-agent-api-missing-port-admin.sock", "WGFT_AGENT_API": "0.0.0.0"}, []string{"--mode", "userspace"}},
+		{"admin missing port", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51822", "WGFT_ADMIN": "127.0.0.1"}, []string{"--mode", "userspace"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

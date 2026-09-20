@@ -112,6 +112,39 @@ func TestEnsureRegisteredKeepsStoredNameOnMismatch(t *testing.T) {
 	}
 }
 
+// TestEnsureRegisteredJoinFailuresAreConfigRefusal is the regression test for the agent-side
+// startup-refusal gap (cmd/wgft/agent_test.go's TestAgentJoinErrorsExitCode is the end-to-end
+// counterpart): a missing, malformed, or already-spent WGFT_JOIN on a not-yet-registered agent used
+// to return a plain error from ensureRegistered, which cmd/wgft could not distinguish from a
+// Register network failure, so both became the generic exit code 1 and the shipped
+// agent.service's Restart=on-failure looped on it every 2 seconds forever even though none of
+// these three retry themselves into working. They must now come back as *ConfigRefusal.
+func TestEnsureRegisteredJoinFailuresAreConfigRefusal(t *testing.T) {
+	_, usedJoin := newTestRegisterServer(t, "home")
+	usedJ, err := ParseJoin(usedJoin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		f    *credentials.Credentials
+		opts Options
+	}{
+		{"not registered, no join", &credentials.Credentials{}, Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json")}},
+		{"malformed join", &credentials.Credentials{}, Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Join: "not-a-join-string"}},
+		{"already-used join", &credentials.Credentials{UsedJoinTokenSHA256: usedJ.TokenHash()}, Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Join: usedJoin}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ensureRegistered(tc.f, tc.opts)
+			var refusal *ConfigRefusal
+			if !errors.As(err, &refusal) {
+				t.Fatalf("ensureRegistered = %v (%T), want a *ConfigRefusal", err, err)
+			}
+		})
+	}
+}
+
 // サーバ証明書が認証情報のピンと違うとき、stream の接続は ErrPinMismatch として区別できる。
 func TestStreamOnceReportsPinMismatch(t *testing.T) {
 	srv, _ := newTestRegisterServer(t, "home")

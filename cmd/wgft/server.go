@@ -5,8 +5,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -66,6 +69,20 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 	if err != nil {
 		return vpsd.Options{}, nil, configErrorf("WGFT_MTU: %q is not an integer", c.str("WGFT_MTU"))
 	}
+	// WGFT_WG_ADDRESS の構文は、値そのものが原因の失敗であり、環境には触れていないここで弾く。
+	// これを弾かずに進むと internal/vpsd.Run の netip.ParsePrefix まで届き、そこは設定の値の誤りと
+	// 環境由来の失敗を終了コードで区別する層より後なので、ただのエラー(終了コード 1)になって
+	// systemd に再起動され続けていた(cmd/wgft/server_test.go の TestServerConfigErrorsExitCode、
+	// 設計文書 11a 節)。食い違い(記録済みの帯との不一致)の判定は従来どおり internal/vpsd 側で行う。
+	if _, err := netip.ParsePrefix(c.str("WGFT_WG_ADDRESS")); err != nil {
+		return vpsd.Options{}, nil, configErrorf("WGFT_WG_ADDRESS: %q is not a valid address/prefix such as 10.200.0.1/24: %v", c.str("WGFT_WG_ADDRESS"), err)
+	}
+	if err := validateListenAddr("WGFT_AGENT_API", c.str("WGFT_AGENT_API")); err != nil {
+		return vpsd.Options{}, nil, err
+	}
+	if err := validateListenAddr("WGFT_ADMIN", c.str("WGFT_ADMIN")); err != nil {
+		return vpsd.Options{}, nil, err
+	}
 	limits, err := limitsFromConfig(c)
 	if err != nil {
 		return vpsd.Options{}, nil, err
@@ -93,6 +110,25 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 		AdminHost:       c.slice("WGFT_ADMIN_HOST"),
 	}
 	return opts, c, nil
+}
+
+// validateListenAddr checks that val is a syntactically valid net.Listen("tcp", ...) address
+// (host:port) before anything is touched, catching a typo such as a bare address with no port.
+// WGFT_ADMIN may also be a unix:// socket path, which this leaves alone. Without this, a bad value
+// reaches admin.Listen or agentapi.Listen deep inside vpsd.Run (after wg is already up), whose
+// generic net.Listen error there is indistinguishable from a genuine environment problem (a port
+// already in use, an address not yet configured) and becomes exit code 1: the shipped unit's
+// Restart=on-failure loops on it forever even though a syntax error never fixes itself by
+// retrying (docs/design.md 11a 節). A real bind failure (EADDRINUSE and similar) still reaches
+// net.Listen unchanged and keeps exit code 1, since retrying that can genuinely help.
+func validateListenAddr(env, val string) error {
+	if strings.HasPrefix(val, "unix://") {
+		return nil
+	}
+	if _, _, err := net.SplitHostPort(val); err != nil {
+		return configErrorf("%s: %q is not a valid host:port: %v", env, val, err)
+	}
+	return nil
 }
 
 func newServerCmd() *cobra.Command {

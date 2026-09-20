@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -204,5 +205,64 @@ func TestAgentLsConnectedStillShowsLiveState(t *testing.T) {
 	}
 	if fields.rules != "1 ok" {
 		t.Errorf("connected agent's RULES = %q, want \"1 ok\" unprefixed", fields.rules)
+	}
+}
+
+// WGFT_JOIN 自体が原因の起動中止(初回登録前の欠落、構文の誤り)は、ネットワークに触る前に
+// 終了コード 3 で止まる(仕様 11a 節)。以前は internal/agent.ensureRegistered がプレーンな error を
+// 返すだけで、cmd/wgft のどこもそれを *configError や *wg.StartupRefusal に写していなかったため、
+// 終了コード 1 になり、同梱の agent.service(Restart=on-failure、RestartSec=2、
+// RestartPreventExitStatus=3。この値を含まない)が 2 秒おきに再起動を繰り返していた。
+// agent run を cobra 経由で実行し、実際の CLI の経路で確かめる。
+func TestAgentJoinErrorsExitCode(t *testing.T) {
+	none := filepath.Join(t.TempDir(), "none.env")
+	cases := []struct {
+		name string
+		join string
+	}{
+		{"no join, not registered", ""},
+		{"malformed join", "not-a-join-string"},
+		{"join with no port", "wgft://example.com/tok#sha256:00"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WGFT_JOIN", tc.join)
+			root := newRootCmd()
+			root.SetArgs([]string{"agent", "run", "--config", none, "--data-dir", t.TempDir()})
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			err := root.Execute()
+			if got := exitCode(err); err == nil || got != exitConfigRefusal {
+				t.Errorf("err=%v exitCode=%d, want %d", err, got, exitConfigRefusal)
+			}
+			if !isAgentConfigRefusal(err) {
+				t.Errorf("isAgentConfigRefusal(%v) = false, want true", err)
+			}
+		})
+	}
+}
+
+// TestAgentConfigRefusalExitsWithConfigRefusal is the unit-level counterpart of
+// server_test.go's TestConntrackReadFailureExitsWithConfigRefusal, checking isAgentConfigRefusal
+// and exitCode directly against internal/agent.ConfigRefusal.
+func TestAgentConfigRefusalExitsWithConfigRefusal(t *testing.T) {
+	err := &agent.ConfigRefusal{Reason: "not registered and no join string; provide via WGFT_JOIN or --join"}
+	if !isAgentConfigRefusal(err) {
+		t.Errorf("isAgentConfigRefusal(%v) = false, want true", err)
+	}
+	if got := exitCode(err); got != exitConfigRefusal {
+		t.Errorf("exitCode(%v) = %d, want %d", err, got, exitConfigRefusal)
+	}
+	// sanity: confirm the type really is what isAgentConfigRefusal looks for.
+	var refusal *agent.ConfigRefusal
+	if !errors.As(error(err), &refusal) {
+		t.Fatal("sanity: err is not a *agent.ConfigRefusal")
+	}
+	// a plain error, and nil, must not be misclassified.
+	if isAgentConfigRefusal(errors.New("network unreachable")) {
+		t.Error("isAgentConfigRefusal(plain error) = true, want false")
+	}
+	if isAgentConfigRefusal(nil) {
+		t.Error("isAgentConfigRefusal(nil) = true, want false")
 	}
 }

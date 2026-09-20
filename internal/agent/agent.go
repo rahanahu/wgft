@@ -350,6 +350,19 @@ func (rt *runtime) reconnect() {
 	}
 }
 
+// ConfigRefusal marks an ensureRegistered failure caused by WGFT_JOIN itself (missing on a first
+// run, malformed, or already spent), never by the environment, so retrying it can never help.
+// cmd/wgft maps it to the same exit code as vpsd's *wg.StartupRefusal (docs/design.md 9, 11a 節),
+// so the shipped agent.service's RestartPreventExitStatus=3 stops systemd from restarting it every
+// 2 seconds forever. Before this, ensureRegistered returned these as plain errors, indistinguishable
+// from a Register network failure (which does deserve the restart loop, since the VPS or network
+// may recover), so both became the generic exit code 1. A stale WGFT_JOIN left in a compose file
+// once the agent is already registered is deliberately not covered here (11a 節): ensureRegistered
+// never reaches this path in that case, it only logs and returns nil above.
+type ConfigRefusal struct{ Reason string }
+
+func (e *ConfigRefusal) Error() string { return e.Reason }
+
 // ensureRegistered は初回登録を行う(仕様 5.1 節)。恒久トークンがあれば何もしない。
 // WGFT_JOIN が compose に残ったまま再起動されるのが普通なので、使用済みの接続文字列は黙って無視する。
 // WGFT_NAME / --name は任意。接続文字列の発行時の名前に紐付いているので、与えなければトークンに
@@ -367,14 +380,14 @@ func ensureRegistered(f *credentials.Credentials, opts Options) error {
 		return nil
 	}
 	if opts.Join == "" {
-		return errors.New("not registered and no join string; provide via WGFT_JOIN or --join")
+		return &ConfigRefusal{Reason: "not registered and no join string; provide via WGFT_JOIN or --join"}
 	}
 	j, err := ParseJoin(opts.Join)
 	if err != nil {
-		return err
+		return &ConfigRefusal{Reason: err.Error()}
 	}
 	if j.TokenHash() == f.UsedJoinTokenSHA256 {
-		return errors.New("this join string is already used; issue a new join string")
+		return &ConfigRefusal{Reason: "this join string is already used; issue a new join string"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

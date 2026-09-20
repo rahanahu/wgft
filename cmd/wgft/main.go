@@ -3,12 +3,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
 
+	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/buildinfo"
 )
 
@@ -59,10 +61,18 @@ func main() {
 
 // exitCode は Execute の失敗を終了コードに振り分ける。設定起因で再起動しても直らないものは 3。
 func exitCode(err error) int {
-	if isStartupRefusal(err) || isConfigError(err) {
+	if isStartupRefusal(err) || isConfigError(err) || isAgentConfigRefusal(err) {
 		return exitConfigRefusal
 	}
 	return 1
+}
+
+// isAgentConfigRefusal は、agent の WGFT_JOIN 自体が原因の起動中止(欠落、構文の誤り、使用済み)かを返す
+// (internal/agent.ConfigRefusal、仕様 11a 節)。internal/agent はどの OS 向けビルドにも入るので、
+// isStartupRefusal と違って build tag で分ける必要が無い。
+func isAgentConfigRefusal(err error) bool {
+	var refusal *agent.ConfigRefusal
+	return errors.As(err, &refusal)
 }
 
 // effectiveVersion は -X で埋めた buildinfo.Version を返す。埋められていない(`go install ...@v0.1.0` で
