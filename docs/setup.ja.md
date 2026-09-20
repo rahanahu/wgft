@@ -21,6 +21,8 @@ VPS 側は Linux で動作します。自宅側の agent は Windows amd64 で�
 
 VPS で root が使えるならカーネルモードを推奨します。ユーザー空間モードは、root が使えない環境、カーネルに WireGuard がない環境、コンテナだけで完結させたい場合向けです。
 
+カーネルモードは、ホストの conntrack の表にも依存します。`wgft server check` と起動時のログは、`nf_conntrack_max` が wgft の推奨する下限 65536 を下回っている場合に警告し、上げるための `sysctl -w net.netfilter.nf_conntrack_max=65536` を提示します。
+
 フローには、ルールごと、接続元アドレスごと、プロセス全体の 3 段の同時数の上限があります。agent は接続元アドレスを区別できないため、ルールごととプロセス全体の 2 段だけを適用します。`wgft server` は、ユーザー空間モードでは 3 段とも Go で適用します。カーネルモードでは、DNAT ルールの通信は nftables が転送し、`wgft server` を経由しません。そのため、DNAT ルールには接続元アドレスごとの上限だけを nftables の `ct count` で適用します。proxy モードのルールの TCP 接続は、カーネルモードでも `wgft server` が終端します。そのため、proxy モードのルールにはユーザー空間モードと同じく 3 段とも適用します。上限に達すると新しいフローだけを拒否し、既存のフローは切りません。カーネルモードでも、自宅側の agent は中継を行うため、agent の上限の対象です。
 
 プロセス全体の上限は `WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS` で設定し、既定値はそれぞれ 8192 と 2048 です。server と agent は別プロセスなので、必要ならそれぞれに設定してください。wgft はこの 2 つの値から Go ランタイムのメモリのソフト上限を計算し、起動時に表示します。開発用ラボでは、ユーザー空間モードの server で既定値の上限を埋め、さらに大量の通信を送ったときの最大 RSS は 208 MiB でした。`WGFT_MAX_UDP_FLOWS=2048` と `WGFT_MAX_TCP_FLOWS=1024` では同じ負荷を 150 MiB の cgroup 制限内で動かせました。実際の 256 MiB VPS ではまだ確認していません。systemd では、必要なら付属 unit のコメント例を使って `MemoryMax=` を起動時に表示されるソフト上限より大きい値に設定できます。
@@ -244,6 +246,8 @@ sudo launchctl bootout system/io.github.rahanahu.wgft.agent
 sudo install -m 0755 wgft-darwin-arm64 /usr/local/bin/wgft
 sudo launchctl bootstrap system /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
 ```
+
+wgft は更新の経路を保証しますが、更新後に旧版へ戻すことは保証しません。戻す場合に備え、更新前に `~/Library/Application Support/wgft` のバックアップを取ってください。
 
 この構成は、macOS の次の 2 つの挙動に合わせたものです。
 

@@ -170,7 +170,7 @@ Then open `http://localhost:8686`. Other admin access options are documented in 
 
 ## Status
 
-Alpha, v0.5.0. Kernel mode has been verified on the author's VPS/home setup for UDP and TCP forwarding, NAT traversal, reconnects, reboot recovery, and teardown. Userspace mode has been verified in the development lab and on a VPS. Relayed flows are bounded per rule, source, and process to limit memory use under load. See the design and setup documentation for implementation and deployment details.
+Alpha, v0.5.0. Kernel mode has been verified on the author's VPS/home setup for UDP and TCP forwarding, NAT traversal, reconnects, reboot recovery, and teardown. Userspace mode has been verified in the development lab and on a VPS. Relayed flows are bounded per rule, source, and process to limit memory use under load. The upgrade path is supported, but reverting to an older version afterward is not promised. Back up the data directory before upgrading so you can restore it if you need to move back. See the design and setup documentation for implementation and deployment details.
 
 ## Security
 
