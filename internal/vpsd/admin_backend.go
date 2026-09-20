@@ -67,7 +67,7 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 		}
 		if st.Heartbeat != nil {
 			info.Generation = st.Heartbeat.Generation
-			info.Tunnel = st.Heartbeat.Tunnel
+			info.Tunnel = admin.TunnelStatusView(st.Heartbeat.Tunnel)
 			info.Rules = st.Heartbeat.Rules
 		}
 		if st.Connected {
@@ -409,11 +409,65 @@ func (d *Daemon) ResourceStatus() admin.ResourceStatus {
 	return admin.ResourceStatus{FlowBudget: budget, Refusals: refusals}
 }
 
+// AgentRuleStatuses is admin.AgentRuleStatusBackend's implementation (design.md 5.2、7a.11 節): each
+// of rules' agent-side status, keyed by rule ID, from the per-agent stream state Agents() also reads
+// Tunnel/Rules from. rules is the rule set already read for this response (admin.go passes
+// resp.Rules), so this needs no store read of its own and cannot fail.
+//
+// A rule's status comes only from its own agent (r.Agent), by looking that one agent's cached
+// heartbeat up for an entry with that rule's ID - never by collecting every agent's heartbeat and
+// keying by rule ID regardless of which agent reported it. The latter looked plausible but was
+// wrong: a disconnected agent keeps its last heartbeat's content (design.md 5.2 節), so if a rule
+// moved to a different agent, or was deleted, while its old agent was offline, that old agent's
+// stale heartbeat can still list the rule's ID. Looking a rule up by its own current agent means a
+// moved rule always shows its new agent's live status, and a deleted rule's ID never appears at all
+// (it is simply not in rules any more, so it is never looked up).
+//
+// Every rule gets an entry, whether or not its agent has reported it yet (2026-09-21, owner's
+// decision; design.md 7a.11 節): otherwise a rule id absent from the result would be indistinguishable
+// from this Backend not implementing the interface at all. d.hub.Status of an agent name the hub has
+// never seen - never registered, or revoked (stream.Hub.Disconnect removes its entry entirely) -
+// returns the zero Status (Connected false, Heartbeat nil), so that case falls out of the same code
+// path with no special-casing.
+func (d *Daemon) AgentRuleStatuses(rules []proto.Rule) map[string]admin.AgentRuleStatus {
+	out := make(map[string]admin.AgentRuleStatus, len(rules))
+	for _, rule := range rules {
+		st := d.hub.Status(rule.Agent)
+		entry := admin.AgentRuleStatus{Agent: rule.Agent, Connected: st.Connected}
+		if st.Heartbeat != nil {
+			for _, rs := range st.Heartbeat.Rules {
+				if rs.ID != rule.ID {
+					continue
+				}
+				entry.State, entry.Reason = rs.State, rs.Reason
+				if !st.LastHeartbeat.IsZero() {
+					entry.At = st.LastHeartbeat.Format(time.RFC3339)
+				}
+				break
+			}
+		}
+		out[rule.ID] = entry
+	}
+	return out
+}
+
+// neverZero returns nil for 0 ("never published"; design.md 7a.11 節) and a pointer to g otherwise.
+// Generation 0 itself is a real, reachable value (9 節: the generation is 0 while there are no
+// rules), so the zero value cannot double as "never published"; a rule whose forwarding value has
+// genuinely never been published is instead simply absent (rule_states[id].active_generation is
+// omitted, not present as 0 or null).
+func neverZero(g uint64) *uint64 {
+	if g == 0 {
+		return nil
+	}
+	return &g
+}
+
 func applyStatusToAdmin(st reconcile.Status) admin.ApplyStatus {
 	out := admin.ApplyStatus{DesiredGeneration: st.DesiredGeneration, ActiveGeneration: st.ActiveGeneration,
 		Rules: make(map[string]admin.RuleApply, len(st.Rules)), LastError: st.LastError}
 	for id, rs := range st.Rules {
-		out.Rules[id] = admin.RuleApply{ApplyState: string(rs.State), Reason: rs.Reason, ActiveGeneration: rs.ActiveGeneration}
+		out.Rules[id] = admin.RuleApply{ApplyState: string(rs.State), Reason: rs.Reason, ActiveGeneration: neverZero(rs.ActiveGeneration)}
 	}
 	conv := func(rs []reconcile.Resource) []admin.DriftResource {
 		res := make([]admin.DriftResource, 0, len(rs))

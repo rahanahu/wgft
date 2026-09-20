@@ -123,7 +123,7 @@ func newFakeBackend(mode string) *fakeBackend {
 			Connected: true, StreamFrom: "203.0.113.10:51820", WGEndpoint: "203.0.113.10:51820",
 			LastHeartbeat: rfc(-5 * time.Second), Generation: 42,
 			PublicKey: "HhYgfQgcVISS51VHjdkVxdPeCdaDL3P+vgm9soc8MLQ=", LastHandshake: rfc(-40 * time.Second),
-			Tunnel: proto.TunnelStatus{State: proto.StatusOK, Endpoint: "203.0.113.10:51820"},
+			Tunnel: admin.TunnelStatus{State: proto.StatusOK, Endpoint: "203.0.113.10:51820"},
 			Rules: []proto.RuleStatus{
 				{ID: "r_mc_tcp25565", State: proto.StatusOK},
 				{ID: "r_valheim_udp", State: proto.StatusOK},
@@ -141,7 +141,7 @@ func newFakeBackend(mode string) *fakeBackend {
 			Connected: false, StreamFrom: "203.0.113.24:41220", WGEndpoint: "198.51.100.9:51820",
 			LastHeartbeat: rfc(-3 * time.Minute), Generation: 40,
 			PublicKey: "Z50DXIe02Z4jmIIULTXv8vct6DA04NgcDKgxLdm6ytI=", LastHandshake: rfc(-6 * time.Minute),
-			Tunnel:   proto.TunnelStatus{State: proto.StatusOK, Endpoint: "198.51.100.9:51820"},
+			Tunnel:   admin.TunnelStatus{State: proto.StatusOK, Endpoint: "198.51.100.9:51820"},
 			Warnings: []admin.Warning{mismatch},
 		},
 		{
@@ -151,7 +151,7 @@ func newFakeBackend(mode string) *fakeBackend {
 			Connected: true, StreamFrom: "192.0.2.55:51820", WGEndpoint: "192.0.2.55:51820",
 			LastHeartbeat: rfc(-12 * time.Second), Generation: 40,
 			PublicKey: "qJzBQ+ilV8EQ9749TxyIY1sB1jRieCYDU33kUi6aAPg=", LastHandshake: rfc(-18 * time.Second),
-			Tunnel: proto.TunnelStatus{State: proto.StatusOK, Endpoint: "192.0.2.55:51820"},
+			Tunnel: admin.TunnelStatus{State: proto.StatusOK, Endpoint: "192.0.2.55:51820"},
 			Rules: []proto.RuleStatus{
 				{ID: "r_lab_udp19132", State: proto.StatusOK},
 				{ID: "r_lab_tcp22", State: proto.StatusOK},

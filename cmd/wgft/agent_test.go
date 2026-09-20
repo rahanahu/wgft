@@ -159,7 +159,7 @@ func TestAgentLsDisconnectedShowsLastReport(t *testing.T) {
 	agents := []admin.AgentInfo{
 		{
 			Name: "office", Address: "10.200.0.3", Connected: false, LastHeartbeat: old,
-			Tunnel: proto.TunnelStatus{State: proto.StatusOK},
+			Tunnel: admin.TunnelStatus{State: proto.StatusOK},
 			Rules:  []proto.RuleStatus{{ID: "r_a", State: proto.StatusOK}},
 		},
 	}
@@ -185,7 +185,7 @@ func TestAgentLsConnectedStillShowsLiveState(t *testing.T) {
 		{
 			Name: "home", Address: "10.200.0.2", Connected: true, StreamFrom: "203.0.113.10:51820",
 			LastHeartbeat: time.Now().Format(time.RFC3339),
-			Tunnel:        proto.TunnelStatus{State: proto.StatusOK},
+			Tunnel:        admin.TunnelStatus{State: proto.StatusOK},
 			Rules:         []proto.RuleStatus{{ID: "r_a", State: proto.StatusOK}},
 		},
 	}

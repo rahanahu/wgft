@@ -20,8 +20,11 @@ type RuleApply struct {
 	// Reason explains pending and not_active, e.g. "bind failed: ...", "disabled".
 	Reason string `json:"reason,omitempty"`
 	// ActiveGeneration is the generation at which the rule's forwarding value was last published;
-	// 0 when it never was.
-	ActiveGeneration uint64 `json:"active_generation"`
+	// nil (the key absent on the wire) when it never was. Generation 0 is a real, reachable value
+	// (design.md 9 節: the generation is 0 while there are no rules at all), so it cannot double as
+	// "never published"; this follows the same *uint64 convention as the sibling
+	// BatchResponse.DesiredGeneration/ActiveGeneration (design.md 7a.11 節).
+	ActiveGeneration *uint64 `json:"active_generation,omitempty"`
 }
 
 // DriftResource is one forwarding resource that differs from the declaration.

@@ -93,7 +93,7 @@ type AgentInfo struct {
 	StreamFrom    string             `json:"stream_from,omitempty"`
 	LastHeartbeat string             `json:"last_heartbeat,omitempty"`
 	Generation    uint64             `json:"generation"` // 処理済み世代
-	Tunnel        proto.TunnelStatus `json:"tunnel"`
+	Tunnel        TunnelStatus       `json:"tunnel"`     // tunnelview.go: wire の proto.TunnelStatus とは別の見せ方(7a.11 節)
 	Rules         []proto.RuleStatus `json:"rules,omitempty"`
 	// 版の交渉(仕様 7a.6 節)。未接続、または接続が legacy v0 なら ProtocolVersion は 0 で、
 	// AgentProtocolLegacy が true な場合だけ「legacy v0 と判定した」ことを示す(未接続との違いは
@@ -198,6 +198,9 @@ type BatchResponse struct {
 	// v1 への加算で、報告を持たない Backend では省く(resource_status.go の withResourceStatus)。
 	FlowBudget       map[proto.Proto]FlowBudget   `json:"flow_budget,omitempty"`
 	ResourceRefusals map[string]map[string]uint64 `json:"resource_refusals,omitempty"`
+	// AgentRuleStates is each rule's agent-side status (agent_rule_status.go; design.md 5.2、7a.11
+	// 節). v1 への加算で、報告を持たない Backend では省く。
+	AgentRuleStates map[string]AgentRuleStatus `json:"agent_rule_states,omitempty"`
 }
 
 // ErrorBody は失敗時の本文。
@@ -331,6 +334,7 @@ func (s *Server) getRules(w http.ResponseWriter, r *http.Request) {
 	resp := BatchResponse{Generation: gen, Rules: rules, Drops: drops}
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)
+	s.withAgentRuleStatus(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -352,6 +356,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	resp := BatchResponse{Generation: res.Generation, Changed: res.Changed, Rules: res.Rules}
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)
+	s.withAgentRuleStatus(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 

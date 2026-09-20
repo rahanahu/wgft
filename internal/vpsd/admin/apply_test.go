@@ -69,8 +69,8 @@ func TestRulesResponseApplyFields(t *testing.T) {
 	status := ApplyStatus{
 		DesiredGeneration: 7, ActiveGeneration: 6,
 		Rules: map[string]RuleApply{
-			"r_ok":   {ApplyState: ApplyActive, ActiveGeneration: 6},
-			"r_bind": {ApplyState: ApplyNotActive, Reason: "bind failed: address already in use", ActiveGeneration: 5},
+			"r_ok":   {ApplyState: ApplyActive, ActiveGeneration: u64p(6)},
+			"r_bind": {ApplyState: ApplyNotActive, Reason: "bind failed: address already in use", ActiveGeneration: u64p(5)},
 		},
 		Drift: Drift{Retiring: []DriftResource{{RuleID: "r_bind", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 8443, Hi: 8443}, Forwarding: "relay"}}},
 	}
@@ -115,3 +115,33 @@ func TestRuleRunStateServerSide(t *testing.T) {
 		t.Errorf("active on the server, applied by the agent: badge %q, want success", badge)
 	}
 }
+
+// TestRuleApplyActiveGenerationNeverPublishedVsZeroVsN confirms RuleApply.ActiveGeneration follows
+// the same *uint64 convention as BatchResponse.DesiredGeneration/ActiveGeneration (design.md 7a.11
+// 節, item 2 of the 2026-09-21 JSON-contract fixes): a rule that never published is absent from the
+// JSON, distinct from a rule genuinely published at generation 0 (which the store can produce: 9
+// 節, "0 while there are no rules") and from one at a later generation N.
+func TestRuleApplyActiveGenerationNeverPublishedVsZeroVsN(t *testing.T) {
+	cases := []struct {
+		name string
+		ag   *uint64
+		want string // the whole encoded RuleApply, to also confirm the key is absent, not null
+	}{
+		{"never published", nil, `{"apply_state":"active"}`},
+		{"published at generation 0", u64p(0), `{"apply_state":"active","active_generation":0}`},
+		{"published at generation N", u64p(6), `{"apply_state":"active","active_generation":6}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b, err := json.Marshal(RuleApply{ApplyState: ApplyActive, ActiveGeneration: c.ag})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != c.want {
+				t.Errorf("got %s, want %s", b, c.want)
+			}
+		})
+	}
+}
+
+func u64p(u uint64) *uint64 { return &u }
