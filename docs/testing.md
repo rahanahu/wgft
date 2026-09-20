@@ -64,7 +64,9 @@ CI (`.github/workflows/ci.yml`) は、ホストで完結する A1 から A8 と�
 
 開発の途中でラボの確認を流し直すときは、`lab/lifecycle.sh` に確認の番号を指定して、その確認だけを流せます (`lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b`)。
 
-今の CI は、B4 (`windows-test`)、B5 (`release-snapshot`)、B6 (`govulncheck`)、B8 (`macos-test`) を契機を問わずすべての PR で流しています。契機に合わせて振り分ける仕組み (パスによる絞り込みと、B6 の定期実行) は未実装で、v1.1 以降に導入します。それまでは、この 4 つが関係の無い PR で落ちた場合も、その PR の不具合とは限りません。B6 は外部の脆弱性の情報によって結果が変わるので、コードを変えていない PR でも落ちることがあります。
+CI は、B4 (`windows-test`)、B5 (`release-snapshot`)、B6 (`govulncheck`)、B8 (`macos-test`) を、前節の表の契機に当たる PR でだけ流します。振り分けは `.github/workflows/ci.yml` の `changes` という 1 つのジョブが担い、`dorny/paths-filter` で変更されたパスを調べ、`agent-platform` と `build` の契機に当たるかどうかを他のジョブへ渡します。振り分けはワークフロー全体の `paths:` ではなく、ジョブごとの `if:` で行います。ワークフローの `paths:` で絞ると、当たらない PR ではジョブそのものが実行されず、GitHub の checks の一覧に現れません。ブランチ保護がこれらを必須の check にした場合、現れない check はいつまでも待ち続け、マージを永久に塞ぎます。ジョブごとの `if:` であれば、当たらない PR でもジョブは実行され、内容を飛ばして skipped で終わります。GitHub は skipped のジョブを必須の check の合格として扱うため、マージを塞ぎません。
+
+パスによる判定ができない、または信用できないときは、契機を問わずすべてを流す側に倒します。`changes` ジョブの `paths-filter` の実行が失敗したとき、比較対象の直前のコミットが無いとき (ブランチの最初の push、force push)、`workflow_dispatch` による手動実行のとき、`.github/workflows/**` 自身を変更したとき (振り分けの仕組み自身の変更を、その仕組みに判定させないため) は、B4、B5、B6、B8 のすべてを流します。B6 はこれに加えて、週に 1 回の定期実行と `workflow_dispatch` でも流します。定期実行はコードを変えていない PR にも起きるため、この場合の失敗は外部の脆弱性の情報の変化によるものであり、コードの不具合とは限りません。定期実行が失敗すると、GitHub はリポジトリの所有者に既定でメールを送ります。追加の通知の仕組みや issue を起票する bot は用意していません。
 
 netns のトポロジを組む `lab/netns.sh` は Incus に依存しないので、GitHub の runner の上で root としてラボの一式を流す案があります。ただし、runner のカーネルの版と、runner で動く Docker が有効にする `br_netfilter` の影響が結果に混ざるので、ラボを VM に切り分けた理由 (CLAUDE.md の「開発用ラボの立て方」) と両立するかは未確認です。v1 では採りません。
 
@@ -147,11 +149,11 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | B1 | build tag `lab` の nftables のテスト (`lab/lab test internal/dataplane/linuxkernel/nft`。ゴールデンテスト、他のテーブルを触らないこと、wg からの転送の遮断) | 生成した式が実際のカーネルで同じ `nft list` にならないこと | ラボ | `nft-emit`、`kernel`、`admission` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
 | B2 | build tag `lab` の WireGuard、ホストの検査、teardown のテスト (`internal/dataplane/linuxkernel/wg`、`internal/platform/linux`、`internal/vpsd`) | 他の wg インタフェースの乗っ取り、所有の判定の誤り、他のテーブルの削除 | ラボ | `kernel`、`deploy` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
 | B3 | 実際の Caddy での HTTPS の経路 ([lab/caddy/README.md](../lab/caddy/README.md)) | PROXY protocol のヘッダを実際のリバースプロキシが読めないこと | ラボ | `relay` | 契機に当たる PR ごとに 1 回 | 10 分前後 (見込み) | 手作業 |
-| B4 | CI の `windows-test` | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方) の退行 | CI (Windows の runner) | `agent-platform` (今はすべての PR) | 契機に当たる PR の更新ごと | 数分 | 自動 |
-| B5 | CI の `release-snapshot` | GoReleaser の設定、フック、成果物の名前の食い違い | CI (Linux) | `build`、`rc` (今はすべての PR) | 契機に当たる PR の更新ごと | 数分 | 自動 |
-| B6 | CI の `govulncheck` | 依存するモジュールの既知の脆弱性 | CI (Linux) | `build`、`rc`、週に 1 回の定期実行 (今はすべての PR) | 契機に当たる PR の更新ごと | 1 分前後 | 自動 |
+| B4 | CI の `windows-test` | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方) の退行 | CI (Windows の runner) | `agent-platform` | 契機に当たる PR の更新ごと | 数分 | 自動 |
+| B5 | CI の `release-snapshot` | GoReleaser の設定、フック、成果物の名前の食い違い | CI (Linux) | `build`、`rc` | 契機に当たる PR の更新ごと | 数分 | 自動 |
+| B6 | CI の `govulncheck` | 依存するモジュールの既知の脆弱性 | CI (Linux) | `build`、`rc`、週に 1 回の定期実行 | 契機に当たる PR の更新ごと。定期実行は週に 1 回 | 1 分前後 | 自動 |
 | B7 | `lab/version-skew.sh` | 旧 agent と新 server、新 agent と旧 server、legacy v0 の agent と新 server の組で、登録、全体状態の配信、転送、再接続が壊れること。旧い側が表せない機能のルールを理由付きの `not_active` にすること (7a.6 節) は、該当する capability がまだ無いため確認を SKIP する | ラボ (直前のリリースと legacy v0 のバイナリを GitHub の Releases から取得してキャッシュする。ラボの VM から GitHub への経路が無い場合は、バイナリを事前に置く) | `protocol`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 数分 | 自動 (開発者が起動) |
-| B8 | CI の `macos-test` | macOS でだけ通る経路 (UDP の送信バッファの既定 9216 バイトを超えるデータグラムの書き込み) の退行 | CI (macOS の runner) | `agent-platform`、`rc` (今はすべての PR) | 契機に当たる PR の更新ごと | 1 分から 2 分 (初回の実行は 1 分 15 秒) | 自動 |
+| B8 | CI の `macos-test` | macOS でだけ通る経路 (UDP の送信バッファの既定 9216 バイトを超えるデータグラムの書き込み) の退行 | CI (macOS の runner) | `agent-platform`、`rc` | 契機に当たる PR の更新ごと | 1 分から 2 分 (初回の実行は 1 分 15 秒) | 自動 |
 | B9 | 配布物の VM 試験 (`scripts/dist-vm.sh`) | 同梱の unit で起動しないこと、VM の再起動の後に転送が戻らないこと、設定の誤りで再起動を繰り返すこと | 2 台の VM (server と agent) | `deploy`、`rc` | 契機に当たる PR ごとに 1 つのディストリビューションで、リリース候補ごとに 3 つのディストリビューションで | 約 4 分 (Debian 12、Ubuntu 24.04、Fedora 44 のいずれも) | 自動 (開発者が起動) |
 | B10 | Docker のイメージの疎通 (`scripts/docker-smoke.sh`) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (ホスト、CI の runner、ラボの VM のどれでも可) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | キャッシュが温まっていれば約 8 秒、初回はイメージの取得を含めて約 30 秒 | 自動 (開発者が起動) |
 
@@ -343,16 +345,6 @@ v1 の条件のうち、公式に対応をうたう 3 つのディストリビ�
 - 契機:`manual-release` と、表の各行の契機
 - 自動化:手作業です。E6 のうち外からの疎通の確認だけは、機械で定期的に行えます
 - v1:必須で、v1 の前に 1 回の項目です
-
-### CI の契機による振り分け
-
-- 内容:B4、B5、B6、B8 を契機のパスに当たる PR でだけ流し、B6 を週に 1 回の定期実行とリリースのタグでも流します
-- 足りない理由:ラボではなく CI の設定の問題です。今の CI は、この 4 つをすべての PR で流しています
-- 環境:CI です
-- 時期:契機に当たる PR ごとと、定期実行で流します
-- 契機:`build`、`agent-platform`
-- 自動化:自動です
-- v1:v1.1 以降でよい項目です。4 つとも開発者の待ち時間を増やさない並列のジョブなので、振り分けの効果は、関係の無い失敗を PR から除くことに限られます
 
 ## Windows と macOS のエージェント
 

@@ -1,15 +1,138 @@
 name: CI
 
+# Trigger names in the comments below are the ones docs/testing.md's "変更の契機と対象のパス"
+# table defines. Only two of that table's triggers gate a job that actually runs on GitHub's
+# runners; the rest gate lab-only B-class tests (B1, B2, B3, B7, B9, B10) that need Incus and
+# never run here. The path globs below are copied from that table, so the table and this file
+# can be compared line by line:
+#
+#   agent-platform -> internal/agent/**, internal/flock/**,
+#                     internal/dataplane/userspace/relay/**, internal/dataplane/userspace/tunnel/**,
+#                     cmd/wgft/**, **/*_windows.go, **/*_darwin.go
+#                     (also **/*_unix.go here: every existing *_unix.go and //go:build-tagged
+#                     file already lives under one of the directories above, but a future one
+#                     might not, and this filter only widens what runs, never narrows it)
+#                     -> gates windows-test (B4), macos-test (B8)
+#   build          -> .goreleaser.yaml, scripts/build-release.sh, scripts/goreleaser-checksum.sh,
+#                     scripts/third-party-licenses.sh, scripts/check-release-assets.sh,
+#                     scripts/docker-smoke.sh, deploy/Dockerfile.*, deploy/*.compose.yaml,
+#                     go.mod, go.sum, .github/workflows/**
+#                     -> gates release-snapshot (B5), govulncheck (B6)
+#
+# A change to .github/workflows/** (the `workflows` filter below) additionally forces every
+# gated job to run, on top of what `build` already covers: a ci.yml change can change how the
+# other jobs behave, so path filtering must not be trusted to judge its own correctness.
+#
+# build-test (A1, A2, A5, A6, A7) and lint-output (A8) are not gated: they are the cheap
+# checks that docs/testing.md's A class runs on every PR regardless of what changed.
+#
+# Every job below always reports a status. The workflow itself always triggers on push and
+# pull_request; only the job body is conditional on the `changes` job's output, so a job this
+# PR doesn't need shows up as skipped rather than missing. GitHub treats a skipped job as
+# passing for a required status check, so this is safe even if `main` later requires these
+# checks to pass before a squash merge (see docs/testing.md's "CI とラボの関係").
+
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly govulncheck (B6), independent of any PR: new advisories affect code nobody
+    # touched. 03:17 UTC Tuesday is away from the UTC-midnight rush GitHub's scheduling
+    # documentation warns can delay jobs, and away from any release-day activity.
+    - cron: "17 3 * * 2"
+  workflow_dispatch:
+    # Lets a human re-run govulncheck on demand (a new advisory doesn't wait for the
+    # weekly schedule or a qualifying code change), or force a full run of every job.
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    # Decides which of the gates above this run hits. This job itself always runs
+    # regardless of event type; it is cheap (checkout plus a path diff), and always having
+    # its outputs available keeps the jobs below simple. It never fails the whole run: the
+    # paths-filter step is allowed to fail, and the decide step turns that into "run
+    # everything" instead (see the fail-open rule below).
+    runs-on: ubuntu-latest
+    outputs:
+      run_all: ${{ steps.decide.outputs.run_all }}
+      agent_platform: ${{ steps.filter.outputs.agent_platform }}
+      build: ${{ steps.filter.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # dorny/paths-filter needs the commits it diffs between. A push event compares
+          # against github.event.before, which the default shallow (depth 1) checkout
+          # would not contain.
+          fetch-depth: 0
+      - id: filter
+        # v4.0.3 (https://github.com/dorny/paths-filter/releases/tag/v4.0.3), pinned by
+        # major-version tag. This is not a full commit SHA: every action already in this
+        # file and in release.yml (actions/checkout@v7, goreleaser/goreleaser-action@v7,
+        # docker/setup-buildx-action@v3, docker/login-action@v4, anchore/sbom-action@v0,
+        # actions/attest-build-provenance@v4, actions/attest-sbom@v4) is pinned the same
+        # way, so a lone SHA pin here would be an inconsistency rather than an improvement.
+        uses: dorny/paths-filter@v4
+        continue-on-error: true
+        with:
+          filters: |
+            workflows:
+              - '.github/workflows/**'
+            agent_platform:
+              - 'internal/agent/**'
+              - 'internal/flock/**'
+              - 'internal/dataplane/userspace/relay/**'
+              - 'internal/dataplane/userspace/tunnel/**'
+              - 'cmd/wgft/**'
+              - '**/*_windows.go'
+              - '**/*_darwin.go'
+              - '**/*_unix.go'
+            build:
+              - '.goreleaser.yaml'
+              - 'scripts/build-release.sh'
+              - 'scripts/goreleaser-checksum.sh'
+              - 'scripts/third-party-licenses.sh'
+              - 'scripts/check-release-assets.sh'
+              - 'scripts/docker-smoke.sh'
+              - 'deploy/Dockerfile.*'
+              - 'deploy/*.compose.yaml'
+              - 'go.mod'
+              - 'go.sum'
+              - '.github/workflows/**'
+      - id: decide
+        # Fail-open rule: a push with no reachable "before" commit (first push of a new
+        # branch, a force push) or any other failure of the filter step above must not
+        # silently skip everything, so run_all becomes true instead. workflow_dispatch has
+        # no base to diff against either, and by nature asks for a full run. A change to
+        # the workflow files themselves (the `workflows` filter) also sets run_all, for the
+        # reason in the header comment. A schedule event never sets run_all: its only
+        # purpose is the govulncheck run below, which checks github.event_name directly.
+        run: |
+          event="${{ github.event_name }}"
+          outcome="${{ steps.filter.outcome }}"
+          before="${{ github.event.before }}"
+          workflows_changed="${{ steps.filter.outputs.workflows }}"
+          run_all=false
+          if [ "$event" = "workflow_dispatch" ]; then
+            run_all=true
+          elif [ "$event" = "schedule" ]; then
+            run_all=false
+          elif [ "$outcome" != "success" ]; then
+            run_all=true
+          elif [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            run_all=true
+          elif [ "$workflows_changed" = "true" ]; then
+            run_all=true
+          fi
+          echo "run_all=$run_all" >> "$GITHUB_OUTPUT"
+
   build-test:
+    # A1, A2, A5, A6, A7 (see docs/testing.md): always runs on every push and pull
+    # request. Not gated, and not run on the weekly schedule (that event exists only to
+    # drive govulncheck below).
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -42,8 +165,6 @@ jobs:
           done
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   windows-test:
     # Runs the packages that actually build and pass on native Windows today: the agent
@@ -52,6 +173,18 @@ jobs:
     # subpackages are Linux-only (kernel WireGuard, nftables) and are not part of this job;
     # the build-test job's cross-build step already keeps ./cmd/wgft buildable for Windows,
     # this job additionally runs the Windows-specific code paths.
+    #
+    # Gated by the agent-platform trigger (B4, see the header comment). Runs whenever the
+    # changes job could not tell (run_all, including its own failure) or the agent-platform
+    # filter matched; !cancelled() keeps this from being auto-skipped just because `changes`
+    # was skipped or failed, which is the default behaviour for a job with `needs:`.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.agent_platform == 'true'
+      )
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -67,6 +200,15 @@ jobs:
     # SO_SNDBUF workaround for macOS's 9216-byte default UDP send buffer, docs/testing.md's
     # B8); the build-test job's cross-build step only compiles for darwin and does not run
     # anything.
+    #
+    # Gated the same way as windows-test, above.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.agent_platform == 'true'
+      )
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -84,6 +226,15 @@ jobs:
     # the released asset names, so a mismatch like #22's wgft-windows-amd64.sha256 naming a file
     # actually published as wgft-windows-amd64.exe fails here instead of only being caught by
     # someone running a snapshot by hand.
+    #
+    # Gated by the build trigger (B5, see the header comment).
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.build == 'true'
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -104,10 +255,40 @@ jobs:
       - name: verify released assets and their checksums
         run: bash scripts/check-release-assets.sh dist
 
+  govulncheck:
+    # Known-vulnerability scan of the module graph (B6). Gated by the build trigger like
+    # release-snapshot above, plus two triggers of its own: the weekly schedule and a
+    # manual workflow_dispatch (both checked directly against github.event_name, not
+    # through the changes job, since neither has a meaningful diff to filter). A scheduled
+    # failure is not silent: GitHub emails the repository owner when a scheduled workflow
+    # run fails, without any extra bot or issue-creation step.
+    needs: changes
+    if: >-
+      !cancelled() && (
+        github.event_name == 'schedule' ||
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.build == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   lint-output:
     # Keeps tool output English (no Japanese in string literals) and punctuation ASCII
     # in published files. Lab integration tests need Incus and are not run in CI
     # (see lab/README.md); they run on a developer VM.
+    #
+    # Not gated: A8 runs on every PR regardless of what changed, including a
+    # documentation-only change, since this is what catches full-width punctuation
+    # creeping into README.md, docs/*.md and similar public files. Not run on the
+    # weekly schedule, which exists only to drive govulncheck above.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
