@@ -227,8 +227,26 @@ func New(st *store.Store, backend Backend) *Server {
 	return s
 }
 
-// ServeHTTP は Host と Origin の検査(仕様 11 節)を通してから mux に渡す。
+// securityHeaders は Web UI と JSON の両方の応答に付ける防御的なヘッダ(仕様 11 節)。テンプレートが
+// 実際に読み込むもの(/static/ 配下の自オリジンの JS・CSS と、インラインの style 属性)だけを許す。
+// 画像、フォント、外部ドメインの読み込みは無いので default-src 'self' の外を空ける必要は無い。
+// /static/ の応答は変わらず埋め込みの静的資産なので、Cache-Control: no-store は付けない
+// (それ以外の応答には接続文字列などの秘密が乗ることがあるため付ける)。
+func securityHeaders(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Content-Security-Policy",
+		"default-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+	if !strings.HasPrefix(r.URL.Path, "/static/") {
+		h.Set("Cache-Control", "no-store")
+	}
+}
+
+// ServeHTTP は防御的なヘッダを付けたうえで、Host と Origin の検査(仕様 11 節)を通してから mux に渡す。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	securityHeaders(w, r)
 	// Host 検査:DNS リバインディングを防ぐ。CLI(Unix ソケット/ループバック)も localhost で通る
 	if !s.hostAllowed(hostOnly(r.Host)) {
 		writeError(w, http.StatusForbidden, "Host not allowed; open it via SSH forwarding or Tailscale")

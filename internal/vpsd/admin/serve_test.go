@@ -4,9 +4,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
 
 // TCP で開いた管理用 API には ReadHeaderTimeout・ReadTimeout・WriteTimeout・IdleTimeout が付き、
@@ -99,5 +103,53 @@ func TestAdminServerTCPIdleTimeout(t *testing.T) {
 		t.Fatal("expected the idle connection to be closed")
 	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		t.Fatalf("connection still open after %s", timeouts.IdleTimeout*10)
+	}
+}
+
+// Web UI と JSON の両方の応答に防御的なヘッダが付く。/static/ の応答は埋め込みの静的資産なので
+// Cache-Control: no-store を付けない(それ以外には付ける)。
+func TestSecurityHeaders(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	defer srv.Close()
+
+	for _, path := range []string{"/", "/api/v1/rules"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		h := resp.Header
+		if got := h.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options = %q, want nosniff", path, got)
+		}
+		if got := h.Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("%s: X-Frame-Options = %q, want DENY", path, got)
+		}
+		if got := h.Get("Referrer-Policy"); got != "no-referrer" {
+			t.Errorf("%s: Referrer-Policy = %q, want no-referrer", path, got)
+		}
+		if got := h.Get("Content-Security-Policy"); !strings.Contains(got, "default-src 'self'") {
+			t.Errorf("%s: Content-Security-Policy = %q, want it to restrict default-src to 'self'", path, got)
+		}
+		if got := h.Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control = %q, want no-store", path, got)
+		}
+	}
+
+	resp, err := http.Get(srv.URL + "/static/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got == "no-store" {
+		t.Error("/static/ responses should not be forced to no-store")
+	}
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("/static/: X-Content-Type-Options = %q, want nosniff", got)
 	}
 }
