@@ -148,6 +148,7 @@ func loadConfig(cmd *cobra.Command, specs []spec, configPath string) (*config, e
 		}
 		c.vals[sp.Env] = r
 	}
+	warnInsecureConfigFile(os.Stderr, configPath, c)
 	return c, nil
 }
 
