@@ -10,6 +10,8 @@ import (
 	"net/netip"
 	"time"
 
+	"golang.org/x/net/netutil"
+
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
 
@@ -135,6 +137,18 @@ func newHTTPServer(addr string, h http.Handler, tlsConfig *tls.Config, t serverT
 	}
 }
 
+// maxAgentConns はエージェント用 API の同時接続数の固定上限(仕様 11 節)。11a 節の設定項目には
+// しない(この上限は一度に受け付ける接続数の話であり、7 節の同時フロー数の上限とは別の軸である)。
+// 数百台のエージェントが 1 本ずつ stream(WebSocket)を張っても十分な余裕を持たせてある。
+// 上限に達した接続は accept を待つだけで、拒否や RST にはしない。すでに accept 済みで動いている
+// stream はこの上限に関わらず切れない(LimitListener は Close されるまで数え続けるだけである)。
+const maxAgentConns = 4096
+
+// limitListener は ln の同時接続数を n で制限する(golang.org/x/net はすでに依存にある:
+// internal/dataplane/userspace/tunnel が icmp/ipv4 で使っている)。n はテストが小さい値を
+// 注入できるよう引数にしてある。
+func limitListener(ln net.Listener, n int) net.Listener { return netutil.LimitListener(ln, n) }
+
 // Serve は TLS で待ち受け、そのまま応答を続ける(公開。Listen と ServeListener を続けて呼ぶ)。
 func (s *Server) Serve(addr string) error {
 	ln, err := s.Listen(addr)
@@ -160,5 +174,5 @@ func (s *Server) Listen(addr string) (net.Listener, error) {
 func (s *Server) ServeListener(ln net.Listener) error {
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{s.cert}, MinVersion: tls.VersionTLS12}
 	srv := newHTTPServer(ln.Addr().String(), s, tlsConfig, defaultTimeouts)
-	return srv.ServeTLS(ln, "", "")
+	return srv.ServeTLS(limitListener(ln, maxAgentConns), "", "")
 }
