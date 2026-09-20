@@ -69,7 +69,7 @@ func TestHostOriginAndBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	defer srv.Close()
 
 	// Host 検査:許可されない Host は 403、localhost 系は通る。
@@ -174,7 +174,7 @@ func TestBatchExpectedDigestConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	defer srv.Close()
 	c := &Client{Base: srv.URL}
 
@@ -248,7 +248,7 @@ func TestUIRenderLocales(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	defer srv.Close()
 
 	get := func(path string) string {

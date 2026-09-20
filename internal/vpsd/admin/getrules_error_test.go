@@ -51,7 +51,7 @@ func TestGetRulesReadFailureIsNotSilentZero(t *testing.T) {
 			}
 			defer st.Close()
 			base := &fakeBackend{st: st}
-			srv := httptest.NewServer(New(st, c.backend(base)))
+			srv := httptest.NewServer(New(c.backend(base)))
 			defer srv.Close()
 
 			resp, err := http.Get(srv.URL + "/api/v1/rules")

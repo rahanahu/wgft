@@ -382,7 +382,7 @@ func Run(opts Options) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	errc := make(chan error, 3)
-	srv := admin.New(st, d)
+	srv := admin.New(d)
 	srv.AllowedHosts = append(srv.AllowedHosts, opts.AdminHost...)
 	if opts.AdminTailscale {
 		if ip, dnsName, detail, other := detectAdminTailscale(ctx); ip != "" {

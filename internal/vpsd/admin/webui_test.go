@@ -144,7 +144,7 @@ func newStateTestServer(t *testing.T) *httptest.Server {
 		},
 		{Name: "office", Connected: false},
 	}
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st, agents: agents}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st, agents: agents}))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -251,7 +251,7 @@ func TestAgentListDisconnectedShowsStaleNotLive(t *testing.T) {
 		StreamFrom: "203.0.113.24:41220", WGEndpoint: "203.0.113.24:51820",
 		Tunnel: proto.TunnelStatus{State: proto.StatusOK},
 	}}
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st, agents: agents}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st, agents: agents}))
 	defer srv.Close()
 
 	for _, lang := range []string{"ja", "en"} {
@@ -294,7 +294,7 @@ func TestDashboardWarningsLayout(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { st.Close() })
-		srv := httptest.NewServer(New(st, &fakeBackend{st: st, warnings: warns}))
+		srv := httptest.NewServer(New(&fakeBackend{st: st, warnings: warns}))
 		t.Cleanup(srv.Close)
 		return srv
 	}

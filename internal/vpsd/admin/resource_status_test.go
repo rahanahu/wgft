@@ -98,7 +98,7 @@ func TestRulesResponseResourceStatusFields(t *testing.T) {
 	// The same fields must appear on the batch endpoint (POST /api/v1/rules/batch), which shares
 	// BatchResponse and the same withResourceStatus call.
 	batchStatus := ResourceStatus{FlowBudget: map[proto.Proto]FlowBudget{proto.TCP: {InUse: 1, Limit: 2048}}}
-	srv := httptest.NewServer(New(st, &resourceBackend{fakeBackend: base, status: batchStatus}))
+	srv := httptest.NewServer(New(&resourceBackend{fakeBackend: base, status: batchStatus}))
 	defer srv.Close()
 	resp, err := http.Post(srv.URL+"/api/v1/rules/batch", "application/json", strings.NewReader(`{}`))
 	if err != nil {

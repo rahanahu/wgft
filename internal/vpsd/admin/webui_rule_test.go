@@ -29,7 +29,7 @@ func TestAddRuleFormFollowsMode(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer st.Close()
-		srv := httptest.NewServer(New(st, &fakeBackend{st: st, mode: mode}))
+		srv := httptest.NewServer(New(&fakeBackend{st: st, mode: mode}))
 		defer srv.Close()
 		resp, err := http.Get(srv.URL + "/ui/add-rule")
 		if err != nil {
@@ -85,7 +85,7 @@ func newDetailTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	t.Cleanup(srv.Close)
 	return srv, st
 }
@@ -420,7 +420,7 @@ func TestAddRuleDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	defer srv.Close()
 
 	resp, err := http.PostForm(srv.URL+"/ui/add-rule", url.Values{

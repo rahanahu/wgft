@@ -30,7 +30,7 @@ func newResourceRuleCLITestServer(t *testing.T, status admin.ResourceStatus) (ad
 	}
 	t.Cleanup(func() { st.Close() })
 	backend = &resourceRuleBackend{fakeRuleBackend: &fakeRuleBackend{st: st}, status: status}
-	srv := httptest.NewServer(admin.New(st, backend))
+	srv := httptest.NewServer(admin.New(backend))
 	t.Cleanup(srv.Close)
 	return srv.URL, backend
 }

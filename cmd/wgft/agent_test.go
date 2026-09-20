@@ -45,12 +45,7 @@ func (b *fakeAgentBackend) ServerInfo() (admin.ServerInfo, error) { return admin
 // returns the URL to pass as --admin.
 func newAgentCLITestServer(t *testing.T, agents []admin.AgentInfo) (adminURL string) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	srv := httptest.NewServer(admin.New(st, &fakeAgentBackend{agents: agents}))
+	srv := httptest.NewServer(admin.New(&fakeAgentBackend{agents: agents}))
 	t.Cleanup(srv.Close)
 	return srv.URL
 }

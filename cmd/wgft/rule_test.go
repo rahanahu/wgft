@@ -53,7 +53,7 @@ func newRuleCLITestServer(t *testing.T) (adminURL string, st *store.Store) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	srv := httptest.NewServer(admin.New(st, &fakeRuleBackend{st: st}))
+	srv := httptest.NewServer(admin.New(&fakeRuleBackend{st: st}))
 	t.Cleanup(srv.Close)
 	return srv.URL, st
 }

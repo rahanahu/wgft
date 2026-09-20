@@ -37,7 +37,7 @@ func newImportTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(st, &fakeBackend{st: st}))
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	t.Cleanup(srv.Close)
 	return srv, st
 }
@@ -320,7 +320,7 @@ func TestImportApplyMapsBatchConflictToStalePage(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &conflictOnceBackend{fakeBackend: &fakeBackend{st: st}}
-	srv := httptest.NewServer(New(st, backend))
+	srv := httptest.NewServer(New(backend))
 	t.Cleanup(srv.Close)
 
 	desired := []proto.Rule{
