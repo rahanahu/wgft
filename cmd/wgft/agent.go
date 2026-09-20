@@ -69,10 +69,7 @@ On the VPS (against the admin API):
 	run := &cobra.Command{
 		Use:   "run",
 		Short: "run the agent; agent host",
-		Long: `Agent host daemon. Brings up the tunnel and listeners first from the key in the credentials file (agent.json) and the last full state,
-then connects to the server stream to receive the full state. On first run it registers with the join string (WGFT_JOIN); the name (WGFT_NAME) is
-optional and normally left unset, since the join string is already bound to a name.`,
-		Args: cobra.NoArgs,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := loadConfig(cmd, agentSpecs(), resolveConfigPath(cmd, agentConfigPath))
 			if err != nil {
