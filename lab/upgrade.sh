@@ -1,50 +1,69 @@
 #!/usr/bin/env bash
-# upgrade.sh proves the in-place UPGRADE from the previous release (docs/testing.md D4, design
-# 7a.6 section "既存のデータの置き場からの更新"): the CURRENT build started on a v0.4.0 install's
+# upgrade.sh proves the in-place UPGRADE from a previous release (docs/testing.md D4, design
+# 7a.6 section "既存のデータの置き場からの更新"): the CURRENT build started on an old install's
 # data (server database, WireGuard keys, agent credentials) keeps everything working after a
 # clean stop and a binary swap, the way a package upgrade (systemd ExecStart pointing at a new
 # binary, then a single restart) would. Unlike lab/version-skew.sh, which proves the wire
 # protocol negotiates correctly with FRESH data on both sides, the point here is OLD DATA: a
-# database and a credentials file that v0.4.0 itself created, months of phase 4/5/6 changes
-# behind the current build (reconcile/apply, the Admission Policy compilers, Resource Guard).
+# database and a credentials file that the old release itself created.
 #
-#   lab/lab exec vm bash /wgft/lab/upgrade.sh kernel
-#   lab/lab exec vm bash /wgft/lab/upgrade.sh userspace
+# The old release is $OLD_VERSION (below), default v0.5.0: the immediately-previous release,
+# which is the upgrade operators actually run next now that the current build is v0.5.1 plus
+# nothing yet. v0.4.0, the oldest release the project's release notes still promise an upgrade
+# from ("a rolling upgrade from v0.5.0 or v0.4.0 is supported"), is covered by overriding the
+# version, which every v0.4.0-specific assertion below still runs under in full:
+#
+#   lab/lab exec vm bash /wgft/lab/upgrade.sh kernel                              # v0.5.0 -> current
+#   lab/lab exec vm bash /wgft/lab/upgrade.sh userspace                           # v0.5.0 -> current
+#   WGFT_UPGRADE_OLD_VERSION=0.4.0 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel     # v0.4.0 -> current
+#   WGFT_UPGRADE_OLD_VERSION=0.4.0 lab/lab exec vm bash /wgft/lab/upgrade.sh userspace  # v0.4.0 -> current
+#
+# Between v0.4.0 and v0.5.0, phase 5 (Admission Policy compilers: TCP packet_rate stops taking
+# effect, Relay listeners become IPv4-only) and phase 6 (Resource Guard: the flow budget line)
+# landed, so v0.5.0's own CLI already shows some of what step 5 below asserts as "new" for
+# v0.4.0. old_has (below) gates each such assertion on $OLD_VERSION, so the v0.4.0 run keeps
+# asserting the genuine before/after change while the v0.5.0 run SKIPs only the part that is no
+# longer a change (with a stated reason), never silently drops it.
 #
 # Scenario, all against the SAME data directories throughout (never recreated), except where
 # noted:
-#   1. start v0.4.0's server and agent on fresh data, create one rule of each representative
-#      shape through v0.4.0's own CLI (plain TCP, plain UDP, a UDP port range, a rule with a
-#      source_deny and a source_allow, a TCP rule with all three rates including packet_rate, a
-#      disabled rule, a Relay/PROXY-protocol rule), prove forwarding, and record v0.4.0's own
-#      `rule ls --json`, `agent ls --json`, WireGuard public keys and the agent's credentials
-#      file. A snapshot of both data directories is taken right after this (SIGTERM'd, so no
-#      writer is mid-write), for step 4's partial-upgrade scenarios below.
+#   1. start the old release's server and agent on fresh data, create one rule of each
+#      representative shape through the old release's own CLI (plain TCP, plain UDP, a UDP port
+#      range, a rule with a source_deny and a source_allow, a TCP rule with all three rates
+#      including packet_rate, a disabled rule, a Relay/PROXY-protocol rule), prove forwarding,
+#      and record the old release's own `rule ls` (plain and `--json`), `agent ls --json`,
+#      WireGuard public keys and the agent's credentials file. A snapshot of both data
+#      directories is taken right after this (SIGTERM'd, so no writer is mid-write), for step
+#      4's partial-upgrade scenarios below.
 #   2. stop both cleanly (SIGTERM, wait for exit: stop_server/stop_agent below), then start the CURRENT
-#      build's server and agent on the SAME data directories, flags and environment v0.4.0 used
-#      (design 7a.6 promises the CLI, WGFT_*, admin API v1 and wire protocol as an external
-#      contract; a diff of v0.4.0..current cmd/wgft/*.go found only additions, no renames or
-#      removals - see the "no settings changed" note below).
+#      build's server and agent on the SAME data directories, flags and environment the old
+#      release used (design 7a.6 promises the CLI, WGFT_*, admin API v1 and wire protocol as an
+#      external contract; a diff of v0.5.0..current and v0.4.0..current cmd/wgft/*.go found only
+#      additions, no renames or removals - see the "no settings changed" note below).
 #   3. assert: the new server comes up with no extra step and no schema/migration error; every
 #      rule from step 1 is still there, compared field by field (proto.Rule itself did not
-#      change between v0.4.0 and current, so this is exact equality, not tolerance - the fields
-#      the new version ADDS live one level up, on the list response, not on each rule; see
-#      compare_rules.py's own comment); the agent reconnects on its existing credentials with no
-#      re-enrolment; both sides' WireGuard keys are unchanged; the negotiated protocol is what
-#      design 7a.6 requires; TCP and UDP forward again through every enabled rule; the disabled
-#      rule stays disabled; deny and allow still bite (two throwaway rules created and removed
-#      after this step, so they do not appear in the rule comparison).
+#      change between either old release and current, so this is exact equality, not tolerance -
+#      the fields the new version ADDS live one level up, on the list response, not on each
+#      rule; see compare_rules.py's own comment); the agent reconnects on its existing
+#      credentials with no re-enrolment; both sides' WireGuard keys are unchanged; the negotiated
+#      protocol is what design 7a.6 requires; TCP and UDP forward again through every enabled
+#      rule; the disabled rule stays disabled; deny and allow still bite (two throwaway rules
+#      created and removed after this step, so they do not appear in the rule comparison).
 #   4. partial upgrades in both orders, using a snapshot of step 1's OLD data (not fresh data,
-#      which is what lab/version-skew.sh already covers): new server + still-v0.4.0 agent, and
-#      v0.4.0 server + new agent. Each only has to keep forwarding.
+#      which is what lab/version-skew.sh already covers): new server + still-old agent, and old
+#      server + new agent. Each only has to keep forwarding.
 #   5. behaviour changes an upgrade makes visible, asserted the way the design states them:
 #      packet_rate on the TCP rule from step 1 is kept but the CLI now says it has no effect;
 #      Relay listeners are IPv4-only (the v0.4.0 dual-stack bug design.md's revision record
 #      describes); `rule ls` now prints a flow budget line (Resource Guard, design 7a.10; a
-#      single rule using the whole budget under flood is L8's job, not re-verified here).
+#      single rule using the whole budget under flood is L8's job, not re-verified here). Each
+#      of these three is also checked directly against the old release's own pre-upgrade output
+#      (old_has, above); for v0.4.0 this proves a genuine before/after change, for v0.5.0 (which
+#      already has all three) that half of the check is a stated SKIP instead.
 #
 # Requires `lab/lab build` (current wgft, echo, ppecho in /usr/local/bin of the VM) and the netns
-# topology (`lab/lab net up`). Runs kernel and userspace mode; v0.4.0 supports both.
+# topology (`lab/lab net up`). Runs kernel and userspace mode; both v0.4.0 and v0.5.0 support
+# both.
 #
 # SANDBOX-READY / PARALLEL-SAFE: every file this script writes lives under $WORK (one variable,
 # defaulting under /tmp), and the netns names and every port/address are variables (today's fixed
@@ -78,7 +97,9 @@ set -u
 # pid already reaches everything the job forked, and the group kill is an extra safety net.
 set -m
 GH_REPO=rahanahu/wgft
-OLD_VERSION=0.4.0  # immediately-previous release; this is what a real upgrade starts from
+OLD_VERSION=${WGFT_UPGRADE_OLD_VERSION:-0.5.0}  # default: the immediately-previous release, the
+  # upgrade operators actually run next. Override with WGFT_UPGRADE_OLD_VERSION=0.4.0 for the
+  # oldest release the project's release notes still promise an upgrade from (see header comment).
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: upgrade.sh kernel|userspace" >&2; exit 2;; esac
 
@@ -118,6 +139,9 @@ P_RATES=39950;      T_RATES=25622
 P_DISABLED=39960;   T_DISABLED=25623  # never actually dialled; the rule stays disabled
 P_RELAY=39970;      T_RELAY=8461      # ppecho, not echo: proves the PROXY protocol header
 
+VPS6=2001:db8::1; CLIENT6=2001:db8::2  # documentation prefix, client-vps link only (lab/README.md);
+  # used by both step 1 (the old release's own relay, old_has-gated) and step 5 (current build's)
+
 fail=0
 check() { # check <label> <expected-substring> <actual>
   if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug)"; fail=1; return; fi
@@ -139,6 +163,21 @@ okcheck() { # okcheck <label> <ok-if-true 1/0>
   if [ "$2" = "1" ]; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1; fi
 }
 skip() { echo "SKIP  $1"; }
+
+# old_has <capability>: whether $OLD_VERSION's OWN build already implements the named phase 5/6
+# behaviour, so step 1's and step 5's before/after assertions know whether a genuine change is
+# available to prove. Every capability here landed between v0.4.0 and v0.5.0 (design 7a.8's
+# revision record: phase 5 step 3 - Relay listeners become IPv4-only; phase 5 step 5 -
+# packet_rate stops taking effect on TCP and the CLI starts saying so; phase 6 step 5 - `rule ls`
+# starts printing a flow budget line), so v0.4.0 is the only release lacking any of them; v0.5.0
+# and v0.5.1 have all three already. Extend this table, not the call sites, if a future default
+# OLD_VERSION again lacks one of these.
+old_has() {
+  case "$OLD_VERSION:$1" in
+    0.4.0:*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 
 # wait_until <timeout-seconds> <command...>: wall-clock poll, same idiom (and same reasoning
 # about slow predicates under CPU contention) as lab/lifecycle.sh and lab/version-skew.sh's.
@@ -416,9 +455,9 @@ port_listening() {
 
 ensure_wgftlab() { id wgftlab >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin wgftlab; }
 
-# start_server <bin> <data-dir> <log-file>: same flags v0.4.0 and the current build both accept
-# unchanged (design 7a.6's external-contract table; verified by diffing v0.4.0..HEAD's
-# cmd/wgft/server.go, agent.go, config.go - see this script's header comment).
+# start_server <bin> <data-dir> <log-file>: same flags the old release and the current build both
+# accept unchanged (design 7a.6's external-contract table; verified by diffing both v0.4.0..HEAD
+# and v0.5.0..HEAD's cmd/wgft/server.go, agent.go, config.go - see this script's header comment).
 start_server() {
   local bin=$1 data=$2 log=$3
   : > "$log"
@@ -560,7 +599,7 @@ add_rules() {
   echo "$r"
   r=$(vps "$bin" rule add --agent home --tcp "$P_RATES" --to "$LAN_ADDR:$T_RATES" --group upgrade --note "all three rates" --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   vps "$bin" rule rate new-flow "$r" 100/second --admin "$ADMIN" >/dev/null
-  vps "$bin" rule rate packet "$r" 500/second --admin "$ADMIN" >/dev/null 2>&1  # TCP + packet_rate; v0.4.0 has no notice to print yet
+  vps "$bin" rule rate packet "$r" 500/second --admin "$ADMIN" >/dev/null 2>&1  # TCP + packet_rate; output discarded, checked later via the old release's own `rule ls` (old_has)
   vps "$bin" rule rate per-source "$r" 50/second --admin "$ADMIN" >/dev/null
   echo "$r"
   r=$(vps "$bin" rule add --agent home --tcp "$P_DISABLED" --to "$LAN_ADDR:$T_DISABLED" --disabled --group upgrade --note "disabled" --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+'); echo "$r"
@@ -577,13 +616,15 @@ mkdir -p "$PYDIR"
 cat > "$PYDIR/compare_rules.py" <<'PYEOF'
 # compare_rules.py <old-rules.json> <new-rules.json>: exact field-by-field comparison of the
 # "rules" array from `rule ls --json` before and after the upgrade. proto.Rule itself is
-# byte-for-byte the same struct in v0.4.0 and the current build (checked by diffing proto/rule.go
-# across the two tags), so no per-rule field tolerance is needed or applied here: every field
-# must match exactly, for every rule id present on either side. The fields the current build
-# ADDS live one level up, on the list response itself (desired_generation, active_generation,
-# rule_states, drift, apply_error, flow_budget, resource_refusals - all absent from v0.4.0's
-# response), not on individual rules; upgrade.sh's own PASS/FAIL lines report those separately,
-# not through this script.
+# byte-for-byte the same struct in the old release and the current build, for both v0.4.0 and
+# v0.5.0 (checked by diffing proto/rule.go across each old tag and HEAD), so no per-rule field
+# tolerance is needed or applied here: every field must match exactly, for every rule id present
+# on either side. The fields the current build ADDS live one level up, on the list response
+# itself (desired_generation, active_generation, rule_states, drift, apply_error, flow_budget,
+# resource_refusals - all present in the current build's response, but only some of them absent
+# from the old release's own response; see old_has/upgrade.sh's own step3 checks below for which),
+# not on individual rules; upgrade.sh's own PASS/FAIL lines report those separately, not through
+# this script.
 import json
 import sys
 
@@ -641,7 +682,7 @@ teardown_data() { # teardown_data <bin> <data-dir> <agent-data-dir>
 }
 
 # ===================================================================================================
-# step 1: v0.4.0 server + v0.4.0 agent on fresh data; representative configuration; baseline capture
+# step 1: old release server + agent on fresh data; representative configuration; baseline capture
 # ===================================================================================================
 fetch_release "$OLD_VERSION" "$CACHE/wgft-v$OLD_VERSION" \
   || { echo "FAIL  setup: could not obtain v$OLD_VERSION (see lab/version-skew.sh's header comment on pre-staging for a VM with no outbound IPv4)"; exit 1; }
@@ -650,16 +691,16 @@ OLD_BIN="$CACHE/wgft-v$OLD_VERSION"
 DATA="$WORK/server-data"; ADATA="$WORK/agent-data"
 mkdir -p "$DATA"
 
-echo "== $mode: step 1: v0.4.0 server + agent, representative configuration"
+echo "== $mode: step 1: v$OLD_VERSION server + agent, representative configuration"
 start_server "$OLD_BIN" "$DATA" "$WORK/step1-server.log"
 if ! wait_admin; then
-  echo "FAIL  step1: v0.4.0 admin api never came up"; fail=1
+  echo "FAIL  step1: v$OLD_VERSION admin api never came up"; fail=1
   echo "   --- $WORK/step1-server.log ---"; cat "$WORK/step1-server.log"
 fi
 JOIN=$(vps "$OLD_BIN" agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
 start_targets
 start_agent "$OLD_BIN" "$ADATA" "$WORK/step1-agent.log" "$JOIN"
-if ! wait_until 30 agent_registered; then echo "FAIL  step1: v0.4.0 agent never registered"; fail=1; fi
+if ! wait_until 30 agent_registered; then echo "FAIL  step1: v$OLD_VERSION agent never registered"; fail=1; fi
 wait_until 100 tunnel_up
 check "step1: tunnel up before any rule" "state=ok" "$(tunnel_state_text)"
 
@@ -682,8 +723,25 @@ check "step1: deny+allow rule forwards from the allowed source" "tcp-echo" "$(tc
 check "step1: all-three-rates rule forwards" "tcp-echo" "$(tcp_probe "$P_RATES")"
 check "step1: relay rule carries the client ip via PROXY protocol" "198.51.100.2" "$(tcp_probe "$P_RELAY")"
 
-# baseline: what v0.4.0 itself reports (docs/testing.md D4's step 1)
+# The v0.4.0 dual-stack bug (design.md's revision record): before phase 5 step 3, Relay listeners
+# bound both IPv4 and IPv6, so an IPv6 source reached the target instead of being refused. Only
+# meaningful to demonstrate when the old release actually still has the bug (old_has false); once
+# fixed (v0.5.0 onward) there is nothing left to show on the OLD side, so this half is a stated
+# SKIP rather than a repeat of step 5's current-build check below.
+if old_has relay_ipv4_only; then
+  skip "step1: v$OLD_VERSION's own relay listener is already IPv4-only (phase 5 step 3 predates it in v$OLD_VERSION); no dual-stack bug left to demonstrate on the old side"
+elif client "ip -6 addr show dev eth0 | grep -q $CLIENT6" >/dev/null 2>&1; then
+  old_relay_v6=$(client "timeout -k 2 3 socat -t 1 -T 2 - TCP6:[$VPS6]:$P_RELAY 2>&1 || true")
+  check "step1: v$OLD_VERSION's own relay listener DOES accept an IPv6 source (the dual-stack bug this upgrade fixes)" "client=" "$old_relay_v6"
+else
+  skip "step1: v$OLD_VERSION dual-stack relay check (client namespace has no IPv6 address configured)"
+fi
+
+# baseline: what the old release itself reports (docs/testing.md D4's step 1). Both --json (for
+# compare_rules.py, step 3) and plain (for old_has's before/after checks, step 5) are captured,
+# since the packet_rate notice and the flow budget line are plain-`rule ls` text, not JSON fields.
 vps "$OLD_BIN" rule ls --admin "$ADMIN" --json > "$WORK/old-rules.json"
+vps "$OLD_BIN" rule ls --admin "$ADMIN" > "$WORK/old-rulels.stdout" 2>"$WORK/old-rulels.stderr"
 vps "$OLD_BIN" agent ls --admin "$ADMIN" --json > "$WORK/old-agents.json"
 old_agent_pubkey=$(home "$OLD_BIN" agent pubkey --data-dir "$ADATA")
 old_cred_full_sha=$(sha256sum "$ADATA/agent.json" | awk '{print $1}')
@@ -692,9 +750,9 @@ old_server_pubkey=""
 if [ "$mode" = kernel ]; then
   old_server_pubkey=$(vps wg show wgft0 public-key)
 fi
-echo "   baseline: v0.4.0 credentials file sha256 $old_cred_full_sha (whole file; see stable_cred_hash.py for why the post-upgrade check below hashes everything but last_state)"
+echo "   baseline: v$OLD_VERSION credentials file sha256 $old_cred_full_sha (whole file; see stable_cred_hash.py for why the post-upgrade check below hashes everything but last_state)"
 
-echo "== $mode: stop v0.4.0 cleanly and snapshot its data (for step 4's partial upgrades)"
+echo "== $mode: stop v$OLD_VERSION cleanly and snapshot its data (for step 4's partial upgrades)"
 stop_agent
 stop_server
 DATA_SNAPSHOT="$WORK/data-snapshot"; ADATA_SNAPSHOT="$WORK/adata-snapshot"
@@ -704,12 +762,13 @@ cp -a "$ADATA" "$ADATA_SNAPSHOT"
 # ===================================================================================================
 # step 2+3: swap ONLY the binaries; start the current build on the SAME data; assert the promises
 # ===================================================================================================
-# No settings changed between v0.4.0 and the current build: `git diff v0.4.0..HEAD -- cmd/wgft/
-# server.go cmd/wgft/agent.go cmd/wgft/config.go` shows only additions (WGFT_AGENT_ALLOW_TARGETS,
-# and internal-only refactors of perSourceLimitsFromConfig's return shape); every WGFT_* name and
-# flag v0.4.0 used is still accepted with the same meaning (design 7a.6's external-contract
-# table). So the current build below is started with the exact same flags step 1 used.
-echo "== $mode: step 2: swap to the current build on v0.4.0's data"
+# No settings changed between the old release and the current build: `git diff v0.4.0..HEAD` and
+# `git diff v0.5.0..HEAD -- cmd/wgft/server.go cmd/wgft/agent.go cmd/wgft/config.go` both show
+# only additions (WGFT_AGENT_ALLOW_TARGETS and later flags, and internal-only refactors such as
+# perSourceLimitsFromConfig's return shape); every WGFT_* name and flag the old release used is
+# still accepted with the same meaning (design 7a.6's external-contract table). So the current
+# build below is started with the exact same flags step 1 used.
+echo "== $mode: step 2: swap to the current build on v$OLD_VERSION's data"
 start_server wgft "$DATA" "$WORK/upgraded-server.log"
 okcheck "step2: new server comes up with no extra step (admin api answers)" "$(wait_admin && echo 1 || echo 0)"
 absent "step2: no schema/migration error in the new server's log" "applying schema version" "$(cat "$WORK/upgraded-server.log")"
@@ -734,15 +793,36 @@ echo "   $rules_diff"
 
 # the fields the new version ADDS live one level up, on the list response, not on individual
 # rules (compare_rules.py's own comment has the full list); spot-check that they are actually
-# there post-upgrade, rather than only asserting by omission.
+# there post-upgrade, rather than only asserting by omission. This much is true of the current
+# build regardless of $OLD_VERSION, so it is unconditional.
 added_fields_seen=$(python3 -c "
 import json
 d = json.load(open('$WORK/new-rules.json'))
 added = [k for k in ('desired_generation','active_generation','rule_states','drift','flow_budget','resource_refusals') if k in d]
 print(','.join(added))
 ")
-check "step3: the new response has the fields v0.4.0's response never had" "active_generation" "$added_fields_seen"
-echo "   fields added by the new version at the list-response level (not per rule): $added_fields_seen"
+check "step3: the post-upgrade response has the generation/drift/budget fields" "active_generation" "$added_fields_seen"
+echo "   fields present in the current build's list response (not per rule): $added_fields_seen"
+
+# Whether these fields are actually NEW (absent from the old release's own response) depends on
+# $OLD_VERSION: v0.4.0 predates all of them (design 7a.8's phase 4/6 steps), but v0.5.0 already
+# has them, so asserting their absence from v0.5.0's own response would be a false claim, not a
+# stricter one. old_has gates this the way it gates step 5's checks below.
+if old_has generation_fields; then
+  skip "step3: v$OLD_VERSION's own rule ls --json already had the generation/drift/budget fields before the upgrade (phase 4/6 predate them in v$OLD_VERSION); not new after this particular upgrade"
+else
+  old_added_seen=$(python3 -c "
+import json
+d = json.load(open('$WORK/old-rules.json'))
+added = [k for k in ('desired_generation','active_generation','rule_states','drift','flow_budget','resource_refusals') if k in d]
+print(','.join(added))
+")
+  if [ -z "$old_added_seen" ]; then
+    echo "PASS  step3: v$OLD_VERSION's own pre-upgrade response had none of those fields (confirms they are genuinely new)"
+  else
+    echo "FAIL  step3: v$OLD_VERSION's own pre-upgrade response already had: $old_added_seen"; fail=1
+  fi
+fi
 
 new_agent_pubkey=$(home wgft agent pubkey --data-dir "$ADATA")
 strcheck "step3: agent's WireGuard public key is unchanged" "$old_agent_pubkey" "$new_agent_pubkey"
@@ -828,11 +908,27 @@ check "step5: packet_rate on the TCP rule is kept but the CLI now says it has no
   "note: packet_rate is stored but has no effect on TCP rules" "$(cat "$WORK/rulels.stderr")"
 check "step5: rule ls now reports a flow budget line (Resource Guard, design 7a.10)" "flow budget:" "$rls_out"
 
+# Both checks above are unconditionally true of the CURRENT build, so they hold regardless of
+# $OLD_VERSION. Whether that is actually a CHANGE this upgrade made visible - as opposed to
+# something the old release already showed on its own, before any upgrade happened - depends on
+# $OLD_VERSION: v0.4.0 predates both (phase 5 step 5, phase 6 step 5), v0.5.0 already has both.
+if old_has packet_rate_notice; then
+  skip "step5: v$OLD_VERSION's own rule ls already showed the packet_rate notice before the upgrade (phase 5 step 5 predates it in v$OLD_VERSION); not a change this upgrade makes visible"
+else
+  absent "step5: v$OLD_VERSION's own rule ls had NO packet_rate notice before the upgrade (confirms the CLI notice above is genuinely new)" \
+    "note: packet_rate is stored but has no effect on TCP rules" "$(cat "$WORK/old-rulels.stderr")"
+fi
+if old_has flow_budget_line; then
+  skip "step5: v$OLD_VERSION's own rule ls already reported a flow budget line before the upgrade (phase 6 step 5 predates it in v$OLD_VERSION); not a change this upgrade makes visible"
+else
+  absent "step5: v$OLD_VERSION's own rule ls had NO flow budget line before the upgrade (confirms the budget line above is genuinely new)" \
+    "flow budget:" "$(cat "$WORK/old-rulels.stdout")"
+fi
+
 # a single rule may now use the whole flow budget under flood (design 7a.10, phase 6): not
 # re-verified here (that is docs/testing.md L8's job, in the lab suite proper); listed as not
 # asserted in this script's own report.
 
-VPS6=2001:db8::1; CLIENT6=2001:db8::2  # documentation prefix, client-vps link only (lab/README.md)
 if client "ip -6 addr show dev eth0 | grep -q $CLIENT6" >/dev/null 2>&1; then
   # TCP6:, not TCP: with a bracketed literal - lab/ipv6.sh (L13) uses the same explicit address
   # type for the same reason: an early version of this check used "TCP:[addr]:port" and got a
@@ -845,15 +941,15 @@ else
 fi
 
 # ===================================================================================================
-# step 4: partial upgrades in both orders, on a COPY of step 1's v0.4.0 data (not fresh data -
-# lab/version-skew.sh already proves the negotiation mechanics with fresh data on both sides)
+# step 4: partial upgrades in both orders, on a COPY of step 1's old-release data (not fresh data
+# - lab/version-skew.sh already proves the negotiation mechanics with fresh data on both sides)
 # ===================================================================================================
 echo "== $mode: cleaning up the fully-upgraded instance before the partial-upgrade scenarios"
 stop_agent
 stop_server
 stop_targets
 
-echo "== $mode: step 4a: new server + still-v0.4.0 agent, on a copy of step 1's data"
+echo "== $mode: step 4a: new server + still-v$OLD_VERSION agent, on a copy of step 1's data"
 DATA_A="$WORK/data-a"; ADATA_A="$WORK/adata-a"
 cp -a "$DATA_SNAPSHOT" "$DATA_A"; cp -a "$ADATA_SNAPSHOT" "$ADATA_A"
 start_targets
@@ -861,12 +957,12 @@ start_server "$OLD_BIN" "$DATA_A" "$WORK/step4a-old-server.log"
 if wait_admin; then
   start_agent "$OLD_BIN" "$ADATA_A" "$WORK/step4a-old-agent.log"
   wait_reconnected 40
-  check "step4a: v0.4.0+v0.4.0 resumes from the snapshot before the partial upgrade" "state=ok" "$(tunnel_state_text)"
-  stop_server  # server side upgrades; the v0.4.0 agent (step4a-old-agent) keeps running, untouched
+  check "step4a: v$OLD_VERSION+v$OLD_VERSION resumes from the snapshot before the partial upgrade" "state=ok" "$(tunnel_state_text)"
+  stop_server  # server side upgrades; the old-release agent (step4a-old-agent) keeps running, untouched
   start_server wgft "$DATA_A" "$WORK/step4a-new-server.log"
   if wait_admin; then
     wait_reconnected 40
-    check "step4a: still-v0.4.0 agent reconnects to the upgraded server" "state=ok" "$(tunnel_state_text)"
+    check "step4a: still-v$OLD_VERSION agent reconnects to the upgraded server" "state=ok" "$(tunnel_state_text)"
     wait_until 15 tcp_probe_ok "$P_TCP"; wait_until 10 udp_probe_ok "$P_UDP"
     check "step4a: tcp forwards (new server, old agent, old data)" "tcp-echo" "$(tcp_probe "$P_TCP")"
     check "step4a: udp forwards (new server, old agent, old data)" "udp-echo" "$(udp_probe "$P_UDP")"
@@ -875,13 +971,13 @@ if wait_admin; then
     echo "   --- $WORK/step4a-new-server.log ---"; cat "$WORK/step4a-new-server.log"
   fi
 else
-  echo "FAIL  step4a: v0.4.0 server never resumed from the snapshot"; fail=1
+  echo "FAIL  step4a: v$OLD_VERSION server never resumed from the snapshot"; fail=1
   echo "   --- $WORK/step4a-old-server.log ---"; cat "$WORK/step4a-old-server.log"
 fi
 stop_agent; stop_server; stop_targets
 teardown_data wgft "$DATA_A" "$ADATA_A"
 
-echo "== $mode: step 4b: still-v0.4.0 server + new agent, on a copy of step 1's data"
+echo "== $mode: step 4b: still-v$OLD_VERSION server + new agent, on a copy of step 1's data"
 DATA_B="$WORK/data-b"; ADATA_B="$WORK/adata-b"
 cp -a "$DATA_SNAPSHOT" "$DATA_B"; cp -a "$ADATA_SNAPSHOT" "$ADATA_B"
 start_targets
@@ -889,16 +985,16 @@ start_server "$OLD_BIN" "$DATA_B" "$WORK/step4b-old-server.log"
 if wait_admin; then
   start_agent "$OLD_BIN" "$ADATA_B" "$WORK/step4b-old-agent.log"
   wait_reconnected 40
-  check "step4b: v0.4.0+v0.4.0 resumes from the snapshot before the partial upgrade" "state=ok" "$(tunnel_state_text)"
-  stop_agent  # agent side upgrades; the v0.4.0 server keeps running, untouched
+  check "step4b: v$OLD_VERSION+v$OLD_VERSION resumes from the snapshot before the partial upgrade" "state=ok" "$(tunnel_state_text)"
+  stop_agent  # agent side upgrades; the old-release server keeps running, untouched
   start_agent wgft "$ADATA_B" "$WORK/step4b-new-agent.log"
   wait_reconnected 40
-  check "step4b: new agent reconnects to the still-v0.4.0 server" "state=ok" "$(tunnel_state_text)"
+  check "step4b: new agent reconnects to the still-v$OLD_VERSION server" "state=ok" "$(tunnel_state_text)"
   wait_until 15 tcp_probe_ok "$P_TCP"; wait_until 10 udp_probe_ok "$P_UDP"
   check "step4b: tcp forwards (old server, new agent, old data)" "tcp-echo" "$(tcp_probe "$P_TCP")"
   check "step4b: udp forwards (old server, new agent, old data)" "udp-echo" "$(udp_probe "$P_UDP")"
 else
-  echo "FAIL  step4b: v0.4.0 server never resumed from the snapshot"; fail=1
+  echo "FAIL  step4b: v$OLD_VERSION server never resumed from the snapshot"; fail=1
   echo "   --- $WORK/step4b-old-server.log ---"; cat "$WORK/step4b-old-server.log"
 fi
 stop_agent; stop_server; stop_targets
