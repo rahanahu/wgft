@@ -29,10 +29,52 @@
 #   scripts/dist-vm.sh --image images:ubuntu/24.04
 #   scripts/dist-vm.sh --image images:fedora/44
 #   scripts/dist-vm.sh --keep-failed            # leave the VMs behind for inspection on failure
+#   scripts/dist-vm.sh --upgrade                # also run the upgrade-from-a-previous-release phase
 #
 # docs/testing.md calls for one distribution per PR and three per release candidate; this script
 # takes the distribution as a parameter instead of hard-coding a loop, so a release candidate runs
 # it three times.
+#
+# --upgrade (docs/testing.md D4's own "remaining item" note, the previous-release upgrade this VM
+# test did not yet cover): an OPTIONAL, additional phase appended after every check above still
+# runs unchanged - the checks above and their duration are the same whether
+# or not --upgrade is given. lab/upgrade.sh already proves the in-place upgrade at the netns/process
+# level, on both kernel and userspace mode; what it cannot reach is the part that only exists at the
+# VM level: a PREVIOUS release installed exactly as docs/setup.md instructed AT THE TIME (its own
+# shipped deploy/server.service and deploy/agent.service, not necessarily today's), a binary-only
+# swap the way a package upgrade actually happens (overwrite /usr/local/bin/wgft, systemctl restart,
+# nothing else touched), and a VM reboot on top of that. This phase reuses the two VMs, the static
+# IP, the shipped-unit install and the retry/check/probe/reboot helpers already set up and defined
+# above for exactly that reason - a sibling script would either duplicate all of that or have to
+# source dist-vm.sh as a library, which it is not written to be (it execs a host-wide flock and a
+# capacity check as soon as it is invoked, not on a function call); appending an optional phase here
+# keeps the one already-paid-for VM pair and every helper function in scope with no new plumbing.
+#
+# The previous release defaults to the newest tag reachable from HEAD (WGFT_DIST_VM_UPGRADE_OLD_VERSION
+# overrides it, unprefixed, e.g. "0.4.0" - the same convention as lab/upgrade.sh's
+# WGFT_UPGRADE_OLD_VERSION); its linux-amd64 binary is fetched and sha256-verified on the HOST (this
+# host reaches GitHub; the VMs are not assumed to, same reasoning as lab/oldrelease.sh, whose
+# fetch_release this sources and reuses rather than copying) and pushed into both VMs with
+# "incus file push", the same way the current build already is above.
+#
+# Scenario, against the SAME two VMs and the SAME two data directories throughout: install the old
+# release fresh (its own tag's units, a fresh join, a representative rule of every shape
+# lab/upgrade.sh uses: plain TCP, plain UDP, a UDP port range, a source_deny+source_allow rule, a TCP
+# rule with all three rates, a disabled rule, a Relay/PROXY-protocol rule) and prove it forwards; back
+# up the data directory as v0.5.1's release notes' "Upgrading" section tells operators to; swap ONLY
+# the server binary and restart, and check the rules survive field by field (ignoring the fields the
+# new build adds to the list response, never to a rule itself), the agent reconnects with no
+# re-enrolment, forwarding still works, and "wgft server check" is clean; swap the agent binary the
+# same way; reboot the server VM, then the agent VM, and check forwarding comes back unaided. Each
+# restart's forwarding outage is measured and printed - an informative number, not an assertion; the
+# project makes no numeric promise about it (docs/testing.md's "update and rollback promise"
+# section). Whether an operator
+# who ALSO updates the unit files ends up anywhere different is decided at runtime by diffing the old
+# tag's units against deploy/*.service with comments stripped: identical (the case for v0.5.1, checked
+# when this was written) means the binary-only swap already covers it and that second case is not run
+# separately; a real difference is reported instead of silently skipped. Downgrading is not promised
+# and not exercised here. A single pass only (old server + old agent, then server-first, then
+# agent-first swap order); the reverse swap order (agent first) is not run - see the report for why.
 #
 # Topology (2 VMs, not 3): the "server" VM runs wgft server (kernel mode). The "agent" VM runs
 # wgft agent and also hosts the target service (tools/echo, bound to 127.0.0.1 on the agent VM,
@@ -113,12 +155,14 @@ REPO=$(pwd)
 IMAGE=images:debian/12
 KEEP_FAILED=0
 FORCE=0
+UPGRADE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --image) IMAGE=$2; shift 2 ;;
     --image=*) IMAGE=${1#--image=}; shift ;;
     --keep-failed) KEEP_FAILED=1; shift ;;
     --force) FORCE=1; shift ;;
+    --upgrade) UPGRADE=1; shift ;;
     -h | --help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -219,6 +263,21 @@ check() { # check <label> <expected-substring> <actual>: returns 1 on FAIL so ca
 }
 eqcheck() { # eqcheck <label> <want> <got>: exact integer comparison.
   if [ "$2" -eq "$3" ] 2>/dev/null; then echo "PASS  $1 ($2)"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; unexpected_fail=1; fi
+}
+# absent/strcheck: only used by the --upgrade phase (below), same idiom as lab/upgrade.sh's
+# functions of the same name. Defined here with the other check helpers so every check function
+# lives in one place; harmless and unused when --upgrade is not given.
+absent() { # absent <label> <substring-that-must-not-appear> <actual>
+  if [ -z "$2" ]; then echo "FAIL  $1: empty substring (test bug)"; fail=1; unexpected_fail=1; return 1; fi
+  case "$3" in
+    *"$2"*) echo "FAIL  $1: got '$3'"; fail=1; unexpected_fail=1; return 1 ;;
+    *) echo "PASS  $1"; return 0 ;;
+  esac
+}
+strcheck() { # strcheck <label> <want> <got>: exact string equality (keys, hashes, ids - check()'s
+  # substring match would let one value that is a prefix of another slip through).
+  if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug or a capture that returned nothing)"; fail=1; unexpected_fail=1; return 1; fi
+  if [ "$2" = "$3" ]; then echo "PASS  $1"; return 0; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; unexpected_fail=1; return 1; fi
 }
 teeth_pass() { echo "PASS  teeth: $1"; }
 teeth_fail() { echo "FAIL  teeth: $1"; fail=1; unexpected_fail=1; }
@@ -410,9 +469,13 @@ retry 30 ping -c1 -W1 "$server_ip" || { cat "$tmp/netstatic.server.log" >&2; ech
 retry 30 ping -c1 -W1 "$agent_ip" || { cat "$tmp/netstatic.agent.log" >&2; echo "FAIL  $agent_vm: static IP $agent_ip never came up"; exit 1; }
 echo "PASS  static IPv4 on $bridge_cidr: server=$server_ip agent=$agent_ip"
 
-# Open firewalld's ports if the image ships it active (Fedora does by default); never installed,
-# only configured with the tool already on the image, exactly as docs/setup.md's firewalld
-# example shows.
+# Open firewalld's ports if the image has it active; never installed, only configured with the
+# tool already on the image, exactly as docs/setup.md's firewalld example shows. A Fedora Server
+# or Workstation install has firewalld active by default, but the Incus image images:fedora/44
+# that this script launches ships neither firewalld (`rpm -q firewalld` finds nothing) nor an
+# SELinux policy (getenforce: Disabled; no selinux-policy package, though /sys/fs/selinux is
+# mounted). On that image this function does nothing, so a host with firewalld active and a host
+# with SELinux enforcing are both UNVERIFIED by this script.
 open_firewall() { # open_firewall <vm> <port-flags...>
   if incus exec "$1" -- systemctl is-active -q firewalld 2>/dev/null; then
     shift
@@ -800,6 +863,394 @@ if retry 30 wait_for_log_since "$server_vm" wgft "$since" "server started" && re
 else
   echo "FAIL  restore: server did not come back healthy after the check4 teeth tests"
   fail=1; unexpected_fail=1
+fi
+
+# =================================================================================================
+# optional phase: upgrade from a previous release (--upgrade; docs/testing.md D4's remaining item)
+# =================================================================================================
+# Everything above this point already ran, unmodified, whether or not --upgrade was given; this
+# phase only reuses the same two VMs from here on, starting from whatever check4's restore just left
+# (the current build, valid config, both units healthy) and immediately replacing it with a fresh
+# install of the OLD release, so nothing above needed to change to make room for it.
+if [ "$UPGRADE" = 1 ]; then
+  upgrade_started=$(date +%s)
+  echo "== upgrade: starting the optional upgrade-from-a-previous-release phase (--upgrade)"
+  need curl
+  need python3
+
+  OLD_VERSION=${WGFT_DIST_VM_UPGRADE_OLD_VERSION:-}
+  if [ -z "$OLD_VERSION" ]; then
+    old_tag=$(git -C "$REPO" describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null)
+    OLD_VERSION=${old_tag#v}
+  fi
+  head_tag=$(git -C "$REPO" describe --tags --exact-match HEAD 2>/dev/null)
+
+  if [ -z "$OLD_VERSION" ]; then
+    echo "FAIL  upgrade: could not determine a previous release (no v* tag reachable from HEAD); set WGFT_DIST_VM_UPGRADE_OLD_VERSION=X.Y.Z"
+    fail=1; unexpected_fail=1
+  elif [ "$head_tag" = "v$OLD_VERSION" ]; then
+    echo "FAIL  upgrade: HEAD is exactly tagged v$OLD_VERSION, so there is no newer build to upgrade TO; set WGFT_DIST_VM_UPGRADE_OLD_VERSION to an older release"
+    fail=1; unexpected_fail=1
+  else
+    echo "== upgrade: previous release v$OLD_VERSION -> current build ($version)"
+
+    # --- fetch and verify the old release's binary on the HOST (lab/oldrelease.sh's fetch_release,
+    # sourced and reused, not copied - same contract lab/upgrade.sh and lab/version-skew.sh rely on:
+    # cached, sha256-verified, safe if another sandbox fetches the same version concurrently) --------
+    GH_REPO=rahanahu/wgft
+    # shellcheck source=lab/oldrelease.sh
+    . "$REPO/lab/oldrelease.sh"
+    OLD_CACHE=${WGFT_DIST_VM_OLDRELEASE_CACHE:-/tmp/wgft-dist-vm-oldrelease-cache}
+    mkdir -p "$OLD_CACHE"
+    OLD_BIN="$OLD_CACHE/wgft-v$OLD_VERSION-linux-amd64"
+    if fetch_release "$OLD_VERSION" "$OLD_BIN"; then
+      echo "PASS  upgrade: fetched and sha256-verified v$OLD_VERSION ($OLD_BIN)"
+    else
+      echo "FAIL  upgrade: could not fetch/verify v$OLD_VERSION from GitHub Releases (see lab/oldrelease.sh; the VMs are never asked to reach GitHub themselves)"
+      fail=1; unexpected_fail=1
+    fi
+
+    # --- the old release's OWN shipped units, fetched from its tag, not today's deploy/ -------------
+    # An operator who installed v$OLD_VERSION at the time got THAT release's units. Whether those
+    # differ from today's in anything other than comments decides whether "swap the binary" and
+    # "also update the unit" are actually two different cases worth running separately.
+    git -C "$REPO" show "v$OLD_VERSION:deploy/server.service" >"$tmp/old-server.service" 2>/dev/null
+    old_server_unit_rc=$?
+    git -C "$REPO" show "v$OLD_VERSION:deploy/agent.service" >"$tmp/old-agent.service" 2>/dev/null
+    old_agent_unit_rc=$?
+    if [ "$old_server_unit_rc" -ne 0 ] || [ "$old_agent_unit_rc" -ne 0 ]; then
+      echo "FAIL  upgrade: could not read deploy/server.service and/or deploy/agent.service from tag v$OLD_VERSION"
+      fail=1; unexpected_fail=1
+    fi
+    grep -v '^[[:space:]]*#' "$tmp/old-server.service" >"$tmp/old-server.nocomment" 2>/dev/null
+    grep -v '^[[:space:]]*#' "$REPO/deploy/server.service" >"$tmp/new-server.nocomment"
+    grep -v '^[[:space:]]*#' "$tmp/old-agent.service" >"$tmp/old-agent.nocomment" 2>/dev/null
+    grep -v '^[[:space:]]*#' "$REPO/deploy/agent.service" >"$tmp/new-agent.nocomment"
+    unit_directive_diff=$(diff "$tmp/old-server.nocomment" "$tmp/new-server.nocomment"; diff "$tmp/old-agent.nocomment" "$tmp/new-agent.nocomment")
+    if [ -z "$unit_directive_diff" ]; then
+      echo "== upgrade: deploy/server.service and deploy/agent.service have no directive changes since v$OLD_VERSION (comments aside), so a binary-only swap already leaves the operator in the same place an updated unit would; that second case is not run separately"
+    else
+      echo "== upgrade: deploy/server.service and/or deploy/agent.service changed a real directive since v$OLD_VERSION, not just a comment:"
+      echo "$unit_directive_diff"
+      echo "== upgrade: NOTE: this phase only exercises the binary-only swap (the old units stay installed); the 'operator also updates the unit' case above is NOT run and is reported as not covered"
+    fi
+
+    # --- build the two extra disposable test-only helpers this phase's rule shapes need --------------
+    if ! ( cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$tmp/ppecho" ./tools/ppecho ) >"$tmp/ppecho-build.log" 2>&1; then
+      cat "$tmp/ppecho-build.log" >&2
+      echo "FAIL  upgrade: build tools/ppecho"
+      fail=1; unexpected_fail=1
+    fi
+
+    # representative rule shapes and ports (lab/upgrade.sh's own list), on the agent VM's own
+    # loopback like the existing check1/check2 target, but on ports distinct from those (39971/27015)
+    # so both target services can run side by side without a collision.
+    UP_P_TCP=39991;      UP_T_TCP=25631
+    UP_P_UDP=27021;      UP_T_UDP=19191
+    UP_P_RANGE_LO=39993; UP_P_RANGE_HI=39995; UP_T_RANGE_LO=20031
+    UP_P_ACL=39996;      UP_T_ACL=25632
+    UP_P_RATES=39997;    UP_T_RATES=25633
+    UP_P_DISABLED=39998; UP_T_DISABLED=25634
+    UP_P_RELAY=39999;    UP_T_RELAY=8462
+
+    # python3 helpers, host-side only (never assumed inside a VM - see the header comment on why the
+    # VMs get no package installed): mirrors lab/upgrade.sh's compare_rules.py and
+    # stable_cred_hash.py, adapted to read from files this script already captures with plain
+    # "incus exec ... > file" redirections, the same idiom the rest of this script already uses.
+    cat >"$tmp/compare_rules.py" <<'PYEOF'
+import json, sys
+FIELDS = ["id", "agent", "group", "note", "proto", "listen_port", "target", "vps_mode",
+          "proxy_protocol", "source_allow", "source_deny", "new_flow_rate", "packet_rate",
+          "per_source_rate", "enabled"]
+with open(sys.argv[1]) as f:
+    old = {r["id"]: r for r in json.load(f)["rules"]}
+with open(sys.argv[2]) as f:
+    new = {r["id"]: r for r in json.load(f)["rules"]}
+problems = []
+if set(old) != set(new):
+    problems.append("rule id sets differ: only-before=%s only-after=%s" % (
+        sorted(set(old) - set(new)), sorted(set(new) - set(old))))
+for rid in sorted(set(old) & set(new)):
+    o, n = old[rid], new[rid]
+    for field in FIELDS:
+        if o.get(field) != n.get(field):
+            problems.append("%s.%s: before=%r after=%r" % (rid, field, o.get(field), n.get(field)))
+if problems:
+    print("\n".join(problems)); sys.exit(1)
+print("%d rules identical across the upgrade" % len(old))
+PYEOF
+    cat >"$tmp/stable_cred_hash.py" <<'PYEOF'
+import hashlib, json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+d.pop("last_state", None)  # rewritten on every reconnect; excluded so this isolates "same
+                            # credentials, no rotate-key, no re-enrolment" (see lab/upgrade.sh)
+print(hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest())
+PYEOF
+
+    # ===============================================================================================
+    # step 1: install v$OLD_VERSION fresh on both VMs, exactly as docs/setup.md instructs, with that
+    # release's OWN units; a representative rule of every shape; prove forwarding; capture the
+    # baseline v$OLD_VERSION itself reports.
+    # ===============================================================================================
+    echo "== upgrade: step 1: install v$OLD_VERSION fresh (docs/setup.md's steps, that release's own units)"
+    incus exec "$server_vm" -- systemctl stop wgft
+    incus exec "$agent_vm" -- systemctl stop wgft-agent
+    teardown_out=$(incus exec "$server_vm" -- wgft server teardown --purge --yes 2>&1)
+    check "upgrade: step1: current-build state purged for a fresh v$OLD_VERSION install" "removing" "$teardown_out"
+    incus exec "$agent_vm" -- rm -f /var/lib/wgft/agent.json
+
+    incus file push "$OLD_BIN" "$server_vm/root/wgft-old-linux-amd64" --mode 0644 >/dev/null
+    incus file push "$OLD_BIN" "$agent_vm/root/wgft-old-linux-amd64" --mode 0644 >/dev/null
+    incus exec "$server_vm" -- install -m 0755 /root/wgft-old-linux-amd64 /usr/local/bin/wgft
+    incus exec "$agent_vm" -- install -m 0755 /root/wgft-old-linux-amd64 /usr/local/bin/wgft
+    incus file push "$tmp/old-server.service" "$server_vm/etc/systemd/system/wgft.service" --mode 0644 >/dev/null
+    incus file push "$tmp/old-agent.service" "$agent_vm/etc/systemd/system/wgft-agent.service" --mode 0644 >/dev/null
+    incus exec "$server_vm" -- systemctl daemon-reload
+    incus exec "$agent_vm" -- systemctl daemon-reload
+
+    # /etc/wgft/server.env and /etc/wgft/agent.env are left exactly as they already are: WGFT_MODE,
+    # WGFT_WG_ENDPOINT and WGFT_JOIN are accepted unchanged by v$OLD_VERSION (checked above: only
+    # additions between v$OLD_VERSION and this build's cmd/wgft/{server,agent,config}.go).
+    incus exec "$server_vm" -- systemctl reset-failed wgft >/dev/null 2>&1
+    incus exec "$server_vm" -- systemctl restart wgft
+    bring_up_server "upgrade: step1: v$OLD_VERSION" || { fail=1; unexpected_fail=1; }
+
+    old_join=$(incus exec "$server_vm" -- wgft agent join-string --name home 2>/dev/null | head -1)
+    check "upgrade: step1: v$OLD_VERSION join string issued" "wgft://" "$old_join"
+    printf 'WGFT_JOIN=%s\n' "$old_join" >"$tmp/upgrade-agent.env"
+    incus file push "$tmp/upgrade-agent.env" "$agent_vm/etc/wgft/agent.env" --mode 0640 >/dev/null
+    incus exec "$agent_vm" -- chown root:wgft /etc/wgft/agent.env
+    incus exec "$agent_vm" -- chmod 0640 /etc/wgft/agent.env
+
+    since=$(incus exec "$agent_vm" -- date +%s)
+    incus exec "$agent_vm" -- systemctl reset-failed wgft-agent >/dev/null 2>&1
+    incus exec "$agent_vm" -- systemctl restart wgft-agent
+    if retry 30 wait_for_log_since "$agent_vm" wgft-agent "$since" "registered as agent"; then
+      echo "PASS  upgrade: step1: v$OLD_VERSION agent registers fresh"
+    else
+      incus exec "$agent_vm" -- journalctl -u wgft-agent --no-pager | tail -n 40 >&2
+      echo "FAIL  upgrade: step1: v$OLD_VERSION agent never registered"
+      fail=1; unexpected_fail=1
+    fi
+    retry 40 tunnel_ok || { echo "FAIL  upgrade: step1: tunnel never reached ok"; fail=1; unexpected_fail=1; }
+
+    # target listeners for the new rule shapes, alongside (not instead of) check1/check2's own
+    # wgft-dist-echo on 25565/25566 - both keep running side by side, on different ports. /root/echo
+    # is already there from earlier in this script (check1); NOT re-pushed here - check2's own
+    # wgft-dist-echo.service still has it open, and "incus file push" onto a running executable
+    # fails with "text file busy" (harmless, but this avoids the noise and the pointless retry).
+    incus file push "$tmp/ppecho" "$agent_vm/root/ppecho" --mode 0755 >/dev/null
+    cat >"$tmp/wgft-dist-upgrade-echo.service" <<EOF
+[Unit]
+Description=wgft-dist-vm upgrade-phase disposable test target (not part of wgft)
+After=network.target
+
+[Service]
+ExecStart=/root/echo -bind 127.0.0.1 -tcp $UP_T_TCP,$UP_T_ACL,$UP_T_RATES,$UP_T_DISABLED -udp $UP_T_UDP,$UP_T_RANGE_LO,$((UP_T_RANGE_LO + 1)),$((UP_T_RANGE_LO + 2))
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    cat >"$tmp/wgft-dist-upgrade-ppecho.service" <<EOF
+[Unit]
+Description=wgft-dist-vm upgrade-phase PROXY-protocol test target (not part of wgft)
+After=network.target
+
+[Service]
+ExecStart=/root/ppecho -addr 127.0.0.1:$UP_T_RELAY
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    incus file push "$tmp/wgft-dist-upgrade-echo.service" "$agent_vm/etc/systemd/system/wgft-dist-upgrade-echo.service" --mode 0644 >/dev/null
+    incus file push "$tmp/wgft-dist-upgrade-ppecho.service" "$agent_vm/etc/systemd/system/wgft-dist-upgrade-ppecho.service" --mode 0644 >/dev/null
+    incus exec "$agent_vm" -- systemctl daemon-reload
+    incus exec "$agent_vm" -- systemctl enable --now wgft-dist-upgrade-echo wgft-dist-upgrade-ppecho
+
+    up_r_tcp=$(incus exec "$server_vm" -- wgft rule add --agent home --tcp "$UP_P_TCP" --to "127.0.0.1:$UP_T_TCP" --group upgrade --note "plain tcp" 2>/dev/null | grep -oE 'r_[A-Za-z0-9]+')
+    up_r_udp=$(incus exec "$server_vm" -- wgft rule add --agent home --udp "$UP_P_UDP" --to "127.0.0.1:$UP_T_UDP" --group upgrade --note "plain udp" 2>/dev/null | grep -oE 'r_[A-Za-z0-9]+')
+    up_r_range=$(incus exec "$server_vm" -- wgft rule add --agent home --udp "$UP_P_RANGE_LO-$UP_P_RANGE_HI" --to "127.0.0.1:$UP_T_RANGE_LO" --group upgrade --note "port range" 2>/dev/null | grep -oE 'r_[A-Za-z0-9]+')
+    up_r_acl=$(incus exec "$server_vm" -- wgft rule add --agent home --tcp "$UP_P_ACL" --to "127.0.0.1:$UP_T_ACL" --group upgrade --note "deny+allow" 2>/dev/null | grep -oE 'r_[A-Za-z0-9]+')
+    incus exec "$server_vm" -- wgft rule allow add "$up_r_acl" "$net_base.0/$net_prefix" >/dev/null 2>&1
+    incus exec "$server_vm" -- wgft rule deny add "$up_r_acl" 203.0.113.5/32 >/dev/null 2>&1
+    up_r_rates=$(incus exec "$server_vm" -- wgft rule add --agent home --tcp "$UP_P_RATES" --to "127.0.0.1:$UP_T_RATES" --group upgrade --note "all three rates" 2>/dev/null | grep -oE 'r_[A-Za-z0-9]+')
+    incus exec "$server_vm" -- wgft rule rate new-flow "$up_r_rates" 100/second >/dev/null 2>&1
+    incus exec "$server_vm" -- wgft rule rate packet "$up_r_rates" 500/second >/dev/null 2>&1
+    incus exec "$server_vm" -- wgft rule rate per-source "$up_r_rates" 50/second >/dev/null 2>&1
+    up_r_disabled=$(incus exec "$server_vm" -- wgft rule add --agent home --tcp "$UP_P_DISABLED" --to "127.0.0.1:$UP_T_DISABLED" --disabled --group upgrade --note "disabled" 2>/dev/null | grep -oE 'r_[A-Za-z0-9]+')
+    up_r_relay=$(incus exec "$server_vm" -- wgft rule add --agent home --tcp "$UP_P_RELAY" --to "127.0.0.1:$UP_T_RELAY" --proxy --proxy-protocol --group upgrade --note "relay" 2>/dev/null | grep -oE 'r_[A-Za-z0-9]+')
+    for rid in "$up_r_tcp" "$up_r_udp" "$up_r_range" "$up_r_acl" "$up_r_rates" "$up_r_disabled" "$up_r_relay"; do
+      check "upgrade: step1: rule id issued ($rid)" "r_" "$rid"
+    done
+    open_firewall "$server_vm" --add-port="$UP_P_TCP/tcp" --add-port="$UP_P_UDP/udp" \
+      --add-port="$UP_P_RANGE_LO-$UP_P_RANGE_HI/udp" --add-port="$UP_P_ACL/tcp" \
+      --add-port="$UP_P_RATES/tcp" --add-port="$UP_P_DISABLED/tcp" --add-port="$UP_P_RELAY/tcp"
+
+    upgrade_probe_all() { # upgrade_probe_all <label-suffix>: probes every enabled rule shape, called
+      # identically after step1's fresh install and after each swap below.
+      local suf=$1 out
+      out=$(probe_until tcp "$server_ip:$UP_P_TCP" tcp-echo 30); check "upgrade: $suf: plain tcp forwards" "tcp-echo" "$out" || dump_forwarding_diagnostics
+      out=$(probe_until udp "$server_ip:$UP_P_UDP" udp-echo 30 "$agent_vm"); check "upgrade: $suf: plain udp forwards" "udp-echo" "$out" || dump_forwarding_diagnostics
+      out=$(probe_until udp "$server_ip:$UP_P_RANGE_LO" udp-echo 20 "$agent_vm"); check "upgrade: $suf: port-range rule forwards (first port)" "udp-echo" "$out"
+      out=$(probe_until tcp "$server_ip:$UP_P_ACL" tcp-echo 20); check "upgrade: $suf: deny+allow rule forwards from the allowed source" "tcp-echo" "$out"
+      out=$(probe_until tcp "$server_ip:$UP_P_RATES" tcp-echo 20); check "upgrade: $suf: all-three-rates rule forwards" "tcp-echo" "$out"
+      out=$(probe_until tcp "$server_ip:$UP_P_RELAY" "client=" 20); check "upgrade: $suf: relay rule carries the client via PROXY protocol" "client=" "$out"
+    }
+    upgrade_probe_all "step1 (v$OLD_VERSION)"
+
+    incus exec "$server_vm" -- wgft rule ls --json >"$tmp/upgrade-old-rules.json"
+    incus exec "$server_vm" -- wgft rule ls >"$tmp/upgrade-old-rulels.stdout" 2>"$tmp/upgrade-old-rulels.stderr"
+    incus exec "$agent_vm" -- cat /var/lib/wgft/agent.json >"$tmp/upgrade-old-agent.json" 2>/dev/null
+    old_agent_pubkey=$(incus exec "$agent_vm" -- wgft agent pubkey --data-dir /var/lib/wgft 2>/dev/null)
+    if [ -n "$old_agent_pubkey" ]; then echo "PASS  upgrade: step1: v$OLD_VERSION agent public key read"; else echo "FAIL  upgrade: step1: v$OLD_VERSION agent public key empty"; fail=1; unexpected_fail=1; fi
+    old_cred_hash=$(python3 "$tmp/stable_cred_hash.py" "$tmp/upgrade-old-agent.json" 2>/dev/null)
+    # server's own WireGuard public key (kernel mode): unlike lab/upgrade.sh, which runs inside a lab
+    # image that has wireguard-tools installed, these VMs deliberately have neither wg(8) nor nft(8)
+    # (header comment: wgft talks to the kernel over netlink itself, so the base image needs neither,
+    # and this script never apt-get's anything into a VM). There is also no "wgft server pubkey"
+    # command (only "agent pubkey" exists). So the server's key is checked INDIRECTLY: WireGuard
+    # pins the peer's key at both ends, so if the server's private key changed, the agent's already-
+    # provisioned peer entry for the OLD server key would fail the handshake and tunnel_ok would
+    # never return to "ok" after the swap below - which every step below already checks. A changed
+    # server key would therefore surface as a tunnel failure, not silently pass.
+    echo "== upgrade: step1: server's own WireGuard key is checked indirectly (tunnel_ok after each swap), not read directly - see the comment above this line for why"
+
+    # --- step 2: back up the data directory, as v0.5.1's release notes' "Upgrading" section tells
+    # operators to do before replacing the binary --------------------------------------------------
+    echo "== upgrade: step 2: back up the data directory before the binary swap"
+    incus exec "$server_vm" -- tar czf /root/wgft-server-data-backup.tar.gz -C /var/lib/wgft .
+    backup1=$(incus exec "$server_vm" -- sh -c 'test -s /root/wgft-server-data-backup.tar.gz && echo present')
+    check "upgrade: step2: server data directory backed up" "present" "$backup1"
+    incus exec "$agent_vm" -- tar czf /root/wgft-agent-data-backup.tar.gz -C /var/lib/wgft .
+    backup2=$(incus exec "$agent_vm" -- sh -c 'test -s /root/wgft-agent-data-backup.tar.gz && echo present')
+    check "upgrade: step2: agent data directory backed up" "present" "$backup2"
+
+    # ===============================================================================================
+    # step 3: swap ONLY the server binary (the v$OLD_VERSION units stay installed - the case an
+    # operator who "just swaps the binary" actually ends up in), restart, and check the promises.
+    # ===============================================================================================
+    echo "== upgrade: step 3: swap the server binary only, restart"
+    incus exec "$server_vm" -- install -m 0755 /root/wgft-linux-amd64 /usr/local/bin/wgft
+    server_restart_t0=$SECONDS
+    incus exec "$server_vm" -- systemctl reset-failed wgft >/dev/null 2>&1
+    incus exec "$server_vm" -- systemctl restart wgft
+    bring_up_server "upgrade: step3: current build on v$OLD_VERSION's data" || { fail=1; unexpected_fail=1; }
+    server_log=$(incus exec "$server_vm" -- journalctl -u wgft -b --no-pager -q 2>/dev/null)
+    absent "upgrade: step3: no schema/migration error in the server log" "applying schema version" "$server_log"
+    absent "upgrade: step3: no newer-schema refusal in the server log" "is newer than this binary" "$server_log"
+    retry 40 tunnel_ok || { echo "FAIL  upgrade: step3: tunnel did not return to ok after the server swap"; fail=1; unexpected_fail=1; }
+    server_outage=$((SECONDS - server_restart_t0))
+    echo "== upgrade: measured outage after the SERVER restart: tunnel back to ok after ${server_outage}s (informative measurement, not asserted - docs/testing.md makes no numeric promise here)"
+
+    incus exec "$server_vm" -- wgft rule ls --json >"$tmp/upgrade-new-rules.json"
+    rules_diff=$(python3 "$tmp/compare_rules.py" "$tmp/upgrade-old-rules.json" "$tmp/upgrade-new-rules.json"); rules_rc=$?
+    if [ "$rules_rc" = 0 ]; then echo "PASS  upgrade: step3: $rules_diff"; else echo "FAIL  upgrade: step3: rules changed across the server swap: $rules_diff"; fail=1; unexpected_fail=1; fi
+
+    check_out=$(incus exec "$server_vm" -- wgft server check 2>&1); check_rc=$?
+    eqcheck "upgrade: step3: 'wgft server check' exits 0 after the swap" "0" "$check_rc"
+    absent "upgrade: step3: 'wgft server check' finds nothing needing attention" "needs attention" "$check_out"
+    absent "upgrade: step3: 'wgft server check' can open the server database" "cannot open" "$check_out"
+
+    upgrade_probe_all "step3 (after the server swap)"
+    disabled_out=$("$tmp/probe" -proto tcp -addr "$server_ip:$UP_P_DISABLED" -timeout 2s 2>&1)
+    absent "upgrade: step3: the disabled rule still has no listener" "tcp-echo" "$disabled_out"
+
+    # ===============================================================================================
+    # step 4: swap the agent binary, restart, and check the agent needed no re-enrolment.
+    # ===============================================================================================
+    echo "== upgrade: step 4: swap the agent binary, restart"
+    incus exec "$agent_vm" -- install -m 0755 /root/wgft-linux-amd64 /usr/local/bin/wgft
+    agent_restart_t0=$SECONDS
+    since=$(incus exec "$agent_vm" -- date +%s)
+    incus exec "$agent_vm" -- systemctl reset-failed wgft-agent >/dev/null 2>&1
+    incus exec "$agent_vm" -- systemctl restart wgft-agent
+    retry 40 tunnel_ok || { echo "FAIL  upgrade: step4: tunnel did not return to ok after the agent swap"; fail=1; unexpected_fail=1; }
+    agent_log_since=$(incus exec "$agent_vm" -- journalctl -u wgft-agent --no-pager -q --since "@$since" 2>/dev/null)
+    # a spent WGFT_JOIN is deliberately still sitting in /etc/wgft/agent.env from step 1 (docs/
+    # setup.md: "A used WGFT_JOIN left in ... an agent that is already registered is ignored"); left
+    # in place on purpose, not cleared, so this exercises exactly that real-world leftover.
+    absent "upgrade: step4: agent needed no re-enrolment (no 'not registered' error, spent WGFT_JOIN notwithstanding)" "not registered and no join string" "$agent_log_since"
+    agent_outage=$((SECONDS - agent_restart_t0))
+    echo "== upgrade: measured outage after the AGENT restart: tunnel back to ok after ${agent_outage}s (informative measurement, not asserted)"
+
+    incus exec "$agent_vm" -- cat /var/lib/wgft/agent.json >"$tmp/upgrade-new-agent.json" 2>/dev/null
+    new_cred_hash=$(python3 "$tmp/stable_cred_hash.py" "$tmp/upgrade-new-agent.json" 2>/dev/null)
+    strcheck "upgrade: step4: agent credentials (name/endpoint/cert/token/wg key) unchanged, no re-enrolment" "$old_cred_hash" "$new_cred_hash"
+    new_agent_pubkey=$(incus exec "$agent_vm" -- wgft agent pubkey --data-dir /var/lib/wgft 2>/dev/null)
+    strcheck "upgrade: step4: agent's WireGuard public key is unchanged" "$old_agent_pubkey" "$new_agent_pubkey"
+
+    upgrade_probe_all "step4 (after the agent swap)"
+
+    # ===============================================================================================
+    # step 5: reboot the server VM, then the agent VM; forwarding must come back with no manual step.
+    # ===============================================================================================
+    echo "== upgrade: step 5: reboot the server VM, then the agent VM"
+    if reboot_and_wait "$server_vm" 120; then
+      bring_up_server "upgrade: step5: server VM rebooted" boot || { fail=1; unexpected_fail=1; }
+    else
+      echo "FAIL  upgrade: step5: server VM did not reboot within the timeout"; fail=1; unexpected_fail=1
+    fi
+    retry 40 tunnel_ok || { echo "FAIL  upgrade: step5: tunnel did not reconnect after the server VM rebooted"; fail=1; unexpected_fail=1; }
+    upgrade_probe_all "step5 (after rebooting the server VM)"
+
+    if reboot_and_wait "$agent_vm" 120 && retry 60 agent_healthy; then
+      echo "PASS  upgrade: step5: agent VM rebooted and wgft-agent.service is active again, unattended"
+    else
+      echo "FAIL  upgrade: step5: agent VM did not come back healthy after reboot"; fail=1; unexpected_fail=1
+    fi
+    upgrade_probe_all "step5 (after rebooting the agent VM)"
+
+    # ===============================================================================================
+    # teeth: a data directory the service's user cannot read must fail the restart with a clear
+    # message, not silently keep the old binary's behaviour or fail unintelligibly. Simulated exactly
+    # as the task asks: chmod the data directory unreadable before the restart.
+    # ===============================================================================================
+    echo "== upgrade: teeth: a database file the service's user cannot read must fail the restart with a clear message"
+    # NOT chmod'd on the StateDirectory itself (/var/lib/wgft, a symlink to /var/lib/private/wgft
+    # under DynamicUser=yes): tried first, and found to be no teeth at all - systemd re-provisions a
+    # DynamicUser unit's StateDirectory to StateDirectoryMode (0700) and the dynamic user's own
+    # ownership on every unit start, silently undoing a chmod on the directory before ExecStart ever
+    # runs (confirmed live: 'stat -L /var/lib/wgft' read back 0700 owned by the dynamic user right
+    # after a chmod 000 plus a restart). The database FILE inside it is not re-provisioned that way,
+    # so chmod/chown the file itself, saving its current owner first (a numeric uid:gid - the dynamic
+    # user's name only resolves via NSS while the unit is active, not while it is stopped for this).
+    db_owner=$(incus exec "$server_vm" -- stat -L -c '%u:%g' /var/lib/wgft)
+    incus exec "$server_vm" -- chown 0:0 /var/lib/wgft/wgft.sqlite
+    incus exec "$server_vm" -- chmod 000 /var/lib/wgft/wgft.sqlite
+    incus exec "$server_vm" -- systemctl reset-failed wgft >/dev/null 2>&1
+    incus exec "$server_vm" -- systemctl restart wgft
+    sleep 8
+    teeth_active=$(incus exec "$server_vm" -- systemctl is-active wgft 2>&1)
+    teeth_log=$(incus exec "$server_vm" -- journalctl -u wgft -b --no-pager -q -n 40 2>&1)
+    if [ "$teeth_active" = active ]; then
+      teeth_fail "server stayed active with an unreadable database file (no teeth)"
+    else
+      case "$teeth_log" in
+        *"server database"*"unable to open database file"*) teeth_pass "an unreadable database file leaves the unit '$teeth_active', with a clear message naming the database: $(echo "$teeth_log" | grep -m1 'server database')" ;;
+        *"server database"*) teeth_pass "an unreadable database file leaves the unit '$teeth_active', with a clear database error in the journal" ;;
+        *) teeth_fail "unit is '$teeth_active' but the journal does not clearly name the database as the cause: $teeth_log" ;;
+      esac
+    fi
+    echo "== upgrade: restore: database file ownership and a healthy server"
+    incus exec "$server_vm" -- chown "$db_owner" /var/lib/wgft/wgft.sqlite
+    incus exec "$server_vm" -- chmod 0600 /var/lib/wgft/wgft.sqlite
+    incus exec "$server_vm" -- systemctl reset-failed wgft >/dev/null 2>&1
+    since=$(incus exec "$server_vm" -- date +%s)
+    incus exec "$server_vm" -- systemctl restart wgft
+    if retry 30 wait_for_log_since "$server_vm" wgft "$since" "server started" && retry 40 tunnel_ok; then
+      echo "PASS  upgrade: restore: server healthy again once the data directory is readable"
+    else
+      echo "FAIL  upgrade: restore: server did not recover after restoring data directory permissions"; fail=1; unexpected_fail=1
+    fi
+
+    upgrade_elapsed=$(( $(date +%s) - upgrade_started ))
+    echo "== upgrade phase (v$OLD_VERSION -> current): elapsed ${upgrade_elapsed}s"
+  fi
 fi
 
 elapsed=$(( $(date +%s) - started ))
