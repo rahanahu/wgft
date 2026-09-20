@@ -180,7 +180,7 @@ func newRuleLsCmd() *cobra.Command {
 				}
 				fmt.Printf("# %s (%d)\n", name, len(byGroup[g]))
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-				fmt.Fprintf(w, "  ID\tAGENT\tPROTO\tLISTEN\tTARGET\tMODE\tENABLED\tDENY\tALLOW\tRATES\tDROPPED\tREFUSED\tNOTE\n")
+				fmt.Fprintf(w, "  ID\tAGENT\tPROTO\tLISTEN\tTARGET\tMODE\tENABLED\tDENY\tALLOW\tRATES\tDROPPED\tREFUSED\tAGENT_STATE\tNOTE\n")
 				for _, r := range byGroup[g] {
 					rates := []string{}
 					for nm, v := range map[string]*proto.Rate{"new": r.NewFlowRate, "pkt": r.PacketRate, "src": r.PerSourceRate} {
@@ -189,8 +189,9 @@ func newRuleLsCmd() *cobra.Command {
 						}
 					}
 					sort.Strings(rates)
-					fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\t%s\t%v\t%d\t%d\t%s\t%d\t%d\t%s\n", short(r.ID), r.Agent, r.Proto, r.ListenPort, r.TargetDisplay(), r.VPSMode, r.Enabled,
-						len(r.SourceDeny), len(r.SourceAllow), strings.Join(rates, ","), res.Drops[r.ID], resourceRefusalTotal(res.ResourceRefusals, r.ID), truncNote(r.Note))
+					fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\t%s\t%v\t%d\t%d\t%s\t%d\t%d\t%s\t%s\n", short(r.ID), r.Agent, r.Proto, r.ListenPort, r.TargetDisplay(), r.VPSMode, r.Enabled,
+						len(r.SourceDeny), len(r.SourceAllow), strings.Join(rates, ","), res.Drops[r.ID], resourceRefusalTotal(res.ResourceRefusals, r.ID),
+						agentRuleNote(res.AgentRuleStates, r.ID), truncNote(r.Note))
 				}
 				w.Flush()
 			}
@@ -548,6 +549,26 @@ func resourceRefusalTotal(refusals map[string]map[string]uint64, ruleID string) 
 		total += n
 	}
 	return total
+}
+
+// agentRuleNote renders one rule's agent-side status for the human `rule ls` table (design.md 10.1,
+// 7a.11 節): "-" if its agent never reported this rule, "ok" if it did and the rule is fine, or
+// "error: <reason>" otherwise. A "last:" prefix marks a disconnected agent's last report as history,
+// matching `agent ls`'s RULES column (design.md 5.2 節). This is unrelated to REFUSED, which counts
+// Resource Guard's own refusals, not the agent's.
+func agentRuleNote(states map[string]admin.AgentRuleStatus, ruleID string) string {
+	st, ok := states[ruleID]
+	if !ok {
+		return "-"
+	}
+	note := st.State
+	if st.State != proto.StatusOK {
+		note = "error: " + st.Reason
+	}
+	if !st.Connected {
+		note = "last:" + note
+	}
+	return note
 }
 
 // flowBudgetLine は "generation" の行に続けて出す、プロセス全体のフロー予算の要約

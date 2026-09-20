@@ -409,6 +409,36 @@ func (d *Daemon) ResourceStatus() admin.ResourceStatus {
 	return admin.ResourceStatus{FlowBudget: budget, Refusals: refusals}
 }
 
+// AgentRuleStatuses is admin.AgentRuleStatusBackend's implementation (design.md 5.2、7a.11 節): each
+// rule's agent-side status (its owning agent's own report of that rule, from the heartbeat), keyed
+// by rule ID. It draws on the same per-agent stream state Agents() reads Tunnel/Rules from, so a
+// disconnected agent's entries are its last report before the stream dropped (Connected is false;
+// design.md 5.2 節 says these are history, not a current value). Reads the registered-agent list the
+// same way Agents() does, and fails the same way on a store error (design.md 10.5 節、フェイルクローズ):
+// this is apply-state information an operator reads as "all clear" when absent, so a read failure
+// must not look like a Backend that simply does not report it.
+func (d *Daemon) AgentRuleStatuses() (map[string]admin.AgentRuleStatus, error) {
+	list, err := d.st.Agents()
+	if err != nil {
+		return nil, fmt.Errorf("reading agents: %w", err)
+	}
+	out := map[string]admin.AgentRuleStatus{}
+	for _, a := range list {
+		st := d.hub.Status(a.Name)
+		if st.Heartbeat == nil {
+			continue
+		}
+		var at string
+		if !st.LastHeartbeat.IsZero() {
+			at = st.LastHeartbeat.Format(time.RFC3339)
+		}
+		for _, r := range st.Heartbeat.Rules {
+			out[r.ID] = admin.AgentRuleStatus{Agent: a.Name, State: r.State, Reason: r.Reason, At: at, Connected: st.Connected}
+		}
+	}
+	return out, nil
+}
+
 func applyStatusToAdmin(st reconcile.Status) admin.ApplyStatus {
 	out := admin.ApplyStatus{DesiredGeneration: st.DesiredGeneration, ActiveGeneration: st.ActiveGeneration,
 		Rules: make(map[string]admin.RuleApply, len(st.Rules)), LastError: st.LastError}

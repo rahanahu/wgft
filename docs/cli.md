@@ -564,6 +564,14 @@ server reports its process-wide budget: in_use/limit per protocol. Kernel mode
 never reports one for UDP, since it counts UDP flows through conntrack, not
 through this budget.
 
+AGENT_STATE is the rule's owning agent's own report of it: "-" before the
+agent has reported it, "ok", or "error: <reason>" for a target refused by the
+agent's WGFT_AGENT_ALLOW_TARGETS, a listener that failed to bind, or a TCP
+target that failed its connectivity check. A "last:" prefix means the agent is
+currently disconnected, so this is its last report rather than a current
+state, same as the "last:" prefix in "agent ls"'s RULES column. --json carries
+the same information under agent_rule_states, keyed by rule ID.
+
 ```text
 wgft rule ls [flags]
 ```

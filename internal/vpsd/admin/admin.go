@@ -198,6 +198,9 @@ type BatchResponse struct {
 	// v1 への加算で、報告を持たない Backend では省く(resource_status.go の withResourceStatus)。
 	FlowBudget       map[proto.Proto]FlowBudget   `json:"flow_budget,omitempty"`
 	ResourceRefusals map[string]map[string]uint64 `json:"resource_refusals,omitempty"`
+	// AgentRuleStates is each rule's agent-side status (agent_rule_status.go; design.md 5.2、7a.11
+	// 節). v1 への加算で、報告を持たない Backend では省く。
+	AgentRuleStates map[string]AgentRuleStatus `json:"agent_rule_states,omitempty"`
 }
 
 // ErrorBody は失敗時の本文。
@@ -331,6 +334,10 @@ func (s *Server) getRules(w http.ResponseWriter, r *http.Request) {
 	resp := BatchResponse{Generation: gen, Rules: rules, Drops: drops}
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)
+	if err := s.withAgentRuleStatus(&resp); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -352,6 +359,10 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	resp := BatchResponse{Generation: res.Generation, Changed: res.Changed, Rules: res.Rules}
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)
+	if err := s.withAgentRuleStatus(&resp); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
