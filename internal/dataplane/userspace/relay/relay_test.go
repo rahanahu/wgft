@@ -126,9 +126,9 @@ func bigSendBuffer(c *net.UDPConn) { c.SetWriteBuffer(udpBufMax) }
 
 func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} }
 
-// 予算とルールごとの上限は、Pool を渡さなければ Limits から導く(resource.Limits.UDPPerRuleCap、
-// 仕様 7 節)。
-func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
+// 予算とルール 1 本の上限は、Pool を渡さなければ Limits から導く(上限は ceil(T/2)。
+// 設計文書 7a.10 節)。
+func TestRuleCapDefaultsFromLimits(t *testing.T) {
 	m := New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: t.Logf})
 	if got := m.opts.UDPPool.RuleCap(); got != 10000 {
 		t.Errorf("UDP rule cap = %d, want 10000 (half of UDPTotal)", got)
@@ -142,13 +142,13 @@ func TestPerRuleCapDefaultsFromLimits(t *testing.T) {
 	if got := m.opts.TCPPool.Total(); got != 4000 {
 		t.Errorf("TCP budget = %d, want 4000", got)
 	}
-	// 何も渡さなければ既定の全体上限(8192, 2048)から導く、導入前の固定値と同じ値になる
+	// 何も渡さなければ既定の予算(8192, 2048)から導く。置き換えた式の値と同じ値になる
 	m = New(&loopback{}, Options{Logf: t.Logf})
 	if udp, tcp := m.opts.UDPPool.RuleCap(), m.opts.TCPPool.RuleCap(); udp != 4096 || tcp != 1024 {
 		t.Errorf("default rule caps: udp=%d tcp=%d, want 4096 1024", udp, tcp)
 	}
 	// 呼び出し側が Pool を渡せば、それを使う(導出値は使わない)
-	pool := resource.NewPool(40, 5)
+	pool := resource.NewPool(40)
 	m = New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 40}, UDPPool: pool, Logf: t.Logf})
 	if m.opts.UDPPool != pool {
 		t.Error("an explicit UDPPool must not be replaced by the derived default")
@@ -280,7 +280,7 @@ func TestUDPRelaySessionsAndIdle(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: resource.NewPool(0, 2), Logf: t.Logf})
+	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: resource.NewPool(2), Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 
@@ -309,7 +309,7 @@ func TestUDPRelaySessionsAndIdle(t *testing.T) {
 	if n := m.Status()[0].Sessions; n != 2 {
 		t.Errorf("sessions = %d, want 2", n)
 	}
-	// 3 つ目はルールの上限(2)で捨てられる。既存は生きている
+	// 3 つ目は予算(2。ルールが 1 本なので予算のすべてがこのルールの上限)で捨てられる。既存は生きている
 	c3.SetDeadline(time.Now().Add(300 * time.Millisecond))
 	if _, err := roundtrip(c3, "over"); err == nil {
 		t.Error("third session should be dropped at limit")
@@ -550,7 +550,7 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	pool := resource.NewPool(10, 0)
+	pool := resource.NewPool(10)
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{UDP: 2}})
 	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: pool, Logf: t.Logf,
@@ -675,10 +675,15 @@ func TestTCPRelayConnCap(t *testing.T) {
 	}()
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
-	pool := resource.NewPool(10, 2)
+	other := reserveTCP(t, lb)
+	// 予算 4 でルールが 2 本なので、ルール 1 本の上限は ceil(4/2) = 2(設計文書 7a.10 節)
+	pool := resource.NewPool(4)
 	m := New(lb, Options{TCPPool: pool, Logf: t.Logf})
 	defer m.Close()
-	m.Apply(map[Key]Desired{{proto.TCP, port}: {srv.Addr().String(), "r1"}})
+	m.Apply(map[Key]Desired{
+		{proto.TCP, port}:  {srv.Addr().String(), "r1"},
+		{proto.TCP, other}: {srv.Addr().String(), "r2"},
+	})
 	echo := func(c net.Conn) error {
 		c.SetDeadline(time.Now().Add(2 * time.Second))
 		if _, err := c.Write([]byte("x")); err != nil {

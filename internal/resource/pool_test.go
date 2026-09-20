@@ -22,9 +22,48 @@ func acquireN(l *Listener, n int) (int, Refusal) {
 	return passed, last
 }
 
-// プロセス全体の予算は、ルールごとの上限を持たないプールでも効く。拒否の理由は budget。
+// fillUp は拒まれるまで枠を取り、通った数と拒否を返す。
+func fillUp(t *testing.T, l *Listener, limit int) (int, Refusal) {
+	t.Helper()
+	for i := range limit {
+		if ref, ok := l.Acquire(); !ok {
+			return i, ref
+		}
+	}
+	t.Fatalf("%d flows passed without a refusal", limit)
+	return 0, Refusal{}
+}
+
+// ok は不変条件の検算。running total が待ち受けの一覧と合っていることを確かめる。
+func ok(t *testing.T, p *Pool) {
+	t.Helper()
+	if err := p.checkInvariants(); err != nil {
+		t.Fatalf("pool invariants: %v", err)
+	}
+}
+
+// ルールが 1 本なら、そのルールは予算 T のすべてを使える(設計文書 7a.10 節)。
+func TestPoolOneRuleUsesTheWholeBudget(t *testing.T) {
+	for _, total := range []int{1, 2, 3, 15, 16, 17, 100, 101, 2048, 8192} {
+		p := NewPool(total)
+		l := p.Listener("r1")
+		passed, ref := fillUp(t, l, total+1)
+		if passed != total {
+			t.Errorf("budget %d: one rule held %d flows, want %d", total, passed, total)
+		}
+		if ref.Reason != ReasonBudget {
+			t.Errorf("budget %d: refusal reason = %q, want %q", total, ref.Reason, ReasonBudget)
+		}
+		if p.Rules() != 1 || p.Reserve() != 0 {
+			t.Errorf("budget %d: rules = %d, reserve = %d, want 1 and 0", total, p.Rules(), p.Reserve())
+		}
+		ok(t, p)
+	}
+}
+
+// プロセス全体の予算の拒否は budget で、返した枠は使い直せる。
 func TestPoolBudget(t *testing.T) {
-	p := NewPool(3, 0)
+	p := NewPool(3)
 	l := p.Listener("r1")
 	passed, ref := acquireN(l, 5)
 	if passed != 3 {
@@ -43,86 +82,262 @@ func TestPoolBudget(t *testing.T) {
 	if p.InUse() != 2 {
 		t.Errorf("InUse after a release = %d, want 2", p.InUse())
 	}
-	if _, ok := l.Acquire(); !ok {
+	if _, admitted := l.Acquire(); !admitted {
 		t.Error("a released slot must be reusable")
 	}
+	ok(t, p)
 }
 
-// ルールごとの上限は、同じルールの待ち受けの合計で見る。他のルールは残りの予算を使える。
+// ルール 1 本の上限 C は、そのルールの待ち受けの合計で見る。他のルールは自分の予約を使える。
 func TestPoolRuleCapSumsTheRuleListeners(t *testing.T) {
-	p := NewPool(10, 3)
+	p := NewPool(10) // C = 5、ルールが 2 本なら q = 5
 	a1 := p.Listener("r1")
 	a2 := p.Listener("r1")
 	b := p.Listener("r2")
-	if n, _ := acquireN(a1, 2); n != 2 {
-		t.Fatalf("r1's first listener admitted %d flows, want 2", n)
+	if p.RuleCap() != 5 || p.Reserve() != 5 {
+		t.Fatalf("cap = %d, reserve = %d, want 5 and 5", p.RuleCap(), p.Reserve())
 	}
-	passed, ref := acquireN(a2, 3)
-	if passed != 1 {
-		t.Errorf("r1's second listener admitted %d flows, want 1 (2 of the cap of 3 are held by the first)", passed)
+	if n, _ := acquireN(a1, 3); n != 3 {
+		t.Fatalf("r1's first listener admitted %d flows, want 3", n)
+	}
+	passed, ref := acquireN(a2, 4)
+	if passed != 2 {
+		t.Errorf("r1's second listener admitted %d flows, want 2 (3 of the cap of 5 are held by the first)", passed)
 	}
 	if ref.Reason != ReasonRuleCap {
 		t.Errorf("refusal reason = %q, want %q", ref.Reason, ReasonRuleCap)
 	}
-	if ref.RuleID != "r1" || ref.RuleFlows != 3 || ref.RuleCap != 3 {
-		t.Errorf("refusal = %+v, want rule r1 holding 3 of a cap of 3", ref)
+	if ref.RuleID != "r1" || ref.RuleFlows != 5 || ref.RuleCap != 5 {
+		t.Errorf("refusal = %+v, want rule r1 holding 5 of a cap of 5", ref)
 	}
-	if got := p.RuleFlows("r1"); got != 3 {
-		t.Errorf("RuleFlows(r1) = %d, want 3", got)
+	if got := p.RuleFlows("r1"); got != 5 {
+		t.Errorf("RuleFlows(r1) = %d, want 5", got)
 	}
-	if n, _ := acquireN(b, 3); n != 3 {
-		t.Errorf("r2 admitted %d flows, want 3 (its own cap, out of the shared budget)", n)
+	if n, _ := acquireN(b, 5); n != 5 {
+		t.Errorf("r2 admitted %d flows, want 5 (its own reserve, out of the shared budget)", n)
 	}
-	if p.InUse() != 6 {
-		t.Errorf("InUse = %d, want 6", p.InUse())
+	if p.InUse() != 10 {
+		t.Errorf("InUse = %d, want 10", p.InUse())
+	}
+	ok(t, p)
+}
+
+// 判定の順序は、予算、ルール 1 本の上限、隔離予約である(設計文書 7a.10 節の条件の並び)。
+func TestPoolReasonPrecedence(t *testing.T) {
+	// 予算が尽きているときは、ルール 1 本の上限に達していても budget
+	p := NewPool(2) // C = 1
+	a, b := p.Listener("r1"), p.Listener("r2")
+	if _, admitted := a.Acquire(); !admitted {
+		t.Fatal("r1's first flow must pass")
+	}
+	if _, admitted := b.Acquire(); !admitted {
+		t.Fatal("r2's first flow must pass")
+	}
+	if ref, admitted := a.Acquire(); admitted || ref.Reason != ReasonBudget {
+		t.Errorf("refusal = %+v, admitted = %v, want %q (the budget is judged first)", ref, admitted, ReasonBudget)
+	}
+	ok(t, p)
+
+	// 上限に達しているルールは、空きがあり、他のルールの予約が余っていても rule_cap
+	p2 := NewPool(10) // C = 5、N = 3 で q = 2
+	c := p2.Listener("r1")
+	p2.Listener("r2")
+	p2.Listener("r3")
+	if n, _ := acquireN(c, 5); n != 5 {
+		t.Fatalf("r1 admitted %d flows, want 5 (its cap)", n)
+	}
+	ref, admitted := c.Acquire()
+	if admitted || ref.Reason != ReasonRuleCap {
+		t.Errorf("refusal = %+v, admitted = %v, want %q", ref, admitted, ReasonRuleCap)
+	}
+	if p2.InUse() != 5 {
+		t.Errorf("InUse = %d, want 5 (the budget still has room)", p2.InUse())
+	}
+	ok(t, p2)
+}
+
+// 自分の予約を超えたルールは、残りの空きが他のルールの予約で埋まっていれば reserve で拒まれる。
+// 予約の内側にいるルールは、そのあいだも予約まで通せる。
+func TestPoolReserveKeepsRoomForTheOtherRules(t *testing.T) {
+	p := NewPool(10) // C = 5、N = 3 で q = 2
+	a, b, c := p.Listener("r1"), p.Listener("r2"), p.Listener("r3")
+	if p.Reserve() != 2 {
+		t.Fatalf("reserve = %d, want 2", p.Reserve())
+	}
+	if n, _ := acquireN(a, 4); n != 4 {
+		t.Fatalf("r1 admitted %d flows, want 4", n)
+	}
+	if n, _ := acquireN(b, 4); n != 4 {
+		t.Fatalf("r2 admitted %d flows, want 4", n)
+	}
+	// 空きは 2 つあるが、どちらも r3 の予約の分なので、予約を超えた 2 本は通せない
+	for _, l := range []*Listener{a, b} {
+		ref, admitted := l.Acquire()
+		if admitted || ref.Reason != ReasonReserve {
+			t.Errorf("rule %s: refusal = %+v, admitted = %v, want %q", ref.RuleID, ref, admitted, ReasonReserve)
+		}
+	}
+	if p.InUse() != 8 {
+		t.Errorf("InUse = %d, want 8", p.InUse())
+	}
+	// 予約の内側の r3 は、他のルールがフラッドを受けている最中も予約まで通せる
+	if n, _ := acquireN(c, 2); n != 2 {
+		t.Errorf("r3 admitted %d flows, want 2 (its reserve)", n)
+	}
+	if ref, admitted := c.Acquire(); admitted || ref.Reason != ReasonBudget {
+		t.Errorf("refusal = %+v, admitted = %v, want %q (the budget is full now)", ref, admitted, ReasonBudget)
+	}
+	ok(t, p)
+}
+
+// ルールが 2 本以上あるとき、他のルールがフローを持たなくても、1 本のルールが持てる最大はちょうど C。
+func TestPoolFloodedRuleStopsAtTheCap(t *testing.T) {
+	totals := []int{1, 2, 3, 4, 5, 7, 16, 17, 63, 100, 101, 255, 256, 1024, 2048, 8192, TotalMax}
+	for _, total := range totals {
+		for _, rules := range []int{2, 3, 4, 7, 16, 100, 300} {
+			p := NewPool(total)
+			flooded := p.Listener("r1")
+			for i := 1; i < rules; i++ {
+				p.Listener(fmt.Sprintf("r%d", i+1))
+			}
+			if p.Rules() != rules {
+				t.Fatalf("budget %d, %d rules: Rules() = %d", total, rules, p.Rules())
+			}
+			want := (total + 1) / 2
+			if p.RuleCap() != want {
+				t.Fatalf("budget %d: cap = %d, want ceil(T/2) = %d", total, p.RuleCap(), want)
+			}
+			passed, ref := fillUp(t, flooded, total+1)
+			if passed != want {
+				t.Errorf("budget %d, %d rules: one rule held %d flows, want the cap %d (refused with %q)",
+					total, rules, passed, want, ref.Reason)
+			}
+			ok(t, p)
+		}
 	}
 }
 
-// 予算が先に尽きたときの理由は budget、ルールごとの上限が先なら rule_cap。
-func TestPoolBudgetBeatsRuleCap(t *testing.T) {
-	p := NewPool(2, 5)
-	l := p.Listener("r1")
-	if n, _ := acquireN(l, 2); n != 2 {
-		t.Fatal("the first two flows must pass")
+// ルール 1 本の上限は、どの予算でも ceil(T/2) である。既定以上の予算では、置き換えた式の値を下回らない。
+func TestRuleCapIsHalfTheBudgetRoundedUp(t *testing.T) {
+	// replaced は Phase 6 の移行の手順 4 が置き換えた式 max(floor(T/2), min(F, T))。
+	// F は設定項目にする前の固定値(UDP 4096、TCP 1024)である。
+	replaced := func(total, floor int) int { return max(total/2, min(floor, total), 1) }
+	for total := TotalMin; total <= TotalMax; total++ {
+		got := ruleCapFor(total)
+		want := (total + 1) / 2
+		if got != want {
+			t.Fatalf("ruleCapFor(%d) = %d, want %d", total, got, want)
+		}
+		if total >= UDPTotal && got < replaced(total, 4096) {
+			t.Fatalf("budget %d: cap %d is below the replaced UDP cap %d", total, got, replaced(total, 4096))
+		}
+		if total >= TCPTotal && got < replaced(total, 1024) {
+			t.Fatalf("budget %d: cap %d is below the replaced TCP cap %d", total, got, replaced(total, 1024))
+		}
 	}
-	ref, ok := l.Acquire()
-	if ok {
-		t.Fatal("a flow over the budget must be refused")
+	// 既定の予算は従来の固定値のちょうど 2 倍なので、C は従来の上限と同じ値になる
+	if got := ruleCapFor(UDPTotal); got != 4096 {
+		t.Errorf("cap at the default UDP budget = %d, want 4096", got)
 	}
-	if ref.Reason != ReasonBudget {
-		t.Errorf("reason = %q, want %q (the budget is tighter than the rule cap here)", ref.Reason, ReasonBudget)
+	if got := ruleCapFor(TCPTotal); got != 1024 {
+		t.Errorf("cap at the default TCP budget = %d, want 1024", got)
+	}
+}
+
+// 予約の合計は予算に収まる(N × q <= T)。どの予算とルールの本数でも成り立つ。
+func TestReserveTimesRulesFitsTheBudget(t *testing.T) {
+	for total := TotalMin; total <= TotalMax; total++ {
+		if q := reserveFor(total, 1); q != 0 {
+			t.Fatalf("reserveFor(%d, 1) = %d, want 0", total, q)
+		}
+		for rules := 2; rules <= 300; rules++ {
+			q := reserveFor(total, rules)
+			if want := (total - (total+1)/2) / (rules - 1); q != want {
+				t.Fatalf("reserveFor(%d, %d) = %d, want %d", total, rules, q, want)
+			}
+			if rules*q > total {
+				t.Fatalf("budget %d, %d rules: %d x %d does not fit", total, rules, rules, q)
+			}
+			if q > ruleCapFor(total) {
+				t.Fatalf("budget %d, %d rules: reserve %d is over the cap %d", total, rules, q, ruleCapFor(total))
+			}
+		}
+	}
+}
+
+// 1 本のルールへのフラッドの最中も、他のどのルールも自分の予約まで新しいフローを通せる。
+func TestPoolReserveIsReachableUnderAFlood(t *testing.T) {
+	for _, total := range []int{16, 17, 100, 101, 1024, 2048} {
+		for _, rules := range []int{2, 3, 5, 8, 33} {
+			p := NewPool(total)
+			ls := make([]*Listener, rules)
+			for i := range ls {
+				ls[i] = p.Listener(fmt.Sprintf("r%d", i+1))
+			}
+			q := p.Reserve()
+			fillUp(t, ls[0], total+1) // 1 本目を拒まれるまで埋める
+			for i := 1; i < rules; i++ {
+				if n, ref := acquireN(ls[i], q); n != q {
+					t.Fatalf("budget %d, %d rules: rule %d admitted %d of its reserve of %d (refused with %q)",
+						total, rules, i+1, n, q, ref.Reason)
+				}
+			}
+			ok(t, p)
+		}
 	}
 }
 
 // 分割と統合で所属ルールが変わった待ち受けの既存のフローは、移動先のルールで数える(仕様 7 節)。
+// 統合で移動先のルールが上限を超えても既存のフローは追い出さず、新しいフローだけを拒む。
 func TestPoolSetRuleMovesExistingFlows(t *testing.T) {
-	p := NewPool(10, 2)
-	l := p.Listener("r1")
-	if n, _ := acquireN(l, 2); n != 2 {
-		t.Fatal("the first two flows must pass")
+	p := NewPool(10) // N = 3 で C = 5、q = 2
+	a, b, c := p.Listener("r1"), p.Listener("r2"), p.Listener("r3")
+	if n, _ := acquireN(a, 4); n != 4 {
+		t.Fatalf("r1 admitted %d flows, want 4", n)
 	}
-	l.SetRule("r2")
+	if n, _ := acquireN(b, 3); n != 3 {
+		t.Fatalf("r2 admitted %d flows, want 3", n)
+	}
+	a.SetRule("r2") // r1 と r2 の統合。r2 は 7 本を持ち、上限 5 を超える
 	if got := p.RuleFlows("r1"); got != 0 {
-		t.Errorf("RuleFlows(r1) after the relabel = %d, want 0", got)
+		t.Errorf("RuleFlows(r1) after the merge = %d, want 0", got)
 	}
-	if got := p.RuleFlows("r2"); got != 2 {
-		t.Errorf("RuleFlows(r2) after the relabel = %d, want 2", got)
+	if got := p.RuleFlows("r2"); got != 7 {
+		t.Errorf("RuleFlows(r2) after the merge = %d, want 7", got)
 	}
-	// 移動先のルールで上限に達しているので、この待ち受けは新しいフローを通さない
-	if _, ok := l.Acquire(); ok {
-		t.Error("the relabelled listener must be at its new rule's cap")
+	if p.InUse() != 7 {
+		t.Errorf("InUse after the merge = %d, want 7 (no flow is evicted)", p.InUse())
 	}
-	// 元のルールに別の待ち受けがあれば、そちらは空の枠を使える
-	other := p.Listener("r1")
-	if n, _ := acquireN(other, 2); n != 2 {
-		t.Error("the old rule must be empty again")
+	for _, l := range []*Listener{a, b} {
+		if ref, admitted := l.Acquire(); admitted || ref.Reason != ReasonRuleCap {
+			t.Errorf("a rule over its cap must be refused with %q, got %+v (admitted=%v)", ReasonRuleCap, ref, admitted)
+		}
 	}
+	// 予約の内側の r3 は、統合の後も空きのあいだ先着順に通せる
+	if n, _ := acquireN(c, 4); n != 3 {
+		t.Errorf("r3 admitted %d flows, want 3 (the rest of the budget)", n)
+	}
+	ok(t, p)
+	// 元のルールに新しい待ち受けを開けば、そのルールは空の状態から数え直す
+	fresh := p.Listener("r1")
+	if got := p.RuleFlows("r1"); got != 0 {
+		t.Errorf("RuleFlows(r1) with a fresh listener = %d, want 0", got)
+	}
+	if ref, admitted := fresh.Acquire(); admitted || ref.Reason != ReasonBudget {
+		t.Errorf("refusal = %+v, admitted = %v, want %q (the budget is full)", ref, admitted, ReasonBudget)
+	}
+	ok(t, p)
 }
 
 // 受け付けをやめた待ち受け(Retiring)のフローは、プロセス全体の数に残り、ルールごとの数から外れる。
+// そのルールは受け付けているルールの集合から外れるので、残りのルールの予約は増える。
 func TestPoolStopAcceptingKeepsTheFlowsInTheBudget(t *testing.T) {
-	p := NewPool(10, 2)
+	p := NewPool(10)
 	retiring := p.Listener("r1")
+	other := p.Listener("r2")
+	if p.Reserve() != 5 {
+		t.Fatalf("reserve with 2 rules = %d, want 5", p.Reserve())
+	}
 	if n, _ := acquireN(retiring, 2); n != 2 {
 		t.Fatal("the first two flows must pass")
 	}
@@ -133,20 +348,28 @@ func TestPoolStopAcceptingKeepsTheFlowsInTheBudget(t *testing.T) {
 	if got := p.RuleFlows("r1"); got != 0 {
 		t.Errorf("RuleFlows(r1) = %d, want 0 (a retiring listener is out of the rule's count)", got)
 	}
-	fresh := p.Listener("r1")
-	if n, _ := acquireN(fresh, 2); n != 2 {
-		t.Error("a new listener of the same rule must get the whole rule cap")
+	if p.Rules() != 1 || p.Reserve() != 0 {
+		t.Errorf("rules = %d, reserve = %d, want 1 and 0 (only r2 accepts now)", p.Rules(), p.Reserve())
+	}
+	ok(t, p)
+	// 残った 1 本のルールは、Retiring のフローを除いた予算の残りを全部使える
+	if n, _ := acquireN(other, 9); n != 8 {
+		t.Errorf("r2 admitted %d flows, want 8 (the rest of the budget)", n)
 	}
 	// 宣言に戻った待ち受けは、また数に入る
 	retiring.Accept()
-	if got := p.RuleFlows("r1"); got != 4 {
-		t.Errorf("RuleFlows(r1) after Accept = %d, want 4", got)
+	if got := p.RuleFlows("r1"); got != 2 {
+		t.Errorf("RuleFlows(r1) after Accept = %d, want 2", got)
 	}
+	if p.Rules() != 2 {
+		t.Errorf("rules after Accept = %d, want 2", p.Rules())
+	}
+	ok(t, p)
 }
 
 // 閉じた待ち受けの残りのフローは、Release を呼ぶまでプロセス全体の数に残る。
 func TestPoolCloseKeepsFlowsUntilRelease(t *testing.T) {
-	p := NewPool(4, 0)
+	p := NewPool(4)
 	l := p.Listener("r1")
 	if n, _ := acquireN(l, 2); n != 2 {
 		t.Fatal("the first two flows must pass")
@@ -158,6 +381,10 @@ func TestPoolCloseKeepsFlowsUntilRelease(t *testing.T) {
 	if got := p.RuleFlows("r1"); got != 0 {
 		t.Errorf("RuleFlows(r1) after Close = %d, want 0", got)
 	}
+	if p.Rules() != 0 {
+		t.Errorf("rules after Close = %d, want 0", p.Rules())
+	}
+	ok(t, p)
 	l.Release()
 	l.Release()
 	if p.InUse() != 0 {
@@ -167,11 +394,12 @@ func TestPoolCloseKeepsFlowsUntilRelease(t *testing.T) {
 	if p.InUse() != 0 {
 		t.Errorf("InUse after a second Close = %d, want 0", p.InUse())
 	}
+	ok(t, p)
 }
 
 // 枠を取っていない Release は数を負にしない。負にすると、以後の判定が予算を過大に空いていると見る。
 func TestPoolReleaseNeverGoesNegative(t *testing.T) {
-	p := NewPool(2, 0)
+	p := NewPool(2)
 	l := p.Listener("r1")
 	l.Release()
 	l.Release()
@@ -181,181 +409,267 @@ func TestPoolReleaseNeverGoesNegative(t *testing.T) {
 	if n, _ := acquireN(l, 3); n != 2 {
 		t.Errorf("admitted %d flows after the stray releases, want 2 (the budget is intact)", n)
 	}
+	ok(t, p)
 }
 
-// 拒否の数は、ルールごと、理由ごとに数える。通ったフローは数えない。
+// 拒否の数は、ルールごと、理由ごとに数える。3 つの理由を混ぜても取り違えない。
 func TestPoolRefusalCounters(t *testing.T) {
-	p := NewPool(3, 2)
-	a := p.Listener("r1")
-	b := p.Listener("r2")
-	acquireN(a, 4) // 2 は通り、2 は rule_cap で拒む
-	acquireN(b, 3) // 1 は通り(予算の残りは 1)、2 は budget で拒む
+	p := NewPool(10) // C = 5、N = 3 で q = 2
+	a, b, c := p.Listener("r1"), p.Listener("r2"), p.Listener("r3")
+	acquireN(a, 4) // 4 本通る
+	acquireN(b, 6) // 4 本通り、2 本は reserve(r3 の予約の分だけ空きが残る)
+	acquireN(a, 1) // reserve
+	acquireN(c, 4) // 2 本通り(予約)、2 本は budget
+	fresh := p.Listener("r1")
+	acquireN(fresh, 1) // budget(予算が先に判定される)
 	got := p.Refusals()
 	want := map[string]map[Reason]uint64{
-		"r1": {ReasonRuleCap: 2},
-		"r2": {ReasonBudget: 2},
+		"r1": {ReasonReserve: 1, ReasonBudget: 1},
+		"r2": {ReasonReserve: 2},
+		"r3": {ReasonBudget: 2},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("Refusals = %+v, want %+v", got, want)
-	}
-	for rule, byReason := range want {
-		for reason, n := range byReason {
-			if got[rule][reason] != n {
-				t.Errorf("Refusals[%s][%s] = %d, want %d (all: %+v)", rule, reason, got[rule][reason], n, got)
-			}
-		}
-		if len(got[rule]) != len(byReason) {
-			t.Errorf("Refusals[%s] = %+v, want %+v", rule, got[rule], byReason)
-		}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("Refusals = %+v, want %+v", got, want)
 	}
 	// 返す表は複製で、書き換えても Pool の数は変わらない
-	got["r1"][ReasonRuleCap] = 99
-	if p.Refusals()["r1"][ReasonRuleCap] != 2 {
+	got["r1"][ReasonReserve] = 99
+	if p.Refusals()["r1"][ReasonReserve] != 1 {
 		t.Error("Refusals must return a copy")
 	}
+	ok(t, p)
+
+	// ルール 1 本の上限の拒否も、同じ表に理由ごとに積む
+	p2 := NewPool(10)
+	d := p2.Listener("r1")
+	p2.Listener("r2")
+	acquireN(d, 7) // 5 本通り(上限)、2 本は rule_cap
+	if n := p2.Refusals()["r1"][ReasonRuleCap]; n != 2 {
+		t.Errorf("rule_cap refusals = %d, want 2 (all: %+v)", n, p2.Refusals())
+	}
+	ok(t, p2)
 }
 
 // ログの文言は理由で分かれる(設計文書 7a.10 節の「拒否の報告」)。
 func TestRefusalMessages(t *testing.T) {
-	p := NewPool(1, 1)
+	p := NewPool(1)
 	l := p.Listener("r1")
-	if _, ok := l.Acquire(); !ok {
+	if _, admitted := l.Acquire(); !admitted {
 		t.Fatal("the first flow must pass")
 	}
 	ref, _ := l.Acquire()
 	if got, want := ref.String(), "flow budget full (1 of 1 in use in this process)"; got != want {
 		t.Errorf("budget message = %q, want %q", got, want)
 	}
-	p2 := NewPool(10, 1)
+
+	// 既定の UDP の予算でルールが 2 本、1 本が上限まで持ったときの行(設計文書 7a.10 節の例)
+	p2 := NewPool(UDPTotal)
 	l2 := p2.Listener("r1")
-	if _, ok := l2.Acquire(); !ok {
-		t.Fatal("the first flow must pass")
-	}
+	p2.Listener("r2")
+	acquireN(l2, UDPTotal/2+1)
 	ref2, _ := l2.Acquire()
-	if got, want := ref2.String(), "rule r1 holds 1 of the 1 flows one rule may hold"; got != want {
-		t.Errorf("rule cap message = %q, want %q", got, want)
+	want2 := "rule r1 holds 4096 flows and the rest of the budget is reserved for 1 other rule"
+	if got := ref2.String(); got != want2 {
+		t.Errorf("rule cap message = %q, want %q", got, want2)
+	}
+
+	// 予約による拒否の行
+	p3 := NewPool(10)
+	a, b, c := p3.Listener("r1"), p3.Listener("r2"), p3.Listener("r3")
+	acquireN(a, 4)
+	acquireN(b, 4)
+	_ = c
+	ref3, _ := a.Acquire()
+	want3 := "rule r1 holds 4 flows, above its reserve of 2, and the free part of the budget (2 of 10) is reserved for 2 other rules"
+	if got := ref3.String(); got != want3 {
+		t.Errorf("reserve message = %q, want %q", got, want3)
 	}
 }
 
-// oldGuard は Pool を置く前の判定(設計文書 7a.10 節の移行の手順 2 が置き換えたもの)。
-// relay.Manager はルールごとの数を待ち受けの合計から読み、そのあとにプロセス全体の Counter で
-// 枠を取っていた。移行の手順 2 の完了条件は、同じ入力の列に対して通す・拒むが一致することである。
-type oldGuard struct {
-	total, ruleCap int
-	inUse          int
-	flows          []int // 待ち受けごとのフロー数
-	rules          []string
-	accepting      []bool
-	open           []bool
+// model は隔離予約の式(設計文書 7a.10 節)を Pool とは別に素直に書き下したもの。待ち受けごとの
+// フロー数から毎回すべてを数え直し、Pool が足し引きで保つ値のずれと式の取り違えを見つける。
+type model struct {
+	total     int
+	flows     []int
+	rules     []string
+	accepting []bool
+	open      []bool
 }
 
-func (g *oldGuard) add(rule string) int {
-	g.flows = append(g.flows, 0)
-	g.rules = append(g.rules, rule)
-	g.accepting = append(g.accepting, true)
-	g.open = append(g.open, true)
-	return len(g.flows) - 1
+func (m *model) add(rule string) int {
+	m.flows = append(m.flows, 0)
+	m.rules = append(m.rules, rule)
+	m.accepting = append(m.accepting, true)
+	m.open = append(m.open, true)
+	return len(m.flows) - 1
 }
 
-func (g *oldGuard) ruleFlows(rule string) int {
+// inUse は u。閉じた待ち受けの返していないフローも数える。
+func (m *model) inUse() int {
 	n := 0
-	for i := range g.flows {
-		if g.open[i] && g.accepting[i] && g.rules[i] == rule {
-			n += g.flows[i]
-		}
+	for _, f := range m.flows {
+		n += f
 	}
 	return n
 }
 
-func (g *oldGuard) acquire(i int) bool {
-	if g.ruleCap > 0 && g.ruleFlows(g.rules[i]) >= g.ruleCap {
-		return false
+// acceptingRules は A と、そのルールごとの u_r。
+func (m *model) acceptingRules() map[string]int {
+	out := map[string]int{}
+	for i := range m.flows {
+		if m.open[i] && m.accepting[i] {
+			out[m.rules[i]] += m.flows[i]
+		}
 	}
-	if g.total > 0 && g.inUse >= g.total {
-		return false
-	}
-	g.inUse++
-	g.flows[i]++
-	return true
+	return out
 }
 
-func (g *oldGuard) release(i int) {
-	if g.flows[i] == 0 {
+func (m *model) cap() int {
+	if m.total <= 0 {
+		return 0
+	}
+	return (m.total + 1) / 2
+}
+
+func (m *model) reserve() int {
+	a := m.acceptingRules()
+	if m.total <= 0 || len(a) < 2 {
+		return 0
+	}
+	return (m.total - m.cap()) / (len(a) - 1)
+}
+
+// judge は待ち受け i の新しいフローを通すかを判定する(数は動かさない)。
+func (m *model) judge(i int) (Reason, bool) {
+	if m.total <= 0 {
+		return "", true
+	}
+	u := m.inUse()
+	if u >= m.total {
+		return ReasonBudget, false
+	}
+	a := m.acceptingRules()
+	rule := m.rules[i]
+	ruleFlows := a[rule]
+	if !(m.open[i] && m.accepting[i]) {
+		ruleFlows += m.flows[i]
+	}
+	if len(a) >= 2 && ruleFlows >= m.cap() {
+		return ReasonRuleCap, false
+	}
+	q := m.reserve()
+	if ruleFlows < q {
+		return "", true
+	}
+	others := 0
+	for s, f := range a {
+		if s != rule && f < q {
+			others += q - f
+		}
+	}
+	if m.total-u-others >= 1 {
+		return "", true
+	}
+	return ReasonReserve, false
+}
+
+func (m *model) acquire(i int) (Reason, bool) {
+	reason, admitted := m.judge(i)
+	if admitted {
+		m.flows[i]++
+	}
+	return reason, admitted
+}
+
+func (m *model) release(i int) {
+	if m.flows[i] == 0 {
 		return
 	}
-	g.flows[i]--
-	g.inUse--
+	m.flows[i]--
 }
 
-// 移行の手順 2 の完了条件:待ち受けの追加、所属ルールの付け替え、Retiring、閉鎖、取得と返却を
-// 混ぜた列に対して、Pool と置き換え前の判定が同じフローを通し、同じフローを拒む。
-func TestPoolMatchesTheJudgementItReplaces(t *testing.T) {
-	for _, c := range []struct{ total, ruleCap int }{{20, 8}, {8, 8}, {30, 3}, {12, 0}, {0, 4}} {
-		rnd := rand.New(rand.NewPCG(1, uint64(c.total*100+c.ruleCap)))
-		pool := NewPool(c.total, c.ruleCap)
-		old := &oldGuard{total: c.total, ruleCap: c.ruleCap}
+// 取得、返却、所属ルールの付け替え、Retiring、閉鎖、待ち受けの追加を混ぜた列に対して、Pool と
+// 式を素直に書き下した模型が同じフローを通し、同じ理由で拒む。数の不変条件も毎手で確かめる。
+func TestPoolMatchesTheFormula(t *testing.T) {
+	for _, total := range []int{20, 8, 30, 12, 1, 16, 47} {
+		rnd := rand.New(rand.NewPCG(1, uint64(total)))
+		pool := NewPool(total)
+		m := &model{total: total}
 		var ls []*Listener
-		var held [][]int // 待ち受けごとに、取れている枠の数を両者で数える
+		var held []int
 		add := func(rule string) {
 			ls = append(ls, pool.Listener(rule))
-			old.add(rule)
-			held = append(held, []int{0, 0})
+			m.add(rule)
+			held = append(held, 0)
 		}
 		add("r1")
 		add("r1")
 		add("r2")
-		rules := []string{"r1", "r2", "r3"}
-		for step := range 4000 {
+		rules := []string{"r1", "r2", "r3", "r4"}
+		for step := range 6000 {
 			i := rnd.IntN(len(ls))
 			switch rnd.IntN(10) {
 			case 0, 1, 2, 3, 4, 5: // 枠を取る
-				if !old.open[i] || !old.accepting[i] {
-					continue
+				gotRef, gotOK := ls[i].Acquire()
+				wantReason, wantOK := m.acquire(i)
+				if gotOK != wantOK || (!gotOK && gotRef.Reason != wantReason) {
+					t.Fatalf("budget %d step %d listener %d (rule %s): Pool admitted=%v reason=%q, the formula says admitted=%v reason=%q (in use %d, rules %v, reserve %d)",
+						total, step, i, m.rules[i], gotOK, gotRef.Reason, wantOK, wantReason, pool.InUse(), m.acceptingRules(), m.reserve())
 				}
-				_, newOK := ls[i].Acquire()
-				oldOK := old.acquire(i)
-				if newOK != oldOK {
-					t.Fatalf("case %+v step %d listener %d: Pool admitted=%v, the replaced judgement admitted=%v (in use %d, rule %s holds %d)",
-						c, step, i, newOK, oldOK, pool.InUse(), old.rules[i], old.ruleFlows(old.rules[i]))
+				if gotOK {
+					held[i]++
 				}
-				if newOK {
-					held[i][0]++
-					held[i][1]++
+				// 予約の内側にいるルールは、予算に空きがあるかぎり reserve で拒まれない
+				if !gotOK && gotRef.Reason == ReasonReserve && gotRef.RuleFlows < gotRef.Reserve {
+					t.Fatalf("budget %d step %d: rule %s holds %d flows, below its reserve of %d, and was refused with %q",
+						total, step, gotRef.RuleID, gotRef.RuleFlows, gotRef.Reserve, gotRef.Reason)
 				}
 			case 6, 7: // 枠を返す
-				if held[i][0] == 0 {
+				if held[i] == 0 {
 					continue
 				}
 				ls[i].Release()
-				old.release(i)
-				held[i][0]--
-				held[i][1]--
+				m.release(i)
+				held[i]--
 			case 8: // 所属ルールを付け替える、または受け付けを止める・再開する
 				switch rnd.IntN(3) {
 				case 0:
 					r := rules[rnd.IntN(len(rules))]
 					ls[i].SetRule(r)
-					old.rules[i] = r
+					m.rules[i] = r
 				case 1:
 					ls[i].StopAccepting()
-					old.accepting[i] = false
+					m.accepting[i] = false
 				default:
 					ls[i].Accept()
-					old.accepting[i] = true
+					m.accepting[i] = true
 				}
 			default: // 待ち受けを閉じる、または開く
-				if len(ls) < 6 && rnd.IntN(2) == 0 {
+				if len(ls) < 7 && rnd.IntN(2) == 0 {
 					add(rules[rnd.IntN(len(rules))])
 					continue
 				}
-				if !old.open[i] {
+				if !m.open[i] {
 					continue
 				}
 				ls[i].Close()
-				old.open[i] = false
+				m.open[i] = false
 			}
-			if pool.InUse() != old.inUse {
-				t.Fatalf("case %+v step %d: InUse = %d, the replaced judgement counts %d", c, step, pool.InUse(), old.inUse)
+			if pool.InUse() != m.inUse() {
+				t.Fatalf("budget %d step %d: InUse = %d, the formula counts %d", total, step, pool.InUse(), m.inUse())
+			}
+			if total > 0 && pool.InUse() > total {
+				t.Fatalf("budget %d step %d: InUse = %d, over the budget", total, step, pool.InUse())
+			}
+			if err := pool.checkInvariants(); err != nil {
+				t.Fatalf("budget %d step %d: %v", total, step, err)
+			}
+			if got, want := pool.Reserve(), m.reserve(); got != want {
+				t.Fatalf("budget %d step %d: reserve = %d, the formula says %d", total, step, got, want)
+			}
+			for rule, flows := range m.acceptingRules() {
+				if got := pool.RuleFlows(rule); got != flows {
+					t.Fatalf("budget %d step %d: RuleFlows(%s) = %d, the formula counts %d", total, step, rule, got, flows)
+				}
 			}
 		}
 	}
@@ -363,8 +677,8 @@ func TestPoolMatchesTheJudgementItReplaces(t *testing.T) {
 
 // Acquire と Release を並行に呼んでも、数は壊れず、予算を超えない(-race で流す)。
 func TestPoolConcurrentAcquireRelease(t *testing.T) {
-	const total, ruleCap, workers, rounds = 40, 10, 16, 500
-	p := NewPool(total, ruleCap)
+	const total, workers, rounds = 40, 16, 500
+	p := NewPool(total)
 	ls := []*Listener{p.Listener("r1"), p.Listener("r1"), p.Listener("r2"), p.Listener("r3")}
 	var wg sync.WaitGroup
 	for w := range workers {
@@ -373,12 +687,16 @@ func TestPoolConcurrentAcquireRelease(t *testing.T) {
 			defer wg.Done()
 			l := ls[w%len(ls)]
 			for range rounds {
-				if _, ok := l.Acquire(); ok {
+				if _, admitted := l.Acquire(); admitted {
 					l.Release()
 				}
-				if w%4 == 0 {
+				switch w % 4 {
+				case 0:
 					l.SetRule("r1")
 					l.SetRule("r2")
+				case 1:
+					l.StopAccepting()
+					l.Accept()
 				}
 			}
 		}(w)
@@ -387,13 +705,49 @@ func TestPoolConcurrentAcquireRelease(t *testing.T) {
 	if p.InUse() != 0 {
 		t.Errorf("InUse after every flow was released = %d, want 0", p.InUse())
 	}
-	// 予算はそのまま残っている。ルールごとの上限に当たらないよう、1 フローずつ別のルールで埋める
-	for i := range total {
-		if _, ok := p.Listener(fmt.Sprintf("fill%d", i)).Acquire(); !ok {
-			t.Fatalf("only %d of the %d flows fit after the concurrent run", i, total)
-		}
+	ok(t, p)
+	// 予算はそのまま残っている。1 本のルールだけを使い、予算のすべてを取り直せることを確かめる
+	p2 := NewPool(total)
+	l := p2.Listener("solo")
+	if n, _ := acquireN(l, total+1); n != total {
+		t.Errorf("only %d of the %d flows fit after the concurrent run", n, total)
 	}
-	if _, ok := p.Listener("fill_over").Acquire(); ok {
-		t.Error("a flow over the budget passed after the concurrent run")
+	ok(t, p2)
+}
+
+// 並行した取得と返却の最中に待ち受けの集合が変わっても、数はずれない(-race で流す)。
+func TestPoolConcurrentRuleSetChanges(t *testing.T) {
+	p := NewPool(64)
+	var wg sync.WaitGroup
+	for w := range 8 {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for round := range 200 {
+				l := p.Listener(fmt.Sprintf("r%d", w%3))
+				held := 0
+				for range 4 {
+					if _, admitted := l.Acquire(); admitted {
+						held++
+					}
+				}
+				if round%2 == 0 {
+					l.SetRule(fmt.Sprintf("s%d", w))
+				}
+				l.StopAccepting()
+				l.Close()
+				for range held {
+					l.Release()
+				}
+			}
+		}(w)
 	}
+	wg.Wait()
+	if p.InUse() != 0 {
+		t.Errorf("InUse after every listener closed = %d, want 0", p.InUse())
+	}
+	if p.Rules() != 0 {
+		t.Errorf("accepting rules after every listener closed = %d, want 0", p.Rules())
+	}
+	ok(t, p)
 }

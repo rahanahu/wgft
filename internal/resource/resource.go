@@ -8,16 +8,10 @@
 package resource
 
 // 仕様 7 節の値。プロセス全体の上限(WGFT_MAX_UDP_FLOWS、WGFT_MAX_TCP_FLOWS)が設定項目で、
-// ここはその既定値。ルールごとの上限は設定項目ではなく、プロセス全体の上限から導く
-// (Limits.UDPPerRuleCap、TCPPerRuleCap)。
+// ここはその既定値。ルール 1 本の上限と隔離予約は設定項目ではなく、この上限から Pool が導く。
 const (
 	UDPTotal = 8192
 	TCPTotal = 2048
-
-	// ルールごとの上限の下限。設定項目にする前の固定値で、全体の上限を下げた構成で
-	// ルール 1 本の上限が以前より下がらないようにする(Limits.UDPPerRuleCap)
-	UDPPerRuleFloor = 4096
-	TCPPerRuleFloor = 1024
 
 	// プロセス全体の上限に設定できる範囲
 	TotalMin = 16
@@ -41,14 +35,6 @@ func (l Limits) WithDefaults() Limits {
 	}
 	return l
 }
-
-// UDPPerRuleCap と TCPPerRuleCap は、ルールごとの同時フロー数の上限をプロセス全体の上限から
-// 導く(仕様 7 節)。全体の半分とするが、以前の固定値と全体の上限の小さいほうを下回らない。
-// 全体を上げれば一緒に上がり、既定や全体を下げた構成では以前と同じ値になる。
-func (l Limits) UDPPerRuleCap() int { return perRuleCap(l.WithDefaults().UDPTotal, UDPPerRuleFloor) }
-func (l Limits) TCPPerRuleCap() int { return perRuleCap(l.WithDefaults().TCPTotal, TCPPerRuleFloor) }
-
-func perRuleCap(total, floor int) int { return max(total/2, min(floor, total), 1) }
 
 // MemoryLimit は、この上限で動くプロセスに設定するメモリのソフト上限(バイト)。
 // 係数はラボの実測からの定数で、ホストのメモリの量は見ない(仕様 7 節)。

@@ -89,8 +89,8 @@ func New(opts Options) *Backend {
 	b := &Backend{
 		logf:    logf,
 		policy:  goengine.New(nil),
-		udpPool: resource.NewPool(lim.UDPTotal, lim.UDPPerRuleCap()),
-		tcpPool: resource.NewPool(lim.TCPTotal, lim.TCPPerRuleCap()),
+		udpPool: resource.NewPool(lim.UDPTotal),
+		tcpPool: resource.NewPool(lim.TCPTotal),
 	}
 	b.relay = relay.New(hostNetwork{}, relay.Options{
 		UDPIdleTimeout: 120 * time.Second, // the default of conntrack's udp_timeout_stream

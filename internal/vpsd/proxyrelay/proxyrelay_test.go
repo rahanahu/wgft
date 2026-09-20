@@ -21,8 +21,8 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// Pool を渡さなければ、既定の予算(resource.TCPTotal、2048)とそこから導くルールごとの上限
-// (resource.Limits.TCPPerRuleCap、仕様 7 節)で作る。上限は導入前の固定値(1024)と一致する。
+// Pool を渡さなければ、既定の予算(resource.TCPTotal、2048)とそこから導くルール 1 本の上限
+// (ceil(T/2)、設計文書 7a.10 節)で作る。既定の予算での上限は、置き換えた式の値(1024)と一致する。
 func TestPoolDefaultsFromTheDefaultBudget(t *testing.T) {
 	m := New(Options{})
 	if got := m.opts.Pool.Total(); got != 2048 {
@@ -32,7 +32,7 @@ func TestPoolDefaultsFromTheDefaultBudget(t *testing.T) {
 		t.Errorf("default rule cap = %d, want 1024", got)
 	}
 	// 呼び出し側が渡した Pool は、そのまま使う
-	pool := resource.NewPool(40, 3)
+	pool := resource.NewPool(40)
 	m = New(Options{Pool: pool})
 	if m.opts.Pool != pool {
 		t.Error("an explicit Pool must not be replaced by the derived default")
@@ -239,7 +239,7 @@ func TestConnCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ユーザー空間モードと同じく、Admission Policy は Go の評価器が判定する
-	pool := resource.NewPool(10, 0)
+	pool := resource.NewPool(10)
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r", Proto: proto.TCP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{TCP: 1}})
 	m := New(Options{
@@ -325,7 +325,7 @@ func admissionManager(t *testing.T, eng *goengine.Engine) (dial func() net.Conn,
 		Listen: func(uint16) (net.Listener, error) { return raw, nil },
 		Dial:   func(string) (net.Conn, error) { return net.Dial("tcp", agentAddr) },
 		Logf:   testLogf(t),
-		Pool:   resource.NewPool(10, 0),
+		Pool:   resource.NewPool(10),
 		Admit: func(ruleID string, src netip.Addr) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, 0)
 			return tk.Release, d.Allow

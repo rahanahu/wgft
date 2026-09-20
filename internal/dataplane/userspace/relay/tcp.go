@@ -106,8 +106,9 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				}
 				release = rel
 			}
-			// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算とルールごとの上限を
-			// Pool が 1 つの排他の中で判定する。超えた接続はすぐ閉じる(既存の接続は追い出さない)
+			// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の上限、
+			// 他のルールの隔離予約を Pool が 1 つの排他の中で判定する。拒んだ接続はすぐ閉じる
+			// (既存の接続は追い出さない)
 			if ref, ok := l.budget.Acquire(); !ok {
 				release()
 				abortRefused(c)

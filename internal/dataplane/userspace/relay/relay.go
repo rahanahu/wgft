@@ -33,8 +33,9 @@ type Options struct {
 	UDPIdleTimeout time.Duration // 無通信でセッションを閉じるまで(全体状態の udp_timeout_stream)
 	// Limits はプロセス全体の予算(設定値)。UDPPool と TCPPool の既定値を導くのに使う
 	Limits resource.Limits
-	// UDPPool と TCPPool はプロセス全体の予算とルールごとの上限(仕様 7 節、Resource Guard)。
-	// nil なら Limits から作る。vpsd はプロキシモードの中継と共有する Pool を渡す
+	// UDPPool と TCPPool はプロセス全体の予算と、そこから導くルールごとの上限と隔離予約
+	// (仕様 7 節、設計文書 7a.10 節の Resource Guard)。nil なら Limits から作る。
+	// vpsd はプロキシモードの中継と共有する Pool を渡す
 	UDPPool *resource.Pool
 	TCPPool *resource.Pool
 	Dial    func(network, addr string) (net.Conn, error)
@@ -42,8 +43,8 @@ type Options struct {
 	// Admit は新しいフロー(TCP の accept、UDP の新しいセッションの最初のデータグラム)を通すかを、
 	// Admission Policy のすべての段で判定する(設計文書 7a.9 節の AdmitFlow)。size は最初のパケットの
 	// 大きさ(UDP はデータグラムの長さ、TCP は 0)。通すときは、送信元ごとの同時フロー数の枠を返す
-	// release も返し、中継はフローの終わりに 1 回呼ぶ。後の Resource Guard(ルールごとの上限、
-	// プロセス全体の上限)が拒んだときも、その場で呼ぶ。nil なら全部通す。
+	// release も返し、中継はフローの終わりに 1 回呼ぶ。後の Resource Guard(プロセス全体の予算、
+	// ルール 1 本の上限、隔離予約)が拒んだときも、その場で呼ぶ。nil なら全部通す。
 	// VPS 側のユーザー空間モード(仕様 6.3 節)が使う。エージェントでは nil。
 	Admit func(ruleID string, src netip.Addr, size int) (release func(), ok bool)
 	// AdmitPacket は成立済みの UDP セッションのデータグラム 1 つを通すか(packet_rate)。nil なら全部通す。
@@ -110,7 +111,7 @@ type listener struct {
 	sweep func(keep func(src netip.Addr) bool) int
 	// セッション数(ハートビートの表示用)
 	sessions func() int
-	// budget は Resource Guard の枠(プロセス全体の予算とルールごとの上限。設計文書 7a.10 節)。
+	// budget は Resource Guard の枠(プロセス全体の予算と隔離予約。設計文書 7a.10 節)。
 	// 上限の対象になるフロー(UDP はセッション、TCP は公開側の接続)を 1 つずつここで取る。
 	// ルールごとの数は Pool が同じルールの待ち受けの合計で見るので、分割と統合で所属ルールが
 	// 変わったリスナーの既存のフローは移動先のルールで数える(仕様 7 節)
@@ -140,10 +141,10 @@ func New(n Network, opts Options) *Manager {
 	}
 	lim := opts.Limits.WithDefaults()
 	if opts.UDPPool == nil {
-		opts.UDPPool = resource.NewPool(lim.UDPTotal, lim.UDPPerRuleCap())
+		opts.UDPPool = resource.NewPool(lim.UDPTotal)
 	}
 	if opts.TCPPool == nil {
-		opts.TCPPool = resource.NewPool(lim.TCPTotal, lim.TCPPerRuleCap())
+		opts.TCPPool = resource.NewPool(lim.TCPTotal)
 	}
 	if opts.Dial == nil {
 		d := &net.Dialer{Timeout: 10 * time.Second}
@@ -275,6 +276,10 @@ func (m *Manager) openLocked(k Key, d Desired) {
 		// 開けなくても登録しておき、状態として見せる。次の Apply(再試行)で開き直す
 		l.bindErr = err
 		l.closeF = func() {}
+		// 開けなかった待ち受けは新しいフローを受け付けないので、隔離予約の集合 A から外す
+		// (設計文書 7a.10 節:bind に失敗して待ち受けを持たないルールは A に含めない)。
+		// 再試行は待ち受けを作り直すので、受け付けの再開はここでは要らない
+		l.budget.StopAccepting()
 		m.opts.Logf("listener %s: %v", k, err)
 	} else {
 		m.opts.Logf("listener %s -> %s opened; rule %s", k, d.Target, d.RuleID)

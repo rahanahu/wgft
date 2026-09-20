@@ -41,7 +41,8 @@ type Options struct {
 	// Dial はエージェントのリスナーへ繋ぐ。既定は net.Dial("tcp", addr)。
 	Dial func(addr string) (net.Conn, error)
 	Logf func(string, ...any)
-	// Pool はプロセス全体の予算とルールごとの上限(仕様 7 節、Resource Guard)。nil なら既定値で作る。
+	// Pool はプロセス全体の予算と、そこから導くルールごとの上限と隔離予約(仕様 7 節、
+	// 設計文書 7a.10 節の Resource Guard)。nil なら既定値で作る。
 	// ユーザー空間モードの vpsd は relay と同じ Pool を渡し、合計で数える
 	Pool *resource.Pool
 	// Admit は新しい接続を Admission Policy のすべての段(deny、allow、3 つのレート、送信元ごとの
@@ -121,7 +122,7 @@ func New(opts Options) *Manager {
 	}
 	if opts.Pool == nil {
 		lim := resource.Limits{}.WithDefaults()
-		opts.Pool = resource.NewPool(lim.TCPTotal, lim.TCPPerRuleCap())
+		opts.Pool = resource.NewPool(lim.TCPTotal)
 	}
 	return &Manager{opts: opts, ls: map[uint16]*listener{}, bindFail: map[uint16]*failure{}}
 }
@@ -351,8 +352,9 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 		abortRefused(c)
 		return
 	}
-	// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算とルールごとの上限を Pool が
-	// 1 つの排他の中で判定する。超えた接続はすぐ閉じる(既存の接続は追い出さない)
+	// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の上限、他の
+	// ルールの隔離予約を Pool が 1 つの排他の中で判定する。拒んだ接続はすぐ閉じる(既存の接続は
+	// 追い出さない)
 	ref, ok := l.budget.Acquire()
 	if !ok {
 		abortRefused(c)

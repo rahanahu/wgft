@@ -176,9 +176,9 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					}
 					release = rel
 				}
-				// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算とルールごとの
-				// 上限を Pool が 1 つの排他の中で判定する。超えた新規パケットは捨てる(既存セッションは
-				// 追い出さない)
+				// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の
+				// 上限、他のルールの隔離予約を Pool が 1 つの排他の中で判定する。拒んだ新規パケットは
+				// 捨てる(既存セッションは追い出さない)
 				if ref, ok := l.budget.Acquire(); !ok {
 					release()
 					if capLog.Allow() {
