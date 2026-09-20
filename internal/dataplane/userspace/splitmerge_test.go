@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
@@ -52,10 +53,22 @@ func TestSplitAndMergeRefuseNoNewConnections(t *testing.T) {
 	}
 	commit(plan("r_a"))
 
-	var refused, served, other atomic.Int64
+	var refused, served, other, attempts atomic.Int64
+	var otherErrs sync.Map // collects the "other" bucket's error strings, for a failure to show
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	addr := "127.0.0.1:" + strconv.Itoa(int(port))
+	// pace bounds each goroutine's connection rate. Left unthrottled, a tight dial/read/close loop on
+	// loopback opens on the order of 10^5 connections a second; sustained across many runs (this test
+	// alone, repeated, or alongside the rest of the suite) that floods the host's netfilter conntrack
+	// table, which is system-wide and shared with everything else on the machine, and once it is full
+	// the kernel drops new SYNs outright. The dropped SYN surfaces here as a plain
+	// net.Dial "i/o timeout" (never ECONNREFUSED and never ECONNRESET, since the packet never reaches
+	// the listening socket), which looks exactly like the "other" bucket this test watches for but has
+	// nothing to do with the split/merge code under test. Paced at this rate the test still drives
+	// several hundred connection attempts across the 300 relabels, comfortably enough to still fail if
+	// a real refusal or drop happens.
+	const pace = 5 * time.Millisecond
 	for range 4 {
 		wg.Add(1)
 		go func() {
@@ -67,17 +80,20 @@ func TestSplitAndMergeRefuseNoNewConnections(t *testing.T) {
 					return
 				default:
 				}
+				attempts.Add(1)
 				c, err := net.DialTimeout("tcp4", addr, time.Second)
 				if err != nil {
 					if errors.Is(err, syscall.ECONNRESET) {
 						refused.Add(1)
 					} else {
 						other.Add(1)
+						otherErrs.Store(fmt.Sprintf("dial: %v", err), true)
 					}
+					time.Sleep(pace)
 					continue
 				}
 				c.SetReadDeadline(time.Now().Add(2 * time.Second))
-				_, err = c.Read(buf)
+				n, err := c.Read(buf)
 				switch {
 				case errors.Is(err, syscall.ECONNRESET):
 					refused.Add(1)
@@ -85,8 +101,10 @@ func TestSplitAndMergeRefuseNoNewConnections(t *testing.T) {
 					served.Add(1)
 				default:
 					other.Add(1)
+					otherErrs.Store(fmt.Sprintf("read: n=%d err=%v buf=%q", n, err, buf[:n]), true)
 				}
 				c.Close()
+				time.Sleep(pace)
 			}
 		}()
 	}
@@ -96,11 +114,13 @@ func TestSplitAndMergeRefuseNoNewConnections(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
-	t.Logf("served %d, refused %d", served.Load(), refused.Load())
+	t.Logf("served %d, refused %d, attempts %d", served.Load(), refused.Load(), attempts.Load())
 	if refused.Load() != 0 {
 		t.Errorf("%d connections were refused while the port moved between rule IDs (%d served)", refused.Load(), served.Load())
 	}
 	if served.Load() == 0 || other.Load() != 0 {
-		t.Errorf("served %d, unexpected outcomes %d; the probe did not exercise the relay", served.Load(), other.Load())
+		var msgs []string
+		otherErrs.Range(func(k, _ any) bool { msgs = append(msgs, k.(string)); return true })
+		t.Errorf("served %d, unexpected outcomes %d; the probe did not exercise the relay; errors: %v", served.Load(), other.Load(), msgs)
 	}
 }
