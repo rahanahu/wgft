@@ -86,15 +86,6 @@ func (r Retiring) SourceAllowed(src netip.Addr) bool {
 	return r.Previous.Policy.SourceAllowed(src) && r.Desired.SourceAllowed(src)
 }
 
-// RetiringByRule indexes retiring by rule ID.
-func RetiringByRule(retiring []Retiring) map[string]Retiring {
-	out := make(map[string]Retiring, len(retiring))
-	for _, r := range retiring {
-		out[r.Previous.RuleID] = r
-	}
-	return out
-}
-
 // Participant is the dataplane side of the Runtime's fixed order (design.md 7a.2 節). Every
 // Backend is one; internal/reconcile depends only on this narrow interface.
 type Participant interface {

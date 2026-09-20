@@ -103,8 +103,8 @@ func TestBuildAdmissionCarriesPerSourceFlowCaps(t *testing.T) {
 }
 
 // TestBuildDeterministic は、入力ルールとエージェントの順序をどう変えても、Plan.Ports は
-// (Proto, ListenPort.Lo, RuleID) の順、Plan.Peers は Agent の順に必ず並ぶことを確かめる
-// (design.md 7a.2 節: Planner は決定的である)。
+// (Proto, ListenPort.Lo, RuleID) の順に必ず並ぶことを確かめる(design.md 7a.2 節: Planner は決定的
+// である)。
 func TestBuildDeterministic(t *testing.T) {
 	rules := []model.Rule{
 		{ID: "r_udp_hi", Agent: "b", Proto: proto.UDP, ListenPort: pr(5000, 5000), Enabled: true},
@@ -122,14 +122,6 @@ func TestBuildDeterministic(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotPortOrder, wantPortOrder) {
 		t.Fatalf("Plan.Ports order = %v, want %v", gotPortOrder, wantPortOrder)
-	}
-	wantPeerOrder := []string{"a", "b"}
-	var gotPeerOrder []string
-	for _, p := range base.Peers {
-		gotPeerOrder = append(gotPeerOrder, p.Agent)
-	}
-	if !reflect.DeepEqual(gotPeerOrder, wantPeerOrder) {
-		t.Fatalf("Plan.Peers order = %v, want %v", gotPeerOrder, wantPeerOrder)
 	}
 
 	rnd := rand.New(rand.NewSource(1))
@@ -165,7 +157,7 @@ func TestTransparentAndRelayHelpers(t *testing.T) {
 
 func TestBuildEmptyInput(t *testing.T) {
 	got := Build(Input{})
-	if len(got.Ports) != 0 || len(got.Peers) != 0 {
+	if len(got.Ports) != 0 {
 		t.Fatalf("Build(Input{}) = %+v, want an empty Plan", got)
 	}
 }

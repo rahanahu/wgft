@@ -3,8 +3,8 @@
 //
 // Planner "は、normalize したルール集合と AdmissionPolicy から Plan を組み立てる。OS、nftables、
 // gVisor の実装詳細を知らない。" This package holds no Backend, Runtime, or reconcile logic (those
-// come later; design.md 7a.7 節 assigns them to internal/dataplane, internal/frontend and
-// internal/reconcile). It only computes what should exist, never applies anything.
+// come later; design.md 7a.7 節 assigns them to internal/dataplane and internal/reconcile). It only
+// computes what should exist, never applies anything.
 //
 // This package is pure: it imports internal/model, internal/policy (OS-free types, admission
 // limits included) and proto (the external contract), and nothing from
@@ -22,7 +22,9 @@ import (
 
 // Agent is a registered agent as the Planner sees it: its name and its address on wg0. This is the
 // only agent-derived Planner input in Phase 1 (design.md 7a.8 節: "normalize したルール集合と
-// AdmissionPolicy から Plan を組み立てる"); see Peer's doc comment for what is deliberately left out.
+// AdmissionPolicy から Plan を組み立てる"). The full WireGuard peer configuration (public key,
+// allowed IPs, keepalive) is assembled by the dataplane Backend from this address, not by Planner;
+// see dataplane.WGConfig.Peers.
 type Agent struct {
 	Name string
 	Addr netip.Addr
@@ -75,19 +77,13 @@ type PortPlan struct {
 	Policy policy.RulePolicy
 }
 
-// Peer is one WireGuard peer the Plan expects to exist on wg0, identified by the agent's wg0
-// address. Phase 1 takes no key material as Planner input (design.md 7a.8 節 scopes this phase to
-// "normalize したルール集合と AdmissionPolicy"); the full peer configuration (public key, allowed
-// IPs, keepalive) is assembled by the dataplane Backend from Phase 2 onward, once Runtime exists.
-type Peer struct {
-	Agent string
-	Addr  netip.Addr
-}
-
-// Plan is the desired generation, ingress/admission plan per owned port, routes to targets, and
-// WireGuard peer set (design.md 7a.2 節): backend-independent data a Backend (design.md 7a.7 節,
-// Phase 2/3) reads to converge. internal/planner never calls into a Backend; the dependency is
-// one-directional.
+// Plan is the desired generation and the ingress/admission plan and route per owned port
+// (design.md 7a.2 節): backend-independent data a Backend (design.md 7a.7 節, Phase 2/3) reads to
+// converge. internal/planner never calls into a Backend; the dependency is one-directional.
+// The WireGuard peer set is not part of Plan: it is dataplane.WGConfig.Peers, built by the caller
+// (internal/vpsd/apply.go's wgConfig) from the same registered-agent data Planner receives as
+// Input.Agents, and reconcile.Runtime tracks its own changes through Desired.PeersChanged (see
+// design.md 7a.3 節「ピアを変える操作」).
 //
 // Admission is the AdmissionPolicy IR (internal/policy) for what this Plan forwards: its Rules hold
 // only the rules that have an entry in Ports (disabled rules and rules of unregistered agents are
@@ -100,14 +96,13 @@ type Peer struct {
 type Plan struct {
 	Generation uint64
 	Ports      []PortPlan
-	Peers      []Peer
 	Admission  policy.Policy
 }
 
 // Build derives a Plan from normalized rules, admission policy settings, and agent addresses
 // (design.md 7a.2 節). It is pure (no OS, nftables, or gVisor calls) and deterministic: for the
-// same Input, Plan.Ports is always sorted by (Proto, ListenPort.Lo, RuleID) and Plan.Peers by
-// Agent, regardless of the input rule or agent order.
+// same Input, Plan.Ports is always sorted by (Proto, ListenPort.Lo, RuleID), regardless of the
+// input rule or agent order.
 //
 // A rule is left out of Plan.Ports when it is disabled, or when its agent is not in Input.Agents.
 // This matches what every dataplane already needs before it can forward anything: before this Plan
@@ -169,11 +164,6 @@ func Build(in Input) Plan {
 		return a.RuleID < b.RuleID
 	})
 
-	for _, a := range in.Agents {
-		plan.Peers = append(plan.Peers, Peer{Agent: a.Name, Addr: a.Addr})
-	}
-	sort.Slice(plan.Peers, func(i, j int) bool { return plan.Peers[i].Agent < plan.Peers[j].Agent })
-
 	return plan
 }
 
@@ -200,14 +190,14 @@ func (p Plan) byForwarding(f model.Forwarding) []PortPlan {
 }
 
 // Without returns a copy of p that forwards none of the rules in ids: their ports and their
-// Admission entries are left out, everything else (generation, peers, per-source caps) is kept.
-// The Runtime uses it to publish a fail-closed Plan, one where the rules whose Prepare failed
-// have no dispatch at all (design.md 7a.3 節). p itself is not modified.
+// Admission entries are left out, everything else (generation, per-source caps) is kept. The
+// Runtime uses it to publish a fail-closed Plan, one where the rules whose Prepare failed have no
+// dispatch at all (design.md 7a.3 節). p itself is not modified.
 func (p Plan) Without(ids map[string]bool) Plan {
 	if len(ids) == 0 {
 		return p
 	}
-	out := Plan{Generation: p.Generation, Peers: p.Peers,
+	out := Plan{Generation: p.Generation,
 		Admission: policy.Policy{PerSourceFlowCaps: p.Admission.PerSourceFlowCaps}}
 	for _, pp := range p.Ports {
 		if !ids[pp.RuleID] {

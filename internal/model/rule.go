@@ -35,10 +35,10 @@ type Rule struct {
 }
 
 // FromProto は 1 本の proto.Rule を正規化する。呼び出し側は、構造的な検査(ポート範囲の重なり、
-// 予約ポートなど)を NormalizeRules/NormalizeUpsert 経由で proto.ValidateRules/ValidateUpsert に
-// 先に通す前提である。FromProto 自身は Forwarding/SourceMetadata への写像だけを検査する
-// (proto.Rule.Validate の「proxy_protocol は vps_mode=proxy でしか立てられない」という検査と
-// 同じ制約を、モデル側の語彙である Transparent + ProxyV2 の禁止として言い換える)。
+// 予約ポートなど)を proto.ValidateRules/ValidateUpsert に先に通す前提である(書き込みの経路である
+// internal/vpsd/store と webui_import はこれを直接呼ぶ)。FromProto 自身は Forwarding/SourceMetadata
+// への写像だけを検査する(proto.Rule.Validate の「proxy_protocol は vps_mode=proxy でしか立てられ
+// ない」という検査と同じ制約を、モデル側の語彙である Transparent + ProxyV2 の禁止として言い換える)。
 func FromProto(r proto.Rule) (Rule, error) {
 	fwd, meta, err := forwardingFromProto(r.VPSMode, r.ProxyProtocol)
 	if err != nil {
@@ -109,15 +109,6 @@ func NormalizeRules(rules []proto.Rule, reserved proto.Reserved) ([]Rule, error)
 	return fromProtoAll(rules)
 }
 
-// NormalizeUpsert は proto.ValidateUpsert で検査してから正規化する。before と ID・内容が変わらない
-// 行には Rule.Validate を掛け直さない規則(設計文書 5.4 節)を、そのまま proto.ValidateUpsert から引き継ぐ。
-func NormalizeUpsert(rules, before []proto.Rule, reserved proto.Reserved) ([]Rule, error) {
-	if err := proto.ValidateUpsert(rules, before, reserved); err != nil {
-		return nil, err
-	}
-	return fromProtoAll(rules)
-}
-
 func fromProtoAll(rules []proto.Rule) ([]Rule, error) {
 	out := make([]Rule, len(rules))
 	for i, r := range rules {
@@ -128,14 +119,4 @@ func fromProtoAll(rules []proto.Rule) ([]Rule, error) {
 		out[i] = m
 	}
 	return out, nil
-}
-
-// ToProtoRules は正規化したルール集合を外部契約へ書き戻す(NormalizeRules/NormalizeUpsert の逆写像)。
-// ルールの並び順は保つ。
-func ToProtoRules(rules []Rule) []proto.Rule {
-	out := make([]proto.Rule, len(rules))
-	for i, r := range rules {
-		out[i] = r.ToProto()
-	}
-	return out
 }
