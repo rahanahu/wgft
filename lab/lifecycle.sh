@@ -132,18 +132,22 @@ skip() { echo "SKIP  $1 (does not apply to $mode mode)"; }
 # wait_until <timeout-seconds> <command...>: polls <command...> (a plain command or a function
 # defined in this script; it runs directly, not through a subshell, so a function sees the rest
 # of this script's other functions and variables) every 0.2s until it exits 0, or until
-# <timeout-seconds> (a whole number) elapses. Returns non-zero on timeout so that the caller's
-# own, unchanged assertion (the check/okcheck/absent right after) runs anyway and reports its
-# usual FAIL; wait_until itself never prints PASS/FAIL and never turns a real failure into a
-# silent pass.
+# <timeout-seconds> (a whole number) of WALL-CLOCK time elapses. The deadline is tracked with
+# bash's $SECONDS, not an iteration count: counting timeout*5 iterations of "run the command, then
+# sleep 0.2" assumes each run of the command takes ~0s, so a slow predicate (a `wgft ... --json |
+# python3 -c ...` pipeline under CPU contention, which is exactly when a lab run is most likely to
+# be slow) silently turns a stated 10s wait into several times that, which was observed to turn
+# whole lab runs into multi-minute hangs. Returns non-zero on timeout so that the caller's own,
+# unchanged assertion (the check/okcheck/absent right after) runs anyway and reports its usual
+# FAIL; wait_until itself never prints PASS/FAIL and never turns a real failure into a silent pass.
 wait_until() {
   local timeout=$1; shift
-  local tries=$((timeout * 5)) i
-  for ((i = 0; i < tries; i++)); do
+  local deadline=$((SECONDS + timeout))
+  while :; do
     "$@" >/dev/null 2>&1 && return 0
+    (( SECONDS >= deadline )) && return 1
     sleep 0.2
   done
-  return 1
 }
 # must_wait <label> <timeout-seconds> <command...>: like wait_until, but for a wait whose
 # condition is NOT re-checked by the assertion that follows it (an unrelated or differently-named

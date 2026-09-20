@@ -59,17 +59,20 @@ cleanup() {
   rm -rf "$DATA" "$ADATA"
 }
 
-# wait_until <timeout-seconds> <command...>: polls until <command...> exits 0 or the timeout
-# elapses (0.2s steps). Non-zero on timeout; the caller's own check/okcheck right after re-does
-# the same probe, so a timeout still surfaces as that assertion's normal FAIL.
+# wait_until <timeout-seconds> <command...>: polls until <command...> exits 0 or <timeout-seconds>
+# of WALL-CLOCK time elapses (0.2s steps), tracked with bash's $SECONDS rather than an iteration
+# count of timeout*5: an iteration count assumes each poll takes ~0s, so a slow predicate silently
+# multiplies the stated timeout instead of bounding it. Non-zero on timeout; the caller's own
+# check/okcheck right after re-does the same probe, so a timeout still surfaces as that assertion's
+# normal FAIL.
 wait_until() {
   local timeout=$1; shift
-  local tries=$((timeout * 5)) i
-  for ((i = 0; i < tries; i++)); do
+  local deadline=$((SECONDS + timeout))
+  while :; do
     "$@" >/dev/null 2>&1 && return 0
+    (( SECONDS >= deadline )) && return 1
     sleep 0.2
   done
-  return 1
 }
 admin_up() { vps wgft agent ls --admin "$ADMIN" >/dev/null 2>&1; }
 # agent_registered: true once "home"'s control stream has registered AND its WireGuard peer has
