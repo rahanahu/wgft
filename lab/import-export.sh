@@ -21,10 +21,11 @@ set -u
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: import-export.sh kernel|userspace" >&2; exit 2;; esac
 
-DATA=/tmp/wgft-importexport-server
-ADATA=/tmp/wgft-importexport-agent
+. "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
+DATA=$W/wgft-importexport-server
+ADATA=$W/wgft-importexport-agent
 ADMIN=127.0.0.1:8686
-RULES=/tmp/wgft-importexport-rules.json
+RULES=$W/wgft-importexport-rules.json
 fail=0
 check() { # check <label> <expected-substring> <actual>
   # an empty expected substring matches anything, so it would always pass; refuse it
@@ -39,8 +40,8 @@ absent() { # absent <label> <substring-that-must-not-appear> <actual>
   if [ -z "$2" ]; then echo "FAIL  $1: empty substring (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1"; fi
 }
-vps() { ip netns exec vps "$@"; }
-client() { ip netns exec client bash -c "$1"; }
+vps() { ip netns exec "$VPS_NS" "$@"; }
+client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
 rule_count() { vps wgft rule ls --admin "$ADMIN" --json | python3 -c 'import json, sys; print(len(json.load(sys.stdin)["rules"]))'; }
 hidden_field() { # hidden_field <name> <html-file>, unescaping the HTML attribute entities
   python3 -c "
@@ -50,9 +51,9 @@ m = re.search(r'name=\"$1\" value=\"(.*?)\"', page, re.S)
 print(html.unescape(m.group(1)) if m else '')
 "
 }
-kill_all() { pkill -x wgft; pkill -x echo; sleep 1; }
+kill_all() { sandbox_kill_named wgft echo; sleep 1; }
 kill_server() {
-  for p in $(pgrep -x wgft); do
+  for p in $(sandbox_wgft_pids); do
     tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' server run' && kill "$p"
   done
   sleep 1
@@ -62,7 +63,7 @@ cleanup() {
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
   vps ip link del wgft0 2>/dev/null
   vps nft delete table inet wgft 2>/dev/null
-  rm -rf "$DATA" "$ADATA" "$RULES" /tmp/wgft-importexport-confirm*.html
+  rm -rf "$DATA" "$ADATA" "$RULES" $W/wgft-importexport-confirm*.html
 }
 
 cleanup
@@ -76,15 +77,15 @@ else
 fi
 echo "== $mode: start server"
 vps setsid nohup $run_server --mode "$mode" --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
-  > /tmp/wgft-importexport-server.log 2>&1 < /dev/null &
+  > $W/wgft-importexport-server.log 2>&1 < /dev/null &
 disown
 sleep 3
-check "server up" "admin api" "$(grep -o 'admin api' /tmp/wgft-importexport-server.log | head -1)"
+check "server up" "admin api" "$(grep -o 'admin api' $W/wgft-importexport-server.log | head -1)"
 
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-WGFT_JOIN="$join" ip netns exec home setsid nohup wgft agent run --data-dir "$ADATA" > /tmp/wgft-importexport-agent.log 2>&1 < /dev/null &
+WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-importexport-agent.log 2>&1 < /dev/null &
 disown
-ip netns exec home setsid nohup echo -udp 19132 > /tmp/wgft-importexport-echo.log 2>&1 < /dev/null &
+ip netns exec "$HOME_NS" setsid nohup echo -udp 19132 > $W/wgft-importexport-echo.log 2>&1 < /dev/null &
 disown
 sleep 6
 check "agent registered" "home" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)"
@@ -108,15 +109,15 @@ json.dump(rules, open('$RULES', 'w'))
 "
 
 echo "== read-only confirmation page"
-vps curl -s -F "file=@$RULES;type=application/json" "http://$ADMIN/ui/rules/import?lang=en" > /tmp/wgft-importexport-confirm1.html
-confirm1=$(cat /tmp/wgft-importexport-confirm1.html)
+vps curl -s -F "file=@$RULES;type=application/json" "http://$ADMIN/ui/rules/import?lang=en" > $W/wgft-importexport-confirm1.html
+confirm1=$(cat $W/wgft-importexport-confirm1.html)
 check "confirm page shows the one deletion" "Deleted 1" "$confirm1"
 check "confirm page counts r1 as unchanged" "Unchanged 1" "$confirm1"
 eqcheck "nothing applied yet (still 2 rules)" "2" "$(rule_count)"
 
-content=$(hidden_field content /tmp/wgft-importexport-confirm1.html)
-generation=$(hidden_field generation /tmp/wgft-importexport-confirm1.html)
-digest=$(hidden_field digest /tmp/wgft-importexport-confirm1.html)
+content=$(hidden_field content $W/wgft-importexport-confirm1.html)
+generation=$(hidden_field generation $W/wgft-importexport-confirm1.html)
+digest=$(hidden_field digest $W/wgft-importexport-confirm1.html)
 
 echo "== a CLI change between confirm and apply must refuse the apply"
 # --note does not bump the generation (design 5.3 section) but does change the digest.
@@ -127,10 +128,10 @@ check "apply refuses after an out-of-band change" "changed after this confirmati
 eqcheck "still 2 rules after the refused apply" "2" "$(rule_count)"
 
 echo "== re-confirm and apply for real"
-vps curl -s -F "file=@$RULES;type=application/json" "http://$ADMIN/ui/rules/import" > /tmp/wgft-importexport-confirm2.html
-content2=$(hidden_field content /tmp/wgft-importexport-confirm2.html)
-generation2=$(hidden_field generation /tmp/wgft-importexport-confirm2.html)
-digest2=$(hidden_field digest /tmp/wgft-importexport-confirm2.html)
+vps curl -s -F "file=@$RULES;type=application/json" "http://$ADMIN/ui/rules/import" > $W/wgft-importexport-confirm2.html
+content2=$(hidden_field content $W/wgft-importexport-confirm2.html)
+generation2=$(hidden_field generation $W/wgft-importexport-confirm2.html)
+digest2=$(hidden_field digest $W/wgft-importexport-confirm2.html)
 apply_code=$(vps curl -s -o /dev/null -w "%{http_code}" --data-urlencode "content=$content2" --data-urlencode "generation=$generation2" --data-urlencode "digest=$digest2" \
   "http://$ADMIN/ui/rules/import/apply")
 check "apply redirects (deletion applied)" "303" "$apply_code"
@@ -144,7 +145,7 @@ absent "r2's port is gone" "udp-echo" "$out"
 echo "== a same-count deny-list replacement must show as changed, with the CIDRs, not unchanged"
 # Give r1 a real deny entry so the next upload can replace it 1-for-1 (same count).
 vps wgft rule deny add "$r1" 203.0.113.0/24 --admin "$ADMIN" >/dev/null
-ACL_RULES=/tmp/wgft-importexport-acl.json
+ACL_RULES=$W/wgft-importexport-acl.json
 vps curl -s -o "$ACL_RULES" "http://$ADMIN/ui/rules/export"
 python3 -c "
 import json
@@ -154,9 +155,9 @@ for r in rules:
         r['source_deny'] = ['198.51.100.0/24']
 json.dump(rules, open('$ACL_RULES', 'w'))
 "
-vps curl -s -F "file=@$ACL_RULES;type=application/json" "http://$ADMIN/ui/rules/import?lang=en" > /tmp/wgft-importexport-confirm-acl.html
+vps curl -s -F "file=@$ACL_RULES;type=application/json" "http://$ADMIN/ui/rules/import?lang=en" > $W/wgft-importexport-confirm-acl.html
 # html/template escapes "+" as &#43; in attribute/text context; unescape before matching.
-confirm_acl=$(python3 -c "import html; print(html.unescape(open('/tmp/wgft-importexport-confirm-acl.html').read()))")
+confirm_acl=$(python3 -c "import html; print(html.unescape(open('$W/wgft-importexport-confirm-acl.html').read()))")
 check "same-count deny-list replacement shows as changed" "Changed 1" "$confirm_acl"
 check "confirm page shows the added CIDR" "+198.51.100.0/24" "$confirm_acl"
 check "confirm page shows the removed CIDR" "-203.0.113.0/24" "$confirm_acl"
@@ -165,13 +166,13 @@ if [[ "$confirm_acl" == *"Unchanged 1"* ]]; then
 else
   echo "PASS  same-count deny-list replacement must not also count as unchanged"
 fi
-rm -f "$ACL_RULES" /tmp/wgft-importexport-confirm-acl.html
+rm -f "$ACL_RULES" $W/wgft-importexport-confirm-acl.html
 
 echo "== teardown"
 kill_server
 out=$(vps wgft server teardown --data-dir "$DATA" --purge --yes 2>&1)
 check "teardown runs" "deleted $DATA/wgft.sqlite" "$out"
 kill_all
-rm -rf "$DATA" "$ADATA" "$RULES" /tmp/wgft-importexport-confirm*.html
+rm -rf "$DATA" "$ADATA" "$RULES" $W/wgft-importexport-confirm*.html
 if [ "$fail" = 0 ]; then echo "== $mode: ALL PASS"; else echo "== $mode: FAILURES"; fi
 exit "$fail"

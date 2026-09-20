@@ -58,10 +58,11 @@ set -u
 GH_REPO=rahanahu/wgft
 OLD_AGENT_VERSION=0.4.0  # previous release: already speaks protocol v1 (design 7a.6)
 LEGACY_VERSION=0.3.0     # predates version negotiation entirely: legacy v0
+. "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
 CACHE=/tmp/wgft-version-skew-cache
 ADMIN=127.0.0.1:8686
-DATA=/tmp/wgft-version-skew-server
-ADATA=/tmp/wgft-version-skew-agent
+DATA=$W/wgft-version-skew-server
+ADATA=$W/wgft-version-skew-agent
 LAN_TCP=25590
 LAN_UDP=19160
 TCP_PORT=39995
@@ -80,8 +81,8 @@ check() { # check <label> <expected-substring> <actual>
   if [[ "$3" == *"$2"* ]]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3'"; fail=1; fi
 }
 skip() { echo "SKIP  $1"; }
-vps() { ip netns exec vps "$@"; }
-client() { ip netns exec client bash -c "$1"; }
+vps() { ip netns exec "$VPS_NS" "$@"; }
+client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
 
 # wait_until <timeout-seconds> <command...>: polls every 0.2s until <command...> exits 0, or the
 # timeout elapses. The timeout is a wall-clock deadline, so a slow predicate (one that starts
@@ -116,22 +117,25 @@ fetch_release() {
   fi
   local i
   for ((i = 0; i < 40; i++)); do
-    if curl -fsSL --connect-timeout 5 --max-time 30 -o "$out.tmp" "$url" \
-      && curl -fsSL --connect-timeout 5 --max-time 30 -o "$out.sha256.tmp" "$url.sha256"; then
+    # the temp names carry this shell's pid: the cache is shared by every sandbox in the VM,
+    # and two copies fetching the same version must not write the same temp file
+    local tmp=$out.tmp.$$ shatmp=$out.sha256.tmp.$$
+    if curl -fsSL --connect-timeout 5 --max-time 30 -o "$tmp" "$url" \
+      && curl -fsSL --connect-timeout 5 --max-time 30 -o "$shatmp" "$url.sha256"; then
       local want got
-      want=$(awk '{print $1}' "$out.sha256.tmp")
-      got=$(sha256sum "$out.tmp" | awk '{print $1}')
+      want=$(awk '{print $1}' "$shatmp")
+      got=$(sha256sum "$tmp" | awk '{print $1}')
       if [ -n "$want" ] && [ "$want" = "$got" ]; then
-        mv "$out.tmp" "$out"; mv "$out.sha256.tmp" "$out.sha256"; chmod +x "$out"
+        mv "$tmp" "$out"; mv "$shatmp" "$out.sha256"; chmod +x "$out"
         return 0
       fi
       echo "version-skew: sha256 mismatch for v$ver (want $want got $got)" >&2
-      rm -f "$out.tmp" "$out.sha256.tmp"
+      rm -f "$tmp" "$shatmp"
       return 1
     fi
     # covers both a transient network hiccup and the "pre-staged by incus file push while this
     # loop is already running" race; already_cached() below re-checks the same path each round.
-    rm -f "$out.tmp" "$out.sha256.tmp"
+    rm -f "$tmp" "$shatmp"
     already_cached && { chmod +x "$out"; return 0; }
     sleep 5
   done
@@ -142,14 +146,14 @@ fetch_release() {
 # shared LAN echo target (started once, below) running; that target is only killed at the very
 # end of the script, in final_cleanup.
 kill_all() {
-  pkill -x wgft 2>/dev/null
-  pkill -f "$CACHE/wgft-v" 2>/dev/null
-  pkill -x socat 2>/dev/null
+  sandbox_kill_named wgft 2>/dev/null
+  sandbox_kill_cmdline "$CACHE/wgft-v" 2>/dev/null
+  sandbox_kill_named socat 2>/dev/null
   sleep 1
 }
 final_cleanup() {
   kill_all
-  pkill -x echo 2>/dev/null
+  sandbox_kill_named echo 2>/dev/null
   sleep 1
 }
 teardown_data() { # teardown_data <server-bin>
@@ -247,7 +251,7 @@ proc_gone() { ! kill -0 "$1" 2>/dev/null; }
 find_pid() {
   local bin=$1 sub=$2 name p
   name=$(basename "$bin")
-  for p in $(pgrep -x "$name" 2>/dev/null); do
+  for p in $(sandbox_pids_named "$name" 2>/dev/null); do
     if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q " $sub"; then echo "$p"; return; fi
   done
 }
@@ -267,9 +271,9 @@ mkdir -p "$CACHE"
 
 # the LAN target every combination forwards to. Started once, outside kill_all/run_combo's own
 # cleanup (which only resets the server/agent under test), so it survives across all combinations.
-pkill -x echo 2>/dev/null
-ip netns exec lan setsid nohup echo -bind 192.168.50.3 -tcp "$LAN_TCP" -udp "$LAN_UDP" \
-  > /tmp/wgft-version-skew-echo.log 2>&1 < /dev/null &
+sandbox_kill_named echo 2>/dev/null
+ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp "$LAN_TCP" -udp "$LAN_UDP" \
+  > $W/wgft-version-skew-echo.log 2>&1 < /dev/null &
 disown
 
 # run_combo <name> <server-bin> <agent-bin> <expect-protocol-label> <agent-has-protocol-log 0/1>
@@ -279,8 +283,8 @@ run_combo() {
   kill_all
   teardown_data "$server_bin"
   mkdir -p "$DATA"
-  local slog=/tmp/wgft-version-skew-$name-server.log
-  local alog=/tmp/wgft-version-skew-$name-agent.log
+  local slog=$W/wgft-version-skew-$name-server.log
+  local alog=$W/wgft-version-skew-$name-agent.log
   : > "$slog"; : > "$alog"
 
   vps setsid nohup "$server_bin" server run --mode kernel --data-dir "$DATA" \
@@ -293,7 +297,7 @@ run_combo() {
 
   local join
   join=$(vps "$server_bin" agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec home setsid nohup "$agent_bin" agent run --data-dir "$ADATA" \
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$agent_bin" agent run --data-dir "$ADATA" \
     > "$alog" 2>&1 < /dev/null &
   disown
   if ! wait_until 20 agent_registered "$server_bin"; then
@@ -328,7 +332,7 @@ run_combo() {
   # once at a freshly-created state. First the server alone, keeping $DATA (its database and
   # wg0/nftables state) so this is a restart, not a fresh setup; then the agent alone, keeping
   # $ADATA (its stored credentials) so it reconnects rather than re-joining.
-  local rslog=/tmp/wgft-version-skew-$name-server-restart.log
+  local rslog=$W/wgft-version-skew-$name-server-restart.log
   : > "$rslog"
   if restart_proc "$server_bin" "server run"; then
     vps setsid nohup "$server_bin" server run --mode kernel --data-dir "$DATA" \
@@ -364,10 +368,10 @@ run_combo() {
     echo "FAIL  $name: could not find the server process to restart"; fail=1
   fi
 
-  local ralog=/tmp/wgft-version-skew-$name-agent-restart.log
+  local ralog=$W/wgft-version-skew-$name-agent-restart.log
   : > "$ralog"
   if restart_proc "$agent_bin" "agent run"; then
-    WGFT_JOIN="$join" ip netns exec home setsid nohup "$agent_bin" agent run --data-dir "$ADATA" \
+    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$agent_bin" agent run --data-dir "$ADATA" \
       > "$ralog" 2>&1 < /dev/null &
     disown
     if wait_until 40 agent_registered "$server_bin"; then
