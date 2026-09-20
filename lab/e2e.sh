@@ -22,6 +22,10 @@ check() { # check <label> <expected-substring> <actual>
   if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3'"; fail=1; fi
 }
+eqcheck() { # eqcheck <label> <want> <got>: integers must be equal. check()'s substring match is
+  # wrong for a bare number (e.g. a byte count of "0" is itself a substring of "10" or "20").
+  if [ "$2" -eq "$3" ] 2>/dev/null; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
+}
 vps() { ip netns exec vps "$@"; }
 client() { ip netns exec client bash -c "$1"; }
 kill_all() { pkill -x wgft; pkill -x echo; pkill -x ppecho; pkill -x socat; sleep 1; }
@@ -96,7 +100,7 @@ sleep 1
 after=$(flows)
 wait
 check "deny cuts the open tcp session" "before=1 after=0" "before=$before after=$after"
-check "deny silences udp" "0" "$(client 'echo hi | timeout -k 5 20 socat -t 2 -T 10 - UDP:198.51.100.1:27015' | wc -c)"
+eqcheck "deny silences udp" "0" "$(client 'echo hi | timeout -k 5 20 socat -t 2 -T 10 - UDP:198.51.100.1:27015' | wc -c)"
 vps wgft rule deny rm "$t" 198.51.100.2/32 --admin "$ADMIN" >/dev/null; sleep 1
 check "tcp again after deny rm" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39971')"
 

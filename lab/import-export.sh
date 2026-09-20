@@ -31,6 +31,10 @@ check() { # check <label> <expected-substring> <actual>
   if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3'"; fail=1; fi
 }
+eqcheck() { # eqcheck <label> <want> <got>: integers must be equal. check()'s substring match is
+  # wrong for a bare count (e.g. a rule count of "2" is itself a substring of "12").
+  if [ "$2" -eq "$3" ] 2>/dev/null; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
+}
 absent() { # absent <label> <substring-that-must-not-appear> <actual>
   if [ -z "$2" ]; then echo "FAIL  $1: empty substring (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1"; fi
@@ -108,7 +112,7 @@ vps curl -s -F "file=@$RULES;type=application/json" "http://$ADMIN/ui/rules/impo
 confirm1=$(cat /tmp/wgft-importexport-confirm1.html)
 check "confirm page shows the one deletion" "Deleted 1" "$confirm1"
 check "confirm page counts r1 as unchanged" "Unchanged 1" "$confirm1"
-check "nothing applied yet (still 2 rules)" "2" "$(rule_count)"
+eqcheck "nothing applied yet (still 2 rules)" "2" "$(rule_count)"
 
 content=$(hidden_field content /tmp/wgft-importexport-confirm1.html)
 generation=$(hidden_field generation /tmp/wgft-importexport-confirm1.html)
@@ -120,7 +124,7 @@ vps wgft rule set "$r1" --note "changed between confirm and apply" --admin "$ADM
 stale=$(vps curl -s --data-urlencode "content=$content" --data-urlencode "generation=$generation" --data-urlencode "digest=$digest" \
   "http://$ADMIN/ui/rules/import/apply?lang=en")
 check "apply refuses after an out-of-band change" "changed after this confirmation" "$stale"
-check "still 2 rules after the refused apply" "2" "$(rule_count)"
+eqcheck "still 2 rules after the refused apply" "2" "$(rule_count)"
 
 echo "== re-confirm and apply for real"
 vps curl -s -F "file=@$RULES;type=application/json" "http://$ADMIN/ui/rules/import" > /tmp/wgft-importexport-confirm2.html
@@ -130,7 +134,7 @@ digest2=$(hidden_field digest /tmp/wgft-importexport-confirm2.html)
 apply_code=$(vps curl -s -o /dev/null -w "%{http_code}" --data-urlencode "content=$content2" --data-urlencode "generation=$generation2" --data-urlencode "digest=$digest2" \
   "http://$ADMIN/ui/rules/import/apply")
 check "apply redirects (deletion applied)" "303" "$apply_code"
-check "r2 is gone, r1 remains" "1" "$(rule_count)"
+eqcheck "r2 is gone, r1 remains" "1" "$(rule_count)"
 
 sleep 1
 check "udp through r1 still works after the import" "udp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:2456')"

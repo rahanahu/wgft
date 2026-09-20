@@ -107,6 +107,21 @@ absent() { # absent <label> <substring-that-must-not-appear> <actual>
   if [ -z "$2" ]; then echo "FAIL  $1: empty substring (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1"; fi
 }
+eqcheck() { # eqcheck <label> <want> <got>: integers must be equal. check()'s substring match is
+  # wrong for a bare number ("40" is a substring of "140"), which this replaces. An empty or
+  # non-numeric $3 (a probe that crashed or printed nothing) makes `-eq` itself fail, which the
+  # else branch below reports as FAIL, not a silent pass. Same helper, same behaviour, as
+  # lab/ipv6.sh's eqcheck of the same name.
+  if [ "$2" -eq "$3" ] 2>/dev/null; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
+}
+strcheck() { # strcheck <label> <want> <got>: exact string equality, for values check()'s substring
+  # match would be wrong for even though they are not bare integers (`-eq` cannot compare them):
+  # a source port like "sport=100" is itself a substring of "sport=1005", and an nft table dump
+  # that grew can still contain the old, shorter dump verbatim.
+  # an empty want would make two failed captures ("" = "") pass; refuse it like check() does
+  if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug or a capture that returned nothing)"; fail=1; return; fi
+  if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
+}
 # field <name> <text>: the integer after "<name>=" in text, or empty
 field() { echo "$2" | grep -oE "$1=[0-9]+" | head -1 | cut -d= -f2; }
 okcheck() { # okcheck <label> <ok-if-true 1/0>
@@ -117,18 +132,22 @@ skip() { echo "SKIP  $1 (does not apply to $mode mode)"; }
 # wait_until <timeout-seconds> <command...>: polls <command...> (a plain command or a function
 # defined in this script; it runs directly, not through a subshell, so a function sees the rest
 # of this script's other functions and variables) every 0.2s until it exits 0, or until
-# <timeout-seconds> (a whole number) elapses. Returns non-zero on timeout so that the caller's
-# own, unchanged assertion (the check/okcheck/absent right after) runs anyway and reports its
-# usual FAIL; wait_until itself never prints PASS/FAIL and never turns a real failure into a
-# silent pass.
+# <timeout-seconds> (a whole number) of WALL-CLOCK time elapses. The deadline is tracked with
+# bash's $SECONDS, not an iteration count: counting timeout*5 iterations of "run the command, then
+# sleep 0.2" assumes each run of the command takes ~0s, so a slow predicate (a `wgft ... --json |
+# python3 -c ...` pipeline under CPU contention, which is exactly when a lab run is most likely to
+# be slow) silently turns a stated 10s wait into several times that, which was observed to turn
+# whole lab runs into multi-minute hangs. Returns non-zero on timeout so that the caller's own,
+# unchanged assertion (the check/okcheck/absent right after) runs anyway and reports its usual
+# FAIL; wait_until itself never prints PASS/FAIL and never turns a real failure into a silent pass.
 wait_until() {
   local timeout=$1; shift
-  local tries=$((timeout * 5)) i
-  for ((i = 0; i < tries; i++)); do
+  local deadline=$((SECONDS + timeout))
+  while :; do
     "$@" >/dev/null 2>&1 && return 0
+    (( SECONDS >= deadline )) && return 1
     sleep 0.2
   done
-  return 1
 }
 # must_wait <label> <timeout-seconds> <command...>: like wait_until, but for a wait whose
 # condition is NOT re-checked by the assertion that follows it (an unrelated or differently-named
@@ -153,8 +172,26 @@ client() { ip netns exec client bash -c "$1"; }
 
 admin_up() { vps wgft agent ls --admin "$ADMIN" >/dev/null 2>&1; }
 wait_admin() { wait_until 30 admin_up || { echo "!! admin api did not come up" >&2; return 1; }; }
-agent_registered() { vps wgft agent ls --admin "$ADMIN" 2>/dev/null | tail -1 | grep -q "$1"; }
-wait_agent() { wait_until 30 agent_registered "$1" || { echo "!! agent $1 did not register" >&2; return 1; }; }
+# agent_registered <name>: true once the agent's control stream has registered under <name> AND
+# its WireGuard peer has actually handshaken (agent ls --json's last_handshake, which
+# internal/vpsd/admin_backend.go's Agents() reads straight off the live wg device, in both modes:
+# kernel's real wg0 and userspace's wireguard-go). The name alone shows up as soon as the stream
+# registers, well before wgft0 has a peer for it, so a probe fired right after a name-only wait can
+# lose its very first SYN into a still-peerless interface; tcp_probe_ok's own comment further down
+# describes a run where that raced into a 10+ minute hang. Goes through --json rather than the
+# plain table: agent ls pads its columns with spaces via tabwriter, not tabs, so the printed
+# HANDSHAKE column cannot be matched reliably by position or delimiter.
+agent_registered() {
+  vps wgft agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    agents = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if any(a.get('name') == '$1' and a.get('last_handshake') for a in agents) else 1)
+"
+}
+wait_agent() { wait_until 30 agent_registered "$1" || { echo "!! agent $1 did not register (or its WireGuard peer never handshaked)" >&2; return 1; }; }
 
 # tcp_probe_ok/udp_probe_ok <port>: a single short-timeout round trip through tools/echo, used to
 # poll for "the rule just added/retargeted actually forwards" instead of guessing how long that
@@ -693,7 +730,7 @@ check1() {
     after_line=$(vps conntrack -L -p tcp --dport 39980 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | head -1)
     after_sport=$(echo "$after_line" | grep -oE 'sport=[0-9]+' | head -1)
     okcheck "the tcp conntrack entry is found before the restart" "$([ -n "$before_sport" ] && echo 1 || echo 0)"
-    check "the same tcp conntrack entry (same source port) persists across the restart" "$before_sport" "$after_sport"
+    strcheck "the same tcp conntrack entry (same source port) persists across the restart" "$before_sport" "$after_sport"
   fi
 
   wait "$tcp_pid" "$udp_pid" 2>/dev/null
@@ -1406,7 +1443,7 @@ check6() {
     okcheck "its conntrack entry is still ESTABLISHED" \
       "$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep -q ESTABLISHED && echo 1 || echo 0)"
     local h_after_sport; h_after_sport=$(vps conntrack -L -p tcp --dport 39996 --src 198.51.100.2 2>/dev/null | grep ESTABLISHED | grep -oE 'sport=[0-9]+' | head -1)
-    check "it is the same conntrack entry (same source port), not a new one" "$h_before_sport" "$h_after_sport"
+    strcheck "it is the same conntrack entry (same source port), not a new one" "$h_before_sport" "$h_after_sport"
     echo "-- the session keeps carrying data while the rule stays not_active (held 3s, then asserted again)"
     local pk_before; pk_before=$(h_orig_packets)
     # deliberate: survival over time is the point, so wall-clock time has to pass here.
@@ -1588,7 +1625,7 @@ check7() {
   drops_committed() { [ "$(rule_drops "$w")" = "$flood_n" ]; }
   must_wait "check7e: the flood's drops are committed" 5 drops_committed
   local before; before=$(rule_drops "$w"); [ -z "$before" ] && before=0
-  check "the flood's drops are committed exactly once before any swap failure" "$flood_n" "$before"
+  eqcheck "the flood's drops are committed exactly once before any swap failure" "$flood_n" "$before"
 
   if ! hold_table; then
     kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
@@ -1602,7 +1639,7 @@ check7() {
   vps wgft rule enable "$z" --admin "$ADMIN" >/dev/null 2>&1
   must_wait "check7e: z is active again after the successful swap" 10 rule_state_is "$z" apply_state active
   local after; after=$(rule_drops "$w"); [ -z "$after" ] && after=0
-  check "the rule's cumulative drops still equal exactly what was sent, not double counted" "$flood_n" "$after"
+  eqcheck "the rule's cumulative drops still equal exactly what was sent, not double counted" "$flood_n" "$after"
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"
@@ -1674,7 +1711,7 @@ check8() {
     "$([ "$(fail_log_count)" = 1 ] && echo 1 || echo 0)"
   if [ "$mode" = kernel ]; then
     local after_handles; after_handles=$(vps nft -a list table inet wgft 2>/dev/null)
-    check "a no-op retry does not replace table inet wgft (handles are unchanged)" "$before_handles" "$after_handles"
+    strcheck "a no-op retry does not replace table inet wgft (handles are unchanged)" "$before_handles" "$after_handles"
   else
     skip "nft table handle stability (userspace mode has no nftables table)"
   fi
@@ -1755,7 +1792,7 @@ check9() {
   # interval plus slack has to pass to show that neither the notifications of wgft's own commits,
   # nor another table's changes, nor the retry timer replace the table.
   sleep 35
-  check "table inet wgft's handles are unchanged" "$before_handles" "$(table_handles)"
+  strcheck "table inet wgft's handles are unchanged" "$before_handles" "$(table_handles)"
   okcheck "no apply was logged in the window" "$([ "$(applied_lines)" = "$before_applied" ] && echo 1 || echo 0)"
   okcheck "no drift line was logged in the window" "$([ "$(drift_lines)" = 2 ] && echo 1 || echo 0)"
 

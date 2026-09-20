@@ -24,6 +24,13 @@ check() { # check <label> <expected-substring> <actual>
   if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3'"; fail=1; fi
 }
+strcheck() { # strcheck <label> <want> <got>: exact string equality, for a listen_port value where
+  # check()'s substring match is wrong (a port left as a range, e.g. "2456-2457", would still
+  # contain the plain port "2456" as a substring, hiding exactly the regression this proves absent).
+  # an empty want would make two failed captures ("" = "") pass; refuse it like check() does
+  if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug or a capture that returned nothing)"; fail=1; return; fi
+  if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
+}
 vps() { ip netns exec vps "$@"; }
 client() { ip netns exec client bash -c "$1"; }
 kill_all() { pkill -x wgft; pkill -x echo; sleep 1; }
@@ -99,12 +106,12 @@ for rule in rules:
         print(rule['listen_port'])
 "
 }
-check "head keeps the original id and shrinks to port 2456" "2456" "$(listen_port_of "$r")"
+strcheck "head keeps the original id and shrinks to port 2456" "2456" "$(listen_port_of "$r")"
 
 sleep 1
 merge_code=$(vps curl -s -o /dev/null -w "%{http_code}" -X POST "http://$ADMIN/ui/rules/$r/merge" --data "other=$tail_id")
 check "merge via the web UI redirects" "303" "$merge_code"
-check "merge restored the 2456-2457 range under the original id" "2456-2457" "$(listen_port_of "$r")"
+strcheck "merge restored the 2456-2457 range under the original id" "2456-2457" "$(listen_port_of "$r")"
 
 wait "$flow_pid"
 flow_result=$(cat /tmp/wgft-splitmerge-flow.log)
