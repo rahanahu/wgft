@@ -162,12 +162,27 @@ lab/lab exec vm labhost run -parallel 8 all                                 # �
 lab/lab exec vm labhost list                                                # 今ある Sandbox
 lab/lab exec vm labhost create                                              # 手作業用に 1 つ作る
 lab/lab exec vm labhost gc                                                  # 死んだ実行の残骸の片付け
+lab/lab exec vm labhost run -wait 10m -parallel 8 all                       # 他の run が終わるまで待つ
 ```
+
+`run` と `gc` は、Lab Host VM ごとに 1 つのロック (`/run/wgft-labhost.lock`) を取ります。2 つ目の
+`run` は既定では待たずに断り、ロックファイルの場所と持ち主の PID を示します。`-wait <期間>` を付けた
+ときだけ、その期間まで順番を待ちます。単独で流す分類が約束するのは「Lab Host VM の中で単独」なので、
+2 つの `run` が同時に走ると、一方の単独の仕事が他方のどの仕事とでも重なります。ロックの実体は
+カーネルの flock で、持ち主が SIGKILL で死んでも残りません。`create` と `destroy` は名指しした
+Sandbox 1 つだけを扱う手作業の道具なので、ロックを取りません。`run` が持っている Sandbox を
+名指ししない限り、いつでも使えます。
 
 `run all` は [lab/suite.txt](suite.txt) を読みます。`parallel` に分類された確認を大きさ
 `-parallel` のプールで流し、そのあと `exclusive-*` に分類された確認を 1 つずつ流します。`run all` が流すのは `suite.txt` の `default` の列が yes の確認だけです。
 `version-skew.sh` は Lab Host VM からリリースのバイナリを取得できる場合に限る確認なので、
-`default` は no とし、名指ししたときだけ流れます。終了コードは 1 つでも失敗すれば非 0 です。
+`default` は no とし、名指ししたときだけ流れます。
+
+終了コードが 0 になるのは、すべての仕事が成功し、中断されず、後片付けの漏れが無かったときだけです。
+確認がすべて PASS でも、netns、プロセス、作業ディレクトリ、root netns のリンクのどれかが残っていれば
+非 0 で終わり、`LEFTOVER FAILURE` の行が何が残ったかを挙げます。片付けの正しさは harness 自身の
+責任なので、シナリオの失敗と同じ扱いにしています。`-keep-failed` で意図して残した作業ディレクトリは
+漏れに数えません。
 
 出力の最後に、確認ごとの PASS、FAIL、SKIP の行数が並びます。従来の 1 確認 1 VM の流し方と
 同じ確認が流れたことは、この行数の一致で確かめられます。
@@ -235,7 +250,8 @@ lab/lab exec vm labhost run -keep-failed -parallel 4 all
 - SIGINT で harness を止めると、harness 自身が自分の Sandbox を片付けます。SIGKILL で止めると
   harness は片付けられないので、namespace、プロセス、作業ディレクトリが残ります。`run` は
   流し始めに毎回 `gc` を呼ぶので、前回 SIGKILL で終わった残骸は次の `run` の前に消えます。
-  すぐに残骸を消したいときは `labhost gc` を単独で呼びます
+  すぐに残骸を消したいときは `labhost gc` を単独で呼びます。`gc` も Lab Host のロックを取るので、
+  流れている `run` があるときは断ります
 
 ### シナリオ側の約束
 
