@@ -9,8 +9,12 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
 
-	_ "modernc.org/sqlite"
+	sqlitedrv "modernc.org/sqlite"
 )
 
 // Store は開いた SQLite ファイル。
@@ -81,8 +85,128 @@ var migrations = []string{
 	ALTER TABLE agents DROP COLUMN stream_blocked`,
 }
 
+// sqliteFileURI builds a "file:" URI for path with the given query string, for
+// modernc.org/sqlite's SQLITE_OPEN_URI mode (the driver always passes that flag; see newConn in
+// its sqlite.go). path is made absolute first: SQLite's own URI grammar (sqlite.org/uri.html)
+// treats "file://" (two slashes right after the scheme) as introducing an authority (host)
+// component, and net/url's URL.String always emits that double slash once Host is empty, even when
+// Path does not begin with "/". A relative path such as "rel.db" therefore serialises to
+// "file://rel.db?...", which SQLite parses as an authority named "rel.db" and rejects with
+// "invalid uri authority"; this used to break every relative WGFT_DATA_DIR and every call from a
+// process not already chdir'd to an absolute path (found in review; see
+// TestSQLiteFileURIHandlesSpecialPaths, which fails on a plain url.URL{Scheme:"file", Path: path}
+// without the Abs call). Once absolute, a Unix path always starts with "/", so the same
+// construction yields the unambiguous three-slash form "file:///abs/path?..." (empty authority,
+// absolute path). A Windows path (`C:\Users\a\s.sqlite`) needs converting first: see
+// windowsPathToURIPath. Either way, url.URL's normal percent-encoding of Path (spaces, '?', '#',
+// and a literal '%' so a name like "has%41percent.db" round-trips instead of decoding to
+// "hasApercent.db") is exactly what a "file:" URI needs for those characters; a drive letter's ':'
+// is left unescaped (verified: it is not the first path segment once the URI has an authority, so
+// net/url does not treat it as a scheme separator).
+func sqliteFileURI(path, query string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolving %s to an absolute path: %w", path, err)
+	}
+	return fileURIFromAbsPath(abs, query, runtime.GOOS == "windows")
+}
+
+// fileURIFromAbsPath builds the "file:" URI string from abs (already made absolute by
+// filepath.Abs) and query. windows is passed in explicitly, rather than read from runtime.GOOS
+// inside this function, so it stays a pure function testable on any host OS with inputs of either
+// flavour; sqliteFileURI is its only real caller and is what actually consults runtime.GOOS.
+func fileURIFromAbsPath(abs, query string, windows bool) (string, error) {
+	uriPath := abs
+	if windows {
+		p, err := windowsPathToURIPath(abs)
+		if err != nil {
+			return "", err
+		}
+		uriPath = p
+	}
+	u := url.URL{Scheme: "file", Path: uriPath, RawQuery: query}
+	return u.String(), nil
+}
+
+// windowsPathToURIPath converts abs, an absolute Windows path exactly as filepath.Abs returns it
+// when GOOS=windows (for example `C:\Users\a\s.sqlite`), into the path component of a "file:" URI
+// per sqlite.org/uri.html: backslashes become forward slashes, and since a drive-letter path does
+// not start with "/" once converted, one is prepended so that, combined with the URI's own "//"
+// after the scheme, the result reads file:///C:/Users/a/s.sqlite (three slashes: empty authority,
+// then the absolute path).
+//
+// A UNC path (`\\server\share\...`) is rejected with a clear error instead of guessed at: how many
+// leading slashes a UNC path needs inside a file: URI to round-trip correctly through SQLite's own
+// URI parser on Windows is not something verifiable without a real Windows and SQLite environment
+// (this repository has none to test against), and a wrong URI that silently opens the wrong file,
+// or none, is worse than refusing to start with a clear message naming the setting to fix.
+func windowsPathToURIPath(abs string) (string, error) {
+	if strings.HasPrefix(abs, `\\`) || strings.HasPrefix(abs, "//") {
+		return "", fmt.Errorf("%s is a UNC path; UNC paths are not supported for the server database path, use a local drive path instead", abs)
+	}
+	slashed := strings.ReplaceAll(abs, `\`, "/")
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	return slashed, nil
+}
+
+// sqliteDSN builds the modernc.org/sqlite DSN for Open, passing journal_mode, foreign_keys and
+// busy_timeout as DSN parameters instead of PRAGMA statements sent one by one after the connection
+// opens. The driver applies _busy_timeout before _journal_mode and _foreign_keys regardless of the
+// order the parameters appear in the DSN (its documented apply order in sqlite.go's
+// applyQueryParams), so this puts the busy timeout into effect for every ordinary statement before
+// journal_mode or foreign_keys run, instead of after them as the old three separate PRAGMA
+// statements did (改訂の記録 2026-09-20). This alone does not cover the one case Open still retries
+// by hand below: switching journal_mode to WAL for the first time.
+func sqliteDSN(path string) (string, error) {
+	return sqliteFileURI(path, "_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on")
+}
+
+// sqliteBusy is SQLite's SQLITE_BUSY primary result code (https://sqlite.org/rescode.html#busy), a
+// stable part of the C API. modernc.org/sqlite's *Error exposes it via Code().
+const sqliteBusy = 5
+
+// isSQLiteBusy reports whether err is SQLITE_BUSY, in any of its extended forms. modernc.org/sqlite
+// enables extended result codes on every connection (conn.go's newConn calls
+// extendedResultCodes(true) unconditionally) and step()'s default case returns whatever raw code
+// sqlite3_step gave it, so a busy failure can arrive as the plain primary code (5) or as one of the
+// SQLITE_BUSY_* extended codes: BUSY_RECOVERY (261, another connection recovering a WAL file after
+// a crash, exactly a restart-time case), BUSY_SNAPSHOT (517, a stale read snapshot) or BUSY_TIMEOUT
+// (773, busy_timeout itself expired). All three still encode the primary code in the low byte
+// (SQLite's rescode.html: extended = primary | (specific << 8)), so isSQLiteBusyCode's mask catches
+// all four forms with one comparison. Verified empirically that a real busy_timeout expiry (a 200ms
+// _busy_timeout against a lock held 1.5s) still came back as plain 5 with this driver/SQLite
+// version (v1.58.0, SQLite 3.53.4); the mask does not rely on that continuing to be true.
+func isSQLiteBusy(err error) bool {
+	var sqliteErr *sqlitedrv.Error
+	return errors.As(err, &sqliteErr) && isSQLiteBusyCode(sqliteErr.Code())
+}
+
+// isSQLiteBusyCode is isSQLiteBusy's comparison, split out so it can be unit tested against literal
+// result codes: modernc.org/sqlite's *Error has no exported constructor, so a test cannot build one
+// with an arbitrary Code() to exercise the mask directly.
+func isSQLiteBusyCode(code int) bool {
+	return code&0xff == sqliteBusy
+}
+
+// openBusyRetryWindow bounds how long Open retries a connection whose setup hit SQLITE_BUSY (see
+// below). It matches _busy_timeout (5s): the two mechanisms cover the same total span, one for
+// ordinary statements once a connection is up, this one for the one setup step that is not subject
+// to the busy handler at all.
+const openBusyRetryWindow = 5 * time.Second
+
 // Open はファイルを開き(なければ 0600 で作り)、スキーマを最新にする。本体と WAL の補助ファイルに
 // グループかその他の権限があれば外す(仕様 9 節)。
+//
+// journal_mode を初めて WAL に切り替える接続確立の 1 手だけは、busy_timeout を先に効かせても
+// SQLite 自身がリトライしない(手を動かして確認した。busytimeout_test.go の
+// TestJournalModeWALDoesNotHonorBusyTimeout)。他の統計値ではなく他のプロセスがまさにファイルを
+// 保持している数ミリ秒(再起動、バイナリの入れ替え、`wgft server teardown`、CLI の一操作)に
+// ぶつかると、SQLITE_BUSY で即座に失敗する。そのため、この 1 手(sqliteDSN の適用を含む接続の確立、
+// つまり最初の migrate 呼び出し全体)だけは、SQLITE_BUSY を検出して自前で待ち直す
+// (改訂の記録 2026-09-20)。sqliteDSN の busy_timeout は、確立した後の通常の文(migrate が送る他の
+// 文、以後のすべてのクエリ)を短いロックから守る、両者は補い合う。
 func Open(path string) (*Store, error) {
 	if err := ensureCreated(path); err != nil {
 		return nil, err
@@ -90,26 +214,35 @@ func Open(path string) (*Store, error) {
 	if err := narrowMode(path); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path)
+	dsn, err := sqliteDSN(path)
 	if err != nil {
 		return nil, err
 	}
-	// 単一プロセスからしか使わないので接続は 1 本にし、トランザクションの直列化を SQLite に任せる
-	db.SetMaxOpenConns(1)
-	s := &Store{db: db, filePath: path}
-	for _, q := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.Exec(q); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("%s: %w", q, err)
+
+	start := time.Now()
+	var s *Store
+	for {
+		db, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			return nil, err
 		}
-	}
-	if err := s.migrate(); err != nil {
+		// 単一プロセスからしか使わないので接続は 1 本にし、トランザクションの直列化を SQLite に任せる
+		db.SetMaxOpenConns(1)
+		s = &Store{db: db, filePath: path}
+		migErr := s.migrate()
+		if migErr == nil {
+			break
+		}
 		db.Close()
-		return nil, err
+		if !isSQLiteBusy(migErr) || time.Since(start) >= openBusyRetryWindow {
+			return nil, migErr
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+
 	for _, p := range []string{path + "-wal", path + "-shm"} {
 		if err := narrowMode(p); err != nil {
-			db.Close()
+			s.db.Close()
 			return nil, err
 		}
 	}
@@ -129,8 +262,11 @@ func OpenReadOnly(path string) (*Store, error) {
 	if !exists(path+"-wal") && !exists(path+"-shm") {
 		q += "&immutable=1"
 	}
-	u := url.URL{Scheme: "file", Path: path, RawQuery: q}
-	db, err := sql.Open("sqlite", u.String())
+	dsn, err := sqliteFileURI(path, q)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}

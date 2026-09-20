@@ -28,6 +28,20 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 		{"flows", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_MAX_TCP_FLOWS": "0"}, nil},
 		{"per-source flows", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_MAX_UDP_FLOWS_PER_SOURCE": "-1"}, nil},
 		{"no endpoint", map[string]string{"WGFT_WG_ENDPOINT": ""}, nil},
+		{"wg address not a prefix", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_ADDRESS": "not-an-address"}, nil},
+		{"wg address missing prefix length", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_ADDRESS": "10.200.0.1"}, nil},
+		// userspace モード:agent-api/admin の構文の誤りは applyNFT より後(admin.Listen/agentAPI.Listen)
+		// でしか気付けなかったので、kernel モードで確かめると非 root では bringUpWG の CAP_NET_ADMIN 不足
+		// (classifyPrivilege)で先に終了コード 3 になり、この構文検査を実際には試さないまま通ってしまう
+		// (手を動かして確認した)。WGFT_ADMIN を非特権で書ける unix ソケットにし、wg のポートをサブテスト間で
+		// 衝突しないように分けて、目的の値だけを壊す。
+		{"agent api missing port", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51821", "WGFT_ADMIN": "unix:///tmp/wgft-test-agent-api-missing-port-admin.sock", "WGFT_AGENT_API": "0.0.0.0"}, []string{"--mode", "userspace"}},
+		{"admin missing port", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51822", "WGFT_ADMIN": "127.0.0.1"}, []string{"--mode", "userspace"}},
+		// agent API は TCP だけで待ち受ける(agentapi.Listen)。unix:// を通すと net.Listen("tcp", "unix://...") まで
+		// 届いて終了コード 1 になり、unit が再起動を繰り返す
+		{"agent api unix socket", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51823", "WGFT_ADMIN": "unix:///tmp/wgft-test-agent-api-unix-admin.sock", "WGFT_AGENT_API": "unix:///tmp/wgft-test-agent-api.sock"}, []string{"--mode", "userspace"}},
+		{"agent api bad port", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51824", "WGFT_ADMIN": "unix:///tmp/wgft-test-agent-api-bad-port-admin.sock", "WGFT_AGENT_API": "0.0.0.0:notaport"}, []string{"--mode", "userspace"}},
+		{"admin unix without a path", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_PORT": "51825", "WGFT_ADMIN": "unix://"}, []string{"--mode", "userspace"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,6 +70,23 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 // found on a module-less Debian 12 lab VM, 83 restarts in about 3 minutes before this fix).
 func TestConntrackReadFailureExitsWithConfigRefusal(t *testing.T) {
 	err := &wg.StartupRefusal{Reason: "reading the conntrack UDP timeouts after applying table inet wgft: read /proc/sys/net/netfilter/nf_conntrack_udp_timeout: no such file or directory"}
+	if !isStartupRefusal(err) {
+		t.Errorf("isStartupRefusal(%v) = false, want true", err)
+	}
+	if got := exitCode(err); got != exitConfigRefusal {
+		t.Errorf("exitCode(%v) = %d, want %d", err, got, exitConfigRefusal)
+	}
+}
+
+// Kernel mode started without root or CAP_NET_ADMIN used to fail at the first privileged netlink
+// or wgctrl call with a generic EPERM/EACCES, exit code 1, so the shipped server.service
+// (Restart=on-failure, RestartSec=2, RestartPreventExitStatus=3, which does not include 1)
+// restarted it every 2 seconds forever until someone reinstalled the unit correctly or switched to
+// userspace mode. internal/dataplane/linuxkernel/wg.classifyPrivilege now wraps that class of
+// error as a *wg.StartupRefusal (docs/design.md 9, 11a 節), which must map to exit code 3 like the
+// other startup refusals.
+func TestServerPrivilegeErrorExitsWithConfigRefusal(t *testing.T) {
+	err := &wg.StartupRefusal{Reason: "kernel mode needs CAP_NET_ADMIN: operation not permitted. Run as root or with that capability, as the shipped server.service does (AmbientCapabilities=CAP_NET_ADMIN), or set WGFT_MODE=userspace, which needs neither"}
 	if !isStartupRefusal(err) {
 		t.Errorf("isStartupRefusal(%v) = false, want true", err)
 	}
@@ -124,5 +155,37 @@ func TestServerUnreadableHint(t *testing.T) {
 	}
 	if msg := err.Error(); !strings.Contains(msg, "only server settings") || !strings.Contains(msg, "chmod 0644 "+p) {
 		t.Errorf("server の直し方が違う: %v", err)
+	}
+}
+
+// validateListenAddr の受け付けと拒否の境目。unix:// を受け付けるのは、Unix ソケットで待ち受けられる
+// 管理 API だけである。
+func TestValidateListenAddr(t *testing.T) {
+	for _, tc := range []struct {
+		val       string
+		allowUnix bool
+		ok        bool
+	}{
+		{"0.0.0.0:8443", false, true},
+		{":8443", false, true},
+		{"[::1]:8686", true, true},
+		{"127.0.0.1:8686", true, true},
+		{"unix:///run/wgft/admin.sock", true, true},
+		{"unix:///run/wgft/admin.sock", false, false},
+		{"unix://", true, false},
+		{"unix://", false, false},
+		{"0.0.0.0", false, false},
+		{"0.0.0.0:", false, false},
+		{"0.0.0.0:notaport", false, false},
+		{"0.0.0.0:70000", false, false},
+		{"", true, false},
+	} {
+		err := validateListenAddr("WGFT_X", tc.val, tc.allowUnix)
+		if (err == nil) != tc.ok {
+			t.Errorf("validateListenAddr(%q, allowUnix=%v) = %v, want ok=%v", tc.val, tc.allowUnix, err, tc.ok)
+		}
+		if err != nil && !isConfigError(err) {
+			t.Errorf("validateListenAddr(%q): %v is not a config error", tc.val, err)
+		}
 	}
 }

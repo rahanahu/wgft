@@ -11,6 +11,7 @@ import (
 	"github.com/rahanahu/wgft/proto"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 
 	"github.com/vishvananda/netlink"
@@ -59,6 +60,25 @@ func (e *StartupRefusal) Error() string {
 	return s
 }
 
+// classifyPrivilege turns a permission failure from a privileged netlink or wgctrl call (creating
+// the interface, setting its MTU/address/key/port/peers, bringing it up) into a *StartupRefusal
+// naming the two ways out, instead of the generic error that used to reach cmd/wgft as exit code 1
+// (shipped server.service's Restart=on-failure, RestartSec=2 then loops on it forever, since
+// running unprivileged never fixes itself by retrying). Any other error, or nil, passes through
+// unchanged. This is checked once, in Ensure's cleanup defer below, rather than at each of the
+// several write call sites above, because any of them can be the first one that needs
+// CAP_NET_ADMIN depending on whether the interface already exists (design.md 9, 11a 節,
+// 改訂の記録 2026-09-20).
+func classifyPrivilege(err error) error {
+	if err == nil || !errors.Is(err, os.ErrPermission) {
+		return err
+	}
+	return &StartupRefusal{Reason: fmt.Sprintf(
+		"kernel mode needs CAP_NET_ADMIN: %v. Run as root or with that capability, as the shipped server.service does (AmbientCapabilities=CAP_NET_ADMIN), or set WGFT_MODE=userspace, which needs neither",
+		err,
+	)}
+}
+
 // Ensure は wg0 を宣言に収束させ、変えた点を返す。なければ作り、あれば差分だけ直す。
 // 手作業で変えられたアドレス、MTU、ポート、ピア、秘密鍵はここで宣言に戻る。
 // ただし収束するのは「自分が作ったインタフェース」だけで、既存の同名インタフェースは
@@ -67,6 +87,13 @@ func (e *StartupRefusal) Error() string {
 func Ensure(cfg Config) (changes []string, err error) {
 	created := false
 	defer func() {
+		// root でも CAP_NET_ADMIN でもない状態での起動は、このどこかの netlink・wgctrl の書き込みが
+		// EPERM/EACCES で失敗する。どの書き込みが最初に当たるかはインタフェースが既にあるかで変わる
+		// (無ければ作成、あれば MTU やアドレスの差分)ので、各書き込みへ個別に足す代わりに、ここで
+		// 一括して分類する(classifyPrivilege のコメント参照)。
+		if e := classifyPrivilege(err); e != err {
+			err = e
+		}
 		// 作ったばかりのインタフェースは、後段で失敗したら残さない(残すと次の起動で「自分のもの」として
 		// 収束はできるが、失敗の原因が消えるまで unit が再起動を繰り返す間、半端な状態が見える)
 		if err != nil && created {
