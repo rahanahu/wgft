@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strings"
+	"os"
 
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
@@ -116,12 +116,24 @@ func modeGate(stored, want string, residue, known bool) (allow bool, reason stri
 // wgResidue は、指定インタフェースの kernel wg が残っているかを返す(known=false なら確認できなかった)。
 func wgResidue(iface string) (residue, known bool) {
 	_, err := wg.Status(iface)
-	if err == nil {
+	return classifyWGResidue(err)
+}
+
+// classifyWGResidue is wgResidue's error classification, split out so it can be unit-tested
+// without a real wg device (this package has no netlink test double). wgctrl's Device()
+// documents its interface-not-found error as wrapping os.ErrNotExist (internal/wglinux's
+// client_linux.go: "compatible with os.ErrNotExist for easy checking"), so errors.Is is the
+// correct, typed check here; the previous strings.Contains on the error text risked reading an
+// unrelated failure's message (e.g. a permission or netlink error that happens to mention "not
+// found") as a confirmed absence, which would wrongly let a kernel-to-userspace mode switch
+// through modeGate (design.md 10.5 節; 3.3 節 for the gate itself).
+func classifyWGResidue(err error) (residue, known bool) {
+	switch {
+	case err == nil:
 		return true, true
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "no such") || strings.Contains(msg, "not exist") || strings.Contains(msg, "not found") {
+	case errors.Is(err, os.ErrNotExist):
 		return false, true
+	default:
+		return false, false
 	}
-	return false, false
 }

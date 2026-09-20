@@ -1,12 +1,21 @@
 package admin
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// roundTripFunc adapts a function to http.RoundTripper, so tests can inject a transport-level
+// error without a real socket.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // Client の既定の HTTP クライアントには打ち切りのタイムアウトがある。無いと、応答しない
 // サーバに対して wgft rule ls のようなコマンドが永久に待ち続け、診断も出ない(仕様 11 節)。
@@ -61,5 +70,33 @@ func TestClientTimeoutProducesClearError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "did not respond") {
 		t.Fatalf("error %q does not look like a clear timeout message", err)
+	}
+}
+
+// 実際の権限拒否(os.ErrPermission を実装に沿って包んだ形)は、sudo を案内する分かりやすい
+// エラーになる。design.md 10.5 節: 型で判定するので、文面が典型的でなくても正しく分類する。
+func TestClientPermissionErrorSuggestsSudo(t *testing.T) {
+	c := &Client{Base: "unix:///run/wgft/admin.sock", HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("dial unix /run/wgft/admin.sock: connect: %w", os.ErrPermission)
+	})}}
+	_, err := c.Rules()
+	if err == nil || !strings.Contains(err.Error(), "run with sudo") {
+		t.Fatalf("got %v, want an error suggesting sudo", err)
+	}
+}
+
+// 以前は err.Error() に "permission denied" が含まれるかどうかで判定していた。この判定だと、
+// 権限とは無関係な理由でたまたま同じ文言を含むエラーまで誤って「ソケットの権限」と読み違える。
+// 型で判定する今は、そのようなエラーを正しく素通しする(design.md 10.5 節)。
+func TestClientDoesNotMisreadPermissionSubstring(t *testing.T) {
+	c := &Client{Base: "unix:///run/wgft/admin.sock", HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial unix /run/wgft/admin.sock: some unrelated wrapper mentions permission denied in passing")
+	})}}
+	_, err := c.Rules()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "run with sudo") {
+		t.Fatalf("a dial error that merely mentions \"permission denied\" in its text must not be misread as the socket's own permission bit; got %v", err)
 	}
 }

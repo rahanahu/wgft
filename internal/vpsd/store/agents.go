@@ -171,9 +171,14 @@ func allocateAddress(q querier, network netip.Prefix) (netip.Addr, error) {
 		if err := rows.Scan(&a); err != nil {
 			return netip.Addr{}, err
 		}
-		if addr, err := netip.ParseAddr(a); err == nil {
-			used[addr] = true
+		addr, err := netip.ParseAddr(a)
+		if err != nil {
+			// 解釈できない行を「使われていない」とみなすと、既にその行が持っているアドレスを
+			// 新しいエージェントに二重に割り当てかねない(design.md 10.5 節)。安全側に倒し、
+			// 割り当てそのものを拒む。
+			return netip.Addr{}, fmt.Errorf("agents table has a row with an unparseable address %q: %w", a, err)
 		}
+		used[addr] = true
 	}
 	net := network.Masked()
 	// .0 はネットワーク、.1 は vpsd。ブロードキャストの手前まで
@@ -235,7 +240,12 @@ func (s *Store) agentBy(where string, arg any) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.Address, _ = netip.ParseAddr(addr)
+	// a.Address feeds the wg peer AllowedIPs and the admin API/UI directly (vpsd.go's agents(),
+	// admin_backend.go's Agents()). A row that cannot be parsed must not silently become the zero
+	// address and flow into that plan as if it were a real, unused address (design.md 10.5 節).
+	if a.Address, err = netip.ParseAddr(addr); err != nil {
+		return nil, fmt.Errorf("agent %s: stored address %q: %w", a.Name, addr, err)
+	}
 	a.PublicKey = pub.String
 	a.CreatedAt = time.Unix(created, 0)
 	return &a, nil
@@ -259,7 +269,10 @@ func (s *Store) Agents() ([]Agent, error) {
 		if err := rows.Scan(&a.Name, &addr, &pub, &created, &a.RegisteredFrom); err != nil {
 			return nil, err
 		}
-		a.Address, _ = netip.ParseAddr(addr)
+		// agentBy と同じ理由(上のコメント参照): 読めないアドレスを零値のまま先へ進めない。
+		if a.Address, err = netip.ParseAddr(addr); err != nil {
+			return nil, fmt.Errorf("agent %s: stored address %q: %w", a.Name, addr, err)
+		}
 		a.PublicKey = pub.String
 		a.CreatedAt = time.Unix(created, 0)
 		out = append(out, a)

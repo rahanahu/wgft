@@ -117,8 +117,19 @@ func (s *Server) renderImportConfirm(w http.ResponseWriter, locale, filename str
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	gen, _ := s.backend.Generation()
-	agents, _ := s.backend.Agents()
+	// gen と agents は確認ページの Generation(適用時に照合する値)と、未登録エージェントの検査に
+	// 使う。読み取りが失敗した世代を "0" のまま確認ページへ埋め込むと、後の一致判定を偶然
+	// 通してしまう恐れがあるため(design.md 10.5 節)、確認ページ自体を 500 で止める。
+	gen, err := s.backend.Generation()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	agents, err := s.backend.Agents()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	agentNames := make(map[string]bool, len(agents))
 	for _, a := range agents {
 		agentNames[a.Name] = true
@@ -332,7 +343,14 @@ func (s *Server) uiImportApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	gen, _ := s.backend.Generation()
+	// gen は今の世代との事前照合(仕様 10.1 節)に使う。読み取りが失敗した "0" をそのまま
+	// 比べると、確認ページ側も同じ失敗で "0" を埋めていた場合に偶然一致してしまい、事前照合を
+	// すり抜けて古い内容を適用しかねない(design.md 10.5 節)。読み取りが失敗したら 500 で止める。
+	gen, err := s.backend.Generation()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	digest := r.FormValue("digest")
 	stale := func() {
 		s.renderImportPage(w, locale, "importConfirmTitle", "importstale", map[string]any{"Locale": locale})

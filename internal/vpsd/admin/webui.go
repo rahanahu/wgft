@@ -138,9 +138,20 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 	if err != nil {
 		return dashData{}, err
 	}
-	gen, _ := s.backend.Generation()
-	drops, _ := s.backend.RuleDrops()
-	warns, _ := s.backend.Warnings()
+	// generation/drops/warnings もダッシュボードの本体データであり、Agents/Rules と同じく
+	// 失敗を 0 件・世代 0 のような値に変えて描いてはならない(design.md 10.5 節)。
+	gen, err := s.backend.Generation()
+	if err != nil {
+		return dashData{}, err
+	}
+	drops, err := s.backend.RuleDrops()
+	if err != nil {
+		return dashData{}, err
+	}
+	warns, err := s.backend.Warnings()
+	if err != nil {
+		return dashData{}, err
+	}
 
 	d := dashData{Locale: locale, Generation: gen, FirewallText: firewallText(locale)}
 	if info, e := s.backend.ServerInfo(); e == nil {
@@ -361,22 +372,32 @@ func (s *Server) uiWarningsPartial(w http.ResponseWriter, r *http.Request) {
 	s.renderHTML(w, "warnings", d)
 }
 
-// findRule は ID で 1 件返す。
-func (s *Server) findRule(id string) (proto.Rule, bool) {
-	rules, _ := s.backend.Rules()
+// findRule は ID で 1 件返す。ルール一覧そのものが読めなければ、無いルールと区別するため
+// エラーを返す(design.md 10.5 節。読み取りの失敗を「無い」に変えて見せない)。
+func (s *Server) findRule(id string) (proto.Rule, bool, error) {
+	rules, err := s.backend.Rules()
+	if err != nil {
+		return proto.Rule{}, false, err
+	}
 	for _, r := range rules {
 		if r.ID == id {
-			return r, true
+			return r, true, nil
 		}
 	}
-	return proto.Rule{}, false
+	return proto.Rule{}, false, nil
 }
 
-// findRuleOr404 は findRule の 404 応答つき版。ルール詳細ページの各ハンドラ(meta、
+// findRuleOr404 は findRule の応答つき版。ルール詳細ページの各ハンドラ(meta、
 // deny/allow、rates、split、merge の self 側)が繰り返す「無ければ 404 を書いて戻る」を
 // まとめる。呼び出し側は ok を見て return するのは変わらず、分岐そのものは隠さない。
+// ルール一覧が読めない場合は 404 ではなく 500 にする(store の障害を「そのルールは無い」と
+// 見せてはならない)。
 func (s *Server) findRuleOr404(w http.ResponseWriter, id string) (proto.Rule, bool) {
-	rule, ok := s.findRule(id)
+	rule, ok, err := s.findRule(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return proto.Rule{}, false
+	}
 	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 	}
@@ -384,11 +405,6 @@ func (s *Server) findRuleOr404(w http.ResponseWriter, id string) (proto.Rule, bo
 }
 
 // ---- 補助(ページ描画・リダイレクト。他のページも使う) ----
-
-func (s *Server) agentsOrNil() []AgentInfo {
-	a, _ := s.backend.Agents()
-	return a
-}
 
 func (s *Server) renderHTML(w http.ResponseWriter, name string, data any) {
 	var buf bytes.Buffer

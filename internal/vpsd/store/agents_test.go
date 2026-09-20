@@ -143,6 +143,57 @@ func TestInvalidAgentNames(t *testing.T) {
 		t.Errorf("bad name must not be deleted: %d agents", len(agents))
 	}
 }
+
+// TestAgentsRejectsUnparseableAddress は、agents テーブルの address 列が壊れている(手での書き
+// 換えや取り違いを想定)ときに、Agents() がその行を空/零アドレスとして黙って返さず、読み取り
+// 全体を失敗として返すことを確かめる(design.md 10.5 節)。零アドレスのまま先へ進むと、wg の
+// ピア構成やアドレスの再割り当て判定にそのまま使われてしまう。
+func TestAgentsRejectsUnparseableAddress(t *testing.T) {
+	s := openTemp(t)
+	net := netip.MustParsePrefix("10.200.0.0/24")
+	tok, err := s.IssueJoinToken("home", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Register(tok, "home", "x", net); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("UPDATE agents SET address = ? WHERE name = ?", "not-an-address", "home"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Agents(); err == nil {
+		t.Fatal("Agents() with a corrupt stored address returned no error; a corrupt row must not silently become the zero address")
+	}
+	if _, err := s.AgentByName("home"); err == nil {
+		t.Fatal("AgentByName() with a corrupt stored address returned no error")
+	}
+}
+
+// TestAllocateAddressRejectsUnparseableAddress は、既存の行に解釈できないアドレスがあるとき、
+// allocateAddress がその行を「使われていない」とみなして新しいエージェントに同じアドレスを
+// 割り当ててしまわないことを確かめる(design.md 10.5 節)。
+func TestAllocateAddressRejectsUnparseableAddress(t *testing.T) {
+	s := openTemp(t)
+	net := netip.MustParsePrefix("10.200.0.0/24")
+	tok, err := s.IssueJoinToken("home", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Register(tok, "home", "x", net); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("UPDATE agents SET address = ? WHERE name = ?", "garbage", "home"); err != nil {
+		t.Fatal(err)
+	}
+	tok2, err := s.IssueJoinToken("office", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Register(tok2, "office", "y", net); err == nil {
+		t.Fatal("Register() allocated a new address while an existing row's address could not be confirmed as used; want a refusal, not a possible address collision")
+	}
+}
+
 func TestJoinTokenExpiry(t *testing.T) {
 	s := openTemp(t)
 	tok, _ := s.IssueJoinToken("home", -time.Second) // すでに期限切れ

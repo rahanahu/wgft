@@ -93,3 +93,44 @@ func TestAgentsLogsWarningsReadFailure(t *testing.T) {
 		t.Errorf("expected a log line naming the agent and the failed warnings read, got %q", buf.String())
 	}
 }
+
+// TestAgentsLogsWGStatusReadFailure confirms that Agents() still returns the full agent list
+// when the wg peer-status read fails (fail open: the endpoint IP/last-handshake columns and the
+// IP-mismatch comparison are display-only here, the periodic watch in watch.go is the actual
+// detector, design.md 10.5 節), but that the failure is not silent: before this fix, `dev, _ :=
+// d.dp.WGStatus()` discarded the cause and every agent's WGEndpoint/LastHandshake just went
+// quietly blank with nothing in the log to explain why.
+func TestAgentsLogsWGStatusReadFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	tok, err := st.IssueJoinToken("home", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.Register(tok, "home", "203.0.113.2", netip.MustParsePrefix("10.200.0.0/24")); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{st: st, dp: errWGStatusDataplane{}, hub: stream.New(nil)}
+
+	buf := captureLog(t)
+
+	infos, err := d.Agents()
+	if err != nil {
+		t.Fatalf("Agents() = %v, want success (fail open)", err)
+	}
+	if len(infos) != 1 || infos[0].Name != "home" {
+		t.Fatalf("Agents() = %+v, want the one registered agent", infos)
+	}
+	if infos[0].WGEndpoint != "" {
+		t.Errorf("WGEndpoint = %q, want empty when the wg status read failed", infos[0].WGEndpoint)
+	}
+	if !strings.Contains(buf.String(), "wg status") {
+		t.Errorf("expected a log line naming the failed wg status read, got %q", buf.String())
+	}
+}
