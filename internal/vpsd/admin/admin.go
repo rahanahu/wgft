@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -460,9 +461,50 @@ func Listen(addr string, warnNonLoopback bool) (net.Listener, error) {
 	return ln, nil
 }
 
-// ServeListener は Listen で開いた待ち受けで応答を続ける。
+// adminTimeouts は TCP で開いた管理用 API の http.Server の期限。テストが短い値を注入できるよう
+// 分けてある(agentapi.serverTimeouts と同じ形)。
+type adminTimeouts struct {
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+}
+
+// defaultAdminTCPTimeouts は TCP で開いたときの既定値(仕様 11 節)。管理用 API の応答はどれも
+// 束縛されている(JSON はバッチの本文の上限、書き出しはルール一覧、読み込みの確認は
+// importMaxBytes・importApplyMaxBytes に収まる)ので、WriteTimeout を付けても中断しない。
+// Unix ソケットは既存の信頼している境界の内側(root、SSH、Tailscale)だけなので期限を付けない。
+var defaultAdminTCPTimeouts = adminTimeouts{
+	ReadHeaderTimeout: 10 * time.Second,
+	ReadTimeout:       30 * time.Second,
+	WriteTimeout:      30 * time.Second,
+	IdleTimeout:       120 * time.Second,
+}
+
+// newAdminHTTPServer は http.Server を組み立てる(テストが短い期限を注入できるよう分けてある)。
+func newAdminHTTPServer(h http.Handler, t adminTimeouts) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: t.ReadHeaderTimeout,
+		ReadTimeout:       t.ReadTimeout,
+		WriteTimeout:      t.WriteTimeout,
+		IdleTimeout:       t.IdleTimeout,
+	}
+}
+
+// adminServerFor は ln の種類に応じた http.Server を組み立てる(ServeListener と、期限を
+// 直接検査するテストが共有する)。
+func adminServerFor(ln net.Listener, h http.Handler) *http.Server {
+	if ln.Addr().Network() == "unix" {
+		return &http.Server{Handler: h}
+	}
+	return newAdminHTTPServer(h, defaultAdminTCPTimeouts)
+}
+
+// ServeListener は Listen で開いた待ち受けで応答を続ける。ln が Unix ソケットなら期限を付けない
+// (相手は root か、その root に入れる人に限られる)。TCP なら defaultAdminTCPTimeouts を付ける。
 func ServeListener(ln net.Listener, h http.Handler) error {
-	return (&http.Server{Handler: h}).Serve(ln)
+	return adminServerFor(ln, h).Serve(ln)
 }
 
 func isLoopbackAddr(addr string) bool {
