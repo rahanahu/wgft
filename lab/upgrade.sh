@@ -49,25 +49,24 @@
 # SANDBOX-READY / PARALLEL-SAFE: every file this script writes lives under $WORK (one variable,
 # defaulting under /tmp), and the netns names are variables (today's fixed topology names by
 # default). It never does a VM-wide process lookup (no pkill by name, no pgrep, no ps/grep over
-# the whole process table). What is actually guaranteed, precisely: within one run, stop_server/
-# stop_agent/stop_targets only ever act on pids this exact script instance holds in a variable
-# right now (SERVER_PID and friends), the moment after starting them, so there is no restart and
-# no window for pid reuse to matter. leaf_pid additionally resolves that pid's real descendant
-# through /proc/<pid>/task/<pid>/children (still scoped to that one pid, never a table-wide scan)
-# so those functions wait for the actual target process to exit, not just its wrapper (see
-# leaf_pid's own comment). Across runs, stale_cleanup reads pids a PREVIOUS run of this script
-# left in $WORK/pid.*; a bare pid number surviving that long is not enough to identify a specific
-# process (pids get reused), so it only signals a recorded pid after verifying, right then, that
-# the kernel boot id and the process's own start time still match what was recorded when this
-# tooling started it (see verify_and_signal_stale's own comment); every other case signals
-# nothing. This script can therefore only ever signal or wait on a process it itself started AND
-# can still verify is that exact process, even if another sandbox on the same VM is running wgft
-# under a different netns at the same time, or a stale pid file's number has since been recycled
-# by something unrelated. Deliberately kept small: this is a verified-identity safety net for
-# running this one script directly, not a general-purpose reaper; owning a whole sandbox's
-# leftovers is the coming lab harness's job. The one thing that is NOT yet sandboxed is the netns
-# topology itself (client/vps/home/lan are one shared set per VM today, same as every other
-# lab/*.sh script); that is a lab/netns.sh limitation this script does not attempt to fix.
+# the whole process table), and - this is the precise guarantee - it never signals a process it
+# did not itself start in THIS run. stop_server/stop_agent/stop_targets only ever act on pids
+# this exact script instance holds in a variable right now (SERVER_PID and friends), the moment
+# after starting them; there is no restart and no window for pid reuse to matter there. leaf_pid
+# additionally resolves that pid's real descendant through /proc/<pid>/task/<pid>/children (still
+# scoped to that one pid, never a table-wide scan) so those functions wait for the actual target
+# process to exit, not just its wrapper (see leaf_pid's own comment). Across runs, stale_cleanup
+# reads pids a PREVIOUS run of this script left in $WORK/pid.*, but it never signals or waits on
+# any of them, verified or not: it only reports what it finds (naming the process and the exact
+# command to stop it, when the record's boot id and process start time verify it is a genuine,
+# still-running leftover) and removes the stale record. If any leftover verified as still
+# running, the whole run refuses to continue instead of risking a collision (see stale_cleanup's
+# own comment for exactly what would collide and why that is worse than stopping). Deliberately
+# kept small: this is a verified-identity detect-and-report safety net for running this one
+# script directly, not a general-purpose reaper; owning a whole sandbox's leftovers is the coming
+# lab harness's job. The one thing that is NOT yet sandboxed is the netns topology itself
+# (client/vps/home/lan are one shared set per VM today, same as every other lab/*.sh script);
+# that is a lab/netns.sh limitation this script does not attempt to fix.
 set -u
 # job control (set -m) is needed for term_group below: without it, a non-interactive bash script
 # never gives a background job its own process group (every "cmd &" just stays in the script's
@@ -240,57 +239,78 @@ read_pid_record() {
   [ -n "$REC_PID" ] && [ -n "$REC_BOOT" ] && [ -n "$REC_START" ]
 }
 
-# stale_cleanup: on entry, signals a leftover from a previous, aborted run of this exact script,
-# but ONLY a pid file under $WORK whose recorded boot id and process start time both still match
-# right now; every other case (a different boot, the pid already gone, a start time that differs
-# because the pid number was reused by an unrelated process since, an unreadable or old-format
-# record) signals nothing, logs why, and just drops the stale record. This is deliberately small:
-# it is a minimal, verified-identity safety net for running this one script by hand in today's
-# single-VM lab, not a general process reaper. Ownership of a whole sandbox's leftovers is the
-# coming lab harness's job, not this script's; this only ever cleans up after ITSELF.
+# stale_cleanup: on entry, NEVER signals or waits on anything (the owner's call: even a
+# fully-verified leftover only gets reported, never killed, by this script). For each pid file
+# under $WORK left by a previous run, report_stale below prints exactly one line describing what
+# it found and removes the record; stale_cleanup then always rebuilds $WORK empty. If, and only
+# if, at least one record turned out to be a genuine, still-running leftover of an earlier run of
+# this exact script (boot id and process start time both still match), this refuses to continue:
+# it prints what to run to stop it and exits 3. The reason it stops instead of just reporting and
+# carrying on is what actually collides if it does not. $WORK itself never collides (it is always
+# rebuilt empty here, whether or not a leftover is found); a leftover's own data directory under
+# the OLD $WORK is orphaned, not corrupted, by that rebuild. What does collide: the vps/home/lan
+# network namespaces are shared for the whole VM (not sandboxed; see the header comment), and
+# every port and address this script uses is a fixed constant in that shared namespace (the
+# admin API at $ADMIN, the agent API, every P_* listen port) - a leftover server or agent still
+# holding any of those would make this run's own start_server/start_agent either fail to bind, or
+# silently succeed by binding nothing while the OLD process keeps answering, which would let this
+# run's very first checks read the leftover's state instead of its own and pass or fail for the
+# wrong reason. That risk is exactly what a fresh run cannot tell apart from a real regression,
+# so this stops rather than let it happen quietly.
 stale_cleanup() {
-  local f
+  local f found=0
   if [ -d "$WORK" ]; then
     for f in "$WORK"/pid.*; do
       [ -e "$f" ] || continue
-      verify_and_signal_stale "$f"
+      report_stale "$f" || found=1
     done
   fi
   rm -rf "$WORK"
   mkdir -p "$WORK" "$CACHE"
+  if [ "$found" = 1 ]; then
+    echo "stale_cleanup: refusing to start: at least one leftover reported above is still running and would collide with this run's own server/agent in the shared vps/home/lan namespaces (see this function's own comment for why). Stop it with the command printed above, then rerun." >&2
+    exit 3
+  fi
 }
-# verify_and_signal_stale <pid-file>: the one place a pid read back from a file (rather than an
-# in-memory variable of this running script) is ever acted on; see stale_cleanup's own comment for
-# why every branch that cannot fully verify identity signals nothing and only reports why.
-verify_and_signal_stale() {
-  local file=$1 pid boot start cur_boot cur_start real
+# report_stale <pid-file>: the one place a pid read back from a file (rather than an in-memory
+# variable of this running script) is ever even looked at; it only ever reports, never signals or
+# waits on it - see stale_cleanup's own comment for why and for what happens after. Returns 1 if
+# the record is a genuine, still-running leftover of an earlier run of this exact script (boot id
+# and start time both verified to match), so the caller can decide whether it is safe to
+# continue; returns 0 for every other case (already gone, reused, unreadable or old-format
+# record), all of which are safe to ignore.
+report_stale() {
+  local file=$1 pid boot start cur_boot cur_start real cmdline
   if ! read_pid_record "$file"; then
-    echo "stale_cleanup: $file has no verifiable pid record (missing, unreadable, or the old pid-only format); signalling nothing, just removing the record"
+    echo "stale_cleanup: $file has no verifiable pid record (missing, unreadable, or the old pid-only format); nothing to report, removing the record"
     return 0
   fi
   pid=$REC_PID; boot=$REC_BOOT; start=$REC_START
   cur_boot=$(boot_id)
   if [ "$boot" != "$cur_boot" ]; then
-    echo "stale_cleanup: $file recorded boot id $boot but this boot is $cur_boot (host rebooted since); pid $pid may since have been reused, signalling nothing"
+    echo "stale_cleanup: $file recorded boot id $boot but this boot is $cur_boot (host rebooted since); pid $pid may since have been reused, ignoring it"
     return 0
   fi
   cur_start=$(proc_start_time "$pid")
   if [ -z "$cur_start" ]; then
-    echo "stale_cleanup: $file's pid $pid no longer exists; nothing to signal"
+    echo "stale_cleanup: $file's pid $pid no longer exists; nothing to report"
     return 0
   fi
   if [ "$cur_start" != "$start" ]; then
-    echo "stale_cleanup: $file's pid $pid exists but started at $cur_start, recorded $start (the pid number was reused by an unrelated process); signalling nothing"
+    echo "stale_cleanup: $file's pid $pid exists but started at $cur_start, recorded $start (the pid number was reused by an unrelated process); ignoring it"
     return 0
   fi
-  # verified: this is the exact process this tooling started, in this same boot, never reaped.
-  # leaf_pid is resolved fresh right here, in the same breath as the kill it feeds, for the same
-  # reason stop_server's own comment gives: it is never read back from a stale record of its own.
+  # verified: this is the exact process this tooling started, in this same boot, never reaped,
+  # and it is still running right now. Report it in full; do not touch it.
   real=$(leaf_pid "$pid")
-  echo "stale_cleanup: $file's pid $pid verified as a genuine leftover (boot id and start time match); signalling it${real:+ (real process $real)}"
-  term_group "$pid"
-  wait_until 10 proc_gone "$real"
-  wait_until 10 proc_gone "$pid"
+  cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+  echo "stale_cleanup: LEFTOVER - $file's pid $pid is still running from an earlier run of this script (boot id and start time match)"
+  echo "  cmdline: ${cmdline:-<unreadable, process may have just exited>}"
+  if [ -n "$real" ] && [ "$real" != "$pid" ]; then
+    echo "  real process (resolved via leaf_pid, for your information only): $real"
+  fi
+  echo "  to stop it yourself: kill -- -$pid   (falls back to a plain 'kill $pid' if that pid is not its own process group leader)"
+  return 1
 }
 
 ensure_wgftlab() { id wgftlab >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin wgftlab; }
