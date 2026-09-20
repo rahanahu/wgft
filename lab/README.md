@@ -31,7 +31,7 @@ lab/lab exec vps wgft server run ...  # VM では /usr/local/bin の名前で実
 lab/lab shell home              # home ns で bash
 lab/lab exec vm bash /wgft/lab/e2e.sh kernel     # 端から端までのシナリオ(登録、TCP/UDP、PROXY protocol、deny の即時反映、撤去)を PASS/FAIL で
 lab/lab exec vm bash /wgft/lab/e2e.sh userspace  # 同じシナリオをユーザー空間モード(非 root の wgftlab ユーザー)で
-lab/lab exec vm bash /wgft/lab/rates.sh kernel   # レート制限の実負荷(packet、per-source、new-flow)。userspace も同じ
+lab/lab exec vm bash /wgft/lab/rates.sh kernel   # 3 つのレートと Relay ルールのレートの実際の通過数、拒否の順序、TCP への packet_rate 無効を PASS/FAIL で。userspace も同じ
 lab/lab exec vm bash /wgft/lab/connlimit.sh      # カーネルモードの接続元 IP ごとの同時フロー数の上限(ct count)。userspace には無い機能なので kernel だけ
 lab/lab exec vm bash /wgft/lab/split-merge.sh kernel   # Web UI の分割・統合。流れている UDP セッションが切れないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/import-export.sh kernel # Web UI の書き出しと読み込み。確認画面の差分、確認後の変更による適用の拒否を確認。userspace も同じ

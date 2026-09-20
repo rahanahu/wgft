@@ -87,7 +87,7 @@ netns のトポロジを組む `lab/netns.sh` は Incus に依存しないので
 | A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | すべての PR | PR の更新ごと | 1 分前後 | 自動 |
 | A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | すべての PR | PR の更新ごと | 1 分前後 | 自動 |
 | A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力 | CI (Linux) | すべての PR | PR の更新ごと | 1 分未満 | 自動 |
-| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L13。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。7a.8 節の共通の完了条件 | ラボ (使い捨て VM で並列、または 1 台で順に) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 並列で約 2.5 分、1 台で 10 分以上 | 自動 (開発者が起動。L3 は半自動) |
+| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L13。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。7a.8 節の共通の完了条件 | ラボ (使い捨て VM で並列、または 1 台で順に) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 並列で約 2.5 分、1 台で 10 分以上 | 自動 (開発者が起動) |
 
 ### ラボの一式の内訳
 
@@ -95,7 +95,7 @@ netns のトポロジを組む `lab/netns.sh` は Incus に依存しないので
 |---|---|---|---|---|---|---|---|
 | L1 | `lab/e2e.sh` (kernel と userspace) | 登録、TCP と UDP の転送、3000 バイトの UDP、PROXY protocol、deny による切断、撤去の退行 | ラボ | `relay`、`userspace`、`protocol`、`agent-platform`、`dataplane-net` | A9 として | モードごとに約 35 秒 | 自動 |
 | L2 | `lab/connlimit.sh` | 送信元ごとの同時フロー数の上限 (`ct count`) が実際のパケットで守られないこと、既存のフローの追い出し | ラボ | `admission`、`kernel`、`nft-emit` | A9 として | 約 30 秒 | 自動 |
-| L3 | `lab/rates.sh` (kernel と userspace) | 3 つのレートと `Relay` のルールのレートの実際の通過数が両モードで食い違うこと | ラボ | `admission`、`nft-emit`、`relay`、`userspace` | A9 として | モードごとに約 35 秒 | 半自動 (判定の追加は新設) |
+| L3 | `lab/rates.sh` (kernel と userspace) | 3 つのレートと `Relay` のルールのレートの実際の通過数が両モードで食い違うこと、拒否した段が後の段のトークンを使うこと、TCP のルールに `packet_rate` が効くこと | ラボ | `admission`、`nft-emit`、`relay`、`userspace` | A9 として | モードごとに約 50 秒 | 自動 |
 | L4 | `lab/lifecycle.sh` check 1 | server の再起動の間に kernel モードの転送と conntrack が途切れること | ラボ | `reconcile`、`kernel`、`userspace`、`protocol` | A9 として | 1 分前後 | 自動 |
 | L5 | `lab/lifecycle.sh` check 2 | 無関係なルールの追加、変更、削除で既存のフローが切れること | ラボ | `reconcile`、`rule-ops`、`kernel` | A9 として | 1 分前後 | 自動 |
 | L6 | `lab/lifecycle.sh` check 3、3b | Relay の bind の失敗が nftables に漏れること、テーブルの差し替えの失敗で待ち受けが戻らないこと | ラボ | `relay`、`reconcile` | A9 として | 1 分前後 | 自動 |
@@ -201,16 +201,6 @@ v1 の前に 1 回流し、以後は関係する領域を変えたときにだ�
 ## 新設と自動化が未了の項目
 
 各項目は、確かめる内容、今のラボで足りない理由、必要な環境、流す時期、流す契機、自動か手作業か、v1 に必須か v1.1 以降でよいか、の 7 点で定めます。v1 の項目には、前節の繰り返しの頻度を付けます。
-
-### L3 の拡張:レートの判定
-
-- 内容:`lab/rates.sh` の結果に、通過数の範囲による PASS と FAIL の判定を加えます
-- 足りない理由:今の `lab/rates.sh` は通過数を表示するだけなので、両モードが一致しているかを人が読んで判断しています。`Relay` のルールのレートを確かめる場面 (7a.9 節) は、Phase 5 の移行の手順 4 で加えました
-- 環境:ラボです
-- 時期:実装した時点でラボの一式 (A9) に加わり、以後はコードを変える PR ごとに流れます
-- 契機:開発の途中では `admission`、`nft-emit`、`relay`
-- 自動化:自動です
-- v1:必須です。Phase 5 の完了条件に当たります
 
 ### L8 の拡張:Resource Guard の隔離と小さい予算
 
