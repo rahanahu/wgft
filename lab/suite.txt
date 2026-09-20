@@ -10,8 +10,14 @@
 #                             a person reads from it, is a measurement of memory or of achieved
 #                             rate, and a neighbour is one confounder too many.
 #            exclusive-timing runs alone in the Lab Host VM: it asserts on what does or does not
-#                             happen inside a wall-clock window, and measurably flakes when it
-#                             shares the VM even though CPU is not saturated.
+#                             happen inside a wall-clock window, without first waiting for the
+#                             state that window observes to have converged, so a neighbour's or a
+#                             prior step's leftover activity can bleed into the window (see
+#                             docs/testing.md's rule against wall-clock-only wait windows, which a
+#                             check restructured to converge first can usually leave). No check
+#                             needs this class today; the class exists so that a check whose
+#                             negative claim genuinely cannot be made to wait for convergence
+#                             first has a home.
 #            exclusive-global runs alone in the Lab Host VM: it changes a value a network namespace
 #                             does not isolate, such as net.netfilter.nf_conntrack_max or the
 #                             conntrack hash size. No check needs this class today; the class
@@ -49,10 +55,14 @@ exclusive-heavy  yes  lifecycle.sh kernel 5e
 parallel         yes  lifecycle.sh kernel 6
 parallel         yes  lifecycle.sh kernel 7
 parallel         yes  lifecycle.sh kernel 8
-# check 9c asserts that nothing is applied during a 35 s window with nothing changed. Measured:
-# 20 of 20 runs pass alone, 17 of 20 in a pool of 8, with the same failure each time
-# ("no apply was logged in the window"), so it runs alone.
-exclusive-timing yes  lifecycle.sh kernel 9
+# check 9c asserts that nothing is applied during a 35 s window with nothing changed. It used to
+# wait only for forwarding to come back after the preceding flush/delete, not for their own
+# "applied"/drift log lines to actually land, so a neighbour's load could delay one of those
+# lines into the window and read as an unexplained apply (17 of 20 in a pool of 8, 18 of 20 in
+# the whole suite, always alone 20 of 20). Restructured to wait for both prior repairs' own log
+# lines before taking the window's baseline (docs/testing.md); measured again at 20 of 20 alone,
+# 20 of 20 in a pool of 8 beside the rest of this file's parallel jobs, so it now runs in the pool.
+parallel         yes  lifecycle.sh kernel 9
 
 parallel         yes  lifecycle.sh userspace 1
 parallel         yes  lifecycle.sh userspace 2
@@ -67,7 +77,7 @@ exclusive-heavy  yes  lifecycle.sh userspace 5e
 parallel         yes  lifecycle.sh userspace 6
 parallel         yes  lifecycle.sh userspace 7
 parallel         yes  lifecycle.sh userspace 8
-exclusive-timing yes  lifecycle.sh userspace 9
+parallel         yes  lifecycle.sh userspace 9
 
 exclusive-heavy  yes  rates.sh kernel
 exclusive-heavy  yes  rates.sh userspace
