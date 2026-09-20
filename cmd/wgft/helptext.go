@@ -127,7 +127,13 @@ a prefix as long as it is unambiguous. TARGET shows the effective target range.
 MODE is proxy for rules added with --proxy and kernel for all others; in
 userspace mode "kernel" rules are relayed by the wgft process, not the kernel.
 DENY and ALLOW are the number of CIDRs, RATES the configured limits, DROPPED
-the packets or flows dropped by them so far.`,
+the packets or flows dropped by them so far by your rate limits and lists.
+REFUSED is unrelated: it is how many times Resource Guard, wgft's own process-
+wide flow budget, refused a new flow on this rule since the server started (not
+persisted across restarts). A "flow budget" line follows the table when the
+server reports its process-wide budget: in_use/limit per protocol. Kernel mode
+never reports one for UDP, since it counts UDP flows through conntrack, not
+through this budget.`,
 		Example: `  wgft rule ls
   wgft rule ls --json`,
 	},

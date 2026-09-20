@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/rahanahu/wgft/internal/buildinfo"
 	"github.com/rahanahu/wgft/internal/reconcile"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -338,6 +339,42 @@ func (d *Daemon) ApplyStatus() (admin.ApplyStatus, bool) {
 		return admin.ApplyStatus{}, false
 	}
 	return applyStatusToAdmin(st), true
+}
+
+// udpPooler is implemented by a serverDataplane that tracks UDP flows in a resource.Pool. Only
+// userspace mode does (userspaceDataplane, dataplane_userspace.go): kernel mode counts UDP through
+// nftables/conntrack, not through resource.Pool (design.md 7a.10 節「kernel 側の保護」). Kept
+// separate from serverDataplane so kernelDataplane needs no meaningless implementation.
+type udpPooler interface {
+	UDPPool() *resource.Pool
+}
+
+// ResourceStatus is admin.ResourceStatusBackend's implementation (design.md 7a.10 節「拒否の報告」).
+// TCP always has a pool: d.proxy judges every Relay connection (kernel mode: its own pool; userspace
+// mode: the same pool the relay uses, design.md 7a.10 節「共有プールと隔離予約」). UDP has one only
+// in userspace mode, so kernel mode's FlowBudget has no "udp" entry and no UDP rule ever appears in
+// Refusals.
+func (d *Daemon) ResourceStatus() admin.ResourceStatus {
+	budget := map[proto.Proto]admin.FlowBudget{}
+	refusals := map[string]map[string]uint64{}
+	addPool := func(p proto.Proto, pool *resource.Pool) {
+		if pool == nil {
+			return
+		}
+		budget[p] = admin.FlowBudget{InUse: pool.InUse(), Limit: pool.Total()}
+		for rule, byReason := range pool.Refusals() {
+			m := make(map[string]uint64, len(byReason))
+			for reason, n := range byReason {
+				m[string(reason)] = n
+			}
+			refusals[rule] = m
+		}
+	}
+	addPool(proto.TCP, d.proxy.Pool())
+	if up, ok := d.dp.(udpPooler); ok {
+		addPool(proto.UDP, up.UDPPool())
+	}
+	return admin.ResourceStatus{FlowBudget: budget, Refusals: refusals}
 }
 
 func applyStatusToAdmin(st reconcile.Status) admin.ApplyStatus {

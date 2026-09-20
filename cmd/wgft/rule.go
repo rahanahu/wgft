@@ -180,7 +180,7 @@ func newRuleLsCmd() *cobra.Command {
 				}
 				fmt.Printf("# %s (%d)\n", name, len(byGroup[g]))
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-				fmt.Fprintf(w, "  ID\tAGENT\tPROTO\tLISTEN\tTARGET\tMODE\tENABLED\tDENY\tALLOW\tRATES\tDROPPED\tNOTE\n")
+				fmt.Fprintf(w, "  ID\tAGENT\tPROTO\tLISTEN\tTARGET\tMODE\tENABLED\tDENY\tALLOW\tRATES\tDROPPED\tREFUSED\tNOTE\n")
 				for _, r := range byGroup[g] {
 					rates := []string{}
 					for nm, v := range map[string]*proto.Rate{"new": r.NewFlowRate, "pkt": r.PacketRate, "src": r.PerSourceRate} {
@@ -189,12 +189,15 @@ func newRuleLsCmd() *cobra.Command {
 						}
 					}
 					sort.Strings(rates)
-					fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\t%s\t%v\t%d\t%d\t%s\t%d\t%s\n", short(r.ID), r.Agent, r.Proto, r.ListenPort, r.TargetDisplay(), r.VPSMode, r.Enabled,
-						len(r.SourceDeny), len(r.SourceAllow), strings.Join(rates, ","), res.Drops[r.ID], truncNote(r.Note))
+					fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\t%s\t%v\t%d\t%d\t%s\t%d\t%d\t%s\n", short(r.ID), r.Agent, r.Proto, r.ListenPort, r.TargetDisplay(), r.VPSMode, r.Enabled,
+						len(r.SourceDeny), len(r.SourceAllow), strings.Join(rates, ","), res.Drops[r.ID], resourceRefusalTotal(res.ResourceRefusals, r.ID), truncNote(r.Note))
 				}
 				w.Flush()
 			}
 			fmt.Printf("generation %d\n", res.Generation)
+			if line := flowBudgetLine(res.FlowBudget); line != "" {
+				fmt.Println(line)
+			}
 			if hasTCPPacketRate {
 				fmt.Fprintln(os.Stderr, packetRateTCPNotice)
 			}
@@ -534,6 +537,37 @@ func truncNote(s string) string {
 		return string(r[:39]) + "…"
 	}
 	return s
+}
+
+// resourceRefusalTotal は、そのルールに対する Resource Guard の拒否の総数(理由を問わない)。
+// design.md 7a.10 節「拒否の報告」の値で、report を持たない Backend や、その理由でまだ 1 度も
+// 拒んでいないルールでは 0 になる(RATES 列の DROPPED と違い、こちらは wgft 自身の資源が理由)。
+func resourceRefusalTotal(refusals map[string]map[string]uint64, ruleID string) uint64 {
+	var total uint64
+	for _, n := range refusals[ruleID] {
+		total += n
+	}
+	return total
+}
+
+// flowBudgetLine は "generation" の行に続けて出す、プロセス全体のフロー予算の要約
+// (design.md 7a.10 節)。report を持たない Backend では空文字を返し、何も出さない。
+// kernel モードは UDP を Go 側で数えないので "udp" は出ない。
+func flowBudgetLine(budget map[proto.Proto]admin.FlowBudget) string {
+	if len(budget) == 0 {
+		return ""
+	}
+	protos := make([]proto.Proto, 0, len(budget))
+	for p := range budget {
+		protos = append(protos, p)
+	}
+	sort.Slice(protos, func(i, j int) bool { return protos[i] < protos[j] })
+	parts := make([]string, 0, len(protos))
+	for _, p := range protos {
+		b := budget[p]
+		parts = append(parts, fmt.Sprintf("%s %d/%d", p, b.InUse, b.Limit))
+	}
+	return "flow budget: " + strings.Join(parts, ", ")
 }
 
 // findRule は ID の完全一致か、前方一致が 1 つだけのルールを返す。

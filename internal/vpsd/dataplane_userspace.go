@@ -12,6 +12,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace"
 	"github.com/rahanahu/wgft/internal/platform/linux"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/vpsd/conncheck"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -72,3 +73,7 @@ func (u *userspaceDataplane) ConntrackWarning() string { return "" }
 func (u *userspaceDataplane) CheckConnectivity(addr string) conncheck.Result {
 	return conncheck.Check(addr, conncheck.Options{Dial: u.b.Dial})
 }
+
+// UDPPool implements udpPooler (admin_backend.go): userspace mode tracks UDP flows in a
+// resource.Pool, unlike kernel mode (design.md 7a.10 節「拒否の報告」).
+func (u *userspaceDataplane) UDPPool() *resource.Pool { return u.b.UDPPool() }
