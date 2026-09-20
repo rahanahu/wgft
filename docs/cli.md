@@ -107,8 +107,11 @@ Issue a join string for a new agent. It is printed once, can be used once, and
 expires after one hour. Issuing another one for the same name invalidates the
 earlier unused one.
 
-Give the string to the agent as WGFT_JOIN. It contains a #, so write it into a
-dotenv file as it is, without quotes.
+The join string is a secret: whoever has it can register as this agent. Give
+it to the agent as WGFT_JOIN, in the environment or a dotenv file, rather than
+the --join flag; a flag value is visible to other local users via ps and is
+kept in shell history. It contains a #, so write it into a dotenv file as it
+is, without quotes.
 
 ```text
 wgft agent join-string [flags]
@@ -234,6 +237,10 @@ Flags:
 Agent host daemon. Brings up the tunnel and listeners first from the key in the credentials file (agent.json) and the last full state,
 then connects to the server stream to receive the full state. On first run it registers with the join string (WGFT_JOIN); the name (WGFT_NAME) is
 optional and normally left unset, since the join string is already bound to a name.
+
+WGFT_JOIN is a secret. Prefer setting it as an environment variable or in the
+dotenv file (--config); the --join flag leaves it visible to other local
+users via ps and in shell history.
 
 ```text
 wgft agent run [flags]

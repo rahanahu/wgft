@@ -151,6 +151,8 @@ sudo wgft agent join-string --name home
 
 The join string can be used once and expires after one hour. Quote it when passing it through a shell because it contains `#`.
 
+The join string is a secret: whoever has it can register as this agent. The examples below set it as `WGFT_JOIN` in the environment or a dotenv file rather than passing it on the command line as a flag, because a flag value is visible to other local users via `ps` and stays in shell history.
+
 ### Run the agent as a binary
 
 ```sh

@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,6 +240,94 @@ func TestServerTimeouts_IdleKeepAlive(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < timeouts.IdleTimeout {
 		t.Errorf("closed after %s, want at least IdleTimeout %s", elapsed, timeouts.IdleTimeout)
 	}
+}
+
+// (d) 同時接続数が上限に達すると、新しい接続は accept を待つだけで、既存の接続(stream 役)は
+// 切れない。上限に空きができれば、待っていた接続がそのまま処理される。
+// started はチャネルではなく atomic なカウンタで数える。バッファ付きチャネルだと、上限が
+// 効いていない場合でも n+1 番目の send がチャネルの容量で偶然ブロックし、限定が効いているのと
+// 見分けが付かなくなる(実際に一度そのバグを作り込んで確かめた)ため
+func TestServerConnLimit(t *testing.T) {
+	const n = 2
+	var started atomic.Int32
+	release := make(chan struct{})
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started.Add(1)
+		<-release // stream のような長命の接続に見立てて、応答せずに居座る
+		fmt.Fprint(w, "ok")
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	longTimeouts := serverTimeouts{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20}
+	srv := newHTTPServer("", h, nil, longTimeouts)
+	go srv.Serve(limitListener(ln, n))
+	t.Cleanup(func() { srv.Close() })
+	addr := ln.Addr().String()
+
+	var held []net.Conn
+	t.Cleanup(func() {
+		for _, c := range held {
+			c.Close()
+		}
+	})
+	for i := 0; i < n; i++ {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, c)
+		if _, err := fmt.Fprint(c, "GET / HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitForCount(t, &started, n, 2*time.Second)
+
+	// 上限ちょうどで動いている状態で、もう 1 本繋ぐと accept されず応答が来ない
+	extra, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	if _, err := fmt.Fprint(extra, "GET / HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	extra.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	buf := make([]byte, 16)
+	if _, err := extra.Read(buf); err == nil {
+		t.Fatal("connection beyond the limit got a response before any slot freed up")
+	} else if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("unexpected error waiting on the extra connection: %v", err)
+	}
+	if got := started.Load(); got != n {
+		t.Fatalf("handler ran %d times while waiting for a slot, want exactly the limit (%d); the extra connection was accepted early", got, n)
+	}
+
+	// release を閉じて、これから accept される extra の handler も進めるようにしておく。
+	// held[1] の handler もこれで進むが、その接続はまだ開いたままなので枠は空かない
+	close(release)
+	// held[0] をクライアント側から閉じて枠を 1 つ空ける
+	held[0].Close()
+
+	extra.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := extra.Read(buf); err != nil {
+		t.Fatalf("expected the extra connection to be served once a slot freed up: %v", err)
+	}
+	waitForCount(t, &started, n+1, 2*time.Second)
+}
+
+// waitForCount は c が want に達するまで待つ(上限。ポーリング)。
+func waitForCount(t *testing.T, c *atomic.Int32, want int32, budget time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if c.Load() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("handler count = %d after %s, want at least %d", c.Load(), budget, want)
 }
 
 // --- 登録の名前検証と失敗応答の一様性 ---

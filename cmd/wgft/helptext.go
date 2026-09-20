@@ -33,8 +33,11 @@ other ways to pass the same values.`,
 expires after one hour. Issuing another one for the same name invalidates the
 earlier unused one.
 
-Give the string to the agent as WGFT_JOIN. It contains a #, so write it into a
-dotenv file as it is, without quotes.`,
+The join string is a secret: whoever has it can register as this agent. Give
+it to the agent as WGFT_JOIN, in the environment or a dotenv file, rather than
+the --join flag; a flag value is visible to other local users via ps and is
+kept in shell history. It contains a #, so write it into a dotenv file as it
+is, without quotes.`,
 		Example: `  wgft agent join-string --name home`,
 	},
 	"agent ls": {
@@ -88,6 +91,13 @@ the new public key over the stream, so nothing has to be done on the VPS.`,
 		Example: `  wgft agent rotate-key`,
 	},
 	"agent run": {
+		Long: `Agent host daemon. Brings up the tunnel and listeners first from the key in the credentials file (agent.json) and the last full state,
+then connects to the server stream to receive the full state. On first run it registers with the join string (WGFT_JOIN); the name (WGFT_NAME) is
+optional and normally left unset, since the join string is already bound to a name.
+
+WGFT_JOIN is a secret. Prefer setting it as an environment variable or in the
+dotenv file (--config); the --join flag leaves it visible to other local
+users via ps and in shell history.`,
 		Example: `  WGFT_JOIN='wgft://vps.example.com:8443/TOKEN#sha256:...' wgft agent run
   wgft agent run --config /etc/wgft/agent.env`,
 	},
