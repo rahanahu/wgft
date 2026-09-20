@@ -102,6 +102,13 @@ OLD_VERSION=${WGFT_UPGRADE_OLD_VERSION:-0.5.0}  # default: the immediately-previ
   # oldest release the project's release notes still promise an upgrade from (see header comment).
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: upgrade.sh kernel|userspace" >&2; exit 2;; esac
+# old_has below knows what 0.4.0 lacks and treats every other version as having all of it, which
+# is only true from 0.5.0 on. An older or mistyped version would make the version-specific
+# assertions skip themselves and pass for the wrong reason, so refuse it here.
+case "$OLD_VERSION" in
+  0.4.0|0.[5-9].*|0.[1-9][0-9].*|[1-9]*) ;;
+  *) echo "upgrade.sh: WGFT_UPGRADE_OLD_VERSION=$OLD_VERSION is not a release this check knows how to judge (0.4.0, or 0.5.0 and later)" >&2; exit 2;;
+esac
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lab/oldrelease.sh
