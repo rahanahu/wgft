@@ -165,8 +165,7 @@ lab/lab exec vm labhost gc                                                  # �
 ```
 
 `run all` は [lab/suite.txt](suite.txt) を読みます。`parallel` に分類された確認を大きさ
-`-parallel` のプールで流し、そのあと `exclusive-heavy` と `exclusive-global` の確認を 1 つずつ
-流します。`run all` が流すのは `suite.txt` の `default` の列が yes の確認だけです。
+`-parallel` のプールで流し、そのあと `exclusive-*` に分類された確認を 1 つずつ流します。`run all` が流すのは `suite.txt` の `default` の列が yes の確認だけです。
 `version-skew.sh` は Lab Host VM からリリースのバイナリを取得できる場合に限る確認なので、
 `default` は no とし、名指ししたときだけ流れます。終了コードは 1 つでも失敗すれば非 0 です。
 
@@ -175,7 +174,7 @@ lab/lab exec vm labhost gc                                                  # �
 
 ### 確認の分類
 
-[lab/suite.txt](suite.txt) が確認ごとに持つ分類は 3 つです。
+[lab/suite.txt](suite.txt) が確認ごとに持つ分類は 4 つです。
 
 | 分類 | 意味 | 対象 |
 |---|---|---|
