@@ -17,8 +17,12 @@ import "golang.zx2c4.com/wireguard/conn"
 //
 // conn.NewStdNetBind() は Go の net パッケージ経由でソケットを開き、net パッケージが
 // 自分で開くすべての UDP ソケットで SIO_UDP_CONNRESET を無効にしているため、同じ
-// 操作をしても受信が止まらないことを確認した。代償として、Windows では Registered
-// I/O による高速なパケット処理を使わない。
+// 操作をしても受信が止まらないことを確認した。この選択はバッチ処理の速さを犠牲に
+// しない。依存するこの版の golang.zx2c4.com/wireguard では、WinRingBind.BatchSize()
+// も StdNetBind.BatchSize() も Windows で 1 を返し、バッチサイズに差が無いためである。
+// 残る差は、自前のリングバッファと Go の netpoller 経由の UDP ソケットとの間の、
+// パケットごとの syscall や I/O 完了通知のオーバーヘッドであり、その大きさは未測定
+// である。
 //
 // vpsd 自体は Linux でしか動かないが、この package は CI の windows-test が
 // ビルドと単体テストの対象にしている。internal/dataplane/userspace/tunnel は

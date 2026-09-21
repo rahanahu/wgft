@@ -178,7 +178,7 @@ jobs:
         run: |
           for target in windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/wgft
-            GOOS=${target%/*} GOARCH=${target#*/} go vet ./cmd/... ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/flock/...
+            GOOS=${target%/*} GOARCH=${target#*/} go vet ./cmd/... ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/dataplane/userspace/utun/... ./internal/flock/...
           done
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
@@ -186,8 +186,10 @@ jobs:
   windows-test:
     # Runs the packages that actually build and pass on native Windows today: the agent
     # (including its credentials/ACL handling), the relay it shares with the server's userspace
-    # mode, flock, and the CLI. internal/vpsd and its
-    # subpackages are Linux-only (kernel WireGuard, nftables) and are not part of this job;
+    # mode, flock, the CLI, and the server's userspace tunnel bind (internal/dataplane/userspace/utun).
+    # The rest of internal/vpsd and its subpackages are Linux-only (kernel WireGuard, nftables)
+    # and are not part of this job; the parent internal/dataplane/userspace package is also
+    # excluded because TestPrepareBindFailureIsFailClosed fails on native Windows (issue #109).
     # the build-test job's cross-build step already keeps ./cmd/wgft buildable for Windows,
     # this job additionally runs the Windows-specific code paths.
     #
@@ -210,7 +212,7 @@ jobs:
         with:
           go-version: "1.27.x"
       - name: test
-        run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/flock/... ./cmd/wgft/...
+        run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/dataplane/userspace/utun/... ./internal/flock/... ./cmd/wgft/...
 
   macos-test:
     # Runs the same packages as windows-test, on GitHub's Apple silicon runner. This is the
