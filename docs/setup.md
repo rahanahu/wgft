@@ -321,15 +321,15 @@ Entries are comma-separated and each one is `CIDR`, `CIDR:port` or `CIDR:lo-hi`.
 An agent whose host changes networks and returns to one it used within the last ten minutes raises the `ip-flapping` warning, once for the stream and once for the WireGuard endpoint. A laptop moving between home Wi-Fi and a phone hotspot, or between two offices, does this routinely with a single copy of its credentials; it is expected, not a sign of theft. `wgft agent warnings` lists it in this form:
 
 ```
-AGENT  KIND         DETAIL                                                        AT
-home   ip-flapping  stream source alternated between 198.51.100.7 and 203.0.113.9  2026-01-01T09:00:00+09:00
-home   ip-flapping  wg endpoint alternated between 198.51.100.7 and 203.0.113.9    2026-01-01T09:00:05+09:00
+AGENT   KIND         DETAIL                                                         AT
+laptop  ip-flapping  stream source alternated between 198.51.100.7 and 203.0.113.9  2026-01-01T09:00:00+09:00
+laptop  ip-flapping  wg endpoint alternated between 198.51.100.7 and 203.0.113.9    2026-01-01T09:00:05+09:00
 ```
 
-For an agent known to roam like this, dismiss each warning:
+For an agent known to roam like this, dismiss the warnings. Without a detail argument the command removes every `ip-flapping` warning of that agent:
 
 ```sh
-sudo wgft agent dismiss-warning home ip-flapping
+sudo wgft agent dismiss-warning laptop ip-flapping
 ```
 
 An `ip-flapping` warning on an agent that does not move is the case to take seriously; see `wgft agent warnings --help` for what to do next.

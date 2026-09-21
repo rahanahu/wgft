@@ -318,21 +318,21 @@ printf 'WGFT_AGENT_ALLOW_TARGETS=192.168.1.20:25565,192.168.1.21:2456-2458\n' | 
 
 ### ローミングと ip-flapping の警告
 
-エージェントを動かすホストがネットワークを移動し、直近 10 分以内に使ったネットワークへ戻ると `ip-flapping` の警告が出ます。stream 側と WireGuard のエンドポイント側でそれぞれ 1 件です。自宅の Wi-Fi と携帯回線のテザリングの間を移動するノート PC や、2 つの事業所の間を移動する運用では、認証情報が 1 部のままでもこれが日常的に起こります。窃取の兆候ではなく、想定内の挙動です。`wgft agent warnings` は次の形で表示します。
+エージェントを動かすホストがネットワークを移動し、直近 10 分以内に使ったネットワークへ戻ると `ip-flapping` の警告が出ます。stream 側と WireGuard のエンドポイント側でそれぞれ 1 件です。自宅の Wi-Fi と携帯回線のテザリングの間を移動するノート PC や、2 つの事業所の間を移動する運用では、認証情報が 1 部のままでもこれが日常的に起こります。この場合の警告は、窃取の兆候ではありません。`wgft agent warnings` は次の形で表示します。
 
 ```
-AGENT  KIND         DETAIL                                                        AT
-home   ip-flapping  stream source alternated between 198.51.100.7 and 203.0.113.9  2026-01-01T09:00:00+09:00
-home   ip-flapping  wg endpoint alternated between 198.51.100.7 and 203.0.113.9    2026-01-01T09:00:05+09:00
+AGENT   KIND         DETAIL                                                         AT
+laptop  ip-flapping  stream source alternated between 198.51.100.7 and 203.0.113.9  2026-01-01T09:00:00+09:00
+laptop  ip-flapping  wg endpoint alternated between 198.51.100.7 and 203.0.113.9    2026-01-01T09:00:05+09:00
 ```
 
-このようにローミングすると分かっているエージェントでは、それぞれの警告を削除します。
+ローミングすると分かっているエージェントでは、警告を削除します。詳細の引数を付けなければ、そのエージェントの `ip-flapping` の警告をすべて削除します。
 
 ```sh
-sudo wgft agent dismiss-warning home ip-flapping
+sudo wgft agent dismiss-warning laptop ip-flapping
 ```
 
-移動しないエージェントでの `ip-flapping` は重く受け止める対象です。次に行うことは `wgft agent warnings --help` を参照してください。
+移動しないエージェントに `ip-flapping` が出た場合は、鍵か恒久トークンの複製を疑います。対応は `wgft agent warnings --help` にあります。
 
 ## 4. 転送ルールを追加する
 
