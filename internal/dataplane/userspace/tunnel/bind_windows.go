@@ -8,8 +8,11 @@ import "golang.zx2c4.com/wireguard/conn"
 // WinRingBind)を避け、conn.NewStdNetBind() を明示して使う。
 //
 // WinRingBind は Winsock のソケットを自前で開き、SIO_UDP_CONNRESET を無効にしない。
-// このため、到達できない宛先へ送った UDP に対する ICMP port unreachable の通知を、
-// Windows は次の受信で WSAECONNRESET として返す。この誤りは net.Error として
+// このため、到達できない宛先へ送った UDP に対して Windows 自身のスタックが生成する
+// ICMP port unreachable(TTL 128)では、次の受信が WSAECONNRESET になることを
+// 確認した。経路上を伝わる ICMP(WSL2 ゲストの Linux カーネル発、LAN 上の別ホスト発)
+// では、この現象は一度も現れなかった。実サーバーへの実運用でも経路上を伝わる ICMP が
+// 同じく WSAECONNRESET を起こすかどうかは未確認である。この誤りは net.Error として
 // Temporary()=false になり、wireguard-go の device.RoutineReceiveIncoming は
 // net.ErrClosed 以外の非一時的な誤りを回復不能と判定して受信ループをそのまま
 // 終える。以後そのトンネルはプロセスを再起動するまで一切受信できなくなる
