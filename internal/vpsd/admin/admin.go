@@ -229,6 +229,7 @@ func New(backend Backend) *Server {
 	s.mux.HandleFunc("GET /api/v1/agents/{name}/state", s.getAgentState)
 	s.mux.HandleFunc("GET /api/v1/nft", s.getNFT)
 	s.mux.HandleFunc("POST /api/v1/rules/{id}/check", s.postCheck)
+	s.mux.HandleFunc("GET /api/v1/server", s.getServerInfo)
 	s.registerUI()
 	return s
 }
@@ -454,6 +455,17 @@ func (s *Server) getNFT(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write(out)
+}
+
+// getServerInfo は vpsd/VPS の構成と環境を返す(ダッシュボード上部に加え、`rule add`/`rule set`
+// `--dry-run` が予約ポートを組み立てる元にする。design.md 11a 節)。
+func (s *Server) getServerInfo(w http.ResponseWriter, r *http.Request) {
+	info, err := s.backend.ServerInfo()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 // Serve は addr で待ち受け、そのまま応答を続ける(Listen と ServeListener を続けて呼ぶ)。

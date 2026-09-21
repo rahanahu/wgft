@@ -183,9 +183,6 @@ func newServerCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "server",
 		Short: "VPS-side daemon; start it with server run",
-		Long: `VPS-side daemon. Converges wg to the declared state, applies the SQLite rules to nftables, and listens on the admin API.
-Config is passed via WGFT_* environment variables (or their dotenv, or flags). The admin API has no password and by default
-listens on a Unix socket (root-owned 0600).`,
 	}
 
 	run := &cobra.Command{

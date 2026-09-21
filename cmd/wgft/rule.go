@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -75,13 +76,12 @@ func newRuleAddCmd() *cobra.Command {
 		group, note         string
 		proxy, proxyProto   bool
 		force, disabled     bool
+		dryRun              bool
 	)
 	add := &cobra.Command{
 		Use:   "add",
 		Short: "Add a rule",
-		Example: `  wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456
-  wgft rule add --agent home --tcp 443 --to 192.168.1.30:443 --proxy --proxy-protocol`,
-		Args: cobra.NoArgs,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if (udp == "") == (tcp == "") {
 				return fmt.Errorf("specify exactly one of --udp or --tcp")
@@ -113,6 +113,9 @@ func newRuleAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if dryRun {
+				return runRuleDryRun(c, []proto.Rule{r})
+			}
 			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{r}, Force: force, Op: "cli rule add"})
 			if err != nil {
 				return err
@@ -131,6 +134,7 @@ func newRuleAddCmd() *cobra.Command {
 	add.Flags().BoolVar(&proxyProto, "proxy-protocol", false, "add a PROXY protocol v2 header; use with --proxy")
 	add.Flags().BoolVar(&force, "force", false, "ignore conflicts with ports already bound on the VPS")
 	add.Flags().BoolVar(&disabled, "disabled", false, "add in a disabled state")
+	add.Flags().BoolVar(&dryRun, "dry-run", false, "check the rule and print what would change, without saving it")
 	_ = add.MarkFlagRequired("agent")
 	_ = add.MarkFlagRequired("to")
 	return add
@@ -481,6 +485,7 @@ func newRuleRateCmd() *cobra.Command {
 // newRuleSetCmd は `rule set`。group と note だけを ID そのままで変える(仕様 10.2 節)。
 func newRuleSetCmd() *cobra.Command {
 	var setGroup, setNote string
+	var dryRun bool
 	set := &cobra.Command{
 		Use:   "set <id>",
 		Short: "Change only an existing rule's group / note; ID stays, no effect on forwarding",
@@ -495,6 +500,19 @@ func newRuleSetCmd() *cobra.Command {
 			}
 			r, err := findRule(c, args[0])
 			if err != nil {
+				// findRule reads GET /api/v1/rules itself, ahead of runRuleDryRun's own reads;
+				// without this, a --dry-run whose admin API cannot be reached at all exited 1
+				// or 2 depending on which of the two GET /api/v1/rules calls happened to fail
+				// first (findRule's or runRuleDryRun's), while docs/design.md 11a 節,
+				// helptext.go and every other --dry-run failure promise 2 (unavailable). "no
+				// matching rule" and "matches multiple rules" are not an availability problem,
+				// so only the wrapped case (findRule's own read failing) is converted here;
+				// rule rm/enable/disable and rule set without --dry-run are untouched and keep
+				// exit 1 for all three cases, as before.
+				var un *rulesUnreachableError
+				if dryRun && errors.As(err, &un) {
+					return unavailable(un.err)
+				}
 				return err
 			}
 			if cmd.Flags().Changed("group") {
@@ -505,6 +523,9 @@ func newRuleSetCmd() *cobra.Command {
 			}
 			if err := r.Validate(); err != nil {
 				return err
+			}
+			if dryRun {
+				return runRuleDryRun(c, []proto.Rule{*r})
 			}
 			res, err := c.Batch(admin.BatchRequest{Upsert: []proto.Rule{*r}, Op: "cli rule set"})
 			if err != nil {
@@ -520,7 +541,189 @@ func newRuleSetCmd() *cobra.Command {
 	}
 	set.Flags().StringVar(&setGroup, "group", "", `group ("" to clear)`)
 	set.Flags().StringVar(&setNote, "note", "", `note ("" to clear)`)
+	set.Flags().BoolVar(&dryRun, "dry-run", false, "check the change and print what would change, without saving it")
 	return set
+}
+
+// runRuleDryRun implements --dry-run for `rule add` and `rule set` (design.md 11a 節): it
+// matches, as far as the admin API lets it observe, the admission judgment a real Batch makes
+// before saving, and never calls Batch itself. It reads the server's own reserved ports from
+// GET /api/v1/server (via reservedFromServerInfo), the current rules, and the registered
+// agents, computes the issues the same way ruleDryRunIssues does, prints the non-unchanged rows
+// of the diff and the issues found (if any), and returns a non-nil error only when there are
+// issues, so the exit code is 1 exactly when this change would not be accepted.
+//
+// If any of these three reads fails -- including an admin API too old to have
+// GET /api/v1/server -- this returns exit code 2 (unavailable) rather than falling back to no
+// reserved ports: "whether this change would be accepted could not be determined" must not be
+// confused with "it would be accepted." Continuing with an empty reserved set is exactly the
+// defect an independent review found (proto.ValidateUpsert's reserved argument was nil here,
+// so a rule overlapping the VPS's own WireGuard, admin API, or agent API port printed "accepted"
+// and was then refused by the real Batch that store.ApplyBatch runs). rule add/rule set without
+// --dry-run never call GET /api/v1/server, so they are unaffected.
+//
+// It does not try to reach any rule's target, does not check for a port already bound by
+// another process on the VPS, and does not check for a DNAT some other nftables table has
+// installed on the port (e.g. by Docker, which is refused even with --force): the former is
+// "wgft server doctor <rule>"'s job, and the latter two need root and nft, which are not
+// reachable through the admin API this command talks to.
+func runRuleDryRun(c *admin.Client, upsert []proto.Rule) error {
+	info, err := c.ServerInfo()
+	if err != nil {
+		return unavailable(fmt.Errorf("reading server info: %w", err))
+	}
+	current, err := c.Rules()
+	if err != nil {
+		return unavailable(fmt.Errorf("reading rules: %w", err))
+	}
+	agentList, err := c.Agents()
+	if err != nil {
+		return unavailable(fmt.Errorf("reading agents: %w", err))
+	}
+	agents := make(map[string]bool, len(agentList))
+	for _, a := range agentList {
+		agents[a.Name] = true
+	}
+	desired, _ := admin.ApplyBatchToRules(current.Rules, admin.BatchRequest{Upsert: upsert})
+
+	fmt.Println("dry-run: changes if this were applied:")
+	printed := false
+	for _, chg := range proto.DiffRules(current.Rules, desired) {
+		if chg.Kind == proto.ChangeUnchanged {
+			continue
+		}
+		printed = true
+		fmt.Printf("  %s %s\n", dryRunChangeSymbol(chg.Kind), dryRunRuleSummary(chg.Rule))
+		for _, fc := range chg.FieldChanges {
+			fmt.Printf("      %s: %q -> %q\n", fc.Field, fc.Old, fc.New)
+		}
+	}
+	if !printed {
+		fmt.Println("  (no changes)")
+	}
+
+	issues := ruleDryRunIssues(upsert, current.Rules, agents, reservedFromServerInfo(info))
+	if len(issues) > 0 {
+		fmt.Println("dry-run: issues found; nothing was saved:")
+		for _, msg := range issues {
+			fmt.Printf("  %s\n", msg)
+		}
+		return fmt.Errorf("dry-run found %d issue(s)", len(issues))
+	}
+	fmt.Println("dry-run: no issues found; this change would likely be accepted. Nothing was saved.")
+	return nil
+}
+
+// reservedFromServerInfo builds the proto.Reserved set a real Batch would refuse a listen_port
+// for, from GET /api/v1/server's report of the server's own ports. It mirrors, field for field,
+// how internal/vpsd/vpsd.go builds Daemon.reserved at startup (around opts.WGPort/AdminAddr/
+// AgentAPIAddr): the WireGuard port is always reserved; the admin API's port is reserved only
+// when AdminAddr parses as host:port (a Unix socket, e.g. the default "unix:///run/wgft/
+// admin.sock", does not reserve a port); the agent API's port comes from AgentAPIPort, which
+// ServerInfo already returns net.SplitHostPort'd (an empty or unparseable value reserves
+// nothing for it, the same as a net.SplitHostPort failure in vpsd.go).
+func reservedFromServerInfo(info *admin.ServerInfo) proto.Reserved {
+	reserved := proto.Reserved{uint16(info.WGPort): "WireGuard"}
+	if ap, err := netip.ParseAddrPort(info.AdminAddr); err == nil {
+		reserved[ap.Port()] = "admin API"
+	}
+	if ap, err := netip.ParseAddrPort("0.0.0.0:" + info.AgentAPIPort); err == nil {
+		reserved[ap.Port()] = "agent API"
+	}
+	return reserved
+}
+
+// ruleDryRunIssues collects the reasons a dry run would refuse upsert. A row's own shape
+// (proto.Rule.Validate) is not checked here: both callers of runRuleDryRun (`rule add` and
+// `rule set`'s RunE, cmd/wgft/rule.go) already run it and return early on failure before ever
+// calling runRuleDryRun, so a re-check here could never fail and would only mislead a reader of
+// this function into thinking shape errors are caught at this point. Per row of upsert, it
+// checks the agent's registration against the names GET /api/v1/agents returns, matching what
+// Daemon.Batch itself checks per row of req.Upsert (internal/vpsd/admin_backend.go). Only if
+// every row passes does it check the merged set (current with upsert applied, via the exported
+// admin.ApplyBatchToRules, the same helper the fake and demo Backends use to build that set) for
+// ID duplicates, reserved ports, and listen_port overlaps with proto.ValidateUpsert, matching
+// what store.ApplyBatch validates before saving (internal/vpsd/store/rules.go). reserved must be
+// built from the same GET /api/v1/server response this dry run just read
+// (reservedFromServerInfo); passing nil here was the defect an independent review found.
+func ruleDryRunIssues(upsert, current []proto.Rule, agents map[string]bool, reserved proto.Reserved) []string {
+	var out []string
+	for _, r := range upsert {
+		if !agents[r.Agent] {
+			out = append(out, fmt.Sprintf("%s: agent %q is not registered", dryRunRuleLabel(r, current), r.Agent))
+		}
+	}
+	if len(out) == 0 {
+		desired, _ := admin.ApplyBatchToRules(current, admin.BatchRequest{Upsert: upsert})
+		if err := proto.ValidateUpsert(desired, current, reserved); err != nil {
+			out = append(out, redactThrowawayRuleIDs(err.Error(), upsert, current))
+		}
+	}
+	return out
+}
+
+// ruleIsNew reports whether r is a row "rule add" is about to create with a throwaway ID this
+// invocation just made up, as opposed to a row already saved under that ID (current has it,
+// always true for every row "rule set" passes, which only ever edits an existing rule).
+func ruleIsNew(r proto.Rule, current []proto.Rule) bool {
+	for _, c := range current {
+		if c.ID == r.ID {
+			return false
+		}
+	}
+	return true
+}
+
+// dryRunRuleLabel identifies a rule in a --dry-run issue message. A row not yet in current is
+// being added with a throwaway ID: newRuleID() gives every invocation, including a --dry-run
+// one, a fresh ULID, so the ID on this upsert row is never the ID the row gets once an actual
+// "rule add" saves it. Printing that disposable ID would name a rule that will never exist, so
+// such a row is identified by its summary instead. A row already in current (always true for
+// "rule set", which edits an existing rule) is identified by its real, saved ID.
+func dryRunRuleLabel(r proto.Rule, current []proto.Rule) string {
+	if ruleIsNew(r, current) {
+		return "new rule (" + dryRunRuleSummary(r) + ")"
+	}
+	return "rule " + short(r.ID)
+}
+
+// redactThrowawayRuleIDs replaces, in msg, every upsert row's throwaway ID with the same label
+// dryRunRuleLabel gives that row. msg is an error string proto.ValidateUpsert returned
+// (proto/rule.go's validateRuleSet): a reserved-port collision, an ID duplicate or a listen_port
+// overlap all embed the offending row's ID verbatim ("rule %s: ...", "rule ID %s is duplicated",
+// "rule %s %s/%s overlaps rule %s %s"), with no way for proto to know that, for a brand new row
+// upsert holds only for this one dry run, that ID is disposable: dryRunRuleLabel's own doc comment
+// explains why printing it would name a rule that will never exist. A row already in current keeps
+// its real, saved ID untouched (never disposable, so never replaced). This is the fix for the
+// defect an independent review found: only the "agent not registered" issue used dryRunRuleLabel;
+// the reserved-port, duplicate-ID and listen_port-overlap issues, which come from
+// proto.ValidateUpsert instead, printed the raw throwaway ID.
+func redactThrowawayRuleIDs(msg string, upsert, current []proto.Rule) string {
+	for _, r := range upsert {
+		if ruleIsNew(r, current) {
+			msg = strings.ReplaceAll(msg, r.ID, dryRunRuleLabel(r, current))
+		}
+	}
+	return msg
+}
+
+// dryRunChangeSymbol is runRuleDryRun's display symbol for a proto.RuleChange.Kind.
+func dryRunChangeSymbol(k proto.ChangeKind) string {
+	switch k {
+	case proto.ChangeAdded:
+		return "+"
+	case proto.ChangeChanged:
+		return "~"
+	case proto.ChangeDeleted:
+		return "-"
+	default:
+		return " "
+	}
+}
+
+// dryRunRuleSummary is runRuleDryRun's one-line description of a rule.
+func dryRunRuleSummary(r proto.Rule) string {
+	return fmt.Sprintf("%s %s -> %s %s", strings.ToUpper(string(r.Proto)), r.ListenPort.String(), r.Agent, r.TargetDisplay())
 }
 
 // short はルール ID を短く表示する(先頭 12 文字)。findRule が前方一致で受けるので選択には困らない。
@@ -598,11 +801,22 @@ func flowBudgetLine(budget map[proto.Proto]admin.FlowBudget) string {
 	return "flow budget: " + strings.Join(parts, ", ")
 }
 
+// rulesUnreachableError marks that findRule's own call to GET /api/v1/rules failed, as opposed to
+// that call succeeding and no rule matching id. Its Error() text is unchanged from the wrapped
+// error, so rule rm/enable/disable and rule set without --dry-run, which all just "return err"
+// unchanged, keep exit code 1 for every findRule failure exactly as before (exitCode only special-
+// cases *unavailableError and startup.Refusal); only rule set --dry-run looks for this type, to
+// give findRule's own read the same exit code 2 as runRuleDryRun's reads.
+type rulesUnreachableError struct{ err error }
+
+func (e *rulesUnreachableError) Error() string { return e.err.Error() }
+func (e *rulesUnreachableError) Unwrap() error { return e.err }
+
 // findRule は ID の完全一致か、前方一致が 1 つだけのルールを返す。
 func findRule(c *admin.Client, id string) (*proto.Rule, error) {
 	res, err := c.Rules()
 	if err != nil {
-		return nil, err
+		return nil, &rulesUnreachableError{err: err}
 	}
 	var matches []proto.Rule
 	for _, r := range res.Rules {

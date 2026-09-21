@@ -168,3 +168,11 @@ func (c *Client) NFT() (string, error) {
 	var out string
 	return out, c.do("GET", "/api/v1/nft", nil, &out)
 }
+
+// ServerInfo は vpsd/VPS の構成と環境を取る(仕様 10.1 節)。`rule add`/`rule set` の
+// `--dry-run` はこれを使って proto.Reserved を組み立て、実際の Batch が拒む予約ポートと
+// 同じ判定にする(design.md 11a 節)。
+func (c *Client) ServerInfo() (*ServerInfo, error) {
+	var out ServerInfo
+	return &out, c.do("GET", "/api/v1/server", nil, &out)
+}

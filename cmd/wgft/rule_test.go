@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,18 +20,74 @@ import (
 // 確かめる。fakeRuleBackend は internal/vpsd/admin の fakeBackend(その package の内部専用)
 // を cmd/wgft から使えないので同じ形で持つ最小限の Backend 実装である。
 
-type fakeRuleBackend struct{ st *store.Store }
+type fakeRuleBackend struct {
+	st *store.Store
+	// agentNames は Agents() が返す登録済みエージェントの名前(design.md 11a 節の
+	// `rule add`/`rule set --dry-run` のテスト用)。未設定(nil)なら旧来どおり Agents() は
+	// 空を返す。batchCalls は Batch が実際に呼ばれた回数で、--dry-run がそれを 1 度も
+	// 呼ばないことをテストで確かめるために数える。rulesCalls・agentsCalls・serverInfoCalls は
+	// 同じ理由で GET /api/v1/rules・/api/v1/agents・/api/v1/server それぞれの呼び出し回数を
+	// 数える(行の形の誤りが admin API に一度も触れずに失敗することを確かめる
+	// TestRuleAddDryRunShapeErrorNeverReachesAdminAPI 用)。
+	agentNames                                           []string
+	batchCalls, rulesCalls, agentsCalls, serverInfoCalls int
+	// serverInfo is what ServerInfo() returns to a `--dry-run` building its reserved-port set
+	// (design.md 11a 節, reservedFromServerInfo). Batch derives its own proto.Reserved from this
+	// same value, via reservedPortsLikeVPSD below rather than reservedFromServerInfo, so a test
+	// that sets serverInfo and then runs both a --dry-run and a real add against the same
+	// fixture actually cross-checks two independent implementations instead of one comparing
+	// itself to itself (see reservedPortsLikeVPSD's own comment). Zero value reserves nothing
+	// (WGPort 0, empty AdminAddr/AgentAPIPort), matching prior behavior for tests that do not
+	// care about reserved ports.
+	serverInfo admin.ServerInfo
+}
 
-func (b *fakeRuleBackend) Rules() ([]proto.Rule, error) { return b.st.Rules() }
-func (b *fakeRuleBackend) Generation() (uint64, error)  { return b.st.Generation() }
+func (b *fakeRuleBackend) Rules() ([]proto.Rule, error) {
+	b.rulesCalls++
+	return b.st.Rules()
+}
+func (b *fakeRuleBackend) Generation() (uint64, error) { return b.st.Generation() }
 func (b *fakeRuleBackend) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
-	return b.st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+	b.batchCalls++
+	reserved := reservedPortsLikeVPSD(b.serverInfo)
+	return b.st.ApplyBatch(reserved, func(rules []proto.Rule) ([]proto.Rule, error) {
 		return admin.ApplyBatchToRules(rules, req)
 	})
 }
+
+// reservedPortsLikeVPSD builds the proto.Reserved set a real Batch would refuse a listen_port
+// for, the same way fakeRuleBackend.Batch needs it for a test. It is written independently of
+// cmd/wgft/rule.go's reservedFromServerInfo, as a separate copy of internal/vpsd/vpsd.go's
+// construction of Daemon.reserved (around opts.WGPort/AdminAddr/AgentAPIAddr) instead of a call
+// to that function: a test that runs both a --dry-run (which calls reservedFromServerInfo) and a
+// real add (which, through this function, calls neither reservedFromServerInfo nor vpsd.go) and
+// then compares the two outcomes only actually cross-checks reservedFromServerInfo against
+// vpsd.go's rule when the two are implemented separately. Calling reservedFromServerInfo here, as
+// this test double once did, would make such a test pass even if reservedFromServerInfo's rule
+// silently drifted from vpsd.go's, since both sides would apply the same (wrong) rule.
+func reservedPortsLikeVPSD(info admin.ServerInfo) proto.Reserved {
+	reserved := proto.Reserved{uint16(info.WGPort): "WireGuard"}
+	if ap, err := netip.ParseAddrPort(info.AdminAddr); err == nil {
+		reserved[ap.Port()] = "admin API"
+	}
+	if ap, err := netip.ParseAddrPort("0.0.0.0:" + info.AgentAPIPort); err == nil {
+		reserved[ap.Port()] = "agent API"
+	}
+	return reserved
+}
 func (b *fakeRuleBackend) AgentState(string) (*proto.State, error) { return &proto.State{}, nil }
-func (b *fakeRuleBackend) Agents() ([]admin.AgentInfo, error)      { return nil, nil }
-func (b *fakeRuleBackend) RuleDrops() (map[string]uint64, error)   { return nil, nil }
+func (b *fakeRuleBackend) Agents() ([]admin.AgentInfo, error) {
+	b.agentsCalls++
+	if b.agentNames == nil {
+		return nil, nil
+	}
+	out := make([]admin.AgentInfo, len(b.agentNames))
+	for i, n := range b.agentNames {
+		out[i] = admin.AgentInfo{Name: n}
+	}
+	return out, nil
+}
+func (b *fakeRuleBackend) RuleDrops() (map[string]uint64, error) { return nil, nil }
 func (b *fakeRuleBackend) JoinString(string) (admin.JoinStringResponse, error) {
 	return admin.JoinStringResponse{}, nil
 }
@@ -42,20 +99,33 @@ func (b *fakeRuleBackend) DismissWarning(string, string, string) error { return 
 func (b *fakeRuleBackend) CheckConnectivity(string) (admin.ConnCheck, error) {
 	return admin.ConnCheck{}, nil
 }
-func (b *fakeRuleBackend) ServerInfo() (admin.ServerInfo, error) { return admin.ServerInfo{}, nil }
+func (b *fakeRuleBackend) ServerInfo() (admin.ServerInfo, error) {
+	b.serverInfoCalls++
+	return b.serverInfo, nil
+}
 
 // newRuleCLITestServer は空のルール集合を持つ管理 API サーバーを立て、CLI が --admin に
 // 渡す URL(http://127.0.0.1:port)を返す。
 func newRuleCLITestServer(t *testing.T) (adminURL string, st *store.Store) {
+	t.Helper()
+	url, st, _ := newRuleCLITestServerWithAgents(t)
+	return url, st
+}
+
+// newRuleCLITestServerWithAgents is newRuleCLITestServer plus the backend itself, so a test
+// can register agents (design.md 11a 節: rule add/set --dry-run checks GET /api/v1/agents) and
+// later read batchCalls to confirm --dry-run never calls Batch.
+func newRuleCLITestServerWithAgents(t *testing.T, agents ...string) (adminURL string, st *store.Store, backend *fakeRuleBackend) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	srv := httptest.NewServer(admin.New(&fakeRuleBackend{st: st}))
+	backend = &fakeRuleBackend{st: st, agentNames: agents}
+	srv := httptest.NewServer(admin.New(backend))
 	t.Cleanup(srv.Close)
-	return srv.URL, st
+	return srv.URL, st, backend
 }
 
 // runRuleCmd は `wgft rule ...` を実行し、標準出力・標準エラーを文字列として返す。
