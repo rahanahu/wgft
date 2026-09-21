@@ -188,6 +188,8 @@ $env:WGFT_JOIN = '<join string>'
 .\wgft.exe agent run
 ```
 
+Explorer で .exe をダブルクリックすると、PowerShell から実行するよう促す文章を表示し、Return キーを押すまでウィンドウを閉じずに待ちます。
+
 join string は `#` を含むため、PowerShell では単一引用符で囲みます。初回登録に成功すると `%ProgramData%\wgft\agent.json` が作成されます。既定のこの場所は管理者権限を必要としません。2 回目以降は次だけで起動できます。
 
 ```powershell
