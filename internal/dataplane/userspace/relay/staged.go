@@ -141,6 +141,20 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 	}
 	s.done = true
 	m := s.m
+	// 新しく開く TCP の待ち受けの到達確認は、錠を取る前にまとめて行う(設計文書 5.2 節)。錠を持った
+	// まま 1 つずつ確認すると、黙ってパケットを捨てる target が 1 つあるだけで中継が止まる。Commit は
+	// 戻れない地点の後なので、確認の結果は状態として載せるだけであり、待ち受けは結果によらず開く。
+	var probes []targetProbe
+	for k := range s.opened {
+		if k.Proto == proto.TCP {
+			probes = append(probes, targetProbe{key: k, target: s.desired[k].Target})
+		}
+	}
+	m.runProbes(probes)
+	probed := make(map[Key]error, len(probes))
+	for i := range probes {
+		probed[probes[i].key] = probes[i].err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Retiring から宣言に戻った UDP の待ち受けは、ソケットを持ち続けているのでそのまま戻す
@@ -189,11 +203,9 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 			m.opts.Logf("listener %s: opened after %d failed attempts", k, f.attempts)
 			delete(m.bindFail, k)
 		}
-		if k.Proto == proto.TCP {
-			if err := m.checkTarget(d.Target); err != nil {
-				setTargetErrLocked(l, err)
-				m.opts.Logf("listener %s: cannot connect to target %s: %v", k, d.Target, err)
-			}
+		if err := probed[k]; err != nil {
+			setTargetErrLocked(l, err)
+			m.opts.Logf("listener %s: cannot connect to target %s: %v", k, d.Target, err)
 		}
 	}
 	// 以前から Retiring の待ち受けは、そのルールがまだ Retiring のあいだだけ残す。ルールが削除、
