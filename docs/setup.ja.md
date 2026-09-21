@@ -172,7 +172,15 @@ wgft agent run --data-dir ~/.wgft
 
 ### Windows で agent を実行する
 
-[Releases ページ](https://github.com/rahanahu/wgft/releases) から `wgft-windows-amd64.exe` を取得します。ファイルを保存したフォルダで PowerShell を開きます。例えば Downloads フォルダです。次を実行します。
+[Releases ページ](https://github.com/rahanahu/wgft/releases) から `wgft-windows-amd64.exe` と `wgft-windows-amd64.exe.sha256` を取得します。ファイルを保存したフォルダで PowerShell を開きます。例えば Downloads フォルダです。次のコマンドでダウンロードを検証します。
+
+```powershell
+if ((Get-FileHash -Algorithm SHA256 .\wgft-windows-amd64.exe).Hash -ne (Get-Content .\wgft-windows-amd64.exe.sha256).Split(' ')[0]) {
+    throw "SHA256 mismatch"
+}
+```
+
+一致すれば何も表示されず、そのまま次に進めます。一致しなければ例外を投げてスクリプトを止めるため、ハッシュが合わないバイナリをそのまま実行することを防げます。`Get-FileHash` はハッシュを大文字で返し、公開されている `.sha256` ファイルは小文字であるため、PowerShell の `-ne` が大文字と小文字を区別せずに比較する点が重要です。続けて次を実行します。
 
 ```powershell
 Rename-Item wgft-windows-amd64.exe wgft.exe
