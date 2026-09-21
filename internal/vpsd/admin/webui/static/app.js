@@ -3,23 +3,75 @@
 (function () {
   "use strict";
   function refresh(el) {
+    // #rules は差し替えのたびにグループの折りたたみ state と group-toggle の click
+    // listener を失う（querySelectorAll で一度だけ束縛しているため）ので、差し替えの前後で
+    // 折りたたみ state を保存・復元し、listener を束縛し直す。他の要素（#warnings、#agents、
+    // #health）は差し替えても壊れる state を持たない。
+    var isRules = el.id === "rules";
+    var collapsed = isRules ? collapsedGroupNames() : null;
     fetch(el.dataset.refresh, { headers: { "X-Partial": "1" } })
       .then(function (r) { return r.ok ? r.text() : null; })
-      .then(function (html) { if (html !== null) el.innerHTML = html; })
+      .then(function (html) {
+        if (html === null) return;
+        el.innerHTML = html;
+        syncToggle(el);
+        if (isRules) {
+          initRuleGroups();
+          restoreCollapsedGroups(collapsed);
+        }
+      })
       .catch(function () { /* 一時的な失敗は無視して次の周期で再試行 */ });
+  }
+  // collapsedGroupNames/restoreCollapsedGroups: グループの折りたたみは group-name の表示名を
+  // 手掛かりに保つ（data-group はグループの並び順で振った通し番号なので、部分更新の間に
+  // グループの追加・削除で並びが変わると同じ番号が別のグループを指しうる）。
+  function collapsedGroupNames() {
+    var names = {};
+    document.querySelectorAll("#rules .group-row").forEach(function (row) {
+      var btn = row.querySelector(".group-toggle");
+      var label = row.querySelector(".group-name");
+      if (btn && label && btn.getAttribute("aria-expanded") === "false") {
+        names[label.textContent] = true;
+      }
+    });
+    return names;
+  }
+  function restoreCollapsedGroups(names) {
+    if (!names) return;
+    document.querySelectorAll("#rules .group-row").forEach(function (row) {
+      var btn = row.querySelector(".group-toggle");
+      var label = row.querySelector(".group-name");
+      if (!btn || !label || !names[label.textContent]) return;
+      btn.setAttribute("aria-expanded", "false");
+      btn.textContent = "▸";
+      var g = btn.dataset.group;
+      document.querySelectorAll('.rule-row[data-group="' + g + '"]').forEach(function (r) {
+        r.hidden = true;
+      });
+    });
+  }
+  // syncToggle は、部分更新で作り直された切り替えのボタンに今の状態を描き直す。
+  function syncToggle(el) {
+    var t = el.querySelector && el.querySelector("#autorefresh-toggle");
+    if (!t) return;
+    var off = document.body.dataset.autorefresh === "off";
+    t.classList.toggle("off", off);
+    t.setAttribute("aria-pressed", String(!off));
   }
   function start() {
     var targets = document.querySelectorAll("[data-refresh]");
     if (!targets.length) return;
     var enabled = true;
-    var toggle = document.getElementById("autorefresh-toggle");
-    if (toggle) {
-      toggle.addEventListener("click", function () {
-        enabled = !enabled;
-        toggle.classList.toggle("off", !enabled);
-        toggle.setAttribute("aria-pressed", String(enabled));
-      });
-    }
+    // 切り替えのボタンは #agents の中にあり、その部分更新で作り直される。要素に直接束縛すると
+    // 最初の差し替えで listener を失うので、document から委譲し、差し替えの後の見た目も直す。
+    document.body.addEventListener("click", function (e) {
+      var toggle = e.target.closest && e.target.closest("#autorefresh-toggle");
+      if (!toggle) return;
+      enabled = !enabled;
+      document.body.dataset.autorefresh = enabled ? "on" : "off";
+      toggle.classList.toggle("off", !enabled);
+      toggle.setAttribute("aria-pressed", String(enabled));
+    });
     setInterval(function () {
       if (!enabled || document.hidden) return;
       targets.forEach(refresh);

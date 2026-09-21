@@ -63,7 +63,7 @@ func TestDashboardReadFailureIsNotSilentZero(t *testing.T) {
 			srv := httptest.NewServer(New(c.backend(&fakeBackend{st: st})))
 			defer srv.Close()
 
-			for _, path := range []string{"/", "/ui/agents", "/ui/warnings"} {
+			for _, path := range []string{"/", "/ui/agents", "/ui/warnings", "/ui/rules", "/ui/health"} {
 				resp, err := http.Get(srv.URL + path)
 				if err != nil {
 					t.Fatal(err)
