@@ -206,7 +206,7 @@ Sandbox 1 つだけを扱う手作業の道具なので、ロックを取りま�
 |---|---|---|
 | `parallel` | 他の Sandbox と同時に流せます。触るものが自分の namespace と自分の作業ディレクトリの中に閉じます | `e2e.sh`、`ipv6.sh`、`split-merge.sh`、`import-export.sh`、`connlimit.sh`、`version-skew.sh`、`lifecycle.sh` の check 1 2 3 3b 4 5c 5d 6 7 8 9 |
 | `exclusive-heavy` | Lab Host VM の中で単独で流します。主張の根拠になる値そのものが、メモリか到達頻度の測定値です | `lifecycle.sh` の check 5、5b、5e、`rates.sh` |
-| `exclusive-timing` | Lab Host VM の中で単独で流します。壁時計の窓の中で何が起きないかを主張するので、その窓が始まる前に収束を確認できないと、同じ VM を分け合ったときに失敗します | 該当する確認は今はありません |
+| `exclusive-timing` | Lab Host VM の中で単独で流します。壁時計で測る区間の中で何が起きないかを主張するので、その区間が始まる前に収束を確認できないと、同じ VM を分け合ったときに失敗します | 該当する確認は今はありません |
 | `exclusive-global` | Lab Host VM の中で単独で流します。network namespace が隔てない値を変えます | 該当する確認は今はありません |
 
 `lifecycle.sh` の check 5c と check 5d は、主張の根拠が到達頻度でもメモリでもなく、ルールごとの受け付けの判定です。8 つの Sandbox のプールの中で、しかも 5c と 5d が同時に流れる状態で、20 回ずつ流して 160 件のすべてが成功し、保持数も毎回同じでした。この測定により、分類は `parallel` です。
@@ -223,13 +223,13 @@ budget を持ちます。実際の待ちは、単独で流したときも、8 �
 `exclusive-heavy` の確認を隣で流したときも 24 秒から 25 秒で、並列で延びませんでした。
 余裕は約 20 秒あるので、check 8 の分類は `parallel` です。
 
-check 9 はかつて `exclusive-timing` でした。check 9c は、何も変えていない 35 秒の窓の間に適用が
-1 度も記録されないことを主張しますが、窓に入る前には前段の flush と delete への応答で forwarding が
+check 9 はかつて `exclusive-timing` でした。check 9c は、何も変えていない 35 秒の区間の間に適用が
+1 度も記録されないことを主張しますが、区間に入る前には前段の flush と delete への応答で forwarding が
 戻ったことしか確認しておらず、それぞれの応答が残す "applied"/drift のログ行そのものは確認していませんでした。
-隣の Sandbox の負荷でそのログ行の書き込みが遅れると、窓の中に紛れ込み、無関係な apply に見えました
+隣の Sandbox の負荷でそのログ行の書き込みが遅れると、区間の中に紛れ込み、無関係な apply に見えました
 (実測は単独で 20 回中 20 回成功、8 並列のプールで 20 回中 17 回成功、一式の中で 20 回中 18 回成功で、
 失敗はいつも `no apply was logged in the window`)。[docs/testing.md](../docs/testing.md) の規範に
-従い、窓の基準値を取る前に、直前の 2 つの応答それぞれの "applied"/drift のログ行を実際に確認するよう
+従い、区間の基準値を取る前に、直前の 2 つの応答それぞれの "applied"/drift のログ行を実際に確認するよう
 直しました。直した後の実測は、単独で 20 回中 20 回成功、8 並列のプール (この 8 並列は本節の表にある
 `parallel` の確認一式を隣に置いた状態) で 20 回中 20 回成功だったので、分類を `parallel` に移しました。
 
