@@ -378,9 +378,9 @@ table inet wgft {
 
 `vpsd` はテーブルを組み立てながらバッチのメッセージ数と長さを数え、送る直前に、その大きさに合わせた送信側と受信側のバッファを要求する。受信側には 1 通ごとの ACK の分を上乗せする。要求する値の下限は 1 MiB、上限は 64 MiB である。`nft` コマンドも同じ手順を取り、バッチの長さと命令の数からバッファを決めてから 1 回の sendmsg で送る。
 
-要求は `SO_SNDBUFFORCE` と `SO_RCVBUFFORCE` で行い、権限が足りなければ `SO_SNDBUF` と `SO_RCVBUF` に落ちる。前者は init の user namespace での CAP_NET_ADMIN を必要とする。`deploy/server.service` はこの権限を与えるので、systemd から動かす VPS では要求が通る。user namespace を分けた非特権のコンテナは、自分の netns の nftables を操作できても FORCE の側は拒まれ、`SO_SNDBUF` と `SO_RCVBUF` に落ちる。落ちた配置では `net.core.rmem_max` と `net.core.wmem_max` の 2 倍が上限になり、壁は既定の 2 倍ほど遠のくだけで残る。上限の sysctl を上げれば、その分だけ遠のく。
+要求は `SO_SNDBUFFORCE` と `SO_RCVBUFFORCE` で行い、権限が足りなければ `SO_SNDBUF` と `SO_RCVBUF` に落ちる。前者は init の user namespace での CAP_NET_ADMIN を必要とする。`deploy/server.service` はこの権限を与えるので、systemd から動かす VPS では要求が通る。user namespace を分けた非特権のコンテナは、自分の netns の nftables を操作できても FORCE の側は拒まれ、`SO_SNDBUF` と `SO_RCVBUF` に落ちる。落ちた配置では `net.core.rmem_max` と `net.core.wmem_max` の 2 倍が上限になり、壁は既定の 2 倍ほど遠のくだけで残る。ラボでは `unshare --user --map-root-user --net` の中でカーネルモードの `vpsd` を動かして確かめた。WireGuard のインタフェースの作成、`net.ipv4.ip_forward` の書き込み、テーブルの適用は通る。両方の sysctl が既定の 212992 のとき、1 回の `rule import` は 120 本まで適用でき、125 本で ENOBUFS になり、500 本からは EMSGSIZE になった。両方を 8388608 にすると 2000 本まで適用できた。この 2 つの sysctl は network namespace ごとの値ではなく、分けた namespace の中の `/proc/sys/net/core` には現れない。値を変えられるのは初期の network namespace の側だけである。文書にある配置で当てはまるものは無い。コンテナの配置はユーザー空間モードだけを対象にしている(`deploy/server.compose.yaml`)。
 
-確かめた範囲は Debian 12 のラボである。1 回の `rule import` による 1000 本と、1 本ずつの `rule add` による 1000 本のどちらも適用でき、10 本から 1000 本までのすべての段で転送が通った。1000 本を超える規模は確かめていない。
+確かめた範囲は Debian 12 のラボである。1 回の `rule import` による 1000 本と、1 本ずつの `rule add` による 1000 本のどちらも適用でき、10 本から 1000 本までのすべての段で転送が通った。適用だけなら 2000 本まで通った。2000 本を超える規模は確かめていない。
 
 この壁で適用が失敗したときの意味論は、他の差し替えの失敗と同じである。失敗した世代は active にならない。ENOBUFS の場合は実際のテーブルだけが新しい世代に進むので、`vpsd` が持つ active な世代と食い違う。この食い違いは 7a.3 節の「実際の状態への収束」が拾い、`Observe` がテーブルの指紋の違いを drift として報告し、次のトランザクションが active な世代を公開し直す。食い違っている区間も、DNAT の宛先のエージェントが新しいルールを受け取っていないため、新しい世代のポートへの転送は通らない。
 
