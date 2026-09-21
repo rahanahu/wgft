@@ -708,10 +708,11 @@ check1() {
 
   vps wgft rule add --agent home --tcp 39980 --to 192.168.50.3:25580 --admin "$ADMIN" >/dev/null
   vps wgft rule add --agent home --udp 27020 --to 192.168.50.3:19150 --admin "$ADMIN" >/dev/null
-  # bare wait_until: re-checked immediately below by the check() calls, which redo the exact
-  # same probe with their own (unchanged) timeout and would FAIL on the unmatched substring.
-  wait_until 10 tcp_probe_ok 39980
-  wait_until 10 udp_probe_ok 27020
+  # must_wait, not bare: the check() calls right after redo the exact same probe, but on a
+  # rule-local bind failure (a squatted fixed port) the FAIL they'd print reads as a plain "tcp
+  # doesn't work here", not as the setup failure it actually is. must_wait names that explicitly.
+  must_wait "check1: the tcp rule forwards before the restart" 10 tcp_probe_ok 39980
+  must_wait "check1: the udp rule forwards before the restart" 10 udp_probe_ok 27020
   check "tcp works before the restart" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39980')"
   check "udp works before the restart" "udp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:27020')"
 
@@ -829,9 +830,10 @@ check2() {
   local a_tcp a_udp
   a_tcp=$(vps wgft rule add --agent home --tcp 39982 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   a_udp=$(vps wgft rule add --agent home --udp 27022 --to 192.168.50.3:19151 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
-  # bare wait_until: re-checked immediately below by the check() calls (same probe, same port).
-  wait_until 10 tcp_probe_ok 39982
-  wait_until 10 udp_probe_ok 27022
+  # must_wait, not bare: same reasoning as check1's setup above (a rule-local bind failure on
+  # this fixed port must be named here, not folded into the check() below's plain FAIL).
+  must_wait "check2: rule A's tcp probe answers before anything" 10 tcp_probe_ok 39982
+  must_wait "check2: rule A's udp probe answers before anything" 10 udp_probe_ok 27022
   check "tcp on A works before anything" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39982')"
   check "udp on A works before anything" "udp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:27022')"
 
@@ -870,11 +872,11 @@ check2() {
   local a_tcp2 a_udp2
   a_tcp2=$(vps wgft rule add --agent home --tcp 39983 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   a_udp2=$(vps wgft rule add --agent home --udp 27023 --to 192.168.50.3:19151 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
-  # bare wait_until below: each is re-checked by the "before"/"after" comparison a couple of
-  # lines later, since before/after both come straight from flows_established() and a timed-out
-  # wait leaves them at whatever value that produces (0 when the rule was never ready, unchanged
-  # when the cut never happened), which the check() right after "before=1 after=0" catches.
-  wait_until 10 tcp_probe_ok 39983
+  # must_wait, not bare: a timed-out wait here used to be laundered into the "before"/"after"
+  # comparison below as a plain before=0, which reads as "A's target change failed to cut
+  # anything" rather than "the rule never became ready" (a rule-local bind failure on this fixed
+  # port). must_wait fails right at the setup step instead.
+  must_wait "check2: rule A2's tcp probe answers before the target change" 10 tcp_probe_ok 39983
   client 'python3 -c "
 import socket, time
 s = socket.create_connection((\"198.51.100.1\", 39983), timeout=5); s.send(b\"x\"); time.sleep(6)
@@ -898,9 +900,10 @@ s = socket.create_connection((\"198.51.100.1\", 39983), timeout=5); s.send(b\"x\
   echo "-- deleting A cuts its flows too"
   local a_tcp3
   a_tcp3=$(vps wgft rule add --agent home --tcp 39984 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
-  # bare wait_until below: same reasoning as the a_tcp2 block above (before/after feed straight
-  # into the "before=1 after=0" check that follows).
-  wait_until 10 tcp_probe_ok 39984
+  # must_wait, not bare: same reasoning as the a_tcp2 block above (before/after would otherwise
+  # feed a timed-out wait straight into the "before=1 after=0" check that follows, misread as
+  # the deletion not cutting the session).
+  must_wait "check2: rule A3's tcp probe answers before the delete" 10 tcp_probe_ok 39984
   client 'python3 -c "
 import socket, time
 s = socket.create_connection((\"198.51.100.1\", 39984), timeout=5); s.send(b\"x\"); time.sleep(6)
