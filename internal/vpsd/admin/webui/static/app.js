@@ -14,6 +14,7 @@
       .then(function (html) {
         if (html === null) return;
         el.innerHTML = html;
+        syncToggle(el);
         if (isRules) {
           initRuleGroups();
           restoreCollapsedGroups(collapsed);
@@ -49,18 +50,28 @@
       });
     });
   }
+  // syncToggle は、部分更新で作り直された切り替えのボタンに今の状態を描き直す。
+  function syncToggle(el) {
+    var t = el.querySelector && el.querySelector("#autorefresh-toggle");
+    if (!t) return;
+    var off = document.body.dataset.autorefresh === "off";
+    t.classList.toggle("off", off);
+    t.setAttribute("aria-pressed", String(!off));
+  }
   function start() {
     var targets = document.querySelectorAll("[data-refresh]");
     if (!targets.length) return;
     var enabled = true;
-    var toggle = document.getElementById("autorefresh-toggle");
-    if (toggle) {
-      toggle.addEventListener("click", function () {
-        enabled = !enabled;
-        toggle.classList.toggle("off", !enabled);
-        toggle.setAttribute("aria-pressed", String(enabled));
-      });
-    }
+    // 切り替えのボタンは #agents の中にあり、その部分更新で作り直される。要素に直接束縛すると
+    // 最初の差し替えで listener を失うので、document から委譲し、差し替えの後の見た目も直す。
+    document.body.addEventListener("click", function (e) {
+      var toggle = e.target.closest && e.target.closest("#autorefresh-toggle");
+      if (!toggle) return;
+      enabled = !enabled;
+      document.body.dataset.autorefresh = enabled ? "on" : "off";
+      toggle.classList.toggle("off", !enabled);
+      toggle.setAttribute("aria-pressed", String(enabled));
+    });
     setInterval(function () {
       if (!enabled || document.hidden) return;
       targets.forEach(refresh);
