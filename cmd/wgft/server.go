@@ -251,7 +251,10 @@ listens on a Unix socket (root-owned 0600).`,
 	}
 	nft.Flags().String("admin", "unix:///run/wgft/admin.sock", "admin API address, env WGFT_ADMIN")
 
-	root.AddCommand(run, check, newTeardownCmd(), nft)
+	// doctor の実装は build tag の無い cmd/wgft/doctor.go にあり、管理用 API しか使わない。
+	// 登録だけがこのファイル(Linux)にあるので、Linux 以外のビルドでは server の一群ごと
+	// 拒否する代替に置き換わり、doctor も現れない(設計文書 10.2a 節)。
+	root.AddCommand(run, check, newTeardownCmd(), nft, newServerDoctorCmd())
 	return root
 }
 

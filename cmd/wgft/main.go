@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -63,6 +64,13 @@ func exeName() string {
 // それ以外の失敗は終了コード 1 にして、unit の再起動に任せる。
 const exitRefusal = 3
 
+// exitUnavailable は、コマンドが求められた報告そのものを作れなかったときの終了コードである。
+// `wgft server doctor` だけが使う(設計文書 10.2a 節)。診断は 0(壊れた検査が無い)と
+// 1(壊れた検査がある)を監視に伝える約束なので、管理用 API に届かない場合や引数が誤っている
+// 場合を 1 に混ぜると、監視が「転送が止まった」と読んでしまう。11b 節の終了コード 3 とは
+// 目的が別で、あちらは起動の拒否を監督するプロセスに伝えるものである。
+const exitUnavailable = 2
+
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "wgft",
@@ -103,16 +111,32 @@ func main() {
 	}
 }
 
-// exitCode は Execute の失敗を終了コードに振り分ける。判定は 1 か所、1 つの型で済む。起動の拒否
-// (*startup.Refusal)は 3、それ以外は 1 である。server も agent も、どの層も同じ型を返す
-// (設計文書 11b 節)。かつては wg.StartupRefusal、cmd の configError、agent.ConfigRefusal の
-// 3 つを並べて見ており、新しい失敗を足すときに写し忘れる余地があった。
+// exitCode は Execute の失敗を終了コードに振り分ける。判定は 1 か所で、型を見るだけで済む。
+// 起動の拒否(*startup.Refusal)は 3、報告を作れなかった失敗(*unavailableError)は 2、
+// それ以外は 1 である。server も agent も、どの層も同じ型を返す(設計文書 11b 節)。かつては
+// wg.StartupRefusal、cmd の configError、agent.ConfigRefusal の 3 つを並べて見ており、新しい
+// 失敗を足すときに写し忘れる余地があった。2 つ目の型を足したのは `wgft server doctor` の
+// ためだけで、その終了コードの意味は 10.2a 節に定める。
 func exitCode(err error) int {
 	if startup.IsRefusal(err) {
 		return exitRefusal
 	}
+	var un *unavailableError
+	if errors.As(err, &un) {
+		return exitUnavailable
+	}
 	return 1
 }
+
+// unavailableError は「求められた報告を作れなかった」失敗である。起動の拒否と同じく 1 つの型
+// だけを見て終了コードを決める形を保つ(設計文書 11b 節の写し忘れを防ぐ理由は同じ)。
+type unavailableError struct{ err error }
+
+func (e *unavailableError) Error() string { return e.err.Error() }
+func (e *unavailableError) Unwrap() error { return e.err }
+
+// unavailable は err を終了コード 2 の失敗として包む。
+func unavailable(err error) error { return &unavailableError{err: err} }
 
 // effectiveVersion は -X で埋めた buildinfo.Version を返す。埋められていない(`go install ...@v0.1.0` で
 // 入れた)場合は、モジュールの版をビルド情報から取る。それも無ければ dev のまま。

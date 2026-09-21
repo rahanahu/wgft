@@ -32,6 +32,7 @@ To regenerate after changing the help: `go test ./cmd/wgft -run TestCLIDocUpToDa
 | [`wgft rule set`](#wgft-rule-set) | Change only an existing rule's group / note |
 | [`wgft rule split`](#wgft-rule-split) | Split a range into two just before <port> |
 | [`wgft server check`](#wgft-server-check) | Check the config and environment without starting |
+| [`wgft server doctor`](#wgft-server-doctor) | Diagnose why traffic is not getting through |
 | [`wgft server nft`](#wgft-server-nft) | Print the applied table inet wgft as-is |
 | [`wgft server run`](#wgft-server-run) | Run the daemon |
 | [`wgft server teardown`](#wgft-server-teardown) | Remove what wgft created: table inet wgft and the wg interface |
@@ -846,6 +847,85 @@ Flags:
       --wg-endpoint string             WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT
       --wg-interface string            WireGuard interface name, env WGFT_WG_INTERFACE (default "wgft0")
       --wg-port uint16                 WireGuard listen UDP port, env WGFT_WG_PORT (default 51820)
+```
+
+## wgft server doctor
+
+```text
+Answer, for traffic that is not getting through: how far does it work, where
+does it stop, and what to look at next. Run it on the VPS, as root: it reads
+the admin API of the running server (WGFT_ADMIN, default
+unix:///run/wgft/admin.sock) and nothing else. Where "server check" asks
+whether this host is configured correctly, "doctor" asks why a rule does not
+carry traffic.
+
+Without an argument it surveys the server, the agents and every rule in a line
+each. With a rule it follows that one rule from the public side to the target,
+grouped as Server, Tunnel and Agent, and ends with where traffic stops.
+
+Every item is in one of five states, and they mean exactly this:
+
+  OK          this command observed the item succeed
+  FAILED      this command observed the item fail
+  UNKNOWN     there is evidence, but it is stale, contradictory or not enough
+  NOT TESTED  this command does not test that reachability or condition at all
+  SKIPPED     it could have been tested, but an earlier failure made it impossible
+
+OK is never permanent: it carries how old the observation is, and an item falls
+to UNKNOWN once its evidence is older than that item allows (90s for a
+heartbeat and for the agent's own report of a rule, 3m for a WireGuard
+handshake). The public port therefore reads NOT TESTED even when the server
+serves it: DNAT applies to input from outside, so the server cannot reach its
+own public port from itself. Test that from another host.
+
+--probe opens one real TCP connection from the server, through the tunnel and
+the agent, to the target, so it takes one rule at a time and the target sees a
+connection. Without it nothing is dialled. --verbose adds the internal detail
+(generations, apply state, endpoints, counters). --from <address> evaluates the
+deny and allow lists against one client address.
+
+Every run ends with what it did NOT test, and with the fact that it has no
+history: it only evaluates the current state, so to find when a rule stopped
+working, read the logs.
+
+While an agent is disconnected, everything that agent reported is history:
+those lines read "last:" and are never given as the current cause, the same way
+"agent ls" marks them.
+
+--json prints the diagnostic model: a "checks" array of {id, status, reason,
+observed_at, ...}. The ids and the reason codes are the machine interface. They
+only ever gain members: read an id you do not know by ignoring it, and a reason
+you do not know as "unknown".
+
+Exit codes, specific to this command: 0 when no check is FAILED, 1 when one or
+more is, 2 when the report could not be produced at all (the admin API did not
+answer, or the named rule does not exist), 3 for a bad setting. UNKNOWN and NOT
+TESTED alone never make it non-zero.
+```
+
+```text
+wgft server doctor [rule] [flags]
+```
+
+Examples:
+
+```sh
+sudo wgft server doctor
+sudo wgft server doctor r_01M2R009
+sudo wgft server doctor r_01M2R009 --probe --from 203.0.113.7
+sudo wgft server doctor r_01M2R009 --verbose
+sudo wgft server doctor --json
+```
+
+Flags:
+
+```text
+      --admin string    admin API address, env WGFT_ADMIN (default "unix:///run/wgft/admin.sock")
+      --config string   dotenv config file (default "/etc/wgft/server.env")
+      --from string     client address to evaluate the deny and allow lists against
+      --json            output as JSON; the stable diagnostic model of this command
+      --probe           also open a real TCP connection through the tunnel to the target; one rule only
+      --verbose         also print the internal detail: generations, apply state, endpoints, counters
 ```
 
 ## wgft server nft
