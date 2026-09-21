@@ -788,13 +788,20 @@ func connectionCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRep
 		c.ObservedAt = ai.LastHeartbeat
 	}
 	if !ai.Connected {
-		c.Status, c.Reason = statusFailed, reasonAgentDisconnected
-		c.Detail = "the agent is not connected to this server"
+		c.Reason = reasonAgentDisconnected
+		seen := ""
 		if hbOK {
-			c.Detail = "last seen " + since(in.Now, hb).String() + " ago"
+			seen = ", last seen " + since(in.Now, hb).String() + " ago"
 		}
 		if hs, ok := parseWhen(ai.LastHandshake); ok && in.Now.Sub(hs) < handshakeStale {
-			c.Detail += ". Its tunnel handshook " + since(in.Now, hs).String() + " ago, so it is probably still forwarding the rules it already has, and only rule changes do not reach it"
+			// 制御の経路だけが切れていて、トンネルは生きている状態である。この検査が測るのは
+			// 制御の経路の健全さであって、転送が止まった位置ではない(設計文書 10.2a 節)。
+			// stream が切れていることは確かだが、このルールが今も転送しているかどうかは、この
+			// 証拠からは決まらない。failed にすると、疎通確認が実際に target まで届いた場合でも
+			// 「転送はここで止まった」と報告してしまう。
+			c.Status = statusUnknown
+			c.Detail = "the control connection is down" + seen + ", but the tunnel handshook " + since(in.Now, hs).String() +
+				" ago: the rules the agent already holds may still be forwarding, while rule changes are certainly not arriving"
 			c.Causes = []string{
 				"the control connection dropped and the agent has not reconnected yet; it backs off up to 5 minutes",
 				"the agent reached this server but was rejected (see the server log)",
@@ -802,8 +809,20 @@ func connectionCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRep
 			}
 			// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
 			c.Next = "read this server's log for this agent's control connection, and the agent's own log on its host " +
-				"(journalctl -u wgft-agent, or docker logs). Traffic keeps flowing; rule changes do not arrive."
+				"(journalctl -u wgft-agent, or docker logs)."
+			// 既に疎通確認を行った実行に「--probe を付けよ」と言わない。今やったことを勧める行は
+			// 読み手にとって雑音である。
+			if !in.Probed {
+				c.Next += " To see whether this rule still carries traffic, add --probe."
+			}
 			return c
+		}
+		// ハンドシェイクも新しくない。転送が止まったことは `tunnel.handshake` が failed として
+		// 報告し、経路の順でそちらが先に来るので、ルールはトンネルで止まる。
+		c.Status = statusFailed
+		c.Detail = "the agent is not connected to this server"
+		if hbOK {
+			c.Detail = "last seen " + since(in.Now, hb).String() + " ago"
 		}
 		c.Causes = []string{"the agent is not running", "it cannot reach this VPS's agent API port", "the home line or the ISP is down"}
 		// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).

@@ -142,21 +142,6 @@ func TestDiagnose(t *testing.T) {
 			wantNext:   "moved to another agent",
 		},
 		{
-			// 転送は続いているのに切断と表示されるエージェント(古いハートビートと新しいハンドシェイク)
-			name: "disconnected agent with a fresh handshake",
-			mutate: func(r *proto.Rule, in *doctorInput) {
-				in.Agents[0].Connected = false
-				in.Agents[0].LastHeartbeat = at(4 * time.Minute)
-				in.Agents[0].LastHandshake = at(20 * time.Second)
-				in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{
-					Agent: "home", State: proto.StatusOK, At: at(4 * time.Minute), Connected: false,
-				}
-			},
-			wantFailed: checkConnection, wantReason: reasonAgentDisconnected,
-			wantDetail: "still forwarding the rules it already has",
-			wantNext:   "Traffic keeps flowing",
-		},
-		{
 			name: "tunnel without a recent handshake",
 			mutate: func(r *proto.Rule, in *doctorInput) {
 				in.Agents[0].LastHandshake = at(9 * time.Minute)
@@ -971,5 +956,142 @@ func TestUnknownFlagExitsUnavailable(t *testing.T) {
 	}
 	if code := exitCode(err); code != exitUnavailable {
 		t.Errorf("exit code = %d, want %d", code, exitUnavailable)
+	}
+}
+
+// disconnectedButTunnelledInput は、制御の経路だけが切れていてトンネルは生きている状態である。
+// 転送を続けているエージェントを server が切断と表示する、2026-09-21 に実測した区間に当たる。
+func disconnectedButTunnelledInput(r proto.Rule) doctorInput {
+	in := healthyInput(r)
+	in.Agents[0].Connected = false
+	in.Agents[0].LastHeartbeat = at(4 * time.Minute)
+	in.Agents[0].LastHandshake = at(20 * time.Second)
+	in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{
+		Agent: "home", State: proto.StatusOK, At: at(4 * time.Minute), Connected: false,
+	}
+	in.Rules.Rules = []proto.Rule{r}
+	return in
+}
+
+// TestDisconnectedAgentWithFreshHandshakeIsUnknownNotFailed は、`agent.connection` が測るものを
+// 固定する(設計文書 10.2a 節)。この検査は制御の経路の健全さと、新しい設定を配れるかどうかを
+// 測るのであって、転送が止まった位置を測るのではない。stream が切れていてトンネルが生きている
+// 状態では、このルールが今も転送しているかどうかはこの証拠から決まらないので unknown にする。
+// かつては failed にしており、ルールの止まった位置をここだと報告していた。
+//
+// 表(TestDiagnose)にあった「disconnected agent with a fresh handshake」の行は、failed を
+// 前提にした形なので、意味を変えたこの試験へ移した。
+func TestDisconnectedAgentWithFreshHandshakeIsUnknownNotFailed(t *testing.T) {
+	r := tcpRule()
+	in := disconnectedButTunnelledInput(r)
+	checks := diagnose(r, in)
+
+	c := checkOf(t, checks, checkConnection)
+	if c.Status != statusUnknown {
+		t.Errorf("status = %q, want %q: the stream being down does not locate where forwarding stopped", c.Status, statusUnknown)
+	}
+	if c.Reason != reasonAgentDisconnected {
+		t.Errorf("reason = %q, want %q: the fact is certain, only its consequence for this rule is not", c.Reason, reasonAgentDisconnected)
+	}
+	// 所見は 2 つの半分を両方はっきり述べる。
+	for _, want := range []string{"the control connection is down", "the tunnel handshook", "may still be forwarding", "rule changes are certainly not arriving"} {
+		if !strings.Contains(c.Detail, want) {
+			t.Errorf("detail must hold %q, got %q", want, c.Detail)
+		}
+	}
+	if len(c.Causes) != 3 {
+		t.Errorf("the causes this evidence cannot separate must be kept, got %v", c.Causes)
+	}
+	if !strings.Contains(c.Next, "journalctl -u wgft-agent") {
+		t.Errorf("the next step must be kept, got %q", c.Next)
+	}
+	if got := firstFailed(checks); got != "" {
+		t.Errorf("no check may be failed in this state, got %q: %s", got, dumpChecks(checks))
+	}
+
+	// ルールは ok にはならず unknown になる。本当に落ちているエージェントも要約から消えない。
+	rep := buildReport([]proto.Rule{r}, in)
+	if rep.Rules[0].Status != statusUnknown {
+		t.Errorf("rule status = %q, want %q", rep.Rules[0].Status, statusUnknown)
+	}
+	if rep.Rules[0].StoppedAt != "" {
+		t.Errorf("stopped_at = %q, want empty: nothing was observed to stop", rep.Rules[0].StoppedAt)
+	}
+	if err := doctorExit(rep); err != nil {
+		t.Errorf("no failed check means exit 0, got %v", err)
+	}
+}
+
+// TestProbeSucceedsWhileControlStreamIsDown は、二度と戻してはならない退行を固定する。疎通確認が
+// トンネルとエージェントを通って target まで実際に届いたのに、`agent.connection` がそれを覆して
+// 「転送はここで止まった」と報告していた。
+func TestProbeSucceedsWhileControlStreamIsDown(t *testing.T) {
+	r := tcpRule()
+	in := disconnectedButTunnelledInput(r)
+	in.Probed = true
+	in.Probes[r.ID] = probeResult{Check: &admin.ConnCheck{OK: true, Reach: "target", Detail: "home service responded"}}
+	rep := buildReport([]proto.Rule{r}, in)
+
+	if rep.Rules[0].Status == statusFailed {
+		t.Errorf("a rule whose probe reached the target must not be reported as stopped: %s", dumpChecks(rep.Checks))
+	}
+	if rep.Rules[0].StoppedAt != "" {
+		t.Errorf("stopped_at = %q, want empty: a real connection reached the target", rep.Rules[0].StoppedAt)
+	}
+	if err := doctorExit(rep); err != nil {
+		t.Errorf("doctorExit must return nil, got %v", err)
+	}
+	if p := checkOf(t, rep.Checks, checkProbe); p.Status != statusOK {
+		t.Errorf("probe status = %q, want %q", p.Status, statusOK)
+	}
+}
+
+// TestDisconnectedAgentStaysFailedWhenNothingElseExplainsIt は、unknown にしたのが 1 つの場合
+// だけであることを確かめる。トンネルも死んでいれば `tunnel.handshake` が failed になり、経路の
+// 順でそちらが先なのでルールはトンネルで止まる。エージェントがそもそも登録されていなければ、
+// `tunnel.handshake` は skipped なので `agent.connection` が最初の失敗として正しい。
+func TestDisconnectedAgentStaysFailedWhenNothingElseExplainsIt(t *testing.T) {
+	t.Run("disconnected with a stale handshake stops at the tunnel", func(t *testing.T) {
+		r := tcpRule()
+		in := disconnectedButTunnelledInput(r)
+		in.Agents[0].LastHandshake = at(20 * time.Minute)
+		checks := diagnose(r, in)
+		if c := checkOf(t, checks, checkConnection); c.Status != statusFailed || c.Reason != reasonAgentDisconnected {
+			t.Errorf("agent.connection = %s/%s, want %s/%s", c.Status, c.Reason, statusFailed, reasonAgentDisconnected)
+		}
+		if got := firstFailed(checks); got != checkHandshake {
+			t.Errorf("first failed check = %q, want %q", got, checkHandshake)
+		}
+	})
+	t.Run("an unregistered agent stops at the connection", func(t *testing.T) {
+		r := tcpRule()
+		in := healthyInput(r)
+		in.Agents = nil
+		in.Rules.Rules = []proto.Rule{r}
+		checks := diagnose(r, in)
+		if c := checkOf(t, checks, checkHandshake); c.Status != statusSkipped {
+			t.Errorf("tunnel.handshake = %q, want %q with no agent registered", c.Status, statusSkipped)
+		}
+		if got := firstFailed(checks); got != checkConnection {
+			t.Errorf("first failed check = %q, want %q", got, checkConnection)
+		}
+		if c := checkOf(t, checks, checkConnection); c.Reason != reasonAgentNotRegistered {
+			t.Errorf("reason = %q, want %q", c.Reason, reasonAgentNotRegistered)
+		}
+	})
+}
+
+// TestDisconnectedNextDoesNotSuggestAProbeAlreadyRun は、既に疎通確認を行った実行が
+// 「--probe を付けよ」と言わないことを確かめる。今やったことを勧める行は雑音である。
+func TestDisconnectedNextDoesNotSuggestAProbeAlreadyRun(t *testing.T) {
+	r := tcpRule()
+	in := disconnectedButTunnelledInput(r)
+	if c := checkOf(t, diagnose(r, in), checkConnection); !strings.Contains(c.Next, "--probe") {
+		t.Errorf("without a probe, the next step should offer one, got %q", c.Next)
+	}
+	in.Probed = true
+	in.Probes[r.ID] = probeResult{Check: &admin.ConnCheck{OK: true, Reach: "target", Detail: "ok"}}
+	if c := checkOf(t, diagnose(r, in), checkConnection); strings.Contains(c.Next, "--probe") {
+		t.Errorf("after a probe has run, the next step must not suggest adding one, got %q", c.Next)
 	}
 }
