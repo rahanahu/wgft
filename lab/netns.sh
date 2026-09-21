@@ -34,6 +34,20 @@ LAN_ADDR=192.168.50.3      # lan の eth0(LAN 上の別ホスト。ゲートウ�
 CLIENT_ADDR6=2001:db8::2   # client の eth0
 VPS_PUB0_6=2001:db8::1     # vps の client 側(公開 IF)
 
+# Fixed ports the vps namespace binds that fall inside the kernel's default ephemeral range
+# (32768-60999, see /proc/sys/net/ipv4/ip_local_port_range): the rule ports lifecycle.sh,
+# upgrade.sh, e2e.sh, ipv6.sh and version-skew.sh use as --tcp/--udp targets (39900-39999) and
+# the WireGuard endpoint port (51820, from --wg-endpoint 203.0.113.1:51820). Every admin CLI call
+# in this namespace (`wgft rule add/ls/rm ... --admin 127.0.0.1:8686`) is an outbound loopback
+# TCP connection that takes an ephemeral source port and leaves it in TIME_WAIT for 60s; the
+# kernel can hand out a contiguous band that covers one of the ports above, and the server's own
+# bind/listen on it then fails with "address already in use" until its next 30s reconcile. This
+# is the single place that lists these ports. net.ipv4.ip_local_reserved_ports is namespaced, so
+# reserving them only in vps (below, once the namespace exists) leaves client/home/lan/homerouter
+# untouched and keeps the kernel from ever handing one of these ports out as an ephemeral source
+# port here.
+RESERVED_PORTS=39900-39999,51820
+
 die() { echo "netns.sh: $*" >&2; exit 1; }
 
 # veth の両端を別々の ns に置いて up する: link <ns1> <if1> <ns2> <if2>
@@ -55,6 +69,7 @@ up() {
     ip netns add "$ns"
     ip -n "$ns" link set lo up
   done
+  ip netns exec "$VPS_NS" sysctl -qw net.ipv4.ip_local_reserved_ports="$RESERVED_PORTS"
 
   link "$CLIENT_NS" eth0 "$VPS_NS" pub0
   ip -n "$CLIENT_NS" addr add "$CLIENT_ADDR/24" dev eth0
