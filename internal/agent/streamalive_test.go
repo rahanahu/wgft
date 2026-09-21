@@ -138,16 +138,89 @@ func TestReconnectBackoffAtTheCapIsCutShortByANewHandshake(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no first connection attempt within 5s")
 	}
-	// 1 回目の試みが記録された時点で、この周回の通知の捨て処理は既に済んでいる。以後に入れた
-	// 通知は待ちの select まで残るので、実時間の sleep で待ちに入るのを待つ必要は無い
+	// 通知を捨てるのは接続の試みが戻った後なので、1 回目の試みを見た時点ではまだ捨てられる側に
+	// いるかもしれない。待ちに入るのを実時間の sleep で待つ代わりに、2 回目の試みが来るまで
+	// 通知を入れ続ける。チャネルは大きさ 1 で送信は非ブロッキングなので、入れ過ぎても害は無い
+	deadline := time.After(capped - time.Second)
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		notifyNonBlocking(rt.handshakeWake)
+		select {
+		case second := <-attempts:
+			if d := second.Sub(first); d > capped/2 {
+				t.Errorf("the second attempt came %s after the first; the handshake must cut the %s wait short", d, capped)
+			}
+			return
+		case <-tick.C:
+		case <-deadline:
+			t.Fatalf("no second attempt within %s; the %s backoff was not cut short by a new handshake", capped-time.Second, capped)
+		}
+	}
+}
+
+// (i-b) 接続していた間に観測したハンドシェイクは、その接続が切れた後の待ちを打ち切らない
+// (仕様 5.2 節)。打ち切る根拠になるのは、失敗した後に観測したハンドシェイクだけである。
+// server は接続を受けてから閉じるので、通知は接続の最中に入る。
+func TestHandshakeSeenWhileConnectedDoesNotCutTheNextBackoff(t *testing.T) {
+	const capped = 3 * time.Second
+	closeNow := make(chan struct{})
+	connected := make(chan struct{}, 8)
+	attempts := make(chan time.Time, 64)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/stream", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case attempts <- time.Now():
+		default:
+		}
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		var first proto.Message
+		if _, b, err := ws.Read(r.Context()); err != nil || json.Unmarshal(b, &first) != nil {
+			return
+		}
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
+		select {
+		case <-closeNow:
+		case <-r.Context().Done():
+		}
+	})
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	endpoint, pin := strings.TrimPrefix(srv.URL, "https://"), sha256.Sum256(srv.Certificate().Raw)
+
+	rt := newAliveTestRuntime(t, endpoint, pin)
+	rt.reconnectBackoffMin, rt.reconnectBackoffMax = capped, capped
+	runStreamLoop(t, rt)
+
+	var first time.Time
+	select {
+	case first = <-attempts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no first connection attempt within 5s")
+	}
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server did not see the pubkey within 5s")
+	}
+	// 接続の最中に観測したことにする
 	notifyNonBlocking(rt.handshakeWake)
+	close(closeNow)
+
 	select {
 	case second := <-attempts:
-		if d := second.Sub(first); d > capped/2 {
-			t.Errorf("the second attempt came %s after the first; the handshake must cut the %s wait short", d, capped)
+		if d := second.Sub(first); d < capped/2 {
+			t.Errorf("the second attempt came %s after the first; a handshake seen while connected must not cut the %s wait short", d, capped)
 		}
-	case <-time.After(capped - time.Second):
-		t.Fatalf("no second attempt within %s; the %s backoff was not cut short by a new handshake", capped-time.Second, capped)
+	case <-time.After(capped + 2*time.Second):
+		t.Fatalf("no second attempt within %s", capped+2*time.Second)
 	}
 }
 

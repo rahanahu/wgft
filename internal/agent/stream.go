@@ -38,12 +38,6 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 	}
 	backoff := backoffMin
 	for {
-		// 前の接続の間に溜まったハンドシェイクの通知は捨てる。待ちを打ち切る根拠にするのは、
-		// この接続の試みが失敗した後に観測したハンドシェイクだけである(仕様 5.2 節)
-		select {
-		case <-rt.handshakeWake:
-		default:
-		}
 		started := time.Now()
 		connCtx, cancel := context.WithCancel(ctx)
 		rt.streamMu.Lock()
@@ -51,6 +45,13 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 		rt.streamMu.Unlock()
 		err := rt.streamOnce(connCtx)
 		cancel()
+		// 接続していた間に溜まったハンドシェイクの通知は捨てる。待ちを打ち切る根拠にするのは、
+		// この接続の試みが失敗した後に観測したハンドシェイクだけだからである(仕様 5.2 節)。
+		// 接続中のハンドシェイクは、その接続が切れる前の経路の話でしかない
+		select {
+		case <-rt.handshakeWake:
+		default:
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
