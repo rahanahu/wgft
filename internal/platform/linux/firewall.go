@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package linux は、VPS と(将来の Phase 7 の)agent の kernel backend が共通に使う、Linux ホスト側の
 // 前段検査と sysctl の読み書きを持つ(設計文書 7a.7 節)。他テーブルの forward/input/DNAT の検査、
 // bind 中のポートの検査、ip_forward と conntrack テーブルの sysctl がここに属する。自動では何も

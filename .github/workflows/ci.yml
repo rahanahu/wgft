@@ -184,14 +184,20 @@ jobs:
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
 
   windows-test:
-    # Runs the packages that actually build and pass on native Windows today: the agent
-    # (including its credentials/ACL handling), the relay it shares with the server's userspace
-    # mode, flock, the CLI, and the server's userspace tunnel bind (internal/dataplane/userspace/utun).
-    # The rest of the top-level internal/vpsd package is Linux-only (kernel WireGuard, nftables)
-    # and is not part of this job; the parent internal/dataplane/userspace package is also
-    # excluded because TestPrepareBindFailureIsFailClosed fails on native Windows (issue #109).
-    # the build-test job's cross-build step already keeps ./cmd/wgft buildable for Windows,
-    # this job additionally runs the Windows-specific code paths.
+    # Builds and vets the whole tree on native Windows first: the top-level internal/vpsd
+    # package, internal/dataplane/linuxkernel and its subpackages, and internal/platform/linux
+    # are Linux-only (kernel WireGuard, nftables) and rely on `//go:build linux` tags to
+    # keep the rest of the tree buildable on Windows (#109); without a step that actually
+    # runs `go build ./...` / `go vet ./...` here, a later file added to one of those
+    # packages without that tag would stay green and silently break the Windows build
+    # again. It then runs the packages that actually build and pass on native Windows
+    # today: the agent (including its credentials/ACL handling), the relay it shares with
+    # the server's userspace mode, flock, the CLI, and the server's userspace tunnel bind
+    # (internal/dataplane/userspace/utun); the parent internal/dataplane/userspace package
+    # is excluded because TestPrepareBindFailureIsFailClosed fails there on native Windows
+    # (issue #109). `go test ./...` is deliberately not run here: internal/dataplane/userspace,
+    # internal/vpsd/store and tools/labhost have known pre-existing POSIX-assumption test
+    # failures on native Windows.
     #
     # Gated by go_code, not by the table's agent-platform trigger (B4, see the header
     # comment for why). Runs whenever the changes job could not tell (run_all, including
@@ -211,6 +217,10 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.27.x"
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
       - name: test
         run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/dataplane/userspace/utun/... ./internal/flock/... ./cmd/wgft/...
 

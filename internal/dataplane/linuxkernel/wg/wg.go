@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package wg は VPS(および将来の agent の kernel backend、Phase 7)の WireGuard インタフェースを
 // 宣言に収束させる(仕様 4, 9 節、設計文書 7a.7 節)。インタフェースの作成とアドレス・MTU は
 // netlink で、鍵・ポート・ピアは wgctrl で扱う。停止時には何も削除しない。internal/vpsd を

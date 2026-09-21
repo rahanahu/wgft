@@ -1,3 +1,5 @@
+//go:build linux
+
 package vpsd
 
 // 撤去(アンインストール、仕様 10.3 節)。vpsd が自分で作ったものだけを消し、

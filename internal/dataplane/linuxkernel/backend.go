@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package linuxkernel is the kernel dataplane Backend (design.md 6.1, 7a.7, 7a.8 節 Phase 3): kernel
 // WireGuard (linuxkernel/wg), nftables DNAT and admission (linuxkernel/nft), and conntrack
 // convergence (linuxkernel/conntrack), behind the same dataplane.Backend interface the userspace

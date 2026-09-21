@@ -1,3 +1,5 @@
+//go:build linux
+
 package linux
 
 // sysctl の読み書き:conntrack の UDP タイムアウト、net.ipv4.ip_forward、conntrack テーブルの
