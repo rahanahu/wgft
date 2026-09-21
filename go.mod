@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/google/nftables v0.3.0
+	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/spf13/cobra v1.10.2
@@ -28,7 +29,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mdlayher/genetlink v1.3.2 // indirect
-	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
