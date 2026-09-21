@@ -83,6 +83,11 @@
 #      handles stay the same across a full retry interval; a table held by another process
 #      (flags owner) leaves an admin change pending until the holder exits, after which the
 #      pending generation is published and delivered to the agent without any admin change.
+#   10. stopping the agent process (server left running) is shown as a stale last report, not a
+#      live state (design 5.2 section): `agent ls` prefixes TUNNEL and RULES with "last:"
+#      (cmd/wgft/agent.go), and the Web UI agent list shows the tunnelStale label instead of a
+#      live OK and hides the IP comparison (internal/vpsd/admin/webui.go's agentToView).
+#      Restarting the agent with the same credentials returns both to the live state.
 #
 # Requires `lab/lab build` (wgft and echo in /usr/local/bin of the VM) and the netns topology
 # (`lab/lab net up`). Leftovers from earlier runs are killed first. Wherever a step waits on
@@ -98,8 +103,8 @@ ulimit -n 100000 2>/dev/null || true  # check 5 floods thousands of sockets from
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: lifecycle.sh kernel|userspace [check...]" >&2; exit 2;; esac
 shift || true
-# Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9) run only those checks; none runs all.
-ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9"
+# Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9 10) run only those checks; none runs all.
+ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10"
 CHECKS="${*:-$ALL_CHECKS}"
 for c in $CHECKS; do
   case " $ALL_CHECKS " in *" $c "*) ;; *) echo "lifecycle.sh: unknown check '$c' (use: $ALL_CHECKS)" >&2; exit 2;; esac
@@ -2364,6 +2369,77 @@ for r in d['rules']:
   wait_until 10 tcp_probe_ok 39991
   check "the rule added while the table was held forwards end to end" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39991')"
   check "the first rule forwards again" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39990')"
+
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 10. server side rendering of a disconnected agent (design 5.2 section: vpsd keeps
+# Tunnel/StreamFrom/WGEndpoint after Connected goes false, for diagnosis). Stopping only the
+# agent process (not the server) must make both `agent ls` (cmd/wgft/agent.go's "last:" prefix
+# on TUNNEL and RULES) and the Web UI agent list (internal/vpsd/admin/webui.go's agentToView,
+# i18n key tunnelStale) show the last heartbeat as history, not as a live state, and restarting
+# the agent with the same credentials must return both to the live state. Mode-independent (the
+# rendering is server side, not a dataplane path), run in both modes anyway for the same reason
+# most of this file's other checks are: one command line covers both, at low extra cost.
+# ---------------------------------------------------------------------------------------------
+check10() {
+  echo "== $mode: check 10: a stopped agent is shown as a stale last report, not a live state, in agent ls and the Web UI"
+  local DATA=$W/wgft-lifecycle-c10 ADATA=$W/wgft-lifecycle-c10-agent
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+
+  start_server "$DATA" $W/wgft-lifecycle-c10-server.log
+  if ! wait_admin; then echo "FAIL  check10 setup: admin api never came up"; fail=1; return; fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  local agent_pid
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c10-agent.log 2>&1 < /dev/null &
+  agent_pid=$!
+  disown
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25575 -udp 19140 > $W/wgft-lifecycle-c10-echo.log 2>&1 < /dev/null &
+  disown
+  if ! wait_agent home; then echo "FAIL  check10 setup: agent never registered"; fail=1; return; fi
+
+  vps wgft rule add --agent home --tcp 39975 --to 192.168.50.3:25575 --admin "$ADMIN" >/dev/null
+  vps wgft rule add --agent home --udp 27010 --to 192.168.50.3:19140 --admin "$ADMIN" >/dev/null
+  # bare wait_until: re-checked immediately below by the check() call, which redoes the exact
+  # same probe with its own (unchanged) timeout.
+  wait_until 10 tcp_probe_ok 39975
+  check "tcp works while the agent is connected" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39975')"
+
+  local ls_line; ls_line=$(vps wgft agent ls --admin "$ADMIN" | tail -1)
+  absent "agent ls carries no last: prefix while the agent is connected" "last:" "$ls_line"
+
+  # Stop only the agent process; the server keeps running.
+  kill "$agent_pid" 2>/dev/null
+  must_wait "check10: agent pid $agent_pid exited" 5 proc_gone "$agent_pid"
+
+  agent_shows_stale() { vps wgft agent ls --admin "$ADMIN" | tail -1 | grep -q 'last:'; }
+  # bare wait_until: re-checked immediately below by the check() calls, which redo the same
+  # agent ls read.
+  wait_until 30 agent_shows_stale
+  ls_line=$(vps wgft agent ls --admin "$ADMIN" | tail -1)
+  check "agent ls TUNNEL carries the last: prefix once the agent process is gone" "last:ok" "$ls_line"
+  check "agent ls RULES carries the last: prefix once the agent process is gone" "last:2 ok" "$ls_line"
+
+  local html; html=$(vps curl -s "http://$ADMIN/ui/agents?lang=en")
+  check "the Web UI (en) shows the stale last-report label for the stopped agent" "Last reported (disconnected)" "$html"
+  absent "the Web UI does not draw the stopped agent's tunnel with the live-OK style" "stack success-text" "$html"
+
+  # Restart the agent with the same credentials (agent.json, written by the join above, is
+  # still on disk) and confirm both agent ls and the Web UI return to the live state.
+  ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c10-agent2.log 2>&1 < /dev/null &
+  disown
+  if ! wait_agent home; then echo "FAIL  check10: agent never re-registered after the restart"; fail=1; return; fi
+
+  agent_shows_live() { ! (vps wgft agent ls --admin "$ADMIN" | tail -1 | grep -q 'last:'); }
+  # bare wait_until: re-checked immediately below by the absent()/check() calls.
+  wait_until 30 agent_shows_live
+  ls_line=$(vps wgft agent ls --admin "$ADMIN" | tail -1)
+  absent "agent ls carries no last: prefix again once the agent has reconnected" "last:" "$ls_line"
+  html=$(vps curl -s "http://$ADMIN/ui/agents?lang=en")
+  check "the Web UI (en) shows the live tunnel state again once the agent has reconnected" "stack success-text" "$html"
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"
