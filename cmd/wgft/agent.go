@@ -88,7 +88,7 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 	return agent.Options{
 		AllowTargets:    allow,
 		Limits:          limits,
-		CredentialsPath: c.str("WGFT_DATA_DIR") + "/agent.json",
+		CredentialsPath: joinPath(c.str("WGFT_DATA_DIR"), "agent.json"),
 		Join:            join,
 		Name:            c.str("WGFT_NAME"),
 		Version:         effectiveVersion(),
@@ -101,7 +101,7 @@ func agentCredentialsPath(cmd *cobra.Command) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return c.str("WGFT_DATA_DIR") + "/agent.json", nil
+	return joinPath(c.str("WGFT_DATA_DIR"), "agent.json"), nil
 }
 
 func newAgentCmd() *cobra.Command {

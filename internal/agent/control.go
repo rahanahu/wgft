@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -22,11 +23,30 @@ import (
 // ControlPath は認証情報ファイルに対応する制御ソケットの場所。
 func ControlPath(path string) string { return path + ".sock" }
 
+// controlPathLimit は、どの OS でも収まる制御ソケットのパスの長さ(バイト)。sockaddr_un の sun_path は
+// Linux と Windows で 108 バイト、macOS で 104 バイトで、終端の NUL を含む(仕様 11a 節)。
+const controlPathLimit = 103
+
+// explainControlErr は、パスが長すぎて開けない・つなげない場合に原因と対処を添える。Go の net は
+// sun_path に収まらない名前を OS を呼ぶ前に EINVAL で拒否するので、元のエラーは "invalid argument" しか言わない。
+func explainControlErr(path string, err error) error {
+	if err == nil || !errors.Is(err, syscall.EINVAL) || len(path) <= controlPathLimit {
+		return err
+	}
+	return fmt.Errorf("%w (the socket path is %d bytes; Unix socket paths hold at most 107 bytes on Linux and Windows and 103 on macOS, so use a shorter data directory)", err, len(path))
+}
+
+// listenControl は制御ソケットを開く。
+func listenControl(path string) (net.Listener, error) {
+	ln, err := net.Listen("unix", path)
+	return ln, explainControlErr(path, err)
+}
+
 // serveControl は制御ソケットで 1 行の指示を受ける。今あるのは rotate-key だけ。
 func (rt *runtime) serveControl(ctx context.Context) {
 	path := ControlPath(rt.opts.CredentialsPath)
 	os.Remove(path)
-	ln, err := net.Listen("unix", path)
+	ln, err := listenControl(path)
 	if err != nil {
 		log.Printf("cannot open control socket %s: %v; rotate-key only works while the agent is stopped", path, err)
 		return
@@ -106,7 +126,7 @@ func RotateKey(path string) (string, error) {
 	if locked {
 		c, err := net.DialTimeout("unix", ControlPath(path), 5*time.Second)
 		if err != nil {
-			return "", fmt.Errorf("agent is running but the control socket is unreachable: %w", err)
+			return "", fmt.Errorf("agent is running but the control socket is unreachable: %w", explainControlErr(ControlPath(path), err))
 		}
 		defer c.Close()
 		c.SetDeadline(time.Now().Add(30 * time.Second))
