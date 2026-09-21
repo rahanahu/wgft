@@ -50,6 +50,6 @@ func TestFlapStep(t *testing.T) {
 	h2 := []ipObs{{IP: "A", At: at(0)}, {IP: "B", At: at(30)}}
 	_, flapped, _ = flapStep(h2, "A", at(0+700), win) // 700s 後、A は区間外
 	if flapped {
-		t.Fatal("窓外の古い値への復帰で往復")
+		t.Fatal("区間外の古い値への復帰で往復")
 	}
 }
