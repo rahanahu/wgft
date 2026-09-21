@@ -155,7 +155,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | B1 | build tag `lab` の nftables のテスト (`lab/lab test internal/dataplane/linuxkernel/nft`。ゴールデンテスト、他のテーブルを触らないこと、wg からの転送の遮断) | 生成した式が実際のカーネルで同じ `nft list` にならないこと | ラボ | `nft-emit`、`kernel`、`admission` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
 | B2 | build tag `lab` の WireGuard、ホストの検査、teardown のテスト (`internal/dataplane/linuxkernel/wg`、`internal/platform/linux`、`internal/vpsd`) | 他の wg インタフェースの乗っ取り、所有の判定の誤り、他のテーブルの削除 | ラボ | `kernel`、`deploy` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
 | B3 | 実際の Caddy での HTTPS の経路 ([lab/caddy/README.md](../lab/caddy/README.md)) | PROXY protocol のヘッダを実際のリバースプロキシが読めないこと | ラボ | `relay` | 契機に当たる PR ごとに 1 回 | 10 分前後 (見込み) | 手作業 |
-| B4 | CI の `windows-test` | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方) の退行 | CI (Windows の runner) | `agent-platform` | 契機に当たる PR の更新ごと | 数分 | 自動 |
+| B4 | CI の `windows-test` | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方、server への UDP が届かなくなった後の受信の固着) の退行 | CI (Windows の runner) | `agent-platform` | 契機に当たる PR の更新ごと | 数分 | 自動 |
 | B5 | CI の `release-snapshot` | GoReleaser の設定、フック、成果物の名前の食い違い | CI (Linux) | `build`、`rc` | 契機に当たる PR の更新ごと | 数分 | 自動 |
 | B6 | CI の `govulncheck` | 依存するモジュールの既知の脆弱性 | CI (Linux) | `build`、`rc`、週に 1 回の定期実行 | 契機に当たる PR の更新ごと。定期実行は週に 1 回 | 1 分前後 | 自動 |
 | B7 | `lab/version-skew.sh` | 旧 agent と新 server、新 agent と旧 server、legacy v0 の agent と新 server の組で、登録、全体状態の配信、転送、再接続が壊れること。旧い側が表せない機能のルールを理由付きの `not_active` にすること (7a.6 節) は、該当する capability がまだ無いため確認を SKIP する | ラボ (直前のリリースと legacy v0 のバイナリを GitHub の Releases から取得してキャッシュする。ラボの VM から GitHub への経路が無い場合は、バイナリを事前に置く) | `protocol`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 数分 | 自動 (開発者が起動) |
@@ -381,6 +381,7 @@ D1 は、リリースのバイナリ (`wgft-windows-amd64.exe`) を、ラボか�
 - TCP と UDP の転送:Windows 自身と LAN の他のホストへの転送が通るかを確かめます
 - 大きな UDP:トンネルの MTU を超えるデータグラム (3000 バイトと 12000 バイト) が欠けずに届くかを確かめます
 - 再接続:server の再起動と、エージェントの再起動の後に転送が戻るかを確かめます
+- UDP の受信の固着:server の UDP のポートが一時的に届かなくなった後、送信は続くのに受信だけが止まったままにならないか、エージェントを再起動せずに戻るかを確かめます
 - 状態の保持:保存した認証情報で、登録をやり直さずに起動できるかを確かめます。認証情報のファイルの ACL が保護されたままであることも確かめます
 - ネットワークアダプタの無効と有効:アダプタを無効にして有効に戻した後に、転送が戻るかを確かめます
 - リリースのバイナリ:ビルドし直した物ではなく Releases の物が、Windows Defender ファイアウォールの確認 (許可と取り消しのどちらでも) の後に動くかを確かめます
@@ -401,7 +402,7 @@ macOS の挙動は Linux の上で再現できるとはみなしません。macO
 
 ### 実機の確認を小さな回帰テストに置き換える候補
 
-エージェントの tunnel と userspace の server 側を 1 つのプロセスの中で接続し、TCP と UDP を転送する Go のテストを作れば、Windows と macOS の runner (B4、B8) で D1 と D2 の一部 (転送、大きな UDP) を PR ごとに確かめられます。userspace の server 側のコードが Windows と macOS でビルドできるかは未確認です。この置き換えは v1.1 以降の候補とし、置き換えた後も、launchd、ACL、スリープ、ネットワークの変化の確認は実機に残します。
+エージェントの tunnel と userspace の server 側を 1 つのプロセスの中で接続し、TCP と UDP を転送する Go のテスト (`TestAgentServerInProcessForwarding`、`internal/dataplane/userspace/utun/inprocess_forward_test.go`) は、Pull Request #102 (未マージ) として存在し、Linux と macOS では通ります。取り込めば、Windows と macOS の runner (B4、B8) で D1 と D2 の一部 (転送、大きな UDP) を PR ごとに確かめられます。userspace の server 側のコード (`internal/dataplane/userspace/utun`) が Windows と macOS でビルドできるかは確認済みで、windows/amd64、windows/arm64、darwin/amd64、darwin/arm64 の 4 種のクロスビルドと `go vet` が通り、Windows での単体テストの実行も通ります。Pull Request #107 (未マージ) はこの package を CI の `windows-test` の `go test` の対象と、クロスターゲットの `go vet` の対象に加えます。#102 で Windows だけこのテストを SKIP している原因は特定済みで、#107 がその修正を含みます。#107 の修正をあてて SKIP を外すと、Windows での 13 回の実行のうち 10 回は通り、残る 3 回の失敗はテスト自身のランダムな wg の listen port の選び方の弱さ (50 回試しても 127.0.0.1 上の空きポートが見つからない) によるもので、トンネル側の不具合ではありません。この置き換えを取り込む時期は未定で、取り込んだ後も、launchd、ACL、スリープ、ネットワークの変化の確認は実機に残します。
 
 ## 高価な実験を小さな回帰テストへ置き換える規則
 
