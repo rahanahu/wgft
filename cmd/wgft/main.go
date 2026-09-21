@@ -13,6 +13,27 @@ import (
 	"github.com/rahanahu/wgft/internal/startup"
 )
 
+// cobra's default MousetrapHelpText (spf13/cobra@v1.10.2 cobra.go:72) tells a user who
+// double-clicks the .exe in Explorer to open cmd.exe. docs/setup.md's Windows procedure
+// uses PowerShell instead ($env:WGFT_JOIN, .\wgft.exe agent run), which cmd.exe does not
+// accept, so the default sends the user to the wrong shell. init overrides it here rather
+// than in newRootCmd because it must run before cobra's Windows-only preExecHook, which
+// fires inside (*Command).Execute before any command-specific setup.
+func init() {
+	cobra.MousetrapHelpText = `wgft is a command line tool; double-clicking it does not run it.
+
+Open PowerShell in the folder holding this .exe and run:
+  .\wgft.exe --help
+
+docs/setup.md has the full Windows setup, including the join command.
+`
+	// The default 5s auto-close (cobra.go:81) is too short for this longer message.
+	// 0 makes cobra print "Press return to continue..." and wait for Enter
+	// (command_win.go:32-35) instead, so the window stays open until the user is done
+	// reading it.
+	cobra.MousetrapDisplayDuration = 0
+}
+
 // exitRefusal は、再起動では直らない失敗で起動を中止したときの終了コード。設計文書 11b 節の
 // 4 つの種別(config、prerequisite、conflict、mode-gate)がここに写る。同梱の unit は
 // RestartPreventExitStatus に入れているので、systemd はこの終了コードでは再起動しない。

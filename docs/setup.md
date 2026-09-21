@@ -180,6 +180,8 @@ $env:WGFT_JOIN = '<join string>'
 .\wgft.exe agent run
 ```
 
+Double-clicking the .exe in Explorer instead of running it from PowerShell prints a reminder to do this and waits for Return before the window closes.
+
 The join string contains `#`, so PowerShell needs it in single quotes. The first successful registration writes `%ProgramData%\wgft\agent.json`; the default location needs no administrator rights. Later starts need only:
 
 ```powershell
