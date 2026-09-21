@@ -32,15 +32,15 @@
 # leftover process.
 #
 # Both ladders cut short once a rung stops converging, and then skip every larger rung FOR THAT
-# METHOD ONLY: the rung that failed is evidence a larger one would only take as long or longer,
-# not new information (design's wall-clock-window rule, this script's own variant of it: budgets
-# below are bounds on how long we wait, not speed claims). The one-by-one ladder cuts short on its
-# own per-rung ONEBYONE_BUDGET timing out; the rules actually added are left in place and checked
-# as far as they got. The batch ladder cuts short the first time a `rule import` fails to converge
-# within BATCH_APPLY_BUDGET -- this DOES happen on this lab VM, at kernel mode's netlink wall (see
-# LADDER below), even though one `rule import` call replaces the whole set in a single apply
-# regardless of how many rules the file carries; that non-convergence is itself the finding, and
-# repeating it at every larger rung would only re-spend the budget, not learn anything new.
+# METHOD ONLY: the rung that failed is evidence a larger one would only take as long or longer, not
+# new information (the wall-clock timing rule of docs/testing.md, this script's own variant of it:
+# budgets below are bounds on how long we wait, not speed claims). The one-by-one ladder cuts short
+# on its own per-rung ONEBYONE_BUDGET timing out; the rules actually added are left in place and
+# checked as far as they got. The batch ladder cuts short the first time a `rule import` fails to
+# converge within BATCH_APPLY_BUDGET -- this DOES happen on this lab VM, at kernel mode's netlink
+# wall (see LADDER below), even though one `rule import` call replaces the whole set in a single
+# apply regardless of how many rules the file carries; that non-convergence is itself the finding,
+# and repeating it at every larger rung would only re-spend the budget, not learn anything new.
 #
 #   lab/lab exec vm bash /wgft/lab/scale.sh kernel
 #   lab/lab exec vm bash /wgft/lab/scale.sh userspace
