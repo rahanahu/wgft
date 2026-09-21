@@ -316,6 +316,24 @@ printf 'WGFT_AGENT_ALLOW_TARGETS=192.168.1.20:25565,192.168.1.21:2456-2458\n' | 
 
 Entries are comma-separated and each one is `CIDR`, `CIDR:port` or `CIDR:lo-hi`. A bare address means that one host, and an entry without a port allows all of its ports. An IPv6 entry with a port needs brackets, as in `[2001:db8::/32]:8080`. The agent checks the address it is about to connect to, so a target that is a hostname is checked after it has been resolved, on every new connection and UDP session. A rule whose literal target falls outside the list gets no listener and shows as an error with the reason in `wgft agent ls` and the Web UI; for a port range, only the ports outside the list stay closed. Leaving the setting unset, the default, means no restriction. An invalid value stops the agent at startup with exit code 3, and so does a value that holds no entries at all, such as a lone comma: a security setting must not turn itself off silently.
 
+### Roaming and the ip-flapping warning
+
+An agent whose host changes networks and returns to one it used within the last ten minutes raises the `ip-flapping` warning, once for the stream and once for the WireGuard endpoint. A laptop moving between home Wi-Fi and a phone hotspot, or between two offices, does this routinely with a single copy of its credentials; it is expected, not a sign of theft. `wgft agent warnings` lists it in this form:
+
+```
+AGENT  KIND         DETAIL                                                        AT
+home   ip-flapping  stream source alternated between 198.51.100.7 and 203.0.113.9  2026-01-01T09:00:00+09:00
+home   ip-flapping  wg endpoint alternated between 198.51.100.7 and 203.0.113.9    2026-01-01T09:00:05+09:00
+```
+
+For an agent known to roam like this, dismiss each warning:
+
+```sh
+sudo wgft agent dismiss-warning home ip-flapping
+```
+
+An `ip-flapping` warning on an agent that does not move is the case to take seriously; see `wgft agent warnings --help` for what to do next.
+
 ## 4. Add forwarding rules
 
 Verify that the agent is connected:
