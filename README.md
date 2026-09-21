@@ -15,7 +15,7 @@ flowchart LR
   subgraph vps[VPS - public IP]
     s[wgft server]
   end
-  s ==>|WireGuard tunnel| a
+  s <==>|WireGuard tunnel| a
   subgraph home[home - no open ports]
     a[wgft agent] --> g[game server<br>192.168.1.20:2456]
     a --> p[reverse proxy<br>192.168.1.30:443]
