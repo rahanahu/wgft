@@ -23,7 +23,7 @@ v1 に必須の項目には、繰り返しの頻度として「リリース候�
 
 ## マージの前に流すテスト
 
-コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L14 です。流し方は、1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行することです。この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。文書だけを変える PR は、ラボを流しません。CI の検査 (A1 から A8) は、どちらの PR でも CI が流します。
+コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L14 です。流し方は、1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行することです。この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。文書だけを変える PR は、ラボを流しません。CI の検査のうち A8 は、どちらの PR でも流します。A1 から A7 は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。
 
 コードは、実行時の挙動かテストの結果を変えうるすべての変更を指します。Go のコード (`go.mod`、`go.sum` を含む)、`deploy/`、`lab/` 自身、設定と dotenv の扱い、`scripts/`、`.goreleaser.yaml`、`.github/workflows/` がこれに当たります。変更がコードに当たらないのは、Markdown とテキストの文書 (README、`docs/` の文書とその画像) だけです。`docs/cli.md` はヘルプから生成するので、ヘルプを変えた PR は Go のコードを変える PR です。
 
@@ -58,13 +58,17 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 
 ## CI とラボの関係
 
-CI (`.github/workflows/ci.yml`) は、ホストで完結する A1 から A8 と、B 類のうち GitHub の runner で動くものを流します。ラボの結合テストは Incus の VM を必要とするので、CI では流しません ([CLAUDE.md](../CLAUDE.md) の「テストの分け方」)。ラボの一式 (A9) と、ラボを使う B 類は、PR を出す開発者がラボで流し、その結果を PR の本文に書きます。
+CI (`.github/workflows/ci.yml`) は、ホストで完結する A1 から A8 と、B 類のうち GitHub の runner で動くものを、変更の内容に応じて流します。ラボの結合テストは Incus の VM を必要とするので、CI では流しません ([CLAUDE.md](../CLAUDE.md) の「テストの分け方」)。ラボの一式 (A9) と、ラボを使う B 類は、PR を出す開発者がラボで流し、その結果を PR の本文に書きます。
 
 ラボのスクリプトは、どれも自分で server、エージェント、宛先を立てて片付けるので、互いに独立しています。この独立性があるので、ラボの一式は並列に流せます。既定の流し方は、1 台の Lab Host VM の中に Sandbox を並べる [tools/labhost](../tools/labhost) です。`labhost run -parallel N all` は、前節の `parallel` な確認をプールで並列に流し、そのあと `exclusive-*` な確認を 1 つずつ流します。1 台の Lab Host VM で一式を流すと 約 5 分半 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は 338 秒)かかります。複数の使い捨て VM に分けて流す道具もあり、8 台で約 2.5 分に縮みますが、リポジトリには含めていません。`lab/lab` は `WGFT_LAB_VM` で VM の名前を変えられるので、同じ仕組みで複数の VM を立てられます。どちらの道具も使わない開発者は、1 台の VM で確認を 1 つずつ順に流せます。その場合は 10 分以上かかります。`lab/lifecycle.sh` の check 5、5b、5c、5d、5e と `rates.sh` はどれもフラッドで CPU を使うので、複数の VM に分ける流し方では他の VM と CPU を取り合わない VM で流し、Sandbox で流す場合は `exclusive-heavy` の分類が単独の実行に振り分けます。
 
 開発の途中でラボの確認を流し直すときは、`lab/lifecycle.sh` に確認の番号を指定して、その確認だけを流せます (`lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b`)。
 
-CI は、B4 (`windows-test`)、B5 (`release-snapshot`)、B6 (`govulncheck`)、B8 (`macos-test`) を、変更の内容に応じてだけ流します。振り分けは `.github/workflows/ci.yml` の `changes` という 1 つのジョブが担い、`dorny/paths-filter` で変更されたパスを調べます。振り分けはワークフロー全体の `paths:` ではなく、ジョブごとの `if:` で行います。ワークフローの `paths:` で絞ると、当たらない PR ではジョブそのものが実行されず、GitHub の checks の一覧に現れません。ブランチ保護がこれらを必須の check にした場合、現れない check はいつまでも待ち続け、マージを永久に塞ぎます。ジョブごとの `if:` であれば、当たらない PR でもジョブは実行され、内容を飛ばして skipped で終わります。GitHub は skipped のジョブを必須の check の合格として扱うため、マージを塞ぎません。
+CI は、`build-test` (A1 から A7)、B4 (`windows-test`)、B5 (`release-snapshot`)、B6 (`govulncheck`)、B8 (`macos-test`) を、変更の内容に応じてだけ流します。振り分けは `.github/workflows/ci.yml` の `changes` という 1 つのジョブが担い、`dorny/paths-filter` で変更されたパスを調べます。振り分けはワークフロー全体の `paths:` ではなく、ジョブごとの `if:` で行います。ワークフローの `paths:` で絞ると、当たらない PR ではジョブそのものが実行されず、GitHub の checks の一覧に現れません。ブランチ保護がこれらを必須の check にした場合、現れない check はいつまでも待ち続け、マージを永久に塞ぎます。ジョブごとの `if:` であれば、当たらない PR でもジョブは実行され、内容を飛ばして skipped で終わります。GitHub は skipped のジョブを必須の check の合格として扱うため、マージを塞ぎません。
+
+`build-test` の絞り方は、他のジョブと向きが逆です。他のジョブは流す条件をパスの一覧で数え上げますが、`build-test` は skip する条件を数え上げます。A1 から A7 の検査が見るのは Go のソース、`go.mod`、`go.sum`、および Go のテストが読むファイルだけなので、Markdown の文書と `docs/images/` の画像だけを変えた PR では結果が変わりません。`changes` ジョブは変更されたパスの一覧を受け取り、一覧のすべてが Markdown の文書か `docs/images/` の画像であるときにだけ `build-test` を skip します。当てはまらないパスが 1 つでも混じれば流します。`docs/cli.md` は Markdown ですが、`cmd/wgft/helptext.go` から生成して `TestCLIDocUpToDate` が照合するので、文書としては扱いません。
+
+向きを逆にした理由は、A2 の `go test ./...` が Go 以外のファイルも読むことにあります。読み取りの対象は `docs/cli.md`、`internal/vpsd/admin` が `go:embed` で取り込む Web UI のテンプレートと静的ファイル、`tools/labhost` の `suite_test.go` が読む `lab/suite.txt`、`internal/policy` と `internal/dataplane/linuxkernel/nft` の `testdata` です。流す条件を数え上げる書き方では、後から加わった読み取り先が漏れて、検査が静かに skip されます。skip する条件を数え上げる書き方では、一覧に無いパスはすべて流す側に倒れます。
 
 B4 と B8 は、前節の表の `agent-platform` の契機どおりには絞りません。`agent-platform` の契機は、CI では再現できない実機の確認 (D1、D2、E4、E5) の定義としてそのまま残しますが、`windows-test` と `macos-test` は、Go のソースファイル (`*.go`) 1 つでも、`go.mod`、`go.sum` のどちらかでも変えた PR で流します。理由は、この 2 つのジョブが実行する `cmd/wgft` と `internal/agent` などのテストの一式が、実際のサーバのデータベースや admin backend を組み立てるためです。組み立てに使う依存は `internal/vpsd/store`、`internal/vpsd/admin`、`proto`、`internal/model`、`internal/policy`、`internal/resource`、`internal/nettun` など広い範囲に及び、パスの一覧として手で追いかけると保守のたびに漏れが生じます。加えて、特定の OS でだけ壊れる変更は、`*_windows.go` のようなプラットフォーム固有のファイルの外に置かれることもあります。共有パッケージの中でファイルパスや `file:` の URI をスラッシュ区切りで組み立てるコードは、その一例です。Linux と macOS では動いても Windows では壊れ、これを捉えられるのは実際に Windows で流すジョブだけです。この理由から、`windows-test` と `macos-test` は Go のコードと `go.mod`、`go.sum` のどれも変えない PR (文書、`lab/` のスクリプト、`deploy/` の設定ファイル、画像だけの変更) でだけ skip します。
 
@@ -72,7 +76,7 @@ B5 は、前節の表の `build` の契機 (`.goreleaser.yaml`、GoReleaser の�
 
 B6 は `build` の契機に加えて、Go のソースファイルの変更でも流します。`govulncheck` は既知の脆弱性への到達可能性をコード全体の呼び出しグラフから判定するため、`go.mod` や `go.sum` を変えない Go のソースの変更だけでも、既存の脆弱な依存関係への呼び出しの経路が新しく生まれることがあります。これは前節の表の `build` だけに絞った記述より広い判定です。
 
-パスによる判定ができない、または信用できないときは、契機を問わずすべてを流す側に倒します。`changes` ジョブの `paths-filter` の実行が失敗したとき、比較対象の直前のコミットが無いとき (ブランチの最初の push、force push)、`workflow_dispatch` による手動実行のとき、`.github/workflows/**` 自身を変更したとき (振り分けの仕組み自身の変更を、その仕組みに判定させないため) は、B4、B5、B6、B8 のすべてを流します。B6 はこれに加えて、週に 1 回の定期実行と `workflow_dispatch` でも流します。定期実行はコードを変えていない PR にも起きるため、この場合の失敗は外部の脆弱性の情報の変化によるものであり、コードの不具合とは限りません。定期実行が失敗すると、GitHub はリポジトリの所有者に既定でメールを送ります。追加の通知の仕組みや issue を起票する bot は用意していません。
+パスによる判定ができない、または信用できないときは、契機を問わずすべてを流す側に倒します。`changes` ジョブの `paths-filter` の実行が失敗したとき、比較対象の直前のコミットが無いとき (ブランチの最初の push、force push)、`workflow_dispatch` による手動実行のとき、`.github/workflows/**` 自身を変更したとき (振り分けの仕組み自身の変更を、その仕組みに判定させないため) は、`build-test`、B4、B5、B6、B8 のすべてを流します。B6 はこれに加えて、週に 1 回の定期実行と `workflow_dispatch` でも流します。定期実行はコードを変えていない PR にも起きるため、この場合の失敗は外部の脆弱性の情報の変化によるものであり、コードの不具合とは限りません。定期実行が失敗すると、GitHub はリポジトリの所有者に既定でメールを送ります。追加の通知の仕組みや issue を起票する bot は用意していません。
 
 netns のトポロジを組む `lab/netns.sh` は Incus に依存しないので、GitHub の runner の上で root としてラボの一式を流す案があります。ただし、runner のカーネルの版と、runner で動く Docker が有効にする `br_netfilter` の影響が結果に混ざるので、ラボを VM に切り分けた理由 (CLAUDE.md の「開発用ラボの立て方」) と両立するかは未確認です。v1 では採りません。
 
@@ -120,13 +124,13 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 
 | 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 所要時間 | 自動化 |
 |---|---|---|---|---|---|---|---|
-| A1 | `gofmt -l`、`go mod tidy` の差分、`go vet`、`go build ./...` | 書式の崩れ、`go.mod` の不整合、ビルドの失敗 | CI (Linux) | すべての PR | PR の更新ごと | 1 分前後 | 自動 |
-| A2 | `go test ./...` | 単体で確かめられる退行全般 (`docs/cli.md` とヘルプの食い違いを捉える `TestCLIDocUpToDate` を含めて) | CI (Linux)、ホスト | すべての PR | PR の更新ごと | 1 から 2 分 | 自動 |
-| A3 | Admission Policy の共有 fixture (`internal/policy/admissiontest`、`internal/policy/testdata/admission`) | nftables のコンパイラと Go の評価器の判定、drop の種類、カウンタの食い違い (7a.9 節) | CI (Linux)、ホスト | すべての PR | PR の更新ごと | 数秒 | 自動 |
-| A4 | 計画と収束の故障注入 (`internal/planner`、`internal/reconcile` の retry、repair、drift のテスト、`internal/dataplane` の fail-closed のテスト) | Prepare、Commit の失敗の扱い、世代の前進、再試行の誤り (7a.3 節) | CI (Linux)、ホスト | すべての PR | PR の更新ごと | 数秒 | 自動 |
-| A5 | nftables の行の生成 (`internal/dataplane/linuxkernel/nft` と `internal/policy/nftables` の単体テスト) | 行の順序、行の抜け、ルールごとの fail-closed の誤り (カーネルを使わない照合) | CI (Linux)、ホスト | すべての PR | PR の更新ごと | 数秒 | 自動 |
-| A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | すべての PR | PR の更新ごと | 1 分前後 | 自動 |
-| A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | すべての PR | PR の更新ごと | 1 分前後 | 自動 |
+| A1 | `gofmt -l`、`go mod tidy` の差分、`go vet`、`go build ./...` | 書式の崩れ、`go.mod` の不整合、ビルドの失敗 | CI (Linux) | コードを変える PR | PR の更新ごと | 1 分前後 | 自動 |
+| A2 | `go test ./...` | 単体で確かめられる退行全般 (`docs/cli.md` とヘルプの食い違いを捉える `TestCLIDocUpToDate` を含めて) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 1 から 2 分 | 自動 |
+| A3 | Admission Policy の共有 fixture (`internal/policy/admissiontest`、`internal/policy/testdata/admission`) | nftables のコンパイラと Go の評価器の判定、drop の種類、カウンタの食い違い (7a.9 節) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 数秒 | 自動 |
+| A4 | 計画と収束の故障注入 (`internal/planner`、`internal/reconcile` の retry、repair、drift のテスト、`internal/dataplane` の fail-closed のテスト) | Prepare、Commit の失敗の扱い、世代の前進、再試行の誤り (7a.3 節) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 数秒 | 自動 |
+| A5 | nftables の行の生成 (`internal/dataplane/linuxkernel/nft` と `internal/policy/nftables` の単体テスト) | 行の順序、行の抜け、ルールごとの fail-closed の誤り (カーネルを使わない照合) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 数秒 | 自動 |
+| A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | コードを変える PR | PR の更新ごと | 1 分前後 | 自動 |
+| A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 1 分前後 | 自動 |
 | A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力 | CI (Linux) | すべての PR | PR の更新ごと | 1 分未満 | 自動 |
 | A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L14。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。7a.8 節の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | Sandbox で 約 5 分半 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は 338 秒)、複数の VM で並列に約 2.5 分、1 台で順に 10 分以上 | 自動 (開発者が起動) |
 

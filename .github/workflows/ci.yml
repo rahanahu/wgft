@@ -45,8 +45,25 @@ name: CI
 # change how the other jobs behave, so path filtering must not be trusted to judge its own
 # correctness.
 #
-# build-test (A1, A2, A5, A6, A7) and lint-output (A8) are not gated: they are the cheap
-# checks that docs/testing.md's A class runs on every PR regardless of what changed.
+#   docs_only -> gates build-test (A1, A2, A5, A6, A7) the other way round: that job is
+#               skipped only when every file the change touches is a Markdown document or an
+#               image under docs/images/. This is docs/testing.md's own definition of a change
+#               that is not code, and the exception it names applies here too: docs/cli.md is
+#               generated from cmd/wgft/helptext.go and compared against it by
+#               TestCLIDocUpToDate, so a change touching it is a code change and does not
+#               count as docs_only.
+#
+#     Unlike go_code, this is an allowlist evaluated over every changed path, so anything the
+#     list does not name runs the job. That direction is what makes it safe to skip a job whose
+#     `go test ./...` reads files that are not Go source: besides docs/cli.md, the Web UI
+#     templates and static files that internal/vpsd/admin embeds with go:embed, lab/suite.txt
+#     that tools/labhost's suite_test.go loads, and the testdata directories under
+#     internal/policy and internal/dataplane/linuxkernel/nft. None of those is a Markdown file
+#     or an image under docs/images/, so none of them can be skipped by mistake, and a new one
+#     added later cannot either. A change that mixes a document with anything else runs the job.
+#
+# lint-output (A8) is not gated at all: it is what catches full-width punctuation in README.md
+# and docs/*.md, which is exactly the kind of change docs_only describes.
 #
 # Every job below always reports a status. The workflow itself always triggers on push and
 # pull_request; only the job body is conditional on the `changes` job's output, so a job this
@@ -80,6 +97,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run_all: ${{ steps.decide.outputs.run_all }}
+      docs_only: ${{ steps.decide.outputs.docs_only }}
       go_code: ${{ steps.filter.outputs.go_code }}
       build: ${{ steps.filter.outputs.build }}
     steps:
@@ -99,7 +117,14 @@ jobs:
         uses: dorny/paths-filter@v4
         continue-on-error: true
         with:
+          # changed_files below carries every path this change touches, which the decide step
+          # needs to answer "is this nothing but documents?". The filters themselves cannot
+          # answer that: each one reports whether ANY changed path matched it, never whether
+          # ALL of them did.
+          list-files: json
           filters: |
+            changed:
+              - '**'
             workflows:
               - '.github/workflows/**'
             go_code:
@@ -126,6 +151,14 @@ jobs:
         # the workflow files themselves (the `workflows` filter) also sets run_all, for the
         # reason in the header comment. A schedule event never sets run_all: its only
         # purpose is the govulncheck run below, which checks github.event_name directly.
+        #
+        # docs_only follows the same fail-open rule from the other side: it stays false
+        # unless the file list is present and every entry in it is a document, so every
+        # case that sets run_all leaves docs_only false and build-test runs.
+        env:
+          # Through the environment rather than an expression inside the script: this value
+          # is file names from the change being tested.
+          CHANGED_FILES: ${{ steps.filter.outputs.changed_files }}
         run: |
           event="${{ github.event_name }}"
           outcome="${{ steps.filter.outcome }}"
@@ -145,11 +178,34 @@ jobs:
           fi
           echo "run_all=$run_all" >> "$GITHUB_OUTPUT"
 
+          # A change is documents only when it touches at least one file and every one of
+          # them is a Markdown document other than the generated docs/cli.md, or an image
+          # under docs/images/. See the header comment for why the test is written as an
+          # allowlist over the whole list.
+          docs_only=false
+          if [ "$run_all" = "false" ] && [ -n "$CHANGED_FILES" ]; then
+            if printf '%s' "$CHANGED_FILES" | jq -e '
+                  length > 0 and all(
+                    . != "docs/cli.md"
+                    and (endswith(".md") or startswith("docs/images/"))
+                  )' > /dev/null; then
+              docs_only=true
+            fi
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
   build-test:
-    # A1, A2, A5, A6, A7 (see docs/testing.md): always runs on every push and pull
-    # request. Not gated, and not run on the weekly schedule (that event exists only to
-    # drive govulncheck below).
-    if: github.event_name != 'schedule'
+    # A1, A2, A5, A6, A7 (see docs/testing.md). Every check in it reads Go source, go.mod,
+    # go.sum or a file the Go tests load, so a change that touches nothing but documents and
+    # images cannot alter its result. Skipped in exactly that case and run otherwise,
+    # including whenever the changes job could not decide; see the header comment. Not run on
+    # the weekly schedule (that event exists only to drive govulncheck below).
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.docs_only != 'true'
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
