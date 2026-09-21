@@ -57,6 +57,10 @@ type Status struct {
 	Err           error // エンドポイントの解決失敗など
 }
 
+// bindForDevice は device に渡す UDP バインドを作る。値は GOOS ごとの newBind
+// (bind_other.go と bind_windows.go)で、テストだけが受信の停止を模すために差し替える。
+var bindForDevice = newBind
+
 // New はトンネルを作って up する。エンドポイントの解決に失敗しても起こし、引き直しに任せる。
 func New(cfg Config) (*Tunnel, error) {
 	if cfg.Logf == nil {
@@ -70,7 +74,7 @@ func New(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
 	t := &Tunnel{cfg: cfg, tnet: tnet}
-	t.dev = device.NewDevice(tnet, newBind(), device.NewLogger(device.LogLevelError, "wg: "))
+	t.dev = device.NewDevice(tnet, bindForDevice(), device.NewLogger(device.LogLevelError, "wg: "))
 
 	ep, err := resolve(cfg.Endpoint)
 	if err != nil {
