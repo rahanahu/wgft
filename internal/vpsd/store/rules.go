@@ -71,7 +71,7 @@ type BatchResult struct {
 
 // ApplyBatch はルール集合の変更を 1 トランザクションで行う(仕様 5.4 節)。
 // mutate は現在の集合を受け取り、変更後の集合を返す。検証は変更後の全体に対して行い、
-// エージェントに配る部分(id、proto、listen_port、target、enabled)に差があれば世代を 1 だけ上げる。
+// エージェントごとに配る内容(agentView)に差があれば世代を 1 だけ上げる。
 // 接続元制限だけの変更では世代は上がらない。
 func (s *Store) ApplyBatch(reserved proto.Reserved, mutate func(rules []proto.Rule) ([]proto.Rule, error)) (*BatchResult, error) {
 	tx, err := s.db.Begin()
@@ -124,10 +124,21 @@ func (s *Store) ApplyBatch(reserved proto.Reserved, mutate func(rules []proto.Ru
 	return &BatchResult{Rules: after, Generation: gen, Changed: changed}, nil
 }
 
-func agentView(rules []proto.Rule) []proto.AgentRule {
-	out := make([]proto.AgentRule, 0, len(rules))
+// agentView はルール集合を、エージェントごとに配る内容へ射影する(仕様 5.2、5.3 節)。
+// 持ち主(proto.Rule.Agent)は proto.AgentRule に入らない。エージェントに送る全体状態そのものに
+// 持ち主は含まれないからである。しかし全体状態はエージェントごとに組み立てられ、そのエージェントが
+// 持ち主であるルールだけが入る(vpsd.Daemon.AgentState)。持ち主を移す変更は、移す前のエージェントの
+// 全体状態からその行を外し、移した先のエージェントの全体状態にその行を入れるので、配る内容が変わる。
+// そのため比較の側では持ち主でまとめる。行そのものを並べて比べていた頃は移動が差として現れず、
+// 世代が上がらないまま、どちらのエージェントも新しい全体状態を受け取らなかった。
+//
+// 各エージェントの中の並び順は保存の順のままにする。全体状態のルールの並びも同じ順であり、
+// 並べ替えは配る内容の変化として扱う。map の値は必ず 1 要素以上を持つので、nil と空スライスの
+// 区別が比較に混ざることはない。
+func agentView(rules []proto.Rule) map[string][]proto.AgentRule {
+	out := make(map[string][]proto.AgentRule, len(rules))
 	for i := range rules {
-		out = append(out, rules[i].ForAgent())
+		out[rules[i].Agent] = append(out[rules[i].Agent], rules[i].ForAgent())
 	}
 	return out
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/netip"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -220,5 +221,185 @@ func TestGroupNoteNoGeneration(t *testing.T) {
 	}
 	if rules, _ := s.Rules(); len(rules) != 1 || rules[0].Group != "valheim" || rules[0].Note != "週末サーバ" {
 		t.Errorf("group/note not persisted: %+v", rules)
+	}
+}
+
+// distributedTo は vpsd.Daemon.AgentState と同じ選び方で、そのエージェントに配るルールを返す。
+func distributedTo(rules []proto.Rule, agent string) []proto.AgentRule {
+	out := []proto.AgentRule{}
+	for i := range rules {
+		if rules[i].Agent == agent {
+			out = append(out, rules[i].ForAgent())
+		}
+	}
+	return out
+}
+
+// TestRuleMoveBetweenAgentsBumpsGeneration は、ルールの持ち主を別のエージェントへ移す変更で
+// 世代が上がることを確かめる(仕様 5.2、5.3 節)。proto.Rule.Agent は proto.AgentRule に
+// 入らないので、行ごとの射影だけを並べて比べていた頃は移動が差として現れず、世代が上がらず、
+// 旧い持ち主も新しい持ち主も新しい全体状態を受け取らなかった。
+func TestRuleMoveBetweenAgentsBumpsGeneration(t *testing.T) {
+	s := openTemp(t)
+	res, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		return append(r, rule("a", proto.TCP, 25565, 25565, "h:25565")), nil
+	})
+	if err != nil || res.Generation != 1 || !res.Changed {
+		t.Fatalf("add: %+v %v", res, err)
+	}
+	before := res.Rules
+	if len(distributedTo(before, "home")) != 1 || len(distributedTo(before, "office")) != 0 {
+		t.Fatalf("before the move: home=%+v office=%+v", distributedTo(before, "home"), distributedTo(before, "office"))
+	}
+
+	res, err = s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		r[0].Agent = "office"
+		return r, nil
+	})
+	if err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if !res.Changed || res.Generation != 2 {
+		t.Fatalf("moving a rule to another agent must bump the generation: changed=%v generation=%d, want true 2",
+			res.Changed, res.Generation)
+	}
+	after := res.Rules
+	if got := distributedTo(after, "home"); len(got) != 0 {
+		t.Errorf("after the move the old agent still gets the rule: %+v", got)
+	}
+	if got := distributedTo(after, "office"); len(got) != 1 || got[0].ID != "a" {
+		t.Errorf("after the move the new agent does not get the rule: %+v", got)
+	}
+	if rules, _ := s.Rules(); len(rules) != 1 || rules[0].Agent != "office" {
+		t.Errorf("owner not persisted: %+v", rules)
+	}
+
+	// 移し戻しても同じように上がる。
+	res, err = s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		r[0].Agent = "home"
+		return r, nil
+	})
+	if err != nil || !res.Changed || res.Generation != 3 {
+		t.Fatalf("moving back: %+v %v", res, err)
+	}
+}
+
+// TestBatchMovingAndEditingTogether は、1 つのバッチが片方のルールの持ち主を移し、もう片方の
+// 配らないフィールドだけを変える場合に、世代が 1 つだけ上がり、両方の変更が保存されることを
+// 確かめる(仕様 5.4 節。バッチの結果で上がる世代は 1 つ)。
+func TestBatchMovingAndEditingTogether(t *testing.T) {
+	s := openTemp(t)
+	res, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		return append(r, rule("a", proto.TCP, 25565, 25565, "h:25565"), rule("b", proto.UDP, 2456, 2456, "h:2456")), nil
+	})
+	if err != nil || res.Generation != 1 {
+		t.Fatalf("add: %+v %v", res, err)
+	}
+	res, err = s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		r[0].Agent = "office" // 配る先が変わる
+		r[1].Note = "a note"  // 配らないので、単独なら世代は上がらない
+		return r, nil
+	})
+	if err != nil || !res.Changed || res.Generation != 2 {
+		t.Fatalf("move plus an invisible edit must bump the generation exactly once: %+v %v", res, err)
+	}
+	rules, err := s.Rules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 || rules[0].Agent != "office" || rules[1].Agent != "home" || rules[1].Note != "a note" {
+		t.Fatalf("both changes must be persisted: %+v", rules)
+	}
+	if got := distributedTo(rules, "office"); len(got) != 1 || got[0].ID != "a" {
+		t.Errorf("office must get rule a: %+v", got)
+	}
+	if got := distributedTo(rules, "home"); len(got) != 1 || got[0].ID != "b" {
+		t.Errorf("home must keep rule b only: %+v", got)
+	}
+}
+
+// invisibleChange は proto.Rule のフィールドのうち、proto.AgentRule に無く、変更しても世代が
+// 上がってはならないものと、その変え方。持ち主(Agent)だけは例外で、移すと配る先が変わるため
+// 世代が上がる(TestRuleMoveBetweenAgentsBumpsGeneration)。順に 1 つずつ適用するので、
+// VPSMode を proxy にしてから ProxyProtocol を立てる並びにしてある(kernel のまま
+// proxy_protocol を立てると Rule.Validate が拒む)。
+type invisibleChange struct {
+	field  string
+	mutate func(*proto.Rule)
+}
+
+func invisibleChanges() []invisibleChange {
+	rate, _ := proto.ParseRate("10/second")
+	prefix := netip.MustParsePrefix("203.0.113.0/24")
+	return []invisibleChange{
+		{"Group", func(r *proto.Rule) { r.Group = "valheim" }},
+		{"Note", func(r *proto.Rule) { r.Note = "a note" }},
+		{"SourceAllow", func(r *proto.Rule) { r.SourceAllow = []netip.Prefix{prefix} }},
+		{"SourceDeny", func(r *proto.Rule) { r.SourceDeny = []netip.Prefix{prefix} }},
+		{"NewFlowRate", func(r *proto.Rule) { v := rate; r.NewFlowRate = &v }},
+		{"PacketRate", func(r *proto.Rule) { v := rate; r.PacketRate = &v }},
+		{"PerSourceRate", func(r *proto.Rule) { v := rate; r.PerSourceRate = &v }},
+		{"VPSMode", func(r *proto.Rule) { r.VPSMode = proto.ModeProxy }},
+		{"ProxyProtocol", func(r *proto.Rule) { r.ProxyProtocol = true }},
+	}
+}
+
+// TestInvisibleFieldsDoNotBumpGeneration は、エージェントに配らないフィールドの変更で世代が
+// 上がらないことを、フィールドごとに確かめる(仕様 5.3 節)。持ち主の比較を加えたことで、
+// 配らない変更まで世代を上げるようになっていないことを見る。最初の照合は、proto.Rule に
+// フィールドが増えたときに、その新しいフィールドがどちら側(配る、配らない)かを決めないまま
+// 通り過ぎないようにするためのものである。
+func TestInvisibleFieldsDoNotBumpGeneration(t *testing.T) {
+	agentFields := map[string]bool{}
+	at := reflect.TypeOf(proto.AgentRule{})
+	for i := 0; i < at.NumField(); i++ {
+		agentFields[at.Field(i).Name] = true
+	}
+	covered := map[string]bool{"Agent": true} // 持ち主は上がる側。上の 2 つのテストが見る
+	changes := invisibleChanges()
+	for _, c := range changes {
+		covered[c.field] = true
+	}
+	rt := reflect.TypeOf(proto.Rule{})
+	for i := 0; i < rt.NumField(); i++ {
+		name := rt.Field(i).Name
+		if agentFields[name] || covered[name] {
+			continue
+		}
+		t.Errorf("proto.Rule.%s is not in proto.AgentRule and no test says whether it bumps the generation", name)
+	}
+
+	s := openTemp(t)
+	res, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		return append(r, rule("a", proto.TCP, 25565, 25565, "h:25565")), nil
+	})
+	if err != nil || res.Generation != 1 {
+		t.Fatalf("add: %+v %v", res, err)
+	}
+	for _, c := range changes {
+		before, err := s.Rules()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+			c.mutate(&r[0])
+			return r, nil
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", c.field, err)
+		}
+		if res.Changed || res.Generation != 1 {
+			t.Errorf("changing %s must not bump the generation: changed=%v generation=%d",
+				c.field, res.Changed, res.Generation)
+		}
+		after, err := s.Rules()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 変更が本当に保存されていることを見る。何も変えていない変更を「上がらない」と
+		// 判定しても意味が無いため。
+		if reflect.DeepEqual(before, after) {
+			t.Errorf("changing %s changed nothing; the case proves nothing", c.field)
+		}
 	}
 }
