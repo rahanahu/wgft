@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
@@ -799,7 +800,7 @@ func TestResolveWithoutEvidenceIsNotTested(t *testing.T) {
 			if c.Status != statusNotTested || c.Reason != reasonResolvedByAgent {
 				t.Errorf("status/reason = %s/%s, want %s/%s: %s", c.Status, c.Reason, statusNotTested, reasonResolvedByAgent, c.Detail)
 			}
-			if !strings.Contains(c.Next, "agent-side doctor") {
+			if !strings.Contains(c.Next, "on the agent host") {
 				t.Errorf("next must send the operator to the agent host, got %q", c.Next)
 			}
 		})
@@ -867,5 +868,86 @@ func TestOffPathChecksAreExactlyTheDocumentedTwo(t *testing.T) {
 		if c.offPath && c.Status == statusFailed {
 			t.Errorf("check %q is off the path, so it must never report failed", c.ID)
 		}
+	}
+}
+
+// TestHandshakeOlderThanThresholdIsFailedNotStale は、最終ハンドシェイクの扱いを固定する
+// (設計文書 10.2a 節)。`agent.connection` と `rule.target` はエージェントが過去に送った報告
+// なので、古ければ「今どうなっているか分からない」を意味し unknown になる。`tunnel.handshake`
+// は報告ではなく、server が WireGuard から今読む値である。「最終ハンドシェイクは 181 秒前」と
+// いう値は、今この瞬間に読んだ現在の観測であり、トンネルが健全の条件を満たしていないことを
+// 示す。古い証拠ではないので unknown ではなく failed にする。7 節の時定数がこれを裏づける。
+// keepalive が 25 秒、`RekeyAfterTime` が 120 秒なので健全なトンネルの最終ハンドシェイクは
+// 145 秒より古くならず、`RejectAfterTime` の 180 秒を過ぎた鍵は送信にも使えない。
+func TestHandshakeOlderThanThresholdIsFailedNotStale(t *testing.T) {
+	tests := []struct {
+		name       string
+		handshake  string
+		wantStatus string
+		wantReason string
+	}{
+		{"just inside the threshold", at(179 * time.Second), statusOK, ""},
+		{"just past the threshold", at(181 * time.Second), statusFailed, reasonNoRecentHandshake},
+		{"never handshook", "", statusFailed, reasonNoRecentHandshake},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := tcpRule()
+			in := healthyInput(r)
+			in.Agents[0].LastHandshake = tt.handshake
+			in.Rules.Rules = []proto.Rule{r}
+			c := checkOf(t, diagnose(r, in), checkHandshake)
+			if c.Status != tt.wantStatus || c.Reason != tt.wantReason {
+				t.Errorf("status/reason = %s/%s, want %s/%s: %s", c.Status, c.Reason, tt.wantStatus, tt.wantReason, c.Detail)
+			}
+			if tt.wantStatus == statusFailed && c.Status == statusUnknown {
+				t.Error("a handshake read now is a current observation, not stale evidence; it must not fall to unknown")
+			}
+		})
+	}
+}
+
+// TestHandshakePastThresholdExitsNonZero は、上の判定が終了コードまで届くことを確かめる。
+// unknown にすると warn と同じく 0 で終わってしまい、転送が止まっているトンネルを監視が
+// 見逃す。
+func TestHandshakePastThresholdExitsNonZero(t *testing.T) {
+	r := tcpRule()
+	in := healthyInput(r)
+	in.Agents[0].LastHandshake = at(181 * time.Second)
+	in.Rules.Rules = []proto.Rule{r}
+	rep := buildReport([]proto.Rule{r}, in)
+
+	if rep.Rules[0].StoppedAt != checkHandshake {
+		t.Errorf("stopped_at = %q, want %q", rep.Rules[0].StoppedAt, checkHandshake)
+	}
+	err := doctorExit(rep)
+	if err == nil {
+		t.Fatal("a handshake past the threshold must make the command exit non-zero")
+	}
+	if code := exitCode(err); code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+}
+
+// TestWrongArgumentCountExitsUnavailable は、引数の数の誤りが終了コード 2 になることを確かめる
+// (設計文書 10.2a 節)。cobra の Args をそのまま渡すと、その誤りだけが包まれずに exitCode へ
+// 届き、「壊れた検査があった」の 1 と見分けが付かなくなる。
+func TestWrongArgumentCountExitsUnavailable(t *testing.T) {
+	err := newServerDoctorCmd().Args(nil, []string{"one", "two"})
+	if err == nil {
+		t.Fatal("two arguments must be rejected")
+	}
+	var un *unavailableError
+	if !errors.As(err, &un) {
+		t.Errorf("the argument error must be an *unavailableError so it exits %d, got %T: %v", exitUnavailable, err, err)
+	}
+	if code := exitCode(err); code != exitUnavailable {
+		t.Errorf("exit code = %d, want %d", code, exitUnavailable)
+	}
+	if err := newServerDoctorCmd().Args(nil, []string{"one"}); err != nil {
+		t.Errorf("one argument is valid, got %v", err)
+	}
+	if err := newServerDoctorCmd().Args(nil, nil); err != nil {
+		t.Errorf("no argument is valid, got %v", err)
 	}
 }

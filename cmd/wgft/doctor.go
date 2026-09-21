@@ -111,17 +111,21 @@ const (
 	// ごとにハートビートを送る(設計文書 5.2 節)ので、3 回分の沈黙を越えたら、接続していると
 	// いう表示を今の値として扱わない。
 	heartbeatStale = 90 * time.Second
-	// handshakeStale は、トンネルの観測が古くなる長さである。健全なトンネルの最終ハンドシェイクは
-	// 145 秒以内に必ず新しくなり(設計文書 7 節)、窃取検知も 3 分以内のものだけを生きていると
-	// 見なす(5.2 節)ので、同じ 3 分を使う。
+	// handshakeStale は、最終ハンドシェイクがトンネルの健全を示さなくなる長さである。健全な
+	// トンネルの最終ハンドシェイクは 145 秒以内に必ず新しくなり(設計文書 7 節)、窃取検知も
+	// 3 分以内のものだけを生きていると見なす(5.2 節)ので、同じ 3 分を使う。
+	//
+	// 他の 2 つの閾値と違い、これを越えた値は古い証拠ではなく、今読んだ現在の観測である
+	// (10.2a 節)。`tunnel.handshake` は報告ではなく、server が WireGuard から今読む値なので、
+	// 越えていれば FAILED になる。受信だけが死んだトンネルを見分けられない期間も同じ長さで
+	// あり、別の定数を持たない。エージェントが device と netstack を作り直す 300 秒(7 節)は
+	// エージェント側の watchdog の閾値であって、診断が気付けない期間ではない。1 つの数に
+	// 2 つの定数を置いたことが、両者の取り違えを生んでいた。
 	handshakeStale = 3 * time.Minute
 	// targetReportStale は、エージェントが報告したルールの状態が古くなる長さである。TCP の
 	// target への接続確認は 30 秒ごとに行われる(設計文書 5.2 節)ので、ハートビートと同じ
 	// 90 秒を越えた報告は、今の値として扱わない。
 	targetReportStale = 90 * time.Second
-	// oneWayBlind は、受信だけが死んだトンネルを最終ハンドシェイクからは見分けられない長さで
-	// ある。エージェントは 300 秒でトンネルを作り直す(設計文書 7 節)。
-	oneWayBlind = 5 * time.Minute
 )
 
 // doctorReport は 1 回の診断の結果全体である。JSON はこの形で出し、人向けの出力とは別の、
@@ -232,7 +236,15 @@ func newServerDoctorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor [rule]",
 		Short: "diagnose why traffic is not getting through; VPS side, reads the admin API",
-		Args:  cobra.MaximumNArgs(1),
+		// 引数の数の誤りも「報告を作れなかった」失敗であり、終了コード 2 で終わる(設計文書
+		// 10.2a 節)。cobra の Args をそのまま渡すと、その誤りだけが包まれずに exitCode へ届き、
+		// 「壊れた検査があった」の 1 と見分けが付かなくなる。
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.MaximumNArgs(1)(cmd, args); err != nil {
+				return unavailable(err)
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := adminClient(cmd)
 			if err != nil {
@@ -375,10 +387,11 @@ func notTestedList(rules []proto.Rule, in doctorInput) []notTested {
 			"only under load does not appear."},
 		{"the service", "the application behind the target. Every check here connects and closes without speaking the protocol, " +
 			"so a port that accepts while the service refuses, is full, or is the wrong service reads as healthy."},
-		{"one-way tunnel", "the first " + oneWayBlind.String() + " of a tunnel that stopped receiving. Its handshake stays recent " +
+		{"one-way tunnel", "the first " + handshakeStale.String() + " of a tunnel that stopped receiving. Its handshake stays recent " +
 			"for that long, so a check run inside that window calls it healthy."},
+		// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
 		{"the agent host", "the agent's own environment: its OS, its permissions, its interfaces and its name resolution. This " +
-			"server sees only what the heartbeat carries. Run the agent-side doctor on that host."},
+			"server sees only what the heartbeat carries. To see it, read the agent's own log on that host."},
 	}
 	if !in.Probed {
 		out = append(out, notTested{"inner path", "nothing was dialled. Add --probe to open one real TCP connection from this " +
@@ -784,11 +797,15 @@ func connectionCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRep
 				"the agent reached this server but was rejected (see the server log)",
 				"this server has not yet noticed a connection that is in fact alive",
 			}
-			c.Next = "on the agent host run the agent-side doctor; meanwhile read this server's log for this agent. Traffic keeps flowing; rule changes do not arrive."
+			// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
+			c.Next = "read this server's log for this agent's control connection, and the agent's own log on its host " +
+				"(journalctl -u wgft-agent, or docker logs). Traffic keeps flowing; rule changes do not arrive."
 			return c
 		}
 		c.Causes = []string{"the agent is not running", "it cannot reach this VPS's agent API port", "the home line or the ISP is down"}
-		c.Next = "on the agent host run the agent-side doctor, or: systemctl status wgft-agent (docker logs for a container)"
+		// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
+		c.Next = "on the agent host: systemctl status wgft-agent and journalctl -u wgft-agent (docker logs for a container), " +
+			"then check that it can reach this VPS's agent API port"
 		return c
 	}
 	if !hbOK {
@@ -926,7 +943,9 @@ func resolveCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport
 		// 古い証拠ではなく、そもそも試していない条件として扱う(10.2a 節の状態の定義)。
 		c.Status, c.Reason = statusNotTested, reasonResolvedByAgent
 		c.Detail = "not tested: the agent resolves " + host + " itself and this server never observes the result; only a failure reaches it, inside the reason on the target line below"
-		c.Next = "to see resolution itself, run the agent-side doctor on that host"
+		// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
+		c.Next = "to see resolution itself, resolve " + host + " on the agent host, and read the agent's log for what it " +
+			"reports about this rule"
 	}
 	return c
 }
