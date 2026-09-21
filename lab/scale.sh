@@ -37,10 +37,10 @@
 # budgets below are bounds on how long we wait, not speed claims). The one-by-one ladder cuts short
 # on its own per-rung ONEBYONE_BUDGET timing out; the rules actually added are left in place and
 # checked as far as they got. The batch ladder cuts short the first time a `rule import` fails to
-# converge within BATCH_APPLY_BUDGET -- this DOES happen on this lab VM, at kernel mode's netlink
-# wall (see LADDER below), even though one `rule import` call replaces the whole set in a single
-# apply regardless of how many rules the file carries; that non-convergence is itself the finding,
-# and repeating it at every larger rung would only re-spend the budget, not learn anything new.
+# converge within BATCH_APPLY_BUDGET; one `rule import` call replaces the whole set in a single
+# apply regardless of how many rules the file carries, so a rung that fails to converge is itself
+# the finding, and repeating it at every larger rung would only re-spend the budget, not learn
+# anything new. No rung is expected to cut short now (see LADDER below).
 #
 #   lab/lab exec vm bash /wgft/lab/scale.sh kernel
 #   lab/lab exec vm bash /wgft/lab/scale.sh userspace
@@ -86,17 +86,14 @@ RULE_AGENT=home0
 BASE=20000                 # ladder rules occupy BASE..BASE+R-1
 # A first trial with the suggested 10/100/500/1000 ladder found a hard wall in between: kernel
 # mode's apply flushes the WHOLE table in one netlink SendMessages call
-# (github.com/google/nftables@v0.3.0 conn.go's Flush), and on this lab VM's default socket buffer
-# sizes that call starts failing somewhere around 100-200 rules. An isolated bisection by hand,
-# server and one idle agent only, no other load, found 100 rules applying cleanly and the wall
-# starting at 150 (reply read failing with ENOBUFS even though the write went through) and 200
-# (the send itself failing with EMSGSIZE, "message too long", applying nothing). Full runs of this
-# scenario (5 agents, the checks that precede the ladder) instead see the wall at R=100 itself
-# (ENOBUFS), reproducibly: more netlink and admin-API traffic already in flight around the same
-# socket buffers moves the wall down from the isolated bisection's number. Wherever it lands, it
-# is a hard wall, not a slow path: PASS/FAIL below is the correctness signal, not a speed number.
-# 150 and 200 stay in the ladder to double-check the wall from a second rung when it is reached;
-# 500 and 1000 stay to be skipped, on record, by the cut-short above rather than silently absent.
+# (github.com/google/nftables@v0.3.0 conn.go's Flush), and on this lab VM's DEFAULT socket buffer
+# sizes that call started failing somewhere around 100-200 rules, with ENOBUFS on the reply read
+# first and EMSGSIZE ("message too long") on the send itself further up. That wall is fixed:
+# internal/dataplane/linuxkernel/nft/batch.go now counts the batch while building it and sizes the
+# netlink socket's send and receive buffers to it (SO_SNDBUFFORCE / SO_RCVBUFFORCE), the way the
+# nft command does, so the whole ladder converges in both modes (design.md 6.1 節 and the last
+# entry of its 改訂の記録). 150 and 200 stay in the ladder as the rungs that used to sit on the
+# wall, so a regression shows up at the same place it first appeared.
 LADDER="10 100 150 200 500 1000"
 # RANGE_LO/HI and OVERLIMIT_BASE are chosen below 32768: a first trial placed them at 45000-49999
 # and 55000+, inside this lab VM's ephemeral port range (net.ipv4.ip_local_port_range, 32768-60999

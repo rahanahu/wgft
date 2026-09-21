@@ -40,7 +40,7 @@ lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3
 lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定するポートに届かず、集約のレートのトークンも使わないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/version-skew.sh         # 版の組み合わせ(新旧の server・agent、legacy v0)。旧いバイナリは GitHub の Releases から取得しキャッシュする(スクリプト冒頭のコメント参照)
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel       # 旧版からの更新(D4)。既定は直前のリリース(v0.6.0)のデータに現在のビルドを重ね、ルール・鍵・認証情報が保たれ、転送が戻ることを確認。WGFT_UPGRADE_OLD_VERSION=0.4.0 を付けると、release notes が更新を約束するもう一方の版でも同じ確認を流せる。userspace も同じ
-lab/lab exec vm bash /wgft/lab/scale.sh kernel         # 規模の試験(C3)。1 台の server と 5 台のエージェントで、ルール数を 10 から 1000 まで段階的に増やし、適用時間・全体状態の大きさ・RSS を測定。kernel モードはこのラボ VM で 100 本の段から nftables の適用が netlink の誤りで失敗し、FAIL で終わる(未解決の問題。docs/testing.md の C3 と design.md の改訂の記録を参照)。userspace も同じ引数で流せ、こちらは 1000 本まで通る
+lab/lab exec vm bash /wgft/lab/scale.sh kernel         # 規模の試験(C3)。1 台の server と 5 台のエージェントで、ルール数を 10 から 1000 まで段階的に増やし、適用時間・全体状態の大きさ・RSS を測定。kernel モードも userspace モードも 1000 本まで通る(kernel モードが 100 本前後で失敗していた netlink のバッファの問題は解決済み。design.md の 6.1 節と改訂の記録を参照)
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
 lab/lab destroy                 # VM ごと消す
 ```
