@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/netip"
 	"strings"
 	"testing"
@@ -949,5 +950,26 @@ func TestWrongArgumentCountExitsUnavailable(t *testing.T) {
 	}
 	if err := newServerDoctorCmd().Args(nil, nil); err != nil {
 		t.Errorf("no argument is valid, got %v", err)
+	}
+}
+
+// TestUnknownFlagExitsUnavailable は、フラグの誤りも終了コード 2 になることを確かめる(設計文書
+// 10.2a 節)。フラグの解析は Args の検査より前に行われるので、Args を包むだけでは届かない。
+// 引数の数と同じ種類の誤りが、入口の違いだけで 1 と 2 に分かれることを防ぐ。
+func TestUnknownFlagExitsUnavailable(t *testing.T) {
+	cmd := newServerDoctorCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--bogus"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("an unknown flag must be rejected")
+	}
+	var un *unavailableError
+	if !errors.As(err, &un) {
+		t.Errorf("the flag error must be an *unavailableError so it exits %d, got %T: %v", exitUnavailable, err, err)
+	}
+	if code := exitCode(err); code != exitUnavailable {
+		t.Errorf("exit code = %d, want %d", code, exitUnavailable)
 	}
 }
