@@ -729,3 +729,143 @@ func TestSourceFilterWithoutFrom(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// TestHostnameTargetDoesNotMakeAHealthyRuleUnknown は、ホスト名の `target` を持つ健全な TCP の
+// ルールが ok のままであることを確かめる(設計文書 10.2a 節)。TCP のルールの ok は、エージェントが
+// その `target` への接続を開けたことを意味し(5.2 節)、名前への接続は解決を経るので、解決の成功
+// そのものを観測している。かつては解決を常に unknown にしており、何も壊れていないルールが
+// unknown に落ちていた。
+func TestHostnameTargetDoesNotMakeAHealthyRuleUnknown(t *testing.T) {
+	r := tcpRule()
+	r.Target = "nas.home.lan:25565"
+	in := healthyInput(r)
+	in.Rules.Rules = []proto.Rule{r}
+	rep := buildReport([]proto.Rule{r}, in)
+
+	if rep.Rules[0].Status != statusOK {
+		t.Errorf("rule status = %q, want %q: nothing about this rule is wrong%s", rep.Rules[0].Status, statusOK, dumpChecks(rep.Checks))
+	}
+	c := checkOf(t, rep.Checks, checkTargetResolve)
+	if c.Status != statusOK {
+		t.Errorf("target resolve = %q, want %q", c.Status, statusOK)
+	}
+	if c.ObservedAt == "" {
+		t.Error("an ok resolve must carry the time of the agent report it is drawn from")
+	}
+	if !strings.Contains(c.Detail, "resolved nas.home.lan") || !strings.Contains(c.Detail, "ago") {
+		t.Errorf("detail must say the name resolved and how old that is, got %q", c.Detail)
+	}
+}
+
+// TestResolveWithoutEvidenceIsNotTested は、解決について証拠がまったく無い場合を not_tested に
+// することを確かめる(設計文書 10.2a 節)。server はエージェントの解決を観測しないので、判定に
+// 足りない古い証拠ではなく、そもそも試さない条件として扱う。unknown にするとルールの総合判定まで
+// 下がってしまう。
+func TestResolveWithoutEvidenceIsNotTested(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func() (proto.Rule, doctorInput)
+	}{
+		{"udp rule with a hostname target", func() (proto.Rule, doctorInput) {
+			r := udpRule()
+			r.Target = "nas.home.lan:2456"
+			in := healthyInput(r)
+			in.Rules.Rules = []proto.Rule{r}
+			return r, in
+		}},
+		{"tcp rule whose report is stale", func() (proto.Rule, doctorInput) {
+			r := tcpRule()
+			r.Target = "nas.home.lan:25565"
+			in := healthyInput(r)
+			in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{
+				Agent: "home", State: proto.StatusOK, At: at(10 * time.Minute), Connected: true,
+			}
+			in.Rules.Rules = []proto.Rule{r}
+			return r, in
+		}},
+		{"tcp rule whose agent has not reported it", func() (proto.Rule, doctorInput) {
+			r := tcpRule()
+			r.Target = "nas.home.lan:25565"
+			in := healthyInput(r)
+			in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{Agent: "home", Connected: true}
+			in.Rules.Rules = []proto.Rule{r}
+			return r, in
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, in := tc.build()
+			c := checkOf(t, diagnose(r, in), checkTargetResolve)
+			if c.Status != statusNotTested || c.Reason != reasonResolvedByAgent {
+				t.Errorf("status/reason = %s/%s, want %s/%s: %s", c.Status, c.Reason, statusNotTested, reasonResolvedByAgent, c.Detail)
+			}
+			if !strings.Contains(c.Next, "agent-side doctor") {
+				t.Errorf("next must send the operator to the agent host, got %q", c.Next)
+			}
+		})
+	}
+}
+
+// TestOffPathChecksDoNotMoveTheRuleStatus は、経路の外の検査(累積の拒否と窃取の警告)が
+// ルールの総合判定を動かさないことを確かめる(設計文書 10.2a 節)。どちらも server の起動からの
+// 事実であり、今転送しているかどうかを述べない。判定に混ぜると、一度の異常のあと server を
+// 再起動するまで要約が下がり続ける。
+func TestOffPathChecksDoNotMoveTheRuleStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		id     string
+		mutate func(r proto.Rule, in *doctorInput)
+	}{
+		{"resource refusals from an earlier flood", checkFlowBudget, func(r proto.Rule, in *doctorInput) {
+			in.Rules.ResourceRefusals = map[string]map[string]uint64{r.ID: {"rule": 7}}
+		}},
+		{"an open credential warning", checkCredentials, func(r proto.Rule, in *doctorInput) {
+			in.Agents[0].Warnings = []admin.Warning{{Agent: "home", Kind: "ip-flapping", At: at(time.Hour)}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := tcpRule()
+			in := healthyInput(r)
+			tc.mutate(r, &in)
+			in.Rules.Rules = []proto.Rule{r}
+			rep := buildReport([]proto.Rule{r}, in)
+
+			if rep.Rules[0].Status != statusOK {
+				t.Errorf("rule status = %q, want %q: an off-path observation must not drag the summary down%s",
+					rep.Rules[0].Status, statusOK, dumpChecks(rep.Checks))
+			}
+			if rep.Status != statusOK {
+				t.Errorf("report status = %q, want %q", rep.Status, statusOK)
+			}
+			if err := doctorExit(rep); err != nil {
+				t.Errorf("an off-path observation must not change the exit code, got %v", err)
+			}
+			// それでも所見そのものは出し続ける。
+			c := checkOf(t, rep.Checks, tc.id)
+			if c.Status != statusUnknown {
+				t.Errorf("%s: status = %q, want %q: the observation itself is still reported", tc.id, c.Status, statusUnknown)
+			}
+			if c.Next == "" {
+				t.Errorf("%s: an off-path finding still has to say what to do next", tc.id)
+			}
+		})
+	}
+}
+
+// TestOffPathChecksAreExactlyTheDocumentedTwo は、経路の外と定めた検査が設計文書 10.2a 節の
+// 一覧と一致することを確かめる。経路の上の検査を誤って外すと、転送が止まっていても要約が ok の
+// ままになる。
+func TestOffPathChecksAreExactlyTheDocumentedTwo(t *testing.T) {
+	want := map[string]bool{checkCredentials: true, checkFlowBudget: true}
+	r := tcpRule()
+	for _, c := range diagnose(r, healthyInput(r)) {
+		if c.offPath != want[c.ID] {
+			t.Errorf("check %q: offPath = %v, want %v", c.ID, c.offPath, want[c.ID])
+		}
+		// 経路の外の検査は転送の停止を主張しないので、failed になってはならない。
+		if c.offPath && c.Status == statusFailed {
+			t.Errorf("check %q is off the path, so it must never report failed", c.ID)
+		}
+	}
+}

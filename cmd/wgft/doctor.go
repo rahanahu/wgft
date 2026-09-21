@@ -172,6 +172,9 @@ type checkReport struct {
 	// 経路の要になる検査(公開ポート、トンネル、接続、target)はどちらも立てない。
 	hideWhenOK       bool
 	hideWhenUntested bool
+	// offPath は、転送の経路の上に無い検査である。運用者に見せる事実ではあるが、そのルールが
+	// 今転送しているかどうかを述べないので、ルールの総合判定を動かさない(設計文書 10.2a 節)。
+	offPath bool
 }
 
 // ruleReport は 1 本のルールの要約である。
@@ -322,12 +325,18 @@ func buildReport(rules []proto.Rule, in doctorInput) doctorReport {
 			RuleID: r.ID, Agent: r.Agent, Proto: string(r.Proto), ListenPort: r.ListenPort.String(),
 			Target: r.TargetDisplay(), Group: r.Group, Enabled: r.Enabled, Status: statusOK,
 		}
+		// ルールの総合判定は、経路の上の検査だけから決める(設計文書 10.2a 節)。経路の外の
+		// 検査(累積の拒否、窃取の警告)は起動からの事実を述べるだけで、今転送しているかを
+		// 述べないため、要約をいつまでも下げ続けないようにする。
 		for _, c := range checks {
+			if c.offPath {
+				continue
+			}
 			if c.Status == statusFailed && rr.StoppedAt == "" {
 				rr.StoppedAt, rr.Status = c.ID, statusFailed
 			}
 		}
-		if rr.Status == statusOK && anyStatus(checks, statusUnknown) {
+		if rr.Status == statusOK && anyPathStatus(checks, statusUnknown) {
 			rr.Status = statusUnknown
 		}
 		if rr.Status == statusOK && !r.Enabled {
@@ -338,7 +347,7 @@ func buildReport(rules []proto.Rule, in doctorInput) doctorReport {
 	}
 	rep.Checks = append(rep.Checks, dataplaneCheck(in))
 	for _, c := range rep.Checks {
-		if c.Status == statusFailed {
+		if c.Status == statusFailed && !c.offPath {
 			rep.Status = statusFailed
 		}
 	}
@@ -470,9 +479,10 @@ func checkLabel(id string, r proto.Rule) string {
 	return id
 }
 
-func anyStatus(checks []checkReport, want string) bool {
+// anyPathStatus は、経路の上の検査に want の判定があるかを返す。経路の外の検査は数えない。
+func anyPathStatus(checks []checkReport, want string) bool {
 	for _, c := range checks {
-		if c.Status == want {
+		if !c.offPath && c.Status == want {
 			return true
 		}
 	}
@@ -844,7 +854,7 @@ func heartbeatAgeSuffix(ai *admin.AgentInfo, in doctorInput) string {
 // credentialsCheck は窃取検知の警告である(設計文書 5.2 節)。往復も食い違いも、第三者と
 // ローミングを見分けられないので、警告があるときは unknown にする。
 func credentialsCheck(r proto.Rule, ai *admin.AgentInfo) checkReport {
-	c := checkReport{ID: checkCredentials, RuleID: r.ID, Agent: r.Agent, Group: groupAgent, Label: "credentials", hideWhenOK: true}
+	c := checkReport{ID: checkCredentials, RuleID: r.ID, Agent: r.Agent, Group: groupAgent, Label: "credentials", hideWhenOK: true, offPath: true}
 	if ai == nil {
 		c.Status, c.Reason = statusSkipped, reasonAgentNotRegistered
 		c.Detail = "not tested: no agent is registered under that name"
@@ -888,22 +898,51 @@ func resolveCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport
 		c.hideWhenOK = true
 		return c
 	}
-	reason, at, live := agentReason(r, in)
-	if live && looksLikeResolveFailure(reason) {
-		c.Status, c.Reason, c.ObservedAt = statusFailed, reasonResolveFailed, at
-		c.Detail = "the agent could not resolve " + host + ": " + reason
-		c.Next = "fix name resolution on the agent host, or point the rule at a literal address"
-		return c
-	}
-	c.Status, c.Reason = statusUnknown, reasonResolvedByAgent
-	c.Detail = "the agent resolves " + host + " itself and this server never sees the result; only a failure reaches it, inside the reason on the target line below"
-	c.Next = "if the target line is ok, resolution worked at the agent's last check; to see it directly, run the agent-side doctor on that host"
 	if ai == nil {
 		c.Status, c.Reason = statusSkipped, reasonAgentNotRegistered
 		c.Detail = "not tested: no agent is registered under that name"
 		c.Next = "register one: wgft agent join-string --name " + r.Agent
+		return c
+	}
+	st, fresh := freshAgentRuleReport(r, in)
+	switch {
+	case fresh && st.State == proto.StatusError && looksLikeResolveFailure(st.Reason):
+		c.Status, c.Reason, c.ObservedAt = statusFailed, reasonResolveFailed, st.At
+		c.Detail = "the agent could not resolve " + host + ": " + st.Reason
+		c.Next = "fix name resolution on the agent host, or point the rule at a literal address"
+	case fresh && st.State == proto.StatusOK && r.Proto == proto.TCP:
+		// TCP のルールが ok であることは、エージェントが target への接続を開けたことを意味する
+		// (5.2 節)。名前への接続は解決を経るので、その時点で解決が成功したことを観測している。
+		// UDP には同じことが言えない。UDP の ok はリスナーを開けたことしか意味せず、解決を伴わない。
+		c.Status, c.ObservedAt = statusOK, st.At
+		age, ok := reportAge(st.At, in.Now)
+		c.Detail = "the agent resolved " + host + " and connected to it at its last check"
+		if ok {
+			c.Detail += " " + age.String() + " ago"
+		}
+		c.hideWhenOK = true
+	default:
+		// 証拠がまったく無い。server はエージェントの名前解決を観測しないので、判定に足りない
+		// 古い証拠ではなく、そもそも試していない条件として扱う(10.2a 節の状態の定義)。
+		c.Status, c.Reason = statusNotTested, reasonResolvedByAgent
+		c.Detail = "not tested: the agent resolves " + host + " itself and this server never observes the result; only a failure reaches it, inside the reason on the target line below"
+		c.Next = "to see resolution itself, run the agent-side doctor on that host"
 	}
 	return c
+}
+
+// freshAgentRuleReport は、このルールについてエージェントが今報告している内容である。接続中で、
+// かつ targetReportStale より新しい報告だけを今の値として返す(設計文書 5.2、10.2a 節)。
+func freshAgentRuleReport(r proto.Rule, in doctorInput) (admin.AgentRuleStatus, bool) {
+	st, ok := in.Rules.AgentRuleStates[r.ID]
+	if !ok || !st.Connected || st.State == "" {
+		return admin.AgentRuleStatus{}, false
+	}
+	age, ok := reportAge(st.At, in.Now)
+	if !ok || age > targetReportStale {
+		return admin.AgentRuleStatus{}, false
+	}
+	return st, true
 }
 
 // looksLikeResolveFailure は、エージェントの理由が名前解決の失敗かどうかを見る。Go の net が
@@ -915,16 +954,6 @@ func looksLikeResolveFailure(reason string) bool {
 		}
 	}
 	return false
-}
-
-// agentReason は、このルールについてエージェントが今報告している理由である。接続中の報告だけを
-// 今の値として返す(設計文書 5.2 節)。
-func agentReason(r proto.Rule, in doctorInput) (reason, at string, live bool) {
-	st, ok := in.Rules.AgentRuleStates[r.ID]
-	if !ok || !st.Connected || st.State != proto.StatusError {
-		return "", "", false
-	}
-	return st.Reason, st.At, true
 }
 
 // targetCheck は、そのルールの持ち主のエージェント自身の報告である(設計文書 5.2、7a.11 節の
@@ -1057,7 +1086,7 @@ func agentRuleNextStep(reason string, r proto.Rule) string {
 // flowBudgetCheck は Resource Guard の拒否である(設計文書 7a.10 節)。累積の値なので、拒否が
 // あっても今そうであるとは言えず、unknown にする。
 func flowBudgetCheck(r proto.Rule, in doctorInput) checkReport {
-	c := checkReport{ID: checkFlowBudget, RuleID: r.ID, Group: groupAgent, Label: "flow budget", hideWhenOK: true, hideWhenUntested: true}
+	c := checkReport{ID: checkFlowBudget, RuleID: r.ID, Group: groupAgent, Label: "flow budget", hideWhenOK: true, hideWhenUntested: true, offPath: true}
 	res := in.Rules
 	if res.ResourceRefusals == nil && res.FlowBudget == nil {
 		c.Status, c.Reason = statusUnknown, reasonNotReportedByServer
