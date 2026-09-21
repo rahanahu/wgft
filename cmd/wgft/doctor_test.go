@@ -355,6 +355,22 @@ func TestEvidenceFallsToUnknownWhenStale(t *testing.T) {
 	})
 }
 
+// TestFreshAgentRuleStatusBoundary は、targetReportStale(90 秒)ちょうどの境界を固定する
+// (design.md 10.2b 節、レビューの指摘)。既存の試験は 5 秒(新しい)と 2 分すぎ(古い)しか
+// 使っておらず、90 秒ちょうどを踏む例が無かったため、`age > targetReportStale` を
+// `age >= targetReportStale` に変える変異が検出されずに残っていた。90 秒ちょうどはまだ
+// fresh で、90 秒 + 1 秒からは古いという境界そのものを、2 つの値で確かめる。
+func TestFreshAgentRuleStatusBoundary(t *testing.T) {
+	st := admin.AgentRuleStatus{State: proto.StatusOK, Connected: true, At: at(targetReportStale)}
+	if _, fresh := freshAgentRuleStatus(st, doctorNow); !fresh {
+		t.Error("a report exactly targetReportStale old must still be fresh")
+	}
+	stOld := admin.AgentRuleStatus{State: proto.StatusOK, Connected: true, At: at(targetReportStale + time.Second)}
+	if _, fresh := freshAgentRuleStatus(stOld, doctorNow); fresh {
+		t.Error("a report one second past targetReportStale must be stale")
+	}
+}
+
 // TestPublicPortIsNeverOK は、外からの到達性を試していない以上、公開ポートを ok にしないことを
 // 確かめる(設計文書 10.2a 節の状態の定義)。
 func TestPublicPortIsNeverOK(t *testing.T) {
@@ -451,6 +467,39 @@ func TestUnattributableFindingsNameTheirCauses(t *testing.T) {
 		if !found {
 			t.Errorf("the causes must name %q, got %v", want, c.Causes)
 		}
+	}
+}
+
+// TestHandshakeTunnelErrorWhileConnected は、tunnel.handshake の判定(tunnelHealth、
+// design.md 10.2a 節)を固定する。制御ストリームが繋がっていて最終ハンドシェイクも新しいが、
+// エージェント自身がトンネルを error と報告している場合は failed かつ reasonTunnelError に
+// なる。この分岐は、`wgft status` の Agents 行(status.go の agentHealthOf、design.md
+// 10.2b 節、2026-09-22 の所有者の決定)が tunnelHealth を共有する前提になるので、doctor 側の
+// 挙動として固定しておく。
+func TestHandshakeTunnelErrorWhileConnected(t *testing.T) {
+	r := tcpRule()
+	in := healthyInput(r)
+	in.Agents[0].Tunnel = admin.TunnelStatus{State: proto.StatusError, Reason: "handshake not established"}
+	c := checkOf(t, diagnose(r, in), checkHandshake)
+	if c.Status != statusFailed || c.Reason != reasonTunnelError {
+		t.Errorf("status/reason = %s/%s, want %s/%s: %s", c.Status, c.Reason, statusFailed, reasonTunnelError, c.Detail)
+	}
+	if !strings.Contains(c.Detail, "handshake not established") {
+		t.Errorf("detail must carry the agent's own reason, got %q", c.Detail)
+	}
+}
+
+// TestHandshakeUnknownTunnelStateWhileConnected は、tunnelHealth の unknown 側の分岐を固定
+// する。制御ストリームが繋がっていて最終ハンドシェイクも新しいが、エージェントがこの版の知らない
+// トンネルの状態を報告している場合は unknown かつ reasonUnknownValue になり、故障とは決めつけ
+// ない(7a.11 節の開いた集合の契約)。
+func TestHandshakeUnknownTunnelStateWhileConnected(t *testing.T) {
+	r := tcpRule()
+	in := healthyInput(r)
+	in.Agents[0].Tunnel = admin.TunnelStatus{State: "handshaking"}
+	c := checkOf(t, diagnose(r, in), checkHandshake)
+	if c.Status != statusUnknown || c.Reason != reasonUnknownValue {
+		t.Errorf("status/reason = %s/%s, want %s/%s: %s", c.Status, c.Reason, statusUnknown, reasonUnknownValue, c.Detail)
 	}
 }
 

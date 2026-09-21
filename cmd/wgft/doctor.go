@@ -692,9 +692,43 @@ func sourceFilterCheck(r proto.Rule, in doctorInput) checkReport {
 	return c
 }
 
+// tunnelHealth is doctor's `tunnel.handshake` judgment (design.md 10.2a 節), factored out of
+// handshakeCheck below so `wgft status`(status.go の agentHealthOf、design.md 10.2b 節)can share
+// the exact same freshness rule (handshakeStale、3 分)for its Agents row instead of reimplementing
+// it. handshakeCheck stays the only caller that turns this into a checkReport, so this extraction
+// changes nothing about doctor's own output; cmd/wgft/doctor_test.go's existing coverage of
+// checkHandshake still exercises this function through handshakeCheck.
+func tunnelHealth(ai *admin.AgentInfo, now time.Time) (status, reason, detail, observedAt string) {
+	hs, ok := parseWhen(ai.LastHandshake)
+	if ok {
+		observedAt = ai.LastHandshake
+	}
+	if !ok || now.Sub(hs) > handshakeStale {
+		detail = "no WireGuard handshake with this agent has ever been observed"
+		if ok {
+			detail = "handshake " + since(now, hs).String() + " ago; a live tunnel renews it within 145s"
+		}
+		return statusFailed, reasonNoRecentHandshake, detail, observedAt
+	}
+	age := "handshake " + since(now, hs).String() + " ago"
+	if !ai.Connected {
+		return statusOK, "", age + "; the agent's own tunnel report is last:" + tunnelStateText(ai.Tunnel) + ", not a current value", observedAt
+	}
+	if ai.Tunnel.State == proto.StatusError {
+		return statusFailed, reasonTunnelError,
+			"the agent reports its tunnel in error: " + reasonOr(ai.Tunnel.Reason, "no reason reported") + " (this VPS still saw a " + age + ")",
+			observedAt
+	}
+	if ai.Tunnel.State != "" && ai.Tunnel.State != proto.StatusOK {
+		return statusUnknown, reasonUnknownValue, age + fmt.Sprintf("; the agent reports a tunnel state this build does not know: %q", ai.Tunnel.State), observedAt
+	}
+	return statusOK, "", age, observedAt
+}
+
 // handshakeCheck はトンネルを見る。最終ハンドシェイクは server が WireGuard から直接読む今の
 // 値なので、stream が切れていても使える。エージェント自身のトンネルの報告はハートビート由来
-// なので、切れている間は今の値として扱わない(設計文書 5.2 節)。
+// なので、切れている間は今の値として扱わない(設計文書 5.2 節)。判定そのものは tunnelHealth に
+// 持つ。
 func handshakeCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport {
 	c := checkReport{ID: checkHandshake, RuleID: r.ID, Agent: r.Agent, Group: groupTunnel, Label: "WireGuard"}
 	if ai == nil {
@@ -707,40 +741,16 @@ func handshakeCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRepo
 		c.Internal = append(c.Internal, "peer endpoint "+ai.WGEndpoint)
 	}
 	c.Internal = append(c.Internal, "agent tunnel report "+tunnelStateText(ai.Tunnel))
-	hs, ok := parseWhen(ai.LastHandshake)
-	if ok {
-		c.ObservedAt = ai.LastHandshake
-	}
-	if !ok || in.Now.Sub(hs) > handshakeStale {
-		c.Status, c.Reason = statusFailed, reasonNoRecentHandshake
-		c.Detail = "no WireGuard handshake with this agent has ever been observed"
-		if ok {
-			c.Detail = "handshake " + since(in.Now, hs).String() + " ago; a live tunnel renews it within 145s"
-		}
+	c.Status, c.Reason, c.Detail, c.ObservedAt = tunnelHealth(ai, in.Now)
+	switch c.Reason {
+	case reasonNoRecentHandshake:
 		c.Causes = handshakeCauses()
 		c.Next = handshakeNext()
-		return c
-	}
-	age := "handshake " + since(in.Now, hs).String() + " ago"
-	if !ai.Connected {
-		c.Status, c.Reason = statusOK, ""
-		c.Detail = age + "; the agent's own tunnel report is last:" + tunnelStateText(ai.Tunnel) + ", not a current value"
-		return c
-	}
-	if ai.Tunnel.State == proto.StatusError {
-		c.Status, c.Reason = statusFailed, reasonTunnelError
-		c.Detail = "the agent reports its tunnel in error: " + reasonOr(ai.Tunnel.Reason, "no reason reported") + " (this VPS still saw a " + age + ")"
+	case reasonTunnelError:
 		c.Next = "read that reason on the agent host; the agent retries every 30s and rebuilds the tunnel after 300s without a handshake"
-		return c
-	}
-	if ai.Tunnel.State != "" && ai.Tunnel.State != proto.StatusOK {
-		c.Status, c.Reason = statusUnknown, reasonUnknownValue
-		c.Detail = age + fmt.Sprintf("; the agent reports a tunnel state this build does not know: %q", ai.Tunnel.State)
+	case reasonUnknownValue:
 		c.Next = "upgrade this CLI to the agent's version"
-		return c
 	}
-	c.Status = statusOK
-	c.Detail = age
 	return c
 }
 
@@ -975,12 +985,23 @@ func resolveCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport
 
 // freshAgentRuleReport は、このルールについてエージェントが今報告している内容である。接続中で、
 // かつ targetReportStale より新しい報告だけを今の値として返す(設計文書 5.2、10.2a 節)。
+// 鮮度の規則そのものは freshAgentRuleStatus に切り出してあり、`wgft status`(status.go の
+// rulesStatusOf)もこの版から同じ規則を共有する(design.md 10.2b 節)。
 func freshAgentRuleReport(r proto.Rule, in doctorInput) (admin.AgentRuleStatus, bool) {
-	st, ok := in.Rules.AgentRuleStates[r.ID]
-	if !ok || !st.Connected || st.State == "" {
+	return freshAgentRuleStatus(in.Rules.AgentRuleStates[r.ID], in.Now)
+}
+
+// freshAgentRuleStatus は、1 件の agent_rule_states の項目が「今の値」として使えるかどうかを
+// 判定する(設計文書 5.2、10.2a、10.2b 節)。接続中(Connected)であること、State が空でない
+// こと(まだ 1 度も報告していない項目と区別する)、報告の時刻が targetReportStale より新しい
+// ことの 3 つをすべて満たす場合だけ、その値をそのまま返す。1 つでも欠ければ、ゼロ値と false を
+// 返す。ゼロ値の st(agent_rule_states にその行が無い呼び出し元も渡せる)を渡しても、Connected
+// が false かつ State が空なので、この関数はそのまま false を返す。
+func freshAgentRuleStatus(st admin.AgentRuleStatus, now time.Time) (admin.AgentRuleStatus, bool) {
+	if !st.Connected || st.State == "" {
 		return admin.AgentRuleStatus{}, false
 	}
-	age, ok := reportAge(st.At, in.Now)
+	age, ok := reportAge(st.At, now)
 	if !ok || age > targetReportStale {
 		return admin.AgentRuleStatus{}, false
 	}
@@ -1000,7 +1021,10 @@ func looksLikeResolveFailure(reason string) bool {
 
 // targetCheck は、そのルールの持ち主のエージェント自身の報告である(設計文書 5.2、7a.11 節の
 // agent_rule_states)。stream が切れている間の報告は履歴であり、今の原因として示してはならない
-// ので unknown と "last:" にする。報告が 90 秒より古い場合も今の値として扱わない。
+// ので unknown と "last:" にする。報告が 90 秒より古い場合も今の値として扱わない。この鮮度の
+// 判定そのものは freshAgentRuleStatus と共有する。state・Connected・報告の有無で文言を出し
+// 分ける場合分けは、この関数に残す(2026-09-22 の改訂まではここに同じ鮮度の条件を別のインライン
+// のコードとして持っており、freshAgentRuleStatus を直しても追随しなかった。レビューの指摘)。
 func targetCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport {
 	c := checkReport{ID: checkTarget, RuleID: r.ID, Agent: r.Agent, Group: groupAgent, Label: "target"}
 	states := in.Rules.AgentRuleStates
@@ -1036,9 +1060,13 @@ func targetCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport 
 		return c
 	}
 	reportAge, ageOK := reportAge(st.At, in.Now)
+	// fresh は、この st がすでに Connected と State を満たしていることを前提に、報告の時刻だけを
+	// freshAgentRuleStatus と同じ規則で判定する。呼び出す前に Connected・State を確かめ済みなので、
+	// freshAgentRuleStatus の最初の条件は必ず通り、結果は下の ageOK・reportAge の計算と揃う。
+	_, fresh := freshAgentRuleStatus(st, in.Now)
 	switch st.State {
 	case proto.StatusOK:
-		if !ageOK || reportAge > targetReportStale {
+		if !fresh {
 			c.Status, c.Reason = statusUnknown, reasonStaleReport
 			c.Detail = "the agent last reported this rule ok, but that was " + staleAgeText(reportAge, ageOK) + ", so it is not a current observation"
 			c.Next = "re-run this command; if the report stays old, read the control connection line above and the agent's log"
@@ -1052,7 +1080,7 @@ func targetCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport 
 		}
 		return c
 	case proto.StatusError:
-		if !ageOK || reportAge > targetReportStale {
+		if !fresh {
 			c.Status, c.Reason = statusUnknown, reasonStaleReport
 			c.Detail = "the agent last reported an error on this rule (" + reasonOr(st.Reason, "no reason") + "), but that was " + staleAgeText(reportAge, ageOK) + ", so it is not a current observation"
 			c.Next = "re-run this command; if the report stays old, read the control connection line above and the agent's log"

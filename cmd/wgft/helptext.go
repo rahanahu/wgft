@@ -22,11 +22,98 @@ One binary holds both sides. Where each command runs:
   agent run|pubkey|rotate-key on the home side, next to the services
   agent ls|join-string|...    on the VPS, against the admin API
   rule ...                    on the VPS, against the admin API
+  status                      on the VPS, against the admin API
 
 Commands that talk to the admin API use the Unix socket of the running server
 (WGFT_ADMIN, default unix:///run/wgft/admin.sock), so run them as root on the VPS.
 Settings are WGFT_* environment variables; a dotenv file (--config) and flags are
 other ways to pass the same values.`,
+	},
+	"status": {
+		Long: `Summarize whether the deployment looks healthy, in four lines: Server, Agents,
+Rules, Warnings. It reads the admin API of the running server (WGFT_ADMIN,
+default unix:///run/wgft/admin.sock) and nothing else. Where "server doctor"
+follows one rule from the public side to the target to find where traffic
+stops, "status" only counts: it does not say where a problem is, only that
+there is one.
+
+Server, Agents and Rules each read healthy, degraded or unknown as such;
+unknown means there is no evidence either way, such as an older server that
+predates a field this command reads, and it is never counted as healthy or as
+degraded. Server is healthy when the server's forwarding has caught up with
+the current rules and the last change applied without error, degraded when it
+has fallen behind, the last change failed, or a repair after a published
+change failed, and unknown when a generation field is missing and there is no
+apply_error to fall back on.
+
+Agents counts registered agents as healthy, degraded or unknown; a healthy
+agent needs both its control connection and its WireGuard tunnel to be
+healthy. An agent counts as degraded when its control connection is down, or
+when its tunnel has failed, reports an error, or its last handshake has gone
+stale, the same freshness rule "server doctor"'s tunnel.handshake check uses.
+An agent counts as unknown when its tunnel reports a state this build does
+not recognize. Once any agent is degraded or unknown, the value spells out
+all three counts against the total, such as "1 healthy, 1 degraded / 2"; when
+every agent is healthy it just says "1 / 2 healthy". A live control connection
+no longer counts as healthy by itself: an agent whose tunnel has quietly died
+while its control connection stays up now reads degraded here too, matching
+"server doctor" on the same input, instead of being counted healthy.
+
+Rules counts the enabled rules as active, degraded or unknown, out of the
+total; a disabled rule is not counted against the total, since being disabled
+is a declared state, not a fault. A rule counts as active only when the
+server has published it and its agent's freshest report says it can reach
+the target: the server publishing a rule is not evidence that the agent is
+actually forwarding it, since the agent can still refuse the target on its
+own (WGFT_AGENT_ALLOW_TARGETS, a listener bind failure, and so on). A rule
+counts as degraded when the server reports it pending or not_active, or when
+its agent's freshest report is an error. A rule counts as unknown when the
+server reports nothing about it, reports a state this build does not
+recognize, or its agent has not freshly reported it, including a report left
+over from before the agent's connection dropped. Once any rule is degraded or
+unknown, the value spells out all three counts against the total, such as
+"5 active, 2 degraded, 1 unknown / 8"; when every rule is active it just says
+"8 active". Warnings reads a count of open theft-detection warnings, or
+"none"; the added line also says how long ago each one was raised, when the
+server reports that.
+
+When a line is healthy, it holds nothing more than that: no generation
+number, apply state string or endpoint. A degraded or unknown line gets one
+added line naming what it found, such as which agent has not been seen, which
+rule is not active and why, or that the server reports no apply state at all.
+
+Exit code is 0 when every line is healthy or the only problem is unknown, 1
+when a line is degraded, 2 when the summary itself could not be built (the
+admin API is unreachable, or a bad argument or flag was given, the same as
+"server doctor"), and 3 when the configuration itself is invalid, such as a
+malformed dotenv file passed with --config. Unknown alone never raises the
+exit code, matching "server doctor"'s own UNKNOWN, so an older server that
+has not yet grown a field does not sound an alarm during a rolling upgrade.
+
+Exit 1 here does not mean traffic stopped: it means some part of the
+deployment needs operator attention. "server doctor" answers whether one
+rule's forwarding path is broken; "status" answers whether the deployment as
+a whole looks degraded, a different question. In particular, "server doctor"
+deliberately exits 0 for a rule whose agent's control connection is down
+while its tunnel still handshakes, since traffic may still be flowing; the
+same agent shows up here as degraded too, and "status" exits 1 for it. The
+reverse also raises it: an agent can keep its control connection up while its
+tunnel itself has gone stale or failed, and "status" now catches that in the
+Agents line instead of counting a control-connected agent as healthy
+regardless of its tunnel. The same difference is why an open warning raises
+the exit code here but not in "server doctor": "server doctor" asks whether a
+rule's forwarding path is broken right now, so a warning that lingers until
+an operator dismisses it sits outside that path, while "status" asks whether
+this deployment still has something an operator needs to act on, and an
+undismissed warning is exactly that.
+
+--json prints the summary model: an object with server, agents, rules and
+warnings. server holds a status of healthy, degraded or unknown, and an
+optional detail. agents and rules each hold healthy/active, degraded and
+unknown counts plus the total, and an optional detail. It only ever gains
+members.`,
+		Example: `  wgft status
+  wgft status --json`,
 	},
 	"agent join-string": {
 		Long: `Issue a join string for a new agent. It is printed once, can be used once, and
