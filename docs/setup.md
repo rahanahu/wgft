@@ -198,6 +198,8 @@ The join string contains `#`, so PowerShell needs it in single quotes. The first
 
 Windows Defender Firewall may prompt to allow `wgft.exe` on the first start, because wireguard-go listens on UDP on all interfaces. This was verified on Windows 11: the tunnel and relay keep working whether that prompt is allowed or cancelled, including across WireGuard key rotations, because the agent only makes outbound connections. Stop the agent with Ctrl+C or by closing the console window; a later start recovers and reuses the saved credentials.
 
+The release binary is not code-signed. On the Windows 11 system used for verification, downloading it through a browser and starting it by double-clicking in Explorer triggered Microsoft Defender SmartScreen's "Windows protected your PC" warning, which blocked the app until More info and then Run anyway were selected. Depending on Windows or organization policy, the warning may not be bypassable. Choosing Run anyway there prevented the prompt from appearing again for that file, and starting it from PowerShell as described above did not show it at all.
+
 wgft installs no Windows service, scheduled task, or tray icon. `agent run` runs as whichever user starts it, the way many game servers run on a gaming PC. Keeping it running across logons, for example with a shortcut in the Startup folder, is left to you; this has not been tested.
 
 ### Run the agent on macOS
