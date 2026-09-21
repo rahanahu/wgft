@@ -478,7 +478,8 @@ func checkLabel(id string, r proto.Rule) string {
 	case checkHandshake:
 		return "WireGuard"
 	case checkConnection:
-		return "connected"
+		// "connected DEGRADED" は 1 行の中で矛盾して読めるので、状態の語ではなく対象の名前にする。
+		return "control connection"
 	case checkRulesReceived:
 		return "rules received"
 	case checkCredentials:
@@ -771,7 +772,7 @@ func tunnelStateText(t admin.TunnelStatus) string {
 // connectionCheck はエージェントの stream を見る。stream が切れているのにハンドシェイクが
 // 新しい場合は、転送は続いているが新しいルールが届かない状態として名指しする。
 func connectionCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport {
-	c := checkReport{ID: checkConnection, RuleID: r.ID, Agent: r.Agent, Group: groupAgent, Label: "connected"}
+	c := checkReport{ID: checkConnection, RuleID: r.ID, Agent: r.Agent, Group: groupAgent, Label: "control connection"}
 	if ai == nil {
 		c.Status, c.Reason = statusFailed, reasonAgentNotRegistered
 		c.Detail = fmt.Sprintf("no agent named %q is registered, so this rule has nowhere to forward to", r.Agent)
@@ -800,8 +801,8 @@ func connectionCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRep
 			// 証拠からは決まらない。failed にすると、疎通確認が実際に target まで届いた場合でも
 			// 「転送はここで止まった」と報告してしまう。
 			c.Status = statusUnknown
-			c.Detail = "the control connection is down" + seen + ", but the tunnel handshook " + since(in.Now, hs).String() +
-				" ago: the rules the agent already holds may still be forwarding, while rule changes are certainly not arriving"
+			c.Detail = "the control connection is down" + seen + "; existing traffic can still flow, but rule changes will " +
+				"not arrive. The tunnel handshook " + since(in.Now, hs).String() + " ago, so the rules the agent already holds may still be forwarding"
 			c.Causes = []string{
 				"the control connection dropped and the agent has not reconnected yet; it backs off up to 5 minutes",
 				"the agent reached this server but was rejected (see the server log)",
@@ -864,7 +865,7 @@ func rulesReceivedCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) check
 		c.Status, c.Reason = statusUnknown, reasonStaleReport
 		c.ObservedAt = ai.LastHeartbeat
 		c.Detail = fmt.Sprintf("last: it held rule set %d before it went away; this server now serves %d", ai.Generation, cur)
-		c.Next = "the connected line above says what to do; this value is history"
+		c.Next = "the control connection line above says what to do; this value is history"
 		return c
 	}
 	c.ObservedAt = ai.LastHeartbeat
@@ -1025,7 +1026,7 @@ func targetCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport 
 		} else {
 			c.Detail = "last: the agent reported " + agentStateText(st) + " before it went away; that is history, not the current cause"
 		}
-		c.Next = "the connected line above says what to do; this value is not current"
+		c.Next = "the control connection line above says what to do; this value is not current"
 		return c
 	}
 	if st.State == "" {
@@ -1040,7 +1041,7 @@ func targetCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport 
 		if !ageOK || reportAge > targetReportStale {
 			c.Status, c.Reason = statusUnknown, reasonStaleReport
 			c.Detail = "the agent last reported this rule ok, but that was " + staleAgeText(reportAge, ageOK) + ", so it is not a current observation"
-			c.Next = "re-run this command; if the report stays old, read the connected line above and the agent's log"
+			c.Next = "re-run this command; if the report stays old, read the control connection line above and the agent's log"
 			return c
 		}
 		c.Status = statusOK
@@ -1054,7 +1055,7 @@ func targetCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport 
 		if !ageOK || reportAge > targetReportStale {
 			c.Status, c.Reason = statusUnknown, reasonStaleReport
 			c.Detail = "the agent last reported an error on this rule (" + reasonOr(st.Reason, "no reason") + "), but that was " + staleAgeText(reportAge, ageOK) + ", so it is not a current observation"
-			c.Next = "re-run this command; if the report stays old, read the connected line above and the agent's log"
+			c.Next = "re-run this command; if the report stays old, read the control connection line above and the agent's log"
 			return c
 		}
 		c.Status, c.Reason = statusFailed, targetReasonCode(st.Reason)
@@ -1207,6 +1208,20 @@ func probeCheck(r proto.Rule, in doctorInput) checkReport {
 
 // --- 人向けの出力 ---
 
+// displayStatus は 1 つの検査を人向けの語にする。1 か所だけ、JSON の値と画面の語が意図して
+// 食い違う(設計文書 10.2a 節)。制御の経路が切れていてトンネルが生きている状態は、JSON では
+// unknown と `agent_disconnected` のままだが、画面には DEGRADED と出す。この状態は「判定に
+// 足りない」のではなく「運用として劣化している」と読むほうが人には正確であり、終了コードが 0 で
+// あっても出力が黙らないためである。機械はあくまで status と reason を読む。
+//
+// 条件はこの 1 つだけに絞る。他の unknown は UNKNOWN のまま出す。
+func displayStatus(c checkReport) string {
+	if c.ID == checkConnection && c.Status == statusUnknown && c.Reason == reasonAgentDisconnected {
+		return "DEGRADED"
+	}
+	return statusWord(c.Status)
+}
+
 // statusWord は判定を人向けの語にする。表そのものは契約ではない(設計文書 7a.11 節)。
 func statusWord(s string) string {
 	switch s {
@@ -1279,7 +1294,7 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 				fmt.Fprintln(w, g)
 				group = g
 			}
-			writeLine(w, c.Label, statusWord(c.Status), c.Detail)
+			writeLine(w, c.Label, displayStatus(c), c.Detail)
 			for _, cause := range c.Causes {
 				fmt.Fprintf(w, "%s- %s\n", strings.Repeat(" ", indent), wrapAt(cause, indent+2))
 			}
@@ -1361,7 +1376,7 @@ func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
 		}
 	}
 	fmt.Fprintln(w, "Server")
-	writeLine(w, dp.Label, statusWord(dp.Status), dp.Detail)
+	writeLine(w, dp.Label, displayStatus(dp), dp.Detail)
 	if dp.Status != statusOK && dp.Next != "" {
 		fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(dp.Next, indent+7))
 	}
@@ -1373,7 +1388,7 @@ func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
 		fmt.Fprintln(w, "  no agent is named by any rule")
 	}
 	for _, a := range agents {
-		writeLine(w, a.Label, statusWord(a.Status), a.Detail)
+		writeLine(w, a.Label, displayStatus(a), a.Detail)
 		if a.Status != statusOK && a.Next != "" {
 			fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(a.Next, indent+7))
 		}

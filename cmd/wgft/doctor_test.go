@@ -994,7 +994,7 @@ func TestDisconnectedAgentWithFreshHandshakeIsUnknownNotFailed(t *testing.T) {
 		t.Errorf("reason = %q, want %q: the fact is certain, only its consequence for this rule is not", c.Reason, reasonAgentDisconnected)
 	}
 	// 所見は 2 つの半分を両方はっきり述べる。
-	for _, want := range []string{"the control connection is down", "the tunnel handshook", "may still be forwarding", "rule changes are certainly not arriving"} {
+	for _, want := range []string{"the control connection is down", "existing traffic can still flow", "rule changes will not arrive", "may still be forwarding"} {
 		if !strings.Contains(c.Detail, want) {
 			t.Errorf("detail must hold %q, got %q", want, c.Detail)
 		}
@@ -1094,4 +1094,65 @@ func TestDisconnectedNextDoesNotSuggestAProbeAlreadyRun(t *testing.T) {
 	if c := checkOf(t, diagnose(r, in), checkConnection); strings.Contains(c.Next, "--probe") {
 		t.Errorf("after a probe has run, the next step must not suggest adding one, got %q", c.Next)
 	}
+}
+
+// TestDegradedIsADisplayWordOnly は、画面の語と JSON の値が意図して食い違う 1 か所を固定する
+// (設計文書 10.2a 節)。制御の経路が切れていてトンネルが生きている状態は、人には DEGRADED と
+// 見せる。終了コードが 0 でも出力が黙らないためである。機械が読む値は unknown と
+// `agent_disconnected` のままで、状態は 5 つから増やさない。
+func TestDegradedIsADisplayWordOnly(t *testing.T) {
+	r := tcpRule()
+	in := disconnectedButTunnelledInput(r)
+	rep := buildReport([]proto.Rule{r}, in)
+
+	// 機械が読む側は変わらない。
+	c := checkOf(t, rep.Checks, checkConnection)
+	if c.Status != statusUnknown || c.Reason != reasonAgentDisconnected {
+		t.Errorf("JSON status/reason = %s/%s, want %s/%s", c.Status, c.Reason, statusUnknown, reasonAgentDisconnected)
+	}
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "DEGRADED") {
+		t.Error("DEGRADED is a word for a person; it must not appear in the machine-readable output")
+	}
+
+	// 人が読む側にだけ DEGRADED が出る。
+	if got := displayStatus(c); got != "DEGRADED" {
+		t.Errorf("displayStatus = %q, want %q", got, "DEGRADED")
+	}
+	var out strings.Builder
+	writeRuleReport(&out, rep, false)
+	line := lineHolding(t, out.String(), "control connection")
+	if !strings.Contains(line, "DEGRADED") {
+		t.Errorf("the rendered line must read DEGRADED, got %q", line)
+	}
+	if strings.Contains(line, "UNKNOWN") {
+		t.Errorf("the rendered line must not also read UNKNOWN, got %q", line)
+	}
+
+	// 他の unknown は UNKNOWN のままである。この 1 つの条件だけに絞る。
+	for _, id := range []string{checkRulesReceived, checkTarget} {
+		if got := displayStatus(checkOf(t, rep.Checks, id)); got != "UNKNOWN" {
+			t.Errorf("%s: displayStatus = %q, want %q: only agent.connection reads DEGRADED", id, got, "UNKNOWN")
+		}
+	}
+	// 同じ検査でも、理由が違う unknown は UNKNOWN のままである。
+	other := checkReport{ID: checkConnection, Status: statusUnknown, Reason: reasonNotReported}
+	if got := displayStatus(other); got != "UNKNOWN" {
+		t.Errorf("agent.connection unknown for another reason must stay %q, got %q", "UNKNOWN", got)
+	}
+}
+
+// lineHolding は、出力の中で want を含む最初の行を返す。
+func lineHolding(t *testing.T, out, want string) string {
+	t.Helper()
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, want) {
+			return l
+		}
+	}
+	t.Fatalf("no line holding %q in:\n%s", want, out)
+	return ""
 }
