@@ -62,6 +62,11 @@ type runtime struct {
 	tunStart time.Time    // 今のトンネルを立てた時刻。ハンドシェイクが一度も成立していないときの起点
 	rebuild  rebuildState // トンネルを作り直す判定の閾値と、次の作り直しまでの間隔(仕様 7 節)
 
+	// retrySt は、トンネルの作成に失敗したときの全体状態。試し直しはこの全体状態から立てる。
+	// 認証情報ファイルの last_state は適用を終えた全体状態しか指さないので、新しい全体状態の適用が
+	// 失敗した後の試し直しには使えない(仕様 7 節)。メモリの上だけに持ち、保存はしない
+	retrySt *proto.State
+
 	streamMu     sync.Mutex
 	streamCancel context.CancelFunc // 今の stream 接続を切る(rotate-key で張り直すとき)
 	reconnectNow bool               // 切った直後はバックオフせずに繋ぎ直す
@@ -160,15 +165,24 @@ func (rt *runtime) generation() uint64 {
 func (rt *runtime) apply(st *proto.State) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	var firstErr error
 	if rt.tun == nil || !reflect.DeepEqual(rt.wgCfg, st.WG) {
 		if rt.tun != nil {
 			log.Printf("wg config changed; rebuilding tunnel")
 		}
-		if err := rt.startTunnelLocked(st); err != nil {
+		// 作成に失敗したら、世代も認証情報ファイルも進めずに返す。作成そのものの失敗なら
+		// buildLocked が試し直しを控えるので、次の全体状態を待たずに watchdog が立て直す(仕様 7 節)
+		if err := rt.buildLocked(time.Now(), st, false); err != nil {
 			return fmt.Errorf("wireguard: %w", err)
 		}
+		return nil
 	}
+	return rt.finishApplyLocked(st)
+}
+
+// finishApplyLocked はトンネルが立った後の共通の後始末である。リスナーを宣言に合わせ、処理済み世代を
+// 進め、認証情報ファイルに保存する(仕様 5.2 節)。呼び出し側は rt.mu を持つ。
+func (rt *runtime) finishApplyLocked(st *proto.State) error {
+	var firstErr error
 	acts := rt.rl.Apply(relay.DesiredFromRules(st.Rules))
 	rt.gen = st.Generation
 	rt.f.LastState = st
@@ -266,22 +280,25 @@ var newTunnel = tunnel.New
 // startTunnelLocked は今のトンネルと中継を閉じてから、全体状態の wg 設定で立て直す(仕様 7 節)。
 // 呼び出し側は rt.mu を持つ。リスナーは開かないので、呼び出し側が続けて rl.Apply を呼ぶ。
 // 閉じるのが先なので、古い device と netstack、その goroutine は新しいものを作る前に必ず片付く。
-func (rt *runtime) startTunnelLocked(st *proto.State) error {
+//
+// retryable は、失敗が試し直す価値のあるものかどうかを表す。誤りが無いときの値に意味は無い。
+// wg 設定の誤りは同じ全体状態では何度試しても同じ結果になるので、試し直しの対象にしない。
+func (rt *runtime) startTunnelLocked(st *proto.State) (retryable bool, err error) {
 	rt.closeLocked()
 	rt.tunStart = time.Now()
 	cfg, err := tunnelConfig(rt.priv, st.WG)
 	if err != nil {
-		return err
+		return false, err
 	}
 	tun, err := newTunnel(cfg)
 	if err != nil {
-		return err
+		return true, err // 資源の不足など、環境による失敗
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go tun.Run(ctx)
 	rt.tun, rt.tunCancel, rt.wgCfg = tun, cancel, st.WG
 	rt.rl = relay.New(tun, rt.relayOptions(st))
-	return nil
+	return true, nil
 }
 
 // checkTunnel は 30 秒ごとに呼ばれ(Run のティッカー)、ハンドシェイクが新しくならない時間が作り直しの
@@ -293,20 +310,20 @@ func (rt *runtime) startTunnelLocked(st *proto.State) error {
 // 停止している場合もエージェントから見た症状は同じで区別できないため、作り直しの間隔はバックオフで
 // 広げ、ハンドシェイクが成立したら初期値に戻す。
 //
-// 作り直しがトンネルの作成そのものに失敗するとトンネルが 1 つも無い状態になるので、予定の時刻に
-// 作成だけを試し直す。試し直すのは checkTunnel 自身の失敗で残った場合だけで、rotate-key・停止・
-// 最初の全体状態を受け取る前の「トンネルが無い」状態には手を出さない。
+// トンネルの作成そのものに失敗するとトンネルが 1 つも無い状態になるので、予定の時刻に作成だけを
+// 試し直す。対象は、作り直しの作成が失敗した場合と、全体状態の適用の中で作成が失敗した場合である。
+// rotate-key・停止・最初の全体状態を受け取る前の「トンネルが無い」状態には手を出さない。
 func (rt *runtime) checkTunnel(now time.Time) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.tun == nil {
+		rt.retryBuildLocked(now)
+		return
+	}
 	if rt.f == nil || rt.f.LastState == nil {
 		return
 	}
 	st := rt.f.LastState
-	if rt.tun == nil {
-		rt.retryBuildLocked(now, st)
-		return
-	}
 	// Status が読むのは今の device なので、ゼロでない最終ハンドシェイクは必ず今のトンネルのものである
 	idle, rebuild := rt.rebuild.step(now, rt.tunStart, rt.tun.Status().LastHandshake)
 	if !rebuild {
@@ -314,37 +331,55 @@ func (rt *runtime) checkTunnel(now time.Time) {
 	}
 	log.Printf("no new wireguard handshake for %s; rebuilding the tunnel (the next rebuild needs %s without one)",
 		idle.Round(time.Second), rt.rebuild.wait.Round(time.Second))
-	rt.buildLocked(now, st)
+	// 既に適用を終えた全体状態なので、世代の記録はやり直さない。誤りは buildLocked が 1 行出す
+	rt.buildLocked(now, st, true) //nolint:errcheck // 誤りは buildLocked が出す
 }
 
-// retryBuildLocked は、作り直しが作成に失敗して残ったトンネルの無い状態を、予定の時刻に試し直す
-// (仕様 7 節)。予定が無ければ何もしないので、rotate-key や停止で閉じたトンネルは立て直さない。
-// 呼び出し側は rt.mu を持つ。
-func (rt *runtime) retryBuildLocked(now time.Time, st *proto.State) {
-	if rt.rebuild.retryAt.IsZero() || now.Before(rt.rebuild.retryAt) {
+// retryBuildLocked は、作成に失敗して残ったトンネルの無い状態を、予定の時刻に試し直す(仕様 7 節)。
+// 予定が無ければ何もしないので、rotate-key や停止で閉じたトンネルは立て直さない。
+//
+// 立てるのは、作成に失敗したときの全体状態(retrySt)からである。認証情報ファイルの last_state は
+// 適用を終えた全体状態しか指さず、新しい全体状態の適用が失敗した後は 1 つ前の全体状態を指したままな
+// ので、そちらから立てるとサーバが想定していないトンネルになる。成功したときは世代の記録まで行う。
+// 既に適用を終えた全体状態なら、同じ値を書き直すだけで害は無い。呼び出し側は rt.mu を持つ。
+func (rt *runtime) retryBuildLocked(now time.Time) {
+	if rt.retrySt == nil || rt.rebuild.retryAt.IsZero() || now.Before(rt.rebuild.retryAt) {
 		return
 	}
-	log.Printf("no tunnel since the last rebuild failed %s ago; building it again", now.Sub(rt.tunStart).Round(time.Second))
-	rt.buildLocked(now, st)
+	log.Printf("no tunnel since the last build failed %s ago; building it again", now.Sub(rt.tunStart).Round(time.Second))
+	rt.buildLocked(now, rt.retrySt, false) //nolint:errcheck // 誤りは buildLocked が出す
 }
 
-// buildLocked はトンネルを立て直してリスナーを開き直す。失敗したら理由を 1 行出し、次に試す時刻を
-// 決める。呼び出し側は rt.mu を持つ。
-func (rt *runtime) buildLocked(now time.Time, st *proto.State) {
-	// startTunnelLocked は最初に closeLocked を呼び、closeLocked は再試行の予定を消す。続けて失敗した
+// buildLocked はトンネルを立ててリスナーを開き直す。applied は、渡した全体状態の適用が世代の記録まで
+// 済んでいるかを表す。済んでいなければ、作成に成功した時点で finishApplyLocked まで行う。
+//
+// 作成に失敗したときは理由を 1 行出し、作成そのものの失敗なら次に試す時刻と全体状態を控える。
+// wg 設定の誤りは控えず、次の全体状態を待つ。呼び出し側は rt.mu を持つ。
+func (rt *runtime) buildLocked(now time.Time, st *proto.State, applied bool) error {
+	// startTunnelLocked は最初に closeLocked を呼び、closeLocked は試し直しの控えを消す。続けて失敗した
 	// ときに間隔を広げられるよう、予定は呼ぶ前に控えておき、失敗したら戻してから次を決める
 	retryAt, retryWait := rt.rebuild.retryAt, rt.rebuild.retryWait
-	if err := rt.startTunnelLocked(st); err != nil {
+	retryable, err := rt.startTunnelLocked(st)
+	if err != nil {
+		rt.retrySt = st // 失敗した全体状態は、試し直さない場合もハートビートの理由のために控える
+		if !retryable {
+			log.Printf("build tunnel: %v; not retrying until a new full state arrives", err)
+			return err
+		}
 		rt.rebuild.retryAt, rt.rebuild.retryWait = retryAt, retryWait
 		rt.rebuild.failedBuild(now)
 		if d := rt.rebuild.retryAt.Sub(now); d > 0 {
-			log.Printf("rebuild tunnel: %v; trying again in %s", err, d.Round(time.Second))
+			log.Printf("build tunnel: %v; trying again in %s", err, d.Round(time.Second))
 		} else {
-			log.Printf("rebuild tunnel: %v; trying again at the next check", err)
+			log.Printf("build tunnel: %v; trying again at the next check", err)
 		}
-		return
+		return err
 	}
-	rt.rl.Apply(relay.DesiredFromRules(st.Rules))
+	if applied {
+		rt.rl.Apply(relay.DesiredFromRules(st.Rules))
+		return nil
+	}
+	return rt.finishApplyLocked(st)
 }
 
 // relayOptions は中継の調整値を作る。宛先の許可一覧があれば、中継が宛先へ接続するときに
@@ -372,9 +407,10 @@ func logAllowTargets(l *allowtargets.List) {
 }
 
 func (rt *runtime) closeLocked() {
-	// 閉じたトンネルは watchdog の再試行の対象にしない(仕様 7 節)。作り直しに失敗した直後に
-	// checkTunnel が付け直す
+	// 閉じたトンネルは watchdog の試し直しの対象にしない(仕様 7 節)。作成に失敗した直後に
+	// buildLocked が控え直す
 	rt.rebuild.clearRetry()
+	rt.retrySt = nil
 	if rt.rl != nil {
 		rt.rl.Close()
 		rt.rl = nil
@@ -405,14 +441,17 @@ func (rt *runtime) heartbeat() proto.Heartbeat {
 	defer rt.mu.Unlock()
 	hb := proto.Heartbeat{Generation: rt.gen, Rules: []proto.RuleStatus{}}
 	if rt.tun == nil {
-		// トンネルが無い理由は 3 通りある。全体状態をまだ受け取っていない場合、作り直しが作成に失敗して
-		// 再試行を待っている場合(仕様 7 節)、受け取った全体状態の適用が作成に失敗した場合である
-		reason := "no tunnel; full state not received"
-		if rt.f != nil && rt.f.LastState != nil {
-			reason = "no tunnel"
-			if !rt.rebuild.retryAt.IsZero() {
-				reason = "no tunnel; the last rebuild failed and will be retried"
-			}
+		// トンネルが無い理由は 4 通りある。作成に失敗して試し直しを待っている場合(仕様 7 節)、
+		// 作成が wg 設定の誤りで終わって次の全体状態を待っている場合、全体状態をまだ受け取っていない
+		// 場合、rotate-key や停止で閉じた直後の場合である
+		reason := "no tunnel"
+		switch {
+		case !rt.rebuild.retryAt.IsZero():
+			reason = "no tunnel; building it failed and will be retried"
+		case rt.retrySt != nil:
+			reason = "no tunnel; building it failed"
+		case rt.f == nil || rt.f.LastState == nil:
+			reason = "no tunnel; full state not received"
 		}
 		hb.Tunnel = proto.TunnelStatus{State: proto.StatusError, Reason: reason}
 		return hb
