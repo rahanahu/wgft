@@ -215,8 +215,11 @@ jobs:
         run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/dataplane/userspace/utun/... ./internal/flock/... ./cmd/wgft/...
 
   macos-test:
-    # Runs the same packages as windows-test, on GitHub's Apple silicon runner. This is the
-    # first job that actually executes the darwin-specific code paths (sndbuf_darwin.go's
+    # Runs the same packages as windows-test except internal/dataplane/userspace/utun, on
+    # GitHub's Apple silicon runner. utun is left out here because bind_windows_test.go's
+    # coverage is a Windows-specific regression test for the WSAECONNRESET bind fix, and
+    # darwin's runtime behaviour there has not been verified, so it is not claimed. This is
+    # the first job that actually executes the darwin-specific code paths (sndbuf_darwin.go's
     # SO_SNDBUF workaround for macOS's 9216-byte default UDP send buffer, docs/testing.md's
     # B8); the build-test job's cross-build step only compiles for darwin and does not run
     # anything.
