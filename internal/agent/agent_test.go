@@ -506,7 +506,7 @@ func TestStreamOnceSendsHeartbeatAfterApply(t *testing.T) {
 	waitHeartbeat(0)
 }
 
-// TestStreamOnceSendsProtocolRange は、agent が pubkey メッセージに話せる版の範囲と、
+// TestStreamOnceSendsProtocolRange は、agent が pubkey メッセージに対応する版の範囲と、
 // 空(だが非 nil)の capabilities を載せることを確かめる(仕様 7a.6 節)。
 func TestStreamOnceSendsProtocolRange(t *testing.T) {
 	srv, pin, _, _, firstCh := newTestStreamServer(t)

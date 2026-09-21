@@ -7,7 +7,7 @@ import (
 )
 
 // リポジトリの lab/suite.txt は読めて、分類が既知のものだけで、旧来の一式と同じ範囲を
-// 既定で覆う。分類を書き間違えると単独で流すべき確認が並列に混ざるので、ここで止める。
+// 既定で対象とする。分類を書き間違えると単独で流すべき確認が並列に混ざるので、ここで止める。
 func TestRepoManifestIsValid(t *testing.T) {
 	jobs, err := loadManifest(filepath.Join("..", "..", "lab", "suite.txt"))
 	if err != nil {

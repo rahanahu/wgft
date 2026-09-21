@@ -288,7 +288,7 @@ func TestImportApplyAndStaleRefusal(t *testing.T) {
 
 // conflictOnceBackend は fakeBackend を包み、ExpectedDigest 付きの最初の Batch 呼び出しだけを
 // ErrBatchConflict で拒む。確認ページの事前照合(世代とハッシュの一致)を通り抜けた後、
-// Batch を呼ぶまでの狭い窓に別経路の書き込みが割り込んだ場合を模す
+// Batch を呼ぶまでのわずかな競合可能期間に別経路の書き込みが割り込んだ場合を模す
 // (webui_import.go の uiImportApply のコメント、仕様 10.1 節)。
 type conflictOnceBackend struct {
 	*fakeBackend
@@ -306,7 +306,7 @@ func (b *conflictOnceBackend) Batch(req BatchRequest) (*store.BatchResult, error
 // TestImportApplyMapsBatchConflictToStalePage は、事前照合を通り抜けた後に Batch 自身が
 // ExpectedDigest の不一致(ErrBatchConflict)で拒む場合も、事前照合が拒んだときと同じ
 // 「確認ページを表示した後に変わった」再アップロードの案内になることを確かめる。
-// この経路は、事前照合と Batch 呼び出しの間の競合の窓を、BatchRequest.ExpectedDigest が
+// この経路は、事前照合と Batch 呼び出しの間の競合可能期間を、BatchRequest.ExpectedDigest が
 // 実際に塞いでいることの確認である。
 func TestImportApplyMapsBatchConflictToStalePage(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))

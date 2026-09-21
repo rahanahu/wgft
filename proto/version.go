@@ -5,7 +5,7 @@ package proto
 // server_protocol_version が無い場合は legacy v0 として別に扱う(このファイルの型は関与しない。
 // 版のフィールドの有無で判定する。proto/stream.go、proto/state.go を参照)。
 
-// ProtocolRange は話せる版の範囲(両端を含む)。
+// ProtocolRange は対応する版の範囲(両端を含む)。
 type ProtocolRange struct {
 	Min int
 	Max int
@@ -18,7 +18,7 @@ func (r ProtocolRange) Valid() bool {
 	return r.Min >= 1 && r.Min <= r.Max
 }
 
-// SupportedProtocol は、この build の server と agent が共通に話せる、番号の付いた版の範囲。
+// SupportedProtocol は、この build の server と agent が共通に対応できる、番号の付いた版の範囲。
 // 現在の版と直前の版を必ず支えるという約束により、v2 を追加する変更は Max を 2 に広げるだけで、
 // v1 を落とすときに初めて Min を 2 に上げる。SelectProtocolVersion 自体は変えなくてよい。
 var SupportedProtocol = ProtocolRange{Min: 1, Max: 1}

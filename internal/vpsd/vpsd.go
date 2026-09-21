@@ -7,7 +7,7 @@
 //   - vpsd.go: Options、Daemon、Run(起動の配線)
 //   - dataplane.go: 転送面(カーネルの wg・nftables・conntrack)へのインタフェースとカーネル実装
 //   - dataplane_userspace.go: ユーザー空間モードの転送面(internal/dataplane/userspace の Backend)を包む層
-//   - apply.go: wg の立ち上げとルールの適用(bringUpWG、applyNFT。Reconciler が駆動する)
+//   - apply.go: wg の立ち上げとルールの適用(bringUpWG、applyNFT。Reconciler が動かす)
 //   - admin_backend.go: 管理用 API(admin.Backend)の実装
 //   - agent_backend.go: 登録(agentapi.Backend)と stream(stream.Backend)の実装
 //   - watch.go: 窃取検知(IP の食い違いと往復。仕様 5.2 節)
@@ -224,7 +224,7 @@ type Daemon struct {
 
 	// dp は転送面。カーネル(nftables + カーネル WireGuard、仕様 6.1 節)とユーザー空間(仕様 6.3 節)の 2 つの実装がある
 	dp serverDataplane
-	// rec は dp とプロキシモードの中継を 1 つのトランザクションで駆動し、Desired と Active を持つ
+	// rec は dp とプロキシモードの中継を 1 つのトランザクションで動かし、Desired と Active を持つ
 	// (設計文書 7a.3 節)。最初の applyNFT で作る
 	rec *reconcile.Reconciler
 	// notActive はログに記録済みのルール単位の失敗(ルール ID → 理由)。同じ失敗を再試行のたびに

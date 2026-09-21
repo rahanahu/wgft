@@ -170,7 +170,7 @@ func TestOpenWaitsOutAHeldLock(t *testing.T) {
 	// busy_timeout を持たない接続の COMMIT は、SQLite の既定 (リトライ 0) でこの一瞬の衝突にも
 	// 即座に失敗するため、以前はこの COMMIT 自体が "database is locked (SQLITE_BUSY)" で
 	// 失敗することがあった (4 並列の CPU 負荷の下で 280 回中 4 回、再現して確認: エラーも
-	// 発生までの時間もここで固定した想定と一致し、Open 自身の 5 秒の再試行窓には無関係だった)。
+	// 発生までの時間もここで固定した想定と一致し、Open 自身の 5 秒の再試行区間には無関係だった)。
 	// ここで busy_timeout を設定すれば、この一瞬の衝突は COMMIT 自身のリトライで吸収される。
 	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
 		t.Fatalf("set busy_timeout on the blocker connection: %v", err)

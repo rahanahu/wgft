@@ -42,7 +42,7 @@ func currentUserSID() (*windows.SID, error) {
 // OICI を添える。SecureFile(filesec_windows.go)は、既に存在するファイルを事後に締めるため
 // forContainer=false でこれを呼ぶ。新規に作るファイルは、事後に締めるこの経路ではなく
 // createSecureTemp(createtemp_windows.go)が作成の瞬間から保護する(仕様 11a 節。事後に
-// 締める経路には、作成直後から締めるまでの間に別の利用者がハンドルを開けてしまう窓がある)。
+// 締める経路には、作成直後から締めるまでの間、別の利用者がハンドルを開けてしまう、緩い ACL のままの期間がある)。
 func applyProtectedDACL(path string, userSID *windows.SID, forContainer bool) error {
 	sd, err := protectedSecurityDescriptor(userSID, forContainer)
 	if err != nil {

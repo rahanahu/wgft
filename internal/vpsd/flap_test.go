@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// flapStep:A→B は警告なし、A→B→A は往復、窓を超えた古い値への復帰は警告なし、
+// flapStep:A→B は警告なし、A→B→A は往復、区間を超えた古い値への復帰は警告なし、
 // 同一 IP の連続は何もしない(仕様 5.2 節の第 2 判定)。
 func TestFlapStep(t *testing.T) {
 	win := 10 * time.Minute
@@ -46,10 +46,10 @@ func TestFlapStep(t *testing.T) {
 		t.Fatalf("同一 IP 連続で変化: flapped=%v len %d→%d", flapped, before, len(h))
 	}
 
-	// 窓を超えた古い値への復帰は往復にしない(10 分より前の A は落ちている)
+	// 区間を超えた古い値への復帰は往復にしない(10 分より前の A は落ちている)
 	h2 := []ipObs{{IP: "A", At: at(0)}, {IP: "B", At: at(30)}}
-	_, flapped, _ = flapStep(h2, "A", at(0+700), win) // 700s 後、A は窓外
+	_, flapped, _ = flapStep(h2, "A", at(0+700), win) // 700s 後、A は区間外
 	if flapped {
-		t.Fatal("窓外の古い値への復帰で往復")
+		t.Fatal("区間外の古い値への復帰で往復")
 	}
 }

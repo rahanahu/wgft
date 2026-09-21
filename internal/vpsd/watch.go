@@ -91,7 +91,7 @@ func ipMismatchStep(count int, streamIP, wgIP string) (int, bool) {
 	return count, count >= 8
 }
 
-// flapWindow は「以前の値へ戻った」とみなす時間窓(仕様 5.2 節)。
+// flapWindow は「以前の値へ戻った」とみなす時間区間(仕様 5.2 節)。
 const flapWindow = 10 * time.Minute
 
 // ipObs は 1 チャネルで観測した 1 つの IP と、その最終観測時刻。
@@ -107,8 +107,8 @@ type flapState struct {
 	hist map[string]map[string][]ipObs // agent -> channel -> 履歴
 }
 
-// flapStep は履歴に now 時点の ip を足し、それが「直前の値ではなく、それより前に窓の内で
-// 持っていた値」に一致すれば往復(flapped=true)とする純関数。窓を超えた古い項目は落とす。
+// flapStep は履歴に now 時点の ip を足し、それが「直前の値ではなく、それより前に区間内で
+// 持っていた値」に一致すれば往復(flapped=true)とする純関数。区間を超えた古い項目は落とす。
 // 同じ IP が続くときは最終観測時刻を更新するだけで往復にはしない(仕様 5.2 節)。
 func flapStep(hist []ipObs, ip string, now time.Time, window time.Duration) (out []ipObs, flapped bool, other string) {
 	for _, e := range hist {

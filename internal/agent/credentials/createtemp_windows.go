@@ -23,7 +23,7 @@ import (
 // から締め直すまでの間、その一時ファイルは親ディレクトリから継承した ACL のままであり、
 // その間に別の利用者がハンドルを開けば、後から DACL を締めてもその接続は取り消せない
 // (レビュー指摘。Windows はアクセス可否をハンドルを開く瞬間にだけ判定するため)。
-// windows.CreateFile に SECURITY_ATTRIBUTES を渡すことで、この窓を無くす。
+// windows.CreateFile に SECURITY_ATTRIBUTES を渡すことで、この期間を無くす。
 func createSecureTemp(dir, pattern string) (*os.File, error) {
 	sid, err := currentUserSID()
 	if err != nil {

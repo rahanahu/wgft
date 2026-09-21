@@ -21,7 +21,7 @@ import (
 // *stream.Hub である(interface で差し替えられない)ため、本物の Hub と WebSocket 接続で確かめる。
 // 実際の不具合(2026-09-21 のレビュー指摘)は、rule_id をキーに「そのルール ID を最後に報告した
 // どの agent か」を拾ってしまい、切断した agent の古いハートビートが今の持ち主を上書きしうる形に
-// あった。直した形は、rules(呼び出し元がこの応答用に読んだ今のルール集合)を歩き、各ルールの
+// あった。直した形は、rules(呼び出し元がこの応答用に読んだ今のルール集合)を順に調べ、各ルールの
 // 今の持ち主(proto.Rule.Agent)のハートビートだけを見る。
 
 // fakeStreamBackend is a minimal stream.Backend (internal/vpsd/stream) that accepts any

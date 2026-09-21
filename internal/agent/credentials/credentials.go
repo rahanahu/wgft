@@ -67,7 +67,7 @@ func (f *Credentials) Save(path string) error {
 	dir := filepath.Dir(path)
 	// createSecureTemp は、Windows では作成の瞬間から保護 DACL を付けた状態でファイルを作る
 	// (os.CreateTemp してから締め直すのでは、締め直すまでの間に別の利用者がハンドルを開けて
-	// しまう窓ができ、後から DACL を締めても取り消せない。レビュー指摘、仕様 11a 節)。
+	// しまう、緩い ACL のままの期間ができ、後から DACL を締めても取り消せない。レビュー指摘、仕様 11a 節)。
 	// Unix では os.CreateTemp そのもので、作成の瞬間から 0600 であることに変わりはない。
 	tmp, err := createSecureTemp(dir, ".wgft-credentials-*")
 	if err != nil {
