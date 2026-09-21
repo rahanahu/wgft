@@ -276,6 +276,8 @@ func TestUIRenderLocales(t *testing.T) {
 		{"/ui/rules/r_a", "拒否リスト", "Deny list"},
 		{"/ui/agents", "最終ハートビート", "Last heartbeat"},
 		{"/ui/warnings", "警告", "Warnings"},
+		{"/ui/rules", "拒否数", "Denied"},
+		{"/ui/health", "警告があります", "Warnings present"},
 		{"/ui/rules/import", "読み込み", "Import rules"},
 	}
 	for _, tc := range cases {

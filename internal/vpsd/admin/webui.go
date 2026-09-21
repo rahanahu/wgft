@@ -43,6 +43,8 @@ func (s *Server) registerUI() {
 	s.mux.HandleFunc("GET /{$}", s.uiDashboard)
 	s.mux.HandleFunc("GET /ui/agents", s.uiAgentsPartial)
 	s.mux.HandleFunc("GET /ui/warnings", s.uiWarningsPartial)
+	s.mux.HandleFunc("GET /ui/rules", s.uiRulesPartial)
+	s.mux.HandleFunc("GET /ui/health", s.uiHealthPartial)
 	s.mux.HandleFunc("GET /ui/add-rule", s.uiAddRuleForm)
 	s.mux.HandleFunc("POST /ui/add-rule", s.uiAddRule)
 	s.mux.HandleFunc("GET /ui/add-agent", s.uiAddAgentForm)
@@ -370,6 +372,24 @@ func (s *Server) uiWarningsPartial(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderHTML(w, "warnings", d)
+}
+
+func (s *Server) uiRulesPartial(w http.ResponseWriter, r *http.Request) {
+	d, err := s.buildDash(resolveLocale(w, r))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.renderHTML(w, "rules", d)
+}
+
+func (s *Server) uiHealthPartial(w http.ResponseWriter, r *http.Request) {
+	d, err := s.buildDash(resolveLocale(w, r))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.renderHTML(w, "health", d)
 }
 
 // findRule は ID で 1 件返す。ルール一覧そのものが読めなければ、無いルールと区別するため

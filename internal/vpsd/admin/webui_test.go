@@ -324,6 +324,42 @@ func TestDashboardWarningsLayout(t *testing.T) {
 	}
 }
 
+// TestRulesAndHealthAutoRefresh confirms the rules panel and the header health block now carry
+// data-refresh (design.md 10.1 節), and that the partial routes backing them (GET /ui/rules,
+// GET /ui/health) render exactly the fragment the full dashboard page embeds -- the same
+// contract the pre-existing #agents/#warnings partials follow. Before this change, #rules had no
+// data-refresh attribute and there was no /ui/rules route at all, so a rule that turned error (or
+// recovered) after page load stayed at its load-time state/reason/dropped-count forever, and the
+// header health summary (derived from the same rule-error count) was equally frozen.
+func TestRulesAndHealthAutoRefresh(t *testing.T) {
+	srv := newStateTestServer(t)
+
+	full := getBody(t, srv.URL+"/?lang=en")
+	if !strings.Contains(full, `id="rules" data-refresh="/ui/rules"`) {
+		t.Error("the rules panel is missing data-refresh=\"/ui/rules\"")
+	}
+	if !strings.Contains(full, `id="health" data-refresh="/ui/health"`) {
+		t.Error("the header health block is missing data-refresh=\"/ui/health\"")
+	}
+
+	rulesPartial := getBody(t, srv.URL+"/ui/rules?lang=en")
+	if !strings.Contains(full, rulesPartial) {
+		t.Errorf("GET /ui/rules must render exactly the fragment the full page embeds inside #rules\nfull:\n%s\npartial:\n%s", full, rulesPartial)
+	}
+	// 中身そのものも部分更新の対象になっていることを確かめる(状態欄、拒否数)。
+	if !strings.Contains(rulesPartial, "Applied") || !strings.Contains(rulesPartial, "Error") {
+		t.Error("the /ui/rules fragment is missing per-rule state badges")
+	}
+
+	healthPartial := getBody(t, srv.URL+"/ui/health?lang=en")
+	if !strings.Contains(full, healthPartial) {
+		t.Errorf("GET /ui/health must render exactly the fragment the full page embeds inside #health\nfull:\n%s\npartial:\n%s", full, healthPartial)
+	}
+	if !strings.Contains(healthPartial, "1 errors") {
+		t.Error("the /ui/health fragment is missing the rule error count")
+	}
+}
+
 // TestRestrictionSummaryUnits は、一覧の接続元制限の要約でレートの単位が表示言語に
 // 合わせて訳され、日本語に "second" などの英語が混ざらないことを確かめる。
 func TestRestrictionSummaryUnits(t *testing.T) {

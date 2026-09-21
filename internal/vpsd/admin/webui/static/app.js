@@ -3,10 +3,51 @@
 (function () {
   "use strict";
   function refresh(el) {
+    // #rules は差し替えのたびにグループの折りたたみ state と group-toggle の click
+    // listener を失う（querySelectorAll で一度だけ束縛しているため）ので、差し替えの前後で
+    // 折りたたみ state を保存・復元し、listener を束縛し直す。他の要素（#warnings、#agents、
+    // #health）は差し替えても壊れる state を持たない。
+    var isRules = el.id === "rules";
+    var collapsed = isRules ? collapsedGroupNames() : null;
     fetch(el.dataset.refresh, { headers: { "X-Partial": "1" } })
       .then(function (r) { return r.ok ? r.text() : null; })
-      .then(function (html) { if (html !== null) el.innerHTML = html; })
+      .then(function (html) {
+        if (html === null) return;
+        el.innerHTML = html;
+        if (isRules) {
+          initRuleGroups();
+          restoreCollapsedGroups(collapsed);
+        }
+      })
       .catch(function () { /* 一時的な失敗は無視して次の周期で再試行 */ });
+  }
+  // collapsedGroupNames/restoreCollapsedGroups: グループの折りたたみは group-name の表示名を
+  // 手掛かりに保つ（data-group はグループの並び順で振った通し番号なので、部分更新の間に
+  // グループの追加・削除で並びが変わると同じ番号が別のグループを指しうる）。
+  function collapsedGroupNames() {
+    var names = {};
+    document.querySelectorAll("#rules .group-row").forEach(function (row) {
+      var btn = row.querySelector(".group-toggle");
+      var label = row.querySelector(".group-name");
+      if (btn && label && btn.getAttribute("aria-expanded") === "false") {
+        names[label.textContent] = true;
+      }
+    });
+    return names;
+  }
+  function restoreCollapsedGroups(names) {
+    if (!names) return;
+    document.querySelectorAll("#rules .group-row").forEach(function (row) {
+      var btn = row.querySelector(".group-toggle");
+      var label = row.querySelector(".group-name");
+      if (!btn || !label || !names[label.textContent]) return;
+      btn.setAttribute("aria-expanded", "false");
+      btn.textContent = "▸";
+      var g = btn.dataset.group;
+      document.querySelectorAll('.rule-row[data-group="' + g + '"]').forEach(function (r) {
+        r.hidden = true;
+      });
+    });
   }
   function start() {
     var targets = document.querySelectorAll("[data-refresh]");
