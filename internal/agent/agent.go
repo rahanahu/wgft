@@ -59,6 +59,9 @@ type runtime struct {
 	wgCfg     proto.WGConfig // 適用済みの wg 設定
 	gen       uint64         // 処理済み世代
 
+	tunStart time.Time    // 今のトンネルを立てた時刻。ハンドシェイクが一度も成立していないときの起点
+	rebuild  rebuildState // トンネルを作り直す判定の閾値と、次の作り直しまでの間隔(仕様 7 節)
+
 	streamMu     sync.Mutex
 	streamCancel context.CancelFunc // 今の stream 接続を切る(rotate-key で張り直すとき)
 	reconnectNow bool               // 切った直後はバックオフせずに繋ぎ直す
@@ -104,6 +107,7 @@ func Run(opts Options) error {
 		heartbeatInterval:      30 * time.Second,
 		handshakeRetryInterval: time.Second,
 		handshakeRetryTimeout:  10 * time.Second,
+		rebuild:                rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
 	}
 	defer rt.close()
 
@@ -134,6 +138,7 @@ func Run(opts Options) error {
 			// 復帰できない認証拒否。鍵と認証情報ファイルは残したまま止まる(仕様 5.1 節)
 			return err
 		case <-tick.C:
+			rt.checkTunnel(time.Now())
 			rt.mu.Lock()
 			if rt.rl != nil {
 				rt.rl.Retry()
@@ -160,19 +165,9 @@ func (rt *runtime) apply(st *proto.State) error {
 		if rt.tun != nil {
 			log.Printf("wg config changed; rebuilding tunnel")
 		}
-		rt.closeLocked()
-		cfg, err := tunnelConfig(rt.priv, st.WG)
-		if err != nil {
+		if err := rt.startTunnelLocked(st); err != nil {
 			return fmt.Errorf("wireguard: %w", err)
 		}
-		tun, err := tunnel.New(cfg)
-		if err != nil {
-			return fmt.Errorf("wireguard: %w", err)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		go tun.Run(ctx)
-		rt.tun, rt.tunCancel, rt.wgCfg = tun, cancel, st.WG
-		rt.rl = relay.New(tun, rt.relayOptions(st))
 	}
 	acts := rt.rl.Apply(relay.DesiredFromRules(st.Rules))
 	rt.gen = st.Generation
@@ -182,6 +177,174 @@ func (rt *runtime) apply(st *proto.State) error {
 	}
 	log.Printf("applied generation %d (%d actions, %d listeners)", st.Generation, len(acts), len(rt.rl.Status()))
 	return firstErr
+}
+
+// defaultRebuildAfter と defaultRebuildBackoffMax は、トンネルを作り直す判定の既定の閾値(仕様 7 節)。
+// 300 秒は WireGuard の時定数から決めた値で、健全なトンネルでは最終ハンドシェイクが 145 秒
+// (RekeyAfterTime 120 秒 + keepalive 25 秒)より古くならず、180 秒(RejectAfterTime)を過ぎた鍵は
+// 送信にも使えないため、300 秒の時点のトンネルは既に 120 秒以上まったく通信していない。
+// keepalive の倍数にしないのは、WireGuard のこの 3 つの時定数が keepalive の値によらず一定だからである。
+const (
+	defaultRebuildAfter      = 300 * time.Second
+	defaultRebuildBackoffMax = 900 * time.Second
+)
+
+// rebuildState はトンネルを作り直す判定の状態。after はハンドシェイクが新しくならないまま最初の
+// 作り直しに至るまでの時間、backoffMax は作り直しの間隔の上限、wait は次の作り直しに要する時間である。
+// テストで短くできるよう、閾値は定数ではなくこの値で持つ。
+//
+// lastHandshake と observedAt は、経過時間を壁時計の差ではなく観測からの単調な時間で測るために持つ。
+// IpcGet が返す最終ハンドシェイクは壁時計の秒で、NTP の補正や手動の変更で飛ぶ値であり、その値と
+// 現在時刻の差で測ると、前方への飛びが健全なトンネルを古く見せてしまう(仕様 7 節)。
+type rebuildState struct {
+	after      time.Duration
+	backoffMax time.Duration
+	wait       time.Duration
+
+	lastHandshake time.Time // 直近に観測した最終ハンドシェイクの値
+	observedAt    time.Time // その値を最初に観測した時刻
+
+	// retryAt と retryWait は、作り直しがトンネルの作成そのものに失敗したときの再試行の予定。
+	// retryAt がゼロなら再試行を待っているトンネルは無い。閉じたトンネルを watchdog が勝手に
+	// 立て直さないよう、この印を付けるのは checkTunnel の失敗だけで、closeLocked が必ず消す
+	retryAt   time.Time
+	retryWait time.Duration
+}
+
+// failedBuild は、トンネルの作成に失敗したことを記録し、次に試す時刻を決める(仕様 7 節)。
+// トンネルが 1 つも無い状態なので、最初の 1 回は次のティッカーで試し、続けて失敗するほど
+// 間隔を after から上限まで広げる。
+func (s *rebuildState) failedBuild(now time.Time) {
+	if s.retryAt.IsZero() {
+		s.retryAt, s.retryWait = now, s.after
+		return
+	}
+	s.retryAt = now.Add(s.retryWait)
+	s.retryWait = min(2*s.retryWait, max(s.backoffMax, s.after))
+}
+
+// clearRetry は再試行の予定を捨てる。closeLocked から呼ぶので、作成に成功した場合も、
+// rotate-key や停止でトンネルを閉じた場合も消える。
+func (s *rebuildState) clearRetry() { s.retryAt, s.retryWait = time.Time{}, 0 }
+
+// step は、今の最終ハンドシェイクの値 handshake を観測し、その値が新しくならないまま経った時間で
+// トンネルを作り直すかどうかを決める(仕様 7 節)。作り直すときは次の間隔を倍にし、ゼロでない新しい
+// ハンドシェイクを観測したときは間隔を初期値に戻す。
+//
+// 起点には、値を観測した時刻とトンネルを立てた時刻 start の遅い方を使う。作り直した直後の device は
+// ハンドシェイクがゼロで、前の値もゼロだったときは値が変わらず、観測の時刻が更新されないためである。
+// now と start は time.Now が返す単調な読みを持つので、両者の差は壁時計の飛びに左右されない。
+//
+// サーバが停止しているだけの場合と、受信の経路が死んだ場合は、エージェントからは区別できない。
+// そこで、作り直しても戻らない間は間隔を広げ、上限で頭打ちにする。
+func (s *rebuildState) step(now, start, handshake time.Time) (idle time.Duration, rebuild bool) {
+	if s.after <= 0 {
+		return 0, false // 閾値を持たない runtime では作り直さない
+	}
+	if !handshake.Equal(s.lastHandshake) {
+		s.lastHandshake, s.observedAt = handshake, now
+		if !handshake.IsZero() {
+			s.wait = s.after
+		}
+	}
+	since := s.observedAt
+	if since.IsZero() || start.After(since) {
+		since = start
+	}
+	idle = now.Sub(since)
+	wait := max(s.wait, s.after)
+	if idle < wait {
+		return idle, false
+	}
+	s.wait = min(2*wait, max(s.backoffMax, s.after))
+	return idle, true
+}
+
+// newTunnel はトンネルを作る。値は tunnel.New で、テストだけが作成の失敗を模すために差し替える。
+var newTunnel = tunnel.New
+
+// startTunnelLocked は今のトンネルと中継を閉じてから、全体状態の wg 設定で立て直す(仕様 7 節)。
+// 呼び出し側は rt.mu を持つ。リスナーは開かないので、呼び出し側が続けて rl.Apply を呼ぶ。
+// 閉じるのが先なので、古い device と netstack、その goroutine は新しいものを作る前に必ず片付く。
+func (rt *runtime) startTunnelLocked(st *proto.State) error {
+	rt.closeLocked()
+	rt.tunStart = time.Now()
+	cfg, err := tunnelConfig(rt.priv, st.WG)
+	if err != nil {
+		return err
+	}
+	tun, err := newTunnel(cfg)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go tun.Run(ctx)
+	rt.tun, rt.tunCancel, rt.wgCfg = tun, cancel, st.WG
+	rt.rl = relay.New(tun, rt.relayOptions(st))
+	return nil
+}
+
+// checkTunnel は 30 秒ごとに呼ばれ(Run のティッカー)、ハンドシェイクが新しくならない時間が作り直しの
+// 間隔を超えたらトンネルを作り直す(仕様 7 節)。第 1 段の軽い回復(エンドポイントの引き直しと
+// トンネル内への ping)は tunnel.Run が keepalive ごとに行うので、checkTunnel は第 2 段だけを担う。
+//
+// 作り直しが要るのは、wireguard-go の受信ループが回復不能な誤りで終わったまま戻らない状態である。
+// そのトンネルは送信を続けるが二度と受信しないので、ハンドシェイクは永久に成立しない。サーバが単に
+// 停止している場合もエージェントから見た症状は同じで区別できないため、作り直しの間隔はバックオフで
+// 広げ、ハンドシェイクが成立したら初期値に戻す。
+//
+// 作り直しがトンネルの作成そのものに失敗するとトンネルが 1 つも無い状態になるので、予定の時刻に
+// 作成だけを試し直す。試し直すのは checkTunnel 自身の失敗で残った場合だけで、rotate-key・停止・
+// 最初の全体状態を受け取る前の「トンネルが無い」状態には手を出さない。
+func (rt *runtime) checkTunnel(now time.Time) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.f == nil || rt.f.LastState == nil {
+		return
+	}
+	st := rt.f.LastState
+	if rt.tun == nil {
+		rt.retryBuildLocked(now, st)
+		return
+	}
+	// Status が読むのは今の device なので、ゼロでない最終ハンドシェイクは必ず今のトンネルのものである
+	idle, rebuild := rt.rebuild.step(now, rt.tunStart, rt.tun.Status().LastHandshake)
+	if !rebuild {
+		return
+	}
+	log.Printf("no new wireguard handshake for %s; rebuilding the tunnel (the next rebuild needs %s without one)",
+		idle.Round(time.Second), rt.rebuild.wait.Round(time.Second))
+	rt.buildLocked(now, st)
+}
+
+// retryBuildLocked は、作り直しが作成に失敗して残ったトンネルの無い状態を、予定の時刻に試し直す
+// (仕様 7 節)。予定が無ければ何もしないので、rotate-key や停止で閉じたトンネルは立て直さない。
+// 呼び出し側は rt.mu を持つ。
+func (rt *runtime) retryBuildLocked(now time.Time, st *proto.State) {
+	if rt.rebuild.retryAt.IsZero() || now.Before(rt.rebuild.retryAt) {
+		return
+	}
+	log.Printf("no tunnel since the last rebuild failed %s ago; building it again", now.Sub(rt.tunStart).Round(time.Second))
+	rt.buildLocked(now, st)
+}
+
+// buildLocked はトンネルを立て直してリスナーを開き直す。失敗したら理由を 1 行出し、次に試す時刻を
+// 決める。呼び出し側は rt.mu を持つ。
+func (rt *runtime) buildLocked(now time.Time, st *proto.State) {
+	// startTunnelLocked は最初に closeLocked を呼び、closeLocked は再試行の予定を消す。続けて失敗した
+	// ときに間隔を広げられるよう、予定は呼ぶ前に控えておき、失敗したら戻してから次を決める
+	retryAt, retryWait := rt.rebuild.retryAt, rt.rebuild.retryWait
+	if err := rt.startTunnelLocked(st); err != nil {
+		rt.rebuild.retryAt, rt.rebuild.retryWait = retryAt, retryWait
+		rt.rebuild.failedBuild(now)
+		if d := rt.rebuild.retryAt.Sub(now); d > 0 {
+			log.Printf("rebuild tunnel: %v; trying again in %s", err, d.Round(time.Second))
+		} else {
+			log.Printf("rebuild tunnel: %v; trying again at the next check", err)
+		}
+		return
+	}
+	rt.rl.Apply(relay.DesiredFromRules(st.Rules))
 }
 
 // relayOptions は中継の調整値を作る。宛先の許可一覧があれば、中継が宛先へ接続するときに
@@ -209,6 +372,9 @@ func logAllowTargets(l *allowtargets.List) {
 }
 
 func (rt *runtime) closeLocked() {
+	// 閉じたトンネルは watchdog の再試行の対象にしない(仕様 7 節)。作り直しに失敗した直後に
+	// checkTunnel が付け直す
+	rt.rebuild.clearRetry()
 	if rt.rl != nil {
 		rt.rl.Close()
 		rt.rl = nil
@@ -239,7 +405,16 @@ func (rt *runtime) heartbeat() proto.Heartbeat {
 	defer rt.mu.Unlock()
 	hb := proto.Heartbeat{Generation: rt.gen, Rules: []proto.RuleStatus{}}
 	if rt.tun == nil {
-		hb.Tunnel = proto.TunnelStatus{State: proto.StatusError, Reason: "no tunnel; full state not received"}
+		// トンネルが無い理由は 3 通りある。全体状態をまだ受け取っていない場合、作り直しが作成に失敗して
+		// 再試行を待っている場合(仕様 7 節)、受け取った全体状態の適用が作成に失敗した場合である
+		reason := "no tunnel; full state not received"
+		if rt.f != nil && rt.f.LastState != nil {
+			reason = "no tunnel"
+			if !rt.rebuild.retryAt.IsZero() {
+				reason = "no tunnel; the last rebuild failed and will be retried"
+			}
+		}
+		hb.Tunnel = proto.TunnelStatus{State: proto.StatusError, Reason: reason}
 		return hb
 	}
 	ts := rt.tun.Status()
