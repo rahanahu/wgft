@@ -107,7 +107,7 @@ type flapState struct {
 	hist map[string]map[string][]ipObs // agent -> channel -> 履歴
 }
 
-// flapStep は履歴に now 時点の ip を足し、それが「直前の値ではなく、それより前に区間の内で
+// flapStep は履歴に now 時点の ip を足し、それが「直前の値ではなく、それより前に区間内で
 // 持っていた値」に一致すれば往復(flapped=true)とする純関数。区間を超えた古い項目は落とす。
 // 同じ IP が続くときは最終観測時刻を更新するだけで往復にはしない(仕様 5.2 節)。
 func flapStep(hist []ipObs, ip string, now time.Time, window time.Duration) (out []ipObs, flapped bool, other string) {
