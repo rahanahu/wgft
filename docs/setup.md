@@ -175,10 +175,12 @@ wgft agent run --data-dir ~/.wgft
 Download `wgft-windows-amd64.exe` and `wgft-windows-amd64.exe.sha256` from the [Releases page](https://github.com/rahanahu/wgft/releases). Open PowerShell in the folder they were saved to, for example Downloads, and verify the download:
 
 ```powershell
-(Get-FileHash -Algorithm SHA256 .\wgft-windows-amd64.exe).Hash -eq (Get-Content .\wgft-windows-amd64.exe.sha256).Split(' ')[0]
+if ((Get-FileHash -Algorithm SHA256 .\wgft-windows-amd64.exe).Hash -ne (Get-Content .\wgft-windows-amd64.exe.sha256).Split(' ')[0]) {
+    throw "SHA256 mismatch"
+}
 ```
 
-This prints `True` when the hash matches. PowerShell's `-eq` compares strings case-insensitively, which matters here because `Get-FileHash` returns the hash in uppercase while the published `.sha256` file has it in lowercase. Then run:
+This prints nothing and lets you continue when the hash matches. On a mismatch it throws and stops the script, so you cannot run the binary by mistake. PowerShell's `-ne` compares strings case-insensitively, which matters here because `Get-FileHash` returns the hash in uppercase while the published `.sha256` file has it in lowercase. Then run:
 
 ```powershell
 Rename-Item wgft-windows-amd64.exe wgft.exe
