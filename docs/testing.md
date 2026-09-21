@@ -381,6 +381,7 @@ D1 は、リリースのバイナリ (`wgft-windows-amd64.exe`) を、ラボか�
 - TCP と UDP の転送:Windows 自身と LAN の他のホストへの転送が通るかを確かめます
 - 大きな UDP:トンネルの MTU を超えるデータグラム (3000 バイトと 12000 バイト) が欠けずに届くかを確かめます
 - 再接続:server の再起動と、エージェントの再起動の後に転送が戻るかを確かめます
+- UDP の受信の固着:server の UDP のポートが一時的に届かなくなった後、送信は続くのに受信だけが止まったままにならないか、エージェントを再起動せずに戻るかを確かめます
 - 状態の保持:保存した認証情報で、登録をやり直さずに起動できるかを確かめます。認証情報のファイルの ACL が保護されたままであることも確かめます
 - ネットワークアダプタの無効と有効:アダプタを無効にして有効に戻した後に、転送が戻るかを確かめます
 - リリースのバイナリ:ビルドし直した物ではなく Releases の物が、Windows Defender ファイアウォールの確認 (許可と取り消しのどちらでも) の後に動くかを確かめます
@@ -401,7 +402,7 @@ macOS の挙動は Linux の上で再現できるとはみなしません。macO
 
 ### 実機の確認を小さな回帰テストに置き換える候補
 
-エージェントの tunnel と userspace の server 側を 1 つのプロセスの中で接続し、TCP と UDP を転送する Go のテストを作れば、Windows と macOS の runner (B4、B8) で D1 と D2 の一部 (転送、大きな UDP) を PR ごとに確かめられます。userspace の server 側のコードが Windows と macOS でビルドできるかは未確認です。この置き換えは v1.1 以降の候補とし、置き換えた後も、launchd、ACL、スリープ、ネットワークの変化の確認は実機に残します。
+エージェントの tunnel と userspace の server 側を 1 つのプロセスの中で接続し、TCP と UDP を転送する Go のテスト (`TestAgentServerInProcessForwarding`、`internal/dataplane/userspace/utun/inprocess_forward_test.go`) は、Pull Request #102 (未マージ) として存在し、Linux と macOS では通ります。このテストは `runtime.GOOS == "windows"` を条件に、Windows でだけ今も SKIP しています。Pull Request #107 は main に取り込み済みで、Windows での SKIP の原因だった `conn.NewDefaultBind()` の `WinRingBind` の挙動への修正 (`internal/dataplane/userspace/tunnel` と `internal/dataplane/userspace/utun` の `newBind()` が `conn.NewStdNetBind()` を明示して使う形) と、この `utun` package を CI の `windows-test` の `go test` の対象とクロスターゲットの `go vet` の対象に加える変更を含みます。したがって、Windows でこのテストの分の確認を得るために残る作業は、#102 側の SKIP を外し、ランダムな wg listen port の選択による不安定さを解消したうえで、`windows-test` で安定して通ることを確かめることです。#102 を今のまま取り込むと、得られるのは macOS の runner (B8) の分 (D2 の一部、転送、大きな UDP) だけで、Windows (B4) の分はまだ確かめられません。#107 の修正をあてて SKIP を外し、Windows の実機で 13 回実行した実験では 10 回通り、残る 3 回の失敗はテスト自身のランダムな wg の listen port の選び方の弱さ (50 回試しても 127.0.0.1 上の空きポートが見つからない) によるもので、トンネル側の不具合ではありません。#102 を取り込む時期は未定です。取り込んだ後も、launchd、ACL、スリープ、ネットワークの変化の確認は実機に残します。
 
 ## 高価な実験を小さな回帰テストへ置き換える規則
 
