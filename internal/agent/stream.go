@@ -110,7 +110,7 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 	defer ws.CloseNow()
 	ws.SetReadLimit(4 << 20)
 
-	// 版と機能の交渉(仕様 7a.6 節)。agent は話せる範囲を毎回そのまま宣言する。今のところ
+	// 版と機能の交渉(仕様 7a.6 節)。agent は対応する範囲を毎回そのまま宣言する。今のところ
 	// capabilities の語彙は無いので常に空配列を送り、legacy v0(語彙が無いこと自体)とは区別する
 	protoMin, protoMax := proto.SupportedProtocol.Min, proto.SupportedProtocol.Max
 	caps := proto.SupportedCapabilities

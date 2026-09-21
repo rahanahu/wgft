@@ -10,7 +10,7 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// 共有 fixture(internal/policy/testdata/admission)が覆わない場面を確かめる。IPv6 の送信元は
+// 共有 fixture(internal/policy/testdata/admission)が対象としない場面を確かめる。IPv6 の送信元は
 // kernel の行に一致しないので fixture に書けず、ここで確かめる(設計文書 7a.9 節)。
 
 type clock struct{ t time.Time }

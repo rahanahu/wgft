@@ -238,7 +238,7 @@ func TestLoadTightensExistingLooseFile(t *testing.T) {
 // 作成した直後(他の呼び出しを何も挟まない時点)で、既に保護 DACL(SYSTEM・
 // BUILTIN\Administrators・今の実行者だけ)になっていることを確かめる。os.CreateTemp して
 // から SecureFile で締め直す旧い手順では、締め直すまでの間、緩い(親から継承した)ACL の
-// ままハンドルを開ける窓があった(レビュー指摘)。この窓が無いことを、作成直後の 1 点だけを
+// ままハンドルを開ける期間があった(レビュー指摘)。この期間が無いことを、作成直後の 1 点だけを
 // 見て確認する。
 func TestCreateSecureTempHasProtectedDACLAtCreation(t *testing.T) {
 	dir := t.TempDir()

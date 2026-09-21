@@ -11,7 +11,7 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// 共有 fixture が覆わない、meter の期限と set の大きさを、手で組んだ行の列で確かめる。
+// 共有 fixture が対象としない、meter の期限と set の大きさを、手で組んだ行の列で確かめる。
 
 func udpRow(kind string, ctNew bool, st polnft.Stmt) polnft.Row {
 	return polnft.Row{RuleID: "r", Kind: kind, Comment: polnft.Comment("r", kind),

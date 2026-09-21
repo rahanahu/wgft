@@ -56,7 +56,7 @@ func (d *Daemon) wgConfig() (*dataplane.WGConfig, map[string]netip.Addr, error) 
 	}, agentAddr, nil
 }
 
-// reconciler は Runtime を駆動する Reconciler を返す(設計文書 7a.2、7a.3 節)。frontend はプロキシモードの
+// reconciler は Runtime を動かす Reconciler を返す(設計文書 7a.2、7a.3 節)。frontend はプロキシモードの
 // 中継(proxyrelay)、dataplane はモードの Backend である。
 func (d *Daemon) reconciler() *reconcile.Reconciler {
 	if d.rec == nil {

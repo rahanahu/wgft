@@ -121,8 +121,8 @@ func TestAgentServerInProcessForwarding(t *testing.T) {
 	agentRelay := relay.New(agentTun, relay.Options{Logf: quiet})
 	agentRelay.Apply(relay.DesiredFromRules(agentRules))
 
-	// 4. 握手を待ってから (壁時計の窓に入る前に状態の到達を確かめる。docs/testing.md
-	// 「壁時計の窓を使うテストの規範」)、TCP と UDP を確かめる。予算は handshakeBudget を参照
+	// 4. 握手を待ってから (壁時計の区間に入る前に状態の到達を確かめる。docs/testing.md
+	// 「壁時計の区間を使うテストの規範」)、TCP と UDP を確かめる。予算は handshakeBudget を参照
 	// (再送の間隔は wireguard-go の RekeyTimeout=5 秒で、遅い CI runner ではさらに伸びうる)。
 	waitForHandshake(t, srvTun, agentTun, agentPub, wgPort, handshakeBudget, time.Time{})
 
@@ -372,8 +372,8 @@ func startUDPEcho(t *testing.T) string {
 // netstack devices) before concluding the handshake is genuinely stuck rather than merely late.
 const handshakeBudget = 40 * time.Second
 
-// waitForHandshake は、after より後の握手が成立するまで待つ (壁時計の窓に入る前に状態の到達を
-// 確かめる。docs/testing.md 「壁時計の窓を使うテストの規範」)。上限を超えたら失敗させ、診断のため
+// waitForHandshake は、after より後の握手が成立するまで待つ (壁時計の区間に入る前に状態の到達を
+// 確かめる。docs/testing.md 「壁時計の区間を使うテストの規範」)。上限を超えたら失敗させ、診断のため
 // 両側の IpcGet 相当の状態を出す (Logf は失敗したテストでだけ表示されるので、通ったときの費用は無い)。
 func waitForHandshake(t *testing.T, srv *Tunnel, agent *tunnel.Tunnel, peer wgtypes.Key, wgPort uint16, budget time.Duration, after time.Time) PeerStatus {
 	t.Helper()
@@ -484,7 +484,7 @@ func checkUDPRoundTrip(t *testing.T, addr string, size int) {
 }
 
 // checkUDPRoundTripFails は、否定の主張(転送が戻らない)を確かめる。区間そのものが要る
-// (docs/testing.md「壁時計の窓を使うテストの規範」)ので、timeout は主張の根拠ではなく上限。
+// (docs/testing.md「壁時計の区間を使うテストの規範」)ので、timeout は主張の根拠ではなく上限。
 func checkUDPRoundTripFails(t *testing.T, addr string, timeout time.Duration) {
 	t.Helper()
 	conn, err := net.Dial("udp4", addr)
@@ -504,7 +504,7 @@ func checkUDPRoundTripFails(t *testing.T, addr string, timeout time.Duration) {
 
 // assertGoroutinesSettle は、明示的に片付けた後に goroutine 数が基準値まで戻ることを確かめる
 // (-count=3 を跨いで漏れないため)。wireguard-go とネットスタックの後片付けは非同期なので、
-// 収束を待ってから比べる(壁時計の窓を使うテストの規範と同じ考え方)。
+// 収束を待ってから比べる(壁時計の区間を使うテストの規範と同じ考え方)。
 func assertGoroutinesSettle(t *testing.T, baseline int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
