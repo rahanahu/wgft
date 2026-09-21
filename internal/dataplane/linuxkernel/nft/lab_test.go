@@ -1,4 +1,4 @@
-//go:build lab
+//go:build lab && linux
 
 package nft
 

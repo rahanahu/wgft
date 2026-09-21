@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package vpsd は VPS 側のデーモン。
 // wg0 を宣言に収束させ、SQLite のルールを nftables に適用し、エージェント用 API と管理用 API を待ち受ける。
 //

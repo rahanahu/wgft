@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package conntrack は、外から入って DNAT されたフローを Plan に収束させる(仕様 6.1 節、
 // 設計文書 7a.8 節 Phase 3)。「宣言状態に収束させる」1 手順だけを持つ:Dump → 判定 → 削除。
 // nftables テーブルの差し替えの後に走らせる。internal/dataplane/linuxkernel の一部で、

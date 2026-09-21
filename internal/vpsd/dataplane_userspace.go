@@ -1,3 +1,5 @@
+//go:build linux
+
 package vpsd
 
 // ユーザー空間モードの転送面(仕様 6.3 節)を Daemon に見せる薄い層。転送そのもの(wireguard-go と

@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package nft は、Plan から VPS の table inet wgft を組み立てて適用する(仕様 6.1 節、設計文書 7a.2 節)。
 // internal/dataplane/linuxkernel の nftables 実装で、internal/vpsd を import しない(設計文書 7a.7 節)。
 //
