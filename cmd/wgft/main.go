@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
@@ -20,18 +21,40 @@ import (
 // than in newRootCmd because it must run before cobra's Windows-only preExecHook, which
 // fires inside (*Command).Execute before any command-specific setup.
 func init() {
-	cobra.MousetrapHelpText = `wgft is a command line tool; double-clicking it does not run it.
+	// The scenario this message exists for is a user double-clicking the file they just
+	// downloaded from the Releases page, which is named wgft-windows-amd64.exe. Renaming
+	// it to wgft.exe is a step in docs/setup.md's Windows procedure, which they have not
+	// followed yet at this point, so a hardcoded ".\wgft.exe" example would usually name a
+	// file that does not exist. os.Args[0] is set by the Go runtime from the command line
+	// Explorer used to start the process, which for a double-click is the executable's own
+	// path (e.g. `C:\Users\name\Downloads\wgft-windows-amd64.exe`), so filepath.Base gives
+	// the real file name. Base only returns "." or a bare separator for an empty or
+	// all-separator input, neither of which a real launch path produces; exeName falls back
+	// to the setup guide's own name for that unlikely case rather than printing either.
+	name := exeName()
+	cobra.MousetrapHelpText = fmt.Sprintf(`wgft is a command line tool; double-clicking it does not run it.
 
 Open PowerShell in the folder holding this .exe and run:
-  .\wgft.exe --help
+  .\%s --help
 
-docs/setup.md has the full Windows setup, including the join command.
-`
+See the Windows setup guide on GitHub (docs/setup.md) for the full procedure, including the join command.
+`, name)
 	// The default 5s auto-close (cobra.go:81) is too short for this longer message.
 	// 0 makes cobra print "Press return to continue..." and wait for Enter
 	// (command_win.go:32-35) instead, so the window stays open until the user is done
 	// reading it.
 	cobra.MousetrapDisplayDuration = 0
+}
+
+// exeName returns the file name the user actually double-clicked, falling back to the name
+// docs/setup.md's Windows procedure uses if os.Args[0] is empty or is only separators (Base
+// then returns "." or a bare separator, neither a usable example).
+func exeName() string {
+	name := filepath.Base(os.Args[0])
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return "wgft.exe"
+	}
+	return name
 }
 
 // exitRefusal は、再起動では直らない失敗で起動を中止したときの終了コード。設計文書 11b 節の
