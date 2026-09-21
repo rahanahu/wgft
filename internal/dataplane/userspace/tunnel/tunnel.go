@@ -19,7 +19,6 @@ import (
 
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
-	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -71,7 +70,7 @@ func New(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
 	t := &Tunnel{cfg: cfg, tnet: tnet}
-	t.dev = device.NewDevice(tnet, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "wg: "))
+	t.dev = device.NewDevice(tnet, newBind(), device.NewLogger(device.LogLevelError, "wg: "))
 
 	ep, err := resolve(cfg.Endpoint)
 	if err != nil {
