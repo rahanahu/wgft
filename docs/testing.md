@@ -388,15 +388,15 @@ D1 は、リリースのバイナリ (`wgft-windows-amd64.exe`) を、ラボか�
 
 環境の候補は、Linux のホストの上の Windows の VM、Windows の CI の runner、Windows の実機の 3 つです。Windows の VM は、Linux のラボの netns の中には入らず、別の VM としてラボの server に接続します。Windows の VM で D1 のどこまでを再現できるかは未確認です。Windows の CI の runner で登録と転送を確かめるには、runner から届く server を CI から用意する仕組みが要るので、v1 では使いません。VM のスリープが実機のスリープと同じ経路 (ネットワークのドライバの停止と再開) を通るかは未確認なので、スリープと復帰は実機で確かめます (E4)。無人での常駐 (サービスや SYSTEM としての実行) は未確認で、v1 の確認の対象に含めません。
 
-Windows の実機の代わりに、同じ Windows 機の WSL2 に server を置き、`networkingMode=mirrored` で client と結ぶ構成もあります。この構成は登録、ルールの扱い、認証情報の保存、CLI の一式を確かめる分には十分ですが、client と server が別のホストにある本来の構成の経路を再現しません。次の 3 点は、この構成だけで判定すると誤ります (issue #87)。
+Windows の実機の代わりに、同じ Windows 機の WSL2 に server を置き、`networkingMode=mirrored` で client と結ぶ構成もあります。この構成は登録、ルールの扱い、認証情報の保存、D1 で使う CLI の確認には十分ですが、client と server が別のホストにある本来の構成の経路を再現しません。次の 3 点は、この構成だけで判定すると誤ります (issue #87)。
 
 | 効果 | 内容 |
 |---|---|
-| 経路の再現 | mirrored networking では WSL2 の guest が Windows host のアドレスを共有するため、待ち受けの無いポート宛てのデータグラムは guest に届かず、Windows host 自身が ICMP を返します。実 VPS を実回線越しに使う確認では、同じ手順でこの ICMP は現れませんでした |
+| 経路の再現 | mirrored networking では WSL2 の guest が Windows host のアドレスを共有するため、待ち受けの無いポート宛てのデータグラムは guest に届かず、Windows host 自身が ICMP を返します。実 VPS を実回線越しに使う確認では、同じ種の送信でも WinRingBind に WSAECONNRESET は現れませんでした。VPS が ICMP を生成したか、経路上で失われたかは切り分けていません |
 | MTU の頭打ち | mirrored の経路は wgft と無関係な UDP の制御用の応答でも頭打ちになるため、3000 バイトと 12000 バイトの確認は判定できません。1420 バイトのトンネルの MTU を上回る転送そのものは、この経路でも成功しました |
 | アダプタの無効と有効 | Windows host のアダプタを無効にして有効に戻しても、mirrored networking の guest は自分のネットワークインタフェースを失ったままでした。server がその guest にあると、client の経路の消失と server の消失が同時に起き、アダプタの項目を切り分けられません |
 
-この 3 点を確かめるには、client と server が別のホストにある構成が要ります。WSL2 の mirrored networking は、この 3 点を除く D1 の項目には有効な近道です。
+D1 の「UDP の受信の固着」「大きな UDP」「ネットワークアダプタの無効と有効」を確かめるには、client と server が別のホストにある構成が要ります。WSL2 の mirrored networking は、それ以外の D1 の確認には有効な近道です。
 
 ### macOS のエージェントの smoke の内容
 
