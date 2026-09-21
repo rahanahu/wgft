@@ -18,10 +18,25 @@ import (
 // errUnauthorized は stream の認証が拒否された(恒久トークンが無効)。復帰は WGFT_JOIN による再登録(仕様 5.1 節)。
 var errUnauthorized = errors.New("stream authentication rejected: the permanent token may have been revoked")
 
+// defaultReconnectBackoffMin と defaultReconnectBackoffMax は stream を繋ぎ直す間隔の既定の
+// 初期値と上限(仕様 5.2 節)。
+const (
+	defaultReconnectBackoffMin = time.Second
+	defaultReconnectBackoffMax = 5 * time.Minute
+)
+
 // streamLoop は stream に繋ぎ続ける。切れたら指数バックオフ(1 秒-5 分)で繋ぎ直す(仕様 5.2 節)。
+// WireGuard の新しいハンドシェイクを観測したときは、残りの待ちを打ち切って直ちに繋ぎ直す。
 // 認証拒否で復帰できないときだけ、誤りを返して終わる。
 func (rt *runtime) streamLoop(ctx context.Context) error {
-	backoff := time.Second
+	backoffMin, backoffMax := rt.reconnectBackoffMin, rt.reconnectBackoffMax
+	if backoffMin <= 0 {
+		backoffMin = defaultReconnectBackoffMin
+	}
+	if backoffMax < backoffMin {
+		backoffMax = max(defaultReconnectBackoffMax, backoffMin)
+	}
+	backoff := backoffMin
 	for {
 		started := time.Now()
 		connCtx, cancel := context.WithCancel(ctx)
@@ -30,6 +45,13 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 		rt.streamMu.Unlock()
 		err := rt.streamOnce(connCtx)
 		cancel()
+		// 接続していた間に溜まったハンドシェイクの通知は捨てる。待ちを打ち切る根拠にするのは、
+		// この接続の試みが失敗した後に観測したハンドシェイクだけだからである(仕様 5.2 節)。
+		// 接続中のハンドシェイクは、その接続が切れる前の経路の話でしかない
+		select {
+		case <-rt.handshakeWake:
+		default:
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -38,12 +60,12 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 		rt.streamMu.Unlock()
 		if now {
 			log.Printf("stream: reconnecting")
-			backoff = time.Second
+			backoff = backoffMin
 			continue
 		}
 		// 1 分以上つながっていたなら、次の失敗はバックオフを最初から
 		if time.Since(started) > time.Minute {
-			backoff = time.Second
+			backoff = backoffMin
 		}
 		switch {
 		case errors.Is(err, errUnauthorized):
@@ -51,7 +73,7 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 			if rerr := rt.recover(); rerr != nil {
 				return rerr
 			}
-			backoff = time.Second
+			backoff = backoffMin
 			continue
 		case errors.Is(err, ErrPinMismatch):
 			// 証明書が変わった。未使用でピンの違う WGFT_JOIN があれば再登録し、なければ再接続を続ける
@@ -60,7 +82,7 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 					log.Printf("stream: %v; re-registration with the provided join string failed: %v; retrying in %s", err, rerr, backoff)
 					break
 				}
-				backoff = time.Second
+				backoff = backoffMin
 				continue
 			}
 			log.Printf("stream: %v; if the server was rebuilt (teardown --purge), issue a new join string and restart with it in WGFT_JOIN; retrying in %s", err, backoff)
@@ -78,10 +100,18 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-rt.handshakeWake:
+			// WireGuard の新しいハンドシェイクは、vpsd までの経路が戻ったことを示す。残りの
+			// 待ちを打ち切り、バックオフも初期値に戻す(仕様 5.2 節)。1 つのトンネルの最終
+			// ハンドシェイクは 2 分に 1 回程度しか新しくならないので、API だけが止まっていても
+			// この経路の再試行は 2 分に 1 回を超えない
+			log.Printf("stream: a new wireguard handshake shows the server is reachable; reconnecting now")
+			backoff = backoffMin
+			continue
 		case <-time.After(backoff):
 		}
-		if backoff *= 2; backoff > 5*time.Minute {
-			backoff = 5 * time.Minute
+		if backoff *= 2; backoff > backoffMax {
+			backoff = backoffMax
 		}
 	}
 }
@@ -124,10 +154,16 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 
 	// ハートビート。30 秒ごとに送るのに加え、stream の接続直後に全体状態を適用した直後と、
 	// 以後の世代を適用するたびにも送る(仕様 5.2 節)。applyNotify はサイズ 1 の非ブロッキング通知で、
-	// 適用が連続してもハートビートの送信は高々 1 回にまとめる。この goroutine が ws への唯一の書き手であり
-	// (読み側の for ループは公開鍵の送信より後は読むだけ)、書き込みが競合することはない。
+	// 適用が連続してもハートビートの送信は高々 1 回にまとめる。JSON のメッセージを ws へ書くのはこの
+	// goroutine だけであり(読み側の for ループは公開鍵の送信より後は読むだけ)、書き込みが競合することはない。
+	// pingLoop も ws へ書くが、書くのは制御フレームだけで、ライブラリがフレーム単位で直列化する。
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
+
+	// 半開きの TCP の判定(仕様 5.2 節)。読みの期限を相手の送信に結び付けられないので、
+	// こちらから ping を送り、pong の期限で経路の生死を測る
+	go rt.pingLoop(hbCtx, ws)
+
 	applyNotify := make(chan struct{}, 1)
 	go func() {
 		t := time.NewTicker(rt.heartbeatInterval)
@@ -167,10 +203,78 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 			continue
 		}
 		first = false
-		if err := rt.apply(m.State); err != nil {
-			log.Printf("stream: applying generation %d: %v", m.State.Generation, err)
+		// 適用の間は読みが止まるので、pingLoop に判定を見送らせる(仕様 5.2 節)。
+		// 入るときと出るときに 1 つ進めるので、適用の最中は値が奇数になる
+		rt.applySeq.Add(1)
+		applyErr := rt.apply(m.State)
+		rt.applySeq.Add(1)
+		if applyErr != nil {
+			log.Printf("stream: applying generation %d: %v", m.State.Generation, applyErr)
 		}
 		notifyNonBlocking(applyNotify)
+	}
+}
+
+// pingLoop は、接続中の stream に pingInterval ごとに WebSocket の ping を送り、pongTimeout 以内に
+// pong が返らなければ接続を閉じる(仕様 5.2 節)。閉じると読みの for ループが誤りを返し、streamLoop が
+// 繋ぎ直す。pingInterval が 0 以下なら ping を送らない(テストの既定)。
+//
+// stream が生きているとは、TCP が ESTABLISHED であることではなく、相手の応答が限られた時間の
+// 内に届くことである。ハートビートは agent の状態を server に報告するもので、経路の生死は測れない。
+// 半開きの TCP への書き込みは何分ものあいだ成功し続けるからである。ping と pong は、stream が
+// 双方向に通ることだけを測る。2 つは役割が違い、どちらも要る。
+//
+// 判定を ws の ping に載せるのは、server が待機中の stream へ定期的な送信を行わず、読みの期限を
+// 相手の送信に結び付けられないためである。ping は RFC 6455 が pong の返送を求める制御フレームで、
+// coder/websocket は読みを続けている接続で自動的に返す(read.go の opPing の分岐)。旧い版の server も
+// 同じライブラリを使うので、JSON のメッセージを増やさずに判定できる。server 側の 90 秒の期限は
+// 制御フレームでは戻らない(Conn.Read はデータのメッセージでしか戻らないため)ので、この ping が
+// 止まったハートビートの代わりになることはない。
+//
+// この判定が測るのは、経路が通っていることと、こちらの読みの for ループが動いていることの両方で
+// ある。ライブラリは ping と pong を読みの中でしか処理せず、Conn.Ping 自身は接続から読まない
+// (ライブラリの注釈が Reader と並行に呼ぶことを求めている)。下の applySeq の守りが要るのはこの
+// 性質のためであり、判定の失敗を回線の不調とだけ読んではいけない。
+//
+// ws への書き手はハートビートの goroutine とこの goroutine の 2 つになるが、ライブラリがフレーム
+// 単位で直列化するので混ざらない。Conn.Ping は読みを続ける goroutine と並行に呼ぶ前提の API である。
+func (rt *runtime) pingLoop(ctx context.Context, ws *websocket.Conn) {
+	if rt.pingInterval <= 0 {
+		return
+	}
+	t := time.NewTicker(rt.pingInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		// 全体状態の適用の間は読みの for ループが止まり、pong を処理できない。適用は TCP の宛先への
+		// 試し接続を含み、宛先 1 つにつき最長 10 秒かかるので、pong の期限より長くなりうる。値が
+		// 奇数なら適用の最中なので ping を送らない。適用が戻らない場合の上限は、server が何も
+		// 届かない stream を閉じる 90 秒が与える
+		seq := rt.applySeq.Load()
+		if seq%2 == 1 {
+			continue
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, rt.pongTimeout)
+		err := ws.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if rt.applySeq.Load() != seq {
+			// ping を送ってから pong を待つ間に適用が挟まり、読みが止まっていた。経路の生死の
+			// 証拠にならないので判定を見送り、次の周期で測り直す
+			continue
+		}
+		log.Printf("stream: the server did not answer a ping within %s (%v); the connection is dead, closing it", rt.pongTimeout, err)
+		ws.CloseNow()
+		return
 	}
 }
 
