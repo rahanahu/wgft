@@ -94,8 +94,12 @@ func Stage(plan planner.Plan, relayListening map[uint16]bool, cfg Config) (*Stag
 	return s, nil
 }
 
-// Flush は組み立てた差し替えを 1 トランザクションで送る(kernel backend の Commit)。Flush は
-// カーネル側で不可分なので、失敗すれば旧いテーブルのまま残る。
+// Flush は組み立てた差し替えを 1 トランザクションで送る(kernel backend の Commit)。
+// カーネル側の差し替え自体は不可分である。ただし、誤りが返ったときに旧いテーブルが残っているとは
+// 限らない。カーネルは commit の後に応答を返すので、応答の受信に失敗した場合(ENOBUFS)は、
+// テーブルが差し替わった後で誤りが返る。送信が拒まれた場合(EMSGSIZE)とカーネルがバッチを
+// 拒んだ場合は、旧いテーブルが残る。実際の状態との食い違いは、reconciler の Observe による
+// drift の検出で収束させる(設計文書 6.1 節、7a.3 節)。
 func (s *Staged) Flush() error { return s.conn.Flush() }
 
 // DeleteTable は table inet wgft を削除する。他のテーブルには触れない。
