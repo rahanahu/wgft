@@ -15,7 +15,7 @@ flowchart LR
   subgraph vps[VPS - 固定 IP]
     s[wgft server]
   end
-  s ==>|WireGuard トンネル| a
+  s <==>|WireGuard トンネル| a
   subgraph home[自宅 - ポート開放なし]
     a[wgft agent] --> g[ゲームサーバ<br>192.168.1.20:2456]
     a --> p[リバースプロキシ<br>192.168.1.30:443]
