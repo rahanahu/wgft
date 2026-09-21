@@ -35,8 +35,8 @@
 # and immediately-previous NUMBERED protocol version, and every release from v0.4.0 onward speaks
 # the same protocol v1 (no v2 has been introduced yet), so old-agent/old-server exist to exercise
 # an actual previous release's registration/forwarding/reconnect behaviour, not to add protocol
-# coverage a unit test does not already have. It moves forward with each release: v0.5.0 as of
-# this revision (main is v0.5.1 plus nothing yet), v0.4.0 previously.
+# coverage a unit test does not already have. It moves forward with each release: v0.6.0 as of
+# this revision (main is v0.6.0 plus whatever has landed since), v0.5.0 previously.
 #
 # v0.3.0 predates the "stream: server selected protocol ..." log line by design (it has no
 # concept of a negotiated version to log), so the legacy combination only checks the server's own
@@ -71,7 +71,7 @@
 set -u
 
 GH_REPO=rahanahu/wgft
-OLD_AGENT_VERSION=0.5.0  # immediately-previous release: already speaks protocol v1 (design 7a.6)
+OLD_AGENT_VERSION=0.6.0  # immediately-previous release: already speaks protocol v1 (design 7a.6)
 LEGACY_VERSION=0.3.0     # predates version negotiation entirely: legacy v0. Fixed regardless of
   # OLD_AGENT_VERSION (see the "legacy" combination's own comment above): design 7a.6 requires
   # legacy v0 support through v1.0.x, and v0.3.0 is the only release that is actually legacy v0.

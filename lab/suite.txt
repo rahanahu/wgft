@@ -88,7 +88,8 @@ exclusive-heavy  yes  rates.sh userspace
 # same 12 PASS lines, so it belongs in the pool.
 parallel         yes  connlimit.sh
 
-# version-skew.sh needs the v0.3.0 and v0.4.0 release binaries. A lab VM on a host without
-# outbound IPv4 cannot fetch them (GitHub has no IPv6), so they have to be staged into the VM
-# first, and the check is opt-in for that reason, exactly as it is in the per-VM suite today.
+# version-skew.sh needs the v0.3.0 and v0.6.0 release binaries (v0.6.0 is OLD_AGENT_VERSION as of
+# this revision; see the script's own header comment). A lab VM on a host without outbound IPv4
+# cannot fetch them (GitHub has no IPv6), so they have to be staged into the VM first, and the
+# check is opt-in for that reason, exactly as it is in the per-VM suite today.
 parallel         no   version-skew.sh
