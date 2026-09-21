@@ -76,10 +76,29 @@ type Desired struct {
 	RuleID string
 }
 
+// targetProbeTimeout は target への到達確認 1 件の期限(設計文書 5.2 節)。
+// 中継が実際の通信のために target へ接続するときの期限(Options.Dial の既定は 10 秒)とは別に持つ。
+// LAN の target の TCP のハンドシェイクは 1 ミリ秒の桁で済むので 2 秒には三桁の余裕があり、
+// 黙って捨てる target 1 つが確認を延ばす長さもこの値で決まる。ハンドシェイクに 2 秒を超える
+// target は、接続を受け付けていても error として報告される。error は報告にだけ使い、中継そのものは
+// 止めないので、誤って error になったルールも転送を続ける。
+const targetProbeTimeout = 2 * time.Second
+
+// targetProbeConcurrency は 1 回の確認で同時に試みる target の数の上限(設計文書 5.2 節)。
+// 確認を錠の外へ出すだけでは 1 周期が target の数に比例したままなので、同時に試みる。
+// 32 と 2 秒の組み合わせでは、黙って捨てる target が 480 件あっても 1 周期が 30 秒に収まる。
+// 上限を置くのは、確認が中継そのものと資源を取り合わないためである。32 本の接続は TCP の
+// フローのプロセス全体の既定の上限(2048)の 2 パーセントに満たない。なお 1 件の待ちを期限で
+// 打ち切っても、その下の Dial は自分の期限まで走り続けるので、target がすべて黙って捨てる
+// 間は、実際に開いている接続がこの上限の数倍まで一時的に増える。
+const targetProbeConcurrency = 32
+
 // Manager は現在のリスナー集合を持ち、宣言に収束させる。
 type Manager struct {
 	net  Network
 	opts Options
+	// probeTimeout は到達確認 1 件の期限。単体テストだけが New の後に書き換える
+	probeTimeout time.Duration
 
 	mu        sync.Mutex
 	listeners map[Key]*listener
@@ -153,7 +172,7 @@ func New(n Network, opts Options) *Manager {
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
 	}
-	return &Manager{net: n, opts: opts, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}}
+	return &Manager{net: n, opts: opts, probeTimeout: targetProbeTimeout, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}}
 }
 
 // DesiredFromRules は全体状態のルールから、ポートごとの宣言値を計算する。
@@ -216,10 +235,12 @@ func plan(current map[Key]*listener, desired map[Key]Desired) []Action {
 }
 
 // Apply は宣言に収束させる。開けなかったポートは記録して続け(部分失敗でも進める)、まとめて返す。
+// 開いた TCP の待ち受けの target への到達確認は、錠を放してからまとめて行う(設計文書 5.2 節)。
+// Apply はその結果を待ってから戻るので、ルールの最初の状態は適用の直後のハートビートに載る。
 func (m *Manager) Apply(desired map[Key]Desired) []Action {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	acts := plan(m.listeners, desired)
+	var probes []targetProbe
 	for _, a := range acts {
 		d := desired[a.Key]
 		switch a.Op {
@@ -227,14 +248,17 @@ func (m *Manager) Apply(desired map[Key]Desired) []Action {
 			m.closeLocked(a.Key)
 		case "reopen":
 			m.closeLocked(a.Key)
-			m.openLocked(a.Key, d)
+			probes = appendProbe(probes, a.Key, m.openLocked(a.Key, d))
 		case "relabel":
 			m.listeners[a.Key].ruleID = d.RuleID
 			m.listeners[a.Key].budget.SetRule(d.RuleID)
 		case "open":
-			m.openLocked(a.Key, d)
+			probes = appendProbe(probes, a.Key, m.openLocked(a.Key, d))
 		}
 	}
+	m.mu.Unlock()
+	m.runProbes(probes)
+	m.applyProbes(probes)
 	return acts
 }
 
@@ -263,7 +287,9 @@ func (m *Manager) newListener(k Key, d Desired) *listener {
 // openLocked は待ち受けを 1 つ開いて中継を始める(Apply の経路)。bind を先に行い、開けてから
 // Resource Guard の枠を受け付けにする。逆の順にすると、bind の最中と bind に失敗した待ち受けの
 // ルールが A に入り、その間だけ他のルールの予約が減る(設計文書 7a.10 節の A の定義)。
-func (m *Manager) openLocked(k Key, d Desired) {
+// target への到達確認は錠を持ったまま行えないので、開いた待ち受けを返すだけにする。呼び出し側が
+// 錠を放してから確認する(設計文書 5.2 節)。
+func (m *Manager) openLocked(k Key, d Desired) *listener {
 	// 許可一覧の外にある IP リテラルの宛先は、待ち受けを開かずに理由を報告する(設計文書 7 節)
 	var sock boundSocket
 	err := m.allowedAtApply(d.Target)
@@ -287,14 +313,9 @@ func (m *Manager) openLocked(k Key, d Desired) {
 			m.serveTCP(l, sock.ln)
 		}
 		m.opts.Logf("listener %s -> %s opened; rule %s", k, d.Target, d.RuleID)
-		if k.Proto == proto.TCP {
-			setTargetErrLocked(l, m.checkTarget(l.target))
-			if l.targetErr != nil {
-				m.opts.Logf("listener %s: cannot connect to target %s: %v", k, l.target, l.targetErr)
-			}
-		}
 	}
 	m.listeners[k] = l
+	return l
 }
 
 // checkTarget は TCP の target へ試し接続する(接続してすぐ閉じる)。UDP は到達確認ができないので呼ばない。
@@ -310,19 +331,114 @@ func (m *Manager) checkTarget(target string) error {
 
 // Retry は 30 秒ごとに、bind できなかったリスナーを開き直し、TCP は target への接続を再確認する
 // (仕様 5.2 節)。target が復帰すれば targetErr が消え、落ちれば付く。状態の変化はハートビートで報告される。
+//
+// 確認は錠を放してから同時に行う(設計文書 5.2 節)。錠を持ったまま 1 つずつ確認すると、黙って
+// パケットを捨てる target が 1 つあるだけで、その待ちのあいだ accept した接続の処理と UDP の新しい
+// セッションの作成が止まる。
 func (m *Manager) Retry() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	var probes []targetProbe
+	var rebind []Key
 	for k, l := range m.listeners {
 		if l.bindErr != nil {
-			d := Desired{Target: l.target, RuleID: l.ruleID}
-			l.budget.Close()
-			delete(m.listeners, k)
-			m.openLocked(k, d)
+			// 開き直しは map を書き換えるので、走査の後にまとめて行う
+			rebind = append(rebind, k)
 			continue
 		}
 		if k.Proto == proto.TCP {
-			setTargetErrLocked(l, m.checkTarget(l.target))
+			probes = append(probes, targetProbe{key: k, l: l, target: l.target})
+		}
+	}
+	for _, k := range rebind {
+		l := m.listeners[k]
+		d := Desired{Target: l.target, RuleID: l.ruleID}
+		l.budget.Close()
+		delete(m.listeners, k)
+		probes = appendProbe(probes, k, m.openLocked(k, d))
+	}
+	m.mu.Unlock()
+	m.runProbes(probes)
+	m.applyProbes(probes)
+}
+
+// targetProbe は target への到達確認 1 件。錠を放しているあいだに待ち受けが閉じることも、開き直される
+// ことも、宛先が変わることもあるので、確認したときの待ち受けと宛先を持つ。結果を反映するのは、
+// その 2 つが今も同じ場合だけである(設計文書 5.2 節)。
+type targetProbe struct {
+	key    Key
+	l      *listener
+	target string
+	err    error
+}
+
+// appendProbe は、開けた TCP の待ち受けを確認の対象に加える。UDP は到達確認ができないので加えない。
+// bind に失敗した待ち受けも、リスナーが無いので加えない。呼び出し側は m.mu を持つ。
+func appendProbe(probes []targetProbe, k Key, l *listener) []targetProbe {
+	if l == nil || l.bindErr != nil || k.Proto != proto.TCP {
+		return probes
+	}
+	return append(probes, targetProbe{key: k, l: l, target: l.target})
+}
+
+// runProbes は錠を持たない状態で到達確認を行う。同時に試みる数は targetProbeConcurrency までで、
+// 1 件の期限は m.probeTimeout である。
+func (m *Manager) runProbes(probes []targetProbe) {
+	if len(probes) == 0 {
+		return
+	}
+	sem := make(chan struct{}, targetProbeConcurrency)
+	var wg sync.WaitGroup
+	for i := range probes {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(p *targetProbe) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			p.err = m.probeTarget(p.target)
+		}(&probes[i])
+	}
+	wg.Wait()
+}
+
+// probeTarget は target への試し接続を 1 件、期限付きで行う。Options.Dial は期限を受け取らないので、
+// 別の goroutine で呼び出して期限で待つのをやめる。打ち切った後も下の Dial は自分の期限まで走り、
+// 繋がれば checkTarget がその接続を閉じる。
+func (m *Manager) probeTarget(target string) error {
+	res := make(chan error, 1)
+	go func() { res <- m.checkTarget(target) }()
+	t := time.NewTimer(m.probeTimeout)
+	defer t.Stop()
+	select {
+	case err := <-res:
+		return err
+	case <-t.C:
+		return fmt.Errorf("target %s did not answer within %s", target, m.probeTimeout)
+	}
+}
+
+// applyProbes は確認の結果を待ち受けに反映する。錠を放しているあいだに待ち受けが閉じた場合、開き直された
+// 場合、宛先が変わった場合は、その結果を捨てる(設計文書 5.2 節)。到達性が変わった待ち受けだけ、
+// ログを 1 行出す。確認は 30 秒ごとなので、変化のときだけ出せば 1 つの待ち受けにつき 30 秒に 1 行を
+// 超えない。lograte の門を重ねると、往復する target の最後の行が実際の状態と食い違う。
+func (m *Manager) applyProbes(probes []targetProbe) {
+	if len(probes) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range probes {
+		p := &probes[i]
+		l := m.listeners[p.key]
+		if l != p.l || l.target != p.target {
+			continue
+		}
+		before := l.targetErr
+		setTargetErrLocked(l, p.err)
+		switch {
+		case before == nil && p.err != nil:
+			m.opts.Logf("listener %s: cannot connect to target %s: %v", p.key, p.target, p.err)
+		case before != nil && p.err == nil:
+			m.opts.Logf("listener %s: target %s is reachable again", p.key, p.target)
 		}
 	}
 }
