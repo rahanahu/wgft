@@ -2411,8 +2411,46 @@ check10() {
   wait_until 10 tcp_probe_ok 39975
   check "tcp works while the agent is connected" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39975')"
 
+  # The last heartbeat is what the stopped agent will be shown with, so it has to be the settled
+  # one before the agent is stopped. Forwarding works as soon as the listeners are open, which is
+  # earlier than the heartbeat that reports the handshake and both rules: stopping the agent in
+  # between leaves "last:error (handshake not established)" with an empty RULES column, which is a
+  # correct last report but not the one the checks below expect.
+  # agent_reports_settled [<wg endpoint> <last heartbeat>]: the agent is connected and its report
+  # says tunnel ok and both rules ok. With the two arguments, the report also has to be newer than
+  # the one they were read from: a reconnected agent is shown with the PREVIOUS connection's last
+  # heartbeat until its own first one arrives, so without them the wait passes on old data.
+  agent_reports_settled() {
+    vps wgft agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    agents = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+a = next((x for x in agents if x.get('name') == 'home'), None)
+if not a or not a.get('connected'):
+    sys.exit(1)
+rules = a.get('rules') or []
+ok = a.get('tunnel', {}).get('state') == 'ok' and len(rules) == 2 and all(r.get('state') == 'ok' for r in rules)
+old_ep, old_hb = '${1:-}', '${2:-}'
+fresh = not old_ep or a.get('wg_endpoint') != old_ep or a.get('last_heartbeat') != old_hb
+sys.exit(0 if ok and fresh else 1)
+"
+  }
+  agent_report_field() {
+    vps wgft agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
+import json, sys
+a = next((x for x in json.load(sys.stdin) if x.get('name') == 'home'), {})
+print(a.get('$1', ''))
+"
+  }
+  must_wait "check10: the agent's heartbeat reports the tunnel ok and both rules ok" 20 agent_reports_settled || return
+
   local ls_line; ls_line=$(vps wgft agent ls --admin "$ADMIN" | tail -1)
   absent "agent ls carries no last: prefix while the agent is connected" "last:" "$ls_line"
+
+  local ep_before hb_before
+  ep_before=$(agent_report_field wg_endpoint); hb_before=$(agent_report_field last_heartbeat)
 
   # Stop only the agent process; the server keeps running.
   kill "$agent_pid" 2>/dev/null
@@ -2436,9 +2474,11 @@ check10() {
   disown
   if ! wait_agent home; then echo "FAIL  check10: agent never re-registered after the restart"; fail=1; return; fi
 
-  agent_shows_live() { ! (vps wgft agent ls --admin "$ADMIN" | tail -1 | grep -q 'last:'); }
-  # bare wait_until: re-checked immediately below by the absent()/check() calls.
-  wait_until 30 agent_shows_live
+  # Same reasoning as before the stop: a reconnected agent drops the last: prefix at once, but its
+  # own first heartbeat reads "error (handshake not established)", and the Web UI draws that
+  # without the live-OK style. Until that heartbeat arrives the agent is shown with the previous
+  # connection's last report, so the wait also asks for a report newer than the one read above.
+  must_wait "check10: the restarted agent's heartbeat reports the tunnel ok and both rules ok" 30 agent_reports_settled "$ep_before" "$hb_before" || return
   ls_line=$(vps wgft agent ls --admin "$ADMIN" | tail -1)
   absent "agent ls carries no last: prefix again once the agent has reconnected" "last:" "$ls_line"
   html=$(vps curl -s "http://$ADMIN/ui/agents?lang=en")
