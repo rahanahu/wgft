@@ -5,12 +5,14 @@
 package proxyrelay
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/netip"
 	"strconv"
 	"sync"
+	"time"
 
 	proxyproto "github.com/pires/go-proxyproto"
 
@@ -85,12 +87,19 @@ type listener struct {
 	// pending は枠を取ってから track するまでの接続の数(エージェントへの接続中)。Retiring の
 	// 待ち受けを閉じてよいか(idle)の判定に使う
 	pending int
+	// gen は実効宛先(エージェントのアドレスと待ち受けポート)を差し替えた回数。handle は accept の
+	// 時点の値を控え、track のときに値が変わっていれば、その接続は旧い実効宛先へつながっているので
+	// 中継を始めずに閉じる(仕様 6.2 節の実効宛先の変更)
+	gen int
 	// budget は Resource Guard の枠(プロセス全体の予算とルールごとの上限。設計文書 7a.10 節)
 	budget *resource.Listener
 	capLog lograte.Gate
 	// dialLog はエージェントへの接続失敗のログを絞る(agent 側が落ちている間、公開ポートへの
 	// 接続のたびに 1 行出ると高頻度になりうるため。仕様 10.4 節)。
 	dialLog lograte.Gate
+	// acceptLog は accept の失敗のログを絞る(ファイル記述子の枯渇のように、失敗が続く間は
+	// 再試行のたびに 1 行出るため。仕様 10.4 節)。
+	acceptLog lograte.Gate
 }
 
 // abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う
@@ -255,7 +264,9 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 	}
 	for port, r := range p.want {
 		if l, ok := m.ls[port]; ok {
-			l.updateRestriction(r)
+			if retargeted, n := l.updateRestriction(r); retargeted {
+				m.opts.Logf("proxy: relay for %d -> %s:%d retargeted; rule %s; closed %d connections", port, r.AgentAddr, r.AgentPort, r.ID, n)
+			}
 			continue
 		}
 		ln, ok := p.opened[port]
@@ -334,12 +345,42 @@ func (m *Manager) RetiringPorts() []uint16 {
 	return out
 }
 
+// acceptRetryMin と acceptRetryMax は、accept が閉じた待ち受け以外の理由で失敗したときの待ち時間の
+// 下限と上限。net/http.Server.Serve と同じ形の後退で、失敗が続く間に accept の呼び出しが詰まるのを
+// 避ける。
+const (
+	acceptRetryMin = 5 * time.Millisecond
+	acceptRetryMax = time.Second
+)
+
+// serve は待ち受けで accept を続ける。待ち受けを閉じた場合(close、stopAccepting、Rollback)は
+// net.ErrClosed で戻る。それ以外の失敗、例えばファイル記述子の枯渇(EMFILE、ENFILE)では、待ち受けを
+// 開いたまま後退して試し直す。戻ってしまうと、ソケットは bind されたまま accept しない状態で残り、
+// Prepare は m.ls にあるポートを開き直さないので、`vpsd` を再起動するまでそのポートの中継が止まる。
+// Go の runtime は EINTR、EAGAIN、ECONNABORTED を自分で握って accept をやり直すので、ここに来る
+// 失敗は一時的でないものだけである。
 func (m *Manager) serve(l *listener) {
+	delay := time.Duration(0)
 	for {
 		c, err := l.ln.Accept()
 		if err != nil {
-			return
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if l.acceptLog.Allow() {
+				m.opts.Logf("proxy: %d: accept failed: %v; the listener stays open and retries", l.port(), err)
+			}
+			delay *= 2
+			if delay < acceptRetryMin {
+				delay = acceptRetryMin
+			}
+			if delay > acceptRetryMax {
+				delay = acceptRetryMax
+			}
+			time.Sleep(delay)
+			continue
 		}
+		delay = 0
 		go m.handle(l, c)
 	}
 }
@@ -347,7 +388,7 @@ func (m *Manager) serve(l *listener) {
 func (m *Manager) handle(l *listener, c net.Conn) {
 	src := ipOf(c.RemoteAddr())
 	l.mu.Lock()
-	rule := l.rule
+	rule, gen := l.rule, l.gen
 	l.mu.Unlock()
 	// Admission Policy(仕様 6.2 節)。ユーザー空間モードでは Go の評価器がすべての段を判定し、
 	// 拒んだ段の drop を数える。カーネルモードでは nftables が状態を持つ段を判定してパケットを捨てる
@@ -405,39 +446,64 @@ func (m *Manager) handle(l *listener, c net.Conn) {
 		}
 	}
 	unpend()
-	l.track(c, src)
+	if !l.track(c, src, gen) {
+		// 実効宛先が変わった後にこの接続を残すと、旧いエージェントへ中継し続ける
+		up.Close()
+		return
+	}
 	defer l.untrack(c)
 	netpipe.Pipe(c, up)
 }
 
-// updateRestriction は接続元制限を更新し、許可されなくなった進行中の接続を閉じる。
+// updateRestriction は待ち受けを残したまま宣言を更新し、閉じるべき進行中の接続を閉じる。
 // 同じポートのルールが分割・統合やエージェントの変更で入れ替わった場合に備え、ID と所属エージェントも
 // 新しい宣言に合わせる(CloseAgent がエージェントで探すため)。
-func (l *listener) updateRestriction(r Rule) {
+//
+// 実効宛先(エージェントのアドレスと待ち受けポート)が変わったときは、進行中の接続をすべて閉じる
+// (仕様 6.2 節、7 節の収束の表の「実効宛先が違う」)。成立済みの接続は accept の時点の実効宛先へ
+// つながったままであり、宣言の値を書き換えても新しいエージェントへは向かないためである。
+// 接続元制限だけが変わったときは、許可されなくなった接続元の接続だけを閉じる。
+// 戻り値は、実効宛先が変わったかどうかと、閉じた接続の数である。
+func (l *listener) updateRestriction(r Rule) (retargeted bool, closed int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	retargeted = r.AgentAddr != l.rule.AgentAddr || r.AgentPort != l.rule.AgentPort
 	l.rule.ID, l.rule.Agent = r.ID, r.Agent
 	// 分割と統合で所属ルールが変わっても、既存の接続は移動先のルールで数える(仕様 7 節)
 	l.budget.SetRule(r.ID)
 	l.rule.Policy = r.Policy
 	l.rule.ProxyProtocol, l.rule.AgentAddr, l.rule.AgentPort = r.ProxyProtocol, r.AgentAddr, r.AgentPort
+	if retargeted {
+		// 旧い実効宛先へ接続中の handle は、track のときに gen の違いで気付いて閉じる
+		l.gen++
+		for c := range l.conns {
+			c.Close()
+			closed++
+		}
+		return retargeted, closed
+	}
 	for c, srcStr := range l.conns {
 		src, err := netip.ParseAddr(srcStr)
 		if err == nil && !sourceAllowed(src, l.rule) {
 			c.Close()
+			closed++
 		}
 	}
+	return retargeted, closed
 }
 
-func (l *listener) track(c net.Conn, src netip.Addr) {
+// track は中継を始める接続を記録する。待ち受けが閉じた後の接続と、接続している間に実効宛先が
+// 変わった接続(gen の違い)は記録せずに閉じ、偽を返す。
+func (l *listener) track(c net.Conn, src netip.Addr, gen int) bool {
 	l.mu.Lock()
-	if l.closed {
+	if l.closed || l.gen != gen {
 		l.mu.Unlock()
 		c.Close()
-		return
+		return false
 	}
 	l.conns[c] = src.String()
 	l.mu.Unlock()
+	return true
 }
 
 func (l *listener) untrack(c net.Conn) {
