@@ -321,6 +321,50 @@ func TestHeartbeatResetsTimeout(t *testing.T) {
 	}
 }
 
+// TestPingDoesNotResetHeartbeatTimeout は、agent が送る WebSocket の ping が vpsd 側の
+// 90 秒の期限を延ばさないことを確かめる(仕様 5.2 節)。agent は半開きの TCP を測るために
+// 30 秒ごとに ping を送る(internal/agent の pingLoop)。制御フレームで期限が戻ると、
+// ハートビートが止まったまま ping だけを送り続ける agent が接続中として残ってしまう。
+// Conn.Read はデータのメッセージでしか戻らないので、期限を戻す readJSON にも届かない。
+func TestPingDoesNotResetHeartbeatTimeout(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, gen: 1}
+	h := New(b)
+	h.HeartbeatTimeout = 300 * time.Millisecond
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	key, _ := wgtypes.GeneratePrivateKey()
+	c, _, err := dial(t, url, "tok-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	sendJSON(t, c, proto.Message{Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String()})
+	if _, err := readMsg(t, c); err != nil {
+		t.Fatalf("first state: %v", err)
+	}
+
+	// 期限より短い間隔で ping を送り続けても、ハートビートを送らない限り閉じられる。
+	// ping には vpsd 側が自動で pong を返すので、経路そのものは生きている
+	go func() {
+		tick := time.NewTicker(50 * time.Millisecond)
+		defer tick.Stop()
+		for range tick.C {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			err := c.Ping(ctx)
+			cancel()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	if _, err := readMsg(t, c); websocket.CloseStatus(err) != websocket.StatusCode(proto.CloseHeartbeatTimeout) {
+		t.Errorf("want heartbeat-timeout close although pings kept arriving, got %v", err)
+	}
+}
+
 // intPtr/strSlicePtr build the pointer types Message uses to distinguish "absent" from
 // "present but empty" (proto/stream.go).
 func intPtr(i int) *int                { return &i }

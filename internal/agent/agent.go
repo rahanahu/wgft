@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -51,6 +52,31 @@ type runtime struct {
 	// 短くできるよう runtime に持たせる。handshakeRetryInterval が 0 以下なら追送りしない
 	handshakeRetryInterval time.Duration
 	handshakeRetryTimeout  time.Duration
+
+	// pingInterval と pongTimeout は、接続中の stream に送る WebSocket の ping の間隔と、pong を
+	// 待つ期限(仕様 5.2 節)。既定は 30 秒と 20 秒で、経路が死んでから判定までに要する時間は
+	// 最長 50 秒になる。テストで短くできるよう runtime に持たせる。pingInterval が 0 以下なら
+	// ping を送らない
+	pingInterval time.Duration
+	pongTimeout  time.Duration
+
+	// reconnectBackoffMin と reconnectBackoffMax は stream を繋ぎ直す間隔の初期値と上限
+	// (仕様 5.2 節)。既定は 1 秒と 5 分。テストで短くできるよう runtime に持たせる
+	reconnectBackoffMin time.Duration
+	reconnectBackoffMax time.Duration
+
+	// handshakeWake は、WireGuard の新しいハンドシェイクを checkTunnel が観測したことを streamLoop に
+	// 伝えるサイズ 1 の非ブロッキングチャネル(仕様 5.2 節)。streamLoop はこれを受けて再接続の待ちを
+	// 打ち切る。チャネルにしてあるのは、rt.mu を持ったまま streamMu を取らないためである。
+	// nil なら送信も受信も起きないので、チャネルを持たない runtime を組むテストはそのまま動く
+	handshakeWake chan struct{}
+
+	// applySeq は、stream の読みの for ループが全体状態の適用に入るたびと出るたびに 1 つ進む
+	// (仕様 5.2 節)。奇数なら適用の最中である。適用の間は読みが止まって pong を処理できないので、
+	// pingLoop は、値が奇数なら ping を送らず、ping を送ってから pong を待つ間に値が変わった場合も
+	// 判定を見送る。適用の中の宛先への試し接続は宛先 1 つにつき最長 10 秒かかるので、適用は
+	// pong の期限より長くなりうる
+	applySeq atomic.Uint64
 
 	mu        sync.Mutex
 	tun       *tunnel.Tunnel
@@ -112,6 +138,11 @@ func Run(opts Options) error {
 		heartbeatInterval:      30 * time.Second,
 		handshakeRetryInterval: time.Second,
 		handshakeRetryTimeout:  10 * time.Second,
+		pingInterval:           30 * time.Second,
+		pongTimeout:            20 * time.Second,
+		reconnectBackoffMin:    defaultReconnectBackoffMin,
+		reconnectBackoffMax:    defaultReconnectBackoffMax,
+		handshakeWake:          make(chan struct{}, 1),
 		rebuild:                rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
 	}
 	defer rt.close()
@@ -325,7 +356,14 @@ func (rt *runtime) checkTunnel(now time.Time) {
 	}
 	st := rt.f.LastState
 	// Status が読むのは今の device なので、ゼロでない最終ハンドシェイクは必ず今のトンネルのものである
-	idle, rebuild := rt.rebuild.step(now, rt.tunStart, rt.tun.Status().LastHandshake)
+	handshake := rt.tun.Status().LastHandshake
+	// 新しいハンドシェイクは、vpsd までの経路が戻ったことを示す。stream が再接続の待ちに入って
+	// いれば、その待ちを打ち切らせる(仕様 5.2 節)。判定は step が値を控え直す前に行う。観測は
+	// この 1 回の Status の読みだけで、別の監視は持たない
+	if !handshake.IsZero() && !handshake.Equal(rt.rebuild.lastHandshake) {
+		notifyNonBlocking(rt.handshakeWake)
+	}
+	idle, rebuild := rt.rebuild.step(now, rt.tunStart, handshake)
 	if !rebuild {
 		return
 	}
