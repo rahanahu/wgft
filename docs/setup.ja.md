@@ -21,7 +21,7 @@ VPS 側は Linux で動作します。自宅側の agent は Windows amd64 で�
 
 VPS で root が使えるならカーネルモードを推奨します。ユーザー空間モードは、root が使えない環境、カーネルに WireGuard がない環境、コンテナだけで完結させたい場合向けです。
 
-ユーザー空間モードでは、`wgft server` 自身がルールの listen port で待ち受けます。この listen port が host のエフェメラルポートの範囲(Linux の既定は 32768-60999、`net.ipv4.ip_local_port_range`)に入っていると、VPS 上のどのプロセスの外向きの接続でも、その番号を送信元ポートとして使っているあいだや、切断後 60 秒の TIME_WAIT のあいだは、server の bind と衝突します。衝突すると bind は失敗し、ルールは宣言に残ったまま not active として報告されます。理由は `bind failed: listen tcp4 :<port>: bind: address already in use` で、server のログには `rule <id>: not active: bind failed: ...` の行が出て、Web UI のルールの状態にも同じ理由が表示されます。`wgft server` は 30 秒ごとに適用をやり直すため、ポートが空けば自然に回復します。`SO_REUSEADDR` はこの衝突を防ぎません。カーネルモードでは VPS 上で公開ポートを待ち受けるプロセスが無いため、この問題は起きません。衝突を避けるには、listen port をエフェメラルポートの範囲外から選ぶか、`sysctl net.ipv4.ip_local_reserved_ports=<ports>` で予約してください。
+ユーザー空間モードでは、`wgft server` 自身がルールの listen port で待ち受けます。この listen port がホストのエフェメラルポートの範囲(Linux の既定は 32768-60999、`net.ipv4.ip_local_port_range`)に入っていると、VPS 上のどのプロセスの外向きの接続でも、その番号を送信元ポートとして使っているあいだや、切断後 60 秒の TIME_WAIT のあいだは、server の bind と衝突します。衝突すると bind は失敗し、ルールは宣言に残ったまま not active として報告されます。理由は `bind failed: listen tcp4 :<port>: bind: address already in use` で、server のログには `rule <id>: not active: bind failed: ...` の行が出て、Web UI のルールの状態にも同じ理由が表示されます。`wgft rule ls --json` の `rule_states` にも同じ理由が入ります。`wgft server` は 30 秒ごとに適用をやり直すため、ポートが空けば自然に回復します。`SO_REUSEADDR` はこの衝突を防ぎません。カーネルモードでは VPS 上で公開ポートを待ち受けるプロセスが無いため、この問題は起きません。衝突を避けるには、listen port をエフェメラルポートの範囲外から選ぶか、`sysctl net.ipv4.ip_local_reserved_ports=<ports>` で予約してください。
 
 カーネルモードは、ホストの conntrack の表にも依存します。`wgft server check` と起動時のログは、`nf_conntrack_max` が wgft の推奨する下限 65536 を下回っている場合に警告し、上げるための `sysctl -w net.netfilter.nf_conntrack_max=65536` を提示します。
 
