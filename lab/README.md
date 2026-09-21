@@ -206,7 +206,7 @@ Sandbox 1 つだけを扱う手作業の道具なので、ロックを取りま�
 |---|---|---|
 | `parallel` | 他の Sandbox と同時に流せます。触るものが自分の namespace と自分の作業ディレクトリの中に閉じます | `e2e.sh`、`ipv6.sh`、`split-merge.sh`、`import-export.sh`、`connlimit.sh`、`version-skew.sh`、`lifecycle.sh` の check 1 2 3 3b 4 5c 5d 6 7 8 9 |
 | `exclusive-heavy` | Lab Host VM の中で単独で流します。主張の根拠になる値そのものが、メモリか到達頻度の測定値です | `lifecycle.sh` の check 5、5b、5e、`rates.sh` |
-| `exclusive-timing` | Lab Host VM の中で単独で流します。壁時計の区間の中で何が起きないかを主張するので、その区間が始まる前に収束を確認できないと、同じ VM を分け合ったときに失敗します | 該当する確認は今はありません |
+| `exclusive-timing` | Lab Host VM の中で単独で流します。壁時計で測る区間の中で何が起きないかを主張するので、その区間が始まる前に収束を確認できないと、同じ VM を分け合ったときに失敗します | 該当する確認は今はありません |
 | `exclusive-global` | Lab Host VM の中で単独で流します。network namespace が隔てない値を変えます | 該当する確認は今はありません |
 
 `lifecycle.sh` の check 5c と check 5d は、主張の根拠が到達頻度でもメモリでもなく、ルールごとの受け付けの判定です。8 つの Sandbox のプールの中で、しかも 5c と 5d が同時に流れる状態で、20 回ずつ流して 160 件のすべてが成功し、保持数も毎回同じでした。この測定により、分類は `parallel` です。
