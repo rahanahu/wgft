@@ -187,8 +187,8 @@ jobs:
     # Runs the packages that actually build and pass on native Windows today: the agent
     # (including its credentials/ACL handling), the relay it shares with the server's userspace
     # mode, flock, the CLI, and the server's userspace tunnel bind (internal/dataplane/userspace/utun).
-    # The rest of internal/vpsd and its subpackages are Linux-only (kernel WireGuard, nftables)
-    # and are not part of this job; the parent internal/dataplane/userspace package is also
+    # The rest of the top-level internal/vpsd package is Linux-only (kernel WireGuard, nftables)
+    # and is not part of this job; the parent internal/dataplane/userspace package is also
     # excluded because TestPrepareBindFailureIsFailClosed fails on native Windows (issue #109).
     # the build-test job's cross-build step already keeps ./cmd/wgft buildable for Windows,
     # this job additionally runs the Windows-specific code paths.
