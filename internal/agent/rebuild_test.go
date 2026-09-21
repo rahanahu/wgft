@@ -279,8 +279,9 @@ func TestCheckTunnelRetriesAfterAFailedRebuild(t *testing.T) {
 	if rt.rebuild.retryAt.IsZero() {
 		t.Fatal("no retry was scheduled after the rebuild failed to build")
 	}
-	// 全体状態は受け取り済みなので、ハートビートは「受け取っていない」とは言わない
-	if got, want := rt.heartbeat().Tunnel.Reason, "no tunnel; the last rebuild failed and will be retried"; got != want {
+	// 全体状態は受け取り済みなので、ハートビートは「受け取っていない」とは言わない。理由の文面は
+	// 作り直しの失敗と適用の中の失敗で共通である(仕様 7 節)
+	if got, want := rt.heartbeat().Tunnel.Reason, "no tunnel; building it failed and will be retried"; got != want {
 		t.Fatalf("heartbeat reason while a retry is pending = %q, want %q", got, want)
 	}
 
