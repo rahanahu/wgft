@@ -7,14 +7,15 @@
 # protocol negotiates correctly with FRESH data on both sides, the point here is OLD DATA: a
 # database and a credentials file that the old release itself created.
 #
-# The old release is $OLD_VERSION (below), default v0.5.0: the immediately-previous release,
-# which is the upgrade operators actually run next now that the current build is v0.5.1 plus
-# nothing yet. v0.4.0, the oldest release the project's release notes still promise an upgrade
-# from ("a rolling upgrade from v0.5.0 or v0.4.0 is supported"), is covered by overriding the
-# version, which every v0.4.0-specific assertion below still runs under in full:
+# The old release is $OLD_VERSION (below), default v0.6.0: the immediately-previous release,
+# which is the upgrade operators actually run next now that the current build is v0.6.0 plus
+# whatever has landed since. v0.4.0, the oldest release the project's release notes still promise
+# an upgrade from (v0.6.0's own notes: "a rolling upgrade from v0.5.1, v0.5.0 or v0.4.0 is
+# supported"), is covered by overriding the version, which every v0.4.0-specific assertion below
+# still runs under in full:
 #
-#   lab/lab exec vm bash /wgft/lab/upgrade.sh kernel                              # v0.5.0 -> current
-#   lab/lab exec vm bash /wgft/lab/upgrade.sh userspace                           # v0.5.0 -> current
+#   lab/lab exec vm bash /wgft/lab/upgrade.sh kernel                              # v0.6.0 -> current
+#   lab/lab exec vm bash /wgft/lab/upgrade.sh userspace                           # v0.6.0 -> current
 #   WGFT_UPGRADE_OLD_VERSION=0.4.0 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel     # v0.4.0 -> current
 #   WGFT_UPGRADE_OLD_VERSION=0.4.0 lab/lab exec vm bash /wgft/lab/upgrade.sh userspace  # v0.4.0 -> current
 #
@@ -38,7 +39,7 @@
 #   2. stop both cleanly (SIGTERM, wait for exit: stop_server/stop_agent below), then start the CURRENT
 #      build's server and agent on the SAME data directories, flags and environment the old
 #      release used (design 7a.6 promises the CLI, WGFT_*, admin API v1 and wire protocol as an
-#      external contract; a diff of v0.5.0..current and v0.4.0..current cmd/wgft/*.go found only
+#      external contract; a diff of v0.6.0..current and v0.4.0..current cmd/wgft/*.go found only
 #      additions, no renames or removals - see the "no settings changed" note below).
 #   3. assert: the new server comes up with no extra step and no schema/migration error; every
 #      rule from step 1 is still there, compared field by field (proto.Rule itself did not
@@ -58,11 +59,11 @@
 #      describes); `rule ls` now prints a flow budget line (Resource Guard, design 7a.10; a
 #      single rule using the whole budget under flood is L8's job, not re-verified here). Each
 #      of these three is also checked directly against the old release's own pre-upgrade output
-#      (old_has, above); for v0.4.0 this proves a genuine before/after change, for v0.5.0 (which
+#      (old_has, above); for v0.4.0 this proves a genuine before/after change, for v0.6.0 (which
 #      already has all three) that half of the check is a stated SKIP instead.
 #
 # Requires `lab/lab build` (current wgft, echo, ppecho in /usr/local/bin of the VM) and the netns
-# topology (`lab/lab net up`). Runs kernel and userspace mode; both v0.4.0 and v0.5.0 support
+# topology (`lab/lab net up`). Runs kernel and userspace mode; both v0.4.0 and v0.6.0 support
 # both.
 #
 # SANDBOX-READY / PARALLEL-SAFE: every file this script writes lives under $WORK (one variable,
@@ -97,7 +98,7 @@ set -u
 # pid already reaches everything the job forked, and the group kill is an extra safety net.
 set -m
 GH_REPO=rahanahu/wgft
-OLD_VERSION=${WGFT_UPGRADE_OLD_VERSION:-0.5.0}  # default: the immediately-previous release, the
+OLD_VERSION=${WGFT_UPGRADE_OLD_VERSION:-0.6.0}  # default: the immediately-previous release, the
   # upgrade operators actually run next. Override with WGFT_UPGRADE_OLD_VERSION=0.4.0 for the
   # oldest release the project's release notes still promise an upgrade from (see header comment).
 mode=${1:-kernel}
@@ -176,9 +177,9 @@ skip() { echo "SKIP  $1"; }
 # available to prove. Every capability here landed between v0.4.0 and v0.5.0 (design 7a.8's
 # revision record: phase 5 step 3 - Relay listeners become IPv4-only; phase 5 step 5 -
 # packet_rate stops taking effect on TCP and the CLI starts saying so; phase 6 step 5 - `rule ls`
-# starts printing a flow budget line), so v0.4.0 is the only release lacking any of them; v0.5.0
-# and v0.5.1 have all three already. Extend this table, not the call sites, if a future default
-# OLD_VERSION again lacks one of these.
+# starts printing a flow budget line), so v0.4.0 is the only release lacking any of them; v0.5.0,
+# v0.5.1 and v0.6.0 have all three already. Extend this table, not the call sites, if a future
+# default OLD_VERSION again lacks one of these.
 old_has() {
   case "$OLD_VERSION:$1" in
     0.4.0:*) return 1 ;;
@@ -464,7 +465,7 @@ ensure_wgftlab() { id wgftlab >/dev/null 2>&1 || useradd --system --home-dir /no
 
 # start_server <bin> <data-dir> <log-file>: same flags the old release and the current build both
 # accept unchanged (design 7a.6's external-contract table; verified by diffing both v0.4.0..HEAD
-# and v0.5.0..HEAD's cmd/wgft/server.go, agent.go, config.go - see this script's header comment).
+# and v0.6.0..HEAD's cmd/wgft/server.go, agent.go, config.go - see this script's header comment).
 start_server() {
   local bin=$1 data=$2 log=$3
   : > "$log"
@@ -624,7 +625,7 @@ cat > "$PYDIR/compare_rules.py" <<'PYEOF'
 # compare_rules.py <old-rules.json> <new-rules.json>: exact field-by-field comparison of the
 # "rules" array from `rule ls --json` before and after the upgrade. proto.Rule itself is
 # byte-for-byte the same struct in the old release and the current build, for both v0.4.0 and
-# v0.5.0 (checked by diffing proto/rule.go across each old tag and HEAD), so no per-rule field
+# v0.6.0 (checked by diffing proto/rule.go across each old tag and HEAD), so no per-rule field
 # tolerance is needed or applied here: every field must match exactly, for every rule id present
 # on either side. The fields the current build ADDS live one level up, on the list response
 # itself (desired_generation, active_generation, rule_states, drift, apply_error, flow_budget,
@@ -770,11 +771,12 @@ cp -a "$ADATA" "$ADATA_SNAPSHOT"
 # step 2+3: swap ONLY the binaries; start the current build on the SAME data; assert the promises
 # ===================================================================================================
 # No settings changed between the old release and the current build: `git diff v0.4.0..HEAD` and
-# `git diff v0.5.0..HEAD -- cmd/wgft/server.go cmd/wgft/agent.go cmd/wgft/config.go` both show
+# `git diff v0.6.0..HEAD -- cmd/wgft/server.go cmd/wgft/agent.go cmd/wgft/config.go` both show
 # only additions (WGFT_AGENT_ALLOW_TARGETS and later flags, and internal-only refactors such as
-# perSourceLimitsFromConfig's return shape); every WGFT_* name and flag the old release used is
-# still accepted with the same meaning (design 7a.6's external-contract table). So the current
-# build below is started with the exact same flags step 1 used.
+# perSourceLimitsFromConfig's return shape and agent.go's credentials-path joining); every WGFT_*
+# name and flag the old release used is still accepted with the same meaning (design 7a.6's
+# external-contract table). So the current build below is started with the exact same flags step
+# 1 used.
 echo "== $mode: step 2: swap to the current build on v$OLD_VERSION's data"
 start_server wgft "$DATA" "$WORK/upgraded-server.log"
 okcheck "step2: new server comes up with no extra step (admin api answers)" "$(wait_admin && echo 1 || echo 0)"
