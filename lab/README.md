@@ -7,7 +7,7 @@ VPS 側のカーネル機能(nftables、WireGuard、conntrack)を、ホストを
 | やること | 場所 |
 |---|---|
 | コードを書く、`go test`、エージェント・制御プレーン・CLI を動かす | ホスト |
-| nftables、wg0、conntrack が絡む実験と、端から端までの結合テスト | Incus の VM(`wgft-lab`)の中の netns |
+| nftables、wg0、conntrack が絡む実験と、通しの結合テスト | Incus の VM(`wgft-lab`)の中の netns |
 
 - ホストや Docker でカーネル機能を試すと、ホストのカーネルのバージョン、読み込まれるモジュール、Docker が有効にする `br_netfilter` 経由のホストのルールと conntrack が結果に混ざる。VM に閉じ込めて切り分ける
 - Docker は開発環境には使わない。使うのは server とエージェントの配布用イメージを確かめるときだけ(`scripts/docker-smoke.sh`)
@@ -29,7 +29,7 @@ lab/lab build                   # ホストで ./cmd/... ./tools/... を bin/ �
 lab/lab test internal/vpsd/nft  # build tag lab 付きのテストを VM の vps ns で実行(root と nft が要るゴールデンテストなど)
 lab/lab exec vps wgft server run ...  # VM では /usr/local/bin の名前で実行する(/wgft/bin を直接 exec しない。下の注意)
 lab/lab shell home              # home ns で bash
-lab/lab exec vm bash /wgft/lab/e2e.sh kernel     # 端から端までのシナリオ(登録、TCP/UDP、PROXY protocol、deny の即時反映、撤去)を PASS/FAIL で
+lab/lab exec vm bash /wgft/lab/e2e.sh kernel     # 通しのシナリオ(登録、TCP/UDP、PROXY protocol、deny の即時反映、撤去)を PASS/FAIL で
 lab/lab exec vm bash /wgft/lab/e2e.sh userspace  # 同じシナリオをユーザー空間モード(非 root の wgftlab ユーザー)で
 lab/lab exec vm bash /wgft/lab/rates.sh kernel   # 3 つのレートと Relay ルールのレートの実際の通過数、拒否の順序、TCP への packet_rate 無効を PASS/FAIL で。userspace も同じ
 lab/lab exec vm bash /wgft/lab/connlimit.sh      # カーネルモードの接続元 IP ごとの同時フロー数の上限(ct count)。userspace には無い機能なので kernel だけ

@@ -6,7 +6,7 @@ wgft の VPS 側はカーネルの nftables、WireGuard、conntrack を直接操
 
 ## 開発用ラボの立て方
 
-コードの編集と `go test` はホストで行います。nftables、wg0、conntrack が絡む実験と、端から端までの結合テストは、Incus の VM `wgft-lab` の中の network namespace で行います。ホストや Docker でカーネル機能を試すと、ホスト自身のカーネルバージョンや、Docker が有効にする `br_netfilter` 経由のルールと conntrack が結果に混ざるため、VM に切り分けます。
+コードの編集と `go test` はホストで行います。nftables、wg0、conntrack が絡む実験と、通しの結合テストは、Incus の VM `wgft-lab` の中の network namespace で行います。ホストや Docker でカーネル機能を試すと、ホスト自身のカーネルバージョンや、Docker が有効にする `br_netfilter` 経由のルールと conntrack が結果に混ざるため、VM に切り分けます。
 
 ラボの起動は `lab/lab up` の 1 コマンドで済みます。Incus が入っていて自分が `incus-admin` グループに属していれば、VM の作成、パッケージの導入、`client - vps - homerouter(NAT) - home` の 4 つの network namespace によるトポロジの構築までがこの 1 コマンドに含まれます。ビルドは `lab/lab build` がホスト上の Go コードを VM の `/usr/local/bin` にインストールし、`lab/lab exec <ns> <コマンド>` で各 namespace 内のプロセスを起動します。壊れた状態になったら `lab/lab reset` でスナップショットに戻せます。詳しい手順は [lab/README.md](lab/README.md) にあります。
 
@@ -96,6 +96,7 @@ v1.0 をリリースするまで、内部構造は原則として固定します
   - https://gist.githubusercontent.com/k16shikano/fd287c3133457c4fd8f5601d34aa817d/raw (日本語技術文書の文章規範)
   - https://gist.githubusercontent.com/k16shikano/eb2929f13ed19c97188393d297be8432/raw (「駄文の見分け方」の部分だけ使います。文書自身を語る文は削ります)
 - 要点は次のとおりです。です・ます体で書きます。項目を主語にした定義文にします。体言止め、指示語 (ここ、そこ)、擬人化 (プログラムに「教える」)、翻訳調 (「前面に出して」) を使いません。くだけた語 (足す、消す、上げる) は書き言葉にします。見出しは内容を特定する名詞句にします。箇条書きのラベルは名詞句とコロンにします。未確認のことは「未確認」と書きます
+- 英語の語を日本語に開くときは、語ごとの置き換えをしません。定着した日本語が無い語は、意味を担う日本語の語を選ぶか、具体的に書き下します。例えば end-to-end test を「端から端までのテスト」と機械的に置き換えず、文脈に応じて「通しテスト」のように書きます。開いた結果が不自然な日本語になる言い換えは採りません
 - 括弧とコロンは ASCII にします。README では括弧による補足をできるだけ使わず、別の文にします。図は README なら Mermaid にします
 - 試していないことを手順として書きません。ラボか実機で通したものだけを書きます
 
