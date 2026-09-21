@@ -225,10 +225,12 @@ jobs:
         run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/dataplane/userspace/utun/... ./internal/flock/... ./cmd/wgft/...
 
   macos-test:
-    # Runs the same packages as windows-test except internal/dataplane/userspace/utun, on
-    # GitHub's Apple silicon runner. utun is left out here because bind_windows_test.go's
-    # coverage is a Windows-specific regression test for the WSAECONNRESET bind fix, and
-    # darwin's runtime behaviour there has not been verified, so it is not claimed. This is
+    # Runs the same packages as windows-test, on GitHub's Apple silicon runner, including
+    # internal/dataplane/userspace/utun: its inprocess_forward_test.go
+    # (TestAgentServerInProcessForwarding) is cross-platform and this is where it gives B8
+    # coverage (docs/testing.md). utun's bind_windows_test.go carries its own
+    # `//go:build windows` tag, so it does not compile or run here, and this job makes no
+    # claim about the Windows-specific bind fix it regression-tests. This is
     # the first job that actually executes the darwin-specific code paths (sndbuf_darwin.go's
     # SO_SNDBUF workaround for macOS's 9216-byte default UDP send buffer, docs/testing.md's
     # B8); the build-test job's cross-build step only compiles for darwin and does not run
@@ -249,7 +251,7 @@ jobs:
         with:
           go-version: "1.27.x"
       - name: test
-        run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/flock/... ./cmd/wgft/...
+        run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/dataplane/userspace/utun/... ./internal/flock/... ./cmd/wgft/...
 
   release-snapshot:
     # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,

@@ -156,11 +156,11 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | B1 | build tag `lab` の nftables のテスト (`lab/lab test internal/dataplane/linuxkernel/nft`。ゴールデンテスト、他のテーブルを触らないこと、wg からの転送の遮断) | 生成した式が実際のカーネルで同じ `nft list` にならないこと | ラボ | `nft-emit`、`kernel`、`admission` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
 | B2 | build tag `lab` の WireGuard、ホストの検査、teardown のテスト (`internal/dataplane/linuxkernel/wg`、`internal/platform/linux`、`internal/vpsd`) | 他の wg インタフェースの乗っ取り、所有の判定の誤り、他のテーブルの削除 | ラボ | `kernel`、`deploy` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
 | B3 | 実際の Caddy での HTTPS の経路 ([lab/caddy/README.md](../lab/caddy/README.md)) | PROXY protocol のヘッダを実際のリバースプロキシが読めないこと | ラボ | `relay` | 契機に当たる PR ごとに 1 回 | 10 分前後 (見込み) | 手作業 |
-| B4 | CI の `windows-test` | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方) の退行 | CI (Windows の runner) | `agent-platform` | 契機に当たる PR の更新ごと | 数分 | 自動 |
+| B4 | CI の `windows-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方) の退行と、エージェントのトンネル・中継の転送そのものの退行 (D1 の一部の置き換え) | CI (Windows の runner) | `agent-platform` | 契機に当たる PR の更新ごと | 数分 | 自動 |
 | B5 | CI の `release-snapshot` | GoReleaser の設定、フック、成果物の名前の食い違い | CI (Linux) | `build`、`rc` | 契機に当たる PR の更新ごと | 数分 | 自動 |
 | B6 | CI の `govulncheck` | 依存するモジュールの既知の脆弱性 | CI (Linux) | `build`、`rc`、週に 1 回の定期実行 | 契機に当たる PR の更新ごと。定期実行は週に 1 回 | 1 分前後 | 自動 |
 | B7 | `lab/version-skew.sh` | 旧 agent と新 server、新 agent と旧 server、legacy v0 の agent と新 server の組で、登録、全体状態の配信、転送、再接続が壊れること。旧い側が表せない機能のルールを理由付きの `not_active` にすること (7a.6 節) は、該当する capability がまだ無いため確認を SKIP する | ラボ (直前のリリースと legacy v0 のバイナリを GitHub の Releases から取得してキャッシュする。ラボの VM から GitHub への経路が無い場合は、バイナリを事前に置く) | `protocol`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 数分 | 自動 (開発者が起動) |
-| B8 | CI の `macos-test` | macOS でだけ通る経路 (UDP の送信バッファの既定 9216 バイトを超えるデータグラムの書き込み) の退行 | CI (macOS の runner) | `agent-platform`、`rc` | 契機に当たる PR の更新ごと | 1 分から 2 分 (初回の実行は 1 分 15 秒) | 自動 |
+| B8 | CI の `macos-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む) | macOS でだけ通る経路 (UDP の送信バッファの既定 9216 バイトを超えるデータグラムの書き込み) の退行 (D2 の一部の置き換え。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | CI (macOS の runner) | `agent-platform`、`rc` | 契機に当たる PR の更新ごと | 1 分から 2 分 (初回の実行は 1 分 15 秒) | 自動 |
 | B9 | 配布物の VM 試験 (`scripts/dist-vm.sh`) | 同梱の unit で起動しないこと、VM の再起動の後に転送が戻らないこと、設定の誤りで再起動を繰り返すこと | 2 台の VM (server と agent) | `deploy`、`rc` | 契機に当たる PR ごとに 1 つのディストリビューションで、リリース候補ごとに 3 つのディストリビューションで | 約 4 分 (Debian 12、Ubuntu 24.04、Fedora 44 のいずれも) | 自動 (開発者が起動) |
 | B10 | Docker のイメージの疎通 (`scripts/docker-smoke.sh`) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (ホスト、CI の runner、ラボの VM のどれでも可) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | キャッシュが温まっていれば約 8 秒、初回はイメージの取得を含めて約 30 秒 | 自動 (開発者が起動) |
 
@@ -411,9 +411,19 @@ D2 は、リリースのバイナリ (`wgft-darwin-arm64`) を Apple シリコ�
 
 macOS の挙動は Linux の上で再現できるとはみなしません。macOS の CI の runner は単体テスト (B8、CI の `macos-test`) には使えますが、launchd、スリープと復帰、ネットワークの変化の確認は、実機での手作業の関門 (D2 と E5) にします。runner の macOS が実機と同じ UDP の送信バッファの既定 (9216 バイト) を持つかは未確認です。FileVault を無効にした Mac でのログイン無しの起動と、ログアウトの後の動作は未確認です。
 
-### 実機の確認を小さな回帰テストに置き換える候補
+### 実機の確認を小さな回帰テストに置き換えた範囲
 
-エージェントの tunnel と userspace の server 側を 1 つのプロセスの中で接続し、TCP と UDP を転送する Go のテスト (`TestAgentServerInProcessForwarding`、`internal/dataplane/userspace/utun/inprocess_forward_test.go`) は、Pull Request #102 (未マージ) として存在し、Linux と macOS では通ります。このテストは `runtime.GOOS == "windows"` を条件に、Windows でだけ今も SKIP しています。Pull Request #107 は main に取り込み済みで、Windows での SKIP の原因だった `conn.NewDefaultBind()` の `WinRingBind` の挙動への修正 (`internal/dataplane/userspace/tunnel` と `internal/dataplane/userspace/utun` の `newBind()` が `conn.NewStdNetBind()` を明示して使う形) と、この `utun` package を CI の `windows-test` の `go test` の対象とクロスターゲットの `go vet` の対象に加える変更を含みます。したがって、Windows でこのテストの分の確認を得るために残る作業は、#102 側の SKIP を外し、ランダムな wg listen port の選択による不安定さを解消したうえで、`windows-test` で安定して通ることを確かめることです。#102 を今のまま取り込むと、得られるのは macOS の runner (B8) の分 (D2 の一部、転送、大きな UDP) だけで、Windows (B4) の分はまだ確かめられません。#107 の修正をあてて SKIP を外し、Windows の実機で 13 回実行した実験では 10 回通り、残る 3 回の失敗はテスト自身のランダムな wg の listen port の選び方の弱さ (50 回試しても 127.0.0.1 上の空きポートが見つからない) によるもので、トンネル側の不具合ではありません。#102 を取り込む時期は未定です。取り込んだ後も、launchd、ACL、スリープ、ネットワークの変化の確認は実機に残します。
+`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` は、エージェント側のトンネルと中継 (`internal/agent` が組む `internal/dataplane/userspace/tunnel` と `internal/dataplane/userspace/relay` の組み合わせ) と、VPS 側のユーザー空間モードが使う部品 (`utun.Tunnel`、`relay.Manager`、`internal/policy/goengine` の評価器) を、1 つのプロセスの中で実 UDP (127.0.0.1、ループバックだけ) で繋ぎ、TCP と UDP を実際に転送します。CI では `build-test` (Linux)、`macos-test` (B8)、`windows-test` (B4) の 3 つがこのテストを PR ごとに流します。
+
+確かめる内容は、TCP の往復と両方向の綺麗な切断、100・1400・3000・12000 バイトの UDP のデータグラムが欠けずに往復すること (3000 バイトはトンネルの MTU を超え、12000 バイトは前述の macOS の既定の UDP 送信バッファ 9216 バイトを超えます)、エージェント側を同じ鍵で落として立て直した後に転送が戻ることです。D1 と D2 のうち「TCP と UDP の転送」と「大きな UDP」の項目を、この 3 つの CI runner の範囲で PR ごとに機械で確かめます。
+
+VPS 側は `userspace.Backend` という型そのものではなく、`Backend` が組む部品を同じ手順で直接組んでいます。`Backend` に `Close` が無く、1 つのプロセスの中で後始末をしながら `-count` で繰り返し流すテストの土台にできないためです。VPS 側の「公開ポート」は、production の非公開の `hostNetwork` (全インタフェースに bind する) の代わりに、127.0.0.1 だけに bind するテスト用の実装を使います。VPS 側の実装 (`internal/vpsd`) は Linux 限定なので、この違いは実際の配布物の挙動には影響しません。
+
+「userspace の server 側のコードが Windows と macOS でビルドできるか」は確かめました。`internal/dataplane/userspace` とその下位パッケージ (`utun` を含む) は、4 つの対象 (windows/amd64、windows/arm64、darwin/amd64、darwin/arm64) で `go build` と `go vet` を通ります。ビルドできないのは `internal/vpsd` そのもの (google/nftables など Linux 限定の依存を持つ、カーネルの nftables を操作する層) で、`internal/dataplane/userspace` はその依存を持ちません。
+
+このテストは、以前は Windows でだけ結果を判定せず SKIP していました。原因は、wireguard-go の `conn.NewDefaultBind()` が Windows で返す `WinRingBind` が `SIO_UDP_CONNRESET` を無効にせず、届いた ICMP port unreachable が `WSAECONNRESET` として次の受信に現れ、`device.RoutineReceiveIncoming` がこれを回復不能な誤りと判定して受信ループを止めることでした (詳しい経緯は [design.md](design.md) の改訂の記録にあります)。この不具合は Pull Request #107 が直し、`internal/dataplane/userspace/tunnel` と `internal/dataplane/userspace/utun` の `newBind()` は、Windows でだけ `conn.NewStdNetBind()` を明示して使います。この修正を当てて SKIP を外した状態を Windows の実機で 13 回実行した実験では 10 回通り、残る 3 回の失敗はトンネル側の不具合ではなく、テスト自身が wg の `listen_port` をホストが決めた範囲から連続 50 個走査して選んでいた弱さ (空きポートが見つからない) によるものでした。この走査は、`ListenPort` に 0 を渡して OS に選ばせ、実際に割り当てられたポートを `IpcGet` で読み返す形に変え、SKIP も外しています。この形にした後、CI の `windows-test` でこのテストは 5 回続けて通りました。Windows の実機での再実行は未確認です。
+
+このテストの後も、launchd での起動、認証情報ファイルの ACL、スリープと復帰、ネットワークアダプタの変化、リリースの実バイナリそのものの確認、D1 の「UDP の受信の固着」(実サーバーに対する実機での通しの確認がまだ無いため。改訂の記録を参照) は実機に残ります (D1、D2、E4、E5)。
 
 ## 高価な実験を小さな回帰テストへ置き換える規則
 
