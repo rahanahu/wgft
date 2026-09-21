@@ -13,6 +13,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/buildinfo"
 	"github.com/rahanahu/wgft/internal/startup"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // cobra's default MousetrapHelpText (spf13/cobra@v1.10.2 cobra.go:72) tells a user who
@@ -80,8 +81,9 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: false,
 	}
 	// buildinfo.Version is embedded at build time with -X (scripts/build-release.sh,
-	// .goreleaser.yaml). --version and `wgft version` both print the bare
-	// string (e.g. "v0.1.0" or "dev"), matching what the release assets use.
+	// .goreleaser.yaml). --version prints that bare string alone (e.g. "v0.1.0" or
+	// "dev"), matching what the release assets use; `wgft version` prints it as its
+	// first line and adds the supported protocol range below it (7a.6 section).
 	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(
 		newServerCmd(),
@@ -100,7 +102,14 @@ func newVersionCmd() *cobra.Command {
 		Short: "Print the wgft version",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), effectiveVersion())
+			out := cmd.OutOrStdout()
+			if _, err := fmt.Fprintln(out, effectiveVersion()); err != nil {
+				return err
+			}
+			// This is the range this binary supports (design.md 7a.6 section), not the
+			// version negotiated with any one agent; "wgft agent ls" prints that instead,
+			// per connection, in its PROTO column.
+			_, err := fmt.Fprintf(out, "protocol range: v%d-v%d\n", proto.SupportedProtocol.Min, proto.SupportedProtocol.Max)
 			return err
 		},
 	}

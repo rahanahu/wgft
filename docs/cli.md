@@ -141,11 +141,25 @@ List registered agents with the state of their stream and tunnel.
 Columns: STREAM is the address the agent's control connection comes from,
 HEARTBEAT its age, GEN the rule generation the agent has applied, TUNNEL ok or
 error, WG_ENDPOINT and HANDSHAKE the WireGuard peer as the VPS sees it, RULES
-lists id:reason for the rules currently failing, or "N ok" once none are, WARN
-the number of open warnings. When an agent is disconnected (STREAM shows -),
-TUNNEL and RULES are its last report before the stream dropped, prefixed with
-"last:"; they are not the current state. HEARTBEAT shows how long ago that
-report was.
+lists id:reason for the rules currently failing, or "N ok" once none are, PROTO
+the protocol negotiated on the agent's current connection, WARN the number of
+open warnings. When an agent is disconnected (STREAM shows -), TUNNEL and
+RULES are its last report before the stream dropped, prefixed with "last:";
+they are not the current state. HEARTBEAT shows how long ago that report was.
+
+PROTO shows vN for a connection that negotiated a numbered version, legacy
+for an agent whose advertisement carried no protocol_min/protocol_max at all
+(an older agent build), and - either while disconnected or while connected to
+a server too old to report which one it picked. A disconnected agent shows -
+rather than the version it last negotiated, since that value is no longer in
+effect and does not become current again until the agent reconnects.
+
+PROTO is what this one connection is using, not a range. "wgft version"
+prints the range of numbered versions built into the binary it runs as; a
+legacy agent, which advertises no version at all, connects regardless of that
+range (design.md 7a.6 section). Even run on the VPS, that range belongs to
+the on-disk binary and can differ from the range the running server process
+uses until the server restarts with it.
 
 ```text
 wgft agent ls [flags]
@@ -1170,7 +1184,13 @@ Flags:
 
 ## wgft version
 
-Print the wgft version.
+Print the wgft version, followed by the range of protocol versions this
+binary supports. That range is static, and it does not depend on any agent
+being connected, but it covers only numbered versions; a server also accepts
+a legacy agent that reports no version at all, regardless of this range,
+during v1.0.x (design.md 7a.6 section). It is not the version in use with a
+particular agent, which "wgft agent ls" prints per connection in its PROTO
+column.
 
 ```text
 wgft version

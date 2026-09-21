@@ -231,11 +231,31 @@ On the VPS (against the admin API):
 				return enc.Encode(agents)
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tADDRESS\tSTREAM\tHEARTBEAT\tGEN\tTUNNEL\tWG_ENDPOINT\tHANDSHAKE\tRULES\tWARN")
+			fmt.Fprintln(w, "NAME\tADDRESS\tSTREAM\tHEARTBEAT\tGEN\tTUNNEL\tWG_ENDPOINT\tHANDSHAKE\tRULES\tPROTO\tWARN")
 			for _, a := range agents {
 				stream := "-"
 				if a.Connected {
 					stream = a.StreamFrom
+				}
+				// PROTO is the protocol version negotiated on this agent's current
+				// connection (design.md 7a.6 section), not the range this binary
+				// supports ("wgft version" prints that range). It is only meaningful
+				// while connected, so a disconnected agent shows "-" rather than the
+				// version negotiated on a stream that has since dropped.
+				protoVal := "-"
+				if a.Connected {
+					switch {
+					case a.AgentProtocolLegacy:
+						protoVal = "legacy"
+					case a.ProtocolVersion >= 1:
+						protoVal = fmt.Sprintf("v%d", a.ProtocolVersion)
+					default:
+						// An old server does not report protocol_version or
+						// agent_protocol_legacy (added 2026-09-19); both are then Go's
+						// zero value. That is neither a numbered version nor legacy, so
+						// show "-" rather than the misleading "v0".
+						protoVal = "-"
+					}
 				}
 				tun := a.Tunnel.State
 				if a.Tunnel.Reason != "" {
@@ -266,7 +286,7 @@ On the VPS (against the admin API):
 				if n := len(a.Warnings); n > 0 {
 					warn = fmt.Sprintf("%d", n)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Address, stream, ago(a.LastHeartbeat), a.Generation, tun, a.WGEndpoint, ago(a.LastHandshake), rules, warn)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Address, stream, ago(a.LastHeartbeat), a.Generation, tun, a.WGEndpoint, ago(a.LastHandshake), rules, protoVal, warn)
 			}
 			return w.Flush()
 		},
