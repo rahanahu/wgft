@@ -6,7 +6,7 @@ wgft のコードは、設計文書([docs/design.md](design.md))の各節が扱�
 
 | パッケージ | 実装する節 | 役割 |
 | --- | --- | --- |
-| `internal/dataplane` | 7a.2, 7a.7 | dataplane `Backend` の契約(`Prepare`/`Commit`/`Rollback`、`EnsureWG`、`Converge`、`ReadDrops`、`Dial`)だけを持つ、インタフェース専用のパッケージです |
+| `internal/dataplane` | 7a.2, 7a.7 | dataplane `Backend` の仕様(`Prepare`/`Commit`/`Rollback`、`EnsureWG`、`Converge`、`ReadDrops`、`Dial`)だけを持つ、インタフェース専用のパッケージです |
 | `internal/dataplane/linuxkernel` | 6.1, 7a.7 | kernel dataplane の `Backend` です。カーネルの WireGuard(`wg`)、nftables(`nft`)、conntrack 収束(`conntrack`)を束ね、`internal/vpsd` を import しません(将来の agent の kernel backend、7a.8 節 Phase 7 も同じ実装を使います) |
 | `internal/dataplane/linuxkernel/nft` | 6.1 | `internal/planner` の `Plan` から `table inet wgft` を組み立て、1 トランザクションで適用します |
 | `internal/dataplane/linuxkernel/conntrack` | 6.1(収束) | 外から入って DNAT されたフローを `Plan` の Transparent なルールに収束させます |

@@ -588,7 +588,7 @@ func TestWriteStatusReportRulesUnknown(t *testing.T) {
 // TestRulesStatusOfUnknownApplyStateValue は、この版が知らない apply_state の値(将来の版の
 // server が足しうる値、例えば "retiring")を、故障ではなく unknown に数え、終了コードを 0 の
 // ままにすることを確かめる。apply_state は増えうる開いた集合であり、知らない値を失敗にしては
-// ならないという契約(design.md 7a.11 節)を、この版から知る値だけを degraded に数える形で守る。
+// ならないという約束(design.md 7a.11 節)を、この版から知る値だけを degraded に数える形で守る。
 // かつての default 節は、active 以外を丸ごと degraded に数えており、新しい版の server に古い CLI
 // を向けたとき、まだ知らない値だけで誤って壊れていると報告していた。
 func TestRulesStatusOfUnknownApplyStateValue(t *testing.T) {
@@ -638,7 +638,7 @@ func TestRulesStatusOfUnknownApplyStateValue(t *testing.T) {
 // 固定する。server は apply_state を active と報告し、そのルールの持ち主のエージェントの報告も
 // 鮮度があるが、State がこの版の知らない値(将来の agent が足しうる値、例えば "starting")なら、
 // active ではなく unknown に数える。7a.11 節は agent_rule_states の state も apply_state と同じ
-// 開いた集合と定めており、エージェント側だけをこの契約の外に置いてはならない。
+// 開いた集合と定めており、エージェント側だけをこの約束の外に置いてはならない。
 func TestRulesStatusOfFreshUnknownAgentStateIsUnknownNotActive(t *testing.T) {
 	in := healthyStatusInput()
 	var oneID string

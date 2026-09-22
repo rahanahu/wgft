@@ -20,7 +20,7 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
 
-// fakeBackend は Backend の単純な実装(仕様 5.1 節の register ハンドラの契約だけを確かめる)。
+// fakeBackend は Backend の単純な実装(仕様 5.1 節の register ハンドラの動作だけを確かめる)。
 // name が空ならトークンに紐付いた名前(boundName)で、name があれば一致するときだけ登録が通る。
 type fakeBackend struct {
 	boundName string

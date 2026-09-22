@@ -8,7 +8,7 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// Rule はルール 1 本の正規化した内部表現(設計文書 7a.2 節)。外部契約である proto.Rule の
+// Rule はルール 1 本の正規化した内部表現(設計文書 7a.2 節)。維持する外部仕様である proto.Rule の
 // VPSMode/ProxyProtocol を Forwarding/SourceMetadata の 2 つの軸へ写し、それ以外のフィールドは
 // そのまま引き継ぐ。AdmissionPolicy(internal/policy)が使う送信元制限とレートも、正規化した
 // ルールの一部としてここに残る。ルール集合から AdmissionPolicy の IR を組み立てるのは
@@ -54,7 +54,7 @@ func FromProto(r proto.Rule) (Rule, error) {
 	}, nil
 }
 
-// ToProto は正規化したルールを外部契約の proto.Rule へ書き戻す。FromProto の逆写像であり、
+// ToProto は正規化したルールを維持する外部仕様の proto.Rule へ書き戻す。FromProto の逆写像であり、
 // 常に成功する(Rule は既に有効な組み合わせしか表せないため)。
 func (r Rule) ToProto() proto.Rule {
 	mode, proxyProtocol := protoForwarding(r.Forwarding, r.SourceMetadata)

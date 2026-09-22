@@ -28,7 +28,7 @@ import (
 )
 
 // newTestRegisterServer は登録 API のなりすまし(仕様 5.1 節)。渡された name が空でなければ
-// boundName と比較し、違えば 401 を返す(vpsd の実装と同じ契約)。
+// boundName と比較し、違えば 401 を返す(vpsd の実装と同じ仕様)。
 func newTestRegisterServer(t *testing.T, boundName string) (*httptest.Server, string) {
 	t.Helper()
 	mux := http.NewServeMux()

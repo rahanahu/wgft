@@ -20,10 +20,10 @@ import (
 
 // このファイルは `wgft server doctor`(設計文書 10.2a 節)を持つ。転送経路を公開側から自宅側へ
 // 順に調べ、どこまで通ってどこで止まったか、運用者が次に何を見るかを示す。判定は既存の管理用 API
-// の応答だけから行い(7a.11 節の契約を変えない)、診断は diagnose という純粋な関数に閉じてある。
+// の応答だけから行い(7a.11 節の保証を変えない)、診断は diagnose という純粋な関数に閉じてある。
 // コマンドの登録は cmd/wgft/server.go(Linux の build tag)が行う。
 
-// 検査の識別子。JSON の "id" の値であり、機械向けの契約である(設計文書 10.2a 節)。開いた集合
+// 検査の識別子。JSON の "id" の値であり、機械向けの保証である(設計文書 10.2a 節)。開いた集合
 // として扱い、項目を増やすことだけができる。名前の変更も意味の変更も互換ではない。
 const (
 	checkDataplane     = "server.dataplane"
@@ -63,7 +63,7 @@ const (
 	statusSkipped = "skipped"
 )
 
-// 理由の符号。JSON の "reason" の値であり、機械向けの契約である。開いた集合として扱い、
+// 理由の符号。JSON の "reason" の値であり、機械向けの保証である。開いた集合として扱い、
 // 読み手は知らない値を「不明」として扱う(設計文書 10.2a、7a.11 節)。
 const (
 	reasonRuleDisabled        = "rule_disabled"
@@ -98,7 +98,7 @@ const (
 	reasonResolvedByAgent     = "resolved_by_agent"
 )
 
-// 検査のまとまり。人向けの出力の見出しになる。契約ではない。
+// 検査のまとまり。人向けの出力の見出しになる。保証の対象ではない。
 const (
 	groupServer = "Server"
 	groupTunnel = "Tunnel"
@@ -149,7 +149,7 @@ type doctorReport struct {
 
 // checkReport は 1 つの検査である。
 type checkReport struct {
-	// ID は機械向けの契約である。増えることはあっても、名前も意味も変わらない。
+	// ID は機械向けの保証である。増えることはあっても、名前も意味も変わらない。
 	ID string `json:"id"`
 	// RuleID は、この検査が 1 本のルールに属する場合のそのルールである。
 	RuleID string `json:"rule_id,omitempty"`
@@ -160,10 +160,10 @@ type checkReport struct {
 	Reason string `json:"reason,omitempty"`
 	// ObservedAt は、この判定の根拠になった観測の時刻である。観測が無ければ省く。
 	ObservedAt string `json:"observed_at,omitempty"`
-	// Group と Label は人向けの見出しであり、契約ではない(設計文書 7a.11 節)。
+	// Group と Label は人向けの見出しであり、保証の対象ではない(設計文書 7a.11 節)。
 	Group string `json:"group"`
 	Label string `json:"label"`
-	// Detail は人向けの 1 文である。契約ではない。
+	// Detail は人向けの 1 文である。保証の対象ではない。
 	Detail string `json:"detail"`
 	// Causes は、この証拠だけでは切り分けられない原因の一覧である。1 つに決めつけないために
 	// 持つ(設計文書 10.2a 節)。切り分けられる所見では省く。
@@ -1250,7 +1250,7 @@ func displayStatus(c checkReport) string {
 	return statusWord(c.Status)
 }
 
-// statusWord は判定を人向けの語にする。表そのものは契約ではない(設計文書 7a.11 節)。
+// statusWord は判定を人向けの語にする。表そのものは保証の対象ではない(設計文書 7a.11 節)。
 func statusWord(s string) string {
 	switch s {
 	case statusOK:
@@ -1267,7 +1267,7 @@ func statusWord(s string) string {
 	return s
 }
 
-// 人向けの出力の桁。表そのものは契約ではない(設計文書 7a.11 節)。
+// 人向けの出力の桁。表そのものは保証の対象ではない(設計文書 7a.11 節)。
 const (
 	labelWidth  = 18
 	statusWidth = 11

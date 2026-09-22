@@ -45,7 +45,7 @@ type serverStatus struct {
 	// Status は serverHealthy、serverDegraded、statusUnknown(doctor.go)のいずれかである。
 	// bool では unknown を表せないので、この版から文字列にした(design.md 10.2b 節)。
 	Status string `json:"status"`
-	// Detail は人向けの 1 文で、Status が serverHealthy 以外のときだけ持つ。契約ではない
+	// Detail は人向けの 1 文で、Status が serverHealthy 以外のときだけ持つ。保証の対象ではない
 	// (design.md 10.2b 節)。
 	Detail string `json:"detail,omitempty"`
 }
@@ -402,7 +402,7 @@ func warningsStatusOf(warnings []admin.Warning, now time.Time) warningsStatus {
 
 // --- 人向けの出力 ---
 
-// statusLabelWidth と statusValueWidth は表の桁である。表そのものは契約ではない
+// statusLabelWidth と statusValueWidth は表の桁である。表そのものは保証の対象ではない
 // (design.md 7a.11 節)。理由(Detail)が無い行では値のあとの余白を出さない。
 const (
 	statusLabelWidth = 14
