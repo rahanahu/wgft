@@ -30,8 +30,7 @@ import "golang.zx2c4.com/wireguard/conn"
 // vpsd 自体は Linux でしか動かないが、この package は CI の windows-test が
 // ビルドと単体テストの対象にしている。internal/dataplane/userspace/tunnel は
 // 同じ理由でこの対を複製している。5 行程度のこの選択のためだけに新しい package を
-// 設けると、v1.0 まで固定する package 境界(CLAUDE.md、docs/design.md 7a 節)に
-// 触れるため、共有はしない。
+// 設ける実利は無いため、共有はしない。
 func newBind() conn.Bind {
 	return conn.NewStdNetBind()
 }
