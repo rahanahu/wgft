@@ -615,22 +615,13 @@ func runRuleDryRun(c *admin.Client, upsert []proto.Rule) error {
 }
 
 // reservedFromServerInfo builds the proto.Reserved set a real Batch would refuse a listen_port
-// for, from GET /api/v1/server's report of the server's own ports. It mirrors, field for field,
-// how internal/vpsd/vpsd.go builds Daemon.reserved at startup (around opts.WGPort/AdminAddr/
-// AgentAPIAddr): the WireGuard port is always reserved; the admin API's port is reserved only
-// when AdminAddr parses as host:port (a Unix socket, e.g. the default "unix:///run/wgft/
-// admin.sock", does not reserve a port); the agent API's port comes from AgentAPIPort, which
-// ServerInfo already returns net.SplitHostPort'd (an empty or unparseable value reserves
-// nothing for it, the same as a net.SplitHostPort failure in vpsd.go).
+// for, from GET /api/v1/server's report of the server's own ports. It delegates to
+// admin.ReservedFromServerInfo, the rule internal/vpsd/vpsd.go's construction of Daemon.reserved
+// at startup mirrors, so this CLI path and the Web UI's read-import confirmation
+// (internal/vpsd/admin/webui_import.go's importIssues) share one implementation instead of two
+// that can drift apart the way they once did (design.md's revision record, --dry-run entry).
 func reservedFromServerInfo(info *admin.ServerInfo) proto.Reserved {
-	reserved := proto.Reserved{uint16(info.WGPort): "WireGuard"}
-	if ap, err := netip.ParseAddrPort(info.AdminAddr); err == nil {
-		reserved[ap.Port()] = "admin API"
-	}
-	if ap, err := netip.ParseAddrPort("0.0.0.0:" + info.AgentAPIPort); err == nil {
-		reserved[ap.Port()] = "agent API"
-	}
-	return reserved
+	return admin.ReservedFromServerInfo(*info)
 }
 
 // ruleDryRunIssues collects the reasons a dry run would refuse upsert. A row's own shape

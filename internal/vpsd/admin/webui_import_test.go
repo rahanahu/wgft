@@ -487,14 +487,189 @@ func TestImportIssuesGrandfathersUnchangedLegacyRow(t *testing.T) {
 
 	otherNoted := other
 	otherNoted.Note = "only the note changes"
-	if got := importIssues([]proto.Rule{legacy, otherNoted}, current, agents); len(got) != 0 {
+	if got := importIssues([]proto.Rule{legacy, otherNoted}, current, agents, nil); len(got) != 0 {
 		t.Errorf("import that leaves the legacy row alone is withheld: %v", got)
 	}
 
 	legacyNoted := legacy
 	legacyNoted.Note = "touching the legacy row"
-	got := importIssues([]proto.Rule{legacyNoted, other}, current, agents)
+	got := importIssues([]proto.Rule{legacyNoted, other}, current, agents, nil)
 	if len(got) != 1 || !strings.Contains(got[0], "r_legacy") {
 		t.Errorf("import that changes the legacy row should report it once, got %v", got)
 	}
 }
+
+// reservedPortsLikeVPSD builds the proto.Reserved set a real Batch would refuse a listen_port
+// for, the same way reservedBackend's Batch below needs it. It is written independently of
+// ReservedFromServerInfo (admin.go) instead of a call to that function: a test that renders the
+// confirm page (which calls ReservedFromServerInfo through importIssues) and then also runs a
+// real Batch against the same fixture only actually cross-checks ReservedFromServerInfo against
+// an independent copy when the two are implemented separately. Calling ReservedFromServerInfo
+// here would make such a test pass even if ReservedFromServerInfo's rule silently drifted, since
+// both sides would then apply the same (wrong) rule.
+//
+// Despite the name, this is a copy of ReservedFromServerInfo, not of internal/vpsd/vpsd.go's
+// construction of Daemon.reserved: that one takes Options (WGPort/AdminAddr/AgentAPIAddr) and
+// splits AgentAPIAddr's port itself with net.SplitHostPort, whereas this one, like
+// ReservedFromServerInfo, takes ServerInfo and uses AgentAPIPort, which its producers already
+// return net.SplitHostPort'd. vpsd.go's own construction (reservedPorts) is pinned directly by
+// internal/vpsd's TestReservedPorts; ReservedFromServerInfo's rule is pinned directly by
+// TestReservedFromServerInfo (reserved_test.go, this package). cmd/wgft/rule_test.go's own
+// reservedPortsLikeVPSD makes the same choice, with the same naming quirk, for the CLI's
+// --dry-run tests.
+func reservedPortsLikeVPSD(info ServerInfo) proto.Reserved {
+	reserved := proto.Reserved{uint16(info.WGPort): "WireGuard"}
+	if ap, err := netip.ParseAddrPort(info.AdminAddr); err == nil {
+		reserved[ap.Port()] = "admin API"
+	}
+	if ap, err := netip.ParseAddrPort("0.0.0.0:" + info.AgentAPIPort); err == nil {
+		reserved[ap.Port()] = "agent API"
+	}
+	return reserved
+}
+
+// reservedBackend wraps fakeBackend to report a fixed ServerInfo and to make Batch honor the
+// same reserved-port set a real Daemon.Batch would (fakeBackend.Batch itself passes nil, which
+// is fine for tests that don't care about reserved ports, but would hide the exact defect the
+// tests below exist to catch: the confirm page and the real Batch disagreeing about a reserved
+// port).
+type reservedBackend struct {
+	*fakeBackend
+	info ServerInfo
+}
+
+func (b *reservedBackend) ServerInfo() (ServerInfo, error) { return b.info, nil }
+
+func (b *reservedBackend) Batch(req BatchRequest) (*store.BatchResult, error) {
+	return b.st.ApplyBatch(reservedPortsLikeVPSD(b.info), func(rules []proto.Rule) ([]proto.Rule, error) {
+		return ApplyBatchToRules(rules, req)
+	})
+}
+
+// TestImportConfirmRejectsReservedPortOverlap is the fix for the defect an independent review
+// found: importIssues passed nil as proto.ValidateUpsert's reserved argument, so a read-import
+// that overlapped the VPS's own WireGuard, admin API, or agent API port showed as accepted on
+// the confirm page even though the real Daemon.Batch (internal/vpsd/admin_backend.go, via
+// internal/vpsd/store/rules.go's ApplyBatch) would refuse it. For each of the three ports, this
+// confirms both that the confirm page withholds the apply button and that a real Batch against
+// the same fixture also refuses it, so the two judgments cannot drift apart the way they did
+// before this fix.
+func TestImportConfirmRejectsReservedPortOverlap(t *testing.T) {
+	cases := []struct {
+		name string
+		info ServerInfo
+		port uint16
+	}{
+		{"WireGuard", ServerInfo{WGPort: 51820}, 51820},
+		{"admin API", ServerInfo{WGPort: 51821, AdminAddr: "127.0.0.1:8686"}, 8686},
+		{"agent API", ServerInfo{WGPort: 51821, AgentAPIPort: "8687"}, 8687},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { st.Close() })
+			backend := &reservedBackend{fakeBackend: &fakeBackend{st: st}, info: tc.info}
+			srv := httptest.NewServer(New(backend))
+			t.Cleanup(srv.Close)
+
+			desired := []proto.Rule{
+				{ID: "r_new", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: tc.port, Hi: tc.port},
+					Target: "192.168.1.30:9", VPSMode: proto.ModeKernel, Enabled: true},
+			}
+			body, err := json.Marshal(desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			confirm := multipartUpload(t, srv.URL+"/ui/rules/import?lang=en", "rules.json", body)
+			defer confirm.Body.Close()
+			if confirm.StatusCode != http.StatusOK {
+				t.Fatalf("confirm status = %d, want 200", confirm.StatusCode)
+			}
+			page, _ := io.ReadAll(confirm.Body)
+			s := string(page)
+			if !strings.Contains(s, "Cannot apply") {
+				t.Errorf("confirm page must withhold apply for a rule overlapping the reserved %s port: %s", tc.name, s)
+			}
+			if !strings.Contains(s, `type="submit" disabled`) {
+				t.Errorf("apply button must be disabled: %s", s)
+			}
+			// The listed reason must actually name the reserved-port collision (proto/rule.go's
+			// "includes %s port %d", from validateRuleSet), not just any issue. Checking only
+			// "Cannot apply" above would stay green even if importIssues refused this rule for an
+			// unrelated reason, such as wrongly treating every row as pointing at an unregistered
+			// agent.
+			wantReason := fmt.Sprintf("includes %s port %d", tc.name, tc.port)
+			if !strings.Contains(s, wantReason) {
+				t.Errorf("confirm page must list the reserved-port collision (%q), got: %s", wantReason, s)
+			}
+			fields := extractHiddenFields(t, s)
+
+			// The confirm page's judgment must agree with what a real Batch does: applying the
+			// same fixture through the actual apply handler must also be refused, not silently
+			// accepted, and nothing must be saved.
+			applyResp, err := http.PostForm(srv.URL+"/ui/rules/import/apply?lang=en", url.Values{
+				"content": {fields["content"]}, "generation": {fields["generation"]}, "digest": {fields["digest"]},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer applyResp.Body.Close()
+			applyBody, _ := io.ReadAll(applyResp.Body)
+			if applyResp.StatusCode != http.StatusUnprocessableEntity {
+				t.Errorf("apply of a %s-port-overlapping import must fail (422), got %d: %s", tc.name, applyResp.StatusCode, applyBody)
+			}
+			after, err := st.Rules()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(after) != 0 {
+				t.Errorf("a refused apply must not save anything: %+v", after)
+			}
+		})
+	}
+}
+
+// TestImportConfirmAcceptsNonOverlappingUnixSocketAdminAddr is a control for
+// TestImportConfirmRejectsReservedPortOverlap: an AdminAddr that is a Unix socket path (not
+// host:port, e.g. the default "unix:///run/wgft/admin.sock") must not reserve any port, so a
+// read-import that does not otherwise conflict must still be accepted. This guards against an
+// overly broad fix that reserves something for every AdminAddr regardless of shape.
+func TestImportConfirmAcceptsNonOverlappingUnixSocketAdminAddr(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	info := ServerInfo{WGPort: 51821, AdminAddr: "unix:///run/wgft/admin.sock", AgentAPIPort: "8687"}
+	backend := &reservedBackend{fakeBackend: &fakeBackend{st: st}, info: info}
+	srv := httptest.NewServer(New(backend))
+	t.Cleanup(srv.Close)
+
+	desired := []proto.Rule{
+		{ID: "r_new", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 8080, Hi: 8080},
+			Target: "192.168.1.30:8080", VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	body, err := json.Marshal(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm := multipartUpload(t, srv.URL+"/ui/rules/import?lang=en", "rules.json", body)
+	defer confirm.Body.Close()
+	page, _ := io.ReadAll(confirm.Body)
+	s := string(page)
+	if strings.Contains(s, "Cannot apply") {
+		t.Errorf("a Unix socket admin_addr must not reserve a port: %s", s)
+	}
+	if strings.Contains(s, `type="submit" disabled`) {
+		t.Errorf("apply button must not be disabled: %s", s)
+	}
+}
+
+// A ServerInfo() failure -- the case that matters most, since falling back to reserved == nil
+// would make a read-import that overlaps a reserved port show as accepted -- is covered by the
+// "server info" case TestImportConfirmReadFailureIsNotSilentZero (webui_readfail_test.go) adds,
+// alongside its existing generation/agents cases, via errServerInfoBackend.

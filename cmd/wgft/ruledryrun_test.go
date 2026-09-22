@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
-	"github.com/rahanahu/wgft/proto"
 )
 
 // このファイルは `rule add` と `rule set` の `--dry-run`(design.md 11a 節)を確かめる。
@@ -448,46 +447,34 @@ func TestRuleAddDryRunOverlappingPortNoThrowawayID(t *testing.T) {
 	}
 }
 
-// TestReservedFromServerInfo pins reservedFromServerInfo's rule with explicit inputs and outputs.
-// This is a copy of internal/vpsd/vpsd.go's Daemon.reserved construction (around
-// opts.WGPort/AdminAddr/AgentAPIAddr), which reservedFromServerInfo's own doc comment says it
-// mirrors field for field, so this test's expectations come from reading vpsd.go, not from
-// running reservedFromServerInfo and recording what it happened to return.
-func TestReservedFromServerInfo(t *testing.T) {
+// TestReservedFromServerInfoDelegates confirms that reservedFromServerInfo forwards to
+// admin.ReservedFromServerInfo unchanged (a straight dereference-and-call, cmd/wgft/rule.go).
+//
+// The full rule this delegates to -- WireGuard always reserved, admin API only when AdminAddr
+// parses as host:port, agent API from the already-split AgentAPIPort -- used to be pinned by a
+// larger table test here, duplicating a copy of the same logic that lived in
+// admin.ReservedFromServerInfo. Now that reservedFromServerInfo is only a delegation, that table
+// belongs with the function it actually tests: internal/vpsd/admin's own
+// TestReservedFromServerInfo (reserved_test.go) pins the rule itself, including the cases (a
+// Unix socket AdminAddr, an AdminAddr that fails to parse for some other reason, an empty
+// AgentAPIPort) that matter for not silently reserving a placeholder port. Keeping a second full
+// copy of that table here would let the two drift out of sync with no test catching it; this
+// smaller test only guards that the one-line delegation itself does not regress, for example by
+// someone re-inlining the old logic and returning something else.
+func TestReservedFromServerInfoDelegates(t *testing.T) {
 	cases := []struct {
 		name string
 		info admin.ServerInfo
-		want proto.Reserved
 	}{
-		{
-			name: "unix socket admin_addr reserves no port",
-			info: admin.ServerInfo{WGPort: 51820, AdminAddr: "unix:///run/wgft/admin.sock", AgentAPIPort: "9443"},
-			want: proto.Reserved{51820: "WireGuard", 9443: "agent API"},
-		},
-		{
-			name: "TCP admin_addr reserves its port",
-			info: admin.ServerInfo{WGPort: 51820, AdminAddr: "10.0.0.5:8443", AgentAPIPort: "9443"},
-			want: proto.Reserved{51820: "WireGuard", 8443: "admin API", 9443: "agent API"},
-		},
-		{
-			// vpsd.go builds Daemon.reserved with the same netip.ParseAddrPort(opts.AdminAddr),
-			// which fails on a host-less address the same way; this is vpsd.go's own rule, not
-			// a defect, and is pinned here so a change to either side is caught by this test.
-			name: `admin_addr missing a host (":8443") reserves no port, matching vpsd.go`,
-			info: admin.ServerInfo{WGPort: 51820, AdminAddr: ":8443", AgentAPIPort: "9443"},
-			want: proto.Reserved{51820: "WireGuard", 9443: "agent API"},
-		},
-		{
-			name: "empty agent_api_port reserves no port",
-			info: admin.ServerInfo{WGPort: 51820, AdminAddr: "10.0.0.5:8443", AgentAPIPort: ""},
-			want: proto.Reserved{51820: "WireGuard", 8443: "admin API"},
-		},
+		{name: "TCP admin_addr reserves its port", info: admin.ServerInfo{WGPort: 51820, AdminAddr: "10.0.0.5:8443", AgentAPIPort: "9443"}},
+		{name: "unix socket admin_addr reserves no port", info: admin.ServerInfo{WGPort: 51820, AdminAddr: "unix:///run/wgft/admin.sock", AgentAPIPort: "9443"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := reservedFromServerInfo(&tc.info)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("reservedFromServerInfo(%+v) = %v, want %v", tc.info, got, tc.want)
+			want := admin.ReservedFromServerInfo(tc.info)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("reservedFromServerInfo(%+v) = %v, want %v (admin.ReservedFromServerInfo's own answer)", tc.info, got, want)
 			}
 		})
 	}
