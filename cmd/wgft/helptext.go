@@ -210,7 +210,28 @@ real client address to the target in a PROXY protocol v2 header. The target
 must expect that header.
 
 The command refuses a port that another process on the VPS already listens on;
---force overrides that.`,
+--force overrides that.
+
+--dry-run checks the rule against what a real "wgft rule add" would enforce
+before saving, as far as the admin API lets it observe: its own shape,
+whether it duplicates an ID or overlaps another rule's listen port, whether
+it overlaps a port the server has reserved for itself (WireGuard, the admin
+API, or the agent API), and whether --agent names a currently registered
+agent. --force has no effect together with --dry-run: --dry-run never calls
+Batch, the only place --force applies, so a rule overlapping a reserved
+port is still refused. It prints what would change and exits 1 if it finds
+a problem, 0 if not, and never saves anything either way. It does not try
+to reach --to, and it does not check for a port already bound by another
+process on the VPS or a DNAT some other nftables table has installed on
+it, e.g. by Docker; the latter is refused even with --force. Both need
+root and nft, which this command does not have; run "wgft server doctor
+<rule>" for reachability once the rule exists. If the server's reserved
+ports cannot be read, including because the admin API predates this
+check, --dry-run exits 2: it could not determine whether the rule would
+be accepted, which is not the same as finding it acceptable.`,
+		Example: `  wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456
+  wgft rule add --agent home --tcp 443 --to 192.168.1.30:443 --proxy --proxy-protocol
+  wgft rule add --agent home --udp 2456 --to 192.168.1.20:2456 --dry-run`,
 	},
 	"rule ls": {
 		Long: `List rules, grouped by --group. ID is shortened; every rule command accepts such
@@ -256,8 +277,27 @@ open sessions are cut; ID, limits and lists are kept.`,
 		Example: `  wgft rule disable r_01M2R009`,
 	},
 	"rule set": {
+		Long: `Change only an existing rule's group or note; give --group, --note or both.
+Neither affects forwarding, and neither raises the rule generation.
+
+--dry-run checks the change against what a real "wgft rule set" would
+enforce before saving, as far as the admin API lets it observe: the rule's
+own shape, whether it duplicates another rule's ID, whether its listen_port
+overlaps another rule or a port the server has reserved for itself
+(WireGuard, the admin API, or the agent API), and whether the rule's agent
+is still currently registered. "rule set" cannot change listen_port, so
+that check can only surface a conflict that already exists, never one this
+command created. There is no --agent flag on this command; the agent
+checked is the one already stored on the rule. It prints what would change
+and exits 1 if it finds a problem, 0 if not, and never saves anything
+either way; run "wgft server doctor <rule>" for reachability, which this
+does not check. If the admin API cannot be reached, including to look up
+the rule itself, or the server's reserved ports cannot be read, including
+because the admin API predates this check, --dry-run exits 2: it could not
+determine whether the change would be accepted.`,
 		Example: `  wgft rule set r_01M2R009 --group game --note "game server"
-  wgft rule set r_01M2R009 --note ""`,
+  wgft rule set r_01M2R009 --note ""
+  wgft rule set r_01M2R009 --note "game server" --dry-run`,
 	},
 	"rule deny": {
 		Long: `Sources in the deny list of a rule are dropped. The list holds IPv4 CIDRs; a
