@@ -63,9 +63,9 @@ v1.0 までの内部構造の固定は、v1.0.0 のリリース (2026-09-23) を
 
 固定の終了後も、次の 3 つの制約が別の理由で効きます。
 
-- 依存の向き。規範は [docs/design.md](docs/design.md) の 7a.7 節で、`internal/dataplane/deps_test.go` が検査します。この制約はテストが検査しており、内部構造の固定とは無関係に効き続けます
-- Admission Policy のコンパイラの import の境界。規範は [docs/design.md](docs/design.md) の 7a.9 節で、`internal/policy/nftables` が `google/nftables` を import しないことを、同じ `internal/dataplane/deps_test.go` の `TestPolicyNftablesDoesNotImportGoogleNftables` が検査します。依存の向きと同じ理由で、内部構造の固定とは無関係に効き続けます
-- 外部仕様の互換性の保証。規範は [docs/design.md](docs/design.md) の 7a.11 節です。この保証は v1.0 のリリースをもって始まりました。内部構造の固定が終わることと、外部仕様の保証が始まることは別の出来事なので、固定の終了後も保証は続きます。内部の作りは変えられますが、公開しているサーフェスの約束は保ちます
+- 依存の向き:規範は [docs/design.md](docs/design.md) の 7a.7 節で、`internal/dataplane/deps_test.go` の `TestDependencyDirection`、`TestPureLayersStayPure`、`TestVpsdSubpackagesDoNotImportVpsd` が検査します
+- Admission Policy のコンパイラの import の境界:規範は [docs/design.md](docs/design.md) の 7a.9 節で、`internal/policy/nftables` が `google/nftables` を import しないことを、同じ `internal/dataplane/deps_test.go` の `TestPolicyNftablesDoesNotImportGoogleNftables` が検査します
+- 外部仕様の互換性の保証:規範は [docs/design.md](docs/design.md) の 7a.11 節です。この保証は v1.0 のリリースをもって始まりました。内部の作りは変えられますが、公開しているサーフェスの約束は保ちます
 
 ## コードと出力の約束
 
