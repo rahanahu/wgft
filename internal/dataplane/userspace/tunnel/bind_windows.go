@@ -28,8 +28,7 @@ import "golang.zx2c4.com/wireguard/conn"
 // syscall や I/O 完了通知のオーバーヘッドであり、その大きさは未測定である。
 //
 // tunnel と internal/dataplane/userspace/utun は同じ理由でこの対を複製している。
-// 5 行程度のこの選択のためだけに新しい package を設けると、v1.0 まで固定する
-// package 境界(CLAUDE.md、docs/design.md 7a 節)に触れるため、共有はしない。
+// 5 行程度のこの選択のためだけに新しい package を設ける実利は無いため、共有はしない。
 func newBind() conn.Bind {
 	return conn.NewStdNetBind()
 }
