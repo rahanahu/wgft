@@ -19,6 +19,15 @@ import (
 // このファイルは `wgft status`(設計文書 10.2b 節)の判定を、合成した管理用 API の応答に
 // 対して確かめる。at、u64、doctorNow は doctor_test.go のものをそのまま使う。
 
+// wallNow は、実時刻の time.Now() から見て d 前の時刻を返す。at は doctorNow(固定の偽の
+// 「今」)から見た相対時刻を作るが、runStatusCmd を経由する RunE の試験は cmd.Execute() が
+// status.go の RunE をそのまま呼ぶため、比較の基準は doctorNow ではなく実際の time.Now() に
+// なる(status.go:154)。buildStatusReport を直に呼ぶ試験は Now: doctorNow を明示して渡すので
+// at() で足りるが、この経路の「doctorNow から 5 秒前」は、実時刻が doctorNow を過ぎた分だけ
+// 古い時刻になり、鮮度の判定(targetReportStale は 90 秒、handshakeStale は 3 分)を外れて
+// 落ちる。RunE を通す試験のうち、鮮度が結果を左右するものはこちらを使う。
+func wallNow(d time.Duration) string { return time.Now().Add(-d).Format(time.RFC3339) }
+
 func rulesFixture() []proto.Rule {
 	mk := func(id, target string, enabled bool) proto.Rule {
 		return proto.Rule{
@@ -864,12 +873,12 @@ func agentSideFailureStatusBackend() *fakeStatusBackend {
 		}
 		states[r.ID] = admin.RuleApply{ApplyState: admin.ApplyActive}
 		agentStates[r.ID] = admin.AgentRuleStatus{
-			Agent: r.Agent, State: proto.StatusError, Reason: "target not allowed", Connected: true, At: at(5 * time.Second),
+			Agent: r.Agent, State: proto.StatusError, Reason: "target not allowed", Connected: true, At: wallNow(5 * time.Second),
 		}
 	}
 	return &fakeStatusBackend{
 		rules:           rules,
-		agents:          []admin.AgentInfo{{Name: "home", Connected: true, LastHeartbeat: at(5 * time.Second), LastHandshake: at(5 * time.Second)}},
+		agents:          []admin.AgentInfo{{Name: "home", Connected: true, LastHeartbeat: wallNow(5 * time.Second), LastHandshake: wallNow(5 * time.Second)}},
 		apply:           admin.ApplyStatus{DesiredGeneration: 9, ActiveGeneration: 9, Rules: states},
 		agentRuleStates: agentStates,
 	}
