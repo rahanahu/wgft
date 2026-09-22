@@ -65,10 +65,10 @@ func exeName() string {
 const exitRefusal = 3
 
 // exitUnavailable は、コマンドが求められた報告そのものを作れなかったときの終了コードである。
-// `wgft server doctor` だけが使う(設計文書 10.2a 節)。診断は 0(壊れた検査が無い)と
-// 1(壊れた検査がある)を監視に伝える約束なので、管理用 API に届かない場合や引数が誤っている
-// 場合を 1 に混ぜると、監視が「転送が止まった」と読んでしまう。11b 節の終了コード 3 とは
-// 目的が別で、あちらは起動の拒否を監督するプロセスに伝えるものである。
+// `wgft server doctor`(設計文書 10.2a 節)と `wgft status`(10.2b 節)が使う。どちらも 0(壊れた・
+// degraded な項目が無い)と 1(ある)を監視に伝える約束なので、管理用 API に届かない場合や
+// 引数が誤っている場合を 1 に混ぜると、監視が「転送が止まった」「配置が劣化した」と読んでしまう。
+// 11b 節の終了コード 3 とは目的が別で、あちらは起動の拒否を監督するプロセスに伝えるものである。
 const exitUnavailable = 2
 
 func newRootCmd() *cobra.Command {
@@ -87,6 +87,7 @@ func newRootCmd() *cobra.Command {
 		newServerCmd(),
 		newAgentCmd(),
 		newRuleCmd(),
+		newStatusCmd(),
 		newVersionCmd(),
 	)
 	applyHelp(root)
@@ -115,8 +116,8 @@ func main() {
 // 起動の拒否(*startup.Refusal)は 3、報告を作れなかった失敗(*unavailableError)は 2、
 // それ以外は 1 である。server も agent も、どの層も同じ型を返す(設計文書 11b 節)。かつては
 // wg.StartupRefusal、cmd の configError、agent.ConfigRefusal の 3 つを並べて見ており、新しい
-// 失敗を足すときに写し忘れる余地があった。2 つ目の型を足したのは `wgft server doctor` の
-// ためだけで、その終了コードの意味は 10.2a 節に定める。
+// 失敗を足すときに写し忘れる余地があった。2 つ目の型は `wgft server doctor` のために足したが、
+// `wgft status` も同じ型を使う。終了コード 2 の意味はどちらも 10.2a 節と 10.2b 節にそれぞれ定める。
 func exitCode(err error) int {
 	if startup.IsRefusal(err) {
 		return exitRefusal

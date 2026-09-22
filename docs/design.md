@@ -1218,17 +1218,17 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 
 **Web UI(`/`、`/ui/...`、`/static/...`)。** 保つものは無い。ダッシュボードの URL 構成、`/ui/rules/{id}` のようなパス、フォームのフィールド名、`?lang=` と言語 cookie、HTML の構造は、テンプレートの都合で理由なく変わってよい。`GET /ui/rules/export` だけは JSON を返すが、これは CLI の `rule import` と同じ配列を人が手元で編集して読み込むための書き出しであり、`proto.Rule` の JSON 形(ルールのスキーマ、5.3 節)を経由した契約であって `/ui/` 自体の契約ではない。Web UI を自動化の対象にする場合は `/api/v1/...` を直接呼ぶべきで、`/ui/...` の HTML を解析すべきでない。
 
-**CLI のコマンドとフラグ。** 保つものは、コマンド名とサブコマンドの構成(`server`・`agent`・`rule`・`version` とその下位)、フラグの名前と意味、`--json` を持つコマンド(`rule ls`・`agent ls`)がその出力を持ち続けることである。
+**CLI のコマンドとフラグ。** 保つものは、コマンド名とサブコマンドの構成(`server`・`agent`・`rule`・`status`・`version` とその下位)、フラグの名前と意味、`--json` を持つコマンド(`rule ls`・`agent ls`・`status`・`server doctor`)がその出力を持ち続けることである。
 
 保たないものは、表形式の人間向け出力(列の並びと幅、`last:` のような接頭辞、REFUSED や DROPPED の見せ方)と、`--help`・`docs/cli.md` の文面である。
 
-機械可読な契約は `--json` の出力だけである。`rule ls --json` は `admin.BatchResponse` を、`agent ls --json` は `[]admin.AgentInfo` を、CLI 側で別の型に写さずそのまま出力する。つまり CLI の `--json` 契約は上記の管理用 API の契約そのものであり、二重に管理しない。ここから導かれる規則は次のとおりである。
+機械可読な契約は `--json` の出力である。ただし、出力の形には 2 通りある。`rule ls --json` は `admin.BatchResponse` を、`agent ls --json` は `[]admin.AgentInfo` を、CLI 側で別の型に写さずそのまま出力する。この 2 つは管理用 API の応答をそのまま出しているだけなので、契約は上記の管理用 API の契約そのものであり、二重に管理しない。`status --json`(10.2b 節)と `server doctor --json`(10.2a 節)はこれとは違う。どちらも管理用 API の応答だけを読んで組み立てるが、出力は `statusReport`・`doctorReport` という CLI 専用の型であり、admin パッケージのどの型とも一致しない。この 2 つの契約は、それぞれの節(10.2b・10.2a)が個別に定め、フィールドの追加も、既知の値の集合の開き方も、各節の記述に従う。管理用 API の型をそのまま返すコマンドと、CLI 専用の模型を持つコマンドは、この節では別の扱いとして書き分ける。いずれの場合も、ここから導かれる規則は次のとおりである。
 
 - フィールドは v1 の中で追加されるだけで、名前が変わったり削除されたりしない
 - 消費者は知らないフィールドを無視しなければならない(`encoding/json` の既定の振る舞いに合わせる)
-- 列挙値を持つフィールド(`rule_states` の `apply_state`、`tunnel` と `rules` の `state`、`agent_rule_states` の `state`、`resource_refusals` の理由のキー、警告の `kind`)は、v1 の中で値が増えうる開いた集合である。消費者は知らない値を「不明」として扱い、失敗にしてはならない。この条件のもとで、値の追加は互換である。既存の値の意味は変えない。リクエストに書く側の列挙値(ルールの `proto`、`vps_mode`)は閉じた集合で、値の追加は新しい機能の追加として扱う
-- 人間向けの表(`rule ls`・`agent ls` の素の出力)は自動化が読んではならない情報であり、どの列が何を意味するかは `--help` の文面と同じ扱いで自由に変わる
-- `--json` の出力のうち表に現れない項目(`rule ls --json` の `rule_states`・`drift`・`desired_generation`・`active_generation`、`agent ls --json` の `public_key`・`registered_from`・`created_at`・`agent_protocol_*`・`warnings` の詳細)も同じ契約の対象であり、情報量が多い分だけ自動化に向く
+- 列挙値を持つフィールド(`rule_states` の `apply_state`、`tunnel` と `rules` の `state`、`agent_rule_states` の `state`、`resource_refusals` の理由のキー、警告の `kind`、`status --json` の `server.status`、`server doctor --json` の `checks[].id`・`checks[].status`・`checks[].reason`)は、v1 の中で値が増えうる開いた集合である。消費者は知らない値を「不明」として扱い、失敗にしてはならない。この条件のもとで、値の追加は互換である。既存の値の意味は変えない。リクエストに書く側の列挙値(ルールの `proto`、`vps_mode`)は閉じた集合で、値の追加は新しい機能の追加として扱う
+- 人間向けの表(`rule ls`・`agent ls` の素の出力、`status`・`server doctor` の表形式の出力)は自動化が読んではならない情報であり、どの列が何を意味するかは `--help` の文面と同じ扱いで自由に変わる
+- `--json` の出力のうち表に現れない項目(`rule ls --json` の `rule_states`・`drift`・`desired_generation`・`active_generation`、`agent ls --json` の `public_key`・`registered_from`・`created_at`・`agent_protocol_*`・`warnings` の詳細)も同じ契約の対象であり、情報量が多い分だけ自動化に向く。`status --json` の `server.detail`・`rules.detail`・`agents.detail`・`warnings.detail` はこれとは逆である。どれも表にそのまま印字される文字列であり、表に現れない項目ではないため、契約ではない(10.2b 節)
 
 **設定(`WGFT_*`)。** 11a 節が定める名前と意味を維持する。同じ名前をフラグとファイル(dotenv)の両方から渡せることと、優先順位(フラグ、環境変数、ファイル、既定の順)も契約に含む。`--force`・`--purge`・`--adopt-existing`・`--yes`・`--dry-run` の 5 つは 1 回限りの操作なので、これらに対応する `WGFT_*` を新設しないことも契約に含む(11a 節)。
 
@@ -1593,7 +1593,7 @@ UNKNOWN と NOT TESTED だけでは 0 のままとする。外からの到達性
 この規則を置く理由は、終了コードに 2 つの意味を混ぜないことにある。終了コードが「転送が止まった」と「管理の経路が壊れた」の両方を指すようになると、それを見ている側はどちらが起きたのかを区別できない。責任は次のように分ける。
 
 - `server doctor`: このルールの転送の経路が壊れているかどうかに答える
-- `wgft status`: 配置全体の運用の状態が健全かどうかに答える。制御の経路が切れている状態は、そこでは `DEGRADED` になる。このコマンドはまだ存在しないので、`status` が将来担う内容として定める
+- `wgft status`: 配置全体の運用の状態が健全かどうかに答える。制御の経路が切れている状態は、そこでは配置全体の劣化として終了コードを動かす。この関係を 10.2b 節が実装として定める
 - `wgft agent ls`: エージェント 1 台ごとの詳細を担う
 
 引数の数の誤りとフラグの誤りも 2 で終わる。どちらも診断そのものを始められなかった失敗であり、「壊れた検査があった」の 1 と混ぜると監視から見分けが付かなくなるためである。包む場所は 2 か所ある。引数の数は引数を検査する関数が、フラグはフラグの誤りを扱う関数が包む。フラグの解析は引数の検査より前に行われるので、片方だけでは入口の違いで終了コードが分かれる。
@@ -1603,6 +1603,156 @@ UNKNOWN と NOT TESTED だけでは 0 のままとする。外からの到達性
 #### `--report` の設計上の約束
 
 `--report` は、GitHub の Issue にそのまま貼れる形を出す将来の選択肢である。この版では実装しないが、後から加えるときに出力の形を変えずに済むよう、原則を先に定める。`--report` は許可一覧であり、伏せ字ではない。内部の構造をそのまま直列化してから秘密を取り除く形にはしない。報告専用の型 (版、OS、モード、エージェントの状態、ルールの状態など) を明示的に埋める形にし、後から加えたフィールドが既定で漏れるのではなく既定で現れないようにする。今の診断が読む値には、秘密鍵も恒久トークンも接続文字列も含まれない。管理用 API のうち診断が呼び出す 3 つの節点がそれらを返さないためである。
+
+### 10.2b 状態の要約(`wgft status`)
+
+`wgft status` は配置全体の運用の状態を見る。1 画面の 4 行の要約であり、`server doctor`(10.2a 節)が転送の経路を公開側から自宅側へたどってどこで止まったかを答えるのに対し、`status` はどこで止まったかを探さない。判定と次に見る場所の提示は `server doctor` の役目のままとする。10.2a 節の終了コードの節で予告した「`wgft status` は配置全体の運用の状態が健全かどうかに答える」という役割を、この節で実装として定める。Agents 行は、制御の接続とトンネルの健全さの両方を評価する(2026-09-22、所有者の決定)。
+
+#### 読む節点
+
+読む節点は次の 3 つに絞る。増やさない。`admin.BatchRequest` にも項目を足さない。
+
+| 行 | 出どころ |
+|---|---|
+| Server | `GET /api/v1/rules` の `desired_generation`、`active_generation`、`apply_error` |
+| Agents | `GET /api/v1/agents` の `Connected`・`Tunnel`・`LastHandshake` |
+| Rules | `GET /api/v1/rules` の `rule_states[].apply_state` と `agent_rule_states` |
+| Warnings | `GET /api/v1/warnings` |
+
+Rules 行は `rule_states[].apply_state` に加えて `agent_rule_states` も読む(2026-09-22、所有者の決定)。どちらも `GET /api/v1/rules` の同じ 1 回の応答に既にある既存のフィールドなので、読む節点の数は 3 つのままである。Agents 行も、`Connected` に加えて `Tunnel`・`LastHandshake` を読む(2026-09-22、所有者の決定)。どちらも `GET /api/v1/agents` の同じ応答に既にある既存のフィールドであり、`server doctor` の `tunnel.handshake`(10.2a 節)が読むものと同じなので、節点は増えない。
+
+警告の件数は `GET /api/v1/warnings` から数える。`AgentInfo.Warnings` は使わない。`AgentInfo.Warnings` はエージェント個別の窃取検知の警告であり、配置全体の件数を数えるための節点ではないためである。
+
+#### 4 行の意味
+
+状態の語彙は healthy・degraded・unknown の 3 つである。証拠が無い項目は、健全でも故障でもなく unknown とする。証拠が無いことを健全と数えると、2026-09-19 の改訂で加えたフィールドをまだ返さない旧い版の server にこの版の CLI を向けたとき、フィールドが返らないだけで「Server healthy」「Rules 8 active」と報告してしまう。unknown は、故障を観測していないことを示す状態であり、故障を観測した degraded とは別である。
+
+- Server:server 側のデータプレーンへの適用が宣言に追いついているかどうかである。判定は `server doctor` の `server.dataplane`(10.2a 節)と同じ優先順位を使い、世代の遅れを先に見て、次に適用の誤りを見る。`desired_generation` と `active_generation` のどちらか一方でも欠けていれば世代の遅れを計算できないので unknown とする。`apply_error` は世代とは別の証拠なので、世代が欠けていても `apply_error` が有れば degraded とする。世代が揃っていて遅れが無く、`apply_error` も無い場合だけ healthy とする。優先順位は `server.dataplane` と同じでも、判定そのものは食い違う一点がある。世代の遅れが無く `apply_error` だけが残る場合、`server.dataplane` はこれを unknown(reason `repair_failed`)にとどめて `server doctor` の終了コードを 0 のままにするが、`status` はここを degraded として終了コードを 1 にする。問うている範囲が違うので、これは矛盾ではない。`server doctor` はそのルールの転送が今も通っているかどうかに答えるので、公開された値が現行の generation のままである限り unknown で足りる。`status` は配置全体の運用の状態に答えるので、戻れない地点の後の修復が失敗したままという事実そのものを運用上の劣化として degraded に数える
+- Agents:登録済みのエージェントを healthy・degraded・unknown の 3 つに数え分ける(2026-09-22、所有者の決定)。healthy は、制御ストリーム(`Connected`)とトンネルの両方が健全なときだけである。degraded は、制御ストリームが切れているとき、またはトンネルが failed・error であるか最終ハンドシェイクが健全の条件(3 分、下記)を外れているときである。unknown は、トンネルの状態や報告がこの版の知らない値であるときである。トンネルの判定は `server doctor` の `tunnel.handshake`(10.2a 節)と同じ判定・同じ鮮度の規則(`handshakeStale`、3 分)を共有し、doctor.go の `tunnelHealth` という関数を両方から呼ぶ。制御ストリームが切れている間は、エージェント自身のトンネルの報告がハートビート由来で古くなるため、`tunnelHealth` はこれを故障と決めつけず、直近のハンドシェイク(server が WireGuard から直接読む値)だけで判定するが、Agents 行にとっては制御ストリームが切れていること自体が既に運用上の劣化なので、その場合は `tunnelHealth` の判定を待たずに degraded とする。行の値は、healthy な場合だけ「N / M healthy」で示し、degraded か unknown が 1 つでもあれば、Rules 行と同じく 3 つの数をそれぞれ総数と並べて示す。以前は `Connected` だけを見ており、制御ストリームは繋がっていてもトンネルが死んでいる配置(WireGuard のハンドシェイクが一度も無い、またはエージェントがトンネルを error と報告している)を healthy 側に数えていた。`server doctor` は同じ入力に対して `tunnel.handshake` が FAILED になり終了コード 1 で終わるのに、`status` は「1 / 1 healthy」と報告して終了コード 0 のままだった(レビューの指摘)
+- Rules:有効なルールを active・degraded・unknown の 3 つに数え分ける。無効なルールは総数に数えない。無効は宣言どおりの状態であり、故障ではないという `rule.enabled`(10.2a 節)と同じ判断による。Rules が数える active は、有効なルールのうち、VPS 側の適用と、鮮度のあるエージェント側の報告の両方で、転送の準備が整っているものである(2026-09-22、所有者の決定)。`apply_state` の既知の値は `admin.ApplyActive`・`admin.ApplyPending`・`admin.ApplyNotActive` の 3 つで、このうち `pending` と `not_active` は、server 側の適用そのものが失敗している証拠として、この時点で degraded に数える。`apply_state` が `active` であることは、server がそのルールを公開できたという証拠でしかなく、エージェントが実際に target へ届いているという証拠ではない。例えば VPS 側が有効なルールをすべて公開できていても、エージェント自身がその target への到達を拒んでいれば(`WGFT_AGENT_ALLOW_TARGETS` など)、1 バイトも転送されない。この場合は、そのルールの持ち主のエージェントが直近に報告した `agent_rule_states` を、`server doctor` の `rule.target`(10.2a 節、`freshAgentRuleStatus`)と同じ鮮度の規則(接続中であること、`state` が空でないこと、報告が `targetReportStale`(90 秒)より新しいこと)で読み、鮮度のある報告が `error` なら degraded、`ok` なら active とする。報告が無い場合、または鮮度が無い場合(一度も報告していない、stream が切れている間の古い報告、90 秒より古い報告のいずれか)は、故障を観測してはいないので unknown に数える。5.2 節が、切断中のエージェントの最後の報告を今の状態として描くことを禁じているので、古い報告を degraded にも active にも数えない。`rule_states` にその行が無い場合、server がそもそも `rule_states` を返さない場合、または `apply_state` がこの版の知らない値である場合も、同じ理由で unknown に数える。`apply_state` は増えうる開いた集合であり(7a.11 節)、この版が知らない値を故障と決めつけて degraded に数えてはならない
+- Warnings:開いている窃取検知の警告の件数である。行の値は件数そのもの(0 件なら none)であり、healthy・degraded・unknown の語は持たない。1 件でもあれば、後述の終了コードの根拠になる
+
+healthy な行は、その数だけを示し、内部の値(世代、`apply_state` の文字列、待ち受けのエンドポイントなど)を出さない。degraded と unknown の行には、何が見つかったかを 1 行だけ添える。添える内容は、エージェントなら最後に見えた時刻、ルールなら該当のルールの短い ID とその理由(server 側の適用の失敗、エージェント側の報告の失敗、鮮度のある報告が無い旨のいずれか)、警告なら種類・対象のエージェント・`Warning.At` が読めれば発生からの経過である。Rules の値の列は、degraded と unknown がどちらも 0 のときだけ「N active」と言い切る。1 つでもあれば、active・degraded・unknown の数をそれぞれ別に示し、Total と並べる。かつては degraded と unknown をまとめて「Active + Degraded」/ Total という 1 つの数(「known」、証拠のある数の意)に畳んでおり、5 active・2 degraded・1 unknown のような組み合わせが「7 / 8 known」となって、壊れている 2 本が active 側に隠れて読めなくなっていた(レビューの指摘)。今の形は、健全でない項目を 1 つも隠さないことを優先し、値の桁が伸びることを厭わない。
+
+以下は、実際に合成した応答に対して `wgft status` を動かして得た出力である。健全でない行が 3 つある場合(ルールが 1 本 degraded、エージェントが 1 台切断、警告が 1 件)は次のとおりである。
+
+```
+Server        healthy
+Agents        1 healthy, 1 degraded / 2   home2 last seen 4m12s ago
+Rules         7 active, 1 degraded / 8   r_01M335HMAB… bind failed: address already in use
+Warnings      1              ip-flapping on home, 1m0s ago
+```
+
+トンネルが死んでいて制御ストリームだけ生きている配置(WireGuard のハンドシェイクが一度も観測されていない)は、次のとおりである。Agents 行が degraded になり、Rules 行が 8 本とも active のままでも終了コードは 1 になる。
+
+```
+Server        healthy
+Agents        0 healthy, 1 degraded / 1   home tunnel: no WireGuard handshake with this agent has ever been observed
+Rules         8 active
+Warnings      none
+```
+
+有効なルールが 1 本も無い場合は、次のとおりである。
+
+```
+Server        healthy
+Agents        1 / 1 healthy
+Rules         0 active
+Warnings      none
+```
+
+証拠の無い server に対する表示は次のとおりである。この例は、世代のフィールドも `rule_states` も一切返さない server(7a.11 節の `ApplyStatusBackend` を実装しない Backend)を再現したもので、Server が unknown になるとともに、Rules は根拠がまったく無いので 8 本すべてが unknown になる。
+
+```
+Server        unknown        this server does not report apply generations
+Agents        1 / 1 healthy
+Rules         0 active, 8 unknown / 8   apply state is unavailable for 8 rules
+Warnings      none
+```
+
+上の例は `rule_states` 自体が丸ごと無い場合に限った話である。`rule_states` はあるが個々の行の `apply_state` がこの版の知らない値であるとき、または VPS 側は active と報告しているのにエージェント側の鮮度のある報告がまだ無いときは、一部の行だけが unknown になる。3 つの状態が混在する例を次に示す。8 本のうち 5 本が active(VPS 側の適用とエージェント側の報告のどちらも整っている)、2 本が degraded(1 本は VPS 側の適用の失敗、もう 1 本はエージェント側の報告が `error`)、1 本が unknown(VPS 側は active と報告しているが、エージェント側の鮮度のある報告がまだ無い)である。
+
+```
+Server        healthy
+Agents        1 / 1 healthy
+Rules         5 active, 2 degraded, 1 unknown / 8   r_06MIXED000… bind failed: address already in use, r_07MIXED000… target not allowed, r_08MIXED000… the agent has not confirmed it is forwarding this rule
+Warnings      none
+```
+
+#### 終了コード
+
+終了コードは次のとおりである。
+
+| コード | 意味 |
+|---|---|
+| 0 | 健全、または unknown があるだけ |
+| 1 | degraded な項目が 1 つ以上ある |
+| 2 | 要約そのものを作れなかった。管理用 API に届かない場合、引数の数が誤っている場合、知らないフラグを渡した場合が当たる |
+| 3 | 設定の誤り(11a 節) |
+
+Warnings は healthy・degraded・unknown の語を持たないが、終了コード 1 の根拠になる。開いている警告が 1 件でもあれば、コード 1 になる。Agents は Rules と同じく 3 つの語を持ち、degraded なエージェントが 1 台でもあればコード 1 になる。unknown なエージェント(トンネルの状態がこの版の知らない値)は、Rules の unknown と同じ理由でコードを動かさない。
+
+unknown だけでは終了コードを上げない。`server doctor` の UNKNOWN が終了コード 0 のままである規則(10.2a 節)と揃えている。旧い版の server との rolling upgrade の最中、まだ返らないフィールドだけで監視を鳴らし続けることを避けるためである。新旧の版が混在しながら互換を保って正常に更新を進めている間は、監視だけが騒ぐ状態を防ぐ。
+
+> `status` の終了コード 1 は「転送断」を意味しない。配置全体に運用上の手当てが必要な degraded state があることを意味する。
+
+この規則を置く背景を述べる。10.2a 節は、制御の経路が切れていても最終ハンドシェイクが新しい場合、`server doctor` の判定をあえて終了コード 0 に留める規則を定めた。この状態では転送が続いている可能性があり、制御の経路の故障だけでそのルールの転送が止まったと報告すると、疎通確認が実際に target まで届いた場合でも自己矛盾した報告になるためである。10.2a 節はこの異常を拾う役目を `wgft status` に割り当てており、この節が実装するのはその割り当てである。`server doctor` の終了コード 1 は、対象のルールの転送の経路が壊れていることに答える。`status` の終了コード 1 は、配置全体に運用上の劣化があることに答える。両者は問うている範囲が違う。
+
+Warnings が終了コードを動かすことも、同じ問いの違いから来る(2026-09-22、所有者の決定)。`server doctor` は「このルールの転送の経路が今止まっているか」に答えるので、一度立って以後は運用者の操作を待つだけの累積した所見(Resource Guard の拒否や窃取検知の警告)を経路の外に置き、`rule.credentials`(10.2a 節)を unknown にとどめて総合判定にも終了コードにも入れない。`wgft status` が答える問いはこれとは違う。「この配置に運用者の対応が必要な状態が残っているか」であり、dismiss していない窃取検知の警告は、まさにその対象である。この警告は単なる履歴ではない。運用者が `wgft agent dismiss-warning` で確認して消すまで `GET /api/v1/warnings` に開いたまま残り続ける所見である。したがって「3 か月前に一度起きた出来事だから、いつまでも異常だと言われる」のではなく、「3 か月前に発生し、まだ運用者が処理済みにしていない警告が今も 1 件ある」と読む。`wgft agent dismiss-warning` は、その未処理から確認済みへの遷移そのものである。同じ証拠(`GET /api/v1/warnings`)を、`server doctor` は経路の外の所見として終了コードから外し、`status` は配置全体の未処理な項目として終了コードに数える。問うている範囲が違うだけで、これも矛盾ではない。
+
+#### 機械向けの出力
+
+`--json` はこの版から持つ。出力は `server doctor` の JSON とは別の、このコマンド専用の模型である。3 つの状態は、Server では `status` という文字列の項目で、Agents と Rules ではそれぞれ healthy・degraded・unknown、active・degraded・unknown の 3 つの数え分けで区別できる。
+
+```json
+{"server":{"status":"healthy"},
+ "agents":{"healthy":2,"degraded":0,"unknown":0,"total":2},
+ "rules":{"active":8,"degraded":0,"unknown":0,"total":8},
+ "warnings":{"count":0}}
+```
+
+degraded な行は `detail` を持つ。実際に動かして得た出力を示す(健全でない行が 3 つある場合、上の人向けの出力の例と同じ入力)。
+
+```json
+{"server":{"status":"healthy"},
+ "agents":{"healthy":1,"degraded":1,"unknown":0,"total":2,"detail":"home2 last seen 4m12s ago"},
+ "rules":{"active":7,"degraded":1,"unknown":0,"total":8,"detail":"r_01M335HMAB… bind failed: address already in use"},
+ "warnings":{"count":1,"detail":"ip-flapping on home, 1m0s ago"}}
+```
+
+unknown な行も `detail` を持つ。
+
+```json
+{"server":{"status":"unknown","detail":"this server does not report apply generations"},
+ "agents":{"healthy":1,"degraded":0,"unknown":0,"total":1},
+ "rules":{"active":0,"degraded":0,"unknown":8,"total":8,"detail":"apply state is unavailable for 8 rules"},
+ "warnings":{"count":0}}
+```
+
+active・degraded・unknown が混在する行も、それぞれの数を `rules` の 3 つのフィールドにそのまま持つ。人向けの出力の混在の例(前節)と同じ入力を動かした出力を示す。
+
+```json
+{"server":{"status":"healthy"},
+ "agents":{"healthy":1,"degraded":0,"unknown":0,"total":1},
+ "rules":{"active":5,"degraded":2,"unknown":1,"total":8,
+  "detail":"r_06MIXED000… bind failed: address already in use, r_07MIXED000… target not allowed, r_08MIXED000… the agent has not confirmed it is forwarding this rule"},
+ "warnings":{"count":0}}
+```
+
+トンネルが死んでいて制御ストリームだけ生きている場合、`agents` は healthy が 0 に、degraded が 1 になる。人向けの出力の同じ例(前節)と同じ入力を動かした出力を示す。
+
+```json
+{"server":{"status":"healthy"},
+ "agents":{"healthy":0,"degraded":1,"unknown":0,"total":1,"detail":"home tunnel: no WireGuard handshake with this agent has ever been observed"},
+ "rules":{"active":8,"degraded":0,"unknown":0,"total":8},
+ "warnings":{"count":0}}
+```
+
+最上位はオブジェクトとし、7a.11 節の規則どおり項目は増やせるが、既存の項目の名前と意味は変えない。`detail` は人向けの文であり、契約ではない。`server.status` の値は開いた集合として扱い、読み手は知らない値を unknown として扱う。
+
+#### 置き場所
+
+`status` は最上位のコマンドとし、`server` の一群には入れない。`server` は Linux 限定の build tag を持ち、Linux 以外のビルドでは `cmd/wgft/server_other.go` が拒否する代替に置き換わる(10.2a 節)。`status` は管理用 API を読むだけで VPS 上のカーネル機能に触れないため、この制約を受け継ぐ理由が無い。実装は `cmd/wgft/status.go` に置き、build tag を持たない。
 
 ### 10.3 運用の流れ
 
@@ -2031,3 +2181,34 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - 復帰したエージェントを server が数分にわたって未接続と表示する(2026-09-21、GitHub issue #135、実機の macOS とラボでの実測):`wgft agent ls` と Web UI が、TCP も UDP も転送しており WireGuard のハンドシェイクも数秒前のエージェントを、`STREAM` が空、ハートビートが古い、`TUNNEL last:ok` の形で未接続として示す状態が、実機の macOS で 3 分 43 秒と 1 分 31 秒続いた。原因は 2 つある。1 つ目は、stream の再接続のバックオフが上限の 5 分に達すると、接続が 1 分以上続くか再登録するまで初期値に戻らず、トンネルの回復が待ちを打ち切る根拠にならなかったことである。2 つ目は、エージェントが読みの期限も ping も持たず、半開きの TCP を、30 秒ごとのハートビートの書き込みが失敗するまで、つまり OS が再送を諦めるまで検出できなかったことである。5.2 節に「接続の生死の判定」を追加した。stream が生きているとは TCP が `ESTABLISHED` であることではなく、相手の応答が限られた時間の内に届くことだと定め、状態の報告を担うハートビートと、経路が双方向に通ることを測る ping の役割を分けた。エージェントは 30 秒ごとに WebSocket の ping を送り、20 秒以内に pong が返らなければ接続を閉じて繋ぎ直す。判定に要する時間の上限は 50 秒で、`vpsd` が何も届かない stream を閉じる 90 秒に対して 40 秒の余裕がある。期限を間隔の 2 / 3 としたのは、Python の `websockets`、MQTT、SSH、NATS が採る 1.0 倍から 3 倍の範囲の内側に収めるためである。同じ節の再接続の間隔には、WireGuard の新しいハンドシェイクを観測したら残りの待ちを打ち切り、バックオフを初期値に戻すことを加えた。観測には、トンネルの点検(7 節)が 30 秒ごとに読む最終ハンドシェイクの値をそのまま使い、別の監視を持たない。打ち切りによる再接続の試みは 2 分に 1 回を超えない。ラボで確かめたことは次のとおりである。homerouter で stream の 5-tuple だけを落として半開きの stream を作ると、Linux の既定の設定では、エージェントが気付くまでに修正の前は 15 分 53 秒かかり、その間 server は動いているエージェントを 14 分 48 秒にわたって未接続として示した。修正の後は 34 秒で気付いて繋ぎ直し、server の側は置き換えとして処理したので未接続の区間は現れなかった。経路を断ってバックオフを上限に届かせ、戻した後に `vpsd` が接続を認めるまでの時間は、修正の前が 301 秒、修正の後が 14 秒である。どちらの回でも転送は経路を戻してから 10 秒以内に回復しており、stream の遅れは転送の回復とは無関係である。Go の既定の 15 秒の TCP keepalive は、この 15 分 53 秒を縮めなかった。Linux では網の口を落としてもアドレスが残るため、既存の stream は誤りを返さずに半開きになることも分かった。エージェントの ping が `vpsd` 側の 90 秒の期限を延ばさないことは、`internal/vpsd/stream` の単体テストで固定した。`lab/version-skew.sh` の 4 つの組み合わせ(legacy v0 の v0.3.0 の agent、v0.6.0 の agent、v0.6.0 の server、現在の版どうし)がすべて通り、ping を送るようになった agent が旧い版の server とも通じることを確かめた。一式(`labhost run -parallel 8 all`)の判定も変わらない。未確認:Windows と macOS の実機での判定、`vpsd` 以外の WebSocket の実装が相手になる場合の pong の応答、pong の期限を 20 秒とした判断が細い回線や混んだ回線で十分かどうか。
 - 接続中に観測したハンドシェイクで待ちを打ち切らないよう直す(2026-09-22、所有者のレビュー、5.2 節):直前の改訂で入れた打ち切りは、溜まっていた観測を捨てる位置が接続の試みの前にあった。長く続いた接続の最中にハンドシェイクを観測すると、その接続が切れた直後の待ちを、古い観測が打ち切ってしまう。意図は、接続の試みが終わった後に観測したものだけを根拠にすることであった。捨てる位置を接続の試みが戻った直後へ移した。余計な再接続が 1 回増えるだけの誤りであるが、この改訂は再接続の間隔そのものを定める改訂であるため直した。単体テストを 1 本足し、接続の最中に観測したハンドシェイクが次の待ちを打ち切らないことを確かめた。位置を戻すとこのテストは落ちる
 - 転送の診断コマンド `wgft server doctor` を加える(2026-09-22、所有者の設計):転送が通らないときに運用者が `rule ls`、`agent ls`、`rule ls --json`、Web UI、ログを突き合わせて行っていた作業を、1 つのコマンドにまとめた。10.2a 節を新設し、名前と置き場所、5 つの状態の意味、観測の古さの閾値、検査の一覧と証拠の出どころ、検査どうしの優先順位、切り分けられない所見の示し方、試していない範囲、履歴を持たないこと、機械向けの出力の契約、終了コード、`--report` の許可一覧の原則を定めた。この版が実装するのは `wgft server doctor [rule]` だけで、`agent doctor`、Web UI の操作、`--report`、遠隔の診断は含めない。遠隔の診断は server からエージェントへの新しいメッセージを要し、7a.6 節の機能の交渉に触れるため、`agent doctor` ができて手元で見える範囲が分かってから必要性を判断する。診断は既存の管理用 API の 3 つの節点(`GET /api/v1/rules`、`GET /api/v1/agents`、`POST /api/v1/rules/{id}/check`)だけを呼び出し、節点も応答の形も追加していない。状態の定義では、OK を実際に観測したものだけに使い、公開ポートは外からの到達性を試していないので常に NOT TESTED とする。OK の所見は必ず観測の古さを伴い、接続とエージェントの報告は 90 秒、トンネルは 3 分を越えると UNKNOWN に落ちる。この閾値は、2026-09-21 に実測した 2 つの区間(転送しているエージェントが切断と表示される区間と、受信の死んだトンネルの最終ハンドシェイクが 5 分間新しいままである区間)で診断が誤って安心させることを防ぐために置いた。終了コードは 0(FAILED 無し)、1(FAILED あり)、2(報告を作れなかった)、3(設定の誤り)とし、`cmd/wgft` の `exitCode` が見る型を 1 つ増やした。レビューで、引数の数の誤りが cobra から包まれずに返り 1 になっていたことが分かり、引数を検査する関数とフラグの誤りを扱う関数の両方で包む形に直した。11b 節が定める起動の失敗の意味論は変えていない。`rule.target_resolve` は単独の検査として成立しない。エージェントが名前を自分で解決し、失敗だけが `reason` の文字列に現れるためで、文言による判定と、解決を server が観測しない旨を出力に示す形にした。単独の検査にするには遠隔の診断が要る。レビューで 2 つの欠陥が見つかり、同じ改訂の中で直した。1 つ目は、ホスト名の `target` を持つ健全な TCP のルールが UNKNOWN になっていたことである。解決を常に UNKNOWN にしていたためで、TCP のルールの `ok` が解決の成功を含むという観測を捨てていた。上記の 4 つの場合分けに改め、証拠がまったく無い場合は UNKNOWN ではなく NOT TESTED とした。2 つ目は、経路の外の検査がルールの総合判定を永久に下げ続けていたことである。Resource Guard の累積の拒否と窃取の警告は、一度立つと server の再起動か運用者の削除まで残るため、転送が健全でも要約が UNKNOWN のままになっていた。総合判定を経路の上の検査だけから決める規則を加えた。レビューの第 2 巡で 3 つを直した。1 つ目は `tunnel.handshake` の意味づけである。第 1 巡では 3 分を越えた最終ハンドシェイクを UNKNOWN にするよう求められたが、7 節の時定数を根拠に取り下げられた。`agent.connection` と `rule.target` はエージェントが過去に送った報告なので、古ければ今の状態が分からず UNKNOWN が正しい。`tunnel.handshake` は報告ではなく server が WireGuard から今読む値であり、「181 秒前」という値自体が、トンネルが健全の条件を満たしていないという現在の観測である。keepalive が 25 秒、`RekeyAfterTime` が 120 秒なので健全なトンネルの最終ハンドシェイクは 145 秒より古くならず、`RejectAfterTime` の 180 秒を過ぎた鍵は送信にも使えない。実装は変えず、閾値を越えたときの移り先が項目によって違うことを本節に書き分けた。あわせて、受信だけが死んだトンネルを見分けられない期間を表す別の定数を削除し、`tunnel.handshake` の閾値そのものを使う形にした。5 分としていたのは、エージェント側の watchdog がトンネルを作り直す 300 秒 (7 節) を取り違えたものである。1 つの数に 2 つの定数を置いたことが取り違えを生んだ。2 つ目は、まだ存在しない `wgft agent doctor` を 4 か所で案内していたことである。健全な実行でも必ず出る「試していない範囲」を含むので、今あるログの読み取りと名前の解決の確認に書き換えた。3 つ目は、引数の数の誤りが終了コード 1 になっていたことである。`--from` の誤りと存在しないルールは 2 で終わるのに、cobra が RunE の前に返す誤りだけが包まれずに 1 になっていた。引数の検査を関数にして同じ型で包んだ。レビューの第 3 巡では、`agent.connection` の意味づけを直した。stream が切れているだけで FAILED にしており、この検査が経路の順で `rule.probe` より前にあるため、疎通確認が実際に `target` まで届いたルールでも「転送はここで止まった」と報告していた。同じ所見の文が「転送は続いている」と述べながら止まった位置を主張する、自己矛盾した報告である。この検査が測るのは制御の経路の健全さと新しい設定を配れるかどうかであって、転送が止まった位置ではない。最終ハンドシェイクが新しい場合だけを UNKNOWN に改め、理由の符号 `agent_disconnected` はそのままとした。stream が切れていることは確かであり、確かでないのはこのルールの転送に与える結果だからである。ハンドシェイクも古い場合と、エージェントが登録されていない場合は FAILED のままとした。前者は `tunnel.handshake` が先に FAILED になるので位置としてそちらが正しく、後者は `tunnel.handshake` が SKIPPED なので `agent.connection` が最初の失敗として正しい。経路の外の検査にはしていない。本当に落ちているエージェントはルールの要約を動かす必要があり、UNKNOWN はそれを保ったまま、止まった位置だという主張だけを取り下げるためである。あわせて、終了コードが答える問いを 1 つに保つ規則を、`agent.connection` 固有の注記ではなく終了コードの節の規則として書いた。制御の経路の故障だけでは失敗にせず、`wgft status` と `wgft agent ls` が運用上の劣化を担う分担も定めた。人向けの出力ではこの状態だけを `DEGRADED` と表示し、機械向けの値は `unknown` と `agent_disconnected` のままとする。終了コードが 0 でも出力が黙らないようにするためで、画面の語と JSON の値がこの 1 か所だけ食い違うことは決定として明記した。見出しは `connected` から `control connection` に改めた。ホストの単体テストで確かめたことは次のとおりである。公開ポートの bind の失敗、別のエージェントへ移って世代が遅れているルール、転送しているのに切断と表示されるエージェント、最終ハンドシェイクが無いトンネル、エージェントが到達できない宛先、宛先の許可一覧による拒否、拒否リストと許可リストによる接続元の遮断、公開の失敗が続いて active な世代が遅れている状態の 8 つを、それぞれ合成した応答から正しい検査の ID と理由の符号で報告する。無効なルールは SKIPPED にとどまり終了コードを変えない。stream が切れている間のエージェントの報告は UNKNOWN と `last:` になり、古い宛先の誤りを今の原因として示さない。加算的な報告を持たない Backend では健全と言わず UNKNOWN と言う。ok 以外のすべての所見が次に見るものを持つ。ホスト名の `target` を持つ健全な TCP のルールは ok のままであり、UDP のルールと報告の古い TCP のルールの解決は NOT TESTED になる。累積の拒否と窃取の警告は所見として出るが、ルールの総合判定も終了コードも動かさない。最終ハンドシェイクが 179 秒前なら OK、181 秒前と一度も成立していない場合は FAILED になり、181 秒前の場合は終了コード 1 まで届く。引数を 2 つ渡すと終了コード 2 で終わる。stream が切れていてトンネルが生きているルールは、疎通確認が `target` まで届いた場合を含め、止まった位置を持たず終了コード 0 で終わり、総合判定は UNKNOWN になる。ハンドシェイクも古い場合はトンネルで止まり、エージェントが未登録の場合は接続で止まる。この状態の検査は、JSON では `unknown` と `agent_disconnected` のまま、人向けの出力では `DEGRADED` と出る。理由の違う `unknown` と他の検査の `unknown` は `UNKNOWN` のまま出る。未確認:Web UI からの呼び出し、`agent doctor` との出力の共有は実装していないため確かめていない
+- 状態の要約コマンド `wgft status` を加える(2026-09-22、所有者の設計):配置全体が健全かどうかを 1 画面で示す要約コマンドを加えた。10.2b 節を新設し、読む節点を `GET /api/v1/rules`、`GET /api/v1/agents`、`GET /api/v1/warnings` の 3 つに絞り、Server・Agents・Rules・Warnings の 4 行の意味と終了コードを定めた。10.2a 節の終了コードの節が予告していた「`wgft status` は配置全体の運用の状態が健全かどうかに答える」という役割を、この節で実装として引き継ぐ。実装は `cmd/wgft/status.go` に置き、`server` の一群(Linux 限定の build tag)には入れない。管理用 API を読むだけで VPS 上のカーネル機能に触れないためである。Rules 行は有効なルールだけを総数に数え、無効なルールは除く。無効は宣言どおりの状態であり故障ではないという `rule.enabled`(10.2a 節)と同じ判断による。
+
+レビューで 2 つの決定を直した。1 つ目は状態の語彙である。最初の実装は、Server 行と Rules 行のいずれも、故障を示す証拠が無い場合は健全側に倒していた。desired_generation と active_generation と apply_error がどれも無い server を healthy と数え、rule_states にその行が無いルールを active と数えており、`server doctor`(10.2a 節)が「確認できていないことを正常と言わない」とした原則と逆だった。2026-09-19 の改訂で加えたフィールドを旧い版の server が返さない場合、新しい CLI を旧い server に当てると、フィールドがまだ返らないだけで Server healthy と Rules 8 active を報告してしまう。unknown という 1 つの状態を足し、証拠の無い項目は healthy でも degraded でもなく unknown にするよう改めた。Server は Status という文字列の項目(healthy・degraded・unknown)に、Rules は Active・Degraded・Unknown の 3 つの数え分けに直した。`--json` の server.healthy という真偽値は 3 つの状態を表せないので、server.status という文字列の項目に変えた。unknown は degraded として数えない。2 つ目は終了コードである。最初の実装は、要約の中身がどうであれ判定を持たせず、終了コードを常に 0 にしていた。所有者の決定により、degraded な項目が 1 つでもあれば終了コード 1 で終わるように改めた。unknown だけでは 0 のままとし、`server doctor` の UNKNOWN が 0 のままである規則(10.2a 節)と揃えた。旧い版の server との rolling upgrade の最中、まだ返らないフィールドだけで監視を鳴らし続けることを避けるためである。10.2a 節は、制御の経路が切れていても最終ハンドシェイクが新しい場合、`server doctor` の判定をあえて終了コード 0 に留める規則を定めており、この異常を拾う役目を `wgft status` に割り当てていた。この改訂はその割り当てを実装として満たす。`server doctor` の終了コード 1 は対象のルールの転送の経路が壊れていることに答え、`status` の終了コード 1 は配置全体に運用上の劣化があることに答える。両者は問うている範囲が違うという規則を 10.2b 節に明記した。管理用 API に届かない場合と、引数・フラグの誤りは、これまでどおり `server doctor` と同じ終了コード 2 のままである。ホストの単体テストで、4 行すべてが健全な合成応答と、ルールの適用失敗とエージェントの切断と警告が 1 件ずつある合成応答の 2 つについて、`writeStatusReport` の 4 行の文字列と `json.Marshal` の形の両方を確かめた。世代のフィールドを返さず rule_states も空の合成応答(Server が unknown、Rules が unknown を含む形になり、終了コードは 0)は、`writeStatusReport` の出力と `statusExit` を確かめたが、`json.Marshal` の形は確かめていない。未確認:実機とラボでの確認
+
+独立レビューが 4 つの欠陥を見つけ、同じ改訂で直した。1 つ目は `--json` の経路である。`RunE` が `enc.Encode` の戻り値をそのまま返しており、degraded な報告でも `statusExit` まで届かず終了コードが 0 のままだった。`server doctor` の `RunE` が `switch` を抜けたあとで必ず `doctorExit` を呼ぶ形に揃え、`enc.Encode` の失敗も `unavailable` で包んで終了コード 2 にした。`RunE` 自身を通す試験が 1 本も無かったことがこの欠陥を見逃した原因なので、`cmd.Execute` を text と `--json` の両方で呼ぶ試験を足し、同じ degraded な入力でどちらも終了コード 1 になることを確かめた。2 つ目は `rulesStatusOf` の既定の分岐である。`apply_state` が `active` 以外ならすべて degraded に数えており、7a.11 節の「列挙値を持つフィールドは開いた集合であり、知らない値を失敗にしてはならない」契約に反していた。新しい版の server がこの版の知らない値(例えば `retiring`)を足した場合、rolling upgrade の最中に degraded と誤報する。既知の値である `admin.ApplyPending` と `admin.ApplyNotActive` だけを degraded に数え、それ以外(空文字とこの版の知らない値)は unknown に数えるよう改めた。単体テストで、知らない値を持つルールが unknown に数えられ、終了コードが 0 のままであることを確かめた。3 つ目は終了コードの試験の立て方である。健全でない行を 3 つ同時に立てる合成応答だけでは、`statusExit` の 4 つの節のうち 1 つを削っても、残り 2 つが終了コードを非 0 に保つため検出できない。原因ごとに 1 つずつ壊す試験を 4 本(server の degraded、rules の degraded、agent の切断、warning)足し、それぞれ単独でも終了コード 1 になることを確かめた。レビューが指摘した 6 種の変異(`statusExit` の 4 つの節それぞれの削除、`rulesValue` の "known" を "active" に変える変更、unknown の detail の文言の変更)を実装へ 1 つずつ入れて `go test ./cmd/wgft/...` を流し、いずれも新設した試験のどれかが落ちることを確かめたうえで元に戻した。4 つ目は、Server の判定が `server doctor` の `server.dataplane` と食い違う一点(世代の遅れが無く `apply_error` だけが残る場合、`server.dataplane` は unknown にとどめるが `status` は degraded にする)を、コメントにも本節にも書いていなかったことである。両者が問うている範囲の違いを本節と `serverStatusOf` のコメントに明記した。あわせて、本節の「`apply_state` が active でない行は degraded に数える」という記述が 7a.11 節の契約と矛盾していたので、既知の値だけを degraded に数える記述に直し、Agents 行と Warnings 行が healthy・degraded・unknown の語彙を持たないことと、それでも終了コードの根拠になることも書き加えた
+
+もう 1 巡、独立レビューの指摘と所有者の決定により、Rules 行の出どころを見直した(2026-09-22)。それまでの `rulesStatusOf` は `rule_states[].apply_state` だけを読んでおり、server がルールを 8 本ともきれいに公開できていても、エージェント自身がその target を拒んでいれば(`WGFT_AGENT_ALLOW_TARGETS` など)1 バイトも転送されない状態を `8 active` と報告し、終了コード 0 で終わっていた。同じ入力に対し `server doctor` は `8 of 8 rules not carrying traffic` と答えており、2 つのコマンドが同じ配置について逆の答えを返していた。新しい節点は足さず、`GET /api/v1/rules` が既に返す `agent_rule_states`(この応答にはこの改訂の前から載っている)を読むだけに直した。`apply_state` が `active` の行はさらに、そのルールの持ち主のエージェントの鮮度のある報告(接続中、`state` が空でない、`targetReportStale` より新しい)を見て、`error` なら degraded、`ok` なら active、報告が無いか古ければ unknown とする。鮮度の規則は `server doctor` の `freshAgentRuleReport` が実装していたものと同じなので、判定そのものを `freshAgentRuleStatus`(`doctor.go`)という小さな関数に切り出し、`doctor` と `status` の両方から呼ぶ形にした。切り出しの前後で `doctor` の単体テストがすべて通ることを確かめており、`doctor` の挙動は変えていない。5.2 節が、切断中のエージェントの最後の報告を今の状態として描くことを禁じているので、stream が切れている間の古い報告や 90 秒を越えて古い報告は、degraded にも active にも数えず unknown に落とす。ホストの単体テストで、独立レビューが指摘した場合(server は 8 本とも active、agent_rule_states は 8 本とも `error`)を再現し、`status` が `8 active` ではなく全 8 本を degraded と数え、終了コード 1 で終わることを確かめた。同じ試験で、stream 切断中の古い報告と 90 秒を越えて古い報告のどちらも、degraded にも active にもならず unknown に落ちることも確かめた。
+
+同じ改訂で、Warnings が終了コードを動かす理由と `server doctor` の判定が逆になる理由を、所有者の整理のまま 10.2b 節に明記した。`server doctor` はそのルールの転送の経路が今止まっているかに答えるので、一度立って以後は運用者の操作を待つだけの警告を経路の外に置き終了コードを動かさない。`status` はこの配置に運用者の対応が必要な状態が残っているかに答えるので、dismiss していない警告はまさにその対象であり、終了コードを動かす。同じ証拠を違う問いに使い分けているだけで、矛盾ではない。あわせて、`warningsStatusOf` が `Warning.At` を読めるときは経過時間を添えるようにした。開いている警告が種類とエージェントしか出ておらず、30 秒前のものか 3 か月前のものか運用者に分からなかったためである。管理用 API の型は変えていない。
+
+`rulesValue` の混在時の表示も直した。unknown が 1 つでもあると、値の列が `Active + Degraded` / Total の 1 つの数(「known」)に畳まれており、5 active・2 degraded・1 unknown のような入力が `7 / 8 known` となって、壊れている 2 本が active 側に隠れて読めなくなっていた(レビューの指摘)。degraded と unknown のどちらかが 1 つでもあれば、3 つの数をそれぞれ Total と並べて示す形に直した。10.2b 節の 3 つの例(0 件、全部 unknown、混在)は、実際に合成した応答に対して `wgft status` を動かして得た出力をそのまま貼った。
+
+7a.11 節も、`server doctor --json`(既にマージ済み)と `status --json` がどちらも管理用 API の型を経由しない CLI 専用の模型を持つという実態に合わせて書き直した。CLI のコマンド一覧に `status` を、`--json` を持つコマンドの一覧に `status`・`server doctor` を加え、機械可読な契約の段落を、`rule ls`・`agent ls` のように管理用 API の型をそのまま返すものと、`status`・`server doctor` のように CLI 専用の型を持ち契約をそれぞれの節が個別に定めるものとに書き分けた。
+
+細かい誤りも直した。10.2b 節の例のルール ID(`r_01M32SD123`)は 12 文字ちょうどで、`short()`(`cmd/wgft/rule.go`)が詰める閾値(12 文字)をまたいでいなかった。実際の ID は `r_` + 26 文字の ULID なので必ず `…` が付く。実際に `newRuleID` と同じ形の ID(`r_01M335HMABBS0HAXB58DE7QSTR`)に差し替え、`status_test.go` の合成データも同じ長さの ID に直したうえで、`…` を経由する表示を確かめる形にした。証拠の無い server の例に添えていた「`withApply` は 3 つのフィールドをまとめて設定するかまとめて省くかのどちらかなので、7 / 8 known のように一部だけ known にはならない」という記述は、server 側の private な関数の名前を CLI の挙動の根拠にしており、かつ `rule_states` 自体は返るが個々の行の `apply_state` が未知の値であるとき、または agent_rule_states の鮮度が無いときには普通に一部だけ unknown になるので、言い過ぎだった。この例は `rule_states` 自体が丸ごと無い場合に限った話だと書き直し、混在する場合の例を別に添えた。`status_test.go` のコメントにあった「買収前はこの経路を試すテストが 1 つも無かった」は「以前は」の誤りだったので直した。
+
+以下を、変異を実装へ 1 つずつ入れて `go test ./cmd/wgft/...` を流し、新設した試験のいずれかが落ちることを確かめたうえで元に戻した。`rulesStatusOf` の `case` から `admin.ApplyPending` を落とす変異、`c.Rules()`・`c.Agents()`・`c.Warnings()`・`enc.Encode` の失敗を包む `unavailable(err)` をそれぞれ `err` に変える変異、鮮度のある `error` を active に数える変異、鮮度の判定から `Connected` の確認を落とす変異、鮮度の判定から古さの確認を落とす変異である。最後の 2 つは、`doctor.go` の既存の試験(`TestResolveWithoutEvidenceIsNotTested` など)だけでは検出できず、この改訂で足した `status` 側の試験がなければ見逃していた。未確認:実機とラボでの確認
+
+3 巡目の独立レビューと所有者の決定により、Agents 行の判定を見直した(2026-09-22)。それまでの `agentsStatusOf` は `Connected` だけを見ており、制御ストリームは繋がっているがトンネルが死んでいる配置(WireGuard のハンドシェイクが一度も観測されていない、またはエージェントがトンネルを `error` と報告している)を healthy 側に数えていた。`server doctor` は同じ入力に対して `tunnel.handshake` が FAILED になり終了コード 1 で終わるのに、`status` は「1 / 1 online」と報告して終了コード 0 のままだった。所有者の決定により、Agents 行は制御ストリームとトンネルの両方を評価する形に改めた。制御ストリームが切れている場合、またはトンネルが failed・error か鮮度の条件(`handshakeStale`、3 分)を外れている場合は degraded、トンネルの状態や報告がこの版の知らない値の場合は unknown とする。判定は doctor.go の `handshakeCheck`(`tunnel.handshake`)から `tunnelHealth` という関数を切り出して共有し、doctor 自身の挙動は変えていない(切り出しの前後で `server doctor` の単体テストがすべて通ることを確かめた)。`agentsStatus` の `--json` は Online と Total だけの形から、Rules 行と同じ online・degraded・unknown・total の数え分けに変え、人向けの表示も `rulesValue` と同じ形(`agentsValue`)にした。
+
+同じ巡で、`rule.target`(`targetCheck`)が `freshAgentRuleStatus` を呼ばず、同じ鮮度の判定を別のインラインのコードとして持ち続けていたことも直した(独立レビューの指摘)。10.2b 節は以前から「`server doctor` の `rule.target`・`freshAgentRuleStatus` と同じ鮮度の規則」と述べていたが、`targetCheck` は実際にはこの関数を呼んでおらず、判定が今は一致していても、`freshAgentRuleStatus` を直した人が `targetCheck` も追随すると誤認しうる状態だった。`targetCheck` の `StatusOK`・`StatusError` それぞれの分岐にある古さの確認(`!ageOK || reportAge > targetReportStale`)を `freshAgentRuleStatus` の呼び出し(`!fresh`)に置き換え、本節の記述を実装として満たした。文言を出し分けるための `state`・`Connected`・報告の有無の場合分けは、`targetCheck` にそのまま残した。
+
+7a.11 節の一文も直した。同節は `status --json` の `rules.detail`・`agents.detail`・`warnings.detail` を「表に現れない項目」の一覧に挙げ、10.2b 節が定める「`detail` は契約ではない」という決定と逆のことを述べていた。しかも `server.detail` が列挙から漏れており、4 つのうち 3 つという数え方になっていた。`writeStatusReport` は `detail` を 4 行の表の右側にそのまま印字するので、表に現れない項目ではない。この一文を、`status --json` の `server.detail`・`rules.detail`・`agents.detail`・`warnings.detail` は表にそのまま印字される文字列であり契約ではない、という記述に直し、`cmd/wgft/status.go` のコメントの参照先も 10.2b 節に揃えた。
+
+10.2a 節の終了コードの表にはあった終了コード 3(設定の誤り、11a 節)が、10.2b 節の表と `cmd/wgft/helptext.go` の `status` の説明の両方から漏れていたことも直した。`wgft status --config` に構文の誤った dotenv を渡すと終了コード 3 で終わることを実際に確かめ、両方に表と説明を足した。
+
+日本語の文言の誤りもいくつか直した。`cmd/wgft/status.go` のコメント「壊れている 2 本が active 側に隠れて読めていた」は意味が逆で「読めなくなっていた」の誤りだったので直した(本節の同じ経緯の記述は元から正しかった)。`cmd/wgft/doctor.go` の `freshAgentRuleStatus` のコメントにあった「rule_states にその行が無い呼び出し元」は「agent_rule_states」の誤りだったので直した。`cmd/wgft/status.go` の「declared な状態」は「宣言どおりの状態」に、「嘘の健全を報告してしまう」は「フィールドがまだ返らないだけで健全だと報告してしまう」に書き直した。`statusExit` の `"%d rule(s) not active"` のような `(s)` の複数形と、`rulesStatusOf` の `rule%s` という複数形が同じ出力の中に混在していたので、`pluralS` という 1 つの関数にまとめた。`apply_state` がこの版の知らない値であるルールの `detail` が「apply state is unavailable」になっており、値は実際に届いているので unavailable ではなかった。`rule_states` 自体が丸ごと無い場合(本当に unavailable)と、値が届いたが未知である場合とで文言を書き分けた。本節にあった「Rules の 3 つの数はいつも一部だけ known にはならないと決めつけることはできない」という文は、廃した `known` という語を含むうえ意味が読み取れなかったので、直後に続く具体的な記述だけを残す形に書き直した。
+
+同じ巡で、レビューが変異を 27 個入れ、次の 2 つが生き残った。`rulesStatusOf` の `case fresh && ars.State == proto.StatusOK:` を `case fresh:` に変える変異(エージェント側の `state` がこの版の知らない値でも fresh なら active に数えてしまう。7a.11 節は `agent_rule_states` の `state` も `apply_state` と同列の開いた集合と定めており、エージェント側だけがこの契約を守らないままだった)と、`targetReportStale` の境界を `age > targetReportStale` から `age >= targetReportStale` に変える変異(既存の試験が 5 秒と 2 分しか使っておらず、90 秒ちょうどを踏む例が無かった)である。それぞれを固定する試験を足し(`TestRulesStatusOfFreshUnknownAgentStateIsUnknownNotActive`、`TestFreshAgentRuleStatusBoundary`)、変異を入れて落ちることと、元に戻すと通ることを確かめた。Agents 行のトンネルの判定にも同様に変異を入れ(ハンドシェイクの鮮度の確認を落とす、`ai.Tunnel.State == proto.StatusError` の確認を落とす、知らないトンネルの状態を degraded に倒す)、新設した試験がそれぞれ落ちることを確かめたうえで元に戻した。未確認:実機とラボでの確認
+
+所有者の決定により、`online` の意味が制御ストリームの生存からトンネルも含めた健全性へ狭まった結果、トンネルだけ `error` のエージェントについて `agent ls` は接続元アドレスを示すのに `status` は `online` を 0 と数え 2 つのコマンドが逆の印象を与えていたので、Agents 行の `online` を、Rules 行の `active` と対称な `healthy` に改名した(2026-09-22)。
