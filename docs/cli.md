@@ -1015,10 +1015,12 @@ retry, including a port or interface another owner still holds. One failure
 does neither: when the stored rules cannot be applied at startup, the server
 holds the startup with only the admin API listening and retries every 30
 seconds, so that rule rm and rule disable can make the declaration smaller.
-No new declaration is published until the apply succeeds. In kernel mode a
-restart is not a stop, so the table and peers the previous process published
-stay in the kernel and keep forwarding the previous declaration meanwhile;
-proxy-mode listeners go with the process.
+The server does not advance its active generation until the apply succeeds.
+In kernel mode a
+restart is not a stop, so whatever the previous process left in the kernel
+stays; which declaration it still forwards depends on where the apply failed
+and is not visible from here. Run wgft server nft to read it. Proxy-mode
+listeners go with the process either way.
 
 ```text
 wgft server run [flags]

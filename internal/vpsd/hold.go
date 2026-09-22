@@ -25,10 +25,14 @@ var errReadingRules = errors.New("reading the rules again")
 // holdGuidance は、保留の行が運用者に示す状況と出口である。入るときの行と、適用の失敗の理由が
 // 変わったときの行の両方が同じ形で持つ(設計文書 11b 節のログの規則)。
 //
-// 「転送が止まる」とは書かない。保留の間に止まるのは公開であって転送ではない(11b 節の「転送」の項)。
-// カーネルモードでプロセスだけを入れ替えた起動では、前のプロセスが公開したテーブルとピアがカーネルに
-// 残っており、保留の間も前回の宣言のまま転送が続く。
-const holdGuidance = "no new declaration is published, and in kernel mode whatever the last publication left in the kernel keeps forwarding until an apply succeeds. Read the state with wgft status, then make the declaration smaller with wgft rule rm or wgft rule disable"
+// 「前回の宣言のまま転送が続く」とも「転送が止まる」とも書かない。カーネルが差し替えを行わないまま
+// 失敗した場合はテーブルは本当に旧いままで前回の宣言が転送を続けるが、カーネルが差し替えを終えたのに
+// vpsd が応答を受け取れなかった場合(ENOBUFS、6.1 節の受信側の壁)はテーブルは既に差し替わっており、
+// 失敗と報告した新しい宣言のほうが転送している。vpsd の側からはどちらが起きたか確定できない(11b 節の
+// 「転送」の項)。冒頭も「宣言が公開されていない」とは書かない。受信側の壁ではカーネルは既に新しい
+// テーブルを受け取っているので、公開の失敗を運用者が「旧いテーブルが残る」と読み違える。vpsd が
+// 観測した事実、すなわち適用そのものが失敗したことだけを述べる。
+const holdGuidance = "the apply did not succeed; which declaration the kernel is forwarding cannot be told here. Check it with wgft server nft. Read the state with wgft status, then shrink the declaration with wgft rule rm or wgft rule disable"
 
 // applyFirst は起動時の最初のルールの適用である。d.mu を取るのは、apply の「呼び出し側が d.mu を
 // 持つ」という約束を守るためである(apply.go)。この時点では他に適用を試すものが無い。
