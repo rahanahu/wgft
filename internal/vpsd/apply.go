@@ -93,10 +93,14 @@ func (d *Daemon) applyNFT(rules []proto.Rule) error {
 // netlink is what makes the kernel auto-load nf_conntrack (and nft_ct, nf_nat) on a host where
 // nothing else has loaded it yet, the same as `nft` would. Reading the sysctls first fails there
 // (a fresh install, or every boot on a host where nothing else loads the module first); moving the
-// read after apply fixed it in the lab with no modprobe. Nothing before this point in Run consumes
-// the timeouts or the warning: their only other use, in admin_backend.go, serves the admin and
-// agent APIs, which start listening later in Run, so this reordering does not affect Phase 4's
-// convergence order or its point-of-no-return guarantees.
+// read after apply fixed it in the lab with no modprobe. Nothing before this point in serve consumes
+// the timeouts or the warning: their only other use is in admin_backend.go, so this reordering does
+// not affect Phase 4's convergence order or its point-of-no-return guarantees.
+//
+// The admin API no longer starts listening strictly after this read, though: a startup hold opens it
+// while the apply passed in here keeps retrying, so it can answer before the timeouts are read
+// (design.md 11b 節). That is why Daemon.timeouts is an atomic.Pointer, and why the hold reports
+// those two values as 0 until it is over.
 //
 // A read failure once the table is applied is an ordinary error (exit code 1), so the unit keeps
 // restarting on it. It was a startup refusal (exit code 3) between 2026-09-20 and this change, on
@@ -210,9 +214,20 @@ func (d *Daemon) reapply() {
 	}
 }
 
-// apply は applyNFT の本体。retry が真なら、前回と同じものを公開するだけのときに何も commit せず、
-// ログも出さない。
+// apply はすべての適用の経路が通る 1 点である。呼び出し側は d.mu を持つ。適用が成功したら、起動の
+// 保留のループにそれを伝える(hold.go の noteApplied)。管理用 API のバッチ操作も自分で適用を試すので、
+// この 1 点で伝えることで、運用者が宣言を直した時点で保留が解ける(設計文書 11b 節)。
 func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error) {
+	out, err := d.applyOnce(rules, retry)
+	if err == nil {
+		d.noteApplied()
+	}
+	return out, err
+}
+
+// applyOnce は applyNFT の本体。retry が真なら、前回と同じものを公開するだけのときに何も commit せず、
+// ログも出さない。
+func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, error) {
 	wgCfg, agentAddr, err := d.wgConfig()
 	if err != nil {
 		return reconcile.Outcome{}, err

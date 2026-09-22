@@ -8,6 +8,7 @@
 //   - dataplane.go: 転送面(カーネルの wg・nftables・conntrack)へのインタフェースとカーネル実装
 //   - dataplane_userspace.go: ユーザー空間モードの転送面(internal/dataplane/userspace の Backend)を包む層
 //   - apply.go: wg の立ち上げとルールの適用(bringUpWG、applyNFT。Reconciler が動かす)
+//   - hold.go: 起動の保留(最初の適用が失敗したときの待ち方。設計文書 11b 節)
 //   - admin_backend.go: 管理用 API(admin.Backend)の実装
 //   - agent_backend.go: 登録(agentapi.Backend)と stream(stream.Backend)の実装
 //   - watch.go: 窃取検知(IP の食い違いと往復。仕様 5.2 節)
@@ -41,6 +42,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -208,8 +210,11 @@ type Daemon struct {
 	opts      Options
 	st        *store.Store
 	reserved  proto.Reserved
-	timeouts  linux.UDPTimeouts
 	serverKey wgtypes.Key
+	// timeouts は、エージェントに配る conntrack の UDP タイムアウト 2 値である(仕様 4 節)。
+	// 起動の保留(設計文書 11b 節)の間は管理用 API が先に応答を始めていて、保留が解けた時点で
+	// この値が入るので、待ち受けと同時に書き換わりうる。読み書きは udpTimeouts を通す。
+	timeouts atomic.Pointer[linux.UDPTimeouts]
 
 	network   netip.Prefix // 10.200.0.0/24
 	startedAt time.Time
@@ -236,6 +241,13 @@ type Daemon struct {
 	// lastRepairErr は、戻れない地点の後の修復が残っているあいだの失敗の行。同じ失敗を再試行の
 	// たびに出さないために持つ(apply.go の logRepair)。
 	lastRepairErr string
+	// applied は、起動の保留(設計文書 11b 節)の間だけ持つ channel である。どの経路の適用でも、
+	// 成功した時点で apply が閉じ、保留のループがそれを見て起動の残りに進む(hold.go)。
+	// 保留に入っていない間は nil である。
+	applied chan struct{}
+	// holdReason は、起動の保留の間に最後に出した適用の失敗の理由である。同じ理由の試し直しを
+	// ログに出さず、理由が変わったときだけ 1 行出すために持つ(hold.go の retryHold)。
+	holdReason string
 }
 
 // Run は起動して、シグナルまで動く。
@@ -370,16 +382,21 @@ func Run(opts Options) error {
 	if err != nil {
 		return err
 	}
-	// テーブルの適用、続いて conntrack の UDP タイムアウトと表の大きさの警告を読む。この順序と、
-	// 適用後もなお読めない場合の扱いは apply.go の applyThenReadConntrack を見よ(設計文書 11b 節)。
-	if d.timeouts, err = applyThenReadConntrack(
-		func() error { return d.applyNFT(rules) },
-		d.dp.ReadUDPTimeouts,
-		d.dp.ConntrackWarning,
-	); err != nil {
-		return err
-	}
-	if d.agentAPI, err = agentapi.New(st, d); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return d.serve(ctx, rules)
+}
+
+// serve は、サーバのデータベースと転送面が立ち上がった後の起動の残りである。最初のルールの適用、
+// 失敗したときの起動の保留(設計文書 11b 節)、conntrack の UDP タイムアウトの読み取り、待ち受け、
+// 起動完了の行、収束のループの順に進み、ctx が切れるか待ち受けが終わるまで戻らない。
+// Run から分けてあるのは、転送面を差し替えた単体テストがこの順序を確かめられるようにするためである
+// (hold_test.go)。
+func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
+	var err error
+	// エージェント用 API の証明書と stream の hub は、どの待ち受けを開くより先に作る。起動の保留の
+	// 間も管理用 API がこの 2 つを読む(admin_backend.go の Agents と JoinString)ためである。
+	if d.agentAPI, err = agentapi.New(d.st, d); err != nil {
 		return fmt.Errorf("agent API: %w", err)
 	}
 	d.hub = stream.New(d)
@@ -388,14 +405,102 @@ func Run(opts Options) error {
 	// stream の接続元 IP を接続の事象で記録し、往復を検知する(仕様 5.2 節)
 	d.hub.OnStreamConnect = func(agent, from string) { d.observeFlap(agent, "stream", "stream source", from) }
 	d.agentAPI.Handle("GET /api/v1/agents/stream", d.hub.ServeHTTP)
-	_ = st.PurgeExpiredJoinTokens()
+	_ = d.st.PurgeExpiredJoinTokens()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	errc := make(chan error, 3)
+	// openAdmin は管理用 API の待ち受けを開く。起動の保留に入るときと、保留を経ない起動の最後の
+	// 両方から呼ぶので、2 度開かないようにする。
+	adminUp := false
+	openAdmin := func() error {
+		if adminUp {
+			return nil
+		}
+		if err := d.listenAdmin(ctx, errc); err != nil {
+			return err
+		}
+		adminUp = true
+		return nil
+	}
+
+	// テーブルの適用、続いて conntrack の UDP タイムアウトと表の大きさの警告を読む。この順序と、
+	// 適用後もなお読めない場合の扱いは apply.go の applyThenReadConntrack を見よ(設計文書 11b 節)。
+	// 最初の適用が失敗したときは終了せず、管理用 API だけを開いて試し直す(起動の保留。11b 節)。
+	held := false
+	timeouts, err := applyThenReadConntrack(
+		func() error {
+			err := d.applyFirst(rules)
+			if err == nil {
+				return nil
+			}
+			// 起動の拒否は保留の対象にしない。運用者が手を入れるまで消えない失敗なので、管理用 API を
+			// 開いて待つ意味が無く、従来どおり終了コード 3 で止める(設計文書 11b 節の入る条件)
+			if startup.IsRefusal(err) {
+				return err
+			}
+			held = true
+			return d.hold(ctx, err, openAdmin, errc)
+		},
+		d.dp.ReadUDPTimeouts,
+		d.dp.ConntrackWarning,
+	)
+	if err != nil {
+		if errors.Is(err, errHoldStopped) {
+			// 保留の間に ctx が切れた。このプロセスは何も公開していないので、そのまま終える。
+			// カーネルに前のプロセスの公開が残っていることはあるので、主語をこのプロセスに限る
+			log.Printf("shutting down during the startup hold; this process never applied the rules")
+			return nil
+		}
+		return err
+	}
+	d.timeouts.Store(&timeouts)
+	if held {
+		// 保留の間に運用者が宣言を直しているので、起動完了の行に出す数を読み直す
+		if rules, err = d.st.Rules(); err != nil {
+			return err
+		}
+	}
+	if err := openAdmin(); err != nil {
+		return err
+	}
+	agentLn, err := d.agentAPI.Listen(d.opts.AgentAPIAddr)
+	if err != nil {
+		return fmt.Errorf("agent API: %w", err)
+	}
+	// 起動完了の行は、データプレーンの適用と全部の待ち受けが済んでから出す(仕様 10.4 節)。
+	// これより前に失敗すれば、この行は出ずにプロセスが終わる。起動の保留の間も出さない(11b 節)
+	gen, err := d.st.Generation()
+	if err != nil {
+		return err
+	}
+	_, agentAddr, err := d.agents()
+	if err != nil {
+		return err
+	}
+	log.Printf("wgft %s server started: mode %s, interface %s, generation %d, %d rules, %d agents",
+		d.opts.Version, d.opts.Mode, d.opts.WGInterface, gen, len(rules), len(agentAddr))
+	go func() { errc <- fmt.Errorf("agent API: %w", d.agentAPI.ServeListener(agentLn)) }()
+	go d.watchIPMismatch(ctx)
+	go d.convergeLoop(ctx)
+	select {
+	case <-ctx.Done():
+		if d.opts.Mode == modeUserspace {
+			log.Printf("shutting down")
+		} else {
+			log.Printf("shutting down; keeping interface %s and the table", d.opts.WGInterface)
+		}
+		return nil
+	case err := <-errc:
+		return err
+	}
+}
+
+// listenAdmin は管理用 API の待ち受けを開いて応答を始める。--admin-tailscale の追加の待ち受けも
+// 同じ管理用 API なので、ここで一緒に開く。起動の保留の間に開くのはこの待ち受けだけであり、
+// 待ち受けそのものの失敗は従来どおりの誤りで、cmd/wgft が終了コード 1 にする(設計文書 11b 節)。
+func (d *Daemon) listenAdmin(ctx context.Context, errc chan<- error) error {
 	srv := admin.New(d)
-	srv.AllowedHosts = append(srv.AllowedHosts, opts.AdminHost...)
-	if opts.AdminTailscale {
+	srv.AllowedHosts = append(srv.AllowedHosts, d.opts.AdminHost...)
+	if d.opts.AdminTailscale {
 		if ip, dnsName, detail, other := detectAdminTailscale(ctx); ip != "" {
 			srv.AllowedHosts = append(srv.AllowedHosts, ip)
 			if dnsName != "" {
@@ -414,41 +519,12 @@ func Run(opts Options) error {
 			log.Printf("warning: --admin-tailscale set but no tailnet address (100.64.0.0/10) found")
 		}
 	}
-	adminLn, err := admin.Listen(opts.AdminAddr, true)
+	adminLn, err := admin.Listen(d.opts.AdminAddr, true)
 	if err != nil {
 		return fmt.Errorf("admin API: %w", err)
 	}
-	agentLn, err := d.agentAPI.Listen(opts.AgentAPIAddr)
-	if err != nil {
-		return fmt.Errorf("agent API: %w", err)
-	}
-	// 起動完了の行は、データプレーンの適用と全部の待ち受けが済んでから出す(仕様 10.4 節)。
-	// これより前に失敗すれば、この行は出ずにプロセスが終わる
-	gen, err := st.Generation()
-	if err != nil {
-		return err
-	}
-	_, agentAddr, err := d.agents()
-	if err != nil {
-		return err
-	}
-	log.Printf("wgft %s server started: mode %s, interface %s, generation %d, %d rules, %d agents",
-		opts.Version, mode, opts.WGInterface, gen, len(rules), len(agentAddr))
 	go func() { errc <- fmt.Errorf("admin API: %w", admin.ServeListener(adminLn, srv)) }()
-	go func() { errc <- fmt.Errorf("agent API: %w", d.agentAPI.ServeListener(agentLn)) }()
-	go d.watchIPMismatch(ctx)
-	go d.convergeLoop(ctx)
-	select {
-	case <-ctx.Done():
-		if d.opts.Mode == modeUserspace {
-			log.Printf("shutting down")
-		} else {
-			log.Printf("shutting down; keeping interface %s and the table", opts.WGInterface)
-		}
-		return nil
-	case err := <-errc:
-		return err
-	}
+	return nil
 }
 
 // agents は SQLite のエージェントから、wg のピア集合と名前 → アドレスの表を作る。

@@ -255,12 +255,13 @@ func (d *Daemon) AgentState(agent string) (*proto.State, error) {
 		return nil, err
 	}
 	wgAddr := d.network
+	timeouts := d.udpTimeouts()
 	st := &proto.State{
 		Generation: gen,
 		WG: proto.WGConfig{
 			ServerPubkey: d.serverKey.PublicKey().String(), Endpoint: d.opts.WGEndpoint,
 			Address: netip.PrefixFrom(addr, wgAddr.Bits()).String(), MTU: d.opts.MTU, Keepalive: 25,
-			UDPTimeout: d.timeouts.Timeout, UDPTimeoutStream: d.timeouts.TimeoutStream,
+			UDPTimeout: timeouts.Timeout, UDPTimeoutStream: timeouts.TimeoutStream,
 		},
 		Rules: []proto.AgentRule{},
 	}
@@ -339,6 +340,7 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 	if b, err := d.st.GetMeta(metaIPForwardSetAt); err == nil {
 		ipf = string(b)
 	}
+	timeouts := d.udpTimeouts()
 	return admin.ServerInfo{
 		Version:          buildinfo.Version,
 		Mode:             d.opts.Mode,
@@ -354,8 +356,8 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 		Kernel:           d.kernel,
 		NFT:              d.nftVer,
 		IPForwardSetAt:   ipf,
-		UDPTimeout:       d.timeouts.Timeout,
-		UDPTimeoutStream: d.timeouts.TimeoutStream,
+		UDPTimeout:       timeouts.Timeout,
+		UDPTimeoutStream: timeouts.TimeoutStream,
 	}, nil
 }
 
