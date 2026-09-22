@@ -250,6 +250,32 @@ type Daemon struct {
 	holdReason string
 }
 
+// reservedPorts は Daemon.reserved を組む。vpsd 自身が既に使っているポートへの listen_port を
+// store.ApplyBatch(proto.ValidateUpsert 経由)が拒むための、予約ポートの正本である。
+// internal/vpsd/admin の ReservedFromServerInfo(CLI の `rule add`/`rule set --dry-run` と
+// Web UI の読み込みの確認が使う)は、この規則を admin.ServerInfo から組み立て直した写しであり、
+// 入力が Options ではなく admin.ServerInfo(管理用 API の GET /api/v1/server か、同一プロセス内の
+// ServerInfo() が返す値)である点が違う。WireGuard のポートは常に予約する。管理用 API のポートは
+// AdminAddr が host:port として構文解析できたときだけ予約する(既定の Unix ソケット
+// "unix:///run/wgft/admin.sock" は予約しない。host:port 以外の理由で構文解析に失敗した値も
+// 同様に予約しない。固定のポートを代わりに予約したりはしない)。エージェント用 API のポートは
+// AgentAPIAddr を net.SplitHostPort で分けて取る(admin.ServerInfo.AgentAPIPort は既にこの分割を
+// 済ませた文字列を持つ点が異なる)。この関数を切り出す前は、この組み立てを検査するテストが
+// リポジトリのどこにも無く、例えば管理用 API のポートの予約を落とす変異を入れても
+// `go test ./...` はどこも落ちなかった。
+func reservedPorts(opts Options) proto.Reserved {
+	reserved := proto.Reserved{opts.WGPort: "WireGuard"}
+	if ap, err := netip.ParseAddrPort(opts.AdminAddr); err == nil {
+		reserved[ap.Port()] = "admin API"
+	}
+	if _, port, err := net.SplitHostPort(opts.AgentAPIAddr); err == nil {
+		if p, err := netip.ParseAddrPort("0.0.0.0:" + port); err == nil {
+			reserved[p.Port()] = "agent API"
+		}
+	}
+	return reserved
+}
+
 // Run は起動して、シグナルまで動く。
 func Run(opts Options) error {
 	st, err := store.Open(opts.DBPath)
@@ -288,15 +314,7 @@ func Run(opts Options) error {
 		iface: opts.WGInterface,
 		b:     linuxkernel.New(linuxkernel.Options{Interface: opts.WGInterface, AdoptExisting: opts.AdoptExisting}),
 	}}
-	d.reserved = proto.Reserved{opts.WGPort: "WireGuard"}
-	if ap, err := netip.ParseAddrPort(opts.AdminAddr); err == nil {
-		d.reserved[ap.Port()] = "admin API"
-	}
-	if _, port, err := net.SplitHostPort(opts.AgentAPIAddr); err == nil {
-		if p, err := netip.ParseAddrPort("0.0.0.0:" + port); err == nil {
-			d.reserved[p.Port()] = "agent API"
-		}
-	}
+	d.reserved = reservedPorts(opts)
 	// モードとアドレス帯の初回記録・照合は、鍵やインタフェースを作る前に済ませる(仕様 9・11a 節)。
 	_, keyErr := st.GetMeta(serverKeyMeta)
 	hadServerKey := keyErr == nil

@@ -130,6 +130,16 @@ func (s *Server) renderImportConfirm(w http.ResponseWriter, locale, filename str
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// info は、Batch が実際に拒む予約ポート(WireGuard・管理用 API・エージェント用 API)を
+	// importIssues が組み立てる元になる(admin.ReservedFromServerInfo)。読み取れなければ、
+	// 予約ポートを組めなかったまま「受理される」と表示しないよう、確認ページ自体をここで止める
+	// (design.md 改訂の記録の --dry-run の項と同じ考え方。CLI 側は同じ理由で終了コード 2 の
+	// unavailable として止める)。
+	info, err := s.backend.ServerInfo()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	agentNames := make(map[string]bool, len(agents))
 	for _, a := range agents {
 		agentNames[a.Name] = true
@@ -143,7 +153,7 @@ func (s *Server) renderImportConfirm(w http.ResponseWriter, locale, filename str
 	data := importConfirmData{
 		Locale: locale, FileName: filename, Force: force,
 		Content: string(content), Generation: strconv.FormatUint(gen, 10), Digest: proto.RulesDigest(current),
-		Issues: importIssues(desired, current, agentNames),
+		Issues: importIssues(desired, current, agentNames, ReservedFromServerInfo(info)),
 	}
 	for _, c := range proto.DiffRules(current, desired) {
 		switch c.Kind {
@@ -166,11 +176,14 @@ func (s *Server) renderImportConfirm(w http.ResponseWriter, locale, filename str
 }
 
 // importIssues は、適用ボタンを出さない条件(仕様 10.1 節)を集める。未登録の
-// エージェントを指すルールと、Rule.Validate / 全体の重複・重なりに落ちるルールである。
-// Rule.Validate は、適用時のバッチ(proto.ValidateUpsert)と同じく、current から変わって
+// エージェントを指すルールと、Rule.Validate / 全体の重複・重なり・予約ポートに落ちるルールで
+// ある。Rule.Validate は、適用時のバッチ(proto.ValidateUpsert)と同じく、current から変わって
 // いない行には掛けない。後から増えた検査に落ちる古い行(例:proxy の範囲)があっても、
-// その行を変えない読み込みは CLI と同じく適用できる。
-func importIssues(desired, current []proto.Rule, agents map[string]bool) []string {
+// その行を変えない読み込みは CLI と同じく適用できる。reserved は呼び出し元が
+// admin.ReservedFromServerInfo で組んだ、実際の Daemon.Batch が拒む予約ポートの集合であり、
+// これを nil のまま ValidateUpsert に渡すと、予約ポートに重なる読み込みを「受理される」と
+// 見せかけてしまう(design.md 改訂の記録の --dry-run の項と同じ欠陥)。
+func importIssues(desired, current []proto.Rule, agents map[string]bool, reserved proto.Reserved) []string {
 	var out []string
 	unchanged := proto.UnchangedIDs(desired, current)
 	for _, r := range desired {
@@ -184,10 +197,10 @@ func importIssues(desired, current []proto.Rule, agents map[string]bool) []strin
 			out = append(out, fmt.Sprintf("rule %s: agent %q is not registered", r.ID, r.Agent))
 		}
 	}
-	// 行ごとの誤りが無いときだけ全体の検査(ID の重複、重なり)を足す。行ごとの誤りを
-	// 全体の検査がもう一度報告して、同じ行が 2 回出るのを避ける
+	// 行ごとの誤りが無いときだけ全体の検査(ID の重複、予約ポート、重なり)を足す。行ごとの
+	// 誤りを全体の検査がもう一度報告して、同じ行が 2 回出るのを避ける
 	if len(out) == 0 {
-		if err := proto.ValidateUpsert(desired, current, nil); err != nil {
+		if err := proto.ValidateUpsert(desired, current, reserved); err != nil {
 			out = append(out, err.Error())
 		}
 	}

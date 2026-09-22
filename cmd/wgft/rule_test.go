@@ -35,10 +35,10 @@ type fakeRuleBackend struct {
 	// (design.md 11a 節, reservedFromServerInfo). Batch derives its own proto.Reserved from this
 	// same value, via reservedPortsLikeVPSD below rather than reservedFromServerInfo, so a test
 	// that sets serverInfo and then runs both a --dry-run and a real add against the same
-	// fixture actually cross-checks two independent implementations instead of one comparing
-	// itself to itself (see reservedPortsLikeVPSD's own comment). Zero value reserves nothing
-	// (WGPort 0, empty AdminAddr/AgentAPIPort), matching prior behavior for tests that do not
-	// care about reserved ports.
+	// fixture actually cross-checks two independent implementations of the same rule instead of
+	// one comparing itself to itself (see reservedPortsLikeVPSD's own comment). Zero value
+	// reserves nothing (WGPort 0, empty AdminAddr/AgentAPIPort), matching prior behavior for
+	// tests that do not care about reserved ports.
 	serverInfo admin.ServerInfo
 }
 
@@ -57,14 +57,23 @@ func (b *fakeRuleBackend) Batch(req admin.BatchRequest) (*store.BatchResult, err
 
 // reservedPortsLikeVPSD builds the proto.Reserved set a real Batch would refuse a listen_port
 // for, the same way fakeRuleBackend.Batch needs it for a test. It is written independently of
-// cmd/wgft/rule.go's reservedFromServerInfo, as a separate copy of internal/vpsd/vpsd.go's
-// construction of Daemon.reserved (around opts.WGPort/AdminAddr/AgentAPIAddr) instead of a call
-// to that function: a test that runs both a --dry-run (which calls reservedFromServerInfo) and a
-// real add (which, through this function, calls neither reservedFromServerInfo nor vpsd.go) and
-// then compares the two outcomes only actually cross-checks reservedFromServerInfo against
-// vpsd.go's rule when the two are implemented separately. Calling reservedFromServerInfo here, as
-// this test double once did, would make such a test pass even if reservedFromServerInfo's rule
-// silently drifted from vpsd.go's, since both sides would apply the same (wrong) rule.
+// cmd/wgft/rule.go's reservedFromServerInfo instead of a call to that function: a test that runs
+// both a --dry-run (which calls reservedFromServerInfo) and a real add (which, through this
+// function, does not) and then compares the two outcomes only actually cross-checks
+// reservedFromServerInfo against an independent copy when the two are implemented separately.
+// Calling reservedFromServerInfo here, as this test double once did, would make such a test pass
+// even if reservedFromServerInfo's rule silently drifted, since both sides would apply the same
+// (wrong) rule.
+//
+// This is a copy of admin.ReservedFromServerInfo (internal/vpsd/admin/admin.go), which
+// reservedFromServerInfo now only delegates to, not of internal/vpsd/vpsd.go's construction of
+// Daemon.reserved: that one takes Options (WGPort/AdminAddr/AgentAPIAddr) and splits
+// AgentAPIAddr's port itself with net.SplitHostPort, whereas this one, like
+// admin.ReservedFromServerInfo, takes admin.ServerInfo and uses AgentAPIPort, which its
+// producers already return net.SplitHostPort'd. vpsd.go's own construction (reservedPorts) is
+// pinned directly by internal/vpsd's TestReservedPorts; admin.ReservedFromServerInfo's rule is
+// pinned directly by internal/vpsd/admin's TestReservedFromServerInfo. This function exists only
+// so that this cross-check does not compare admin.ReservedFromServerInfo to itself.
 func reservedPortsLikeVPSD(info admin.ServerInfo) proto.Reserved {
 	reserved := proto.Reserved{uint16(info.WGPort): "WireGuard"}
 	if ap, err := netip.ParseAddrPort(info.AdminAddr); err == nil {

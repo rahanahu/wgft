@@ -39,6 +39,18 @@ func (b *errRulesBackend) Rules() ([]proto.Rule, error) {
 	return nil, errors.New("simulated store failure: rules")
 }
 
+// errServerInfoBackend simulates a failed GET /api/v1/server-equivalent read. The read-import
+// confirmation page (webui_import.go) needs ServerInfo() to build the reserved-port set
+// importIssues passes to proto.ValidateUpsert (ReservedFromServerInfo, admin.go); falling back to
+// reserved == nil on a read failure would show a read-import as accepted even when it overlaps a
+// reserved port a real Batch would refuse (design.md's revision record, --dry-run entry, the same
+// defect this backend's use in TestImportConfirmReadFailureIsNotSilentZero below guards against).
+type errServerInfoBackend struct{ *fakeBackend }
+
+func (b *errServerInfoBackend) ServerInfo() (ServerInfo, error) {
+	return ServerInfo{}, errors.New("simulated store failure: server info")
+}
+
 // TestDashboardReadFailureIsNotSilentZero confirms that GET / (and its partials) answers 500 when
 // any of the reads buildDash depends on fails, instead of drawing an empty/zero dashboard.
 // Agents/Rules were already guarded; Generation/RuleDrops/Warnings were not (`gen, _ :=` etc.).
@@ -183,9 +195,10 @@ func TestAddRuleFormReadFailureIsNotSilentZero(t *testing.T) {
 }
 
 // TestImportConfirmReadFailureIsNotSilentZero confirms that the read-only confirmation page
-// answers 500 when Generation() or Agents() fails, instead of embedding a fabricated generation
-// (which the apply step later trusts for its optimistic-concurrency check) or wrongly flagging
-// every rule as pointing at an unregistered agent.
+// answers 500 when Generation(), Agents(), or ServerInfo() fails, instead of embedding a
+// fabricated generation (which the apply step later trusts for its optimistic-concurrency check),
+// wrongly flagging every rule as pointing at an unregistered agent, or -- the ServerInfo() case --
+// falling back to reserved == nil and showing a reserved-port-overlapping import as accepted.
 func TestImportConfirmReadFailureIsNotSilentZero(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -193,6 +206,7 @@ func TestImportConfirmReadFailureIsNotSilentZero(t *testing.T) {
 	}{
 		{"generation", func(st *store.Store) Backend { return &errGenerationBackend{fakeBackend: &fakeBackend{st: st}} }},
 		{"agents", func(st *store.Store) Backend { return &errAgentsBackend{fakeBackend: &fakeBackend{st: st}} }},
+		{"server info", func(st *store.Store) Backend { return &errServerInfoBackend{fakeBackend: &fakeBackend{st: st}} }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

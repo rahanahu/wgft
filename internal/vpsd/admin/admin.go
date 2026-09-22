@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,6 +65,32 @@ type ServerInfo struct {
 	IPForwardSetAt   string `json:"ip_forward_set_at"`
 	UDPTimeout       int    `json:"udp_timeout"`
 	UDPTimeoutStream int    `json:"udp_timeout_stream"`
+}
+
+// ReservedFromServerInfo builds the proto.Reserved set a real Batch refuses a listen_port for,
+// from a ServerInfo report of the server's own ports. It mirrors, field for field, how
+// internal/vpsd/vpsd.go builds Daemon.reserved at startup (around opts.WGPort/AdminAddr/
+// AgentAPIAddr): the WireGuard port is always reserved; the admin API's port is reserved only
+// when AdminAddr parses as host:port (a Unix socket, e.g. the default
+// "unix:///run/wgft/admin.sock", does not reserve a port); the agent API's port comes from
+// AgentAPIPort, which this struct's producers (Daemon.ServerInfo, the admin client's ServerInfo)
+// already return net.SplitHostPort'd (an empty or unparseable value reserves nothing for it, the
+// same as a net.SplitHostPort failure in vpsd.go).
+//
+// Both `rule add`/`rule set --dry-run` (cmd/wgft/rule.go) and the Web UI's read-import
+// confirmation (webui_import.go's importIssues) call this function so the reserved-port rule
+// cannot drift between the two callers the way it once did (design.md's revision record,
+// --dry-run entry): the CLI reconstructed the rule from ServerInfo on its own, the Web UI passed
+// nil, and only the CLI's copy was ever fixed to match Daemon.reserved.
+func ReservedFromServerInfo(info ServerInfo) proto.Reserved {
+	reserved := proto.Reserved{uint16(info.WGPort): "WireGuard"}
+	if ap, err := netip.ParseAddrPort(info.AdminAddr); err == nil {
+		reserved[ap.Port()] = "admin API"
+	}
+	if ap, err := netip.ParseAddrPort("0.0.0.0:" + info.AgentAPIPort); err == nil {
+		reserved[ap.Port()] = "agent API"
+	}
+	return reserved
 }
 
 // ConnCheck は疎通確認の結果。Reach は "target" / "agent" / "none"。
