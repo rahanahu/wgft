@@ -6,7 +6,7 @@ VPS, so please report it privately.
 
 ## Supported versions
 
-wgft is alpha software. Only the latest published release is supported;
+Only the latest published release is supported;
 please upgrade before reporting an issue that might already be fixed.
 
 ## Reporting a vulnerability

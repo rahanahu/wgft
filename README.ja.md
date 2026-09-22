@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/rahanahu/wgft/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
-[![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#開発状況)
+[![Status: v1.0](https://img.shields.io/badge/status-v1.0-blue.svg)](#開発状況)
 
 [English](README.md) | 日本語
 
@@ -170,7 +170,7 @@ ssh -L 8686:/run/wgft/admin.sock root@vps
 
 ## 開発状況
 
-Alpha、v0.7.0。カーネルモードは作者の VPS / 自宅環境で UDP/TCP 転送、NAT 越え、再接続、VPS 再起動からの復旧、teardown を確認済みです。ユーザー空間モードは開発環境と VPS で確認済みです。v1.0 の互換性の保証がリリース後に拘束するのは、Linux の server と Linux の agent だけです。暫定の扱いにしたことは、現在配っている Windows と macOS の agent のバイナリの配布を取りやめる決定ではありません。登録、トンネルの確立、再起動からの復帰などの一般的な動作は、Windows と macOS の実機で確認済みです。agent の再接続の契機を決める接続の生死の判定は新しく加えた仕組みで、Windows でも macOS でも実機で確認していません。この判定が実機で未確認であることが、Windows と macOS の agent を今回 v1.0 の保証に含めなかったおもな理由です。中継フローはルール単位、接続元単位、プロセス単位で上限を設け、負荷時のメモリ使用量を制限します。更新の経路は保証しますが、更新後に旧版へ戻すことは保証しません。戻す場合に備え、更新前にデータディレクトリのバックアップを取ってください。実装や構成の詳細は設計・セットアップ文書を参照してください。
+v1.0.0。版番号は、互換性の保証が拘束を始める点を示すものであり、成熟度の段階ではありません。対象は Linux の server と Linux の agent だけです。Windows と macOS の agent は暫定とし、保証の対象に含めません。カーネルモードは作者の VPS / 自宅環境で UDP/TCP 転送、NAT 越え、再接続、VPS 再起動からの復旧、teardown を確認済みです。ユーザー空間モードは開発環境と VPS で確認済みです。`wgft server doctor` と `wgft status` は、カーネルモードの稼働中の server と登録済みの agent 1 台に対して、次の 3 つの場面で確認済みです。健全な配置、agent が宛先を拒む状態、制御の接続が切れた状態です。適用が毎回失敗するルール集合からの回復も開発環境で確認済みです。server は管理用 API を開いたまま起動の残りを保留するので、データディレクトリを削除せずにルールを小さくできます。暫定の扱いにしたことは、現在配っている Windows と macOS の agent のバイナリの配布を取りやめる決定ではありません。登録、トンネルの確立、再起動からの復帰などの一般的な動作は、Windows と macOS の実機で確認済みです。agent の再接続の契機を決める接続の生死の判定は新しく加えた仕組みで、Windows でも macOS でも実機で確認していません。この判定が実機で未確認であることが、Windows と macOS の agent を今回 v1.0 の保証に含めなかったおもな理由です。中継フローはルール単位、接続元単位、プロセス単位で上限を設け、負荷時のメモリ使用量を制限します。更新の経路は保証しますが、更新後に旧版へ戻すことは保証しません。戻す場合に備え、更新前にデータディレクトリのバックアップを取ってください。実装や構成の詳細は設計・セットアップ文書を参照してください。
 
 ## セキュリティ
 
