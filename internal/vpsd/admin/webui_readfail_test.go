@@ -19,7 +19,7 @@ import (
 // とおり「0 件」や「0」のような正常な結果に化けず、そのページ・区画がエラーの状態を返すことを
 // 確かめる。getrules_error_test.go(管理用 API 側)と同じ、fakeBackend を 1 メソッドだけ
 // 上書きするフェイクで、実際の store 障害(admin_backend_test.go 側)ではなく Backend の
-// 契約そのものを確かめる。
+// 仕様そのものを確かめる。
 
 type errWarningsBackend struct{ *fakeBackend }
 

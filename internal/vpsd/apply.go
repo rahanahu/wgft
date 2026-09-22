@@ -338,7 +338,7 @@ func ruleFailureLog(prev map[string]string, failed map[string]error) (map[string
 // (設計文書 7a.2 節)。proxyrelay の Prepare は bind に失敗したポートをログに出し、そのルールを
 // Failed として報告するだけで、全体としては失敗しない(ルール単位の失敗。7a.3 節)。
 // *proxyrelay.Prepared の Commit は失敗せず、2 回目以降は何もしないので、
-// 戻れない地点の後に呼ぶ frontend の Commit の契約を満たす。
+// 戻れない地点の後に呼ぶ frontend の Commit の仕様を満たす。
 type relayFrontend struct{ m *proxyrelay.Manager }
 
 func (f relayFrontend) Prepare(plan planner.Plan) (reconcile.FrontendPrepared, error) {

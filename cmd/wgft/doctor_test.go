@@ -492,7 +492,7 @@ func TestHandshakeTunnelErrorWhileConnected(t *testing.T) {
 // TestHandshakeUnknownTunnelStateWhileConnected は、tunnelHealth の unknown 側の分岐を固定
 // する。制御ストリームが繋がっていて最終ハンドシェイクも新しいが、エージェントがこの版の知らない
 // トンネルの状態を報告している場合は unknown かつ reasonUnknownValue になり、故障とは決めつけ
-// ない(7a.11 節の開いた集合の契約)。
+// ない(7a.11 節の開いた集合の約束)。
 func TestHandshakeUnknownTunnelStateWhileConnected(t *testing.T) {
 	r := tcpRule()
 	in := healthyInput(r)
@@ -659,7 +659,7 @@ func TestReportAlwaysSaysWhatItDidNotTest(t *testing.T) {
 	}
 }
 
-// TestReportJSONShape は、機械向けの模型(設計文書 10.2a 節。--json だけが契約)の骨格を固定する。
+// TestReportJSONShape は、機械向けの模型(設計文書 10.2a 節。--json だけが保証の対象)の骨格を固定する。
 func TestReportJSONShape(t *testing.T) {
 	r := tcpRule()
 	in := healthyInput(r)

@@ -73,7 +73,7 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 			info.Rules = st.Heartbeat.Rules
 		}
 		if st.Connected {
-			// 版の交渉(仕様 7a.6 節)。観測用の加算フィールドで、管理用 API の契約は変えない
+			// 版の交渉(仕様 7a.6 節)。観測用の加算フィールドで、管理用 API の保証は変えない
 			info.ProtocolVersion = st.Protocol.Version
 			info.AgentProtocolLegacy = st.Protocol.Legacy
 			info.AgentProtocolMin = st.Protocol.AgentMin

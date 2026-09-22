@@ -1,8 +1,8 @@
-// Package model は、外部契約(proto.Rule)から正規化した内部のドメインモデルを持つ(設計文書 7a.2 節)。
+// Package model は、維持する外部仕様(proto.Rule)から正規化した内部のドメインモデルを持つ(設計文書 7a.2 節)。
 //
 // このパッケージは OS、nftables、gVisor を知らない純粋な Go の型と関数だけを持つ。
 // dataplane、frontend、platform、vpsd、agent のどの package も import しない(設計文書 7a.7 節)。
-// proto パッケージは外部契約であり、import してよい対象に含まれる。
+// proto パッケージは維持する外部仕様であり、import してよい対象に含まれる。
 package model
 
 import "fmt"

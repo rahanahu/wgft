@@ -6,7 +6,7 @@
 // この 1 つの IR から作る。このパッケージ自身はコンパイラも評価器も持たない、データと評価順だけの
 // 表現である。
 //
-// このパッケージは純粋で、proto(外部契約)、internal/model(OS を知らない
+// このパッケージは純粋で、proto(維持する外部仕様)、internal/model(OS を知らない
 // カウンタと上限の計算だけを持つ)だけを import する。dataplane、frontend、platform、vpsd、agent
 // のどの package も import しない(設計文書 7a.7 節)。
 package policy
