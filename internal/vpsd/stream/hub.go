@@ -221,7 +221,7 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 			old.ws.Close(websocket.StatusCode(proto.CloseSuperseded), "superseded")
 			old.cancel()
 		}()
-		log.Printf("stream: %s: closing old connection (%s) as superseded", agent, old.from)
+		log.Printf("stream: %s: closing old connection from %s as superseded", agent, old.from)
 	}
 	h.conns[agent] = c
 	h.status[agent] = &Status{Connected: true, StreamFrom: from, ConnectedAt: time.Now(), Protocol: sel}
@@ -240,7 +240,7 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		return
 	}
 	// 選んだ版は接続ごとに 1 回だけログに出す(仕様 7a.6 節。メッセージごとには出さない)
-	log.Printf("stream: %s connected (%s, protocol %s, sent generation %d)", agent, from, protocolLabel(sel), st.Generation)
+	log.Printf("stream: %s connected from %s, protocol %s, sent generation %d", agent, from, protocolLabel(sel), st.Generation)
 
 	// ハートビートを受け続ける。期限内にメッセージが来なければ vpsd 側から理由コード付きで閉じる。
 	// readJSON の ctx を期限で切ると、このライブラリは内部で無条件に接続を閉じてしまい
@@ -249,7 +249,7 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 	// (supersede・revoke と同じ「Close してから cancel する」順序)。
 	heartbeatTimer := time.AfterFunc(h.HeartbeatTimeout, func() {
 		c.timedOut.Store(true)
-		log.Printf("stream: %s: no message within %s; closing (heartbeat timeout)", agent, h.HeartbeatTimeout)
+		log.Printf("stream: %s: no message within %s; closing: heartbeat timeout", agent, h.HeartbeatTimeout)
 		ws.Close(websocket.StatusCode(proto.CloseHeartbeatTimeout), "heartbeat timeout")
 	})
 	defer heartbeatTimer.Stop()
@@ -258,7 +258,7 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		if err := readJSON(ctx, ws, &m); err != nil {
 			h.drop(agent, c)
 			if ctx.Err() == nil && !c.timedOut.Load() {
-				log.Printf("stream: %s disconnected (%s): %v", agent, from, err)
+				log.Printf("stream: %s disconnected from %s: %v", agent, from, err)
 			}
 			return
 		}

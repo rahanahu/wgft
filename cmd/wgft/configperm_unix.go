@@ -27,7 +27,7 @@ func warnInsecureConfigFile(w io.Writer, path string, c *config) {
 		return // 直前に読めているのでここでは通常起きない。読めないなら他のエラー経路が扱う
 	}
 	if info.Mode().Perm()&0o007 != 0 {
-		fmt.Fprintf(w, "warning: %s is readable by other users on this host and holds a secret value (WGFT_JOIN); recommended mode is 0600, or 0640 owned by root and a dedicated group (see docs/design.md 11a)\n", path)
+		fmt.Fprintf(w, "warning: %s is readable by other users on this host and holds a secret value, WGFT_JOIN; recommended mode is 0600, or 0640 owned by root and a dedicated group; see docs/design.md 11a\n", path)
 	}
 }
 

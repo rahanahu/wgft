@@ -77,7 +77,7 @@ func (e *engine) Handle(at time.Duration, ev admissiontest.Event) (string, error
 		// IPv6 のパケットは `dnat ip to` に写されず、待ち受けも IPv4 だけで開く(設計文書 7a.9 節)。
 		// drop カウンタにも数えない。行が落としたなら、その行は IPv4 の一致を欠いている
 		if v.Dropped {
-			return "", fmt.Errorf("row %s dropped a packet that no rule forwards (src %s)", v.Comment, src)
+			return "", fmt.Errorf("row %s dropped a packet that no rule forwards: src %s", v.Comment, src)
 		}
 		e.in.End(ev.Flow)
 		return admissiontest.Drop, nil

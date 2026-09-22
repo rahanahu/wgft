@@ -112,7 +112,7 @@ func validateInterfaceName(env, name string) error {
 	case name == "." || name == "..":
 		return configErrorf(env, "%q is not a usable interface name", name)
 	case strings.ContainsAny(name, "/: \t\n\v\f\r"):
-		return configErrorf(env, "%q contains a character the kernel rejects in an interface name (/, : or whitespace)", name)
+		return configErrorf(env, "%q contains a character the kernel rejects in an interface name: /, : or whitespace", name)
 	}
 	return nil
 }

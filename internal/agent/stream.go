@@ -88,9 +88,9 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 				backoff = backoffMin
 				continue
 			}
-			log.Printf("stream: %v; if the server was rebuilt (teardown --purge), issue a new join string and restart with it in WGFT_JOIN; retrying in %s", err, backoff)
+			log.Printf("stream: %v; if the server was rebuilt with teardown --purge, issue a new join string and restart with it in WGFT_JOIN; retrying in %s", err, backoff)
 		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseSuperseded):
-			log.Printf("stream: superseded by another connection for the same agent: double start or copied credentials (agent.json); reconnecting in %s", backoff)
+			log.Printf("stream: superseded by another connection for the same agent: double start or copied agent.json credentials; reconnecting in %s", backoff)
 		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseRevoked):
 			log.Printf("stream: permanent token was revoked; retrying in %s", backoff)
 		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseProtocolMismatch):
@@ -289,7 +289,7 @@ func (rt *runtime) pingLoop(ctx context.Context, ws *websocket.Conn, epoch uint6
 			// 証拠にならないので判定を見送り、次の周期で測り直す
 			continue
 		}
-		log.Printf("stream: the server did not answer a ping within %s (%v); the connection is dead, closing it", rt.pongTimeout, err)
+		log.Printf("stream: the server did not answer a ping within %s: %v; the connection is dead, closing it", rt.pongTimeout, err)
 		ws.CloseNow()
 		return
 	}
@@ -308,7 +308,7 @@ func checkServerProtocolVersion(local proto.ProtocolRange, st *proto.State) erro
 	}
 	v := *st.ServerProtocolVersion
 	if v < 1 {
-		return fmt.Errorf("server selected protocol version %d, which is not a valid numbered version (versions start at 1)", v)
+		return fmt.Errorf("server selected protocol version %d, which is not a valid numbered version; versions start at 1", v)
 	}
 	if v < local.Min || v > local.Max {
 		return fmt.Errorf("server selected protocol version %d, outside the agent's supported range [%d,%d]", v, local.Min, local.Max)

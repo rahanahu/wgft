@@ -64,7 +64,7 @@ func (s *Store) IssueJoinToken(agent string, ttl time.Duration) (string, error) 
 		return "", errors.New("agent name is empty")
 	}
 	if !ValidAgentName(agent) {
-		return "", fmt.Errorf("agent name %q must match %s (DNS-label style: lowercase letters, digits and hyphens, not starting or ending with a hyphen, 32 characters max)", agent, agentNamePattern)
+		return "", fmt.Errorf("agent name %q must match %s, DNS-label style: lowercase letters, digits and hyphens, not starting or ending with a hyphen, 32 characters max", agent, agentNamePattern)
 	}
 	tx, err := s.db.Begin()
 	if err != nil {

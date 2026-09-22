@@ -33,7 +33,7 @@ func explainControlErr(path string, err error) error {
 	if err == nil || !errors.Is(err, syscall.EINVAL) || len(path) <= controlPathLimit {
 		return err
 	}
-	return fmt.Errorf("%w (the socket path is %d bytes; Unix socket paths hold at most 107 bytes on Linux and Windows and 103 on macOS, so use a shorter data directory)", err, len(path))
+	return fmt.Errorf("%w: the socket path is %d bytes; Unix socket paths hold at most 107 bytes on Linux and Windows and 103 on macOS, so use a shorter data directory", err, len(path))
 }
 
 // listenControl は制御ソケットを開く。

@@ -217,7 +217,7 @@ func cmdRun(args []string) error {
 	// 流すジョブが 1 つも無い run を成功にしない。マージの前の関門に使う道具なので、
 	// 「流したつもりで exit 0」を作らない
 	if len(plan) == 0 {
-		return fmt.Errorf("nothing to run: the plan is empty (check the manifest's default column, or pass -with-optional)")
+		return fmt.Errorf("nothing to run: the plan is empty; check the manifest's default column, or pass -with-optional")
 	}
 	outDir := *out
 	if outDir == "" {

@@ -74,7 +74,7 @@ func classifyPrivilege(err error) error {
 	if err == nil || !errors.Is(err, os.ErrPermission) {
 		return err
 	}
-	return startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN: %v. Run as root or with that capability, as the shipped server.service does (AmbientCapabilities=CAP_NET_ADMIN), or set WGFT_MODE=userspace, which needs neither", err)
+	return startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN: %v. Run as root or with that capability, as the shipped server.service does with AmbientCapabilities=CAP_NET_ADMIN, or set WGFT_MODE=userspace, which needs neither", err)
 }
 
 // Ensure は wg0 を宣言に収束させ、変えた点を返す。なければ作り、あれば差分だけ直す。

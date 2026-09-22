@@ -49,7 +49,7 @@ func run(mode string) error {
 	}
 
 	srv := admin.New(newFakeBackend(mode))
-	log.Printf("uidemo: http://%s (fixed sample data, mode=%s, for screenshots only)", listenAddr, mode)
+	log.Printf("uidemo: http://%s, fixed sample data, mode=%s, for screenshots only", listenAddr, mode)
 	return admin.Serve(listenAddr, srv, false)
 }
 

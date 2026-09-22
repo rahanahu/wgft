@@ -522,7 +522,7 @@ func Listen(addr string, warnNonLoopback bool) (net.Listener, error) {
 			ln.Close()
 			return nil, err
 		}
-		log.Printf("admin api: unix://%s (0600)", socket)
+		log.Printf("admin api: unix://%s, permissions 0600", socket)
 		return ln, nil
 	}
 	if warnNonLoopback && !isLoopbackAddr(addr) {

@@ -294,7 +294,7 @@ func Run(opts Options) error {
 		log.Printf("warning: checking agent names: %v", err)
 	} else {
 		for _, n := range bad {
-			log.Printf("warning: agent %q has a name that does not match the current validation rule (spec 5.1); keeping it as is", n)
+			log.Printf("warning: agent %q has a name that does not match the current validation rule from spec 5.1; keeping it as is", n)
 		}
 	}
 
@@ -529,12 +529,12 @@ func (d *Daemon) listenAdmin(ctx context.Context, errc chan<- error) error {
 			if err != nil {
 				return fmt.Errorf("admin API tailscale: %w", err)
 			}
-			log.Printf("also listening for the admin API on Tailscale %s (%s)", tsAddr, detail)
+			log.Printf("also listening for the admin API on Tailscale %s, %s", tsAddr, detail)
 			go func() { errc <- fmt.Errorf("admin API tailscale: %w", admin.ServeListener(tsLn, srv)) }()
 		} else if other != "" {
 			log.Printf("warning: --admin-tailscale set but %s has a 100.64.0.0/10 address and is not a Tailscale interface; the admin API is NOT listening there", other)
 		} else {
-			log.Printf("warning: --admin-tailscale set but no tailnet address (100.64.0.0/10) found")
+			log.Printf("warning: --admin-tailscale set but no tailnet address within 100.64.0.0/10 found")
 		}
 	}
 	adminLn, err := admin.Listen(d.opts.AdminAddr, true)

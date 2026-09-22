@@ -318,7 +318,7 @@ func doctorExit(rep doctorReport) error {
 	var bad []string
 	for _, r := range rep.Rules {
 		if r.Status == statusFailed {
-			bad = append(bad, short(r.RuleID)+" ("+r.StoppedAt+")")
+			bad = append(bad, short(r.RuleID)+": "+r.StoppedAt)
 		}
 	}
 	if len(bad) == 0 {
@@ -381,7 +381,7 @@ func notTestedList(rules []proto.Rule, in doctorInput) []notTested {
 		{"from outside", "whether the internet reaches " + ports + " on this VPS. DNAT applies to input from outside, so the " +
 			"server cannot reach its own public port from itself. Test it from another host: nc -vz <vps> <port>. Invisible here: " +
 			"the provider's security group, this host's input firewall, the ISP, and, in userspace mode, a listen port inside the " +
-			"ephemeral range (docs/setup.md)."},
+			"ephemeral range; see docs/setup.md."},
 		{"udp end to end", "a UDP rule cannot be tested end to end, because a UDP send cannot tell success. It is judged from " +
 			"what the agent reports about its listener alone."},
 		{"mtu", "MTU and fragmentation. A tunnel that handshakes and carries small packets can still lose large datagrams, which " +
@@ -590,7 +590,7 @@ func dataplaneCheck(in doctorInput) checkReport {
 		c.Status, c.Reason = statusFailed, reasonNotPublished
 		c.Detail = "the last change has not reached the forwarding path: " + gap
 		if res.ApplyError != "" {
-			c.Detail += " (" + res.ApplyError + ")"
+			c.Detail += "; apply error: " + res.ApplyError
 		}
 		c.Next = "free whatever the reason names; the server retries every 30s and publishes the change when it succeeds"
 		return c
@@ -638,7 +638,7 @@ func applyNextStep(reason string) string {
 	switch {
 	case strings.Contains(reason, "bind failed"):
 		return "another process on this VPS holds that port. In userspace mode the server binds every listen port, and a port inside " +
-			"net.ipv4.ip_local_port_range (32768-60999 by default) can be taken by any outbound connection or its TIME_WAIT. Move the " +
+			"net.ipv4.ip_local_port_range, 32768-60999 by default, can be taken by any outbound connection or its TIME_WAIT. Move the " +
 			"listen port outside that range, or reserve it with net.ipv4.ip_local_reserved_ports. The server retries every 30s."
 	case strings.Contains(reason, "disabled"):
 		return "enable it: wgft rule enable <rule>"
@@ -716,7 +716,7 @@ func tunnelHealth(ai *admin.AgentInfo, now time.Time) (status, reason, detail, o
 	}
 	if ai.Tunnel.State == proto.StatusError {
 		return statusFailed, reasonTunnelError,
-			"the agent reports its tunnel in error: " + reasonOr(ai.Tunnel.Reason, "no reason reported") + " (this VPS still saw a " + age + ")",
+			"the agent reports its tunnel in error: " + reasonOr(ai.Tunnel.Reason, "no reason reported") + "; this VPS still saw a " + age,
 			observedAt
 	}
 	if ai.Tunnel.State != "" && ai.Tunnel.State != proto.StatusOK {
@@ -740,7 +740,7 @@ func handshakeCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRepo
 	if ai.WGEndpoint != "" {
 		c.Internal = append(c.Internal, "peer endpoint "+ai.WGEndpoint)
 	}
-	c.Internal = append(c.Internal, "agent tunnel report "+tunnelStateText(ai.Tunnel))
+	c.Internal = append(c.Internal, "agent tunnel report: "+tunnelStateText(ai.Tunnel))
 	c.Status, c.Reason, c.Detail, c.ObservedAt = tunnelHealth(ai, in.Now)
 	switch c.Reason {
 	case reasonNoRecentHandshake:
@@ -771,12 +771,12 @@ func handshakeNext() string {
 
 func tunnelStateText(t admin.TunnelStatus) string {
 	if t.State == "" {
-		return "(nothing reported)"
+		return "nothing reported"
 	}
 	if t.Reason == "" {
 		return t.State
 	}
-	return t.State + " (" + t.Reason + ")"
+	return t.State + ": " + t.Reason
 }
 
 // connectionCheck はエージェントの stream を見る。stream が切れているのにハンドシェイクが
@@ -815,12 +815,12 @@ func connectionCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRep
 				"not arrive. The tunnel handshook " + since(in.Now, hs).String() + " ago, so the rules the agent already holds may still be forwarding"
 			c.Causes = []string{
 				"the control connection dropped and the agent has not reconnected yet; it backs off up to 5 minutes",
-				"the agent reached this server but was rejected (see the server log)",
+				"the agent reached this server but was rejected; see the server log",
 				"this server has not yet noticed a connection that is in fact alive",
 			}
 			// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
-			c.Next = "read this server's log for this agent's control connection, and the agent's own log on its host " +
-				"(journalctl -u wgft-agent, or docker logs)."
+			c.Next = "read this server's log for this agent's control connection, and the agent's own log on its host: " +
+				"journalctl -u wgft-agent, or docker logs."
 			// 既に疎通確認を行った実行に「--probe を付けよ」と言わない。今やったことを勧める行は
 			// 読み手にとって雑音である。
 			if !in.Probed {
@@ -837,7 +837,7 @@ func connectionCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRep
 		}
 		c.Causes = []string{"the agent is not running", "it cannot reach this VPS's agent API port", "the home line or the ISP is down"}
 		// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
-		c.Next = "on the agent host: systemctl status wgft-agent and journalctl -u wgft-agent (docker logs for a container), " +
+		c.Next = "on the agent host: systemctl status wgft-agent and journalctl -u wgft-agent, or docker logs for a container, " +
 			"then check that it can reach this VPS's agent API port"
 		return c
 	}
@@ -888,7 +888,7 @@ func rulesReceivedCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) check
 	c.Detail = fmt.Sprintf("it still holds rule set %d while this server serves %d, so this rule has not reached it", ai.Generation, cur)
 	c.Causes = []string{
 		"the new rules are in flight and will be applied in a moment",
-		"the agent is connected but is not applying them (see its log)",
+		"the agent is connected but is not applying them; see its log",
 	}
 	c.Next = "re-run in a few seconds; if it stays behind, read the agent's log. A rule moved to another agent carries no traffic until that agent takes the new rule set."
 	return c
@@ -926,8 +926,8 @@ func credentialsCheck(r proto.Rule, ai *admin.AgentInfo) checkReport {
 	}
 	sort.Strings(kinds)
 	c.Status, c.Reason, c.ObservedAt = statusUnknown, reasonCredentialWarning, latest
-	c.Detail = fmt.Sprintf("%d open warning(s) that these credentials are used from two places: %s. They do not stop traffic",
-		len(ai.Warnings), strings.Join(uniq(kinds), ", "))
+	c.Detail = fmt.Sprintf("%d open warning%s that these credentials are used from two places: %s. They do not stop traffic",
+		len(ai.Warnings), pluralS(len(ai.Warnings)), strings.Join(uniq(kinds), ", "))
 	c.Causes = []string{"someone else holds the same credentials", "one agent moves between two lines and came back"}
 	c.Next = "wgft agent warnings; dismiss it if the move was yours, revoke the agent if it was not"
 	return c
@@ -1082,7 +1082,7 @@ func targetCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport 
 	case proto.StatusError:
 		if !fresh {
 			c.Status, c.Reason = statusUnknown, reasonStaleReport
-			c.Detail = "the agent last reported an error on this rule (" + reasonOr(st.Reason, "no reason") + "), but that was " + staleAgeText(reportAge, ageOK) + ", so it is not a current observation"
+			c.Detail = "the agent last reported an error on this rule: " + reasonOr(st.Reason, "no reason") + ", but that was " + staleAgeText(reportAge, ageOK) + ", so it is not a current observation"
 			c.Next = "re-run this command; if the report stays old, read the control connection line above and the agent's log"
 			return c
 		}
@@ -1136,7 +1136,7 @@ func agentStateText(st admin.AgentRuleStatus) string {
 	if st.State == proto.StatusOK || st.Reason == "" {
 		return st.State
 	}
-	return st.State + " (" + st.Reason + ")"
+	return st.State + ": " + st.Reason
 }
 
 // agentRuleNextStep は、エージェントが返した理由に応じた次の手である。
@@ -1229,7 +1229,7 @@ func probeCheck(r proto.Rule, in doctorInput) checkReport {
 		return c
 	}
 	c.Status, c.Reason = statusUnknown, reasonUnknownValue
-	c.Detail = fmt.Sprintf("the server reported a result this build does not know: %q (%s)", p.Check.Reach, p.Check.Detail)
+	c.Detail = fmt.Sprintf("the server reported a result this build does not know: %q, detail %s", p.Check.Reach, p.Check.Detail)
 	c.Next = "upgrade this CLI to the server's version"
 	return c
 }
@@ -1306,7 +1306,7 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 	for _, rr := range rep.Rules {
 		name := short(rr.RuleID)
 		if rr.Group != "" {
-			name += " (" + rr.Group + ")"
+			name += ", group " + rr.Group
 		}
 		fmt.Fprintf(w, "%s  %s %s to %s\n\n", name, rr.Proto, rr.ListenPort, rr.Target)
 		group := ""

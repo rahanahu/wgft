@@ -96,7 +96,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("agent api: registered agent %s (%s, from %s)", name, addr, from)
+	log.Printf("agent api: registered agent %s at %s, from %s", name, addr, from)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(RegisterResponse{PermanentToken: tok, Address: addr.String(), Name: name})
 }
