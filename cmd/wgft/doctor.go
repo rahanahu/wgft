@@ -560,7 +560,7 @@ func publicPortCheck(r proto.Rule, in doctorInput) checkReport {
 	case admin.ApplyPending:
 		c.Status, c.Reason = statusFailed, reasonNotPublished
 		c.Detail = "the server has not yet published this port: " + reasonOr(firstNonEmpty(st.Reason, res.ApplyError), "the last change failed as a whole")
-		c.Next = "free whatever the reason names; the server retries every 30s. Whatever forwarded before the failed change keeps forwarding."
+		c.Next = "free whatever the reason names; the server retries every 30s. Which declaration the kernel is forwarding depends on where the apply failed; check it with wgft server nft."
 		return c
 	}
 	c.Status, c.Reason = statusUnknown, reasonUnknownValue

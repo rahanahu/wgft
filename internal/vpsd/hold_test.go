@@ -316,11 +316,23 @@ func TestServeHoldsTheStartupUntilTheRulesApply(t *testing.T) {
 		!strings.Contains(line, "wgft rule rm") || !strings.Contains(line, "wgft rule disable") {
 		t.Errorf("the hold line must show how to read the state and how to make the declaration smaller, got %q", line)
 	}
-	// The hold stops publication, not forwarding: a restart leaves the previous table and peers in
-	// the kernel, and kernel-mode transparent rules keep carrying traffic under the old declaration
-	// (design.md 11b 節: 転送). The line must not tell the operator otherwise.
+	if !strings.Contains(buf.String(), "wgft server nft") {
+		t.Errorf("the hold line must point at wgft server nft to read the kernel's actual content, got %q", buf.String())
+	}
+	// The hold stops publication, not forwarding, but which declaration the kernel still carries
+	// depends on where the apply failed and cannot be told from here: a failure before the kernel
+	// swaps the table leaves the old table genuinely in place, while a failure after the kernel has
+	// swapped but before the reply arrives means the table already carries the declaration that was
+	// reported as failed (design.md 11b 節: 転送, 6.1 節の受信側の壁). The line must claim neither
+	// outcome. These two string checks catch the literal wording that shipped once; they do not
+	// catch every rephrasing of the same unqualified claim, such as "the previous declaration still
+	// carries traffic" or "forwarding stops" said some other way. A reviewer still has to read the
+	// line.
 	if strings.Contains(buf.String(), "nothing is forwarded") {
 		t.Errorf("the hold line must not claim forwarding stopped, got %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "keeps forwarding") {
+		t.Errorf("the hold line must not claim the previous declaration keeps forwarding, got %q", buf.String())
 	}
 	// Read after the table is applied, so during the hold there is nothing to report yet
 	// (design.md 11b 節: 保留の間の conntrack の UDP タイムアウト 2 値).

@@ -129,8 +129,9 @@ type Prepared interface {
 	// are not staged: Commit publishes no dispatch for them.
 	Failed() map[string]error
 	// Commit publishes the staged change as one atomic step (for the kernel backend, one nftables
-	// transaction). On error nothing of it is published, the previous state keeps forwarding and
-	// the Runtime rolls back. Success is the point of no return (design.md 7a.2 節).
+	// transaction). On error the commit did not succeed; which state the kernel is still forwarding
+	// depends on where it failed and cannot be told from here (design.md 11b 節: 転送 の項). The
+	// Runtime rolls back regardless. Success is the point of no return (design.md 7a.2 節).
 	//
 	// Around the publication, Commit also does what belongs to the same transaction: it reads the
 	// drop counters of the state it replaces (returned only on success, so a failed publication
