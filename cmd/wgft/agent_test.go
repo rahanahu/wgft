@@ -98,12 +98,12 @@ func runAgentCmd(t *testing.T, adminURL string, args ...string) (stdout, stderr 
 	return stdout, stderr, err
 }
 
-// agentLsRow holds the parsed TUNNEL and RULES columns for one row of `agent ls` output.
-type agentLsRow struct{ tunnel, rules string }
+// agentLsRow holds the parsed TUNNEL, RULES and PROTO columns for one row of `agent ls` output.
+type agentLsRow struct{ tunnel, rules, proto string }
 
 // agentLsFields finds the row for the given agent name in tabwriter output and splits it on
-// runs of 2+ spaces (the column separator tabwriter pads with), returning the TUNNEL and
-// RULES columns. Columns are located by the header row so this does not depend on which
+// runs of 2+ spaces (the column separator tabwriter pads with), returning the TUNNEL, RULES
+// and PROTO columns. Columns are located by the header row so this does not depend on which
 // other columns are empty in a given test's fixture.
 func agentLsFields(t *testing.T, stdout, agentName string) agentLsRow {
 	t.Helper()
@@ -130,7 +130,8 @@ func agentLsFields(t *testing.T, stdout, agentName string) agentLsRow {
 		return start, end
 	}
 	tStart, tEnd := col("TUNNEL", "WG_ENDPOINT")
-	rStart, rEnd := col("RULES", "WARN")
+	rStart, rEnd := col("RULES", "PROTO")
+	pStart, pEnd := col("PROTO", "WARN")
 	slice := func(line string, start, end int) string {
 		if start >= len(line) {
 			return ""
@@ -142,7 +143,11 @@ func agentLsFields(t *testing.T, stdout, agentName string) agentLsRow {
 	}
 	for _, line := range lines[1:] {
 		if strings.HasPrefix(line, agentName+" ") {
-			return agentLsRow{tunnel: slice(line, tStart, tEnd), rules: slice(line, rStart, rEnd)}
+			return agentLsRow{
+				tunnel: slice(line, tStart, tEnd),
+				rules:  slice(line, rStart, rEnd),
+				proto:  slice(line, pStart, pEnd),
+			}
 		}
 	}
 	t.Fatalf("agent ls: no row for agent %q in:\n%s", agentName, stdout)
@@ -161,6 +166,12 @@ func TestAgentLsDisconnectedShowsLastReport(t *testing.T) {
 			Name: "office", Address: "10.200.0.3", Connected: false, LastHeartbeat: old,
 			Tunnel: admin.TunnelStatus{State: proto.StatusOK},
 			Rules:  []proto.RuleStatus{{ID: "r_a", State: proto.StatusOK}},
+			// ProtocolVersion set on purpose, as if left over from a dropped connection
+			// (admin_backend.go never sets it while disconnected, but this stands in for
+			// that case): PROTO must still show "-", not the stale version, since the
+			// negotiated version has no meaning once the stream that negotiated it drops
+			// (design.md 5.2 and 7a.6 sections).
+			ProtocolVersion: 1,
 		},
 	}
 	adminURL := newAgentCLITestServer(t, agents)
@@ -176,6 +187,9 @@ func TestAgentLsDisconnectedShowsLastReport(t *testing.T) {
 	if fields.rules != "last:1 ok" {
 		t.Errorf("disconnected agent's RULES = %q, want the last: prefix (a stale report, not the current state)", fields.rules)
 	}
+	if fields.proto != "-" {
+		t.Errorf("disconnected agent's PROTO = %q, want \"-\" (the negotiated version is not a current value once the stream drops)", fields.proto)
+	}
 }
 
 // TestAgentLsConnectedStillShowsLiveState is the control: a connected agent's TUNNEL and
@@ -184,9 +198,10 @@ func TestAgentLsConnectedStillShowsLiveState(t *testing.T) {
 	agents := []admin.AgentInfo{
 		{
 			Name: "home", Address: "10.200.0.2", Connected: true, StreamFrom: "203.0.113.10:51820",
-			LastHeartbeat: time.Now().Format(time.RFC3339),
-			Tunnel:        admin.TunnelStatus{State: proto.StatusOK},
-			Rules:         []proto.RuleStatus{{ID: "r_a", State: proto.StatusOK}},
+			LastHeartbeat:   time.Now().Format(time.RFC3339),
+			Tunnel:          admin.TunnelStatus{State: proto.StatusOK},
+			Rules:           []proto.RuleStatus{{ID: "r_a", State: proto.StatusOK}},
+			ProtocolVersion: 1,
 		},
 	}
 	adminURL := newAgentCLITestServer(t, agents)
@@ -204,6 +219,61 @@ func TestAgentLsConnectedStillShowsLiveState(t *testing.T) {
 	}
 	if fields.rules != "1 ok" {
 		t.Errorf("connected agent's RULES = %q, want \"1 ok\" unprefixed", fields.rules)
+	}
+	if fields.proto != "v1" {
+		t.Errorf("connected agent's PROTO = %q, want \"v1\" (the version negotiated on this connection)", fields.proto)
+	}
+}
+
+// TestAgentLsConnectedLegacyShowsLegacy confirms that a connected agent negotiated as
+// legacy v0 (no protocol_min/protocol_max in its pubkey message; design.md 7a.6 section)
+// prints PROTO as "legacy" rather than "v0", since 0 is not a numbered protocol version.
+func TestAgentLsConnectedLegacyShowsLegacy(t *testing.T) {
+	agents := []admin.AgentInfo{
+		{
+			Name: "legacyhome", Address: "10.200.0.4", Connected: true, StreamFrom: "203.0.113.20:51820",
+			LastHeartbeat:       time.Now().Format(time.RFC3339),
+			Tunnel:              admin.TunnelStatus{State: proto.StatusOK},
+			AgentProtocolLegacy: true,
+		},
+	}
+	adminURL := newAgentCLITestServer(t, agents)
+
+	stdout, _, err := runAgentCmd(t, adminURL, "ls")
+	if err != nil {
+		t.Fatalf("agent ls: %v", err)
+	}
+	fields := agentLsFields(t, stdout, "legacyhome")
+	if fields.proto != "legacy" {
+		t.Errorf("connected legacy agent's PROTO = %q, want \"legacy\"", fields.proto)
+	}
+}
+
+// TestAgentLsConnectedUnreportedVersionShowsDash confirms that a connected agent whose
+// server does not report protocol_version/agent_protocol_legacy at all (an old server,
+// from before the 2026-09-19 revision that added those fields) prints PROTO as "-" rather
+// than "v0". Connected plus the Go zero values (ProtocolVersion 0, AgentProtocolLegacy
+// false) is neither a numbered version (which start at 1) nor legacy, so it must not fall
+// into the numbered-version branch.
+func TestAgentLsConnectedUnreportedVersionShowsDash(t *testing.T) {
+	agents := []admin.AgentInfo{
+		{
+			Name: "oldserver", Address: "10.200.0.5", Connected: true, StreamFrom: "203.0.113.30:51820",
+			LastHeartbeat: time.Now().Format(time.RFC3339),
+			Tunnel:        admin.TunnelStatus{State: proto.StatusOK},
+			// ProtocolVersion and AgentProtocolLegacy left at their zero values, as an
+			// old server's response would leave them.
+		},
+	}
+	adminURL := newAgentCLITestServer(t, agents)
+
+	stdout, _, err := runAgentCmd(t, adminURL, "ls")
+	if err != nil {
+		t.Fatalf("agent ls: %v", err)
+	}
+	fields := agentLsFields(t, stdout, "oldserver")
+	if fields.proto != "-" {
+		t.Errorf("connected agent with no reported version has PROTO = %q, want \"-\"", fields.proto)
 	}
 }
 
