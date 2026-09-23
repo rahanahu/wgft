@@ -3,7 +3,7 @@ package doctor
 import "testing"
 
 // TestTargetReasonCode は、エージェントが報告する人向けの文言を、targetReasonCode がどの機械向けの
-// 符号に写すかを確かめる。文言はいずれも実際にエージェントが返すものである。timeout の行は、
+// 符号に写すかを確かめる。文言はいずれも実装が返しうるものである。timeout の行は、
 // ユーザー空間モードの中継(internal/dataplane/userspace/relay)の probeTarget が返す確認の期限
 // 切れの文言そのものであり、以前はどの case にも当たらず target_error に落ちていた(target が
 // 黙って SYN を捨てるルールをラボで作って確認した)。bind: の行は、Go の net.Listen がそのまま

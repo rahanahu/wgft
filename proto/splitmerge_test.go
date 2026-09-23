@@ -66,7 +66,7 @@ func TestRuleSplitProxyRange(t *testing.T) {
 // 確かめる。id1/id2 のどちらが下位ポートかに関わらず self が残る(仕様 10.1、10.2 節)。
 func TestMerge(t *testing.T) {
 	a := validRule() // r_1, UDP 2456-2457 -> 192.168.1.20:2456
-	a.Group, a.Note = "valheim", "weekend"
+	a.Group, a.Note = "game", "weekend"
 	b := a
 	b.ID, b.ListenPort, b.Target = "r_2", PortRange{2458, 2459}, "192.168.1.20:2458"
 

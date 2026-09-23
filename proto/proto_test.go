@@ -234,7 +234,7 @@ func TestRuleJSONRoundTrip(t *testing.T) {
 	const spec = `{
   "id": "r_01J",
   "agent": "home",
-  "group": "valheim",
+  "group": "game",
   "note": "週末サーバ。フレンド用",
   "proto": "udp",
   "listen_port": "2456-2457",

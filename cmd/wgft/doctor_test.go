@@ -773,8 +773,8 @@ func hasInnerPath(rep doctorReport) bool {
 
 // TestInnerPathDropsOnlyWhenEveryDiagnosedRuleIsUDP は、inner path の項目が消える条件を固定
 // する。`--probe` は 1 本のルールにしか付けられないので、`wgft server doctor`(引数無し)や
-// `/ui/doctor` は複数のルールを一度に診断できる。UDP のルールが 1 本でも混じっていない診断
-// だけがこの項目を要らなくする。管理用 API は UDP のルールの確認そのものを拒むため、混じって
+// `/ui/doctor` は複数のルールを一度に診断できる。診断の対象がすべて UDP のルールであるとき
+// だけ、この項目を要らなくする。管理用 API は UDP のルールの確認そのものを拒むため、混じって
 // いる TCP のルールには `--probe` が今も意味を持つ(設計文書 10.2a 節の改訂の記録、
 // 2026-09-23)。
 func TestInnerPathDropsOnlyWhenEveryDiagnosedRuleIsUDP(t *testing.T) {

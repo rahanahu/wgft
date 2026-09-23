@@ -212,14 +212,14 @@ func TestGroupNoteNoGeneration(t *testing.T) {
 		t.Fatalf("add: %+v %v", res, err)
 	}
 	res, err = s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
-		r[0].Group = "valheim"
+		r[0].Group = "game"
 		r[0].Note = "週末サーバ"
 		return r, nil
 	})
 	if err != nil || res.Generation != 1 || res.Changed {
 		t.Fatalf("group/note change must not bump: %+v %v", res, err)
 	}
-	if rules, _ := s.Rules(); len(rules) != 1 || rules[0].Group != "valheim" || rules[0].Note != "週末サーバ" {
+	if rules, _ := s.Rules(); len(rules) != 1 || rules[0].Group != "game" || rules[0].Note != "週末サーバ" {
 		t.Errorf("group/note not persisted: %+v", rules)
 	}
 }
@@ -332,7 +332,7 @@ func invisibleChanges() []invisibleChange {
 	rate, _ := proto.ParseRate("10/second")
 	prefix := netip.MustParsePrefix("203.0.113.0/24")
 	return []invisibleChange{
-		{"Group", func(r *proto.Rule) { r.Group = "valheim" }},
+		{"Group", func(r *proto.Rule) { r.Group = "game" }},
 		{"Note", func(r *proto.Rule) { r.Note = "a note" }},
 		{"SourceAllow", func(r *proto.Rule) { r.SourceAllow = []netip.Prefix{prefix} }},
 		{"SourceDeny", func(r *proto.Rule) { r.SourceDeny = []netip.Prefix{prefix} }},

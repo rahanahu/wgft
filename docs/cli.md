@@ -111,9 +111,14 @@ Flags:
 ```text
 Answer, on the host that runs the agent: is an agent running here, does it hold
 credentials, and can this host resolve the names it needs. Run it on the agent
-host, as the user the agent runs as. Where "server doctor" answers how far a
-rule's traffic gets from the VPS, "agent doctor" answers what this one host
-looks like, and it answers while the agent is stopped as well as while it runs.
+host, as the user the agent runs as. For the packaged systemd unit that user is
+wgft: runuser -u wgft -- wgft agent doctor. For a custom deployment, run it as
+whichever user actually runs the agent. When run as root, host.privileges
+reads UNKNOWN with running_as_root, since root bypasses file permissions and
+this command cannot then say whether the agent's own user can reach them.
+Where "server doctor" answers how far a rule's traffic gets from the VPS,
+"agent doctor" answers what this one host looks like, and it answers while the
+agent is stopped as well as while it runs.
 
 It reads only what this host holds: the credentials file, kept as agent.json in
 the data directory set by WGFT_DATA_DIR, the operating system, and, while an
