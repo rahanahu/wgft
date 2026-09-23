@@ -2,12 +2,14 @@ package admin
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,8 +18,8 @@ import (
 )
 
 // このファイルはルールの追加フォームと、ルール詳細ページ(/ui/rules/{id}。仕様 10.1 節)の
-// メタ情報(group/note)、拒否/許可リスト、レート制限、有効無効、削除を持つ。分割・統合は
-// webui_splitmerge.go、適用状態の判定は webui_state.go に分ける。
+// 設定(group、note、レート制限を 1 つの保存ボタンでまとめて保存する)、拒否/許可リスト、
+// 有効無効、削除を持つ。分割・統合は webui_splitmerge.go、適用状態の判定は webui_state.go に分ける。
 
 var rateUnits = []string{string(proto.PerSecond), string(proto.PerMinute), string(proto.PerHour), string(proto.PerDay), string(proto.PerWeek)}
 
@@ -126,19 +128,28 @@ type ruleDetailData struct {
 	Enabled                bool
 	StateBadge, StateLabel string
 	StateReason            string
-	Note, Group            string
+	HeadNote               string // 要約に添える保存済みの note(設定の入力欄の値とは別)
 	Groups                 []string
-	MetaError              string
+
+	// 設定の区画(group、note、レート制限)。1 つのフォームでまとめて保存する。Group/Note と
+	// Rates の Count/Unit/NoLimit は入力欄の値で、描き直しでは利用者の入力を残す。Orig* と
+	// rateFieldView.Orig は、そのフォームを描いた時点の保存値で、hidden で送り返させる。
+	// 保存はこれと比べて利用者が変えた欄だけを当てはめる(uiSaveSettings)。
+	Note, Group                 string
+	OrigGroup, OrigNote         string
+	GroupConflict, NoteConflict string
+	SettingsError               string
+	Rates                       rateFormView
+	Units                       []string
+	ShowPacketNote              bool
+	Dropped                     string // このルールの累積 drop 数(一覧の「拒否数」と同じ値。レート制限の見出しに添える)
+
+	// アクセス制御の区画(拒否/許可リスト)。追加と削除はその場で保存する。
 	DenyList               []sourceItemView
 	DenyInput, DenyError   string
 	AllowList              []sourceItemView
 	AllowInput, AllowError string
 	AllowConfirmAdd        bool
-	Rates                  rateFormView
-	RateError              string
-	Units                  []string
-	ShowPacketNote         bool
-	Dropped                string // このルールの累積 drop 数(一覧の「拒否数」と同じ値。レート制限の見出しに添える)
 
 	// 分割。範囲でないルールでは CanSplit が false になり、区画そのものを出さない。
 	CanSplit           bool
@@ -166,11 +177,16 @@ type rateFormView struct {
 	PerSource, NewFlow, Packet rateFieldView
 }
 
-// rateFieldView は 1 つのレート欄。NoLimit なら Count/Unit は表示のみで送信されない。
+// rateFieldView は 1 つのレート欄。NoLimit なら Count/Unit は表示のみで保存に使わない。
+// Orig はフォームを描いた時点の保存値(proto.Rate.String() の形、制限なしなら空)、
+// Error はこの欄の入力の誤り、Conflict は別の場所で変わった今の値の表示。
 type rateFieldView struct {
-	Count   string
-	Unit    string
-	NoLimit bool
+	Count    string
+	Unit     string
+	NoLimit  bool
+	Orig     string
+	Error    string
+	Conflict string
 }
 
 // ruleDetailView はルール詳細ページのビューを組み立てる。RuleDrops/Generation/Agents/Rules の
@@ -189,7 +205,8 @@ func (s *Server) ruleDetailView(rule proto.Rule, locale string) (ruleDetailData,
 		Locale: locale, ID: rule.ID, Ports: rule.ListenPort.String(),
 		ProtoUpper: strings.ToUpper(string(rule.Proto)), ProtoClass: protoClass,
 		Agent: rule.Agent, Target: rule.TargetDisplay(), Mode: mode, Enabled: rule.Enabled,
-		Note: rule.Note, Group: rule.Group, Groups: s.existingGroups(),
+		HeadNote: rule.Note, Groups: s.existingGroups(),
+		Note: rule.Note, Group: rule.Group, OrigNote: rule.Note, OrigGroup: rule.Group,
 		DenyList:        sourceItems(rule.SourceDeny, false),
 		AllowList:       sourceItems(rule.SourceAllow, len(rule.SourceAllow) == 1),
 		AllowConfirmAdd: len(rule.SourceAllow) == 0,
@@ -262,7 +279,15 @@ func rateFieldFrom(r *proto.Rate) rateFieldView {
 	if r == nil {
 		return rateFieldView{Unit: string(proto.PerSecond), NoLimit: true}
 	}
-	return rateFieldView{Count: strconv.FormatUint(r.Count, 10), Unit: string(r.Unit)}
+	return rateFieldView{Count: strconv.FormatUint(r.Count, 10), Unit: string(r.Unit), Orig: r.String()}
+}
+
+// rateString は保存値の比較に使う形(proto.Rate.String()。制限なしなら空)。
+func rateString(r *proto.Rate) string {
+	if r == nil {
+		return ""
+	}
+	return r.String()
 }
 
 func rateFormFrom(rule proto.Rule) rateFormView {
@@ -296,26 +321,221 @@ func (s *Server) uiRuleDetail(w http.ResponseWriter, r *http.Request) {
 	s.renderDetailPage(w, locale, d)
 }
 
-func (s *Server) uiEditMeta(w http.ResponseWriter, r *http.Request) {
+// ---- 設定の区画(group、note、レート制限。仕様 10.1 節) ----
+
+// settingsOrigFields は設定フォームが hidden で送り返す、描いた時点の保存値の欄。
+var settingsOrigFields = []string{"orig_group", "orig_note", "orig_per_source", "orig_new_flow", "orig_packet"}
+
+// settingsRateFields は設定フォームのレート欄。name は入力欄の接頭辞(<name>_count、<name>_unit、
+// <name>_nolimit、orig_<name>)、rule と view は proto.Rule とビューの対応する欄を返す。
+var settingsRateFields = []struct {
+	name string
+	rule func(*proto.Rule) **proto.Rate
+	view func(*rateFormView) *rateFieldView
+}{
+	{"per_source", func(r *proto.Rule) **proto.Rate { return &r.PerSourceRate }, func(v *rateFormView) *rateFieldView { return &v.PerSource }},
+	{"new_flow", func(r *proto.Rule) **proto.Rate { return &r.NewFlowRate }, func(v *rateFormView) *rateFieldView { return &v.NewFlow }},
+	{"packet", func(r *proto.Rule) **proto.Rate { return &r.PacketRate }, func(v *rateFormView) *rateFieldView { return &v.Packet }},
+}
+
+// settingsInput は送られてきた設定フォームの入力そのもの。描き直しで利用者の入力を失わない
+// ために、前後の空白も含めて受け取ったままを持つ。
+type settingsInput struct {
+	Group, Note         string
+	OrigGroup, OrigNote string
+	Rates               rateFormView
+}
+
+func settingsInputFrom(r *http.Request) settingsInput {
+	in := settingsInput{
+		Group: r.FormValue("group"), Note: r.FormValue("note"),
+		OrigGroup: r.FormValue("orig_group"), OrigNote: r.FormValue("orig_note"),
+	}
+	for _, f := range settingsRateFields {
+		*f.view(&in.Rates) = rateFieldView{
+			Count: r.FormValue(f.name + "_count"), Unit: r.FormValue(f.name + "_unit"),
+			NoLimit: r.FormValue(f.name+"_nolimit") == "1", Orig: r.FormValue("orig_" + f.name),
+		}
+	}
+	return in
+}
+
+// settingsEdit は設定の 1 つの欄を比べるための 3 つの値。group と note は前後の空白を除いた
+// 文字列、レートは rateString の形で持つ。user は利用者の入力、orig はフォームを描いた時点の
+// 保存値、cur は今の保存値。
+type settingsEdit struct {
+	user, orig, cur string
+}
+
+// changed は利用者がこの欄を、フォームを描いた時点の値から変えたかどうか。
+func (e settingsEdit) changed() bool { return e.user != e.orig }
+
+// conflict は、利用者が変えた欄が、フォームを描いた後に別の場所でも変わっていて、しかも
+// 利用者の値と違うかどうか。同じ値への変更は食い違いとみなさない。
+func (e settingsEdit) conflict() bool { return e.changed() && e.cur != e.orig && e.cur != e.user }
+
+// uiSaveSettings は設定の区画(group、note、3 つのレート)を 1 つのフォームで保存する
+// (仕様 10.1 節)。フォームを描いた時点の保存値を hidden(orig_*)で送り返させ、利用者が
+// それから変えた欄だけを今のルールに当てはめる。比べる単位は Rule の欄(group、note、
+// per_source_rate、new_flow_rate、packet_rate)で、レートは回数と単位を 1 つの値として扱う。
+//   - 入力の誤り(値の無いレート欄など)があれば何も保存せず、その欄に誤りを示し、すべての
+//     欄の入力を残して描き直す
+//   - 利用者が変えた欄が、描いた後に別の場所(CLI や別のタブ)でも変わっていれば、上書き
+//     せず何も保存しない。今の値をその欄に示し、利用者の入力を残して描き直す。hidden の
+//     保存値は今の値に改めるので、確かめてから保存し直すと利用者の値が入る
+//   - 利用者が変えていない欄は、描いた後に別の場所で変わっていても今の値のまま残す
+//
+// 保存はバッチ 1 回で、今読んだルール集合のハッシュを ExpectedDigest に渡し、読み取りから
+// 確定までの間の割り込みも拒む。
+func (s *Server) uiSaveSettings(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	locale := resolveLocale(w, r)
-	rule, ok := s.findRuleOr404(w, r.PathValue("id"))
+	for _, k := range settingsOrigFields {
+		if _, ok := r.PostForm[k]; !ok {
+			http.Error(w, "the settings form has no "+k+" field; reload the rule page and save again", http.StatusBadRequest)
+			return
+		}
+	}
+	rules, err := s.backend.Rules()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	id := r.PathValue("id")
+	idx := slices.IndexFunc(rules, func(x proto.Rule) bool { return x.ID == id })
+	if idx < 0 {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	cur := rules[idx]
+	in := settingsInputFrom(r)
+
+	group := settingsEdit{user: strings.TrimSpace(in.Group), orig: in.OrigGroup, cur: cur.Group}
+	note := settingsEdit{user: strings.TrimSpace(in.Note), orig: in.OrigNote, cur: cur.Note}
+	rateEdits := make([]settingsEdit, len(settingsRateFields))
+	rateValues := make([]*proto.Rate, len(settingsRateFields))
+	invalid := false
+	for i, f := range settingsRateFields {
+		v := f.view(&in.Rates)
+		rate, err := parseRateInput(*v, locale)
+		if err != nil {
+			v.Error, invalid = err.Error(), true
+			continue
+		}
+		rateValues[i] = rate
+		rateEdits[i] = settingsEdit{user: rateString(rate), orig: v.Orig, cur: rateString(*f.rule(&cur))}
+	}
+	if invalid {
+		s.renderSettingsInput(w, locale, cur, in, T(locale, "settingsInvalid"))
+		return
+	}
+
+	if group.conflict() || note.conflict() || slices.ContainsFunc(rateEdits, settingsEdit.conflict) {
+		s.renderSettingsConflict(w, locale, cur, in, group, note, rateEdits)
+		return
+	}
+
+	updated := cur
+	if group.changed() {
+		updated.Group = group.user
+	}
+	if note.changed() {
+		updated.Note = note.user
+	}
+	for i, f := range settingsRateFields {
+		if rateEdits[i].changed() {
+			*f.rule(&updated) = rateValues[i]
+		}
+	}
+	_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}, ExpectedDigest: proto.RulesDigest(rules), Op: "ui edit"})
+	switch {
+	case errors.Is(err, ErrBatchConflict):
+		// 読み取りから確定までの間の割り込み。どの欄が変わったかは分からないので、入力と
+		// hidden の保存値を送られたまま残す。保存し直せば、その時点の値と改めて比べる。
+		s.renderSettingsInput(w, locale, cur, in, T(locale, "settingsRaced"))
+	case err != nil:
+		s.renderSettingsInput(w, locale, cur, in, err.Error())
+	default:
+		http.Redirect(w, r, "/ui/rules/"+cur.ID, http.StatusSeeOther)
+	}
+}
+
+// parseRateInput は 1 つのレート欄の入力を解釈する。「制限しない」なら nil を返す。
+func parseRateInput(v rateFieldView, locale string) (*proto.Rate, error) {
+	if v.NoLimit {
+		return nil, nil
+	}
+	count := strings.TrimSpace(v.Count)
+	if count == "" {
+		return nil, errors.New(T(locale, "rateRequired"))
+	}
+	rate, err := proto.ParseRate(count + "/" + v.Unit)
+	if err != nil {
+		return nil, err
+	}
+	return &rate, nil
+}
+
+// renderSettingsInput は詳細ページを描き直し、設定の区画には送られてきた入力と hidden の
+// 保存値をそのまま入れる(入力の誤りと保存の失敗のとき)。
+func (s *Server) renderSettingsInput(w http.ResponseWriter, locale string, cur proto.Rule, in settingsInput, msg string) {
+	d, ok := s.renderRuleDetailOrError(w, locale, cur)
 	if !ok {
 		return
 	}
-	updated := rule
-	updated.Group = strings.TrimSpace(r.FormValue("group"))
-	updated.Note = strings.TrimSpace(r.FormValue("note"))
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}, Op: "ui edit"}); err != nil {
-		d, ok := s.renderRuleDetailOrError(w, locale, rule)
-		if !ok {
-			return
-		}
-		d.MetaError, d.Group, d.Note = err.Error(), updated.Group, updated.Note
-		s.renderDetailPage(w, locale, d)
+	d.Group, d.Note, d.OrigGroup, d.OrigNote, d.Rates = in.Group, in.Note, in.OrigGroup, in.OrigNote, in.Rates
+	d.SettingsError = msg
+	s.renderDetailPage(w, locale, d)
+}
+
+// renderSettingsConflict は、利用者が変えた欄が別の場所でも変わっていたときの描き直し。
+// hidden の保存値はすべて今の値にする。利用者が変えた欄は入力を残し、食い違った欄には
+// 今の値を添える。利用者が変えていない欄は今の値を出す。
+func (s *Server) renderSettingsConflict(w http.ResponseWriter, locale string, cur proto.Rule, in settingsInput, group, note settingsEdit, rateEdits []settingsEdit) {
+	d, ok := s.renderRuleDetailOrError(w, locale, cur)
+	if !ok {
 		return
 	}
-	http.Redirect(w, r, "/ui/rules/"+rule.ID, http.StatusSeeOther)
+	current := func(v string) string {
+		if v == "" {
+			v = T(locale, "listEmpty")
+		}
+		return fmt.Sprintf(T(locale, "settingsCurrentFmt"), v)
+	}
+	if group.changed() {
+		d.Group = in.Group
+		if group.conflict() {
+			d.GroupConflict = current(cur.Group)
+		}
+	}
+	if note.changed() {
+		d.Note = in.Note
+		if note.conflict() {
+			d.NoteConflict = current(cur.Note)
+		}
+	}
+	for i, f := range settingsRateFields {
+		if !rateEdits[i].changed() {
+			continue
+		}
+		v := f.view(&d.Rates)
+		orig := v.Orig
+		*v = *f.view(&in.Rates)
+		v.Orig = orig
+		if rateEdits[i].conflict() {
+			v.Conflict = fmt.Sprintf(T(locale, "settingsCurrentFmt"), rateDisplay(*f.rule(&cur), locale))
+		}
+	}
+	d.SettingsError = T(locale, "settingsConflict")
+	s.renderDetailPage(w, locale, d)
+}
+
+// rateDisplay はレートの保存値を画面の語で表す(「10 / 分」、制限なしなら「制限しない」)。
+func rateDisplay(r *proto.Rate, locale string) string {
+	if r == nil {
+		return T(locale, "noLimit")
+	}
+	return fmt.Sprintf("%d / %s", r.Count, unitLabel(locale, string(r.Unit)))
 }
 
 // uiDenyAdd / uiDenyRm / uiAllowAdd / uiAllowRm は拒否・許可リストの追加・削除を扱う。
@@ -383,72 +603,6 @@ func (s *Server) renderSourceError(w http.ResponseWriter, locale string, rule pr
 		d.DenyError, d.DenyInput = err.Error(), input
 	}
 	s.renderDetailPage(w, locale, d)
-}
-
-// uiSetRates はレート制限の 3 欄を 1 フォームで保存する。値が無く「制限しない」も外れている欄は
-// 誤りとして扱い、何も保存しない。
-func (s *Server) uiSetRates(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-	locale := resolveLocale(w, r)
-	rule, ok := s.findRuleOr404(w, r.PathValue("id"))
-	if !ok {
-		return
-	}
-	renderRatesError := func(err error) {
-		d, ok := s.renderRuleDetailOrError(w, locale, rule)
-		if !ok {
-			return
-		}
-		d.RateError, d.Rates = err.Error(), s.rateFormFromRequest(r)
-		s.renderDetailPage(w, locale, d)
-	}
-	perSource, errPS := s.parseRateField(r, "per_source", T(locale, "ratePerSourceHead"), locale)
-	newFlow, errNF := s.parseRateField(r, "new_flow", T(locale, "rateNewFlowHead"), locale)
-	packet, errPkt := s.parseRateField(r, "packet", T(locale, "ratePacketHead"), locale)
-	if err := firstErr(errPS, errNF, errPkt); err != nil {
-		renderRatesError(err)
-		return
-	}
-	updated := rule
-	updated.PerSourceRate, updated.NewFlowRate, updated.PacketRate = perSource, newFlow, packet
-	if _, err := s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}, Op: "ui edit"}); err != nil {
-		renderRatesError(err)
-		return
-	}
-	http.Redirect(w, r, "/ui/rules/"+rule.ID, http.StatusSeeOther)
-}
-
-// parseRateField は 1 つのレート欄(<prefix>_count、<prefix>_unit、<prefix>_nolimit)を解釈する。
-// label はエラーメッセージに使う、その欄の訳済みの見出し。
-func (s *Server) parseRateField(r *http.Request, prefix, label, locale string) (*proto.Rate, error) {
-	if r.FormValue(prefix+"_nolimit") == "1" {
-		return nil, nil
-	}
-	count := strings.TrimSpace(r.FormValue(prefix + "_count"))
-	if count == "" {
-		return nil, fmt.Errorf("%s: %s", label, T(locale, "rateRequired"))
-	}
-	rate, err := proto.ParseRate(count + "/" + r.FormValue(prefix+"_unit"))
-	if err != nil {
-		return nil, err
-	}
-	return &rate, nil
-}
-
-func (s *Server) rateFormFromRequest(r *http.Request) rateFormView {
-	field := func(prefix string) rateFieldView {
-		return rateFieldView{Count: r.FormValue(prefix + "_count"), Unit: r.FormValue(prefix + "_unit"), NoLimit: r.FormValue(prefix+"_nolimit") == "1"}
-	}
-	return rateFormView{PerSource: field("per_source"), NewFlow: field("new_flow"), Packet: field("packet")}
-}
-
-func firstErr(errs ...error) error {
-	for _, e := range errs {
-		if e != nil {
-			return e
-		}
-	}
-	return nil
 }
 
 func (s *Server) uiCheck(w http.ResponseWriter, r *http.Request) {

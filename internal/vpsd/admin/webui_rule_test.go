@@ -1,12 +1,15 @@
 package admin
 
 import (
+	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -198,25 +201,20 @@ func TestRuleDetailRates(t *testing.T) {
 	srv, st := newDetailTestServer(t)
 
 	post := func(vals url.Values) *http.Response {
-		resp, err := http.PostForm(srv.URL+"/ui/rules/r_a/rates", vals)
-		if err != nil {
-			t.Fatal(err)
-		}
+		resp, _ := postSettings(t, srv.URL, "r_a", vals)
 		return resp
 	}
 
 	// 値の入っていない欄は、no limit のチェックが無ければ誤りとして何も保存しない
-	resp := post(url.Values{
+	resp, body := postSettings(t, srv.URL, "r_a", url.Values{
 		"per_source_count": {""}, "per_source_unit": {"second"},
 		"new_flow_nolimit": {"1"}, "new_flow_unit": {"second"},
 		"packet_nolimit": {"1"}, "packet_unit": {"second"},
 	})
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("missing value without no-limit: status = %d, want 200 (re-rendered with the error)", resp.StatusCode)
 	}
-	if !strings.Contains(string(body), T("ja", "rateRequired")) {
+	if !strings.Contains(body, T("ja", "rateRequired")) {
 		t.Errorf("expected the rateRequired message: %s", body)
 	}
 	if r := findRuleT(t, st, "r_a"); r.PerSourceRate != nil || r.NewFlowRate != nil || r.PacketRate != nil {
@@ -282,14 +280,11 @@ func TestRuleDetailRateWording(t *testing.T) {
 	}
 
 	// setting per_source only: its summary sentence reads back the value
-	resp, err := http.PostForm(srv.URL+"/ui/rules/r_a/rates", url.Values{
+	resp, _ := postSettings(t, srv.URL, "r_a", url.Values{
 		"per_source_count": {"10"}, "per_source_unit": {"minute"},
 		"new_flow_nolimit": {"1"}, "new_flow_unit": {"second"},
 		"packet_nolimit": {"1"}, "packet_unit": {"second"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	resp.Body.Close()
 	ja, en = get("ja"), get("en")
 	if !strings.Contains(ja, "1 つの接続元から 1 分に 10 本まで") {
@@ -303,14 +298,11 @@ func TestRuleDetailRateWording(t *testing.T) {
 	}
 
 	// setting packet_rate opens the (otherwise collapsed) packet section by default
-	resp, err = http.PostForm(srv.URL+"/ui/rules/r_a/rates", url.Values{
+	resp, _ = postSettings(t, srv.URL, "r_a", url.Values{
 		"per_source_nolimit": {"1"}, "per_source_unit": {"second"},
 		"new_flow_nolimit": {"1"}, "new_flow_unit": {"second"},
 		"packet_count": {"500"}, "packet_unit": {"second"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	resp.Body.Close()
 	ja, en = get("ja"), get("en")
 	if !strings.Contains(ja, `class="advanced" open`) {
@@ -377,14 +369,11 @@ func TestRuleDetailPacketRateTCPNotice(t *testing.T) {
 
 	// saving the rate form (per_source changes, packet field resubmits its current value
 	// since it is not disabled) must keep the stored packet_rate.
-	resp, err := http.PostForm(srv.URL+"/ui/rules/r_tcp/rates", url.Values{
+	resp, _ := postSettings(t, srv.URL, "r_tcp", url.Values{
 		"per_source_count": {"5"}, "per_source_unit": {"minute"},
 		"new_flow_nolimit": {"1"}, "new_flow_unit": {"second"},
 		"packet_count": {"500"}, "packet_unit": {"second"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	resp.Body.Close()
 	r := findRuleT(t, st, "r_tcp")
 	if r.PacketRate == nil || r.PacketRate.String() != "500/second" {
@@ -395,20 +384,417 @@ func TestRuleDetailPacketRateTCPNotice(t *testing.T) {
 	}
 }
 
-// TestRuleDetailMeta は、詳細ページに取り込まれたグループ/説明の編集がルール詳細ページへ戻ることを確かめる。
-func TestRuleDetailMeta(t *testing.T) {
-	srv, st := newDetailTestServer(t)
-	resp, err := http.PostForm(srv.URL+"/ui/rules/r_a/meta", url.Values{"group": {"valheim"}, "note": {"weekend"}})
+// ---- 設定の区画(group、note、レート制限を 1 つのフォームで保存する。仕様 10.1 節) ----
+
+var (
+	settingsFormRe = regexp.MustCompile(`(?s)<form method="post" action="([^"]*)"[^>]*id="settings-form"[^>]*>(.*?)</form>`)
+	inputTagRe     = regexp.MustCompile(`<input\b[^>]*>`)
+	selectRe       = regexp.MustCompile(`(?s)<select name="([^"]*)">(.*?)</select>`)
+	optionRe       = regexp.MustCompile(`<option value="([^"]*)"\s*(selected)?\s*>`)
+	attrNameRe     = regexp.MustCompile(`\bname="([^"]*)"`)
+	attrValueRe    = regexp.MustCompile(`\bvalue="([^"]*)"`)
+	attrTypeRe     = regexp.MustCompile(`\btype="([^"]*)"`)
+)
+
+// settingsFormHTML は詳細ページの HTML から設定フォームの中身を取り出す。
+func settingsFormHTML(t *testing.T, page string) string {
+	t.Helper()
+	m := settingsFormRe.FindStringSubmatch(page)
+	if m == nil {
+		t.Fatalf("the page has no settings form: %s", page)
+	}
+	return m[2]
+}
+
+// settingsFormValues は、ブラウザが設定フォームをそのまま送るときの値を、描かれた HTML から
+// 組み立てる(チェックの無いチェックボックスは送らず、select は選ばれた option の値を送る)。
+func settingsFormValues(t *testing.T, page string) url.Values {
+	t.Helper()
+	form := settingsFormHTML(t, page)
+	vals := url.Values{}
+	for _, tag := range inputTagRe.FindAllString(form, -1) {
+		name := attrNameRe.FindStringSubmatch(tag)
+		if name == nil {
+			continue
+		}
+		value := ""
+		if m := attrValueRe.FindStringSubmatch(tag); m != nil {
+			value = html.UnescapeString(m[1])
+		}
+		if typ := attrTypeRe.FindStringSubmatch(tag); typ != nil && typ[1] == "checkbox" && !strings.Contains(tag, " checked") {
+			continue
+		}
+		vals.Add(name[1], value)
+	}
+	for _, sel := range selectRe.FindAllStringSubmatch(form, -1) {
+		opts := optionRe.FindAllStringSubmatch(sel[2], -1)
+		if len(opts) == 0 {
+			continue
+		}
+		chosen := opts[0][1]
+		for _, o := range opts {
+			if o[2] != "" {
+				chosen = o[1]
+			}
+		}
+		vals.Set(sel[1], chosen)
+	}
+	return vals
+}
+
+// postSettings は詳細ページを開いて設定フォームを読み、set の欄だけを書き換えて送る。
+// set にレート欄(<prefix>_count など)が 1 つでもあれば、その欄の 3 つの値を set で置き換える
+// (「制限しない」を外すには set に <prefix>_nolimit を含めない)。応答の本文も返す。
+func postSettings(t *testing.T, base, id string, set url.Values) (*http.Response, string) {
+	t.Helper()
+	return postSettingsForm(t, base, id, getBody(t, base+"/ui/rules/"+id), set)
+}
+
+// postSettingsForm は postSettings と同じだが、既に描かれたページ(page)のフォームから送る。
+// ページを開いた後に別の場所で変更が入る場合を模すのに使う。
+func postSettingsForm(t *testing.T, base, id, page string, set url.Values) (*http.Response, string) {
+	t.Helper()
+	form := settingsFormValues(t, page)
+	for _, prefix := range []string{"per_source", "new_flow", "packet"} {
+		touched := false
+		for k := range set {
+			if strings.HasPrefix(k, prefix+"_") {
+				touched = true
+			}
+		}
+		if touched {
+			for _, suffix := range []string{"_count", "_unit", "_nolimit"} {
+				form.Del(prefix + suffix)
+			}
+		}
+	}
+	for k, v := range set {
+		form[k] = v
+	}
+	action := settingsFormRe.FindStringSubmatch(page)[1]
+	if action != "/ui/rules/"+id+"/settings" {
+		t.Fatalf("settings form action = %q", action)
+	}
+	resp, err := http.PostForm(base+action, form)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if req := resp.Request; req == nil || !strings.HasSuffix(req.URL.Path, "/ui/rules/r_a") {
-		t.Errorf("saving meta must redirect back to the detail page, got %v", req)
+	b, _ := io.ReadAll(resp.Body)
+	return resp, string(b)
+}
+
+// setRuleInStore は、ページを開いた後の別の場所(CLI など)からの変更を模して、ストアの
+// ルールを直接書き換える。
+func setRuleInStore(t *testing.T, st *store.Store, id string, edit func(*proto.Rule)) {
+	t.Helper()
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		for i := range rules {
+			if rules[i].ID == id {
+				edit(&rules[i])
+			}
+		}
+		return rules, nil
+	}); err != nil {
+		t.Fatal(err)
 	}
-	r := findRuleT(t, st, "r_a")
-	if r.Group != "valheim" || r.Note != "weekend" {
-		t.Errorf("meta not saved: group=%q note=%q", r.Group, r.Note)
+}
+
+func mustRate(t *testing.T, s string) *proto.Rate {
+	t.Helper()
+	r, err := proto.ParseRate(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &r
+}
+
+// newSettingsTestServer は、group、note、per_source_rate、packet_rate が入った r_a を持つ
+// 詳細ページのテスト用サーバー。
+func newSettingsTestServer(t *testing.T) (*httptest.Server, *store.Store) {
+	t.Helper()
+	srv, st := newDetailTestServer(t)
+	setRuleInStore(t, st, "r_a", func(r *proto.Rule) {
+		r.Group, r.Note = "valheim", "weekend"
+		r.PerSourceRate, r.PacketRate = mustRate(t, "10/minute"), mustRate(t, "500/second")
+	})
+	return srv, st
+}
+
+// ruleSettings はルールの設定の区画にあたる欄を、比べやすい 5 つの文字列にする。
+func ruleSettings(r proto.Rule) [5]string {
+	return [5]string{r.Group, r.Note, rateString(r.PerSourceRate), rateString(r.NewFlowRate), rateString(r.PacketRate)}
+}
+
+// TestRuleSettingsSavesOnlyChangedFields は、設定フォームの 1 つの保存ボタンで、利用者が
+// 変えた欄だけが保存され、他の欄が保存値のまま残ることを確かめる(仕様 10.1 節)。レート欄は
+// 保存値で埋めて描くので、説明だけを変えた保存がレート欄のせいで拒まれることは無い。
+func TestRuleSettingsSavesOnlyChangedFields(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  url.Values
+		want [5]string
+	}{
+		{"note only", url.Values{"note": {"friday night"}}, [5]string{"valheim", "friday night", "10/minute", "", "500/second"}},
+		{"group only", url.Values{"group": {"survival"}}, [5]string{"survival", "weekend", "10/minute", "", "500/second"}},
+		{"per-source rate only", url.Values{"per_source_count": {"20"}, "per_source_unit": {"hour"}}, [5]string{"valheim", "weekend", "20/hour", "", "500/second"}},
+		{"new-flow rate only", url.Values{"new_flow_count": {"100"}, "new_flow_unit": {"second"}}, [5]string{"valheim", "weekend", "10/minute", "100/second", "500/second"}},
+		{"packet rate to no limit", url.Values{"packet_nolimit": {"1"}, "packet_unit": {"second"}}, [5]string{"valheim", "weekend", "10/minute", "", ""}},
+		{"nothing changed", url.Values{}, [5]string{"valheim", "weekend", "10/minute", "", "500/second"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st := newSettingsTestServer(t)
+			resp, body := postSettings(t, srv.URL, "r_a", tc.set)
+			if req := resp.Request; req == nil || req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/ui/rules/r_a") {
+				t.Fatalf("saving must redirect back to the detail page; got %v: %s", req, body)
+			}
+			if got := ruleSettings(findRuleT(t, st, "r_a")); got != tc.want {
+				t.Errorf("saved settings = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRuleSettingsInvalidKeepsInput は、レート欄の誤りがあると何も保存せず、その欄に誤りを
+// 示し、利用者が入力した説明やグループを残して描き直すことを確かめる。
+func TestRuleSettingsInvalidKeepsInput(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix string
+		set          url.Values
+		wantErr      string
+	}{
+		{"per-source empty", "per_source", url.Values{"per_source_count": {""}, "per_source_unit": {"minute"}}, T("ja", "rateRequired")},
+		{"new-flow zero", "new_flow", url.Values{"new_flow_count": {"0"}, "new_flow_unit": {"second"}}, "count is not a positive integer"},
+		{"packet empty", "packet", url.Values{"packet_count": {""}, "packet_unit": {"second"}}, T("ja", "rateRequired")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st := newSettingsTestServer(t)
+			before := ruleSettings(findRuleT(t, st, "r_a"))
+			set := url.Values{"note": {"typed note"}, "group": {"typed-group"}}
+			for k, v := range tc.set {
+				set[k] = v
+			}
+			resp, body := postSettings(t, srv.URL, "r_a", set)
+			if resp.StatusCode != http.StatusOK || resp.Request.Method != http.MethodPost {
+				t.Fatalf("an invalid submission must re-render the page, got status %d via %s", resp.StatusCode, resp.Request.Method)
+			}
+			if got := ruleSettings(findRuleT(t, st, "r_a")); got != before {
+				t.Errorf("an invalid submission must save nothing: %q, want %q", got, before)
+			}
+			form := settingsFormHTML(t, body)
+			if !strings.Contains(form, `name="note" value="typed note"`) || !strings.Contains(form, `name="group" value="typed-group"`) {
+				t.Errorf("the typed group and note must stay in the form: %s", form)
+			}
+			// 誤りはその欄のブロック(その欄の入力から次のレート欄の手前まで)に出る
+			start := strings.Index(form, `name="`+tc.prefix+`_count"`)
+			if start < 0 {
+				t.Fatalf("no %s_count input: %s", tc.prefix, form)
+			}
+			block := form[start:]
+			if end := strings.Index(block, `class="rate-field"`); end >= 0 {
+				block = block[:end]
+			}
+			if !strings.Contains(block, `<p class="danger-text">`) || !strings.Contains(block, html.EscapeString(tc.wantErr)) {
+				t.Errorf("the error %q must be shown at the %s field: %s", tc.wantErr, tc.prefix, block)
+			}
+			if !strings.Contains(body, T("ja", "settingsInvalid")) {
+				t.Errorf("missing the not-saved message: %s", body)
+			}
+			// 描き直したフォームは、描いた時点の保存値(hidden)を送られたまま持つ
+			vals := settingsFormValues(t, body)
+			if vals.Get("orig_note") != "weekend" || vals.Get("orig_per_source") != "10/minute" || vals.Get("orig_packet") != "500/second" {
+				t.Errorf("the re-rendered form must keep the original values: %v", vals)
+			}
+			if tc.prefix == "packet" && !strings.Contains(form, `class="advanced" open`) {
+				t.Error("the packet details must be open when the packet field has an error")
+			}
+		})
+	}
+}
+
+// TestRuleSettingsConcurrentChange は、ページを開いた後に別の場所(CLI など)で変わった欄を
+// 上書きしないことを確かめる(仕様 10.1 節)。利用者が変えていない欄の変更は残り、利用者も
+// 変えた欄の変更は、何も保存せず今の値を示し、利用者の入力を残して描き直す。描き直した
+// フォームを確かめてから送り直すと、利用者の値が入る。
+func TestRuleSettingsConcurrentChange(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		elsewhere func(*proto.Rule)
+		set       url.Values
+		// conflict が空なら保存され want になる。空でなければ何も保存せず(ストアは別の場所の
+		// 変更のまま)、その欄に今の値の表示 conflict が出て、送り直すと wantAfterRetry になる。
+		want           [5]string
+		conflict       string
+		wantAfterRetry [5]string
+	}{
+		{
+			name:      "rate changed elsewhere, note changed here",
+			elsewhere: func(r *proto.Rule) { r.PerSourceRate = mustRate(t, "99/second") },
+			set:       url.Values{"note": {"friday night"}},
+			want:      [5]string{"valheim", "friday night", "99/second", "", "500/second"},
+		},
+		{
+			name:      "note changed elsewhere, rate changed here",
+			elsewhere: func(r *proto.Rule) { r.Note = "from the cli" },
+			set:       url.Values{"packet_count": {"800"}, "packet_unit": {"second"}},
+			want:      [5]string{"valheim", "from the cli", "10/minute", "", "800/second"},
+		},
+		{
+			name:      "same field to the same value",
+			elsewhere: func(r *proto.Rule) { r.Group = "survival" },
+			set:       url.Values{"group": {"survival"}, "note": {"friday night"}},
+			want:      [5]string{"survival", "friday night", "10/minute", "", "500/second"},
+		},
+		{
+			name:           "rate changed in both places",
+			elsewhere:      func(r *proto.Rule) { r.PerSourceRate = mustRate(t, "99/second") },
+			set:            url.Values{"per_source_count": {"20"}, "per_source_unit": {"minute"}, "note": {"friday night"}},
+			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "99 / 秒"),
+			wantAfterRetry: [5]string{"valheim", "friday night", "20/minute", "", "500/second"},
+		},
+		{
+			name:           "rate removed elsewhere, changed here",
+			elsewhere:      func(r *proto.Rule) { r.PacketRate = nil },
+			set:            url.Values{"packet_count": {"800"}, "packet_unit": {"second"}},
+			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), T("ja", "noLimit")),
+			wantAfterRetry: [5]string{"valheim", "weekend", "10/minute", "", "800/second"},
+		},
+		{
+			name:           "note changed in both places",
+			elsewhere:      func(r *proto.Rule) { r.Note = "from the cli" },
+			set:            url.Values{"note": {"friday night"}},
+			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "from the cli"),
+			wantAfterRetry: [5]string{"valheim", "friday night", "10/minute", "", "500/second"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st := newSettingsTestServer(t)
+			page := getBody(t, srv.URL+"/ui/rules/r_a")
+			setRuleInStore(t, st, "r_a", tc.elsewhere)
+			stored := ruleSettings(findRuleT(t, st, "r_a"))
+
+			resp, body := postSettingsForm(t, srv.URL, "r_a", page, tc.set)
+			if tc.conflict == "" {
+				if resp.Request.Method != http.MethodGet {
+					t.Fatalf("expected a save and a redirect, got a re-render: %s", body)
+				}
+				if got := ruleSettings(findRuleT(t, st, "r_a")); got != tc.want {
+					t.Errorf("saved settings = %q, want %q", got, tc.want)
+				}
+				return
+			}
+
+			if resp.StatusCode != http.StatusOK || resp.Request.Method != http.MethodPost {
+				t.Fatalf("a conflicting save must re-render the page, got status %d via %s", resp.StatusCode, resp.Request.Method)
+			}
+			if got := ruleSettings(findRuleT(t, st, "r_a")); got != stored {
+				t.Errorf("a conflicting save must not change the rule: %q, want %q", got, stored)
+			}
+			if !strings.Contains(body, T("ja", "settingsConflict")) {
+				t.Errorf("missing the conflict message: %s", body)
+			}
+			form := settingsFormHTML(t, body)
+			if !strings.Contains(form, html.EscapeString(tc.conflict)) {
+				t.Errorf("missing the current value %q at the field: %s", tc.conflict, form)
+			}
+			vals := settingsFormValues(t, body)
+			for k := range tc.set {
+				if vals.Get(k) != tc.set.Get(k) {
+					t.Errorf("the user's input %s=%q must be kept, got %q", k, tc.set.Get(k), vals.Get(k))
+				}
+			}
+
+			// 描き直したフォームをそのまま送り直すと、利用者の値が入る
+			resp, body = postSettingsForm(t, srv.URL, "r_a", body, url.Values{})
+			if resp.Request.Method != http.MethodGet {
+				t.Fatalf("resubmitting the reviewed form must save: %s", body)
+			}
+			if got := ruleSettings(findRuleT(t, st, "r_a")); got != tc.wantAfterRetry {
+				t.Errorf("after resubmitting: %q, want %q", got, tc.wantAfterRetry)
+			}
+		})
+	}
+}
+
+// TestRuleSettingsBatchConflict は、今の値を読んでから保存を確定するまでの間に別の場所の
+// 書き込みが割り込んだ場合(Batch が ExpectedDigest の不一致で拒む)も、何も保存せず入力を
+// 残して描き直すことを確かめる。
+func TestRuleSettingsBatchConflict(t *testing.T) {
+	_, st := newSettingsTestServer(t)
+	srv := httptest.NewServer(New(&conflictOnceBackend{fakeBackend: &fakeBackend{st: st}}))
+	defer srv.Close()
+	before := ruleSettings(findRuleT(t, st, "r_a"))
+	resp, body := postSettings(t, srv.URL, "r_a", url.Values{"note": {"friday night"}})
+	if resp.Request.Method != http.MethodPost || !strings.Contains(body, T("ja", "settingsRaced")) {
+		t.Fatalf("a batch conflict must re-render with the raced message: %s", body)
+	}
+	if got := ruleSettings(findRuleT(t, st, "r_a")); got != before {
+		t.Errorf("a batch conflict must save nothing: %q, want %q", got, before)
+	}
+	if !strings.Contains(settingsFormHTML(t, body), `name="note" value="friday night"`) {
+		t.Error("the typed note must stay in the form after a batch conflict")
+	}
+}
+
+// TestRuleSettingsRequiresOriginalValues は、描いた時点の保存値(hidden)の無い送信を
+// 400 で拒むことを確かめる。無いまま受けると、どの欄を利用者が変えたかを判定できない。
+func TestRuleSettingsRequiresOriginalValues(t *testing.T) {
+	srv, st := newSettingsTestServer(t)
+	before := ruleSettings(findRuleT(t, st, "r_a"))
+	resp, err := http.PostForm(srv.URL+"/ui/rules/r_a/settings", url.Values{"group": {"x"}, "note": {"y"}, "per_source_nolimit": {"1"}, "new_flow_nolimit": {"1"}, "packet_nolimit": {"1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	if got := ruleSettings(findRuleT(t, st, "r_a")); got != before {
+		t.Errorf("nothing must be saved: %q", got)
+	}
+}
+
+// TestRuleDetailSections は、詳細ページが設定、アクセス制御、ルール操作の 3 つの区画に
+// この順で分かれ、設定の区画だけが 1 つの保存ボタンを持ち、拒否/許可リストと分割・統合が
+// 設定のフォームの外にあることを、ja/en の両方で確かめる。
+func TestRuleDetailSections(t *testing.T) {
+	srv, _ := newSettingsTestServer(t)
+	for _, lang := range []string{"ja", "en"} {
+		t.Run(lang, func(t *testing.T) {
+			page := getBody(t, srv.URL+"/ui/rules/r_a?lang="+lang)
+			last := -1
+			for _, key := range []string{"settingsHead", "accessHead", "ruleOpsHead"} {
+				i := strings.Index(page, "<h2>"+T(lang, key)+"</h2>")
+				if i < 0 {
+					t.Fatalf("missing the %s heading %q", key, T(lang, key))
+				}
+				if i < last {
+					t.Errorf("the %s heading is out of order", key)
+				}
+				last = i
+			}
+			if n := strings.Count(page, ">"+T(lang, "save")+"</button>"); n != 1 {
+				t.Errorf("the page must have exactly one Save button, found %d", n)
+			}
+			form := settingsFormHTML(t, page)
+			if n := strings.Count(form, `type="submit"`); n != 1 {
+				t.Errorf("the settings form must have exactly one submit button, found %d", n)
+			}
+			for _, name := range []string{"group", "note", "per_source_count", "new_flow_count", "packet_count"} {
+				if !strings.Contains(form, `name="`+name+`"`) {
+					t.Errorf("the settings form must contain %s", name)
+				}
+			}
+			for _, outside := range []string{"<form", "<textarea", `name="cidrs"`, `name="cidr"`, "/deny/", "/allow/", "/split", "/merge"} {
+				if strings.Contains(form, outside) {
+					t.Errorf("the settings form must not contain %q", outside)
+				}
+			}
+			// 設定の区画はアクセス制御の見出しより前で閉じる
+			if strings.Index(page, `id="settings-form"`) > strings.Index(page, "<h2>"+T(lang, "accessHead")+"</h2>") {
+				t.Error("the settings form must come before the access control section")
+			}
+		})
 	}
 }
 
