@@ -5,8 +5,8 @@
 // scripts/check-japanese does, and flags any literal whose unquoted value
 // contains a round parenthesis.
 //
-// Three kinds of literal are not operator-facing output and are excluded
-// structurally, without naming them one by one:
+// Three kinds of literal are not operator-facing English output and are
+// excluded structurally, without naming a file one by one:
 //
 //   - _test.go files, entirely. Test assertions such as t.Fatalf and t.Errorf
 //     are not seen by an operator, and "got %v (want %v)"-style messages are
@@ -17,18 +17,23 @@
 //     exclude-by-file rule; sqlKeyword below recognizes the uppercase
 //     keywords this codebase's SQL always uses, such as CREATE TABLE and
 //     SELECT.
-//   - The Japanese side of internal/vpsd/admin/i18n.go's tr map. Unlike
-//     scripts/check-japanese, this check does not exempt the whole file: its
-//     English side is exactly the text this check exists for. Only the
-//     literal at index 0 of each {ja, en} pair is skipped; see
-//     japaneseSideLiterals.
+//   - Any literal that contains a Japanese character, by content. This rule
+//     is about English output, so a Japanese literal that happens to contain
+//     a stray "(" is not the kind of violation it targets; see
+//     containsJapanese. internal/vpsd/admin/i18n.go's Japanese half of its
+//     {ja, en} pairs and internal/vpsd/admin/webui.go's Japanese-locale
+//     format strings (for example "%d日 %d時間") are both covered this way,
+//     without listing either file by name: scripts/check-japanese already
+//     guarantees every other Go file has no Japanese in a string literal at
+//     all, so this content check only ever fires in files that are already
+//     allowed to mix the two languages.
 //
 // Everything else that isn't operator-facing prose but still contains a round
 // parenthesis, such as a regexp literal, a Windows SDDL string, or a test
 // helper's t.Errorf format outside a _test.go file, is a short, fixed list of
 // one-off cases in ../check-parens-allowlist.txt, normalized the same way as
-// scripts/check-log-tokens-allowlist.txt: "path:trimmed literal", so an edit
-// elsewhere in the file doesn't cause drift.
+// scripts/check-log-tokens-allowlist.txt: "path:trimmed literal", with path
+// relative to the repository root regardless of how this check is invoked.
 package main
 
 import (
@@ -42,6 +47,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // sqlKeyword matches the uppercase SQL keywords this codebase's SQL text
@@ -51,9 +57,38 @@ import (
 // mentions "select" or "update" in passing.
 var sqlKeyword = regexp.MustCompile(`\b(CREATE TABLE|ALTER TABLE|DROP TABLE|INSERT INTO|DELETE FROM|ON CONFLICT|PRAGMA|SELECT|UPDATE)\b`)
 
-// allowlistPath is relative to the check's root argument, matching how
+// allowlistPath is relative to the repository root, matching how
 // scripts/check-log-tokens.sh keeps its allowlist next to itself.
 const allowlistPath = "scripts/check-parens-allowlist.txt"
+
+// skipDirs lists directory base names this check never descends into, the
+// same set scripts/check-japanese uses plus ".claude": this repository keeps
+// working copies of other in-progress changes under .claude/worktrees/, and
+// without this, running the check from the repository root would also lint
+// those copies. Their file paths do not match the root-relative form the
+// allowlist below is keyed on, so every one of that allowlist's entries
+// would additionally misfire as a false positive once per copy.
+var skipDirs = map[string]bool{
+	"experiments": true,
+	"notes":       true,
+	".git":        true,
+	".claude":     true,
+	"vendor":      true,
+	"scripts":     true,
+}
+
+func isJapanese(r rune) bool {
+	return unicode.In(r, unicode.Hiragana, unicode.Katakana, unicode.Han)
+}
+
+func containsJapanese(s string) bool {
+	for _, r := range s {
+		if isJapanese(r) {
+			return true
+		}
+	}
+	return false
+}
 
 func loadAllowlist(path string) (map[string]bool, error) {
 	allow := make(map[string]bool)
@@ -76,73 +111,40 @@ func loadAllowlist(path string) (map[string]bool, error) {
 	return allow, scanner.Err()
 }
 
-func normalize(path, literal string) string {
-	return filepath.ToSlash(path) + ":" + strings.TrimSpace(literal)
+// normalize builds the allowlist key, and the text to paste into the
+// allowlist file, for a literal at relPath: "path:trimmed literal", relPath
+// already relative to the repository root and slash-separated.
+func normalize(relPath, literal string) string {
+	return relPath + ":" + strings.TrimSpace(literal)
 }
 
 func hasParen(s string) bool {
 	return strings.ContainsAny(s, "()")
 }
 
-// japaneseSideLiterals returns the set of *ast.BasicLit nodes that are the
-// Japanese element of internal/vpsd/admin/i18n.go's tr map, {ja, en}. It is a
-// no-op for any other file: the "tr" var name and the {ja, en} pair shape are
-// specific to that one file's known layout, but gating on the filename too
-// means a same-shaped "tr" var introduced elsewhere would not silently gain
-// this exemption. Only the two-element composite literals directly inside the
-// "tr" var declaration count; every other literal in the file, including the
-// English element of the same pair, is checked normally.
-func japaneseSideLiterals(path string, f *ast.File) map[*ast.BasicLit]bool {
-	skip := make(map[*ast.BasicLit]bool)
-	if filepath.Base(filepath.ToSlash(path)) != "i18n.go" {
-		return skip
-	}
-	for _, decl := range f.Decls {
-		gd, ok := decl.(*ast.GenDecl)
-		if !ok || gd.Tok != token.VAR {
-			continue
-		}
-		for _, spec := range gd.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "tr" {
-				continue
-			}
-			for _, val := range vs.Values {
-				mapLit, ok := val.(*ast.CompositeLit)
-				if !ok {
-					continue
-				}
-				for _, elt := range mapLit.Elts {
-					kv, ok := elt.(*ast.KeyValueExpr)
-					if !ok {
-						continue
-					}
-					pair, ok := kv.Value.(*ast.CompositeLit)
-					if !ok || len(pair.Elts) != 2 {
-						continue
-					}
-					if lit, ok := pair.Elts[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-						skip[lit] = true
-					}
-				}
-			}
-		}
-	}
-	return skip
+// finding is one string literal that contains a round parenthesis and is not
+// covered by any exclusion.
+type finding struct {
+	relPath string
+	line    int
+	literal string // source text of the literal, including its quotes or backticks
 }
 
-// findParens walks the parsed file and returns "path:line: literal" for every
+func (h finding) String() string {
+	entry := normalize(h.relPath, h.literal)
+	return fmt.Sprintf("%s:%d: %s\n    if this is a legitimate exception, add this line to %s:\n    %s",
+		h.relPath, h.line, strings.TrimSpace(h.literal), allowlistPath, entry)
+}
+
+// findParens walks the parsed file, whose content came from the file at
+// relPath relative to the repository root, and returns one finding for every
 // string literal that contains a round parenthesis and isn't covered by the
-// SQL, i18n.go-Japanese-side, or allowlist exclusions.
-func findParens(path string, fset *token.FileSet, f *ast.File, allow map[string]bool) []string {
-	var hits []string
-	skip := japaneseSideLiterals(path, f)
+// SQL, Japanese-content, or allowlist exclusions.
+func findParens(relPath string, fset *token.FileSet, f *ast.File, allow map[string]bool) []finding {
+	var hits []finding
 	ast.Inspect(f, func(n ast.Node) bool {
 		lit, ok := n.(*ast.BasicLit)
 		if !ok || lit.Kind != token.STRING {
-			return true
-		}
-		if skip[lit] {
 			return true
 		}
 		value, uerr := strconv.Unquote(lit.Value)
@@ -158,11 +160,14 @@ func findParens(path string, fset *token.FileSet, f *ast.File, allow map[string]
 		if sqlKeyword.MatchString(value) {
 			return true
 		}
-		pos := fset.Position(lit.Pos())
-		if allow[normalize(pos.Filename, lit.Value)] {
+		if containsJapanese(value) {
 			return true
 		}
-		hits = append(hits, fmt.Sprintf("%s:%d: %s", pos.Filename, pos.Line, strings.TrimSpace(lit.Value)))
+		if allow[normalize(relPath, lit.Value)] {
+			return true
+		}
+		pos := fset.Position(lit.Pos())
+		hits = append(hits, finding{relPath: relPath, line: pos.Line, literal: lit.Value})
 		return true
 	})
 	return hits
@@ -178,14 +183,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	var hits []string
+	var hits []finding
 	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
-			base := info.Name()
-			if base == "experiments" || base == "notes" || base == ".git" || base == "vendor" || base == "scripts" {
+			if skipDirs[info.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
@@ -193,12 +197,17 @@ func main() {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
+		relPath, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		relPath = filepath.ToSlash(relPath)
 		fset := token.NewFileSet()
 		f, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {
 			return nil
 		}
-		hits = append(hits, findParens(path, fset, f, allow)...)
+		hits = append(hits, findParens(relPath, fset, f, allow)...)
 		return nil
 	})
 	if err != nil {
@@ -210,11 +219,11 @@ func main() {
 		if len(hits) == 1 {
 			plural = ""
 		}
-		fmt.Fprintf(os.Stderr, "round parenthesis found in %d string literal%s; tests, SQL text, and the Japanese side of i18n.go are excluded:\n", len(hits), plural)
+		fmt.Fprintf(os.Stderr, "round parenthesis found in %d string literal%s; tests, SQL text, and Japanese-language literals are excluded:\n", len(hits), plural)
 		for _, h := range hits {
-			fmt.Fprintln(os.Stderr, h)
+			fmt.Fprintln(os.Stderr, h.String())
 		}
-		fmt.Fprintf(os.Stderr, "use a colon, a semicolon, or a separate sentence instead; if this is a legitimate exception, add it to %s\n", allowlistPath)
+		fmt.Fprintln(os.Stderr, "use a colon, a semicolon, or a separate sentence instead")
 		os.Exit(1)
 	}
 	fmt.Println("OK: no round parentheses in English string literals")

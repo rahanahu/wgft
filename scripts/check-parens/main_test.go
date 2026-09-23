@@ -53,6 +53,25 @@ func TestSQLKeyword(t *testing.T) {
 	}
 }
 
+func TestContainsJapanese(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"Bad (English) text", false},
+		{"got %v (want %v)", false},
+		{"%d日 %d時間", true},      // hours-ago format from webui.go
+		{"%d分前", true},          // minutes-ago format from webui.go
+		{"ルール %s(%s 経由)", true}, // i18n.go's Japanese side of a tr pair
+	}
+	for _, tc := range cases {
+		if got := containsJapanese(tc.s); got != tc.want {
+			t.Errorf("containsJapanese(%q) = %v, want %v", tc.s, got, tc.want)
+		}
+	}
+}
+
 func TestLoadAllowlist(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -114,15 +133,37 @@ func TestFindParensReportsAndExcludes(t *testing.T) {
 	if len(hits) != 1 {
 		t.Fatalf("findParens: got %d hits, want 1: %v", len(hits), hits)
 	}
-	if !strings.Contains(hits[0], `got %v (want %v)`) {
+	if !strings.Contains(hits[0].String(), `got %v (want %v)`) {
 		t.Errorf("findParens: hit %q does not report the expected literal", hits[0])
 	}
 }
 
-// i18nSrc mirrors internal/vpsd/admin/i18n.go's shape closely enough to
-// exercise japaneseSideLiterals: a Japanese element with a round
-// parenthesis, which must be skipped, next to an English element that must
-// still be checked.
+// TestFindParensHitIncludesAllowlistLine covers requirement D: a reported
+// hit must carry the exact "path:literal" line a developer can paste into
+// scripts/check-parens-allowlist.txt, since that differs from the
+// "path:line: literal" form used to locate the hit in the source.
+func TestFindParensHitIncludesAllowlistLine(t *testing.T) {
+	t.Parallel()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "sample.go", findParensSrc, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := findParens("sample.go", fset, f, nil)
+	if len(hits) != 2 {
+		t.Fatalf("findParens: got %d hits, want 2: %v", len(hits), hits)
+	}
+	for _, h := range hits {
+		want := normalize(h.relPath, h.literal)
+		if !strings.Contains(h.String(), want) {
+			t.Errorf("finding.String() = %q, want it to contain the allowlist-ready line %q", h.String(), want)
+		}
+	}
+}
+
+// i18nSrc mirrors internal/vpsd/admin/i18n.go's tr map shape: a Japanese
+// element with a round parenthesis, which must be skipped by content, next
+// to an English element that must still be checked.
 const i18nSrc = `package admin
 
 var tr = map[string][2]string{
@@ -131,34 +172,64 @@ var tr = map[string][2]string{
 }
 `
 
-func TestFindParensSkipsI18nJapaneseSideOnly(t *testing.T) {
+func TestFindParensSkipsJapaneseContentAnywhere(t *testing.T) {
 	t.Parallel()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "i18n.go", i18nSrc, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hits := findParens("i18n.go", fset, f, nil)
-	if len(hits) != 1 {
-		t.Fatalf("findParens on i18n.go: got %d hits, want 1: %v", len(hits), hits)
-	}
-	if !strings.Contains(hits[0], "Bad (English) text") {
-		t.Errorf("findParens on i18n.go: hit %q, want the English-side violation", hits[0])
+	// Unlike the i18n.go-specific AST walk this replaced, the Japanese-content
+	// exclusion is not gated on the file name: it applies the same way in
+	// i18n.go, in webui.go, or in any other file, since it is a property of
+	// the literal's own text, not its position in a known map shape.
+	for _, name := range []string{"i18n.go", "webui.go", "other.go"} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, name, i18nSrc, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hits := findParens(name, fset, f, nil)
+		if len(hits) != 1 {
+			t.Fatalf("findParens on %s: got %d hits, want 1 (only the English-side violation): %v", name, len(hits), hits)
+		}
+		if !strings.Contains(hits[0].String(), "Bad (English) text") {
+			t.Errorf("findParens on %s: hit %q, want the English-side violation", name, hits[0])
+		}
 	}
 }
 
-// TestFindParensTrExemptionIsFilenameGated confirms the {ja, en} exemption is
-// specific to i18n.go: the same tr-map shape in another file gets no special
-// treatment, so its first element is checked like any other literal.
-func TestFindParensTrExemptionIsFilenameGated(t *testing.T) {
+// webuiSrc mirrors webui.go's locale-branching relative-time helpers: a
+// Japanese-language format string with a round parenthesis (not present in
+// the real file today, but exercising the same shape a future one could
+// take) next to the English format the locale branch uses instead.
+const webuiSrc = `package admin
+
+func relTime(locale string, days, hours int) string {
+	if locale == "en" {
+		return fmt.Sprintf("%dd %dh", days, hours)
+	}
+	return fmt.Sprintf("%d日(%d時間)", days, hours)
+}
+`
+
+func TestFindParensSkipsJapaneseFormatStringInWebui(t *testing.T) {
 	t.Parallel()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "other.go", i18nSrc, 0)
+	f, err := parser.ParseFile(fset, "webui.go", webuiSrc, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hits := findParens("other.go", fset, f, nil)
-	if len(hits) != 2 {
-		t.Fatalf("findParens on other.go: got %d hits, want 2 (both the ja and en violations): %v", len(hits), hits)
+	hits := findParens("webui.go", fset, f, nil)
+	if len(hits) != 0 {
+		t.Fatalf("findParens on webui.go: got %d hits, want 0 (the only paren-bearing literal is Japanese): %v", len(hits), hits)
+	}
+}
+
+func TestNormalizeUsesRootRelativePath(t *testing.T) {
+	t.Parallel()
+	// findParens is always called with a path already relative to the
+	// repository root (main computes it via filepath.Rel before parsing), so
+	// the allowlist key never depends on whether the check was invoked with
+	// a relative or an absolute root argument.
+	got := normalize("cmd/wgft/main.go", `"(devel)"`)
+	want := `cmd/wgft/main.go:"(devel)"`
+	if got != want {
+		t.Errorf("normalize = %q, want %q", got, want)
 	}
 }
