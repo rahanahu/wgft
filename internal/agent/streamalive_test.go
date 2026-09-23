@@ -396,7 +396,7 @@ func TestPingLoopIsOffWithoutAnInterval(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rt.pingLoop(context.Background(), nil) // ws を触るなら nil で落ちる
+		rt.pingLoop(context.Background(), nil, 0) // ws を触るなら nil で落ちる
 		closed.Store(true)
 	}()
 	select {
