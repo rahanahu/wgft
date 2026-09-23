@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # portable-test-packages prints the package list that CI's windows-test and macos-test jobs
-# hand to `go test`: every package that builds for the current GOOS, minus the ones with
-# known pre-existing failures there.
+# hand to `go test`: every package that builds for the current GOOS, minus a short skip list.
+# The reason for skipping is not the same for every package or every GOOS: see the comment
+# above the list below for which runner each failure is confirmed on.
 #
 # The list used to be written out in .github/workflows/ci.yml, once per job. A package added
 # later was covered on Linux by `go test ./...` but stayed invisible on Windows and macOS
@@ -10,9 +11,9 @@
 # is tested on Windows and macOS as soon as it exists.
 #
 # `go test ./...` is still not what the jobs run, for the reason that put an explicit list
-# there in the first place. The packages named below fail on those runners today for reasons
-# that predate this script, and running them would turn both jobs red for every change.
-# Naming them here limits the exclusion to those packages, instead of excluding everything
+# there in the first place. Skipping a package here is not a claim that it fails on both
+# jobs; the comment above the list says which runner each failure is confirmed on. Naming
+# the packages here limits the exclusion to those packages, instead of excluding everything
 # that nobody added to a list.
 #
 # The Linux-only packages need no naming: `go list ./...` leaves out a directory whose files
