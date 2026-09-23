@@ -5,7 +5,8 @@ name: CI
 # actually runs on GitHub's runners; the rest gate lab-only B-class tests (B1, B2, B3, B7, B9,
 # B10) that need Incus and never run here.
 #
-#   go_code -> **/*.go, go.mod, go.sum -> gates windows-test (B4), macos-test (B8)
+#   go_code -> **/*.go, go.mod, go.sum, scripts/portable-test-packages.sh
+#               -> gates windows-test (B4), macos-test (B8)
 #
 #     This is wider than the table's own agent-platform trigger (internal/agent/**,
 #     internal/flock/**, internal/dataplane/userspace/relay/**,
@@ -131,6 +132,9 @@ jobs:
               - '**/*.go'
               - 'go.mod'
               - 'go.sum'
+              # The script that decides which packages windows-test and macos-test run. A
+              # change to it changes what those two jobs test, so it has to run them.
+              - 'scripts/portable-test-packages.sh'
             build:
               - '.goreleaser.yaml'
               - 'scripts/build-release.sh'
@@ -229,12 +233,16 @@ jobs:
       - name: test
         run: go test ./...
       # The agent and the CLI also build for Windows and macOS (the server is Linux only). Nothing
-      # is run there; this only keeps those builds from breaking.
+      # is run there; this only keeps those builds from breaking. `go vet ./...` is what the
+      # vet covers, rather than a written-out list of packages: a wildcard pattern leaves out
+      # the directories whose files are all excluded by a `//go:build linux` tag, so it reaches
+      # exactly the packages the target GOOS builds, and a package added later is vetted for
+      # these four targets without anyone updating a list here.
       - name: cross-build for windows and darwin
         run: |
           for target in windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/wgft
-            GOOS=${target%/*} GOARCH=${target#*/} go vet ./cmd/... ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/dataplane/userspace/utun/... ./internal/flock/...
+            GOOS=${target%/*} GOARCH=${target#*/} go vet ./...
           done
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
@@ -246,14 +254,15 @@ jobs:
     # keep the rest of the tree buildable on Windows (#109); without a step that actually
     # runs `go build ./...` / `go vet ./...` here, a later file added to one of those
     # packages without that tag would stay green and silently break the Windows build
-    # again. It then runs the packages that actually build and pass on native Windows
-    # today: the agent (including its credentials/ACL handling), the relay it shares with
-    # the server's userspace mode, flock, the CLI, and the server's userspace tunnel bind
-    # (internal/dataplane/userspace/utun); the parent internal/dataplane/userspace package
-    # is excluded because TestPrepareBindFailureIsFailClosed fails there on native Windows
-    # (issue #109). `go test ./...` is deliberately not run here: internal/dataplane/userspace,
-    # internal/vpsd/store and tools/labhost have known pre-existing POSIX-assumption test
-    # failures on native Windows.
+    # again. It then runs every package that builds for Windows except the ones with known
+    # pre-existing failures there. scripts/portable-test-packages.sh computes that list and
+    # holds the exclusions with their reasons, so a package added later is tested here
+    # without anyone updating a list in this file; the list used to be written out in this
+    # job and in macos-test, and a package left out of both stayed untested on Windows and
+    # macOS while `go test ./...` on Linux made it look covered. `go test ./...` is still
+    # deliberately not what runs here: internal/dataplane/userspace, internal/vpsd/store and
+    # tools/labhost have known pre-existing POSIX-assumption test failures on native Windows,
+    # and the script names exactly those.
     #
     # Gated by go_code, not by the table's agent-platform trigger (B4, see the header
     # comment for why). Runs whenever the changes job could not tell (run_all, including
@@ -278,10 +287,12 @@ jobs:
       - name: vet
         run: go vet ./...
       - name: test
-        run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/dataplane/userspace/utun/... ./internal/flock/... ./cmd/wgft/...
+        shell: bash
+        run: go test $(bash scripts/portable-test-packages.sh)
 
   macos-test:
-    # Runs the same packages as windows-test, on GitHub's Apple silicon runner, including
+    # Runs the same packages as windows-test, from the same
+    # scripts/portable-test-packages.sh, on GitHub's Apple silicon runner, including
     # internal/dataplane/userspace/utun: its inprocess_forward_test.go
     # (TestAgentServerInProcessForwarding) is cross-platform and this is where it gives B8
     # coverage (docs/testing.md). utun's bind_windows_test.go carries its own
@@ -307,7 +318,8 @@ jobs:
         with:
           go-version: "1.27.x"
       - name: test
-        run: go test ./internal/agent/... ./internal/dataplane/userspace/relay/... ./internal/dataplane/userspace/tunnel/... ./internal/dataplane/userspace/utun/... ./internal/flock/... ./cmd/wgft/...
+        shell: bash
+        run: go test $(bash scripts/portable-test-packages.sh)
 
   release-snapshot:
     # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,
