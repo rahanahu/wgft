@@ -163,12 +163,11 @@ and it sets no threshold of its own. There, a label and its value print with
 no status word, so a healthy agent's six UNKNOWNs do not read as six findings.
 When a value cannot be read, for example because the agent is stopped, the
 item prints SKIPPED with its status word, so a missing value is not mistaken
-for an observed one. The last handshake is shown as a
-fact for the same reason as these six, but it stays inside the tunnel item in
-the Tunnel group, since that item's own status can be OK or FAILED.
+for an observed one. The last handshake is shown as a fact for the same reason
+as these six, but it stays inside the tunnel item in the Tunnel group, since
+that item's own status can be OK or FAILED.
 
-How to read the six values; --json carries the same guidance in each item's
-"next":
+How to read the six values; --json keeps each item's own "next":
 
   reconnect backoff  a wait that keeps growing while the control connection
                      stays down points at the server or the line to it
@@ -188,10 +187,11 @@ How to read the six values; --json carries the same guidance in each item's
                      its share, reserve that the room left was held for
                      other rules
 
-The Connection, Tunnel and Relay items other than "wg endpoint resolve" are held
-only by the running process and are read over its control socket. While the
-agent is stopped, or while its socket cannot be reached, they are listed as
-SKIPPED with the reason why rather than left out. One of them, the target
+The Connection, Tunnel and Relay items other than "wg endpoint resolve", and
+the six items printed under Observed values, are held only by the running
+process and are read over its control socket. While the agent is stopped, or
+while its socket cannot be reached, they are listed as SKIPPED with the reason
+why rather than left out. One of them, the target
 allowlist, reads UNKNOWN instead while no process is running or while that
 cannot be settled: the list is a setting, so evidence for it exists somewhere,
 but only the running process says which list it is holding. Two answers about that socket

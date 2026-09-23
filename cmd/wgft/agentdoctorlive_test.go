@@ -734,6 +734,35 @@ func TestAgentDoctorHumanOutputKeepsTheStatusWordWhenAnObservedValueIsSkipped(t 
 	}
 }
 
+// Observed values 節で値を読めた行は、ラベルと同じ行から値を始め、長い値は値の桁(21 桁目)で
+// 折り返す。「Not tested by this command」の節と同じ形である(10.2c 節)。
+func TestAgentDoctorObservedValuesStartOnTheLabelLine(t *testing.T) {
+	detail := strings.Repeat("word ", 30) + "end"
+	var b strings.Builder
+	writeAgentDoctorObserved(&b, []agentDoctorCheck{{
+		ID: agentCheckTransfer, Label: "transfer", Status: statusUnknown, Reason: agentReasonNoThreshold,
+		Detail: detail, valueOnly: true,
+	}})
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	// lines[0] は空行、lines[1] は節の見出しである。
+	if len(lines) < 4 || lines[1] != "Observed values" {
+		t.Fatalf("want the heading, the label line and at least one continuation line:\n%s", b.String())
+	}
+	first := fmt.Sprintf("  %-*s word ", labelWidth, "transfer")
+	if !strings.HasPrefix(lines[2], first) {
+		t.Errorf("the value does not start on the label's line; want the prefix %q:\n%s", first, b.String())
+	}
+	valueColumn := 2 + labelWidth + 1
+	for _, line := range lines[3:] {
+		if len(line) <= valueColumn || strings.TrimSpace(line[:valueColumn]) != "" || line[valueColumn] == ' ' {
+			t.Errorf("continuation line %q does not start at the value column %d:\n%s", line, valueColumn+1, b.String())
+		}
+	}
+	if got := normalizeWhitespace(strings.Join(lines[2:], " ")); got != "transfer "+normalizeWhitespace(detail) {
+		t.Errorf("the value was not printed whole: %q", got)
+	}
+}
+
 // Observed values 節で UNKNOWN 以外の状態になった行は、判定済みの検査と同じく状態語と Next を
 // 出す。値そのものを読めなかったことと、その次に見るものを落とさないためである(10.2c 節)。
 func TestAgentDoctorObservedValuesKeepNextWhenNotAValue(t *testing.T) {
