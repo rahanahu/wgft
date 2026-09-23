@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -42,20 +43,22 @@ func listenControl(path string) (net.Listener, error) {
 	return ln, explainControlErr(path, err)
 }
 
-// serveControl は制御ソケットで 1 行の指示を受ける。今あるのは rotate-key だけ。
+// serveControl は制御ソケットで 1 行の指示を受ける。今あるのは rotate-key と doctor である。
+// 応答の形式は指示ごとに定める。rotate-key は 1 行のテキスト、doctor は 1 行の JSON を返す
+// (設計文書 10.2c 節)。要求は今までどおり行ベースで、ソケットの framing は変わらない。
 func (rt *runtime) serveControl(ctx context.Context) {
 	path := ControlPath(rt.opts.CredentialsPath)
 	os.Remove(path)
 	ln, err := listenControl(path)
 	if err != nil {
-		log.Printf("cannot open control socket %s: %v; rotate-key only works while the agent is stopped", path, err)
+		log.Printf("cannot open control socket %s: %v; rotate-key works only while the agent is stopped, and agent doctor cannot read this agent's live state", path, err)
 		return
 	}
 	// credentials.SecureSocket はこのソケットだけを単独で締める(Windows は保護 DACL で
 	// 失敗を伝える。Unix はこの修正より前と同じく 0600 の chmod で、失敗は無視する。
 	// 仕様 9・11a 節)。秘密は持たないが、agent.json と同じ基準にそろえる。
 	if err := credentials.SecureSocket(path); err != nil {
-		log.Printf("cannot secure control socket %s: %v; rotate-key only works while the agent is stopped", path, err)
+		log.Printf("cannot secure control socket %s: %v; rotate-key works only while the agent is stopped, and agent doctor cannot read this agent's live state", path, err)
 		ln.Close()
 		os.Remove(path)
 		return
@@ -68,24 +71,68 @@ func (rt *runtime) serveControl(ctx context.Context) {
 		}
 		go func() {
 			defer c.Close()
-			c.SetDeadline(time.Now().Add(30 * time.Second))
-			line, err := bufio.NewReader(c).ReadString('\n')
-			if err != nil {
-				return
-			}
-			switch strings.TrimSpace(line) {
-			case "rotate-key":
-				pub, err := rt.rotateKey()
-				if err != nil {
-					fmt.Fprintf(c, "error: %v\n", err)
-					return
-				}
-				fmt.Fprintf(c, "ok %s\n", pub)
-			default:
-				fmt.Fprintf(c, "error: unknown command\n")
-			}
+			rt.serveControlConn(c)
 		}()
 	}
+}
+
+// serveControlConn は制御ソケットの接続を 1 つ処理する。
+//
+// 応答を組む処理が panic しても、常駐プロセスごと落とさない(設計文書 10.2c 節)。診断のために
+// 転送を止めないためである。rotate-key が触る値は少ないが、doctor は多くの値を触る。受け止めた
+// 場合は接続だけを閉じ、まだ応答を書いていなければ、何が起きたかが分かる応答を返す。
+func (rt *runtime) serveControlConn(c net.Conn) {
+	var cmd string
+	answered := false
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		log.Printf("control socket: recovered from a panic while answering %q: %v\n%s", cmd, r, debug.Stack())
+		if answered {
+			// 途中まで書いた応答に足すと、読み手には壊れた 1 行になる。接続を閉じるだけにする
+			return
+		}
+		c.Write(controlPanicAnswer(cmd, r))
+	}()
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+	line, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil {
+		return
+	}
+	cmd = strings.TrimSpace(line)
+	answer := rt.answerControl(cmd)
+	answered = true
+	c.Write(answer)
+}
+
+// answerControl は 1 つの指示に対する応答を組む。応答の形式は指示ごとに定める。rotate-key は
+// 1 行のテキスト、doctor は 1 行の JSON である(設計文書 10.2c 節)。
+func (rt *runtime) answerControl(cmd string) []byte {
+	switch cmd {
+	case "rotate-key":
+		pub, err := rt.rotateKey()
+		if err != nil {
+			return []byte(fmt.Sprintf("error: %v\n", err))
+		}
+		return []byte(fmt.Sprintf("ok %s\n", pub))
+	case DoctorCommand:
+		return rt.doctorResponseLine()
+	}
+	// 新しい実行ファイルを置いてから常駐プロセスを再起動するまでの間、新しい CLI が送る doctor は
+	// 古い常駐プロセスのこの分岐に当たる。CLI はこれを、稼働中の診断が取れない場合として扱う
+	// (設計文書 10.2c 節)。版の交渉も capability も要らない
+	return []byte("error: unknown command\n")
+}
+
+// controlPanicAnswer は panic を受け止めたときの応答である。形式は指示に合わせる。
+func controlPanicAnswer(cmd string, r any) []byte {
+	msg := fmt.Sprintf("the agent panicked while answering this request: %v", r)
+	if cmd == DoctorCommand {
+		return doctorErrorLine(msg)
+	}
+	return []byte("error: " + msg + "\n")
 }
 
 // rotateKey は wg 鍵対を作り直し、トンネルを新しい鍵で張り直し、stream を張り直す(新しい公開鍵を宣言する)。
