@@ -35,7 +35,8 @@ type Options struct {
 	Limits resource.Limits
 	// UDPPool と TCPPool はプロセス全体の予算と、そこから導くルールごとの上限と隔離予約
 	// (仕様 7 節、設計文書 7a.10 節の Resource Guard)。nil なら Limits から作る。
-	// vpsd はプロキシモードの中継と共有する Pool を渡す
+	// 今の呼び出し側はどちらも渡さない。vpsd は Limits だけを渡し、この Manager が作った Pool を
+	// TCPPool() から読んでプロキシモードの中継に渡すので、同時接続数は合計で数える(仕様 7 節)
 	UDPPool *resource.Pool
 	TCPPool *resource.Pool
 	Dial    func(network, addr string) (net.Conn, error)

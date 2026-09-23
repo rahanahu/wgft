@@ -65,6 +65,11 @@ type runtime struct {
 	reconnectBackoffMin time.Duration
 	reconnectBackoffMax time.Duration
 
+	// doctorLockWait は制御ソケットの doctor が実行時の状態を守る排他を待つ期限
+	// (設計文書 10.2c 節)。0 以下なら defaultDoctorLockWait を使う。テストで短くできるよう
+	// runtime に持たせる
+	doctorLockWait time.Duration
+
 	// handshakeWake は、WireGuard の新しいハンドシェイクを checkTunnel が観測したことを streamLoop に
 	// 伝えるサイズ 1 の非ブロッキングチャネル(仕様 5.2 節)。streamLoop はこれを受けて再接続の待ちを
 	// 打ち切る。チャネルにしてあるのは、rt.mu を持ったまま streamMu を取らないためである。
@@ -147,6 +152,7 @@ func Run(opts Options) error {
 		pongTimeout:            20 * time.Second,
 		reconnectBackoffMin:    defaultReconnectBackoffMin,
 		reconnectBackoffMax:    defaultReconnectBackoffMax,
+		doctorLockWait:         defaultDoctorLockWait,
 		handshakeWake:          make(chan struct{}, 1),
 		rebuild:                rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
 	}
@@ -277,6 +283,18 @@ func (s *rebuildState) failedBuild(now time.Time) {
 // rotate-key や停止でトンネルを閉じた場合も消える。
 func (s *rebuildState) clearRetry() { s.retryAt, s.retryWait = time.Time{}, 0 }
 
+// effectiveWait は step が判定に使う作り直しの間隔である。保持している値と閾値の大きい方で、
+// 閾値を下回らない。ゼロでない最終ハンドシェイクを一度も観測しておらず作り直しも一度も起きて
+// いないトンネルでは wait が 0 のままだが、その場合も判定は閾値で動く。doctor はこの実効値を
+// 示すので(設計文書 10.2c 節)、step と同じ式をここに一本化する。閾値を持たない runtime は
+// 作り直さないので 0 を返す。
+func (s *rebuildState) effectiveWait() time.Duration {
+	if s.after <= 0 {
+		return 0
+	}
+	return max(s.wait, s.after)
+}
+
 // step は、今の最終ハンドシェイクの値 handshake を観測し、その値が新しくならないまま経った時間で
 // トンネルを作り直すかどうかを決める(仕様 7 節)。作り直すときは次の間隔を倍にし、ゼロでない新しい
 // ハンドシェイクを観測したときは間隔を初期値に戻す。
@@ -302,7 +320,7 @@ func (s *rebuildState) step(now, start, handshake time.Time) (idle time.Duration
 		since = start
 	}
 	idle = now.Sub(since)
-	wait := max(s.wait, s.after)
+	wait := s.effectiveWait()
 	if idle < wait {
 		return idle, false
 	}
@@ -483,6 +501,32 @@ func (rt *runtime) heartbeat() proto.Heartbeat {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	hb := proto.Heartbeat{Generation: rt.gen, Rules: []proto.RuleStatus{}}
+	tun := rt.tunnelSnapshotLocked()
+	hb.Tunnel = tun.hb
+	if !tun.present {
+		return hb
+	}
+	hb.Rules = ruleStatuses(rt.rl.Status())
+	return hb
+}
+
+// readTunnelStatus はトンネルの状態を 1 回読む。値は tunnel.Tunnel.Status で、テストだけが
+// 読みの回数と、1 つの応答に混ざる時点を確かめるために差し替える。
+var readTunnelStatus = (*tunnel.Tunnel).Status
+
+// tunnelSnapshot はトンネルの状態の写しである。present はトンネルがあるかどうか、hb はハートビートに
+// 載せる形、raw は読んだままの値である。送受信バイト数は proto.TunnelStatus に載らないので raw
+// にしかなく、present が偽のときの raw に意味は無い。
+type tunnelSnapshot struct {
+	present bool
+	hb      proto.TunnelStatus
+	raw     tunnel.Status
+}
+
+// tunnelSnapshotLocked はトンネルの状態を 1 回だけ読み、ハートビートと doctor が共有する写しを返す
+// (設計文書 10.2c 節)。呼び出し側は rt.mu を持つ。doctor が別に読み直す形にすると、送受信
+// バイト数と最終ハンドシェイクが 1 つの応答の中で異なる時点の値になる。
+func (rt *runtime) tunnelSnapshotLocked() tunnelSnapshot {
 	if rt.tun == nil {
 		// トンネルが無い理由は 4 通りある。作成に失敗して試し直しを待っている場合(仕様 7 節)、
 		// 作成が wg 設定の誤りで終わって次の全体状態を待っている場合、全体状態をまだ受け取っていない
@@ -496,22 +540,30 @@ func (rt *runtime) heartbeat() proto.Heartbeat {
 		case rt.f == nil || rt.f.LastState == nil:
 			reason = "no tunnel; full state not received"
 		}
-		hb.Tunnel = proto.TunnelStatus{State: proto.StatusError, Reason: reason}
-		return hb
+		return tunnelSnapshot{hb: proto.TunnelStatus{State: proto.StatusError, Reason: reason}}
 	}
-	ts := rt.tun.Status()
-	hb.Tunnel = proto.TunnelStatus{State: proto.StatusOK, LastHandshake: ts.LastHandshake}
+	// Status が読むのは今の device なので、最終ハンドシェイクは必ず今のトンネルのものである。
+	// watchdog が rebuildState に持つ値は closeLocked が消さず、立て直した直後は前のトンネルの
+	// 値が残るので、2 つを混ぜない(設計文書 10.2c 節)
+	ts := readTunnelStatus(rt.tun)
+	snap := tunnelSnapshot{present: true, raw: ts, hb: proto.TunnelStatus{State: proto.StatusOK, LastHandshake: ts.LastHandshake}}
 	if ts.Endpoint.IsValid() {
-		hb.Tunnel.Endpoint = ts.Endpoint.String()
+		snap.hb.Endpoint = ts.Endpoint.String()
 	}
 	if ts.Err != nil {
-		hb.Tunnel.State, hb.Tunnel.Reason = proto.StatusError, ts.Err.Error()
+		snap.hb.State, snap.hb.Reason = proto.StatusError, ts.Err.Error()
 	} else if ts.LastHandshake.IsZero() {
-		hb.Tunnel.State, hb.Tunnel.Reason = proto.StatusError, reasonHandshakePending
+		snap.hb.State, snap.hb.Reason = proto.StatusError, reasonHandshakePending
 	}
-	// ルールの状態は所属リスナーの合成。1 つでも error なら error
+	return snap
+}
+
+// ruleStatuses はリスナーの状態からルールごとの状態を合成する(仕様 5.2 節)。1 つでも error なら
+// そのルールは error である。ハートビートと doctor が同じ判定を使うので、この 1 か所に置く
+// (設計文書 10.2c 節)。呼び出し側は Manager.Status の結果を 1 回だけ読んで渡す。
+func ruleStatuses(sts []relay.Status) []proto.RuleStatus {
 	byRule := map[string]*proto.RuleStatus{}
-	for _, s := range rt.rl.Status() {
+	for _, s := range sts {
 		r := byRule[s.RuleID]
 		if r == nil {
 			r = &proto.RuleStatus{ID: s.RuleID, State: proto.StatusOK}
@@ -521,11 +573,12 @@ func (rt *runtime) heartbeat() proto.Heartbeat {
 			r.State, r.Reason = proto.StatusError, fmt.Sprintf("%s: %v", s.Key, s.Err)
 		}
 	}
+	out := make([]proto.RuleStatus, 0, len(byRule))
 	for _, r := range byRule {
-		hb.Rules = append(hb.Rules, *r)
+		out = append(out, *r)
 	}
-	sort.Slice(hb.Rules, func(i, j int) bool { return hb.Rules[i].ID < hb.Rules[j].ID })
-	return hb
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // logStatus は 30 秒ごとに呼ばれる(Run のティッカー)。毎回は出さず、前回のログと同じ内容なら黙る
