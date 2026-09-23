@@ -217,6 +217,11 @@ func TestServerTimeouts_IdleKeepAlive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	// start はリクエストを送る前に取る。サーバの idle タイマは応答を書き終えた時点で
+	// 始まるので、ここで取っておけばサーバ側の起点より確実に前になり、以後に測る経過は
+	// 必ず IdleTimeout 以上になる。応答を読み終えたあとに取ると、その間にサーバのタイマが
+	// 既に進んでいるぶん、経過が IdleTimeout を下回ることがある。
+	start := time.Now()
 	if _, err := fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: example\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +234,6 @@ func TestServerTimeouts_IdleKeepAlive(t *testing.T) {
 	resp.Body.Close()
 
 	// リクエストを完了させたあと、何も送らずに待つ
-	start := time.Now()
 	conn.SetReadDeadline(start.Add(timeouts.IdleTimeout * 10))
 	buf := make([]byte, 16)
 	if _, err := conn.Read(buf); err == nil {
