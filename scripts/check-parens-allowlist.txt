@@ -1,0 +1,44 @@
+# Allowlist for scripts/check-parens: literals that legitimately contain a
+# round parenthesis for a reason other than SQL text or i18n.go's Japanese
+# side, which scripts/check-parens/main.go excludes structurally instead.
+#
+# Each entry is "path:trimmed literal", the literal exactly as it appears in
+# the source including its quotes or backticks, so an edit elsewhere in the
+# file doesn't cause drift. Blank lines and lines starting with # are ignored.
+# Keep this short: a growing list is a sign the exclusion belongs in code
+# instead.
+#
+# debug.ReadBuildInfo's build-info sentinel for a module with no VCS info.
+cmd/wgft/main.go:"(devel)"
+# Windows SDDL string: "(...)" is SDDL's own ACE syntax, not English prose.
+internal/agent/credentials/datadir_windows.go:"D:P(A;%s;FA;;;SY)(A;%s;FA;;;BA)(A;%s;FA;;;%s)"
+# Go enum-Stringer fallback format, mirroring stdlib conventions such as
+# time.Weekday's %!Weekday(7).
+internal/model/model.go:"Forwarding(%d)"
+internal/model/model.go:"SourceMetadata(%d)"
+internal/policy/policy.go:"Step(%d)"
+# Mimics gVisor's own AddProtocolAddress(...) call syntax in the wrapped
+# error, not an English aside.
+internal/nettun/nettun.go:"AddProtocolAddress(%v): %v"
+# Regexp literal: the parentheses are a capture group.
+internal/vpsd/store/agents.go:`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
+# SQLite DSN _pragma value; busy_timeout(5000) is the pragma's own call
+# syntax, not matched by the uppercase SQL-keyword exclusion because DSN
+# pragma names are lowercase.
+internal/vpsd/store/store.go:"mode=ro&_pragma=busy_timeout(5000)"
+# pid(name) diagnostic identifiers in the lab harness, not operator-facing
+# tool output.
+tools/labhost/main.go:"%d(%s)"
+tools/labhost/sandbox.go:"%d(%s)"
+tools/labhost/sandbox.go:"%s:%d(%s)"
+# doctor.go's firstClause separator list. Effectively unused since no
+# remaining Detail string contains " (the ...)" after the parens sweep in
+# #166, but it is itself a search token, not displayed text; left as-is per
+# that PR's own review.
+cmd/wgft/doctor.go:" (the "
+# internal/policy/admissiontest/run.go is test-fixture harness code (it takes
+# a *testing.T and calls t.Fatalf/t.Errorf) rather than a _test.go file, so it
+# isn't covered by the whole-file test exclusion; its failure messages are
+# seen by a developer running go test, not an operator.
+internal/policy/admissiontest/run.go:"%s: event %d (%s %s %s at %dms): %v"
+internal/policy/admissiontest/run.go:"%s: event %d (%s rule=%s src=%s flow=%s at %dms) = %q, want %q"

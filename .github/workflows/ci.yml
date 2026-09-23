@@ -375,7 +375,7 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   lint-output:
-    # Keeps tool output English (no Japanese in string literals) and punctuation ASCII
+    # Keeps tool output English, without round parentheses, and punctuation ASCII
     # in published files. Lab integration tests need Incus and are not run in CI
     # (see lab/README.md); they run on a developer VM.
     #
@@ -392,6 +392,8 @@ jobs:
           go-version: "1.27.x"
       - name: no Japanese in string literals
         run: go run ./scripts/check-japanese/
+      - name: no round parentheses in English string literals
+        run: go run ./scripts/check-parens/
       - name: ASCII punctuation in public files
         run: bash scripts/check-ascii-punct.sh
       - name: no token values in logs
