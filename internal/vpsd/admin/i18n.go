@@ -73,12 +73,16 @@ var tr = map[string][2]string{
 	"colAgent":     {"エージェント", "Agent"},
 	"colDest":      {"宛先", "Destination"},
 	"colMode":      {"方式", "Mode"},
-	"colDenied":    {"拒否数", "Denied"},
-	"colRestrict":  {"接続元制限", "Source restrictions"},
-	"applied":      {"適用済み", "Applied"},
-	"disabled":     {"無効", "Disabled"},
-	"agentOffline": {"エージェント未接続", "Agent offline"},
-	"stateError":   {"エラー", "Error"},
+	// 方式の列に出す PROXY protocol の印。PROXY protocol は仕様の固有の名前なので、
+	// 日本語でもそのままにする。i18n を通すのは、同じ概念を指す他の語がすべて T を
+	// 通っているためである。
+	"modeProxyProto": {"PROXY", "PROXY"},
+	"colDenied":      {"拒否数", "Denied"},
+	"colRestrict":    {"接続元制限", "Source restrictions"},
+	"applied":        {"適用済み", "Applied"},
+	"disabled":       {"無効", "Disabled"},
+	"agentOffline":   {"エージェント未接続", "Agent offline"},
+	"stateError":     {"エラー", "Error"},
 	// server のデータプレーンへの適用状態(設計文書 7a.3 節)
 	"serverNotActive": {"サーバーで未適用", "Not active on server"},
 	"serverPending":   {"サーバーで反映待ち", "Pending on server"},
