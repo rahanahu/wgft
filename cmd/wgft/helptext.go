@@ -200,7 +200,7 @@ the new public key over the stream, so nothing has to be done on the VPS.`,
 credentials, and can this host resolve the names it needs. Run it on the agent
 host, as the user the agent runs as. For the packaged systemd unit that user is
 wgft: runuser -u wgft -- wgft agent doctor. For a custom deployment, run it as
-whichever user actually runs the agent. Run as root instead, and host.privileges
+whichever user actually runs the agent. When run as root, host.privileges
 reads UNKNOWN with running_as_root, since root bypasses file permissions and
 this command cannot then say whether the agent's own user can reach them.
 Where "server doctor" answers how far a rule's traffic gets from the VPS,
