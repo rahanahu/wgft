@@ -693,6 +693,42 @@ func TestAgentDoctorHumanOutputSaysWhenEvidenceIsMissing(t *testing.T) {
 	}
 }
 
+// 稼働を判定できない実行では、宛先の許可一覧の所見も「判定できなかった」に揃える。同じ報告の
+// agent.process が判定できなかったと述べている横で、この検査だけがエージェントは動いていないと
+// 断定すると、動いているエージェントについて事実でないことを述べる(10.2c 節)。
+func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
+	unknown := agentRunState{State: flock.Unknown, Err: errors.New("permission denied"), PermissionDenied: true}
+	checks := agentLiveOnlyChecks(unknown)
+	var allow agentDoctorCheck
+	for _, c := range checks {
+		if c.ID == agentCheckAllowTargets {
+			allow = c
+		}
+	}
+	if allow.Status != statusUnknown || allow.Reason != agentReasonRunStateUnknown {
+		t.Fatalf("relay.allow_targets = %s/%q, want %s/%q", allow.Status, allow.Reason, statusUnknown, agentReasonRunStateUnknown)
+	}
+	if strings.Contains(allow.Detail, "no process holds it now") {
+		t.Errorf("relay.allow_targets says the agent is stopped although the run state could not be determined: %q", allow.Detail)
+	}
+	if !strings.Contains(allow.Detail, "could not be determined") {
+		t.Errorf("relay.allow_targets does not say the run state could not be determined: %q", allow.Detail)
+	}
+	if strings.HasPrefix(allow.Next, "start the agent") {
+		t.Errorf("relay.allow_targets tells the operator to start an agent that may already be running: %q", allow.Next)
+	}
+	// 停止していると判定できた実行は、今までどおり停止中の文面のままである。
+	stopped := agentLiveOnlyChecks(agentRunState{State: flock.Absent})
+	for _, c := range stopped {
+		if c.ID != agentCheckAllowTargets {
+			continue
+		}
+		if !strings.Contains(c.Detail, "no process holds it now") {
+			t.Errorf("a stopped agent's relay.allow_targets lost the stopped wording: %q", c.Detail)
+		}
+	}
+}
+
 // --- 助け ---
 
 func testAgentDoctorInput(t *testing.T, dir string) agentDoctorInput {

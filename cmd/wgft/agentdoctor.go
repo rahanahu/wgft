@@ -787,11 +787,21 @@ func agentLiveOnlyChecks(run agentRunState) []agentDoctorCheck {
 // 原理的に読めるので、証拠になりうるものはあるが判定には使えないという UNKNOWN の定義に当たる。
 // agent.env と CLI 自身の環境変数から組み立てて次の起動で効く値として示す案は採らない。組み立てた
 // 値を次に起動するエージェントが実際に読むとは保証できないためである。
+//
+// 稼働を判定できない実行にも同じ UNKNOWN を当てるが、所見は分ける。同じ報告の agent.process が
+// 判定できなかったと述べている横で、この検査だけが止まっていると断定すると、動いているエージェント
+// について事実でないことを述べる。
 func agentAllowTargetsState(c *agentDoctorCheck, run agentRunState) {
 	if run.running() {
 		return
 	}
 	c.Status = statusUnknown
+	if run.undetermined() {
+		c.Detail = "the allowlist this agent enforces is the one its running process holds, and whether a process holds it now could not be determined"
+		c.Next = "settle whether an agent is running first: the process check above says why that could not be read here. " +
+			"Once it is settled, the value shown for a running agent is the one it actually enforces, not one rebuilt from the environment"
+		return
+	}
 	c.Detail = "the allowlist this agent enforces is the one its running process holds, and no process holds it now"
 	c.Next = "start the agent and re-run this command; the value shown then is the one it actually enforces, not one rebuilt from the environment"
 }
