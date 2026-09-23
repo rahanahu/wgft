@@ -8,7 +8,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -76,63 +75,40 @@ func (rt *runtime) serveControl(ctx context.Context) {
 	}
 }
 
-// serveControlConn は制御ソケットの接続を 1 つ処理する。
-//
-// 応答を組む処理が panic しても、常駐プロセスごと落とさない(設計文書 10.2c 節)。診断のために
-// 転送を止めないためである。rotate-key が触る値は少ないが、doctor は多くの値を触る。受け止めた
-// 場合は接続だけを閉じ、まだ応答を書いていなければ、何が起きたかが分かる応答を返す。
+// serveControlConn は制御ソケットの接続を 1 つ処理する。panic を受け止めるのは doctor の枝だけで、
+// その受け止めは doctorResponseLine の中にある。
 func (rt *runtime) serveControlConn(c net.Conn) {
-	var cmd string
-	answered := false
-	defer func() {
-		r := recover()
-		if r == nil {
-			return
-		}
-		log.Printf("control socket: recovered from a panic while answering %q: %v\n%s", cmd, r, debug.Stack())
-		if answered {
-			// 途中まで書いた応答に足すと、読み手には壊れた 1 行になる。接続を閉じるだけにする
-			return
-		}
-		c.Write(controlPanicAnswer(cmd, r))
-	}()
 	c.SetDeadline(time.Now().Add(30 * time.Second))
 	line, err := bufio.NewReader(c).ReadString('\n')
 	if err != nil {
 		return
 	}
-	cmd = strings.TrimSpace(line)
-	answer := rt.answerControl(cmd)
-	answered = true
-	c.Write(answer)
-}
-
-// answerControl は 1 つの指示に対する応答を組む。応答の形式は指示ごとに定める。rotate-key は
-// 1 行のテキスト、doctor は 1 行の JSON である(設計文書 10.2c 節)。
-func (rt *runtime) answerControl(cmd string) []byte {
-	switch cmd {
+	switch strings.TrimSpace(line) {
 	case "rotate-key":
+		// この枝には recover を置かない。抜けではなく、意図してそうしている。
+		//
+		// 設計文書 10.2c 節が recover を置く根拠は「rotate-key が触る値は少ないが、doctor は
+		// 多くの値を触る」であり、対象は doctor の枝である。rotateKey は rt.mu を defer では
+		// なく手で放し、その区間で認証情報ファイルの保存とトンネルの後始末を行う。この区間の
+		// panic をここで受け止めると、常駐プロセスは rt.mu を誰も放さないまま生き続ける。
+		// 既存の待ち受けは転送を続ける一方、ハートビート、トンネルの見張り、全体状態の適用、
+		// リスナーの再試行、次の doctor がすべて永久に止まり、service は active のまま無応答に
+		// なる。再起動の契機がどこにも無いので、落ちるより静かに悪い。落ちれば同梱の
+		// agent.service の Restart=on-failure が立て直す
 		pub, err := rt.rotateKey()
 		if err != nil {
-			return []byte(fmt.Sprintf("error: %v\n", err))
+			fmt.Fprintf(c, "error: %v\n", err)
+			return
 		}
-		return []byte(fmt.Sprintf("ok %s\n", pub))
+		fmt.Fprintf(c, "ok %s\n", pub)
 	case DoctorCommand:
-		return rt.doctorResponseLine()
+		c.Write(rt.doctorResponseLine())
+	default:
+		// 新しい実行ファイルを置いてから常駐プロセスを再起動するまでの間、新しい CLI が送る
+		// doctor は古い常駐プロセスのこの分岐に当たる。CLI はこれを、稼働中の診断が取れない
+		// 場合として扱う(設計文書 10.2c 節)。版の交渉も capability も要らない
+		fmt.Fprintf(c, "error: unknown command\n")
 	}
-	// 新しい実行ファイルを置いてから常駐プロセスを再起動するまでの間、新しい CLI が送る doctor は
-	// 古い常駐プロセスのこの分岐に当たる。CLI はこれを、稼働中の診断が取れない場合として扱う
-	// (設計文書 10.2c 節)。版の交渉も capability も要らない
-	return []byte("error: unknown command\n")
-}
-
-// controlPanicAnswer は panic を受け止めたときの応答である。形式は指示に合わせる。
-func controlPanicAnswer(cmd string, r any) []byte {
-	msg := fmt.Sprintf("the agent panicked while answering this request: %v", r)
-	if cmd == DoctorCommand {
-		return doctorErrorLine(msg)
-	}
-	return []byte("error: " + msg + "\n")
 }
 
 // rotateKey は wg 鍵対を作り直し、トンネルを新しい鍵で張り直し、stream を張り直す(新しい公開鍵を宣言する)。

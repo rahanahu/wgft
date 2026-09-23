@@ -3,6 +3,8 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"sort"
 	"time"
 
@@ -183,8 +185,20 @@ const defaultDoctorLockWait = 2 * time.Second
 var doctorSnapshot = (*runtime).collectDoctor
 
 // doctorResponseLine は制御ソケットに書く doctor の応答 1 行を組む。JSON は複数行にせず、
-// pretty-print もしない(設計文書 10.2c 節)。panic は呼び出し側の serveControlConn が受け止める。
-func (rt *runtime) doctorResponseLine() []byte {
+// pretty-print もしない(設計文書 10.2c 節)。
+//
+// 応答を組む処理が panic しても、常駐プロセスごと落とさない。診断のために転送を止めないためで
+// ある。受け止めが安全なのは、この経路が取る排他が、collectDoctor の rt.mu も、その下の中継と
+// フロー予算の排他も、すべて defer で放されるからである。持ったままになる排他は残らない。
+// 応答は 1 行を組み上げてから返し、書くのは呼び出し側なので、受け止めた応答が書きかけの行に
+// 足されることもない。rotate-key をこの受け止めに含めない理由は serveControlConn にある。
+func (rt *runtime) doctorResponseLine() (line []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("doctor: recovered from a panic while collecting the agent state: %v\n%s", r, debug.Stack())
+			line = doctorErrorLine(fmt.Sprintf("the agent panicked while collecting its state: %v", r))
+		}
+	}()
 	b, err := json.Marshal(doctorSnapshot(rt))
 	if err != nil {
 		return doctorErrorLine("the agent state could not be encoded as JSON: " + err.Error())

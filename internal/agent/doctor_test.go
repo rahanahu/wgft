@@ -527,6 +527,94 @@ func TestDoctorReportsNoAllowTargets(t *testing.T) {
 	}
 }
 
+// TestControlDoesNotRecoverARotateKeyPanic は、rotate-key の枝の panic を受け止めないことを
+// 確かめる。rotateKey は rt.mu を defer ではなく手で放すので、受け止めると常駐プロセスは排他を
+// 誰も放さないまま生き続け、ハートビートも全体状態の適用も次の doctor も永久に止まる。落ちれば
+// agent.service の Restart=on-failure が立て直す。
+//
+// 認証情報が nil の runtime は、rotateKey が排他を取った後で必ず panic する。
+func TestControlDoesNotRecoverARotateKeyPanic(t *testing.T) {
+	rt := &runtime{}
+	got := func() (r any) {
+		defer func() { r = recover() }()
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+		go fmt.Fprintln(client, "rotate-key") //nolint:errcheck // 読み手が panic すれば書き手も終わる
+		rt.serveControlConn(server)
+		return nil
+	}()
+	if got == nil {
+		t.Fatal("a panic inside rotate-key was recovered; the daemon would survive holding the runtime lock forever")
+	}
+	// 受け止めていないので、排他は取られたままである。プロセスが落ちるので害は無い
+	if rt.mu.TryLock() {
+		rt.mu.Unlock()
+		t.Error("rotate-key released the runtime lock before panicking; this test no longer covers the wedge")
+	}
+}
+
+// TestControlRecoversADoctorPanic は、doctor の枝だけが panic を受け止め、その後も排他が
+// 空いていることを確かめる。doctor の経路が取る排他はすべて defer で放される。
+func TestControlRecoversADoctorPanic(t *testing.T) {
+	rt := &runtime{f: &credentials.Credentials{}}
+	real := doctorSnapshot
+	doctorSnapshot = func(*runtime) DoctorResponse { panic("simulated failure while collecting the agent state") }
+	t.Cleanup(func() { doctorSnapshot = real })
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	go fmt.Fprintln(client, DoctorCommand) //nolint:errcheck // 応答を読む側が続けて閉じる
+	done := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(client).ReadString('\n')
+		done <- line
+	}()
+	rt.serveControlConn(server)
+	select {
+	case line := <-done:
+		if res := parseDoctor(t, line); res.Error == "" {
+			t.Errorf("the answer to a panicking doctor carries no error: %q", line)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no answer to a panicking doctor")
+	}
+	if !rt.mu.TryLock() {
+		t.Fatal("the runtime lock is still held after the panic in doctor")
+	}
+	rt.mu.Unlock()
+}
+
+// TestLockRuntimeReleasesTheLockItAbandons は、期限を過ぎて諦めた取得が、後で取れたときに
+// すぐ排他を放すことを確かめる。放さなければ、待っていた取得がそのまま排他を握り続け、
+// 常駐プロセスは永久に固まる。
+func TestLockRuntimeReleasesTheLockItAbandons(t *testing.T) {
+	rt := &runtime{}
+	rt.mu.Lock()
+	if rt.lockRuntime(50 * time.Millisecond) {
+		rt.mu.Unlock()
+		t.Fatal("lockRuntime took a lock that was already held")
+	}
+	// 放すと、待っている取得が必ずこの排他を取る。他に待ち手はいない。この猶予の間に、
+	// 取ってすぐ放す実装は取得と解放を終え、放さない実装は握ったまま残る。猶予を置かずに
+	// 測ると、試験の側の取得が先に通ってしまい、握られたことを見られない
+	rt.mu.Unlock()
+	time.Sleep(200 * time.Millisecond)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if rt.mu.TryLock() {
+			rt.mu.Unlock()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the lock taken after doctor gave up was never released; the agent is wedged")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // udpRule は試験用の UDP ルールを 1 本作る。
 func udpRule(t *testing.T, id string, lo, hi uint16, target string) proto.AgentRule {
 	t.Helper()
