@@ -288,6 +288,16 @@ func TestUIRenderLocales(t *testing.T) {
 			t.Errorf("en %s: missing %q", tc.path, tc.wantEN)
 		}
 	}
+
+	// 共通の枠(page.gohtml)を使うページでは、ダッシュボードへ戻る導線はヘッダのボタン 1 つだけ
+	// にする。枠の中に同じ行き先の戻るリンクを重ねない。
+	for _, path := range []string{"/ui/add-rule", "/ui/add-agent", "/ui/rules/r_a/check", "/ui/rules/r_a", "/ui/rules/import", "/ui/doctor", "/ui/doctor/r_a"} {
+		for _, locale := range []string{"ja", "en"} {
+			if n := strings.Count(get(path+"?lang="+locale), T(locale, "back")); n != 1 {
+				t.Errorf("%s %s: the back-to-dashboard link appears %d times, want 1", locale, path, n)
+			}
+		}
+	}
 }
 func findRuleT(t *testing.T, st *store.Store, id string) proto.Rule {
 	t.Helper()

@@ -96,7 +96,6 @@
       <pre class="terminal" style="margin:0;white-space:pre-wrap;word-break:break-all">{{ .JoinString }}</pre>
     </div>
   </div>
-  <a class="btn" href="/">{{ T .Locale "back" }}</a>
 {{ else }}
   <form method="post" action="/ui/add-agent" style="display:grid;gap:12px;max-width:420px">
     <label>{{ T .Locale "fAgentName" }}<input class="search" name="name" required placeholder="home"></label>
@@ -117,11 +116,9 @@
   <div class="alert danger-alert"><div class="alert-icon">▲</div><div class="alert-body"><strong class="danger-text">{{ .ReachLabel }}</strong><p>{{ .Detail }}</p></div></div>
 {{ end }}
 <p class="muted" style="font-size:12px">{{ T .Locale "checkNote" }}</p>
-<a class="btn" href="/">{{ T .Locale "back" }}</a>
 {{ end }}
 
 {{ define "ruledetail" }}
-<p class="muted"><a href="/">{{ T .Locale "back" }}</a></p>
 <div class="rule-detail-head">
   <div class="rule-summary">
     <strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> <span class="mono">{{ .Ports }}</span>
