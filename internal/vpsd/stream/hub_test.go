@@ -607,3 +607,158 @@ func TestStreamProtocolMalformed(t *testing.T) {
 		t.Error("a malformed advertisement must not be registered as connected")
 	}
 }
+
+// TestOnHeartbeatReportsGeneration は、今の接続から届いたハートビートの世代が OnHeartbeat に
+// 渡ることを確かめる。vpsd はこれでルール集合の世代の遅れの始まりを記録する(設計文書 10.2a 節)。
+func TestOnHeartbeatReportsGeneration(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, gen: 7}
+	h := New(b)
+	got := make(chan uint64, 4)
+	h.OnHeartbeat = func(agent string, generation uint64) {
+		if agent == "home" {
+			got <- generation
+		}
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	key, _ := wgtypes.GeneratePrivateKey()
+	c, _, err := dial(t, url, "tok-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	sendJSON(t, c, proto.Message{Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String()})
+	if _, err := readMsg(t, c); err != nil {
+		t.Fatalf("first state: %v", err)
+	}
+	sendJSON(t, c, proto.Message{Type: proto.MsgHeartbeat, Heartbeat: &proto.Heartbeat{Generation: 6, Tunnel: proto.TunnelStatus{State: proto.StatusOK}}})
+	select {
+	case g := <-got:
+		if g != 6 {
+			t.Errorf("OnHeartbeat generation = %d, want 6", g)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnHeartbeat was not called for a heartbeat on the current connection")
+	}
+}
+
+// TestDisconnectWaitsForTheHeartbeatHook は、実行中の OnHeartbeat が終わるまで Disconnect が
+// 接続を外さないことを確かめる。vpsd の Revoke は Disconnect の後に遅れの記録を消すので、先に
+// 外すと、実行中だったハートビートが消した後の記録を作り直してしまう(設計文書 10.2a 節)。
+func TestDisconnectWaitsForTheHeartbeatHook(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, gen: 7}
+	h := New(b)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	h.OnHeartbeat = func(string, uint64) {
+		close(entered)
+		<-release
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	key, _ := wgtypes.GeneratePrivateKey()
+	c, _, err := dial(t, url, "tok-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	sendJSON(t, c, proto.Message{Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String()})
+	if _, err := readMsg(t, c); err != nil {
+		t.Fatalf("first state: %v", err)
+	}
+	sendJSON(t, c, proto.Message{Type: proto.MsgHeartbeat, Heartbeat: &proto.Heartbeat{Generation: 6, Tunnel: proto.TunnelStatus{State: proto.StatusOK}}})
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("OnHeartbeat was not called")
+	}
+	done := make(chan struct{})
+	go func() {
+		h.Disconnect("home", proto.CloseRevoked, "revoked")
+		close(done)
+	}()
+	select {
+	case <-done:
+		close(release)
+		t.Fatal("Disconnect returned while OnHeartbeat for that agent was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Disconnect did not return after OnHeartbeat finished")
+	}
+}
+
+// TestSupersedeWaitsForTheHeartbeatHook は、実行中の OnHeartbeat が終わるまで新しい接続が旧い接続を
+// 置き換えないことを確かめる。先に置き換えると、旧い接続の古い世代の報告が新しい接続の報告の後に
+// 記録され、vpsd が止まっていない遅れを記録してしまう(設計文書 10.2a 節)。
+func TestSupersedeWaitsForTheHeartbeatHook(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, gen: 7}
+	h := New(b)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	h.OnHeartbeat = func(string, uint64) {
+		entered <- struct{}{}
+		<-release
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	key, _ := wgtypes.GeneratePrivateKey()
+	dialHome := func() *websocket.Conn {
+		c, _, err := dial(t, url, "tok-home")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sendJSON(t, c, proto.Message{Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String()})
+		return c
+	}
+
+	old := dialHome()
+	defer old.CloseNow()
+	if _, err := readMsg(t, old); err != nil {
+		t.Fatalf("first state: %v", err)
+	}
+	sendJSON(t, old, proto.Message{Type: proto.MsgHeartbeat, Heartbeat: &proto.Heartbeat{Generation: 6, Tunnel: proto.TunnelStatus{State: proto.StatusOK}}})
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("OnHeartbeat was not called")
+	}
+
+	cur := dialHome()
+	defer cur.CloseNow()
+	stateSent := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _, err := cur.Read(ctx)
+		stateSent <- err
+	}()
+	select {
+	case <-stateSent:
+		close(release)
+		t.Fatal("the new connection replaced the old one while OnHeartbeat for the old one was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-stateSent:
+		if err != nil {
+			t.Fatalf("first state on the new connection: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the new connection did not get its state after OnHeartbeat finished")
+	}
+}

@@ -1221,7 +1221,7 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 
 `state` が無いことは、値を持たないフィールドの一般の規則(観測していない値は省く。上記の `tunnel.last_handshake` と同じ)に従っただけであり、`state` に `"unknown"` や `"pending"` のような server 発の値を新設したのではない。`state` はエージェント自身の語彙(`ok`/`error`)だけを持つ場所であり、そこに server が作った値を混ぜると、どちらが言った状態かが読み手にわかりにくくなる。`reason`・`at` も `state` と一緒に省く。`agent`・`connected` は常にある。`Rule.Agent` が指す名前が今は登録されていない(恒久トークンの無効化。11 節)場合も、その名前で hub を引くだけなので同じ形で `connected: false` の項目になる。これで `rule ls --json` だけを読む自動化も、`agent ls` を突き合わせずにルールごとの拒否・失敗の理由と、まだ報告が無いことをすべて追える。`agent ls` の RULES 列と Web UI は、同じ元データ(そのエージェントの直近のハートビート)から変わらず同じ情報を出す。
 
-管理用 API のタイムスタンプ(`created_at`・`last_heartbeat`・`tunnel.last_handshake`・警告の `at` など)は、観測していない値をフィールドごと省き、観測した値を秒精度の RFC3339 の文字列で表す、という 1 つの規則に揃える。`tunnel.last_handshake` はこれまでこの規則に従っておらず、agent -> server のハートビートに乗る wire の型(`proto.TunnelStatus`、5.2 節)の `time.Time` をそのまま返していたため、一度もハンドシェイクしていないトンネルで Go の `time.Time` の既定の JSON 表現(`\"0001-01-01T00:00:00Z\"`、しかも他のタイムスタンプと違い RFC3339Nano)を返す不具合があった(2026-09-21 修正)。`TunnelStatus` は agent の新旧の実装が読み書きし続ける wire の型なので変えず、管理用 API だけがこの規則に沿う別の型(`internal/vpsd/admin/tunnelview.go` の同名の `TunnelStatus`。admin パッケージの中でだけ使う見せ方で、新しい層ではない)を経由して返す。
+管理用 API のタイムスタンプ(`created_at`・`last_heartbeat`・`generation_behind_since`・`tunnel.last_handshake`・警告の `at` など)は、観測していない値をフィールドごと省き、観測した値を秒精度の RFC3339 の文字列で表す、という 1 つの規則に揃える。`tunnel.last_handshake` はこれまでこの規則に従っておらず、agent -> server のハートビートに乗る wire の型(`proto.TunnelStatus`、5.2 節)の `time.Time` をそのまま返していたため、一度もハンドシェイクしていないトンネルで Go の `time.Time` の既定の JSON 表現(`\"0001-01-01T00:00:00Z\"`、しかも他のタイムスタンプと違い RFC3339Nano)を返す不具合があった(2026-09-21 修正)。`TunnelStatus` は agent の新旧の実装が読み書きし続ける wire の型なので変えず、管理用 API だけがこの規則に沿う別の型(`internal/vpsd/admin/tunnelview.go` の同名の `TunnelStatus`。admin パッケージの中でだけ使う見せ方で、新しい層ではない)を経由して返す。
 
 `RuleApply.ActiveGeneration`(`rule_states[id].active_generation`)は、世代 0 を「一度も公開していない」の代わりに使っていた。世代はルールが 1 つも無ければ 0 なので(9 節)、0 は無効な値ではなく、公開済みの世代 0 と未公開が JSON 上で見分けられなかった。`BatchResponse` の `desired_generation`・`active_generation` と同じ `*uint64` に変え、一度も公開していないルールはキーの値自体を省く(2026-09-21、所有者の決定)。
 
@@ -1241,7 +1241,7 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 - 消費者は知らないフィールドを無視しなければならない(`encoding/json` の既定の振る舞いに合わせる)
 - 列挙値を持つフィールド(`rule_states` の `apply_state`、`tunnel` と `rules` の `state`、`agent_rule_states` の `state`、`resource_refusals` の理由のキー、警告の `kind`、`status --json` の `server.status`、`server doctor --json` の `checks[].id`・`checks[].status`・`checks[].reason`、`agent doctor --json` の `status`・`checks[].id`・`checks[].status`・`checks[].reason`)は、v1 の中で値が増えうる開いた集合である。消費者は知らない値を「不明」として扱い、失敗にしてはならない。この条件のもとで、値の追加は互換である。既存の値の意味は変えない。リクエストに書く側の列挙値(ルールの `proto`、`vps_mode`)は閉じた集合で、値の追加は新しい機能の追加として扱う
 - 人間向けの表(`rule ls`・`agent ls` の素の出力、`status`・`server doctor`・`agent doctor` の表形式の出力)は自動化が読んではならない情報であり、どの列が何を意味するかは `--help` の文面と同じ扱いで自由に変わる
-- `--json` の出力のうち表に現れない項目(`rule ls --json` の `rule_states`・`drift`・`desired_generation`・`active_generation`、`agent ls --json` の `public_key`・`registered_from`・`created_at`・`agent_protocol_min`・`agent_protocol_max`・`warnings` の詳細)も同じ保証の対象であり、情報量が多い分だけ自動化に向く。`status --json` の `server.detail`・`rules.detail`・`agents.detail`・`warnings.detail` はこれとは逆である。どれも表にそのまま印字される文字列であり、表に現れない項目ではないため、保証の対象ではない(10.2b 節)
+- `--json` の出力のうち表に現れない項目(`rule ls --json` の `rule_states`・`drift`・`desired_generation`・`active_generation`、`agent ls --json` の `public_key`・`registered_from`・`created_at`・`agent_protocol_min`・`agent_protocol_max`・`generation_behind_since`・`warnings` の詳細)も同じ保証の対象であり、情報量が多い分だけ自動化に向く。`status --json` の `server.detail`・`rules.detail`・`agents.detail`・`warnings.detail` はこれとは逆である。どれも表にそのまま印字される文字列であり、表に現れない項目ではないため、保証の対象ではない(10.2b 節)
 - 一発実行のコマンドの終了コードも、`--json` の出力と並ぶ機械が読める保証の対象である。成功が 0、失敗が 0 以外であり、0 以外のどの値になるかを定めるのは各節である。定めが無いコマンドはこの共通の保証だけを持つ(本節冒頭の横断する規則)
 
 **設定(`WGFT_*`)。** 11a 節が定める名前と意味を維持する。同じ名前をフラグとファイル(dotenv)の両方から渡せることと、優先順位(フラグ、環境変数、ファイル、既定の順)も保証に含む。`--force`・`--purge`・`--adopt-existing`・`--yes`・`--dry-run` の 5 つは 1 回限りの操作なので、これらに対応する `WGFT_*` を新設しないことも保証に含む(11a 節)。
@@ -1438,6 +1438,23 @@ target             UNKNOWN
 
 この規則が防ぐのは、2026-09-21 に実測した 2 つの区間で、診断が誤って安心させることである。1 つは、転送を続けているエージェントを server が切断と表示する区間である。もう 1 つは、受信の経路が死んだトンネルの最終ハンドシェイクが 3 分間は新しいままである区間である (7 節)。後者の区間の長さは `tunnel.handshake` の閾値そのものであり、別の値ではない。エージェントが device と netstack を作り直す 300 秒 (7 節) はエージェント側の watchdog の閾値であって、診断が気付けない期間ではない。
 
+#### ルール集合の世代の遅れ
+
+`agent.rules_received` は、接続中のエージェントの世代が server の世代と違うとき、その遅れが続いている長さで判定を 2 つに分ける (2026-09-24、所有者の決定)。60 秒未満は UNKNOWN とし、理由の符号を `generation_pending` とする。60 秒以上は FAILED とし、理由の符号を `generation_behind` とする。世代はルール集合全体に 1 つだけあり (5.2 節)、どのルールを変えても、そのエージェントを名指す有効なすべてのルールがこの検査を経由する。遅れを直ちに FAILED にすると、ルールを 1 本変えるたびに、そのエージェントのすべてのルールが一時的に FAILED になる。ラボではエージェントは新しい世代を 1 秒未満で取り、取った直後にハートビートを送る (5.2 節) ので、60 秒続く遅れは届く途中の遅れではない。このため 60 秒以上の FAILED は、原因の候補にも次の手順にも、届く途中であることや数秒後の再実行を挙げない。
+
+遅れの長さは、server がエージェントごとにメモリに持つ遅れの始まりの時刻から測る。管理用 API のエージェント一覧は、この時刻を `generation_behind_since` として返し、遅れていないエージェントでは省く。一覧は、直近のハートビートの内容 (`last_heartbeat`、`generation`) とこの時刻を、ハートビートの記録が済んだ後の 1 つの時点の組として返す。別々に読むと、ハートビートの内容だけが新しく、始まりの時刻の記録がまだの途中を返すことがあり、その形は `generation_behind_since` を返さない旧い server の応答と区別できない。診断は管理用 API だけを読むので、この値を経由する。始まりの時刻は次の規則で決める。
+
+- 記録の契機:server の世代が進んだときと、ハートビートが届いたときに、エージェントの世代が server の世代より古ければ、始まりの時刻が無い場合に限りその時刻を記録する
+- 遅れの間に世代がさらに進んだ場合の扱い:始まりの時刻を動かさない。動かすと、ルールの変更が続く間は遅れがいつまでも閾値に届かない
+- 始まりの時刻が消える条件:エージェントが server の今の世代を報告したときだけである
+- server の再起動の後の扱い:始まりの時刻はメモリにしか無いので失われる。起動の後に初めて遅れを観測した時刻から数え直す。起動の前から続いていた遅れの長さを server は知らないので、その分だけ FAILED になる時刻が遅れる
+
+接続してからまだハートビートが届いていないエージェントは、世代を比べず UNKNOWN とし、理由の符号を `not_reported` とする。hub は接続ごとにエージェントの状態を作り直すので、この間の管理用 API の応答は `last_heartbeat` を省き、`generation` を 0 とする。この 0 は報告された世代ではない。判定の条件は `agent.connection` と同じく `last_heartbeat` が無いことであり、2 つの検査は同じ判定を返す。再接続の前から遅れの始まりの時刻が記録されていても、この判定を先に行う。最初のハートビートが届いた後は、記録されている始まりの時刻から遅れの長さを測る。
+
+応答に `generation_behind_since` が無いまま世代が違う場合は、v1.1 と同じく FAILED とし、理由の符号を `generation_behind` とする。この値を返さない旧い server を新しい CLI で診断する場合が当たる。遅れの長さが分からないまま UNKNOWN にすると、止まった遅れを見逃すためである。
+
+`generation_behind` の意味は v1.1 から変えず、止まった遅れを表す。`generation_pending` は、理由の符号の開いた集合への加算である (7a.11 節)。`generation_pending` の UNKNOWN は、経路の上の他の UNKNOWN と同じく、ルールの総合判定を UNKNOWN にし、終了コードを動かさない。
+
 #### 検査の一覧と証拠の出どころ
 
 検査はすべて既存の管理用 API の応答から組み立てる。新しい節点を追加しない (7a.11 節の保証を変えない)。
@@ -1450,7 +1467,7 @@ target             UNKNOWN
 | `server.dataplane` | dataplane | `desired_generation`、`active_generation`、`apply_error` | `GET /api/v1/rules` |
 | `tunnel.handshake` | WireGuard | `AgentInfo.LastHandshake`、`AgentInfo.Tunnel` | `GET /api/v1/agents` |
 | `agent.connection` | connected | `AgentInfo.Connected`、`LastHeartbeat`、`StreamFrom` | `GET /api/v1/agents` |
-| `agent.rules_received` | rules received | `AgentInfo.Generation` と応答の `generation` | `GET /api/v1/agents`、`GET /api/v1/rules` |
+| `agent.rules_received` | rules received | `AgentInfo.Generation`、`AgentInfo.GenerationBehindSince` と応答の `generation` | `GET /api/v1/agents`、`GET /api/v1/rules` |
 | `agent.credentials` | credentials | `AgentInfo.Warnings` | `GET /api/v1/agents` |
 | `rule.target_resolve` | target resolve | `agent_rule_states[id].reason` の文言 | `GET /api/v1/rules` |
 | `rule.target` | target | `agent_rule_states[id]` の `state`・`reason`・`at`・`connected` | `GET /api/v1/rules` |
@@ -2775,3 +2792,4 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - `agent.rules_received` の FAILED の detail の言い過ぎを直した(2026-09-23、所有者の決定):ルール集合の世代は server が単一で持ち、変わるたびに、そのエージェントを名指す有効なすべてのルールの `agent.rules_received` を経由する。エージェントが新しい世代をまだ取っていない間は、そのエージェントの全ルールが FAILED になる。以前の detail「it still holds rule set N while this server serves M, so this rule has not reached it」は、この 1 本のルールが届いていないと述べていたが、世代の中身が変わっていないルールは、世代番号が古いままでも転送を続けており、この文言はそのルールについて誤りだった。detail をエージェントとルール集合の世代という、確かめている事実だけを述べる形に直し、個々のルールへの言及を外した。「this agent still holds rule set N while this server serves M; it has not taken the latest rule set yet」とする。status は FAILED、reason は `generation_behind` のまま変えておらず、7a.11 節の保証する値の範囲を変えない。短い遅れ(再送信中で数秒後に追いつく)と、いつまでも世代が追いつかないままの状態とを分ける境目は、この版では決めず、Web UI の経路の図(10.2d 節)が付けるダッシュボードの印と合わせて v1.2 で決める。
 - 共通の枠のページの上部の移動をパンくずにした(2026-09-23、所有者の決定):ダッシュボード以外の共通の枠のページは、右上の「ダッシュボードへ戻る」ボタンと、診断の画面の枠の中の「診断の一覧へ戻る」リンクで戻り先を示していた。診断の画面では同じ行き先のリンクが 2 つ並び、広い画面ではボタンが本文の枠から離れていた。上部の移動を左寄せのパンくずの 1 本にまとめ、10.1 節に書いた。フォームの取り消しボタンはフォームの操作なので残す。この版では Web UI について次のことも決めた。診断の画面の枠の最大幅を 1200px とし、ルールの詳細ページと読み込みの確認ページは 900px のまま残す。ヘッダはページの幅の枠の外に置き、ロゴをどのページでも同じ位置に描く。言語の切り替えはダッシュボードにだけ置き、他のページはそこで選んだ言語にクッキーで従う。POST の結果のページで切り替えると、読み直しで結果が消えるためである。診断の一覧の経路の列見出しは、節点の名前を「 - 」で区切る。エージェントの登録を取り消す操作は、日本語の画面では「削除」と呼び、確認の文で、鍵が失効して再接続できなくなること、戻すには登録し直すこと、ルールの設定は残ることを示す。
 - `agent doctor` の人向けの出力で、値だけを示す 6 つの検査を「Observed values」節に分けた(2026-09-24、所有者の決定):`stream.backoff`、`stream.liveness`、`tunnel.watchdog`、`tunnel.transfer`、`relay.sessions`、`relay.refusals` は、値を述べるだけで良し悪しを言う閾値を持たず、健全なエージェントでも UNKNOWN にしかならない。判定済みの検査と同じ大きな状態語を Connection、Tunnel、Relay の各群に並べると、運用者はその列を故障と読む。この 6 つを群から抜き、5 つの群の後に「Observed values」という 1 つの節としてまとめた。値を読めた実行(状態が UNKNOWN)は状態語を出さず、ラベルと同じ行から値を示す。この行には次に見るもの(`Check:` の行)も出さない。健全なエージェントでも 6 つの `Check:` の行が並び、何かを確かめる必要があるように読めるためである。値の読み方は `--help` に短く書き、`--json` の `next` はこれまでどおり持つ。値に文脈を添えないと読み違えられる場合は、決まった `Check:` の行ではなく、その値に短い注記を付ける。値を読めなかった実行は、これまでどおり SKIPPED を状態語と次に見るものごと示す。値が無いことを値と取り違えないためである。実装を読んで確かめたところ、この 6 つは UNKNOWN と SKIPPED のどちらかにしかならず、OK にも FAILED にもならない。内部の判定、`checks[]` の `id`、`status`、`reason`、終了コード、`--json` の出力は変えていない。変える前と後で `--json` の出力が一致することを確かめた。ラボで稼働中と停止中のエージェントに対して人向けの出力と `--json` を確かめた。未確認:実機では確かめていない。
+- `agent.rules_received` の世代の遅れを、続いている長さで UNKNOWN と FAILED に分けた(2026-09-24、所有者の決定):`agent.rules_received` は、エージェントの世代が server の世代と違えば、すぐに FAILED `generation_behind` を返していた。世代はルール集合全体に 1 つなので、ルールを 1 本変えるたびに、そのエージェントのすべてのルールが一時的に FAILED になっていた。ラボではエージェントは新しい世代を 1 秒未満で取った。遅れが 60 秒未満なら UNKNOWN とし、新しい理由の符号 `generation_pending` を加えた。60 秒以上は従来どおり FAILED `generation_behind` とし、detail に遅れの長さを加え、原因の候補と次の手順から、届く途中であるという見立てを外した。応答に遅れの始まりが無い場合は、v1.1 の判定と文言のまま残した。2026-09-23 の項目が v1.2 に送った、短い遅れと止まった遅れの境目を、この版で決めた。ダッシュボードの印はこの変更に含めず、v1.2 で決める。7a.11 節は既存の値の意味の変更を認めないので、`generation_behind` は止まった遅れの意味のまま残し、届く途中の遅れには新しい値を充てた。遅れの長さを測るため、server はエージェントごとの遅れの始まりの時刻をメモリに持ち、管理用 API のエージェント一覧の加算のフィールド `generation_behind_since` として返す。始まりの時刻は、遅れの間に server の世代がさらに進んでも動かさず、エージェントが今の世代を報告したときだけ消す。server を再起動した後は、起動の後に初めて遅れを観測した時刻から数え直す。エージェント一覧は、ハートビートの内容と始まりの時刻を、ハートビートの記録が済んだ後の組として読む。別々に読むと、再起動の後の最初のハートビートが古い世代を報告した直後に、始まりの時刻の無い形を返し、診断が直ちに FAILED を出していた。接続してから最初のハートビートが届くまでの間は、エージェントの世代を server が観測していないので、世代の 0 を報告された世代として比べず、`agent.connection` と同じ UNKNOWN `not_reported` とした。以前は、この間も FAILED `generation_behind` を返していた。10.2a 節に「ルール集合の世代の遅れ」の項を加え、7a.11 節のタイムスタンプの規則と `agent ls --json` の項目の一覧にこのフィールドを加えた。Web UI の診断の画面は判定の状態をそのまま描くので、届く途中の遅れは UNKNOWN の印で出る。ラボでの通しの確認は、この変更の上では未確認である。

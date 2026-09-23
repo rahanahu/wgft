@@ -78,30 +78,48 @@ type Hub struct {
 	// OnStreamConnect は stream の認証が通って接続が確立したときに呼ぶ(窃取検知の「IP の往復」用。
 	// 短命な supersede も取りこぼさないよう、サンプリングではなく接続の事象で記録する)。nil なら何もしない
 	OnStreamConnect func(agent, from string)
+	// OnHeartbeat は、今の接続からハートビートを受け取って状態に記録した後に、報告された世代を
+	// 渡して呼ぶ(設計文書 10.2a 節のルール集合の世代の遅れの記録用)。nil なら何もしない。
+	// 呼ぶ間はそのエージェントの hookLock を持つ。接続の置き換えと Disconnect も同じ錠を取るので、
+	// 置き換えられた接続や切断された接続のハートビートが、置き換えや切断の後に呼ばれることは無い
+	OnHeartbeat func(agent string, generation uint64)
 	// HeartbeatTimeout は読みの期限(既定 90 秒。テストで短くできるよう差し替え可能にしてある)
 	HeartbeatTimeout time.Duration
 
-	mu     sync.Mutex
-	locks  map[string]*sync.Mutex // 同一エージェントの接続処理の直列化
-	conns  map[string]*conn
-	status map[string]*Status
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex // 同一エージェントの接続処理の直列化
+	// hookLocks は、同一エージェントの OnHeartbeat の呼び出しと、接続の置き換えおよび Disconnect を
+	// 直列化する。取る順は locks、hookLocks、mu である。OnHeartbeat は mu を持たずに呼ぶので、
+	// OnHeartbeat の中から Status のような mu を取る関数を呼んでもよい
+	hookLocks map[string]*sync.Mutex
+	conns     map[string]*conn
+	status    map[string]*Status
 }
 
 // New は空の Hub を作る。
 func New(b Backend) *Hub {
 	return &Hub{
-		backend: b, locks: map[string]*sync.Mutex{}, conns: map[string]*conn{}, status: map[string]*Status{},
+		backend: b, locks: map[string]*sync.Mutex{}, hookLocks: map[string]*sync.Mutex{},
+		conns: map[string]*conn{}, status: map[string]*Status{},
 		HeartbeatTimeout: defaultHeartbeatTimeout,
 	}
 }
 
 func (h *Hub) agentLock(name string) *sync.Mutex {
+	return h.lockOf(h.locks, name)
+}
+
+func (h *Hub) hookLock(name string) *sync.Mutex {
+	return h.lockOf(h.hookLocks, name)
+}
+
+func (h *Hub) lockOf(m map[string]*sync.Mutex, name string) *sync.Mutex {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	l, ok := h.locks[name]
+	l, ok := m[name]
 	if !ok {
 		l = &sync.Mutex{}
-		h.locks[name] = l
+		m[name] = l
 	}
 	return l
 }
@@ -114,6 +132,22 @@ func (h *Hub) Status(agent string) Status {
 		return *s
 	}
 	return Status{}
+}
+
+// StatusWithHook は、そのエージェントの hookLock を持ったまま状態を読み、f に渡して呼ぶ。
+// ハートビートは状態を更新してから、同じ錠の中で OnHeartbeat を呼ぶ。この錠を持って読むと、
+// 状態の更新だけが済んで OnHeartbeat の記録がまだ済んでいない途中の姿を読まない。管理用 API が
+// 状態と、OnHeartbeat が記録する値(vpsd の遅れの始まり)を 1 つの時点の組として返すのに使う
+// (設計文書 10.2a 節)。
+//
+// f は hookLock を持ったまま呼ぶので、そのエージェントの接続処理と Disconnect を待たせる。f の中で
+// 長く待つ処理(データベースの読み取りなど)をしない。Status は hookLock を取らないまま残す。
+// OnHeartbeat は hookLock を持って呼ばれ、その中から Status を呼んでよいためである。
+func (h *Hub) StatusWithHook(agent string, f func(Status)) {
+	hook := h.hookLock(agent)
+	hook.Lock()
+	defer hook.Unlock()
+	f(h.Status(agent))
 }
 
 // ServeHTTP は GET /api/v1/agents/stream。
@@ -214,6 +248,8 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		ws.Close(websocket.StatusInternalError, "peer setup failed")
 		return
 	}
+	hook := h.hookLock(agent)
+	hook.Lock()
 	h.mu.Lock()
 	if old := h.conns[agent]; old != nil {
 		// 旧 TCP が死んでいる場合に備え、常に新しい方を優先する
@@ -226,6 +262,7 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 	h.conns[agent] = c
 	h.status[agent] = &Status{Connected: true, StreamFrom: from, ConnectedAt: time.Now(), Protocol: sel}
 	h.mu.Unlock()
+	hook.Unlock()
 	if h.OnStreamConnect != nil {
 		h.OnStreamConnect(agent, from)
 	}
@@ -264,12 +301,20 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		}
 		heartbeatTimer.Reset(h.HeartbeatTimeout)
 		if m.Type == proto.MsgHeartbeat && m.Heartbeat != nil {
+			hook := h.hookLock(agent)
+			hook.Lock()
 			h.mu.Lock()
+			current := false
 			if s := h.status[agent]; s != nil && h.conns[agent] == c {
 				s.LastHeartbeat = time.Now()
 				s.Heartbeat = m.Heartbeat
+				current = true
 			}
 			h.mu.Unlock()
+			if current && h.OnHeartbeat != nil {
+				h.OnHeartbeat(agent, m.Heartbeat.Generation)
+			}
+			hook.Unlock()
 		}
 	}
 }
@@ -323,11 +368,15 @@ func (h *Hub) PushAll() {
 
 // Disconnect はエージェントの接続を理由付きで閉じる(無効化)。
 func (h *Hub) Disconnect(agent string, code int, reason string) {
+	// 実行中の OnHeartbeat が終わるのを待ってから外す。外した後にその接続の OnHeartbeat は呼ばれない
+	hook := h.hookLock(agent)
+	hook.Lock()
 	h.mu.Lock()
 	c := h.conns[agent]
 	delete(h.conns, agent)
 	delete(h.status, agent)
 	h.mu.Unlock()
+	hook.Unlock()
 	if c != nil {
 		// close の応答待ち(最大 5 秒)で呼び出し側(管理用 API)を止めない
 		go func() {

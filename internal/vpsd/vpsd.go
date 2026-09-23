@@ -224,6 +224,8 @@ type Daemon struct {
 	hub       *stream.Hub
 	proxy     *proxyrelay.Manager
 	flaps     *flapState
+	// lag はエージェントごとのルール集合の世代の遅れの始まり(genlag.go、設計文書 10.2a 節)
+	lag genLag
 
 	mu sync.Mutex // ルール・エージェントの変更と、wg0・nftables の適用を直列化する
 
@@ -417,11 +419,8 @@ func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
 	if d.agentAPI, err = agentapi.New(d.st, d); err != nil {
 		return fmt.Errorf("agent API: %w", err)
 	}
-	d.hub = stream.New(d)
+	d.hub = d.newHub(d)
 	d.hub.RateLimit = d.agentAPI.Allow
-	d.flaps = &flapState{hist: map[string]map[string][]ipObs{}}
-	// stream の接続元 IP を接続の事象で記録し、往復を検知する(仕様 5.2 節)
-	d.hub.OnStreamConnect = func(agent, from string) { d.observeFlap(agent, "stream", "stream source", from) }
 	d.agentAPI.Handle("GET /api/v1/agents/stream", d.hub.ServeHTTP)
 	_ = d.st.PurgeExpiredJoinTokens()
 
@@ -569,4 +568,17 @@ func (d *Daemon) agents() ([]dataplane.Peer, map[string]netip.Addr, error) {
 		peers = append(peers, dataplane.Peer{PublicKey: key, Address: a.Address})
 	}
 	return peers, addr, nil
+}
+
+// newHub は stream の hub を作り、Daemon が受け取る接続とハートビートの事象をつなぐ。backend は
+// serve では Daemon 自身で、テストは偽物を渡してつなぎ方だけを確かめる。
+func (d *Daemon) newHub(backend stream.Backend) *stream.Hub {
+	h := stream.New(backend)
+	d.flaps = &flapState{hist: map[string]map[string][]ipObs{}}
+	// stream の接続元 IP を接続の事象で記録し、往復を検知する(仕様 5.2 節)
+	h.OnStreamConnect = func(agent, from string) { d.observeFlap(agent, "stream", "stream source", from) }
+	// ハートビートが報告した世代を、server の今の世代と突き合わせて遅れの始まりを記録する。
+	// server の世代もここで読むので、再起動の後の最初のハートビートから数え始める
+	h.OnHeartbeat = d.observeAgentGeneration
+	return h
 }

@@ -385,12 +385,46 @@ func rulesReceivedCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 		c.Next = "the control connection line above says what to do; this value is history"
 		return c
 	}
+	// 接続してからまだハートビートが無い間は、server はこの接続のエージェントの世代を観測して
+	// いない。Generation の 0 は報告された世代ではないので比べない。判定の条件は
+	// connectionCheck と同じ(LastHeartbeat が読めないこと)にし、2 つの検査が食い違わない
+	// ようにする(設計文書 10.2a 節)。遅れの始まりが再接続の前から記録されていても同じである
+	if _, ok := ParseWhen(ai.LastHeartbeat); !ok {
+		c.Status, c.Reason = StatusUnknown, ReasonNotReported
+		c.Detail = fmt.Sprintf("the agent is connected but has not sent a heartbeat yet, so which rule set it holds is not known; this server serves %d", cur)
+		c.Next = "re-run in about 30 seconds; the agent reports every 30s"
+		return c
+	}
 	c.ObservedAt = ai.LastHeartbeat
 	if ai.Generation == cur {
 		c.Status = StatusOK
 		c.Detail = fmt.Sprintf("it holds rule set %d, this server's current one%s", cur, heartbeatAgeSuffix(ai, in))
 		return c
 	}
+	// 遅れの始まりは server がメモリに持ち、管理用 API が generation_behind_since で返す
+	// (設計文書 10.2a 節)。閾値の内側の遅れは、配り直しの途中でありうるので UNKNOWN にする。
+	// 始まりが無い応答(この値を返さない旧い server)は、v1.1 と同じく FAILED のままにする。
+	if since, ok := ParseWhen(ai.GenerationBehindSince); ok {
+		age := Since(in.Now, since)
+		if age < GenerationBehindLimit {
+			c.Status, c.Reason = StatusUnknown, ReasonGenerationPending
+			c.Detail = fmt.Sprintf("this agent still holds rule set %d while this server serves %d; it has been behind for %s, and an agent normally takes a new rule set within seconds",
+				ai.Generation, cur, age)
+			c.Next = "re-run in a few seconds; if it is still behind after a minute, this check turns failed"
+			return c
+		}
+		// 閾値を超えた遅れは、10.2a 節の定めで届く途中ではない。「すぐ届く」「数秒後に再実行」を
+		// 言わず、止まった遅れの原因だけを挙げる
+		c.Status, c.Reason = StatusFailed, ReasonGenerationBehind
+		c.Detail = fmt.Sprintf("this agent still holds rule set %d while this server serves %d; it has been behind for %s without taking the latest rule set", ai.Generation, cur, age)
+		c.Causes = []string{
+			"the agent is connected but has not applied the new rule set; see its log",
+			"this server could not deliver the new rule set to the agent; see this server's log for errors about this agent",
+		}
+		c.Next = "read the agent's log and this server's log. A rule moved to another agent carries no traffic until that agent takes the new rule set."
+		return c
+	}
+	// 始まりを返さない旧い server:v1.1 と同じ判定と文言
 	c.Status, c.Reason = StatusFailed, ReasonGenerationBehind
 	c.Detail = fmt.Sprintf("this agent still holds rule set %d while this server serves %d; it has not taken the latest rule set yet", ai.Generation, cur)
 	c.Causes = []string{
