@@ -1855,7 +1855,7 @@ active・degraded・unknown が混在する行も、それぞれの数を `rules
 | `agent.process` | process | Credentials | 稼働中かどうか | `agent.json.lock` の flock | 成立する |
 | `agent.last_state` | last state | Credentials | 最後に処理した全体状態の世代、wg 設定、ルールの本数 | `agent.json` の `LastState` | 成立する |
 | `agent.control` | control socket | Connection | 稼働中のエージェントの制御ソケットに繋げるか | `agent.json.sock` | 成立しない |
-| `stream.connection` | control connection | Connection | 制御ストリームが今つながっているか、直近の切断の理由 | 制御ソケット | 成立しない |
+| `stream.connection` | control connection | Connection | 制御ストリームが今つながっているか、つながっていない場合の直近の理由 | 制御ソケット | 成立しない |
 | `stream.backoff` | reconnect backoff | Connection | 再接続の間隔の現在値と次に試す時刻 | 制御ソケット | 成立しない |
 | `stream.liveness` | liveness | Connection | 直近の ping と pong の時刻、pong を待っている最中かどうか | 制御ソケット | 成立しない |
 | `tunnel.resolve` | wg endpoint resolve | Tunnel | WireGuard のピアの宛先 (`proto.WGConfig.Endpoint`) のホスト名の解決 | `agent.json` の `LastState` | 成立する |
@@ -1934,6 +1934,8 @@ LAN の宛先への試し接続は行わない。エージェントの中継が�
 稼働中の制御ソケットからエージェントのプロセス自身の UID と権限の状態を取り、それを `host.privileges` の判定の材料にする案は採らなかった (2026-09-23、所有者の決定)。この案なら、呼び出し元とエージェントの実行主体が違う実行と、前提を満たしたうえでの本当の権限の失敗を見分けられる。採らなかった理由は、前提を課したうえで呼び出し元の権限をそのまま使う案の方が単純であることによる。この案には、エージェントが止まっている実行では使えないことと、制御ソケットの応答に権限の情報を新たに足すことになるという難点もある。
 
 `stream.connection` を動かさない検査に含める理由を述べる。制御ストリームが切れていることは、エージェントが受け取り済みのルールを転送し続けている間も起こる (5.2 節、7 節)。この状態を配置全体の劣化として数えるかどうかは 10.2b 節が定めており、`agent doctor` が同じ判定を重ねて持つと、切れている間の終了コードが 2 か所で決まることになる。`agent doctor` が加えるのは、エージェント側だけが持つ事実、つまり直近の切断の理由、バックオフの現在値、次に試す時刻である。状態は、つながっていれば OK、切れていれば UNKNOWN とし、理由の符号を `reconnecting` とする。
+
+`stream.connection` が示す理由は、切断の理由に限らない。接続に至らなかった試み、つまり dial の失敗や server に断られた登録も同じ値に入る (2026-09-23)。どちらも「今つながっていない理由」を答えるものであり、2 つに分けると `agent doctor` の側で合成することになる。
 
 `tunnel.transfer` は、server から見えないが転送の実際の通り具合を示す値の代表である。扱いは次のとおりとする。値は所見として必ず出す。状態は UNKNOWN とし、理由の符号を `no_threshold` とする。総合判定と終了コードは動かさない。閾値を置かない理由は、送受信バイト数の多い少ないが、それだけでは健全さを意味しないことにある。利用者が誰も接続していないゲームサーバのトンネルは、何時間も 0 バイトのまま正常である。値が判定に使えるのは、運用者が「今この瞬間に通っているはずだ」という外の知識を持っている場合だけであり、その知識はコマンドの側に無い。値は 1 回の実行で 1 回だけ読む。2 回読んで差を取れば今の通り具合を言えるが、待ち時間を伴うので、必要になった時点で明示のフラグの下に置く。最初の版では決めない。
 
