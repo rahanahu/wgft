@@ -160,13 +160,12 @@ that only ever state a value, never OK: reconnect waits, keepalive times, the
 watchdog's rebuild interval, transfer counters, session counts and refusal
 totals are healthy or not only against knowledge this command does not have,
 and it sets no threshold of its own. There, a label and its value print with
-no status word, so a healthy agent's six UNKNOWNs do not read as six findings
-the way they would in the groups above. Any of them prints SKIPPED instead,
-with its status word kept, when there is nothing to observe: while the agent
-is stopped, while its control socket cannot be reached, or, for the two relay
-items, before a tunnel and relay exist. The last handshake is shown as a fact
-for the same reason as these six, but it stays inside the tunnel item in the
-Tunnel group, since that item's own status can be OK or FAILED.
+no status word, so a healthy agent's six UNKNOWNs do not read as six findings.
+When a value cannot be read, for example because the agent is stopped, the
+item prints SKIPPED with its status word, so a missing value is not mistaken
+for an observed one. The last handshake is shown as a
+fact for the same reason as these six, but it stays inside the tunnel item in
+the Tunnel group, since that item's own status can be OK or FAILED.
 
 The Connection, Tunnel and Relay items other than "wg endpoint resolve" are held
 only by the running process and are read over its control socket. While the

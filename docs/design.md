@@ -1970,13 +1970,13 @@ LAN の宛先への試し接続は行わない。エージェントの中継が�
 操作体系を `server doctor` (10.2a 節) に揃える。揃えるのは操作体系であって、検査の中身ではない。状態の語彙、`--json`、終了コードの考え方が揃っていれば、運用者は読み方もスクリプトも共通にできる。見る場所が違うことは、検査の一覧が違うことで表す。この項が定めるのは次のとおりである。`--json` と終了コードは、後続の 2 つの項で定める。
 
 - 群分け: 検査を `Host`、`Credentials`、`Connection`、`Tunnel`、`Relay` の群に分けて示す。10.2a 節が `Server`、`Tunnel`、`Agent` に分けるのと同じ形である
-- Observed values: 値だけを示し合否を持たない 6 つの検査 (`stream.backoff`、`stream.liveness`、`tunnel.watchdog`、`tunnel.transfer`、`relay.sessions`、`relay.refusals`) は群から抜き、5 つの群の後に「Observed values」という 1 つの節としてまとめて出す (2026-09-24、所有者の決定、改訂の記録に詳細)。値を読めた実行 (状態が UNKNOWN) は状態語を出さずラベルと値だけを示し、値そのものを読めなかった実行は SKIPPED のまま判定済みの検査と同じく状態語を出す。人向けの出力だけの見せ方であり、内部の模型と `--json` の `checks[]` は変えない (7a.11 節)
+- 値だけを示す検査の節: 値だけを示し合否を持たない 6 つの検査 (`stream.backoff`、`stream.liveness`、`tunnel.watchdog`、`tunnel.transfer`、`relay.sessions`、`relay.refusals`) は群から抜き、5 つの群の後に「Observed values」という 1 つの節としてまとめて出す (2026-09-24、所有者の決定、改訂の記録に詳細)。値を読めた実行 (状態が UNKNOWN) は状態語を出さず、ラベルと同じ行から値を示す。値そのものを読めなかった実行は、SKIPPED のまま判定済みの検査と同じく状態語を出す。人向けの出力だけの見せ方であり、内部の模型と `--json` の `checks[]` は変えない (7a.11 節)
 - 状態の語彙: 10.2a 節の表の OK、FAILED、UNKNOWN、NOT TESTED、SKIPPED をそのまま使う。意味も同じとし、新しい語を加えない
 - 次に見るもの: FAILED の所見には必ず次に見るものを添える。次の行動を伴わない所見は、10.2a 節と同じく機能の失敗として扱う
 - 試していない範囲: 10.2a 節と同じく、何も壊れていない実行でも試していない範囲を必ず出力する (2026-09-23、所有者の決定)。項目の一覧は、実装のときに定める
 - 履歴: 10.2a 節と同じく、診断のために保存の仕組みを追加せず、履歴を持たない。10.2a 節が持つ `History` のまとまりは同じ形で出力する。一方 `Result:` の行は持たない。転送の経路を順にたどる形を持たないため、「転送はここで止まった」という位置を言えないためである
 
-次の断片は、エージェントが止まっている実行の出力の形を示す例である。実際に動かして得たものではなく、値も仮のものである。Tunnel 群は、停止中も成立する `wg endpoint resolve` の行だけを示した。`tunnel.local` の行は、Connection 群と同じく SKIPPED で並ぶので省いた。Relay 群は、`relay.allow_targets` が UNKNOWN になるほかは SKIPPED で並ぶので省いた。Observed values 節は、`reconnect backoff` と `liveness` だけを示した。`watchdog`、`transfer`、`sessions`、`refusals` の行も同じく SKIPPED で並ぶので省いた。
+次の断片は、エージェントが止まっている実行の出力の形を示す例である。実際に動かして得たものではなく、値も仮のものである。Tunnel 群は、停止中も成立する `wg endpoint resolve` の行だけを示した。`tunnel.local` の行は、Connection 群と同じく SKIPPED で並ぶので省いた。Relay 群は、`relay.allow_targets` が UNKNOWN になるほかは SKIPPED で並ぶので省いた。Observed values 節は、`reconnect backoff` と `liveness` だけを示した。`watchdog`、`transfer`、`sessions`、`refusals` の行も同じく SKIPPED で並ぶので省いた。1 行に収まらない所見は、状態語の次の行に置く。
 
 ```
 Host
@@ -1991,14 +1991,28 @@ Credentials
                      Check: systemctl status wgft-agent, or docker ps for a container
   last state         OK       last: generation N, 3 rules
 Connection
-  control socket     SKIPPED  the agent is not running, so its live state was not read
-  control connection SKIPPED  the agent is not running, so its live state was not read
+  control socket     SKIPPED
+                     the agent is not running, so its live state was not read
+  control connection SKIPPED
+                     the agent is not running, so its live state was not read
 Tunnel
   wg endpoint resolve OK       vps.example.net resolves to 203.0.113.10
 
 Observed values
-  reconnect backoff  SKIPPED  the agent is not running, so its live state was not read
-  liveness           SKIPPED  the agent is not running, so its live state was not read
+  reconnect backoff  SKIPPED
+                     the agent is not running, so its live state was not read
+  liveness           SKIPPED
+                     the agent is not running, so its live state was not read
+```
+
+次の断片は、稼働中のエージェントの出力のうち Observed values 節の先頭の 2 行を示す例である。ラボで動かして得た出力から取った。値はラベルと同じ行から始まり、続く行は値の桁で折り返す。
+
+```
+Observed values
+  reconnect backoff  no reconnect wait has been recorded on this connection yet; no attempt is
+                     waiting now
+  liveness           the last ping went out at 2026-09-23T22:36:01Z, 13s ago; the last pong came
+                     back at 2026-09-23T22:36:01Z, 13s ago
 ```
 
 #### 機械向けの出力
@@ -2758,4 +2772,4 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - 10.2d 節の冒頭が「まだ実装していない」と述べていたのを正した(2026-09-23):10.2d 節は骨格を固定した時点(上記の「Web UI の診断の画面を設計した」の改訂の記録)の文をそのまま残しており、その後の実装(上記の「Web UI の診断の画面を実装し」以降の一連の改訂の記録)を経ても書き換えていなかった。冒頭の文を「実装してある」に改め、この節が定めるのは骨格であることと、細部と実装の時点で確かめた事実は改訂の記録に分けて書くことを述べる形にした。10.2c 節と 13 節の中で `agent doctor`、`--json`、Web UI の診断の画面について「まだ実装していない」に当たる記述が他に残っていないかを検査し、無いことを確かめた。10.2c 節の冒頭は既に「実装してある」と述べており、13 節の未決事項はどれも実装済みの機能を指していない。
 - `agent.rules_received` の FAILED の detail の言い過ぎを直した(2026-09-23、所有者の決定):ルール集合の世代は server が単一で持ち、変わるたびに、そのエージェントを名指す有効なすべてのルールの `agent.rules_received` を経由する。エージェントが新しい世代をまだ取っていない間は、そのエージェントの全ルールが FAILED になる。以前の detail「it still holds rule set N while this server serves M, so this rule has not reached it」は、この 1 本のルールが届いていないと述べていたが、世代の中身が変わっていないルールは、世代番号が古いままでも転送を続けており、この文言はそのルールについて誤りだった。detail をエージェントとルール集合の世代という、確かめている事実だけを述べる形に直し、個々のルールへの言及を外した。「this agent still holds rule set N while this server serves M; it has not taken the latest rule set yet」とする。status は FAILED、reason は `generation_behind` のまま変えておらず、7a.11 節の保証する値の範囲を変えない。短い遅れ(再送信中で数秒後に追いつく)と、いつまでも世代が追いつかないままの状態とを分ける境目は、この版では決めず、Web UI の経路の図(10.2d 節)が付けるダッシュボードの印と合わせて v1.2 で決める。
 - 共通の枠のページの上部の移動をパンくずにした(2026-09-23、所有者の決定):ダッシュボード以外の共通の枠のページは、右上の「ダッシュボードへ戻る」ボタンと、診断の画面の枠の中の「診断の一覧へ戻る」リンクで戻り先を示していた。診断の画面では同じ行き先のリンクが 2 つ並び、広い画面ではボタンが本文の枠から離れていた。上部の移動を左寄せのパンくずの 1 本にまとめ、10.1 節に書いた。フォームの取り消しボタンはフォームの操作なので残す。この版では Web UI について次のことも決めた。診断の画面の枠の最大幅を 1200px とし、ルールの詳細ページと読み込みの確認ページは 900px のまま残す。ヘッダはページの幅の枠の外に置き、ロゴをどのページでも同じ位置に描く。言語の切り替えはダッシュボードにだけ置き、他のページはそこで選んだ言語にクッキーで従う。POST の結果のページで切り替えると、読み直しで結果が消えるためである。診断の一覧の経路の列見出しは、節点の名前を「 - 」で区切る。エージェントの登録を取り消す操作は、日本語の画面では「削除」と呼び、確認の文で、鍵が失効して再接続できなくなること、戻すには登録し直すこと、ルールの設定は残ることを示す。
-- `agent doctor` の人向けの出力で、値だけを示す 6 つの検査を「Observed values」節に分けた(2026-09-24、所有者の決定):`stream.backoff`、`stream.liveness`、`tunnel.watchdog`、`tunnel.transfer`、`relay.sessions`、`relay.refusals` は、10.2c 節の「個別の理由で動かさない検査」などが既に述べているとおり、値を述べるだけで良し悪しを言う閾値を持たず、健全なエージェントでも UNKNOWN にしかならない。判定済みの検査と同じ大きな状態語を Connection、Tunnel、Relay の各群に並べると、運用者がその列をすべて故障と読む。この 6 つを群から抜き、5 つの群の後に「Observed values」という 1 つの節としてまとめ、値を読めた実行(状態が UNKNOWN)は状態語を出さずラベルと値だけを示す形にした。値そのものを読めなかった実行は、これまでどおり SKIPPED として状態語ごと示す。値が無いことを、値と取り違えてはならないためである。コードを読んで確かめたところ、この 6 つは UNKNOWN と SKIPPED のどちらかにしかならず、FAILED にも OK にもならない。`relay.sessions` と `relay.refusals` は、中継がまだ無い実行(トンネルがまだ無い、または全体状態をまだ持たない)では `no_relay` の SKIPPED になり、他の 4 つは、稼働中のプロセスから値そのものを読めなかった実行で SKIPPED になる(前述の「証拠の鮮度の違い」の項)。したがって、この節の中の行は、UNKNOWN では状態語を出さず、SKIPPED を含むそれ以外の状態では判定済みの検査と同じ状態語を出す形にした。内部の判定、`checks[].id`・`status`・`reason`、終了コードは変えていない。この分け方は `writeAgentDoctorReport` だけが持つ人向けの見せ方であり、`--json` を組む `agentDoctorJSONOf`(agentdoctorjson.go)は検査の一覧をそのまま写すだけで、この分け方を読まない。値だけを示す検査という性質は、`agentLiveOnlyCheck.valueOnly` と `agentDoctorCheck.valueOnly` という内部の印にした。人向けの出力だけがこの印を読み、`--json` の側のファイルにこの識別子が出てこないことは `TestAgentDoctorJSONNeverReadsValueOnly` で固定した。確かめ方:`agentDoctorTable`(cmd/wgft/agentdoctor_test.go)にこの 6 つの `valueOnly` の列を足し、`TestAgentDoctorEmitsTheDesignTable` が実装とこの表の対応を確かめる。人向けの出力については、健全な稼働中のエージェントと、止まっているエージェントの両方の場面で、この 6 つが Observed values 節の中に来ること、状態語の有無が UNKNOWN と SKIPPED で分かれることを新設の単体テストで確かめた。`--json` については、この 6 つの `status` と `reason` が、Observed values への分け方を入れる前と入れた後で変わらないことを、`git stash` で実装だけを退避してから同じ 9 つの場面の `--json` をホストの単体テストの中で取り直し、`data_dir` の一時ディレクトリのパスを除いてバイト単位で一致することを確かめた。変異として、この 6 つのうち 1 つ (`stream.backoff`) を判定済みの列に戻す変異、Observed values 節でも状態語を出す変異、`--json` の理由の符号を変える変異の 3 つを入れ、いずれも単体テストが落ちることを確かめた。ヘルプ(`cmd/wgft/helptext.go`)とそこから生成する `docs/cli.md` も、この節の並びに合わせて改めた。未確認:ラボと実機では確かめていない。
+- `agent doctor` の人向けの出力で、値だけを示す 6 つの検査を「Observed values」節に分けた(2026-09-24、所有者の決定):`stream.backoff`、`stream.liveness`、`tunnel.watchdog`、`tunnel.transfer`、`relay.sessions`、`relay.refusals` は、値を述べるだけで良し悪しを言う閾値を持たず、健全なエージェントでも UNKNOWN にしかならない。判定済みの検査と同じ大きな状態語を Connection、Tunnel、Relay の各群に並べると、運用者はその列を故障と読む。この 6 つを群から抜き、5 つの群の後に「Observed values」という 1 つの節としてまとめた。値を読めた実行(状態が UNKNOWN)は状態語を出さず、ラベルと同じ行から値を示す。値を読めなかった実行は、これまでどおり SKIPPED を状態語ごと示す。値が無いことを値と取り違えないためである。実装を読んで確かめたところ、この 6 つは UNKNOWN と SKIPPED のどちらかにしかならず、OK にも FAILED にもならない。内部の判定、`checks[]` の `id`、`status`、`reason`、終了コード、`--json` の出力は変えていない。変える前と後で `--json` の出力が一致することを確かめた。ラボで稼働中と停止中のエージェントに対して人向けの出力と `--json` を確かめた。未確認:実機では確かめていない。

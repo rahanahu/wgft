@@ -1171,16 +1171,9 @@ func writeAgentDoctorObserved(w io.Writer, checks []agentDoctorCheck) {
 	}
 }
 
-// writeValueLine は 1 つの観測値を、状態語を出さずにラベルと値だけで出す。桁は writeLine と
-// 揃え、状態語の桁が無い分だけ同じ行に収められる detail を長くする。
+// writeValueLine は 1 つの観測値を、状態語を出さずにラベルと値だけで出す。値はラベルと同じ行から
+// 始め、続く行は値の桁で折り返す。「Not tested by this command」の節と同じ形である。
 func writeValueLine(w io.Writer, label, detail string) {
 	indent := 2 + labelWidth + 1
-	if detail != "" && len(detail) <= inlineDetail+statusWidth {
-		fmt.Fprintf(w, "  %-*s %s\n", labelWidth, label, detail)
-		return
-	}
-	fmt.Fprintf(w, "  %s\n", label)
-	if detail != "" {
-		fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", indent), wrapAt(detail, indent))
-	}
+	fmt.Fprintf(w, "  %-*s %s\n", labelWidth, label, wrapAt(detail, indent))
 }
