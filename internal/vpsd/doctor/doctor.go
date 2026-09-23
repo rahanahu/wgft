@@ -305,12 +305,18 @@ func notTestedList(rules []proto.Rule, in Input) []NotTested {
 		{"the agent host", "the agent's own environment: its OS, its permissions, its interfaces and its name resolution. This " +
 			"server sees only what the heartbeat carries. To see it, run wgft agent doctor on that host."},
 	}
-	// --probe only ever applies to a single rule (10.2a 節), so this entry is only misleading
-	// when that one rule is UDP: the admin API refuses to dial a UDP rule end to end either
-	// way, and "udp end to end" above already says so (設計文書 10.2a 節の改訂の記録、
-	// 2026-09-23)。
-	udpAlone := len(rules) == 1 && rules[0].Proto == proto.UDP
-	if !in.Probed && !udpAlone {
+	// この項目は、診断の対象がすべて UDP のルールであれば出さない。UDP のルールは --probe を
+	// 付けても管理用 API が確認そのものを拒むので、この項目の案内は意味を持たない。1 本でも
+	// TCP のルールが混じっていれば、そのルールには --probe が今も意味を持つので出す(設計文書
+	// 10.2a 節の改訂の記録、2026-09-23)。
+	allUDP := len(rules) > 0
+	for _, r := range rules {
+		if r.Proto != proto.UDP {
+			allUDP = false
+			break
+		}
+	}
+	if !in.Probed && !allUDP {
 		out = append(out, NotTested{"inner path", "nothing was dialled. Add --probe to open one real TCP connection from this " +
 			"server, through the tunnel and the agent, to the target."})
 	}

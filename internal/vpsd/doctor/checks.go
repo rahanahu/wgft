@@ -322,10 +322,16 @@ func connectionCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 				"this server has not yet noticed a connection that is in fact alive",
 			}
 			c.Next = "read this server's log for this agent's control connection, and run wgft agent doctor on the agent host."
-			// 既に疎通確認を行った実行に「--probe を付けよ」と言わない。今やったことを勧める行は
-			// 読み手にとって雑音である。UDP のルールにも言わない。admin API が UDP の確認そのもの
-			// を拒むので、この案内は意味を持たない(設計文書 10.2a 節の改訂の記録、2026-09-23)。
-			if !in.Probed && r.Proto != proto.UDP {
+			switch {
+			case r.Proto == proto.UDP:
+				// UDP のルールには --probe を勧めない。管理用 API が UDP のルールの確認その
+				// ものを拒むためである。代わりに、`rule.probe` の判定が同じ状況で返す案内
+				// (udpProbeNext)をそのまま繰り返す(設計文書 10.2a 節の改訂の記録、
+				// 2026-09-23)。
+				c.Next += " " + strings.ToUpper(udpProbeNext[:1]) + udpProbeNext[1:] + "."
+			case !in.Probed:
+				// 既に疎通確認を行った実行に「--probe を付けよ」と言わない。今やったことを
+				// 勧める行は読み手にとって雑音である。
 				c.Next += " To see whether this rule still carries traffic, add --probe."
 			}
 			return c
@@ -695,9 +701,8 @@ func probeCheck(r proto.Rule, in Input) Check {
 		c.Detail = "nothing was dialled"
 		c.Next = "add --probe to open one real TCP connection from this server, through the tunnel and the agent, to the target"
 		if r.Proto == proto.UDP {
-			// --probe would not help here either; the admin API refuses to dial a UDP rule
-			// end to end, so telling the operator to add it is meaningless (design.md 10.2a
-			// 節の改訂の記録、2026-09-23)。
+			// UDP のルールには --probe を付けても意味が無い。管理用 API が UDP のルールの
+			// 確認そのものを拒むためである(設計文書 10.2a 節の改訂の記録、2026-09-23)。
 			c.Next = udpProbeNext
 		}
 		return c
