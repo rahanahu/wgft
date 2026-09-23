@@ -458,8 +458,14 @@ type Status struct {
 	// 2 つを区別できず、bind の失敗はポートの衝突を、宛先の失敗は宛先の機器を指すため、
 	// 運用者の次の行動が違う(設計文書 10.2c 節)
 	Listening bool
-	Sessions  int
-	Err       error
+	// Sessions は中継が持っている接続の数。TCP は公開側と宛先側の両方を数えるので、フロー予算の
+	// 上限の対象とは一致しない。上限の対象の数は Flows である
+	Sessions int
+	// Flows はこの待ち受けがフロー予算から取っている枠の数、つまり上限の判定の対象になる数である
+	// (TCP は公開側の接続 1 本、UDP はセッション 1 つにつき 1)。判定を行う resource.Listener の
+	// 帳簿をそのまま読むので、上限と同じ量になる(設計文書 7a.10、10.2c 節)
+	Flows int
+	Err   error
 }
 
 // Status は現在のリスナーごとの宣言値と状態を返す(ハートビートの材料)。
@@ -472,6 +478,7 @@ func (m *Manager) Status() []Status {
 			Key: l.key, Target: l.target, RuleID: l.ruleID,
 			Listening: l.bindErr == nil,
 			Sessions:  l.sessions(),
+			Flows:     l.budget.Flows(),
 			Err:       l.err(),
 		})
 	}
