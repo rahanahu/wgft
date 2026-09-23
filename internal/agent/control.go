@@ -119,11 +119,14 @@ func (rt *runtime) rotateKey() (wgtypes.Key, error) {
 
 // RotateKey は CLI から呼ぶ。稼働中なら制御ソケット経由で、停止中なら認証情報ファイルの鍵と last_state を直接消す。
 func RotateKey(path string) (string, error) {
-	locked, err := credentials.IsLocked(path)
+	// 判定はロックファイルを作らない Inspect で行う(設計 10.2c 節)。Acquire 経由の判定は、
+	// 一度も起動していないホストで rotate-key を打っただけで、呼び出し元の権限のロックファイルを
+	// 残し、後から非特権で動くエージェントの起動を塞いだ。
+	state, err := credentials.Inspect(path)
 	if err != nil {
 		return "", err
 	}
-	if locked {
+	if state == credentials.Locked {
 		c, err := net.DialTimeout("unix", ControlPath(path), 5*time.Second)
 		if err != nil {
 			return "", fmt.Errorf("agent is running but the control socket is unreachable: %w", explainControlErr(ControlPath(path), err))
