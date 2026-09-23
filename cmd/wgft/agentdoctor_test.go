@@ -806,22 +806,31 @@ func TestAgentDoctorReportsAnUnreadableConfigFile(t *testing.T) {
 }
 
 // 設定ファイルが無い配置は正しい。無いことを失敗にせず、報告はそのまま出る。
+//
+// 主張は OS に依らない形にしてある。`host.privileges` の状態そのものは OS で分かれ、Windows では
+// 新しいファイルを作れるかどうかを副作用なしに判定できないので UNKNOWN になる(10.2c 節)。
+// この場面が固定するのは、読めない設定ファイルの扱いが不在のファイルに及ばないことである。
 func TestAgentDoctorAcceptsAMissingConfigFile(t *testing.T) {
 	dir := t.TempDir()
+	missing := filepath.Join(dir, "none.env")
 	var out bytes.Buffer
 	root := newRootCmd()
-	root.SetArgs([]string{"agent", "doctor", "--config", filepath.Join(dir, "none.env"), "--data-dir", filepath.Join(dir, "data")})
+	root.SetArgs([]string{"agent", "doctor", "--config", missing, "--data-dir", filepath.Join(dir, "data")})
 	root.SetOut(&out)
 	root.SetErr(io.Discard)
 	err := root.Execute()
 	// 認証情報ファイルが無いので総合判定は FAILED であり、終了コードは 1 である。証拠に権限で
-	// 届かなかった実行ではないので 2 ではない。
+	// 届かなかった実行ではないので 2 ではない。不在のファイルを読めない扱いにすると 2 になる。
 	if got := exitCode(err); err == nil || got != 1 {
 		t.Fatalf("err=%v exitCode=%d, want 1", err, got)
 	}
 	report := out.String()
-	if !strings.Contains(report, "privileges         OK") {
-		t.Errorf("a missing config file lowered host.privileges:\n%s", report)
+	if strings.Contains(report, "privileges         FAILED") {
+		t.Errorf("a missing config file failed host.privileges:\n%s", report)
+	}
+	// 所見が設定ファイルの名前を出すのは、読めなかった対象として並べるときだけである。
+	if strings.Contains(report, missing) {
+		t.Errorf("the report names the missing config file as evidence it could not read:\n%s", report)
 	}
 	if !strings.Contains(report, "the memory soft limit would be") {
 		t.Errorf("the report does not predict the memory soft limit although the settings were read:\n%s", report)

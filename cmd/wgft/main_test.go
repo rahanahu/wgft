@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -101,14 +102,18 @@ func TestRefusalWordingFollowsTheCommand(t *testing.T) {
 		name string
 		args []string
 		want string
+		// serverSide は、Linux 以外のビルドでは差し替えになる `server` の一群である
+		// (cmd/wgft/server_other.go)。設定を読む手前で Linux 専用である旨を答えるので、
+		// 拒否の文面そのものがこのビルドには無い。
+		serverSide bool
 	}{
-		{"server run starts a daemon", []string{"server", "run", "--config", bad, "--data-dir", dir}, startupWording},
-		{"agent run starts a daemon", []string{"agent", "run", "--config", bad, "--data-dir", dir}, startupWording},
-		{"server check starts nothing", []string{"server", "check", "--config", bad, "--data-dir", dir}, oneShotWording},
-		{"agent doctor starts nothing", []string{"agent", "doctor", "--config", bad, "--data-dir", dir}, oneShotWording},
-		{"status starts nothing", []string{"status", "--config", bad}, oneShotWording},
-		{"rule ls starts nothing", []string{"rule", "ls", "--config", bad}, oneShotWording},
-		{"agent pubkey starts nothing", []string{"agent", "pubkey", "--config", bad, "--data-dir", dir}, oneShotWording},
+		{"server run starts a daemon", []string{"server", "run", "--config", bad, "--data-dir", dir}, startupWording, true},
+		{"agent run starts a daemon", []string{"agent", "run", "--config", bad, "--data-dir", dir}, startupWording, false},
+		{"server check starts nothing", []string{"server", "check", "--config", bad, "--data-dir", dir}, oneShotWording, true},
+		{"agent doctor starts nothing", []string{"agent", "doctor", "--config", bad, "--data-dir", dir}, oneShotWording, false},
+		{"status starts nothing", []string{"status", "--config", bad}, oneShotWording, false},
+		{"rule ls starts nothing", []string{"rule", "ls", "--config", bad}, oneShotWording, false},
+		{"agent pubkey starts nothing", []string{"agent", "pubkey", "--config", bad, "--data-dir", dir}, oneShotWording, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := newRootCmd()
@@ -118,6 +123,17 @@ func TestRefusalWordingFollowsTheCommand(t *testing.T) {
 			err := root.Execute()
 			if err == nil {
 				t.Fatal("a dotenv that is not in KEY=value form must be refused")
+			}
+			if tc.serverSide && runtime.GOOS != "linux" {
+				// 差し替えの側も確かめる。この一群は設定を読まないので拒否にはならず、
+				// 再試行で直りうる失敗と同じ終了コード 1 で終わる(設計文書 11b 節)。
+				if !strings.Contains(err.Error(), "the server runs on Linux only") {
+					t.Errorf("message = %q, want the Linux-only answer this build gives", err.Error())
+				}
+				if got := exitCode(err); got != 1 {
+					t.Errorf("exitCode = %d, want 1", got)
+				}
+				return
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("message = %q, want it to contain %q", err.Error(), tc.want)
