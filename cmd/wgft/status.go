@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
+	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -63,7 +64,7 @@ const (
 // LastHandshake であり、healthy は制御ストリームとトンネルの両方が健全なときだけである。制御
 // ストリームが切れている、またはトンネルが failed・error か鮮度の条件を外れているときは
 // degraded、トンネルの状態や報告が不明なときは unknown である。トンネルの判定は `server doctor`
-// の `tunnel.handshake`(10.2a 節、doctor.go の tunnelHealth)をそのまま呼び、同じ鮮度の規則
+// の `tunnel.handshake`(10.2a 節、internal/vpsd/doctor の TunnelHealth)をそのまま呼び、同じ鮮度の規則
 // (handshakeStale、3 分)を共有する。以前は Connected だけを見ており、制御ストリームは生きて
 // いてもトンネルが死んでいる配置を healthy 側に数えていた(レビューの指摘)。
 type agentsStatus struct {
@@ -87,7 +88,7 @@ type agentsStatus struct {
 // 名乗る唯一の値なので、両方の証拠が揃って初めて active と数える。
 type rulesStatus struct {
 	// Active は、server が apply_state を active と報告し、かつそのルールの持ち主のエージェントの
-	// 鮮度のある報告(agent_rule_states、freshAgentRuleStatus と同じ鮮度の規則)が ok であるルール
+	// 鮮度のある報告(agent_rule_states、FreshAgentRuleStatus と同じ鮮度の規則)が ok であるルール
 	// の数である(design.md 10.2b 節)。
 	Active int `json:"active"`
 	// Degraded は、次のいずれかであるルールの数である(design.md 10.2b 節)。
@@ -196,7 +197,7 @@ func buildStatusReport(in statusInput) statusReport {
 	}
 }
 
-// serverStatusOf は generationGap(doctor.go)をそのまま使い、doctor の dataplaneCheck と同じ
+// serverStatusOf は GenerationGap(internal/vpsd/doctor)をそのまま使い、doctor の dataplaneCheck と同じ
 // 優先順位(apply_error を伴う世代の遅れを先に、次に単独の apply_error)で見る。ただし判定その
 // ものは dataplaneCheck と違う。世代の遅れが無く apply_error だけが残る場合、dataplaneCheck は
 // これを statusUnknown(reasonRepairFailed)にとどめて `server doctor` の終了コードを 0 のままに
@@ -219,7 +220,7 @@ func serverStatusOf(res *admin.BatchResponse) serverStatus {
 	}
 	haveGenerations := res.DesiredGeneration != nil && res.ActiveGeneration != nil
 	if haveGenerations {
-		if gap := generationGap(res); gap != "" {
+		if gap := doctor.GenerationGap(res); gap != "" {
 			detail := gap
 			if res.ApplyError != "" {
 				detail += "; " + res.ApplyError
@@ -238,11 +239,11 @@ func serverStatusOf(res *admin.BatchResponse) serverStatus {
 
 // agentHealthOf は 1 台のエージェントを healthy・degraded・unknown に分類する。制御ストリーム
 // (Connected)が切れていること自体が運用上の劣化なので、その場合は degraded とし、agent ls と
-// 同じ語り口で最終ハートビートからの経過を添える(doctor.go の since、parseWhen を使う)。制御
-// ストリームが繋がっている場合だけ、トンネルの健全さを doctor.go の tunnelHealth(`server
+// 同じ語り口で最終ハートビートからの経過を添える(internal/vpsd/doctor の Since、ParseWhen を使う)。制御
+// ストリームが繋がっている場合だけ、トンネルの健全さを internal/vpsd/doctor の TunnelHealth(`server
 // doctor` の `tunnel.handshake`、10.2a 節と同じ判定・同じ鮮度の規則)で見る。制御ストリームが
 // 切れている間は、エージェント自身のトンネルの報告がハートビート由来で古くなるため、
-// tunnelHealth 自身がこれを healthy 側に倒す(直近のハンドシェイクだけを見る)が、この行の
+// TunnelHealth 自身がこれを healthy 側に倒す(直近のハンドシェイクだけを見る)が、この行の
 // 目的では制御ストリームが切れていること自体で既に degraded が決まっているので、その判定を
 // 待たずに返す(2026-09-22、所有者の決定)。
 func agentHealthOf(a admin.AgentInfo, now time.Time) (status, detail string) {
@@ -252,14 +253,14 @@ func agentHealthOf(a admin.AgentInfo, now time.Time) (status, detail string) {
 		}
 		return serverDegraded, a.Name + " never connected"
 	}
-	tStatus, _, tDetail, _ := tunnelHealth(&a, now)
+	tStatus, _, tDetail, _ := doctor.TunnelHealth(&a, now)
 	switch tStatus {
 	case statusFailed:
 		return serverDegraded, a.Name + " tunnel: " + tDetail
 	case statusOK:
 		return serverHealthy, ""
 	default:
-		// tunnelHealth returns only ok, failed and unknown today. A fourth state added later
+		// TunnelHealth returns only ok, failed and unknown today. A fourth state added later
 		// must not be counted as healthy: this command never calls something healthy on
 		// evidence it has not read (design.md 10.2b section).
 		return statusUnknown, a.Name + " tunnel: " + tDetail
@@ -304,7 +305,7 @@ func agentsStatusOf(agents []admin.AgentInfo, now time.Time) agentsStatus {
 // apply_state が active であることは、server がこのルールを公開できたという証拠でしかなく、
 // エージェントが実際に target へ届いているという証拠ではない(2026-09-22、所有者の決定)。この
 // 場合は、そのルールの持ち主のエージェントの agent_rule_states を、doctor.go の
-// freshAgentRuleStatus と同じ鮮度の規則(接続中、State が空でない、targetReportStale より新しい)
+// FreshAgentRuleStatus と同じ鮮度の規則(接続中、State が空でない、targetReportStale より新しい)
 // で読み、次の 3 つに分ける。
 //   - 鮮度のある報告が error: 故障を観測しているので degraded
 //   - 鮮度のある報告が ok: server とエージェントの両方が転送の準備を報告しているので active
@@ -342,9 +343,9 @@ func rulesStatusOf(res *admin.BatchResponse, now time.Time) rulesStatus {
 			bad = append(bad, short(r.ID)+" "+reasonOr(state.Reason, state.ApplyState))
 		case state.ApplyState == admin.ApplyActive:
 			// A read from a nil map (a Backend that does not implement AgentRuleStatusBackend at
-			// all) is safe and returns the zero admin.AgentRuleStatus, which freshAgentRuleStatus
+			// all) is safe and returns the zero admin.AgentRuleStatus, which FreshAgentRuleStatus
 			// already treats as "no fresh report" (Connected false, State empty).
-			ars, fresh := freshAgentRuleStatus(res.AgentRuleStates[r.ID], now)
+			ars, fresh := doctor.FreshAgentRuleStatus(res.AgentRuleStates[r.ID], now)
 			switch {
 			case fresh && ars.State == proto.StatusError:
 				st.Degraded++

@@ -22,6 +22,7 @@ import (
 // このファイルは Web UI のルーティング、ダッシュボードの組み立てと描画、および
 // renderHTML/renderPage/redirectOrError のような、他のページも使う共通の補助を持つ。
 // ルール追加・詳細ページ(meta、拒否/許可リスト、レート、有効無効)は webui_rule.go、
+// 診断の画面は webui_doctor.go、
 // 分割・統合は webui_splitmerge.go、ルールの適用状態の判定は webui_state.go、
 // エージェントの追加・無効化・警告の削除は webui_agent.go、ルールの書き出し・読み込みは
 // webui_import.go に分ける。
@@ -45,6 +46,8 @@ func (s *Server) registerUI() {
 	s.mux.HandleFunc("GET /ui/warnings", s.uiWarningsPartial)
 	s.mux.HandleFunc("GET /ui/rules", s.uiRulesPartial)
 	s.mux.HandleFunc("GET /ui/health", s.uiHealthPartial)
+	s.mux.HandleFunc("GET /ui/doctor", s.uiDoctor)
+	s.mux.HandleFunc("GET /ui/doctor/{id}", s.uiDoctorRule)
 	s.mux.HandleFunc("GET /ui/add-rule", s.uiAddRuleForm)
 	s.mux.HandleFunc("POST /ui/add-rule", s.uiAddRule)
 	s.mux.HandleFunc("GET /ui/add-agent", s.uiAddAgentForm)

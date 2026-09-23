@@ -131,6 +131,7 @@
     <form method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
       <button class="small-btn" type="submit">{{ if .Enabled }}{{ T .Locale "disable" }}{{ else }}{{ T .Locale "enable" }}{{ end }}</button>
     </form>
+    <a class="small-btn accent" href="/ui/doctor/{{ .ID }}">{{ T .Locale "doctorTitle" }}</a>
   </div>
   {{ if .StateReason }}<p class="danger-text">{{ .StateReason }}</p>{{ end }}
   {{ if .Note }}<p class="muted">{{ .Note }}</p>{{ end }}

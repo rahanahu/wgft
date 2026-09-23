@@ -254,6 +254,23 @@ var tr = map[string][2]string{
 	"diffSetFmt":             {"%s %s", "%s %s"},
 	"boolYes":                {"あり", "yes"},
 	"boolNo":                 {"なし", "no"},
+	// 診断の画面(設計文書 10.2d 節)。検査の見出し、状態の語、群の名前と所見の自由文は
+	// 英語のままにするので、ここには持たない。画面の枠の語だけを切り替える。
+	"doctorTitle":            {"診断", "Diagnostics"},
+	"doctorIntro":            {"この画面は、server が既に受け取っている観測から組み立てます。開いた時点では、どこへも接続を試しません。", "This page is built from what the server has already observed. Opening it dials nothing."},
+	"doctorRuleLink":         {"このルールを診断", "Diagnose"},
+	"doctorBackToSummary":    {"← 診断の一覧へ戻る", "← Back to the diagnosis"},
+	"doctorFinding":          {"所見", "Finding"},
+	"doctorHistoryHead":      {"履歴", "History"},
+	"doctorNotTestedHead":    {"この診断が試していない範囲", "Not tested by this diagnosis"},
+	"doctorCheckedAt":        {"読み取りの時刻:", "Read at"},
+	"doctorProbeOnRulePage":  {"疎通の確認は、ルールごとの画面にあります。上の「診断」から開くと、その 1 本だけに接続を試せます。", "The end-to-end probe lives on the page of a single rule: open one with Diagnose above to dial that rule, and only that rule."},
+	"doctorProbeHead":        {"疎通の確認", "End-to-end probe"},
+	"doctorProbe":            {"疎通を試す", "Run the probe"},
+	"doctorProbeHelp":        {"押したときだけ、この server からトンネルとエージェントを通って宛先へ TCP 接続を 1 本開きます。宛先にはデータを伴わない接続が 1 本届きます。", "Only when pressed, this opens one real TCP connection from this server, through the tunnel and the agent, to the target. The target sees one connection that carries no data."},
+	"doctorProbeUnavailable": {"疎通の確認を使えるのは、有効な TCP のルールだけです。UDP は送信だけでは成否が分かりません。", "The probe is available for enabled TCP rules only: a UDP send cannot tell success."},
+	"doctorInternalHead":     {"内部の値", "Internal values"},
+	"doctorHiddenHead":       {"既定で隠している検査", "Checks hidden by default"},
 }
 
 // T はキーの訳を返す。未知のキーはキーそのものを返す。

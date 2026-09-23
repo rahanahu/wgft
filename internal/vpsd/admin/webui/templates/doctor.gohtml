@@ -1,0 +1,128 @@
+{{ define "doctorcheck" }}
+<li class="check-row">
+  <div class="check-head">
+    <span class="check-label">{{ .Label }}</span>
+    <span class="badge {{ .Badge }}">{{ .Status }}</span>
+  </div>
+  {{ if .Detail }}<p class="check-detail">{{ .Detail }}</p>{{ end }}
+  {{ if .Causes }}<ul class="check-causes">{{ range .Causes }}<li>{{ . }}</li>{{ end }}</ul>{{ end }}
+  {{ if .Next }}<p class="check-next"><strong>Check:</strong> {{ .Next }}</p>{{ end }}
+  {{ if .Internal }}<details class="check-internal"><summary>{{ T .Locale "doctorInternalHead" }}</summary><ul>{{ range .Internal }}<li class="mono">{{ . }}</li>{{ end }}</ul></details>{{ end }}
+</li>
+{{ end }}
+
+{{ define "doctortail" }}
+<section class="detail-section">
+  <h3>{{ T .Locale "doctorHistoryHead" }}</h3>
+  <p class="check-detail"><span class="badge neutral">NOT AVAILABLE</span> {{ .History }}</p>
+</section>
+
+<section class="detail-section">
+  <h3>{{ T .Locale "doctorNotTestedHead" }}</h3>
+  <ul class="check-list">
+    {{ range .NotTested }}
+    <li class="check-row"><div class="check-head"><span class="check-label">{{ .ID }}</span></div><p class="check-detail">{{ .Detail }}</p></li>
+    {{ end }}
+  </ul>
+</section>
+<p class="muted" style="font-size:12px">{{ T .Locale "doctorCheckedAt" }} {{ .CheckedAt }}</p>
+{{ end }}
+
+{{ define "doctorsummary" }}
+<p class="muted"><a href="/">{{ T .Locale "back" }}</a></p>
+<h2 style="margin-top:0">{{ T .Locale "doctorTitle" }}</h2>
+<p class="field-help">{{ T .Locale "doctorIntro" }}</p>
+
+<section class="detail-section">
+  <h3>Server</h3>
+  <ul class="check-list">{{ template "doctorcheck" .Server }}</ul>
+</section>
+
+<section class="detail-section">
+  <h3>Agents</h3>
+  <ul class="check-list">
+    {{ range .Agents }}{{ template "doctorcheck" . }}{{ else }}<li class="check-row"><p class="check-detail muted">no agent is named by any rule</p></li>{{ end }}
+  </ul>
+</section>
+
+<section class="detail-section">
+  <h3>Rules</h3>
+  {{ $loc := .Locale }}
+  <div class="table-scroll">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>{{ T $loc "colState" }}</th><th>{{ T $loc "colProtoPort" }}</th><th>{{ T $loc "colAgent" }}</th>
+          <th>{{ T $loc "colDest" }}</th><th>{{ T $loc "doctorFinding" }}</th><th>{{ T $loc "colActions" }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range .Rules }}
+        <tr>
+          <td data-label="{{ T $loc "colState" }}"><span class="badge {{ .Badge }}">{{ .Status }}</span></td>
+          <td data-label="{{ T $loc "colProtoPort" }}"><strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> {{ .Ports }}</td>
+          <td data-label="{{ T $loc "colAgent" }}">{{ .Agent }}</td>
+          <td data-label="{{ T $loc "colDest" }}" class="mono">{{ .Target }}</td>
+          <td data-label="{{ T $loc "doctorFinding" }}" class="check-detail">{{ .Why }}</td>
+          <td data-label="{{ T $loc "colActions" }}"><a class="small-btn accent" href="/ui/doctor/{{ .ID }}">{{ T $loc "doctorRuleLink" }}</a></td>
+        </tr>
+        {{ else }}
+        <tr><td colspan="6" class="muted">{{ T $loc "noRules" }}</td></tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+  <p class="doctor-result"><strong>Result:</strong> {{ .Result }}</p>
+  <p class="field-help">{{ T $loc "doctorProbeOnRulePage" }}</p>
+</section>
+
+{{ template "doctortail" . }}
+{{ end }}
+
+{{ define "doctorrule" }}
+<p class="muted"><a href="/ui/doctor">{{ T .Locale "doctorBackToSummary" }}</a></p>
+{{ with .Rule }}
+<div class="rule-detail-head">
+  <div class="rule-summary">
+    <strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> <span class="mono">{{ .Ports }}</span>
+    <span class="flow-arrow">→</span> {{ .Agent }} <span class="mono">{{ .Target }}</span>
+    <span class="badge {{ .Badge }}">{{ .Status }}</span>
+    {{ if .Group }}<span class="badge neutral">{{ .Group }}</span>{{ end }}
+  </div>
+  <p class="muted mono" style="font-size:12px">{{ .ID }}</p>
+</div>
+{{ end }}
+
+{{ range .Groups }}
+<section class="detail-section">
+  <h3>{{ .Title }}</h3>
+  <ul class="check-list">{{ range .Checks }}{{ template "doctorcheck" . }}{{ end }}</ul>
+</section>
+{{ end }}
+
+<p class="doctor-result"><strong>Result:</strong> {{ .Result }}</p>
+
+<section class="detail-section">
+  <h3>{{ T .Locale "doctorProbeHead" }}</h3>
+  {{ if .CanProbe }}
+  <form method="get" action="/ui/doctor/{{ .Rule.ID }}">
+    <input type="hidden" name="probe" value="1">
+    <button class="small-btn accent" type="submit">{{ T .Locale "doctorProbe" }}</button>
+  </form>
+  <p class="field-help">{{ T .Locale "doctorProbeHelp" }}</p>
+  {{ else }}
+  <p class="field-help">{{ T .Locale "doctorProbeUnavailable" }}</p>
+  {{ end }}
+</section>
+
+{{ if .Hidden }}
+<section class="detail-section">
+  <details class="advanced">
+    <summary>{{ T .Locale "doctorHiddenHead" }}</summary>
+    <ul class="check-list advanced-body">{{ range .Hidden }}{{ template "doctorcheck" . }}{{ end }}</ul>
+  </details>
+</section>
+{{ end }}
+
+{{ template "doctortail" . }}
+{{ end }}

@@ -232,3 +232,16 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 .sv { display: flex; flex-direction: column; gap: 2px; }
 .sv-k { color: var(--muted); font-size: 11px; font-weight: 700; }
 .sv-v { font-size: 13px; font-weight: 600; }
+
+/* 診断の画面 */
+.check-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.check-row { padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.check-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.check-label { font-weight: 600; font-size: 13px; }
+.check-detail { margin: 6px 0 0; font-size: 13px; line-height: 1.55; }
+.check-causes { margin: 6px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.55; color: var(--muted); }
+.check-next { margin: 6px 0 0; font-size: 13px; line-height: 1.55; color: var(--accent-strong); }
+.check-internal { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.check-internal summary { cursor: pointer; }
+.check-internal ul { margin: 6px 0 0; padding-left: 18px; }
+.doctor-result { font-size: 14px; font-weight: 600; margin: 14px 0 0; }

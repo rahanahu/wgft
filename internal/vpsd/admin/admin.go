@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -93,48 +94,20 @@ func ReservedFromServerInfo(info ServerInfo) proto.Reserved {
 	return reserved
 }
 
-// ConnCheck は疎通確認の結果。Reach は "target" / "agent" / "none"。
-type ConnCheck struct {
-	OK     bool   `json:"ok"`
-	Reach  string `json:"reach"`
-	Detail string `json:"detail"`
-}
-
-// Warning は窃取検知の警告 1 件。
-type Warning struct {
-	Agent  string `json:"agent"`
-	Kind   string `json:"kind"`
-	Detail string `json:"detail"`
-	At     string `json:"at"`
-}
-
-// AgentInfo はエージェント一覧の 1 行(仕様 10.1 節)。
-type AgentInfo struct {
-	Name           string `json:"name"`
-	Address        string `json:"address"`
-	PublicKey      string `json:"public_key,omitempty"`
-	RegisteredFrom string `json:"registered_from"`
-	CreatedAt      string `json:"created_at"`
-	// stream
-	Connected     bool               `json:"connected"`
-	StreamFrom    string             `json:"stream_from,omitempty"`
-	LastHeartbeat string             `json:"last_heartbeat,omitempty"`
-	Generation    uint64             `json:"generation"` // 処理済み世代
-	Tunnel        TunnelStatus       `json:"tunnel"`     // tunnelview.go: wire の proto.TunnelStatus とは別の見せ方(7a.11 節)
-	Rules         []proto.RuleStatus `json:"rules,omitempty"`
-	// 版の交渉(仕様 7a.6 節)。未接続、または接続が legacy v0 なら ProtocolVersion は 0 で、
-	// AgentProtocolLegacy が true な場合だけ「legacy v0 と判定した」ことを示す(未接続との違いは
-	// Connected を見る)
-	ProtocolVersion     int  `json:"protocol_version,omitempty"`
-	AgentProtocolLegacy bool `json:"agent_protocol_legacy,omitempty"`
-	AgentProtocolMin    int  `json:"agent_protocol_min,omitempty"`
-	AgentProtocolMax    int  `json:"agent_protocol_max,omitempty"`
-	// wg
-	WGEndpoint    string `json:"wg_endpoint,omitempty"`
-	LastHandshake string `json:"last_handshake,omitempty"`
-	// 窃取検知
-	Warnings []Warning `json:"warnings,omitempty"`
-}
+// この API の読み取り側の型は internal/vpsd/adminapi が持ち、ここで同じ名前に別名を付ける
+// (design.md 10.2d 節)。診断(internal/vpsd/doctor)がこれらを証拠として読み、その doctor を
+// この package が import する以上、doctor からこの package への import は循環になる。別名なので
+// admin.AgentInfo と adminapi.AgentInfo は同一の型であり、JSON の形も呼び出し側も変わらない。
+type (
+	// ConnCheck は疎通確認の結果。Reach は "target" / "agent" / "none"。
+	ConnCheck = adminapi.ConnCheck
+	// Warning は窃取検知の警告 1 件。
+	Warning = adminapi.Warning
+	// AgentInfo はエージェント一覧の 1 行(仕様 10.1 節)。
+	AgentInfo = adminapi.AgentInfo
+	// BatchResponse はバッチの結果。
+	BatchResponse = adminapi.BatchResponse
+)
 
 // JoinStringRequest / JoinStringResponse は接続文字列の発行。
 type JoinStringRequest struct {
@@ -205,29 +178,6 @@ func ApplyBatchToRules(rules []proto.Rule, req BatchRequest) ([]proto.Rule, erro
 		}
 	}
 	return kept, nil
-}
-
-// BatchResponse はバッチの結果。
-type BatchResponse struct {
-	Generation uint64            `json:"generation"`
-	Changed    bool              `json:"changed"`
-	Rules      []proto.Rule      `json:"rules"`
-	Drops      map[string]uint64 `json:"drops,omitempty"` // rule_id → 累積 drop パケット数
-	// 以下は server のデータプレーンへの適用状態(設計文書 7a.3 節)。v1 への加算で、報告を持たない
-	// Backend では省く。DesiredGeneration は最後に適用を試みた宣言の世代、ActiveGeneration は
-	// 最後に成功した適用の世代(backend 全体の失敗では進まない)。
-	DesiredGeneration *uint64              `json:"desired_generation,omitempty"`
-	ActiveGeneration  *uint64              `json:"active_generation,omitempty"`
-	RuleStates        map[string]RuleApply `json:"rule_states,omitempty"` // rule_id → 適用状態
-	Drift             *Drift               `json:"drift,omitempty"`
-	ApplyError        string               `json:"apply_error,omitempty"` // 最後の適用の backend 全体の失敗か、公開の後の修復の失敗
-	// FlowBudget と ResourceRefusals は Resource Guard の状態(設計文書 7a.10 節「拒否の報告」)。
-	// v1 への加算で、報告を持たない Backend では省く(resource_status.go の withResourceStatus)。
-	FlowBudget       map[proto.Proto]FlowBudget   `json:"flow_budget,omitempty"`
-	ResourceRefusals map[string]map[string]uint64 `json:"resource_refusals,omitempty"`
-	// AgentRuleStates is each rule's agent-side status (agent_rule_status.go; design.md 5.2、7a.11
-	// 節). v1 への加算で、報告を持たない Backend では省く。
-	AgentRuleStates map[string]AgentRuleStatus `json:"agent_rule_states,omitempty"`
 }
 
 // ErrorBody は失敗時の本文。
@@ -340,29 +290,38 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, ErrorBody{Error: msg})
 }
 
-func (s *Server) getRules(w http.ResponseWriter, r *http.Request) {
+// rulesResponse は GET /api/v1/rules の本文を組み立てる。HTTP の応答と、同じプロセスの中の
+// 読み手(Web UI の診断の画面。webui_doctor.go)がここを共有するので、CLI 経由と画面とで違う
+// 値を見ることがない(design.md 10.2d 節)。
+func (s *Server) rulesResponse() (BatchResponse, error) {
 	rules, err := s.backend.Rules()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return BatchResponse{}, err
 	}
 	if rules == nil {
 		rules = []proto.Rule{}
 	}
 	gen, err := s.backend.Generation()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return BatchResponse{}, err
 	}
 	drops, err := s.backend.RuleDrops()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return BatchResponse{}, err
 	}
 	resp := BatchResponse{Generation: gen, Rules: rules, Drops: drops}
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)
 	s.withAgentRuleStatus(&resp)
+	return resp, nil
+}
+
+func (s *Server) getRules(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.rulesResponse()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 

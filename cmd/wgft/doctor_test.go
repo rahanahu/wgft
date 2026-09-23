@@ -11,11 +11,66 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
+	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // このファイルは `wgft server doctor` の判定(設計文書 10.2a 節)を、合成した管理用 API の
 // 応答に対して確かめる。表の各行は、実際に見つかった障害 1 つに対応する。
+
+// 判定は internal/vpsd/doctor にある(設計文書 10.2d 節)。この一連の試験は切り出しの前に
+// `wgft server doctor` の判定を固定したものであり、切り出しが挙動を変えていないことを示すため、
+// 本文を変えずにそのまま残してある。下の別名は、切り出しの前と同じ名前でその package を指す
+// ためだけのものである。
+const (
+	checkEnabled       = doctor.CheckEnabled
+	checkPublicPort    = doctor.CheckPublicPort
+	checkSourceFilter  = doctor.CheckSourceFilter
+	checkHandshake     = doctor.CheckHandshake
+	checkConnection    = doctor.CheckConnection
+	checkRulesReceived = doctor.CheckRulesReceived
+	checkCredentials   = doctor.CheckCredentials
+	checkTargetResolve = doctor.CheckTargetResolve
+	checkTarget        = doctor.CheckTarget
+	checkFlowBudget    = doctor.CheckFlowBudget
+	checkProbe         = doctor.CheckProbe
+
+	reasonRuleDisabled        = doctor.ReasonRuleDisabled
+	reasonBindFailed          = doctor.ReasonBindFailed
+	reasonNotPublished        = doctor.ReasonNotPublished
+	reasonGenerationBehind    = doctor.ReasonGenerationBehind
+	reasonAgentNotRegistered  = doctor.ReasonAgentNotRegistered
+	reasonAgentDisconnected   = doctor.ReasonAgentDisconnected
+	reasonNoRecentHandshake   = doctor.ReasonNoRecentHandshake
+	reasonTunnelError         = doctor.ReasonTunnelError
+	reasonDeniedByDenyList    = doctor.ReasonDeniedByDenyList
+	reasonNotInAllowList      = doctor.ReasonNotInAllowList
+	reasonTargetNotAllowed    = doctor.ReasonTargetNotAllowed
+	reasonResolveFailed       = doctor.ReasonResolveFailed
+	reasonConnectionRefused   = doctor.ReasonConnectionRefused
+	reasonTargetUnreachable   = doctor.ReasonTargetUnreachable
+	reasonAgentUnreachable    = doctor.ReasonAgentUnreachable
+	reasonNotReported         = doctor.ReasonNotReported
+	reasonStaleReport         = doctor.ReasonStaleReport
+	reasonNoFrom              = doctor.ReasonNoFrom
+	reasonNotReportedByServer = doctor.ReasonNotReportedByServer
+	reasonUnknownValue        = doctor.ReasonUnknownValue
+	reasonExternalNotTested   = doctor.ReasonExternalNotTested
+	reasonResolvedByAgent     = doctor.ReasonResolvedByAgent
+
+	targetReportStale = doctor.TargetReportStale
+)
+
+// checkOrder は経路の順である。判定と同じ並びを使う。
+var checkOrder = doctor.CheckOrder()
+
+func diagnose(r proto.Rule, in doctorInput) []checkReport { return doctor.Diagnose(r, in) }
+
+func dataplaneCheck(in doctorInput) checkReport { return doctor.DataplaneCheck(in) }
+
+func freshAgentRuleStatus(st admin.AgentRuleStatus, now time.Time) (admin.AgentRuleStatus, bool) {
+	return doctor.FreshAgentRuleStatus(st, now)
+}
 
 var doctorNow = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 
@@ -896,11 +951,11 @@ func TestOffPathChecksAreExactlyTheDocumentedTwo(t *testing.T) {
 	want := map[string]bool{checkCredentials: true, checkFlowBudget: true}
 	r := tcpRule()
 	for _, c := range diagnose(r, healthyInput(r)) {
-		if c.offPath != want[c.ID] {
-			t.Errorf("check %q: offPath = %v, want %v", c.ID, c.offPath, want[c.ID])
+		if c.OffPath() != want[c.ID] {
+			t.Errorf("check %q: offPath = %v, want %v", c.ID, c.OffPath(), want[c.ID])
 		}
 		// 経路の外の検査は転送の停止を主張しないので、failed になってはならない。
-		if c.offPath && c.Status == statusFailed {
+		if c.OffPath() && c.Status == statusFailed {
 			t.Errorf("check %q is off the path, so it must never report failed", c.ID)
 		}
 	}
