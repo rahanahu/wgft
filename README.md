@@ -34,6 +34,7 @@ wgft is aimed at workloads where arbitrary TCP/UDP forwarding matters, especiall
 - Rule changes do not disconnect unrelated sessions
 - Optional PROXY protocol v2 for preserving the real client IP on TCP rules
 - Web dashboard for agents, rules, warnings, and forwarding state
+- Diagnostics that show how far a rule's traffic gets and where it stops, from the CLI and the Web UI
 - `wgft server teardown` removes only state created by wgft
 
 ## Why wgft?
@@ -157,6 +158,23 @@ ssh -L 8686:/run/wgft/admin.sock root@vps
 ```
 
 Then open `http://localhost:8686`. Other admin access options are documented in the [setup guide](docs/setup.md#web-ui).
+
+## Diagnosing a rule that carries no traffic
+
+`wgft server doctor` on the VPS answers how far a rule's traffic gets, where it stops, and what to check next. Without an argument it surveys the server, the agents, and every rule. Given a rule ID, it follows that one rule from the public port to the target. It reads only what the running server has already observed and opens no connection unless you add `--probe`, which dials one real TCP connection through the tunnel and the agent to the target.
+
+```sh
+sudo wgft server doctor
+sudo wgft server doctor <rule ID>
+```
+
+The Diagnostics page of the Web UI shows the same verdicts, built from the same evidence. Each rule is drawn as a path through the nodes `public port`, `WireGuard`, `agent`, and `listener / target`, marked at the node where traffic stops. The probe runs only when you press its button on a single rule's page. The screenshot below shows a rule whose traffic stops at WireGuard because its agent has not completed a recent handshake. The page also has [a list of every rule](docs/images/doctor.png).
+
+![Diagnostics page of one rule](docs/images/doctor-rule.png)
+
+`wgft agent doctor` runs on the agent host and answers whether an agent runs there, whether it holds credentials, and whether the host can resolve the names it needs. Run it as the user the agent runs as. It answers for the permissions of the user who runs it. Run as root, it cannot tell whether the agent's own user can reach its files, and reports the privileges item as UNKNOWN. Where the agent itself runs as root, running the command as root is correct and that UNKNOWN is expected. With `--json`, both doctor commands print a diagnostic model. Its check ids and reason codes may gain new values in later versions, but an existing value never changes its meaning.
+
+See the [CLI reference](docs/cli.md) for what each state means and for the exit codes, and the [design](docs/design.md) for how the checks are judged.
 
 ## Documentation
 

@@ -1,3 +1,12 @@
+{{ define "brand" }}<div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ . }}</div></div>{{ end }}
+
+{{- /* 言語の切り替え。ダッシュボードだけが持ち、他のページはそこで選んだ言語(クッキー、resolveLocale)
+     に従う(設計文書 10.1 節)。リンクは問い合わせ文字列だけの相対 URL である */ -}}
+{{ define "langswitch" }}<span class="lang-switch">
+          <a class="lang {{ if ne . "en" }}active{{ end }}" href="?lang=ja">JA</a>
+          <a class="lang {{ if eq . "en" }}active{{ end }}" href="?lang=en">EN</a>
+        </span>{{ end }}
+
 {{ define "page" }}<!doctype html>
 <html lang="{{ .Locale }}">
 <head>
@@ -10,15 +19,22 @@
 </head>
 <body>
   <div class="app-shell">
+    {{- /* ヘッダはダッシュボードと同じ位置と大きさで描き、ロゴがどのページでも同じ場所に来る。
+         ページごとに幅が変わるのは、パンくずと本文の枠だけで、左端はロゴにそろう(設計文書 10.1 節) */}}
     <header class="topbar">
-      <div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ .Title }}</div></div>
-      <div class="top-actions"><a class="btn" href="/">{{ T .Locale "back" }}</a></div>
+      {{ template "brand" .Title }}
     </header>
-    <main style="max-width:{{ if .Wide }}900{{ else }}640{{ end }}px">
-      <section class="panel" style="padding:18px">
-        {{ .Body }}
-      </section>
-    </main>
+    {{ $w := 640 }}{{ if .MaxWidth }}{{ $w = .MaxWidth }}{{ else if .Wide }}{{ $w = 900 }}{{ end }}
+    <div class="page-frame" style="max-width:{{ $w }}px">
+      {{ with .Crumbs }}<nav class="crumbs" aria-label="{{ T $.Locale "crumbNav" }}"><ol>
+        {{- range . }}<li>{{ if .Href }}<a href="{{ .Href }}">{{ .Label }}</a>{{ else }}<span aria-current="page">{{ .Label }}</span>{{ end }}</li>{{ end -}}
+      </ol></nav>{{ end }}
+      <main>
+        <section class="panel" style="padding:18px">
+          {{ .Body }}
+        </section>
+      </main>
+    </div>
   </div>
 </body>
 </html>{{ end }}

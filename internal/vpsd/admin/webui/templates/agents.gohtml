@@ -33,7 +33,7 @@
         <td data-label="{{ T $loc "colHeartbeat" }}" class="{{ .HeartbeatClass }}">{{ .HeartbeatAgo }}</td>
         <td data-label="{{ T $loc "colWarn" }}">{{ if .WarnCount }}<span class="count danger">{{ .WarnCount }}</span>{{ else }}<span class="muted">-</span>{{ end }}</td>
         <td data-label="{{ T $loc "colActions" }}">
-          <form method="post" action="/ui/agents/{{ .Name }}/revoke" style="display:inline" data-confirm="{{ printf (T $loc "confirmRevoke") .Name }}">
+          <form autocomplete="off" method="post" action="/ui/agents/{{ .Name }}/revoke" style="display:inline" data-confirm="{{ printf (T $loc "confirmRevoke") .Name }}">
             <button class="small-btn" type="submit">{{ T $loc "revoke" }}</button>
           </form>
         </td>

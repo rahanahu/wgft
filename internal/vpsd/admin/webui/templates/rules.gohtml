@@ -43,12 +43,12 @@
         <td data-label="{{ T $loc "colRestrict" }}">{{ .Restriction }}</td>
         <td data-label="{{ T $loc "colActions" }}">
           <div class="row-actions">
-            <form method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
+            <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
               <button class="small-btn" type="submit">{{ if .Enabled }}{{ T $loc "disable" }}{{ else }}{{ T $loc "enable" }}{{ end }}</button>
             </form>
             {{ if .CanCheck }}<a class="small-btn accent" href="/ui/rules/{{ .ID }}/check">{{ T $loc "testConn" }}</a>{{ end }}
             <a class="small-btn" href="/ui/rules/{{ .ID }}">{{ T $loc "detailLink" }}</a>
-            <form method="post" action="/ui/rules/{{ .ID }}/delete" data-confirm="{{ printf (T $loc "confirmDelete") .Ports }}">
+            <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/delete" data-confirm="{{ printf (T $loc "confirmDelete") .Ports }}">
               <button class="small-btn" type="submit">{{ T $loc "delete" }}</button>
             </form>
           </div>

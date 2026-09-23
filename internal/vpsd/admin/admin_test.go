@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -288,6 +291,39 @@ func TestUIRenderLocales(t *testing.T) {
 			t.Errorf("en %s: missing %q", tc.path, tc.wantEN)
 		}
 	}
+
+	// パンくずと本文は、ページの種類で幅が決まる枠 1 つに入る。ヘッダはその枠の外にあり、
+	// どのページでもダッシュボードと同じ形で描く(TestHeaderSameOnEveryPage)。
+	frames := []struct {
+		path  string
+		width string
+	}{
+		{"/ui/add-rule", "640px"},
+		{"/ui/add-agent", "640px"},
+		{"/ui/rules/import", "640px"},
+		{"/ui/rules/r_a", "900px"},
+		{"/ui/doctor", "1200px"},
+		{"/ui/doctor/r_a", "1200px"},
+	}
+	for _, f := range frames {
+		body := get(f.path + "?lang=en")
+		frame := `<div class="page-frame" style="max-width:` + f.width + `">`
+		i := strings.Index(body, frame)
+		if i < 0 {
+			t.Errorf("%s: no %s", f.path, frame)
+			continue
+		}
+		rest := body[i:]
+		if n, m := strings.Index(rest, `<nav class="crumbs"`), strings.Index(rest, "<main>"); n < 0 || m < 0 || n > m {
+			t.Errorf("%s: the breadcrumb and the main content are not both inside the page frame, breadcrumb first", f.path)
+		}
+		if strings.Contains(rest, `<header class="topbar">`) {
+			t.Errorf("%s: the header is inside the page frame; it must not take the frame's width", f.path)
+		}
+		if n := strings.Count(body, "max-width:"+f.width); n != 1 {
+			t.Errorf("%s: max-width:%s appears %d times, want only on the page frame", f.path, f.width, n)
+		}
+	}
 }
 func findRuleT(t *testing.T, st *store.Store, id string) proto.Rule {
 	t.Helper()
@@ -302,4 +338,222 @@ func findRuleT(t *testing.T, st *store.Store, id string) proto.Rule {
 	}
 	t.Fatalf("rule %q not found", id)
 	return proto.Rule{}
+}
+
+// TestPageBreadcrumbs は、ダッシュボード以外の共通の枠のページが上部の移動を左寄せのパンくずで
+// 行い、右上のダッシュボードへ戻るボタンを持たないことを確かめる(設計文書 10.1 節)。上位の項目は
+// リンクで、今いるページの項目はリンクにしない。ルールの一覧のページは無いので、ルールの階層は
+// 作らない。
+func TestPageBreadcrumbs(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, proto.Rule{ID: "r_a", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true}), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
+	defer srv.Close()
+
+	dash := `<a href="/">Dashboard</a>`
+	cases := []struct {
+		path    string
+		links   []string
+		current string
+	}{
+		{"/ui/doctor", []string{dash}, "Diagnostics"},
+		{"/ui/doctor/r_a", []string{dash, `<a href="/ui/doctor">Diagnostics</a>`}, "TCP 25565 → home"},
+		{"/ui/rules/r_a", []string{dash}, "TCP 25565 → home"},
+		{"/ui/rules/r_a/check", []string{dash, `<a href="/ui/rules/r_a">TCP 25565 → home</a>`}, "Connection test"},
+		{"/ui/add-rule", []string{dash}, "Add rule"},
+		{"/ui/add-agent", []string{dash}, "Add agent"},
+		{"/ui/rules/import", []string{dash}, "Import rules"},
+	}
+	for _, tc := range cases {
+		assertBreadcrumb(t, tc.path, getBody(t, srv.URL+tc.path+"?lang=en"), tc.links, tc.current)
+	}
+
+	// 接続文字列を発行した後のページは、同じ「エージェントを追加」のページの結果である。
+	resp, err := http.PostForm(srv.URL+"/ui/add-agent?lang=en", url.Values{"name": {"home2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assertBreadcrumb(t, "POST /ui/add-agent", string(b), []string{dash}, "Add agent")
+
+	// 日本語の見出しでも同じ形になる。
+	assertBreadcrumb(t, "/ui/doctor/r_a ja", getBody(t, srv.URL+"/ui/doctor/r_a?lang=ja"),
+		[]string{`<a href="/">ダッシュボード</a>`, `<a href="/ui/doctor">診断</a>`}, "TCP 25565 → home")
+}
+
+// assertBreadcrumb は、ページのパンくずが links のリンクをこの順に持ち、current を今いるページの
+// 項目(リンクではない)として末尾に持ち、ページにダッシュボードへ戻るボタンが無いことを確かめる。
+// ダッシュボードへのリンクは、パンくずの先頭とフォームの取り消しボタンのほかに置かない。文言を
+// 変えた戻るリンク(「← Dashboard」など)もこれで見つかる。言語は links の先頭の文言から決める。
+func assertBreadcrumb(t *testing.T, name, body string, links []string, current string) {
+	t.Helper()
+	locale := "en"
+	if len(links) > 0 && strings.Contains(links[0], T("ja", "crumbDashboard")) {
+		locale = "ja"
+	}
+	i := strings.Index(body, `<nav class="crumbs"`)
+	if i < 0 {
+		t.Errorf("%s: no breadcrumb", name)
+		return
+	}
+	end := i + strings.Index(body[i:], "</nav>")
+	nav := body[i:end]
+	if want := `<nav class="crumbs" aria-label="` + T(locale, "crumbNav") + `">`; !strings.HasPrefix(nav, want) {
+		t.Errorf("%s: the breadcrumb does not open with %s:\n%s", name, want, nav)
+	}
+	rest := body[:i] + body[end:]
+	rest = strings.ReplaceAll(rest, `<a class="btn" href="/">`+T(locale, "cancel")+`</a>`, "")
+	if strings.Contains(rest, `href="/"`) {
+		t.Errorf("%s: a link to the dashboard sits outside the breadcrumb and the form's Cancel button", name)
+	}
+	at := 0
+	for _, l := range links {
+		k := strings.Index(nav[at:], l)
+		if k < 0 {
+			t.Errorf("%s: breadcrumb lacks %s after the earlier items:\n%s", name, l, nav)
+			return
+		}
+		at += k + len(l)
+	}
+	if want := `<span aria-current="page">` + current + `</span></li></ol>`; !strings.Contains(body[i:], want) {
+		t.Errorf("%s: breadcrumb does not end with the current item %q:\n%s", name, current, nav)
+	}
+	if n := strings.Count(nav, "<a "); n != len(links) {
+		t.Errorf("%s: breadcrumb has %d links, want %d; the current page must not be a link", name, n, len(links))
+	}
+	if strings.Contains(body, "Back to dashboard") || strings.Contains(body, "ダッシュボードへ戻る") {
+		t.Errorf("%s: a back-to-dashboard button is still on the page", name)
+	}
+	// 共通の枠のページのヘッダは、ロゴとページの見出しだけで、右側に何も置かない。
+	if strings.Contains(body, `class="top-actions"`) || strings.Contains(body, `class="lang-switch"`) {
+		t.Errorf("%s: the header carries an action area or the language switch", name)
+	}
+}
+
+// TestHeaderSameOnEveryPage は、ダッシュボードと共通の枠のすべてのページが同じヘッダを、同じ
+// 位置に描くことを確かめる。ヘッダは app-shell の最初の子で、ロゴの部分は同じテンプレート
+// ("brand")から出る。ロゴの位置がページごとに動かないのは、ヘッダがページの幅の枠の外にあり、
+// どのページでも同じ入れ物と同じクラスで描かれるからである。
+func TestHeaderSameOnEveryPage(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, proto.Rule{ID: "r_a", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true}), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
+	defer srv.Close()
+
+	// 空白を比べない。改行は、テンプレートを CRLF で取り出した環境(Windows の git の autocrlf)では
+	// \r\n になるので、strings.Fields で空白の種類によらず取り除く。
+	space := func(s string) string { return strings.Join(strings.Fields(s), "") }
+	const head = `<divclass="app-shell"><headerclass="topbar"><divclass="brand-wrap"><divclass="brand">wgft</div><divclass="subtitle">`
+	for _, path := range []string{"/", "/ui/doctor", "/ui/doctor/r_a", "/ui/rules/r_a", "/ui/rules/r_a/check", "/ui/add-rule", "/ui/add-agent", "/ui/rules/import"} {
+		body := space(getBody(t, srv.URL+path+"?lang=en"))
+		if !strings.Contains(body, head) {
+			t.Errorf("%s: the page does not open with the shared header", path)
+		}
+	}
+}
+
+// TestLangSwitchOnDashboardOnly は、言語の切り替えがダッシュボードにだけあり、共通の枠のページには
+// 無いことを確かめる(設計文書 10.1 節)。共通の枠のページは、ダッシュボードで選んだ言語に
+// クッキーで従う。POST の結果のページ(発行した接続文字列、読み込みの確認)で切り替えると、読み直しで
+// 結果が消えるためである。
+func TestLangSwitchOnDashboardOnly(t *testing.T) {
+	srv, _ := newDoctorTestServer(t)
+	dash := getBody(t, srv.URL+"/?lang=en")
+	for _, want := range []string{`<span class="lang-switch">`, `href="?lang=ja">JA</a>`, `href="?lang=en">EN</a>`} {
+		if !strings.Contains(dash, want) {
+			t.Errorf("dashboard: no %s", want)
+		}
+	}
+	for _, path := range []string{"/ui/doctor", "/ui/doctor/r_ok", "/ui/rules/r_ok", "/ui/rules/r_ok/check", "/ui/add-rule", "/ui/add-agent", "/ui/rules/import"} {
+		if body := getBody(t, srv.URL+path+"?lang=en"); strings.Contains(body, "lang-switch") || strings.Contains(body, "?lang=") {
+			t.Errorf("%s: carries a language switch; only the dashboard has one", path)
+		}
+	}
+	// ダッシュボードで選んだ言語は、クッキーで他のページにも効く。
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &http.Client{Jar: jar}
+	for _, u := range []string{srv.URL + "/?lang=ja", srv.URL + "/ui/doctor"} {
+		resp, err := c.Get(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if u == srv.URL+"/ui/doctor" && !strings.Contains(string(b), `<a href="/">`+T("ja", "crumbDashboard")+`</a>`) {
+			t.Errorf("the diagnostics page does not follow the language chosen on the dashboard")
+		}
+	}
+}
+
+// TestFormsOptOutOfAutofill は、Web UI のフォームがパスワード管理ソフトの自動入力の対象に
+// ならないよう、すべてのフォームが autocomplete="off" を持ち、文字や数を打ち込む入力欄
+// (type が無いか text、number、search の input と textarea)が autocomplete="off" と
+// 各ソフトの無視の印を持つことを確かめる。
+func TestFormsOptOutOfAutofill(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules,
+			proto.Rule{ID: "r_a", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true},
+			proto.Rule{ID: "r_r", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 30000, Hi: 30003}, Target: "192.168.1.40:30000", VPSMode: proto.ModeKernel, Enabled: true},
+		), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(&fakeBackend{st: st, agents: []AgentInfo{{Name: "home", Address: "10.200.0.2", Connected: true}}}))
+	defer srv.Close()
+
+	tagRe := regexp.MustCompile(`<(input|textarea|form)\b[^>]*>`)
+	typeRe := regexp.MustCompile(`\stype="([a-z]+)"`)
+	counted := map[string]int{}
+	for _, path := range []string{"/", "/ui/add-rule", "/ui/add-agent", "/ui/rules/r_a", "/ui/rules/r_r", "/ui/rules/import", "/ui/doctor", "/ui/doctor/r_a"} {
+		body := getBody(t, srv.URL+path+"?lang=en")
+		for _, tag := range tagRe.FindAllString(body, -1) {
+			switch {
+			case strings.HasPrefix(tag, "<form"):
+				counted["form"]++
+				if !strings.Contains(tag, `autocomplete="off"`) {
+					t.Errorf("%s: form without autocomplete=\"off\": %s", path, tag)
+				}
+				continue
+			case strings.HasPrefix(tag, "<input"):
+				if m := typeRe.FindStringSubmatch(tag); m != nil && m[1] != "text" && m[1] != "number" && m[1] != "search" {
+					continue
+				}
+			}
+			counted["field"]++
+			for _, want := range []string{`autocomplete="off"`, "data-1p-ignore", `data-lpignore="true"`, "data-bwignore", `data-form-type="other"`} {
+				if !strings.Contains(tag, want) {
+					t.Errorf("%s: field without %s: %s", path, want, tag)
+				}
+			}
+		}
+	}
+	// 見落としで何も数えないまま通らないよう、少なくとも数があることを確かめる。
+	if counted["form"] < 10 || counted["field"] < 15 {
+		t.Errorf("too few forms or fields were checked: %v", counted)
+	}
 }

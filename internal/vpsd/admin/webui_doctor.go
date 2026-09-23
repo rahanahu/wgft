@@ -336,7 +336,12 @@ func doctorResultLine(rr doctor.RuleReport, rep doctor.Report) string {
 	return "healthy as far as this diagnosis can see"
 }
 
-// renderDoctorPage は診断の画面を、ルール詳細ページと同じ広い枠で描く。
+// doctorMaxWidth は診断の画面の枠の最大幅 (px) である。
+const doctorMaxWidth = 1200
+
+// renderDoctorPage は診断の画面を、ルール詳細ページより広い枠で描く。診断の画面は経路の図と
+// 表が横に並ぶので、広い画面では幅を使う方が読みやすい。ルール詳細ページと読み込みの確認ページは
+// フォームが自前の最大幅を持つので、枠を広げても余白が増えるだけであり、900px のまま残す。
 func (s *Server) renderDoctorPage(w http.ResponseWriter, locale, body string, d doctorPageData) {
 	var inner strings.Builder
 	if err := uiTmpl.ExecuteTemplate(&inner, body, d); err != nil {
@@ -345,5 +350,16 @@ func (s *Server) renderDoctorPage(w http.ResponseWriter, locale, body string, d 
 	}
 	s.renderHTML(w, "page", map[string]any{
 		"Locale": locale, "Title": T(locale, "doctorTitle"), "Body": template.HTML(inner.String()), "Wide": true,
+		"MaxWidth": doctorMaxWidth, "Crumbs": doctorCrumbs(locale, d),
 	})
+}
+
+// doctorCrumbs は診断の画面のパンくずを返す。一覧の画面は「ダッシュボード / 診断」、1 本のルールの
+// 画面は「ダッシュボード / 診断 / ルール」である。
+func doctorCrumbs(locale string, d doctorPageData) []pageCrumb {
+	dash := dashboardCrumb(locale)
+	if d.Rule == nil {
+		return []pageCrumb{dash, {Label: T(locale, "doctorTitle")}}
+	}
+	return []pageCrumb{dash, {Label: T(locale, "doctorTitle"), Href: "/ui/doctor"}, {Label: ruleCrumbLabel(d.Rule.ProtoUpper, d.Rule.Ports, d.Rule.Agent)}}
 }

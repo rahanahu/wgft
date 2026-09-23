@@ -326,7 +326,8 @@ Flags:
 
 ## wgft agent revoke
 
-Revoke an agent. Its permanent token stops working, its stream is closed, its
+Revoke an agent. Its registration is removed, so it no longer appears in
+"agent ls", and its permanent token stops working. Its stream is closed, its
 WireGuard peer and tunnel address are reclaimed, and unused join strings issued
 for the name stop working. Rules that point at the agent are kept but forward
 nothing until an agent registers under that name again, which a new join

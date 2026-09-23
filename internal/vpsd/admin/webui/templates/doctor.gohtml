@@ -53,7 +53,6 @@
 {{ end }}
 
 {{ define "doctorsummary" }}
-<p class="muted"><a href="/">{{ T .Locale "back" }}</a></p>
 <h2 style="margin-top:0">{{ T .Locale "doctorTitle" }}</h2>
 <p class="field-help">{{ T .Locale "doctorIntro" }}</p>
 
@@ -68,13 +67,13 @@
   <div class="table-scroll">
     <table class="data-table doctor-table">
       <thead>
-        <tr><th>{{ T .Locale "colAgent" }}</th><th class="path-head">tunnel · stream · rules</th><th>{{ T .Locale "doctorFinding" }}</th></tr>
+        <tr><th>{{ T .Locale "colAgent" }}</th><th class="path-head">tunnel - stream - rules</th><th>{{ T .Locale "doctorFinding" }}</th></tr>
       </thead>
       <tbody>
         {{ range .Agents }}
         <tr>
           <td data-label="{{ T $.Locale "colAgent" }}"><span class="check-label">{{ .Name }}</span> <span class="badge {{ .Badge }}">{{ .Status }}</span></td>
-          <td data-label="tunnel · stream · rules">{{ template "doctorpathmini" .Path }}</td>
+          <td data-label="tunnel - stream - rules">{{ template "doctorpathmini" .Path }}</td>
           <td data-label="{{ T $.Locale "doctorFinding" }}" class="check-detail">{{ .Detail }}
             {{ if .Checks }}<details class="row-finding agent-finding"{{ if .Open }} open{{ end }}><summary>{{ T $.Locale "doctorAgentChecks" }}</summary><ul class="check-list">{{ range .Checks }}{{ template "doctorcheck" . }}{{ end }}</ul></details>{{ end }}
           </td>
@@ -96,7 +95,7 @@
       <thead>
         <tr>
           <th>{{ T $loc "colState" }}</th><th>{{ T $loc "doctorRuleCol" }}</th>
-          <th class="path-head">public port · WireGuard · agent · listener / target</th>
+          <th class="path-head">public port - WireGuard - agent - listener / target</th>
         </tr>
       </thead>
       <tbody>
@@ -107,7 +106,7 @@
             <a class="rule-link" href="/ui/doctor/{{ .ID }}"><strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> {{ .Ports }} <span class="flow-arrow">→</span> {{ .Agent }} <span class="mono">{{ .Target }}</span></a>
             {{ if .Why }}<details class="row-finding"><summary>{{ T $loc "doctorFindingMore" }}</summary><p class="check-detail">{{ .Why }}</p></details>{{ end }}
           </td>
-          <td data-label="public port · WireGuard · agent · listener / target">
+          <td data-label="public port - WireGuard - agent - listener / target">
             <a class="path-link" href="/ui/doctor/{{ .ID }}">{{ template "doctorpathmini" .Path }}{{ if .Path.Caption }}<span class="path-caption mono">{{ .Path.Caption }}</span>{{ end }}</a>
           </td>
         </tr>
@@ -125,7 +124,6 @@
 {{ end }}
 
 {{ define "doctorrule" }}
-<p class="muted"><a href="/ui/doctor">{{ T .Locale "doctorBackToSummary" }}</a></p>
 {{ with .Rule }}
 <div class="rule-detail-head">
   <div class="rule-summary">
@@ -181,7 +179,7 @@
 <section class="detail-section">
   <h3>{{ T .Locale "doctorProbeHead" }}</h3>
   {{ if .CanProbe }}
-  <form method="get" action="/ui/doctor/{{ .Rule.ID }}">
+  <form autocomplete="off" method="get" action="/ui/doctor/{{ .Rule.ID }}">
     <input type="hidden" name="probe" value="1">
     <button class="small-btn accent" type="submit">{{ T .Locale "doctorProbe" }}</button>
   </form>
