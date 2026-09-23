@@ -24,6 +24,8 @@ type fakeBackend struct {
 	mode     string
 	agents   []AgentInfo // 空なら未接続の "home" 1 台(既定)。ルールの適用状態のテストは差し替える
 	warnings []Warning   // nil なら IP 食い違いの警告 1 件(既定)。ダッシュボードの警告バナーのテストは空スライスに差し替える
+	acks     []store.Ack // IPMismatchAcks が返す確認済みの組
+	acksErr  error       // nil でなければ IPMismatchAcks はこのエラーを返す
 }
 
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.st.Rules() }
@@ -44,6 +46,7 @@ func (b *fakeBackend) Warnings() ([]Warning, error) {
 	return []Warning{{Agent: "home", Kind: store.WarnIPMismatch, Detail: "stream=9.9.9.9 wg=1.2.3.4"}}, nil
 }
 func (b *fakeBackend) DismissWarning(agent, kind, detail string) error { return nil }
+func (b *fakeBackend) IPMismatchAcks() ([]store.Ack, error)            { return b.acks, b.acksErr }
 func (b *fakeBackend) CheckConnectivity(ruleID string) (ConnCheck, error) {
 	return ConnCheck{OK: true, Reach: "target", Detail: "ok"}, nil
 }

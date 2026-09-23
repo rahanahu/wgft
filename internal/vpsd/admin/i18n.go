@@ -62,6 +62,7 @@ var tr = map[string][2]string{
 	"tunnelStale":     {"最終報告(切断中)", "Last reported; disconnected"},
 	"ipMatch":         {"✓ IP 一致", "✓ IP match"},
 	"ipMismatch":      {"▲ IP 不一致", "▲ IP mismatch"},
+	"ipMismatchAcked": {"IP 不一致 (確認済み)", "IP mismatch, acknowledged"},
 	"pending":         {"反映待ち", "Pending"},
 	"revoke":          {"削除", "Revoke"},
 	"noAgents":        {"エージェントがまだありません。「+ エージェントを追加」から接続文字列を発行してください。", "No agents yet. Use “+ Add agent” to issue a join string."},

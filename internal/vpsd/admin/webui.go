@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"log"
 	"net/http"
 	"os/exec"
 	"sort"
@@ -161,12 +162,22 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 	if info, e := s.backend.ServerInfo(); e == nil {
 		d.Server = serverToView(info, locale)
 	}
+	// 確認済みの組は IP の比較の見せ方だけに使う。読めなければ、確認済みでない食い違いとして
+	// 警告の色で描く(警告の側に倒す。仕様 10.1 節)
+	acks := map[string][]store.Ack{}
+	if all, err := s.backend.IPMismatchAcks(); err != nil {
+		log.Printf("dashboard: reading acknowledged IP mismatches: %v", err)
+	} else {
+		for _, a := range all {
+			acks[a.Agent] = append(acks[a.Agent], a)
+		}
+	}
 	online := 0
 	for _, a := range agents {
 		if a.Connected {
 			online++
 		}
-		d.Agents = append(d.Agents, agentToView(a, gen, locale))
+		d.Agents = append(d.Agents, agentToView(a, gen, locale, acks[a.Name]))
 	}
 	agentIdx := buildAgentIndex(agents)
 	d.RuleCount = len(rules)
@@ -192,7 +203,7 @@ func health(total, online, rules, warnings, ruleErrors int, locale string) healt
 	}
 }
 
-func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {
+func agentToView(a AgentInfo, latestGen uint64, locale string, acks []store.Ack) agentView {
 	v := agentView{Name: a.Name, Address: a.Address, StreamFrom: a.StreamFrom, WGEndpoint: a.WGEndpoint,
 		Connected: a.Connected, Generation: a.Generation, WarnCount: len(a.Warnings)}
 	if a.Connected {
@@ -216,16 +227,20 @@ func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {
 		v.TunnelClass, v.TunnelLabel = "muted", T(locale, "tunnelNone")
 	}
 	// stream の接続元 IP と WG エンドポイント IP の食い違い(窃取の兆候)。切断していれば
-	// 両方とも履歴の値なので、比較そのものを出さない(IP match/mismatch のどちらも今を語らない)
+	// 両方とも履歴の値なので、比較そのものを出さない(IP match/mismatch のどちらも今を語らない)。
+	// 比較は 15 秒ごとの監視と同じ store.ClassifyIPPair で行う。今の組が確認済みの組なら、
+	// 食い違っている事実だけを警告の色なしで示し、要対応にしない(仕様 5.2、10.1 節)
 	if a.Connected {
-		sIP, wIP := ipOnly(a.StreamFrom), ipOnly(a.WGEndpoint)
-		if sIP != "" && wIP != "" {
-			v.ShowIPCompare = true
-			if sIP == wIP {
-				v.IPCompareClass, v.IPCompareLabel = "success-text", T(locale, "ipMatch")
-			} else {
-				v.IPCompareClass, v.IPCompareLabel, v.Attention = "warning-text", T(locale, "ipMismatch"), true
-			}
+		v.ShowIPCompare = true
+		switch store.ClassifyIPPair(a.StreamFrom, a.WGEndpoint, acks) {
+		case store.IPPairMatch:
+			v.IPCompareClass, v.IPCompareLabel = "success-text", T(locale, "ipMatch")
+		case store.IPPairMismatch:
+			v.IPCompareClass, v.IPCompareLabel, v.Attention = "warning-text", T(locale, "ipMismatch"), true
+		case store.IPPairAcknowledged:
+			v.IPCompareClass, v.IPCompareLabel = "muted", T(locale, "ipMismatchAcked")
+		default:
+			v.ShowIPCompare = false
 		}
 	}
 	if a.Connected && latestGen > 0 && a.Generation != latestGen {
@@ -562,24 +577,6 @@ func firewallText(locale string) string {
 		return T(locale, "noNftTable")
 	}
 	return string(out)
-}
-
-func ipOnly(hostport string) string {
-	if hostport == "" {
-		return ""
-	}
-	if h, _, err := splitHostPortLoose(hostport); err == nil {
-		return h
-	}
-	return hostport
-}
-
-func splitHostPortLoose(s string) (string, string, error) {
-	i := strings.LastIndex(s, ":")
-	if i < 0 {
-		return s, "", nil
-	}
-	return s[:i], s[i+1:], nil
 }
 
 func agoStr(rfc3339, locale string) string {

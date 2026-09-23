@@ -40,6 +40,7 @@ func (b *fakeAgentBackend) JoinString(string) (admin.JoinStringResponse, error) 
 func (b *fakeAgentBackend) Revoke(string) error                         { return nil }
 func (b *fakeAgentBackend) Warnings() ([]admin.Warning, error)          { return nil, nil }
 func (b *fakeAgentBackend) DismissWarning(string, string, string) error { return nil }
+func (b *fakeAgentBackend) IPMismatchAcks() ([]store.Ack, error)        { return nil, nil }
 func (b *fakeAgentBackend) CheckConnectivity(string) (admin.ConnCheck, error) {
 	return admin.ConnCheck{}, nil
 }

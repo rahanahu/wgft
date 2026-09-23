@@ -306,6 +306,10 @@ func (s *Store) RevokeAgent(name string) error {
 	if _, err := tx.Exec("DELETE FROM join_tokens WHERE agent = ? AND used_at IS NULL", name); err != nil {
 		return err
 	}
+	// 確認済みの組は、無効化したエージェントの分を残さない(仕様 5.2 節)
+	if _, err := tx.Exec("DELETE FROM warning_acks WHERE agent = ?", name); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

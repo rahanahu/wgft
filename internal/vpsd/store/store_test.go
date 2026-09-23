@@ -65,7 +65,7 @@ func TestNewerSchemaIsRejected(t *testing.T) {
 
 // 版の順序は既存の DB との互換性そのもの。並びを固定する。
 func TestMigrationOrder(t *testing.T) {
-	want := []string{"CREATE TABLE meta", "CREATE TABLE rules", "CREATE TABLE agents", "CREATE TABLE agent_known_ips", "CREATE TABLE drop_counters", "CREATE TABLE warnings", "DROP TABLE IF EXISTS agent_known_ips"}
+	want := []string{"CREATE TABLE meta", "CREATE TABLE rules", "CREATE TABLE agents", "CREATE TABLE agent_known_ips", "CREATE TABLE drop_counters", "CREATE TABLE warnings", "DROP TABLE IF EXISTS agent_known_ips", "CREATE TABLE warning_acks"}
 	if len(migrations) != len(want) {
 		t.Fatalf("migrations = %d, want %d(新しい版は末尾に足す)", len(migrations), len(want))
 	}

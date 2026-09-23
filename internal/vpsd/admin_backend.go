@@ -302,13 +302,23 @@ func (d *Daemon) AgentState(agent string) (*proto.State, error) {
 	return st, nil
 }
 
-// DismissWarning は警告を消す(管理者が正当と確認したとき。仕様 5.2 節)。
+// DismissWarning は警告を消す(管理者が正当と確認したとき。仕様 5.2 節)。ip-mismatch では、
+// 消した警告の 2 つの IP の組を確認済みの組として記録し、同じ組の食い違いが続く間は出し直さない。
 func (d *Daemon) DismissWarning(agent, kind, detail string) error {
-	if err := d.st.ClearWarning(agent, kind, detail); err != nil {
+	acks, err := d.st.DismissWarning(agent, kind, detail)
+	if err != nil {
 		return err
 	}
 	log.Printf("dismissed warning %s for agent %s", kind, agent)
+	for _, a := range acks {
+		log.Printf("agent %s: acknowledged the IP mismatch %s; it is not warned again while the same pair continues", agent, store.IPMismatchDetail(a.StreamIP, a.WGIP))
+	}
 	return nil
+}
+
+// IPMismatchAcks は ip-mismatch の確認済みの組を全エージェント分返す(ダッシュボード用。仕様 5.2 節)。
+func (d *Daemon) IPMismatchAcks() ([]store.Ack, error) {
+	return d.st.WarningAcks(store.WarnIPMismatch)
 }
 
 // CheckConnectivity は TCP ルールの疎通確認(仕様 10.1 節)。vpsd から wg0 経由でエージェントの

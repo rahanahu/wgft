@@ -10,7 +10,7 @@ func TestIPMismatchStep(t *testing.T) {
 	count := 0
 	for i := 1; i <= 8; i++ {
 		var warn bool
-		count, warn = ipMismatchStep(count, "1.1.1.1", "2.2.2.2")
+		count, warn, _ = ipMismatchStep(count, "1.1.1.1", "2.2.2.2", nil)
 		if count != i {
 			t.Fatalf("i=%d: count=%d", i, count)
 		}
@@ -19,14 +19,14 @@ func TestIPMismatchStep(t *testing.T) {
 		}
 	}
 	// 一致したら 0 に戻す(警告は消さないが count はリセット)
-	if n, w := ipMismatchStep(7, "1.1.1.1", "1.1.1.1"); n != 0 || w {
+	if n, w, _ := ipMismatchStep(7, "1.1.1.1", "1.1.1.1", nil); n != 0 || w {
 		t.Errorf("一致で数え直し: n=%d w=%v", n, w)
 	}
 	// 片方が観測できなければ数えない
-	if n, _ := ipMismatchStep(7, "", "2.2.2.2"); n != 0 {
+	if n, _, _ := ipMismatchStep(7, "", "2.2.2.2", nil); n != 0 {
 		t.Errorf("stream 欠けで数え直し: n=%d", n)
 	}
-	if n, _ := ipMismatchStep(7, "1.1.1.1", ""); n != 0 {
+	if n, _, _ := ipMismatchStep(7, "1.1.1.1", "", nil); n != 0 {
 		t.Errorf("wg 欠けで数え直し: n=%d", n)
 	}
 }
