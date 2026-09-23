@@ -7,6 +7,7 @@
   {{ if .Detail }}<p class="check-detail">{{ .Detail }}</p>{{ end }}
   {{ if .Causes }}<ul class="check-causes">{{ range .Causes }}<li>{{ . }}</li>{{ end }}</ul>{{ end }}
   {{ if .Next }}<p class="check-next"><strong>Check:</strong> {{ .Next }}</p>{{ end }}
+  {{ if .ScreenNote }}<p class="field-help" style="margin-top:6px">{{ .ScreenNote }}</p>{{ end }}
   {{ if .Internal }}<details class="check-internal"><summary>{{ T .Locale "doctorInternalHead" }}</summary><ul>{{ range .Internal }}<li class="mono">{{ . }}</li>{{ end }}</ul></details>{{ end }}
 </li>
 {{ end }}
