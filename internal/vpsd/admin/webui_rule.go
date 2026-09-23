@@ -42,6 +42,19 @@ func unitLabel(locale, unit string) string {
 	return unit
 }
 
+// describedByIDs はテンプレート関数 DescribedBy。id と、その id が指す文言(空なら出ていない)
+// の組を並べて渡すと、実際に出ている文言の id だけをスペース区切りで返す。aria-describedby
+// に渡す値の組み立てに使う(空文字列なら呼び出し側で属性ごと省く)。
+func describedByIDs(pairs ...string) string {
+	var ids []string
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if pairs[i+1] != "" {
+			ids = append(ids, pairs[i])
+		}
+	}
+	return strings.Join(ids, " ")
+}
+
 // serverMode は現在の転送方式(kernel / userspace)。ServerInfo が引けなければ kernel とみなす
 // (仕様 9 節。記録の無い既存の状態は kernel とみなす規則に合わせる)。
 func (s *Server) serverMode() string {

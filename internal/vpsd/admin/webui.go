@@ -35,7 +35,7 @@ var tmplFS embed.FS
 //go:embed webui/static/*
 var staticFS embed.FS
 
-var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
+var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel, "DescribedBy": describedByIDs}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
 
 // registerUI は Web UI のルートを mux に足す(認証は ServeHTTP でかかる)。
 func (s *Server) registerUI() {

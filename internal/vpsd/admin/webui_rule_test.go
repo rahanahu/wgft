@@ -389,11 +389,20 @@ func TestRuleDetailPacketRateTCPNotice(t *testing.T) {
 var (
 	settingsFormRe = regexp.MustCompile(`(?s)<form\b[^>]*\smethod="post" action="([^"]*)"[^>]*id="settings-form"[^>]*>(.*?)</form>`)
 	inputTagRe     = regexp.MustCompile(`<input\b[^>]*>`)
-	selectRe       = regexp.MustCompile(`(?s)<select name="([^"]*)">(.*?)</select>`)
+	selectRe       = regexp.MustCompile(`(?s)<select\b[^>]*\sname="([^"]*)"[^>]*>(.*?)</select>`)
 	optionRe       = regexp.MustCompile(`<option value="([^"]*)"\s*(selected)?\s*>`)
 	attrNameRe     = regexp.MustCompile(`\bname="([^"]*)"`)
 	attrValueRe    = regexp.MustCompile(`\bvalue="([^"]*)"`)
 	attrTypeRe     = regexp.MustCompile(`\btype="([^"]*)"`)
+
+	// 付属性の検査(アクセシビリティ)に使う正規表現。
+	idAttrRe          = regexp.MustCompile(`\bid="([^"]*)"`)
+	ariaLabelledByRe  = regexp.MustCompile(`\baria-labelledby="([^"]*)"`)
+	ariaDescribedByRe = regexp.MustCompile(`\baria-describedby="([^"]*)"`)
+	ariaInvalidRe     = regexp.MustCompile(`\baria-invalid="true"`)
+	rateControlTagRe  = regexp.MustCompile(`<(?:input|select)\b[^>]*>`)
+	rateControlNameRe = regexp.MustCompile(`^[a-z]+(?:_[a-z]+)*_(?:count|unit|nolimit)$`)
+	dangerTextIDRe    = regexp.MustCompile(`<p class="danger-text" id="([^"]+)">`)
 )
 
 // settingsFormHTML は詳細ページの HTML から設定フォームの中身を取り出す。
@@ -440,6 +449,201 @@ func settingsFormValues(t *testing.T, page string) url.Values {
 		vals.Set(sel[1], chosen)
 	}
 	return vals
+}
+
+// ---- アクセシビリティ(レート欄のラベルと aria-describedby。design.md の規範は無いが、
+// forms.gohtml のレート欄には <label> が無かった欠落を直す。以下はその検査) ----
+
+// pageIDCounts は page 内の id="..." をすべて数える。id の重複が無いことと、
+// aria-labelledby/aria-describedby が指す id が実在することの両方の検査に使う。
+func pageIDCounts(page string) map[string]int {
+	counts := map[string]int{}
+	for _, m := range idAttrRe.FindAllStringSubmatch(page, -1) {
+		counts[m[1]]++
+	}
+	return counts
+}
+
+// fieldsContain は aria-labelledby/aria-describedby のようなスペース区切りの id 一覧に
+// want が含まれるかどうか。
+func fieldsContain(list, want string) bool {
+	for _, id := range strings.Fields(list) {
+		if id == want {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAccessibleName は、1 つの input/select の開始タグ(tag)に、アクセシブルな名前が
+// 付いているかどうかを見る。aria-labelledby ならその id がすべて page に実在すること、
+// 無ければ tag 自身の id を指す <label for="..."> が page にあることを見る。
+func hasAccessibleName(tag, page string, ids map[string]int) bool {
+	if m := ariaLabelledByRe.FindStringSubmatch(tag); m != nil {
+		for _, id := range strings.Fields(m[1]) {
+			if ids[id] == 0 {
+				return false
+			}
+		}
+		return true
+	}
+	if m := idAttrRe.FindStringSubmatch(tag); m != nil {
+		return strings.Contains(page, `for="`+m[1]+`"`)
+	}
+	return false
+}
+
+// checkRateAccessibleNames は、page にあるレート欄の input/select/checkbox(名前が
+// <接頭辞>_count、<接頭辞>_unit、<接頭辞>_nolimit の形のもの)をすべて見つけ、それぞれに
+// アクセシブルな名前が付いていることを確かめる。見つけた欄の数を返す。
+func checkRateAccessibleNames(t *testing.T, page string) int {
+	t.Helper()
+	ids := pageIDCounts(page)
+	found := 0
+	for _, tag := range rateControlTagRe.FindAllString(page, -1) {
+		nameM := attrNameRe.FindStringSubmatch(tag)
+		if nameM == nil || !rateControlNameRe.MatchString(nameM[1]) {
+			continue
+		}
+		found++
+		if !hasAccessibleName(tag, page, ids) {
+			t.Errorf("rate control %q has no accessible name (no aria-labelledby resolving to an id, no <label for>): %s", nameM[1], tag)
+		}
+	}
+	return found
+}
+
+// findDangerTextID は、prefix の欄のブロック(名前 <prefix>_count の入力から次の
+// rate-field の手前まで)にある danger-text の段落(誤りか食い違いの表示)の id を返す。
+func findDangerTextID(t *testing.T, form, prefix string) string {
+	t.Helper()
+	start := strings.Index(form, `name="`+prefix+`_count"`)
+	if start < 0 {
+		t.Fatalf("no %s_count input: %s", prefix, form)
+	}
+	block := form[start:]
+	if end := strings.Index(block, `class="rate-field"`); end >= 0 {
+		block = block[:end]
+	}
+	m := dangerTextIDRe.FindStringSubmatch(block)
+	if m == nil {
+		t.Fatalf("no danger-text paragraph with an id in the %s field's block: %s", prefix, block)
+	}
+	return m[1]
+}
+
+// TestRuleDetailRateFieldsAccessibleNames は、ルール詳細ページのレート欄(3 つの欄 x
+// count/unit/no-limit の 3 つの入力欄、計 9 個)がそれぞれアクセシブルな名前を持つこと、
+// ページ内の id が重複しないことを確かめる。
+func TestRuleDetailRateFieldsAccessibleNames(t *testing.T) {
+	srv, _ := newSettingsTestServer(t)
+	page := getBody(t, srv.URL+"/ui/rules/r_a")
+
+	for id, n := range pageIDCounts(page) {
+		if n > 1 {
+			t.Errorf("id %q appears %d times on the rule detail page, ids must be unique", id, n)
+		}
+	}
+
+	if n := checkRateAccessibleNames(t, page); n != 9 {
+		t.Fatalf("found %d rate controls on the rule detail page, want 9 (3 fields x count/unit/nolimit)", n)
+	}
+}
+
+// TestAddRuleFormRateFieldsAccessibleNames は、追加フォームにレート欄があれば同じ検査を
+// する。今の追加フォームはレート欄を持たない(制限の追加はルール作成後の詳細ページの
+// 設定でしかできない)ので、このテストは今のところ 0 件を確かめるだけだが、追加フォームに
+// レート欄が増えたときに同じ欠落を機械的に見つける。
+func TestAddRuleFormRateFieldsAccessibleNames(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
+	defer srv.Close()
+	page := getBody(t, srv.URL+"/ui/add-rule")
+
+	for id, n := range pageIDCounts(page) {
+		if n > 1 {
+			t.Errorf("id %q appears %d times on the add-rule page, ids must be unique", id, n)
+		}
+	}
+	checkRateAccessibleNames(t, page)
+}
+
+// TestRuleSettingsRateFieldAriaOnError は、レート欄の入力の誤りがあるとき、その欄の
+// count 入力と unit セレクトに aria-invalid="true" と、誤り文の id を指す
+// aria-describedby が付くことを確かめる。
+func TestRuleSettingsRateFieldAriaOnError(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix string
+		set          url.Values
+	}{
+		{"per-source empty", "per_source", url.Values{"per_source_count": {""}, "per_source_unit": {"minute"}}},
+		{"new-flow zero", "new_flow", url.Values{"new_flow_count": {"0"}, "new_flow_unit": {"second"}}},
+		{"packet empty", "packet", url.Values{"packet_count": {""}, "packet_unit": {"second"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newSettingsTestServer(t)
+			_, body := postSettings(t, srv.URL, "r_a", tc.set)
+			form := settingsFormHTML(t, body)
+			errID := findDangerTextID(t, form, tc.prefix)
+
+			for _, name := range []string{tc.prefix + "_count", tc.prefix + "_unit"} {
+				re := regexp.MustCompile(`<(?:input|select)\b[^>]*\bname="` + regexp.QuoteMeta(name) + `"[^>]*>`)
+				tags := re.FindAllString(form, -1)
+				if len(tags) != 1 {
+					t.Fatalf("expected exactly one control named %q, got %d: %v", name, len(tags), tags)
+				}
+				tag := tags[0]
+				if !ariaInvalidRe.MatchString(tag) {
+					t.Errorf(`%s: missing aria-invalid="true": %s`, name, tag)
+				}
+				m := ariaDescribedByRe.FindStringSubmatch(tag)
+				if m == nil {
+					t.Fatalf("%s: missing aria-describedby: %s", name, tag)
+				}
+				if !fieldsContain(m[1], errID) {
+					t.Errorf("%s: aria-describedby %q does not reference the error paragraph's id %q", name, m[1], errID)
+				}
+			}
+		})
+	}
+}
+
+// TestRuleSettingsRateFieldAriaOnConflict は、レート欄が別の場所での変更と食い違ったとき
+// (TestRuleSettingsConcurrentChange と同じ状況)も、count 入力と unit セレクトに
+// aria-invalid と、食い違い文の id を指す aria-describedby が付くことを確かめる。
+func TestRuleSettingsRateFieldAriaOnConflict(t *testing.T) {
+	srv, st := newSettingsTestServer(t)
+	page := getBody(t, srv.URL+"/ui/rules/r_a")
+	setRuleInStore(t, st, "r_a", func(r *proto.Rule) { r.PerSourceRate = mustRate(t, "99/second") })
+
+	_, body := postSettingsForm(t, srv.URL, "r_a", page, url.Values{
+		"per_source_count": {"20"}, "per_source_unit": {"minute"}, "note": {"friday night"},
+	})
+	form := settingsFormHTML(t, body)
+	conflictID := findDangerTextID(t, form, "per_source")
+
+	for _, name := range []string{"per_source_count", "per_source_unit"} {
+		re := regexp.MustCompile(`<(?:input|select)\b[^>]*\bname="` + regexp.QuoteMeta(name) + `"[^>]*>`)
+		tags := re.FindAllString(form, -1)
+		if len(tags) != 1 {
+			t.Fatalf("expected exactly one control named %q, got %d: %v", name, len(tags), tags)
+		}
+		tag := tags[0]
+		if !ariaInvalidRe.MatchString(tag) {
+			t.Errorf(`%s: missing aria-invalid="true": %s`, name, tag)
+		}
+		m := ariaDescribedByRe.FindStringSubmatch(tag)
+		if m == nil {
+			t.Fatalf("%s: missing aria-describedby: %s", name, tag)
+		}
+		if !fieldsContain(m[1], conflictID) {
+			t.Errorf("%s: aria-describedby %q does not reference the conflict paragraph's id %q", name, m[1], conflictID)
+		}
+	}
 }
 
 // postSettings は詳細ページを開いて設定フォームを読み、set の欄だけを書き換えて送る。
@@ -594,7 +798,7 @@ func TestRuleSettingsInvalidKeepsInput(t *testing.T) {
 			if end := strings.Index(block, `class="rate-field"`); end >= 0 {
 				block = block[:end]
 			}
-			if !strings.Contains(block, `<p class="danger-text">`) || !strings.Contains(block, html.EscapeString(tc.wantErr)) {
+			if !strings.Contains(block, `<p class="danger-text"`) || !strings.Contains(block, html.EscapeString(tc.wantErr)) {
 				t.Errorf("the error %q must be shown at the %s field: %s", tc.wantErr, tc.prefix, block)
 			}
 			if !strings.Contains(body, T("ja", "settingsInvalid")) {
