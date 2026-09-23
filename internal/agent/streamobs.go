@@ -27,8 +27,10 @@ type streamObservation struct {
 	DisconnectedAt   time.Time
 	DisconnectReason string
 
-	// Backoff は再接続の間隔の現在値で、RetryAt は次に繋ぎ直す時刻。どちらも streamLoop が待ちに
-	// 入るたびに書く。待ちに入っていない間、RetryAt はゼロである
+	// Backoff は直近に待った再接続の間隔で、RetryAt は次に繋ぎ直す時刻。どちらも streamLoop が待ちに
+	// 入るたびに書く。待ちに入っていない間、RetryAt はゼロである。Backoff は streamLoop のローカル
+	// 変数の今の値ではない。待ちを抜けた後の倍加も、待ちを打ち切って初期値に戻す 4 つの経路も、
+	// 次に待ちに入るまで記録に現れないので、つながっている間の Backoff は最後に待った間隔のままである
 	Backoff time.Duration
 	RetryAt time.Time
 
@@ -47,8 +49,8 @@ func (rt *runtime) streamStatus() streamObservation {
 }
 
 // noteStreamAttempt は、再接続の待ちを抜けて接続を試み始めたことを記録する。待っていない間に
-// 過去の予定を残さないよう、次に試す時刻を消す。間隔の現在値は streamLoop のローカル変数と
-// そろえたまま残す。
+// 過去の予定を残さないよう、次に試す時刻を消す。直近に待った間隔はそのまま残し、次に待ちに
+// 入ったときに書き換える。
 func (rt *runtime) noteStreamAttempt() {
 	rt.streamMu.Lock()
 	defer rt.streamMu.Unlock()
