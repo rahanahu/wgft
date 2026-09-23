@@ -28,13 +28,14 @@ import (
 // ホストの上で、そのホストでしか分からない事実を調べる。`server doctor`(10.2a 節)が server から
 // 見た転送の経路に答えるのに対し、こちらはエージェントのローカルの実行環境と現在の状態に答える。
 //
-// この版が実装するのは、エージェントが止まっていても成立する検査だけである。10.2c 節の表で
-// 「停止中」が「成立しない」の行、つまり稼働中のプロセスの制御ソケットからしか取れない検査は、
-// 同じ節の規則どおり SKIPPED として並べる。制御ソケットを読む実装は別に加える。
+// このファイルは、エージェントが止まっていても成立する検査を持つ。10.2c 節の表で「停止中」が
+// 「成立しない」の行、つまり稼働中のプロセスの制御ソケットからしか取れない検査は
+// agentdoctorlive.go にある。
 //
 // 検査は副作用を持たない。認証情報ファイルは credentials.Load を通さずに読む。Load は読み取りに
 // 続けて Windows の DACL を締め直すからである(10.2c 節の「能動的に試す範囲」)。稼働の判定には
-// flock.Inspect を使い、ロックファイルを作らない。
+// flock.Inspect を使い、ロックファイルを作らない。稼働中のエージェントへは、その制御ソケットに
+// 1 行の doctor を送って読むだけである。
 //
 // `agent` の一群は build tag を持たないので、このファイルも持たない(10.2c 節の「置き場所」)。
 // 副作用なしには判定できない OS 固有の判定だけを agentdoctor_unix.go と agentdoctor_windows.go に
@@ -84,10 +85,6 @@ const (
 	// agentReasonRunStateUnknown は、稼働中かどうかを判定できないために取れない値である。
 	// ロックファイルを権限で開けない実行が当たる。
 	agentReasonRunStateUnknown = "agent_state_unknown"
-	// agentReasonLiveStateNotRead は、エージェントは稼働しているが、この版が制御ソケットから
-	// 実行時の状態を読まないために取れない値である。control_socket_unreachable は接続そのものが
-	// できない場合の符号なので、この場合に当ててはならない(10.2c 節)。
-	agentReasonLiveStateNotRead = "live_state_not_read"
 	// agentReasonResolveFailed は、ホスト名の解決に失敗した場合である(10.2c 節が定める符号)。
 	agentReasonResolveFailed = "resolve_failed"
 	// agentReasonNoLastState は、全体状態をまだ一度も受け取っていない場合である。
@@ -206,6 +203,8 @@ type agentDoctorInput struct {
 	// DirCreateAccess は、そのディレクトリに新しいファイルを作れるかどうかを、作らずに判定する。
 	// Windows では判定できないので accessNotDetermined を返す(10.2c 節)。
 	DirCreateAccess func(dir string) (accessResult, error)
+	// Dial は稼働中のエージェントの制御ソケットに繋ぐ。既定は Unix ソケットへの接続である。
+	Dial func(path string) (net.Conn, error)
 }
 
 // resolveTimeout は名前解決を待つ長さである。診断はトラブルの最中に繰り返し使うので、応答しない
@@ -228,6 +227,9 @@ func (in agentDoctorInput) withDefaults() agentDoctorInput {
 	}
 	if in.DirCreateAccess == nil {
 		in.DirCreateAccess = dirCreateAccess
+	}
+	if in.Dial == nil {
+		in.Dial = dialAgentControl
 	}
 	if in.Now.IsZero() {
 		in.Now = time.Now()
@@ -336,12 +338,13 @@ func agentDoctorExit(rep agentDoctorReport) error {
 	return nil
 }
 
-// agentDiagnose は検査一式を組み立てる。証拠は 2 か所から取るが(10.2c 節)、この版が読むのは
-// 静的で永続する側、つまり認証情報ファイルと OS だけである。
+// agentDiagnose は検査一式を組み立てる。証拠は 2 か所から取る(10.2c 節)。静的で永続する側は
+// 認証情報ファイルと OS であり、動的で今だけの側は稼働中のプロセスの制御ソケットである。
 func agentDiagnose(in agentDoctorInput) agentDoctorReport {
 	in = in.withDefaults()
 	cred := readAgentCredentials(in.CredentialsPath)
 	run := inspectAgentProcess(in)
+	live := readAgentLive(in, run)
 	checks := []agentDoctorCheck{
 		agentPlatformCheck(in),
 		agentPrivilegesCheck(in),
@@ -352,7 +355,7 @@ func agentDiagnose(in agentDoctorInput) agentDoctorReport {
 		agentLastStateCheck(in, cred),
 		agentWGResolveCheck(in, cred),
 	}
-	checks = append(checks, agentLiveOnlyChecks(run)...)
+	checks = append(checks, agentLiveChecks(in, run, live)...)
 	sort.SliceStable(checks, func(i, j int) bool {
 		return agentCheckIndex(checks[i].ID) < agentCheckIndex(checks[j].ID)
 	})
@@ -844,31 +847,6 @@ var agentLiveOnly = []agentLiveOnlyCheck{
 	{agentCheckSessions, agentGroupRelay, "sessions", false},
 	{agentCheckRefusals, agentGroupRelay, "refusals", false},
 	{agentCheckAllowTargets, agentGroupRelay, "target allowlist", false},
-}
-
-func agentLiveOnlyChecks(run agentRunState) []agentDoctorCheck {
-	out := make([]agentDoctorCheck, 0, len(agentLiveOnly))
-	for _, spec := range agentLiveOnly {
-		c := agentDoctorCheck{ID: spec.ID, Group: spec.Group, Label: spec.Label, verdict: spec.verdict, Status: statusSkipped}
-		switch {
-		case run.undetermined():
-			c.Reason = agentReasonRunStateUnknown
-			c.Detail = "whether the agent is running could not be determined, so its live state was not read"
-		case run.running():
-			// 接続そのものを試していないので、control_socket_unreachable は当たらない。
-			// あの符号は接続そのものができない場合のものである(10.2c 節)。
-			c.Reason = agentReasonLiveStateNotRead
-			c.Detail = "the agent is running, but this build does not read its live state over the control socket"
-		default:
-			c.Reason = agentReasonNotRunning
-			c.Detail = "the agent is not running, so its live state was not read"
-		}
-		if spec.ID == agentCheckAllowTargets {
-			agentAllowTargetsState(&c, run)
-		}
-		out = append(out, c)
-	}
-	return out
 }
 
 // agentAllowTargetsState は、宛先の許可一覧だけの例外を当てる。停止中は値を示さず UNKNOWN に
