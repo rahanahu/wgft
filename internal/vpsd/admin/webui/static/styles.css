@@ -194,7 +194,9 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 
 /* ルール詳細ページ */
 .rule-detail-head { margin-bottom: 18px; }
-.rule-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 15px; }
+.rule-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 15px; min-width: 0; overflow-wrap: anywhere; }
+/* 長いエージェント名や宛先は途中で折り返し、狭い画面で枠の外へはみ出させない */
+.rule-summary > * { min-width: 0; max-width: 100%; }
 .rule-summary form { display: inline; }
 /* 詳細ページの 3 つの区画(設定、アクセス制御、ルール操作)。区画の中の小見出しは .detail-section */
 .detail-group { border-top: 2px solid var(--border); padding-top: 18px; margin-top: 28px; }
