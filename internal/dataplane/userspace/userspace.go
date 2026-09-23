@@ -42,15 +42,9 @@ type Options struct {
 
 // Backend is the userspace dataplane. It implements dataplane.Backend.
 type Backend struct {
-	logf    func(format string, args ...any)
-	policy  *goengine.Engine
-	relay   *relay.Manager
-	udpPool *resource.Pool
-	// tcpPool is shared by the relay and the server's Relay frontend (proxyrelay): in userspace mode
-	// both count against the same process-wide TCP budget and the same per-rule cap (design.md 7,
-	// 7a.10 節). The per-source count is the evaluator's, which the Relay frontend reaches through
-	// AdmitRelayFlow.
-	tcpPool *resource.Pool
+	logf   func(format string, args ...any)
+	policy *goengine.Engine
+	relay  *relay.Manager
 
 	mu  sync.Mutex
 	tun *utun.Tunnel
@@ -81,16 +75,13 @@ func (hostNetwork) ListenTCP(port uint16) (net.Listener, error) {
 // first Prepare binds the listeners and its Commit serves them. The evaluator rejects every flow
 // until that first Commit gives it the Plan's admission policy, before any listener serves.
 func New(opts Options) *Backend {
-	lim := opts.Limits.WithDefaults()
 	logf := opts.Logf
 	if logf == nil {
 		logf = log.Printf
 	}
 	b := &Backend{
-		logf:    logf,
-		policy:  goengine.New(nil),
-		udpPool: resource.NewPool(lim.UDPTotal),
-		tcpPool: resource.NewPool(lim.TCPTotal),
+		logf:   logf,
+		policy: goengine.New(nil),
 	}
 	b.relay = relay.New(hostNetwork{}, relay.Options{
 		UDPIdleTimeout: 120 * time.Second, // the default of conntrack's udp_timeout_stream
@@ -101,22 +92,22 @@ func New(opts Options) *Backend {
 			return t.Release, d.Allow
 		},
 		AdmitPacket: func(ruleID string, size int) bool { return b.policy.AdmitPacket(ruleID, size).Allow },
-		// 予算は Backend が作った Pool そのもので、Limits は渡さない(Pool を渡すと使われないため)
-		UDPPool: b.udpPool,
-		TCPPool: b.tcpPool,
+		// 予算は relay が Limits から作る。Backend が別に作って渡すと、Pool を読む入口が 2 つになる
+		Limits: opts.Limits,
 	})
 	return b
 }
 
 // TCPPool is the TCP flow budget the relay uses. The server hands it to its Relay frontend so that
 // both count against one process-wide TCP budget, and against one per-rule cap, in userspace mode
-// (design.md 7, 7a.10 節).
-func (b *Backend) TCPPool() *resource.Pool { return b.tcpPool }
+// (design.md 7, 7a.10 節). It is the relay's own pool: agent and server read the budget through the
+// same accessor (design.md 10.2c 節).
+func (b *Backend) TCPPool() *resource.Pool { return b.relay.TCPPool() }
 
 // UDPPool is the UDP flow budget the relay uses. The admin API reads it to report Resource Guard's
 // status (design.md 7a.10 節「拒否の報告」); kernel mode has no equivalent, since it counts UDP
 // through nftables/conntrack, not through resource.Pool.
-func (b *Backend) UDPPool() *resource.Pool { return b.udpPool }
+func (b *Backend) UDPPool() *resource.Pool { return b.relay.UDPPool() }
 
 // AdmitRelayFlow judges a new connection of the server's Relay frontend (proxyrelay) in userspace
 // mode by every Admission Policy step, exactly as a Transparent TCP connection is judged: Forwarding

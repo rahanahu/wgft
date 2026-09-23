@@ -486,6 +486,14 @@ func (m *Manager) Status() []Status {
 	return out
 }
 
+// TCPPool は TCP のフロー予算(設計文書 7a.10 節の Resource Guard)。上限とその使用量、ルールごと、
+// 理由ごとの拒否の数を持つ。Options で渡された Pool があればそれで、無ければ New が Limits から
+// 作った Pool である。エージェントは Pool を渡さないので、この入口だけが読み出しの経路になる。
+func (m *Manager) TCPPool() *resource.Pool { return m.opts.TCPPool }
+
+// UDPPool は UDP のフロー予算。読み方は TCPPool と同じ。
+func (m *Manager) UDPPool() *resource.Pool { return m.opts.UDPPool }
+
 // CloseSessions は、keep が偽を返す(ルール ID、接続元)のセッションを閉じ、閉じた数を返す。
 // 接続元制限を変えたときに進行中のフローを切るために VPS 側のユーザー空間モードが使う。
 func (m *Manager) CloseSessions(keep func(ruleID string, src netip.Addr) bool) int {
