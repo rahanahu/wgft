@@ -281,6 +281,8 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 .row-finding summary { cursor: pointer; color: var(--muted); }
 .agent-finding .check-list { margin-top: 6px; }
 .doctor-table th.path-head { white-space: normal; }
+/* 広い画面では経路の節点の名前を 1 行に収める。狭い画面では折り返し、表を横にはみ出させない */
+@media (min-width: 1081px) { .doctor-table th.path-head { white-space: nowrap; } }
 
 /* 1 本のルールの画面の図。狭い画面では縦に並べる */
 .path.full { --node: 30px; }
