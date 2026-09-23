@@ -457,10 +457,12 @@ func TestHeaderSameOnEveryPage(t *testing.T) {
 	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	defer srv.Close()
 
-	space := strings.NewReplacer(" ", "", "\n", "", "\t", "")
+	// 空白を比べない。改行は、テンプレートを CRLF で取り出した環境(Windows の git の autocrlf)では
+	// \r\n になるので、strings.Fields で空白の種類によらず取り除く。
+	space := func(s string) string { return strings.Join(strings.Fields(s), "") }
 	const head = `<divclass="app-shell"><headerclass="topbar"><divclass="brand-wrap"><divclass="brand">wgft</div><divclass="subtitle">`
 	for _, path := range []string{"/", "/ui/doctor", "/ui/doctor/r_a", "/ui/rules/r_a", "/ui/rules/r_a/check", "/ui/add-rule", "/ui/add-agent", "/ui/rules/import"} {
-		body := space.Replace(getBody(t, srv.URL+path+"?lang=en"))
+		body := space(getBody(t, srv.URL+path+"?lang=en"))
 		if !strings.Contains(body, head) {
 			t.Errorf("%s: the page does not open with the shared header", path)
 		}
