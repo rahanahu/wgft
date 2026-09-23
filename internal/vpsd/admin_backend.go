@@ -10,6 +10,7 @@ import (
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
+	"github.com/rahanahu/wgft/internal/vpsd/stream"
 	"github.com/rahanahu/wgft/proto"
 	"log"
 	"net"
@@ -62,7 +63,17 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 	for _, a := range list {
 		info := admin.AgentInfo{Name: a.Name, Address: a.Address.String(), PublicKey: a.PublicKey,
 			RegisteredFrom: a.RegisteredFrom, CreatedAt: a.CreatedAt.Format(time.RFC3339)}
-		st := d.hub.Status(a.Name)
+		// ハートビートの状態と遅れの始まりは、hub の hookLock の中で組として読む。別々に読むと、
+		// ハートビートが状態を更新した後、遅れの始まりを記録する前の途中を読み、古い世代なのに
+		// 始まりが無い形(始まりを返さない旧い server と同じ形)を返してしまう。doctor はその形を
+		// 直ちに FAILED にする(設計文書 10.2a 節)。f の中ではデータベースを読まない
+		var st stream.Status
+		var since time.Time
+		var behind bool
+		d.hub.StatusWithHook(a.Name, func(s stream.Status) {
+			st = s
+			since, behind = d.lag.behindSince(a.Name)
+		})
 		info.Connected, info.StreamFrom = st.Connected, st.StreamFrom
 		if !st.LastHeartbeat.IsZero() {
 			info.LastHeartbeat = st.LastHeartbeat.Format(time.RFC3339)
@@ -71,6 +82,9 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 			info.Generation = st.Heartbeat.Generation
 			info.Tunnel = admin.TunnelStatusView(st.Heartbeat.Tunnel)
 			info.Rules = st.Heartbeat.Rules
+		}
+		if behind {
+			info.GenerationBehindSince = since.Format(time.RFC3339)
 		}
 		if st.Connected {
 			// 版の交渉(仕様 7a.6 節)。観測用の加算フィールドで、管理用 API の保証は変えない
@@ -104,6 +118,18 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 		out = append(out, info)
 	}
 	return out, nil
+}
+
+// observeAgentGeneration は hub の OnHeartbeat である。server の今の世代を読んでから、
+// エージェントが報告した世代を記録する(genlag.go)。
+func (d *Daemon) observeAgentGeneration(agent string, generation uint64) {
+	now := time.Now()
+	if gen, err := d.st.Generation(); err != nil {
+		log.Printf("stream: %s: reading generation: %v", agent, err)
+	} else {
+		d.lag.serverAt(gen, now)
+	}
+	d.lag.reported(agent, generation, now)
 }
 
 const joinTokenTTL = time.Hour
@@ -144,6 +170,7 @@ func (d *Daemon) Revoke(name string) error {
 	_ = d.st.ClearWarning(name, store.WarnIPFlapping, "")
 	log.Printf("revoked agent %s", name)
 	d.hub.Disconnect(name, proto.CloseRevoked, "revoked")
+	d.lag.forget(name)
 	if d.proxy != nil {
 		d.proxy.CloseAgent(name)
 	}
@@ -224,6 +251,8 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 世代が進んだ時点を、まだ追いついていないエージェントの遅れの始まりにする(genlag.go)
+	d.lag.serverAt(res.Generation, time.Now())
 	// 変更は SQLite に確定済みなので、データプレーンへの適用に失敗しても記録を残す
 	log.Print(batchSummary(req.Op, added, updated, deleted, res.Generation, res.Changed))
 	if err := d.applyNFT(res.Rules); err != nil {

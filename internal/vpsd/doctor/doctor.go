@@ -82,6 +82,7 @@ const (
 	ReasonBindFailed          = "bind_failed"
 	ReasonNotPublished        = "not_published"
 	ReasonGenerationBehind    = "generation_behind"
+	ReasonGenerationPending   = "generation_pending"
 	ReasonAgentNotRegistered  = "agent_not_registered"
 	ReasonAgentDisconnected   = "agent_disconnected"
 	ReasonNoRecentHandshake   = "no_recent_handshake"
@@ -138,6 +139,11 @@ const (
 	// target への接続確認は 30 秒ごとに行われる(設計文書 5.2 節)ので、ハートビートと同じ
 	// 90 秒を越えた報告は、今の値として扱わない。
 	TargetReportStale = 90 * time.Second
+	// GenerationBehindLimit は、エージェントがルール集合の世代に追いつかない状態を、届きかけ
+	// ではなく止まった遅れとして扱い始める長さである(設計文書 10.2a 節)。ラボではエージェントは
+	// 新しい世代を 1 秒未満で取り、取った直後にハートビートを送る(5.2 節)ので、この長さまで
+	// 続く遅れは届きかけではない。
+	GenerationBehindLimit = 60 * time.Second
 )
 
 // Report は 1 回の診断の結果全体である。JSON はこの形で出し、人向けの出力とは別の、

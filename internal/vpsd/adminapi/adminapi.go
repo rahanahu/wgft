@@ -39,12 +39,16 @@ type AgentInfo struct {
 	RegisteredFrom string `json:"registered_from"`
 	CreatedAt      string `json:"created_at"`
 	// stream
-	Connected     bool               `json:"connected"`
-	StreamFrom    string             `json:"stream_from,omitempty"`
-	LastHeartbeat string             `json:"last_heartbeat,omitempty"`
-	Generation    uint64             `json:"generation"` // 処理済み世代
-	Tunnel        TunnelStatus       `json:"tunnel"`     // wire の proto.TunnelStatus とは別の見せ方(7a.11 節)
-	Rules         []proto.RuleStatus `json:"rules,omitempty"`
+	Connected     bool   `json:"connected"`
+	StreamFrom    string `json:"stream_from,omitempty"`
+	LastHeartbeat string `json:"last_heartbeat,omitempty"`
+	Generation    uint64 `json:"generation"` // 処理済み世代
+	// GenerationBehindSince は、このエージェントが server の今のルール集合の世代に追いついて
+	// いない状態の始まり(RFC3339)。遅れていなければ省く。server がメモリに持つ値で、再起動の
+	// 後は、起動の後に初めて遅れを観測した時刻から数え直す(設計文書 10.2a 節)。v1 への加算
+	GenerationBehindSince string             `json:"generation_behind_since,omitempty"`
+	Tunnel                TunnelStatus       `json:"tunnel"` // wire の proto.TunnelStatus とは別の見せ方(7a.11 節)
+	Rules                 []proto.RuleStatus `json:"rules,omitempty"`
 	// 版の交渉(仕様 7a.6 節)。未接続、または接続が legacy v0 なら ProtocolVersion は 0 で、
 	// AgentProtocolLegacy が true な場合だけ「legacy v0 と判定した」ことを示す(未接続との違いは
 	// Connected を見る)
