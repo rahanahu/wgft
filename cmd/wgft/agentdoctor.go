@@ -112,6 +112,10 @@ const (
 	// agentReasonConfigUnreadable は、設定ファイルがあるのに権限で読めない場合である。診断は
 	// 続けるが、そのファイルが決める値に依る所見は示せない(10.2c 節)。
 	agentReasonConfigUnreadable = "config_unreadable"
+	// agentReasonRunningAsRoot は、root で実行したために、エージェント自身の利用者が権限で証拠に
+	// 届くかどうかを答えられない場合である。root はファイルのパーミッションを迂回するので、読めた
+	// ことはエージェントの利用者について何も述べない(10.2c 節)。
+	agentReasonRunningAsRoot = "running_as_root"
 )
 
 // agentCheckOrder は 10.2c 節の表の並びである。人向けの出力はこの順に、群ごとにまとめて出す。
@@ -205,6 +209,9 @@ type agentDoctorInput struct {
 	DirCreateAccess func(dir string) (accessResult, error)
 	// Dial は稼働中のエージェントの制御ソケットに繋ぐ。既定は Unix ソケットへの接続である。
 	Dial func(path string) (net.Conn, error)
+	// Euid は呼び出し元の実効 uid を返す。既定は os.Geteuid で、Windows では -1 を返す。0 の
+	// 実行では host.privileges が判定できない側に倒れる(10.2c 節)。
+	Euid func() int
 }
 
 // resolveTimeout は名前解決を待つ長さである。診断はトラブルの最中に繰り返し使うので、応答しない
@@ -230,6 +237,9 @@ func (in agentDoctorInput) withDefaults() agentDoctorInput {
 	}
 	if in.Dial == nil {
 		in.Dial = dialAgentControl
+	}
+	if in.Euid == nil {
+		in.Euid = os.Geteuid
 	}
 	if in.Now.IsZero() {
 		in.Now = time.Now()
@@ -496,6 +506,9 @@ func agentPlatformCheck(in agentDoctorInput) agentDoctorCheck {
 //
 // この検査は権限だけを見る。agent.json やデータディレクトリが無いことを失敗にしない。不在という
 // 事実は agent.credentials が答える。
+//
+// root で実行した場合は、拒まれた対象が無ければ UNKNOWN とする。root はパーミッションを迂回する
+// ので、この実行ではエージェント自身の利用者が届くかどうかを答えられない(10.2c 節)。
 func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 	c := agentDoctorCheck{ID: agentCheckPrivileges, Group: agentGroupHost, Label: "privileges"}
 	var have []string
@@ -580,6 +593,15 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 			// いるのは上の階層のディレクトリであり、運用者が見るのもそちらである。
 			c.Next += ". If this is already that user, then the refusal is on a directory on the way to the config file rather than on the file itself; read the permissions of each directory in its path"
 		}
+	case in.Euid() == 0:
+		// root はファイルのパーミッションを迂回するので、読めたことはエージェント自身の利用者に
+		// ついて何も述べない。OK を返すと、非 root で動くエージェントに対する前提の崩れが健全な
+		// 報告に隠れる。エージェントが root で動く配置では前提が満たされているので、FAILED にも
+		// 層 2 にもしない(10.2c 節)。root でも拒まれた対象がある実行は、root の迂回が及ばない
+		// 拒否という事実があるので、前の分岐で層 2 の FAILED として扱う。
+		c.Status, c.Reason = statusUnknown, agentReasonRunningAsRoot
+		c.Detail += "; root bypasses file permissions, so this run cannot say whether the user the agent runs as can reach them"
+		c.Next = "if the agent runs as another user, run this command as that user to check its permissions; if the agent itself runs as root, this result is expected"
 	case len(undetermined) > 0:
 		c.Status, c.Reason = statusUnknown, agentReasonPermissionNotDetermined
 		c.Next = "if the agent cannot start, read its log for the first write it fails; this command does not answer it"
