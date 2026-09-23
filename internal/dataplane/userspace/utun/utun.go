@@ -83,6 +83,11 @@ func New(cfg Config) (*Tunnel, error) {
 // net.port が非 0 になった時点でその実際の値を返す。golang.zx2c4.com/wireguard の device/device.go
 // と device/uapi.go)、この呼び出しでその値を読み返す。Config.ListenPort が 0 でなければ、その値が
 // そのまま返る。
+//
+// Close の後に呼んでも誤りにはならず、bind していたときの listen_port を誤りとしてでは
+// なく引き続き返す。wireguard-go の closeBindLocked(device/device.go)が net.port を 0 に
+// 戻さず、IpcGetOperation(device/uapi.go)は net.port が非 0 の間ずっとその行を出すためである。
+// 呼び出し側は戻り値を「今 bind している値」ではなく「直近に bind していた値」として扱う。
 func (t *Tunnel) ListenPort() (uint16, error) {
 	out, err := t.dev.IpcGet()
 	if err != nil {
