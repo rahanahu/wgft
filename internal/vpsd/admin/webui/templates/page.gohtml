@@ -10,15 +10,19 @@
 </head>
 <body>
   <div class="app-shell">
-    <header class="topbar">
-      <div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ .Title }}</div></div>
-      <div class="top-actions"><a class="btn" href="/">{{ T .Locale "back" }}</a></div>
-    </header>
-    <main style="max-width:{{ if .MaxWidth }}{{ .MaxWidth }}{{ else if .Wide }}900{{ else }}640{{ end }}px">
-      <section class="panel" style="padding:18px">
-        {{ .Body }}
-      </section>
-    </main>
+    {{- /* ヘッダと本文の枠は同じ最大幅を持つ。戻るボタンが本文の枠の右端にそろう */ -}}
+    {{ $w := 640 }}{{ if .MaxWidth }}{{ $w = .MaxWidth }}{{ else if .Wide }}{{ $w = 900 }}{{ end }}
+    <div class="page-frame" style="max-width:{{ $w }}px">
+      <header class="topbar">
+        <div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ .Title }}</div></div>
+        <div class="top-actions"><a class="btn" href="/">{{ T .Locale "back" }}</a></div>
+      </header>
+      <main>
+        <section class="panel" style="padding:18px">
+          {{ .Body }}
+        </section>
+      </main>
+    </div>
   </div>
 </body>
 </html>{{ end }}

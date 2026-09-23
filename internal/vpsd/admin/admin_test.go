@@ -298,6 +298,37 @@ func TestUIRenderLocales(t *testing.T) {
 			}
 		}
 	}
+
+	// ヘッダと本文の枠は同じ最大幅の枠 1 つに入る。戻るボタンが本文の枠の右端にそろうのは、
+	// 両方がこの枠の幅に従うからである。幅はページの種類で決まる。
+	frames := []struct {
+		path  string
+		width string
+	}{
+		{"/ui/add-rule", "640px"},
+		{"/ui/add-agent", "640px"},
+		{"/ui/rules/import", "640px"},
+		{"/ui/rules/r_a", "900px"},
+		{"/ui/doctor", "1200px"},
+		{"/ui/doctor/r_a", "1200px"},
+	}
+	for _, f := range frames {
+		body := get(f.path + "?lang=en")
+		frame := `<div class="page-frame" style="max-width:` + f.width + `">`
+		i := strings.Index(body, frame)
+		if i < 0 {
+			t.Errorf("%s: no %s", f.path, frame)
+			continue
+		}
+		rest := body[i:]
+		h, m := strings.Index(rest, `<header class="topbar">`), strings.Index(rest, "<main>")
+		if h < 0 || m < 0 || h > m {
+			t.Errorf("%s: the header and the main content are not both inside the page frame, header first", f.path)
+		}
+		if n := strings.Count(body, "max-width:"+f.width); n != 1 {
+			t.Errorf("%s: max-width:%s appears %d times, want only on the page frame", f.path, f.width, n)
+		}
+	}
 }
 func findRuleT(t *testing.T, st *store.Store, id string) proto.Rule {
 	t.Helper()
