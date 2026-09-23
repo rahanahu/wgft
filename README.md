@@ -168,11 +168,11 @@ sudo wgft server doctor
 sudo wgft server doctor <rule ID>
 ```
 
-The Diagnostics page of the Web UI shows the same verdicts, built from the same evidence. Each rule is drawn as a path of public port, WireGuard, agent, and listener/target, marked at the point where traffic stops. The probe runs only when you press its button on a single rule's page. The screenshot below shows a rule whose traffic stops at WireGuard because its agent has not completed a recent handshake. The page also has [a list of every rule](docs/images/doctor.png).
+The Diagnostics page of the Web UI shows the same verdicts, built from the same evidence. Each rule is drawn as a path through the nodes `public port`, `WireGuard`, `agent`, and `listener / target`, marked at the node where traffic stops. The probe runs only when you press its button on a single rule's page. The screenshot below shows a rule whose traffic stops at WireGuard because its agent has not completed a recent handshake. The page also has [a list of every rule](docs/images/doctor.png).
 
 ![Diagnostics page of one rule](docs/images/doctor-rule.png)
 
-`wgft agent doctor` answers from the agent host: whether an agent runs there, whether it holds credentials, and whether the host can resolve the names it needs. Run it on the agent host as the user the agent runs as. It answers for the permissions of the user who runs it. Run as root, it cannot tell whether the agent's own user can reach its files, and reports the privileges item as UNKNOWN. With `--json`, both doctor commands print a diagnostic model whose ids and reason codes are a stable machine interface.
+`wgft agent doctor` runs on the agent host and answers whether an agent runs there, whether it holds credentials, and whether the host can resolve the names it needs. Run it as the user the agent runs as. It answers for the permissions of the user who runs it. Run as root, it cannot tell whether the agent's own user can reach its files, and reports the privileges item as UNKNOWN. Where the agent itself runs as root, running the command as root is correct and that UNKNOWN is expected. With `--json`, both doctor commands print a diagnostic model. Its check ids and reason codes may gain new values in later versions, but an existing value never changes its meaning.
 
 See the [CLI reference](docs/cli.md) for what each state means and for the exit codes, and the [design](docs/design.md) for how the checks are judged.
 

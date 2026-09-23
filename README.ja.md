@@ -168,11 +168,11 @@ sudo wgft server doctor
 sudo wgft server doctor <ルール ID>
 ```
 
-Web UI の診断の画面は、同じ証拠から組み立てた同じ判定を表示します。各ルールは公開ポート、WireGuard、agent、リスナーと転送先を結んだ経路の図になり、通信が止まった箇所に印が付きます。疎通の確認は、1 本のルールの画面でボタンを押したときだけ実行します。次の画面は、agent との最近のハンドシェイクが無いために WireGuard で止まったルールです。全ルールの[一覧の画面](docs/images/doctor.ja.png)もあります。
+Web UI の診断の画面は、同じ証拠から組み立てた同じ判定を表示します。各ルールは `public port`、`WireGuard`、`agent`、`listener / target` の節点を結んだ経路の図になり、通信が止まった節点に印が付きます。Web UI は、1 本のルールの画面でボタンを押したときだけ疎通を確認します。次の図は、agent との最近のハンドシェイクが無いために WireGuard で止まったルールの診断の画面です。全ルールの[一覧の画面](docs/images/doctor.ja.png)もあります。
 
 ![1 本のルールの診断の画面](docs/images/doctor-rule.ja.png)
 
-`wgft agent doctor` は、agent のホストの側から、agent が動いているか、認証情報を持っているか、必要な名前を解決できるかを示します。判定は実行した利用者の権限で行うため、agent のホストで agent と同じ利用者として実行します。root で実行すると、agent 自身の利用者がファイルを読めるかを判定できないので、privileges の項目は UNKNOWN になります。`--json` を付けると、どちらの doctor も診断の結果を JSON で出力します。その id と reason のコードは、機械で読むための安定した形式です。
+`wgft agent doctor` は agent のホストで実行し、agent が動いているか、認証情報を持っているか、必要な名前を解決できるかを示します。判定は実行した利用者の権限で行うため、agent と同じ利用者として実行します。root で実行すると、agent 自身の利用者がファイルを読めるかを判定できないので、privileges の項目は UNKNOWN になります。agent 自身が root で動く配置では root での実行が正しく、privileges の UNKNOWN は想定どおりの結果です。`--json` を付けると、どちらの doctor も診断の結果を JSON で出力します。JSON の検査の id と reason の値は、版が上がって種類が増えることはあっても、既にある値の意味は変わりません。
 
 各状態の意味と終了コードは [CLI リファレンス](docs/cli.md) を、検査の判定の仕方は [設計](docs/design.md) を参照してください。
 

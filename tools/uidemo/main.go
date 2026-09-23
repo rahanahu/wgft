@@ -119,7 +119,6 @@ func sampleWarning() admin.Warning {
 
 // sampleAgents returns the three sample agents with their timestamps taken relative to now.
 func sampleAgents() []admin.AgentInfo {
-	rfc := func(d time.Duration) string { return rfcAgo(-d) }
 	mismatch := sampleWarning()
 
 	return []admin.AgentInfo{
@@ -129,10 +128,10 @@ func sampleAgents() []admin.AgentInfo {
 			// while r_home_tcp8081 shows "error" with a realistic dial failure from
 			// checkTarget (relay.Manager). A listen bind conflict can't happen
 			// here: the agent's listener lives on its own netstack (design 7 section).
-			Name: "home", Address: "10.200.0.2", CreatedAt: rfc(-72 * time.Hour),
+			Name: "home", Address: "10.200.0.2", CreatedAt: rfcAgo(72 * time.Hour),
 			Connected: true, StreamFrom: "203.0.113.10:51820", WGEndpoint: "203.0.113.10:51820",
-			LastHeartbeat: rfc(-5 * time.Second), Generation: 42,
-			PublicKey: "HhYgfQgcVISS51VHjdkVxdPeCdaDL3P+vgm9soc8MLQ=", LastHandshake: rfc(-40 * time.Second),
+			LastHeartbeat: rfcAgo(5 * time.Second), Generation: 42,
+			PublicKey: "HhYgfQgcVISS51VHjdkVxdPeCdaDL3P+vgm9soc8MLQ=", LastHandshake: rfcAgo(40 * time.Second),
 			Tunnel: admin.TunnelStatus{State: proto.StatusOK, Endpoint: "203.0.113.10:51820"},
 			Rules: []proto.RuleStatus{
 				{ID: "r_pub_tcp25565", State: proto.StatusOK},
@@ -147,20 +146,20 @@ func sampleAgents() []admin.AgentInfo {
 			// (design 5.2 section); Connected: false must keep the dashboard from drawing
 			// them as current (tunnel "OK", a live IP match/mismatch): the tunnel shows as a
 			// stale last report, and the IP comparison (both values are history) is hidden.
-			Name: "office", Address: "10.200.0.3", CreatedAt: rfc(-48 * time.Hour),
+			Name: "office", Address: "10.200.0.3", CreatedAt: rfcAgo(48 * time.Hour),
 			Connected: false, StreamFrom: "203.0.113.24:41220", WGEndpoint: "198.51.100.9:51820",
-			LastHeartbeat: rfc(-3 * time.Minute), Generation: 40,
-			PublicKey: "Z50DXIe02Z4jmIIULTXv8vct6DA04NgcDKgxLdm6ytI=", LastHandshake: rfc(-6 * time.Minute),
+			LastHeartbeat: rfcAgo(3 * time.Minute), Generation: 40,
+			PublicKey: "Z50DXIe02Z4jmIIULTXv8vct6DA04NgcDKgxLdm6ytI=", LastHandshake: rfcAgo(6 * time.Minute),
 			Tunnel:   admin.TunnelStatus{State: proto.StatusOK, Endpoint: "198.51.100.9:51820"},
 			Warnings: []admin.Warning{mismatch},
 		},
 		{
 			// generation 40 is behind Generation() (42), so both of its rules show
 			// "pending" no matter what Rules below says.
-			Name: "lab", Address: "10.200.0.4", CreatedAt: rfc(-24 * time.Hour),
+			Name: "lab", Address: "10.200.0.4", CreatedAt: rfcAgo(24 * time.Hour),
 			Connected: true, StreamFrom: "192.0.2.55:51820", WGEndpoint: "192.0.2.55:51820",
-			LastHeartbeat: rfc(-12 * time.Second), Generation: 40,
-			PublicKey: "qJzBQ+ilV8EQ9749TxyIY1sB1jRieCYDU33kUi6aAPg=", LastHandshake: rfc(-18 * time.Second),
+			LastHeartbeat: rfcAgo(12 * time.Second), Generation: 40,
+			PublicKey: "qJzBQ+ilV8EQ9749TxyIY1sB1jRieCYDU33kUi6aAPg=", LastHandshake: rfcAgo(18 * time.Second),
 			Tunnel: admin.TunnelStatus{State: proto.StatusOK, Endpoint: "192.0.2.55:51820"},
 			Rules: []proto.RuleStatus{
 				{ID: "r_lab_udp19132", State: proto.StatusOK},
