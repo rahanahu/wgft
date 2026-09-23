@@ -2525,7 +2525,7 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - 拒否リストを外部のブロックリストから自動更新するか
 - 管理 UI の `public` 待ち受け(11 節)。必要になった場合の実装項目は 11 節に列挙してある
 - `agent doctor` をエージェントと同じ利用者で手軽に実行する方法。システムの利用者や `DynamicUser` で動くエージェントでは管理者の追加の操作が要る場合がある。v1.2 で決め、v1.1 では未解決とする(10.2c 節)
-- 7a.7 節と agent の実装との食い違い。7a.7 節は、reconcile を server と agent が共有し、agent が dataplane と frontend の実装から `Runtime` を組み立てると述べています。実装の `internal/agent/agent.go` は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` のいずれも使わず、userspace のトンネル(`internal/dataplane/userspace/tunnel`)と中継(`internal/dataplane/userspace/relay`)を直接駆動しています。依存の向きの検査(`internal/dataplane/deps_test.go`)はこの実装でも通っており、機能上の害はありません。7a.7 節は、v1.2 の agent 側のカーネルモードの dataplane、つまり agent 側の dataplane の境界を設計するときに書き直します
+- 7a.7 節と agent の実装との食い違い。7a.7 節は、reconcile を server と agent が共有し、agent が dataplane と frontend の実装から `Runtime` を組み立てると述べる。実装の `internal/agent/agent.go` は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` のいずれも使わず、userspace のトンネル(`internal/dataplane/userspace/tunnel`)と中継(`internal/dataplane/userspace/relay`)を直接駆動する。依存の向きの検査(`internal/dataplane/deps_test.go`)はこの実装でも通っており、機能上の害は無い。7a.7 節は、v1.2 の agent 側のカーネルモードの dataplane、つまり agent 側の dataplane の境界を設計するときに書き直す
 
 ## 改訂の記録
 
