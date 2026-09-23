@@ -392,7 +392,7 @@ func rulesReceivedCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 		return c
 	}
 	c.Status, c.Reason = StatusFailed, ReasonGenerationBehind
-	c.Detail = fmt.Sprintf("it still holds rule set %d while this server serves %d, so this rule has not reached it", ai.Generation, cur)
+	c.Detail = fmt.Sprintf("this agent still holds rule set %d while this server serves %d; it has not taken the latest rule set yet", ai.Generation, cur)
 	c.Causes = []string{
 		"the new rules are in flight and will be applied in a moment",
 		"the agent is connected but is not applying them; see its log",
