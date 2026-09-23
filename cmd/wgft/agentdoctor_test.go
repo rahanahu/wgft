@@ -968,6 +968,18 @@ func TestAgentDoctorPrivilegesUnderRoot(t *testing.T) {
 			wantStatus: statusFailed, wantReason: agentReasonPermissionDenied, wantExit: 2,
 		},
 		{
+			// root の実行は、拒まれた対象が無ければ、判定できない対象があっても running_as_root に
+			// なる。判定できない理由より、この実行が答えられない理由のほうが先に立つ(10.2c 節)。
+			name: "root, and a target cannot be decided", euid: 0,
+			setup: func(t *testing.T, in *agentDoctorInput) {
+				healthyAgentForTest(t, in)
+				in.DirCreateAccess = func(string) (accessResult, error) {
+					return accessNotDetermined, errors.New("read-only file system")
+				}
+			},
+			wantStatus: statusUnknown, wantReason: agentReasonRunningAsRoot, wantRootWording: true, wantExit: 0,
+		},
+		{
 			name: "not root, a healthy running agent", euid: 1000, setup: healthyAgentForTest,
 			wantStatus: statusOK, wantExit: 0,
 		},
@@ -1013,6 +1025,15 @@ func TestAgentDoctorPrivilegesUnderRoot(t *testing.T) {
 				t.Errorf("exit code = %d, want %d", code, tc.wantExit)
 			}
 		})
+	}
+}
+
+// 差し替えられていない実効 uid の入口は、このプロセスの実効 uid を答える。既定が別の値を返すと、
+// root の実行を見分ける判定が実際の実行に効かない。
+func TestAgentDoctorDefaultEuidIsTheProcessEuid(t *testing.T) {
+	in := agentDoctorInput{}.withDefaults()
+	if got, want := in.Euid(), os.Geteuid(); got != want {
+		t.Errorf("the default Euid() = %d, want os.Geteuid() = %d", got, want)
 	}
 }
 
