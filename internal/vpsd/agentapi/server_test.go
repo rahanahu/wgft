@@ -210,7 +210,32 @@ func TestServerTimeouts_BodyStall(t *testing.T) {
 func TestServerTimeouts_IdleKeepAlive(t *testing.T) {
 	timeouts := testTimeouts()
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") })
-	addr := startTestServer(t, h, timeouts)
+
+	// startTestServer は使わず、ここだけ ConnState を差し込めるように組み立てる。net/http は
+	// (HTTP/1.x で) 1 リクエストへの応答を終えると ConnState を StateIdle で呼んでから
+	// SetReadDeadline で idle タイマを仕掛ける。つまり StateIdle の通知時刻は、サーバ側の
+	// idle タイマの起点と同時かそれより前になる。ここを起点に経過を測れば、その値は接続が
+	// 実際に idle のまま待たされた時間そのものになり、応答の生成にかかった時間を含めて
+	// 下限を水増ししない。リクエストを送る前に起点を取る旧方式は、その水増し分だけ
+	// IdleTimeout を早く切っても見逃してしまう。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newHTTPServer("", h, nil, timeouts)
+	idleAt := make(chan time.Time, 1)
+	srv.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state != http.StateIdle {
+			return
+		}
+		select {
+		case idleAt <- time.Now():
+		default: // この接続で 2 回目以降の StateIdle、または既に受信済み: 最初の 1 回だけを使う
+		}
+	}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	addr := ln.Addr().String()
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -228,8 +253,14 @@ func TestServerTimeouts_IdleKeepAlive(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
+	var start time.Time
+	select {
+	case start = <-idleAt:
+	case <-time.After(timeouts.IdleTimeout * 10):
+		t.Fatal("connection never reached http.StateIdle")
+	}
+
 	// リクエストを完了させたあと、何も送らずに待つ
-	start := time.Now()
 	conn.SetReadDeadline(start.Add(timeouts.IdleTimeout * 10))
 	buf := make([]byte, 16)
 	if _, err := conn.Read(buf); err == nil {
