@@ -592,6 +592,15 @@ column.`,
 func applyHelp(root *cobra.Command) {
 	var walk func(c *cobra.Command)
 	walk = func(c *cobra.Command) {
+		// 表の文は、そのパスのコマンドが動くビルドのためのものである。Linux 以外のビルドの server の
+		// 一群は同じパスを持つが動かないので、表を当てると存在しない機能を肯定形で述べることになる。
+		// 差し替えは自分の説明を持ち、注記で表の適用を断る。
+		if c.Annotations[ownHelpAnnotation] != "" {
+			for _, sub := range c.Commands() {
+				walk(sub)
+			}
+			return
+		}
 		if t, ok := helpTexts[helpKey(c)]; ok {
 			if t.Long != "" {
 				c.Long = t.Long
@@ -606,6 +615,10 @@ func applyHelp(root *cobra.Command) {
 	}
 	walk(root)
 }
+
+// ownHelpAnnotation は、そのコマンドが helpTexts の表を当てずに自分の Long を使うことを表す注記である。
+// Linux 以外のビルドの server の一群だけが持つ。
+const ownHelpAnnotation = "wgft-own-help"
 
 // helpKey は "wgft rule rate packet" を "rule rate packet" に、ルートを "" にする。
 func helpKey(c *cobra.Command) string {
