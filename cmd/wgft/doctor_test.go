@@ -312,6 +312,30 @@ func TestDiagnose(t *testing.T) {
 	}
 }
 
+// TestGenerationBehindDetailDoesNotClaimThisRule は、`agent.rules_received` が FAILED の
+// ときの detail が、エージェントとルール集合の世代の事実だけを述べ、この 1 本のルールが
+// 届いていないとは述べないことを確かめる(v1.1、所有者の決定)。ルール集合の世代が変わる
+// たびに、そのエージェントの有効なすべてのルールがこの検査を経由する。変わっていないルール
+// も含まれるので、「このルールは届いていない」という言い方は届いているルールについて誤りに
+// なる。
+func TestGenerationBehindDetailDoesNotClaimThisRule(t *testing.T) {
+	r := tcpRule()
+	in := healthyInput(r)
+	in.Agents[0].Generation = 11
+	in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{Agent: "home", Connected: true}
+	c := checkOf(t, diagnose(r, in), checkRulesReceived)
+
+	if c.Status != statusFailed || c.Reason != reasonGenerationBehind {
+		t.Fatalf("status/reason = %s/%s, want %s/%s", c.Status, c.Reason, statusFailed, reasonGenerationBehind)
+	}
+	if strings.Contains(c.Detail, "this rule has not reached it") || strings.Contains(c.Detail, "this rule") {
+		t.Errorf("detail must not claim this particular rule has not arrived, got %q", c.Detail)
+	}
+	if !strings.Contains(c.Detail, "this agent still holds rule set 11") || !strings.Contains(c.Detail, "this server serves 12") {
+		t.Errorf("detail must state the agent/rule-set level fact, got %q", c.Detail)
+	}
+}
+
 // TestEveryFindingSaysWhatToDoNext は、この機能の成功条件を直に確かめる。次に見るものを
 // 言わない所見は、この機能の失敗である(設計文書 10.2a 節)。
 func TestEveryFindingSaysWhatToDoNext(t *testing.T) {
