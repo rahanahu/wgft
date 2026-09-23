@@ -300,7 +300,9 @@ func TestDoctorPathUnreachedNodesKeepTheOriginalStatus(t *testing.T) {
 }
 
 // TestDoctorPathDoesNotDrawAUDPTargetAsVerified は、UDP のルールの宛先の節点を ✓ にしない
-// ことを確かめる。UDP の ok はリスナーが開いたことしか意味しない。
+// ことを確かめる。UDP のエージェントの ok はリスナーが開いたことしか意味せず、判定そのものが
+// `rule.target` を not_tested(udp_listener_only)にする。図はそれを読み替えずに写し、代替テキスト
+// にも判定と同じ NOT TESTED が入る(設計文書 10.2a 節、2026-09-24 の改訂の記録)。
 func TestDoctorPathDoesNotDrawAUDPTargetAsVerified(t *testing.T) {
 	for _, c := range pathCases() {
 		if c.name != "UDP rule without probe" {
@@ -317,9 +319,50 @@ func TestDoctorPathDoesNotDrawAUDPTargetAsVerified(t *testing.T) {
 		if n.Word != "NOT TESTED" || n.Note != T("en", "doctorUDPTargetNote") {
 			t.Errorf("a UDP target node must read NOT TESTED with the listener note, got %q / %q", n.Word, n.Note)
 		}
-		if !strings.Contains(n.Alt, "target OK") {
-			t.Errorf("the alt must still carry the check's own OK, got %q", n.Alt)
+		// 節点の語も読み替えではなく判定から来るので、節点の状態に判定の reason が付く。
+		if !strings.HasPrefix(n.Alt, "listener / target: NOT TESTED / udp_listener_only") {
+			t.Errorf("the node's own state must carry the check's reason, got %q", n.Alt)
 		}
+		if !strings.Contains(n.Alt, "target NOT TESTED / udp_listener_only") {
+			t.Errorf("the alt must carry the check's own NOT TESTED and reason, got %q", n.Alt)
+		}
+		if strings.Contains(n.Alt, "target OK") {
+			t.Errorf("the alt must not call the UDP target OK, got %q", n.Alt)
+		}
+	}
+}
+
+// TestDoctorPathUDPTargetNoteFollowsTheCheck は、宛先の節点に添える「リスナーは開いているが
+// UDP の宛先は試していない」旨の 1 文が、判定が not_tested(udp_listener_only)を返したときだけ
+// 出ることを確かめる。健全な TCP のルールの宛先と、報告の古い UDP のルールの宛先には出さない。
+// 後者はリスナーが今開いているとは言えないためである。
+func TestDoctorPathUDPTargetNoteFollowsTheCheck(t *testing.T) {
+	udp := pathRule("r_udp", proto.UDP)
+	cases := []struct {
+		name     string
+		c        pathCase
+		wantNote bool
+		wantWord string
+	}{
+		{"healthy UDP", pathCase{"healthy UDP", []proto.Rule{udp}, nil}, true, "NOT TESTED"},
+		{"healthy TCP", pathCase{"healthy TCP", []proto.Rule{pathRule("r_tcp", proto.TCP)}, nil}, false, "OK"},
+		{"UDP with a stale report", pathCase{"UDP with a stale report", []proto.Rule{udp}, func(in *doctor.Input) {
+			st := in.Rules.AgentRuleStates["r_udp"]
+			st.At = pathAt(doctor.TargetReportStale + time.Second)
+			in.Rules.AgentRuleStates["r_udp"] = st
+		}}, false, "UNKNOWN"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, paths := buildPath(t, tc.c)
+			n := paths[0].Nodes[3]
+			if got := n.Note != ""; got != tc.wantNote {
+				t.Errorf("note = %q, want one: %v", n.Note, tc.wantNote)
+			}
+			if n.Word != tc.wantWord {
+				t.Errorf("word = %q, want %q", n.Word, tc.wantWord)
+			}
+		})
 	}
 }
 

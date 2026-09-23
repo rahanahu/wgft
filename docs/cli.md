@@ -1088,7 +1088,9 @@ to UNKNOWN once its evidence is older than that item allows: 90s for a
 heartbeat and for the agent's own report of a rule, 3m for a WireGuard
 handshake. The public port therefore reads NOT TESTED even when the server
 serves it: DNAT applies to input from outside, so the server cannot reach its
-own public port from itself. Test that from another host.
+own public port from itself. Test that from another host. A UDP rule's target
+reads NOT TESTED too, even while the agent reports its listener open: a UDP
+send cannot tell whether the target received it or answered.
 
 --probe opens one real TCP connection from the server, through the tunnel and
 the agent, to the target, so it takes one rule at a time and the target sees a

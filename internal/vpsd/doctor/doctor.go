@@ -109,6 +109,9 @@ const (
 	ReasonUnknownValue        = "unknown_value"
 	ReasonExternalNotTested   = "external_not_tested"
 	ReasonResolvedByAgent     = "resolved_by_agent"
+	// ReasonUDPListenerOnly は、UDP のルールの rule.target の not_tested の理由である。エージェント
+	// の報告が示すのはリスナーを開けたことだけで、宛先が応えたことではない(設計文書 10.2a 節)。
+	ReasonUDPListenerOnly = "udp_listener_only"
 )
 
 // 検査のまとまり。人向けの出力の見出しになる。保証の対象ではない。
@@ -297,7 +300,7 @@ func notTestedList(rules []proto.Rule, in Input) []NotTested {
 			"the provider's security group, this host's input firewall, the ISP, and, in userspace mode, a listen port inside the " +
 			"ephemeral range; see docs/setup.md."},
 		{"udp end to end", "a UDP rule cannot be tested end to end, because a UDP send cannot tell success. It is judged from " +
-			"what the agent reports about its listener alone."},
+			"what the agent reports about its listener alone, so its target line reads NOT TESTED."},
 		{"mtu", "MTU and fragmentation. A tunnel that handshakes and carries small packets can still lose large datagrams, which " +
 			"reads as healthy here and as \"it works sometimes\" to the user."},
 		{"under load", "rate limits, the flow budget and the connection tracking table are read at one instant; a limit reached " +

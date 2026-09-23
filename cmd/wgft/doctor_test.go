@@ -627,8 +627,95 @@ func TestUDPCannotBeTestedEndToEnd(t *testing.T) {
 		t.Errorf("a UDP rule must not be called broken just because it cannot be probed, got %q", got)
 	}
 	tg := checkOf(t, checks, checkTarget)
-	if !strings.Contains(tg.Detail, "a send cannot prove the target answers") {
+	if !strings.Contains(tg.Detail, "a UDP send cannot tell whether the target received it or answered") {
 		t.Errorf("a UDP rule's target line must say what it does not cover, got %q", tg.Detail)
+	}
+}
+
+// TestUDPTargetIsNotTested は、`rule.target` の判定を、ルールの proto とエージェントの報告の
+// 組ごとに固定する(設計文書 10.2a 節、2026-09-24 の改訂の記録)。UDP のルールの新しい ok の報告は
+// リスナーを開けたことしか示さないので、OK ではなく NOT TESTED(理由 udp_listener_only)にする。
+// TCP のルールの新しい ok は宛先への接続を観測しているので OK のままである。古い報告の UNKNOWN と、
+// error の報告の FAILED は、UDP でも TCP と同じである。
+func TestUDPTargetIsNotTested(t *testing.T) {
+	cases := []struct {
+		name       string
+		rule       proto.Rule
+		edit       func(r proto.Rule, in *doctorInput)
+		wantStatus string
+		wantReason string
+		wantRule   string
+	}{
+		{"healthy UDP rule", udpRule(), nil, statusNotTested, doctor.ReasonUDPListenerOnly, statusOK},
+		{"healthy TCP rule", tcpRule(), nil, statusOK, "", statusOK},
+		{"UDP rule with a stale ok report", udpRule(), func(r proto.Rule, in *doctorInput) {
+			st := in.Rules.AgentRuleStates[r.ID]
+			st.At = at(targetReportStale + time.Second)
+			in.Rules.AgentRuleStates[r.ID] = st
+		}, statusUnknown, reasonStaleReport, statusUnknown},
+		{"UDP rule whose agent reports an error", udpRule(), func(r proto.Rule, in *doctorInput) {
+			in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{Agent: "home", State: proto.StatusError,
+				Reason: "bind failed: address already in use", At: at(10 * time.Second), Connected: true}
+		}, statusFailed, doctor.ReasonListenerBindFailed, statusFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := healthyInput(tc.rule)
+			if tc.edit != nil {
+				tc.edit(tc.rule, &in)
+			}
+			rep := buildReport([]proto.Rule{tc.rule}, in)
+			c := checkOf(t, rep.Checks, checkTarget)
+			if c.Status != tc.wantStatus || c.Reason != tc.wantReason {
+				t.Errorf("rule.target = %q/%q, want %q/%q: %s", c.Status, c.Reason, tc.wantStatus, tc.wantReason, c.Detail)
+			}
+			if c.ObservedAt != in.Rules.AgentRuleStates[tc.rule.ID].At {
+				t.Errorf("observed_at = %q, want the agent's report time %q", c.ObservedAt, in.Rules.AgentRuleStates[tc.rule.ID].At)
+			}
+			if got := rep.Rules[0].Status; got != tc.wantRule {
+				t.Errorf("the rule's status = %q, want %q", got, tc.wantRule)
+			}
+			// 終了コードを動かすのは FAILED だけである。NOT TESTED と UNKNOWN は 0 のままにする。
+			err := doctorExit(rep)
+			if wantFail := tc.wantStatus == statusFailed; (err != nil) != wantFail {
+				t.Errorf("doctorExit = %v, want a failure: %v", err, wantFail)
+			}
+			if c.Status == statusNotTested && !strings.HasPrefix(c.Detail, "not tested: ") {
+				t.Errorf("a NOT TESTED target line must say so first, got %q", c.Detail)
+			}
+		})
+	}
+}
+
+// TestUDPTargetJSON は、健全な UDP のルールの `rule.target` が `--json` で `"status":"not_tested"`
+// と `"reason":"udp_listener_only"` になることを、報告を JSON に直した値で固定する。
+// `checks[].status` と `checks[].reason` は機械向けの保証なので(設計文書 7a.11 節)、値そのものを
+// 文字列で確かめる。
+func TestUDPTargetJSON(t *testing.T) {
+	r := udpRule()
+	rep := buildReport([]proto.Rule{r}, healthyInput(r))
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Status string `json:"status"`
+		Checks []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "ok" {
+		t.Errorf("status = %q, want ok", got.Status)
+	}
+	for _, c := range got.Checks {
+		if c.ID == "rule.target" && (c.Status != "not_tested" || c.Reason != "udp_listener_only") {
+			t.Errorf("rule.target = %q/%q, want not_tested/udp_listener_only", c.Status, c.Reason)
+		}
 	}
 }
 
