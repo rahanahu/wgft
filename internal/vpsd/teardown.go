@@ -64,8 +64,14 @@ type TeardownOptions struct {
 
 // Teardown は撤去を実行する。out に進捗と「手で戻す一覧」を書く。
 func Teardown(opts TeardownOptions, out io.Writer) error {
-	// 停止した vpsd の後片付けとして行う。稼働中なら何もしないで拒否する。
-	if locked, err := flock.IsLocked(opts.DBPath); err == nil && locked {
+	// 停止した vpsd の後片付けとして行う。稼働中なら何もしないで拒否する。判定はロックファイルを
+	// 作らない Inspect で行う(設計 10.2c 節)。Acquire 経由の判定は、まだサーバのデータベースが
+	// 無いホストで teardown を打っただけでロックファイルを残した。読めなかった場合に撤去を続ける
+	// 扱いは、以前と同じにする。ただし黙って続けると稼働中のサーバを撤去しかねないので、警告を出す。
+	switch state, err := flock.Inspect(opts.DBPath); {
+	case err != nil:
+		fmt.Fprintf(out, "warning: reading the lock state of the server database failed: %v; continuing without knowing whether the server is running; stop it first with systemctl disable --now wgft if it is\n", err)
+	case state == flock.Locked:
 		return fmt.Errorf("server is running; stop it first with systemctl disable --now wgft")
 	}
 
