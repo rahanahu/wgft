@@ -271,13 +271,12 @@ var tr = map[string][2]string{
 	// 英語のままにするので、ここには持たない。画面の枠の語だけを切り替える。
 	"doctorTitle":            {"診断", "Diagnostics"},
 	"doctorIntro":            {"この画面は、server が既に受け取っている観測から組み立てます。開いた時点では、どこへも接続を試しません。", "This page is built from what the server has already observed. Opening it dials nothing."},
-	"doctorRuleLink":         {"このルールを診断", "Diagnose"},
 	"doctorBackToSummary":    {"← 診断の一覧へ戻る", "← Back to the diagnosis"},
 	"doctorFinding":          {"所見", "Finding"},
 	"doctorHistoryHead":      {"履歴", "History"},
 	"doctorNotTestedHead":    {"この診断が試していない範囲", "Not tested by this diagnosis"},
 	"doctorCheckedAt":        {"読み取りの時刻:", "Read at"},
-	"doctorProbeOnRulePage":  {"疎通の確認は、ルールごとの画面にあります。上の「診断」から開くと、その 1 本だけに接続を試せます。", "The end-to-end probe lives on the page of a single rule: open one with Diagnose above to dial that rule, and only that rule."},
+	"doctorProbeOnRulePage":  {"疎通の確認は、ルールごとの画面にあります。上の表の行からルールを開くと、その 1 本だけに接続を試せます。", "The end-to-end probe lives on the page of a single rule: open a rule from its row above to dial that rule, and only that rule."},
 	"doctorProbeHead":        {"疎通の確認", "End-to-end probe"},
 	"doctorProbe":            {"疎通を試す", "Run the probe"},
 	"doctorProbeHelp":        {"押したときだけ、この server からトンネルとエージェントを通って宛先へ TCP 接続を 1 本開きます。宛先にはデータを伴わない接続が 1 本届きます。", "Only when pressed, this opens one real TCP connection from this server, through the tunnel and the agent, to the target. The target sees one connection that carries no data."},
@@ -290,6 +289,19 @@ var tr = map[string][2]string{
 	},
 	"doctorInternalHead": {"内部の値", "Internal values"},
 	"doctorHiddenHead":   {"既定で隠している検査", "Checks hidden by default"},
+	// 診断の画面の経路の図。節点の名前と状態の語は英語のままで、ここには置かない(10.2d 節)。
+	"doctorNotReached":    {"届いていない", "not reached"},
+	"doctorAfterStopAlt":  {"止まった位置より後ろなので、図には状態を出していません", "not shown in the path after the stop"},
+	"doctorDisabledAlt":   {"ルールが無効なので、何も転送していません", "the rule is disabled, so nothing is forwarded"},
+	"doctorUDPTargetNote": {"リスナーは開いています。UDP の宛先は試していません", "listener open; UDP target not tested"},
+	"doctorPathAria":      {"公開側から宛先までの経路", "path from the public port to the target"},
+	"doctorAgentPathAria": {"エージェントの状態", "agent state"},
+	"doctorRuleCol":       {"ルール", "Rule"},
+	"doctorPathCol":       {"経路", "Path"},
+	"doctorFindingMore":   {"所見を読む", "Read the finding"},
+	"doctorOffPathHead":   {"経路の外の検査", "Checks off the path"},
+	"doctorAgentChecks":   {"検査と次に見るもの", "Checks and what to check next"},
+	"doctorBanner":        {"server の転送の状態が OK ではありません。すべてのルールに関わります。", "The server's own forwarding is not OK; it concerns every rule."},
 }
 
 // T はキーの訳を返す。未知のキーはキーそのものを返す。

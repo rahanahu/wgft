@@ -250,3 +250,68 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 .check-internal summary { cursor: pointer; }
 .check-internal ul { margin: 6px 0 0; padding-left: 18px; }
 .doctor-result { font-size: 14px; font-weight: 600; margin: 14px 0 0; }
+
+/* 診断の画面の経路の図。状態ごとに図形を変え、色だけに意味を頼らない
+   (OK は円、FAILED は八角形、UNKNOWN はひし形、NOT TESTED は点線の円、
+   届いていないものは小さな中空の円、SKIPPED は横棒の入った中空の円) */
+.path { list-style: none; margin: 0; padding: 0; display: flex; }
+.path .node { position: relative; }
+.node-mark { display: grid; place-items: center; width: var(--node); height: var(--node); font-size: calc(var(--node) * 0.55); font-weight: 800; line-height: 1; position: relative; z-index: 1; }
+.node.ok .node-mark { border-radius: 50%; background: var(--success); color: var(--surface); }
+.node.failed .node-mark { background: var(--danger); color: var(--surface); clip-path: polygon(30% 0, 70% 0, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0 70%, 0 30%); }
+.node.unknown .node-mark { background: var(--warning); color: var(--surface); clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); }
+.node.untested .node-mark { border-radius: 50%; border: 2px dotted var(--muted); background: var(--surface); }
+.node.unreached .node-mark, .node.skipped .node-mark { border-radius: 50%; border: 2px solid var(--border); background: var(--surface); transform: scale(0.6); }
+.node.skipped .node-mark::after { content: ""; width: 60%; height: 2px; background: var(--muted); }
+.node-word { font-size: 11px; font-weight: 700; color: var(--muted); }
+.node.ok .node-word { color: var(--success); }
+.node.failed .node-word { color: var(--danger); }
+.node.unknown .node-word { color: var(--warning); }
+
+/* 一覧の画面の縮めた図。名前は表の見出しに 1 回だけ出す */
+.path.mini { --node: 18px; gap: 12px; }
+.path.mini .node + .node::before { content: ""; position: absolute; top: calc(var(--node) / 2 - 1px); left: -12px; width: 12px; border-top: 2px solid var(--border); }
+.path.mini .node.after-stop::before { border-top-style: dashed; }
+.path-link { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; color: inherit; text-decoration: none; }
+.path-caption { font-size: 11px; color: var(--muted); }
+.path-link:hover .path-caption { color: var(--accent); }
+.rule-link { color: inherit; text-decoration: none; }
+.rule-link:hover { color: var(--accent); }
+.row-finding { margin-top: 4px; font-size: 12px; }
+.row-finding summary { cursor: pointer; color: var(--muted); }
+.agent-finding .check-list { margin-top: 6px; }
+.doctor-table th.path-head { white-space: normal; }
+
+/* 1 本のルールの画面の図。狭い画面では縦に並べる */
+.path.full { --node: 30px; }
+.path.full .node { flex: 1 1 0; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; min-width: 0; }
+.path.full .node + .node::before { content: ""; position: absolute; top: calc(var(--node) / 2 - 1px); left: calc(-50% + var(--node) / 2 + 4px); right: calc(50% + var(--node) / 2 + 4px); border-top: 2px solid var(--border); }
+.path.full .node.after-stop::before { border-top-style: dashed; }
+.node-text { display: grid; gap: 2px; justify-items: center; }
+.node-name { font-weight: 700; font-size: 13px; }
+.node-stop { font-size: 11px; color: var(--danger); overflow-wrap: anywhere; }
+.node:not(.failed) .node-stop { color: var(--muted); }
+.node-note { font-size: 11px; color: var(--muted); }
+.path-section { padding-bottom: 4px; }
+@media (max-width: 560px) {
+  .path.full { flex-direction: column; }
+  .path.full .node { flex-direction: row; align-items: flex-start; text-align: left; gap: 10px; padding-bottom: 16px; }
+  .path.full .node + .node::before { content: none; }
+  .path.full .node:not(:last-child)::after { content: ""; position: absolute; left: calc(var(--node) / 2 - 1px); top: calc(var(--node) + 3px); bottom: 3px; border-left: 2px solid var(--border); }
+  .path.full .node:has(+ .after-stop)::after { border-left-style: dashed; }
+  .node-text { justify-items: start; }
+}
+
+/* 節点ごとの検査の折りたたみと dataplane の帯 */
+.node-detail { border: 1px solid var(--border); border-radius: 10px; padding: 0 12px; margin-top: 10px; }
+.node-detail > summary { cursor: pointer; padding: 10px 2px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.node-detail > summary { list-style: none; }
+.node-detail > summary::-webkit-details-marker { display: none; }
+.node-detail > summary::before { content: "▸"; color: var(--muted); }
+.node-detail[open] > summary::before { content: "▾"; }
+.node-detail > .check-list { padding-bottom: 12px; }
+.node-inline { --node: 16px; display: inline-block; }
+.node-labels { font-size: 12px; }
+.doctor-banner { border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px; }
+.doctor-banner.danger { background: var(--danger-bg); border-color: color-mix(in srgb, var(--danger), var(--border) 60%); }
+.doctor-banner.warning { background: var(--warning-bg); border-color: color-mix(in srgb, var(--warning), var(--border) 60%); }

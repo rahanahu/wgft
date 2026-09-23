@@ -12,6 +12,29 @@
 </li>
 {{ end }}
 
+{{ define "doctorpathmini" }}
+<ol class="path mini" aria-label="{{ .Aria }}">
+  {{ range .Nodes }}<li class="node {{ .State }}{{ if .AfterStop }} after-stop{{ end }}" title="{{ .Alt }}"><span class="node-mark" aria-hidden="true">{{ .Symbol }}</span><span class="sr-only">{{ .Alt }}</span></li>{{ end }}
+</ol>
+{{ end }}
+
+{{ define "doctorpathfull" }}
+<ol class="path full" aria-label="{{ .Aria }}">
+  {{ range .Nodes }}
+  <li class="node {{ .State }}{{ if .AfterStop }} after-stop{{ end }}" title="{{ .Alt }}">
+    <span class="node-mark" aria-hidden="true">{{ .Symbol }}</span>
+    <span class="node-text" aria-hidden="true">
+      <span class="node-name">{{ .Name }}</span>
+      <span class="node-word">{{ .Word }}</span>
+      {{ if .Stop }}<span class="node-stop mono">{{ .Stop }}</span>{{ end }}
+      {{ if .Note }}<span class="node-note">{{ .Note }}</span>{{ end }}
+    </span>
+    <span class="sr-only">{{ .Alt }}{{ if .Stop }}. {{ .Stop }}{{ end }}</span>
+  </li>
+  {{ end }}
+</ol>
+{{ end }}
+
 {{ define "doctortail" }}
 <section class="detail-section">
   <h3>{{ T .Locale "doctorHistoryHead" }}</h3>
@@ -41,34 +64,55 @@
 
 <section class="detail-section">
   <h3>Agents</h3>
-  <ul class="check-list">
-    {{ range .Agents }}{{ template "doctorcheck" . }}{{ else }}<li class="check-row"><p class="check-detail muted">no agent is named by any rule</p></li>{{ end }}
-  </ul>
+  {{ if .Agents }}
+  <div class="table-scroll">
+    <table class="data-table doctor-table">
+      <thead>
+        <tr><th>{{ T .Locale "colAgent" }}</th><th class="path-head">tunnel · stream · rules</th><th>{{ T .Locale "doctorFinding" }}</th></tr>
+      </thead>
+      <tbody>
+        {{ range .Agents }}
+        <tr>
+          <td data-label="{{ T $.Locale "colAgent" }}"><span class="check-label">{{ .Name }}</span> <span class="badge {{ .Badge }}">{{ .Status }}</span></td>
+          <td data-label="tunnel · stream · rules">{{ template "doctorpathmini" .Path }}</td>
+          <td data-label="{{ T $.Locale "doctorFinding" }}" class="check-detail">{{ .Detail }}
+            {{ if .Checks }}<details class="row-finding agent-finding"{{ if .Open }} open{{ end }}><summary>{{ T $.Locale "doctorAgentChecks" }}</summary><ul class="check-list">{{ range .Checks }}{{ template "doctorcheck" . }}{{ end }}</ul></details>{{ end }}
+          </td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </div>
+  {{ else }}
+  <p class="check-detail muted">no agent is named by any rule</p>
+  {{ end }}
 </section>
 
 <section class="detail-section">
   <h3>Rules</h3>
   {{ $loc := .Locale }}
   <div class="table-scroll">
-    <table class="data-table">
+    <table class="data-table doctor-table">
       <thead>
         <tr>
-          <th>{{ T $loc "colState" }}</th><th>{{ T $loc "colProtoPort" }}</th><th>{{ T $loc "colAgent" }}</th>
-          <th>{{ T $loc "colDest" }}</th><th>{{ T $loc "doctorFinding" }}</th><th>{{ T $loc "colActions" }}</th>
+          <th>{{ T $loc "colState" }}</th><th>{{ T $loc "doctorRuleCol" }}</th>
+          <th class="path-head">public port · WireGuard · agent · listener / target</th>
         </tr>
       </thead>
       <tbody>
         {{ range .Rules }}
         <tr>
           <td data-label="{{ T $loc "colState" }}"><span class="badge {{ .Badge }}">{{ .Status }}</span></td>
-          <td data-label="{{ T $loc "colProtoPort" }}"><strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> {{ .Ports }}</td>
-          <td data-label="{{ T $loc "colAgent" }}">{{ .Agent }}</td>
-          <td data-label="{{ T $loc "colDest" }}" class="mono">{{ .Target }}</td>
-          <td data-label="{{ T $loc "doctorFinding" }}" class="check-detail">{{ .Why }}</td>
-          <td data-label="{{ T $loc "colActions" }}"><a class="small-btn accent" href="/ui/doctor/{{ .ID }}">{{ T $loc "doctorRuleLink" }}</a></td>
+          <td data-label="{{ T $loc "doctorRuleCol" }}">
+            <a class="rule-link" href="/ui/doctor/{{ .ID }}"><strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> {{ .Ports }} <span class="flow-arrow">→</span> {{ .Agent }} <span class="mono">{{ .Target }}</span></a>
+            {{ if .Why }}<details class="row-finding"><summary>{{ T $loc "doctorFindingMore" }}</summary><p class="check-detail">{{ .Why }}</p></details>{{ end }}
+          </td>
+          <td data-label="public port · WireGuard · agent · listener / target">
+            <a class="path-link" href="/ui/doctor/{{ .ID }}">{{ template "doctorpathmini" .Path }}{{ if .Path.Caption }}<span class="path-caption mono">{{ .Path.Caption }}</span>{{ end }}</a>
+          </td>
         </tr>
         {{ else }}
-        <tr><td colspan="6" class="muted">{{ T $loc "noRules" }}</td></tr>
+        <tr><td colspan="3" class="muted">{{ T $loc "noRules" }}</td></tr>
         {{ end }}
       </tbody>
     </table>
@@ -94,14 +138,45 @@
 </div>
 {{ end }}
 
-{{ range .Groups }}
-<section class="detail-section">
-  <h3>{{ .Title }}</h3>
-  <ul class="check-list">{{ range .Checks }}{{ template "doctorcheck" . }}{{ end }}</ul>
+{{ with .Banner }}
+<div class="doctor-banner {{ .Badge }}" role="note">
+  <span class="check-label">dataplane</span> <span class="badge {{ .Badge }}">{{ .Status }}</span>
+  <span>{{ T $.Locale "doctorBanner" }}</span>
+  {{ if .Detail }}<p class="check-detail">{{ .Detail }}</p>{{ end }}
+</div>
+{{ end }}
+
+{{ with .Rule }}
+<section class="detail-section path-section">
+  {{ template "doctorpathfull" .Path }}
 </section>
 {{ end }}
 
 <p class="doctor-result"><strong>Result:</strong> {{ .Result }}</p>
+
+{{ with .Rule }}
+<section class="detail-section">
+  {{ range .Path.Nodes }}{{ if .Rows }}
+  <details class="node-detail"{{ if .Open }} open{{ end }}>
+    <summary>
+      <span class="node {{ .State }} node-inline"><span class="node-mark" aria-hidden="true">{{ .Symbol }}</span></span>
+      <strong>{{ .Name }}</strong> <span class="badge {{ .Badge }}">{{ .Word }}</span>
+      <span class="muted node-labels">{{ .LabelsText }}</span>
+    </summary>
+    <ul class="check-list">{{ range .Rows }}{{ template "doctorcheck" . }}{{ end }}</ul>
+  </details>
+  {{ end }}{{ end }}
+</section>
+{{ end }}
+
+{{ if .OffPath }}
+<section class="detail-section">
+  <details class="node-detail"{{ if .Banner }} open{{ end }}>
+    <summary><strong>{{ T .Locale "doctorOffPathHead" }}</strong></summary>
+    <ul class="check-list">{{ range .OffPath }}{{ template "doctorcheck" . }}{{ end }}</ul>
+  </details>
+</section>
+{{ end }}
 
 <section class="detail-section">
   <h3>{{ T .Locale "doctorProbeHead" }}</h3>

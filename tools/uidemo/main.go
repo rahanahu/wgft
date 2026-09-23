@@ -295,3 +295,40 @@ func (b *fakeBackend) CheckConnectivity(ruleID string) (admin.ConnCheck, error) 
 }
 
 func (b *fakeBackend) ServerInfo() (admin.ServerInfo, error) { return b.info, nil }
+
+// ApplyStatus reports every enabled rule's public port as active at generation 42, the way a
+// real server reports it. The dashboard reads only not_active and pending from it, so its
+// screenshots do not change; the diagnosis page (/ui/doctor) reads it for the public port.
+func (b *fakeBackend) ApplyStatus() (admin.ApplyStatus, bool) {
+	gen := uint64(42)
+	st := admin.ApplyStatus{DesiredGeneration: gen, ActiveGeneration: gen, Rules: map[string]admin.RuleApply{}}
+	for _, r := range b.rules {
+		if r.Enabled {
+			st.Rules[r.ID] = admin.RuleApply{ApplyState: admin.ApplyActive, ActiveGeneration: &gen}
+		}
+	}
+	return st, true
+}
+
+// AgentRuleStatuses reports what each rule's agent last said about it, from the sample agents
+// above, so the diagnosis page can show a rule stopping at its target (r_home_tcp8081) and a UDP
+// rule whose listener is open (r_valheim_udp).
+func (b *fakeBackend) AgentRuleStatuses(rules []proto.Rule) map[string]admin.AgentRuleStatus {
+	out := make(map[string]admin.AgentRuleStatus, len(rules))
+	for _, r := range rules {
+		st := admin.AgentRuleStatus{Agent: r.Agent}
+		for _, a := range b.agents {
+			if a.Name != r.Agent {
+				continue
+			}
+			st.Connected = a.Connected
+			for _, rs := range a.Rules {
+				if rs.ID == r.ID {
+					st.State, st.Reason, st.At = rs.State, rs.Reason, a.LastHeartbeat
+				}
+			}
+		}
+		out[r.ID] = st
+	}
+	return out
+}

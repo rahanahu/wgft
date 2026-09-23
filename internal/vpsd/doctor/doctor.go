@@ -510,6 +510,7 @@ func checkIndex(id string) int {
 
 // AgentSummaries は、報告に現れるエージェントごとに 1 行ぶんの要約を作る。エージェントの接続の
 // 検査をそのまま使い、同じ判定を 2 か所で作らない。Label はエージェントの名前に差し替える。
+// 検査は AgentCheck と同じ規則で選ぶ。
 func (rep Report) AgentSummaries() []Check {
 	seen := map[string]bool{}
 	var out []Check
@@ -518,11 +519,36 @@ func (rep Report) AgentSummaries() []Check {
 			continue
 		}
 		seen[c.Agent] = true
+		c, _ = rep.AgentCheck(c.Agent, CheckConnection)
 		c.Label = c.Agent
 		out = append(out, c)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Agent < out[j].Agent })
 	return out
+}
+
+// AgentCheck は、エージェントに属する検査 id(tunnel.handshake、agent.connection など)を、
+// そのエージェントを名指すルールの検査から 1 つ選ぶ。これらの検査はどの有効なルールにも同じ値で
+// 入るが、無効なルールの検査は rule_disabled の skipped であり、エージェントの状態を述べない。
+// そこで有効なルールの検査を先に採り、無ければ最初の検査を返す(設計文書 10.2a 節の改訂の
+// 記録、2026-09-23)。
+func (rep Report) AgentCheck(agent, id string) (Check, bool) {
+	var first *Check
+	for i, c := range rep.Checks {
+		if c.ID != id || c.Agent != agent {
+			continue
+		}
+		if c.Reason != ReasonRuleDisabled {
+			return c, true
+		}
+		if first == nil {
+			first = &rep.Checks[i]
+		}
+	}
+	if first != nil {
+		return *first, true
+	}
+	return Check{}, false
 }
 
 // --- 小さな補助 ---
