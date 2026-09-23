@@ -30,33 +30,52 @@ func waitStreamObs(t *testing.T, rt *runtime, within time.Duration, want string,
 	}
 }
 
-// 切断の理由は保持され、次の切断で置き換わる。接続に至らなかった試みの失敗も同じ組に入る。
+// 切断はつながっている状態を倒し、その理由を残す。理由は次の切断で置き換わり、接続に至らなかった
+// 試みの失敗も同じ組に入る。どの切断も、その手前でつながった状態を作ってから確かめる。つながった
+// ことのない runtime に切断を書くだけでは、Connected が初めから false なので何も確かめられない。
 func TestStreamObservationKeepsTheLastDisconnectReason(t *testing.T) {
 	rt := &runtime{}
 	if obs := rt.streamStatus(); obs.Connected || obs.DisconnectReason != "" || !obs.DisconnectedAt.IsZero() {
 		t.Fatalf("a runtime that never connected must have an empty observation: %+v", obs)
 	}
 
+	rt.noteStreamConnected()
+	if obs := rt.streamStatus(); !obs.Connected {
+		t.Fatalf("the stream must look connected once the public key is sent: %+v", obs)
+	}
 	first := time.Now()
-	rt.noteStreamDisconnected(first, errors.New("dial tcp: connection refused"))
+	rt.noteStreamDisconnected(first, errors.New("received close frame: status = 4001"))
 	obs := rt.streamStatus()
 	if obs.Connected {
 		t.Error("the stream must not look connected after a disconnect")
 	}
-	if obs.DisconnectReason != "dial tcp: connection refused" || !obs.DisconnectedAt.Equal(first) {
+	if obs.DisconnectReason != "received close frame: status = 4001" || !obs.DisconnectedAt.Equal(first) {
 		t.Errorf("the first disconnect was not kept: %+v", obs)
 	}
 
+	// 接続に至らなかった試みの失敗は、つながらないまま同じ組を置き換える
 	second := first.Add(time.Second)
-	rt.noteStreamDisconnected(second, errors.New("received close frame: status = 4001"))
+	rt.noteStreamDisconnected(second, errors.New("dial tcp: connection refused"))
 	obs = rt.streamStatus()
-	if obs.DisconnectReason != "received close frame: status = 4001" || !obs.DisconnectedAt.Equal(second) {
+	if obs.Connected {
+		t.Error("a failed attempt must not make the stream look connected")
+	}
+	if obs.DisconnectReason != "dial tcp: connection refused" || !obs.DisconnectedAt.Equal(second) {
 		t.Errorf("the second disconnect did not replace the first: %+v", obs)
 	}
 
-	// 誤りの無い終わり方でも、理由の欄は空にしない
+	// 繋ぎ直せばつながっている状態に戻り、その接続の終わりで再び倒れる。誤りの無い終わり方でも、
+	// 理由の欄は空にしない
+	rt.noteStreamConnected()
+	if obs = rt.streamStatus(); !obs.Connected {
+		t.Fatalf("a new connection must show up as connected: %+v", obs)
+	}
 	rt.noteStreamDisconnected(second.Add(time.Second), nil)
-	if obs = rt.streamStatus(); obs.DisconnectReason == "" {
+	obs = rt.streamStatus()
+	if obs.Connected {
+		t.Error("a disconnect without an error must still end the connected state")
+	}
+	if obs.DisconnectReason == "" {
 		t.Errorf("a disconnect without an error must still carry a reason: %+v", obs)
 	}
 }
@@ -158,13 +177,16 @@ func TestStreamObservationTracksThePingAndThePong(t *testing.T) {
 	}
 }
 
-// streamLoop が書く値を確かめる。間隔は streamLoop が実際に待つ値と一致し、次に試す時刻は
-// その間隔から導け、切断の理由は再接続のたびに新しくなる。
+// streamLoop が書く値を確かめる。間隔は streamLoop がこれから待つ値であって次の試みに使う値では
+// なく、次に試す時刻はその間隔から導け、切断の理由は再接続のたびに新しくなる。初期値と上限を離して
+// あるのは、この 2 つの値を試験が見分けられるようにするためである。同じ値にすると、待つ値を記録
+// しても倍加した後の値を記録しても、記録は同じ値になる。
 func TestStreamLoopRecordsTheBackoffAndTheDisconnect(t *testing.T) {
-	const backoff = 300 * time.Millisecond
+	const backoffMin = 500 * time.Millisecond
+	const backoffMax = 8 * backoffMin
 	endpoint, pin, attempts := newRefusingStreamServer(t)
 	rt := newAliveTestRuntime(t, endpoint, pin)
-	rt.reconnectBackoffMin, rt.reconnectBackoffMax = backoff, backoff
+	rt.reconnectBackoffMin, rt.reconnectBackoffMax = backoffMin, backoffMax
 
 	runStreamLoop(t, rt)
 
@@ -183,13 +205,15 @@ func TestStreamLoopRecordsTheBackoffAndTheDisconnect(t *testing.T) {
 	if obs.DisconnectReason == "" || obs.DisconnectedAt.IsZero() {
 		t.Errorf("the refused attempt must leave a reason: %+v", obs)
 	}
-	if obs.Backoff != backoff {
-		t.Errorf("the recorded interval %s is not the %s that streamLoop waits", obs.Backoff, backoff)
+	// 1 回目の待ちに入った時点の記録は初期値である。倍加した後の値を記録する実装なら、ここは
+	// 初期値の 2 倍になる
+	if obs.Backoff != backoffMin {
+		t.Errorf("the recorded interval %s is not the %s that streamLoop waits first", obs.Backoff, backoffMin)
 	}
 	// 次に試す時刻は、待ちに入った時刻に間隔を足したものである。待ちに入るのは切断の直後なので、
 	// 差は間隔以上、間隔にその直後の処理の分を足した範囲に収まる
-	if d := obs.RetryAt.Sub(obs.DisconnectedAt); d < backoff || d > backoff+2*time.Second {
-		t.Errorf("the next attempt is %s after the disconnect; it must be the %s interval", d, backoff)
+	if d := obs.RetryAt.Sub(obs.DisconnectedAt); d < backoffMin || d > backoffMin+2*time.Second {
+		t.Errorf("the next attempt is %s after the disconnect; it must be the %s interval", d, backoffMin)
 	}
 
 	// 記録した間隔が、実際に待った時間とも一致することを、次の試みの時刻で確かめる
@@ -199,8 +223,8 @@ func TestStreamLoopRecordsTheBackoffAndTheDisconnect(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no second connection attempt within 5s")
 	}
-	if d := second.Sub(first); d < backoff*8/10 {
-		t.Errorf("the second attempt came %s after the first, below the recorded %s interval", d, backoff)
+	if d := second.Sub(first); d < backoffMin*8/10 {
+		t.Errorf("the second attempt came %s after the first, below the recorded %s interval", d, backoffMin)
 	}
 
 	// 再接続のたびに切断の記録が新しくなる
@@ -211,6 +235,12 @@ func TestStreamLoopRecordsTheBackoffAndTheDisconnect(t *testing.T) {
 	if next.DisconnectReason == "" {
 		t.Errorf("the newer disconnect lost its reason: %+v", next)
 	}
+
+	// 倍加した値が記録に現れるのは 2 回目の待ちからである。1 回目の記録が倍加の後の値ではない
+	// ことの裏付けになる
+	waitStreamObs(t, rt, 10*time.Second, "the doubled interval on the second wait", func(o streamObservation) bool {
+		return o.Backoff == 2*backoffMin
+	})
 }
 
 // pingLoop が書く値を確かめる。ping に応じる server につないでいる間、ping と pong の時刻が進む。
