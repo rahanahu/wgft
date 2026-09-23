@@ -132,7 +132,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | A4 | 計画と収束の故障注入 (`internal/planner`、`internal/reconcile` の retry、repair、drift のテスト、`internal/dataplane` の fail-closed のテスト) | Prepare、Commit の失敗の扱い、世代の前進、再試行の誤り (7a.3 節) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 数秒 | 自動 |
 | A5 | nftables の行の生成 (`internal/dataplane/linuxkernel/nft` と `internal/policy/nftables` の単体テスト) | 行の順序、行の抜け、ルールごとの fail-closed の誤り (カーネルを使わない照合) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 数秒 | 自動 |
 | A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | コードを変える PR | PR の更新ごと | 1 分前後 | 自動 |
-| A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 4 つの target の合計 | 自動 |
+| A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 数分 | 自動 |
 | A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力 | CI (Linux) | すべての PR | PR の更新ごと | 1 分未満 | 自動 |
 | A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L14。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。7a.8 節の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | Sandbox で 約 5 分半 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は 338 秒)、複数の VM で並列に約 2.5 分、1 台で順に 10 分以上 | 自動 (開発者が起動) |
 
