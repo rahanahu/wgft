@@ -41,3 +41,18 @@ func Acquire(path string) (*Lock, error) {
 
 // IsLocked は誰かがロックを持っているか(ロックは取らない)。
 func IsLocked(path string) (bool, error) { return flock.IsLocked(path) }
+
+// State は Inspect が読み取ったロックファイルの状態。
+type State = flock.State
+
+// 状態の値は flock のものをそのまま使う。呼び出し側が flock を直接 import せずに済ませるため。
+const (
+	Unknown  = flock.Unknown
+	Absent   = flock.Absent
+	Unlocked = flock.Unlocked
+	Locked   = flock.Locked
+)
+
+// Inspect はロックファイルを作らずにロックの状態を読む。認証情報ファイルのロックファイルが
+// 無ければ Absent で、そのデータディレクトリではエージェントが一度も起動していない。
+func Inspect(path string) (State, error) { return flock.Inspect(path) }
