@@ -39,12 +39,6 @@ const agentControlDialTimeout = 5 * time.Second
 // 使うコマンドなので、答えないソケットの前で 30 秒止まるより、答えなかった事実を返すほうがよい。
 const agentControlReplyTimeout = 10 * time.Second
 
-// agentControlPathLimit は、どの OS でも収まる制御ソケットのパスの長さである。単位はバイト。
-// sockaddr_un の sun_path は Linux と Windows で 108 バイト、macOS で 104 バイトで、終端の NUL を
-// 含む(設計文書 11a 節)。internal/agent/control.go の controlPathLimit と同じ値であり、そちらは
-// 公開されていないので同じ判断をここでも持つ。
-const agentControlPathLimit = 103
-
 // agentLiveKind は、制御ソケットから実行時の状態を読んだ結果の区分である。10.2c 節の
 // 「制御ソケットから実行時の状態を取れない場合」が分ける場合を、そのまま値にしてある。
 type agentLiveKind int
@@ -115,11 +109,21 @@ const (
 	agentReasonNoRelay = "no_relay"
 )
 
-// agentHandshakePendingReason は、トンネルはあるがハンドシェイクがまだ成立していないときに
-// ハートビートが組み立てる理由である。internal/agent の reasonHandshakePending と同じ文字列で
-// あり、そちらは公開されていない。応答から読めるのは理由の文字列だけなので、この 1 つの場合を
-// ts.Err による誤りと見分けるには同じ文字列をここでも持つほかない。
-const agentHandshakePendingReason = "handshake not established"
+// 所見に並べる項目の数の上限。ルールの本数にも拒否の組み合わせの数にも上限が無いので、1 行が
+// 際限なく伸びないように先頭のいくつかだけを並べ、残りは件数で示す。ルールより拒否を多く出すのは、
+// 拒否がルールと理由の組ごとに立ち、1 本のルールが 3 つの理由を持ちうるためである。
+const (
+	// agentMaxRuleLines はルールを並べる本数の上限である。
+	agentMaxRuleLines = 4
+	// agentMaxRefusalLines は拒否の組を並べる数の上限である。
+	agentMaxRefusalLines = 6
+)
+
+// agentAndMore は、上限で打ち切った並びの末尾に添える句である。切ったことを運用者が読み取れる
+// ようにする。
+func agentAndMore(rest int) string {
+	return fmt.Sprintf("and %d more", rest)
+}
 
 // agentLive は制御ソケットから読んだ実行時の状態である。
 type agentLive struct {
@@ -163,7 +167,7 @@ func dialFailureKind(path string, err error) agentLiveKind {
 	switch {
 	case errors.Is(err, fs.ErrPermission):
 		return liveDenied
-	case errors.Is(err, syscall.EINVAL) && len(path) > agentControlPathLimit:
+	case errors.Is(err, syscall.EINVAL) && len(path) > agent.ControlPathLimit:
 		// Go の net は sun_path に収まらない名前を OS を呼ぶ前に EINVAL で拒むので、もとの誤りは
 		// invalid argument としか言わない(internal/agent/control.go)。
 		return livePathTooLong
@@ -348,8 +352,9 @@ func agentControlCheck(c *agentDoctorCheck, run agentRunState, live agentLive) {
 	case liveUnreachable:
 		c.Status, c.Reason = statusFailed, agentReasonControlUnreachable
 		c.Detail = "the agent is running, but its control socket at " + live.Path + " could not be reached: " + errText(live.Err)
-		c.Next = "the agent keeps forwarding without this socket, so this is not a forwarding fault. It logs the reason when it cannot open the socket; " +
-			"read that line with journalctl -u wgft-agent, or docker logs for a container"
+		c.Next = "the agent keeps forwarding without this socket, so this is not a forwarding fault. Read its log with journalctl -u wgft-agent, " +
+			"or docker logs for a container: it prints a line when it cannot open the socket. If it printed none, the socket file at that path is " +
+			"a leftover of a process that did not remove it, and restarting the agent replaces it"
 	}
 }
 
@@ -466,7 +471,7 @@ func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.D
 	}
 	// トンネルがある場合は、ts.Err があることを先に見て、LastHandshake が無いことを後に見る。
 	// ハートビートの分岐がこの順であり、両方が成り立つ実行の理由は ts.Err の側になる(10.2c 節)。
-	if t.Reason == agentHandshakePendingReason {
+	if t.Reason == agent.ReasonHandshakePending {
 		c.Status, c.Reason = statusUnknown, agentReasonHandshakePending
 		c.Detail = "the tunnel is up to " + orDash(t.Endpoint) + ", but no handshake has been established on it yet"
 		c.Next = "a tunnel that was just built always passes through this state. If it stays here, the VPS's WireGuard UDP port, this line's firewall or the ISP " +
@@ -599,11 +604,10 @@ func agentListenersCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
 // agentRuleLines はルールごとの 1 句を組み立てる。長くなりすぎないよう先頭のいくつかだけを返す。
 // 誤りの文字列は internal/agent の側で既に 512 バイトに切られているので、ここでは切らない。
 func agentRuleLines(rules []agent.DoctorRule) []string {
-	const max = 4
-	out := make([]string, 0, max+1)
+	out := make([]string, 0, agentMaxRuleLines+1)
 	for i, r := range rules {
-		if i == max {
-			out = append(out, fmt.Sprintf("and %d more", len(rules)-max))
+		if i == agentMaxRuleLines {
+			out = append(out, agentAndMore(len(rules)-agentMaxRuleLines))
 			break
 		}
 		line := fmt.Sprintf("%s %s: %d of %d listener%s open", r.ID, orDash(string(r.Proto)), r.Listening, r.Listeners, pluralS(r.Listeners))
@@ -648,11 +652,10 @@ func agentSessionsCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
 
 // agentSessionLines はルールごとの接続の数の 1 句を組み立てる。
 func agentSessionLines(rules []agent.DoctorRule) []string {
-	const max = 4
-	out := make([]string, 0, max+1)
+	out := make([]string, 0, agentMaxRuleLines+1)
 	for i, r := range rules {
-		if i == max {
-			out = append(out, fmt.Sprintf("and %d more", len(rules)-max))
+		if i == agentMaxRuleLines {
+			out = append(out, agentAndMore(len(rules)-agentMaxRuleLines))
 			break
 		}
 		out = append(out, fmt.Sprintf("%s %d flow%s in %d session%s", r.ID, r.Flows, pluralS(r.Flows), r.Sessions, pluralS(r.Sessions)))
@@ -669,15 +672,22 @@ func agentRefusalsCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.Doct
 	}
 	c.Status, c.Reason = statusUnknown, agentReasonNoThreshold
 	start := "since this tunnel was built " + agentWhen(in.Now, st.RefusalsSince)
+	// 拒否は、ルールと理由の組ごとに立つ。組の数にも上限が無いので、並べる数を抑え、抑えたことを
+	// 末尾に書く。切ったことが読み取れないと、運用者は並びが全部だと読む。
 	var lines []string
 	var total uint64
+	groups := 0
 	for _, b := range st.Budgets {
 		for _, r := range b.Refusals {
 			total += r.Count
-			if len(lines) < 6 {
+			groups++
+			if len(lines) < agentMaxRefusalLines {
 				lines = append(lines, fmt.Sprintf("%s %s %s %d", r.RuleID, b.Proto, r.Reason, r.Count))
 			}
 		}
+	}
+	if groups > len(lines) {
+		lines = append(lines, agentAndMore(groups-len(lines)))
 	}
 	if total == 0 {
 		c.Detail = "no flow has been refused " + start

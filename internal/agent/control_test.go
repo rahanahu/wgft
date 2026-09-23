@@ -27,7 +27,7 @@ func TestListenControlExplainsLongPath(t *testing.T) {
 func TestListenControlShortPath(t *testing.T) {
 	dir := t.TempDir()
 	path := ControlPath(filepath.Join(dir, "agent.json"))
-	if len(path) > controlPathLimit {
+	if len(path) > ControlPathLimit {
 		t.Skipf("temp dir %q is already too long for a Unix socket", dir)
 	}
 	ln, err := listenControl(path)

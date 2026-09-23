@@ -493,9 +493,14 @@ func (rt *runtime) close() {
 }
 
 // heartbeat は処理済み世代、トンネルの状態、ルールごとの状態をまとめる(仕様 5.2 節)。
-// reasonHandshakePending は、トンネルはあるが WireGuard のハンドシェイクがまだ済んでいないときの理由。
+// ReasonHandshakePending は、トンネルはあるが WireGuard のハンドシェイクがまだ済んでいないときの理由。
 // 適用直後の追送り(needsHandshakeFollowUp)がこの値で判定するので、文言を変えるときは両方に効く。
-const reasonHandshakePending = "handshake not established"
+//
+// 公開しているのは、制御ソケットの doctor の応答から同じ場合を見分ける読み手がいるためである
+// (設計文書 10.2c 節)。応答が載せるのは理由の文字列だけで、ハンドシェイク待ちを tunnel.Status の
+// Err による誤りと分ける材料は他に無い。写しを持たせると、この文言を変えたときに読み手だけが
+// 取り残される。
+const ReasonHandshakePending = "handshake not established"
 
 func (rt *runtime) heartbeat() proto.Heartbeat {
 	rt.mu.Lock()
@@ -553,7 +558,7 @@ func (rt *runtime) tunnelSnapshotLocked() tunnelSnapshot {
 	if ts.Err != nil {
 		snap.hb.State, snap.hb.Reason = proto.StatusError, ts.Err.Error()
 	} else if ts.LastHandshake.IsZero() {
-		snap.hb.State, snap.hb.Reason = proto.StatusError, reasonHandshakePending
+		snap.hb.State, snap.hb.Reason = proto.StatusError, ReasonHandshakePending
 	}
 	return snap
 }

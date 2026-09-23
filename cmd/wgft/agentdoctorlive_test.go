@@ -52,7 +52,7 @@ func useLongSocketPath(t *testing.T, in *agentDoctorInput) {
 	}
 	in.DataDir = deep
 	in.CredentialsPath = filepath.Join(deep, "agent.json")
-	if len(agent.ControlPath(in.CredentialsPath)) <= agentControlPathLimit {
+	if len(agent.ControlPath(in.CredentialsPath)) <= agent.ControlPathLimit {
 		t.Skipf("the temporary directory is too short to exceed the limit: %s", in.CredentialsPath)
 	}
 }
@@ -162,6 +162,27 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 				{agentCheckTransfer, statusUnknown, agentReasonNoTunnel},
 			},
 			wantExit: 1,
+		},
+		{
+			// 中継はあるがルールを 1 本も持たない実行。まだ何も公開されていない健全な配置であり、
+			// 総合判定を動かす relay.listeners は OK である。中継の有無の見分けは、ルールの並びでは
+			// なくフロー予算の項目の有無で行う。ルールの並びは、中継が無い実行でも中継がルールを
+			// 持たない実行でも同じく空になるためである。
+			name: "the relay is up and holds no rules",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+				st.Rules = nil
+			}))),
+			want: []wantCheck{
+				{agentCheckListeners, statusOK, ""},
+				{agentCheckSessions, statusUnknown, agentReasonNoThreshold},
+				{agentCheckRefusals, statusUnknown, agentReasonNoThreshold},
+				{agentCheckTunnelLocal, statusOK, ""},
+			},
+			wantExit: 0,
+			wantDetail: map[string]string{
+				agentCheckListeners: "the relay holds no rules, so it opens no listeners",
+				agentCheckSessions:  "the relay holds no rules",
+			},
 		},
 		{
 			// ハンドシェイクがまだ成立していない実行。トンネルを作り直した直後に必ず通る状態で
@@ -328,7 +349,10 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 				{agentCheckAllowTargets, statusSkipped, agentReasonControlUnreachable},
 			},
 			wantExit: 0,
-			wantNext: map[string]string{agentCheckControl: "It logs the reason when it cannot open the socket"},
+			// この枝は既定の受け皿であり、ソケットを開けないまま動いている実行も、常駐プロセスが
+			// 消し忘れたソケットのファイルが残っている実行も入る。次の一手は、その両方に届く形に
+			// する。
+			wantNext: map[string]string{agentCheckControl: "it prints a line when it cannot open the socket. If it printed none, the socket file at that path is a leftover"},
 		},
 		{
 			// 繋げたが応答を読めない実行。
@@ -714,7 +738,7 @@ func TestAgentDoctorShowsRefusalsAgainstTheirStart(t *testing.T) {
 
 // 読み取りの入口の振り分けそのものを、誤りから直接確かめる。
 func TestDialFailureKind(t *testing.T) {
-	long := "/" + strings.Repeat("a", agentControlPathLimit)
+	long := "/" + strings.Repeat("a", agent.ControlPathLimit)
 	for _, tc := range []struct {
 		name string
 		path string
@@ -758,4 +782,96 @@ func TestAgentDoctorNamesALongSocketPath(t *testing.T) {
 	if !strings.Contains(c.Next, "shorter path") {
 		t.Errorf("agent.control does not say to use a shorter data directory: %q", c.Next)
 	}
+}
+
+// ルールの並びは上限で打ち切り、打ち切ったことを末尾に書く。ルールの本数に上限が無いので、
+// 1 行が際限なく伸びないようにする一方、切ったことが読み取れないと運用者は並びが全部だと読む。
+//
+// 上限の値は、実装の定数ではなく数そのもので書く。定数を読むと、上限を変える変異でこの試験の
+// 期待も一緒に動き、変えたことが誰にも見えない。
+func TestAgentDoctorCapsTheRuleLines(t *testing.T) {
+	const rules = 6
+	in := testRunningAgent(t, runtimeResponse(func(st *agent.DoctorRuntimeState) {
+		st.Rules = nil
+		for i := 0; i < rules; i++ {
+			st.Rules = append(st.Rules, agent.DoctorRule{ID: fmt.Sprintf("r_%d", i), State: proto.StatusOK,
+				Proto: proto.TCP, Listeners: 1, Listening: 1})
+		}
+	}))
+	rep := agentDiagnose(in)
+	for _, id := range []string{agentCheckListeners, agentCheckSessions} {
+		c, _ := findAgentCheck(rep, id)
+		// 6 本のうち、名前で出るのは先頭の 4 本だけで、残る 2 本は件数になる。
+		for _, want := range []string{"r_0", "r_1", "r_2", "r_3", "and 2 more"} {
+			if !strings.Contains(c.Detail, want) {
+				t.Errorf("%s does not show %q: %q", id, want, c.Detail)
+			}
+		}
+		for _, unwanted := range []string{"r_4", "r_5"} {
+			if strings.Contains(c.Detail, unwanted) {
+				t.Errorf("%s names %s past the cap: %q", id, unwanted, c.Detail)
+			}
+		}
+	}
+	// 上限に満たない並びには、印を付けない。
+	c, _ := findAgentCheck(agentDiagnose(testRunningAgent(t, healthyLiveResponse())), agentCheckListeners)
+	if strings.Contains(c.Detail, "more") {
+		t.Errorf("relay.listeners says the list was cut although it holds every rule: %q", c.Detail)
+	}
+}
+
+// 拒否の並びも上限で打ち切り、打ち切ったことを末尾に書く。拒否はルールと理由の組ごとに立つので、
+// 組の数にも上限が無い。上限の値を数そのもので書く理由は、ルールの並びの試験と同じである。
+func TestAgentDoctorCapsTheRefusalLines(t *testing.T) {
+	const groups = 8
+	in := testRunningAgent(t, runtimeResponse(func(st *agent.DoctorRuntimeState) {
+		st.Budgets[0].Refusals = nil
+		for i := 0; i < groups; i++ {
+			st.Budgets[0].Refusals = append(st.Budgets[0].Refusals,
+				agent.DoctorRefusal{RuleID: fmt.Sprintf("r_%d", i), Reason: resource.ReasonBudget, Count: 1})
+		}
+	}))
+	c, _ := findAgentCheck(agentDiagnose(in), agentCheckRefusals)
+	// 8 組のうち、名前で出るのは先頭の 6 組だけで、残る 2 組は件数になる。合計はすべてを数える。
+	for _, want := range []string{"8 flows refused", "r_0", "r_1", "r_2", "r_3", "r_4", "r_5", "and 2 more"} {
+		if !strings.Contains(c.Detail, want) {
+			t.Errorf("relay.refusals does not show %q: %q", want, c.Detail)
+		}
+	}
+	for _, unwanted := range []string{"r_6", "r_7"} {
+		if strings.Contains(c.Detail, unwanted) {
+			t.Errorf("relay.refusals names %s past the cap: %q", unwanted, c.Detail)
+		}
+	}
+}
+
+// 制御ソケットの応答が載せるハンドシェイク待ちの理由は、別に組み上げた常駐プロセスが書いた
+// 文字列である。この試験はその文字列を直に書いて、読み手がそれを見分けることを固定する。
+// internal/agent の側でこの文言だけを変えると、新しい CLI が、まだ入れ替えていない常駐プロセスの
+// 応答を読み違えるので、この試験が落ちる。
+func TestAgentDoctorReadsTheHandshakePendingReasonAReleasedAgentSends(t *testing.T) {
+	const sent = "handshake not established"
+	if agent.ReasonHandshakePending != sent {
+		t.Fatalf("the agent now sends %q for a pending handshake; agent doctor reads %q, so a CLI newer than the running process misreads it",
+			agent.ReasonHandshakePending, sent)
+	}
+	in := testRunningAgent(t, runtimeResponse(func(st *agent.DoctorRuntimeState) {
+		st.Tunnel.State, st.Tunnel.Reason = proto.StatusError, sent
+		st.Tunnel.LastHandshake = time.Time{}
+	}))
+	c, _ := findAgentCheck(agentDiagnose(in), agentCheckTunnelLocal)
+	if c.Status != statusUnknown || c.Reason != agentReasonHandshakePending {
+		t.Errorf("tunnel.local = %s/%q for the reason a released agent sends, want %s/%q",
+			c.Status, c.Reason, statusUnknown, agentReasonHandshakePending)
+	}
+}
+
+// testRunningAgent は、稼働中のエージェントに対する実行の入力を組む。
+func testRunningAgent(t *testing.T, resp *agent.DoctorResponse) agentDoctorInput {
+	t.Helper()
+	in := testAgentDoctorInput(t, t.TempDir())
+	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+	holdTheLock(t, in.CredentialsPath)
+	in.Dial = fakeDoctorSocket(t, liveReply(resp))
+	return in
 }

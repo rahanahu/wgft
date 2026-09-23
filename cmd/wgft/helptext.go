@@ -246,7 +246,10 @@ is healthy is what "server doctor" answers.
 The Connection, Tunnel and Relay items other than "wg endpoint resolve" are held
 only by the running process and are read over its control socket. While the
 agent is stopped, or while its socket cannot be reached, they are listed as
-SKIPPED with the reason why rather than left out. Two answers about that socket
+SKIPPED with the reason why rather than left out. One of them, the target
+allowlist, reads UNKNOWN instead while no process is running or while that
+cannot be settled: the list is a setting, so evidence for it exists somewhere,
+but only the running process says which list it is holding. Two answers about that socket
 are not a forwarding fault and never raise the exit code above 0: a path longer
 than a Unix socket name holds, and an agent that never opened the socket. Being
 refused by the socket's permissions is exit 2, since the verdict items behind it

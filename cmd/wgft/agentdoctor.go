@@ -77,8 +77,8 @@ const (
 
 // 理由の符号。10.2c 節は agent_not_running、control_socket_unreachable、resolve_failed、
 // no_threshold、reconnecting、handshake_pending を出発点として残し、残りは実装のときに定めると
-// している。この版が使うのは次のとおりで、稼働中のプロセスから読む検査の符号は、その実装が
-// 加えるときに足す。
+// している。ここにあるのは、エージェントが止まっていても成立する検査が使う符号である。稼働中の
+// プロセスから読む検査の符号は agentdoctorlive.go にある。
 const (
 	// agentReasonNotRunning は、エージェントが止まっているために取れない値である。
 	agentReasonNotRunning = "agent_not_running"
@@ -832,9 +832,10 @@ type agentLiveOnlyCheck struct {
 	verdict bool
 }
 
-// agentLiveOnlyChecks は、稼働中のプロセスの制御ソケットからしか取れない検査である。この版は
-// 制御ソケットを読まないので、10.2c 節の規則どおり SKIPPED として並べる。項目ごと落とす案は
-// 採らない。実行の状態によって項目そのものが消えると、機械が処理しにくくなるためである。
+// agentLiveOnly は、稼働中のプロセスの制御ソケットからしか取れない検査の並びである。値を入れる
+// のは agentdoctorlive.go の agentLiveChecks で、読めなかった実行では 10.2c 節の規則どおり
+// SKIPPED として並べる。項目ごと落とす案は採らない。実行の状態によって項目そのものが消えると、
+// 機械が処理しにくくなるためである。
 var agentLiveOnly = []agentLiveOnlyCheck{
 	{agentCheckControl, agentGroupConnection, "control socket", false},
 	{agentCheckStreamConn, agentGroupConnection, "control connection", false},
@@ -1023,8 +1024,9 @@ func agentNotTested() []notTested {
 			"handshake is healthy. This command never judges that; run wgft server doctor on the VPS for it."},
 		{"reaching the vps", "whether this host's line reaches the VPS's WireGuard UDP port and its agent API port. Nothing is dialled towards " +
 			"the VPS from here, so a blocked home firewall or ISP does not show up."},
-		{"the targets", "the LAN services this agent forwards to. Nothing is dialled from here; a running agent tests TCP targets itself " +
-			"every 30s and reports the result, and a UDP target cannot be tested at all."},
+		{"the targets", "the LAN services this agent forwards to. Nothing is dialled from here. A running agent tests TCP targets itself " +
+			"every 30s, and its result is what the listeners line above reports; a UDP target cannot be tested at all, so no line here " +
+			"answers for one."},
 		{"local settings", "the effective value and source of every setting on this host. The agent prints those as its first lines when it " +
 			"starts; read them in its log."},
 	}
