@@ -64,7 +64,7 @@ var tr = map[string][2]string{
 	"ipMatch":         {"✓ IP 一致", "✓ IP match"},
 	"ipMismatch":      {"▲ IP 不一致", "▲ IP mismatch"},
 	"pending":         {"反映待ち", "Pending"},
-	"revoke":          {"無効化", "Revoke"},
+	"revoke":          {"削除", "Revoke"},
 	"noAgents":        {"エージェントがまだありません。「+ エージェントを追加」から接続文字列を発行してください。", "No agents yet. Use “+ Add agent” to issue a join string."},
 	// rules table
 	"rules":        {"ルール", "Rules"},
@@ -112,13 +112,13 @@ var tr = map[string][2]string{
 	"warnLinkFmt":       {"警告 %d 件", "%d warnings"},
 	"noWarnings":        {"異常なし", "No issues"},
 	"dismiss":           {"警告を消す", "Dismiss"},
-	"revokeAgent":       {"エージェントを無効化", "Revoke agent"},
+	"revokeAgent":       {"エージェントを削除", "Revoke agent"},
 	"warnMismatchTitle": {"IP の食い違いを検知しました", "IP mismatch detected"},
 	"warnMismatchBody":  {"生きている stream の接続元 IP と、最近ハンドシェイクした WireGuard のエンドポイント IP が 2 分以上食い違っています。認証情報 (agent.json) の窃取か二重起動の疑いです。正当な事情(2 拠点から使うなど)なら消してください。", "The live stream's source IP and the recently handshaked WireGuard endpoint IP have differed for over 2 minutes. Possible theft of the credentials in agent.json, or double-start. Dismiss it if this is expected; for example, running from two sites."},
 	"warnFlappingTitle": {"IP の往復を検知しました", "IP flapping detected"},
 	"warnFlappingBody":  {"同じチャネル(stream の接続元か WireGuard のエンドポイント)の IP が 10 分以内に以前の値へ往復しました。同じ鍵か恒久トークンを 2 か所から使っている疑いです(認証情報の窃取か二重起動)。正当な事情なら消してください。", "The same channel's IP, stream source or WireGuard endpoint, returned to a previous value within 10 minutes. The same key or permanent token is likely used from two places: theft of the credentials in agent.json, or double-start. Dismiss it if this is expected."},
 	// confirms
-	"confirmRevoke": {"エージェント %s を無効化します。よいですか?", "Revoke agent %s?"},
+	"confirmRevoke": {"エージェント %s を削除します。鍵は失効して再接続できなくなり、戻すには登録し直す必要があります。ルールの設定は残ります。よいですか?", "Revoke agent %s? Its key stops working and it cannot reconnect; to bring it back, register it again. Its rules are kept."},
 	"confirmDelete": {"ルール %s を削除します。よいですか?", "Delete rule %s?"},
 	// forms: add rule
 	"addRuleTitle":  {"ルールを追加", "Add rule"},
