@@ -28,21 +28,37 @@
 # limit from a test nobody has got to yet.
 set -euo pipefail
 
-# Each of the three was recorded in issue #109 as failing on native Windows, and none of the
-# failures comes from a build tag:
+# The skip list is not the same on every GOOS, because the failures below are not the same
+# on every GOOS:
 #
-# internal/dataplane/userspace: TestPrepareBindFailureIsFailClosed. Its subpackages relay,
-#   tunnel and utun pass and are not excluded.
-# internal/vpsd/store: TestOpenTightensExistingModesTo0600 and TestNarrowModeKeepsOwnerBits.
-#   Both compare file modes against 0o600 and 0o400 with no Windows branch, and Windows does
-#   not keep POSIX permission bits.
-# tools/labhost: TestRunLockNamesItsHolder. It names the lock's holder through holderSuffix,
-#   which reads /proc/<pid>/comm, so it assumes Linux, not merely POSIX: macOS has no /proc
-#   either.
+# internal/dataplane/userspace: TestPrepareBindFailureIsFailClosed fails on native Windows,
+#   recorded in issue #109. Its subpackages relay, tunnel and utun pass there and are not
+#   excluded.
+# internal/vpsd/store: TestOpenTightensExistingModesTo0600 and TestNarrowModeKeepsOwnerBits
+#   fail on native Windows, recorded in issue #109. Both compare file modes against 0o600 and
+#   0o400 with no Windows branch, and Windows does not keep POSIX permission bits.
+# tools/labhost: TestRunLockNamesItsHolder fails on native Windows, recorded in issue #109. It
+#   names the lock's holder through holderSuffix, which reads /proc/<pid>/comm, so it assumes
+#   Linux, not merely POSIX: macOS has no /proc either, so it is expected to fail there too,
+#   though that expectation is untested.
 #
-# The same list is used on macOS. store and internal/dataplane/userspace may well pass
-# there, which is not confirmed; neither ran on macOS before this script either.
-skip='^github\.com/rahanahu/wgft/(internal/dataplane/userspace|internal/vpsd/store|tools/labhost)$'
+# A macos-latest run confirmed internal/vpsd/store and internal/dataplane/userspace pass on
+# macOS, the three tests named above included, so the macOS skip list carries only
+# tools/labhost.
+case "$(go env GOOS)" in
+windows)
+	skip='^github\.com/rahanahu/wgft/(internal/dataplane/userspace|internal/vpsd/store|tools/labhost)$'
+	;;
+darwin)
+	skip='^github\.com/rahanahu/wgft/tools/labhost$'
+	;;
+*)
+	# windows-test and macos-test are the only callers, but a skip list built for a failure
+	# specific to one of those two GOOS values would be wrong to apply anywhere else, so a
+	# third GOOS excludes nothing.
+	skip='$^'
+	;;
+esac
 
 # go list runs on its own line, not at the head of a pipe, so that its failure stops the
 # script under set -e instead of leaving a partial list on stdout. An empty result fails
