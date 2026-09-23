@@ -75,19 +75,21 @@ const (
 	agentGroupRelay       = "Relay"
 )
 
-// 理由の符号。10.2c 節は agent_not_running、control_socket_unreachable、resolve_failed、
-// no_threshold、reconnecting、handshake_pending を出発点として残し、残りは実装のときに定めると
-// している。ここにあるのは、エージェントが止まっていても成立する検査が使う符号である。稼働中の
-// プロセスから読む検査の符号は agentdoctorlive.go にある。
+// 理由の符号。JSON の "reason" の値であり、機械向けの保証である(設計文書 10.2c 節の
+// 「機械向けの出力」、7a.11 節)。1 つの符号は 1 つの事実だけを表し、どの検査に付いても同じ事実を
+// 指す。agent.credentials、agent.process、agent.control が OK でないために SKIPPED になった検査は、
+// その検査の符号をそのまま持つ。この規則の外の SKIPPED は自分の事実の符号を持ち、中継が無いための
+// relay.* の SKIPPED は tunnel.local の符号ではなく no_relay を持つ。一覧は 10.2c 節の表にあり、TestAgentDoctorReasonsMatchTheDesign が照合する。ここにあるのは、エージェントが
+// 止まっていても成立する検査が使う符号である。稼働中のプロセスから読む検査の符号は
+// agentdoctorlive.go にある。
 const (
-	// agentReasonNotRunning は、エージェントが止まっているために取れない値である。
+	// agentReasonNotRunning は、このデータディレクトリのロックを持つプロセスが無いことである。
 	agentReasonNotRunning = "agent_not_running"
-	// agentReasonRunStateUnknown は、稼働中かどうかを判定できないために取れない値である。
-	// ロックファイルを権限で開けない実行が当たる。
-	agentReasonRunStateUnknown = "agent_state_unknown"
 	// agentReasonResolveFailed は、ホスト名の解決に失敗した場合である(10.2c 節が定める符号)。
 	agentReasonResolveFailed = "resolve_failed"
-	// agentReasonNoLastState は、全体状態をまだ一度も受け取っていない場合である。
+	// agentReasonNoLastState は、agent.json が最後に処理した全体状態を持たない場合である。停止中の
+	// rotate-key も全体状態を消すので、一度も受け取っていないとは限らない。稼働中のエージェントが
+	// 全体状態をまだ持たないためにトンネルが無いことは、別の符号 agentReasonFullStatePending で表す。
 	agentReasonNoLastState = "no_last_state"
 	// agentReasonNoWGEndpoint は、全体状態はあるが WireGuard のピアの宛先が空の場合である。
 	agentReasonNoWGEndpoint = "no_wg_endpoint"
@@ -100,7 +102,8 @@ const (
 	// agentReasonNotRegistered は、認証情報ファイルはあるが登録が済んでいない場合である。
 	agentReasonNotRegistered = "not_registered"
 	// agentReasonNotRunning と違い、agentReasonLockUnreadable はロックファイルそのものを読めない
-	// 場合である。稼働中か停止中かを判定できない。
+	// 場合である。稼働中か停止中かを判定できない。agent.process がこの符号を持つ実行では、稼働中の
+	// プロセスから読む検査も、手前の失敗の符号としてこれを持つ。
 	agentReasonLockUnreadable = "lock_unreadable"
 	// agentReasonPermissionDenied は、診断に要る権限が呼び出し元に無い場合である。
 	agentReasonPermissionDenied = "permission_denied"
@@ -152,6 +155,8 @@ type agentDoctorCheck struct {
 // agentDoctorReport は 1 回の診断の結果全体である。
 type agentDoctorReport struct {
 	CheckedAt time.Time
+	// DataDir は、この報告が答えるデータディレクトリである。
+	DataDir   string
 	Checks    []agentDoctorCheck
 	History   string
 	NotTested []notTested
@@ -248,6 +253,7 @@ func (in agentDoctorInput) withDefaults() agentDoctorInput {
 }
 
 func newAgentDoctorCmd() *cobra.Command {
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "diagnose the agent's own state and environment; agent host; reads only local evidence, running or stopped",
@@ -264,11 +270,20 @@ func newAgentDoctorCmd() *cobra.Command {
 				return err
 			}
 			rep := agentDiagnose(in)
-			writeAgentDoctorReport(cmd.OutOrStdout(), rep)
+			if asJSON {
+				// --json は終了コードを変えない。報告の中の status と終了コードは、同じ
+				// agentDoctorVerdict から決まる(10.2c 節)。
+				if err := writeAgentDoctorJSON(cmd.OutOrStdout(), rep); err != nil {
+					return unavailable(err)
+				}
+			} else {
+				writeAgentDoctorReport(cmd.OutOrStdout(), rep)
+			}
 			return agentDoctorExit(rep)
 		},
 	}
 	fl := cmd.Flags()
+	fl.BoolVar(&asJSON, "json", false, "output as JSON; the stable diagnostic model of this command")
 	fl.String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR; holds agent.json")
 	// フロー数の上限は、メモリのソフト上限の予測に要る。エージェントが読むのと同じ設定を同じ
 	// 経路で読まなければ、予測が当たらない。
@@ -326,9 +341,29 @@ func agentDoctorInputFrom(cmd *cobra.Command) (agentDoctorInput, error) {
 	}, nil
 }
 
-// agentDoctorExit は報告を終了コードに写す。10.2c 節が定める 3 つの層のうち、層 2 は層 1 に優先
+// agentDoctorVerdict は報告の総合判定である。10.2c 節が定める 3 つの層のうち、層 2 は層 1 に優先
 // する。終了コード 2 は診断の結果を信頼できないことを表すので、診断が成立していないまま総合判定を
-// 1 として返さない。UNKNOWN、NOT TESTED、SKIPPED だけでは 0 のままにする。
+// failed として返さない。UNKNOWN、NOT TESTED、SKIPPED だけでは ok のままにする。
+//
+// 終了コードと --json の最上位の status は、どちらもこの関数から決まる。2 か所で判定を持つと、
+// --json を付けたかどうかで答えが食い違いうる。
+func agentDoctorVerdict(rep agentDoctorReport) string {
+	failed := false
+	for _, c := range rep.Checks {
+		if c.evidenceUnreachable {
+			return statusUnknown
+		}
+		if c.verdict && c.Status == statusFailed {
+			failed = true
+		}
+	}
+	if failed {
+		return statusFailed
+	}
+	return statusOK
+}
+
+// agentDoctorExit は報告を終了コードに写す。ok は 0、failed は 1、unknown は 2 である(10.2c 節)。
 func agentDoctorExit(rep agentDoctorReport) error {
 	var failed, unreachable []string
 	for _, c := range rep.Checks {
@@ -339,10 +374,10 @@ func agentDoctorExit(rep agentDoctorReport) error {
 			failed = append(failed, c.Label)
 		}
 	}
-	if len(unreachable) > 0 {
+	switch agentDoctorVerdict(rep) {
+	case statusUnknown:
 		return unavailable(fmt.Errorf("the diagnosis is incomplete: %s could not be read with this command's permissions; run it as the user the agent runs as", strings.Join(unreachable, ", ")))
-	}
-	if len(failed) > 0 {
+	case statusFailed:
 		return fmt.Errorf("this host's agent cannot forward traffic as it stands: %s", strings.Join(failed, ", "))
 	}
 	return nil
@@ -371,11 +406,22 @@ func agentDiagnose(in agentDoctorInput) agentDoctorReport {
 	})
 	return agentDoctorReport{
 		CheckedAt: in.Now,
+		DataDir:   absDataDir(in.DataDir),
 		Checks:    checks,
 		History: "this command only evaluates the current state. To find when this agent stopped working, read its log on this host " +
 			"with journalctl -u wgft-agent, or docker logs for a container, and the server log on the VPS.",
 		NotTested: agentNotTested(),
 	}
+}
+
+// absDataDir は、報告が答えるデータディレクトリを絶対パスの正規形で返す(10.2c 節)。同じ
+// ディレクトリを相対パスや .. を含むパスで指定しても、機械が読む値を変えないためである。絶対パスに
+// できない場合は正規化だけを行う。
+func absDataDir(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return filepath.Clean(dir)
 }
 
 func agentCheckIndex(id string) int {
@@ -798,7 +844,7 @@ func agentLastStateCheck(in agentDoctorInput, cred agentCredentialsFile) agentDo
 	ls := cred.Creds.LastState
 	if ls == nil {
 		c.Status, c.Reason = statusUnknown, agentReasonNoLastState
-		c.Detail = "this host has never recorded a full state, so it holds no rules of its own yet"
+		c.Detail = "agent.json holds no full state, so this host holds no rules of its own yet"
 		c.Next = "start the agent and let it reach the server; the server sends the whole state on every connection"
 		return c
 	}
@@ -829,9 +875,9 @@ func agentWGResolveCheck(in agentDoctorInput, cred agentCredentialsFile) agentDo
 	}
 	ls := cred.Creds.LastState
 	if ls == nil {
-		// 一度も全体状態を受け取っていない事実を理由に示す(10.2c 節)。
+		// agent.json が全体状態を持たない事実を理由に示す(10.2c 節)。
 		c.Status, c.Reason = statusUnknown, agentReasonNoLastState
-		c.Detail = "this host has never recorded a full state, so it does not know which WireGuard peer to resolve"
+		c.Detail = "agent.json holds no full state, so this host does not know which WireGuard peer to resolve"
 		c.Next = "start the agent and let it reach the server; the peer's address arrives with the full state"
 		return c
 	}

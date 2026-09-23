@@ -422,8 +422,8 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			},
 			want: []wantCheck{
 				{agentCheckProcess, statusUnknown, agentReasonLockUnreadable},
-				{agentCheckControl, statusSkipped, agentReasonRunStateUnknown},
-				{agentCheckAllowTargets, statusUnknown, agentReasonRunStateUnknown},
+				{agentCheckControl, statusSkipped, agentReasonLockUnreadable},
+				{agentCheckAllowTargets, statusUnknown, agentReasonLockUnreadable},
 			},
 			wantExit: 2,
 		},
@@ -450,8 +450,8 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			wantExit: 2,
 		},
 		{
-			// 全体状態を一度も受け取っていない事実を理由に示す(10.2c 節)。
-			name: "no full state has ever been received",
+			// agent.json が全体状態を持たない事実を理由に示す(10.2c 節)。
+			name: "agent.json holds no full state",
 			setup: func(t *testing.T, in *agentDoctorInput) {
 				f := registeredCredentials()
 				f.LastState = nil
@@ -745,8 +745,8 @@ func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
 			allow = c
 		}
 	}
-	if allow.Status != statusUnknown || allow.Reason != agentReasonRunStateUnknown {
-		t.Fatalf("relay.allow_targets = %s/%q, want %s/%q", allow.Status, allow.Reason, statusUnknown, agentReasonRunStateUnknown)
+	if allow.Status != statusUnknown || allow.Reason != agentReasonLockUnreadable {
+		t.Fatalf("relay.allow_targets = %s/%q, want %s/%q", allow.Status, allow.Reason, statusUnknown, agentReasonLockUnreadable)
 	}
 	if strings.Contains(allow.Detail, "no process holds it now") {
 		t.Errorf("relay.allow_targets says the agent is stopped although the run state could not be determined: %q", allow.Detail)
