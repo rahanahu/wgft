@@ -36,6 +36,8 @@ func TestLinuxOnlyServerGroupRefuses(t *testing.T) {
 		{"teardown starts nothing", []string{"server", "teardown", "--purge", "--yes"}, "cannot continue " + subject},
 		{"doctor starts nothing", []string{"server", "doctor", "--json"}, "cannot continue " + subject},
 		{"the group itself starts nothing", []string{"server"}, "cannot continue " + subject},
+		// `--` より後ろの --help はフラグではないので、help ではなく拒否になる。
+		{"help after -- is not a flag", []string{"server", "run", "--", "--help"}, "refusing to start " + subject},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := newRootCmd()

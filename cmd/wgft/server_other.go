@@ -53,7 +53,11 @@ func linuxOnlyServerCmd(use, short string) *cobra.Command {
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// DisableFlagParsing を付けたコマンドでは cobra が --help を拾わないので、ここで拾う。
+			// `--` より後ろはフラグではないので見ない。
 			for _, a := range args {
+				if a == "--" {
+					break
+				}
 				if a == "-h" || a == "--help" {
 					return cmd.Help()
 				}
@@ -66,8 +70,8 @@ func linuxOnlyServerCmd(use, short string) *cobra.Command {
 // linuxOnlyLong は、差し替えのコマンドの --help に出る説明である。Linux 向けの説明の代わりに置く。
 const linuxOnlyLong = `Not available in this build. The server uses kernel WireGuard and nftables,
 so it runs on Linux only; the Windows and macOS builds carry the agent and the
-rule CLI. Every server command exits with code 3 here, as a prerequisite the
-host cannot provide.`
+rule CLI. Each server subcommand refuses to run here and exits with code 3,
+as a prerequisite the host cannot provide.`
 
 // linuxOnlyRefusal は、Linux 以外のビルドで server の一群が返す拒否である。種別は prerequisite で
 // ある。ホストが備えるべきものの欠如であり、再試行でも再起動でも現れない(設計文書 11b 節)ので、

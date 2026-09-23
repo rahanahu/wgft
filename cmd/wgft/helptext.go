@@ -616,11 +616,11 @@ func applyHelp(root *cobra.Command) {
 	walk(root)
 }
 
-// helpKey は "wgft rule rate packet" を "rule rate packet" に、ルートを "" にする。
 // ownHelpAnnotation は、そのコマンドが helpTexts の表を当てずに自分の Long を使うことを表す注記である。
 // Linux 以外のビルドの server の一群だけが持つ。
 const ownHelpAnnotation = "wgft-own-help"
 
+// helpKey は "wgft rule rate packet" を "rule rate packet" に、ルートを "" にする。
 func helpKey(c *cobra.Command) string {
 	return strings.TrimSpace(strings.TrimPrefix(c.CommandPath(), "wgft"))
 }
