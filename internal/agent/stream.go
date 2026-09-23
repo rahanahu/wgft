@@ -102,8 +102,8 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 		}
 		// 待ちに入る間隔と次に試す時刻を控える(設計文書 10.2c 節の観測)。待つ値は下の
 		// time.After と同じ backoff であり、この記録は待ちの長さを変えない。記録が動くのは
-		// ここだけなので、下の倍加も、上の 4 つの continue が初期値に戻す変更も、次にここを
-		// 通るまで観測には現れない
+		// ここだけなので、下の倍加も、上の 3 つと下の select の中の 1 つ、あわせて 4 つの
+		// continue が初期値に戻す変更も、次にここを通るまで観測には現れない
 		rt.noteStreamWaiting(time.Now(), backoff)
 		select {
 		case <-ctx.Done():
