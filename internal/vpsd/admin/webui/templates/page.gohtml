@@ -1,7 +1,7 @@
 {{ define "brand" }}<div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ . }}</div></div>{{ end }}
 
-{{- /* 言語の切り替え。リンクは問い合わせ文字列だけの相対 URL なので、同じパスに留まり、それまでの
-     問い合わせ文字列(probe=1 など)は引き継がない。言語はクッキーに残る(resolveLocale) */ -}}
+{{- /* 言語の切り替え。ダッシュボードだけが持ち、他のページはそこで選んだ言語(クッキー、resolveLocale)
+     に従う(設計文書 10.1 節)。リンクは問い合わせ文字列だけの相対 URL である */ -}}
 {{ define "langswitch" }}<span class="lang-switch">
           <a class="lang {{ if ne . "en" }}active{{ end }}" href="?lang=ja">JA</a>
           <a class="lang {{ if eq . "en" }}active{{ end }}" href="?lang=en">EN</a>
@@ -23,7 +23,6 @@
          ページごとに幅が変わるのは、パンくずと本文の枠だけで、左端はロゴにそろう(設計文書 10.1 節) */}}
     <header class="topbar">
       {{ template "brand" .Title }}
-      <div class="top-actions">{{ template "langswitch" .Locale }}</div>
     </header>
     {{ $w := 640 }}{{ if .MaxWidth }}{{ $w = .MaxWidth }}{{ else if .Wide }}{{ $w = 900 }}{{ end }}
     <div class="page-frame" style="max-width:{{ $w }}px">

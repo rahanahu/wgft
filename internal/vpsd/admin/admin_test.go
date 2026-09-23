@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
@@ -431,9 +432,9 @@ func assertBreadcrumb(t *testing.T, name, body string, links []string, current s
 	if strings.Contains(body, "Back to dashboard") || strings.Contains(body, "ダッシュボードへ戻る") {
 		t.Errorf("%s: a back-to-dashboard button is still on the page", name)
 	}
-	// ヘッダの右側に置くのは言語の切り替えだけである。
-	if i, j := strings.Index(body, `<div class="top-actions">`), strings.Index(body, "</header>"); i < 0 || j < i || !strings.Contains(body[i:j], `<span class="lang-switch">`) || strings.Contains(body[i:j], `class="btn`) {
-		t.Errorf("%s: the header's right side is not the language switch alone", name)
+	// 共通の枠のページのヘッダは、ロゴとページの見出しだけで、右側に何も置かない。
+	if strings.Contains(body, `class="top-actions"`) || strings.Contains(body, `class="lang-switch"`) {
+		t.Errorf("%s: the header carries an action area or the language switch", name)
 	}
 }
 
@@ -465,23 +466,38 @@ func TestHeaderSameOnEveryPage(t *testing.T) {
 	}
 }
 
-// TestLangSwitchOnEveryPage は、言語の切り替えがダッシュボードと共通の枠のすべてのページにあり、
-// 同じページに留まり、疎通の確認(probe=1)を引き継がないことを確かめる。
-func TestLangSwitchOnEveryPage(t *testing.T) {
+// TestLangSwitchOnDashboardOnly は、言語の切り替えがダッシュボードにだけあり、共通の枠のページには
+// 無いことを確かめる(設計文書 10.1 節)。共通の枠のページは、ダッシュボードで選んだ言語に
+// クッキーで従う。POST の結果のページ(発行した接続文字列、読み込みの確認)で切り替えると、読み直しで
+// 結果が消えるためである。
+func TestLangSwitchOnDashboardOnly(t *testing.T) {
 	srv, _ := newDoctorTestServer(t)
-	for _, path := range []string{"/", "/ui/doctor", "/ui/doctor/r_ok", "/ui/doctor/r_ok?probe=1", "/ui/rules/r_ok", "/ui/rules/r_ok/check", "/ui/add-rule", "/ui/add-agent", "/ui/rules/import"} {
-		sep := "?"
-		if strings.Contains(path, "?") {
-			sep = "&"
+	dash := getBody(t, srv.URL+"/?lang=en")
+	for _, want := range []string{`<span class="lang-switch">`, `href="?lang=ja">JA</a>`, `href="?lang=en">EN</a>`} {
+		if !strings.Contains(dash, want) {
+			t.Errorf("dashboard: no %s", want)
 		}
-		body := getBody(t, srv.URL+path+sep+"lang=en")
-		for _, want := range []string{`<span class="lang-switch">`, `href="?lang=ja">JA</a>`, `href="?lang=en">EN</a>`} {
-			if !strings.Contains(body, want) {
-				t.Errorf("%s: no %s", path, want)
-			}
+	}
+	for _, path := range []string{"/ui/doctor", "/ui/doctor/r_ok", "/ui/rules/r_ok", "/ui/rules/r_ok/check", "/ui/add-rule", "/ui/add-agent", "/ui/rules/import"} {
+		if body := getBody(t, srv.URL+path+"?lang=en"); strings.Contains(body, "lang-switch") || strings.Contains(body, "?lang=") {
+			t.Errorf("%s: carries a language switch; only the dashboard has one", path)
 		}
-		if strings.Contains(body, `lang=ja&`) || strings.Contains(body, `probe=1&amp;lang`) || strings.Contains(body, `?probe=1&lang`) {
-			t.Errorf("%s: the language switch carries other query parameters", path)
+	}
+	// ダッシュボードで選んだ言語は、クッキーで他のページにも効く。
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &http.Client{Jar: jar}
+	for _, u := range []string{srv.URL + "/?lang=ja", srv.URL + "/ui/doctor"} {
+		resp, err := c.Get(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if u == srv.URL+"/ui/doctor" && !strings.Contains(string(b), `<a href="/">`+T("ja", "crumbDashboard")+`</a>`) {
+			t.Errorf("the diagnostics page does not follow the language chosen on the dashboard")
 		}
 	}
 }
