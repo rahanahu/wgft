@@ -3,6 +3,7 @@ package admin
 import (
 	"time"
 
+	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -24,15 +25,10 @@ import (
 // LastHandshake が無い(観測していない)ときは、他のタイムスタンプと同じ規則で省く
 // (design.md 7a.11 節)。
 
-// TunnelStatus is the tunnel status as `agent ls`/the admin API show it (design.md 5.2、7a.11 節):
-// the wire's proto.TunnelStatus, with LastHandshake formatted like every sibling timestamp in this
-// API (RFC3339, omitted when never observed) instead of a bare time.Time.
-type TunnelStatus struct {
-	State         string `json:"state"` // ok | error; an open set (7a.11 節)
-	Reason        string `json:"reason,omitempty"`
-	Endpoint      string `json:"endpoint,omitempty"` // 解決したエンドポイント(ip:port)
-	LastHandshake string `json:"last_handshake,omitempty"`
-}
+// TunnelStatus is the tunnel status as `agent ls`/the admin API show it (design.md 5.2、7a.11 節).
+// 宣言は internal/vpsd/adminapi にあり、ここは別名である(design.md 10.2d 節。admin.go の別名と
+// 同じ理由である)。
+type TunnelStatus = adminapi.TunnelStatus
 
 // TunnelStatusView converts the wire type to the admin API's view (design.md 7a.11 節). The wire
 // type itself is left untouched; only this rendering changes. Exported for internal/vpsd, which

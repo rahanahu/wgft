@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
+	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -717,13 +718,9 @@ func dryRunRuleSummary(r proto.Rule) string {
 	return fmt.Sprintf("%s %s -> %s %s", strings.ToUpper(string(r.Proto)), r.ListenPort.String(), r.Agent, r.TargetDisplay())
 }
 
-// short はルール ID を短く表示する(先頭 12 文字)。findRule が前方一致で受けるので選択には困らない。
-func short(id string) string {
-	if len(id) > 12 {
-		return id[:12] + "…"
-	}
-	return id
-}
+// short はルール ID を短く表示する(先頭 12 文字)。findRule が前方一致で受けるので選択には
+// 困らない。診断の所見も同じ形で ID を出すので、切り方は internal/vpsd/doctor と共有する。
+func short(id string) string { return doctor.ShortID(id) }
 
 // truncNote は一覧用に note を 40 文字で切る。
 func truncNote(s string) string {
@@ -738,11 +735,7 @@ func truncNote(s string) string {
 // design.md 7a.10 節「拒否の報告」の値で、report を持たない Backend や、その理由でまだ 1 度も
 // 拒んでいないルールでは 0 になる(RATES 列の DROPPED と違い、こちらは wgft 自身の資源が理由)。
 func resourceRefusalTotal(refusals map[string]map[string]uint64, ruleID string) uint64 {
-	var total uint64
-	for _, n := range refusals[ruleID] {
-		total += n
-	}
-	return total
+	return doctor.ResourceRefusalTotal(refusals, ruleID)
 }
 
 // agentRuleNote renders one rule's agent-side status for the human `rule ls` table (design.md 10.1,
@@ -776,20 +769,7 @@ func agentRuleNote(states map[string]admin.AgentRuleStatus, ruleID string) strin
 // (design.md 7a.10 節)。report を持たない Backend では空文字を返し、何も出さない。
 // kernel モードは UDP を Go 側で数えないので "udp" は出ない。
 func flowBudgetLine(budget map[proto.Proto]admin.FlowBudget) string {
-	if len(budget) == 0 {
-		return ""
-	}
-	protos := make([]proto.Proto, 0, len(budget))
-	for p := range budget {
-		protos = append(protos, p)
-	}
-	sort.Slice(protos, func(i, j int) bool { return protos[i] < protos[j] })
-	parts := make([]string, 0, len(protos))
-	for _, p := range protos {
-		b := budget[p]
-		parts = append(parts, fmt.Sprintf("%s %d/%d", p, b.InUse, b.Limit))
-	}
-	return "flow budget: " + strings.Join(parts, ", ")
+	return doctor.FlowBudgetLine(budget)
 }
 
 // rulesUnreachableError marks that findRule's own call to GET /api/v1/rules failed, as opposed to

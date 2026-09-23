@@ -1,19 +1,17 @@
 package admin
 
-import "github.com/rahanahu/wgft/proto"
+import (
+	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
+	"github.com/rahanahu/wgft/proto"
+)
 
 // このファイルは、Resource Guard の予算と拒否数(設計文書 7a.10 節「拒否の報告」)を管理用 API v1 に
 // 加算的に載せる型を持つ。既存のフィールドの意味は変えない(7a.6 節)。
 
 // FlowBudget is Resource Guard's process-wide flow budget for one protocol (design.md 7a.10 節
-// 「共有プールと隔離予約」).
-type FlowBudget struct {
-	// InUse is u, the number of flows the process currently holds for this protocol, across every
-	// rule.
-	InUse int `json:"in_use"`
-	// Limit is T, the configured process-wide budget (WGFT_MAX_UDP_FLOWS / WGFT_MAX_TCP_FLOWS).
-	Limit int `json:"limit"`
-}
+// 「共有プールと隔離予約」). 宣言は internal/vpsd/adminapi にあり、ここは別名である
+// (design.md 10.2d 節。admin.go の別名と同じ理由である)。
+type FlowBudget = adminapi.FlowBudget
 
 // ResourceStatus is Resource Guard's report (design.md 7a.10 節「拒否の報告」): the process-wide
 // flow budget by protocol, and the admission refusals accumulated since the process started, by

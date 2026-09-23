@@ -1,49 +1,26 @@
 package admin
 
-import "github.com/rahanahu/wgft/proto"
+import "github.com/rahanahu/wgft/internal/vpsd/adminapi"
 
 // このファイルは、server 側のデータプレーンへの適用状態(設計文書 7a.3 節の Desired と Active)を
 // 管理用 API v1 に加算的に載せる型を持つ。既存のフィールドの意味は変えない(7a.6 節)。
 
-// Apply states of a rule on the server (RuleApply.ApplyState).
+// この API の読み取り側の型は internal/vpsd/adminapi が持ち、ここで同じ名前に別名を付ける
+// (design.md 10.2d 節。admin.go の別名と同じ理由である)。
 const (
-	ApplyActive    = "active"
-	ApplyPending   = "pending"
-	ApplyNotActive = "not_active"
+	ApplyActive    = adminapi.ApplyActive
+	ApplyPending   = adminapi.ApplyPending
+	ApplyNotActive = adminapi.ApplyNotActive
 )
 
-// RuleApply is one rule's apply state on the server's data plane (design.md 7a.3 節).
-type RuleApply struct {
-	// ApplyState is active, pending (the last transaction failed as a whole; what was Active
-	// before still forwards) or not_active (see Reason).
-	ApplyState string `json:"apply_state"`
-	// Reason explains pending and not_active, e.g. "bind failed: ...", "disabled".
-	Reason string `json:"reason,omitempty"`
-	// ActiveGeneration is the generation at which the rule's forwarding value was last published;
-	// nil (the key absent on the wire) when it never was. Generation 0 is a real, reachable value
-	// (design.md 9 節: the generation is 0 while there are no rules at all), so it cannot double as
-	// "never published"; this follows the same *uint64 convention as the sibling
-	// BatchResponse.DesiredGeneration/ActiveGeneration (design.md 7a.11 節).
-	ActiveGeneration *uint64 `json:"active_generation,omitempty"`
-}
-
-// DriftResource is one forwarding resource that differs from the declaration.
-type DriftResource struct {
-	RuleID     string          `json:"rule_id"`
-	Proto      proto.Proto     `json:"proto"`
-	ListenPort proto.PortRange `json:"listen_port"`
-	Forwarding string          `json:"forwarding"` // transparent | relay
-}
-
-// Drift lists what is forwarded although the declaration no longer asks for it.
-type Drift struct {
-	// ActiveOnly is still forwarding although deleted, disabled or of an unregistered agent: its
-	// removal was kept from being published by a failed transaction.
-	ActiveOnly []DriftResource `json:"active_only"`
-	// Retiring is the previous value of rules made fail-closed: it accepts no new flows, and the
-	// established flows it still admits are kept until they end.
-	Retiring []DriftResource `json:"retiring"`
-}
+type (
+	// RuleApply is one rule's apply state on the server's data plane (design.md 7a.3 節).
+	RuleApply = adminapi.RuleApply
+	// DriftResource is one forwarding resource that differs from the declaration.
+	DriftResource = adminapi.DriftResource
+	// Drift lists what is forwarded although the declaration no longer asks for it.
+	Drift = adminapi.Drift
+)
 
 // ApplyStatus is the server's Desired against Active report.
 type ApplyStatus struct {
