@@ -42,8 +42,8 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		conns = map[net.Conn]netip.Addr{} // 公開側の接続はその接続元、target 側はゼロ値
 		done  = make(chan struct{})
 		once  sync.Once
-		// public は公開側の接続の数(同時フロー数の上限の対象。conns は target 側も含む)
-		public  int
+		// 同時フロー数の上限の対象は公開側の接続だけで、conns は target 側も含むため一致しない。
+		// 上限の対象の数を数えるのは l.budget で、Status.Flows がその数を返す
 		capLog  lograte.Gate // 上限で拒んだログの頻度
 		dialLog lograte.Gate // target への dial 失敗のログの頻度(target が落ちている間、接続のたびに鳴らさない)
 	)
@@ -111,13 +111,11 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 			}
 			mu.Lock()
 			conns[c] = src
-			public++
 			mu.Unlock()
 			go func() {
 				defer func() {
 					mu.Lock()
 					delete(conns, c)
-					public--
 					mu.Unlock()
 					l.budget.Release()
 					release()
