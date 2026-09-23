@@ -172,7 +172,7 @@ func TestRuleStateOnDashboard(t *testing.T) {
 		lang, wantApplied, wantError, wantOffline, wantReason, wantGroupErr string
 	}{
 		{"ja", "適用済み", "エラー", "エージェント未接続", "bind: address already in use", "エラー 1 件"},
-		{"en", "Applied", "Error", "Agent offline", "bind: address already in use", "1 errors"},
+		{"en", "Applied", "Error", "Agent offline", "bind: address already in use", "1 error"},
 	} {
 		body := getBody(t, srv.URL+"/?lang="+tc.lang)
 		if !strings.Contains(body, tc.wantApplied) {

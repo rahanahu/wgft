@@ -82,6 +82,7 @@ var tr = map[string][2]string{
 	// server のデータプレーンへの適用状態(設計文書 7a.3 節)
 	"serverNotActive": {"サーバーで未適用", "Not active on server"},
 	"serverPending":   {"サーバーで反映待ち", "Pending on server"},
+	"groupErrN1":      {"エラー %d 件", "%d error"},
 	"groupErrN":       {"エラー %d 件", "%d errors"},
 	"enable":          {"有効化", "Enable"},
 	"disable":         {"無効化", "Disable"},

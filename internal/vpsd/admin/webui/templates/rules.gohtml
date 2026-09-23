@@ -22,7 +22,8 @@
         <td colspan="8">
           <button type="button" class="group-toggle" data-group="g{{ $gi }}" aria-expanded="true">▾</button>
           <span class="group-name">{{ $g.Label }}</span><span class="count">{{ len $g.Rules }}</span>
-          {{ if $g.ErrorCount }}<span class="count danger">{{ printf (T $loc "groupErrN") $g.ErrorCount }}</span>{{ end }}
+          {{ if eq $g.ErrorCount 1 }}<span class="count danger">{{ printf (T $loc "groupErrN1") $g.ErrorCount }}</span>
+          {{ else if $g.ErrorCount }}<span class="count danger">{{ printf (T $loc "groupErrN") $g.ErrorCount }}</span>{{ end }}
         </td>
       </tr>
       {{ range $g.Rules }}
