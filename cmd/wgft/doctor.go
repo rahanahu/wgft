@@ -115,20 +115,25 @@ func newServerDoctorCmd() *cobra.Command {
 			if probe && len(args) == 0 {
 				return unavailable(fmt.Errorf("--probe follows one rule at a time; give a rule, or drop --probe to survey every rule"))
 			}
-			in := doctorInput{Now: time.Now(), Probed: probe, Probes: map[string]probeResult{}}
+			// --from は証拠を読む前に解釈する。読めない値は、管理用 API が応答するかどうかに
+			// 関わらず、報告を作れなかった失敗として同じ終了コードで止まる(設計文書 10.2a 節)。
+			var source netip.Addr
+			hasSource := false
 			if from != "" {
 				addr, err := netip.ParseAddr(from)
 				if err != nil {
 					return unavailable(fmt.Errorf("--from %q is not an IP address: %w", from, err))
 				}
-				in.From, in.HasFrom = addr, true
+				source, hasSource = addr, true
 			}
-			if in.Rules, err = c.Rules(); err != nil {
+			// 証拠の読み取りは Web UI と同じ経路を通る(設計文書 10.2d 節)。*admin.Client が
+			// そのまま doctor.Evidence を満たすので、この経路に読み取りを足すと画面にも同じ
+			// 値が届く。
+			in, err := doctor.Read(c, time.Now())
+			if err != nil {
 				return unavailable(err)
 			}
-			if in.Agents, err = c.Agents(); err != nil {
-				return unavailable(err)
-			}
+			in.From, in.HasFrom = source, hasSource
 			rules := in.Rules.Rules
 			single := false
 			if len(args) == 1 {
@@ -139,8 +144,7 @@ func newServerDoctorCmd() *cobra.Command {
 				rules, single = []proto.Rule{*r}, true
 			}
 			if probe {
-				res, err := c.CheckConnectivity(rules[0].ID)
-				in.Probes[rules[0].ID] = probeResult{Check: res, Err: err}
+				in.AddProbe(c, rules[0].ID)
 			}
 			rep := buildReport(rules, in)
 			out := cmd.OutOrStdout()
