@@ -27,11 +27,29 @@
 # limit from a test nobody has got to yet.
 set -euo pipefail
 
-# internal/dataplane/userspace: TestPrepareBindFailureIsFailClosed fails on native Windows
-#   (issue #109). Its subpackages relay, tunnel and utun pass and are not excluded.
-# internal/vpsd/store: its mode tests assert POSIX permission bits, which Windows does not
-#   carry.
-# tools/labhost: POSIX assumptions in its tests.
+# Each of the three was recorded in issue #109 as failing on native Windows, and none of the
+# failures comes from a build tag:
+#
+# internal/dataplane/userspace: TestPrepareBindFailureIsFailClosed. Its subpackages relay,
+#   tunnel and utun pass and are not excluded.
+# internal/vpsd/store: TestOpenTightensExistingModesTo0600 and TestNarrowModeKeepsOwnerBits.
+#   Both compare file modes against 0o600 and 0o400 with no Windows branch, and Windows does
+#   not keep POSIX permission bits.
+# tools/labhost: TestRunLockNamesItsHolder. It names the lock's holder through holderSuffix,
+#   which reads /proc/<pid>/comm, so it assumes Linux, not merely POSIX: macOS has no /proc
+#   either.
+#
+# The same list is used on macOS. store and internal/dataplane/userspace may well pass
+# there, which is not confirmed; neither ran on macOS before this script either.
 skip='^github\.com/rahanahu/wgft/(internal/dataplane/userspace|internal/vpsd/store|tools/labhost)$'
 
-go list ./... | grep -Ev "$skip"
+# go list runs on its own line, not at the head of a pipe, so that its failure stops the
+# script under set -e instead of leaving a partial list on stdout. An empty result fails
+# too: it would hand `go test` no packages, which tests the current directory instead.
+all=$(go list ./...)
+pkgs=$(grep -Ev "$skip" <<<"$all" || true)
+if [ -z "$pkgs" ]; then
+	echo "portable-test-packages: go list returned no packages to test" >&2
+	exit 1
+fi
+printf '%s\n' "$pkgs"

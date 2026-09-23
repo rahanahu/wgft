@@ -22,8 +22,9 @@ name: CI
 #     outside the platform-specific files can still break only one OS: for example, code that
 #     builds a filesystem path or a file: URI with forward slashes works on Linux and macOS
 #     but not on Windows, and only a job that actually runs on Windows catches it. Because of
-#     this, windows-test and macos-test run on any change that touches a .go file or the
-#     module (go.mod, go.sum), and are skipped only when a change touches no Go code at all
+#     this, windows-test and macos-test run on any change that touches a .go file, the
+#     module (go.mod, go.sum) or scripts/portable-test-packages.sh, which decides the
+#     packages they test, and are skipped only when a change touches none of those
 #     (documents, lab scripts, deploy/ text files, images).
 #
 #   build    -> .goreleaser.yaml, scripts/build-release.sh, scripts/goreleaser-checksum.sh,
@@ -266,7 +267,8 @@ jobs:
     #
     # Gated by go_code, not by the table's agent-platform trigger (B4, see the header
     # comment for why). Runs whenever the changes job could not tell (run_all, including
-    # its own failure) or a .go file, go.mod or go.sum changed; !cancelled() keeps this
+    # its own failure) or a .go file, go.mod, go.sum or scripts/portable-test-packages.sh
+    # changed; !cancelled() keeps this
     # from being auto-skipped just because `changes` was skipped or failed, which is the
     # default behaviour for a job with `needs:`.
     needs: changes
@@ -288,7 +290,13 @@ jobs:
         run: go vet ./...
       - name: test
         shell: bash
-        run: go test $(bash scripts/portable-test-packages.sh)
+        # Assigned first, not substituted into the go test line: the exit status of a command
+        # substitution inside another command's arguments is discarded, so a failing script
+        # would hand go test a partial list and the step would stay green. An assignment
+        # carries the status, and bash -e stops the step on it.
+        run: |
+          pkgs=$(bash scripts/portable-test-packages.sh)
+          go test $pkgs
 
   macos-test:
     # Runs the same packages as windows-test, from the same
@@ -319,7 +327,13 @@ jobs:
           go-version: "1.27.x"
       - name: test
         shell: bash
-        run: go test $(bash scripts/portable-test-packages.sh)
+        # Assigned first, not substituted into the go test line: the exit status of a command
+        # substitution inside another command's arguments is discarded, so a failing script
+        # would hand go test a partial list and the step would stay green. An assignment
+        # carries the status, and bash -e stops the step on it.
+        run: |
+          pkgs=$(bash scripts/portable-test-packages.sh)
+          go test $pkgs
 
   release-snapshot:
     # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,
