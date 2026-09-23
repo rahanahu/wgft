@@ -474,7 +474,7 @@ func TestDoctorPagesDrawThePathInBothLocales(t *testing.T) {
 		if n := strings.Count(list, `<ol class="path mini" aria-label="`+T(lang, "doctorPathAria")+`"`); n != 3 {
 			t.Errorf("%s: the summary draws %d rule paths, want one per rule (3)", lang, n)
 		}
-		if !strings.Contains(list, "public port · WireGuard · agent · listener / target") {
+		if !strings.Contains(list, "public port - WireGuard - agent - listener / target") {
 			t.Errorf("%s: the summary must name the stages once in the header", lang)
 		}
 		// 行の図は 1 本のルールの画面へのリンクである。
