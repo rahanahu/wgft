@@ -172,6 +172,14 @@ func loadConfig(cmd *cobra.Command, specs []spec, configPath string) (*config, e
 	if err != nil {
 		return nil, err
 	}
+	return resolveConfig(cmd, specs, configPath, file), nil
+}
+
+// resolveConfig は、読み終えた dotenv の中身とフラグと環境変数から設定を解決する。dotenv を
+// 読む処理と分けてあるのは、`wgft agent doctor` が、設定ファイルを読めない実行でも診断を続ける
+// ためである(設計文書 10.2c 節)。その経路は file に空の map を渡し、フラグ、環境変数、既定
+// だけから解決する。
+func resolveConfig(cmd *cobra.Command, specs []spec, configPath string, file map[string]string) *config {
 	c := &config{vals: map[string]resolved{}, specs: specs}
 	for _, sp := range specs {
 		r := resolved{value: sp.Default, source: "default"}
@@ -187,7 +195,7 @@ func loadConfig(cmd *cobra.Command, specs []spec, configPath string) (*config, e
 		c.vals[sp.Env] = r
 	}
 	warnInsecureConfigFile(os.Stderr, configPath, c)
-	return c, nil
+	return c
 }
 
 func (c *config) str(env string) string { return c.vals[env].value }

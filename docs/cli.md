@@ -122,6 +122,14 @@ no exclusive lock, and it opens no connection to a target. The two exceptions to
 reading alone are name resolution: it resolves the agent API endpoint and the
 WireGuard peer, neither of which opens a connection to a service.
 
+Its own settings come from where "agent run" takes them: the flags, the
+environment and the dotenv file named by --config. A dotenv file that is there
+but cannot be read here is reported as a finding, and the report is built from
+the flags, the environment and the defaults instead. The memory soft limit is
+then left unpredicted, since the file is what sets the flow caps it follows.
+"agent run" refuses to start in that same case, because a daemon that forwards
+under settings it never read is not running the declared configuration.
+
 Reading whether an agent is running does take a shared lock on the existing
 lock file for an instant. An agent starting in that same instant fails to take
 its own lock and exits; the supplied systemd unit restarts it, so the cost is

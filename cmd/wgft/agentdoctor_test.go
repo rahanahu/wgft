@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -542,6 +544,42 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			// 読み取りの失敗を別々に挙げている。前の場面は両方を同時に成り立たせるので、
 			// `agent.credentials` だけが終了コード 2 を出せるかどうかを固定できない。この場面は
 			// `host.privileges` が見る権限を満たしたまま、読み取りだけを失敗させる。
+			// 設定ファイルを権限で読めないことは、報告を拒む理由ではなく診断の結果である
+			// (10.2c 節の層 2)。読めなかった事実を host.privileges が示し、その設定に依る
+			// メモリのソフト上限の予測を host.platform が示さず、残りの検査は通常どおり答える。
+			name: "the config file cannot be read",
+			setup: func(t *testing.T, in *agentDoctorInput) {
+				writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+				holdTheLock(t, in.CredentialsPath)
+				in.ConfigUnreadable = fs.ErrPermission
+			},
+			want: []wantCheck{
+				{agentCheckPlatform, statusUnknown, agentReasonConfigUnreadable},
+				{agentCheckPrivileges, statusFailed, agentReasonPermissionDenied},
+				// 手前の失敗ではないので、認証情報とロックを読む検査はそのまま答える。
+				{agentCheckCredentials, statusOK, ""},
+				{agentCheckProcess, statusOK, ""},
+				{agentCheckLastState, statusOK, ""},
+			},
+			wantExit: 2,
+		},
+		{
+			// 設定ファイルが無い配置は正しい。値は環境変数と既定から決まるので、失敗にしない。
+			name: "the config file does not exist",
+			setup: func(t *testing.T, in *agentDoctorInput) {
+				writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+				holdTheLock(t, in.CredentialsPath)
+				in.ConfigPath = filepath.Join(in.DataDir, "none.env")
+				in.ConfigUnreadable = nil
+			},
+			want: []wantCheck{
+				{agentCheckPlatform, statusOK, ""},
+				{agentCheckPrivileges, statusOK, ""},
+				{agentCheckCredentials, statusOK, ""},
+			},
+			wantExit: 0,
+		},
+		{
 			name:                 "only the credentials file cannot be read",
 			needsUnixPermissions: true,
 			setup: func(t *testing.T, in *agentDoctorInput) {
@@ -729,6 +767,67 @@ func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
 	}
 }
 
+// 設定ファイルを権限で読めない実行でも、`agent doctor` は報告を出し、終了コード 2 で終わる。
+// 実機で見つかった欠陥は、この経路が報告を組む手前で終了コード 3 の拒否になっていたことである。
+func TestAgentDoctorReportsAnUnreadableConfigFile(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("this scenario needs a file that refuses the running user; root refuses nothing and Windows does not answer os.Chmod that way")
+	}
+	dir := t.TempDir()
+	config := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(config, []byte("WGFT_MAX_UDP_FLOWS=2048\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chmodForTest(t, config, 0)
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "doctor", "--config", config, "--data-dir", filepath.Join(dir, "data")})
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	if got := exitCode(err); err == nil || got != exitUnavailable {
+		t.Fatalf("err=%v exitCode=%d, want %d; an unreadable config file is a finding, not a reason to refuse the report", err, got, exitUnavailable)
+	}
+	report := out.String()
+	for _, want := range []string{"Host\n", "Credentials\n", "Relay\n", "privileges         FAILED", "cannot be read", "Not tested by this command\n"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report has no %q:\n%s", want, report)
+		}
+	}
+	// 「refusing to start」は起動を拒む経路の文であり、何も起動しないこのコマンドには当たらない。
+	// 報告の所見に拒否の文面をそのまま流し込む形も同じ文を持ち込むので、両方を見る。
+	if strings.Contains(err.Error(), "refusing to start") || strings.Contains(report, "refusing to start") {
+		t.Errorf("agent doctor says it refuses to start; it starts nothing: %v\n%s", err, report)
+	}
+	// 予測は、エージェントが読むのと同じ設定を読めた実行でだけ示す。
+	if strings.Contains(report, "the memory soft limit would be") {
+		t.Errorf("the report predicts the memory soft limit from the defaults although the settings could not be read:\n%s", report)
+	}
+}
+
+// 設定ファイルが無い配置は正しい。無いことを失敗にせず、報告はそのまま出る。
+func TestAgentDoctorAcceptsAMissingConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "doctor", "--config", filepath.Join(dir, "none.env"), "--data-dir", filepath.Join(dir, "data")})
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	// 認証情報ファイルが無いので総合判定は FAILED であり、終了コードは 1 である。証拠に権限で
+	// 届かなかった実行ではないので 2 ではない。
+	if got := exitCode(err); err == nil || got != 1 {
+		t.Fatalf("err=%v exitCode=%d, want 1", err, got)
+	}
+	report := out.String()
+	if !strings.Contains(report, "privileges         OK") {
+		t.Errorf("a missing config file lowered host.privileges:\n%s", report)
+	}
+	if !strings.Contains(report, "the memory soft limit would be") {
+		t.Errorf("the report does not predict the memory soft limit although the settings were read:\n%s", report)
+	}
+}
+
 // --- 助け ---
 
 func testAgentDoctorInput(t *testing.T, dir string) agentDoctorInput {
@@ -737,6 +836,7 @@ func testAgentDoctorInput(t *testing.T, dir string) agentDoctorInput {
 		Now:             time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC),
 		DataDir:         dir,
 		CredentialsPath: filepath.Join(dir, "agent.json"),
+		ConfigPath:      filepath.Join(dir, "agent.env"),
 		Version:         "v1.0.0",
 		Platform:        "linux/amd64",
 		User:            "running as tester, uid 1000",
