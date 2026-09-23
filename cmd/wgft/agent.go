@@ -115,7 +115,7 @@ On the agent host:
   pubkey        print the wg public key; generate and save one if absent
   rotate-key    regenerate the wg key pair
 
-On the VPS (against the admin API):
+On the VPS, against the admin API:
   ls            list registered agents
   join-string   issue a join string; one-time
   revoke        revoke a permanent token
