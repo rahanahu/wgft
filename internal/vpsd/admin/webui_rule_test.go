@@ -324,6 +324,66 @@ func TestRuleDetailRateWording(t *testing.T) {
 	}
 }
 
+// TestRuleDetailRateSummarySingular confirms the three rate-limit summary sentences use the
+// singular English noun when the count is exactly 1. 1 is a valid, reachable value for every
+// rate field: proto.ParseRate only rejects 0, and forms.gohtml's number inputs use min="1". For
+// each field, both the correct singular text and the absence of the wrong plural are checked --
+// "connection"/"packet" alone would also match inside the wrong plural "connections"/"packets".
+func TestRuleDetailRateSummarySingular(t *testing.T) {
+	srv, _ := newDetailTestServer(t)
+
+	post := func(vals url.Values) {
+		resp, err := http.PostForm(srv.URL+"/ui/rules/r_a/rates", vals)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	get := func() string { return getBody(t, srv.URL+"/ui/rules/r_a?lang=en") }
+
+	// per_source = 1
+	post(url.Values{
+		"per_source_count": {"1"}, "per_source_unit": {"second"},
+		"new_flow_nolimit": {"1"}, "new_flow_unit": {"second"},
+		"packet_nolimit": {"1"}, "packet_unit": {"second"},
+	})
+	body := get()
+	if !strings.Contains(body, "Up to 1 new connection per second from one source") {
+		t.Errorf("missing the singular per-source summary sentence: %s", body)
+	}
+	if strings.Contains(body, "Up to 1 new connections per second from one source") {
+		t.Errorf("per-source summary uses the wrong plural for a count of 1: %s", body)
+	}
+
+	// new_flow (whole rule) = 1
+	post(url.Values{
+		"per_source_nolimit": {"1"}, "per_source_unit": {"second"},
+		"new_flow_count": {"1"}, "new_flow_unit": {"minute"},
+		"packet_nolimit": {"1"}, "packet_unit": {"second"},
+	})
+	body = get()
+	if !strings.Contains(body, "Up to 1 new connection per minute for the whole rule") {
+		t.Errorf("missing the singular whole-rule summary sentence: %s", body)
+	}
+	if strings.Contains(body, "Up to 1 new connections per minute for the whole rule") {
+		t.Errorf("whole-rule summary uses the wrong plural for a count of 1: %s", body)
+	}
+
+	// packet = 1
+	post(url.Values{
+		"per_source_nolimit": {"1"}, "per_source_unit": {"second"},
+		"new_flow_nolimit": {"1"}, "new_flow_unit": {"second"},
+		"packet_count": {"1"}, "packet_unit": {"second"},
+	})
+	body = get()
+	if !strings.Contains(body, "Up to 1 packet per second") {
+		t.Errorf("missing the singular packet summary sentence: %s", body)
+	}
+	if strings.Contains(body, "Up to 1 packets per second") {
+		t.Errorf("packet summary uses the wrong plural for a count of 1: %s", body)
+	}
+}
+
 // TestRuleDetailPacketRateTCPNotice は、TCP のルールに packet_rate があるとき、詳細ページと
 // レート区画に「TCP には効かない」旨(design.md 7a.9 節。CLI の旨と文言を揃える)が出ること、
 // UDP のルールやレートの無い TCP のルールには出ないこと、他の欄を保存しても保存済みの

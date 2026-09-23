@@ -216,7 +216,7 @@
         <label class="check"><input type="checkbox" name="per_source_nolimit" value="1" {{ if .Rates.PerSource.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
       </div>
       <p class="field-help">{{ T .Locale "ratePerSourceHelp" }}</p>
-      {{ if and (not .Rates.PerSource.NoLimit) .Rates.PerSource.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPerSourceFmt") (UnitLabel $loc .Rates.PerSource.Unit) .Rates.PerSource.Count }}</p>{{ end }}
+      {{ if and (not .Rates.PerSource.NoLimit) .Rates.PerSource.Count }}<p class="rate-summary">{{ if eq .Rates.PerSource.Count "1" }}{{ printf (T .Locale "rateSummaryPerSourceFmt1") (UnitLabel $loc .Rates.PerSource.Unit) .Rates.PerSource.Count }}{{ else }}{{ printf (T .Locale "rateSummaryPerSourceFmt") (UnitLabel $loc .Rates.PerSource.Unit) .Rates.PerSource.Count }}{{ end }}</p>{{ end }}
     </div>
 
     <div class="rate-field">
@@ -228,7 +228,7 @@
         <label class="check"><input type="checkbox" name="new_flow_nolimit" value="1" {{ if .Rates.NewFlow.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
       </div>
       <p class="field-help">{{ T .Locale "rateNewFlowHelp" }}</p>
-      {{ if and (not .Rates.NewFlow.NoLimit) .Rates.NewFlow.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryWholeFmt") (UnitLabel $loc .Rates.NewFlow.Unit) .Rates.NewFlow.Count }}</p>{{ end }}
+      {{ if and (not .Rates.NewFlow.NoLimit) .Rates.NewFlow.Count }}<p class="rate-summary">{{ if eq .Rates.NewFlow.Count "1" }}{{ printf (T .Locale "rateSummaryWholeFmt1") (UnitLabel $loc .Rates.NewFlow.Unit) .Rates.NewFlow.Count }}{{ else }}{{ printf (T .Locale "rateSummaryWholeFmt") (UnitLabel $loc .Rates.NewFlow.Unit) .Rates.NewFlow.Count }}{{ end }}</p>{{ end }}
     </div>
 
     {{ $hasPacket := and (not .Rates.Packet.NoLimit) .Rates.Packet.Count }}
@@ -244,7 +244,7 @@
             <label class="check"><input type="checkbox" name="packet_nolimit" value="1" {{ if .Rates.Packet.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
           </div>
           <p class="field-help">{{ T .Locale "ratePacketHelp" }}</p>
-          {{ if $hasPacket }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPacketFmt") (UnitLabel $loc .Rates.Packet.Unit) .Rates.Packet.Count }}</p>{{ end }}
+          {{ if $hasPacket }}<p class="rate-summary">{{ if eq .Rates.Packet.Count "1" }}{{ printf (T .Locale "rateSummaryPacketFmt1") (UnitLabel $loc .Rates.Packet.Unit) .Rates.Packet.Count }}{{ else }}{{ printf (T .Locale "rateSummaryPacketFmt") (UnitLabel $loc .Rates.Packet.Unit) .Rates.Packet.Count }}{{ end }}</p>{{ end }}
           {{ if .ShowPacketNote }}<p class="field-help">{{ T .Locale "packetTCPNoEffectNote" }}</p>{{ end }}
         </div>
       </div>
