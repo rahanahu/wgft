@@ -189,6 +189,11 @@ type agentDoctorInput struct {
 	// ConfigUnreadable は、設定ファイルがあるのに権限で読めなかった誤りである。読めた場合と
 	// ファイルが無い場合は nil である。ファイルが無い配置は正しいので、誤りとして扱わない。
 	ConfigUnreadable error
+	// DataDirAssumed は、設定ファイルを読めなかったためにデータディレクトリを既定値から取った
+	// ことである。フラグと環境変数の値は設定ファイルより優先するので、そちらから取れた実行では
+	// 偽である。真の実行では、読めなかったファイルが別のディレクトリを指している場合があり、
+	// 報告が別の場所について述べていることになる。
+	DataDirAssumed bool
 
 	// Inspect はロックファイルの状態を読む。既定は flock.Inspect で、ロックファイルを作らない。
 	Inspect func(statePath string) (flock.State, error)
@@ -305,6 +310,7 @@ func agentDoctorInputFrom(cmd *cobra.Command) (agentDoctorInput, error) {
 		User:             runningUserText(),
 		ConfigPath:       configPath,
 		ConfigUnreadable: cfgErr,
+		DataDirAssumed:   cfgErr != nil && c.source("WGFT_DATA_DIR") == "default",
 	}, nil
 }
 
@@ -580,6 +586,18 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 	return c
 }
 
+// agentAssumedDataDirNote は、データディレクトリを既定値から取った実行に添える句である。設定
+// ファイルを読めなかった実行では、そのファイルが別のディレクトリを指している場合があり、この
+// 報告は別の場所について述べていることになる。断定する所見にだけ添える。エージェントが登録され
+// ているかどうかと稼働しているかどうかは、どのデータディレクトリを見たかで答えが変わる。
+func agentAssumedDataDirNote(in agentDoctorInput) string {
+	if !in.DataDirAssumed {
+		return ""
+	}
+	return "this answers for " + in.DataDir + ", the default, because " + in.ConfigPath +
+		" could not be read here and may name another data directory"
+}
+
 // agentSamePrincipalNext は、層 2 に当たる実行に添える次の手である。root での実行し直しは案内
 // しない。root はすべて読めるので、host.privileges がエージェント自身の権限ではなく root の権限を
 // 答え、前提の崩れそのものを検出できなくなる(10.2c 節)。
@@ -640,6 +658,11 @@ func agentCredentialsCheck(in agentDoctorInput, cred agentCredentialsFile) agent
 	case credMissing:
 		c.Status, c.Reason = statusFailed, agentReasonCredentialsMissing
 		c.Detail = "there is no credentials file at " + in.CredentialsPath + ", so this host has never registered as an agent"
+		// 登録したことがないという断定は、見たディレクトリについてのものである。設定ファイルを
+		// 読めずに既定値を使った実行では、登録済みのホストについて偽になりうる。
+		if note := agentAssumedDataDirNote(in); note != "" {
+			c.Detail += "; " + note
+		}
 		c.Next = "issue a join string on the VPS with wgft agent join-string --name <agent>, then start the agent with WGFT_JOIN set to it"
 		return c
 	case credUnreadable:
@@ -729,6 +752,11 @@ func agentProcessCheck(in agentDoctorInput, run agentRunState) agentDoctorCheck 
 	default:
 		c.Status, c.Reason = statusFailed, agentReasonNotRunning
 		c.Detail = "no agent is running for this data directory: the lock file at " + flock.LockPath(in.CredentialsPath) + " is there, but no process holds it"
+	}
+	// 止まっているという断定も、見たディレクトリについてのものである。設定ファイルを読めずに
+	// 既定値を使った実行では、別のディレクトリで動いているエージェントについて偽になりうる。
+	if note := agentAssumedDataDirNote(in); note != "" {
+		c.Detail += "; " + note
 	}
 	c.Next = "start it and read why it stopped: systemctl status wgft-agent and journalctl -u wgft-agent, or docker ps and docker logs for a container. " +
 		"This answers for " + in.DataDir + " alone; an agent running with another WGFT_DATA_DIR is not visible here"

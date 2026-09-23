@@ -205,6 +205,10 @@ func resolveConfig(cmd *cobra.Command, specs []spec, configPath string, file map
 
 func (c *config) str(env string) string { return c.vals[env].value }
 
+// source は、その項目の値をどこから取ったかである。"flag"、"env"、"file"、"default" のいずれかで、
+// print が出す出所と同じものである。
+func (c *config) source(env string) string { return c.vals[env].source }
+
 func (c *config) boolVal(env string) bool {
 	switch strings.ToLower(c.vals[env].value) {
 	case "1", "true", "yes", "on":

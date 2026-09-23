@@ -870,6 +870,34 @@ func TestAgentDoctorNamesTheConfigFileItCouldStat(t *testing.T) {
 	}
 }
 
+// 設定ファイルを読めない実行では、データディレクトリを既定値から取る。登録と稼働について断定する
+// 所見は、見たディレクトリがその既定値であることを添える。読めなかったファイルが別のディレクトリを
+// 指していれば、登録済みで稼働中のホストについて偽になるためである。
+func TestAgentDoctorSaysWhenTheDataDirCameFromTheDefaults(t *testing.T) {
+	dir := t.TempDir()
+	in := testAgentDoctorInput(t, dir)
+	in.ConfigUnreadable = fs.ErrPermission
+	in.DataDirAssumed = true
+	rep := agentDiagnose(in)
+	for _, id := range []string{agentCheckCredentials, agentCheckProcess} {
+		c, _ := findAgentCheck(rep, id)
+		if c.Status != statusFailed {
+			t.Fatalf("%s = %s, want failed; this scenario needs the claims that assert", id, c.Status)
+		}
+		if !strings.Contains(c.Detail, "the default, because "+in.ConfigPath) {
+			t.Errorf("%s asserts without saying the data directory came from the defaults: %q", id, c.Detail)
+		}
+	}
+	// 設定を読めた実行の文面は変えない。
+	plain := agentDiagnose(testAgentDoctorInput(t, dir))
+	for _, id := range []string{agentCheckCredentials, agentCheckProcess} {
+		c, _ := findAgentCheck(plain, id)
+		if strings.Contains(c.Detail, "the default, because") {
+			t.Errorf("%s carries the note although the config file was read: %q", id, c.Detail)
+		}
+	}
+}
+
 // 設定ファイルが無い配置は正しい。無いことを失敗にせず、報告はそのまま出る。
 //
 // 主張は OS に依らない形にしてある。`host.privileges` の状態そのものは OS で分かれ、Windows では
