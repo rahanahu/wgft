@@ -691,6 +691,17 @@ func TestRuleSettingsConcurrentChange(t *testing.T) {
 			wantAfterRetry: [5]string{"valheim", "from the cli", "20/minute", "", "700/second"},
 		},
 		{
+			// 利用者が触れていない group が別の場所で変わり、別の欄が食い違う。描き直しは
+			// group を今の値で埋めるので、送り直しても別の場所の group は消えない。
+			name: "conflict plus untouched group changed elsewhere",
+			elsewhere: func(r *proto.Rule) {
+				r.PerSourceRate, r.Group = mustRate(t, "99/second"), "from-cli"
+			},
+			set:            url.Values{"per_source_count": {"20"}, "per_source_unit": {"minute"}},
+			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "99 / 秒"),
+			wantAfterRetry: [5]string{"from-cli", "weekend", "20/minute", "", "500/second"},
+		},
+		{
 			// 利用者は「制限しない」を選んだので、入力欄の値だけでは詳細は開かない。
 			// 食い違いの表示のために開く。
 			name:           "packet changed elsewhere, cleared here",
@@ -821,15 +832,18 @@ func TestRuleSettingsInvalidThenFixedKeepsConcurrentNote(t *testing.T) {
 
 // TestRuleSettingsOddStoredNote は、改行や前後の空白を含む保存済みの説明(CLI の
 // rule set --note や読み込みで入りうる)が、レートだけを変えた保存で書き換わらず、食い違い
-// にもならないことを確かめる。ブラウザは <input type="text"> の値から改行を取り除き、
+// にもならないこと、説明を変えた保存も食い違いにならないことを確かめる。ブラウザは <input type="text"> の値から改行を取り除き、
 // hidden の値の改行を送信時に CRLF に揃えるので、その形で送る。
 func TestRuleSettingsOddStoredNote(t *testing.T) {
 	for _, tc := range []struct {
 		name, stored string
 		set          url.Values
+		want         string // 保存後の note
 	}{
-		{"newline", "a\nb", url.Values{"orig_note": {"a\r\nb"}, "note": {"ab"}}},
-		{"edge spaces", " x ", url.Values{}},
+		{"newline", "a\nb", url.Values{"orig_note": {"a\r\nb"}, "note": {"ab"}}, "a\nb"},
+		{"edge spaces", " x ", url.Values{}, " x "},
+		// 利用者が説明を変えた場合も、保存値の改行を別の場所の変更と取り違えない
+		{"newline, note changed", "a\nb", url.Values{"orig_note": {"a\r\nb"}, "note": {"new"}}, "new"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, st := newSettingsTestServer(t)
@@ -843,8 +857,8 @@ func TestRuleSettingsOddStoredNote(t *testing.T) {
 				t.Fatalf("a rate-only save must not conflict: %s", body)
 			}
 			r := findRuleT(t, st, "r_a")
-			if r.Note != tc.stored {
-				t.Errorf("note = %q, want the stored %q unchanged", r.Note, tc.stored)
+			if r.Note != tc.want {
+				t.Errorf("note = %q, want %q", r.Note, tc.want)
 			}
 			if rateString(r.PerSourceRate) != "20/minute" {
 				t.Errorf("per_source_rate = %v, want 20/minute", r.PerSourceRate)
