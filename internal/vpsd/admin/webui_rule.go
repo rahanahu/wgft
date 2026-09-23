@@ -42,14 +42,22 @@ func unitLabel(locale, unit string) string {
 	return unit
 }
 
-// describedByIDs はテンプレート関数 DescribedBy。id と、その id が指す文言(空なら出ていない)
-// の組を並べて渡すと、実際に出ている文言の id だけをスペース区切りで返す。aria-describedby
-// に渡す値の組み立てに使う(空文字列なら呼び出し側で属性ごと省く)。
-func describedByIDs(pairs ...string) string {
+// describedByIDs はテンプレート関数 DescribedBy。id と、その id が指す要素が出ているかどうか
+// (文字列なら空でないとき、bool なら true のとき)の組を並べて渡すと、実際に出ている要素の
+// id だけをスペース区切りで返す。aria-describedby に渡す値の組み立てに使う。
+func describedByIDs(pairs ...any) string {
 	var ids []string
 	for i := 0; i+1 < len(pairs); i += 2 {
-		if pairs[i+1] != "" {
-			ids = append(ids, pairs[i])
+		id, _ := pairs[i].(string)
+		shown := false
+		switch v := pairs[i+1].(type) {
+		case string:
+			shown = v != ""
+		case bool:
+			shown = v
+		}
+		if id != "" && shown {
+			ids = append(ids, id)
 		}
 	}
 	return strings.Join(ids, " ")
