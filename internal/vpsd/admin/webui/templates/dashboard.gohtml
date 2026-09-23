@@ -17,10 +17,7 @@
         <a class="btn" href="/ui/doctor">{{ T .Locale "doctorTitle" }}</a>
         <a class="btn primary" href="/ui/add-agent">{{ T .Locale "addAgent" }}</a>
         <a class="btn primary" href="/ui/add-rule">{{ T .Locale "addRule" }}</a>
-        <span class="lang-switch">
-          <a class="lang {{ if ne .Locale "en" }}active{{ end }}" href="?lang=ja">JA</a>
-          <a class="lang {{ if eq .Locale "en" }}active{{ end }}" href="?lang=en">EN</a>
-        </span>
+        {{ template "langswitch" .Locale }}
       </div>
     </header>
 

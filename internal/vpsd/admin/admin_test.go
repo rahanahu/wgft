@@ -431,8 +431,9 @@ func assertBreadcrumb(t *testing.T, name, body string, links []string, current s
 	if strings.Contains(body, "Back to dashboard") || strings.Contains(body, "ダッシュボードへ戻る") {
 		t.Errorf("%s: a back-to-dashboard button is still on the page", name)
 	}
-	if strings.Contains(body, `class="top-actions"`) {
-		t.Errorf("%s: the header still has an action area on the right", name)
+	// ヘッダの右側に置くのは言語の切り替えだけである。
+	if i, j := strings.Index(body, `<div class="top-actions">`), strings.Index(body, "</header>"); i < 0 || j < i || !strings.Contains(body[i:j], `<span class="lang-switch">`) || strings.Contains(body[i:j], `class="btn`) {
+		t.Errorf("%s: the header's right side is not the language switch alone", name)
 	}
 }
 
@@ -460,6 +461,27 @@ func TestHeaderSameOnEveryPage(t *testing.T) {
 		body := space.Replace(getBody(t, srv.URL+path+"?lang=en"))
 		if !strings.Contains(body, head) {
 			t.Errorf("%s: the page does not open with the shared header", path)
+		}
+	}
+}
+
+// TestLangSwitchOnEveryPage は、言語の切り替えがダッシュボードと共通の枠のすべてのページにあり、
+// 同じページに留まり、疎通の確認(probe=1)を引き継がないことを確かめる。
+func TestLangSwitchOnEveryPage(t *testing.T) {
+	srv, _ := newDoctorTestServer(t)
+	for _, path := range []string{"/", "/ui/doctor", "/ui/doctor/r_ok", "/ui/doctor/r_ok?probe=1", "/ui/rules/r_ok", "/ui/rules/r_ok/check", "/ui/add-rule", "/ui/add-agent", "/ui/rules/import"} {
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		body := getBody(t, srv.URL+path+sep+"lang=en")
+		for _, want := range []string{`<span class="lang-switch">`, `href="?lang=ja">JA</a>`, `href="?lang=en">EN</a>`} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: no %s", path, want)
+			}
+		}
+		if strings.Contains(body, `lang=ja&`) || strings.Contains(body, `probe=1&amp;lang`) || strings.Contains(body, `?probe=1&lang`) {
+			t.Errorf("%s: the language switch carries other query parameters", path)
 		}
 	}
 }
