@@ -74,11 +74,19 @@ type doctorCheckView struct {
 	Internal []string
 }
 
-// doctorGroupView は 1 本のルールの画面の、検査のまとまり 1 つである。Title は Server、Tunnel、
-// Agent "name" のいずれかで、これも訳さない。
-type doctorGroupView struct {
-	Title  string
+// doctorAgentRowView は一覧の画面のエージェントの 1 行である。図は tunnel、stream、rules の
+// 3 つの節点で、状態はそのまま出す(webui_doctor_path.go)。
+type doctorAgentRowView struct {
+	Name   string
+	Status string
+	Badge  string
+	Detail string
+	Path   doctorPathView
+	// Checks は tunnel、stream、rules の検査の行で、行ごとの折りたたみに入れる。Causes、Next、
+	// Internal を一覧の画面から読めるようにするためである。
 	Checks []doctorCheckView
+	// Open は折りたたみを既定で開くかどうかで、どれかの検査が OK でないときに開く。
+	Open bool
 }
 
 // doctorRuleRowView は一覧の 1 行であり、1 本のルールの画面の見出しでもある。
@@ -94,6 +102,8 @@ type doctorRuleRowView struct {
 	Status     string
 	Badge      string
 	Why        string
+	// Path は経路の図である(webui_doctor_path.go)。
+	Path doctorPathView
 }
 
 // doctorPageData は診断の画面のビューである。一覧の画面と 1 本のルールの画面が同じ型を使う。
@@ -102,11 +112,14 @@ type doctorPageData struct {
 	CheckedAt string
 	// 一覧の画面
 	Server doctorCheckView
-	Agents []doctorCheckView
+	Agents []doctorAgentRowView
 	Rules  []doctorRuleRowView
-	// 1 本のルールの画面
-	Rule     *doctorRuleRowView
-	Groups   []doctorGroupView
+	// 1 本のルールの画面。経路の上の検査の行は Rule.Path の節点の下に入る。
+	Rule *doctorRuleRowView
+	// Banner は server.dataplane が OK でないときだけ、図の上に帯として出す検査である。
+	Banner *doctorCheckView
+	// OffPath は経路の図の節点に入らない検査(dataplane、credentials、flow budget)の行である。
+	OffPath  []doctorCheckView
 	Hidden   []doctorCheckView
 	CanProbe bool
 	Probed   bool
@@ -227,15 +240,27 @@ func (s *Server) uiDoctor(w http.ResponseWriter, r *http.Request) {
 			d.Server = doctorCheckToView(c, locale)
 		}
 	}
-	for _, c := range rep.AgentSummaries() {
-		d.Agents = append(d.Agents, doctorCheckToView(c, locale))
+	for _, a := range rep.AgentSummaries() {
+		path, checks := doctorAgentPath(a.Agent, rep, locale)
+		row := doctorAgentRowView{
+			Name: a.Agent, Status: doctor.DisplayStatus(a), Badge: doctorBadge(a.Status), Detail: a.Detail, Path: path,
+		}
+		for _, c := range checks {
+			row.Checks = append(row.Checks, doctorCheckToView(c, locale))
+			if c.Status != doctor.StatusOK {
+				row.Open = true
+			}
+		}
+		d.Agents = append(d.Agents, row)
 	}
 	failed := 0
 	for _, rr := range rep.Rules {
 		if rr.Status == doctor.StatusFailed {
 			failed++
 		}
-		d.Rules = append(d.Rules, doctorRuleToView(rr, rep))
+		v := doctorRuleToView(rr, rep)
+		v.Path = doctorPath(rr, rep.ChecksOf(rr.RuleID), in.Now, locale)
+		d.Rules = append(d.Rules, v)
 	}
 	d.Result = "no failing check"
 	if rep.Status == doctor.StatusFailed {
@@ -268,6 +293,7 @@ func (s *Server) uiDoctorRule(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(rep.Rules) == 1 {
 		head := doctorRuleToView(rep.Rules[0], rep)
+		head.Path = doctorPath(rep.Rules[0], rep.ChecksOf(rule.ID), in.Now, locale)
 		d.Rule = &head
 		d.Result = doctorResultLine(rep.Rules[0], rep)
 	}
@@ -278,15 +304,15 @@ func (s *Server) uiDoctorRule(w http.ResponseWriter, r *http.Request) {
 			d.Hidden = append(d.Hidden, v)
 			continue
 		}
-		title := c.Group
-		if title == doctor.GroupAgent {
-			title = fmt.Sprintf("Agent %q", rule.Agent)
+		if c.ID == doctor.CheckDataplane && c.Status != doctor.StatusOK {
+			banner := v
+			d.Banner = &banner
 		}
-		if n := len(d.Groups); n > 0 && d.Groups[n-1].Title == title {
-			d.Groups[n-1].Checks = append(d.Groups[n-1].Checks, v)
+		if i := doctorNodeIndex(c.ID); i >= 0 && d.Rule != nil {
+			d.Rule.Path.Nodes[i].Rows = append(d.Rule.Path.Nodes[i].Rows, v)
 			continue
 		}
-		d.Groups = append(d.Groups, doctorGroupView{Title: title, Checks: []doctorCheckView{v}})
+		d.OffPath = append(d.OffPath, v)
 	}
 	s.renderDoctorPage(w, locale, "doctorrule", d)
 }

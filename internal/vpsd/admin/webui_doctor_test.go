@@ -163,8 +163,8 @@ func TestDoctorPageKeepsTheDiagnosisVocabularyInEnglish(t *testing.T) {
 		for _, want := range []string{
 			// 検査の見出し(design.md 10.2a 節の一覧)
 			"public port", "dataplane", "WireGuard", "control connection", "rules received", "target",
-			// 群の名前
-			"Server", "Tunnel", `Agent &#34;home&#34;`,
+			// 経路の図の節点の名前(webui_doctor_path.go)
+			"agent", "listener / target",
 			// 状態の語
 			"OK", "NOT TESTED",
 		} {
@@ -335,13 +335,13 @@ func TestDoctorSummaryShowsEveryPartOfTheReport(t *testing.T) {
 		t.Errorf("the summary's finding column must carry the tunnel's own reason, row:\n%s", offRow)
 	}
 
-	// 健全なルールは OK で、所見の列は空である。ここが埋まるのは、証拠のどれかが欠けたときである。
+	// 健全なルールは OK で、所見の折りたたみを持たない。所見が付くのは、証拠のどれかが欠けたときである。
 	okRow := doctorRuleRow(t, body, "r_ok")
 	if !strings.Contains(okRow, `badge success">OK`) {
 		t.Errorf("a healthy rule must read OK in the summary, row:\n%s", okRow)
 	}
-	if !strings.Contains(okRow, `class="check-detail"></td>`) {
-		t.Errorf("a healthy rule's finding column must stay empty, row:\n%s", okRow)
+	if strings.Contains(okRow, `class="row-finding"`) {
+		t.Errorf("a healthy rule must carry no finding, row:\n%s", okRow)
 	}
 }
 

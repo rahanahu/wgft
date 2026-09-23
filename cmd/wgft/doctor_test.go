@@ -1376,3 +1376,32 @@ func lineHolding(t *testing.T, out, want string) string {
 	t.Fatalf("no line holding %q in:\n%s", want, out)
 	return ""
 }
+
+// TestAgentLineIgnoresADisabledRuleListedFirst は、エージェントの行が無効なルールの検査から
+// 作られないことを確かめる。無効なルールの agent.connection は rule_disabled の skipped で、
+// エージェントの状態を述べない。そのルールが一覧の先にあっても、行は有効なルールの検査から
+// 作る。Web UI の診断の画面も同じ関数を読むので、CLI と画面の行が食い違わない(設計文書
+// 10.2a 節の改訂の記録、2026-09-23)。
+func TestAgentLineIgnoresADisabledRuleListedFirst(t *testing.T) {
+	off := tcpRule()
+	off.ID, off.Enabled = "r_01M2R009DISABLEDAAAAAAAAA", false
+	on := tcpRule()
+	in := healthyInput(on)
+	in.Rules.Rules = []proto.Rule{off, on}
+	rep := buildReport([]proto.Rule{off, on}, in)
+
+	lines := agentLines(rep)
+	if len(lines) != 1 {
+		t.Fatalf("agent lines = %d, want 1 for the one agent home", len(lines))
+	}
+	if lines[0].Status != statusOK || lines[0].Reason == "rule_disabled" {
+		t.Errorf("home's line = %s/%s, want ok from the enabled rule", lines[0].Status, lines[0].Reason)
+	}
+	var b strings.Builder
+	writeSurvey(&b, rep, false)
+	agents := b.String()
+	agents = agents[strings.Index(agents, "Agents"):strings.Index(agents, "\nRules")]
+	if strings.Contains(agents, "SKIPPED") || strings.Contains(agents, "disabled") {
+		t.Errorf("the Agents section speaks of the disabled rule instead of the agent:\n%s", agents)
+	}
+}
