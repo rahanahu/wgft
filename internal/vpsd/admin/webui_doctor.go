@@ -151,15 +151,16 @@ func doctorCheckToView(c doctor.Check, locale string) doctorCheckView {
 //   - `rule.source_filter` は --from を付け直すよう案内するが、画面には接続元アドレスの入力欄が
 //     無い。入力欄を設けることは画面から管理用 API を呼び直す新しい操作になるので、この版では
 //     CLI の実行の形を画面に示すだけにする。
-//   - `rule.probe` は、疎通の確認を試していない実行では --probe を付けるよう案内する。有効な
-//     TCP のルールなら同じ画面にボタンがあるが、UDP のルールにはボタンが無く、管理用 API も
-//     確認そのものを拒む。無効なルールの `rule.probe` は別の理由と次の一手を持つので当たらない。
-func doctorScreenNote(c doctor.Check, locale string, r proto.Rule, probed bool) string {
+//
+// `rule.probe` はかつて、疎通の確認を試していない UDP のルールに「--probe を付けよ」と勧め、
+// 画面にボタンが無いのに CLI の操作を勧める食い違いを補う 1 文をここで足していた。共有の次の
+// 一手が UDP のルールにはもう --probe を勧めなくなったので(design.md 10.2a 節の改訂の記録、
+// 2026-09-23)、この画面固有の 1 文は要らなくなった。ボタンが無い理由は Probe の節の
+// doctorProbeUnavailable が別に説明する。
+func doctorScreenNote(c doctor.Check, locale string) string {
 	switch {
 	case c.ID == doctor.CheckSourceFilter && c.Reason == doctor.ReasonNoFrom:
 		return T(locale, "doctorSourceFilterNote")
-	case c.ID == doctor.CheckProbe && c.Reason == doctor.ReasonNoProbe && !probed && r.Proto == proto.UDP:
-		return T(locale, "doctorProbeUDPNote")
 	}
 	return ""
 }
@@ -272,7 +273,7 @@ func (s *Server) uiDoctorRule(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range rep.ChecksOf(rule.ID) {
 		v := doctorCheckToView(c, locale)
-		v.ScreenNote = doctorScreenNote(c, locale, rule, in.Probed)
+		v.ScreenNote = doctorScreenNote(c, locale)
 		if c.Hidden(false) {
 			d.Hidden = append(d.Hidden, v)
 			continue

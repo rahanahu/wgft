@@ -279,10 +279,6 @@ var tr = map[string][2]string{
 		"この画面には接続元アドレスの入力欄がありません。1 つのアドレスを試すには、VPS で sudo wgft server doctor <ルールの ID> --from <接続元アドレス> を実行してください。ルールの ID は画面の先頭にあります。",
 		"This page has no field for a client address. To try one, run sudo wgft server doctor <rule id> --from <client address> on this VPS; the rule ID is at the top of this page.",
 	},
-	"doctorProbeUDPNote": {
-		"このルールは UDP なので、画面からも CLI からも疎通の確認を実行できません。UDP は送信だけでは成否が分かりません。上の target の行から判断し、サービスそのものは実際のクライアントから確かめてください。",
-		"This is a UDP rule, so no probe can run for it, from this page or from the CLI: a UDP send cannot tell success. Judge it from the target line above, and confirm the service from a real client.",
-	},
 	"doctorInternalHead": {"内部の値", "Internal values"},
 	"doctorHiddenHead":   {"既定で隠している検査", "Checks hidden by default"},
 }
