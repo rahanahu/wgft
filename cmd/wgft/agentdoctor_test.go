@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -391,6 +392,10 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			setup: func(t *testing.T, in *agentDoctorInput) {
 				writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 				holdTheLock(t, in.CredentialsPath)
+				// ソケットが無い場合の応答を差し替えで与える。OS の接続に任せると、テストの一時
+				// ディレクトリが深いランナーではソケットのパスが sun_path の上限を超え、パスの
+				// 長さという別の事実を答える。この場面が問うのはパスの長さではない。
+				in.Dial = func(string) (net.Conn, error) { return nil, &net.OpError{Op: "dial", Err: syscall.ENOENT} }
 			},
 			want: []wantCheck{
 				{agentCheckProcess, statusOK, ""},
