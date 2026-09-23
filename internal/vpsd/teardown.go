@@ -211,7 +211,7 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 	}
 
 	if userspace {
-		list = append(list, "delete by hand the unit or container that ran the server, its env, the binary, and the data directory; it remains unless --purge")
+		list = append(list, "the unit or container that ran the server, its env, the binary, and the data directory; it remains unless --purge")
 		return list
 	}
 
@@ -227,9 +227,9 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 
 	// wgft が置いたものではないファイル
 	list = append(list,
-		"delete by hand the systemd unit and env: /etc/systemd/system/wgft.service, /etc/wgft/",
-		"delete by hand the binary: /usr/local/bin/wgft",
-		"delete by hand the state directory: /var/lib/wgft, which remains unless --purge",
+		"the systemd unit and env: /etc/systemd/system/wgft.service, /etc/wgft/",
+		"the binary: /usr/local/bin/wgft",
+		"the state directory: /var/lib/wgft, which remains unless --purge",
 	)
 
 	return list

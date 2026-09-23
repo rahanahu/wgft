@@ -34,7 +34,7 @@
         </td>
         <td data-label="{{ T $loc "colAgent" }}">{{ .Agent }}</td>
         <td data-label="{{ T $loc "colDest" }}" class="mono">{{ .Target }}</td>
-        <td data-label="{{ T $loc "colMode" }}">{{ .Mode }}{{ if .ProxyProtocol }} <small>(PROXY)</small>{{ end }}</td>
+        <td data-label="{{ T $loc "colMode" }}">{{ .Mode }}{{ if .ProxyProtocol }} <small>PROXY</small>{{ end }}</td>
         <td data-label="{{ T $loc "colState" }}">
           <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
           {{ if .StateReason }}<small class="danger-text">{{ .StateReason }}</small>{{ end }}
