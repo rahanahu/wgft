@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
@@ -62,14 +63,17 @@ type DoctorAllowTargets struct {
 
 // DoctorStream は制御ストリームの観測の写しである。項目の意味は streamObservation にある。
 type DoctorStream struct {
-	Connected        bool      `json:"connected"`
-	DisconnectedAt   time.Time `json:"disconnected_at,omitempty"`
+	Connected bool `json:"connected"`
+	// DisconnectedAt と RetryAt、LastPingAt、LastPongAt は、値が無ければゼロ値の時刻になる。
+	// encoding/json の omitempty は struct に効かないので、項目そのものは必ず出る。読み手は
+	// IsZero で判定する
+	DisconnectedAt   time.Time `json:"disconnected_at"`
 	DisconnectReason string    `json:"disconnect_reason,omitempty"`
 	// Backoff は直近に待った再接続の間隔。単位はナノ秒
 	Backoff      time.Duration `json:"backoff,omitempty"`
-	RetryAt      time.Time     `json:"retry_at,omitempty"`
-	LastPingAt   time.Time     `json:"last_ping_at,omitempty"`
-	LastPongAt   time.Time     `json:"last_pong_at,omitempty"`
+	RetryAt      time.Time     `json:"retry_at"`
+	LastPingAt   time.Time     `json:"last_ping_at"`
+	LastPongAt   time.Time     `json:"last_pong_at"`
 	AwaitingPong bool          `json:"awaiting_pong"`
 }
 
@@ -79,14 +83,15 @@ type DoctorRuntimeState struct {
 	// Generation は最後に受け取って処理した全体状態の世代
 	Generation uint64       `json:"generation"`
 	Tunnel     DoctorTunnel `json:"tunnel"`
-	// Rules はルールごとの状態である。リスナー 1 つずつは並べない
-	Rules []DoctorRule `json:"rules"`
-	// Budgets はプロトコルごとのフロー予算である
-	Budgets []DoctorBudget `json:"budgets"`
+	// Rules はルールごとの状態である。リスナー 1 つずつは並べない。中継が無ければ項目ごと出ない
+	Rules []DoctorRule `json:"rules,omitempty"`
+	// Budgets はプロトコルごとのフロー予算である。中継が無ければ項目ごと出ない
+	Budgets []DoctorBudget `json:"budgets,omitempty"`
 	// RefusalsSince は Budgets の拒否の累計の起点、つまり今のトンネルを立てた時刻である。
 	// フロー予算はトンネルを立て直すたびに中継ごと作り直され、累計はそのたびに 0 に戻る
-	// (設計文書 10.2c 節)。中継が無ければゼロ
-	RefusalsSince time.Time `json:"refusals_since,omitempty"`
+	// (設計文書 10.2c 節)。中継が無ければゼロ値の時刻になる。項目そのものは必ず出るので、
+	// 読み手は IsZero で判定する
+	RefusalsSince time.Time `json:"refusals_since"`
 }
 
 // DoctorTunnel はトンネルの状態である。State と Reason はハートビートが組み立てる値そのもので、
@@ -100,12 +105,13 @@ type DoctorTunnel struct {
 	// Endpoint は解決済みのエンドポイント。初回の名前解決に失敗したトンネルは持たない
 	Endpoint string `json:"endpoint,omitempty"`
 	// LastHandshake は今の device から読んだ最終ハンドシェイクである。watchdog が別に持つ値は
-	// トンネルを閉じても消えず、立て直した直後は前のトンネルの値が残るので、そちらは載せない
-	LastHandshake time.Time `json:"last_handshake,omitempty"`
+	// トンネルを閉じても消えず、立て直した直後は前のトンネルの値が残るので、そちらは載せない。
+	// 成立していなければゼロ値の時刻になる。項目そのものは必ず出るので、読み手は IsZero で判定する
+	LastHandshake time.Time `json:"last_handshake"`
 	RxBytes       int64     `json:"rx_bytes"`
 	TxBytes       int64     `json:"tx_bytes"`
-	// StartedAt は今のトンネルを立てた時刻。トンネルが無ければゼロ
-	StartedAt time.Time      `json:"started_at,omitempty"`
+	// StartedAt は今のトンネルを立てた時刻。トンネルが無ければゼロ値の時刻になる
+	StartedAt time.Time      `json:"started_at"`
 	Watchdog  DoctorWatchdog `json:"watchdog"`
 }
 
@@ -115,8 +121,9 @@ type DoctorTunnel struct {
 type DoctorWatchdog struct {
 	// RebuildInterval は判定に使う作り直しの間隔の実効値である。単位はナノ秒
 	RebuildInterval time.Duration `json:"rebuild_interval"`
-	// RetryAt は、作成に失敗して試し直しを待っている場合の予定の時刻。待っていなければゼロ
-	RetryAt time.Time `json:"retry_at,omitempty"`
+	// RetryAt は、作成に失敗して試し直しを待っている場合の予定の時刻。待っていなければゼロ値の
+	// 時刻になる。項目そのものは必ず出るので、読み手は IsZero で判定する
+	RetryAt time.Time `json:"retry_at"`
 }
 
 // DoctorRule はルール 1 本の状態である。リスナー 1 つずつは並べない。ポート範囲の幅に上限が無く、
@@ -208,12 +215,33 @@ func (rt *runtime) doctorResponseLine() (line []byte) {
 
 // doctorErrorLine は理由だけを載せた応答 1 行を組む。
 func doctorErrorLine(msg string) []byte {
-	b, err := json.Marshal(DoctorResponse{Error: msg})
+	b, err := json.Marshal(DoctorResponse{Error: clipText(msg)})
 	if err != nil {
 		// 固定の形なので届かないが、ここでも 1 行の JSON を返す
 		return []byte("{\"error\":\"the agent could not describe its own failure\"}\n")
 	}
 	return append(b, '\n')
+}
+
+// maxDoctorText は応答に載せる 1 つの文字列の長さの上限である。単位はバイト。
+//
+// 制御ソケットの応答には大きさの上限が無く、リスナーの誤りも panic の値も長さに上限を持たない。
+// 節の趣旨は応答が大きくなりすぎないことなので(設計文書 10.2c 節)、リスナーの一覧をルール単位に
+// まとめるのと同じ理由でここにも上限を置く。実際の bind の失敗と宛先の到達確認の失敗はどちらも
+// 100 バイトに満たないので、512 バイトには 5 倍の余裕がある。
+const maxDoctorText = 512
+
+// clipText は上限を超える文字列を切り、切ったことを添える。切る位置は rune の境目に合わせるので、
+// 結果は正しい UTF-8 のままである。
+func clipText(s string) string {
+	if len(s) <= maxDoctorText {
+		return s
+	}
+	n := maxDoctorText
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "... truncated"
 }
 
 // collectDoctor は doctor の応答を組む。実行時の状態を守る排他は期限付きで取り、取れなければ
@@ -224,6 +252,7 @@ func doctorErrorLine(msg string) []byte {
 func (rt *runtime) collectDoctor() DoctorResponse {
 	allow := doctorAllowTargets(rt.opts.AllowTargets)
 	stream := DoctorStream(rt.streamStatus())
+	stream.DisconnectReason = clipText(stream.DisconnectReason)
 	res := DoctorResponse{AllowTargets: &allow, Stream: &stream}
 	wait := rt.doctorLockWait
 	if wait <= 0 {
@@ -272,7 +301,7 @@ func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 	st.Tunnel = DoctorTunnel{
 		Present:       tun.present,
 		State:         tun.hb.State,
-		Reason:        tun.hb.Reason,
+		Reason:        clipText(tun.hb.Reason),
 		Endpoint:      tun.hb.Endpoint,
 		LastHandshake: tun.hb.LastHandshake,
 		Watchdog: DoctorWatchdog{
@@ -304,7 +333,7 @@ func doctorRules(states []proto.RuleStatus, sts []relay.Status) []DoctorRule {
 	out := make([]DoctorRule, len(states))
 	at := make(map[string]int, len(states))
 	for i, s := range states {
-		out[i] = DoctorRule{ID: s.ID, State: s.State, Reason: s.Reason}
+		out[i] = DoctorRule{ID: s.ID, State: s.State, Reason: clipText(s.Reason)}
 		at[s.ID] = i
 	}
 	for _, s := range sts {
@@ -321,13 +350,13 @@ func doctorRules(states []proto.RuleStatus, sts []relay.Status) []DoctorRule {
 		case !s.Listening:
 			r.BindErrors++
 			if r.BindError == "" && s.Err != nil {
-				r.BindError = fmt.Sprintf("%s: %v", s.Key, s.Err)
+				r.BindError = clipText(fmt.Sprintf("%s: %v", s.Key, s.Err))
 			}
 		case s.Err != nil:
 			r.Listening++
 			r.TargetErrors++
 			if r.TargetError == "" {
-				r.TargetError = fmt.Sprintf("%s: %v", s.Key, s.Err)
+				r.TargetError = clipText(fmt.Sprintf("%s: %v", s.Key, s.Err))
 			}
 		default:
 			r.Listening++
@@ -365,7 +394,7 @@ func doctorBudget(p proto.Proto, pool *resource.Pool) DoctorBudget {
 func doctorAllowTargets(l *allowtargets.List) DoctorAllowTargets {
 	out := DoctorAllowTargets{Env: allowtargets.Env}
 	if l != nil {
-		out.Set, out.List = true, l.String()
+		out.Set, out.List = true, clipText(l.String())
 	}
 	return out
 }

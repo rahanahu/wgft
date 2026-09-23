@@ -615,6 +615,78 @@ func TestLockRuntimeReleasesTheLockItAbandons(t *testing.T) {
 	}
 }
 
+// TestDoctorRulesMapSessionsAndFlowsSeparately は、中継が数える接続の数と、フロー予算の上限の
+// 対象になる数を、別々の項目として運ぶことを確かめる(設計文書 10.2c 節の relay.sessions)。
+// TCP は公開側と宛先側の両方を接続として数えるので、2 つは一致しない。
+func TestDoctorRulesMapSessionsAndFlowsSeparately(t *testing.T) {
+	sts := []relay.Status{
+		{Key: relay.Key{Proto: proto.TCP, Port: 2456}, RuleID: "r1", Listening: true, Sessions: 6, Flows: 3},
+		{Key: relay.Key{Proto: proto.TCP, Port: 2457}, RuleID: "r1", Listening: true, Sessions: 2, Flows: 1},
+	}
+	rules := doctorRules(ruleStatuses(sts), sts)
+	if len(rules) != 1 {
+		t.Fatalf("doctorRules returned %d entries for 1 rule, want 1", len(rules))
+	}
+	if rules[0].Sessions != 8 {
+		t.Errorf("sessions = %d, want 8, the sum of what the relay holds", rules[0].Sessions)
+	}
+	if rules[0].Flows != 4 {
+		t.Errorf("flows = %d, want 4, the sum of what the flow budget caps", rules[0].Flows)
+	}
+}
+
+// TestDoctorClipsLongText は、代表として出す誤りの文字列に上限があることを確かめる。
+// 制御ソケットの応答には大きさの上限が無いので、1 つの長い誤りで行が膨らまないようにする。
+func TestDoctorClipsLongText(t *testing.T) {
+	long := strings.Repeat("x", 100000)
+	fakeNet := &fakeRelayNetwork{failPorts: map[uint16]bool{40000: true}, failReason: long}
+	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: time.Now()} })
+	rt := &runtime{tun: &tunnel.Tunnel{}, rl: relay.New(fakeNet, relay.Options{}), tunStart: time.Now()}
+	t.Cleanup(rt.rl.Close)
+	rt.rl.Apply(relay.DesiredFromRules([]proto.AgentRule{udpRule(t, "r1", 40000, 40000, "192.0.2.5:40000")}))
+
+	ask := serveTestControl(t, rt)
+	line := ask(t, DoctorCommand)
+	if len(line) > 4096 {
+		t.Errorf("the answer is %d bytes although the only listener error was clipped", len(line))
+	}
+	r := parseDoctor(t, line).RuntimeState.Rules[0]
+	for name, got := range map[string]string{"bind_error": r.BindError, "reason": r.Reason} {
+		if len(got) > maxDoctorText+len("... truncated") {
+			t.Errorf("%s is %d bytes, want at most %d", name, len(got), maxDoctorText+len("... truncated"))
+		}
+		if !strings.HasSuffix(got, "... truncated") {
+			t.Errorf("%s does not say it was clipped: %q", name, got)
+		}
+	}
+}
+
+// TestDoctorLeavesOutEmptyLists は、中継が無い実行で空の一覧が null として出ないことと、
+// 時刻の項目が消えずにゼロ値として出ることを確かめる。encoding/json の omitempty は struct に
+// 効かないので、読み手は時刻を IsZero で判定する。
+func TestDoctorLeavesOutEmptyLists(t *testing.T) {
+	rt := &runtime{f: &credentials.Credentials{}}
+	ask := serveTestControl(t, rt)
+	line := ask(t, DoctorCommand)
+	if strings.Contains(line, "null") {
+		t.Errorf("the answer carries a null: %s", line)
+	}
+	for _, key := range []string{`"rules"`, `"budgets"`} {
+		if strings.Contains(line, key) {
+			t.Errorf("%s is present although the agent has no relay: %s", key, line)
+		}
+	}
+	for _, key := range []string{`"refusals_since"`, `"last_handshake"`, `"started_at"`, `"retry_at"`} {
+		if !strings.Contains(line, key) {
+			t.Errorf("%s is missing; a time field never disappears from the answer: %s", key, line)
+		}
+	}
+	res := parseDoctor(t, line)
+	if !res.RuntimeState.RefusalsSince.IsZero() || !res.RuntimeState.Tunnel.StartedAt.IsZero() {
+		t.Errorf("a time with no value did not survive as the zero time: %+v", res.RuntimeState)
+	}
+}
+
 // udpRule は試験用の UDP ルールを 1 本作る。
 func udpRule(t *testing.T, id string, lo, hi uint16, target string) proto.AgentRule {
 	t.Helper()
@@ -628,18 +700,29 @@ func udpRule(t *testing.T, id string, lo, hi uint16, target string) proto.AgentR
 // fakeRelayNetwork はリスナーを開く先の差し替えである。ホストのポートを 1 つも使わずに数百の
 // 待ち受けを作れるので、ポート範囲の広いルールを試験に持ち込める。failPorts のポートは
 // bind に失敗させる。
-type fakeRelayNetwork struct{ failPorts map[uint16]bool }
+type fakeRelayNetwork struct {
+	failPorts map[uint16]bool
+	// failReason は bind の失敗の理由に足す文字列。誤りが長い場合の扱いを試すために使う
+	failReason string
+}
+
+func (n *fakeRelayNetwork) bindErr(p proto.Proto, port uint16) error {
+	if n.failReason != "" {
+		return fmt.Errorf("simulated bind failure on %s port %d: %s", p, port, n.failReason)
+	}
+	return fmt.Errorf("simulated bind failure on %s port %d", p, port)
+}
 
 func (n *fakeRelayNetwork) ListenUDP(port uint16) (net.PacketConn, error) {
 	if n.failPorts[port] {
-		return nil, fmt.Errorf("simulated bind failure on udp port %d", port)
+		return nil, n.bindErr(proto.UDP, port)
 	}
 	return newIdleConn(), nil
 }
 
 func (n *fakeRelayNetwork) ListenTCP(port uint16) (net.Listener, error) {
 	if n.failPorts[port] {
-		return nil, fmt.Errorf("simulated bind failure on tcp port %d", port)
+		return nil, n.bindErr(proto.TCP, port)
 	}
 	return newIdleConn(), nil
 }
