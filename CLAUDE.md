@@ -55,7 +55,7 @@ nftables や WireGuard の挙動を確かめる使い捨ての実験コードは
 
 ## CI が通す検査
 
-`.github/workflows/ci.yml` は push と pull request のたびに次を検査します。`gofmt -l` によるフォーマットの確認、`go vet`、ビルドと `go test ./...`、`staticcheck` による静的解析、文字列リテラルへの日本語混入の検査([scripts/check-japanese](scripts/check-japanese/)。ツールの出力は英語だけを使う約束のためです)、英語の出力への丸括弧の混入の検査([scripts/check-parens](scripts/check-parens/)。補足はコロンかセミコロンか言い換えで表す約束のためです)、ログへの秘密の混入の検査([scripts/check-log-tokens.sh](scripts/check-log-tokens.sh))、公開対象ファイルの全角記号の検査([scripts/check-ascii-punct.sh](scripts/check-ascii-punct.sh))です。Go の検査は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。全角記号の検査は、どの PR でも流します。ラボの結合テストは Incus の VM を必要とするため、CI には含まれません。
+`.github/workflows/ci.yml` は push と pull request のたびに次を検査します。`gofmt -l` によるフォーマットの確認、`go vet`、ビルドと `go test ./...`、`staticcheck` による静的解析、文字列リテラルへの日本語混入の検査([scripts/check-japanese](scripts/check-japanese/)。ツールの出力は英語だけを使う約束のためです)、英語の出力への丸括弧の混入の検査([scripts/check-parens](scripts/check-parens/)。補足はコロンかセミコロンか言い換えで表す約束のためです)、ログへの秘密の混入の検査([scripts/check-log-tokens.sh](scripts/check-log-tokens.sh))、公開対象ファイルの全角記号の検査([scripts/check-ascii-punct.sh](scripts/check-ascii-punct.sh))です。Go の検査は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。`lint-output` ジョブの検査は、どの PR でも流します。ラボの結合テストは Incus の VM を必要とするため、CI には含まれません。
 
 ## 内部構造の固定の終了後も効く制約
 
