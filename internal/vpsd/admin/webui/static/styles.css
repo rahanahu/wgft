@@ -196,6 +196,11 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 .rule-detail-head { margin-bottom: 18px; }
 .rule-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 15px; }
 .rule-summary form { display: inline; }
+/* 詳細ページの 3 つの区画(設定、アクセス制御、ルール操作)。区画の中の小見出しは .detail-section */
+.detail-group { border-top: 2px solid var(--border); padding-top: 18px; margin-top: 28px; }
+.detail-group > h2 { margin: 0 0 4px; font-size: 17px; }
+.detail-group > .field-help { margin: 0 0 16px; }
+.settings-form > .form-actions { margin-top: 18px; }
 .detail-section { border-top: 1px solid var(--border); padding-top: 16px; margin-top: 16px; }
 .detail-section:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
 .detail-section h3 { margin: 0 0 6px; font-size: 15px; }

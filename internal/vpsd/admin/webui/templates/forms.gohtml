@@ -134,168 +134,197 @@
     <a class="small-btn accent" href="/ui/doctor/{{ .ID }}">{{ T .Locale "doctorTitle" }}</a>
   </div>
   {{ if .StateReason }}<p class="danger-text">{{ .StateReason }}</p>{{ end }}
-  {{ if .Note }}<p class="muted">{{ .Note }}</p>{{ end }}
+  {{ if .HeadNote }}<p class="muted">{{ .HeadNote }}</p>{{ end }}
 </div>
 
-<section class="detail-section">
-  <h3>{{ T .Locale "metaHead" }}</h3>
-  {{ if .MetaError }}<p class="danger-text">{{ .MetaError }}</p>{{ end }}
-  <form method="post" action="/ui/rules/{{ .ID }}/meta" class="rule-form">
-    <div class="field">
-      <label for="e-group">{{ T .Locale "fGroup" }}</label>
-      <input id="e-group" class="search" name="group" value="{{ .Group }}" list="group-list" maxlength="32" placeholder="minecraft">
-      <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
-      <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
-    </div>
-    <div class="field">
-      <label for="e-note">{{ T .Locale "fNote" }}</label>
-      <input id="e-note" class="search" name="note" value="{{ .Note }}" maxlength="120">
-      <small class="field-help">{{ T .Locale "fNoteHelp" }}</small>
-    </div>
-    <div class="form-actions"><button class="btn primary" type="submit">{{ T .Locale "save" }}</button></div>
-  </form>
-</section>
-
-<section class="detail-section">
-  <h3>{{ T .Locale "denyListHead" }}</h3>
-  <p class="field-help">{{ T .Locale "denyListHelp" }}</p>
-  {{ if .DenyError }}<p class="danger-text">{{ .DenyError }}</p>{{ end }}
-  <ul class="cidr-list">
-    {{ range .DenyList }}
-    <li><span class="mono">{{ .CIDR }}</span>
-      <form method="post" action="/ui/rules/{{ $.ID }}/deny/rm">
-        <input type="hidden" name="cidr" value="{{ .CIDR }}">
-        <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
-      </form>
-    </li>
-    {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
-  </ul>
-  <form method="post" action="/ui/rules/{{ .ID }}/deny/add" class="inline-form">
-    <div class="field">
-      <textarea name="cidrs" rows="3" placeholder="203.0.113.7&#10;198.51.100.0/24">{{ .DenyInput }}</textarea>
-      <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
-    </div>
-    <button class="btn" type="submit">{{ T .Locale "add" }}</button>
-  </form>
-</section>
-
-<section class="detail-section">
-  <h3>{{ T .Locale "allowListHead" }}</h3>
-  <p class="field-help">{{ T .Locale "allowListHelp" }}</p>
-  {{ if .AllowError }}<p class="danger-text">{{ .AllowError }}</p>{{ end }}
-  <ul class="cidr-list">
-    {{ range .AllowList }}
-    <li><span class="mono">{{ .CIDR }}</span>
-      <form method="post" action="/ui/rules/{{ $.ID }}/allow/rm" {{ if .Confirm }}data-confirm="{{ T $.Locale "confirmAllowLast" }}"{{ end }}>
-        <input type="hidden" name="cidr" value="{{ .CIDR }}">
-        <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
-      </form>
-    </li>
-    {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
-  </ul>
-  <form method="post" action="/ui/rules/{{ .ID }}/allow/add" class="inline-form" {{ if .AllowConfirmAdd }}data-confirm="{{ T .Locale "confirmAllowFirst" }}"{{ end }}>
-    <div class="field">
-      <textarea name="cidrs" rows="3" placeholder="203.0.113.7">{{ .AllowInput }}</textarea>
-      <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
-    </div>
-    <button class="btn" type="submit">{{ T .Locale "add" }}</button>
-  </form>
-</section>
-
-<section class="detail-section">
-  <div class="title-row"><h3>{{ T .Locale "rateHead" }}</h3><small class="muted">{{ printf (T .Locale "rateDroppedFmt") .Dropped }}</small></div>
-  <p class="field-help">{{ T .Locale "rateHelp" }}</p>
-  {{ if .RateError }}<p class="danger-text">{{ .RateError }}</p>{{ end }}
+{{/* 設定:group、note、レート制限を 1 つのフォームにまとめ、末尾の 1 つの保存ボタンで保存する。
+     orig_* は描いた時点の保存値で、保存は利用者が変えた欄だけを当てはめる(仕様 10.1 節)。 */}}
+<section class="detail-group" id="rule-settings">
+  <h2>{{ T .Locale "settingsHead" }}</h2>
+  <p class="field-help">{{ T .Locale "settingsHelp" }}</p>
+  {{ if .SettingsError }}<p class="danger-text">{{ .SettingsError }}</p>{{ end }}
   {{ $loc := .Locale }}
-  <form method="post" action="/ui/rules/{{ .ID }}/rates" class="rate-form">
-    <div class="rate-field">
-      <div class="rate-row">
-        <span class="rate-label">{{ T .Locale "ratePerSourceHead" }}</span>
-        <input type="number" min="1" name="per_source_count" value="{{ .Rates.PerSource.Count }}">
-        <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
-        <select name="per_source_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.PerSource.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
-        <label class="check"><input type="checkbox" name="per_source_nolimit" value="1" {{ if .Rates.PerSource.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
-      </div>
-      <p class="field-help">{{ T .Locale "ratePerSourceHelp" }}</p>
-      {{ if and (not .Rates.PerSource.NoLimit) .Rates.PerSource.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPerSourceFmt") (UnitLabel $loc .Rates.PerSource.Unit) .Rates.PerSource.Count }}</p>{{ end }}
-    </div>
+  <form method="post" action="/ui/rules/{{ .ID }}/settings" class="settings-form" id="settings-form">
+    <input type="hidden" name="orig_group" value="{{ .OrigGroup }}">
+    <input type="hidden" name="orig_note" value="{{ .OrigNote }}">
+    <input type="hidden" name="orig_per_source" value="{{ .Rates.PerSource.Orig }}">
+    <input type="hidden" name="orig_new_flow" value="{{ .Rates.NewFlow.Orig }}">
+    <input type="hidden" name="orig_packet" value="{{ .Rates.Packet.Orig }}">
 
-    <div class="rate-field">
-      <div class="rate-row">
-        <span class="rate-label">{{ T .Locale "rateNewFlowHead" }}</span>
-        <input type="number" min="1" name="new_flow_count" value="{{ .Rates.NewFlow.Count }}">
-        <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
-        <select name="new_flow_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.NewFlow.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
-        <label class="check"><input type="checkbox" name="new_flow_nolimit" value="1" {{ if .Rates.NewFlow.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
-      </div>
-      <p class="field-help">{{ T .Locale "rateNewFlowHelp" }}</p>
-      {{ if and (not .Rates.NewFlow.NoLimit) .Rates.NewFlow.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryWholeFmt") (UnitLabel $loc .Rates.NewFlow.Unit) .Rates.NewFlow.Count }}</p>{{ end }}
-    </div>
-
-    {{ $hasPacket := and (not .Rates.Packet.NoLimit) .Rates.Packet.Count }}
-    <details class="advanced" {{ if $hasPacket }}open{{ end }}>
-      <summary>{{ T .Locale "ratePacketDetails" }}</summary>
-      <div class="advanced-body">
-        <div class="rate-field">
-          <div class="rate-row">
-            <span class="rate-label">{{ T .Locale "ratePacketHead" }}</span>
-            <input type="number" min="1" name="packet_count" value="{{ .Rates.Packet.Count }}">
-            <span class="rate-unit-word">{{ T .Locale "ratePacketWord" }}</span> /
-            <select name="packet_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.Packet.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
-            <label class="check"><input type="checkbox" name="packet_nolimit" value="1" {{ if .Rates.Packet.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
-          </div>
-          <p class="field-help">{{ T .Locale "ratePacketHelp" }}</p>
-          {{ if $hasPacket }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPacketFmt") (UnitLabel $loc .Rates.Packet.Unit) .Rates.Packet.Count }}</p>{{ end }}
-          {{ if .ShowPacketNote }}<p class="field-help">{{ T .Locale "packetTCPNoEffectNote" }}</p>{{ end }}
+    <div class="detail-section">
+      <h3>{{ T .Locale "metaHead" }}</h3>
+      <div class="rule-form">
+        <div class="field">
+          <label for="e-group">{{ T .Locale "fGroup" }}</label>
+          <input id="e-group" class="search" name="group" value="{{ .Group }}" list="group-list" maxlength="32" placeholder="minecraft">
+          <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
+          <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
+          {{ if .GroupConflict }}<p class="danger-text">{{ .GroupConflict }}</p>{{ end }}
+        </div>
+        <div class="field">
+          <label for="e-note">{{ T .Locale "fNote" }}</label>
+          <input id="e-note" class="search" name="note" value="{{ .Note }}" maxlength="120">
+          <small class="field-help">{{ T .Locale "fNoteHelp" }}</small>
+          {{ if .NoteConflict }}<p class="danger-text">{{ .NoteConflict }}</p>{{ end }}
         </div>
       </div>
-    </details>
+    </div>
+
+    <div class="detail-section rate-form">
+      <div class="title-row"><h3>{{ T .Locale "rateHead" }}</h3><small class="muted">{{ printf (T .Locale "rateDroppedFmt") .Dropped }}</small></div>
+      <p class="field-help">{{ T .Locale "rateHelp" }}</p>
+      <div class="rate-field">
+        <div class="rate-row">
+          <span class="rate-label">{{ T .Locale "ratePerSourceHead" }}</span>
+          <input type="number" min="1" name="per_source_count" value="{{ .Rates.PerSource.Count }}">
+          <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
+          <select name="per_source_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.PerSource.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
+          <label class="check"><input type="checkbox" name="per_source_nolimit" value="1" {{ if .Rates.PerSource.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+        </div>
+        {{ if .Rates.PerSource.Error }}<p class="danger-text">{{ .Rates.PerSource.Error }}</p>{{ end }}
+        {{ if .Rates.PerSource.Conflict }}<p class="danger-text">{{ .Rates.PerSource.Conflict }}</p>{{ end }}
+        <p class="field-help">{{ T .Locale "ratePerSourceHelp" }}</p>
+        {{ if and (not .Rates.PerSource.NoLimit) .Rates.PerSource.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPerSourceFmt") (UnitLabel $loc .Rates.PerSource.Unit) .Rates.PerSource.Count }}</p>{{ end }}
+      </div>
+
+      <div class="rate-field">
+        <div class="rate-row">
+          <span class="rate-label">{{ T .Locale "rateNewFlowHead" }}</span>
+          <input type="number" min="1" name="new_flow_count" value="{{ .Rates.NewFlow.Count }}">
+          <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
+          <select name="new_flow_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.NewFlow.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
+          <label class="check"><input type="checkbox" name="new_flow_nolimit" value="1" {{ if .Rates.NewFlow.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+        </div>
+        {{ if .Rates.NewFlow.Error }}<p class="danger-text">{{ .Rates.NewFlow.Error }}</p>{{ end }}
+        {{ if .Rates.NewFlow.Conflict }}<p class="danger-text">{{ .Rates.NewFlow.Conflict }}</p>{{ end }}
+        <p class="field-help">{{ T .Locale "rateNewFlowHelp" }}</p>
+        {{ if and (not .Rates.NewFlow.NoLimit) .Rates.NewFlow.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryWholeFmt") (UnitLabel $loc .Rates.NewFlow.Unit) .Rates.NewFlow.Count }}</p>{{ end }}
+      </div>
+
+      {{ $hasPacket := and (not .Rates.Packet.NoLimit) .Rates.Packet.Count }}
+      <details class="advanced" {{ if or $hasPacket .Rates.Packet.Error .Rates.Packet.Conflict }}open{{ end }}>
+        <summary>{{ T .Locale "ratePacketDetails" }}</summary>
+        <div class="advanced-body">
+          <div class="rate-field">
+            <div class="rate-row">
+              <span class="rate-label">{{ T .Locale "ratePacketHead" }}</span>
+              <input type="number" min="1" name="packet_count" value="{{ .Rates.Packet.Count }}">
+              <span class="rate-unit-word">{{ T .Locale "ratePacketWord" }}</span> /
+              <select name="packet_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.Packet.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
+              <label class="check"><input type="checkbox" name="packet_nolimit" value="1" {{ if .Rates.Packet.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+            </div>
+            {{ if .Rates.Packet.Error }}<p class="danger-text">{{ .Rates.Packet.Error }}</p>{{ end }}
+            {{ if .Rates.Packet.Conflict }}<p class="danger-text">{{ .Rates.Packet.Conflict }}</p>{{ end }}
+            <p class="field-help">{{ T .Locale "ratePacketHelp" }}</p>
+            {{ if $hasPacket }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPacketFmt") (UnitLabel $loc .Rates.Packet.Unit) .Rates.Packet.Count }}</p>{{ end }}
+            {{ if .ShowPacketNote }}<p class="field-help">{{ T .Locale "packetTCPNoEffectNote" }}</p>{{ end }}
+          </div>
+        </div>
+      </details>
+    </div>
 
     <div class="form-actions"><button class="btn primary" type="submit">{{ T .Locale "save" }}</button></div>
   </form>
 </section>
 
-{{ if .CanSplit }}
-<section class="detail-section">
-  <h3>{{ T .Locale "splitHead" }}</h3>
-  <p class="field-help">{{ T .Locale "splitHelp" }}</p>
-  {{ if .SplitError }}<p class="danger-text">{{ .SplitError }}</p>{{ end }}
-  <form method="post" action="/ui/rules/{{ .ID }}/split" class="split-form" id="split-form"
-        data-listen-lo="{{ .ListenLo }}" data-listen-hi="{{ .ListenHi }}"
-        data-target-host="{{ .TargetHost }}" data-target-port="{{ .TargetPort }}">
-    <div class="field">
-      <label for="split-at">{{ T .Locale "splitAt" }}</label>
-      <select id="split-at" name="at">
-        {{ range .SplitPorts }}<option value="{{ . }}">{{ . }}</option>{{ end }}
-      </select>
-    </div>
-    <p id="split-preview" class="mono split-preview"></p>
-    <div class="form-actions"><button class="btn primary" type="submit">{{ T .Locale "splitSubmit" }}</button></div>
-  </form>
-</section>
-{{ end }}
+{{/* アクセス制御:拒否/許可リスト。追加と「外す」はその場で保存する。 */}}
+<section class="detail-group" id="rule-access">
+  <h2>{{ T .Locale "accessHead" }}</h2>
+  <p class="field-help">{{ T .Locale "accessHelp" }}</p>
 
-<section class="detail-section">
-  <h3>{{ T .Locale "mergeHead" }}</h3>
-  <p class="field-help">{{ T .Locale "mergeHelp" }}</p>
-  {{ if .MergeError }}<p class="danger-text">{{ .MergeError }}</p>{{ end }}
-  {{ if .MergeCandidates }}
-  <ul class="merge-list">
-    {{ range .MergeCandidates }}
-    <li>
-      <span><strong class="proto {{ $.ProtoClass }}">{{ $.ProtoUpper }}</strong> <span class="mono">{{ .Ports }}</span>
-        <span class="flow-arrow">→</span> <span class="mono">{{ .Target }}</span></span>
-      <form method="post" action="/ui/rules/{{ $.ID }}/merge">
-        <input type="hidden" name="other" value="{{ .ID }}">
-        <button class="btn" type="submit">{{ T $.Locale "mergeWithThis" }}</button>
-      </form>
-    </li>
-    {{ end }}
-  </ul>
-  {{ else if .MergeBlocked }}
-  <p class="muted">{{ printf (T .Locale "mergeBlockedFmt") .MergeBlocked.Ports .MergeBlocked.Target .MergeBlocked.Reason }}</p>
-  {{ else }}
-  <p class="muted">{{ T .Locale "mergeNoNeighbor" }}</p>
+  <div class="detail-section">
+    <h3>{{ T .Locale "denyListHead" }}</h3>
+    <p class="field-help">{{ T .Locale "denyListHelp" }}</p>
+    {{ if .DenyError }}<p class="danger-text">{{ .DenyError }}</p>{{ end }}
+    <ul class="cidr-list">
+      {{ range .DenyList }}
+      <li><span class="mono">{{ .CIDR }}</span>
+        <form method="post" action="/ui/rules/{{ $.ID }}/deny/rm">
+          <input type="hidden" name="cidr" value="{{ .CIDR }}">
+          <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
+        </form>
+      </li>
+      {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
+    </ul>
+    <form method="post" action="/ui/rules/{{ .ID }}/deny/add" class="inline-form">
+      <div class="field">
+        <textarea name="cidrs" rows="3" placeholder="203.0.113.7&#10;198.51.100.0/24">{{ .DenyInput }}</textarea>
+        <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
+      </div>
+      <button class="btn" type="submit">{{ T .Locale "add" }}</button>
+    </form>
+  </div>
+
+  <div class="detail-section">
+    <h3>{{ T .Locale "allowListHead" }}</h3>
+    <p class="field-help">{{ T .Locale "allowListHelp" }}</p>
+    {{ if .AllowError }}<p class="danger-text">{{ .AllowError }}</p>{{ end }}
+    <ul class="cidr-list">
+      {{ range .AllowList }}
+      <li><span class="mono">{{ .CIDR }}</span>
+        <form method="post" action="/ui/rules/{{ $.ID }}/allow/rm" {{ if .Confirm }}data-confirm="{{ T $.Locale "confirmAllowLast" }}"{{ end }}>
+          <input type="hidden" name="cidr" value="{{ .CIDR }}">
+          <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
+        </form>
+      </li>
+      {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
+    </ul>
+    <form method="post" action="/ui/rules/{{ .ID }}/allow/add" class="inline-form" {{ if .AllowConfirmAdd }}data-confirm="{{ T .Locale "confirmAllowFirst" }}"{{ end }}>
+      <div class="field">
+        <textarea name="cidrs" rows="3" placeholder="203.0.113.7">{{ .AllowInput }}</textarea>
+        <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
+      </div>
+      <button class="btn" type="submit">{{ T .Locale "add" }}</button>
+    </form>
+  </div>
+</section>
+
+{{/* ルール操作:分割と統合。どちらもボタンを押した時点で実行する。 */}}
+<section class="detail-group" id="rule-operations">
+  <h2>{{ T .Locale "ruleOpsHead" }}</h2>
+
+  {{ if .CanSplit }}
+  <div class="detail-section">
+    <h3>{{ T .Locale "splitHead" }}</h3>
+    <p class="field-help">{{ T .Locale "splitHelp" }}</p>
+    {{ if .SplitError }}<p class="danger-text">{{ .SplitError }}</p>{{ end }}
+    <form method="post" action="/ui/rules/{{ .ID }}/split" class="split-form" id="split-form"
+          data-listen-lo="{{ .ListenLo }}" data-listen-hi="{{ .ListenHi }}"
+          data-target-host="{{ .TargetHost }}" data-target-port="{{ .TargetPort }}">
+      <div class="field">
+        <label for="split-at">{{ T .Locale "splitAt" }}</label>
+        <select id="split-at" name="at">
+          {{ range .SplitPorts }}<option value="{{ . }}">{{ . }}</option>{{ end }}
+        </select>
+      </div>
+      <p id="split-preview" class="mono split-preview"></p>
+      <div class="form-actions"><button class="btn primary" type="submit">{{ T .Locale "splitSubmit" }}</button></div>
+    </form>
+  </div>
   {{ end }}
+
+  <div class="detail-section">
+    <h3>{{ T .Locale "mergeHead" }}</h3>
+    <p class="field-help">{{ T .Locale "mergeHelp" }}</p>
+    {{ if .MergeError }}<p class="danger-text">{{ .MergeError }}</p>{{ end }}
+    {{ if .MergeCandidates }}
+    <ul class="merge-list">
+      {{ range .MergeCandidates }}
+      <li>
+        <span><strong class="proto {{ $.ProtoClass }}">{{ $.ProtoUpper }}</strong> <span class="mono">{{ .Ports }}</span>
+          <span class="flow-arrow">→</span> <span class="mono">{{ .Target }}</span></span>
+        <form method="post" action="/ui/rules/{{ $.ID }}/merge">
+          <input type="hidden" name="other" value="{{ .ID }}">
+          <button class="btn" type="submit">{{ T $.Locale "mergeWithThis" }}</button>
+        </form>
+      </li>
+      {{ end }}
+    </ul>
+    {{ else if .MergeBlocked }}
+    <p class="muted">{{ printf (T .Locale "mergeBlockedFmt") .MergeBlocked.Ports .MergeBlocked.Target .MergeBlocked.Reason }}</p>
+    {{ else }}
+    <p class="muted">{{ T .Locale "mergeNoNeighbor" }}</p>
+    {{ end }}
+  </div>
 </section>
 {{ end }}
