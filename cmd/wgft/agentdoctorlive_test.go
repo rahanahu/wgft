@@ -633,6 +633,153 @@ func TestAgentDoctorHumanOutputForARunningAgent(t *testing.T) {
 	}
 }
 
+// 値だけを示し合否を持たない 6 つの検査(agentLiveOnly の valueOnly)は、判定済みの検査の後に来る
+// 「Observed values」節に入り、UNKNOWN の実行では大きな状態語を出さない。判定済みの検査は群の中に
+// 残り、これまでどおり状態語を出す(10.2c 節、2026-09-24 の所有者の決定)。
+func TestAgentDoctorHumanOutputSeparatesObservedValues(t *testing.T) {
+	in := testAgentDoctorInput(t, t.TempDir())
+	healthyAgentForTest(t, &in)
+	rep := agentDiagnose(in)
+	var b strings.Builder
+	writeAgentDoctorReport(&b, rep)
+	out := b.String()
+
+	relayAt := strings.Index(out, "Relay\n")
+	observedAt := strings.Index(out, "\nObserved values\n")
+	if relayAt < 0 || observedAt < 0 || observedAt < relayAt {
+		t.Fatalf("Observed values does not come after the five groups:\n%s", out)
+	}
+	historyAt := strings.Index(out, "\nHistory\n")
+	if historyAt < observedAt {
+		t.Fatalf("History does not follow Observed values:\n%s", out)
+	}
+	section := out[observedAt:historyAt]
+
+	for _, spec := range agentLiveOnly {
+		if !spec.valueOnly {
+			continue
+		}
+		c, ok := findAgentCheck(rep, spec.ID)
+		if !ok {
+			t.Fatalf("%s is missing from the report", spec.ID)
+		}
+		if c.Status != statusUnknown {
+			t.Fatalf("test setup: %s is %s, want unknown for a healthy running agent; fix the scenario", spec.ID, c.Status)
+		}
+		if humanHasLine(out, spec.Label, statusWord(statusUnknown)) {
+			t.Errorf("%s still prints its status word %s in the human output:\n%s", spec.Label, statusWord(statusUnknown), out)
+		}
+		if at := strings.Index(out, spec.Label); at < observedAt {
+			t.Errorf("%s is not printed inside the Observed values section:\n%s", spec.Label, out)
+		}
+		// 値を読めた行は Next を出さない。読み方はヘルプと --json の next が持つ(10.2c 節)。
+		if c.Next == "" {
+			t.Fatalf("test setup: %s carries no Next, so this test cannot see it left out", spec.ID)
+		}
+		if strings.Contains(normalizeWhitespace(section), normalizeWhitespace(c.Next)) {
+			t.Errorf("%s prints its Next text in the Observed values section:\n%s", spec.Label, section)
+		}
+	}
+	if strings.Contains(section, "Check:") {
+		t.Errorf("the Observed values section prints a Check: line for a value that was read:\n%s", section)
+	}
+
+	// 判定済みの検査は変わらず、群の中で状態語を出す。
+	for _, want := range []string{
+		"control socket     OK",
+		"control connection OK",
+		"tunnel             OK",
+		"listeners          OK",
+		"target allowlist   OK",
+	} {
+		at := strings.Index(out, want)
+		if at < 0 {
+			t.Errorf("the output has no %q:\n%s", want, out)
+			continue
+		}
+		if at > observedAt {
+			t.Errorf("%q moved into the Observed values section:\n%s", want, out)
+		}
+	}
+}
+
+// エージェントが止まっていて値そのものを読めない実行では、値だけを示す検査も Observed values 節の
+// 中で SKIPPED の状態語を保つ。値が無いことは、値と取り違えられてはならない(10.2c 節)。
+func TestAgentDoctorHumanOutputKeepsTheStatusWordWhenAnObservedValueIsSkipped(t *testing.T) {
+	in := testAgentDoctorInput(t, t.TempDir())
+	stoppedAgentForTest(t, &in)
+	rep := agentDiagnose(in)
+	var b strings.Builder
+	writeAgentDoctorReport(&b, rep)
+	out := b.String()
+
+	observedAt := strings.Index(out, "\nObserved values\n")
+	if observedAt < 0 {
+		t.Fatalf("no Observed values section:\n%s", out)
+	}
+	for _, spec := range agentLiveOnly {
+		if !spec.valueOnly {
+			continue
+		}
+		c, ok := findAgentCheck(rep, spec.ID)
+		if !ok {
+			t.Fatalf("%s is missing from the report", spec.ID)
+		}
+		if c.Status != statusSkipped {
+			t.Fatalf("test setup: %s is %s, want skipped for a stopped agent; fix the scenario", spec.ID, c.Status)
+		}
+		if !humanHasLine(out[observedAt:], spec.Label, statusWord(statusSkipped)) {
+			t.Errorf("%s does not print its status word %s inside Observed values:\n%s", spec.Label, statusWord(statusSkipped), out)
+		}
+	}
+}
+
+// Observed values 節で値を読めた行は、ラベルと同じ行から値を始め、長い値は値の桁(21 桁目)で
+// 折り返す。「Not tested by this command」の節と同じ形である(10.2c 節)。
+func TestAgentDoctorObservedValuesStartOnTheLabelLine(t *testing.T) {
+	detail := strings.Repeat("word ", 30) + "end"
+	var b strings.Builder
+	writeAgentDoctorObserved(&b, []agentDoctorCheck{{
+		ID: agentCheckTransfer, Label: "transfer", Status: statusUnknown, Reason: agentReasonNoThreshold,
+		Detail: detail, valueOnly: true,
+	}})
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	// lines[0] は空行、lines[1] は節の見出しである。
+	if len(lines) < 4 || lines[1] != "Observed values" {
+		t.Fatalf("want the heading, the label line and at least one continuation line:\n%s", b.String())
+	}
+	first := fmt.Sprintf("  %-*s word ", labelWidth, "transfer")
+	if !strings.HasPrefix(lines[2], first) {
+		t.Errorf("the value does not start on the label's line; want the prefix %q:\n%s", first, b.String())
+	}
+	valueColumn := 2 + labelWidth + 1
+	for _, line := range lines[3:] {
+		if len(line) <= valueColumn || strings.TrimSpace(line[:valueColumn]) != "" || line[valueColumn] == ' ' {
+			t.Errorf("continuation line %q does not start at the value column %d:\n%s", line, valueColumn+1, b.String())
+		}
+	}
+	if got := normalizeWhitespace(strings.Join(lines[2:], " ")); got != "transfer "+normalizeWhitespace(detail) {
+		t.Errorf("the value was not printed whole: %q", got)
+	}
+}
+
+// Observed values 節で UNKNOWN 以外の状態になった行は、判定済みの検査と同じく状態語と Next を
+// 出す。値そのものを読めなかったことと、その次に見るものを落とさないためである(10.2c 節)。
+func TestAgentDoctorObservedValuesKeepNextWhenNotAValue(t *testing.T) {
+	var b strings.Builder
+	writeAgentDoctorObserved(&b, []agentDoctorCheck{{
+		ID: agentCheckTransfer, Label: "transfer", Status: statusSkipped, Reason: agentReasonRuntimeBusy,
+		Detail: "not read", Next: "look at the tunnel line", valueOnly: true,
+	}})
+	out := b.String()
+	if !humanHasLine(out, "transfer", statusWord(statusSkipped)) {
+		t.Errorf("a SKIPPED observed value lost its status word:\n%s", out)
+	}
+	if !strings.Contains(out, "Check: look at the tunnel line") {
+		t.Errorf("a SKIPPED observed value lost its Next:\n%s", out)
+	}
+}
+
 // --- 助け ---
 
 // fakeDoctorSocket は、制御ソケットの代わりに 1 行の応答を返すエージェントを模す。要求が

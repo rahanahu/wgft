@@ -155,16 +155,43 @@ Values read from agent.json carry a "last:" prefix: they are what was saved, not
 what is true now, the same way "agent ls" marks a disconnected agent's report.
 Values read over the control socket carry no prefix: they are current.
 
-Items that only state a value read UNKNOWN, not OK: transfer counters, reconnect
-waits, keepalive times, session counts and refusal totals are healthy or not
-only against knowledge this command does not have, and it sets no threshold of
-its own. The last handshake is shown as a fact for the same reason; whether it
-is healthy is what "server doctor" answers.
+After the five groups, a separate "Observed values" section holds six items
+that only ever state a value, never OK: reconnect waits, keepalive times, the
+watchdog's rebuild interval, transfer counters, session counts and refusal
+totals are healthy or not only against knowledge this command does not have,
+and it sets no threshold of its own. There, a label and its value print with
+no status word, so a healthy agent's six UNKNOWNs do not read as six findings.
+When a value cannot be read, for example because the agent is stopped, the
+item prints SKIPPED with its status word, so a missing value is not mistaken
+for an observed one. The last handshake is shown as a fact for the same reason
+as these six, but it stays inside the tunnel item in the Tunnel group, since
+that item's own status can be OK or FAILED.
 
-The Connection, Tunnel and Relay items other than "wg endpoint resolve" are held
-only by the running process and are read over its control socket. While the
-agent is stopped, or while its socket cannot be reached, they are listed as
-SKIPPED with the reason why rather than left out. One of them, the target
+How to read the six values; --json keeps each item's own "next":
+
+  reconnect backoff  a wait that keeps growing while the control connection
+                     stays down points at the server or the line to it
+  liveness           the agent's own keepalives on the control stream; they
+                     are cleared on every reconnect, so an empty pair on a
+                     stream that is up means the connection is new
+  watchdog           the rebuild interval the agent judges by, not a
+                     countdown; a pending rebuild means the tunnel item says
+                     why the last build failed
+  transfer           an idle tunnel keeps the same counts and is healthy; run
+                     this twice while traffic should flow to see them move
+  sessions           flows are what the budget counts, one per public-side
+                     TCP connection or UDP source address and port; sessions
+                     count both sides of a TCP relay
+  refusals           counted from the time the tunnel was built; budget means
+                     the whole process was full, rule_cap that one rule hit
+                     its share, reserve that the room left was held for
+                     other rules
+
+The Connection, Tunnel and Relay items other than "wg endpoint resolve", and
+the six items printed under Observed values, are held only by the running
+process and are read over its control socket. While the agent is stopped, or
+while its socket cannot be reached, they are listed as SKIPPED with the reason
+why rather than left out. One of them, the target
 allowlist, reads UNKNOWN instead while no process is running or while that
 cannot be settled: the list is a setting, so evidence for it exists somewhere,
 but only the running process says which list it is holding. Two answers about that socket
