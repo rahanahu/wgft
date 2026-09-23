@@ -67,13 +67,17 @@ const (
 	liveUnreachable
 )
 
-// 稼働中のプロセスから読む検査の理由の符号。10.2c 節は agent_not_running、
-// control_socket_unreachable、resolve_failed、no_threshold、reconnecting、handshake_pending を
-// 出発点として残し、残りは実装のときに定めるとしている。
+// 稼働中のプロセスから読む検査の理由の符号。agentdoctor.go の符号と同じく、JSON の "reason" の
+// 値であり、1 つの符号は 1 つの事実だけを表す(設計文書 10.2c 節の「機械向けの出力」)。
 const (
 	// agentReasonControlUnreachable は、稼働中のエージェントの制御ソケットに繋げない場合である。
-	// 10.2c 節が定める符号であり、接続そのものができない場合だけに当てる。
+	// 10.2c 節が定める符号であり、接続そのものができない場合だけに当てる。パスが長すぎる場合は
+	// agentReasonControlPathTooLong であり、この符号に含めない。
 	agentReasonControlUnreachable = "control_socket_unreachable"
+	// agentReasonControlPathTooLong は、制御ソケットのパスが sun_path の上限を超えていて、原理的に
+	// 繋げない場合である。パスを変えない限り続く事実であり、対処もデータディレクトリを短いパスに
+	// 移すことなので、他の繋げない場合と分ける(10.2c 節)。
+	agentReasonControlPathTooLong = "control_socket_path_too_long"
 	// agentReasonDoctorUnsupported は、古い常駐プロセスが doctor に対応していない場合である。
 	// 接続はできているので control_socket_unreachable には当たらない(10.2c 節)。
 	agentReasonDoctorUnsupported = "doctor_unsupported"
@@ -92,8 +96,14 @@ const (
 	// agentReasonHandshakePending は、トンネルはあるがハンドシェイクがまだ成立していない場合で
 	// ある(10.2c 節)。
 	agentReasonHandshakePending = "handshake_pending"
-	// agentReasonNoTunnel は、トンネルが無い場合である。理由が正常な遷移を指すときに当てる。
+	// agentReasonNoTunnel は、トンネルが今無いことである。tunnel.local では、原因が
+	// agentReasonFullStatePending と agentReasonTunnelBuildFailed のどちらにも当たらない場合に
+	// 当てる。tunnel.transfer では原因を問わずに当てる。
 	agentReasonNoTunnel = "no_tunnel"
+	// agentReasonFullStatePending は、トンネルが無く、稼働中のエージェントが全体状態をまだ持って
+	// いない場合である。agent.json が全体状態を持たないこと(agentReasonNoLastState)とは別の
+	// 事実であり、稼働中のプロセスから読む。
+	agentReasonFullStatePending = "full_state_pending"
 	// agentReasonTunnelBuildFailed は、トンネルの構築が実際に失敗している場合である。
 	agentReasonTunnelBuildFailed = "tunnel_build_failed"
 	// agentReasonTunnelErrorNoEndpoint は、トンネルが誤りを報告していて、転送に使える解決済みの
@@ -266,14 +276,19 @@ func agentLiveSkip(c *agentDoctorCheck, run agentRunState, live agentLive) {
 	switch live.Kind {
 	case liveNotAttempted:
 		if run.undetermined() {
-			c.Reason = agentReasonRunStateUnknown
+			// 手前の agent.process の符号をそのまま持つ(10.2c 節)。
+			c.Reason = agentReasonLockUnreadable
 			c.Detail = "whether the agent is running could not be determined, so its live state was not read"
 			return
 		}
 		c.Reason = agentReasonNotRunning
 		c.Detail = "the agent is not running, so its live state was not read"
 	case liveDenied, livePathTooLong, liveUnreachable:
+		// 手前の agent.control の符号をそのまま持つ(10.2c 節)。
 		c.Reason = agentReasonControlUnreachable
+		if live.Kind == livePathTooLong {
+			c.Reason = agentReasonControlPathTooLong
+		}
 		c.Detail = "the agent is running, but its control socket could not be reached, so its live state was not read"
 		c.Next = "the control socket line above says why; this value comes from the running process alone"
 	case liveUnsupported:
@@ -344,7 +359,7 @@ func agentControlCheck(c *agentDoctorCheck, run agentRunState, live agentLive) {
 		c.Detail = "the agent is running, but its control socket at " + live.Path + " refuses this command's permissions: " + errText(live.Err)
 		c.Next = agentSamePrincipalNext
 	case livePathTooLong:
-		c.Status, c.Reason = statusFailed, agentReasonControlUnreachable
+		c.Status, c.Reason = statusFailed, agentReasonControlPathTooLong
 		c.Detail = fmt.Sprintf("the agent is running, but its control socket path is %d bytes: %s. Unix socket paths hold at most 107 bytes on Linux and Windows and 103 on macOS, "+
 			"so this path cannot be opened at all", len(live.Path), live.Path)
 		c.Next = "move the data directory to a shorter path and restart the agent; forwarding itself is not affected, only this socket. " +
@@ -505,7 +520,7 @@ func agentNoTunnelCheck(c *agentDoctorCheck, reason string) {
 		c.Next = "read why the build failed in the agent's log, with journalctl -u wgft-agent, or docker logs for a container. " +
 			"The wg configuration comes from the server, so wgft rule ls and the server's log on the VPS say what it was told to build"
 	case strings.Contains(reason, "full state not received"):
-		c.Status, c.Reason = statusUnknown, agentReasonNoLastState
+		c.Status, c.Reason = statusUnknown, agentReasonFullStatePending
 		c.Detail = "there is no tunnel yet: " + reason
 		c.Next = "this is where an agent sits until the server answers it. The control connection line above says whether the stream is up"
 	default:

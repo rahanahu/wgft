@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -391,6 +392,10 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			setup: func(t *testing.T, in *agentDoctorInput) {
 				writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 				holdTheLock(t, in.CredentialsPath)
+				// ソケットが無い場合の応答を差し替えで与える。OS の接続に任せると、テストの一時
+				// ディレクトリが深いランナーではソケットのパスが sun_path の上限を超え、パスの
+				// 長さという別の事実を答える。この場面が問うのはパスの長さではない。
+				in.Dial = func(string) (net.Conn, error) { return nil, &net.OpError{Op: "dial", Err: syscall.ENOENT} }
 			},
 			want: []wantCheck{
 				{agentCheckProcess, statusOK, ""},
@@ -422,8 +427,8 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			},
 			want: []wantCheck{
 				{agentCheckProcess, statusUnknown, agentReasonLockUnreadable},
-				{agentCheckControl, statusSkipped, agentReasonRunStateUnknown},
-				{agentCheckAllowTargets, statusUnknown, agentReasonRunStateUnknown},
+				{agentCheckControl, statusSkipped, agentReasonLockUnreadable},
+				{agentCheckAllowTargets, statusUnknown, agentReasonLockUnreadable},
 			},
 			wantExit: 2,
 		},
@@ -450,8 +455,8 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			wantExit: 2,
 		},
 		{
-			// 全体状態を一度も受け取っていない事実を理由に示す(10.2c 節)。
-			name: "no full state has ever been received",
+			// agent.json が全体状態を持たない事実を理由に示す(10.2c 節)。
+			name: "agent.json holds no full state",
 			setup: func(t *testing.T, in *agentDoctorInput) {
 				f := registeredCredentials()
 				f.LastState = nil
@@ -745,8 +750,8 @@ func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
 			allow = c
 		}
 	}
-	if allow.Status != statusUnknown || allow.Reason != agentReasonRunStateUnknown {
-		t.Fatalf("relay.allow_targets = %s/%q, want %s/%q", allow.Status, allow.Reason, statusUnknown, agentReasonRunStateUnknown)
+	if allow.Status != statusUnknown || allow.Reason != agentReasonLockUnreadable {
+		t.Fatalf("relay.allow_targets = %s/%q, want %s/%q", allow.Status, allow.Reason, statusUnknown, agentReasonLockUnreadable)
 	}
 	if strings.Contains(allow.Detail, "no process holds it now") {
 		t.Errorf("relay.allow_targets says the agent is stopped although the run state could not be determined: %q", allow.Detail)

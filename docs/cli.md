@@ -178,6 +178,17 @@ of them: an address resolved earlier can still carry traffic.
 Every run ends with what it did NOT test, and with the fact that it keeps no
 history: it evaluates the current state only.
 
+--json prints the diagnostic model instead: an object with status, checked_at,
+data_dir, a "checks" array of {id, status, reason, evidence_unreachable, ...},
+history and not_tested. status is ok, failed or unknown and matches exit code
+0, 1 or 2; --json never changes the exit code. evidence_unreachable marks the
+items that could not be read with this command's permissions. The ids, the
+status words and the reason codes are the machine interface. They only ever
+gain members: read an id you do not know by ignoring it, and a status or
+reason you do not know as "unknown". A bad argument or flag, exit 2, and a bad
+setting, exit 3, stop before any report is built: stdout then holds no JSON,
+and the error goes to stderr.
+
 Exit codes, specific to this command: 0 when no verdict item is FAILED, 1 when
 one or more is, 2 when some evidence could not be read with this command's
 permissions, so the report does not settle the question, and 3 for a bad
@@ -195,6 +206,7 @@ Examples:
 wgft agent doctor
 wgft agent doctor --data-dir /srv/wgft
 wgft agent doctor --config /etc/wgft/agent.env
+wgft agent doctor --json
 ```
 
 Flags:
@@ -202,6 +214,7 @@ Flags:
 ```text
       --config string       dotenv config file (default "/etc/wgft/agent.env")
       --data-dir string     data dir, env WGFT_DATA_DIR; holds agent.json (default "/var/lib/wgft")
+      --json                output as JSON; the stable diagnostic model of this command
       --max-tcp-flows int   process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
       --max-udp-flows int   process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
 ```

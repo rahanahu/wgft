@@ -276,7 +276,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 				st.Tunnel = agent.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel; full state not received"}
 				st.Rules, st.Budgets = nil, nil
 			}))),
-			want:     []wantCheck{{agentCheckTunnelLocal, statusUnknown, agentReasonNoLastState}},
+			want:     []wantCheck{{agentCheckTunnelLocal, statusUnknown, agentReasonFullStatePending}},
 			wantExit: 0,
 		},
 		{
@@ -331,8 +331,8 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			longPath: true,
 			dial:     func(string) (net.Conn, error) { return nil, &net.OpError{Op: "dial", Err: syscall.EINVAL} },
 			want: []wantCheck{
-				{agentCheckControl, statusFailed, agentReasonControlUnreachable},
-				{agentCheckTunnelLocal, statusSkipped, agentReasonControlUnreachable},
+				{agentCheckControl, statusFailed, agentReasonControlPathTooLong},
+				{agentCheckTunnelLocal, statusSkipped, agentReasonControlPathTooLong},
 			},
 			wantExit: 0,
 			wantDetail: map[string]string{
@@ -424,10 +424,11 @@ func TestAgentDoctorSeparatesTheThreeUnreachableCauses(t *testing.T) {
 		err      error
 		exit     int
 		longPath bool
+		reason   string
 	}{
-		{name: "permission", err: &net.OpError{Op: "dial", Err: syscall.EACCES}, exit: 2},
-		{name: "sun_path", err: &net.OpError{Op: "dial", Err: syscall.EINVAL}, exit: 0, longPath: true},
-		{name: "no socket", err: &net.OpError{Op: "dial", Err: syscall.ENOENT}, exit: 0},
+		{name: "permission", err: &net.OpError{Op: "dial", Err: syscall.EACCES}, exit: 2, reason: agentReasonControlUnreachable},
+		{name: "sun_path", err: &net.OpError{Op: "dial", Err: syscall.EINVAL}, exit: 0, longPath: true, reason: agentReasonControlPathTooLong},
+		{name: "no socket", err: &net.OpError{Op: "dial", Err: syscall.ENOENT}, exit: 0, reason: agentReasonControlUnreachable},
 	}
 	seen := map[string]string{}
 	for _, tc := range cases {
@@ -440,8 +441,8 @@ func TestAgentDoctorSeparatesTheThreeUnreachableCauses(t *testing.T) {
 		in.Dial = func(string) (net.Conn, error) { return nil, tc.err }
 		rep := agentDiagnose(in)
 		c, _ := findAgentCheck(rep, agentCheckControl)
-		if c.Status != statusFailed || c.Reason != agentReasonControlUnreachable {
-			t.Errorf("%s: agent.control = %s/%q, want %s/%q", tc.name, c.Status, c.Reason, statusFailed, agentReasonControlUnreachable)
+		if c.Status != statusFailed || c.Reason != tc.reason {
+			t.Errorf("%s: agent.control = %s/%q, want %s/%q", tc.name, c.Status, c.Reason, statusFailed, tc.reason)
 		}
 		if got := agentDoctorExitCode(rep); got != tc.exit {
 			t.Errorf("%s: exit code = %d, want %d", tc.name, got, tc.exit)
@@ -773,8 +774,8 @@ func TestAgentDoctorNamesALongSocketPath(t *testing.T) {
 	holdTheLock(t, in.CredentialsPath)
 	in.Dial = nil // 既定の入口を使う
 	c, _ := findAgentCheck(agentDiagnose(in), agentCheckControl)
-	if c.Status != statusFailed || c.Reason != agentReasonControlUnreachable {
-		t.Fatalf("agent.control = %s/%q, want %s/%q", c.Status, c.Reason, statusFailed, agentReasonControlUnreachable)
+	if c.Status != statusFailed || c.Reason != agentReasonControlPathTooLong {
+		t.Fatalf("agent.control = %s/%q, want %s/%q", c.Status, c.Reason, statusFailed, agentReasonControlPathTooLong)
 	}
 	if !strings.Contains(c.Detail, "Unix socket paths hold at most") {
 		t.Errorf("agent.control does not name the limit it hit: %q", c.Detail)
