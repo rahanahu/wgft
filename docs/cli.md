@@ -8,6 +8,7 @@ To regenerate after changing the help: `go test ./cmd/wgft -run TestCLIDocUpToDa
 | Command | What it does |
 |---|---|
 | [`wgft agent dismiss-warning`](#wgft-agent-dismiss-warning) | Dismiss a warning once confirmed legitimate |
+| [`wgft agent doctor`](#wgft-agent-doctor) | Diagnose the agent's own state and environment |
 | [`wgft agent join-string`](#wgft-agent-join-string) | Issue an agent join string |
 | [`wgft agent ls`](#wgft-agent-ls) | List registered agents |
 | [`wgft agent pubkey`](#wgft-agent-pubkey) | Print the wg public key |
@@ -71,6 +72,7 @@ On the agent host:
   run           run the agent: bring up the tunnel and relay incoming traffic to the LAN
   pubkey        print the wg public key; generate and save one if absent
   rotate-key    regenerate the wg key pair
+  doctor        diagnose this host's own agent, running or stopped
 
 On the VPS, against the admin API:
   ls            list registered agents
@@ -102,6 +104,81 @@ Flags:
 ```text
       --admin string    admin API address, env WGFT_ADMIN (default "unix:///run/wgft/admin.sock")
       --config string   dotenv config file (default "/etc/wgft/server.env")
+```
+
+## wgft agent doctor
+
+```text
+Answer, on the host that runs the agent: is an agent running here, does it hold
+credentials, and can this host resolve the names it needs. Run it on the agent
+host, as the user the agent runs as. Where "server doctor" answers how far a
+rule's traffic gets from the VPS, "agent doctor" answers what this one host
+looks like, and it answers while the agent is stopped as well as while it runs.
+
+It reads only what this host holds: the credentials file, kept as agent.json in
+the data directory set by WGFT_DATA_DIR, and the operating system. It needs no
+server and no admin API. It changes nothing: it creates no lock file, it takes
+no exclusive lock, and it opens no connection to a target. The two exceptions to
+reading alone are name resolution: it resolves the agent API endpoint and the
+WireGuard peer, neither of which opens a connection to a service.
+
+Reading whether an agent is running does take a shared lock on the existing
+lock file for an instant. An agent starting in that same instant fails to take
+its own lock and exits; the supplied systemd unit restarts it, so the cost is
+the wait until the next start.
+
+Items are grouped as Host, Credentials, Connection, Tunnel and Relay, and each
+is in one of the same five states "server doctor" uses:
+
+  OK          this command observed the item succeed
+  FAILED      this command observed the item fail
+  UNKNOWN     there is evidence, but it is stale, contradictory or not enough
+  NOT TESTED  this command does not test that reachability or condition at all
+  SKIPPED     it could have been tested, but an earlier failure made it impossible
+
+Values read from agent.json carry a "last:" prefix: they are what was saved, not
+what is true now, the same way "agent ls" marks a disconnected agent's report.
+
+The Connection, Tunnel and Relay items other than "wg endpoint resolve" are held
+only by the running process and are read over its control socket. This build
+does not read that socket yet, so they are listed as SKIPPED with the reason why
+rather than left out.
+
+Being stopped is a failure here: a stopped agent forwards nothing, so "process"
+reads FAILED. Four items decide the verdict: credentials, process, tunnel and
+listeners. The rest are printed and never raise the exit code, because they
+state a value rather than whether this host can forward. Name resolution is one
+of them: an address resolved earlier can still carry traffic.
+
+Every run ends with what it did NOT test, and with the fact that it keeps no
+history: it evaluates the current state only.
+
+Exit codes, specific to this command: 0 when no verdict item is FAILED, 1 when
+one or more is, 2 when some evidence could not be read with this command's
+permissions, so the report does not settle the question, and 3 for a bad
+setting. Exit 2 wins over exit 1: a report that could not be completed is not a
+report that found a fault. UNKNOWN and SKIPPED alone never make it non-zero.
+```
+
+```text
+wgft agent doctor [flags]
+```
+
+Examples:
+
+```sh
+wgft agent doctor
+wgft agent doctor --data-dir /srv/wgft
+wgft agent doctor --config /etc/wgft/agent.env
+```
+
+Flags:
+
+```text
+      --config string       dotenv config file (default "/etc/wgft/agent.env")
+      --data-dir string     data dir, env WGFT_DATA_DIR; holds agent.json (default "/var/lib/wgft")
+      --max-tcp-flows int   process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
+      --max-udp-flows int   process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
 ```
 
 ## wgft agent join-string

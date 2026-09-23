@@ -195,6 +195,60 @@ with the agent stopped, the credentials file is rewritten. The server learns
 the new public key over the stream, so nothing has to be done on the VPS.`,
 		Example: `  wgft agent rotate-key`,
 	},
+	"agent doctor": {
+		Long: `Answer, on the host that runs the agent: is an agent running here, does it hold
+credentials, and can this host resolve the names it needs. Run it on the agent
+host, as the user the agent runs as. Where "server doctor" answers how far a
+rule's traffic gets from the VPS, "agent doctor" answers what this one host
+looks like, and it answers while the agent is stopped as well as while it runs.
+
+It reads only what this host holds: the credentials file, kept as agent.json in
+the data directory set by WGFT_DATA_DIR, and the operating system. It needs no
+server and no admin API. It changes nothing: it creates no lock file, it takes
+no exclusive lock, and it opens no connection to a target. The two exceptions to
+reading alone are name resolution: it resolves the agent API endpoint and the
+WireGuard peer, neither of which opens a connection to a service.
+
+Reading whether an agent is running does take a shared lock on the existing
+lock file for an instant. An agent starting in that same instant fails to take
+its own lock and exits; the supplied systemd unit restarts it, so the cost is
+the wait until the next start.
+
+Items are grouped as Host, Credentials, Connection, Tunnel and Relay, and each
+is in one of the same five states "server doctor" uses:
+
+  OK          this command observed the item succeed
+  FAILED      this command observed the item fail
+  UNKNOWN     there is evidence, but it is stale, contradictory or not enough
+  NOT TESTED  this command does not test that reachability or condition at all
+  SKIPPED     it could have been tested, but an earlier failure made it impossible
+
+Values read from agent.json carry a "last:" prefix: they are what was saved, not
+what is true now, the same way "agent ls" marks a disconnected agent's report.
+
+The Connection, Tunnel and Relay items other than "wg endpoint resolve" are held
+only by the running process and are read over its control socket. This build
+does not read that socket yet, so they are listed as SKIPPED with the reason why
+rather than left out.
+
+Being stopped is a failure here: a stopped agent forwards nothing, so "process"
+reads FAILED. Four items decide the verdict: credentials, process, tunnel and
+listeners. The rest are printed and never raise the exit code, because they
+state a value rather than whether this host can forward. Name resolution is one
+of them: an address resolved earlier can still carry traffic.
+
+Every run ends with what it did NOT test, and with the fact that it keeps no
+history: it evaluates the current state only.
+
+Exit codes, specific to this command: 0 when no verdict item is FAILED, 1 when
+one or more is, 2 when some evidence could not be read with this command's
+permissions, so the report does not settle the question, and 3 for a bad
+setting. Exit 2 wins over exit 1: a report that could not be completed is not a
+report that found a fault. UNKNOWN and SKIPPED alone never make it non-zero.`,
+		Example: `  wgft agent doctor
+  wgft agent doctor --data-dir /srv/wgft
+  wgft agent doctor --config /etc/wgft/agent.env`,
+	},
 	"agent run": {
 		Long: `Agent host daemon. Brings up the tunnel and listeners first from the key in the credentials file, kept as agent.json, and the last full
 state, then connects to the server stream to receive the full state. On first run it registers with the join string, set by WGFT_JOIN; the name,

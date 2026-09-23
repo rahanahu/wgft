@@ -114,6 +114,7 @@ On the agent host:
   run           run the agent: bring up the tunnel and relay incoming traffic to the LAN
   pubkey        print the wg public key; generate and save one if absent
   rotate-key    regenerate the wg key pair
+  doctor        diagnose this host's own agent, running or stopped
 
 On the VPS, against the admin API:
   ls            list registered agents
@@ -357,7 +358,7 @@ On the VPS, against the admin API:
 	}
 	addAdminFlag(dismiss)
 
-	cmd.AddCommand(run, pubkey, rotate, joinString, ls, revoke, warnings, dismiss)
+	cmd.AddCommand(run, pubkey, rotate, newAgentDoctorCmd(), joinString, ls, revoke, warnings, dismiss)
 	return cmd
 }
 
