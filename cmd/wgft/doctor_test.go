@@ -608,6 +608,38 @@ func TestUDPCannotBeTestedEndToEnd(t *testing.T) {
 	}
 }
 
+// TestProbeCheckNextForAnUnprobedRule は、`rule.probe` の次の一手を、疎通確認をまだ試していない
+// 実行について固定する。TCP のルールは `--probe` を勧め、UDP のルールは勧めない。管理用 API は
+// UDP のルールの確認そのものを拒むので、`--probe` を付けても意味が無い。UDP のルールの次の一手
+// は、確認をした後で管理用 API が拒んだときと同じ文にする(設計文書 10.2a 節の改訂の記録、
+// 2026-09-23)。
+func TestProbeCheckNextForAnUnprobedRule(t *testing.T) {
+	tr := tcpRule()
+	tc := checkOf(t, diagnose(tr, healthyInput(tr)), checkProbe)
+	if !strings.Contains(tc.Next, "--probe") {
+		t.Errorf("an unprobed TCP rule must still suggest --probe, got %q", tc.Next)
+	}
+
+	ur := udpRule()
+	uc := checkOf(t, diagnose(ur, healthyInput(ur)), checkProbe)
+	if strings.Contains(uc.Next, "--probe") {
+		t.Errorf("an unprobed UDP rule must not suggest --probe, got %q", uc.Next)
+	}
+	want := "judge a UDP rule from the target line above, and confirm the service from a real client"
+	if uc.Next != want {
+		t.Errorf("an unprobed UDP rule's next step = %q, want %q", uc.Next, want)
+	}
+
+	// 疎通確認を試して管理用 API に拒まれた実行と、同じ文になる。
+	rin := healthyInput(ur)
+	rin.Probed = true
+	rin.Probes[ur.ID] = probeResult{Err: errString("connectivity check is for TCP rules only; a UDP send cannot tell success")}
+	rc := checkOf(t, diagnose(ur, rin), checkProbe)
+	if rc.Next != uc.Next {
+		t.Errorf("a UDP rule's next step must read the same whether or not --probe was tried: unprobed %q, refused %q", uc.Next, rc.Next)
+	}
+}
+
 // TestProbeResults は、疎通確認の 3 つの到達段階がそれぞれ正しい判定になることを確かめる。
 func TestProbeResults(t *testing.T) {
 	cases := []struct {
@@ -710,6 +742,15 @@ func TestReportAlwaysSaysWhatItDidNotTest(t *testing.T) {
 	for _, n := range buildReport([]proto.Rule{r}, in).NotTested {
 		if n.ID == "inner path" {
 			t.Error("with --probe the inner path is dialled, so it must not be listed as not tested")
+		}
+	}
+	// 診断の対象が UDP のルール 1 本だけの実行でも inner path の項目が消える。--probe を
+	// 付けても管理用 API が確認そのものを拒むので、この項目の案内は意味を持たない。同じ
+	// 事実は "udp end to end" が既に述べている(設計文書 10.2a 節の改訂の記録、2026-09-23)。
+	ur := udpRule()
+	for _, n := range buildReport([]proto.Rule{ur}, healthyInput(ur)).NotTested {
+		if n.ID == "inner path" {
+			t.Error("diagnosing a single UDP rule must not list inner path as not tested; --probe cannot help there")
 		}
 	}
 }
@@ -1199,6 +1240,18 @@ func TestDisconnectedNextDoesNotSuggestAProbeAlreadyRun(t *testing.T) {
 	in.Probes[r.ID] = probeResult{Check: &admin.ConnCheck{OK: true, Reach: "target", Detail: "ok"}}
 	if c := checkOf(t, diagnose(r, in), checkConnection); strings.Contains(c.Next, "--probe") {
 		t.Errorf("after a probe has run, the next step must not suggest adding one, got %q", c.Next)
+	}
+}
+
+// TestDisconnectedNextDoesNotSuggestAProbeForUDP は、同じ agent.connection の次の一手が、UDP の
+// ルールには --probe を勧めないことを確かめる。管理用 API は UDP のルールの確認そのものを拒む
+// ので、疎通確認を試したかどうかに関わらずこの案内は意味を持たない(設計文書 10.2a 節の改訂の
+// 記録、2026-09-23)。
+func TestDisconnectedNextDoesNotSuggestAProbeForUDP(t *testing.T) {
+	r := udpRule()
+	in := disconnectedButTunnelledInput(r)
+	if c := checkOf(t, diagnose(r, in), checkConnection); strings.Contains(c.Next, "--probe") {
+		t.Errorf("a UDP rule's next step must not suggest --probe, got %q", c.Next)
 	}
 }
 

@@ -475,49 +475,50 @@ func TestDoctorRulePageSaysHowToTestOneClientAddress(t *testing.T) {
 	}
 }
 
-// TestDoctorRulePageSaysAUDPRuleCannotBeProbed は、UDP のルールの `rule.probe` の行に画面の側の
-// 1 文が添うことを確かめる。判定の次の一手は --probe を付けるよう案内するが、UDP のルールの
-// 画面にはボタンが無く、管理用 API も確認を拒む。有効な TCP のルールの画面には添えない。
-// 同じ画面にボタンがあるためである。
-func TestDoctorRulePageSaysAUDPRuleCannotBeProbed(t *testing.T) {
+// TestDoctorRulePageDoesNotSuggestProbingAUDPRule は、UDP のルールの `rule.probe` の行が
+// --probe を勧めないことを確かめる。admin API は UDP のルールの疎通確認そのものを拒むので、
+// CLI にも画面にも意味を持たない(design.md 10.2a 節の改訂の記録、2026-09-23)。かつてはこの
+// 食い違いを画面側の note で補っていたが、共有の次の一手がもう --probe を勧めないので note は
+// 要らなくなった(design.md 10.2d 節の改訂の記録)。
+func TestDoctorRulePageDoesNotSuggestProbingAUDPRule(t *testing.T) {
 	srv, _ := newDoctorTestServer(t)
 
-	for _, lang := range []string{"ja", "en"} {
-		note := escapeForHTML.Replace(T(lang, "doctorProbeUDPNote"))
-		udp := getBody(t, srv.URL+"/ui/doctor/r_err?lang="+lang)
-		if n := strings.Count(udp, note); n != 1 {
-			t.Errorf("%s: a UDP rule's page carries the probe note %d times, want 1:\n%s", lang, n, udp)
-		}
-		tcp := getBody(t, srv.URL+"/ui/doctor/r_ok?lang="+lang)
-		if strings.Contains(tcp, note) {
-			t.Errorf("%s: an enabled TCP rule's page has the probe button, so it must not say no probe can run:\n%s", lang, tcp)
-		}
+	udp := getBody(t, srv.URL+"/ui/doctor/r_err?lang=en")
+	if strings.Contains(udp, "--probe") {
+		t.Errorf("a UDP rule's page must not suggest --probe:\n%s", udp)
+	}
+	judge := escapeForHTML.Replace("judge a UDP rule from the target line above, and confirm the service from a real client")
+	if n := strings.Count(udp, judge); n != 1 {
+		t.Errorf("a UDP rule's page must carry the judge-from-target advice exactly once, got %d:\n%s", n, udp)
+	}
+
+	tcp := getBody(t, srv.URL+"/ui/doctor/r_ok?lang=en")
+	if !strings.Contains(tcp, "--probe") {
+		t.Errorf("an untested TCP rule's page must still suggest --probe:\n%s", tcp)
 	}
 }
 
 // TestDoctorScreenNoteIsOnlyOnTheCheckThatNeedsIt は、画面の側の 1 文をそれが要る検査にだけ
 // 添えることを確かめる。すべての行に添えると、画面から実行できる案内まで打ち消してしまう。
+// `rule.probe` はもう画面固有の note を持たない。共有の次の一手が UDP のルールに --probe を
+// もう勧めないので、CLI と画面の食い違いが無くなったためである(design.md 10.2d 節の改訂の
+// 記録、2026-09-23)。
 func TestDoctorScreenNoteIsOnlyOnTheCheckThatNeedsIt(t *testing.T) {
-	tcp := proto.Rule{ID: "r_t", Proto: proto.TCP, Enabled: true}
-	udp := proto.Rule{ID: "r_u", Proto: proto.UDP, Enabled: true}
 	cases := []struct {
-		name   string
-		in     doctor.Check
-		rule   proto.Rule
-		probed bool
-		want   bool
+		name string
+		in   doctor.Check
+		want bool
 	}{
-		{"source filter without a client address", doctor.Check{ID: doctor.CheckSourceFilter, Reason: doctor.ReasonNoFrom}, tcp, false, true},
-		{"source filter judged against a client address", doctor.Check{ID: doctor.CheckSourceFilter, Reason: doctor.ReasonDeniedByDenyList}, tcp, false, false},
-		{"probe on a TCP rule, which has its button on the page", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonNoProbe}, tcp, false, false},
-		{"probe on a UDP rule, which has no button", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonNoProbe}, udp, false, true},
-		{"probe on a UDP rule the admin API already refused", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonNoProbe}, udp, true, false},
-		{"probe on a disabled rule", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonRuleDisabled}, udp, false, false},
+		{"source filter without a client address", doctor.Check{ID: doctor.CheckSourceFilter, Reason: doctor.ReasonNoFrom}, true},
+		{"source filter judged against a client address", doctor.Check{ID: doctor.CheckSourceFilter, Reason: doctor.ReasonDeniedByDenyList}, false},
+		{"probe on a TCP rule, which has its button on the page", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonNoProbe}, false},
+		{"probe on a UDP rule, which has no button", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonNoProbe}, false},
+		{"probe on a disabled rule", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonRuleDisabled}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := doctorScreenNote(c.in, "en", c.rule, c.probed) != ""; got != c.want {
-				t.Errorf("a screen-side note on %s/%s for %s = %v, want %v", c.in.ID, c.in.Reason, c.rule.Proto, got, c.want)
+			if got := doctorScreenNote(c.in, "en") != ""; got != c.want {
+				t.Errorf("a screen-side note on %s/%s = %v, want %v", c.in.ID, c.in.Reason, got, c.want)
 			}
 		})
 	}

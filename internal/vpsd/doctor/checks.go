@@ -323,8 +323,9 @@ func connectionCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 			}
 			c.Next = "read this server's log for this agent's control connection, and run wgft agent doctor on the agent host."
 			// 既に疎通確認を行った実行に「--probe を付けよ」と言わない。今やったことを勧める行は
-			// 読み手にとって雑音である。
-			if !in.Probed {
+			// 読み手にとって雑音である。UDP のルールにも言わない。admin API が UDP の確認そのもの
+			// を拒むので、この案内は意味を持たない(設計文書 10.2a 節の改訂の記録、2026-09-23)。
+			if !in.Probed && r.Proto != proto.UDP {
 				c.Next += " To see whether this rule still carries traffic, add --probe."
 			}
 			return c
@@ -679,6 +680,11 @@ func flowBudgetCheck(r proto.Rule, in Input) Check {
 	return c
 }
 
+// udpProbeNext is what a UDP rule's probe check tells the operator to do next, whether or not
+// --probe was given: the admin API refuses to dial a UDP rule end to end either way, because a
+// UDP send cannot tell success. Both branches below share this one phrasing of that fact.
+const udpProbeNext = "judge a UDP rule from the target line above, and confirm the service from a real client"
+
 // probeCheck は能動的な疎通確認の結果である(設計文書 10.1 節の疎通確認)。--probe が無ければ
 // 何も試していないことをそのまま出す。
 func probeCheck(r proto.Rule, in Input) Check {
@@ -688,6 +694,12 @@ func probeCheck(r proto.Rule, in Input) Check {
 		c.Status, c.Reason = StatusNotTested, ReasonNoProbe
 		c.Detail = "nothing was dialled"
 		c.Next = "add --probe to open one real TCP connection from this server, through the tunnel and the agent, to the target"
+		if r.Proto == proto.UDP {
+			// --probe would not help here either; the admin API refuses to dial a UDP rule
+			// end to end, so telling the operator to add it is meaningless (design.md 10.2a
+			// 節の改訂の記録、2026-09-23)。
+			c.Next = udpProbeNext
+		}
 		return c
 	}
 	c.ObservedAt = in.Now.UTC().Format(time.RFC3339)
@@ -698,7 +710,7 @@ func probeCheck(r proto.Rule, in Input) Check {
 		if r.Proto == proto.UDP {
 			c.Status, c.Reason = StatusNotTested, ReasonNoProbe
 			c.Detail = "a UDP rule cannot be dialled end to end, because a UDP send cannot tell success: " + p.Err.Error()
-			c.Next = "judge a UDP rule from the target line above, and confirm the service from a real client"
+			c.Next = udpProbeNext
 		}
 		return c
 	}
