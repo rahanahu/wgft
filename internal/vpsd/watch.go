@@ -14,7 +14,7 @@ import (
 
 // watchIPMismatch は 15 秒ごとに、生きている stream の接続元 IP と、最近ハンドシェイクした
 // wg エンドポイント IP を比べ、食い違いが 2 分(連続 8 回)続いたら ip-mismatch を 1 件残す
-// (仕様 5.2 節)。自宅回線の IP 更新では、旧 stream が死んで新 stream と wg が同じ IP に揃うので
+// (仕様 5.2 節)。管理者が確認済みにした組の食い違いは警告しない。自宅回線の IP 更新では、旧 stream が死んで新 stream と wg が同じ IP に揃うので
 // 警告しない。置き換えそのものは検知しない。
 func (d *Daemon) watchIPMismatch(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
@@ -58,6 +58,7 @@ func (d *Daemon) ipMismatchTick(counts map[string]int) {
 		log.Printf("ip mismatch watch: reading agents: %v", err)
 		return
 	}
+	obs := make([]ipObservation, 0, len(list))
 	for _, a := range list {
 		streamIP := ""
 		st := d.hub.Status(a.Name)
@@ -70,25 +71,79 @@ func (d *Daemon) ipMismatchTick(counts map[string]int) {
 		}
 		// 第 2 判定:wg エンドポイント IP の往復。stream 側は hub の接続事象で記録する(仕様 5.2 節)
 		d.observeFlap(a.Name, "wg", "wg endpoint", wgIP)
-		n, warn := ipMismatchStep(counts[a.Name], streamIP, wgIP)
-		counts[a.Name] = n
+		obs = append(obs, ipObservation{Agent: a.Name, StreamIP: streamIP, WGIP: wgIP})
+	}
+	d.judgeIPMismatch(counts, obs)
+}
+
+// ipObservation は 1 回の観測での 1 エージェントの 2 つの IP。観測できない側は空。
+type ipObservation struct {
+	Agent, StreamIP, WGIP string
+}
+
+// judgeIPMismatch は 1 回分の観測から、食い違いの連続回数、確認済みの組の破棄、警告を決める
+// (仕様 5.2 節)。wg とハートビートの読み取りから分けてあるので、単体テストは観測の列を直接
+// 与えて 15 秒ごとの回を進められる。確認済みの組を読めない回は、判定そのものを飛ばす。
+// 読めないまま判定すると、管理者が確認した組の警告を出し直すことになるためである。
+func (d *Daemon) judgeIPMismatch(counts map[string]int, obs []ipObservation) {
+	acks, err := d.st.WarningAcks(store.WarnIPMismatch)
+	if err != nil {
+		log.Printf("ip mismatch watch: reading acknowledged mismatches: %v", err)
+		return
+	}
+	if d.afterMismatchAcksRead != nil {
+		d.afterMismatchAcksRead()
+	}
+	byAgent := map[string][]store.Ack{}
+	for _, a := range acks {
+		byAgent[a.Agent] = append(byAgent[a.Agent], a)
+	}
+	for _, o := range obs {
+		streamIP, wgIP := store.NormalizeIP(o.StreamIP), store.NormalizeIP(o.WGIP)
+		n, warn, discard := ipMismatchStep(counts[o.Agent], streamIP, wgIP, byAgent[o.Agent])
+		counts[o.Agent] = n
+		for _, a := range discard {
+			if err := d.st.DeleteWarningAck(a); err != nil {
+				log.Printf("agent %s: discarding the acknowledged IP mismatch %s: %v", o.Agent, store.IPMismatchDetail(a.StreamIP, a.WGIP), err)
+				continue
+			}
+			log.Printf("agent %s: discarded the acknowledged IP mismatch %s; now observed stream %s / wg %s", o.Agent, store.IPMismatchDetail(a.StreamIP, a.WGIP), streamIP, wgIP)
+		}
 		if warn {
-			detail := fmt.Sprintf("stream %s / wg %s", streamIP, wgIP)
-			if err := d.st.AddWarning(a.Name, store.WarnIPMismatch, detail); err == nil {
-				log.Printf("agent %s: detected IP mismatch: %s", a.Name, detail)
+			// 上で読んだ確認済みの組は、この記録までの間に管理者が警告を消すと古くなる。記録は
+			// 確認済みの組との照合と同じ文で行い、消したばかりの警告を戻さない
+			if added, err := d.st.AddIPMismatchWarning(o.Agent, streamIP, wgIP); err == nil && added {
+				log.Printf("agent %s: detected IP mismatch: %s", o.Agent, store.IPMismatchDetail(streamIP, wgIP))
 			}
 		}
 	}
 }
 
-// ipMismatchStep は 1 回の観測。両 IP が観測でき食い違っていれば連続回数を増やし、8 回で警告。
-// どちらか観測できない、または一致していれば 0 に戻す(警告は消さない、仕様 5.2 節)。
-func ipMismatchStep(count int, streamIP, wgIP string) (int, bool) {
-	if streamIP == "" || wgIP == "" || streamIP == wgIP {
-		return 0, false
+// ipMismatchStep は 1 回の観測(仕様 5.2 節)。acks はそのエージェントの確認済みの組。
+//   - どちらかが観測できなければ 0 に戻し、確認済みの組は捨てない
+//   - 一致していれば 0 に戻し、確認済みの組を全部捨てる(警告は消さない)
+//   - 食い違っていれば、観測した組と違う確認済みの組を捨てる。捨てたうえで観測した組が確認済み
+//     でなければ、連続回数を 0 から数え直す。確認済みの組が無い間は、組が変わっても数え直さない
+//   - 連続 8 回で警告する。観測した組が確認済みなら警告しない
+func ipMismatchStep(count int, streamIP, wgIP string, acks []store.Ack) (n int, warn bool, discard []store.Ack) {
+	state := store.ClassifyIPPair(streamIP, wgIP, acks)
+	switch state {
+	case store.IPPairUnobserved:
+		return 0, false, nil
+	case store.IPPairMatch:
+		return 0, false, acks
+	}
+	acked := state == store.IPPairAcknowledged
+	for _, a := range acks {
+		if !a.SamePair(streamIP, wgIP) {
+			discard = append(discard, a)
+		}
+	}
+	if len(discard) > 0 && !acked {
+		count = 0
 	}
 	count++
-	return count, count >= 8
+	return count, count >= 8 && !acked, discard
 }
 
 // flapWindow は「以前の値へ戻った」とみなす時間区間(仕様 5.2 節)。

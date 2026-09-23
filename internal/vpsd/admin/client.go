@@ -146,7 +146,8 @@ func (c *Client) Warnings() ([]Warning, error) {
 	return out, c.do("GET", "/api/v1/warnings", nil, &out)
 }
 
-// DismissWarning は警告 1 件を消す。再検出されれば再び出る。
+// DismissWarning は警告を消す。ip-flapping は再検出されれば再び出る。ip-mismatch は消した警告の
+// 2 つの IP の組を server が確認済みとして記録し、同じ組の食い違いが続く間は出さない(仕様 5.2 節)。
 func (c *Client) DismissWarning(name, kind, detail string) error {
 	return c.do("POST", "/api/v1/agents/"+name+"/dismiss-warning", map[string]string{"kind": kind, "detail": detail}, nil)
 }

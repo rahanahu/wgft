@@ -748,6 +748,7 @@ func (b *fakeStatusBackend) Warnings() ([]admin.Warning, error) {
 	return b.warnings, b.warningsErr
 }
 func (b *fakeStatusBackend) DismissWarning(string, string, string) error { return nil }
+func (b *fakeStatusBackend) IPMismatchAcks() ([]store.Ack, error)        { return nil, nil }
 func (b *fakeStatusBackend) CheckConnectivity(string) (admin.ConnCheck, error) {
 	return admin.ConnCheck{}, nil
 }

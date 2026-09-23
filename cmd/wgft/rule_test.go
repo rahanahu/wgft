@@ -105,6 +105,7 @@ func (b *fakeRuleBackend) Warnings() ([]admin.Warning, error) {
 	return nil, nil
 }
 func (b *fakeRuleBackend) DismissWarning(string, string, string) error { return nil }
+func (b *fakeRuleBackend) IPMismatchAcks() ([]store.Ack, error)        { return nil, nil }
 func (b *fakeRuleBackend) CheckConnectivity(string) (admin.ConnCheck, error) {
 	return admin.ConnCheck{}, nil
 }

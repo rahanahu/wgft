@@ -304,6 +304,7 @@ func (b *fakeBackend) Warnings() ([]admin.Warning, error) {
 }
 
 func (b *fakeBackend) DismissWarning(agent, kind, detail string) error { return nil }
+func (b *fakeBackend) IPMismatchAcks() ([]store.Ack, error)            { return nil, nil }
 
 func (b *fakeBackend) CheckConnectivity(ruleID string) (admin.ConnCheck, error) {
 	return admin.ConnCheck{OK: true, Reach: "target", Detail: "demo: path OK"}, nil

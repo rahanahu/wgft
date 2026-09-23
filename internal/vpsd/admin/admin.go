@@ -40,8 +40,12 @@ type Backend interface {
 	Revoke(name string) error
 	// Warnings は窃取検知の警告一覧。
 	Warnings() ([]Warning, error)
-	// DismissWarning は警告を消す(管理者が正当と確認したとき。仕様 5.2 節)。
+	// DismissWarning は警告を消す(管理者が正当と確認したとき。仕様 5.2 節)。ip-mismatch では
+	// 消した警告の 2 つの IP の組を確認済みとして記録する。
 	DismissWarning(agent, kind, detail string) error
+	// IPMismatchAcks は ip-mismatch の確認済みの組を全エージェント分返す(仕様 5.2 節)。ダッシュボードが
+	// 1 回の読み取りで使う。管理用 API には出さない。
+	IPMismatchAcks() ([]store.Ack, error)
 	// CheckConnectivity は TCP ルールの疎通確認(仕様 10.1 節)。
 	CheckConnectivity(ruleID string) (ConnCheck, error)
 	// ServerInfo は vpsd/VPS の構成と環境(ダッシュボード上部に出す)。

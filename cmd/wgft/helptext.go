@@ -179,7 +179,15 @@ agent and register it again with a new join string.`,
 		Long: `Dismiss a warning after confirming it was legitimate. <kind> is ip-mismatch or
 ip-flapping as printed by "agent warnings". Without [detail] every warning of
 that kind for the agent is dismissed; with it, only the one whose DETAIL column
-matches.`,
+matches.
+
+Dismissing an ip-mismatch warning also records its pair of addresses, the
+stream address and the WireGuard endpoint address, as acknowledged. While the
+same pair continues, the warning does not come back. The acknowledgement is
+dropped once the two addresses match or a different pair is seen, and a new
+pair is warned about after the usual two minutes. Revoking the agent also drops
+it. Acknowledgements are not listed anywhere; the server log records each one
+and when it is dropped. Dismissing ip-flapping only removes the warning.`,
 		Example: `  wgft agent dismiss-warning home ip-flapping`,
 	},
 	"agent pubkey": {

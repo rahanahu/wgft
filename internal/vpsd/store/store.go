@@ -83,6 +83,16 @@ var migrations = []string{
 	// v7:窃取検知の簡素化(仕様 5.2 節)。既知 IP 集合と stream 受け付け停止をやめる
 	`DROP TABLE IF EXISTS agent_known_ips;
 	ALTER TABLE agents DROP COLUMN stream_blocked`,
+	// v8:ip-mismatch の確認済みの組(仕様 5.2 節)。警告を消したときに、その 2 つの IP の組を
+	// 正当と確認した記録として残す。エージェントの無効化で一緒に消す
+	`CREATE TABLE warning_acks (
+		agent      TEXT NOT NULL,
+		kind       TEXT NOT NULL,
+		stream_ip  TEXT NOT NULL,  -- normalised stream source IP, no port
+		wg_ip      TEXT NOT NULL,  -- normalised wg endpoint IP, no port
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY (agent, kind, stream_ip, wg_ip)
+	)`,
 }
 
 // sqliteFileURI builds a "file:" URI for path with the given query string, for

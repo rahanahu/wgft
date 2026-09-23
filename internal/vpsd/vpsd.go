@@ -250,6 +250,9 @@ type Daemon struct {
 	// holdReason は、起動の保留の間に最後に出した適用の失敗の理由である。同じ理由の試し直しを
 	// ログに出さず、理由が変わったときだけ 1 行出すために持つ(hold.go の retryHold)。
 	holdReason string
+	// afterMismatchAcksRead は単体テスト用の差し込み口。judgeIPMismatch が確認済みの組を読んだ
+	// 直後に呼ぶ。本番では nil。
+	afterMismatchAcksRead func()
 }
 
 // reservedPorts は Daemon.reserved を組む。vpsd 自身が既に使っているポートへの listen_port を
