@@ -171,30 +171,32 @@
       <div class="title-row"><h3>{{ T .Locale "rateHead" }}</h3><small class="muted">{{ printf (T .Locale "rateDroppedFmt") .Dropped }}</small></div>
       <p class="field-help">{{ T .Locale "rateHelp" }}</p>
       <div class="rate-field">
+        {{ $psDB := DescribedBy "e-per-source-error" .Rates.PerSource.Error "e-per-source-conflict" .Rates.PerSource.Conflict "e-per-source-help" true }}
         <div class="rate-row">
-          <span class="rate-label">{{ T .Locale "ratePerSourceHead" }}</span>
-          <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" type="number" min="1" name="per_source_count" value="{{ .Rates.PerSource.Count }}">
-          <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
-          <select name="per_source_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.PerSource.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
-          <label class="check"><input type="checkbox" name="per_source_nolimit" value="1" {{ if .Rates.PerSource.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+          <span class="rate-label" id="e-per-source-label">{{ T .Locale "ratePerSourceHead" }}</span>
+          <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" type="number" min="1" id="e-per-source-count" name="per_source_count" value="{{ .Rates.PerSource.Count }}" aria-labelledby="e-per-source-label" aria-describedby="{{ $psDB }}"{{ if .Rates.PerSource.Error }} aria-invalid="true"{{ end }}>
+          <span class="rate-unit-word" id="e-per-source-unit-word">{{ T .Locale "rateConnWord" }}</span> /
+          <select id="e-per-source-unit" name="per_source_unit" aria-labelledby="e-per-source-label e-per-source-unit-word" aria-describedby="{{ $psDB }}"{{ if .Rates.PerSource.Error }} aria-invalid="true"{{ end }}>{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.PerSource.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
+          <label class="check"><input type="checkbox" id="e-per-source-nolimit" name="per_source_nolimit" value="1" aria-labelledby="e-per-source-label e-per-source-nolimit-text" aria-describedby="{{ $psDB }}"{{ if .Rates.PerSource.Error }} aria-invalid="true"{{ end }} {{ if .Rates.PerSource.NoLimit }}checked{{ end }}> <span id="e-per-source-nolimit-text">{{ T .Locale "noLimit" }}</span></label>
         </div>
-        {{ if .Rates.PerSource.Error }}<p class="danger-text">{{ .Rates.PerSource.Error }}</p>{{ end }}
-        {{ if .Rates.PerSource.Conflict }}<p class="danger-text">{{ .Rates.PerSource.Conflict }}</p>{{ end }}
-        <p class="field-help">{{ T .Locale "ratePerSourceHelp" }}</p>
+        {{ if .Rates.PerSource.Error }}<p class="danger-text" id="e-per-source-error">{{ .Rates.PerSource.Error }}</p>{{ end }}
+        {{ if .Rates.PerSource.Conflict }}<p class="danger-text" id="e-per-source-conflict">{{ .Rates.PerSource.Conflict }}</p>{{ end }}
+        <p class="field-help" id="e-per-source-help">{{ T .Locale "ratePerSourceHelp" }}</p>
         {{ if and (not .Rates.PerSource.NoLimit) .Rates.PerSource.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPerSourceFmt") (UnitLabel $loc .Rates.PerSource.Unit) .Rates.PerSource.Count }}</p>{{ end }}
       </div>
 
       <div class="rate-field">
+        {{ $nfDB := DescribedBy "e-new-flow-error" .Rates.NewFlow.Error "e-new-flow-conflict" .Rates.NewFlow.Conflict "e-new-flow-help" true }}
         <div class="rate-row">
-          <span class="rate-label">{{ T .Locale "rateNewFlowHead" }}</span>
-          <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" type="number" min="1" name="new_flow_count" value="{{ .Rates.NewFlow.Count }}">
-          <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
-          <select name="new_flow_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.NewFlow.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
-          <label class="check"><input type="checkbox" name="new_flow_nolimit" value="1" {{ if .Rates.NewFlow.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+          <span class="rate-label" id="e-new-flow-label">{{ T .Locale "rateNewFlowHead" }}</span>
+          <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" type="number" min="1" id="e-new-flow-count" name="new_flow_count" value="{{ .Rates.NewFlow.Count }}" aria-labelledby="e-new-flow-label" aria-describedby="{{ $nfDB }}"{{ if .Rates.NewFlow.Error }} aria-invalid="true"{{ end }}>
+          <span class="rate-unit-word" id="e-new-flow-unit-word">{{ T .Locale "rateConnWord" }}</span> /
+          <select id="e-new-flow-unit" name="new_flow_unit" aria-labelledby="e-new-flow-label e-new-flow-unit-word" aria-describedby="{{ $nfDB }}"{{ if .Rates.NewFlow.Error }} aria-invalid="true"{{ end }}>{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.NewFlow.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
+          <label class="check"><input type="checkbox" id="e-new-flow-nolimit" name="new_flow_nolimit" value="1" aria-labelledby="e-new-flow-label e-new-flow-nolimit-text" aria-describedby="{{ $nfDB }}"{{ if .Rates.NewFlow.Error }} aria-invalid="true"{{ end }} {{ if .Rates.NewFlow.NoLimit }}checked{{ end }}> <span id="e-new-flow-nolimit-text">{{ T .Locale "noLimit" }}</span></label>
         </div>
-        {{ if .Rates.NewFlow.Error }}<p class="danger-text">{{ .Rates.NewFlow.Error }}</p>{{ end }}
-        {{ if .Rates.NewFlow.Conflict }}<p class="danger-text">{{ .Rates.NewFlow.Conflict }}</p>{{ end }}
-        <p class="field-help">{{ T .Locale "rateNewFlowHelp" }}</p>
+        {{ if .Rates.NewFlow.Error }}<p class="danger-text" id="e-new-flow-error">{{ .Rates.NewFlow.Error }}</p>{{ end }}
+        {{ if .Rates.NewFlow.Conflict }}<p class="danger-text" id="e-new-flow-conflict">{{ .Rates.NewFlow.Conflict }}</p>{{ end }}
+        <p class="field-help" id="e-new-flow-help">{{ T .Locale "rateNewFlowHelp" }}</p>
         {{ if and (not .Rates.NewFlow.NoLimit) .Rates.NewFlow.Count }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryWholeFmt") (UnitLabel $loc .Rates.NewFlow.Unit) .Rates.NewFlow.Count }}</p>{{ end }}
       </div>
 
@@ -203,18 +205,19 @@
         <summary>{{ T .Locale "ratePacketDetails" }}</summary>
         <div class="advanced-body">
           <div class="rate-field">
+            {{ $pkDB := DescribedBy "e-packet-error" .Rates.Packet.Error "e-packet-conflict" .Rates.Packet.Conflict "e-packet-help" true "e-packet-note" .ShowPacketNote }}
             <div class="rate-row">
-              <span class="rate-label">{{ T .Locale "ratePacketHead" }}</span>
-              <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" type="number" min="1" name="packet_count" value="{{ .Rates.Packet.Count }}">
-              <span class="rate-unit-word">{{ T .Locale "ratePacketWord" }}</span> /
-              <select name="packet_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.Packet.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
-              <label class="check"><input type="checkbox" name="packet_nolimit" value="1" {{ if .Rates.Packet.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
+              <span class="rate-label" id="e-packet-label">{{ T .Locale "ratePacketHead" }}</span>
+              <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" type="number" min="1" id="e-packet-count" name="packet_count" value="{{ .Rates.Packet.Count }}" aria-labelledby="e-packet-label" aria-describedby="{{ $pkDB }}"{{ if .Rates.Packet.Error }} aria-invalid="true"{{ end }}>
+              <span class="rate-unit-word" id="e-packet-unit-word">{{ T .Locale "ratePacketWord" }}</span> /
+              <select id="e-packet-unit" name="packet_unit" aria-labelledby="e-packet-label e-packet-unit-word" aria-describedby="{{ $pkDB }}"{{ if .Rates.Packet.Error }} aria-invalid="true"{{ end }}>{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.Packet.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
+              <label class="check"><input type="checkbox" id="e-packet-nolimit" name="packet_nolimit" value="1" aria-labelledby="e-packet-label e-packet-nolimit-text" aria-describedby="{{ $pkDB }}"{{ if .Rates.Packet.Error }} aria-invalid="true"{{ end }} {{ if .Rates.Packet.NoLimit }}checked{{ end }}> <span id="e-packet-nolimit-text">{{ T .Locale "noLimit" }}</span></label>
             </div>
-            {{ if .Rates.Packet.Error }}<p class="danger-text">{{ .Rates.Packet.Error }}</p>{{ end }}
-            {{ if .Rates.Packet.Conflict }}<p class="danger-text">{{ .Rates.Packet.Conflict }}</p>{{ end }}
-            <p class="field-help">{{ T .Locale "ratePacketHelp" }}</p>
+            {{ if .Rates.Packet.Error }}<p class="danger-text" id="e-packet-error">{{ .Rates.Packet.Error }}</p>{{ end }}
+            {{ if .Rates.Packet.Conflict }}<p class="danger-text" id="e-packet-conflict">{{ .Rates.Packet.Conflict }}</p>{{ end }}
+            <p class="field-help" id="e-packet-help">{{ T .Locale "ratePacketHelp" }}</p>
             {{ if $hasPacket }}<p class="rate-summary">{{ printf (T .Locale "rateSummaryPacketFmt") (UnitLabel $loc .Rates.Packet.Unit) .Rates.Packet.Count }}</p>{{ end }}
-            {{ if .ShowPacketNote }}<p class="field-help">{{ T .Locale "packetTCPNoEffectNote" }}</p>{{ end }}
+            {{ if .ShowPacketNote }}<p class="field-help" id="e-packet-note">{{ T .Locale "packetTCPNoEffectNote" }}</p>{{ end }}
           </div>
         </div>
       </details>
