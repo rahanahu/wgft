@@ -226,7 +226,11 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 	list = append(list, "if you added lines to other tables as server check suggested, e.g. `oifname \""+iface+"\" ...` for DOCKER-USER or FORWARD, restore them by hand; check their location with `nft list ruleset | grep "+iface+"`")
 
 	// wgft が置いたものではないファイル
-	list = append(list, "delete by hand the systemd unit and env: /etc/systemd/system/wgft.service, /etc/wgft/; the binary: /usr/local/bin/wgft; and the state directory: /var/lib/wgft, which remains unless --purge")
+	list = append(list,
+		"delete by hand the systemd unit and env: /etc/systemd/system/wgft.service, /etc/wgft/",
+		"delete by hand the binary: /usr/local/bin/wgft",
+		"delete by hand the state directory: /var/lib/wgft, which remains unless --purge",
+	)
 
 	return list
 }

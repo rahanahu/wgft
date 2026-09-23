@@ -256,8 +256,8 @@ Flags:
 ## wgft agent run
 
 Agent host daemon. Brings up the tunnel and listeners first from the key in the credentials file, kept as agent.json, and the last full
-state, then connects to the server stream to receive the full state. On first run it registers with the join string, set as WGFT_JOIN; the name,
-set as WGFT_NAME, is optional and normally left unset, since the join string is already bound to a name.
+state, then connects to the server stream to receive the full state. On first run it registers with the join string, set by WGFT_JOIN; the name,
+set by WGFT_NAME, is optional and normally left unset, since the join string is already bound to a name.
 
 WGFT_JOIN is a secret. Prefer setting it as an environment variable or in the
 dotenv file, set with --config; the --join flag leaves it visible to other local
@@ -867,11 +867,11 @@ server itself can open its socket.
 Check the configuration and the environment without starting or changing
 anything: the effective value and source of every setting, other nftables
 tables that would drop or steal forwarded traffic, whether the host's own
-input firewall would block wgft's ports, namely WireGuard, the agent API, and
-any rule's listen port that wgft itself binds: proxy-mode rules in kernel mode,
-every rule in userspace mode; net.ipv4.ip_forward, the size of the
-connection tracking table, and the recorded mode and address range. Run it
-as root; without root the nftables and firewall parts are skipped.
+input firewall would block wgft's ports, net.ipv4.ip_forward, the size of the
+connection tracking table, and the recorded mode and address range. The ports
+checked are WireGuard, the agent API, and any rule's listen port that wgft
+itself binds: proxy-mode rules in kernel mode, every rule in userspace mode.
+Run it as root; without root the nftables and firewall parts are skipped.
 
 ```text
 wgft server check [flags]

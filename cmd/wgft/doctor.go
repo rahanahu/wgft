@@ -318,7 +318,7 @@ func doctorExit(rep doctorReport) error {
 	var bad []string
 	for _, r := range rep.Rules {
 		if r.Status == statusFailed {
-			bad = append(bad, short(r.RuleID)+": "+r.StoppedAt)
+			bad = append(bad, short(r.RuleID)+" at "+r.StoppedAt)
 		}
 	}
 	if len(bad) == 0 {
@@ -740,7 +740,7 @@ func handshakeCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRepo
 	if ai.WGEndpoint != "" {
 		c.Internal = append(c.Internal, "peer endpoint "+ai.WGEndpoint)
 	}
-	c.Internal = append(c.Internal, "agent tunnel report: "+tunnelStateText(ai.Tunnel))
+	c.Internal = append(c.Internal, "agent tunnel report is "+tunnelStateText(ai.Tunnel))
 	c.Status, c.Reason, c.Detail, c.ObservedAt = tunnelHealth(ai, in.Now)
 	switch c.Reason {
 	case reasonNoRecentHandshake:
