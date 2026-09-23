@@ -364,6 +364,11 @@ On the VPS, against the admin API:
 
 // agentUnreadableHint は、agent が設定ファイルを読めないときの直し方。agent の設定は WGFT_JOIN を含みうるので、
 // 全員に読ませる権限は勧めず、agent の利用者のグループにだけ読ませる(仕様 11a 節)。
+//
+// 勧める所有者とパーミッションが既に満たされている配置もある。そのときに同じ操作を勧めるだけ
+// では、実行しても何も変わらない。読んだのがエージェントを動かす利用者ではない場合が残るので、
+// その場合を最後に書く。
 func agentUnreadableHint(path string) string {
-	return fmt.Sprintf("It may hold WGFT_JOIN, so let only the agent's group read it; with the provided agent.service: chown root:wgft %s && chmod 0640 %s", path, path)
+	return fmt.Sprintf("It may hold WGFT_JOIN, so let the agent's group read it rather than every local user; with the provided agent.service, which runs the agent as the wgft user: chown root:wgft %s && chmod 0640 %s. "+
+		"If the file already has that owner, group and mode, the user that read it here is not the one the agent runs as", path, path)
 }

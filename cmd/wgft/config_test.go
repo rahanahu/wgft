@@ -238,6 +238,39 @@ func TestConfigUnreadable(t *testing.T) {
 	}
 }
 
+// 読めない設定ファイルの拒否は、読めなかった理由を断定せず、見分けるための事実を並べる。
+// かつては「the user wgft runs as cannot read it」と述べていたが、読めなかったのが呼び出し元で
+// ある実行でも同じ文が出るため、事実と食い違っていた。
+func TestUnreadableConfigFileStatesTheFactsInsteadOfBlame(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs Unix permissions and a non-root user")
+	}
+	p := filepath.Join(t.TempDir(), "agent.env")
+	if err := os.WriteFile(p, []byte("WGFT_JOIN=wgft://h:1/tok#sha256:ab\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := parseDotenv(p)
+	if err == nil {
+		t.Fatal("読めないファイルがエラーにならない")
+	}
+	if strings.Contains(err.Error(), "the user wgft runs as") {
+		t.Errorf("読めない理由を wgft の利用者だと断定している: %v", err)
+	}
+	for _, want := range []string{"this process runs as uid", "the file is mode", "owner uid"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("見分けに要る事実 %q が無い: %v", want, err)
+		}
+	}
+	// agent の直し方は、勧める所有者とパーミッションが既に満たされている場合も扱う。
+	hint := agentUnreadableHint(p)
+	if !strings.Contains(hint, "not the one the agent runs as") {
+		t.Errorf("直し方が、既に満たされている配置を扱っていない: %s", hint)
+	}
+}
+
 // agent は、読めないファイルが server.env という名前でも 0644 を勧めない(WGFT_JOIN を含みうる)。
 func TestAgentUnreadableHint(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {

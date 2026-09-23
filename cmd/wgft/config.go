@@ -45,10 +45,15 @@ type config struct {
 // (設計文書 11b 節)。ファイル名を Subject に持ち、直し方(Hint)は読み取りの層では決めない。
 // 同じファイルを server と agent で共有でき、中身を読めない以上秘密の有無も分からないので、
 // どの権限にすべきかは呼び出し側のコマンドが知っている範囲で添える。
+//
+// 文言は、読めなかった理由を断定せずに事実だけを並べる。この拒否は `agent run` のように
+// エージェント自身が読む経路でも、`wgft agent doctor` のように別の利用者が読む経路でも起きる。
+// 読み手がどちらかはこの層には分からないので、読んだプロセスの識別と、ファイルの持ち主と
+// パーミッションを並べ、どちらの側に原因があるかの判断は運用者に残す。
 func unreadableConfigFile(path string, err error) *startup.Refusal {
 	// 元のエラーを包んだままにする。呼び出し側とテストが errors.Is(err, os.ErrPermission) で
 	// 読めない理由を確かめられるようにするためである。
-	return startup.Config(path, "%v; the user wgft runs as cannot read it", err).Wrapping(err)
+	return startup.Config(path, "%v; %s", err, configFilePermFacts(path)).Wrapping(err)
 }
 
 // withUnreadableHint は、err が path を読めなかったことによる拒否なら直し方を添える。
