@@ -255,6 +255,27 @@ for an observed one. The last handshake is shown as a
 fact for the same reason as these six, but it stays inside the tunnel item in
 the Tunnel group, since that item's own status can be OK or FAILED.
 
+How to read the six values; --json carries the same guidance in each item's
+"next":
+
+  reconnect backoff  a wait that keeps growing while the control connection
+                     stays down points at the server or the line to it
+  liveness           the agent's own keepalives on the control stream; they
+                     are cleared on every reconnect, so an empty pair on a
+                     stream that is up means the connection is new
+  watchdog           the rebuild interval the agent judges by, not a
+                     countdown; a pending rebuild means the tunnel item says
+                     why the last build failed
+  transfer           an idle tunnel keeps the same counts and is healthy; run
+                     this twice while traffic should flow to see them move
+  sessions           flows are what the budget counts, one per public-side
+                     TCP connection or UDP source address and port; sessions
+                     count both sides of a TCP relay
+  refusals           counted from the time the tunnel was built; budget means
+                     the whole process was full, rule_cap that one rule hit
+                     its share, reserve that the room left was held for
+                     other rules
+
 The Connection, Tunnel and Relay items other than "wg endpoint resolve" are held
 only by the running process and are read over its control socket. While the
 agent is stopped, or while its socket cannot be reached, they are listed as

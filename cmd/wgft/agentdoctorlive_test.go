@@ -649,6 +649,11 @@ func TestAgentDoctorHumanOutputSeparatesObservedValues(t *testing.T) {
 	if relayAt < 0 || observedAt < 0 || observedAt < relayAt {
 		t.Fatalf("Observed values does not come after the five groups:\n%s", out)
 	}
+	historyAt := strings.Index(out, "\nHistory\n")
+	if historyAt < observedAt {
+		t.Fatalf("History does not follow Observed values:\n%s", out)
+	}
+	section := out[observedAt:historyAt]
 
 	for _, spec := range agentLiveOnly {
 		if !spec.valueOnly {
@@ -667,6 +672,16 @@ func TestAgentDoctorHumanOutputSeparatesObservedValues(t *testing.T) {
 		if at := strings.Index(out, spec.Label); at < observedAt {
 			t.Errorf("%s is not printed inside the Observed values section:\n%s", spec.Label, out)
 		}
+		// 値を読めた行は Next を出さない。読み方はヘルプと --json の next が持つ(10.2c 節)。
+		if c.Next == "" {
+			t.Fatalf("test setup: %s carries no Next, so this test cannot see it left out", spec.ID)
+		}
+		if strings.Contains(normalizeWhitespace(section), normalizeWhitespace(c.Next)) {
+			t.Errorf("%s prints its Next text in the Observed values section:\n%s", spec.Label, section)
+		}
+	}
+	if strings.Contains(section, "Check:") {
+		t.Errorf("the Observed values section prints a Check: line for a value that was read:\n%s", section)
 	}
 
 	// 判定済みの検査は変わらず、群の中で状態語を出す。
@@ -716,6 +731,23 @@ func TestAgentDoctorHumanOutputKeepsTheStatusWordWhenAnObservedValueIsSkipped(t 
 		if !humanHasLine(out[observedAt:], spec.Label, statusWord(statusSkipped)) {
 			t.Errorf("%s does not print its status word %s inside Observed values:\n%s", spec.Label, statusWord(statusSkipped), out)
 		}
+	}
+}
+
+// Observed values 節で UNKNOWN 以外の状態になった行は、判定済みの検査と同じく状態語と Next を
+// 出す。値そのものを読めなかったことと、その次に見るものを落とさないためである(10.2c 節)。
+func TestAgentDoctorObservedValuesKeepNextWhenNotAValue(t *testing.T) {
+	var b strings.Builder
+	writeAgentDoctorObserved(&b, []agentDoctorCheck{{
+		ID: agentCheckTransfer, Label: "transfer", Status: statusSkipped, Reason: agentReasonRuntimeBusy,
+		Detail: "not read", Next: "look at the tunnel line", valueOnly: true,
+	}})
+	out := b.String()
+	if !humanHasLine(out, "transfer", statusWord(statusSkipped)) {
+		t.Errorf("a SKIPPED observed value lost its status word:\n%s", out)
+	}
+	if !strings.Contains(out, "Check: look at the tunnel line") {
+		t.Errorf("a SKIPPED observed value lost its Next:\n%s", out)
 	}
 }
 

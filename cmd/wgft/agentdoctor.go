@@ -1150,9 +1150,10 @@ func writeAgentDoctorReport(w io.Writer, rep agentDoctorReport) {
 // writeAgentDoctorObserved は、値だけを示し合否を持たない検査を「Observed values」の節として
 // 出す(10.2c 節、2026-09-24 の所有者の決定)。健全なエージェントでもこの 6 つは UNKNOWN にしか
 // ならないので、判定済みの検査と同じ大きな状態語を並べると、運用者がその列をすべて故障と読む。
-// この節では、値を読めた実行(状態が UNKNOWN)は状態語を出さずラベルと値だけを示す。値そのものを
-// 読めなかった実行は、SKIPPED や、この 6 つがまだ持たない状態が来た場合も含め、判定済みの検査と
-// 同じく状態語を出す。値が無いことは、値と取り違えられてはならないためである。
+// この節では、値を読めた実行(状態が UNKNOWN)はラベルと値だけを示し、状態語も Next も出さない。
+// 値の読み方はヘルプと `--json` の next が持つ。値そのものを読めなかった実行は、SKIPPED や、
+// この 6 つがまだ持たない状態が来た場合も含め、判定済みの検査と同じく状態語と Next を出す。値が
+// 無いことは、値と取り違えられてはならないためである。
 func writeAgentDoctorObserved(w io.Writer, checks []agentDoctorCheck) {
 	if len(checks) == 0 {
 		return
@@ -1162,9 +1163,9 @@ func writeAgentDoctorObserved(w io.Writer, checks []agentDoctorCheck) {
 	for _, c := range checks {
 		if c.Status == statusUnknown {
 			writeValueLine(w, c.Label, c.Detail)
-		} else {
-			writeLine(w, c.Label, statusWord(c.Status), c.Detail)
+			continue
 		}
+		writeLine(w, c.Label, statusWord(c.Status), c.Detail)
 		if c.Next != "" && c.Status != statusOK {
 			fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(c.Next, indent+7))
 		}

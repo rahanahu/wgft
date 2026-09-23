@@ -903,6 +903,10 @@ func TestAgentDoctorJSONValueOnlyChecksAreUnaffectedByObservedValues(t *testing.
 				if found.Status != sc.want || found.Reason != sc.reason {
 					t.Errorf("%s: %s = %s/%q, want %s/%q", sc.name, id, found.Status, found.Reason, sc.want, sc.reason)
 				}
+				// 人向けの出力は値を読めた行に Next を出さないが、--json は next を持ち続ける。
+				if found.Status == statusUnknown && found.Next == "" {
+					t.Errorf("%s: %s carries no next in the JSON; the human output leaves it out, not the JSON", sc.name, id)
+				}
 			}
 		})
 	}
