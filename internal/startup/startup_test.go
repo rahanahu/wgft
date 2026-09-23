@@ -34,6 +34,49 @@ func TestErrorNamesCategoryAndSubject(t *testing.T) {
 	}
 }
 
+// A command that starts nothing marks the refusal, and only the opening words change: a one-shot
+// run cannot refuse to start, it can only stop (design.md 11b 節). The category, the subject, the
+// reason, the hint, the wrapped cause and the type itself, which decides exit code 3, stay put.
+func TestOneShotChangesOnlyTheOpeningWords(t *testing.T) {
+	r := startup.Config("/etc/wgft/agent.env", "permission denied").Wrapping(os.ErrPermission)
+	r.Hint = "run it as the user the agent runs as"
+	if got := startup.OneShot(r); got != error(r) {
+		t.Errorf("OneShot returned %v, want the same error", got)
+	}
+	want := "cannot continue [config /etc/wgft/agent.env]: permission denied. run it as the user the agent runs as"
+	if got := r.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if !startup.IsRefusal(r) || !errors.Is(r, os.ErrPermission) {
+		t.Error("marking the refusal lost its type or its cause; exit code 3 and errors.Is must not move")
+	}
+	// The mark reaches a refusal through wrapping, which is how a command's entry point marks
+	// one that a lower layer raised and an upper layer wrapped.
+	inner := startup.Prerequisite("wg", "no kernel module")
+	if err := startup.OneShot(fmt.Errorf("server: %w", inner)); err == nil {
+		t.Fatal("OneShot dropped the error")
+	}
+	if !strings.HasPrefix(inner.Error(), "cannot continue [") {
+		t.Errorf("a wrapped refusal was not marked: %q", inner.Error())
+	}
+	// An ordinary error and nil pass through untouched.
+	plain := errors.New("listen tcp :8443: address already in use")
+	if got := startup.OneShot(plain); got != plain {
+		t.Errorf("OneShot(ordinary) = %v, want it unchanged", got)
+	}
+	if got := startup.OneShot(nil); got != nil {
+		t.Errorf("OneShot(nil) = %v, want nil", got)
+	}
+}
+
+// An unmarked refusal keeps the startup wording. The zero value is what every layer builds, so a
+// refusal nobody marks reads the way the server's and the agent's startup have always read.
+func TestUnmarkedRefusalKeepsTheStartupWording(t *testing.T) {
+	if got := startup.Config("WGFT_MTU", "out of range").Error(); !strings.HasPrefix(got, "refusing to start [") {
+		t.Errorf("Error() = %q, want it to start with the startup wording", got)
+	}
+}
+
 // A hint added by the layer that knows the fix appears after the reason, once.
 func TestHintIsAppended(t *testing.T) {
 	r := startup.Config("/etc/wgft/server.env", "permission denied")

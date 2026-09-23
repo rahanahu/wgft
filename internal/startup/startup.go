@@ -10,6 +10,11 @@
 // without an operator; when in doubt it is an ordinary error, because a wrong exit code 3 keeps the
 // forwarder down for good, which is worse than a noisy restart loop.
 //
+// The same refusals reach one-shot commands, because the config layer is shared: an unreadable
+// dotenv stops `wgft status` as surely as `wgft server run`. A command that starts nothing marks
+// the refusal with OneShot, which only changes the opening words of the message, since a command
+// that starts nothing cannot refuse to start. The exit code stays 3 on both paths.
+//
 // Every refusal carries the cause's category, so an operator can tell a value to edit from a host
 // that is missing something, and the setting or resource it is about. The package imports nothing
 // from this module: every layer, from cmd/wgft down to internal/dataplane/linuxkernel/wg, may
@@ -61,6 +66,13 @@ type Refusal struct {
 	// unreadable config file keeps os.ErrPermission). Nil otherwise: most refusals are judgements
 	// on a value, not wrappers around a failure.
 	Err error
+	// oneShot is true when this refusal stopped a single run of a command rather than the
+	// startup of the server or the agent. The same refusals are raised on both paths: the
+	// config layer is shared, so "wgft status" and "wgft server run" reach the same
+	// unreadable dotenv. The zero value keeps the startup wording, so every refusal that
+	// nobody marks reads as it always has; OneShot marks the other side, and only the
+	// command's own entry point knows which side it is on.
+	oneShot bool
 }
 
 // Unwrap exposes Err, so errors.Is reaches the underlying error through a refusal.
@@ -72,10 +84,27 @@ func (e *Refusal) Wrapping(err error) *Refusal {
 	return e
 }
 
+// OneShot marks the refusal in err's chain as one that stopped a single run of a command, and
+// returns err unchanged. An ordinary error and nil pass through. A command that starts nothing
+// calls it on the way out, so its message says the run cannot continue instead of claiming that
+// something refused to start.
+func OneShot(err error) error {
+	if r := Of(err); r != nil {
+		r.oneShot = true
+	}
+	return err
+}
+
 // Error names the category and the subject before the reason, so an operator reading one line of
-// the journal can tell a value to edit from a host to fix, and grep for either.
+// the journal can tell a value to edit from a host to fix, and grep for either. The opening words
+// name what the refusal stopped: the startup of a long-running process, or the run of a command
+// that starts nothing.
 func (e *Refusal) Error() string {
-	s := "refusing to start [" + string(e.Category)
+	opening := "refusing to start ["
+	if e.oneShot {
+		opening = "cannot continue ["
+	}
+	s := opening + string(e.Category)
 	if e.Subject != "" {
 		s += " " + e.Subject
 	}

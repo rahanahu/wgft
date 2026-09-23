@@ -129,6 +129,8 @@ On the VPS, against the admin API:
 		Use:   "run",
 		Short: "run the agent; agent host",
 		Args:  cobra.NoArgs,
+		// 常駐プロセスを起動するので、起動の拒否の文面はそのままである(設計文書 11b 節)。
+		Annotations: map[string]string{daemonAnnotation: "yes"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts, c, err := buildAgentOptions(cmd)
 			if err != nil {

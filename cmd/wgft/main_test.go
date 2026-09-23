@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -80,5 +83,49 @@ func TestVersionSubcommandRangeComesFromProto(t *testing.T) {
 	}
 	if want := "protocol range: v2-v7"; lines[1] != want {
 		t.Errorf("version line 2 = %q, want %q (the range must be read from proto.SupportedProtocol)", lines[1], want)
+	}
+}
+
+// 拒否の書き出しは、そのコマンドが常駐プロセスを起動するかどうかで決まる(設計文書 11b 節)。
+// 設定を読む層は共有しているので、同じ設定の誤りが両方の経路に出る。`server check` と
+// `server run` は buildServerOptions を共有しており、それでも文面が分かれることを固定する。
+func TestRefusalWordingFollowsTheCommand(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.env")
+	if err := os.WriteFile(bad, []byte("not a pair\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const startupWording = "refusing to start ["
+	const oneShotWording = "cannot continue ["
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"server run starts a daemon", []string{"server", "run", "--config", bad, "--data-dir", dir}, startupWording},
+		{"agent run starts a daemon", []string{"agent", "run", "--config", bad, "--data-dir", dir}, startupWording},
+		{"server check starts nothing", []string{"server", "check", "--config", bad, "--data-dir", dir}, oneShotWording},
+		{"agent doctor starts nothing", []string{"agent", "doctor", "--config", bad, "--data-dir", dir}, oneShotWording},
+		{"status starts nothing", []string{"status", "--config", bad}, oneShotWording},
+		{"rule ls starts nothing", []string{"rule", "ls", "--config", bad}, oneShotWording},
+		{"agent pubkey starts nothing", []string{"agent", "pubkey", "--config", bad, "--data-dir", dir}, oneShotWording},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newRootCmd()
+			root.SetArgs(tc.args)
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			err := root.Execute()
+			if err == nil {
+				t.Fatal("a dotenv that is not in KEY=value form must be refused")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("message = %q, want it to contain %q", err.Error(), tc.want)
+			}
+			// 文面だけの区別である。設定の誤りは、どちらの経路でも終了コード 3 で終わる。
+			if got := exitCode(err); got != exitRefusal {
+				t.Errorf("exitCode = %d, want %d", got, exitRefusal)
+			}
+		})
 	}
 }

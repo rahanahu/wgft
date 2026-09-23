@@ -189,6 +189,8 @@ func newServerCmd() *cobra.Command {
 		Use:   "run",
 		Short: "run the daemon; unit ExecStart or Docker entrypoint",
 		Args:  cobra.NoArgs,
+		// 常駐プロセスを起動するので、起動の拒否の文面はそのままである(設計文書 11b 節)。
+		Annotations: map[string]string{daemonAnnotation: "yes"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts, c, err := buildServerOptions(cmd)
 			if err != nil {
