@@ -3,10 +3,10 @@
 # each in English (name.png) and Japanese (name.ja.png) under docs/images:
 #
 #   dashboard         the dashboard, full page at a width of 1400
-#   doctor            the diagnostics page's list of every rule, at a width of 960,
+#   doctor            the diagnostics page's list of every rule, at a width of 1200,
 #                     cut off just below the rules table and its result line
 #   doctor-rule       the diagnostics page of the one rule r_pub_tcp8080, which stops
-#                     at WireGuard, at a width of 960, cut off below the probe section
+#                     at WireGuard, at a width of 1200, cut off above the history section
 #
 # It builds tools/uidemo, a throwaway program that serves the admin Web UI on
 # 127.0.0.1:8687 with fixed sample data (three agents, nine rules, one warning;
@@ -110,9 +110,9 @@ shoot() {
 
 shoot "/?lang=en" "$out_dir/dashboard.png" 1400
 shoot "/?lang=ja" "$out_dir/dashboard.ja.png" 1400
-shoot "/ui/doctor?lang=en" "$out_dir/doctor.png" 960,2329
-shoot "/ui/doctor?lang=ja" "$out_dir/doctor.ja.png" 960,2376
-shoot "/ui/doctor/r_pub_tcp8080?lang=en" "$out_dir/doctor-rule.png" 960,1175
-shoot "/ui/doctor/r_pub_tcp8080?lang=ja" "$out_dir/doctor-rule.ja.png" 960,1188
+shoot "/ui/doctor?lang=en" "$out_dir/doctor.png" 1200,2258
+shoot "/ui/doctor?lang=ja" "$out_dir/doctor.ja.png" 1200,2303
+shoot "/ui/doctor/r_pub_tcp8080?lang=en" "$out_dir/doctor-rule.png" 1200,1139
+shoot "/ui/doctor/r_pub_tcp8080?lang=ja" "$out_dir/doctor-rule.ja.png" 1200,1170
 
 echo "done."
