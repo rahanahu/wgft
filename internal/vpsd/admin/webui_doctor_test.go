@@ -274,6 +274,23 @@ func TestDoctorPageHidesTheNoisyChecksButKeepsThem(t *testing.T) {
 	}
 }
 
+// TestDoctorSummarySaysWhereTheProbeIs は、一覧の画面から疎通を試せることが読み取れるかを
+// 確かめる。一覧の画面にボタンは無く、試していない範囲の inner path の行は CLI と同じ文なので、
+// 画面だけを見る運用者には 1 本のルールの画面へ進む道が見えない。
+func TestDoctorSummarySaysWhereTheProbeIs(t *testing.T) {
+	srv, _ := newDoctorTestServer(t)
+
+	for _, lang := range []string{"ja", "en"} {
+		body := getBody(t, srv.URL+"/ui/doctor?lang="+lang)
+		if !strings.Contains(body, T(lang, "doctorProbeOnRulePage")) {
+			t.Errorf("%s: the summary page does not say where the probe can be run:\n%s", lang, body)
+		}
+		if !strings.Contains(body, `href="/ui/doctor/r_ok"`) {
+			t.Errorf("%s: the summary page does not link to a rule's own page:\n%s", lang, body)
+		}
+	}
+}
+
 // TestDoctorPageIsReachableFromTheDashboard は、入口を確かめる。ダッシュボードの見出しと、
 // ルール詳細ページの要約の両方から開ける。
 func TestDoctorPageIsReachableFromTheDashboard(t *testing.T) {

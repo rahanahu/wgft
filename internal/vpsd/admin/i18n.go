@@ -264,6 +264,7 @@ var tr = map[string][2]string{
 	"doctorHistoryHead":      {"履歴", "History"},
 	"doctorNotTestedHead":    {"この診断が試していない範囲", "Not tested by this diagnosis"},
 	"doctorCheckedAt":        {"読み取りの時刻:", "Read at"},
+	"doctorProbeOnRulePage":  {"疎通の確認は、ルールごとの画面にあります。上の「診断」から開くと、その 1 本だけに接続を試せます。", "The end-to-end probe lives on the page of a single rule: open one with Diagnose above to dial that rule, and only that rule."},
 	"doctorProbeHead":        {"疎通の確認", "End-to-end probe"},
 	"doctorProbe":            {"疎通を試す", "Run the probe"},
 	"doctorProbeHelp":        {"押したときだけ、この server からトンネルとエージェントを通って宛先へ TCP 接続を 1 本開きます。宛先にはデータを伴わない接続が 1 本届きます。", "Only when pressed, this opens one real TCP connection from this server, through the tunnel and the agent, to the target. The target sees one connection that carries no data."},
