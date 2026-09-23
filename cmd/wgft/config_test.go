@@ -271,6 +271,42 @@ func TestUnreadableConfigFileStatesTheFactsInsteadOfBlame(t *testing.T) {
 	}
 }
 
+// 読めなかった理由の事実は、実 uid と実 gid ではなく実効 uid と実効 gid で述べる。ファイルを
+// 開けるかどうかを決めるのは実効の側である。今の wgft は setuid で動かないので 2 つは一致し、
+// 値を見比べても違いが出ない。呼び出しの形を読んで固定する。
+func TestConfigPermFactsUseTheEffectiveIDs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows build states no uid or gid; the DACL decides who may read the file")
+	}
+	b, err := os.ReadFile("configperm_unix.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, want := range []string{"os.Geteuid()", "os.Getegid()"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("configperm_unix.go does not call %s; the facts must name the ids that decide access", want)
+		}
+	}
+	for _, banned := range []string{"os.Getuid()", "os.Getgid()"} {
+		if strings.Contains(src, banned) {
+			t.Errorf("configperm_unix.go calls %s; the real ids do not decide whether the file can be opened", banned)
+		}
+	}
+}
+
+// 句を繋ぐときに句読点を 2 つ並べない。Windows の OS の誤りの文は句点で終わるので、そのまま
+// 繋ぐと ".;" になる。
+func TestUnreadableConfigFileJoinsSentencesCleanly(t *testing.T) {
+	r := unreadableConfigFile(filepath.Join(t.TempDir(), "agent.env"), errors.New(`open C:\wgft\agent.env: Access is denied.`))
+	if strings.Contains(r.Error(), ".;") {
+		t.Errorf("two marks of punctuation run together: %v", r)
+	}
+	if !strings.Contains(r.Error(), "Access is denied;") {
+		t.Errorf("the underlying reason was lost: %v", r)
+	}
+}
+
 // agent は、読めないファイルが server.env という名前でも 0644 を勧めない(WGFT_JOIN を含みうる)。
 func TestAgentUnreadableHint(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {

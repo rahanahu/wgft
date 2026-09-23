@@ -538,9 +538,14 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 	// 同じファイルを読み、読めなければ起動を拒む。無いファイルは正しい配置なので見ない。読めな
 	// かった実行だけを、他の対象と同じ層 2 の失敗として並べる(10.2c 節)。
 	configDenied := in.ConfigUnreadable != nil
+	// sawConfigFile は、ファイル自身の持ち主とパーミッションを読めたかどうかである。読めなかった
+	// 実行では、拒んでいるのは上の階層のディレクトリであり、ファイル自身については何も分からない。
+	sawConfigFile := false
 	if configDenied {
-		denied = append(denied, "the config file "+in.ConfigPath+" cannot be read: "+errText(in.ConfigUnreadable)+
-			"; "+configFilePermFacts(in.ConfigPath)+". Its settings were taken from this command's flags, environment and the defaults instead")
+		var facts string
+		facts, sawConfigFile = configFilePermFacts(in.ConfigPath)
+		denied = append(denied, "the config file "+in.ConfigPath+" cannot be read: "+trimSentenceEnd(errText(in.ConfigUnreadable))+
+			"; "+facts+". Its settings were taken from this command's flags, environment and the defaults instead")
 	}
 
 	// 所見には、満たした対象も満たさなかった対象も並べる。どこまで読めてどこから権限で読めな
@@ -556,10 +561,15 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 		// ならず、層 2 として 2 になる。状態の語と終了コードは別のものとして扱う(10.2c 節)。
 		c.Status, c.Reason, c.evidenceUnreachable = statusFailed, agentReasonPermissionDenied, true
 		c.Next = agentSamePrincipalNext
-		if configDenied {
+		switch {
+		case configDenied && sawConfigFile:
 			// エージェントを動かす利用者で実行し直しても読めない配置がある。その場合に残る
 			// 原因はファイル自身の持ち主とパーミッションなので、見比べる先を示す。
 			c.Next += ". If this is already that user, then the file's own owner, group and mode refuse it, and the detail above names both sides"
+		case configDenied:
+			// ファイル自身は読めていないので、その持ち主とパーミッションを名指ししない。拒んで
+			// いるのは上の階層のディレクトリであり、運用者が見るのもそちらである。
+			c.Next += ". If this is already that user, then the refusal is on a directory on the way to the config file rather than on the file itself; read the permissions of each directory in its path"
 		}
 	case len(undetermined) > 0:
 		c.Status, c.Reason = statusUnknown, agentReasonPermissionNotDetermined
@@ -680,7 +690,8 @@ func credentialsModeNote(cred agentCredentialsFile) string {
 	if runtime.GOOS == "windows" {
 		return ""
 	}
-	note := fmt.Sprintf("mode %#o", cred.Mode)
+	// パーミッションは常に 4 桁で書く。設定ファイルの所見と揃える。
+	note := fmt.Sprintf("mode %#04o", cred.Mode)
 	if cred.Mode&0o077 != 0 {
 		note += ", which lets other local users read the permanent token; tighten it with chmod 0600"
 	}

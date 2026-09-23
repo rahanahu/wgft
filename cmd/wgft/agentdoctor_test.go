@@ -805,6 +805,71 @@ func TestAgentDoctorReportsAnUnreadableConfigFile(t *testing.T) {
 	}
 }
 
+// 設定ファイルの手前のディレクトリが通り抜けを拒む実行では、ファイル自身の持ち主とパーミッションを
+// 読めていない。所見も次の一手も、読めていないものを名指ししない。運用者が直すのはディレクトリで
+// あって、ファイルではない。
+func TestAgentDoctorDoesNotBlameTheFileADirectoryHides(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("this scenario needs a directory that refuses the running user; root refuses nothing and Windows does not answer os.Chmod that way")
+	}
+	dir := t.TempDir()
+	closed := filepath.Join(dir, "closed")
+	if err := os.Mkdir(closed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(closed, "agent.env")
+	if err := os.WriteFile(config, []byte("WGFT_NAME=home\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chmodForTest(t, closed, 0)
+
+	in := testAgentDoctorInput(t, dir)
+	in.ConfigPath = config
+	in.ConfigUnreadable = fs.ErrPermission
+	priv, _ := findAgentCheck(agentDiagnose(in), agentCheckPrivileges)
+	if priv.Status != statusFailed || priv.Reason != agentReasonPermissionDenied {
+		t.Fatalf("host.privileges = %s/%q, want failed/%q", priv.Status, priv.Reason, agentReasonPermissionDenied)
+	}
+	if !strings.Contains(priv.Detail, "a directory above it refuses the way in") {
+		t.Errorf("host.privileges does not say which side refused: %q", priv.Detail)
+	}
+	if strings.Contains(priv.Detail, "the file is mode") {
+		t.Errorf("host.privileges states the file's mode although it could not read it: %q", priv.Detail)
+	}
+	// 次の一手が、読めていないファイルの持ち主とパーミッションを直せと述べてはならない。
+	if strings.Contains(priv.Next, "the file's own owner, group and mode refuse it") {
+		t.Errorf("the next step blames the file although a directory above it refused: %q", priv.Next)
+	}
+	if !strings.Contains(priv.Next, "directory on the way to the config file") {
+		t.Errorf("the next step does not send the operator to the directories: %q", priv.Next)
+	}
+}
+
+// ファイル自身を読めた実行では、逆に、その持ち主とパーミッションを名指しする。エージェントを
+// 動かす利用者で実行し直しても読めない配置で、運用者が次に見るものである。
+func TestAgentDoctorNamesTheConfigFileItCouldStat(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("the facts this check reads are the Unix owner and mode; Windows does not answer os.Chmod that way")
+	}
+	dir := t.TempDir()
+	config := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(config, []byte("WGFT_NAME=home\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chmodForTest(t, config, 0)
+
+	in := testAgentDoctorInput(t, dir)
+	in.ConfigPath = config
+	in.ConfigUnreadable = fs.ErrPermission
+	priv, _ := findAgentCheck(agentDiagnose(in), agentCheckPrivileges)
+	if !strings.Contains(priv.Detail, "the file is mode 0000") {
+		t.Errorf("host.privileges does not state the file's own mode: %q", priv.Detail)
+	}
+	if !strings.Contains(priv.Next, "the file's own owner, group and mode refuse it") {
+		t.Errorf("the next step does not name the file it could read: %q", priv.Next)
+	}
+}
+
 // 設定ファイルが無い配置は正しい。無いことを失敗にせず、報告はそのまま出る。
 //
 // 主張は OS に依らない形にしてある。`host.privileges` の状態そのものは OS で分かれ、Windows では

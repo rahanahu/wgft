@@ -51,10 +51,15 @@ type config struct {
 // 読み手がどちらかはこの層には分からないので、読んだプロセスの識別と、ファイルの持ち主と
 // パーミッションを並べ、どちらの側に原因があるかの判断は運用者に残す。
 func unreadableConfigFile(path string, err error) *startup.Refusal {
+	facts, _ := configFilePermFacts(path)
 	// 元のエラーを包んだままにする。呼び出し側とテストが errors.Is(err, os.ErrPermission) で
 	// 読めない理由を確かめられるようにするためである。
-	return startup.Config(path, "%v; %s", err, configFilePermFacts(path)).Wrapping(err)
+	return startup.Config(path, "%s; %s", trimSentenceEnd(err.Error()), facts).Wrapping(err)
 }
+
+// trimSentenceEnd は、句を繋ぐ前に末尾の句点を落とす。Windows の OS の誤りの文は句点で終わるので、
+// そのまま繋ぐと "Access is denied.; this process runs as ..." のように句読点が 2 つ並ぶ。
+func trimSentenceEnd(s string) string { return strings.TrimRight(s, ". ") }
 
 // withUnreadableHint は、err が path を読めなかったことによる拒否なら直し方を添える。
 // それ以外はそのまま返す。読めないファイルの拒否は Subject にそのファイルのパスを持つので、
