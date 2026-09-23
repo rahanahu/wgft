@@ -230,7 +230,8 @@ func TestServerTimeouts_IdleKeepAlive(t *testing.T) {
 		}
 		select {
 		case idleAt <- time.Now():
-		default: // この接続で 2 回目以降の StateIdle、または既に受信済み: 最初の 1 回だけを使う
+		default: // 最初の値がチャンネルに残っている間に来た後続の通知を捨てる。このテストは
+			// リクエストを 1 回しか送らないので、StateIdle はもともと 1 回しか起きない。
 		}
 	}
 	go srv.Serve(ln)
