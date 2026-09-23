@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -499,5 +500,58 @@ func TestLangSwitchOnDashboardOnly(t *testing.T) {
 		if u == srv.URL+"/ui/doctor" && !strings.Contains(string(b), `<a href="/">`+T("ja", "crumbDashboard")+`</a>`) {
 			t.Errorf("the diagnostics page does not follow the language chosen on the dashboard")
 		}
+	}
+}
+
+// TestFormsOptOutOfAutofill は、Web UI のフォームがパスワード管理ソフトの自動入力の対象に
+// ならないよう、すべてのフォームが autocomplete="off" を持ち、文字や数を打ち込む入力欄
+// (type が無いか text、number、search の input と textarea)が autocomplete="off" と
+// 各ソフトの無視の印を持つことを確かめる。
+func TestFormsOptOutOfAutofill(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules,
+			proto.Rule{ID: "r_a", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true},
+			proto.Rule{ID: "r_r", Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 30000, Hi: 30003}, Target: "192.168.1.40:30000", VPSMode: proto.ModeKernel, Enabled: true},
+		), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(&fakeBackend{st: st, agents: []AgentInfo{{Name: "home", Address: "10.200.0.2", Connected: true}}}))
+	defer srv.Close()
+
+	tagRe := regexp.MustCompile(`<(input|textarea|form)\b[^>]*>`)
+	typeRe := regexp.MustCompile(`\stype="([a-z]+)"`)
+	counted := map[string]int{}
+	for _, path := range []string{"/", "/ui/add-rule", "/ui/add-agent", "/ui/rules/r_a", "/ui/rules/r_r", "/ui/rules/import", "/ui/doctor", "/ui/doctor/r_a"} {
+		body := getBody(t, srv.URL+path+"?lang=en")
+		for _, tag := range tagRe.FindAllString(body, -1) {
+			switch {
+			case strings.HasPrefix(tag, "<form"):
+				counted["form"]++
+				if !strings.Contains(tag, `autocomplete="off"`) {
+					t.Errorf("%s: form without autocomplete=\"off\": %s", path, tag)
+				}
+				continue
+			case strings.HasPrefix(tag, "<input"):
+				if m := typeRe.FindStringSubmatch(tag); m != nil && m[1] != "text" && m[1] != "number" && m[1] != "search" {
+					continue
+				}
+			}
+			counted["field"]++
+			for _, want := range []string{`autocomplete="off"`, "data-1p-ignore", `data-lpignore="true"`, "data-bwignore", `data-form-type="other"`} {
+				if !strings.Contains(tag, want) {
+					t.Errorf("%s: field without %s: %s", path, want, tag)
+				}
+			}
+		}
+	}
+	// 見落としで何も数えないまま通らないよう、少なくとも数があることを確かめる。
+	if counted["form"] < 10 || counted["field"] < 15 {
+		t.Errorf("too few forms or fields were checked: %v", counted)
 	}
 }

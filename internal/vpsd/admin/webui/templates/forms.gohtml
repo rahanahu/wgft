@@ -1,7 +1,7 @@
 {{ define "addrule" }}
 <h2 style="margin-top:0">{{ T .Locale "addRuleTitle" }}</h2>
 {{ if .Error }}<p class="danger-text">{{ .Error }}</p>{{ end }}
-<form method="post" action="/ui/add-rule" class="rule-form" id="rule-form">
+<form autocomplete="off" method="post" action="/ui/add-rule" class="rule-form" id="rule-form">
   <div class="flow" aria-hidden="true">
     <span class="flow-node">{{ T .Locale "flowClient" }}</span>
     <span class="flow-arrow">→</span>
@@ -26,26 +26,26 @@
 
   <div class="field">
     <label for="f-listen">{{ T .Locale "fListen" }}</label>
-    <input id="f-listen" class="search" name="listen_port" required placeholder="25565" inputmode="numeric">
+    <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" id="f-listen" class="search" name="listen_port" required placeholder="25565" inputmode="numeric">
     <small class="field-help">{{ T .Locale "fListenHelp" }}</small>
   </div>
 
   <div class="field">
     <label for="f-target">{{ T .Locale "fDest" }}</label>
-    <input id="f-target" class="search" name="target" required placeholder="192.168.1.20:25565">
+    <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" id="f-target" class="search" name="target" required placeholder="192.168.1.20:25565">
     <small class="field-help">{{ T .Locale "fDestHelp" }}</small>
   </div>
 
   <div class="field">
     <label for="f-group">{{ T .Locale "fGroup" }}</label>
-    <input id="f-group" class="search" name="group" placeholder="game" list="group-list" maxlength="32">
+    <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" id="f-group" class="search" name="group" placeholder="game" list="group-list" maxlength="32">
     <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
     <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
   </div>
 
   <div class="field">
     <label for="f-note">{{ T .Locale "fNote" }}</label>
-    <input id="f-note" class="search" name="note" maxlength="120">
+    <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" id="f-note" class="search" name="note" maxlength="120">
     <small class="field-help">{{ T .Locale "fNoteHelp" }}</small>
   </div>
 
@@ -97,8 +97,8 @@
     </div>
   </div>
 {{ else }}
-  <form method="post" action="/ui/add-agent" style="display:grid;gap:12px;max-width:420px">
-    <label>{{ T .Locale "fAgentName" }}<input class="search" name="name" required placeholder="home"></label>
+  <form autocomplete="off" method="post" action="/ui/add-agent" style="display:grid;gap:12px;max-width:420px">
+    <label>{{ T .Locale "fAgentName" }}<input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" class="search" name="name" required placeholder="home"></label>
     <div style="display:flex;gap:8px">
       <button class="btn primary" type="submit">{{ T .Locale "genJoin" }}</button>
       <a class="btn" href="/">{{ T .Locale "cancel" }}</a>
@@ -125,7 +125,7 @@
     <span class="flow-arrow">→</span> {{ .Agent }} <span class="mono">{{ .Target }}</span>
     <span class="badge neutral">{{ .Mode }}</span>
     <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
-    <form method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
+    <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
       <button class="small-btn" type="submit">{{ if .Enabled }}{{ T .Locale "disable" }}{{ else }}{{ T .Locale "enable" }}{{ end }}</button>
     </form>
     <a class="small-btn accent" href="/ui/doctor/{{ .ID }}">{{ T .Locale "doctorTitle" }}</a>
@@ -141,7 +141,7 @@
   <p class="field-help">{{ T .Locale "settingsHelp" }}</p>
   {{ if .SettingsError }}<p class="danger-text">{{ .SettingsError }}</p>{{ end }}
   {{ $loc := .Locale }}
-  <form method="post" action="/ui/rules/{{ .ID }}/settings" class="settings-form" id="settings-form">
+  <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/settings" class="settings-form" id="settings-form">
     <input type="hidden" name="orig_group" value="{{ .OrigGroup }}">
     <input type="hidden" name="orig_note" value="{{ .OrigNote }}">
     <input type="hidden" name="orig_per_source" value="{{ .Rates.PerSource.Orig }}">
@@ -153,14 +153,14 @@
       <div class="rule-form">
         <div class="field">
           <label for="e-group">{{ T .Locale "fGroup" }}</label>
-          <input id="e-group" class="search" name="group" value="{{ .Group }}" list="group-list" maxlength="32" placeholder="game">
+          <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" id="e-group" class="search" name="group" value="{{ .Group }}" list="group-list" maxlength="32" placeholder="game">
           <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
           <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
           {{ if .GroupConflict }}<p class="danger-text">{{ .GroupConflict }}</p>{{ end }}
         </div>
         <div class="field">
           <label for="e-note">{{ T .Locale "fNote" }}</label>
-          <input id="e-note" class="search" name="note" value="{{ .Note }}" maxlength="120">
+          <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" id="e-note" class="search" name="note" value="{{ .Note }}" maxlength="120">
           <small class="field-help">{{ T .Locale "fNoteHelp" }}</small>
           {{ if .NoteConflict }}<p class="danger-text">{{ .NoteConflict }}</p>{{ end }}
         </div>
@@ -173,7 +173,7 @@
       <div class="rate-field">
         <div class="rate-row">
           <span class="rate-label">{{ T .Locale "ratePerSourceHead" }}</span>
-          <input type="number" min="1" name="per_source_count" value="{{ .Rates.PerSource.Count }}">
+          <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" type="number" min="1" name="per_source_count" value="{{ .Rates.PerSource.Count }}">
           <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
           <select name="per_source_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.PerSource.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
           <label class="check"><input type="checkbox" name="per_source_nolimit" value="1" {{ if .Rates.PerSource.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
@@ -187,7 +187,7 @@
       <div class="rate-field">
         <div class="rate-row">
           <span class="rate-label">{{ T .Locale "rateNewFlowHead" }}</span>
-          <input type="number" min="1" name="new_flow_count" value="{{ .Rates.NewFlow.Count }}">
+          <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" type="number" min="1" name="new_flow_count" value="{{ .Rates.NewFlow.Count }}">
           <span class="rate-unit-word">{{ T .Locale "rateConnWord" }}</span> /
           <select name="new_flow_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.NewFlow.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
           <label class="check"><input type="checkbox" name="new_flow_nolimit" value="1" {{ if .Rates.NewFlow.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
@@ -205,7 +205,7 @@
           <div class="rate-field">
             <div class="rate-row">
               <span class="rate-label">{{ T .Locale "ratePacketHead" }}</span>
-              <input type="number" min="1" name="packet_count" value="{{ .Rates.Packet.Count }}">
+              <input autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" type="number" min="1" name="packet_count" value="{{ .Rates.Packet.Count }}">
               <span class="rate-unit-word">{{ T .Locale "ratePacketWord" }}</span> /
               <select name="packet_unit">{{ range $u := .Units }}<option value="{{ $u }}" {{ if eq $u $.Rates.Packet.Unit }}selected{{ end }}>{{ UnitLabel $loc $u }}</option>{{ end }}</select>
               <label class="check"><input type="checkbox" name="packet_nolimit" value="1" {{ if .Rates.Packet.NoLimit }}checked{{ end }}> {{ T .Locale "noLimit" }}</label>
@@ -236,16 +236,16 @@
     <ul class="cidr-list">
       {{ range .DenyList }}
       <li><span class="mono">{{ .CIDR }}</span>
-        <form method="post" action="/ui/rules/{{ $.ID }}/deny/rm">
+        <form autocomplete="off" method="post" action="/ui/rules/{{ $.ID }}/deny/rm">
           <input type="hidden" name="cidr" value="{{ .CIDR }}">
           <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
         </form>
       </li>
       {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
     </ul>
-    <form method="post" action="/ui/rules/{{ .ID }}/deny/add" class="inline-form">
+    <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/deny/add" class="inline-form">
       <div class="field">
-        <textarea name="cidrs" rows="3" placeholder="203.0.113.7&#10;198.51.100.0/24">{{ .DenyInput }}</textarea>
+        <textarea autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" name="cidrs" rows="3" placeholder="203.0.113.7&#10;198.51.100.0/24">{{ .DenyInput }}</textarea>
         <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
       </div>
       <button class="btn" type="submit">{{ T .Locale "add" }}</button>
@@ -259,16 +259,16 @@
     <ul class="cidr-list">
       {{ range .AllowList }}
       <li><span class="mono">{{ .CIDR }}</span>
-        <form method="post" action="/ui/rules/{{ $.ID }}/allow/rm" {{ if .Confirm }}data-confirm="{{ T $.Locale "confirmAllowLast" }}"{{ end }}>
+        <form autocomplete="off" method="post" action="/ui/rules/{{ $.ID }}/allow/rm" {{ if .Confirm }}data-confirm="{{ T $.Locale "confirmAllowLast" }}"{{ end }}>
           <input type="hidden" name="cidr" value="{{ .CIDR }}">
           <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
         </form>
       </li>
       {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
     </ul>
-    <form method="post" action="/ui/rules/{{ .ID }}/allow/add" class="inline-form" {{ if .AllowConfirmAdd }}data-confirm="{{ T .Locale "confirmAllowFirst" }}"{{ end }}>
+    <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/allow/add" class="inline-form" {{ if .AllowConfirmAdd }}data-confirm="{{ T .Locale "confirmAllowFirst" }}"{{ end }}>
       <div class="field">
-        <textarea name="cidrs" rows="3" placeholder="203.0.113.7">{{ .AllowInput }}</textarea>
+        <textarea autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" name="cidrs" rows="3" placeholder="203.0.113.7">{{ .AllowInput }}</textarea>
         <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
       </div>
       <button class="btn" type="submit">{{ T .Locale "add" }}</button>
@@ -285,7 +285,7 @@
     <h3>{{ T .Locale "splitHead" }}</h3>
     <p class="field-help">{{ T .Locale "splitHelp" }}</p>
     {{ if .SplitError }}<p class="danger-text">{{ .SplitError }}</p>{{ end }}
-    <form method="post" action="/ui/rules/{{ .ID }}/split" class="split-form" id="split-form"
+    <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/split" class="split-form" id="split-form"
           data-listen-lo="{{ .ListenLo }}" data-listen-hi="{{ .ListenHi }}"
           data-target-host="{{ .TargetHost }}" data-target-port="{{ .TargetPort }}">
       <div class="field">
@@ -310,7 +310,7 @@
       <li>
         <span><strong class="proto {{ $.ProtoClass }}">{{ $.ProtoUpper }}</strong> <span class="mono">{{ .Ports }}</span>
           <span class="flow-arrow">→</span> <span class="mono">{{ .Target }}</span></span>
-        <form method="post" action="/ui/rules/{{ $.ID }}/merge">
+        <form autocomplete="off" method="post" action="/ui/rules/{{ $.ID }}/merge">
           <input type="hidden" name="other" value="{{ .ID }}">
           <button class="btn" type="submit">{{ T $.Locale "mergeWithThis" }}</button>
         </form>

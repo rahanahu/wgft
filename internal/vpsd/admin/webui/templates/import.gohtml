@@ -1,7 +1,7 @@
 {{ define "importform" }}
 <h2 style="margin-top:0">{{ T .Locale "importTitle" }}</h2>
 {{ if .Error }}<p class="danger-text">{{ .Error }}</p>{{ end }}
-<form method="post" action="/ui/rules/import" enctype="multipart/form-data" style="display:grid;gap:12px;max-width:420px">
+<form autocomplete="off" method="post" action="/ui/rules/import" enctype="multipart/form-data" style="display:grid;gap:12px;max-width:420px">
   <label>{{ T .Locale "importChooseFile" }}<input type="file" name="file" accept=".json,application/json" required></label>
   <label class="check"><input type="checkbox" name="force" value="1"> {{ T .Locale "fForce" }}</label>
   <div style="display:flex;gap:8px">
@@ -38,7 +38,7 @@
   </li>
   {{ end }}
 </ul>
-<form method="post" action="/ui/rules/import/apply" {{ if .HasDeletions }}data-confirm="{{ T .Locale "confirmImportApply" }}"{{ end }}>
+<form autocomplete="off" method="post" action="/ui/rules/import/apply" {{ if .HasDeletions }}data-confirm="{{ T .Locale "confirmImportApply" }}"{{ end }}>
   <input type="hidden" name="content" value="{{ .Content }}">
   <input type="hidden" name="generation" value="{{ .Generation }}">
   <input type="hidden" name="digest" value="{{ .Digest }}">

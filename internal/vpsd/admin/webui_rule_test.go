@@ -387,7 +387,7 @@ func TestRuleDetailPacketRateTCPNotice(t *testing.T) {
 // ---- 設定の区画(group、note、レート制限を 1 つのフォームで保存する。仕様 10.1 節) ----
 
 var (
-	settingsFormRe = regexp.MustCompile(`(?s)<form method="post" action="([^"]*)"[^>]*id="settings-form"[^>]*>(.*?)</form>`)
+	settingsFormRe = regexp.MustCompile(`(?s)<form\b[^>]*\smethod="post" action="([^"]*)"[^>]*id="settings-form"[^>]*>(.*?)</form>`)
 	inputTagRe     = regexp.MustCompile(`<input\b[^>]*>`)
 	selectRe       = regexp.MustCompile(`(?s)<select name="([^"]*)">(.*?)</select>`)
 	optionRe       = regexp.MustCompile(`<option value="([^"]*)"\s*(selected)?\s*>`)

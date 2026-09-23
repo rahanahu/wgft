@@ -179,7 +179,7 @@
 <section class="detail-section">
   <h3>{{ T .Locale "doctorProbeHead" }}</h3>
   {{ if .CanProbe }}
-  <form method="get" action="/ui/doctor/{{ .Rule.ID }}">
+  <form autocomplete="off" method="get" action="/ui/doctor/{{ .Rule.ID }}">
     <input type="hidden" name="probe" value="1">
     <button class="small-btn accent" type="submit">{{ T .Locale "doctorProbe" }}</button>
   </form>
