@@ -623,18 +623,31 @@ func targetReasonCode(reason string) string {
 	switch {
 	case strings.Contains(reason, allowtargets.Env) || strings.Contains(reason, "is not allowed"):
 		return ReasonTargetNotAllowed
-	case strings.Contains(reason, "bind failed"):
+	case looksLikeBindFailure(reason):
 		return ReasonListenerBindFailed
 	case looksLikeResolveFailure(reason):
 		return ReasonResolveFailed
 	case strings.Contains(reason, "connection refused"):
 		return ReasonConnectionRefused
-	case strings.Contains(reason, "timeout") || strings.Contains(reason, "timed out"):
+	case strings.Contains(reason, "timeout") || strings.Contains(reason, "timed out") || strings.Contains(reason, "did not answer"):
 		return ReasonTargetTimeout
 	case strings.Contains(reason, "no route to host") || strings.Contains(reason, "unreachable"):
 		return ReasonTargetUnreachable
 	}
 	return ReasonTargetError
+}
+
+// looksLikeBindFailure は、エージェントの理由がリスナーの bind の失敗かどうかを見る。エージェント
+// 自身の文言 "bind failed" に加え、Go の net.Listen がそのまま返す形("listen ...: bind: address
+// already in use" のような、"listen" と "bind:" を伴う文言)も含む。ユーザー空間モードの中継
+// (internal/dataplane/userspace/relay)では、この符号に至る経路を実際には踏めていない(設計文書
+// 改訂の記録)。それでも符号は残し、両方の文言を見る。将来この経路を踏んだときに target_error へ
+// 沈めないためである。
+func looksLikeBindFailure(reason string) bool {
+	if strings.Contains(reason, "bind failed") {
+		return true
+	}
+	return strings.Contains(reason, "listen") && strings.Contains(reason, "bind:")
 }
 
 func agentStateText(st adminapi.AgentRuleStatus) string {
