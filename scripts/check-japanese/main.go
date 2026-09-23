@@ -81,7 +81,11 @@ func main() {
 		os.Exit(2)
 	}
 	if len(hits) > 0 {
-		fmt.Fprintf(os.Stderr, "Japanese found in %d string literal(s) (comments, tests, and i18n.go are excluded):\n", len(hits))
+		plural := "s"
+		if len(hits) == 1 {
+			plural = ""
+		}
+		fmt.Fprintf(os.Stderr, "Japanese found in %d string literal%s; comments, tests, and i18n.go are excluded:\n", len(hits), plural)
 		for _, h := range hits {
 			fmt.Fprintln(os.Stderr, h)
 		}

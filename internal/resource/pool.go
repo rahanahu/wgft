@@ -421,15 +421,15 @@ type Refusal struct {
 func (r Refusal) String() string {
 	switch r.Reason {
 	case ReasonBudget:
-		return fmt.Sprintf("flow budget full (%d of %d in use in this process)", r.InUse, r.Total)
+		return fmt.Sprintf("flow budget full: %d of %d in use in this process", r.InUse, r.Total)
 	case ReasonRuleCap:
 		return fmt.Sprintf("rule %s holds %d flows and the rest of the budget is reserved for %s",
 			r.RuleID, r.RuleFlows, otherRules(r.OtherRules))
 	case ReasonReserve:
-		return fmt.Sprintf("rule %s holds %d flows, above its reserve of %d, and the free part of the budget (%d of %d) is reserved for %s",
+		return fmt.Sprintf("rule %s holds %d flows, above its reserve of %d, and the free part of the budget, %d of %d, is reserved for %s",
 			r.RuleID, r.RuleFlows, r.Reserve, r.Total-r.InUse, r.Total, otherRules(r.OtherRules))
 	default:
-		return fmt.Sprintf("refused by the flow budget (%s)", r.Reason)
+		return fmt.Sprintf("refused by the flow budget: %s", r.Reason)
 	}
 }
 

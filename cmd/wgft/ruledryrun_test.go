@@ -417,7 +417,7 @@ func TestRuleAddDryRunReservedPortConflictNoThrowawayID(t *testing.T) {
 	if disposableRuleIDPattern.MatchString(stdout) {
 		t.Errorf("stdout must not print the disposable ID rule add generated for this run alone: %q", stdout)
 	}
-	if !strings.Contains(stdout, "new rule (") {
+	if !strings.Contains(stdout, "new rule ") {
 		t.Errorf("stdout must identify the new row by its summary instead of an ID: %q", stdout)
 	}
 }
@@ -442,7 +442,7 @@ func TestRuleAddDryRunOverlappingPortNoThrowawayID(t *testing.T) {
 			t.Errorf("stdout must not print a disposable rule ID, found %q which is not the existing rule's own %q: %q", id, existingID, stdout)
 		}
 	}
-	if !strings.Contains(stdout, "new rule (") {
+	if !strings.Contains(stdout, "new rule ") {
 		t.Errorf("stdout must identify the new row by its summary instead of an ID: %q", stdout)
 	}
 }

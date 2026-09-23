@@ -24,15 +24,15 @@ One binary holds both sides. Where each command runs:
   rule ...                    on the VPS, against the admin API
   status                      on the VPS, against the admin API
 
-Commands that talk to the admin API use the Unix socket of the running server
-(WGFT_ADMIN, default unix:///run/wgft/admin.sock), so run them as root on the VPS.
-Settings are WGFT_* environment variables; a dotenv file (--config) and flags are
-other ways to pass the same values.`,
+Commands that talk to the admin API use the Unix socket of the running server, set
+by WGFT_ADMIN and defaulting to unix:///run/wgft/admin.sock, so run them as root on
+the VPS. Settings are WGFT_* environment variables; a dotenv file, set with --config,
+and flags are other ways to pass the same values.`,
 	},
 	"status": {
 		Long: `Summarize whether the deployment looks healthy, in four lines: Server, Agents,
-Rules, Warnings. It reads the admin API of the running server (WGFT_ADMIN,
-default unix:///run/wgft/admin.sock) and nothing else. Where "server doctor"
+Rules, Warnings. It reads the admin API of the running server, set by WGFT_ADMIN
+and defaulting to unix:///run/wgft/admin.sock, and nothing else. Where "server doctor"
 follows one rule from the public side to the target to find where traffic
 stops, "status" only counts: it does not say where a problem is, only that
 there is one.
@@ -65,7 +65,7 @@ is a declared state, not a fault. A rule counts as active only when the
 server has published it and its agent's freshest report says it can reach
 the target: the server publishing a rule is not evidence that the agent is
 actually forwarding it, since the agent can still refuse the target on its
-own (WGFT_AGENT_ALLOW_TARGETS, a listener bind failure, and so on). A rule
+own, such as WGFT_AGENT_ALLOW_TARGETS or a listener bind failure. A rule
 counts as degraded when the server reports it pending or not_active, or when
 its agent's freshest report is an error. A rule counts as unknown when the
 server reports nothing about it, reports a state this build does not
@@ -83,9 +83,9 @@ added line naming what it found, such as which agent has not been seen, which
 rule is not active and why, or that the server reports no apply state at all.
 
 Exit code is 0 when every line is healthy or the only problem is unknown, 1
-when a line is degraded, 2 when the summary itself could not be built (the
+when a line is degraded, 2 when the summary itself could not be built: the
 admin API is unreachable, or a bad argument or flag was given, the same as
-"server doctor"), and 3 when the configuration itself is invalid, such as a
+"server doctor"; and 3 when the configuration itself is invalid, such as a
 malformed dotenv file passed with --config. Unknown alone never raises the
 exit code, matching "server doctor"'s own UNKNOWN, so an older server that
 has not yet grown a field does not sound an alarm during a rolling upgrade.
@@ -135,13 +135,13 @@ HEARTBEAT its age, GEN the rule generation the agent has applied, TUNNEL ok or
 error, WG_ENDPOINT and HANDSHAKE the WireGuard peer as the VPS sees it, RULES
 lists id:reason for the rules currently failing, or "N ok" once none are, PROTO
 the protocol negotiated on the agent's current connection, WARN the number of
-open warnings. When an agent is disconnected (STREAM shows -), TUNNEL and
+open warnings. When an agent is disconnected, shown as STREAM -, TUNNEL and
 RULES are its last report before the stream dropped, prefixed with "last:";
 they are not the current state. HEARTBEAT shows how long ago that report was.
 
 PROTO shows vN for a connection that negotiated a numbered version, legacy
-for an agent whose advertisement carried no protocol_min/protocol_max at all
-(an older agent build), and - either while disconnected or while connected to
+for an agent whose advertisement carried no protocol_min/protocol_max at all,
+from an older agent build, and - either while disconnected or while connected to
 a server too old to report which one it picked. A disconnected agent shows -
 rather than the version it last negotiated, since that value is no longer in
 effect and does not become current again until the agent reconnects.
@@ -149,7 +149,7 @@ effect and does not become current again until the agent reconnects.
 PROTO is what this one connection is using, not a range. "wgft version"
 prints the range of numbered versions built into the binary it runs as; a
 legacy agent, which advertises no version at all, connects regardless of that
-range (design.md 7a.6 section). Even run on the VPS, that range belongs to
+range; see design.md section 7a.6. Even run on the VPS, that range belongs to
 the on-disk binary and can differ from the range the running server process
 uses until the server restarts with it.`,
 		Example: `  wgft agent ls
@@ -170,7 +170,7 @@ in use from two places:
                addresses for a sustained time
   ip-flapping  the address of one channel went back to an earlier value within
                ten minutes
-If it was you (a line change, a move), dismiss the warning. If not, revoke the
+If it was you, such as a line change or a move, dismiss the warning. If not, revoke the
 agent and register it again with a new join string.`,
 		Example: `  wgft agent warnings`,
 	},
@@ -196,12 +196,12 @@ the new public key over the stream, so nothing has to be done on the VPS.`,
 		Example: `  wgft agent rotate-key`,
 	},
 	"agent run": {
-		Long: `Agent host daemon. Brings up the tunnel and listeners first from the key in the credentials file (agent.json) and the last full state,
-then connects to the server stream to receive the full state. On first run it registers with the join string (WGFT_JOIN); the name (WGFT_NAME) is
-optional and normally left unset, since the join string is already bound to a name.
+		Long: `Agent host daemon. Brings up the tunnel and listeners first from the key in the credentials file, kept as agent.json, and the last full
+state, then connects to the server stream to receive the full state. On first run it registers with the join string, set by WGFT_JOIN; the name,
+set by WGFT_NAME, is optional and normally left unset, since the join string is already bound to a name.
 
 WGFT_JOIN is a secret. Prefer setting it as an environment variable or in the
-dotenv file (--config); the --join flag leaves it visible to other local
+dotenv file, set with --config; the --join flag leaves it visible to other local
 users via ps and in shell history.
 
 WGFT_AGENT_ALLOW_TARGETS limits the addresses this agent connects to, so that
@@ -217,8 +217,8 @@ Unset means no limit.`,
 "lo-hi" maps onto the same number of ports at the target, starting at the port
 in --to: --udp 2456-2457 --to 192.168.1.20:2456 reaches 2456 and 2457.
 
-Without --proxy the rule is forwarded by the kernel (or by the wgft process in
-userspace mode), and the service at home sees the agent as the client. With
+Without --proxy the rule is forwarded by the kernel, or by the wgft process in
+userspace mode, and the service at home sees the agent as the client. With
 --proxy the server terminates TCP itself, and --proxy-protocol then passes the
 real client address to the target in a PROXY protocol v2 header. The target
 must expect that header.
@@ -229,8 +229,8 @@ The command refuses a port that another process on the VPS already listens on;
 --dry-run checks the rule against what a real "wgft rule add" would enforce
 before saving, as far as the admin API lets it observe: its own shape,
 whether it duplicates an ID or overlaps another rule's listen port, whether
-it overlaps a port the server has reserved for itself (WireGuard, the admin
-API, or the agent API), and whether --agent names a currently registered
+it overlaps a port the server has reserved for itself, such as WireGuard, the
+admin API, or the agent API, and whether --agent names a currently registered
 agent. --force has no effect together with --dry-run: --dry-run never calls
 Batch, the only place --force applies, so a rule overlapping a reserved
 port is still refused. It prints what would change and exits 1 if it finds
@@ -255,8 +255,8 @@ userspace mode "kernel" rules are relayed by the wgft process, not the kernel.
 DENY and ALLOW are the number of CIDRs, RATES the configured limits, DROPPED
 the packets or flows dropped by them so far by your rate limits and lists.
 REFUSED is unrelated: it is how many times Resource Guard, wgft's own process-
-wide flow budget, refused a new flow on this rule since the server started (not
-persisted across restarts). A "flow budget" line follows the table when the
+wide flow budget, refused a new flow on this rule since the server started; it is
+not persisted across restarts. A "flow budget" line follows the table when the
 server reports its process-wide budget: in_use/limit per protocol. Kernel mode
 never reports one for UDP, since it counts UDP flows through conntrack, not
 through this budget.
@@ -266,14 +266,15 @@ AGENT_STATE is the rule's owning agent's own report of it: "ok", or
 WGFT_AGENT_ALLOW_TARGETS, a listener that failed to bind, or a TCP target
 that failed its connectivity check. "-" means nothing has been reported
 yet, whether or not the agent is connected. A "last:" prefix means the
-report (or, for "-", the lack of one) is not current: either the agent is
+report, or for "-" the lack of one, is not current: either the agent is
 disconnected and this is its last known state before that, or it never
 reported at all, same idea as the "last:" prefix in "agent ls"'s RULES
 column. --json carries the same information under agent_rule_states,
 keyed by rule ID: every current rule has an entry there, with "state"
 present only once the agent has reported it and "connected" always
-present, so a script can tell "never reported" (state absent) from "no
-report because this server does not track it" (the whole field absent).`,
+present, so a script can tell "never reported", where state is absent, from
+"no report because this server does not track it", where the whole field is
+absent.`,
 		Example: `  wgft rule ls
   wgft rule ls --json`,
 	},
@@ -297,8 +298,8 @@ Neither affects forwarding, and neither raises the rule generation.
 --dry-run checks the change against what a real "wgft rule set" would
 enforce before saving, as far as the admin API lets it observe: the rule's
 own shape, whether it duplicates another rule's ID, whether its listen_port
-overlaps another rule or a port the server has reserved for itself
-(WireGuard, the admin API, or the agent API), and whether the rule's agent
+overlaps another rule or a port the server has reserved for itself, such as
+WireGuard, the admin API, or the agent API, and whether the rule's agent
 is still currently registered. "rule set" cannot change listen_port, so
 that check can only surface a conflict that already exists, never one this
 command created. There is no --agent flag on this command; the agent
@@ -396,8 +397,8 @@ Two forwarding modes, chosen with WGFT_MODE on the first start and recorded:
   kernel     kernel WireGuard and nftables; needs root to install
   userspace  wireguard-go inside the process; no root, runs in a container
 
-Configuration is WGFT_* environment variables, a dotenv file (--config, default
-/etc/wgft/server.env) or flags. The admin API has no password: only root and the
+Configuration is WGFT_* environment variables, a dotenv file set with --config and
+defaulting to /etc/wgft/server.env, or flags. The admin API has no password: only root and the
 server itself can open its socket.`,
 	},
 	"server run": {
@@ -423,18 +424,18 @@ listeners go with the process either way.`,
 		Long: `Check the configuration and the environment without starting or changing
 anything: the effective value and source of every setting, other nftables
 tables that would drop or steal forwarded traffic, whether the host's own
-input firewall would block wgft's ports (WireGuard, the agent API, and any
-rule's listen port that wgft itself binds: proxy-mode rules in kernel mode,
-every rule in userspace mode), net.ipv4.ip_forward, the size of the
-connection tracking table, and the recorded mode and address range. Run it
-as root; without root the nftables and firewall parts are skipped.`,
+input firewall would block wgft's ports, net.ipv4.ip_forward, the size of the
+connection tracking table, and the recorded mode and address range. The ports
+checked are WireGuard, the agent API, and any rule's listen port that wgft
+itself binds: proxy-mode rules in kernel mode, every rule in userspace mode.
+Run it as root; without root the nftables and firewall parts are skipped.`,
 		Example: `  sudo wgft server check`,
 	},
 	"server doctor": {
 		Long: `Answer, for traffic that is not getting through: how far does it work, where
 does it stop, and what to look at next. Run it on the VPS, as root: it reads
-the admin API of the running server (WGFT_ADMIN, default
-unix:///run/wgft/admin.sock) and nothing else. Where "server check" asks
+the admin API of the running server, set by WGFT_ADMIN and defaulting to
+unix:///run/wgft/admin.sock, and nothing else. Where "server check" asks
 whether this host is configured correctly, "doctor" asks why a rule does not
 carry traffic.
 
@@ -451,16 +452,16 @@ Every item is in one of five states, and they mean exactly this:
   SKIPPED     it could have been tested, but an earlier failure made it impossible
 
 OK is never permanent: it carries how old the observation is, and an item falls
-to UNKNOWN once its evidence is older than that item allows (90s for a
+to UNKNOWN once its evidence is older than that item allows: 90s for a
 heartbeat and for the agent's own report of a rule, 3m for a WireGuard
-handshake). The public port therefore reads NOT TESTED even when the server
+handshake. The public port therefore reads NOT TESTED even when the server
 serves it: DNAT applies to input from outside, so the server cannot reach its
 own public port from itself. Test that from another host.
 
 --probe opens one real TCP connection from the server, through the tunnel and
 the agent, to the target, so it takes one rule at a time and the target sees a
-connection. Without it nothing is dialled. --verbose adds the internal detail
-(generations, apply state, endpoints, counters). --from <address> evaluates the
+connection. Without it nothing is dialled. --verbose adds the internal detail:
+generations, apply state, endpoints, counters. --from <address> evaluates the
 deny and allow lists against one client address.
 
 Every run ends with what it did NOT test, and with the fact that it has no
@@ -477,8 +478,8 @@ only ever gain members: read an id you do not know by ignoring it, and a reason
 you do not know as "unknown".
 
 Exit codes, specific to this command: 0 when no check is FAILED, 1 when one or
-more is, 2 when the report could not be produced at all (the admin API did not
-answer, or the named rule does not exist), 3 for a bad setting. UNKNOWN and NOT
+more is, 2 when the report could not be produced at all: the admin API did not
+answer, or the named rule does not exist; 3 for a bad setting. UNKNOWN and NOT
 TESTED alone never make it non-zero.`,
 		Example: `  sudo wgft server doctor
   sudo wgft server doctor r_01M2R009
@@ -502,7 +503,7 @@ shows it. In userspace mode there is no table and the command says so.`,
 binary supports. That range is static, and it does not depend on any agent
 being connected, but it covers only numbered versions; a server also accepts
 a legacy agent that reports no version at all, regardless of this range,
-during v1.0.x (design.md 7a.6 section). It is not the version in use with a
+during v1.0.x; see design.md section 7a.6. It is not the version in use with a
 particular agent, which "wgft agent ls" prints per connection in its PROTO
 column.`,
 	},

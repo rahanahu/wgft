@@ -163,7 +163,7 @@ func (d *Daemon) observeOnce() {
 		return
 	}
 	if len(drift) > 0 {
-		log.Printf("data plane changed outside wgft (%s); applying the rules again", strings.Join(drift, "; "))
+		log.Printf("data plane changed outside wgft: %s; applying the rules again", strings.Join(drift, "; "))
 	}
 	if !due {
 		d.logConverge("")
@@ -248,7 +248,7 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 		return out, fmt.Errorf("failed to apply nftables: %w", err)
 	}
 	if len(out.Drift) > 0 {
-		log.Printf("data plane changed outside wgft (%s); applying the rules again", strings.Join(out.Drift, "; "))
+		log.Printf("data plane changed outside wgft: %s; applying the rules again", strings.Join(out.Drift, "; "))
 	}
 	// ルール単位の失敗の行は、何も commit しない再試行でも決める。理由が変わったときの 1 行を落とさない
 	var lines []string
@@ -277,9 +277,9 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 		}
 	}
 	if d.opts.Mode == modeUserspace {
-		log.Printf("applied %d rules in userspace mode (%d agents, %d peers)", len(rules), len(agentAddr), len(wgCfg.Peers))
+		log.Printf("applied %d rules in userspace mode: %d agents, %d peers", len(rules), len(agentAddr), len(wgCfg.Peers))
 	} else {
-		log.Printf("applied table inet %s (%d rules, %d enabled in kernel mode, %d agents, %d peers)",
+		log.Printf("applied table inet %s: %d rules, %d enabled in kernel mode, %d agents, %d peers",
 			nft.TableName, len(rules), active, len(agentAddr), len(wgCfg.Peers))
 	}
 	if d.proxy != nil {
@@ -474,7 +474,7 @@ func (d *Daemon) checkRule(r *proto.Rule, rep *linux.Report, force bool) error {
 		return nil
 	}
 	if c := rep.DNATConflicts(r.Proto, r.ListenPort); len(c) > 0 {
-		return fmt.Errorf("rule %s: %s/%s overlaps the DNAT in %s (%s)", r.ID, r.Proto, r.ListenPort, c[0].Where, c[0].Ports)
+		return fmt.Errorf("rule %s: %s/%s overlaps the DNAT in %s: %s", r.ID, r.Proto, r.ListenPort, c[0].Where, c[0].Ports)
 	}
 	bound, err := d.dp.BoundPorts()
 	if err != nil {

@@ -73,7 +73,7 @@ func perSourceLimitsFromConfig(c *config) (policy.AdmissionLimits, error) {
 	}{{"WGFT_MAX_UDP_FLOWS_PER_SOURCE", &l.UDPPerSource}, {"WGFT_MAX_TCP_FLOWS_PER_SOURCE", &l.TCPPerSource}} {
 		n, err := strconv.Atoi(c.str(f.env))
 		if err != nil || n < 0 || n > resource.TotalMax {
-			return policy.AdmissionLimits{}, configErrorf(f.env, "%q is not an integer between 0 and %d (0 disables the per-source cap)", c.str(f.env), resource.TotalMax)
+			return policy.AdmissionLimits{}, configErrorf(f.env, "%q is not an integer between 0 and %d; 0 disables the per-source cap", c.str(f.env), resource.TotalMax)
 		}
 		if n == 0 {
 			n = policy.PerSourceOff
@@ -88,12 +88,12 @@ func perSourceLimitsFromConfig(c *config) (policy.AdmissionLimits, error) {
 // apply が偽なら値を印字するだけ(server check)。
 func applyMemoryLimit(w io.Writer, l resource.Limits, apply bool) {
 	if v := os.Getenv("GOMEMLIMIT"); v != "" {
-		fmt.Fprintf(w, "memory soft limit: GOMEMLIMIT=%s (set by the environment)\n", v)
+		fmt.Fprintf(w, "memory soft limit: GOMEMLIMIT=%s; set by the environment\n", v)
 		return
 	}
 	n := l.MemoryLimit()
 	if apply {
 		debug.SetMemoryLimit(n)
 	}
-	fmt.Fprintf(w, "memory soft limit: %d MiB (derived from the flow caps; set GOMEMLIMIT to override)\n", n>>20)
+	fmt.Fprintf(w, "memory soft limit: %d MiB, derived from the flow caps; set GOMEMLIMIT to override\n", n>>20)
 }

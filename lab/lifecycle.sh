@@ -1630,7 +1630,7 @@ resource_isolation_case() {
   for i in $(seq 1 $((nrules - 1))); do
     if [ "$i" = $((nrules - 1)) ]; then
       check "$tag: rule $((i + 1)) (the last to fill) is refused by reason budget, not reserve or rule_cap" \
-        "flow budget full (" "$(grep "tcp/${ports[$i]}:" "$LOG")"
+        "flow budget full: " "$(grep "tcp/${ports[$i]}:" "$LOG")"
     else
       check "$tag: rule $((i + 1))'s refusal is reason reserve (q is below C, and the total is not yet full)" \
         "above its reserve of $q" "$(grep "rule ${ids[$i]} holds" "$LOG")"
@@ -2284,7 +2284,7 @@ check9() {
   # must_wait: the change notification wakes the server within a debounce of 250ms; 5s is slack.
   must_wait "check9a: forwarding is back within 5s of the flush" 5 tcp_probe_ok 39990
   check "the rule forwards again after the flush" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39990')"
-  check "one log line names what drifted" "data plane changed outside wgft (table inet wgft is missing)" "$(grep "data plane changed" "$LOG")"
+  check "one log line names what drifted" "data plane changed outside wgft: table inet wgft is missing; applying the rules again" "$(grep "data plane changed" "$LOG")"
   okcheck "exactly one drift line so far" "$([ "$(drift_lines)" = 1 ] && echo 1 || echo 0)"
 
   echo "-- b. nft delete table inet wgft"
@@ -2414,7 +2414,7 @@ check10() {
   # The last heartbeat is what the stopped agent will be shown with, so it has to be the settled
   # one before the agent is stopped. Forwarding works as soon as the listeners are open, which is
   # earlier than the heartbeat that reports the handshake and both rules: stopping the agent in
-  # between leaves "last:error (handshake not established)" with an empty RULES column, which is a
+  # between leaves "last:error: handshake not established" with an empty RULES column, which is a
   # correct last report but not the one the checks below expect.
   # agent_reports_settled [<wg endpoint> <last heartbeat>]: the agent is connected and its report
   # says tunnel ok and both rules ok. With the two arguments, the report also has to be newer than
@@ -2465,7 +2465,7 @@ print(a.get('$1', ''))
   check "agent ls RULES carries the last: prefix once the agent process is gone" "last:2 ok" "$ls_line"
 
   local html; html=$(vps curl -s "http://$ADMIN/ui/agents?lang=en")
-  check "the Web UI (en) shows the stale last-report label for the stopped agent" "Last reported (disconnected)" "$html"
+  check "the Web UI (en) shows the stale last-report label for the stopped agent" "Last reported; disconnected" "$html"
   absent "the Web UI does not draw the stopped agent's tunnel with the live-OK style" "stack success-text" "$html"
 
   # Restart the agent with the same credentials (agent.json, written by the join above, is
@@ -2475,7 +2475,7 @@ print(a.get('$1', ''))
   if ! wait_agent home; then echo "FAIL  check10: agent never re-registered after the restart"; fail=1; return; fi
 
   # Same reasoning as before the stop: a reconnected agent drops the last: prefix at once, but its
-  # own first heartbeat reads "error (handshake not established)", and the Web UI draws that
+  # own first heartbeat reads "error: handshake not established", and the Web UI draws that
   # without the live-OK style. Until that heartbeat arrives the agent is shown with the previous
   # connection's last report, so the wait also asks for a report newer than the one read above.
   must_wait "check10: the restarted agent's heartbeat reports the tunnel ok and both rules ok" 30 agent_reports_settled "$ep_before" "$hb_before" || return

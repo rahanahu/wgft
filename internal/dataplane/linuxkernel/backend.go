@@ -248,7 +248,7 @@ func driftOf(iface string, last committed, dev wg.DeviceState, fp string, presen
 	case dev.Kind != "wireguard":
 		return nil, fmt.Errorf("%s is now a %s link, not the WireGuard interface wgft created; leaving it alone", iface, dev.Kind)
 	case dev.PrivateKey != w.PrivateKey:
-		return nil, fmt.Errorf("%s is now a WireGuard interface wgft does not own (its private key does not match); leaving it alone", iface)
+		return nil, fmt.Errorf("%s is now a WireGuard interface wgft does not own: its private key does not match; leaving it alone", iface)
 	}
 	if dev.ListenPort != w.ListenPort {
 		drift = append(drift, fmt.Sprintf("%s listen port is %d, not %d", iface, dev.ListenPort, w.ListenPort))

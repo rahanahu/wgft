@@ -35,7 +35,7 @@ func Check(opts Options, out io.Writer) error {
 	// ユーザー空間モードは nftables も ip_forward も使わない(仕様 6.3 節)。
 	root := os.Geteuid() == 0
 	if mode == modeUserspace {
-		fmt.Fprintln(out, "nft check: not used in userspace mode (rules are relayed by the wgft process)")
+		fmt.Fprintln(out, "nft check: not used in userspace mode; rules are relayed by the wgft process")
 	} else if !root {
 		fmt.Fprintln(out, "nft check: skipped because not root; run sudo wgft server check")
 	} else if rep, err := linux.Inspect(opts.WGInterface, nft.TableName); err != nil {
@@ -126,7 +126,7 @@ func checkOwnPorts(out io.Writer, opts Options) {
 	for _, t := range ownPortTargets(opts) {
 		lines, err := linux.InputPortSuggestions(proto.PortRange{Lo: t.port, Hi: t.port}, t.proto, nft.TableName)
 		if err != nil {
-			fmt.Fprintf(out, "own ports check (%s %d/%s): cannot run: %v\n", t.purpose, t.port, t.proto, err)
+			fmt.Fprintf(out, "own ports check %s %d/%s: cannot run: %v\n", t.purpose, t.port, t.proto, err)
 			continue
 		}
 		if len(lines) == 0 {
@@ -164,7 +164,7 @@ func checkRulePorts(out io.Writer, rules []proto.Rule, mode string) {
 		}
 		lines, err := linux.InputPortSuggestions(r.ListenPort, r.Proto, nft.TableName)
 		if err != nil {
-			fmt.Fprintf(out, "rule ports check (%s %s/%s): cannot run: %v\n", r.ID, r.ListenPort, r.Proto, err)
+			fmt.Fprintf(out, "rule ports check %s %s/%s: cannot run: %v\n", r.ID, r.ListenPort, r.Proto, err)
 			continue
 		}
 		if len(lines) == 0 {
@@ -266,7 +266,7 @@ func checkIPForward(out io.Writer) {
 	if openErr != nil {
 		finding := linux.Finding{
 			Where:   "net.ipv4.ip_forward",
-			Problem: fmt.Sprintf("is %s and not writable (%v); kernel-mode forwarding needs it at 1", val, openErr),
+			Problem: fmt.Sprintf("is %s and not writable: %v; kernel-mode forwarding needs it at 1", val, openErr),
 			Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
 		}
 		fmt.Fprintf(out, "  - %s\n", finding)
@@ -291,7 +291,7 @@ func checkConntrack(out io.Writer) {
 			Where:   "nf_conntrack_max",
 			Problem: fmt.Sprintf("cannot read %s: %v", linux.ConntrackMaxPath, err),
 			Suggest: []string{
-				"expected when nf_conntrack has never loaded on this host (a fresh install, or every boot if nothing else loads it first)",
+				"expected when nf_conntrack has never loaded on this host; a fresh install, or every boot if nothing else loads it first",
 				"harmless for kernel mode: `server run` loads nf_conntrack itself when it applies table inet wgft, before it reads this value",
 				"the actual limit and usage cannot be shown before that first start; run server check again afterwards to see them",
 			},

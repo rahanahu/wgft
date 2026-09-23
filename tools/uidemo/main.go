@@ -27,7 +27,7 @@ import (
 const listenAddr = "127.0.0.1:8687"
 
 func main() {
-	mode := flag.String("mode", "kernel", "forwarding mode to show in the sample ServerInfo (kernel or userspace)")
+	mode := flag.String("mode", "kernel", "forwarding mode to show in the sample ServerInfo; kernel or userspace")
 	flag.Parse()
 	if *mode != "kernel" && *mode != "userspace" {
 		log.Fatalf("uidemo: -mode must be kernel or userspace, got %q", *mode)
@@ -49,7 +49,7 @@ func run(mode string) error {
 	}
 
 	srv := admin.New(newFakeBackend(mode))
-	log.Printf("uidemo: http://%s (fixed sample data, mode=%s, for screenshots only)", listenAddr, mode)
+	log.Printf("uidemo: http://%s, fixed sample data, mode=%s, for screenshots only", listenAddr, mode)
 	return admin.Serve(listenAddr, srv, false)
 }
 

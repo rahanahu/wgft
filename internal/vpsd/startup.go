@@ -64,7 +64,7 @@ func EnableIPForward(st *store.Store) *linux.Finding {
 		// 読み取り専用の /proc や seccomp/LSM で塞がれている場合など。落とさず警告する。
 		return &linux.Finding{
 			Where:   "net.ipv4.ip_forward",
-			Problem: fmt.Sprintf("is 0 and could not be set to 1 (%v); kernel-mode forwarding will not work until this is set", err),
+			Problem: fmt.Sprintf("is 0 and could not be set to 1: %v; kernel-mode forwarding will not work until this is set", err),
 			Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
 		}
 	}

@@ -73,7 +73,7 @@ func TestBatchSummaryTruncatesLongIDLists(t *testing.T) {
 		ids[i] = "r_" + strconv.Itoa(i)
 	}
 	got := batchSummary("cli rule import", ids, nil, nil, 1, true)
-	if !strings.Contains(got, "(+5 more)") {
+	if !strings.Contains(got, "and 5 more") {
 		t.Errorf("batchSummary() = %q, want it to mention 5 more ids", got)
 	}
 	// Only the first 20 ids should be listed verbatim.

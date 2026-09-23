@@ -39,7 +39,7 @@ func init() {
 Open PowerShell in the folder holding this .exe and run:
   .\%s --help
 
-See the Windows setup guide on GitHub (docs/setup.md) for the full procedure, including the join command.
+See the Windows setup guide on GitHub at docs/setup.md for the full procedure, including the join command.
 `, name)
 	// The default 5s auto-close (cobra.go:81) is too short for this longer message.
 	// 0 makes cobra print "Press return to continue..." and wait for Enter

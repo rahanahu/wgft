@@ -127,7 +127,7 @@ func newRuleAddCmd() *cobra.Command {
 	add.Flags().StringVar(&agent, "agent", "", "agent name")
 	add.Flags().StringVar(&udp, "udp", "", "UDP port to listen on at the VPS; range allowed")
 	add.Flags().StringVar(&tcp, "tcp", "", "TCP port to listen on at the VPS; range allowed")
-	add.Flags().StringVar(&to, "to", "", "target host:port on the home side; for a listen port range, the first port (the rest follow in order)")
+	add.Flags().StringVar(&to, "to", "", "target host:port on the home side; for a listen port range, the first port; the rest follow in order")
 	add.Flags().StringVar(&group, "group", "", "group to bundle rules under; optional, alphanumerics and - _ ., up to 32 chars")
 	add.Flags().StringVar(&note, "note", "", "note describing the rule's purpose; optional, up to 120 chars")
 	add.Flags().BoolVar(&proxy, "proxy", false, "server accepts and relays TCP in proxy mode")
@@ -182,7 +182,7 @@ func newRuleLsCmd() *cobra.Command {
 				if name == "" {
 					name = "ungrouped"
 				}
-				fmt.Printf("# %s (%d)\n", name, len(byGroup[g]))
+				fmt.Printf("# %s: %d\n", name, len(byGroup[g]))
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 				fmt.Fprintf(w, "  ID\tAGENT\tPROTO\tLISTEN\tTARGET\tMODE\tENABLED\tDENY\tALLOW\tRATES\tDROPPED\tREFUSED\tAGENT_STATE\tNOTE\n")
 				for _, r := range byGroup[g] {
@@ -539,8 +539,8 @@ func newRuleSetCmd() *cobra.Command {
 			return nil
 		},
 	}
-	set.Flags().StringVar(&setGroup, "group", "", `group ("" to clear)`)
-	set.Flags().StringVar(&setNote, "note", "", `note ("" to clear)`)
+	set.Flags().StringVar(&setGroup, "group", "", `group, or "" to clear it`)
+	set.Flags().StringVar(&setNote, "note", "", `note, or "" to clear it`)
 	set.Flags().BoolVar(&dryRun, "dry-run", false, "check the change and print what would change, without saving it")
 	return set
 }
@@ -599,7 +599,7 @@ func runRuleDryRun(c *admin.Client, upsert []proto.Rule) error {
 		}
 	}
 	if !printed {
-		fmt.Println("  (no changes)")
+		fmt.Println("  no changes")
 	}
 
 	issues := ruleDryRunIssues(upsert, current.Rules, agents, reservedFromServerInfo(info))
@@ -608,7 +608,7 @@ func runRuleDryRun(c *admin.Client, upsert []proto.Rule) error {
 		for _, msg := range issues {
 			fmt.Printf("  %s\n", msg)
 		}
-		return fmt.Errorf("dry-run found %d issue(s)", len(issues))
+		return fmt.Errorf("dry-run found %d issue%s", len(issues), pluralS(len(issues)))
 	}
 	fmt.Println("dry-run: no issues found; this change would likely be accepted. Nothing was saved.")
 	return nil
@@ -673,7 +673,7 @@ func ruleIsNew(r proto.Rule, current []proto.Rule) bool {
 // "rule set", which edits an existing rule) is identified by its real, saved ID.
 func dryRunRuleLabel(r proto.Rule, current []proto.Rule) string {
 	if ruleIsNew(r, current) {
-		return "new rule (" + dryRunRuleSummary(r) + ")"
+		return "new rule " + dryRunRuleSummary(r)
 	}
 	return "rule " + short(r.ID)
 }

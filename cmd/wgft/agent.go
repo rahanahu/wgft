@@ -82,7 +82,7 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 	join := c.str("WGFT_JOIN")
 	if join != "" {
 		if _, err := agent.ParseJoin(join); err != nil {
-			log.Printf("warning: WGFT_JOIN is malformed (%v); it is used only for a first registration or after a revocation, so this agent starts if it is already registered", err)
+			log.Printf("warning: WGFT_JOIN is malformed: %v; it is used only for a first registration or after a revocation, so this agent starts if it is already registered", err)
 		}
 	}
 	return agent.Options{
@@ -115,7 +115,7 @@ On the agent host:
   pubkey        print the wg public key; generate and save one if absent
   rotate-key    regenerate the wg key pair
 
-On the VPS (against the admin API):
+On the VPS, against the admin API:
   ls            list registered agents
   join-string   issue a join string; one-time
   revoke        revoke a permanent token
@@ -259,7 +259,7 @@ On the VPS (against the admin API):
 				}
 				tun := a.Tunnel.State
 				if a.Tunnel.Reason != "" {
-					tun += " (" + a.Tunnel.Reason + ")"
+					tun += ": " + a.Tunnel.Reason
 				}
 				rules := ""
 				for _, r := range a.Rules {

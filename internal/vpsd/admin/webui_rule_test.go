@@ -263,7 +263,7 @@ func TestRuleDetailRateWording(t *testing.T) {
 	for _, tc := range []struct{ ja, en string }{
 		{"1 つの接続元からの新しい接続", "New connections per source"},
 		{"ルール全体の新しい接続", "New connections for the whole rule"},
-		{"パケット (通信中のデータも含む)", "Packets (including ongoing traffic)"},
+		{"パケット (通信中のデータも含む)", "Packets, including ongoing traffic"},
 		{"拒否 42 件", "42 dropped"}, // fakeBackend.RuleDrops: r_a=42
 	} {
 		if !strings.Contains(ja, tc.ja) {

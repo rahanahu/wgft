@@ -225,7 +225,7 @@ func (rt *runtime) finishApplyLocked(st *proto.State) error {
 	if err := rt.f.Save(rt.opts.CredentialsPath); err != nil {
 		firstErr = fmt.Errorf("save credentials file: %w", err)
 	}
-	log.Printf("applied generation %d (%d actions, %d listeners)", st.Generation, len(acts), len(rt.rl.Status()))
+	log.Printf("applied generation %d: %d actions, %d listeners", st.Generation, len(acts), len(rt.rl.Status()))
 	return firstErr
 }
 
@@ -372,7 +372,7 @@ func (rt *runtime) checkTunnel(now time.Time) {
 	if !rebuild {
 		return
 	}
-	log.Printf("no new wireguard handshake for %s; rebuilding the tunnel (the next rebuild needs %s without one)",
+	log.Printf("no new wireguard handshake for %s; rebuilding the tunnel; the next rebuild needs %s without one",
 		idle.Round(time.Second), rt.rebuild.wait.Round(time.Second))
 	// 既に適用を終えた全体状態なので、世代の記録はやり直さない。誤りは buildLocked が 1 行出す
 	rt.buildLocked(now, st, true) //nolint:errcheck // 誤りは buildLocked が出す
@@ -443,7 +443,7 @@ func (rt *runtime) relayOptions(st *proto.State) relay.Options {
 // 一覧が無いときに何も出さないと、制限が無いことが運用者に見えないので、無いことも出す。
 func logAllowTargets(l *allowtargets.List) {
 	if l == nil {
-		log.Printf("no target allowlist (%s is not set); the server can direct this agent to any address it can reach", allowtargets.Env)
+		log.Printf("no target allowlist: %s is not set; the server can direct this agent to any address it can reach", allowtargets.Env)
 		return
 	}
 	log.Printf("target allowlist %s=%s; the server can direct this agent only to these addresses", allowtargets.Env, l)

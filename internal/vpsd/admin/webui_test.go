@@ -171,8 +171,8 @@ func TestRuleStateOnDashboard(t *testing.T) {
 	for _, tc := range []struct {
 		lang, wantApplied, wantError, wantOffline, wantReason, wantGroupErr string
 	}{
-		{"ja", "適用済み", "エラー", "エージェント未接続", "bind: address already in use", "エラー 1 件"},
-		{"en", "Applied", "Error", "Agent offline", "bind: address already in use", "1 error(s)"},
+		{"ja", "適用済み", "エラー", "エージェント未接続", "bind: address already in use", "エラー 1 件</span>"},
+		{"en", "Applied", "Error", "Agent offline", "bind: address already in use", "1 error</span>"},
 	} {
 		body := getBody(t, srv.URL+"/?lang="+tc.lang)
 		if !strings.Contains(body, tc.wantApplied) {

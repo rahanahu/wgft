@@ -377,13 +377,13 @@ func (r *Report) collectDNAT(c *nftables.Conn, ch *nftables.Chain, rules []*nfta
 		if d.Unknown {
 			// この規則の宛先ポートは読めなかった(multiport、読めない無名 set、未知の式の形)。
 			// wgft のルールと重なるかを判定できないので、拒否はせず警告だけにする(仕様 6.1 節)
-			proto := "unknown protocol"
+			desc := "a DNAT rule of unknown protocol"
 			if d.Proto != "" {
-				proto = string(d.Proto)
+				desc = "a " + string(d.Proto) + " DNAT rule"
 			}
 			r.Findings = append(r.Findings, Finding{
 				Where:   d.Where,
-				Problem: fmt.Sprintf("has a DNAT rule (%s) whose port match could not be read; wgft cannot tell whether it overlaps a wgft rule's port, so check by hand", proto),
+				Problem: fmt.Sprintf("has %s whose port match could not be read; wgft cannot tell whether it overlaps a wgft rule's port, so check by hand", desc),
 			})
 		}
 	}

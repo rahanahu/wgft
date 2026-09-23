@@ -39,7 +39,7 @@ func reconcileModeAndAddress(st *store.Store, opts Options, hadServerKey bool) e
 			} else {
 				// 値が無いことは値だけからは判定できない。記録の有無を見て初めて必須になるので、
 				// 入口(cmd/wgft の buildServerOptions)ではなく、ここで判定する(設計文書 11b 節)。
-				return startup.Config("WGFT_MODE", "set it (--mode) to kernel or userspace on the first start")
+				return startup.Config("WGFT_MODE", "set it with --mode to kernel or userspace on the first start")
 			}
 		}
 		// 値そのものの誤りは入口で弾いてある。ここは、入口を通らない呼び出し(単体テスト、将来の
@@ -69,7 +69,7 @@ func reconcileModeAndAddress(st *store.Store, opts Options, hadServerKey bool) e
 			if !allow {
 				return startup.ModeGate("WGFT_MODE", "changing mode from %s to %s: %s", have, want, reason)
 			}
-			log.Printf("changing mode from %s to %s (%s)", have, want, reason)
+			log.Printf("changing mode from %s to %s: %s", have, want, reason)
 			if err := st.SetMeta(modeMeta, []byte(want)); err != nil {
 				return err
 			}
@@ -90,7 +90,7 @@ func reconcileModeAndAddress(st *store.Store, opts Options, hadServerKey bool) e
 		return fmt.Errorf("checking address range: %w", err)
 	default:
 		if string(addr) != opts.WGAddress {
-			return startup.Conflict("WGFT_WG_ADDRESS", "wg address range differs from the recorded one (%s vs %s); changing it needs teardown --purge and re-registration", addr, opts.WGAddress)
+			return startup.Conflict("WGFT_WG_ADDRESS", "wg address range differs from the recorded one: %s vs %s; changing it needs teardown --purge and re-registration", addr, opts.WGAddress)
 		}
 	}
 	return nil

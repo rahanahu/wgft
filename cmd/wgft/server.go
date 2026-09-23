@@ -197,7 +197,7 @@ func newServerCmd() *cobra.Command {
 			// 必須なのは run だけである。check は設定と環境を見るだけなので、エンドポイントが
 			// 決まっていない段階でも動く(10.3 節の初回セットアップの順序)。
 			if opts.WGEndpoint == "" {
-				return configErrorf("WGFT_WG_ENDPOINT", "is required (--wg-endpoint): the host:port that agents connect to, for example vps.example.com:51820")
+				return configErrorf("WGFT_WG_ENDPOINT", "is required; set it with --wg-endpoint: the host:port that agents connect to, for example vps.example.com:51820")
 			}
 			adopt, _ := cmd.Flags().GetBool("adopt-existing")
 			opts.AdoptExisting = adopt
@@ -261,8 +261,8 @@ func newTeardownCmd() *cobra.Command {
 		Use:   "teardown",
 		Short: "remove what wgft created: table inet wgft and the wg interface",
 		Long: `Clean up after a stopped server. Removes only what wgft created itself.
-Refuses if it is still running (run systemctl disable --now wgft first). Removes table inet wgft and the wg
-interface, and with --purge the server database (keys, certificates, rules, agents) too. Other tables, firewall ports, and ip_forward are not
+Refuses if it is still running: run systemctl disable --now wgft first. Removes table inet wgft and the wg
+interface, and with --purge the server database too, including keys, certificates, rules and agents. Other tables, firewall ports, and ip_forward are not
 reverted automatically; it only prints a list to revert by hand.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -277,7 +277,7 @@ reverted automatically; it only prints a list to revert by hand.`,
 	f := cmd.Flags()
 	f.String("data-dir", "/var/lib/wgft", "data dir, env WGFT_DATA_DIR")
 	f.String("config", defaultConfigPath, "dotenv config file")
-	f.BoolVar(&o.Purge, "purge", false, "also remove the server database (keys, certificates, rules, agents); agents must re-register")
+	f.BoolVar(&o.Purge, "purge", false, "also remove the server database: keys, certificates, rules, agents; agents must re-register")
 	f.BoolVar(&o.DryRun, "dry-run", false, "only print what would be removed and the list to revert by hand")
 	f.BoolVar(&o.Yes, "yes", false, "skip the --purge confirmation")
 	f.BoolVar(&o.Adopt, "adopt-existing", false, "remove wg even when the key does not match or the server database is missing")
