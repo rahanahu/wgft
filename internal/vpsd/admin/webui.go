@@ -438,6 +438,8 @@ func (s *Server) renderHTML(w http.ResponseWriter, name string, data any) {
 	buf.WriteTo(w)
 }
 
+// renderPage は共通の枠(page テンプレート)でページを描く。パンくずは既定で「ダッシュボード /
+// ページの見出し」で、data の "Crumbs" に []pageCrumb があればそれを使う。
 func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, titleKey, body string, data map[string]any) {
 	locale := resolveLocale(w, r)
 	data["Locale"] = locale
@@ -446,7 +448,38 @@ func (s *Server) renderPage(w http.ResponseWriter, r *http.Request, titleKey, bo
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.renderHTML(w, "page", map[string]any{"Locale": locale, "Title": T(locale, titleKey), "Body": template.HTML(inner.String())})
+	crumbs, ok := data["Crumbs"].([]pageCrumb)
+	if !ok {
+		crumbs = []pageCrumb{dashboardCrumb(locale), {Label: T(locale, titleKey)}}
+	}
+	s.renderHTML(w, "page", map[string]any{"Locale": locale, "Title": T(locale, titleKey), "Body": template.HTML(inner.String()), "Crumbs": crumbs})
+}
+
+// pageCrumb はパンくずの 1 項目である。Href が空の項目は今いるページで、リンクにしない。
+//
+// ダッシュボード以外の共通の枠のページは、上部の移動をすべて左寄せのパンくずで行い、右上に
+// ダッシュボードへ戻るボタンを置かない(設計文書 10.1 節)。パンくずに入れる階層は、実際に開ける
+// ページだけである。ルールの一覧のページは無いので、ルールの階層は作らない。
+type pageCrumb struct {
+	Label string
+	Href  string
+}
+
+// dashboardCrumb はパンくずの先頭の、ダッシュボードへのリンクである。
+func dashboardCrumb(locale string) pageCrumb {
+	return pageCrumb{Label: T(locale, "crumbDashboard"), Href: "/"}
+}
+
+// ruleCrumbLabel はパンくずでルールを指す呼び名である。プロトコルと受信ポートに持ち主の
+// エージェントを添える。ダッシュボードのルールの行と診断の一覧の行と同じ語順なので、開いた行を
+// 見分けられる。
+func ruleCrumbLabel(protoUpper, ports, agent string) string {
+	return protoUpper + " " + ports + " → " + agent
+}
+
+// ruleCrumb はルール詳細ページへのリンクになるパンくずの項目である。
+func ruleCrumb(r proto.Rule) pageCrumb {
+	return pageCrumb{Label: ruleCrumbLabel(strings.ToUpper(string(r.Proto)), r.ListenPort.String(), r.Agent), Href: "/ui/rules/" + r.ID}
 }
 
 func (s *Server) redirectOrError(w http.ResponseWriter, r *http.Request, err error) {

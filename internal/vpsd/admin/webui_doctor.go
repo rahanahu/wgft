@@ -354,25 +354,12 @@ func (s *Server) renderDoctorPage(w http.ResponseWriter, locale, body string, d 
 	})
 }
 
-// pageCrumb はパンくずの 1 項目である。Href が空の項目は今いるページで、リンクにしない。
-type pageCrumb struct {
-	Label string
-	Href  string
-}
-
 // doctorCrumbs は診断の画面のパンくずを返す。一覧の画面は「ダッシュボード / 診断」、1 本のルールの
-// 画面は「ダッシュボード / 診断 / ルール」である。パンくずを持つページはヘッダの戻るボタンを出さず、
-// 戻る道はパンくずの 1 本だけにする。
+// 画面は「ダッシュボード / 診断 / ルール」である。
 func doctorCrumbs(locale string, d doctorPageData) []pageCrumb {
-	dash := pageCrumb{Label: T(locale, "crumbDashboard"), Href: "/"}
+	dash := dashboardCrumb(locale)
 	if d.Rule == nil {
 		return []pageCrumb{dash, {Label: T(locale, "doctorTitle")}}
 	}
-	return []pageCrumb{dash, {Label: T(locale, "doctorTitle"), Href: "/ui/doctor"}, {Label: doctorCrumbLabel(*d.Rule)}}
-}
-
-// doctorCrumbLabel はパンくずの末尾に置くルールの呼び名である。プロトコルと受信ポートに持ち主の
-// エージェントを添える。一覧の行の書き出しと同じ語順なので、一覧から開いた行を見分けられる。
-func doctorCrumbLabel(r doctorRuleRowView) string {
-	return r.ProtoUpper + " " + r.Ports + " → " + r.Agent
+	return []pageCrumb{dash, {Label: T(locale, "doctorTitle"), Href: "/ui/doctor"}, {Label: ruleCrumbLabel(d.Rule.ProtoUpper, d.Rule.Ports, d.Rule.Agent)}}
 }

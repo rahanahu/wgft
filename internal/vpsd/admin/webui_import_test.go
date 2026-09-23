@@ -140,6 +140,8 @@ func TestImportConfirmShowsDiff(t *testing.T) {
 	}
 	page, _ := io.ReadAll(resp.Body)
 	s := string(page)
+	// 確認の画面は読み込みのページの下に置く(設計文書 10.1 節)。
+	assertBreadcrumb(t, "import confirmation", s, []string{`<a href="/">Dashboard</a>`, `<a href="/ui/rules/import">Import rules</a>`}, "Import confirmation")
 	for _, want := range []string{
 		"Added 1", "Changed 1", "Deleted 1", "Unchanged 0",
 		"destination", "192.168.1.30:443", "192.168.1.31:443",

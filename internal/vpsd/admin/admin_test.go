@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -289,17 +290,6 @@ func TestUIRenderLocales(t *testing.T) {
 		}
 	}
 
-	// 共通の枠(page.gohtml)を使うページでは、ダッシュボードへ戻る導線はヘッダのボタン 1 つだけ
-	// にする。枠の中に同じ行き先の戻るリンクを重ねない。診断の画面はボタンの代わりにパンくずを
-	// 持つ(TestDoctorBreadcrumb)。
-	for _, path := range []string{"/ui/add-rule", "/ui/add-agent", "/ui/rules/r_a/check", "/ui/rules/r_a", "/ui/rules/import"} {
-		for _, locale := range []string{"ja", "en"} {
-			if n := strings.Count(get(path+"?lang="+locale), T(locale, "back")); n != 1 {
-				t.Errorf("%s %s: the back-to-dashboard link appears %d times, want 1", locale, path, n)
-			}
-		}
-	}
-
 	// ヘッダと本文の枠は同じ最大幅の枠 1 つに入る。戻るボタンが本文の枠の右端にそろうのは、
 	// 両方がこの枠の幅に従うからである。幅はページの種類で決まる。
 	frames := []struct {
@@ -346,9 +336,11 @@ func findRuleT(t *testing.T, st *store.Store, id string) proto.Rule {
 	return proto.Rule{}
 }
 
-// TestDoctorBreadcrumb は、診断の画面がヘッダの戻るボタンの代わりにパンくずを持つことを確かめる。
-// 上位の項目はリンクで、今いるページの項目はリンクにしない。戻る道はパンくずの 1 本だけである。
-func TestDoctorBreadcrumb(t *testing.T) {
+// TestPageBreadcrumbs は、ダッシュボード以外の共通の枠のページが上部の移動を左寄せのパンくずで
+// 行い、右上のダッシュボードへ戻るボタンを持たないことを確かめる(設計文書 10.1 節)。上位の項目は
+// リンクで、今いるページの項目はリンクにしない。ルールの一覧のページは無いので、ルールの階層は
+// 作らない。
+func TestPageBreadcrumbs(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -362,38 +354,67 @@ func TestDoctorBreadcrumb(t *testing.T) {
 	srv := httptest.NewServer(New(&fakeBackend{st: st}))
 	defer srv.Close()
 
+	dash := `<a href="/">Dashboard</a>`
 	cases := []struct {
 		path    string
 		links   []string
 		current string
 	}{
-		{"/ui/doctor", []string{`<a href="/">Dashboard</a>`}, `<span aria-current="page">Diagnostics</span>`},
-		{"/ui/doctor/r_a", []string{`<a href="/">Dashboard</a>`, `<a href="/ui/doctor">Diagnostics</a>`}, `<span aria-current="page">TCP 25565 → home</span>`},
+		{"/ui/doctor", []string{dash}, "Diagnostics"},
+		{"/ui/doctor/r_a", []string{dash, `<a href="/ui/doctor">Diagnostics</a>`}, "TCP 25565 → home"},
+		{"/ui/rules/r_a", []string{dash}, "TCP 25565 → home"},
+		{"/ui/rules/r_a/check", []string{dash, `<a href="/ui/rules/r_a">TCP 25565 → home</a>`}, "Connection test"},
+		{"/ui/add-rule", []string{dash}, "Add rule"},
+		{"/ui/add-agent", []string{dash}, "Add agent"},
+		{"/ui/rules/import", []string{dash}, "Import rules"},
 	}
 	for _, tc := range cases {
-		body := getBody(t, srv.URL+tc.path+"?lang=en")
-		i := strings.Index(body, `<nav class="crumbs"`)
-		if i < 0 {
-			t.Errorf("%s: no breadcrumb", tc.path)
-			continue
+		assertBreadcrumb(t, tc.path, getBody(t, srv.URL+tc.path+"?lang=en"), tc.links, tc.current)
+	}
+
+	// 接続文字列を発行した後のページは、同じ「エージェントを追加」のページの結果である。
+	resp, err := http.PostForm(srv.URL+"/ui/add-agent?lang=en", url.Values{"name": {"home2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assertBreadcrumb(t, "POST /ui/add-agent", string(b), []string{dash}, "Add agent")
+
+	// 日本語の見出しでも同じ形になる。
+	assertBreadcrumb(t, "/ui/doctor/r_a ja", getBody(t, srv.URL+"/ui/doctor/r_a?lang=ja"),
+		[]string{`<a href="/">ダッシュボード</a>`, `<a href="/ui/doctor">診断</a>`}, "TCP 25565 → home")
+}
+
+// assertBreadcrumb は、ページのパンくずが links のリンクをこの順に持ち、current を今いるページの
+// 項目(リンクではない)として末尾に持ち、ページにダッシュボードへ戻るボタンが無いことを確かめる。
+func assertBreadcrumb(t *testing.T, name, body string, links []string, current string) {
+	t.Helper()
+	i := strings.Index(body, `<nav class="crumbs"`)
+	if i < 0 {
+		t.Errorf("%s: no breadcrumb", name)
+		return
+	}
+	nav := body[i : i+strings.Index(body[i:], "</nav>")]
+	at := 0
+	for _, l := range links {
+		k := strings.Index(nav[at:], l)
+		if k < 0 {
+			t.Errorf("%s: breadcrumb lacks %s after the earlier items:\n%s", name, l, nav)
+			return
 		}
-		nav := body[i : i+strings.Index(body[i:], "</nav>")]
-		for _, l := range tc.links {
-			if !strings.Contains(nav, l) {
-				t.Errorf("%s: breadcrumb lacks %s:\n%s", tc.path, l, nav)
-			}
-		}
-		if !strings.Contains(nav, tc.current) {
-			t.Errorf("%s: breadcrumb lacks the current item %s:\n%s", tc.path, tc.current, nav)
-		}
-		if n := strings.Count(nav, "<a "); n != len(tc.links) {
-			t.Errorf("%s: breadcrumb has %d links, want %d; the current page must not be a link", tc.path, n, len(tc.links))
-		}
-		if strings.Contains(body, T("en", "back")) {
-			t.Errorf("%s: the header's back button is still there beside the breadcrumb", tc.path)
-		}
-		if strings.Contains(body, "Back to the diagnosis") {
-			t.Errorf("%s: the in-panel back link is still there beside the breadcrumb", tc.path)
-		}
+		at += k + len(l)
+	}
+	if want := `<span aria-current="page">` + current + `</span></li></ol>`; !strings.Contains(body[i:], want) {
+		t.Errorf("%s: breadcrumb does not end with the current item %q:\n%s", name, current, nav)
+	}
+	if n := strings.Count(nav, "<a "); n != len(links) {
+		t.Errorf("%s: breadcrumb has %d links, want %d; the current page must not be a link", name, n, len(links))
+	}
+	if strings.Contains(body, "Back to dashboard") || strings.Contains(body, "ダッシュボードへ戻る") {
+		t.Errorf("%s: a back-to-dashboard button is still on the page", name)
+	}
+	if strings.Contains(body, `class="top-actions"`) {
+		t.Errorf("%s: the header still has an action area on the right", name)
 	}
 }

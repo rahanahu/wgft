@@ -305,7 +305,8 @@ func (s *Server) renderDetailPage(w http.ResponseWriter, locale string, data rul
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.renderHTML(w, "page", map[string]any{"Locale": locale, "Title": T(locale, "ruleDetailTitle"), "Body": template.HTML(inner.String()), "Wide": true})
+	crumbs := []pageCrumb{dashboardCrumb(locale), {Label: ruleCrumbLabel(data.ProtoUpper, data.Ports, data.Agent)}}
+	s.renderHTML(w, "page", map[string]any{"Locale": locale, "Title": T(locale, "ruleDetailTitle"), "Body": template.HTML(inner.String()), "Wide": true, "Crumbs": crumbs})
 }
 
 func (s *Server) uiRuleDetail(w http.ResponseWriter, r *http.Request) {
@@ -619,6 +620,11 @@ func (s *Server) uiCheck(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	res, err := s.backend.CheckConnectivity(id)
 	data := map[string]any{"RuleLabel": id, "Agent": ""}
+	// 接続テストは 1 本のルールの操作なので、パンくずではそのルールの詳細ページの下に置く。
+	// ルールが見つからないときは「ダッシュボード / 接続テスト」の既定に任せる。
+	if rule, ok, ferr := s.findRule(id); ferr == nil && ok {
+		data["Crumbs"] = []pageCrumb{dashboardCrumb(locale), ruleCrumb(rule), {Label: T(locale, "checkTitle")}}
+	}
 	if err != nil {
 		data["OK"], data["ReachLabel"], data["Detail"] = false, T(locale, "checkFailed"), err.Error()
 	} else {

@@ -18,7 +18,6 @@ var tr = map[string][2]string{
 	"subtitle": {"WireGuard Forwarding Tool", "WireGuard Forwarding Tool"},
 	"addAgent": {"+ エージェントを追加", "+ Add agent"},
 	"addRule":  {"+ ルールを追加", "+ Add rule"},
-	"back":     {"← ダッシュボードへ戻る", "← Back to dashboard"},
 	"firewall": {"適用中のファイアウォール設定", "Applied firewall configuration"},
 	// server info
 	"serverHead":  {"サーバー", "Server"},

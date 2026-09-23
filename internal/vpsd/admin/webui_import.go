@@ -393,5 +393,7 @@ func (s *Server) renderImportPage(w http.ResponseWriter, locale, titleKey, tmplN
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.renderHTML(w, "page", map[string]any{"Locale": locale, "Title": T(locale, titleKey), "Body": template.HTML(inner.String()), "Wide": true})
+	// 確認の画面は読み込みのページから進んだ先なので、パンくずではその下に置く。
+	crumbs := []pageCrumb{dashboardCrumb(locale), {Label: T(locale, "importTitle"), Href: "/ui/rules/import"}, {Label: T(locale, titleKey)}}
+	s.renderHTML(w, "page", map[string]any{"Locale": locale, "Title": T(locale, titleKey), "Body": template.HTML(inner.String()), "Wide": true, "Crumbs": crumbs})
 }

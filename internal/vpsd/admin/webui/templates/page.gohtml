@@ -10,12 +10,11 @@
 </head>
 <body>
   <div class="app-shell">
-    {{- /* ヘッダと本文の枠は同じ最大幅を持つ。戻るボタンが本文の枠の右端にそろう */ -}}
+    {{- /* ヘッダ、パンくず、本文の枠は同じ最大幅の枠に入り、左端がそろう(設計文書 10.1 節) */ -}}
     {{ $w := 640 }}{{ if .MaxWidth }}{{ $w = .MaxWidth }}{{ else if .Wide }}{{ $w = 900 }}{{ end }}
     <div class="page-frame" style="max-width:{{ $w }}px">
       <header class="topbar">
         <div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ .Title }}</div></div>
-        {{ if not .Crumbs }}<div class="top-actions"><a class="btn" href="/">{{ T .Locale "back" }}</a></div>{{ end }}
       </header>
       {{ with .Crumbs }}<nav class="crumbs" aria-label="{{ T $.Locale "crumbNav" }}"><ol>
         {{- range . }}<li>{{ if .Href }}<a href="{{ .Href }}">{{ .Label }}</a>{{ else }}<span aria-current="page">{{ .Label }}</span>{{ end }}</li>{{ end -}}
