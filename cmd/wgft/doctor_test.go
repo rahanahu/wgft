@@ -1051,8 +1051,10 @@ func TestDisconnectedAgentWithFreshHandshakeIsUnknownNotFailed(t *testing.T) {
 	if len(c.Causes) != 3 {
 		t.Errorf("the causes this evidence cannot separate must be kept, got %v", c.Causes)
 	}
-	if !strings.Contains(c.Next, "journalctl -u wgft-agent") {
-		t.Errorf("the next step must be kept, got %q", c.Next)
+	// 10.2a 節が「agent doctor ができた時点で案内し直す」と定めた箇所である。自宅側を見る
+	// 必要がある所見は、ログの読み取りではなくそのコマンドを案内する(10.2c 節の「置き場所」)。
+	if !strings.Contains(c.Next, "wgft agent doctor") {
+		t.Errorf("the next step must send the operator to the agent host's own diagnosis, got %q", c.Next)
 	}
 	if got := firstFailed(checks); got != "" {
 		t.Errorf("no check may be failed in this state, got %q: %s", got, dumpChecks(checks))

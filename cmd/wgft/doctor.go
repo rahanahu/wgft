@@ -392,9 +392,10 @@ func notTestedList(rules []proto.Rule, in doctorInput) []notTested {
 			"so a port that accepts while the service refuses, is full, or is the wrong service reads as healthy."},
 		{"one-way tunnel", "the first " + handshakeStale.String() + " of a tunnel that stopped receiving. Its handshake stays recent " +
 			"for that long, so a check run inside that window calls it healthy."},
-		// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
+		// 10.2a 節の「agent doctor ができた時点で案内し直す」に従って向け直した案内である
+		// (10.2c 節の「置き場所」)。
 		{"the agent host", "the agent's own environment: its OS, its permissions, its interfaces and its name resolution. This " +
-			"server sees only what the heartbeat carries. To see it, read the agent's own log on that host."},
+			"server sees only what the heartbeat carries. To see it, run wgft agent doctor on that host."},
 	}
 	if !in.Probed {
 		out = append(out, notTested{"inner path", "nothing was dialled. Add --probe to open one real TCP connection from this " +
@@ -818,9 +819,7 @@ func connectionCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRep
 				"the agent reached this server but was rejected; see the server log",
 				"this server has not yet noticed a connection that is in fact alive",
 			}
-			// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
-			c.Next = "read this server's log for this agent's control connection, and the agent's own log on its host: " +
-				"journalctl -u wgft-agent, or docker logs."
+			c.Next = "read this server's log for this agent's control connection, and run wgft agent doctor on the agent host."
 			// 既に疎通確認を行った実行に「--probe を付けよ」と言わない。今やったことを勧める行は
 			// 読み手にとって雑音である。
 			if !in.Probed {
@@ -836,8 +835,7 @@ func connectionCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkRep
 			c.Detail = "last seen " + since(in.Now, hb).String() + " ago"
 		}
 		c.Causes = []string{"the agent is not running", "it cannot reach this VPS's agent API port", "the home line or the ISP is down"}
-		// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
-		c.Next = "on the agent host: systemctl status wgft-agent and journalctl -u wgft-agent, or docker logs for a container, " +
+		c.Next = "run wgft agent doctor on the agent host; it answers whether the agent runs there and what its own state is, " +
 			"then check that it can reach this VPS's agent API port"
 		return c
 	}
@@ -976,9 +974,7 @@ func resolveCheck(r proto.Rule, ai *admin.AgentInfo, in doctorInput) checkReport
 		// 古い証拠ではなく、そもそも試していない条件として扱う(10.2a 節の状態の定義)。
 		c.Status, c.Reason = statusNotTested, reasonResolvedByAgent
 		c.Detail = "not tested: the agent resolves " + host + " itself and this server never observes the result; only a failure reaches it, inside the reason on the target line below"
-		// TODO(agent-doctor): point at `wgft agent doctor` once that command exists (design 10.2a).
-		c.Next = "to see resolution itself, resolve " + host + " on the agent host, and read the agent's log for what it " +
-			"reports about this rule"
+		c.Next = "to see resolution itself, run wgft agent doctor on the agent host and resolve " + host + " there"
 	}
 	return c
 }
@@ -1343,8 +1339,8 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 			fmt.Fprintln(w, "Result: healthy as far as this command can see")
 		}
 	}
-	writeHistory(w, rep)
-	writeNotTested(w, rep)
+	writeHistory(w, rep.History.Detail)
+	writeNotTested(w, rep.NotTested)
 }
 
 func checksOfRule(rep doctorReport, ruleID string) []checkReport {
@@ -1447,8 +1443,8 @@ func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
 		fmt.Fprintln(w, "Result: no failing check")
 	}
 	fmt.Fprintln(w, "\nrun `wgft server doctor <rule>` to follow one rule end to end")
-	writeHistory(w, rep)
-	writeNotTested(w, rep)
+	writeHistory(w, rep.History.Detail)
+	writeNotTested(w, rep.NotTested)
 }
 
 // agentLines は、報告に現れるエージェントごとに 1 行ぶんの要約を作る。エージェントの接続の
@@ -1487,15 +1483,18 @@ func countStatus(rules []ruleReport, want string) int {
 	return n
 }
 
-func writeHistory(w io.Writer, rep doctorReport) {
+// writeHistory は、このコマンドが履歴を持たないことを出す。detail を引数に取るのは、`agent doctor`
+// (設計文書 10.2c 節)が同じ形の History を、別の文で出すためである。
+func writeHistory(w io.Writer, detail string) {
 	fmt.Fprintln(w, "\nHistory")
 	writeLine(w, "when it broke", "NOT AVAILABLE", "")
-	fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", 2+labelWidth+1), wrapAt(rep.History.Detail, 2+labelWidth+1))
+	fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", 2+labelWidth+1), wrapAt(detail, 2+labelWidth+1))
 }
 
-func writeNotTested(w io.Writer, rep doctorReport) {
+// writeNotTested は試していない範囲を出す。項目を引数に取るのは History と同じ理由である。
+func writeNotTested(w io.Writer, items []notTested) {
 	fmt.Fprintln(w, "\nNot tested by this command")
-	for _, n := range rep.NotTested {
+	for _, n := range items {
 		fmt.Fprintf(w, "  %-16s %s\n", n.ID, wrapAt(n.Detail, 19))
 	}
 }
