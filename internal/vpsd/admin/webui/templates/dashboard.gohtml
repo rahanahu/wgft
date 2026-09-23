@@ -17,6 +17,7 @@
       </div>
       <div class="top-actions">
         <div class="global-health {{ .Health.Class }}" id="health" data-refresh="/ui/health">{{ template "health" . }}</div>
+        <a class="btn" href="/ui/doctor">{{ T .Locale "doctorTitle" }}</a>
         <a class="btn primary" href="/ui/add-agent">{{ T .Locale "addAgent" }}</a>
         <a class="btn primary" href="/ui/add-rule">{{ T .Locale "addRule" }}</a>
         <span class="lang-switch">
