@@ -932,6 +932,125 @@ func TestAgentDoctorAcceptsAMissingConfigFile(t *testing.T) {
 	}
 }
 
+// root で実行した host.privileges の扱いを、10.2c 節の規則をそのまま入力に写して確かめる。root は
+// ファイルのパーミッションを迂回するので、読めたことはエージェント自身の利用者について何も述べない。
+// そのため root の実行では、拒まれた対象が無ければ OK ではなく UNKNOWN とし、層 2 には数えない。
+// 終了コードは他の検査が決める。root でない実行の扱いは変えない。
+func TestAgentDoctorPrivilegesUnderRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		euid int
+		// setup は場面の残りを作る。healthy は稼働中で何も壊れていないエージェントである。
+		setup      func(t *testing.T, in *agentDoctorInput)
+		wantStatus string
+		wantReason string
+		// wantRootWording は、所見と次の一手が root の迂回を述べることである。
+		wantRootWording bool
+		wantExit        int
+	}{
+		{
+			name: "root, a healthy running agent", euid: 0, setup: healthyAgentForTest,
+			wantStatus: statusUnknown, wantReason: agentReasonRunningAsRoot, wantRootWording: true, wantExit: 0,
+		},
+		{
+			// 層 1 の FAILED は root でもそのまま効く。root の UNKNOWN が 2 に倒すことはない。
+			name: "root, a stopped agent", euid: 0, setup: stoppedAgentForTest,
+			wantStatus: statusUnknown, wantReason: agentReasonRunningAsRoot, wantRootWording: true, wantExit: 1,
+		},
+		{
+			// root でも拒まれた対象がある実行は、迂回が及ばない拒否という事実があるので、層 2 の
+			// FAILED のままとする。
+			name: "root, and a target refuses it anyway", euid: 0,
+			setup: func(t *testing.T, in *agentDoctorInput) {
+				healthyAgentForTest(t, in)
+				in.Readable = func(string, bool) (accessResult, error) { return accessDenied, fs.ErrPermission }
+			},
+			wantStatus: statusFailed, wantReason: agentReasonPermissionDenied, wantExit: 2,
+		},
+		{
+			// root の実行は、拒まれた対象が無ければ、判定できない対象があっても running_as_root に
+			// なる。判定できない理由より、この実行が答えられない理由のほうが先に立つ(10.2c 節)。
+			name: "root, and a target cannot be decided", euid: 0,
+			setup: func(t *testing.T, in *agentDoctorInput) {
+				healthyAgentForTest(t, in)
+				in.DirCreateAccess = func(string) (accessResult, error) {
+					return accessNotDetermined, errors.New("read-only file system")
+				}
+			},
+			wantStatus: statusUnknown, wantReason: agentReasonRunningAsRoot, wantRootWording: true, wantExit: 0,
+		},
+		{
+			name: "not root, a healthy running agent", euid: 1000, setup: healthyAgentForTest,
+			wantStatus: statusOK, wantExit: 0,
+		},
+		{
+			name: "not root, a stopped agent", euid: 1000, setup: stoppedAgentForTest,
+			wantStatus: statusOK, wantExit: 1,
+		},
+		{
+			// Windows の os.Geteuid は -1 を返す。root の分岐に入らない。
+			name: "no uid, as on Windows", euid: -1, setup: healthyAgentForTest,
+			wantStatus: statusOK, wantExit: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := testAgentDoctorInput(t, t.TempDir())
+			euid := tc.euid
+			in.Euid = func() int { return euid }
+			tc.setup(t, &in)
+			rep := agentDiagnose(in)
+			c, ok := findAgentCheck(rep, agentCheckPrivileges)
+			if !ok {
+				t.Fatal("host.privileges is missing from the report")
+			}
+			if c.Status != tc.wantStatus || c.Reason != tc.wantReason {
+				t.Errorf("host.privileges = %s/%q, want %s/%q; detail: %s", c.Status, c.Reason, tc.wantStatus, tc.wantReason, c.Detail)
+			}
+			if tc.wantStatus == statusUnknown && c.evidenceUnreachable {
+				t.Error("the root run counts as evidence out of reach; running as root alone must not end in exit code 2")
+			}
+			saysBypass := strings.Contains(c.Detail, "root bypasses file permissions") &&
+				strings.Contains(c.Detail, "cannot say whether the user the agent runs as can reach them")
+			if saysBypass != tc.wantRootWording {
+				t.Errorf("the detail says root bypasses permissions = %v, want %v: %q", saysBypass, tc.wantRootWording, c.Detail)
+			}
+			if tc.wantRootWording {
+				for _, want := range []string{"run this command as that user", "if the agent itself runs as root, this result is expected"} {
+					if !strings.Contains(c.Next, want) {
+						t.Errorf("the next step has no %q: %q", want, c.Next)
+					}
+				}
+			}
+			if code := agentDoctorExitCode(rep); code != tc.wantExit {
+				t.Errorf("exit code = %d, want %d", code, tc.wantExit)
+			}
+		})
+	}
+}
+
+// 差し替えられていない実効 uid の入口は、このプロセスの実効 uid を答える。既定が別の値を返すと、
+// root の実行を見分ける判定が実際の実行に効かない。
+func TestAgentDoctorDefaultEuidIsTheProcessEuid(t *testing.T) {
+	in := agentDoctorInput{}.withDefaults()
+	if got, want := in.Euid(), os.Geteuid(); got != want {
+		t.Errorf("the default Euid() = %d, want os.Geteuid() = %d", got, want)
+	}
+}
+
+// healthyAgentForTest は、登録済みで稼働中の、何も壊れていないエージェントの場面を作る。
+func healthyAgentForTest(t *testing.T, in *agentDoctorInput) {
+	t.Helper()
+	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+	holdTheLock(t, in.CredentialsPath)
+	in.Dial = fakeDoctorSocket(t, liveReply(healthyLiveResponse()))
+}
+
+// stoppedAgentForTest は、登録済みで止まっているエージェントの場面を作る。
+func stoppedAgentForTest(t *testing.T, in *agentDoctorInput) {
+	t.Helper()
+	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+}
+
 // --- 助け ---
 
 func testAgentDoctorInput(t *testing.T, dir string) agentDoctorInput {
@@ -955,6 +1074,9 @@ func testAgentDoctorInput(t *testing.T, dir string) agentDoctorInput {
 		// TestDirCreateAccess が確かめる。この表が確かめるのは 10.2c 節の規則であり、走らせた
 		// OS が答えを変えてはならない。
 		DirCreateAccess: func(string) (accessResult, error) { return accessAllowed, nil },
+		// 既定の場面は root でない利用者で走らせる。root の場面は明示して与える。テストを root で
+		// 走らせても、場面の答えが変わらないようにするためである。
+		Euid: func() int { return 1000 },
 	}
 }
 
