@@ -90,32 +90,42 @@ NFT
 
 // fakeBackend implements admin.Backend with fixed sample data: three agents (home,
 // office, lab), nine rules across two named groups plus one ungrouped, one
-// ip-mismatch warning, and a server info block. Among the rules, r_valheim_udp and
-// r_valheim_udp2 are adjacent and mergeable; r_lab_udp30000 and
+// ip-mismatch warning, and a server info block. Among the rules, r_game_udp and
+// r_game_udp2 are adjacent and mergeable; r_lab_udp30000 and
 // r_lab_udp30002 are adjacent but not (their deny lists differ).
+//
+// Every timestamp (heartbeats, handshakes, the warning, the server's start) is computed
+// relative to the time of each request, not to the time the demo started, so a screenshot
+// looks the same however long the demo has been running: a healthy agent's heartbeat stays a
+// few seconds old instead of going stale after the liveness window.
 type fakeBackend struct {
-	agents   []admin.AgentInfo
-	rules    []proto.Rule
-	drops    map[string]uint64
-	warnings []admin.Warning
-	info     admin.ServerInfo
+	rules []proto.Rule
+	drops map[string]uint64
+	mode  string
 }
 
-func newFakeBackend(mode string) *fakeBackend {
-	base := time.Now()
-	rfc := func(d time.Duration) string { return base.Add(d).Format(time.RFC3339) }
+// rfcAgo returns the RFC 3339 time d before now.
+func rfcAgo(d time.Duration) string { return time.Now().Add(-d).Format(time.RFC3339) }
 
-	mismatch := admin.Warning{
+// sampleWarning is the office agent's ip-mismatch warning, raised three minutes ago.
+func sampleWarning() admin.Warning {
+	return admin.Warning{
 		Agent:  "office",
 		Kind:   "ip-mismatch",
 		Detail: "stream 203.0.113.24 / wg 198.51.100.9",
-		At:     rfc(-3 * time.Minute),
+		At:     rfcAgo(3 * time.Minute),
 	}
+}
 
-	agents := []admin.AgentInfo{
+// sampleAgents returns the three sample agents with their timestamps taken relative to now.
+func sampleAgents() []admin.AgentInfo {
+	rfc := func(d time.Duration) string { return rfcAgo(-d) }
+	mismatch := sampleWarning()
+
+	return []admin.AgentInfo{
 		{
 			// generation 42 matches Generation() below, and it reports every rule it
-			// owns, so r_mc_tcp25565, r_valheim_udp and r_valheim_udp2 show "applied"
+			// owns, so r_pub_tcp25565, r_game_udp and r_game_udp2 show "applied"
 			// while r_home_tcp8081 shows "error" with a realistic dial failure from
 			// checkTarget (relay.Manager). A listen bind conflict can't happen
 			// here: the agent's listener lives on its own netstack (design 7 section).
@@ -125,14 +135,14 @@ func newFakeBackend(mode string) *fakeBackend {
 			PublicKey: "HhYgfQgcVISS51VHjdkVxdPeCdaDL3P+vgm9soc8MLQ=", LastHandshake: rfc(-40 * time.Second),
 			Tunnel: admin.TunnelStatus{State: proto.StatusOK, Endpoint: "203.0.113.10:51820"},
 			Rules: []proto.RuleStatus{
-				{ID: "r_mc_tcp25565", State: proto.StatusOK},
-				{ID: "r_valheim_udp", State: proto.StatusOK},
-				{ID: "r_valheim_udp2", State: proto.StatusOK},
+				{ID: "r_pub_tcp25565", State: proto.StatusOK},
+				{ID: "r_game_udp", State: proto.StatusOK},
+				{ID: "r_game_udp2", State: proto.StatusOK},
 				{ID: "r_home_tcp8081", State: proto.StatusError, Reason: "tcp/8081: dial tcp 192.168.1.30:8081: connect: connection refused"},
 			},
 		},
 		{
-			// disconnected, so r_mc_tcp8080 shows "agent offline" regardless of Rules. Tunnel
+			// disconnected, so r_pub_tcp8080 shows "agent offline" regardless of Rules. Tunnel
 			// and StreamFrom/WGEndpoint are the last heartbeat before the stream dropped
 			// (design 5.2 section); Connected: false must keep the dashboard from drawing
 			// them as current (tunnel "OK", a live IP match/mismatch): the tunnel shows as a
@@ -158,29 +168,31 @@ func newFakeBackend(mode string) *fakeBackend {
 			},
 		},
 	}
+}
 
+func newFakeBackend(mode string) *fakeBackend {
 	rules := []proto.Rule{
 		{
-			ID: "r_mc_tcp25565", Agent: "home", Group: "minecraft", Note: "public server",
+			ID: "r_pub_tcp25565", Agent: "home", Group: "public", Note: "public server",
 			Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565},
 			Target: "192.168.1.15:25565", VPSMode: proto.ModeProxy, ProxyProtocol: true, Enabled: true,
 			SourceAllow: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("198.51.100.0/24")},
 		},
 		{
-			ID: "r_mc_tcp8080", Agent: "office", Group: "minecraft", Note: "Bedrock voice",
+			ID: "r_pub_tcp8080", Agent: "office", Group: "public", Note: "voice chat",
 			Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 8080, Hi: 8080},
 			Target: "192.168.1.10:8080", VPSMode: proto.ModeKernel, Enabled: true,
 		},
 		{
-			ID: "r_valheim_udp", Agent: "home", Group: "valheim", Note: "weekend server for friends",
+			ID: "r_game_udp", Agent: "home", Group: "game", Note: "weekend server for friends",
 			Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 2456, Hi: 2457},
 			Target: "192.168.1.20:2456", VPSMode: proto.ModeKernel, Enabled: true,
 		},
 		{
-			// Adjacent to r_valheim_udp above with everything else equal (agent, proto,
+			// Adjacent to r_game_udp above with everything else equal (agent, proto,
 			// mode, proxy_protocol, lists, rates, enabled), so the rule detail page's
 			// merge section offers each as the other's candidate.
-			ID: "r_valheim_udp2", Agent: "home", Group: "valheim", Note: "extra port for the weekend server",
+			ID: "r_game_udp2", Agent: "home", Group: "game", Note: "extra port for the weekend server",
 			Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 2458, Hi: 2459},
 			Target: "192.168.1.20:2458", VPSMode: proto.ModeKernel, Enabled: true,
 		},
@@ -223,33 +235,35 @@ func newFakeBackend(mode string) *fakeBackend {
 	}
 
 	return &fakeBackend{
-		agents: agents,
-		rules:  rules,
+		rules: rules,
 		drops: map[string]uint64{
-			"r_mc_tcp25565": 8392,
-			"r_mc_tcp8080":  523,
-			"r_valheim_udp": 14,
+			"r_pub_tcp25565": 8392,
+			"r_pub_tcp8080":  523,
+			"r_game_udp":     14,
 		},
-		warnings: []admin.Warning{mismatch},
-		info: admin.ServerInfo{
-			Version:          "v0.1.0-abc1234",
-			Mode:             mode,
-			StartedAt:        rfc(-(50*time.Hour + 5*time.Minute)), // uptime: 2d 2h
-			WGInterface:      "wgft0",
-			WGAddress:        "10.200.0.1/24",
-			WGPort:           51821,
-			WGEndpoint:       "vps.example.com:51821",
-			AgentAPIPort:     "8443",
-			AdminAddr:        listenAddr,
-			MTU:              1420,
-			ServerPubKey:     "wJ6znEXOTPMBUXW+3z2vqjaMYikBWi2gYGA9EI0PZXk=",
-			Kernel:           "6.1.0-53-amd64",
-			NFT:              "v1.0.6",
-			IPForwardSetAt:   "", // unchanged
-			UDPTimeout:       30,
-			UDPTimeoutStream: 120,
-		},
+		mode: mode,
 	}
+}
+
+func (b *fakeBackend) ServerInfo() (admin.ServerInfo, error) {
+	return admin.ServerInfo{
+		Version:          "v1.1.0",
+		Mode:             b.mode,
+		StartedAt:        rfcAgo(50*time.Hour + 5*time.Minute), // uptime: 2d 2h
+		WGInterface:      "wgft0",
+		WGAddress:        "10.200.0.1/24",
+		WGPort:           51821,
+		WGEndpoint:       "vps.example.com:51821",
+		AgentAPIPort:     "8443",
+		AdminAddr:        listenAddr,
+		MTU:              1420,
+		ServerPubKey:     "wJ6znEXOTPMBUXW+3z2vqjaMYikBWi2gYGA9EI0PZXk=",
+		Kernel:           "6.1.0-53-amd64",
+		NFT:              "v1.0.6",
+		IPForwardSetAt:   "", // unchanged
+		UDPTimeout:       30,
+		UDPTimeoutStream: 120,
+	}, nil
 }
 
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.rules, nil }
@@ -273,7 +287,7 @@ func (b *fakeBackend) AgentState(agent string) (*proto.State, error) {
 	return &proto.State{Generation: 42}, nil
 }
 
-func (b *fakeBackend) Agents() ([]admin.AgentInfo, error) { return b.agents, nil }
+func (b *fakeBackend) Agents() ([]admin.AgentInfo, error) { return sampleAgents(), nil }
 
 func (b *fakeBackend) RuleDrops() (map[string]uint64, error) { return b.drops, nil }
 
@@ -286,15 +300,15 @@ func (b *fakeBackend) JoinString(name string) (admin.JoinStringResponse, error) 
 
 func (b *fakeBackend) Revoke(name string) error { return nil }
 
-func (b *fakeBackend) Warnings() ([]admin.Warning, error) { return b.warnings, nil }
+func (b *fakeBackend) Warnings() ([]admin.Warning, error) {
+	return []admin.Warning{sampleWarning()}, nil
+}
 
 func (b *fakeBackend) DismissWarning(agent, kind, detail string) error { return nil }
 
 func (b *fakeBackend) CheckConnectivity(ruleID string) (admin.ConnCheck, error) {
 	return admin.ConnCheck{OK: true, Reach: "target", Detail: "demo: path OK"}, nil
 }
-
-func (b *fakeBackend) ServerInfo() (admin.ServerInfo, error) { return b.info, nil }
 
 // ApplyStatus reports every enabled rule's public port as active at generation 42, the way a
 // real server reports it. The dashboard reads only not_active and pending from it, so its
@@ -312,12 +326,13 @@ func (b *fakeBackend) ApplyStatus() (admin.ApplyStatus, bool) {
 
 // AgentRuleStatuses reports what each rule's agent last said about it, from the sample agents
 // above, so the diagnosis page can show a rule stopping at its target (r_home_tcp8081) and a UDP
-// rule whose listener is open (r_valheim_udp).
+// rule whose listener is open (r_game_udp).
 func (b *fakeBackend) AgentRuleStatuses(rules []proto.Rule) map[string]admin.AgentRuleStatus {
 	out := make(map[string]admin.AgentRuleStatus, len(rules))
+	agents := sampleAgents()
 	for _, r := range rules {
 		st := admin.AgentRuleStatus{Agent: r.Agent}
-		for _, a := range b.agents {
+		for _, a := range agents {
 			if a.Name != r.Agent {
 				continue
 			}

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# screenshot-ui retakes the two dashboard screenshots used by README.md and
-# README.ja.md: docs/images/dashboard.png (English) and
-# docs/images/dashboard.ja.png (Japanese).
+# screenshot-ui retakes the Web UI screenshots used by README.md and README.ja.md,
+# each in English (name.png) and Japanese (name.ja.png) under docs/images:
+#
+#   dashboard         the dashboard, full page at a width of 1400
+#   doctor            the diagnostics page's list of every rule, at a width of 960,
+#                     cut off just below the rules table and its result line
+#   doctor-rule       the diagnostics page of the one rule r_pub_tcp8080, which stops
+#                     at WireGuard, at a width of 960, cut off below the probe section
 #
 # It builds tools/uidemo, a throwaway program that serves the admin Web UI on
-# 127.0.0.1:8687 with fixed sample data (three agents, five rules, one warning;
+# 127.0.0.1:8687 with fixed sample data (three agents, nine rules, one warning;
 # see tools/uidemo/main.go for the exact values), waits for the port to accept
 # connections, captures each locale with headless Firefox using a fresh
 # throwaway profile, then stops the demo server.
@@ -19,7 +24,12 @@
 # Firefox 155: width,height crops to exactly that box, e.g. 1400x600 stays
 # 1400x600 even though the page is taller; width alone yields a screenshot
 # sized to the page's actual content height, e.g. 1400x1276). So this script
-# passes only a width, to avoid ever cutting the dashboard off at the bottom.
+# passes only a width for the dashboard, to avoid ever cutting it off at the
+# bottom. The diagnostics pages end in a long list of what the diagnosis does
+# not test, so their shots pass width,height to keep only the part above it.
+# The heights are per locale and were measured on Firefox 156 with the fixed
+# sample data; if the diagnostics page's layout or text changes, look at the
+# new images and adjust the heights so each one ends just below a divider.
 #
 # Re-run this after any change to the Web UI's templates, styles, or sample
 # data shape, so the screenshots keep matching the current UI text.
@@ -80,14 +90,15 @@ exec 3<&- 3>&-
 mkdir -p "$out_dir"
 
 shoot() {
-    lang="$1"
+    path="$1"
     out="$2"
+    size="$3"
     profile="$(mktemp -d)"
     shot_dir="$(mktemp -d)"
     shot="$shot_dir/shot.png"
     "$firefox_bin" --headless --no-remote --profile "$profile" \
-        --window-size=1400 --screenshot "$shot" \
-        "http://$addr/?lang=$lang"
+        --window-size="$size" --screenshot "$shot" \
+        "http://$addr$path"
     if [ ! -s "$shot" ]; then
         echo "screenshot-ui: firefox did not produce $shot" >&2
         exit 1
@@ -97,7 +108,11 @@ shoot() {
     echo "wrote $out"
 }
 
-shoot en "$out_dir/dashboard.png"
-shoot ja "$out_dir/dashboard.ja.png"
+shoot "/?lang=en" "$out_dir/dashboard.png" 1400
+shoot "/?lang=ja" "$out_dir/dashboard.ja.png" 1400
+shoot "/ui/doctor?lang=en" "$out_dir/doctor.png" 960,2329
+shoot "/ui/doctor?lang=ja" "$out_dir/doctor.ja.png" 960,2376
+shoot "/ui/doctor/r_pub_tcp8080?lang=en" "$out_dir/doctor-rule.png" 960,1175
+shoot "/ui/doctor/r_pub_tcp8080?lang=ja" "$out_dir/doctor-rule.ja.png" 960,1188
 
 echo "done."

@@ -34,6 +34,7 @@ wgft は、任意の TCP/UDP ポートをそのまま転送したい用途、特
 - ルール変更時も無関係なセッションは切断しない
 - TCP ルールでは PROXY protocol v2 により実クライアント IP を転送可能
 - agent、ルール、警告、転送状態を確認できる Web ダッシュボード
+- ルールの通信がどこまで届き、どこで止まるかを CLI と Web UI で診断
 - `wgft server teardown` は wgft が作成した状態だけを削除
 
 ## wgft を作った理由
@@ -157,6 +158,23 @@ ssh -L 8686:/run/wgft/admin.sock root@vps
 ```
 
 その状態で `http://localhost:8686` を開きます。その他の管理画面への接続方法は [セットアップガイド](docs/setup.ja.md#web-ui) を参照してください。
+
+## 転送が届かないときの診断
+
+VPS で実行する `wgft server doctor` は、ルールの通信がどこまで届き、どこで止まるかと、次に確かめる箇所を示します。引数を省くと server、agent、全ルールを一覧にします。ルール ID を渡すと、そのルールを公開ポートから転送先まで順にたどります。このコマンドは稼働中の server が既に観測した内容だけを読み、`--probe` を付けたときだけ接続を試します。`--probe` は、トンネルと agent を通して転送先へ実際の TCP 接続を 1 本開きます。
+
+```sh
+sudo wgft server doctor
+sudo wgft server doctor <ルール ID>
+```
+
+Web UI の診断の画面は、同じ証拠から組み立てた同じ判定を表示します。各ルールは公開ポート、WireGuard、agent、リスナーと転送先を結んだ経路の図になり、通信が止まった箇所に印が付きます。疎通の確認は、1 本のルールの画面でボタンを押したときだけ実行します。次の画面は、agent との最近のハンドシェイクが無いために WireGuard で止まったルールです。全ルールの[一覧の画面](docs/images/doctor.ja.png)もあります。
+
+![1 本のルールの診断の画面](docs/images/doctor-rule.ja.png)
+
+`wgft agent doctor` は、agent のホストの側から、agent が動いているか、認証情報を持っているか、必要な名前を解決できるかを示します。判定は実行した利用者の権限で行うため、agent のホストで agent と同じ利用者として実行します。root で実行すると、agent 自身の利用者がファイルを読めるかを判定できないので、privileges の項目は UNKNOWN になります。`--json` を付けると、どちらの doctor も診断の結果を JSON で出力します。その id と reason のコードは、機械で読むための安定した形式です。
+
+各状態の意味と終了コードは [CLI リファレンス](docs/cli.md) を、検査の判定の仕方は [設計](docs/design.md) を参照してください。
 
 ## ドキュメント
 
