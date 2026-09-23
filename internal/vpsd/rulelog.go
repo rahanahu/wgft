@@ -47,7 +47,7 @@ func idList(ids []string) string {
 	}
 	s := "[" + strings.Join(shown, " ") + "]"
 	if more > 0 {
-		s += fmt.Sprintf(" (+%d more)", more)
+		s += fmt.Sprintf(" and %d more", more)
 	}
 	return s
 }

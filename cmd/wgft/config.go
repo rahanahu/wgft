@@ -221,7 +221,7 @@ func (c *config) print(w interface{ Write([]byte) (int, error) }) {
 		if sp.Secret && val != "" {
 			val = "****"
 		}
-		fmt.Fprintf(w, "  %-22s = %-28s (%s)\n", sp.Env, val, r.source)
+		fmt.Fprintf(w, "  %-22s = %-28s from %s\n", sp.Env, val, r.source)
 	}
 }
 

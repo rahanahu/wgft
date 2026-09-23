@@ -100,7 +100,7 @@ func (t *Tunnel) SetPeers(peers []dataplane.Peer) (changes []string, err error) 
 			continue
 		}
 		fmt.Fprintf(&b, "public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32\n", hex.EncodeToString(k[:]), addr)
-		changes = append(changes, fmt.Sprintf("add peer %s (%s)", k, addr))
+		changes = append(changes, fmt.Sprintf("add peer %s at %s", k, addr))
 	}
 	if b.Len() == 0 {
 		return nil, nil

@@ -109,11 +109,11 @@ func Register(ctx context.Context, j *Join, name string) (permanentToken, addres
 	// (design.md 11b 節).
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		return "", "", "", startup.Conflict("WGFT_JOIN", "%v. Issue a new join string on the VPS (wgft agent join-string) and replace WGFT_JOIN", ErrRegisterRejected)
+		return "", "", "", startup.Conflict("WGFT_JOIN", "%v. Issue a new join string on the VPS with wgft agent join-string, and replace WGFT_JOIN", ErrRegisterRejected)
 	case resp.StatusCode == http.StatusBadRequest:
 		return "", "", "", startup.Config("WGFT_NAME", "the registration API rejected the request: HTTP 400, %s; an agent name may hold only lowercase letters, digits and hyphens, at most 32 of them, and may not begin or end with a hyphen", bytes.TrimSpace(data))
 	case resp.StatusCode == http.StatusConflict:
-		return "", "", "", startup.Conflict("WGFT_JOIN", "an agent is already registered under the name this join string carries: HTTP 409, %s; revoke it on the VPS (wgft agent revoke <name>) or issue a join string for another name", bytes.TrimSpace(data))
+		return "", "", "", startup.Conflict("WGFT_JOIN", "an agent is already registered under the name this join string carries: HTTP 409, %s; revoke it on the VPS with wgft agent revoke <name>, or issue a join string for another name", bytes.TrimSpace(data))
 	case resp.StatusCode != http.StatusOK:
 		return "", "", "", fmt.Errorf("registration API: HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(data))
 	}

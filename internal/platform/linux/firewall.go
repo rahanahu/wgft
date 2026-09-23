@@ -383,7 +383,7 @@ func (r *Report) collectDNAT(c *nftables.Conn, ch *nftables.Chain, rules []*nfta
 			}
 			r.Findings = append(r.Findings, Finding{
 				Where:   d.Where,
-				Problem: fmt.Sprintf("has a DNAT rule (%s) whose port match could not be read; wgft cannot tell whether it overlaps a wgft rule's port, so check by hand", proto),
+				Problem: fmt.Sprintf("has a DNAT rule, %s, whose port match could not be read; wgft cannot tell whether it overlaps a wgft rule's port, so check by hand", proto),
 			})
 		}
 	}

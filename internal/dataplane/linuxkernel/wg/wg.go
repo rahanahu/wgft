@@ -138,7 +138,7 @@ func Ensure(cfg Config) (changes []string, err error) {
 				// LinkAdd 自体が自動ロードを試した後なので、再起動では現れない。運用者が
 				// モジュールを入れるか別のカーネルで起動するまで同じ結果になるので、
 				// prerequisite の拒否として扱う(仕様 9 節、設計文書 11b 節)。
-				return nil, startup.Prerequisite("wireguard module", "cannot create %s: this kernel has no WireGuard support (the wireguard module is missing or cannot be loaded; `modprobe wireguard` shows why). Kernel mode needs it; on a VPS without it, run the userspace mode instead (WGFT_MODE=userspace)", cfg.Interface)
+				return nil, startup.Prerequisite("wireguard module", "cannot create %s: this kernel has no WireGuard support; the wireguard module is missing or cannot be loaded, and `modprobe wireguard` shows why. Kernel mode needs it; on a VPS without it, run the userspace mode instead by setting WGFT_MODE=userspace", cfg.Interface)
 			}
 			return nil, fmt.Errorf("cannot create %s: %w", cfg.Interface, err)
 		}
@@ -239,7 +239,7 @@ func Ensure(cfg Config) (changes []string, err error) {
 	for _, p := range cfg.Peers {
 		if ips, ok := wantPeers[p.PublicKey]; ok {
 			wc.Peers = append(wc.Peers, wgtypes.PeerConfig{PublicKey: p.PublicKey, ReplaceAllowedIPs: true, AllowedIPs: ips})
-			note("add peer %s (%s)", p.PublicKey, p.Address)
+			note("add peer %s at %s", p.PublicKey, p.Address)
 		}
 	}
 	if wc.PrivateKey != nil || wc.ListenPort != nil || len(wc.Peers) > 0 {

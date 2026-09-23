@@ -149,5 +149,5 @@ func RotateKey(path string) (string, error) {
 	if err := f.Save(path); err != nil {
 		return "", err
 	}
-	return "agent stopped: cleared the key and last_state in the credentials file (agent.json); the next start regenerates the key and receives full state over the stream", nil
+	return "agent stopped: cleared the key and last_state in the credentials file, agent.json; the next start regenerates the key and receives full state over the stream", nil
 }

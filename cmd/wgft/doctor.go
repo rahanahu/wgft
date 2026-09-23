@@ -333,7 +333,7 @@ func doctorExit(rep doctorReport) error {
 // buildReport は検査一式と、ルールごとの要約と、試していない範囲を組み立てる。
 func buildReport(rules []proto.Rule, in doctorInput) doctorReport {
 	rep := doctorReport{CheckedAt: in.Now.UTC().Format(time.RFC3339), Probed: in.Probed, Status: statusOK}
-	rep.History = historyReport{Detail: "this command only evaluates the current state. To find when a rule stopped working, read the server log (journalctl -u wgft) and the agent's log."}
+	rep.History = historyReport{Detail: "this command only evaluates the current state. To find when a rule stopped working, read the server log via journalctl -u wgft, and the agent's log."}
 	for _, r := range rules {
 		checks := diagnose(r, in)
 		rr := ruleReport{

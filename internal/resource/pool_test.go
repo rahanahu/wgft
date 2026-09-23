@@ -566,7 +566,7 @@ func TestRefusalMessages(t *testing.T) {
 		t.Fatal("the first flow must pass")
 	}
 	ref, _ := l.Acquire()
-	if got, want := ref.String(), "flow budget full (1 of 1 in use in this process)"; got != want {
+	if got, want := ref.String(), "flow budget full: 1 of 1 in use in this process"; got != want {
 		t.Errorf("budget message = %q, want %q", got, want)
 	}
 
@@ -588,7 +588,7 @@ func TestRefusalMessages(t *testing.T) {
 	acquireN(b, 4)
 	_ = c
 	ref3, _ := a.Acquire()
-	want3 := "rule r1 holds 4 flows, above its reserve of 2, and the free part of the budget (2 of 10) is reserved for 2 other rules"
+	want3 := "rule r1 holds 4 flows, above its reserve of 2, and the free part of the budget, 2 of 10, is reserved for 2 other rules"
 	if got := ref3.String(); got != want3 {
 		t.Errorf("reserve message = %q, want %q", got, want3)
 	}

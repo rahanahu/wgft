@@ -374,7 +374,7 @@ func negotiateVersion(m proto.Message) (sel proto.Negotiated, ok bool, malformed
 	}
 	remote := proto.ProtocolRange{Min: *m.ProtocolMin, Max: *m.ProtocolMax}
 	if !remote.Valid() {
-		reason = fmt.Sprintf("malformed protocol advertisement: invalid range [%d,%d] (protocol_min must be at least 1 and at most protocol_max)",
+		reason = fmt.Sprintf("malformed protocol advertisement: invalid range [%d,%d]; protocol_min must be at least 1 and at most protocol_max",
 			remote.Min, remote.Max)
 		return proto.Negotiated{}, false, true, reason
 	}

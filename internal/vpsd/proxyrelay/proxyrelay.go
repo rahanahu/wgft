@@ -238,7 +238,7 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 		keep, ok := retiring[l.ruleID()]
 		if !ok {
 			l.close()
-			m.opts.Logf("proxy: closed retiring relay for %d (rule %s is no longer retiring)", l.port(), l.ruleID())
+			m.opts.Logf("proxy: closed retiring relay for %d: rule %s is no longer retiring", l.port(), l.ruleID())
 			continue
 		}
 		if l.retire(keep); l.idle() {
@@ -255,7 +255,7 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 				l.stopAccepting()
 				n := l.retire(keep)
 				m.retiring = append(m.retiring, l)
-				m.opts.Logf("proxy: relay for %d stopped accepting (rule %s is not active); closed %d connections its new declaration refuses", port, l.ruleID(), n)
+				m.opts.Logf("proxy: relay for %d stopped accepting: rule %s is not active; closed %d connections its new declaration refuses", port, l.ruleID(), n)
 				continue
 			}
 			l.close()
@@ -295,7 +295,7 @@ func (p *Prepared) Rollback() {
 	p.done = true
 	for port, ln := range p.opened {
 		ln.Close()
-		p.m.opts.Logf("proxy: released listener for %d (dataplane apply failed)", port)
+		p.m.opts.Logf("proxy: released listener for %d: dataplane apply failed", port)
 	}
 }
 

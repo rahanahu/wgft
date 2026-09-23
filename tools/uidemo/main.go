@@ -27,7 +27,7 @@ import (
 const listenAddr = "127.0.0.1:8687"
 
 func main() {
-	mode := flag.String("mode", "kernel", "forwarding mode to show in the sample ServerInfo (kernel or userspace)")
+	mode := flag.String("mode", "kernel", "forwarding mode to show in the sample ServerInfo; kernel or userspace")
 	flag.Parse()
 	if *mode != "kernel" && *mode != "userspace" {
 		log.Fatalf("uidemo: -mode must be kernel or userspace, got %q", *mode)

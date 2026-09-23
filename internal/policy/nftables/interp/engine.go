@@ -91,7 +91,7 @@ func (e *engine) Handle(at time.Duration, ev admissiontest.Event) (string, error
 	}
 	if rule != ev.Rule {
 		// 別のルールの行が落とした。want と一致しない形で返し、食い違いとして報告させる
-		return fmt.Sprintf("%s (row of rule %s)", admissiontest.DropOf(kind), rule), nil
+		return fmt.Sprintf("%s: row of rule %s", admissiontest.DropOf(kind), rule), nil
 	}
 	return admissiontest.DropOf(kind), nil
 }

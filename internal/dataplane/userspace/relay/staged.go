@@ -217,7 +217,7 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 			l.closeF()
 			l.budget.Close()
 			delete(m.retiring, k)
-			m.opts.Logf("listener %s closed (rule %s is no longer retiring)", k, l.ruleID)
+			m.opts.Logf("listener %s closed: rule %s is no longer retiring", k, l.ruleID)
 			continue
 		}
 		l.sweep(func(src netip.Addr) bool { return keep(src) })
@@ -225,7 +225,7 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 			l.closeF()
 			l.budget.Close()
 			delete(m.retiring, k)
-			m.opts.Logf("listener %s closed (no established flows left)", k)
+			m.opts.Logf("listener %s closed: no established flows left", k)
 		}
 	}
 }
@@ -251,7 +251,7 @@ func (m *Manager) retireLocked(k Key, l *listener, keep func(src netip.Addr) boo
 		n = l.sweep(keep)
 	}
 	m.retiring[k] = l
-	m.opts.Logf("listener %s stopped accepting (rule %s is not active); closed %d flows its new declaration refuses", k, l.ruleID, n)
+	m.opts.Logf("listener %s stopped accepting: rule %s is not active; closed %d flows its new declaration refuses", k, l.ruleID, n)
 }
 
 // Rollback は Prepare で bind したソケットを閉じる。既存の待ち受けには触らない。
@@ -262,7 +262,7 @@ func (s *Staged) Rollback() {
 	s.done = true
 	for k, sock := range s.opened {
 		sock.close()
-		s.m.opts.Logf("listener %s released (data plane apply failed)", k)
+		s.m.opts.Logf("listener %s released: data plane apply failed", k)
 	}
 }
 

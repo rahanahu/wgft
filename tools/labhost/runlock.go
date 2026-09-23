@@ -99,5 +99,5 @@ func holderSuffix(path string) string {
 	if err != nil || !strings.Contains(string(comm), "labhost") {
 		return ""
 	}
-	return fmt.Sprintf(" (held by pid %d)", pid)
+	return fmt.Sprintf(", held by pid %d", pid)
 }

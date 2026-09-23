@@ -90,7 +90,7 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 			// 仮定していることを出力に出す。黙って仮定すると、--adopt-existing(鍵の一致を
 			// 見ずに削除する)と組み合わさったとき、実際とは無関係な同名のインタフェースを
 			// 消しかねない(design.md 10.3・10.5 節)。
-			fmt.Fprintf(out, "warning: no recorded wg interface name in the server database (%v); assuming the default %s; if the server used a different --wg-interface, this teardown will not find it, and --adopt-existing could delete an unrelated interface named %s\n", e, iface, iface)
+			fmt.Fprintf(out, "warning: no recorded wg interface name in the server database: %v; assuming the default %s; if the server used a different --wg-interface, this teardown will not find it, and --adopt-existing could delete an unrelated interface named %s\n", e, iface, iface)
 		}
 		if b, e := st.GetMeta(serverKeyMeta); e == nil && len(b) == wgtypes.KeyLen {
 			serverKey, _ = wgtypes.NewKey(b)
@@ -122,7 +122,7 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 	}
 
 	if userspace {
-		fmt.Fprint(out, "userspace mode: nothing to remove in the kernel (no nftables table, no wg interface)")
+		fmt.Fprint(out, "userspace mode: nothing to remove in the kernel; no nftables table, no wg interface")
 	} else {
 		fmt.Fprintf(out, "removing: table inet wgft / wg %s / conntrack entries created by wgft", iface)
 	}
@@ -153,7 +153,7 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 
 	// 2. conntrack 収束(ルール 0 件で、wgft 由来の DNAT 済みエントリを消す。帯は記録した wg_address)
 	if n, err := ctconv.Converge(nil, wgNet); err != nil {
-		fmt.Fprintf(out, "warning: conntrack converge failed (%v)\n", err)
+		fmt.Fprintf(out, "warning: conntrack converge failed: %v\n", err)
 	} else {
 		fmt.Fprintf(out, "deleted %d conntrack entries created by wgft\n", n)
 	}
@@ -184,7 +184,7 @@ func purgeState(opts TeardownOptions, out io.Writer) {
 		if err := os.Remove(p); err == nil {
 			fmt.Fprintf(out, "deleted %s\n", p)
 		} else if !os.IsNotExist(err) {
-			fmt.Fprintf(out, "warning: cannot delete %s (%v)\n", p, err)
+			fmt.Fprintf(out, "warning: cannot delete %s: %v\n", p, err)
 		}
 	}
 }
@@ -211,7 +211,7 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 	}
 
 	if userspace {
-		list = append(list, "delete by hand the unit or container that ran the server, its env, the binary, and the data directory (remains unless --purge)")
+		list = append(list, "delete by hand the unit or container that ran the server, its env, the binary, and the data directory; it remains unless --purge")
 		return list
 	}
 
@@ -226,7 +226,7 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 	list = append(list, "if you added lines to other tables as server check suggested, e.g. `oifname \""+iface+"\" ...` for DOCKER-USER or FORWARD, restore them by hand; check their location with `nft list ruleset | grep "+iface+"`")
 
 	// wgft が置いたものではないファイル
-	list = append(list, "delete by hand the systemd unit and env (/etc/systemd/system/wgft.service, /etc/wgft/), the binary (/usr/local/bin/wgft), and the state directory (/var/lib/wgft, remains unless --purge)")
+	list = append(list, "delete by hand the systemd unit and env: /etc/systemd/system/wgft.service, /etc/wgft/; the binary: /usr/local/bin/wgft; and the state directory: /var/lib/wgft, which remains unless --purge")
 
 	return list
 }

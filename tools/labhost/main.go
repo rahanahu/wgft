@@ -75,9 +75,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: labhost <command> [flags]
 
   run [flags] "<script> <args...>"...  run scenarios in disposable sandboxes
-  run [flags] all                      run every job of `+manifestPath+` (parallel pool, then the
-                                       exclusive jobs one at a time)
-  gc [flags]                           remove leftovers of dead runs (namespaces, processes, workdirs)
+  run [flags] all                      run every job of `+manifestPath+`: parallel pool, then the
+                                       exclusive jobs one at a time
+  gc [flags]                           remove leftovers of dead runs: namespaces, processes, workdirs
   list                                 list the sandboxes that exist now
   create [-id ID]                      create one sandbox and print its environment
   destroy <ID>                         destroy one sandbox
@@ -86,11 +86,11 @@ run flags: -parallel N -repeat R -timeout DUR -keep-failed -no-gc -out DIR -pref
            -repo DIR -manifest FILE -with-optional -run-lock PATH -wait DUR
 gc flags:  -prefix P -root DIR -keep-workdirs -run-lock PATH -wait DUR
 
-One run per Lab Host VM: run and gc take a lock (`+defaultRunLock+`.lock by default) and refuse at
+One run per Lab Host VM: run and gc take a lock, `+defaultRunLock+`.lock by default, and refuse at
 once if another run holds it; -wait DUR queues instead. create and destroy act on the one sandbox
 you name and do not take the lock, so do not point them at a sandbox a run owns.
-A run exits non-zero if any job failed, if it was interrupted, or if anything was left behind
-(namespace, process, workdir or link): cleaning up is the harness's own job.
+A run exits non-zero if any job failed, if it was interrupted, or if anything, a namespace, process,
+workdir or link, was left behind: cleaning up is the harness's own job.
 `)
 }
 
@@ -162,11 +162,11 @@ func cmdRun(args []string) error {
 	timeout := fs.Duration("timeout", 10*time.Minute, "wall-clock limit for one scenario")
 	keepFailed := fs.Bool("keep-failed", false, "keep the workdir of a failed run")
 	noGC := fs.Bool("no-gc", false, "do not collect leftovers of dead runs before starting")
-	out := fs.String("out", "", "directory for the summary and the logs (default <root>/run-<timestamp>)")
+	out := fs.String("out", "", "directory for the summary and the logs; default <root>/run-<timestamp>")
 	prefix := fs.String("prefix", defaultPrefix, "namespace name prefix")
 	root := fs.String("root", defaultRoot, "directory holding the sandbox workdirs")
 	repo := fs.String("repo", defaultRepo, "repository root inside the VM")
-	manifest := fs.String("manifest", "", "manifest for `run all` (default <repo>/"+manifestPath+")")
+	manifest := fs.String("manifest", "", "manifest for `run all`; default <repo>/"+manifestPath)
 	runLockPath := fs.String("run-lock", defaultRunLock, "base path of the Lab Host lock that keeps one run per VM")
 	wait := fs.Duration("wait", 0, "wait this long for the Lab Host lock instead of refusing at once")
 	withOptional := fs.Bool("with-optional", false, "also run the manifest's default=no jobs")
@@ -175,7 +175,7 @@ func cmdRun(args []string) error {
 	}
 	scenarios := fs.Args()
 	if len(scenarios) == 0 {
-		return fmt.Errorf("no scenario given (e.g. \"e2e.sh kernel\", or \"all\" for the manifest)")
+		return fmt.Errorf("no scenario given; e.g. \"e2e.sh kernel\", or \"all\" for the manifest")
 	}
 	if err := validateRunCounts(*parallel, *repeat); err != nil {
 		return err
@@ -310,7 +310,7 @@ func cmdRun(args []string) error {
 		}
 	}
 	sum.ParallelJobs, sum.ExclusiveJobs = len(parallelPlan), len(exclusivePlan)
-	fmt.Printf("plan: %d parallel jobs (pool of %d), %d exclusive jobs (one at a time)\n",
+	fmt.Printf("plan: %d parallel jobs, pool of %d; %d exclusive jobs, one at a time\n",
 		len(parallelPlan), *parallel, len(exclusivePlan))
 
 	results := make(chan jobResult, len(plan)+1)
@@ -524,14 +524,14 @@ func cmdList(args []string) error {
 		fmt.Printf("%s roles=%s pids=%d workdir=%s\n", id, strings.Join(byID[id], ","), pids, filepath.Join(*root, id))
 	}
 	if len(ids) == 0 {
-		fmt.Println("(no sandbox)")
+		fmt.Println("no sandbox")
 	}
 	return nil
 }
 
 func cmdCreate(args []string) error {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
-	id := fs.String("id", "", "sandbox id (default: random)")
+	id := fs.String("id", "", "sandbox id; default random")
 	prefix := fs.String("prefix", defaultPrefix, "namespace name prefix")
 	root := fs.String("root", defaultRoot, "directory holding the sandbox workdirs")
 	repo := fs.String("repo", defaultRepo, "repository root inside the VM")
@@ -685,7 +685,7 @@ func leftoverFailures(s *summary) []string {
 	// 関係がない。片付けきれなかったこと自体が harness の不具合である
 	for _, r := range s.Results {
 		if len(r.Cleanup.LeftoverNS) > 0 || len(r.Cleanup.LeftoverPid) > 0 || len(r.Cleanup.Errs) > 0 {
-			out = append(out, fmt.Sprintf("job %d (%s, sandbox %s) could not finish its cleanup: namespaces=%v pids=%v errors=%v",
+			out = append(out, fmt.Sprintf("job %d, %s, sandbox %s, could not finish its cleanup: namespaces=%v pids=%v errors=%v",
 				r.Index, r.Scenario, r.SandboxID, r.Cleanup.LeftoverNS, r.Cleanup.LeftoverPid, r.Cleanup.Errs))
 		}
 	}
@@ -719,7 +719,7 @@ func printSummary(s *summary, outDir string) {
 	}
 	fmt.Printf("   leftovers: namespaces=%v workdirs=%v processes=%v links=%v\n", s.LeftoverNS, s.LeftoverWorkdirs, s.LeftoverProcs, s.LeftoverLinks)
 	for _, f := range s.LeftoverFailures {
-		fmt.Printf("   LEFTOVER FAILURE (the harness did not clean up; not a scenario failure): %s\n", f)
+		fmt.Printf("   LEFTOVER FAILURE: the harness did not clean up; not a scenario failure: %s\n", f)
 	}
 	for _, r := range s.Results {
 		if r.Exit != 0 || r.SetupErr != "" || len(r.Cleanup.LeftoverNS) > 0 || len(r.Cleanup.LeftoverPid) > 0 {
