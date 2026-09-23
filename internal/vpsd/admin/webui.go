@@ -180,14 +180,30 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 func health(total, online, rules, warnings, ruleErrors int, locale string) healthView {
 	switch {
 	case ruleErrors > 0 && warnings > 0:
-		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErrWarn"), online, total, rules, ruleErrors, warnings)}
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErrWarn"), summaryArgs(locale, online, total, rules, ruleErrors, warnings)...)}
 	case ruleErrors > 0:
-		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErr"), online, total, rules, ruleErrors)}
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErr"), summaryArgs(locale, online, total, rules, ruleErrors)...)}
 	case warnings > 0:
-		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryWarn"), online, total, rules, warnings)}
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryWarn"), summaryArgs(locale, online, total, rules, warnings)...)}
 	default:
-		return healthView{OK: true, Class: "success", Title: T(locale, "healthOK"), Summary: fmt.Sprintf(T(locale, "summaryOK"), online, total, rules)}
+		return healthView{OK: true, Class: "success", Title: T(locale, "healthOK"), Summary: fmt.Sprintf(T(locale, "summaryOK"), summaryArgs(locale, online, total, rules)...)}
 	}
+}
+
+// summaryArgs は health() の summary* 文言に渡す Sprintf の引数を作る。online と total は
+// そのままの数(オンライン x / y に件数の単数複数は無い)。それ以降の counts は、それぞれの
+// 文言中の %d に対応する件数で、rules、[errors]、[warnings] の順に渡す。en の文言だけが各
+// %d の直後に %s を持つので、それを埋める pluralS(n) の結果は locale が en のときだけ差し込む。
+// ja の文言は %s を持たないので、この関数も ja では差し込まない。
+func summaryArgs(locale string, online, total int, counts ...int) []any {
+	args := []any{online, total}
+	for _, c := range counts {
+		args = append(args, c)
+		if locale == "en" {
+			args = append(args, pluralS(c))
+		}
+	}
+	return args
 }
 
 func agentToView(a AgentInfo, latestGen uint64, locale string) agentView {

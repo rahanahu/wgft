@@ -277,8 +277,14 @@ func TestOverallHealthIncludesRuleErrors(t *testing.T) {
 	srv := newStateTestServer(t)
 
 	body := getBody(t, srv.URL+"/?lang=en")
-	if !strings.Contains(body, "1 errors") {
-		t.Errorf("dashboard health summary missing the rule error count; body did not contain %q", "1 errors")
+	// "1 error" alone is not enough: it is a substring of the wrong plural "1 errors", so a
+	// regression to the plural would still satisfy a plain Contains(body, "1 error") check.
+	// The second assertion, that the wrong plural is absent, is what actually catches it.
+	if !strings.Contains(body, "1 error") {
+		t.Errorf("dashboard health summary missing the rule error count; body did not contain %q", "1 error")
+	}
+	if strings.Contains(body, "1 errors") {
+		t.Errorf("dashboard health summary uses the wrong plural %q for a single error", "1 errors")
 	}
 }
 
@@ -319,8 +325,13 @@ func TestDashboardWarningsLayout(t *testing.T) {
 	if !strings.Contains(body, `class="badge danger warn-jump" href="#warnings"`) {
 		t.Errorf("the header warning count must link to #warnings: %s", body)
 	}
-	if !strings.Contains(body, "1 warnings") {
+	// See TestOverallHealthIncludesRuleErrors for why both a positive and a negative check are
+	// needed: "1 warning" alone would still match the wrong plural "1 warnings".
+	if !strings.Contains(body, "1 warning") {
 		t.Errorf("missing the header warning count: %s", body)
+	}
+	if strings.Contains(body, "1 warnings") {
+		t.Errorf("header warning count uses the wrong plural %q for a single warning", "1 warnings")
 	}
 }
 
@@ -355,8 +366,12 @@ func TestRulesAndHealthAutoRefresh(t *testing.T) {
 	if !strings.Contains(full, healthPartial) {
 		t.Errorf("GET /ui/health must render exactly the fragment the full page embeds inside #health\nfull:\n%s\npartial:\n%s", full, healthPartial)
 	}
-	if !strings.Contains(healthPartial, "1 errors") {
+	// See TestOverallHealthIncludesRuleErrors for why both checks are needed.
+	if !strings.Contains(healthPartial, "1 error") {
 		t.Error("the /ui/health fragment is missing the rule error count")
+	}
+	if strings.Contains(healthPartial, "1 errors") {
+		t.Errorf("the /ui/health fragment uses the wrong plural %q for a single error", "1 errors")
 	}
 }
 

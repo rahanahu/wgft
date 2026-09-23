@@ -4,5 +4,5 @@
   <strong>{{ .Health.Title }}</strong>
   <small>{{ .Health.Summary }}</small>
 </div>
-{{ if .Warnings }}<a class="badge danger warn-jump" href="#warnings">▲ {{ printf (T .Locale "warnLinkFmt") (len .Warnings) }}</a>{{ end }}
+{{ if .Warnings }}<a class="badge danger warn-jump" href="#warnings">▲ {{ if eq (len .Warnings) 1 }}{{ printf (T .Locale "warnLinkFmt1") (len .Warnings) }}{{ else }}{{ printf (T .Locale "warnLinkFmt") (len .Warnings) }}{{ end }}</a>{{ end }}
 {{ end }}

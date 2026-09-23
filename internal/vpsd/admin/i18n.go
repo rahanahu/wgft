@@ -36,12 +36,18 @@ var tr = map[string][2]string{
 	"ipfBywgft":   {"wgft が設定", "set by wgft"},
 	"ipfDefault":  {"既定のまま", "unchanged"},
 	// health
-	"healthOK":       {"すべてのシステムが正常です", "All systems operational"},
-	"healthWarn":     {"警告があります", "Warnings present"},
-	"summaryOK":      {"オンライン %d / %d ・ ルール %d 件", "%d / %d online · %d rules"},
-	"summaryErr":     {"オンライン %d / %d ・ ルール %d 件 ・ エラー %d 件", "%d / %d online · %d rules · %d errors"},
-	"summaryWarn":    {"オンライン %d / %d ・ ルール %d 件 ・ 警告 %d 件", "%d / %d online · %d rules · %d warnings"},
-	"summaryErrWarn": {"オンライン %d / %d ・ ルール %d 件 ・ エラー %d 件 ・ 警告 %d 件", "%d / %d online · %d rules · %d errors · %d warnings"},
+	"healthOK":   {"すべてのシステムが正常です", "All systems operational"},
+	"healthWarn": {"警告があります", "Warnings present"},
+	// summary* の en 側は %d の直後に %s を置く。健康度の要約は 1 つの文に複数の件数
+	// (rule、error、warning)を持ち、鍵を組み合わせの数だけ分けると爆発するので、代わりに
+	// 呼び出し側(webui.go の health/summaryArgs)が各 %d の直後に pluralS(n) の結果
+	// ("" か "s")を渡し、件数 1 のときの単数形を作る。ja 側は「件」が数によらず
+	// 変わらないので %s を持たない。rules.gohtml の groupErrN1/groupErrN のように鍵を
+	// 分けて選ぶ形は、数が複数ある組み合わせでは鍵の数が増えすぎるため使わない
+	"summaryOK":      {"オンライン %d / %d ・ ルール %d 件", "%d / %d online · %d rule%s"},
+	"summaryErr":     {"オンライン %d / %d ・ ルール %d 件 ・ エラー %d 件", "%d / %d online · %d rule%s · %d error%s"},
+	"summaryWarn":    {"オンライン %d / %d ・ ルール %d 件 ・ 警告 %d 件", "%d / %d online · %d rule%s · %d warning%s"},
+	"summaryErrWarn": {"オンライン %d / %d ・ ルール %d 件 ・ エラー %d 件 ・ 警告 %d 件", "%d / %d online · %d rule%s · %d error%s · %d warning%s"},
 	// agents table
 	"agents":          {"エージェント", "Agents"},
 	"colName":         {"名前", "Name"},
@@ -106,6 +112,7 @@ var tr = map[string][2]string{
 	// warnings
 	"warningsHead":      {"警告", "Warnings"},
 	"warnLinkFmt":       {"警告 %d 件", "%d warnings"},
+	"warnLinkFmt1":      {"警告 %d 件", "%d warning"},
 	"noWarnings":        {"異常なし", "No issues"},
 	"dismiss":           {"警告を消す", "Dismiss"},
 	"revokeAgent":       {"エージェントを無効化", "Revoke agent"},
@@ -266,6 +273,18 @@ func T(locale, key string) string {
 		return v[1]
 	}
 	return v[0]
+}
+
+// pluralS returns the English plural suffix "s" unless n is exactly 1. It mirrors
+// cmd/wgft/status.go's pluralS, which plays the same role for the CLI's output; that copy
+// stays where it is since this package must not import cmd/wgft, and the two call sites build
+// their sentences differently enough (Go string concatenation there, tr-map templates here)
+// that sharing one helper package for a two-line function was not worth the added indirection.
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // resolveLocale は言語を決める。?lang= があればそれを採用してクッキーに残す。
