@@ -185,7 +185,8 @@ func TestRefusalWordingFollowsTheCommand(t *testing.T) {
 		want string
 		// serverSide は、Linux 以外のビルドでは差し替えになる `server` の一群である
 		// (cmd/wgft/server_other.go)。設定を読む手前で Linux 専用である旨を答えるので、
-		// 拒否の文面そのものがこのビルドには無い。
+		// 拒否の理由は設定の誤りにならない。書き出しと終了コードの規則は同じなので、
+		// 理由だけを別に確かめる。差し替えそのものは TestLinuxOnlyServerGroupRefuses が見る。
 		serverSide bool
 	}{
 		{"server run starts a daemon", []string{"server", "run", "--config", bad, "--data-dir", dir}, startupWording, true},
@@ -206,15 +207,12 @@ func TestRefusalWordingFollowsTheCommand(t *testing.T) {
 				t.Fatal("a dotenv that is not in KEY=value form must be refused")
 			}
 			if tc.serverSide && runtime.GOOS != "linux" {
-				// 差し替えの側も確かめる。この一群は設定を読まないので拒否にはならず、
-				// 再試行で直りうる失敗と同じ終了コード 1 で終わる(設計文書 11b 節)。
+				// 差し替えの側も確かめる。この一群は設定を読まないので理由は設定の誤りに
+				// ならないが、Linux でないことも再試行では消えないので拒否であり、書き出しの
+				// 分かれ方と終了コード 3 は同じである(設計文書 11b 節)。下の共通の検査へ進む。
 				if !strings.Contains(err.Error(), "the server runs on Linux only") {
 					t.Errorf("message = %q, want the Linux-only answer this build gives", err.Error())
 				}
-				if got := exitCode(err); got != 1 {
-					t.Errorf("exitCode = %d, want 1", got)
-				}
-				return
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("message = %q, want it to contain %q", err.Error(), tc.want)
