@@ -112,6 +112,9 @@ const (
 	agentReasonPermissionNotDetermined = "permission_not_determined"
 	// agentReasonInterfacesUnreadable は、このホストのインタフェースを読めなかった場合である。
 	agentReasonInterfacesUnreadable = "interfaces_unreadable"
+	// agentReasonConfigUnreadable は、設定ファイルがあるのに権限で読めない場合である。診断は
+	// 続けるが、そのファイルが決める値に依る所見は示せない(10.2c 節)。
+	agentReasonConfigUnreadable = "config_unreadable"
 )
 
 // agentCheckOrder は 10.2c 節の表の並びである。人向けの出力はこの順に、群ごとにまとめて出す。
@@ -181,6 +184,16 @@ type agentDoctorInput struct {
 	MemoryLimitEnv string
 	// User は実行している利用者を表す文である。
 	User string
+	// ConfigPath は設定ファイルの場所である。
+	ConfigPath string
+	// ConfigUnreadable は、設定ファイルがあるのに権限で読めなかった誤りである。読めた場合と
+	// ファイルが無い場合は nil である。ファイルが無い配置は正しいので、誤りとして扱わない。
+	ConfigUnreadable error
+	// DataDirAssumed は、設定ファイルを読めなかったためにデータディレクトリを既定値から取った
+	// ことである。フラグと環境変数の値は設定ファイルより優先するので、そちらから取れた実行では
+	// 偽である。真の実行では、読めなかったファイルが別のディレクトリを指している場合があり、
+	// 報告が別の場所について述べていることになる。
+	DataDirAssumed bool
 
 	// Inspect はロックファイルの状態を読む。既定は flock.Inspect で、ロックファイルを作らない。
 	Inspect func(statePath string) (flock.State, error)
@@ -256,12 +269,28 @@ func newAgentDoctorCmd() *cobra.Command {
 
 // agentDoctorInputFrom は、設定から証拠の出どころを決める。認証情報ファイルの場所は rotate-key
 // と同じ経路、つまり WGFT_DATA_DIR、--data-dir、agent.env で決める(10.2c 節)。
+//
+// 設定ファイルを権限で読めないことは、報告を拒む理由ではなく診断の結果である(10.2c 節の層 2)。
+// 読めない実行では、フラグと環境変数と既定から設定を解決して診断を続け、読めなかったことを
+// host.privileges と host.platform の所見にする。`agent run` の側は同じ場合に起動を拒む。設定を
+// 読めないまま転送を始める常駐プロセスは、宣言された設定で動いていないためである。
 func agentDoctorInputFrom(cmd *cobra.Command) (agentDoctorInput, error) {
 	configPath := resolveConfigPath(cmd, agentConfigPath)
-	c, err := loadConfig(cmd, agentSpecs(), configPath)
-	if err != nil {
-		return agentDoctorInput{}, withUnreadableHint(err, configPath, agentUnreadableHint)
+	file, cfgErr := parseDotenv(configPath)
+	if cfgErr != nil && !errors.Is(cfgErr, fs.ErrPermission) {
+		// 構文の誤りは設定の値そのものの誤りであり、権限で証拠に届かない場合ではない。他の
+		// コマンドと同じく設定の拒否として終了コード 3 で止まる(11a、11b 節)。
+		return agentDoctorInput{}, cfgErr
 	}
+	if cfgErr != nil {
+		// 拒否の文面はこの診断の所見には長すぎる。errors.Is で見分けた後は、包まれている
+		// もとの誤りだけを持つ。
+		if u := errors.Unwrap(cfgErr); u != nil {
+			cfgErr = u
+		}
+		file = map[string]string{}
+	}
+	c := resolveConfig(cmd, agentSpecs(), configPath, file)
 	dir := strings.TrimSpace(c.str("WGFT_DATA_DIR"))
 	if dir == "" {
 		return agentDoctorInput{}, configErrorf("WGFT_DATA_DIR", "is empty; give the directory that holds agent.json")
@@ -271,14 +300,17 @@ func agentDoctorInputFrom(cmd *cobra.Command) (agentDoctorInput, error) {
 		return agentDoctorInput{}, err
 	}
 	return agentDoctorInput{
-		Now:             time.Now(),
-		DataDir:         dir,
-		CredentialsPath: joinPath(dir, "agent.json"),
-		Version:         effectiveVersion(),
-		Platform:        runtime.GOOS + "/" + runtime.GOARCH,
-		Limits:          limits,
-		MemoryLimitEnv:  os.Getenv("GOMEMLIMIT"),
-		User:            runningUserText(),
+		Now:              time.Now(),
+		DataDir:          dir,
+		CredentialsPath:  joinPath(dir, "agent.json"),
+		Version:          effectiveVersion(),
+		Platform:         runtime.GOOS + "/" + runtime.GOARCH,
+		Limits:           limits,
+		MemoryLimitEnv:   os.Getenv("GOMEMLIMIT"),
+		User:             runningUserText(),
+		ConfigPath:       configPath,
+		ConfigUnreadable: cfgErr,
+		DataDirAssumed:   cfgErr != nil && c.source("WGFT_DATA_DIR") == "default",
 	}, nil
 }
 
@@ -438,6 +470,17 @@ func agentPlatformCheck(in agentDoctorInput) agentDoctorCheck {
 		c.Detail = head + "; the memory soft limit comes from GOMEMLIMIT=" + v + " in this command's environment, not from the flow caps"
 		return c
 	}
+	if in.ConfigUnreadable != nil {
+		// 予測が当たるのは、エージェントが読むのと同じ設定を同じ経路で読めた場合だけである
+		// (10.2c 節の「示す値の定め方」)。設定ファイルを読めない実行で既定値から計算した数を
+		// 示すと、上限を絞った配置では事実でない数を述べることになる。数を出さずに、出せない
+		// 理由を述べる。
+		c.Status, c.Reason = statusUnknown, agentReasonConfigUnreadable
+		c.Detail = head + "; the memory soft limit is not predicted here: it follows the flow caps, and " + in.ConfigPath +
+			", which sets them for the agent, could not be read"
+		c.Next = agentSamePrincipalNext
+		return c
+	}
 	c.Detail = fmt.Sprintf("%s; the memory soft limit would be %d MiB, computed here from the flow caps %d UDP and %d TCP, not read from the running agent",
 		head, in.Limits.MemoryLimit()>>20, in.Limits.WithDefaults().UDPTotal, in.Limits.WithDefaults().TCPTotal)
 	return c
@@ -497,6 +540,19 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 			undetermined = append(undetermined, "whether agent.json can be read: "+errText(rerr))
 		}
 	}
+	// 設定ファイルを読める権限も、エージェント自身が要る権限である。エージェントは起動のたびに
+	// 同じファイルを読み、読めなければ起動を拒む。無いファイルは正しい配置なので見ない。読めな
+	// かった実行だけを、他の対象と同じ層 2 の失敗として並べる(10.2c 節)。
+	configDenied := in.ConfigUnreadable != nil
+	// sawConfigFile は、ファイル自身の持ち主とパーミッションを読めたかどうかである。読めなかった
+	// 実行では、拒んでいるのは上の階層のディレクトリであり、ファイル自身については何も分からない。
+	sawConfigFile := false
+	if configDenied {
+		var facts string
+		facts, sawConfigFile = configFilePermFacts(in.ConfigPath)
+		denied = append(denied, "the config file "+in.ConfigPath+" cannot be read: "+trimSentenceEnd(errText(in.ConfigUnreadable))+
+			"; "+facts+". Its settings were taken from this command's flags, environment and the defaults instead")
+	}
 
 	// 所見には、満たした対象も満たさなかった対象も並べる。どこまで読めてどこから権限で読めな
 	// かったかを示すほうが、運用者は直せる(10.2c 節)。失敗した対象だけを出すと、読めた対象が
@@ -511,6 +567,16 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 		// ならず、層 2 として 2 になる。状態の語と終了コードは別のものとして扱う(10.2c 節)。
 		c.Status, c.Reason, c.evidenceUnreachable = statusFailed, agentReasonPermissionDenied, true
 		c.Next = agentSamePrincipalNext
+		switch {
+		case configDenied && sawConfigFile:
+			// エージェントを動かす利用者で実行し直しても読めない配置がある。その場合に残る
+			// 原因はファイル自身の持ち主とパーミッションなので、見比べる先を示す。
+			c.Next += ". If this is already that user, then the file's own owner, group and mode refuse it, and the detail above names both sides"
+		case configDenied:
+			// ファイル自身は読めていないので、その持ち主とパーミッションを名指ししない。拒んで
+			// いるのは上の階層のディレクトリであり、運用者が見るのもそちらである。
+			c.Next += ". If this is already that user, then the refusal is on a directory on the way to the config file rather than on the file itself; read the permissions of each directory in its path"
+		}
 	case len(undetermined) > 0:
 		c.Status, c.Reason = statusUnknown, agentReasonPermissionNotDetermined
 		c.Next = "if the agent cannot start, read its log for the first write it fails; this command does not answer it"
@@ -518,6 +584,18 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 		c.Status = statusOK
 	}
 	return c
+}
+
+// agentAssumedDataDirNote は、データディレクトリを既定値から取った実行に添える句である。設定
+// ファイルを読めなかった実行では、そのファイルが別のディレクトリを指している場合があり、この
+// 報告は別の場所について述べていることになる。断定する所見にだけ添える。エージェントが登録され
+// ているかどうかと稼働しているかどうかは、どのデータディレクトリを見たかで答えが変わる。
+func agentAssumedDataDirNote(in agentDoctorInput) string {
+	if !in.DataDirAssumed {
+		return ""
+	}
+	return "this answers for " + in.DataDir + ", the default, because " + in.ConfigPath +
+		" could not be read here and may name another data directory"
 }
 
 // agentSamePrincipalNext は、層 2 に当たる実行に添える次の手である。root での実行し直しは案内
@@ -580,6 +658,11 @@ func agentCredentialsCheck(in agentDoctorInput, cred agentCredentialsFile) agent
 	case credMissing:
 		c.Status, c.Reason = statusFailed, agentReasonCredentialsMissing
 		c.Detail = "there is no credentials file at " + in.CredentialsPath + ", so this host has never registered as an agent"
+		// 登録したことがないという断定は、見たディレクトリについてのものである。設定ファイルを
+		// 読めずに既定値を使った実行では、登録済みのホストについて偽になりうる。
+		if note := agentAssumedDataDirNote(in); note != "" {
+			c.Detail += "; " + note
+		}
 		c.Next = "issue a join string on the VPS with wgft agent join-string --name <agent>, then start the agent with WGFT_JOIN set to it"
 		return c
 	case credUnreadable:
@@ -630,7 +713,8 @@ func credentialsModeNote(cred agentCredentialsFile) string {
 	if runtime.GOOS == "windows" {
 		return ""
 	}
-	note := fmt.Sprintf("mode %#o", cred.Mode)
+	// パーミッションは常に 4 桁で書く。設定ファイルの所見と揃える。
+	note := fmt.Sprintf("mode %#04o", cred.Mode)
 	if cred.Mode&0o077 != 0 {
 		note += ", which lets other local users read the permanent token; tighten it with chmod 0600"
 	}
@@ -668,6 +752,11 @@ func agentProcessCheck(in agentDoctorInput, run agentRunState) agentDoctorCheck 
 	default:
 		c.Status, c.Reason = statusFailed, agentReasonNotRunning
 		c.Detail = "no agent is running for this data directory: the lock file at " + flock.LockPath(in.CredentialsPath) + " is there, but no process holds it"
+	}
+	// 止まっているという断定も、見たディレクトリについてのものである。設定ファイルを読めずに
+	// 既定値を使った実行では、別のディレクトリで動いているエージェントについて偽になりうる。
+	if note := agentAssumedDataDirNote(in); note != "" {
+		c.Detail += "; " + note
 	}
 	c.Next = "start it and read why it stopped: systemctl status wgft-agent and journalctl -u wgft-agent, or docker ps and docker logs for a container. " +
 		"This answers for " + in.DataDir + " alone; an agent running with another WGFT_DATA_DIR is not visible here"
@@ -787,11 +876,21 @@ func agentLiveOnlyChecks(run agentRunState) []agentDoctorCheck {
 // 原理的に読めるので、証拠になりうるものはあるが判定には使えないという UNKNOWN の定義に当たる。
 // agent.env と CLI 自身の環境変数から組み立てて次の起動で効く値として示す案は採らない。組み立てた
 // 値を次に起動するエージェントが実際に読むとは保証できないためである。
+//
+// 稼働を判定できない実行にも同じ UNKNOWN を当てるが、所見は分ける。同じ報告の agent.process が
+// 判定できなかったと述べている横で、この検査だけが止まっていると断定すると、動いているエージェント
+// について事実でないことを述べる。
 func agentAllowTargetsState(c *agentDoctorCheck, run agentRunState) {
 	if run.running() {
 		return
 	}
 	c.Status = statusUnknown
+	if run.undetermined() {
+		c.Detail = "the allowlist this agent enforces is the one its running process holds, and whether a process holds it now could not be determined"
+		c.Next = "settle whether an agent is running first: the process check above says why that could not be read here. " +
+			"Once it is settled, the value shown for a running agent is the one it actually enforces, not one rebuilt from the environment"
+		return
+	}
 	c.Detail = "the allowlist this agent enforces is the one its running process holds, and no process holds it now"
 	c.Next = "start the agent and re-run this command; the value shown then is the one it actually enforces, not one rebuilt from the environment"
 }

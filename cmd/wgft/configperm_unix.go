@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 )
 
 // warnInsecureConfigFile は、path に secret な spec の値が実際にファイルから読まれていて、かつ
@@ -29,6 +30,29 @@ func warnInsecureConfigFile(w io.Writer, path string, c *config) {
 	if info.Mode().Perm()&0o007 != 0 {
 		fmt.Fprintf(w, "warning: %s is readable by other users on this host and holds a secret value, WGFT_JOIN; recommended mode is 0600, or 0640 owned by root and a dedicated group; see docs/design.md 11a\n", path)
 	}
+}
+
+// configFilePermFacts は、設定ファイルを読めなかったときに、原因を見分けるための事実を 1 句で
+// 返す。読んだプロセスの実効 uid と gid、ファイルの持ち主とパーミッションを並べる。権限を決める
+// のは実効 uid と gid なので、実 uid と実 gid は使わない。どちらの側に原因があるかは述べない。
+// ファイル自身のパーミッションが読み手を拒んでいるのか、読み手がエージェントと違う利用者なのかは、
+// この 2 つを見比べれば運用者が判断できる。
+//
+// 第 2 の返り値は、ファイル自身の持ち主とパーミッションを読めたかどうかである。読めなかった場合は
+// 上の階層のディレクトリが通り抜けを拒んでいる場合であり、ファイル自身のパーミッションについては
+// 何も分からない。呼び出し側は、この値を見てからファイル自身を名指しする文を添える。
+func configFilePermFacts(path string) (string, bool) {
+	who := fmt.Sprintf("this process runs as uid %d, gid %d", os.Geteuid(), os.Getegid())
+	fi, err := os.Stat(path)
+	if err != nil {
+		return who + ", and the file's own owner and mode could not be read, so a directory above it refuses the way in: " + err.Error(), false
+	}
+	// パーミッションは常に 4 桁で書く。%#o だけでは 0 が "0" になり、0640 と桁が揃わない。
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Sprintf("%s, and the file is mode %#04o", who, fi.Mode().Perm()), true
+	}
+	return fmt.Sprintf("%s, and the file is mode %#04o with owner uid %d and group gid %d", who, fi.Mode().Perm(), st.Uid, st.Gid), true
 }
 
 func hasSecretFromFile(c *config) bool {

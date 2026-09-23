@@ -238,6 +238,75 @@ func TestConfigUnreadable(t *testing.T) {
 	}
 }
 
+// 読めない設定ファイルの拒否は、読めなかった理由を断定せず、見分けるための事実を並べる。
+// かつては「the user wgft runs as cannot read it」と述べていたが、読めなかったのが呼び出し元で
+// ある実行でも同じ文が出るため、事実と食い違っていた。
+func TestUnreadableConfigFileStatesTheFactsInsteadOfBlame(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs Unix permissions and a non-root user")
+	}
+	p := filepath.Join(t.TempDir(), "agent.env")
+	if err := os.WriteFile(p, []byte("WGFT_JOIN=wgft://h:1/tok#sha256:ab\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := parseDotenv(p)
+	if err == nil {
+		t.Fatal("読めないファイルがエラーにならない")
+	}
+	if strings.Contains(err.Error(), "the user wgft runs as") {
+		t.Errorf("読めない理由を wgft の利用者だと断定している: %v", err)
+	}
+	for _, want := range []string{"this process runs as uid", "the file is mode", "owner uid"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("見分けに要る事実 %q が無い: %v", want, err)
+		}
+	}
+	// agent の直し方は、勧める所有者とパーミッションが既に満たされている場合も扱う。
+	hint := agentUnreadableHint(p)
+	if !strings.Contains(hint, "not the one the agent runs as") {
+		t.Errorf("直し方が、既に満たされている配置を扱っていない: %s", hint)
+	}
+}
+
+// 読めなかった理由の事実は、実 uid と実 gid ではなく実効 uid と実効 gid で述べる。ファイルを
+// 開けるかどうかを決めるのは実効の側である。今の wgft は setuid で動かないので 2 つは一致し、
+// 値を見比べても違いが出ない。呼び出しの形を読んで固定する。
+func TestConfigPermFactsUseTheEffectiveIDs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows build states no uid or gid; the DACL decides who may read the file")
+	}
+	b, err := os.ReadFile("configperm_unix.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, want := range []string{"os.Geteuid()", "os.Getegid()"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("configperm_unix.go does not call %s; the facts must name the ids that decide access", want)
+		}
+	}
+	for _, banned := range []string{"os.Getuid()", "os.Getgid()"} {
+		if strings.Contains(src, banned) {
+			t.Errorf("configperm_unix.go calls %s; the real ids do not decide whether the file can be opened", banned)
+		}
+	}
+}
+
+// 句を繋ぐときに句読点を 2 つ並べない。Windows の OS の誤りの文は句点で終わるので、そのまま
+// 繋ぐと ".;" になる。
+func TestUnreadableConfigFileJoinsSentencesCleanly(t *testing.T) {
+	r := unreadableConfigFile(filepath.Join(t.TempDir(), "agent.env"), errors.New(`open C:\wgft\agent.env: Access is denied.`))
+	if strings.Contains(r.Error(), ".;") {
+		t.Errorf("two marks of punctuation run together: %v", r)
+	}
+	if !strings.Contains(r.Error(), "Access is denied;") {
+		t.Errorf("the underlying reason was lost: %v", r)
+	}
+}
+
 // agent は、読めないファイルが server.env という名前でも 0644 を勧めない(WGFT_JOIN を含みうる)。
 func TestAgentUnreadableHint(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {

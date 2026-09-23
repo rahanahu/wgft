@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -542,6 +544,42 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			// 読み取りの失敗を別々に挙げている。前の場面は両方を同時に成り立たせるので、
 			// `agent.credentials` だけが終了コード 2 を出せるかどうかを固定できない。この場面は
 			// `host.privileges` が見る権限を満たしたまま、読み取りだけを失敗させる。
+			// 設定ファイルを権限で読めないことは、報告を拒む理由ではなく診断の結果である
+			// (10.2c 節の層 2)。読めなかった事実を host.privileges が示し、その設定に依る
+			// メモリのソフト上限の予測を host.platform が示さず、残りの検査は通常どおり答える。
+			name: "the config file cannot be read",
+			setup: func(t *testing.T, in *agentDoctorInput) {
+				writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+				holdTheLock(t, in.CredentialsPath)
+				in.ConfigUnreadable = fs.ErrPermission
+			},
+			want: []wantCheck{
+				{agentCheckPlatform, statusUnknown, agentReasonConfigUnreadable},
+				{agentCheckPrivileges, statusFailed, agentReasonPermissionDenied},
+				// 手前の失敗ではないので、認証情報とロックを読む検査はそのまま答える。
+				{agentCheckCredentials, statusOK, ""},
+				{agentCheckProcess, statusOK, ""},
+				{agentCheckLastState, statusOK, ""},
+			},
+			wantExit: 2,
+		},
+		{
+			// 設定ファイルが無い配置は正しい。値は環境変数と既定から決まるので、失敗にしない。
+			name: "the config file does not exist",
+			setup: func(t *testing.T, in *agentDoctorInput) {
+				writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+				holdTheLock(t, in.CredentialsPath)
+				in.ConfigPath = filepath.Join(in.DataDir, "none.env")
+				in.ConfigUnreadable = nil
+			},
+			want: []wantCheck{
+				{agentCheckPlatform, statusOK, ""},
+				{agentCheckPrivileges, statusOK, ""},
+				{agentCheckCredentials, statusOK, ""},
+			},
+			wantExit: 0,
+		},
+		{
 			name:                 "only the credentials file cannot be read",
 			needsUnixPermissions: true,
 			setup: func(t *testing.T, in *agentDoctorInput) {
@@ -693,6 +731,205 @@ func TestAgentDoctorHumanOutputSaysWhenEvidenceIsMissing(t *testing.T) {
 	}
 }
 
+// 稼働を判定できない実行では、宛先の許可一覧の所見も「判定できなかった」に揃える。同じ報告の
+// agent.process が判定できなかったと述べている横で、この検査だけがエージェントは動いていないと
+// 断定すると、動いているエージェントについて事実でないことを述べる(10.2c 節)。
+func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
+	unknown := agentRunState{State: flock.Unknown, Err: errors.New("permission denied"), PermissionDenied: true}
+	checks := agentLiveOnlyChecks(unknown)
+	var allow agentDoctorCheck
+	for _, c := range checks {
+		if c.ID == agentCheckAllowTargets {
+			allow = c
+		}
+	}
+	if allow.Status != statusUnknown || allow.Reason != agentReasonRunStateUnknown {
+		t.Fatalf("relay.allow_targets = %s/%q, want %s/%q", allow.Status, allow.Reason, statusUnknown, agentReasonRunStateUnknown)
+	}
+	if strings.Contains(allow.Detail, "no process holds it now") {
+		t.Errorf("relay.allow_targets says the agent is stopped although the run state could not be determined: %q", allow.Detail)
+	}
+	if !strings.Contains(allow.Detail, "could not be determined") {
+		t.Errorf("relay.allow_targets does not say the run state could not be determined: %q", allow.Detail)
+	}
+	if strings.HasPrefix(allow.Next, "start the agent") {
+		t.Errorf("relay.allow_targets tells the operator to start an agent that may already be running: %q", allow.Next)
+	}
+	// 停止していると判定できた実行は、今までどおり停止中の文面のままである。
+	stopped := agentLiveOnlyChecks(agentRunState{State: flock.Absent})
+	for _, c := range stopped {
+		if c.ID != agentCheckAllowTargets {
+			continue
+		}
+		if !strings.Contains(c.Detail, "no process holds it now") {
+			t.Errorf("a stopped agent's relay.allow_targets lost the stopped wording: %q", c.Detail)
+		}
+	}
+}
+
+// 設定ファイルを権限で読めない実行でも、`agent doctor` は報告を出し、終了コード 2 で終わる。
+// 実機で見つかった欠陥は、この経路が報告を組む手前で終了コード 3 の拒否になっていたことである。
+func TestAgentDoctorReportsAnUnreadableConfigFile(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("this scenario needs a file that refuses the running user; root refuses nothing and Windows does not answer os.Chmod that way")
+	}
+	dir := t.TempDir()
+	config := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(config, []byte("WGFT_MAX_UDP_FLOWS=2048\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chmodForTest(t, config, 0)
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "doctor", "--config", config, "--data-dir", filepath.Join(dir, "data")})
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	if got := exitCode(err); err == nil || got != exitUnavailable {
+		t.Fatalf("err=%v exitCode=%d, want %d; an unreadable config file is a finding, not a reason to refuse the report", err, got, exitUnavailable)
+	}
+	report := out.String()
+	for _, want := range []string{"Host\n", "Credentials\n", "Relay\n", "privileges         FAILED", "cannot be read", "Not tested by this command\n"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report has no %q:\n%s", want, report)
+		}
+	}
+	// 「refusing to start」は起動を拒む経路の文であり、何も起動しないこのコマンドには当たらない。
+	// 報告の所見に拒否の文面をそのまま流し込む形も同じ文を持ち込むので、両方を見る。
+	if strings.Contains(err.Error(), "refusing to start") || strings.Contains(report, "refusing to start") {
+		t.Errorf("agent doctor says it refuses to start; it starts nothing: %v\n%s", err, report)
+	}
+	// 予測は、エージェントが読むのと同じ設定を読めた実行でだけ示す。
+	if strings.Contains(report, "the memory soft limit would be") {
+		t.Errorf("the report predicts the memory soft limit from the defaults although the settings could not be read:\n%s", report)
+	}
+}
+
+// 設定ファイルの手前のディレクトリが通り抜けを拒む実行では、ファイル自身の持ち主とパーミッションを
+// 読めていない。所見も次の一手も、読めていないものを名指ししない。運用者が直すのはディレクトリで
+// あって、ファイルではない。
+func TestAgentDoctorDoesNotBlameTheFileADirectoryHides(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("this scenario needs a directory that refuses the running user; root refuses nothing and Windows does not answer os.Chmod that way")
+	}
+	dir := t.TempDir()
+	closed := filepath.Join(dir, "closed")
+	if err := os.Mkdir(closed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(closed, "agent.env")
+	if err := os.WriteFile(config, []byte("WGFT_NAME=home\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chmodForTest(t, closed, 0)
+
+	in := testAgentDoctorInput(t, dir)
+	in.ConfigPath = config
+	in.ConfigUnreadable = fs.ErrPermission
+	priv, _ := findAgentCheck(agentDiagnose(in), agentCheckPrivileges)
+	if priv.Status != statusFailed || priv.Reason != agentReasonPermissionDenied {
+		t.Fatalf("host.privileges = %s/%q, want failed/%q", priv.Status, priv.Reason, agentReasonPermissionDenied)
+	}
+	if !strings.Contains(priv.Detail, "a directory above it refuses the way in") {
+		t.Errorf("host.privileges does not say which side refused: %q", priv.Detail)
+	}
+	if strings.Contains(priv.Detail, "the file is mode") {
+		t.Errorf("host.privileges states the file's mode although it could not read it: %q", priv.Detail)
+	}
+	// 次の一手が、読めていないファイルの持ち主とパーミッションを直せと述べてはならない。
+	if strings.Contains(priv.Next, "the file's own owner, group and mode refuse it") {
+		t.Errorf("the next step blames the file although a directory above it refused: %q", priv.Next)
+	}
+	if !strings.Contains(priv.Next, "directory on the way to the config file") {
+		t.Errorf("the next step does not send the operator to the directories: %q", priv.Next)
+	}
+}
+
+// ファイル自身を読めた実行では、逆に、その持ち主とパーミッションを名指しする。エージェントを
+// 動かす利用者で実行し直しても読めない配置で、運用者が次に見るものである。
+func TestAgentDoctorNamesTheConfigFileItCouldStat(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("the facts this check reads are the Unix owner and mode; Windows does not answer os.Chmod that way")
+	}
+	dir := t.TempDir()
+	config := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(config, []byte("WGFT_NAME=home\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chmodForTest(t, config, 0)
+
+	in := testAgentDoctorInput(t, dir)
+	in.ConfigPath = config
+	in.ConfigUnreadable = fs.ErrPermission
+	priv, _ := findAgentCheck(agentDiagnose(in), agentCheckPrivileges)
+	if !strings.Contains(priv.Detail, "the file is mode 0000") {
+		t.Errorf("host.privileges does not state the file's own mode: %q", priv.Detail)
+	}
+	if !strings.Contains(priv.Next, "the file's own owner, group and mode refuse it") {
+		t.Errorf("the next step does not name the file it could read: %q", priv.Next)
+	}
+}
+
+// 設定ファイルを読めない実行では、データディレクトリを既定値から取る。登録と稼働について断定する
+// 所見は、見たディレクトリがその既定値であることを添える。読めなかったファイルが別のディレクトリを
+// 指していれば、登録済みで稼働中のホストについて偽になるためである。
+func TestAgentDoctorSaysWhenTheDataDirCameFromTheDefaults(t *testing.T) {
+	dir := t.TempDir()
+	in := testAgentDoctorInput(t, dir)
+	in.ConfigUnreadable = fs.ErrPermission
+	in.DataDirAssumed = true
+	rep := agentDiagnose(in)
+	for _, id := range []string{agentCheckCredentials, agentCheckProcess} {
+		c, _ := findAgentCheck(rep, id)
+		if c.Status != statusFailed {
+			t.Fatalf("%s = %s, want failed; this scenario needs the claims that assert", id, c.Status)
+		}
+		if !strings.Contains(c.Detail, "the default, because "+in.ConfigPath) {
+			t.Errorf("%s asserts without saying the data directory came from the defaults: %q", id, c.Detail)
+		}
+	}
+	// 設定を読めた実行の文面は変えない。
+	plain := agentDiagnose(testAgentDoctorInput(t, dir))
+	for _, id := range []string{agentCheckCredentials, agentCheckProcess} {
+		c, _ := findAgentCheck(plain, id)
+		if strings.Contains(c.Detail, "the default, because") {
+			t.Errorf("%s carries the note although the config file was read: %q", id, c.Detail)
+		}
+	}
+}
+
+// 設定ファイルが無い配置は正しい。無いことを失敗にせず、報告はそのまま出る。
+//
+// 主張は OS に依らない形にしてある。`host.privileges` の状態そのものは OS で分かれ、Windows では
+// 新しいファイルを作れるかどうかを副作用なしに判定できないので UNKNOWN になる(10.2c 節)。
+// この場面が固定するのは、読めない設定ファイルの扱いが不在のファイルに及ばないことである。
+func TestAgentDoctorAcceptsAMissingConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "none.env")
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "doctor", "--config", missing, "--data-dir", filepath.Join(dir, "data")})
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	// 認証情報ファイルが無いので総合判定は FAILED であり、終了コードは 1 である。証拠に権限で
+	// 届かなかった実行ではないので 2 ではない。不在のファイルを読めない扱いにすると 2 になる。
+	if got := exitCode(err); err == nil || got != 1 {
+		t.Fatalf("err=%v exitCode=%d, want 1", err, got)
+	}
+	report := out.String()
+	if strings.Contains(report, "privileges         FAILED") {
+		t.Errorf("a missing config file failed host.privileges:\n%s", report)
+	}
+	// 所見が設定ファイルの名前を出すのは、読めなかった対象として並べるときだけである。
+	if strings.Contains(report, missing) {
+		t.Errorf("the report names the missing config file as evidence it could not read:\n%s", report)
+	}
+	if !strings.Contains(report, "the memory soft limit would be") {
+		t.Errorf("the report does not predict the memory soft limit although the settings were read:\n%s", report)
+	}
+}
+
 // --- 助け ---
 
 func testAgentDoctorInput(t *testing.T, dir string) agentDoctorInput {
@@ -701,6 +938,7 @@ func testAgentDoctorInput(t *testing.T, dir string) agentDoctorInput {
 		Now:             time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC),
 		DataDir:         dir,
 		CredentialsPath: filepath.Join(dir, "agent.json"),
+		ConfigPath:      filepath.Join(dir, "agent.env"),
 		Version:         "v1.0.0",
 		Platform:        "linux/amd64",
 		User:            "running as tester, uid 1000",

@@ -2,8 +2,15 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/buildinfo"
 	"github.com/rahanahu/wgft/proto"
@@ -80,5 +87,142 @@ func TestVersionSubcommandRangeComesFromProto(t *testing.T) {
 	}
 	if want := "protocol range: v2-v7"; lines[1] != want {
 		t.Errorf("version line 2 = %q, want %q (the range must be read from proto.SupportedProtocol)", lines[1], want)
+	}
+}
+
+// 印は、コマンド木の全体に当たる。下の表は 7 つのコマンドの文面を実物で確かめるが、木には
+// `rule allow add` のような深さ 3 のコマンドもあり、表に並べたものだけを見ていると、木を途中までしか
+// 歩かない実装を通してしまう。
+//
+// 包んだ RunE は markOneShotRefusals の中の 1 つの関数リテラルから作るので、どの包みも同じコードの
+// 番地を指す。包まれていないコマンドの RunE は別の番地を指すので、木を歩いて番地を見れば、印の
+// 付き忘れと付けすぎの両方が分かる。
+func TestEveryCommandInTheTreeIsMarked(t *testing.T) {
+	root := newRootCmd()
+	// `version` は常駐プロセスを起動しないので、必ず包まれている。包みの番地の見本に使う。
+	version := findCommand(t, root, "wgft version")
+	if version.Annotations[daemonAnnotation] != "" {
+		t.Fatal("wgft version carries the daemon annotation; it cannot serve as the one-shot sample")
+	}
+	wrapped := reflect.ValueOf(version.RunE).Pointer()
+
+	depth, seen := 0, 0
+	var walk func(c *cobra.Command, d int)
+	walk = func(c *cobra.Command, d int) {
+		if d > depth {
+			depth = d
+		}
+		for _, sub := range c.Commands() {
+			walk(sub, d+1)
+		}
+		if c.RunE == nil {
+			return
+		}
+		seen++
+		daemon := c.Annotations[daemonAnnotation] != ""
+		switch got := reflect.ValueOf(c.RunE).Pointer(); {
+		case daemon && got == wrapped:
+			t.Errorf("%q starts a daemon, but its refusals are marked as a one-shot run", c.CommandPath())
+		case !daemon && got != wrapped:
+			t.Errorf("%q starts nothing, but its refusals are not marked, so they would claim it refused to start", c.CommandPath())
+		}
+	}
+	walk(root, 0)
+
+	// この検査自身が木を歩ききったことを確かめる。深さ 3 のコマンドに届かない歩き方では、
+	// 上の主張は静かに空になる。
+	if depth < 3 {
+		t.Errorf("the walk reached depth %d; the tree has commands at depth 3 such as rule allow add", depth)
+	}
+	if seen < 20 {
+		t.Errorf("the walk saw %d commands with a RunE; the tree holds far more", seen)
+	}
+	// 深さ 3 のコマンドを 1 つ名指しで確かめる。木の形が変わったときに、上の深さの主張だけでは
+	// 気付けない。
+	if got := reflect.ValueOf(findCommand(t, root, "wgft rule allow add").RunE).Pointer(); got != wrapped {
+		t.Error("wgft rule allow add is not marked; the walk does not reach depth 3")
+	}
+	// 常駐プロセスを起動する側も名指しで確かめる。注記の綴りを違えると、静かに一発実行の側に倒れる。
+	if got := reflect.ValueOf(findCommand(t, root, "wgft agent run").RunE).Pointer(); got == wrapped {
+		t.Error("wgft agent run is marked as a one-shot run; refusing to start is correct for it")
+	}
+}
+
+// findCommand は、コマンド木からそのパスのコマンドを返す。
+func findCommand(t *testing.T, root *cobra.Command, path string) *cobra.Command {
+	t.Helper()
+	var found *cobra.Command
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.CommandPath() == path {
+			found = c
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(root)
+	if found == nil {
+		t.Fatalf("the command tree holds no %q", path)
+	}
+	return found
+}
+
+// 拒否の書き出しは、そのコマンドが常駐プロセスを起動するかどうかで決まる(設計文書 11b 節)。
+// 設定を読む層は共有しているので、同じ設定の誤りが両方の経路に出る。`server check` と
+// `server run` は buildServerOptions を共有しており、それでも文面が分かれることを固定する。
+func TestRefusalWordingFollowsTheCommand(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.env")
+	if err := os.WriteFile(bad, []byte("not a pair\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const startupWording = "refusing to start ["
+	const oneShotWording = "cannot continue ["
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+		// serverSide は、Linux 以外のビルドでは差し替えになる `server` の一群である
+		// (cmd/wgft/server_other.go)。設定を読む手前で Linux 専用である旨を答えるので、
+		// 拒否の文面そのものがこのビルドには無い。
+		serverSide bool
+	}{
+		{"server run starts a daemon", []string{"server", "run", "--config", bad, "--data-dir", dir}, startupWording, true},
+		{"agent run starts a daemon", []string{"agent", "run", "--config", bad, "--data-dir", dir}, startupWording, false},
+		{"server check starts nothing", []string{"server", "check", "--config", bad, "--data-dir", dir}, oneShotWording, true},
+		{"agent doctor starts nothing", []string{"agent", "doctor", "--config", bad, "--data-dir", dir}, oneShotWording, false},
+		{"status starts nothing", []string{"status", "--config", bad}, oneShotWording, false},
+		{"rule ls starts nothing", []string{"rule", "ls", "--config", bad}, oneShotWording, false},
+		{"agent pubkey starts nothing", []string{"agent", "pubkey", "--config", bad, "--data-dir", dir}, oneShotWording, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newRootCmd()
+			root.SetArgs(tc.args)
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			err := root.Execute()
+			if err == nil {
+				t.Fatal("a dotenv that is not in KEY=value form must be refused")
+			}
+			if tc.serverSide && runtime.GOOS != "linux" {
+				// 差し替えの側も確かめる。この一群は設定を読まないので拒否にはならず、
+				// 再試行で直りうる失敗と同じ終了コード 1 で終わる(設計文書 11b 節)。
+				if !strings.Contains(err.Error(), "the server runs on Linux only") {
+					t.Errorf("message = %q, want the Linux-only answer this build gives", err.Error())
+				}
+				if got := exitCode(err); got != 1 {
+					t.Errorf("exitCode = %d, want 1", got)
+				}
+				return
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("message = %q, want it to contain %q", err.Error(), tc.want)
+			}
+			// 文面だけの区別である。設定の誤りは、どちらの経路でも終了コード 3 で終わる。
+			if got := exitCode(err); got != exitRefusal {
+				t.Errorf("exitCode = %d, want %d", got, exitRefusal)
+			}
+		})
 	}
 }

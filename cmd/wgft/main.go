@@ -93,7 +93,34 @@ func newRootCmd() *cobra.Command {
 		newVersionCmd(),
 	)
 	applyHelp(root)
+	markOneShotRefusals(root)
 	return root
+}
+
+// daemonAnnotation は、そのコマンドが常駐プロセスを起動することを表す注記である。`server run` と
+// `agent run` だけが持つ。
+const daemonAnnotation = "wgft-daemon"
+
+// markOneShotRefusals は、常駐プロセスを起動しないコマンドが返す拒否に印を付ける。印は文面だけを
+// 変え、起動を拒んだという書き出しを、その実行を続けられないという書き出しに置き換える(設計文書
+// 11b 節)。終了コードは 3 のままである。
+//
+// 印を付ける場所をコマンド木の 1 か所にしてあるのは、設定を読む層を常駐プロセスと一発実行の
+// コマンドが共有しているためである。`buildServerOptions` は `server run` と `server check` の
+// 両方が呼び、`loadConfig` はほとんどのコマンドが呼ぶ。読む層の側で書き分けることはできず、
+// 呼び出し側の入口ごとに印を付ける形にすると、コマンドを足すたびに写し忘れが起きる。既定を
+// 一発実行の側に倒し、常駐プロセスを起動する 2 つのコマンドだけが注記で名乗る。
+func markOneShotRefusals(c *cobra.Command) {
+	for _, sub := range c.Commands() {
+		markOneShotRefusals(sub)
+	}
+	if c.RunE == nil || c.Annotations[daemonAnnotation] != "" {
+		return
+	}
+	inner := c.RunE
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return startup.OneShot(inner(cmd, args))
+	}
 }
 
 func newVersionCmd() *cobra.Command {
