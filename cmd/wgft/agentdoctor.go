@@ -647,7 +647,7 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 		// 拒否という事実があるので、前の分岐で層 2 の FAILED として扱う。
 		c.Status, c.Reason = statusUnknown, agentReasonRunningAsRoot
 		c.Detail += "; root bypasses file permissions, so this run cannot say whether the user the agent runs as can reach them"
-		c.Next = "if the agent runs as another user, run this command as that user to check its permissions; if the agent itself runs as root, this result is expected"
+		c.Next = "run this command as the same user as the agent. For the packaged systemd unit, that is wgft: runuser -u wgft -- wgft agent doctor. If the agent itself runs as root, this result is expected"
 	case len(undetermined) > 0:
 		c.Status, c.Reason = statusUnknown, agentReasonPermissionNotDetermined
 		c.Next = "if the agent cannot start, read its log for the first write it fails; this command does not answer it"

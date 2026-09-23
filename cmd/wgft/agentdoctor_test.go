@@ -1020,7 +1020,7 @@ func TestAgentDoctorPrivilegesUnderRoot(t *testing.T) {
 				t.Errorf("the detail says root bypasses permissions = %v, want %v: %q", saysBypass, tc.wantRootWording, c.Detail)
 			}
 			if tc.wantRootWording {
-				for _, want := range []string{"run this command as that user", "if the agent itself runs as root, this result is expected"} {
+				for _, want := range []string{"run this command as the same user as the agent", "runuser -u wgft -- wgft agent doctor", "If the agent itself runs as root, this result is expected"} {
 					if !strings.Contains(c.Next, want) {
 						t.Errorf("the next step has no %q: %q", want, c.Next)
 					}
