@@ -43,8 +43,11 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 		rt.streamMu.Lock()
 		rt.streamCancel, rt.reconnectNow = cancel, false
 		rt.streamMu.Unlock()
+		// 待ちを抜けて接続を試み始めた(設計文書 10.2c 節の観測)。この記録は再接続の流れを変えない
+		rt.noteStreamAttempt()
 		err := rt.streamOnce(connCtx)
 		cancel()
+		rt.noteStreamDisconnected(time.Now(), err)
 		// 接続していた間に溜まったハンドシェイクの通知は捨てる。待ちを打ち切る根拠にするのは、
 		// この接続の試みが失敗した後に観測したハンドシェイクだけだからである(仕様 5.2 節)。
 		// 接続中のハンドシェイクは、その接続が切れる前の経路の話でしかない
@@ -97,6 +100,9 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 		default:
 			log.Printf("stream: disconnected: %v; reconnecting in %s", err, backoff)
 		}
+		// 待ちに入る間隔と次に試す時刻を控える(設計文書 10.2c 節の観測)。待つ値は下の
+		// time.After と同じ backoff であり、この記録は待ちの長さを変えない
+		rt.noteStreamWaiting(time.Now(), backoff)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -151,6 +157,9 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 		return err
 	}
 	log.Printf("stream: connected to %s; public key sent", f.Endpoint)
+	// ここから先がつながっている状態である(設計文書 10.2c 節の観測)。epoch は、この接続の
+	// pingLoop が書いた値だけを受け取るための通し番号
+	epoch := rt.noteStreamConnected()
 
 	// ハートビート。30 秒ごとに送るのに加え、stream の接続直後に全体状態を適用した直後と、
 	// 以後の世代を適用するたびにも送る(仕様 5.2 節)。applyNotify はサイズ 1 の非ブロッキング通知で、
@@ -162,7 +171,7 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 
 	// 半開きの TCP の判定(仕様 5.2 節)。読みの期限を相手の送信に結び付けられないので、
 	// こちらから ping を送り、pong の期限で経路の生死を測る
-	go rt.pingLoop(hbCtx, ws)
+	go rt.pingLoop(hbCtx, ws, epoch)
 
 	applyNotify := make(chan struct{}, 1)
 	go func() {
@@ -238,7 +247,9 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 //
 // ws への書き手はハートビートの goroutine とこの goroutine の 2 つになるが、ライブラリがフレーム
 // 単位で直列化するので混ざらない。Conn.Ping は読みを続ける goroutine と並行に呼ぶ前提の API である。
-func (rt *runtime) pingLoop(ctx context.Context, ws *websocket.Conn) {
+// epoch は、この pingLoop が属する接続の通し番号である。観測の書き込みはこの番号が今の接続の
+// ものである間だけ効く(設計文書 10.2c 節)。
+func (rt *runtime) pingLoop(ctx context.Context, ws *websocket.Conn, epoch uint64) {
 	if rt.pingInterval <= 0 {
 		return
 	}
@@ -259,7 +270,11 @@ func (rt *runtime) pingLoop(ctx context.Context, ws *websocket.Conn) {
 			continue
 		}
 		pingCtx, cancel := context.WithTimeout(ctx, rt.pongTimeout)
+		// ping を送ってから pong の待ちが終わるまでを観測に写す(設計文書 10.2c 節)。判定の流れは
+		// 変えず、ws.Ping の前後に記録を置くだけである
+		rt.noteStreamPingSent(time.Now(), epoch)
 		err := ws.Ping(pingCtx)
+		rt.noteStreamPingAnswered(time.Now(), epoch, err == nil)
 		cancel()
 		if err == nil {
 			continue

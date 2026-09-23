@@ -97,6 +97,11 @@ type runtime struct {
 	streamCancel context.CancelFunc // 今の stream 接続を切る(rotate-key で張り直すとき)
 	reconnectNow bool               // 切った直後はバックオフせずに繋ぎ直す
 
+	// streamObs は制御ストリームの観測(設計文書 10.2c 節)。streamObs と streamEpoch は streamMu が
+	// 守る。書き手と読み手、mutex を選んだ理由は internal/agent/streamobs.go にある
+	streamObs   streamObservation
+	streamEpoch uint64 // 接続の通し番号。前の接続の pingLoop の遅れた書き込みを捨てるために使う
+
 	// lastStatusLines は logStatus が前回出した内容(30 秒ごとの定期ログの重複を防ぐ。Run のループの
 	// 単一の goroutine からしか呼ばれないので、別途の mutex は持たない)
 	lastStatusLines []string
