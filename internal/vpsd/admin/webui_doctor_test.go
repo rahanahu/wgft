@@ -48,6 +48,15 @@ func (b *countingBackend) ApplyStatus() (ApplyStatus, bool) {
 	return st, true
 }
 
+// ResourceStatus は Resource Guard の報告(design.md 7a.10 節)である。画面はフロー予算の値を
+// dataplane の内部の値に、拒否の累計を flow budget の検査に出す。
+func (b *countingBackend) ResourceStatus() ResourceStatus {
+	return ResourceStatus{
+		FlowBudget: map[proto.Proto]FlowBudget{proto.TCP: {InUse: 1, Limit: 2048}},
+		Refusals:   map[string]map[string]uint64{"r_err": {"budget": 3}},
+	}
+}
+
 func (b *countingBackend) AgentRuleStatuses(rules []proto.Rule) map[string]AgentRuleStatus {
 	agents, _ := b.Agents()
 	out := make(map[string]AgentRuleStatus, len(rules))
@@ -274,6 +283,84 @@ func TestDoctorPageHidesTheNoisyChecksButKeepsThem(t *testing.T) {
 	}
 }
 
+// doctorRuleRow は一覧の画面から 1 本のルールの行を切り出す。行ごとに状態と所見を見るために使う。
+func doctorRuleRow(t *testing.T, body, ruleID string) string {
+	t.Helper()
+	for _, row := range strings.Split(body, "<tr>") {
+		if strings.Contains(row, "/ui/doctor/"+ruleID+`"`) {
+			return row
+		}
+	}
+	t.Fatalf("no row for rule %s in:\n%s", ruleID, body)
+	return ""
+}
+
+// TestDoctorSummaryShowsEveryPartOfTheReport は、一覧の画面が報告の 3 つの部分をすべて出すことを
+// 確かめる。運用者が最初に見る画面なので、server の行、エージェントの行、ルールごとの状態と所見の
+// どれが欠けても、止まっている場所が読めなくなる。
+func TestDoctorSummaryShowsEveryPartOfTheReport(t *testing.T) {
+	srv, _ := newDoctorTestServer(t)
+
+	body := getBody(t, srv.URL+"/ui/doctor?lang=en")
+
+	// server の行。判定と、その内部の値まで出す。
+	if !strings.Contains(body, "the server&#39;s forwarding matches the current rules") {
+		t.Errorf("the summary page does not carry the server's own check:\n%s", body)
+	}
+	if !strings.Contains(body, "flow budget: tcp 1/2048") {
+		t.Errorf("the summary page does not carry Resource Guard's budget, which reaches it through the same evidence:\n%s", body)
+	}
+
+	// エージェントの行。名前ごとに 1 行で、接続しているものと落ちているものを出し分ける。
+	if !strings.Contains(body, `<span class="check-label">home</span>`) {
+		t.Errorf("the summary page is missing the connected agent's row:\n%s", body)
+	}
+	if !strings.Contains(body, `<span class="check-label">office</span>`) {
+		t.Errorf("the summary page is missing the disconnected agent's row:\n%s", body)
+	}
+	if !strings.Contains(body, "the agent is not connected to this server") {
+		t.Errorf("the summary page does not say what is wrong with the disconnected agent:\n%s", body)
+	}
+
+	// ルールの行。止まった位置と理由を所見の列に出す。
+	errRow := doctorRuleRow(t, body, "r_err")
+	if !strings.Contains(errRow, `badge danger">FAILED`) {
+		t.Errorf("a failing rule must read FAILED in the summary, row:\n%s", errRow)
+	}
+	if !strings.Contains(errRow, "target: the agent could not use this rule: bind failed: address already in use") {
+		t.Errorf("the summary's finding column must say where the rule stops and why, row:\n%s", errRow)
+	}
+	offRow := doctorRuleRow(t, body, "r_off")
+	if !strings.Contains(offRow, "WireGuard: no WireGuard handshake with this agent has ever been observed") {
+		t.Errorf("the summary's finding column must carry the tunnel's own reason, row:\n%s", offRow)
+	}
+
+	// 健全なルールは OK で、所見の列は空である。ここが埋まるのは、証拠のどれかが欠けたときである。
+	okRow := doctorRuleRow(t, body, "r_ok")
+	if !strings.Contains(okRow, `badge success">OK`) {
+		t.Errorf("a healthy rule must read OK in the summary, row:\n%s", okRow)
+	}
+	if !strings.Contains(okRow, `class="check-detail"></td>`) {
+		t.Errorf("a healthy rule's finding column must stay empty, row:\n%s", okRow)
+	}
+}
+
+// TestDoctorSummaryKeepsTheGroupNamesInEnglish は、一覧の画面の群の見出しを訳さないことを
+// 確かめる(設計文書 10.2d 節)。1 本のルールの画面の見出しは判定が持つ値から描くが、一覧の
+// 画面の Server と Agents はテンプレートに直接書いてあるので、別に固定する。
+func TestDoctorSummaryKeepsTheGroupNamesInEnglish(t *testing.T) {
+	srv, _ := newDoctorTestServer(t)
+
+	for _, lang := range []string{"ja", "en"} {
+		body := getBody(t, srv.URL+"/ui/doctor?lang="+lang)
+		for _, want := range []string{"<h3>Server</h3>", "<h3>Agents</h3>", "<h3>Rules</h3>"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: the summary page must keep the group name %q in English:\n%s", lang, want, body)
+			}
+		}
+	}
+}
+
 // TestDoctorSummarySaysWhereTheProbeIs は、一覧の画面から疎通を試せることが読み取れるかを
 // 確かめる。一覧の画面にボタンは無く、試していない範囲の inner path の行は CLI と同じ文なので、
 // 画面だけを見る運用者には 1 本のルールの画面へ進む道が見えない。
@@ -288,6 +375,40 @@ func TestDoctorSummarySaysWhereTheProbeIs(t *testing.T) {
 		if !strings.Contains(body, `href="/ui/doctor/r_ok"`) {
 			t.Errorf("%s: the summary page does not link to a rule's own page:\n%s", lang, body)
 		}
+	}
+}
+
+// TestDoctorProbeIsOfferedOnlyWhereItWorks は、疎通の確認を試せるルールにだけボタンを出し、
+// それ以外では理由を出すことを確かめる。管理用 API は UDP のルールと無効なルールの確認を
+// 拒むので、押せるように見せてはならない。
+func TestDoctorProbeIsOfferedOnlyWhereItWorks(t *testing.T) {
+	srv, _ := newDoctorTestServer(t)
+
+	tcp := getBody(t, srv.URL+"/ui/doctor/r_ok?lang=en")
+	if !strings.Contains(tcp, `<input type="hidden" name="probe" value="1">`) {
+		t.Errorf("an enabled TCP rule must offer the probe:\n%s", tcp)
+	}
+	udp := getBody(t, srv.URL+"/ui/doctor/r_err?lang=en")
+	if strings.Contains(udp, `name="probe"`) {
+		t.Errorf("a UDP rule must not offer a probe the admin API refuses to run:\n%s", udp)
+	}
+	if !strings.Contains(udp, T("en", "doctorProbeUnavailable")) {
+		t.Errorf("a rule that cannot be probed must say why:\n%s", udp)
+	}
+}
+
+// TestDoctorPageCarriesResourceGuardsRefusals は、Resource Guard の拒否の累計が画面に届くことを
+// 確かめる。経路の外の検査なのでルールの判定は動かさないが(設計文書 10.2a 節)、所見としては
+// 必ず出す。
+func TestDoctorPageCarriesResourceGuardsRefusals(t *testing.T) {
+	srv, _ := newDoctorTestServer(t)
+
+	body := getBody(t, srv.URL+"/ui/doctor/r_err?lang=en")
+	if !strings.Contains(body, "3 connections on this rule were refused for want of wgft&#39;s own resources") {
+		t.Errorf("the page does not carry Resource Guard's refusals:\n%s", body)
+	}
+	if !strings.Contains(body, `traffic stops at &#34;target&#34;`) {
+		t.Errorf("an off-path finding must not move where traffic stops:\n%s", body)
 	}
 }
 
