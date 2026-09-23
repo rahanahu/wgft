@@ -33,7 +33,7 @@ func fixtureRules() []proto.Rule {
 			VPSMode: proto.ModeKernel, Enabled: true,
 		},
 		{
-			ID: "r_kernel_range", Agent: "home", Group: "valheim", Note: "weekend server, friends only",
+			ID: "r_kernel_range", Agent: "home", Group: "game", Note: "weekend server, friends only",
 			Proto: proto.UDP, ListenPort: pr(2500, 2503), Target: "192.168.1.20:2500",
 			VPSMode: proto.ModeKernel, Enabled: true,
 			SourceDeny: []netip.Prefix{cidr("203.0.113.0/24")},

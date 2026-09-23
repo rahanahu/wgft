@@ -38,7 +38,7 @@
 
   <div class="field">
     <label for="f-group">{{ T .Locale "fGroup" }}</label>
-    <input id="f-group" class="search" name="group" placeholder="minecraft" list="group-list" maxlength="32">
+    <input id="f-group" class="search" name="group" placeholder="game" list="group-list" maxlength="32">
     <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
     <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
   </div>
@@ -156,7 +156,7 @@
       <div class="rule-form">
         <div class="field">
           <label for="e-group">{{ T .Locale "fGroup" }}</label>
-          <input id="e-group" class="search" name="group" value="{{ .Group }}" list="group-list" maxlength="32" placeholder="minecraft">
+          <input id="e-group" class="search" name="group" value="{{ .Group }}" list="group-list" maxlength="32" placeholder="game">
           <datalist id="group-list">{{ range .Groups }}<option value="{{ . }}"></option>{{ end }}</datalist>
           <small class="field-help">{{ T .Locale "fGroupHelp" }}</small>
           {{ if .GroupConflict }}<p class="danger-text">{{ .GroupConflict }}</p>{{ end }}

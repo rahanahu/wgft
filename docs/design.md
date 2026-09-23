@@ -246,7 +246,7 @@ stream はエージェントごとに 1 本だけである。
 {
   "id": "r_01J...",
   "agent": "home",
-  "group": "valheim",
+  "group": "game",
   "note": "週末サーバ。フレンド用",
   "proto": "udp",
   "listen_port": "2456-2457",
@@ -263,7 +263,7 @@ stream はエージェントごとに 1 本だけである。
 ```
 
 - `agent`:このルールの持ち主となるエージェントの名前。登録済みのエージェントでなければ `vpsd` は拒否する。転送の経路と、このルールを載せる全体状態の配り先の両方を決める
-- `group`:任意。ルールを束ねる短いラベル 1 つ(例 `minecraft`)。1 ルールに 1 つ。英数と `-_.`、32 文字以内。転送には影響しない。空のルールは UI で「その他」に入る
+- `group`:任意。ルールを束ねる短いラベル 1 つ(例 `game`)。1 ルールに 1 つ。英数と `-_.`、32 文字以内。転送には影響しない。空のルールは UI で「その他」に入る
 - `note`:任意。このルールが何のためかを書く自由記述(120 文字以内)。転送には影響しない
 - `proto`:`tcp` または `udp`
 - `listen_port`:VPS で待ち受けるポート。`"2456-2457"` の範囲指定も許す。範囲のときは `target` のポートは先頭に対応し、以降は連番で写す。ルール間で重複できない
@@ -1348,9 +1348,9 @@ CLI は管理用 API を叩く薄い層で、Web UI と同じことができる�
 ```
 wgft agent join-string --name home
 wgft agent rotate-key
-wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group valheim --note "週末サーバ"
+wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group game --note "週末サーバ"
 wgft rule add --agent home --tcp 443 --to 192.168.1.30:443 --proxy --proxy-protocol
-wgft rule set r_01J --group minecraft --note "公開サバ"
+wgft rule set r_01J --group friends --note "公開サバ"
 wgft rule deny add r_01J 203.0.113.0/24
 wgft rule ls
 wgft server nft
