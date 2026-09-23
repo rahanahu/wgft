@@ -515,7 +515,7 @@ func newSettingsTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
 	srv, st := newDetailTestServer(t)
 	setRuleInStore(t, st, "r_a", func(r *proto.Rule) {
-		r.Group, r.Note = "valheim", "weekend"
+		r.Group, r.Note = "friends", "weekend"
 		r.PerSourceRate, r.PacketRate = mustRate(t, "10/minute"), mustRate(t, "500/second")
 	})
 	return srv, st
@@ -535,12 +535,12 @@ func TestRuleSettingsSavesOnlyChangedFields(t *testing.T) {
 		set  url.Values
 		want [5]string
 	}{
-		{"note only", url.Values{"note": {"friday night"}}, [5]string{"valheim", "friday night", "10/minute", "", "500/second"}},
+		{"note only", url.Values{"note": {"friday night"}}, [5]string{"friends", "friday night", "10/minute", "", "500/second"}},
 		{"group only", url.Values{"group": {"survival"}}, [5]string{"survival", "weekend", "10/minute", "", "500/second"}},
-		{"per-source rate only", url.Values{"per_source_count": {"20"}, "per_source_unit": {"hour"}}, [5]string{"valheim", "weekend", "20/hour", "", "500/second"}},
-		{"new-flow rate only", url.Values{"new_flow_count": {"100"}, "new_flow_unit": {"second"}}, [5]string{"valheim", "weekend", "10/minute", "100/second", "500/second"}},
-		{"packet rate to no limit", url.Values{"packet_nolimit": {"1"}, "packet_unit": {"second"}}, [5]string{"valheim", "weekend", "10/minute", "", ""}},
-		{"nothing changed", url.Values{}, [5]string{"valheim", "weekend", "10/minute", "", "500/second"}},
+		{"per-source rate only", url.Values{"per_source_count": {"20"}, "per_source_unit": {"hour"}}, [5]string{"friends", "weekend", "20/hour", "", "500/second"}},
+		{"new-flow rate only", url.Values{"new_flow_count": {"100"}, "new_flow_unit": {"second"}}, [5]string{"friends", "weekend", "10/minute", "100/second", "500/second"}},
+		{"packet rate to no limit", url.Values{"packet_nolimit": {"1"}, "packet_unit": {"second"}}, [5]string{"friends", "weekend", "10/minute", "", ""}},
+		{"nothing changed", url.Values{}, [5]string{"friends", "weekend", "10/minute", "", "500/second"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, st := newSettingsTestServer(t)
@@ -637,13 +637,13 @@ func TestRuleSettingsConcurrentChange(t *testing.T) {
 			name:      "rate changed elsewhere, note changed here",
 			elsewhere: func(r *proto.Rule) { r.PerSourceRate = mustRate(t, "99/second") },
 			set:       url.Values{"note": {"friday night"}},
-			want:      [5]string{"valheim", "friday night", "99/second", "", "500/second"},
+			want:      [5]string{"friends", "friday night", "99/second", "", "500/second"},
 		},
 		{
 			name:      "note changed elsewhere, rate changed here",
 			elsewhere: func(r *proto.Rule) { r.Note = "from the cli" },
 			set:       url.Values{"packet_count": {"800"}, "packet_unit": {"second"}},
-			want:      [5]string{"valheim", "from the cli", "10/minute", "", "800/second"},
+			want:      [5]string{"friends", "from the cli", "10/minute", "", "800/second"},
 		},
 		{
 			name:      "same field to the same value",
@@ -656,21 +656,21 @@ func TestRuleSettingsConcurrentChange(t *testing.T) {
 			elsewhere:      func(r *proto.Rule) { r.PerSourceRate = mustRate(t, "99/second") },
 			set:            url.Values{"per_source_count": {"20"}, "per_source_unit": {"minute"}, "note": {"friday night"}},
 			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "99 / 秒"),
-			wantAfterRetry: [5]string{"valheim", "friday night", "20/minute", "", "500/second"},
+			wantAfterRetry: [5]string{"friends", "friday night", "20/minute", "", "500/second"},
 		},
 		{
 			name:           "rate removed elsewhere, changed here",
 			elsewhere:      func(r *proto.Rule) { r.PacketRate = nil },
 			set:            url.Values{"packet_count": {"800"}, "packet_unit": {"second"}},
 			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), T("ja", "noLimit")),
-			wantAfterRetry: [5]string{"valheim", "weekend", "10/minute", "", "800/second"},
+			wantAfterRetry: [5]string{"friends", "weekend", "10/minute", "", "800/second"},
 		},
 		{
 			name:           "note changed in both places",
 			elsewhere:      func(r *proto.Rule) { r.Note = "from the cli" },
 			set:            url.Values{"note": {"friday night"}},
 			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "from the cli"),
-			wantAfterRetry: [5]string{"valheim", "friday night", "10/minute", "", "500/second"},
+			wantAfterRetry: [5]string{"friends", "friday night", "10/minute", "", "500/second"},
 		},
 		{
 			name:           "group changed in both places",
@@ -688,7 +688,7 @@ func TestRuleSettingsConcurrentChange(t *testing.T) {
 			},
 			set:            url.Values{"per_source_count": {"20"}, "per_source_unit": {"minute"}},
 			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "99 / 秒"),
-			wantAfterRetry: [5]string{"valheim", "from the cli", "20/minute", "", "700/second"},
+			wantAfterRetry: [5]string{"friends", "from the cli", "20/minute", "", "700/second"},
 		},
 		{
 			// 利用者が触れていない group が別の場所で変わり、別の欄が食い違う。描き直しは
@@ -708,7 +708,7 @@ func TestRuleSettingsConcurrentChange(t *testing.T) {
 			elsewhere:      func(r *proto.Rule) { r.PacketRate = mustRate(t, "700/second") },
 			set:            url.Values{"packet_nolimit": {"1"}, "packet_unit": {"second"}},
 			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "700 / 秒"),
-			wantAfterRetry: [5]string{"valheim", "weekend", "10/minute", "", ""},
+			wantAfterRetry: [5]string{"friends", "weekend", "10/minute", "", ""},
 			wantPacketOpen: true,
 		},
 	} {
@@ -825,7 +825,7 @@ func TestRuleSettingsInvalidThenFixedKeepsConcurrentNote(t *testing.T) {
 	if resp.Request.Method != http.MethodGet {
 		t.Fatalf("the fixed resubmission must save: %s", body)
 	}
-	if got, want := ruleSettings(findRuleT(t, st, "r_a")), [5]string{"valheim", "from the cli", "20/minute", "", "500/second"}; got != want {
+	if got, want := ruleSettings(findRuleT(t, st, "r_a")), [5]string{"friends", "from the cli", "20/minute", "", "500/second"}; got != want {
 		t.Errorf("after the fixed resubmission: %q, want %q", got, want)
 	}
 }
