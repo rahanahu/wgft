@@ -605,6 +605,10 @@ func TestRuleSettingsInvalidKeepsInput(t *testing.T) {
 			if vals.Get("orig_note") != "weekend" || vals.Get("orig_per_source") != "10/minute" || vals.Get("orig_packet") != "500/second" {
 				t.Errorf("the re-rendered form must keep the original values: %v", vals)
 			}
+			// 要約の説明は保存値のまま(入力中の説明を保存済みのように見せない)
+			if !strings.Contains(body, `<p class="muted">weekend</p>`) || strings.Contains(body, `<p class="muted">typed note</p>`) {
+				t.Error("the header must show the stored note, not the typed one")
+			}
 			if tc.prefix == "packet" && !strings.Contains(form, `class="advanced" open`) {
 				t.Error("the packet details must be open when the packet field has an error")
 			}
@@ -626,6 +630,8 @@ func TestRuleSettingsConcurrentChange(t *testing.T) {
 		want           [5]string
 		conflict       string
 		wantAfterRetry [5]string
+		// wantPacketOpen は、描き直したページでパケットの制限の詳細が開いていること
+		wantPacketOpen bool
 	}{
 		{
 			name:      "rate changed elsewhere, note changed here",
@@ -666,6 +672,34 @@ func TestRuleSettingsConcurrentChange(t *testing.T) {
 			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "from the cli"),
 			wantAfterRetry: [5]string{"valheim", "friday night", "10/minute", "", "500/second"},
 		},
+		{
+			name:           "group changed in both places",
+			elsewhere:      func(r *proto.Rule) { r.Group = "from-cli" },
+			set:            url.Values{"group": {"survival"}},
+			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "from-cli"),
+			wantAfterRetry: [5]string{"survival", "weekend", "10/minute", "", "500/second"},
+		},
+		{
+			// 食い違った欄の他に、利用者が触れていない欄(note と packet_rate)も別の場所で
+			// 変わっている。描き直しはそれらを今の値で埋めるので、送り直しても消えない。
+			name: "conflict plus untouched fields changed elsewhere",
+			elsewhere: func(r *proto.Rule) {
+				r.PerSourceRate, r.PacketRate, r.Note = mustRate(t, "99/second"), mustRate(t, "700/second"), "from the cli"
+			},
+			set:            url.Values{"per_source_count": {"20"}, "per_source_unit": {"minute"}},
+			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "99 / 秒"),
+			wantAfterRetry: [5]string{"valheim", "from the cli", "20/minute", "", "700/second"},
+		},
+		{
+			// 利用者は「制限しない」を選んだので、入力欄の値だけでは詳細は開かない。
+			// 食い違いの表示のために開く。
+			name:           "packet changed elsewhere, cleared here",
+			elsewhere:      func(r *proto.Rule) { r.PacketRate = mustRate(t, "700/second") },
+			set:            url.Values{"packet_nolimit": {"1"}, "packet_unit": {"second"}},
+			conflict:       fmt.Sprintf(T("ja", "settingsCurrentFmt"), "700 / 秒"),
+			wantAfterRetry: [5]string{"valheim", "weekend", "10/minute", "", ""},
+			wantPacketOpen: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, st := newSettingsTestServer(t)
@@ -694,6 +728,9 @@ func TestRuleSettingsConcurrentChange(t *testing.T) {
 				t.Errorf("missing the conflict message: %s", body)
 			}
 			form := settingsFormHTML(t, body)
+			if tc.wantPacketOpen && !strings.Contains(form, `class="advanced" open`) {
+				t.Error("the packet details must be open when the packet field has a conflict")
+			}
 			if !strings.Contains(form, html.EscapeString(tc.conflict)) {
 				t.Errorf("missing the current value %q at the field: %s", tc.conflict, form)
 			}
@@ -736,21 +773,83 @@ func TestRuleSettingsBatchConflict(t *testing.T) {
 	}
 }
 
-// TestRuleSettingsRequiresOriginalValues は、描いた時点の保存値(hidden)の無い送信を
-// 400 で拒むことを確かめる。無いまま受けると、どの欄を利用者が変えたかを判定できない。
+// TestRuleSettingsRequiresOriginalValues は、描いた時点の保存値(hidden)のどれか 1 つでも
+// 無い送信を 400 で拒むことを確かめる。無いまま受けると、どの欄を利用者が変えたかを判定できない。
 func TestRuleSettingsRequiresOriginalValues(t *testing.T) {
+	for _, missing := range []string{"orig_group", "orig_note", "orig_per_source", "orig_new_flow", "orig_packet"} {
+		t.Run(missing, func(t *testing.T) {
+			srv, st := newSettingsTestServer(t)
+			before := ruleSettings(findRuleT(t, st, "r_a"))
+			form := settingsFormValues(t, getBody(t, srv.URL+"/ui/rules/r_a"))
+			form.Set("note", "changed")
+			form.Del(missing)
+			resp, err := http.PostForm(srv.URL+"/ui/rules/r_a/settings", form)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", resp.StatusCode)
+			}
+			if got := ruleSettings(findRuleT(t, st, "r_a")); got != before {
+				t.Errorf("nothing must be saved: %q", got)
+			}
+		})
+	}
+}
+
+// TestRuleSettingsInvalidThenFixedKeepsConcurrentNote は、入力の誤りで描き直したフォームが、
+// 送られてきた描いた時点の保存値を持ち続けることを確かめる。ページを開いた後に CLI が説明を
+// 変え、利用者はレート欄を誤って送り、直して送り直す。利用者は説明に触れていないので、
+// CLI の説明が残る。
+func TestRuleSettingsInvalidThenFixedKeepsConcurrentNote(t *testing.T) {
 	srv, st := newSettingsTestServer(t)
-	before := ruleSettings(findRuleT(t, st, "r_a"))
-	resp, err := http.PostForm(srv.URL+"/ui/rules/r_a/settings", url.Values{"group": {"x"}, "note": {"y"}, "per_source_nolimit": {"1"}, "new_flow_nolimit": {"1"}, "packet_nolimit": {"1"}})
-	if err != nil {
-		t.Fatal(err)
+	page := getBody(t, srv.URL+"/ui/rules/r_a")
+	setRuleInStore(t, st, "r_a", func(r *proto.Rule) { r.Note = "from the cli" })
+	resp, body := postSettingsForm(t, srv.URL, "r_a", page, url.Values{"per_source_count": {""}, "per_source_unit": {"minute"}})
+	if resp.Request.Method != http.MethodPost || !strings.Contains(body, T("ja", "settingsInvalid")) {
+		t.Fatalf("expected a validation re-render: %s", body)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", resp.StatusCode)
+	resp, body = postSettingsForm(t, srv.URL, "r_a", body, url.Values{"per_source_count": {"20"}, "per_source_unit": {"minute"}})
+	if resp.Request.Method != http.MethodGet {
+		t.Fatalf("the fixed resubmission must save: %s", body)
 	}
-	if got := ruleSettings(findRuleT(t, st, "r_a")); got != before {
-		t.Errorf("nothing must be saved: %q", got)
+	if got, want := ruleSettings(findRuleT(t, st, "r_a")), [5]string{"valheim", "from the cli", "20/minute", "", "500/second"}; got != want {
+		t.Errorf("after the fixed resubmission: %q, want %q", got, want)
+	}
+}
+
+// TestRuleSettingsOddStoredNote は、改行や前後の空白を含む保存済みの説明(CLI の
+// rule set --note や読み込みで入りうる)が、レートだけを変えた保存で書き換わらず、食い違い
+// にもならないことを確かめる。ブラウザは <input type="text"> の値から改行を取り除き、
+// hidden の値の改行を送信時に CRLF に揃えるので、その形で送る。
+func TestRuleSettingsOddStoredNote(t *testing.T) {
+	for _, tc := range []struct {
+		name, stored string
+		set          url.Values
+	}{
+		{"newline", "a\nb", url.Values{"orig_note": {"a\r\nb"}, "note": {"ab"}}},
+		{"edge spaces", " x ", url.Values{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, st := newSettingsTestServer(t)
+			setRuleInStore(t, st, "r_a", func(r *proto.Rule) { r.Note = tc.stored })
+			set := url.Values{"per_source_count": {"20"}, "per_source_unit": {"minute"}}
+			for k, v := range tc.set {
+				set[k] = v
+			}
+			resp, body := postSettings(t, srv.URL, "r_a", set)
+			if resp.Request.Method != http.MethodGet {
+				t.Fatalf("a rate-only save must not conflict: %s", body)
+			}
+			r := findRuleT(t, st, "r_a")
+			if r.Note != tc.stored {
+				t.Errorf("note = %q, want the stored %q unchanged", r.Note, tc.stored)
+			}
+			if rateString(r.PerSourceRate) != "20/minute" {
+				t.Errorf("per_source_rate = %v, want 20/minute", r.PerSourceRate)
+			}
+		})
 	}
 }
 

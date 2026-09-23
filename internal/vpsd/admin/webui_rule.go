@@ -360,8 +360,8 @@ func settingsInputFrom(r *http.Request) settingsInput {
 	return in
 }
 
-// settingsEdit は設定の 1 つの欄を比べるための 3 つの値。group と note は前後の空白を除いた
-// 文字列、レートは rateString の形で持つ。user は利用者の入力、orig はフォームを描いた時点の
+// settingsEdit は設定の 1 つの欄を比べるための 3 つの値。group と note は formText の形、
+// レートは rateString の形で持つ。user は利用者の入力、orig はフォームを描いた時点の
 // 保存値、cur は今の保存値。
 type settingsEdit struct {
 	user, orig, cur string
@@ -410,8 +410,8 @@ func (s *Server) uiSaveSettings(w http.ResponseWriter, r *http.Request) {
 	cur := rules[idx]
 	in := settingsInputFrom(r)
 
-	group := settingsEdit{user: strings.TrimSpace(in.Group), orig: in.OrigGroup, cur: cur.Group}
-	note := settingsEdit{user: strings.TrimSpace(in.Note), orig: in.OrigNote, cur: cur.Note}
+	group := settingsEdit{user: formText(in.Group), orig: formText(in.OrigGroup), cur: formText(cur.Group)}
+	note := settingsEdit{user: formText(in.Note), orig: formText(in.OrigNote), cur: formText(cur.Note)}
 	rateEdits := make([]settingsEdit, len(settingsRateFields))
 	rateValues := make([]*proto.Rate, len(settingsRateFields))
 	invalid := false
@@ -458,6 +458,15 @@ func (s *Server) uiSaveSettings(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Redirect(w, r, "/ui/rules/"+cur.ID, http.StatusSeeOther)
 	}
+}
+
+// formText は group と note を比べるための形にする。ブラウザは <input type="text"> の値から
+// 改行を取り除き、hidden の値の改行は送信時に CRLF に揃えるので、保存値に改行や前後の空白が
+// あると、そのままでは利用者が触れていない欄でも入力と保存値が食い違う。入力、描いた時点の
+// 保存値、今の保存値の 3 つを同じ形(CR と LF を除き、前後の空白を除く)にしてから比べる。
+// 保存するのは利用者が変えた欄だけなので、触れていない欄の保存値はバイト単位でそのまま残る。
+func formText(s string) string {
+	return strings.TrimSpace(strings.NewReplacer("\r", "", "\n", "").Replace(s))
 }
 
 // parseRateInput は 1 つのレート欄の入力を解釈する。「制限しない」なら nil を返す。
