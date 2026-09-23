@@ -73,12 +73,16 @@ var tr = map[string][2]string{
 	"colAgent":     {"エージェント", "Agent"},
 	"colDest":      {"宛先", "Destination"},
 	"colMode":      {"方式", "Mode"},
-	"colDenied":    {"拒否数", "Denied"},
-	"colRestrict":  {"接続元制限", "Source restrictions"},
-	"applied":      {"適用済み", "Applied"},
-	"disabled":     {"無効", "Disabled"},
-	"agentOffline": {"エージェント未接続", "Agent offline"},
-	"stateError":   {"エラー", "Error"},
+	// 方式の列に出す PROXY protocol の印。PROXY protocol は仕様の固有の名前なので、
+	// 日本語でもそのままにする。i18n を通すのは、同じ概念を指す他の語がすべて T を
+	// 通っているためである。
+	"modeProxyProto": {"PROXY", "PROXY"},
+	"colDenied":      {"拒否数", "Denied"},
+	"colRestrict":    {"接続元制限", "Source restrictions"},
+	"applied":        {"適用済み", "Applied"},
+	"disabled":       {"無効", "Disabled"},
+	"agentOffline":   {"エージェント未接続", "Agent offline"},
+	"stateError":     {"エラー", "Error"},
 	// server のデータプレーンへの適用状態(設計文書 7a.3 節)
 	"serverNotActive": {"サーバーで未適用", "Not active on server"},
 	"serverPending":   {"サーバーで反映待ち", "Pending on server"},
@@ -269,8 +273,18 @@ var tr = map[string][2]string{
 	"doctorProbe":            {"疎通を試す", "Run the probe"},
 	"doctorProbeHelp":        {"押したときだけ、この server からトンネルとエージェントを通って宛先へ TCP 接続を 1 本開きます。宛先にはデータを伴わない接続が 1 本届きます。", "Only when pressed, this opens one real TCP connection from this server, through the tunnel and the agent, to the target. The target sees one connection that carries no data."},
 	"doctorProbeUnavailable": {"疎通の確認を使えるのは、有効な TCP のルールだけです。UDP は送信だけでは成否が分かりません。", "The probe is available for enabled TCP rules only: a UDP send cannot tell success."},
-	"doctorInternalHead":     {"内部の値", "Internal values"},
-	"doctorHiddenHead":       {"既定で隠している検査", "Checks hidden by default"},
+	// 判定が持つ所見は CLI のために書いてあるので、画面から実行できない案内がそのまま出る。
+	// 共有の文は書き換えず、画面の側に 1 文を添える(10.2d 節の改訂の記録)。
+	"doctorSourceFilterNote": {
+		"この画面には接続元アドレスの入力欄がありません。1 つのアドレスを試すには、VPS で sudo wgft server doctor <ルールの ID> --from <接続元アドレス> を実行してください。ルールの ID は画面の先頭にあります。",
+		"This page has no field for a client address. To try one, run sudo wgft server doctor <rule id> --from <client address> on this VPS; the rule ID is at the top of this page.",
+	},
+	"doctorProbeUDPNote": {
+		"このルールは UDP なので、画面からも CLI からも疎通の確認を実行できません。UDP は送信だけでは成否が分かりません。上の target の行から判断し、サービスそのものは実際のクライアントから確かめてください。",
+		"This is a UDP rule, so no probe can run for it, from this page or from the CLI: a UDP send cannot tell success. Judge it from the target line above, and confirm the service from a real client.",
+	},
+	"doctorInternalHead": {"内部の値", "Internal values"},
+	"doctorHiddenHead":   {"既定で隠している検査", "Checks hidden by default"},
 }
 
 // T はキーの訳を返す。未知のキーはキーそのものを返す。

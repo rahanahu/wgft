@@ -449,3 +449,76 @@ func TestClientAndWebUIShareTheSameEvidenceInterface(t *testing.T) {
 	var _ doctor.Evidence = (*Client)(nil)
 	var _ doctor.Evidence = doctorEvidence{}
 }
+
+// escapeForHTML は html/template が本文の中で行う置き換えのうち、この試験が使う 2 つを再現する。
+// 画面の語に < と > が入るので、生の文字列のままでは照合できない。
+var escapeForHTML = strings.NewReplacer("<", "&lt;", ">", "&gt;")
+
+// TestDoctorRulePageSaysHowToTestOneClientAddress は、`rule.source_filter` の行に画面の側の
+// 1 文が添うことを確かめる。判定が持つ次の一手は --from を付け直すよう案内するが、画面には
+// 接続元アドレスの入力欄が無いので、共有の文だけでは運用者が画面の上で何もできない
+// (設計文書 10.2d 節)。共有の文はそのまま残す。一覧の画面の疎通の案内と同じ形である。
+func TestDoctorRulePageSaysHowToTestOneClientAddress(t *testing.T) {
+	srv, _ := newDoctorTestServer(t)
+
+	for _, lang := range []string{"ja", "en"} {
+		body := getBody(t, srv.URL+"/ui/doctor/r_ok?lang="+lang)
+		note := escapeForHTML.Replace(T(lang, "doctorSourceFilterNote"))
+		if n := strings.Count(body, note); n != 1 {
+			t.Errorf("%s: the page carries the screen-side note for the source filter %d times, want 1:\n%s", lang, n, body)
+		}
+		// 共有の文は書き換えない。CLI と画面で同じ事実を違う文で語ると、どちらが正しいかを
+		// 読み手が確かめられなくなる。
+		if !strings.Contains(body, escapeForHTML.Replace("add --from <client address>")) {
+			t.Errorf("%s: the judgment's own next step must stay as the CLI shows it:\n%s", lang, body)
+		}
+	}
+}
+
+// TestDoctorRulePageSaysAUDPRuleCannotBeProbed は、UDP のルールの `rule.probe` の行に画面の側の
+// 1 文が添うことを確かめる。判定の次の一手は --probe を付けるよう案内するが、UDP のルールの
+// 画面にはボタンが無く、管理用 API も確認を拒む。有効な TCP のルールの画面には添えない。
+// 同じ画面にボタンがあるためである。
+func TestDoctorRulePageSaysAUDPRuleCannotBeProbed(t *testing.T) {
+	srv, _ := newDoctorTestServer(t)
+
+	for _, lang := range []string{"ja", "en"} {
+		note := escapeForHTML.Replace(T(lang, "doctorProbeUDPNote"))
+		udp := getBody(t, srv.URL+"/ui/doctor/r_err?lang="+lang)
+		if n := strings.Count(udp, note); n != 1 {
+			t.Errorf("%s: a UDP rule's page carries the probe note %d times, want 1:\n%s", lang, n, udp)
+		}
+		tcp := getBody(t, srv.URL+"/ui/doctor/r_ok?lang="+lang)
+		if strings.Contains(tcp, note) {
+			t.Errorf("%s: an enabled TCP rule's page has the probe button, so it must not say no probe can run:\n%s", lang, tcp)
+		}
+	}
+}
+
+// TestDoctorScreenNoteIsOnlyOnTheCheckThatNeedsIt は、画面の側の 1 文をそれが要る検査にだけ
+// 添えることを確かめる。すべての行に添えると、画面から実行できる案内まで打ち消してしまう。
+func TestDoctorScreenNoteIsOnlyOnTheCheckThatNeedsIt(t *testing.T) {
+	tcp := proto.Rule{ID: "r_t", Proto: proto.TCP, Enabled: true}
+	udp := proto.Rule{ID: "r_u", Proto: proto.UDP, Enabled: true}
+	cases := []struct {
+		name   string
+		in     doctor.Check
+		rule   proto.Rule
+		probed bool
+		want   bool
+	}{
+		{"source filter without a client address", doctor.Check{ID: doctor.CheckSourceFilter, Reason: doctor.ReasonNoFrom}, tcp, false, true},
+		{"source filter judged against a client address", doctor.Check{ID: doctor.CheckSourceFilter, Reason: doctor.ReasonDeniedByDenyList}, tcp, false, false},
+		{"probe on a TCP rule, which has its button on the page", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonNoProbe}, tcp, false, false},
+		{"probe on a UDP rule, which has no button", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonNoProbe}, udp, false, true},
+		{"probe on a UDP rule the admin API already refused", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonNoProbe}, udp, true, false},
+		{"probe on a disabled rule", doctor.Check{ID: doctor.CheckProbe, Reason: doctor.ReasonRuleDisabled}, udp, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := doctorScreenNote(c.in, "en", c.rule, c.probed) != ""; got != c.want {
+				t.Errorf("a screen-side note on %s/%s for %s = %v, want %v", c.in.ID, c.in.Reason, c.rule.Proto, got, c.want)
+			}
+		})
+	}
+}

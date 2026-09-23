@@ -65,6 +65,10 @@ type doctorCheckView struct {
 	Next   string
 	Agent  string
 	RuleID string
+	// ScreenNote は、Next が画面から実行できない検査に画面の側から添える 1 文である。判定が
+	// 持つ所見は CLI と共有しており、同じ事実を 2 つの面で違う文にすると、どちらが正しいかを
+	// 読み手が確かめられなくなるので、共有の文は書き換えない(design.md 10.2d 節)。
+	ScreenNote string
 	// Internal は wgft 自身を追うときだけ要る値である。CLI の --verbose が出すものと同じで、
 	// 画面では行ごとの折りたたみの中に入れる。
 	Internal []string
@@ -139,6 +143,25 @@ func doctorCheckToView(c doctor.Check, locale string) doctorCheckView {
 		Detail: c.Detail, Causes: c.Causes, Next: c.Next, Agent: c.Agent, RuleID: c.RuleID,
 		Internal: c.Internal,
 	}
+}
+
+// doctorScreenNote は、CLI のために書かれた次の一手を画面で読んだときに補う 1 文を返す。
+// 1 本のルールの画面だけが使う。対象は次のとおりである(design.md 10.2d 節の改訂の記録)。
+//
+//   - `rule.source_filter` は --from を付け直すよう案内するが、画面には接続元アドレスの入力欄が
+//     無い。入力欄を設けることは画面から管理用 API を呼び直す新しい操作になるので、この版では
+//     CLI の実行の形を画面に示すだけにする。
+//   - `rule.probe` は、疎通の確認を試していない実行では --probe を付けるよう案内する。有効な
+//     TCP のルールなら同じ画面にボタンがあるが、UDP のルールにはボタンが無く、管理用 API も
+//     確認そのものを拒む。無効なルールの `rule.probe` は別の理由と次の一手を持つので当たらない。
+func doctorScreenNote(c doctor.Check, locale string, r proto.Rule, probed bool) string {
+	switch {
+	case c.ID == doctor.CheckSourceFilter && c.Reason == doctor.ReasonNoFrom:
+		return T(locale, "doctorSourceFilterNote")
+	case c.ID == doctor.CheckProbe && c.Reason == doctor.ReasonNoProbe && !probed && r.Proto == proto.UDP:
+		return T(locale, "doctorProbeUDPNote")
+	}
+	return ""
 }
 
 func doctorRuleToView(rr doctor.RuleReport, rep doctor.Report) doctorRuleRowView {
@@ -249,6 +272,7 @@ func (s *Server) uiDoctorRule(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range rep.ChecksOf(rule.ID) {
 		v := doctorCheckToView(c, locale)
+		v.ScreenNote = doctorScreenNote(c, locale, rule, in.Probed)
 		if c.Hidden(false) {
 			d.Hidden = append(d.Hidden, v)
 			continue
