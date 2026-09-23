@@ -225,7 +225,7 @@ func dialAgentControl(path string) (net.Conn, error) {
 func agentLiveChecks(in agentDoctorInput, run agentRunState, live agentLive) []agentDoctorCheck {
 	out := make([]agentDoctorCheck, 0, len(agentLiveOnly))
 	for _, spec := range agentLiveOnly {
-		c := agentDoctorCheck{ID: spec.ID, Group: spec.Group, Label: spec.Label, verdict: spec.verdict}
+		c := agentDoctorCheck{ID: spec.ID, Group: spec.Group, Label: spec.Label, verdict: spec.verdict, valueOnly: spec.valueOnly}
 		if spec.ID == agentCheckControl {
 			agentControlCheck(&c, run, live)
 			out = append(out, c)

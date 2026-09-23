@@ -294,12 +294,31 @@ func TestAgentDoctorJSONMatchesTheHumanOutput(t *testing.T) {
 					j.Group != c.Group || j.Label != c.Label || j.Detail != c.Detail || j.Next != c.Next {
 					t.Errorf("checks[%d] in JSON = %+v, want the report's %+v", i, j, c)
 				}
+				// 値だけを示す検査(valueOnly)が UNKNOWN の実行では、10.2c 節の Observed values
+				// 節が状態語を出さず、ラベルと値だけを示す(2026-09-24 の所有者の決定)。JSON は
+				// この実行でも status: "unknown" を持つので、人向けの出力の側だけがこの形を採る。
+				// 長い detail は行をまたいで折り返されるので、空白をたたんで比べる。
+				if c.valueOnly && j.Status == statusUnknown {
+					if !strings.Contains(normalizeWhitespace(human.String()), normalizeWhitespace(j.Detail)) {
+						t.Errorf("the human output has no observed value for %q, which JSON reports for %s: %q\n%s", j.Label, j.ID, j.Detail, human.String())
+					}
+					if humanHasLine(human.String(), j.Label, statusWord(j.Status)) {
+						t.Errorf("the observed value %q still prints its status word %s in the human output:\n%s", j.Label, statusWord(j.Status), human.String())
+					}
+					continue
+				}
 				if !humanHasLine(human.String(), j.Label, statusWord(j.Status)) {
 					t.Errorf("the human output has no %q line reading %s, which JSON reports for %s:\n%s", j.Label, statusWord(j.Status), j.ID, human.String())
 				}
 			}
 		})
 	}
+}
+
+// normalizeWhitespace は、連続する空白と改行を 1 個の空白にたたむ。Observed values 節の長い
+// detail は wrapAt で複数行に折り返されるので、折り返しをまたいだ一致を見るのに使う。
+func normalizeWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // humanHasLine は、人向けの出力に、その見出しとその状態の語の行があるかどうかである。行の形は
@@ -845,5 +864,59 @@ func TestAgentDoctorControlSocketCodesNameOneFactEach(t *testing.T) {
 	}
 	if reasons["no socket"] == reasons["path too long"] {
 		t.Errorf("a missing socket and a socket path too long both read %q; they are two facts with two fixes", reasons["no socket"])
+	}
+}
+
+// `--json` は、人向けの出力が値だけを示す検査を「Observed values」節に分けて状態語を省く形に
+// 変わっても、一切変わらない(10.2c 節、2026-09-24 の所有者の決定、7a.11 節)。内部の模型、検査の
+// id、状態、理由の符号、終了コードは変えないという約束を、この 6 つの検査の値で固定する。id と
+// status は表のテストが既に固定しているので、ここでは status と reason の組を場面ごとに書き下す。
+func TestAgentDoctorJSONValueOnlyChecksAreUnaffectedByObservedValues(t *testing.T) {
+	for _, sc := range []struct {
+		name   string
+		setup  func(t *testing.T, in *agentDoctorInput)
+		want   string // 6 つに共通の status
+		reason string // 6 つに共通の reason
+	}{
+		{"a stopped agent", stoppedAgentForTest, statusSkipped, agentReasonNotRunning},
+		{"a healthy running agent", healthyAgentForTest, statusUnknown, agentReasonNoThreshold},
+	} {
+		t.Run(sc.name, func(t *testing.T) {
+			in := testAgentDoctorInput(t, t.TempDir())
+			sc.setup(t, &in)
+			rep := agentDiagnose(in)
+			got := agentDoctorJSONOf(rep)
+			for _, id := range []string{
+				agentCheckStreamBackfl, agentCheckStreamLive, agentCheckWatchdog,
+				agentCheckTransfer, agentCheckSessions, agentCheckRefusals,
+			} {
+				var found *agentDoctorJSONCheck
+				for i := range got.Checks {
+					if got.Checks[i].ID == id {
+						found = &got.Checks[i]
+						break
+					}
+				}
+				if found == nil {
+					t.Fatalf("%s: %s is missing from the JSON", sc.name, id)
+				}
+				if found.Status != sc.want || found.Reason != sc.reason {
+					t.Errorf("%s: %s = %s/%q, want %s/%q", sc.name, id, found.Status, found.Reason, sc.want, sc.reason)
+				}
+			}
+		})
+	}
+}
+
+// この検査の内部の印(agentDoctorCheck.valueOnly)は人向けの出力だけが読み、`--json` には出さない
+// (10.2c 節、2026-09-24 の所有者の決定)。agentdoctorjson.go がこの識別子を読むようになれば、
+// うっかり機械向けの保証にまで染み出すので、静的にも塞いでおく。
+func TestAgentDoctorJSONNeverReadsValueOnly(t *testing.T) {
+	b, err := os.ReadFile("agentdoctorjson.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "valueOnly") {
+		t.Error("agentdoctorjson.go reads valueOnly; it must stay an internal marker for the human output alone")
 	}
 }

@@ -243,11 +243,18 @@ Values read from agent.json carry a "last:" prefix: they are what was saved, not
 what is true now, the same way "agent ls" marks a disconnected agent's report.
 Values read over the control socket carry no prefix: they are current.
 
-Items that only state a value read UNKNOWN, not OK: transfer counters, reconnect
-waits, keepalive times, session counts and refusal totals are healthy or not
-only against knowledge this command does not have, and it sets no threshold of
-its own. The last handshake is shown as a fact for the same reason; whether it
-is healthy is what "server doctor" answers.
+After the five groups, a separate "Observed values" section holds six items
+that only ever state a value, never OK: reconnect waits, keepalive times, the
+watchdog's rebuild interval, transfer counters, session counts and refusal
+totals are healthy or not only against knowledge this command does not have,
+and it sets no threshold of its own. There, a label and its value print with
+no status word, so a healthy agent's six UNKNOWNs do not read as six findings
+the way they would in the groups above. Any of them prints SKIPPED instead,
+with its status word kept, when there is nothing to observe: while the agent
+is stopped, while its control socket cannot be reached, or, for the two relay
+items, before a tunnel and relay exist. The last handshake is shown as a fact
+for the same reason as these six, but it stays inside the tunnel item in the
+Tunnel group, since that item's own status can be OK or FAILED.
 
 The Connection, Tunnel and Relay items other than "wg endpoint resolve" are held
 only by the running process and are read over its control socket. While the

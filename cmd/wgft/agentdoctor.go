@@ -150,6 +150,9 @@ type agentDoctorCheck struct {
 	// 診断そのものが成立しなかったことを表し、終了コード 2 に倒す。状態の語とは別のものとして
 	// 扱う(同節)。
 	evidenceUnreachable bool
+	// valueOnly は、この検査が値だけを示し、合否を持たないことである。人向けの出力だけが読む
+	// 内部の印であり、`--json` には出さない(10.2c 節、2026-09-24 の所有者の決定)。
+	valueOnly bool
 }
 
 // agentDoctorReport は 1 回の診断の結果全体である。
@@ -898,6 +901,11 @@ type agentLiveOnlyCheck struct {
 	Group   string
 	Label   string
 	verdict bool
+	// valueOnly は、この検査が値だけを示し、合否を持たないことである(10.2c 節の「動かさない
+	// 検査のうち…累計か現在値を述べるだけ」の 6 つ、2026-09-24 の所有者の決定)。健全なエージェント
+	// でもこの 6 つは UNKNOWN にしかならないので、人向けの出力では判定済みの検査と分け、大きな
+	// 状態語を出さない。値そのものを読めず SKIPPED になる実行では、通常の検査と同じく状態語を出す。
+	valueOnly bool
 }
 
 // agentLiveOnly は、稼働中のプロセスの制御ソケットからしか取れない検査の並びである。値を入れる
@@ -905,17 +913,17 @@ type agentLiveOnlyCheck struct {
 // SKIPPED として並べる。項目ごと落とす案は採らない。実行の状態によって項目そのものが消えると、
 // 機械が処理しにくくなるためである。
 var agentLiveOnly = []agentLiveOnlyCheck{
-	{agentCheckControl, agentGroupConnection, "control socket", false},
-	{agentCheckStreamConn, agentGroupConnection, "control connection", false},
-	{agentCheckStreamBackfl, agentGroupConnection, "reconnect backoff", false},
-	{agentCheckStreamLive, agentGroupConnection, "liveness", false},
-	{agentCheckTunnelLocal, agentGroupTunnel, "tunnel", true},
-	{agentCheckWatchdog, agentGroupTunnel, "watchdog", false},
-	{agentCheckTransfer, agentGroupTunnel, "transfer", false},
-	{agentCheckListeners, agentGroupRelay, "listeners", true},
-	{agentCheckSessions, agentGroupRelay, "sessions", false},
-	{agentCheckRefusals, agentGroupRelay, "refusals", false},
-	{agentCheckAllowTargets, agentGroupRelay, "target allowlist", false},
+	{ID: agentCheckControl, Group: agentGroupConnection, Label: "control socket"},
+	{ID: agentCheckStreamConn, Group: agentGroupConnection, Label: "control connection"},
+	{ID: agentCheckStreamBackfl, Group: agentGroupConnection, Label: "reconnect backoff", valueOnly: true},
+	{ID: agentCheckStreamLive, Group: agentGroupConnection, Label: "liveness", valueOnly: true},
+	{ID: agentCheckTunnelLocal, Group: agentGroupTunnel, Label: "tunnel", verdict: true},
+	{ID: agentCheckWatchdog, Group: agentGroupTunnel, Label: "watchdog", valueOnly: true},
+	{ID: agentCheckTransfer, Group: agentGroupTunnel, Label: "transfer", valueOnly: true},
+	{ID: agentCheckListeners, Group: agentGroupRelay, Label: "listeners", verdict: true},
+	{ID: agentCheckSessions, Group: agentGroupRelay, Label: "sessions", valueOnly: true},
+	{ID: agentCheckRefusals, Group: agentGroupRelay, Label: "refusals", valueOnly: true},
+	{ID: agentCheckAllowTargets, Group: agentGroupRelay, Label: "target allowlist"},
 }
 
 // agentAllowTargetsState は、宛先の許可一覧だけの例外を当てる。停止中は値を示さず UNKNOWN に
@@ -1104,12 +1112,19 @@ func agentNotTested() []notTested {
 
 // writeAgentDoctorReport は検査を群ごとに出す。操作体系は `server doctor`(10.2a 節)に揃える。
 // `Result:` の行は持たない。転送の経路を順にたどる形を持たないので、転送が止まった位置を言えない
-// ためである(10.2c 節)。
+// ためである(10.2c 節)。値だけを示す検査(agentDoctorCheck.valueOnly)は群から抜き、判定済みの
+// 検査の後に別の節として出す(writeAgentDoctorObserved、2026-09-24 の所有者の決定)。
 func writeAgentDoctorReport(w io.Writer, rep agentDoctorReport) {
 	indent := 2 + labelWidth + 1
 	group := ""
 	unreachable := false
+	var observed []agentDoctorCheck
 	for _, c := range rep.Checks {
+		unreachable = unreachable || c.evidenceUnreachable
+		if c.valueOnly {
+			observed = append(observed, c)
+			continue
+		}
 		if c.Group != group {
 			fmt.Fprintln(w, c.Group)
 			group = c.Group
@@ -1119,8 +1134,8 @@ func writeAgentDoctorReport(w io.Writer, rep agentDoctorReport) {
 		if c.Next != "" && c.Status != statusOK {
 			fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(c.Next, indent+7))
 		}
-		unreachable = unreachable || c.evidenceUnreachable
 	}
+	writeAgentDoctorObserved(w, observed)
 	if unreachable {
 		// 層 2 に当たる実行でも報告は出す。どこまで読めてどこから権限で読めなかったかを示す
 		// ほうが、運用者は直せる(10.2c 節)。
@@ -1130,4 +1145,42 @@ func writeAgentDoctorReport(w io.Writer, rep agentDoctorReport) {
 	}
 	writeHistory(w, rep.History)
 	writeNotTested(w, rep.NotTested)
+}
+
+// writeAgentDoctorObserved は、値だけを示し合否を持たない検査を「Observed values」の節として
+// 出す(10.2c 節、2026-09-24 の所有者の決定)。健全なエージェントでもこの 6 つは UNKNOWN にしか
+// ならないので、判定済みの検査と同じ大きな状態語を並べると、運用者がその列をすべて故障と読む。
+// この節では、値を読めた実行(状態が UNKNOWN)は状態語を出さずラベルと値だけを示す。値そのものを
+// 読めなかった実行は、SKIPPED や、この 6 つがまだ持たない状態が来た場合も含め、判定済みの検査と
+// 同じく状態語を出す。値が無いことは、値と取り違えられてはならないためである。
+func writeAgentDoctorObserved(w io.Writer, checks []agentDoctorCheck) {
+	if len(checks) == 0 {
+		return
+	}
+	indent := 2 + labelWidth + 1
+	fmt.Fprintln(w, "\nObserved values")
+	for _, c := range checks {
+		if c.Status == statusUnknown {
+			writeValueLine(w, c.Label, c.Detail)
+		} else {
+			writeLine(w, c.Label, statusWord(c.Status), c.Detail)
+		}
+		if c.Next != "" && c.Status != statusOK {
+			fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(c.Next, indent+7))
+		}
+	}
+}
+
+// writeValueLine は 1 つの観測値を、状態語を出さずにラベルと値だけで出す。桁は writeLine と
+// 揃え、状態語の桁が無い分だけ同じ行に収められる detail を長くする。
+func writeValueLine(w io.Writer, label, detail string) {
+	indent := 2 + labelWidth + 1
+	if detail != "" && len(detail) <= inlineDetail+statusWidth {
+		fmt.Fprintf(w, "  %-*s %s\n", labelWidth, label, detail)
+		return
+	}
+	fmt.Fprintf(w, "  %s\n", label)
+	if detail != "" {
+		fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", indent), wrapAt(detail, indent))
+	}
 }

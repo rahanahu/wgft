@@ -27,32 +27,35 @@ import (
 
 // agentDoctorTable は 10.2c 節の「検査の一覧と証拠の出どころ」の表そのものである。実装の
 // agentCheckOrder と agentLiveOnly から作らずに書き下すのは、実装がこの表からずれたときに
-// テストが落ちるようにするためである。
+// テストが落ちるようにするためである。valueOnly は、値だけを示し合否を持たない 6 つの検査
+// (reconnect backoff、liveness、watchdog、transfer、sessions、refusals)であることを表し、人向けの
+// 出力で「Observed values」節に入る(2026-09-24 の所有者の決定)。
 var agentDoctorTable = []struct {
-	id      string
-	group   string
-	label   string
-	verdict bool // 「総合判定」の列
+	id        string
+	group     string
+	label     string
+	verdict   bool // 「総合判定」の列
+	valueOnly bool
 }{
-	{"host.platform", "Host", "platform", false},
-	{"host.privileges", "Host", "privileges", false},
-	{"host.interfaces", "Host", "interfaces", false},
-	{"host.resolve", "Host", "endpoint resolve", false},
-	{"agent.credentials", "Credentials", "credentials", true},
-	{"agent.process", "Credentials", "process", true},
-	{"agent.last_state", "Credentials", "last state", false},
-	{"agent.control", "Connection", "control socket", false},
-	{"stream.connection", "Connection", "control connection", false},
-	{"stream.backoff", "Connection", "reconnect backoff", false},
-	{"stream.liveness", "Connection", "liveness", false},
-	{"tunnel.resolve", "Tunnel", "wg endpoint resolve", false},
-	{"tunnel.local", "Tunnel", "tunnel", true},
-	{"tunnel.watchdog", "Tunnel", "watchdog", false},
-	{"tunnel.transfer", "Tunnel", "transfer", false},
-	{"relay.listeners", "Relay", "listeners", true},
-	{"relay.sessions", "Relay", "sessions", false},
-	{"relay.refusals", "Relay", "refusals", false},
-	{"relay.allow_targets", "Relay", "target allowlist", false},
+	{"host.platform", "Host", "platform", false, false},
+	{"host.privileges", "Host", "privileges", false, false},
+	{"host.interfaces", "Host", "interfaces", false, false},
+	{"host.resolve", "Host", "endpoint resolve", false, false},
+	{"agent.credentials", "Credentials", "credentials", true, false},
+	{"agent.process", "Credentials", "process", true, false},
+	{"agent.last_state", "Credentials", "last state", false, false},
+	{"agent.control", "Connection", "control socket", false, false},
+	{"stream.connection", "Connection", "control connection", false, false},
+	{"stream.backoff", "Connection", "reconnect backoff", false, true},
+	{"stream.liveness", "Connection", "liveness", false, true},
+	{"tunnel.resolve", "Tunnel", "wg endpoint resolve", false, false},
+	{"tunnel.local", "Tunnel", "tunnel", true, false},
+	{"tunnel.watchdog", "Tunnel", "watchdog", false, true},
+	{"tunnel.transfer", "Tunnel", "transfer", false, true},
+	{"relay.listeners", "Relay", "listeners", true, false},
+	{"relay.sessions", "Relay", "sessions", false, true},
+	{"relay.refusals", "Relay", "refusals", false, true},
+	{"relay.allow_targets", "Relay", "target allowlist", false, false},
 }
 
 // どの実行でも、10.2c 節の表の検査がすべて、表の順で、表の群と見出しと総合判定の区別を持って
@@ -74,6 +77,9 @@ func TestAgentDoctorEmitsTheDesignTable(t *testing.T) {
 		}
 		if got.verdict != want.verdict {
 			t.Errorf("%s: moves the overall verdict = %v, want %v", got.ID, got.verdict, want.verdict)
+		}
+		if got.valueOnly != want.valueOnly {
+			t.Errorf("%s: valueOnly = %v, want %v", got.ID, got.valueOnly, want.valueOnly)
 		}
 		if got.Status == statusFailed && got.Next == "" {
 			t.Errorf("%s is FAILED with nothing to check next; design 10.2a and 10.2c require it", got.ID)

@@ -633,6 +633,92 @@ func TestAgentDoctorHumanOutputForARunningAgent(t *testing.T) {
 	}
 }
 
+// 値だけを示し合否を持たない 6 つの検査(agentLiveOnly の valueOnly)は、判定済みの検査の後に来る
+// 「Observed values」節に入り、UNKNOWN の実行では大きな状態語を出さない。判定済みの検査は群の中に
+// 残り、これまでどおり状態語を出す(10.2c 節、2026-09-24 の所有者の決定)。
+func TestAgentDoctorHumanOutputSeparatesObservedValues(t *testing.T) {
+	in := testAgentDoctorInput(t, t.TempDir())
+	healthyAgentForTest(t, &in)
+	rep := agentDiagnose(in)
+	var b strings.Builder
+	writeAgentDoctorReport(&b, rep)
+	out := b.String()
+
+	relayAt := strings.Index(out, "Relay\n")
+	observedAt := strings.Index(out, "\nObserved values\n")
+	if relayAt < 0 || observedAt < 0 || observedAt < relayAt {
+		t.Fatalf("Observed values does not come after the five groups:\n%s", out)
+	}
+
+	for _, spec := range agentLiveOnly {
+		if !spec.valueOnly {
+			continue
+		}
+		c, ok := findAgentCheck(rep, spec.ID)
+		if !ok {
+			t.Fatalf("%s is missing from the report", spec.ID)
+		}
+		if c.Status != statusUnknown {
+			t.Fatalf("test setup: %s is %s, want unknown for a healthy running agent; fix the scenario", spec.ID, c.Status)
+		}
+		if humanHasLine(out, spec.Label, statusWord(statusUnknown)) {
+			t.Errorf("%s still prints its status word %s in the human output:\n%s", spec.Label, statusWord(statusUnknown), out)
+		}
+		if at := strings.Index(out, spec.Label); at < observedAt {
+			t.Errorf("%s is not printed inside the Observed values section:\n%s", spec.Label, out)
+		}
+	}
+
+	// 判定済みの検査は変わらず、群の中で状態語を出す。
+	for _, want := range []string{
+		"control socket     OK",
+		"control connection OK",
+		"tunnel             OK",
+		"listeners          OK",
+		"target allowlist   OK",
+	} {
+		at := strings.Index(out, want)
+		if at < 0 {
+			t.Errorf("the output has no %q:\n%s", want, out)
+			continue
+		}
+		if at > observedAt {
+			t.Errorf("%q moved into the Observed values section:\n%s", want, out)
+		}
+	}
+}
+
+// エージェントが止まっていて値そのものを読めない実行では、値だけを示す検査も Observed values 節の
+// 中で SKIPPED の状態語を保つ。値が無いことは、値と取り違えられてはならない(10.2c 節)。
+func TestAgentDoctorHumanOutputKeepsTheStatusWordWhenAnObservedValueIsSkipped(t *testing.T) {
+	in := testAgentDoctorInput(t, t.TempDir())
+	stoppedAgentForTest(t, &in)
+	rep := agentDiagnose(in)
+	var b strings.Builder
+	writeAgentDoctorReport(&b, rep)
+	out := b.String()
+
+	observedAt := strings.Index(out, "\nObserved values\n")
+	if observedAt < 0 {
+		t.Fatalf("no Observed values section:\n%s", out)
+	}
+	for _, spec := range agentLiveOnly {
+		if !spec.valueOnly {
+			continue
+		}
+		c, ok := findAgentCheck(rep, spec.ID)
+		if !ok {
+			t.Fatalf("%s is missing from the report", spec.ID)
+		}
+		if c.Status != statusSkipped {
+			t.Fatalf("test setup: %s is %s, want skipped for a stopped agent; fix the scenario", spec.ID, c.Status)
+		}
+		if !humanHasLine(out[observedAt:], spec.Label, statusWord(statusSkipped)) {
+			t.Errorf("%s does not print its status word %s inside Observed values:\n%s", spec.Label, statusWord(statusSkipped), out)
+		}
+	}
+}
+
 // --- 助け ---
 
 // fakeDoctorSocket は、制御ソケットの代わりに 1 行の応答を返すエージェントを模す。要求が
