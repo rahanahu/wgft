@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -653,6 +654,11 @@ func TestUDPTargetIsNotTested(t *testing.T) {
 			st.At = at(targetReportStale + time.Second)
 			in.Rules.AgentRuleStates[r.ID] = st
 		}, statusUnknown, reasonStaleReport, statusUnknown},
+		{"UDP rule whose agent is disconnected", udpRule(), func(r proto.Rule, in *doctorInput) {
+			st := in.Rules.AgentRuleStates[r.ID]
+			st.Connected = false
+			in.Rules.AgentRuleStates[r.ID] = st
+		}, statusUnknown, reasonStaleReport, statusUnknown},
 		{"UDP rule whose agent reports an error", udpRule(), func(r proto.Rule, in *doctorInput) {
 			in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{Agent: "home", State: proto.StatusError,
 				Reason: "bind failed: address already in use", At: at(10 * time.Second), Connected: true}
@@ -682,6 +688,56 @@ func TestUDPTargetIsNotTested(t *testing.T) {
 			}
 			if c.Status == statusNotTested && !strings.HasPrefix(c.Detail, "not tested: ") {
 				t.Errorf("a NOT TESTED target line must say so first, got %q", c.Detail)
+			}
+		})
+	}
+}
+
+// TestUDPEndToEndItemDoesNotContradictTheTargetLine は、試していない範囲の「udp end to end」の
+// 項目が、`rule.target` が NOT TESTED 以外になる実行と食い違わないことを確かめる。エージェントが
+// bind の失敗を報告している UDP のルールでは target の行は FAILED になり、報告が古ければ
+// UNKNOWN になる。同じ出力の末尾の項目が、条件を付けずに「target の行は NOT TESTED になる」と
+// 述べると、1 つの出力の中で矛盾する(設計文書 10.2a 節、2026-09-24 の改訂の記録)。
+func TestUDPEndToEndItemDoesNotContradictTheTargetLine(t *testing.T) {
+	cases := []struct {
+		name     string
+		edit     func(r proto.Rule, in *doctorInput)
+		wantLine string
+	}{
+		{"agent reports a bind failure", func(r proto.Rule, in *doctorInput) {
+			in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{Agent: "home", State: proto.StatusError,
+				Reason: "bind failed: address already in use", At: at(10 * time.Second), Connected: true}
+		}, "FAILED"},
+		{"agent's report is stale", func(r proto.Rule, in *doctorInput) {
+			st := in.Rules.AgentRuleStates[r.ID]
+			st.At = at(targetReportStale + time.Second)
+			in.Rules.AgentRuleStates[r.ID] = st
+		}, "UNKNOWN"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := udpRule()
+			in := healthyInput(r)
+			tc.edit(r, &in)
+			var b strings.Builder
+			writeRuleReport(&b, buildReport([]proto.Rule{r}, in), false)
+			out := b.String()
+			if !regexp.MustCompile(`(?m)^  target +` + tc.wantLine).MatchString(out) {
+				t.Fatalf("precondition: the target line must read %s:\n%s", tc.wantLine, out)
+			}
+			i := strings.Index(out, "  udp end to end")
+			if i < 0 {
+				t.Fatalf("the report lists no udp end to end item:\n%s", out)
+			}
+			item := strings.Join(strings.Fields(out[i:]), " ")
+			if j := strings.Index(item, " mtu "); j >= 0 {
+				item = item[:j]
+			}
+			if strings.Contains(item, "so its target line reads NOT TESTED") {
+				t.Errorf("the udp end to end item must not say unconditionally that the target reads NOT TESTED while the target line reads %s: %q", tc.wantLine, item)
+			}
+			if !strings.Contains(item, "while the agent reports its listener open, the target line reads NOT TESTED, never OK") {
+				t.Errorf("the udp end to end item must put its NOT TESTED under the condition of an open listener, got %q", item)
 			}
 		})
 	}
