@@ -116,11 +116,13 @@ rule's traffic gets from the VPS, "agent doctor" answers what this one host
 looks like, and it answers while the agent is stopped as well as while it runs.
 
 It reads only what this host holds: the credentials file, kept as agent.json in
-the data directory set by WGFT_DATA_DIR, and the operating system. It needs no
-server and no admin API. It changes nothing: it creates no lock file, it takes
-no exclusive lock, and it opens no connection to a target. The two exceptions to
-reading alone are name resolution: it resolves the agent API endpoint and the
-WireGuard peer, neither of which opens a connection to a service.
+the data directory set by WGFT_DATA_DIR, the operating system, and, while an
+agent runs here, that process's own state over the control socket next to the
+credentials file. It needs no server and no admin API. It changes nothing: it
+creates no lock file, it takes no exclusive lock, and it opens no connection to
+a target. The two exceptions to reading alone are name resolution: it resolves
+the agent API endpoint and the WireGuard peer, neither of which opens a
+connection to a service.
 
 Its own settings come from where "agent run" takes them: the flags, the
 environment and the dotenv file named by --config. A dotenv file that is there
@@ -146,11 +148,26 @@ is in one of the same five states "server doctor" uses:
 
 Values read from agent.json carry a "last:" prefix: they are what was saved, not
 what is true now, the same way "agent ls" marks a disconnected agent's report.
+Values read over the control socket carry no prefix: they are current.
+
+Items that only state a value read UNKNOWN, not OK: transfer counters, reconnect
+waits, keepalive times, session counts and refusal totals are healthy or not
+only against knowledge this command does not have, and it sets no threshold of
+its own. The last handshake is shown as a fact for the same reason; whether it
+is healthy is what "server doctor" answers.
 
 The Connection, Tunnel and Relay items other than "wg endpoint resolve" are held
-only by the running process and are read over its control socket. This build
-does not read that socket yet, so they are listed as SKIPPED with the reason why
-rather than left out.
+only by the running process and are read over its control socket. While the
+agent is stopped, or while its socket cannot be reached, they are listed as
+SKIPPED with the reason why rather than left out. One of them, the target
+allowlist, reads UNKNOWN instead while no process is running or while that
+cannot be settled: the list is a setting, so evidence for it exists somewhere,
+but only the running process says which list it is holding. Two answers about that socket
+are not a forwarding fault and never raise the exit code above 0: a path longer
+than a Unix socket name holds, and an agent that never opened the socket. Being
+refused by the socket's permissions is exit 2, since the verdict items behind it
+stay unread. An agent started from an older binary answers that it does not know
+the command; restart it to read its live state.
 
 Being stopped is a failure here: a stopped agent forwards nothing, so "process"
 reads FAILED. Four items decide the verdict: credentials, process, tunnel and

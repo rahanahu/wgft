@@ -38,7 +38,7 @@ func serveTestControl(t *testing.T, rt *runtime) controlAsk {
 	dir := t.TempDir()
 	rt.opts.CredentialsPath = filepath.Join(dir, "agent.json")
 	path := ControlPath(rt.opts.CredentialsPath)
-	if len(path) > controlPathLimit {
+	if len(path) > ControlPathLimit {
 		t.Skipf("temp dir %q makes the control socket path too long for a Unix socket", dir)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -212,8 +212,8 @@ func TestDoctorReportsHandshakePending(t *testing.T) {
 	if !tun.Present {
 		t.Fatal("tunnel present = false, want true")
 	}
-	if tun.State != proto.StatusError || tun.Reason != reasonHandshakePending {
-		t.Errorf("tunnel state/reason = %q/%q, want %q/%q", tun.State, tun.Reason, proto.StatusError, reasonHandshakePending)
+	if tun.State != proto.StatusError || tun.Reason != ReasonHandshakePending {
+		t.Errorf("tunnel state/reason = %q/%q, want %q/%q", tun.State, tun.Reason, proto.StatusError, ReasonHandshakePending)
 	}
 	if !tun.LastHandshake.IsZero() {
 		t.Errorf("last handshake = %s, want the zero time", tun.LastHandshake)

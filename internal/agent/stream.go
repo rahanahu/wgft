@@ -390,7 +390,7 @@ func runHeartbeats(done <-chan struct{}, tick <-chan time.Time, notify <-chan st
 // needsHandshakeFollowUp は、ハートビートのトンネル状態がハンドシェイク待ちによる誤りかどうかを見る
 // (仕様 5.2 節)。トンネルが無い、bind に失敗した、といった本当の誤りとは区別する。
 func needsHandshakeFollowUp(t proto.TunnelStatus) bool {
-	return t.State == proto.StatusError && t.Reason == reasonHandshakePending
+	return t.State == proto.StatusError && t.Reason == ReasonHandshakePending
 }
 
 func writeJSON(ctx context.Context, ws *websocket.Conn, m proto.Message) error {

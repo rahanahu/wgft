@@ -394,12 +394,14 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			},
 			want: []wantCheck{
 				{agentCheckProcess, statusOK, ""},
-				// 稼働中でも、この版は制御ソケットを読まない。control_socket_unreachable は
-				// 接続そのものができない場合の符号なので、この場合に当ててはならない。
-				{agentCheckControl, statusSkipped, agentReasonLiveStateNotRead},
-				{agentCheckTunnelLocal, statusSkipped, agentReasonLiveStateNotRead},
-				{agentCheckAllowTargets, statusSkipped, agentReasonLiveStateNotRead},
+				// このデータディレクトリには制御ソケットが無いので、稼働中のプロセスからしか
+				// 取れない検査は繋げなかった場合として並ぶ。稼働中に繋げない実行では、宛先の
+				// 許可一覧も停止中の UNKNOWN ではなく SKIPPED である(10.2c 節)。
+				{agentCheckControl, statusFailed, agentReasonControlUnreachable},
+				{agentCheckTunnelLocal, statusSkipped, agentReasonControlUnreachable},
+				{agentCheckAllowTargets, statusSkipped, agentReasonControlUnreachable},
 			},
+			// 制御ソケットに繋げないことは、終了コード 1 が答える問いに対して偽である。
 			wantExit: 0,
 		},
 		{
@@ -736,7 +738,7 @@ func TestAgentDoctorHumanOutputSaysWhenEvidenceIsMissing(t *testing.T) {
 // 断定すると、動いているエージェントについて事実でないことを述べる(10.2c 節)。
 func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
 	unknown := agentRunState{State: flock.Unknown, Err: errors.New("permission denied"), PermissionDenied: true}
-	checks := agentLiveOnlyChecks(unknown)
+	checks := agentLiveChecks(agentDoctorInput{}, unknown, agentLive{Kind: liveNotAttempted})
 	var allow agentDoctorCheck
 	for _, c := range checks {
 		if c.ID == agentCheckAllowTargets {
@@ -756,7 +758,7 @@ func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
 		t.Errorf("relay.allow_targets tells the operator to start an agent that may already be running: %q", allow.Next)
 	}
 	// 停止していると判定できた実行は、今までどおり停止中の文面のままである。
-	stopped := agentLiveOnlyChecks(agentRunState{State: flock.Absent})
+	stopped := agentLiveChecks(agentDoctorInput{}, agentRunState{State: flock.Absent}, agentLive{Kind: liveNotAttempted})
 	for _, c := range stopped {
 		if c.ID != agentCheckAllowTargets {
 			continue

@@ -23,14 +23,17 @@ import (
 // ControlPath は認証情報ファイルに対応する制御ソケットの場所。
 func ControlPath(path string) string { return path + ".sock" }
 
-// controlPathLimit は、どの OS でも収まる制御ソケットのパスの長さ(バイト)。sockaddr_un の sun_path は
+// ControlPathLimit は、どの OS でも収まる制御ソケットのパスの長さ(バイト)。sockaddr_un の sun_path は
 // Linux と Windows で 108 バイト、macOS で 104 バイトで、終端の NUL を含む(仕様 11a 節)。
-const controlPathLimit = 103
+//
+// 公開しているのは、繋げなかった理由が長さにあるかどうかを外から判定する読み手がいるためである
+// (設計文書 10.2c 節の agent.control)。写しを持たせると、片方だけを直したときに判定が食い違う。
+const ControlPathLimit = 103
 
 // explainControlErr は、パスが長すぎて開けない・つなげない場合に原因と対処を添える。Go の net は
 // sun_path に収まらない名前を OS を呼ぶ前に EINVAL で拒否するので、元のエラーは "invalid argument" しか言わない。
 func explainControlErr(path string, err error) error {
-	if err == nil || !errors.Is(err, syscall.EINVAL) || len(path) <= controlPathLimit {
+	if err == nil || !errors.Is(err, syscall.EINVAL) || len(path) <= ControlPathLimit {
 		return err
 	}
 	return fmt.Errorf("%w: the socket path is %d bytes; Unix socket paths hold at most 107 bytes on Linux and Windows and 103 on macOS, so use a shorter data directory", err, len(path))

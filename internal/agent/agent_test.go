@@ -306,7 +306,7 @@ func TestNeedsHandshakeFollowUp(t *testing.T) {
 		want bool
 	}{
 		{"ok", proto.TunnelStatus{State: proto.StatusOK}, false},
-		{"handshake not established", proto.TunnelStatus{State: proto.StatusError, Reason: reasonHandshakePending}, true},
+		{"handshake not established", proto.TunnelStatus{State: proto.StatusError, Reason: ReasonHandshakePending}, true},
 		{"no tunnel", proto.TunnelStatus{State: proto.StatusError, Reason: "no tunnel; full state not received"}, false},
 		{"real tunnel error", proto.TunnelStatus{State: proto.StatusError, Reason: "wireguard: listen: address already in use"}, false},
 	}
@@ -332,7 +332,7 @@ func TestRunHeartbeatsFollowsUpUntilHandshake(t *testing.T) {
 		if established {
 			hb.Tunnel = proto.TunnelStatus{State: proto.StatusOK}
 		} else {
-			hb.Tunnel = proto.TunnelStatus{State: proto.StatusError, Reason: reasonHandshakePending}
+			hb.Tunnel = proto.TunnelStatus{State: proto.StatusError, Reason: ReasonHandshakePending}
 		}
 		sendCh <- hb
 		return hb, true
@@ -369,7 +369,7 @@ func TestRunHeartbeatsStopsFollowUpAfterTimeout(t *testing.T) {
 	var calls atomic.Int32
 	send := func() (proto.Heartbeat, bool) {
 		calls.Add(1)
-		return proto.Heartbeat{Tunnel: proto.TunnelStatus{State: proto.StatusError, Reason: reasonHandshakePending}}, true
+		return proto.Heartbeat{Tunnel: proto.TunnelStatus{State: proto.StatusError, Reason: ReasonHandshakePending}}, true
 	}
 
 	done := make(chan struct{})
