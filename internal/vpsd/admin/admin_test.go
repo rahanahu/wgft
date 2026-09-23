@@ -290,8 +290,8 @@ func TestUIRenderLocales(t *testing.T) {
 		}
 	}
 
-	// ヘッダと本文の枠は同じ最大幅の枠 1 つに入る。戻るボタンが本文の枠の右端にそろうのは、
-	// 両方がこの枠の幅に従うからである。幅はページの種類で決まる。
+	// パンくずと本文は、ページの種類で幅が決まる枠 1 つに入る。ヘッダはその枠の外にあり、
+	// どのページでもダッシュボードと同じ形で描く(TestHeaderSameOnEveryPage)。
 	frames := []struct {
 		path  string
 		width string
@@ -312,9 +312,11 @@ func TestUIRenderLocales(t *testing.T) {
 			continue
 		}
 		rest := body[i:]
-		h, m := strings.Index(rest, `<header class="topbar">`), strings.Index(rest, "<main>")
-		if h < 0 || m < 0 || h > m {
-			t.Errorf("%s: the header and the main content are not both inside the page frame, header first", f.path)
+		if n, m := strings.Index(rest, `<nav class="crumbs"`), strings.Index(rest, "<main>"); n < 0 || m < 0 || n > m {
+			t.Errorf("%s: the breadcrumb and the main content are not both inside the page frame, breadcrumb first", f.path)
+		}
+		if strings.Contains(rest, `<header class="topbar">`) {
+			t.Errorf("%s: the header is inside the page frame; it must not take the frame's width", f.path)
 		}
 		if n := strings.Count(body, "max-width:"+f.width); n != 1 {
 			t.Errorf("%s: max-width:%s appears %d times, want only on the page frame", f.path, f.width, n)
@@ -416,5 +418,33 @@ func assertBreadcrumb(t *testing.T, name, body string, links []string, current s
 	}
 	if strings.Contains(body, `class="top-actions"`) {
 		t.Errorf("%s: the header still has an action area on the right", name)
+	}
+}
+
+// TestHeaderSameOnEveryPage は、ダッシュボードと共通の枠のすべてのページが同じヘッダを、同じ
+// 位置に描くことを確かめる。ヘッダは app-shell の最初の子で、ロゴの部分は同じテンプレート
+// ("brand")から出る。ロゴの位置がページごとに動かないのは、ヘッダがページの幅の枠の外にあり、
+// どのページでも同じ入れ物と同じクラスで描かれるからである。
+func TestHeaderSameOnEveryPage(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, proto.Rule{ID: "r_a", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true}), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
+	defer srv.Close()
+
+	space := strings.NewReplacer(" ", "", "\n", "", "\t", "")
+	const head = `<divclass="app-shell"><headerclass="topbar"><divclass="brand-wrap"><divclass="brand">wgft</div><divclass="subtitle">`
+	for _, path := range []string{"/", "/ui/doctor", "/ui/doctor/r_a", "/ui/rules/r_a", "/ui/rules/r_a/check", "/ui/add-rule", "/ui/add-agent", "/ui/rules/import"} {
+		body := space.Replace(getBody(t, srv.URL+path+"?lang=en"))
+		if !strings.Contains(body, head) {
+			t.Errorf("%s: the page does not open with the shared header", path)
+		}
 	}
 }

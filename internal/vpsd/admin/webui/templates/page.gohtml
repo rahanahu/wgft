@@ -1,3 +1,5 @@
+{{ define "brand" }}<div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ . }}</div></div>{{ end }}
+
 {{ define "page" }}<!doctype html>
 <html lang="{{ .Locale }}">
 <head>
@@ -10,12 +12,13 @@
 </head>
 <body>
   <div class="app-shell">
-    {{- /* ヘッダ、パンくず、本文の枠は同じ最大幅の枠に入り、左端がそろう(設計文書 10.1 節) */ -}}
+    {{- /* ヘッダはダッシュボードと同じ位置と大きさで描き、ロゴがどのページでも同じ場所に来る。
+         ページごとに幅が変わるのは、パンくずと本文の枠だけで、左端はロゴにそろう(設計文書 10.1 節) */}}
+    <header class="topbar">
+      {{ template "brand" .Title }}
+    </header>
     {{ $w := 640 }}{{ if .MaxWidth }}{{ $w = .MaxWidth }}{{ else if .Wide }}{{ $w = 900 }}{{ end }}
     <div class="page-frame" style="max-width:{{ $w }}px">
-      <header class="topbar">
-        <div class="brand-wrap"><div class="brand">wgft</div><div class="subtitle">{{ .Title }}</div></div>
-      </header>
       {{ with .Crumbs }}<nav class="crumbs" aria-label="{{ T $.Locale "crumbNav" }}"><ol>
         {{- range . }}<li>{{ if .Href }}<a href="{{ .Href }}">{{ .Label }}</a>{{ else }}<span aria-current="page">{{ .Label }}</span>{{ end }}</li>{{ end -}}
       </ol></nav>{{ end }}

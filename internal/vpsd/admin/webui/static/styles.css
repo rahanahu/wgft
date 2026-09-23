@@ -53,7 +53,7 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
 .app-shell { min-height: 100vh; padding: 18px; }
-.topbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-bottom: 16px; }
+.topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: 16px; }
 .brand-wrap { display: flex; align-items: baseline; gap: 14px; }
 .brand { font-size: 30px; font-weight: 800; letter-spacing: -0.04em; }
 .subtitle { color: var(--muted); font-size: 14px; }
@@ -133,7 +133,6 @@ h2 { font-size: 18px; margin: 0; }
 .footer { color: var(--muted); text-align: center; font-size: 11px; padding: 16px 0 2px; }
 
 @media (max-width: 1080px) {
-  .topbar { align-items: flex-start; }
   .top-actions { flex-wrap: wrap; justify-content: flex-end; }
 }
 
