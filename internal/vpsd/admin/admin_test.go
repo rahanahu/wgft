@@ -290,8 +290,9 @@ func TestUIRenderLocales(t *testing.T) {
 	}
 
 	// 共通の枠(page.gohtml)を使うページでは、ダッシュボードへ戻る導線はヘッダのボタン 1 つだけ
-	// にする。枠の中に同じ行き先の戻るリンクを重ねない。
-	for _, path := range []string{"/ui/add-rule", "/ui/add-agent", "/ui/rules/r_a/check", "/ui/rules/r_a", "/ui/rules/import", "/ui/doctor", "/ui/doctor/r_a"} {
+	// にする。枠の中に同じ行き先の戻るリンクを重ねない。診断の画面はボタンの代わりにパンくずを
+	// 持つ(TestDoctorBreadcrumb)。
+	for _, path := range []string{"/ui/add-rule", "/ui/add-agent", "/ui/rules/r_a/check", "/ui/rules/r_a", "/ui/rules/import"} {
 		for _, locale := range []string{"ja", "en"} {
 			if n := strings.Count(get(path+"?lang="+locale), T(locale, "back")); n != 1 {
 				t.Errorf("%s %s: the back-to-dashboard link appears %d times, want 1", locale, path, n)
@@ -343,4 +344,56 @@ func findRuleT(t *testing.T, st *store.Store, id string) proto.Rule {
 	}
 	t.Fatalf("rule %q not found", id)
 	return proto.Rule{}
+}
+
+// TestDoctorBreadcrumb は、診断の画面がヘッダの戻るボタンの代わりにパンくずを持つことを確かめる。
+// 上位の項目はリンクで、今いるページの項目はリンクにしない。戻る道はパンくずの 1 本だけである。
+func TestDoctorBreadcrumb(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, proto.Rule{ID: "r_a", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true}), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
+	defer srv.Close()
+
+	cases := []struct {
+		path    string
+		links   []string
+		current string
+	}{
+		{"/ui/doctor", []string{`<a href="/">Dashboard</a>`}, `<span aria-current="page">Diagnostics</span>`},
+		{"/ui/doctor/r_a", []string{`<a href="/">Dashboard</a>`, `<a href="/ui/doctor">Diagnostics</a>`}, `<span aria-current="page">TCP 25565 → home</span>`},
+	}
+	for _, tc := range cases {
+		body := getBody(t, srv.URL+tc.path+"?lang=en")
+		i := strings.Index(body, `<nav class="crumbs"`)
+		if i < 0 {
+			t.Errorf("%s: no breadcrumb", tc.path)
+			continue
+		}
+		nav := body[i : i+strings.Index(body[i:], "</nav>")]
+		for _, l := range tc.links {
+			if !strings.Contains(nav, l) {
+				t.Errorf("%s: breadcrumb lacks %s:\n%s", tc.path, l, nav)
+			}
+		}
+		if !strings.Contains(nav, tc.current) {
+			t.Errorf("%s: breadcrumb lacks the current item %s:\n%s", tc.path, tc.current, nav)
+		}
+		if n := strings.Count(nav, "<a "); n != len(tc.links) {
+			t.Errorf("%s: breadcrumb has %d links, want %d; the current page must not be a link", tc.path, n, len(tc.links))
+		}
+		if strings.Contains(body, T("en", "back")) {
+			t.Errorf("%s: the header's back button is still there beside the breadcrumb", tc.path)
+		}
+		if strings.Contains(body, "Back to the diagnosis") {
+			t.Errorf("%s: the in-panel back link is still there beside the breadcrumb", tc.path)
+		}
+	}
 }

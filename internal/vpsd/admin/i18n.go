@@ -270,8 +270,9 @@ var tr = map[string][2]string{
 	// 診断の画面(設計文書 10.2d 節)。検査の見出し、状態の語、群の名前と所見の自由文は
 	// 英語のままにするので、ここには持たない。画面の枠の語だけを切り替える。
 	"doctorTitle":            {"診断", "Diagnostics"},
+	"crumbDashboard":         {"ダッシュボード", "Dashboard"},
+	"crumbNav":               {"現在の位置", "Breadcrumb"},
 	"doctorIntro":            {"この画面は、server が既に受け取っている観測から組み立てます。開いた時点では、どこへも接続を試しません。", "This page is built from what the server has already observed. Opening it dials nothing."},
-	"doctorBackToSummary":    {"← 診断の一覧へ戻る", "← Back to the diagnosis"},
 	"doctorFinding":          {"所見", "Finding"},
 	"doctorHistoryHead":      {"履歴", "History"},
 	"doctorNotTestedHead":    {"この診断が試していない範囲", "Not tested by this diagnosis"},
