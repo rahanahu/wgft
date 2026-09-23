@@ -3,6 +3,9 @@
 package main
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/startup"
@@ -53,7 +56,11 @@ func linuxOnlyServerCmd(use, short string) *cobra.Command {
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// DisableFlagParsing を付けたコマンドでは cobra が --help を拾わないので、ここで拾う。
-			// `--` より後ろはフラグではないので見ない。
+			// `--` より後ろはフラグではないので見ない。help は pflag の bool フラグなので、
+			// `-h`、`--help` に加えて `--help=true`、`-h=true`、`--help=false`、`-h=false` も
+			// pflag と同じく strconv.ParseBool で解く。値が真に解けない場合、実物の cobra は
+			// フラグの誤りとしてコマンド全体を止めるが、この差し替えは help か拒否かの二択しか
+			// 持たないので、help ではない側、つまり拒否に倒す。
 			for _, a := range args {
 				if a == "--" {
 					break
@@ -61,10 +68,28 @@ func linuxOnlyServerCmd(use, short string) *cobra.Command {
 				if a == "-h" || a == "--help" {
 					return cmd.Help()
 				}
+				if v, ok := boolFlagValue(a, "--help"); ok && v {
+					return cmd.Help()
+				}
+				if v, ok := boolFlagValue(a, "-h"); ok && v {
+					return cmd.Help()
+				}
 			}
 			return linuxOnlyRefusal()
 		},
 	}
+}
+
+// boolFlagValue は、引数 a が `<name>=<値>` の形なら、値を strconv.ParseBool で解いて返す。pflag は
+// bool フラグの `=` の後ろをこの関数と同じ規則で解く。値が解けなければ ok は false であり、呼び出し側は
+// help とは扱わない。
+func boolFlagValue(a, name string) (v bool, ok bool) {
+	prefix := name + "="
+	if !strings.HasPrefix(a, prefix) {
+		return false, false
+	}
+	v, err := strconv.ParseBool(a[len(prefix):])
+	return v, err == nil
 }
 
 // linuxOnlyLong は、差し替えのコマンドの --help に出る説明である。Linux 向けの説明の代わりに置く。

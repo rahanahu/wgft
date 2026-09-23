@@ -38,6 +38,12 @@ func TestLinuxOnlyServerGroupRefuses(t *testing.T) {
 		{"the group itself starts nothing", []string{"server"}, "cannot continue " + subject},
 		// `--` より後ろの --help はフラグではないので、help ではなく拒否になる。
 		{"help after -- is not a flag", []string{"server", "run", "--", "--help"}, "refusing to start " + subject},
+		// --help=false と -h=false は pflag の bool フラグと同じく help を求めない。
+		{"help=false is not help", []string{"server", "run", "--help=false"}, "refusing to start " + subject},
+		{"h=false is not help", []string{"server", "run", "-h=false"}, "refusing to start " + subject},
+		// 値が真に解けない場合、この差し替えは help ではなく拒否に倒す(実物の cobra はフラグの
+		// 誤りとしてコマンド全体を止める。server_other.go の boolFlagValue のコメントを参照)。
+		{"help with an unparsable value is not help", []string{"server", "run", "--help=nope"}, "refusing to start " + subject},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := newRootCmd()
@@ -76,6 +82,10 @@ func TestLinuxOnlyServerHelpSaysItIsNotHere(t *testing.T) {
 		{"server", "run", "--help"},
 		{"help", "server", "run"},
 		{"help", "server", "doctor"},
+		// pflag の bool フラグと同じく、--help=true と -h=true も help を求める。
+		{"server", "run", "--help=true"},
+		{"server", "run", "-h=true"},
+		{"server", "run", "-h"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			root := newRootCmd()
