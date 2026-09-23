@@ -8,8 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -181,9 +179,7 @@ func (serverNetwork) ListenTCP(port uint16) (net.Listener, error) {
 }
 
 // newServerTunnel は VPS 側のトンネルを listen_port=0 で立て、OS が選んだ実際のポートを
-// IpcGet で読み返す。wireguard-go の device.BindUpdate は net.ListenUDP と同じ規則で port 0 を
-// 実際の空きポートに解決し (golang.zx2c4.com/wireguard の device/device.go)、device.IpcGet は
-// net.port が非 0 になった時点でその実際の値を listen_port として返す (device/uapi.go)。
+// Tunnel.ListenPort で読み返す。
 //
 // 連続するポートを順に試す走査は、Windows の実機で空きが見つからずに失敗することがあった。
 // OS に選ばせる形は走査の幅に依存しない。
@@ -194,39 +190,16 @@ func newServerTunnel(t *testing.T, priv wgtypes.Key, addr netip.Addr) (*Tunnel, 
 	if err != nil {
 		t.Fatalf("server tunnel: %v", err)
 	}
-	port, err := boundListenPort(tun)
+	port, err := tun.ListenPort()
 	if err != nil {
 		tun.Close()
 		t.Fatalf("read back the OS-assigned listen_port: %v", err)
 	}
 	if port == 0 {
 		tun.Close()
-		t.Fatal("server tunnel bound but IpcGet reports listen_port=0")
+		t.Fatal("server tunnel bound but ListenPort reports 0")
 	}
 	return tun, port
-}
-
-// boundListenPort reads tun's actual wg listen port back through IpcGet. It exists because
-// Config.ListenPort=0 lets the OS pick the port, and Tunnel has no exported way to read it back;
-// this test file is in package utun, so it reaches the unexported dev field directly instead of
-// adding one to production code (utun.Tunnel).
-func boundListenPort(tun *Tunnel) (uint16, error) {
-	out, err := tun.dev.IpcGet()
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(out, "\n") {
-		k, v, ok := strings.Cut(line, "=")
-		if !ok || k != "listen_port" {
-			continue
-		}
-		n, err := strconv.ParseUint(v, 10, 16)
-		if err != nil {
-			return 0, fmt.Errorf("parse listen_port %q: %w", v, err)
-		}
-		return uint16(n), nil
-	}
-	return 0, fmt.Errorf("IpcGet output has no listen_port line")
 }
 
 // newAgentTunnel はエージェント側のトンネルを立てて Run を回す (internal/agent/agent.go の
