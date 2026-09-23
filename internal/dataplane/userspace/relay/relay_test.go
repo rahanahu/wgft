@@ -262,9 +262,11 @@ func udpEcho(t *testing.T) (addr string, packets *atomic.Int64) {
 // it at all, since Prepare skips a rule's later ports once an earlier one of the same rule already
 // failed, so a held-open reservation could still be sitting there when the test's own re-bind
 // check runs), TestTCPTargetCheck's target port (deliberately unreachable at first; a real server
-// only binds it later, in the test itself, to prove the target coming back is noticed), and the
-// UDP destinations that stay unreachable for the whole test in TestUDPNoTargetCheck and
-// readwait_windows_test.go.
+// only binds it later, in the test itself, to prove the target coming back is noticed),
+// TestStatusSeparatesBindFailureFromTargetFailure's `deadTarget` (it must stay unreachable for the
+// whole test, so that the listener bound in front of it reports a target failure and not a bind
+// failure), and the UDP destinations that stay unreachable for the whole test in
+// TestUDPNoTargetCheck and readwait_windows_test.go.
 func freePort(t *testing.T) uint16 {
 	t.Helper()
 	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})

@@ -134,8 +134,12 @@ type listener struct {
 	// 上限の対象になるフロー(UDP はセッション、TCP は公開側の接続)を 1 つずつここで取る。
 	// ルールごとの数は Pool が同じルールの待ち受けの合計で見るので、分割と統合で所属ルールが
 	// 変わったリスナーの既存のフローは移動先のルールで数える(仕様 7 節)
-	budget  *resource.Listener
-	bindErr error // リスナーを開けなかった(bind 失敗)。Retry で開き直す
+	budget *resource.Listener
+	// bindErr は待ち受けを開けなかったこと。bind の失敗のほか、宛先が許可一覧の外にある IP
+	// リテラルで bind を試みなかった場合の誤りもここに入る(設計文書 7 節の openLocked)。
+	// どちらも待ち受けを持たない状態を表すので、Status.Listening はこの値が nil かどうかである。
+	// Retry で開き直す
+	bindErr error
 	// targetErr は TCP ルールで target への接続確認が失敗したときの誤り(仕様 5.2 節)。
 	// リスナー自体は開いているので、Retry では開き直さず再確認だけする
 	targetErr error
@@ -445,11 +449,17 @@ func (m *Manager) applyProbes(probes []targetProbe) {
 
 // Status はリスナーごとの状態(ハートビート用)。
 type Status struct {
-	Key      Key
-	Target   string
-	RuleID   string
-	Sessions int
-	Err      error
+	Key    Key
+	Target string
+	RuleID string
+	// Listening は待ち受けを開けているかどうか。偽なら待ち受けが無く、Err はその理由、つまり
+	// bind の失敗か、宛先が許可一覧の外で bind を試みなかったことである。真で Err が非 nil なら、
+	// 待ち受けは開いていて宛先に届かない。Err だけでは bind の失敗が宛先の失敗に優先するので
+	// 2 つを区別できず、bind の失敗はポートの衝突を、宛先の失敗は宛先の機器を指すため、
+	// 運用者の次の行動が違う(設計文書 10.2c 節)
+	Listening bool
+	Sessions  int
+	Err       error
 }
 
 // Status は現在のリスナーごとの宣言値と状態を返す(ハートビートの材料)。
@@ -458,7 +468,12 @@ func (m *Manager) Status() []Status {
 	defer m.mu.Unlock()
 	out := make([]Status, 0, len(m.listeners))
 	for _, l := range m.listeners {
-		out = append(out, Status{Key: l.key, Target: l.target, RuleID: l.ruleID, Sessions: l.sessions(), Err: l.err()})
+		out = append(out, Status{
+			Key: l.key, Target: l.target, RuleID: l.ruleID,
+			Listening: l.bindErr == nil,
+			Sessions:  l.sessions(),
+			Err:       l.err(),
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key.String() < out[j].Key.String() })
 	return out
