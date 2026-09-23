@@ -426,29 +426,32 @@ func waitHandshake(t *testing.T, rt *runtime, budget time.Duration) {
 	t.Fatalf("no handshake within %s", budget)
 }
 
-// newServerTunnel は VPS 側のトンネルを立てる。port が 0 なら空いているものを走査で選ぶ
-// (bind の成功そのものが空きの証拠になる。utun/utun_test.go と同じ考え方)。
+// newServerTunnel は VPS 側のトンネルを立てる。port が 0 なら listen_port=0 で bind し、OS が
+// 選んだ実際のポートを Tunnel.ListenPort で読み返す(utun/inprocess_forward_test.go と同じ考え方)。
+// 51850-51899 のような狭い範囲を順に走査すると、この範囲を同時に使う他のテストプロセスと
+// 衝突しやすい。TestCheckTunnelResetsAfterHandshake が同じ port を指定して呼び直すのは、
+// サーバを同じ listen port で再起動する場面を確かめるためで、その bind は元から特定の
+// ポート番号を指定している。
 func newServerTunnel(t *testing.T, priv wgtypes.Key, port uint16) (*utun.Tunnel, uint16) {
 	t.Helper()
 	quiet := func(string, ...any) {}
 	addr := netip.MustParseAddr("10.200.0.1")
+	s, err := utun.New(utun.Config{PrivateKey: priv, ListenPort: port, Address: addr, MTU: 1420, Logf: quiet})
+	if err != nil {
+		t.Fatalf("server tunnel on port %d: %v", port, err)
+	}
+	t.Cleanup(s.Close)
 	if port != 0 {
-		s, err := utun.New(utun.Config{PrivateKey: priv, ListenPort: port, Address: addr, MTU: 1420, Logf: quiet})
-		if err != nil {
-			t.Fatalf("server tunnel on port %d: %v", port, err)
-		}
-		t.Cleanup(s.Close)
 		return s, port
 	}
-	for p := uint16(51850); p < 51900; p++ {
-		s, err := utun.New(utun.Config{PrivateKey: priv, ListenPort: p, Address: addr, MTU: 1420, Logf: quiet})
-		if err == nil {
-			t.Cleanup(s.Close)
-			return s, p
-		}
+	got, err := s.ListenPort()
+	if err != nil {
+		t.Fatalf("read back the OS-assigned listen_port: %v", err)
 	}
-	t.Fatal("no free wg listen port on 127.0.0.1 after 50 attempts")
-	return nil, 0
+	if got == 0 {
+		t.Fatal("server tunnel bound but ListenPort reports 0")
+	}
+	return s, got
 }
 
 // newKey は wg の秘密鍵を 1 つ作る。

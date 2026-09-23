@@ -78,6 +78,35 @@ func New(cfg Config) (*Tunnel, error) {
 	return t, nil
 }
 
+// ListenPort は実際に bind した wg の listen port を IpcGet から読み返す。Config.ListenPort が 0
+// なら OS が空きポートを選ぶので(device.BindUpdate が net.ListenUDP と同じ規則で解決し、IpcGet は
+// net.port が非 0 になった時点でその実際の値を返す。golang.zx2c4.com/wireguard の device/device.go
+// と device/uapi.go)、この呼び出しでその値を読み返す。Config.ListenPort が 0 でなければ、その値が
+// そのまま返る。
+//
+// Close の後に呼んでも誤りにはならず、bind していたときの listen_port を誤りとしてでは
+// なく引き続き返す。wireguard-go の closeBindLocked(device/device.go)が net.port を 0 に
+// 戻さず、IpcGetOperation(device/uapi.go)は net.port が非 0 の間ずっとその行を出すためである。
+// 呼び出し側は戻り値を「今 bind している値」ではなく「直近に bind していた値」として扱う。
+func (t *Tunnel) ListenPort() (uint16, error) {
+	out, err := t.dev.IpcGet()
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || k != "listen_port" {
+			continue
+		}
+		n, err := strconv.ParseUint(v, 10, 16)
+		if err != nil {
+			return 0, fmt.Errorf("parse listen_port %q: %w", v, err)
+		}
+		return uint16(n), nil
+	}
+	return 0, fmt.Errorf("IpcGet output has no listen_port line")
+}
+
 // SetPeers は宣言のピア集合に収束させる(足りないものを足し、余分を消す)。
 // カーネルモードの wg.Ensure(internal/vpsd/wg)のピア部分に相当し、変えた点を返す。
 // ピアのエンドポイントは指定しない(エージェントからの握手でローミング学習する)。

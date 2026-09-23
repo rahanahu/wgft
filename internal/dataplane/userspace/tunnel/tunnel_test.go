@@ -146,19 +146,23 @@ func waitPing(t *testing.T, tun *Tunnel, want bool, budget time.Duration, when s
 		!want, when, budget, st.LastHandshake, st.RxBytes, st.TxBytes, st.Err)
 }
 
-// newServerTunnel は VPS 側のトンネルを空いている listen_port で立てる。ポートは走査で選ぶ
-// (bind の成功そのものが空きの証拠になる。utun/utun_test.go と同じ考え方)。
+// newServerTunnel は VPS 側のトンネルを listen_port=0 で立て、OS が選んだ実際のポートを
+// Tunnel.ListenPort で読み返す(utun/inprocess_forward_test.go と同じ考え方)。
 func newServerTunnel(t *testing.T, priv wgtypes.Key, addr netip.Addr) (*utun.Tunnel, uint16) {
 	t.Helper()
-	for p := uint16(51950); p < 52000; p++ {
-		s, err := utun.New(utun.Config{PrivateKey: priv, ListenPort: p, Address: addr, MTU: 1420, Logf: func(string, ...any) {}})
-		if err == nil {
-			t.Cleanup(s.Close)
-			return s, p
-		}
+	s, err := utun.New(utun.Config{PrivateKey: priv, ListenPort: 0, Address: addr, MTU: 1420, Logf: func(string, ...any) {}})
+	if err != nil {
+		t.Fatalf("server tunnel: %v", err)
 	}
-	t.Fatal("no free wg listen port on 127.0.0.1 after 50 attempts")
-	return nil, 0
+	t.Cleanup(s.Close)
+	port, err := s.ListenPort()
+	if err != nil {
+		t.Fatalf("read back the OS-assigned listen_port: %v", err)
+	}
+	if port == 0 {
+		t.Fatal("server tunnel bound but ListenPort reports 0")
+	}
+	return s, port
 }
 
 // assertGoroutinesSettle は、閉じた後に goroutine の数が基準値まで戻ることを確かめる

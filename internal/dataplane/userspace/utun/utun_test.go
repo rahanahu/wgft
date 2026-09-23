@@ -21,19 +21,8 @@ func TestServerTunnelWithAgentTunnel(t *testing.T) {
 	ck, _ := wgtypes.GeneratePrivateKey()
 	quiet := func(string, ...any) {}
 
-	// listen_port は空いているものを探す
-	var srv *Tunnel
-	var port uint16
-	for p := uint16(51900); p < 51950; p++ {
-		s, err := New(Config{PrivateKey: sk, ListenPort: p, Address: netip.MustParseAddr("10.200.0.1"), Logf: quiet})
-		if err == nil {
-			srv, port = s, p
-			break
-		}
-	}
-	if srv == nil {
-		t.Fatal("no free port for the server tunnel")
-	}
+	// listen_port は OS に選ばせる (newServerTunnel、inprocess_forward_test.go)
+	srv, port := newServerTunnel(t, sk, netip.MustParseAddr("10.200.0.1"))
 	defer srv.Close()
 
 	client, err := tunnel.New(tunnel.Config{
