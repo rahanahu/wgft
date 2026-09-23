@@ -284,11 +284,12 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 .doctor-table th.path-head { white-space: normal; }
 
 /* パンくず。ボタンではなく現在の位置を示すので、枠も背景も持たない小さな薄い文字にする */
-.crumbs { margin: -6px 0 10px; font-size: 13px; color: var(--muted); min-width: 0; }
+.crumbs { margin: -6px 0 10px; font-size: 14px; color: var(--muted); min-width: 0; }
 .crumbs ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: baseline; min-width: 0; }
 .crumbs li { display: flex; align-items: baseline; min-width: 0; max-width: 100%; }
-.crumbs li + li::before { content: "/"; margin: 0 8px; color: var(--border); }
-.crumbs a { color: var(--muted); text-decoration: none; }
+.crumbs li + li::before { content: "/"; margin: 0 8px; color: color-mix(in srgb, var(--border) 65%, var(--bg)); }
+/* 濃さの段階:リンクは本文と薄字の間、今いるページは薄字より一段弱く、区切りはさらに弱い */
+.crumbs a { color: color-mix(in srgb, var(--text) 35%, var(--muted)); font-weight: 500; text-decoration: none; }
 .crumbs a:hover, .crumbs a:focus-visible { color: var(--accent); text-decoration: underline; }
 .crumbs [aria-current] { opacity: 0.8; }
 /* 狭い画面では項目ごとに折り返し、1 項目が 1 行に収まらなければ末尾を省略する。横にはみ出させない */
