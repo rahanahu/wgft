@@ -92,7 +92,7 @@ func isConnReset(err error) bool {
 }
 
 // friendlyDialErr は dial の失敗を運用者向けの短い文にする。Linux でしか動かない package なので
-// (internal/vpsd はカーネルの netlink を直接使う。CLAUDE.md の 7a.7 節)、syscall の型で判定して
+// (internal/vpsd はカーネルの netlink を直接使う。docs/design.md の 7a.7 節)、syscall の型で判定して
 // 差し支えない。errors.Is は net.OpError・os.SyscallError を辿って元の errno まで見る
 func friendlyDialErr(err error) string {
 	switch {
