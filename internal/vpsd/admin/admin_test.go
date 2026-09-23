@@ -390,14 +390,29 @@ func TestPageBreadcrumbs(t *testing.T) {
 
 // assertBreadcrumb は、ページのパンくずが links のリンクをこの順に持ち、current を今いるページの
 // 項目(リンクではない)として末尾に持ち、ページにダッシュボードへ戻るボタンが無いことを確かめる。
+// ダッシュボードへのリンクは、パンくずの先頭とフォームの取り消しボタンのほかに置かない。文言を
+// 変えた戻るリンク(「← Dashboard」など)もこれで見つかる。言語は links の先頭の文言から決める。
 func assertBreadcrumb(t *testing.T, name, body string, links []string, current string) {
 	t.Helper()
+	locale := "en"
+	if len(links) > 0 && strings.Contains(links[0], T("ja", "crumbDashboard")) {
+		locale = "ja"
+	}
 	i := strings.Index(body, `<nav class="crumbs"`)
 	if i < 0 {
 		t.Errorf("%s: no breadcrumb", name)
 		return
 	}
-	nav := body[i : i+strings.Index(body[i:], "</nav>")]
+	end := i + strings.Index(body[i:], "</nav>")
+	nav := body[i:end]
+	if want := `<nav class="crumbs" aria-label="` + T(locale, "crumbNav") + `">`; !strings.HasPrefix(nav, want) {
+		t.Errorf("%s: the breadcrumb does not open with %s:\n%s", name, want, nav)
+	}
+	rest := body[:i] + body[end:]
+	rest = strings.ReplaceAll(rest, `<a class="btn" href="/">`+T(locale, "cancel")+`</a>`, "")
+	if strings.Contains(rest, `href="/"`) {
+		t.Errorf("%s: a link to the dashboard sits outside the breadcrumb and the form's Cancel button", name)
+	}
 	at := 0
 	for _, l := range links {
 		k := strings.Index(nav[at:], l)
