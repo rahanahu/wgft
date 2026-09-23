@@ -17,14 +17,8 @@ func TestAcquireIsExclusive(t *testing.T) {
 	if _, err := Acquire(state); !errors.Is(err, ErrLocked) {
 		t.Fatalf("second Acquire = %v, want ErrLocked", err)
 	}
-	if locked, err := IsLocked(state); err != nil || !locked {
-		t.Fatalf("IsLocked = %v, %v; want true", locked, err)
-	}
 	if err := first.Release(); err != nil {
 		t.Fatal(err)
-	}
-	if locked, err := IsLocked(state); err != nil || locked {
-		t.Fatalf("IsLocked after release = %v, %v; want false", locked, err)
 	}
 	again, err := Acquire(state)
 	if err != nil {

@@ -39,9 +39,6 @@ func Acquire(path string) (*Lock, error) {
 	return l, nil
 }
 
-// IsLocked は誰かがロックを持っているか(ロックは取らない)。
-func IsLocked(path string) (bool, error) { return flock.IsLocked(path) }
-
 // State は Inspect が読み取ったロックファイルの状態。
 type State = flock.State
 

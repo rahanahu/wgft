@@ -22,8 +22,8 @@ func TestLock(t *testing.T) {
 	if got := ErrLocked.Error(); got != "credentials file is in use by another process" {
 		t.Errorf("ErrLocked = %q, want the credentials file wording", got)
 	}
-	if locked, _ := IsLocked(path); !locked {
-		t.Error("IsLocked = false while held")
+	if state, err := Inspect(path); err != nil || state != Locked {
+		t.Errorf("Inspect while held = %v, %v; want Locked", state, err)
 	}
 	// 別プロセスからも取れない
 	out, err := exec.Command("flock", "-n", LockPath(path), "true").CombinedOutput()
@@ -31,8 +31,8 @@ func TestLock(t *testing.T) {
 		t.Errorf("external flock should fail while held: %s", out)
 	}
 	l.Release()
-	if locked, _ := IsLocked(path); locked {
-		t.Error("IsLocked = true after release")
+	if state, err := Inspect(path); err != nil || state != Unlocked {
+		t.Errorf("Inspect after release = %v, %v; want Unlocked", state, err)
 	}
 	again, err := Acquire(path)
 	if err != nil {

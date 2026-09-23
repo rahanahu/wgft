@@ -40,19 +40,6 @@ func Acquire(statePath string) (*Lock, error) {
 	return &Lock{f: f}, nil
 }
 
-// IsLocked は誰かがロックを持っているか(ロックは取らない)。
-func IsLocked(statePath string) (bool, error) {
-	l, err := Acquire(statePath)
-	if errors.Is(err, ErrLocked) {
-		return true, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	l.Release()
-	return false, nil
-}
-
 // State は Inspect が読み取ったロックファイルの状態。
 type State int
 
