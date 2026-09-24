@@ -70,7 +70,7 @@ func Check(opts Options, out io.Writer) error {
 	// 読み取り専用で開く。store.Open は権限を狭め、スキーマを移行するので、check では使わない(仕様 9 節)
 	st, err := store.OpenReadOnly(opts.DBPath)
 	if err != nil {
-		fmt.Fprintf(out, "server database: cannot open: %v\n", err)
+		printDBOpenFailure(out, err)
 		return nil
 	}
 	defer st.Close()
@@ -184,6 +184,27 @@ func checkRulePorts(out io.Writer, rules []proto.Rule, mode string) {
 	for _, f := range findings {
 		fmt.Fprintf(out, "  - %s\n", f)
 	}
+}
+
+// printDBOpenFailure は、サーバのデータベースを開けなかった理由を出す。server check の終了コードは
+// この場合も 0 のままなので(7a.11 節)、運用者は終了コードでなく出力でこの失敗に気付く必要がある。
+// 新しい版が書いたスキーマ(store.SchemaNewerError)は、そのうちで運用者が最も見落としてはいけない
+// 場合である。この版はそのデータベースをまったく読めず、ちょうど入れ替えの巻き戻しの最中、
+// 新しい版が書いたデータベースに対して旧い版の server check を実行する場面で起きる。専用の、
+// 他の行に紛れない文言にし、出力の先頭からでも末尾からでも読み落とさないよう 2 回出す
+// (改訂の記録参照)。それ以外の理由(権限、他プロセスの保持、壊れたファイルなど)は、
+// 従来どおり 1 行だけ出す。
+func printDBOpenFailure(out io.Writer, err error) {
+	var sne *store.SchemaNewerError
+	if errors.As(err, &sne) {
+		headline := fmt.Sprintf("server database: schema version %d is newer than this binary; this binary supports up to %d and cannot run with this database at all", sne.Version, sne.MaxSupported)
+		fmt.Fprintln(out, headline)
+		fmt.Fprintln(out, "server database: install the newer wgft again, or restore a copy of the database taken with this version")
+		fmt.Fprintf(out, "server database: cannot open: %v\n", err)
+		fmt.Fprintln(out, headline)
+		return
+	}
+	fmt.Fprintf(out, "server database: cannot open: %v\n", err)
 }
 
 // printDBModes は、SQLite の本体と WAL の補助ファイルの権限を 1 行ずつ出す。0600 より広ければ、

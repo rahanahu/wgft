@@ -294,7 +294,7 @@ func OpenReadOnly(path string) (*Store, error) {
 	}
 	if version > len(migrations) {
 		db.Close()
-		return nil, fmt.Errorf("%w: version %d, while this binary supports up to %d", ErrSchemaNewer, version, len(migrations))
+		return nil, &SchemaNewerError{Version: version, MaxSupported: len(migrations)}
 	}
 	return &Store{db: db, filePath: path}, nil
 }
@@ -344,11 +344,28 @@ func narrowMode(path string) error {
 // Close は SQLite を閉じる。
 func (s *Store) Close() error { return s.db.Close() }
 
-// ErrSchemaNewer is returned by Open when the database was written by a newer wgft, whose schema
-// this binary does not know. The caller (internal/vpsd.Run) turns it into a startup refusal: no
-// amount of restarting teaches an older binary a newer schema, only installing that binary again or
-// restoring a copy of the database does (design.md 11b 節).
+// ErrSchemaNewer is returned by Open and OpenReadOnly when the database was written by a newer
+// wgft, whose schema this binary does not know. Open's caller (internal/vpsd.Run) turns it into a
+// startup refusal: no amount of restarting teaches an older binary a newer schema, only installing
+// that binary again or restoring a copy of the database does (design.md 11b 節). OpenReadOnly's
+// caller (internal/vpsd.Check, "server check") cannot refuse: its exit code stays 0 by design
+// (design.md 7a.11 節), so it prints a dedicated line instead (改訂の記録参照).
 var ErrSchemaNewer = errors.New("server database schema is newer than this binary")
+
+// SchemaNewerError wraps ErrSchemaNewer with the two version numbers behind it, so a caller can
+// build a message that names them without re-parsing Error()'s text.
+type SchemaNewerError struct {
+	// Version is PRAGMA user_version, as found in the database.
+	Version int
+	// MaxSupported is the highest schema version this binary knows, that is len(migrations).
+	MaxSupported int
+}
+
+func (e *SchemaNewerError) Error() string {
+	return fmt.Sprintf("%s: version %d, while this binary supports up to %d", ErrSchemaNewer, e.Version, e.MaxSupported)
+}
+
+func (e *SchemaNewerError) Unwrap() error { return ErrSchemaNewer }
 
 func (s *Store) migrate() error {
 	var version int
@@ -356,7 +373,7 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if version > len(migrations) {
-		return fmt.Errorf("%w: version %d, while this binary supports up to %d", ErrSchemaNewer, version, len(migrations))
+		return &SchemaNewerError{Version: version, MaxSupported: len(migrations)}
 	}
 	for i := version; i < len(migrations); i++ {
 		tx, err := s.db.Begin()
