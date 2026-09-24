@@ -113,6 +113,18 @@ func validateBool(env, val string) error {
 // dev_valid_name と同じで、空でないこと、15 バイト以内、"." と ".." でないこと、'/'、':'、空白を
 // 含まないことである。これを通さずに進むと netlink の LinkAdd が EINVAL で返るだけで、環境由来の
 // 失敗と区別が付かない。
+//
+// dev_valid_name はインタフェース名を Unicode の文字列としてではなく、生のバイト列として 1 バイト
+// ずつ調べる。空白の判定も同じで、カーネルの isspace(lib/ctype.c の _ctype テーブル)が空白とする
+// 7 バイトは、通常の ASCII の空白(0x09-0x0D、0x20)に加えて 0xA0 を含む。0xA0 は Latin-1 の
+// non-breaking space だが、UTF-8 では "à" (U+00E0) のような文字の 2 バイト目にも現れる。このため
+// isKernelSpace はバイト単位で調べる。Unicode のルーンとして比べる strings.ContainsAny では、
+// "à" は 1 つのルーンとして扱われ、その内側の 0xA0 というバイトを見逃す。
+//
+// 合わせて次の 2 バイトも拒む。どちらも dev_valid_name 自身には拒まれないが、通すと宣言した名前と
+// 実際に付く名前が食い違う。NUL バイトは、name を C の文字列として netlink へ渡す際にそこで
+// 切られるので、検査した文字列と実際に設定される名前が食い違う。'%' は、`register_netdevice` が
+// "wg%d" のような名前をテンプレートとして扱い、指定と違う番号付きの名前を作ってしまう。
 func validateInterfaceName(env, name string) error {
 	switch {
 	case name == "":
@@ -121,10 +133,23 @@ func validateInterfaceName(env, name string) error {
 		return configErrorf(env, "%q is longer than the 15 bytes the kernel allows for an interface name", name)
 	case name == "." || name == "..":
 		return configErrorf(env, "%q is not a usable interface name", name)
-	case strings.ContainsAny(name, "/: \t\n\v\f\r"):
-		return configErrorf(env, "%q contains a character the kernel rejects in an interface name: /, : or whitespace", name)
+	}
+	for i := 0; i < len(name); i++ {
+		if b := name[i]; b == '/' || b == ':' || b == '%' || b == 0 || isKernelSpace(b) {
+			return configErrorf(env, "%q contains byte 0x%02x, which is not usable in an interface name; /, :, %%, a NUL byte and whitespace including 0xa0 are not allowed", name, b)
+		}
 	}
 	return nil
+}
+
+// isKernelSpace は、カーネルの isspace が空白とみなすバイトかどうかを返す(validateInterfaceName
+// のコメントを参照)。
+func isKernelSpace(b byte) bool {
+	switch b {
+	case '\t', '\n', '\v', '\f', '\r', ' ', 0xA0:
+		return true
+	}
+	return false
 }
 
 // parseDotenv は最小構文の dotenv を読む(3.1 節)。
