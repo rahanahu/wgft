@@ -25,10 +25,14 @@ type fakeKernel struct {
 	calls    []string
 	counters []nft.Drop // counters of the current table
 	flushErr error
-	stageErr error
-	wgErr    func(peers []wg.Peer) error
-	devPeers []wg.Peer
-	rules    []conntrack.Rule
+	// replacedTable, when set with flushErr, is the fingerprint of the table a failing flush leaves
+	// published anyway: the kernel took the batch, but the flush then failed (ENOBUFS on the replies,
+	// or sets that do not hold what was sent).
+	replacedTable string
+	stageErr      error
+	wgErr         func(peers []wg.Peer) error
+	devPeers      []wg.Peer
+	rules         []conntrack.Rule
 	// dev and table are what inspect and fingerprint read back (drift_test.go).
 	dev   wg.DeviceState
 	table string // fingerprint of the table; "" means the table is missing
@@ -71,6 +75,9 @@ type fakeStaged struct{ k *fakeKernel }
 func (s fakeStaged) Flush() error {
 	s.k.calls = append(s.k.calls, "flush")
 	if s.k.flushErr != nil {
+		if s.k.replacedTable != "" {
+			s.k.table = s.k.replacedTable
+		}
 		return s.k.flushErr
 	}
 	s.k.counters = nil // a new table starts with zero counters
