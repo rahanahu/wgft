@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"sync"
 	"syscall"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -28,12 +29,19 @@ import (
 
 // Device は 1 つの IPv4 アドレスを持つ gVisor netstack 上の tun.Device で、wireguard-go の
 // device.Device に組み込める。wireguard-go 自身の netstack.Net と違い、Stack を公開する。
+//
+// 閉じたことは closed で知らせ、incomingPacket は閉じない。WriteNotify は gVisor の stack の
+// goroutine から呼ばれ、Close の途中や後にも走りうる (channel.Endpoint の RemoveNotify は、
+// 通知の途中の呼び出しを待たない)。incomingPacket を閉じると、受け渡しを待っている WriteNotify が
+// 閉じた channel への送信で panic する。上流の tun/netstack はこの形のままである。
 type Device struct {
 	ep             *channel.Endpoint
 	stack          *stack.Stack
 	events         chan tun.Event
 	notifyHandle   *channel.NotificationHandle
 	incomingPacket chan *buffer.View
+	closed         chan struct{}
+	closeOnce      sync.Once
 	mtu            int
 }
 
@@ -51,6 +59,7 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		}),
 		events:         make(chan tun.Event, 10),
 		incomingPacket: make(chan *buffer.View),
+		closed:         make(chan struct{}),
 		mtu:            mtu,
 	}
 	sack := tcpip.TCPSACKEnabled(true) // 既定では無効
@@ -80,8 +89,10 @@ func (t *Device) MTU() (int, error)        { return t.mtu, nil }
 func (t *Device) BatchSize() int           { return 1 }
 
 func (t *Device) Read(buf [][]byte, sizes []int, offset int) (int, error) {
-	view, ok := <-t.incomingPacket
-	if !ok {
+	var view *buffer.View
+	select {
+	case view = <-t.incomingPacket:
+	case <-t.closed:
 		return 0, os.ErrClosed
 	}
 	n, err := view.Read(buf[0][offset:])
@@ -114,16 +125,24 @@ func (t *Device) WriteNotify() {
 	}
 	view := pkt.ToView()
 	pkt.DecRef()
-	t.incomingPacket <- view
+	select {
+	case t.incomingPacket <- view:
+	case <-t.closed:
+		// 閉じた後は読む者がいないので捨てる。
+		view.Release()
+	}
 }
 
+// Close は device を閉じる。2 回目以降の呼び出しは何もしない。
 func (t *Device) Close() error {
-	t.stack.RemoveNIC(1)
-	t.stack.Close()
-	t.ep.RemoveNotify(t.notifyHandle)
-	t.ep.Close()
-	close(t.events)
-	close(t.incomingPacket)
+	t.closeOnce.Do(func() {
+		t.stack.RemoveNIC(1)
+		t.stack.Close()
+		t.ep.RemoveNotify(t.notifyHandle)
+		t.ep.Close()
+		close(t.events)
+		close(t.closed)
+	})
 	return nil
 }
 
