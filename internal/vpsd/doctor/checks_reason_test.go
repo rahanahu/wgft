@@ -6,9 +6,21 @@ import "testing"
 // 符号に写すかを確かめる。文言はいずれも実装が返しうるものである。timeout の行は、
 // ユーザー空間モードの中継(internal/dataplane/userspace/relay)の probeTarget が返す確認の期限
 // 切れの文言そのものであり、以前はどの case にも当たらず target_error に落ちていた(target が
-// 黙って SYN を捨てるルールをラボで作って確認した)。bind: の行は、Go の net.Listen がそのまま
-// 返す文言であり、この形の bind 失敗はユーザー空間モードの中継では実際には再現できていない
-// (設計文書 10.2a 節の改訂の記録)。それでも符号を当てられることは確かめておく。
+// 黙って SYN を捨てるルールをラボで作って確認した)。"listen tcp4 ...: bind: ..." の行は、Go の
+// net.Listen がそのまま返す文言である。"tcp/8461: bind tcp ...: ..." と "udp/8462: bind udp ...:
+// ..." の行は、エージェントのユーザー空間モードの中継が bind の失敗で実際に組み立てる文言の形
+// である。internal/dataplane/userspace/dataplane_userspace.go の ruleStatuses は
+// "<Key>: <Err>" を組む。エージェントは gVisor の netstack の上で待ち受けを開くので、bind の
+// 失敗はその Err に Go の net.OpError がそのまま乗り、internal/nettun/listen.go の ListenTCP と
+// gonet.DialUDP(UDP のリスナーが経由する。同ファイル ListenUDP)のどちらも Op を "listen" では
+// なく "bind" にするため、"bind tcp <addr>: <err>" / "bind udp <addr>: <err>" の形になる
+// (net.Listen の "listen ...: bind: ..." とは組み立てが違う)。"<Key>: <Err>" の組み立てと、
+// bind ではなく dial・connect の失敗でこの形になることは、ラボで実際に起こした dial の失敗
+// ("tcp/9000: dial tcp 192.168.50.3:25580: connect: connection refused")で確かめた。bind の
+// 失敗そのもの、つまりこの経路に利用者の操作から実際に至る道筋は、2 本のルールに同じ待ち受け
+// ポートを与える経路(server が rule add 自体を拒む)と、同じポートでルールを削除して即座に
+// 追加し直す経路(80 回試して 1 度も失敗しなかった)の 2 つをラボで試し、どちらも再現しなかった
+// (設計文書 10.2a 節の改訂の記録に記載の、以前からの未確認と同じ)。
 func TestTargetReasonCode(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -38,6 +50,16 @@ func TestTargetReasonCode(t *testing.T) {
 		{
 			name:   "agent's own bind failed wording",
 			reason: "bind failed: address already in use",
+			want:   ReasonListenerBindFailed,
+		},
+		{
+			name:   "agent's userspace relay TCP listener bind, real net.OpError wording",
+			reason: "tcp/8461: bind tcp 10.200.0.2:8461: port is in use",
+			want:   ReasonListenerBindFailed,
+		},
+		{
+			name:   "agent's userspace relay UDP listener bind, real net.OpError wording",
+			reason: "udp/8462: bind udp 10.200.0.2:8462: port is in use",
 			want:   ReasonListenerBindFailed,
 		},
 		{

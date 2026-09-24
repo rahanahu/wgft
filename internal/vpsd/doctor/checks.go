@@ -563,7 +563,7 @@ func looksLikeResolveFailure(reason string) bool {
 			return true
 		}
 	}
-	return false
+	return strings.Contains(reason, "bind tcp ") || strings.Contains(reason, "bind udp ")
 }
 
 // targetCheck は、そのルールの持ち主のエージェント自身の報告である(設計文書 5.2、7a.11 節の
@@ -714,17 +714,25 @@ func targetReasonCode(reason string) string {
 	return ReasonTargetError
 }
 
-// looksLikeBindFailure は、エージェントの理由がリスナーの bind の失敗かどうかを見る。エージェント
-// 自身の文言 "bind failed" に加え、Go の net.Listen がそのまま返す形("listen ...: bind: address
-// already in use" のような、"listen" と "bind:" を伴う文言)も含む。ユーザー空間モードの中継
-// (internal/dataplane/userspace/relay)では、この符号に至る経路を実際には踏めていない(設計文書
-// 改訂の記録)。それでも符号は残し、両方の文言を見る。将来この経路を踏んだときに target_error へ
-// 沈めないためである。
+// looksLikeBindFailure は、エージェントの理由がリスナーの bind の失敗かどうかを見る。3 つの文言の
+// 形を見る。エージェント自身の文言 "bind failed"、Go の net.Listen がそのまま返す形("listen ...:
+// bind: address already in use" のような、"listen" と "bind:" を伴う文言)、そしてユーザー空間
+// モードの中継(internal/dataplane/userspace/relay)が実際に組み立てる形である。エージェントの
+// 中継は gVisor の netstack(internal/nettun/listen.go の ListenTCP、UDP のリスナーが経由する
+// gonet.DialUDP)の上で待ち受けを開き、その bind の失敗は Go の net.OpError をそのまま経由するが、
+// Op が "listen" ではなく "bind" になる("bind tcp 10.200.0.2:8080: port is in use" の形。
+// net.Listen の "listen ...: bind: ..." とは組み立てが違うので、以前の判定には当たらなかった)。
+// この形はソースコードから読み取った実際の組み立てで、意味の分からない target_error に落ちて
+// いた。利用者の操作からこの bind の失敗そのものに至る経路は、ラボで 2 通り試したがまだ再現
+// できていない(設計文書 改訂の記録)。
 func looksLikeBindFailure(reason string) bool {
 	if strings.Contains(reason, "bind failed") {
 		return true
 	}
-	return strings.Contains(reason, "listen") && strings.Contains(reason, "bind:")
+	if strings.Contains(reason, "listen") && strings.Contains(reason, "bind:") {
+		return true
+	}
+	return strings.Contains(reason, "bind tcp ") || strings.Contains(reason, "bind udp ")
 }
 
 func agentStateText(st adminapi.AgentRuleStatus) string {
