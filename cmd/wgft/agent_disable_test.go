@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
@@ -157,14 +159,17 @@ func TestAgentEnableUnchanged(t *testing.T) {
 	}
 }
 
-// TestAgentLsShowsDisabledState confirms `agent ls`'s STATE column distinguishes a disabled
-// agent, with how long ago, from an enabled one, and that the JSON form still passes
-// AgentInfo's disabled/disabled_at through unchanged (design.md 7a.11 節: agent ls --json is
-// admin.BatchResponse's sibling AgentInfo, output as-is).
+// TestAgentLsShowsDisabledState confirms `agent ls`'s plain-table STATE column distinguishes a
+// disabled agent, with how long ago (via ago(), design.md 7a.11 節's timestamp convention), from
+// an enabled one, using "enabled"/"disabled" rather than a health word since disabled is a
+// declared state (design.md 5.1 節). It also confirms --json still passes AgentInfo's
+// disabled/disabled_at through unchanged (7a.11 節: agent ls --json is []admin.AgentInfo, output
+// as-is, not folded into the plain table's STATE word).
 func TestAgentLsShowsDisabledState(t *testing.T) {
+	disabledAt := time.Now().Add(-90 * time.Minute).Format(time.RFC3339)
 	agents := []admin.AgentInfo{
 		{Name: "home", Address: "10.200.0.2", Connected: true, Disabled: false},
-		{Name: "office", Address: "10.200.0.3", Connected: true, Disabled: true, DisabledAt: "2026-09-24T00:00:00Z"},
+		{Name: "office", Address: "10.200.0.3", Connected: true, Disabled: true, DisabledAt: disabledAt},
 	}
 	adminURL := newAgentCLITestServer(t, agents)
 
@@ -193,10 +198,37 @@ func TestAgentLsShowsDisabledState(t *testing.T) {
 	}
 	homeState := strings.TrimSpace(homeLine[stateCol:addrCol])
 	officeState := strings.TrimSpace(officeLine[stateCol:addrCol])
-	if homeState != "ok" {
-		t.Errorf("enabled agent's STATE = %q, want \"ok\"", homeState)
+	if homeState != "enabled" {
+		t.Errorf("enabled agent's STATE = %q, want \"enabled\"", homeState)
 	}
-	if !strings.HasPrefix(officeState, "disabled") {
-		t.Errorf("disabled agent's STATE = %q, want it to start with \"disabled\"", officeState)
+	// "disabled " plus ago()'s output, which always ends in " ago"; requiring both the prefix
+	// and the "ago" suffix, rather than just the "disabled" prefix, is what catches ago() being
+	// dropped (STATE collapsing to the bare word "disabled" with nothing after it).
+	if !strings.HasPrefix(officeState, "disabled ") || !strings.HasSuffix(officeState, "ago") {
+		t.Errorf("disabled agent's STATE = %q, want \"disabled <duration> ago\"", officeState)
+	}
+
+	stdoutJSON, _, err := runAgentCmd(t, adminURL, "ls", "--json")
+	if err != nil {
+		t.Fatalf("agent ls --json: %v", err)
+	}
+	var got []admin.AgentInfo
+	if err := json.Unmarshal([]byte(stdoutJSON), &got); err != nil {
+		t.Fatalf("agent ls --json: invalid JSON: %v\n%s", err, stdoutJSON)
+	}
+	var office *admin.AgentInfo
+	for i := range got {
+		if got[i].Name == "office" {
+			office = &got[i]
+		}
+	}
+	if office == nil {
+		t.Fatalf("agent ls --json: no entry for office in %s", stdoutJSON)
+	}
+	if !office.Disabled {
+		t.Errorf("agent ls --json: office.disabled = false, want true")
+	}
+	if office.DisabledAt != disabledAt {
+		t.Errorf("agent ls --json: office.disabled_at = %q, want %q", office.DisabledAt, disabledAt)
 	}
 }

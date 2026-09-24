@@ -119,7 +119,7 @@ On the agent host:
 On the VPS, against the admin API:
   ls            list registered agents
   join-string   issue a join string; one-time
-  disable       stop forwarding this agent's rules, keeping its registration
+  disable       stop forwarding an agent's rules, keeping its registration
   enable        undo a disable
   revoke        revoke a permanent token
   warnings      list theft-detection warnings
@@ -238,10 +238,11 @@ On the VPS, against the admin API:
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "NAME\tSTATE\tADDRESS\tSTREAM\tHEARTBEAT\tGEN\tTUNNEL\tWG_ENDPOINT\tHANDSHAKE\tRULES\tPROTO\tWARN")
 			for _, a := range agents {
-				// STATE reflects agent disable/enable (design.md 5.1 section), not the stream
-				// or tunnel: a disabled agent can still be connected with a live tunnel while
-				// forwarding nothing, so folding this into STREAM or TUNNEL would hide that.
-				state := "ok"
+				// STATE is enabled/disabled, a declared state (design.md section 5.1), not a
+				// health word: a disabled agent can still be connected with a live tunnel
+				// while forwarding nothing, so folding this into STREAM or TUNNEL would hide
+				// that, and calling it "ok" would read as a health check it is not.
+				state := "enabled"
 				if a.Disabled {
 					state = "disabled"
 					if a.DisabledAt != "" {
