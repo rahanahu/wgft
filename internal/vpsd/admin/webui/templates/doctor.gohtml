@@ -185,6 +185,8 @@
     <button class="small-btn accent" type="submit">{{ T .Locale "doctorProbe" }}</button>
   </form>
   <p class="field-help">{{ T .Locale "doctorProbeHelp" }}</p>
+  {{ else if .AgentDisabled }}
+  <p class="field-help">{{ T .Locale "doctorProbeAgentDisabled" }}</p>
   {{ else }}
   <p class="field-help">{{ T .Locale "doctorProbeUnavailable" }}</p>
   {{ end }}

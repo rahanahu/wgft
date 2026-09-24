@@ -144,9 +144,12 @@ func applyNextStep(reason string) string {
 			"net.ipv4.ip_local_port_range, 32768-60999 by default, can be taken by any outbound connection or its TIME_WAIT. Move the " +
 			"listen port outside that range, or reserve it with net.ipv4.ip_local_reserved_ports. The server retries every 30s."
 	case strings.HasPrefix(reason, "agent ") && strings.HasSuffix(reason, " is disabled"):
-		// The rule's agent is disabled (design.md 5.1 節). rule enable would change nothing, so this
-		// case comes before the rule's own "disabled" below.
-		return "enable the agent the reason names; the admin API route is POST /api/v1/agents/<agent>/enable"
+		// 無効なエージェントのルールは、Diagnose が agent.enabled の agent_disabled として先に
+		// 扱うので、普段はここに来ない。来るのは、ルールの読み取りとエージェントの読み取りの間に
+		// エージェントが有効化された場合だけである。エージェントは既に有効なので agent enable は
+		// 案内せず、読み直しを勧める。rule enable も何も変えないので、下のルール自身の
+		// "disabled" より先に判定する(設計文書 5.1、10.2a 節)。
+		return "the agent may have just been enabled while this command read the evidence; run it again"
 	case strings.Contains(reason, "disabled"):
 		return "enable it: wgft rule enable <rule>"
 	case strings.Contains(reason, "not registered") || strings.Contains(reason, "unregistered"):

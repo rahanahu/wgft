@@ -34,8 +34,12 @@ import (
 // 検査の識別子。JSON の "id" の値であり、機械向けの保証である(設計文書 10.2a 節)。開いた集合
 // として扱い、項目を増やすことだけができる。名前の変更も意味の変更も互換ではない。
 const (
-	CheckDataplane     = "server.dataplane"
-	CheckEnabled       = "rule.enabled"
+	CheckDataplane = "server.dataplane"
+	CheckEnabled   = "rule.enabled"
+	// CheckAgentEnabled は、ルールの持ち主のエージェントに無効の印があるかどうかである(設計文書
+	// 5.1、10.2a 節)。server は無効の印の正本である自分のデータベースを読むので、登録の無い
+	// エージェントのルールでも OK になる。登録の有無は CheckConnection が判定する。
+	CheckAgentEnabled  = "agent.enabled"
 	CheckPublicPort    = "rule.public_port"
 	CheckSourceFilter  = "rule.source_filter"
 	CheckHandshake     = "tunnel.handshake"
@@ -51,7 +55,7 @@ const (
 // checkOrder は検査を、公開側から自宅側への経路の順に並べたものである。最初に failed になった
 // 検査が、そのルールの止まった位置になる。CheckOrder が写しを返す。
 var checkOrder = []string{
-	CheckEnabled, CheckPublicPort, CheckSourceFilter, CheckDataplane,
+	CheckEnabled, CheckAgentEnabled, CheckPublicPort, CheckSourceFilter, CheckDataplane,
 	CheckHandshake,
 	CheckConnection, CheckRulesReceived, CheckCredentials, CheckTargetResolve, CheckTarget, CheckFlowBudget, CheckProbe,
 }
@@ -78,7 +82,11 @@ const (
 // 理由の符号。JSON の "reason" の値であり、機械向けの保証である。開いた集合として扱い、
 // 読み手は知らない値を「不明」として扱う(設計文書 10.2a、7a.11 節)。
 const (
-	ReasonRuleDisabled        = "rule_disabled"
+	ReasonRuleDisabled = "rule_disabled"
+	// ReasonAgentDisabled は、ルールは有効だが持ち主のエージェントが無効なときの skipped の理由
+	// である(設計文書 5.1、10.2a 節)。直す操作が rule enable ではなく agent enable なので、
+	// rule_disabled を流用しない。
+	ReasonAgentDisabled       = "agent_disabled"
 	ReasonBindFailed          = "bind_failed"
 	ReasonNotPublished        = "not_published"
 	ReasonGenerationBehind    = "generation_behind"
@@ -283,7 +291,10 @@ func BuildReport(rules []proto.Rule, in Input) Report {
 		if rr.Status == StatusOK && anyPathStatus(checks, StatusUnknown) {
 			rr.Status = StatusUnknown
 		}
-		if rr.Status == StatusOK && !r.Enabled {
+		// 無効なルールと、無効なエージェントのルールは、宣言どおりの状態であり故障ではない
+		// (設計文書 10.2a 節)。どちらも下流の検査はすべて skipped なので、ここに来るのは
+		// ok のときだけである。
+		if rr.Status == StatusOK && (!r.Enabled || agentDisabledIn(checks)) {
 			rr.Status = StatusSkipped
 		}
 		rep.Checks = append(rep.Checks, checks...)
@@ -347,9 +358,12 @@ func notTestedList(rules []proto.Rule, in Input) []NotTested {
 }
 
 // Diagnose は 1 本のルールの検査を経路の順に返す。検査どうしの優先順位は設計文書 10.2a 節に
-// ある。要点は 2 つである。無効なルールは宣言どおりなので skipped にとどめて下流を試さない。
-// エージェントの stream が切れている間は、そのエージェントが報告した値(トンネルの状態、
-// 処理済み世代、ルールの状態)を今の値として扱わず、unknown と "last:" にする(5.2 節)。
+// ある。要点は 3 つである。無効なルールは宣言どおりなので skipped にとどめて下流を試さない。
+// ルールが有効でも持ち主のエージェントが無効なら、同じく宣言どおりなので、agent.enabled から
+// 下流を agent_disabled の skipped にする。ルール自身の無効を先に示すのは、直す操作が違うため
+// である(rule enable と agent enable)。エージェントの stream が切れている間は、そのエージェントが
+// 報告した値(トンネルの状態、処理済み世代、ルールの状態)を今の値として扱わず、unknown と
+// "last:" にする(5.2 節)。
 func Diagnose(r proto.Rule, in Input) []Check {
 	ai := findAgentInfo(in.Agents, r.Agent)
 	if !r.Enabled {
@@ -375,9 +389,14 @@ func Diagnose(r proto.Rule, in Input) []Check {
 		}
 		return out
 	}
+	enabled := Check{ID: CheckEnabled, RuleID: r.ID, Group: GroupServer, Label: "enabled", Status: StatusOK,
+		Detail: "the rule is enabled", hideWhenOK: true}
+	if ai != nil && ai.Disabled {
+		return agentDisabledChecks(enabled, r, ai, in)
+	}
 	return []Check{
-		{ID: CheckEnabled, RuleID: r.ID, Group: GroupServer, Label: "enabled", Status: StatusOK,
-			Detail: "the rule is enabled", hideWhenOK: true},
+		enabled,
+		agentEnabledCheck(r, ai, in),
 		publicPortCheck(r, in),
 		sourceFilterCheck(r, in),
 		handshakeCheck(r, ai, in),
@@ -391,8 +410,79 @@ func Diagnose(r proto.Rule, in Input) []Check {
 	}
 }
 
+// agentEnabledCheck は、持ち主のエージェントが無効でないルールの agent.enabled である。無効の
+// 場合は agentDisabledChecks が組み立てる。登録の無いエージェントも ok にする。server は無効の
+// 印の正本である自分のデータベースを読んでおり、そのルールを止める印が無いことを直接観測して
+// いるためである(設計文書 10.2a 節)。この ok は既存の検査の結果も、ルールの総合判定も、
+// 終了コードも動かさない。登録の有無は agent.connection が判定する。
+func agentEnabledCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
+	c := Check{ID: CheckAgentEnabled, RuleID: r.ID, Agent: r.Agent, Group: GroupServer, Label: "agent enabled",
+		Status: StatusOK, ObservedAt: in.Now.UTC().Format(time.RFC3339), hideWhenOK: true}
+	if ai == nil {
+		c.Detail = fmt.Sprintf("no disable mark stops this rule: no agent named %q is registered, read just now", r.Agent)
+		return c
+	}
+	c.Detail = fmt.Sprintf("agent %q is enabled, read just now", r.Agent)
+	return c
+}
+
+// agentDisabledChecks は、有効なルールの持ち主のエージェントが無効なときの検査一式である
+// (設計文書 5.1、10.2a 節)。agent.enabled を agent_disabled の skipped にし、下流もすべて同じ
+// 理由の skipped にする。無効なエージェントのルールは VPS も自宅側も転送しないので、下流の
+// 検査が何を観測しても、そのルールについての今の所見にはならない。
+func agentDisabledChecks(enabled Check, r proto.Rule, ai *adminapi.AgentInfo, in Input) []Check {
+	// 一覧の 1 行は detail の最初の句だけを出すので(cmd/wgft の firstClause)、無効であることを
+	// 最初の句に置く。
+	when := fmt.Sprintf("agent %q is disabled", r.Agent)
+	if t, ok := ParseWhen(ai.DisabledAt); ok {
+		when = fmt.Sprintf("agent %q was disabled %s ago", r.Agent, Since(in.Now, t))
+	}
+	detail := when + "; this rule forwards nothing until the agent is enabled. That is a declared state, not a fault"
+	out := []Check{enabled, {
+		ID: CheckAgentEnabled, RuleID: r.ID, Agent: r.Agent, Group: GroupServer, Label: "agent enabled",
+		Status: StatusSkipped, Reason: ReasonAgentDisabled, ObservedAt: ai.DisabledAt,
+		Detail: detail, Next: "enable the agent: wgft agent enable " + r.Agent,
+	}}
+	for _, id := range checkOrder {
+		if id == CheckEnabled || id == CheckAgentEnabled || id == CheckDataplane {
+			continue
+		}
+		out = append(out, Check{
+			ID: id, RuleID: r.ID, Agent: agentOf(id, r), Group: checkGroup(id), Label: checkLabel(id, r),
+			Status: StatusSkipped, Reason: ReasonAgentDisabled,
+			Detail: fmt.Sprintf("not tested: agent %q is disabled", r.Agent),
+			Next:   "enable the agent first: wgft agent enable " + r.Agent,
+			// 無効なルールの下流と同じく、同じ 1 つの理由を繰り返すだけなので既定では出さない。
+			hideWhenUntested: true,
+		})
+	}
+	return out
+}
+
+// agentDisabledIn は、検査の中に agent.enabled の agent_disabled があるかどうかである。
+func agentDisabledIn(checks []Check) bool {
+	for _, c := range checks {
+		if c.ID == CheckAgentEnabled && c.Reason == ReasonAgentDisabled {
+			return true
+		}
+	}
+	return false
+}
+
+// RuleAgentDisabled は、そのルールが有効で、持ち主のエージェントが無効であるために skipped に
+// なったかどうかである。CLI と Web UI の結論の 1 行が、無効なルールの場合と書き分けるために読む。
+func (rep Report) RuleAgentDisabled(ruleID string) bool {
+	var checks []Check
+	for _, c := range rep.Checks {
+		if c.RuleID == ruleID {
+			checks = append(checks, c)
+		}
+	}
+	return agentDisabledIn(checks)
+}
+
 func agentOf(id string, r proto.Rule) string {
-	if checkGroup(id) == GroupAgent || id == CheckHandshake {
+	if checkGroup(id) == GroupAgent || id == CheckHandshake || id == CheckAgentEnabled {
 		return r.Agent
 	}
 	return ""
@@ -400,7 +490,7 @@ func agentOf(id string, r proto.Rule) string {
 
 func checkGroup(id string) string {
 	switch id {
-	case CheckDataplane, CheckEnabled, CheckPublicPort, CheckSourceFilter:
+	case CheckDataplane, CheckEnabled, CheckAgentEnabled, CheckPublicPort, CheckSourceFilter:
 		return GroupServer
 	case CheckHandshake:
 		return GroupTunnel
@@ -414,6 +504,8 @@ func checkLabel(id string, r proto.Rule) string {
 		return "dataplane"
 	case CheckEnabled:
 		return "enabled"
+	case CheckAgentEnabled:
+		return "agent enabled"
 	case CheckPublicPort:
 		return "public port"
 	case CheckSourceFilter:
@@ -555,18 +647,30 @@ func (rep Report) AgentSummaries() []Check {
 // 入るが、無効なルールの検査は rule_disabled の skipped であり、エージェントの状態を述べない。
 // そこで有効なルールの検査を先に採り、無ければ最初の検査を返す(設計文書 10.2a 節の改訂の
 // 記録、2026-09-23)。
+//
+// 無効なエージェントのルールの検査は agent_disabled の skipped で、どの有効なルールでも同じ値に
+// なる。これはエージェント自身の状態(無効)を述べるので、rule_disabled より先に採る。
 func (rep Report) AgentCheck(agent, id string) (Check, bool) {
-	var first *Check
+	var agentOff, first *Check
 	for i, c := range rep.Checks {
 		if c.ID != id || c.Agent != agent {
 			continue
 		}
-		if c.Reason != ReasonRuleDisabled {
+		switch c.Reason {
+		case ReasonRuleDisabled:
+		case ReasonAgentDisabled:
+			if agentOff == nil {
+				agentOff = &rep.Checks[i]
+			}
+		default:
 			return c, true
 		}
 		if first == nil {
 			first = &rep.Checks[i]
 		}
+	}
+	if agentOff != nil {
+		return *agentOff, true
 	}
 	if first != nil {
 		return *first, true

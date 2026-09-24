@@ -122,7 +122,10 @@ type doctorPageData struct {
 	OffPath  []doctorCheckView
 	Hidden   []doctorCheckView
 	CanProbe bool
-	Probed   bool
+	// AgentDisabled は、ルールは有効で持ち主のエージェントが無効であることである。疎通の確認を
+	// 使えない理由を、無効なルールや UDP のルールと書き分けるために持つ。
+	AgentDisabled bool
+	Probed        bool
 	// 両方
 	Result    string
 	History   string
@@ -286,10 +289,14 @@ func (s *Server) uiDoctorRule(w http.ResponseWriter, r *http.Request) {
 		in.AddProbe(doctorEvidence{s}, rule.ID)
 	}
 	rep := doctor.BuildReport([]proto.Rule{rule}, in)
+	agentOff := rep.RuleAgentDisabled(rule.ID)
 	d := doctorPageData{
 		Locale: locale, CheckedAt: rep.CheckedAt, Probed: in.Probed,
-		CanProbe: rule.Enabled && rule.Proto == proto.TCP,
-		History:  rep.History.Detail, NotTested: doctorNotTestedViews(rep.NotTested),
+		// 管理用 API は無効なエージェントのルールの疎通の確認を拒むので、ボタンを出さない
+		// (設計文書 5.1 節)。
+		CanProbe:      rule.Enabled && rule.Proto == proto.TCP && !agentOff,
+		AgentDisabled: agentOff,
+		History:       rep.History.Detail, NotTested: doctorNotTestedViews(rep.NotTested),
 	}
 	if len(rep.Rules) == 1 {
 		head := doctorRuleToView(rep.Rules[0], rep)
@@ -317,8 +324,8 @@ func (s *Server) uiDoctorRule(w http.ResponseWriter, r *http.Request) {
 	s.renderDoctorPage(w, locale, "doctorrule", d)
 }
 
-// doctorResultLine は 1 本のルールの結論である。CLI の `Result:` の行と同じ 4 つの場合に分ける
-// (design.md 10.2a 節)。
+// doctorResultLine は 1 本のルールの結論である。CLI の `Result:` の行と同じ場合に分ける
+// (design.md 10.2a 節)。skipped は、ルール自身の無効と持ち主のエージェントの無効を書き分ける。
 func doctorResultLine(rr doctor.RuleReport, rep doctor.Report) string {
 	switch rr.Status {
 	case doctor.StatusFailed:
@@ -329,6 +336,9 @@ func doctorResultLine(rr doctor.RuleReport, rep doctor.Report) string {
 		}
 		return "traffic stops at " + rr.StoppedAt
 	case doctor.StatusSkipped:
+		if rep.RuleAgentDisabled(rr.RuleID) {
+			return fmt.Sprintf("the rule's agent %q is disabled, so nothing is forwarded", rr.Agent)
+		}
 		return "the rule is disabled, so nothing is forwarded"
 	case doctor.StatusUnknown:
 		return "no failure found, but some evidence above is stale or untested"

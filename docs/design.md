@@ -1734,7 +1734,7 @@ target             NOT TESTED
 | 検査の ID | 見出し | 証拠 | 呼び出し |
 |---|---|---|---|
 | `rule.enabled` | enabled | `Rule.Enabled` | `GET /api/v1/rules` |
-| `agent.enabled` | agent enabled | `AgentInfo.Disabled` | `GET /api/v1/agents` |
+| `agent.enabled` | agent enabled | `AgentInfo.Disabled`、`AgentInfo.DisabledAt` | `GET /api/v1/agents` |
 | `rule.public_port` | public port | `rule_states[id].apply_state` と `reason`、`drift` | `GET /api/v1/rules` |
 | `rule.source_filter` | source filter | `source_deny`、`source_allow` と `--from` の値 | `GET /api/v1/rules` |
 | `server.dataplane` | dataplane | `desired_generation`、`active_generation`、`apply_error` | `GET /api/v1/rules` |
@@ -2018,8 +2018,8 @@ Warnings が終了コードを動かすことも、同じ問いの違いから�
 
 ```json
 {"server":{"status":"healthy"},
- "agents":{"healthy":2,"degraded":0,"unknown":0,"total":2},
- "rules":{"active":8,"degraded":0,"unknown":0,"total":8},
+ "agents":{"healthy":2,"degraded":0,"unknown":0,"disabled":0,"total":2},
+ "rules":{"active":8,"degraded":0,"unknown":0,"agent_disabled":0,"total":8},
  "warnings":{"count":0}}
 ```
 
@@ -2027,8 +2027,8 @@ degraded な行は `detail` を持つ。実際に動かして得た出力を示�
 
 ```json
 {"server":{"status":"healthy"},
- "agents":{"healthy":1,"degraded":1,"unknown":0,"total":2,"detail":"home2 last seen 4m12s ago"},
- "rules":{"active":7,"degraded":1,"unknown":0,"total":8,"detail":"r_01M335HMAB… bind failed: address already in use"},
+ "agents":{"healthy":1,"degraded":1,"unknown":0,"disabled":0,"total":2,"detail":"home2 last seen 4m12s ago"},
+ "rules":{"active":7,"degraded":1,"unknown":0,"agent_disabled":0,"total":8,"detail":"r_01M335HMAB… bind failed: address already in use"},
  "warnings":{"count":1,"detail":"ip-flapping on home, 1m0s ago"}}
 ```
 
@@ -2036,8 +2036,8 @@ unknown な行も `detail` を持つ。
 
 ```json
 {"server":{"status":"unknown","detail":"this server does not report apply generations"},
- "agents":{"healthy":1,"degraded":0,"unknown":0,"total":1},
- "rules":{"active":0,"degraded":0,"unknown":8,"total":8,"detail":"apply state is unavailable for 8 rules"},
+ "agents":{"healthy":1,"degraded":0,"unknown":0,"disabled":0,"total":1},
+ "rules":{"active":0,"degraded":0,"unknown":8,"agent_disabled":0,"total":8,"detail":"apply state is unavailable for 8 rules"},
  "warnings":{"count":0}}
 ```
 
@@ -2045,8 +2045,8 @@ active・degraded・unknown が混在する行も、それぞれの数を `rules
 
 ```json
 {"server":{"status":"healthy"},
- "agents":{"healthy":1,"degraded":0,"unknown":0,"total":1},
- "rules":{"active":5,"degraded":2,"unknown":1,"total":8,
+ "agents":{"healthy":1,"degraded":0,"unknown":0,"disabled":0,"total":1},
+ "rules":{"active":5,"degraded":2,"unknown":1,"agent_disabled":0,"total":8,
   "detail":"r_06MIXED000… bind failed: address already in use, r_07MIXED000… target not allowed, r_08MIXED000… the agent has not confirmed it is forwarding this rule"},
  "warnings":{"count":0}}
 ```
@@ -2055,12 +2055,28 @@ active・degraded・unknown が混在する行も、それぞれの数を `rules
 
 ```json
 {"server":{"status":"healthy"},
- "agents":{"healthy":0,"degraded":1,"unknown":0,"total":1,"detail":"home tunnel: no WireGuard handshake with this agent has ever been observed"},
- "rules":{"active":8,"degraded":0,"unknown":0,"total":8},
+ "agents":{"healthy":0,"degraded":1,"unknown":0,"disabled":0,"total":1,"detail":"home tunnel: no WireGuard handshake with this agent has ever been observed"},
+ "rules":{"active":8,"degraded":0,"unknown":0,"agent_disabled":0,"total":8},
  "warnings":{"count":0}}
 ```
 
-`agents` は `disabled` も、`rules` は `agent_disabled` も持つ(本節の Agents と Rules の項)。どちらも常に持ち、該当が無ければ 0 とする。上の例の出力への `disabled` の反映は、実装のときに実際に動かした出力で行う。
+`agents` は `disabled` も、`rules` は `agent_disabled` も持つ(本節の Agents と Rules の項)。どちらも常に持ち、該当が無ければ 0 とする。上の例はどれも無効なエージェントを含まないので、どちらも 0 である。
+
+無効なエージェントを含む場合を示す。第 1 の例の配置に、無効なエージェント `off` を 1 台加えた。`off` は有効なルールを 3 本と、自分で無効なルールを 1 本持つ。無効なルールは今までどおり総数に数えない。実際に動かして得た出力であり、終了コードは 0 である。
+
+```
+Server        healthy
+Agents        2 / 2 healthy, 1 disabled
+Rules         8 active, 3 agent disabled / 11
+Warnings      none
+```
+
+```json
+{"server":{"status":"healthy"},
+ "agents":{"healthy":2,"degraded":0,"unknown":0,"disabled":1,"total":3},
+ "rules":{"active":8,"degraded":0,"unknown":0,"agent_disabled":3,"total":11},
+ "warnings":{"count":0}}
+```
 
 最上位はオブジェクトとし、7a.11 節の規則どおり項目は増やせるが、既存の項目の名前と意味は変えない。`detail` は人向けの文であり、保証の対象ではない。`server.status` の値は開いた集合として扱い、読み手は知らない値を unknown として扱う。
 
@@ -3150,3 +3166,4 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - エージェントの無効化と有効化の server 側を実装した(2026-09-24):5.1 節の設計のとおり、サーバのデータベースのスキーマを版 9 に上げてエージェントの行に `disabled_at` を加え、管理用 API の `POST /api/v1/agents/{name}/disable` と `POST /api/v1/agents/{name}/enable`、エージェント一覧の `disabled` と `disabled_at`、全体状態の `agent_disabled` を実装した。CLI の `agent disable` と `agent enable`、`server doctor`・`status`・`agent doctor` での扱い、Web UI は、この変更に含めていない。それらが入るまでの間、無効なエージェントのルールは、`status` と `server doctor` と Web UI では公開されていないルールとして故障に数えられ、`server doctor` の次の一手はエージェントの有効化の管理用 API を案内する。設計が実装に委ねていた点は次のように定めた。422 の本文で「何も保存しなかった」と「保存は済んだが公開していない」を区別するフィールドは `saved` とし、2 つのルートの失敗の応答がすべて持つ(7a.11 節)。全体状態に加算するフィールドの名前は `agent_disabled` とした(7a.11 節)。エージェント一覧の `disabled_at` は、同じ行の `created_at` と同じく server のローカルの時差で書く。有効化の検査に要る読み取りの失敗を 500 とすること、`rule_states` の理由で自分の無効を先に示すこと、公開できなかった世代を後から公開した経路が配ることを 5.1 節に加えた。状態が変わらない操作は、7a.11 節のとおり、保存も配信も公開もせず、200 と `changed:false` を返す。前の操作が公開できなかった世代の公開は、30 秒ごとの再試行に任せる。配信は、公開した世代が進んだときに適用の 1 か所で行うようにした。それまでは、ルールのバッチは世代を進めたときだけ配り、公開した世代の進みで配るのは再試行だけだった。そのため、公開に失敗した有効化の世代を、変更の無いバッチや削除や登録が先に公開すると、再試行が要らなくなり、エージェントはその世代を受け取らなかった。配る写しを作る処理は 1 か所にまとめ、全体状態の組み立てと、ルールのバッチが世代を進めるかどうかの比較の両方がそれを使う。2 か所が別々に写すと、配る内容が変わったのに世代が進まないことが起きうるためである。ラボで確かめたこと:kernel と userspace の両モードで、2 台のエージェントのうち 1 台を無効にすると、そのエージェントの TCP と UDP のルールとプロキシモードのルールが転送をやめ、成立済みの TCP のセッションも切れ、もう 1 台のルールは転送を続けた。ルールの保存値は変わらず、無効にしたエージェントは接続したまま、ルールを 1 本も報告しなくなった。無効の間に加えたルールは転送しなかった。server を再起動しても無効のままだった。有効化すると、各ルールは自分の `enabled` のとおりに戻り、無効の間に加えたルールも転送した。kernel モードでは、VPS 上のプロセスがルールのポートを bind している間の有効化が 422 と `saved:false` で拒まれて何も保存されないことと、他のプロセスが `table inet wgft` を保持している間の無効化が 422 と `saved:true` を返し、エージェントには届き、保持が解けた後の再試行で公開されることを確かめた。v1.1.1 の server は、版 9 のデータベースを新しすぎるとして起動を拒んだ。v1.1.1 のエージェントは、kernel モードの server から `enabled:false` の写しを受け取ってリスナーを閉じ、有効化で開き直した(TCP のルール 1 本で、手で確かめた)。分かったこと:無効化で成立済みの TCP のセッションを切った直後に有効化すると、そのルールのエージェントのリスナーは、ラボでは開くまでに 60 秒から 90 秒かかった。エージェントが中継中の netstack の接続を通常の `Close` で先に閉じるので、その端が gVisor の既定で 60 秒の TIME_WAIT に入り、相手が閉じなければ FIN_WAIT_2 に留まり、その間は同じポートで待ち受けを開けないためである。VPS がそのフローを変換しなくなってエージェントの FIN が届かないことは、この保持を長くするだけである。エージェントの側で中継中の接続を閉じると、そのポートは少なくとも 60 秒塞がる。この保持は、直前の項目の変更(中継が切る TCP の接続を RST で切る)で解消した。その変更を含むビルドで確認を流し直し、有効化の直後に、そのルールのリスナーが bind の失敗なしに開き、転送が戻ることを両モードで確かめた。未確認:無効化の配信からエージェントがリスナーを閉じるまでの時間は測っていない。旧い版のエージェントとの組み合わせは、`lab/version-skew.sh` にまだ入れていない。
 - エージェントのカーネルモードを骨格として設計した(2026-09-24、所有者の決定):エージェントは `WGFT_MODE=kernel` を明示したときだけ、カーネルの WireGuard インタフェースと `table inet wgft_agent` の DNAT で LAN の宛先へ転送する。既定は今のユーザー空間モードのままである。7b 節を新設し、2 節、7 節の冒頭と末尾、7a.2・7a.7・7a.8・7a.11 節、9・10.2c・10.3・11・11a・11b・13 節を改めた。守る意味は、カーネルモードでもユーザー空間モードと同じ「転送できる」「転送できない」を保ち、backend 全体の失敗とルール単位の失敗を混ぜないことである。ルールの失敗は 3 つの種類に分けた。許可一覧の外、名前の解決の失敗、ループバックの宛先はルール単位の失敗で、そのルールの DNAT を作らない。TCP の宛先の接続確認の失敗は `error` の報告だけで、DNAT を残して転送を続ける。テーブル全体の公開の失敗は backend 全体の失敗で、処理済み世代と `last_state` を進めずに旧いテーブルを残して試し直す。`wgft agent teardown` は、`server teardown` と同じく稼働中のエージェントに対しては何も消さずに拒む。`agent doctor` では、カーネルモードの `agent.process` の停止を FAILED のまま総合判定から外し、`dataplane.interface`、`dataplane.table`、`host.forwarding` に総合判定を動かさせることにした。ルール単位の失敗は、7b.3 節の 1 つ目と 2 つ目の種類のどちらも `dataplane.table` の FAILED として示し、リスナーの無いカーネルモードでは `relay.listeners` を NOT TESTED とする。停止中の `dataplane.table` は、`agent.json` の `LastState` と直近の公開の記録を実際のテーブルと比べ、公開すべきルールの DNAT が欠けていれば FAILED とする。指紋の完全な一致と TCP の接続確認の結果は再現できないので、一致しても OK ではなく UNKNOWN とし、終了コードは 0 のままとする。テーブル全体の公開の失敗は、旧いテーブルが転送を続けるので、`dataplane.table` の所見にとどめる。`relay.allow_targets` はカーネルモードでも一覧を示す。終了コード 1 が「このホストのエージェントが、今の状態では転送を担えない」を意味し続けるためである。FAILED にするのは `ip_forward` が 0 であるような確かな事実だけとし、他のテーブルの `policy drop` と `rp_filter` は手掛かりとして示す。停止中のエージェントを `CAP_NET_ADMIN` の無い利用者で診断してカーネルの状態を読めない場合は、層 2 の終了コード 2 とし、例外として root での実行も案内する。ホスト名の解決の結果が変わっても、成立済みのフローは切らない。停止中の `rotate-key` と撤去は 1 つ前の鍵を扱い、状態ファイルを失った場合の手順を示す。`WGFT_MODE=kernel` を既にエージェントへ渡している配置と、カーネルモードから旧い版へ戻す場合は、リリースノートで知らせる。10.2c 節の表への行の追加は、表と実装を両方向に照合するテストがあるので、実装と同じ変更で行う。内部の構造は、エージェント全体を `reconcile.Runtime` へ移さず、`internal/agent` の中に dataplane の境目を切る形にした。7a.7 節の「reconcile を server と agent が共有する」という記述は実装と食い違っていたので、事実に合わせて書き直し、13 節の同じ項目を閉じた。13 節の「`agent doctor` を同じ利用者で手軽に実行する方法」も、稼働中のエージェントが自分の実行主体を答える形で閉じた。設計の前にラボで確かめたことを記す。範囲のずらしを表す無名の連結 map の DNAT と MSS のクランプを google/nftables で組め、`nft list` の表示が `nft` コマンドで入れた場合と一致し、通信も通ったので、`nft` コマンドへの依存は要らない。PMTUD の ICMP を落とす経路では、クランプが無いと大きな TCP が両方向とも止まり、片方の向きだけのクランプでは片方の向きが止まり、両方の向きを `rt mtu` でクランプすると両方向とも通った。非 root のプロセスが `CAP_NET_ADMIN` だけを持てば、WireGuard インタフェース、nftables、conntrack、`ip_forward` のすべてを操作でき、`DynamicUser` と `CAP_NET_ADMIN` の systemd の unit でも同じだった。`ProtectKernelTunables=yes` は `ip_forward` の書き込みを止める。非特権の LXC の中でも同じ操作ができ、`ip_forward` はコンテナの network namespace に閉じてホストの値を変えなかった。コンテナの `ip_forward` の初期値はホストの値を写すので、エージェントは常に明示して書く。ホスト自身の LAN のアドレスへの DNAT は input を通って届き、サービスには VPS のトンネルアドレスが送信元として見えた。`127.0.0.1` への DNAT は既定では届かず、wgft0 に `route_localnet` を立てると届いた。ユーザー空間モードのエージェントでは、ルールの変更の後、CLI が戻った直後にはエージェントが新しい世代を報告し終えていた。`server doctor` の理由の符号 `listener_bind_failed` には、ユーザー空間モードでも利用者の操作から届く経路が見つかっていない。符号は残し、カーネルモードの公開の失敗には既存の `target_not_allowed` と `target_resolve_failed`、新しい `target_loopback_unsupported` を使う(7b.3 節)。未確認:LAN の側に小さい MTU の区間がある場合とホスト自身の LAN のアドレスへの DNAT での MSS、入る向きの SYN でも `rt mtu` が wgft0 の MTU から決まる理由、固定の `User=wgft` の unit に `CAP_NET_ADMIN` を重ねた配置そのもの、SELinux と AppArmor、Proxmox と Incus のコンテナ、WireGuard のモジュールを自動で読み込めないホスト、`rotate-key` の途中で鍵がずれた場合、プロキシモードと疎通確認が DNAT を通って届くこと、カーネルモードのエージェントでの世代の遅れ、Docker でのカーネルモード。実装はまだ無い。
 - `server check` が、新しい版が書いたスキーマを開けないことを見落としにくくした(2026-09-24、所有者の決定):`internal/vpsd` の `Check` は、サーバのデータベースを読み取り専用で開けなかった場合、所見を他の nft の検査などと同じ 1 行の `cannot open` の文言で示し、終了コードは 0 のままにしていた。ステージングで、新しい版が書いたスキーマのデータベースに対して旧い版の `server check` を動かすと、「server database schema is newer than this binary」の行が他の所見に紛れ、見落とされうることが分かった。7a.11 節は `server check` の終了コードが 0 のままであることを v1.0 の保証としており、サーバのデータベースを開けない場合もその一部である。ロールバックの最中に読むのは旧い版の `server check` であり、旧い版はこの改訂を持たないので、終了コードだけを変えてもロールバックの助けにはならない。終了コードは変えず、新しい版が書いたスキーマで開けない場合(`store.ErrSchemaNewer`)だけ、他の行に紛れない専用の見出し行を出すことにした。見出し行は版番号とこの版が対応する上限を名指しし、出力の最初のほうと最後の両方に同じ文言で現れるようにした。`internal/vpsd/store` に、`ErrSchemaNewer` の版番号を運ぶ型 `SchemaNewerError` を加え、`Open`(`server run` が使う)と `OpenReadOnly`(`server check` が使う)の両方がこれを返すようにした。`server run` 側の拒否の組み立て(9・11b 節)は変えていない。それ以外の理由でサーバのデータベースを開けない場合(権限、他プロセスによる保持、壊れたファイルなど)の文言は変えていない。7a.11 節の記述に、この専用行の 1 文を足した。確かめ方:ホストの単体テストで、新しい版が書いたスキーマを開けない場合に終了コードが 0 のままであること、専用の見出し行が出力の先頭付近と末尾の両方に現れること、それ以外の理由で開けない場合は終了コードが 0 のままで見出し行を出さないことを確かめた。専用の見出し行を出さない、終了コードを変える、出力の末尾に繰り返さないの各変異を入れ、対応するテストが落ちることも確かめた。未確認:実機とラボでの確認は行っていない。
+- 無効なエージェントを `server doctor` と `status` で扱うようにした(2026-09-24):10.2a 節と 10.2b 節の定めのとおりに実装した。`server doctor` は、ルールが有効で持ち主のエージェントが無効なら、`agent.enabled` を SKIPPED `agent_disabled` にし、下流の検査も同じ理由の SKIPPED にする。ルールの `status` は skipped、最上位の `status` は ok、終了コードは 0 になり、`rule.public_port` は FAILED `not_published` にならない。`agent.enabled` は `rule.enabled` の直後に置き、群は Server とした。無効の印は server が持つ宣言だからである。有効なエージェントと登録の無いエージェントでは OK になり、既定の表示では隠す。1 本の報告の結論の行は、ルール自身の無効とエージェントの無効を書き分ける。一覧の Agents の行は、エージェントを名指すルールの検査から 1 つを選ぶときに `agent_disabled` を `rule_disabled` より先に採るので、無効なエージェントの行は灰色の SKIPPED になる。`rule.public_port` の次の一手は、理由が `agent "<名前>" is disabled` なら、エージェントが今有効化されたかもしれないので実行し直すよう示す。この分岐に来るのは、ルールの読み取りとエージェントの読み取りの間にエージェントが有効化された場合だけであり、そのときエージェントは既に有効である。`status` は `agents.disabled` と `rules.agent_disabled` を常に出す。10.2b 節の機械向けの出力の例は、実際に動かした出力で書き直した。Web UI の診断の画面は、`agent.enabled` を経路の図の `public port` の節点に入れる。無効なエージェントのルールは、無効なルールと同じくすべての節点を「届いていない」で描き、札を `agent enabled / agent_disabled` にする。管理用 API が疎通の確認を拒むので、ボタンを出さずに理由を示す。`public port` の節点の見出しの一覧が変わるので、1 本のルールの診断の画面のスクリーンショットを撮り直した。ラボでは両方のモードで次を確かめた。無効なエージェントのルールについて、`server doctor` の 1 本の報告、一覧、`--json`、`status`、`status --json` が上の結果になり、どれも終了コード 0 で終わる。削除したエージェントに残ったルールは、`agent.enabled` の OK が加わるだけで、`rule.public_port` の FAILED `not_published`、`agent.connection` の FAILED `agent_not_registered`、終了コード 1、`status` の degraded の数え方が変わらない。`lab/lifecycle.sh` の確認 11 にこれらの確認を加えた。未確認:次の一手が名指す `wgft agent enable` は、この改訂の時点では CLI に無い(7a.11 節の加算として別の変更で加わる)。`disabled` を返さない旧い版の server に新しい CLI を向ける組み合わせは、単体テストだけで確かめ、ラボでは確かめていない。

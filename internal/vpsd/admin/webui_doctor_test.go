@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -521,5 +522,42 @@ func TestDoctorScreenNoteIsOnlyOnTheCheckThatNeedsIt(t *testing.T) {
 				t.Errorf("a screen-side note on %s/%s = %v, want %v", c.in.ID, c.in.Reason, got, c.want)
 			}
 		})
+	}
+}
+
+// TestDoctorPagesShowADisabledAgentAsDeclaredNotFailed は、持ち主のエージェントが無効なルール
+// (設計文書 5.1、10.2a 節)を、診断の画面が故障の色にせず、灰色の SKIPPED と「届いていない」
+// 節点で示すことを確かめる。疎通の確認は管理用 API が拒むので、ボタンを出さずに理由を示す。
+func TestDoctorPagesShowADisabledAgentAsDeclaredNotFailed(t *testing.T) {
+	srv, b := newDoctorTestServer(t)
+	b.agents[0].Disabled = true
+	b.agents[0].DisabledAt = time.Now().Add(-time.Hour).Format(time.RFC3339)
+
+	for _, loc := range []string{"en", "ja"} {
+		body := getBody(t, srv.URL+"/ui/doctor/r_ok?lang="+loc)
+		for _, want := range []string{
+			"agent enabled", `<span class="badge neutral">SKIPPED</span>`, "wgft agent enable home",
+			"agent enabled / agent_disabled", html.EscapeString(`the rule's agent "home" is disabled, so nothing is forwarded`),
+			html.EscapeString(T(loc, "doctorProbeAgentDisabled")), html.EscapeString(T(loc, "doctorAgentDisabledAlt")),
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: the rule page is missing %q:\n%s", loc, want, body)
+			}
+		}
+		if strings.Contains(body, `name="probe"`) {
+			t.Errorf("%s: the rule page offers a probe the admin API refuses for a disabled agent", loc)
+		}
+		if strings.Contains(body, "badge danger") || strings.Contains(body, "badge warning") {
+			t.Errorf("%s: a disabled agent's rule must not be drawn as a fault:\n%s", loc, body)
+		}
+	}
+
+	body := getBody(t, srv.URL+"/ui/doctor?lang=en")
+	row := doctorRuleRow(t, body, "r_ok")
+	if !strings.Contains(row, `<span class="badge neutral">SKIPPED</span>`) || !strings.Contains(row, "agent enabled / agent_disabled") {
+		t.Errorf("the summary row of a disabled agent's rule must be a grey SKIPPED with the agent_disabled caption:\n%s", row)
+	}
+	if strings.Contains(row, "badge danger") {
+		t.Errorf("the summary row of a disabled agent's rule is drawn as a failure:\n%s", row)
 	}
 }
