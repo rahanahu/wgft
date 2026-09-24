@@ -542,7 +542,7 @@ check_teardown() {
   check "a directory without agent.json removes nothing" "does not exist, so nothing was removed" "$out"
   okcheck "and exits 1" "$([ "$rc" = 1 ] && echo 1 || echo 0)"
   check "it names the table it found" "found: table inet wgft_agent" "$out"
-  check "it names wgft0" "found: the WireGuard interface wgft0" "$out"
+  check "it names wgft0 as wgft's configured name" "found: the WireGuard interface wgft0, wgft's configured name" "$out"
   check "it points at --data-dir" "Point --data-dir" "$out"
   check "the running agent's table stays" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
   check "the running agent's wgft0 stays up" "UP" "$(home ip -br link show wgft0 2>&1)"

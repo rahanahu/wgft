@@ -141,7 +141,7 @@ func teardownWith(ops teardownOps, opts TeardownOptions, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "agent teardown: credentials file %s\n", path)
 	if plan.f == nil {
-		return noCredentials(ops, path, out)
+		return noCredentials(ops, path, opts.Interface, out)
 	}
 	if plan.empty() {
 		for _, l := range plan.leave {
@@ -217,11 +217,12 @@ func teardownWith(ops teardownOps, opts TeardownOptions, out io.Writer) error {
 }
 
 // noCredentials は、指したデータディレクトリに agent.json が無い場合の扱いである(設計文書 10.3 節)。
-// 何も消さずに、見つけた table inet wgft_agent と WireGuard インタフェースを示し、誤りを返す。稼働の判定は
+// 何も消さずに、見つけた table inet wgft_agent と WireGuard インタフェースを示し、誤りを返す。設定の名前と
+// 作業用の名前のインタフェースには、その旨の印を付け、個人の VPN など他の WireGuard と見分けられるようにする。稼働の判定は
 // そのディレクトリのロックファイルしか見ないので、--data-dir が実際のデータディレクトリを指していないと、
 // 稼働中のエージェントの資源を停止したものと取り違えるためである。一覧を読めなくても、その旨を示して
 // 同じ誤りを返す。
-func noCredentials(ops teardownOps, path string, out io.Writer) error {
+func noCredentials(ops teardownOps, path, iface string, out io.Writer) error {
 	if present, err := ops.tablePresent(); err != nil {
 		fmt.Fprintf(out, "found: cannot list the nftables tables: %v\n", err)
 	} else if present {
@@ -230,8 +231,16 @@ func noCredentials(ops teardownOps, path string, out io.Writer) error {
 	if names, err := ops.wireGuardLinks(); err != nil {
 		fmt.Fprintf(out, "found: cannot list the WireGuard interfaces: %v\n", err)
 	} else {
+		staging := ops.stagingName(iface)
 		for _, n := range names {
-			fmt.Fprintf(out, "found: the WireGuard interface %s\n", n)
+			switch n {
+			case iface:
+				fmt.Fprintf(out, "found: the WireGuard interface %s, wgft's configured name: WGFT_WG_INTERFACE of this run\n", n)
+			case staging:
+				fmt.Fprintf(out, "found: the WireGuard interface %s, wgft's configured name: the one the agent uses while creating %s\n", n, iface)
+			default:
+				fmt.Fprintf(out, "found: the WireGuard interface %s, not a name wgft uses with this configuration\n", n)
+			}
 		}
 	}
 	return fmt.Errorf("%s does not exist, so nothing was removed: without the agent's credentials, teardown can neither tell whether an agent using this data directory is running nor judge which WireGuard interface is the agent's. "+

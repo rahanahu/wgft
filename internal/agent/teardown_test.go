@@ -420,7 +420,7 @@ func TestTeardownLeavesLinksItDoesNotOwn(t *testing.T) {
 func TestTeardownWithoutCredentialsRemovesNothing(t *testing.T) {
 	other := tdKey(t)
 	path := filepath.Join(t.TempDir(), "agent.json")
-	k := &tdKernel{links: map[string]wgtypes.Key{"wgft0": other}, table: true}
+	k := &tdKernel{links: map[string]wgtypes.Key{"wgft0": other, "wgftnew-wgft0": {}, "wg-home": other}, table: true}
 	out, err := runTeardown(t, k, TeardownOptions{CredentialsPath: path})
 	if err == nil {
 		t.Fatalf("teardown succeeded without agent.json:\n%s", out)
@@ -431,7 +431,12 @@ func TestTeardownWithoutCredentialsRemovesNothing(t *testing.T) {
 	if len(k.calls) != 0 || !k.table {
 		t.Errorf("changed something: calls=%v", k.calls)
 	}
-	for _, s := range []string{"found: table inet wgft_agent", "found: the WireGuard interface wgft0"} {
+	for _, s := range []string{
+		"found: table inet wgft_agent",
+		"found: the WireGuard interface wgft0, wgft's configured name: WGFT_WG_INTERFACE of this run\n",
+		"found: the WireGuard interface wgftnew-wgft0, wgft's configured name: the one the agent uses while creating wgft0\n",
+		"found: the WireGuard interface wg-home, not a name wgft uses with this configuration\n",
+	} {
 		if !strings.Contains(out, s) {
 			t.Errorf("output lacks %q:\n%s", s, out)
 		}
