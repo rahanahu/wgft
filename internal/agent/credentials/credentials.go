@@ -44,6 +44,10 @@ type Credentials struct {
 	// internal/dataplane/linuxkernel/nft の AgentPublication の JSON で、その package は Linux でしか
 	// ビルドしないので、ここでは形を持たずに保存する
 	KernelPublication json.RawMessage `json:"kernel_publication,omitempty"`
+	// KernelUnconverged は、conntrack の収束が済んでいない前の公開の列である(仕様 7b.4 節)。古い順に
+	// 並ぶ。収束に失敗している間だけ持ち、収束が済めば消す。再起動の後も、その公開で成立したフローを
+	// wgft のものと見分けるために残す。中身は KernelPublication と同じ形の JSON の配列である
+	KernelUnconverged json.RawMessage `json:"kernel_unconverged,omitempty"`
 }
 
 // PreviousKey は 1 つ前の wg の秘密鍵である。記録が無ければゼロの鍵を返す。ゼロの鍵はどの

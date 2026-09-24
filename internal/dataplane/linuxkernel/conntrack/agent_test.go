@@ -96,6 +96,7 @@ func TestClassifyAgentFlow(t *testing.T) {
 	webTo80 := rule("r_web", proto.TCP, 8443, 8443, "nas.lan:80")
 	web2To80 := rule("r_web", proto.TCP, 8443, 8443, "nas2.lan:80")
 	litTo80 := rule("r_web", proto.TCP, 8443, 8443, "192.168.1.22:80")
+	lit31To80 := rule("r_web", proto.TCP, 8443, 8443, "192.168.1.31:80")
 	mcLoop := mc
 	mcLoop.Target = "127.0.0.1:25565"
 
@@ -202,6 +203,15 @@ func TestClassifyAgentFlow(t *testing.T) {
 			publish(nil, allowOnly("192.168.1.30/32"), mc), agentFlow(6, 25565, "192.168.1.22:25565"), agentNotAllowed, allowOnly("192.168.1.30/32")},
 		{"port-only match is not closed by the allow list", []nft.AgentPublication{base},
 			publish(resolves("nas.lan", "192.168.1.30"), allowOnly("192.168.1.0/24"), mc, vh, web), agentFlow(6, 8443, "172.17.0.2:443"), agentKeep, allowOnly("192.168.1.0/24")},
+		// 宛先を IP リテラルへ変えてから同じホスト名へ戻した場合。中間の公開 A は、戻した B と DNAT が同じでも
+		// 宣言が違う。列が A を持てば、X で成立したフローは宛先の宣言が変わったものとして閉じる。A を畳んで
+		// 落とした列では、宣言が変わっていないように見えて残る
+		{"host name, IP literal, back to the host name: the middle publication retargets", []nft.AgentPublication{
+			publish(resolves("nas.lan", "192.168.1.30"), nil, webTo80), publish(nil, nil, lit31To80), publish(resolves("nas.lan", "192.168.1.31"), nil, webTo80)},
+			publish(resolves("nas.lan", "192.168.1.31"), nil, webTo80), agentFlow(6, 8443, "192.168.1.30:80"), agentRetargeted, nil},
+		{"the same change with the middle publication dropped keeps the flow", []nft.AgentPublication{
+			publish(resolves("nas.lan", "192.168.1.30"), nil, webTo80), publish(resolves("nas.lan", "192.168.1.31"), nil, webTo80)},
+			publish(resolves("nas.lan", "192.168.1.31"), nil, webTo80), agentFlow(6, 8443, "192.168.1.30:80"), agentKeep, nil},
 		{"created under an older publication than the list", []nft.AgentPublication{
 			publish(nil, nil, mcAddr)}, publish(nil, nil, mcPort), agentFlow(6, 25565, "192.168.1.22:25565"), agentForeign, nil},
 	}

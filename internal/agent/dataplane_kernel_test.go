@@ -22,6 +22,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/conntrack"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/startup"
@@ -69,6 +70,16 @@ type fakeKernel struct {
 	onEnsure func()
 	// lookups は引いた名前の記録である
 	lookups []string
+	// converged は conntrack の収束の呼び出しの記録である。convergeErr を設定すれば失敗させる
+	converged   []convergeCall
+	convergeErr error
+	convergeRes conntrack.AgentResult
+}
+
+type convergeCall struct {
+	prev  []nft.AgentPublication
+	cur   nft.AgentPublication
+	scope conntrack.AgentScope
 }
 
 func (k *fakeKernel) ops() kernelOps {
@@ -138,6 +149,10 @@ func (k *fakeKernel) ops() kernelOps {
 				return k.sendErr(len(k.datagrams) - 1)
 			}
 			return nil
+		},
+		convergeFlows: func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error) {
+			k.converged = append(k.converged, convergeCall{append([]nft.AgentPublication(nil), prev...), cur, scope})
+			return k.convergeRes, k.convergeErr
 		},
 		routeIface: func(netip.Addr) (string, error) {
 			if k.route == "" {
@@ -1503,5 +1518,260 @@ func TestObserveSavesARepairThatAlsoReturnsAnError(t *testing.T) {
 	case <-rt.stateNotify:
 	default:
 		t.Error("the repair did not ask for a heartbeat")
+	}
+}
+
+func gens(ps []nft.AgentPublication) []uint64 {
+	var out []uint64
+	for _, p := range ps {
+		out = append(out, p.Generation)
+	}
+	return out
+}
+
+// 公開のたびに、直前の公開を前の公開として conntrack を収束させる。前の公開が無ければ呼ばない。
+// 範囲は wgft0 のアドレスと vpsd のトンネルアドレスと今の許可一覧である(7b.4 節)。
+func TestKernelConvergesConntrackAfterEachPublication(t *testing.T) {
+	allow, err := allowtargets.Parse("192.168.1.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := &fakeKernel{}
+	f := &credentials.Credentials{}
+	d := newTestKernel(t, k, f, allow)
+	if _, err := d.applyRules(1, []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.converged) != 0 {
+		t.Fatalf("converged %d times with no earlier publication", len(k.converged))
+	}
+	if _, err := d.applyRules(2, []proto.AgentRule{tcpRule("r1", "192.168.1.21:80", 80, 80)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.converged) != 1 {
+		t.Fatalf("converged %d times, want once", len(k.converged))
+	}
+	c := k.converged[0]
+	if got := gens(c.prev); len(got) != 1 || got[0] != 1 || c.cur.Generation != 2 {
+		t.Errorf("converged from %v to %d, want from [1] to 2", got, c.cur.Generation)
+	}
+	if c.scope.Local != netip.MustParseAddr("10.200.0.2") || c.scope.Peer != netip.MustParseAddr("10.200.0.1") || c.scope.AllowTarget == nil {
+		t.Errorf("scope = %+v", c.scope)
+	}
+	if len(f.KernelUnconverged) != 0 {
+		t.Errorf("a converged publication left an unconverged list: %s", f.KernelUnconverged)
+	}
+}
+
+// 収束に失敗したら前の公開の列を残して認証情報ファイルに写し、30 秒ごとの見直しで、テーブルを
+// 差し替えずに同じ列で試し直す。その間に公開が進めば、列はその公開も含めて伸びる(7b.4 節)。
+func TestKernelKeepsUnconvergedPublicationsUntilConverged(t *testing.T) {
+	k := &fakeKernel{}
+	f := &credentials.Credentials{}
+	saves := 0
+	d := newTestKernel(t, k, f, nil)
+	d.save = func() error { saves++; return nil }
+	rule := func(target string) []proto.AgentRule { return []proto.AgentRule{tcpRule("r1", target, 80, 80)} }
+	if _, err := d.applyRules(1, rule("192.168.1.20:80"), nil); err != nil {
+		t.Fatal(err)
+	}
+	k.convergeErr = errors.New("conntrack: operation not permitted")
+	if _, err := d.applyRules(2, rule("192.168.1.21:80"), nil); err != nil {
+		t.Fatalf("a failed convergence failed the apply: %v", err)
+	}
+	if _, err := d.applyRules(3, rule("192.168.1.22:80"), nil); err != nil {
+		t.Fatal(err)
+	}
+	last := k.converged[len(k.converged)-1]
+	if got := gens(last.prev); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("the third publication converged from %v, want [1 2]", got)
+	}
+	var persisted []nft.AgentPublication
+	if err := json.Unmarshal(f.KernelUnconverged, &persisted); err != nil || len(persisted) != 2 {
+		t.Fatalf("persisted %s (%v), want two publications", f.KernelUnconverged, err)
+	}
+	published := len(k.published)
+	d.refresh()
+	if len(k.published) != published {
+		t.Error("the retry replaced the table")
+	}
+	if got := gens(k.converged[len(k.converged)-1].prev); len(got) != 2 {
+		t.Errorf("the retry converged from %v, want the same list", got)
+	}
+	k.convergeErr = nil
+	d.refresh()
+	if len(d.unconverged) != 0 || len(f.KernelUnconverged) != 0 || saves != 1 {
+		t.Errorf("after a good retry: list %v, persisted %s, saves %d; want it cleared and saved once", gens(d.unconverged), f.KernelUnconverged, saves)
+	}
+}
+
+// 再起動の後は、認証情報ファイルの公開の記録と、収束が済んでいない前の公開の列から収束させる。
+// エージェントが止まっている間に無効化された場合も、再起動後の公開がその前の公開のフローを消す。
+func TestKernelConvergesFromTheRecordAfterARestart(t *testing.T) {
+	older := nft.AgentPublication{Generation: 4, Rules: []nft.AgentRuleResult{{RuleID: "r1", Proto: proto.TCP,
+		ListenPort: proto.PortRange{Lo: 80, Hi: 80}, Target: "192.168.1.19:80",
+		Ranges: []nft.AgentRange{{Ports: proto.PortRange{Lo: 80, Hi: 80}, Dest: netip.MustParseAddrPort("192.168.1.19:80")}}}}}
+	rec := nft.AgentPublication{Generation: 5, Rules: []nft.AgentRuleResult{{RuleID: "r1", Proto: proto.TCP,
+		ListenPort: proto.PortRange{Lo: 80, Hi: 80}, Target: "192.168.1.20:80",
+		Ranges: []nft.AgentRange{{Ports: proto.PortRange{Lo: 80, Hi: 80}, Dest: netip.MustParseAddrPort("192.168.1.20:80")}}}}}
+	b, _ := json.Marshal(rec)
+	u, _ := json.Marshal([]nft.AgentPublication{older})
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, &credentials.Credentials{KernelPublication: b, KernelUnconverged: u}, nil)
+	// 止まっている間にエージェントが無効にされ、すべてのルールが enabled:false で届く
+	disabled := []proto.AgentRule{{ID: "r1", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 80, Hi: 80}, Target: "192.168.1.20:80"}}
+	if _, err := d.applyRules(6, disabled, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.converged) != 1 {
+		t.Fatalf("converged %d times, want once", len(k.converged))
+	}
+	c := k.converged[0]
+	if got := gens(c.prev); len(got) != 2 || got[0] != 4 || got[1] != 5 {
+		t.Errorf("converged from %v, want the persisted list and the record, [4 5]", got)
+	}
+	if len(c.cur.DNATs()) != 0 {
+		t.Errorf("the disabled agent's publication has DNATs: %+v", c.cur.DNATs())
+	}
+}
+
+// 再起動の後、wgft0 を一度も収束させていない間の見直しは、残った列で conntrack を収束させない。
+// 最初の公開が、記録を列に加えてから収束させる。
+func TestKernelWaitsForTheFirstConvergenceBeforeRetrying(t *testing.T) {
+	rec := nft.AgentPublication{Generation: 5, Rules: []nft.AgentRuleResult{{RuleID: "r1", Proto: proto.TCP,
+		ListenPort: proto.PortRange{Lo: 80, Hi: 80}, Target: "192.168.1.20:80",
+		Ranges: []nft.AgentRange{{Ports: proto.PortRange{Lo: 80, Hi: 80}, Dest: netip.MustParseAddrPort("192.168.1.20:80")}}}}}
+	older := rec
+	older.Generation = 4
+	older.Rules = []nft.AgentRuleResult{{RuleID: "r1", Proto: proto.TCP,
+		ListenPort: proto.PortRange{Lo: 80, Hi: 80}, Target: "192.168.1.19:80",
+		Ranges: []nft.AgentRange{{Ports: proto.PortRange{Lo: 80, Hi: 80}, Dest: netip.MustParseAddrPort("192.168.1.19:80")}}}}
+	b, _ := json.Marshal(rec)
+	u, _ := json.Marshal([]nft.AgentPublication{older})
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, &credentials.Credentials{KernelPublication: b, KernelUnconverged: u}, nil)
+	d.refresh()
+	if len(k.converged) != 0 {
+		t.Fatalf("the check converged conntrack %d times before wgft0 was converged", len(k.converged))
+	}
+	if _, err := d.applyRules(6, []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.converged) != 1 {
+		t.Fatalf("converged %d times, want once", len(k.converged))
+	}
+}
+
+// 読めない列は無いものとして扱い、途中まで読めた要素も使わない。
+func TestKernelIgnoresAnUnreadableUnconvergedList(t *testing.T) {
+	rec := nft.AgentPublication{Generation: 5, Rules: []nft.AgentRuleResult{{RuleID: "r1", Proto: proto.TCP,
+		ListenPort: proto.PortRange{Lo: 80, Hi: 80}, Target: "192.168.1.20:80",
+		Ranges: []nft.AgentRange{{Ports: proto.PortRange{Lo: 80, Hi: 80}, Dest: netip.MustParseAddrPort("192.168.1.20:80")}}}}}
+	b, _ := json.Marshal(rec)
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, &credentials.Credentials{KernelPublication: b,
+		KernelUnconverged: json.RawMessage(`[{"generation":4,"rules":[]},"not a publication"]`)}, nil)
+	if _, err := d.applyRules(6, []proto.AgentRule{tcpRule("r1", "192.168.1.21:80", 80, 80)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.converged) != 1 {
+		t.Fatalf("converged %d times, want once", len(k.converged))
+	}
+	if got := gens(k.converged[0].prev); len(got) != 1 || got[0] != 5 {
+		t.Errorf("converged from %v, want only the record, [5]", got)
+	}
+}
+
+// 列の上限と、DNAT の同じ公開をまとめること。
+func TestAppendUnconverged(t *testing.T) {
+	pub := func(g uint64, dest string) nft.AgentPublication {
+		return nft.AgentPublication{Generation: g, Rules: []nft.AgentRuleResult{{RuleID: "r", Proto: proto.TCP,
+			ListenPort: proto.PortRange{Lo: 80, Hi: 80}, Target: dest,
+			Ranges: []nft.AgentRange{{Ports: proto.PortRange{Lo: 80, Hi: 80}, Dest: netip.MustParseAddrPort(dest)}}}}}
+	}
+	var list []nft.AgentPublication
+	list = appendUnconverged(list, pub(1, "192.168.1.1:80"))
+	reasoned := pub(2, "192.168.1.1:80")
+	reasoned.Rules[0].Reason = "probe failed" // 理由は比べない
+	list = appendUnconverged(list, reasoned)
+	if got := gens(list); len(got) != 1 || got[0] != 2 {
+		t.Errorf("same DNATs: %v, want [2]", got)
+	}
+	// DNAT が同じでも宣言の宛先が違えば畳まない
+	named := pub(3, "192.168.1.1:80")
+	named.Rules[0].Target = "nas.lan:80"
+	if got := gens(appendUnconverged(append([]nft.AgentPublication(nil), list...), named)); len(got) != 2 {
+		t.Errorf("same DNATs, another declared target: %v, want both kept", got)
+	}
+	for g := uint64(3); g < 3+maxUnconverged+5; g++ {
+		list = appendUnconverged(list, pub(g, fmt.Sprintf("192.168.1.%d:80", g%200+2)))
+	}
+	if len(list) != maxUnconverged || list[len(list)-1].Generation != 3+maxUnconverged+4 {
+		t.Errorf("list of %d ending at %d, want %d ending at the newest", len(list), list[len(list)-1].Generation, maxUnconverged)
+	}
+}
+
+// DNAT が同じでも宣言の宛先の文字列が違う公開は畳まない。ホスト名の宛先を IP リテラルへ変えてから同じ
+// ホスト名へ戻すと、戻した公開は中間の公開と DNAT が同じになる。中間の公開を落とすと、収束は宣言が
+// 変わっていないと見て、最初の宛先へのフローを残す(7b.4 節)。
+func TestKernelKeepsARetargetThatReturnsToTheSameDNAT(t *testing.T) {
+	k := &fakeKernel{dns: map[string][]netip.Addr{"nas.lan": {netip.MustParseAddr("192.168.1.30")}}}
+	d := newTestKernel(t, k, nil, nil)
+	rule := func(target string) []proto.AgentRule { return []proto.AgentRule{tcpRule("r", target, 8443, 8443)} }
+	apply := func(gen uint64, target string) {
+		t.Helper()
+		st := &proto.State{WG: testWG(t), Rules: rule(target)}
+		if _, err := d.applyRules(gen, st.Rules, d.prepareApply(st)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply(1, "nas.lan:80") // X: .30
+	k.convergeErr = errors.New("conntrack: operation not permitted")
+	apply(2, "192.168.1.31:80") // A
+	k.dns["nas.lan"] = []netip.Addr{netip.MustParseAddr("192.168.1.31")}
+	apply(3, "nas.lan:80") // B: A と DNAT が同じ
+	apply(4, "nas.lan:80") // C: B と DNAT も宣言も同じ
+	last := k.converged[len(k.converged)-1]
+	if got := gens(last.prev); len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Errorf("C converged from %v, want X, A and B, [1 2 3]", got)
+	}
+	apply(5, "nas.lan:80") // D。列に加わる C は、DNAT も宣言も同じ B を置き換える
+	last = k.converged[len(k.converged)-1]
+	if got := gens(last.prev); len(got) != 3 || got[2] != 4 {
+		t.Errorf("D converged from %v, want [1 2 4]: C replaces B", got)
+	}
+}
+
+// 同じ削除の失敗が続く間、閉じたフローの無い結果を 30 秒ごとに出さない。誤りは変わったときだけ出す。
+func TestKernelLogsARepeatedConvergenceFailureOnce(t *testing.T) {
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, nil, nil)
+	rule := func(target string) []proto.AgentRule { return []proto.AgentRule{tcpRule("r1", target, 80, 80)} }
+	if _, err := d.applyRules(1, rule("192.168.1.20:80"), nil); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	k.convergeRes = conntrack.AgentResult{Failed: 2}
+	k.convergeErr = errors.New("conntrack delete: closing 2 of the agent's flows failed, the first with: operation not permitted")
+	if _, err := d.applyRules(2, rule("192.168.1.21:80"), nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		d.refresh()
+	}
+	out := buf.String()
+	if n := strings.Count(out, "closing 2 of the agent's flows failed"); n != 1 {
+		t.Errorf("the failure was logged %d times, want once:\n%s", n, out)
+	}
+	if strings.Contains(out, "closed 0 flows") {
+		t.Errorf("a result that closed nothing was logged:\n%s", out)
+	}
+	k.convergeRes = conntrack.AgentResult{Retargeted: 2}
+	k.convergeErr = nil
+	d.refresh()
+	if out := buf.String(); !strings.Contains(out, "closed 2 flows") || !strings.Contains(out, "converges again") {
+		t.Errorf("the recovery did not log the closed flows:\n%s", out)
 	}
 }

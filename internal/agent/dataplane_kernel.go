@@ -23,6 +23,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/conntrack"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/lograte"
@@ -49,6 +50,7 @@ type kernelOps struct {
 	now            func() time.Time
 	sendDatagram   func(dst netip.AddrPort) error
 	routeIface     func(dst netip.Addr) (string, error)
+	convergeFlows  func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error)
 }
 
 func defaultKernelOps() kernelOps {
@@ -82,7 +84,8 @@ func defaultKernelOps() kernelOps {
 			_, err = c.Write([]byte{0})
 			return err
 		},
-		routeIface: wg.AgentRouteInterface,
+		routeIface:    wg.AgentRouteInterface,
+		convergeFlows: conntrack.ConvergeAgent,
 	}
 }
 
@@ -158,6 +161,14 @@ type kernelDataplane struct {
 	// routeFinding は、vpsd のトンネルアドレスへの経路が wgft0 を通らないことの直前の説明である。
 	// 変わったときだけ 1 行出す
 	routeFinding string
+
+	// unconverged は、conntrack の収束が済んでいない前の公開の列である(7b.4 節)。古い順に並び、最後の
+	// 要素が pub の直前の公開である。空なら、pub への収束は済んでいる。認証情報ファイルに写して
+	// 再起動をまたいで残す。convergeErr は直前の収束の誤りで、変わったときだけ 1 行出す
+	unconverged []nft.AgentPublication
+	convergeErr string
+	// save は認証情報ファイルを保存する。30 秒ごとの見直しで収束が済んだときに、列を消した記録を書く
+	save func() error
 	// lkg はルールごとの、直前に解決できた宛先のアドレスである(7b.2 節)。宣言の宛先の文字列が
 	// 同じ間だけ使う
 	lkg map[string]lkgEntry
@@ -183,8 +194,8 @@ func startupFatal(err error) bool {
 }
 
 // newKernelDataplane はカーネルモードの dataplane を作る。カーネルには何も書かない。
-func newKernelDataplane(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials) (agentDataplane, error) {
-	d := &kernelDataplane{ops: defaultKernelOps(), iface: iface, allow: allow, f: f, ctx: ctx,
+func newKernelDataplane(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error) (agentDataplane, error) {
+	d := &kernelDataplane{ops: defaultKernelOps(), iface: iface, allow: allow, f: f, ctx: ctx, save: save,
 		lkg: map[string]lkgEntry{}, probeErr: map[string]string{}}
 	d.loadRecord()
 	return d, nil
@@ -194,6 +205,12 @@ func newKernelDataplane(ctx context.Context, iface string, allow *allowtargets.L
 // 解決できたアドレスの元にする。読めない記録は無いものとして扱う。記録は診断と比較のためのもので、
 // 起動を止める理由にはしない。
 func (d *kernelDataplane) loadRecord() {
+	if len(d.f.KernelUnconverged) > 0 {
+		if err := json.Unmarshal(d.f.KernelUnconverged, &d.unconverged); err != nil {
+			log.Printf("kernel mode: ignoring the unreadable list of unconverged publications in the credentials file: %v", err)
+			d.unconverged = nil
+		}
+	}
 	if len(d.f.KernelPublication) == 0 {
 		return
 	}
@@ -648,8 +665,99 @@ func (d *kernelDataplane) publish(pub nft.AgentPublication) error {
 	// (7a.3 節の指紋の読み直しの失敗と同じ扱い)
 	fp, present, err := d.ops.fingerprint(nft.AgentTableName)
 	d.fp, d.fpKnown = fp, err == nil && present
-	convergeAgentFlows(prev, pub)
+	if prev != nil {
+		d.unconverged = appendUnconverged(d.unconverged, *prev)
+	}
+	d.convergeFlows()
 	return nil
+}
+
+// maxUnconverged は、収束が済んでいない前の公開を残す数の上限である。収束が失敗し続ける間に公開が
+// 続いても、認証情報ファイルが大きくならないようにする。上限を超えた古い公開のフローは見分けられなく
+// なり、残る。
+const maxUnconverged = 32
+
+// appendUnconverged は、収束が済んでいない前の公開の列に p を加える。直前の要素と DNAT も宣言も同じなら、
+// 収束の判定に使う中身が変わらないので、置き換えて並びを伸ばさない。DNAT が同じでも宣言の宛先の文字列が
+// 違う公開は畳まない。収束は宣言の宛先の変化で宛先の変更を見分けるので、IP リテラルへ変えてから同じ
+// ホスト名へ戻した中間の公開を落とすと、宛先の変更を見落とす(7b.4 節)。
+func appendUnconverged(list []nft.AgentPublication, p nft.AgentPublication) []nft.AgentPublication {
+	if n := len(list); n > 0 && sameDNATs(list[n-1], p) && sameDeclarations(list[n-1], p) {
+		list[n-1] = p
+		return list
+	}
+	list = append(list, p)
+	if len(list) > maxUnconverged {
+		list = list[len(list)-maxUnconverged:]
+	}
+	return list
+}
+
+// sameDeclarations は、2 つの公開のルールの宣言、つまりルールごとのプロトコル、待ち受けのポートの範囲、
+// 宣言の宛先の文字列が同じかどうかである。世代と理由は比べない。
+func sameDeclarations(a, b nft.AgentPublication) bool {
+	type decl struct {
+		proto  proto.Proto
+		listen proto.PortRange
+		target string
+	}
+	byID := func(p nft.AgentPublication) map[string]decl {
+		m := make(map[string]decl, len(p.Rules))
+		for _, r := range p.Rules {
+			m[r.RuleID] = decl{r.Proto, r.ListenPort, r.Target}
+		}
+		return m
+	}
+	return reflect.DeepEqual(byID(a), byID(b))
+}
+
+// convergeFlows は、conntrack を今の公開に収束させる(7b.4 節)。wgft0 から入って DNAT されたフローの
+// うち、宣言から消えたポートのフロー、実効宛先の宣言が変わったポートのフロー、今の許可一覧の外に
+// DNAT したフローを消す。成功したら収束が済んでいない前の公開の列を消し、失敗したら列を残して、
+// 30 秒ごとの見直しでテーブルを差し替えずに試し直す(7a.3 節の修復)。列は認証情報ファイルに写す。
+// 前の公開が 1 つも無ければ、どのフローも wgft のものと見分けられないので、何もしない。
+func (d *kernelDataplane) convergeFlows() {
+	if d.pub == nil || len(d.unconverged) == 0 {
+		d.recordUnconverged()
+		return
+	}
+	addr, err := netip.ParsePrefix(d.wg.Address)
+	if err != nil {
+		return
+	}
+	scope := conntrack.AgentScope{Local: addr.Addr(), Peer: d.server}
+	if d.allow != nil {
+		scope.AllowTarget = d.allow.Allows
+	}
+	res, err := d.ops.convergeFlows(d.unconverged, *d.pub, scope)
+	// 閉じたフローがあれば出す。閉じられなかったフローは誤りに数が入るので、誤りと同じく変わったときだけ
+	// 出す。同じ削除の失敗が 30 秒ごとに繰り返す間、同じ行を出し続けないためである
+	if res.Deleted() > 0 {
+		log.Printf("kernel mode: conntrack: %s", res)
+	}
+	switch {
+	case err == nil:
+		if d.convergeErr != "" {
+			log.Printf("kernel mode: conntrack converges again")
+		}
+		d.convergeErr = ""
+		d.unconverged = nil
+	case err.Error() != d.convergeErr:
+		log.Printf("kernel mode: conntrack: %v; established flows the new table does not allow may still pass until this succeeds, and the 30-second check tries again", err)
+		d.convergeErr = err.Error()
+	}
+	d.recordUnconverged()
+}
+
+// recordUnconverged は、収束が済んでいない前の公開の列を認証情報ファイルの項目に写す。
+func (d *kernelDataplane) recordUnconverged() {
+	if len(d.unconverged) == 0 {
+		d.f.KernelUnconverged = nil
+		return
+	}
+	if b, err := json.Marshal(d.unconverged); err == nil {
+		d.f.KernelUnconverged = b
+	}
 }
 
 // planWith は解決の結果からポートごとの DNAT を決める(7b.2 節)。解決に失敗した名前は、宣言の宛先の
@@ -786,6 +894,15 @@ func (d *kernelDataplane) refresh() {
 			d.local = l
 		}
 	}
+	// 収束が済んでいなければ、テーブルを差し替えずに収束だけを試し直す(7a.3 節の修復)
+	if len(d.unconverged) > 0 && d.converged {
+		d.convergeFlows()
+		if len(d.unconverged) == 0 && d.save != nil {
+			if err := d.save(); err != nil {
+				log.Printf("save credentials file after conntrack converged: %v", err)
+			}
+		}
+	}
 	d.probeAll()
 }
 
@@ -868,14 +985,6 @@ func (d *kernelDataplane) allLocal(r nft.AgentRuleResult) bool {
 	}
 	return len(r.Ranges) > 0
 }
-
-// convergeAgentFlows は、公開の後に成立済みのフローを宣言へ収束させる(7b.4 節)。wgft0 から入って DNAT
-// されたフローのうち、宣言から消えたポートと実効宛先が変わったポートのフローを消す。
-//
-// TODO: conntrack の収束の部品が入ったら、ここから呼ぶ。失敗は修復として残し、30 秒ごとに試し直す。
-// それまでは何もしない。prev は直前に公開したテーブルの記録で、起動後の最初の公開では認証情報ファイルの
-// 記録である。
-var convergeAgentFlows = func(prev *nft.AgentPublication, cur nft.AgentPublication) {}
 
 // hostAddrs はホストのすべてのインタフェースの IPv4 のアドレスである。
 func hostAddrs() (map[netip.Addr]bool, error) {
