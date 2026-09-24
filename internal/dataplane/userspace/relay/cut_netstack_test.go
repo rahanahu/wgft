@@ -125,7 +125,7 @@ func TestTCPForcedCutFreesTheNetstackPortAtOnce(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client, agent := netstackPair(t)
 			target, other := tcpEcho(t), tcpEcho(t)
-			m := New(agent, Options{Logf: t.Logf})
+			m := New(agent, Options{Logf: testLogf(t)})
 			defer m.Close()
 			m.Apply(map[Key]Desired{k: {target, "r1"}})
 			c := dialNetstackEcho(t, client, port)
@@ -160,7 +160,7 @@ func TestUDPCloseFreesTheNetstackPortAtOnce(t *testing.T) {
 	k := Key{proto.UDP, port}
 	client, agent := netstackPair(t)
 	target, _ := udpEcho(t)
-	m := New(agent, Options{Logf: t.Logf})
+	m := New(agent, Options{Logf: testLogf(t)})
 	defer m.Close()
 	want := map[Key]Desired{k: {target, "r1"}}
 	echo := func() {
@@ -231,7 +231,7 @@ func TestTCPConnAcceptedDuringCloseIsCut(t *testing.T) {
 	client, agent := netstackPair(t)
 	target, other := tcpEcho(t), tcpEcho(t)
 	accepted := make(chan struct{}, 1)
-	m := New(acceptSignal{agent, accepted}, Options{Logf: t.Logf})
+	m := New(acceptSignal{agent, accepted}, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{k: {target, "r1"}})
 

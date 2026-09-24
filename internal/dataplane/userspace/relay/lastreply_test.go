@@ -69,7 +69,7 @@ func TestLastRepliesOnlyCountsDatagramsFromTheTarget(t *testing.T) {
 	// 同じ番号を受け取り、閉じているはずの宛先が echo や待ち受けになることがある。TCP の freePort
 	// では、番号が UDP の側で使われているかを確かめられない
 	closed := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(freeUDPPort(t))))
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{
 		{proto.UDP, echoPort}:   {echoAddr, "r_echo"},
@@ -108,7 +108,7 @@ func TestLastRepliesFollowTheListener(t *testing.T) {
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
 	k := Key{proto.UDP, port}
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{k: {echoAddr, "r_a"}})
 	if !sendTo(t, port, 2*time.Second) {
@@ -130,7 +130,7 @@ func TestLastReplyMarkIsThrottled(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r_a"}})
 	var wg sync.WaitGroup

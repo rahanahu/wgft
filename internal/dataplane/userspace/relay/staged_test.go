@@ -69,7 +69,7 @@ func TestStagedBindFailureFailsWholeRule(t *testing.T) {
 	// cannot hand free the number other then gets.
 	other := reserveTCP(t, lb)
 	free := freePort(t)
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 
 	s := m.Prepare(map[Key]Desired{
@@ -102,7 +102,7 @@ func TestStagedRollback(t *testing.T) {
 	echo := tcpEcho(t)
 	lb := &loopback{}
 	oldPort, newPort := reserveTCP(t, lb), reserveTCP(t, lb)
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Prepare(map[Key]Desired{{proto.TCP, oldPort}: {echo, "r_old"}}).Commit(nil)
 	s := m.Prepare(map[Key]Desired{{proto.TCP, newPort}: {echo, "r_new"}})
@@ -139,7 +139,7 @@ func TestStagedRetiringTCP(t *testing.T) {
 	}
 	defer blocker.Close()
 	blocked := uint16(blocker.Addr().(*net.TCPAddr).Port)
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Prepare(map[Key]Desired{{proto.TCP, port}: {echo, "r_x"}}).Commit(nil)
 	c, err := dialLoopback(port)
@@ -194,7 +194,7 @@ func TestStagedRetiringUDP(t *testing.T) {
 	}
 	defer blocker.Close()
 	blocked := uint16(blocker.LocalAddr().(*net.UDPAddr).Port)
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Prepare(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r_u"}}).Commit(nil)
 	dial := func() *net.UDPConn {

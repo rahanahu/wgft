@@ -15,12 +15,12 @@ import (
 // 作った Pool に届く経路はこの入口だけである(設計文書 10.2c 節の relay.refusals)。
 func TestManagerExposesTheFlowBudgets(t *testing.T) {
 	udp, tcp := resource.NewPool(4), resource.NewPool(4)
-	m := New(&loopback{}, Options{UDPPool: udp, TCPPool: tcp, Logf: t.Logf})
+	m := New(&loopback{}, Options{UDPPool: udp, TCPPool: tcp, Logf: testLogf(t)})
 	if m.UDPPool() != udp || m.TCPPool() != tcp {
 		t.Error("a pool given through Options must be the one the accessors return")
 	}
 
-	m = New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 32, TCPTotal: 24}, Logf: t.Logf})
+	m = New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 32, TCPTotal: 24}, Logf: testLogf(t)})
 	if got := m.UDPPool(); got == nil || got.Total() != 32 {
 		t.Errorf("derived UDP pool = %+v, want a pool with total 32", got)
 	}
@@ -35,7 +35,7 @@ func TestManagerReportsFlowBudgetRefusals(t *testing.T) {
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
 	// 予算 1 なので、2 本目の接続は予算で拒まれる
-	m := New(lb, Options{Limits: resource.Limits{TCPTotal: 1}, Logf: t.Logf})
+	m := New(lb, Options{Limits: resource.Limits{TCPTotal: 1}, Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, port}: {target, "r1"}})
 

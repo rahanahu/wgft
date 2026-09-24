@@ -46,7 +46,7 @@ func TestNoAllowListDialsTargetAsIs(t *testing.T) {
 	lb := &loopback{}
 	var got atomic.Value
 	m := New(lb, Options{
-		Logf: t.Logf,
+		Logf: testLogf(t),
 		Dial: func(network, addr string) (net.Conn, error) { got.Store(addr); return nil, errors.New("refused") },
 		LookupTarget: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			t.Error("LookupTarget must not be called without an allow list")
@@ -65,7 +65,7 @@ func TestApplyDeniesLiteralTargetOutsideList(t *testing.T) {
 	var netw neverListen
 	pool := resource.NewPool(10)
 	m := New(&netw, Options{
-		Logf:              t.Logf,
+		Logf:              testLogf(t),
 		TCPPool:           pool,
 		AllowTarget:       allowList("192.168.1.20:25565"),
 		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
@@ -110,7 +110,7 @@ func TestApplyDeniesOnePortOfRange(t *testing.T) {
 	// 同じルールの 2 つのポート。実効宛先は echo のポートと、その次のポート。次だけを一覧から外す
 	next := strconv.Itoa(mustPort(t, portStr) + 1)
 	lb := &loopback{}
-	m := New(lb, Options{Logf: t.Logf, AllowTarget: allowList(echoAddr), AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS"})
+	m := New(lb, Options{Logf: testLogf(t), AllowTarget: allowList(echoAddr), AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS"})
 	defer m.Close()
 	allowed, denied := reserveUDP(t, lb), freePort(t)
 	m.Apply(map[Key]Desired{
@@ -170,7 +170,7 @@ func TestDialTimeCheckFollowsDNS(t *testing.T) {
 	var dialed atomic.Value
 	lb := &loopback{}
 	m := New(lb, Options{
-		Logf:              t.Logf,
+		Logf:              testLogf(t),
 		AllowTarget:       allowList("127.0.0.1:" + strconv.Itoa(targetPort)),
 		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
 		LookupTarget: func(ctx context.Context, host string) ([]netip.Addr, error) {
@@ -240,7 +240,7 @@ func TestUDPDialTimeCheckDropsDatagrams(t *testing.T) {
 	}
 	lb := &loopback{}
 	m := New(lb, Options{
-		Logf:              t.Logf,
+		Logf:              testLogf(t),
 		AllowTarget:       allowList("127.0.0.9:" + portStr), // echo の 127.0.0.1 は許さない
 		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
 		LookupTarget: func(ctx context.Context, host string) ([]netip.Addr, error) {
