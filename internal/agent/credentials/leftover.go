@@ -25,8 +25,8 @@ var errLockNotHeld = errors.New("remove leftover temporary credentials files: th
 //
 // 呼び出し側は Acquire で認証情報ファイルのロックを取り、その Lock を渡す。ロックを持つ別の
 // プロセスが保存している途中の一時ファイルを消さないためである。ロックを取らずに保存する書き手
-// (agent pubkey と、ロックファイルの無い停止中の rotate-key)と重なると、Unix ではその書き手の
-// rename が失敗する。Windows では、書き手が一時ファイルを共有を許さずに開いている間はこちらの削除が
+// (ロックファイルの無いデータディレクトリでの agent pubkey と停止中の rotate-key)と重なると、
+// Unix ではその書き手の rename が失敗する。Windows では、書き手が一時ファイルを共有を許さずに開いている間はこちらの削除が
 // 失敗し、閉じてから rename するまでの間だけ書き手の rename が失敗する。どちらでも認証情報ファイルは
 // 壊れない。この向きの失敗は許容する(仕様 9 節)。
 //

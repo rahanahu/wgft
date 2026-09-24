@@ -72,7 +72,7 @@ Agent-related commands.
 
 On the agent host:
   run           run the agent: bring up the tunnel and relay incoming traffic to the LAN
-  pubkey        print the wg public key; generate and save one if absent
+  pubkey        print the wg public key; generate and save one if absent while the agent is stopped
   rotate-key    regenerate the wg key pair
   doctor        diagnose this host's own agent, running or stopped
 
@@ -428,9 +428,15 @@ Flags:
 
 ## wgft agent pubkey
 
-Print the agent's WireGuard public key. If the credentials file has no key yet,
-one is generated and saved first. Registration does not need this; it is for
-checking which key an agent uses.
+Print the agent's WireGuard public key. Registration does not need this; it is
+for checking which key an agent uses.
+
+With the agent stopped, a key is generated and saved first if the credentials
+file has none yet. With the agent running, the key is only read from the
+credentials file and nothing is written, since the running agent owns the file.
+If another process is using the data directory, such as an agent that is still
+starting, and the credentials file has no key yet, the command fails; running it
+again a moment later prints the key.
 
 ```text
 wgft agent pubkey [flags]

@@ -152,42 +152,23 @@ func (rt *runtime) rotateKey() (wgtypes.Key, error) {
 
 // RotateKey は CLI から呼ぶ。稼働中なら制御ソケット経由で、停止中なら認証情報ファイルの鍵と last_state を直接消す。
 func RotateKey(path string) (string, error) {
-	// 判定はロックファイルを作らない Inspect で行う(設計 10.2c 節)。Acquire 経由の判定は、
-	// ロックファイルの無いデータディレクトリで rotate-key を打っただけで、呼び出し元の権限の
-	// ロックファイルを残し、後から非特権で動くエージェントの起動を塞いだ。
-	state, err := inspectLock(path)
+	// 判定とロックの取り方は lockWhileStopped にある。判定はロックファイルを作らない Inspect で行う
+	// (設計 10.2c 節)。Acquire 経由の判定は、ロックファイルの無いデータディレクトリで rotate-key を
+	// 打っただけで、呼び出し元の権限のロックファイルを残し、後から非特権で動くエージェントの起動を塞いだ。
+	// ロックファイルがあって誰も持っていなければ、ロックを取ってから書き換える。取らないと、判定の後に
+	// 起動したエージェントが書いた記録(カーネルモードへの切り替えの記録など)を、この書き換えが古い
+	// 内容で上書きしうる(仕様 9 節)
+	release, running, err := lockWhileStopped(path)
 	if err != nil {
 		return "", err
 	}
-	if state == credentials.Locked {
+	if running {
 		return rotateKeyRunning(path)
 	}
-	// ロックファイルがあって誰も持っていなければ、ロックを取ってから書き換える。取らないと、判定の後に
-	// 起動したエージェントが書いた記録(カーネルモードへの切り替えの記録など)を、この書き換えが古い
-	// 内容で上書きしうる(仕様 9 節)。既にあるロックファイルを開くだけなので、持ち主は変わらない。
-	//
-	// ロックファイルが無ければ、ロックを取らずに書き換える。判定の時点でそのパスのロックを持つ
-	// エージェントはおらず、取ろうとするとロックファイルを呼び出し元の権限で作ってしまう。バックアップ
-	// からの戻しやホストの移し替えの後、運用者がロックファイルを消した後がこの場合に当たる(10.2c 節)。
-	// 判定の直後に起動したエージェントの書き込みを上書きしうる狭い隙間は許容する(仕様 9 節)
-	var lock *credentials.Lock
-	if state == credentials.Unlocked {
-		lock, err = credentials.Acquire(path)
-		if errors.Is(err, credentials.ErrLocked) {
-			// 判定の後に起動したエージェントがロックを持っている。稼働中として扱う
-			return rotateKeyRunning(path)
-		}
-		if err != nil {
-			return "", err
-		}
-		defer lock.Release()
-	}
+	defer release()
 	f, err := credentials.Load(path)
 	if err != nil {
 		return "", err
-	}
-	if rotateKeyLockedHook != nil {
-		rotateKeyLockedHook()
 	}
 	// カーネルモードでは、消す鍵を 1 つ前の鍵として残す(仕様 7b.4 節)。wgft0 はまだその鍵を持つので、
 	// 次の起動は 1 つ前の鍵で wgft0 を自分のものと判定し、新しい鍵へ書き換える
@@ -197,6 +178,9 @@ func RotateKey(path string) (string, error) {
 	if err := f.Save(path); err != nil {
 		return "", err
 	}
+	if rotateKeyLockedHook != nil {
+		rotateKeyLockedHook()
+	}
 	msg := "agent stopped: cleared the key and last_state in the credentials file, agent.json; the next start regenerates the key and receives full state over the stream"
 	if kernel {
 		msg += "; the old key is kept as the previous key, so the next start still recognises the kernel WireGuard interface that holds it and moves it to the new key"
@@ -204,8 +188,8 @@ func RotateKey(path string) (string, error) {
 	return msg, nil
 }
 
-// rotateKeyLockedHook は、停止中の rotate-key が認証情報ファイルを読んだ後、書く前に呼ばれる。
-// テストだけが、この区間でロックを持っていることを確かめるために設定する。
+// rotateKeyLockedHook は、停止中の rotate-key が認証情報ファイルを書いた後、ロックを放す前に呼ばれる。
+// テストだけが、読んでから書き終えるまでロックを持っていることを確かめるために設定する。
 var rotateKeyLockedHook func()
 
 // inspectLock はロックの状態を読む。値は credentials.Inspect で、テストだけが、判定と取得の間に

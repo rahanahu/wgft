@@ -904,25 +904,3 @@ func nameOrUnregistered(name string) string {
 	}
 	return name
 }
-
-// PublicKey は認証情報ファイルの鍵(なければ生成して保存)の公開鍵を返す。
-func PublicKey(path string) (wgtypes.Key, error) {
-	f, err := credentials.LoadOrNew(path)
-	if err != nil {
-		return wgtypes.Key{}, err
-	}
-	created, err := f.EnsureKey()
-	if err != nil {
-		return wgtypes.Key{}, err
-	}
-	if created {
-		if err := f.Save(path); err != nil {
-			return wgtypes.Key{}, err
-		}
-	}
-	priv, err := f.PrivateKey()
-	if err != nil {
-		return wgtypes.Key{}, err
-	}
-	return priv.PublicKey(), nil
-}
