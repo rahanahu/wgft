@@ -155,10 +155,13 @@ func sampleAgents() []admin.AgentInfo {
 		},
 		{
 			// generation 40 is behind Generation() (42), so both of its rules show
-			// "pending" no matter what Rules below says.
+			// "pending" no matter what Rules below says. It fell behind 20 seconds ago, as a
+			// current server reports in generation_behind_since, so the diagnosis reads it as
+			// UNKNOWN generation_pending (still within the 60s limit) and the dashboard marks
+			// its rules "? agent" rather than a red "✕ agent".
 			Name: "lab", Address: "10.200.0.4", CreatedAt: rfcAgo(24 * time.Hour),
 			Connected: true, StreamFrom: "192.0.2.55:51820", WGEndpoint: "192.0.2.55:51820",
-			LastHeartbeat: rfcAgo(12 * time.Second), Generation: 40,
+			LastHeartbeat: rfcAgo(12 * time.Second), Generation: 40, GenerationBehindSince: rfcAgo(20 * time.Second),
 			PublicKey: "qJzBQ+ilV8EQ9749TxyIY1sB1jRieCYDU33kUi6aAPg=", LastHandshake: rfcAgo(18 * time.Second),
 			Tunnel: admin.TunnelStatus{State: proto.StatusOK, Endpoint: "192.0.2.55:51820"},
 			Rules: []proto.RuleStatus{

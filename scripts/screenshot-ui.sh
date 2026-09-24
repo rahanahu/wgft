@@ -110,8 +110,8 @@ shoot() {
 
 shoot "/?lang=en" "$out_dir/dashboard.png" 1400
 shoot "/?lang=ja" "$out_dir/dashboard.ja.png" 1400
-shoot "/ui/doctor?lang=en" "$out_dir/doctor.png" 1200,2279
-shoot "/ui/doctor?lang=ja" "$out_dir/doctor.ja.png" 1200,2327
+shoot "/ui/doctor?lang=en" "$out_dir/doctor.png" 1200,2232
+shoot "/ui/doctor?lang=ja" "$out_dir/doctor.ja.png" 1200,2260
 shoot "/ui/doctor/r_pub_tcp8080?lang=en" "$out_dir/doctor-rule.png" 1200,1106
 shoot "/ui/doctor/r_pub_tcp8080?lang=ja" "$out_dir/doctor-rule.ja.png" 1200,1138
 

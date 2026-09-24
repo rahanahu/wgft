@@ -108,6 +108,10 @@ type doctorPathView struct {
 	Nodes []doctorNodeView
 	// Caption は一覧の画面で図の横に出す札で、止まった節点の Stop か、無効なルールの札である。
 	Caption string
+	// Stop は止まった節点の位置で、止まっていなければ -1 である。StoppedAt の検査が入る節点を
+	// doctorPath が決めた値そのものであり、ダッシュボードの印(doctorMark)が同じ節点を指すために
+	// 外へ出す。
+	Stop int
 }
 
 // doctorSeverity は節点を集約するときの状態の重さである。
@@ -155,7 +159,7 @@ func doctorPath(rr doctor.RuleReport, checks []doctor.Check, now time.Time, loca
 			byID[c.ID] = c
 		}
 	}
-	p := doctorPathView{Aria: T(locale, "doctorPathAria")}
+	p := doctorPathView{Aria: T(locale, "doctorPathAria"), Stop: -1}
 	stop := -1
 	for i, def := range doctorNodeDefs {
 		n, stopped := doctorNode(def, byID, rr, now, locale)
@@ -192,6 +196,7 @@ func doctorPath(rr doctor.RuleReport, checks []doctor.Check, now time.Time, loca
 	for i := range p.Nodes {
 		doctorFinishNode(&p.Nodes[i])
 	}
+	p.Stop = stop
 	return p
 }
 
@@ -315,6 +320,70 @@ func doctorNodeIndex(id string) int {
 		}
 	}
 	return -1
+}
+
+// doctorMarkView はダッシュボードのルール一覧の 1 行に置く診断の印である(設計文書 10.1、10.2d 節)。
+// doctorPath が作った図から 1 つを選ぶだけで、判定も写し方も持たない。
+type doctorMarkView struct {
+	// State と Symbol は経路の図の節点と同じ描き方と記号である。記号は aria-hidden にし、
+	// 読み上げは Alt が担う。
+	State, Symbol string
+	// Node は印に添える語である。FAILED なら止まった節点の名前、UNKNOWN なら図の上で最初の
+	// UNKNOWN の節点の名前(どちらも英語のまま)、持ち主のエージェントが未登録なら画面の枠の語の
+	// 「エージェント未登録」である。OK と SKIPPED では空である。
+	Node string
+	// Alt は .sr-only と title に入れる文である。状態の語は英語のまま入れる。
+	Alt string
+	// Failed はヘッダの全体ヘルスとグループの見出しの error の件数に数える印であることである。
+	// 件数は印と同じこの値から数え、赤い ✕ の行が「エラー 0 件」の下に並ばないようにする。
+	Failed bool
+}
+
+// doctorMark は 1 本のルールの印を選ぶ。形と記号は、ルールの総合判定(rr.Status)を
+// doctorSetState に通して節点と同じ表から取る。印のために別の記号の表は持たない。
+//
+// 添える節点の名前は次の規則で選ぶ。
+//
+//   - FAILED:doctorPath が StoppedAt から決めた止まった節点(p.Stop)。一覧の図と 1 本のルールの
+//     画面が止まった位置として描く節点と同じである
+//   - UNKNOWN:図を公開側から見て最初に UNKNOWN になる節点。StoppedAt と違って doctor が持つ値
+//     ではなく、画面が図から選ぶ唯一の値である。向きは StoppedAt が「経路の順で最初の failed」で
+//     あるのと揃えてある
+//
+// 持ち主のエージェントが登録されていないルールは、`server doctor` では `agent.connection` が
+// FAILED `agent_not_registered` になるが、Web UI では故障ではなく登録を待つ状態として灰色で示し、
+// エラーの数に含めない(設計文書 5.1、10.1 節)。その判別は、同じ診断の検査の reason の符号で行う。
+func doctorMark(rr doctor.RuleReport, checks []doctor.Check, p doctorPathView, locale string) doctorMarkView {
+	var n doctorNodeView
+	doctorSetState(&n, doctor.Check{Status: rr.Status})
+	m := doctorMarkView{State: n.State, Symbol: n.Symbol}
+	for _, c := range checks {
+		if c.RuleID == rr.RuleID && c.ID == doctor.CheckConnection && c.Reason == doctor.ReasonAgentNotRegistered {
+			m.State, m.Symbol, m.Node = nodeSkipped, "", T(locale, "dashDiagUnregistered")
+			m.Alt = fmt.Sprintf(T(locale, "dashDiagAlt"), m.Node)
+			return m
+		}
+	}
+	switch rr.Status {
+	case doctor.StatusFailed:
+		m.Failed = true
+		if p.Stop >= 0 && p.Stop < len(p.Nodes) {
+			m.Node = p.Nodes[p.Stop].Name
+		}
+	case doctor.StatusUnknown:
+		for _, node := range p.Nodes {
+			if node.State == nodeUnknown {
+				m.Node = node.Name
+				break
+			}
+		}
+	}
+	word := doctor.StatusWord(rr.Status)
+	if m.Node != "" {
+		word += " at " + m.Node
+	}
+	m.Alt = fmt.Sprintf(T(locale, "dashDiagAlt"), word)
+	return m
 }
 
 // doctorAgentPath はエージェント 1 つの行の図を作る。検査は doctor.Report.AgentCheck で選び、
