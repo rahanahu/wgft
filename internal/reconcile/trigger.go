@@ -82,7 +82,7 @@ func Watch(ctx context.Context, s dataplane.Sensor, wake func(), backoff Backoff
 			if err == nil {
 				logf("watching the data plane for changes stopped; subscribing again")
 			} else {
-				logf("watching the data plane for changes failed: %v; subscribing again in %v, and a periodic check still runs every few minutes as a backstop", err, delay)
+				logf("watching the data plane for changes failed: %v; subscribing again in %v, and the periodic check still runs as a backstop", err, delay)
 			}
 			failing = true
 		}

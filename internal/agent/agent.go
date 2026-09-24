@@ -20,6 +20,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/reconcile"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
@@ -79,6 +80,13 @@ type runtime struct {
 	// 打ち切る。チャネルにしてあるのは、rt.mu を持ったまま streamMu を取らないためである。
 	// nil なら送信も受信も起きないので、チャネルを持たない runtime を組むテストはそのまま動く
 	handshakeWake chan struct{}
+
+	// kernelWake は、カーネルの変更の通知を受けたことを serve に伝えるサイズ 1 の非ブロッキングチャネル
+	// である(仕様 7b.4 節の変更の通知)。serve は最初の通知から notifyDebounce 待って続く通知をまとめ、
+	// observeNotified を 1 回呼ぶ。見直しの間に届いた通知は、もう 1 回の見直しになる。nil なら何も
+	// 届かないので、チャネルを持たない runtime を組むテストはそのまま動く
+	kernelWake     chan struct{}
+	notifyDebounce time.Duration
 
 	// applySeq は、stream の読みの for ループが全体状態の適用に入るたびと出るたびに 1 つ進む
 	// (仕様 5.2 節)。奇数なら適用の最中である。適用の間は読みが止まって pong を処理できないので、
@@ -209,6 +217,7 @@ func Run(opts Options) error {
 	} else {
 		log.Printf("no saved full state; waiting for full state from stream")
 	}
+	rt.watchKernel(ctx)
 	errc := make(chan error, 1)
 	go func() { errc <- rt.streamLoop(ctx) }()
 	go rt.serveControl(ctx)
@@ -220,8 +229,11 @@ func Run(opts Options) error {
 
 // serve は Run の本体のループである。stream の復帰できない誤り errc か、プロセスを終える適用の誤り
 // (rt.fatal)が届くか、ctx が取り消されるまで動く。tick ごとに、トンネルの見張り、公開できなかった
-// 全体状態の試し直し、開けなかったリスナーの再試行と宛先の試し接続、状態のログを行う。
+// 全体状態の試し直し、開けなかったリスナーの再試行と宛先の試し接続、状態のログを行う。カーネルの
+// 変更の通知(rt.kernelWake)は、最初の通知から rt.notifyDebounce 待ってまとめ、observeNotified を
+// 呼ぶ。まとめ方は vpsd の reconcile.Triggers と同じである。
 func (rt *runtime) serve(ctx context.Context, errc <-chan error, tick <-chan time.Time) error {
+	var settle <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -233,6 +245,13 @@ func (rt *runtime) serve(ctx context.Context, errc <-chan error, tick <-chan tim
 		case err := <-rt.fatal:
 			// stream の側の適用が、このプロセスの最初の wgft0 の収束で起動の失敗に当たった(11b 節)
 			return err
+		case <-rt.kernelWake:
+			if settle == nil {
+				settle = time.After(rt.notifyDebounce)
+			}
+		case <-settle:
+			settle = nil
+			rt.observeNotified()
 		case <-tick:
 			rt.checkTunnel(time.Now())
 			if err := rt.retryPending(); err != nil {
@@ -264,6 +283,8 @@ func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *run
 		reconnectBackoffMax:    defaultReconnectBackoffMax,
 		doctorLockWait:         defaultDoctorLockWait,
 		handshakeWake:          make(chan struct{}, 1),
+		kernelWake:             make(chan struct{}, 1),
+		notifyDebounce:         reconcile.DefaultTriggers.Debounce,
 		dp:                     newUserspaceDataplane(opts.AllowTargets, opts.Limits),
 		rebuild:                rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
 	}
@@ -330,6 +351,48 @@ func (rt *runtime) observe() {
 	notifyNonBlocking(rt.stateNotify)
 	if err := rt.f.Save(rt.opts.CredentialsPath); err != nil {
 		log.Printf("save credentials file after the 30-second check: %v", err)
+	}
+}
+
+// watchKernel は、dataplane がカーネルの変更の通知を購読できれば、ctx が取り消されるまで購読する
+// (仕様 7b.4 節の変更の通知)。購読が失敗したら、vpsd と同じく間隔を倍にしながら張り直し
+// (reconcile.Watch)、通知を失ったかもしれないので見直しを 1 回起こす。ユーザー空間モードでは何もしない。
+func (rt *runtime) watchKernel(ctx context.Context) {
+	s, ok := rt.dp.(sensed)
+	if !ok {
+		return
+	}
+	logf := func(format string, args ...any) { log.Printf("kernel mode: "+format, args...) }
+	go reconcile.Watch(ctx, s.sensor(), rt.pokeKernel, reconcile.DefaultBackoff, logf)
+}
+
+// pokeKernel は、カーネルの変更の通知を serve に伝える。塞がらない。
+func (rt *runtime) pokeKernel() { notifyNonBlocking(rt.kernelWake) }
+
+// observeNotified は、変更の通知をまとめた後の見直しである(仕様 7b.4 節の変更の通知)。30 秒ごとの
+// 見直し(observe)と違って名前を引かないので、rt.mu を持ったまま 1 回で済む。処理済みの全体状態が
+// 無い間と、公開できなかった全体状態の試し直しを待つ間は、observe と同じく何もしない。試し直しが
+// 公開を担うためである。記録が変わったら、認証情報ファイルを保存し、次の 30 秒を待たずにハートビートを
+// 送らせる。
+func (rt *runtime) observeNotified() {
+	s, ok := rt.dp.(sensed)
+	if !ok {
+		return
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	st := rt.f.LastState
+	if st == nil || rt.pendingSt != nil || !rt.dp.built() {
+		return
+	}
+	// 誤りは observeNotified が出す。誤りがあっても記録が変わっていれば保存する
+	saved, _ := s.observeNotified(st.Generation, st.Rules)
+	if !saved {
+		return
+	}
+	notifyNonBlocking(rt.stateNotify)
+	if err := rt.f.Save(rt.opts.CredentialsPath); err != nil {
+		log.Printf("save credentials file after a change notification: %v", err)
 	}
 }
 

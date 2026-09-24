@@ -7,6 +7,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
@@ -86,6 +87,16 @@ type wgChecker interface {
 type observer interface {
 	observePrepare(rules []proto.AgentRule) any
 	observeCommit(gen uint64, rules []proto.AgentRule, prepared any) (saved bool, err error)
+}
+
+// sensed は、カーネルの変更の通知を購読できる dataplane である。カーネルモードの実装だけが持つ
+// (仕様 7b.4 節の変更の通知)。sensor は購読の口で、runtime が vpsd と同じ reconcile.Watch で動かす。
+// runtime は通知をまとめてから observeNotified を rt.mu を持って呼ぶ。observeNotified は名前を引かず、
+// 直前の公開と宣言を実際のテーブルと wgft0 に比べ、食い違えば直す。saved の意味は
+// observer.observeCommit と同じである。
+type sensed interface {
+	sensor() dataplane.Sensor
+	observeNotified(gen uint64, rules []proto.AgentRule) (saved bool, err error)
 }
 
 // startupChecker は、起動時に stream へ繋ぐ前に行う検査を持つ dataplane である。カーネルモードの

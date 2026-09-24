@@ -502,7 +502,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		summary += fmt.Sprintf("; %d rule%s: %s", len(ev.rules), pluralS(len(ev.rules)), strings.Join(agentKernelRuleLines(ev.rules), "; "))
 	}
 	if ev.checkError != "" {
-		summary += "; the last 30s check failed: " + ev.checkError
+		summary += "; the agent's last check of the table and wgft0 failed: " + ev.checkError
 	}
 	if !ev.running {
 		c.Status, c.Reason = statusUnknown, agentReasonNotRunning

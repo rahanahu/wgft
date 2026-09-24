@@ -39,8 +39,11 @@
 #       target resolve. agent doctor's dataplane.table agrees: once check 22's refused rules are
 #       removed, unknown resolve_failed and exit 0 while the rule still forwards, and failed
 #       listener_error and exit 1 once the old address refuses. The refused rules are not put back.
-#   drift. the 30-second check repairs changes made outside wgft: a deleted table, a deleted row,
-#       a changed MTU and a deleted wgft0, without a route warning while wgft0 is gone.
+#   drift. the agent repairs changes made outside wgft: a deleted table, a deleted row, a changed
+#       MTU and a deleted wgft0, without a route warning while wgft0 is gone.
+#   notify. the kernel's change notifications bring a deleted table and a deleted wgft0 back within
+#       5 s, well before the 30-second check, and forwarding with them; the notifications of the
+#       agent's own repair lead to no further publication.
 #   session. the keepalive datagram: with a kernel-mode server it reaches the server's tunnel
 #       address on UDP port 9 and leaves the server's nftables counters alone; in both server
 #       modes server doctor gives the same results before and after a minute of datagrams; and after
@@ -93,7 +96,7 @@ ELOG=$W/wgft-ak-echo.log
 ADMIN=127.0.0.1:8686
 SERVER_MODE=kernel
 case "${1:-}" in kernel|userspace) SERVER_MODE=$1; shift ;; esac
-CHECKS=${*:-16 17 18 19 22 24 25 resolve drift session route pin teardown}
+CHECKS=${*:-16 17 18 19 22 24 25 resolve drift notify session route pin teardown}
 HOSTS=/etc/netns/$HOME_NS/hosts
 fail=0
 
@@ -441,8 +444,8 @@ NFT
   check "2 MB upload through the VPS" "got=2000000" "$(upload_2mb)"
   check "2 MB download through the VPS" "2000000" "$(download_2mb)"
   # The same transfers without the agent's two MSS rows, to show that the path needs them. The
-  # agent is stopped meanwhile: its 30-second check would put the rows back in the middle of a
-  # transfer. The kernel keeps forwarding with the table as it is.
+  # agent is stopped meanwhile: its change notifications would put the rows back at once, and its
+  # 30-second check in the middle of a transfer. The kernel keeps forwarding with the table as it is.
   stop_agent
   delete_mss_rows
   # Forget what each host learned about path MTUs, so that neither end reuses a smaller MSS or PMTU
@@ -596,7 +599,7 @@ else:
 rule_state_ok() { [[ "$(rule_status "$1")" == "ok "* ]]; }
 
 check_drift() {
-  echo "== drift: the 30-second check repairs changes made outside wgft"
+  echo "== drift: the agent repairs changes made outside wgft"
   # A TCP flow held across each deletion is only observed and printed, not judged: what the kernel
   # does with an established flow when the table goes is not a promise of wgft's
   local held=$W/wgft-ak-flowdrift
@@ -835,6 +838,46 @@ json.dump(d, open(p, "w"), indent=2)
 PY
 }
 
+# check_notify: the notifications repair within a second. Without them only the 30-second check
+# repairs, and each of the three deletions passes its 5 s bound only if a check happens to fall
+# inside that window, so the three rarely pass together.
+check_notify() {
+  echo "== notify: change notifications repair outside changes before the 30-second check"
+  local i t0 took before after
+  wait_until 30 tcp_ok 39971
+  for i in 1 2; do
+    home nft delete table inet wgft_agent
+    t0=$(date +%s.%N)
+    wait_until 5 home nft list table inet wgft_agent
+    took=$(since "$t0")
+    okcheck "a deleted table is published again within 5 s, trial $i: after ${took}s" \
+      "$(home nft list table inet wgft_agent >/dev/null 2>&1 && below "$took" 5 && echo 1 || echo 0)"
+    wait_until 5 tcp_ok 39971
+    took=$(since "$t0")
+    okcheck "forwarding is back within 5 s of the deleted table, trial $i: after ${took}s" \
+      "$(tcp_ok 39971 && below "$took" 5 && echo 1 || echo 0)"
+  done
+  # A republication replaces the whole table, so its rows get new handles. The handles staying the
+  # same shows that the notifications of the repair itself published nothing again.
+  sleep 2
+  before=$(table_handles)
+  sleep 5
+  after=$(table_handles)
+  okcheck "the notifications of the repair lead to no further publication" \
+    "$([ -n "$before" ] && [ "$before" = "$after" ] && echo 1 || echo 0)"
+  home ip link del wgft0
+  t0=$(date +%s.%N)
+  wait_until 5 home ip link show wgft0
+  took=$(since "$t0")
+  okcheck "a deleted wgft0 is created again within 5 s: after ${took}s" \
+    "$(home ip link show wgft0 >/dev/null 2>&1 && below "$took" 5 && echo 1 || echo 0)"
+  wait_until 30 tcp_ok 39971
+  echo "INFO  forwarding back $(since "$t0")s after wgft0 was deleted"
+  check "forwarding is back after wgft0 was deleted" "tcp-echo" "$(tcp_echo 39971)"
+}
+since() { python3 -c "import time; print('%.1f' % (time.time() - $1))"; } # since <epoch>: seconds elapsed
+below() { python3 -c "import sys; sys.exit(0 if $1 < $2 else 1)"; }       # below <a> <b>: a < b
+table_handles() { home nft -a list table inet wgft_agent 2>/dev/null | grep -oE 'handle [0-9]+' | tr '\n' ' '; }
 masquerade_back() { home nft list chain inet wgft_agent postrouting | grep -q masquerade; }
 mtu_back() { home ip link show wgft0 | grep -q 'mtu 1420'; }
 tcp_ok() { [[ "$(tcp_echo "$1")" == *tcp-echo* ]]; }
@@ -1136,7 +1179,7 @@ handshake_after() { local h; h=$(agent_field last_handshake); [ -n "$h" ] && [ "
 
 for c in $CHECKS; do
   case "$c" in
-    16|17|18|19|22|24|25|resolve|drift|session|route|pin|teardown) "check_$c" ;;
+    16|17|18|19|22|24|25|resolve|drift|notify|session|route|pin|teardown) "check_$c" ;;
     *) echo "FAIL  unknown check $c"; fail=1 ;;
   esac
 done
