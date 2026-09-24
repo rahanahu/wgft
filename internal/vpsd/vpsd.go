@@ -237,6 +237,9 @@ type Daemon struct {
 	// notActive はログに記録済みのルール単位の失敗(ルール ID → 理由)。同じ失敗を再試行のたびに
 	// ログへ出さないために持つ(apply.go の ruleFailureLog)
 	notActive map[string]string
+	// retryGate は、backend 全体の失敗の後に、変更の通知による適用し直しの間隔を空ける
+	// (apply.go の observeOnce、設計文書 7a.3 節の再試行)。
+	retryGate reconcile.RetryGate
 	// lastConvergeErr は observeOnce と retryOnce が直前に出した失敗の行。同じ失敗を通知や再試行の
 	// たびに出さないために持つ(apply.go の logConverge)。
 	lastConvergeErr string

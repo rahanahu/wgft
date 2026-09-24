@@ -3,7 +3,6 @@
 package nft
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -115,16 +114,7 @@ func fingerprintOf(chains []chainDump, sets []setDump) string {
 	sort.Slice(sets, func(i, j int) bool { return sets[i].set.Name < sets[j].set.Name })
 	for _, sd := range sets {
 		fmt.Fprintf(h, "set %q\n", sd.set.Name)
-		keys := make([][]byte, 0, len(sd.elems))
-		for _, e := range sd.elems {
-			k := append(append([]byte(nil), e.Key...), e.KeyEnd...)
-			if e.IntervalEnd {
-				k = append(k, 1)
-			}
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool { return bytes.Compare(keys[i], keys[j]) < 0 })
-		for _, k := range keys {
+		for _, k := range elemKeys(sd.elems) {
 			fmt.Fprintf(h, "elem %x\n", k)
 		}
 	}

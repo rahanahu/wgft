@@ -28,7 +28,8 @@ const (
 	// exprBytes は式 1 つの上限。最も大きい式(set への add と、その中に入れるレートの式)でも
 	// この値に収まる。
 	exprBytes = 160
-	// elemBytes は set の要素 1 つの上限。要素はキーだけで、1 通にまとめて入る。
+	// elemBytes は set の要素 1 つの上限。要素はキーと区間の終端の印だけで、elemsPerMessage 個ずつ
+	// 1 通に入る。
 	elemBytes = 48
 	// ackBytes は応答 1 通あたりにカーネルが受信キューで使う量の見積もり。ACK 自身は数十バイトだが、
 	// skb 1 つ分の管理領域が加わるため、この値で数える。
@@ -99,9 +100,14 @@ func (s *sizing) AddChain(c *nftables.Chain) *nftables.Chain {
 func (s *sizing) AddSet(set *nftables.Set, els []nftables.SetElement) error {
 	s.size.add(0) // set の宣言
 	if len(els) > 0 {
-		s.size.add(len(els) * elemBytes) // 要素は 1 通にまとめて入る
+		s.size.add(len(els) * elemBytes) // AddSet に渡した要素は 1 通にまとめて入る
 	}
 	return s.to.AddSet(set, els)
+}
+
+func (s *sizing) SetAddElements(set *nftables.Set, els []nftables.SetElement) error {
+	s.size.add(len(els) * elemBytes)
+	return s.to.SetAddElements(set, els)
 }
 
 func (s *sizing) AddRule(r *nftables.Rule) *nftables.Rule {
@@ -124,4 +130,46 @@ func (s *Staged) sizeSocket(c *netlink.Conn) error {
 	_ = c.SetWriteBuffer(send)
 	_ = c.SetReadBuffer(receive)
 	return nil
+}
+
+// set の要素は、1 通の NFT_MSG_NEWSETELEM の中で NFTA_SET_ELEM_LIST_ELEMENTS という 1 つの入れ子の
+// 属性にまとめて入る。netlink の属性の長さは 16 ビットなので、この属性は 65535 バイトを超えられない。
+// google/nftables v0.3.0 は 1 回の呼び出しの要素をすべてこの 1 つの属性に入れ、mdlayher/netlink は
+// 長さが 16 ビットに収まるかを検査せずに下位 16 ビットだけを書く。カーネルはその短い長さの分だけを
+// 要素の一覧として読むので、要素の欠けた set が誤りを返さずに公開される。重なり合わない /32 を
+// 1638 個持つ送信元の一覧で set が空になり、1700 個で 62 要素だけが残った(ラボで確かめた。設計文書
+// 6.1 節)。そこで要素を elemsPerMessage 個ずつ別の NEWSETELEM に分け、同じバッチで送る。分けても
+// 同じバッチの中なので、差し替えの不可分性は変わらない。
+const (
+	// elemListLimit は、1 通の要素の一覧(NFTA_SET_ELEM_LIST_ELEMENTS の属性の全体)に許す長さ。
+	// 16 ビットの上限の半分にして、要素の符号化が少し長くなっても上限に届かない余裕を持たせる。
+	elemListLimit = 32 << 10
+	// elemListBytes は、IPv4 のキーの要素 1 つが一覧の中で占める長さの上限。区間の終端の印を持つ
+	// 要素が最も長く、要素の見出し 4 バイト、flags の属性 8 バイト、key の属性 12 バイトの計 24 バイトになる。
+	elemListBytes = 24
+)
+
+// elemsPerMessage は 1 通の NEWSETELEM に入れる要素の数の上限で、一覧の見出しの 4 バイトを足しても
+// elemListLimit に収まる。変数にしてあるのは、分けずに送っていた以前の形をラボのテストが再現する
+// ためだけであり、本番のコードは書き換えない。
+var elemsPerMessage = (elemListLimit - 4) / elemListBytes
+
+// elementChunks は set の要素の列を n 個以下ずつに分ける。区間の開始と、その直後の終端の印は同じ
+// 通に入れる。どの通も区間を丸ごと持つので、通と通の間に、開始だけがあって終端の無い区間ができない。
+// 切れ目の直後が終端の印なら、1 つ手前で切る。先頭の 0.0.0.0 の終端の印は最初の通に入る。
+// n は 2 以上でなければならない。
+func elementChunks(els []nftables.SetElement, n int) [][]nftables.SetElement {
+	var out [][]nftables.SetElement
+	for len(els) > n {
+		cut := n
+		for cut > 1 && els[cut].IntervalEnd {
+			cut--
+		}
+		out = append(out, els[:cut])
+		els = els[cut:]
+	}
+	if len(els) > 0 {
+		out = append(out, els)
+	}
+	return out
 }
