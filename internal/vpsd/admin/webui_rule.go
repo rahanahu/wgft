@@ -142,15 +142,15 @@ func (s *Server) uiAddRule(w http.ResponseWriter, r *http.Request) {
 
 // ruleDetailData はルール詳細ページ(/ui/rules/{id})のビュー(仕様 10.1 節)。
 type ruleDetailData struct {
-	Locale                 string
-	ID, Ports              string
-	ProtoUpper, ProtoClass string
-	Agent, Target, Mode    string
-	Enabled                bool
-	StateBadge, StateLabel string
-	StateReason            string
-	HeadNote               string // 要約に添える保存済みの note(設定の入力欄の値とは別)
-	Groups                 []string
+	Locale                            string
+	ID, Ports                         string
+	ProtoUpper, ProtoClass            string
+	Agent, Target, Mode               string
+	Enabled                           bool
+	StateIcon, StateBadge, StateLabel string
+	StateReason                       string
+	HeadNote                          string // 要約に添える保存済みの note(設定の入力欄の値とは別)
+	Groups                            []string
 
 	// 設定の区画(group、note、レート制限)。1 つのフォームでまとめて保存する。Group/Note と
 	// Rates の Count/Unit/NoLimit は入力欄の値で、描き直しでは利用者の入力を残す。Orig* と
@@ -251,7 +251,9 @@ func (s *Server) ruleDetailView(rule proto.Rule, locale string) (ruleDetailData,
 	if err != nil {
 		return ruleDetailData{}, err
 	}
-	d.StateBadge, d.StateLabel, d.StateReason = ruleRunState(&rule, gen, buildAgentIndex(agents), s.serverApply(), locale)
+	idx := buildAgentIndex(agents)
+	d.StateBadge, d.StateLabel, d.StateReason = ruleRunState(&rule, gen, idx, s.serverApply(), locale)
+	d.StateIcon = ruleStateIcon(&rule, idx)
 
 	d.CanSplit = rule.ListenPort.IsRange()
 	if d.CanSplit {

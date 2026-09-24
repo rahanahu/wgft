@@ -83,3 +83,21 @@ func ruleRunState(r *proto.Rule, latestGen uint64, agents map[string]ruleAgentSt
 		return "success", T(locale, "applied"), ""
 	}
 }
+
+// stateIconIdle は、持ち主のエージェントが無効か未登録で、宣言どおりに転送していないルールの
+// バッジの頭の記号(横棒、U+2014)である。
+const stateIconIdle = "\u2014"
+
+// ruleStateIcon は適用状態のバッジの頭に置く記号を返す。有効なルールの持ち主のエージェントが無効か
+// 未登録なら横棒 (U+2014) を、それ以外は ● を返す(設計文書 10.1 節)。この 2 つは、ルールが転送していないことを
+// 宣言どおりの状態として示すので、動いている状態を表す ● と見分けられるようにする。判定の順は
+// ruleRunState と同じで、無効なルールは持ち主のエージェントに関わらず ● の「無効」のままにする。
+func ruleStateIcon(r *proto.Rule, agents map[string]ruleAgentStatus) string {
+	if !r.Enabled {
+		return "●"
+	}
+	if a, ok := agents[r.Agent]; !ok || a.Disabled {
+		return stateIconIdle
+	}
+	return "●"
+}

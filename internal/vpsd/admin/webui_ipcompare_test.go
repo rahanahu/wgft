@@ -21,10 +21,11 @@ func ackFor(agent, streamIP, wgIP string) store.Ack {
 	return store.Ack{Agent: agent, Kind: store.WarnIPMismatch, StreamIP: streamIP, WGIP: wgIP}
 }
 
-// agentRow はダッシュボードから、そのエージェントの行(<tr> から </tr> まで)を切り出す。
+// agentRow はダッシュボードから、そのエージェントの行(<tr> から </tr> まで)を切り出す。行は、
+// 名前から詳細ページへのリンクで見分ける。
 func agentRow(t *testing.T, body, name string) string {
 	t.Helper()
-	i := strings.Index(body, "<strong>"+name+"</strong>")
+	i := strings.Index(body, `href="/ui/agents/`+name+`">`+name+`</a></strong>`)
 	if i < 0 {
 		t.Fatalf("no row for %s in body:\n%s", name, body)
 	}

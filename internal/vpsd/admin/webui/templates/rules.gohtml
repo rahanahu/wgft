@@ -37,7 +37,7 @@
         <td data-label="{{ T $loc "colMode" }}">{{ .Mode }}{{ if .ProxyProtocol }} <small>{{ T $loc "modeProxyProto" }}</small>{{ end }}</td>
         <td data-label="{{ T $loc "colState" }}">
           <div class="state-cell">
-            <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
+            <span class="badge {{ .StateBadge }}"><span aria-hidden="true">{{ .StateIcon }}</span> {{ .StateLabel }}</span>
             <a class="diag-mark {{ .Diag.State }}" href="/ui/doctor/{{ .ID }}" title="{{ .Diag.Alt }}"><span class="node {{ .Diag.State }} node-inline"><span class="node-mark" aria-hidden="true">{{ .Diag.Symbol }}</span></span>{{ if .Diag.Node }}<span class="diag-node" aria-hidden="true">{{ .Diag.Node }}</span>{{ end }}<span class="sr-only">{{ .Diag.Alt }}</span></a>
           </div>
         </td>

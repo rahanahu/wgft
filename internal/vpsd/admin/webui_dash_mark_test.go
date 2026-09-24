@@ -202,7 +202,7 @@ func TestDashboardGreyRowsForAgentsNotForwarding(t *testing.T) {
 		for id, label := range map[string]string{"r_paused": T(lang, "agentDisabled"), "r_gone": T(lang, "agentUnregistered")} {
 			cell := stateCell(t, body, id)
 			for _, want := range []string{
-				`<span class="badge neutral">● ` + label + `</span>`,
+				`<span class="badge neutral"><span aria-hidden="true">` + stateIconIdle + `</span> ` + label + `</span>`,
 				`<a class="diag-mark skipped" href="/ui/doctor/` + id + `"`,
 			} {
 				if !strings.Contains(cell, want) {
@@ -225,7 +225,8 @@ func TestDashboardMarkSymbolsAreHidden(t *testing.T) {
 	srv := httptest.NewServer(s)
 	defer srv.Close()
 
-	hidden := regexp.MustCompile(`<span class="node-mark" aria-hidden="true">[^<]*</span>`)
+	// 印の記号と、適用状態のバッジの頭の記号(● と横棒)は、どちらも aria-hidden の中に置く。
+	hidden := regexp.MustCompile(`<span class="node-mark" aria-hidden="true">[^<]*</span>|<span aria-hidden="true">[●\x{2014}]</span>`)
 	for _, lang := range []string{"ja", "en"} {
 		body := getBody(t, srv.URL+"/?lang="+lang)
 		for id := range markWants {
@@ -324,7 +325,11 @@ func TestDashboardCountsFollowTheMarks(t *testing.T) {
 		if total != 3 {
 			t.Fatalf("%s: %d red marks in the list, want 3", lang, total)
 		}
-		summary := fmt.Sprintf(T(lang, "summaryErr"), 4, 6, 10, total)
+		// オンラインの分母は有効なエージェントの 5 台で、無効な paused は分母に入れず「無効 1」に分ける。
+		// 接続している有効なエージェントは home、edge、quiet の 3 台である(設計文書 10.1 節)。
+		sep := T(lang, "summarySep")
+		summary := fmt.Sprintf(T(lang, "summaryOnline"), 3, 5) + sep + fmt.Sprintf(T(lang, "summaryDisabled"), 1) + sep +
+			fmt.Sprintf(T(lang, "summaryRules"), 10) + sep + fmt.Sprintf(T(lang, "summaryErrors"), total)
 		if !strings.Contains(body, summary) {
 			t.Errorf("%s: the header health summary is not %q:\n%s", lang, summary, body)
 		}

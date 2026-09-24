@@ -35,12 +35,17 @@ var tr = map[string][2]string{
 	"ipfBywgft":   {"wgft が設定", "set by wgft"},
 	"ipfDefault":  {"既定のまま", "unchanged"},
 	// health
-	"healthOK":       {"すべてのシステムが正常です", "All systems operational"},
-	"healthWarn":     {"警告があります", "Warnings present"},
-	"summaryOK":      {"オンライン %d / %d ・ ルール %d 件", "%d / %d online · %d rules"},
-	"summaryErr":     {"オンライン %d / %d ・ ルール %d 件 ・ エラー %d 件", "%d / %d online · %d rules · %d errors"},
-	"summaryWarn":    {"オンライン %d / %d ・ ルール %d 件 ・ 警告 %d 件", "%d / %d online · %d rules · %d warnings"},
-	"summaryErrWarn": {"オンライン %d / %d ・ ルール %d 件 ・ エラー %d 件 ・ 警告 %d 件", "%d / %d online · %d rules · %d errors · %d warnings"},
+	"healthOK":   {"すべてのシステムが正常です", "All systems operational"},
+	"healthWarn": {"警告があります", "Warnings present"},
+	// ヘッダの全体ヘルスの要約は、次の項目を summarySep でつないだものである。オンラインの分母は
+	// 有効なエージェントの数で、無効なエージェントは summaryDisabled に分けて、1 台以上のときだけ出す
+	// (設計文書 10.1 節)
+	"summarySep":      {" ・ ", " · "},
+	"summaryOnline":   {"オンライン %d / %d", "%d / %d online"},
+	"summaryDisabled": {"無効 %d", "%d disabled"},
+	"summaryRules":    {"ルール %d 件", "%d rules"},
+	"summaryErrors":   {"エラー %d 件", "%d errors"},
+	"summaryWarnings": {"警告 %d 件", "%d warnings"},
 	// agents table
 	"agents":          {"エージェント", "Agents"},
 	"colName":         {"名前", "Name"},
@@ -118,8 +123,9 @@ var tr = map[string][2]string{
 	"warnFlappingTitle": {"IP の往復を検知しました", "IP flapping detected"},
 	"warnFlappingBody":  {"同じチャネル(stream の接続元か WireGuard のエンドポイント)の IP が 10 分以内に以前の値へ往復しました。同じ鍵か恒久トークンを 2 か所から使っている疑いです(認証情報の窃取か二重起動)。正当な事情なら消してください。", "The same channel's IP, stream source or WireGuard endpoint, returned to a previous value within 10 minutes. The same key or permanent token is likely used from two places: theft of the credentials in agent.json, or double-start. Dismiss it if this is expected."},
 	// confirms
-	"confirmRevoke": {"エージェント %s を削除します。鍵は失効して再接続できなくなり、戻すには登録し直す必要があります。ルールの設定は残ります。よいですか?", "Revoke agent %s? Its key stops working and it cannot reconnect; to bring it back, register it again. Its rules are kept."},
-	"confirmDelete": {"ルール %s を削除します。よいですか?", "Delete rule %s?"},
+	"confirmRevoke":       {"エージェント %s を削除します。鍵は失効して再接続できなくなり、元に戻せません。使い直すには登録し直す必要があります。ルールの設定は残ります。一時的に止めるだけなら、削除ではなく無効化を使ってください。よいですか?", "Revoke agent %s? Its key stops working and it cannot reconnect; this cannot be undone, and to use it again you must register it again. Its rules are kept. To stop it only for a while, disable it instead."},
+	"confirmAgentDisable": {"エージェント %s を無効化します。このエージェントのルールはすべて転送を止め、通信中のセッションも切れます。登録、鍵、ルールの設定は残り、有効化で元に戻ります。よいですか?", "Disable agent %s? Every rule of this agent stops forwarding, and active sessions are cut. Its registration, key and rule settings are kept, and enabling it brings it back."},
+	"confirmDelete":       {"ルール %s を削除します。よいですか?", "Delete rule %s?"},
 	// forms: add rule
 	"addRuleTitle":  {"ルールを追加", "Add rule"},
 	"fAgent":        {"エージェント", "Agent"},
@@ -306,6 +312,29 @@ var tr = map[string][2]string{
 	// ダッシュボードのルール一覧の診断の印(設計文書 10.1 節)。%s に入る状態の語と節点の名前は英語のまま
 	"dashDiagAlt":          {"診断: %s", "Diagnosis: %s"},
 	"dashDiagUnregistered": {"エージェント未登録", "agent not registered"},
+
+	// エージェントの詳細ページ(設計文書 10.1 節)
+	"agentDetailTitle":      {"エージェント詳細", "Agent detail"},
+	"agentCrumbFmt":         {"エージェント %s", "Agent %s"},
+	"agentFieldAddress":     {"トンネル IP", "Tunnel IP"},
+	"agentFieldPublicKey":   {"公開鍵", "Public key"},
+	"agentFieldStream":      {"stream の接続元", "Stream source"},
+	"agentFieldWG":          {"WireGuard のエンドポイント", "WireGuard endpoint"},
+	"agentFieldTunnel":      {"トンネル", "Tunnel"},
+	"agentFieldHandshake":   {"最終ハンドシェイク", "Last handshake"},
+	"agentFieldCreated":     {"登録", "Registered"},
+	"agentFieldDisabledAt":  {"無効にした時刻", "Disabled at"},
+	"agentDisabledNote":     {"このエージェントは無効です。ルールはすべて転送を止めています。登録、鍵、ルールの設定は残っており、有効化で元に戻ります。", "This agent is disabled. None of its rules forward. Its registration, key and rule settings are kept, and enabling it brings it back."},
+	"agentRulesHead":        {"ルール", "Rules"},
+	"agentRulesNone":        {"このエージェントを持ち主とするルールはありません。", "No rule belongs to this agent."},
+	"dangerZoneHead":        {"危険な操作", "Danger zone"},
+	"agentDeleteHead":       {"エージェントの削除", "Revoke this agent"},
+	"agentDeleteHelp":       {"削除すると鍵は失効し、このエージェントは再接続できなくなります。元に戻せません。使い直すには、新しい接続文字列で登録し直します。ルールの設定は残ります。一時的に止めるだけなら、削除ではなく上の「無効化」を使ってください。", "Revoking makes its key stop working, and the agent cannot reconnect. This cannot be undone; to use it again, register it again with a new join string. Its rules are kept. To stop it only for a while, use Disable above instead."},
+	"agentDeleteConfirmFmt": {"確認のため、エージェントの名前 %s を入力してください", "To confirm, type the agent's name, %s"},
+	"agentDeleteMismatch":   {"入力した名前がエージェントの名前と一致しません。何も削除していません。", "The name you typed does not match the agent's name. Nothing was revoked."},
+	"agentDeleteFailed":     {"エージェントを削除できませんでした。", "The agent could not be revoked."},
+	"agentChangeNotSaved":   {"何も変えていません。", "Nothing was changed."},
+	"agentChangeNotApplied": {"変更は保存しましたが、まだ転送の設定に反映していません。server が 30 秒ごとに反映を試し直します。", "The change is saved but not yet applied to forwarding. The server retries every 30 seconds."},
 
 	// ルールの適用状態のうち、持ち主のエージェントが未登録か無効のもの。どちらも故障ではないので
 	// 灰色で示す(設計文書 5.1、10.1 節)

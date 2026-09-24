@@ -28,6 +28,9 @@ type fakeBackend struct {
 	acksErr  error       // nil でなければ IPMismatchAcks はこのエラーを返す
 	// agentChange は nil でなければ DisableAgent と EnableAgent がこれを呼ぶ(op は disable か enable)
 	agentChange func(op, name string) (AgentDisabledResponse, error)
+	// revoked は Revoke に渡された名前を順に持つ。revokeErr が nil でなければ Revoke はそれを返す
+	revoked   []string
+	revokeErr error
 }
 
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.st.Rules() }
@@ -55,7 +58,10 @@ func (b *fakeBackend) CheckConnectivity(ruleID string) (ConnCheck, error) {
 func (b *fakeBackend) JoinString(name string) (JoinStringResponse, error) {
 	return JoinStringResponse{JoinString: "wgft://h:1/t#sha256:00"}, nil
 }
-func (b *fakeBackend) Revoke(name string) error { return nil }
+func (b *fakeBackend) Revoke(name string) error {
+	b.revoked = append(b.revoked, name)
+	return b.revokeErr
+}
 func (b *fakeBackend) DisableAgent(name string) (AgentDisabledResponse, error) {
 	if b.agentChange != nil {
 		return b.agentChange("disable", name)

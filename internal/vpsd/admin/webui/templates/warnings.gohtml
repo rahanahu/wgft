@@ -15,7 +15,7 @@
       {{ if .Detail }}<div class="mono compare">{{ .Detail }}</div>{{ end }}
       <div class="alert-actions">
         <form autocomplete="off" method="post" action="/ui/agents/{{ .Agent }}/dismiss-warning" style="display:inline"><input type="hidden" name="kind" value="{{ .Kind }}"><input type="hidden" name="detail" value="{{ .Detail }}"><button class="btn" type="submit">{{ T $loc "dismiss" }}</button></form>
-        <form autocomplete="off" method="post" action="/ui/agents/{{ .Agent }}/revoke" style="display:inline" data-confirm="{{ printf (T $loc "confirmRevoke") .Agent }}"><button class="btn danger-outline" type="submit">{{ T $loc "revokeAgent" }}</button></form>
+        <form autocomplete="off" method="post" action="/ui/agents/{{ .Agent }}/revoke" style="display:inline" data-confirm="{{ printf (T $loc "confirmRevoke") .Agent }}"><input type="hidden" name="confirm_name" value="{{ .Agent }}"><button class="btn danger-outline" type="submit">{{ T $loc "revokeAgent" }}</button></form>
       </div>
     </div>
   </article>
