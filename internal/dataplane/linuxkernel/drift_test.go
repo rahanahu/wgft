@@ -3,6 +3,7 @@
 package linuxkernel
 
 import (
+	"errors"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -129,6 +130,41 @@ func TestObserveAfterCommit(t *testing.T) {
 	want := []string{"table inet wgft is missing", "interface wgft0 is missing"}
 	if !reflect.DeepEqual(obs.Drift, want) || len(obs.Peers) != 0 {
 		t.Errorf("Observe after flush and link del: %+v, want drift %v and no peers", obs, want)
+	}
+}
+
+// A publication that replaced the table but failed afterwards (here: its sets do not hold the
+// elements sent, design.md 6.1 節) fails the Commit and is never taken as the baseline: the
+// fingerprint of the last good publication stays, so Observe reports the replaced table as drift
+// and the next transaction republishes (design.md 7a.3 節).
+func TestFailedPublicationIsNotTheBaseline(t *testing.T) {
+	peer := testPeer(t, "10.200.0.2")
+	w := testWG(t, peer)
+	b, k := committedBackend(t, w)
+	k.flushErr = errors.New("table inet wgft was replaced, but it does not hold what was sent: set deny_1 holds 62 set elements, but 3401 were sent")
+	k.replacedTable = "fp-partial"
+	p, err := b.Prepare(dataplane.Desired{WG: &w, ActivePeers: w.Peers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Commit(nil); err == nil || !strings.Contains(err.Error(), "does not hold what was sent") {
+		t.Fatalf("Commit: %v, want the verification error", err)
+	}
+	p.Rollback()
+	if b.last == nil || b.last.table != "fp1" {
+		t.Fatalf("the baseline after the failed publication is %+v, want the last good fingerprint fp1", b.last)
+	}
+	for _, c := range k.calls {
+		if c == "converge" {
+			t.Errorf("the failed publication ran the conntrack convergence: %v", k.calls)
+		}
+	}
+	obs, err := b.Observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"table inet wgft was changed"}; !reflect.DeepEqual(obs.Drift, want) {
+		t.Errorf("Observe after the failed publication: drift %v, want %v", obs.Drift, want)
 	}
 }
 

@@ -363,9 +363,12 @@ type prepared struct {
 func (p *prepared) Failed() map[string]error { return nil }
 
 // Commit reads the drop counters of the current table, replaces the table in one nftables
-// transaction, and then removes the peers the declaration dropped and converges conntrack
-// (design.md 6.1, 7a.3 節). On a failed replacement nothing is published, the counters are not
-// handed out (the old table still holds them) and the Runtime rolls back.
+// transaction, checks that the sets wgft fills hold the elements sent, and then removes the peers
+// the declaration dropped and converges conntrack (design.md 6.1, 7a.3 節). On a failed replacement
+// the counters are not handed out and the Runtime rolls back. Nothing is published when the kernel
+// refused the batch; when the replacement went through but its replies were lost or its sets do
+// not hold what was sent, the replaced table stays in the kernel, is not recorded as what this
+// Commit left, and Observe reports it as drift.
 func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, error) {
 	b, d := p.b, p.desired
 	drops, dropsErr := b.ops.readDrops()
@@ -374,7 +377,9 @@ func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, e
 	b.replyMu.Lock()
 	b.readRepliesLocked(b.clock())
 	if err := p.staged.Flush(); err != nil {
-		// 差し替わったかどうかが分からない(6.1 節の受信側の壁)ので、どのルールも始め直す
+		// 差し替わったかどうかが分からない(6.1 節の受信側の壁)。差し替わった後で set が送った要素を
+		// 持たないと分かった場合も、ここに来る(nft.Staged.Flush)。どちらも last は直前の成功の
+		// ままにし、差し替わったテーブルは Observe が drift として拾う。UDP の応答はどのルールも始め直す
 		for _, w := range b.replies {
 			w.restart()
 		}
