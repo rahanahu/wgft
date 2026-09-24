@@ -267,6 +267,13 @@ func udpEcho(t *testing.T) (addr string, packets *atomic.Int64) {
 // whole test, so that the listener bound in front of it reports a target failure and not a bind
 // failure), and the UDP destinations that stay unreachable for the whole test in
 // TestUDPNoTargetCheck and readwait_windows_test.go.
+//
+// The number is closed when freePort returns, so the next bind to port 0 in the same test can be
+// handed that same number. A test whose freePort number must differ from a port it reserves makes
+// the reservation first, as TestTCPTargetCheck, TestStagedBindFailureFailsWholeRule and
+// TestStatusSeparatesBindFailureFromTargetFailure do: the reservation stays open, so freePort
+// cannot pick it. freePort only knows about TCP; a UDP destination that must stay closed uses
+// freeUDPPort (lastreply_test.go) instead, after the test's other UDP sockets are open.
 func freePort(t *testing.T) uint16 {
 	t.Helper()
 	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -405,11 +412,13 @@ func TestOpenFailureAndRetry(t *testing.T) {
 
 // TCP ルールは、bind できても target に接続できなければ error。target が復帰したら Retry で ok に戻る。
 func TestTCPTargetCheck(t *testing.T) {
-	// まだ誰も listen していないポートを target にする(接続拒否)
-	targetPort := freePort(t)
-	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(targetPort)))
+	// 待ち受けのポートを先に押さえてから、まだ誰も listen していないポートを target に選ぶ(接続拒否)。
+	// 逆の順では、freePort が閉じたポートを reserveTCP の bind がそのまま受け取ることがあり、target が
+	// 自分自身の待ち受けになって「繋がらない」の確認が成り立たない
 	lb := &loopback{}
 	listenPort := reserveTCP(t, lb)
+	targetPort := freePort(t)
+	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(targetPort)))
 	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, listenPort}: {target, "r1"}})

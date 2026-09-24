@@ -10,6 +10,18 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
+// freeUDPPort は、今どの UDP のソケットも使っていない 127.0.0.1 の番号を返す。freePort と同じく
+// 閉じてから返すので、この番号と重なってはならないソケットは、呼ぶ前に開けておく。
+func freeUDPPort(t *testing.T) uint16 {
+	t.Helper()
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	return uint16(c.LocalAddr().(*net.UDPAddr).Port)
+}
+
 // udpSink は受けたデータグラムを捨て、何も返さない UDP の宛先(ループバック)。
 func udpSink(t *testing.T) string {
 	t.Helper()
@@ -50,14 +62,18 @@ func sendTo(t *testing.T, port uint16, wait time.Duration) bool {
 // 観測」)。
 func TestLastRepliesOnlyCountsDatagramsFromTheTarget(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
-	closed := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(freePort(t))))
+	sinkAddr := udpSink(t)
 	lb := &loopback{}
 	echoPort, sinkPort, closedPort := reserveUDP(t, lb), reserveUDP(t, lb), reserveUDP(t, lb)
+	// 閉じたポートは、ほかの UDP のソケットをすべて開けた後に UDP で選ぶ。先に選ぶと、後の bind が
+	// 同じ番号を受け取り、閉じているはずの宛先が echo や待ち受けになることがある。TCP の freePort
+	// では、番号が UDP の側で使われているかを確かめられない
+	closed := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(freeUDPPort(t))))
 	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 	m.Apply(map[Key]Desired{
 		{proto.UDP, echoPort}:   {echoAddr, "r_echo"},
-		{proto.UDP, sinkPort}:   {udpSink(t), "r_sink"},
+		{proto.UDP, sinkPort}:   {sinkAddr, "r_sink"},
 		{proto.UDP, closedPort}: {closed, "r_closed"},
 	})
 	if len(m.LastReplies()) != 0 {

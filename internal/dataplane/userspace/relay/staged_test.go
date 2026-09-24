@@ -65,9 +65,10 @@ func TestStagedBindFailureFailsWholeRule(t *testing.T) {
 	// an earlier one has already failed (design.md 7a.3 節). Depending on which port sorts first,
 	// Manager may never claim free's reservation at all, so free stays with plain freePort (its own,
 	// separate, and much smaller race) rather than a held-open reservation that this test's own
-	// re-bind check below would then find still in use.
-	free := freePort(t)
+	// re-bind check below would then find still in use. other is reserved first, so freePort
+	// cannot hand free the number other then gets.
 	other := reserveTCP(t, lb)
+	free := freePort(t)
 	m := New(lb, Options{Logf: t.Logf})
 	defer m.Close()
 
