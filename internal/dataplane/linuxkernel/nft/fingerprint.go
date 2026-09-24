@@ -15,8 +15,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Fingerprint reads table inet wgft back from the kernel and returns a digest of what wgft wrote
-// into it (design.md 7a.3 節: 実際の状態への収束). present is false when the table does not exist.
+// Fingerprint reads the inet table named table back from the kernel and returns a digest of what
+// wgft wrote into it (design.md 7a.3 節: 実際の状態への収束). present is false when the table does
+// not exist. The server passes TableName and the agent AgentTableName (design.md 7b.1 節); the
+// digest does not depend on which table it reads.
 //
 // The digest covers, per chain (by name): its type, hook and priority, and per rule its handle,
 // its comment and its expressions; plus the elements of every set wgft fills itself (deny_N,
@@ -24,10 +26,15 @@ import (
 // values (set to zero before hashing) and the elements of sets packets add to (meters and
 // flows_udp/flows_tcp, flags dynamic). A rule deleted, added or replaced, a chain or set removed,
 // or the table recreated with other contents therefore changes the digest; traffic does not.
+// google/nftables v0.3.0 skips, without an error, the expressions it cannot decode (rt and
+// byteorder, which the agent's MSS rows use); the digest covers the rest of such a row. `nft
+// replace rule` keeps a rule's handle, so replacing an MSS row by one that differs only in those two
+// expressions leaves the digest unchanged; a replacement that changes any other expression, such as
+// a fixed MSS value, changes it.
 //
 // It is a handful of netlink dumps (tables, chains, one per chain for its rules, sets, one per
 // static set for its elements), cheap enough to run after every Commit and on every Observe.
-func Fingerprint() (fp string, present bool, err error) {
+func Fingerprint(table string) (fp string, present bool, err error) {
 	c, err := nftables.New()
 	if err != nil {
 		return "", false, fmt.Errorf("cannot connect to nftables: %w", err)
@@ -37,21 +44,21 @@ func Fingerprint() (fp string, present bool, err error) {
 		return "", false, fmt.Errorf("listing tables: %w", err)
 	}
 	for _, t := range tables {
-		if t.Name == TableName {
+		if t.Name == table {
 			present = true
 		}
 	}
 	if !present {
 		return "", false, nil
 	}
-	t := &nftables.Table{Family: nftables.TableFamilyINet, Name: TableName}
+	t := &nftables.Table{Family: nftables.TableFamilyINet, Name: table}
 	all, err := c.ListChainsOfTableFamily(nftables.TableFamilyINet)
 	if err != nil {
 		return "", true, fmt.Errorf("listing chains: %w", err)
 	}
 	var chains []chainDump
 	for _, ch := range all {
-		if ch.Table == nil || ch.Table.Name != TableName {
+		if ch.Table == nil || ch.Table.Name != table {
 			continue
 		}
 		rules, err := c.GetRules(t, &nftables.Chain{Name: ch.Name, Table: t})

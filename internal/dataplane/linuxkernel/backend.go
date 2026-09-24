@@ -98,7 +98,7 @@ func (realOps) converge(rules []conntrack.Rule, wgNet netip.Prefix) (int, error)
 	return conntrack.Converge(rules, wgNet)
 }
 func (realOps) inspect(iface string) (wg.DeviceState, error) { return wg.Inspect(iface) }
-func (realOps) fingerprint() (string, bool, error)           { return nft.Fingerprint() }
+func (realOps) fingerprint() (string, bool, error)           { return nft.Fingerprint(nft.TableName) }
 
 // Backend is the kernel dataplane: kernel WireGuard, nftables DNAT and admission, and conntrack
 // convergence (design.md 6.1 節). It implements dataplane.Backend.

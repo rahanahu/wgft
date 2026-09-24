@@ -106,7 +106,7 @@ func TestGolden(t *testing.T) {
 			}
 			// wgft 自身が google/nftables で読み戻せること(Observe の指紋と UDP の応答のカウンタ)。
 			// nft list の一致だけでは、google/nftables が解釈できない属性を持つ行を見落とす
-			if _, _, err := Fingerprint(); err != nil {
+			if _, _, err := Fingerprint(TableName); err != nil {
 				t.Errorf("Fingerprint: %v", err)
 			}
 			if udpReplyPorts(plan) != nil {

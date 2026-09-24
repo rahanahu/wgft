@@ -1,0 +1,39 @@
+# 範囲のルール(連結 map でずらす)、単一ポートのルール(宛先のポートを書き換える)、
+# 許可一覧が一部のポートを拒んだ範囲のルール。
+table inet wgft_agent {
+  chain filter_pre {
+    type filter hook prerouting priority -150; policy accept;
+    iifname "wgft0" ct state established,related accept
+    iifname "wgft0" tcp dport 25565 accept comment "wgft:r_mc:pass"
+    iifname "wgft0" udp dport 2456-2458 accept comment "wgft:r_valheim:pass"
+    iifname "wgft0" udp dport 7000 accept comment "wgft:r_partial:pass"
+    iifname "wgft0" udp dport 7002 accept comment "wgft:r_partial:pass"
+    iifname "wgft0" drop
+  }
+  chain nat_pre {
+    type nat hook prerouting priority dstnat - 1; policy accept;
+    iifname "wgft0" tcp dport 25565 dnat ip to 192.168.1.22:25566 comment "wgft:r_mc:dnat"
+    iifname "wgft0" udp dport 2456-2458 dnat ip to udp dport map { 2456 : 192.168.1.20 . 3000, 2457 : 192.168.1.20 . 3001, 2458 : 192.168.1.20 . 3002 } comment "wgft:r_valheim:dnat"
+    iifname "wgft0" udp dport 7000-7002 dnat ip to udp dport map { 7000 : 192.168.1.30 . 7000, 7002 : 192.168.1.30 . 7002 } comment "wgft:r_partial:dnat"
+  }
+  chain input {
+    type filter hook input priority filter - 10; policy accept;
+    iifname "wgft0" ct status dnat accept
+    iifname "wgft0" ct state established,related accept
+    iifname "wgft0" drop
+  }
+  chain forward {
+    type filter hook forward priority filter - 10; policy accept;
+    iifname "wgft0" tcp flags syn / syn,rst tcp option maxseg size set rt mtu
+    oifname "wgft0" tcp flags syn / syn,rst tcp option maxseg size set rt mtu
+    iifname "wgft0" oifname "wgft0" drop
+    iifname "wgft0" ct status dnat accept
+    oifname "wgft0" ct state established,related accept
+    iifname "wgft0" drop
+    oifname "wgft0" drop
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    iifname "wgft0" oifname != "wgft0" ct status dnat masquerade
+  }
+}

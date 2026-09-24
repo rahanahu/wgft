@@ -44,6 +44,7 @@ type emitter interface {
 	AddTable(*nftables.Table) *nftables.Table
 	DelTable(*nftables.Table)
 	AddSet(*nftables.Set, []nftables.SetElement) error
+	SetAddElements(*nftables.Set, []nftables.SetElement) error
 	AddChain(*nftables.Chain) *nftables.Chain
 	AddRule(*nftables.Rule) *nftables.Rule
 }
