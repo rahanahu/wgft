@@ -130,7 +130,9 @@ is, without quotes.`,
 	"agent ls": {
 		Long: `List registered agents with the state of their stream and tunnel.
 
-Columns: STREAM is the address the agent's control connection comes from,
+Columns: STATE is ok, or disabled with how long ago "agent disable" was run
+(design.md 5.1 section); a disabled agent can still show a connected STREAM
+and an ok TUNNEL while forwarding nothing. STREAM is the address the agent's control connection comes from,
 HEARTBEAT its age, GEN the rule generation the agent has applied, TUNNEL ok or
 error, WG_ENDPOINT and HANDSHAKE the WireGuard peer as the VPS sees it, RULES
 lists id:reason for the rules currently failing, or "N ok" once none are, PROTO
@@ -155,13 +157,55 @@ uses until the server restarts with it.`,
 		Example: `  wgft agent ls
   wgft agent ls --json`,
 	},
+	"agent disable": {
+		Long: `Stop forwarding an agent's rules without deleting anything. Its registration,
+permanent token, WireGuard peer, tunnel address and rules, including each
+rule's own enabled setting, are all kept; the agent may stay connected and its
+heartbeat and tunnel state keep showing. What stops is forwarding: the VPS
+drops the agent's rules from what it publishes, closes their listeners and cuts
+sessions already open, and the agent receives its own rules marked
+enabled:false and closes them the same way it would for a rule disabled on its
+own. "agent enable" undoes this; a rule that was disabled on its own before the
+agent was disabled stays disabled after "agent enable".
+
+Disabling an agent that is already disabled changes nothing and is not an
+error.
+
+If saving the change succeeds but publishing it to the data plane fails, the
+change is kept: the agent has already received the masked rules over its
+stream, so nothing new reaches it, and the server retries publishing every 30
+seconds. This is not "agent revoke", which removes the registration itself and
+cannot be undone; use "agent revoke" to stop trusting an agent's credentials,
+and "agent disable" to pause forwarding while keeping them.`,
+		Example: `  wgft agent disable home`,
+	},
+	"agent enable": {
+		Long: `Undo "agent disable". Each of the agent's rules resumes forwarding exactly as
+its own enabled setting says; a rule left disabled on its own stays disabled.
+
+Enabling checks the agent's rules against the same conflicts a rule batch
+checks at write time, such as a port another table or process already binds
+on the VPS, with no --force override. If a conflict is found, nothing is
+saved and the refusal names the conflict. If the check passes but saving
+succeeds while publishing the change to the data plane fails, the change is
+kept and the server retries publishing every 30 seconds; the agent forwards
+nothing until that publish succeeds.
+
+Enabling an agent that is already enabled changes nothing and is not an
+error.`,
+		Example: `  wgft agent enable home`,
+	},
 	"agent revoke": {
 		Long: `Revoke an agent. Its registration is removed, so it no longer appears in
 "agent ls", and its permanent token stops working. Its stream is closed, its
 WireGuard peer and tunnel address are reclaimed, and unused join strings issued
 for the name stop working. Rules that point at the agent are kept but forward
 nothing until an agent registers under that name again, which a new join
-string allows.`,
+string allows.
+
+This deletes the registration and cannot be undone; a new registration starts
+over with a new token and tunnel address. To pause forwarding temporarily
+without losing any of that, use "agent disable" instead.`,
 		Example: `  wgft agent revoke home`,
 	},
 	"agent warnings": {

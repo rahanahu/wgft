@@ -7,8 +7,10 @@ To regenerate after changing the help: `go test ./cmd/wgft -run TestCLIDocUpToDa
 
 | Command | What it does |
 |---|---|
+| [`wgft agent disable`](#wgft-agent-disable) | Stop forwarding an agent's rules, keeping its registration |
 | [`wgft agent dismiss-warning`](#wgft-agent-dismiss-warning) | Dismiss a warning once confirmed legitimate |
 | [`wgft agent doctor`](#wgft-agent-doctor) | Diagnose the agent's own state and environment |
+| [`wgft agent enable`](#wgft-agent-enable) | Undo an agent disable |
 | [`wgft agent join-string`](#wgft-agent-join-string) | Issue an agent join string |
 | [`wgft agent ls`](#wgft-agent-ls) | List registered agents |
 | [`wgft agent pubkey`](#wgft-agent-pubkey) | Print the wg public key |
@@ -77,9 +79,50 @@ On the agent host:
 On the VPS, against the admin API:
   ls            list registered agents
   join-string   issue a join string; one-time
+  disable       stop forwarding this agent's rules, keeping its registration
+  enable        undo a disable
   revoke        revoke a permanent token
   warnings      list theft-detection warnings
   dismiss-warning  dismiss a warning
+```
+
+## wgft agent disable
+
+Stop forwarding an agent's rules without deleting anything. Its registration,
+permanent token, WireGuard peer, tunnel address and rules, including each
+rule's own enabled setting, are all kept; the agent may stay connected and its
+heartbeat and tunnel state keep showing. What stops is forwarding: the VPS
+drops the agent's rules from what it publishes, closes their listeners and cuts
+sessions already open, and the agent receives its own rules marked
+enabled:false and closes them the same way it would for a rule disabled on its
+own. "agent enable" undoes this; a rule that was disabled on its own before the
+agent was disabled stays disabled after "agent enable".
+
+Disabling an agent that is already disabled changes nothing and is not an
+error.
+
+If saving the change succeeds but publishing it to the data plane fails, the
+change is kept: the agent has already received the masked rules over its
+stream, so nothing new reaches it, and the server retries publishing every 30
+seconds. This is not "agent revoke", which removes the registration itself and
+cannot be undone; use "agent revoke" to stop trusting an agent's credentials,
+and "agent disable" to pause forwarding while keeping them.
+
+```text
+wgft agent disable <name> [flags]
+```
+
+Examples:
+
+```sh
+wgft agent disable home
+```
+
+Flags:
+
+```text
+      --admin string    admin API address, env WGFT_ADMIN (default "unix:///run/wgft/admin.sock")
+      --config string   dotenv config file (default "/etc/wgft/server.env")
 ```
 
 ## wgft agent dismiss-warning
@@ -259,6 +302,39 @@ Flags:
       --max-udp-flows int   process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
 ```
 
+## wgft agent enable
+
+Undo "agent disable". Each of the agent's rules resumes forwarding exactly as
+its own enabled setting says; a rule left disabled on its own stays disabled.
+
+Enabling checks the agent's rules against the same conflicts a rule batch
+checks at write time, such as a port another table or process already binds
+on the VPS, with no --force override. If a conflict is found, nothing is
+saved and the refusal names the conflict. If the check passes but saving
+succeeds while publishing the change to the data plane fails, the change is
+kept and the server retries publishing every 30 seconds; the agent forwards
+nothing until that publish succeeds.
+
+Enabling an agent that is already enabled changes nothing and is not an
+error.
+
+```text
+wgft agent enable <name> [flags]
+```
+
+Examples:
+
+```sh
+wgft agent enable home
+```
+
+Flags:
+
+```text
+      --admin string    admin API address, env WGFT_ADMIN (default "unix:///run/wgft/admin.sock")
+      --config string   dotenv config file (default "/etc/wgft/server.env")
+```
+
 ## wgft agent join-string
 
 Issue a join string for a new agent. It is printed once, can be used once, and
@@ -293,7 +369,9 @@ Flags:
 
 List registered agents with the state of their stream and tunnel.
 
-Columns: STREAM is the address the agent's control connection comes from,
+Columns: STATE is ok, or disabled with how long ago "agent disable" was run
+(design.md 5.1 section); a disabled agent can still show a connected STREAM
+and an ok TUNNEL while forwarding nothing. STREAM is the address the agent's control connection comes from,
 HEARTBEAT its age, GEN the rule generation the agent has applied, TUNNEL ok or
 error, WG_ENDPOINT and HANDSHAKE the WireGuard peer as the VPS sees it, RULES
 lists id:reason for the rules currently failing, or "N ok" once none are, PROTO
@@ -367,6 +445,10 @@ WireGuard peer and tunnel address are reclaimed, and unused join strings issued
 for the name stop working. Rules that point at the agent are kept but forward
 nothing until an agent registers under that name again, which a new join
 string allows.
+
+This deletes the registration and cannot be undone; a new registration starts
+over with a new token and tunnel address. To pause forwarding temporarily
+without losing any of that, use "agent disable" instead.
 
 ```text
 wgft agent revoke <name> [flags]
