@@ -113,7 +113,7 @@ jobs:
         # v4.0.3 (https://github.com/dorny/paths-filter/releases/tag/v4.0.3), pinned by
         # major-version tag. This is not a full commit SHA: every action already in this
         # file and in release.yml (actions/checkout@v7, goreleaser/goreleaser-action@v7,
-        # docker/setup-buildx-action@v3, docker/login-action@v4, anchore/sbom-action@v0,
+        # docker/setup-buildx-action@v4, docker/login-action@v4, anchore/sbom-action@v0,
         # actions/attest-build-provenance@v4, actions/attest-sbom@v4) is pinned the same
         # way, so a lone SHA pin here would be an inconsistency rather than an improvement.
         uses: dorny/paths-filter@v4
