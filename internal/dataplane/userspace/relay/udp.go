@@ -149,16 +149,35 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 
 	go func() {
 		buf := make([]byte, udpBufMax)
+		var (
+			delay   time.Duration
+			readLog lograte.Gate
+		)
 		for {
 			n, from, err := pc.ReadFrom(buf)
 			if err != nil {
 				select {
 				case <-done:
+					return
 				default:
-					m.opts.Logf("udp %s: read: %v", l.key, err)
 				}
-				return
+				// 待ち受けを閉じた以外の失敗では、TCP の accept と同じく、ソケットを開いたまま後退して
+				// 試し直す。戻ってしまうと、ソケットは bind されたまま読まない状態で残り、Apply も
+				// Prepare も開き直さない。Linux のホストのソケットでは、管理者がソケットを破棄したとき
+				// (sock_diag の SOCK_DESTROY、ss -K)の ECONNABORTED がこれに当たる。ソケットは
+				// bind したポートを持ったままなので、次の読み取りから元に戻る(設計文書 6.3 節)
+				if readLog.Allow() {
+					m.opts.Logf("udp %s: read failed: %v; the listener stays open and retries", l.key, err)
+				}
+				delay = nextRetry(delay)
+				select {
+				case <-done:
+					return
+				case <-time.After(delay):
+				}
+				continue
 			}
+			delay = 0
 			k := from.String()
 			mu.Lock()
 			s := sessions[k]

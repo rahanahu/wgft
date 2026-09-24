@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/netpipe"
@@ -52,6 +53,19 @@ func cutConn(c net.Conn) {
 	}
 	c.Close()
 }
+
+// retryMin と retryMax は、TCP の accept と UDP の読み取りが、待ち受けを閉じた以外の理由で失敗した
+// ときの待ち時間の下限と上限。プロキシモードの中継(internal/vpsd/proxyrelay)と同じく、閉じた場合
+// 以外の誤りはすべて試し直す。値は net/http.Server.Serve の後退と同じだが、net/http が試し直すのは
+// Temporary() が真の誤りだけで、ENOBUFS や ENOMEM は試し直さない点が違う。
+const (
+	retryMin = 5 * time.Millisecond
+	retryMax = time.Second
+)
+
+// nextRetry は、失敗が続いたときの次の待ち時間である。最初は retryMin で、倍々に retryMax まで
+// 広げる。成功したら呼び出し側が 0 に戻す。
+func nextRetry(d time.Duration) time.Duration { return min(max(2*d, retryMin), retryMax) }
 
 // serveTCP は開いた待ち受け ln で中継を始める。bind は呼び出し側(Apply の経路の openLocked と、
 // Prepare/Commit の経路の Prepare)が済ませてある。
@@ -105,16 +119,34 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		mu.Unlock()
 	}
 	go func() {
+		var (
+			delay     time.Duration
+			acceptLog lograte.Gate
+		)
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				select {
 				case <-done:
+					return
 				default:
-					m.opts.Logf("tcp %s: accept: %v", l.key, err)
 				}
-				return
+				// 待ち受けを閉じた以外の失敗、例えばホストのソケットでのファイル記述子の枯渇(EMFILE、
+				// ENFILE)では、待ち受けを開いたまま後退して試し直す。戻ってしまうと、ソケットは bind
+				// されたまま accept しない状態で残り、Apply も Prepare も開いている待ち受けを開き直さない
+				// ので、プロセスを再起動するまでそのポートの中継が止まる(設計文書 6.3、7 節)
+				if acceptLog.Allow() {
+					m.opts.Logf("tcp %s: accept failed: %v; the listener stays open and retries", l.key, err)
+				}
+				delay = nextRetry(delay)
+				select {
+				case <-done:
+					return
+				case <-time.After(delay):
+				}
+				continue
 			}
+			delay = 0
 			src := addrOf(c.RemoteAddr())
 			ruleID := m.ruleOf(l)
 			release := func() {}
