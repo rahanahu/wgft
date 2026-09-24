@@ -40,7 +40,7 @@ func TestStatusFlowsMatchTheQuantityTheCapApplies(t *testing.T) {
 	first := reserveTCP(t, lb)
 	second := reserveTCP(t, lb)
 	pool := resource.NewPool(32)
-	m := New(lb, Options{TCPPool: pool, Logf: t.Logf})
+	m := New(lb, Options{TCPPool: pool, Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{
 		{proto.TCP, first}:  {target, "r1"},
@@ -86,7 +86,7 @@ func TestStatusFlowsCountUDPSessions(t *testing.T) {
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
 	pool := resource.NewPool(8)
-	m := New(lb, Options{UDPIdleTimeout: 10 * time.Second, UDPPool: pool, Logf: t.Logf})
+	m := New(lb, Options{UDPIdleTimeout: 10 * time.Second, UDPPool: pool, Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 

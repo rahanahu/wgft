@@ -129,7 +129,7 @@ func pr(lo, hi uint16) proto.PortRange { return proto.PortRange{Lo: lo, Hi: hi} 
 // 予算とルール 1 本の上限は、Pool を渡さなければ Limits から導く(上限は ceil(T/2)。
 // 設計文書 7a.10 節)。
 func TestRuleCapDefaultsFromLimits(t *testing.T) {
-	m := New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: t.Logf})
+	m := New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 20000, TCPTotal: 4000}, Logf: testLogf(t)})
 	if got := m.opts.UDPPool.RuleCap(); got != 10000 {
 		t.Errorf("UDP rule cap = %d, want 10000 (half of UDPTotal)", got)
 	}
@@ -143,13 +143,13 @@ func TestRuleCapDefaultsFromLimits(t *testing.T) {
 		t.Errorf("TCP budget = %d, want 4000", got)
 	}
 	// 何も渡さなければ既定の予算(8192, 2048)から導く。置き換えた式の値と同じ値になる
-	m = New(&loopback{}, Options{Logf: t.Logf})
+	m = New(&loopback{}, Options{Logf: testLogf(t)})
 	if udp, tcp := m.opts.UDPPool.RuleCap(), m.opts.TCPPool.RuleCap(); udp != 4096 || tcp != 1024 {
 		t.Errorf("default rule caps: udp=%d tcp=%d, want 4096 1024", udp, tcp)
 	}
 	// 呼び出し側が Pool を渡せば、それを使う(導出値は使わない)
 	pool := resource.NewPool(40)
-	m = New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 40}, UDPPool: pool, Logf: t.Logf})
+	m = New(&loopback{}, Options{Limits: resource.Limits{UDPTotal: 40}, UDPPool: pool, Logf: testLogf(t)})
 	if m.opts.UDPPool != pool {
 		t.Error("an explicit UDPPool must not be replaced by the derived default")
 	}
@@ -289,7 +289,7 @@ func TestUDPRelaySessionsAndIdle(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: resource.NewPool(2), Logf: t.Logf})
+	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: resource.NewPool(2), Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 
@@ -360,7 +360,7 @@ func TestTCPRelayHalfClose(t *testing.T) {
 	}()
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, port}: {srv.Addr().String(), "r1"}})
 
@@ -397,7 +397,7 @@ func TestOpenFailureAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	port := uint16(blocker.LocalAddr().(*net.UDPAddr).Port)
-	m := New(&loopback{}, Options{Logf: t.Logf})
+	m := New(&loopback{}, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {"127.0.0.1:9", "r1"}})
 	if st := m.Status(); len(st) != 1 || st[0].Err == nil {
@@ -419,7 +419,7 @@ func TestTCPTargetCheck(t *testing.T) {
 	listenPort := reserveTCP(t, lb)
 	targetPort := freePort(t)
 	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(targetPort)))
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, listenPort}: {target, "r1"}})
 
@@ -462,7 +462,7 @@ func TestUDPNoTargetCheck(t *testing.T) {
 	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(freePort(t)))) // 誰も listen していない UDP 宛先
 	lb := &loopback{}
 	listenPort := reserveUDP(t, lb)
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, listenPort}: {target, "r1"}})
 	if st := m.Status(); st[0].Err != nil {
@@ -475,7 +475,7 @@ func TestUDPRelayLargeReplyFromFirstDatagram(t *testing.T) {
 	echoAddr, _ := udpEcho(t)
 	lb := &loopback{}
 	port := reserveUDP(t, lb)
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
 	c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
@@ -564,7 +564,7 @@ func TestUDPRelayTotalAndPerSourceCap(t *testing.T) {
 	pool := resource.NewPool(10)
 	eng := goengine.New(nil)
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP}}, PerSourceFlowCaps: policy.PerSourceFlowCaps{UDP: 2}})
-	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: pool, Logf: t.Logf,
+	m := New(lb, Options{UDPIdleTimeout: 200 * time.Millisecond, UDPPool: pool, Logf: testLogf(t),
 		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, size)
 			return tk.Release, d.Allow
@@ -689,7 +689,7 @@ func TestTCPRelayConnCap(t *testing.T) {
 	other := reserveTCP(t, lb)
 	// 予算 4 でルールが 2 本なので、ルール 1 本の上限は ceil(4/2) = 2(設計文書 7a.10 節)
 	pool := resource.NewPool(4)
-	m := New(lb, Options{TCPPool: pool, Logf: t.Logf})
+	m := New(lb, Options{TCPPool: pool, Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{
 		{proto.TCP, port}:  {srv.Addr().String(), "r1"},
@@ -762,7 +762,7 @@ func TestTCPRelayRefusalIsAborted(t *testing.T) {
 	port := reserveTCP(t, lb)
 	m := New(lb, Options{
 		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) { return nil, false },
-		Logf:  t.Logf,
+		Logf:  testLogf(t),
 	})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, port}: {"127.0.0.1:1", "r1"}})
@@ -807,7 +807,7 @@ func TestUDPDeniedSourceSpendsNoPacketTokens(t *testing.T) {
 	eng.Update(policy.Policy{Rules: []policy.RulePolicy{{RuleID: "r1", Proto: proto.UDP,
 		SourceDeny: []netip.Prefix{netip.MustParsePrefix("127.0.0.2/32")},
 		PacketRate: &proto.Rate{Count: 1, Unit: proto.PerHour}}}})
-	m := New(lb, Options{Logf: t.Logf,
+	m := New(lb, Options{Logf: testLogf(t),
 		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) {
 			d, tk := eng.AdmitFlow(ruleID, src, size)
 			return tk.Release, d.Allow
@@ -914,7 +914,7 @@ func TestApplyKeepsTheAcceptingRulesWhileABindIsPending(t *testing.T) {
 	pending := reserveUDP(t, lb)
 	g := &gatedNet{loopback: lb, gatedPort: pending, gate: make(chan struct{}), started: make(chan struct{}, 1)}
 	pool := resource.NewPool(10) // ルールが 1 本なら 10、2 本ならルール 1 本は ceil(10/2) = 5
-	m := New(g, Options{UDPPool: pool, Logf: t.Logf})
+	m := New(g, Options{UDPPool: pool, Logf: testLogf(t)})
 	// 後始末は登録の逆順に走るので、gate を開ける後始末を後から登録して先に走らせる。テストが
 	// t.Fatalf で抜けても、bind の途中で止まった Apply が Manager の錠を握ったままにならない
 	t.Cleanup(m.Close)
@@ -977,7 +977,7 @@ func TestApplyFailedBindNeverEntersTheAcceptingRules(t *testing.T) {
 	// 同じポートを gate と失敗の対象にする。gate を開けるまで bind の最中を観測でき、開けたら失敗する
 	g := &gatedNet{loopback: lb, gatedPort: bad, gate: make(chan struct{}), started: make(chan struct{}, 1), failPort: bad}
 	pool := resource.NewPool(10)
-	m := New(g, Options{UDPPool: pool, Logf: t.Logf})
+	m := New(g, Options{UDPPool: pool, Logf: testLogf(t)})
 	t.Cleanup(m.Close)
 	release := sync.OnceFunc(func() { close(g.gate) })
 	t.Cleanup(release)
@@ -1048,7 +1048,7 @@ func TestRetryEntersTheAcceptingRulesWhenTheBindSucceeds(t *testing.T) {
 	}
 	port := uint16(blocker.LocalAddr().(*net.UDPAddr).Port)
 	pool := resource.NewPool(10)
-	m := New(&loopback{}, Options{UDPPool: pool, Logf: t.Logf})
+	m := New(&loopback{}, Options{UDPPool: pool, Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.UDP, port}: {"127.0.0.1:9", "r1"}})
 	if st := m.Status(); len(st) != 1 || st[0].Err == nil {

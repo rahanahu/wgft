@@ -94,7 +94,7 @@ func TestProbeDoesNotStallRelayingDuringASweep(t *testing.T) {
 	lb := &loopback{}
 	healthy := reserveTCP(t, lb)
 	dead := reserveTCP(t, lb)
-	m := New(lb, Options{Logf: t.Logf, Dial: bh.dial})
+	m := New(lb, Options{Logf: testLogf(t), Dial: bh.dial})
 	m.probeTimeout = time.Second
 	defer m.Close()
 
@@ -124,7 +124,7 @@ func TestApplyDoesNotStallRelayingWhileItProbes(t *testing.T) {
 	lb := &loopback{}
 	healthy := reserveTCP(t, lb)
 	dead := reserveTCP(t, lb)
-	m := New(lb, Options{Logf: t.Logf, Dial: bh.dial})
+	m := New(lb, Options{Logf: testLogf(t), Dial: bh.dial})
 	m.probeTimeout = time.Second
 	defer m.Close()
 
@@ -158,7 +158,7 @@ func TestProbeResultIsDiscardedWhenTheListenerIsClosed(t *testing.T) {
 	bh := newBlackhole(t, "127.0.0.1:9")
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
-	m := New(lb, Options{Logf: t.Logf, Dial: bh.dial})
+	m := New(lb, Options{Logf: testLogf(t), Dial: bh.dial})
 	m.probeTimeout = time.Second
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, port}: {bh.addr, "r1"}})
@@ -201,7 +201,7 @@ func TestProbeResultIsDiscardedWhenTheTargetChanged(t *testing.T) {
 	}
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
-	m := New(lb, Options{Logf: t.Logf, Dial: dial})
+	m := New(lb, Options{Logf: testLogf(t), Dial: dial})
 	m.probeTimeout = 5 * time.Second
 	defer m.Close()
 

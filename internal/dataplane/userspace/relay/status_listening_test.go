@@ -41,7 +41,7 @@ func TestStatusSeparatesBindFailureFromTargetFailure(t *testing.T) {
 	unreachable := reserveTCP(t, lb)
 	deadTarget := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(freePort(t))))
 
-	m := New(lb, Options{Logf: t.Logf})
+	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{
 		{proto.TCP, blocked}:     {target, "r1"},
@@ -86,7 +86,7 @@ func TestStatusSeparatesBindFailureFromTargetFailure(t *testing.T) {
 func TestStatusListeningIsFalseForATargetTheAllowListRefuses(t *testing.T) {
 	var netw neverListen
 	m := New(&netw, Options{
-		Logf:              t.Logf,
+		Logf:              testLogf(t),
 		AllowTarget:       allowList("192.168.1.20:25565"),
 		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
 		Dial:              func(network, addr string) (net.Conn, error) { t.Errorf("dialed %s", addr); return nil, nil },
