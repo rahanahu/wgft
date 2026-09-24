@@ -15,6 +15,6 @@ import (
 const kernelModeBuilt = false
 
 // newKernelDataplane は Linux 以外では作れない。入口が kernel の指定を先に拒むので、ここには届かない。
-func newKernelDataplane(context.Context, string, *allowtargets.List, *credentials.Credentials) (agentDataplane, error) {
+func newKernelDataplane(context.Context, string, *allowtargets.List, *credentials.Credentials, func() error) (agentDataplane, error) {
 	return nil, startup.Prerequisite("WGFT_MODE", "the agent's kernel mode needs Linux; leave WGFT_MODE unset or set it to userspace")
 }

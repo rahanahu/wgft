@@ -269,7 +269,7 @@ func newModeRuntime(ctx context.Context, opts Options, f *credentials.Credential
 	if opts.Mode != credentials.ModeKernel {
 		return rt, nil
 	}
-	dp, err := newKernelDataplane(ctx, opts.WGInterface, opts.AllowTargets, f)
+	dp, err := newKernelDataplane(ctx, opts.WGInterface, opts.AllowTargets, f, func() error { return f.Save(opts.CredentialsPath) })
 	if err != nil {
 		return nil, err
 	}

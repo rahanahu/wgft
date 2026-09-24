@@ -17,6 +17,8 @@
 #       table stay in place.
 #   18. an unrelated rule change, adding and deleting another rule, does not cut an established
 #       TCP flow.
+#   19. a retarget closes the established flows to the old target, and a delete closes the
+#       deleted rule's flows; the agent's conntrack convergence does it, not the table.
 #   22. the guards: a target outside WGFT_AGENT_ALLOW_TARGETS gets no DNAT and is reported, a
 #       loopback target is an error, a DNAT to the agent host's own LAN address works and the
 #       service sees the VPS tunnel address as the source, nothing else on the agent host is
@@ -25,6 +27,8 @@
 #       forward policy drop is named in the agent's startup log.
 #   24. MSS clamp: with ICMP "fragmentation needed" dropped on both ends, 2 MB of TCP goes through
 #       in each direction.
+#   25. disabling the agent on the server removes the home DNAT and closes the agent's flows, also
+#       when the agent was stopped at the time and learns of it after a restart and reconnect.
 #   resolve. the 30-second check resolves a rule's host name again: a change that keeps the chosen
 #       address publishes nothing, a changed address moves new flows to it, and a name that stops
 #       resolving keeps forwarding to the last good address and says so in the rule's state. The
@@ -62,7 +66,7 @@ ELOG=$W/wgft-ak-echo.log
 ADMIN=127.0.0.1:8686
 SERVER_MODE=kernel
 case "${1:-}" in kernel|userspace) SERVER_MODE=$1; shift ;; esac
-CHECKS=${*:-16 17 18 22 24 resolve drift session route}
+CHECKS=${*:-16 17 18 19 22 24 25 resolve drift session route}
 HOSTS=/etc/netns/$HOME_NS/hosts
 fail=0
 
@@ -467,11 +471,18 @@ rule_state_ok() { [[ "$(rule_status "$1")" == "ok "* ]]; }
 
 check_drift() {
   echo "== drift: the 30-second check repairs changes made outside wgft"
+  # A TCP flow held across each deletion is only observed and printed, not judged: what the kernel
+  # does with an established flow when the table goes is not a promise of wgft's
+  local held=$W/wgft-ak-flowdrift
+  slow_flow 39971 45 "$held"
+  sleep 3
   home nft delete table inet wgft_agent
   wait_until 45 home nft list table inet wgft_agent
   check "a deleted table is published again" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
   check "forwarding is back after the table was deleted" "tcp-echo" "$(tcp_echo 39971)"
   check "the log names the missing table" "table inet wgft_agent is gone" "$(cat "$ALOG")"
+  wait_until 60 test -s "$held"
+  echo "INFO  a TCP flow held across the deleted table: $(flow_ok "$held" && echo survived || echo "ended: $(tail -1 "$held")")"
   local h
   h=$(home nft -a list chain inet wgft_agent postrouting | grep masquerade | grep -oE 'handle [0-9]+' | awk '{print $2}')
   home nft delete rule inet wgft_agent postrouting handle "$h"
@@ -483,6 +494,8 @@ check_drift() {
   okcheck "a changed MTU is converged back" "$(mtu_back && echo 1 || echo 0)"
   local warned
   warned=$(grep -c "leaves through" "$ALOG")
+  slow_flow 39971 45 "$held"
+  sleep 3
   home ip link del wgft0
   wait_until 60 home ip link show wgft0
   wait_until 60 handshaken
@@ -492,6 +505,8 @@ check_drift() {
   # While wgft0 is gone, the route to the server leaves through the default route; the route check
   # runs after the repair, so it does not warn about that
   okcheck "no route warning while wgft0 was gone" "$(count_above "leaves through" "$warned" && echo 0 || echo 1)"
+  wait_until 60 test -s "$held"
+  echo "INFO  a TCP flow held across the deleted wgft0: $(flow_ok "$held" && echo survived || echo "ended: $(tail -1 "$held")")"
 }
 masquerade_back() { home nft list chain inet wgft_agent postrouting | grep -q masquerade; }
 mtu_back() { home ip link show wgft0 | grep -q 'mtu 1420'; }
@@ -589,6 +604,94 @@ check_route() {
   check "forwarding works with the route removed" "tcp-echo" "$(tcp_echo 39971)"
 }
 count_above() { [ "$(grep -c "$1" "$ALOG")" -gt "$2" ]; } # count_above <pattern> <count>: in the agent's log
+
+check_19() {
+  echo "== 19: a retarget or a delete closes the old target's flows"
+  local out=$W/wgft-ak-flow19 r closed
+  closed=$(grep -cE "conntrack: closed [1-9]" "$ALOG")
+  slow_flow 39971 12 "$out"
+  sleep 3
+  set_target "$R_TCP" 192.168.50.2:25565
+  wait_until 30 caught_up
+  wait_until 30 test -s "$out"
+  okcheck "a retarget closes the established flow to the old target" "$(flow_ok "$out" && echo 0 || echo 1)"
+  echo "INFO  flow: $(cat "$out" | tail -1)"
+  check "new flows reach the new target" "tcp-echo 192.168.50.2:25565" "$(tcp_echo 39971)"
+  okcheck "the agent logs the closed flows" "$([ "$(grep -cE "conntrack: closed [1-9]" "$ALOG")" -gt "$closed" ] && echo 1 || echo 0)"
+  set_target "$R_TCP" 192.168.50.3:25565
+  wait_until 30 caught_up
+  r=$(add_rule --tcp 39978 --to 192.168.50.3:25565)
+  wait_until 30 caught_up
+  out=$W/wgft-ak-flow19b
+  slow_flow 39978 12 "$out"
+  sleep 3
+  closed=$(grep -cE "conntrack: closed [1-9]" "$ALOG")
+  vps wgft rule rm "$r" --admin "$ADMIN" >/dev/null
+  wait_until 30 caught_up
+  wait_until 30 test -s "$out"
+  okcheck "a delete closes the deleted rule's established flow" "$(flow_ok "$out" && echo 0 || echo 1)"
+  echo "INFO  flow: $(cat "$out" | tail -1)"
+  # The server closes its own side of a deleted rule's flow too, so the flow ending does not show
+  # that the agent closed it; the agent's log does.
+  okcheck "the agent logs the deleted rule's closed flow" "$([ "$(grep -cE "conntrack: closed [1-9]" "$ALOG")" -gt "$closed" ] && echo 1 || echo 0)"
+  check "the retarget was undone" "tcp-echo 0.0.0.0:25565" "$(tcp_echo 39971)"
+}
+
+check_25() {
+  echo "== 25: disabling the agent removes the home DNAT and closes its flows"
+  local out=$W/wgft-ak-flow25 closed
+  slow_flow 39971 12 "$out"
+  sleep 3
+  closed=$(grep -cE "conntrack: closed [1-9]" "$ALOG")
+  vps wgft agent disable home --admin "$ADMIN" >/dev/null
+  wait_until 30 caught_up
+  wait_until 30 test -s "$out"
+  okcheck "disabling closes the agent's established flow" "$(flow_ok "$out" && echo 0 || echo 1)"
+  # as in check 19, the server closes its own side too; the agent's log shows the agent closed it
+  okcheck "the agent logs the disabled agent's closed flow" "$([ "$(grep -cE "conntrack: closed [1-9]" "$ALOG")" -gt "$closed" ] && echo 1 || echo 0)"
+  okcheck "a disabled agent publishes no DNAT at home" "$(home_dnat_rows | grep -q . && echo 0 || echo 1)"
+  vps wgft agent enable home --admin "$ADMIN" >/dev/null
+  wait_until 30 caught_up
+  wait_until 30 tcp_ok 39971
+  check "enabling brings forwarding back" "tcp-echo" "$(tcp_echo 39971)"
+
+  # disabled while the agent is stopped: the home side keeps the old DNAT and the flow's conntrack
+  # entry until the agent restarts, reconnects and learns of it
+  slow_flow 39971 20 "$out"
+  sleep 3
+  stop_agent
+  vps wgft agent disable home --admin "$ADMIN" >/dev/null
+  sleep 2
+  okcheck "while stopped, the home DNAT is still there" "$(home_dnat_rows | grep -q . && echo 1 || echo 0)"
+  okcheck "while stopped, the home conntrack still holds the flow" "$([ "$(home_flows 39971)" -gt 0 ] && echo 1 || echo 0)"
+  start_agent
+  wait_until 60 caught_up
+  wait_until 30 home_no_dnat
+  okcheck "after the restart, the home DNAT is gone" "$(home_no_dnat && echo 1 || echo 0)"
+  okcheck "after the restart, the flow's home conntrack entry is gone" "$([ "$(home_flows 39971)" = 0 ] && echo 1 || echo 0)"
+  vps wgft agent enable home --admin "$ADMIN" >/dev/null
+  wait_until 30 caught_up
+  wait_until 30 tcp_ok 39971
+  check "enabling brings forwarding back after the restart" "tcp-echo" "$(tcp_echo 39971)"
+}
+home_dnat_rows() { home nft list chain inet wgft_agent nat_pre | grep dnat; }
+home_no_dnat() { ! home_dnat_rows | grep -q .; }
+home_flows() { home conntrack -L -p tcp --dport "$1" 2>/dev/null | grep -c . ; }
+# set_target <rule-id> <new-target>: changes one rule's target via export and `rule import`, since
+# `rule set` only touches the group and the note.
+set_target() {
+  local f=$W/wgft-ak-settarget.json
+  vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for r in d['rules']:
+    if r['id'] == '$1':
+        r['target'] = '$2'
+json.dump(d['rules'], open('$f', 'w'))
+"
+  vps wgft rule import "$f" --admin "$ADMIN" >/dev/null
+}
+
 # doctor_states: every "id=status" in server doctor's JSON, sorted, on one line.
 doctor_states() {
   vps wgft server doctor --admin "$ADMIN" --json 2>/dev/null | python3 -c '
@@ -615,7 +718,7 @@ handshake_after() { local h; h=$(agent_field last_handshake); [ -n "$h" ] && [ "
 
 for c in $CHECKS; do
   case "$c" in
-    16|17|18|22|24|resolve|drift|session|route) "check_$c" ;;
+    16|17|18|19|22|24|25|resolve|drift|session|route) "check_$c" ;;
     *) echo "FAIL  unknown check $c"; fail=1 ;;
   esac
 done
