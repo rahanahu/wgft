@@ -644,6 +644,7 @@ func (s *Server) uiCheck(w http.ResponseWriter, r *http.Request) {
 	// 接続テストは 1 本のルールの操作なので、パンくずではそのルールの詳細ページの下に置く。
 	// ルールが見つからないときは「ダッシュボード / 接続テスト」の既定に任せる。
 	if rule, ok, ferr := s.findRule(id); ferr == nil && ok {
+		data["Agent"] = rule.Agent
 		data["Crumbs"] = []pageCrumb{dashboardCrumb(locale), ruleCrumb(rule), {Label: T(locale, "checkTitle")}}
 	}
 	if err != nil {

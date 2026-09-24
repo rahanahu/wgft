@@ -328,6 +328,39 @@ func TestUIRenderLocales(t *testing.T) {
 		}
 	}
 }
+
+// TestUICheckShowsAgentName は接続テストのページ(/ui/rules/{id}/check)が「ルール r_a(home 経由)」
+// のように、そのルールのエージェント名を出すことを確かめる。uiCheck が data["Agent"] を空のままに
+// 戻す退行を検出する(webui_rule.go)。
+func TestUICheckShowsAgentName(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, proto.Rule{ID: "r_a", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, Target: "192.168.1.20:25565", VPSMode: proto.ModeKernel, Enabled: true}), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(&fakeBackend{st: st}))
+	defer srv.Close()
+
+	cases := []struct {
+		lang string
+		want string
+	}{
+		{"en", "Rule r_a via home"},
+		{"ja", "ルール r_a(home 経由)"},
+	}
+	for _, tc := range cases {
+		body := getBody(t, srv.URL+"/ui/rules/r_a/check?lang="+tc.lang)
+		if !strings.Contains(body, tc.want) {
+			t.Errorf("lang=%s: body does not contain %q (agent name missing from the check page)", tc.lang, tc.want)
+		}
+	}
+}
+
 func findRuleT(t *testing.T, st *store.Store, id string) proto.Rule {
 	t.Helper()
 	rules, err := st.Rules()
