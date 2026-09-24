@@ -58,7 +58,7 @@ func TestAgentDismissWarningNoneForAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent dismiss-warning: %v", err)
 	}
-	if want := "no warning for home: ip-flapping to dismiss; nothing changed\n"; stdout != want {
+	if want := "no ip-flapping warning for home to dismiss; nothing changed\n"; stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 	if strings.Contains(stdout, "dismissed") {
@@ -80,7 +80,7 @@ func TestAgentDismissWarningWrongKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent dismiss-warning: %v", err)
 	}
-	if want := "no warning for home: ip-flapping to dismiss; nothing changed\n"; stdout != want {
+	if want := "no ip-flapping warning for home to dismiss; nothing changed\n"; stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 	if backend.dismissCalled {
@@ -88,8 +88,31 @@ func TestAgentDismissWarningWrongKind(t *testing.T) {
 	}
 }
 
+// TestAgentDismissWarningWrongAgent confirms the pre-check matches on agent too: a warning of
+// the same kind and detail, but for a different agent, does not count as a match. Without this
+// check, a mutation that drops the agent comparison entirely still passes every other test here,
+// since they all use a single agent name.
+func TestAgentDismissWarningWrongAgent(t *testing.T) {
+	backend := &fakeAgentBackend{warnings: []admin.Warning{
+		{Agent: "office", Kind: "ip-flapping", Detail: "", At: "2026-09-24T00:00:00Z"},
+	}}
+	adminURL := newAgentCLITestServerBackend(t, backend)
+	stdout, _, err := runAgentCmd(t, adminURL, "dismiss-warning", "home", "ip-flapping")
+	if err != nil {
+		t.Fatalf("agent dismiss-warning: %v", err)
+	}
+	if want := "no ip-flapping warning for home to dismiss; nothing changed\n"; stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	if backend.dismissCalled {
+		t.Errorf("DismissWarning was called even though the only matching warning belongs to a different agent")
+	}
+}
+
 // TestAgentDismissWarningDetailMismatch confirms a warning of the same agent and kind but a
-// different detail than the one given does not count as a match.
+// different detail than the one given does not count as a match, and that the CLI says a
+// warning exists but does not match the given detail, rather than the plainer "no warning at
+// all" wording (which would be misleading: a warning is there, just not that one).
 func TestAgentDismissWarningDetailMismatch(t *testing.T) {
 	backend := &fakeAgentBackend{warnings: []admin.Warning{
 		{Agent: "home", Kind: "ip-mismatch", Detail: "stream 203.0.113.5 / wg 203.0.113.9", At: "2026-09-24T00:00:00Z"},
@@ -99,11 +122,34 @@ func TestAgentDismissWarningDetailMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent dismiss-warning: %v", err)
 	}
-	if want := "no warning for home: ip-mismatch to dismiss; nothing changed\n"; stdout != want {
+	if want := "no ip-mismatch warning for home matches that detail; nothing changed. See wgft agent warnings for the current entries.\n"; stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 	if backend.dismissCalled {
 		t.Errorf("DismissWarning was called even though no warning matches the given detail")
+	}
+}
+
+// TestAgentDismissWarningNoDetailGivenMatchesNonEmptyDetail confirms the CLI's main usage
+// without a [detail] argument: an ip-mismatch warning always has a non-empty Detail (it records
+// the pair of addresses), and omitting [detail] on the command line must still match and dismiss
+// it. Without this check, a mutation that always compares Detail exactly (dropping the
+// detail == "" shortcut) still passes every other test here, since they either give no warnings
+// with a non-empty Detail while detail == "", or give a Detail while passing one that matches.
+func TestAgentDismissWarningNoDetailGivenMatchesNonEmptyDetail(t *testing.T) {
+	backend := &fakeAgentBackend{warnings: []admin.Warning{
+		{Agent: "home", Kind: "ip-mismatch", Detail: "stream 203.0.113.5 / wg 203.0.113.9", At: "2026-09-24T00:00:00Z"},
+	}}
+	adminURL := newAgentCLITestServerBackend(t, backend)
+	stdout, _, err := runAgentCmd(t, adminURL, "dismiss-warning", "home", "ip-mismatch")
+	if err != nil {
+		t.Fatalf("agent dismiss-warning: %v", err)
+	}
+	if want := "dismissed warning for home: ip-mismatch\n"; stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	if !backend.dismissCalled {
+		t.Errorf("DismissWarning was not called even though omitting [detail] should match any detail for this agent and kind")
 	}
 }
 

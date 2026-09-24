@@ -459,15 +459,27 @@ On the VPS, against the admin API:
 			if err != nil {
 				return err
 			}
-			found := false
+			found, sameKind := false, false
 			for _, w := range ws {
-				if w.Agent == args[0] && w.Kind == args[1] && (detail == "" || w.Detail == detail) {
+				if w.Agent != args[0] || w.Kind != args[1] {
+					continue
+				}
+				sameKind = true
+				if detail == "" || w.Detail == detail {
 					found = true
 					break
 				}
 			}
 			if !found {
-				fmt.Printf("no warning for %s: %s to dismiss; nothing changed\n", args[0], args[1])
+				if detail != "" && sameKind {
+					// エージェントと種類は一致する警告があるが、渡した detail のものは無い
+					// (ip-mismatch は detail が必ず組で違うので、渡した組を勘違いしている
+					// ことが多い)。「消した」と誤って言わないことに加え、警告が無いという
+					// のとも違う事実を言う。
+					fmt.Printf("no %s warning for %s matches that detail; nothing changed. See wgft agent warnings for the current entries.\n", args[1], args[0])
+				} else {
+					fmt.Printf("no %s warning for %s to dismiss; nothing changed\n", args[1], args[0])
+				}
 				return nil
 			}
 			if err := c.DismissWarning(args[0], args[1], detail); err != nil {
