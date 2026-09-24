@@ -149,7 +149,7 @@ Open the forwarded port on the VPS firewall. Once the rule is active, traffic ar
 
 ![wgft dashboard](docs/images/dashboard.png)
 
-The dashboard shows agent connectivity, rules, drop counters, warnings, and the active nftables state. Next to each rule's state, a diagnosis mark names the node where the rule's traffic stops and opens that rule's diagnostics page. The error counts in the header and the group headings count these marks. The dashboard can also issue join strings and manage ordinary rule operations.
+The dashboard shows agent connectivity, rules, drop counters, warnings, and the active nftables state. Next to each rule's state, a diagnosis mark shows where the rule's traffic stops and opens that rule's diagnostics page. The error counts in the header and the group headings count these marks. The dashboard can also issue join strings and manage ordinary rule operations.
 
 The admin API is not exposed publicly by default; it listens on `/run/wgft/admin.sock`. Reach it through SSH:
 

@@ -26,6 +26,7 @@ import (
 //	g2:        r_stale(? agent、バッジは Error。ハートビートが古い)、r_deg(? agent、切断していて
 //	           ハンドシェイクは新しい)、r_late(? listener / target、まだ報告されていない)、
 //	           r_dis(無効なルール、灰色)、r_gone(持ち主のエージェントが未登録、灰色)
+//	           r_paused(無効なエージェントのルール、灰色。server は not_active を報告する)
 //	その他:    r_down(✕ WireGuard、バッジは Agent offline)
 //
 // バッジの色から数えると g1 は 1 件、g2 は 1 件、その他は 0 件、全体は 2 件になる。印から数えると
@@ -51,6 +52,7 @@ func markFixture(t *testing.T) (*countingBackend, *Server) {
 			rule("r_late", "home", "g2", proto.TCP, 1006, true),
 			rule("r_dis", "home", "g2", proto.TCP, 1007, false),
 			rule("r_gone", "ghost", "g2", proto.TCP, 1008, true),
+			rule("r_paused", "paused", "g2", proto.TCP, 1010, true),
 			rule("r_down", "down", "", proto.TCP, 1009, true),
 		), nil
 	}); err != nil {
@@ -74,6 +76,7 @@ func markFixture(t *testing.T) (*countingBackend, *Server) {
 		{Name: "quiet", Connected: true, Generation: gen, LastHeartbeat: ago(2 * time.Minute), LastHandshake: ago(30 * time.Second), Tunnel: ok,
 			Rules: []proto.RuleStatus{{ID: "r_stale", State: proto.StatusError, Reason: "tcp/1004: stale failure"}}},
 		{Name: "lan", Connected: false, Generation: gen, LastHeartbeat: ago(3 * time.Minute), LastHandshake: ago(30 * time.Second), Tunnel: ok},
+		{Name: "paused", Disabled: true, Connected: true, Generation: gen, LastHeartbeat: ago(10 * time.Second), LastHandshake: ago(30 * time.Second), Tunnel: ok},
 		{Name: "down", Connected: false, Generation: gen, LastHeartbeat: ago(time.Hour), LastHandshake: ago(time.Hour), Tunnel: ok},
 	}
 	b := &countingBackend{fakeBackend: fakeBackend{st: st, agents: agents, warnings: []Warning{}}}
@@ -86,14 +89,15 @@ type markWant struct {
 }
 
 var markWants = map[string]markWant{
-	"r_ok":    {state: nodeOK, symbol: "✓", word: "OK", badge: "success"},
-	"r_err":   {state: nodeFailed, symbol: "✕", node: "listener / target", word: "FAILED", badge: "danger"},
-	"r_hs":    {state: nodeFailed, symbol: "✕", node: "WireGuard", word: "FAILED", badge: "success"},
-	"r_stale": {state: nodeUnknown, symbol: "?", node: "agent", word: "UNKNOWN", badge: "danger"},
-	"r_deg":   {state: nodeUnknown, symbol: "?", node: "agent", word: "UNKNOWN", badge: "neutral"},
-	"r_late":  {state: nodeUnknown, symbol: "?", node: "listener / target", word: "UNKNOWN", badge: "warning"},
-	"r_dis":   {state: nodeSkipped, word: "SKIPPED", badge: "neutral"},
-	"r_down":  {state: nodeFailed, symbol: "✕", node: "WireGuard", word: "FAILED", badge: "neutral"},
+	"r_ok":     {state: nodeOK, symbol: "✓", word: "OK", badge: "success"},
+	"r_err":    {state: nodeFailed, symbol: "✕", node: "listener / target", word: "FAILED", badge: "danger"},
+	"r_hs":     {state: nodeFailed, symbol: "✕", node: "WireGuard", word: "FAILED", badge: "success"},
+	"r_stale":  {state: nodeUnknown, symbol: "?", node: "agent", word: "UNKNOWN", badge: "danger"},
+	"r_deg":    {state: nodeUnknown, symbol: "?", node: "agent", word: "UNKNOWN", badge: "neutral"},
+	"r_late":   {state: nodeUnknown, symbol: "?", node: "listener / target", word: "UNKNOWN", badge: "warning"},
+	"r_dis":    {state: nodeSkipped, word: "SKIPPED", badge: "neutral"},
+	"r_paused": {state: nodeSkipped, word: "SKIPPED", badge: "neutral"},
+	"r_down":   {state: nodeFailed, symbol: "✕", node: "WireGuard", word: "FAILED", badge: "neutral"},
 }
 
 // ruleRow は一覧の中の 1 本のルールの行を返す。行は詳細ページへのリンクで見分ける。
@@ -178,6 +182,36 @@ func TestDashboardMarkPerState(t *testing.T) {
 			for _, red := range []string{"failed", "danger"} {
 				if strings.Contains(cell, red) {
 					t.Errorf("%s %s: a grey row must carry nothing red (%q):\n%s", lang, id, red, cell)
+				}
+			}
+		}
+	}
+}
+
+// TestDashboardGreyRowsForAgentsNotForwarding は、持ち主のエージェントが無効か未登録のルールを、
+// 適用状態のバッジも診断の印も灰色で示し、エラーに数えないことを確かめる(設計文書 5.1、10.1 節)。
+// 無効なエージェントのルールは、server が not_active を報告していても赤にせず、転送していないので
+// 緑の ✓ にもしない。件数に入らないことは TestDashboardCountsFollowTheMarks が g2 の 0 件で確かめる。
+func TestDashboardGreyRowsForAgentsNotForwarding(t *testing.T) {
+	_, s := markFixture(t)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	for _, lang := range []string{"ja", "en"} {
+		body := getBody(t, srv.URL+"/?lang="+lang)
+		for id, label := range map[string]string{"r_paused": T(lang, "agentDisabled"), "r_gone": T(lang, "agentUnregistered")} {
+			cell := stateCell(t, body, id)
+			for _, want := range []string{
+				`<span class="badge neutral">● ` + label + `</span>`,
+				`<a class="diag-mark skipped" href="/ui/doctor/` + id + `"`,
+			} {
+				if !strings.Contains(cell, want) {
+					t.Errorf("%s %s: the state cell is missing %q:\n%s", lang, id, want, cell)
+				}
+			}
+			for _, wrong := range []string{"danger", "failed", "success", "warning", "unknown", "✓", "✕"} {
+				if strings.Contains(cell, wrong) {
+					t.Errorf("%s %s: a rule whose agent does not forward must be grey only, but its cell has %q:\n%s", lang, id, wrong, cell)
 				}
 			}
 		}
@@ -290,7 +324,7 @@ func TestDashboardCountsFollowTheMarks(t *testing.T) {
 		if total != 3 {
 			t.Fatalf("%s: %d red marks in the list, want 3", lang, total)
 		}
-		summary := fmt.Sprintf(T(lang, "summaryErr"), 3, 5, 9, total)
+		summary := fmt.Sprintf(T(lang, "summaryErr"), 4, 6, 10, total)
 		if !strings.Contains(body, summary) {
 			t.Errorf("%s: the header health summary is not %q:\n%s", lang, summary, body)
 		}
@@ -305,7 +339,12 @@ func TestDashboardCountsFollowTheMarks(t *testing.T) {
 // countingBackend の加算の報告(ApplyStatus など)はそのまま使う。
 type readCountingBackend struct {
 	*countingBackend
-	rules, agents, gens, drops atomic.Int64
+	rules, agents, gens, drops, applies atomic.Int64
+}
+
+func (b *readCountingBackend) ApplyStatus() (ApplyStatus, bool) {
+	b.applies.Add(1)
+	return b.countingBackend.ApplyStatus()
 }
 
 func (b *readCountingBackend) Rules() ([]proto.Rule, error) {
@@ -329,8 +368,8 @@ func (b *readCountingBackend) RuleDrops() (map[string]uint64, error) {
 }
 
 // TestDashboardReadsOnce は、印を出すために読み取りを増やさないことを確かめる。ページ全体と
-// 4 つの部分更新は、どれもルール、エージェント、世代、拒否数をそれぞれ 1 回だけ読み、疎通の確認を
-// 呼ばない。バッジと印と件数は、この 1 回の読み取りから作られる。
+// 4 つの部分更新は、どれもルール、エージェント、世代、拒否数、server の適用状態をそれぞれ 1 回だけ
+// 読み、疎通の確認を呼ばない。バッジと印と件数は、この 1 回の読み取りから作られる。
 func TestDashboardReadsOnce(t *testing.T) {
 	base, _ := markFixture(t)
 	b := &readCountingBackend{countingBackend: base}
@@ -342,8 +381,9 @@ func TestDashboardReadsOnce(t *testing.T) {
 		b.agents.Store(0)
 		b.gens.Store(0)
 		b.drops.Store(0)
+		b.applies.Store(0)
 		getBody(t, srv.URL+path)
-		for name, n := range map[string]int64{"Rules": b.rules.Load(), "Agents": b.agents.Load(), "Generation": b.gens.Load(), "RuleDrops": b.drops.Load()} {
+		for name, n := range map[string]int64{"Rules": b.rules.Load(), "Agents": b.agents.Load(), "Generation": b.gens.Load(), "RuleDrops": b.drops.Load(), "ApplyStatus": b.applies.Load()} {
 			if n != 1 {
 				t.Errorf("GET %s read %s %d time(s), want exactly 1", path, name, n)
 			}
@@ -371,5 +411,65 @@ func TestDashboardLeavesTheLongErrorToOtherPages(t *testing.T) {
 		if body := getBody(t, srv.URL+path); !strings.Contains(body, reason) {
 			t.Errorf("GET %s lost the error text %q", path, reason)
 		}
+	}
+}
+
+// TestDashMarksMatchChecksOf は、dashMarks がルールごとの検査を 1 回で振り分けても、ルールごとに
+// rep.ChecksOf を呼んだ場合と同じ印になることを確かめる。振り分けは費用のための近道であり、
+// 印を変えてはならない。
+func TestDashMarksMatchChecksOf(t *testing.T) {
+	_, s := markFixture(t)
+	in, err := doctor.Read(doctorEvidence{s}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lang := range []string{"ja", "en"} {
+		got := dashMarks(in.Rules.Rules, in, lang)
+		rep := doctor.BuildReport(in.Rules.Rules, in)
+		if len(got) != len(rep.Rules) || len(got) == 0 {
+			t.Fatalf("%s: %d marks for %d rules", lang, len(got), len(rep.Rules))
+		}
+		for _, rr := range rep.Rules {
+			checks := rep.ChecksOf(rr.RuleID)
+			want := doctorMark(rr, checks, doctorPath(rr, checks, in.Now, lang), lang)
+			if got[rr.RuleID] != want {
+				t.Errorf("%s %s: mark %+v, want %+v", lang, rr.RuleID, got[rr.RuleID], want)
+			}
+		}
+	}
+}
+
+// TestChecksByRuleKeepsInterleavedChecks は、同じルールの検査が離れて現れても、振り分けがどれも
+// 落とさず、元の順のまま継ぎ足すことを確かめる。今の BuildReport は 1 本のルールの検査を続けて
+// 並べるが、振り分けはその並びに頼って検査を落としてはならない。
+func TestChecksByRuleKeepsInterleavedChecks(t *testing.T) {
+	c := func(rule, id string) doctor.Check { return doctor.Check{RuleID: rule, ID: id} }
+	checks := []doctor.Check{
+		c("a", doctor.CheckEnabled), c("a", doctor.CheckPublicPort),
+		c("b", doctor.CheckEnabled),
+		c("", doctor.CheckDataplane),
+		c("a", doctor.CheckTarget),
+		c("b", doctor.CheckTarget),
+	}
+	got := checksByRule(checks)
+	want := map[string][]string{
+		"a": {doctor.CheckEnabled, doctor.CheckPublicPort, doctor.CheckTarget},
+		"b": {doctor.CheckEnabled, doctor.CheckTarget},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d rules, want %d: %v", len(got), len(want), got)
+	}
+	for rule, ids := range want {
+		var gotIDs []string
+		for _, ch := range got[rule] {
+			gotIDs = append(gotIDs, ch.ID)
+		}
+		if strings.Join(gotIDs, ",") != strings.Join(ids, ",") {
+			t.Errorf("rule %s: checks %v, want %v", rule, gotIDs, ids)
+		}
+	}
+	// 連続した区間を指したまま継ぎ足しても、元の並びを書き換えない。
+	if checks[2].RuleID != "b" || checks[2].ID != doctor.CheckEnabled {
+		t.Errorf("checksByRule wrote into its input: %+v", checks[2])
 	}
 }

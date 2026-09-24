@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"html"
 	"net/http"
 	"net/http/httptest"
@@ -42,8 +43,20 @@ func (b *countingBackend) ApplyStatus() (ApplyStatus, bool) {
 	if err != nil {
 		return ApplyStatus{}, false
 	}
+	// 本物の server と同じく、無効なエージェントのルールは公開から外し、not_active とその理由を返す
+	// (internal/vpsd/apply.go、設計文書 5.1 節)。
+	disabled := map[string]bool{}
+	if agents, err := b.fakeBackend.Agents(); err == nil {
+		for _, a := range agents {
+			disabled[a.Name] = a.Disabled
+		}
+	}
 	st := ApplyStatus{DesiredGeneration: gen, ActiveGeneration: gen, Rules: map[string]RuleApply{}}
 	for _, r := range rules {
+		if disabled[r.Agent] {
+			st.Rules[r.ID] = RuleApply{ApplyState: ApplyNotActive, Reason: fmt.Sprintf("agent %q is disabled", r.Agent)}
+			continue
+		}
 		st.Rules[r.ID] = RuleApply{ApplyState: ApplyActive, ActiveGeneration: &gen}
 	}
 	return st, true

@@ -140,7 +140,10 @@ type warnView struct {
 // buildDash はダッシュボードとその部分更新のビューを組み立てる。ルールとエージェントは診断と
 // 同じ doctor.Read の 1 回の読み取りから取る(設計文書 10.1、10.2d 節)。適用状態のバッジと診断の
 // 印と件数を同じ時点の証拠から作り、印のために読み取りを増やさないためである。疎通の確認は呼ばない。
-func (s *Server) buildDash(locale string) (dashData, error) {
+//
+// withRules が false なら、ルール一覧とヘッダの全体ヘルス(RuleGroups と Health)を組み立てない。
+// エージェント一覧と警告の部分更新はこの 2 つを描かないので、診断の組み立ての費用を払わない。
+func (s *Server) buildDash(locale string, withRules bool) (dashData, error) {
 	// ルール、世代、拒否数、エージェントの読み取りの失敗は doctor.Read がそのまま返す。
 	// generation/drops/warnings もダッシュボードの本体データであり、Agents/Rules と同じく
 	// 失敗を 0 件・世代 0 のような値に変えて描いてはならない(design.md 10.5 節)。
@@ -175,27 +178,57 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 		}
 		d.Agents = append(d.Agents, agentToView(a, gen, locale, acks[a.Name]))
 	}
-	agentIdx := buildAgentIndex(agents)
 	d.RuleCount = len(rules)
-	var ruleErrors int
-	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, agentIdx, in.Rules.RuleStates, dashMarks(rules, in, locale))
 	for _, w := range warns {
 		d.Warnings = append(d.Warnings, warnToView(w, locale))
 	}
+	if !withRules {
+		return d, nil
+	}
+	var ruleErrors int
+	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, buildAgentIndex(agents), in.Rules.RuleStates, dashMarks(rules, in, locale))
 	d.Health = health(len(agents), online, len(rules), len(warns), ruleErrors, locale)
 	return d, nil
 }
 
 // dashMarks はルールごとの診断の印を返す。印は診断の画面と同じ doctor.BuildReport と doctorPath の
 // 出力から選ぶ(webui_doctor_path.go の doctorMark)。
+//
+// 検査はルールの ID ごとに 1 回で振り分ける。ルールごとに rep.ChecksOf を呼ぶと、そのたびに全ルールの
+// 検査をなめて並べ直すので、費用がルールの本数の 2 乗で伸びる。ダッシュボードは 5 秒ごとの部分更新の
+// たびにここを通る。doctorPath と doctorMark はそのルールの検査だけを ID で引き、並びにも
+// server.dataplane にも頼らないので、ChecksOf の結果の代わりに振り分けた検査を渡してよい。
 func dashMarks(rules []proto.Rule, in doctor.Input, locale string) map[string]doctorMarkView {
 	rep := doctor.BuildReport(rules, in)
+	byRule := checksByRule(rep.Checks)
 	out := make(map[string]doctorMarkView, len(rep.Rules))
 	for _, rr := range rep.Rules {
-		checks := rep.ChecksOf(rr.RuleID)
+		checks := byRule[rr.RuleID]
 		out[rr.RuleID] = doctorMark(rr, checks, doctorPath(rr, checks, in.Now, locale), locale)
 	}
 	return out
+}
+
+// checksByRule は検査をルールの ID ごとに振り分ける。ルールに属さない検査(server.dataplane)は
+// 入れない。並びは checks の中の順のままである。BuildReport は 1 本のルールの検査を続けて並べるので、
+// 連続した区間は写さずに指す。同じルールの検査が離れて現れた場合だけ、写して継ぎ足す。
+func checksByRule(checks []doctor.Check) map[string][]doctor.Check {
+	byRule := map[string][]doctor.Check{}
+	for i := 0; i < len(checks); {
+		id, j := checks[i].RuleID, i+1
+		for j < len(checks) && checks[j].RuleID == id {
+			j++
+		}
+		if id != "" {
+			if prev, ok := byRule[id]; ok {
+				byRule[id] = append(prev, checks[i:j]...)
+			} else {
+				byRule[id] = checks[i:j:j]
+			}
+		}
+		i = j
+	}
+	return byRule
 }
 
 // health はヘッダの全体ヘルスを作る。ruleErrors は診断の印が FAILED のルールの数で、グループの
@@ -378,7 +411,7 @@ func warnToView(w Warning, locale string) warnView {
 // ---- ハンドラ(ダッシュボードとその部分更新) ----
 
 func (s *Server) uiDashboard(w http.ResponseWriter, r *http.Request) {
-	d, err := s.buildDash(resolveLocale(w, r))
+	d, err := s.buildDash(resolveLocale(w, r), true)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -387,7 +420,7 @@ func (s *Server) uiDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiAgentsPartial(w http.ResponseWriter, r *http.Request) {
-	d, err := s.buildDash(resolveLocale(w, r))
+	d, err := s.buildDash(resolveLocale(w, r), false)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -396,7 +429,7 @@ func (s *Server) uiAgentsPartial(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiWarningsPartial(w http.ResponseWriter, r *http.Request) {
-	d, err := s.buildDash(resolveLocale(w, r))
+	d, err := s.buildDash(resolveLocale(w, r), false)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -405,7 +438,7 @@ func (s *Server) uiWarningsPartial(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiRulesPartial(w http.ResponseWriter, r *http.Request) {
-	d, err := s.buildDash(resolveLocale(w, r))
+	d, err := s.buildDash(resolveLocale(w, r), true)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -414,7 +447,7 @@ func (s *Server) uiRulesPartial(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiHealthPartial(w http.ResponseWriter, r *http.Request) {
-	d, err := s.buildDash(resolveLocale(w, r))
+	d, err := s.buildDash(resolveLocale(w, r), true)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

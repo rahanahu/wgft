@@ -29,6 +29,7 @@ func TestRuleRunState(t *testing.T) {
 		rule       *proto.Rule
 		latestGen  uint64
 		agents     map[string]ruleAgentStatus
+		server     map[string]RuleApply
 		wantBadge  string
 		wantLabel  [2]string // ja, en
 		wantReason string
@@ -45,7 +46,31 @@ func TestRuleRunState(t *testing.T) {
 			rule:      rule(true),
 			latestGen: 5,
 			agents:    map[string]ruleAgentStatus{},
-			wantBadge: "neutral", wantLabel: [2]string{"エージェント未接続", "Agent offline"},
+			wantBadge: "neutral", wantLabel: [2]string{"エージェント未登録", "Agent not registered"},
+		},
+		{
+			// 無効なエージェントのルールは server が公開から外して not_active を報告する。宣言どおりに
+			// 止めたルールなので、赤の「公開していない」ではなく灰色の「エージェント無効」にする
+			name:      "agent disabled, server reports not_active",
+			rule:      rule(true),
+			latestGen: 5,
+			agents:    agents(ruleAgentStatus{Disabled: true, Connected: true, Generation: 5, Rules: map[string]proto.RuleStatus{}}),
+			server:    map[string]RuleApply{"r_a": {ApplyState: ApplyNotActive, Reason: `agent "home" is disabled`}},
+			wantBadge: "neutral", wantLabel: [2]string{"エージェント無効", "Agent disabled"},
+		},
+		{
+			name:      "agent disabled and disconnected",
+			rule:      rule(true),
+			latestGen: 5,
+			agents:    agents(ruleAgentStatus{Disabled: true, Connected: false, Generation: 5}),
+			wantBadge: "neutral", wantLabel: [2]string{"エージェント無効", "Agent disabled"},
+		},
+		{
+			name:      "disabled rule of a disabled agent stays disabled",
+			rule:      rule(false),
+			latestGen: 5,
+			agents:    agents(ruleAgentStatus{Disabled: true, Connected: true, Generation: 5}),
+			wantBadge: "neutral", wantLabel: [2]string{"無効", "Disabled"},
 		},
 		{
 			name:      "agent registered but not connected",
@@ -95,7 +120,7 @@ func TestRuleRunState(t *testing.T) {
 	for _, tc := range cases {
 		for i, locale := range []string{"ja", "en"} {
 			t.Run(tc.name+"/"+locale, func(t *testing.T) {
-				badge, label, reason := ruleRunState(tc.rule, tc.latestGen, tc.agents, nil, locale)
+				badge, label, reason := ruleRunState(tc.rule, tc.latestGen, tc.agents, tc.server, locale)
 				if badge != tc.wantBadge {
 					t.Errorf("badge = %q, want %q", badge, tc.wantBadge)
 				}
