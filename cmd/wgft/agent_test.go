@@ -337,6 +337,8 @@ func TestEveryAgentSettingIsCheckedAtTheDoor(t *testing.T) {
 		"WGFT_DATA_DIR":      "  ",
 		"WGFT_JOIN":          "",
 		"WGFT_NAME":          "",
+		"WGFT_MODE":          "kernal",
+		"WGFT_WG_INTERFACE":  "wg/ft0",
 		allowtargets.Env:     "192.168.1.0/33",
 		"WGFT_MAX_UDP_FLOWS": "0",
 		"WGFT_MAX_TCP_FLOWS": "one",
@@ -359,9 +361,12 @@ func TestEveryAgentSettingIsCheckedAtTheDoor(t *testing.T) {
 			continue
 		}
 		t.Run(sp.Env, func(t *testing.T) {
+			// データの置き場所は環境変数で渡す。フラグで渡すと、WGFT_DATA_DIR の壊れた値をフラグが
+			// 上書きし、その行が何も確かめなくなる。壊れた値の設定は、その後に置くので上書きが勝つ
+			t.Setenv("WGFT_DATA_DIR", t.TempDir())
 			t.Setenv(sp.Env, value)
 			root := newRootCmd()
-			root.SetArgs([]string{"agent", "run", "--config", filepath.Join(t.TempDir(), "none.env"), "--data-dir", t.TempDir()})
+			root.SetArgs([]string{"agent", "run", "--config", filepath.Join(t.TempDir(), "none.env")})
 			root.SetOut(io.Discard)
 			root.SetErr(io.Discard)
 			done := make(chan error, 1)
@@ -375,8 +380,10 @@ func TestEveryAgentSettingIsCheckedAtTheDoor(t *testing.T) {
 			if got := exitCode(err); err == nil || got != exitRefusal {
 				t.Fatalf("%s=%q: err=%v exitCode=%d, want %d", sp.Env, value, err, got, exitRefusal)
 			}
-			if r := startup.Of(err); r == nil || r.Category != startup.CategoryConfig {
-				t.Errorf("%s=%q: refusal = %v, want category %q", sp.Env, value, r, startup.CategoryConfig)
+			// 種別だけでは足りない。未登録のエージェントは WGFT_JOIN の欠落でも同じ種別の拒否になるので、
+			// 拒否がその設定についてのものであることまで確かめる
+			if r := startup.Of(err); r == nil || r.Category != startup.CategoryConfig || r.Subject != sp.Env {
+				t.Errorf("%s=%q: refusal = %v, want category %q about %s", sp.Env, value, r, startup.CategoryConfig, sp.Env)
 			}
 		})
 	}
@@ -427,5 +434,64 @@ func TestAgentRefusalExitsWithRefusalCode(t *testing.T) {
 	}
 	if got := exitCode(errors.New("network unreachable")); got != 1 {
 		t.Errorf("exitCode(plain error) = %d, want 1", got)
+	}
+}
+
+// Linux 以外のビルドで kernel を指定すると、入口で種別 prerequisite の拒否になり、認証情報ファイルに
+// 触れない(設計文書 7b.5・11b 節)。Linux 以外のホストは再起動でも Linux にならないためである。
+func TestAgentKernelModeOffLinuxIsAPrerequisiteRefusal(t *testing.T) {
+	old := agentGOOS
+	agentGOOS = "windows"
+	t.Cleanup(func() { agentGOOS = old })
+	dir := t.TempDir()
+	t.Setenv("WGFT_MODE", "kernel")
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "run", "--config", filepath.Join(dir, "none.env"), "--data-dir", dir})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	if got := exitCode(err); got != exitRefusal {
+		t.Fatalf("err=%v exitCode=%d, want %d", err, got, exitRefusal)
+	}
+	if r := startup.Of(err); r == nil || r.Category != startup.CategoryPrerequisite || r.Subject != "WGFT_MODE" {
+		t.Errorf("refusal = %v, want a prerequisite refusal about WGFT_MODE", r)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "agent.json")); !os.IsNotExist(err) {
+		t.Errorf("agent.json exists after a refusal at the door: %v", err)
+	}
+}
+
+// カーネルモードの記録を持つ agent.json で、WGFT_MODE を省略して、または userspace で起動すると、
+// 種別 mode-gate の拒否として終了コード 3 で止まり、agent.json を書き換えない(設計文書 11a・11b 節)。
+func TestAgentModeGateRefusesLeavingKernelMode(t *testing.T) {
+	for _, mode := range []string{"", "userspace"} {
+		t.Run("WGFT_MODE="+mode, func(t *testing.T) {
+			dir := t.TempDir()
+			body := `{"name":"home","endpoint":"127.0.0.1:1","cert_sha256":"` + strings.Repeat("ab", 32) + `","permanent_token":"tok","mode":"kernel"}`
+			path := filepath.Join(dir, "agent.json")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if mode != "" {
+				t.Setenv("WGFT_MODE", mode)
+			}
+			root := newRootCmd()
+			root.SetArgs([]string{"agent", "run", "--config", filepath.Join(dir, "none.env"), "--data-dir", dir})
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			err := root.Execute()
+			if got := exitCode(err); got != exitRefusal {
+				t.Fatalf("err=%v exitCode=%d, want %d", err, got, exitRefusal)
+			}
+			if r := startup.Of(err); r == nil || r.Category != startup.CategoryModeGate {
+				t.Fatalf("refusal = %v, want category %q", r, startup.CategoryModeGate)
+			}
+			if !strings.Contains(err.Error(), "wgft agent teardown") {
+				t.Errorf("refusal %q does not point to wgft agent teardown", err)
+			}
+			if b, _ := os.ReadFile(path); string(b) != body {
+				t.Errorf("the refused start rewrote agent.json:\n%s", b)
+			}
+		})
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -14,7 +15,12 @@ import (
 	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/startup"
 )
+
+// agentGOOS はエージェントの入口が Linux 以外での kernel の指定を判定するための OS 名である。
+// 値は runtime.GOOS で、テストだけが Linux 以外のビルドを模すために差し替える。
+var agentGOOS = runtime.GOOS
 
 // agentConfigPath は agent の dotenv 既定(仕様 11a 節)。置き場は OS ごと(paths_*.go)。
 var agentConfigPath = joinPath(defaultConfigDir(), "agent.env")
@@ -37,6 +43,8 @@ func agentSpecs() []spec {
 		{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir()},
 		{Env: "WGFT_JOIN", Flag: "join", Default: "", Secret: true},
 		{Env: "WGFT_NAME", Flag: "name", Default: ""},
+		{Env: "WGFT_MODE", Flag: "mode", Default: ""},
+		{Env: "WGFT_WG_INTERFACE", Flag: "wg-interface", Default: "wgft0"},
 		{Env: allowtargets.Env, Flag: "agent-allow-targets", Default: "", Slice: true},
 	}, limitSpecs()...)
 }
@@ -71,6 +79,20 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 	if strings.TrimSpace(c.str("WGFT_DATA_DIR")) == "" {
 		return agent.Options{}, nil, configErrorf("WGFT_DATA_DIR", "is empty; give the directory that holds agent.json")
 	}
+	// WGFT_MODE は値そのものの誤りと、Linux 以外での kernel の指定をここで弾く。記録との照合と切り替えの
+	// 関門は、記録を読める internal/agent が判定する(設計文書 11a・11b 節)。省略は userspace を指す
+	mode := c.str("WGFT_MODE")
+	if mode != "" && mode != "kernel" && mode != "userspace" {
+		return agent.Options{}, nil, configErrorf("WGFT_MODE", "must be kernel or userspace, not %q", mode)
+	}
+	if mode == "kernel" && agentGOOS != "linux" {
+		return agent.Options{}, nil, startup.Prerequisite("WGFT_MODE", "the agent's kernel mode needs Linux, and this is %s; leave WGFT_MODE unset or set it to userspace", agentGOOS)
+	}
+	// インタフェース名はカーネルモードでだけ使うが、値だけで判定できるので、モードによらずここで弾く。
+	// 後でカーネルモードへ切り替えたときに、起動の後半で初めて失敗しないためである
+	if err := validateInterfaceName("WGFT_WG_INTERFACE", c.str("WGFT_WG_INTERFACE")); err != nil {
+		return agent.Options{}, nil, err
+	}
 	limits, err := limitsFromConfig(c)
 	if err != nil {
 		return agent.Options{}, nil, err
@@ -90,8 +112,10 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 		Limits:          limits,
 		CredentialsPath: joinPath(c.str("WGFT_DATA_DIR"), "agent.json"),
 		Join:            join,
+		Mode:            mode,
 		Name:            c.str("WGFT_NAME"),
 		Version:         effectiveVersion(),
+		WGInterface:     c.str("WGFT_WG_INTERFACE"),
 	}, c, nil
 }
 
@@ -152,6 +176,8 @@ On the VPS, against the admin API:
 	registerLimitFlags(rf)
 	rf.String("join", "", "join string wgft://host:port/token#sha256:..., env WGFT_JOIN")
 	rf.String("name", "", "agent name, env WGFT_NAME; optional, the join string is already bound to a name")
+	rf.String("mode", "", "forwarding mode userspace or kernel, env WGFT_MODE; unset means userspace, and kernel is Linux only")
+	rf.String("wg-interface", "wgft0", "kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE; unused in userspace mode")
 	rf.String("agent-allow-targets", "",
 		"comma-separated targets the server may send traffic to, env "+allowtargets.Env+"; entries are CIDR, CIDR:port or CIDR:lo-hi; unset means no restriction")
 	rf.String("config", agentConfigPath, "dotenv config file")

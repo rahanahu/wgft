@@ -34,6 +34,13 @@ type Options struct {
 	Limits          resource.Limits // 同時フロー数のプロセス全体の予算(仕様 7 節)。ゼロ値は既定値
 	Name            string          // エージェント名(WGFT_NAME か --name)。任意。接続文字列の発行時の名前に紐付いているので、与えなければトークンに紐付いた名前で登録される
 	Version         string          // 起動ログに出す wgft の版(cmd 側の effectiveVersion())。空なら "dev" として出す
+
+	// Mode は設定の WGFT_MODE の値である(仕様 11a 節)。kernel か userspace で、空なら省略されており
+	// userspace を指す。起動時に認証情報ファイルの記録と照合する(mode.go)
+	Mode string
+	// WGInterface はカーネルモードの WireGuard インタフェースの名前である(WGFT_WG_INTERFACE、既定 wgft0。
+	// 仕様 7b.1・11a 節)。ユーザー空間モードでは使わない
+	WGInterface string
 }
 
 // runtime は動いているエージェント。全体状態を「宣言された状態に収束させる」方式で適用する。
@@ -120,7 +127,12 @@ func Run(opts Options) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("wgft %s agent starting: name %s, data dir %s", versionOrDev(opts.Version), nameOrUnregistered(f.Name), filepath.Dir(opts.CredentialsPath))
+	// モードの照合は、鍵を作るよりも前に行う。関門で止まる起動は認証情報ファイルに何も書かない(仕様 11a 節)
+	mode, err := enterMode(f, opts.Mode, opts.CredentialsPath)
+	if err != nil {
+		return err
+	}
+	log.Printf("wgft %s agent starting: name %s, mode %s, data dir %s", versionOrDev(opts.Version), nameOrUnregistered(f.Name), mode, filepath.Dir(opts.CredentialsPath))
 	logAllowTargets(opts.AllowTargets)
 	created, err := f.EnsureKey()
 	if err != nil {

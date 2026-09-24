@@ -121,8 +121,15 @@ func (rt *runtime) rotateKey() (wgtypes.Key, error) {
 		return wgtypes.Key{}, err
 	}
 	rt.mu.Lock()
+	// カーネルモードでは、今の鍵を 1 つ前の鍵として新しい鍵と同じ保存で残す(仕様 7b.4 節)。wgft0 を
+	// 新しい鍵へ書き換える前に落ちても、次の起動は 1 つ前の鍵で wgft0 を自分のものと判定できる。
+	// 保存に失敗したら、メモリの上の 2 つの鍵も元に戻す。戻さないと、使われていない新しい鍵が今の鍵に、
+	// 使っている鍵が 1 つ前の鍵に残り、次の rotate-key の後に落ちると、wgft0 の鍵はどちらとも一致しない
+	oldKey, oldPrev := rt.f.WGPrivateKey, rt.f.PreviousWGPrivateKey
+	rt.f.KeepPreviousKey()
 	rt.f.WGPrivateKey = key.String()
 	if err := rt.f.Save(rt.opts.CredentialsPath); err != nil {
+		rt.f.WGPrivateKey, rt.f.PreviousWGPrivateKey = oldKey, oldPrev
 		rt.mu.Unlock()
 		return wgtypes.Key{}, err
 	}
@@ -146,37 +153,81 @@ func (rt *runtime) rotateKey() (wgtypes.Key, error) {
 // RotateKey は CLI から呼ぶ。稼働中なら制御ソケット経由で、停止中なら認証情報ファイルの鍵と last_state を直接消す。
 func RotateKey(path string) (string, error) {
 	// 判定はロックファイルを作らない Inspect で行う(設計 10.2c 節)。Acquire 経由の判定は、
-	// 一度も起動していないホストで rotate-key を打っただけで、呼び出し元の権限のロックファイルを
-	// 残し、後から非特権で動くエージェントの起動を塞いだ。
-	state, err := credentials.Inspect(path)
+	// ロックファイルの無いデータディレクトリで rotate-key を打っただけで、呼び出し元の権限の
+	// ロックファイルを残し、後から非特権で動くエージェントの起動を塞いだ。
+	state, err := inspectLock(path)
 	if err != nil {
 		return "", err
 	}
 	if state == credentials.Locked {
-		c, err := net.DialTimeout("unix", ControlPath(path), 5*time.Second)
-		if err != nil {
-			return "", fmt.Errorf("agent is running but the control socket is unreachable: %w", explainControlErr(ControlPath(path), err))
+		return rotateKeyRunning(path)
+	}
+	// ロックファイルがあって誰も持っていなければ、ロックを取ってから書き換える。取らないと、判定の後に
+	// 起動したエージェントが書いた記録(カーネルモードへの切り替えの記録など)を、この書き換えが古い
+	// 内容で上書きしうる(仕様 9 節)。既にあるロックファイルを開くだけなので、持ち主は変わらない。
+	//
+	// ロックファイルが無ければ、ロックを取らずに書き換える。判定の時点でそのパスのロックを持つ
+	// エージェントはおらず、取ろうとするとロックファイルを呼び出し元の権限で作ってしまう。バックアップ
+	// からの戻しやホストの移し替えの後、運用者がロックファイルを消した後がこの場合に当たる(10.2c 節)。
+	// 判定の直後に起動したエージェントの書き込みを上書きしうる狭い隙間は許容する(仕様 9 節)
+	var lock *credentials.Lock
+	if state == credentials.Unlocked {
+		lock, err = credentials.Acquire(path)
+		if errors.Is(err, credentials.ErrLocked) {
+			// 判定の後に起動したエージェントがロックを持っている。稼働中として扱う
+			return rotateKeyRunning(path)
 		}
-		defer c.Close()
-		c.SetDeadline(time.Now().Add(30 * time.Second))
-		fmt.Fprintln(c, "rotate-key")
-		line, err := bufio.NewReader(c).ReadString('\n')
 		if err != nil {
 			return "", err
 		}
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "ok ") {
-			return "", errors.New(strings.TrimPrefix(line, "error: "))
-		}
-		return "running agent regenerated its key; public key: " + strings.TrimPrefix(line, "ok "), nil
+		defer lock.Release()
 	}
 	f, err := credentials.Load(path)
 	if err != nil {
 		return "", err
 	}
+	if rotateKeyLockedHook != nil {
+		rotateKeyLockedHook()
+	}
+	// カーネルモードでは、消す鍵を 1 つ前の鍵として残す(仕様 7b.4 節)。wgft0 はまだその鍵を持つので、
+	// 次の起動は 1 つ前の鍵で wgft0 を自分のものと判定し、新しい鍵へ書き換える
+	kernel := f.RecordedMode() == credentials.ModeKernel
+	f.KeepPreviousKey()
 	f.WGPrivateKey, f.LastState = "", nil
 	if err := f.Save(path); err != nil {
 		return "", err
 	}
-	return "agent stopped: cleared the key and last_state in the credentials file, agent.json; the next start regenerates the key and receives full state over the stream", nil
+	msg := "agent stopped: cleared the key and last_state in the credentials file, agent.json; the next start regenerates the key and receives full state over the stream"
+	if kernel {
+		msg += "; the old key is kept as the previous key, so the next start still recognises the kernel WireGuard interface that holds it and moves it to the new key"
+	}
+	return msg, nil
+}
+
+// rotateKeyLockedHook は、停止中の rotate-key が認証情報ファイルを読んだ後、書く前に呼ばれる。
+// テストだけが、この区間でロックを持っていることを確かめるために設定する。
+var rotateKeyLockedHook func()
+
+// inspectLock はロックの状態を読む。値は credentials.Inspect で、テストだけが、判定と取得の間に
+// エージェントが起動した場合を模すために差し替える。
+var inspectLock = credentials.Inspect
+
+// rotateKeyRunning は、稼働中のエージェントに制御ソケットで鍵の作り直しを指示する。
+func rotateKeyRunning(path string) (string, error) {
+	c, err := net.DialTimeout("unix", ControlPath(path), 5*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("agent is running but the control socket is unreachable: %w", explainControlErr(ControlPath(path), err))
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(30 * time.Second))
+	fmt.Fprintln(c, "rotate-key")
+	line, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "ok ") {
+		return "", errors.New(strings.TrimPrefix(line, "error: "))
+	}
+	return "running agent regenerated its key; public key: " + strings.TrimPrefix(line, "ok "), nil
 }

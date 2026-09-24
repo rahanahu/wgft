@@ -539,7 +539,9 @@ Flags:
       --join string                  join string wgft://host:port/token#sha256:..., env WGFT_JOIN
       --max-tcp-flows int            process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory (default 2048)
       --max-udp-flows int            process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory (default 8192)
+      --mode string                  forwarding mode userspace or kernel, env WGFT_MODE; unset means userspace, and kernel is Linux only
       --name string                  agent name, env WGFT_NAME; optional, the join string is already bound to a name
+      --wg-interface string          kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE; unused in userspace mode (default "wgft0")
 ```
 
 ## wgft agent warnings
