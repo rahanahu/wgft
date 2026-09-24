@@ -587,7 +587,11 @@ func agoStr(rfc3339, locale string) string {
 	if err != nil {
 		return rfc3339
 	}
-	d := time.Since(t)
+	return agoDur(time.Since(t), locale)
+}
+
+// agoDur は経過時間を「18秒前」「18s ago」の形にする。
+func agoDur(d time.Duration, locale string) string {
 	if locale == "en" {
 		switch {
 		case d < time.Minute:

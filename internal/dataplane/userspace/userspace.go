@@ -27,6 +27,7 @@ import (
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/policy/goengine"
 	"github.com/rahanahu/wgft/internal/resource"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // Options configures a Backend.
@@ -55,9 +56,26 @@ type Backend struct {
 	// Prepare, Commit and Repair.
 	pendingPeers []dataplane.Peer
 	repairPeers  bool
+
+	// replies は公開している UDP のルールごとの応答の観測の起点である(設計文書 10.2a 節「UDP の
+	// 応答の観測」)。応答の時刻そのものは relay の待ち受けが持ち、ここはルールの同一性と、観測を
+	// 始めた時刻だけを持つ。Commit が書き、管理用 API の読み取りが読むので、replyMu で守る
+	replyMu sync.Mutex
+	replies map[string]replyWatch
+	// now は時計。単体テストだけが差し替える
+	now func() time.Time
 }
 
-var _ dataplane.Backend = (*Backend)(nil)
+// replyWatch は 1 本の UDP のルールの観測の起点である。
+type replyWatch struct {
+	ident string    // dataplane.UDPReplyIdentity
+	since time.Time // 観測を始めた時刻
+}
+
+var (
+	_ dataplane.Backend          = (*Backend)(nil)
+	_ dataplane.UDPReplyObserver = (*Backend)(nil)
+)
 
 // hostNetwork opens the relay's listeners on all host IPv4 addresses (the public ports). v1 handles
 // IPv4 only (design.md 4, 7a.9 節): a dual-stack listener would let an IPv6 source past deny lists
@@ -82,6 +100,7 @@ func New(opts Options) *Backend {
 	b := &Backend{
 		logf:   logf,
 		policy: goengine.New(nil),
+		now:    time.Now,
 	}
 	b.relay = relay.New(hostNetwork{}, relay.Options{
 		UDPIdleTimeout: 120 * time.Second, // the default of conntrack's udp_timeout_stream
@@ -259,6 +278,7 @@ func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, e
 		keep[r.Previous.RuleID] = r.SourceAllowed
 	}
 	p.staged.Commit(keep)
+	b.watchReplies(p.desired.Plan.Without(failed))
 	// ピアの削除が残っていれば、ピアの集合が変わらなくても公開の後で宣言に収束させる
 	peersPending := b.repairPeers
 	b.pendingPeers, b.repairPeers = nil, false
@@ -273,6 +293,55 @@ func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, e
 		return b.policy.SourceAllowed(ruleID, src)
 	})
 	return c, nil
+}
+
+// watchReplies converges the reply observation to the UDP rules plan publishes (design.md 10.2a
+// 節「UDP の応答の観測」). A rule seen for the first time, or whose identity changed (its ID, agent,
+// target or ports), starts watching now; the replies its listeners read before that belong to
+// something else and are not reported. A rule plan no longer publishes loses its entry. It runs
+// after the relay's Commit, so a retargeted listener's old sessions are already closed.
+func (b *Backend) watchReplies(plan planner.Plan) {
+	now := b.now()
+	b.replyMu.Lock()
+	defer b.replyMu.Unlock()
+	next := map[string]replyWatch{}
+	for _, pp := range plan.Transparent() {
+		if pp.Proto != proto.UDP {
+			continue
+		}
+		id := dataplane.UDPReplyIdentity(pp)
+		if w, ok := b.replies[pp.RuleID]; ok && w.ident == id {
+			next[pp.RuleID] = w
+			continue
+		}
+		next[pp.RuleID] = replyWatch{ident: id, since: now}
+	}
+	b.replies = next
+}
+
+// UDPReplies implements dataplane.UDPReplyObserver: for each published UDP rule, when this process
+// began watching it and the last reply its listeners read from the agent since then (design.md
+// 10.2a 節「UDP の応答の観測」). The relay marks a listener's last reply at most once a second.
+func (b *Backend) UDPReplies() map[string]dataplane.UDPReply {
+	last := b.relay.LastReplies()
+	b.replyMu.Lock()
+	defer b.replyMu.Unlock()
+	return udpRepliesOf(b.replies, last)
+}
+
+// udpRepliesOf pairs each watched rule with its listeners' last reply. A reply read before the
+// watch began belongs to the rule's previous identity (a relabeled or retargeted listener keeps
+// its time) and is left out.
+func udpRepliesOf(watch map[string]replyWatch, last map[string]time.Time) map[string]dataplane.UDPReply {
+	out := make(map[string]dataplane.UDPReply, len(watch))
+	for id, w := range watch {
+		r := dataplane.UDPReply{Since: w.since}
+		if t, ok := last[id]; ok && !t.Before(w.since) {
+			r.Last = t
+		}
+		out[id] = r
+	}
+	return out
 }
 
 // drops converts the evaluator's drop counts into the dataplane's.

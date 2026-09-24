@@ -501,6 +501,7 @@ func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
 	go func() { errc <- fmt.Errorf("agent API: %w", d.agentAPI.ServeListener(agentLn)) }()
 	go d.watchIPMismatch(ctx)
 	go d.convergeLoop(ctx)
+	go d.pollUDPReplies(ctx)
 	select {
 	case <-ctx.Done():
 		if d.opts.Mode == modeUserspace {

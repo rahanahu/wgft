@@ -245,6 +245,10 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 			for _, cause := range c.Causes {
 				fmt.Fprintf(w, "%s- %s\n", strings.Repeat(" ", indent), wrapAt(cause, indent+2))
 			}
+			// UDP の宛先の応答の観測は、判定とは別の補足の 1 行である(設計文書 10.2a 節)
+			if c.ReplyLine != "" {
+				fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", indent), wrapAt(c.ReplyLine, indent))
+			}
 			if c.Next != "" && (c.Status != statusOK || verbose) {
 				fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(c.Next, indent+7))
 			}

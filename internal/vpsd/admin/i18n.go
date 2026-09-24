@@ -303,6 +303,11 @@ var tr = map[string][2]string{
 	"doctorOffPathHead":   {"経路の外の検査", "Checks off the path"},
 	"doctorAgentChecks":   {"検査と次に見るもの", "Checks and what to check next"},
 	"doctorBanner":        {"server の転送の状態が OK ではありません。すべてのルールに関わります。", "The server's own forwarding is not OK; it concerns every rule."},
+
+	// UDP の宛先の応答の観測(設計文書 10.2a 節「UDP の応答の観測」)。状態の色を持たない控えめな注記
+	"doctorUDPLastReply":   {"最後に応答を観測: %s", "last reply seen %s"},
+	"doctorUDPNoReply":     {"%sに観測を始めてから、応答を観測していません", "no reply seen since watching began %s"},
+	"doctorUDPNotObserved": {"応答を観測できません: %s", "replies are not observed: %s"},
 }
 
 // T はキーの訳を返す。未知のキーはキーそのものを返す。

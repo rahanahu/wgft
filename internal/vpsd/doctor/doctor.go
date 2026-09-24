@@ -193,6 +193,18 @@ type Check struct {
 	Next string `json:"next,omitempty"`
 	// Internal は wgft 自身を追うときだけ要る値である。人向けの出力では --verbose で出す。
 	Internal []string `json:"internal,omitempty"`
+	// LastReplyAt、ReplySince、ReplyNotObserved は、UDP のルールの rule.target だけが持つ、server
+	// 自身が見た宛先の応答の観測である(設計文書 10.2a 節「UDP の応答の観測」)。管理用 API の
+	// udp_replies の写しで、報告の無い server では省く。どれも Status、Reason、ObservedAt を
+	// 動かさない。LastReplyAt は ReplySince 以降に見た最後の応答の時刻(RFC3339)で、見ていなければ
+	// 省く。ReplySince は途切れずに観測している始まりである。ReplyNotObserved は観測できない理由で、
+	// そのときは他の 2 つを省く。
+	LastReplyAt      string `json:"last_reply_at,omitempty"`
+	ReplySince       string `json:"reply_since,omitempty"`
+	ReplyNotObserved string `json:"reply_not_observed,omitempty"`
+	// ReplyLine は上の観測を人向けの 1 行にしたもので、人向けの出力が detail の下に出す。
+	// 保証の対象ではないので JSON には載せない。
+	ReplyLine string `json:"-"`
 	// hideWhenOK と hideWhenUntested は、既定の表示から外す条件である。JSON には常に載せる。
 	// 経路の要になる検査(公開ポート、トンネル、接続、target)はどちらも立てない。
 	hideWhenOK       bool
@@ -301,7 +313,8 @@ func notTestedList(rules []proto.Rule, in Input) []NotTested {
 			"ephemeral range; see docs/setup.md."},
 		{"udp end to end", "a UDP rule cannot be tested end to end, because a UDP send cannot tell success. It is judged from " +
 			"what the agent reports about its listener alone, so while the agent reports its listener open, the target line " +
-			"reads NOT TESTED, never OK."},
+			"reads NOT TESTED, never OK. The line under it may show when this server last saw the target answer; " +
+			"that is a passive observation and does not change the status."},
 		{"mtu", "MTU and fragmentation. A tunnel that handshakes and carries small packets can still lose large datagrams, which " +
 			"reads as healthy here and as \"it works sometimes\" to the user."},
 		{"under load", "rate limits, the flow budget and the connection tracking table are read at one instant; a limit reached " +
@@ -372,7 +385,7 @@ func Diagnose(r proto.Rule, in Input) []Check {
 		rulesReceivedCheck(r, ai, in),
 		credentialsCheck(r, ai),
 		resolveCheck(r, ai, in),
-		targetCheck(r, ai, in),
+		withUDPReply(targetCheck(r, ai, in), r, in),
 		flowBudgetCheck(r, in),
 		probeCheck(r, in),
 	}

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -84,6 +85,9 @@ type doctorNodeView struct {
 	Stop string
 	// Note は UDP の宛先の節点に添える 1 文である。
 	Note string
+	// ReplyNote は UDP の宛先の節点に添える 2 つ目の控えめな 1 文で、server 自身が見た宛先の応答の
+	// 観測である(設計文書 10.2a 節「UDP の応答の観測」)。節点の状態は変えない。
+	ReplyNote string
 	// Alt は .sr-only と title に入れる文である。英語の状態の語を必ず含む。
 	Alt string
 	// AfterStop は止まった節点より後ろにあることである。線を点線にする。
@@ -222,6 +226,9 @@ func doctorNode(def doctorNodeDef, byID map[string]doctor.Check, rr doctor.RuleR
 		if id == doctor.CheckTarget && c.Status == doctor.StatusNotTested && c.Reason == doctor.ReasonUDPListenerOnly {
 			n.Note = T(locale, "doctorUDPTargetNote")
 		}
+		if id == doctor.CheckTarget {
+			n.ReplyNote = doctorReplyNote(c, now, locale)
+		}
 		if sev := doctorSeverity(c.Status); sev > worstSev {
 			worst, worstSev = c, sev
 		}
@@ -239,12 +246,30 @@ func doctorNode(def doctorNodeDef, byID map[string]doctor.Check, rr doctor.RuleR
 	if n.Note != "" {
 		alt += ". " + n.Note
 	}
+	if n.ReplyNote != "" {
+		alt += ". " + n.ReplyNote
+	}
 	// 検査が 1 つだけで見出しが節点の名前と同じなら、同じ語を繰り返さない。
 	if len(n.Labels) > 1 || n.Labels[0] != n.Name {
 		alt += ". " + strings.Join(n.checkWords, "; ")
 	}
 	n.Alt = alt
 	return n, stopped
+}
+
+// doctorReplyNote は rule.target が持つ UDP の宛先の応答の観測を、節点の 2 つ目の注記にする。
+// 観測を持たない検査(TCP のルール、観測を報告しない server)では空である。
+func doctorReplyNote(c doctor.Check, now time.Time, locale string) string {
+	if c.ReplyNotObserved != "" {
+		return fmt.Sprintf(T(locale, "doctorUDPNotObserved"), c.ReplyNotObserved)
+	}
+	if t, ok := doctor.ParseWhen(c.LastReplyAt); ok {
+		return fmt.Sprintf(T(locale, "doctorUDPLastReply"), agoDur(doctor.Since(now, t), locale))
+	}
+	if t, ok := doctor.ParseWhen(c.ReplySince); ok {
+		return fmt.Sprintf(T(locale, "doctorUDPNoReply"), agoDur(doctor.Since(now, t), locale))
+	}
+	return ""
 }
 
 // doctorSetState は検査 1 件の状態を、節点の描き方と記号と語に写す。
@@ -267,7 +292,7 @@ func doctorSetState(n *doctorNodeView, c doctor.Check) {
 // doctorUnreach は節点を「届いていない」に置き換える。why は置き換えた理由で、代替テキストには
 // 中の検査の元の状態を併せて書く。図が情報を隠さないようにするためである。
 func doctorUnreach(n *doctorNodeView, why, locale string) {
-	n.State, n.Symbol, n.Word, n.Note, n.Stop, n.Open = nodeUnreached, "", T(locale, "doctorNotReached"), "", "", false
+	n.State, n.Symbol, n.Word, n.Note, n.ReplyNote, n.Stop, n.Open = nodeUnreached, "", T(locale, "doctorNotReached"), "", "", "", false
 	n.Alt = n.Name + ": " + n.Word + ", " + why + ". " + strings.Join(n.checkWords, "; ")
 }
 

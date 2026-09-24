@@ -148,6 +148,10 @@ type listener struct {
 	// 接続ごとに呼ばれる noteTargetAllowErr が、状態が変わらないときに Manager の錠を
 	// 取らずに済ませるための印で、targetErr と合わせて setTargetErrLocked が更新する
 	allowDenied atomic.Bool
+	// lastReply は、UDP の待ち受けが宛先から最後に応答を読んだ時刻(UnixNano。0 は未観測)である。
+	// forwardReply が 1 秒に 1 回まで書く。待ち受けとともに生まれて消えるので、開き直しで捨てられる
+	// (設計文書 10.2a 節「UDP の応答の観測」)。TCP の待ち受けでは使わない
+	lastReply atomic.Int64
 }
 
 // err は報告する状態。bind 失敗が優先(リスナーがないので)。
@@ -484,6 +488,29 @@ func (m *Manager) Status() []Status {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key.String() < out[j].Key.String() })
+	return out
+}
+
+// LastReplies は、UDP の待ち受けが宛先から最後に応答を読んだ時刻を、所属ルール ID ごとの最大値で
+// 返す(設計文書 10.2a 節「UDP の応答の観測」)。範囲のルールはポートごとに待ち受けを持つので、
+// そのうち最も新しいものがルールの値になる。応答を 1 度も読んでいないルールは含まない。
+// Retiring の待ち受けは含まない。そのルールは公開していない値だからである。
+func (m *Manager) LastReplies() map[string]time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string]time.Time{}
+	for _, l := range m.listeners {
+		if l.key.Proto != proto.UDP {
+			continue
+		}
+		ns := l.lastReply.Load()
+		if ns == 0 {
+			continue
+		}
+		if t := time.Unix(0, ns); t.After(out[l.ruleID]) {
+			out[l.ruleID] = t
+		}
+	}
 	return out
 }
 

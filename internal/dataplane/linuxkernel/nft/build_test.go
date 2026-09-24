@@ -134,7 +134,7 @@ func TestEmitRows(t *testing.T) {
 	if got := rec.ops[:3]; !reflect.DeepEqual(got, []string{"AddTable", "DelTable", "AddTable"}) {
 		t.Errorf("first ops = %v, want add/delete/add", got)
 	}
-	if want := []string{"filter_pre", "nat_pre", "input", "forward", "postrouting"}; !reflect.DeepEqual(rec.chains, want) {
+	if want := []string{"filter_pre", "nat_pre", "input", "forward", "postrouting", UDPReplyChain}; !reflect.DeepEqual(rec.chains, want) {
 		t.Errorf("chains = %v, want %v", rec.chains, want)
 	}
 
@@ -167,7 +167,10 @@ func TestEmitRows(t *testing.T) {
 	if got, want := rec.comments("nat_pre"), []string{Comment("r_tcp", "dnat"), Comment("r_udp", "dnat")}; !reflect.DeepEqual(got, want) {
 		t.Errorf("nat_pre = %v, want %v", got, want)
 	}
-	for chain, n := range map[string]int{"input": 1, "forward": 5, "postrouting": 1} {
+	if got, want := rec.comments(UDPReplyChain), []string{Comment("r_udp", ReplyKind)}; !reflect.DeepEqual(got, want) {
+		t.Errorf("%s = %v, want %v", UDPReplyChain, got, want)
+	}
+	for chain, n := range map[string]int{"input": 1, "forward": 6, "postrouting": 1} {
 		if got := len(rec.rules[chain]); got != n {
 			t.Errorf("%s has %d rules, want %d", chain, got, n)
 		}
@@ -466,5 +469,137 @@ func TestFlowCapProxyOnlyWhenListening(t *testing.T) {
 		if !slices.Contains(rec.comments("filter_pre"), Comment("r_tcp", "src_flow")) {
 			t.Errorf("relayListening=%v: r_tcp lost its src_flow line", listening)
 		}
+	}
+}
+
+// UDP の応答のカウンタの行(設計文書 6.1、10.2a 節「UDP の応答の観測」)。行は有効な UDP のルールに
+// だけ 1 つずつ付き、どれも meta l4proto udp を持つ(ICMP の誤りを数えない)。forward の入口の行は、
+// wg0 から戻る DNAT 済みの UDP の応答だけを udp_reply へ送り、established,related の accept より前に
+// 置く。UDP のルールが無ければ、チェーンも入口の行も作らない。
+func TestEmitUDPReplyRows(t *testing.T) {
+	rules := []proto.Rule{
+		{ID: "r_a", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2457), Target: "192.168.1.20:2456", VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_b", Agent: "home", Proto: proto.UDP, ListenPort: pr(3000, 3000), Target: "192.168.1.20:3000", VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_off", Agent: "home", Proto: proto.UDP, ListenPort: pr(4000, 4000), Target: "192.168.1.20:4000", VPSMode: proto.ModeKernel, Enabled: false},
+		{ID: "r_tcp", Agent: "home", Proto: proto.TCP, ListenPort: pr(25565, 25565), Target: "192.168.1.22:25565", VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	rec := newRecorder()
+	if err := emit(rec, buildTestPlan(t, rules, testAgentAddr, policy.AdmissionLimits{}), nil, testCfg); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rec.comments(UDPReplyChain), []string{Comment("r_a", ReplyKind), Comment("r_b", ReplyKind)}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s rows = %v, want %v", UDPReplyChain, got, want)
+	}
+	udp := []byte{unix.IPPROTO_UDP}
+	for _, r := range rec.rules[UDPReplyChain] {
+		c, _ := userdata.GetString(r.UserData, userdata.TypeComment)
+		hasUDP, hasCounter, ret := false, false, false
+		for i, e := range r.Exprs {
+			switch v := e.(type) {
+			case *expr.Meta:
+				if v.Key == expr.MetaKeyL4PROTO && i+1 < len(r.Exprs) {
+					if cmp, ok := r.Exprs[i+1].(*expr.Cmp); ok && slices.Equal(cmp.Data, udp) {
+						hasUDP = true
+					}
+				}
+			case *expr.Ct:
+				// ct の向きの属性を持つ式は google/nftables が読み戻せないので使わない(ReadReplies と
+				// Fingerprint が GetRules で読む)
+				t.Errorf("%s reads ct key %d; the row must match the reply's source port instead", c, v.Key)
+			case *expr.Payload:
+				if v.Base != expr.PayloadBaseTransportHeader || v.Offset != 0 || v.Len != 2 {
+					t.Errorf("%s reads payload %+v, want the transport source port", c, v)
+				}
+			case *expr.Counter:
+				hasCounter = true
+			case *expr.Verdict:
+				ret = v.Kind == expr.VerdictReturn
+			}
+		}
+		if !hasUDP || !hasCounter || !ret {
+			t.Errorf("%s: meta l4proto udp %v, counter %v, return %v; want all", c, hasUDP, hasCounter, ret)
+		}
+	}
+	// r_a は範囲なので gte と lte、r_b は 1 つのポートなので eq で比べる
+	var ops []expr.CmpOp
+	for _, e := range rec.row(t, UDPReplyChain, Comment("r_a", ReplyKind)).Exprs {
+		if cmp, ok := e.(*expr.Cmp); ok && len(cmp.Data) == 2 {
+			ops = append(ops, cmp.Op)
+		}
+	}
+	if want := []expr.CmpOp{expr.CmpOpGte, expr.CmpOpLte}; !reflect.DeepEqual(ops, want) {
+		t.Errorf("r_a compares the port with %v, want %v", ops, want)
+	}
+
+	gate, accept := -1, -1
+	for i, r := range rec.rules["forward"] {
+		for _, e := range r.Exprs {
+			if v, ok := e.(*expr.Verdict); ok {
+				switch {
+				case v.Kind == expr.VerdictJump && v.Chain == UDPReplyChain:
+					gate = i
+				case v.Kind == expr.VerdictAccept && hasCtState(r):
+					accept = i
+				}
+			}
+		}
+	}
+	if gate < 0 || accept < 0 || gate > accept {
+		t.Fatalf("forward: jump to %s at %d, established accept at %d; want the jump first", UDPReplyChain, gate, accept)
+	}
+	g := rec.rules["forward"][gate]
+	dirReply, gateUDP := false, false
+	for i, e := range g.Exprs {
+		next := func() *expr.Cmp {
+			if i+1 < len(g.Exprs) {
+				c, _ := g.Exprs[i+1].(*expr.Cmp)
+				return c
+			}
+			return nil
+		}
+		switch v := e.(type) {
+		case *expr.Ct:
+			if c := next(); v.Key == expr.CtKeyDIRECTION && c != nil && slices.Equal(c.Data, []byte{ipCtDirReply}) {
+				dirReply = true
+			}
+		case *expr.Meta:
+			if c := next(); v.Key == expr.MetaKeyL4PROTO && c != nil && slices.Equal(c.Data, udp) {
+				gateUDP = true
+			}
+		}
+	}
+	if !dirReply || !gateUDP {
+		t.Errorf("forward jump row: ct direction reply %v, meta l4proto udp %v; want both", dirReply, gateUDP)
+	}
+
+	// UDP のルールが無ければ、チェーンも入口の行も無い
+	rec = newRecorder()
+	if err := emit(rec, buildTestPlan(t, rules[3:], testAgentAddr, policy.AdmissionLimits{}), nil, testCfg); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(rec.chains, UDPReplyChain) || len(rec.rules["forward"]) != 5 {
+		t.Errorf("without UDP rules: chains %v, %d forward rows; want no %s and 5 rows", rec.chains, len(rec.rules["forward"]), UDPReplyChain)
+	}
+}
+
+// hasCtState は行が ct state を読むかどうか(forward の established,related の accept の行を見分ける)。
+func hasCtState(r *nftables.Rule) bool {
+	for _, e := range r.Exprs {
+		if ct, ok := e.(*expr.Ct); ok && ct.Key == expr.CtKeySTATE {
+			return true
+		}
+	}
+	return false
+}
+
+// ReadReplies が読む値の取り出しは、reply の行だけを数え、drop の種類の行を拾わない。
+func TestRepliesOf(t *testing.T) {
+	row := func(comment string, pkts uint64) *nftables.Rule {
+		return &nftables.Rule{UserData: userdata.AppendString(nil, userdata.TypeComment, comment),
+			Exprs: []expr.Any{&expr.Counter{Packets: pkts, Bytes: pkts * 100}}}
+	}
+	got := repliesOf([]*nftables.Rule{row(Comment("r_a", ReplyKind), 7), row(Comment("r_b", ReplyKind), 0), row(Comment("r_a", "deny"), 99), {}})
+	if want := map[string]uint64{"r_a": 7, "r_b": 0}; !reflect.DeepEqual(got, want) {
+		t.Errorf("repliesOf = %v, want %v", got, want)
 	}
 }

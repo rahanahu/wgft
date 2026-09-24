@@ -95,6 +95,10 @@ type BatchResponse struct {
 	// AgentRuleStates is each rule's agent-side status (design.md 5.2、7a.11 節). v1 への加算で、
 	// 報告を持たない Backend では省く(admin の withAgentRuleStatus)。
 	AgentRuleStates map[string]AgentRuleStatus `json:"agent_rule_states,omitempty"`
+	// UDPReplies is what this server has seen of each UDP rule's replies (design.md 10.2a 節「UDP の
+	// 応答の観測」、7a.11 節). v1 への加算で、報告を持たない Backend では省く(admin の
+	// withUDPReplies)。キーは、server が今公開している有効な UDP のルールの ID だけである。
+	UDPReplies map[string]UDPReply `json:"udp_replies,omitempty"`
 }
 
 // Apply states of a rule on the server (RuleApply.ApplyState).
@@ -186,4 +190,22 @@ type AgentRuleStatus struct {
 	//     and may still get to it; Connected false means it is offline (or has never connected at
 	//     all, e.g. a revoked agent's name, or one never registered) and nothing will arrive soon.
 	Connected bool `json:"connected"`
+}
+
+// UDPReply is what the server itself has seen of one UDP rule's replies: the datagrams the rule's
+// target sent back through the tunnel to this server (design.md 10.2a 節「UDP の応答の観測」). It is
+// kept in memory only, so a restarted server starts watching over. It is an observation, not a
+// verdict: no reply seen is not a failure, since an idle rule and a silent service look the same.
+type UDPReply struct {
+	// Since is when the server began watching this rule without a gap (RFC3339): its start, the
+	// publication after the rule's ID, agent, target or ports changed, or the first reading after
+	// the watch was interrupted. Omitted when NotObserved is set.
+	Since string `json:"since,omitempty"`
+	// LastReplyAt is the last reply seen since Since (RFC3339). Omitted when none was seen. In
+	// kernel mode it is the time of the counter reading that saw the reply, up to about 10 seconds
+	// after it.
+	LastReplyAt string `json:"last_reply_at,omitempty"`
+	// NotObserved is set, with the reason, when the server cannot observe the rule's replies now
+	// (it could not read its reply counters, for example). It is not "no reply".
+	NotObserved string `json:"not_observed,omitempty"`
 }

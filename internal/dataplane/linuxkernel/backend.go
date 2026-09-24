@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -55,6 +56,7 @@ type kernelOps interface {
 	peers(iface string) ([]dataplane.Peer, error)
 	stage(plan planner.Plan, relayListening map[uint16]bool, cfg nft.Config) (flusher, error)
 	readDrops() ([]nft.Drop, error)
+	readReplies() (map[string]uint64, error)
 	converge(rules []conntrack.Rule, wgNet netip.Prefix) (int, error)
 	// inspect and fingerprint read the wg interface and table inet wgft back without changing
 	// them (Observe after the first Commit).
@@ -90,7 +92,8 @@ func (realOps) peers(iface string) ([]dataplane.Peer, error) {
 func (realOps) stage(plan planner.Plan, relayListening map[uint16]bool, cfg nft.Config) (flusher, error) {
 	return nft.Stage(plan, relayListening, cfg)
 }
-func (realOps) readDrops() ([]nft.Drop, error) { return nft.ReadDrops() }
+func (realOps) readDrops() ([]nft.Drop, error)          { return nft.ReadDrops() }
+func (realOps) readReplies() (map[string]uint64, error) { return nft.ReadReplies() }
 func (realOps) converge(rules []conntrack.Rule, wgNet netip.Prefix) (int, error) {
 	return conntrack.Converge(rules, wgNet)
 }
@@ -115,6 +118,25 @@ type Backend struct {
 	// pending holds the repairs the last Commit or Repair left failed (design.md 7a.3 節: 戻れない
 	// 地点の後の修復). A new Commit reruns every step, so it starts over.
 	pending repairs
+
+	// replies is the reply observation of each UDP rule of the published table, and replyErr a
+	// failure to read its counters (design.md 10.2a 節「UDP の応答の観測」, replies.go). Unlike the
+	// rest of the Backend they are also used outside the Reconciler (PollUDPReplies and the admin
+	// API), so replyMu guards them; Commit holds it from the reading before the replacement to the
+	// reading after it, so a poll never reads in between.
+	replyMu  sync.Mutex
+	replies  map[string]*replyWatch
+	replyErr error
+	// now is the clock; nil means time.Now. Only unit tests set it.
+	now func() time.Time
+}
+
+// clock reads b.now.
+func (b *Backend) clock() time.Time {
+	if b.now == nil {
+		return time.Now()
+	}
+	return b.now()
 }
 
 // committed is what one successful Commit left in the kernel.
@@ -135,7 +157,10 @@ type repairs struct {
 	rules    []conntrack.Rule
 }
 
-var _ dataplane.Backend = (*Backend)(nil)
+var (
+	_ dataplane.Backend          = (*Backend)(nil)
+	_ dataplane.UDPReplyObserver = (*Backend)(nil)
+)
 
 // New builds a Backend that converges opts.Interface.
 func New(opts Options) *Backend {
@@ -344,9 +369,21 @@ func (p *prepared) Failed() map[string]error { return nil }
 func (p *prepared) Commit(retiring []dataplane.Retiring) (dataplane.Committed, error) {
 	b, d := p.b, p.desired
 	drops, dropsErr := b.ops.readDrops()
+	// UDP の応答のカウンタも差し替えで 0 に戻るので、drop のカウンタと同じく直前に読む。差し替えの
+	// 直後にもう一度読み、新しいテーブルの値を基準にする(設計文書 10.2a 節「UDP の応答の観測」)
+	b.replyMu.Lock()
+	b.readRepliesLocked(b.clock())
 	if err := p.staged.Flush(); err != nil {
+		// 差し替わったかどうかが分からない(6.1 節の受信側の壁)ので、どのルールも始め直す
+		for _, w := range b.replies {
+			w.restart()
+		}
+		b.replyMu.Unlock()
 		return dataplane.Committed{}, err
 	}
+	b.syncRepliesLocked(d.Plan)
+	b.readRepliesLocked(b.clock())
+	b.replyMu.Unlock()
 	p.done = true
 	c := dataplane.Committed{WGChanges: p.wgChanges}
 	if dropsErr != nil {
