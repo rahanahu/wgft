@@ -234,8 +234,7 @@ func TestRetryHoldDoesNotAdviseARuleChangeWhenTheDatabaseCannotBeRead(t *testing
 // path, and TestServeHoldsTheStartupUntilTheRulesApply is where it is checked.
 func TestServeStartsWithoutAHoldWhenTheFirstApplyWorks(t *testing.T) {
 	st := openTestStore(t)
-	addrs := freeAddrs(t, 2)
-	adminAddr, agentAddr := addrs[0], addrs[1]
+	adminAddr, agentAddr := freeAPIAddrs(t)
 	d := newHoldDaemon(t, st, newHoldParticipant(nil), adminAddr, agentAddr)
 
 	buf := newSyncBuffer(t)
@@ -286,8 +285,7 @@ func TestServeHoldsTheStartupUntilTheRulesApply(t *testing.T) {
 	addRule(t, st, "r_big")
 	addRule(t, st, "r_small")
 
-	addrs := freeAddrs(t, 2)
-	adminAddr, agentAddr := addrs[0], addrs[1]
+	adminAddr, agentAddr := freeAPIAddrs(t)
 	p := newHoldParticipant(errors.New("no buffer space available"))
 	d := newHoldDaemon(t, st, p, adminAddr, agentAddr)
 
@@ -403,9 +401,8 @@ func TestServeHoldsTheStartupUntilTheRulesApply(t *testing.T) {
 func TestServeDoesNotHoldOnAStartupRefusal(t *testing.T) {
 	st := openTestStore(t)
 	refusal := startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN")
-	addrs := freeAddrs(t, 2)
-	adminAddr := addrs[0]
-	d := newHoldDaemon(t, st, newHoldParticipant(refusal), adminAddr, addrs[1])
+	adminAddr, agentAddr := freeAPIAddrs(t)
+	d := newHoldDaemon(t, st, newHoldParticipant(refusal), adminAddr, agentAddr)
 
 	buf := newSyncBuffer(t)
 	// A deadline so that a refusal which is held by mistake ends the test with the assertion below
@@ -429,8 +426,8 @@ func TestServeDoesNotHoldOnAStartupRefusal(t *testing.T) {
 // so cmd/wgft exits 0, and the server started line is never printed.
 func TestServeShutsDownDuringTheStartupHold(t *testing.T) {
 	st := openTestStore(t)
-	shutAddrs := freeAddrs(t, 2)
-	d := newHoldDaemon(t, st, newHoldParticipant(errors.New("no buffer space available")), shutAddrs[0], shutAddrs[1])
+	adminAddr, agentAddr := freeAPIAddrs(t)
+	d := newHoldDaemon(t, st, newHoldParticipant(errors.New("no buffer space available")), adminAddr, agentAddr)
 
 	buf := newSyncBuffer(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -567,26 +564,31 @@ func testKey(t *testing.T) wgtypes.Key {
 	return k
 }
 
-// freeAddrs returns n distinct loopback host:port addresses nothing is listening on, so that the
-// test can tell a listener that is open from one that is not. All the reservations are held open
-// until the last one is made: a closed listening socket has no TIME_WAIT, so reserving one port at
-// a time can hand out the same port twice, and two APIs of one test would then share an address.
-func freeAddrs(t *testing.T, n int) []string {
+// freeAPIAddrs returns a loopback host:port for the admin API and one for the agent API that
+// nothing is listening on, so that the test can tell a listener that is open from one that is not.
+//
+// Each number is found by binding port 0 and closing the socket, and serve binds it again later.
+// The agent API binds last, after the test has already dialled: requests to the admin API, whose
+// idle connection stays open, and probes of the agent API while nothing listens there yet. Each of
+// those dials takes an ephemeral source port on 127.0.0.1, and it could be the number meant for
+// the agent API: the admin client's idle connection held it, or a probe connected to itself and
+// left the number in TIME_WAIT. The agent API then failed to bind with "address already in use".
+// The agent API's address is therefore on 127.0.0.2. A dial to it still leaves from 127.0.0.1, so
+// the test's own sockets can no longer hold that address. The admin API stays on 127.0.0.1, which
+// its Host check accepts, and binds before the test dials anything.
+func freeAPIAddrs(t *testing.T) (admin, agent string) {
 	t.Helper()
-	lns := make([]net.Listener, 0, n)
-	addrs := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		lns = append(lns, ln)
-		addrs = append(addrs, ln.Addr().String())
+	return freeAddr(t, "127.0.0.1"), freeAddr(t, "127.0.0.2")
+}
+
+func freeAddr(t *testing.T, host string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, ln := range lns {
-		ln.Close()
-	}
-	return addrs
+	defer ln.Close()
+	return ln.Addr().String()
 }
 
 // agentAPIAnswers reports whether the agent API itself is listening at addr, by completing a TLS
