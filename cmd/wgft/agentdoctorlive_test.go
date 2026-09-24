@@ -185,6 +185,43 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			},
 		},
 		{
+			// server がこのエージェントを無効にしている実行で、中継は生きている場合。無効な
+			// ルールは宣言に現れずリスナーを 1 つも開かないので、relay.listeners は SKIPPED とし、
+			// 中継が無い場合と区別する(仕様 5.1 節、設計文書 10.2c 節の relay.listeners の粒度)。
+			// SKIPPED は総合判定と終了コードを動かさない。
+			name: "the server has disabled this agent while the relay is up",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+				st.AgentDisabled = true
+				st.Rules = nil
+			}))),
+			want: []wantCheck{
+				{agentCheckListeners, statusSkipped, agentReasonAgentDisabled},
+				{agentCheckTunnelLocal, statusOK, ""},
+			},
+			wantExit: 0,
+			wantDetail: map[string]string{
+				agentCheckListeners: "the server has disabled this agent; it opens no listeners until wgft agent enable home is run on the VPS",
+			},
+		},
+		{
+			// 同じ無効の実行だが、中継そのものも無い場合。agentListenersCheck は st.AgentDisabled を
+			// agentNoRelay より先に見るので、理由の符号は agent_disabled のままであり、no_relay には
+			// ならない。この判定の順序を入れ替えても両方とも SKIPPED になり状態だけでは区別が付かない
+			// ので、理由の符号で固定する。
+			name: "the server has disabled this agent while there is no relay",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+				st.AgentDisabled = true
+				st.Rules, st.Budgets = nil, nil
+			}))),
+			want: []wantCheck{
+				{agentCheckListeners, statusSkipped, agentReasonAgentDisabled},
+			},
+			wantExit: 0,
+			wantDetail: map[string]string{
+				agentCheckListeners: "the server has disabled this agent; it opens no listeners until wgft agent enable home is run on the VPS",
+			},
+		},
+		{
 			// ハンドシェイクがまだ成立していない実行。トンネルを作り直した直後に必ず通る状態で
 			// あり、UNKNOWN とする。総合判定は動かさない(10.2c 節)。
 			name: "no handshake has been established yet",

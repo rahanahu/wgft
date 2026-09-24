@@ -403,7 +403,7 @@ func agentDiagnose(in agentDoctorInput) agentDoctorReport {
 		agentLastStateCheck(in, cred),
 		agentWGResolveCheck(in, cred),
 	}
-	checks = append(checks, agentLiveChecks(in, run, live)...)
+	checks = append(checks, agentLiveChecks(in, run, live, agentDisplayName(cred))...)
 	sort.SliceStable(checks, func(i, j int) bool {
 		return agentCheckIndex(checks[i].ID) < agentCheckIndex(checks[j].ID)
 	})
@@ -862,7 +862,22 @@ func agentLastStateCheck(in agentDoctorInput, cred agentCredentialsFile) agentDo
 	if ls.WG.MTU > 0 {
 		c.Detail += fmt.Sprintf(", mtu %d", ls.WG.MTU)
 	}
+	if ls.AgentDisabled {
+		// 無効かどうかは relay.listeners が SKIPPED として判定する。ここでは事実を述べるだけで、
+		// 状態は変えない(設計文書 10.2c 節)。稼働中でも停止中でも同じ agent.json の LastState
+		// から読むので、所見は両方の実行で同じになる。
+		c.Detail += "; the server has disabled this agent"
+	}
 	return c
+}
+
+// agentDisplayName は、稼働中のエージェントの検査の所見に名指す登録名である。認証情報ファイルに
+// 登録済みの名前を使う。稼働するには登録が要るので、稼働中の実行でこれが空になることは想定しない。
+func agentDisplayName(cred agentCredentialsFile) string {
+	if cred.Creds != nil {
+		return cred.Creds.Name
+	}
+	return ""
 }
 
 // --- Tunnel 群 ---

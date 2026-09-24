@@ -366,7 +366,10 @@ Being stopped is a failure here: a stopped agent forwards nothing, so "process"
 reads FAILED. Four items decide the verdict: credentials, process, tunnel and
 listeners. The rest are printed and never raise the exit code, because they
 state a value rather than whether this host can forward. Name resolution is one
-of them: an address resolved earlier can still carry traffic.
+of them: an address resolved earlier can still carry traffic. When the server
+has disabled this agent, listeners reads SKIPPED by design instead of counting
+against the verdict: a disabled agent opens no listeners until wgft agent
+enable <name> is run on the VPS.
 
 Every run ends with what it did NOT test, and with the fact that it keeps no
 history: it evaluates the current state only.

@@ -2714,6 +2714,42 @@ print('agents %d/%d/%d disabled=%d total=%d rules %d/%d/%d agent_disabled=%d tot
   eqcheck "status --json exits 0 while home is disabled" 0 "$rcode"
   strcheck "status --json counts" "agents 1/0/0 disabled=1 total=2 rules 1/0/0 agent_disabled=3 total=4 sums=True" "$(status_json_counts)"
 
+  echo "-- wgft agent doctor on home itself while it is disabled (design 10.2c)"
+  # agent_doctor_json_of: the top status and relay.listeners's own status/reason from agent
+  # doctor --json, run on the agent's own host (the home namespace) against its data dir.
+  agent_doctor_json_of() {
+    ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" --json 2>/dev/null | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+by = {c['id']: c for c in d['checks']}
+c = by.get('relay.listeners', {})
+last = by.get('agent.last_state', {})
+print('%s %s/%s last=%s' % (d['status'], c.get('status', ''), c.get('reason', ''), last.get('status', '')))
+"
+  }
+  # agent_doctor_check_detail <id>: that check's own detail text from agent doctor --json, read
+  # whole (not word-wrapped the way the plain-text report breaks a long detail across lines at
+  # labelWidth, which would otherwise split "wgft agent enable home" mid-phrase).
+  agent_doctor_check_detail() {
+    ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" --json 2>/dev/null | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+by = {c['id']: c for c in d['checks']}
+print(by.get('$1', {}).get('detail', ''))
+"
+  }
+  out=$(ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" 2>&1); rcode=$?
+  eqcheck "agent doctor on the disabled home exits 0" 0 "$rcode"
+  absent "agent doctor on the disabled home has no FAILED check" "FAILED" "$out"
+  strcheck "agent doctor --json on the disabled home" "ok skipped/agent_disabled last=ok" "$(agent_doctor_json_of)"
+  check "agent doctor's relay.listeners (--json) names the undo command" "wgft agent enable home is run on the VPS" "$(agent_doctor_check_detail relay.listeners)"
+  check "agent doctor's relay.listeners (--json) says the server disabled it" "the server has disabled this agent" "$(agent_doctor_check_detail relay.listeners)"
+  check "agent doctor's agent.last_state (--json) also says the server disabled it" "the server has disabled this agent" "$(agent_doctor_check_detail agent.last_state)"
+  # The plain-text report word-wraps a long detail at labelWidth, which can split this phrase
+  # across lines (design 10.2c's "出力の形"); collapse whitespace before matching so the plain
+  # output is checked too, not just --json.
+  check "agent doctor's plain-text output names the undo command despite wrapping" "wgft agent enable home is run on the VPS" "$(echo "$out" | tr -s '[:space:]' ' ')"
+
   echo "-- a rule added while home is disabled is saved but does not forward"
   local rd; rd=$(vps wgft rule add --agent home --tcp 39973 --to 192.168.50.3:25570 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   okcheck "the new rule D is saved" "$([ -n "$rd" ] && echo 1 || echo 0)"
@@ -2767,6 +2803,15 @@ print('agents %d/%d/%d disabled=%d total=%d rules %d/%d/%d agent_disabled=%d tot
   must_wait "check11: C forwards again" 15 udp_probe_ok 27002
   must_wait "check11: P forwards again" 15 tcp_probe_ok 39972
   must_wait "check11: D, added while disabled, forwards" 15 tcp_probe_ok 39973
+
+  echo "-- wgft agent doctor on home itself after the enable (design 10.2c)"
+  out=$(ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" 2>&1); rcode=$?
+  eqcheck "agent doctor on the re-enabled home exits 0" 0 "$rcode"
+  strcheck "agent doctor --json on the re-enabled home clears the disabled status" "ok ok/ last=ok" "$(agent_doctor_json_of)"
+  local raw; raw=$(ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" --json 2>/dev/null)
+  absent "agent doctor --json on the re-enabled home carries no agent_disabled reason" "agent_disabled" "$raw"
+  absent "agent doctor's agent.last_state no longer mentions the disable" "the server has disabled this agent" "$(agent_doctor_check_detail agent.last_state)"
+
   check "O keeps forwarding" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39971')"
   okcheck "B stays off by its own setting" "$(udp_probe_ok 27000 && echo 0 || echo 1)"
   strcheck "home is enabled" "False" "$(agent_json home disabled)"
