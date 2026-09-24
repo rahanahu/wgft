@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http/httptest"
 	"net/netip"
@@ -271,4 +272,54 @@ func firstRuleID(t *testing.T, adminURL string) string {
 		t.Fatal("no rules")
 	}
 	return res.Rules[0].ID
+}
+
+// TestRuleImportSummaryPluralizes confirms `rule import`'s summary line ("replaced with N
+// rules") agrees in number with the actual count, including the singular "1 rule" case
+// (previously always said "rules", even for exactly one).
+func TestRuleImportSummaryPluralizes(t *testing.T) {
+	cases := []struct {
+		name  string
+		rules []proto.Rule
+		want  string
+	}{
+		{
+			name: "one rule",
+			rules: []proto.Rule{
+				{Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, Target: "192.168.1.20:25565",
+					VPSMode: proto.ModeKernel, Enabled: true, SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{}},
+			},
+			want: "replaced with 1 rule at generation",
+		},
+		{
+			name: "two rules",
+			rules: []proto.Rule{
+				{Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 25565, Hi: 25565}, Target: "192.168.1.20:25565",
+					VPSMode: proto.ModeKernel, Enabled: true, SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{}},
+				{Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 2456, Hi: 2456}, Target: "192.168.1.20:2456",
+					VPSMode: proto.ModeKernel, Enabled: true, SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{}},
+			},
+			want: "replaced with 2 rules at generation",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			adminURL, _ := newRuleCLITestServer(t)
+			b, err := json.Marshal(tc.rules)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "rules.json")
+			if err := os.WriteFile(path, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdout, _, err := runRuleCmd(t, adminURL, "import", path)
+			if err != nil {
+				t.Fatalf("rule import: %v", err)
+			}
+			if !strings.Contains(stdout, tc.want) {
+				t.Errorf("stdout = %q, want it to hold %q", stdout, tc.want)
+			}
+		})
+	}
 }
