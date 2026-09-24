@@ -611,12 +611,18 @@ func targetCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 			c.Next = "re-run this command; if the report stays old, read the control connection line above and the agent's log"
 			return c
 		}
-		c.Status = StatusOK
-		if r.Proto == proto.TCP {
-			c.Detail = "the agent reached " + r.TargetDisplay() + ", last check " + reportAge.String() + " ago, repeated every 30s"
-		} else {
-			c.Detail = "the agent has its listener open, last report " + reportAge.String() + " ago; for UDP that is all it can tell, since a send cannot prove the target answers"
+		if r.Proto != proto.TCP {
+			// UDP のルールの ok は、エージェントがリスナーを開けたことしか意味しない(設計文書
+			// 5.2 節)。宛先がデータグラムを受け取ったことも応えたことも示さないので、OK の定義
+			// (実際に成功を観測した)に当たらない。報告そのものは新しいので、観測の時刻は残す
+			// (設計文書 10.2a 節、2026-09-24 の改訂の記録)。
+			c.Status, c.Reason = StatusNotTested, ReasonUDPListenerOnly
+			c.Detail = "not tested: the agent has its listener open, last report " + reportAge.String() + " ago, but a UDP send cannot tell whether the target received it or answered"
+			c.Next = "confirm the service from a real client"
+			return c
 		}
+		c.Status = StatusOK
+		c.Detail = "the agent reached " + r.TargetDisplay() + ", last check " + reportAge.String() + " ago, repeated every 30s"
 		return c
 	case proto.StatusError:
 		if !fresh {

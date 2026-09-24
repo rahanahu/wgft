@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -129,5 +131,79 @@ func TestServerDoctorRunEProbeNeedsARule(t *testing.T) {
 	_, err = runServerDoctorCmd(t, srv.URL, "--from", "not-an-address")
 	if err == nil || exitCode(err) != 2 {
 		t.Errorf("an unreadable --from must exit 2, got %v", err)
+	}
+}
+
+// TestServerDoctorRunEHealthyUDPRule は、健全な UDP のルールの `rule.target` が、人向けの出力でも
+// `--json` でも NOT TESTED(`not_tested`、理由 `udp_listener_only`)になり、それでもルールの
+// 総合判定は ok で終了コードは 0 のままであることを、RunE の経路で確かめる(設計文書 10.2a 節、
+// 2026-09-24 の改訂の記録)。以前は `rule.target` が `ok` を返していた。エージェントの報告は
+// リスナーを開けたことしか示さないので、OK の定義に当たらない。
+func TestServerDoctorRunEHealthyUDPRule(t *testing.T) {
+	b := doctorRuneBackend()
+	const udpID = "r_01J0000000000000000000BBB"
+	b.agentRuleStates[udpID] = admin.AgentRuleStatus{Agent: "home", State: proto.StatusOK, Connected: true, At: sinceNow(10 * time.Second)}
+	srv := httptest.NewServer(admin.New(b))
+	defer srv.Close()
+
+	out, err := runServerDoctorCmd(t, srv.URL, udpID)
+	if err != nil {
+		t.Errorf("a healthy UDP rule must exit 0, got %v (exit code %d)", err, exitCode(err))
+	}
+	if !regexp.MustCompile(`(?m)^  target +NOT TESTED`).MatchString(out) {
+		t.Errorf("a healthy UDP rule's target line must read NOT TESTED:\n%s", out)
+	}
+	if regexp.MustCompile(`(?m)^  target +OK`).MatchString(out) {
+		t.Errorf("a healthy UDP rule's target line must not read OK:\n%s", out)
+	}
+	if !strings.Contains(out, "Result: healthy as far as this command can see") {
+		t.Errorf("NOT TESTED alone must leave the rule's result healthy:\n%s", out)
+	}
+
+	// 引数の無い実行も、全ルールが健全なので終了コード 0 のままである。
+	if _, err := runServerDoctorCmd(t, srv.URL); err != nil {
+		t.Errorf("the survey of healthy TCP and UDP rules must exit 0, got %v", err)
+	}
+
+	out, err = runServerDoctorCmd(t, srv.URL, udpID, "--json")
+	if err != nil {
+		t.Errorf("--json must not change the exit code of a healthy UDP rule, got %v", err)
+	}
+	var rep struct {
+		Status string `json:"status"`
+		Checks []struct {
+			ID         string `json:"id"`
+			Status     string `json:"status"`
+			Reason     string `json:"reason"`
+			ObservedAt string `json:"observed_at"`
+		} `json:"checks"`
+		Rules []struct {
+			Status string `json:"status"`
+		} `json:"rules"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("--json did not parse: %v\n%s", err, out)
+	}
+	if rep.Status != statusOK {
+		t.Errorf("status = %q, want %q", rep.Status, statusOK)
+	}
+	found := false
+	for _, c := range rep.Checks {
+		if c.ID != checkTarget {
+			continue
+		}
+		found = true
+		if c.Status != statusNotTested || c.Reason != "udp_listener_only" {
+			t.Errorf("rule.target = %q/%q, want %q/%q", c.Status, c.Reason, statusNotTested, "udp_listener_only")
+		}
+		if c.ObservedAt == "" {
+			t.Error("rule.target must keep the time of the agent's report as observed_at")
+		}
+	}
+	if !found {
+		t.Errorf("--json has no rule.target check:\n%s", out)
+	}
+	if len(rep.Rules) != 1 || rep.Rules[0].Status != statusOK {
+		t.Errorf("rules = %+v, want one rule with status %q", rep.Rules, statusOK)
 	}
 }

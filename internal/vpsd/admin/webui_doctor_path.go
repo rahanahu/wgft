@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
-	"github.com/rahanahu/wgft/proto"
 )
 
 // このファイルは診断の画面の経路の図(設計文書 10.2d 節)を組み立てる。判定は作らない。
@@ -20,10 +19,13 @@ import (
 //     「届いていない」として描く。元の状態は代替テキストと検査の一覧に残す。
 //  3. 無効なルールは、すべての節点を「届いていない」として描く。
 //
-// 表示のためだけの読み替えが 2 つある。`rule.probe` の not_tested(疎通の確認を試していない)は
+// 表示のためだけの読み替えは 1 つだけある。`rule.probe` の not_tested(疎通の確認を試していない)は
 // 節点に数えない。数えると、probe を押していない TCP のルールの宛先が常に ◌ になるためである。
-// UDP のルールの `rule.target` の ok は、節点では not_tested として数える。UDP の ok はエージェ
-// ントがリスナーを開けたことしか意味せず、宛先が応えることは確かめていないためである。
+//
+// UDP のルールの `rule.target` は、判定そのものが not_tested(理由 udp_listener_only)なので、
+// 読み替えずにそのまま数え、節点に「リスナーは開いているが宛先は試していない」旨の 1 文を添える。
+// 2026-09-24 までは判定が ok を返し、この図だけが not_tested に読み替えていた(設計文書 10.2a 節、
+// 同日の改訂の記録)。
 
 // doctorNodeDef は経路の節点 1 つと、そこに入る検査の ID である。節点の名前は検査の見出しと
 // 同じく英語のままにし、訳さない(10.2d 節)。並びは doctor の checkOrder と同じ向きで、
@@ -217,8 +219,7 @@ func doctorNode(def doctorNodeDef, byID map[string]doctor.Check, rr doctor.RuleR
 		if id == doctor.CheckProbe && c.Status == doctor.StatusNotTested {
 			continue
 		}
-		if id == doctor.CheckTarget && c.Status == doctor.StatusOK && rr.Proto == string(proto.UDP) {
-			c.Status, c.Reason = doctor.StatusNotTested, ""
+		if id == doctor.CheckTarget && c.Status == doctor.StatusNotTested && c.Reason == doctor.ReasonUDPListenerOnly {
 			n.Note = T(locale, "doctorUDPTargetNote")
 		}
 		if sev := doctorSeverity(c.Status); sev > worstSev {
