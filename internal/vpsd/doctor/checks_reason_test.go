@@ -14,13 +14,15 @@ import "testing"
 // 失敗はその Err に Go の net.OpError がそのまま乗り、internal/nettun/listen.go の ListenTCP と
 // gonet.DialUDP(UDP のリスナーが経由する。同ファイル ListenUDP)のどちらも Op を "listen" では
 // なく "bind" にするため、"bind tcp <addr>: <err>" / "bind udp <addr>: <err>" の形になる
-// (net.Listen の "listen ...: bind: ..." とは組み立てが違う)。"<Key>: <Err>" の組み立てと、
-// bind ではなく dial・connect の失敗でこの形になることは、ラボで実際に起こした dial の失敗
-// ("tcp/9000: dial tcp 192.168.50.3:25580: connect: connection refused")で確かめた。bind の
-// 失敗そのもの、つまりこの経路に利用者の操作から実際に至る道筋は、2 本のルールに同じ待ち受け
-// ポートを与える経路(server が rule add 自体を拒む)と、同じポートでルールを削除して即座に
-// 追加し直す経路(80 回試して 1 度も失敗しなかった)の 2 つをラボで試し、どちらも再現しなかった
-// (設計文書 10.2a 節の改訂の記録に記載の、以前からの未確認と同じ)。
+// (net.Listen の "listen ...: bind: ..." とは組み立てが違う)。この形は、試験用の実機(#211 より
+// 前の版のエージェント)で実際に観測されている。"port is in use" の行はその観測に基づく。
+// "<Key>: <Err>" の組み立てと、bind ではなく dial・connect の失敗でもこの形になることは、ラボで
+// 実際に起こした dial の失敗("tcp/9000: dial tcp 192.168.50.3:25580: connect: connection
+// refused")で確かめた。#211 で直した今の版のエージェントで、bind の失敗そのもの、つまりこの
+// 経路に利用者の操作から実際に至る道筋は、2 本のルールに同じ待ち受けポートを与える経路(server
+// が rule add 自体を拒む)と、同じポートでルールを削除して即座に追加し直す経路(繰り返した回数は
+// PR の本文に書く)の 2 つをラボで試し、どちらも再現しなかった(設計文書 10.2a 節の改訂の記録に
+// 記載の、以前からの未確認と同じ)。
 func TestTargetReasonCode(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -60,6 +62,14 @@ func TestTargetReasonCode(t *testing.T) {
 		{
 			name:   "agent's userspace relay UDP listener bind, real net.OpError wording",
 			reason: "udp/8462: bind udp 10.200.0.2:8462: port is in use",
+			want:   ReasonListenerBindFailed,
+		},
+		{
+			// 実機(#211 より前の版のエージェント。stream が切れた後もリレーのポートを空けず、
+			// ルールの無効化と直後の有効化などでしばらく in use のままだった)で実際に観測した
+			// 文言そのもの。上の 2 つの case が確かめる net.OpError の組み立てと同じ形である。
+			name:   "field observation, pre-#211 agent leaving a relay port bound after a cut session",
+			reason: "listener tcp/40000: bind tcp 10.200.0.2:40000: port is in use",
 			want:   ReasonListenerBindFailed,
 		},
 		{

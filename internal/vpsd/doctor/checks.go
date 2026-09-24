@@ -720,10 +720,12 @@ func targetReasonCode(reason string) string {
 // モードの中継(internal/dataplane/userspace/relay)が実際に組み立てる形である。エージェントの
 // 中継は gVisor の netstack(internal/nettun/listen.go の ListenTCP、UDP のリスナーが経由する
 // gonet.DialUDP)の上で待ち受けを開き、その bind の失敗は Go の net.OpError をそのまま経由するが、
-// Op が "listen" ではなく "bind" になる("bind tcp 10.200.0.2:8080: port is in use" の形。
+// Op が "listen" ではなく "bind" になる("bind tcp <トンネルのアドレス>: port is in use" の形。
 // net.Listen の "listen ...: bind: ..." とは組み立てが違うので、以前の判定には当たらなかった)。
-// この形はソースコードから読み取った実際の組み立てで、意味の分からない target_error に落ちて
-// いた。利用者の操作からこの bind の失敗そのものに至る経路は、ラボで 2 通り試したがまだ再現
+// この形は、ソースコードから読み取った実際の組み立てと合わせて、試験用の実機(#211 より前の版の
+// エージェント。stream が切れてもリレーのポートを空けない不具合があった)で実際に観測されている。
+// 意味の分からない target_error に落ちていたのはこの形である。#211 で直した今の版のエージェント
+// で、利用者の操作からこの bind の失敗そのものに至る経路は、ラボで別の経路を試したがまだ再現
 // できていない(設計文書 改訂の記録)。
 func looksLikeBindFailure(reason string) bool {
 	if strings.Contains(reason, "bind failed") {
