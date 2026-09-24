@@ -17,9 +17,9 @@
       {{ $loc := .Locale }}
       {{ range .Agents }}
       <tr {{ if .Attention }}class="attention-row"{{ end }}>
-        <td data-label="{{ T $loc "colName" }}"><div class="entity"><span class="status-dot {{ if not .Connected }}offline{{ end }}"></span><div><strong>{{ .Name }}</strong><small>{{ .Address }}</small>{{ if .PublicKeyShort }}<small class="mono muted" title="{{ .PublicKey }}">{{ .PublicKeyShort }}</small>{{ end }}</div></div></td>
+        <td data-label="{{ T $loc "colName" }}"><div class="entity"><span class="status-dot {{ if or .Disabled (not .Connected) }}offline{{ end }}"></span><div><strong><a class="entity-link" href="/ui/agents/{{ .Name }}">{{ .Name }}</a></strong><small>{{ .Address }}</small>{{ if .PublicKeyShort }}<small class="mono muted" title="{{ .PublicKey }}">{{ .PublicKeyShort }}</small>{{ end }}</div></div></td>
         <td data-label="{{ T $loc "colState" }}">
-          <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
+          <span class="badge {{ .StateBadge }}"><span aria-hidden="true">●</span> {{ .StateLabel }}</span>
           <small class="stack {{ .TunnelClass }}">{{ T $loc "tunnelPrefix" }}{{ .TunnelLabel }}</small>
         </td>
         <td data-label="{{ T $loc "colTunnelIP" }}" class="mono">{{ .Address }}</td>
@@ -33,9 +33,16 @@
         <td data-label="{{ T $loc "colHeartbeat" }}" class="{{ .HeartbeatClass }}">{{ .HeartbeatAgo }}</td>
         <td data-label="{{ T $loc "colWarn" }}">{{ if .WarnCount }}<span class="count danger">{{ .WarnCount }}</span>{{ else }}<span class="muted">-</span>{{ end }}</td>
         <td data-label="{{ T $loc "colActions" }}">
-          <form autocomplete="off" method="post" action="/ui/agents/{{ .Name }}/revoke" style="display:inline" data-confirm="{{ printf (T $loc "confirmRevoke") .Name }}">
-            <button class="small-btn" type="submit">{{ T $loc "revoke" }}</button>
+          {{- /* 削除は行に置かず、詳細ページの「危険な操作」と警告のバナーに置く(設計文書 10.1 節) */}}
+          {{ if .Disabled }}
+          <form autocomplete="off" method="post" action="/ui/agents/{{ .Name }}/enable" style="display:inline">
+            <button class="small-btn" type="submit">{{ T $loc "enable" }}</button>
           </form>
+          {{ else }}
+          <form autocomplete="off" method="post" action="/ui/agents/{{ .Name }}/disable" style="display:inline" data-confirm="{{ printf (T $loc "confirmAgentDisable") .Name }}">
+            <button class="small-btn" type="submit">{{ T $loc "disable" }}</button>
+          </form>
+          {{ end }}
         </td>
       </tr>
       {{ else }}

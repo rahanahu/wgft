@@ -70,6 +70,9 @@ func (s *Server) registerUI() {
 	s.mux.HandleFunc("POST /ui/rules/{id}/enable", s.uiRuleEnable)
 	s.mux.HandleFunc("POST /ui/rules/{id}/disable", s.uiRuleDisable)
 	s.mux.HandleFunc("POST /ui/rules/{id}/delete", s.uiRuleDelete)
+	s.mux.HandleFunc("GET /ui/agents/{name}", s.uiAgentDetail)
+	s.mux.HandleFunc("POST /ui/agents/{name}/disable", s.uiAgentDisable)
+	s.mux.HandleFunc("POST /ui/agents/{name}/enable", s.uiAgentEnable)
 	s.mux.HandleFunc("POST /ui/agents/{name}/revoke", s.uiRevoke)
 	s.mux.HandleFunc("POST /ui/agents/{name}/dismiss-warning", s.uiDismissWarning)
 }
@@ -98,24 +101,29 @@ type healthView struct {
 type agentView struct {
 	Name, Address, StreamFrom, WGEndpoint string
 	Connected                             bool
-	Generation                            uint64
-	StateBadge, StateLabel                string
-	TunnelClass, TunnelLabel              string
-	ShowIPCompare                         bool
-	IPCompareClass, IPCompareLabel        string
-	Pending                               bool
-	HeartbeatAgo, HeartbeatClass          string
-	HandshakeAgo                          string
-	PublicKey, PublicKeyShort             string
-	WarnCount                             int
-	Attention                             bool
+	// Disabled はエージェントが無効であることである。行は故障の色でない「無効」を示し、要対応に
+	// しない。トンネルとハートビートは参考の値として控えめな色で描く(設計文書 10.1 節)
+	Disabled                       bool
+	Generation                     uint64
+	StateBadge, StateLabel         string
+	TunnelClass, TunnelLabel       string
+	ShowIPCompare                  bool
+	IPCompareClass, IPCompareLabel string
+	Pending                        bool
+	HeartbeatAgo, HeartbeatClass   string
+	HandshakeAgo                   string
+	PublicKey, PublicKeyShort      string
+	WarnCount                      int
+	Attention                      bool
 }
 
 type ruleView struct {
 	ID, Agent, Target, Mode          string
 	ProtoUpper, ProtoClass, Ports    string
 	ProxyProtocol, Enabled, CanCheck bool
-	StateBadge, StateLabel           string
+	// StateIcon は適用状態のバッジの頭の記号である。持ち主のエージェントが無効か未登録なら横棒 (U+2014) に、
+	// それ以外は ● にする(設計文書 10.1 節)
+	StateIcon, StateBadge, StateLabel string
 	// Diag は適用状態のバッジの右に置く診断の印である。理由の長い文は一覧に出さず、ルールの
 	// 詳細ページと診断の画面で読む(設計文書 10.1 節)。
 	Diag        doctorMarkView
@@ -171,9 +179,13 @@ func (s *Server) buildDash(locale string, withRules bool) (dashData, error) {
 			acks[a.Agent] = append(acks[a.Agent], a)
 		}
 	}
-	online := 0
+	// オンラインの分母は有効なエージェントの数で、無効なエージェントは別に数える(設計文書 10.1 節)
+	online, disabled := 0, 0
 	for _, a := range agents {
-		if a.Connected {
+		switch {
+		case a.Disabled:
+			disabled++
+		case a.Connected:
 			online++
 		}
 		d.Agents = append(d.Agents, agentToView(a, gen, locale, acks[a.Name]))
@@ -187,7 +199,8 @@ func (s *Server) buildDash(locale string, withRules bool) (dashData, error) {
 	}
 	var ruleErrors int
 	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, buildAgentIndex(agents), in.Rules.RuleStates, dashMarks(rules, in, locale))
-	d.Health = health(len(agents), online, len(rules), len(warns), ruleErrors, locale)
+	d.Health = health(healthCounts{Enabled: len(agents) - disabled, Online: online, Disabled: disabled,
+		Rules: len(rules), Warnings: len(warns), RuleErrors: ruleErrors}, locale)
 	return d, nil
 }
 
@@ -231,24 +244,46 @@ func checksByRule(checks []doctor.Check) map[string][]doctor.Check {
 	return byRule
 }
 
-// health はヘッダの全体ヘルスを作る。ruleErrors は診断の印が FAILED のルールの数で、グループの
-// 見出しの error の件数と同じ数え方である(groupRules)。
-func health(total, online, rules, warnings, ruleErrors int, locale string) healthView {
-	switch {
-	case ruleErrors > 0 && warnings > 0:
-		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErrWarn"), online, total, rules, ruleErrors, warnings)}
-	case ruleErrors > 0:
-		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryErr"), online, total, rules, ruleErrors)}
-	case warnings > 0:
-		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: fmt.Sprintf(T(locale, "summaryWarn"), online, total, rules, warnings)}
-	default:
-		return healthView{OK: true, Class: "success", Title: T(locale, "healthOK"), Summary: fmt.Sprintf(T(locale, "summaryOK"), online, total, rules)}
+// healthCounts はヘッダの全体ヘルスの要約に出す数である。
+type healthCounts struct {
+	// Enabled は有効なエージェントの数で、オンラインの分母である。Online は、そのうち接続している
+	// エージェントの数である。Disabled は無効なエージェントの数で、分母にも分子にも入れない
+	// (設計文書 10.1 節)。
+	Enabled, Online, Disabled int
+	Rules, Warnings           int
+	// RuleErrors は診断の印が FAILED のルールの数で、グループの見出しの error の件数と同じ数え方で
+	// ある(groupRules)。無効なエージェントのルールは印が SKIPPED なので入らない。
+	RuleErrors int
+}
+
+// health はヘッダの全体ヘルスを作る。要約は、オンライン、無効(1 台以上のときだけ)、ルール、
+// エラー(1 件以上のときだけ)、警告(1 件以上のときだけ)の順に並べる。
+func health(c healthCounts, locale string) healthView {
+	parts := []string{fmt.Sprintf(T(locale, "summaryOnline"), c.Online, c.Enabled)}
+	if c.Disabled > 0 {
+		parts = append(parts, fmt.Sprintf(T(locale, "summaryDisabled"), c.Disabled))
 	}
+	parts = append(parts, fmt.Sprintf(T(locale, "summaryRules"), c.Rules))
+	if c.RuleErrors > 0 {
+		parts = append(parts, fmt.Sprintf(T(locale, "summaryErrors"), c.RuleErrors))
+	}
+	if c.Warnings > 0 {
+		parts = append(parts, fmt.Sprintf(T(locale, "summaryWarnings"), c.Warnings))
+	}
+	summary := strings.Join(parts, T(locale, "summarySep"))
+	if c.RuleErrors > 0 || c.Warnings > 0 {
+		return healthView{OK: false, Title: T(locale, "healthWarn"), Summary: summary}
+	}
+	return healthView{OK: true, Class: "success", Title: T(locale, "healthOK"), Summary: summary}
 }
 
 func agentToView(a AgentInfo, latestGen uint64, locale string, acks []store.Ack) agentView {
 	v := agentView{Name: a.Name, Address: a.Address, StreamFrom: a.StreamFrom, WGEndpoint: a.WGEndpoint,
-		Connected: a.Connected, Generation: a.Generation, WarnCount: len(a.Warnings)}
+		Connected: a.Connected, Disabled: a.Disabled, Generation: a.Generation, WarnCount: len(a.Warnings)}
+	if a.Disabled {
+		disabledAgentView(&v, a, locale, acks)
+		return v
+	}
 	if a.Connected {
 		v.StateBadge, v.StateLabel = "success", T(locale, "online")
 	} else {
@@ -302,6 +337,45 @@ func agentToView(a AgentInfo, latestGen uint64, locale string, acks []store.Ack)
 	return v
 }
 
+// disabledAgentView は無効なエージェントの行を描く(設計文書 10.1 節)。状態は故障の色でない
+// 「無効」で、行を要対応にしない。トンネル、ハンドシェイク、ハートビートは参考の値として控えめな色
+// (muted)で描き、接続していなくても警告や故障の色にしない。反映待ちの印も出さない。VPS は無効な
+// エージェントのルールを転送しないので、世代の遅れは転送に関わらないためである。
+//
+// 窃取の警告だけは要対応にする。無効の間も恒久トークンは使えるためである。IP の比較は有効な
+// エージェントと同じく、接続している間だけ出す。
+func disabledAgentView(v *agentView, a AgentInfo, locale string, acks []store.Ack) {
+	v.StateBadge, v.StateLabel = "neutral", T(locale, "disabled")
+	v.TunnelClass = "muted"
+	switch {
+	case !a.Connected:
+		v.TunnelLabel = T(locale, "tunnelStale")
+	case a.Tunnel.State == proto.StatusOK:
+		v.TunnelLabel = T(locale, "tunnelOK")
+	case a.Tunnel.State == proto.StatusError:
+		v.TunnelLabel = T(locale, "tunnelError")
+	default:
+		v.TunnelLabel = T(locale, "tunnelNone")
+	}
+	if a.Connected {
+		v.ShowIPCompare = true
+		switch store.ClassifyIPPair(a.StreamFrom, a.WGEndpoint, acks) {
+		case store.IPPairMatch:
+			v.IPCompareClass, v.IPCompareLabel = "muted", T(locale, "ipMatch")
+		case store.IPPairMismatch:
+			v.IPCompareClass, v.IPCompareLabel = "warning-text", T(locale, "ipMismatch")
+		case store.IPPairAcknowledged:
+			v.IPCompareClass, v.IPCompareLabel = "muted", T(locale, "ipMismatchAcked")
+		default:
+			v.ShowIPCompare = false
+		}
+	}
+	v.HeartbeatAgo, v.HeartbeatClass = agoStr(a.LastHeartbeat, locale), "muted"
+	v.HandshakeAgo = agoStr(a.LastHandshake, locale)
+	v.PublicKey, v.PublicKeyShort = a.PublicKey, pubKeyShort(a.PublicKey)
+	v.Attention = len(a.Warnings) > 0
+}
+
 // pubKeyShort は公開鍵の先頭だけを一覧に出す用に切る(全体は title 属性に持たせる。
 // `agent pubkey` の出力と見比べられれば足りるので、これで確定はしない)。
 func pubKeyShort(key string) string {
@@ -331,8 +405,11 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode strin
 		v.ProtoClass = "tcp"
 	}
 	v.StateBadge, v.StateLabel, _ = ruleRunState(r, latestGen, agents, server, locale)
+	v.StateIcon = ruleStateIcon(r, agents)
 	v.Diag = mark
-	v.CanCheck = r.Enabled && r.Proto == proto.TCP
+	// 接続テストは、持ち主のエージェントが無効か未登録のルールには出さない。server がそのルールの
+	// 疎通確認を拒むためである(設計文書 5.1 節)
+	v.CanCheck = r.Enabled && r.Proto == proto.TCP && v.StateIcon != stateIconIdle
 	v.Dropped = strconv.FormatUint(drops[r.ID], 10)
 	v.Restriction = restrictionSummary(r, locale)
 	v.Note = r.Note

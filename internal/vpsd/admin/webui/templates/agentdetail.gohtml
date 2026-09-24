@@ -1,0 +1,77 @@
+{{ define "agentdetail" }}
+{{ $loc := .Locale }}
+{{ with .Row }}
+<div class="rule-detail-head">
+  <div class="rule-summary">
+    <span class="status-dot {{ if or .Disabled (not .Connected) }}offline{{ end }}"></span>
+    <strong>{{ .Name }}</strong>
+    <span class="badge {{ .StateBadge }}"><span aria-hidden="true">●</span> {{ .StateLabel }}</span>
+    {{ if .Disabled }}
+    <form autocomplete="off" method="post" action="/ui/agents/{{ .Name }}/enable">
+      <input type="hidden" name="return" value="detail">
+      <button class="small-btn" type="submit">{{ T $loc "enable" }}</button>
+    </form>
+    {{ else }}
+    <form autocomplete="off" method="post" action="/ui/agents/{{ .Name }}/disable" data-confirm="{{ printf (T $loc "confirmAgentDisable") .Name }}">
+      <input type="hidden" name="return" value="detail">
+      <button class="small-btn" type="submit">{{ T $loc "disable" }}</button>
+    </form>
+    {{ end }}
+  </div>
+  {{ if .Disabled }}<p class="muted">{{ T $loc "agentDisabledNote" }}</p>{{ end }}
+</div>
+{{ end }}
+{{ if .Error }}<p class="danger-text" role="alert">{{ .Error }}</p>{{ end }}
+
+<dl class="agent-facts">
+  {{ with .Row }}
+  <dt>{{ T $loc "agentFieldAddress" }}</dt><dd class="mono">{{ or .Address "-" }}</dd>
+  <dt>{{ T $loc "agentFieldPublicKey" }}</dt><dd class="mono">{{ or .PublicKey "-" }}</dd>
+  <dt>{{ T $loc "agentFieldTunnel" }}</dt><dd class="{{ .TunnelClass }}">{{ .TunnelLabel }}</dd>
+  <dt>{{ T $loc "agentFieldStream" }}</dt><dd class="mono">{{ or .StreamFrom "-" }}{{ if .ShowIPCompare }} <small class="{{ .IPCompareClass }}">{{ .IPCompareLabel }}</small>{{ end }}</dd>
+  <dt>{{ T $loc "agentFieldWG" }}</dt><dd class="mono">{{ or .WGEndpoint "-" }}</dd>
+  <dt>{{ T $loc "colHeartbeat" }}</dt><dd class="{{ .HeartbeatClass }}">{{ .HeartbeatAgo }}</dd>
+  <dt>{{ T $loc "agentFieldHandshake" }}</dt><dd class="{{ if .Disabled }}muted{{ end }}">{{ .HandshakeAgo }}</dd>
+  <dt>{{ T $loc "colGen" }}</dt><dd>{{ .Generation }}{{ if .Pending }} <span class="badge warning">{{ T $loc "pending" }}</span>{{ end }}</dd>
+  <dt>{{ T $loc "colWarn" }}</dt><dd>{{ if .WarnCount }}<a class="count danger" href="/#warnings">{{ .WarnCount }}</a>{{ else }}<span class="muted">-</span>{{ end }}</dd>
+  {{ end }}
+  <dt>{{ T $loc "agentFieldCreated" }}</dt><dd class="mono">{{ .CreatedAt }}</dd>
+  {{ if .DisabledAt }}<dt>{{ T $loc "agentFieldDisabledAt" }}</dt><dd class="mono">{{ .DisabledAt }}</dd>{{ end }}
+</dl>
+
+<section class="detail-group" id="agent-rules">
+  <h2>{{ T $loc "agentRulesHead" }} <span class="count">{{ len .Rules }}</span></h2>
+  {{ if .Rules }}
+  <ul class="agent-rule-list">
+    {{ range .Rules }}
+    <li><a href="/ui/rules/{{ .ID }}">{{ .Label }}</a> <span class="mono muted">{{ .Target }}</span>{{ if not .Enabled }} <span class="badge neutral">{{ T $loc "disabled" }}</span>{{ end }}{{ if .Note }} <small class="rule-note">{{ .Note }}</small>{{ end }}</li>
+    {{ end }}
+  </ul>
+  {{ else }}
+  <p class="muted">{{ T $loc "agentRulesNone" }}</p>
+  {{ end }}
+</section>
+
+{{/* 危険な操作:エージェントの削除。名前の入力で確認し、照合は server が行う(設計文書 10.1 節)。
+     JavaScript は名前が一致するまでボタンを押せなくするが、補助にとどまる。 */}}
+<section class="detail-group danger-zone" id="agent-danger">
+  <h2>{{ T $loc "dangerZoneHead" }}</h2>
+  <div class="detail-section">
+    <h3>{{ T $loc "agentDeleteHead" }}</h3>
+    <p class="field-help">{{ T $loc "agentDeleteHelp" }}</p>
+    <form autocomplete="off" method="post" action="/ui/agents/{{ .Row.Name }}/revoke" class="name-confirm-form" data-name="{{ .Row.Name }}">
+      <div class="field">
+        <label for="confirm-name">{{ printf (T $loc "agentDeleteConfirmFmt") .Row.Name }}</label>
+        <input id="confirm-name" class="search mono" name="confirm_name" value="{{ .ConfirmName }}" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" spellcheck="false" required>
+      </div>
+      <div class="form-actions"><button class="btn danger-outline" type="submit">{{ T $loc "revokeAgent" }}</button></div>
+    </form>
+  </div>
+</section>
+{{ end }}
+
+{{/* 操作の結果の文 1 つ。戻る先のページが無い操作の結果に使う(webui_agent.go の renderNotice) */}}
+{{ define "notice" }}
+<p class="danger-text" role="alert">{{ .Message }}</p>
+<p><a class="btn" href="/">{{ T .Locale "backToDashboard" }}</a></p>
+{{ end }}

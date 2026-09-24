@@ -9,8 +9,9 @@
 #                     at WireGuard, at a width of 1200, cut off above the history section
 #
 # It builds tools/uidemo, a throwaway program that serves the admin Web UI on
-# 127.0.0.1:8687 with fixed sample data (three agents, nine rules, one warning;
-# see tools/uidemo/main.go for the exact values), waits for the port to accept
+# 127.0.0.1:8687 with fixed sample data (four agents, one of them disabled; twelve
+# rules, two of them left by a revoked agent; one warning; see tools/uidemo/main.go
+# for the exact values), waits for the port to accept
 # connections, captures each locale with headless Firefox using a fresh
 # throwaway profile, then stops the demo server.
 #
@@ -110,8 +111,8 @@ shoot() {
 
 shoot "/?lang=en" "$out_dir/dashboard.png" 1400
 shoot "/?lang=ja" "$out_dir/dashboard.ja.png" 1400
-shoot "/ui/doctor?lang=en" "$out_dir/doctor.png" 1200,2232
-shoot "/ui/doctor?lang=ja" "$out_dir/doctor.ja.png" 1200,2260
+shoot "/ui/doctor?lang=en" "$out_dir/doctor.png" 1200,3246
+shoot "/ui/doctor?lang=ja" "$out_dir/doctor.ja.png" 1200,3281
 shoot "/ui/doctor/r_pub_tcp8080?lang=en" "$out_dir/doctor-rule.png" 1200,1106
 shoot "/ui/doctor/r_pub_tcp8080?lang=ja" "$out_dir/doctor-rule.ja.png" 1200,1138
 

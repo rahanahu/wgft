@@ -124,7 +124,7 @@
     <strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> <span class="mono">{{ .Ports }}</span>
     <span class="flow-arrow">→</span> {{ .Agent }} <span class="mono">{{ .Target }}</span>
     <span class="badge neutral">{{ .Mode }}</span>
-    <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
+    <span class="badge {{ .StateBadge }}"><span aria-hidden="true">{{ .StateIcon }}</span> {{ .StateLabel }}</span>
     <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
       <button class="small-btn" type="submit">{{ if .Enabled }}{{ T .Locale "disable" }}{{ else }}{{ T .Locale "enable" }}{{ end }}</button>
     </form>

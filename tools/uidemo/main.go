@@ -88,8 +88,9 @@ table inet wgft {
 NFT
 `
 
-// fakeBackend implements admin.Backend with fixed sample data: three agents (home,
-// office, lab), nine rules across two named groups plus one ungrouped, one
+// fakeBackend implements admin.Backend with fixed sample data: four agents (home,
+// office, lab, and backup, which is disabled), twelve rules across three named groups
+// plus one ungrouped, two of them left by an agent that was revoked (oldhome), one
 // ip-mismatch warning, and a server info block. Among the rules, r_game_udp and
 // r_game_udp2 are adjacent and mergeable; r_lab_udp30000 and
 // r_lab_udp30002 are adjacent but not (their deny lists differ).
@@ -169,8 +170,28 @@ func sampleAgents() []admin.AgentInfo {
 				{ID: "r_lab_tcp22", State: proto.StatusOK},
 			},
 		},
+		{
+			// disabled (design 5.1 section): it stays connected and keeps its key, but the server
+			// forwards none of its rules and it reports none of them. The dashboard shows a neutral
+			// "Disabled" row with its tunnel and heartbeat as muted reference values, and its rule
+			// as a grey "Agent disabled" with a dash.
+			Name: "backup", Address: "10.200.0.5", CreatedAt: rfcAgo(96 * time.Hour),
+			Disabled: true, DisabledAt: time.Now().Add(-26 * time.Hour).Format(time.RFC3339),
+			Connected: true, StreamFrom: "198.51.100.40:51820", WGEndpoint: "198.51.100.40:51820",
+			LastHeartbeat: rfcAgo(8 * time.Second), Generation: 42,
+			PublicKey: "mVQ2xbJ6yJ0jdmvdXk1LcS1jHkq3rN7eTqS5pBnd0Fs=", LastHandshake: rfcAgo(70 * time.Second),
+			Tunnel: admin.TunnelStatus{State: proto.StatusOK, Endpoint: "198.51.100.40:51820"},
+		},
 	}
 }
+
+// disabledAgents and revokedAgents name the sample agents whose rules the server does not
+// publish: backup is disabled, and oldhome was revoked while its rules were kept (design 5.1
+// section). ApplyStatus reports their rules not_active with the reasons a real server gives.
+var (
+	disabledAgents = map[string]bool{"backup": true}
+	revokedAgents  = map[string]bool{"oldhome": true}
+)
 
 func newFakeBackend(mode string) *fakeBackend {
 	rules := []proto.Rule{
@@ -233,6 +254,26 @@ func newFakeBackend(mode string) *fakeBackend {
 			Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 30002, Hi: 30003},
 			Target: "192.168.1.40:30002", VPSMode: proto.ModeKernel, Enabled: true,
 			SourceDeny: []netip.Prefix{netip.MustParsePrefix("203.0.113.90/32")},
+		},
+		{
+			// The disabled agent's rule keeps its own enabled flag; it does not forward while the
+			// agent is disabled.
+			ID: "r_backup_tcp8443", Agent: "backup", Group: "backup", Note: "offsite backup sync",
+			Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 8443, Hi: 8443},
+			Target: "192.168.2.10:8443", VPSMode: proto.ModeKernel, Enabled: true,
+		},
+		{
+			// Two rules left by the revoked agent oldhome, waiting for an agent of that name to
+			// register again (design 5.1 section). The dashboard shows them grey as
+			// "Agent not registered" with a dash, without counting them as errors.
+			ID: "r_old_tcp9000", Agent: "oldhome", Group: "backup", Note: "old file share",
+			Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 9000, Hi: 9000},
+			Target: "192.168.3.10:9000", VPSMode: proto.ModeKernel, Enabled: true,
+		},
+		{
+			ID: "r_old_udp9001", Agent: "oldhome", Group: "backup",
+			Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 9001, Hi: 9001},
+			Target: "192.168.3.10:9001", VPSMode: proto.ModeKernel, Enabled: true,
 		},
 	}
 
@@ -322,13 +363,21 @@ func (b *fakeBackend) CheckConnectivity(ruleID string) (admin.ConnCheck, error) 
 }
 
 // ApplyStatus reports every enabled rule's public port as active at generation 42, the way a
-// real server reports it. The dashboard reads only not_active and pending from it, so its
-// screenshots do not change; the diagnosis page (/ui/doctor) reads it for the public port.
+// real server reports it, except the rules of the disabled and the revoked agent, which a real
+// server leaves out of the data plane as not_active with these reasons (internal/vpsd/apply.go).
+// The dashboard reads only not_active and pending from it; the diagnosis page (/ui/doctor) reads
+// it for the public port.
 func (b *fakeBackend) ApplyStatus() (admin.ApplyStatus, bool) {
 	gen := uint64(42)
 	st := admin.ApplyStatus{DesiredGeneration: gen, ActiveGeneration: gen, Rules: map[string]admin.RuleApply{}}
 	for _, r := range b.rules {
-		if r.Enabled {
+		switch {
+		case !r.Enabled:
+		case disabledAgents[r.Agent]:
+			st.Rules[r.ID] = admin.RuleApply{ApplyState: admin.ApplyNotActive, Reason: fmt.Sprintf("agent %q is disabled", r.Agent)}
+		case revokedAgents[r.Agent]:
+			st.Rules[r.ID] = admin.RuleApply{ApplyState: admin.ApplyNotActive, Reason: fmt.Sprintf("agent %q is not registered", r.Agent)}
+		default:
 			st.Rules[r.ID] = admin.RuleApply{ApplyState: admin.ApplyActive, ActiveGeneration: &gen}
 		}
 	}

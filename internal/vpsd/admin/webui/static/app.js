@@ -221,9 +221,24 @@
     update();
   }
 
+  // 名前の入力で確かめる削除(エージェントの詳細ページの「危険な操作」)。名前が一致するまで送信の
+  // ボタンを押せなくする。補助にとどまり、照合は server が行う(設計文書 10.1 節)
+  function initNameConfirm() {
+    document.querySelectorAll("form.name-confirm-form").forEach(function (form) {
+      var input = form.querySelector('input[name="confirm_name"]');
+      var button = form.querySelector('button[type="submit"]');
+      if (!input || !button) return;
+      function sync() { button.disabled = input.value !== form.dataset.name; }
+      input.addEventListener("input", sync);
+      sync();
+    });
+  }
+
+  function init() { start(); confirmForms(); initRuleForm(); initRuleGroups(); initRateForm(); initSplitForm(); initNameConfirm(); }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function () { start(); confirmForms(); initRuleForm(); initRuleGroups(); initRateForm(); initSplitForm(); });
+    document.addEventListener("DOMContentLoaded", init);
   } else {
-    start(); confirmForms(); initRuleForm(); initRuleGroups(); initRateForm(); initSplitForm();
+    init();
   }
 })();
