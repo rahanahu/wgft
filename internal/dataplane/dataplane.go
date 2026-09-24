@@ -258,6 +258,36 @@ func PeerUnion(want, have []Peer) []Peer {
 	return out
 }
 
+// HeldPeer is one peer a WireGuard device has now, as InheritedEndpoint reads it: its key, the
+// address its AllowedIPs route to it (invalid unless they are exactly one /32) and the endpoint
+// WireGuard last saw it at (invalid when it has none).
+type HeldPeer struct {
+	PublicKey wgtypes.Key
+	Address   netip.Addr
+	Endpoint  netip.AddrPort
+}
+
+// InheritedEndpoint returns the endpoint a peer being added for key at addr takes over, and the
+// key of the peer it takes it from: the endpoint of the peer of have that holds addr under another
+// key. That is an agent that rotated its key (design.md 5.2 節). The new peer has no endpoint of its
+// own until a handshake under the new key arrives, and the agent's first handshake under it leaves
+// before the server has the new peer and is dropped, so without the old endpoint the tunnel waited
+// for the agent's retry after WireGuard's REKEY_TIMEOUT. With it, the server starts the handshake
+// itself as soon as it has a packet for the agent. ok is false when no peer of have holds addr
+// under another key, or when that peer has no endpoint. WireGuard routes an address to one peer
+// only, so at most one peer of a device's own list holds addr.
+func InheritedEndpoint(have []HeldPeer, key wgtypes.Key, addr netip.Addr) (endpoint netip.AddrPort, from wgtypes.Key, ok bool) {
+	if !addr.IsValid() {
+		return netip.AddrPort{}, wgtypes.Key{}, false
+	}
+	for _, p := range have {
+		if p.PublicKey != key && p.Address == addr && p.Endpoint.IsValid() {
+			return p.Endpoint, p.PublicKey, true
+		}
+	}
+	return netip.AddrPort{}, wgtypes.Key{}, false
+}
+
 // Drop is one rule's drop counter for one kind of admission step (design.md 6.1 節).
 type Drop struct {
 	RuleID  string

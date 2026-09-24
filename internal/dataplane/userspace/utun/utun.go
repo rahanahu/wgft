@@ -109,7 +109,9 @@ func (t *Tunnel) ListenPort() (uint16, error) {
 
 // SetPeers は宣言のピア集合に収束させる(足りないものを足し、余分を消す)。
 // カーネルモードの wg.Ensure(internal/vpsd/wg)のピア部分に相当し、変えた点を返す。
-// ピアのエンドポイントは指定しない(エージェントからの握手でローミング学習する)。
+// ピアのエンドポイントは、エージェントからのハンドシェイクで学習する。例外は鍵を替えたエージェントの
+// 新しいピアで、同じアドレスを持っていた古いピアのエンドポイントを引き継ぐ(設計文書 5.2 節。
+// dataplane.InheritedEndpoint)。
 func (t *Tunnel) SetPeers(peers []dataplane.Peer) (changes []string, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -117,6 +119,9 @@ func (t *Tunnel) SetPeers(peers []dataplane.Peer) (changes []string, err error) 
 	for _, p := range peers {
 		want[p.PublicKey] = p.Address
 	}
+	// 読めなければ引き継がずに進める。引き継ぎは断を縮めるだけで、無くてもエージェントの
+	// ハンドシェイクでつながるので、ピアの変更そのものを失敗させない。
+	held := t.heldPeers()
 	var b strings.Builder
 	for k := range t.peers {
 		if _, ok := want[k]; !ok {
@@ -129,6 +134,13 @@ func (t *Tunnel) SetPeers(peers []dataplane.Peer) (changes []string, err error) 
 			continue
 		}
 		fmt.Fprintf(&b, "public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32\n", hex.EncodeToString(k[:]), addr)
+		if _, known := t.peers[k]; !known {
+			if ep, from, ok := dataplane.InheritedEndpoint(held, k, addr); ok {
+				fmt.Fprintf(&b, "endpoint=%s\n", ep)
+				changes = append(changes, fmt.Sprintf("add peer %s at %s, taking over endpoint %s from peer %s", k, addr, ep, from))
+				continue
+			}
+		}
 		changes = append(changes, fmt.Sprintf("add peer %s at %s", k, addr))
 	}
 	if b.Len() == 0 {
@@ -139,6 +151,25 @@ func (t *Tunnel) SetPeers(peers []dataplane.Peer) (changes []string, err error) 
 	}
 	t.peers = want
 	return changes, nil
+}
+
+// heldPeers は、今のピアを dataplane.InheritedEndpoint が読む形で返す。アドレスは SetPeers が
+// 宣言した値、エンドポイントは IpcGet が返す値である。IpcGet が失敗したら nil を返す。t.mu を
+// 持って呼ぶ。
+func (t *Tunnel) heldPeers() []dataplane.HeldPeer {
+	if len(t.peers) == 0 {
+		return nil
+	}
+	st, err := t.Peers()
+	if err != nil {
+		return nil
+	}
+	out := make([]dataplane.HeldPeer, 0, len(t.peers))
+	for k, addr := range t.peers {
+		ep := st[k].Endpoint
+		out = append(out, dataplane.HeldPeer{PublicKey: k, Address: addr, Endpoint: netip.AddrPortFrom(ep.Addr().Unmap(), ep.Port())})
+	}
+	return out
 }
 
 // Peers は IpcGet を解析してピアの状態を返す。

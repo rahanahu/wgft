@@ -10,6 +10,7 @@ package wg
 import (
 	"errors"
 	"fmt"
+	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
@@ -209,11 +210,19 @@ func Ensure(cfg Config) (changes []string, err error) {
 		}
 		delete(wantPeers, p.PublicKey)
 	}
-	// map の順序は不定なので、宣言の順に足す
+	// map の順序は不定なので、宣言の順に足す。鍵を替えたエージェントの新しいピアは、同じアドレスを
+	// 持っていた古いピアのエンドポイントを引き継ぐ(設計文書 5.2 節。dataplane.InheritedEndpoint)。
+	held := heldPeers(devPeers)
 	for _, p := range cfg.Peers {
 		if ips, ok := wantPeers[p.PublicKey]; ok {
-			wc.Peers = append(wc.Peers, wgtypes.PeerConfig{PublicKey: p.PublicKey, ReplaceAllowedIPs: true, AllowedIPs: ips})
-			note("add peer %s at %s", p.PublicKey, p.Address)
+			pc := wgtypes.PeerConfig{PublicKey: p.PublicKey, ReplaceAllowedIPs: true, AllowedIPs: ips}
+			if ep, from, ok := dataplane.InheritedEndpoint(held, p.PublicKey, p.Address); ok {
+				pc.Endpoint = net.UDPAddrFromAddrPort(ep)
+				note("add peer %s at %s, taking over endpoint %s from peer %s", p.PublicKey, p.Address, ep, from)
+			} else {
+				note("add peer %s at %s", p.PublicKey, p.Address)
+			}
+			wc.Peers = append(wc.Peers, pc)
 		}
 	}
 	if wc.PrivateKey != nil || wc.ListenPort != nil || len(wc.Peers) > 0 {
@@ -226,6 +235,26 @@ func Ensure(cfg Config) (changes []string, err error) {
 		return nil, err
 	}
 	return changes, nil
+}
+
+// heldPeers reads the device's peers as dataplane.InheritedEndpoint takes them: the address is the
+// peer's one /32, and the endpoint is unmapped the same way the agent's link reads it
+// (peerEndpoint).
+func heldPeers(peers []wgtypes.Peer) []dataplane.HeldPeer {
+	out := make([]dataplane.HeldPeer, 0, len(peers))
+	for i := range peers {
+		p := &peers[i]
+		h := dataplane.HeldPeer{PublicKey: p.PublicKey, Endpoint: peerEndpoint(p)}
+		if len(p.AllowedIPs) == 1 {
+			if ones, bits := p.AllowedIPs[0].Mask.Size(); ones == 32 && bits == 32 {
+				if a, ok := netip.AddrFromSlice(p.AllowedIPs[0].IP); ok {
+					h.Address = a.Unmap()
+				}
+			}
+		}
+		out = append(out, h)
+	}
+	return out
 }
 
 // createLink creates a WireGuard link named name with the given MTU. A kernel without the
