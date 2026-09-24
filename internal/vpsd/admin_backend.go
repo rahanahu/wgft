@@ -3,6 +3,7 @@
 package vpsd
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/buildinfo"
@@ -272,23 +273,18 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 // ルールをすべて enabled:false の写しにして配り、AgentDisabled を載せる。保存値には触れない。
 // エージェントは既存の enabled の扱いでリスナーとセッションを閉じるので、無効化を知らない旧い版の
 // エージェントも止まる。AgentDisabled は診断のためのもので、守りには使わない。
+//
+// エージェントの行、ルール集合、世代は 1 回の読み(store.AgentSnapshot)で得る。配信は goroutine から
+// 並行に走り、その間に管理者の変更が確定しうるので、別々に読むと世代と内容が食い違う。
 func (d *Daemon) AgentState(agent string) (*proto.State, error) {
-	_, agentAddr, disabled, err := d.agents()
-	if err != nil {
-		return nil, err
-	}
-	addr, ok := agentAddr[agent]
-	if !ok {
+	snap, err := d.st.AgentSnapshot(agent)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("agent %q is not registered", agent)
 	}
-	rules, err := d.st.Rules()
 	if err != nil {
 		return nil, err
 	}
-	gen, err := d.st.Generation()
-	if err != nil {
-		return nil, err
-	}
+	addr, disabled, rules, gen := snap.Agent.Address, snap.Agent.Disabled(), snap.Rules, snap.Generation
 	wgAddr := d.network
 	timeouts := d.udpTimeouts()
 	st := &proto.State{
@@ -299,11 +295,11 @@ func (d *Daemon) AgentState(agent string) (*proto.State, error) {
 			UDPTimeout: timeouts.Timeout, UDPTimeoutStream: timeouts.TimeoutStream,
 		},
 		Rules:         []proto.AgentRule{},
-		AgentDisabled: disabled[agent],
+		AgentDisabled: disabled,
 	}
 	for i := range rules {
 		if rules[i].Agent == agent {
-			st.Rules = append(st.Rules, store.DeliveredRule(&rules[i], disabled[agent]))
+			st.Rules = append(st.Rules, store.DeliveredRule(&rules[i], disabled))
 		}
 	}
 	return st, nil

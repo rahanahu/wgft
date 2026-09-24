@@ -234,6 +234,10 @@ func (s *Store) AgentByName(name string) (*Agent, error) {
 }
 
 func (s *Store) agentBy(where string, arg any) (*Agent, error) {
+	return agentByTx(s.db, where, arg)
+}
+
+func agentByTx(q querier, where string, arg any) (*Agent, error) {
 	var (
 		a        Agent
 		addr     string
@@ -241,7 +245,7 @@ func (s *Store) agentBy(where string, arg any) (*Agent, error) {
 		created  int64
 		disabled sql.NullInt64
 	)
-	err := s.db.QueryRow("SELECT name, address, public_key, created_at, registered_from, disabled_at FROM agents WHERE "+where, arg).
+	err := q.QueryRow("SELECT name, address, public_key, created_at, registered_from, disabled_at FROM agents WHERE "+where, arg).
 		Scan(&a.Name, &addr, &pub, &created, &a.RegisteredFrom, &disabled)
 	if err != nil {
 		return nil, err

@@ -275,3 +275,62 @@ func TestDeliveredRule(t *testing.T) {
 		t.Error("DeliveredRule modified the stored rule")
 	}
 }
+
+// AgentSnapshot reads the agent's row, the rules and the generation in one transaction. An enable
+// that commits while the snapshot is being read must not mix into it: the snapshot shows either the
+// disabled agent at the old generation or the enabled agent at the new one, never the disabled flag
+// with the new generation.
+func TestAgentSnapshotIsOneRead(t *testing.T) {
+	s := openTemp(t)
+	registerAgent(t, s, "home")
+	if _, err := s.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		return append(rules, rule("r_a", proto.UDP, 2456, 2456, "192.168.1.20:2456")), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.SetAgentDisabled("home", true, time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := res.Generation
+
+	enabled := make(chan error, 1)
+	testHookAgentSnapshot = func() {
+		testHookAgentSnapshot = nil
+		go func() {
+			_, err := s.SetAgentDisabled("home", false, time.Now(), nil)
+			enabled <- err
+		}()
+		// A snapshot that is one read holds the database, so the enable waits for it. Separate
+		// reads let the enable commit here.
+		select {
+		case err := <-enabled:
+			enabled <- err
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	t.Cleanup(func() { testHookAgentSnapshot = nil })
+
+	snap, err := s.AgentSnapshot("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Agent.Disabled() || snap.Generation != gen || len(snap.Rules) != 1 {
+		t.Errorf("snapshot during the enable = disabled %v, generation %d, %d rules; want disabled, generation %d, 1 rule",
+			snap.Agent.Disabled(), snap.Generation, len(snap.Rules), gen)
+	}
+	if err := <-enabled; err != nil {
+		t.Fatal(err)
+	}
+	snap, err = s.AgentSnapshot("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Agent.Disabled() || snap.Generation != gen+1 {
+		t.Errorf("snapshot after the enable = disabled %v, generation %d; want enabled, generation %d", snap.Agent.Disabled(), snap.Generation, gen+1)
+	}
+
+	if _, err := s.AgentSnapshot("gone"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("snapshot of an unregistered agent = %v, want sql.ErrNoRows", err)
+	}
+}

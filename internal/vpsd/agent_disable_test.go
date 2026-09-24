@@ -581,3 +581,65 @@ func TestAgentChangeOverTheAdminAPI(t *testing.T) {
 		t.Errorf("client enable = %+v, %v", res, err)
 	}
 }
+
+// AgentState reads the agent's row, the rules and the generation as one snapshot. A state that
+// took the disabled flag from before a disable or an enable and the generation from after it would
+// carry the new generation with the old copies. The agent drops only an older generation, so if
+// that state arrived after the correct one it would replace it, and the agent would report the new
+// generation while running the old copies. Toggling the agent while reading makes such a mix show
+// up: each toggle moves the generation by one, so the parity of the generation fixes the flag.
+func TestAgentStateIsOneSnapshot(t *testing.T) {
+	f := newDisableFixture(t)
+	if _, err := f.d.AgentState("ghost"); err == nil || err.Error() != `agent "ghost" is not registered` {
+		t.Errorf("state of an unregistered agent = %v", err)
+	}
+	gen0, err := f.st.Generation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	toggled := make(chan int)
+	go func() {
+		n := 0
+		defer func() { toggled <- n }()
+		for disabled := true; ; disabled = !disabled {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := f.st.SetAgentDisabled("home", disabled, time.Now(), nil); err != nil {
+				t.Error(err)
+				return
+			}
+			n++
+		}
+	}()
+	want := map[string]bool{"r_a": true, "r_b": false, "r_c": true}
+	deadline := time.Now().Add(2 * time.Second)
+	reads, mixed := 0, 0
+	for time.Now().Before(deadline) && mixed == 0 {
+		st, err := f.d.AgentState("home")
+		if err != nil {
+			t.Fatal(err)
+		}
+		reads++
+		disabled := (st.Generation-gen0)%2 == 1
+		ok := st.AgentDisabled == disabled
+		for _, r := range st.Rules {
+			if r.Enabled != (want[r.ID] && !disabled) {
+				ok = false
+			}
+		}
+		if !ok {
+			mixed++
+			t.Errorf("generation %d, %d after the start, came with agent_disabled %v and rules %+v", st.Generation, st.Generation-gen0, st.AgentDisabled, st.Rules)
+		}
+	}
+	close(stop)
+	n := <-toggled
+	if n < 10 {
+		t.Fatalf("the agent was toggled only %d times during %d reads; the test did not exercise the race", n, reads)
+	}
+	t.Logf("%d reads, %d toggles", reads, n)
+}
