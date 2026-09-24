@@ -50,6 +50,45 @@ func (s *Store) Generation() (uint64, error) {
 	return generationTx(s.db)
 }
 
+// AgentSnapshot は、1 つのエージェントに全体状態を配るために読む値の組である(仕様 5.2 節)。
+type AgentSnapshot struct {
+	Agent      *Agent
+	Rules      []proto.Rule
+	Generation uint64
+}
+
+// testHookAgentSnapshot は、AgentSnapshot が行を読んだ後、ルールを読む前に呼ばれる。単体テストだけが
+// 読みの途中に書き込みを挟むために使う。
+var testHookAgentSnapshot func()
+
+// AgentSnapshot は、エージェント name の行、ルール集合、世代を 1 つのトランザクションで読む。行が無ければ
+// sql.ErrNoRows を返す。3 つを別々に読むと、間に確定した変更の前と後が混ざる。例えば、有効化の前の
+// 無効の印と、有効化の後の世代が組になる。エージェントは古い世代だけを捨てるので、この組が正しい組の
+// 後に届くと、エージェントは新しい世代を名乗ったまま古い内容で動く。
+func (s *Store) AgentSnapshot(name string) (*AgentSnapshot, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	a, err := agentByTx(tx, "name = ?", name)
+	if err != nil {
+		return nil, err
+	}
+	if testHookAgentSnapshot != nil {
+		testHookAgentSnapshot()
+	}
+	rules, err := s.rulesTx(tx)
+	if err != nil {
+		return nil, err
+	}
+	gen, err := generationTx(tx)
+	if err != nil {
+		return nil, err
+	}
+	return &AgentSnapshot{Agent: a, Rules: rules, Generation: gen}, tx.Commit()
+}
+
 func generationTx(q querier) (uint64, error) {
 	var v []byte
 	err := q.QueryRow("SELECT value FROM meta WHERE key = ?", generationMeta).Scan(&v)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -579,5 +580,135 @@ func TestAgentChangeOverTheAdminAPI(t *testing.T) {
 	res, err := c.EnableAgent("home")
 	if err != nil || res.Disabled || res.Name != "home" {
 		t.Errorf("client enable = %+v, %v", res, err)
+	}
+}
+
+// AgentState reads the agent's row, the rules and the generation as one snapshot. A state that
+// took the disabled flag or the rules from before a change and the generation from after it would
+// carry the new generation with the old content. The agent drops only an older generation, so if
+// that state arrived after the correct one it would replace it, and the agent would report the new
+// generation while running the old content. Changing the store back and forth while reading makes
+// such a mix show up: each change moves the generation by one, so the parity of the generation
+// fixes the content.
+func TestAgentStateIsOneSnapshot(t *testing.T) {
+	port := func(p uint16) proto.PortRange { return proto.PortRange{Lo: p, Hi: p} }
+	extra := proto.Rule{ID: "r_x", Agent: "home", Proto: proto.UDP, ListenPort: port(2460), Target: "192.168.1.22:2456", VPSMode: proto.ModeKernel, Enabled: true}
+	enabled := map[string]bool{"r_a": true, "r_b": false, "r_c": true, "r_x": true}
+	cases := []struct {
+		name string
+		// change makes the odd-numbered change when odd is true and undoes it otherwise
+		change func(f *disableFixture, odd bool) error
+		// want is the rules and the flag the state must carry after an even or an odd number of changes
+		wantRules    func(odd bool) []string
+		wantDisabled func(odd bool) bool
+	}{
+		{
+			name: "disable and enable",
+			change: func(f *disableFixture, odd bool) error {
+				_, err := f.st.SetAgentDisabled("home", odd, time.Now(), nil)
+				return err
+			},
+			wantRules:    func(bool) []string { return []string{"r_a", "r_b", "r_c"} },
+			wantDisabled: func(odd bool) bool { return odd },
+		},
+		{
+			name: "rule batch",
+			change: func(f *disableFixture, odd bool) error {
+				_, err := f.st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+					out := rules[:0:0]
+					for _, r := range rules {
+						if r.ID != extra.ID {
+							out = append(out, r)
+						}
+					}
+					if odd {
+						out = append(out, extra)
+					}
+					return out, nil
+				})
+				return err
+			},
+			wantRules: func(odd bool) []string {
+				if odd {
+					return []string{"r_a", "r_b", "r_c", "r_x"}
+				}
+				return []string{"r_a", "r_b", "r_c"}
+			},
+			wantDisabled: func(bool) bool { return false },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDisableFixture(t)
+			if _, err := f.d.AgentState("ghost"); err == nil || err.Error() != `agent "ghost" is not registered` {
+				t.Errorf("state of an unregistered agent = %v", err)
+			}
+			gen0, err := f.st.Generation()
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The changer stops and is waited for however the test ends, before the fixture closes
+			// the store: a t.Fatal below must not leave it writing to a closed store.
+			stop := make(chan struct{})
+			changed := make(chan int, 1)
+			go func() {
+				n := 0
+				defer func() { changed <- n }()
+				for odd := true; ; odd = !odd {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if err := tc.change(f, odd); err != nil {
+						t.Error(err)
+						return
+					}
+					n++
+				}
+			}()
+			var n int
+			stopped := false
+			stopChanger := func() int {
+				if !stopped {
+					stopped = true
+					close(stop)
+					n = <-changed
+				}
+				return n
+			}
+			t.Cleanup(func() { stopChanger() })
+
+			deadline := time.Now().Add(2 * time.Second)
+			reads, mixed := 0, 0
+			for time.Now().Before(deadline) && mixed == 0 {
+				st, err := f.d.AgentState("home")
+				if err != nil {
+					t.Fatal(err)
+				}
+				reads++
+				odd := (st.Generation-gen0)%2 == 1
+				disabled := tc.wantDisabled(odd)
+				ok := st.AgentDisabled == disabled
+				var ids []string
+				for _, r := range st.Rules {
+					ids = append(ids, r.ID)
+					if r.Enabled != (enabled[r.ID] && !disabled) {
+						ok = false
+					}
+				}
+				if !reflect.DeepEqual(ids, tc.wantRules(odd)) {
+					ok = false
+				}
+				if !ok {
+					mixed++
+					t.Errorf("generation %d, %d after the start, came with agent_disabled %v and rules %+v", st.Generation, st.Generation-gen0, st.AgentDisabled, st.Rules)
+				}
+			}
+			if n := stopChanger(); n < 10 {
+				t.Fatalf("the store changed only %d times during %d reads; the test did not exercise the race", n, reads)
+			}
+			t.Logf("%d reads, %d changes", reads, n)
+		})
 	}
 }
