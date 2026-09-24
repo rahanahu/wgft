@@ -313,7 +313,7 @@ func TestDiagnose(t *testing.T) {
 			},
 			wantFailed: checkTarget, wantReason: doctor.ReasonListenerBindFailed,
 			wantDetail: "port is in use",
-			wantNext:   "own earlier listener",
+			wantNext:   "earlier listener or connection",
 		},
 	}
 	for _, tt := range tests {

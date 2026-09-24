@@ -751,12 +751,14 @@ func agentRuleNextStep(reason string, r proto.Rule) string {
 		return "the agent refuses this target itself: " + allowtargets.Env + " on the agent host does not list it. Add the target there, or point the rule elsewhere."
 	case ReasonListenerBindFailed:
 		// ユーザー空間モードの中継の待ち受けはエージェントのプロセス内の netstack にあり、
-		// ホストの他のプロセスとポート空間を共有しない。実機で観測した例は、stream が切れても
-		// リレーのポートを空けないエージェント自身の不具合(#211 で修正済み)によって、エージェント
-		// 自身の前のリスナーがまだそのポートを離していない場合だった。「他のプロセスを探す」という
-		// 以前の案内は誤りを誘うため直した(設計文書 改訂の記録)。
-		return "the agent's own earlier listener for this port has not been freed yet; this is internal to the agent process, not another " +
-			"process on the agent host. The agent retries every 30s and releases the port on its own; restarting the agent also frees it at once."
+		// ホストの他のプロセスとポート空間を共有しない。「他のプロセスを探す」という以前の案内は
+		// 誤りを誘うため直した。ラボで再現できた経路では、ポートを保持しているのは TIME_WAIT に
+		// 残った接続であって待ち受けそのものではないので、待ち受けと接続の両方を挙げる。実機で
+		// 観測した pre-#211 の例(stream が切れてもリレーのポートを空けない不具合。#211 で修正済み)
+		// は、無効化の直後の有効化でエージェント自身の前の待ち受けがまだそのポートを離していない
+		// 場合だった(設計文書 改訂の記録)。
+		return "an earlier listener or connection of the agent on this port has not been freed yet; this is internal to the agent process, " +
+			"not another process on the agent host. The agent retries every 30s and clears once that hold ends; restarting the agent also frees it at once."
 	case ReasonResolveFailed:
 		return "fix name resolution on the agent host, or point the rule at a literal address"
 	}
