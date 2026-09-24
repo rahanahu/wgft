@@ -248,7 +248,17 @@ func TestDiagnose(t *testing.T) {
 				in.From, in.HasFrom = netip.MustParseAddr("203.0.113.7"), true
 			},
 			wantFailed: checkSourceFilter, wantReason: reasonNotInAllowList,
-			wantDetail: "none covers 203.0.113.7",
+			wantDetail: "the allow list holds 1 entry and none covers 203.0.113.7",
+			wantNext:   "rule allow add",
+		},
+		{
+			name: "client not covered by a two-entry allow list keeps the plural",
+			mutate: func(r *proto.Rule, in *doctorInput) {
+				r.SourceAllow = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("192.0.3.0/24")}
+				in.From, in.HasFrom = netip.MustParseAddr("203.0.113.7"), true
+			},
+			wantFailed: checkSourceFilter, wantReason: reasonNotInAllowList,
+			wantDetail: "the allow list holds 2 entries and none covers 203.0.113.7",
 			wantNext:   "rule allow add",
 		},
 		{
@@ -1076,6 +1086,9 @@ func TestSourceFilterWithoutFrom(t *testing.T) {
 	}
 	if !strings.Contains(c.Next, "--from") {
 		t.Errorf("next must say how to evaluate it, got %q", c.Next)
+	}
+	if want := "this rule has 1 deny entry and 0 allow entries"; !strings.Contains(c.Detail, want) {
+		t.Errorf("detail = %q, want it to hold %q (singular deny entry, plural allow entries)", c.Detail, want)
 	}
 }
 

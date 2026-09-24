@@ -162,10 +162,11 @@ func applyNextStep(reason string) string {
 // (設計文書 5.3 節。拒否を先に評価する)。--from が無ければ試さない。
 func sourceFilterCheck(r proto.Rule, in Input) Check {
 	c := Check{ID: CheckSourceFilter, RuleID: r.ID, Group: GroupServer, Label: "source filter", hideWhenUntested: true}
-	c.Internal = append(c.Internal, fmt.Sprintf("%d deny, %d allow entries", len(r.SourceDeny), len(r.SourceAllow)))
+	c.Internal = append(c.Internal, fmt.Sprintf("%d deny %s, %d allow %s", len(r.SourceDeny), entryNoun(len(r.SourceDeny)), len(r.SourceAllow), entryNoun(len(r.SourceAllow))))
 	if !in.HasFrom {
 		c.Status, c.Reason = StatusNotTested, ReasonNoFrom
-		c.Detail = fmt.Sprintf("not tested: this rule has %d deny and %d allow entries, and no client address was given", len(r.SourceDeny), len(r.SourceAllow))
+		c.Detail = fmt.Sprintf("not tested: this rule has %d deny %s and %d allow %s, and no client address was given",
+			len(r.SourceDeny), entryNoun(len(r.SourceDeny)), len(r.SourceAllow), entryNoun(len(r.SourceAllow)))
 		c.Next = "add --from <client address> to see whether one client would be let in"
 		return c
 	}
@@ -193,7 +194,7 @@ func sourceFilterCheck(r proto.Rule, in Input) Check {
 			}
 		}
 		c.Status, c.Reason = StatusFailed, ReasonNotInAllowList
-		c.Detail = fmt.Sprintf("the allow list holds %d entries and none covers %s, so every other client is dropped", len(r.SourceAllow), in.From)
+		c.Detail = fmt.Sprintf("the allow list holds %d %s and none covers %s, so every other client is dropped", len(r.SourceAllow), entryNoun(len(r.SourceAllow)), in.From)
 		c.Next = fmt.Sprintf("if that is wrong: wgft rule allow add %s %s/32", ShortID(r.ID), in.From)
 		return c
 	}

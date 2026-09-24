@@ -783,3 +783,12 @@ func pluralS(n int) string {
 	}
 	return "s"
 }
+
+// entryNoun returns "entry" for n == 1 and "entries" otherwise. "entry" does not pluralize with
+// pluralS's plain "s".
+func entryNoun(n int) string {
+	if n == 1 {
+		return "entry"
+	}
+	return "entries"
+}
