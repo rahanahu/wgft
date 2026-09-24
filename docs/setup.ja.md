@@ -6,7 +6,7 @@
 
 VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。Apple シリコンの macOS でも動作し、macOS 27 で実機確認済みです。Intel Mac には対応していません。wgft は現在 IPv4 のみに対応しています。
 
-自宅側のエージェントには root 権限も TUN デバイスも不要です。VPS 側の要件は動作モードで変わります。
+既定のユーザー空間モードでは、自宅側のエージェントには root 権限も TUN デバイスも不要です。Linux のエージェントはカーネルモードでも動作し、カーネルモードには `CAP_NET_ADMIN` が必要です。詳しくは[カーネルモードで起動する](#カーネルモードで起動する)を参照してください。VPS 側の要件は動作モードで変わります。
 
 | | カーネルモード `kernel` | ユーザー空間モード `userspace` |
 |---|---|---|
@@ -288,6 +288,54 @@ sudo systemctl enable --now wgft-agent
 
 認証情報は `/var/lib/wgft/agent.json` に保存されます。
 
+### カーネルモードで起動する
+
+カーネルモード (`WGFT_MODE=kernel`) の Linux のエージェントは、ホストにカーネルの WireGuard インタフェースと `table inet wgft_agent` を作り、カーネルが DNAT で LAN の転送先へ転送します。インタフェースの名前は `WGFT_WG_INTERFACE` で変えない限り `wgft0` です。エージェントのプロセスは通信を中継しないため、エージェントの停止中や再起動中も転送は続きます。ただし停止中は、ルールの変更への追従、転送先の名前の引き直し、外からの変更で崩れたテーブルの修復が止まります。詳しくは [design.md](design.md) の 7b 節にあります。
+
+カーネルモードとユーザー空間モードの違いは次のとおりです。
+
+- 権限:エージェントには `CAP_NET_ADMIN` が必要で、ホストにはカーネルの WireGuard のモジュールが必要です。権限が無い場合、エージェントは起動時に終了コード 3 で止まり、ログに `CAP_NET_ADMIN` を示します
+- 転送先:IPv4 の転送先だけを転送し、`127.0.0.1` のようなループバックの転送先は拒否します。エージェントのホスト自身のサービスへ転送する場合は、そのホストの LAN のアドレスを転送先に指定します。このサービスから見た送信元は server のトンネルアドレスで、既定では `10.200.0.1` です。LAN の別のホストのサービスから見た送信元は、エージェントのホストの LAN のアドレスです
+- ホストの転送:エージェントは起動時に `net.ipv4.ip_forward` が 0 なら 1 に書き換え、書き換えたことを `agent.json` に記録します。ホストは wgft 以外の通信もインタフェースの間で転送するようになり、wgft のテーブルが制限するのは `wgft0` が関わる転送だけです。エージェントが `ip_forward` を 0 に戻すことはありません
+- 同時フロー数の上限:`WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS` は使いません。フローはホストの conntrack の表が保持します
+
+`WGFT_AGENT_ALLOW_TARGETS` の意味はカーネルモードでも変わらず、一覧の外の転送先には DNAT を作りません。
+
+カーネルモードの手順は、前節の systemd の構成を前提にします。付属の `agent.service` は権限を持たないままとし、drop-in の [deploy/agent.kernel.conf](../deploy/agent.kernel.conf) が `CAP_NET_ADMIN` だけを加えます。エージェントは引き続き `wgft` ユーザーで動作し、unit の他のサンドボックスの設定も変わりません。drop-in を unit の隣に置き、`agent.env` に `WGFT_MODE=kernel` を加えます。
+
+```sh
+sudo install -D -m 0644 deploy/agent.kernel.conf /etc/systemd/system/wgft-agent.service.d/kernel.conf
+printf 'WGFT_MODE=kernel\n' | sudo tee -a /etc/wgft/agent.env >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart wgft-agent
+```
+
+新しいホストでは、systemd の構成の `systemctl enable --now wgft-agent` の前に最初の 3 つのコマンドを実行します。エージェントは登録を済ませ、カーネルモードで起動します。ユーザー空間モードで動いているエージェントは、最後の restart でカーネルモードに切り替わります。`ProtectKernelTunables=` は `/proc/sys` を読み取り専用にし、エージェントによる `ip_forward` の書き換えを止めるため、drop-in に加えないでください。
+
+結果は `agent doctor` で確かめます。エージェントの稼働中は、エージェントの利用者として実行します。Dataplane の群の項目は、エージェント自身が報告する `wgft0`、テーブル、転送の設定を示し、終了コード 0 はこのホストが転送できることを意味します。
+
+```sh
+sudo runuser -u wgft -- wgft agent doctor
+```
+
+エージェントの停止中は、カーネルの状態を root だけが読めるため、`sudo wgft agent doctor` を実行します。process の項目は FAILED になりますが、カーネルが転送を続けるので、`wgft0`、テーブル、`ip_forward` がそろっていれば終了コードは 0 です。停止中のエージェントを `wgft` ユーザーとして診断すると、Dataplane の群の項目は `needs_cap_net_admin` の UNKNOWN になり、終了コードは 2 になります。
+
+ユーザー空間モードへ戻すには、エージェントを止め、カーネルモードが残したものを `wgft agent teardown` で削除してから、`WGFT_MODE=kernel` と drop-in を取り除きます。
+
+```sh
+sudo systemctl stop wgft-agent
+sudo wgft agent teardown --dry-run
+sudo wgft agent teardown
+sudo sed -i '/^WGFT_MODE=/d' /etc/wgft/agent.env
+sudo rm /etc/systemd/system/wgft-agent.service.d/kernel.conf
+sudo systemctl daemon-reload
+sudo systemctl start wgft-agent
+```
+
+`wgft agent teardown` は、`wgft0`、エージェントが転送したフローの conntrack のエントリ、`table inet wgft_agent`、`agent.json` のカーネルモードの記録を削除します。登録の情報と鍵は残るため、エージェントは同じエージェントとして接続し直します。エージェントの稼働中は何も削除せずに拒否します。`ip_forward` は元に戻しません。エージェントが 0 から書き換えた場合は、元に戻すコマンドを出力に示します。teardown の前にユーザー空間モードで起動したエージェントは、カーネルモードの記録が残っている間は起動を拒否し、`wgft agent teardown` の実行を案内します。
+
+以上の手順は、開発環境の Debian 12 の VM で、server をカーネルモードにして確認済みです。確認した内容は、エージェントのホスト自身のアドレスと別のホストへの TCP と UDP の転送、VM の再起動、エージェントの停止中の転送、稼働中と停止中の `agent doctor`、drop-in が無い場合の終了コード 3、teardown、2 つのモードの間の切り替えです。試験用の実機では、Proxmox VE の非特権の LXC コンテナ (Debian 13) で drop-in を確認済みです。このコンテナは nesting を有効にし、AppArmor のプロファイルを unconfined にしています。確認した内容は、`systemctl restart wgft-agent` の後とコンテナ自体の再起動の後に転送が戻ること、約 40 秒 エージェントを止めている間も転送が続くこと、エージェントの稼働中と停止中の `wgft agent rotate-key` です。Ubuntu や Fedora のような他のディストリビューション、SELinux や AppArmor を有効にしたディストリビューション、nesting を無効にした Proxmox VE のコンテナ、AppArmor のプロファイルが制限をかける Proxmox VE のコンテナ、Incus のコンテナ、Docker では未確認です。Docker でカーネルモードを使う手順は、このガイドに記載していません。
+
 ### Docker で起動する
 
 [deploy/agent.compose.yaml](../deploy/agent.compose.yaml) の `WGFT_JOIN` を設定して起動します。
@@ -454,6 +502,8 @@ sudo wgft server teardown --purge --yes
 ```
 
 `--purge` を付けなければ key と証明書は残るため、再起動後も同じ server identity を使えます。`--purge` を付けると server key、ルール、agent 登録も削除されるため、agent の再登録が必要です。
+
+カーネルモードのエージェントは、停止した後もインタフェースと nftables のテーブルをカーネルに残します。認証情報を削除する前にエージェントを止め、`sudo wgft agent teardown` を実行してください。詳しくは[カーネルモードで起動する](#カーネルモードで起動する)を参照してください。
 
 Docker の agent を認証情報ごと削除する場合:
 

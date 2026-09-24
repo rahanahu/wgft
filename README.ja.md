@@ -57,7 +57,19 @@ wgft は Pangolin から着想を得ています。Pangolin を使って、VPS �
 
 VPS で root が使える場合はカーネルモードを使います。root やカーネル WireGuard が使えない場合、または server をコンテナ内だけで動かしたい場合はユーザー空間モードを使います。
 
-VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。Apple シリコンの macOS でも動作し、macOS 27 で実機確認済みです。Intel Mac には対応していません。wgft は IPv4 のみに対応しています。自宅側の agent には root 権限も TUN デバイスも不要で、Windows でも管理者権限は不要です。macOS の agent は利用者の権限で動作します。
+VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。Apple シリコンの macOS でも動作し、macOS 27 で実機確認済みです。Intel Mac には対応していません。wgft は IPv4 のみに対応しています。既定のユーザー空間モードでは、自宅側の agent には root 権限も TUN デバイスも不要で、Windows でも管理者権限は不要です。macOS の agent は利用者の権限で動作します。
+
+### 自宅側 agent のカーネルモード
+
+Linux の自宅側 agent も、カーネルモードで転送できます。`agent.env` に `WGFT_MODE=kernel` を書くと、agent は自宅のホストにカーネルの WireGuard インタフェース `wgft0` と nftables のテーブルを作り、カーネルが DNAT で LAN の転送先へ転送します。agent のプロセスは通信を中継しないため、agent の停止中や再起動中も転送は続きます。`WGFT_MODE=kernel` を書かなければ、agent はユーザー空間モードで動作します。
+
+カーネルモードには `CAP_NET_ADMIN` が必要です。付属の `agent.service` は権限を持たないままとし、drop-in の [deploy/agent.kernel.conf](deploy/agent.kernel.conf) がこの権限だけを加えます。agent は引き続き `wgft` ユーザーで動作します。カーネルモードは IPv4 の転送先だけを扱い、ループバックの転送先を拒否します。agent のホスト自身のサービスへ転送する場合は、そのホストの LAN のアドレスを転送先に指定します。
+
+カーネルモードでは、自宅のホストがルータとして働きます。agent は `net.ipv4.ip_forward` が 0 なら 1 に書き換えるため、ホストは wgft 以外の通信もインタフェースの間で転送するようになります。wgft のテーブルが制限するのは、`wgft0` が関わる転送だけです。
+
+ユーザー空間モードへ戻すには、agent を止めてから `sudo wgft agent teardown` を実行します。`wgft agent teardown` はインタフェース、テーブル、カーネルモードの記録を削除します。`ip_forward` は変更せず、元に戻す方法を表示します。`wgft agent doctor` は、カーネルモードの agent のインタフェース、テーブル、IP の転送の設定がそろっているかを示します。手順は[セットアップガイド](docs/setup.ja.md#カーネルモードで起動する)を参照してください。
+
+試験用の実機では、Proxmox VE の非特権の LXC コンテナで drop-in を確認済みです。このコンテナの OS は Debian 13 で、nesting を有効にし、AppArmor のプロファイルを unconfined にしています。確認した内容は、`systemctl restart wgft-agent` の後とコンテナ自体の再起動の後に転送が戻ること、約 40 秒 agent を止めている間も転送が続くこと、agent の稼働中と停止中の `wgft agent rotate-key` です。開発環境の Debian 12 の VM でも、転送、VM の再起動、agent の停止中の転送、`wgft agent doctor`、teardown によるユーザー空間モードへの戻しを確認済みです。nesting を無効にした Proxmox VE のコンテナ、AppArmor のプロファイルが制限をかける Proxmox VE のコンテナ、Incus のコンテナ、Docker、SELinux や AppArmor を有効にしたディストリビューションでは未確認です。Docker でカーネルモードを使う手順は、セットアップガイドに記載していません。
 
 ## クイックスタート
 
@@ -172,7 +184,7 @@ Web UI の診断の画面は、同じ証拠から組み立てた同じ判定を�
 
 ![1 本のルールの診断の画面](docs/images/doctor-rule.ja.png)
 
-`wgft agent doctor` は agent のホストで実行し、agent が動いているか、認証情報を持っているか、必要な名前を解決できるかを示します。判定は実行した利用者の権限で行うため、agent と同じ利用者として実行します。root で実行すると、agent 自身の利用者がファイルを読めるかを判定できないので、privileges の項目は UNKNOWN になります。agent 自身が root で動く配置では root での実行が正しく、privileges の UNKNOWN は想定どおりの結果です。`--json` を付けると、どちらの doctor も診断の結果を JSON で出力します。JSON の検査の id と reason の値は、版が上がって種類が増えることはあっても、既にある値の意味は変わりません。
+`wgft agent doctor` は agent のホストで実行し、agent が動いているか、認証情報を持っているか、必要な名前を解決できるかを示します。カーネルモードの agent では、WireGuard インタフェース、nftables のテーブル、IP の転送の設定も検査します。カーネルが転送を続けるため、停止中のカーネルモードの agent でも、インタフェース、テーブル、転送の設定がそろっていれば終了コードは 0 です。agent の停止中にこの状態を読むには root 権限が必要です。それ以外の場合、判定は実行した利用者の権限で行うため、agent と同じ利用者として実行します。root で実行すると、agent 自身の利用者がファイルを読めるかを判定できないので、privileges の項目は UNKNOWN になります。agent 自身が root で動く配置では root での実行が正しく、privileges の UNKNOWN は想定どおりの結果です。`--json` を付けると、どちらの doctor も診断の結果を JSON で出力します。JSON の検査の id と reason の値は、版が上がって種類が増えることはあっても、既にある値の意味は変わりません。
 
 各状態の意味と終了コードは [CLI リファレンス](docs/cli.md) を、検査の判定の仕方は [設計](docs/design.md) を参照してください。
 

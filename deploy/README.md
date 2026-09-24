@@ -9,13 +9,14 @@ The step-by-step procedure is in [docs/setup.md](../docs/setup.md). This directo
 | `Dockerfile.server` | Container for the server in the userspace mode (docs/design.md section 6.3). Static binary, unprivileged, no nftables, runs as uid 65532 |
 | `server.compose.yaml` | Docker Compose for the server: `WGFT_WG_ENDPOINT` and the state volume. Pulls `ghcr.io/rahanahu/wgft-server` (amd64 and arm64, built from `Dockerfile.server` by the release workflow); `build:` is there, commented out, for building from source |
 | `agent.service` | systemd unit for the home agent as a plain binary. Runs as the unprivileged user `wgft`; `/etc/wgft/agent.env` holds `WGFT_JOIN` for the first start |
+| `agent.kernel.conf` | systemd drop-in for `agent.service` that lets the agent run in kernel mode, `WGFT_MODE=kernel`: adds `CAP_NET_ADMIN` as an ambient capability and nothing else, and the agent still runs as `wgft`. Install it as `/etc/systemd/system/wgft-agent.service.d/kernel.conf`; see docs/setup.md, "Run the agent in kernel mode" |
 | `Dockerfile.agent` | Container for the home agent. Static binary, unprivileged, no TUN, runs as uid 65532 |
 | `agent.compose.yaml` | Docker Compose for the agent: `WGFT_JOIN` / `WGFT_NAME` and the state volume. Pulls `ghcr.io/rahanahu/wgft-agent` (amd64 and arm64, built from `Dockerfile.agent` by the release workflow); `build:` is there, commented out, for building from source |
 | `io.github.rahanahu.wgft.agent.plist` | launchd LaunchDaemon for the home agent on macOS (`wgft agent run`, label `io.github.rahanahu.wgft.agent`). Runs with the rights of the user named in `UserName`, not as root, with `WGFT_DATA_DIR` in that user's `~/Library/Application Support/wgft`. Replace `YOUR_USER` before installing; it holds no `WGFT_JOIN`, so register once from Terminal first. A LaunchDaemon rather than a LaunchAgent because a LaunchAgent could not reach other LAN hosts (docs/design.md section 11a) |
 
 Binaries are built with `../scripts/build-release.sh` into `dist/wgft-linux-<arch>` (a single file, no CGO).
 
-The two sides are not symmetric in kernel mode. **The server needs privileges** (it configures wg0 and nftables over netlink). **The agent is unprivileged** (user-space wireguard-go + gVisor netstack, so no TUN and no NET_ADMIN; it only needs outbound UDP and reachability to the LAN targets). The server's userspace mode drops that asymmetry: `Dockerfile.server` runs the same wireguard-go and netstack as the agent, so it needs no privileges either. It replaces kernel mode, not just its packaging; see docs/design.md section 6.3 for what that trades away.
+Privileges follow the mode, on either side. **Kernel mode needs `CAP_NET_ADMIN`** (the WireGuard interface and nftables over netlink): `server.service` always grants it, and the agent gets it only from `agent.kernel.conf`. **Userspace mode is unprivileged** (user-space wireguard-go + gVisor netstack, so no TUN and no NET_ADMIN; it only needs outbound UDP and reachability to the LAN targets). The agent defaults to userspace mode, so `agent.service`, `Dockerfile.agent` and `agent.compose.yaml` stay unprivileged. `Dockerfile.server` runs the server in userspace mode, which replaces kernel mode, not just its packaging; see docs/design.md section 6.3 for what that trades away. There are no kernel-mode files for the agent in Docker.
 
 ## Removal
 
@@ -27,7 +28,15 @@ sudo wgft server teardown --dry-run     # show what would be removed and what to
 sudo wgft server teardown --purge --yes # do it (--purge also removes keys and certificates)
 ```
 
-On the home side:
+On the home side, a kernel-mode agent first needs `wgft agent teardown`: it keeps its interface and `table inet wgft_agent` in the kernel after it stops. The command removes only what the agent created. It does not set `ip_forward` back; when the agent changed it from 0, it prints how to restore it.
+
+```sh
+sudo systemctl stop wgft-agent
+sudo wgft agent teardown --dry-run     # show what would be removed and what to revert by hand
+sudo wgft agent teardown
+```
+
+Then, in any mode:
 
 ```sh
 # with compose, including the state volume
