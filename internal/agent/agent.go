@@ -138,6 +138,7 @@ func Run(opts Options) error {
 		return err
 	}
 	defer lock.Release()
+	removeLeftoverTemps(lock, opts.CredentialsPath)
 
 	f, err := credentials.LoadOrNew(opts.CredentialsPath)
 	if err != nil {
