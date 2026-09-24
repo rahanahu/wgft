@@ -144,7 +144,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | L2 | `lab/connlimit.sh` | 送信元ごとの同時フロー数の上限 (`ct count`) が実際のパケットで守られないこと、既存のフローの追い出し | ラボ | `admission`、`kernel`、`nft-emit` | A9 として | 約 30 秒 | 自動 |
 | L3 | `lab/rates.sh` (kernel と userspace) | 3 つのレートと `Relay` のルールのレートの実際の通過数が両モードで食い違うこと、拒否した段が後の段のトークンを使うこと、TCP のルールに `packet_rate` が効くこと | ラボ | `admission`、`nft-emit`、`relay`、`userspace` | A9 として | モードごとに約 50 秒 | 自動 |
 | L4 | `lab/lifecycle.sh` check 1 | server の再起動の間に kernel モードの転送と conntrack が途切れること | ラボ | `reconcile`、`kernel`、`userspace`、`protocol` | A9 として | 1 分前後 | 自動 |
-| L5 | `lab/lifecycle.sh` check 2 | 無関係なルールの追加、変更、削除で既存のフローが切れること | ラボ | `reconcile`、`rule-ops`、`kernel` | A9 として | 1 分前後 | 自動 |
+| L5 | `lab/lifecycle.sh` check 2 | 無関係なルールの追加、変更、削除で既存のフローが切れること、成立済みの TCP のセッションを切ったルールが 10 秒以内に転送に戻らないこと | ラボ | `reconcile`、`rule-ops`、`kernel` | A9 として | 1 分前後 | 自動 |
 | L6 | `lab/lifecycle.sh` check 3、3b | Relay の bind の失敗が nftables に漏れること、テーブルの差し替えの失敗で待ち受けが戻らないこと | ラボ | `relay`、`reconcile` | A9 として | 1 分前後 | 自動 |
 | L7 | `lab/lifecycle.sh` check 4 | `server teardown` が wgft の物以外を削除すること | ラボ | `kernel`、`deploy` | A9 として | 1 分未満 | 自動 |
 | L8 | `lab/lifecycle.sh` check 5、5b、5c、5d、5e | 上限までのフラッドでメモリがソフト上限と余裕の和を超えること (check 5 は半分の予算、5b は既定の予算)、1 本のルールへのフラッドが他のルールの新しいフローまで止めること (5c は 2 本、5d は 3 本のルール)、既定より小さい予算で隔離が崩れること (5e) | ラボ (CPU を占有できる VM) | `resource`、`userspace` | A9 として | 3 から 4 分 | 自動 |
