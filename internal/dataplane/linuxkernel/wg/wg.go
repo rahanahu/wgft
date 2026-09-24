@@ -1,9 +1,10 @@
 //go:build linux
 
-// Package wg は VPS(および将来の agent の kernel backend、Phase 7)の WireGuard インタフェースを
-// 宣言に収束させる(仕様 4, 9 節、設計文書 7a.7 節)。インタフェースの作成とアドレス・MTU は
-// netlink で、鍵・ポート・ピアは wgctrl で扱う。停止時には何も削除しない。internal/vpsd を
-// import しない(internal/platform/linux の bind 中ポート検査だけを使う)。
+// Package wg は VPS の wg0(このファイル)と、カーネルモードのエージェントの単一ピアの
+// インタフェース(agent.go、設計文書 7b 節)の WireGuard インタフェースを宣言に収束させる
+// (仕様 4, 9 節、設計文書 7a.7 節)。インタフェースの作成とアドレス・MTU は netlink で、鍵・ポート・
+// ピアは wgctrl で扱う。作成、MTU、アドレスの収束は両者で共有する。停止時には何も削除しない。internal/vpsd と
+// internal/agent を import しない(internal/platform/linux の bind 中ポート検査だけを使う)。
 package wg
 
 import (
@@ -71,10 +72,17 @@ func conflictError(dryRun []string, format string, a ...any) error {
 // 改訂の記録 2026-09-20). The category is prerequisite: a process's capabilities are fixed when it
 // is executed, so the same unit will always exec it the same way.
 func classifyPrivilege(err error) error {
+	return privilegeRefusal(err, "kernel mode needs CAP_NET_ADMIN: %v. Run as root or with that capability, as the shipped server.service does with AmbientCapabilities=CAP_NET_ADMIN, or set WGFT_MODE=userspace, which needs neither")
+}
+
+// privilegeRefusal is classifyPrivilege with the reason's text as a parameter, so the server's wg0
+// and the agent's single-peer link (agent.go) name their own ways out. format takes err as its one
+// argument.
+func privilegeRefusal(err error, format string) error {
 	if err == nil || !errors.Is(err, os.ErrPermission) {
 		return err
 	}
-	return startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN: %v. Run as root or with that capability, as the shipped server.service does with AmbientCapabilities=CAP_NET_ADMIN, or set WGFT_MODE=userspace, which needs neither", err)
+	return startup.Prerequisite("CAP_NET_ADMIN", format, err)
 }
 
 // Ensure は wg0 を宣言に収束させ、変えた点を返す。なければ作り、あれば差分だけ直す。
@@ -132,15 +140,8 @@ func Ensure(cfg Config) (changes []string, err error) {
 
 	link, err := netlink.LinkByName(cfg.Interface)
 	if _, notFound := err.(netlink.LinkNotFoundError); notFound {
-		if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: cfg.Interface, MTU: cfg.MTU}}); err != nil {
-			if errors.Is(err, unix.EOPNOTSUPP) {
-				// カーネルが wireguard のリンク種別を知らない(モジュールが無い、ロードできない)。
-				// LinkAdd 自体が自動ロードを試した後なので、再起動では現れない。運用者が
-				// モジュールを入れるか別のカーネルで起動するまで同じ結果になるので、
-				// prerequisite の拒否として扱う(仕様 9 節、設計文書 11b 節)。
-				return nil, startup.Prerequisite("wireguard module", "cannot create %s: this kernel has no WireGuard support; the wireguard module is missing or cannot be loaded, and `modprobe wireguard` shows why. Kernel mode needs it; on a VPS without it, run the userspace mode instead by setting WGFT_MODE=userspace", cfg.Interface)
-			}
-			return nil, fmt.Errorf("cannot create %s: %w", cfg.Interface, err)
+		if err := createLink(cfg.Interface, cfg.MTU, "cannot create %s: this kernel has no WireGuard support; the wireguard module is missing or cannot be loaded, and `modprobe wireguard` shows why. Kernel mode needs it; on a VPS without it, run the userspace mode instead by setting WGFT_MODE=userspace"); err != nil {
+			return nil, err
 		}
 		created = true
 		note("create interface %s", cfg.Interface)
@@ -168,35 +169,8 @@ func Ensure(cfg Config) (changes []string, err error) {
 		}
 	}
 
-	if link.Attrs().MTU != cfg.MTU {
-		if err := netlink.LinkSetMTU(link, cfg.MTU); err != nil {
-			return nil, fmt.Errorf("MTU: %w", err)
-		}
-		note("MTU %d -> %d", link.Attrs().MTU, cfg.MTU)
-	}
-
-	want := &netlink.Addr{IPNet: prefixToIPNet(cfg.Address)}
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
-	if err != nil {
+	if err := convergeMTUAndAddress(link, cfg.MTU, cfg.Address, note); err != nil {
 		return nil, err
-	}
-	have := false
-	for i := range addrs {
-		a := &addrs[i]
-		if a.IPNet.String() == want.IPNet.String() {
-			have = true
-			continue
-		}
-		if err := netlink.AddrDel(link, a); err != nil {
-			return nil, fmt.Errorf("delete address %s: %w", a.IPNet, err)
-		}
-		note("delete address %s", a.IPNet)
-	}
-	if !have {
-		if err := netlink.AddrAdd(link, want); err != nil {
-			return nil, fmt.Errorf("add address %s: %w", want.IPNet, err)
-		}
-		note("add address %s", want.IPNet)
 	}
 
 	dev, err := c.Device(cfg.Interface)
@@ -248,13 +222,114 @@ func Ensure(cfg Config) (changes []string, err error) {
 		}
 	}
 
+	if err := bringUp(link, note); err != nil {
+		return nil, err
+	}
+	return changes, nil
+}
+
+// createLink creates a WireGuard link named name with the given MTU. A kernel without the
+// wireguard link type makes LinkAdd fail with EOPNOTSUPP; that becomes a prerequisite refusal whose
+// reason is noWireGuardFormat with name as its one argument, so the server and the agent each name
+// their own way out.
+func createLink(name string, mtu int, noWireGuardFormat string) error {
+	if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: name, MTU: mtu}}); err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) {
+			// カーネルが wireguard のリンク種別を知らない(モジュールが無い、ロードできない)。
+			// LinkAdd 自体が自動ロードを試した後なので、再起動では現れない。運用者が
+			// モジュールを入れるか別のカーネルで起動するまで同じ結果になるので、
+			// prerequisite の拒否として扱う(仕様 9 節、設計文書 11b 節)。
+			return startup.Prerequisite("wireguard module", noWireGuardFormat, name)
+		}
+		return fmt.Errorf("cannot create %s: %w", name, err)
+	}
+	return nil
+}
+
+// convergeMTUAndAddress sets link's MTU to mtu and its IPv4 addresses to exactly addr, noting each
+// change. The server's wg0 and the agent's link converge these two the same way.
+func convergeMTUAndAddress(link netlink.Link, mtu int, addr netip.Prefix, note func(string, ...any)) error {
+	if link.Attrs().MTU != mtu {
+		if err := netlink.LinkSetMTU(link, mtu); err != nil {
+			return fmt.Errorf("MTU: %w", err)
+		}
+		note("MTU %d -> %d", link.Attrs().MTU, mtu)
+	}
+
+	want := &netlink.Addr{IPNet: prefixToIPNet(addr)}
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return err
+	}
+	have := false
+	for i := range addrs {
+		a := &addrs[i]
+		if a.IPNet.String() == want.IPNet.String() {
+			have = true
+			continue
+		}
+		if err := netlink.AddrDel(link, a); err != nil {
+			return fmt.Errorf("delete address %s: %w", a.IPNet, err)
+		}
+		note("delete address %s", a.IPNet)
+	}
+	if !have {
+		if err := netlink.AddrAdd(link, want); err != nil {
+			return fmt.Errorf("add address %s: %w", want.IPNet, err)
+		}
+		note("add address %s", want.IPNet)
+	}
+	return nil
+}
+
+// bringUp sets link up if it is down.
+func bringUp(link netlink.Link, note func(string, ...any)) error {
 	if link.Attrs().Flags&net.FlagUp == 0 {
 		if err := netlink.LinkSetUp(link); err != nil {
-			return nil, fmt.Errorf("up: %w", err)
+			return fmt.Errorf("up: %w", err)
 		}
 		note("up")
 	}
-	return changes, nil
+	return nil
+}
+
+// addressPlan lists, for a dry run, the address changes convergeMTUAndAddress would make.
+func addressPlan(link netlink.Link, mtu int, addr netip.Prefix) []string {
+	var out []string
+	if link.Attrs().MTU != mtu {
+		out = append(out, fmt.Sprintf("MTU %d->%d", link.Attrs().MTU, mtu))
+	}
+	if addrs, err := netlink.AddrList(link, netlink.FAMILY_V4); err == nil {
+		want := prefixToIPNet(addr).String()
+		have := false
+		for _, a := range addrs {
+			if a.IPNet.String() == want {
+				have = true
+			} else {
+				out = append(out, "delete address "+a.IPNet.String())
+			}
+		}
+		if !have {
+			out = append(out, "add address "+want)
+		}
+	}
+	return out
+}
+
+// ipv4Prefixes reads link's IPv4 addresses.
+func ipv4Prefixes(link netlink.Link) ([]netip.Prefix, error) {
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return nil, err
+	}
+	var out []netip.Prefix
+	for _, a := range addrs {
+		if p, ok := netip.AddrFromSlice(a.IPNet.IP); ok {
+			ones, _ := a.IPNet.Mask.Size()
+			out = append(out, netip.PrefixFrom(p.Unmap(), ones))
+		}
+	}
+	return out, nil
 }
 
 // Owned は iface が存在し、その秘密鍵が expectedKey と一致する(=wgft が作った)かを返す。
@@ -384,24 +459,7 @@ func checkAddrOverlap(cfg Config) error {
 // planChanges は、そのまま収束していたら加えていた変更をドライランで列挙する。
 // 所有判定で拒む前に、何を壊すところだったかを見せるために使う。
 func planChanges(link netlink.Link, dev *wgtypes.Device, cfg Config) []string {
-	var out []string
-	if link.Attrs().MTU != cfg.MTU {
-		out = append(out, fmt.Sprintf("MTU %d->%d", link.Attrs().MTU, cfg.MTU))
-	}
-	if addrs, err := netlink.AddrList(link, netlink.FAMILY_V4); err == nil {
-		want := prefixToIPNet(cfg.Address).String()
-		have := false
-		for _, a := range addrs {
-			if a.IPNet.String() == want {
-				have = true
-			} else {
-				out = append(out, "delete address "+a.IPNet.String())
-			}
-		}
-		if !have {
-			out = append(out, "add address "+want)
-		}
-	}
+	out := addressPlan(link, cfg.MTU, cfg.Address)
 	if dev.PrivateKey != cfg.PrivateKey {
 		out = append(out, "replace the private key")
 	}
@@ -470,15 +528,8 @@ func Inspect(iface string) (DeviceState, error) {
 		return st, nil
 	}
 	st.Up = link.Attrs().Flags&net.FlagUp != 0
-	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
-	if err != nil {
+	if st.Addresses, err = ipv4Prefixes(link); err != nil {
 		return DeviceState{}, err
-	}
-	for _, a := range addrs {
-		if p, ok := netip.AddrFromSlice(a.IPNet.IP); ok {
-			ones, _ := a.IPNet.Mask.Size()
-			st.Addresses = append(st.Addresses, netip.PrefixFrom(p.Unmap(), ones))
-		}
 	}
 	c, err := wgctrl.New()
 	if err != nil {
