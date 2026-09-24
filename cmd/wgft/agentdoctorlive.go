@@ -117,6 +117,11 @@ const (
 	// agentReasonNoRelay は、中継がまだ無い場合である。中継はトンネルと一緒に作られるので、
 	// トンネルが無い間は中継も無い。
 	agentReasonNoRelay = "no_relay"
+	// agentReasonAgentDisabled は、server がこのエージェントを無効にしている場合である
+	// (仕様 5.1 節、設計文書 10.2c 節の relay.listeners の粒度)。無効を示すための新しい検査は
+	// 作らない。カーネルモードの dataplane.table(同節の「カーネルモードのエージェント」の項)も
+	// 同じ符号を使う設計だが、その検査自体はまだ実装していない。
+	agentReasonAgentDisabled = "agent_disabled"
 )
 
 // 所見に並べる項目の数の上限。ルールの本数にも拒否の組み合わせの数にも上限が無いので、1 行が
@@ -221,8 +226,8 @@ func dialAgentControl(path string) (net.Conn, error) {
 
 // agentLiveChecks は、稼働中のプロセスの制御ソケットからしか取れない検査を組み立てる。項目ごと
 // 落とす案は採らない。実行の状態によって項目そのものが消えると、機械が処理しにくくなるためで
-// ある(10.2c 節)。
-func agentLiveChecks(in agentDoctorInput, run agentRunState, live agentLive) []agentDoctorCheck {
+// ある(10.2c 節)。agentName は relay.listeners の所見が名指す、このエージェントの登録名である。
+func agentLiveChecks(in agentDoctorInput, run agentRunState, live agentLive, agentName string) []agentDoctorCheck {
 	out := make([]agentDoctorCheck, 0, len(agentLiveOnly))
 	for _, spec := range agentLiveOnly {
 		c := agentDoctorCheck{ID: spec.ID, Group: spec.Group, Label: spec.Label, verdict: spec.verdict, valueOnly: spec.valueOnly}
@@ -241,7 +246,7 @@ func agentLiveChecks(in agentDoctorInput, run agentRunState, live agentLive) []a
 			out = append(out, c)
 			continue
 		}
-		agentLiveValueCheck(&c, in, live.Resp)
+		agentLiveValueCheck(&c, in, live.Resp, agentName)
 		out = append(out, c)
 	}
 	return out
@@ -374,7 +379,7 @@ func agentControlCheck(c *agentDoctorCheck, run agentRunState, live agentLive) {
 }
 
 // agentLiveValueCheck は、読めた値を検査に写す。
-func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *agent.DoctorResponse) {
+func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *agent.DoctorResponse, agentName string) {
 	switch c.ID {
 	case agentCheckStreamConn:
 		agentStreamConnCheck(c, in, resp.Stream)
@@ -391,7 +396,7 @@ func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *agent.D
 	case agentCheckTransfer:
 		agentTransferCheck(c, in, resp.RuntimeState)
 	case agentCheckListeners:
-		agentListenersCheck(c, resp.RuntimeState)
+		agentListenersCheck(c, resp.RuntimeState, agentName)
 	case agentCheckSessions:
 		agentSessionsCheck(c, resp.RuntimeState)
 	case agentCheckRefusals:
@@ -585,7 +590,17 @@ func agentTransferCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.Doct
 // agentListenersCheck はルールごとのリスナーを示す。総合判定を動かす検査である。判定も所見も
 // ルール単位とし、FAILED になるのはルール単位の状態が error の場合だけである。リスナー 1 つずつは
 // 並べない(10.2c 節)。
-func agentListenersCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
+//
+// server がこのエージェントを無効にしている場合(仕様 5.1 節)は、中継の有無を見るより先に
+// SKIPPED とする(設計文書 10.2c 節の relay.listeners の粒度)。無効なエージェントは宣言どおり
+// リスナーを 1 つも持たなくなるので、中継そのものは生きていても「ルールを持たない健全な配置」
+// (agentNoRelay の下の分岐)と区別が付かない。無効を示すための新しい検査は作らない。
+func agentListenersCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState, agentName string) {
+	if st.AgentDisabled {
+		agentDisabledSkip(c)
+		c.Detail = "the server has disabled this agent; it opens no listeners until wgft agent enable " + orDash(agentName) + " is run on the VPS"
+		return
+	}
 	if agentNoRelay(c, st, "which listeners are open") {
 		return
 	}
@@ -723,6 +738,14 @@ func agentNoRelay(c *agentDoctorCheck, st *agent.DoctorRuntimeState, what string
 	c.Detail = "there is no relay running, so " + what + " could not be read: the relay is built with the tunnel, and there is no tunnel now"
 	c.Next = "the tunnel line above says why there is none"
 	return true
+}
+
+// agentDisabledSkip は状態と理由の符号を SKIPPED / agent_disabled に置く。呼び出し側が Detail を
+// 組み立てる。relay.listeners がこの実装で使う。設計文書 10.2c 節の「カーネルモードのエージェント」
+// の項は、カーネルモードの dataplane.table(まだ実装していない)も同じ符号を使うと定めており、
+// 実装するときにこの判定を共有できるよう、状態と符号だけをここに切り出してある。
+func agentDisabledSkip(c *agentDoctorCheck) {
+	c.Status, c.Reason = statusSkipped, agentReasonAgentDisabled
 }
 
 // agentAllowTargetsValue は、稼働中のエージェントが実際に持っている宛先の許可一覧を示す。組み立てた

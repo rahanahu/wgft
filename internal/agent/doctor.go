@@ -97,6 +97,11 @@ type DoctorRuntimeState struct {
 	// (設計文書 10.2c 節)。中継が無ければゼロ値の時刻になる。項目そのものは必ず出るので、
 	// 読み手は IsZero で判定する
 	RefusalsSince time.Time `json:"refusals_since"`
+	// AgentDisabled は、最後に適用した全体状態の proto.State.AgentDisabled をそのまま写した
+	// ものである(仕様 5.1 節)。server がこのエージェントを無効にしていることをエージェント
+	// 自身の診断のために示すだけで、守りには使わない。relay.listeners はこの値から SKIPPED を
+	// 判定する(設計文書 10.2c 節)
+	AgentDisabled bool `json:"agent_disabled"`
 }
 
 // DoctorTunnel はトンネルの状態である。State と Reason はハートビートが組み立てる値そのもので、
@@ -304,6 +309,9 @@ func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 	st := &DoctorRuntimeState{Generation: rt.gen}
 	if rt.opts.Mode == credentials.ModeKernel {
 		st.Mode = credentials.ModeKernel
+	}
+	if rt.f != nil && rt.f.LastState != nil {
+		st.AgentDisabled = rt.f.LastState.AgentDisabled
 	}
 	r := rt.dp.read()
 	tun := rt.tunnelSnapshotLocked(r.tunnel)

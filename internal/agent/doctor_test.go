@@ -678,15 +678,87 @@ func TestDoctorLeavesOutEmptyLists(t *testing.T) {
 			t.Errorf("%s is present although the agent has no relay: %s", key, line)
 		}
 	}
-	for _, key := range []string{`"refusals_since"`, `"last_handshake"`, `"started_at"`, `"retry_at"`} {
+	for _, key := range []string{`"refusals_since"`, `"last_handshake"`, `"started_at"`, `"retry_at"`, `"agent_disabled"`} {
 		if !strings.Contains(line, key) {
-			t.Errorf("%s is missing; a time field never disappears from the answer: %s", key, line)
+			t.Errorf("%s is missing; a time field never disappears from the answer, and agent_disabled has no omitempty either, so a false value still shows the key: %s", key, line)
 		}
 	}
 	res := parseDoctor(t, line)
 	if !res.RuntimeState.RefusalsSince.IsZero() || !res.RuntimeState.Tunnel.StartedAt.IsZero() {
 		t.Errorf("a time with no value did not survive as the zero time: %+v", res.RuntimeState)
 	}
+	if res.RuntimeState.AgentDisabled {
+		t.Errorf("AgentDisabled = true, want false: this runtime never applied a disabled state")
+	}
+}
+
+// TestDoctorReportsAgentDisabled は、DoctorRuntimeState.AgentDisabled が、最後に適用した全体状態の
+// proto.State.AgentDisabled をそのまま写すことを確かめる(仕様 5.1 節、設計文書 10.2c 節)。守りには
+// 使わない診断専用のフィールドである。中継の有無に関わらず読めることも確かめる。relay.listeners の
+// SKIPPED の判定は cmd/wgft の側の試験が持つ。
+func TestDoctorReportsAgentDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    *credentials.Credentials
+		want bool
+	}{
+		{"disabled by the server", &credentials.Credentials{LastState: &proto.State{AgentDisabled: true}}, true},
+		{"enabled", &credentials.Credentials{LastState: &proto.State{AgentDisabled: false}}, false},
+		{"an old server that never sends the field", &credentials.Credentials{LastState: oldServerState(t)}, false},
+		{"no full state applied yet", &credentials.Credentials{}, false},
+		{"no credentials file loaded", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &runtime{dp: newTestUserspace(), f: tc.f}
+			ask := serveTestControl(t, rt)
+			res := askDoctor(t, ask)
+			if res.RuntimeState == nil {
+				t.Fatal("the answer holds no runtime state")
+			}
+			if res.RuntimeState.AgentDisabled != tc.want {
+				t.Errorf("AgentDisabled = %v, want %v", res.RuntimeState.AgentDisabled, tc.want)
+			}
+		})
+	}
+}
+
+// TestDoctorClearsAgentDisabledOnReEnable は、無効から有効に戻った後の全体状態を適用すると、
+// 次の doctor の応答が無効を持ち越さないことを確かめる。apply は proto.State をまるごと
+// LastState に置き換えるので、消え残る経路が無いことを固定する(仕様 5.1 節)。本物のトンネルを
+// 立てずに済むよう fakeDataplane を使う。
+func TestDoctorClearsAgentDisabledOnReEnable(t *testing.T) {
+	rt := newFakeDataplaneRuntime(t, &fakeDataplane{})
+	if err := rt.apply(&proto.State{Generation: 1, AgentDisabled: true}); err != nil {
+		t.Fatalf("apply the disabled state: %v", err)
+	}
+	if !rt.collectDoctor().RuntimeState.AgentDisabled {
+		t.Fatal("the doctor answer does not show the agent as disabled after the disabled state was applied")
+	}
+	if !rt.f.LastState.AgentDisabled {
+		t.Fatal("agent.json's LastState does not carry the disabled flag after the disabled state was applied")
+	}
+	if err := rt.apply(&proto.State{Generation: 2, AgentDisabled: false}); err != nil {
+		t.Fatalf("apply the re-enabled state: %v", err)
+	}
+	if rt.collectDoctor().RuntimeState.AgentDisabled {
+		t.Error("the doctor answer still shows the agent as disabled after it was re-enabled")
+	}
+	if rt.f.LastState.AgentDisabled {
+		t.Error("agent.json's LastState still carries the disabled flag after it was re-enabled")
+	}
+}
+
+// oldServerState は、agent_disabled を持たない旧い版の server が送った全体状態を模す。JSON を
+// 経由して組み立てるのは、Go の構造体リテラルではなく、旧い server が実際に送るバイト列を試験の
+// 入力にするためである。
+func oldServerState(t *testing.T) *proto.State {
+	t.Helper()
+	var st proto.State
+	old := `{"generation":1,"wg":{"server_pubkey":"","endpoint":"","address":"","mtu":0,"keepalive":0,"udp_timeout":0,"udp_timeout_stream":0},"rules":[]}`
+	if err := json.Unmarshal([]byte(old), &st); err != nil {
+		t.Fatal(err)
+	}
+	return &st
 }
 
 // udpRule は試験用の UDP ルールを 1 本作る。

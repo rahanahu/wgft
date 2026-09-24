@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/proto"
@@ -214,6 +215,54 @@ func TestAgentDoctorShowsTheRecordedEvidence(t *testing.T) {
 	}
 	if !strings.Contains(last.Detail, "generation 12") || !strings.Contains(last.Detail, "2 rules") {
 		t.Errorf("agent.last_state does not show the recorded generation and rule count: %q", last.Detail)
+	}
+}
+
+// server がこのエージェントを無効にしていることは、agent.last_state の所見にも表れる。総合判定は
+// 動かさず、状態は OK のままである(仕様 5.1 節、設計文書 10.2c 節の relay.listeners の粒度)。
+// agent.json の LastState から読むので、稼働中でも停止中でも同じ所見になる。
+func TestAgentDoctorLastStateNamesADisabledAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.json")
+	f := registeredCredentials()
+	f.LastState.AgentDisabled = true
+	writeTestCredentials(t, path, f)
+
+	// 停止中: 稼働中の証拠を一切持たない実行でも、agent.json の LastState だけから同じ事実を
+	// 示せることを確かめる。
+	rep := agentDiagnose(testAgentDoctorInput(t, dir))
+	last, ok := findAgentCheck(rep, agentCheckLastState)
+	if !ok {
+		t.Fatal("agent.last_state is missing from the report")
+	}
+	if last.Status != statusOK {
+		t.Errorf("a stopped, disabled agent's agent.last_state = %s, want OK; being disabled does not change its status", last.Status)
+	}
+	if !strings.Contains(last.Detail, "disabled") {
+		t.Errorf("a stopped, disabled agent's agent.last_state does not say the agent is disabled: %q", last.Detail)
+	}
+	// この報告の総合判定は、止まっていること自体で agent.process が FAILED になるので failed に
+	// なる(10.2c 節)。無効かどうかとは無関係であり、ここでは確かめない。稼働中の場合の総合判定は
+	// 下で確かめる。
+
+	// 稼働中: 同じ所見が、制御ソケットから読んだ稼働中の実行でも変わらない。relay.listeners が
+	// SKIPPED になることは TestAgentDoctorLiveScenarios が別に確かめる。
+	holdTheLock(t, path)
+	inRunning := testAgentDoctorInput(t, dir)
+	inRunning.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+		st.AgentDisabled = true
+		st.Rules = nil
+	})))
+	repRunning := agentDiagnose(inRunning)
+	lastRunning, ok := findAgentCheck(repRunning, agentCheckLastState)
+	if !ok {
+		t.Fatal("agent.last_state is missing from the running report")
+	}
+	if lastRunning.Status != statusOK || !strings.Contains(lastRunning.Detail, "disabled") {
+		t.Errorf("a running, disabled agent's agent.last_state = %s/%q, want OK and mentioning disabled", lastRunning.Status, lastRunning.Detail)
+	}
+	if v, code := agentDoctorVerdict(repRunning), agentDoctorExitCode(repRunning); v != statusOK || code != 0 {
+		t.Errorf("a running, disabled agent's verdict = %s, exit %d; want ok, 0", v, code)
 	}
 }
 
@@ -749,7 +798,7 @@ func TestAgentDoctorHumanOutputSaysWhenEvidenceIsMissing(t *testing.T) {
 // 断定すると、動いているエージェントについて事実でないことを述べる(10.2c 節)。
 func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
 	unknown := agentRunState{State: flock.Unknown, Err: errors.New("permission denied"), PermissionDenied: true}
-	checks := agentLiveChecks(agentDoctorInput{}, unknown, agentLive{Kind: liveNotAttempted})
+	checks := agentLiveChecks(agentDoctorInput{}, unknown, agentLive{Kind: liveNotAttempted}, "")
 	var allow agentDoctorCheck
 	for _, c := range checks {
 		if c.ID == agentCheckAllowTargets {
@@ -769,7 +818,7 @@ func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
 		t.Errorf("relay.allow_targets tells the operator to start an agent that may already be running: %q", allow.Next)
 	}
 	// 停止していると判定できた実行は、今までどおり停止中の文面のままである。
-	stopped := agentLiveChecks(agentDoctorInput{}, agentRunState{State: flock.Absent}, agentLive{Kind: liveNotAttempted})
+	stopped := agentLiveChecks(agentDoctorInput{}, agentRunState{State: flock.Absent}, agentLive{Kind: liveNotAttempted}, "")
 	for _, c := range stopped {
 		if c.ID != agentCheckAllowTargets {
 			continue
