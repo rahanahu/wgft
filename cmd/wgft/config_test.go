@@ -394,3 +394,70 @@ func TestConfigIgnoresForeign(t *testing.T) {
 		t.Error("specs に無い WGFT_MODE を読んでしまった")
 	}
 }
+
+// validateInterfaceName は生のバイト列を調べるので、カーネルの isspace が空白とするバイト(0xA0 を
+// 含む)は、それが有効な文字の内側のバイトであっても名前を拒む。逆に、0xA0 を含まない他の非 ASCII
+// バイトは通す。カーネル自身は Unicode を知らず、name[i] を 1 バイトずつ見るだけである。
+func TestValidateInterfaceName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		val  string
+		ok   bool
+	}{
+		{"typical name", "wgft0", true},
+		{"single byte", "a", true},
+		{"15 bytes, the limit", "abcdefghijklmno", true},
+		{"16 bytes, over the limit", "abcdefghijklmnop", false},
+		{"empty", "", false},
+		{"exactly a dot", ".", false},
+		{"exactly two dots", "..", false},
+		{"a dot prefix is not the exact name", ".hidden", true},
+		{"two dots followed by more", "..wg", true},
+		{"a dot in the middle", "wg.0", true},
+		{"slash", "wg/0", false},
+		{"colon", "wg:0", false},
+		{"percent, a register_netdevice template character", "wg%d", false},
+		{"leading slash", "/wg0", false},
+		{"ascii space in the middle", "wg 0", false},
+		{"tab", "wg\t0", false},
+		{"newline", "wg\n0", false},
+		{"carriage return", "wg\r0", false},
+		{"vertical tab 0x0B", "wg\x0b0", false},
+		{"form feed 0x0C", "wg\x0c0", false},
+		{"trailing ascii space", "wgft0 ", false},
+		{"bare byte 0xA0", "wg\xa00", false},
+		{"UTF-8 a with grave accent, U+00E0, bytes C3 A0", "wg\u00e00", false},
+		{"UTF-8 e with acute accent, U+00E9, bytes C3 A9, no 0xA0 byte", "wg\u00e90", true},
+		{"UTF-8 non-breaking space, U+00A0, bytes C2 A0", "wg\u00a00", false},
+		{"embedded NUL, netlink cuts the C string there", "wg\x000", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateInterfaceName("WGFT_WG_INTERFACE", tc.val)
+			if (err == nil) != tc.ok {
+				t.Errorf("validateInterfaceName(%q) = %v, want ok=%v", tc.val, err, tc.ok)
+			}
+			if r := startup.Of(err); err != nil && (r == nil || r.Category != startup.CategoryConfig) {
+				t.Errorf("validateInterfaceName(%q): %v is not a config refusal", tc.val, err)
+			}
+		})
+	}
+}
+
+func TestIsKernelSpace(t *testing.T) {
+	var space []byte
+	for b := 0; b < 256; b++ {
+		if isKernelSpace(byte(b)) {
+			space = append(space, byte(b))
+		}
+	}
+	want := []byte{'\t', '\n', '\v', '\f', '\r', ' ', 0xA0}
+	if len(space) != len(want) {
+		t.Fatalf("isKernelSpace matches %d bytes %v, want %v", len(space), space, want)
+	}
+	for i, b := range want {
+		if space[i] != b {
+			t.Errorf("isKernelSpace matches %v, want %v", space, want)
+			break
+		}
+	}
+}
