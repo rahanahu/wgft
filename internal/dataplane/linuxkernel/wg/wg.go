@@ -140,7 +140,7 @@ func Ensure(cfg Config) (changes []string, err error) {
 
 	link, err := netlink.LinkByName(cfg.Interface)
 	if _, notFound := err.(netlink.LinkNotFoundError); notFound {
-		if err := createLink(cfg.Interface, cfg.MTU, "cannot create %s: this kernel has no WireGuard support; the wireguard module is missing or cannot be loaded, and `modprobe wireguard` shows why. Kernel mode needs it; on a VPS without it, run the userspace mode instead by setting WGFT_MODE=userspace"); err != nil {
+		if err := createLink(cfg.Interface, cfg.Interface, cfg.MTU, "cannot create %s: this kernel has no WireGuard support; the wireguard module is missing or cannot be loaded, and `modprobe wireguard` shows why. Kernel mode needs it; on a VPS without it, run the userspace mode instead by setting WGFT_MODE=userspace"); err != nil {
 			return nil, err
 		}
 		created = true
@@ -230,18 +230,19 @@ func Ensure(cfg Config) (changes []string, err error) {
 
 // createLink creates a WireGuard link named name with the given MTU. A kernel without the
 // wireguard link type makes LinkAdd fail with EOPNOTSUPP; that becomes a prerequisite refusal whose
-// reason is noWireGuardFormat with name as its one argument, so the server and the agent each name
-// their own way out.
-func createLink(name string, mtu int, noWireGuardFormat string) error {
+// reason is noWireGuardFormat with shown as its one argument, so the server and the agent each name
+// their own way out. shown is the name the operator knows: the agent creates its link under a
+// staging name and renames it, and the refusal names the interface it was creating.
+func createLink(name, shown string, mtu int, noWireGuardFormat string) error {
 	if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: name, MTU: mtu}}); err != nil {
 		if errors.Is(err, unix.EOPNOTSUPP) {
 			// カーネルが wireguard のリンク種別を知らない(モジュールが無い、ロードできない)。
 			// LinkAdd 自体が自動ロードを試した後なので、再起動では現れない。運用者が
 			// モジュールを入れるか別のカーネルで起動するまで同じ結果になるので、
 			// prerequisite の拒否として扱う(仕様 9 節、設計文書 11b 節)。
-			return startup.Prerequisite("wireguard module", noWireGuardFormat, name)
+			return startup.Prerequisite("wireguard module", noWireGuardFormat, shown)
 		}
-		return fmt.Errorf("cannot create %s: %w", name, err)
+		return fmt.Errorf("cannot create %s: %w", shown, err)
 	}
 	return nil
 }

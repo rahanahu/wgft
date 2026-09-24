@@ -11,6 +11,7 @@ package wg
 import (
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"net"
 	"net/netip"
 	"strings"
@@ -130,9 +131,10 @@ func (e *NotOursError) Error() string {
 	case e.Ownership == NotWireGuard:
 		s = fmt.Sprintf("%s exists but is a %s link, not WireGuard; wgft leaves it untouched. Set WGFT_WG_INTERFACE to another name", e.Interface, e.Kind)
 	case e.Keyless:
-		s = fmt.Sprintf("%s exists as a WireGuard link with no key, so wgft leaves it untouched. "+
-			"It is most likely one this agent left behind when it stopped between creating the link and setting its key; "+
-			"delete it with `ip link del %s`, or set WGFT_WG_INTERFACE to another name", e.Interface, e.Interface)
+		// エージェントは鍵を書いてから wgft0 の名前を付けるので、自分の作成の途中で鍵の無い wgft0 を
+		// 残すことは無い(design.md 7b.4 節)。鍵の無いリンクは他の道具が作ったものと見るのが自然である
+		s = fmt.Sprintf("%s exists as a WireGuard link with no key, so it is not this agent's and wgft leaves it untouched; another tool probably created it. "+
+			"If nothing uses it, delete it with `ip link del %s`; otherwise set WGFT_WG_INTERFACE to another name", e.Interface, e.Interface)
 	default:
 		s = fmt.Sprintf("%s exists but holds neither this agent's WireGuard key nor its previous one, so wgft leaves it untouched. "+
 			"If it was left by an earlier registration of this agent, for example after agent.json was lost, confirm that and delete it with `ip link del %s`; "+
@@ -235,7 +237,7 @@ func EnsureAgent(cfg AgentConfig) (changes []string, err error) {
 	}
 
 	if absent {
-		if err := createLink(cfg.Interface, cfg.MTU, agentNoWireGuardFormat); err != nil {
+		if err := createAgentLink(c, cfg); err != nil {
 			return nil, err
 		}
 		created = true
@@ -272,6 +274,90 @@ func EnsureAgent(cfg AgentConfig) (changes []string, err error) {
 // agentAfterCreate, when set, runs right after EnsureAgent created the link and makes it fail
 // there. Only the lab tests set it, to check that a link created by a failed call is deleted.
 var agentAfterCreate func(iface string) error
+
+// agentStagingHook, when set, runs at each step of createAgentLink: "created" right after the
+// staging link exists without a key, "keyed" right after it holds the key and before the rename.
+// Only the lab tests set it, to stop a child process there and kill it, as a crash would.
+var agentStagingHook func(step string)
+
+// AgentStagingName is the name the agent's link has while it is being created (design.md 7b.4 節).
+// It is derived from the interface name, so every start that creates the same interface uses the
+// same staging name and can clear what a crash left under it. It is 15 bytes, the kernel's limit.
+func AgentStagingName(iface string) string {
+	return fmt.Sprintf("wgftnew%08x", crc32.ChecksumIEEE([]byte(iface)))
+}
+
+// createAgentLink creates the agent's link so that it never exists under its own name without the
+// agent's key (design.md 7b.4 節). A new WireGuard link holds no key, and a keyless link is not
+// the agent's, so a crash between creating the link under its own name and setting the key would
+// leave a link that every later start refuses as not ours until an operator deletes it. The link is
+// created under AgentStagingName, given the private key, and only then renamed; a new link is down,
+// which a rename requires. A crash before the rename leaves only the staging link, which the next
+// creation deletes.
+//
+// Anything left under the staging name is deleted first when it is a WireGuard link with no key or
+// with the current or the previous key: the agent's own creation left it there. Anything else under
+// that name is left alone and reported.
+func createAgentLink(c *wgctrl.Client, cfg AgentConfig) error {
+	tmp := AgentStagingName(cfg.Interface)
+	if err := clearStaging(c, tmp, cfg); err != nil {
+		return err
+	}
+	if err := createLink(tmp, cfg.Interface, cfg.MTU, agentNoWireGuardFormat); err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		if l, e := netlink.LinkByName(tmp); e == nil {
+			_ = netlink.LinkDel(l)
+		}
+		return err
+	}
+	if agentStagingHook != nil {
+		agentStagingHook("created")
+	}
+	if err := c.ConfigureDevice(tmp, wgtypes.Config{PrivateKey: &cfg.PrivateKey}); err != nil {
+		return fail(fmt.Errorf("set the key of %s while creating %s: %w", tmp, cfg.Interface, err))
+	}
+	if agentStagingHook != nil {
+		agentStagingHook("keyed")
+	}
+	link, err := netlink.LinkByName(tmp)
+	if err != nil {
+		return fail(fmt.Errorf("read %s while creating %s: %w", tmp, cfg.Interface, err))
+	}
+	if err := netlink.LinkSetName(link, cfg.Interface); err != nil {
+		return fail(fmt.Errorf("rename %s to %s: %w", tmp, cfg.Interface, err))
+	}
+	return nil
+}
+
+// clearStaging deletes what a crash of an earlier creation left under the staging name tmp.
+func clearStaging(c *wgctrl.Client, tmp string, cfg AgentConfig) error {
+	link, err := netlink.LinkByName(tmp)
+	if _, nf := err.(netlink.LinkNotFoundError); nf {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %w", tmp, err)
+	}
+	if link.Type() != "wireguard" {
+		return fmt.Errorf("cannot create %s: the agent creates it under the name %s first, and a %s link already has that name; "+
+			"remove or rename that link, or set WGFT_WG_INTERFACE to another name, which also changes the name used while creating it", cfg.Interface, tmp, link.Type())
+	}
+	dev, err := c.Device(tmp)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", tmp, err)
+	}
+	if dev.PrivateKey != (wgtypes.Key{}) && !judgeOwnership(link.Type(), dev.PrivateKey, cfg.PrivateKey, cfg.PreviousKey).Ours() {
+		return fmt.Errorf("cannot create %s: the agent creates it under the name %s first, and a WireGuard interface with another key already has that name; "+
+			"if it is left over from an earlier agent on this host, delete it with `ip link del %s`; "+
+			"otherwise set WGFT_WG_INTERFACE to another name, which also changes the name used while creating it", cfg.Interface, tmp, tmp)
+	}
+	if err := netlink.LinkDel(link); err != nil {
+		return fmt.Errorf("delete %s left over from an earlier creation of %s: %w", tmp, cfg.Interface, err)
+	}
+	return nil
+}
 
 // hostAddr and hostRoute are the addresses and main-table routes of the host's other interfaces,
 // as checkAgentOverlap reads them. Iface is empty for a route with no single interface, such as a
