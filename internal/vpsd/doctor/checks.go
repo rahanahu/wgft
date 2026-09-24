@@ -704,7 +704,13 @@ func staleTargetCheck(c Check, r proto.Rule, addr, rest string, age time.Duratio
 		c.Status, c.Reason = StatusFailed, targetReasonCode(rest)
 		c.Detail = "the agent forwards to " + addr + " from its last successful resolution, but could not use it: " + rest +
 			", last check " + age.String() + " ago"
-		c.Next = agentRuleNextStep(rest, r)
+		// 次の手は、宣言の名前ではなく、エージェントが実際に繋いでいる直前の解決の結果のアドレスを
+		// 名指す
+		old := r
+		if _, port, err := net.SplitHostPort(r.Target); err == nil {
+			old.Target = net.JoinHostPort(addr, port)
+		}
+		c.Next = agentRuleNextStep(rest, old)
 		return c
 	}
 	if r.Proto != proto.TCP {

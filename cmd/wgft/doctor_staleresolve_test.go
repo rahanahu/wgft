@@ -117,8 +117,9 @@ func TestStaleResolutionWithARefusingTargetStopsAtTarget(t *testing.T) {
 	if tgt.Status != statusFailed || tgt.Reason != reasonConnectionRefused {
 		t.Errorf("rule.target = %s/%s, want %s/%s", tgt.Status, tgt.Reason, statusFailed, reasonConnectionRefused)
 	}
-	if !strings.Contains(tgt.Next, "a service is listening on game.lan:25565") {
-		t.Errorf("rule.target next = %q, want the refusing target's next step", tgt.Next)
+	// 次の手は、エージェントが実際に繋いでいる直前のアドレスを名指し、宣言の名前を名指さない
+	if !strings.Contains(tgt.Next, "a service is listening on 192.168.1.30:25565") || strings.Contains(tgt.Next, "game.lan") {
+		t.Errorf("rule.target next = %q, want it to name the old address 192.168.1.30:25565, not the declared name", tgt.Next)
 	}
 	if rr := rep.Rules[0]; rr.Status != statusFailed || rr.StoppedAt != checkTarget {
 		t.Errorf("rule = %s stopped at %q, want failed at %s", rr.Status, rr.StoppedAt, checkTarget)
@@ -207,5 +208,37 @@ func TestStaleResolutionParse(t *testing.T) {
 		if addr != tc.addr || rest != tc.rest || ok != tc.ok {
 			t.Errorf("StaleResolution(%q) = %q, %q, %v; want %q, %q, %v", tc.reason, addr, rest, ok, tc.addr, tc.rest, tc.ok)
 		}
+	}
+}
+
+// 前の解決の結果で転送を続けるルールの経路に、別の UNKNOWN(ここでは配り直しの途中の世代)もあれば、
+// 結論の行は転送を続けていることに加えて、他の証拠が古いか確かめられていないことも述べる。
+func TestStaleResolutionResultKeepsOtherUnknowns(t *testing.T) {
+	r := tcpRule()
+	in := staleInput(&r, staleReason(""))
+	in.Agents[0].Generation = 11
+	in.Agents[0].GenerationBehindSince = at(5 * time.Second)
+	rep := buildReport([]proto.Rule{r}, in)
+	if c := checkOf(t, rep.Checks, checkRulesReceived); c.Status != statusUnknown || c.Reason != doctor.ReasonGenerationPending {
+		t.Fatalf("precondition: rules received = %s/%s, want unknown/%s", c.Status, c.Reason, doctor.ReasonGenerationPending)
+	}
+	var out strings.Builder
+	writeRuleReport(&out, rep, false)
+	result, _, _ := strings.Cut(out.String()[strings.Index(out.String(), "Result:"):], "\n\n")
+	result = strings.Join(strings.Fields(result), " ")
+	for _, want := range []string{"still forwarding to 192.168.1.30", "fix name resolution", "other evidence above is also stale or untested"} {
+		if !strings.Contains(result, want) {
+			t.Errorf("result line = %q, want it to hold %q", result, want)
+		}
+	}
+	// 他に UNKNOWN が無ければ、その句を足さない。経路の外の UNKNOWN(累積の拒否)は数えない
+	in = staleInput(&r, staleReason(""))
+	in.Rules.ResourceRefusals = map[string]map[string]uint64{r.ID: {"rule": 7}}
+	rep = buildReport([]proto.Rule{r}, in)
+	if c := checkOf(t, rep.Checks, checkFlowBudget); c.Status != statusUnknown {
+		t.Fatalf("precondition: flow budget = %s, want unknown", c.Status)
+	}
+	if note := rep.RuleResultNote(r.ID); note == "" || strings.Contains(note, "other evidence") {
+		t.Errorf("result note = %q, want the stale note without a clause about other evidence", note)
 	}
 }

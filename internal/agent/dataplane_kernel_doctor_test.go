@@ -124,3 +124,39 @@ func TestKernelStaleReasonIsReadByServerDoctor(t *testing.T) {
 		})
 	}
 }
+
+// TestKernelErrorsAfterAReasonOnlyOnPublishedRules は、試し接続と ip_forward の誤りを理由の後ろに
+// 続けるのが DNAT を公開したルールだけであることを固定する(設計文書 7b.2 節)。DNAT の無いルール
+// (一度も解決できていない名前、ループバックの宛先)は転送しないので、ip_forward の誤りはそのルールの
+// 原因ではない。続けると、server doctor の読む残りの文言に関係の無い誤りが混ざる。
+func TestKernelErrorsAfterAReasonOnlyOnPublishedRules(t *testing.T) {
+	k := &fakeKernel{forwardWriteEr: os.ErrPermission, dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.30")}}}
+	d := newTestKernel(t, k, nil, nil)
+	if err := d.enableForwarding(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	rules := []proto.AgentRule{
+		tcpRule("never", "never.lan:80", 80, 80),
+		tcpRule("lo", "127.0.0.1:81", 81, 81),
+		tcpRule("stale", "game.lan:82", 82, 82),
+	}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	k.dnsErr = errors.New("lookup game.lan: no such host")
+	if _, err := d.applyRules(2, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"never", "lo"} {
+		s := statusOf(t, d, id)
+		if s.State != proto.StatusError || s.Reason == "" {
+			t.Fatalf("%s = %+v, want an error with a reason", id, s)
+		}
+		if strings.Contains(s.Reason, "ip_forward") {
+			t.Errorf("%s = %q: a rule without a DNAT must not carry the ip_forward error", id, s.Reason)
+		}
+	}
+	if s := statusOf(t, d, "stale"); !strings.Contains(s.Reason, "still forwarding") || !strings.Contains(s.Reason, "ip_forward") {
+		t.Errorf("stale = %q, want the stale reason followed by the ip_forward error", s.Reason)
+	}
+}

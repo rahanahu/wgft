@@ -841,3 +841,28 @@ func TestDoctorPathStaleResolutionReadsDegraded(t *testing.T) {
 		t.Fatal("the case is missing from pathCases")
 	}
 }
+
+// 前の解決の結果で転送を続けるルールの経路に別の UNKNOWN もあれば、画面の結論も両方を述べる。
+// CLI の Result: の行と同じ文である。
+func TestDoctorResultLineStaleResolutionKeepsOtherUnknowns(t *testing.T) {
+	for _, c := range pathCases() {
+		if c.name != "name fails, still forwarding" {
+			continue
+		}
+		edit := c.edit
+		c.edit = func(in *doctor.Input) {
+			edit(in)
+			in.Agents[0].Generation = 11
+			in.Agents[0].GenerationBehindSince = pathAt(5 * time.Second)
+		}
+		rep, _ := buildPath(t, c)
+		line := doctorResultLine(rep.Rules[0], rep)
+		for _, want := range []string{"still forwarding to 192.168.1.30", "other evidence above is also stale or untested"} {
+			if !strings.Contains(line, want) {
+				t.Errorf("result line = %q, want it to hold %q", line, want)
+			}
+		}
+		return
+	}
+	t.Fatal("the case is missing from pathCases")
+}
