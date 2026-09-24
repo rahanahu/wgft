@@ -65,6 +65,21 @@ retry() { # retry <timeout-seconds> <command...>
   return 0
 }
 
+container_uid() { # container_uid <container> -> the container's numeric uid, empty on error
+  # Both images are distroless (no shell, no ps, no id), so the uid has to come from outside
+  # the container. docker top reads the host's view of the process and needs a PID field
+  # present in its output, but otherwise accepts plain ps(1) format options. podman top instead
+  # takes its own format descriptors directly (no "-o"); "-o"/"-eo" tell it to run ps(1) inside
+  # the container instead, which would fail here. A bare "uid" descriptor also differs from
+  # podman's default columns, which show USER as a resolved name (for example "nonroot" from
+  # the image's /etc/passwd) rather than the numeric id.
+  if [[ "$(basename "$DOCKER")" == podman ]]; then
+    "$DOCKER" top "$1" uid 2>/dev/null | awk 'NR==2{print $NF}'
+  else
+    "$DOCKER" top "$1" -o pid,uid 2>/dev/null | awk 'NR==2{print $NF}'
+  fi
+}
+
 # leftovers from an earlier interrupted run (a different pid, same wgft-smoke- prefix)
 sweep_leftovers() {
   local c v n
@@ -131,7 +146,7 @@ else
   echo "FAIL  server container started: timed out"
   fail=1
 fi
-check "server runs as uid 65532" "65532" "$("$DOCKER" top "$server" 2>/dev/null)"
+check "server runs as uid 65532" "65532" "$(container_uid "$server")"
 
 join=$("$DOCKER" exec "$server" wgft agent join-string --name smoke 2>/dev/null | head -1)
 check "join string issued" "wgft://" "$join"
@@ -151,7 +166,7 @@ else
   echo "FAIL  agent registered and connected: timed out"
   fail=1
 fi
-check "agent runs as uid 65532" "65532" "$("$DOCKER" top "$agent" 2>/dev/null)"
+check "agent runs as uid 65532" "65532" "$(container_uid "$agent")"
 
 t=$("$DOCKER" exec "$server" wgft rule add --agent smoke --tcp 39971 --to echo:25565 2>/dev/null | grep -oE 'r_[A-Z0-9]+')
 u=$("$DOCKER" exec "$server" wgft rule add --agent smoke --udp 27015 --to echo:25566 2>/dev/null | grep -oE 'r_[A-Z0-9]+')
