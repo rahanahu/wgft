@@ -704,6 +704,10 @@ func targetReasonCode(reason string) string {
 		return ReasonListenerBindFailed
 	case looksLikeResolveFailure(reason):
 		return ReasonResolveFailed
+	case strings.Contains(reason, "does not forward to loopback targets"):
+		// カーネルモードのエージェントの文言(internal/dataplane/linuxkernel/nft の targetAddrs)。名前の
+		// 解決に失敗して直前のアドレスも使えない場合は、解決の失敗の側を先に当てる
+		return ReasonTargetLoopbackUnsupported
 	case strings.Contains(reason, "connection refused"):
 		return ReasonConnectionRefused
 	case strings.Contains(reason, "timeout") || strings.Contains(reason, "timed out") || strings.Contains(reason, "did not answer"):
@@ -761,6 +765,8 @@ func agentRuleNextStep(reason string, r proto.Rule) string {
 			"not another process on the agent host. The agent retries every 30s and clears once that hold ends; restarting the agent also frees it at once."
 	case ReasonResolveFailed:
 		return "fix name resolution on the agent host, or point the rule at a literal address"
+	case ReasonTargetLoopbackUnsupported:
+		return "the agent runs in kernel mode, which does not forward to a loopback target. Point the rule at the agent host's LAN address instead of " + r.TargetDisplay() + "."
 	}
 	return "the tunnel and the agent are healthy up to this point. Check that a service is listening on " + r.TargetDisplay() +
 		" and accepts connections from the agent host; the agent retries every 30s and clears the error on its own."

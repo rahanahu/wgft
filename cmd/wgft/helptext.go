@@ -343,8 +343,8 @@ lock file for an instant. An agent starting in that same instant fails to take
 its own lock and exits; the supplied systemd unit restarts it, so the cost is
 the wait until the next start.
 
-Items are grouped as Host, Credentials, Connection, Tunnel and Relay, and each
-is in one of the same five states "server doctor" uses:
+Items are grouped as Host, Credentials, Connection, Tunnel, Relay and
+Dataplane, and each is in one of the same five states "server doctor" uses:
 
   OK          this command observed the item succeed
   FAILED      this command observed the item fail
@@ -356,7 +356,7 @@ Values read from agent.json carry a "last:" prefix: they are what was saved, not
 what is true now, the same way "agent ls" marks a disconnected agent's report.
 Values read over the control socket carry no prefix: they are current.
 
-After the five groups, a separate "Observed values" section holds six items
+After the groups, a separate "Observed values" section holds six items
 that only ever state a value, never OK: reconnect waits, keepalive times, the
 watchdog's rebuild interval, transfer counters, session counts and refusal
 totals are healthy or not only against knowledge this command does not have,
@@ -403,13 +403,35 @@ stay unread. An agent started from an older binary answers that it does not know
 the command; restart it to read its live state.
 
 Being stopped is a failure here: a stopped agent forwards nothing, so "process"
-reads FAILED. Four items decide the verdict: credentials, process, tunnel and
-listeners. The rest are printed and never raise the exit code, because they
+reads FAILED. In userspace mode four items decide the verdict: credentials,
+process, tunnel and listeners. The rest are printed and never raise the exit code, because they
 state a value rather than whether this host can forward. Name resolution is one
 of them: an address resolved earlier can still carry traffic. When the server
 has disabled this agent, listeners reads SKIPPED by design instead of counting
 against the verdict: a disabled agent opens no listeners until wgft agent
 enable <name> is run on the VPS.
+
+A kernel-mode agent, WGFT_MODE=kernel, is judged by what the kernel forwards
+with rather than by its process. The Dataplane group answers for it: interface
+reads the WireGuard interface, wgft0 unless WGFT_WG_INTERFACE names another,
+with its key, peer and the route to the server's tunnel address; table compares
+table inet wgft_agent with the publication the agent last recorded and lists
+each rule with the ports that have DNAT. The table reads FAILED when it is
+gone, when a row that forwarding needs is missing, or when a rule reports an
+error. It reads UNKNOWN when only guard rows are missing, such as the drop that
+closes the tunnel side, or when rows are added or sit in another position,
+since whether those stop forwarding is not known. Forwarding reads
+net.ipv4.ip_forward, other tables' forward policy and rp_filter. Credentials, tunnel and these three
+decide the verdict in kernel mode, and process does not: it still reads FAILED
+for a stopped agent, but the kernel keeps forwarding, so a stopped agent whose
+interface, table and ip_forward are in place exits 0. Its table then reads
+UNKNOWN, since the target checks only the running agent makes are missing.
+Listeners, sessions, refusals and watchdog read NOT TESTED, as kernel mode has
+none of them; a userspace agent reads the three Dataplane items NOT TESTED
+instead. A running agent reports its kernel state over the control socket. For
+a stopped one this command reads the kernel itself, which needs CAP_NET_ADMIN:
+without it, what cannot be read is UNKNOWN with needs_cap_net_admin and the
+exit code is 2. Start the agent, or run this command as root, to read it.
 
 Every run ends with what it did NOT test, and with the fact that it keeps no
 history: it evaluates the current state only.

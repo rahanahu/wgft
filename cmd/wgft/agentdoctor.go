@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/resource"
@@ -64,6 +65,7 @@ const (
 	agentCheckSessions     = "relay.sessions"
 	agentCheckRefusals     = "relay.refusals"
 	agentCheckAllowTargets = "relay.allow_targets"
+	// カーネルモードの検査の識別子は agentdoctorkernel.go にある
 )
 
 // 検査のまとまり。人向けの出力の見出しになる(10.2c 節の「出力の形」)。
@@ -128,6 +130,7 @@ var agentCheckOrder = []string{
 	agentCheckControl, agentCheckStreamConn, agentCheckStreamBackfl, agentCheckStreamLive,
 	agentCheckWGResolve, agentCheckTunnelLocal, agentCheckWatchdog, agentCheckTransfer,
 	agentCheckListeners, agentCheckSessions, agentCheckRefusals, agentCheckAllowTargets,
+	agentCheckDPInterface, agentCheckDPTable, agentCheckForwarding,
 }
 
 // agentDoctorCheck は 1 つの検査の結果である。`server doctor` の checkReport とは別の型にして
@@ -220,6 +223,13 @@ type agentDoctorInput struct {
 	// Euid は呼び出し元の実効 uid を返す。既定は os.Geteuid で、Windows では -1 を返す。0 の
 	// 実行では host.privileges が判定できない側に倒れる(10.2c 節)。
 	Euid func() int
+
+	// WGInterface は、カーネルモードのエージェントの WireGuard インタフェースの名前である。設定の
+	// WGFT_WG_INTERFACE から取り、停止中のエージェントのカーネルを直接読むときに使う(10.2c 節)。
+	WGInterface string
+	// ReadKernel は、停止中のカーネルモードのエージェントのカーネルの状態を直接読む。既定は
+	// internal/agent の ReadKernel で、稼働中のエージェントが自分を読むのと同じ関数である。
+	ReadKernel func(f *credentials.Credentials, iface string) *agent.DoctorKernel
 }
 
 // resolveTimeout は名前解決を待つ長さである。診断はトラブルの最中に繰り返し使うので、応答しない
@@ -248,6 +258,12 @@ func (in agentDoctorInput) withDefaults() agentDoctorInput {
 	}
 	if in.Euid == nil {
 		in.Euid = os.Geteuid
+	}
+	if in.ReadKernel == nil {
+		in.ReadKernel = agent.ReadKernel
+	}
+	if in.WGInterface == "" {
+		in.WGInterface = "wgft0"
 	}
 	if in.Now.IsZero() {
 		in.Now = time.Now()
@@ -341,6 +357,7 @@ func agentDoctorInputFrom(cmd *cobra.Command) (agentDoctorInput, error) {
 		ConfigPath:       configPath,
 		ConfigUnreadable: cfgErr,
 		DataDirAssumed:   cfgErr != nil && c.source("WGFT_DATA_DIR") == "default",
+		WGInterface:      c.str("WGFT_WG_INTERFACE"),
 	}, nil
 }
 
@@ -379,7 +396,7 @@ func agentDoctorExit(rep agentDoctorReport) error {
 	}
 	switch agentDoctorVerdict(rep) {
 	case statusUnknown:
-		return unavailable(fmt.Errorf("the diagnosis is incomplete: %s could not be read with this command's permissions; run it as the user the agent runs as", strings.Join(unreachable, ", ")))
+		return unavailable(fmt.Errorf("the diagnosis is incomplete: %s could not be read with this command's permissions; %s", strings.Join(unreachable, ", "), agentIncompleteNext(rep)))
 	case statusFailed:
 		return fmt.Errorf("this host's agent cannot forward traffic as it stands: %s", strings.Join(failed, ", "))
 	}
@@ -393,17 +410,21 @@ func agentDiagnose(in agentDoctorInput) agentDoctorReport {
 	cred := readAgentCredentials(in.CredentialsPath)
 	run := inspectAgentProcess(in)
 	live := readAgentLive(in, run)
+	mode := agentModeOf(cred, live)
+	privileges := agentPrivilegesCheck(in)
+	agentPrivilegesWithAgent(&privileges, live, mode)
 	checks := []agentDoctorCheck{
 		agentPlatformCheck(in),
-		agentPrivilegesCheck(in),
+		privileges,
 		agentInterfacesCheck(in),
 		agentEndpointResolveCheck(in, cred),
 		agentCredentialsCheck(in, cred),
-		agentProcessCheck(in, run),
+		agentProcessCheck(in, run, mode),
 		agentLastStateCheck(in, cred),
 		agentWGResolveCheck(in, cred),
 	}
-	checks = append(checks, agentLiveChecks(in, run, live, agentDisplayName(cred))...)
+	checks = append(checks, agentLiveChecks(in, run, live, agentDisplayName(cred), mode)...)
+	checks = append(checks, agentKernelChecks(in, cred, run, live, mode)...)
 	sort.SliceStable(checks, func(i, j int) bool {
 		return agentCheckIndex(checks[i].ID) < agentCheckIndex(checks[j].ID)
 	})
@@ -413,7 +434,7 @@ func agentDiagnose(in agentDoctorInput) agentDoctorReport {
 		Checks:    checks,
 		History: "this command only evaluates the current state. To find when this agent stopped working, read its log on this host " +
 			"with journalctl -u wgft-agent, or docker logs for a container, and the server log on the VPS.",
-		NotTested: agentNotTested(),
+		NotTested: agentNotTested(mode),
 	}
 }
 
@@ -672,6 +693,30 @@ func agentAssumedDataDirNote(in agentDoctorInput) string {
 		" could not be read here and may name another data directory"
 }
 
+// agentIncompleteNext は、層 2 に当たる実行の次の手である。欠けた証拠がカーネルの状態だけなら、
+// エージェントを起動するか root で実行し直すことを示し、ファイルの権限が欠けていれば同じ実行主体での
+// 実行し直しを示す。root を案内するのはカーネルモードの例外である(10.2c 節)。
+func agentIncompleteNext(rep agentDoctorReport) string {
+	files, kernel := false, false
+	for _, c := range rep.Checks {
+		if !c.evidenceUnreachable {
+			continue
+		}
+		if c.Reason == agentReasonNeedsNetAdmin {
+			kernel = true
+		} else {
+			files = true
+		}
+	}
+	switch {
+	case kernel && files:
+		return agentSamePrincipalNext + ". For the kernel state, " + agentNeedsNetAdminNext
+	case kernel:
+		return agentNeedsNetAdminNext
+	}
+	return agentSamePrincipalNext
+}
+
 // agentSamePrincipalNext は、層 2 に当たる実行に添える次の手である。root での実行し直しは案内
 // しない。root はすべて読めるので、host.privileges がエージェント自身の権限ではなく root の権限を
 // 答え、前提の崩れそのものを検出できなくなる(10.2c 節)。
@@ -798,8 +843,12 @@ func credentialsModeNote(cred agentCredentialsFile) string {
 // agentProcessCheck は稼働中かどうかを見る。総合判定を動かす検査である。停止そのものは FAILED と
 // して扱う。ユーザー空間の中継を持つエージェントは常駐して転送を担うプロセスであり、止まっている
 // 間は 1 バイトも転送しないためである(10.2c 節)。
-func agentProcessCheck(in agentDoctorInput, run agentRunState) agentDoctorCheck {
-	c := agentDoctorCheck{ID: agentCheckProcess, Group: agentGroupCredentials, Label: "process", verdict: true}
+//
+// カーネルモードでは、停止中もカーネルに残した設定で転送が続きうるので、この FAILED だけで総合判定を
+// 決めない。転送の実体は Dataplane の群の検査が答える(10.2c 節の「カーネルモードの総合判定」)。
+func agentProcessCheck(in agentDoctorInput, run agentRunState, mode string) agentDoctorCheck {
+	kernel := mode == credentials.ModeKernel
+	c := agentDoctorCheck{ID: agentCheckProcess, Group: agentGroupCredentials, Label: "process", verdict: !kernel}
 	if run.Err != nil {
 		// 稼働中か停止中かを判定できないので、FAILED にはしない。権限で開けない場合は、
 		// 次の前提が崩れている実行として終了コード 2 の側に置く(10.2c 節)。
@@ -831,6 +880,10 @@ func agentProcessCheck(in agentDoctorInput, run agentRunState) agentDoctorCheck 
 	// 既定値を使った実行では、別のディレクトリで動いているエージェントについて偽になりうる。
 	if note := agentAssumedDataDirNote(in); note != "" {
 		c.Detail += "; " + note
+	}
+	if kernel {
+		c.Detail += ". In kernel mode the kernel may still be forwarding with the interface and the table the agent left in place, " +
+			"while updates from the server, name re-resolution and convergence after outside changes have stopped; the Dataplane lines below say whether forwarding is in place"
 	}
 	c.Next = "start it and read why it stopped: systemctl status wgft-agent and journalctl -u wgft-agent, or docker ps and docker logs for a container. " +
 		"This answers for " + in.DataDir + " alone; an agent running with another WGFT_DATA_DIR is not visible here"
@@ -1109,15 +1162,21 @@ func upperFirst(s string) string {
 
 // agentNotTested は、この診断が試していない範囲である。何も壊れていない実行でも必ず出す。黙って
 // いると運用者が沈黙を健全と読むためである(10.2a、10.2c 節)。
-func agentNotTested() []notTested {
+func agentNotTested(mode string) []notTested {
+	targets := notTested{"the targets", "the LAN services this agent forwards to. Nothing is dialled from here. A running agent tests TCP targets itself " +
+		"every 30s, and its result is what the listeners line above reports; a UDP target cannot be tested at all, so no line here " +
+		"answers for one."}
+	if mode == credentials.ModeKernel {
+		targets.Detail = "the LAN services this agent forwards to. Nothing is dialled from here. A running agent in kernel mode tests the first port " +
+			"of each TCP range every 30s, and its result is what the table line above reports; a UDP target cannot be tested at all, so no line here " +
+			"answers for one."
+	}
 	return []notTested{
 		{"the server side", "what the server sees: whether it publishes each rule, what it reads from its own WireGuard, and whether the last " +
 			"handshake is healthy. This command never judges that; run wgft server doctor on the VPS for it."},
 		{"reaching the vps", "whether this host's line reaches the VPS's WireGuard UDP port and its agent API port. Nothing is dialled towards " +
 			"the VPS from here, so a blocked home firewall or ISP does not show up."},
-		{"the targets", "the LAN services this agent forwards to. Nothing is dialled from here. A running agent tests TCP targets itself " +
-			"every 30s, and its result is what the listeners line above reports; a UDP target cannot be tested at all, so no line here " +
-			"answers for one."},
+		targets,
 		{"local settings", "the effective value and source of every setting on this host. The agent prints those as its first lines when it " +
 			"starts; read them in its log."},
 	}
@@ -1156,7 +1215,7 @@ func writeAgentDoctorReport(w io.Writer, rep agentDoctorReport) {
 		// ほうが、運用者は直せる(10.2c 節)。
 		fmt.Fprintln(w, "\nIncomplete")
 		fmt.Fprintf(w, "  %s\n", wrapAt("Some evidence could not be read with this command's permissions, so the lines above do not settle whether this "+
-			"agent can forward. "+upperFirst(agentSamePrincipalNext)+".", 2))
+			"agent can forward. "+upperFirst(agentIncompleteNext(rep))+".", 2))
 	}
 	writeHistory(w, rep.History)
 	writeNotTested(w, rep.NotTested)

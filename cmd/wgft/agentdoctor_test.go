@@ -57,6 +57,11 @@ var agentDoctorTable = []struct {
 	{"relay.sessions", "Relay", "sessions", false, true},
 	{"relay.refusals", "Relay", "refusals", false, true},
 	{"relay.allow_targets", "Relay", "target allowlist", false, false},
+	// カーネルモードの検査。総合判定を動かすのはカーネルモードの実行だけで、ユーザー空間モードでは
+	// NOT TESTED になる(10.2c 節の「カーネルモードのエージェント」)
+	{"dataplane.interface", "Dataplane", "interface", true, false},
+	{"dataplane.table", "Dataplane", "table", true, false},
+	{"host.forwarding", "Dataplane", "forwarding", true, false},
 }
 
 // どの実行でも、10.2c 節の表の検査がすべて、表の順で、表の群と見出しと総合判定の区別を持って
@@ -798,7 +803,7 @@ func TestAgentDoctorHumanOutputSaysWhenEvidenceIsMissing(t *testing.T) {
 // 断定すると、動いているエージェントについて事実でないことを述べる(10.2c 節)。
 func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
 	unknown := agentRunState{State: flock.Unknown, Err: errors.New("permission denied"), PermissionDenied: true}
-	checks := agentLiveChecks(agentDoctorInput{}, unknown, agentLive{Kind: liveNotAttempted}, "")
+	checks := agentLiveChecks(agentDoctorInput{}, unknown, agentLive{Kind: liveNotAttempted}, "", "")
 	var allow agentDoctorCheck
 	for _, c := range checks {
 		if c.ID == agentCheckAllowTargets {
@@ -818,7 +823,7 @@ func TestAgentDoctorAllowTargetsWhenTheRunStateIsUnknown(t *testing.T) {
 		t.Errorf("relay.allow_targets tells the operator to start an agent that may already be running: %q", allow.Next)
 	}
 	// 停止していると判定できた実行は、今までどおり停止中の文面のままである。
-	stopped := agentLiveChecks(agentDoctorInput{}, agentRunState{State: flock.Absent}, agentLive{Kind: liveNotAttempted}, "")
+	stopped := agentLiveChecks(agentDoctorInput{}, agentRunState{State: flock.Absent}, agentLive{Kind: liveNotAttempted}, "", "")
 	for _, c := range stopped {
 		if c.ID != agentCheckAllowTargets {
 			continue

@@ -120,6 +120,9 @@ const (
 	// ReasonUDPListenerOnly は、UDP のルールの rule.target の not_tested の理由である。エージェント
 	// の報告が示すのはリスナーを開けたことだけで、宛先が応えたことではない(設計文書 10.2a 節)。
 	ReasonUDPListenerOnly = "udp_listener_only"
+	// ReasonTargetLoopbackUnsupported は、カーネルモードのエージェントがループバックか未指定のアドレスの
+	// 宛先を公開しないことである(設計文書 7b.2・7b.3 節)。宛先をホストの LAN のアドレスに直せば通る。
+	ReasonTargetLoopbackUnsupported = "target_loopback_unsupported"
 )
 
 // 検査のまとまり。人向けの出力の見出しになる。保証の対象ではない。
