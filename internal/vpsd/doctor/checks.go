@@ -563,7 +563,7 @@ func looksLikeResolveFailure(reason string) bool {
 			return true
 		}
 	}
-	return strings.Contains(reason, "bind tcp ") || strings.Contains(reason, "bind udp ")
+	return false
 }
 
 // targetCheck は、そのルールの持ち主のエージェント自身の報告である(設計文書 5.2、7a.11 節の
@@ -725,8 +725,8 @@ func targetReasonCode(reason string) string {
 // この形は、ソースコードから読み取った実際の組み立てと合わせて、試験用の実機(#211 より前の版の
 // エージェント。stream が切れてもリレーのポートを空けない不具合があった)で実際に観測されている。
 // 意味の分からない target_error に落ちていたのはこの形である。#211 で直した今の版のエージェント
-// で、利用者の操作からこの bind の失敗そのものに至る経路は、ラボで別の経路を試したがまだ再現
-// できていない(設計文書 改訂の記録)。
+// でも、宛先が先に閉じるセッションの後にルールを閉じ直すと、TIME_WAIT の間ポートを保持する経路
+// (設計文書 7 節)から同じ文言に至ることをラボで確かめた(設計文書 改訂の記録)。
 func looksLikeBindFailure(reason string) bool {
 	if strings.Contains(reason, "bind failed") {
 		return true
@@ -750,7 +750,13 @@ func agentRuleNextStep(reason string, r proto.Rule) string {
 	case ReasonTargetNotAllowed:
 		return "the agent refuses this target itself: " + allowtargets.Env + " on the agent host does not list it. Add the target there, or point the rule elsewhere."
 	case ReasonListenerBindFailed:
-		return "the agent could not open its listener for this port. Find what else on the agent host binds it; the agent retries every 30s."
+		// ユーザー空間モードの中継の待ち受けはエージェントのプロセス内の netstack にあり、
+		// ホストの他のプロセスとポート空間を共有しない。実機で観測した例は、stream が切れても
+		// リレーのポートを空けないエージェント自身の不具合(#211 で修正済み)によって、エージェント
+		// 自身の前のリスナーがまだそのポートを離していない場合だった。「他のプロセスを探す」という
+		// 以前の案内は誤りを誘うため直した(設計文書 改訂の記録)。
+		return "the agent's own earlier listener for this port has not been freed yet; this is internal to the agent process, not another " +
+			"process on the agent host. The agent retries every 30s and releases the port on its own; restarting the agent also frees it at once."
 	case ReasonResolveFailed:
 		return "fix name resolution on the agent host, or point the rule at a literal address"
 	}
