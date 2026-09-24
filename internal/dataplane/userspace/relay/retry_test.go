@@ -276,3 +276,29 @@ func TestServeCloseIsNotAFailure(t *testing.T) {
 		})
 	}
 }
+
+// nextRetry は retryMin から倍々に広げ、retryMax で止める。
+func TestNextRetry(t *testing.T) {
+	for _, c := range []struct{ in, want time.Duration }{
+		{0, retryMin},
+		{retryMin / 2, retryMin},
+		{retryMin, 2 * retryMin},
+		{retryMax / 2, retryMax},
+		{retryMax/2 + time.Millisecond, retryMax},
+		{retryMax, retryMax},
+		{2 * retryMax, retryMax},
+	} {
+		if got := nextRetry(c.in); got != c.want {
+			t.Errorf("nextRetry(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+	d := time.Duration(0)
+	for i := 0; i < 64; i++ {
+		if d = nextRetry(d); d > retryMax || d < retryMin {
+			t.Fatalf("after %d failures the wait is %v, want it within [%v, %v]", i+1, d, retryMin, retryMax)
+		}
+	}
+	if d != retryMax {
+		t.Errorf("after 64 failures the wait is %v, want %v", d, retryMax)
+	}
+}
