@@ -722,3 +722,23 @@ func InspectAgent(iface string, current, previous wgtypes.Key) (AgentState, erro
 	}
 	return st, nil
 }
+
+// AgentRouteInterface returns the name of the interface the kernel's routing, policy rules
+// included, sends traffic to dst through (design.md 7b.1 節). The agent compares it with its own
+// interface after converging: an address or route overlap check reads only the main table, so a
+// rule that sends the server's tunnel address to another table, such as Tailscale's table 52, is
+// seen only here.
+func AgentRouteInterface(dst netip.Addr) (string, error) {
+	routes, err := netlink.RouteGet(dst.AsSlice())
+	if err != nil {
+		return "", err
+	}
+	if len(routes) == 0 {
+		return "", fmt.Errorf("no route to %s", dst)
+	}
+	link, err := netlink.LinkByIndex(routes[0].LinkIndex)
+	if err != nil {
+		return "", err
+	}
+	return link.Attrs().Name, nil
+}

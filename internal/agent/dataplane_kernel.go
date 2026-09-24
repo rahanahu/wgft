@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -46,6 +47,8 @@ type kernelOps struct {
 	writeIPForward func() error
 	localAddrs     func() (map[netip.Addr]bool, error)
 	now            func() time.Time
+	sendDatagram   func(dst netip.AddrPort) error
+	routeIface     func(dst netip.Addr) (string, error)
 }
 
 func defaultKernelOps() kernelOps {
@@ -70,8 +73,23 @@ func defaultKernelOps() kernelOps {
 		writeIPForward: linux.WriteIPForward,
 		localAddrs:     hostAddrs,
 		now:            time.Now,
+		sendDatagram: func(dst netip.AddrPort) error {
+			c, err := net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(dst))
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			_, err = c.Write([]byte{0})
+			return err
+		},
+		routeIface: wg.AgentRouteInterface,
 	}
 }
+
+// kernelSessionPort は、keepalive ごとのデータグラムを送る vpsd のトンネルアドレスのポートである
+// (7b.1 節のセッションの回復)。discard のポートで、応答を求めない。カーネルモードの vpsd は wg0 から入る
+// 新しい接続を input で落とし、数えない。ユーザー空間モードの vpsd の netstack はこのポートで待ち受けない。
+const kernelSessionPort = 9
 
 // 名前の解決と宛先の試し接続の期限(仕様 5.2・7b.2・7b.3 節)。試し接続の 2 秒と同時に試す数の 32 は
 // ユーザー空間モードの中継と同じ値である(internal/dataplane/userspace/relay)。
@@ -108,6 +126,8 @@ type kernelDataplane struct {
 	endpoint   netip.AddrPort
 	endpointOf string
 	endpointEr error
+	// declared は宣言のエンドポイントの名前である。30 秒ごとの見直しが引き直すのはこの名前で、epMu が守る
+	declared string
 
 	// converged は、このプロセスが wgft0 を一度でも収束させたかどうかである。偽の間の所有の衝突、
 	// アドレス帯の重なり、前提の欠如は起動の失敗として扱う(11b 節、fatalError)
@@ -123,6 +143,21 @@ type kernelDataplane struct {
 	driftSeen string
 	// observeErr は直前の見直しの誤りである。同じ誤りが続く間は 1 行だけ出す
 	observeErr string
+
+	// kaStop は keepalive ごとのデータグラムを送る goroutine を止める(7b.1 節)。動いていなければ nil。
+	// kaUnit は keepalive の値の単位で、テストだけが短くする
+	kaStop func()
+	kaUnit time.Duration
+	// hsValue は直前に見た最終ハンドシェイクで、hsSince はその値を見始めた時刻か、エンドポイントを
+	// 最後に引いた時刻の遅い方である。ハンドシェイクが keepalive の 5 倍の間新しくならなければ、
+	// 次の見直しがエンドポイントを引き直す(7b.1 節)
+	hsValue time.Time
+	hsSince time.Time
+	// endpointStale は、次の見直しでエンドポイントを引き直すことを表す。epMu が守る
+	endpointStale bool
+	// routeFinding は、vpsd のトンネルアドレスへの経路が wgft0 を通らないことの直前の説明である。
+	// 変わったときだけ 1 行出す
+	routeFinding string
 	// lkg はルールごとの、直前に解決できた宛先のアドレスである(7b.2 節)。宣言の宛先の文字列が
 	// 同じ間だけ使う
 	lkg map[string]lkgEntry
@@ -308,7 +343,85 @@ func (d *kernelDataplane) build(priv wgtypes.Key, w proto.WGConfig) (bool, error
 	}
 	d.priv, d.wg, d.have = priv, w, true
 	d.server = addr.Masked().Addr().Next()
+	d.epMu.Lock()
+	d.declared = w.Endpoint
+	d.epMu.Unlock()
+	d.startKeepalive()
 	return true, nil
+}
+
+// startKeepalive は、keepalive ごとに wgft0 を通して vpsd のトンネルアドレスへ小さな UDP のデータ
+// グラムを 1 つ送る goroutine を立て直す(7b.1 節のセッションの回復)。keepalive のパケットだけでは、
+// vpsd の側がセッションを失ったときに新しいハンドシェイクが鍵の寿命まで始まらない。データを送れば、
+// 応答が無いまま 15 秒たったところで WireGuard がハンドシェイクをやり直す。応答は要らない。
+// keepalive が 0 なら送らない。goroutine は ops と、立てたときの宛先と間隔だけを使い、排他を取らない。
+// 送れない間は、理由が変わったときだけ 1 行出す。ピアにエンドポイントが無い間(名前がまだ解決できて
+// いないとき)は、そのことを出す。
+func (d *kernelDataplane) startKeepalive() {
+	d.stopKeepalive()
+	if d.wg.Keepalive <= 0 {
+		return
+	}
+	unit := d.kaUnit
+	if unit <= 0 {
+		unit = time.Second
+	}
+	every := time.Duration(d.wg.Keepalive) * unit
+	dst := netip.AddrPortFrom(d.server, kernelSessionPort)
+	send, iface := d.ops.sendDatagram, d.iface
+	ctx, cancel := context.WithCancel(d.ctx)
+	d.kaStop = cancel
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		last := ""
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			err := send(dst)
+			reason := sendFailure(err)
+			if reason == last {
+				continue
+			}
+			switch {
+			case err == nil:
+				log.Printf("kernel mode: the keepalive datagram to %s is sent again", dst)
+			case errors.Is(err, syscall.EDESTADDRREQ):
+				log.Printf("kernel mode: cannot send the keepalive datagram to %s yet: the server peer on %s has no endpoint, as when the endpoint name has not resolved; it is sent once the peer has one", dst, iface)
+			default:
+				log.Printf("kernel mode: cannot send the keepalive datagram to %s: %s; until this works, a session the server lost may recover only when its keys expire", dst, reason)
+			}
+			last = reason
+		}
+	}()
+}
+
+// sendFailure は、データグラムを送れなかった理由を、ログを出し直すかの比べに使う形にする。送れたら空で
+// ある。net の書き込みの誤りは送信元のポートを含み、送るたびに違うので、下層の errno があればそれで
+// 比べる。
+func sendFailure(err error) string {
+	if err == nil {
+		return ""
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno.Error()
+	}
+	var op *net.OpError
+	if errors.As(err, &op) && op.Err != nil {
+		return op.Err.Error()
+	}
+	return err.Error()
+}
+
+func (d *kernelDataplane) stopKeepalive() {
+	if d.kaStop != nil {
+		d.kaStop()
+		d.kaStop = nil
+	}
 }
 
 func (d *kernelDataplane) built() bool { return d.have }
@@ -509,6 +622,7 @@ func (d *kernelDataplane) applyRules(gen uint64, rules []proto.AgentRule, prepar
 	if len(changes) > 0 {
 		log.Printf("kernel mode: %s: %s", d.iface, strings.Join(changes, "; "))
 	}
+	d.checkRoute()
 
 	pub := d.planWith(gen, rules, p.resolved)
 	if err := d.publish(pub); err != nil {
@@ -680,6 +794,7 @@ func (d *kernelDataplane) refresh() {
 // rotate-key はこの経路で新しい鍵を渡す。直前の公開の記録と、直前に解決できたアドレスは残す。
 func (d *kernelDataplane) close() {
 	d.have = false
+	d.stopKeepalive()
 }
 
 func (d *kernelDataplane) lastHandshake() time.Time {
@@ -794,11 +909,25 @@ func sortedAddrs(a []netip.Addr) []netip.Addr {
 func (d *kernelDataplane) observePrepare(rules []proto.AgentRule) any {
 	ctx, cancel := context.WithTimeout(d.ctx, kernelResolveTimeout)
 	defer cancel()
-	resolved := resolveTargets(ctx, rules, d.ops.lookup)
+	p := &observePrepared{}
+	d.epMu.Lock()
+	stale, name := d.endpointStale, d.declared
+	d.epMu.Unlock()
+	if stale && name != "" {
+		p.endpoint = &kernelPrepared{tried: true, endpointOf: name}
+		p.endpoint.endpoint, p.endpoint.endpointEr = resolveEndpointAddr(ctx, name, d.ops.lookup)
+	}
+	p.resolved = resolveTargets(ctx, rules, d.ops.lookup)
 	if d.ctx.Err() != nil {
 		return nil
 	}
-	return resolved
+	return p
+}
+
+// observePrepared は observePrepare の結果である。endpoint は、エンドポイントを引き直したときだけある。
+type observePrepared struct {
+	resolved map[string]nft.Resolution
+	endpoint *kernelPrepared
 }
 
 // observeCommit は 30 秒ごとの見直しの残りである(7b.2・7b.4 節)。rt.mu を持って呼ぶ。
@@ -812,18 +941,31 @@ func (d *kernelDataplane) observePrepare(rules []proto.AgentRule) any {
 // saved は記録が変わったかどうかで、真なら呼び出し側が認証情報ファイルを保存する。見直しの失敗は
 // 旧いテーブルを残し、次の見直しで試し直す。
 func (d *kernelDataplane) observeCommit(gen uint64, rules []proto.AgentRule, prepared any) (saved bool, err error) {
-	resolved, ok := prepared.(map[string]nft.Resolution)
+	op, ok := prepared.(*observePrepared)
 	if !ok || !d.have || !d.converged || d.pub == nil {
 		return false, nil
 	}
 	defer func() { d.noteObserveErr(err) }()
-	next := d.planWith(gen, rules, resolved)
+	next := d.planWith(gen, rules, op.resolved)
 	changedDNAT := !sameDNATs(*d.pub, next)
 
-	tableDrift, linkDrift, err := d.drift()
+	// 引き直したエンドポイントの収束に失敗しても、表の修復と経路の確認へ進み、誤りは最後に返す。
+	// 印は残るので、次の見直しが試し直す。ここで返すと、収束の失敗が続く間(稼働中に現れた重なりなど)、
+	// 30 秒ごとの見直しが表の修復に届かない
+	if op.endpoint != nil {
+		if reErr := d.reResolved(op.endpoint); reErr != nil {
+			defer func() {
+				if err == nil {
+					err = reErr
+				}
+			}()
+		}
+	}
+	tableDrift, linkDrift, link, err := d.drift()
 	if err != nil {
 		return false, err
 	}
+	d.watchHandshake(link)
 	drift := strings.Join(nonEmpty(tableDrift, linkDrift), "; ")
 	if drift != "" && drift != d.driftSeen {
 		log.Printf("kernel mode: %s; publishing the table again", drift)
@@ -842,6 +984,9 @@ func (d *kernelDataplane) observeCommit(gen uint64, rules []proto.AgentRule, pre
 			log.Printf("kernel mode: %s: %s", d.iface, strings.Join(changes, "; "))
 		}
 	}
+	// 経路は wgft0 が宣言どおりになってから確かめる。wgft0 が消えたり down だったりする間は、経路が
+	// 既定経路へ出るのは当然で、確かめる意味が無い(7b.1 節)
+	d.checkRoute()
 	switch {
 	case changedDNAT:
 		log.Printf("kernel mode: target resolution changed the DNAT of %s; publishing the table again", strings.Join(changedRules(*d.pub, next), ", "))
@@ -883,11 +1028,11 @@ func (d *kernelDataplane) noteObserveErr(err error) {
 // drift は、実際のテーブルと wgft0 が直前の公開と宣言に一致しなければ、それぞれ何が違うかを返す。
 // 一致すれば空である。テーブルは指紋で、wgft0 は種別、鍵、up、MTU、アドレス、ピアの集合と
 // AllowedIPs と keepalive で比べる。エンドポイントは比べない(7b.1 節)。
-func (d *kernelDataplane) drift() (table, link string, err error) {
+func (d *kernelDataplane) drift() (table, link string, st wg.AgentState, err error) {
 	fp, present, err := d.ops.fingerprint(nft.AgentTableName)
 	switch {
 	case err != nil:
-		return "", "", fmt.Errorf("read table inet %s: %w", nft.AgentTableName, err)
+		return "", "", st, fmt.Errorf("read table inet %s: %w", nft.AgentTableName, err)
 	case !present:
 		table = "table inet " + nft.AgentTableName + " is gone"
 	case !d.fpKnown:
@@ -896,11 +1041,107 @@ func (d *kernelDataplane) drift() (table, link string, err error) {
 		table = "table inet " + nft.AgentTableName + " was changed outside wgft"
 	}
 	prev, _ := d.f.PreviousKey()
-	st, err := d.ops.inspectLink(d.iface, d.priv, prev)
+	st, err = d.ops.inspectLink(d.iface, d.priv, prev)
 	if err != nil {
-		return "", "", fmt.Errorf("read %s: %w", d.iface, err)
+		return "", "", st, fmt.Errorf("read %s: %w", d.iface, err)
 	}
-	return table, d.linkDrift(st), nil
+	return table, d.linkDrift(st), st, nil
+}
+
+// watchHandshake は、wgft0 の最終ハンドシェイクが keepalive の 5 倍の間新しくならなければ、次の見直しで
+// エンドポイントの名前を引き直すよう印を付ける(7b.1 節、4 節と同じ契機)。カーネルの WireGuard は
+// 名前を自分では引き直さない。IP リテラルのエンドポイントと keepalive が 0 の設定では引き直さない。
+func (d *kernelDataplane) watchHandshake(st wg.AgentState) {
+	var hs time.Time
+	for _, p := range st.Peers {
+		hs = p.LastHandshake
+	}
+	now := d.ops.now()
+	if !hs.Equal(d.hsValue) || d.hsSince.IsZero() {
+		d.hsValue, d.hsSince = hs, now
+	}
+	if d.wg.Keepalive <= 0 {
+		return
+	}
+	host, _, err := net.SplitHostPort(d.wg.Endpoint)
+	if err != nil {
+		return
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return
+	}
+	if now.Sub(d.hsSince) >= 5*time.Duration(d.wg.Keepalive)*time.Second {
+		d.epMu.Lock()
+		d.endpointStale = true
+		d.epMu.Unlock()
+	}
+}
+
+// reResolved は、見直しが引き直したエンドポイントを控えに入れ、wgft0 のピアへ設定する。引けなかった
+// 場合は控えを使い続ける。どちらの場合も、次に引き直すのはさらに keepalive の 5 倍の後である。ただし
+// wgft0 の収束に失敗したら、次の見直しで試し直す。
+func (d *kernelDataplane) reResolved(p *kernelPrepared) error {
+	d.epMu.Lock()
+	before := d.endpoint
+	d.epMu.Unlock()
+	d.useEndpoint(p)
+	if p.endpointEr != nil {
+		d.resolvedAgain()
+		return nil
+	}
+	if p.endpoint != before {
+		log.Printf("kernel mode: no new handshake for 5 times the keepalive; resolved the server endpoint %s again to %s", p.endpointOf, p.endpoint)
+	}
+	// アドレスが変わらなくても wgft0 を収束させる。カーネルのピアのエンドポイントが外から書き換えられて
+	// いれば、ここで戻る。収束に失敗したら印を残し、次の見直しで引き直しと収束を試し直す
+	cfg, err := d.linkConfig()
+	if err != nil {
+		return err
+	}
+	changes, err := d.ops.ensureLink(cfg)
+	if err != nil {
+		return fmt.Errorf("converge %s: %w", d.iface, err)
+	}
+	if len(changes) > 0 {
+		log.Printf("kernel mode: %s: %s", d.iface, strings.Join(changes, "; "))
+	}
+	d.resolvedAgain()
+	return nil
+}
+
+// resolvedAgain は引き直しの印を消し、次に引き直すまでの keepalive の 5 倍を数え直す。
+func (d *kernelDataplane) resolvedAgain() {
+	d.epMu.Lock()
+	d.endpointStale = false
+	d.epMu.Unlock()
+	d.hsSince = d.ops.now()
+}
+
+// checkRoute は、vpsd のトンネルアドレスへの経路が wgft0 を通るかを、ポリシールーティングの規則を
+// 含めて確かめる(7b.1 節)。アドレス帯の重なりの検査は main の経路表だけを読むので、先に引かれる
+// 規則の表(Tailscale の表 52 など)が奪う経路はここでだけ見える。稼働中に main の表に現れた重なりも
+// ここで見える。警告はカーネルの引き当てが示す事実だけを述べ、原因は決めつけない。警告だけを出し、
+// 起動は止めない(2026-09-24、所有者の決定)。ポリシールーティングは稼働中にも変わるためである。
+// 変わったときだけ 1 行出す。wgft0 が宣言どおりになった後に呼ぶ。
+func (d *kernelDataplane) checkRoute() {
+	iface, err := d.ops.routeIface(d.server)
+	finding := ""
+	switch {
+	case err != nil:
+		finding = fmt.Sprintf("cannot look up the route to the server's tunnel address %s: %v", d.server, err)
+	case iface != d.iface:
+		finding = fmt.Sprintf("policy rules included, the route to the server's tunnel address %s leaves through %s, not %s; replies to the server may not go through the tunnel; look for a policy routing rule that sends %s to another table, such as the one Tailscale adds for accepted subnet routes, or for an address or route on another interface that covers it", d.server, iface, d.iface, d.server)
+	}
+	if finding == d.routeFinding {
+		return
+	}
+	switch {
+	case finding != "":
+		log.Printf("warning: %s", finding)
+	default:
+		log.Printf("kernel mode: the route to the server's tunnel address %s leaves through %s again", d.server, d.iface)
+	}
+	d.routeFinding = finding
 }
 
 func nonEmpty(s ...string) []string {
