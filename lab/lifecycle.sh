@@ -18,7 +18,9 @@
 #   2. adding, retargeting, disabling and deleting an unrelated rule B, and a group/note edit
 #      of rule A, do not cut A's long-lived TCP session and UDP stream. Changing A's own target,
 #      or deleting A, does cut them (design 6.1 conntrack convergence, design 7 port-based
-#      reconciliation).
+#      reconciliation). A rule whose live TCP session was cut by a target change, or by a
+#      disable and an enable at once, forwards again within 10s: the agent's cut frees its
+#      netstack port at once (design 7).
 #   3. kernel mode only: a proxy rule whose port is already bound by another process logs the
 #      bind failure without an nft accounting line for that port; the next apply (port freed)
 #      adds the line; same across a server restart (design 6.2 section). 3b: a failed nftables
@@ -915,6 +917,57 @@ s = socket.create_connection((\"198.51.100.1\", 39984), timeout=5); s.send(b\"x\
   after=$(flows_established 39984)
   wait
   check "deleting A cuts A's open tcp session" "before=1 after=0" "before=$before after=$after"
+
+  echo "-- cutting A's live tcp session by a target change, or by a disable and an enable at once: A forwards again within 10s"
+  # The agent cuts the relay's sessions when the port leaves its declaration or its target
+  # changes. A graceful close would leave the agent's netstack endpoint in TIME_WAIT (60s) or
+  # FIN_WAIT_2, holding the port, so the listener would fail to open again with "port is in use"
+  # and come back only on a 30s retry after the hold ends. The agent aborts the netstack side
+  # (RST) instead (design 7). The target change reproduces the hold on its own: the VPS keeps
+  # forwarding to the same agent port, so the client is still there to keep the session open.
+  local agentlog=$W/wgft-lifecycle-c2-agent.log
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25583 > $W/wgft-lifecycle-c2-echo2.log 2>&1 < /dev/null &
+  disown
+  # hold_session <port>: a client session that sends one byte and then holds, without closing, for
+  # 30s, well past the steps below (each waits at most about 25s); the client must not be the one
+  # to close first, or the agent would never be the active closer. Sets held to the job's pid.
+  local held
+  hold_session() {
+    client "python3 -c \"
+import socket, time
+s = socket.create_connection(('198.51.100.1', $1), timeout=5); s.send(b'x'); time.sleep(30)
+\"" &
+    held=$!
+  }
+  local a_tcp4 a_tcp5 back t0 held4 held5
+  a_tcp4=$(vps wgft rule add --agent home --tcp 39985 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  must_wait "check2: rule A4's tcp probe answers before the target change" 10 tcp_probe_ok 39985
+  hold_session 39985; held4=$held
+  must_wait "check2: A4's tcp session is up before the target change" 5 tcp_flow_up 39985
+  set_target "$a_tcp4" 192.168.50.3:25583
+  must_wait "check2: the agent reopened A4's listener for the new target" 10 log_has "$agentlog" "listener tcp/39985 closed"
+  t0=$SECONDS back=0
+  wait_until 10 tcp_probe_ok 39985 && back=1
+  echo "      A4 answered again: $back, $((SECONDS - t0))s after the reopen"
+  okcheck "a retargeted A forwards again within 10s after its tcp session was cut" "$back"
+  absent "the agent reopens A4's listener without a bind failure" "listener tcp/39985: bind" "$(grep 'listener tcp/39985' "$agentlog")"
+
+  a_tcp5=$(vps wgft rule add --agent home --tcp 39986 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  must_wait "check2: rule A5's tcp probe answers before the disable" 10 tcp_probe_ok 39986
+  hold_session 39986; held5=$held
+  must_wait "check2: A5's tcp session is up before the disable" 5 tcp_flow_up 39986
+  vps wgft rule disable "$a_tcp5" --admin "$ADMIN" >/dev/null
+  # must_wait, not bare: an agent that never saw the disable would never cut the session, and the
+  # checks below would then pass without exercising the cut at all
+  must_wait "check2: the agent closed A5's listener on the disable" 10 log_has "$agentlog" "listener tcp/39986 closed"
+  vps wgft rule enable "$a_tcp5" --admin "$ADMIN" >/dev/null
+  t0=$SECONDS back=0
+  wait_until 10 tcp_probe_ok 39986 && back=1
+  echo "      A5 answered again: $back, $((SECONDS - t0))s after the enable"
+  okcheck "a re-enabled A forwards again within 10s after its tcp session was cut" "$back"
+  absent "the agent reopens A5's listener without a bind failure" "listener tcp/39986: bind" "$(grep 'listener tcp/39986' "$agentlog")"
+  # the held clients exit on their own once their 30s are up
+  wait "$held4" "$held5" 2>/dev/null
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"

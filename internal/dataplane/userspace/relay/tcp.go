@@ -34,6 +34,25 @@ func abortRefused(c net.Conn) {
 	}
 }
 
+// cutConn は、中継中の接続を中継の側から意図して切るときに使う(ポートが宣言から消えたとき、
+// 実効宛先が変わって開き直すとき、Manager.Close、接続元制限の変更で切るとき、待ち受けを閉じた
+// 後に accept のループが受け取った接続)。netstack の接続は Abort(RST)で
+// 即座に解放する。通常の Close ではエンドポイントが TIME_WAIT(gVisor の既定で 60 秒)か、
+// 相手が閉じなければ FIN_WAIT_2 に残り、その間は同じポートで待ち受けを開き直せない
+// ("port is in use")。無効化の直後に有効に戻したルールや、宛先を変えたルールが、その間
+// 転送できなくなる(設計文書 7 節)。どのみち切るセッションなので、クライアントに FIN ではなく
+// RST が届いても失うものは無い。実ソケット(エージェントの宛先側、vpsd の公開側)は、
+// 待ち受けのポートを塞がないので、今までどおり通常の Close にする。セッションが自然に終わる
+// 経路(ハーフクローズ、EOF)は netpipe が扱い、この関数を通らない。その経路でエージェントが
+// 先に閉じた接続は、conns から外れた後なので切れず、TIME_WAIT の間ポートを保持する(設計文書 7 節)。
+func cutConn(c net.Conn) {
+	if a, ok := c.(aborter); ok {
+		a.Abort()
+		return
+	}
+	c.Close()
+}
+
 // serveTCP は開いた待ち受け ln で中継を始める。bind は呼び出し側(Apply の経路の openLocked と、
 // Prepare/Commit の経路の Prepare)が済ませてある。
 func (m *Manager) serveTCP(l *listener, ln net.Listener) {
@@ -54,7 +73,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		n := 0
 		for c, src := range conns {
 			if src.IsValid() && !keep(src) {
-				c.Close()
+				cutConn(c)
 				n++
 			}
 		}
@@ -69,10 +88,19 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 	l.closeF = func() {
 		once.Do(func() { close(done) })
 		ln.Close()
-		// 中継中の TCP 接続もすべて閉じる(仕様 7 節:ポートが宣言から消えたとき)
+		// 中継中の TCP 接続もすべて切る(仕様 7 節:ポートが宣言から消えたとき、開き直すとき)。
+		// netstack の側を先に Abort する。実ソケットの側を先に閉じると、netpipe がその EOF を
+		// netstack の側へ FIN として伝え、RST の前に FIN が出ることがあるため
 		mu.Lock()
 		for c := range conns {
-			c.Close()
+			if _, ok := c.(aborter); ok {
+				cutConn(c)
+			}
+		}
+		for c := range conns {
+			if _, ok := c.(aborter); !ok {
+				cutConn(c)
+			}
 		}
 		mu.Unlock()
 	}
@@ -109,7 +137,20 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				}
 				continue
 			}
+			// accept から登録までの間に closeF が走っていれば(Apply が m.mu を持つ間、上の ruleOf が
+			// 待たされる)、closeF はこの接続を見ていない。登録せずにここで切り、ポートを保持させない。
+			// closeF は mu を取る前に done を閉じるので、done が閉じていなければ closeF はこの後に mu を
+			// 取り、登録した接続を切る
 			mu.Lock()
+			select {
+			case <-done:
+				mu.Unlock()
+				l.budget.Release()
+				release()
+				cutConn(c)
+				continue
+			default:
+			}
 			conns[c] = src
 			mu.Unlock()
 			go func() {
