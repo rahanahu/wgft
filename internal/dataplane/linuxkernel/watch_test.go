@@ -12,19 +12,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// readIntSysctl は整数の sysctl ファイルを読む。internal/platform/linux が持つ同名の(公開されて
-// いない)関数と同じ形で、このテストのためだけにここへ写した。
-func readIntSysctl(t *testing.T, path string) int {
+// readIntSysctl は整数の sysctl ファイルを読む。internal/platform/linux の同名の(公開されて
+// いない)関数を元にしたこのテスト専用の版で、読めないときの扱いが違う。あちらは読めなければ
+// 誤りを返すが、こちらは誤りをテストのログに出して ok を偽で返す。
+// テストを動かす環境 (コンテナなど) によっては /proc/sys の一部が見えないことがあり、読めないことは
+// ソケットの不具合ではないためである。読めた値が整数でなければテストを落とす。
+func readIntSysctl(t *testing.T, path string) (n int, ok bool) {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		t.Logf("cannot read %s: %v", path, err)
+		return 0, false
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	n, err = strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil {
 		t.Fatalf("%s value is not an integer: %v", path, err)
 	}
-	return n
+	return n, true
 }
 
 // TestSizeNotifySocketRaisesTheBuffer は、本物の netlink ソケットを開き(開くだけなら特別な権限は
@@ -63,7 +67,13 @@ func TestSizeNotifySocketRaisesTheBuffer(t *testing.T) {
 		t.Errorf("read buffer shrank from %d to %d", before, after)
 	}
 
-	rmemMax := readIntSysctl(t, "/proc/sys/net/core/rmem_max")
+	// 上限が読めなければ、伸びたはずの値を決められない。ここまでの確かめ(誤りを返さないこと、
+	// 縮まないこと)は済んでいるので、残りだけを SKIP にする
+	rmemMax, ok := readIntSysctl(t, "/proc/sys/net/core/rmem_max")
+	if !ok {
+		t.Skip("net.core.rmem_max cannot be read here, so the size the buffer should reach is unknown; " +
+			"only the checks above ran")
+	}
 	want := notifyReceiveBuffer
 	if rmemMax < want {
 		want = rmemMax
