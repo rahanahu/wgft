@@ -127,26 +127,50 @@ func (s *Staged) Flush() error {
 // DeleteTable は table inet wgft を削除する。他のテーブルには触れない。
 // すでに無ければ何もしない(撤去を手作業の途中からでも走らせられるように)。
 func DeleteTable() error {
+	_, err := deleteTableNamed(TableName)
+	return err
+}
+
+// DeleteAgentTable は table inet wgft_agent を削除し、削除したかどうかを返す(設計文書 10.3 節の
+// agent teardown)。他のテーブルには触れない。すでに無ければ何もせず false を返す。
+func DeleteAgentTable() (bool, error) { return deleteTableNamed(AgentTableName) }
+
+// AgentTablePresent は table inet wgft_agent があるかどうかを返す。何も変えない。
+func AgentTablePresent() (bool, error) {
 	conn, err := nftables.New()
 	if err != nil {
-		return fmt.Errorf("cannot connect to nftables: %w", err)
+		return false, fmt.Errorf("cannot connect to nftables: %w", err)
 	}
+	return tablePresent(conn, AgentTableName)
+}
+
+func tablePresent(conn *nftables.Conn, name string) (bool, error) {
 	tables, err := conn.ListTablesOfFamily(nftables.TableFamilyINet)
 	if err != nil {
-		return fmt.Errorf("listing tables: %w", err)
+		return false, fmt.Errorf("listing tables: %w", err)
 	}
-	found := false
 	for _, t := range tables {
-		if t.Name == TableName {
-			found = true
-			break
+		if t.Name == name {
+			return true, nil
 		}
 	}
-	if !found {
-		return nil
+	return false, nil
+}
+
+func deleteTableNamed(name string) (bool, error) {
+	conn, err := nftables.New()
+	if err != nil {
+		return false, fmt.Errorf("cannot connect to nftables: %w", err)
 	}
-	conn.DelTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: TableName})
-	return conn.Flush()
+	found, err := tablePresent(conn, name)
+	if err != nil || !found {
+		return false, err
+	}
+	conn.DelTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: name})
+	if err := conn.Flush(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Comment はルールの行に付けるコメント。差し替えのたびにハンドルは振り直されるので、

@@ -43,6 +43,18 @@
 #   route. a policy routing rule that sends the server's tunnel address to another table, the way
 #       Tailscale's table 52 can, is named in the agent's log within one 30-second check, and so is
 #       its removal; so are a main-table route that covers the address and its removal.
+#   teardown. wgft agent teardown: it refuses while the agent runs; pointed at a directory without
+#       agent.json while the agent runs, it removes nothing and forwarding goes on; a stopped
+#       kernel-mode agent's leftovers make a userspace start refuse; teardown removes the agent's
+#       interfaces, found by key under any name, its table and its records, keeps agent.json's
+#       owner, and leaves a WireGuard interface with another key and an unrelated table alone; the
+#       agent then forwards in userspace mode, and the outage from stopping the kernel-mode agent
+#       until forwarding is back is measured and printed; kernel mode comes back after a teardown;
+#       a wgft0 holding the previous key after a stopped rotate-key is removed, and without
+#       last_state the flows are found by wgft0's address; a foreign-key wgft0 is left and named;
+#       a host with only the records left, as after a reboot, is cleared; an unknown recorded mode
+#       stops it with exit code 3 and changes nothing; a run without CAP_NET_ADMIN is a
+#       prerequisite refusal; a second run finds nothing to remove.
 #
 # The server runs in kernel mode unless the first argument is "userspace" or "kernel":
 #
@@ -66,7 +78,7 @@ ELOG=$W/wgft-ak-echo.log
 ADMIN=127.0.0.1:8686
 SERVER_MODE=kernel
 case "${1:-}" in kernel|userspace) SERVER_MODE=$1; shift ;; esac
-CHECKS=${*:-16 17 18 19 22 24 25 resolve drift session route}
+CHECKS=${*:-16 17 18 19 22 24 25 resolve drift session route teardown}
 HOSTS=/etc/netns/$HOME_NS/hosts
 fail=0
 
@@ -109,13 +121,17 @@ cleanup() {
   vps nft delete table inet ak_probe9 2>/dev/null
   vps ip link del wgft0 2>/dev/null
   vps nft delete table inet wgft 2>/dev/null
-  # wgft agent teardown is a later change; remove the agent's kernel state by hand
+  # remove the agent's kernel state by hand, so that a run stopped before wgft agent teardown
+  # leaves nothing either
   home ip link del wgft0 2>/dev/null
   home nft delete table inet wgft_agent 2>/dev/null
   home nft delete table ip docker_like 2>/dev/null
   home nft delete table inet otherfw 2>/dev/null
   home ip rule del to 10.200.0.1 lookup 52 2>/dev/null
   home ip route flush table 52 2>/dev/null
+  home ip link del wgold 2>/dev/null
+  home ip link del wgunrel 2>/dev/null
+  home nft delete table inet unrelated 2>/dev/null
   client 'nft delete table inet noicmp 2>/dev/null'
   lan nft delete table inet noicmp 2>/dev/null
   rm -rf "$DATA" "$ADATA" "/etc/netns/$HOME_NS"
@@ -127,8 +143,8 @@ set_hosts() { printf '127.0.0.1 localhost\n' > "$HOSTS"; printf '%s\n' "$@" >> "
 # The allowlist holds every target the rules use except the one that must be refused. 127.0.0.1 is
 # in it, so the loopback rule is refused for being loopback, not for the list.
 ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.3:25570,192.168.50.2:25580,192.168.50.2:25565,192.168.50.4:25565,192.168.50.5:25565,127.0.0.1:25565
-start_agent() {
-  WGFT_MODE=kernel WGFT_JOIN="${JOIN:-}" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
+start_agent() { # start_agent [mode]: kernel unless given
+  WGFT_MODE=${1:-kernel} WGFT_JOIN="${JOIN:-}" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
     home setsid nohup wgft agent run --data-dir "$ADATA" >> "$ALOG" 2>&1 < /dev/null &
   disown
   wait_until 20 agent_running
@@ -508,6 +524,207 @@ check_drift() {
   wait_until 60 test -s "$held"
   echo "INFO  a TCP flow held across the deleted wgft0: $(flow_ok "$held" && echo survived || echo "ended: $(tail -1 "$held")")"
 }
+check_teardown() {
+  echo "== teardown: wgft agent teardown removes only what the agent owns"
+  local out rc t_stop t_down t_up key other owner before probe=$W/wgft-ak-probe nocap=$W/wgft-ak-nocap
+  wait_until 30 caught_up
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  check "teardown refuses while the agent runs" "the agent is running, so nothing was removed" "$out"
+  okcheck "the refusal exits 1" "$([ "$rc" = 1 ] && echo 1 || echo 0)"
+  check "wgft0 stays after the refusal" "wgft0" "$(home ip -br link show wgft0 2>&1)"
+  check "the table stays after the refusal" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
+
+  # A data directory without agent.json, as when --data-dir is left out while the agent uses another
+  # directory: the lock there says nothing about the running agent, so teardown must remove nothing.
+  local empty=$W/wgft-ak-empty
+  rm -rf "$empty"; mkdir -p "$empty"
+  out=$(home wgft agent teardown --data-dir "$empty" 2>&1); rc=$?
+  check "a directory without agent.json removes nothing" "does not exist, so nothing was removed" "$out"
+  okcheck "and exits 1" "$([ "$rc" = 1 ] && echo 1 || echo 0)"
+  check "it names the table it found" "found: table inet wgft_agent" "$out"
+  check "it names wgft0 as wgft's configured name" "found: the WireGuard interface wgft0, wgft's configured name" "$out"
+  check "it points at --data-dir" "Point --data-dir" "$out"
+  check "the running agent's table stays" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
+  check "the running agent's wgft0 stays up" "UP" "$(home ip -br link show wgft0 2>&1)"
+  check "forwarding goes on right after it" "tcp-echo" "$(tcp_echo 39971)"
+  okcheck "it created nothing in that directory" "$([ -z "$(ls -A "$empty")" ] && echo 1 || echo 0)"
+  rm -rf "$empty"
+
+  # Forwarding is probed every 0.1 s from the client through the VPS, each probe a new TCP
+  # connection that gives up after 0.5 s, for the outage measured below.
+  client "python3 - > $probe 2>&1 <<'PY' &
+import socket, time
+end = time.time() + 120
+while time.time() < end:
+    t = time.time()
+    try:
+        # the echo answers once the client half-closes
+        s = socket.create_connection(('198.51.100.1', 39971), timeout=0.5)
+        s.settimeout(0.5); s.sendall(b'hi'); s.shutdown(socket.SHUT_WR)
+        ok = b'tcp-echo' in s.recv(200); s.close()
+    except OSError:
+        ok = False
+    print('%.3f %s' % (t, 'ok' if ok else 'fail'), flush=True)
+    time.sleep(max(0, 0.1 - (time.time() - t)))
+PY"
+  sleep 2
+  t_stop=$(date +%s.%N)
+  stop_agent
+  sleep 3
+  check "forwarding goes on while the kernel-mode agent is stopped" "tcp-echo" "$(tcp_echo 39971)"
+
+  # the agent's key under an old name, a WireGuard interface with another key, an unrelated table
+  key=$W/wgft-ak-agentkey
+  other=$W/wgft-ak-otherkey
+  (umask 077; python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wg_private_key"])' "$ADATA/agent.json" > "$key"; wg genkey > "$other")
+  home ip link add wgold type wireguard && home wg set wgold private-key "$key"
+  home ip link add wgunrel type wireguard && home wg set wgunrel private-key "$other"
+  home nft add table inet unrelated && home nft add chain inet unrelated keep
+
+  out=$(WGFT_MODE=userspace home timeout -k 5 30 wgft agent run --data-dir "$ADATA" 2>&1); rc=$?
+  check "a userspace start is refused while the kernel-mode leftovers remain" "refusing to start [mode-gate WGFT_MODE]" "$out"
+  okcheck "the mode gate exits 3" "$([ "$rc" = 3 ] && echo 1 || echo 0)"
+
+  out=$(home wgft agent teardown --data-dir "$ADATA" --dry-run 2>&1)
+  check "dry run lists wgft0" "remove: the WireGuard interface wgft0, which holds this agent's key" "$out"
+  check "dry run lists the old name" "remove: the WireGuard interface wgold, which holds this agent's key" "$out"
+  not_forwarded "dry run does not list the interface with another key" "wgunrel" "$out"
+  check "dry run changes nothing" "wgft0" "$(home ip -br link show wgft0 2>&1)"
+  check "dry run keeps the records" '"mode": "kernel"' "$(cat "$ADATA/agent.json")"
+
+  owner=$(stat -c %u:%g "$ADATA/agent.json")
+  chown 65534:65534 "$ADATA/agent.json"
+  t_down=$(date +%s.%N)
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  echo "$out" | sed 's/^/INFO  teardown: /'
+  okcheck "teardown exits 0" "$([ "$rc" = 0 ] && echo 1 || echo 0)"
+  check "teardown deleted wgft0" "deleted the WireGuard interface wgft0" "$out"
+  okcheck "teardown closed the agent's conntrack entries" "$([[ "$out" =~ conntrack:\ closed\ [1-9] ]] && echo 1 || echo 0)"
+  okcheck "wgft0 is gone" "$(home ip link show wgft0 >/dev/null 2>&1 && echo 0 || echo 1)"
+  okcheck "the old-name interface with the agent's key is gone" "$(home ip link show wgold >/dev/null 2>&1 && echo 0 || echo 1)"
+  okcheck "table inet wgft_agent is gone" "$(home nft list table inet wgft_agent >/dev/null 2>&1 && echo 0 || echo 1)"
+  check "the WireGuard interface with another key stays" "wgunrel" "$(home ip -br link show wgunrel 2>&1)"
+  check "the unrelated table stays" "chain keep" "$(home nft list table inet unrelated 2>&1)"
+  not_forwarded "agent.json has no mode record" '"mode"' "$(cat "$ADATA/agent.json")"
+  check "agent.json keeps the registration" '"permanent_token"' "$(cat "$ADATA/agent.json")"
+  check "agent.json keeps its owner" "65534:65534" "$(stat -c %u:%g "$ADATA/agent.json")"
+  chown "$owner" "$ADATA/agent.json"
+  if [ "$forward_before" = 0 ]; then
+    check "the ip_forward change is shown with the command to restore it" "sysctl -w net.ipv4.ip_forward=0" "$out"
+  fi
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  check "a second run finds nothing" "nothing to remove" "$out"
+  okcheck "a second run exits 0" "$([ "$rc" = 0 ] && echo 1 || echo 0)"
+
+  t_up=$(date +%s.%N)
+  start_agent userspace
+  wait_until 60 tcp_ok 39971
+  check "the agent forwards tcp in userspace mode after teardown" "tcp-echo" "$(tcp_echo 39971)"
+  check "and udp" "udp-echo" "$(udp_echo 27015)"
+  okcheck "userspace mode made no wgft0" "$(home ip link show wgft0 >/dev/null 2>&1 && echo 0 || echo 1)"
+  sleep 3
+  python3 - "$probe" "$t_stop" "$t_down" "$t_up" <<'PY'
+import sys
+t_stop, t_down, t_up = (float(x) for x in sys.argv[2:5])
+rows = [(float(t), r) for t, r in (l.split() for l in open(sys.argv[1]) if len(l.split()) == 2)]
+# A probe gives up after 0.5 s, so one started up to 0.6 s before teardown can fail because of it.
+stopped = [r for t, r in rows if t_stop + 0.5 < t < t_down - 0.6]
+print('%s  no probe failed while the kernel-mode agent was stopped, before teardown: %d of %d failed' %
+      ('PASS' if stopped and 'fail' not in stopped else 'FAIL', stopped.count('fail'), len(stopped)))
+last_ok = max((t for t, r in rows if r == 'ok' and t < t_down), default=None)
+back = min((t for t, r in rows if r == 'ok' and t > t_up), default=None)
+if last_ok is None or back is None:
+    print('FAIL  outage: the probes do not show forwarding before teardown and back in userspace mode')
+    sys.exit(1)
+failed = sum(1 for t, r in rows if last_ok < t < back and r == 'fail')
+print('PASS  outage: forwarding is back in userspace mode after %d failed probes' % failed)
+print('INFO  outage: gap from the last good probe before teardown to the first good one in userspace mode: %.2fs' % (back - last_ok))
+print('INFO  outage: from running teardown until forwarding was back: %.2fs' % (back - t_down))
+print('INFO  outage: from starting the userspace-mode agent until forwarding was back: %.2fs' % (back - t_up))
+print('INFO  outage: from stopping the kernel-mode agent until forwarding was back, with a 3 s pause and the checks before teardown: %.2fs' % (back - t_stop))
+sys.exit(0 if stopped and 'fail' not in stopped else 1)
+PY
+  [ $? = 0 ] || fail=1
+
+  echo "-- kernel mode again after teardown"
+  stop_agent
+  start_agent kernel
+  wait_until 60 tcp_ok 39971
+  check "kernel mode forwards again after teardown" "tcp-echo" "$(tcp_echo 39971)"
+  check "kernel mode is recorded again" '"mode": "kernel"' "$(cat "$ADATA/agent.json")"
+
+  echo "-- a wgft0 that holds the previous key after a stopped rotate-key"
+  stop_agent
+  check "a stopped rotate-key keeps the old key as the previous one" "the old key is kept as the previous key" "$(home wgft agent rotate-key --data-dir "$ADATA" 2>&1)"
+  not_forwarded "the stopped rotate-key cleared last_state" '"last_state": {' "$(cat "$ADATA/agent.json")"
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  check "teardown names wgft0 by the previous key" "remove: the WireGuard interface wgft0, which holds this agent's previous key" "$out"
+  okcheck "without last_state it closes the agent's conntrack entries by wgft0's address" "$([[ "$out" =~ conntrack:\ closed\ [1-9] ]] && echo 1 || echo 0)"
+  okcheck "and deletes it" "$([ "$rc" = 0 ] && ! home ip link show wgft0 >/dev/null 2>&1 && echo 1 || echo 0)"
+  not_forwarded "the previous key is cleared" '"previous_wg_private_key"' "$(cat "$ADATA/agent.json")"
+
+  echo "-- a wgft0 with another key"
+  start_agent kernel
+  wait_until 60 tcp_ok 39971
+  stop_agent
+  home wgft agent teardown --data-dir "$ADATA" > /dev/null 2>&1
+  home ip link add wgft0 type wireguard && home wg set wgft0 private-key "$other"
+  home nft add table inet wgft_agent
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  check "a wgft0 with another key is named" "leave: wgft0 is a WireGuard interface that holds neither this agent's key nor its previous one" "$out"
+  okcheck "and teardown succeeds" "$([ "$rc" = 0 ] && echo 1 || echo 0)"
+  check "the wgft0 with another key stays" "wgft0" "$(home ip -br link show wgft0 2>&1)"
+  okcheck "the table named wgft_agent is removed beside it" "$(home nft list table inet wgft_agent >/dev/null 2>&1 && echo 0 || echo 1)"
+  home ip link del wgft0
+
+  echo "-- only the records left, as after a reboot"
+  start_agent kernel
+  wait_until 60 tcp_ok 39971
+  stop_agent
+  home ip link del wgft0
+  home nft delete table inet wgft_agent
+  out=$(WGFT_MODE=userspace home timeout -k 5 30 wgft agent run --data-dir "$ADATA" 2>&1); rc=$?
+  okcheck "the records alone make a userspace start refuse" "$([ "$rc" = 3 ] && [[ "$out" == *mode-gate* ]] && echo 1 || echo 0)"
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  check "teardown clears the records alone" "cleared the kernel-mode records" "$out"
+  okcheck "and exits 0" "$([ "$rc" = 0 ] && echo 1 || echo 0)"
+  not_forwarded "agent.json has no mode record after that" '"mode"' "$(cat "$ADATA/agent.json")"
+
+  echo "-- an unknown recorded mode"
+  start_agent kernel
+  wait_until 60 tcp_ok 39971
+  stop_agent
+  set_recorded_mode future
+  before=$(sha256sum < "$ADATA/agent.json")
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  check "an unknown mode stops teardown" "cannot continue [conflict WGFT_MODE]" "$out"
+  okcheck "with exit code 3" "$([ "$rc" = 3 ] && echo 1 || echo 0)"
+  okcheck "agent.json is unchanged" "$([ "$(sha256sum < "$ADATA/agent.json")" = "$before" ] && echo 1 || echo 0)"
+  check "wgft0 is untouched" "wgft0" "$(home ip -br link show wgft0 2>&1)"
+  check "the table is untouched" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
+  set_recorded_mode kernel
+
+  echo "-- without CAP_NET_ADMIN"
+  rm -rf "$nocap"; mkdir -p "$nocap"; cp "$ADATA/agent.json" "$nocap/"; chown -R 65534:65534 "$nocap"
+  out=$(home runuser -u nobody -- wgft agent teardown --data-dir "$nocap" --config "$nocap/none.env" 2>&1); rc=$?
+  check "a run without CAP_NET_ADMIN is a prerequisite refusal" "cannot continue [prerequisite CAP_NET_ADMIN]" "$out"
+  okcheck "with exit code 3" "$([ "$rc" = 3 ] && echo 1 || echo 0)"
+  check "and wgft0 stays" "wgft0" "$(home ip -br link show wgft0 2>&1)"
+  rm -rf "$nocap" "$key" "$other"
+  home wgft agent teardown --data-dir "$ADATA" > /dev/null 2>&1
+  home ip link del wgunrel
+  home nft delete table inet unrelated
+}
+set_recorded_mode() { # set_recorded_mode <mode>: rewrite the mode record in agent.json by hand
+  python3 - "$ADATA/agent.json" "$1" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["mode"] = sys.argv[2]
+json.dump(d, open(p, "w"), indent=2)
+PY
+}
+
 masquerade_back() { home nft list chain inet wgft_agent postrouting | grep -q masquerade; }
 mtu_back() { home ip link show wgft0 | grep -q 'mtu 1420'; }
 tcp_ok() { [[ "$(tcp_echo "$1")" == *tcp-echo* ]]; }
@@ -718,7 +935,7 @@ handshake_after() { local h; h=$(agent_field last_handshake); [ -n "$h" ] && [ "
 
 for c in $CHECKS; do
   case "$c" in
-    16|17|18|19|22|24|25|resolve|drift|session|route) "check_$c" ;;
+    16|17|18|19|22|24|25|resolve|drift|session|route|teardown) "check_$c" ;;
     *) echo "FAIL  unknown check $c"; fail=1 ;;
   esac
 done

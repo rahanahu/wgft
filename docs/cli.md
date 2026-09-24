@@ -17,6 +17,7 @@ To regenerate after changing the help: `go test ./cmd/wgft -run TestCLIDocUpToDa
 | [`wgft agent revoke`](#wgft-agent-revoke) | Revoke a permanent token |
 | [`wgft agent rotate-key`](#wgft-agent-rotate-key) | Regenerate the wg key pair |
 | [`wgft agent run`](#wgft-agent-run) | Run the agent |
+| [`wgft agent teardown`](#wgft-agent-teardown) | Remove what a stopped kernel-mode agent left: its WireGuard interface, table inet wgft_agent and the kernel-mode records |
 | [`wgft agent warnings`](#wgft-agent-warnings) | List theft-detection warnings |
 | [`wgft rule add`](#wgft-rule-add) | Add a rule |
 | [`wgft rule allow add`](#wgft-rule-allow-add) | Add allow CIDRs |
@@ -75,6 +76,7 @@ On the agent host:
   pubkey        print the wg public key; generate and save one if absent while the agent is stopped
   rotate-key    regenerate the wg key pair
   doctor        diagnose this host's own agent, running or stopped
+  teardown      remove what a stopped kernel-mode agent left in the kernel
 
 On the VPS, against the admin API:
   ls            list registered agents
@@ -561,6 +563,59 @@ Flags:
       --mode string                  forwarding mode userspace or kernel, env WGFT_MODE; unset means userspace, and kernel is Linux only
       --name string                  agent name, env WGFT_NAME; optional, the join string is already bound to a name
       --wg-interface string          kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE; unused in userspace mode (default "wgft0")
+```
+
+## wgft agent teardown
+
+Clean up after a stopped kernel-mode agent, so that it can start again in
+userspace mode. Run it on the agent host as root, since it reads and deletes
+kernel interfaces and nftables tables, which needs CAP_NET_ADMIN. It refuses and
+removes nothing while the agent is running: stop it first.
+
+It removes, in this order: every WireGuard interface that holds the key in
+agent.json or the previous key kept there after rotate-key, whatever its name;
+the conntrack entries of the flows the agent forwarded, found from the
+publication records in agent.json; table inet wgft_agent; and then the
+kernel-mode records in agent.json: the mode, the previous key, the ip_forward
+record, the publication record and the publications whose conntrack cleanup
+had not finished. The registration, the key and last_state stay, so the agent
+reconnects as the same agent.
+
+It never touches a WireGuard interface that holds another key or no key, or a
+link that is not WireGuard, even under the name WGFT_WG_INTERFACE gives; it
+names such a link and leaves it, and still succeeds. When agent.json records
+a mode this version does not know, it removes nothing and exits with code 3.
+A host with nothing left succeeds without changing anything.
+
+It tells whether the agent runs, and which interfaces are the agent's, from
+the data directory set by --data-dir or WGFT_DATA_DIR, taken from agent.env
+like "agent run" does. When that directory holds no agent.json, it removes
+nothing, lists the table inet wgft_agent and WireGuard interfaces it finds, and
+exits with code 1: point --data-dir at the directory the agent actually uses.
+
+It does not set net.ipv4.ip_forward back. When agent.json records that the
+agent changed it from 0 to 1, it prints the command to restore it, along with
+the other things to undo by hand, such as WGFT_MODE=kernel in agent.env.
+
+```text
+wgft agent teardown [flags]
+```
+
+Examples:
+
+```sh
+sudo systemctl stop wgft-agent
+sudo wgft agent teardown --dry-run
+sudo wgft agent teardown
+```
+
+Flags:
+
+```text
+      --config string         dotenv config file (default "/etc/wgft/agent.env")
+      --data-dir string       data dir, env WGFT_DATA_DIR; holds agent.json (default "/var/lib/wgft")
+      --dry-run               only print what would be removed and the list to restore by hand
+      --wg-interface string   kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE (default "wgft0")
 ```
 
 ## wgft agent warnings
