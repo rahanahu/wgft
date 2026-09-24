@@ -30,12 +30,19 @@ import (
 // enableRes/enableErr let `agent disable`/`agent enable` tests (agent_disable_test.go) inject
 // a fixed response or error, standing in for the real Daemon.DisableAgent/EnableAgent
 // (internal/vpsd/agent_disable.go), which needs a real store and dataplane to exercise.
+// warnings/dismissErr/dismissCalled let `agent dismiss-warning` tests (agent_dismiss_test.go)
+// inject a fixed warning list and observe whether DismissWarning was actually called, standing
+// in for the real Daemon.Warnings/DismissWarning (internal/vpsd/admin_backend.go).
 type fakeAgentBackend struct {
-	agents     []admin.AgentInfo
-	disableRes admin.AgentDisabledResponse
-	disableErr error
-	enableRes  admin.AgentDisabledResponse
-	enableErr  error
+	agents        []admin.AgentInfo
+	disableRes    admin.AgentDisabledResponse
+	disableErr    error
+	enableRes     admin.AgentDisabledResponse
+	enableErr     error
+	warnings      []admin.Warning
+	warningsErr   error
+	dismissErr    error
+	dismissCalled bool
 }
 
 func (b *fakeAgentBackend) Rules() ([]proto.Rule, error) { return nil, nil }
@@ -56,9 +63,12 @@ func (b *fakeAgentBackend) DisableAgent(string) (admin.AgentDisabledResponse, er
 func (b *fakeAgentBackend) EnableAgent(string) (admin.AgentDisabledResponse, error) {
 	return b.enableRes, b.enableErr
 }
-func (b *fakeAgentBackend) Warnings() ([]admin.Warning, error)          { return nil, nil }
-func (b *fakeAgentBackend) DismissWarning(string, string, string) error { return nil }
-func (b *fakeAgentBackend) IPMismatchAcks() ([]store.Ack, error)        { return nil, nil }
+func (b *fakeAgentBackend) Warnings() ([]admin.Warning, error) { return b.warnings, b.warningsErr }
+func (b *fakeAgentBackend) DismissWarning(string, string, string) error {
+	b.dismissCalled = true
+	return b.dismissErr
+}
+func (b *fakeAgentBackend) IPMismatchAcks() ([]store.Ack, error) { return nil, nil }
 func (b *fakeAgentBackend) CheckConnectivity(string) (admin.ConnCheck, error) {
 	return admin.ConnCheck{}, nil
 }
