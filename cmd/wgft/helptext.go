@@ -256,9 +256,14 @@ and when it is dropped. Dismissing ip-flapping only removes the warning.`,
 		Example: `  wgft agent dismiss-warning home ip-flapping`,
 	},
 	"agent pubkey": {
-		Long: `Print the agent's WireGuard public key. If the credentials file has no key yet,
-one is generated and saved first. Registration does not need this; it is for
-checking which key an agent uses.`,
+		Long: `Print the agent's WireGuard public key. Registration does not need this; it is
+for checking which key an agent uses.
+
+With the agent stopped, a key is generated and saved first if the credentials
+file has none yet. With the agent running, the key is only read from the
+credentials file and nothing is written, since the running agent owns the file.
+A running agent that is still starting may not have saved its key yet; the
+command then fails, and running it again a moment later prints the key.`,
 		Example: `  wgft agent pubkey
   wgft agent pubkey --data-dir /srv/wgft`,
 	},

@@ -152,36 +152,20 @@ func (rt *runtime) rotateKey() (wgtypes.Key, error) {
 
 // RotateKey は CLI から呼ぶ。稼働中なら制御ソケット経由で、停止中なら認証情報ファイルの鍵と last_state を直接消す。
 func RotateKey(path string) (string, error) {
-	// 判定はロックファイルを作らない Inspect で行う(設計 10.2c 節)。Acquire 経由の判定は、
-	// ロックファイルの無いデータディレクトリで rotate-key を打っただけで、呼び出し元の権限の
-	// ロックファイルを残し、後から非特権で動くエージェントの起動を塞いだ。
-	state, err := inspectLock(path)
+	// 判定とロックの取り方は lockWhileStopped にある。判定はロックファイルを作らない Inspect で行う
+	// (設計 10.2c 節)。Acquire 経由の判定は、ロックファイルの無いデータディレクトリで rotate-key を
+	// 打っただけで、呼び出し元の権限のロックファイルを残し、後から非特権で動くエージェントの起動を塞いだ。
+	// ロックファイルがあって誰も持っていなければ、ロックを取ってから書き換える。取らないと、判定の後に
+	// 起動したエージェントが書いた記録(カーネルモードへの切り替えの記録など)を、この書き換えが古い
+	// 内容で上書きしうる(仕様 9 節)
+	release, running, err := lockWhileStopped(path)
 	if err != nil {
 		return "", err
 	}
-	if state == credentials.Locked {
+	if running {
 		return rotateKeyRunning(path)
 	}
-	// ロックファイルがあって誰も持っていなければ、ロックを取ってから書き換える。取らないと、判定の後に
-	// 起動したエージェントが書いた記録(カーネルモードへの切り替えの記録など)を、この書き換えが古い
-	// 内容で上書きしうる(仕様 9 節)。既にあるロックファイルを開くだけなので、持ち主は変わらない。
-	//
-	// ロックファイルが無ければ、ロックを取らずに書き換える。判定の時点でそのパスのロックを持つ
-	// エージェントはおらず、取ろうとするとロックファイルを呼び出し元の権限で作ってしまう。バックアップ
-	// からの戻しやホストの移し替えの後、運用者がロックファイルを消した後がこの場合に当たる(10.2c 節)。
-	// 判定の直後に起動したエージェントの書き込みを上書きしうる狭い隙間は許容する(仕様 9 節)
-	var lock *credentials.Lock
-	if state == credentials.Unlocked {
-		lock, err = credentials.Acquire(path)
-		if errors.Is(err, credentials.ErrLocked) {
-			// 判定の後に起動したエージェントがロックを持っている。稼働中として扱う
-			return rotateKeyRunning(path)
-		}
-		if err != nil {
-			return "", err
-		}
-		defer lock.Release()
-	}
+	defer release()
 	f, err := credentials.Load(path)
 	if err != nil {
 		return "", err

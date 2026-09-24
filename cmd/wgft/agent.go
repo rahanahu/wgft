@@ -203,7 +203,7 @@ On the VPS, against the admin API:
 
 	pubkey := &cobra.Command{
 		Use:   "pubkey",
-		Short: "print the wg public key; agent host; generates and saves one to the credentials file if absent",
+		Short: "print the wg public key; agent host; generates and saves one if absent while the agent is stopped",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sp, err := agentCredentialsPath(cmd)
