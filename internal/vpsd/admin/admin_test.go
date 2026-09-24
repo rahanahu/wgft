@@ -28,9 +28,12 @@ type fakeBackend struct {
 	acksErr  error       // nil でなければ IPMismatchAcks はこのエラーを返す
 	// agentChange は nil でなければ DisableAgent と EnableAgent がこれを呼ぶ(op は disable か enable)
 	agentChange func(op, name string) (AgentDisabledResponse, error)
-	// revoked は Revoke に渡された名前を順に持つ。revokeErr が nil でなければ Revoke はそれを返す
-	revoked   []string
-	revokeErr error
+	// revoked は Revoke に渡された名前を順に持つ。revokeErr が nil でなければ Revoke はそれを返す。
+	// revokeDropsRow が真なら、Revoke は誤りを返す場合も agents からその行を外す。本物の Daemon.Revoke が
+	// 行を消した後に dataplane への公開で失敗する場合を模す
+	revoked        []string
+	revokeErr      error
+	revokeDropsRow bool
 }
 
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.st.Rules() }
@@ -60,6 +63,15 @@ func (b *fakeBackend) JoinString(name string) (JoinStringResponse, error) {
 }
 func (b *fakeBackend) Revoke(name string) error {
 	b.revoked = append(b.revoked, name)
+	if b.revokeErr == nil || b.revokeDropsRow {
+		kept := b.agents[:0:0]
+		for _, a := range b.agents {
+			if a.Name != name {
+				kept = append(kept, a)
+			}
+		}
+		b.agents = kept
+	}
 	return b.revokeErr
 }
 func (b *fakeBackend) DisableAgent(name string) (AgentDisabledResponse, error) {

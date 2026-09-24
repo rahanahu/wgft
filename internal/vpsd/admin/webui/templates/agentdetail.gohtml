@@ -5,7 +5,7 @@
   <div class="rule-summary">
     <span class="status-dot {{ if or .Disabled (not .Connected) }}offline{{ end }}"></span>
     <strong>{{ .Name }}</strong>
-    <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
+    <span class="badge {{ .StateBadge }}"><span aria-hidden="true">●</span> {{ .StateLabel }}</span>
     {{ if .Disabled }}
     <form autocomplete="off" method="post" action="/ui/agents/{{ .Name }}/enable">
       <input type="hidden" name="return" value="detail">
@@ -68,4 +68,10 @@
     </form>
   </div>
 </section>
+{{ end }}
+
+{{/* 操作の結果の文 1 つ。戻る先のページが無い操作の結果に使う(webui_agent.go の renderNotice) */}}
+{{ define "notice" }}
+<p class="danger-text" role="alert">{{ .Message }}</p>
+<p><a class="btn" href="/">{{ T .Locale "backToDashboard" }}</a></p>
 {{ end }}

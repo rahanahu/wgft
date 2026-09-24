@@ -19,7 +19,7 @@
       <tr {{ if .Attention }}class="attention-row"{{ end }}>
         <td data-label="{{ T $loc "colName" }}"><div class="entity"><span class="status-dot {{ if or .Disabled (not .Connected) }}offline{{ end }}"></span><div><strong><a class="entity-link" href="/ui/agents/{{ .Name }}">{{ .Name }}</a></strong><small>{{ .Address }}</small>{{ if .PublicKeyShort }}<small class="mono muted" title="{{ .PublicKey }}">{{ .PublicKeyShort }}</small>{{ end }}</div></div></td>
         <td data-label="{{ T $loc "colState" }}">
-          <span class="badge {{ .StateBadge }}">● {{ .StateLabel }}</span>
+          <span class="badge {{ .StateBadge }}"><span aria-hidden="true">●</span> {{ .StateLabel }}</span>
           <small class="stack {{ .TunnelClass }}">{{ T $loc "tunnelPrefix" }}{{ .TunnelLabel }}</small>
         </td>
         <td data-label="{{ T $loc "colTunnelIP" }}" class="mono">{{ .Address }}</td>

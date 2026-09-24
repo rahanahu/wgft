@@ -131,7 +131,7 @@ func TestDisabledAgentRowIsNeutral(t *testing.T) {
 	for _, lang := range []string{"ja", "en"} {
 		body := getBody(t, srv.URL+"/ui/agents?lang="+lang)
 		row := agentRow(t, body, "paused")
-		if !strings.Contains(row, `<span class="badge neutral">● `+T(lang, "disabled")+`</span>`) {
+		if !strings.Contains(row, `<span class="badge neutral"><span aria-hidden="true">●</span> `+T(lang, "disabled")+`</span>`) {
 			t.Errorf("%s: the disabled agent's state must be a neutral %q:\n%s", lang, T(lang, "disabled"), row)
 		}
 		for _, wrong := range []string{"attention-row", "danger", "warning", "success", T(lang, "pending")} {
@@ -297,7 +297,7 @@ func TestAgentDetailPage(t *testing.T) {
 		body := getBody(t, srv.URL+"/ui/agents/paused?lang="+lang)
 		for _, want := range []string{
 			`<span aria-current="page">` + fmt.Sprintf(T(lang, "agentCrumbFmt"), "paused") + `</span>`,
-			`<span class="badge neutral">● ` + T(lang, "disabled") + `</span>`,
+			`<span class="badge neutral"><span aria-hidden="true">●</span> ` + T(lang, "disabled") + `</span>`,
 			`action="/ui/agents/paused/enable"`,
 			`<input type="hidden" name="return" value="detail">`,
 			T(lang, "agentDisabledNote"),
@@ -374,10 +374,35 @@ func TestAgentRevokeChecksTheTypedName(t *testing.T) {
 		t.Errorf("Revoke calls = %v, want [home]", b.revoked)
 	}
 
-	b.revokeErr = errors.New("nft: busy")
-	resp, body := postForm(t, srv.URL+"/ui/agents/home/revoke?lang=en", url.Values{"confirm_name": {"home"}}, nil)
-	if resp.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body, T("en", "agentDeleteFailed")+" nft: busy") {
-		t.Errorf("a failed revoke: status %d, want 422 with the reason; body:\n%s", resp.StatusCode, body)
+}
+
+// TestAgentRevokeFailureTellsWhetherTheAgentIsGone は、削除が誤りを返したとき、エージェントがまだ居れば
+// 削除できなかったと詳細ページに示し、既に居なければ、削除は済んだが転送への反映はまだで server が
+// 試し直すと示すことを確かめる。本物の server は行を消してから公開し、公開の失敗を誤りとして返す。
+func TestAgentRevokeFailureTellsWhetherTheAgentIsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		dropsRow bool
+		want     string
+		detail   bool
+	}{
+		{name: "not revoked", want: T("en", "agentDeleteFailed") + " nft: busy", detail: true},
+		{name: "revoked, not applied", dropsRow: true, want: T("en", "agentRevokedNotApplied") + " nft: busy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, srv := agentUIFixture(t)
+			b.revokeErr, b.revokeDropsRow = errors.New("nft: busy"), tc.dropsRow
+			resp, body := postForm(t, srv.URL+"/ui/agents/home/revoke?lang=en", url.Values{"confirm_name": {"home"}}, nil)
+			if resp.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body, html.EscapeString(tc.want)) {
+				t.Errorf("status %d, want 422 with %q; body:\n%s", resp.StatusCode, tc.want, body)
+			}
+			if got := strings.Contains(body, `id="agent-danger"`); got != tc.detail {
+				t.Errorf("detail page shown = %v, want %v; body:\n%s", got, tc.detail, body)
+			}
+			if !tc.detail && !strings.Contains(body, `href="/">`+T("en", "backToDashboard")) {
+				t.Errorf("the notice must link back to the dashboard:\n%s", body)
+			}
+		})
 	}
 }
 

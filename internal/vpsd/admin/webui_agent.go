@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -134,8 +135,14 @@ func (s *Server) renderAgentDetail(w http.ResponseWriter, r *http.Request, statu
 		return
 	}
 	crumbs := []pageCrumb{dashboardCrumb(locale), {Label: fmt.Sprintf(T(locale, "agentCrumbFmt"), a.Name)}}
+	writePage(w, status, map[string]any{"Locale": locale, "Title": T(locale, "agentDetailTitle"), "Body": template.HTML(inner.String()), "Wide": true, "Crumbs": crumbs})
+}
+
+// writePage は共通の枠(page テンプレート)を status で書く。操作の誤りを 200 以外の状態で示すページに
+// 使う。描けなければ 500 にする。
+func writePage(w http.ResponseWriter, status int, data map[string]any) {
 	var page bytes.Buffer
-	if err := uiTmpl.ExecuteTemplate(&page, "page", map[string]any{"Locale": locale, "Title": T(locale, "agentDetailTitle"), "Body": template.HTML(inner.String()), "Wide": true, "Crumbs": crumbs}); err != nil {
+	if err := uiTmpl.ExecuteTemplate(&page, "page", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -193,6 +200,11 @@ func (s *Server) uiAgentChange(w http.ResponseWriter, r *http.Request, op func(s
 // 削除する。詳細ページの「危険な操作」では利用者が名前を入力し、警告のバナーでは確認のダイアログの後に
 // 名前を hidden で送る。照合はこの server 側で行い、ブラウザの JavaScript には頼らない。一致しなければ
 // 何も削除せず、入力を残して詳細ページに誤りを示す。
+//
+// 削除が誤りを返しても、エージェントの行は既に消えていることがある。server は行を消してから
+// dataplane へ公開し、公開の失敗を誤りとして返すためである(internal/vpsd の Daemon.Revoke)。そこで
+// 誤りの後にエージェントを読み直し、居なければ「削除は済んだが、転送への反映はまだ」と示す。
+// 居れば削除できなかったとして詳細ページに誤りを示す。
 func (s *Server) uiRevoke(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	name := r.PathValue("name")
@@ -203,10 +215,35 @@ func (s *Server) uiRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.backend.Revoke(name); err != nil {
+		if s.revokedAnyway(name) {
+			log.Printf("ui: agent %s revoked, but applying the change failed: %v", name, err)
+			s.renderNotice(w, r, http.StatusUnprocessableEntity, T(locale, "agentRevokedNotApplied")+" "+err.Error())
+			return
+		}
 		s.renderAgentDetail(w, r, http.StatusUnprocessableEntity, T(locale, "agentDeleteFailed")+" "+err.Error(), "")
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// revokedAnyway は、誤りを返した削除の後に、エージェントの行が既に無いかを返す。読み直せなければ
+// false を返し、呼び出し側は削除できなかったとして扱う。
+func (s *Server) revokedAnyway(name string) bool {
+	_, ok, err := s.findAgent(name)
+	return err == nil && !ok
+}
+
+// renderNotice は、操作の結果の文 1 つとダッシュボードへのリンクを、共通の枠で status のページとして描く。
+// 戻る先のページが無い操作(削除したエージェントなど)の結果に使う。
+func (s *Server) renderNotice(w http.ResponseWriter, r *http.Request, status int, msg string) {
+	locale := resolveLocale(w, r)
+	var inner bytes.Buffer
+	if err := uiTmpl.ExecuteTemplate(&inner, "notice", map[string]any{"Locale": locale, "Message": msg}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	crumbs := []pageCrumb{dashboardCrumb(locale), {Label: T(locale, "noticeTitle")}}
+	writePage(w, status, map[string]any{"Locale": locale, "Title": T(locale, "noticeTitle"), "Body": template.HTML(inner.String()), "Crumbs": crumbs})
 }
 
 func (s *Server) uiDismissWarning(w http.ResponseWriter, r *http.Request) {
