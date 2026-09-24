@@ -3,6 +3,8 @@
 package nft
 
 import (
+	"fmt"
+
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
 	"github.com/google/nftables/userdata"
@@ -46,6 +48,44 @@ func ReadDrops() ([]Drop, error) {
 		}
 	}
 	return out, nil
+}
+
+// ReadReplies は udp_reply の各行のカウンタを、ルール ID ごとのパケット数で返す(設計文書 6.1、
+// 10.2a 節「UDP の応答の観測」)。drop のカウンタと違い累積しない。呼び出し側は値が増えたかどうか
+// だけを見る。テーブルかチェーンが無ければ誤りを返す。UDP のルールを公開している間はチェーンが
+// あるはずなので、無いことは観測できないことである。
+func ReadReplies() (map[string]uint64, error) {
+	c, err := nftables.New()
+	if err != nil {
+		return nil, err
+	}
+	t := &nftables.Table{Family: nftables.TableFamilyINet, Name: TableName}
+	rules, err := c.GetRules(t, &nftables.Chain{Name: UDPReplyChain, Table: t})
+	if err != nil {
+		return nil, fmt.Errorf("listing chain %s of table inet %s: %w", UDPReplyChain, TableName, err)
+	}
+	return repliesOf(rules), nil
+}
+
+// repliesOf は udp_reply の行からルールごとのパケット数を取り出す。単体テストのために分けてある。
+func repliesOf(rules []*nftables.Rule) map[string]uint64 {
+	out := map[string]uint64{}
+	for _, r := range rules {
+		comment, ok := userdata.GetString(r.UserData, userdata.TypeComment)
+		if !ok {
+			continue
+		}
+		id, kind := parseComment(comment)
+		if id == "" || kind != ReplyKind {
+			continue
+		}
+		for _, e := range r.Exprs {
+			if ct, ok := e.(*expr.Counter); ok {
+				out[id] += ct.Packets
+			}
+		}
+	}
+	return out
 }
 
 // parseComment は "wgft:<id>:<kind>" を分ける。id にコロンは入らない前提(ルール ID は r_ULID)。

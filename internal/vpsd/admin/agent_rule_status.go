@@ -53,3 +53,28 @@ func (s *Server) withAgentRuleStatus(resp *BatchResponse) {
 	}
 	resp.AgentRuleStates = b.AgentRuleStatuses(resp.Rules)
 }
+
+// UDPReply is what the server has seen of one UDP rule's replies (design.md 10.2a 節「UDP の応答の
+// 観測」、7a.11 節). 宣言は internal/vpsd/adminapi にある。
+type UDPReply = adminapi.UDPReply
+
+// UDPReplyBackend is implemented by a Backend that observes its UDP rules' replies. It is optional
+// like AgentRuleStatusBackend: a Backend without it (fakeBackend, tools/uidemo) serves the rules
+// without udp_replies.
+type UDPReplyBackend interface {
+	// UDPReplies returns an entry for each of rules that is an enabled UDP rule the server
+	// publishes now, by rule ID. ok is false when the server does not observe replies at all.
+	UDPReplies(rules []proto.Rule) (replies map[string]UDPReply, ok bool)
+}
+
+// withUDPReplies adds udp_replies to a rules response, when the Backend observes them (design.md
+// 10.2a、7a.11 節; additive to API v1).
+func (s *Server) withUDPReplies(resp *BatchResponse) {
+	b, ok := s.backend.(UDPReplyBackend)
+	if !ok {
+		return
+	}
+	if replies, ok := b.UDPReplies(resp.Rules); ok {
+		resp.UDPReplies = replies
+	}
+}

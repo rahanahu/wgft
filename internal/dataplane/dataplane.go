@@ -13,8 +13,10 @@ package dataplane
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
+	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -262,4 +264,35 @@ type Drop struct {
 	Kind    string // deny | allow | per_source | src_flow | new_flow | packet
 	Packets uint64
 	Bytes   uint64
+}
+
+// UDPReply is what a Backend has seen of one UDP rule's replies: the datagrams its target sent
+// back through the tunnel to this server (design.md 10.2a 節「UDP の応答の観測」). It is a passive
+// observation kept in memory only, and it never decides a status.
+type UDPReply struct {
+	// Since is when the Backend began watching this rule without a gap: the rule's first
+	// publication in this process, the publication after its identity changed (UDPReplyIdentity), or
+	// the first reading after the watch was interrupted. Zero while Err is set.
+	Since time.Time
+	// Last is the last time a reply was seen, not before Since. Zero when none was seen since.
+	Last time.Time
+	// Err is set while the Backend cannot observe the rule's replies (the kernel backend could not
+	// read its reply counters, for example). It is not "no reply": nothing is known either way.
+	Err error
+}
+
+// UDPReplyObserver is implemented by a Backend that observes the replies of its UDP rules
+// (design.md 10.2a 節「UDP の応答の観測」).
+type UDPReplyObserver interface {
+	// UDPReplies returns one entry per UDP rule the Backend publishes now, by rule ID. A rule it does
+	// not publish (disabled, failed, or of an unregistered agent) has no entry.
+	UDPReplies() map[string]UDPReply
+}
+
+// UDPReplyIdentity is what a UDP rule's reply observation belongs to, besides its rule ID: the
+// agent it forwards to, that agent's address, the target and the public ports. When any of them
+// changes, the replies come from somewhere else, so a Backend discards the observation and starts
+// watching over (design.md 10.2a 節「UDP の応答の観測」).
+func UDPReplyIdentity(pp planner.PortPlan) string {
+	return fmt.Sprintf("%s|%s|%s|%s", pp.Agent, pp.AgentAddr, pp.Target, pp.ListenPort)
 }

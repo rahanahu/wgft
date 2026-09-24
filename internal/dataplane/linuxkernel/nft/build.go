@@ -257,6 +257,27 @@ func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Conf
 	// ピア同士の通信を遮断し、DNAT されたフローとその返りだけを通す
 	addRule(forward, "", ifname(expr.MetaKeyIIFNAME, expr.CmpOpEq, wg), ifname(expr.MetaKeyOIFNAME, expr.CmpOpEq, wg), drop)
 	addRule(forward, "", ifname(expr.MetaKeyOIFNAME, expr.CmpOpEq, wg), ctBits(expr.CtKeySTATUS, ipsDstNAT), accept)
+	// UDP の応答の観測(設計文書 6.1、10.2a 節)。wg0 から戻る DNAT 済みの UDP の応答だけを udp_reply へ
+	// 送り、ルールごとの行のカウンタで数える。判定を持たないので転送の結果は変えない。ICMP の誤りは
+	// 同じ conntrack のエントリの応答の向きに一致するが、meta l4proto udp で外す。
+	// ルールの見分けは応答の送信元ポートで行う。DNAT はポートを書き換えず、応答の向きのパケットは
+	// forward の時点でまだ送信元の逆変換(postrouting)を受けていないので、送信元ポートは公開ポートの
+	// ままである。`ct original proto-dst` は同じ値を読めるが、google/nftables がその行を読み戻せない
+	// (向きの属性の長さの解釈が違い、GetRules が誤りを返す。ラボで確かめた)ので使わない
+	if replies := udpReplyPorts(plan); len(replies) > 0 {
+		udpReply := e.AddChain(&nftables.Chain{Name: UDPReplyChain, Table: t})
+		for _, pp := range replies {
+			addRule(udpReply, Comment(pp.RuleID, ReplyKind), l4proto(proto.UDP), sport(pp.ListenPort),
+				[]expr.Any{&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictReturn}})
+		}
+		addRule(forward, "", ifname(expr.MetaKeyIIFNAME, expr.CmpOpEq, wg), l4proto(proto.UDP),
+			[]expr.Any{
+				&expr.Ct{Register: 1, Key: expr.CtKeyDIRECTION},
+				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{ipCtDirReply}},
+			},
+			ctBits(expr.CtKeySTATUS, ipsDstNAT),
+			[]expr.Any{&expr.Verdict{Kind: expr.VerdictJump, Chain: UDPReplyChain}})
+	}
 	addRule(forward, "", ifname(expr.MetaKeyIIFNAME, expr.CmpOpEq, wg), ctState(expr.CtStateBitESTABLISHED|expr.CtStateBitRELATED), accept)
 	// wg0 が絡む残りの転送は落とす。wg0 から VPS の他のインタフェース(private NIC、別の VPN)へ出る
 	// 新規フローと、他インタフェースから wg0 へ入る DNAT 以外のフローが対象(仕様 6.1 節)
@@ -265,6 +286,52 @@ func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Conf
 	// masquerade は DNAT された接続に限定し、VPS 自身の通信には触れない
 	addRule(post, "", ifname(expr.MetaKeyOIFNAME, expr.CmpOpEq, wg), ctBits(expr.CtKeySTATUS, ipsDstNAT), []expr.Any{&expr.Masq{}})
 	return nil
+}
+
+// UDPReplyChain は UDP の応答を数える通常のチェーンの名前である。行はルールごとに 1 つで、
+// コメント wgft:<ルール ID>:reply で持ち主を特定する(ReadReplies)。
+const UDPReplyChain = "udp_reply"
+
+// ReplyKind は UDP の応答のカウンタの行のコメントの種類である。drop の種類(ReadDrops)とは
+// 別のチェーンに置くので、drop として累積されない。
+const ReplyKind = "reply"
+
+// ipCtDirReply は `ct direction reply` の値(IP_CT_DIR_REPLY)。
+const ipCtDirReply = 1
+
+// udpReplyPorts は応答を数える UDP のルールである。kernel モードの UDP のルールは常に
+// Transparent である(プロキシモードは TCP だけ。5.3 節)。
+func udpReplyPorts(plan planner.Plan) []planner.PortPlan {
+	var out []planner.PortPlan
+	for _, pp := range plan.Ports {
+		if pp.Proto == proto.UDP && pp.Forwarding == model.Transparent {
+			out = append(out, pp)
+		}
+	}
+	return out
+}
+
+// l4proto は `meta l4proto <proto>`。
+func l4proto(p proto.Proto) []expr.Any {
+	l4 := byte(unix.IPPROTO_UDP)
+	if p == proto.TCP {
+		l4 = unix.IPPROTO_TCP
+	}
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{l4}},
+	}
+}
+
+// sport は `udp sport <range>` のうち送信元ポートの比較の部分。呼び出し側が先に l4proto を置く。
+func sport(r proto.PortRange) []expr.Any {
+	out := []expr.Any{&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 0, Len: 2}}
+	if r.Lo == r.Hi {
+		return append(out, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(r.Lo)})
+	}
+	return append(out,
+		&expr.Cmp{Op: expr.CmpOpGte, Register: 1, Data: binaryutil.BigEndian.PutUint16(r.Lo)},
+		&expr.Cmp{Op: expr.CmpOpLte, Register: 1, Data: binaryutil.BigEndian.PutUint16(r.Hi)})
 }
 
 // match は `iifname != "wg0" <proto> dport <range>`。

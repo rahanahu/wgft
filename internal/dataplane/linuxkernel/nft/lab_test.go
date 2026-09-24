@@ -104,6 +104,22 @@ func TestGolden(t *testing.T) {
 			if got != want {
 				t.Errorf("nft list differs\n--- want (nft -f)\n%s\n--- got (google/nftables)\n%s", want, got)
 			}
+			// wgft 自身が google/nftables で読み戻せること(Observe の指紋と UDP の応答のカウンタ)。
+			// nft list の一致だけでは、google/nftables が解釈できない属性を持つ行を見落とす
+			if _, _, err := Fingerprint(); err != nil {
+				t.Errorf("Fingerprint: %v", err)
+			}
+			if udpReplyPorts(plan) != nil {
+				replies, err := ReadReplies()
+				if err != nil {
+					t.Errorf("ReadReplies: %v", err)
+				}
+				for _, pp := range udpReplyPorts(plan) {
+					if v, ok := replies[pp.RuleID]; !ok || v != 0 {
+						t.Errorf("ReadReplies[%s] = %d, %v; want 0 on a fresh table", pp.RuleID, v, ok)
+					}
+				}
+			}
 			// もう一度適用しても同じ(テーブルがある状態からの差し替え)
 			if err := Apply(plan, relayListening, cfg); err != nil {
 				t.Fatalf("Apply again: %v", err)

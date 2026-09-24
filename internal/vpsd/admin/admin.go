@@ -317,6 +317,7 @@ func (s *Server) rulesResponse() (BatchResponse, error) {
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)
 	s.withAgentRuleStatus(&resp)
+	s.withUDPReplies(&resp)
 	return resp, nil
 }
 
@@ -348,6 +349,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	s.withApply(&resp)
 	s.withResourceStatus(&resp)
 	s.withAgentRuleStatus(&resp)
+	s.withUDPReplies(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 

@@ -36,8 +36,16 @@ func readWaiterOf(c net.Conn) ReadWaiter {
 
 var udpBufPool = sync.Pool{New: func() any { b := make([]byte, udpBufMax); return &b }}
 
+// replyMarkEvery は、待ち受けの最後の応答の時刻(listener.lastReply)を書き直す最短の間隔である。
+// 1 つの待ち受けの多数のセッションの goroutine が、応答のたびに同じ値へ書き込むことを避ける。
+// 表示の粒度は秒なので、間引いても失う情報は無い(設計文書 10.2a 節「UDP の応答の観測」)。
+const replyMarkEvery = int64(time.Second)
+
 // forwardReply は target からの応答を 1 個読んで公開側へ返す。own が nil ならプールのバッファを借りる。
-func forwardReply(s *udpSession, pc net.PacketConn, from net.Addr, own []byte) bool {
+// 読めた応答は、セッションの無通信の判定(lastSeen)と同じ時刻で、待ち受けの最後の応答の時刻 reply
+// にも記す。reply への書き込みは replyMarkEvery に 1 回までにする。読み取りの誤り(宛先が ICMP で
+// 拒んだ場合の ECONNREFUSED を含む)は応答ではないので記さない。
+func forwardReply(s *udpSession, pc net.PacketConn, from net.Addr, own []byte, reply *atomic.Int64) bool {
 	rb := own
 	if rb == nil {
 		bp := udpBufPool.Get().(*[]byte)
@@ -48,7 +56,11 @@ func forwardReply(s *udpSession, pc net.PacketConn, from net.Addr, own []byte) b
 	if err != nil {
 		return false
 	}
-	s.lastSeen.Store(time.Now().UnixNano())
+	now := time.Now().UnixNano()
+	s.lastSeen.Store(now)
+	if now-reply.Load() >= replyMarkEvery {
+		reply.Store(now)
+	}
 	_, err = pc.WriteTo(rb[:rn], from)
 	return err == nil
 }
@@ -214,7 +226,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 								return
 							}
 						}
-						if !forwardReply(s, pc, from, own) {
+						if !forwardReply(s, pc, from, own, &l.lastReply) {
 							return
 						}
 					}

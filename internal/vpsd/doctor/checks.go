@@ -642,6 +642,35 @@ func targetCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 	return c
 }
 
+// withUDPReply は UDP のルールの rule.target に、server 自身が見た宛先の応答の観測を添える
+// (設計文書 10.2a 節「UDP の応答の観測」)。添えるだけで、状態、理由、観測の時刻は変えない。
+// 最近の応答があっても NOT TESTED は OK にならず、応答が無いことや古いことも UNKNOWN や FAILED に
+// ならない。閾値を持たない。応答が無いことは、使われていないルールと応答しないサービスで同じに
+// 見えるためである。
+func withUDPReply(c Check, r proto.Rule, in Input) Check {
+	if r.Proto != proto.UDP || in.Rules == nil {
+		return c
+	}
+	obs, ok := in.Rules.UDPReplies[r.ID]
+	if !ok {
+		return c
+	}
+	if obs.NotObserved != "" {
+		c.ReplyNotObserved = obs.NotObserved
+		c.ReplyLine = "UDP replies are not observed: " + obs.NotObserved
+		return c
+	}
+	c.LastReplyAt, c.ReplySince = obs.LastReplyAt, obs.Since
+	if t, ok := ParseWhen(obs.LastReplyAt); ok {
+		c.ReplyLine = "last UDP reply seen by this server " + Since(in.Now, t).String() + " ago"
+		return c
+	}
+	watched, ok := reportAge(obs.Since, in.Now)
+	c.ReplyLine = "no UDP reply seen since this server started watching the rule " + staleAgeText(watched, ok) +
+		"; an idle rule looks the same"
+	return c
+}
+
 func staleAgeText(age time.Duration, ok bool) string {
 	if !ok {
 		return "at an unknown time"

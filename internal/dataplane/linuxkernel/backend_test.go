@@ -35,6 +35,27 @@ type fakeKernel struct {
 	// convergeErr and fpErr make the conntrack convergence and the read-back fail (repair_test.go).
 	convergeErr error
 	fpErr       error
+	// replyCounts are the reply counters of the current table by rule ID (replies_test.go). A
+	// successful flush replaces them with zeros for the UDP rules of the staged Plan, the way a
+	// table replacement does; replyErr makes the reading fail.
+	replyCounts map[string]uint64
+	replyErr    error
+	staged      planner.Plan
+	// keepReplies keeps replyCounts across a flush, standing for a first reading that finds a
+	// non-zero counter.
+	keepReplies bool
+}
+
+func (k *fakeKernel) readReplies() (map[string]uint64, error) {
+	k.calls = append(k.calls, "read replies")
+	if k.replyErr != nil {
+		return nil, k.replyErr
+	}
+	out := make(map[string]uint64, len(k.replyCounts))
+	for id, v := range k.replyCounts {
+		out[id] = v
+	}
+	return out, nil
 }
 
 func (k *fakeKernel) ensureWG(cfg wg.Config) ([]string, error) {
@@ -74,11 +95,21 @@ func (s fakeStaged) Flush() error {
 		return s.k.flushErr
 	}
 	s.k.counters = nil // a new table starts with zero counters
+	if s.k.keepReplies {
+		return nil
+	}
+	s.k.replyCounts = map[string]uint64{}
+	for _, pp := range s.k.staged.Ports {
+		if pp.Proto == proto.UDP && pp.Forwarding == model.Transparent {
+			s.k.replyCounts[pp.RuleID] = 0
+		}
+	}
 	return nil
 }
 
-func (k *fakeKernel) stage(planner.Plan, map[uint16]bool, nft.Config) (flusher, error) {
+func (k *fakeKernel) stage(plan planner.Plan, _ map[uint16]bool, _ nft.Config) (flusher, error) {
 	k.calls = append(k.calls, "stage")
+	k.staged = plan
 	if k.stageErr != nil {
 		return nil, k.stageErr
 	}

@@ -28,6 +28,7 @@
       <span class="node-word">{{ .Word }}</span>
       {{ if .Stop }}<span class="node-stop mono">{{ .Stop }}</span>{{ end }}
       {{ if .Note }}<span class="node-note">{{ .Note }}</span>{{ end }}
+      {{ if .ReplyNote }}<span class="node-note">{{ .ReplyNote }}</span>{{ end }}
     </span>
     <span class="sr-only">{{ .Alt }}{{ if .Stop }}. {{ .Stop }}{{ end }}</span>
   </li>
