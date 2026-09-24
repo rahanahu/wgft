@@ -329,15 +329,30 @@ var tr = map[string][2]string{
 	"agentRulesNone":         {"このエージェントを持ち主とするルールはありません。", "No rule belongs to this agent."},
 	"dangerZoneHead":         {"危険な操作", "Danger zone"},
 	"agentDeleteHead":        {"エージェントの削除", "Revoke this agent"},
-	"agentDeleteHelp":        {"削除すると鍵は失効し、このエージェントは再接続できなくなります。元に戻せません。使い直すには、新しい接続文字列で登録し直します。ルールの設定は残ります。一時的に止めるだけなら、削除ではなく上の「無効化」を使ってください。", "Revoking makes its key stop working, and the agent cannot reconnect. This cannot be undone; to use it again, register it again with a new join string. Its rules are kept. To stop it only for a while, use Disable above instead."},
+	"agentDeleteHelp":        {"削除すると鍵は失効し、このエージェントは再接続できなくなります。元に戻せません。使い直すには、新しい接続文字列で登録し直します。ルールの設定は、下で削除を選ばない限り残ります。一時的に止めるだけなら、削除ではなく上の「無効化」を使ってください。", "Revoking makes its key stop working, and the agent cannot reconnect. This cannot be undone; to use it again, register it again with a new join string. Its rules are kept unless you choose below to delete them. To stop it only for a while, use Disable above instead."},
 	"agentDeleteConfirmFmt":  {"確認のため、エージェントの名前 %s を入力してください", "To confirm, type the agent's name, %s"},
 	"agentDeleteMismatch":    {"入力した名前がエージェントの名前と一致しません。何も削除していません。", "The name you typed does not match the agent's name. Nothing was revoked."},
-	"agentDeleteFailed":      {"エージェントを削除できませんでした。", "The agent could not be revoked."},
 	"agentRevokedNotApplied": {"エージェントは削除しましたが、転送の設定への反映はまだです。server が 30 秒ごとに反映を試し直します。", "The agent was revoked, but the change is not yet applied to forwarding. The server retries every 30 seconds."},
 	"noticeTitle":            {"操作の結果", "Result"},
 	"backToDashboard":        {"ダッシュボードへ戻る", "Back to the dashboard"},
+	"agentDeleteFailed":      {"エージェントを削除できませんでした。", "The agent could not be revoked."},
+	"agentDeleteRulesN1":     {"このエージェントのルール %d 本も削除する", "Also delete this agent's %d rule"},
+	"agentDeleteRulesN":      {"このエージェントのルール %d 本も削除する", "Also delete this agent's %d rules"},
+	"agentDeleteRulesHelp":   {"既定では選びません。残したルールは転送せず、同じ名前で登録し直すとそのまま使えます。", "Off by default. Rules you keep do not forward, and they work as they are once an agent registers again under the same name."},
+	"agentRulesLeft":         {"エージェントは削除しましたが、ルールを削除できませんでした。残ったルールは転送しません。ダッシュボードの未登録のエージェントの帯から削除し直せます。", "The agent was revoked, but its rules could not be deleted. The rules left behind do not forward; delete them from the unregistered agent's band on the dashboard."},
+	"agentRulesChanged":      {"このページを開いた後に、ルールが変わりました。何も削除していません。ページを開き直して確かめてから、削除し直してください。", "The rules changed after this page was opened. Nothing was revoked or deleted; reload the page, check it, and try again."},
+	"agentRulesNotDeleted":   {"選んだルールの削除は行っていません。ダッシュボードの未登録のエージェントの帯から削除できます。", "The rules you chose to delete were not deleted; delete them from the unregistered agent's band on the dashboard."},
 	"agentChangeNotSaved":    {"何も変えていません。", "Nothing was changed."},
 	"agentChangeNotApplied":  {"変更は保存しましたが、まだ転送の設定に反映していません。server が 30 秒ごとに反映を試し直します。", "The change is saved but not yet applied to forwarding. The server retries every 30 seconds."},
+
+	// 未登録のエージェントの帯(設計文書 10.1 節)。ルールが残っている未登録のエージェントごとに 1 本出す
+	"orphanBandFmt":       {"%s は削除済みです。このエージェントを参照するルール: %d 本", "%s has been revoked. Rules that name this agent: %d"},
+	"orphanBandHelp":      {"同じ名前で登録し直すつもりなら、残したまま待てます。ルールは登録し直すまで転送しません。", "If an agent will register again under the same name, you can keep them; they do not forward until it does."},
+	"orphanDelete":        {"ルールをまとめて削除", "Delete these rules"},
+	"confirmOrphanDelete": {"削除済みのエージェント %s を参照するルール %d 本を削除します。元に戻せません。よいですか?", "Delete the %[2]d rules that name the revoked agent %[1]s? This cannot be undone."},
+	"orphanRegistered":    {"エージェント %s は登録されています。登録済みのエージェントのルールは、ここからまとめて削除できません。何も削除していません。", "Agent %s is registered, so its rules cannot be deleted in bulk here. Nothing was deleted."},
+	"orphanChanged":       {"確認の後に、このエージェントを参照するルールの本数が変わりました。何も削除していません。ダッシュボードを開き直して確かめてください。", "The number of rules that name this agent changed after you confirmed. Nothing was deleted; reload the dashboard and check again."},
+	"orphanDeleteFailed":  {"ルールを削除できませんでした。", "The rules could not be deleted."},
 
 	// ルールの適用状態のうち、持ち主のエージェントが未登録か無効のもの。どちらも故障ではないので
 	// 灰色で示す(設計文書 5.1、10.1 節)

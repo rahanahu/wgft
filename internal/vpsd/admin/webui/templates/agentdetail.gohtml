@@ -64,6 +64,11 @@
         <label for="confirm-name">{{ printf (T $loc "agentDeleteConfirmFmt") .Row.Name }}</label>
         <input id="confirm-name" class="search mono" name="confirm_name" value="{{ .ConfirmName }}" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" spellcheck="false" required>
       </div>
+      {{ with len .Rules }}
+      <input type="hidden" name="rules_digest" value="{{ $.RulesDigest }}">
+      <label class="option-row"><input type="checkbox" name="delete_rules" value="1"> {{ if eq . 1 }}{{ printf (T $loc "agentDeleteRulesN1") . }}{{ else }}{{ printf (T $loc "agentDeleteRulesN") . }}{{ end }}</label>
+      <p class="field-help">{{ T $loc "agentDeleteRulesHelp" }}</p>
+      {{ end }}
       <div class="form-actions"><button class="btn danger-outline" type="submit">{{ T $loc "revokeAgent" }}</button></div>
     </form>
   </div>
