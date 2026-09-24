@@ -13,6 +13,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -119,8 +120,8 @@ const (
 	agentReasonNoRelay = "no_relay"
 	// agentReasonAgentDisabled は、server がこのエージェントを無効にしている場合である
 	// (仕様 5.1 節、設計文書 10.2c 節の relay.listeners の粒度)。無効を示すための新しい検査は
-	// 作らない。カーネルモードの dataplane.table(同節の「カーネルモードのエージェント」の項)も
-	// 同じ符号を使う設計だが、その検査自体はまだ実装していない。
+	// 作らない。カーネルモードの dataplane.interface、dataplane.table、host.forwarding(同節の
+	// 「カーネルモードのエージェント」の項)も同じ符号を使う。
 	agentReasonAgentDisabled = "agent_disabled"
 )
 
@@ -227,10 +228,18 @@ func dialAgentControl(path string) (net.Conn, error) {
 // agentLiveChecks は、稼働中のプロセスの制御ソケットからしか取れない検査を組み立てる。項目ごと
 // 落とす案は採らない。実行の状態によって項目そのものが消えると、機械が処理しにくくなるためで
 // ある(10.2c 節)。agentName は relay.listeners の所見が名指す、このエージェントの登録名である。
-func agentLiveChecks(in agentDoctorInput, run agentRunState, live agentLive, agentName string) []agentDoctorCheck {
+//
+// mode はエージェントのモードである。カーネルモードでは、試す対象の無い検査を、実行の状態によらず
+// NOT TESTED にする(10.2c 節の「カーネルモードのエージェント」)。
+func agentLiveChecks(in agentDoctorInput, run agentRunState, live agentLive, agentName, mode string) []agentDoctorCheck {
 	out := make([]agentDoctorCheck, 0, len(agentLiveOnly))
 	for _, spec := range agentLiveOnly {
 		c := agentDoctorCheck{ID: spec.ID, Group: spec.Group, Label: spec.Label, verdict: spec.verdict, valueOnly: spec.valueOnly}
+		if mode == credentials.ModeKernel && agentKernelOnlyNotTested(spec.ID) {
+			agentKernelNotTested(&c)
+			out = append(out, c)
+			continue
+		}
 		if spec.ID == agentCheckControl {
 			agentControlCheck(&c, run, live)
 			out = append(out, c)
@@ -581,6 +590,11 @@ func agentTransferCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.Doct
 	}
 	c.Status, c.Reason = statusUnknown, agentReasonNoThreshold
 	c.Detail = fmt.Sprintf("%d bytes received and %d bytes sent on the tunnel built %s", t.RxBytes, t.TxBytes, agentWhen(in.Now, t.StartedAt))
+	if st.Mode == credentials.ModeKernel {
+		// カーネルは数をインタフェースを作ったときから数え、エージェントの再起動では 0 に戻さない
+		// (10.2c 節)。エージェントが立てた時刻を起点として示さない
+		c.Detail = fmt.Sprintf("%d bytes received and %d bytes sent on the kernel's WireGuard interface, counted since the kernel created it", t.RxBytes, t.TxBytes)
+	}
 	c.Next = "a tunnel that nobody is using stays at these numbers and is healthy, so this command sets no threshold on them. " +
 		"Run it twice while traffic should be flowing to see whether they move"
 }
@@ -741,9 +755,7 @@ func agentNoRelay(c *agentDoctorCheck, st *agent.DoctorRuntimeState, what string
 }
 
 // agentDisabledSkip は状態と理由の符号を SKIPPED / agent_disabled に置く。呼び出し側が Detail を
-// 組み立てる。relay.listeners がこの実装で使う。設計文書 10.2c 節の「カーネルモードのエージェント」
-// の項は、カーネルモードの dataplane.table(まだ実装していない)も同じ符号を使うと定めており、
-// 実装するときにこの判定を共有できるよう、状態と符号だけをここに切り出してある。
+// 組み立てる。relay.listeners と、カーネルモードの 3 つの検査(agentdoctorkernel.go)が使う。
 func agentDisabledSkip(c *agentDoctorCheck) {
 	c.Status, c.Reason = statusSkipped, agentReasonAgentDisabled
 }

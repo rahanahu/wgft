@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -749,7 +750,7 @@ func TestInspectAgentOf(t *testing.T) {
 		rec.rules["nat_pre"] = append(rec.rules["nat_pre"], &nftables.Rule{Exprs: []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}})
 		ins := inspect(rec)
 		if !reflect.DeepEqual(ins.Unexpected, []string{"chain nat_pre: row 4 is not one wgft writes", "chain forward: row 1 is not one wgft writes", "chain extra is not one wgft writes"}) ||
-			ins.Unrecognized != 1 || len(ins.Missing) != 0 {
+			ins.Unrecognized != 1 || len(ins.ExtraDNATsInPlace) != 0 || len(ins.Missing) != 0 || len(ins.Moved) != 0 {
 			t.Errorf("inspection = %+v, want the added row, chain and nat_pre row", ins)
 		}
 	})
@@ -759,9 +760,11 @@ func TestInspectAgentOf(t *testing.T) {
 		fw[2], fw[3] = fw[3], fw[2] // accept of DNATed flows before the wgft0-to-wgft0 drop
 		rec.rules["forward"] = fw
 		ins := inspect(rec)
-		if !reflect.DeepEqual(ins.Missing, []string{"forward: accept DNATed flows from wgft0"}) ||
-			!reflect.DeepEqual(ins.Unexpected, []string{"chain forward: row 3 is not one wgft writes"}) {
-			t.Errorf("missing %v unexpected %v; want the swapped rows reported", ins.Missing, ins.Unexpected)
+		// 位置が違うだけの行は欠けでも加わった行でもなく、位置の違いとして示す(10.2c 節)
+		// 隣り合う 2 行を入れ替えた表では、どちらを移したとも言えるので、どちらか 1 行を名指せばよい
+		if len(ins.Missing) != 0 || len(ins.Unexpected) != 0 || len(ins.Moved) != 1 || ins.Matches() ||
+			(ins.Moved[0] != "forward: accept DNATed flows from wgft0, now at row 3" && ins.Moved[0] != "forward: drop wgft0 to wgft0, now at row 4") {
+			t.Errorf("missing %v unexpected %v moved %v; want the swapped row reported as moved", ins.Missing, ins.Unexpected, ins.Moved)
 		}
 	})
 	// DNAT の行は、宛先を読めても形が違えば記録どおりではない
@@ -857,4 +860,289 @@ func TestInspectAgentOf(t *testing.T) {
 			t.Error("a failed map read did not surface")
 		}
 	})
+}
+
+// rowGuards は、名前の付いた守りの行である(設計文書 10.2c 節の「dataplane.table の判定」)。何が開くかは、
+// 欠けた行の組み合わせで読み手が決める。
+var rowGuards = map[string]string{
+	"filter_pre: drop the rest from wgft0":      GuardPreDrop,
+	"input: drop the rest from wgft0":           GuardInputDrop,
+	"forward: clamp the MSS of SYNs from wgft0": GuardMSS,
+	"forward: clamp the MSS of SYNs to wgft0":   GuardMSS,
+	"forward: drop wgft0 to wgft0":              GuardHairpinDrop,
+	"forward: drop the rest from wgft0":         GuardForwardFromDrop,
+	"forward: drop the rest to wgft0":           GuardForwardToDrop,
+}
+
+// 欠けた行とチェーンの役割は、欠けたときに転送が止まるかどうかで決まる(設計文書 10.2c 節の
+// 「dataplane.table の判定」)。表はラボで行を 1 種類ずつ消して確かめた結果である。通す行は、同じ
+// チェーンでそれが通さなければ落とす drop の行も欠けていれば、転送を止めない。
+func TestInspectAgentRowRoles(t *testing.T) {
+	pub := testAgentPublication()
+	rows := agentRows(pub, "wgft0")
+	drop := func(rec *agentRecorder, descs ...string) {
+		t.Helper()
+		for _, desc := range descs {
+			var want agentRow
+			for _, r := range rows {
+				if r.desc == desc {
+					want = r
+				}
+			}
+			if want.desc == "" {
+				t.Fatalf("no row %q", desc)
+			}
+			got := rec.rules[want.chain]
+			for i, r := range got {
+				comment, _ := userdata.GetString(r.UserData, userdata.TypeComment)
+				if rowSig(comment, r.Exprs) == rowSig(want.comment, want.exprs) {
+					rec.rules[want.chain] = append(append([]*nftables.Rule(nil), got[:i]...), got[i+1:]...)
+					break
+				}
+			}
+		}
+	}
+	dropChain := func(rec *agentRecorder, name string) {
+		var kept []*nftables.Chain
+		for _, c := range rec.chainObjs {
+			if c.Name != name {
+				kept = append(kept, c)
+			}
+		}
+		rec.chainObjs = kept
+	}
+	type want map[string]RowRole
+	for _, tc := range []struct {
+		name  string
+		edit  func(rec *agentRecorder)
+		roles want
+	}{
+		{"filter_pre drop", func(r *agentRecorder) { drop(r, "filter_pre: drop the rest from wgft0") },
+			want{"filter_pre: drop the rest from wgft0": RoleGuard}},
+		{"filter_pre established", func(r *agentRecorder) { drop(r, "filter_pre: accept established and related flows from wgft0") },
+			want{"filter_pre: accept established and related flows from wgft0": RoleGuard}},
+		{"a pass row", func(r *agentRecorder) { drop(r, "filter_pre: accept tcp 25565 from wgft0 for rule r_mc") },
+			want{"filter_pre: accept tcp 25565 from wgft0 for rule r_mc": RoleCarry}},
+		{"a pass row and the drop", func(r *agentRecorder) {
+			drop(r, "filter_pre: accept tcp 25565 from wgft0 for rule r_mc", "filter_pre: drop the rest from wgft0")
+		}, want{"filter_pre: accept tcp 25565 from wgft0 for rule r_mc": RoleGuard, "filter_pre: drop the rest from wgft0": RoleGuard}},
+		{"the filter_pre chain", func(r *agentRecorder) { dropChain(r, "filter_pre") },
+			want{"chain filter_pre is missing": RoleGuard, "filter_pre: accept tcp 25565 from wgft0 for rule r_mc": RoleGuard}},
+		{"input DNAT accept", func(r *agentRecorder) { drop(r, "input: accept DNATed flows from wgft0") },
+			want{"input: accept DNATed flows from wgft0": RoleCarrySelf}},
+		{"input DNAT accept and the drop", func(r *agentRecorder) {
+			drop(r, "input: accept DNATed flows from wgft0", "input: drop the rest from wgft0")
+		}, want{"input: accept DNATed flows from wgft0": RoleGuard, "input: drop the rest from wgft0": RoleGuard}},
+		{"input established", func(r *agentRecorder) { drop(r, "input: accept established and related flows from wgft0") },
+			want{"input: accept established and related flows from wgft0": RoleGuard}},
+		{"the MSS rows", func(r *agentRecorder) {
+			drop(r, "forward: clamp the MSS of SYNs from wgft0", "forward: clamp the MSS of SYNs to wgft0")
+		}, want{"forward: clamp the MSS of SYNs from wgft0": RoleGuard, "forward: clamp the MSS of SYNs to wgft0": RoleGuard}},
+		{"every guard drop", func(r *agentRecorder) {
+			drop(r, "input: drop the rest from wgft0", "forward: drop the rest to wgft0", "filter_pre: drop the rest from wgft0")
+		}, want{"input: drop the rest from wgft0": RoleGuard, "forward: drop the rest to wgft0": RoleGuard}},
+		{"forward wgft0 to wgft0 drop", func(r *agentRecorder) { drop(r, "forward: drop wgft0 to wgft0") },
+			want{"forward: drop wgft0 to wgft0": RoleGuard}},
+		{"forward DNAT accept", func(r *agentRecorder) { drop(r, "forward: accept DNATed flows from wgft0") },
+			want{"forward: accept DNATed flows from wgft0": RoleCarryLAN}},
+		{"forward DNAT accept and its drop", func(r *agentRecorder) {
+			drop(r, "forward: accept DNATed flows from wgft0", "forward: drop the rest from wgft0")
+		}, want{"forward: accept DNATed flows from wgft0": RoleGuard, "forward: drop the rest from wgft0": RoleGuard}},
+		{"forward established", func(r *agentRecorder) { drop(r, "forward: accept established and related flows to wgft0") },
+			want{"forward: accept established and related flows to wgft0": RoleCarryLAN}},
+		{"forward established and its drop", func(r *agentRecorder) {
+			drop(r, "forward: accept established and related flows to wgft0", "forward: drop the rest to wgft0")
+		}, want{"forward: accept established and related flows to wgft0": RoleGuard, "forward: drop the rest to wgft0": RoleGuard}},
+		{"the forward chain", func(r *agentRecorder) { dropChain(r, "forward") },
+			want{"chain forward is missing": RoleGuard, "forward: accept DNATed flows from wgft0": RoleGuard}},
+		{"the masquerade", func(r *agentRecorder) {
+			drop(r, "postrouting: masquerade DNATed flows from wgft0 leaving by another interface")
+		}, want{"postrouting: masquerade DNATed flows from wgft0 leaving by another interface": RoleCarryLAN}},
+		{"the postrouting chain", func(r *agentRecorder) { dropChain(r, "postrouting") },
+			want{"chain postrouting is missing": RoleCarryLAN, "postrouting: masquerade DNATed flows from wgft0 leaving by another interface": RoleCarryLAN}},
+		{"the nat_pre chain", func(r *agentRecorder) { dropChain(r, "nat_pre") },
+			want{"chain nat_pre is missing": RoleCarry, "nat_pre: DNAT row of rule r_mc": RoleCarry}},
+		// map から要素が消えた範囲のルールは、行があっても DNAT が欠けている
+		{"a map element", func(r *agentRecorder) { r.sets["__map0"] = r.sets["__map0"][1:] },
+			want{"DNAT udp 2456 of rule r_valheim to 192.168.1.20:3000": RoleCarry}},
+		{"a chain with another priority", func(r *agentRecorder) {
+			for _, c := range r.chainObjs {
+				if c.Name == "input" {
+					c.Priority = nftables.ChainPriorityRef(0)
+				}
+			}
+		}, want{"chain input is not a filter chain on its hook at priority -10 with policy accept": RoleCarry}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := emitAgentForTest(t, pub)
+			tc.edit(rec)
+			ins, err := inspectAgentOf(rec.dumps(), rec.elems, pub, "wgft0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]RowRole{}
+			for _, m := range ins.MissingItems {
+				got[m.Desc] = m.Role
+			}
+			for _, m := range ins.MissingItems {
+				if m.Guard != rowGuards[m.Desc] {
+					t.Errorf("%q: guard %q, want %q", m.Desc, m.Guard, rowGuards[m.Desc])
+				}
+			}
+			for desc, role := range tc.roles {
+				if r, ok := got[desc]; !ok || r != role {
+					t.Errorf("%q: role %d (present %v), want %d; all: %v", desc, r, ok, role, ins.MissingItems)
+				}
+			}
+			if len(ins.MissingItems) < len(ins.Missing) {
+				t.Errorf("%d missing items for %d missing rows", len(ins.MissingItems), len(ins.Missing))
+			}
+		})
+	}
+}
+
+// 期待する行が同じチェーンの別の位置にあれば、欠けたのではなく位置が違う(設計文書 10.2c 節)。drop の行を
+// チェーンの先頭へ移した表は、欠けた行を持たず、位置の違う行を持つ。
+func TestInspectAgentMovedRows(t *testing.T) {
+	pub := testAgentPublication()
+	for _, tc := range []struct {
+		chain, desc string
+	}{
+		{"filter_pre", "filter_pre: drop the rest from wgft0"},
+		{"forward", "forward: drop the rest from wgft0"},
+		{"input", "input: drop the rest from wgft0"},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			rec := emitAgentForTest(t, pub)
+			rows := rec.rules[tc.chain]
+			var want agentRow
+			for _, r := range agentRows(pub, "wgft0") {
+				if r.desc == tc.desc {
+					want = r
+				}
+			}
+			moved := false
+			for i, r := range rows {
+				comment, _ := userdata.GetString(r.UserData, userdata.TypeComment)
+				if rowSig(comment, r.Exprs) == rowSig(want.comment, want.exprs) {
+					rest := append(append([]*nftables.Rule(nil), rows[:i]...), rows[i+1:]...)
+					rec.rules[tc.chain] = append([]*nftables.Rule{r}, rest...)
+					moved = true
+					break
+				}
+			}
+			if !moved {
+				t.Fatalf("no row %q", tc.desc)
+			}
+			ins, err := inspectAgentOf(rec.dumps(), rec.elems, pub, "wgft0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ins.Missing) != 0 || len(ins.MissingItems) != 0 || len(ins.Unexpected) != 0 {
+				t.Errorf("missing %v, unexpected %v; want none for a row that only moved", ins.Missing, ins.Unexpected)
+			}
+			if len(ins.Moved) != 1 || !strings.HasPrefix(ins.Moved[0], tc.desc+", now at row 1") || ins.Matches() {
+				t.Errorf("moved = %v, want %q at row 1", ins.Moved, tc.desc)
+			}
+		})
+	}
+}
+
+// map に加わった要素は、wgft が書いた形の行から読んだ DNAT として ExtraDNATsInPlace に入る。加わった行が
+// 同時にあっても消えない。加わった DNAT の行から読んだ DNAT は入らない。
+func TestInspectAgentExtraDNATsInPlace(t *testing.T) {
+	full := testAgentPublication()
+	// 記録は r_partial の 7002 を持たず、表の map には 7002 の要素がある
+	want := testAgentPublication()
+	for i, r := range want.Rules {
+		if r.RuleID == "r_partial" {
+			want.Rules[i].Ranges = r.Ranges[:1]
+		}
+	}
+	rec := emitAgentForTest(t, full)
+	rec.rules["nat_pre"] = append(rec.rules["nat_pre"], &nftables.Rule{Exprs: []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}})
+	ins, err := inspectAgentOf(rec.dumps(), rec.elems, want, "wgft0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ins.ExtraDNATsInPlace) != 1 || ins.ExtraDNATsInPlace[0].Ports.Lo != 7002 || !slices.Contains(ins.Unexpected, "chain nat_pre: row 4 is not one wgft writes") {
+		t.Errorf("extra in place %v, unexpected %v; want the 7002 element and the added row", ins.ExtraDNATsInPlace, ins.Unexpected)
+	}
+
+	// 加わった DNAT の行は Unexpected に入り、その DNAT は ExtraDNATsInPlace に入らない
+	extraRule := AgentPublication{Rules: []AgentRuleResult{{RuleID: "r_extra", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 9999, Hi: 9999},
+		Target: "192.168.1.9:9999", Ranges: []AgentRange{{Ports: proto.PortRange{Lo: 9999, Hi: 9999}, Dest: netip.MustParseAddrPort("192.168.1.9:9999")}}}}}
+	withExtra := testAgentPublication()
+	withExtra.Rules = append(withExtra.Rules, extraRule.Rules...)
+	rec = emitAgentForTest(t, withExtra)
+	ins, err = inspectAgentOf(rec.dumps(), rec.elems, full, "wgft0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ins.ExtraDNATs) == 0 || len(ins.ExtraDNATsInPlace) != 0 || len(ins.Unexpected) == 0 {
+		t.Errorf("extra %v, in place %v, unexpected %v; want the added row's DNAT only in ExtraDNATs", ins.ExtraDNATs, ins.ExtraDNATsInPlace, ins.Unexpected)
+	}
+}
+
+// 1 行を移しただけの表では、動いていない行ではなく移した行を、位置の違う行として名指す(最長共通部分列の
+// 照合)。filter_pre の成立済みのフローを通す行を末尾へ移すと、名指されるのはその行だけである。
+func TestInspectAgentNamesTheRowThatMoved(t *testing.T) {
+	pub := testAgentPublication()
+	rec := emitAgentForTest(t, pub)
+	rows := rec.rules["filter_pre"]
+	rec.rules["filter_pre"] = append(append([]*nftables.Rule(nil), rows[1:]...), rows[0])
+	ins, err := inspectAgentOf(rec.dumps(), rec.elems, pub, "wgft0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("filter_pre: accept established and related flows from wgft0, now at row %d", len(rows))
+	if !reflect.DeepEqual(ins.Moved, []string{want}) || len(ins.Missing) != 0 || len(ins.Unexpected) != 0 {
+		t.Errorf("moved %v missing %v unexpected %v; want only %q", ins.Moved, ins.Missing, ins.Unexpected, want)
+	}
+}
+
+// 表が大きすぎて最長共通部分列を取らないチェーンでは、先頭から順の照合に切り替える。並びが同じなら
+// すべて対応し、先頭の行を末尾へ移した場合は、先頭の行だけが末尾に対応して残りは対応しない。移した行の
+// 名指しが粗くなるだけで、欠けと位置の違いの区別は保たれる。
+func TestAlignRowsFallsBackForLargeChains(t *testing.T) {
+	big := make([]string, 3000)
+	for i := range big {
+		big[i] = fmt.Sprint(i)
+	}
+	same := alignRows(big, big)
+	for i, j := range same {
+		if j != i {
+			t.Fatalf("identical chains: row %d aligned to %d", i, j)
+		}
+	}
+	got := append(append([]string(nil), big[1:]...), big[0])
+	out := alignRows(big, got)
+	if out[0] != len(big)-1 || out[1] != -1 {
+		t.Errorf("greedy fallback = %v...", out[:3])
+	}
+	small := alignRows([]string{"a", "b", "c", "d"}, []string{"b", "c", "d", "a"})
+	if !reflect.DeepEqual(small, []int{-1, 0, 1, 2}) {
+		t.Errorf("alignment = %v, want a moved to the end and the rest in order", small)
+	}
+}
+
+// DNAT の行が欠けたルールの宛先は、その行の欠けとして 1 件に数える。行が無ければ宛先も必ず無いためである。
+func TestInspectAgentCountsAMissingDNATRowOnce(t *testing.T) {
+	pub := testAgentPublication()
+	rec := emitAgentForTest(t, pub)
+	var kept []*nftables.Rule
+	for _, r := range rec.rules["nat_pre"] {
+		comment, _ := userdata.GetString(r.UserData, userdata.TypeComment)
+		if comment != Comment("r_mc", DNATKind) {
+			kept = append(kept, r)
+		}
+	}
+	rec.rules["nat_pre"] = kept
+	ins, err := inspectAgentOf(rec.dumps(), rec.elems, pub, "wgft0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ins.MissingItems) != 1 || ins.MissingItems[0].Desc != "nat_pre: DNAT row of rule r_mc" || len(ins.MissingDNATs) != 1 {
+		t.Errorf("missing items %v, missing DNATs %v; want the row once, and the DNAT kept for Matches", ins.MissingItems, ins.MissingDNATs)
+	}
 }

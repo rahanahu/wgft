@@ -35,12 +35,32 @@ type AgentInspection struct {
 	Missing []string
 	// Unexpected は、実際の表にあって、記録から組んだ表に無い行とチェーンである。
 	Unexpected []string
+	// MissingItems は、Missing と MissingDNATs の各項目を、欠けたときに転送が止まるかどうかの役割と
+	// 組にしたものである(設計文書 10.2c 節の「dataplane.table の判定」)。役割は、同じチェーンの drop の
+	// 行やチェーンそのものが欠けているかどうかも見て決める。通す行は、それが通さなければ落とす drop の
+	// 行があるときだけ転送に要るためである
+	MissingItems []MissingItem
+	// Moved は、記録から組む表の行のうち、同じチェーンにあるが期待する位置に無いものである。欠けた行には
+	// 数えない。行の並びが変わった効果は、行が加わった場合と同じく分からないためである(設計文書 10.2c 節)
+	Moved []string
+	// ExtraDNATsInPlace は、ExtraDNATs のうち、wgft が書いた形の行(記録から組む表にある行)の map に
+	// 加わった要素から読んだものである。加わった行から読んだ DNAT は、その行が Unexpected に入るので
+	// 含めない。読み手が同じ行を二重に数えないために持つ
+	ExtraDNATsInPlace []AgentDNAT
+}
+
+// MissingItem は欠けた行、チェーン、DNAT の 1 つである。
+type MissingItem struct {
+	Desc string
+	Role RowRole
+	// Guard は、欠けたのが名前の付いた守りの行なら、その名前(Guard*)である
+	Guard string
 }
 
 // Matches は、表が記録どおりであるかどうかである。
 func (i AgentInspection) Matches() bool {
 	return i.Unrecognized == 0 && len(i.MissingDNATs) == 0 && len(i.ExtraDNATs) == 0 &&
-		len(i.Missing) == 0 && len(i.Unexpected) == 0
+		len(i.Missing) == 0 && len(i.Unexpected) == 0 && len(i.Moved) == 0
 }
 
 // InspectAgent は table inet wgft_agent を読み戻し、記録した公開 want から組む表と比べる(7b.4 節。停止中の
@@ -104,19 +124,45 @@ func inspectAgentOf(chains []chainDump, elems func(set string) ([]nftables.SetEl
 		known[spec.name] = true
 		cd, ok := got[spec.name]
 		if !ok {
-			ins.Missing = append(ins.Missing, fmt.Sprintf("chain %s is missing", spec.name))
+			ins.addMissing(fmt.Sprintf("chain %s is missing", spec.name), spec.role, "")
 		} else if !chainMatches(cd.chain, spec) {
-			ins.Missing = append(ins.Missing, fmt.Sprintf("chain %s is not a %s chain on its hook at priority %d with policy accept", spec.name, spec.typ, spec.prio))
+			// 見出しの違うチェーン(policy drop など)が転送を止めるかどうかは、ラボで確かめていない。
+			// 止まらないとは言えないので、転送を担う側に数える
+			ins.addMissing(fmt.Sprintf("chain %s is not a %s chain on its hook at priority %d with policy accept", spec.name, spec.typ, spec.prio), RoleCarry, "")
 		}
+		missing, moved, unexpected, used := compareRows(spec.name, expected[spec.name], cd.rules)
 		if spec.name == "nat_pre" {
 			tbl, err := agentTableOf(cd.rules, elems)
 			if err != nil {
 				return AgentInspection{}, err
 			}
 			ins.DNATs, ins.Unrecognized = tbl.DNATs, tbl.Unrecognized
+			var inPlace []*nftables.Rule
+			for i, r := range cd.rules {
+				if used[i] {
+					inPlace = append(inPlace, r)
+				}
+			}
+			known, err := agentTableOf(inPlace, elems)
+			if err != nil {
+				return AgentInspection{}, err
+			}
+			_, ins.ExtraDNATsInPlace = diffDNATs(want.DNATs(), known.DNATs)
 		}
-		missing, unexpected := compareRows(spec.name, expected[spec.name], cd.rules)
-		ins.Missing = append(ins.Missing, missing...)
+		ins.Moved = append(ins.Moved, moved...)
+		gone := map[string]bool{}
+		for _, m := range missing {
+			gone[m.desc] = true
+		}
+		for _, m := range missing {
+			role := m.role
+			if m.needs != "" && gone[m.needs] {
+				// 通さなければ落とす drop の行も欠けているので、この行が無くても転送は止まらない。守りの
+				// チェーンごと無い場合も、その drop の行が欠けているのでここに当たる
+				role = RoleGuard
+			}
+			ins.addMissing(m.desc, role, m.guard)
+		}
 		ins.Unexpected = append(ins.Unexpected, unexpected...)
 	}
 	for _, cd := range chains {
@@ -125,7 +171,31 @@ func inspectAgentOf(chains []chainDump, elems func(set string) ([]nftables.SetEl
 		}
 	}
 	ins.MissingDNATs, ins.ExtraDNATs = diffDNATs(want.DNATs(), ins.DNATs)
+	// DNAT の行ごと欠けたルールの DNAT は、その行の欠けとして 1 件に数える。行が無ければ、その宛先も
+	// 必ず無いためである。行はあって宛先だけが違うか欠けたポートは、DNAT として数える
+	rowGone := map[string]bool{}
+	for _, m := range ins.MissingItems {
+		if id, ok := strings.CutPrefix(m.Desc, natPreRowDesc); ok {
+			rowGone[id] = true
+		}
+	}
+	for _, d := range ins.MissingDNATs {
+		if rowGone[d.RuleID] {
+			continue
+		}
+		ins.MissingItems = append(ins.MissingItems, MissingItem{Desc: "DNAT " + d.String(), Role: RoleCarry})
+	}
 	return ins, nil
+}
+
+func (i *AgentInspection) addMissing(desc string, role RowRole, guard string) {
+	i.Missing = append(i.Missing, desc)
+	i.MissingItems = append(i.MissingItems, MissingItem{Desc: desc, Role: role, Guard: guard})
+}
+
+// String は DNAT を 1 句で書く。
+func (d AgentDNAT) String() string {
+	return fmt.Sprintf("%s %s of rule %s to %s", d.Proto, d.Ports, d.RuleID, d.Dest)
 }
 
 func chainMatches(ch *nftables.Chain, spec agentChain) bool {
@@ -144,13 +214,17 @@ func expectedAgentRows(want AgentPublication, wg string) (map[string][]agentRow,
 	for _, row := range agentRows(want, wg) {
 		for i, r := range c.rows[row.chain] {
 			if r.desc == "" && r.comment == row.comment && rowSig(r.comment, r.exprs) == rowSig(row.comment, row.exprs) {
-				c.rows[row.chain][i].desc = row.desc
+				c.rows[row.chain][i].desc, c.rows[row.chain][i].role, c.rows[row.chain][i].needs = row.desc, row.role, row.needs
+				c.rows[row.chain][i].guard = row.guard
 				break
 			}
 		}
 	}
 	return c.rows, nil
 }
+
+// natPreRowDesc は nat_pre の DNAT の行の説明の頭である。続けてルール ID を書く。
+const natPreRowDesc = "nat_pre: DNAT row of rule "
 
 // rowCollector は emitAgent が組む行を集める。netlink には何も送らない。
 type rowCollector struct {
@@ -169,29 +243,51 @@ func (c *rowCollector) AddRule(r *nftables.Rule) *nftables.Rule {
 	row := agentRow{chain: r.Chain.Name, comment: comment, exprs: r.Exprs}
 	if r.Chain.Name == "nat_pre" {
 		id, _ := parseComment(comment)
-		row.desc = "nat_pre: DNAT row of rule " + id
+		row.desc, row.role = natPreRowDesc+id, RoleCarry
 	}
 	c.rows[r.Chain.Name] = append(c.rows[r.Chain.Name], row)
 	return r
 }
 
-// compareRows は、期待する行の列が実際の行の中に同じ順で並んでいるかを見る。見つからない行は missing、
-// 期待する行のどれにも当たらない実際の行は unexpected になる。
-func compareRows(chain string, want []agentRow, got []*nftables.Rule) (missing, unexpected []string) {
-	used := make([]bool, len(got))
-	next := 0
-	for _, w := range want {
+// compareRows は、期待する行の列と実際の行の列を照らし合わせる。同じ順で並ぶ行の数が最も多くなる対応
+// (最長共通部分列)を取り、それに入らない期待する行のうち、同じ形の行がチェーンの別の位置にあるものは
+// moved、どこにも無いものは missing になる。期待する行のどれにも当たらない実際の行は unexpected になる。
+// used は、実際の行が期待する行に当たったかどうかである。最長共通部分列で取るのは、1 行を移しただけの
+// 表で、動いていない行ではなく移した行を moved として名指すためである(設計文書 10.2c 節)。
+func compareRows(chain string, want []agentRow, got []*nftables.Rule) (missing []agentRow, moved, unexpected []string, used []bool) {
+	used = make([]bool, len(got))
+	gotSigs := make([]string, len(got))
+	for i, r := range got {
+		comment, _ := userdata.GetString(r.UserData, userdata.TypeComment)
+		gotSigs[i] = rowSig(comment, r.Exprs)
+	}
+	wantSigs := make([]string, len(want))
+	for i, w := range want {
+		wantSigs[i] = rowSig(w.comment, w.exprs)
+	}
+	inOrder := alignRows(wantSigs, gotSigs)
+	var notInOrder []agentRow
+	for wi, gi := range inOrder {
+		if gi < 0 {
+			notInOrder = append(notInOrder, want[wi])
+			continue
+		}
+		used[gi] = true
+	}
+	// 順に対応しなかった行を、まだ当たっていない実際の行から探す。見つかれば、欠けたのではなく位置が
+	// 違う。行が加わった場合と同じく、並びの違いが転送を止めるかどうかは分からない
+	for _, w := range notInOrder {
 		sig := rowSig(w.comment, w.exprs)
 		found := false
-		for i := next; i < len(got); i++ {
-			comment, _ := userdata.GetString(got[i].UserData, userdata.TypeComment)
-			if rowSig(comment, got[i].Exprs) == sig {
-				used[i], next, found = true, i+1, true
+		for i := range got {
+			if !used[i] && gotSigs[i] == sig {
+				used[i], found = true, true
+				moved = append(moved, fmt.Sprintf("%s, now at row %d", w.desc, i+1))
 				break
 			}
 		}
 		if !found {
-			missing = append(missing, w.desc)
+			missing = append(missing, w)
 		}
 	}
 	for i, u := range used {
@@ -199,7 +295,63 @@ func compareRows(chain string, want []agentRow, got []*nftables.Rule) (missing, 
 			unexpected = append(unexpected, fmt.Sprintf("chain %s: row %d is not one wgft writes", chain, i+1))
 		}
 	}
-	return missing, unexpected
+	return missing, moved, unexpected, used
+}
+
+// maxAlignCells は、最長共通部分列の表の大きさの上限である。期待する行と実際の行の数の積がこれを超える
+// チェーンでは、先頭から順に貪欲に対応を取る。行の数は通す行の数、つまり公開した範囲の数に比例し、ふつうの
+// 配置では数十行である。上限の 400 万は、表の 4 バイトの要素で 16 MiB に当たる。
+const maxAlignCells = 4 << 20
+
+// alignRows は、want の各要素が同じ順で対応する got の位置を返す。対応しない要素は -1 である。
+func alignRows(want, got []string) []int {
+	out := make([]int, len(want))
+	for i := range out {
+		out[i] = -1
+	}
+	n, m := len(want), len(got)
+	if n == 0 || m == 0 {
+		return out
+	}
+	if n*m > maxAlignCells {
+		next := 0
+		for wi, w := range want {
+			for gi := next; gi < m; gi++ {
+				if got[gi] == w {
+					out[wi], next = gi, gi+1
+					break
+				}
+			}
+		}
+		return out
+	}
+	// lcs[i][j] は want[i:] と got[j:] の最長共通部分列の長さである
+	lcs := make([]int32, (n+1)*(m+1))
+	at := func(i, j int) *int32 { return &lcs[i*(m+1)+j] }
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			switch {
+			case want[i] == got[j]:
+				*at(i, j) = *at(i+1, j+1) + 1
+			case *at(i+1, j) >= *at(i, j+1):
+				*at(i, j) = *at(i+1, j)
+			default:
+				*at(i, j) = *at(i, j+1)
+			}
+		}
+	}
+	for i, j := 0, 0; i < n && j < m; {
+		switch {
+		case want[i] == got[j] && *at(i, j) == *at(i+1, j+1)+1:
+			out[i] = j
+			i, j = i+1, j+1
+		case *at(i+1, j) >= *at(i, j+1):
+			i++
+		default:
+			j++
+		}
+	}
+	return out
 }
 
 // rowSig は行の形を比べるための文字列である。コメントと、式の型と netlink の符号化を並べる。

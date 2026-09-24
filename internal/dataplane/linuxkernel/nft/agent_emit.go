@@ -26,17 +26,52 @@ type agentChain struct {
 	typ  nftables.ChainType
 	hook *nftables.ChainHook
 	prio int32
+	// role は、このチェーンが無いときに転送が止まるかどうかである(RowRole)
+	role RowRole
 }
 
 // agentChains はエージェントの表のチェーンである(7b.1 節)。filter_pre は conntrack(-200)の後、DNAT
 // (nat_pre の dstnat - 1)の前に置く。
 var agentChains = []agentChain{
-	{"filter_pre", nftables.ChainTypeFilter, nftables.ChainHookPrerouting, -150}, // mangle
-	{"nat_pre", nftables.ChainTypeNAT, nftables.ChainHookPrerouting, -101},       // dstnat - 1
-	{"input", nftables.ChainTypeFilter, nftables.ChainHookInput, -10},            // filter - 10
-	{"forward", nftables.ChainTypeFilter, nftables.ChainHookForward, -10},        // filter - 10
-	{"postrouting", nftables.ChainTypeNAT, nftables.ChainHookPostrouting, 100},   // srcnat
+	{"filter_pre", nftables.ChainTypeFilter, nftables.ChainHookPrerouting, -150, RoleGuard},  // mangle
+	{"nat_pre", nftables.ChainTypeNAT, nftables.ChainHookPrerouting, -101, RoleCarry},        // dstnat - 1
+	{"input", nftables.ChainTypeFilter, nftables.ChainHookInput, -10, RoleGuard},             // filter - 10
+	{"forward", nftables.ChainTypeFilter, nftables.ChainHookForward, -10, RoleGuard},         // filter - 10
+	{"postrouting", nftables.ChainTypeNAT, nftables.ChainHookPostrouting, 100, RoleCarryLAN}, // srcnat
 }
+
+// 守りの行の名前である(MissingItem.Guard)。drop の行は層になっていて、ある面が開くのは、その面を閉じる
+// 行がすべて欠けたときだけである。どの組み合わせで何が開くかは読み手が決める(設計文書 10.2c 節)。
+const (
+	// GuardPreDrop は filter_pre の drop の行である
+	GuardPreDrop = "filter_pre_drop"
+	// GuardInputDrop は input の drop の行である
+	GuardInputDrop = "input_drop"
+	// GuardForwardFromDrop は forward の wgft0 から入るものの drop の行である
+	GuardForwardFromDrop = "forward_from_drop"
+	// GuardForwardToDrop は forward の wgft0 へ出るものの drop の行である
+	GuardForwardToDrop = "forward_to_drop"
+	// GuardHairpinDrop は forward の wgft0 から wgft0 への drop の行である
+	GuardHairpinDrop = "forward_hairpin_drop"
+	// GuardMSS は MSS のクランプの行である
+	GuardMSS = "mss"
+)
+
+// RowRole は、表の行かチェーンが欠けたときに転送が止まるかどうかである(設計文書 10.2c 節の
+// 「dataplane.table の判定」)。分け方は、ラボで行を 1 種類ずつ消し、転送が通るかどうかを見て決めた。
+type RowRole int
+
+const (
+	// RoleGuard は、欠けても転送が止まらない行である。wgft0 から届く面を閉じる drop の行、成立済みの
+	// フローを通す行のうち転送に要らないもの、MSS のクランプの行、守りのチェーンが当たる
+	RoleGuard RowRole = iota
+	// RoleCarry は、欠けるとそのルールか表全体の転送が止まる行である。DNAT と filter_pre の通す行が当たる
+	RoleCarry
+	// RoleCarryLAN は、欠けると宛先がホスト自身でないルールの転送が止まる行である
+	RoleCarryLAN
+	// RoleCarrySelf は、欠けると宛先がホスト自身のアドレスのルールの転送が止まる行である
+	RoleCarrySelf
+)
 
 // agentRow は nat_pre の DNAT の行を除く 1 行である。desc は InspectAgent が欠けた行を示す文言である。
 type agentRow struct {
@@ -44,6 +79,13 @@ type agentRow struct {
 	desc    string
 	comment string
 	exprs   []expr.Any
+	// role は、この行が欠けたときに転送が止まるかどうかである。needs は、この行が転送に要るのが同じ
+	// チェーンのどの drop の行があるときかを desc で示す。その行も欠けていれば、この行が欠けても転送は
+	// 止まらない
+	role  RowRole
+	needs string
+	// guard は守りの行の名前(Guard*)である。チェーンごと無い場合も、その中の行が欠けた行として並ぶ
+	guard string
 }
 
 // StageAgent は table inet wgft_agent の差し替えを組み立てるが、送らない(7a.2 節の Prepare)。
@@ -124,6 +166,16 @@ func agentRows(pub AgentPublication, wg string) []agentRow {
 	add := func(chain, desc, comment string, parts ...[]expr.Any) {
 		rows = append(rows, agentRow{chain: chain, desc: desc, comment: comment, exprs: concat(parts...)})
 	}
+	// carry は直前に加えた行を、needs の行があるときに転送に要る行にする
+	carry := func(role RowRole, needs string) {
+		rows[len(rows)-1].role, rows[len(rows)-1].needs = role, needs
+	}
+	// named は直前に加えた守りの行に名前を付ける
+	named := func(guard string) { rows[len(rows)-1].guard = guard }
+	preDrop := "filter_pre: drop the rest from " + wg
+	inDrop := "input: drop the rest from " + wg
+	fwdDropFrom := "forward: drop the rest from " + wg
+	fwdDropTo := "forward: drop the rest to " + wg
 
 	// filter_pre:wgft0 から入る新しい接続のうち、公開した (プロトコル, ポート) の組だけを DNAT の前で通し、
 	// 残りを落とす(7b.1 節)。VPS の側から触れる面を入口で閉じるので、他のテーブルの DNAT(Docker が
@@ -133,25 +185,36 @@ func agentRows(pub AgentPublication, wg string) []agentRow {
 		for _, rg := range r.Ranges {
 			add("filter_pre", fmt.Sprintf("filter_pre: accept %s %s from %s for rule %s", r.Proto, rg.Ports, wg, r.RuleID),
 				Comment(r.RuleID, PassKind), fromWG, l4proto(r.Proto), dportIn(rg.Ports), accept)
+			carry(RoleCarry, preDrop)
 		}
 	}
-	add("filter_pre", "filter_pre: drop the rest from "+wg, "", fromWG, drop)
+	add("filter_pre", preDrop, "", fromWG, drop)
+	named(GuardPreDrop)
 
 	// input:wgft0 から入る新規の接続のうち、DNAT していないものを落とす(7b.1 節、11 節)。ホスト自身の
 	// LAN のアドレスへの DNAT は forward ではなく input を通るので、DNAT したフローは通す(7b.2 節)
 	add("input", "input: accept DNATed flows from "+wg, "", fromWG, dnatted, accept)
+	carry(RoleCarrySelf, inDrop)
 	add("input", "input: accept established and related flows from "+wg, "", fromWG, established, accept)
-	add("input", "input: drop the rest from "+wg, "", fromWG, drop)
+	add("input", inDrop, "", fromWG, drop)
+	named(GuardInputDrop)
 
 	// MSS は wgft0 を通る SYN を両方向で経路の MTU にクランプする(7b.1 節)。片方だけでは他方の向きが止まる
 	add("forward", "forward: clamp the MSS of SYNs from "+wg, "", fromWG, mssClamp())
+	named(GuardMSS)
 	add("forward", "forward: clamp the MSS of SYNs to "+wg, "", toWG, mssClamp())
+	named(GuardMSS)
 	// DNAT したフローとその返りだけを通し、wgft0 が絡む残りの転送を落とす。wgft0 が絡まない転送には触れない
 	add("forward", "forward: drop "+wg+" to "+wg, "", fromWG, toWG, drop)
+	named(GuardHairpinDrop)
 	add("forward", "forward: accept DNATed flows from "+wg, "", fromWG, dnatted, accept)
+	carry(RoleCarryLAN, fwdDropFrom)
 	add("forward", "forward: accept established and related flows to "+wg, "", toWG, established, accept)
-	add("forward", "forward: drop the rest from "+wg, "", fromWG, drop)
-	add("forward", "forward: drop the rest to "+wg, "", toWG, drop)
+	carry(RoleCarryLAN, fwdDropTo)
+	add("forward", fwdDropFrom, "", fromWG, drop)
+	named(GuardForwardFromDrop)
+	add("forward", fwdDropTo, "", toWG, drop)
+	named(GuardForwardToDrop)
 
 	// MASQUERADE は wgft0 から入って DNAT したフローのうち、wgft0 以外へ出るものに掛ける(7b.1 節)。表を
 	// wgft0 の側だけで書くので、LAN のインタフェース名は要らない。iifname が無いと、他のテーブルが DNAT した
@@ -159,6 +222,7 @@ func agentRows(pub AgentPublication, wg string) []agentRow {
 	// 入力のインタフェースを照合できる
 	add("postrouting", "postrouting: masquerade DNATed flows from "+wg+" leaving by another interface", "",
 		fromWG, ifname(expr.MetaKeyOIFNAME, expr.CmpOpNeq, wg), dnatted, []expr.Any{&expr.Masq{}})
+	carry(RoleCarryLAN, "")
 	return rows
 }
 

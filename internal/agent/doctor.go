@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"os/user"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
@@ -44,6 +47,10 @@ type DoctorResponse struct {
 	// 応答にも載る
 	Stream *DoctorStream `json:"stream,omitempty"`
 
+	// Process は稼働中のエージェントのプロセスの実行主体である。実行時の排他を要らないので、排他を
+	// 取れなかった応答にも載る(設計文書 10.2c 節の「カーネルモードの制御ソケットの応答」)
+	Process *DoctorProcess `json:"process,omitempty"`
+
 	// RuntimeState は実行時の排他の下でしか読めない状態である。排他を期限内に取れなければ無い
 	RuntimeState *DoctorRuntimeState `json:"runtime_state,omitempty"`
 	// RuntimeStateTimeout は、実行時の排他を取れなかったときに待った期限である。単位はナノ秒。
@@ -60,6 +67,20 @@ type DoctorAllowTargets struct {
 	List string `json:"list,omitempty"`
 	// Env は一覧を渡す設定の名前
 	Env string `json:"env"`
+}
+
+// DoctorProcess は稼働中のエージェントのプロセスの実行主体である。root で実行した agent doctor は
+// ファイルのパーミッションを迂回するので、エージェント自身がどの利用者で動いているかを添える
+// (設計文書 10.2c 節)。
+type DoctorProcess struct {
+	// UID は実 uid である。Windows では -1 になる
+	UID int `json:"uid"`
+	// User は UID の利用者名である。引けなければ空になる。systemd の DynamicUser の利用者は
+	// /etc/passwd に無いので、静的なビルドでは引けないことがある
+	User string `json:"user,omitempty"`
+	// NetAdmin は、プロセスが実効として CAP_NET_ADMIN を持つかどうかである。Linux の外と、読めな
+	// かった場合は nil になる
+	NetAdmin *bool `json:"cap_net_admin,omitempty"`
 }
 
 // DoctorStream は制御ストリームの観測の写しである。項目の意味は streamObservation にある。
@@ -102,6 +123,15 @@ type DoctorRuntimeState struct {
 	// 自身の診断のために示すだけで、守りには使わない。relay.listeners はこの値から SKIPPED を
 	// 判定する(設計文書 10.2c 節)
 	AgentDisabled bool `json:"agent_disabled"`
+
+	// Kernel はカーネルモードの dataplane を読んだ結果である(設計文書 10.2c 節)。カーネルモードの
+	// エージェントだけが持つ。停止中の agent doctor も ReadKernel で同じ形を読む
+	Kernel *DoctorKernel `json:"kernel,omitempty"`
+	// PublishError は、公開できずに試し直している全体状態の誤りである(7b.3 節の 3 つ目の種類)。
+	// 旧いテーブルが残って転送を続けている
+	PublishError string `json:"publish_error,omitempty"`
+	// CheckError は、カーネルモードの直前の 30 秒ごとの見直しの誤りである(7b.4 節)
+	CheckError string `json:"check_error,omitempty"`
 }
 
 // DoctorTunnel はトンネルの状態である。State と Reason はハートビートが組み立てる値そのもので、
@@ -161,6 +191,11 @@ type DoctorRule struct {
 	// フロー予算の上限の対象とは一致しない。上限の対象の数は Flows である
 	Sessions int `json:"sessions"`
 	Flows    int `json:"flows"`
+	// Ports はルールの宣言のポートの数、DNATPorts はそのうちカーネルモードで DNAT を置いたポートの
+	// 数である。カーネルモードのルールだけが持つ。DNAT を置いたまま error を報告するルールと、DNAT を
+	// 持たないルールを見分けるためである(設計文書 10.2c 節)
+	Ports     int `json:"ports,omitempty"`
+	DNATPorts int `json:"dnat_ports,omitempty"`
 }
 
 // DoctorBudget は 1 つのプロトコルのフロー予算である。記号は設計文書 7a.10 節に合わせる。
@@ -263,7 +298,8 @@ func (rt *runtime) collectDoctor() DoctorResponse {
 	allow := doctorAllowTargets(rt.opts.AllowTargets)
 	stream := DoctorStream(rt.streamStatus())
 	stream.DisconnectReason = clipText(stream.DisconnectReason)
-	res := DoctorResponse{AllowTargets: &allow, Stream: &stream}
+	proc := doctorProcess()
+	res := DoctorResponse{AllowTargets: &allow, Stream: &stream, Process: &proc}
 	wait := rt.doctorLockWait
 	if wait <= 0 {
 		wait = defaultDoctorLockWait
@@ -336,6 +372,12 @@ func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 		if r.rules != nil {
 			st.Rules = doctorRules(r.rules, nil)
 		}
+		if kd, ok := rt.dp.(kernelDoctor); ok {
+			st.Kernel = kd.doctorKernel()
+			st.CheckError = clipText(kd.checkError())
+			st.PublishError = clipText(rt.pendingErr)
+			withRulePorts(st.Rules, st.Kernel.Table.Rules)
+		}
 		return st
 	}
 	// 中継とトンネルは一緒に作り直されるので、拒否の累計の起点はトンネルを立てた時刻である
@@ -346,6 +388,39 @@ func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 		doctorBudget(proto.UDP, r.relay.udp),
 	}
 	return st
+}
+
+// kernelDoctor は、agent doctor のためにカーネルの状態を読む dataplane である。カーネルモードの実装だけが
+// 持つ(設計文書 10.2c 節)。呼び出し側は rt.mu を持つ。
+type kernelDoctor interface {
+	// doctorKernel はカーネルを読む。停止中の agent doctor の ReadKernel と同じ読み方である
+	doctorKernel() *DoctorKernel
+	// checkError は直前の 30 秒ごとの見直しの誤りである。無ければ空
+	checkError() string
+}
+
+// withRulePorts は、ハートビートのルールごとの状態に、公開の記録が持つポートの数を写す。
+func withRulePorts(rules, record []DoctorRule) {
+	at := make(map[string]DoctorRule, len(record))
+	for _, r := range record {
+		at[r.ID] = r
+	}
+	for i := range rules {
+		if r, ok := at[rules[i].ID]; ok {
+			rules[i].Proto, rules[i].Ports, rules[i].DNATPorts = r.Proto, r.Ports, r.DNATPorts
+		}
+	}
+}
+
+// doctorProcess はこのプロセスの実行主体を読む。
+func doctorProcess() DoctorProcess {
+	p := DoctorProcess{UID: os.Getuid(), NetAdmin: processNetAdmin()}
+	if p.UID >= 0 {
+		if u, err := user.LookupId(strconv.Itoa(p.UID)); err == nil {
+			p.User = u.Username
+		}
+	}
+	return p
 }
 
 // doctorRules はリスナーの状態をルール単位にまとめる。states はそのリスナーの状態から合成した

@@ -359,7 +359,7 @@ func (d *kernelDataplane) build(priv wgtypes.Key, w proto.WGConfig) (bool, error
 		return false, fmt.Errorf("keepalive %d is not between 0 and 65535", w.Keepalive)
 	}
 	d.priv, d.wg, d.have = priv, w, true
-	d.server = addr.Masked().Addr().Next()
+	d.server = agentServerAddress(addr)
 	d.epMu.Lock()
 	d.declared = w.Endpoint
 	d.epMu.Unlock()
@@ -986,6 +986,15 @@ func (d *kernelDataplane) allLocal(r nft.AgentRuleResult) bool {
 	return len(r.Ranges) > 0
 }
 
+// doctorKernel は agent doctor のためにカーネルを読む(設計文書 10.2c 節)。停止中の agent doctor と同じ
+// readKernel を、メモリの上の認証情報ファイルと公開の記録で呼ぶ。記録は公開に成功するたびに d.f に
+// 写すので、d.pub と同じ中身である。
+func (d *kernelDataplane) doctorKernel() *DoctorKernel {
+	return readKernel(kernelReadInput{iface: d.iface, creds: d.f, pub: d.f.KernelPublication})
+}
+
+func (d *kernelDataplane) checkError() string { return d.observeErr }
+
 // hostAddrs はホストのすべてのインタフェースの IPv4 のアドレスである。
 func hostAddrs() (map[netip.Addr]bool, error) {
 	addrs, err := netlink.AddrList(nil, netlink.FAMILY_V4)
@@ -1269,11 +1278,21 @@ func (d *kernelDataplane) linkDrift(st wg.AgentState) string {
 	if err != nil {
 		return ""
 	}
-	var diff []string
-	switch {
-	case !st.Exists:
+	if !st.Exists {
 		return d.iface + " is gone"
-	case st.Ownership != wg.OwnedByCurrentKey:
+	}
+	diff := linkDiffs(st, cfg)
+	if len(diff) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s differs from the declaration in %s", d.iface, strings.Join(diff, ", "))
+}
+
+// linkDiffs は、ある wgft0 の状態 st が宣言 cfg と違う点を並べる。30 秒ごとの見直しと agent doctor の
+// dataplane.interface が同じ関数を使う(設計文書 10.2c 節)。エンドポイントは比べない(7b.1 節)。
+func linkDiffs(st wg.AgentState, cfg wg.AgentConfig) []string {
+	var diff []string
+	if st.Ownership != wg.OwnedByCurrentKey {
 		diff = append(diff, "the key")
 	}
 	if !st.Up {
@@ -1291,10 +1310,7 @@ func (d *kernelDataplane) linkDrift(st wg.AgentState) string {
 		st.Peers[0].Keepalive != cfg.Server.Keepalive {
 		diff = append(diff, "the peer")
 	}
-	if len(diff) == 0 {
-		return ""
-	}
-	return fmt.Sprintf("%s differs from the declaration in %s", d.iface, strings.Join(diff, ", "))
+	return diff
 }
 
 // sameDNATs は、2 つの公開が同じ DNAT を持つかどうかである。世代と理由の文言は比べない。
