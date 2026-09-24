@@ -9,12 +9,36 @@ import (
 	"sync"
 
 	"github.com/google/nftables"
+	mdnetlink "github.com/mdlayher/netlink"
 	"github.com/vishvananda/netlink"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
 )
 
 var _ dataplane.Sensor = (*Backend)(nil)
+
+// notifyReceiveBuffer is the receive buffer requested for the netlink socket that carries the
+// nftables change notifications (NFNLGRP_NFTABLES) subscribed below. Publishing a large Admission
+// Policy source list creates a set with thousands of elements (design.md 7a.4 節), and the kernel's
+// notification of that change can arrive as more data than the socket's default receive buffer
+// (net.core.rmem_default, normally 212992 bytes) holds; the kernel then drops it and returns
+// ENOBUFS from the read, the same wall internal/dataplane/linuxkernel/nft/batch.go documents and
+// sizes around for a Commit's reply socket. Sized generously and bounded the same way: a fixed
+// request well above the default, clamped so it never asks the kernel for an unbounded amount.
+// Requested with SO_RCVBUFFORCE where the process has CAP_NET_ADMIN in the init user namespace,
+// and falls back to SO_RCVBUF (capped at 2x net.core.rmem_max) otherwise; see batch.go's sizeSocket
+// for the same fallback on the reply socket. Losing this subscription is not silent either way:
+// Watch below reports the failure once and the caller resubscribes within about 1 s (design.md
+// 7a.3 節 安全網).
+const notifyReceiveBuffer = 8 << 20 // 8 MiB: comfortable headroom over a several-thousand-element set's notification.
+
+// sizeNotifySocket requests notifyReceiveBuffer for c's receive buffer. It never fails c's dial:
+// see notifyReceiveBuffer's comment for why a request that falls back to SO_RCVBUF, or that the
+// kernel otherwise cannot grant, still leaves the subscription usable.
+func sizeNotifySocket(c *mdnetlink.Conn) error {
+	_ = c.SetReadBuffer(notifyReceiveBuffer)
+	return nil
+}
 
 // Watch subscribes to the kernel's change notifications that can mean the kernel no longer has
 // what the last Commit left (design.md 7a.3 節: 実際の状態への収束), and calls wake after each:
@@ -44,7 +68,7 @@ func (b *Backend) Watch(ctx context.Context, wake func()) error {
 		}
 	}
 
-	conn, err := nftables.New()
+	conn, err := nftables.New(nftables.WithSockOptions(sizeNotifySocket))
 	if err != nil {
 		return fmt.Errorf("nftables notifications: %w", err)
 	}
