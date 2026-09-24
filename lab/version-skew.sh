@@ -36,8 +36,8 @@
 # and immediately-previous NUMBERED protocol version, and every release from v0.4.0 onward speaks
 # the same protocol v1 (no v2 has been introduced yet), so old-agent/old-server exist to exercise
 # an actual previous release's registration/forwarding/reconnect behaviour, not to add protocol
-# coverage a unit test does not already have. It moves forward with each release: v0.6.0 as of
-# this revision (main is v0.6.0 plus whatever has landed since), v0.5.0 previously.
+# coverage a unit test does not already have. It moves forward with each release: v1.1.3 as of
+# this revision (main is v1.1.3 plus whatever has landed since), v0.6.0 previously.
 #
 # v0.3.0 predates the "stream: server selected protocol ..." log line by design (it has no
 # concept of a negotiated version to log), so the legacy combination only checks the server's own
@@ -55,15 +55,20 @@
 #
 # The old-agent combination also checks agent disable/enable (design 5.1 section), since disable is
 # a server-side-only guarantee added after every release this script can fetch (checked directly:
-# neither v0.6.0 nor any 1.x release ancestors the commit that added `wgft agent disable`). Disabling
-# home with the current server's own CLI is checked to stop that agent's forwarding and to show up
-# in `wgft agent ls`, `wgft status` and `wgft server doctor`; enabling it again is checked to bring
+# neither OLD_AGENT_VERSION nor any 1.x release ancestors the commit that added `wgft agent
+# disable`). Disabling home with the current server's own CLI is checked to stop that agent's
+# forwarding, to show up in `wgft agent ls`, `wgft status` and `wgft server doctor`, and - not just
+# that the VPS side drops the DNAT, but that the disable actually reaches the old agent - to make
+# the old agent itself catch up and report zero rules; enabling it again is checked to bring
 # forwarding back. The OLD_AGENT_VERSION agent, which has no idea disable exists, is also checked to
-# neither crash nor reconnect-loop while disabled: lab/lifecycle.sh's check 11 (L15) already covers
-# disable/enable in full against a current-build agent, so this only adds what is specific to an old
-# agent watching it happen. Only the old-agent combination runs this: old-server has no `agent
-# disable` command to run at all (that combination's server_bin predates the feature entirely), and
-# baseline/legacy add no version-skew information L15 does not already have.
+# neither crash nor reconnect-loop while disabled, counting its own "stream: connected to" log
+# line (every release logs this once per successful connection) across a fixed observation window
+# entered only once the disable has converged both on the VPS side and on the old agent's own
+# reported state. lab/lifecycle.sh's check 11 (L15) already covers disable/enable in full against a
+# current-build agent, so this only adds what is specific to an old agent watching it happen. Only
+# the old-agent combination runs this: old-server has no `agent disable` command to run at all
+# (that combination's server_bin predates the feature entirely), and baseline/legacy add no
+# version-skew information L15 does not already have.
 #
 # Old binaries: OLD_AGENT_VERSION and v0.3.0 (wgft-linux-amd64) are downloaded from the GitHub
 # release assets of this repository and checked against the published .sha256 file. A download is
@@ -84,7 +89,7 @@
 set -u
 
 GH_REPO=rahanahu/wgft
-OLD_AGENT_VERSION=0.6.0  # immediately-previous release: already speaks protocol v1 (design 7a.6)
+OLD_AGENT_VERSION=1.1.3  # immediately-previous release: already speaks protocol v1 (design 7a.6)
 LEGACY_VERSION=0.3.0     # predates version negotiation entirely: legacy v0. Fixed regardless of
   # OLD_AGENT_VERSION (see the "legacy" combination's own comment above): design 7a.6 requires
   # legacy v0 support through v1.0.x, and v0.3.0 is the only release that is actually legacy v0.
@@ -394,9 +399,44 @@ run_combo() {
 
   if [ "$check_disable" = 1 ]; then
     echo "-- $name: agent disable and enable, current server with the $(basename "$agent_bin") agent (design 5.1 section)"
-    local pre_pid pre_reconnects dout drc eout erc
+    # rules_reported <server-bin>: the count of rules "home" currently reports in its own
+    # heartbeat (agent ls --json's "rules" field for the entry named "home"), the same field
+    # lab/lifecycle.sh's check11 reads via its own agent_json helper. A disabled agent's own
+    # heartbeat carries none of its rules (the server excludes them from what it pushes to a
+    # disabled agent - design 5.1 section), so this is 0 once the disable has actually reached
+    # the agent, not just once the VPS side stops forwarding.
+    rules_reported() {
+      vps "$1" agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
+import json, sys
+a = next((x for x in json.load(sys.stdin) if x.get('name') == 'home'), {})
+print(len(a.get('rules') or []))
+"
+    }
+    # agent_caught_up_with_no_rules <server-bin>: home's OWN reported generation (from its
+    # heartbeat) matches the server's current generation, and it reports zero rules. Checking
+    # tcp_refused/udp_refused alone only proves the VPS side dropped the DNAT; it says nothing
+    # about whether the disable actually reached the old agent itself, which is the specific
+    # failure this adds: a server that stopped forwarding locally but never told (or never
+    # correctly told) an old agent about the disable would still fail this, even though the
+    # client-side probes above would already read as refused.
+    agent_caught_up_with_no_rules() {
+      local gen agen
+      gen=$(vps "$1" rule ls --admin "$ADMIN" --json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["generation"])' 2>/dev/null) || return 1
+      agen=$(vps "$1" agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
+import json, sys
+a = next((x for x in json.load(sys.stdin) if x.get('name') == 'home'), {})
+print(a.get('generation', ''))
+")
+      [ -n "$gen" ] && [ "$agen" = "$gen" ] && [ "$(rules_reported "$1")" = 0 ]
+    }
+    local pre_pid pre_connects dout drc eout erc
     pre_pid=$(find_pid "$agent_bin" "agent run")
-    pre_reconnects=$(grep -c "stream: reconnecting" "$ralog" 2>/dev/null || echo 0)
+    # stream: connected to ... is logged once per successful stream connection, by every release
+    # this script can fetch (checked directly: v0.3.0, OLD_AGENT_VERSION and the current build all
+    # emit this exact line), unlike "stream: reconnecting", which only fires on the WGFT_JOIN
+    # re-registration path (internal/agent/stream.go) and never on an ordinary disconnect/retry -
+    # counting that instead would never move on a real reconnect loop and would pass regardless.
+    pre_connects=$(grep -c "stream: connected to" "$ralog" 2>/dev/null)
 
     dout=$(vps "$server_bin" agent disable home --admin "$ADMIN" 2>&1); drc=$?
     if [ "$drc" = 0 ]; then echo "PASS  $name: wgft agent disable home exits 0"; else echo "FAIL  $name: wgft agent disable home exited $drc"; fail=1; fi
@@ -413,24 +453,36 @@ run_combo() {
     check "$name: status counts every rule as agent disabled" "0 active, 3 agent disabled / 3" "$(vps "$server_bin" status --admin "$ADMIN" 2>&1)"
     check "$name: server doctor's survey skips home as disabled" 'SKIPPED    not tested: agent "home" is disabled' "$(vps "$server_bin" server doctor --admin "$ADMIN" 2>&1)"
 
+    # Convergence before the observation window below (docs/testing.md's wall-clock rule: confirm
+    # convergence before entering an interval that claims nothing further happens). Without this,
+    # the sleep 8 below could start before the old agent has even applied the disable, letting a
+    # reconnect that happens during its own catch-up read as a false "reconnected while disabled".
+    wait_until 15 agent_caught_up_with_no_rules "$server_bin"
+    if agent_caught_up_with_no_rules "$server_bin"; then
+      echo "PASS  $name: the $(basename "$agent_bin") agent itself applies the disable and reports no rule, not just the VPS dropping the DNAT"
+    else
+      echo "FAIL  $name: the $(basename "$agent_bin") agent never caught up to report zero rules while home was disabled"; fail=1
+    fi
+
     # Observation window for the negative claim below (docs/testing.md's wall-clock rule: state
-    # has already converged - forwarding stopped, confirmed above - before this interval starts).
-    # An old agent that could not make sense of a disable might drop its stream and reconnect
-    # repeatedly, or panic; watching this many seconds with no fixed-length sleep elsewhere in the
-    # combination gives a real reconnect loop room to show up before the post-* reads below.
+    # has already converged - forwarding stopped and the old agent caught up, confirmed above -
+    # before this interval starts). An old agent that could not make sense of a disable might drop
+    # its stream and reconnect repeatedly, or panic; watching this many seconds with no
+    # fixed-length sleep elsewhere in the combination gives a real reconnect loop room to show up
+    # before the post-* reads below.
     sleep 8
-    local post_pid post_reconnects
+    local post_pid post_connects
     post_pid=$(find_pid "$agent_bin" "agent run")
-    post_reconnects=$(grep -c "stream: reconnecting" "$ralog" 2>/dev/null || echo 0)
+    post_connects=$(grep -c "stream: connected to" "$ralog" 2>/dev/null)
     if [ -n "$post_pid" ] && [ "$post_pid" = "$pre_pid" ]; then
       echo "PASS  $name: the $(basename "$agent_bin") agent process is still running under the same pid while home is disabled"
     else
       echo "FAIL  $name: the $(basename "$agent_bin") agent process pid changed or disappeared while home was disabled (was $pre_pid, now $post_pid)"; fail=1
     fi
-    if [ "$post_reconnects" = "$pre_reconnects" ]; then
+    if [ "$post_connects" = "$pre_connects" ]; then
       echo "PASS  $name: the $(basename "$agent_bin") agent's stream did not reconnect while home was disabled"
     else
-      echo "FAIL  $name: the $(basename "$agent_bin") agent reconnected $((post_reconnects - pre_reconnects)) more time(s) while home was disabled (see $ralog)"; fail=1
+      echo "FAIL  $name: the $(basename "$agent_bin") agent reconnected $((post_connects - pre_connects)) more time(s) while home was disabled (see $ralog)"; fail=1
     fi
 
     eout=$(vps "$server_bin" agent enable home --admin "$ADMIN" 2>&1); erc=$?
