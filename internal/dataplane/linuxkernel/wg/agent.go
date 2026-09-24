@@ -17,11 +17,8 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-
-	"github.com/rahanahu/wgft/internal/startup"
 )
 
 // AgentConfig declares the agent's kernel WireGuard interface (design.md 7b.1 節).
@@ -120,6 +117,8 @@ type NotOursError struct {
 	Interface string
 	Ownership Ownership // ForeignKey or NotWireGuard
 	Kind      string    // the link type
+	// Keyless is set for a WireGuard link that holds no private key at all.
+	Keyless bool
 	// DryRun lists what EnsureAgent would have changed had the link been the agent's. Empty for
 	// teardown and for a link that is not WireGuard.
 	DryRun []string
@@ -127,9 +126,14 @@ type NotOursError struct {
 
 func (e *NotOursError) Error() string {
 	var s string
-	if e.Ownership == NotWireGuard {
+	switch {
+	case e.Ownership == NotWireGuard:
 		s = fmt.Sprintf("%s exists but is a %s link, not WireGuard; wgft leaves it untouched. Set WGFT_WG_INTERFACE to another name", e.Interface, e.Kind)
-	} else {
+	case e.Keyless:
+		s = fmt.Sprintf("%s exists as a WireGuard link with no key, so wgft leaves it untouched. "+
+			"It is most likely one this agent left behind when it stopped between creating the link and setting its key; "+
+			"delete it with `ip link del %s`, or set WGFT_WG_INTERFACE to another name", e.Interface, e.Interface)
+	default:
 		s = fmt.Sprintf("%s exists but holds neither this agent's WireGuard key nor its previous one, so wgft leaves it untouched. "+
 			"If it was left by an earlier registration of this agent, for example after agent.json was lost, confirm that and delete it with `ip link del %s`; "+
 			"otherwise set WGFT_WG_INTERFACE to another name", e.Interface, e.Interface)
@@ -173,7 +177,9 @@ const (
 // (design.md 7b.1, 7b.4 節). A missing link is created. An existing link is converged only when it
 // is ours by the current or the previous key; the judgement is made before the first write, and a
 // link that is not ours is left as it is and reported as *NotOursError with a dry run. A link that
-// held the previous key ends up with the current one.
+// held the previous key ends up with the current one. Before the first write it also refuses, with
+// a plain error, when the agent's address range overlaps an address or a route on another
+// interface (design.md 7b.1 節).
 //
 // Converged: MTU, the IPv4 address (exactly cfg.Address), the private key, the peer set (only the
 // server; any other peer is removed), the server's AllowedIPs (exactly its /32), its endpoint when
@@ -204,35 +210,46 @@ func EnsureAgent(cfg AgentConfig) (changes []string, err error) {
 	defer c.Close()
 
 	link, err := netlink.LinkByName(cfg.Interface)
-	if _, notFound := err.(netlink.LinkNotFoundError); notFound {
-		if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: cfg.Interface, MTU: cfg.MTU}}); err != nil {
-			if errors.Is(err, unix.EOPNOTSUPP) {
-				return nil, startup.Prerequisite("wireguard module", agentNoWireGuardFormat, cfg.Interface)
-			}
-			return nil, fmt.Errorf("cannot create %s: %w", cfg.Interface, err)
-		}
-		created = true
-		note("create interface %s", cfg.Interface)
-		if link, err = netlink.LinkByName(cfg.Interface); err != nil {
-			return nil, err
-		}
-	} else if err != nil {
+	_, absent := err.(netlink.LinkNotFoundError)
+	if err != nil && !absent {
 		return nil, fmt.Errorf("%s: %w", cfg.Interface, err)
 	}
-	if link.Type() != "wireguard" {
-		return nil, &NotOursError{Interface: cfg.Interface, Ownership: NotWireGuard, Kind: link.Type()}
-	}
-
-	dev, err := c.Device(cfg.Interface)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", cfg.Interface, err)
-	}
-	// 所有の判定は最初の書き込みより前に行う。作ったばかりのインタフェースは鍵が空なので判定しない。
-	if !created {
+	var dev *wgtypes.Device
+	if !absent {
+		if link.Type() != "wireguard" {
+			return nil, &NotOursError{Interface: cfg.Interface, Ownership: NotWireGuard, Kind: link.Type()}
+		}
+		if dev, err = c.Device(cfg.Interface); err != nil {
+			return nil, fmt.Errorf("read %s: %w", cfg.Interface, err)
+		}
+		// 所有の判定は最初の書き込みより前に行う。
 		if own := judgeOwnership(link.Type(), dev.PrivateKey, cfg.PrivateKey, cfg.PreviousKey); !own.Ours() {
 			_, planned := agentDeviceDiff(dev, cfg)
 			return nil, &NotOursError{Interface: cfg.Interface, Ownership: own, Kind: link.Type(),
-				DryRun: append(addressPlan(link, cfg.MTU, cfg.Address), planned...)}
+				Keyless: dev.PrivateKey == wgtypes.Key{}, DryRun: append(addressPlan(link, cfg.MTU, cfg.Address), planned...)}
+		}
+	}
+	// アドレス帯の重なりも、作成を含む最初の書き込みより前に判定する。
+	if err := checkAgentOverlap(cfg); err != nil {
+		return nil, err
+	}
+
+	if absent {
+		if err := createLink(cfg.Interface, cfg.MTU, agentNoWireGuardFormat); err != nil {
+			return nil, err
+		}
+		created = true
+		note("create interface %s", cfg.Interface)
+		if agentAfterCreate != nil {
+			if err := agentAfterCreate(cfg.Interface); err != nil {
+				return nil, err
+			}
+		}
+		if link, err = netlink.LinkByName(cfg.Interface); err != nil {
+			return nil, err
+		}
+		if dev, err = c.Device(cfg.Interface); err != nil {
+			return nil, fmt.Errorf("read %s: %w", cfg.Interface, err)
 		}
 	}
 
@@ -252,6 +269,100 @@ func EnsureAgent(cfg AgentConfig) (changes []string, err error) {
 	return changes, nil
 }
 
+// agentAfterCreate, when set, runs right after EnsureAgent created the link and makes it fail
+// there. Only the lab tests set it, to check that a link created by a failed call is deleted.
+var agentAfterCreate func(iface string) error
+
+// hostAddr and hostRoute are the addresses and main-table routes of the host's other interfaces,
+// as checkAgentOverlap reads them. Iface is empty for a route with no single interface, such as a
+// blackhole or a multipath route.
+type hostAddr struct {
+	Iface  string
+	Prefix netip.Prefix
+}
+
+type hostRoute struct {
+	Iface string
+	Dst   netip.Prefix
+}
+
+// bandOverlap is the overlap rule on values already read. The agent's range collides with an
+// address on another interface that lies inside the range, and with a route on another interface
+// that is as specific as the range or more and lies inside it: either one wins over, or ties with,
+// the connected route of the agent's interface, so replies to the server would leave by the other
+// interface. A broader route, the default route included, loses to the agent's range and is fine.
+func bandOverlap(band netip.Prefix, self string, addrs []hostAddr, routes []hostRoute) (string, bool) {
+	band = band.Masked()
+	for _, a := range addrs {
+		if a.Iface != self && band.Contains(a.Prefix.Addr()) {
+			return fmt.Sprintf("address %s on interface %q", a.Prefix, a.Iface), true
+		}
+	}
+	for _, r := range routes {
+		if r.Iface == self && self != "" {
+			continue
+		}
+		if r.Dst.Bits() >= band.Bits() && band.Contains(r.Dst.Addr()) {
+			if r.Iface == "" {
+				return fmt.Sprintf("route %s", r.Dst), true
+			}
+			return fmt.Sprintf("route %s on interface %q", r.Dst, r.Iface), true
+		}
+	}
+	return "", false
+}
+
+// checkAgentOverlap refuses when cfg.Address's range overlaps an address or a main-table route on
+// another interface of the host (design.md 7b.1 節). It is a plain error, exit code 1: the range
+// comes from the server, so the agent's own settings cannot avoid it, and once the host's
+// interface or the server's range changes the next start goes through.
+func checkAgentOverlap(cfg AgentConfig) error {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return fmt.Errorf("list interfaces: %w", err)
+	}
+	names := make(map[int]string, len(links))
+	for _, l := range links {
+		names[l.Attrs().Index] = l.Attrs().Name
+	}
+	nlAddrs, err := netlink.AddrList(nil, netlink.FAMILY_V4)
+	if err != nil {
+		return fmt.Errorf("list addresses: %w", err)
+	}
+	var addrs []hostAddr
+	for _, a := range nlAddrs {
+		if ip, ok := netip.AddrFromSlice(a.IPNet.IP); ok {
+			ones, _ := a.IPNet.Mask.Size()
+			addrs = append(addrs, hostAddr{Iface: names[a.LinkIndex], Prefix: netip.PrefixFrom(ip.Unmap(), ones)})
+		}
+	}
+	nlRoutes, err := netlink.RouteList(nil, netlink.FAMILY_V4)
+	if err != nil {
+		return fmt.Errorf("list routes: %w", err)
+	}
+	var routes []hostRoute
+	for _, r := range nlRoutes {
+		// 既定経路は Dst が nil か長さ 0 で返ることがある。どちらも最も広い経路なので対象にならない。
+		if r.Dst == nil {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(r.Dst.IP)
+		if !ok {
+			continue
+		}
+		ones, _ := r.Dst.Mask.Size()
+		routes = append(routes, hostRoute{Iface: names[r.LinkIndex], Dst: netip.PrefixFrom(ip.Unmap(), ones)})
+	}
+	what, overlap := bandOverlap(cfg.Address, cfg.Interface, addrs, routes)
+	if !overlap {
+		return nil
+	}
+	return fmt.Errorf("the agent's WireGuard address range %s overlaps %s on this host, so traffic to the server at %s would not go through %s. "+
+		"Remove that address or route from this host, or have the server's operator move the range with WGFT_WG_ADDRESS, "+
+		"which takes `wgft server teardown --purge` and registering the agents again",
+		cfg.Address.Masked(), what, cfg.Server.Address, cfg.Interface)
+}
+
 // agentDeviceDiff is the wgctrl part of EnsureAgent on a device already read: the configuration
 // that moves dev to cfg, and one line per change. It never sets the listen port.
 func agentDeviceDiff(dev *wgtypes.Device, cfg AgentConfig) (wgtypes.Config, []string) {
@@ -264,6 +375,8 @@ func agentDeviceDiff(dev *wgtypes.Device, cfg AgentConfig) (wgtypes.Config, []st
 		wc.PrivateKey = &key
 		if cfg.PreviousKey != (wgtypes.Key{}) && dev.PrivateKey == cfg.PreviousKey {
 			note("replace the previous private key; public key %s -> %s", dev.PublicKey, cfg.PrivateKey.PublicKey())
+		} else if dev.PrivateKey == (wgtypes.Key{}) {
+			note("set private key; public key none -> %s", cfg.PrivateKey.PublicKey())
 		} else {
 			note("set private key; public key %s -> %s", dev.PublicKey, cfg.PrivateKey.PublicKey())
 		}
@@ -342,26 +455,33 @@ func peerEndpoint(p *wgtypes.Peer) netip.AddrPort {
 // (design.md 7b.4 節). It changes nothing. The mode gate and teardown judge the agent's leftovers
 // with it.
 func AgentOwnership(iface string, current, previous wgtypes.Key) (Ownership, error) {
+	own, _, _, err := readOwnership(iface, current, previous)
+	return own, err
+}
+
+// readOwnership is AgentOwnership that also returns the link type and whether a WireGuard link
+// holds no key, for the text of NotOursError.
+func readOwnership(iface string, current, previous wgtypes.Key) (own Ownership, kind string, keyless bool, err error) {
 	link, err := netlink.LinkByName(iface)
 	if _, nf := err.(netlink.LinkNotFoundError); nf {
-		return Absent, nil
+		return Absent, "", false, nil
 	}
 	if err != nil {
-		return Absent, err
+		return Absent, "", false, err
 	}
 	if link.Type() != "wireguard" {
-		return NotWireGuard, nil
+		return NotWireGuard, link.Type(), false, nil
 	}
 	c, err := wgctrl.New()
 	if err != nil {
-		return Absent, fmt.Errorf("wgctrl: %w", err)
+		return Absent, "", false, fmt.Errorf("wgctrl: %w", err)
 	}
 	defer c.Close()
 	dev, err := c.Device(iface)
 	if err != nil {
-		return Absent, fmt.Errorf("read %s: %w", iface, err)
+		return Absent, "", false, fmt.Errorf("read %s: %w", iface, err)
 	}
-	return judgeOwnership(link.Type(), dev.PrivateKey, current, previous), nil
+	return judgeOwnership(link.Type(), dev.PrivateKey, current, previous), link.Type(), dev.PrivateKey == wgtypes.Key{}, nil
 }
 
 // DeleteAgentLink deletes iface only when it is the agent's by the current or the previous key
@@ -369,16 +489,12 @@ func AgentOwnership(iface string, current, previous wgtypes.Key) (Ownership, err
 // run again after a partial run. A link that is not ours is left as it is and reported as
 // *NotOursError, whose text shows the `ip link del` recovery.
 func DeleteAgentLink(iface string, current, previous wgtypes.Key) (Ownership, bool, error) {
-	own, err := AgentOwnership(iface, current, previous)
+	own, kind, keyless, err := readOwnership(iface, current, previous)
 	if err != nil || own == Absent {
 		return own, false, err
 	}
 	if !own.Ours() {
-		kind := "wireguard"
-		if l, e := netlink.LinkByName(iface); e == nil {
-			kind = l.Type()
-		}
-		return own, false, &NotOursError{Interface: iface, Ownership: own, Kind: kind}
+		return own, false, &NotOursError{Interface: iface, Ownership: own, Kind: kind, Keyless: keyless}
 	}
 	deleted, err := DeleteLink(iface)
 	return own, deleted, err

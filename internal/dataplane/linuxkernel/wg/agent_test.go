@@ -362,3 +362,60 @@ func TestAgentPrivilegeRefusal(t *testing.T) {
 		t.Errorf("nil became %v", err)
 	}
 }
+
+// エージェントのアドレス帯と重なる他のインタフェースのアドレスと、帯と同じかより細かい経路を拒む。
+// 帯より広い経路 (既定経路を含む) は、エージェントの接続経路に負けるので拒まない (design.md 7b.1 節)。
+func TestBandOverlap(t *testing.T) {
+	band := netip.MustParsePrefix("10.200.0.2/24")
+	a := func(iface, p string) hostAddr { return hostAddr{Iface: iface, Prefix: netip.MustParsePrefix(p)} }
+	r := func(iface, p string) hostRoute { return hostRoute{Iface: iface, Dst: netip.MustParsePrefix(p)} }
+	cases := []struct {
+		name   string
+		addrs  []hostAddr
+		routes []hostRoute
+		want   string // 空なら重ならない
+	}{
+		{"nothing else", nil, nil, ""},
+		{"own address and route", []hostAddr{a("wgft0", "10.200.0.2/24")}, []hostRoute{r("wgft0", "10.200.0.0/24")}, ""},
+		{"LAN address in the range", []hostAddr{a("eth0", "10.200.0.50/24")}, []hostRoute{r("eth0", "10.200.0.0/24")}, `address 10.200.0.50/24 on interface "eth0"`},
+		{"LAN address in the range with a wider mask", []hostAddr{a("eth0", "10.200.0.50/16")}, nil, `address 10.200.0.50/16 on interface "eth0"`},
+		{"the server's wg0 on the same host", []hostAddr{a("wg0", "10.200.0.1/24")}, nil, `address 10.200.0.1/24 on interface "wg0"`},
+		{"a narrower route inside the range", nil, []hostRoute{r("eth1", "10.200.0.128/25")}, `route 10.200.0.128/25 on interface "eth1"`},
+		{"a host route to the server", nil, []hostRoute{r("tun0", "10.200.0.1/32")}, `route 10.200.0.1/32 on interface "tun0"`},
+		{"the same route on another interface", nil, []hostRoute{r("eth1", "10.200.0.0/24")}, `route 10.200.0.0/24 on interface "eth1"`},
+		{"a blackhole route has no interface", nil, []hostRoute{r("", "10.200.0.0/24")}, "route 10.200.0.0/24"},
+		{"a broader route", []hostAddr{a("eth0", "192.168.1.2/24")}, []hostRoute{r("tun0", "10.0.0.0/8"), r("eth0", "0.0.0.0/0")}, ""},
+		{"an address next to the range", []hostAddr{a("eth0", "10.200.1.5/24")}, []hostRoute{r("eth0", "10.200.1.0/24")}, ""},
+	}
+	for _, c := range cases {
+		got, overlap := bandOverlap(band, "wgft0", c.addrs, c.routes)
+		if overlap != (c.want != "") || got != c.want {
+			t.Errorf("%s: got %q %v, want %q", c.name, got, overlap, c.want)
+		}
+	}
+}
+
+// 鍵の無いインタフェースは、エージェント自身が作りかけて残したものである見込みが高いことと、
+// ip link del での消し方を示す。ドライランに空の鍵を公開鍵として出さない。
+func TestKeylessLinkText(t *testing.T) {
+	cfg := agentCfg(t)
+	_, notes := agentDeviceDiff(&wgtypes.Device{}, cfg)
+	if len(notes) == 0 || !strings.Contains(notes[0], "public key none -> "+cfg.PrivateKey.PublicKey().String()) {
+		t.Errorf("notes = %q", notes)
+	}
+	zero := wgtypes.Key{}
+	for _, n := range notes {
+		if strings.Contains(n, zero.String()) {
+			t.Errorf("the zero key is printed as a public key: %q", n)
+		}
+	}
+	s := (&NotOursError{Interface: "wgft0", Ownership: ForeignKey, Kind: "wireguard", Keyless: true, DryRun: notes}).Error()
+	for _, want := range []string{"no key", "most likely one this agent left behind", "ip link del wgft0", "WGFT_WG_INTERFACE"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("%q lacks %q", s, want)
+		}
+	}
+	if strings.Contains(s, zero.String()) || strings.ContainsAny(s, "()") {
+		t.Errorf("keyless text: %q", s)
+	}
+}

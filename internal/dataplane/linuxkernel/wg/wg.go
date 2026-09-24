@@ -3,7 +3,7 @@
 // Package wg は VPS の wg0(このファイル)と、カーネルモードのエージェントの単一ピアの
 // インタフェース(agent.go、設計文書 7b 節)の WireGuard インタフェースを宣言に収束させる
 // (仕様 4, 9 節、設計文書 7a.7 節)。インタフェースの作成とアドレス・MTU は netlink で、鍵・ポート・
-// ピアは wgctrl で扱い、この 2 つの部分は両者で共有する。停止時には何も削除しない。internal/vpsd と
+// ピアは wgctrl で扱う。作成、MTU、アドレスの収束は両者で共有する。停止時には何も削除しない。internal/vpsd と
 // internal/agent を import しない(internal/platform/linux の bind 中ポート検査だけを使う)。
 package wg
 
@@ -140,15 +140,8 @@ func Ensure(cfg Config) (changes []string, err error) {
 
 	link, err := netlink.LinkByName(cfg.Interface)
 	if _, notFound := err.(netlink.LinkNotFoundError); notFound {
-		if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: cfg.Interface, MTU: cfg.MTU}}); err != nil {
-			if errors.Is(err, unix.EOPNOTSUPP) {
-				// カーネルが wireguard のリンク種別を知らない(モジュールが無い、ロードできない)。
-				// LinkAdd 自体が自動ロードを試した後なので、再起動では現れない。運用者が
-				// モジュールを入れるか別のカーネルで起動するまで同じ結果になるので、
-				// prerequisite の拒否として扱う(仕様 9 節、設計文書 11b 節)。
-				return nil, startup.Prerequisite("wireguard module", "cannot create %s: this kernel has no WireGuard support; the wireguard module is missing or cannot be loaded, and `modprobe wireguard` shows why. Kernel mode needs it; on a VPS without it, run the userspace mode instead by setting WGFT_MODE=userspace", cfg.Interface)
-			}
-			return nil, fmt.Errorf("cannot create %s: %w", cfg.Interface, err)
+		if err := createLink(cfg.Interface, cfg.MTU, "cannot create %s: this kernel has no WireGuard support; the wireguard module is missing or cannot be loaded, and `modprobe wireguard` shows why. Kernel mode needs it; on a VPS without it, run the userspace mode instead by setting WGFT_MODE=userspace"); err != nil {
+			return nil, err
 		}
 		created = true
 		note("create interface %s", cfg.Interface)
@@ -233,6 +226,24 @@ func Ensure(cfg Config) (changes []string, err error) {
 		return nil, err
 	}
 	return changes, nil
+}
+
+// createLink creates a WireGuard link named name with the given MTU. A kernel without the
+// wireguard link type makes LinkAdd fail with EOPNOTSUPP; that becomes a prerequisite refusal whose
+// reason is noWireGuardFormat with name as its one argument, so the server and the agent each name
+// their own way out.
+func createLink(name string, mtu int, noWireGuardFormat string) error {
+	if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: name, MTU: mtu}}); err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) {
+			// カーネルが wireguard のリンク種別を知らない(モジュールが無い、ロードできない)。
+			// LinkAdd 自体が自動ロードを試した後なので、再起動では現れない。運用者が
+			// モジュールを入れるか別のカーネルで起動するまで同じ結果になるので、
+			// prerequisite の拒否として扱う(仕様 9 節、設計文書 11b 節)。
+			return startup.Prerequisite("wireguard module", noWireGuardFormat, name)
+		}
+		return fmt.Errorf("cannot create %s: %w", name, err)
+	}
+	return nil
 }
 
 // convergeMTUAndAddress sets link's MTU to mtu and its IPv4 addresses to exactly addr, noting each

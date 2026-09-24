@@ -9,6 +9,7 @@ package wg
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -217,8 +218,12 @@ func TestAgentEnsureRefusesZeroKey(t *testing.T) {
 	}
 	_, err := EnsureAgent(labAgentCfg(t))
 	var nie *NotOursError
-	if !errors.As(err, &nie) || nie.Ownership != ForeignKey {
-		t.Fatalf("err = %v, want *NotOursError ForeignKey", err)
+	if !errors.As(err, &nie) || nie.Ownership != ForeignKey || !nie.Keyless {
+		t.Fatalf("err = %v, want a keyless *NotOursError ForeignKey", err)
+	}
+	var zero wgtypes.Key
+	if !strings.Contains(err.Error(), "left behind") || !strings.Contains(err.Error(), "ip link del "+agentIf) || strings.Contains(err.Error(), zero.String()) {
+		t.Errorf("keyless text: %v", err)
 	}
 	if d := device(t, agentIf); d.PrivateKey != (wgtypes.Key{}) || len(d.Peers) != 0 {
 		t.Errorf("the keyless interface was configured: %+v", d)
@@ -503,4 +508,168 @@ func TestInspectAgentUnprivileged(t *testing.T) {
 		t.Fatalf("unprivileged child failed: %v\n%s", err, out)
 	}
 	t.Logf("child:\n%s", out)
+}
+
+const lanIf = "wgftlan0"
+
+// makeLAN は、同じ namespace に LAN 側のインタフェースを模した dummy のリンクを作る。
+func makeLAN(t *testing.T, addr string) netlink.Link {
+	t.Helper()
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: lanIf}}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := netlink.LinkByName(lanIf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr != "" {
+		a, _ := netlink.ParseAddr(addr)
+		if err := netlink.AddrAdd(l, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := netlink.LinkSetUp(l); err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+func addRoute(t *testing.T, l netlink.Link, dst string) {
+	t.Helper()
+	_, n, _ := net.ParseCIDR(dst)
+	if err := netlink.RouteAdd(&netlink.Route{LinkIndex: l.Attrs().Index, Dst: n}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// エージェントのアドレス帯と重なる LAN のアドレスや経路があれば、何も作らずに普通のエラーで止まる。
+// 帯より広い経路は妨げない (design.md 7b.1 節)。
+func TestAgentEnsureRefusesAddressOverlap(t *testing.T) {
+	cfg := labAgentCfg(t)
+	cases := []struct {
+		name, addr, route string
+		want              string // 空なら通る
+	}{
+		{"LAN address in the range", "10.201.0.50/24", "", `address 10.201.0.50/24 on interface "` + lanIf + `"`},
+		{"narrower route in the range", "192.168.77.1/24", "10.201.0.128/25", `route 10.201.0.128/25 on interface "` + lanIf + `"`},
+		{"broader route", "192.168.77.1/24", "10.0.0.0/8", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cleanup(agentIf, lanIf)
+			defer cleanup(agentIf, lanIf)
+			l := makeLAN(t, c.addr)
+			if c.route != "" {
+				addRoute(t, l, c.route)
+			}
+			_, err := EnsureAgent(cfg)
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("a broader route refused the agent: %v", err)
+				}
+				assertConverged(t, cfg, cfg.Server.Endpoint)
+				return
+			}
+			if err == nil {
+				t.Fatal("the overlap was not refused")
+			}
+			if startup.IsRefusal(err) {
+				t.Fatalf("the overlap became a startup refusal: %v", err)
+			}
+			for _, want := range []string{c.want, "10.201.0.0/24", "WGFT_WG_ADDRESS", "server's operator"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error lacks %q: %v", want, err)
+				}
+			}
+			if _, e := netlink.LinkByName(agentIf); e == nil {
+				t.Error("the link was created despite the overlap")
+			}
+		})
+	}
+}
+
+// 重なりは、既にある自分のインタフェースにも最初の書き込みの前に効き、そのインタフェースを変えない。
+func TestAgentEnsureOverlapLeavesOwnLink(t *testing.T) {
+	cleanup(agentIf, lanIf)
+	defer cleanup(agentIf, lanIf)
+	cfg := labAgentCfg(t)
+	ensureAgent(t, cfg)
+	l, _ := netlink.LinkByName(agentIf)
+	if err := netlink.LinkSetMTU(l, 1300); err != nil {
+		t.Fatal(err)
+	}
+	makeLAN(t, "10.201.0.50/24")
+	if _, err := EnsureAgent(cfg); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("err = %v", err)
+	}
+	if l, _ := netlink.LinkByName(agentIf); l == nil || l.Attrs().MTU != 1300 {
+		t.Error("the link was changed or removed although the overlap stopped the convergence")
+	}
+}
+
+// 作った直後の段で失敗したら、作ったインタフェースを残さない。既にあったインタフェースは消さない。
+func TestAgentEnsureRollsBackCreatedLink(t *testing.T) {
+	cleanup(agentIf)
+	defer cleanup(agentIf)
+	defer func() { agentAfterCreate = nil }()
+	var sawLink bool
+	agentAfterCreate = func(iface string) error {
+		_, err := netlink.LinkByName(iface)
+		sawLink = err == nil
+		return fmt.Errorf("injected failure after creating %s", iface)
+	}
+	cfg := labAgentCfg(t)
+	if _, err := EnsureAgent(cfg); err == nil || !strings.Contains(err.Error(), "injected failure") {
+		t.Fatalf("err = %v", err)
+	}
+	if !sawLink {
+		t.Fatal("the hook ran before the link existed")
+	}
+	if _, e := netlink.LinkByName(agentIf); e == nil {
+		t.Fatal("the link created by the failed call was left behind")
+	}
+
+	// 既にある自分のインタフェースでは作成の段を通らない。
+	agentAfterCreate = nil
+	ensureAgent(t, cfg)
+	agentAfterCreate = func(string) error { return errors.New("must not run for an existing link") }
+	if _, err := EnsureAgent(cfg); err != nil {
+		t.Fatalf("an existing link ran the creation path: %v", err)
+	}
+	if _, e := netlink.LinkByName(agentIf); e != nil {
+		t.Fatal("the existing link is gone")
+	}
+}
+
+// CAP_NET_ADMIN の無い EnsureAgent は、エージェントの言葉の prerequisite の拒否になる。
+func TestEnsureAgentUnprivileged(t *testing.T) {
+	if os.Getenv("WGFT_LAB_ENSURE_CHILD") != "" {
+		_, err := EnsureAgent(labAgentCfg(t))
+		r := startup.Of(err)
+		if r == nil || r.Category != startup.CategoryPrerequisite {
+			t.Fatalf("CHILD: err = %v, want a prerequisite refusal", err)
+		}
+		if !strings.Contains(r.Reason, "Run the agent as root") || strings.Contains(r.Reason, "server.service") {
+			t.Fatalf("CHILD: reason is not the agent's: %q", r.Reason)
+		}
+		t.Logf("CHILD: %v", r.Reason)
+		return
+	}
+	setpriv, err := exec.LookPath("setpriv")
+	if err != nil {
+		t.Skip("setpriv is not installed")
+	}
+	cleanup(agentIf)
+	defer cleanup(agentIf)
+	cmd := exec.Command(setpriv, "--reuid=65534", "--regid=65534", "--clear-groups", "--inh-caps=-all", "--bounding-set=-all",
+		os.Args[0], "-test.run=^TestEnsureAgentUnprivileged$", "-test.v")
+	cmd.Env = append(os.Environ(), "WGFT_LAB_ENSURE_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("unprivileged child failed: %v\n%s", err, out)
+	}
+	t.Logf("child:\n%s", out)
+	if _, e := netlink.LinkByName(agentIf); e == nil {
+		t.Error("the unprivileged child created the link")
+	}
 }
