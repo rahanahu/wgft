@@ -51,6 +51,8 @@ nftables や WireGuard の挙動を確かめる使い捨ての実験コードは
 
 リリースは、版の記述 (README の Status の節) を直すコミットを `chore(release): vX.Y.Z` の形で main に入れ、そのコミットにタグ `vX.Y.Z` を打ちます。版の上げ方は、前回のタグ以降に互換を崩す変更があれば major、`feat` があれば minor、`fix` だけなら patch です。
 
+すでに新しい版を出した後で、古い系列にパッチだけを当てて出すリリースは、メンテナンスブランチで行います。最後のタグから `release-vX.Y` を切り出し、当てる修正は PR でこのブランチへバックポートします。`chore(release): vX.Y.Z` のコミットは main ではなくこのブランチに置き、タグもそこで打ちます。あわせて、main の README の Status の節をこの版番号まで進める小さな PR を別に出します。古い系列へのこのタグ付けは、GitHub の「Latest」表示と GHCR イメージの `:latest` タグを、より新しい main 系列のリリースから奪ってはいけません。`.github/workflows/release.yml` はタグを打つたびに `:latest` へ push するので、メンテナンスブランチでのタグ付けの前に、`.goreleaser.yaml` の `release.make_latest` と、この `:latest` への push が奪わないことを確かめてから進めます。
+
 別のセッションや別の人が同時に作業していることがあります。`git status` で自分のものではない未コミットの変更を見つけたら、自分の変更と混ぜずに、触らないでおきます。
 
 ## CI が通す検査
