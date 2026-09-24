@@ -48,6 +48,8 @@ type recordingParticipant struct {
 	log *eventLog
 	mu  sync.Mutex
 	err error
+	// drift is what Observe reports as drifted (converge_gate_test.go).
+	drift []string
 }
 
 func (p *recordingParticipant) setErr(err error) {
@@ -57,7 +59,9 @@ func (p *recordingParticipant) setErr(err error) {
 }
 
 func (p *recordingParticipant) Observe() (dataplane.Observed, error) {
-	return dataplane.Observed{}, nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return dataplane.Observed{Drift: p.drift}, nil
 }
 func (p *recordingParticipant) Repair() dataplane.Committed { return dataplane.Committed{} }
 
