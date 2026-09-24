@@ -286,23 +286,30 @@ type hostRoute struct {
 	Dst   netip.Prefix
 }
 
-// bandOverlap is the overlap rule on values already read. The agent's range collides with an
-// address on another interface that lies inside the range, and with a route on another interface
-// that is as specific as the range or more and lies inside it: either one wins over, or ties with,
-// the connected route of the agent's interface, so replies to the server would leave by the other
-// interface. A broader route, the default route included, loses to the agent's range and is fine.
-func bandOverlap(band netip.Prefix, self string, addrs []hostAddr, routes []hostRoute) (string, bool) {
-	band = band.Masked()
+// bandOverlap is the overlap rule on values already read. It reports what on another interface
+// would take traffic to the server's tunnel address away from the agent's interface:
+//   - an address that is the server address itself, which the local table delivers to this host;
+//   - an address whose prefix contains the server address and is as specific as own or more, whose
+//     connected route then wins over, or ties with, the one of the agent's interface;
+//   - a main-table route that contains the server address and is as specific as own or more.
+//
+// Anything else is allowed: an address or route inside the range that does not cover the server
+// address, such as a container bridge on the upper half of the range, and a broader route, the
+// default route included, which loses to the agent's connected route.
+func bandOverlap(own netip.Prefix, server netip.Addr, self string, addrs []hostAddr, routes []hostRoute) (string, bool) {
 	for _, a := range addrs {
-		if a.Iface != self && band.Contains(a.Prefix.Addr()) {
+		if a.Iface == self {
+			continue
+		}
+		if a.Prefix.Addr() == server || (a.Prefix.Bits() >= own.Bits() && a.Prefix.Masked().Contains(server)) {
 			return fmt.Sprintf("address %s on interface %q", a.Prefix, a.Iface), true
 		}
 	}
 	for _, r := range routes {
-		if r.Iface == self && self != "" {
+		if r.Iface == self {
 			continue
 		}
-		if r.Dst.Bits() >= band.Bits() && band.Contains(r.Dst.Addr()) {
+		if r.Dst.Bits() >= own.Bits() && r.Dst.Contains(server) {
 			if r.Iface == "" {
 				return fmt.Sprintf("route %s", r.Dst), true
 			}
@@ -312,8 +319,9 @@ func bandOverlap(band netip.Prefix, self string, addrs []hostAddr, routes []host
 	return "", false
 }
 
-// checkAgentOverlap refuses when cfg.Address's range overlaps an address or a main-table route on
-// another interface of the host (design.md 7b.1 節). It is a plain error, exit code 1: the range
+// checkAgentOverlap refuses when an address or a main-table route on another interface of the host
+// would take traffic to the server's tunnel address away from the agent's interface, by the rule
+// of bandOverlap (design.md 7b.1 節). It is a plain error, exit code 1: the range
 // comes from the server, so the agent's own settings cannot avoid it, and once the host's
 // interface or the server's range changes the next start goes through.
 func checkAgentOverlap(cfg AgentConfig) error {
@@ -353,11 +361,11 @@ func checkAgentOverlap(cfg AgentConfig) error {
 		ones, _ := r.Dst.Mask.Size()
 		routes = append(routes, hostRoute{Iface: names[r.LinkIndex], Dst: netip.PrefixFrom(ip.Unmap(), ones)})
 	}
-	what, overlap := bandOverlap(cfg.Address, cfg.Interface, addrs, routes)
+	what, overlap := bandOverlap(cfg.Address, cfg.Server.Address, cfg.Interface, addrs, routes)
 	if !overlap {
 		return nil
 	}
-	return fmt.Errorf("the agent's WireGuard address range %s overlaps %s on this host, so traffic to the server at %s would not go through %s. "+
+	return fmt.Errorf("the agent's WireGuard address range %s overlaps %s on this host, which covers the server at %s, so traffic to the server would not go through %s. "+
 		"Remove that address or route from this host, or have the server's operator move the range with WGFT_WG_ADDRESS, "+
 		"which takes `wgft server teardown --purge` and registering the agents again",
 		cfg.Address.Masked(), what, cfg.Server.Address, cfg.Interface)

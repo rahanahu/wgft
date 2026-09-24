@@ -542,8 +542,8 @@ func addRoute(t *testing.T, l netlink.Link, dst string) {
 	}
 }
 
-// エージェントのアドレス帯と重なる LAN のアドレスや経路があれば、何も作らずに普通のエラーで止まる。
-// 帯より広い経路は妨げない (design.md 7b.1 節)。
+// サーバのトンネルアドレスを覆う LAN のアドレスや細かい経路があれば、何も作らずに普通のエラーで止まる。
+// サーバのアドレスを覆わない細かい経路と、帯より広い経路は妨げない (design.md 7b.1 節)。
 func TestAgentEnsureRefusesAddressOverlap(t *testing.T) {
 	cfg := labAgentCfg(t)
 	cases := []struct {
@@ -551,7 +551,8 @@ func TestAgentEnsureRefusesAddressOverlap(t *testing.T) {
 		want              string // 空なら通る
 	}{
 		{"LAN address in the range", "10.201.0.50/24", "", `address 10.201.0.50/24 on interface "` + lanIf + `"`},
-		{"narrower route in the range", "192.168.77.1/24", "10.201.0.128/25", `route 10.201.0.128/25 on interface "` + lanIf + `"`},
+		{"narrower route covering the server", "192.168.77.1/24", "10.201.0.0/25", `route 10.201.0.0/25 on interface "` + lanIf + `"`},
+		{"narrower route not covering the server", "192.168.77.1/24", "10.201.0.128/25", ""},
 		{"broader route", "192.168.77.1/24", "10.0.0.0/8", ""},
 	}
 	for _, c := range cases {
@@ -565,7 +566,7 @@ func TestAgentEnsureRefusesAddressOverlap(t *testing.T) {
 			_, err := EnsureAgent(cfg)
 			if c.want == "" {
 				if err != nil {
-					t.Fatalf("a broader route refused the agent: %v", err)
+					t.Fatalf("a route that does not take the server away refused the agent: %v", err)
 				}
 				assertConverged(t, cfg, cfg.Server.Endpoint)
 				return

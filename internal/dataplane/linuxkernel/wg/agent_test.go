@@ -363,32 +363,45 @@ func TestAgentPrivilegeRefusal(t *testing.T) {
 	}
 }
 
-// エージェントのアドレス帯と重なる他のインタフェースのアドレスと、帯と同じかより細かい経路を拒む。
-// 帯より広い経路 (既定経路を含む) は、エージェントの接続経路に負けるので拒まない (design.md 7b.1 節)。
+// サーバのトンネルアドレスへの通信を wgft0 から奪うものだけを拒む:サーバのアドレスそのもの、
+// サーバのアドレスを含み wgft0 と同じかより細かいアドレスの帯と経路。帯の中でもサーバのアドレスを
+// 含まないものと、wgft0 より広い経路 (既定経路を含む) は妨げない (design.md 7b.1 節)。
+// 各行の後ろの注は、どの条件を外すとその行が落ちるかを示す。
 func TestBandOverlap(t *testing.T) {
-	band := netip.MustParsePrefix("10.200.0.2/24")
+	own := netip.MustParsePrefix("10.200.0.2/24")
+	server := netip.MustParseAddr("10.200.0.1")
 	a := func(iface, p string) hostAddr { return hostAddr{Iface: iface, Prefix: netip.MustParsePrefix(p)} }
 	r := func(iface, p string) hostRoute { return hostRoute{Iface: iface, Dst: netip.MustParsePrefix(p)} }
 	cases := []struct {
 		name   string
 		addrs  []hostAddr
 		routes []hostRoute
-		want   string // 空なら重ならない
+		want   string // 空なら妨げない
 	}{
 		{"nothing else", nil, nil, ""},
 		{"own address and route", []hostAddr{a("wgft0", "10.200.0.2/24")}, []hostRoute{r("wgft0", "10.200.0.0/24")}, ""},
-		{"LAN address in the range", []hostAddr{a("eth0", "10.200.0.50/24")}, []hostRoute{r("eth0", "10.200.0.0/24")}, `address 10.200.0.50/24 on interface "eth0"`},
-		{"LAN address in the range with a wider mask", []hostAddr{a("eth0", "10.200.0.50/16")}, nil, `address 10.200.0.50/16 on interface "eth0"`},
-		{"the server's wg0 on the same host", []hostAddr{a("wg0", "10.200.0.1/24")}, nil, `address 10.200.0.1/24 on interface "wg0"`},
-		{"a narrower route inside the range", nil, []hostRoute{r("eth1", "10.200.0.128/25")}, `route 10.200.0.128/25 on interface "eth1"`},
+		// 同じ帯の LAN のアドレス:接続経路が wgft0 と並ぶ (アドレスの帯の細かさと包含の条件)
+		{"LAN address in the same /24", []hostAddr{a("eth0", "10.200.0.50/24")}, nil, `address 10.200.0.50/24 on interface "eth0"`},
+		// サーバのアドレスそのもの:広い帯でもローカルに届く (一致の条件)
+		{"the server's own address on the same host", []hostAddr{a("wg0", "10.200.0.1/16")}, nil, `address 10.200.0.1/16 on interface "wg0"`},
+		// 広い帯の LAN のアドレス:サーバを含むが接続経路は wgft0 に負ける (アドレスの帯の細かさの条件)
+		{"LAN address with a wider mask", []hostAddr{a("eth0", "10.200.0.50/16")}, nil, ""},
+		// 帯の上半分の bridge:サーバを含まない (アドレスの包含の条件)
+		{"container bridge on the upper half", []hostAddr{a("docker0", "10.200.0.129/25")}, []hostRoute{r("docker0", "10.200.0.128/25")}, ""},
+		// サーバを含む細かい経路 (経路の条件の両方が真)
+		{"a narrower route covering the server", nil, []hostRoute{r("eth1", "10.200.0.0/25")}, `route 10.200.0.0/25 on interface "eth1"`},
 		{"a host route to the server", nil, []hostRoute{r("tun0", "10.200.0.1/32")}, `route 10.200.0.1/32 on interface "tun0"`},
 		{"the same route on another interface", nil, []hostRoute{r("eth1", "10.200.0.0/24")}, `route 10.200.0.0/24 on interface "eth1"`},
 		{"a blackhole route has no interface", nil, []hostRoute{r("", "10.200.0.0/24")}, "route 10.200.0.0/24"},
-		{"a broader route", []hostAddr{a("eth0", "192.168.1.2/24")}, []hostRoute{r("tun0", "10.0.0.0/8"), r("eth0", "0.0.0.0/0")}, ""},
+		// サーバを含まない細かい経路 (経路の包含の条件)
+		{"a narrower route not covering the server", nil, []hostRoute{r("eth1", "10.200.0.128/25")}, ""},
+		// 網のアドレスが帯の中にある広い経路:wgft0 の /24 に負ける (経路の細かさの条件)
+		{"a broader route starting inside the range", nil, []hostRoute{r("eth0", "10.200.0.0/16")}, ""},
+		{"broader routes", []hostAddr{a("eth0", "192.168.1.2/24")}, []hostRoute{r("tun0", "10.0.0.0/8"), r("eth0", "0.0.0.0/0")}, ""},
 		{"an address next to the range", []hostAddr{a("eth0", "10.200.1.5/24")}, []hostRoute{r("eth0", "10.200.1.0/24")}, ""},
 	}
 	for _, c := range cases {
-		got, overlap := bandOverlap(band, "wgft0", c.addrs, c.routes)
+		got, overlap := bandOverlap(own, server, "wgft0", c.addrs, c.routes)
 		if overlap != (c.want != "") || got != c.want {
 			t.Errorf("%s: got %q %v, want %q", c.name, got, overlap, c.want)
 		}
