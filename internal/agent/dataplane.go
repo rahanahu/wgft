@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"net/netip"
 	"time"
 
@@ -38,7 +39,10 @@ type agentDataplane interface {
 	// 7b.3 節の 3 つ目の種類)。呼び出し側は処理済み世代を進めない。ルール単位の失敗は err に
 	// せず、read が返すルールごとの状態に載せる。ユーザー空間モードの実装は、ルール単位の
 	// 失敗しか持たないので、常に nil を返す
-	applyRules(rules []proto.AgentRule) (summary string, err error)
+	//
+	// gen はルールを受け取った全体状態の世代である。カーネルモードは公開の記録に写す。prepared は
+	// preparer の結果で、持たない実装と、準備を経ない呼び出しでは nil である
+	applyRules(gen uint64, rules []proto.AgentRule, prepared any) (summary string, err error)
 
 	// refresh は 30 秒ごとに呼ぶ見直しである(Run のティッカー)。ユーザー空間モードでは、
 	// 開けなかったリスナーを開き直し、TCP の宛先へ試し接続し直す。built が偽なら何もしない。
@@ -54,6 +58,37 @@ type agentDataplane interface {
 	// read はハートビートと agent doctor が共有する 1 回の読みである(設計文書 10.2c 節)。
 	// トンネルの状態とルールの状態を 1 回ずつだけ読むので、1 つの応答に異なる時点の値が混ざらない。
 	read() dataplaneReading
+}
+
+// preparer は、全体状態の適用の前に rt.mu の外で行う準備を持つ dataplane である。カーネルモードの
+// 実装だけが持ち、エンドポイントと宛先の名前を引く(仕様 7b.1・7b.2 節)。DNS を待つ間に排他を持つと、
+// ハートビートと agent doctor が最長で名前の解決の期限まで待たされるためである。準備は渡した全体状態
+// だけから決まるので、排他を取り直した後にその全体状態を適用する限り、結果は古くならない。
+type preparer interface {
+	prepareApply(st *proto.State) any
+}
+
+// startupChecker は、起動時に stream へ繋ぐ前に行う検査を持つ dataplane である。カーネルモードの
+// 実装だけが持つ(仕様 7b.4 節の所有の判定)。誤りを返せば起動は失敗し、*startup.Refusal なら
+// 終了コード 3、他は 1 で終わる。
+type startupChecker interface {
+	startup(priv wgtypes.Key, save func() error) error
+}
+
+// fatalError は、このプロセスの最初の wgft0 の収束が、起動の失敗として扱う誤りで終わったことを表す
+// (仕様 11b 節、2026-09-24 の所有者の決定)。stream に繋いだ後の収束でも、それがプロセスの最初の
+// 収束なら起動の一部として扱い、runtime はプロセスを終える。所有の衝突とアドレス帯の重なりは終了
+// コード 1、前提の欠如(権限、WireGuard のモジュール)は終了コード 3 である。最初の収束の後の同じ
+// 誤りは、7b.3 節の 3 つ目の種類として旧い設定を残したまま試し直す。
+type fatalError struct{ err error }
+
+func (e *fatalError) Error() string { return e.err.Error() }
+func (e *fatalError) Unwrap() error { return e.err }
+
+// isFatal は err がプロセスを終える誤りかどうかである。
+func isFatal(err error) bool {
+	var f *fatalError
+	return errors.As(err, &f)
 }
 
 // dataplaneReading は agentDataplane.read の結果である。

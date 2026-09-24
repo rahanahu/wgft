@@ -25,8 +25,17 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
+// HookForward と HookInput は Finding.Hook の値である。
+const (
+	HookForward = "forward"
+	HookInput   = "input"
+)
+
 // Finding は警告 1 件と、管理者に提示する手作業の行。
 type Finding struct {
+	// Hook は所見が見つかったフックである(HookForward、HookInput)。どちらでもない所見では空である。
+	// エージェントは forward の所見だけを、自分の転送の向きに合わせた文言で示す
+	Hook    string
 	Where   string   // "ip filter FORWARD" のようなチェーンの場所
 	Problem string   // 何が起きるか
 	Suggest []string // 足す行(コマンドの形)
@@ -298,6 +307,7 @@ func (r *Report) inspectForward(ch *nftables.Chain, rules []*nftables.Rule, wg s
 		}
 	}
 	r.Findings = append(r.Findings, Finding{
+		Hook:    HookForward,
 		Where:   where(ch),
 		Problem: fmt.Sprintf("forward is %s, so wgft's forwarding is dropped: public IF -> %s and its replies. add these 2 lines once, port-independent", how, wg),
 		Suggest: suggest,
@@ -321,6 +331,7 @@ func (r *Report) inspectInput(ch *nftables.Chain, rules []*nftables.Rule) {
 		suggest = []string{fmt.Sprintf("nft insert rule %s %s %s ct state established,related accept", familyName(ch.Table.Family), ch.Table.Name, ch.Name)}
 	}
 	r.Findings = append(r.Findings, Finding{
+		Hook:    HookInput,
 		Where:   where(ch),
 		Problem: fmt.Sprintf("input is %s and has no accept for established; replies to connections the server makes over wg0 are dropped, e.g. proxy-mode relaying and connectivity checks", how),
 		Suggest: suggest,

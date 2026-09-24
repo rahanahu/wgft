@@ -7,10 +7,11 @@ import (
 	"github.com/rahanahu/wgft/internal/startup"
 )
 
-// kernelModeAvailable は、このビルドがエージェントのカーネルモードの dataplane を持つかどうかである。
-// dataplane を加える変更がこの値を真にする。偽の間は、関門を通った kernel の指定も記録する前に止める。
-// 記録してから止めると、ユーザー空間モードへ戻すために、まだ残骸の無いホストで撤去が要る。
-var kernelModeAvailable = false
+// kernelModeAvailable は、このビルドがエージェントのカーネルモードの dataplane を持つかどうかである
+// (Linux のビルドだけが持つ。dataplane_kernel.go)。偽なら、関門を通った kernel の指定も記録する前に
+// 止める。記録してから止めると、ユーザー空間モードへ戻すために、まだ残骸の無いホストで撤去が要る。
+// テストだけが書き換える。
+var kernelModeAvailable = kernelModeBuilt
 
 // reconcileMode は、認証情報ファイルに記録したモード recorded と、設定の WGFT_MODE の値 want を照合する
 // (仕様 9・11a 節)。want が空なら設定は省略されており、ユーザー空間モードを指す。カーネルモードは明示した

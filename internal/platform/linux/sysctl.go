@@ -46,18 +46,40 @@ func readIntSysctl(path string) (int, error) {
 // IPForwardPath は net.ipv4.ip_forward の sysctl ファイル(仕様 6.1 節)。
 const IPForwardPath = "/proc/sys/net/ipv4/ip_forward"
 
-// EnableIPForward は net.ipv4.ip_forward を確認し、1 でなければ 1 にする(仕様 6.1 節)。
-// すでに 1 なら何も書かず changed=false を返す。0→1 に書けたときは changed=true。
-// 書き込みに失敗したとき(読み取り専用の /proc、seccomp/LSM で塞がれている場合など)は err を返す。
-// 1 にした値を 0 に戻す処理はここには無い(呼び出し側の責務ではなく、そもそも持たない)。
-func EnableIPForward() (changed bool, err error) {
-	if cur, err := os.ReadFile(IPForwardPath); err == nil && strings.TrimSpace(string(cur)) == "1" {
-		return false, nil // すでに 1。触らない
-	}
-	if err := os.WriteFile(IPForwardPath, []byte("1\n"), 0); err != nil {
+// ipForwardPath は ReadIPForward と WriteIPForward が読み書きするファイルである。値は IPForwardPath で、
+// テストだけが差し替える。
+var ipForwardPath = IPForwardPath
+
+// ReadIPForward は net.ipv4.ip_forward が 1 かどうかを読む。
+func ReadIPForward() (on bool, err error) {
+	cur, err := os.ReadFile(ipForwardPath)
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return strings.TrimSpace(string(cur)) == "1", nil
+}
+
+// WriteIPForward は net.ipv4.ip_forward に 1 を書く。読み取り専用の /proc や、seccomp か LSM で
+// 塞がれている場合は誤りを返す。
+func WriteIPForward() error {
+	return os.WriteFile(ipForwardPath, []byte("1\n"), 0)
+}
+
+// EnableIPForward は net.ipv4.ip_forward を確認し、1 でなければ 1 にする(仕様 6.1 節)。
+// すでに 1 なら何も書かず changed=false を返す。0 を読んだうえで 1 に書けたときだけ changed=true。
+// 今の値を読めなかったときは、1 を書けても changed=false とする。0 だったとは言えないので、wgft が
+// 変えたと記録しないためである。書き込みに失敗したとき(読み取り専用の /proc、seccomp/LSM で
+// 塞がれている場合など)は err を返す。
+// 1 にした値を 0 に戻す処理はここには無い(呼び出し側の責務ではなく、そもそも持たない)。
+func EnableIPForward() (changed bool, err error) {
+	on, rerr := ReadIPForward()
+	if rerr == nil && on {
+		return false, nil // すでに 1。触らない
+	}
+	if err := WriteIPForward(); err != nil {
+		return false, err
+	}
+	return rerr == nil, nil
 }
 
 // IPForwardStatus は net.ipv4.ip_forward を書き込まずに読む、読み取り専用の検査
@@ -65,7 +87,7 @@ func EnableIPForward() (changed bool, err error) {
 // 書き込みと同じ開き方(O_WRONLY で開いて書かずに閉じる)で書けるかを probe し、開けなければ
 // openErr にその理由を返す(value が "1" のときは probe せず openErr は nil)。
 func IPForwardStatus() (value string, openErr error, err error) {
-	cur, err := os.ReadFile(IPForwardPath)
+	cur, err := os.ReadFile(ipForwardPath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -73,7 +95,7 @@ func IPForwardStatus() (value string, openErr error, err error) {
 	if value == "1" {
 		return value, nil, nil
 	}
-	f, oerr := os.OpenFile(IPForwardPath, os.O_WRONLY, 0)
+	f, oerr := os.OpenFile(ipForwardPath, os.O_WRONLY, 0)
 	if oerr != nil {
 		return value, oerr, nil
 	}

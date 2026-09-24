@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -34,6 +35,28 @@ type Credentials struct {
 	// rotate-key の途中で落ちて鍵がずれた wgft0 や、停止中の rotate-key の後に古い鍵のまま残った
 	// wgft0 を、自分のものと判定するために使う。次に鍵を変えるまで残す。base64
 	PreviousWGPrivateKey string `json:"previous_wg_private_key,omitempty"`
+	// IPForwardEnabledAt は、カーネルモードのエージェントが net.ipv4.ip_forward を 0 から 1 に変えた
+	// 日時である(仕様 7b.1・9 節)。撤去が戻す候補として示すために残す。エージェント自身は値を 0 に
+	// 戻さず、この記録も消さない。変えたことが無ければ nil
+	IPForwardEnabledAt *time.Time `json:"ip_forward_enabled_at,omitempty"`
+	// KernelPublication は、カーネルモードの直近の公開の結果である(仕様 7b.4・9 節)。テーブルの公開に
+	// 成功するたびに書き換える。止まっている間の agent doctor が実際のテーブルと比べる。中身は
+	// internal/dataplane/linuxkernel/nft の AgentPublication の JSON で、その package は Linux でしか
+	// ビルドしないので、ここでは形を持たずに保存する
+	KernelPublication json.RawMessage `json:"kernel_publication,omitempty"`
+}
+
+// PreviousKey は 1 つ前の wg の秘密鍵である。記録が無ければゼロの鍵を返す。ゼロの鍵はどの
+// インタフェースも自分のものにしない(仕様 7b.4 節)。
+func (f *Credentials) PreviousKey() (wgtypes.Key, error) {
+	if f.PreviousWGPrivateKey == "" {
+		return wgtypes.Key{}, nil
+	}
+	k, err := wgtypes.ParseKey(f.PreviousWGPrivateKey)
+	if err != nil {
+		return wgtypes.Key{}, fmt.Errorf("previous_wg_private_key: %w", err)
+	}
+	return k, nil
 }
 
 // ModeKernel と ModeUserspace は Mode の値である(仕様 11a 節の WGFT_MODE と同じ語)。

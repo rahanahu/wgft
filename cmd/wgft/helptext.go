@@ -404,7 +404,17 @@ users via ps and in shell history.
 WGFT_AGENT_ALLOW_TARGETS limits the addresses this agent connects to, so that
 a compromised server cannot use it to reach the rest of the LAN. Entries are
 comma-separated CIDR, CIDR:port or CIDR:lo-hi; a bare address means one host.
-Unset means no limit.`,
+Unset means no limit.
+
+WGFT_MODE chooses how the agent forwards. Unset or userspace, the agent relays
+traffic itself and needs no privileges. WGFT_MODE=kernel, on Linux only, puts a
+kernel WireGuard interface, wgft0 unless WGFT_WG_INTERFACE names another, and
+table inet wgft_agent on this host and forwards with DNAT to the LAN targets;
+the process relays nothing, so forwarding goes on while the agent is stopped
+or restarting. Kernel mode needs root or CAP_NET_ADMIN, forwards only to IPv4
+targets and refuses loopback targets; to reach a service on this host, target
+this host's LAN address. The mode is recorded in agent.json and checked on
+every start.`,
 		Example: `  WGFT_JOIN='wgft://vps.example.com:8443/TOKEN#sha256:...' wgft agent run
   wgft agent run --config /etc/wgft/agent.env
   WGFT_AGENT_ALLOW_TARGETS=192.168.1.20:25565,192.168.1.21:2456-2458 wgft agent run`,

@@ -293,6 +293,9 @@ func TestSuggestionsForms(t *testing.T) {
 	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Suggest[0], "iptables -I DOCKER-USER -o wg0 -j ACCEPT") {
 		t.Errorf("docker form: %+v", rep.Findings)
 	}
+	if rep.Findings[0].Hook != HookForward {
+		t.Errorf("a forward finding has hook %q, want %q", rep.Findings[0].Hook, HookForward)
+	}
 	accept := nftables.ChainPolicyAccept
 	fw := &nftables.Chain{Name: "filter_FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "firewalld"}, Policy: &accept}
 	rep = &Report{}

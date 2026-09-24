@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -32,14 +33,27 @@ type fakeDataplane struct {
 	applied  [][]proto.AgentRule
 	reading  dataplaneReading
 	reads    int
+	// builtWith は build が受け取った wg 設定の並びである
+	builtWith []proto.WGConfig
+	// prepareHook は prepareApply の中で呼ばれる。名前を引いている間に他の経路が動く場合を模す
+	prepareHook func()
 }
 
-func (d *fakeDataplane) build(wgtypes.Key, proto.WGConfig) (bool, error) {
+func (d *fakeDataplane) build(_ wgtypes.Key, wg proto.WGConfig) (bool, error) {
 	d.up = true
+	d.builtWith = append(d.builtWith, wg)
 	return true, nil
 }
+
+// prepareApply は、runtime が rt.mu の外で準備を呼ぶことを確かめるための口である。
+func (d *fakeDataplane) prepareApply(*proto.State) any {
+	if d.prepareHook != nil {
+		d.prepareHook()
+	}
+	return nil
+}
 func (d *fakeDataplane) built() bool { return d.up }
-func (d *fakeDataplane) applyRules(rules []proto.AgentRule) (string, error) {
+func (d *fakeDataplane) applyRules(_ uint64, rules []proto.AgentRule, _ any) (string, error) {
 	if d.applyErr != nil {
 		return "", d.applyErr
 	}
@@ -197,7 +211,8 @@ func TestNewRuntimePassesTheAllowlistToTheDataplane(t *testing.T) {
 }
 
 // ハートビートは dataplane を 1 回だけ読み、トンネルの状態とルールごとの状態をその読みから組む
-// (設計文書 10.2c 節)。中継を持たない dataplane の doctor の応答は、ルールとフロー予算を載せない。
+// (設計文書 10.2c 節)。中継を持たない dataplane(カーネルモード)の doctor の応答は、ルールごとの
+// 状態を同じ読みから載せ、フロー予算と拒否の累計の起点を載せない。
 func TestHeartbeatAndDoctorReadTheDataplaneOnce(t *testing.T) {
 	hs := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
 	dp := &fakeDataplane{up: true, reading: dataplaneReading{
@@ -228,7 +243,246 @@ func TestHeartbeatAndDoctorReadTheDataplaneOnce(t *testing.T) {
 	if st == nil || st.Tunnel.RxBytes != 5 || st.Tunnel.TxBytes != 7 {
 		t.Fatalf("doctor runtime state = %+v, want the transfer counters from the same read", st)
 	}
-	if st.Rules != nil || st.Budgets != nil || !st.RefusalsSince.IsZero() {
-		t.Errorf("a dataplane without a relay: rules=%v budgets=%v refusals_since=%v, want none", st.Rules, st.Budgets, st.RefusalsSince)
+	if len(st.Rules) != 1 || st.Rules[0].ID != "r1" || st.Rules[0].State != proto.StatusError {
+		t.Errorf("a dataplane without a relay: rules=%v, want the rule state from the same read", st.Rules)
+	}
+	if st.Budgets != nil || !st.RefusalsSince.IsZero() {
+		t.Errorf("a dataplane without a relay: budgets=%v refusals_since=%v, want none", st.Budgets, st.RefusalsSince)
+	}
+}
+
+// 公開できなかった全体状態は控えておき、30 秒ごとの試し直しが公開できた時点で世代を進める。
+// 試し直しの間に新しい全体状態が届けば、そちらを試す(設計文書 7a.3 節、7b.3 節の 3 つ目の種類)。
+func TestPendingStateIsRetried(t *testing.T) {
+	dp := &fakeDataplane{}
+	rt := newFakeDataplaneRuntime(t, dp)
+	if err := rt.apply(&proto.State{Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	dp.applyErr = errors.New("batch refused")
+	two := &proto.State{Generation: 2, Rules: []proto.AgentRule{{ID: "r2"}}}
+	if err := rt.apply(two); err == nil {
+		t.Fatal("apply succeeded although the dataplane failed")
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.pendingSt != two || rt.gen != 1 || rt.f.LastState.Generation != 1 {
+		t.Fatalf("pending %v gen %d last %d; want generation 2 pending and 1 processed", rt.pendingSt, rt.gen, rt.f.LastState.Generation)
+	}
+	if err := rt.retryPendingLocked(nil); err != nil || rt.gen != 1 {
+		t.Fatalf("a failing retry: err %v gen %d", err, rt.gen)
+	}
+	three := &proto.State{Generation: 3}
+	rt.mu.Unlock()
+	if err := rt.apply(three); err == nil {
+		t.Fatal("apply of generation 3 succeeded although the dataplane failed")
+	}
+	rt.mu.Lock()
+	if rt.pendingSt != three {
+		t.Fatalf("pending is generation %d, want the newer 3", rt.pendingSt.Generation)
+	}
+	dp.applyErr = nil
+	if err := rt.retryPendingLocked(nil); err != nil {
+		t.Fatal(err)
+	}
+	if rt.pendingSt != nil || rt.gen != 3 || rt.f.LastState != three {
+		t.Errorf("after a good retry: pending %v gen %d; want nothing pending and generation 3", rt.pendingSt, rt.gen)
+	}
+}
+
+// プロセスを終える誤りは試し直しの控えにせず、試し直しから返す。stream の側の適用で起きた場合は
+// Run へ伝える(設計文書 11b 節)。
+func TestFatalApplyErrorIsNotRetried(t *testing.T) {
+	dp := &fakeDataplane{}
+	rt := newFakeDataplaneRuntime(t, dp)
+	rt.fatal = make(chan error, 1)
+	dp.applyErr = &fatalError{err: errors.New("wgft0 is not ours")}
+	err := rt.apply(&proto.State{Generation: 1})
+	if !isFatal(err) {
+		t.Fatalf("err = %v, want fatal", err)
+	}
+	if rt.pendingSt != nil {
+		t.Error("a fatal failure was kept for a retry")
+	}
+	rt.reportFatal(err)
+	rt.reportFatal(err) // 2 つ目は捨てられ、止まらない
+	select {
+	case got := <-rt.fatal:
+		if !isFatal(got) {
+			t.Errorf("Run received %v", got)
+		}
+	default:
+		t.Fatal("the fatal error did not reach Run")
+	}
+	rt.mu.Lock()
+	rt.pendingSt = &proto.State{Generation: 1}
+	err = rt.retryPendingLocked(nil)
+	rt.mu.Unlock()
+	if !isFatal(err) {
+		t.Errorf("retry: err = %v, want fatal", err)
+	}
+}
+
+// カーネルモードのルールごとの状態は、中継が無くても doctor に届く。リスナーと予算は無い(設計文書
+// 10.2c 節)。モードも応答に載る。
+func TestDoctorShowsKernelRuleStates(t *testing.T) {
+	dp := &fakeDataplane{up: true, reading: dataplaneReading{
+		tunnel: tunnelReading{present: true, lastHandshake: time.Now()},
+		rules:  []proto.RuleStatus{{ID: "r1", State: proto.StatusError, Reason: "target 192.168.1.20:80: connection refused"}},
+	}}
+	rt := newFakeDataplaneRuntime(t, dp)
+	rt.opts.Mode = "kernel"
+	rt.mu.Lock()
+	st := rt.runtimeStateLocked()
+	rt.mu.Unlock()
+	if st.Mode != "kernel" {
+		t.Errorf("mode = %q, want kernel", st.Mode)
+	}
+	if len(st.Rules) != 1 || st.Rules[0].ID != "r1" || st.Rules[0].State != proto.StatusError || st.Rules[0].Listeners != 0 {
+		t.Errorf("rules = %+v, want r1 in error with no listeners", st.Rules)
+	}
+	if st.Budgets != nil {
+		t.Errorf("budgets = %+v, want none in kernel mode", st.Budgets)
+	}
+
+	rt.opts.Mode = ""
+	rt.mu.Lock()
+	st = rt.runtimeStateLocked()
+	rt.mu.Unlock()
+	if st.Mode != "" {
+		t.Errorf("userspace mode = %q, want the field left out", st.Mode)
+	}
+}
+
+// stream の側の適用がプロセスを終える誤りに当たったら、Run の本体のループがその誤りで終わる
+// (設計文書 11b 節)。stream の適用から Run の終わりまでを通して確かめる。
+func TestFatalApplyFromTheStreamEndsRun(t *testing.T) {
+	dp := &fakeDataplane{applyErr: &fatalError{err: errors.New("wgft0 is not ours")}}
+	rt := newFakeDataplaneRuntime(t, dp)
+	rt.fatal = make(chan error, 1)
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { done <- rt.serve(ctx, make(chan error), make(chan time.Time)) }()
+	rt.applyFromStream(&proto.State{Generation: 1})
+	select {
+	case err := <-done:
+		if !isFatal(err) {
+			t.Errorf("Run ended with %v, want the fatal error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not end on a fatal error from the stream")
+	}
+}
+
+// 控えは、失敗した全体状態が控えより古ければ置き換えない。rotate-key が last_state を適用し直して
+// 失敗しても、控えていた新しい世代を失わない。
+func TestPendingStateIsNotReplacedByAnOlderOne(t *testing.T) {
+	dp := &fakeDataplane{}
+	rt := newFakeDataplaneRuntime(t, dp)
+	if err := rt.apply(&proto.State{Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	dp.applyErr = errors.New("batch refused")
+	three := &proto.State{Generation: 3}
+	_ = rt.apply(three)
+	_ = rt.apply(rt.f.LastState) // rotate-key の適用し直しと同じく、処理済みの世代 1 を適用する
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.pendingSt != three {
+		t.Errorf("pending is generation %d, want 3", rt.pendingSt.Generation)
+	}
+}
+
+// 控えの試し直しが公開できたら、次の 30 秒を待たずにハートビートを送らせる。
+func TestSuccessfulRetryAsksForAHeartbeat(t *testing.T) {
+	dp := &fakeDataplane{}
+	rt := newFakeDataplaneRuntime(t, dp)
+	rt.stateNotify = make(chan struct{}, 1)
+	if err := rt.apply(&proto.State{Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	dp.applyErr = errors.New("batch refused")
+	_ = rt.apply(&proto.State{Generation: 2})
+	if err := rt.retryPending(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-rt.stateNotify:
+		t.Fatal("a failing retry asked for a heartbeat")
+	default:
+	}
+	dp.applyErr = nil
+	if err := rt.retryPending(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-rt.stateNotify:
+	default:
+		t.Fatal("a successful retry did not ask for a heartbeat")
+	}
+	if rt.generation() != 2 {
+		t.Errorf("generation %d after the retry, want 2", rt.generation())
+	}
+}
+
+// 試し直しの準備の間に控えが別の全体状態に替われば、準備を捨てて何も適用しない。次の試し直しが
+// 新しい控えを扱う。
+func TestRetryDiscardsAPreparationForAReplacedPendingState(t *testing.T) {
+	dp := &fakeDataplane{}
+	rt := newFakeDataplaneRuntime(t, dp)
+	if err := rt.apply(&proto.State{Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	dp.applyErr = errors.New("batch refused")
+	_ = rt.apply(&proto.State{Generation: 2})
+	three := &proto.State{Generation: 3}
+	dp.applyErr = nil
+	calls := len(dp.applied)
+	dp.prepareHook = func() {
+		// 名前を引いている間に、stream の新しい全体状態の適用が失敗して控えを替える
+		rt.mu.Lock()
+		rt.pendingSt = three
+		rt.mu.Unlock()
+	}
+	if err := rt.retryPending(); err != nil {
+		t.Fatal(err)
+	}
+	if len(dp.applied) != calls {
+		t.Fatalf("the retry applied a state after its pending state was replaced")
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.pendingSt != three || rt.gen != 1 {
+		t.Errorf("pending %d gen %d; want generation 3 still pending and 1 processed", rt.pendingSt.Generation, rt.gen)
+	}
+}
+
+// 控えの試し直しは、控えた全体状態の wg 設定が今のものと違えば、apply と同じく立て直してから適用する。
+// rotate-key が 1 つ前の全体状態の wg 設定で立て直した後がこの場合に当たる。
+func TestRetryRebuildsForThePendingStatesWGConfig(t *testing.T) {
+	dp := &fakeDataplane{}
+	rt := newFakeDataplaneRuntime(t, dp)
+	one := &proto.State{Generation: 1, WG: proto.WGConfig{MTU: 1420}}
+	if err := rt.apply(one); err != nil {
+		t.Fatal(err)
+	}
+	dp.applyErr = errors.New("batch refused")
+	two := &proto.State{Generation: 2, WG: proto.WGConfig{MTU: 1380}}
+	_ = rt.apply(two)
+	// rotate-key は last_state(世代 1)で立て直す
+	rt.mu.Lock()
+	rt.closeLocked()
+	rt.mu.Unlock()
+	_ = rt.apply(one)
+	dp.applyErr = nil
+	if err := rt.retryPending(); err != nil {
+		t.Fatal(err)
+	}
+	if got := dp.builtWith[len(dp.builtWith)-1]; got.MTU != 1380 {
+		t.Errorf("the retry applied generation 2 on a tunnel built with MTU %d, want its own 1380", got.MTU)
+	}
+	if rt.generation() != 2 {
+		t.Errorf("generation %d, want 2", rt.generation())
 	}
 }
