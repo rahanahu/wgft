@@ -148,7 +148,7 @@ func TestDoctorReportsWhyThereIsNoTunnel(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rt := &runtime{gen: 7, rebuild: rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax}}
+			rt := &runtime{dp: newTestUserspace(), gen: 7, rebuild: rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax}}
 			c.setup(rt)
 			ask := serveTestControl(t, rt)
 			res := askDoctor(t, ask)
@@ -199,7 +199,7 @@ func TestDoctorReportsHandshakePending(t *testing.T) {
 	})
 	built := time.Now().Add(-time.Minute)
 	rt := &runtime{
-		tun:      &tunnel.Tunnel{},
+		dp:       &userspaceDataplane{tun: &tunnel.Tunnel{}},
 		tunStart: built,
 		rebuild:  rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax, wait: 10 * time.Minute},
 	}
@@ -242,7 +242,7 @@ func TestDoctorReadsTheTunnelStatusOnce(t *testing.T) {
 		// 読むたびに別の時点の値を返す。混ざればどれかが食い違う
 		return tunnel.Status{LastHandshake: base.Add(time.Duration(n) * time.Second), RxBytes: n, TxBytes: n}
 	})
-	rt := &runtime{tun: &tunnel.Tunnel{}, tunStart: time.Now()}
+	rt := &runtime{dp: &userspaceDataplane{tun: &tunnel.Tunnel{}}, tunStart: time.Now()}
 	ask := serveTestControl(t, rt)
 	res := askDoctor(t, ask)
 	if got := reads.Load(); got != 1 {
@@ -263,7 +263,7 @@ func TestDoctorShowsOnlyTheCurrentDeviceHandshake(t *testing.T) {
 	current := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: current} })
 	rt := &runtime{
-		tun:      &tunnel.Tunnel{},
+		dp:       &userspaceDataplane{tun: &tunnel.Tunnel{}},
 		tunStart: time.Now(),
 		rebuild:  rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax, lastHandshake: stale, observedAt: stale},
 	}
@@ -285,9 +285,9 @@ func TestDoctorGroupsListenersByRule(t *testing.T) {
 	const ports = 500
 	rules := []proto.AgentRule{udpRule(t, "r1", 10000, 10000+ports-1, "192.0.2.5:10000")}
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: time.Now()} })
-	rt := &runtime{tun: &tunnel.Tunnel{}, rl: relay.New(&fakeRelayNetwork{}, relay.Options{}), tunStart: time.Now()}
-	t.Cleanup(rt.rl.Close)
-	rt.rl.Apply(relay.DesiredFromRules(rules))
+	rt := &runtime{dp: &userspaceDataplane{tun: &tunnel.Tunnel{}, rl: relay.New(&fakeRelayNetwork{}, relay.Options{})}, tunStart: time.Now()}
+	t.Cleanup(rt.us().rl.Close)
+	rt.us().rl.Apply(relay.DesiredFromRules(rules))
 
 	ask := serveTestControl(t, rt)
 	line := ask(t, DoctorCommand)
@@ -316,9 +316,9 @@ func TestDoctorReportsListenerBindFailure(t *testing.T) {
 	rules := []proto.AgentRule{udpRule(t, "r1", 20000, 20002, "192.0.2.5:20000")}
 	fakeNet := &fakeRelayNetwork{failPorts: map[uint16]bool{20001: true}}
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: time.Now()} })
-	rt := &runtime{tun: &tunnel.Tunnel{}, rl: relay.New(fakeNet, relay.Options{}), tunStart: time.Now()}
-	t.Cleanup(rt.rl.Close)
-	rt.rl.Apply(relay.DesiredFromRules(rules))
+	rt := &runtime{dp: &userspaceDataplane{tun: &tunnel.Tunnel{}, rl: relay.New(fakeNet, relay.Options{})}, tunStart: time.Now()}
+	t.Cleanup(rt.us().rl.Close)
+	rt.us().rl.Apply(relay.DesiredFromRules(rules))
 
 	ask := serveTestControl(t, rt)
 	res := askDoctor(t, ask)
@@ -351,14 +351,16 @@ func TestDoctorReportsFlowBudget(t *testing.T) {
 	rules := []proto.AgentRule{udpRule(t, "r1", 30000, 30000, "192.0.2.5:30000")}
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: time.Now()} })
 	rt := &runtime{
-		tun:      &tunnel.Tunnel{},
-		rl:       relay.New(&fakeRelayNetwork{}, relay.Options{Limits: resource.Limits{UDPTotal: 16, TCPTotal: 16}}),
+		dp: &userspaceDataplane{
+			tun: &tunnel.Tunnel{},
+			rl:  relay.New(&fakeRelayNetwork{}, relay.Options{Limits: resource.Limits{UDPTotal: 16, TCPTotal: 16}}),
+		},
 		tunStart: time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC),
 	}
-	t.Cleanup(rt.rl.Close)
-	rt.rl.Apply(relay.DesiredFromRules(rules))
+	t.Cleanup(rt.us().rl.Close)
+	rt.us().rl.Apply(relay.DesiredFromRules(rules))
 	// 予算を使い切らせて、拒否を 1 件作る
-	pool := rt.rl.UDPPool()
+	pool := rt.us().rl.UDPPool()
 	l := pool.Listener("r1")
 	for i := 0; i < 16; i++ {
 		if _, ok := l.Acquire(); !ok {
@@ -401,7 +403,7 @@ func TestDoctorReportsTheRuntimeLockTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := &runtime{doctorLockWait: wait, opts: Options{AllowTargets: list}}
+	rt := &runtime{dp: newTestUserspace(), doctorLockWait: wait, opts: Options{AllowTargets: list}}
 	ask := serveTestControl(t, rt)
 
 	rt.mu.Lock()
@@ -435,7 +437,7 @@ func TestDoctorReportsTheRuntimeLockTimeout(t *testing.T) {
 // TestDoctorTakesTheRuntimeLockWhenItIsFree は、排他が空いている実行では期限を待たずに
 // 実行時の状態が返ることを確かめる。
 func TestDoctorTakesTheRuntimeLockWhenItIsFree(t *testing.T) {
-	rt := &runtime{doctorLockWait: 5 * time.Second, f: &credentials.Credentials{}}
+	rt := &runtime{dp: newTestUserspace(), doctorLockWait: 5 * time.Second, f: &credentials.Credentials{}}
 	ask := serveTestControl(t, rt)
 	start := time.Now()
 	res := askDoctor(t, ask)
@@ -453,7 +455,7 @@ func TestDoctorTakesTheRuntimeLockWhenItIsFree(t *testing.T) {
 // TestDoctorSurvivesAPanic は、応答を組む処理が panic しても常駐プロセスが生き続け、
 // 運用者に何が起きたかが分かる応答が返ることを確かめる(設計文書 10.2c 節)。
 func TestDoctorSurvivesAPanic(t *testing.T) {
-	rt := &runtime{f: &credentials.Credentials{}}
+	rt := &runtime{dp: newTestUserspace(), f: &credentials.Credentials{}}
 	ask := serveTestControl(t, rt)
 
 	real := doctorSnapshot
@@ -483,7 +485,7 @@ func TestDoctorSurvivesAPanic(t *testing.T) {
 // TestControlAnswersUnknownCommand は、doctor を知らない古い常駐プロセスが返すのと同じ応答を、
 // 知らない指示に対して返し続けることを確かめる(設計文書 10.2c 節)。
 func TestControlAnswersUnknownCommand(t *testing.T) {
-	rt := &runtime{}
+	rt := &runtime{dp: newTestUserspace()}
 	ask := serveTestControl(t, rt)
 	if got, want := ask(t, "rotate-keys"), "error: unknown command\n"; got != want {
 		t.Errorf("answer = %q, want %q", got, want)
@@ -494,7 +496,7 @@ func TestControlAnswersUnknownCommand(t *testing.T) {
 // (設計文書 10.2c 節の stream.connection、stream.backoff、stream.liveness)。
 func TestDoctorReportsTheStreamObservation(t *testing.T) {
 	now := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
-	rt := &runtime{f: &credentials.Credentials{}}
+	rt := &runtime{dp: newTestUserspace(), f: &credentials.Credentials{}}
 	rt.noteStreamDisconnected(now, errors.New("connection reset by peer"))
 	rt.noteStreamWaiting(now, 4*time.Second)
 	ask := serveTestControl(t, rt)
@@ -516,7 +518,7 @@ func TestDoctorReportsTheStreamObservation(t *testing.T) {
 // TestDoctorReportsNoAllowTargets は、宛先の許可一覧を持たない実行がその事実を返すことを確かめる。
 // 一覧の内容はエージェントの手元にしか無い(設計文書 10.2c 節)。
 func TestDoctorReportsNoAllowTargets(t *testing.T) {
-	rt := &runtime{f: &credentials.Credentials{}}
+	rt := &runtime{dp: newTestUserspace(), f: &credentials.Credentials{}}
 	ask := serveTestControl(t, rt)
 	res := askDoctor(t, ask)
 	if res.AllowTargets == nil || res.AllowTargets.Set {
@@ -534,7 +536,7 @@ func TestDoctorReportsNoAllowTargets(t *testing.T) {
 //
 // 認証情報が nil の runtime は、rotateKey が排他を取った後で必ず panic する。
 func TestControlDoesNotRecoverARotateKeyPanic(t *testing.T) {
-	rt := &runtime{}
+	rt := &runtime{dp: newTestUserspace()}
 	got := func() (r any) {
 		defer func() { r = recover() }()
 		client, server := net.Pipe()
@@ -557,7 +559,7 @@ func TestControlDoesNotRecoverARotateKeyPanic(t *testing.T) {
 // TestControlRecoversADoctorPanic は、doctor の枝だけが panic を受け止め、その後も排他が
 // 空いていることを確かめる。doctor の経路が取る排他はすべて defer で放される。
 func TestControlRecoversADoctorPanic(t *testing.T) {
-	rt := &runtime{f: &credentials.Credentials{}}
+	rt := &runtime{dp: newTestUserspace(), f: &credentials.Credentials{}}
 	real := doctorSnapshot
 	doctorSnapshot = func(*runtime) DoctorResponse { panic("simulated failure while collecting the agent state") }
 	t.Cleanup(func() { doctorSnapshot = real })
@@ -590,7 +592,7 @@ func TestControlRecoversADoctorPanic(t *testing.T) {
 // すぐ排他を放すことを確かめる。放さなければ、待っていた取得がそのまま排他を握り続け、
 // 常駐プロセスは永久に固まる。
 func TestLockRuntimeReleasesTheLockItAbandons(t *testing.T) {
-	rt := &runtime{}
+	rt := &runtime{dp: newTestUserspace()}
 	rt.mu.Lock()
 	if rt.lockRuntime(50 * time.Millisecond) {
 		rt.mu.Unlock()
@@ -641,9 +643,9 @@ func TestDoctorClipsLongText(t *testing.T) {
 	long := strings.Repeat("x", 100000)
 	fakeNet := &fakeRelayNetwork{failPorts: map[uint16]bool{40000: true}, failReason: long}
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: time.Now()} })
-	rt := &runtime{tun: &tunnel.Tunnel{}, rl: relay.New(fakeNet, relay.Options{}), tunStart: time.Now()}
-	t.Cleanup(rt.rl.Close)
-	rt.rl.Apply(relay.DesiredFromRules([]proto.AgentRule{udpRule(t, "r1", 40000, 40000, "192.0.2.5:40000")}))
+	rt := &runtime{dp: &userspaceDataplane{tun: &tunnel.Tunnel{}, rl: relay.New(fakeNet, relay.Options{})}, tunStart: time.Now()}
+	t.Cleanup(rt.us().rl.Close)
+	rt.us().rl.Apply(relay.DesiredFromRules([]proto.AgentRule{udpRule(t, "r1", 40000, 40000, "192.0.2.5:40000")}))
 
 	ask := serveTestControl(t, rt)
 	line := ask(t, DoctorCommand)
@@ -665,7 +667,7 @@ func TestDoctorClipsLongText(t *testing.T) {
 // 時刻の項目が消えずにゼロ値として出ることを確かめる。encoding/json の omitempty は struct に
 // 効かないので、読み手は時刻を IsZero で判定する。
 func TestDoctorLeavesOutEmptyLists(t *testing.T) {
-	rt := &runtime{f: &credentials.Credentials{}}
+	rt := &runtime{dp: newTestUserspace(), f: &credentials.Credentials{}}
 	ask := serveTestControl(t, rt)
 	line := ask(t, DoctorCommand)
 	if strings.Contains(line, "null") {

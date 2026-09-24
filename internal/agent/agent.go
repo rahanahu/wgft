@@ -7,11 +7,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
-	"net/netip"
 	"os/signal"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -21,8 +19,6 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
-	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
-	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
@@ -83,12 +79,11 @@ type runtime struct {
 	// pong の期限より長くなりうる
 	applySeq atomic.Uint64
 
-	mu        sync.Mutex
-	tun       *tunnel.Tunnel
-	tunCancel context.CancelFunc
-	rl        *relay.Manager
-	wgCfg     proto.WGConfig // 適用済みの wg 設定
-	gen       uint64         // 処理済み世代
+	mu sync.Mutex
+	// dp はトンネルと転送を担う dataplane である(設計文書 7a.7 節の境目)。rt.mu が守る
+	dp    agentDataplane
+	wgCfg proto.WGConfig // 適用済みの wg 設定
+	gen   uint64         // 処理済み世代
 
 	tunStart time.Time    // 今のトンネルを立てた時刻。ハンドシェイクが一度も成立していないときの起点
 	rebuild  rebuildState // トンネルを作り直す判定の閾値と、次の作り直しまでの間隔(仕様 7 節)
@@ -143,19 +138,7 @@ func Run(opts Options) error {
 	if err := ensureRegistered(f, opts); err != nil {
 		return err
 	}
-	rt := &runtime{
-		opts: opts, f: f, priv: priv,
-		heartbeatInterval:      30 * time.Second,
-		handshakeRetryInterval: time.Second,
-		handshakeRetryTimeout:  10 * time.Second,
-		pingInterval:           30 * time.Second,
-		pongTimeout:            20 * time.Second,
-		reconnectBackoffMin:    defaultReconnectBackoffMin,
-		reconnectBackoffMax:    defaultReconnectBackoffMax,
-		doctorLockWait:         defaultDoctorLockWait,
-		handshakeWake:          make(chan struct{}, 1),
-		rebuild:                rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
-	}
+	rt := newRuntime(opts, f, priv)
 	defer rt.close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -187,12 +170,30 @@ func Run(opts Options) error {
 		case <-tick.C:
 			rt.checkTunnel(time.Now())
 			rt.mu.Lock()
-			if rt.rl != nil {
-				rt.rl.Retry()
-			}
+			rt.dp.refresh()
 			rt.mu.Unlock()
 			rt.logStatus()
 		}
+	}
+}
+
+// newRuntime は Run が動かす runtime を組む。dataplane の宛先の許可一覧とフロー数の予算は opts から
+// 渡す。doctor が示す許可一覧も同じ opts.AllowTargets を読み、opts は起動の後に変わらないので、
+// 中継が守る一覧と doctor が示す一覧は食い違わない(設計文書 10.2c 節)。
+func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *runtime {
+	return &runtime{
+		opts: opts, f: f, priv: priv,
+		heartbeatInterval:      30 * time.Second,
+		handshakeRetryInterval: time.Second,
+		handshakeRetryTimeout:  10 * time.Second,
+		pingInterval:           30 * time.Second,
+		pongTimeout:            20 * time.Second,
+		reconnectBackoffMin:    defaultReconnectBackoffMin,
+		reconnectBackoffMax:    defaultReconnectBackoffMax,
+		doctorLockWait:         defaultDoctorLockWait,
+		handshakeWake:          make(chan struct{}, 1),
+		dp:                     newUserspaceDataplane(opts.AllowTargets, opts.Limits),
+		rebuild:                rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
 	}
 }
 
@@ -207,13 +208,17 @@ func (rt *runtime) generation() uint64 {
 func (rt *runtime) apply(st *proto.State) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.tun == nil || !reflect.DeepEqual(rt.wgCfg, st.WG) {
-		if rt.tun != nil {
+	if !rt.dp.built() || !reflect.DeepEqual(rt.wgCfg, st.WG) {
+		if rt.dp.built() {
 			log.Printf("wg config changed; rebuilding tunnel")
 		}
 		// 作成に失敗したら、世代も認証情報ファイルも進めずに返す。作成そのものの失敗なら
-		// buildLocked が試し直しを控えるので、次の全体状態を待たずに watchdog が立て直す(仕様 7 節)
+		// buildLocked が試し直しを控えるので、次の全体状態を待たずに watchdog が立て直す(仕様 7 節)。
+		// トンネルが立った後の誤り(ルールの適用と認証情報ファイルの保存)には wireguard の接頭辞を付けない
 		if err := rt.buildLocked(time.Now(), st, false); err != nil {
+			if rt.dp.built() {
+				return err
+			}
 			return fmt.Errorf("wireguard: %w", err)
 		}
 		return nil
@@ -221,17 +226,23 @@ func (rt *runtime) apply(st *proto.State) error {
 	return rt.finishApplyLocked(st)
 }
 
-// finishApplyLocked はトンネルが立った後の共通の後始末である。リスナーを宣言に合わせ、処理済み世代を
+// finishApplyLocked はトンネルが立った後の共通の後始末である。ルールを宣言に合わせ、処理済み世代を
 // 進め、認証情報ファイルに保存する(仕様 5.2 節)。呼び出し側は rt.mu を持つ。
+//
+// dataplane が宣言をまとめて公開できなかったときは、世代も認証情報ファイルも進めずに返す
+// (設計文書 7a.3 節)。ユーザー空間モードの dataplane はこの失敗を持たない。
 func (rt *runtime) finishApplyLocked(st *proto.State) error {
 	var firstErr error
-	acts := rt.rl.Apply(relay.DesiredFromRules(st.Rules))
+	summary, err := rt.dp.applyRules(st.Rules)
+	if err != nil {
+		return fmt.Errorf("dataplane: %w", err)
+	}
 	rt.gen = st.Generation
 	rt.f.LastState = st
 	if err := rt.f.Save(rt.opts.CredentialsPath); err != nil {
 		firstErr = fmt.Errorf("save credentials file: %w", err)
 	}
-	log.Printf("applied generation %d: %d actions, %d listeners", st.Generation, len(acts), len(rt.rl.Status()))
+	log.Printf("applied generation %d: %s", st.Generation, summary)
 	return firstErr
 }
 
@@ -306,14 +317,16 @@ func (s *rebuildState) effectiveWait() time.Duration {
 // サーバが停止しているだけの場合と、受信の経路が死んだ場合は、エージェントからは区別できない。
 // そこで、作り直しても戻らない間は間隔を広げ、上限で頭打ちにする。
 func (s *rebuildState) step(now, start, handshake time.Time) (idle time.Duration, rebuild bool) {
-	if s.after <= 0 {
-		return 0, false // 閾値を持たない runtime では作り直さない
-	}
+	// 観測は閾値を持たない runtime でも控える。checkTunnel は控えた値と比べて新しいハンドシェイクを
+	// 見分け、stream の再接続の待ちを打ち切らせるので、控えなければ同じ値を毎回新しいと数える
 	if !handshake.Equal(s.lastHandshake) {
 		s.lastHandshake, s.observedAt = handshake, now
 		if !handshake.IsZero() {
 			s.wait = s.after
 		}
+	}
+	if s.after <= 0 {
+		return 0, false // 閾値を持たない runtime では作り直さない
 	}
 	since := s.observedAt
 	if since.IsZero() || start.After(since) {
@@ -328,11 +341,8 @@ func (s *rebuildState) step(now, start, handshake time.Time) (idle time.Duration
 	return idle, true
 }
 
-// newTunnel はトンネルを作る。値は tunnel.New で、テストだけが作成の失敗を模すために差し替える。
-var newTunnel = tunnel.New
-
-// startTunnelLocked は今のトンネルと中継を閉じてから、全体状態の wg 設定で立て直す(仕様 7 節)。
-// 呼び出し側は rt.mu を持つ。リスナーは開かないので、呼び出し側が続けて rl.Apply を呼ぶ。
+// startTunnelLocked は今のトンネルと転送を閉じてから、全体状態の wg 設定で立て直す(仕様 7 節)。
+// 呼び出し側は rt.mu を持つ。ルールは適用しないので、呼び出し側が続けて dp.applyRules を呼ぶ。
 // 閉じるのが先なので、古い device と netstack、その goroutine は新しいものを作る前に必ず片付く。
 //
 // retryable は、失敗が試し直す価値のあるものかどうかを表す。誤りが無いときの値に意味は無い。
@@ -340,18 +350,11 @@ var newTunnel = tunnel.New
 func (rt *runtime) startTunnelLocked(st *proto.State) (retryable bool, err error) {
 	rt.closeLocked()
 	rt.tunStart = time.Now()
-	cfg, err := tunnelConfig(rt.priv, st.WG)
+	retryable, err = rt.dp.build(rt.priv, st.WG)
 	if err != nil {
-		return false, err
+		return retryable, err
 	}
-	tun, err := newTunnel(cfg)
-	if err != nil {
-		return true, err // 資源の不足など、環境による失敗
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	go tun.Run(ctx)
-	rt.tun, rt.tunCancel, rt.wgCfg = tun, cancel, st.WG
-	rt.rl = relay.New(tun, rt.relayOptions(st))
+	rt.wgCfg = st.WG
 	return true, nil
 }
 
@@ -370,7 +373,7 @@ func (rt *runtime) startTunnelLocked(st *proto.State) (retryable bool, err error
 func (rt *runtime) checkTunnel(now time.Time) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.tun == nil {
+	if !rt.dp.built() {
 		rt.retryBuildLocked(now)
 		return
 	}
@@ -378,11 +381,11 @@ func (rt *runtime) checkTunnel(now time.Time) {
 		return
 	}
 	st := rt.f.LastState
-	// Status が読むのは今の device なので、ゼロでない最終ハンドシェイクは必ず今のトンネルのものである
-	handshake := rt.tun.Status().LastHandshake
+	// 読むのは今の device なので、ゼロでない最終ハンドシェイクは必ず今のトンネルのものである
+	handshake := rt.dp.lastHandshake()
 	// 新しいハンドシェイクは、vpsd までの経路が戻ったことを示す。stream が再接続の待ちに入って
 	// いれば、その待ちを打ち切らせる(仕様 5.2 節)。判定は step が値を控え直す前に行う。観測は
-	// この 1 回の Status の読みだけで、別の監視は持たない
+	// この 1 回の読みだけで、別の監視は持たない
 	if !handshake.IsZero() && !handshake.Equal(rt.rebuild.lastHandshake) {
 		notifyNonBlocking(rt.handshakeWake)
 	}
@@ -408,7 +411,12 @@ func (rt *runtime) retryBuildLocked(now time.Time) {
 		return
 	}
 	log.Printf("no tunnel since the last build failed %s ago; building it again", now.Sub(rt.tunStart).Round(time.Second))
-	rt.buildLocked(now, rt.retrySt, false) //nolint:errcheck // 誤りは buildLocked が出す
+	st := rt.retrySt
+	// 作成の失敗は buildLocked が 1 行出す。立った後のルールの適用と認証情報ファイルの保存の誤りは
+	// buildLocked が出さないので、ここで出す
+	if err := rt.buildLocked(now, st, false); err != nil && rt.dp.built() {
+		log.Printf("applying generation %d after building the tunnel again: %v", st.Generation, err)
+	}
 }
 
 // buildLocked はトンネルを立ててリスナーを開き直す。applied は、渡した全体状態の適用が世代の記録まで
@@ -437,24 +445,12 @@ func (rt *runtime) buildLocked(now time.Time, st *proto.State, applied bool) err
 		return err
 	}
 	if applied {
-		rt.rl.Apply(relay.DesiredFromRules(st.Rules))
+		if _, err := rt.dp.applyRules(st.Rules); err != nil {
+			log.Printf("apply rules after rebuilding the tunnel: %v", err)
+		}
 		return nil
 	}
 	return rt.finishApplyLocked(st)
-}
-
-// relayOptions は中継の調整値を作る。宛先の許可一覧があれば、中継が宛先へ接続するときに
-// 使う判定として渡す(仕様 7 節)。一覧が無ければ渡さないので、中継の挙動は一覧の導入前と同じになる。
-func (rt *runtime) relayOptions(st *proto.State) relay.Options {
-	o := relay.Options{
-		UDPIdleTimeout: time.Duration(st.WG.UDPTimeoutStream) * time.Second,
-		Limits:         rt.opts.Limits,
-	}
-	if rt.opts.AllowTargets != nil {
-		o.AllowTarget = rt.opts.AllowTargets.Allows
-		o.AllowTargetSource = allowtargets.Env
-	}
-	return o
 }
 
 // logAllowTargets は宛先の許可一覧の有無を起動時に 1 行で出す(仕様 7 節)。
@@ -472,18 +468,7 @@ func (rt *runtime) closeLocked() {
 	// buildLocked が控え直す
 	rt.rebuild.clearRetry()
 	rt.retrySt = nil
-	if rt.rl != nil {
-		rt.rl.Close()
-		rt.rl = nil
-	}
-	if rt.tunCancel != nil {
-		rt.tunCancel()
-		rt.tunCancel = nil
-	}
-	if rt.tun != nil {
-		rt.tun.Close()
-		rt.tun = nil
-	}
+	rt.dp.close()
 }
 
 func (rt *runtime) close() {
@@ -506,18 +491,17 @@ func (rt *runtime) heartbeat() proto.Heartbeat {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	hb := proto.Heartbeat{Generation: rt.gen, Rules: []proto.RuleStatus{}}
-	tun := rt.tunnelSnapshotLocked()
+	r := rt.dp.read()
+	tun := rt.tunnelSnapshotLocked(r.tunnel)
 	hb.Tunnel = tun.hb
 	if !tun.present {
 		return hb
 	}
-	hb.Rules = ruleStatuses(rt.rl.Status())
+	if r.rules != nil {
+		hb.Rules = r.rules
+	}
 	return hb
 }
-
-// readTunnelStatus はトンネルの状態を 1 回読む。値は tunnel.Tunnel.Status で、テストだけが
-// 読みの回数と、1 つの応答に混ざる時点を確かめるために差し替える。
-var readTunnelStatus = (*tunnel.Tunnel).Status
 
 // tunnelSnapshot はトンネルの状態の写しである。present はトンネルがあるかどうか、hb はハートビートに
 // 載せる形、raw は読んだままの値である。送受信バイト数は proto.TunnelStatus に載らないので raw
@@ -525,14 +509,14 @@ var readTunnelStatus = (*tunnel.Tunnel).Status
 type tunnelSnapshot struct {
 	present bool
 	hb      proto.TunnelStatus
-	raw     tunnel.Status
+	raw     tunnelReading
 }
 
-// tunnelSnapshotLocked はトンネルの状態を 1 回だけ読み、ハートビートと doctor が共有する写しを返す
-// (設計文書 10.2c 節)。呼び出し側は rt.mu を持つ。doctor が別に読み直す形にすると、送受信
-// バイト数と最終ハンドシェイクが 1 つの応答の中で異なる時点の値になる。
-func (rt *runtime) tunnelSnapshotLocked() tunnelSnapshot {
-	if rt.tun == nil {
+// tunnelSnapshotLocked は、dataplane を 1 回だけ読んだ値 r から、ハートビートと doctor が共有する
+// 写しを作る(設計文書 10.2c 節)。呼び出し側は rt.mu を持つ。doctor が別に読み直す形にすると、
+// 送受信バイト数と最終ハンドシェイクが 1 つの応答の中で異なる時点の値になる。
+func (rt *runtime) tunnelSnapshotLocked(r tunnelReading) tunnelSnapshot {
+	if !r.present {
 		// トンネルが無い理由は 4 通りある。作成に失敗して試し直しを待っている場合(仕様 7 節)、
 		// 作成が wg 設定の誤りで終わって次の全体状態を待っている場合、全体状態をまだ受け取っていない
 		// 場合、rotate-key や停止で閉じた直後の場合である
@@ -547,43 +531,19 @@ func (rt *runtime) tunnelSnapshotLocked() tunnelSnapshot {
 		}
 		return tunnelSnapshot{hb: proto.TunnelStatus{State: proto.StatusError, Reason: reason}}
 	}
-	// Status が読むのは今の device なので、最終ハンドシェイクは必ず今のトンネルのものである。
+	// dataplane が読むのは今の device なので、最終ハンドシェイクは必ず今のトンネルのものである。
 	// watchdog が rebuildState に持つ値は closeLocked が消さず、立て直した直後は前のトンネルの
 	// 値が残るので、2 つを混ぜない(設計文書 10.2c 節)
-	ts := readTunnelStatus(rt.tun)
-	snap := tunnelSnapshot{present: true, raw: ts, hb: proto.TunnelStatus{State: proto.StatusOK, LastHandshake: ts.LastHandshake}}
-	if ts.Endpoint.IsValid() {
-		snap.hb.Endpoint = ts.Endpoint.String()
+	snap := tunnelSnapshot{present: true, raw: r, hb: proto.TunnelStatus{State: proto.StatusOK, LastHandshake: r.lastHandshake}}
+	if r.endpoint.IsValid() {
+		snap.hb.Endpoint = r.endpoint.String()
 	}
-	if ts.Err != nil {
-		snap.hb.State, snap.hb.Reason = proto.StatusError, ts.Err.Error()
-	} else if ts.LastHandshake.IsZero() {
+	if r.err != nil {
+		snap.hb.State, snap.hb.Reason = proto.StatusError, r.err.Error()
+	} else if r.lastHandshake.IsZero() {
 		snap.hb.State, snap.hb.Reason = proto.StatusError, ReasonHandshakePending
 	}
 	return snap
-}
-
-// ruleStatuses はリスナーの状態からルールごとの状態を合成する(仕様 5.2 節)。1 つでも error なら
-// そのルールは error である。ハートビートと doctor が同じ判定を使うので、この 1 か所に置く
-// (設計文書 10.2c 節)。呼び出し側は Manager.Status の結果を 1 回だけ読んで渡す。
-func ruleStatuses(sts []relay.Status) []proto.RuleStatus {
-	byRule := map[string]*proto.RuleStatus{}
-	for _, s := range sts {
-		r := byRule[s.RuleID]
-		if r == nil {
-			r = &proto.RuleStatus{ID: s.RuleID, State: proto.StatusOK}
-			byRule[s.RuleID] = r
-		}
-		if s.Err != nil && r.State == proto.StatusOK {
-			r.State, r.Reason = proto.StatusError, fmt.Sprintf("%s: %v", s.Key, s.Err)
-		}
-	}
-	out := make([]proto.RuleStatus, 0, len(byRule))
-	for _, r := range byRule {
-		out = append(out, *r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
 }
 
 // logStatus は 30 秒ごとに呼ばれる(Run のティッカー)。毎回は出さず、前回のログと同じ内容なら黙る
@@ -712,25 +672,6 @@ func ensureRegistered(f *credentials.Credentials, opts Options) error {
 	}
 	log.Printf("registered as agent %s; assigned %s, API %s", name, addr, j.Endpoint)
 	return nil
-}
-
-// tunnelConfig は全体状態の wg 節からトンネルの宣言を作る。
-// vpsd のアドレスは全体状態にないので、自分のアドレスの帯の先頭(10.200.0.1)とする(仕様 4 節)。
-func tunnelConfig(priv wgtypes.Key, w proto.WGConfig) (tunnel.Config, error) {
-	serverPub, err := wgtypes.ParseKey(w.ServerPubkey)
-	if err != nil {
-		return tunnel.Config{}, fmt.Errorf("server_pubkey: %w", err)
-	}
-	addr, err := netip.ParsePrefix(w.Address)
-	if err != nil || !addr.Addr().Is4() {
-		return tunnel.Config{}, fmt.Errorf("address %q is not an IPv4 CIDR", w.Address)
-	}
-	server := addr.Masked().Addr().Next()
-	return tunnel.Config{
-		PrivateKey: priv, ServerPublicKey: serverPub, Endpoint: w.Endpoint,
-		Address: addr.Addr(), ServerAddress: server, MTU: w.MTU,
-		Keepalive: time.Duration(w.Keepalive) * time.Second,
-	}, nil
 }
 
 // versionOrDev は起動ログに出す版。cmd 側から渡らなければ(単体テストなど)"dev" とする。
