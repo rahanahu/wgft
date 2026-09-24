@@ -1091,6 +1091,8 @@ serves it: DNAT applies to input from outside, so the server cannot reach its
 own public port from itself. Test that from another host. A UDP rule's target
 reads at best NOT TESTED, never OK: the agent can report only that its listener
 is open, and a UDP send cannot tell whether the target received it or answered.
+Its target line also shows the last reply this server saw from the target;
+that never changes the status.
 
 --probe opens one real TCP connection from the server, through the tunnel and
 the agent, to the target, so it takes one rule at a time and the target sees a

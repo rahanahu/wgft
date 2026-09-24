@@ -27,6 +27,17 @@ func udpPort(id, agent, target string) planner.PortPlan {
 		Forwarding: model.Transparent, Target: target, AgentAddr: netip.MustParseAddr("10.200.0.2")}
 }
 
+// withPorts と withAgentAddr は、同一性の片方だけを変えた PortPlan を作る。
+func withPorts(pp planner.PortPlan, lo, hi uint16) planner.PortPlan {
+	pp.ListenPort = proto.PortRange{Lo: lo, Hi: hi}
+	return pp
+}
+
+func withAgentAddr(pp planner.PortPlan, addr string) planner.PortPlan {
+	pp.AgentAddr = netip.MustParseAddr(addr)
+	return pp
+}
+
 func commitPlan(t *testing.T, b *Backend, ports ...planner.PortPlan) {
 	t.Helper()
 	p, err := b.Prepare(dataplane.Desired{Plan: planner.Plan{Ports: ports}})
@@ -121,7 +132,8 @@ func TestUDPReplyTableRebuildResetsTheBaseline(t *testing.T) {
 	}
 }
 
-// 持ち主のエージェント、宛先、ルール ID のどれかが変わったら、観測を捨てて始め直す。
+// 持ち主のエージェント、宛先、ルール ID、公開ポート、エージェントのアドレスのどれかが変わったら、
+// 観測を捨てて始め直す。
 // 無効にしたルールと消したルールの項目は無くなる。
 func TestUDPReplyDiscardedWhenTheRuleChanges(t *testing.T) {
 	cases := []struct {
@@ -132,6 +144,8 @@ func TestUDPReplyDiscardedWhenTheRuleChanges(t *testing.T) {
 		{"target", udpPort("r_a", "home", "192.168.1.21:2456"), "r_a"},
 		{"agent", udpPort("r_a", "office", "192.168.1.20:2456"), "r_a"},
 		{"rule id", udpPort("r_split", "home", "192.168.1.20:2456"), "r_split"},
+		{"ports", withPorts(udpPort("r_a", "home", "192.168.1.20:2456"), 2456, 2458), "r_a"},
+		{"agent address", withAgentAddr(udpPort("r_a", "home", "192.168.1.20:2456"), "10.200.0.9"), "r_a"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -71,4 +71,24 @@ func TestUserspaceUDPReplyWatch(t *testing.T) {
 	if r := got["r_a"]; !r.Last.Equal(seen) {
 		t.Errorf("a reply after the watch began: %+v, want last %v", r, seen)
 	}
+
+	// 公開ポートとエージェントのアドレスが変わっても始め直す(安全側に加えた同一性)
+	for _, tc := range []struct {
+		name string
+		edit func(*planner.PortPlan)
+	}{
+		{"ports", func(pp *planner.PortPlan) { pp.ListenPort = proto.PortRange{Lo: 2456, Hi: 2458} }},
+		{"agent address", func(pp *planner.PortPlan) { pp.AgentAddr = netip.MustParseAddr("10.200.0.9") }},
+	} {
+		base := udpPort("r_id", "home", "192.168.1.20:2456")
+		b.watchReplies(udpPlan(base))
+		start := b.replies["r_id"].since
+		now = now.Add(time.Minute)
+		changed := base
+		tc.edit(&changed)
+		b.watchReplies(udpPlan(changed))
+		if got := b.replies["r_id"].since; got.Equal(start) || !got.Equal(now) {
+			t.Errorf("after the %s changed: since %v, want %v", tc.name, got, now)
+		}
+	}
 }

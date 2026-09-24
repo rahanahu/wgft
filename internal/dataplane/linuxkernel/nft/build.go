@@ -258,7 +258,7 @@ func emit(e emitter, plan planner.Plan, relayListening map[uint16]bool, cfg Conf
 	addRule(forward, "", ifname(expr.MetaKeyIIFNAME, expr.CmpOpEq, wg), ifname(expr.MetaKeyOIFNAME, expr.CmpOpEq, wg), drop)
 	addRule(forward, "", ifname(expr.MetaKeyOIFNAME, expr.CmpOpEq, wg), ctBits(expr.CtKeySTATUS, ipsDstNAT), accept)
 	// UDP の応答の観測(設計文書 6.1、10.2a 節)。wg0 から戻る DNAT 済みの UDP の応答だけを udp_reply へ
-	// 送り、ルールごとの行のカウンタで数える。判定を持たないので転送の結果は変えない。ICMP の誤りは
+	// 送り、ルールごとの行のカウンタで数える。行の判定は return だけで、転送の結果は変えない。ICMP の誤りは
 	// 同じ conntrack のエントリの応答の向きに一致するが、meta l4proto udp で外す。
 	// ルールの見分けは応答の送信元ポートで行う。DNAT はポートを書き換えず、応答の向きのパケットは
 	// forward の時点でまだ送信元の逆変換(postrouting)を受けていないので、送信元ポートは公開ポートの
