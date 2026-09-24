@@ -138,20 +138,7 @@ func Run(opts Options) error {
 	if err := ensureRegistered(f, opts); err != nil {
 		return err
 	}
-	rt := &runtime{
-		opts: opts, f: f, priv: priv,
-		heartbeatInterval:      30 * time.Second,
-		handshakeRetryInterval: time.Second,
-		handshakeRetryTimeout:  10 * time.Second,
-		pingInterval:           30 * time.Second,
-		pongTimeout:            20 * time.Second,
-		reconnectBackoffMin:    defaultReconnectBackoffMin,
-		reconnectBackoffMax:    defaultReconnectBackoffMax,
-		doctorLockWait:         defaultDoctorLockWait,
-		handshakeWake:          make(chan struct{}, 1),
-		dp:                     newUserspaceDataplane(opts.AllowTargets, opts.Limits),
-		rebuild:                rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
-	}
+	rt := newRuntime(opts, f, priv)
 	defer rt.close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -190,6 +177,26 @@ func Run(opts Options) error {
 	}
 }
 
+// newRuntime は Run が動かす runtime を組む。dataplane の宛先の許可一覧とフロー数の予算は opts から
+// 渡す。doctor が示す許可一覧も同じ opts.AllowTargets を読み、opts は起動の後に変わらないので、
+// 中継が守る一覧と doctor が示す一覧は食い違わない(設計文書 10.2c 節)。
+func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *runtime {
+	return &runtime{
+		opts: opts, f: f, priv: priv,
+		heartbeatInterval:      30 * time.Second,
+		handshakeRetryInterval: time.Second,
+		handshakeRetryTimeout:  10 * time.Second,
+		pingInterval:           30 * time.Second,
+		pongTimeout:            20 * time.Second,
+		reconnectBackoffMin:    defaultReconnectBackoffMin,
+		reconnectBackoffMax:    defaultReconnectBackoffMax,
+		doctorLockWait:         defaultDoctorLockWait,
+		handshakeWake:          make(chan struct{}, 1),
+		dp:                     newUserspaceDataplane(opts.AllowTargets, opts.Limits),
+		rebuild:                rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
+	}
+}
+
 func (rt *runtime) generation() uint64 {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -206,8 +213,12 @@ func (rt *runtime) apply(st *proto.State) error {
 			log.Printf("wg config changed; rebuilding tunnel")
 		}
 		// 作成に失敗したら、世代も認証情報ファイルも進めずに返す。作成そのものの失敗なら
-		// buildLocked が試し直しを控えるので、次の全体状態を待たずに watchdog が立て直す(仕様 7 節)
+		// buildLocked が試し直しを控えるので、次の全体状態を待たずに watchdog が立て直す(仕様 7 節)。
+		// トンネルが立った後の誤り(ルールの適用と認証情報ファイルの保存)には wireguard の接頭辞を付けない
 		if err := rt.buildLocked(time.Now(), st, false); err != nil {
+			if rt.dp.built() {
+				return err
+			}
 			return fmt.Errorf("wireguard: %w", err)
 		}
 		return nil
@@ -306,14 +317,16 @@ func (s *rebuildState) effectiveWait() time.Duration {
 // サーバが停止しているだけの場合と、受信の経路が死んだ場合は、エージェントからは区別できない。
 // そこで、作り直しても戻らない間は間隔を広げ、上限で頭打ちにする。
 func (s *rebuildState) step(now, start, handshake time.Time) (idle time.Duration, rebuild bool) {
-	if s.after <= 0 {
-		return 0, false // 閾値を持たない runtime では作り直さない
-	}
+	// 観測は閾値を持たない runtime でも控える。checkTunnel は控えた値と比べて新しいハンドシェイクを
+	// 見分け、stream の再接続の待ちを打ち切らせるので、控えなければ同じ値を毎回新しいと数える
 	if !handshake.Equal(s.lastHandshake) {
 		s.lastHandshake, s.observedAt = handshake, now
 		if !handshake.IsZero() {
 			s.wait = s.after
 		}
+	}
+	if s.after <= 0 {
+		return 0, false // 閾値を持たない runtime では作り直さない
 	}
 	since := s.observedAt
 	if since.IsZero() || start.After(since) {
@@ -398,7 +411,12 @@ func (rt *runtime) retryBuildLocked(now time.Time) {
 		return
 	}
 	log.Printf("no tunnel since the last build failed %s ago; building it again", now.Sub(rt.tunStart).Round(time.Second))
-	rt.buildLocked(now, rt.retrySt, false) //nolint:errcheck // 誤りは buildLocked が出す
+	st := rt.retrySt
+	// 作成の失敗は buildLocked が 1 行出す。立った後のルールの適用と認証情報ファイルの保存の誤りは
+	// buildLocked が出さないので、ここで出す
+	if err := rt.buildLocked(now, st, false); err != nil && rt.dp.built() {
+		log.Printf("applying generation %d after building the tunnel again: %v", st.Generation, err)
+	}
 }
 
 // buildLocked はトンネルを立ててリスナーを開き直す。applied は、渡した全体状態の適用が世代の記録まで

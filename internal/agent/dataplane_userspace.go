@@ -20,7 +20,8 @@ import (
 // トンネル(internal/dataplane/userspace/tunnel)と、その上の中継(internal/dataplane/userspace/relay)
 // を包む。中継はトンネルの netstack で待ち受けるので、2 つは一緒に立ち、一緒に閉じる。
 type userspaceDataplane struct {
-	// allow は宛先の許可一覧(仕様 7 節、WGFT_AGENT_ALLOW_TARGETS)。nil なら制限しない
+	// allow は宛先の許可一覧(仕様 7 節、WGFT_AGENT_ALLOW_TARGETS)。nil なら制限しない。
+	// newRuntime が opts.AllowTargets から渡すので、doctor が示す一覧と同じ値である
 	allow *allowtargets.List
 	// limits は同時フロー数のプロセス全体の予算(仕様 7 節)。ゼロ値は既定値
 	limits resource.Limits
