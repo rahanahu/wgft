@@ -170,9 +170,6 @@ func RotateKey(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if rotateKeyLockedHook != nil {
-		rotateKeyLockedHook()
-	}
 	// カーネルモードでは、消す鍵を 1 つ前の鍵として残す(仕様 7b.4 節)。wgft0 はまだその鍵を持つので、
 	// 次の起動は 1 つ前の鍵で wgft0 を自分のものと判定し、新しい鍵へ書き換える
 	kernel := f.RecordedMode() == credentials.ModeKernel
@@ -181,6 +178,9 @@ func RotateKey(path string) (string, error) {
 	if err := f.Save(path); err != nil {
 		return "", err
 	}
+	if rotateKeyLockedHook != nil {
+		rotateKeyLockedHook()
+	}
 	msg := "agent stopped: cleared the key and last_state in the credentials file, agent.json; the next start regenerates the key and receives full state over the stream"
 	if kernel {
 		msg += "; the old key is kept as the previous key, so the next start still recognises the kernel WireGuard interface that holds it and moves it to the new key"
@@ -188,8 +188,8 @@ func RotateKey(path string) (string, error) {
 	return msg, nil
 }
 
-// rotateKeyLockedHook は、停止中の rotate-key が認証情報ファイルを読んだ後、書く前に呼ばれる。
-// テストだけが、この区間でロックを持っていることを確かめるために設定する。
+// rotateKeyLockedHook は、停止中の rotate-key が認証情報ファイルを書いた後、ロックを放す前に呼ばれる。
+// テストだけが、読んでから書き終えるまでロックを持っていることを確かめるために設定する。
 var rotateKeyLockedHook func()
 
 // inspectLock はロックの状態を読む。値は credentials.Inspect で、テストだけが、判定と取得の間に

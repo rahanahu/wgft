@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -102,7 +103,7 @@ func TestPublicKeyDoesNotOverwriteARunningAgent(t *testing.T) {
 		f.WGPrivateKey = k.String()
 		for g := uint64(1); g <= saves; g++ {
 			f.LastState = &proto.State{Generation: g}
-			if err := f.Save(path); err != nil {
+			if err := retrySharingViolation(func() error { return f.Save(path) }); err != nil {
 				agentDone <- err
 				return
 			}
@@ -116,7 +117,8 @@ func TestPublicKeyDoesNotOverwriteARunningAgent(t *testing.T) {
 	// 鍵の保存の後は、エージェントの保存と並行して呼ぶ。どれもエージェントの鍵を返す
 	<-keySaved
 	for i := 0; i < saves; i++ {
-		got, err := PublicKey(path)
+		var got wgtypes.Key
+		err := retrySharingViolation(func() (err error) { got, err = PublicKey(path); return err })
 		if err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
@@ -194,14 +196,23 @@ func TestPublicKeyWhileStoppedHoldsTheLockWhileWriting(t *testing.T) {
 	}
 	lock.Release()
 	var held credentials.State
-	publicKeyLockedHook = func() { held, _ = credentials.Inspect(path) }
+	var savedKey string
+	publicKeyLockedHook = func() {
+		held, _ = credentials.Inspect(path)
+		if g, err := credentials.Load(path); err == nil {
+			savedKey = g.WGPrivateKey
+		}
+	}
 	t.Cleanup(func() { publicKeyLockedHook = nil })
 	got, err := PublicKey(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if held != credentials.Locked {
-		t.Errorf("the lock state while writing agent.json was %v, want locked", held)
+		t.Errorf("the lock state right after saving agent.json was %v, want locked", held)
+	}
+	if savedKey == "" {
+		t.Error("the hook ran before the key was saved; it must see the saved key")
 	}
 	g, err := credentials.Load(path)
 	if err != nil {
@@ -233,5 +244,32 @@ func TestPublicKeyWithoutALockFileLeavesNone(t *testing.T) {
 	again, err := PublicKey(path)
 	if err != nil || again != got {
 		t.Errorf("second call = %s, %v; want the saved key %s", again, err, got)
+	}
+}
+
+// 一度も起動していないデータディレクトリで、ユーザー空間モードのエージェントがロックを取ってから最初に
+// 保存するまでの間は、agent.json がまだ無い。この場合も、鍵がまだ無い場合と同じ案内を返し、ファイルを
+// 作らない。
+func TestPublicKeyWithAHolderAndNoCredentialsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	lock, err := credentials.Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	if _, err := PublicKey(path); !errors.Is(err, errKeyNotSavedYet) {
+		t.Errorf("err = %v, want errKeyNotSavedYet", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("agent pubkey created agent.json while another process held the lock: %v", err)
+	}
+}
+
+// ロックの持ち主はエージェントとは限らない。停止中に別の CLI が書いている瞬間にも当たるので、案内は
+// 稼働中のエージェントと言い切らず、データディレクトリを別のプロセスが使っていると言う。
+func TestPublicKeyNamesTheHolderAsAnotherProcess(t *testing.T) {
+	msg := errKeyNotSavedYet.Error()
+	if !strings.Contains(msg, "another process is using the data directory") || strings.Contains(msg, "the running agent") {
+		t.Errorf("message %q must say another process uses the data directory, not that the agent runs", msg)
 	}
 }

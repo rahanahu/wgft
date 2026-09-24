@@ -154,7 +154,7 @@ func newAgentCmd() *cobra.Command {
 
 On the agent host:
   run           run the agent: bring up the tunnel and relay incoming traffic to the LAN
-  pubkey        print the wg public key; generate and save one if absent
+  pubkey        print the wg public key; generate and save one if absent while the agent is stopped
   rotate-key    regenerate the wg key pair
   doctor        diagnose this host's own agent, running or stopped
 
