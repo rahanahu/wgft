@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ type kernelOps struct {
 	inspectLink    func(iface string, current, previous wgtypes.Key) (wg.AgentState, error)
 	keyHolders     func(iface string, current, previous wgtypes.Key) ([]string, error)
 	publish        func(nft.AgentPublication, nft.AgentConfig) error
+	fingerprint    func(table string) (fp string, present bool, err error)
 	lookup         nft.LookupFunc
 	probe          func(ctx context.Context, dest netip.AddrPort) error
 	readIPForward  func() (bool, error)
@@ -51,6 +53,7 @@ func defaultKernelOps() kernelOps {
 		inspectLink: wg.InspectAgent,
 		keyHolders:  wg.AgentKeyHolders,
 		publish:     nft.ApplyAgent,
+		fingerprint: nft.Fingerprint,
 		lookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		},
@@ -111,6 +114,14 @@ type kernelDataplane struct {
 
 	// pub は直近に公開に成功したテーブルの記録である。起動時は認証情報ファイルの記録から読む
 	pub *nft.AgentPublication
+	// fp は、このプロセスが直前に公開したテーブルの指紋である(7a.3 節)。fpKnown が偽なら、まだ公開して
+	// いないか読み直せなかったので、比べる基準が無い
+	fp      string
+	fpKnown bool
+	// driftSeen は直前の見直しで見つけた食い違いの説明である。同じ食い違いが直らない間は 1 行だけ出す
+	driftSeen string
+	// observeErr は直前の見直しの誤りである。同じ誤りが続く間は 1 行だけ出す
+	observeErr string
 	// lkg はルールごとの、直前に解決できた宛先のアドレスである(7b.2 節)。宣言の宛先の文字列が
 	// 同じ間だけ使う
 	lkg map[string]lkgEntry
@@ -497,17 +508,31 @@ func (d *kernelDataplane) applyRules(gen uint64, rules []proto.AgentRule, prepar
 	}
 
 	pub := d.planWith(gen, rules, p.resolved)
+	if err := d.publish(pub); err != nil {
+		return "", err
+	}
+	d.probeAll()
+	return d.summary(), nil
+}
+
+// publish はテーブルを 1 つのバッチで差し替え、成功したら記録を認証情報ファイルへ写し、差し替えた
+// テーブルの指紋を読み直し、成立済みのフローを収束させる(7b.4 節、7a.3 節の実際の状態への収束)。
+// 失敗したら旧いテーブルと記録を残す。認証情報ファイルの保存は呼び出し側が行う。
+func (d *kernelDataplane) publish(pub nft.AgentPublication) error {
 	if err := d.ops.publish(pub, d.nftConfig()); err != nil {
-		return "", fmt.Errorf("publish table inet %s: %w", nft.AgentTableName, err)
+		return fmt.Errorf("publish table inet %s: %w", nft.AgentTableName, err)
 	}
 	prev := d.pub
 	d.pub = &pub
 	if b, err := json.Marshal(pub); err == nil {
 		d.f.KernelPublication = b
 	}
+	// 指紋を読めなければ、比べる基準が分からない。次の見直しは食い違いとして公開し直し、読み直す
+	// (7a.3 節の指紋の読み直しの失敗と同じ扱い)
+	fp, present, err := d.ops.fingerprint(nft.AgentTableName)
+	d.fp, d.fpKnown = fp, err == nil && present
 	convergeAgentFlows(prev, pub)
-	d.probeAll()
-	return d.summary(), nil
+	return nil
 }
 
 // planWith は解決の結果からポートごとの DNAT を決める(7b.2 節)。解決に失敗した名前は、宣言の宛先の
@@ -759,4 +784,192 @@ func sortedAddrs(a []netip.Addr) []netip.Addr {
 		}
 	}
 	return uniq
+}
+
+// observePrepare は 30 秒ごとの見直しのうち、名前の解決だけを行う(7b.2 節)。rt.mu の外で呼ぶ。
+// 停止で打ち切られたら nil を返し、見直しは何もしない。
+func (d *kernelDataplane) observePrepare(rules []proto.AgentRule) any {
+	ctx, cancel := context.WithTimeout(d.ctx, kernelResolveTimeout)
+	defer cancel()
+	resolved := resolveTargets(ctx, rules, d.ops.lookup)
+	if d.ctx.Err() != nil {
+		return nil
+	}
+	return resolved
+}
+
+// observeCommit は 30 秒ごとの見直しの残りである(7b.2・7b.4 節)。rt.mu を持って呼ぶ。
+//
+//   - 名前の解決し直し:PlanAgent の結果の DNAT が直前の公開と違うときだけテーブルを公開し直す。解決の
+//     結果が変わっても、選ぶアドレスが同じなら公開し直さない。理由の文言だけが変わったときは、記録を
+//     書き換えるが、テーブルは差し替えない
+//   - 外からの変更:実際のテーブルの指紋と wgft0 の状態を、直前の公開と宣言に比べる。食い違えば、wgft0 を
+//     収束させてからテーブルを公開し直す。エンドポイントだけの違いは食い違いとして扱わない(7b.1 節)
+//
+// saved は記録が変わったかどうかで、真なら呼び出し側が認証情報ファイルを保存する。見直しの失敗は
+// 旧いテーブルを残し、次の見直しで試し直す。
+func (d *kernelDataplane) observeCommit(gen uint64, rules []proto.AgentRule, prepared any) (saved bool, err error) {
+	resolved, ok := prepared.(map[string]nft.Resolution)
+	if !ok || !d.have || !d.converged || d.pub == nil {
+		return false, nil
+	}
+	defer func() { d.noteObserveErr(err) }()
+	next := d.planWith(gen, rules, resolved)
+	changedDNAT := !sameDNATs(*d.pub, next)
+
+	tableDrift, linkDrift, err := d.drift()
+	if err != nil {
+		return false, err
+	}
+	drift := strings.Join(nonEmpty(tableDrift, linkDrift), "; ")
+	if drift != "" && drift != d.driftSeen {
+		log.Printf("kernel mode: %s; publishing the table again", drift)
+	}
+	d.driftSeen = drift
+	if linkDrift != "" {
+		cfg, err := d.linkConfig()
+		if err != nil {
+			return false, err
+		}
+		changes, err := d.ops.ensureLink(cfg)
+		if err != nil {
+			return false, fmt.Errorf("converge %s: %w", d.iface, err)
+		}
+		if len(changes) > 0 {
+			log.Printf("kernel mode: %s: %s", d.iface, strings.Join(changes, "; "))
+		}
+	}
+	switch {
+	case changedDNAT:
+		log.Printf("kernel mode: target resolution changed the DNAT of %s; publishing the table again", strings.Join(changedRules(*d.pub, next), ", "))
+	case drift != "":
+	default:
+		if reflect.DeepEqual(d.pub.Rules, next.Rules) {
+			return false, nil
+		}
+		// 理由の文言だけが変わった。テーブルは同じなので差し替えない
+		d.pub = &next
+		if b, err := json.Marshal(next); err == nil {
+			d.f.KernelPublication = b
+		}
+		return true, nil
+	}
+	if err := d.publish(next); err != nil {
+		return false, err
+	}
+	// driftSeen は公開し直しても残す。他のプロセスが同じ変更を繰り返す間、見直しは 30 秒ごとに直し続けるが、
+	// ログは食い違いが見つからない見直しを挟むまで 1 行だけにする
+	if changedDNAT {
+		d.probeAll()
+	}
+	return true, nil
+}
+
+// noteObserveErr は見直しの誤りを、変わったときだけ 1 行出す。
+func (d *kernelDataplane) noteObserveErr(err error) {
+	switch {
+	case err == nil && d.observeErr != "":
+		log.Printf("kernel mode: the 30-second check works again")
+		d.observeErr = ""
+	case err != nil && err.Error() != d.observeErr:
+		log.Printf("kernel mode: the 30-second check failed: %v; the previous publication stays in place and the next check tries again", err)
+		d.observeErr = err.Error()
+	}
+}
+
+// drift は、実際のテーブルと wgft0 が直前の公開と宣言に一致しなければ、それぞれ何が違うかを返す。
+// 一致すれば空である。テーブルは指紋で、wgft0 は種別、鍵、up、MTU、アドレス、ピアの集合と
+// AllowedIPs と keepalive で比べる。エンドポイントは比べない(7b.1 節)。
+func (d *kernelDataplane) drift() (table, link string, err error) {
+	fp, present, err := d.ops.fingerprint(nft.AgentTableName)
+	switch {
+	case err != nil:
+		return "", "", fmt.Errorf("read table inet %s: %w", nft.AgentTableName, err)
+	case !present:
+		table = "table inet " + nft.AgentTableName + " is gone"
+	case !d.fpKnown:
+		table = "the fingerprint of table inet " + nft.AgentTableName + " was not read after the last publication"
+	case fp != d.fp:
+		table = "table inet " + nft.AgentTableName + " was changed outside wgft"
+	}
+	prev, _ := d.f.PreviousKey()
+	st, err := d.ops.inspectLink(d.iface, d.priv, prev)
+	if err != nil {
+		return "", "", fmt.Errorf("read %s: %w", d.iface, err)
+	}
+	return table, d.linkDrift(st), nil
+}
+
+func nonEmpty(s ...string) []string {
+	var out []string
+	for _, x := range s {
+		if x != "" {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// linkDrift は wgft0 の状態 st が宣言と違えば、その説明を返す。
+func (d *kernelDataplane) linkDrift(st wg.AgentState) string {
+	cfg, err := d.linkConfig()
+	if err != nil {
+		return ""
+	}
+	var diff []string
+	switch {
+	case !st.Exists:
+		return d.iface + " is gone"
+	case st.Ownership != wg.OwnedByCurrentKey:
+		diff = append(diff, "the key")
+	}
+	if !st.Up {
+		diff = append(diff, "the up flag")
+	}
+	if st.MTU != cfg.MTU {
+		diff = append(diff, "the MTU")
+	}
+	if len(st.Addresses) != 1 || st.Addresses[0] != cfg.Address {
+		diff = append(diff, "the address")
+	}
+	want := netip.PrefixFrom(cfg.Server.Address, 32)
+	if len(st.Peers) != 1 || st.Peers[0].PublicKey != cfg.Server.PublicKey ||
+		len(st.Peers[0].AllowedIPs) != 1 || st.Peers[0].AllowedIPs[0] != want ||
+		st.Peers[0].Keepalive != cfg.Server.Keepalive {
+		diff = append(diff, "the peer")
+	}
+	if len(diff) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s differs from the declaration in %s", d.iface, strings.Join(diff, ", "))
+}
+
+// sameDNATs は、2 つの公開が同じ DNAT を持つかどうかである。世代と理由の文言は比べない。
+func sameDNATs(a, b nft.AgentPublication) bool {
+	return reflect.DeepEqual(a.DNATs(), b.DNATs())
+}
+
+// changedRules は、DNAT が変わったルールの ID を並べる。
+func changedRules(a, b nft.AgentPublication) []string {
+	byID := func(p nft.AgentPublication) map[string][]nft.AgentRange {
+		m := map[string][]nft.AgentRange{}
+		for _, r := range p.Rules {
+			m[r.RuleID] = r.Ranges
+		}
+		return m
+	}
+	am, bm := byID(a), byID(b)
+	var out []string
+	for id, rb := range bm {
+		if !reflect.DeepEqual(am[id], rb) {
+			out = append(out, id)
+		}
+	}
+	for id := range am {
+		if _, ok := bm[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

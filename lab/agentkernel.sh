@@ -25,6 +25,12 @@
 #       forward policy drop is named in the agent's startup log.
 #   24. MSS clamp: with ICMP "fragmentation needed" dropped on both ends, 2 MB of TCP goes through
 #       in each direction.
+#   resolve. the 30-second check resolves a rule's host name again: a change that keeps the chosen
+#       address publishes nothing, a changed address moves new flows to it, and a name that stops
+#       resolving keeps forwarding to the last good address and says so in the rule's state. The
+#       name is served from the home namespace's own /etc/hosts, /etc/netns/<ns>/hosts.
+#   drift. the 30-second check repairs changes made outside wgft: a deleted table, a deleted row,
+#       a changed MTU and a deleted wgft0.
 #
 # Requires `lab/lab build` and the netns topology (`lab/lab net up`). Leftovers from earlier runs
 # are removed first. The agent runs as root here; the CAP_NET_ADMIN-only deployment is a separate
@@ -37,7 +43,8 @@ SLOG=$W/wgft-ak-server.log
 ALOG=$W/wgft-ak-agent.log
 ELOG=$W/wgft-ak-echo.log
 ADMIN=127.0.0.1:8686
-CHECKS=${*:-16 17 18 22 24}
+CHECKS=${*:-16 17 18 22 24 resolve drift}
+HOSTS=/etc/netns/$HOME_NS/hosts
 fail=0
 
 check() { # check <label> <expected-substring> <actual>
@@ -83,12 +90,15 @@ cleanup() {
   home nft delete table inet otherfw 2>/dev/null
   client 'nft delete table inet noicmp 2>/dev/null'
   lan nft delete table inet noicmp 2>/dev/null
-  rm -rf "$DATA" "$ADATA"
+  rm -rf "$DATA" "$ADATA" "/etc/netns/$HOME_NS"
 }
+# set_hosts <line>...: the home namespace's /etc/hosts. `ip netns exec` bind-mounts the file when it
+# starts a process, so the file is rewritten in place to keep the running agent's view of it.
+set_hosts() { printf '127.0.0.1 localhost\n' > "$HOSTS"; printf '%s\n' "$@" >> "$HOSTS"; }
 
 # The allowlist holds every target the rules use except the one that must be refused. 127.0.0.1 is
 # in it, so the loopback rule is refused for being loopback, not for the list.
-ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.3:25570,192.168.50.2:25580,127.0.0.1:25565
+ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.3:25570,192.168.50.2:25580,192.168.50.2:25565,192.168.50.4:25565,192.168.50.5:25565,127.0.0.1:25565
 start_agent() {
   WGFT_MODE=kernel WGFT_JOIN="${JOIN:-}" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
     home setsid nohup wgft agent run --data-dir "$ADATA" >> "$ALOG" 2>&1 < /dev/null &
@@ -153,7 +163,10 @@ PY
 
 echo "== agent kernel mode: setup"
 cleanup
-mkdir -p "$DATA" "$ADATA"
+mkdir -p "$DATA" "$ADATA" "/etc/netns/$HOME_NS"
+# 192.168.50.4 and .5 answer nothing. They are listed first and allowed, so a rule that took the
+# first address instead of the smallest would fail the echo.
+set_hosts "192.168.50.4 game.lan" "192.168.50.3 game.lan"
 : > "$ALOG"
 vps setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
   > "$SLOG" 2>&1 < /dev/null &
@@ -161,7 +174,7 @@ disown
 wait_until 30 vps wgft agent ls --admin "$ADMIN" || echo "!! the server did not come up"
 lan setsid nohup echo -tcp 25565,25567 -udp 19132 > "$ELOG" 2>&1 < /dev/null &
 disown
-home setsid nohup echo -bind 192.168.50.2 -tcp 25580 >> "$ELOG" 2>&1 < /dev/null &
+home setsid nohup echo -bind 192.168.50.2 -tcp 25580,25565 >> "$ELOG" 2>&1 < /dev/null &
 disown
 # a LAN service that sends 2 MB on every connection, for the download direction of check 24
 lan setsid nohup python3 -c '
@@ -194,6 +207,7 @@ R_BIG=$(add_rule --tcp 39973 --to 192.168.50.3:25570)
 R_SELF=$(add_rule --tcp 39974 --to 192.168.50.2:25580)
 R_OUT=$(add_rule --tcp 39972 --to 192.168.50.3:25567)
 R_LO=$(add_rule --tcp 39975 --to 127.0.0.1:25565)
+R_NAME=$(add_rule --tcp 39977 --to game.lan:25565)
 wait_until 30 caught_up || echo "!! the agent did not catch up"
 
 check_16() {
@@ -329,33 +343,98 @@ NFT
   check "2 MB upload through the VPS" "got=2000000" "$(upload_2mb)"
   check "2 MB download through the VPS" "2000000" "$(download_2mb)"
   # The same transfers without the agent's two MSS rows, to show that the path needs them. The
-  # restart that follows publishes the whole table again.
-  local h
-  for h in $(home nft -a list chain inet wgft_agent forward | grep maxseg | grep -oE 'handle [0-9]+' | awk '{print $2}'); do
-    home nft delete rule inet wgft_agent forward handle "$h"
-  done
+  # agent is stopped meanwhile: its 30-second check would put the rows back in the middle of a
+  # transfer. The kernel keeps forwarding with the table as it is.
+  stop_agent
+  delete_mss_rows
   # Forget what each host learned about path MTUs, so that neither end reuses a smaller MSS or PMTU
   # it learned from the transfers above.
   client 'ip route flush cache'; lan ip route flush cache; home ip route flush cache; vps ip route flush cache
   echo "INFO  lan tcp_mtu_probing=$(lan cat /proc/sys/net/ipv4/tcp_mtu_probing) client tcp_mtu_probing=$(client 'cat /proc/sys/net/ipv4/tcp_mtu_probing')"
   not_forwarded "without the MSS rows the upload stalls" "got=2000000" "$(upload_2mb)"
+  okcheck "the MSS rows were still absent after the upload" "$(mss_rows_absent && echo 1 || echo 0)"
   not_forwarded "without the MSS rows the download stalls" "2000000" "$(download_2mb)"
+  okcheck "the MSS rows were still absent after the download" "$(mss_rows_absent && echo 1 || echo 0)"
   client 'nft delete table inet noicmp'
   lan nft delete table inet noicmp
-  stop_agent
+  # The restart's startup convergence publishes the whole table before the first 30-second check,
+  # which runs 30 s after the start. Rows back within that time came from the restart.
+  local applied t0
+  applied=$(grep -c "applied generation" "$ALOG")
+  t0=$SECONDS
   start_agent
-  # The generation does not change across the restart, so caught_up would hold at once; wait for
-  # the startup convergence itself, which publishes the whole table again.
-  wait_until 30 mss_rows_back
-  check "the restart puts the MSS rows back" "maxseg" "$(home nft list chain inet wgft_agent forward)"
+  wait_until 25 applied_since "$applied"
+  okcheck "the restart puts the MSS rows back before the first 30-second check: after $((SECONDS - t0))s" \
+    "$(mss_rows_back && [ $((SECONDS - t0)) -lt 30 ] && echo 1 || echo 0)"
 }
+delete_mss_rows() {
+  local h
+  for h in $(home nft -a list chain inet wgft_agent forward | grep maxseg | grep -oE 'handle [0-9]+' | awk '{print $2}'); do
+    home nft delete rule inet wgft_agent forward handle "$h"
+  done
+}
+mss_rows_absent() { [ "$(home nft list chain inet wgft_agent forward | grep -c maxseg)" = 0 ]; }
+applied_since() { [ "$(grep -c "applied generation" "$ALOG")" -gt "$1" ]; }
 mss_rows_back() { [ "$(home nft list chain inet wgft_agent forward | grep -c maxseg)" = 2 ]; }
 upload_2mb() { client 'head -c 2000000 /dev/zero | timeout -k 5 30 socat -t 10 -T 20 - TCP:198.51.100.1:39971 2>&1'; }
 download_2mb() { client 'timeout -k 5 30 socat -T 20 -u TCP:198.51.100.1:39973 - 2>/dev/null | wc -c'; }
 
+check_resolve() {
+  echo "== resolve: the 30-second check resolves names again"
+  check "a host-name rule reaches the smallest address" "tcp-echo 0.0.0.0:25565" "$(tcp_echo 39977)"
+  local before
+  before=$(grep -c "target resolution changed" "$ALOG")
+  # the allowed candidates change from .3 and .4 to .3 and .5; the smallest stays .3
+  set_hosts "192.168.50.5 game.lan" "192.168.50.3 game.lan"
+  sleep 40
+  check "the new candidates keep the smallest address" "tcp-echo 0.0.0.0:25565" "$(tcp_echo 39977)"
+  okcheck "a change that keeps the chosen address publishes nothing" \
+    "$([ "$(grep -c "target resolution changed" "$ALOG")" = "$before" ] && echo 1 || echo 0)"
+  set_hosts "192.168.50.2 game.lan"
+  wait_until 45 grep -q "target resolution changed the DNAT of $R_NAME" "$ALOG"
+  check "a changed address moves new flows" "tcp-echo 192.168.50.2:25565" "$(tcp_echo 39977)"
+  set_hosts
+  wait_until 60 rule_reason_has "$R_NAME" "still forwarding to 192.168.50.2"
+  check "a name that stops resolving keeps the last good address" "still forwarding to 192.168.50.2" "$(rule_status "$R_NAME")"
+  check "and says the name did not resolve" "name resolution" "$(rule_status "$R_NAME")"
+  check "and keeps forwarding" "tcp-echo 192.168.50.2:25565" "$(tcp_echo 39977)"
+  set_hosts "192.168.50.3 game.lan"
+  wait_until 60 rule_state_ok "$R_NAME"
+  check "the name resolves again" "ok" "$(rule_status "$R_NAME")"
+}
+rule_reason_has() { [[ "$(rule_status "$1")" == *"$2"* ]]; }
+rule_state_ok() { [[ "$(rule_status "$1")" == "ok "* ]]; }
+
+check_drift() {
+  echo "== drift: the 30-second check repairs changes made outside wgft"
+  home nft delete table inet wgft_agent
+  wait_until 45 home nft list table inet wgft_agent
+  check "a deleted table is published again" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
+  check "forwarding is back after the table was deleted" "tcp-echo" "$(tcp_echo 39971)"
+  check "the log names the missing table" "table inet wgft_agent is gone" "$(cat "$ALOG")"
+  local h
+  h=$(home nft -a list chain inet wgft_agent postrouting | grep masquerade | grep -oE 'handle [0-9]+' | awk '{print $2}')
+  home nft delete rule inet wgft_agent postrouting handle "$h"
+  wait_until 45 masquerade_back
+  okcheck "a deleted row is published again" "$(masquerade_back && echo 1 || echo 0)"
+  check "the log names the changed table" "was changed outside wgft" "$(cat "$ALOG")"
+  home ip link set wgft0 mtu 1280
+  wait_until 45 mtu_back
+  okcheck "a changed MTU is converged back" "$(mtu_back && echo 1 || echo 0)"
+  home ip link del wgft0
+  wait_until 60 home ip link show wgft0
+  wait_until 60 handshaken
+  check "a deleted wgft0 is created again" "wgft0" "$(home ip -br link show wgft0 2>&1)"
+  wait_until 30 tcp_ok 39971
+  check "forwarding is back after wgft0 was deleted" "tcp-echo" "$(tcp_echo 39971)"
+}
+masquerade_back() { home nft list chain inet wgft_agent postrouting | grep -q masquerade; }
+mtu_back() { home ip link show wgft0 | grep -q 'mtu 1420'; }
+tcp_ok() { [[ "$(tcp_echo "$1")" == *tcp-echo* ]]; }
+
 for c in $CHECKS; do
   case "$c" in
-    16|17|18|22|24) "check_$c" ;;
+    16|17|18|22|24|resolve|drift) "check_$c" ;;
     *) echo "FAIL  unknown check $c"; fail=1 ;;
   esac
 done

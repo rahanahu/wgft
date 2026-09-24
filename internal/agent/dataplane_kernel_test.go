@@ -3,10 +3,12 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"os"
 	"strings"
@@ -35,6 +37,12 @@ type fakeKernel struct {
 
 	published  []nft.AgentPublication
 	publishErr error
+	// table は実際のテーブルの指紋の元である。公開のたびに進み、外からの変更は tableEdit を進めて模す
+	tableGen  int
+	tableEdit int
+	tableGone bool
+	// fpErr は、次の指紋の読みを 1 回だけ失敗させる
+	fpErr error
 
 	dns    map[string][]netip.Addr // 無い名前は解決できない
 	dnsErr error                   // 設定すれば、どの名前も解決できない
@@ -63,7 +71,19 @@ func (k *fakeKernel) ops() kernelOps {
 				return k.publishErr
 			}
 			k.published = append(k.published, p)
+			k.tableGen++
+			k.tableGone = false
 			return nil
+		},
+		fingerprint: func(string) (string, bool, error) {
+			if err := k.fpErr; err != nil {
+				k.fpErr = nil
+				return "", false, err
+			}
+			if k.tableGone {
+				return "", false, nil
+			}
+			return fmt.Sprintf("fp-%d-%d", k.tableGen, k.tableEdit), true, nil
 		},
 		lookup: func(_ context.Context, host string) ([]netip.Addr, error) {
 			if k.dnsErr != nil {
@@ -589,5 +609,373 @@ func TestKernelResolvesTargetsConcurrently(t *testing.T) {
 	p := (<-done).(*kernelPrepared)
 	if len(p.resolved) != 2 || p.resolved["a.lan"].Err != nil || p.resolved["b.lan"].Err != nil {
 		t.Errorf("resolved = %+v", p.resolved)
+	}
+}
+
+// ours は、宣言どおりの wgft0 の状態を返す。
+func ours(t *testing.T, d *kernelDataplane) wg.AgentState {
+	t.Helper()
+	cfg, err := d.linkConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wg.AgentState{Exists: true, Kind: "wireguard", Ownership: wg.OwnedByCurrentKey, Up: true, MTU: cfg.MTU,
+		Addresses: []netip.Prefix{cfg.Address},
+		Peers: []wg.PeerState{{PublicKey: cfg.Server.PublicKey, AllowedIPs: []netip.Prefix{netip.PrefixFrom(cfg.Server.Address, 32)},
+			Keepalive: cfg.Server.Keepalive, Endpoint: netip.MustParseAddrPort("198.51.100.200:51820")}}}
+}
+
+func observeOnce(t *testing.T, d *kernelDataplane, gen uint64, rules []proto.AgentRule) bool {
+	t.Helper()
+	saved, err := d.observeCommit(gen, rules, d.observePrepare(rules))
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	return saved
+}
+
+// 30 秒ごとの見直しは、PlanAgent の結果の DNAT が変わったときだけ公開し直す。名前の解決の結果が
+// 変わっても、選ぶアドレスが同じなら公開し直さない(7b.2 節)。エンドポイントの違いは食い違いにしない。
+func TestKernelObserveRepublishesOnlyWhenTheDNATChanges(t *testing.T) {
+	a3, a4, a9 := netip.MustParseAddr("192.168.1.3"), netip.MustParseAddr("192.168.1.4"), netip.MustParseAddr("192.168.1.9")
+	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {a3, a9}}}
+	d := newTestKernel(t, k, nil, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "game.lan:25565", 25565, 25565)}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	if observeOnce(t, d, 1, rules) || len(k.published) != 1 {
+		t.Fatalf("an unchanged check published %d tables", len(k.published)-1)
+	}
+	k.dns["game.lan"] = []netip.Addr{a3} // 集合は変わったが、最も小さいアドレスは同じ
+	if observeOnce(t, d, 1, rules) || len(k.published) != 1 {
+		t.Errorf("a resolution change that keeps the chosen address republished")
+	}
+	k.dns["game.lan"] = []netip.Addr{a4, a9}
+	if !observeOnce(t, d, 1, rules) || len(k.published) != 2 {
+		t.Fatalf("a changed chosen address did not republish")
+	}
+	if got := k.published[1].Rules[0].Ranges[0].Dest.Addr(); got != a4 {
+		t.Errorf("republished to %s, want %s", got, a4)
+	}
+	if len(k.ensured) != 1 {
+		t.Errorf("a resolution change converged wgft0 again: %d times", len(k.ensured))
+	}
+}
+
+// 見直しは、テーブルが外で変えられたか消えたとき、同じ公開をやり直す。wgft0 が宣言と違えば、先に
+// wgft0 を収束させる(7b.4 節)。
+func TestKernelObserveRepairsDrift(t *testing.T) {
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, nil, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	k.tableEdit++ // nft で行を消したなど
+	if !observeOnce(t, d, 1, rules) || len(k.published) != 2 || len(k.ensured) != 1 {
+		t.Fatalf("a changed table: published %d, ensured %d; want the table again without touching wgft0", len(k.published), len(k.ensured))
+	}
+	if observeOnce(t, d, 1, rules) || len(k.published) != 2 {
+		t.Fatal("the check after a repair published again")
+	}
+	k.tableGone = true // systemctl reload nftables など
+	if !observeOnce(t, d, 1, rules) || len(k.published) != 3 {
+		t.Fatal("a missing table was not published again")
+	}
+	link := ours(t, d)
+	link.MTU = 1280
+	k.link = link
+	if !observeOnce(t, d, 1, rules) || len(k.ensured) != 2 || len(k.published) != 4 {
+		t.Fatalf("a changed MTU: ensured %d, published %d; want wgft0 converged and the table published", len(k.ensured), len(k.published))
+	}
+	k.link = ours(t, d)
+	k.link.Peers[0].Endpoint = netip.MustParseAddrPort("203.0.113.99:40000")
+	if observeOnce(t, d, 1, rules) || len(k.published) != 4 {
+		t.Error("an endpoint that moved was treated as drift")
+	}
+}
+
+// 見直しの公開が失敗したら、旧い記録を残し、同じ誤りでは 1 行だけ出し、次の見直しで試し直す。
+func TestKernelObserveFailureKeepsTheRecord(t *testing.T) {
+	k := &fakeKernel{}
+	f := &credentials.Credentials{}
+	d := newTestKernel(t, k, f, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := string(f.KernelPublication)
+	k.tableGone = true
+	k.publishErr = errors.New("table is owned by another process")
+	if _, err := d.observeCommit(1, rules, d.observePrepare(rules)); err == nil {
+		t.Fatal("a failed republish returned no error")
+	}
+	if string(f.KernelPublication) != before {
+		t.Error("a failed republish replaced the record")
+	}
+	k.publishErr = nil
+	if !observeOnce(t, d, 1, rules) || k.tableGone {
+		t.Error("the next check did not publish again")
+	}
+}
+
+// 理由の文言だけが変わったとき(DNS の誤りの文面など)は、記録を書き換えるが、テーブルは差し替えない。
+func TestKernelObserveReasonOnlyChangeDoesNotRepublish(t *testing.T) {
+	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.30")}}}
+	f := &credentials.Credentials{}
+	d := newTestKernel(t, k, f, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	k.dnsErr = errors.New("i/o timeout")
+	if !observeOnce(t, d, 1, rules) || len(k.published) != 1 {
+		t.Fatalf("published %d tables; a failed lookup that keeps the last good address changes only the reason", len(k.published))
+	}
+	if !strings.Contains(string(f.KernelPublication), "i/o timeout") {
+		t.Error("the record does not carry the new reason")
+	}
+	k.dnsErr = errors.New("server misbehaving")
+	if !observeOnce(t, d, 1, rules) || len(k.published) != 1 {
+		t.Error("a new error text republished the table")
+	}
+}
+
+// runtime の見直しは、名前を引く間に処理済みの全体状態が変われば、その解決の結果を捨てる。古い宣言の
+// 解決の結果で新しい公開を上書きしないためである。試し直しを待つ間も見直しを行わない。
+func TestObserveDiscardsAStaleResolution(t *testing.T) {
+	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.3")}}}
+	f := &credentials.Credentials{}
+	d := newTestKernel(t, k, f, nil)
+	k.link = ours(t, d)
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
+	old := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
+	rt.mu.Lock()
+	if err := rt.finishApplyLocked(old, nil); err != nil {
+		t.Fatal(err)
+	}
+	rt.mu.Unlock()
+	published := len(k.published)
+
+	newer := &proto.State{Generation: 2, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.50:80", 80, 80)}}
+	d.ops.lookup = func(_ context.Context, host string) ([]netip.Addr, error) {
+		// 名前を引いている間に、stream が新しい全体状態を適用し終える
+		rt.mu.Lock()
+		if err := rt.finishApplyLocked(newer, nil); err != nil {
+			t.Error(err)
+		}
+		rt.mu.Unlock()
+		return []netip.Addr{netip.MustParseAddr("192.168.1.99")}, nil
+	}
+	rt.observe()
+	if len(k.published) != published+1 {
+		t.Fatalf("published %d tables during the check, want only the new state's 1", len(k.published)-published)
+	}
+	if got := d.pub.Rules[0].Ranges[0].Dest.Addr(); got != netip.MustParseAddr("192.168.1.50") {
+		t.Errorf("the check overwrote the new state with the old one's resolution: DNAT to %s", got)
+	}
+
+	rt.mu.Lock()
+	rt.pendingSt = &proto.State{Generation: 3}
+	rt.mu.Unlock()
+	k.tableGone = true
+	before := len(k.published)
+	rt.observe()
+	if len(k.published) != before {
+		t.Error("the check published while a pending state waits for its retry")
+	}
+	rt.mu.Lock()
+	rt.pendingSt = nil
+	rt.mu.Unlock()
+	rt.stateNotify = make(chan struct{}, 1)
+	rt.observe()
+	if len(k.published) != before+1 {
+		t.Error("the check did not repair the missing table once nothing was pending")
+	}
+	// 見直しが公開し直したら、次の 30 秒を待たずにハートビートを送らせる
+	select {
+	case <-rt.stateNotify:
+	default:
+		t.Error("the repair did not ask for a heartbeat")
+	}
+}
+
+// 公開の後に指紋を読めなければ、比べる基準が無いので、次の見直しは同じ公開をやり直して指紋を読み直す
+// (7a.3 節の指紋の読み直しの失敗と同じ扱い)。
+func TestKernelObserveRepublishesAfterAnUnreadFingerprint(t *testing.T) {
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, nil, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
+	k.fpErr = errors.New("netlink: message truncated")
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !observeOnce(t, d, 1, rules) || len(k.published) != 2 {
+		t.Fatalf("published %d tables; an unread fingerprint must be published and read again", len(k.published))
+	}
+	if !strings.Contains(d.driftSeen, "was not read after the last publication") {
+		t.Errorf("drift = %q, want it to name the unread fingerprint", d.driftSeen)
+	}
+	if observeOnce(t, d, 1, rules) || len(k.published) != 2 {
+		t.Error("the check after the fingerprint was read again published again")
+	}
+}
+
+// DNAT が変わって公開し直したら、TCP の宛先へ試し接続し直す。新しい宛先の結果をすぐに報告するためである。
+func TestKernelObserveProbesAfterADNATChange(t *testing.T) {
+	a3, a4 := netip.MustParseAddr("192.168.1.3"), netip.MustParseAddr("192.168.1.4")
+	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {a3}}}
+	d := newTestKernel(t, k, nil, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	k.dns["game.lan"] = []netip.Addr{a4}
+	k.probeErr = map[netip.AddrPort]error{netip.AddrPortFrom(a4, 80): errors.New("connection refused")}
+	if !observeOnce(t, d, 1, rules) {
+		t.Fatal("the changed address did not republish")
+	}
+	if last := k.probed[len(k.probed)-1]; last != netip.AddrPortFrom(a4, 80) {
+		t.Errorf("last probe %s, want the new target", last)
+	}
+	if s := statusOf(t, d, "r1"); s.State != proto.StatusError {
+		t.Errorf("r1 = %+v, want the new target's probe error at once", s)
+	}
+}
+
+// 停止で名前の解決が取り消されたら、見直しは何もしない。取り消しの誤りを解決の失敗として理由に
+// 書いた記録も作らない。
+func TestKernelObserveDoesNothingWhenStopping(t *testing.T) {
+	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.3")}}}
+	f := &credentials.Credentials{}
+	d := newTestKernel(t, k, f, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := string(f.KernelPublication)
+	ctx, cancel := context.WithCancel(context.Background())
+	d.ctx = ctx
+	d.ops.lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		cancel()
+		return nil, ctx.Err()
+	}
+	k.tableGone = true
+	if observeOnce(t, d, 1, rules) {
+		t.Error("a check cancelled by stopping reported a change")
+	}
+	if len(k.published) != 1 || string(f.KernelPublication) != before || strings.Contains(string(f.KernelPublication), "context canceled") {
+		t.Errorf("published %d tables, record %s; want nothing done", len(k.published), f.KernelPublication)
+	}
+}
+
+// wgft0 の keepalive、アドレス、up のどれかが宣言と違えば、wgft0 を収束させてからテーブルを公開し直す。
+func TestKernelObserveFindsEachLinkDrift(t *testing.T) {
+	cases := map[string]func(*wg.AgentState){
+		"keepalive":  func(st *wg.AgentState) { st.Peers[0].Keepalive = 0 },
+		"address":    func(st *wg.AgentState) { st.Addresses = []netip.Prefix{netip.MustParsePrefix("10.200.0.9/24")} },
+		"extra addr": func(st *wg.AgentState) { st.Addresses = append(st.Addresses, netip.MustParsePrefix("10.9.9.9/32")) },
+		"down":       func(st *wg.AgentState) { st.Up = false },
+		"key":        func(st *wg.AgentState) { st.Ownership = wg.OwnedByPreviousKey },
+		"allowed":    func(st *wg.AgentState) { st.Peers[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")} },
+		"extra peer": func(st *wg.AgentState) { st.Peers = append(st.Peers, wg.PeerState{PublicKey: testKey(t).PublicKey()}) },
+	}
+	for name, change := range cases {
+		t.Run(name, func(t *testing.T) {
+			k := &fakeKernel{}
+			d := newTestKernel(t, k, nil, nil)
+			k.link = ours(t, d)
+			rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
+			if _, err := d.applyRules(1, rules, nil); err != nil {
+				t.Fatal(err)
+			}
+			st := ours(t, d)
+			change(&st)
+			k.link = st
+			if !observeOnce(t, d, 1, rules) || len(k.ensured) != 2 || len(k.published) != 2 {
+				t.Errorf("ensured %d, published %d; want wgft0 converged and the table published", len(k.ensured), len(k.published))
+			}
+		})
+	}
+}
+
+// 他のプロセスが同じ変更を繰り返すと、見直しは 30 秒ごとに直し続けるが、ログは食い違いの無い見直しを
+// 挟むまで 1 行だけにする。
+func TestKernelObserveLogsARecurringDriftOnce(t *testing.T) {
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, nil, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	for i := 0; i < 3; i++ {
+		k.tableEdit++ // 他のプロセスがまた書き換える
+		observeOnce(t, d, 1, rules)
+	}
+	if n := strings.Count(buf.String(), "changed outside wgft"); n != 1 {
+		t.Errorf("logged the recurring drift %d times, want 1:\n%s", n, buf.String())
+	}
+	if len(k.published) != 4 {
+		t.Errorf("published %d tables, want a repair on every check", len(k.published))
+	}
+	observeOnce(t, d, 1, rules) // 食い違いの無い見直し
+	k.tableEdit++
+	observeOnce(t, d, 1, rules)
+	if n := strings.Count(buf.String(), "changed outside wgft"); n != 2 {
+		t.Errorf("a drift after a clean check logged %d lines in all, want 2", n)
+	}
+	// 直らないうちに別の食い違いが続けば、その食い違いも 1 行出す
+	k.tableGone = true
+	observeOnce(t, d, 1, rules)
+	if !strings.Contains(buf.String(), "table inet wgft_agent is gone") {
+		t.Errorf("a different drift right after another was not logged:\n%s", buf.String())
+	}
+	link := ours(t, d)
+	link.MTU = 1280
+	k.link = link
+	k.tableEdit++
+	observeOnce(t, d, 1, rules)
+	if !strings.Contains(buf.String(), "differs from the declaration in the MTU") {
+		t.Errorf("an MTU drift right after a table drift was not logged:\n%s", buf.String())
+	}
+}
+
+// runtime の見直しは、名前を引く間に公開できなかった全体状態の控えが現れたら、解決の結果を捨てる。
+// 控えの試し直しが公開を担うためである。
+func TestObserveDiscardsAResolutionWhenAPendingStateAppears(t *testing.T) {
+	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.3")}}}
+	f := &credentials.Credentials{}
+	d := newTestKernel(t, k, f, nil)
+	k.link = ours(t, d)
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
+	st := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
+	rt.mu.Lock()
+	if err := rt.finishApplyLocked(st, nil); err != nil {
+		t.Fatal(err)
+	}
+	rt.mu.Unlock()
+	k.tableGone = true
+	d.ops.lookup = func(context.Context, string) ([]netip.Addr, error) {
+		rt.mu.Lock()
+		rt.pendingSt = &proto.State{Generation: 2}
+		rt.mu.Unlock()
+		return []netip.Addr{netip.MustParseAddr("192.168.1.3")}, nil
+	}
+	published := len(k.published)
+	rt.observe()
+	if len(k.published) != published {
+		t.Error("the check published although a pending state appeared while it resolved names")
 	}
 }
