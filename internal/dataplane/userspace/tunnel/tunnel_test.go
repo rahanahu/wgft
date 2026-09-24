@@ -1,9 +1,12 @@
 package tunnel
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,5 +183,29 @@ func assertGoroutinesSettle(t *testing.T, baseline int) {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// エンドポイントの名前を引けない誤りは、問い合わせごとに送信元のポートが変わっても同じ文面になる。
+// 文面はトンネルの状態の Err になり、エージェントは状態の行の変化でログを出すため、変わると
+// keepalive ごとに全ルールの行が出る。
+func TestResolveErrorKeepsItsTextAcrossLookups(t *testing.T) {
+	var n atomic.Int32
+	saved := lookupIP4
+	t.Cleanup(func() { lookupIP4 = saved })
+	lookupIP4 = func(context.Context, string) ([]netip.Addr, error) {
+		return nil, &net.DNSError{Name: "vps.example", Server: "192.168.1.1:53",
+			Err: fmt.Sprintf("read udp 192.168.1.10:%d->192.168.1.1:53: read: connection refused", 40000+n.Add(1))}
+	}
+	_, err1 := resolve("vps.example:51820")
+	_, err2 := resolve("vps.example:51820")
+	if err1 == nil || err2 == nil {
+		t.Fatalf("resolve succeeded: %v, %v", err1, err2)
+	}
+	if err1.Error() != err2.Error() {
+		t.Errorf("two lookups that differ only in the source port read %q and %q", err1, err2)
+	}
+	if strings.Contains(err2.Error(), "->") {
+		t.Errorf("the error keeps the socket pair: %q", err2)
 	}
 }

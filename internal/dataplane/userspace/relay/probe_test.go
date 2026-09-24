@@ -293,3 +293,39 @@ func TestTargetReachabilityIsLoggedOnChangeOnly(t *testing.T) {
 		t.Errorf("unreachable logged %d times in total, want 1; log: %v", n, lines)
 	}
 }
+
+// 名前を引けない宛先の確認の誤りは、問い合わせごとに送信元のポートが変わっても同じ文面になる。文面は
+// ハートビートのルールの理由になり、エージェントは理由の変化でログを出すので、変わると 30 秒ごとに全ルールの
+// 行が出る。
+func TestProbeErrorOfAFailedLookupKeepsItsText(t *testing.T) {
+	var n atomic.Int32
+	lb := &loopback{}
+	port := reserveTCP(t, lb)
+	m := New(lb, Options{Logf: func(string, ...any) {}, Dial: func(network, addr string) (net.Conn, error) {
+		src := 40000 + n.Add(1)
+		return nil, &net.OpError{Op: "dial", Net: network, Err: &net.DNSError{Name: "game.lan", Server: "192.168.1.1:53",
+			Err: fmt.Sprintf("read udp 192.168.1.10:%d->192.168.1.1:53: read: connection refused", src)}}
+	}})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.TCP, port}: {"game.lan:80", "r1"}})
+	errText := func() string {
+		for _, s := range m.Status() {
+			if s.Key.Port == port && s.Err != nil {
+				return s.Err.Error()
+			}
+		}
+		return ""
+	}
+	first := errText()
+	m.Retry()
+	second := errText()
+	if n.Load() < 2 {
+		t.Fatalf("the target was dialled %d times, want a probe on apply and one on Retry", n.Load())
+	}
+	if first == "" || first != second {
+		t.Errorf("the probe error changed between sweeps: %q, then %q", first, second)
+	}
+	if strings.Contains(second, "->") {
+		t.Errorf("the probe error keeps the socket pair: %q", second)
+	}
+}
