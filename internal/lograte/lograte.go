@@ -1,4 +1,5 @@
-// Package lograte は、同じ理由で繰り返し出るログを間引く門を持つ(仕様 10.4 節)。
+// Package lograte は、同じ理由で繰り返し出るログを間引く門と、名前の解決の誤りの文面をそろえる関数
+// (StableError)を持つ(仕様 10.4 節、5.2 節)。
 // 上限で拒んだこと(Resource Guard)と、宛先への dial の失敗の両方が使うので、どちらの
 // package にも属さない小さな package に置く(設計文書 7a.10 節の型の分割)。
 package lograte

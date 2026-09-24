@@ -24,6 +24,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
@@ -403,7 +404,9 @@ func resolveTargets(ctx context.Context, rules []proto.AgentRule, lookup nft.Loo
 			defer wg.Done()
 			a, err := lookup(ctx, h)
 			mu.Lock()
-			answers[h] = answer{a, err}
+			// 誤りの文面はルールの理由になり、見直しは理由の変化で記録を書き換える(7b.2 節)。問い合わせ
+			// ごとに変わる送信元のポートを除き、同じ誤りを 30 秒ごとの変化にしない
+			answers[h] = answer{a, lograte.StableError(err)}
 			mu.Unlock()
 		}()
 	}

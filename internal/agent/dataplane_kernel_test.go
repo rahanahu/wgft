@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/netip"
 	"os"
 	"strings"
@@ -977,5 +978,33 @@ func TestObserveDiscardsAResolutionWhenAPendingStateAppears(t *testing.T) {
 	rt.observe()
 	if len(k.published) != published {
 		t.Error("the check published although a pending state appeared while it resolved names")
+	}
+}
+
+// 名前の解決の誤りが送信元のポートだけ違う場合は、理由の変化にしない。変化にすると、30 秒ごとに記録を
+// 書き換え、ハートビートとルールのログを出す。
+func TestKernelObserveSameLookupErrorFromANewPortSavesNothing(t *testing.T) {
+	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.30")}}}
+	f := &credentials.Credentials{}
+	d := newTestKernel(t, k, f, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	refused := func(port int) error {
+		return &net.DNSError{Name: "game.lan", Server: "192.168.1.1:53",
+			Err: fmt.Sprintf("read udp 192.168.1.10:%d->192.168.1.1:53: read: connection refused", port)}
+	}
+	k.dnsErr = refused(54285)
+	if !observeOnce(t, d, 1, rules) {
+		t.Fatal("the first failed lookup did not record its reason")
+	}
+	k.dnsErr = refused(48346)
+	if observeOnce(t, d, 1, rules) {
+		t.Errorf("the same lookup error from another source port changed the record: %s", f.KernelPublication)
+	}
+	if strings.Contains(string(f.KernelPublication), "->") {
+		t.Errorf("the recorded reason keeps the socket pair: %s", f.KernelPublication)
 	}
 }

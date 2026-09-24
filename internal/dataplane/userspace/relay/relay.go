@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -403,7 +404,9 @@ func (m *Manager) runProbes(probes []targetProbe) {
 		go func(p *targetProbe) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			p.err = m.probeTarget(p.target)
+			// 誤りの文面はルールの理由になり、ハートビートのログは理由の変化で出る。名前の解決の誤りから
+			// 問い合わせごとに変わる送信元のポートを除き、同じ誤りを 30 秒ごとの変化にしない
+			p.err = lograte.StableError(m.probeTarget(p.target))
 		}(&probes[i])
 	}
 	wg.Wait()
