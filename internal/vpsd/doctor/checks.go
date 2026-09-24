@@ -714,17 +714,27 @@ func targetReasonCode(reason string) string {
 	return ReasonTargetError
 }
 
-// looksLikeBindFailure は、エージェントの理由がリスナーの bind の失敗かどうかを見る。エージェント
-// 自身の文言 "bind failed" に加え、Go の net.Listen がそのまま返す形("listen ...: bind: address
-// already in use" のような、"listen" と "bind:" を伴う文言)も含む。ユーザー空間モードの中継
-// (internal/dataplane/userspace/relay)では、この符号に至る経路を実際には踏めていない(設計文書
-// 改訂の記録)。それでも符号は残し、両方の文言を見る。将来この経路を踏んだときに target_error へ
-// 沈めないためである。
+// looksLikeBindFailure は、エージェントの理由がリスナーの bind の失敗かどうかを見る。3 つの文言の
+// 形を見る。エージェント自身の文言 "bind failed"、Go の net.Listen がそのまま返す形("listen ...:
+// bind: address already in use" のような、"listen" と "bind:" を伴う文言)、そしてユーザー空間
+// モードの中継(internal/dataplane/userspace/relay)が実際に組み立てる形である。エージェントの
+// 中継は gVisor の netstack(internal/nettun/listen.go の ListenTCP、UDP のリスナーが経由する
+// gonet.DialUDP)の上で待ち受けを開き、その bind の失敗は Go の net.OpError をそのまま経由するが、
+// Op が "listen" ではなく "bind" になる("bind tcp <トンネルのアドレス>: port is in use" の形。
+// net.Listen の "listen ...: bind: ..." とは組み立てが違うので、以前の判定には当たらなかった)。
+// この形は、ソースコードから読み取った実際の組み立てと合わせて、試験用の実機(#211 より前の版の
+// エージェント。stream が切れてもリレーのポートを空けない不具合があった)で実際に観測されている。
+// 意味の分からない target_error に落ちていたのはこの形である。#211 で直した今の版のエージェント
+// でも、宛先が先に閉じるセッションの後にルールを閉じ直すと、TIME_WAIT の間ポートを保持する経路
+// (設計文書 7 節)から同じ文言に至ることをラボで確かめた(設計文書 改訂の記録)。
 func looksLikeBindFailure(reason string) bool {
 	if strings.Contains(reason, "bind failed") {
 		return true
 	}
-	return strings.Contains(reason, "listen") && strings.Contains(reason, "bind:")
+	if strings.Contains(reason, "listen") && strings.Contains(reason, "bind:") {
+		return true
+	}
+	return strings.Contains(reason, "bind tcp ") || strings.Contains(reason, "bind udp ")
 }
 
 func agentStateText(st adminapi.AgentRuleStatus) string {
@@ -740,7 +750,15 @@ func agentRuleNextStep(reason string, r proto.Rule) string {
 	case ReasonTargetNotAllowed:
 		return "the agent refuses this target itself: " + allowtargets.Env + " on the agent host does not list it. Add the target there, or point the rule elsewhere."
 	case ReasonListenerBindFailed:
-		return "the agent could not open its listener for this port. Find what else on the agent host binds it; the agent retries every 30s."
+		// ユーザー空間モードの中継の待ち受けはエージェントのプロセス内の netstack にあり、
+		// ホストの他のプロセスとポート空間を共有しない。「他のプロセスを探す」という以前の案内は
+		// 誤りを誘うため直した。ラボで再現できた経路では、ポートを保持しているのは TIME_WAIT に
+		// 残った接続であって待ち受けそのものではないので、待ち受けと接続の両方を挙げる。実機で
+		// 観測した pre-#211 の例(stream が切れてもリレーのポートを空けない不具合。#211 で修正済み)
+		// は、無効化の直後の有効化でエージェント自身の前の待ち受けがまだそのポートを離していない
+		// 場合だった(設計文書 改訂の記録)。
+		return "an earlier listener or connection of the agent on this port has not been freed yet; this is internal to the agent process, " +
+			"not another process on the agent host. The agent retries every 30s and clears once that hold ends; restarting the agent also frees it at once."
 	case ReasonResolveFailed:
 		return "fix name resolution on the agent host, or point the rule at a literal address"
 	}

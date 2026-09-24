@@ -295,6 +295,26 @@ func TestDiagnose(t *testing.T) {
 			wantDetail: "could not resolve nas.home.lan",
 			wantNext:   "name resolution on the agent host",
 		},
+		{
+			// looksLikeResolveFailure and looksLikeBindFailure share the "bind tcp "/"bind udp "
+			// wording space: a bind failure's reason text must not also look like a resolve
+			// failure. Pins a regression where looksLikeResolveFailure's fallback had been
+			// accidentally overwritten with looksLikeBindFailure's own return statement, which
+			// made rule.target_resolve fail as target_resolve_failed (pointing at DNS) ahead of
+			// rule.target's own, correct listener_bind_failed classification, for any hostname
+			// target whose agent reports a bind failure.
+			name: "a bind failure on a hostname target does not look like a resolve failure",
+			mutate: func(r *proto.Rule, in *doctorInput) {
+				r.Target = "nas.home.lan:25565"
+				in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{
+					Agent: "home", State: proto.StatusError,
+					Reason: "tcp/8461: bind tcp 10.200.0.2:8461: port is in use", At: at(10 * time.Second), Connected: true,
+				}
+			},
+			wantFailed: checkTarget, wantReason: doctor.ReasonListenerBindFailed,
+			wantDetail: "port is in use",
+			wantNext:   "earlier listener or connection",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -321,6 +341,25 @@ func TestDiagnose(t *testing.T) {
 				t.Errorf("%s next = %q, want it to hold %q", c.ID, c.Next, tt.wantNext)
 			}
 		})
+	}
+}
+
+// TestBindFailureLeavesTargetResolveNotTested confirms the other side of the "bind failure on a
+// hostname target" table case above: rule.target_resolve itself stays NOT TESTED
+// resolved_by_agent, rather than FAILED target_resolve_failed. The table above only checks the
+// first FAILED check (rule.target here); this pins the check right next to it, which is exactly
+// the one the looksLikeResolveFailure regression corrupted.
+func TestBindFailureLeavesTargetResolveNotTested(t *testing.T) {
+	r := tcpRule()
+	r.Target = "nas.home.lan:25565"
+	in := healthyInput(r)
+	in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{
+		Agent: "home", State: proto.StatusError,
+		Reason: "tcp/8461: bind tcp 10.200.0.2:8461: port is in use", At: at(10 * time.Second), Connected: true,
+	}
+	c := checkOf(t, diagnose(r, in), checkTargetResolve)
+	if c.Status != statusNotTested || c.Reason != reasonResolvedByAgent {
+		t.Errorf("status/reason = %s/%s, want %s/%s: %s", c.Status, c.Reason, statusNotTested, reasonResolvedByAgent, c.Detail)
 	}
 }
 

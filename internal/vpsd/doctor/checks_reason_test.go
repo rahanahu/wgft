@@ -6,9 +6,23 @@ import "testing"
 // 符号に写すかを確かめる。文言はいずれも実装が返しうるものである。timeout の行は、
 // ユーザー空間モードの中継(internal/dataplane/userspace/relay)の probeTarget が返す確認の期限
 // 切れの文言そのものであり、以前はどの case にも当たらず target_error に落ちていた(target が
-// 黙って SYN を捨てるルールをラボで作って確認した)。bind: の行は、Go の net.Listen がそのまま
-// 返す文言であり、この形の bind 失敗はユーザー空間モードの中継では実際には再現できていない
-// (設計文書 10.2a 節の改訂の記録)。それでも符号を当てられることは確かめておく。
+// 黙って SYN を捨てるルールをラボで作って確認した)。"listen tcp4 ...: bind: ..." の行は、Go の
+// net.Listen がそのまま返す文言である。"tcp/8461: bind tcp ...: ..." と "udp/8462: bind udp ...:
+// ..." の行は、エージェントのユーザー空間モードの中継が bind の失敗で実際に組み立てる文言の形
+// である。internal/agent/dataplane_userspace.go の ruleStatuses は "<Key>: <Err>" を組む。
+// エージェントは gVisor の netstack の上で待ち受けを開くので、bind の失敗はその Err に Go の
+// net.OpError がそのまま乗り、internal/nettun/listen.go の ListenTCP と gonet.DialUDP(UDP の
+// リスナーが経由する。同ファイル ListenUDP)のどちらも Op を "listen" ではなく "bind" にするため、
+// "bind tcp <addr>: <err>" / "bind udp <addr>: <err>" の形になる(net.Listen の
+// "listen ...: bind: ..." とは組み立てが違う)。"<Key>: <Err>" の組み立てと、bind ではなく
+// dial・connect の失敗でもこの形になることは、ラボで実際に起こした dial の失敗
+// ("tcp/9000: dial tcp 192.168.50.3:25580: connect: connection refused")で確かめた。#211 で
+// 直した今の版のエージェントでも、bind の失敗そのものに利用者の操作から実際に至る道筋を 1 つ、
+// ラボで確かめた。宛先が先に閉じるセッション(接続を受けて 1 行送ってから子プロセスの終了と
+// ともに閉じる待ち受け)を 1 本通した直後にそのルールを削除して同じポートへ追加し直すと、
+// TIME_WAIT の間ポートを保持する経路(design.md 7 節)からこの文言に実際に至った。2 本のルール
+// に同じ待ち受けポートを与える経路(server が rule add 自体を拒む)は、依然として再現しなかった
+// (design.md 改訂の記録)。
 func TestTargetReasonCode(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -38,6 +52,28 @@ func TestTargetReasonCode(t *testing.T) {
 		{
 			name:   "agent's own bind failed wording",
 			reason: "bind failed: address already in use",
+			want:   ReasonListenerBindFailed,
+		},
+		{
+			name:   "agent's userspace relay TCP listener bind, real net.OpError wording",
+			reason: "tcp/8461: bind tcp 10.200.0.2:8461: port is in use",
+			want:   ReasonListenerBindFailed,
+		},
+		{
+			name:   "agent's userspace relay UDP listener bind, real net.OpError wording",
+			reason: "udp/8462: bind udp 10.200.0.2:8462: port is in use",
+			want:   ReasonListenerBindFailed,
+		},
+		{
+			// 実機(#211 より前の版のエージェント。stream が切れた後もリレーのポートを空けず、
+			// ルールの無効化と直後の有効化などでしばらく in use のままだった)で、agent のログの
+			// 行がこの文言("listener tcp/40000: bind tcp 10.200.0.2:40000: port is in use"、
+			// internal/dataplane/userspace/relay の Logf の形)になったことと、その時
+			// `server doctor --json` が rule.target を target_error に誤分類していたことを観測
+			// した。ここではその原因である、server が実際に受け取る報告の形("<Key>: <Err>"。
+			// ログの行から "listener " の接頭辞を除いたもの)を入力にする。
+			name:   "field observation, pre-#211 agent leaving a relay port bound after a cut session",
+			reason: "tcp/40000: bind tcp 10.200.0.2:40000: port is in use",
 			want:   ReasonListenerBindFailed,
 		},
 		{
