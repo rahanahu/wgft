@@ -18,6 +18,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -183,6 +184,9 @@ func TestLeavesOtherTablesAlone(t *testing.T) {
 // 出る新規フローは、既存ファイアウォールの policy に関係なく wgft のテーブルで落ちる。
 // ラボの vps ns で、home 側に向いた pub1 を wg インタフェースに見立ててテーブルを適用し、
 // home ns から client ns への ping(pub1 → pub0 の転送)が止まること、テーブルを消すと戻ることを見る。
+// lab/netns.sh は vps ns の net.ipv4.ip_forward を意図して触らない(本来は vpsd が起動時に 1 に
+// する。設計文書 6.1 節)。このテストは vpsd を起動せずテーブルだけを直に適用するので、自分で
+// 1 にしてから確かめ、終わったら元の値に戻す。
 func TestForwardDropsFromWG(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root が必要")
@@ -190,6 +194,18 @@ func TestForwardDropsFromWG(t *testing.T) {
 	if _, err := exec.LookPath("nft"); err != nil {
 		t.Skip("nft がない")
 	}
+	prevIPForward, err := os.ReadFile(linux.IPForwardPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", linux.IPForwardPath, err)
+	}
+	if err := os.WriteFile(linux.IPForwardPath, []byte("1"), 0); err != nil {
+		t.Fatalf("write %s: %v", linux.IPForwardPath, err)
+	}
+	t.Cleanup(func() {
+		if err := os.WriteFile(linux.IPForwardPath, prevIPForward, 0); err != nil {
+			t.Errorf("restore %s to %q: %v", linux.IPForwardPath, prevIPForward, err)
+		}
+	})
 	ping := func() bool {
 		return exec.Command("ip", "netns", "exec", "home", "ping", "-c1", "-W1", "198.51.100.2").Run() == nil
 	}
