@@ -267,6 +267,12 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 				fmt.Fprintln(w, "Result: the rule is disabled, so nothing is forwarded")
 			}
 		case statusUnknown:
+			// 名前の解決に失敗して直前の解決の結果で転送を続けているルールは、そのことを結論にする
+			// (設計文書 10.2a 節)
+			if note := rep.RuleResultNote(rr.RuleID); note != "" {
+				fmt.Fprintf(w, "Result: %s\n", wrapAt(note, len("Result: ")))
+				break
+			}
 			fmt.Fprintln(w, "Result: no failure found, but some evidence above is stale or untested")
 		default:
 			fmt.Fprintln(w, "Result: healthy as far as this command can see")

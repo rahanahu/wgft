@@ -341,6 +341,11 @@ func doctorResultLine(rr doctor.RuleReport, rep doctor.Report) string {
 		}
 		return "the rule is disabled, so nothing is forwarded"
 	case doctor.StatusUnknown:
+		// 名前の解決に失敗して直前の解決の結果で転送を続けているルールは、そのことを結論にする
+		// (design.md 10.2a 節)。CLI の Result: の行と同じ文である。
+		if note := rep.RuleResultNote(rr.RuleID); note != "" {
+			return note
+		}
 		return "no failure found, but some evidence above is stale or untested"
 	}
 	return "healthy as far as this diagnosis can see"

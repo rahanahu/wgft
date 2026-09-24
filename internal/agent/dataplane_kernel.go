@@ -957,19 +957,30 @@ func (d *kernelDataplane) read() dataplaneReading {
 	return r
 }
 
-// ruleStatuses は公開の記録からルールごとの状態を作る(5.2・7b.3 節)。公開できなかった理由、試し接続の
-// 誤り、ip_forward の順に見る。
+// ruleStatuses は公開の記録からルールごとの状態を作る(5.2・7b.3 節)。公開の記録の理由、試し接続の
+// 誤り、ip_forward の順に見る。理由を持っていても DNAT を公開したルール(直前の解決の結果で転送を
+// 続けているルールと、範囲の一部のポートだけを公開したルール)は、後ろの 2 つの誤りも理由に続ける
+// (7b.2 節)。直前のアドレスの宛先が応えないことを、理由の先頭の文言が隠さないようにするためである。
+// server doctor は、直前の解決の結果で転送を続けている文言の後ろの残りでこのルールの宛先を判定する
+// (10.2a 節、internal/vpsd/doctor の StaleResolution)。
 func (d *kernelDataplane) ruleStatuses() []proto.RuleStatus {
 	out := make([]proto.RuleStatus, 0, len(d.pub.Rules))
 	for _, r := range d.pub.Rules {
 		s := proto.RuleStatus{ID: r.RuleID, State: proto.StatusOK}
-		switch {
-		case r.Reason != "":
-			s.State, s.Reason = proto.StatusError, r.Reason
-		case d.probeErr[r.RuleID] != "":
-			s.State, s.Reason = proto.StatusError, d.probeErr[r.RuleID]
-		case d.forwardErr != nil && !d.allLocal(r):
-			s.State, s.Reason = proto.StatusError, d.forwardErr.Error()+"; the kernel does not forward to a target that is not this host"
+		var parts []string
+		if r.Reason != "" {
+			parts = append(parts, r.Reason)
+		}
+		if len(r.Ranges) > 0 {
+			if e := d.probeErr[r.RuleID]; e != "" {
+				parts = append(parts, e)
+			}
+			if d.forwardErr != nil && !d.allLocal(r) {
+				parts = append(parts, d.forwardErr.Error()+"; the kernel does not forward to a target that is not this host")
+			}
+		}
+		if len(parts) > 0 {
+			s.State, s.Reason = proto.StatusError, strings.Join(parts, "; ")
 		}
 		out = append(out, s)
 	}

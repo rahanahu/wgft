@@ -504,7 +504,19 @@ func resolveCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 		return c
 	}
 	st, fresh := freshAgentRuleReport(r, in)
+	addr, _, stale := StaleResolution(st.Reason)
 	switch {
+	case fresh && st.State == proto.StatusError && stale:
+		// 解決は失敗しているが、エージェントは直前の解決の結果で DNAT を保ち、転送を続けている
+		// (設計文書 7b.2 節)。転送の停止は観測していないので FAILED にしない。直前のアドレスが今も
+		// 正しい宛先かは分からないので UNKNOWN にし、理由の符号は解決の失敗のまま残す(10.2a 節)。
+		c.Status, c.Reason, c.ObservedAt = StatusUnknown, ReasonResolveFailed, st.At
+		head, _, _ := strings.Cut(st.Reason, staleForwardMark)
+		c.Detail = "still forwarding to " + addr + " from the last successful resolution; the agent could not resolve " + host + ": " + head
+		c.Next = "fix name resolution on the agent host; until then new connections still go to " + addr +
+			", which may no longer be the right address"
+		c.resultLine = "still forwarding to " + addr + " from the last successful resolution of " + host +
+			"; fix name resolution on the agent host"
 	case fresh && st.State == proto.StatusError && looksLikeResolveFailure(st.Reason):
 		c.Status, c.Reason, c.ObservedAt = StatusFailed, ReasonResolveFailed, st.At
 		c.Detail = "the agent could not resolve " + host + ": " + st.Reason
@@ -553,6 +565,35 @@ func FreshAgentRuleStatus(st adminapi.AgentRuleStatus, now time.Time) (adminapi.
 		return adminapi.AgentRuleStatus{}, false
 	}
 	return st, true
+}
+
+// 直前の解決の結果で転送を続けているルールの理由の目印である。カーネルモードのエージェントの
+// staleReason(internal/agent/dataplane_kernel.go)が組み立てる文言であり、その側の試験
+// (TestKernelStaleReasonIsReadByServerDoctor)がこの関数で読めることを固定している。
+const (
+	staleForwardMark = "; still forwarding to "
+	staleFromMark    = " from the last successful resolution"
+)
+
+// StaleResolution は、エージェントの理由が「名前の解決に失敗し、直前の解決の結果で転送を続けて
+// いる」(設計文書 7b.2 節)を述べているかを見る。述べていれば、転送を続けている宛先のアドレスと、
+// その後ろに続く残りの文言(試し接続の誤りなど。無ければ空)を返す。人が読む文言に依る判定である
+// (10.2a 節)。直前のアドレスも使えなかった場合の文言("...is not usable either")は当たらない。
+func StaleResolution(reason string) (addr, rest string, ok bool) {
+	i := strings.Index(reason, staleForwardMark)
+	if i < 0 || !looksLikeResolveFailure(reason[:i]) {
+		return "", "", false
+	}
+	tail := reason[i+len(staleForwardMark):]
+	j := strings.Index(tail, staleFromMark)
+	if j <= 0 {
+		return "", "", false
+	}
+	after := tail[j+len(staleFromMark):]
+	if after != "" && !strings.HasPrefix(after, "; ") {
+		return "", "", false
+	}
+	return tail[:j], strings.TrimPrefix(after, "; "), true
 }
 
 // looksLikeResolveFailure は、エージェントの理由が名前解決の失敗かどうかを見る。Go の net が
@@ -639,6 +680,9 @@ func targetCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 			c.Next = "re-run this command; if the report stays old, read the control connection line above and the agent's log"
 			return c
 		}
+		if addr, rest, ok := StaleResolution(st.Reason); ok {
+			return staleTargetCheck(c, r, addr, rest, reportAge)
+		}
 		c.Status, c.Reason = StatusFailed, targetReasonCode(st.Reason)
 		c.Detail = "the agent could not use this rule: " + ReasonOr(st.Reason, "no reason reported") + ", last check " + reportAge.String() + " ago"
 		c.Next = agentRuleNextStep(st.Reason, r)
@@ -647,6 +691,32 @@ func targetCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 	c.Status, c.Reason = StatusUnknown, ReasonUnknownValue
 	c.Detail = fmt.Sprintf("the agent reports a state this build does not know: %q", st.State)
 	c.Next = "upgrade this CLI to the agent's version"
+	return c
+}
+
+// staleTargetCheck は、名前の解決に失敗して直前の解決の結果で転送を続けているルールの rule.target
+// である(設計文書 7b.2、10.2a 節)。解決の失敗そのものは rule.target_resolve が述べるので、ここでは
+// その部分を除いた残りの文言だけで判定する。残りが無ければ、報告が ok であった場合と同じに扱う。
+// カーネルモードのエージェントは試し接続の誤りを理由の後ろに続けるので、残りの無い TCP のルールは、
+// 直前のアドレスへの試し接続が失敗していないことを示す。
+func staleTargetCheck(c Check, r proto.Rule, addr, rest string, age time.Duration) Check {
+	if rest != "" {
+		c.Status, c.Reason = StatusFailed, targetReasonCode(rest)
+		c.Detail = "the agent forwards to " + addr + " from its last successful resolution, but could not use it: " + rest +
+			", last check " + age.String() + " ago"
+		c.Next = agentRuleNextStep(rest, r)
+		return c
+	}
+	if r.Proto != proto.TCP {
+		c.Status, c.Reason = StatusNotTested, ReasonUDPListenerOnly
+		c.Detail = "not tested: the agent forwards to " + addr + " from its last successful resolution, last report " + age.String() +
+			" ago, but a UDP send cannot tell whether the target received it or answered"
+		c.Next = "confirm the service from a real client"
+		return c
+	}
+	c.Status, c.Reason = StatusOK, ""
+	c.Detail = "the agent reached " + addr + ", the address from its last successful resolution, last check " + age.String() +
+		" ago, repeated every 30s"
 	return c
 }
 
