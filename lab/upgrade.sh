@@ -61,6 +61,18 @@
 #      of these three is also checked directly against the old release's own pre-upgrade output
 #      (old_has, above); for v0.4.0 this proves a genuine before/after change, for v0.6.0 (which
 #      already has all three) that half of the check is a stated SKIP instead.
+#   6. agent disable and enable, run on the fully-upgraded instance step 2/3 left running (design
+#      5.1 section, not to be confused with a RULE'S OWN --disabled flag, which step 1's seventh
+#      rule already exercises across the upgrade in step 3 above). home's data comes from
+#      $OLD_VERSION, a release that predates `wgft agent disable` entirely (checked directly: the
+#      commit that added it has no $OLD_VERSION release, nor any earlier one, as an ancestor), so
+#      the agents table has no disabled column set yet; this checks the upgraded server treats
+#      that as enabled, that disabling home through the current build's own CLI stops its
+#      forwarding, that the disable survives a server restart (still on the same upgraded data),
+#      and that enabling it again brings forwarding back. Not re-run for the step 4 partial
+#      upgrades below: those only have to keep forwarding (see step 4's own description), and
+#      disable/enable against an old AGENT specifically (as opposed to old DATA) is
+#      lab/version-skew.sh's job (B7), not this script's.
 #
 # Requires `lab/lab build` (current wgft, echo, ppecho in /usr/local/bin of the VM) and the netns
 # topology (`lab/lab net up`). Runs kernel and userspace mode; both v0.4.0 and v0.6.0 support
@@ -948,6 +960,52 @@ if client "ip -6 addr show dev eth0 | grep -q $CLIENT6" >/dev/null 2>&1; then
 else
   skip "step5: relay listener IPv4-only check (client namespace has no IPv6 address configured)"
 fi
+
+# ===================================================================================================
+# step 6: agent disable and enable on the fully-upgraded instance (design 5.1 section)
+# ===================================================================================================
+echo "== $mode: step 6: agent disable and enable, on home's data from v$OLD_VERSION (design 5.1 section)"
+# agent_field <field>: that field of "home" in agent ls --json, the same idiom
+# lab/lifecycle.sh's check11 uses for the same purpose.
+agent_field() {
+  vps wgft agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
+import json, sys
+a = next((x for x in json.load(sys.stdin) if x.get('name') == 'home'), {})
+v = a.get('$1')
+print('' if v is None else v)
+"
+}
+agent_connected() { [ "$(agent_field connected)" = True ]; }
+
+strcheck "step6: home, whose data v$OLD_VERSION created before agent disable existed, starts out enabled after the upgrade" "False" "$(agent_field disabled)"
+wait_until 15 tcp_probe_ok "$P_TCP"
+check "step6: forwarding still works right after the upgrade, before any disable" "tcp-echo" "$(tcp_probe "$P_TCP")"
+
+disable_out=$(vps wgft agent disable home --admin "$ADMIN" 2>&1); disable_rc=$?
+eqcheck "step6: wgft agent disable home exits 0" 0 "$disable_rc"
+check "step6: wgft agent disable home reports the generation" "disabled agent home at generation" "$disable_out"
+wait_until 15 port_refused "$P_TCP"
+absent "step6: the plain tcp rule stops forwarding once home is disabled" "tcp-echo" "$(tcp_probe "$P_TCP")"
+strcheck "step6: agent ls shows home disabled" "True" "$(agent_field disabled)"
+
+echo "== $mode: step 6: restart the server while home is disabled; the disable is not lost"
+stop_server
+start_server wgft "$DATA" "$WORK/step6-server-restart.log"
+okcheck "step6: server comes back up after the restart" "$(wait_admin && echo 1 || echo 0)"
+strcheck "step6: home is still disabled right after the restart, from the database alone, before it has even reconnected" "True" "$(agent_field disabled)"
+if wait_until 40 agent_connected; then
+  echo "PASS  step6: home reconnects to the restarted server while still disabled"
+else
+  echo "FAIL  step6: home never reconnected to the restarted server"; fail=1
+fi
+absent "step6: the plain tcp rule still does not forward after the restart" "tcp-echo" "$(tcp_probe "$P_TCP")"
+
+enable_out=$(vps wgft agent enable home --admin "$ADMIN" 2>&1); enable_rc=$?
+eqcheck "step6: wgft agent enable home exits 0" 0 "$enable_rc"
+check "step6: wgft agent enable home reports the generation" "enabled agent home at generation" "$enable_out"
+wait_until 15 tcp_probe_ok "$P_TCP"
+check "step6: forwarding resumes once home is enabled again" "tcp-echo" "$(tcp_probe "$P_TCP")"
+strcheck "step6: agent ls shows home enabled again" "False" "$(agent_field disabled)"
 
 # ===================================================================================================
 # step 4: partial upgrades in both orders, on a COPY of step 1's old-release data (not fresh data
