@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -241,8 +240,7 @@ func TestHubHeartbeatClearsTheLag(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.hub = d.newHub(&fakeStreamBackend{server: server})
-	srv := httptest.NewServer(d.hub)
-	t.Cleanup(srv.Close)
+	srv := serveHub(t, d.hub)
 	c := connectAgent(t, d.hub, "ws"+strings.TrimPrefix(srv.URL, "http"), "home",
 		proto.Heartbeat{Generation: gen, Tunnel: proto.TunnelStatus{State: proto.StatusOK}})
 	defer c.CloseNow()
@@ -294,8 +292,7 @@ func TestAgentsReadsHeartbeatAndLagTogether(t *testing.T) {
 		<-release
 		record(agent, generation)
 	}
-	srv := httptest.NewServer(d.hub)
-	t.Cleanup(srv.Close)
+	srv := serveHub(t, d.hub)
 	released := false
 	defer func() {
 		if !released {

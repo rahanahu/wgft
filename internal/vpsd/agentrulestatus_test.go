@@ -5,8 +5,10 @@ package vpsd
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,9 +54,51 @@ func newTestHub(t *testing.T) (*stream.Hub, string) {
 		t.Fatal(err)
 	}
 	h := stream.New(&fakeStreamBackend{server: server})
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
+	srv := serveHub(t, h)
 	return h, "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// serveHub starts h behind an httptest.Server and, when the test ends, ends every stream h is
+// still serving and waits for its handler to return.
+//
+// httptest.Server.Close does not do this: a WebSocket connection is hijacked, and the server stops
+// tracking a hijacked connection. The handler then outlives the test: the test closes its client
+// connection on the way out, and the handler logs its "disconnected" line after the test has
+// returned, into whatever log the next test has captured. A test that expects a quiet log then
+// fails for a line it did not cause. A stream that is still open when the test ends is ended
+// through the request context, which the hub does not log as a disconnect.
+func serveHub(t *testing.T, h http.Handler) *httptest.Server {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	var (
+		mu       sync.Mutex
+		handlers sync.WaitGroup
+		ended    bool
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if ended {
+			mu.Unlock()
+			http.Error(w, "the test has ended", http.StatusServiceUnavailable)
+			return
+		}
+		handlers.Add(1)
+		mu.Unlock()
+		defer handlers.Done()
+		rctx, stop := context.WithCancel(r.Context())
+		defer stop()
+		defer context.AfterFunc(ctx, stop)()
+		h.ServeHTTP(w, r.WithContext(rctx))
+	}))
+	t.Cleanup(func() {
+		mu.Lock()
+		ended = true
+		mu.Unlock()
+		cancel()
+		handlers.Wait()
+		srv.Close()
+	})
+	return srv
 }
 
 // connectAgent dials url as agent (the required pubkey handshake first, draining the initial full
