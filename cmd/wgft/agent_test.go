@@ -23,8 +23,17 @@ import (
 
 // fakeAgentBackend is a minimal admin.Backend that serves a fixed Agents() list, for testing
 // `wgft agent ls`'s handling of a disconnected agent's stale last report. The other methods
-// are not exercised by `agent ls` and are stubbed out.
-type fakeAgentBackend struct{ agents []admin.AgentInfo }
+// are not exercised by `agent ls` and are stubbed out. disableRes/disableErr and
+// enableRes/enableErr let `agent disable`/`agent enable` tests (agent_disable_test.go) inject
+// a fixed response or error, standing in for the real Daemon.DisableAgent/EnableAgent
+// (internal/vpsd/agent_disable.go), which needs a real store and dataplane to exercise.
+type fakeAgentBackend struct {
+	agents     []admin.AgentInfo
+	disableRes admin.AgentDisabledResponse
+	disableErr error
+	enableRes  admin.AgentDisabledResponse
+	enableErr  error
+}
 
 func (b *fakeAgentBackend) Rules() ([]proto.Rule, error) { return nil, nil }
 func (b *fakeAgentBackend) Generation() (uint64, error)  { return 0, nil }
@@ -39,10 +48,10 @@ func (b *fakeAgentBackend) JoinString(string) (admin.JoinStringResponse, error) 
 }
 func (b *fakeAgentBackend) Revoke(string) error { return nil }
 func (b *fakeAgentBackend) DisableAgent(string) (admin.AgentDisabledResponse, error) {
-	return admin.AgentDisabledResponse{}, nil
+	return b.disableRes, b.disableErr
 }
 func (b *fakeAgentBackend) EnableAgent(string) (admin.AgentDisabledResponse, error) {
-	return admin.AgentDisabledResponse{}, nil
+	return b.enableRes, b.enableErr
 }
 func (b *fakeAgentBackend) Warnings() ([]admin.Warning, error)          { return nil, nil }
 func (b *fakeAgentBackend) DismissWarning(string, string, string) error { return nil }

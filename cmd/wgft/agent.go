@@ -119,6 +119,8 @@ On the agent host:
 On the VPS, against the admin API:
   ls            list registered agents
   join-string   issue a join string; one-time
+  disable       stop forwarding an agent's rules, keeping its registration
+  enable        undo a disable
   revoke        revoke a permanent token
   warnings      list theft-detection warnings
   dismiss-warning  dismiss a warning`,
@@ -234,8 +236,19 @@ On the VPS, against the admin API:
 				return enc.Encode(agents)
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tADDRESS\tSTREAM\tHEARTBEAT\tGEN\tTUNNEL\tWG_ENDPOINT\tHANDSHAKE\tRULES\tPROTO\tWARN")
+			fmt.Fprintln(w, "NAME\tSTATE\tADDRESS\tSTREAM\tHEARTBEAT\tGEN\tTUNNEL\tWG_ENDPOINT\tHANDSHAKE\tRULES\tPROTO\tWARN")
 			for _, a := range agents {
+				// STATE is enabled/disabled, a declared state (design.md section 5.1), not a
+				// health word: a disabled agent can still be connected with a live tunnel
+				// while forwarding nothing, so folding this into STREAM or TUNNEL would hide
+				// that, and calling it "ok" would read as a health check it is not.
+				state := "enabled"
+				if a.Disabled {
+					state = "disabled"
+					if a.DisabledAt != "" {
+						state = "disabled " + ago(a.DisabledAt)
+					}
+				}
 				stream := "-"
 				if a.Connected {
 					stream = a.StreamFrom
@@ -289,13 +302,55 @@ On the VPS, against the admin API:
 				if n := len(a.Warnings); n > 0 {
 					warn = fmt.Sprintf("%d", n)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Address, stream, ago(a.LastHeartbeat), a.Generation, tun, a.WGEndpoint, ago(a.LastHandshake), rules, protoVal, warn)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, state, a.Address, stream, ago(a.LastHeartbeat), a.Generation, tun, a.WGEndpoint, ago(a.LastHandshake), rules, protoVal, warn)
 			}
 			return w.Flush()
 		},
 	}
 	ls.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
 	addAdminFlag(ls)
+
+	disable := &cobra.Command{
+		Use: "disable <name>", Short: "stop forwarding an agent's rules, keeping its registration; VPS side", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := adminClient(cmd)
+			if err != nil {
+				return err
+			}
+			res, err := c.DisableAgent(args[0])
+			if err != nil {
+				return err
+			}
+			if !res.Changed {
+				fmt.Printf("agent %s is already disabled; nothing changed\n", args[0])
+				return nil
+			}
+			fmt.Printf("disabled agent %s at generation %d: its rules stop forwarding and open sessions are cut; registration, keys and rule settings are kept. Undo: wgft agent enable %s\n", args[0], res.Generation, args[0])
+			return nil
+		},
+	}
+	addAdminFlag(disable)
+
+	enable := &cobra.Command{
+		Use: "enable <name>", Short: "undo an agent disable; VPS side", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := adminClient(cmd)
+			if err != nil {
+				return err
+			}
+			res, err := c.EnableAgent(args[0])
+			if err != nil {
+				return err
+			}
+			if !res.Changed {
+				fmt.Printf("agent %s is already enabled; nothing changed\n", args[0])
+				return nil
+			}
+			fmt.Printf("enabled agent %s at generation %d: its rules forward again as each rule's own enabled setting decides\n", args[0], res.Generation)
+			return nil
+		},
+	}
+	addAdminFlag(enable)
 
 	revoke := &cobra.Command{
 		Use: "revoke <name>", Short: "revoke a permanent token; VPS side; reclaims the peer and address, the name can be reused", Args: cobra.ExactArgs(1),
@@ -360,7 +415,7 @@ On the VPS, against the admin API:
 	}
 	addAdminFlag(dismiss)
 
-	cmd.AddCommand(run, pubkey, rotate, newAgentDoctorCmd(), joinString, ls, revoke, warnings, dismiss)
+	cmd.AddCommand(run, pubkey, rotate, newAgentDoctorCmd(), joinString, ls, disable, enable, revoke, warnings, dismiss)
 	return cmd
 }
 

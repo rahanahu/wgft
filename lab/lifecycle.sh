@@ -2549,8 +2549,16 @@ print(a.get('$1', ''))
 }
 
 # ---------------------------------------------------------------------------------------------
-# check 11: agent disable and enable (design 5.1 section). Called through the admin API with curl
-# until the CLI gains `agent disable`/`agent enable`.
+# check 11: agent disable and enable (design 5.1 section). The plain (no fault injected) disable
+# and enable calls, their repeats, an unknown name and `agent ls` go through the CLI (`wgft agent
+# disable`/`enable`/`ls`, cmd/wgft/agent.go), since that is what design.md 7a.11 節 promises a
+# user runs. The enable-refused-by-a-bound-port case and the disable-while-a-foreign-process-
+# holds-the-table case stay on the admin API via curl, to keep the raw HTTP status and the body's
+# saved field, which the CLI does not print, as direct assertions; a second, separate hold of the
+# table then drives an enable through the CLI, to get the same lab evidence for enable's own
+# saved-but-not-published wording (it cannot share the first hold, since a repeat once state has
+# already changed is a no-op 200, not a second fault).
+
 # ---------------------------------------------------------------------------------------------
 check11() {
   echo "== $mode: check 11: disabling an agent stops every rule of it and no other agent's; enable brings back each rule's own setting"
@@ -2587,6 +2595,10 @@ check11() {
   must_wait "check11: O forwards before the disable" 10 tcp_probe_ok 39971
 
   api() { vps curl -s -X "$1" -w ' HTTP%{http_code}' "http://$ADMIN$2"; }
+  # cli <sub...>: run `wgft agent <sub...>` through the actual CLI rather than curl, for the
+  # plain disable/enable calls below. Combines stdout and stderr, since a cobra RunE error (e.g.
+  # the 404 for an unknown name) prints to stderr; the caller reads $? for the exit code.
+  cli() { vps wgft agent "$@" --admin "$ADMIN" 2>&1; }
   stored_enabled() {
     vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
@@ -2621,10 +2633,12 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
 ' >/dev/null 2>&1 &"
   must_wait "check11: the long-lived session through A is established" 5 tcp_flow_up 39970
 
-  echo "-- disable home"
-  local out; out=$(api POST /api/v1/agents/home/disable)
-  check "disable answers 200 with the state changed" '"disabled":true,"changed":true' "$out"
-  check "disable answers 200" "HTTP200" "$out"
+  echo "-- disable home, via the CLI"
+  local out clicall clirc
+  clicall=$(cli disable home); clirc=$?
+  eqcheck "wgft agent disable home exits 0" 0 "$clirc"
+  check "wgft agent disable home reports the generation and what stops" "disabled agent home at generation" "$clicall"
+  check "wgft agent disable home points at the undo command" "wgft agent enable home" "$clicall"
   # The server stops forwarding before the disable returns; the checks below need no wait.
   okcheck "A no longer forwards" "$(tcp_refused 39970 && echo 1 || echo 0)"
   okcheck "P, the proxy rule, no longer forwards" "$(tcp_refused 39972 && echo 1 || echo 0)"
@@ -2647,6 +2661,7 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
   strcheck "agent ls shows home still connected" "True" "$(agent_json home connected)"
   okcheck "agent ls gives home a disabled_at" "$([ -n "$(agent_json home disabled_at)" ] && echo 1 || echo 0)"
   strcheck "agent ls shows other enabled" "False" "$(agent_json other disabled)"
+  okcheck "wgft agent ls's plain table marks home's STATE disabled" "$(cli ls | grep -qE '^home[[:space:]]+disabled' && echo 1 || echo 0)"
   local state; state=$(vps curl -s "http://$ADMIN/api/v1/agents/home/state")
   check "the state for home carries agent_disabled" '"agent_disabled":true' "$state"
   absent "the state for home has no enabled rule" '"enabled":true' "$state"
@@ -2654,8 +2669,9 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
   out=$(api POST "/api/v1/rules/$ra/check")
   check "the connectivity check refuses a disabled agent's rule" "HTTP422" "$out"
   check "the refusal names the disabled agent" "disabled agent" "$out"
-  out=$(api POST /api/v1/agents/home/disable)
-  check "a second disable changes nothing" '"disabled":true,"changed":false' "$out"
+  clicall=$(cli disable home); clirc=$?
+  eqcheck "a second wgft agent disable home exits 0" 0 "$clirc"
+  check "a second wgft agent disable home says nothing changed" "agent home is already disabled; nothing changed" "$clicall"
 
   echo "-- a rule added while home is disabled is saved but does not forward"
   local rd; rd=$(vps wgft rule add --agent home --tcp 39973 --to 192.168.50.3:25570 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
@@ -2688,15 +2704,20 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
     check "enable is refused with 422" "HTTP422" "$out"
     check "the refusal says nothing was saved" '"saved":false' "$out"
     strcheck "home stays disabled after the refusal" "True" "$(agent_json home disabled)"
+    clicall=$(cli enable home); clirc=$?
+    okcheck "wgft agent enable home exits non-zero on the same refusal" "$([ "$clirc" != 0 ] && echo 1 || echo 0)"
+    check "wgft agent enable home's refusal names it was refused" "refused" "$clicall"
+    check "wgft agent enable home's refusal says nothing changed" "nothing changed" "$clicall"
     sandbox_kill_named socat
     must_wait "check11: the squatter is gone" 5 bash -c "! ip netns exec $VPS_NS ss -ltn '( sport = :39970 )' | grep -q LISTEN"
   else
     skip "enable refused by a bound port (the bound-port check covers kernel-mode rules on a kernel-mode server)"
   fi
 
-  echo "-- enable home"
-  out=$(api POST /api/v1/agents/home/enable)
-  check "enable answers 200 with the state changed" '"disabled":false,"changed":true' "$out"
+  echo "-- enable home, via the CLI"
+  clicall=$(cli enable home); clirc=$?
+  eqcheck "wgft agent enable home exits 0" 0 "$clirc"
+  check "wgft agent enable home reports the generation and that rules resume their own setting" "enabled agent home at generation" "$clicall"
   # The disable cut A's live session on the agent as well. The agent aborts the netstack side of
   # such a session (design 7), so A's port is free at once and its listener opens again on the
   # enable, without a bind failure and a 30-second retry.
@@ -2709,10 +2730,16 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
   okcheck "B stays off by its own setting" "$(udp_probe_ok 27000 && echo 0 || echo 1)"
   strcheck "home is enabled" "False" "$(agent_json home disabled)"
   okcheck "an enabled agent has no disabled_at" "$([ -z "$(agent_json home disabled_at)" ] && echo 1 || echo 0)"
-  out=$(api POST /api/v1/agents/home/enable)
-  check "a second enable changes nothing" '"disabled":false,"changed":false' "$out"
+  okcheck "wgft agent ls's plain table marks home's STATE enabled again" "$(cli ls | grep -qE '^home[[:space:]]+enabled[[:space:]]' && echo 1 || echo 0)"
+  clicall=$(cli enable home); clirc=$?
+  eqcheck "a second wgft agent enable home exits 0" 0 "$clirc"
+  check "a second wgft agent enable home says nothing changed" "agent home is already enabled; nothing changed" "$clicall"
   out=$(api POST /api/v1/agents/ghost/disable)
   check "an unknown agent is 404" "HTTP404" "$out"
+  clicall=$(cli disable ghost); clirc=$?
+  okcheck "wgft agent disable of an unknown name exits non-zero" "$([ "$clirc" != 0 ] && echo 1 || echo 0)"
+  check "wgft agent disable of an unknown name names it" "ghost" "$clicall"
+  check "wgft agent disable of an unknown name says it is not registered" "not registered" "$clicall"
 
   if [ "$mode" = kernel ]; then
     echo "-- disable while another process holds table inet wgft: saved, not published, and the agent closes its listeners"
@@ -2736,6 +2763,34 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
       # The retry runs every 30 seconds (design 7a.3 section).
       must_wait "check11: the retry publishes the disable once the table is free" 40 table_without_a
       okcheck "A does not forward once published" "$(tcp_refused 39970 && echo 1 || echo 0)"
+    fi
+    rm -f $W/wgft-lifecycle-c11-fifo
+
+    echo "-- enable while another process holds table inet wgft, via the CLI: saved, not published"
+    # home is disabled again from the block above. enable's write-time check (Inspect,
+    # BoundPorts) only reads sockets and other tables' base chains, skipping the table this
+    # process owns by name (internal/platform/linux/firewall.go's Inspect), so it is unaffected
+    # by a foreign table squatting on that same name; the save and the check both succeed, and
+    # only the publish that follows hits the held table. That is confirmed below by the enable
+    # actually reaching the "saved, not published" wording rather than a refusal.
+    rm -f $W/wgft-lifecycle-c11-fifo
+    mkfifo $W/wgft-lifecycle-c11-fifo
+    vps bash -c "exec 3<>$W/wgft-lifecycle-c11-fifo; nft -i <&3 >/dev/null 2>&1 &"
+    if must_wait "check11: nft -i reading the fifo, 2nd time" 3 nft_i_ready; then
+      echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > $W/wgft-lifecycle-c11-fifo
+      must_wait "check11: the foreign table with flags owner exists, 2nd time" 5 foreign_owner
+      owner_pid=$(sandbox_pids_named nft | head -1)
+      clicall=$(cli enable home); clirc=$?
+      okcheck "wgft agent enable home exits non-zero when publishing fails" "$([ "$clirc" != 0 ] && echo 1 || echo 0)"
+      check "wgft agent enable home says the change is saved" "saved" "$clicall"
+      check "wgft agent enable home says it is not published yet" "not published yet" "$clicall"
+      check "wgft agent enable home says the retry publishes it" "retries every 30s" "$clicall"
+      strcheck "home is saved as enabled although not yet published" "False" "$(agent_json home disabled)"
+      [ -n "$owner_pid" ] && kill "$owner_pid" 2>/dev/null
+      must_wait "check11: the foreign nft -i exited, 2nd time" 5 proc_gone "$owner_pid"
+      table_with_a() { vps nft list table inet wgft 2>/dev/null | grep -q 39970; }
+      must_wait "check11: the retry publishes the enable once the table is free" 40 table_with_a
+      must_wait "check11: A forwards once the enable is published" 15 tcp_probe_ok 39970
     fi
     rm -f $W/wgft-lifecycle-c11-fifo
   fi
