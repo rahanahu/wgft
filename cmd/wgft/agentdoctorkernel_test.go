@@ -443,14 +443,40 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			},
 		},
 		{
+			// 直前の解決の結果で転送を続けているだけのルールは、転送の停止ではない。server doctor と同じく
+			// FAILED にせず、名前の解決の失敗として示す(10.2c 節、2026-09-25 の所有者の決定)
 			name: "a rule that keeps forwarding to the last resolved address",
 			resp: kernelRuntime(func(st *agent.DoctorRuntimeState) {
 				st.Rules[0].State = proto.StatusError
-				st.Rules[0].Reason = `name resolution of target host "game.lan" failed: no such host; still forwarding to 192.168.1.20 from the last successful resolution`
+				st.Rules[0].Reason = staleKernelReason
+			}),
+			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonResolveFailed}},
+			wantExit:   0,
+			wantDetail: map[string]string{agentCheckDPTable: "does not resolve; the kernel keeps forwarding it to the address from the last successful resolution: r_1 tcp: DNAT on 1 of 1 port, name resolution of target host"},
+			wantNext:   map[string]string{agentCheckDPTable: "fix name resolution on this host"},
+		},
+		{
+			// 直前のアドレスの宛先も応えなければ、転送は宛先で止まっている。listener_error のままである
+			name: "a rule forwarding to the last resolved address that refuses",
+			resp: kernelRuntime(func(st *agent.DoctorRuntimeState) {
+				st.Rules[0].State = proto.StatusError
+				st.Rules[0].Reason = staleKernelReason + "; target 192.168.1.20:2456: dial tcp 192.168.1.20:2456: connect: connection refused"
 			}),
 			want:       []wantCheck{{agentCheckDPTable, statusFailed, agentReasonListenerError}},
 			wantExit:   1,
-			wantDetail: map[string]string{agentCheckDPTable: "DNAT on 1 of 1 port, name resolution of target host"},
+			wantDetail: map[string]string{agentCheckDPTable: "connection refused"},
+		},
+		{
+			// 停止中は、記録の理由に直前の解決の結果で転送を続けていることがあっても agent_not_running であり、
+			// 所見のルールの一覧に理由を示す
+			name:    "a stopped agent whose record holds a rule forwarding from the last resolution",
+			stopped: true,
+			readKernel: func(k *agent.DoctorKernel) {
+				k.Table.Rules[0].State, k.Table.Rules[0].Reason = proto.StatusError, staleKernelReason
+			},
+			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonNotRunning}},
+			wantExit:   0,
+			wantDetail: map[string]string{agentCheckDPTable: "still forwarding to 192.168.1.20 from the last successful resolution"},
 		},
 		{
 			name: "a rule refused by the allowlist",
@@ -681,9 +707,18 @@ func TestAgentDoctorIncompleteNamesRootForKernelState(t *testing.T) {
 // dataplane.table の判定は、転送の行の欠け、ルールの error、守りの行の欠け、公開の失敗、加わった行の順に見る(10.2c 節の
 // 「dataplane.table の判定」)。ルール単位の失敗は、同じ実行に公開の失敗があっても FAILED のまま示し、
 // 公開の失敗は、加わった行より先に示す。
+// staleKernelReason は、カーネルモードのエージェントが名前の解決に失敗して直前の解決の結果で転送を
+// 続けているルールに付ける理由である(internal/agent の staleReason の形、7b.2 節)。
+const staleKernelReason = `name resolution of target host "game.lan" failed: lookup game.lan: no such host; still forwarding to 192.168.1.20 from the last successful resolution`
+
 func TestAgentDoctorTableOrder(t *testing.T) {
 	ruleError := func(st *agent.DoctorRuntimeState) {
 		st.Rules[0].State, st.Rules[0].Reason = proto.StatusError, "target 192.168.1.20:2456: connection refused"
+	}
+	// stale は、2 本目のルールとして、直前の解決の結果で転送を続けているだけのルールを加える
+	stale := func(st *agent.DoctorRuntimeState) {
+		st.Rules = append(st.Rules, agent.DoctorRule{ID: "r_2", State: proto.StatusError, Proto: proto.TCP, Ports: 1, DNATPorts: 1,
+			Reason: staleKernelReason})
 	}
 	publishFailed := func(st *agent.DoctorRuntimeState) {
 		st.PublishError = "publish table inet wgft_agent: invalid argument"
@@ -712,6 +747,18 @@ func TestAgentDoctorTableOrder(t *testing.T) {
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
 		{"a failed publication before added rows", []func(*agent.DoctorRuntimeState){publishFailed, added},
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonPublishFailed}},
+		// 直前の解決の結果で転送を続けるルールは、他のどの所見よりも後ろで、OK の前である。他の所見が
+		// あれば、そちらの符号を採り、このルールは所見に併せて示す(10.2c 節)
+		{"rule errors before a stale resolution", []func(*agent.DoctorRuntimeState){stale, ruleError},
+			wantCheck{agentCheckDPTable, statusFailed, agentReasonListenerError}},
+		{"missing guard rows before a stale resolution", []func(*agent.DoctorRuntimeState){stale, guard},
+			wantCheck{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
+		{"a failed publication before a stale resolution", []func(*agent.DoctorRuntimeState){stale, publishFailed},
+			wantCheck{agentCheckDPTable, statusUnknown, agentReasonPublishFailed}},
+		{"added rows before a stale resolution", []func(*agent.DoctorRuntimeState){stale, added},
+			wantCheck{agentCheckDPTable, statusUnknown, agentReasonTableChanged}},
+		{"a stale resolution alone", []func(*agent.DoctorRuntimeState){stale},
+			wantCheck{agentCheckDPTable, statusUnknown, agentReasonResolveFailed}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := testAgentDoctorInput(t, t.TempDir())
@@ -725,6 +772,10 @@ func TestAgentDoctorTableOrder(t *testing.T) {
 			c, _ := findAgentCheck(agentDiagnose(in), tc.want.id)
 			if c.Status != tc.want.status || c.Reason != tc.want.reason {
 				t.Errorf("%s = %s/%s, want %s/%s", c.ID, c.Status, c.Reason, tc.want.status, tc.want.reason)
+			}
+			// 直前の解決の結果で転送を続けるルールは、どの符号の所見にも示す
+			if strings.Contains(tc.name, "stale") && !strings.Contains(c.Detail, "r_2 tcp: DNAT on 1 of 1 port, name resolution") {
+				t.Errorf("%s detail = %q, want it to name the rule forwarding from the last resolution", c.ID, c.Detail)
 			}
 		})
 	}

@@ -36,7 +36,9 @@
 #       doctor reads that rule as still forwarding (design 10.2a): target resolve unknown, shown
 #       DEGRADED, exit 0. When the old address then refuses, the agent's report carries the probe
 #       error and doctor stops the rule at the target. A name that never resolved still stops at
-#       target resolve.
+#       target resolve. agent doctor's dataplane.table agrees: once check 22's refused rules are
+#       removed, unknown resolve_failed and exit 0 while the rule still forwards, and failed
+#       listener_error and exit 1 once the old address refuses. The refused rules are not put back.
 #   drift. the 30-second check repairs changes made outside wgft: a deleted table, a deleted row,
 #       a changed MTU and a deleted wgft0, without a route warning while wgft0 is gone.
 #   session. the keepalive datagram: with a kernel-mode server it reaches the server's tunnel
@@ -498,6 +500,21 @@ check_resolve() {
   check "doctor's result says it still forwards" "Result: still forwarding to 192.168.50.2" "$out"
   not_forwarded "doctor does not say traffic stops" "traffic stops" "$out"
   echo "INFO  server doctor while the name fails:"; echo "$out" | sed -n '/^Agent/,/^Result/p' | sed 's/^/INFO    /'
+  # agent doctor on the agent host agrees (design 10.2c). The refused rules from check 22 (outside the
+  # allowlist, loopback) still fail the table as listener_error, and its detail names the rule that
+  # forwards from the last resolution besides. Without them, the table is unknown resolve_failed, not
+  # a failure, and the command exits 0.
+  eqcheck "agent doctor: the table with refused rules beside" "exit=1 failed listener_error" "$(agent_doctor_table)"
+  check "agent doctor names the rule forwarding from the last resolution beside them" \
+    "Rules still forwarding from the last successful resolution while their name does not resolve, 1: $R_NAME" \
+    "$(home wgft agent doctor --data-dir "$ADATA" --json 2>/dev/null | tr -d '\n')"
+  vps wgft rule rm "$R_OUT" --admin "$ADMIN" >/dev/null
+  vps wgft rule rm "$R_LO" --admin "$ADMIN" >/dev/null
+  wait_until 30 caught_up
+  eqcheck "agent doctor: the table while the name fails" "exit=0 unknown resolve_failed" "$(agent_doctor_table)"
+  out=$(home wgft agent doctor --data-dir "$ADATA" 2>&1)
+  check "agent doctor says the kernel keeps forwarding to the old address" "keeps forwarding it to the address from the last successful resolution" "$(echo "$out" | tr -s ' \n' ' ')"
+  echo "INFO  agent doctor while the name fails:"; echo "$out" | grep -A6 "^  table" | sed 's/^/INFO    /'
   # the old address stops answering too: now traffic does stop at the target
   home nft -f - <<'NFT'
 table inet stalereject {
@@ -519,6 +536,7 @@ NFT
   eqcheck "doctor: the rule stops at the target" "failed rule.target" "$(doctor_field "$R_NAME" rule)"
   vps wgft server doctor "$R_NAME" --admin "$ADMIN" >/dev/null 2>&1; rcode=$?
   eqcheck "doctor exits 1 when the old address refuses" 1 "$rcode"
+  eqcheck "agent doctor: the table when the old address refuses" "exit=1 failed listener_error" "$(agent_doctor_table)"
   home nft delete table inet stalereject
   wait_until 90 rule_reason_lacks "$R_NAME" "resolution; target 192.168.50.2:25565"
   eqcheck "doctor: target is ok again once the old address answers" "ok -" "$(doctor_field "$R_NAME" check rule.target)"
@@ -538,6 +556,17 @@ NFT
 rule_reason_has() { [[ "$(rule_status "$1")" == *"$2"* ]]; }
 rule_reason_lacks() { [[ "$(rule_status "$1")" != *"$2"* ]]; }
 eqcheck() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: want '$2', got '$3'"; fail=1; fi; }
+# agent_doctor_table: "exit=<code> <status> <reason>" of dataplane.table from agent doctor --json, run
+# as root on the agent host.
+agent_doctor_table() {
+  local out code
+  out=$(home wgft agent doctor --data-dir "$ADATA" --json 2>/dev/null); code=$?
+  printf 'exit=%s %s' "$code" "$(printf '%s' "$out" | python3 -c '
+import json, sys
+c = next((x for x in json.load(sys.stdin).get("checks") or [] if x.get("id") == "dataplane.table"), {})
+print(c.get("status", "none"), c.get("reason") or "-")
+')"
+}
 # doctor_field <rule-id> check <check-id> | doctor_field <rule-id> rule: "<status> <reason>" of one
 # check, or "<status> <stopped_at>" of the rule, from server doctor --json on that rule ("-" if empty).
 doctor_field() {
