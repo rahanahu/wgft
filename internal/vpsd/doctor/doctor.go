@@ -792,3 +792,12 @@ func entryNoun(n int) string {
 	}
 	return "entries"
 }
+
+// wasWere returns "was" for n == 1 and "were" otherwise, for a sentence whose subject is a count
+// of things this package names with pluralS (e.g. "N connections were refused").
+func wasWere(n int) string {
+	if n == 1 {
+		return "was"
+	}
+	return "were"
+}

@@ -371,7 +371,7 @@ func newRuleImportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("replaced with %d rules at generation %d\n", len(res.Rules), res.Generation)
+			fmt.Printf("replaced with %d rule%s at generation %d\n", len(res.Rules), pluralS(len(res.Rules)), res.Generation)
 			for _, r := range rules {
 				if r.Proto == proto.TCP && r.PacketRate != nil {
 					fmt.Fprintln(os.Stderr, packetRateTCPNotice)

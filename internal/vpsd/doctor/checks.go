@@ -771,7 +771,7 @@ func flowBudgetCheck(r proto.Rule, in Input) Check {
 		return c
 	}
 	c.Status, c.Reason = StatusUnknown, ReasonResourceRefusals
-	c.Detail = fmt.Sprintf("%d connections on this rule were refused for want of wgft's own resources since the server started; that is a total, and this command cannot tell whether it is happening now", refused)
+	c.Detail = fmt.Sprintf("%d connection%s on this rule %s refused for want of wgft's own resources since the server started; that is a total, and this command cannot tell whether it is happening now", refused, pluralS(int(refused)), wasWere(int(refused)))
 	c.Next = "if that is recent, raise WGFT_MAX_TCP_FLOWS / WGFT_MAX_UDP_FLOWS on this server, or look for a flood holding connections open"
 	return c
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/netip"
 	"regexp"
@@ -1089,6 +1090,72 @@ func TestSourceFilterWithoutFrom(t *testing.T) {
 	}
 	if want := "this rule has 1 deny entry and 0 allow entries"; !strings.Contains(c.Detail, want) {
 		t.Errorf("detail = %q, want it to hold %q (singular deny entry, plural allow entries)", c.Detail, want)
+	}
+}
+
+// TestSourceFilterInternalEvidencePluralizes confirms rule.source_filter's Internal evidence
+// line (only shown with --verbose, not asserted by any other test) pluralizes "entry"/"entries"
+// independently for the deny and allow counts, the same as the Detail line TestDiagnose and
+// TestSourceFilterWithoutFrom already cover.
+func TestSourceFilterInternalEvidencePluralizes(t *testing.T) {
+	cases := []struct {
+		name        string
+		deny, allow int
+		want        string
+	}{
+		{"no entries on either side", 0, 0, "0 deny entries, 0 allow entries"},
+		{"one deny entry", 1, 0, "1 deny entry, 0 allow entries"},
+		{"one allow entry", 0, 1, "0 deny entries, 1 allow entry"},
+		{"several on both sides", 2, 3, "2 deny entries, 3 allow entries"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := tcpRule()
+			for i := 0; i < tc.deny; i++ {
+				r.SourceDeny = append(r.SourceDeny, netip.MustParsePrefix(fmt.Sprintf("203.0.113.%d/32", i)))
+			}
+			for i := 0; i < tc.allow; i++ {
+				r.SourceAllow = append(r.SourceAllow, netip.MustParsePrefix(fmt.Sprintf("192.0.2.%d/32", i)))
+			}
+			in := healthyInput(r)
+			c := checkOf(t, diagnose(r, in), checkSourceFilter)
+			found := false
+			for _, line := range c.Internal {
+				if strings.Contains(line, tc.want) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("Internal = %v, want a line containing %q", c.Internal, tc.want)
+			}
+		})
+	}
+}
+
+// TestFlowBudgetRefusalCountPluralizes confirms rule.flow_budget's detail agrees in both number
+// ("connection"/"connections") and verb ("was"/"were") with the refusal count, not just the
+// existing coverage (TestOffPathChecksDoNotMoveTheRuleStatus) that only ever used a count of 7
+// and never looked at the detail text.
+func TestFlowBudgetRefusalCountPluralizes(t *testing.T) {
+	cases := []struct {
+		name    string
+		refused uint64
+		want    string
+	}{
+		{"one refusal", 1, "1 connection on this rule was refused"},
+		{"several refusals", 7, "7 connections on this rule were refused"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := tcpRule()
+			in := healthyInput(r)
+			in.Rules.ResourceRefusals = map[string]map[string]uint64{r.ID: {"rule": tc.refused}}
+			c := checkOf(t, diagnose(r, in), checkFlowBudget)
+			if !strings.Contains(c.Detail, tc.want) {
+				t.Errorf("detail = %q, want it to hold %q", c.Detail, tc.want)
+			}
+		})
 	}
 }
 
