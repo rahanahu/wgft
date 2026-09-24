@@ -1646,7 +1646,7 @@ FAILED の所見には必ず次に見るものを添える。エージェント�
 
 - ルールが無効なら、`rule.enabled` を SKIPPED にし、下流の検査もすべて SKIPPED にする
 - ルールが有効で、持ち主のエージェントが無効(5.1 節)なら、`agent.enabled` を SKIPPED にし、理由の符号を `agent_disabled` とし、下流の検査もすべて SKIPPED にする。次に見るものは `wgft agent enable` である。無効なルールと同じく宣言どおりの状態なので、終了コードは 0 のままとする。ルール自身も無効なら、前項の `rule_disabled` を先に示す。`rule enable` と `agent enable` のどちらで直すかが違うので、`rule_disabled` を流用しない
-- エージェントが登録されていないなら、`agent.connection` を FAILED にし、トンネルとエージェントに属する他の検査を SKIPPED にする。`agent.enabled` は、無効の印を持つ登録済みの行が無いので OK とし、既存の検査の結果、ルールの総合判定、終了コードを動かさない。`rule.public_port` は FAILED `not_published` のまま、`agent.connection` は FAILED `agent_not_registered` のままである。Web UI はこれらのルールを灰色の「エージェント未登録」と示し故障に数えないが、`server doctor` は次のメジャー版まで今の結果を保つ。この違いは 7a.11 節の互換性の保証による意図したものである(5.1 節)
+- エージェントが登録されていないなら、`agent.connection` を FAILED にし、トンネルとエージェントに属する他の検査を SKIPPED にする。`agent.enabled` は、無効の印を持つ登録済みの行が無いので OK とし、既存の検査の結果、ルールの総合判定、終了コードを動かさない。この OK は観測に基づく。`agent.enabled` が答えるのは、そのルールを止める無効の印があるかどうかであり、server は無効の印の正本である自分のデータベースを読むので、エージェントが登録済みかどうかに関わらず、そのルールに無効の印が無いことを直接観測している。登録の有無は、この検査ではなく `agent.connection` が判定する。`rule.public_port` は FAILED `not_published` のまま、`agent.connection` は FAILED `agent_not_registered` のままである。Web UI はこれらのルールを灰色の「エージェント未登録」と示し故障に数えないが、`server doctor` は次のメジャー版まで今の結果を保つ。この違いは 7a.11 節の互換性の保証による意図したものである(5.1 節)
 - エージェントの stream が切れている間は、そのエージェントが報告した値を今の値として扱わない (5.2 節)。`agent.rules_received` と `rule.target` は UNKNOWN とし、理由の符号を `stale_report` とし、人向けの出力では `agent ls` と同じ `last:` の接頭辞を付ける。古い宛先の誤りを今の原因として示さない
 - 最終ハンドシェイクは server が WireGuard から直接読む今の値なので、stream が切れていてもトンネルの判定に使う。エージェント自身のトンネルの報告は履歴として添えるにとどめる
 - stream が切れていてトンネルが生きている間は、`agent.connection` も UNKNOWN とする。理由は前項のとおりである
