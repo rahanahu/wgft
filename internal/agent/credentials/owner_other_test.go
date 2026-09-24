@@ -3,8 +3,10 @@
 package credentials
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -61,5 +63,34 @@ func TestSaveKeepsTheOwnerWhenRoot(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Errorf("chown when not root: %v", calls)
+	}
+}
+
+// root の Save で chown が失敗しても、警告を出して保存は成功させる。root で常駐するエージェントの保存を
+// 持ち主の移し替えの失敗で止めないためである。
+func TestSaveGoesOnWhenChownFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the file would be owned by root, which keepOwner leaves alone")
+	}
+	path := filepath.Join(t.TempDir(), "agent.json")
+	if err := (&Credentials{Name: "home"}).Save(path); err != nil {
+		t.Fatal(err)
+	}
+	var warned []string
+	defer func(e func() int, c func(string, int, int) error, l func(string, ...any)) {
+		geteuid, chown, logf = e, c, l
+	}(geteuid, chown, logf)
+	geteuid = func() int { return 0 }
+	chown = func(string, int, int) error { return os.ErrPermission }
+	logf = func(f string, a ...any) { warned = append(warned, fmt.Sprintf(f, a...)) }
+	if err := (&Credentials{Name: "renamed"}).Save(path); err != nil {
+		t.Fatalf("Save failed on a chown failure: %v", err)
+	}
+	g, err := Load(path)
+	if err != nil || g.Name != "renamed" {
+		t.Fatalf("the file was not saved: %+v, %v", g, err)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "cannot keep the owner") {
+		t.Errorf("warnings = %q, want one about the owner", warned)
 	}
 }

@@ -49,9 +49,11 @@ const (
 func (o linkOwner) ours() bool { return o == linkCurrentKey || o == linkPreviousKey }
 
 // linkState は名前で見たリンクである。kind はリンクの種別で、WireGuard 以外のときだけ文面に使う。
+// address は WireGuard のリンクの IPv4 のアドレスと帯(10.200.0.2/24 の形)で、無ければ空である。
 type linkState struct {
-	owner linkOwner
-	kind  string
+	owner   linkOwner
+	kind    string
+	address string
 }
 
 // teardownOps は撤去がカーネルとロックに触れる操作である。単体テストだけが差し替える。
@@ -63,6 +65,9 @@ type teardownOps struct {
 	keyHolders  func(current, previous wgtypes.Key) ([]string, error)
 	link        func(name string, current, previous wgtypes.Key) (linkState, error)
 	stagingName func(iface string) string
+	// wireGuardLinks は、鍵によらずホストのすべての WireGuard インタフェースの名前を返す。agent.json が
+	// 無いときに、見つけたものを示すためだけに使う。
+	wireGuardLinks func() ([]string, error)
 	// deleteLink は、name が今か前の鍵を持つときだけ消す。消したかどうかを返す。
 	deleteLink   func(name string, current, previous wgtypes.Key) (bool, error)
 	tablePresent func() (bool, error)
@@ -136,7 +141,7 @@ func teardownWith(ops teardownOps, opts TeardownOptions, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "agent teardown: credentials file %s\n", path)
 	if plan.f == nil {
-		fmt.Fprintf(out, "note: %s does not exist, so no WireGuard interface can be judged the agent's by its key; only table inet wgft_agent, which wgft owns by its name, is removed\n", path)
+		return noCredentials(ops, path, out)
 	}
 	if plan.empty() {
 		for _, l := range plan.leave {
@@ -211,7 +216,30 @@ func teardownWith(ops teardownOps, opts TeardownOptions, out io.Writer) error {
 	return nil
 }
 
-// planTeardown は何も変えずに撤去の対象を読む。
+// noCredentials は、指したデータディレクトリに agent.json が無い場合の扱いである(設計文書 10.3 節)。
+// 何も消さずに、見つけた table inet wgft_agent と WireGuard インタフェースを示し、誤りを返す。稼働の判定は
+// そのディレクトリのロックファイルしか見ないので、--data-dir が実際のデータディレクトリを指していないと、
+// 稼働中のエージェントの資源を停止したものと取り違えるためである。一覧を読めなくても、その旨を示して
+// 同じ誤りを返す。
+func noCredentials(ops teardownOps, path string, out io.Writer) error {
+	if present, err := ops.tablePresent(); err != nil {
+		fmt.Fprintf(out, "found: cannot list the nftables tables: %v\n", err)
+	} else if present {
+		fmt.Fprintln(out, "found: table inet wgft_agent")
+	}
+	if names, err := ops.wireGuardLinks(); err != nil {
+		fmt.Fprintf(out, "found: cannot list the WireGuard interfaces: %v\n", err)
+	} else {
+		for _, n := range names {
+			fmt.Fprintf(out, "found: the WireGuard interface %s\n", n)
+		}
+	}
+	return fmt.Errorf("%s does not exist, so nothing was removed: without the agent's credentials, teardown can neither tell whether an agent using this data directory is running nor judge which WireGuard interface is the agent's. "+
+		"Point --data-dir or WGFT_DATA_DIR at the data directory the agent actually uses, the one wgft agent run was given. "+
+		"If agent.json was really lost, stop the agent, confirm that what is found above is the agent's, and delete it by hand with `nft delete table inet wgft_agent` and `ip link del <name>`", path)
+}
+
+// planTeardown は何も変えずに撤去の対象を読む。agent.json が無ければ、カーネルを読まずに f を nil のまま返す。
 func planTeardown(ops teardownOps, opts TeardownOptions) (*teardownPlan, error) {
 	p := &teardownPlan{owners: map[string]linkOwner{}}
 	f, err := credentials.Load(opts.CredentialsPath)
@@ -222,25 +250,26 @@ func planTeardown(ops teardownOps, opts TeardownOptions) (*teardownPlan, error) 
 	default:
 		p.f = f
 	}
-	if p.f != nil {
-		switch p.f.Mode {
-		case "", credentials.ModeKernel, credentials.ModeUserspace:
-		default:
-			// 新しい版が書いた記録かもしれない。この版はその版が残した資源を判定できず、記録を消すと
-			// その版の撤去が手掛かりを失うので、何も変えずに止まる(設計文書 10.3・11a 節)
-			return nil, startup.Conflict("WGFT_MODE",
-				"the credentials file agent.json records the mode %q, which this version of wgft does not know, so nothing was removed; "+
-					"it may have been written by a newer version, whose kernel state this version cannot judge; "+
-					"run wgft agent teardown of the version that wrote it, or restore agent.json from a backup", p.f.Mode)
-		}
-		if p.f.WGPrivateKey != "" {
-			if p.cur, err = p.f.PrivateKey(); err != nil {
-				return nil, fmt.Errorf("the credentials file: %w; nothing was removed", err)
-			}
-		}
-		if p.prev, err = p.f.PreviousKey(); err != nil {
+	if p.f == nil {
+		return p, nil
+	}
+	switch p.f.Mode {
+	case "", credentials.ModeKernel, credentials.ModeUserspace:
+	default:
+		// 新しい版が書いた記録かもしれない。この版はその版が残した資源を判定できず、記録を消すと
+		// その版の撤去が手掛かりを失うので、何も変えずに止まる(設計文書 10.3・11a 節)
+		return nil, startup.Conflict("WGFT_MODE",
+			"the credentials file agent.json records the mode %q, which this version of wgft does not know, so nothing was removed; "+
+				"it may have been written by a newer version, whose kernel state this version cannot judge; "+
+				"run wgft agent teardown of the version that wrote it, or restore agent.json from a backup", p.f.Mode)
+	}
+	if p.f.WGPrivateKey != "" {
+		if p.cur, err = p.f.PrivateKey(); err != nil {
 			return nil, fmt.Errorf("the credentials file: %w; nothing was removed", err)
 		}
+	}
+	if p.prev, err = p.f.PreviousKey(); err != nil {
+		return nil, fmt.Errorf("the credentials file: %w; nothing was removed", err)
 	}
 
 	var zero wgtypes.Key
@@ -269,19 +298,35 @@ func planTeardown(ops teardownOps, opts TeardownOptions) (*teardownPlan, error) 
 		if err != nil {
 			return nil, kernelErr(fmt.Errorf("read %s: %w; nothing was removed", n, err))
 		}
-		if s := describeLeftLink(n, st, p.f == nil); s != "" {
+		if s := describeLeftLink(n, st); s != "" {
 			p.leave = append(p.leave, s)
 		}
 	}
 	if p.table, err = ops.tablePresent(); err != nil {
 		return nil, kernelErr(fmt.Errorf("list the nftables tables: %w; nothing was removed", err))
 	}
-	if p.f != nil {
-		p.records = kernelRecords(p.f)
-		p.forwardAt = p.f.IPForwardEnabledAt
-		p.pubs, p.address, p.flowsSkip = flowInputs(p.f)
-	} else {
-		p.flowsSkip = "agent.json does not exist, so no flow can be told apart as the agent's"
+	p.records = kernelRecords(p.f)
+	p.forwardAt = p.f.IPForwardEnabledAt
+	p.pubs, p.address, p.flowsSkip = flowInputs(p.f)
+	if p.flowsSkip == "" && p.address == "" {
+		// 停止中の rotate-key の後は last_state が無い。消す前のインタフェースのアドレスを代わりに使う。
+		// 設定の名前のものを先に見る
+		for _, n := range append([]string{opts.Interface}, p.links...) {
+			if _, ours := p.owners[n]; !ours {
+				continue
+			}
+			st, err := ops.link(n, p.cur, p.prev)
+			if err != nil {
+				return nil, kernelErr(fmt.Errorf("read the WireGuard interface %s: %w; nothing was removed", n, err))
+			}
+			if st.address != "" {
+				p.address = st.address
+				break
+			}
+		}
+		if p.address == "" {
+			p.flowsSkip = "agent.json has no last_state and no interface of the agent has an address, so the agent's tunnel address is unknown and no flow can be told apart as the agent's"
+		}
 	}
 	return p, nil
 }
@@ -289,7 +334,8 @@ func planTeardown(ops teardownOps, opts TeardownOptions) (*teardownPlan, error) 
 // flowInputs は conntrack の収束の入力を agent.json から取る。前の公開は、収束が済んでいない前の公開の
 // 列(古い順)と、直近の公開の記録をこの順に並べたものである。エージェントの収束と同じ並びであり、
 // 列の公開は直近の公開より前に公開された。公開の記録が無いか、エージェントのトンネルアドレスが
-// 分からなければ、wgft のフローを見分けられないので、その理由を返す。
+// 分からなければ、wgft のフローを見分けられないので、その理由を返す。last_state が無ければアドレスを
+// 空で返し、呼び出し側が消す前のインタフェースから読む。
 func flowInputs(f *credentials.Credentials) (pubs []json.RawMessage, address, skip string) {
 	if len(f.KernelUnconverged) > 0 {
 		var list []json.RawMessage
@@ -305,7 +351,8 @@ func flowInputs(f *credentials.Credentials) (pubs []json.RawMessage, address, sk
 		return nil, "", "agent.json has no publication record, so no flow can be told apart as the agent's"
 	}
 	if f.LastState == nil || f.LastState.WG.Address == "" {
-		return nil, "", "agent.json has no last_state, so the agent's tunnel address is unknown and no flow can be told apart as the agent's"
+		// アドレスは呼び出し側がインタフェースから読む
+		return pubs, "", ""
 	}
 	return pubs, f.LastState.WG.Address, ""
 }
@@ -354,16 +401,13 @@ func describeLink(name string, o linkOwner, iface string) string {
 }
 
 // describeLeftLink は、設定の名前か作業用の名前にあって撤去が触らないリンクの説明である。無ければ空。
-func describeLeftLink(name string, st linkState, noCredentials bool) string {
+func describeLeftLink(name string, st linkState) string {
 	switch st.owner {
 	case linkNotWireGuard:
 		return fmt.Sprintf("%s is a %s link, not WireGuard; wgft leaves it untouched", name, st.kind)
 	case linkKeyless:
 		return fmt.Sprintf("%s is a WireGuard interface with no key, so it cannot be judged the agent's and wgft leaves it untouched; if nothing uses it, delete it with `ip link del %s`", name, name)
 	case linkForeignKey:
-		if noCredentials {
-			return fmt.Sprintf("%s is a WireGuard interface, and without agent.json its key cannot be compared, so wgft leaves it untouched; if it was this agent's, confirm that and delete it with `ip link del %s`", name, name)
-		}
 		return fmt.Sprintf("%s is a WireGuard interface that holds neither this agent's key nor its previous one, so wgft leaves it untouched; "+
 			"if it was left by an earlier registration of this agent, for example after agent.json was lost, confirm that and delete it with `ip link del %s`", name, name)
 	}

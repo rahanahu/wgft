@@ -296,6 +296,12 @@ names such a link and leaves it, and still succeeds. When agent.json records
 a mode this version does not know, it removes nothing and exits with code 3.
 A host with nothing left succeeds without changing anything.
 
+It tells whether the agent runs, and which interfaces are the agent's, from
+the data directory set by --data-dir or WGFT_DATA_DIR, taken from agent.env
+like "agent run" does. When that directory holds no agent.json, it removes
+nothing, lists the table inet wgft_agent and WireGuard interfaces it finds, and
+exits with code 1: point --data-dir at the directory the agent actually uses.
+
 It does not set net.ipv4.ip_forward back. When agent.json records that the
 agent changed it from 0 to 1, it prints the command to restore it, along with
 the other things to undo by hand, such as WGFT_MODE=kernel in agent.env.`,

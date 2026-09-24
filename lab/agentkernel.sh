@@ -43,13 +43,15 @@
 #   route. a policy routing rule that sends the server's tunnel address to another table, the way
 #       Tailscale's table 52 can, is named in the agent's log within one 30-second check, and so is
 #       its removal; so are a main-table route that covers the address and its removal.
-#   teardown. wgft agent teardown: it refuses while the agent runs; a stopped kernel-mode agent's
-#       leftovers make a userspace start refuse; teardown removes the agent's interfaces, found by
-#       key under any name, its table and its records, keeps agent.json's owner, and leaves a
-#       WireGuard interface with another key and an unrelated table alone; the agent then forwards
-#       in userspace mode, and the outage from stopping the kernel-mode agent until forwarding is
-#       back is measured and printed; kernel mode comes back after a teardown; a wgft0 holding the
-#       previous key after a stopped rotate-key is removed; a foreign-key wgft0 is left and named;
+#   teardown. wgft agent teardown: it refuses while the agent runs; pointed at a directory without
+#       agent.json while the agent runs, it removes nothing and forwarding goes on; a stopped
+#       kernel-mode agent's leftovers make a userspace start refuse; teardown removes the agent's
+#       interfaces, found by key under any name, its table and its records, keeps agent.json's
+#       owner, and leaves a WireGuard interface with another key and an unrelated table alone; the
+#       agent then forwards in userspace mode, and the outage from stopping the kernel-mode agent
+#       until forwarding is back is measured and printed; kernel mode comes back after a teardown;
+#       a wgft0 holding the previous key after a stopped rotate-key is removed, and without
+#       last_state the flows are found by wgft0's address; a foreign-key wgft0 is left and named;
 #       a host with only the records left, as after a reboot, is cleared; an unknown recorded mode
 #       stops it with exit code 3 and changes nothing; a run without CAP_NET_ADMIN is a
 #       prerequisite refusal; a second run finds nothing to remove.
@@ -532,6 +534,22 @@ check_teardown() {
   check "wgft0 stays after the refusal" "wgft0" "$(home ip -br link show wgft0 2>&1)"
   check "the table stays after the refusal" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
 
+  # A data directory without agent.json, as when --data-dir is left out while the agent uses another
+  # directory: the lock there says nothing about the running agent, so teardown must remove nothing.
+  local empty=$W/wgft-ak-empty
+  rm -rf "$empty"; mkdir -p "$empty"
+  out=$(home wgft agent teardown --data-dir "$empty" 2>&1); rc=$?
+  check "a directory without agent.json removes nothing" "does not exist, so nothing was removed" "$out"
+  okcheck "and exits 1" "$([ "$rc" = 1 ] && echo 1 || echo 0)"
+  check "it names the table it found" "found: table inet wgft_agent" "$out"
+  check "it names wgft0" "found: the WireGuard interface wgft0" "$out"
+  check "it points at --data-dir" "Point --data-dir" "$out"
+  check "the running agent's table stays" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
+  check "the running agent's wgft0 stays up" "UP" "$(home ip -br link show wgft0 2>&1)"
+  check "forwarding goes on right after it" "tcp-echo" "$(tcp_echo 39971)"
+  okcheck "it created nothing in that directory" "$([ -z "$(ls -A "$empty")" ] && echo 1 || echo 0)"
+  rm -rf "$empty"
+
   # Forwarding is probed every 0.1 s from the client through the VPS, each probe a new TCP
   # connection that gives up after 0.5 s, for the outage measured below.
   client "python3 - > $probe 2>&1 <<'PY' &
@@ -638,8 +656,10 @@ PY
   echo "-- a wgft0 that holds the previous key after a stopped rotate-key"
   stop_agent
   check "a stopped rotate-key keeps the old key as the previous one" "the old key is kept as the previous key" "$(home wgft agent rotate-key --data-dir "$ADATA" 2>&1)"
+  not_forwarded "the stopped rotate-key cleared last_state" '"last_state": {' "$(cat "$ADATA/agent.json")"
   out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
   check "teardown names wgft0 by the previous key" "remove: the WireGuard interface wgft0, which holds this agent's previous key" "$out"
+  okcheck "without last_state it closes the agent's conntrack entries by wgft0's address" "$([[ "$out" =~ conntrack:\ closed\ [1-9] ]] && echo 1 || echo 0)"
   okcheck "and deletes it" "$([ "$rc" = 0 ] && ! home ip link show wgft0 >/dev/null 2>&1 && echo 1 || echo 0)"
   not_forwarded "the previous key is cleared" '"previous_wg_private_key"' "$(cat "$ADATA/agent.json")"
 

@@ -24,6 +24,7 @@ import (
 // 鍵がゼロなら鍵の無い WireGuard、notWG に名前があれば WireGuard 以外のリンクである。
 type tdKernel struct {
 	links    map[string]wgtypes.Key
+	addrs    map[string]string // インタフェースのアドレス。無ければ空
 	notWG    map[string]string
 	table    bool
 	calls    []string
@@ -71,13 +72,20 @@ func (k *tdKernel) ops() teardownOps {
 			case key == zero:
 				return linkState{owner: linkKeyless}, nil
 			case key == cur:
-				return linkState{owner: linkCurrentKey}, nil
+				return linkState{owner: linkCurrentKey, address: k.addrs[name]}, nil
 			case key == prev:
-				return linkState{owner: linkPreviousKey}, nil
+				return linkState{owner: linkPreviousKey, address: k.addrs[name]}, nil
 			}
 			return linkState{owner: linkForeignKey}, nil
 		},
 		stagingName: func(iface string) string { return "wgftnew-" + iface },
+		wireGuardLinks: func() ([]string, error) {
+			var out []string
+			for n := range k.links {
+				out = append(out, n)
+			}
+			return tdSorted(out), nil
+		},
 		deleteLink: func(name string, cur, prev wgtypes.Key) (bool, error) {
 			k.calls = append(k.calls, "delete "+name)
 			if k.deleteErr != nil {
@@ -406,21 +414,32 @@ func TestTeardownLeavesLinksItDoesNotOwn(t *testing.T) {
 	}
 }
 
-// agent.json が無ければ鍵で判定できないので、インタフェースには触れず、テーブルだけを消す。
-func TestTeardownWithoutCredentials(t *testing.T) {
+// agent.json が無ければ何も消さずに誤りを返し、見つけたテーブルとインタフェースを示す(設計文書 10.3 節)。
+// 稼働の判定は指したデータディレクトリのロックファイルしか見ないので、--data-dir が実際のデータ
+// ディレクトリを指していないと、稼働中のエージェントの資源を消しかねないためである。
+func TestTeardownWithoutCredentialsRemovesNothing(t *testing.T) {
 	other := tdKey(t)
 	path := filepath.Join(t.TempDir(), "agent.json")
 	k := &tdKernel{links: map[string]wgtypes.Key{"wgft0": other}, table: true}
 	out, err := runTeardown(t, k, TeardownOptions{CredentialsPath: path})
-	if err != nil {
-		t.Fatalf("teardown: %v\n%s", err, out)
+	if err == nil {
+		t.Fatalf("teardown succeeded without agent.json:\n%s", out)
 	}
-	want := []string{"delete table"}
-	if !reflect.DeepEqual(k.calls, want) {
-		t.Errorf("calls = %v, want %v", k.calls, want)
+	if startup.IsRefusal(err) {
+		t.Errorf("err = %v is a refusal; it is a plain error, exit 1", err)
 	}
-	if !strings.Contains(out, "without agent.json its key cannot be compared") {
-		t.Errorf("output:\n%s", out)
+	if len(k.calls) != 0 || !k.table {
+		t.Errorf("changed something: calls=%v", k.calls)
+	}
+	for _, s := range []string{"found: table inet wgft_agent", "found: the WireGuard interface wgft0"} {
+		if !strings.Contains(out, s) {
+			t.Errorf("output lacks %q:\n%s", s, out)
+		}
+	}
+	for _, s := range []string{"does not exist, so nothing was removed", "--data-dir"} {
+		if !strings.Contains(err.Error(), s) {
+			t.Errorf("error lacks %q: %v", s, err)
+		}
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("teardown created agent.json: %v", err)
@@ -517,12 +536,16 @@ func TestTeardownAfterAStoppedRotateKey(t *testing.T) {
 	if err := f.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	k := &tdKernel{links: map[string]wgtypes.Key{"wgft0": cur}, table: true}
+	k := &tdKernel{links: map[string]wgtypes.Key{"wgft0": cur}, addrs: map[string]string{"wgft0": "10.200.0.5/24"}, table: true}
 	out, err := runTeardown(t, k, TeardownOptions{CredentialsPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := k.links["wgft0"]; ok {
 		t.Errorf("wgft0 with the previous key was not deleted:\n%s", out)
+	}
+	// last_state が無いので、conntrack は消す前の wgft0 のアドレスで見分ける
+	if k.flowsAddr != "10.200.0.5/24" {
+		t.Errorf("conntrack got the address %q, want wgft0's 10.200.0.5/24; calls=%v\n%s", k.flowsAddr, k.calls, out)
 	}
 }

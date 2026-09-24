@@ -503,6 +503,27 @@ func AgentKeyHolders(iface string, current, previous wgtypes.Key) ([]string, err
 	return out, nil
 }
 
+// KernelDeviceNames lists every kernel WireGuard device on the host, whatever its key. Agent teardown
+// shows them when it has no credentials to judge ownership with, and deletes none of them.
+func KernelDeviceNames() ([]string, error) {
+	c, err := wgctrl.New()
+	if err != nil {
+		return nil, fmt.Errorf("wgctrl: %w", err)
+	}
+	defer c.Close()
+	devs, err := c.Devices()
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, d := range devs {
+		if d.Type == wgtypes.LinuxKernel {
+			out = append(out, d.Name)
+		}
+	}
+	return out, nil
+}
+
 // agentDeviceDiff is the wgctrl part of EnsureAgent on a device already read: the configuration
 // that moves dev to cfg, and one line per change. It never sets the listen port.
 func agentDeviceDiff(dev *wgtypes.Device, cfg AgentConfig) (wgtypes.Config, []string) {

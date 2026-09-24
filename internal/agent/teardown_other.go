@@ -18,14 +18,15 @@ func defaultTeardownOps() teardownOps {
 		return startup.Prerequisite("operating system", "the agent's kernel mode, which agent teardown cleans up after, runs on Linux only")
 	}
 	return teardownOps{
-		inspectLock:  credentials.Inspect,
-		acquire:      credentials.Acquire,
-		keyHolders:   func(wgtypes.Key, wgtypes.Key) ([]string, error) { return nil, refuse() },
-		link:         func(string, wgtypes.Key, wgtypes.Key) (linkState, error) { return linkState{}, refuse() },
-		stagingName:  func(iface string) string { return iface },
-		deleteLink:   func(string, wgtypes.Key, wgtypes.Key) (bool, error) { return false, refuse() },
-		tablePresent: func() (bool, error) { return false, refuse() },
-		deleteTable:  func() (bool, error) { return false, refuse() },
-		closeFlows:   func([]json.RawMessage, string) (string, error) { return "", refuse() },
+		inspectLock:    credentials.Inspect,
+		acquire:        credentials.Acquire,
+		keyHolders:     func(wgtypes.Key, wgtypes.Key) ([]string, error) { return nil, refuse() },
+		link:           func(string, wgtypes.Key, wgtypes.Key) (linkState, error) { return linkState{}, refuse() },
+		stagingName:    func(iface string) string { return iface },
+		wireGuardLinks: func() ([]string, error) { return nil, refuse() },
+		deleteLink:     func(string, wgtypes.Key, wgtypes.Key) (bool, error) { return false, refuse() },
+		tablePresent:   func() (bool, error) { return false, refuse() },
+		deleteTable:    func() (bool, error) { return false, refuse() },
+		closeFlows:     func([]json.RawMessage, string) (string, error) { return "", refuse() },
 	}
 }

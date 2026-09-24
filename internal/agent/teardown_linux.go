@@ -23,8 +23,12 @@ func defaultTeardownOps() teardownOps {
 			// 空の名前のインタフェースは無いので、どの名前も除かずに数える
 			return wg.AgentKeyHolders("", current, previous)
 		},
-		link:         teardownLink,
-		stagingName:  wg.AgentStagingName,
+		link:        teardownLink,
+		stagingName: wg.AgentStagingName,
+		wireGuardLinks: func() ([]string, error) {
+			// ゼロの鍵を 2 つ渡すと AgentKeyHolders は何も返さないので、ここでは名前を直接並べる
+			return wg.KernelDeviceNames()
+		},
 		deleteLink:   teardownDeleteLink,
 		tablePresent: nft.AgentTablePresent,
 		deleteTable:  nft.DeleteAgentTable,
@@ -38,13 +42,17 @@ func teardownLink(name string, current, previous wgtypes.Key) (linkState, error)
 	if err != nil {
 		return linkState{}, err
 	}
+	var addr string
+	if len(st.Addresses) > 0 {
+		addr = st.Addresses[0].String()
+	}
 	switch st.Ownership {
 	case wg.Absent:
 		return linkState{owner: linkAbsent}, nil
 	case wg.OwnedByCurrentKey:
-		return linkState{owner: linkCurrentKey}, nil
+		return linkState{owner: linkCurrentKey, address: addr}, nil
 	case wg.OwnedByPreviousKey:
-		return linkState{owner: linkPreviousKey}, nil
+		return linkState{owner: linkPreviousKey, address: addr}, nil
 	case wg.NotWireGuard:
 		return linkState{owner: linkNotWireGuard, kind: st.Kind}, nil
 	}
