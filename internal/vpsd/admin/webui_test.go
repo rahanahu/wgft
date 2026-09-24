@@ -112,6 +112,8 @@ func TestRuleRunState(t *testing.T) {
 
 // newStateTestServer はルール 3 件(ok、error、pending 相当のエージェント未接続)を持つ
 // 管理 API サーバーを立てる。ダッシュボードとルール詳細ページの描画を確かめるために使う。
+// ダッシュボードの診断の印と error の件数は診断の証拠から決まるので、本物の server と同じく
+// 適用状態とエージェントの報告を返す countingBackend を使う(webui_doctor_test.go)。
 func newStateTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
@@ -136,6 +138,7 @@ func newStateTestServer(t *testing.T) *httptest.Server {
 		{
 			Name: "home", Connected: true, Generation: gen,
 			PublicKey:     "wJ6znEXOTPMBUXW+3z2vqjaMYikBWi2gYGA9EI0PZXk=",
+			LastHeartbeat: time.Now().Add(-10 * time.Second).Format(time.RFC3339),
 			LastHandshake: time.Now().Add(-30 * time.Second).Format(time.RFC3339),
 			Rules: []proto.RuleStatus{
 				{ID: "r_ok", State: proto.StatusOK},
@@ -144,7 +147,7 @@ func newStateTestServer(t *testing.T) *httptest.Server {
 		},
 		{Name: "office", Connected: false},
 	}
-	srv := httptest.NewServer(New(&fakeBackend{st: st, agents: agents}))
+	srv := httptest.NewServer(New(&countingBackend{fakeBackend: fakeBackend{st: st, agents: agents}}))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -163,13 +166,14 @@ func getBody(t *testing.T, url string) string {
 }
 
 // TestRuleStateOnDashboard は一覧の状態欄が ok/error/エージェント未接続を出し分け、
-// error の理由が副題に出て、畳んだグループの見出しに error の件数が出ることを確かめる。
+// 畳んだグループの見出しに error の件数が出ることを確かめる。error の理由の長い文は一覧に
+// 出さない(設計文書 10.1 節)。ルール詳細ページには出る(TestRuleStateOnDetailPage)。
 // ja/en 両方で見る。
 func TestRuleStateOnDashboard(t *testing.T) {
 	srv := newStateTestServer(t)
 
 	for _, tc := range []struct {
-		lang, wantApplied, wantError, wantOffline, wantReason, wantGroupErr string
+		lang, wantApplied, wantError, wantOffline, reason, wantGroupErr string
 	}{
 		{"ja", "適用済み", "エラー", "エージェント未接続", "bind: address already in use", "エラー 1 件</span>"},
 		{"en", "Applied", "Error", "Agent offline", "bind: address already in use", "1 error</span>"},
@@ -184,8 +188,8 @@ func TestRuleStateOnDashboard(t *testing.T) {
 		if !strings.Contains(body, tc.wantOffline) {
 			t.Errorf("%s: missing agent-offline label %q", tc.lang, tc.wantOffline)
 		}
-		if !strings.Contains(body, tc.wantReason) {
-			t.Errorf("%s: missing error reason %q", tc.lang, tc.wantReason)
+		if strings.Contains(body, tc.reason) {
+			t.Errorf("%s: the rule list still carries the long error text %q; it belongs on the rule detail page and the diagnosis page", tc.lang, tc.reason)
 		}
 		if !strings.Contains(body, tc.wantGroupErr) {
 			t.Errorf("%s: missing group error count %q", tc.lang, tc.wantGroupErr)
@@ -272,13 +276,14 @@ func TestAgentListDisconnectedShowsStaleNotLive(t *testing.T) {
 }
 
 // TestOverallHealthIncludesRuleErrors はヘッダの全体ヘルスの要約に error のルール件数が
-// 入ることを確かめる(仕様 10.1 節)。
+// 入ることを確かめる(仕様 10.1 節)。件数は診断の印が FAILED のルールで、r_err(宛先で止まる)と
+// r_off(ハンドシェイクが無く WireGuard で止まる)の 2 本である。
 func TestOverallHealthIncludesRuleErrors(t *testing.T) {
 	srv := newStateTestServer(t)
 
 	body := getBody(t, srv.URL+"/?lang=en")
-	if !strings.Contains(body, "1 errors") {
-		t.Errorf("dashboard health summary missing the rule error count; body did not contain %q", "1 errors")
+	if !strings.Contains(body, "2 errors") {
+		t.Errorf("dashboard health summary missing the rule error count; body did not contain %q", "2 errors")
 	}
 }
 
@@ -355,7 +360,7 @@ func TestRulesAndHealthAutoRefresh(t *testing.T) {
 	if !strings.Contains(full, healthPartial) {
 		t.Errorf("GET /ui/health must render exactly the fragment the full page embeds inside #health\nfull:\n%s\npartial:\n%s", full, healthPartial)
 	}
-	if !strings.Contains(healthPartial, "1 errors") {
+	if !strings.Contains(healthPartial, "2 errors") {
 		t.Error("the /ui/health fragment is missing the rule error count")
 	}
 }

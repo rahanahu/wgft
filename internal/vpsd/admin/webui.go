@@ -16,6 +16,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -115,14 +116,16 @@ type ruleView struct {
 	ProtoUpper, ProtoClass, Ports    string
 	ProxyProtocol, Enabled, CanCheck bool
 	StateBadge, StateLabel           string
-	StateReason                      string
-	Dropped                          string
-	Restriction                      string
-	Note                             string
+	// Diag は適用状態のバッジの右に置く診断の印である。理由の長い文は一覧に出さず、ルールの
+	// 詳細ページと診断の画面で読む(設計文書 10.1 節)。
+	Diag        doctorMarkView
+	Dropped     string
+	Restriction string
+	Note        string
 }
 
 // ruleGroupView は一覧のグループ 1 つ分。ErrorCount はグループが畳まれていても見出しに
-// 出す error 状態のルール数(仕様 10.1 節)。
+// 出す error のルール数で、診断の印が FAILED のルールを数える(仕様 10.1 節)。
 type ruleGroupView struct {
 	Group      string
 	Label      string
@@ -134,22 +137,14 @@ type warnView struct {
 	Agent, Kind, Title, Body, Detail, Ago, AlertClass string
 }
 
+// buildDash はダッシュボードとその部分更新のビューを組み立てる。ルールとエージェントは診断と
+// 同じ doctor.Read の 1 回の読み取りから取る(設計文書 10.1、10.2d 節)。適用状態のバッジと診断の
+// 印と件数を同じ時点の証拠から作り、印のために読み取りを増やさないためである。疎通の確認は呼ばない。
 func (s *Server) buildDash(locale string) (dashData, error) {
-	agents, err := s.backend.Agents()
-	if err != nil {
-		return dashData{}, err
-	}
-	rules, err := s.backend.Rules()
-	if err != nil {
-		return dashData{}, err
-	}
+	// ルール、世代、拒否数、エージェントの読み取りの失敗は doctor.Read がそのまま返す。
 	// generation/drops/warnings もダッシュボードの本体データであり、Agents/Rules と同じく
 	// 失敗を 0 件・世代 0 のような値に変えて描いてはならない(design.md 10.5 節)。
-	gen, err := s.backend.Generation()
-	if err != nil {
-		return dashData{}, err
-	}
-	drops, err := s.backend.RuleDrops()
+	in, err := doctor.Read(doctorEvidence{s}, time.Now())
 	if err != nil {
 		return dashData{}, err
 	}
@@ -157,6 +152,7 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 	if err != nil {
 		return dashData{}, err
 	}
+	rules, gen, drops, agents := in.Rules.Rules, in.Rules.Generation, in.Rules.Drops, in.Agents
 
 	d := dashData{Locale: locale, Generation: gen, FirewallText: firewallText(locale)}
 	if info, e := s.backend.ServerInfo(); e == nil {
@@ -182,7 +178,7 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 	agentIdx := buildAgentIndex(agents)
 	d.RuleCount = len(rules)
 	var ruleErrors int
-	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, agentIdx, s.serverApply())
+	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, agentIdx, in.Rules.RuleStates, dashMarks(rules, in, locale))
 	for _, w := range warns {
 		d.Warnings = append(d.Warnings, warnToView(w, locale))
 	}
@@ -190,6 +186,20 @@ func (s *Server) buildDash(locale string) (dashData, error) {
 	return d, nil
 }
 
+// dashMarks はルールごとの診断の印を返す。印は診断の画面と同じ doctor.BuildReport と doctorPath の
+// 出力から選ぶ(webui_doctor_path.go の doctorMark)。
+func dashMarks(rules []proto.Rule, in doctor.Input, locale string) map[string]doctorMarkView {
+	rep := doctor.BuildReport(rules, in)
+	out := make(map[string]doctorMarkView, len(rep.Rules))
+	for _, rr := range rep.Rules {
+		checks := rep.ChecksOf(rr.RuleID)
+		out[rr.RuleID] = doctorMark(rr, checks, doctorPath(rr, checks, in.Now, locale), locale)
+	}
+	return out
+}
+
+// health はヘッダの全体ヘルスを作る。ruleErrors は診断の印が FAILED のルールの数で、グループの
+// 見出しの error の件数と同じ数え方である(groupRules)。
 func health(total, online, rules, warnings, ruleErrors int, locale string) healthView {
 	switch {
 	case ruleErrors > 0 && warnings > 0:
@@ -272,8 +282,9 @@ func pubKeyShort(key string) string {
 // ruleToView は 1 件のビューを作る。serverMode が "userspace" のときは、ルールごとの
 // vps_mode(kernel/proxy)に意味が無い(仕様 6.3 節。全ルールが server 経由で中継される)ので、
 // 一覧の方式欄は一律 "userspace" にし、PROXY protocol の有無だけを添える。適用状態は
-// ruleRunState がエージェントの直近のハートビートから判定する(仕様 10.1 節)。
-func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus, server map[string]RuleApply) ruleView {
+// ruleRunState がエージェントの直近のハートビートから判定する(仕様 10.1 節)。mark は
+// そのルールの診断の印で、dashMarks が作る。
+func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus, server map[string]RuleApply, mark doctorMarkView) ruleView {
 	mode := string(r.VPSMode)
 	if serverMode == "userspace" {
 		mode = "userspace"
@@ -286,7 +297,8 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode strin
 	} else {
 		v.ProtoClass = "tcp"
 	}
-	v.StateBadge, v.StateLabel, v.StateReason = ruleRunState(r, latestGen, agents, server, locale)
+	v.StateBadge, v.StateLabel, _ = ruleRunState(r, latestGen, agents, server, locale)
+	v.Diag = mark
 	v.CanCheck = r.Enabled && r.Proto == proto.TCP
 	v.Dropped = strconv.FormatUint(drops[r.ID], 10)
 	v.Restriction = restrictionSummary(r, locale)
@@ -295,8 +307,9 @@ func ruleToView(r *proto.Rule, drops map[string]uint64, locale, serverMode strin
 }
 
 // groupRules は一覧をグループごとにまとめる。空グループ(その他)は最後(仕様 10.1)。
-// 戻り値の 2 つ目は全体の error 状態のルール数(ヘッダの全体ヘルスに使う)。
-func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus, server map[string]RuleApply) ([]ruleGroupView, int) {
+// 戻り値の 2 つ目は全体の error のルール数(ヘッダの全体ヘルスに使う)。グループの件数も全体の
+// 件数も、適用状態のバッジの色ではなく診断の印から数える。marks はルールの ID ごとの印である。
+func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode string, latestGen uint64, agents map[string]ruleAgentStatus, server map[string]RuleApply, marks map[string]doctorMarkView) ([]ruleGroupView, int) {
 	idx := map[string]int{}
 	var out []ruleGroupView
 	totalErrors := 0
@@ -312,8 +325,8 @@ func groupRules(rules []proto.Rule, drops map[string]uint64, locale, serverMode 
 			}
 			out = append(out, ruleGroupView{Group: g, Label: label})
 		}
-		v := ruleToView(&rules[i], drops, locale, serverMode, latestGen, agents, server)
-		if v.StateBadge == "danger" {
+		v := ruleToView(&rules[i], drops, locale, serverMode, latestGen, agents, server, marks[rules[i].ID])
+		if v.Diag.Failed {
 			out[j].ErrorCount++
 			totalErrors++
 		}

@@ -185,6 +185,17 @@ h2 { font-size: 18px; margin: 0; }
 .group-row .group-name { margin-right: 8px; }
 .rule-note { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; max-width: 42ch; }
 
+/* ルール一覧の状態の列:適用状態のバッジと、その右の診断の印。印の図形は診断の画面の .node をそのまま使う。
+   広い画面ではバッジと印を 1 行に並べる。狭い画面で入りきらなければ印の側を次の行へ折り返し、
+   節点の名前は折り返さない */
+.state-cell { display: flex; align-items: center; gap: 2px 6px; }
+@media (max-width: 720px) { .state-cell { flex-wrap: wrap; } }
+.diag-mark { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 4px; border-radius: 6px; color: inherit; text-decoration: none; white-space: nowrap; }
+.diag-mark:hover, .diag-mark:focus-visible { background: var(--surface-2); }
+.diag-node { font-size: 12px; font-weight: 700; color: var(--muted); }
+.diag-mark.failed .diag-node { color: var(--danger); }
+.diag-mark.unknown .diag-node { color: var(--warning); }
+
 /* ルール操作列（ボタンを揃えて折り返す） */
 .row-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .row-actions form { margin: 0; display: contents; }

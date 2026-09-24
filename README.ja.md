@@ -149,7 +149,7 @@ sudo wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group g
 
 ![wgft のダッシュボード](docs/images/dashboard.ja.png)
 
-ダッシュボードでは agent の接続状態、ルール、drop カウンタ、警告、適用中の nftables 状態を確認できます。join string の発行や通常のルール操作も行えます。
+ダッシュボードでは agent の接続状態、ルール、drop カウンタ、警告、適用中の nftables 状態を確認できます。各ルールの状態の隣には診断の印が付き、通信が止まった節点を示します。印を押すと、そのルールの診断の画面が開きます。ヘッダとグループの見出しのエラーの件数は、この印から数えます。join string の発行や通常のルール操作も行えます。
 
 管理 API は既定では外部公開されず、`/run/wgft/admin.sock` でのみ待ち受けます。SSH で手元へ転送します。
 

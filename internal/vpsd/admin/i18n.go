@@ -303,6 +303,9 @@ var tr = map[string][2]string{
 	"doctorOffPathHead":   {"経路の外の検査", "Checks off the path"},
 	"doctorAgentChecks":   {"検査と次に見るもの", "Checks and what to check next"},
 	"doctorBanner":        {"server の転送の状態が OK ではありません。すべてのルールに関わります。", "The server's own forwarding is not OK; it concerns every rule."},
+	// ダッシュボードのルール一覧の診断の印(設計文書 10.1 節)。%s に入る状態の語と節点の名前は英語のまま
+	"dashDiagAlt":          {"診断: %s", "Diagnosis: %s"},
+	"dashDiagUnregistered": {"エージェント未登録", "Agent not registered"},
 
 	// 持ち主のエージェントが無効なルールの診断の画面(設計文書 5.1、10.2a 節)。検査の見出しと理由の
 	// 符号(agent enabled、agent_disabled)は他の検査と同じく英語のままにする。
