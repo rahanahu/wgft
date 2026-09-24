@@ -18,7 +18,8 @@ import (
 //     試していない検査を含む節点を ✓ と言わないためである。
 //  2. StoppedAt の検査が入る節点が止まった節点で、それより後ろの節点は、中の状態を問わず
 //     「届いていない」として描く。元の状態は代替テキストと検査の一覧に残す。
-//  3. 無効なルールは、すべての節点を「届いていない」として描く。
+//  3. 無効なルールと、持ち主のエージェントが無効なルールは、すべての節点を「届いていない」
+//     として描く。どちらも宣言どおりの状態であり、故障の色にしない(設計文書 5.1 節)。
 //
 // 表示のためだけの読み替えは 1 つだけある。`rule.probe` の not_tested(疎通の確認を試していない)は
 // 節点に数えない。数えると、probe を押していない TCP のルールの宛先が常に ◌ になるためである。
@@ -41,7 +42,7 @@ type doctorNodeDef struct {
 // いないためである(10.2d 節の改訂の記録)。`server.dataplane` はどのルールの検査でもないので
 // 節点に入れず、図の上の帯に出す。経路の外の検査(credentials、flow budget)も入れない。
 var doctorNodeDefs = []doctorNodeDef{
-	{"public port", []string{doctor.CheckEnabled, doctor.CheckPublicPort, doctor.CheckSourceFilter}},
+	{"public port", []string{doctor.CheckEnabled, doctor.CheckAgentEnabled, doctor.CheckPublicPort, doctor.CheckSourceFilter}},
 	{"WireGuard", []string{doctor.CheckHandshake}},
 	{"agent", []string{doctor.CheckConnection, doctor.CheckRulesReceived}},
 	{"listener / target", []string{doctor.CheckTargetResolve, doctor.CheckTarget, doctor.CheckProbe}},
@@ -163,6 +164,7 @@ func doctorPath(rr doctor.RuleReport, checks []doctor.Check, now time.Time, loca
 		}
 		p.Nodes = append(p.Nodes, n)
 	}
+	agentOff := byID[doctor.CheckAgentEnabled].Reason == doctor.ReasonAgentDisabled
 	switch {
 	case !rr.Enabled:
 		for i := range p.Nodes {
@@ -172,6 +174,13 @@ func doctorPath(rr doctor.RuleReport, checks []doctor.Check, now time.Time, loca
 			p.Caption = c.Label + " / " + c.Reason
 			p.Nodes[0].Stop = p.Caption
 		}
+	case agentOff:
+		for i := range p.Nodes {
+			doctorUnreach(&p.Nodes[i], T(locale, "doctorAgentDisabledAlt"), locale)
+		}
+		c := byID[doctor.CheckAgentEnabled]
+		p.Caption = c.Label + " / " + c.Reason
+		p.Nodes[0].Stop = p.Caption
 	case stop >= 0:
 		p.Nodes[stop].Open = true
 		p.Caption = p.Nodes[stop].Stop

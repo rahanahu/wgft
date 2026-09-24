@@ -304,6 +304,11 @@ var tr = map[string][2]string{
 	"doctorAgentChecks":   {"検査と次に見るもの", "Checks and what to check next"},
 	"doctorBanner":        {"server の転送の状態が OK ではありません。すべてのルールに関わります。", "The server's own forwarding is not OK; it concerns every rule."},
 
+	// 持ち主のエージェントが無効なルールの診断の画面(設計文書 5.1、10.2a 節)。検査の見出しと理由の
+	// 符号(agent enabled、agent_disabled)は他の検査と同じく英語のままにする。
+	"doctorAgentDisabledAlt":   {"ルールのエージェントが無効なので、何も転送していません", "the rule's agent is disabled, so nothing is forwarded"},
+	"doctorProbeAgentDisabled": {"このルールのエージェントは無効です。無効なエージェントのルールには、疎通の確認を使えません。", "This rule's agent is disabled, and the probe is not available for a rule of a disabled agent."},
+
 	// UDP の宛先の応答の観測(設計文書 10.2a 節「UDP の応答の観測」)。状態の色を持たない控えめな注記
 	"doctorUDPLastReply":   {"最後に応答を観測: %s", "last reply seen %s"},
 	"doctorUDPNoReply":     {"%sに観測を始めてから、応答を観測していません", "no reply seen since watching began %s"},

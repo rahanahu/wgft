@@ -154,7 +154,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | L12 | `lab/import-export.sh` (kernel と userspace) | Web UI の書き出しと読み込みの形式の食い違い、確認後の変更の見落とし | ラボ | `rule-ops` | A9 として | 約 20 秒 | 自動 |
 | L13 | `lab/ipv6.sh` (kernel と userspace) | IPv6 の送信元が deny をすり抜けること、IPv6 のフラッドが集約のレートのトークンを使うこと | ラボ (IPv6 を加えた netns) | `admission`、`relay` | A9 として | モードごとに約 25 秒 | 自動 |
 | L14 | `lab/lifecycle.sh` check 10 (kernel と userspace) | エージェントの停止後も、`agent ls` と Web UI の一覧が最後のハートビートを生きた状態のまま示すこと (design.md の 5.2 節) | ラボ | `rule-ops`、`protocol`、`agent-platform` | A9 として | モードごとに約 1 秒から 2 秒 | 自動 |
-| L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと (design.md の 5.1 節) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 単独で kernel モードは約 5 秒、userspace モードは約 40 秒 (userspace は server の再起動の後のトンネルの張り直しを待つ)。kernel モードの約 5 秒は、保持していたテーブルの削除の通知ですぐに公開し直す最善の場合です。通知で公開し直さなければ 30 秒ごとの再試行を待ち、確認はその待ちに 40 秒を許します | 自動 |
+| L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと (design.md の 5.1 節)、無効なエージェントのルールで `server doctor` と `status` が失敗を報告すること、削除したエージェントに残ったルールの `server doctor` と `status` の結果が変わること (design.md の 10.2a、10.2b 節) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 単独で kernel モードは約 5 秒、userspace モードは約 40 秒 (userspace は server の再起動の後のトンネルの張り直しを待つ)。kernel モードの約 5 秒は、保持していたテーブルの削除の通知ですぐに公開し直す最善の場合です。通知で公開し直さなければ 30 秒ごとの再試行を待ち、確認はその待ちに 40 秒を許します | 自動 |
 
 ### B 類 (関係する変更の関門)
 

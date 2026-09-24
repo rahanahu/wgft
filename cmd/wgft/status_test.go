@@ -104,7 +104,7 @@ func TestBuildStatusReportHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want2 := `{"server":{"status":"healthy"},"agents":{"healthy":2,"degraded":0,"unknown":0,"total":2},"rules":{"active":8,"degraded":0,"unknown":0,"total":8},"warnings":{"count":0}}`
+	want2 := `{"server":{"status":"healthy"},"agents":{"healthy":2,"degraded":0,"unknown":0,"disabled":0,"total":2},"rules":{"active":8,"degraded":0,"unknown":0,"agent_disabled":0,"total":8},"warnings":{"count":0}}`
 	if string(data) != want2 {
 		t.Errorf("json = %s, want %s", data, want2)
 	}
@@ -519,8 +519,8 @@ func TestStatusJSONRoundTrip(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"server":{"status":"healthy"}`,
-		`"agents":{"healthy":1,"degraded":1,"unknown":0,"total":2,"detail":"home2 last seen 4m12s ago"}`,
-		`"rules":{"active":7,"degraded":1,"unknown":0,"total":8,"detail":"r_01M335HMAB… bind failed: address already in use"}`,
+		`"agents":{"healthy":1,"degraded":1,"unknown":0,"disabled":0,"total":2,"detail":"home2 last seen 4m12s ago"}`,
+		`"rules":{"active":7,"degraded":1,"unknown":0,"agent_disabled":0,"total":8,"detail":"r_01M335HMAB… bind failed: address already in use"}`,
 		`"warnings":{"count":1,"detail":"ip-flapping on home, 1m0s ago"}`,
 	} {
 		if !bytes.Contains(data, []byte(want)) {

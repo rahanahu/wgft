@@ -111,6 +111,11 @@ func pathCases() []pathCase {
 			in.Rules.AgentRuleStates["r_tcp"] = st
 		}},
 		{"disabled rule", []proto.Rule{off}, nil},
+		{"disabled agent", []proto.Rule{tcp}, func(in *doctor.Input) {
+			in.Agents[0].Disabled = true
+			in.Rules.RuleStates["r_tcp"] = RuleApply{ApplyState: ApplyNotActive, Reason: `agent "home" is disabled`}
+			delete(in.Rules.AgentRuleStates, "r_tcp")
+		}},
 		{"unregistered agent", []proto.Rule{tcp}, func(in *doctor.Input) { in.Agents = nil }},
 		{"public port not served", []proto.Rule{tcp}, func(in *doctor.Input) {
 			in.Rules.RuleStates["r_tcp"] = RuleApply{ApplyState: ApplyNotActive, Reason: "bind failed"}
@@ -154,7 +159,7 @@ func TestDoctorPathFollowsTheVerdict(t *testing.T) {
 		"healthy TCP": "ok", "UDP rule without probe": "ok", "stop at WireGuard": "failed",
 		"stop at WireGuard with the stream down too": "failed", "stop at target": "failed",
 		"probe failed at target": "failed", "probe did not reach the listener": "failed",
-		"probe reached the target": "ok", "stream down, tunnel alive": "unknown", "disabled rule": "skipped",
+		"probe reached the target": "ok", "stream down, tunnel alive": "unknown", "disabled rule": "skipped", "disabled agent": "skipped",
 		"unregistered agent": "failed", "public port not served": "failed", "dataplane behind": "ok",
 	}
 	for _, c := range pathCases() {
@@ -187,6 +192,20 @@ func TestDoctorPathFollowsTheVerdict(t *testing.T) {
 					}
 					if p.Caption != "enabled / rule_disabled" {
 						t.Errorf("a disabled rule's caption = %q, want the enabled check's label and reason", p.Caption)
+					}
+				case rep.RuleAgentDisabled(rr.RuleID):
+					// 持ち主のエージェントが無効なルールも、無効なルールと同じく宣言どおりの状態で
+					// ある。故障の色(✕ と ?)を使わず、すべての節点を「届いていない」で描く。
+					for j, n := range p.Nodes {
+						if n.State != nodeUnreached {
+							t.Errorf("a disabled agent's rule: node %d (%s) is %s, want not reached", j, n.Name, n.State)
+						}
+						if !strings.Contains(n.Alt, T("en", "doctorAgentDisabledAlt")) {
+							t.Errorf("node %d alt %q does not say the agent is disabled", j, n.Alt)
+						}
+					}
+					if p.Caption != "agent enabled / agent_disabled" || p.Nodes[0].Stop != p.Caption {
+						t.Errorf("a disabled agent's rule: caption = %q, stop = %q", p.Caption, p.Nodes[0].Stop)
 					}
 				case rr.StoppedAt != "":
 					k := doctorNodeIndex(rr.StoppedAt)
@@ -229,6 +248,8 @@ func TestDoctorPathShapes(t *testing.T) {
 		"probe did not reach the listener": "untested ok ok failed",
 		"probe reached the target":         "untested ok ok ok",
 		"disabled rule":                    "unreached unreached unreached unreached",
+		"disabled agent":                   "unreached unreached unreached unreached",
+		"unregistered agent":               "untested skipped failed unreached",
 		"public port not served":           "failed unreached unreached unreached",
 		"dataplane behind":                 "untested ok ok ok",
 	}

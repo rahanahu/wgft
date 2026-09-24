@@ -259,7 +259,13 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 		case statusFailed:
 			fmt.Fprintf(w, "Result: traffic stops at %q\n", checkLabelOf(rep, rr.RuleID, rr.StoppedAt))
 		case statusSkipped:
-			fmt.Fprintln(w, "Result: the rule is disabled, so nothing is forwarded")
+			// skipped は、ルール自身が無効な場合と、ルールは有効で持ち主のエージェントが無効な
+			// 場合の 2 つである(設計文書 10.2a 節)。直す操作が違うので書き分ける。
+			if rep.RuleAgentDisabled(rr.RuleID) {
+				fmt.Fprintf(w, "Result: the rule's agent %q is disabled, so nothing is forwarded\n", rr.Agent)
+			} else {
+				fmt.Fprintln(w, "Result: the rule is disabled, so nothing is forwarded")
+			}
 		case statusUnknown:
 			fmt.Fprintln(w, "Result: no failure found, but some evidence above is stale or untested")
 		default:

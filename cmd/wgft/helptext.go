@@ -57,7 +57,10 @@ all three counts against the total, such as "1 healthy, 1 degraded / 2"; when
 every agent is healthy it just says "1 / 2 healthy". A live control connection
 no longer counts as healthy by itself: an agent whose tunnel has quietly died
 while its control connection stays up now reads degraded here too, matching
-"server doctor" on the same input, instead of being counted healthy.
+"server doctor" on the same input, instead of being counted healthy. A disabled
+agent is counted apart as disabled, never as healthy, degraded or unknown,
+since being disabled is a declared state: the healthy ratio leaves it out, and
+the value adds the count after it, such as "2 / 2 healthy, 1 disabled".
 
 Rules counts the enabled rules as active, degraded or unknown, out of the
 total; a disabled rule is not counted against the total, since being disabled
@@ -73,7 +76,9 @@ recognize, or its agent has not freshly reported it, including a report left
 over from before the agent's connection dropped. Once any rule is degraded or
 unknown, the value spells out all three counts against the total, such as
 "5 active, 2 degraded, 1 unknown / 8"; when every rule is active it just says
-"8 active". Warnings reads a count of open theft-detection warnings, or
+"8 active". An enabled rule whose agent is disabled counts as agent disabled,
+not as degraded, and stays in the total, such as "5 active, 3 agent disabled
+/ 8". A rule whose agent is not registered still counts as degraded. Warnings reads a count of open theft-detection warnings, or
 "none"; the added line also says how long ago each one was raised, when the
 server reports that.
 
@@ -110,7 +115,10 @@ undismissed warning is exactly that.
 --json prints the summary model: an object with server, agents, rules and
 warnings. server holds a status of healthy, degraded or unknown, and an
 optional detail. agents and rules each hold healthy/active, degraded and
-unknown counts plus the total, and an optional detail. It only ever gains
+unknown counts plus the total, and an optional detail. agents also holds
+disabled and rules also holds agent_disabled, both always present, so
+healthy + degraded + unknown + disabled equals the agents total and active +
+degraded + unknown + agent_disabled equals the rules total. It only ever gains
 members.`,
 		Example: `  wgft status
   wgft status --json`,
@@ -607,6 +615,11 @@ working, read the logs.
 While an agent is disconnected, everything that agent reported is history:
 those lines read "last:" and are never given as the current cause, the same way
 "agent ls" marks them.
+
+A disabled rule, and an enabled rule whose agent is disabled, forward nothing
+by declaration, not by fault. Their checks read SKIPPED with the reason
+rule_disabled or agent_disabled, the rule reads SKIPPED, and the exit code stays
+0. The agent enabled line names the command that enables the agent again.
 
 --json prints the diagnostic model: a "checks" array of {id, status, reason,
 observed_at, ...}. The ids and the reason codes are the machine interface. They

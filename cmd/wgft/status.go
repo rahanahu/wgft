@@ -67,10 +67,17 @@ const (
 // の `tunnel.handshake`(10.2a 節、internal/vpsd/doctor の TunnelHealth)をそのまま呼び、同じ鮮度の規則
 // (handshakeStale、3 分)を共有する。以前は Connected だけを見ており、制御ストリームは生きて
 // いてもトンネルが死んでいる配置を healthy 側に数えていた(レビューの指摘)。
+//
+// 3 つの数え分けは有効なエージェントだけが対象である。無効なエージェント(design.md 5.1 節)は
+// Disabled に数える(2026-09-24、所有者の決定)。Total は登録済みのエージェントの総数という意味を
+// 変えず、Healthy + Degraded + Unknown + Disabled は常に Total に等しい。
 type agentsStatus struct {
 	Healthy  int `json:"healthy"`
 	Degraded int `json:"degraded"`
 	Unknown  int `json:"unknown"`
+	// Disabled は無効なエージェントの数である。宣言どおりの状態なので終了コードを動かさない。
+	// 無効なエージェントが無くても 0 として常に出す。
+	Disabled int `json:"disabled"`
 	Total    int `json:"total"`
 	// Detail は healthy でないエージェントの一覧で、Degraded と Unknown がどちらも 0 のときだけ
 	// 空にする。
@@ -79,7 +86,9 @@ type agentsStatus struct {
 
 // rulesStatus は、有効なルールを active・degraded・unknown の 3 つに数え分けたものである。
 // 無効なルールは総数に数えない。宣言どおりの状態であり、故障ではないためである(design.md
-// 10.2a 節の `rule.enabled` と同じ判断)。Active + Degraded + Unknown は常に Total に等しい。
+// 10.2a 節の `rule.enabled` と同じ判断)。持ち主のエージェントが無効なルール(design.md 5.1 節)は
+// AgentDisabled に数える(2026-09-24、所有者の決定)。Total は `Rule.Enabled` が真のルールの数と
+// いう意味を変えず、Active + Degraded + Unknown + AgentDisabled は常に Total に等しい。
 //
 // この数え分けは、server 側の適用(rule_states[].apply_state)とエージェント側の転送
 // (agent_rule_states)の両方が転送の準備を示していることを要件とする(2026-09-22、所有者の決定)。
@@ -108,7 +117,12 @@ type rulesStatus struct {
 	//     今の状態として描くことを禁じているので、古い報告を degraded にも active にも数えない)
 	// いずれも、故障を観測してはいないので Degraded に数えない。
 	Unknown int `json:"unknown"`
-	Total   int `json:"total"`
+	// AgentDisabled は、ルール自身は有効で、持ち主のエージェントが無効なルールの数である。
+	// 宣言どおりの状態なので終了コードを動かさない。該当が無くても 0 として常に出す。
+	// 持ち主のエージェントが登録されていないルールはここに数えず、今までどおり apply_state の
+	// not_active として Degraded に数える(design.md 5.1、10.2b 節)。
+	AgentDisabled int `json:"agent_disabled"`
+	Total         int `json:"total"`
 	// Detail は Degraded と Unknown の内訳を 1 行にまとめたもので、どちらも 0 のときだけ空にする。
 	Detail string `json:"detail,omitempty"`
 }
@@ -192,7 +206,7 @@ func buildStatusReport(in statusInput) statusReport {
 	return statusReport{
 		Server:   serverStatusOf(in.Rules),
 		Agents:   agentsStatusOf(in.Agents, in.Now),
-		Rules:    rulesStatusOf(in.Rules, in.Now),
+		Rules:    rulesStatusOf(in.Rules, in.Agents, in.Now),
 		Warnings: warningsStatusOf(in.Warnings, in.Now),
 	}
 }
@@ -267,11 +281,17 @@ func agentHealthOf(a admin.AgentInfo, now time.Time) (status, detail string) {
 	}
 }
 
-// agentsStatusOf は登録済みのエージェントを agentHealthOf で分類し、3 つの数に集計する。
+// agentsStatusOf は登録済みのエージェントを数える。無効なエージェントは Disabled に数え、有効な
+// エージェントだけを agentHealthOf で 3 つに分類する(design.md 10.2b 節)。無効なエージェントも
+// stream とトンネルを保つが、宣言どおりに転送しない状態なので、その健全さを配置の劣化に数えない。
 func agentsStatusOf(agents []admin.AgentInfo, now time.Time) agentsStatus {
 	st := agentsStatus{Total: len(agents)}
 	var bad []string
 	for _, a := range agents {
+		if a.Disabled {
+			st.Disabled++
+			continue
+		}
 		status, detail := agentHealthOf(a, now)
 		switch status {
 		case serverHealthy:
@@ -312,12 +332,25 @@ func agentsStatusOf(agents []admin.AgentInfo, now time.Time) agentsStatus {
 //   - 報告が無い、または鮮度が無い(stream が切れている間の古い報告を含む): 故障を観測しては
 //     いないので unknown。5.2 節が、切断中のエージェントの最後の報告を今の状態として描くことを
 //     禁じているので、古い報告を degraded にも active にも数えない
-func rulesStatusOf(res *admin.BatchResponse, now time.Time) rulesStatus {
+//
+// 持ち主のエージェントが無効なルールは、apply_state を見る前に agent_disabled に数える(design.md
+// 10.2b 節)。そのルールの apply_state は not_active だが、宣言どおりの状態であり、server の適用の
+// 失敗ではない。無効かどうかは Agents 行と同じ `GET /api/v1/agents` の応答の Disabled から引く
+// ので、読む節点は増えない。旧い版の server は Disabled を返さないので、どのルールも今までどおりに
+// 数える。持ち主が登録されていないルールは、agents に行が無いので無効とは読まず、今までどおり
+// not_active として degraded に数える。
+func rulesStatusOf(res *admin.BatchResponse, agents []admin.AgentInfo, now time.Time) rulesStatus {
 	// res is never nil in practice; see the identical note on serverStatusOf above.
 	if res == nil {
 		return rulesStatus{}
 	}
 	st := rulesStatus{}
+	disabledAgent := map[string]bool{}
+	for _, a := range agents {
+		if a.Disabled {
+			disabledAgent[a.Name] = true
+		}
+	}
 	var bad []string
 	// missing counts the rules whose unknown reading comes from having no rule_states evidence at
 	// all (the row is absent, or the whole map is, on a Backend without apply reporting).
@@ -331,6 +364,10 @@ func rulesStatusOf(res *admin.BatchResponse, now time.Time) rulesStatus {
 			continue
 		}
 		st.Total++
+		if disabledAgent[r.Agent] {
+			st.AgentDisabled++
+			continue
+		}
 		// A read from a nil map is safe and returns ok == false, so a Backend without apply
 		// reporting takes the same "no evidence at all" branch as a rule missing from the map.
 		state, ok := res.RuleStates[r.ID]
@@ -423,14 +460,15 @@ func writeStatusReport(w io.Writer, rep statusReport) {
 	writeStatusLine(w, "Warnings", warnings, rep.Warnings.Detail)
 }
 
-// rulesValue は Rules 行の値の列である。すべて active なら "N active" とだけ言う。degraded か
-// unknown が 1 つでもあれば、3 つの数を Total と並べて別々に示す。かつては degraded と unknown を
+// rulesValue は Rules 行の値の列である。すべて active なら "N active" とだけ言う。degraded、
+// unknown、agent_disabled が 1 つでもあれば、0 でない数を Total と並べて別々に示す。
+// agent_disabled を "N active" の陰に隠さないためである(2026-09-24、所有者の決定)。かつては degraded と unknown を
 // まとめて "known"(Active + Degraded)/ Total という 1 つの数に畳んでおり、5 active・2 degraded・
 // 1 unknown のような組み合わせが "7 / 8 known" となって、壊れている 2 本が active 側に隠れて
 // 読めなくなっていた(レビューの指摘)。この形は、健全でない項目を 1 つでも隠さないことを優先し、
 // 値の桁が伸びることを厭わない(design.md 10.2b 節)。
 func rulesValue(st rulesStatus) string {
-	if st.Degraded == 0 && st.Unknown == 0 {
+	if st.Degraded == 0 && st.Unknown == 0 && st.AgentDisabled == 0 {
 		return fmt.Sprintf("%d active", st.Active)
 	}
 	parts := []string{fmt.Sprintf("%d active", st.Active)}
@@ -440,6 +478,9 @@ func rulesValue(st rulesStatus) string {
 	if st.Unknown > 0 {
 		parts = append(parts, fmt.Sprintf("%d unknown", st.Unknown))
 	}
+	if st.AgentDisabled > 0 {
+		parts = append(parts, fmt.Sprintf("%d agent disabled", st.AgentDisabled))
+	}
 	return strings.Join(parts, ", ") + fmt.Sprintf(" / %d", st.Total)
 }
 
@@ -447,18 +488,28 @@ func rulesValue(st rulesStatus) string {
 // すべて healthy なら "N / M healthy" とだけ言う。degraded か unknown が 1 つでもあれば、3 つの数を
 // 別々に示す。制御ストリームとトンネルの両方を見るようになった 2026-09-22 の改訂までは、この行が
 // Connected の数だけを見ており、healthy・degraded・unknown という数え分けを持たなかった。
+//
+// 無効なエージェントは健康の比から外し、比の後ろに "N disabled" を添える(design.md 10.2b 節、
+// 2026-09-24、所有者の決定)。比の分母は有効なエージェントの数である。
 func agentsValue(st agentsStatus) string {
+	enabled := st.Total - st.Disabled
+	var v string
 	if st.Degraded == 0 && st.Unknown == 0 {
-		return fmt.Sprintf("%d / %d healthy", st.Healthy, st.Total)
+		v = fmt.Sprintf("%d / %d healthy", st.Healthy, enabled)
+	} else {
+		parts := []string{fmt.Sprintf("%d healthy", st.Healthy)}
+		if st.Degraded > 0 {
+			parts = append(parts, fmt.Sprintf("%d degraded", st.Degraded))
+		}
+		if st.Unknown > 0 {
+			parts = append(parts, fmt.Sprintf("%d unknown", st.Unknown))
+		}
+		v = strings.Join(parts, ", ") + fmt.Sprintf(" / %d", enabled)
 	}
-	parts := []string{fmt.Sprintf("%d healthy", st.Healthy)}
-	if st.Degraded > 0 {
-		parts = append(parts, fmt.Sprintf("%d degraded", st.Degraded))
+	if st.Disabled > 0 {
+		v += fmt.Sprintf(", %d disabled", st.Disabled)
 	}
-	if st.Unknown > 0 {
-		parts = append(parts, fmt.Sprintf("%d unknown", st.Unknown))
-	}
-	return strings.Join(parts, ", ") + fmt.Sprintf(" / %d", st.Total)
+	return v
 }
 
 // statusExit は報告を終了コードに写す。doctor.go の doctorExit と対になる関数で、doctor と

@@ -2657,6 +2657,47 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
   out=$(api POST /api/v1/agents/home/disable)
   check "a second disable changes nothing" '"disabled":true,"changed":false' "$out"
 
+  echo "-- server doctor and status while home is disabled (design 10.2a, 10.2b)"
+  # doctor_json_of <rule>: "<top status> <rule status> <id>=<status>/<reason>..." for the checks
+  # this scenario asserts on, read from server doctor --json on that one rule.
+  doctor_json_of() {
+    vps wgft server doctor "$1" --json --admin "$ADMIN" 2>/dev/null | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+c = {x['id']: '%s/%s' % (x['status'], x.get('reason', '')) for x in d['checks'] if x.get('rule_id') == '$1'}
+print(d['status'], d['rules'][0]['status'], ' '.join('%s=%s' % (k, c.get(k, '-')) for k in ('agent.enabled', 'rule.public_port', 'agent.connection')))
+"
+  }
+  # status_json_counts: the counts of status --json, and whether both invariants hold.
+  status_json_counts() {
+    vps wgft status --json --admin "$ADMIN" 2>/dev/null | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+a, r = d['agents'], d['rules']
+ok = a['healthy'] + a['degraded'] + a['unknown'] + a['disabled'] == a['total'] and r['active'] + r['degraded'] + r['unknown'] + r['agent_disabled'] == r['total']
+print('agents %d/%d/%d disabled=%d total=%d rules %d/%d/%d agent_disabled=%d total=%d sums=%s' % (a['healthy'], a['degraded'], a['unknown'], a['disabled'], a['total'], r['active'], r['degraded'], r['unknown'], r['agent_disabled'], r['total'], ok))
+"
+  }
+  local rcode
+  out=$(vps wgft server doctor "$ra" --admin "$ADMIN" 2>&1); rcode=$?
+  eqcheck "server doctor on A exits 0 while home is disabled" 0 "$rcode"
+  check "server doctor on A shows agent enabled SKIPPED" "agent enabled      SKIPPED" "$out"
+  check "server doctor on A names agent enable" "Check: enable the agent: wgft agent enable home" "$out"
+  check "server doctor on A says the agent is disabled" "Result: the rule's agent \"home\" is disabled" "$out"
+  absent "server doctor on A has no FAILED check" "FAILED" "$out"
+  strcheck "server doctor --json on A" "ok skipped agent.enabled=skipped/agent_disabled rule.public_port=skipped/agent_disabled agent.connection=skipped/agent_disabled" "$(doctor_json_of "$ra")"
+  strcheck "server doctor --json on O of the other agent" "ok ok agent.enabled=ok/ rule.public_port=not_tested/external_not_tested agent.connection=ok/" "$(doctor_json_of "$ro")"
+  out=$(vps wgft server doctor --admin "$ADMIN" 2>&1); rcode=$?
+  eqcheck "the server doctor survey exits 0 while home is disabled" 0 "$rcode"
+  check "the survey's agent line shows home SKIPPED" 'SKIPPED    not tested: agent "home" is disabled' "$out"
+  out=$(vps wgft status --admin "$ADMIN" 2>&1); rcode=$?
+  eqcheck "status exits 0 while home is disabled" 0 "$rcode"
+  check "status leaves home out of the healthy ratio" "1 / 1 healthy, 1 disabled" "$out"
+  check "status counts A, C and P as agent disabled" "1 active, 3 agent disabled / 4" "$out"
+  vps wgft status --json --admin "$ADMIN" >/dev/null 2>&1; rcode=$?
+  eqcheck "status --json exits 0 while home is disabled" 0 "$rcode"
+  strcheck "status --json counts" "agents 1/0/0 disabled=1 total=2 rules 1/0/0 agent_disabled=3 total=4 sums=True" "$(status_json_counts)"
+
   echo "-- a rule added while home is disabled is saved but does not forward"
   local rd; rd=$(vps wgft rule add --agent home --tcp 39973 --to 192.168.50.3:25570 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   okcheck "the new rule D is saved" "$([ -n "$rd" ] && echo 1 || echo 0)"
@@ -2739,6 +2780,21 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
     fi
     rm -f $W/wgft-lifecycle-c11-fifo
   fi
+
+  echo "-- a rule left by a revoked agent keeps its results (design 5.1: unchanged until a major version)"
+  vps wgft agent revoke other --admin "$ADMIN" >/dev/null 2>&1
+  o_not_registered() { rule_state_reason_has "$ro" 'agent "other" is not registered'; }
+  must_wait "check11: O is reported not registered after the revoke" 10 o_not_registered
+  out=$(vps wgft server doctor "$ro" --admin "$ADMIN" 2>&1); rcode=$?
+  eqcheck "server doctor on O exits 1 as before" 1 "$rcode"
+  strcheck "server doctor --json on O" "failed failed agent.enabled=ok/ rule.public_port=failed/not_published agent.connection=failed/agent_not_registered" "$(doctor_json_of "$ro")"
+  vps wgft status --admin "$ADMIN" >/dev/null 2>&1; rcode=$?
+  eqcheck "status exits 1 as before" 1 "$rcode"
+  # Only O is degraded. In kernel mode home is disabled again by the step above, in userspace mode
+  # it is enabled, so the other counts differ between the modes.
+  local counts; counts=$(status_json_counts)
+  check "status --json counts O as degraded" " rules " "$(echo "$counts" | grep -E ' rules [0-9]+/1/0 ')"
+  check "status --json keeps both invariants" "sums=True" "$counts"
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$HDATA" "$ODATA"
