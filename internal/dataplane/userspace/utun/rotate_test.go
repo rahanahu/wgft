@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -56,12 +57,27 @@ func TestSetPeersRotatedKeyTakesOverEndpoint(t *testing.T) {
 		t.Errorf("peer at an address nobody held got endpoint %v, want none", got)
 	}
 	want := fmt.Sprintf("add peer %s at %s, taking over endpoint %s from peer %s", newKey, addr, ep, oldKey)
-	found := false
+	// exactly one line for the new peer, and it is the takeover line
+	var lines []string
 	for _, c := range changes {
-		found = found || c == want
+		if strings.HasPrefix(c, "add peer "+newKey.String()+" ") {
+			lines = append(lines, c)
+		}
 	}
-	if !found {
-		t.Errorf("changes = %q, want a line %q", changes, want)
+	if len(lines) != 1 || lines[0] != want {
+		t.Errorf("lines for the new peer = %q, want exactly %q", lines, want)
+	}
+
+	// A rollback to the old peer set is the same rule the other way round: the old key's peer takes
+	// over the endpoint the new key's peer has (design.md 5.2 節).
+	if _, err := srv.SetPeers([]dataplane.Peer{{PublicKey: oldKey, Address: addr}, {PublicKey: otherKey, Address: otherAddr}}); err != nil {
+		t.Fatal(err)
+	}
+	if peers, err = srv.Peers(); err != nil {
+		t.Fatal(err)
+	}
+	if got := peers[oldKey].Endpoint; got != ep {
+		t.Errorf("rolled-back old peer endpoint = %v, want %v taken over from the new peer", got, ep)
 	}
 
 	// A key the tunnel already has keeps what WireGuard learned for it, even when its address moves
