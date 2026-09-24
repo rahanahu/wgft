@@ -629,11 +629,17 @@ incus exec "$agent_vm" -- systemctl daemon-reload
 incus exec "$agent_vm" -- systemctl enable --now wgft-dist-echo
 retry 10 wait_for_log_boot "$agent_vm" wgft-dist-echo "tcp 127.0.0.1:25565" || echo "dist-vm: warning: target service log line not seen yet" >&2
 
-tunnel_ok() {
-  # 'wgft agent ls' aligns its columns with text/tabwriter, which pads with spaces (>=2) on
-  # output, not literal tabs; split on runs of 2+ spaces instead of -F'\t'.
-  incus exec "$server_vm" -- wgft agent ls 2>/dev/null | awk -F'  +' 'NR>1 && $1=="home" && $6=="ok" { found=1 } END { exit !found }'
+# agent_col <column>: the value of that column on the "home" row of 'wgft agent ls'. The table is
+# aligned with text/tabwriter, so a column starts at the same offset on every line as its header
+# and ends where the next header starts. Cutting by the header's offsets, rather than splitting on
+# runs of spaces, keeps working when a column is added (STATE was) or a cell is empty (RULES is
+# before the first generation).
+agent_col() {
+  incus exec "$server_vm" -- wgft agent ls 2>/dev/null | awk -v col="$1" '
+    NR == 1 { s = index($0, col); rest = substr($0, s + length(col)); m = match(rest, /[^ ]/); e = m ? s + length(col) + m - 1 : 0; next }
+    $1 == "home" && s { v = e ? substr($0, s, e - s) : substr($0, s); gsub(/^ +| +$/, "", v); print v }'
 }
+tunnel_ok() { [ "$(agent_col TUNNEL)" = ok ]; }
 if retry 40 tunnel_ok; then
   echo "PASS  check1: agent tunnel comes up (TUNNEL=ok in 'wgft agent ls')"
 else
@@ -652,9 +658,7 @@ open_firewall "$server_vm" --add-port=39971/tcp --add-port=27015/udp
 
 # Rule delivery over the stream is asynchronous; wait for 'wgft agent ls' to actually report both
 # rules ok (RULES column) instead of a blind sleep, with a bounded wall-clock deadline.
-rules_delivered() { # rules_delivered <n>
-  incus exec "$server_vm" -- wgft agent ls 2>/dev/null | awk -F'  +' -v want="$1 ok" 'NR>1 && $1=="home" && $9==want { f=1 } END { exit !f }'
-}
+rules_delivered() { [ "$(agent_col RULES)" = "$1 ok" ]; } # rules_delivered <n>
 if retry 15 rules_delivered 2; then
   echo "PASS  check2: both rules delivered to the agent (RULES=2 ok)"
 else
