@@ -11,6 +11,9 @@ func TestStableErrorDropsTheSocketPair(t *testing.T) {
 	dnsErr := func(err string) error {
 		return &net.DNSError{Err: err, Name: "game.lan", Server: "192.168.1.1:53"}
 	}
+	dnsErr6 := func(err string) error {
+		return &net.DNSError{Err: err, Name: "game.lan", Server: "[2001:db8::53]:53"}
+	}
 	cases := []struct {
 		name string
 		a, b error
@@ -25,9 +28,9 @@ func TestStableErrorDropsTheSocketPair(t *testing.T) {
 		{"tcp fallback", dnsErr("read tcp 192.168.1.10:40000->192.168.1.1:53: read: connection reset by peer"),
 			dnsErr("read tcp 192.168.1.10:40001->192.168.1.1:53: read: connection reset by peer"),
 			"lookup game.lan on 192.168.1.1:53: read: connection reset by peer"},
-		{"ipv6 server", dnsErr("write udp [fe80::1%eth0]:5353->[fe80::53%eth0]:53: sendto: network is unreachable"),
-			dnsErr("write udp [fe80::1%eth0]:5354->[fe80::53%eth0]:53: sendto: network is unreachable"),
-			"lookup game.lan on 192.168.1.1:53: sendto: network is unreachable"},
+		{"ipv6 server", dnsErr6("write udp [2001:db8::10]:5353->[2001:db8::53]:53: sendto: network is unreachable"),
+			dnsErr6("write udp [2001:db8::10]:5354->[2001:db8::53]:53: sendto: network is unreachable"),
+			"lookup game.lan on [2001:db8::53]:53: sendto: network is unreachable"},
 		{"inside a dial error", &net.OpError{Op: "dial", Net: "tcp", Err: dnsErr("read udp 192.168.1.10:1->192.168.1.1:53: i/o timeout")},
 			&net.OpError{Op: "dial", Net: "tcp", Err: dnsErr("read udp 192.168.1.10:2->192.168.1.1:53: i/o timeout")},
 			"dial tcp: lookup game.lan on 192.168.1.1:53: i/o timeout"},

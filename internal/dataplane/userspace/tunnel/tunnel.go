@@ -22,6 +22,7 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/nettun"
 )
 
@@ -216,6 +217,11 @@ func (t *Tunnel) Ping(timeout time.Duration) (time.Duration, error) {
 // Close はトンネルを閉じる。
 func (t *Tunnel) Close() { t.dev.Close() }
 
+// lookupIP4 はホスト名の A レコードを引く。テストが差し替える。
+var lookupIP4 = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	return net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
+}
+
 // resolve は host:port を IPv4 の AddrPort にする。ホスト名は A レコードを引き、決定的に先頭を選ぶ。
 func resolve(endpoint string) (netip.AddrPort, error) {
 	host, portStr, err := net.SplitHostPort(endpoint)
@@ -234,9 +240,11 @@ func resolve(endpoint string) (netip.AddrPort, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
+	addrs, err := lookupIP4(ctx, host)
 	if err != nil {
-		return netip.AddrPort{}, err
+		// 誤りは Status の Err になり、エージェントは状態の行の変化でログを出す。問い合わせごとに
+		// 変わる送信元のポートを除き、同じ誤りを keepalive ごとの変化にしない(仕様 5.2 節)
+		return netip.AddrPort{}, lograte.StableError(err)
 	}
 	if len(addrs) == 0 {
 		return netip.AddrPort{}, fmt.Errorf("no A record for %s", host)
