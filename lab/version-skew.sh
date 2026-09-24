@@ -62,9 +62,11 @@
 # the old agent itself catch up and report zero rules; enabling it again is checked to bring
 # forwarding back. The OLD_AGENT_VERSION agent, which has no idea disable exists, is also checked to
 # neither crash nor reconnect-loop while disabled, counting its own "stream: connected to" log
-# line (every release logs this once per successful connection) across a fixed observation window
-# entered only once the disable has converged both on the VPS side and on the old agent's own
-# reported state. lab/lifecycle.sh's check 11 (L15) already covers disable/enable in full against a
+# line (OLD_AGENT_VERSION and the current build both log this once per successful connection;
+# see this combination's own code for why v0.3.0's lack of the line keeps this specific to
+# old-agent) across a fixed observation window entered only once the disable has converged both
+# on the VPS side and on the old agent's own reported state. lab/lifecycle.sh's check 11 (L15)
+# already covers disable/enable in full against a
 # current-build agent, so this only adds what is specific to an old agent watching it happen. Only
 # the old-agent combination runs this: old-server has no `agent disable` command to run at all
 # (that combination's server_bin predates the feature entirely), and baseline/legacy add no
@@ -401,10 +403,11 @@ run_combo() {
     echo "-- $name: agent disable and enable, current server with the $(basename "$agent_bin") agent (design 5.1 section)"
     # rules_reported <server-bin>: the count of rules "home" currently reports in its own
     # heartbeat (agent ls --json's "rules" field for the entry named "home"), the same field
-    # lab/lifecycle.sh's check11 reads via its own agent_json helper. A disabled agent's own
-    # heartbeat carries none of its rules (the server excludes them from what it pushes to a
-    # disabled agent - design 5.1 section), so this is 0 once the disable has actually reached
-    # the agent, not just once the VPS side stops forwarding.
+    # lab/lifecycle.sh's check11 reads via its own agent_json helper. The server pushes a
+    # disabled agent's own rules with enabled:false, not omitted (design 5.1 section); the
+    # agent then closes its own listeners for them and so reports none in its heartbeat. This
+    # is 0 once the disable has actually reached the agent and it acted on it, not just once
+    # the VPS side stops forwarding.
     rules_reported() {
       vps "$1" agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
 import json, sys
@@ -431,11 +434,19 @@ print(a.get('generation', ''))
     }
     local pre_pid pre_connects dout drc eout erc
     pre_pid=$(find_pid "$agent_bin" "agent run")
-    # stream: connected to ... is logged once per successful stream connection, by every release
-    # this script can fetch (checked directly: v0.3.0, OLD_AGENT_VERSION and the current build all
-    # emit this exact line), unlike "stream: reconnecting", which only fires on the WGFT_JOIN
-    # re-registration path (internal/agent/stream.go) and never on an ordinary disconnect/retry -
-    # counting that instead would never move on a real reconnect loop and would pass regardless.
+    # stream: connected to ... is logged once per successful stream connection, by OLD_AGENT_VERSION
+    # and the current build (checked directly: identical line in both, internal/agent/stream.go).
+    # v0.3.0 (the legacy combination) predates this line entirely (checked directly: `git grep
+    # "connected to" v0.3.0 -- internal/agent` finds nothing), so this counting only works for
+    # OLD_AGENT_VERSION; extending check_disable to the legacy combination would need a different
+    # signal for v0.3.0, or it would silently never detect a reconnect there.
+    #
+    # "stream: reconnecting" is NOT what an ordinary disconnect/retry logs (that path logs "stream:
+    # disconnected: ...; reconnecting in ..." instead, in the same function's default case); it only
+    # fires when rt.reconnectNow is set, which only happens inside rt.reconnect() (internal/agent/
+    # agent.go), whose only caller is the wg key-rotation path (internal/agent/control.go, `agent
+    # rotate-key`) - unrelated to WGFT_JOIN re-registration. Counting "stream: reconnecting" would
+    # therefore never move on an ordinary disconnect/reconnect loop and would pass regardless.
     pre_connects=$(grep -c "stream: connected to" "$ralog" 2>/dev/null)
 
     dout=$(vps "$server_bin" agent disable home --admin "$ADMIN" 2>&1); drc=$?
@@ -454,9 +465,13 @@ print(a.get('generation', ''))
     check "$name: server doctor's survey skips home as disabled" 'SKIPPED    not tested: agent "home" is disabled' "$(vps "$server_bin" server doctor --admin "$ADMIN" 2>&1)"
 
     # Convergence before the observation window below (docs/testing.md's wall-clock rule: confirm
-    # convergence before entering an interval that claims nothing further happens). Without this,
-    # the sleep 8 below could start before the old agent has even applied the disable, letting a
-    # reconnect that happens during its own catch-up read as a false "reconnected while disabled".
+    # convergence before entering an interval that claims nothing further happens). This is not
+    # about the reconnect count below: pre_connects was already read before the disable was even
+    # issued, and post_connects is read only after the full window, so a reconnect during the old
+    # agent's own catch-up would be counted correctly either way. What this wait_until actually
+    # gates is the PASS/FAIL right after it: without waiting here, that check could read the old
+    # agent's state before it has caught up at all, misreporting a slow-but-genuine catch-up as an
+    # outright failure to convey the disable.
     wait_until 15 agent_caught_up_with_no_rules "$server_bin"
     if agent_caught_up_with_no_rules "$server_bin"; then
       echo "PASS  $name: the $(basename "$agent_bin") agent itself applies the disable and reports no rule, not just the VPS dropping the DNAT"

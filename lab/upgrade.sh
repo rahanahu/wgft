@@ -1008,11 +1008,19 @@ else
 fi
 # Convergence before the negative claim below (docs/testing.md's wall-clock rule): agent_connected
 # alone only means the stream is back, not that home has caught up with the server's post-restart
-# state. Waiting for the wg tunnel and for home's own reported generation to catch up first means
-# the read below cannot land before home is actually ready to report forwarding if it had resumed.
+# state. Waiting for the wg tunnel and for home's own reported generation to catch up first, and
+# reporting each wait's own result, means the read below cannot land before home is actually ready
+# to report forwarding if it had resumed - a bare wait_until whose result is never read would let
+# home time out without ever failing the run, and the negative check right after it could then
+# pass for the wrong reason (nothing ready yet, not the disable holding).
 wait_until 20 tunnel_reset
 wait_until 100 tunnel_up
-wait_until 15 agent_generation_caught_up
+check "step6: wg tunnel re-establishes after the restart" "state=ok" "$(tunnel_state_text)"
+if wait_until 15 agent_generation_caught_up; then
+  echo "PASS  step6: home reports the post-restart generation before the negative check below"
+else
+  echo "FAIL  step6: home never caught up to the post-restart generation"; fail=1
+fi
 absent "step6: the plain tcp rule still does not forward after the restart, once home has reconnected and caught up" "tcp-echo" "$(tcp_probe "$P_TCP")"
 
 enable_out=$(vps wgft agent enable home --admin "$ADMIN" 2>&1); enable_rc=$?
