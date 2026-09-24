@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -76,5 +77,48 @@ func TestRunKeepsLeftoverTempsWhileLocked(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "leftover") {
 		t.Errorf("log mentions a cleanup:\n%s", buf.String())
+	}
+}
+
+// 片付けの警告は 1 行で、件数と誤りの種類だけを出し、一時ファイルのパスを出さない。ディレクトリを
+// 読めなければ、残りの有無を確かめられなかったと言う。権限でファイル操作を拒ませるので、Unix の
+// 非 root でだけ流す。
+func TestRemoveLeftoverTempsWarnsInOneLineWithoutPaths(t *testing.T) {
+	if goruntime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs Unix directory permissions and a non-root user")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.json")
+	lock, err := credentials.Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	leftover := plantLeftover(t, dir)
+	second := filepath.Join(dir, ".wgft-credentials-4343")
+	if err := os.WriteFile(second, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+
+	for _, c := range []struct {
+		mode os.FileMode
+		want string
+	}{
+		{0o500, "warning: cannot remove leftover temporary copies of the credentials file: 2, first error: permission denied; "},
+		{0o300, "warning: could not check the data directory for leftover temporary copies of the credentials file: permission denied; "},
+	} {
+		if err := os.Chmod(dir, c.mode); err != nil {
+			t.Fatal(err)
+		}
+		buf := captureLog(t)
+		removeLeftoverTemps(lock, path)
+		out := buf.String()
+		if strings.Count(out, "\n") != 1 || !strings.HasPrefix(out, c.want) {
+			t.Errorf("mode %04o: log\n%s\nwant one line starting with %q", c.mode, out, c.want)
+		}
+		if strings.Contains(out, dir) || strings.Contains(out, filepath.Base(leftover)) {
+			t.Errorf("mode %04o: log names a path:\n%s", c.mode, out)
+		}
 	}
 }

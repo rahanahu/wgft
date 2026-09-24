@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -78,12 +79,12 @@ func TestRemoveLeftoverTemps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := RemoveLeftoverTemps(l, path)
+	r, err := RemoveLeftoverTemps(l, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != len(leftovers) {
-		t.Errorf("removed %d, want %d", n, len(leftovers))
+	if r.Removed != len(leftovers) || r.Failed != 0 {
+		t.Errorf("result %+v, want %d removed and none failed", r, len(leftovers))
 	}
 	for _, p := range leftovers {
 		if pathExists(t, p) {
@@ -104,8 +105,8 @@ func TestRemoveLeftoverTemps(t *testing.T) {
 	}
 
 	// 残りが無ければ 0 を返す
-	if n, err := RemoveLeftoverTemps(l, path); n != 0 || err != nil {
-		t.Errorf("second run = %d, %v; want 0, nil", n, err)
+	if r, err := RemoveLeftoverTemps(l, path); r != (LeftoverResult{}) || err != nil {
+		t.Errorf("second run = %+v, %v; want nothing removed and no error", r, err)
 	}
 }
 
@@ -115,9 +116,9 @@ func TestRemoveLeftoverTempsNeedsLock(t *testing.T) {
 	path := filepath.Join(dir, "agent.json")
 	leftover := filepath.Join(dir, tempPrefix+"123")
 	writeLeftoverTestFile(t, leftover)
-	n, err := RemoveLeftoverTemps(nil, path)
-	if !errors.Is(err, errLockNotHeld) || n != 0 {
-		t.Errorf("RemoveLeftoverTemps without lock = %d, %v; want 0, errLockNotHeld", n, err)
+	r, err := RemoveLeftoverTemps(nil, path)
+	if !errors.Is(err, errLockNotHeld) || r != (LeftoverResult{}) {
+		t.Errorf("RemoveLeftoverTemps without lock = %+v, %v; want nothing and errLockNotHeld", r, err)
 	}
 	if !pathExists(t, leftover) {
 		t.Error("the leftover was removed without the lock")
@@ -132,7 +133,7 @@ func TestRemoveLeftoverTempsMissingDir(t *testing.T) {
 	}
 }
 
-// 消せない一時ファイルがあれば、誤りを返す。呼び出し側は警告にとどめる。
+// 消せない一時ファイルがあれば、その数と最初の誤りを返す。誤りの種類はパスを含まない。呼び出し側は警告にとどめる。
 // 書き込みの権限の無いディレクトリで確かめるので、Unix の非 root でだけ流す。
 func TestRemoveLeftoverTempsReportsFailure(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
@@ -146,11 +147,39 @@ func TestRemoveLeftoverTempsReportsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(dir, 0o700) })
-	n, err := RemoveLeftoverTemps(&Lock{}, path)
-	if err == nil || n != 0 {
-		t.Errorf("RemoveLeftoverTemps in a read-only directory = %d, %v; want 0 and an error", n, err)
+	r, err := RemoveLeftoverTemps(&Lock{}, path)
+	if err != nil || r.Removed != 0 || r.Failed != 1 || r.FirstFailure == nil {
+		t.Fatalf("RemoveLeftoverTemps in a read-only directory = %+v, %v; want 1 failed and its error", r, err)
+	}
+	if kind := ErrorKind(r.FirstFailure); kind != "permission denied" {
+		t.Errorf("ErrorKind = %q, want permission denied without the path", kind)
 	}
 	if !pathExists(t, leftover) {
 		t.Error("the leftover is gone")
+	}
+}
+
+// Save の一時ファイルは、起動時の片付けが消す名前と置き場所で作られる。rename の直前に一時ファイルを
+// 見て、同じディレクトリの直下にあり、名前が tempPrefix で始まる通常ファイルであることを確かめる。
+func TestSaveTempFileMatchesTheCleanup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.json")
+	var seen string
+	saveBeforeRenameHook = func(tmpName string) {
+		seen = tmpName
+		fi, err := os.Lstat(tmpName)
+		if err != nil || !fi.Mode().IsRegular() {
+			t.Errorf("temp file before rename: %v, %v; want a regular file", fi, err)
+		}
+	}
+	t.Cleanup(func() { saveBeforeRenameHook = nil })
+	if err := (&Credentials{Name: "a"}).Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if seen == "" {
+		t.Fatal("Save did not reach the rename")
+	}
+	if filepath.Dir(seen) != dir || !strings.HasPrefix(filepath.Base(seen), tempPrefix) {
+		t.Errorf("temp file %s is not %s%s* that the startup cleanup removes", seen, filepath.Join(dir, ""), tempPrefix)
 	}
 }

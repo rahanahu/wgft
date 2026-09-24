@@ -152,6 +152,9 @@ func (f *Credentials) Save(path string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if saveBeforeRenameHook != nil {
+		saveBeforeRenameHook(tmpName)
+	}
 	return os.Rename(tmpName, path)
 }
 

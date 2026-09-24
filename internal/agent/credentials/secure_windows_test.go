@@ -247,7 +247,7 @@ func TestCreateSecureTempHasProtectedDACLAtCreation(t *testing.T) {
 	// はっきりさせるため。
 	setLooseDACL(t, dir)
 
-	tmp, err := createSecureTemp(dir, ".wgft-credentials-*")
+	tmp, err := createSecureTemp(dir, tempPrefix+"*")
 	if err != nil {
 		t.Fatalf("createSecureTemp: %v", err)
 	}
