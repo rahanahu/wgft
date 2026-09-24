@@ -43,13 +43,13 @@ VPS から自宅へのポート転送に必要な nftables と WireGuard の手�
 | 部品 | 動作場所 | 役割 |
 |---|---|---|
 | `vpsd` | VPS | wg0 の管理、nftables の適用、conntrack の操作、API と Web UI、状態の保存 |
-| `agent` | 自宅 | `vpsd` への登録、wg トンネルの維持、届いたパケットの LAN 内サービスへの中継 |
+| `agent` | 自宅 | `vpsd` への登録、wg トンネルの維持、届いたパケットの LAN 内サービスへの転送(ユーザー空間モードは自分で中継し、カーネルモードはカーネルの DNAT を設定する) |
 | `proto` | 両方 | 登録と全体状態配信の JSON スキーマを定める共有ライブラリ。実行されるプロセスではない |
 
 実装言語は Go。
 `vpsd` と `agent` は同一バイナリで、サブコマンド `server` と `agent` で切り替える(起動はそれぞれ `wgft server run`、`wgft agent run`)。`vpsd` は本書と内部での呼び名で、利用者に見えるコマンド名は `server` である。
 `vpsd` は wgctrl-go で WireGuard を、google/nftables で nftables を、ti-mo/conntrack で conntrack を直接操作し、Web UI はバイナリに埋め込む。
-`agent` は wireguard-go と gVisor の netstack でトンネルをユーザー空間に持ち、カーネルの設定を変更しない。
+`agent` は 2 つのモードを持つ。既定のユーザー空間モードは、wireguard-go と gVisor の netstack でトンネルをユーザー空間に持ち、カーネルの設定を変更しない(7 節)。Linux のエージェントだけが明示して選べるカーネルモードは、カーネルの WireGuard インタフェースと nftables の DNAT で転送し、`vpsd` と同じく wgctrl-go、google/nftables、ti-mo/conntrack でカーネルを直接操作する(7b 節)。
 
 ## 3. 用語
 
@@ -74,7 +74,7 @@ VPS から自宅へのポート転送に必要な nftables と WireGuard の手�
 - wg0 のアドレス帯は `10.200.0.0/24`。`vpsd` が `.1`、エージェントには登録時に `.2` 以降を割り当てる。stream に一度も来ないエージェントもアドレスを持ち、エージェントの削除で回収される
 - VPS で外に開けるポートは次の 3 種類だけ。WireGuard の待ち受け(UDP 51820、変更可)、エージェント用 API(TCP 8443、変更可)、転送対象のポート
 - 管理用 API と Web UI は Unix ソケット(既定)か Tailscale のアドレスで待ち受け、インターネットには開けない(11 節)
-- wg0 の MTU は `vpsd` が決め(既定 1420)、全体状態でエージェントに渡す。エージェントは netstack の tun に同じ値を使う。TCP はエージェントの netstack で終端され、netstack が自分の MTU から MSS を広告するので、この 2 つが揃っていれば wg0 の MTU を超える TCP は生まれず、VPS 側に MSS クランプは要らない。ずれると、PMTUD の ICMP が途中で落ちる経路で大きな TCP が止まる
+- wg0 の MTU は `vpsd` が決め(既定 1420)、全体状態でエージェントに渡す。エージェントは netstack の tun に同じ値を使う。ユーザー空間モードのエージェントでは TCP はエージェントの netstack で終端され、netstack が自分の MTU から MSS を広告するので、この 2 つが揃っていれば wg0 の MTU を超える TCP は生まれず、VPS 側に MSS クランプは要らない。ずれると、PMTUD の ICMP が途中で落ちる経路で大きな TCP が止まる。カーネルモードのエージェントは TCP を終端しないので、エージェントが自分の WireGuard インタフェースを通る SYN の MSS をクランプする(7b 節)
 - wg0 の MTU 1420 は、外側の回線の MTU が 1500 である前提の値である。自宅回線の MTU が小さい場合(PPPoE の 1454 など)でも、WireGuard の外側の UDP は DF なしなので途中でフラグメントされて動くが、大きなパケットがすべて 2 つに割れる。回線の MTU が分かっているなら `vpsd` の MTU を下げる方が効率がよい(全体状態でエージェントにも渡る)。また、トンネル一般の挙動として、DF 付きで 1393 バイト以上のペイロードの UDP を送る client は初回だけ ICMP fragmentation needed で失敗し、経路 MTU を学習した後は通る(実験で確認)
 - エージェントは `PersistentKeepalive = 25` で NAT 越しに接続を維持する。keepalive の 5 倍の間ハンドシェイクが成功しなければ、エージェントはエンドポイントの名前を引き直してピアに設定し直す。この引き直しでも戻らない故障に備えた第 2 段の回復は 7 節に定める
 - VPS の conntrack の UDP タイムアウト 2 値(`nf_conntrack_udp_timeout` と `nf_conntrack_udp_timeout_stream`)は `vpsd` が起動時に読み、全体状態でエージェントに渡す
@@ -238,12 +238,12 @@ stream はエージェントごとに 1 本だけである。
 - 全体状態はエージェントごとに組み立てる。そのエージェントを持ち主とするルールだけが入る(5.3 節の `agent`)
 - 世代はエージェントごとの値ではなく、ルール集合全体に対して 1 つの値である。どれか 1 つのエージェントに配る内容が変われば 1 つ上がり、`vpsd` は接続中の全エージェントへ配り直す。配る内容が変わらないエージェントは、同じ内容を新しい世代で受け取る
 - 世代の比較は同一 WebSocket 接続内に限る。接続直後の最初の全体状態は世代に関わらず必ず適用し、以後は手元より古い世代を捨てる。`vpsd` の再構築やバックアップからの復元で世代が巻き戻っても、これで収束する
-- エージェントは全体状態を「宣言された状態に収束させる」方式で適用する。wg 設定が変わればトンネルを張り直し、リスナーは変わったものだけを開閉する。収束の単位は 7 節に定める
+- エージェントは全体状態を「宣言された状態に収束させる」方式で適用する。wg 設定が変わればトンネルを張り直し、リスナーは変わったものだけを開閉する。収束の単位は 7 節に定める。カーネルモードのエージェントの収束は 7b 節に定める
 
 ハートビート:
 
-- エージェントは 30 秒ごとに送る。加えて、全体状態を適用するたびに(接続直後の最初の適用を含む)すぐに送る。WireGuard のハンドシェイクがまだ済んでいなければ、済むまで 1 秒ごとに、最長 10 秒まで送り直す。適用が続いたときは、まだ送っていない通知を 1 通にまとめる。中身は処理済み世代(最後に受け取って処理した世代。部分失敗でも進める)、トンネルの状態(`ok` または `error` と理由、エンドポイントの解決結果)、ルールごとの状態(`ok` または `error` と理由)
-- ルールの `error` は、リスナーの開放失敗(bind できない)か、TCP ルールで適用時の `target` への接続確認が失敗した場合を指す。UDP は到達確認ができないので開放失敗だけを見る。宛先の許可一覧(7 節)が `target` を拒んだ場合も `error` になる。IP リテラルの `target` は適用のときに拒まれ、ホスト名の `target` は名前解決の後の接続のときに拒まれる。どちらの理由にも設定の名前を含める。`error` のトンネル設定とルールは、エージェントが 30 秒ごとに再適用と確認を試み、状態が変わったら次のハートビートで報告する。所属ルール ID が移ったリスナーの状態は、移った直後の再確認で新しいルール ID に付け替える
+- エージェントは 30 秒ごとに送る。加えて、全体状態を適用するたびに(接続直後の最初の適用を含む)すぐに送る。WireGuard のハンドシェイクがまだ済んでいなければ、済むまで 1 秒ごとに、最長 10 秒まで送り直す。適用が続いたときは、まだ送っていない通知を 1 通にまとめる。中身は処理済み世代(最後に受け取って処理した世代。backend 全体の失敗を除き、部分失敗でも進める。7・7b 節)、トンネルの状態(`ok` または `error` と理由、エンドポイントの解決結果)、ルールごとの状態(`ok` または `error` と理由)
+- ルールの `error` は、リスナーの開放失敗(bind できない)か、TCP ルールで適用時の `target` への接続確認が失敗した場合を指す。UDP は到達確認ができないので開放失敗だけを見る。宛先の許可一覧(7 節)が `target` を拒んだ場合も `error` になる。IP リテラルの `target` は適用のときに拒まれ、ホスト名の `target` は名前解決の後の接続のときに拒まれる。どちらの理由にも設定の名前を含める。`error` のトンネル設定とルールは、エージェントが 30 秒ごとに再適用と確認を試み、状態が変わったら次のハートビートで報告する。所属ルール ID が移ったリスナーの状態は、移った直後の再確認で新しいルール ID に付け替える。カーネルモードのエージェントはリスナーを持たないので、`error` の出どころを 7b 節で置き換える。`ok` と `error` がそのルールの転送について意味することは、モードで変わらない
 - TCP ルールの `target` への接続確認は、適用のときだけでなく定期的にも行う。周期はハートビートと同じで、現在は 30 秒である。この値は今後変えることがあり、固定はしない。`error` のルールだけでなく `ok` のルールも確認の対象にする。`target` が落ちれば次の周期でそのルールが `error` になり、戻れば `error` は自動で消える。結果は後続のハートビートのルールごとの状態に入る。確認は TCP の接続を開いてすぐに閉じる操作なので、`target` の側には、データを伴わない接続が周期ごとに 1 本届く。接続を記録するサーバでは、その記録が残る。宛先の許可一覧(7 節)が拒む `target` には、この確認でも接続しない。UDP はこの方法で到達性を判定できないので、定期の確認を行わない
 - 接続確認は中継の錠を持たない。エージェントは確認の対象の待ち受けとその `target` を錠の中で写し取り、錠を放してから最大 32 件を同時に試み、結果を反映するときにもう一度錠を取る。反映するのは、その待ち受けが今もあり、かつ `target` が試したときの値と同じ場合だけである。錠を放している競合可能期間に待ち受けが閉じた場合と `target` が変わった場合は、その結果を捨てる。この作りは適用のときの確認にも使う。適用は確認の結果を待ってから戻るので、ルールの最初の状態は適用の直後のハートビートに今までどおり載る
 - 接続確認 1 件の期限は 2 秒である。この値は、中継が実際の通信のために `target` へ接続するときの期限とは別の値である。LAN の `target` の TCP のハンドシェイクは 1 ミリ秒の桁で済むので、2 秒には三桁の余裕がある。ハンドシェイクに 2 秒を超える `target` は、接続を受け付けていても `error` として報告される。`error` は報告にだけ使い、中継そのものを止めないので、誤って `error` になったルールも転送を続ける。期限を長く取ると、黙って捨てる `target` 1 つがその長さだけ確認を延ばす
@@ -342,7 +342,7 @@ stream はエージェントごとに 1 本だけである。
 `agent` は全体状態に載せるフィールドではないが、どのエージェントの全体状態にその行を入れるかを決める。
 持ち主を別のエージェントへ移す変更は、移す前のエージェントに配る内容からその行を取り除き、移した先のエージェントに配る内容にその行を加えるので、世代が上がる。
 世代が上がるかどうかの判定は、行ごとの配る部分だけを並べて比べるのではなく、持ち主ごとにまとめた配る内容どうしを比べて行う。
-`vps_mode`、`group`、`note` はエージェントに配らない。`group` と `note` は管理用のメタデータで、転送にも全体状態にも影響しないため、変更しても世代は上がらずエージェントには配信されない。プロキシモードのルールでも、エージェントはカーネルモードと同じく `listen_port` のリスナーを開き、`vpsd` はそこへ接続して中継する(6.2 節)。
+`vps_mode`、`group`、`note` はエージェントに配らない。`group` と `note` は管理用のメタデータで、転送にも全体状態にも影響しないため、変更しても世代は上がらずエージェントには配信されない。プロキシモードのルールでも、エージェントは `vps_mode = kernel` のルールと同じく `listen_port` で受け、`vpsd` はそこへ接続して中継する(6.2 節)。受けるのは、ユーザー空間モードのエージェントではリスナー、カーネルモードのエージェントでは DNAT である(7・7b 節)。
 接続元制限の変更は全体状態の内容を変えないので、エージェントには配信されず、世代も上がらない。
 
 `listen_port` に WireGuard、エージェント用 API、管理用 API(TCP で待ち受けている場合)のポートを指定した場合、`vpsd` は拒否する。
@@ -583,7 +583,7 @@ Transparent なルールは他テーブルの DNAT と forward を経由し inpu
 
 ## 7. データプレーン(自宅側)
 
-エージェントは 1 つのモードだけを持つ。
+エージェントは、ユーザー空間モードとカーネルモードの 2 つのモードを持つ。既定はユーザー空間モードであり、`WGFT_MODE=kernel` を明示した Linux のエージェントだけがカーネルモードで動く(11a 節)。モードはエージェント全体で 1 つであり、ルール単位で混ぜない。以下の箇条と収束の規則はユーザー空間モードのものであり、カーネルモードは 7b 節に定める。
 
 - 動作条件:なし。Docker コンテナ 1 つで動き、特権も `NET_ADMIN` も不要。LXC でも Proxmox ホストでも同じ
 - wireguard-go と gVisor の netstack でユーザー空間にトンネルを持つ。netstack の IPv4 再組み立ては既定で有効で、フラグメントのバッファ上限(4MB で古いものから捨て始め 3MB まで減らす)と再組み立ての期限(30 秒)は gVisor の定数で固定されており、stack.Stack を直接持っても変更できないが、想定する用途には十分なので既定値を使う
@@ -643,9 +643,10 @@ Transparent なルールは他テーブルの DNAT と forward を経由し inpu
 
 接続元 IP ごとの上限は、少数の IP からフローを保持してルールの上限を埋め、正規の利用者を締め出す攻撃を防ぐ。送信元を偽装できる UDP では、この攻撃は防げない。カーネルモードの VPS にも、6.1 節の `ct count` による同じ設定値の上限がある。この上限はプロセス全体の上限と連動しない。プロセス全体の上限を上げても既定値(256、128)のまま変わらないので、メモリに余裕がある VPS でプロセス全体の上限を上げて同時フロー数を増やしたい運用者は、接続元 IP ごとの上限も明示して上げる必要がある。
 
-サービスから見た接続元は常にエージェントのアドレスになる。
-カーネルモードを持たない理由は、自宅側にも nftables と `ip_forward` の設定を要求し、6.1 節と同じ他チェーンとの干渉問題を自宅側にも持ち込むためである。
-性能面では、想定する用途(ゲームサーバの UDP、数 Mbps)に対して netstack の処理能力は十分に余裕がある。
+ユーザー空間モードでは、サービスから見た接続元は常にエージェントのアドレスになる。カーネルモードの見え方は 7b.2 節に書く。
+ユーザー空間モードを既定に置く理由は、自宅側に nftables と `ip_forward` の設定を要求せず、6.1 節と同じ他チェーンとの干渉問題を自宅側に持ち込まないためである。
+性能面でも、想定する用途(ゲームサーバの UDP、数 Mbps)に対して netstack の処理能力は十分に余裕がある。
+カーネルモードは、エージェントの停止中や更新の間も転送を続けたい Linux のホストのための選択肢であり、明示したときだけ使う(2026-09-24、所有者の決定)。カーネルが転送するので、中継のプロセスの処理能力にも依らない。干渉問題には、6.1 節と同じく他のテーブルとホストの設定を検査して提示し、自動では書き換えない方法で答える(7b 節)。
 
 ## 7a. 内部アーキテクチャ
 
@@ -687,7 +688,7 @@ normalize/validate は、外部の `Rule` を受け取り、構造的な検査(�
 
 `Backend`(kernel/userspace の dataplane)と、Observe/Prepare/Commit/Rollback を持つ transaction の参加者(participant)は別の概念である。`Backend` はその 1 つの participant だが、`Relay` の listener 集合のような frontend 側の資源も、同じ Observe/Prepare/Commit/Rollback を持つ participant になりうる。`internal/vpsd/proxyrelay` の `Prepare`/`Commit`/`Rollback` が、この形の実例として既にある。
 
-`Runtime` は、participant を固定の順序で束ねた実行単位である。server の `Runtime` は frontend の資源(`Relay` の listener)と dataplane の `Backend` から組み立て、agent の `Runtime` も同じ 2 種類の participant から組み立てる(agent の frontend は空、または userspace の `Relay` の listener になる)。
+`Runtime` は、participant を固定の順序で束ねた実行単位である。server の `Runtime` は frontend の資源(`Relay` の listener)と dataplane の `Backend` から組み立て、agent の `Runtime` も同じ 2 種類の participant から組み立てる(agent の frontend は空、または userspace の `Relay` の listener になる)。ただし agent を `Runtime` へ移すのは後の段階であり、それまでの agent は `internal/agent` の中に切った dataplane の境目を使う(7a.7 節)。
 
 `Reconciler` は `Backend` を直接動かさず、`Runtime` を動かす。手順は次の固定順序である。
 
@@ -701,7 +702,7 @@ normalize/validate は、外部の `Rule` を受け取り、構造的な検査(�
 
 WireGuard のピアの変更、drop カウンタの読み出し、公開の後の収束も、同じトランザクションに含める。dataplane の `Prepare` は、新しく宣言されたピアを追加し(旧いピアはまだ残す)、kernel backend ではテーブルの差し替えを組み立てるところまでを行う。dataplane の `Commit` は、差し替える前のテーブルの drop カウンタを読み、差し替えを公開し、宣言から消えたピアを削除し、conntrack(userspace backend ではセッション)を収束させる。drop カウンタは公開が成功したときだけ制御プレーンへ渡す。差し替えが失敗した場合は旧いテーブルがカウンタを持ち続け、次の成功した差し替えで 1 回だけ読まれるので、同じカウンタを二重に累積しない。ピアの削除と収束は戻れない地点の後の処理なので、失敗しても `Commit` を失敗させず、ログに残し、7a.3 節の「戻れない地点の後の修復」で試し直す。`Rollback` は、追加したピアを取り除き、元の集合に戻す。起動時は、最初のトランザクションの前にインタフェースだけを立ち上げる(鍵、待ち受けポート、アドレス、MTU。所有判定による中止もここで行う)。ピアは最初のトランザクションで収束させる。
 
-参加する participant の種類と順序は固定であり、汎用の 2 相コミットではない。Phase 2 より前の `internal/vpsd/apply.go` の `applyNFT`(`proxyrelay.Prepare` → `dp.ApplyNFT` → `proxyrelay.Commit`/`Rollback`)が、この順序の実例であり、Phase 2 からは同じ順序を `internal/reconcile` の `Runtime` が実行する。`Runtime` の合成は `internal/reconcile` の participant interface として持ち、実際の組み立ては `vpsd` と `agent` が起動時に `frontend` と `dataplane` の実装から行う(7a.7 節)。Observe → diff → Prepare → Commit の骨格そのものは共有 package `internal/reconcile` に置き、server と agent が同じ骨格を使う。`Backend` は kernel と userspace の 2 つを持ち、それぞれが OS、nftables、netstack などの実装詳細を隠す。
+参加する participant の種類と順序は固定であり、汎用の 2 相コミットではない。Phase 2 より前の `internal/vpsd/apply.go` の `applyNFT`(`proxyrelay.Prepare` → `dp.ApplyNFT` → `proxyrelay.Commit`/`Rollback`)が、この順序の実例であり、Phase 2 からは同じ順序を `internal/reconcile` の `Runtime` が実行する。`Runtime` の合成は `internal/reconcile` の participant interface として持ち、実際の組み立ては `vpsd` が起動時に `frontend` と `dataplane` の実装から行う(7a.7 節)。Observe → diff → Prepare → Commit の骨格そのものは共有 package `internal/reconcile` に置く。今この骨格を使うのは server であり、agent は `Runtime` へ移った後に同じ骨格を使う(7a.7 節)。`Backend` は kernel と userspace の 2 つを持ち、それぞれが OS、nftables、netstack などの実装詳細を隠す。
 
 `Resource Guard` は、`AdmissionPolicy` と分けて持つ、wgft 自身と OS の資源を守るための予算である(7a.5 節)。
 
@@ -725,7 +726,7 @@ WireGuard のピアの変更、drop カウンタの読み出し、公開の後�
 | `internal/dataplane/linuxkernel/conntrack`(Phase 3 で `internal/vpsd/conntrack` から移した) | kernel `Backend` の conntrack 収束 | `Backend.Converge` が `RulesFromPlan` で `Plan` の Transparent なポートから収束の判定材料を作る。呼び出し側(`vpsd`)はもうルール集合を組み立て直さない |
 | `internal/platform/linux`(Phase 3 で `internal/vpsd/check` から移した) | host 側の前段検査 | kernel `Backend` に同梱しない。agent の kernel backend(Phase 7)からも同じ検査を呼ぶため。`ip_forward` の確認・書き込み、conntrack テーブルの大きさ、conntrack の UDP タイムアウトの読み取り(旧 `internal/vpsd/wg` の一部)もここに合わせて移した |
 | `internal/resource`(Phase 6 の移行の手順 1 で `internal/flowcap` から改めた) | `Resource Guard` | `Limits` はプロセス全体の予算だけを持つ。接続元ごとの上限は `internal/policy` の `AdmissionLimits` へ、ログを間引く門は `internal/lograte` へ移した(7a.5、7a.10 節) |
-| `internal/dataplane/userspace/relay`(Phase 2 で `internal/agent/relay` から移した)の `plan`/`Action` | `internal/reconcile` の骨格のひな型 | この型を server と agent で共有する `internal/reconcile` に一般化する |
+| `internal/dataplane/userspace/relay`(Phase 2 で `internal/agent/relay` から移した)の `plan`/`Action` | `internal/reconcile` の骨格のひな型 | この型を `internal/reconcile` に一般化する。agent が `Runtime` へ移った後は、server と agent で共有する |
 | `internal/dataplane/userspace/tunnel`(`internal/agent/tunnel` から移した)、`internal/dataplane/userspace/utun`(Phase 2 で `internal/vpsd/utun` から移した)、`internal/nettun` | userspace `Backend` の下位実装 | プラットフォーム配線そのままである |
 | `internal/vpsd/agentapi`、`internal/vpsd/stream`、`internal/vpsd/store`、`internal/vpsd/admin` | `vpsd` の制御プレーン | 変更なし(登録、配信、永続化、admin API) |
 | `internal/agent/credentials` | `agent` の制御プレーン | 変更なし |
@@ -884,19 +885,23 @@ internal/
   resource/              Resource Guard(予算、カウンタ)
   lograte/               同じ理由で繰り返すログを間引く門(7a.10 節)
   startup/               起動の拒否の型と種別(11b 節)
-  reconcile/             Observe -> diff -> Prepare -> Commit の骨格(server と agent で共有)
+  reconcile/             Observe -> diff -> Prepare -> Commit の骨格(今は server が使う。agent の移行は後の段階)
   dataplane/             Backend interface(Observe、Prepare、Commit、Rollback)
   dataplane/userspace/   wireguard-go + netstack + 中継
   dataplane/linuxkernel/ カーネルの WireGuard、nftables、conntrack、所有判定
   platform/linux/        sysctl、capability、他ファイアウォールとの衝突の検査
   vpsd/                  制御プレーン(登録、stream、SQLite、admin API)。proxyrelay が frontend の participant を実装する(下記)
-  agent/                 制御プレーン(認証情報、stream クライアント、rotate-key)
+  agent/                 制御プレーン(認証情報、stream クライアント、rotate-key)と、2 つのモードの dataplane を切り替える境目(下記)
 proto/                   維持する外部仕様としての wire スキーマ(既存フィールドの意味は変えず、加算のみ許す)
 ```
 
 `platform/windows/`、`platform/darwin/` は、Windows・macOS の agent(13 節)に着手するときに設ける。今は `platform/linux/` だけがあり、目標の木には含めない。
 
-依存の向きは一方向である。`model`、`policy`、`planner`、`resource` は OS、nftables、gVisor を知らない純粋な Go の型と関数だけを持ち、`dataplane/*`、`platform/*` を一切 import しない。`reconcile` は `planner` の `Plan` と、`Runtime` を組み立てる participant の interface(dataplane の `Backend`、frontend の `Frontend`/`FrontendPrepared`)だけを持ち、`dataplane/userspace`・`dataplane/linuxkernel` にも、frontend の実装にも依存しない。`dataplane/*` は `model`、`policy`、`planner`、`resource`、`platform/*` を import できるが、互いには依存しない。`planner` を含めるのは、`Backend` が収束先を `Plan` と実行時の入力(frontend が待ち受けているポートの集合など)だけから受け取り、設定やルール集合を別の経路から読まないためである。`Relay` の listener 集合という frontend 側の資源には独立した package を置かない。server では `internal/vpsd/proxyrelay` が `Prepare`/`Commit`/`Rollback` を持ち、`internal/vpsd` がそれを `reconcile.Frontend`/`FrontendPrepared` へ橋渡しする(7a.2 節)。`vpsd` と `agent` は上記すべてを import できる唯一の層であり、起動時に dataplane と frontend の実装から `Runtime` を組み立て、`reconcile` に渡す。この向きにより `internal/dataplane/linuxkernel` が `internal/vpsd` に依存しない構造になり、agent の kernel backend(7a.8 節の Phase 7)が server の kernel backend の共通の部品(WireGuard、host 側の検査、nftables と conntrack の基本操作)を再利用できる。VPS 用の table(公開ポートから agent への DNAT)とその収束は server に固有で、agent には LAN の宛先への DNAT、LAN 側への MASQUERADE、agent 側の conntrack 収束という別の経路を同じ package に足す。
+依存の向きは一方向である。`model`、`policy`、`planner`、`resource` は OS、nftables、gVisor を知らない純粋な Go の型と関数だけを持ち、`dataplane/*`、`platform/*` を一切 import しない。`reconcile` は `planner` の `Plan` と、`Runtime` を組み立てる participant の interface(dataplane の `Backend`、frontend の `Frontend`/`FrontendPrepared`)だけを持ち、`dataplane/userspace`・`dataplane/linuxkernel` にも、frontend の実装にも依存しない。`dataplane/*` は `model`、`policy`、`planner`、`resource`、`platform/*` を import できるが、互いには依存しない。`planner` を含めるのは、`Backend` が収束先を `Plan` と実行時の入力(frontend が待ち受けているポートの集合など)だけから受け取り、設定やルール集合を別の経路から読まないためである。`Relay` の listener 集合という frontend 側の資源には独立した package を置かない。server では `internal/vpsd/proxyrelay` が `Prepare`/`Commit`/`Rollback` を持ち、`internal/vpsd` がそれを `reconcile.Frontend`/`FrontendPrepared` へ橋渡しする(7a.2 節)。`vpsd` と `agent` は上記すべてを import できる唯一の層である。`vpsd` は起動時に dataplane と frontend の実装から `Runtime` を組み立て、`reconcile` に渡す。この向きにより `internal/dataplane/linuxkernel` が `internal/vpsd` に依存しない構造になり、agent のカーネルモード(7b 節)が server の kernel backend の共通の部品(WireGuard、host 側の検査、nftables と conntrack の基本操作)を再利用できる。VPS 用の table(公開ポートから agent への DNAT)とその収束は server に固有で、agent には LAN の宛先への DNAT、MASQUERADE、agent 側の conntrack 収束という別の経路を同じ package に足す。
+
+agent は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` をまだ使わない。`internal/agent` は userspace のトンネル(`internal/dataplane/userspace/tunnel`)と中継(`internal/dataplane/userspace/relay`)を直接駆動し、全体状態(`proto.AgentRule` を含む)を自分で収束させる。v1.2 はこの形を保ったまま、`internal/agent` の中に狭い dataplane の境目を切り、その後ろにユーザー空間モードとカーネルモードの 2 つの実装を置く(2026-09-24、所有者の決定)。ユーザー空間モードの実装は今のトンネルと中継をそのまま包み、カーネルモードの実装は `internal/dataplane/linuxkernel` の部品から組み立てる。agent 全体を `Runtime` へ移してからカーネルモードを足す案は採らなかった。移行はトンネルの作り直し(7 節)、全体状態の適用の試し直し、`agent doctor`(10.2c 節)の経路を巻き込み、カーネルモードを加えるという目的より大きいためである。agent を `Runtime` へ移すのは後の段階とする。
+
+この境目は依存の向きの規則を変えない。カーネルモードのために加える部品は `internal/dataplane/linuxkernel` の下に置き、`internal/agent` を import しない。`internal/dataplane/deps_test.go` の `TestDependencyDirection`、`TestPureLayersStayPure`、`TestVpsdSubpackagesDoNotImportVpsd`、`TestPolicyNftablesDoesNotImportGoogleNftables` は変えずに、この配置を検査する。境目の interface の形と、2 つの実装を `internal/agent` のどこに置くかは、実装で定めてこの節に書く。
 
 `internal/startup` は、この向きの例外ではなく葉である。モジュールの中の何も import せず、`cmd/wgft` から `internal/dataplane/linuxkernel/wg` までのどの層も import できる。起動の拒否は、値を受け取る入口と、カーネルに書き込む層の両方が作るので、どちらからも見える場所に置く必要がある。`internal/resource` と `internal/lograte` と同じ扱いであり、`internal/dataplane/deps_test.go` がモジュールの中を import しないことを検査する。
 
@@ -915,7 +920,7 @@ proto/                   維持する外部仕様としての wire スキーマ(
 - **Phase 4(トランザクショナルな収束)**:`Desired`/`Prepared`/`Active`/`Retiring`、`Prepare`/`Commit`/`Rollback`(7a.3 節の範囲)、世代、失敗からの回復、再起動時の収束を導入する。ルール単位の fail-closed は、nftables の全体差し替え(6.1 節)にそのルールの新しい dispatch を含めないことで実現し、差し替え中のルールだけを部分的に書き換える仕組みは作らない。完了条件:backend 全体に及ぶ失敗が `Active` 世代を進めないこと、ルール単位の prepare 失敗はそのルールだけを理由付きの `not_active` のまま見えるようにし、他のルールの `Active` 化と世代の前進を妨げないこと、置き換えに失敗したルールが他のルールの commit 後に新規フローを拒むこと(fail-closed)、`Desired` に無いのに残っている資源が `active_only`/`retiring` として見えること、`Relay` のルールを fail-closed にしても安全な成立済みの TCP 接続が残ることを、新設の lifecycle テストで確かめる
 - **Phase 5(共通の Admission Policy)**:nftables コンパイラと Go の評価器を 1 つの IR から作る形に統合し、4 か所に分かれていた許可拒否の判定(`internal/dataplane/linuxkernel/nft`、`internal/dataplane/userspace/srcpolicy`、`internal/dataplane/linuxkernel/conntrack` の `sourceAllowed`、`internal/vpsd/proxyrelay` の `sourceAllowed`)を IR と 2 つのコンパイラへ集約する。kernel dataplane では `Transparent` と `Relay` の分岐より前に共通の ingress 層を置く。IR の形、各コンパイラの約束、許容差、fixture、移行の手順は 7a.9 節に定める。完了条件:同じ入力に対して両コンパイラが 7a.4 節と 7a.9 節の許容差の範囲内で一致することを共有 fixture で確かめ、既存の connlimit などのラボテストを保つ
 - **Phase 6(Resource Guard の再設計)**:`flowcap.Limits` が混ぜている送信元ごとの上限(Admission Policy)とプロセス全体の予算(Resource Guard)を `AdmissionLimits` と `ResourceLimits` に分ける。ルールごとの隔離を、共有プールと隔離予約の方式に置き換える。隔離予約は admission 時の予約であり、既存のフローを追い出す保証ではない。kernel 側の保護(conntrack の表、set の大きさ)は、userspace の計算式を再利用しない形のまま整理する。型、式、拒否の報告、移行の手順は 7a.10 節に定める。完了条件:1 本のルールなら空いている予算をほぼ使い切れ、複数のルールが競合するときだけ他ルールの最低限を守り、既存のフローを公平化のために切らないことを、ラボで確かめる
-- **Phase 7(agent の kernel dataplane、v1.1 以降)**:上記の構造の上に、Linux agent の kernel backend を、`internal/dataplane/linuxkernel` の共通の部品を再利用し、agent に固有の nftables と conntrack の経路を同じ package に足す形で追加する。ラボで手作業で組んだ検証(2026-09-19)から、範囲のルールは無名 map の DNAT で表すこと、`DynamicUser` と `CAP_NET_ADMIN` のサンドボックスで足りること(`ProtectKernelTunables` は `ip_forward` の書き込みを妨げるため付けないこと)、実物の Docker の `DOCKER-USER` への追加行が Docker の再起動をまたいで残ること、複数 LAN セグメントを持つ自宅では `rp_filter` の strict が転送を壊しうること(`conf.all` と個別インタフェースの値は、より厳しい方が勝つ)が分かっている。agent の kernel dataplane をラボで試作した結果(2026-09-19)からは、agent の停止中も既存と新規のフローが続くこと、変更の無い再起動で conntrack が保たれること、マシンの再起動の後に保存した状態から stream に接続する前に組み直せること、LAN の target に設定変更が要らず MASQUERADE が要ることが分かっている。同じ試作で、自宅側に conntrack の収束が要ること(7a.3 節)、agent は `ip_forward` を明示して設定する必要があること、userspace と kernel の切り替えには約 1 から 2 秒の断があることも分かった。これらは実装の前提として使えるが、詳しい受け入れ条件は agent の kernel dataplane の機能自体の文書に譲る
+- **Phase 7(agent の kernel dataplane、v1.2)**:Linux のエージェントのカーネルモード(7b 節)を、`internal/dataplane/linuxkernel` の共通の部品を再利用し、agent に固有の nftables と conntrack の経路を同じ package に足す形で追加する。agent は `Runtime` へ移さず、`internal/agent` の中に切った dataplane の境目の後ろに置く(7a.7 節)。ラボで手作業で組んだ検証(2026-09-19)から、範囲のルールは無名 map の DNAT で表すこと、`DynamicUser` と `CAP_NET_ADMIN` のサンドボックスで足りること(`ProtectKernelTunables` は `ip_forward` の書き込みを妨げるため付けないこと)、実物の Docker の `DOCKER-USER` への追加行が Docker の再起動をまたいで残ること、複数 LAN セグメントを持つ自宅では `rp_filter` の strict が転送を壊しうること(`conf.all` と個別インタフェースの値は、より厳しい方が勝つ)が分かっている。agent の kernel dataplane をラボで試作した結果(2026-09-19)からは、agent の停止中も既存と新規のフローが続くこと、変更の無い再起動で conntrack が保たれること、マシンの再起動の後に保存した状態から stream に接続する前に組み直せること、LAN の target に設定変更が要らず MASQUERADE が要ることが分かっている。同じ試作で、自宅側に conntrack の収束が要ること(7a.3 節)、agent は `ip_forward` を明示して設定する必要があること、userspace と kernel の切り替えには約 1 から 2 秒の断があることも分かった。v1.2 の設計の前のラボ(2026-09-23)では、範囲のずらしを表す無名の連結 map の DNAT を google/nftables で組めること、非 root で `CAP_NET_ADMIN` だけを持つプロセスが WireGuard、nftables、conntrack、`ip_forward` のすべてを操作できること、非特権の LXC の中でも同じ操作ができることを確かめた(改訂の記録 2026-09-24)。決定と外部から見える面は 7b 節に定め、完了条件の細部は各段の実装がその節に書く
 
 ### 7a.9 Admission Policy のコンパイラ
 
@@ -1362,13 +1367,147 @@ UDP の応答の観測(10.2a 節)は、`server doctor --json` の `rule.target` 
 
 **Go モジュールとパッケージ(`proto/`、`cmd/`)。** `proto/` は `internal/` の外にあるため Go のコードとして外部から import できるが、README(英日とも)はこれをライブラリとして使えるとは謳っておらず、CLI とコンテナイメージだけを配布物として説明している。この文書は `proto/` の Go の型・関数を外部向けの API とは約束しない。約束しているのは `proto` パッケージが生成する JSON の形(ルールのスキーマ、wire protocol のメッセージ)であり、それは上記の各節で個別に保証している。Go のシグネチャの変更(フィールドの型、メソッドの追加)はこの節の対象外である。
 
+エージェントのカーネルモード(7b 節)は、次のものを加える(2026-09-24、所有者の決定)。どれも加算であり、設定を変えない既存の配置の挙動は変わらない。
+
+- 設定:エージェントが `WGFT_MODE`(`--mode`)と `WGFT_WG_INTERFACE`(`--wg-interface`)を読む。名前は `vpsd` と同じで、エージェントでの意味は 11a 節が定める。`WGFT_MODE` の既定は `userspace` なので、`WGFT_MODE` を渡していないエージェントは今と同じモードで動く。例外は、server と共有するファイルなどを通して `WGFT_MODE=kernel` を既にエージェントへ渡している配置である。今のエージェントはこの値を無視するが、更新の後はカーネルモードで起動しようとし、権限の無い unit では種別 `prerequisite` の拒否で止まる。リリースノートはこの配置を名指しして知らせる
+- CLI:コマンド `wgft agent teardown` を加える(10.3 節)。`--json` を持たず、終了コードは共通の保証だけを持つ
+- `agent doctor --json`:`checks[].id` に `dataplane.interface`、`dataplane.table`、`host.forwarding` を、`checks[].reason` に `needs_cap_net_admin` を加える(10.2c 節)。どれも開いた集合への値の加算である。10.2c 節の表への追加は、その診断の実装と同時に行う。カーネルモードで `relay.listeners`、`relay.sessions`、`relay.refusals`、`tunnel.watchdog` が NOT TESTED になり、ルール単位の失敗を `dataplane.table` が示すこと、`agent.process` の FAILED だけでは最上位の `status` が `failed` にならないことは、カーネルモードのエージェントにだけ起きる。ユーザー空間モードのエージェントでの値の意味は変わらない。ユーザー空間モードのエージェントの `--json` も 3 つの新しい `id` を持ち、状態は NOT TESTED である。`checks[]` の項目は実行の状態で消えないという 10.2c 節の約束に従う。`agent doctor` はモードを状態ファイル `agent.json` の記録から知る
+- `server doctor --json`:`checks[].reason` に `target_loopback_unsupported` を加える(7b.3 節)。開いた集合への値の加算である
+- wire protocol と管理用 API:変えない。server にはエージェントのモードを知らせない(7b.6 節)。モードで変わるのはハートビートの理由の文言だけで、文言は保証の対象ではない
+- `deploy/` の同梱物:`agent.service` は変えない。カーネルモード用の設定の例を加えることは加算である
+- 認証情報ファイル:モード、`ip_forward` の記録、1 つ前の鍵、直近の公開の結果を加える。内部の形は保証の外である
+
 保つのが難しい約束をまとめる。
 
 - 「現在の版と直前の版の wire protocol を必ず支える」は、番号の付いた版が v1 しか存在しないため、実地では未検証である
 
+## 7b. データプレーン(自宅側、カーネルモード)
+
+エージェントのカーネルモードは、Linux のエージェントが、カーネルの WireGuard インタフェースと nftables の DNAT で LAN の宛先へ転送するモードである(2026-09-24、所有者の決定)。エージェントのプロセスは制御プレーンとカーネルの設定の収束を担い、パケットを中継しない。このため、エージェントの停止中や更新の間も、カーネルに残した設定で転送が続く。この節は決定と外部から見える面を骨格として定め、内部の作りは各段の実装がこの節に書き加える。
+
+カーネルモードは、ユーザー空間モード(7 節)と同じ「転送できる」「転送できない」の意味を保つ。ルールの `ok` と `error`(5.2 節)、宛先の変更と削除で成立済みのフローが切れるかどうか(7 節の収束の表)、宛先の許可一覧が守る範囲は、モードで変わらない。backend 全体の失敗とルール単位の失敗は 7a.3 節のとおり分けて扱い、混ぜない。
+
+### 7b.1 カーネルに置くもの
+
+エージェントは次の 2 つを自分の資源としてカーネルに置く。
+
+- WireGuard インタフェース:既定名は `wgft0` で、`WGFT_WG_INTERFACE` で変えられる(11a 節)。ピアは VPS の 1 つだけで、AllowedIPs は `vpsd` のトンネルアドレスの /32 である。エンドポイントと keepalive(4 節)を持ち、決まった待ち受けポートは持たない。鍵は認証情報ファイルの鍵を、アドレスと MTU は全体状態の値を使う
+- nftables のテーブル:名前は `table inet wgft_agent` に固定する。同じホストに `vpsd` の `table inet wgft` があっても名前は衝突しない。6.1 節と同じく、宣言が変わるたびにテーブル全体を 1 つの netlink のバッチで差し替える
+
+テーブルの形は次のとおりである。行の並び、優先度、コメントは実装で確定するので、この例は形だけを示す。`192.168.1.20` と `192.168.1.22` は LAN の宛先の例である。
+
+```
+table inet wgft_agent {
+  chain nat_pre {
+    type nat hook prerouting priority dstnat - 1; policy accept;
+    # 範囲のずらしは無名の連結 map で表す(5.3 節の実効宛先)
+    iifname "wgft0" udp dport 2456-2457 dnat ip to udp dport map { 2456 : 192.168.1.20 . 2456, 2457 : 192.168.1.20 . 2457 }
+    iifname "wgft0" tcp dport 25565 dnat ip to 192.168.1.22:25565
+  }
+  chain input {
+    type filter hook input priority filter - 10; policy accept;
+    iifname "wgft0" ct status dnat accept
+    iifname "wgft0" ct state established,related accept
+    iifname "wgft0" drop
+  }
+  chain forward {
+    type filter hook forward priority filter - 10; policy accept;
+    iifname "wgft0" tcp flags syn / syn,rst tcp option maxseg size set rt mtu
+    oifname "wgft0" tcp flags syn / syn,rst tcp option maxseg size set rt mtu
+    iifname "wgft0" oifname "wgft0" drop
+    iifname "wgft0" ct status dnat accept
+    oifname "wgft0" ct state established,related accept
+    iifname "wgft0" drop
+    oifname "wgft0" drop
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname != "wgft0" ct status dnat masquerade
+  }
+}
+```
+
+- DNAT:wgft0 から入るパケットを宛先ポートで照合し、実効宛先(7 節)へ書き換える。範囲のルールのずらしは、無名の連結 map でポートごとの宛先アドレスとポートを引く
+- MASQUERADE:DNAT したフローのうち、wgft0 以外へ出るものだけに掛ける。表を wgft0 の側だけで書くので、エージェントは LAN のインタフェース名を知る必要が無く、そのための設定項目も持たない。LAN のセグメントを複数持つ家でも、出口は経路表が決める。LAN のインタフェースを環境から推測しない(11a 節)
+- forward:DNAT したフローとその返りだけを通し、wgft0 が絡む残りの転送を落とす。wgft0 が絡まない転送には触れない
+- input:wgft0 から入る新規の接続のうち、DNAT していないものを落とす(11 節)。エージェントのホスト自身の LAN のアドレスへの DNAT は forward ではなく input を通るので、input は `ct status dnat` のフローを通す(7b.2 節)
+- MSS:wgft0 を通る SYN の MSS を、入る向きと出る向きの両方で `rt mtu` にクランプする。カーネルモードは TCP を終端しないので、LAN のサーバと利用者は自分のインタフェースの MTU から MSS を合意し、wgft0 の MTU を超えるセグメントを送りうる。この場合、PMTUD の ICMP を落とすホストが経路に 1 台あるだけで、大きな TCP がその向きで止まる。片方の向きだけをクランプすると、もう片方の向きが止まる。固定の値ではなく `rt mtu` を使うのは、wgft0 の MTU の変更に追従させるためである
+
+テーブルは google/nftables の式で組み、`nft` コマンドを実行しない。6.1 節と同じく 1 つのバッチで送り、7a.3 節の指紋で外からの変更を見つけられるようにするためである。組み立ては `internal/dataplane/linuxkernel` の側に置くので、7a.9 節の import の境界は変わらない。
+
+エージェントは起動のたびに `net.ipv4.ip_forward` を読み、1 でなければ 1 にする。新しい network namespace の初期値は環境によって違い、コンテナの中の値はホストの値を写すことがあるので、初期値を当てにしない。0 から 1 に変えたときは、その事実と日時を状態ファイル `agent.json` に記録し、撤去(10.3 節)で戻す候補として示す。いったん 1 にした値を自分では 0 に戻さない。以上の扱いは 6.1 節の `vpsd` と同じである。書き込みに失敗した場合も、`vpsd` と同じく警告を出して起動を続ける。この間、宛先がホスト自身でないルールは転送されないので、それらのルールを `error` として報告する。この `error` は 7b.3 節の 2 つ目の種類と同じく報告だけに使い、DNAT は残す。テーブル全体の失敗(3 つ目の種類)には当たらない。`agent doctor` の `host.forwarding` はこの状態を FAILED とする(10.2c 節)。エージェントは値を 30 秒ごとに読み直し、1 になればルールの `error` を消す。自宅のホストがルータとして振る舞える状態になることの影響は 11 節に書く。
+
+`rp_filter` の strict は、複数の LAN セグメントを持つ家で転送を壊しうる(7a.8 節)。エージェントはこの値と、他のテーブルの forward の `policy drop` を検査して提示し、書き換えない(6.1 節と同じ方針)。
+
+他の値の扱いは次のとおりである。
+
+- 同時フロー数の上限:`WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS` はカーネルモードでは使わない。値が設定されていれば、使わない旨を起動時に 1 行出して起動を続ける。拒否にしないのは、モードを切り替えても同じ `agent.env` を使えるようにするためである。ルールごとの隔離も持たない(7a.10 節)
+- UDP の期限:全体状態の `udp_timeout` と `udp_timeout_stream` は使わない。エージェントのホストの conntrack の期限が効く
+- conntrack の表の上限:エージェントは変えず、読めれば提示するだけにする(7a.10 節の kernel 側の保護)
+- エンドポイントの引き直し:4 節と同じく、ハンドシェイクが keepalive の 5 倍の間成立しなければ、名前を引き直して wgctrl でピアに設定し直す。カーネルの WireGuard は名前を自分では引き直さないためである。7 節のトンネルの作り直しはカーネルモードには無い。作り直しが備える受信の goroutine の停止は、wireguard-go に固有の故障だからである
+
+### 7b.2 宛先の扱い
+
+DNAT は宛先の IP アドレスを要するので、宛先の扱いの形はユーザー空間モードと違う。守る範囲は同じにする(2026-09-24、所有者の決定)。
+
+- ホスト名の宛先:DNAT を組む前に解決し(7a.3 節の `Prepare`)、30 秒ごとに解決し直し、結果が変わったときだけテーブルを公開し直す。公開し直した後は新しいフローだけが新しい IP へ向き、成立済みのフローは切らない。ユーザー空間モードも宣言の宛先の文字列を比べ、解決の結果の変化ではリスナーを閉じ直さない(7 節)ので、同じ意味になる。解決できないルールには DNAT を作らない。これは 7a.3 節のルール単位で閉じる失敗であり、他のルールの公開は進める。ユーザー空間モードは新しいセッションごとに解決するので、DNS の変更が効くまでの時間は、カーネルモードのほうが最長で 30 秒長い
+- 宛先の許可一覧(`WGFT_AGENT_ALLOW_TARGETS`):DNAT を組むときに、ポートごとの実効宛先を判定する。ホスト名は解決の結果で判定する。一覧の外のポートには DNAT の行を作らず、範囲の他のポートは公開する。7 節の IP リテラルの宛先の判定と同じ単位である。解決の結果が変わるたびに判定し直すので、DNS の変更で一覧の外へ向かうことはない
+- ループバックの宛先(`127.0.0.0/8`):カーネルモードでは拒み、DNAT を作らない。カーネルは DNAT でループバックへ向けたパケットを捨てる。wgft0 に `route_localnet` を立てれば届くが、DNAT を経ずにループバックを宛先とするパケットを捨てる守りの行が要り、書き換える sysctl も増えるので、この方法は採らない(13 節)。ルールの理由の文言は、カーネルモードがループバックの宛先を扱わないことを示す。同じホストのサービスには、ホスト自身の LAN のアドレスを宛先に書く
+- エージェントのホスト自身の LAN のアドレス:DNAT の後のパケットは forward ではなく input を通り、そのホストで待ち受けるサービスに届く。MASQUERADE を通らないので、サービスから見た送信元は VPS のトンネルアドレス(`10.200.0.1`)になる。LAN の別のホストのサービスから見た送信元は、エージェントのホストの LAN のアドレスである。送信元で接続を許可するサービスでは、この違いが設定に関わる。ホスト自身の input のファイアウォールがそのポートを塞いでいれば届かない。forward の MSS のクランプはこの経路に掛からない
+
+### 7b.3 ルールの状態と失敗の種類
+
+カーネルモードのルールの状態は、次の 3 つの種類の失敗で決まる(2026-09-24、所有者の決定)。
+
+1. 公開できないルール:宛先が許可一覧の外にある場合、ホスト名を解決できない場合、ループバックの宛先である場合である。ルール単位の失敗であり、そのルールの DNAT を作らず、他のルールの公開は進める。範囲のルールで一部のポートだけが許可一覧の外にある場合は、そのポートの DNAT だけを作らない。ルールは `error` と理由を報告する
+2. TCP の宛先の接続確認の失敗:エージェントのプロセスは、5.2 節と同じく適用のときと 30 秒ごとに TCP の宛先へ試し接続する。失敗したルールは `error` として報告するが、DNAT は残して転送を続ける。ユーザー空間モードでも接続確認の `error` は報告にだけ使い、中継を止めない(5.2 節)ので、同じ意味になる
+3. テーブル全体の公開の失敗:nftables のバッチが拒まれた場合などであり、backend 全体の失敗である(7a.3 節)。エージェントは処理済み世代を進めず、新しい全体状態を `last_state` として確定せず、旧いテーブルを残したまま 30 秒ごとに試し直す。backend 全体の失敗では世代を進めないという 7a.3 節の規則に合わせたものである。ルールごとの状態をこの失敗で `error` に書き換えない。ルール単位の失敗と混ぜると、運用者は宛先の問題とテーブルの問題を区別できないためである。server からは、`server doctor` の世代の遅れ(10.2a 節の `agent.rules_received`)として見える。エージェントのホストの `agent doctor` は、公開の誤りを `dataplane.table` の所見として示すが、FAILED にはしない。旧いテーブルが残って転送を続けているので、このホストのエージェントが今は転送を担えない、とは言えないためである(10.2c 節)。WireGuard インタフェースを変えられない場合も、この種類に入る
+
+UDP のルールの `ok` は、そのルールの DNAT を公開したことを意味する。UDP の宛先に届くかどうかは、ユーザー空間モードと同じく確かめない。TCP のルールの `ok` は、DNAT を公開し、宛先への接続確認が成功したことを意味する。エージェントのホストの `agent doctor` では、1 つ目と 2 つ目の種類の失敗を持つルールを `dataplane.table` が FAILED として示す(10.2c 節)。
+
+理由は人が読む文言であり(7a.6 節)、全体状態とハートビートの形は変わらない。`server doctor`(10.2a 節)は、1 つ目の種類の理由を `rule.target` の理由の符号に分類する。許可一覧の外は既存の `target_not_allowed`、解決の失敗は既存の `target_resolve_failed`、ループバックの宛先は新しい `target_loopback_unsupported` とする(2026-09-24、所有者の決定)。1 つの符号にまとめないのは、運用者が次に取る手当てがそれぞれ違うためである。分類は、エージェントの診断の実装と同じ段で加える。健全な UDP のルールの `rule.target` は、カーネルモードでも NOT TESTED の `udp_listener_only` になる。符号の名前はリスナーを指すが、宛先を試していないという、符号が表す事実は変わらない。
+
+### 7b.4 収束と停止
+
+- 宛先の変更と削除:テーブルを差し替えても conntrack のエントリは残る。ユーザー空間モードがリスナーを閉じ直して得ていた意味(7 節の収束の表)を、カーネルモードは conntrack の収束で実現する。公開の後に、wgft0 から入って DNAT されたフローのうち、宣言から消えたポートのフローと、実効宛先が変わったポートのフローを消す。実効宛先は 7 節と同じく宣言の文字列で比べるので、ホスト名の解決の結果が変わっただけのフローは消さない。所属ルール ID だけが変わったポートのフローも残す。ルールの無効化とエージェントの無効化(5.1 節)はルールを宣言から外すので、成立済みのフローも切れる。切れ方はモードで違う。ユーザー空間モードの中継は、切るセッションの netstack の側を RST で切る(7 節)。カーネルモードの conntrack の削除はパケットを送らずにエントリを消すので、利用者の側には何も届かず、以後のパケットが届かなくなる。どちらも、そのフローが続かないという意味で切れている。公開できずに閉じたルールの成立済みのフローは、7a.3 節のとおり直前の `Active` の値で判定する
+- 停止と起動:エージェントは停止しても wgft0 とテーブルを消さないので、停止中も転送が続く(9 節の `vpsd` と同じ)。起動時は、wgft0 の所有を判定してから、認証情報ファイルの `last_state` へ収束させ、その後に stream に接続する。コンテナを再起動すると network namespace ごと消えるが、起動時の収束で戻る。テーブルの公開に成功するたびに、公開したポートと宛先を状態ファイルに記録する(9 節)。エージェントが止まっている間の `agent doctor` は、この記録と実際のテーブルを比べ、公開すべきルールの DNAT が残っているかを確かめる(10.2c 節)
+- 所有の判定:同名の WireGuard インタフェースの鍵が認証情報ファイルの鍵と一致するときだけ、自分のものとみなす。一致しなければ他の所有者の資源として触らず、終了コード 1 で終わる(11b 節)。`rotate-key` の途中で落ちて鍵がずれる場合に備え、状態ファイルに 1 つ前の鍵を残し、その鍵を持つインタフェースも自分のものとみなす。1 つ前の鍵は、次に鍵を変えるまで残す。停止中の `rotate-key` は今は状態ファイルの鍵を消すだけだが、カーネルモードでは消す鍵を 1 つ前の鍵として残す。停止中の `rotate-key` を続けて 2 回実行すると、2 回目には消す鍵が無いので、1 つ前の鍵を空の値で上書きせずに残す。インタフェースには古い鍵が残っているので、次の起動は 1 つ前の鍵で所有を判定し、新しい鍵へ収束させる。撤去(10.3 節)も 1 つ前の鍵を持つインタフェースを自分のものとして消す。細部は実装で確定する
+- 状態ファイルを失った場合:登録し直すと鍵が変わるので、残った wgft0 は所有の判定で他人のものに見え、エージェントは終了コード 1 で止まる。wgft は鍵の一致しないインタフェースを消さないので、終了のメッセージは、そのインタフェースが以前のエージェントのものであることを運用者が確かめたうえで `ip link del <名前>` で消す手順を示す。`table inet wgft_agent` は名前で決まる wgft の資源なので、次の公開がそのまま差し替える
+- 外からの変更:自宅のホストでも、`systemctl reload nftables` でテーブルが消えうる。エージェントは 30 秒ごとに実際のテーブルとインタフェースを読み、直前の公開と食い違えば公開し直す。7a.3 節の変更の通知の購読は、後の段で加える
+- 撤去:`wgft agent teardown` が、停止したエージェントの資源を消す(10.3 節)
+
+### 7b.5 権限と配置
+
+- 権限:`CAP_NET_ADMIN` だけで足りる。WireGuard インタフェースの作成と設定、nftables、conntrack の削除、`ip_forward` の書き込みのすべてが、非 root のプロセスで `CAP_NET_ADMIN` だけを持てば通ることを、ラボで確かめた。systemd の `ProtectKernelTunables=yes` は `/proc/sys` を読み取り専用にして `ip_forward` の書き込みを止め、`RestrictAddressFamilies` から `AF_NETLINK` を外すとどの操作も失敗する
+- unit:同梱の `deploy/agent.service` は変えない。ユーザー空間モードのエージェントに要らない権限を渡さないためである。カーネルモードに要る `CAP_NET_ADMIN` は、unit に重ねる設定の例として別に配る。例の中身と手順は、配布物の実装がラボで確かめてから書く
+- 非特権の LXC:動作の対象にする。`ip_forward`、WireGuard、nftables、conntrack の操作はどれもコンテナの network namespace の中で完結し、ホストの値を変えないことを、ラボの非特権の LXC で確かめた。conntrack の表の上限はコンテナから変えられないので、読むだけにする
+- Docker:v1.2 ではカーネルモードの手順を書かない(13 節)
+- Linux 以外:Windows と macOS で `WGFT_MODE=kernel` を指定すると、種別 `prerequisite` の拒否として終了コード 3 で止まる(11b 節)
+- カーネルの前提:WireGuard のリンク種別を持たないカーネルと、権限が足りない配置は、9 節の `vpsd` と同じく種別 `prerequisite` の拒否とし、ユーザー空間モードへの案内を添える
+
+### 7b.6 server との関係
+
+server にはエージェントのモードを知らせない(2026-09-24、所有者の決定)。wire protocol、管理用 API、全体状態の形は変わらず、ハートビートの理由の文言だけがモードで変わる。`server doctor` と Web UI の経路の図の節点の名前(`listener / target` など)も変えない。モードを知らせるには、wire と管理用 API への加算と、7a.6 節の capability の検証が要るためである。見直しは 13 節に置く。
+
+プロキシモードのルール(6.2 節)と疎通確認(10.1 節)では、`vpsd` がエージェントのトンネルアドレスの `listen_port` へ接続する。カーネルモードではこの接続も wgft0 から入るので、同じ DNAT で宛先に届く見込みである。この点は未確認である。
+
+### 7b.7 未確認の点
+
+- LAN の側に wgft0 の MTU より小さい区間がある場合の MSS。`rt mtu` はその区間の MTU を反映しない
+- ホスト自身の LAN のアドレスへの DNAT での TCP の MSS。ホストの TCP が wgft0 の経路の MTU から MSS を決めると見込んでいる
+- wgft0 から入る向きの SYN でも `rt mtu` が wgft0 の MTU から決まる理由。結果はラボで観測したが、カーネルのソースでは確かめていない
+- 固定の `User=wgft` の unit に `CAP_NET_ADMIN` を重ねた配置そのもの。仕組みは `DynamicUser` の場合と同じである
+- SELinux または AppArmor が有効なディストリビューション、Proxmox と Incus の非特権のコンテナ、WireGuard のモジュールを自動で読み込めないホスト
+- `rotate-key` の途中で鍵がずれた場合の所有の判定
+- プロキシモードのルールと疎通確認が DNAT を通って届くこと
+- カーネルモードのエージェントでの世代の遅れ
+- Docker でのカーネルモード
+- エージェントのホストで Docker が公開しているポートを宛先にした DNAT
+- 複数の A レコードを持つホスト名で、アドレスの一部だけが許可一覧に入る場合の扱い
+
 ## 8. 接続元 IP の扱い
 
-サービスから見た接続元は、VPS 側の masquerade と自宅側の中継のため、常にエージェントのアドレスになる。
+サービスから見た接続元は、VPS 側の masquerade のため、利用者の IP にはならない。ユーザー空間モードでは自宅側の中継のため、常にエージェントのアドレスになる。カーネルモードでは、LAN の別のホストのサービスからは MASQUERADE の後のエージェントのホストの LAN のアドレスに、ホスト自身のサービスからは VPS のトンネルアドレス(`10.200.0.1`)に見える(7b.2 節)。
 接続元 IP を使いたい処理は、実 IP が見える VPS 側で行う。
 
 - 拒否と許可:5.3 節の `source_deny` と `source_allow`
@@ -1376,7 +1515,7 @@ UDP の応答の観測(10.2a 節)は、`server doctor --json` の `rule.target` 
 - TCP で自宅側のアプリケーションに元 IP を渡したい場合:`vps_mode = proxy` と `proxy_protocol = true`。受け側が PROXY protocol に対応している必要がある
 
 UDP で自宅側のサービスに元 IP を渡す機能は持たない。
-実現にはエージェントをサービスと同じホストに置いてカーネルの経路を変更する必要があり、7 節の方針と両立しないためである。
+実現には VPS 側と自宅側の両方で masquerade をやめ、サービスのホストで応答を wgft0 へ戻す経路を設定する必要があり、v1.2 の範囲の外にあるためである。
 
 送信元を偽装した UDP は L4 では区別できない。
 ルール全体の上限(`new_flow_rate`、エージェントのセッション上限)で VPS、トンネル、エージェントを守る以外にない。
@@ -1411,6 +1550,7 @@ UDP で自宅側のサービスに元 IP を渡す機能は持たない。
 
 - 状態ファイル 1 つに `{name, endpoint, cert_sha256, permanent_token, used_join_token_sha256, wg_private_key, last_state}` を保存する。`name` は登録の応答で確定した名前、`last_state` は最後に処理した全体状態、`used_join_token_sha256` は使用済み登録トークンのハッシュ(5.1 節の復帰経路で使う)
 - 起動時は状態ファイルの鍵と `last_state` でトンネルとリスナーを先に立て、その後 stream に接続する。`vpsd` が停止中でも、VPS 側にピアが残っていれば転送は復旧する
+- カーネルモード(7b 節)では、状態ファイル `agent.json` にモード、`ip_forward` を 0 から 1 に変えた事実と日時、1 つ前の wg の秘密鍵、直近の公開の結果も保存する。直近の公開の結果は、ルールごとに、公開したポートと DNAT に書いた宛先、または公開しなかった理由を持ち、テーブルの公開に成功するたびに書き換える。エージェントが止まっている間の `agent doctor` が、残っているテーブルと比べるために使う(10.2c 節)。1 つ前の鍵は次に鍵を変えるまで残し、停止中の `rotate-key` も消す鍵を 1 つ前の鍵として移す(7b.4 節)。モードは起動のたびに設定と照合する(11a 節)。モードの記録が無い `agent.json` は、ユーザー空間モードの記録とみなす。停止しても wgft0 と `table inet wgft_agent` を残し、起動時は wgft0 の所有を判定してから `last_state` へ収束させる
 - wg 鍵対は状態ファイルにないときだけ生成する。鍵を作り直したいときは `agent rotate-key` を使う。エージェントが稼働中なら、`rotate-key` は Unix ソケット経由で稼働中プロセスに指示し、プロセス自身が鍵を作り直して stream を張り直す。停止中なら状態ファイルの鍵と `last_state` を直接消す。稼働中のファイルは flock で保護されているので、外から書き換えない
 - 状態ファイルは一時ファイルに書いて rename し、パーミッションは 0600。全体状態のたびに書き換わるので、途中でクラッシュしても壊れないようにする。Windows では 0600 相当の chmod がファイルの ACL には効かないため、別途の保護を 11a 節に定める
 - 起動時に状態ファイルに flock をかけ、取れなければ二重起動として終了する
@@ -1936,7 +2076,7 @@ active・degraded・unknown が混在する行も、それぞれの数を `rules
 
 #### この節が固定する範囲
 
-この節が対象とするのは、7 節のユーザー空間の中継を持つエージェントである。`Relay` 群の検査と `tunnel.watchdog` の存在、および `tunnel.local` の判定規則は、その中継に紐づく。エージェントがカーネルの dataplane を持つ段階 (7a.8 節の Phase 7) では、この範囲の検査の扱いを改めて定める。
+この節が主に対象とするのは、7 節のユーザー空間の中継を持つエージェントである。`Relay` 群の検査と `tunnel.watchdog` の存在、および `tunnel.local` の判定規則は、その中継に紐づく。カーネルモードのエージェント (7b 節) の扱いは、後述の「カーネルモードのエージェント」の項が範囲を定める。
 
 この節は骨格を固定し、細部は実装のときに確定する (2026-09-23、所有者の決定)。固定するのは、2 つのコマンドの境目、証拠の 2 つの出どころ、検査の一覧とその `id`、群の分け方、総合判定を動かす検査、終了コード 2 に倒す条件、状態の語とその意味、終了コードの意味、制御ソケットの拡張の形、そして実装が持つべき表のテストの要求である。機械が読むサーフェスについては、`checks[]` が `id`・`status`・`reason` の 3 つのフィールドを持つことと、その値が開いた集合であることまでを固定する。個々の理由の符号と `--json` の最上位の形は、`--json` を実装したときに確定し、後述の「機械向けの出力」の項に書いた (2026-09-23)。境界をここに引いたのは、規則どうしの組み合わせを網羅して確かめるのが実装とそのテストの役目であり、値の一覧まで固定すると実装が現実に合わせて 1 つ直すだけで設計の変更になるためである。v1.0 の後は機械が読むサーフェスの重みが増す (7a.11 節)。
 
@@ -1988,9 +2128,9 @@ active・degraded・unknown が混在する行も、それぞれの数を `rules
 
 `agent doctor` は、エージェントと同じ実行主体で動かすことを前提とする (2026-09-23、所有者の決定)。エージェントが root で動く配置では、`agent doctor` も root で実行する。この前提の下では、呼び出し元がデータディレクトリと `agent.json` に対して持つ権限は、エージェント自身が持つ権限と同じものになる。`host.privileges` と `agent.credentials` が答えるのは、この前提が満たされたときのエージェント自身の権限であり、呼び出し元固有の事情ではない。前提が崩れる実行の扱いは、後述の「終了コード」の項と、次の root の実行の扱いで定める。
 
-エージェントがシステムの利用者や systemd の `DynamicUser` で動く配置では、その利用者として `agent doctor` を実行するために、`sudo -u` や `systemd-run` を使うといった管理者の追加の操作が要る場合がある (2026-09-23、所有者の決定)。この実行を手軽にする方法は v1.2 で決める。v1.1 では未解決とする。
+エージェントがシステムの利用者や systemd の `DynamicUser` で動く配置では、その利用者として `agent doctor` を実行するために、`sudo -u` や `systemd-run` を使うといった管理者の追加の操作が要る場合がある (2026-09-23、所有者の決定)。この実行を手軽にする方法は次のとおりとする (2026-09-24、所有者の決定)。root の実行で示す案内は、後述の `runuser -u wgft -- wgft agent doctor` のまま変えない。制御ソケットの `doctor` の応答に、稼働中のエージェントの実 uid と利用者名を加え、root で実行したときの所見に、稼働中のエージェントがどの uid とどの利用者で動いているかを添える。動いているエージェント自身に聞くので推測にならず、`DynamicUser` の配置でも正しい名前を示せる。unit の名前を推測して自動で実行し直す形は、11a 節の「環境を見て推測しない」に反するので持たない。`sudo` を持たない最小の構成も、前提に含めたままとする。応答に加える値の形は実装で定める。
 
-root で実行した `agent doctor` では、`host.privileges` を UNKNOWN とし、理由の符号を `running_as_root` とする (2026-09-23、所有者の決定)。root はファイルのパーミッションを迂回するので、root が読めたことは、エージェントを動かす利用者が同じ証拠に届くかどうかについて何も述べない。OK を返すと、非 root で動くエージェントに対して前提が崩れていても、報告が健全に見える。FAILED にもせず、層 2 にも数えない。エージェントが root で動く配置では前提が満たされており、この UNKNOWN は想定どおりの結果だからである。終了コードは他の検査が決め、残りの検査は通常どおり行う。所見には root が権限を迂回するためにこの実行では答えられないことを述べ、次に見るものとして、エージェントと同じ利用者で実行し直すことを添える。同梱の systemd の unit ではその利用者が wgft なので、次の一手には `runuser -u wgft -- wgft agent doctor` を名指しする (2026-09-23、所有者の決定)。`deploy/agent.service` の `User=wgft` という配布物の事実を挙げるのであって、環境を見て推測するのではない (11a 節)。独自の配置では、実際にエージェントを動かしている利用者で実行し直す。root で動くなら想定どおりであることも添える。root でも拒まれた対象がある実行は、この扱いに含めず、層 2 の失敗とする。拒まれたという事実は root の迂回が及ばない範囲で得たものであり、答えられないのではなく届かなかったためである。エージェントがカーネルの dataplane を持ち `CAP_NET_ADMIN` を要する段階では、この扱いを改めて定める。
+root で実行した `agent doctor` では、`host.privileges` を UNKNOWN とし、理由の符号を `running_as_root` とする (2026-09-23、所有者の決定)。root はファイルのパーミッションを迂回するので、root が読めたことは、エージェントを動かす利用者が同じ証拠に届くかどうかについて何も述べない。OK を返すと、非 root で動くエージェントに対して前提が崩れていても、報告が健全に見える。FAILED にもせず、層 2 にも数えない。エージェントが root で動く配置では前提が満たされており、この UNKNOWN は想定どおりの結果だからである。終了コードは他の検査が決め、残りの検査は通常どおり行う。所見には root が権限を迂回するためにこの実行では答えられないことを述べ、次に見るものとして、エージェントと同じ利用者で実行し直すことを添える。同梱の systemd の unit ではその利用者が wgft なので、次の一手には `runuser -u wgft -- wgft agent doctor` を名指しする (2026-09-23、所有者の決定)。`deploy/agent.service` の `User=wgft` という配布物の事実を挙げるのであって、環境を見て推測するのではない (11a 節)。独自の配置では、実際にエージェントを動かしている利用者で実行し直す。root で動くなら想定どおりであることも添える。root でも拒まれた対象がある実行は、この扱いに含めず、層 2 の失敗とする。拒まれたという事実は root の迂回が及ばない範囲で得たものであり、答えられないのではなく届かなかったためである。カーネルモードのエージェントで `CAP_NET_ADMIN` を見る扱いは、後述の「カーネルモードのエージェント」の項で定める。
 
 #### 証拠の鮮度の違い
 
@@ -1999,7 +2139,7 @@ root で実行した `agent doctor` では、`host.privileges` を UNKNOWN と�
 - 稼働中のプロセスしか持たない項目は、エージェントが止まっている間は SKIPPED とし、理由の符号を `agent_not_running` とする。SKIPPED は「試せたはずだが、手前の失敗によって今回は試せなかった」であり、エージェントが動いてさえいれば取れた項目に当たる。NOT TESTED はこのコマンドがそもそも試さない項目に使う語なので、稼働中には取れる項目に当てると、同じ項目の状態が実行のたびに NOT TESTED と OK を行き来する。UNKNOWN は証拠があって判定に足りない場合の語なので、証拠が 1 つも無い状態には当たらない。例外は `relay.allow_targets` の停止中であり、この項目だけは UNKNOWN とする
 - `agent.json` から読んだ値は、稼働中でも停止中でも、保存した時点の値である。人向けの出力では `agent ls` および 10.2a 節と同じ `last:` の接頭辞を付け、今の観測と区別する
 
-停止そのものは FAILED として扱う。ユーザー空間の中継を持つエージェントは、常駐して転送を担うプロセスであり、止まっている間は 1 バイトも転送しないためである。無効なルールのような「宣言どおりの停止」は、エージェントには存在しない。
+停止そのものは FAILED として扱う。ユーザー空間の中継を持つエージェントは、常駐して転送を担うプロセスであり、止まっている間は 1 バイトも転送しないためである。無効なルールのような「宣言どおりの停止」は、エージェントには存在しない。カーネルモードのエージェントは停止中も転送を続けうるので、停止の状態は FAILED のまま、総合判定への効き方だけを変える (後述の「カーネルモードのエージェント」の項)。
 
 #### 検査の一覧と証拠の出どころ
 
@@ -2076,7 +2216,7 @@ LAN の宛先への試し接続は行わない。エージェントの中継が�
 
 `agent doctor` は、転送の経路を順にたどる形を持たない。したがって、10.2a 節の「経路の上の検査と経路の外の検査」の区別と、「最初に FAILED になった検査が転送の止まった位置である」という規則を持ち込まない。代わりに、総合判定と終了コードを動かす検査を名指しで定める。前掲の表の「総合判定」の列がその区別である。
 
-動かすのは `agent.credentials`、`agent.process`、`tunnel.local`、`relay.listeners` である (2026-09-23、所有者の決定)。どれも、失敗がそのまま「このホストのエージェントは今の状態では転送を担えない」を意味する。
+動かすのは `agent.credentials`、`agent.process`、`tunnel.local`、`relay.listeners` である (2026-09-23、所有者の決定)。どれも、失敗がそのまま「このホストのエージェントは今の状態では転送を担えない」を意味する。カーネルモードのエージェントでは、動かす検査の組が変わる (後述の「カーネルモードのエージェント」の項)。
 
 動かさない検査のうち、`host.platform`・`host.interfaces`・`agent.last_state`・`stream.backoff`・`stream.liveness`・`tunnel.watchdog`・`relay.sessions`・`relay.refusals` は、累計か現在値を述べるだけで、エージェントが転送を担えるかどうかを述べないためである。10.2a 節が経路の外に置いた検査と同じ理由による。所見としては必ず出し、次に何をするかも添える。`relay.allow_targets` の理由は前述の「宛先の許可一覧の扱い」の項で述べた。残る検査には個別の理由があり、以下の項で述べる。
 
@@ -2106,7 +2246,7 @@ server がこのエージェントを無効にしている場合(5.1 節)、`rel
 
 `agent.control` も動かさない側に置く (2026-09-23、所有者の決定)。制御ソケットに繋げないことは、終了コード 1 が答える問い、つまり「このホストのエージェントが、今の状態では転送を担えない」に対して偽である。ソケットのパスが `sun_path` の上限を超えていても、エージェントは転送を担い続ける (11a 節)。動かす側に置くと、転送が健全な配置に対して「担えない」と答えることになり、問いと答えがずれる。ファイルのパーミッションで繋げない場合の終了コード 2 は、後述の項で別に定める。
 
-`host.privileges` も動かさない側に置く (2026-09-23、所有者の決定)。エージェント自身の権限の不足と、`agent doctor` を実行した利用者が証拠に届かないことを、この検査だけでは区別できない。後者を終了コード 1 にしてはいけない以上、診断が成立するかどうかの問題として終了コード 2 の側に寄せるほうが素直である。稼働中の制御ソケットからエージェントのプロセス自身の権限を取り、判定の材料にする案は採らなかった。前提を課したうえで呼び出し元の権限をそのまま使う案の方が単純であり、この案はエージェントが止まっている実行では使えず、制御ソケットの応答に権限の情報を足すことにもなる。
+`host.privileges` も動かさない側に置く (2026-09-23、所有者の決定)。エージェント自身の権限の不足と、`agent doctor` を実行した利用者が証拠に届かないことを、この検査だけでは区別できない。後者を終了コード 1 にしてはいけない以上、診断が成立するかどうかの問題として終了コード 2 の側に寄せるほうが素直である。稼働中の制御ソケットからエージェントのプロセス自身の権限を取り、判定の材料にする案は採らなかった。前提を課したうえで呼び出し元の権限をそのまま使う案の方が単純であり、この案はエージェントが止まっている実行では使えず、制御ソケットの応答に権限の情報を足すことにもなる。カーネルモードの `CAP_NET_ADMIN` だけは、後述の「カーネルモードのエージェント」の項がこの案を例外として採る。
 
 `host.privileges` が見る権限を、実装が実際に要求する権限に合わせて絞る (2026-09-23、所有者の決定)。検査の対象は、データディレクトリを読めること、データディレクトリに新しいファイルを作れること、`agent.json` を読めること、設定ファイルがある場合にそれを読めることとする。`agent.json` 自体への書き込みの権限は見ない。`internal/agent/credentials` の `Save` は、一時ファイルを書いてから `rename` で置き換える方式であり (9 節)、`rename` が求めるのは、そのファイルを含むディレクトリへの書き込みの権限だからである。検査の対象が実装の要求より厳しければ、`agent.json` を 0400 に締めた配置のような正当な構成で終了コード 2 を毎回返すことになる。
 
@@ -2310,6 +2450,35 @@ doctor\n
 
 この実行の `agent.control` は OK とする (2026-09-23)。制御ソケットに繋げて `doctor` の応答も得ているので、この検査が答える「制御ソケットに繋げるか」は満たされている。古い常駐プロセスが `doctor` に対応していない実行を UNKNOWN とするのとは扱いが違う。あちらは診断の応答そのものを得られないが、この実行では応答を得たうえで実行時の部分だけが欠ける。欠けたことは、続く検査の SKIPPED とその所見が述べる。
 
+#### カーネルモードのエージェント
+
+カーネルモードのエージェント (7b 節) の診断について、この項は総合判定への効き方と証拠の読み方だけを定める (2026-09-24、所有者の決定)。検査の中身、理由の符号、表のテストの場面は、その診断の実装と同じ変更でこの節の表と本文に加える。この節の検査の表と理由の符号の表は、実装とテストで両方向に照合しているので、実装より先に行を加えない。`agent doctor` はエージェントのモードを、状態ファイル `agent.json` の記録から知る。エージェントが止まっていても記録は読めるためである。ユーザー空間モードの実行では、次に加える 3 つの検査を NOT TESTED として `checks[]` に並べる。
+
+カーネルモードでも、終了コード 1 は「このホストのエージェントが、今の状態では転送を担えない」を意味する。カーネルモードで転送を担うのは、カーネルの wgft0、`table inet wgft_agent`、ホストの転送の設定であり、エージェントのプロセスではない。そこで、総合判定を動かす検査を次のように分ける。
+
+- `agent.process`:停止は FAILED のままとする。設定の更新、名前の引き直し、外からの変更への収束が止まるので、運用者の手当てが要る状態であることは変わらない。ただしカーネルモードでは、この FAILED だけで総合判定と終了コード 1 を決めない。停止中も wgft0 とテーブルが残っていれば転送は続くためである (7b.4 節)。所見には、カーネルの転送は続いている可能性があることと、転送の実体は次項の検査が答えることを添える
+- 加える検査:`dataplane.interface` (wgft0 の有無、鍵の一致、ピア)、`dataplane.table` (`table inet wgft_agent` そのものの正しさと、テーブルが公開すべき各ルールの状態。後述)、`host.forwarding` (`ip_forward` など、ホストの転送の設定) を加え、3 つとも総合判定を動かす。ただし FAILED にするのは、転送を担えないと確かに言える事実だけとする。`host.forwarding` では `ip_forward` が 0 であることがこれに当たる。他のテーブルの forward の `policy drop` と `rp_filter` の strict は、明示の accept や経路の組み方によっては転送が通るので、6.1 節と同じく手掛かりとして示し、FAILED にはしない (UNKNOWN か所見)。`dataplane.interface` は最終ハンドシェイクを値として示すだけで、その健全さを判定しない。ハンドシェイクの判定は 10.2a 節の `tunnel.handshake` が持つ (「2 つのコマンドの境目」の項)
+- NOT TESTED にする検査:`relay.listeners`、`relay.sessions`、`relay.refusals`、`tunnel.watchdog` は、カーネルモードには試す対象が無いので NOT TESTED とする。カーネルモードはリスナーも、中継の接続とそのフロー予算も、トンネルの作り直しも持たない (7b.1 節)
+- 生かす検査:`relay.allow_targets` は NOT TESTED にしない (2026-09-24、所有者の決定)。カーネルモードでも宛先の許可一覧を読んで守らせ、一覧の外には DNAT を作らない (7b.2 節) ので、この検査の意味はユーザー空間モードと同じである。一覧を読めれば設定の値を示す。読めない場合は、ユーザー空間モードの今の規則に従う。停止中は UNKNOWN `agent_not_running`、稼働中に制御ソケットに繋げなければ SKIPPED `control_socket_unreachable` のように、「宛先の許可一覧の扱い」の項と「制御ソケットから実行時の状態を取れない場合」の項が定める状態と符号を使う。総合判定は動かさない
+- 実装で定める検査:`tunnel.local` と `tunnel.transfer` のカーネルモードでの扱いは、実装で定める。加える検査のうち値だけを示すものは、「出力の形」の項の Observed values 節に置く
+
+カーネルモードのルール単位の失敗は `dataplane.table` が示す (2026-09-24、所有者の決定)。`dataplane.table` は 2 つのことを判定する。1 つはテーブルそのものが正しいこと、つまり `table inet wgft_agent` があり、直前の公開と指紋が一致することである。直前の公開が失敗していれば(7b.3 節の 3 つ目の種類)、その誤りを所見として示すが、旧いテーブルが転送を続けているので FAILED にはしない。もう 1 つは、テーブルが公開すべき各ルールが実際に成り立っていることである。7b.3 節の 1 つ目の種類の失敗 (許可一覧の外、名前の解決の失敗、ループバックの宛先で、そのルールの DNAT が無い) を持つルールと、2 つ目の種類の失敗 (TCP の宛先の接続確認の失敗で、DNAT はあるがルールが `error` を報告している) を持つルールがあれば、`dataplane.table` を FAILED とする。ユーザー空間モードの `relay.listeners` が、ルールの `error` の出どころを問わず FAILED にするのと同じ扱いであり、終了コード 1 はカーネルモードでも「このホストのエージェントが、今の状態では転送を担えない」を意味する。server がこのエージェントを無効にしている場合 (5.1 節) は、`relay.listeners` と同じく SKIPPED とし、理由の符号を `agent_disabled` とする。カーネルモードで `relay.listeners` を生かしておかないのは、カーネルモードにはリスナーが無く、問うべきは nftables の dataplane がそのルールを公開しているかどうかだからである。リスナーの検査を残すと、存在しないリスナーについて答えることになる。宛先の許可一覧については、`relay.allow_targets` が安全のための設定が何であるかを示し、`dataplane.table` がその設定を当てはめた後に各ルールを公開できるかを判定する。一覧に実際に拒まれたルールは、`dataplane.table` の FAILED として現れる。直前の公開の指紋はエージェントのプロセスのメモリにだけあり、ルールごとの状態はハートビートのために稼働中のエージェントが組み立てる値である。このため、エージェントが停止している実行の `dataplane.table` は、次の形で判定する (2026-09-24、所有者の決定)。テーブルがあることだけでは OK にしない。停止中の診断が答えるのは、プロセスが止まっている間に実際に残っているカーネルの転送だからである。
+
+エージェントが停止している実行の `dataplane.table` は、状態ファイル `agent.json` の記録と実際の `table inet wgft_agent` を比べる。材料は、最後に処理した全体状態 `LastState` と、カーネルモードで記録する直近の公開の結果である (9 節)。直近の公開の結果には、ルールごとに、公開したポートと、そのとき解決して DNAT に書いた宛先のアドレスとポート、または 7b.3 節の 1 つ目の種類で公開しなかった理由を持つ。ホスト名の解決の結果と、許可一覧を当てはめた結果は、`LastState` の宣言だけからは導けないためである。比べ方は次のとおりである。
+
+- 公開すべきルール:`LastState` で有効なルールのうち、直近の公開の結果が公開したと記録しているものである。その各ポート (範囲のルールは範囲のすべてのポート) の DNAT の行が、記録した宛先を指して実際のテーブルにあることを確かめる。1 つでも無いか別の宛先を指していれば FAILED とする。エージェントが止まった後に行が消された場合も、ここで見つかる
+- 公開しなかったルール:直近の公開の結果が 1 つ目の種類の理由を記録しているルールは、稼働中と同じく FAILED とする
+- 記録が無い場合:直近の公開の結果を持たない `agent.json` では、判定を宣言から導ける範囲に限る。有効なルールの各ポートに DNAT の行があること、IP リテラルの宛先ならその宛先を指すこと、ループバックの宛先には行が無いことを確かめ、ループバックの宛先を持つルールは FAILED とする。ホスト名の宛先の向き先と、許可一覧の当てはめは確かめない。許可一覧を設定の出どころから組み立て直さないのは、「宛先の許可一覧の扱い」の項と同じ理由による
+- 再現できない部分:直前の公開の指紋との完全な一致 (外から加えられた行やハンドルの違い) と、ハートビートにだけある TCP の宛先の接続確認の結果 (2 つ目の種類) は、稼働中のプロセスなしには再現できない。この部分は判定せず、所見に比べた範囲と比べなかった範囲を示す
+
+停止中の `dataplane.table` の状態は、比べた部分に FAILED があれば FAILED とし、無ければ UNKNOWN とし、理由の符号を `agent_not_running` とする。比べなかった部分が必ず残るので、停止中の実行で OK にはしない。終了コードは「終了コード」の項の層の規則からそのまま決まる。FAILED は層 1 の FAILED として終了コード 1 になる。比べた部分がすべて一致した UNKNOWN は、権限で証拠に届かなかった実行ではないので層 2 に入らず、他に FAILED が無ければ終了コードは 0 のままである。テーブルを権限で読めない場合は、前述の `needs_cap_net_admin` の規則が先に効く。server がこのエージェントを無効にしている場合は、`LastState` の無効を示すフィールドから知り、稼働中と同じく SKIPPED `agent_disabled` とする。
+
+この分け方で、エージェントが止まっていても、wgft0、公開すべきルールの DNAT を持つテーブル、`ip_forward` が揃っていれば、終了コードは 1 にならない。逆に、どれかが欠けていれば、エージェントが動いていても終了コードは 1 になる。
+
+カーネルの状態は、エージェントが稼働中なら、エージェント自身が制御ソケットで返す (2026-09-24、所有者の決定)。`runuser -u wgft` で実行した `agent doctor` には ambient の権限が付かず nftables を読めないが、エージェント自身は `CAP_NET_ADMIN` を持つので、同じ実行主体の前提のまま答えられる。エージェントが停止している間だけ、呼び出し元がカーネルを直接読む。呼び出し元が `CAP_NET_ADMIN` を持たないために直接読めない検査は UNKNOWN とし、理由の符号を `needs_cap_net_admin` とする。総合判定を動かす検査のこの UNKNOWN は、「終了コード」の項の層 2 に入り、終了コード 2 とし、`evidence_unreachable` を `true` にする。証拠に権限で届かない実行という層 2 の定義そのものに当たるためである。層 2 に入れなければ、止まったエージェントを同じ利用者で診断した実行が、転送の実体を何も観測しないまま終了コード 0 を返す。この場合の次の一手は、エージェントを起動すること、または root で実行してカーネルの状態を直接読むことである。「終了コード」の項は root での実行し直しを案内しないと定めるが、この場合はカーネルモードの例外とする。root での実行し直しを案内しない規則の理由は、root がファイルのパーミッションを迂回して `host.privileges` が前提の崩れを検出できなくなることである。`needs_cap_net_admin` の実行で欠けている証拠はファイルではなくカーネルの状態なので、この理由は当たらない。
+
+root の実行の扱いは次のとおりとする (2026-09-24、所有者の決定)。ファイルの権限の検査は今のまま保ち、root の実行では `host.privileges` を UNKNOWN `running_as_root` とする。root がファイルのパーミッションを迂回する事情は、カーネルモードでも変わらないためである。カーネルモードでは、`host.privileges` の対象に、稼働中のエージェントが実効として持つ `CAP_NET_ADMIN` を加え、制御ソケットの答えで判定する。これは「個別の理由で動かさない検査」の項が退けた、制御ソケットからエージェント自身の権限を取る案を、カーネルモードに限って採るものである。`runuser` で実行した呼び出し元は ambient の権限を持てないので、呼び出し元の権限を見てもエージェントの `CAP_NET_ADMIN` については何も分からないためである。この判定の結果は、エージェント自身の性質をエージェントが答えたものであり、呼び出し元が証拠に届かなかったことを示さないので、実行を層 2 に入れない。同梱の unit はカーネルモードでもエージェントを root で動かさない。root で動くエージェントは、「2 つの証拠の出どころ」の項の root の実行の扱いをそのまま受ける。
+
 #### 範囲外
 
 遠隔の診断は含めない。server がエージェントに診断を要求し、その結果を併せて示す形であり、必要かどうかの判断を `agent doctor` ができてからにすることは 10.2a 節が既に定めている。手元で見えるものが分かって初めて、server 側から要求すべき情報が決まるという理由も変わらない。
@@ -2459,9 +2628,25 @@ wg0 とテーブルが戻り、エージェントは再接続だけで復旧す�
 にしか効かない)、その後 `vpsd` を停止して撤去する。撤去後にエージェントが残っても、
 接続不能を 5.1 節の一時障害とみなしてバックオフ再接続を続けるだけで害はないが、止まらない。
 
-自宅エージェントはユーザー空間の wireguard-go と netstack なのでカーネルに何も残さず、
+ユーザー空間モードの自宅エージェントは wireguard-go と netstack なのでカーネルに何も残さず、
 プロセスを止めて `agent.json`(と隣の `.lock`・`.sock`)を消せば消える。VPS 側では、
 エージェントの削除が恒久トークンを使えなくし、ピア・conntrack・割り当てアドレスを回収する。
+
+カーネルモードのエージェント(7b 節)は、停止しても wgft0 と `table inet wgft_agent` を残す。
+これを消すのが `wgft agent teardown` であり、`server teardown` と同じく停止したエージェントの
+後片付けとして行う(2026-09-24、所有者の決定)。エージェントが稼働中なら何も消さずに拒否し、
+先に停止するよう案内する。稼働中のエージェントの 30 秒ごとの収束や外からの変更への収束と
+競合して、消した資源を作り直させないためである。稼働の判定は、`rotate-key` と同じく
+ロックファイルを作らない `Inspect`(10.2c 節)で行う。
+消すのは `table inet wgft_agent` と、秘密鍵が状態ファイルの鍵か 1 つ前の鍵(7b.4 節)と一致する
+WireGuard インタフェースだけで、他の所有者のインタフェースと他のテーブルには触れない。
+状態ファイルを失って鍵が一致しないインタフェースは消さず、`ip link del <名前>` で消す手順を
+示す(7b.4 節)。消した後は、状態ファイル `agent.json` のカーネルモードの記録を消す。ホストを
+再起動した後は wgft0 もテーブルも無く、この記録だけが残骸として残り、11a 節の切り替えの関門を
+止める。`agent teardown` はこの場合も記録を消して関門を通す。`ip_forward` は自動では戻さず、
+状態ファイルの記録から「エージェントが 0→1 にした(日時)」か「元から 1 だった」かを示し、
+前者だけ戻し方を示す。Windows と macOS では、`server` の一群と同じく種別 `prerequisite` の
+拒否として終了コード 3 で止まる(11b 節)。フラグ、conntrack の後片付け、出力の形は実装で定める。
 
 ### 10.4 ログ
 
@@ -2536,6 +2721,13 @@ TCP で開いた管理用 API(`--admin` のループバック、`--admin-tailsca
 
 奪われた VPS からエージェントを踏み台にする経路も脅威として扱う。エージェントは `vpsd` が配る `target` へ自分から接続するので、VPS を奪った攻撃者はルールの `target` を `192.168.1.1:22` のような自宅の別のホストに書き換え、自宅の LAN 全体への踏み台に使える。エージェント用 API の認証と証明書のピン留めは `vpsd` になりすます第三者を防ぐだけで、`vpsd` 自身が奪われた場合には効かない。v1 はこの経路を、エージェント側の宛先の許可一覧(7 節の `WGFT_AGENT_ALLOW_TARGETS`)で狭める。一覧はエージェントのホストの設定だけにあり、`vpsd` は一覧の内容を知らず、wire protocol にも現れない。一覧を設定しない既定では制限が無いので、自宅の LAN に転送の宛先以外のホストがある運用では、一覧の設定を勧める。一覧が守るのは宛先の範囲だけであり、一覧の中の宛先に対する不正な転送は防げない。
 
+エージェントのカーネルモード(7b 節)は、自宅のホストに新しい面を加える(2026-09-24、所有者の決定)。
+
+- 自宅のホストの転送:カーネルモードでは、パケットを LAN へ送るのはエージェントのプロセスではなく自宅のホストのカーネルである。ユーザー空間モードの netstack は宣言したリスナーしか晒さないが、カーネルモードの wgft0 はホストのインタフェースなので、守りの行が無ければ、VPS からトンネルのアドレス(`10.200.0.x`)でホスト自身のサービス(sshd など)や LAN の任意のホストに届く。`table inet wgft_agent` の forward は、DNAT したフローとその返り以外で wgft0 が絡む転送を落とす。宛先の許可一覧は DNAT を組むときに効くので(7b.2 節)、VPS を奪った攻撃者が `target` を書き換えても、一覧の外へ向かう DNAT は作られない。守りの強さはユーザー空間モードと同じである
+- ホスト自身の入力の守り:`table inet wgft_agent` の input は、wgft0 から入る新規の接続のうち DNAT していないものを落とす。6.1 節の VPS の input と同じ考え方である。DNAT した接続は、ホスト自身の LAN のアドレスを宛先に書いたルールの分だけ input を通る
+- `ip_forward`:エージェントが 1 にすると、自宅のホストはルータとして振る舞える状態になる。wgft 以外の転送を止めるのは既存のファイアウォールの役目であり、`wgft_agent` の forward は wgft0 が絡む転送にしか触れない。家の LAN の中からこのホストを経由するよう仕向けられたパケットが転送されうる点は、6.1 節の VPS と同じである。影響は利用者向けの文書で説明する
+- テーブルが無い間:`systemctl reload nftables` などで `table inet wgft_agent` だけが消えると、wgft0 と `ip_forward`=1 は残るので、VPS のピアからホスト自身と LAN への通信を止める行が無くなる。この間は、上の 2 つの守りがどちらも効かない。エージェントが稼働中なら 30 秒ごとの収束(7b.4 節)が最長 30 秒で戻すが、停止中は戻らない。この隙間を使えるのは VPS を奪った攻撃者だけであり、`agent doctor` の `dataplane.table` が検出する(10.2c 節)
+
 ## 11a. 設定の渡し方
 
 wgft のどのプロセス(`vpsd`、`agent`、CLI)も `WGFT_*` の環境変数で設定を受け取る。ファイルはその dotenv、フラグはその別名であり、優先順位はフラグ、プロセスの環境変数、ファイルの順である。
@@ -2552,7 +2744,7 @@ systemd の unit では `EnvironmentFile=` を使わない。バイナリが既�
 
 起動ログの先頭と `wgft server check` の出力は、有効な設定を値と出所(フラグ、環境変数、ファイル、既定値のいずれか)付きですべて印字する。トークンなど秘密の値は伏せ字にする。
 
-他のプロセス向けの `WGFT_*` はエラーにせず無視する。知らない名前だけでなく、`vpsd` から見た `WGFT_MODE=userspace` のように「知っているが自分には関係ない」名前も対象である。この規則により、同じ Docker イメージや同じ設定ファイルで `agent` と `vpsd` を切り替えて使える。
+他のプロセス向けの `WGFT_*` はエラーにせず無視する。知らない名前だけでなく、`vpsd` から見た `WGFT_AGENT_ALLOW_TARGETS` のように「知っているが自分には関係ない」名前も対象である。この規則により、同じ Docker イメージや同じ設定ファイルで `agent` と `vpsd` を切り替えて使える。`WGFT_MODE` と `WGFT_WG_INTERFACE` は、`vpsd` とエージェントがどちらも同じ名前で読む(下記)。既定のファイルは `server.env` と `agent.env` に分かれているので、同じファイルを両方に渡す配置でだけ、同じ値が両方に効く。この配置では、今のエージェントが無視している `WGFT_MODE=kernel` が、更新の後はエージェントにも効く。リリースノートはこの挙動の変化を知らせる(7a.11 節)。
 
 同時フロー数のプロセス全体の上限(7 節)は `WGFT_MAX_UDP_FLOWS`(既定 8192)と `WGFT_MAX_TCP_FLOWS`(既定 2048)で、`vpsd` とエージェントの両方が受け取る。値は 16 から 65535 の整数で、範囲外は起動時のエラーにする。メモリの小さいホストで下げるための設定であり、ホストのメモリの量から自動では決めない。ルールごとの上限はこの 2 つから導く値であり、独立した設定項目ではない。
 
@@ -2562,7 +2754,7 @@ systemd の unit では `EnvironmentFile=` を使わない。バイナリが既�
 
 データの置き場所は `WGFT_DATA_DIR`(既定 `/var/lib/wgft`)に統一する。この下に `vpsd` は SQLite ファイルを、`agent` は状態ファイルを置く(9 節)。
 
-既定の置き場所は OS ごとに決める。Linux は上のとおりである。Windows は設定ファイルもデータも `%ProgramData%\wgft` に、macOS は `~/Library/Application Support/wgft` に置く。どの OS でも `--config` と `WGFT_DATA_DIR` で変更できる。Linux 以外のバイナリが持つのはエージェントと CLI だけで、`server` サブコマンドは「Linux でしか動かない」と答えて終わる。`vpsd` はカーネルの WireGuard と nftables に依存するためである。エージェントは wireguard-go と netstack だけで動くので OS を選ばない設計であり、Windows は 2026-09-19 に Windows 11(非管理者権限での実行)から実機の VPS に対して確認した。ホームルータの NAT を越えた join string による登録、トンネルの確立、LAN サービスへの UDP と TCP の中継、server の再起動と agent の強制終了からの復帰、2 つ目の `agent run` の拒否、認証情報ファイルの書き換え、稼働中の `rotate-key` が通ったため、Windows 版のエージェントと CLI は Releases に含め、README にも対応として書く。macOS は 2026-09-19 に macOS 27(Apple シリコン、arm64)から、ホームルータの NAT の内側で実機の VPS(v0.3.0、カーネルモード)に対して確認した。join string による登録、トンネルの確立、Mac 自身と LAN の他のホストへの UDP と TCP の中継、Mac の再起動と server の再起動からの復帰、2 つ目の `agent run` の拒否、稼働中の `rotate-key`、データディレクトリ(0700)と `agent.json`・`agent.json.lock`・`agent.json.sock`(0600)の権限が通ったため、macOS 版のエージェントと CLI も Releases に含め、README にも対応として書く。macOS で公開するのは darwin/arm64 だけである。Intel Mac は対象にせず、amd64 の自宅マシンには Linux 版で対応する。
+既定の置き場所は OS ごとに決める。Linux は上のとおりである。Windows は設定ファイルもデータも `%ProgramData%\wgft` に、macOS は `~/Library/Application Support/wgft` に置く。どの OS でも `--config` と `WGFT_DATA_DIR` で変更できる。Linux 以外のバイナリが持つのはエージェントと CLI だけで、`server` サブコマンドは「Linux でしか動かない」と答えて終わる。`vpsd` はカーネルの WireGuard と nftables に依存するためである。ユーザー空間モードのエージェントは wireguard-go と netstack だけで動くので OS を選ばない設計であり(カーネルモードは Linux だけである。7b 節)、Windows は 2026-09-19 に Windows 11(非管理者権限での実行)から実機の VPS に対して確認した。ホームルータの NAT を越えた join string による登録、トンネルの確立、LAN サービスへの UDP と TCP の中継、server の再起動と agent の強制終了からの復帰、2 つ目の `agent run` の拒否、認証情報ファイルの書き換え、稼働中の `rotate-key` が通ったため、Windows 版のエージェントと CLI は Releases に含め、README にも対応として書く。macOS は 2026-09-19 に macOS 27(Apple シリコン、arm64)から、ホームルータの NAT の内側で実機の VPS(v0.3.0、カーネルモード)に対して確認した。join string による登録、トンネルの確立、Mac 自身と LAN の他のホストへの UDP と TCP の中継、Mac の再起動と server の再起動からの復帰、2 つ目の `agent run` の拒否、稼働中の `rotate-key`、データディレクトリ(0700)と `agent.json`・`agent.json.lock`・`agent.json.sock`(0600)の権限が通ったため、macOS 版のエージェントと CLI も Releases に含め、README にも対応として書く。macOS で公開するのは darwin/arm64 だけである。Intel Mac は対象にせず、amd64 の自宅マシンには Linux 版で対応する。
 
 Windows での常駐は、`agent run` をそのときの利用者の権限で起動するところまでを wgft が提供し、サービス、タスクスケジューラ、通知領域への常駐は提供しない。ログオン時の自動起動(スタートアップフォルダへの登録など)は利用者に任せる。Windows のゲームサーバの多くがユーザー権限で動いており、agent も管理者権限を必要としないことに合わせた判断であり、サービス化には Program Files への配置、SYSTEM と対話利用者の間の ACL の取り合い、SCM(サービス制御マネージャ)対応のコードが新たに要ることを理由に見送った。
 
@@ -2598,9 +2790,18 @@ SYSTEM と対話ユーザーの関係は次のとおりである。DACL は毎�
 
 `WGFT_MODE` は初回の起動で必須である。初回に省略すると、`kernel` か `userspace` かを指定するよう求めて起動を止め、環境を見て推測することはしない。初回に指定した値は SQLite に記録する。2 回目以降に省略した場合は、記録したモードで起動する。指定した場合は記録と照合し、一致すれば通常どおり起動する。食い違った場合は関門を通し、通れば記録を書き換えて起動し、通らなければ起動を拒否する。関門の中身は次のとおりである。`kernel` から `userspace` へ切り替えるときは、wg インタフェースと `table inet wgft` の残骸が無いことを確かめる。残骸があれば、先に `teardown` するよう案内して拒否する。残骸の有無を確かめるには `CAP_NET_ADMIN` が要るため、確かめられない環境では「確認できない」と警告したうえで、wireguard-go の UDP bind を試みる。この bind がカーネル側の `wgft0` に既に使われているポートと衝突して失敗した場合は、残骸の疑いとして host 上での `teardown` を案内する。`userspace` から `kernel` へ切り替えるときは残骸が生じないため、そのまま通す。モードの記録が無い既存の SQLite は、これまで `kernel` しか存在しなかったことから `kernel` とみなして記録する。`wgft server teardown` はモードの記録に触れない。切り替えの判断は起動時の照合と関門だけで完結する。
 
+エージェントも `WGFT_MODE`(`--mode`)を読む(2026-09-24、所有者の決定)。7a.6 節が `WGFT_MODE` を server と agent 全体の転送方式(`DataplaneMode`)の外部名と定めているので、エージェント専用の名前は作らない。値は `userspace` か `kernel` で、それ以外は入口で種別 `config` の拒否にする(11b 節)。扱いは `vpsd` と次の点で違う。
+
+- 既定:省略すると `userspace` である。`kernel` は明示したときだけ選ばれる。初回の必須にはしない。既存のエージェントはモードの記録を持たず、既定を今の動作と同じ `userspace` にすれば推測にならないためである。モードの記録が無い `agent.json` は `userspace` の記録とみなす(9 節)。`WGFT_MODE` を渡していない配置は、設定を変えずにそのまま動く
+- 記録と照合:モードは状態ファイル `agent.json` に記録し、起動のたびに設定と照合する(9 節)。`agent.json` の内部の形は 7a.11 節の保証の外なので、項目の追加は自由である
+- 切り替えの関門:`userspace` から `kernel` への切り替えは残骸を生まないので、そのまま通す。`kernel` から `userspace` への切り替えは、カーネルモードの残骸が残っていれば種別 `mode-gate` で拒否し、先に `wgft agent teardown`(10.3 節)を実行するよう案内する。残骸は、鍵の一致する WireGuard インタフェース、`table inet wgft_agent`、`agent.json` のカーネルモードの記録である。ユーザー空間モードのエージェントは `CAP_NET_ADMIN` を持たずテーブルを読めないので、関門は記録を根拠に判定する。ホストを再起動した後は記録だけが残骸として残り、`wgft agent teardown` がそれを消す(10.3 節)。記録が無いのに同じ名前の WireGuard のリンクがある場合は、拒否せずに警告を出す形を取りうるが、未確認である
+- 旧い版への戻し:旧い版のエージェントは `agent.json` の知らない項目を保存し直さない(7a.11 節)ので、カーネルモードから旧い版へ戻すと記録が消え、wgft0 とテーブルだけが残る。リリースノートは、カーネルモードから旧い版へ戻す前に `wgft agent teardown` を実行するよう知らせる
+- Linux だけ:Windows と macOS で `kernel` を指定すると、種別 `prerequisite` の拒否として終了コード 3 で止まる(11b 節)
+- 同時フロー数の上限:カーネルモードでは使わない旨を起動時に 1 行出し、拒否にはしない(7b.1 節)
+
 wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動時に記録し、以後は env の値と照合する。省略した場合は既定値を照合の対象にするので、省略しても起動は止まらない。記録済みの値と食い違えば、エージェントの割り当てアドレスと矛盾するため起動を拒否し、変えるには `wgft server teardown --purge` と全エージェントの再登録が要ると案内する。
 
-インタフェース名(`WGFT_WG_INTERFACE`、既定 `wgft0`)は記録しないが、変更すると旧インタフェースが鍵ごと残ることがあるため、`wgft server check` と起動時に、自分のサーバ鍵を持つ別名の WireGuard デバイスが無いかを検査し、あれば警告する。
+インタフェース名(`WGFT_WG_INTERFACE`、既定 `wgft0`)は記録しないが、変更すると旧インタフェースが鍵ごと残ることがあるため、`wgft server check` と起動時に、自分のサーバ鍵を持つ別名の WireGuard デバイスが無いかを検査し、あれば警告する。エージェントも `WGFT_WG_INTERFACE`(`--wg-interface`、既定 `wgft0`)を読み、カーネルモードのインタフェース名に使う。ユーザー空間モードでは使わない。同じホストの同じ network namespace で `vpsd` とエージェントがどちらもカーネルモードで既定名を使うと名前が衝突するが、鍵による所有の判定(9・7b 節)が相手のインタフェースに触れずに止めるので、安全側に倒れる。
 
 環境変数とファイルに置けるのは設定だけであり、その 1 回の起動や実行にだけ意味を持つ操作はフラグでしか渡さない。対象は `--adopt-existing`、`--force`、`--purge`、`--yes`、`--dry-run` である。たとえば `WGFT_ADOPT_EXISTING=true` のような値がファイルに残ると、再起動のたびに他人の WireGuard インタフェースを引き継いでしまうためである。例外は 2 つあり、どちらも居座っても害が無いことを仕様で保証している。1 つは `WGFT_MODE` と `WGFT_WG_ADDRESS` で、初回に記録された後は照合にしか使われない。もう 1 つは `WGFT_JOIN`(エージェントの初回登録)で、これは 1 回限りの操作でありながら、compose ファイルに残ることを前提に設計してある。エージェントは使用済みの登録トークンのハッシュを状態ファイルに残し、`WGFT_JOIN` の値がそれと同じであれば登録を試みずに止まる(5.1 節)。エージェントが削除され、恒久トークンの認証が拒否された場合だけ、この値を使って再登録する。
 
@@ -2628,13 +2829,17 @@ wg のアドレス帯(`WGFT_WG_ADDRESS`、既定 `10.200.0.1/24`)も初回起動
 | 種別 | 意味 | 例 |
 |---|---|---|
 | `config` | 設定された値そのものの誤り。構文、範囲、必須の値の欠落 | `WGFT_MTU` が範囲外、初回の `WGFT_MODE` の欠落、`WGFT_JOIN` の構文の誤り |
-| `prerequisite` | ホストが備えるべきものの欠如で、再試行では現れないもの | カーネルの WireGuard モジュール、`CAP_NET_ADMIN`、新しい版が書いたサーバのデータベース、Linux でないホスト |
+| `prerequisite` | ホストが備えるべきものの欠如で、再試行では現れないもの | カーネルの WireGuard モジュール、`CAP_NET_ADMIN`、新しい版が書いたサーバのデータベース、Linux でないホスト、Linux でないホストでのエージェントの `WGFT_MODE=kernel` |
 | `conflict` | 設定された値や認証情報が、すでにある記録と矛盾するもの | 記録済みのアドレス帯との食い違い、使用済みの登録トークン、登録済みの名前 |
-| `mode-gate` | モードの切り替えの関門を通らないこと | `kernel` から `userspace` への切り替えで、wg インタフェースか `table inet wgft` が残っている |
+| `mode-gate` | モードの切り替えの関門を通らないこと | `kernel` から `userspace` への切り替えで、wg インタフェースか `table inet wgft` が残っている。エージェントでは、wg インタフェースか `table inet wgft_agent` かカーネルモードの記録が残っている |
 
 Linux 以外のビルドの `server` の一群は、種別 `prerequisite` の拒否を返す (2026-09-23、所有者の決定)。Windows と macOS のバイナリはエージェントと CLI だけを持ち、server はカーネルの WireGuard と nftables を使うので Linux でしか動かない。この前提の不成立は再試行でも再起動でも消えず、運用者が Linux のホストへ移すまで同じ結果になるので、本節の非対称の規則では拒否の側に当たる。終了コードは 3 とする。書き出しは他の拒否と同じ規則で分かれる。`server run` は常駐プロセスの起動なので `refusing to start`、`server check`・`server nft`・`server teardown`・`server doctor` は何も起動しないので `cannot continue` である。この書き分けを保つため、Linux 以外のビルドでも `server` の一群はコマンドの木の形を保ち、常駐プロセスを起動する旨の注記を持つのは `run` だけとする。一群を 1 つのコマンドに畳むと、`server run` まで一発実行の文面になる。
 
 この拒否が起きるホストには systemd が無いので、終了コード 3 が再起動を止める効果も働かない。効果は、本節の末尾が述べる macOS とコンテナの場合と同じく、運用者と監視が原因を選り分けられることにとどまる。それでも 1 にしないのは、Linux でないことが 4 つの種別のどれに当たるかという分類の問題であり、値を監督するプロセスごとに変えると分類そのものが揺れるためである。
+
+エージェントのカーネルモード(7b 節)の起動の失敗は、`vpsd` のカーネルモードと同じ種別に写す(2026-09-24、所有者の決定)。Windows と macOS のエージェントで `WGFT_MODE=kernel` を指定した場合は、上の Linux 以外のビルドの `server` と同じ理由で種別 `prerequisite` の拒否とし、終了コード 3 で止める。カーネルの WireGuard のリンク種別が無い場合と `CAP_NET_ADMIN` が無い場合も、9 節の `vpsd` と同じく `prerequisite` である。`kernel` から `userspace` への切り替えで残骸が残っている場合は `mode-gate` であり、`wgft agent teardown` を案内する(11a 節)。同名の WireGuard インタフェースが別の鍵を持つ場合は、他の所有者の資源との衝突として終了コード 1 で終わる(後述)。
+
+`wgft agent teardown` は常駐プロセスを起動しない一発実行のコマンドである。Windows と macOS では、Linux 以外のビルドの `server` の一群と同じく種別 `prerequisite` の拒否とし、`cannot continue` の書き出しで終了コード 3 で止める。エージェントが稼働中のときに何も消さずに拒否する扱いは起動の拒否ではなく、`server teardown` と同じ普通の誤りであり、終了コードは 7a.11 節の共通の保証に従って 0 以外になる。
 
 再試行で直りうる失敗は拒否にせず、普通のエラーとして終了コード 1 で返す。他の所有者が持っている資源との衝突はこちら側に入る。同名のインタフェースが別の鍵を持っている場合、他の WireGuard が `WGFT_WG_PORT` を使っている場合、他のプロセスがその UDP ポートを bind している場合、アドレス帯が他のインタフェースと重なっている場合、`net.Listen` が `EADDRINUSE` を返す場合、サーバのデータベースを他のプロセスが保持している場合が当たる。いずれも相手が資源を手放せば次の再起動で起動できる。何も書き換える前に中止する事前検査そのものは残す。半端な状態を作らないことと、再起動を止めることは別の目的である。
 
@@ -2664,7 +2869,7 @@ Linux 以外のビルドの `server` の一群は、種別 `prerequisite` の拒
 
 値だけから判定できる失敗は、wg インタフェース、待ち受け、サーバのデータベース、認証情報ファイルのいずれにも触れる前に判定する。この場所を入口と呼ぶ。server の入口は `cmd/wgft` の `buildServerOptions`、エージェントの入口は同じ package の `buildAgentOptions` である。入口を通り抜けた値が起動の後半で初めて失敗すると、そこでは環境由来の失敗と区別が付かず、終了コード 1 の再起動の繰り返しになる。この形の穴は 3 つの設定項目で続けて見つかっている(改訂の記録 2026-09-20 と 2026-09-21)。
 
-server の入口が判定する項目は次のとおりである。`WGFT_MODE` の値(`kernel` か `userspace` か)、`WGFT_DATA_DIR` が空でないこと、`WGFT_WG_INTERFACE` がカーネルの受け付ける名前であること、`WGFT_WG_PORT` が 1 から 65535 の整数であること、`WGFT_MTU` が 576 から 9216 の整数であること、`WGFT_WG_ADDRESS` が `netip.ParsePrefix` の通る形であること、`WGFT_AGENT_API` と `WGFT_ADMIN` が待ち受けられる形であること、`WGFT_WG_ENDPOINT` と `WGFT_AGENT_API_HOST` が `host:port` の形であること、`WGFT_ADMIN_TAILSCALE` が真偽値であること、同時フロー数の 4 つの上限が範囲内であること、`run` では `WGFT_WG_ENDPOINT` があることである。エージェントの入口は、`WGFT_DATA_DIR` が空でないこと、同時フロー数の上限、`WGFT_AGENT_ALLOW_TARGETS` の構文を判定する。
+server の入口が判定する項目は次のとおりである。`WGFT_MODE` の値(`kernel` か `userspace` か)、`WGFT_DATA_DIR` が空でないこと、`WGFT_WG_INTERFACE` がカーネルの受け付ける名前であること、`WGFT_WG_PORT` が 1 から 65535 の整数であること、`WGFT_MTU` が 576 から 9216 の整数であること、`WGFT_WG_ADDRESS` が `netip.ParsePrefix` の通る形であること、`WGFT_AGENT_API` と `WGFT_ADMIN` が待ち受けられる形であること、`WGFT_WG_ENDPOINT` と `WGFT_AGENT_API_HOST` が `host:port` の形であること、`WGFT_ADMIN_TAILSCALE` が真偽値であること、同時フロー数の 4 つの上限が範囲内であること、`run` では `WGFT_WG_ENDPOINT` があることである。エージェントの入口は、`WGFT_DATA_DIR` が空でないこと、同時フロー数の上限、`WGFT_AGENT_ALLOW_TARGETS` の構文を判定する。カーネルモードを加えるときに、`WGFT_MODE` の値、`WGFT_WG_INTERFACE` がカーネルの受け付ける名前であること、Linux 以外のビルドで `kernel` を指定したことを、エージェントの入口の判定に加える。
 
 値だけからは判定できない項目は次の 3 つで、判定の場所とその理由を定める。
 
@@ -2703,8 +2908,9 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - エージェント用 API の証明書ローテーション。全体状態に「次の証明書ハッシュ」を載せ、エージェントがピン留め経路で受け取ったものだけを状態ファイルに追記する方式を想定している。v1 では実装せず、秘密鍵が漏れた場合の対処は `teardown --purge` と全エージェントの再登録とする(5.1 節)
 - 拒否リストを外部のブロックリストから自動更新するか
 - 管理 UI の `public` 待ち受け(11 節)。必要になった場合の実装項目は 11 節に列挙してある
-- `agent doctor` をエージェントと同じ利用者で手軽に実行する方法。システムの利用者や `DynamicUser` で動くエージェントでは管理者の追加の操作が要る場合がある。v1.2 で決め、v1.1 では未解決とする(10.2c 節)
-- 7a.7 節と agent の実装との食い違い。7a.7 節は、reconcile を server と agent が共有し、agent が dataplane と frontend の実装から `Runtime` を組み立てると述べる。実装の `internal/agent/agent.go` は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` のいずれも使わず、userspace のトンネル(`internal/dataplane/userspace/tunnel`)と中継(`internal/dataplane/userspace/relay`)を直接駆動する。依存の向きの検査(`internal/dataplane/deps_test.go`)はこの実装でも通っており、機能上の害は無い。7a.7 節は、v1.2 の agent 側のカーネルモードの dataplane、つまり agent 側の dataplane の境界を設計するときに書き直す
+- エージェントのカーネルモードのループバックの宛先。v1.2 は拒む(7b.2 節)。要望が出たら、wgft0 に `route_localnet` を立て、DNAT を経ずにループバックを宛先とするパケットを input で捨てる方法を v1.3 で検討する。その守りの行はまだ試していない
+- server にエージェントのモードを知らせるか。v1.2 は知らせない(7b.6 節)。`server doctor` と Web UI が「リスナー」と「DNAT」を書き分けられるようになるが、wire と管理用 API への加算が要る。v1.3 で、経路の図の `listener / target` の節点の分割と一緒に見直す
+- エージェントのカーネルモードの Docker の配置。v1.2 は手順に書かない(7b.5 節)。要る権限とネットワークの設定は未確認である
 
 ## 改訂の記録
 
@@ -2942,3 +3148,4 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - UDP のルールの宛先の応答を server が受動的に観測し、診断に補足の 1 行として示すようにした(2026-09-24、所有者の決定):健全な UDP のルールの `rule.target` は NOT TESTED であり、宛先が応答しているかどうかの手掛かりを持たなかった。観測は server だけで行い、wire、ハートビート、capability を変えないので、エージェントの版とモードに依らない。ユーザー空間モードでは中継が待ち受けごとに最後の応答の時刻を 1 秒に 1 回まで記し、カーネルモードでは `table inet wgft` の UDP のルールごとの応答のカウンタを 10 秒ごとに読む。起動の後と差し替えの後の最初の読み取りは基準にしかせず、0 でない値から過去の応答の時刻を推定しない。観測はメモリだけに持ち、ルールの ID、エージェント、宛先のどれかが変わると捨てる。公開ポートとエージェントのアドレスの変化でも捨てるのは、安全側に倒すために実装で加えた条件である。観測は検査の状態、ルールの総合判定、終了コードのどれも動かさず、閾値を持たない。カウンタを読めないことは、応答が無いことと別の文と項目で示す。示す場所は、`server doctor` の人向けの出力の `rule.target` の下の 1 行、`--json` の `rule.target` の任意の項目 `last_reply_at`・`reply_since`・`reply_not_observed`、Web UI の診断の画面の `listener / target` の節点の 2 つ目の注記、管理用 API の `udp_replies` である。`rule ls` とダッシュボードのルール一覧には出さない。6.1、10.2a、10.2d、7a.11 節に書いた。TCP のルールには加えていない。ラボで確かめたことを記す。カウンタの行は、はじめ `ct original proto-dst` で公開ポートを照合していた。`nft list` はこの行を期待どおりに表示し、ゴールデンテストも通った。ところが、google/nftables v0.3.0 はこの行を読み戻せなかった。向きの属性を 4 バイトの値として解釈し、カーネルが返す 1 バイトの属性で `GetRules` が誤りを返したためである。その結果、`udp_reply` のチェーンを読む指紋の読み直しが失敗し、`server doctor` は公開ポートを FAILED と示した。行は応答の送信元ポート(`udp sport`)で照合する形に改めた。DNAT はポートを書き換えず、forward の時点では送信元の逆変換がまだ済んでいないので、同じ値になる。ゴールデンテストには、google/nftables での指紋とカウンタの読み戻しを加えた。改めた後、Debian 12(カーネル 6.1、nftables 1.0.6)のラボで次を確かめた。カーネルモードとユーザー空間モードの両方で、応答する宛先のルールは `last UDP reply seen by this server` の行と `last_reply_at` を示した。応答しない宛先のルールは NOT TESTED のまま `no UDP reply seen` の行を示し、ルールの結果は健全、終了コードは 0 だった。エージェントの許可一覧の外の宛先を持つルールでは、エージェントの netstack が返した ICMP の port unreachable が wg から forward を通ったが、そのルールの応答のカウンタは 0 のままで、`last_reply_at` は現れなかった。LAN の閉じたポートを宛先にするルールにも、応答は現れなかった。ルールを加えてテーブルを差し替えると、カウンタは 0 に戻り、既存のルールの `since` と `last_reply_at` は保たれ、差し替えの後の応答も観測できた。宛先を変えたルールは観測を捨てて始め直した。server を再起動すると、どのルールも起動の後の時刻から観測を始め直し、`last_reply_at` を持たなかった。再起動の後に送った応答は観測できた。未確認の点を挙げる。実機の server では確かめていない。ルールの規模に対する費用、つまり 1000 本規模での差し替えの時間、カウンタの読み取りの時間、応答のパケットが `udp_reply` の行を評価する費用は測っていない。LXC のような非特権のコンテナでのカウンタの読み取りも確かめていない。ルールを別のエージェントへ移す操作、分割と統合による ID の変更、公開ポートとエージェントのアドレスの変更は、単体テストだけで確かめた。宛先を変えた直後、エージェントが新しいルールを適用するまでの短い間に古い宛先が返した応答は、カーネルモードでもユーザー空間モードでも新しい観測に数えられうる。この間の長さは測っていない。差し替えの直前と直後の読み取りの間に届いた応答は数えない。この区間の長さも測っていない。エージェントのカーネルモードはまだ無いので、組み合わせは確かめていない。
 - 中継が切る TCP のセッションの netstack の側を RST で切るようにした(2026-09-24):エージェントの中継は、ポートが宣言から消えたとき(ルールの無効化と削除。5.1 節で設計したエージェントの無効化も同じ経路を通る)と、実効宛先が変わって閉じ直すときに、中継中の TCP 接続を通常の `Close` で閉じていた。エージェントが先に閉じると、netstack のエンドポイントは gVisor の既定の TIME_WAIT に 60 秒残り、相手が閉じなければ FIN_WAIT_2 にさらに長く残る。その間は同じポートで待ち受けを開けず、閉じ直したルールと、無効にした直後に有効に戻したルールは、保持が終わった後の 30 秒ごとの再試行まで転送できなかった。netstack 同士をつないだ試験で、グレースフルクローズの後は 60 秒のあいだ同じポートで待ち受けを開けないこと、`Abort` の後はすぐに開けること、新しい待ち受けに `SO_REUSEADDR` を付けても開けないことを確かめた。この経路の netstack の側の接続を、拒否と同じ `internal/nettun.TCPConn.Abort` で切るように改め、7 節を改訂した。エージェントの終了で中継を閉じるときも同じ経路を通るので、中継中のクライアントには RST が届く。7 節の「RST は既存の接続を持つ相手には送らないので、この経路は拒否にだけ使う」は、成り立たなくなったので削った。レビューで、待ち受けを閉じる間に accept された接続を見つけた。この接続は、適用が `Manager` の錠を持つ間 accept のループで待たされるので、待ち受けを閉じる処理に見えず、その後に中継へ登録されて旧い宛先へつながり、ポートを保持し続けていた。accept のループが登録の前に待ち受けが閉じたかを確かめ、閉じていれば登録せずに切るように直した。この接続は閉じ直しの bind に間に合わないことがあり、その場合の待ち受けは次の再試行で開く。宛先側の実ソケットと、セッションが自然に終わる経路(ハーフクローズ、EOF)の閉じ方は変えない。この経路でエージェントが先に閉じた接続(宛先が先に閉じる HTTP のようなセッション)は、終わった時点で中継の管理から外れるので RST で切れず、TIME_WAIT の間ポートを保持する。すぐに解放されるのは中継が切るセッションだけである。実効宛先の変更については、待ち受けを開き直さずに宛先だけを差し替える方式(`vpsd` の Prepare/Commit の経路が既に使う)にすれば、この保持の影響を受けなくなる。この変更には含めず、今後の課題とする。接続元制限の変更で切る経路(`vpsd` だけが使う)も同じ閉じ方にしたが、切る接続がホストの実ソケットなので挙動は変わらない。`vpsd` のユーザー空間モードが netstack に持つ接続は dial した側で、`Abort` を持たず待ち受けのポートも塞がないので、`vpsd` の挙動も変わらない。UDP の待ち受けは閉じた直後に同じポートで開けることを、同じ形の単体試験で確かめた。gVisor のソースでは、TCP の待ち受けのソケットは閉じるとその場でポートを解放する。ラボでは、`lab/lifecycle.sh` の check 2 に、成立済みの TCP のセッションを実効宛先の変更で切る段と、ルールの無効化とその直後の有効化で切る段を加え、どちらも 10 秒以内に転送に戻ることを確かめる。修正前のエージェントは、両モードで実効宛先の変更の段に落ち、待ち受けを開き直せなかった。無効化の段は修正前でも両モードで通り、その理由は未確認である。推測は次のとおりである。ユーザー空間モードでは、`vpsd` が公開の時点で中継を先にグレースフルに閉じるので、エージェントは後から閉じる側になり TIME_WAIT に入らない。カーネルモードでは、conntrack の収束がエントリを黙って消すので、エージェントの FIN は VPS の上で不正なパケットとして VPS 自身のスタックに届き、RST で答えられてエンドポイントが解放される。未確認:無効化の段が修正前に通る理由(上の推測)、エージェントの無効化の実装(5.1 節)で修正前の保持が起きること、accept を待つ握手済みの接続が、待ち受けを閉じたときにポートを保持しないこと、自然に終わった接続の TIME_WAIT による保持をラボで確かめること
 - エージェントの無効化と有効化の server 側を実装した(2026-09-24):5.1 節の設計のとおり、サーバのデータベースのスキーマを版 9 に上げてエージェントの行に `disabled_at` を加え、管理用 API の `POST /api/v1/agents/{name}/disable` と `POST /api/v1/agents/{name}/enable`、エージェント一覧の `disabled` と `disabled_at`、全体状態の `agent_disabled` を実装した。CLI の `agent disable` と `agent enable`、`server doctor`・`status`・`agent doctor` での扱い、Web UI は、この変更に含めていない。それらが入るまでの間、無効なエージェントのルールは、`status` と `server doctor` と Web UI では公開されていないルールとして故障に数えられ、`server doctor` の次の一手はエージェントの有効化の管理用 API を案内する。設計が実装に委ねていた点は次のように定めた。422 の本文で「何も保存しなかった」と「保存は済んだが公開していない」を区別するフィールドは `saved` とし、2 つのルートの失敗の応答がすべて持つ(7a.11 節)。全体状態に加算するフィールドの名前は `agent_disabled` とした(7a.11 節)。エージェント一覧の `disabled_at` は、同じ行の `created_at` と同じく server のローカルの時差で書く。有効化の検査に要る読み取りの失敗を 500 とすること、`rule_states` の理由で自分の無効を先に示すこと、公開できなかった世代を後から公開した経路が配ることを 5.1 節に加えた。状態が変わらない操作は、7a.11 節のとおり、保存も配信も公開もせず、200 と `changed:false` を返す。前の操作が公開できなかった世代の公開は、30 秒ごとの再試行に任せる。配信は、公開した世代が進んだときに適用の 1 か所で行うようにした。それまでは、ルールのバッチは世代を進めたときだけ配り、公開した世代の進みで配るのは再試行だけだった。そのため、公開に失敗した有効化の世代を、変更の無いバッチや削除や登録が先に公開すると、再試行が要らなくなり、エージェントはその世代を受け取らなかった。配る写しを作る処理は 1 か所にまとめ、全体状態の組み立てと、ルールのバッチが世代を進めるかどうかの比較の両方がそれを使う。2 か所が別々に写すと、配る内容が変わったのに世代が進まないことが起きうるためである。ラボで確かめたこと:kernel と userspace の両モードで、2 台のエージェントのうち 1 台を無効にすると、そのエージェントの TCP と UDP のルールとプロキシモードのルールが転送をやめ、成立済みの TCP のセッションも切れ、もう 1 台のルールは転送を続けた。ルールの保存値は変わらず、無効にしたエージェントは接続したまま、ルールを 1 本も報告しなくなった。無効の間に加えたルールは転送しなかった。server を再起動しても無効のままだった。有効化すると、各ルールは自分の `enabled` のとおりに戻り、無効の間に加えたルールも転送した。kernel モードでは、VPS 上のプロセスがルールのポートを bind している間の有効化が 422 と `saved:false` で拒まれて何も保存されないことと、他のプロセスが `table inet wgft` を保持している間の無効化が 422 と `saved:true` を返し、エージェントには届き、保持が解けた後の再試行で公開されることを確かめた。v1.1.1 の server は、版 9 のデータベースを新しすぎるとして起動を拒んだ。v1.1.1 のエージェントは、kernel モードの server から `enabled:false` の写しを受け取ってリスナーを閉じ、有効化で開き直した(TCP のルール 1 本で、手で確かめた)。分かったこと:無効化で成立済みの TCP のセッションを切った直後に有効化すると、そのルールのエージェントのリスナーは、ラボでは開くまでに 60 秒から 90 秒かかった。エージェントが中継中の netstack の接続を通常の `Close` で先に閉じるので、その端が gVisor の既定で 60 秒の TIME_WAIT に入り、相手が閉じなければ FIN_WAIT_2 に留まり、その間は同じポートで待ち受けを開けないためである。VPS がそのフローを変換しなくなってエージェントの FIN が届かないことは、この保持を長くするだけである。エージェントの側で中継中の接続を閉じると、そのポートは少なくとも 60 秒塞がる。この保持は、直前の項目の変更(中継が切る TCP の接続を RST で切る)で解消した。その変更を含むビルドで確認を流し直し、有効化の直後に、そのルールのリスナーが bind の失敗なしに開き、転送が戻ることを両モードで確かめた。未確認:無効化の配信からエージェントがリスナーを閉じるまでの時間は測っていない。旧い版のエージェントとの組み合わせは、`lab/version-skew.sh` にまだ入れていない。
+- エージェントのカーネルモードを骨格として設計した(2026-09-24、所有者の決定):エージェントは `WGFT_MODE=kernel` を明示したときだけ、カーネルの WireGuard インタフェースと `table inet wgft_agent` の DNAT で LAN の宛先へ転送する。既定は今のユーザー空間モードのままである。7b 節を新設し、2 節、7 節の冒頭と末尾、7a.2・7a.7・7a.8・7a.11 節、9・10.2c・10.3・11・11a・11b・13 節を改めた。守る意味は、カーネルモードでもユーザー空間モードと同じ「転送できる」「転送できない」を保ち、backend 全体の失敗とルール単位の失敗を混ぜないことである。ルールの失敗は 3 つの種類に分けた。許可一覧の外、名前の解決の失敗、ループバックの宛先はルール単位の失敗で、そのルールの DNAT を作らない。TCP の宛先の接続確認の失敗は `error` の報告だけで、DNAT を残して転送を続ける。テーブル全体の公開の失敗は backend 全体の失敗で、処理済み世代と `last_state` を進めずに旧いテーブルを残して試し直す。`wgft agent teardown` は、`server teardown` と同じく稼働中のエージェントに対しては何も消さずに拒む。`agent doctor` では、カーネルモードの `agent.process` の停止を FAILED のまま総合判定から外し、`dataplane.interface`、`dataplane.table`、`host.forwarding` に総合判定を動かさせることにした。ルール単位の失敗は、7b.3 節の 1 つ目と 2 つ目の種類のどちらも `dataplane.table` の FAILED として示し、リスナーの無いカーネルモードでは `relay.listeners` を NOT TESTED とする。停止中の `dataplane.table` は、`agent.json` の `LastState` と直近の公開の記録を実際のテーブルと比べ、公開すべきルールの DNAT が欠けていれば FAILED とする。指紋の完全な一致と TCP の接続確認の結果は再現できないので、一致しても OK ではなく UNKNOWN とし、終了コードは 0 のままとする。テーブル全体の公開の失敗は、旧いテーブルが転送を続けるので、`dataplane.table` の所見にとどめる。`relay.allow_targets` はカーネルモードでも一覧を示す。終了コード 1 が「このホストのエージェントが、今の状態では転送を担えない」を意味し続けるためである。FAILED にするのは `ip_forward` が 0 であるような確かな事実だけとし、他のテーブルの `policy drop` と `rp_filter` は手掛かりとして示す。停止中のエージェントを `CAP_NET_ADMIN` の無い利用者で診断してカーネルの状態を読めない場合は、層 2 の終了コード 2 とし、例外として root での実行も案内する。ホスト名の解決の結果が変わっても、成立済みのフローは切らない。停止中の `rotate-key` と撤去は 1 つ前の鍵を扱い、状態ファイルを失った場合の手順を示す。`WGFT_MODE=kernel` を既にエージェントへ渡している配置と、カーネルモードから旧い版へ戻す場合は、リリースノートで知らせる。10.2c 節の表への行の追加は、表と実装を両方向に照合するテストがあるので、実装と同じ変更で行う。内部の構造は、エージェント全体を `reconcile.Runtime` へ移さず、`internal/agent` の中に dataplane の境目を切る形にした。7a.7 節の「reconcile を server と agent が共有する」という記述は実装と食い違っていたので、事実に合わせて書き直し、13 節の同じ項目を閉じた。13 節の「`agent doctor` を同じ利用者で手軽に実行する方法」も、稼働中のエージェントが自分の実行主体を答える形で閉じた。設計の前にラボで確かめたことを記す。範囲のずらしを表す無名の連結 map の DNAT と MSS のクランプを google/nftables で組め、`nft list` の表示が `nft` コマンドで入れた場合と一致し、通信も通ったので、`nft` コマンドへの依存は要らない。PMTUD の ICMP を落とす経路では、クランプが無いと大きな TCP が両方向とも止まり、片方の向きだけのクランプでは片方の向きが止まり、両方の向きを `rt mtu` でクランプすると両方向とも通った。非 root のプロセスが `CAP_NET_ADMIN` だけを持てば、WireGuard インタフェース、nftables、conntrack、`ip_forward` のすべてを操作でき、`DynamicUser` と `CAP_NET_ADMIN` の systemd の unit でも同じだった。`ProtectKernelTunables=yes` は `ip_forward` の書き込みを止める。非特権の LXC の中でも同じ操作ができ、`ip_forward` はコンテナの network namespace に閉じてホストの値を変えなかった。コンテナの `ip_forward` の初期値はホストの値を写すので、エージェントは常に明示して書く。ホスト自身の LAN のアドレスへの DNAT は input を通って届き、サービスには VPS のトンネルアドレスが送信元として見えた。`127.0.0.1` への DNAT は既定では届かず、wgft0 に `route_localnet` を立てると届いた。ユーザー空間モードのエージェントでは、ルールの変更の後、CLI が戻った直後にはエージェントが新しい世代を報告し終えていた。`server doctor` の理由の符号 `listener_bind_failed` には、ユーザー空間モードでも利用者の操作から届く経路が見つかっていない。符号は残し、カーネルモードの公開の失敗には既存の `target_not_allowed` と `target_resolve_failed`、新しい `target_loopback_unsupported` を使う(7b.3 節)。未確認:LAN の側に小さい MTU の区間がある場合とホスト自身の LAN のアドレスへの DNAT での MSS、入る向きの SYN でも `rt mtu` が wgft0 の MTU から決まる理由、固定の `User=wgft` の unit に `CAP_NET_ADMIN` を重ねた配置そのもの、SELinux と AppArmor、Proxmox と Incus のコンテナ、WireGuard のモジュールを自動で読み込めないホスト、`rotate-key` の途中で鍵がずれた場合、プロキシモードと疎通確認が DNAT を通って届くこと、カーネルモードのエージェントでの世代の遅れ、Docker でのカーネルモード。実装はまだ無い。
