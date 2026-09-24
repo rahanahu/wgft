@@ -408,8 +408,10 @@ func TestBandOverlap(t *testing.T) {
 	}
 }
 
-// 鍵の無いインタフェースは、エージェント自身が作りかけて残したものである見込みが高いことと、
-// ip link del での消し方を示す。ドライランに空の鍵を公開鍵として出さない。
+// 鍵の無いインタフェースは、エージェントのものではなく他の道具が作ったものである見込みが高いことと、
+// ip link del での消し方と別の名前を使う道を示す。エージェントは鍵を書いてから名前を付けるので、
+// 自分の作成の途中で鍵の無いインタフェースを残さない(設計文書 7b.4 節)。ドライランに空の鍵を
+// 公開鍵として出さない。
 func TestKeylessLinkText(t *testing.T) {
 	cfg := agentCfg(t)
 	_, notes := agentDeviceDiff(&wgtypes.Device{}, cfg)
@@ -423,12 +425,41 @@ func TestKeylessLinkText(t *testing.T) {
 		}
 	}
 	s := (&NotOursError{Interface: "wgft0", Ownership: ForeignKey, Kind: "wireguard", Keyless: true, DryRun: notes}).Error()
-	for _, want := range []string{"no key", "most likely one this agent left behind", "ip link del wgft0", "WGFT_WG_INTERFACE"} {
+	for _, want := range []string{"no key", "not this agent's", "another tool", "ip link del wgft0", "WGFT_WG_INTERFACE"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("%q lacks %q", s, want)
 		}
 	}
-	if strings.Contains(s, zero.String()) || strings.ContainsAny(s, "()") {
+	if strings.Contains(s, zero.String()) || strings.ContainsAny(s, "()") || strings.Contains(s, "left behind") {
 		t.Errorf("keyless text: %q", s)
+	}
+}
+
+// 作業用の名前はカーネルの上限の 15 バイトに収まり、インタフェースの名前ごとに決まる(設計文書 7b.4 節)。
+func TestAgentStagingName(t *testing.T) {
+	a, b := AgentStagingName("wgft0"), AgentStagingName("wgft1")
+	if len(a) > 15 || len(b) > 15 {
+		t.Errorf("staging names %q and %q exceed the kernel's 15 bytes", a, b)
+	}
+	if a == b || a == "wgft0" {
+		t.Errorf("staging names %q and %q do not tell the interfaces apart", a, b)
+	}
+	if AgentStagingName("wgft0") != a {
+		t.Error("the staging name is not the same on every call")
+	}
+	// 決まった値と、CRC32 が 0 で始まる名前と、カーネルの上限いっぱいの 15 バイトの名前を確かめる。
+	// 桁を詰めない書式や、名前をそのまま付ける作り方では、この 3 つのどれかが外れる
+	for iface, want := range map[string]string{
+		"wgft0":           "wgftnew0af13fb4",
+		"wg44":            "wgftnew00aa9dde",
+		"abcdefghijklmno": "",
+	} {
+		got := AgentStagingName(iface)
+		if len(got) != 15 {
+			t.Errorf("AgentStagingName(%q) = %q, %d bytes; want exactly 15", iface, got, len(got))
+		}
+		if want != "" && got != want {
+			t.Errorf("AgentStagingName(%q) = %q, want %q", iface, got, want)
+		}
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -222,7 +223,7 @@ func TestAgentEnsureRefusesZeroKey(t *testing.T) {
 		t.Fatalf("err = %v, want a keyless *NotOursError ForeignKey", err)
 	}
 	var zero wgtypes.Key
-	if !strings.Contains(err.Error(), "left behind") || !strings.Contains(err.Error(), "ip link del "+agentIf) || strings.Contains(err.Error(), zero.String()) {
+	if !strings.Contains(err.Error(), "another tool") || !strings.Contains(err.Error(), "ip link del "+agentIf) || strings.Contains(err.Error(), zero.String()) {
 		t.Errorf("keyless text: %v", err)
 	}
 	if d := device(t, agentIf); d.PrivateKey != (wgtypes.Key{}) || len(d.Peers) != 0 {
@@ -672,5 +673,188 @@ func TestEnsureAgentUnprivileged(t *testing.T) {
 	t.Logf("child:\n%s", out)
 	if _, e := netlink.LinkByName(agentIf); e == nil {
 		t.Error("the unprivileged child created the link")
+	}
+}
+
+// 作成の途中でエージェントが落ちても、鍵を持たない wgfta0 は残らない(設計文書 7b.4 節)。子のプロセスを
+// 作成の各段で止めて SIGKILL で落とし、次の EnsureAgent が作業用の名前の残骸を消して、自分のものとして
+// wgfta0 を作ることを確かめる。落ちる前に鍵を書いた段でも書く前の段でも同じである。
+func TestAgentCreateSurvivesACrash(t *testing.T) {
+	if step := os.Getenv("WGFT_LAB_CRASH_STEP"); step != "" {
+		key, err := wgtypes.ParseKey(os.Getenv("WGFT_LAB_CRASH_KEY"))
+		if err != nil {
+			t.Fatalf("CHILD: %v", err)
+		}
+		agentStagingHook = func(s string) {
+			if s == step {
+				fmt.Println("CRASH_POINT_REACHED")
+				time.Sleep(time.Minute) // 親が SIGKILL で落とす
+			}
+		}
+		cfg := labAgentCfg(t)
+		cfg.PrivateKey = key
+		_, err = EnsureAgent(cfg)
+		t.Fatalf("CHILD: EnsureAgent returned %v instead of being killed at %s", err, step)
+	}
+	for _, step := range []string{"created", "keyed"} {
+		t.Run(step, func(t *testing.T) {
+			tmp := AgentStagingName(agentIf)
+			cleanup(agentIf, tmp)
+			defer cleanup(agentIf, tmp)
+			cfg := labAgentCfg(t)
+			cmd := exec.Command(os.Args[0], "-test.run=^TestAgentCreateSurvivesACrash$", "-test.v")
+			cmd.Env = append(os.Environ(), "WGFT_LAB_CRASH_STEP="+step, "WGFT_LAB_CRASH_KEY="+cfg.PrivateKey.String())
+			out, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			reached := make(chan bool, 1)
+			go func() {
+				b := make([]byte, 4096)
+				var got strings.Builder
+				for {
+					n, err := out.Read(b)
+					got.Write(b[:n])
+					if strings.Contains(got.String(), "CRASH_POINT_REACHED") {
+						reached <- true
+						return
+					}
+					if err != nil {
+						reached <- false
+						return
+					}
+				}
+			}()
+			select {
+			case ok := <-reached:
+				if !ok {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+					t.Fatalf("the child ended before reaching %s", step)
+				}
+			case <-time.After(30 * time.Second):
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				t.Fatalf("the child did not reach %s", step)
+			}
+			if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
+				t.Fatal(err)
+			}
+			_ = cmd.Wait()
+
+			if _, e := netlink.LinkByName(agentIf); e == nil {
+				t.Fatalf("a crash at %s left %s behind", step, agentIf)
+			}
+			if _, e := netlink.LinkByName(tmp); e != nil {
+				t.Fatalf("the crash at %s left no staging link %s: %v; the test did not stop where it meant to", step, tmp, e)
+			}
+			ensureAgent(t, cfg)
+			assertConverged(t, cfg, cfg.Server.Endpoint)
+			if _, e := netlink.LinkByName(tmp); e == nil {
+				t.Errorf("the staging link %s is still there after the next creation", tmp)
+			}
+		})
+	}
+}
+
+// 作業用の名前を他の鍵の WireGuard インタフェースか WireGuard 以外のリンクが持っていれば、触らずに
+// 作成を止める。自分の作成が残したものとは言えないためである(設計文書 7b.4 節)。
+func TestAgentCreateLeavesAForeignStagingLink(t *testing.T) {
+	tmp := AgentStagingName(agentIf)
+	cleanup(agentIf, tmp)
+	defer cleanup(agentIf, tmp)
+	makeForeign(t, tmp, "10.99.0.1/24", 0)
+	if _, err := EnsureAgent(labAgentCfg(t)); err == nil || !strings.Contains(err.Error(), "ip link del "+tmp) || !strings.Contains(err.Error(), "WGFT_WG_INTERFACE") {
+		t.Fatalf("err = %v, want a refusal that names the staging link and WGFT_WG_INTERFACE", err)
+	}
+	if _, e := netlink.LinkByName(tmp); e != nil {
+		t.Error("the foreign staging link was deleted")
+	}
+	if _, e := netlink.LinkByName(agentIf); e == nil {
+		t.Error("the link was created despite the foreign staging link")
+	}
+
+	cleanup(tmp)
+	if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: tmp}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureAgent(labAgentCfg(t)); err == nil || !strings.Contains(err.Error(), "dummy") || !strings.Contains(err.Error(), "WGFT_WG_INTERFACE") {
+		t.Fatalf("err = %v, want a refusal that names the dummy link and WGFT_WG_INTERFACE", err)
+	}
+	if _, e := netlink.LinkByName(tmp); e != nil {
+		t.Error("the non-WireGuard staging link was deleted")
+	}
+}
+
+// 作業用の名前に 1 つ前の鍵を持つリンクが残っていれば、次の作成がそれを消してから作る
+// (設計文書 7b.4 節)。停止中の rotate-key の後に、鍵を書いた段で落ちた場合に当たる。
+func TestAgentCreateClearsAStagingLinkWithThePreviousKey(t *testing.T) {
+	tmp := AgentStagingName(agentIf)
+	cleanup(agentIf, tmp)
+	defer cleanup(agentIf, tmp)
+	cfg := labAgentCfg(t)
+	prev := serverKey(t)
+	cfg.PreviousKey = prev
+	if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: tmp}}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := wgctrl.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.ConfigureDevice(tmp, wgtypes.Config{PrivateKey: &prev}); err != nil {
+		t.Fatal(err)
+	}
+	ensureAgent(t, cfg)
+	assertConverged(t, cfg, cfg.Server.Endpoint)
+	if _, e := netlink.LinkByName(tmp); e == nil {
+		t.Error("the staging link with the previous key is still there")
+	}
+}
+
+// 名前を変える前に同じ名前のリンクが現れたら、そのリンクに触れず、作業用の名前のリンクも残さずに
+// 誤りを返す(設計文書 7b.4 節)。
+func TestAgentCreateLeavesALinkThatAppearsBeforeTheRename(t *testing.T) {
+	tmp := AgentStagingName(agentIf)
+	cleanup(agentIf, tmp)
+	defer cleanup(agentIf, tmp)
+	defer func() { agentStagingHook = nil }()
+	agentStagingHook = func(s string) {
+		if s == "keyed" {
+			if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: agentIf}}); err != nil {
+				t.Errorf("create the dummy %s: %v", agentIf, err)
+			}
+		}
+	}
+	if _, err := EnsureAgent(labAgentCfg(t)); err == nil || !strings.Contains(err.Error(), "rename") {
+		t.Fatalf("err = %v, want the rename failure", err)
+	}
+	if l, e := netlink.LinkByName(agentIf); e != nil || l.Type() != "dummy" {
+		t.Errorf("the dummy %s was touched: %v", agentIf, e)
+	}
+	if _, e := netlink.LinkByName(tmp); e == nil {
+		t.Error("the staging link was left behind after the failed rename")
+	}
+}
+
+// 鍵の無い wgfta0 は他の道具が作ったものとして示し、作業用の名前のリンクを作らない(設計文書 7b.4 節)。
+func TestAgentKeylessLinkIsNotOursAndCreatesNoStaging(t *testing.T) {
+	tmp := AgentStagingName(agentIf)
+	cleanup(agentIf, tmp)
+	defer cleanup(agentIf, tmp)
+	if err := netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: agentIf}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := EnsureAgent(labAgentCfg(t))
+	var notOurs *NotOursError
+	if !errors.As(err, &notOurs) || !notOurs.Keyless || !strings.Contains(err.Error(), "another tool") {
+		t.Fatalf("err = %v, want the keyless not-ours error", err)
+	}
+	if _, e := netlink.LinkByName(tmp); e == nil {
+		t.Error("a staging link was created while the interface exists")
 	}
 }
