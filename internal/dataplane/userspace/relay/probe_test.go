@@ -251,10 +251,13 @@ func TestTargetReachabilityIsLoggedOnChangeOnly(t *testing.T) {
 		}
 		return n
 	}
-	targetPort := freePort(t) // まだ誰も listen していないので接続は拒まれる
-	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(targetPort)))
+	// 待ち受けを先に押さえてから、まだ誰も listen していないポートを target に選ぶ(接続は拒まれる)。
+	// 逆の順では、freePort が閉じた番号を reserveTCP がそのまま受け取ることがあり、target が自分自身の
+	// 待ち受けになって「繋がらない」の確かめが成り立たない
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
+	targetPort := freePort(t)
+	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(targetPort)))
 	m := New(lb, Options{Logf: func(f string, a ...any) {
 		mu.Lock()
 		lines = append(lines, fmt.Sprintf(f, a...))
