@@ -22,8 +22,8 @@ import (
 // 配らないが、無効化だけがこの点で例外になる。公開に失敗したら、保存は済んでいるので
 // *admin.AgentChangeError(Saved が真)を返す。30 秒ごとの再試行(retryOnce)が公開する。
 //
-// 既に無効なら何も保存せず、配信もしないが、公開は試みる。前の無効化が公開に失敗したままでも、
-// もう一度の無効化がその公開を試し直し、結果を返せるようにするためである(ルールのバッチと同じ)。
+// 既に無効なら、何も保存せず、配らず、公開もせず、Changed を偽にして成功を返す(仕様 7a.11 節)。
+// 前の無効化が公開に失敗したままなら、その公開は 30 秒ごとの再試行が行う。
 func (d *Daemon) DisableAgent(name string) (admin.AgentDisabledResponse, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -35,11 +35,13 @@ func (d *Daemon) DisableAgent(name string) (admin.AgentDisabledResponse, error) 
 		return admin.AgentDisabledResponse{}, fmt.Errorf("saving agent %s as disabled: %w", name, err)
 	}
 	out := admin.AgentDisabledResponse{Name: name, Disabled: true, Changed: res.Changed, Generation: res.Generation}
-	if res.Changed {
-		d.lag.serverAt(res.Generation, time.Now())
-		log.Printf("disabled agent %s at generation %d", name, res.Generation)
-		d.pushAll()
+	if !res.Changed {
+		return out, nil
 	}
+	d.lag.serverAt(res.Generation, time.Now())
+	log.Printf("disabled agent %s at generation %d", name, res.Generation)
+	d.pushedAhead = res.Generation
+	d.pushAll()
 	if err := d.applyNFT(res.Rules); err != nil {
 		log.Printf("agent %s: disable saved, but applying the data plane failed: %v", name, err)
 		return out, &admin.AgentChangeError{Saved: true, Err: fmt.Errorf(
@@ -55,12 +57,12 @@ func (d *Daemon) DisableAgent(name string) (admin.AgentDisabledResponse, error) 
 // 検査が拒んだら何も保存せず、*admin.AgentChangeError(Saved が偽)を返す。検査のための読み取りの
 // 失敗は拒否ではないので、ふつうの誤り(500)にする。
 //
-// 順序は、保存の確定、dataplane への公開、公開が成功したときだけ配信である。公開に失敗したら配らず、
-// *admin.AgentChangeError(Saved が真)を返す。30 秒ごとの再試行が公開した時点で reapply が配る。
-// 公開に失敗している間、VPS とエージェントの両方が止まったままなので安全側である。
+// 順序は、保存の確定、dataplane への公開、公開が成功したときだけ配信である。配信は、公開した世代が
+// 進んだときに apply が行う。公開に失敗したら配らず、*admin.AgentChangeError(Saved が真)を返す。
+// その世代を後から公開した経路(30 秒ごとの再試行や、別のバッチ)で apply が配る。公開に失敗して
+// いる間、VPS とエージェントの両方が止まったままなので安全側である。
 //
-// 既に有効なら検査も保存もしないが、公開は試みる。前の有効化が公開に失敗したままなら、この公開が
-// その世代を初めて公開しうるので、公開した世代が動いたときも配る。
+// 既に有効なら、検査も保存も配信も公開もせず、Changed を偽にして成功を返す(仕様 7a.11 節)。
 func (d *Daemon) EnableAgent(name string) (admin.AgentDisabledResponse, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -101,18 +103,15 @@ func (d *Daemon) EnableAgent(name string) (admin.AgentDisabledResponse, error) {
 		return admin.AgentDisabledResponse{}, fmt.Errorf("saving agent %s as enabled: %w", name, err)
 	}
 	out := admin.AgentDisabledResponse{Name: name, Disabled: false, Changed: res.Changed, Generation: res.Generation}
-	if res.Changed {
-		d.lag.serverAt(res.Generation, time.Now())
-		log.Printf("enabled agent %s at generation %d", name, res.Generation)
+	if !res.Changed {
+		return out, nil
 	}
-	before := d.activeGeneration()
+	d.lag.serverAt(res.Generation, time.Now())
+	log.Printf("enabled agent %s at generation %d", name, res.Generation)
 	if err := d.applyNFT(res.Rules); err != nil {
 		log.Printf("agent %s: enable saved, but applying the data plane failed: %v", name, err)
 		return out, &admin.AgentChangeError{Saved: true, Err: fmt.Errorf(
 			"saved: agent %s is enabled in the server database, but the change is not published yet: %w; the server retries every 30s and delivers the rules to the agent once published", name, err)}
-	}
-	if res.Changed || d.activeGeneration() != before {
-		d.pushAll()
 	}
 	return out, nil
 }
@@ -124,7 +123,7 @@ func enableConflict(agent string, rules []proto.Rule, rep *linux.Report, bound l
 		if rules[i].Agent != agent {
 			continue
 		}
-		if err := ruleConflict(&rules[i], rep, bound, "free the port, then enable the agent again"); err != nil {
+		if err := ruleConflict(&rules[i], rep, bound, "risk of locking out SSH etc.; free the port and enable the agent again"); err != nil {
 			return err
 		}
 	}

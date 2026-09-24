@@ -2697,13 +2697,11 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
   echo "-- enable home"
   out=$(api POST /api/v1/agents/home/enable)
   check "enable answers 200 with the state changed" '"disabled":false,"changed":true' "$out"
-  # A's listener on the agent can take up to about 90 seconds to come back. The disable cut the
-  # long-lived session above on both sides, and the agent's FIN for it never reaches the client
-  # (the VPS no longer translates that flow), so the agent's netstack keeps the closed connection
-  # on 10.200.0.2:39970 until it gives up retransmitting. Until then the listener's bind fails
-  # with "port is in use", and the agent's 30-second listener retry opens it once the port is
-  # free (seen in the lab: 60 to 90 seconds after the cut). The other rules had no session open.
-  must_wait "check11: A forwards again" 120 tcp_probe_ok 39970
+  # The disable cut A's live session on the agent as well. The agent aborts the netstack side of
+  # such a session (design 7), so A's port is free at once and its listener opens again on the
+  # enable, without a bind failure and a 30-second retry.
+  must_wait "check11: A forwards again" 15 tcp_probe_ok 39970
+  absent "the agent reopens A's listener without a bind failure" "listener tcp/39970: bind" "$(grep 'listener tcp/39970' $W/wgft-lifecycle-c11-home.log)"
   must_wait "check11: C forwards again" 15 udp_probe_ok 27002
   must_wait "check11: P forwards again" 15 tcp_probe_ok 39972
   must_wait "check11: D, added while disabled, forwards" 15 tcp_probe_ok 39973

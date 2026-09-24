@@ -197,31 +197,37 @@ func (d *Daemon) retryOnce() {
 
 // reapply は SQLite の宣言を再試行として適用する(前回と同じものを公開するだけなら commit しない)。
 // 管理者の変更が backend 全体の失敗で公開できなかった場合、その変更はエージェントにも配られていない
-// (admin_backend.go の Batch は適用の失敗で配信を省く)。再試行がその世代を公開したら、ここで配る。
+// (admin_backend.go の Batch は適用の失敗で配信を省く)。再試行がその世代を公開したら、apply が配る。
 func (d *Daemon) reapply() {
 	rules, err := d.st.Rules()
 	if err != nil {
 		d.logConverge(fmt.Sprintf("applying the rules again: %v", err))
 		return
 	}
-	before := d.rec.Status().ActiveGeneration
 	if _, err := d.apply(rules, true); err != nil {
 		d.logConverge(fmt.Sprintf("applying the rules again: %v", err))
 		return
 	}
 	d.logConverge("")
-	if d.rec.Status().ActiveGeneration != before && d.hub != nil {
-		go d.hub.PushAll()
-	}
 }
 
 // apply はすべての適用の経路が通る 1 点である。呼び出し側は d.mu を持つ。適用が成功したら、起動の
 // 保留のループにそれを伝える(hold.go の noteApplied)。管理用 API のバッチ操作も自分で適用を試すので、
 // この 1 点で伝えることで、運用者が宣言を直した時点で保留が解ける(設計文書 11b 節)。
+//
+// 公開した世代(ActiveGeneration)が進んだら、接続中の全エージェントへ配るのもこの 1 点である。
+// 公開に失敗した変更(ルールのバッチ、エージェントの有効化)はエージェントに配られていないので、
+// その世代を後から公開した経路が、再試行でも、別のバッチでも、削除や登録や鍵の宣言でも、ここで配る。
+// 呼び出し側ごとに配ると、変更の無いバッチのような経路が前の世代を公開したときに配り漏れる。
+// 無効化は公開の前に配る(仕様 5.1 節)ので、その世代(pushedAhead)の公開では配り直さない。
 func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error) {
+	before := d.activeGeneration()
 	out, err := d.applyOnce(rules, retry)
 	if err == nil {
 		d.noteApplied()
+		if gen := d.activeGeneration(); gen != before && gen != d.pushedAhead {
+			d.pushAll()
+		}
 	}
 	return out, err
 }
@@ -507,13 +513,13 @@ func (d *Daemon) checkRule(r *proto.Rule, rep *linux.Report, force bool) error {
 	if err != nil {
 		return fmt.Errorf("checking bound ports: %w", err)
 	}
-	return boundConflict(r, bound, force, "override with --force")
+	return boundConflict(r, bound, force, "risk of locking out SSH etc., override with --force")
 }
 
 // ruleConflict は checkRule と同じ検査を、読み取り済みの他テーブルの検査と bind 中のポートに対して行う。
 // エージェントの有効化(仕様 5.1 節)は、読み取りの失敗(500)と検査の拒否(422)を分けるため、
 // 読み取りを先に済ませてからこれを呼ぶ。有効化は force の上書きを持たないので、bind 中のポートの
-// 拒否には hint として上書き以外の直し方を添える。
+// 拒否の後半(hint)には上書き以外の直し方を書く。
 func ruleConflict(r *proto.Rule, rep *linux.Report, bound linux.Bound, hint string) error {
 	if !r.Enabled || r.VPSMode != proto.ModeKernel {
 		return nil
@@ -534,7 +540,7 @@ func dnatConflict(r *proto.Rule, rep *linux.Report) error {
 func boundConflict(r *proto.Rule, bound linux.Bound, force bool, hint string) error {
 	if c := bound.Conflicts(r.Proto, r.ListenPort); len(c) > 0 && !force {
 		for port, addrs := range c {
-			return fmt.Errorf("rule %s: %s/%d is bound by a process on the VPS at %v; risk of locking out SSH etc., %s", r.ID, r.Proto, port, addrs, hint)
+			return fmt.Errorf("rule %s: %s/%d is bound by a process on the VPS at %v; %s", r.ID, r.Proto, port, addrs, hint)
 		}
 	}
 	return nil

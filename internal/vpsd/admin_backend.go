@@ -64,7 +64,8 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 		info := admin.AgentInfo{Name: a.Name, Address: a.Address.String(), PublicKey: a.PublicKey,
 			RegisteredFrom: a.RegisteredFrom, CreatedAt: a.CreatedAt.Format(time.RFC3339), Disabled: a.Disabled()}
 		if a.Disabled() {
-			info.DisabledAt = a.DisabledAt.UTC().Format(time.RFC3339)
+			// created_at と同じく server のローカルの時差で書く(同じ行のタイムスタンプを揃える)
+			info.DisabledAt = a.DisabledAt.Format(time.RFC3339)
 		}
 		// ハートビートの状態と遅れの始まりは、hub の hookLock の中で組として読む。別々に読むと、
 		// ハートビートが状態を更新した後、遅れの始まりを記録する前の途中を読み、古い世代なのに
@@ -263,9 +264,7 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 		log.Printf("rules: %s: applying the data plane failed: %v", opOrAPI(req.Op), err)
 		return nil, err
 	}
-	if res.Changed {
-		go d.hub.PushAll()
-	}
+	// 配信は apply が、公開した世代が進んだときに行う
 	return res, nil
 }
 

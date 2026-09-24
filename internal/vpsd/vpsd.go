@@ -256,6 +256,9 @@ type Daemon struct {
 	// onPushAll は単体テスト用の差し込み口。pushAll(agent_disable.go)が hub への配信の代わりに呼ぶ。
 	// エージェントの無効化と有効化の、保存・配信・公開の順序を確かめるために使う。本番では nil。
 	onPushAll func()
+	// pushedAhead は、公開の前に配った世代である。無効化は公開の成否を待たずに配る(仕様 5.1 節)ので、
+	// apply はこの世代を公開したときに配り直さない。
+	pushedAhead uint64
 }
 
 // reservedPorts は Daemon.reserved を組む。vpsd 自身が既に使っているポートへの listen_port を

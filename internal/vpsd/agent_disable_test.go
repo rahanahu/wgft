@@ -143,7 +143,7 @@ func newDisableFixture(t *testing.T) *disableFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := log.take(); len(got) != 1 || got[0] != "publish r_a,r_c,r_o" {
+	if got := log.take(); !sameEvents(got, "publish r_a,r_c,r_o", "deliver") {
 		t.Fatalf("first apply = %v", got)
 	}
 	return &disableFixture{d: d, st: st, dp: dp, p: p, log: log}
@@ -195,8 +195,8 @@ func TestDisableAndEnableOrderAndEffect(t *testing.T) {
 	if err != nil || res.Changed || res.Generation != 2 || !res.Disabled {
 		t.Errorf("second disable = %+v, %v", res, err)
 	}
-	if got := f.log.take(); !sameEvents(got, "publish r_o") {
-		t.Errorf("second disable events = %v, want only the publication attempt", got)
+	if got := f.log.take(); len(got) != 0 {
+		t.Errorf("second disable events = %v, want none", got)
 	}
 
 	res, err = f.d.EnableAgent("home")
@@ -214,8 +214,72 @@ func TestDisableAndEnableOrderAndEffect(t *testing.T) {
 	if err != nil || res.Changed || res.Generation != 3 {
 		t.Errorf("second enable = %+v, %v", res, err)
 	}
+	if got := f.log.take(); len(got) != 0 {
+		t.Errorf("second enable events = %v, want none", got)
+	}
+}
+
+// An operation that changes nothing answers success with changed false and does nothing else, even
+// while the data plane cannot publish: no save, no delivery and no publication (design.md 7a.11
+// 節). Publishing what an earlier operation left unpublished is the 30s retry's job.
+func TestUnchangedDisableAndEnableDoNothing(t *testing.T) {
+	f := newDisableFixture(t)
+	f.p.setErr(errors.New("netlink: no buffer space available"))
+	res, err := f.d.EnableAgent("home")
+	if err != nil || res != (admin.AgentDisabledResponse{Name: "home", Generation: 1}) {
+		t.Errorf("enable of an enabled agent = %+v, %v; want success, unchanged", res, err)
+	}
+	if got := f.log.take(); len(got) != 0 {
+		t.Errorf("enable of an enabled agent: events %v, want none", got)
+	}
+
+	if _, err := f.d.DisableAgent("home"); err == nil {
+		t.Fatal("the disable must report the failed publication")
+	}
+	f.log.take()
+	res, err = f.d.DisableAgent("home")
+	if err != nil || res != (admin.AgentDisabledResponse{Name: "home", Disabled: true, Generation: 2}) {
+		t.Errorf("disable of a disabled agent, publication still failing = %+v, %v; want success, unchanged", res, err)
+	}
+	if got := f.log.take(); len(got) != 0 {
+		t.Errorf("disable of a disabled agent: events %v, want none", got)
+	}
+}
+
+// A generation an earlier failed enable left unpublished is delivered by whichever apply publishes
+// it, not only by the retry: here a batch that changes nothing. Before the delivery was made in one
+// place, that batch published the enable, cleared the need to retry, and home never received it.
+func TestLaterPublicationDeliversAFailedEnable(t *testing.T) {
+	f := newDisableFixture(t)
+	if _, err := f.d.DisableAgent("home"); err != nil {
+		t.Fatal(err)
+	}
+	f.log.take()
+	f.p.setErr(errors.New("netlink: no buffer space available"))
+	_, err := f.d.EnableAgent("home")
+	var ce *admin.AgentChangeError
+	if !errors.As(err, &ce) || !ce.Saved {
+		t.Fatalf("enable = %v, want saved-not-published", err)
+	}
+	f.log.take()
+
+	f.p.setErr(nil)
+	res, err := f.d.Batch(admin.BatchRequest{})
+	if err != nil || res.Changed {
+		t.Fatalf("empty batch = %+v, %v", res, err)
+	}
+	if got := f.log.take(); !sameEvents(got, "publish r_a,r_c,r_o", "deliver") {
+		t.Errorf("empty batch events = %v, want the enable published and delivered", got)
+	}
+	if st, _ := f.d.ApplyStatus(); st.ActiveGeneration != 3 {
+		t.Errorf("active generation = %d, want 3", st.ActiveGeneration)
+	}
+	// Nothing is left to deliver: another empty batch publishes the same generation and stays quiet.
+	if _, err := f.d.Batch(admin.BatchRequest{}); err != nil {
+		t.Fatal(err)
+	}
 	if got := f.log.take(); !sameEvents(got, "publish r_a,r_c,r_o") {
-		t.Errorf("second enable events = %v, want no delivery", got)
+		t.Errorf("second empty batch events = %v, want no delivery", got)
 	}
 }
 
@@ -249,11 +313,11 @@ func TestDisableAndEnablePublishFailure(t *testing.T) {
 	if a, _ := f.st.AgentByName("home"); !a.Disabled() {
 		t.Error("the disable must stay saved")
 	}
-	// The retry publishes it.
+	// The retry publishes it, and does not deliver it a second time.
 	f.p.setErr(nil)
 	f.d.retryOnce()
-	if got := f.log.take(); len(got) < 1 || got[0] != "publish r_o" {
-		t.Errorf("retry events = %v, want the disabled agent's rules left out", got)
+	if got := f.log.take(); !sameEvents(got, "publish r_o") {
+		t.Errorf("retry events = %v, want the disabled agent's rules left out and no second delivery", got)
 	}
 
 	f.p.setErr(errors.New("netlink: no buffer space available"))
@@ -264,14 +328,11 @@ func TestDisableAndEnablePublishFailure(t *testing.T) {
 	if got := f.log.take(); !sameEvents(got, "publish failed") {
 		t.Errorf("events = %v, want no delivery after a failed publication", got)
 	}
-	// A retried enable that publishes delivers, although the state no longer changes.
+	// The retry publishes it and delivers it then.
 	f.p.setErr(nil)
-	res, err := f.d.EnableAgent("home")
-	if err != nil || res.Changed {
-		t.Fatalf("retried enable = %+v, %v", res, err)
-	}
+	f.d.retryOnce()
 	if got := f.log.take(); !sameEvents(got, "publish r_a,r_c,r_o", "deliver") {
-		t.Errorf("retried enable events = %v, want the delivery once published", got)
+		t.Errorf("retry events = %v, want the delivery once published", got)
 	}
 }
 
@@ -280,6 +341,16 @@ func TestDisableAndEnablePublishFailure(t *testing.T) {
 // the same as in a batch. A failure to read what the checks need is not a refusal.
 func TestEnableRunsTheWriteTimeChecks(t *testing.T) {
 	f := newDisableFixture(t)
+	if _, err := f.d.DisableAgent("home"); err != nil {
+		t.Fatal(err)
+	}
+	f.log.take()
+
+	// Another agent's port is bound: only the enabled agent's own rules are checked.
+	f.dp.bound = linux.Bound{proto.UDP: {3000: {netip.MustParseAddr("0.0.0.0")}}}
+	if _, err := f.d.EnableAgent("home"); err != nil {
+		t.Fatalf("enable with only another agent's port bound = %v", err)
+	}
 	if _, err := f.d.DisableAgent("home"); err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +373,8 @@ func TestEnableRunsTheWriteTimeChecks(t *testing.T) {
 	if !errors.As(err, &ce) || ce.Saved {
 		t.Fatalf("enable with r_a's port bound = %v, want refused with nothing saved", err)
 	}
-	if !strings.Contains(err.Error(), "refused to enable agent home; nothing changed: rule r_a: tcp/25565 is bound") ||
+	if !strings.HasPrefix(err.Error(), "refused to enable agent home; nothing changed: rule r_a: tcp/25565 is bound") ||
+		!strings.HasSuffix(err.Error(), "; risk of locking out SSH etc.; free the port and enable the agent again") ||
 		strings.Contains(err.Error(), "--force") {
 		t.Errorf("message = %q", err.Error())
 	}
@@ -410,6 +482,10 @@ func TestCheckConnectivityRefusesADisabledAgentsRule(t *testing.T) {
 
 // The agent list carries disabled always and disabled_at only for a disabled agent.
 func TestAgentsListDisabled(t *testing.T) {
+	// A zone other than UTC, so that a timestamp written in UTC stands out against created_at.
+	savedLocal := time.Local
+	time.Local = time.FixedZone("JST", 9*60*60)
+	t.Cleanup(func() { time.Local = savedLocal })
 	f := newDisableFixture(t)
 	if _, err := f.d.DisableAgent("home"); err != nil {
 		t.Fatal(err)
@@ -432,6 +508,12 @@ func TestAgentsListDisabled(t *testing.T) {
 			at, _ := a["disabled_at"].(string)
 			if _, err := time.Parse(time.RFC3339, at); err != nil || strings.Contains(at, ".") {
 				t.Errorf("home disabled_at = %q, want seconds RFC3339", at)
+			}
+			// the same offset convention as created_at in the same object: both are written in the
+			// server's local zone, so under a zone other than UTC neither ends in Z
+			created, _ := a["created_at"].(string)
+			if strings.HasSuffix(at, "Z") != strings.HasSuffix(created, "Z") || at[len(at)-6:] != created[len(created)-6:] {
+				t.Errorf("disabled_at %q and created_at %q use different offsets", at, created)
 			}
 		case "other":
 			if v, ok := a["disabled"]; !ok || v != false {

@@ -143,6 +143,10 @@ func applyNextStep(reason string) string {
 		return "another process on this VPS holds that port. In userspace mode the server binds every listen port, and a port inside " +
 			"net.ipv4.ip_local_port_range, 32768-60999 by default, can be taken by any outbound connection or its TIME_WAIT. Move the " +
 			"listen port outside that range, or reserve it with net.ipv4.ip_local_reserved_ports. The server retries every 30s."
+	case strings.HasPrefix(reason, "agent ") && strings.HasSuffix(reason, " is disabled"):
+		// The rule's agent is disabled (design.md 5.1 節). rule enable would change nothing, so this
+		// case comes before the rule's own "disabled" below.
+		return "enable the agent the reason names; the admin API route is POST /api/v1/agents/<agent>/enable"
 	case strings.Contains(reason, "disabled"):
 		return "enable it: wgft rule enable <rule>"
 	case strings.Contains(reason, "not registered") || strings.Contains(reason, "unregistered"):
