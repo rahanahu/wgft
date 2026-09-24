@@ -2625,6 +2625,20 @@ print('' if v is None or v == [] else v)
     [ "$(agent_json home rules)" = "${1:-}" ]
   }
   tcp_refused() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 10 - TCP:198.51.100.1:$1" 2>&1)" != *tcp-echo* ]]; }
+  # vps_port_bound <tcp|udp> <port>: true if the VPS itself has a real socket bound to <port> -
+  # the userspace-mode counterpart of the kernel-mode "table inet wgft has no line for ..." check
+  # below, since userspace mode has no nftables table to read (internal/vpsd's userspace Backend
+  # never touches the kernel firewall; its relay listens on real host sockets instead -
+  # internal/dataplane/userspace/userspace.go's hostNetwork.ListenTCP/ListenUDP bind with plain
+  # net.Listen("tcp4"/"udp4", ...) in the vps network namespace, so this is directly observable
+  # with ss, not an indirect probe through the client). "tail -n +2" skips ss's header instead of
+  # matching on the state word in the row, which differs between LISTEN for tcp and UNCONN for a
+  # bound udp socket - the same idiom lab/upgrade.sh's own port_listening uses.
+  vps_port_bound() {
+    local flag=tln
+    [ "$1" = udp ] && flag=uln
+    vps ss "-$flag" "( sport = :$2 )" 2>/dev/null | tail -n +2 | grep -q .
+  }
 
   # A long-lived TCP session through A, to show that disable also cuts established flows.
   client "python3 -c '
@@ -2652,6 +2666,11 @@ s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\
     absent "table inet wgft has no line for C" "27002" "$table"
     absent "table inet wgft has no line for P" "39972" "$table"
     check "table inet wgft keeps O" "39971" "$table"
+  else
+    okcheck "the VPS relay no longer listens on A's port (tcp)" "$(vps_port_bound tcp 39970 && echo 0 || echo 1)"
+    okcheck "the VPS relay no longer listens on C's port (udp)" "$(vps_port_bound udp 27002 && echo 0 || echo 1)"
+    okcheck "the VPS relay no longer listens on P's port (tcp)" "$(vps_port_bound tcp 39972 && echo 0 || echo 1)"
+    okcheck "the VPS relay still listens on O's port (tcp)" "$(vps_port_bound tcp 39971 && echo 1 || echo 0)"
   fi
   strcheck "the stored enabled of every rule is unchanged" "A=True B=False C=True P=True" "$(stored_enabled)"
   check "A is not_active with the disabled agent named" "not_active" "$(rule_state_field "$ra" apply_state)"
@@ -2803,6 +2822,13 @@ print(by.get('$1', {}).get('detail', ''))
   must_wait "check11: C forwards again" 15 udp_probe_ok 27002
   must_wait "check11: P forwards again" 15 tcp_probe_ok 39972
   must_wait "check11: D, added while disabled, forwards" 15 tcp_probe_ok 39973
+  if [ "$mode" = userspace ]; then
+    # Direct-state counterpart of the probe-based checks just above (this mode's version of the
+    # kernel-mode "table inet wgft" re-check pattern; see vps_port_bound's own comment above).
+    must_wait "check11: the VPS relay listens on A's port again (tcp)" 15 vps_port_bound tcp 39970
+    must_wait "check11: the VPS relay listens on C's port again (udp)" 15 vps_port_bound udp 27002
+    must_wait "check11: the VPS relay listens on P's port again (tcp)" 15 vps_port_bound tcp 39972
+  fi
 
   echo "-- wgft agent doctor on home itself after the enable (design 10.2c)"
   out=$(ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" 2>&1); rcode=$?
