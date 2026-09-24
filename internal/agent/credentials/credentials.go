@@ -126,7 +126,7 @@ func (f *Credentials) Save(path string) error {
 	// (os.CreateTemp してから締め直すのでは、締め直すまでの間に別の利用者がハンドルを開けて
 	// しまう、緩い ACL のままの期間ができ、後から DACL を締めても取り消せない。レビュー指摘、仕様 11a 節)。
 	// Unix では os.CreateTemp そのもので、作成の瞬間から 0600 であることに変わりはない。
-	tmp, err := createSecureTemp(dir, ".wgft-credentials-*")
+	tmp, err := createSecureTemp(dir, tempPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("create temp credentials file: %w", err)
 	}
@@ -151,6 +151,9 @@ func (f *Credentials) Save(path string) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return err
+	}
+	if saveBeforeRenameHook != nil {
+		saveBeforeRenameHook(tmpName)
 	}
 	return os.Rename(tmpName, path)
 }
