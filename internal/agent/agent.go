@@ -228,6 +228,7 @@ func (rt *runtime) serve(ctx context.Context, errc <-chan error, tick <-chan tim
 			if err := rt.retryPending(); err != nil {
 				return err
 			}
+			rt.observe()
 			rt.mu.Lock()
 			rt.dp.refresh()
 			rt.mu.Unlock()
@@ -284,6 +285,39 @@ func (rt *runtime) reportFatal(err error) {
 	select {
 	case rt.fatal <- err:
 	default:
+	}
+}
+
+// observe は 30 秒ごとの見直しである(仕様 7b.2・7b.4 節)。dataplane が observer でなければ何もしない。
+// 名前の解決は rt.mu の外で行い、その間に処理済みの全体状態が変わったか、公開できなかった全体状態の
+// 試し直しを待っていれば、解決の結果を捨てる。古い宣言の解決の結果で新しい公開を上書きしないため
+// である。試し直しを待つ間の公開は、試し直しが担う。記録が変わったら、認証情報ファイルを保存し、
+// 次の 30 秒を待たずにハートビートを送らせる。
+func (rt *runtime) observe() {
+	ob, ok := rt.dp.(observer)
+	if !ok {
+		return
+	}
+	rt.mu.Lock()
+	st := rt.f.LastState
+	busy := st == nil || rt.pendingSt != nil || !rt.dp.built()
+	rt.mu.Unlock()
+	if busy {
+		return
+	}
+	prepared := ob.observePrepare(st.Rules)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.f.LastState != st || rt.pendingSt != nil || !rt.dp.built() {
+		return
+	}
+	saved, err := ob.observeCommit(st.Generation, st.Rules, prepared)
+	if err != nil || !saved {
+		return
+	}
+	notifyNonBlocking(rt.stateNotify)
+	if err := rt.f.Save(rt.opts.CredentialsPath); err != nil {
+		log.Printf("save credentials file after the 30-second check: %v", err)
 	}
 }
 

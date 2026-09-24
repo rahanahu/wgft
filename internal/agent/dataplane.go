@@ -68,6 +68,16 @@ type preparer interface {
 	prepareApply(st *proto.State) any
 }
 
+// observer は、30 秒ごとに実際の状態を宣言と比べ直す dataplane である。カーネルモードの実装だけが
+// 持つ(仕様 7b.2 節の名前の解決し直し、7b.4 節の外からの変更)。見直しは 2 つに分かれる。
+// observePrepare は名前の解決だけを行い、rt.mu の外で呼ぶ。DNS を待つ間に排他を持たないためである。
+// observeCommit は rt.mu を持って呼び、observePrepare の結果で公開し直すかを決める。saved が真なら
+// 呼び出し側が認証情報ファイルを保存する。
+type observer interface {
+	observePrepare(rules []proto.AgentRule) any
+	observeCommit(gen uint64, rules []proto.AgentRule, prepared any) (saved bool, err error)
+}
+
 // startupChecker は、起動時に stream へ繋ぐ前に行う検査を持つ dataplane である。カーネルモードの
 // 実装だけが持つ(仕様 7b.4 節の所有の判定)。誤りを返せば起動は失敗し、*startup.Refusal なら
 // 終了コード 3、他は 1 で終わる。
