@@ -299,6 +299,14 @@ func (b *fakeBackend) JoinString(name string) (admin.JoinStringResponse, error) 
 
 func (b *fakeBackend) Revoke(name string) error { return nil }
 
+func (b *fakeBackend) DisableAgent(name string) (admin.AgentDisabledResponse, error) {
+	return admin.AgentDisabledResponse{Name: name, Disabled: true}, nil
+}
+
+func (b *fakeBackend) EnableAgent(name string) (admin.AgentDisabledResponse, error) {
+	return admin.AgentDisabledResponse{Name: name}, nil
+}
+
 func (b *fakeBackend) Warnings() ([]admin.Warning, error) {
 	return []admin.Warning{sampleWarning()}, nil
 }

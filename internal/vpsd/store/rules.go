@@ -71,7 +71,8 @@ type BatchResult struct {
 
 // ApplyBatch はルール集合の変更を 1 トランザクションで行う(仕様 5.4 節)。
 // mutate は現在の集合を受け取り、変更後の集合を返す。検証は変更後の全体に対して行い、
-// エージェントごとに配る内容(agentView)に差があれば世代を 1 だけ上げる。
+// エージェントごとに配る内容(agentView。無効なエージェントのルールは enabled:false の写し)に
+// 差があれば世代を 1 だけ上げる。
 // 接続元制限だけの変更では世代は上がらない。
 func (s *Store) ApplyBatch(reserved proto.Reserved, mutate func(rules []proto.Rule) ([]proto.Rule, error)) (*BatchResult, error) {
 	tx, err := s.db.Begin()
@@ -98,7 +99,13 @@ func (s *Store) ApplyBatch(reserved proto.Reserved, mutate func(rules []proto.Ru
 	if err != nil {
 		return nil, err
 	}
-	changed := !reflect.DeepEqual(agentView(before), agentView(after))
+	// 比べるのは配る写しである(仕様 5.1 節)。無効なエージェントのルールは enabled:false として
+	// 配るので、そのルールの enabled だけを切り替えるバッチは配る内容を変えず、世代を進めない
+	disabled, err := disabledAgentsTx(tx)
+	if err != nil {
+		return nil, err
+	}
+	changed := !reflect.DeepEqual(agentView(before, disabled), agentView(after, disabled))
 	if changed {
 		gen++
 		if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -135,10 +142,13 @@ func (s *Store) ApplyBatch(reserved proto.Reserved, mutate func(rules []proto.Ru
 // 各エージェントの中の並び順は保存の順のままにする。全体状態のルールの並びも同じ順であり、
 // 並べ替えは配る内容の変化として扱う。map の値は必ず 1 要素以上を持つので、nil と空スライスの
 // 区別が比較に混ざることはない。
-func agentView(rules []proto.Rule) map[string][]proto.AgentRule {
+//
+// 各行は保存値ではなく配る写し(DeliveredRule)にする。disabled は無効なエージェントの名前の集合で、
+// そのエージェントのルールは enabled:false の写しになる(仕様 5.1 節)。
+func agentView(rules []proto.Rule, disabled map[string]bool) map[string][]proto.AgentRule {
 	out := make(map[string][]proto.AgentRule, len(rules))
 	for i := range rules {
-		out[rules[i].Agent] = append(out[rules[i].Agent], rules[i].ForAgent())
+		out[rules[i].Agent] = append(out[rules[i].Agent], DeliveredRule(&rules[i], disabled[rules[i].Agent]))
 	}
 	return out
 }

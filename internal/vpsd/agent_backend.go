@@ -19,7 +19,7 @@ func (d *Daemon) Register(joinToken, name, from string) (string, string, netip.A
 	if err != nil {
 		return "", "", netip.Addr{}, err
 	}
-	// アドレスが決まったので、この名前のルール(無効化中は行を持たなかった)を nftables に戻す
+	// アドレスが決まったので、この名前のルール(削除の後は行を持たなかった)を nftables に戻す
 	if rules, err := d.st.Rules(); err == nil {
 		if err := d.applyNFT(rules); err != nil {
 			log.Printf("applying nftables after registration: %v", err)

@@ -36,8 +36,13 @@ type Backend interface {
 	RuleDrops() (map[string]uint64, error)
 	// JoinString は名前に紐付いた接続文字列を発行する(仕様 5.1 節)。
 	JoinString(name string) (JoinStringResponse, error)
-	// Revoke は恒久トークンを無効化し、ピアとアドレスを回収する(仕様 11 節)。
+	// Revoke はエージェントを削除する。恒久トークンを使えなくし、ピアとアドレスを回収する(仕様 5.1、11 節)。
 	Revoke(name string) error
+	// DisableAgent はエージェントを無効にし、EnableAgent は有効に戻す(仕様 5.1 節)。不明な名前は
+	// store.ErrAgentNotFound(404)、書き込みの時の検査の拒否と、保存は済んだが公開に失敗した場合は
+	// *AgentChangeError(422)、それ以外の誤りは 500 になる。
+	DisableAgent(name string) (AgentDisabledResponse, error)
+	EnableAgent(name string) (AgentDisabledResponse, error)
 	// Warnings は窃取検知の警告一覧。
 	Warnings() ([]Warning, error)
 	// DismissWarning は警告を消す(管理者が正当と確認したとき。仕様 5.2 節)。ip-mismatch では
@@ -124,6 +129,30 @@ type JoinStringResponse struct {
 	ExpiresAt  string `json:"expires_at"`
 }
 
+// AgentDisabledResponse は、エージェントの無効化と有効化(POST /api/v1/agents/{name}/disable と
+// /enable)の成功の応答である(設計文書 5.1、7a.11 節)。状態が変わらない操作も成功で、Changed が false になる。
+type AgentDisabledResponse struct {
+	Name string `json:"name"`
+	// Disabled は操作の後の状態。
+	Disabled bool `json:"disabled"`
+	// Changed は状態が変わったか。変わったときだけ世代が進む。
+	Changed bool `json:"changed"`
+	// Generation は操作の後の世代。
+	Generation uint64 `json:"generation"`
+}
+
+// AgentChangeError は、エージェントの無効化と有効化が 422 で終わる 2 つの場合を表す
+// (設計文書 5.1、7a.11 節)。Saved が false なら有効化の書き込みの時の検査が拒み、何も保存していない。
+// true なら保存は済んだが、dataplane への公開に失敗した。server の 30 秒ごとの再試行が公開する。
+// 管理用 API は Saved を応答の本文の saved として返し、Client はそれをこの型に戻す。
+type AgentChangeError struct {
+	Saved bool
+	Err   error
+}
+
+func (e *AgentChangeError) Error() string { return e.Err.Error() }
+func (e *AgentChangeError) Unwrap() error { return e.Err }
+
 // BatchRequest はルールの追加・変更・削除をまとめて行う(仕様 5.4 節)。
 type BatchRequest struct {
 	Upsert []proto.Rule `json:"upsert"` // ID があれば置き換え、なければ追加
@@ -187,6 +216,11 @@ func ApplyBatchToRules(rules []proto.Rule, req BatchRequest) ([]proto.Rule, erro
 // ErrorBody は失敗時の本文。
 type ErrorBody struct {
 	Error string `json:"error"`
+	// Saved は、エージェントの無効化と有効化(POST /api/v1/agents/{name}/disable と /enable)の
+	// 失敗の応答(404、422、500)だけが持つ(設計文書 7a.11 節)。true は、変更をサーバのデータベースに
+	// 保存したが、まだ公開していないことを表す(422)。false は何も保存していないことを表す。
+	// 他のルートの失敗では省く。
+	Saved *bool `json:"saved,omitempty"`
 }
 
 // Server は管理用 API の HTTP ハンドラ。
@@ -205,6 +239,8 @@ func New(backend Backend) *Server {
 	s.mux.HandleFunc("GET /api/v1/agents", s.getAgents)
 	s.mux.HandleFunc("POST /api/v1/agents/join-string", s.postJoinString)
 	s.mux.HandleFunc("DELETE /api/v1/agents/{name}", s.deleteAgent)
+	s.mux.HandleFunc("POST /api/v1/agents/{name}/disable", s.postDisableAgent)
+	s.mux.HandleFunc("POST /api/v1/agents/{name}/enable", s.postEnableAgent)
 	s.mux.HandleFunc("GET /api/v1/warnings", s.getWarnings)
 	s.mux.HandleFunc("POST /api/v1/agents/{name}/dismiss-warning", s.postDismissWarning)
 	s.mux.HandleFunc("GET /api/v1/agents/{name}/state", s.getAgentState)
@@ -385,6 +421,35 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) postDisableAgent(w http.ResponseWriter, r *http.Request) {
+	s.agentChange(w, r, s.backend.DisableAgent)
+}
+
+func (s *Server) postEnableAgent(w http.ResponseWriter, r *http.Request) {
+	s.agentChange(w, r, s.backend.EnableAgent)
+}
+
+// agentChange はエージェントの無効化と有効化の応答を組み立てる(設計文書 5.1、7a.11 節)。
+// リクエストの本文は読まない。失敗の本文は必ず saved を持ち、何も保存しなかったのか、保存は
+// 済んだが公開していないのかを、誤りの文言に頼らず区別できるようにする。
+func (s *Server) agentChange(w http.ResponseWriter, r *http.Request, op func(string) (AgentDisabledResponse, error)) {
+	res, err := op(r.PathValue("name"))
+	if err == nil {
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+	saved := false
+	status := http.StatusInternalServerError
+	var ce *AgentChangeError
+	switch {
+	case errors.Is(err, store.ErrAgentNotFound):
+		status = http.StatusNotFound
+	case errors.As(err, &ce):
+		status, saved = http.StatusUnprocessableEntity, ce.Saved
+	}
+	writeJSON(w, status, ErrorBody{Error: err.Error(), Saved: &saved})
 }
 
 func (s *Server) getWarnings(w http.ResponseWriter, r *http.Request) {

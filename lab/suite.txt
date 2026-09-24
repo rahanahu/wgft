@@ -64,6 +64,7 @@ parallel         yes  lifecycle.sh kernel 8
 # 20 of 20 in a pool of 8 beside the rest of this file's parallel jobs, so it now runs in the pool.
 parallel         yes  lifecycle.sh kernel 9
 parallel         yes  lifecycle.sh kernel 10
+parallel         yes  lifecycle.sh kernel 11
 
 parallel         yes  lifecycle.sh userspace 1
 parallel         yes  lifecycle.sh userspace 2
@@ -80,6 +81,7 @@ parallel         yes  lifecycle.sh userspace 7
 parallel         yes  lifecycle.sh userspace 8
 parallel         yes  lifecycle.sh userspace 9
 parallel         yes  lifecycle.sh userspace 10
+parallel         yes  lifecycle.sh userspace 11
 
 exclusive-heavy  yes  rates.sh kernel
 exclusive-heavy  yes  rates.sh userspace

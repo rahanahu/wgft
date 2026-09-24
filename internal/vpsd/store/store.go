@@ -55,7 +55,7 @@ var migrations = []string{
 		expires_at INTEGER NOT NULL,
 		used_at    INTEGER              -- UNIX seconds once used
 	)`,
-	// v4:既知エンドポイント IP 集合(仕様 5.2 節)。エージェントの無効化で一緒に消す
+	// v4:既知エンドポイント IP 集合(仕様 5.2 節)。エージェントの削除で一緒に消す
 	`CREATE TABLE agent_known_ips (
 		agent    TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
 		ip       TEXT NOT NULL,
@@ -84,7 +84,7 @@ var migrations = []string{
 	`DROP TABLE IF EXISTS agent_known_ips;
 	ALTER TABLE agents DROP COLUMN stream_blocked`,
 	// v8:ip-mismatch の確認済みの組(仕様 5.2 節)。警告を消したときに、その 2 つの IP の組を
-	// 正当と確認した記録として残す。エージェントの無効化で一緒に消す
+	// 正当と確認した記録として残す。エージェントの削除で一緒に消す
 	`CREATE TABLE warning_acks (
 		agent      TEXT NOT NULL,
 		kind       TEXT NOT NULL,
@@ -93,6 +93,12 @@ var migrations = []string{
 		created_at INTEGER NOT NULL,
 		PRIMARY KEY (agent, kind, stream_ip, wg_ip)
 	)`,
+	// v9:エージェントの無効化(仕様 5.1 節)。NULL は有効、値は無効にした時刻。既存の行は NULL、
+	// つまり有効のまま移る。版を上げるのは、旧い版の server がこの印を読み飛ばして無効な
+	// エージェントの転送を再開しないよう、データベースを新しすぎるとして起動を拒ませるためである。
+	// 値は UNIX 秒。ALTER TABLE の末尾に SQL のコメントを書くと、SQLite が表の定義を書き直すときに
+	// 列の定義の続きとして読み、incomplete input で失敗するので、説明はここに置く
+	`ALTER TABLE agents ADD COLUMN disabled_at INTEGER`,
 }
 
 // sqliteFileURI builds a "file:" URI for path with the given query string, for

@@ -253,6 +253,9 @@ type Daemon struct {
 	// afterMismatchAcksRead は単体テスト用の差し込み口。judgeIPMismatch が確認済みの組を読んだ
 	// 直後に呼ぶ。本番では nil。
 	afterMismatchAcksRead func()
+	// onPushAll は単体テスト用の差し込み口。pushAll(agent_disable.go)が hub への配信の代わりに呼ぶ。
+	// エージェントの無効化と有効化の、保存・配信・公開の順序を確かめるために使う。本番では nil。
+	onPushAll func()
 }
 
 // reservedPorts は Daemon.reserved を組む。vpsd 自身が既に使っているポートへの listen_port を
@@ -492,7 +495,7 @@ func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
 	if err != nil {
 		return err
 	}
-	_, agentAddr, err := d.agents()
+	_, agentAddr, _, err := d.agents()
 	if err != nil {
 		return err
 	}
@@ -548,19 +551,26 @@ func (d *Daemon) listenAdmin(ctx context.Context, errc chan<- error) error {
 	return nil
 }
 
-// agents は SQLite のエージェントから、wg のピア集合と名前 → アドレスの表を作る。
+// agents は SQLite のエージェントから、wg のピア集合と名前 → アドレスの表と、無効なエージェントの
+// 名前の集合を作る。
 // 公開鍵が未宣言(stream に一度も来ていない)のエージェントはアドレスだけ持ち、ピアにはならない。
 // dataplane.Peer を直接返すので、両方の Backend の dataplane.WGConfig にそのまま渡せる
 // (design.md 7a.8 節 Phase 3: カーネル固有の wg.Peer への変換は kernelDataplane の役目ではなくなった)。
-func (d *Daemon) agents() ([]dataplane.Peer, map[string]netip.Addr, error) {
+// 無効なエージェントもピアとアドレスを持ち続ける(仕様 5.1 節)。転送を止めるのは、そのルールを
+// Plan から外す buildPlan と、enabled:false の写しを配る AgentState である。
+func (d *Daemon) agents() ([]dataplane.Peer, map[string]netip.Addr, map[string]bool, error) {
 	list, err := d.st.Agents()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var peers []dataplane.Peer
 	addr := make(map[string]netip.Addr, len(list))
+	disabled := map[string]bool{}
 	for _, a := range list {
 		addr[a.Name] = a.Address
+		if a.Disabled() {
+			disabled[a.Name] = true
+		}
 		if a.PublicKey == "" {
 			continue
 		}
@@ -571,7 +581,7 @@ func (d *Daemon) agents() ([]dataplane.Peer, map[string]netip.Addr, error) {
 		}
 		peers = append(peers, dataplane.Peer{PublicKey: key, Address: a.Address})
 	}
-	return peers, addr, nil
+	return peers, addr, disabled, nil
 }
 
 // newHub は stream の hub を作り、Daemon が受け取る接続とハートビートの事象をつなぐ。backend は

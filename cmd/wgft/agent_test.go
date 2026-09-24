@@ -37,7 +37,13 @@ func (b *fakeAgentBackend) RuleDrops() (map[string]uint64, error)   { return nil
 func (b *fakeAgentBackend) JoinString(string) (admin.JoinStringResponse, error) {
 	return admin.JoinStringResponse{}, nil
 }
-func (b *fakeAgentBackend) Revoke(string) error                         { return nil }
+func (b *fakeAgentBackend) Revoke(string) error { return nil }
+func (b *fakeAgentBackend) DisableAgent(string) (admin.AgentDisabledResponse, error) {
+	return admin.AgentDisabledResponse{}, nil
+}
+func (b *fakeAgentBackend) EnableAgent(string) (admin.AgentDisabledResponse, error) {
+	return admin.AgentDisabledResponse{}, nil
+}
 func (b *fakeAgentBackend) Warnings() ([]admin.Warning, error)          { return nil, nil }
 func (b *fakeAgentBackend) DismissWarning(string, string, string) error { return nil }
 func (b *fakeAgentBackend) IPMismatchAcks() ([]store.Ack, error)        { return nil, nil }

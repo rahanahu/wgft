@@ -36,6 +36,13 @@ type State struct {
 	// *[]string にしてあるのは Message.Capabilities と同じ理由(空配列と不在の区別)
 	ServerProtocolVersion *int      `json:"server_protocol_version,omitempty"`
 	ServerCapabilities    *[]string `json:"server_capabilities,omitempty"`
+
+	// AgentDisabled は、server がこのエージェントを無効にしていることを示す(仕様 5.1 節)。無効の間、
+	// Rules はすべて enabled:false の写しで届く。エージェントが止まるのはその enabled:false による
+	// ものであり、このフィールドはエージェント自身の診断のためだけにある。守りには使わない。
+	// 加算のフィールドで、有効なら省く。旧い版のエージェントは読み飛ばす(Go の encoding/json は
+	// 構造体に無いフィールドを無視する。仕様 7a.6 節)ので、版と機能の交渉は要らない
+	AgentDisabled bool `json:"agent_disabled,omitempty"`
 }
 
 // ForAgent はエージェントに配る部分だけを取り出す。

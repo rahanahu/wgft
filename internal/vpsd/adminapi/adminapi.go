@@ -38,6 +38,11 @@ type AgentInfo struct {
 	PublicKey      string `json:"public_key,omitempty"`
 	RegisteredFrom string `json:"registered_from"`
 	CreatedAt      string `json:"created_at"`
+	// Disabled はエージェントが無効か(設計文書 5.1、7a.11 節)。常に持つ。旧い版の server は返さない
+	// ので、読み手は不在を false と読む。旧い版の server は無効化を持たないので、その読みは正しい
+	Disabled bool `json:"disabled"`
+	// DisabledAt は無効にした時刻(RFC3339)。有効なエージェントでは省く
+	DisabledAt string `json:"disabled_at,omitempty"`
 	// stream
 	Connected     bool   `json:"connected"`
 	StreamFrom    string `json:"stream_from,omitempty"`

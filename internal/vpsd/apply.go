@@ -26,7 +26,7 @@ import (
 // 消す順序で収束させる(設計文書 7a.3 節)。宣言のピアは、所有判定で中止するときのドライランの
 // 表示にだけ使う。
 func (d *Daemon) bringUpWG() error {
-	cfg, _, err := d.wgConfig()
+	cfg, _, _, err := d.wgConfig()
 	if err != nil {
 		return err
 	}
@@ -45,15 +45,16 @@ func (d *Daemon) bringUpWG() error {
 	return nil
 }
 
-// wgConfig は SQLite の宣言から WireGuard の宣言(ピア集合を含む)と、エージェント名からアドレスへの表を作る。
-func (d *Daemon) wgConfig() (*dataplane.WGConfig, map[string]netip.Addr, error) {
-	peers, agentAddr, err := d.agents()
+// wgConfig は SQLite の宣言から WireGuard の宣言(ピア集合を含む)と、エージェント名からアドレスへの表と、
+// 無効なエージェントの名前の集合を作る。
+func (d *Daemon) wgConfig() (*dataplane.WGConfig, map[string]netip.Addr, map[string]bool, error) {
+	peers, agentAddr, disabled, err := d.agents()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	return &dataplane.WGConfig{
 		PrivateKey: d.serverKey, ListenPort: int(d.opts.WGPort), Address: d.network, MTU: d.opts.MTU, Peers: peers,
-	}, agentAddr, nil
+	}, agentAddr, disabled, nil
 }
 
 // reconciler は Runtime を動かす Reconciler を返す(設計文書 7a.2、7a.3 節)。frontend はプロキシモードの
@@ -228,7 +229,7 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 // applyOnce は applyNFT の本体。retry が真なら、前回と同じものを公開するだけのときに何も commit せず、
 // ログも出さない。
 func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, error) {
-	wgCfg, agentAddr, err := d.wgConfig()
+	wgCfg, agentAddr, disabled, err := d.wgConfig()
 	if err != nil {
 		return reconcile.Outcome{}, err
 	}
@@ -236,7 +237,7 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 	if err != nil {
 		return reconcile.Outcome{}, err
 	}
-	plan, excluded := d.buildPlan(rules, agentAddr)
+	plan, excluded := d.buildPlan(rules, agentAddr, disabled)
 	plan.Generation = gen
 	out, err := d.reconciler().Reconcile(reconcile.Input{Plan: plan, WG: wgCfg, Excluded: excluded, Retry: retry})
 	if err != nil {
@@ -270,8 +271,10 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 		}
 	}
 	d.logRepair(out.Committed, retry)
+	// 数と入力の塞がりの提示は、転送する宣言だけを対象にする。無効なエージェントのルールは転送しない
+	effective := effectiveRules(rules, disabled)
 	active := 0
-	for _, r := range rules {
+	for _, r := range effective {
 		if r.Enabled && r.VPSMode == proto.ModeKernel {
 			active++
 		}
@@ -283,9 +286,25 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 			nft.TableName, len(rules), active, len(agentAddr), len(wgCfg.Peers))
 	}
 	if d.proxy != nil {
-		d.proxyInputHints(rules)
+		d.proxyInputHints(effective)
 	}
 	return out, nil
+}
+
+// effectiveRules は、無効なエージェント(仕様 5.1 節)のルールの Enabled を false にした写しを返す。
+// 保存値には触れない。disabled が空なら rules をそのまま返す。
+func effectiveRules(rules []proto.Rule, disabled map[string]bool) []proto.Rule {
+	if len(disabled) == 0 {
+		return rules
+	}
+	out := make([]proto.Rule, len(rules))
+	copy(out, rules)
+	for i := range out {
+		if disabled[out[i].Agent] {
+			out[i].Enabled = false
+		}
+	}
+	return out
 }
 
 // logRepair は、Commit か修復の再試行(dataplane の Repair)が戻れない地点の後に行ったことをログに
@@ -421,9 +440,14 @@ func (d *Daemon) proxyInputHints(rules []proto.Rule) {
 // 無効な行)は書き込みの検査を通らないので現れないはずだが、現れたらログに出して Plan から外す。
 // 世代(Plan.Generation)は呼び出し側が入れる。
 //
-// excluded は、Plan が転送しないルール(無効、エージェントが未登録、写せない行)と、その理由である。
-// 管理用 API はこれらを理由付きの not_active として示す(設計文書 7a.3 節)。
-func (d *Daemon) buildPlan(rules []proto.Rule, agentAddr map[string]netip.Addr) (planner.Plan, map[string]string) {
+// excluded は、Plan が転送しないルール(無効、エージェントが無効、エージェントが未登録、写せない行)と、
+// その理由である。管理用 API はこれらを理由付きの not_active として示す(設計文書 7a.3 節)。
+//
+// disabled は無効なエージェントの名前の集合である(仕様 5.1 節)。そのエージェントのルールは、
+// 保存値の enabled に関わらず Plan から外す。外したルールは、ルール自身の無効化と同じ経路で止まる
+// (DNAT と中継の待ち受けが消え、conntrack の収束が成立済みのフローを切る)。理由は、ルール自身が
+// 無効なら従来どおり "disabled" を先に示す。直す操作が違う(rule enable か agent enable か)ためである。
+func (d *Daemon) buildPlan(rules []proto.Rule, agentAddr map[string]netip.Addr, disabled map[string]bool) (planner.Plan, map[string]string) {
 	normalized := make([]model.Rule, 0, len(rules))
 	excluded := map[string]string{}
 	for _, r := range rules {
@@ -439,6 +463,9 @@ func (d *Daemon) buildPlan(rules []proto.Rule, agentAddr map[string]netip.Addr) 
 		// Forwarding を問わず一様に記録する(設計文書 7a.8 節 Phase 3)。
 		if !m.Enabled {
 			excluded[m.ID] = "disabled"
+		} else if disabled[m.Agent] {
+			m.Enabled = false
+			excluded[m.ID] = fmt.Sprintf("agent %q is disabled", m.Agent)
 		} else if _, ok := agentAddr[m.Agent]; !ok {
 			log.Printf("rule %s: agent %q is not registered, skipping", m.ID, m.Agent)
 			excluded[m.ID] = fmt.Sprintf("agent %q is not registered", m.Agent)
@@ -473,16 +500,41 @@ func (d *Daemon) checkRule(r *proto.Rule, rep *linux.Report, force bool) error {
 	if !r.Enabled || r.VPSMode != proto.ModeKernel {
 		return nil
 	}
-	if c := rep.DNATConflicts(r.Proto, r.ListenPort); len(c) > 0 {
-		return fmt.Errorf("rule %s: %s/%s overlaps the DNAT in %s: %s", r.ID, r.Proto, r.ListenPort, c[0].Where, c[0].Ports)
+	if err := dnatConflict(r, rep); err != nil {
+		return err
 	}
 	bound, err := d.dp.BoundPorts()
 	if err != nil {
 		return fmt.Errorf("checking bound ports: %w", err)
 	}
+	return boundConflict(r, bound, force, "override with --force")
+}
+
+// ruleConflict は checkRule と同じ検査を、読み取り済みの他テーブルの検査と bind 中のポートに対して行う。
+// エージェントの有効化(仕様 5.1 節)は、読み取りの失敗(500)と検査の拒否(422)を分けるため、
+// 読み取りを先に済ませてからこれを呼ぶ。有効化は force の上書きを持たないので、bind 中のポートの
+// 拒否には hint として上書き以外の直し方を添える。
+func ruleConflict(r *proto.Rule, rep *linux.Report, bound linux.Bound, hint string) error {
+	if !r.Enabled || r.VPSMode != proto.ModeKernel {
+		return nil
+	}
+	if err := dnatConflict(r, rep); err != nil {
+		return err
+	}
+	return boundConflict(r, bound, false, hint)
+}
+
+func dnatConflict(r *proto.Rule, rep *linux.Report) error {
+	if c := rep.DNATConflicts(r.Proto, r.ListenPort); len(c) > 0 {
+		return fmt.Errorf("rule %s: %s/%s overlaps the DNAT in %s: %s", r.ID, r.Proto, r.ListenPort, c[0].Where, c[0].Ports)
+	}
+	return nil
+}
+
+func boundConflict(r *proto.Rule, bound linux.Bound, force bool, hint string) error {
 	if c := bound.Conflicts(r.Proto, r.ListenPort); len(c) > 0 && !force {
 		for port, addrs := range c {
-			return fmt.Errorf("rule %s: %s/%d is bound by a process on the VPS at %v; risk of locking out SSH etc., override with --force", r.ID, r.Proto, port, addrs)
+			return fmt.Errorf("rule %s: %s/%d is bound by a process on the VPS at %v; risk of locking out SSH etc., %s", r.ID, r.Proto, port, addrs, hint)
 		}
 	}
 	return nil
