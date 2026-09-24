@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/netip"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -147,13 +146,10 @@ func applyNextStep(reason string) string {
 	case strings.HasPrefix(reason, "agent ") && strings.HasSuffix(reason, " is disabled"):
 		// 無効なエージェントのルールは、Diagnose が agent.enabled の agent_disabled として先に
 		// 扱うので、普段はここに来ない。来るのは、ルールの読み取りとエージェントの読み取りの間に
-		// エージェントが有効化された場合だけである。その場合も rule enable は何も変えないので、
-		// 下のルール自身の "disabled" より先に判定する(設計文書 5.1、10.2a 節)。
-		name := strings.TrimSuffix(strings.TrimPrefix(reason, "agent "), " is disabled")
-		if unq, err := strconv.Unquote(name); err == nil {
-			name = unq
-		}
-		return "enable the agent: wgft agent enable " + name
+		// エージェントが有効化された場合だけである。エージェントは既に有効なので agent enable は
+		// 案内せず、読み直しを勧める。rule enable も何も変えないので、下のルール自身の
+		// "disabled" より先に判定する(設計文書 5.1、10.2a 節)。
+		return "the agent may have just been enabled while this command read the evidence; run it again"
 	case strings.Contains(reason, "disabled"):
 		return "enable it: wgft rule enable <rule>"
 	case strings.Contains(reason, "not registered") || strings.Contains(reason, "unregistered"):

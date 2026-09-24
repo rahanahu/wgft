@@ -1287,25 +1287,26 @@ agent is counted apart as disabled, never as healthy, degraded or unknown,
 since being disabled is a declared state: the healthy ratio leaves it out, and
 the value adds the count after it, such as "2 / 2 healthy, 1 disabled".
 
-Rules counts the enabled rules as active, degraded or unknown, out of the
-total; a disabled rule is not counted against the total, since being disabled
-is a declared state, not a fault. A rule counts as active only when the
-server has published it and its agent's freshest report says it can reach
-the target: the server publishing a rule is not evidence that the agent is
-actually forwarding it, since the agent can still refuse the target on its
+Rules counts the enabled rules as active, degraded, unknown or agent disabled,
+out of the total; a disabled rule is not counted against the total, since
+being disabled is a declared state, not a fault. A rule counts as active only
+when the server has published it and its agent's freshest report says it can
+reach the target: the server publishing a rule is not evidence that the agent
+is actually forwarding it, since the agent can still refuse the target on its
 own, such as WGFT_AGENT_ALLOW_TARGETS or a listener bind failure. A rule
 counts as degraded when the server reports it pending or not_active, or when
 its agent's freshest report is an error. A rule counts as unknown when the
 server reports nothing about it, reports a state this build does not
 recognize, or its agent has not freshly reported it, including a report left
-over from before the agent's connection dropped. Once any rule is degraded or
-unknown, the value spells out all three counts against the total, such as
-"5 active, 2 degraded, 1 unknown / 8"; when every rule is active it just says
-"8 active". An enabled rule whose agent is disabled counts as agent disabled,
-not as degraded, and stays in the total, such as "5 active, 3 agent disabled
-/ 8". A rule whose agent is not registered still counts as degraded. Warnings reads a count of open theft-detection warnings, or
-"none"; the added line also says how long ago each one was raised, when the
-server reports that.
+over from before the agent's connection dropped. An enabled rule whose agent
+is disabled counts as agent disabled, not as degraded; a rule whose agent is
+not registered still counts as degraded. Once any rule is degraded, unknown
+or agent disabled, the value spells out every non-zero count against the
+total, such as "5 active, 2 degraded, 1 unknown / 8" or "5 active, 3 agent
+disabled / 8"; when every rule is active it just says "8 active".
+
+Warnings reads a count of open theft-detection warnings, or "none"; the added
+line also says how long ago each one was raised, when the server reports that.
 
 When a line is healthy, it holds nothing more than that: no generation
 number, apply state string or endpoint. A degraded or unknown line gets one
