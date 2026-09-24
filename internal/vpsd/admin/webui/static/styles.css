@@ -229,6 +229,11 @@ a.small-btn { display: inline-flex; align-items: center; justify-content: center
 .agent-rule-list li { padding: 6px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); overflow-wrap: anywhere; }
 .agent-rule-list .rule-note { max-width: none; }
 .agent-rule-list a { color: var(--text); font-weight: 600; }
+.option-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+/* 未登録のエージェントの帯。故障ではないので警告の色にしない(設計文書 10.1 節) */
+.neutral-alert { background: var(--neutral-bg); }
+.neutral-alert .alert-icon { color: var(--muted); font-style: italic; font-family: serif; }
+.orphan-band form { margin: 0; }
 .entity-link { color: inherit; text-decoration: none; }
 .entity-link:hover { text-decoration: underline; }
 .cidr-list { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; max-width: 480px; }

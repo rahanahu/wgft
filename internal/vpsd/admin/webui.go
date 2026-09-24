@@ -74,18 +74,24 @@ func (s *Server) registerUI() {
 	s.mux.HandleFunc("POST /ui/agents/{name}/disable", s.uiAgentDisable)
 	s.mux.HandleFunc("POST /ui/agents/{name}/enable", s.uiAgentEnable)
 	s.mux.HandleFunc("POST /ui/agents/{name}/revoke", s.uiRevoke)
+	s.mux.HandleFunc("POST /ui/agents/{name}/delete-rules", s.uiDeleteOrphanRules)
 	s.mux.HandleFunc("POST /ui/agents/{name}/dismiss-warning", s.uiDismissWarning)
 }
 
 // ---- ビューモデル(ダッシュボード) ----
 
 type dashData struct {
-	Locale       string
-	Server       serverView
-	Health       healthView
-	Agents       []agentView
-	RuleGroups   []ruleGroupView
-	RuleCount    int
+	Locale     string
+	Server     serverView
+	Health     healthView
+	Agents     []agentView
+	RuleGroups []ruleGroupView
+	RuleCount  int
+	// Orphans は、ルールが残っている未登録のエージェントごとの帯である(設計文書 10.1 節)。名前の順に並ぶ。
+	Orphans []orphanView
+	// RulesDigest は一覧を組み立てたルール集合全体のハッシュ(proto.RulesDigest)である。帯の一括削除の
+	// フォームが送り返し、server はそれと違う集合からは何も削除しない。
+	RulesDigest  string
 	Warnings     []warnView
 	Generation   uint64
 	FirewallText string
@@ -139,6 +145,33 @@ type ruleGroupView struct {
 	Label      string
 	Rules      []ruleView
 	ErrorCount int
+}
+
+// orphanView は未登録のエージェントの帯 1 本である。Count はそのエージェントを参照するルールの本数で、
+// 一括削除のフォームがそのまま送り返す。server は本数が変わっていれば削除しない。
+type orphanView struct {
+	Agent string
+	Count int
+}
+
+// orphansOf は、登録されていないエージェントを参照するルールを、エージェントごとに数える。
+func orphansOf(rules []proto.Rule, agents []AgentInfo) []orphanView {
+	known := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		known[a.Name] = true
+	}
+	counts := map[string]int{}
+	for _, r := range rules {
+		if !known[r.Agent] {
+			counts[r.Agent]++
+		}
+	}
+	out := make([]orphanView, 0, len(counts))
+	for name, n := range counts {
+		out = append(out, orphanView{Agent: name, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Agent < out[j].Agent })
+	return out
 }
 
 type warnView struct {
@@ -196,6 +229,10 @@ func (s *Server) buildDash(locale string, withRules bool) (dashData, error) {
 	}
 	if !withRules {
 		return d, nil
+	}
+	d.Orphans = orphansOf(rules, agents)
+	if len(d.Orphans) > 0 {
+		d.RulesDigest = proto.RulesDigest(rules)
 	}
 	var ruleErrors int
 	d.RuleGroups, ruleErrors = groupRules(rules, drops, locale, d.Server.Mode, gen, buildAgentIndex(agents), in.Rules.RuleStates, dashMarks(rules, in, locale))

@@ -7,6 +7,23 @@
     <a class="small-btn" href="/ui/rules/import">{{ T .Locale "importRules" }}</a>
   </div>
 </div>
+{{/* 未登録のエージェントの帯。ルールが残っている未登録のエージェントごとに 1 本出す。故障ではないので
+     警告の色にしない(設計文書 10.1 節) */}}
+{{ $loc := .Locale }}
+{{ range .Orphans }}
+<article class="alert neutral-alert orphan-band">
+  <div class="alert-icon" aria-hidden="true">i</div>
+  <div class="alert-body">
+    <strong>{{ printf (T $loc "orphanBandFmt") .Agent .Count }}</strong>
+    <p>{{ T $loc "orphanBandHelp" }}</p>
+    <form autocomplete="off" method="post" action="/ui/agents/{{ .Agent }}/delete-rules" data-confirm="{{ printf (T $loc "confirmOrphanDelete") .Agent .Count }}">
+      <input type="hidden" name="count" value="{{ .Count }}">
+      <input type="hidden" name="rules_digest" value="{{ $.RulesDigest }}">
+      <button class="btn danger-outline" type="submit">{{ T $loc "orphanDelete" }}</button>
+    </form>
+  </div>
+</article>
+{{ end }}
 <div class="table-scroll">
   <table class="data-table rules-table">
     <thead>
@@ -16,7 +33,6 @@
       </tr>
     </thead>
     <tbody>
-      {{ $loc := .Locale }}
       {{ range $gi, $g := .RuleGroups }}
       <tr class="group-row">
         <td colspan="8">

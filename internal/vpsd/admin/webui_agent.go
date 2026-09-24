@@ -8,9 +8,11 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/rahanahu/wgft/internal/vpsd/store"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // このファイルはエージェントの追加(接続文字列の発行)、詳細ページ、無効化と有効化、削除、警告の削除の
@@ -40,6 +42,9 @@ type agentDetailData struct {
 	CreatedAt  string
 	DisabledAt string
 	Rules      []agentRuleLink
+	// RulesDigest はページを描いた時点のルール集合全体のハッシュ(proto.RulesDigest)である。ルールも
+	// 削除する削除のフォームが送り返し、server はそれと違う集合からは何も削除しない。
+	RulesDigest string
 	// Error はこのページに戻した操作の誤りである。空なら出さない。
 	Error string
 	// ConfirmName は、削除の名前の入力が一致しなかったときに、入力を残して描き直すための値である。
@@ -88,7 +93,8 @@ func (s *Server) agentDetailView(a AgentInfo, locale string) (agentDetailData, e
 	if err != nil {
 		return agentDetailData{}, err
 	}
-	d := agentDetailData{Locale: locale, Row: agentToView(a, gen, locale, acks), CreatedAt: orDash(a.CreatedAt), DisabledAt: a.DisabledAt}
+	d := agentDetailData{Locale: locale, Row: agentToView(a, gen, locale, acks), CreatedAt: orDash(a.CreatedAt), DisabledAt: a.DisabledAt,
+		RulesDigest: proto.RulesDigest(rules)}
 	for _, r := range rules {
 		if r.Agent != a.Name {
 			continue
@@ -205,6 +211,14 @@ func (s *Server) uiAgentChange(w http.ResponseWriter, r *http.Request, op func(s
 // dataplane へ公開し、公開の失敗を誤りとして返すためである(internal/vpsd の Daemon.Revoke)。そこで
 // 誤りの後にエージェントを読み直し、居なければ「削除は済んだが、転送への反映はまだ」と示す。
 // 居れば削除できなかったとして詳細ページに誤りを示す。
+//
+// delete_rules が "1" なら、エージェントを削除した後に、そのエージェントを持ち主とするルールを
+// ルールのバッチ 1 回で削除する(設計文書 5.1 節)。フォームの rules_digest は詳細ページを描いた時点の
+// ルール集合のハッシュ(proto.RulesDigest)で、削除の前に今の集合と比べ、違えば何もしない。バッチにも
+// ExpectedDigest として渡し、比べた後からバッチまでの間の変更も、バッチのトランザクションの内側で拒む。
+// 確かめた本数より多いルールを消さないためである。2 つの操作は 1 つのトランザクションではない。ルールの
+// 削除だけが失敗すると、ルールは未登録のエージェントのルールとして残り、転送しない。その場合は、
+// エージェントは削除したことと、ダッシュボードの未登録のエージェントの帯から削除し直せることを示す。
 func (s *Server) uiRevoke(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	name := r.PathValue("name")
@@ -214,14 +228,38 @@ func (s *Server) uiRevoke(w http.ResponseWriter, r *http.Request) {
 		s.renderAgentDetail(w, r, http.StatusUnprocessableEntity, T(locale, "agentDeleteMismatch"), typed)
 		return
 	}
+	withRules := r.FormValue("delete_rules") == "1"
+	digest := r.FormValue("rules_digest")
+	if withRules {
+		rules, err := s.backend.Rules()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if digest == "" || proto.RulesDigest(rules) != digest {
+			s.renderAgentDetail(w, r, http.StatusConflict, T(locale, "agentRulesChanged"), typed)
+			return
+		}
+	}
 	if err := s.backend.Revoke(name); err != nil {
 		if s.revokedAnyway(name) {
 			log.Printf("ui: agent %s revoked, but applying the change failed: %v", name, err)
-			s.renderNotice(w, r, http.StatusUnprocessableEntity, T(locale, "agentRevokedNotApplied")+" "+err.Error())
+			msg := T(locale, "agentRevokedNotApplied") + " " + err.Error()
+			if withRules {
+				msg += " " + T(locale, "agentRulesNotDeleted")
+			}
+			s.renderNotice(w, r, http.StatusUnprocessableEntity, msg)
 			return
 		}
 		s.renderAgentDetail(w, r, http.StatusUnprocessableEntity, T(locale, "agentDeleteFailed")+" "+err.Error(), "")
 		return
+	}
+	if withRules {
+		if err := s.deleteRulesOf(name, digest, "ui revoke with rules"); err != nil {
+			log.Printf("ui: agent %s revoked, but deleting its rules failed: %v", name, err)
+			s.renderNotice(w, r, http.StatusUnprocessableEntity, T(locale, "agentRulesLeft")+" "+err.Error())
+			return
+		}
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -231,6 +269,83 @@ func (s *Server) uiRevoke(w http.ResponseWriter, r *http.Request) {
 func (s *Server) revokedAnyway(name string) bool {
 	_, ok, err := s.findAgent(name)
 	return err == nil && !ok
+}
+
+// rulesOf は、そのエージェントを持ち主とするルールの ID を返す。ルールの有効無効は問わない。
+func (s *Server) rulesOf(agent string) ([]string, error) {
+	rules, err := s.backend.Rules()
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, r := range rules {
+		if r.Agent == agent {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids, nil
+}
+
+// deleteRulesOf は、そのエージェントを持ち主とするルールをルールのバッチ 1 回で削除する。digest は
+// 利用者が確かめた時点のルール集合のハッシュで、バッチはそれと今の集合が違えば何も変えず
+// ErrBatchConflict を返す。1 本も無ければ何もしない。
+func (s *Server) deleteRulesOf(agent, digest, op string) error {
+	ids, err := s.rulesOf(agent)
+	if err != nil || len(ids) == 0 {
+		return err
+	}
+	_, err = s.backend.Batch(BatchRequest{Delete: ids, ExpectedDigest: digest, Op: op})
+	return err
+}
+
+// uiDeleteOrphanRules は、未登録のエージェントの帯のボタンから、そのエージェントを参照するルールを
+// ルールのバッチ 1 回でまとめて削除する(設計文書 10.1 節)。次の場合は何も削除しない。
+//
+//   - エージェントが登録されている:帯を描いた後に同じ名前で登録し直した場合に、動いているエージェントの
+//     ルールを消さないためである
+//   - フォームの count(帯が示した本数)が今の本数と違う
+//   - フォームの rules_digest(帯を描いた時点のルール集合のハッシュ)が今の集合と違う。照合はバッチの
+//     ExpectedDigest で、バッチのトランザクションの内側で行う
+//
+// 後の 2 つは、確かめたより多いルールや、確かめた後に変わったルールを消さないためである。登録の確認と
+// バッチの間に同じ名前で登録し直す場合は見分けない。登録はルール集合を変えないので、ハッシュでは
+// 捉えられない。その間は登録の確認からバッチまでのごく短い時間であり、そこで消えるのは利用者が
+// 削除を確かめたルールそのものなので、受け入れる。
+func (s *Server) uiDeleteOrphanRules(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	name := r.PathValue("name")
+	locale := resolveLocale(w, r)
+	_, registered, err := s.findAgent(name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if registered {
+		s.renderNotice(w, r, http.StatusConflict, fmt.Sprintf(T(locale, "orphanRegistered"), name))
+		return
+	}
+	ids, err := s.rulesOf(name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	digest := r.FormValue("rules_digest")
+	if n, err := strconv.Atoi(r.FormValue("count")); err != nil || n != len(ids) || digest == "" {
+		s.renderNotice(w, r, http.StatusConflict, T(locale, "orphanChanged"))
+		return
+	}
+	if len(ids) > 0 {
+		_, err := s.backend.Batch(BatchRequest{Delete: ids, ExpectedDigest: digest, Op: "ui delete rules of unregistered agent"})
+		switch {
+		case errors.Is(err, ErrBatchConflict):
+			s.renderNotice(w, r, http.StatusConflict, T(locale, "orphanChanged"))
+			return
+		case err != nil:
+			s.renderNotice(w, r, http.StatusUnprocessableEntity, T(locale, "orphanDeleteFailed")+" "+err.Error())
+			return
+		}
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // renderNotice は、操作の結果の文 1 つとダッシュボードへのリンクを、共通の枠で status のページとして描く。
