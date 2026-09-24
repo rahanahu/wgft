@@ -451,6 +451,37 @@ On the VPS, against the admin API:
 			if len(args) == 3 {
 				detail = args[2]
 			}
+			// dismiss-warning の応答は本文を持たず、何かを実際に消したかを machine-readable に
+			// 伝えない(設計文書 7a.11 節)。消す前に一覧を読み、対象が無ければそう言う。agent
+			// disable/enable の「既に X; 何も変わらなかった」と同じ形にそろえ、どちらの場合も
+			// 終了コードは 0 のままにする(要求された操作を完了できたことが成功、7a.11 節)。
+			ws, err := c.Warnings()
+			if err != nil {
+				return err
+			}
+			found, sameKind := false, false
+			for _, w := range ws {
+				if w.Agent != args[0] || w.Kind != args[1] {
+					continue
+				}
+				sameKind = true
+				if detail == "" || w.Detail == detail {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if detail != "" && sameKind {
+					// エージェントと種類は一致する警告があるが、渡した detail のものは無い
+					// (ip-mismatch は detail が必ず組で違うので、渡した組を勘違いしている
+					// ことが多い)。「消した」と誤って言わないことに加え、警告が無いという
+					// のとも違う事実を言う。
+					fmt.Printf("no %s warning for %s matches that detail; nothing changed. See wgft agent warnings for the current entries.\n", args[1], args[0])
+				} else {
+					fmt.Printf("no %s warning for %s to dismiss; nothing changed\n", args[1], args[0])
+				}
+				return nil
+			}
 			if err := c.DismissWarning(args[0], args[1], detail); err != nil {
 				return err
 			}
