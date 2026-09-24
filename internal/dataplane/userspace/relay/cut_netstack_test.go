@@ -65,12 +65,10 @@ func netstackPair(t *testing.T) (*nettun.Device, netstackNet) {
 	go pump(client, agent)
 	go pump(agent, client)
 	t.Cleanup(func() {
-		// Stop both stacks: Close aborts every endpoint and Wait removes the NICs, after which
-		// nothing writes to the devices. Device.Close is not called: it closes the channel that
-		// WriteNotify sends on, and the race detector reports that close against sends made
-		// earlier from the stack's goroutines. The two pumps stay blocked in Read.
+		// Close both devices, which also ends the two pumps' Read, then wait for the stacks'
+		// goroutines.
 		for _, d := range []*nettun.Device{client, agent} {
-			d.Stack().Close()
+			d.Close()
 		}
 		for _, d := range []*nettun.Device{client, agent} {
 			d.Stack().Wait()
