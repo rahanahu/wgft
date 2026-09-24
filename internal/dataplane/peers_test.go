@@ -51,3 +51,36 @@ func TestPeersEqual(t *testing.T) {
 		}
 	}
 }
+
+// InheritedEndpoint gives a peer being added the endpoint of the peer that holds its address under
+// another key (an agent that rotated its key), and nothing in every other case.
+func TestInheritedEndpoint(t *testing.T) {
+	old, rotated := testPeer(t, "10.200.0.2"), testPeer(t, "10.200.0.2")
+	other := testPeer(t, "10.200.0.3")
+	ep := netip.MustParseAddrPort("203.0.113.2:40001")
+	held := func(p Peer, ep netip.AddrPort) HeldPeer {
+		return HeldPeer{PublicKey: p.PublicKey, Address: p.Address, Endpoint: ep}
+	}
+	for _, tc := range []struct {
+		name     string
+		have     []HeldPeer
+		add      Peer
+		wantEP   netip.AddrPort
+		wantFrom wgtypes.Key
+	}{
+		{"rotated key takes over the old peer's endpoint", []HeldPeer{held(other, netip.MustParseAddrPort("203.0.113.3:5")), held(old, ep)}, rotated, ep, old.PublicKey},
+		{"the old peer has no endpoint yet", []HeldPeer{held(old, netip.AddrPort{})}, rotated, netip.AddrPort{}, wgtypes.Key{}},
+		{"no peer holds the address", []HeldPeer{held(other, ep)}, rotated, netip.AddrPort{}, wgtypes.Key{}},
+		{"the same key is not its own heir", []HeldPeer{held(old, ep)}, old, netip.AddrPort{}, wgtypes.Key{}},
+		{"a held peer without a valid address matches nothing", []HeldPeer{{PublicKey: old.PublicKey, Endpoint: ep}}, rotated, netip.AddrPort{}, wgtypes.Key{}},
+		{"a peer added without an address takes nothing", []HeldPeer{{PublicKey: old.PublicKey, Endpoint: ep}}, testPeer(t, ""), netip.AddrPort{}, wgtypes.Key{}},
+		{"no peers", nil, rotated, netip.AddrPort{}, wgtypes.Key{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotEP, gotFrom, ok := InheritedEndpoint(tc.have, tc.add.PublicKey, tc.add.Address)
+			if ok != tc.wantEP.IsValid() || gotEP != tc.wantEP || gotFrom != tc.wantFrom {
+				t.Errorf("InheritedEndpoint = %v, %v, %v; want %v, %v", gotEP, gotFrom, ok, tc.wantEP, tc.wantFrom)
+			}
+		})
+	}
+}

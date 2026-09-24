@@ -274,3 +274,53 @@ func TestDeleteLinkRefusesNonWireGuard(t *testing.T) {
 		t.Fatal("the dummy link is gone")
 	}
 }
+
+// 鍵を替えたエージェントの新しいピアは、同じアドレスを持っていた古いピアのエンドポイントを
+// 引き継ぐ(設計文書 5.2 節)。古いピアを外し新しいピアを足す 1 回の Ensure で起きる。どのピアも
+// 持っていなかったアドレスに足すピアは、エンドポイントを持たない。
+func TestEnsureRotatedKeyTakesOverEndpoint(t *testing.T) {
+	cleanup("wgft0")
+	defer cleanup("wgft0")
+	sk := serverKey(t)
+	oldKey, newKey, otherKey := serverKey(t).PublicKey(), serverKey(t).PublicKey(), serverKey(t).PublicKey()
+	addr, otherAddr := netip.MustParseAddr("10.200.0.2"), netip.MustParseAddr("10.200.0.3")
+	cfg := Config{Interface: "wgft0", PrivateKey: sk, ListenPort: 51821, Address: netip.MustParsePrefix("10.200.0.1/24"), MTU: 1420,
+		Peers: []Peer{{PublicKey: oldKey, Address: addr}}}
+	if _, err := Ensure(cfg); err != nil {
+		t.Fatal(err)
+	}
+	// WireGuard はエンドポイントをエージェントのハンドシェイクで学ぶ。ここでは直接書く
+	ep := netip.MustParseAddrPort("203.0.113.2:40001")
+	c, err := wgctrl.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.ConfigureDevice("wgft0", wgtypes.Config{Peers: []wgtypes.PeerConfig{{PublicKey: oldKey, UpdateOnly: true, Endpoint: net.UDPAddrFromAddrPort(ep)}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Peers = []Peer{{PublicKey: newKey, Address: addr}, {PublicKey: otherKey, Address: otherAddr}}
+	changes, err := Ensure(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[wgtypes.Key]netip.AddrPort{}
+	peers := device(t, "wgft0").Peers
+	for i := range peers {
+		got[peers[i].PublicKey] = peerEndpoint(&peers[i])
+	}
+	if _, ok := got[oldKey]; ok {
+		t.Errorf("old peer is still there: %v", got)
+	}
+	if e := got[newKey]; e != ep {
+		t.Errorf("new peer endpoint = %v, want %v taken over from the old peer", e, ep)
+	}
+	if e, ok := got[otherKey]; !ok || e.IsValid() {
+		t.Errorf("peer at an address nobody held: present %v, endpoint %v; want present without an endpoint", ok, e)
+	}
+	want := "add peer " + newKey.String() + " at 10.200.0.2, taking over endpoint " + ep.String() + " from peer " + oldKey.String()
+	if !strings.Contains(strings.Join(changes, "\n"), want) {
+		t.Errorf("changes = %q, want a line %q", changes, want)
+	}
+}
