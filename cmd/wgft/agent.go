@@ -157,6 +157,7 @@ On the agent host:
   pubkey        print the wg public key; generate and save one if absent while the agent is stopped
   rotate-key    regenerate the wg key pair
   doctor        diagnose this host's own agent, running or stopped
+  teardown      remove what a stopped kernel-mode agent left in the kernel
 
 On the VPS, against the admin API:
   ls            list registered agents
@@ -240,6 +241,8 @@ On the VPS, against the admin API:
 	}
 	rotate.Flags().String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR")
 	rotate.Flags().String("config", agentConfigPath, "dotenv config file")
+
+	teardown := newAgentTeardownCmd()
 
 	// --- VPS 側(管理用 API 経由) ---
 	var name string
@@ -491,7 +494,50 @@ On the VPS, against the admin API:
 	}
 	addAdminFlag(dismiss)
 
-	cmd.AddCommand(run, pubkey, rotate, newAgentDoctorCmd(), joinString, ls, disable, enable, revoke, warnings, dismiss)
+	cmd.AddCommand(run, pubkey, rotate, newAgentDoctorCmd(), teardown, joinString, ls, disable, enable, revoke, warnings, dismiss)
+	return cmd
+}
+
+// newAgentTeardownCmd は agent teardown である(設計文書 10.3 節)。停止したカーネルモードのエージェントが
+// カーネルに残した資源と、agent.json のカーネルモードの記録を消す。1 回限りの操作なので、--dry-run は
+// フラグでだけ受ける(11a 節)。カーネルモードは Linux だけなので、Linux 以外では種別 prerequisite の
+// 拒否で止まる(11b 節)。
+func newAgentTeardownCmd() *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "teardown",
+		Short: "remove what a stopped kernel-mode agent left: its WireGuard interface, table inet wgft_agent and the kernel-mode records; agent host",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if agentGOOS != "linux" {
+				return startup.Prerequisite("operating system", "the agent's kernel mode, which agent teardown cleans up after, runs on Linux only, and this is %s; a userspace-mode agent leaves nothing in the kernel", agentGOOS)
+			}
+			configPath := resolveConfigPath(cmd, agentConfigPath)
+			c, err := loadConfig(cmd, []spec{
+				{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir()},
+				{Env: "WGFT_WG_INTERFACE", Flag: "wg-interface", Default: "wgft0"},
+			}, configPath)
+			if err != nil {
+				return withUnreadableHint(err, configPath, agentUnreadableHint)
+			}
+			if strings.TrimSpace(c.str("WGFT_DATA_DIR")) == "" {
+				return configErrorf("WGFT_DATA_DIR", "is empty; give the directory that holds agent.json")
+			}
+			if err := validateInterfaceName("WGFT_WG_INTERFACE", c.str("WGFT_WG_INTERFACE")); err != nil {
+				return err
+			}
+			return agent.Teardown(agent.TeardownOptions{
+				CredentialsPath: joinPath(c.str("WGFT_DATA_DIR"), "agent.json"),
+				Interface:       c.str("WGFT_WG_INTERFACE"),
+				DryRun:          dryRun,
+			}, cmd.OutOrStdout())
+		},
+	}
+	f := cmd.Flags()
+	f.String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR; holds agent.json")
+	f.String("wg-interface", "wgft0", "kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE")
+	f.String("config", agentConfigPath, "dotenv config file")
+	f.BoolVar(&dryRun, "dry-run", false, "only print what would be removed and the list to restore by hand")
 	return cmd
 }
 

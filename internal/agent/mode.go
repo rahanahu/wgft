@@ -26,7 +26,8 @@ var kernelModeAvailable = kernelModeBuilt
 //   - kernel から userspace への切り替えは、種別 mode-gate で拒否する。WGFT_MODE を省略した場合も同じで、
 //     文面は WGFT_MODE=kernel を設定する道と、撤去してから切り替える道の両方を示す
 //
-// 記録が kernel でも userspace でもない値なら、認証情報ファイルと設定が矛盾するものとして拒否する。
+// 記録が kernel でも userspace でもない値なら、認証情報ファイルと設定が矛盾するものとして拒否する。撤去も
+// この記録を消さずに止まる(teardown.go)ので、文面は撤去を案内しない。
 // want が kernel でも userspace でも空でもなければ、種別 config で拒否する。
 func reconcileMode(recorded, want string) (mode string, record bool, err error) {
 	have := recorded
@@ -46,7 +47,8 @@ func reconcileMode(recorded, want string) (mode string, record bool, err error) 
 	case credentials.ModeKernel, credentials.ModeUserspace:
 	default:
 		return "", false, startup.Conflict("WGFT_MODE",
-			"the credentials file agent.json records the mode %q, which is neither kernel nor userspace; restore agent.json from a backup, or run wgft agent teardown to clear the record", have)
+			"the credentials file agent.json records the mode %q, which is neither kernel nor userspace; it may have been written by a newer version of wgft, and agent teardown leaves it too; "+
+				"start the version that wrote it, or restore agent.json from a backup", have)
 	}
 	switch {
 	case have == mode:

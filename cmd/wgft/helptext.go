@@ -275,6 +275,34 @@ with the agent stopped, the credentials file is rewritten. The server learns
 the new public key over the stream, so nothing has to be done on the VPS.`,
 		Example: `  wgft agent rotate-key`,
 	},
+	"agent teardown": {
+		Long: `Clean up after a stopped kernel-mode agent, so that it can start again in
+userspace mode. Run it on the agent host as root, since it reads and deletes
+kernel interfaces and nftables tables, which needs CAP_NET_ADMIN. It refuses and
+removes nothing while the agent is running: stop it first.
+
+It removes, in this order: every WireGuard interface that holds the key in
+agent.json or the previous key kept there after rotate-key, whatever its name;
+the conntrack entries of the flows the agent forwarded, found from the
+publication records in agent.json; table inet wgft_agent; and then the
+kernel-mode records in agent.json: the mode, the previous key, the ip_forward
+record, the publication record and the publications whose conntrack cleanup
+had not finished. The registration, the key and last_state stay, so the agent
+reconnects as the same agent.
+
+It never touches a WireGuard interface that holds another key or no key, or a
+link that is not WireGuard, even under the name WGFT_WG_INTERFACE gives; it
+names such a link and leaves it, and still succeeds. When agent.json records
+a mode this version does not know, it removes nothing and exits with code 3.
+A host with nothing left succeeds without changing anything.
+
+It does not set net.ipv4.ip_forward back. When agent.json records that the
+agent changed it from 0 to 1, it prints the command to restore it, along with
+the other things to undo by hand, such as WGFT_MODE=kernel in agent.env.`,
+		Example: `  sudo systemctl stop wgft-agent
+  sudo wgft agent teardown --dry-run
+  sudo wgft agent teardown`,
+	},
 	"agent doctor": {
 		Long: `Answer, on the host that runs the agent: is an agent running here, does it hold
 credentials, and can this host resolve the names it needs. Run it on the agent
