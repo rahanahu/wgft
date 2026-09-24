@@ -26,6 +26,8 @@ type fakeBackend struct {
 	warnings []Warning   // nil なら IP 食い違いの警告 1 件(既定)。ダッシュボードの警告バナーのテストは空スライスに差し替える
 	acks     []store.Ack // IPMismatchAcks が返す確認済みの組
 	acksErr  error       // nil でなければ IPMismatchAcks はこのエラーを返す
+	// agentChange は nil でなければ DisableAgent と EnableAgent がこれを呼ぶ(op は disable か enable)
+	agentChange func(op, name string) (AgentDisabledResponse, error)
 }
 
 func (b *fakeBackend) Rules() ([]proto.Rule, error) { return b.st.Rules() }
@@ -54,6 +56,18 @@ func (b *fakeBackend) JoinString(name string) (JoinStringResponse, error) {
 	return JoinStringResponse{JoinString: "wgft://h:1/t#sha256:00"}, nil
 }
 func (b *fakeBackend) Revoke(name string) error { return nil }
+func (b *fakeBackend) DisableAgent(name string) (AgentDisabledResponse, error) {
+	if b.agentChange != nil {
+		return b.agentChange("disable", name)
+	}
+	return AgentDisabledResponse{Name: name, Disabled: true, Changed: true, Generation: 1}, nil
+}
+func (b *fakeBackend) EnableAgent(name string) (AgentDisabledResponse, error) {
+	if b.agentChange != nil {
+		return b.agentChange("enable", name)
+	}
+	return AgentDisabledResponse{Name: name, Changed: true, Generation: 1}, nil
+}
 func (b *fakeBackend) AgentState(string) (*proto.State, error) {
 	return &proto.State{Generation: 1}, nil
 }

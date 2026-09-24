@@ -101,6 +101,12 @@ func (b *fakeRuleBackend) JoinString(string) (admin.JoinStringResponse, error) {
 	return admin.JoinStringResponse{}, nil
 }
 func (b *fakeRuleBackend) Revoke(string) error { return nil }
+func (b *fakeRuleBackend) DisableAgent(string) (admin.AgentDisabledResponse, error) {
+	return admin.AgentDisabledResponse{}, nil
+}
+func (b *fakeRuleBackend) EnableAgent(string) (admin.AgentDisabledResponse, error) {
+	return admin.AgentDisabledResponse{}, nil
+}
 func (b *fakeRuleBackend) Warnings() ([]admin.Warning, error) {
 	return nil, nil
 }

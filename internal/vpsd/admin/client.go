@@ -97,6 +97,11 @@ func (c *Client) do(method, path string, in, out any) error {
 	if resp.StatusCode >= 300 {
 		var e ErrorBody
 		if json.Unmarshal(data, &e) == nil && e.Error != "" {
+			// 422 の saved は、エージェントの無効化と有効化が何も保存しなかったのか、保存は済んだが
+			// 公開していないのかを表す(設計文書 7a.11 節)。呼び出し側が errors.As で読めるよう型に戻す
+			if resp.StatusCode == http.StatusUnprocessableEntity && e.Saved != nil {
+				return &AgentChangeError{Saved: *e.Saved, Err: errors.New(e.Error)}
+			}
 			return fmt.Errorf("%s", e.Error)
 		}
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(data))
@@ -135,9 +140,23 @@ func (c *Client) JoinString(name string) (*JoinStringResponse, error) {
 	return &out, c.do("POST", "/api/v1/agents/join-string", JoinStringRequest{Name: name}, &out)
 }
 
-// Revoke は恒久トークンを無効化し、ピアとアドレスを回収する(仕様 11 節)。
+// Revoke はエージェントを削除する。恒久トークンを使えなくし、ピアとアドレスを回収する(仕様 5.1、11 節)。
 func (c *Client) Revoke(name string) error {
 	return c.do("DELETE", "/api/v1/agents/"+name, nil, nil)
+}
+
+// DisableAgent はエージェントを無効にする(仕様 5.1 節)。422 の誤りは *AgentChangeError で、
+// Saved が保存は済んだが公開していないことを表す。
+func (c *Client) DisableAgent(name string) (*AgentDisabledResponse, error) {
+	var out AgentDisabledResponse
+	return &out, c.do("POST", "/api/v1/agents/"+name+"/disable", nil, &out)
+}
+
+// EnableAgent はエージェントを有効に戻す(仕様 5.1 節)。422 の誤りは *AgentChangeError で、
+// Saved が false なら書き込みの時の検査が拒み、何も保存していない。
+func (c *Client) EnableAgent(name string) (*AgentDisabledResponse, error) {
+	var out AgentDisabledResponse
+	return &out, c.do("POST", "/api/v1/agents/"+name+"/enable", nil, &out)
 }
 
 // Warnings は窃取検知の警告一覧を取る(仕様 5.2 節)。

@@ -90,6 +90,13 @@
 #      (cmd/wgft/agent.go), and the Web UI agent list shows the tunnelStale label instead of a
 #      live OK and hides the IP comparison (internal/vpsd/admin/webui.go's agentToView).
 #      Restarting the agent with the same credentials returns both to the live state.
+#   11. agent disable and enable (design 5.1 section), through the admin API: disabling one agent
+#      stops its kernel, UDP and proxy rules and cuts an established session, while another agent
+#      keeps forwarding; the stored rules keep their own enabled, the agent stays connected and
+#      reports no rule, and a restart keeps it disabled. Enable brings back each rule's own
+#      setting, including a rule added while disabled. Kernel mode also checks that a port bound
+#      on the VPS refuses the enable with nothing saved, and that a disable which cannot be
+#      published is saved, delivered to the agent, and published by the retry.
 #
 # Requires `lab/lab build` (wgft and echo in /usr/local/bin of the VM) and the netns topology
 # (`lab/lab net up`). Leftovers from earlier runs are killed first. Wherever a step waits on
@@ -105,8 +112,8 @@ ulimit -n 100000 2>/dev/null || true  # check 5 floods thousands of sockets from
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: lifecycle.sh kernel|userspace [check...]" >&2; exit 2;; esac
 shift || true
-# Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9 10) run only those checks; none runs all.
-ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10"
+# Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9 10 11) run only those checks; none runs all.
+ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10 11"
 CHECKS="${*:-$ALL_CHECKS}"
 for c in $CHECKS; do
   case " $ALL_CHECKS " in *" $c "*) ;; *) echo "lifecycle.sh: unknown check '$c' (use: $ALL_CHECKS)" >&2; exit 2;; esac
@@ -2539,6 +2546,202 @@ print(a.get('$1', ''))
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$ADATA"
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 11: agent disable and enable (design 5.1 section). Called through the admin API with curl
+# until the CLI gains `agent disable`/`agent enable`.
+# ---------------------------------------------------------------------------------------------
+check11() {
+  echo "== $mode: check 11: disabling an agent stops every rule of it and no other agent's; enable brings back each rule's own setting"
+  local DATA=$W/wgft-lifecycle-c11 HDATA=$W/wgft-lifecycle-c11-home ODATA=$W/wgft-lifecycle-c11-other
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$HDATA" "$ODATA"; mkdir -p "$DATA"
+
+  start_server "$DATA" $W/wgft-lifecycle-c11-server.log
+  if ! wait_admin; then echo "FAIL  check11 setup: admin api never came up"; fail=1; return; fi
+  local name dir join
+  for name in home other; do
+    dir=$HDATA; [ "$name" = other ] && dir=$ODATA
+    join=$(vps wgft agent join-string --name "$name" --admin "$ADMIN" 2>/dev/null | head -1)
+    WGFT_JOIN="$join" WGFT_NAME="$name" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$dir" \
+      > "$W/wgft-lifecycle-c11-$name.log" 2>&1 < /dev/null &
+    disown
+  done
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25570,25571,25572 -udp 19130,19131,19132 \
+    > $W/wgft-lifecycle-c11-echo.log 2>&1 < /dev/null &
+  disown
+  if ! wait_agent home || ! wait_agent other; then echo "FAIL  check11 setup: an agent never registered"; fail=1; return; fi
+
+  # The example of design 5.1: A and C are enabled and B is disabled, all on home. P is a proxy
+  # rule of home, so the Relay path is covered too. O belongs to the other agent.
+  local ra rb rc rp ro
+  ra=$(vps wgft rule add --agent home --tcp 39970 --to 192.168.50.3:25570 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  rb=$(vps wgft rule add --agent home --udp 27000 --to 192.168.50.3:19131 --disabled --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  rc=$(vps wgft rule add --agent home --udp 27002 --to 192.168.50.3:19132 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  rp=$(vps wgft rule add --agent home --tcp 39972 --to 192.168.50.3:25572 --proxy --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  ro=$(vps wgft rule add --agent other --tcp 39971 --to 192.168.50.3:25571 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  must_wait "check11: A forwards before the disable" 10 tcp_probe_ok 39970
+  must_wait "check11: C forwards before the disable" 10 udp_probe_ok 27002
+  must_wait "check11: P forwards before the disable" 10 tcp_probe_ok 39972
+  must_wait "check11: O forwards before the disable" 10 tcp_probe_ok 39971
+
+  api() { vps curl -s -X "$1" -w ' HTTP%{http_code}' "http://$ADMIN$2"; }
+  stored_enabled() {
+    vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+by = {r['id']: r['enabled'] for r in d['rules']}
+print('A=%s B=%s C=%s P=%s' % (by['$ra'], by['$rb'], by['$rc'], by['$rp']))
+"
+  }
+  # agent_json <name> <field>: that field of the agent in agent ls --json; empty when absent or an
+  # empty list
+  agent_json() {
+    vps wgft agent ls --admin "$ADMIN" --json | python3 -c "
+import json, sys
+a = next((x for x in json.load(sys.stdin) if x.get('name') == '$1'), {})
+v = a.get('$2')
+print('' if v is None or v == [] else v)
+"
+  }
+  # home_caught_up: home has applied the server's generation. Its heartbeat reports only the rules
+  # it opened a listener for, so a disabled agent reports none.
+  home_caught_up() {
+    local gen; gen=$(vps wgft rule ls --admin "$ADMIN" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["generation"])')
+    [ "$(agent_json home generation)" = "$gen" ] || return 1
+    [ "$(agent_json home rules)" = "${1:-}" ]
+  }
+  tcp_refused() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 10 - TCP:198.51.100.1:$1" 2>&1)" != *tcp-echo* ]]; }
+
+  # A long-lived TCP session through A, to show that disable also cuts established flows.
+  client "python3 -c '
+import socket, time
+s = socket.create_connection((\"198.51.100.1\", 39970), timeout=5); s.send(b\"x\"); time.sleep(20)
+' >/dev/null 2>&1 &"
+  must_wait "check11: the long-lived session through A is established" 5 tcp_flow_up 39970
+
+  echo "-- disable home"
+  local out; out=$(api POST /api/v1/agents/home/disable)
+  check "disable answers 200 with the state changed" '"disabled":true,"changed":true' "$out"
+  check "disable answers 200" "HTTP200" "$out"
+  # The server stops forwarding before the disable returns; the checks below need no wait.
+  okcheck "A no longer forwards" "$(tcp_refused 39970 && echo 1 || echo 0)"
+  okcheck "P, the proxy rule, no longer forwards" "$(tcp_refused 39972 && echo 1 || echo 0)"
+  okcheck "C no longer forwards" "$(udp_probe_ok 27002 && echo 0 || echo 1)"
+  check "O of the other agent keeps forwarding" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39971')"
+  wait_until 5 tcp_flow_gone 39970
+  eqcheck "the established session through A is cut" 0 "$(flows_established 39970)"
+  if [ "$mode" = kernel ]; then
+    local table; table=$(vps nft list table inet wgft)
+    absent "table inet wgft has no line for A" "39970" "$table"
+    absent "table inet wgft has no line for C" "27002" "$table"
+    absent "table inet wgft has no line for P" "39972" "$table"
+    check "table inet wgft keeps O" "39971" "$table"
+  fi
+  strcheck "the stored enabled of every rule is unchanged" "A=True B=False C=True P=True" "$(stored_enabled)"
+  check "A is not_active with the disabled agent named" "not_active" "$(rule_state_field "$ra" apply_state)"
+  check "A's reason names the disabled agent" 'agent "home" is disabled' "$(rule_state_field "$ra" reason)"
+  check "B keeps its own reason" "disabled" "$(rule_state_field "$rb" reason)"
+  strcheck "agent ls shows home disabled" "True" "$(agent_json home disabled)"
+  strcheck "agent ls shows home still connected" "True" "$(agent_json home connected)"
+  okcheck "agent ls gives home a disabled_at" "$([ -n "$(agent_json home disabled_at)" ] && echo 1 || echo 0)"
+  strcheck "agent ls shows other enabled" "False" "$(agent_json other disabled)"
+  local state; state=$(vps curl -s "http://$ADMIN/api/v1/agents/home/state")
+  check "the state for home carries agent_disabled" '"agent_disabled":true' "$state"
+  absent "the state for home has no enabled rule" '"enabled":true' "$state"
+  must_wait "check11: home applied the disable and reports no rule" 15 home_caught_up ""
+  out=$(api POST "/api/v1/rules/$ra/check")
+  check "the connectivity check refuses a disabled agent's rule" "HTTP422" "$out"
+  check "the refusal names the disabled agent" "disabled agent" "$out"
+  out=$(api POST /api/v1/agents/home/disable)
+  check "a second disable changes nothing" '"disabled":true,"changed":false' "$out"
+
+  echo "-- a rule added while home is disabled is saved but does not forward"
+  local rd; rd=$(vps wgft rule add --agent home --tcp 39973 --to 192.168.50.3:25570 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  okcheck "the new rule D is saved" "$([ -n "$rd" ] && echo 1 || echo 0)"
+  okcheck "D does not forward while home is disabled" "$(tcp_refused 39973 && echo 1 || echo 0)"
+
+  echo "-- restart the server while home is disabled"
+  kill_server
+  start_server "$DATA" $W/wgft-lifecycle-c11-server2.log
+  if ! wait_admin; then echo "FAIL  check11: admin api never came back up after the restart"; fail=1; return; fi
+  # Neither agent is waited for with wait_agent here, and O gets 60 seconds. In userspace mode the
+  # restarted server has a new WireGuard device that knows no agent endpoint yet, so a tunnel comes
+  # back only when the agent itself handshakes again, which took more than 30 seconds in the lab. home
+  # is disabled and needs no tunnel for this check; its stream reconnecting is what matters.
+  agent_connected() { [ "$(agent_json "$1" connected)" = True ]; }
+  must_wait "check11: other reconnected after the restart" 30 agent_connected other
+  must_wait "check11: home reconnected after the restart" 30 agent_connected home
+  must_wait "check11: O forwards after the restart" 60 tcp_probe_ok 39971
+  okcheck "A still does not forward after the restart" "$(tcp_refused 39970 && echo 1 || echo 0)"
+  strcheck "home is still disabled after the restart" "True" "$(agent_json home disabled)"
+  must_wait "check11: home reconnected and reports no rule" 15 home_caught_up ""
+
+  if [ "$mode" = kernel ]; then
+    echo "-- enable is refused while a process on the VPS binds A's port, and nothing is saved"
+    vps setsid nohup socat TCP-LISTEN:39970,reuseaddr,fork EXEC:/bin/true > /dev/null 2>&1 < /dev/null &
+    disown
+    squat_up() { vps ss -ltn "( sport = :39970 )" | grep -q LISTEN; }
+    must_wait "check11: the squatter listens on 39970" 5 squat_up
+    out=$(api POST /api/v1/agents/home/enable)
+    check "enable is refused with 422" "HTTP422" "$out"
+    check "the refusal says nothing was saved" '"saved":false' "$out"
+    strcheck "home stays disabled after the refusal" "True" "$(agent_json home disabled)"
+    sandbox_kill_named socat
+    must_wait "check11: the squatter is gone" 5 bash -c "! ip netns exec $VPS_NS ss -ltn '( sport = :39970 )' | grep -q LISTEN"
+  else
+    skip "enable refused by a bound port (the bound-port check covers kernel-mode rules on a kernel-mode server)"
+  fi
+
+  echo "-- enable home"
+  out=$(api POST /api/v1/agents/home/enable)
+  check "enable answers 200 with the state changed" '"disabled":false,"changed":true' "$out"
+  # The disable cut A's live session on the agent as well. The agent aborts the netstack side of
+  # such a session (design 7), so A's port is free at once and its listener opens again on the
+  # enable, without a bind failure and a 30-second retry.
+  must_wait "check11: A forwards again" 15 tcp_probe_ok 39970
+  absent "the agent reopens A's listener without a bind failure" "listener tcp/39970: bind" "$(grep 'listener tcp/39970' $W/wgft-lifecycle-c11-home.log)"
+  must_wait "check11: C forwards again" 15 udp_probe_ok 27002
+  must_wait "check11: P forwards again" 15 tcp_probe_ok 39972
+  must_wait "check11: D, added while disabled, forwards" 15 tcp_probe_ok 39973
+  check "O keeps forwarding" "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:39971')"
+  okcheck "B stays off by its own setting" "$(udp_probe_ok 27000 && echo 0 || echo 1)"
+  strcheck "home is enabled" "False" "$(agent_json home disabled)"
+  okcheck "an enabled agent has no disabled_at" "$([ -z "$(agent_json home disabled_at)" ] && echo 1 || echo 0)"
+  out=$(api POST /api/v1/agents/home/enable)
+  check "a second enable changes nothing" '"disabled":false,"changed":false' "$out"
+  out=$(api POST /api/v1/agents/ghost/disable)
+  check "an unknown agent is 404" "HTTP404" "$out"
+
+  if [ "$mode" = kernel ]; then
+    echo "-- disable while another process holds table inet wgft: saved, not published, and the agent closes its listeners"
+    rm -f $W/wgft-lifecycle-c11-fifo
+    mkfifo $W/wgft-lifecycle-c11-fifo
+    vps bash -c "exec 3<>$W/wgft-lifecycle-c11-fifo; nft -i <&3 >/dev/null 2>&1 &"
+    nft_i_ready() { sandbox_any_named nft; }
+    if must_wait "check11: nft -i reading the fifo" 3 nft_i_ready; then
+      echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > $W/wgft-lifecycle-c11-fifo
+      foreign_owner() { vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner'; }
+      must_wait "check11: the foreign table with flags owner exists" 5 foreign_owner
+      local owner_pid; owner_pid=$(sandbox_pids_named nft | head -1)
+      out=$(api POST /api/v1/agents/home/disable)
+      check "a disable that cannot be published is 422" "HTTP422" "$out"
+      check "the 422 says the change was saved" '"saved":true' "$out"
+      strcheck "home is saved as disabled" "True" "$(agent_json home disabled)"
+      must_wait "check11: home received the disable although it was not published" 15 home_caught_up ""
+      [ -n "$owner_pid" ] && kill "$owner_pid" 2>/dev/null
+      must_wait "check11: the foreign nft -i exited" 5 proc_gone "$owner_pid"
+      table_without_a() { vps nft list table inet wgft 2>/dev/null | grep -q 39971 && ! vps nft list table inet wgft | grep -q 39970; }
+      # The retry runs every 30 seconds (design 7a.3 section).
+      must_wait "check11: the retry publishes the disable once the table is free" 40 table_without_a
+      okcheck "A does not forward once published" "$(tcp_refused 39970 && echo 1 || echo 0)"
+    fi
+    rm -f $W/wgft-lifecycle-c11-fifo
+  fi
+
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$HDATA" "$ODATA"
 }
 
 # ---------------------------------------------------------------------------------------------

@@ -744,6 +744,12 @@ func (b *fakeStatusBackend) JoinString(string) (admin.JoinStringResponse, error)
 	return admin.JoinStringResponse{}, nil
 }
 func (b *fakeStatusBackend) Revoke(string) error { return nil }
+func (b *fakeStatusBackend) DisableAgent(string) (admin.AgentDisabledResponse, error) {
+	return admin.AgentDisabledResponse{}, nil
+}
+func (b *fakeStatusBackend) EnableAgent(string) (admin.AgentDisabledResponse, error) {
+	return admin.AgentDisabledResponse{}, nil
+}
 func (b *fakeStatusBackend) Warnings() ([]admin.Warning, error) {
 	return b.warnings, b.warningsErr
 }

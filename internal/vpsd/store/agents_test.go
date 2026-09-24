@@ -49,7 +49,7 @@ func TestJoinAndRegister(t *testing.T) {
 	if err != nil || b.Address != netip.MustParseAddr("10.200.0.3") {
 		t.Fatalf("second: %+v %v", b, err)
 	}
-	// 無効化で回収 → 次の登録は .2 を再利用し、名前も再利用できる
+	// 削除で回収 → 次の登録は .2 を再利用し、名前も再利用できる
 	if err := s.RevokeAgent("home"); err != nil {
 		t.Fatal(err)
 	}
@@ -231,9 +231,9 @@ func TestIssueJoinTokenSupersedesPreviousUnused(t *testing.T) {
 	}
 }
 
-// 恒久トークンの無効化は、その名前に対する発行済みの未使用トークンも無効化する。
+// エージェントの削除は、その名前に対する発行済みの未使用トークンも無効化する。
 // (レースや移行前のデータで、登録済みの名前に対する未使用トークンが残っている場合を
-// 直接作り、無効化がそれを掃除することを確かめる)
+// 直接作り、削除がそれを掃除することを確かめる)
 func TestRevokeAgentInvalidatesOutstandingJoinToken(t *testing.T) {
 	s := openTemp(t)
 	net := netip.MustParsePrefix("10.200.0.0/24")

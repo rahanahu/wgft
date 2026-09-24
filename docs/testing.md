@@ -23,11 +23,11 @@ v1 に必須の項目には、繰り返しの頻度として「リリース候�
 
 ## マージの前に流すテスト
 
-コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L14 です。流し方は、1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行することです。この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。文書だけを変える PR は、ラボを流しません。CI の検査のうち A8 は、どちらの PR でも流します。A1 から A7 は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。
+コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L15 です。流し方は、1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行することです。この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。文書だけを変える PR は、ラボを流しません。CI の検査のうち A8 は、どちらの PR でも流します。A1 から A7 は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。
 
 コードは、実行時の挙動かテストの結果を変えうるすべての変更を指します。Go のコード (`go.mod`、`go.sum` を含む)、`deploy/`、`lab/` 自身、設定と dotenv の扱い、`scripts/`、`.goreleaser.yaml`、`.github/workflows/` がこれに当たります。変更がコードに当たらないのは、Markdown とテキストの文書 (README、`docs/` の文書とその画像) だけです。`docs/cli.md` はヘルプから生成するので、ヘルプを変えた PR は Go のコードを変える PR です。
 
-変更の領域ごとに流すテストを選ぶ仕組みを持たずに、コードを変えたらすべてを流す規則にする理由は、ラボの一式が安いためです。1 台の Lab Host VM の中で Sandbox を並列に流すと、ラボの一式は 約 5 分半 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は 338 秒)で終わり、人の操作を要しません。この費用であれば、変更の領域とテストの対応を保守して選ぶよりも、すべてを流す規則のほうが単純で、対応の漏れによる見落としもありません。ラボの一式の所要時間が大きく伸びた場合は、この規則を見直します。
+変更の領域ごとに流すテストを選ぶ仕組みを持たずに、コードを変えたらすべてを流す規則にする理由は、ラボの一式が安いためです。1 台の Lab Host VM の中で Sandbox を並列に流すと、ラボの一式は 約 5 分半以上 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は、L15 を加える前で 338 秒)で終わり、人の操作を要しません。この費用であれば、変更の領域とテストの対応を保守して選ぶよりも、すべてを流す規則のほうが単純で、対応の漏れによる見落としもありません。ラボの一式の所要時間が大きく伸びた場合は、この規則を見直します。
 
 B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧のうち実装済みのもの) を選ぶためと、開発の途中でラボの確認を流し直すときに、変えた領域の確認だけを選ぶために使います。開発の途中の選び方は、後述の「ラボの一式の内訳」の表の契機の列にあります。
 
@@ -41,11 +41,11 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 | `kernel` | `internal/dataplane/linuxkernel/**`、`internal/platform/linux/**`、`internal/vpsd/teardown.go`、`lab/netns.sh`、`lab/lab` | B1、B2 | L2、L4、L5、L7、L10 (kernel モード) |
 | `admission` | `internal/policy/**`、`proto/rate.go`、`proto/source.go` | B1 | L2、L3、L13 |
 | `resource` | `internal/resource/**`、`internal/lograte/**`、`internal/dataplane/userspace/**`、`internal/netpipe/**`、`internal/nettun/**`、`cmd/wgft/limits.go` | 無し (C5 と C6 は次の段階の完了時に流し直す) | L8 (両モード) |
-| `reconcile` | `internal/reconcile/**`、`internal/planner/**`、`internal/model/**`、`internal/dataplane/*.go`、`internal/vpsd/apply.go`、`internal/vpsd/watch.go`、`internal/vpsd/dataplane*.go` | 無し (C2 は次の段階の完了時に流し直す) | L4、L5、L6、L9、L10 (両モード) |
+| `reconcile` | `internal/reconcile/**`、`internal/planner/**`、`internal/model/**`、`internal/dataplane/*.go`、`internal/vpsd/apply.go`、`internal/vpsd/watch.go`、`internal/vpsd/dataplane*.go` | 無し (C2 は次の段階の完了時に流し直す) | L4、L5、L6、L9、L10、L15 (両モード) |
 | `relay` | `internal/vpsd/proxyrelay/**` | B3 | L1、L3、L6、L9、L13 |
 | `userspace` | `internal/dataplane/userspace/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` | 無し | L1、L3、L4、L8 (userspace モード) |
-| `rule-ops` | `internal/vpsd/admin/**`、`proto/rule.go`、`proto/splitmerge.go`、`proto/importdiff.go`、`cmd/wgft/rule.go` | 無し | L5、L11、L12、L14 (両モード) |
-| `protocol` | `proto/stream.go`、`proto/state.go`、`proto/version.go`、`internal/vpsd/stream/**`、`internal/vpsd/agentapi/**`、`internal/agent/**` | B7 | L1、L4、L14 |
+| `rule-ops` | `internal/vpsd/admin/**`、`internal/vpsd/agent_disable.go`、`proto/rule.go`、`proto/splitmerge.go`、`proto/importdiff.go`、`cmd/wgft/rule.go` | 無し | L5、L11、L12、L14、L15 (両モード) |
+| `protocol` | `proto/stream.go`、`proto/state.go`、`proto/version.go`、`internal/vpsd/stream/**`、`internal/vpsd/agentapi/**`、`internal/agent/**` | B7 | L1、L4、L14、L15 |
 | `agent-platform` | `internal/agent/**`、`internal/flock/**`、`internal/dataplane/userspace/relay/**`、`internal/dataplane/userspace/tunnel/**`、`cmd/wgft/**`、`*_windows.go`、`*_darwin.go` | B4、B8 | L1、L14 |
 | `deploy` | `deploy/*.service`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
@@ -60,7 +60,7 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 
 CI (`.github/workflows/ci.yml`) は、ホストで完結する A1 から A8 と、B 類のうち GitHub の runner で動くものを、変更の内容に応じて流します。ラボの結合テストは Incus の VM を必要とするので、CI では流しません ([CLAUDE.md](../CLAUDE.md) の「テストの分け方」)。ラボの一式 (A9) と、ラボを使う B 類は、PR を出す開発者がラボで流し、その結果を PR の本文に書きます。
 
-ラボのスクリプトは、どれも自分で server、エージェント、宛先を立てて片付けるので、互いに独立しています。この独立性があるので、ラボの一式は並列に流せます。既定の流し方は、1 台の Lab Host VM の中に Sandbox を並べる [tools/labhost](../tools/labhost) です。`labhost run -parallel N all` は、前節の `parallel` な確認をプールで並列に流し、そのあと `exclusive-*` な確認を 1 つずつ流します。1 台の Lab Host VM で一式を流すと 約 5 分半 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は 338 秒)かかります。複数の使い捨て VM に分けて流す道具もあり、8 台で約 2.5 分に縮みますが、リポジトリには含めていません。`lab/lab` は `WGFT_LAB_VM` で VM の名前を変えられるので、同じ仕組みで複数の VM を立てられます。どちらの道具も使わない開発者は、1 台の VM で確認を 1 つずつ順に流せます。その場合は 10 分以上かかります。`lab/lifecycle.sh` の check 5、5b、5c、5d、5e と `rates.sh` はどれもフラッドで CPU を使うので、複数の VM に分ける流し方では他の VM と CPU を取り合わない VM で流し、Sandbox で流す場合は `exclusive-heavy` の分類が単独の実行に振り分けます。
+ラボのスクリプトは、どれも自分で server、エージェント、宛先を立てて片付けるので、互いに独立しています。この独立性があるので、ラボの一式は並列に流せます。既定の流し方は、1 台の Lab Host VM の中に Sandbox を並べる [tools/labhost](../tools/labhost) です。`labhost run -parallel N all` は、前節の `parallel` な確認をプールで並列に流し、そのあと `exclusive-*` な確認を 1 つずつ流します。1 台の Lab Host VM で一式を流すと 約 5 分半以上 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は、L15 を加える前で 338 秒)かかります。複数の使い捨て VM に分けて流す道具もあり、8 台で約 2.5 分に縮みますが、リポジトリには含めていません。`lab/lab` は `WGFT_LAB_VM` で VM の名前を変えられるので、同じ仕組みで複数の VM を立てられます。どちらの道具も使わない開発者は、1 台の VM で確認を 1 つずつ順に流せます。その場合は 10 分以上かかります。`lab/lifecycle.sh` の check 5、5b、5c、5d、5e と `rates.sh` はどれもフラッドで CPU を使うので、複数の VM に分ける流し方では他の VM と CPU を取り合わない VM で流し、Sandbox で流す場合は `exclusive-heavy` の分類が単独の実行に振り分けます。
 
 開発の途中でラボの確認を流し直すときは、`lab/lifecycle.sh` に確認の番号を指定して、その確認だけを流せます (`lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b`)。
 
@@ -134,7 +134,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | コードを変える PR | PR の更新ごと | 1 分前後 | 自動 |
 | A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 数分 | 自動 |
 | A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力 | CI (Linux) | すべての PR | PR の更新ごと | 1 分未満 | 自動 |
-| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L14。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。7a.8 節の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | Sandbox で 約 5 分半 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は 338 秒)、複数の VM で並列に約 2.5 分、1 台で順に 10 分以上 | 自動 (開発者が起動) |
+| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L15。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。7a.8 節の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | Sandbox で 約 5 分半以上 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は、L15 を加える前で 338 秒)、複数の VM で並列に約 2.5 分から 3 分 (3 台で約 185 秒)、1 台で順に 10 分以上 | 自動 (開発者が起動) |
 
 ### ラボの一式の内訳
 
@@ -154,6 +154,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | L12 | `lab/import-export.sh` (kernel と userspace) | Web UI の書き出しと読み込みの形式の食い違い、確認後の変更の見落とし | ラボ | `rule-ops` | A9 として | 約 20 秒 | 自動 |
 | L13 | `lab/ipv6.sh` (kernel と userspace) | IPv6 の送信元が deny をすり抜けること、IPv6 のフラッドが集約のレートのトークンを使うこと | ラボ (IPv6 を加えた netns) | `admission`、`relay` | A9 として | モードごとに約 25 秒 | 自動 |
 | L14 | `lab/lifecycle.sh` check 10 (kernel と userspace) | エージェントの停止後も、`agent ls` と Web UI の一覧が最後のハートビートを生きた状態のまま示すこと (design.md の 5.2 節) | ラボ | `rule-ops`、`protocol`、`agent-platform` | A9 として | モードごとに約 1 秒から 2 秒 | 自動 |
+| L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと (design.md の 5.1 節) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 単独で kernel モードは約 5 秒、userspace モードは約 40 秒 (userspace は server の再起動の後のトンネルの張り直しを待つ)。kernel モードの約 5 秒は、保持していたテーブルの削除の通知ですぐに公開し直す最善の場合です。通知で公開し直さなければ 30 秒ごとの再試行を待ち、確認はその待ちに 40 秒を許します | 自動 |
 
 ### B 類 (関係する変更の関門)
 

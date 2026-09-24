@@ -110,8 +110,8 @@ func registerAgent(t *testing.T, s *Store, name string) {
 	}
 }
 
-// agents に行が無いエージェント(無効化の後に残った警告)の ip-mismatch は、消すだけで組を残さない。
-// 無効化は組を消すので、ここで組を残すと無効化の後に誰のものでもない組が残り続ける。
+// agents に行が無いエージェント(削除の後に残った警告)の ip-mismatch は、消すだけで組を残さない。
+// 削除は組を消すので、ここで組を残すと削除の後に誰のものでもない組が残り続ける。
 func TestDismissIPMismatchUnregisteredAgentLeavesNoAck(t *testing.T) {
 	s := openTemp(t)
 	if err := s.AddWarning("gone", WarnIPMismatch, IPMismatchDetail("198.51.100.7", "203.0.113.9")); err != nil {
@@ -186,7 +186,7 @@ func TestWarningAckSurvivesReopen(t *testing.T) {
 	}
 }
 
-// エージェントの無効化は、そのエージェントの確認済みの組を消す。他のエージェントの分は残す。
+// エージェントの削除は、そのエージェントの確認済みの組を消す。他のエージェントの分は残す。
 func TestRevokeDeletesWarningAcks(t *testing.T) {
 	s := openTemp(t)
 	pfx := netip.MustParsePrefix("10.200.0.0/24")
@@ -214,7 +214,7 @@ func TestRevokeDeletesWarningAcks(t *testing.T) {
 	}
 }
 
-// 1 つ前の版(v7)の DB を開くと v8 に上がり、既存の警告を保ったまま確認済みの組を記録できる。
+// v7 の DB を開くと最新の版に上がり、既存の警告を保ったまま確認済みの組を記録できる。
 func TestMigrationFromV7AddsWarningAcks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wgft.sqlite")
 	dsn, err := sqliteDSN(path)
@@ -245,8 +245,8 @@ func TestMigrationFromV7AddsWarningAcks(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 8 {
-		t.Fatalf("user_version = %d, %v; want 8", version, err)
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) {
+		t.Fatalf("user_version = %d, %v; want %d", version, err, len(migrations))
 	}
 	if ws, _ := s.AgentWarnings("home"); len(ws) != 1 {
 		t.Fatalf("warnings after migration = %+v", ws)
@@ -262,14 +262,15 @@ func TestMigrationFromV7AddsWarningAcks(t *testing.T) {
 // 判定を、移行の数を 7 に絞って確かめる。
 func TestV8DatabaseIsNewerForV7Binary(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wgft.sqlite")
+	saved := migrations
+	defer func() { migrations = saved }()
+	migrations = saved[:8]
 	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
-	saved := migrations
-	migrations = migrations[:7]
-	defer func() { migrations = saved }()
+	migrations = saved[:7]
 	_, err = Open(path)
 	if err == nil || err.Error() != fmt.Sprintf("%v: version 8, while this binary supports up to 7", ErrSchemaNewer) {
 		t.Fatalf("Open with 7 migrations = %v, want ErrSchemaNewer for version 8", err)

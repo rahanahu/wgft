@@ -30,7 +30,12 @@ type Agent struct {
 	PublicKey      string // base64。未接続なら空
 	CreatedAt      time.Time
 	RegisteredFrom string
+	// DisabledAt は無効にした時刻(仕様 5.1 節)。ゼロ値は有効を表す。
+	DisabledAt time.Time
 }
+
+// Disabled はエージェントが無効か(仕様 5.1 節)。
+func (a *Agent) Disabled() bool { return !a.DisabledAt.IsZero() }
 
 // ErrInvalidToken はトークンが無効(未知、使用済み、期限切れ、名前違い)。
 // 理由を分けて返すと総当たりの手がかりになるので、外向きには 1 つにまとめる。
@@ -56,7 +61,7 @@ func tokenHash(token string) []byte {
 }
 
 // IssueJoinToken は名前に紐付いた 1 回限りの登録トークンを発行する。
-// 同じ名前のエージェントがすでにいれば拒否する(無効化して名前を空けてから発行する)。
+// 同じ名前のエージェントがすでにいれば拒否する(削除して名前を空けてから発行する)。
 // 同じ名前に対する以前の未使用トークンはすべて無効化し、新しく発行した 1 本だけを有効にする
 // (発行し直した後は、古い接続文字列が残っていても登録に使えない)。
 func (s *Store) IssueJoinToken(agent string, ttl time.Duration) (string, error) {
@@ -158,7 +163,7 @@ func (s *Store) Register(joinToken, name, from string, network netip.Prefix) (pe
 }
 
 // allocateAddress は network(10.200.0.0/24)の .2 以降で、使われていない最小のアドレスを返す。
-// 無効化で回収されたアドレスは再利用される。
+// 削除で回収されたアドレスは再利用される。
 func allocateAddress(q querier, network netip.Prefix) (netip.Addr, error) {
 	rows, err := q.Query("SELECT address FROM agents")
 	if err != nil {
@@ -230,16 +235,18 @@ func (s *Store) AgentByName(name string) (*Agent, error) {
 
 func (s *Store) agentBy(where string, arg any) (*Agent, error) {
 	var (
-		a       Agent
-		addr    string
-		pub     sql.NullString
-		created int64
+		a        Agent
+		addr     string
+		pub      sql.NullString
+		created  int64
+		disabled sql.NullInt64
 	)
-	err := s.db.QueryRow("SELECT name, address, public_key, created_at, registered_from FROM agents WHERE "+where, arg).
-		Scan(&a.Name, &addr, &pub, &created, &a.RegisteredFrom)
+	err := s.db.QueryRow("SELECT name, address, public_key, created_at, registered_from, disabled_at FROM agents WHERE "+where, arg).
+		Scan(&a.Name, &addr, &pub, &created, &a.RegisteredFrom, &disabled)
 	if err != nil {
 		return nil, err
 	}
+	a.DisabledAt = disabledTime(disabled)
 	// a.Address feeds the wg peer AllowedIPs and the admin API/UI directly (vpsd.go's agents(),
 	// admin_backend.go's Agents()). A row that cannot be parsed must not silently become the zero
 	// address and flow into that plan as if it were a real, unused address (design.md 10.5 節).
@@ -253,7 +260,7 @@ func (s *Store) agentBy(where string, arg any) (*Agent, error) {
 
 // Agents は登録済みのエージェントを名前順で返す。
 func (s *Store) Agents() ([]Agent, error) {
-	rows, err := s.db.Query("SELECT name, address, public_key, created_at, registered_from FROM agents ORDER BY name")
+	rows, err := s.db.Query("SELECT name, address, public_key, created_at, registered_from, disabled_at FROM agents ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -261,14 +268,16 @@ func (s *Store) Agents() ([]Agent, error) {
 	var out []Agent
 	for rows.Next() {
 		var (
-			a       Agent
-			addr    string
-			pub     sql.NullString
-			created int64
+			a        Agent
+			addr     string
+			pub      sql.NullString
+			created  int64
+			disabled sql.NullInt64
 		)
-		if err := rows.Scan(&a.Name, &addr, &pub, &created, &a.RegisteredFrom); err != nil {
+		if err := rows.Scan(&a.Name, &addr, &pub, &created, &a.RegisteredFrom, &disabled); err != nil {
 			return nil, err
 		}
+		a.DisabledAt = disabledTime(disabled)
 		// agentBy と同じ理由(上のコメント参照): 読めないアドレスを零値のまま先へ進めない。
 		if a.Address, err = netip.ParseAddr(addr); err != nil {
 			return nil, fmt.Errorf("agent %s: stored address %q: %w", a.Name, addr, err)
@@ -286,9 +295,12 @@ func (s *Store) SetAgentPublicKey(name, publicKey string) error {
 	return err
 }
 
-// RevokeAgent は恒久トークンを無効化する(エージェントの行ごと消し、アドレスを回収する。仕様 11 節)。
-// 名前は新しい接続文字列で再利用できる。その名前に対して発行済みの未使用トークンも合わせて
-// 無効化するので、無効化の前に発行され、まだ使われていない古い接続文字列では登録できない。
+// RevokeAgent はエージェントを削除する(英語は revoke。仕様 5.1、11 節)。エージェントの行ごと消すので、
+// 恒久トークンは使えなくなり、アドレスは回収され、無効の印(disabled_at)も行と一緒に消える。
+// 名前は新しい接続文字列で再利用でき、登録し直したエージェントは有効から始まる。その名前に対して
+// 発行済みの未使用トークンも合わせて無効化するので、削除の前に発行され、まだ使われていない古い
+// 接続文字列では登録できない。エージェントの無効化(SetAgentDisabled)とは別の操作であり、
+// 無効化は行もトークンも消さない。
 func (s *Store) RevokeAgent(name string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -306,7 +318,7 @@ func (s *Store) RevokeAgent(name string) error {
 	if _, err := tx.Exec("DELETE FROM join_tokens WHERE agent = ? AND used_at IS NULL", name); err != nil {
 		return err
 	}
-	// 確認済みの組は、無効化したエージェントの分を残さない(仕様 5.2 節)
+	// 確認済みの組は、削除したエージェントの分を残さない(仕様 5.2 節)
 	if _, err := tx.Exec("DELETE FROM warning_acks WHERE agent = ?", name); err != nil {
 		return err
 	}

@@ -34,7 +34,7 @@ func TestRepoManifestIsValid(t *testing.T) {
 			heavy++
 		}
 	}
-	// 既定の一式は、両モードの e2e と ipv6 と rates と lifecycle の 15 個の確認、
+	// 既定の一式は、両モードの e2e と ipv6 と rates と lifecycle の 16 個の確認、
 	// それに split-merge、import-export、connlimit
 	want := []string{
 		"e2e.sh kernel", "e2e.sh userspace", "ipv6.sh kernel", "ipv6.sh userspace",
@@ -42,7 +42,7 @@ func TestRepoManifestIsValid(t *testing.T) {
 		"rates.sh kernel", "rates.sh userspace",
 	}
 	for _, mode := range []string{"kernel", "userspace"} {
-		for _, c := range []string{"1", "2", "3", "3b", "4", "5", "5b", "5c", "5d", "5e", "6", "7", "8", "9", "10"} {
+		for _, c := range []string{"1", "2", "3", "3b", "4", "5", "5b", "5c", "5d", "5e", "6", "7", "8", "9", "10", "11"} {
 			want = append(want, "lifecycle.sh "+mode+" "+c)
 		}
 	}

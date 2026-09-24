@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-// Rules / Generation / Agents / JoinString / Revoke は admin.Backend の実装。
+// Rules / Generation / Agents / JoinString / Revoke / DisableAgent / EnableAgent は admin.Backend の実装。
 // 操作名を付けて包むのは、admin.go の 500 応答が err.Error() をそのまま本文にするため。
 // 包まないと運用者は "database is locked" のような文言だけを見て、どの読み取りが失敗したか分からない。
 func (d *Daemon) Rules() ([]proto.Rule, error) {
@@ -62,7 +62,11 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 	out := make([]admin.AgentInfo, 0, len(list))
 	for _, a := range list {
 		info := admin.AgentInfo{Name: a.Name, Address: a.Address.String(), PublicKey: a.PublicKey,
-			RegisteredFrom: a.RegisteredFrom, CreatedAt: a.CreatedAt.Format(time.RFC3339)}
+			RegisteredFrom: a.RegisteredFrom, CreatedAt: a.CreatedAt.Format(time.RFC3339), Disabled: a.Disabled()}
+		if a.Disabled() {
+			// created_at と同じく server のローカルの時差で書く(同じ行のタイムスタンプを揃える)
+			info.DisabledAt = a.DisabledAt.Format(time.RFC3339)
+		}
 		// ハートビートの状態と遅れの始まりは、hub の hookLock の中で組として読む。別々に読むと、
 		// ハートビートが状態を更新した後、遅れの始まりを記録する前の途中を読み、古い世代なのに
 		// 始まりが無い形(始まりを返さない旧い server と同じ形)を返してしまう。doctor はその形を
@@ -157,7 +161,8 @@ func (d *Daemon) JoinString(name string) (admin.JoinStringResponse, error) {
 	}, nil
 }
 
-// Revoke は恒久トークンを無効化し、ピアを消し、アドレスを回収する(仕様 11 節)。
+// Revoke はエージェントを削除する(英語は revoke。仕様 5.1、11 節)。恒久トークンを使えなくし、ピアを消し、
+// アドレスを回収する。エージェントの行ごと消すので、無効の印も消える。
 // そのエージェントのルールは残るが、行を持たなくなる。中継は CloseAgent で閉じ、ピアと nftables は
 // 1 つのトランザクション(applyNFT)で消す。ピアはテーブルの差し替えの後に外れる(設計文書 7a.3 節)。
 func (d *Daemon) Revoke(name string) error {
@@ -189,7 +194,7 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, agentAddr, err := d.agents()
+	_, agentAddr, _, err := d.agents()
 	if err != nil {
 		return nil, err
 	}
@@ -259,15 +264,16 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 		log.Printf("rules: %s: applying the data plane failed: %v", opOrAPI(req.Op), err)
 		return nil, err
 	}
-	if res.Changed {
-		go d.hub.PushAll()
-	}
+	// 配信は apply が、公開した世代が進んだときに行う
 	return res, nil
 }
 
-// AgentState はそのエージェントに配る全体状態(仕様 5.2 節)。
+// AgentState はそのエージェントに配る全体状態(仕様 5.2 節)。無効なエージェント(仕様 5.1 節)には、
+// ルールをすべて enabled:false の写しにして配り、AgentDisabled を載せる。保存値には触れない。
+// エージェントは既存の enabled の扱いでリスナーとセッションを閉じるので、無効化を知らない旧い版の
+// エージェントも止まる。AgentDisabled は診断のためのもので、守りには使わない。
 func (d *Daemon) AgentState(agent string) (*proto.State, error) {
-	_, agentAddr, err := d.agents()
+	_, agentAddr, disabled, err := d.agents()
 	if err != nil {
 		return nil, err
 	}
@@ -292,11 +298,12 @@ func (d *Daemon) AgentState(agent string) (*proto.State, error) {
 			Address: netip.PrefixFrom(addr, wgAddr.Bits()).String(), MTU: d.opts.MTU, Keepalive: 25,
 			UDPTimeout: timeouts.Timeout, UDPTimeoutStream: timeouts.TimeoutStream,
 		},
-		Rules: []proto.AgentRule{},
+		Rules:         []proto.AgentRule{},
+		AgentDisabled: disabled[agent],
 	}
 	for i := range rules {
 		if rules[i].Agent == agent {
-			st.Rules = append(st.Rules, rules[i].ForAgent())
+			st.Rules = append(st.Rules, store.DeliveredRule(&rules[i], disabled[agent]))
 		}
 	}
 	return st, nil
@@ -344,13 +351,18 @@ func (d *Daemon) CheckConnectivity(ruleID string) (admin.ConnCheck, error) {
 	if !r.Enabled {
 		return admin.ConnCheck{}, fmt.Errorf("cannot check a disabled rule")
 	}
-	_, agentAddr, err := d.agents()
+	_, agentAddr, disabled, err := d.agents()
 	if err != nil {
 		return admin.ConnCheck{}, err
 	}
 	addr, ok := agentAddr[r.Agent]
 	if !ok {
 		return admin.ConnCheck{}, fmt.Errorf("agent %q is not registered", r.Agent)
+	}
+	// 無効なエージェントのルールは、無効なルールと同じく拒む(仕様 5.1 節)。転送していないルールを
+	// 確かめても、失敗の理由が経路の故障に見えるだけである
+	if disabled[r.Agent] {
+		return admin.ConnCheck{}, fmt.Errorf("cannot check a rule of a disabled agent: agent %s is disabled", r.Agent)
 	}
 	res := d.dp.CheckConnectivity(net.JoinHostPort(addr.String(), strconv.Itoa(int(r.ListenPort.Lo))))
 	return admin.ConnCheck{OK: res.OK, Reach: res.Reach, Detail: res.Detail}, nil

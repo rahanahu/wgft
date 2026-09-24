@@ -35,8 +35,8 @@ lab/lab exec vm bash /wgft/lab/rates.sh kernel   # 3 つのレートと Relay �
 lab/lab exec vm bash /wgft/lab/connlimit.sh      # カーネルモードの接続元 IP ごとの同時フロー数の上限(ct count)。userspace には無い機能なので kernel だけ
 lab/lab exec vm bash /wgft/lab/split-merge.sh kernel   # Web UI の分割・統合。流れている UDP セッションが切れないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/import-export.sh kernel # Web UI の書き出しと読み込み。確認画面の差分、確認後の変更による適用の拒否を確認。userspace も同じ
-lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、ルールの増減、撤去、プロキシの bind 失敗、既定と半分の予算下でのメモリ、Resource Guard のルール間の隔離、ルール単位/backend 全体の適用失敗と再試行を確認。userspace も同じ
-lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10)を並べると、その確認だけを流す
+lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、ルールの増減、撤去、プロキシの bind 失敗、既定と半分の予算下でのメモリ、Resource Guard のルール間の隔離、ルール単位/backend 全体の適用失敗と再試行、エージェントの無効化と有効化を確認。userspace も同じ
+lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10 11)を並べると、その確認だけを流す
 lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定するポートに届かず、集約のレートのトークンも使わないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/version-skew.sh         # 版の組み合わせ(新旧の server・agent、legacy v0)。旧いバイナリは GitHub の Releases から取得しキャッシュする(スクリプト冒頭のコメント参照)
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel       # 旧版からの更新(D4)。既定は直前のリリース(v0.6.0)のデータに現在のビルドを重ね、ルール・鍵・認証情報が保たれ、転送が戻ることを確認。WGFT_UPGRADE_OLD_VERSION=0.4.0 を付けると、release notes が更新を約束するもう一方の版でも同じ確認を流せる。userspace も同じ
