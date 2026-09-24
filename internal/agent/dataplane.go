@@ -72,7 +72,8 @@ type preparer interface {
 // 持つ(仕様 7b.2 節の名前の解決し直し、7b.4 節の外からの変更)。見直しは 2 つに分かれる。
 // observePrepare は名前の解決だけを行い、rt.mu の外で呼ぶ。DNS を待つ間に排他を持たないためである。
 // observeCommit は rt.mu を持って呼び、observePrepare の結果で公開し直すかを決める。saved が真なら
-// 呼び出し側が認証情報ファイルを保存する。
+// 呼び出し側が認証情報ファイルを保存する。err が nil でなくても saved が真なら保存する。誤りのログは
+// observeCommit が出す。
 type observer interface {
 	observePrepare(rules []proto.AgentRule) any
 	observeCommit(gen uint64, rules []proto.AgentRule, prepared any) (saved bool, err error)

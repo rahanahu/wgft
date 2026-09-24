@@ -312,8 +312,10 @@ func (rt *runtime) observe() {
 	if rt.f.LastState != st || rt.pendingSt != nil || !rt.dp.built() {
 		return
 	}
-	saved, err := ob.observeCommit(st.Generation, st.Rules, prepared)
-	if err != nil || !saved {
+	// 誤りは observeCommit が出す。誤りがあっても記録が変わっていれば保存する。引き直したエンドポイントの
+	// 収束に失敗した見直しも、表を公開し直していることがあるためである
+	saved, _ := ob.observeCommit(st.Generation, st.Rules, prepared)
+	if !saved {
 		return
 	}
 	notifyNonBlocking(rt.stateNotify)

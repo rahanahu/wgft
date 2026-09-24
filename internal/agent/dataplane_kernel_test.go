@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -57,12 +58,26 @@ type fakeKernel struct {
 	forwardWriteEr error
 	forwardWrites  int
 	local          map[netip.Addr]bool
+	// datagrams は keepalive ごとのデータグラムの宛先である。別の goroutine が送るので、mu が守る
+	datagrams []netip.AddrPort
+	// sendErr は、設定すればデータグラムの n 回目(0 から)の送信の誤りを返す。mu が守る
+	sendErr func(n int) error
+	// route は vpsd のトンネルアドレスへの経路が出るインタフェースである。空なら wgft0
+	route    string
+	routeErr error
+	// onEnsure は、設定すれば wgft0 の収束が成功したときに呼ばれる
+	onEnsure func()
+	// lookups は引いた名前の記録である
+	lookups []string
 }
 
 func (k *fakeKernel) ops() kernelOps {
 	return kernelOps{
 		ensureLink: func(cfg wg.AgentConfig) ([]string, error) {
 			k.ensured = append(k.ensured, cfg)
+			if k.ensureErr == nil && k.onEnsure != nil {
+				k.onEnsure()
+			}
 			return nil, k.ensureErr
 		},
 		inspectLink: func(string, wgtypes.Key, wgtypes.Key) (wg.AgentState, error) { return k.link, k.linkErr },
@@ -87,6 +102,9 @@ func (k *fakeKernel) ops() kernelOps {
 			return fmt.Sprintf("fp-%d-%d", k.tableGen, k.tableEdit), true, nil
 		},
 		lookup: func(_ context.Context, host string) ([]netip.Addr, error) {
+			k.mu.Lock()
+			k.lookups = append(k.lookups, host)
+			k.mu.Unlock()
 			if k.dnsErr != nil {
 				return nil, k.dnsErr
 			}
@@ -112,7 +130,22 @@ func (k *fakeKernel) ops() kernelOps {
 			return nil
 		},
 		localAddrs: func() (map[netip.Addr]bool, error) { return k.local, nil },
-		now:        func() time.Time { return time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC) },
+		sendDatagram: func(dst netip.AddrPort) error {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			k.datagrams = append(k.datagrams, dst)
+			if k.sendErr != nil {
+				return k.sendErr(len(k.datagrams) - 1)
+			}
+			return nil
+		},
+		routeIface: func(netip.Addr) (string, error) {
+			if k.route == "" {
+				return "wgft0", k.routeErr
+			}
+			return k.route, k.routeErr
+		},
+		now: func() time.Time { return time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC) },
 	}
 }
 
@@ -128,6 +161,7 @@ func newTestKernel(t *testing.T, k *fakeKernel, f *credentials.Credentials, allo
 	if _, err := d.build(testKey(t), testWG(t)); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(d.close)
 	return d
 }
 
@@ -1006,5 +1040,468 @@ func TestKernelObserveSameLookupErrorFromANewPortSavesNothing(t *testing.T) {
 	}
 	if strings.Contains(string(f.KernelPublication), "->") {
 		t.Errorf("the recorded reason keeps the socket pair: %s", f.KernelPublication)
+	}
+}
+
+// keepalive ごとに、vpsd のトンネルアドレスのポート 9 へデータグラムを 1 つ送る。close で止まり、
+// build で立て直す。keepalive が 0 なら送らない(7b.1 節のセッションの回復)。
+func TestKernelSendsTheKeepaliveDatagram(t *testing.T) {
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, nil, nil)
+	d.close()
+	d.kaUnit = 10 * time.Millisecond
+	if _, err := d.build(d.priv, testWG(t)); err != nil { // keepalive 25 → 250 ms
+		t.Fatal(err)
+	}
+	count := func() int {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		return len(k.datagrams)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for count() < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	k.mu.Lock()
+	got := append([]netip.AddrPort(nil), k.datagrams...)
+	k.mu.Unlock()
+	if len(got) < 2 || got[0] != netip.MustParseAddrPort("10.200.0.1:9") {
+		t.Fatalf("datagrams = %v, want repeated datagrams to 10.200.0.1:9", got)
+	}
+	d.close()
+	time.Sleep(50 * time.Millisecond)
+	stopped := count()
+	time.Sleep(600 * time.Millisecond)
+	if count() != stopped {
+		t.Error("datagrams kept going after close")
+	}
+	w := testWG(t)
+	w.Keepalive = 0
+	if _, err := d.build(d.priv, w); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if count() != stopped {
+		t.Error("a keepalive of 0 sent datagrams")
+	}
+}
+
+// ハンドシェイクが keepalive の 5 倍の間新しくならなければ、次の見直しがエンドポイントの名前を引き直し、
+// アドレスが変わっていれば wgft0 のピアへ設定する。引き直した後は、さらに 5 倍の間は引かない(7b.1 節)。
+func TestKernelReResolvesTheEndpointWithoutHandshakes(t *testing.T) {
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
+	d := newTestKernel(t, k, nil, nil)
+	d.ops.now = func() time.Time { return now }
+	w := testWG(t)
+	w.Endpoint = "vps.example:51820"
+	if _, err := d.build(d.priv, w); err != nil {
+		t.Fatal(err)
+	}
+	k.link = ours(t, d)
+	if _, err := d.applyRules(1, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := k.ensured[len(k.ensured)-1].Server.Endpoint; got != netip.MustParseAddrPort("203.0.113.1:51820") {
+		t.Fatalf("first endpoint %s", got)
+	}
+	k.link = ours(t, d)
+	lookups := 0
+	lookup := d.ops.lookup
+	d.ops.lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		lookups++
+		return lookup(ctx, host)
+	}
+	observeOnce(t, d, 1, nil) // ハンドシェイクを見始める
+	now = now.Add(100 * time.Second)
+	observeOnce(t, d, 1, nil)
+	if lookups != 0 {
+		t.Fatalf("looked up the endpoint %d times before 5 times the keepalive", lookups)
+	}
+	k.dns["vps.example"] = []netip.Addr{netip.MustParseAddr("203.0.113.7")}
+	now = now.Add(25 * time.Second) // ちょうど 125 秒で引き直す
+	observeOnce(t, d, 1, nil)       // 印を付ける
+	ensured := len(k.ensured)
+	observeOnce(t, d, 1, nil) // 引き直す
+	if lookups != 1 || len(k.ensured) != ensured+1 {
+		t.Fatalf("lookups %d, convergences %d; want one lookup and one convergence", lookups, len(k.ensured)-ensured)
+	}
+	if got := k.ensured[len(k.ensured)-1].Server.Endpoint; got != netip.MustParseAddrPort("203.0.113.7:51820") {
+		t.Errorf("converged to endpoint %s, want the new address", got)
+	}
+	now = now.Add(30 * time.Second)
+	observeOnce(t, d, 1, nil)
+	observeOnce(t, d, 1, nil)
+	if lookups != 1 {
+		t.Errorf("looked up again %d times within 5 times the keepalive after a re-resolution", lookups-1)
+	}
+	// 新しいハンドシェイクがあれば引き直さない
+	link := ours(t, d)
+	link.Peers[0].LastHandshake = now
+	k.link = link
+	now = now.Add(200 * time.Second)
+	observeOnce(t, d, 1, nil)
+	observeOnce(t, d, 1, nil)
+	if lookups != 1 {
+		t.Error("looked up the endpoint although a new handshake was seen")
+	}
+}
+
+// keepalive が 0 の設定では、ハンドシェイクが途絶えてもエンドポイントを引き直さない。5 倍の期間が 0 に
+// なり、見直しのたびに名前を引くことになるためである(7b.1 節)。
+func TestKernelDoesNotReResolveWithAKeepaliveOfZero(t *testing.T) {
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
+	d := newTestKernel(t, k, nil, nil)
+	d.ops.now = func() time.Time { return now }
+	w := testWG(t)
+	w.Endpoint = "vps.example:51820"
+	w.Keepalive = 0
+	if _, err := d.build(d.priv, w); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.applyRules(1, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	k.link = ours(t, d)
+	lookups := 0
+	lookup := d.ops.lookup
+	d.ops.lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		lookups++
+		return lookup(ctx, host)
+	}
+	for i := 0; i < 4; i++ {
+		observeOnce(t, d, 1, nil)
+		now = now.Add(200 * time.Second)
+	}
+	if lookups != 0 {
+		t.Errorf("looked up the endpoint %d times with a keepalive of 0", lookups)
+	}
+}
+
+// 引き直せなかったエンドポイントは、控えたアドレスを使い続ける。
+func TestKernelKeepsTheCachedEndpointWhenReResolutionFails(t *testing.T) {
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
+	d := newTestKernel(t, k, nil, nil)
+	d.ops.now = func() time.Time { return now }
+	w := testWG(t)
+	w.Endpoint = "vps.example:51820"
+	if _, err := d.build(d.priv, w); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.applyRules(1, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	k.link = ours(t, d)
+	observeOnce(t, d, 1, nil)
+	now = now.Add(200 * time.Second)
+	k.dnsErr = errors.New("no route to the resolver")
+	ensured := len(k.ensured)
+	observeOnce(t, d, 1, nil)
+	observeOnce(t, d, 1, nil)
+	if got := d.cachedEndpoint(); got != netip.MustParseAddrPort("203.0.113.1:51820") {
+		t.Errorf("cached endpoint %s after a failed re-resolution, want the old address", got)
+	}
+	if n := len(k.ensured) - ensured; n != 0 {
+		t.Errorf("a failed re-resolution converged %s %d times", d.iface, n)
+	}
+}
+
+// vpsd のトンネルアドレスへの経路が wgft0 を通らなければ警告し、戻れば戻ったことを出す。起動は止めない。
+func TestKernelWarnsWhenTheRouteToTheServerLeavesElsewhere(t *testing.T) {
+	k := &fakeKernel{route: "tailscale0"}
+	d := newTestKernel(t, k, nil, nil)
+	if _, err := d.applyRules(1, nil, nil); err != nil {
+		t.Fatalf("a policy route stopped the apply: %v", err)
+	}
+	if !strings.Contains(d.routeFinding, "tailscale0") || !strings.Contains(d.routeFinding, "10.200.0.1") {
+		t.Errorf("finding = %q", d.routeFinding)
+	}
+	k.route = "wgft0"
+	k.link = ours(t, d)
+	observeOnce(t, d, 1, nil)
+	if d.routeFinding != "" {
+		t.Errorf("finding = %q after the route came back", d.routeFinding)
+	}
+	// 経路を引けないことも警告し、止めない
+	k.routeErr = errors.New("network is unreachable")
+	observeOnce(t, d, 1, nil)
+	if !strings.Contains(d.routeFinding, "cannot look up the route") || !strings.Contains(d.routeFinding, "network is unreachable") {
+		t.Errorf("finding = %q when the route lookup failed", d.routeFinding)
+	}
+}
+
+// syncBuffer は、別の goroutine が書くログを受ける。
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// データグラムを送れない間は、理由が変わったときだけ 1 行出す。net の書き込みの誤りは送るたびに送信元の
+// ポートが違うので、下層の errno で比べる。ピアにエンドポイントが無い間は、そのことを出し、鍵の寿命の
+// 話はしない(7b.1 節)。
+func TestKernelLogsAKeepaliveSendFailureOncePerReason(t *testing.T) {
+	var buf syncBuffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	sendErr := func(n int, errno syscall.Errno) error {
+		return &net.OpError{Op: "write", Net: "udp",
+			Source: net.UDPAddrFromAddrPort(netip.AddrPortFrom(netip.MustParseAddr("10.200.0.2"), uint16(40000+n))),
+			Addr:   net.UDPAddrFromAddrPort(netip.MustParseAddrPort("10.200.0.1:9")),
+			Err:    os.NewSyscallError("write", errno)}
+	}
+	k := &fakeKernel{}
+	k.sendErr = func(n int) error {
+		switch {
+		case n < 4:
+			return sendErr(n, syscall.EDESTADDRREQ)
+		case n < 8:
+			return sendErr(n, syscall.ENOKEY)
+		}
+		return nil
+	}
+	d := newTestKernel(t, k, nil, nil)
+	d.close()
+	d.kaUnit = 5 * time.Millisecond
+	if _, err := d.build(d.priv, testWG(t)); err != nil { // keepalive 25 → 125 ms
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		k.mu.Lock()
+		n := len(k.datagrams)
+		k.mu.Unlock()
+		if n >= 10 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	d.close()
+	time.Sleep(20 * time.Millisecond)
+	out := buf.String()
+	if n := strings.Count(out, "has no endpoint"); n != 1 {
+		t.Errorf("the missing endpoint was logged %d times, want once:\n%s", n, out)
+	}
+	if n := strings.Count(out, "required key not available"); n != 1 {
+		t.Errorf("the second reason was logged %d times, want once:\n%s", n, out)
+	}
+	if n := strings.Count(out, "is sent again"); n != 1 {
+		t.Errorf("the recovery was logged %d times, want once:\n%s", n, out)
+	}
+	if strings.Contains(out, "40001") || strings.Count(out, "keys expire") != 1 {
+		t.Errorf("the log repeats the source port or blames the keys for a missing endpoint:\n%s", out)
+	}
+}
+
+// 引き直しが成功したら、アドレスが同じでも wgft0 を収束させる。外から書き換えられたカーネルのピアの
+// エンドポイントはここで戻る。収束に失敗したら、次の見直しで引き直しと収束を試し直す(7b.1 節)。
+func TestKernelReResolutionConvergesUntilItSucceeds(t *testing.T) {
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
+	d := newTestKernel(t, k, nil, nil)
+	d.ops.now = func() time.Time { return now }
+	w := testWG(t)
+	w.Endpoint = "vps.example:51820"
+	if _, err := d.build(d.priv, w); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.applyRules(1, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	k.link = ours(t, d)
+	observeOnce(t, d, 1, nil)
+	// 同じアドレスでも収束させる
+	now = now.Add(200 * time.Second)
+	observeOnce(t, d, 1, nil) // 印を付ける
+	ensured := len(k.ensured)
+	observeOnce(t, d, 1, nil) // 引き直す
+	if len(k.ensured) != ensured+1 {
+		t.Fatalf("a re-resolution to the same address converged %s %d times, want once", d.iface, len(k.ensured)-ensured)
+	}
+	// 変わったアドレスの収束が 1 回失敗しても、次の見直しで収束させる
+	k.dns["vps.example"] = []netip.Addr{netip.MustParseAddr("203.0.113.7")}
+	now = now.Add(200 * time.Second)
+	observeOnce(t, d, 1, nil) // 印を付ける
+	k.ensureErr = errors.New("netlink: device busy")
+	if _, err := d.observeCommit(1, nil, d.observePrepare(nil)); err == nil {
+		t.Fatal("a failed convergence was not reported")
+	}
+	k.ensureErr = nil
+	ensured = len(k.ensured)
+	now = now.Add(30 * time.Second)
+	observeOnce(t, d, 1, nil)
+	if len(k.ensured) != ensured+1 || k.ensured[len(k.ensured)-1].Server.Endpoint != netip.MustParseAddrPort("203.0.113.7:51820") {
+		t.Errorf("after a failed convergence the next check converged %d times; want once to the new address", len(k.ensured)-ensured)
+	}
+}
+
+// 30 秒ごとの見直しが引き直すのは宣言のエンドポイントの名前であり、最後に解決できた名前ではない。
+func TestKernelReResolvesTheDeclaredEndpointName(t *testing.T) {
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	k := &fakeKernel{dns: map[string][]netip.Addr{"old.example": {netip.MustParseAddr("203.0.113.1")}}}
+	d := newTestKernel(t, k, nil, nil)
+	d.ops.now = func() time.Time { return now }
+	w := testWG(t)
+	w.Endpoint = "old.example:51820"
+	if _, err := d.build(d.priv, w); err != nil {
+		t.Fatal(err)
+	}
+	st := &proto.State{WG: w}
+	if _, err := d.applyRules(1, nil, d.prepareApply(st)); err != nil {
+		t.Fatal(err)
+	}
+	// 宣言が、まだ解決できない新しい名前に変わる。控えは旧い名前のアドレスのまま
+	w.Endpoint = "new.example:51820"
+	if _, err := d.build(d.priv, w); err != nil {
+		t.Fatal(err)
+	}
+	st = &proto.State{WG: w}
+	if _, err := d.applyRules(2, nil, d.prepareApply(st)); err != nil {
+		t.Fatal(err)
+	}
+	k.link = ours(t, d)
+	observeOnce(t, d, 2, nil)
+	now = now.Add(200 * time.Second)
+	k.dns["new.example"] = []netip.Addr{netip.MustParseAddr("203.0.113.9")}
+	k.lookups = nil
+	observeOnce(t, d, 2, nil) // 印を付ける
+	observeOnce(t, d, 2, nil) // 引き直す
+	if len(k.lookups) != 1 || k.lookups[0] != "new.example" {
+		t.Errorf("the check looked up %v, want the declared name new.example", k.lookups)
+	}
+	if got := d.cachedEndpoint(); got != netip.MustParseAddrPort("203.0.113.9:51820") {
+		t.Errorf("cached endpoint %s, want the declared name's address", got)
+	}
+}
+
+// 経路は wgft0 が宣言どおりになってから確かめる。wgft0 が消えている間の経路は既定経路へ出るが、それを
+// 警告しない(7b.1 節)。
+func TestKernelChecksTheRouteAfterRepairingWgft0(t *testing.T) {
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, nil, nil)
+	if _, err := d.applyRules(1, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// wgft0 が消え、経路は既定経路の eth0 へ出る。収束させると wgft0 へ戻る
+	k.link = wg.AgentState{}
+	k.route = "eth0"
+	k.onEnsure = func() { k.route = "" }
+	observeOnce(t, d, 1, nil)
+	if d.routeFinding != "" {
+		t.Errorf("warned about the route while %s was gone: %q", d.iface, d.routeFinding)
+	}
+	// 収束に失敗した間は経路を確かめない
+	k.route = "eth0"
+	k.ensureErr = errors.New("netlink: operation not permitted")
+	if _, err := d.observeCommit(1, nil, d.observePrepare(nil)); err == nil {
+		t.Fatal("a failed convergence was not reported")
+	}
+	if d.routeFinding != "" {
+		t.Errorf("warned about the route while %s could not be converged: %q", d.iface, d.routeFinding)
+	}
+}
+
+// 引き直したエンドポイントの収束に失敗し続けても、30 秒ごとの見直しは表の修復と経路の確認へ進み、誤りは
+// 最後に返す。印は残るので、次の見直しも引き直しと収束を試し直す(7b.1 節)。稼働中に現れた重なりで
+// 収束が書かずに失敗し続け、ハンドシェイクも途絶えている場合に当たる。
+func TestKernelObserveRepairsTheTableWhileTheEndpointCannotConverge(t *testing.T) {
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
+	d := newTestKernel(t, k, nil, nil)
+	d.ops.now = func() time.Time { return now }
+	w := testWG(t)
+	w.Endpoint = "vps.example:51820"
+	if _, err := d.build(d.priv, w); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.applyRules(1, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	k.link = ours(t, d)
+	observeOnce(t, d, 1, nil)
+	now = now.Add(200 * time.Second)
+	observeOnce(t, d, 1, nil) // 印を付ける
+	k.ensureErr = &wg.OverlapError{Interface: "wgft0", Range: netip.MustParsePrefix("10.200.0.0/24"),
+		What: "route 10.200.0.0/25 dev br0", Server: netip.MustParseAddr("10.200.0.1")}
+	k.route = "br0"
+	k.tableGone = true
+	published := len(k.published)
+	for i := 0; i < 10; i++ {
+		saved, err := d.observeCommit(1, nil, d.observePrepare(nil))
+		if err == nil {
+			t.Fatalf("check %d: the failed convergence was not reported", i)
+		}
+		if i == 0 && !saved {
+			t.Error("the check that published the table again did not ask to save the record")
+		}
+		now = now.Add(30 * time.Second)
+	}
+	if n := len(k.published) - published; n != 1 {
+		t.Errorf("the table was published again %d times over 10 checks, want once", n)
+	}
+	if !strings.Contains(d.routeFinding, "br0") {
+		t.Errorf("the route was not checked: finding %q", d.routeFinding)
+	}
+	d.epMu.Lock()
+	stale := d.endpointStale
+	d.epMu.Unlock()
+	if !stale {
+		t.Error("the mark was cleared although the convergence failed")
+	}
+}
+
+// runtime は、見直しが誤りを返しても記録が変わっていれば認証情報ファイルを保存し、ハートビートを送らせる。
+// 引き直したエンドポイントの収束に失敗した見直しも、表を公開し直していることがあるためである。
+func TestObserveSavesARepairThatAlsoReturnsAnError(t *testing.T) {
+	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
+	f := &credentials.Credentials{}
+	d := newTestKernel(t, k, f, nil)
+	d.ops.now = func() time.Time { return now }
+	w := testWG(t)
+	w.Endpoint = "vps.example:51820"
+	if _, err := d.build(d.priv, w); err != nil {
+		t.Fatal(err)
+	}
+	k.link = ours(t, d)
+	path := t.TempDir() + "/agent.json"
+	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
+	st := &proto.State{Generation: 1, WG: w}
+	rt.mu.Lock()
+	if err := rt.finishApplyLocked(st, nil); err != nil {
+		t.Fatal(err)
+	}
+	rt.mu.Unlock()
+	k.link = ours(t, d)
+	rt.observe()
+	now = now.Add(200 * time.Second)
+	rt.observe() // 印を付ける
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	k.ensureErr = errors.New("netlink: operation not permitted")
+	k.tableGone = true
+	rt.stateNotify = make(chan struct{}, 1)
+	rt.observe()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the repair was not saved: %v", err)
+	}
+	select {
+	case <-rt.stateNotify:
+	default:
+		t.Error("the repair did not ask for a heartbeat")
 	}
 }
