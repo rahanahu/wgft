@@ -25,6 +25,40 @@ type Credentials struct {
 	UsedJoinTokenSHA256 string       `json:"used_join_token_sha256"` // 使用済み登録トークンのハッシュ(仕様 5.1 節)
 	WGPrivateKey        string       `json:"wg_private_key"`         // base64
 	LastState           *proto.State `json:"last_state"`             // 最後に処理した全体状態
+
+	// Mode は転送の方式の記録である(仕様 9・11a 節)。起動のたびに設定の WGFT_MODE と照合する。
+	// 空はユーザー空間モードの記録とみなす。記録の無い既存のファイルはユーザー空間モードで動いてきたので、
+	// ユーザー空間モードのエージェントはこの項目を書かない
+	Mode string `json:"mode,omitempty"`
+	// PreviousWGPrivateKey は 1 つ前の wg の秘密鍵である(仕様 7b.4 節)。カーネルモードでだけ持つ。
+	// rotate-key の途中で落ちて鍵がずれた wgft0 や、停止中の rotate-key の後に古い鍵のまま残った
+	// wgft0 を、自分のものと判定するために使う。次に鍵を変えるまで残す。base64
+	PreviousWGPrivateKey string `json:"previous_wg_private_key,omitempty"`
+}
+
+// ModeKernel と ModeUserspace は Mode の値である(仕様 11a 節の WGFT_MODE と同じ語)。
+const (
+	ModeKernel    = "kernel"
+	ModeUserspace = "userspace"
+)
+
+// RecordedMode は記録されたモードである。記録が無ければユーザー空間モードとみなす(仕様 9 節)。
+func (f *Credentials) RecordedMode() string {
+	if f.Mode == "" {
+		return ModeUserspace
+	}
+	return f.Mode
+}
+
+// KeepPreviousKey は、今の鍵を 1 つ前の鍵として移す(仕様 7b.4 節)。今の鍵が空なら、1 つ前の鍵を
+// 空の値で上書きせずに残す。停止中の rotate-key を続けて 2 回実行した場合がこれに当たる。
+// カーネルモードの記録を持つファイルでだけ移す。ユーザー空間モードはカーネルに鍵を残さないので、
+// 1 つ前の鍵を持つ理由が無い。
+func (f *Credentials) KeepPreviousKey() {
+	if f.RecordedMode() != ModeKernel || f.WGPrivateKey == "" {
+		return
+	}
+	f.PreviousWGPrivateKey = f.WGPrivateKey
 }
 
 // Load はファイルを読む。なければ os.ErrNotExist。Windows では、この修正より前に緩い ACL の
