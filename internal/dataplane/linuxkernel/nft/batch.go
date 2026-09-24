@@ -28,7 +28,7 @@ const (
 	// exprBytes は式 1 つの上限。最も大きい式(set への add と、その中に入れるレートの式)でも
 	// この値に収まる。
 	exprBytes = 160
-	// elemBytes は set の要素 1 つの上限。要素はキーだけで、1 通にまとめて入る。
+	// elemBytes は set の要素 1 つの上限。map の要素の値を含めても収まる。
 	elemBytes = 48
 	// ackBytes は応答 1 通あたりにカーネルが受信キューで使う量の見積もり。ACK 自身は数十バイトだが、
 	// skb 1 つ分の管理領域が加わるため、この値で数える。
@@ -102,6 +102,11 @@ func (s *sizing) AddSet(set *nftables.Set, els []nftables.SetElement) error {
 		s.size.add(len(els) * elemBytes) // 要素は 1 通にまとめて入る
 	}
 	return s.to.AddSet(set, els)
+}
+
+func (s *sizing) SetAddElements(set *nftables.Set, els []nftables.SetElement) error {
+	s.size.add(len(els) * elemBytes)
+	return s.to.SetAddElements(set, els)
 }
 
 func (s *sizing) AddRule(r *nftables.Rule) *nftables.Rule {

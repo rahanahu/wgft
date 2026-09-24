@@ -43,6 +43,11 @@ func (r *recorder) AddSet(s *nftables.Set, els []nftables.SetElement) error {
 	r.sets[s.Name] = els
 	return nil
 }
+func (r *recorder) SetAddElements(s *nftables.Set, els []nftables.SetElement) error {
+	r.ops = append(r.ops, "SetAddElements "+s.Name)
+	r.sets[s.Name] = append(r.sets[s.Name], els...)
+	return nil
+}
 func (r *recorder) AddChain(c *nftables.Chain) *nftables.Chain {
 	r.ops = append(r.ops, "AddChain "+c.Name)
 	r.chains = append(r.chains, c.Name)
