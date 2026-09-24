@@ -451,10 +451,56 @@ func checkAgentOverlap(cfg AgentConfig) error {
 	if !overlap {
 		return nil
 	}
-	return fmt.Errorf("the agent's WireGuard address range %s overlaps %s on this host, which covers the server at %s, so traffic to the server would not go through %s. "+
+	return &OverlapError{Range: cfg.Address.Masked(), What: what, Server: cfg.Server.Address, Interface: cfg.Interface}
+}
+
+// OverlapError is EnsureAgent's refusal of an address range that overlaps an address or a route on
+// another interface (design.md 7b.1 節). It is a plain error, exit code 1. The agent tells it apart
+// because the first convergence of the process ends the process on it, and a later one retries.
+type OverlapError struct {
+	Range     netip.Prefix
+	What      string // the overlapping address or route and its interface
+	Server    netip.Addr
+	Interface string
+}
+
+func (e *OverlapError) Error() string {
+	return fmt.Sprintf("the agent's WireGuard address range %s overlaps %s on this host, which covers the server at %s, so traffic to the server would not go through %s. "+
 		"Remove that address or route from this host, or have the server's operator move the range with WGFT_WG_ADDRESS, "+
 		"which takes `wgft server teardown --purge` and registering the agents again",
-		cfg.Address.Masked(), what, cfg.Server.Address, cfg.Interface)
+		e.Range, e.What, e.Server, e.Interface)
+}
+
+// AgentPrivilegeRefusal turns a permission failure of a read the agent makes before converging,
+// such as AgentOwnership, into the same prerequisite refusal EnsureAgent returns. Other errors are
+// returned as they are.
+func AgentPrivilegeRefusal(err error) error {
+	return privilegeRefusal(err, agentPrivilegeFormat)
+}
+
+// AgentKeyHolders lists the WireGuard devices other than iface that hold current or previous
+// (design.md 7b.4 節). A link left under an old name after WGFT_WG_INTERFACE changed is one; the
+// agent warns about it at startup and never deletes it. The zero key matches nothing.
+func AgentKeyHolders(iface string, current, previous wgtypes.Key) ([]string, error) {
+	c, err := wgctrl.New()
+	if err != nil {
+		return nil, fmt.Errorf("wgctrl: %w", err)
+	}
+	defer c.Close()
+	devs, err := c.Devices()
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, d := range devs {
+		if d.Name == iface || d.Type != wgtypes.LinuxKernel {
+			continue
+		}
+		if judgeOwnership("wireguard", d.PrivateKey, current, previous).Ours() {
+			out = append(out, d.Name)
+		}
+	}
+	return out, nil
 }
 
 // agentDeviceDiff is the wgctrl part of EnsureAgent on a device already read: the configuration

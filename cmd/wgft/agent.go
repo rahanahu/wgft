@@ -49,6 +49,24 @@ func agentSpecs() []spec {
 	}, limitSpecs()...)
 }
 
+// logUnusedKernelLimits は、カーネルモードで同時フロー数の上限が設定されていれば、使わないことを
+// 1 行出す(設計文書 7b.1 節)。拒否にしないのは、モードを切り替えても同じ agent.env を使えるように
+// するためである。既定値のままなら何も出さない。
+func logUnusedKernelLimits(opts agent.Options, c *config) {
+	if opts.Mode != "kernel" {
+		return
+	}
+	var set []string
+	for _, env := range []string{"WGFT_MAX_UDP_FLOWS", "WGFT_MAX_TCP_FLOWS"} {
+		if c.source(env) != "default" {
+			set = append(set, env)
+		}
+	}
+	if len(set) > 0 {
+		log.Printf("%s: unused in kernel mode, where the host's conntrack holds the flows; the setting is kept so the same agent.env works in both modes", strings.Join(set, " and "))
+	}
+}
+
 // allowTargetsFromConfig は宛先の許可一覧を読む(仕様 7 節)。構文の誤りは、他の値の誤りと同じく
 // 入口での config の拒否として扱い、終了コード 3 で止める(設計文書 11b 節)。
 // 値が無ければ nil を返す(制限なし)。
@@ -168,6 +186,7 @@ On the VPS, against the admin API:
 			fmt.Fprintln(os.Stderr, "effective config:")
 			c.print(os.Stderr)
 			applyMemoryLimit(os.Stderr, opts.Limits, true)
+			logUnusedKernelLimits(opts, c)
 			return agent.Run(opts)
 		},
 	}

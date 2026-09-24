@@ -86,9 +86,9 @@ func TestReadConntrackUsage(t *testing.T) {
 }
 
 func TestIPForwardStatus(t *testing.T) {
-	// IPForwardPath is a package const, not a var, so this test only exercises the "already 1"
-	// and error paths against the real /proc file; the lab's e2e/lifecycle scripts exercise the
-	// actual write through server startup on a real kernel.
+	// This reads the real /proc file, so it only exercises the "already 1" and error paths; the
+	// lab's e2e/lifecycle scripts exercise the actual write through server startup on a real kernel.
+	// TestEnableIPForward covers EnableIPForward's decisions against a stand-in file.
 	value, openErr, err := IPForwardStatus()
 	if err != nil {
 		t.Skipf("cannot read %s: %v", IPForwardPath, err)
@@ -98,5 +98,48 @@ func TestIPForwardStatus(t *testing.T) {
 	}
 	if value == "1" && openErr != nil {
 		t.Errorf("openErr = %v, want nil when value is already 1", openErr)
+	}
+}
+
+// EnableIPForward は、0 を読んで 1 を書けたときだけ変えたと答える。値を読めなかった場合は、1 を書けても
+// 変えたとは答えない。0 だったとは言えず、wgft が変えたと記録してはいけないためである。
+func TestEnableIPForward(t *testing.T) {
+	cases := []struct {
+		name        string
+		content     string
+		mode        os.FileMode
+		wantChanged bool
+		wantErr     bool
+		wantAfter   string
+	}{
+		{"already 1", "1\n", 0o600, false, false, "1\n"},
+		{"0 is changed", "0\n", 0o600, true, false, "1\n"},
+		{"unreadable but writable", "0\n", 0o200, false, false, "1\n"},
+		{"read-only 0", "0\n", 0o400, false, true, "0\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if os.Geteuid() == 0 && c.mode != 0o600 {
+				t.Skip("root ignores the file mode")
+			}
+			path := filepath.Join(t.TempDir(), "ip_forward")
+			if err := os.WriteFile(path, []byte(c.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, c.mode); err != nil {
+				t.Fatal(err)
+			}
+			old := ipForwardPath
+			ipForwardPath = path
+			t.Cleanup(func() { ipForwardPath = old })
+			changed, err := EnableIPForward()
+			if changed != c.wantChanged || (err != nil) != c.wantErr {
+				t.Errorf("= %v, %v; want changed %v, error %v", changed, err, c.wantChanged, c.wantErr)
+			}
+			_ = os.Chmod(path, 0o600)
+			if b, _ := os.ReadFile(path); string(b) != c.wantAfter {
+				t.Errorf("file = %q, want %q", b, c.wantAfter)
+			}
+		})
 	}
 }

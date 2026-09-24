@@ -65,7 +65,7 @@ func (d *userspaceDataplane) built() bool { return d.tun != nil }
 
 // applyRules はリスナーを宣言に合わせる。変わったものだけを開閉する(仕様 5.2, 7 節)。
 // 開けなかったリスナーはルールの error として read に現れ、refresh が開き直す。
-func (d *userspaceDataplane) applyRules(rules []proto.AgentRule) (string, error) {
+func (d *userspaceDataplane) applyRules(_ uint64, rules []proto.AgentRule, _ any) (string, error) {
 	acts := d.rl.Apply(relay.DesiredFromRules(rules))
 	return fmt.Sprintf("%d actions, %d listeners", len(acts), len(d.rl.Status())), nil
 }

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
@@ -491,6 +494,42 @@ func TestAgentModeGateRefusesLeavingKernelMode(t *testing.T) {
 			}
 			if b, _ := os.ReadFile(path); string(b) != body {
 				t.Errorf("the refused start rewrote agent.json:\n%s", b)
+			}
+		})
+	}
+}
+
+// カーネルモードでは、同時フロー数の上限が設定されていれば使わないことを 1 行出し、既定値のままなら
+// 何も出さない。ユーザー空間モードでは何も出さない(設計文書 7b.1 節)。
+func TestUnusedKernelLimitsAreLogged(t *testing.T) {
+	cases := []struct {
+		name, mode string
+		env        map[string]string
+		want       string
+	}{
+		{"kernel with a cap set", "kernel", map[string]string{"WGFT_MAX_UDP_FLOWS": "4096"}, "WGFT_MAX_UDP_FLOWS: unused in kernel mode"},
+		{"kernel with both set", "kernel", map[string]string{"WGFT_MAX_UDP_FLOWS": "4096", "WGFT_MAX_TCP_FLOWS": "512"}, "WGFT_MAX_UDP_FLOWS and WGFT_MAX_TCP_FLOWS: unused"},
+		{"kernel with defaults", "kernel", nil, ""},
+		{"userspace with a cap set", "", map[string]string{"WGFT_MAX_TCP_FLOWS": "512"}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for k, v := range c.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := loadConfig(&cobra.Command{}, agentSpecs(), filepath.Join(t.TempDir(), "none.env"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			log.SetOutput(&buf)
+			defer log.SetOutput(os.Stderr)
+			logUnusedKernelLimits(agent.Options{Mode: c.mode}, cfg)
+			if c.want == "" && buf.Len() != 0 {
+				t.Errorf("logged %q, want nothing", buf.String())
+			}
+			if c.want != "" && !strings.Contains(buf.String(), c.want) {
+				t.Errorf("logged %q, want %q", buf.String(), c.want)
 			}
 		})
 	}

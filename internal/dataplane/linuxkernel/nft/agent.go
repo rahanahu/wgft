@@ -286,6 +286,13 @@ func targetAddrs(host string, resolved map[string]Resolution) ([]netip.Addr, str
 // errOnlyIPv6 は、ホスト名が IPv6 のアドレスだけに解決されたことを表す。
 var errOnlyIPv6 = errors.New("the host has only IPv6 addresses")
 
+// Failed は、名前の解決そのものが失敗したかどうかである。IPv6 のアドレスだけに解決された名前は、
+// 解決できたうえで公開できない名前なので含めない。エージェントは、解決が失敗した名前にだけ、直前に
+// 解決できたアドレスを使い続ける(7b.2 節)。
+func (r Resolution) Failed() bool {
+	return r.Err != nil && !errors.Is(r.Err, errOnlyIPv6)
+}
+
 // LookupFunc はホスト名のアドレスを引く。net.Resolver.LookupNetIP(ctx, "ip", host) と同じ形である。
 type LookupFunc func(ctx context.Context, host string) ([]netip.Addr, error)
 

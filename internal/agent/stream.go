@@ -176,6 +176,17 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 	go rt.pingLoop(hbCtx, ws, epoch)
 
 	applyNotify := make(chan struct{}, 1)
+	// stream の外の経路が状態を変えたときも、この接続のハートビートを 1 回送る
+	go func() {
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-rt.stateNotify:
+				notifyNonBlocking(applyNotify)
+			}
+		}
+	}()
 	go func() {
 		t := time.NewTicker(rt.heartbeatInterval)
 		defer t.Stop()
@@ -214,14 +225,7 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 			continue
 		}
 		first = false
-		// 適用の間は読みが止まるので、pingLoop に判定を見送らせる(仕様 5.2 節)。
-		// 入るときと出るときに 1 つ進めるので、適用の最中は値が奇数になる
-		rt.applySeq.Add(1)
-		applyErr := rt.apply(m.State)
-		rt.applySeq.Add(1)
-		if applyErr != nil {
-			log.Printf("stream: applying generation %d: %v", m.State.Generation, applyErr)
-		}
+		rt.applyFromStream(m.State)
 		notifyNonBlocking(applyNotify)
 	}
 }

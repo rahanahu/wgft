@@ -174,11 +174,14 @@ func TestResolveAgentTargets(t *testing.T) {
 	if got := res["mapped.lan"]; got.Err != nil || !reflect.DeepEqual(got.Addrs, []netip.Addr{netip.MustParseAddr("192.168.1.40")}) {
 		t.Errorf("mapped.lan = %+v, want 192.168.1.40", got)
 	}
-	if got := res["v6only.lan"]; !errors.Is(got.Err, errOnlyIPv6) {
-		t.Errorf("v6only.lan = %+v, want the only-IPv6 error", got)
+	if got := res["v6only.lan"]; !errors.Is(got.Err, errOnlyIPv6) || got.Failed() {
+		t.Errorf("v6only.lan = %+v failed=%v, want the only-IPv6 error, which is not a failed lookup", got, got.Failed())
 	}
-	if got := res["empty.lan"]; got.Err == nil {
-		t.Errorf("empty.lan = %+v, want an error", got)
+	if got := res["empty.lan"]; got.Err == nil || !got.Failed() {
+		t.Errorf("empty.lan = %+v, want a failed lookup", got)
+	}
+	if got := res["multi.lan"]; got.Failed() {
+		t.Error("a resolved name counts as failed")
 	}
 	pub := PlanAgent(AgentInput{Rules: rules, Resolved: res}, AgentConfig{WGInterface: "wgft0"})
 	reasons := map[string]string{}

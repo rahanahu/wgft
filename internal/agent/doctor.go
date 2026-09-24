@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
@@ -80,10 +81,14 @@ type DoctorStream struct {
 // DoctorRuntimeState は実行時の排他の下で 1 度に読んだ状態である。トンネル、ルール、フロー予算の
 // 値はどれも同じ時点のものである。
 type DoctorRuntimeState struct {
+	// Mode は稼働中のエージェントの転送の方式である(kernel か userspace。仕様 11a 節)。旧い版の
+	// エージェントは送らないので、空ならユーザー空間モードである
+	Mode string `json:"mode,omitempty"`
 	// Generation は最後に受け取って処理した全体状態の世代
 	Generation uint64       `json:"generation"`
 	Tunnel     DoctorTunnel `json:"tunnel"`
-	// Rules はルールごとの状態である。リスナー 1 つずつは並べない。中継が無ければ項目ごと出ない
+	// Rules はルールごとの状態である。リスナー 1 つずつは並べない。ルールを受け付ける資源が無ければ
+	// 項目ごと出ない。カーネルモードでは、リスナーの数と中継の数はどれも 0 で、状態と理由だけが意味を持つ
 	Rules []DoctorRule `json:"rules,omitempty"`
 	// Budgets はプロトコルごとのフロー予算である。中継が無ければ項目ごと出ない
 	Budgets []DoctorBudget `json:"budgets,omitempty"`
@@ -297,6 +302,9 @@ func (rt *runtime) lockRuntime(wait time.Duration) bool {
 // トンネルの状態も中継の状態も 1 回だけ読むので、1 つの応答に異なる時点の値が混ざらない。
 func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 	st := &DoctorRuntimeState{Generation: rt.gen}
+	if rt.opts.Mode == credentials.ModeKernel {
+		st.Mode = credentials.ModeKernel
+	}
 	r := rt.dp.read()
 	tun := rt.tunnelSnapshotLocked(r.tunnel)
 	st.Tunnel = DoctorTunnel{
@@ -315,6 +323,11 @@ func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 		st.Tunnel.StartedAt = rt.tunStart
 	}
 	if r.relay == nil {
+		// カーネルモードのルールごとの状態はハートビートと同じ読みから来る(設計文書 10.2c 節)。
+		// リスナーもフロー予算も無い
+		if r.rules != nil {
+			st.Rules = doctorRules(r.rules, nil)
+		}
 		return st
 	}
 	// 中継とトンネルは一緒に作り直されるので、拒否の累計の起点はトンネルを立てた時刻である

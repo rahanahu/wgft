@@ -95,6 +95,22 @@ type runtime struct {
 	tunStart time.Time    // 今のトンネルを立てた時刻。ハンドシェイクが一度も成立していないときの起点
 	rebuild  rebuildState // トンネルを作り直す判定の閾値と、次の作り直しまでの間隔(仕様 7 節)
 
+	// pendingSt は、dataplane が宣言をまとめて公開できなかった全体状態である(仕様 7a.3 節、7b.3 節の
+	// 3 つ目の種類)。処理済み世代も last_state も進めず、30 秒ごとに試し直す。新しい全体状態が届けば
+	// そちらに置き換わる。pendingErr は直前の試し直しの誤りで、同じ誤りが続く間はログを出さない。
+	// メモリの上だけに持ち、保存はしない。ユーザー空間モードの dataplane はこの失敗を持たない
+	pendingSt  *proto.State
+	pendingErr string
+
+	// stateNotify は、stream の外の経路(公開できなかった全体状態の試し直しなど)が処理済み世代か
+	// ルールの状態を変えたことを、接続中の stream のハートビートに伝える。大きさ 1 の非ブロッキングの
+	// チャネルで、次の 30 秒を待たずにハートビートを 1 回送らせる。nil なら何も伝えない
+	stateNotify chan struct{}
+
+	// fatal は、stream の側の適用がプロセスを終える誤り(fatalError)に当たったことを Run に伝える。
+	// 大きさ 1 の非ブロッキングのチャネルで、最初の 1 つだけが届けば足りる
+	fatal chan error
+
 	// retrySt は、トンネルの作成に失敗したときの全体状態。試し直しはこの全体状態から立てる。
 	// 認証情報ファイルの last_state は適用を終えた全体状態しか指さないので、新しい全体状態の適用が
 	// 失敗した後の試し直しには使えない(仕様 7 節)。メモリの上だけに持ち、保存はしない
@@ -132,6 +148,7 @@ func Run(opts Options) error {
 	if err != nil {
 		return err
 	}
+	opts.Mode = mode
 	log.Printf("wgft %s agent starting: name %s, mode %s, data dir %s", versionOrDev(opts.Version), nameOrUnregistered(f.Name), mode, filepath.Dir(opts.CredentialsPath))
 	logAllowTargets(opts.AllowTargets)
 	created, err := f.EnsureKey()
@@ -150,15 +167,33 @@ func Run(opts Options) error {
 	if err := ensureRegistered(f, opts); err != nil {
 		return err
 	}
-	rt := newRuntime(opts, f, priv)
-	defer rt.close()
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// vpsd が停止中でも、VPS 側にピアが残っていれば転送が復旧するよう、先に立てる(仕様 9 節)
+	rt, err := newModeRuntime(ctx, opts, f, priv)
+	if err != nil {
+		return err
+	}
+	defer rt.close()
+
+	// カーネルモードでは、stream に繋ぐ前に wgft0 の所有を判定する(仕様 7b.4 節)。他の所有者の
+	// インタフェースなら、何も書かずに終わる
+	if sc, ok := rt.dp.(startupChecker); ok {
+		if err := sc.startup(priv, func() error { return f.Save(opts.CredentialsPath) }); err != nil {
+			return err
+		}
+		if err := f.Save(opts.CredentialsPath); err != nil {
+			return err
+		}
+	}
+
+	// vpsd が停止中でも、VPS 側にピアが残っていれば転送が復旧するよう、先に立てる(仕様 9 節)。
+	// カーネルモードでは、このプロセスの最初の wgft0 の収束が起動の失敗に当たれば終わる(11b 節)
 	if f.LastState != nil {
 		if err := rt.apply(f.LastState); err != nil {
+			if isFatal(err) {
+				return err
+			}
 			log.Printf("apply saved generation %d: %v; waiting for full state from stream", f.LastState.Generation, err)
 		}
 	} else {
@@ -168,9 +203,15 @@ func Run(opts Options) error {
 	go func() { errc <- rt.streamLoop(ctx) }()
 	go rt.serveControl(ctx)
 
-	// 30 秒ごと:開けなかったリスナーの再試行と、状態のログ
 	tick := time.NewTicker(30 * time.Second)
 	defer tick.Stop()
+	return rt.serve(ctx, errc, tick.C)
+}
+
+// serve は Run の本体のループである。stream の復帰できない誤り errc か、プロセスを終える適用の誤り
+// (rt.fatal)が届くか、ctx が取り消されるまで動く。tick ごとに、トンネルの見張り、公開できなかった
+// 全体状態の試し直し、開けなかったリスナーの再試行と宛先の試し接続、状態のログを行う。
+func (rt *runtime) serve(ctx context.Context, errc <-chan error, tick <-chan time.Time) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -179,8 +220,14 @@ func Run(opts Options) error {
 		case err := <-errc:
 			// 復帰できない認証拒否。鍵と認証情報ファイルは残したまま止まる(仕様 5.1 節)
 			return err
-		case <-tick.C:
+		case err := <-rt.fatal:
+			// stream の側の適用が、このプロセスの最初の wgft0 の収束で起動の失敗に当たった(11b 節)
+			return err
+		case <-tick:
 			rt.checkTunnel(time.Now())
+			if err := rt.retryPending(); err != nil {
+				return err
+			}
 			rt.mu.Lock()
 			rt.dp.refresh()
 			rt.mu.Unlock()
@@ -195,6 +242,8 @@ func Run(opts Options) error {
 func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *runtime {
 	return &runtime{
 		opts: opts, f: f, priv: priv,
+		fatal:                  make(chan error, 1),
+		stateNotify:            make(chan struct{}, 1),
 		heartbeatInterval:      30 * time.Second,
 		handshakeRetryInterval: time.Second,
 		handshakeRetryTimeout:  10 * time.Second,
@@ -209,6 +258,77 @@ func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *run
 	}
 }
 
+// newModeRuntime は opts.Mode の dataplane で runtime を組む。カーネルモードの dataplane は
+// カーネルに何も書かずに作られ、ctx が取り消されると名前の解決を打ち切る。カーネルモードには
+// トンネルの作り直しが無い(仕様 7b.1 節)ので、watchdog の閾値を 0 にする。最終ハンドシェイクの
+// 観測は続くので、stream の再接続の待ちを打ち切る合図は変わらない。
+func newModeRuntime(ctx context.Context, opts Options, f *credentials.Credentials, priv wgtypes.Key) (*runtime, error) {
+	rt := newRuntime(opts, f, priv)
+	if opts.Mode != credentials.ModeKernel {
+		return rt, nil
+	}
+	dp, err := newKernelDataplane(ctx, opts.WGInterface, opts.AllowTargets, f)
+	if err != nil {
+		return nil, err
+	}
+	rt.dp = dp
+	rt.rebuild = rebuildState{}
+	return rt, nil
+}
+
+// reportFatal は、プロセスを終える誤りを Run に伝える。既に 1 つ届いていれば捨てる。
+func (rt *runtime) reportFatal(err error) {
+	if rt.fatal == nil {
+		return
+	}
+	select {
+	case rt.fatal <- err:
+	default:
+	}
+}
+
+// retryPending は、公開できなかった全体状態を試し直す(仕様 7a.3 節、7b.3 節の 3 つ目の種類)。
+// 名前の解決などの準備は rt.mu の外で行い、排他を取り直したときに控えが別の全体状態に替わって
+// いれば、準備を捨てて次の試し直しを待つ。プロセスを終える誤りだけを返す。
+func (rt *runtime) retryPending() error {
+	rt.mu.Lock()
+	st := rt.pendingSt
+	ok := st != nil && rt.dp.built()
+	rt.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	prepared := rt.prepare(st)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.pendingSt != st {
+		return nil
+	}
+	return rt.retryPendingLocked(prepared)
+}
+
+// retryPendingLocked は retryPending の後半である。試し直しが同じ誤りで失敗する間は何も出さず、
+// 誤りが変わったときと成功したときに 1 行出す。成功したら、次の 30 秒を待たずにハートビートを
+// 送らせる。呼び出し側は rt.mu を持つ。
+func (rt *runtime) retryPendingLocked(prepared any) error {
+	st := rt.pendingSt
+	if st == nil || !rt.dp.built() {
+		return nil
+	}
+	before := rt.pendingErr
+	err := rt.applyLocked(st, prepared)
+	switch {
+	case err == nil:
+		log.Printf("applied generation %d on retry", st.Generation)
+		notifyNonBlocking(rt.stateNotify)
+	case isFatal(err):
+		return err
+	case rt.pendingSt == st && rt.pendingErr != before:
+		log.Printf("retrying generation %d: %v; the previous publication stays in place", st.Generation, err)
+	}
+	return nil
+}
+
 func (rt *runtime) generation() uint64 {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -217,9 +337,21 @@ func (rt *runtime) generation() uint64 {
 
 // apply は全体状態を適用する。wg 設定が変わればトンネルを張り直し(セッションは切れる)、
 // リスナーは変わったものだけを開閉する(仕様 5.2, 7 節)。部分失敗でも世代は進め、認証情報ファイルに保存する。
+//
+// dataplane が準備を持てば(カーネルモードの名前の解決)、rt.mu を取る前に行う。準備は st だけから
+// 決まるので、その間に他の経路が別の全体状態を適用しても、st の適用には使える。
 func (rt *runtime) apply(st *proto.State) error {
+	prepared := rt.prepare(st)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	return rt.applyLocked(st, prepared)
+}
+
+// applyLocked は apply の後半である。wg 設定が今のものと違うか、トンネルが無ければ立て直してから
+// ルールを合わせ、同じならルールだけを合わせる。公開できなかった全体状態の試し直しもこの経路を通る。
+// rotate-key が 1 つ前の全体状態の wg 設定で立て直した後でも、控えた全体状態の wg 設定で適用する
+// ためである。呼び出し側は rt.mu を持つ。
+func (rt *runtime) applyLocked(st *proto.State, prepared any) error {
 	if !rt.dp.built() || !reflect.DeepEqual(rt.wgCfg, st.WG) {
 		if rt.dp.built() {
 			log.Printf("wg config changed; rebuilding tunnel")
@@ -227,7 +359,7 @@ func (rt *runtime) apply(st *proto.State) error {
 		// 作成に失敗したら、世代も認証情報ファイルも進めずに返す。作成そのものの失敗なら
 		// buildLocked が試し直しを控えるので、次の全体状態を待たずに watchdog が立て直す(仕様 7 節)。
 		// トンネルが立った後の誤り(ルールの適用と認証情報ファイルの保存)には wireguard の接頭辞を付けない
-		if err := rt.buildLocked(time.Now(), st, false); err != nil {
+		if err := rt.buildLocked(time.Now(), st, false, prepared); err != nil {
 			if rt.dp.built() {
 				return err
 			}
@@ -235,7 +367,31 @@ func (rt *runtime) apply(st *proto.State) error {
 		}
 		return nil
 	}
-	return rt.finishApplyLocked(st)
+	return rt.finishApplyLocked(st, prepared)
+}
+
+// prepare は、dataplane が preparer なら st の適用の準備を行う。rt.mu を持たずに呼ぶ。rt.dp は
+// 組み立ての後に替わらないので、排他なしで読める。
+func (rt *runtime) prepare(st *proto.State) any {
+	if p, ok := rt.dp.(preparer); ok {
+		return p.prepareApply(st)
+	}
+	return nil
+}
+
+// applyFromStream は stream が受け取った全体状態を適用する。適用の間は読みが止まるので、pingLoop に
+// 判定を見送らせる(仕様 5.2 節)。入るときと出るときに applySeq を 1 つ進めるので、適用の最中は値が
+// 奇数になる。プロセスを終える誤りは Run に伝える(11b 節)。
+func (rt *runtime) applyFromStream(st *proto.State) {
+	rt.applySeq.Add(1)
+	err := rt.apply(st)
+	rt.applySeq.Add(1)
+	if err != nil {
+		log.Printf("stream: applying generation %d: %v", st.Generation, err)
+		if isFatal(err) {
+			rt.reportFatal(err)
+		}
+	}
 }
 
 // finishApplyLocked はトンネルが立った後の共通の後始末である。ルールを宣言に合わせ、処理済み世代を
@@ -243,11 +399,20 @@ func (rt *runtime) apply(st *proto.State) error {
 //
 // dataplane が宣言をまとめて公開できなかったときは、世代も認証情報ファイルも進めずに返す
 // (設計文書 7a.3 節)。ユーザー空間モードの dataplane はこの失敗を持たない。
-func (rt *runtime) finishApplyLocked(st *proto.State) error {
+//
+// 控えは、失敗した全体状態が今の控えと同じか新しいときだけ置き換える。rotate-key が last_state を
+// 適用し直して失敗した場合に、控えていた新しい世代を古い世代で置き換えないためである。
+func (rt *runtime) finishApplyLocked(st *proto.State, prepared any) error {
 	var firstErr error
-	summary, err := rt.dp.applyRules(st.Rules)
+	summary, err := rt.dp.applyRules(st.Generation, st.Rules, prepared)
 	if err != nil {
+		if !isFatal(err) && (rt.pendingSt == nil || st.Generation >= rt.pendingSt.Generation) {
+			rt.pendingSt, rt.pendingErr = st, err.Error()
+		}
 		return fmt.Errorf("dataplane: %w", err)
+	}
+	if rt.pendingSt != nil && rt.pendingSt.Generation <= st.Generation {
+		rt.pendingSt, rt.pendingErr = nil, ""
 	}
 	rt.gen = st.Generation
 	rt.f.LastState = st
@@ -408,7 +573,7 @@ func (rt *runtime) checkTunnel(now time.Time) {
 	log.Printf("no new wireguard handshake for %s; rebuilding the tunnel; the next rebuild needs %s without one",
 		idle.Round(time.Second), rt.rebuild.wait.Round(time.Second))
 	// 既に適用を終えた全体状態なので、世代の記録はやり直さない。誤りは buildLocked が 1 行出す
-	rt.buildLocked(now, st, true) //nolint:errcheck // 誤りは buildLocked が出す
+	rt.buildLocked(now, st, true, nil) //nolint:errcheck // 誤りは buildLocked が出す
 }
 
 // retryBuildLocked は、作成に失敗して残ったトンネルの無い状態を、予定の時刻に試し直す(仕様 7 節)。
@@ -426,7 +591,7 @@ func (rt *runtime) retryBuildLocked(now time.Time) {
 	st := rt.retrySt
 	// 作成の失敗は buildLocked が 1 行出す。立った後のルールの適用と認証情報ファイルの保存の誤りは
 	// buildLocked が出さないので、ここで出す
-	if err := rt.buildLocked(now, st, false); err != nil && rt.dp.built() {
+	if err := rt.buildLocked(now, st, false, nil); err != nil && rt.dp.built() {
 		log.Printf("applying generation %d after building the tunnel again: %v", st.Generation, err)
 	}
 }
@@ -436,7 +601,7 @@ func (rt *runtime) retryBuildLocked(now time.Time) {
 //
 // 作成に失敗したときは理由を 1 行出し、作成そのものの失敗なら次に試す時刻と全体状態を控える。
 // wg 設定の誤りは控えず、次の全体状態を待つ。呼び出し側は rt.mu を持つ。
-func (rt *runtime) buildLocked(now time.Time, st *proto.State, applied bool) error {
+func (rt *runtime) buildLocked(now time.Time, st *proto.State, applied bool, prepared any) error {
 	// startTunnelLocked は最初に closeLocked を呼び、closeLocked は試し直しの控えを消す。続けて失敗した
 	// ときに間隔を広げられるよう、予定は呼ぶ前に控えておき、失敗したら戻してから次を決める
 	retryAt, retryWait := rt.rebuild.retryAt, rt.rebuild.retryWait
@@ -457,12 +622,12 @@ func (rt *runtime) buildLocked(now time.Time, st *proto.State, applied bool) err
 		return err
 	}
 	if applied {
-		if _, err := rt.dp.applyRules(st.Rules); err != nil {
+		if _, err := rt.dp.applyRules(st.Generation, st.Rules, prepared); err != nil {
 			log.Printf("apply rules after rebuilding the tunnel: %v", err)
 		}
 		return nil
 	}
-	return rt.finishApplyLocked(st)
+	return rt.finishApplyLocked(st, prepared)
 }
 
 // logAllowTargets は宛先の許可一覧の有無を起動時に 1 行で出す(仕様 7 節)。
