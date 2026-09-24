@@ -152,6 +152,10 @@ func (d *Daemon) convergeLoop(ctx context.Context) {
 // 公開できていない backend 全体の失敗)があれば SQLite の宣言を適用し直す。食い違いの無い
 // observeOnce は何も commit しないので、nftables のテーブルを差し替えず、meter と ct count の状態を
 // 保つ。同じ失敗は続くあいだ 1 行だけログに出す。
+//
+// 新しく見つかった食い違いが無く、適用し直す理由が直前の失敗だけなら、retryGate が開くまで待つ。
+// 失敗した公開もテーブルを差し替えることがあり(受信側の壁、送った要素を持たない set。設計文書 6.1 節)、
+// その差し替えの通知で適用し直すと、失敗が 0.3 秒ほどの間隔で繰り返されるためである。
 func (d *Daemon) observeOnce() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -168,6 +172,9 @@ func (d *Daemon) observeOnce() {
 	}
 	if !due {
 		d.logConverge("")
+		return
+	}
+	if !d.retryGate.Allow(len(drift) > 0) {
 		return
 	}
 	d.reapply()
@@ -246,6 +253,14 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 	plan, excluded := d.buildPlan(rules, agentAddr, disabled)
 	plan.Generation = gen
 	out, err := d.reconciler().Reconcile(reconcile.Input{Plan: plan, WG: wgCfg, Excluded: excluded, Retry: retry})
+	// 通知による適用し直しの間隔(observeOnce)は、トランザクションの成否だけで決める。Reconcile の
+	// 手前の失敗(サーバのデータベースの読み取り)は Reconciler の状態を変えず、30 秒ごとの再試行も
+	// 予定しないので、ここで間隔を空けると、通知による試し直しの道だけが塞がる
+	if err != nil {
+		d.retryGate.Failed()
+	} else {
+		d.retryGate.Succeeded()
+	}
 	if err != nil {
 		// This is the one failure path for both modes (design.md 7a.2 節の Runtime), but only the
 		// kernel backend's Commit is an nftables transaction; userspace has no nftables to blame.

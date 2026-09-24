@@ -75,6 +75,11 @@ type Staged struct {
 	// size は組み立てたバッチの大きさ。Flush がソケットを開くときに、その大きさに合わせた
 	// バッファを要求するために使う(batch.go)。
 	size batchSize
+	// sent は、wgft が要素を書く set(deny_N、allow_N)ごとの送った要素。Flush が差し替えの後に
+	// 読み直して比べる(verify.go)。
+	sent map[string][]nftables.SetElement
+	// readSet は set の要素を読む。nil ならカーネルから読む。単体テストだけが差し替える。
+	readSet func(name string) ([]nftables.SetElement, error)
 }
 
 // Stage はテーブルの差し替えを組み立てるが、送らない(kernel backend の Prepare。design.md 7a.2 節)。
@@ -88,20 +93,36 @@ func Stage(plan planner.Plan, relayListening map[uint16]bool, cfg Config) (*Stag
 	if err != nil {
 		return nil, fmt.Errorf("cannot connect to nftables: %w", err)
 	}
-	if err := emit(&sizing{to: conn, size: &s.size}, plan, relayListening, cfg); err != nil {
+	if err := s.build(conn, plan, relayListening, cfg); err != nil {
 		return nil, err
 	}
-	s.conn = conn
 	return s, nil
 }
 
-// Flush は組み立てた差し替えを 1 トランザクションで送る(kernel backend の Commit)。
+// build は conn の上にテーブルの差し替えを組み立て、バッチの大きさと送る set の要素を s に残す。
+func (s *Staged) build(conn *nftables.Conn, plan planner.Plan, relayListening map[uint16]bool, cfg Config) error {
+	s.sent = map[string][]nftables.SetElement{}
+	if err := emit(&sizing{to: &sentSets{to: conn, elems: s.sent}, size: &s.size}, plan, relayListening, cfg); err != nil {
+		return err
+	}
+	s.conn = conn
+	return nil
+}
+
+// Flush は組み立てた差し替えを 1 トランザクションで送り、wgft が要素を書く set をカーネルから
+// 読み直して、送った要素がそのまま入っているかを確かめる(kernel backend の Commit)。
 // カーネル側の差し替え自体は不可分である。ただし、誤りが返ったときに旧いテーブルが残っているとは
 // 限らない。カーネルは commit の後に応答を返すので、応答の受信に失敗した場合(ENOBUFS)は、
-// テーブルが差し替わった後で誤りが返る。送信が拒まれた場合(EMSGSIZE)とカーネルがバッチを
-// 拒んだ場合は、旧いテーブルが残る。実際の状態との食い違いは、reconciler の Observe による
-// drift の検出で収束させる(設計文書 6.1 節、7a.3 節)。
-func (s *Staged) Flush() error { return s.conn.Flush() }
+// テーブルが差し替わった後で誤りが返る。読み直した set が送った要素と一致しない場合も、差し替わった
+// 後で誤りが返る。送信が拒まれた場合(EMSGSIZE)とカーネルがバッチを拒んだ場合は、旧いテーブルが
+// 残る。実際の状態との食い違いは、reconciler の Observe による drift の検出で収束させる(設計文書
+// 6.1 節、7a.3 節)。
+func (s *Staged) Flush() error {
+	if err := s.conn.Flush(); err != nil {
+		return err
+	}
+	return s.verify()
+}
 
 // DeleteTable は table inet wgft を削除する。他のテーブルには触れない。
 // すでに無ければ何もしない(撤去を手作業の途中からでも走らせられるように)。
@@ -455,9 +476,17 @@ func dynsetAdd(s *nftables.Set, e expr.Any) []expr.Any {
 func addSet(e emitter, t *nftables.Table, d polnft.Set) (*nftables.Set, error) {
 	switch d.Kind {
 	case polnft.SetInterval:
+		// 宣言を先に送り、要素は 1 通に入る数ずつ分けて足す(batch.go の elemsPerMessage)。
+		// 名前付きの set なので SetAddElements で足せる(google/nftables が拒むのは無名の set だけ)。
+		// set の大きさ(NFTA_SET_DESC_SIZE)は付けない。付けなければカーネルは要素の数を制限しない
 		s := &nftables.Set{Table: t, Name: d.Name, KeyType: nftables.TypeIPAddr, Interval: true}
-		if err := e.AddSet(s, intervalElements(d.Elements)); err != nil {
+		if err := e.AddSet(s, nil); err != nil {
 			return nil, fmt.Errorf("set %s: %w", d.Name, err)
+		}
+		for _, els := range elementChunks(intervalElements(d.Elements), elemsPerMessage) {
+			if err := e.SetAddElements(s, els); err != nil {
+				return nil, fmt.Errorf("set %s: %w", d.Name, err)
+			}
 		}
 		return s, nil
 	case polnft.SetMeter:
