@@ -297,7 +297,8 @@ func (rt *runtime) lockRuntime(wait time.Duration) bool {
 // トンネルの状態も中継の状態も 1 回だけ読むので、1 つの応答に異なる時点の値が混ざらない。
 func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 	st := &DoctorRuntimeState{Generation: rt.gen}
-	tun := rt.tunnelSnapshotLocked()
+	r := rt.dp.read()
+	tun := rt.tunnelSnapshotLocked(r.tunnel)
 	st.Tunnel = DoctorTunnel{
 		Present:       tun.present,
 		State:         tun.hb.State,
@@ -310,19 +311,18 @@ func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 		},
 	}
 	if tun.present {
-		st.Tunnel.RxBytes, st.Tunnel.TxBytes = tun.raw.RxBytes, tun.raw.TxBytes
+		st.Tunnel.RxBytes, st.Tunnel.TxBytes = tun.raw.rxBytes, tun.raw.txBytes
 		st.Tunnel.StartedAt = rt.tunStart
 	}
-	if rt.rl == nil {
+	if r.relay == nil {
 		return st
 	}
 	// 中継とトンネルは一緒に作り直されるので、拒否の累計の起点はトンネルを立てた時刻である
 	st.RefusalsSince = rt.tunStart
-	sts := rt.rl.Status()
-	st.Rules = doctorRules(ruleStatuses(sts), sts)
+	st.Rules = doctorRules(r.rules, r.relay.listeners)
 	st.Budgets = []DoctorBudget{
-		doctorBudget(proto.TCP, rt.rl.TCPPool()),
-		doctorBudget(proto.UDP, rt.rl.UDPPool()),
+		doctorBudget(proto.TCP, r.relay.tcp),
+		doctorBudget(proto.UDP, r.relay.udp),
 	}
 	return st
 }

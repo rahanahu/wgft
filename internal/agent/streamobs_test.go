@@ -34,7 +34,7 @@ func waitStreamObs(t *testing.T, rt *runtime, within time.Duration, want string,
 // 試みの失敗も同じ組に入る。どの切断も、その手前でつながった状態を作ってから確かめる。つながった
 // ことのない runtime に切断を書くだけでは、Connected が初めから false なので何も確かめられない。
 func TestStreamObservationKeepsTheLastDisconnectReason(t *testing.T) {
-	rt := &runtime{}
+	rt := &runtime{dp: newTestUserspace()}
 	if obs := rt.streamStatus(); obs.Connected || obs.DisconnectReason != "" || !obs.DisconnectedAt.IsZero() {
 		t.Fatalf("a runtime that never connected must have an empty observation: %+v", obs)
 	}
@@ -82,7 +82,7 @@ func TestStreamObservationKeepsTheLastDisconnectReason(t *testing.T) {
 
 // 接続の成立は、ping と pong の観測と次に試す時刻を消し、接続の通し番号を進める。
 func TestStreamObservationConnectClearsTheLivenessAndTheRetry(t *testing.T) {
-	rt := &runtime{}
+	rt := &runtime{dp: newTestUserspace()}
 	rt.noteStreamWaiting(time.Now(), time.Second)
 	epoch := rt.noteStreamConnected()
 	rt.noteStreamPingSent(time.Now(), epoch)
@@ -116,7 +116,7 @@ func TestStreamObservationConnectClearsTheLivenessAndTheRetry(t *testing.T) {
 
 // 次に試す時刻は間隔から導ける。待ちに入っていない間はゼロである。
 func TestStreamObservationDerivesTheRetryTimeFromTheBackoff(t *testing.T) {
-	rt := &runtime{}
+	rt := &runtime{dp: newTestUserspace()}
 	now := time.Now()
 	rt.noteStreamWaiting(now, 2*time.Second)
 	obs := rt.streamStatus()
@@ -138,7 +138,7 @@ func TestStreamObservationDerivesTheRetryTimeFromTheBackoff(t *testing.T) {
 
 // ping と pong の時刻は、送るたびと返るたびに進む。期限切れは pong の時刻を進めない。
 func TestStreamObservationTracksThePingAndThePong(t *testing.T) {
-	rt := &runtime{}
+	rt := &runtime{dp: newTestUserspace()}
 	epoch := rt.noteStreamConnected()
 
 	sent := time.Now()

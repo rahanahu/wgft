@@ -33,6 +33,7 @@ func newAliveTestRuntime(t *testing.T, endpoint string, pin [32]byte) *runtime {
 		t.Fatal(err)
 	}
 	return &runtime{
+		dp: newTestUserspace(),
 		f: &credentials.Credentials{
 			Endpoint:       endpoint,
 			CertSHA256:     hex.EncodeToString(pin[:]),
@@ -392,7 +393,7 @@ func assertConnectionIsKept(t *testing.T, rt *runtime, conns chan struct{}) {
 // runtime を組む既存の試験が ping を送らないことを確かめる。
 func TestPingLoopIsOffWithoutAnInterval(t *testing.T) {
 	var closed atomic.Bool
-	rt := &runtime{}
+	rt := &runtime{dp: newTestUserspace()}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

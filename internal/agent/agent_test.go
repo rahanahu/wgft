@@ -23,6 +23,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -155,7 +156,7 @@ func TestEnsureRegisteredJoinFailuresAreRefusals(t *testing.T) {
 // サーバ証明書が認証情報のピンと違うとき、stream の接続は ErrPinMismatch として区別できる。
 func TestStreamOnceReportsPinMismatch(t *testing.T) {
 	srv, _ := newTestRegisterServer(t, "home")
-	rt := &runtime{f: &credentials.Credentials{
+	rt := &runtime{dp: newTestUserspace(), f: &credentials.Credentials{
 		Endpoint:       strings.TrimPrefix(srv.URL, "https://"),
 		CertSHA256:     strings.Repeat("00", 32), // 立て直す前のサーバのピン
 		PermanentToken: "OLD",
@@ -186,7 +187,7 @@ func TestJoinForNewPin(t *testing.T) {
 		{"unparsable join", "wgft://broken", oldPin, "", false},
 	}
 	for _, c := range cases {
-		rt := &runtime{opts: Options{Join: c.join}, f: &credentials.Credentials{CertSHA256: c.storedPin, UsedJoinTokenSHA256: c.usedHash}}
+		rt := &runtime{dp: newTestUserspace(), opts: Options{Join: c.join}, f: &credentials.Credentials{CertSHA256: c.storedPin, UsedJoinTokenSHA256: c.usedHash}}
 		if got := rt.joinForNewPin() != nil; got != c.want {
 			t.Errorf("%s: joinForNewPin != nil is %v, want %v", c.name, got, c.want)
 		}
@@ -198,6 +199,7 @@ func TestRecoverReplacesPinAndToken(t *testing.T) {
 	_, join := newTestRegisterServer(t, "home")
 	path := filepath.Join(t.TempDir(), "agent.json")
 	rt := &runtime{
+		dp:   newTestUserspace(),
 		opts: Options{Join: join, CredentialsPath: path},
 		f:    &credentials.Credentials{Name: "home", CertSHA256: strings.Repeat("00", 32), PermanentToken: "OLD", WGPrivateKey: "keep"},
 	}
@@ -246,7 +248,7 @@ func TestLogStatusDedup(t *testing.T) {
 	log.SetFlags(0) // 時刻を外し、行数だけを見る
 	defer func() { log.SetOutput(old); log.SetFlags(oldFlags) }()
 
-	rt := &runtime{}
+	rt := &runtime{dp: newTestUserspace()}
 	rt.logStatus()
 	first := buf.String()
 	if first == "" {
@@ -467,6 +469,7 @@ func TestStreamOnceSendsHeartbeatAfterApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt := &runtime{
+		dp: newTestUserspace(),
 		f: &credentials.Credentials{
 			Endpoint:       strings.TrimPrefix(srv.URL, "https://"),
 			CertSHA256:     hex.EncodeToString(pin[:]),
@@ -516,6 +519,7 @@ func TestStreamOnceSendsProtocolRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt := &runtime{
+		dp: newTestUserspace(),
 		f: &credentials.Credentials{
 			Endpoint:       strings.TrimPrefix(srv.URL, "https://"),
 			CertSHA256:     hex.EncodeToString(pin[:]),
@@ -562,6 +566,7 @@ func TestStreamOnceRejectsOutOfRangeServerVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt := &runtime{
+		dp: newTestUserspace(),
 		f: &credentials.Credentials{
 			Endpoint:       strings.TrimPrefix(srv.URL, "https://"),
 			CertSHA256:     hex.EncodeToString(pin[:]),
@@ -622,16 +627,14 @@ func TestCheckServerProtocolVersion(t *testing.T) {
 // 設定したときは判定と設定の名前を渡す。
 func TestRelayOptionsAllowTargets(t *testing.T) {
 	st := &proto.State{WG: proto.WGConfig{UDPTimeoutStream: 120}}
-	rt := &runtime{}
-	if o := rt.relayOptions(st); o.AllowTarget != nil || o.AllowTargetSource != "" {
+	if o := newUserspaceDataplane(nil, resource.Limits{}).relayOptions(st.WG); o.AllowTarget != nil || o.AllowTargetSource != "" {
 		t.Errorf("without a list: AllowTarget=%v source=%q, want none", o.AllowTarget != nil, o.AllowTargetSource)
 	}
 	list, err := allowtargets.Parse("192.168.1.20:25565")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt = &runtime{opts: Options{AllowTargets: list}}
-	o := rt.relayOptions(st)
+	o := newUserspaceDataplane(list, resource.Limits{}).relayOptions(st.WG)
 	if o.AllowTarget == nil {
 		t.Fatal("with a list: AllowTarget is nil")
 	}
