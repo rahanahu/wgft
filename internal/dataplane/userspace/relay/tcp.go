@@ -54,13 +54,18 @@ func cutConn(c net.Conn) {
 	c.Close()
 }
 
-// acceptRetryMin と acceptRetryMax は、accept が待ち受けを閉じた以外の理由で失敗したときの待ち時間の
-// 下限と上限。net/http.Server.Serve と、プロキシモードの中継(internal/vpsd/proxyrelay)と同じ形の
-// 後退である。
+// retryMin と retryMax は、TCP の accept と UDP の読み取りが、待ち受けを閉じた以外の理由で失敗した
+// ときの待ち時間の下限と上限。プロキシモードの中継(internal/vpsd/proxyrelay)と同じく、閉じた場合
+// 以外の誤りはすべて試し直す。値は net/http.Server.Serve の後退と同じだが、net/http が試し直すのは
+// Temporary() が真の誤りだけで、ENOBUFS や ENOMEM は試し直さない点が違う。
 const (
-	acceptRetryMin = 5 * time.Millisecond
-	acceptRetryMax = time.Second
+	retryMin = 5 * time.Millisecond
+	retryMax = time.Second
 )
+
+// nextRetry は、失敗が続いたときの次の待ち時間である。最初は retryMin で、倍々に retryMax まで
+// 広げる。成功したら呼び出し側が 0 に戻す。
+func nextRetry(d time.Duration) time.Duration { return min(max(2*d, retryMin), retryMax) }
 
 // serveTCP は開いた待ち受け ln で中継を始める。bind は呼び出し側(Apply の経路の openLocked と、
 // Prepare/Commit の経路の Prepare)が済ませてある。
@@ -133,7 +138,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				if acceptLog.Allow() {
 					m.opts.Logf("tcp %s: accept failed: %v; the listener stays open and retries", l.key, err)
 				}
-				delay = min(max(2*delay, acceptRetryMin), acceptRetryMax)
+				delay = nextRetry(delay)
 				select {
 				case <-done:
 					return
