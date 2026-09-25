@@ -672,23 +672,69 @@ if problems:
 print("%d rules identical across the upgrade" % len(old))
 PYEOF
 cat > "$PYDIR/stable_cred_hash.py" <<'PYEOF'
-# stable_cred_hash.py <agent.json>: sha256 of the credentials fields that must survive an
-# upgrade unchanged (name, endpoint, cert hash, permanent token, used join-token hash, wg private
-# key - internal/agent/credentials.Credentials' fields other than LastState). LastState is
-# excluded on purpose: it is the agent's last-applied full state and is expected to be rewritten
-# the moment the agent reconnects and receives a fresh one, so hashing the whole file would always
-# differ after a reconnect even with zero re-enrolment; hashing everything BUT LastState isolates
-# the actual "same credentials, no rotate-key, no re-registration" claim.
+# stable_cred_hash.py <agent.json>: sha256 of the six identity fields that must survive an
+# upgrade unchanged. They are internal/agent/credentials.Credentials' own registration fields:
+# name, endpoint, cert hash, permanent token, used join-token hash, wg private key. This is a
+# WHITELIST, not "everything but last_state": last_state is rewritten on every reconnect, and a
+# newer build can also add fields the old release never wrote - tunnel_address as of docs/
+# design.md's 2026-09-25 "トンネルのアドレスの記録", and mode/previous_wg_private_key/
+# ip_forward_enabled_at/kernel_publication/kernel_unconverged in kernel mode. None of those are
+# part of the "same credentials, no rotate-key, no re-registration" claim this hash isolates, so
+# folding them in would fail this check on an upgrade that behaved correctly. A field this build
+# adds is checked separately, against the shape docs/design.md promises for it, not folded into
+# this hash.
 import hashlib
 import json
 import sys
 
+IDENTITY_FIELDS = [
+    "name", "endpoint", "cert_sha256", "permanent_token",
+    "used_join_token_sha256", "wg_private_key",
+]
+
 with open(sys.argv[1]) as f:
     d = json.load(f)
-d.pop("last_state", None)
-print(hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest())
+identity = {k: d.get(k) for k in IDENTITY_FIELDS}
+print(hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest())
 PYEOF
 stable_cred_hash() { python3 "$PYDIR/stable_cred_hash.py" "$1"; }
+cat > "$PYDIR/check_tunnel_address.py" <<'PYEOF'
+# check_tunnel_address.py <agent.json> <expected-address> <expected-prefix-bits>: docs/design.md's
+# 2026-09-25 "トンネルのアドレスの記録" promise for tunnel_address, a field an old release's
+# agent.json never had. It must exist once this build's agent has applied a full state. Its
+# address part must be the one the server assigned at registration - docs/design.md 9 section says
+# that does not change for the life of the registration - and, since by the time this runs the
+# agent has already applied a full state, tunnel_up already waited for, it must carry the pool's
+# prefix length too. The address-only form is docs/design.md's other valid shape, right after
+# registration and before any full state, so it is not expected to still be showing at this point.
+import ipaddress
+import json
+import sys
+
+path, expected_addr, expected_bits = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(path) as f:
+    d = json.load(f)
+got = d.get("tunnel_address", "")
+if not got:
+    print("tunnel_address missing or empty")
+    sys.exit(1)
+if "/" in got:
+    addr, bits_s = got.split("/", 1)
+    bits = int(bits_s)
+else:
+    addr, bits = got, None
+if ipaddress.ip_address(addr) != ipaddress.ip_address(expected_addr):
+    print("tunnel_address %r: address %s does not match the one the server assigned, %s" % (got, addr, expected_addr))
+    sys.exit(1)
+if bits is None:
+    print("tunnel_address %r: still address-only; expected the %s/%d form since a full state was already applied" % (got, expected_addr, expected_bits))
+    sys.exit(1)
+if bits != expected_bits:
+    print("tunnel_address %r: prefix length %d does not match the pool's %d" % (got, bits, expected_bits))
+    sys.exit(1)
+print("tunnel_address %s matches the registered address and pool prefix" % got)
+PYEOF
+check_tunnel_address() { python3 "$PYDIR/check_tunnel_address.py" "$1" "$2" "$3"; }
 compare_rules() { python3 "$PYDIR/compare_rules.py" "$1" "$2"; }
 
 # --- teardown (data purge with whichever binary is on hand; either reads the DB fine) ------------
@@ -762,6 +808,18 @@ fi
 vps "$OLD_BIN" rule ls --admin "$ADMIN" --json > "$WORK/old-rules.json"
 vps "$OLD_BIN" rule ls --admin "$ADMIN" > "$WORK/old-rulels.stdout" 2>"$WORK/old-rulels.stderr"
 vps "$OLD_BIN" agent ls --admin "$ADMIN" --json > "$WORK/old-agents.json"
+# home's tunnel address, as the server assigned it at registration - docs/design.md 9 section
+# says it does not change for the life of the registration, so this baseline still holds after
+# the swap below. start_server above never passes --wg-address, so the pool is
+# cmd/wgft/server.go's own default, 10.200.0.1/24 - hence the literal 24 passed to
+# check_tunnel_address further down.
+home_addr=$(python3 -c "
+import json
+agents = json.load(open('$WORK/old-agents.json'))
+a = next((x for x in agents if x.get('name') == 'home'), {})
+print(a.get('address', ''))
+")
+okcheck "step1: v$OLD_VERSION agent ls reports home's assigned address" "$([ -n "$home_addr" ] && echo 1 || echo 0)"
 old_agent_pubkey=$(home "$OLD_BIN" agent pubkey --data-dir "$ADATA")
 old_cred_full_sha=$(sha256sum "$ADATA/agent.json" | awk '{print $1}')
 old_cred_stable_sha=$(stable_cred_hash "$ADATA/agent.json")
@@ -769,7 +827,7 @@ old_server_pubkey=""
 if [ "$mode" = kernel ]; then
   old_server_pubkey=$(vps wg show wgft0 public-key)
 fi
-echo "   baseline: v$OLD_VERSION credentials file sha256 $old_cred_full_sha (whole file; see stable_cred_hash.py for why the post-upgrade check below hashes everything but last_state)"
+echo "   baseline: v$OLD_VERSION credentials file sha256 $old_cred_full_sha - whole file; see stable_cred_hash.py for the identity fields the check below actually compares"
 
 echo "== $mode: stop v$OLD_VERSION cleanly and snapshot its data (for step 4's partial upgrades)"
 stop_agent
@@ -849,8 +907,14 @@ strcheck "step3: agent's WireGuard public key is unchanged" "$old_agent_pubkey" 
 new_cred_stable_sha=$(stable_cred_hash "$ADATA/agent.json")
 strcheck "step3: agent's credentials (name/endpoint/cert/token/wg key) are byte-identical, no re-enrolment" \
   "$old_cred_stable_sha" "$new_cred_stable_sha"
+tunnel_addr_out=$(check_tunnel_address "$ADATA/agent.json" "$home_addr" 24); tunnel_addr_rc=$?
+if [ "$tunnel_addr_rc" = 0 ]; then
+  echo "PASS  step3: $tunnel_addr_out"
+else
+  echo "FAIL  step3: tunnel_address wrong after the upgrade: $tunnel_addr_out"; fail=1
+fi
 new_cred_full_sha=$(sha256sum "$ADATA/agent.json" | awk '{print $1}')
-echo "   post-upgrade credentials file sha256 $new_cred_full_sha (differs from the baseline's $old_cred_full_sha because last_state is rewritten on reconnect; see stable_cred_hash.py)"
+echo "   post-upgrade credentials file sha256 $new_cred_full_sha - differs from the baseline's $old_cred_full_sha because last_state is rewritten on reconnect and this build now also records tunnel_address; see stable_cred_hash.py"
 if [ "$mode" = kernel ]; then
   new_server_pubkey=$(vps wg show wgft0 public-key)
   strcheck "step3: server's WireGuard public key is unchanged" "$old_server_pubkey" "$new_server_pubkey"
