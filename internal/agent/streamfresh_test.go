@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -218,5 +222,112 @@ func TestReconnectWaitAfterSupersededIgnoresTheFreshCap(t *testing.T) {
 	iv, _ := attemptIntervals(t, attempts, time.Time{}, 5)
 	if last := iv[len(iv)-1]; last < 300*time.Millisecond {
 		t.Errorf("after superseded closes the wait stayed at %s; the fresh-tunnel cap must not apply; intervals %v", last, iv)
+	}
+}
+
+// 上限を当てない切断と当てる切断の一覧(仕様 5.2 節)。当てないのは、server が応答したうえで、再試行では
+// 直らない食い違いを示した切断だけである。
+func TestCapsWhileFreshClassifiesTheDisconnect(t *testing.T) {
+	three := 3
+	versionErr := checkServerProtocolVersion(proto.ProtocolRange{Min: 1, Max: 1}, &proto.State{ServerProtocolVersion: &three})
+	zeroErr := checkServerProtocolVersion(proto.ProtocolRange{Min: 1, Max: 1}, &proto.State{ServerProtocolVersion: new(int)})
+	closeErr := func(code websocket.StatusCode) error {
+		return fmt.Errorf("failed to get reader: %w", websocket.CloseError{Code: code, Reason: "x"})
+	}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"permanent token rejected", errUnauthorized, false},
+		{"superseded", closeErr(websocket.StatusCode(proto.CloseSuperseded)), false},
+		{"permanent token revoked", closeErr(websocket.StatusCode(proto.CloseRevoked)), false},
+		{"no shared protocol version", closeErr(websocket.StatusCode(proto.CloseProtocolMismatch)), false},
+		{"the server selected a version outside the agent's range", versionErr, false},
+		{"the server selected version 0", zeroErr, false},
+		{"certificate pin mismatch", fmt.Errorf("dial: %w", ErrPinMismatch), false},
+		{"public key belongs to another agent", closeErr(websocket.StatusPolicyViolation), false},
+
+		{"connection refused", errors.New("dial tcp 203.0.113.1:8443: connect: connection refused"), true},
+		{"too many attempts", errors.New("failed to WebSocket dial: expected handshake response status code 101 but got 429"), true},
+		{"heartbeat timeout", closeErr(websocket.StatusCode(proto.CloseHeartbeatTimeout)), true},
+		{"malformed protocol advertisement", closeErr(websocket.StatusCode(proto.CloseProtocolMalformed)), true},
+		{"server internal error", closeErr(websocket.StatusInternalError), true},
+		{"ping deadline closed the connection", errors.New("failed to get reader: failed to read frame header: use of closed network connection"), true},
+		{"connection ended without an error", nil, true},
+	}
+	for _, c := range cases {
+		if got := capsWhileFresh(c.err); got != c.want {
+			t.Errorf("%s: capsWhileFresh = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if versionErr == nil || !strings.Contains(versionErr.Error(), "outside the agent's supported range") {
+		t.Errorf("version error text changed: %v", versionErr)
+	}
+}
+
+// 再接続の待ちの行は、前と同じ文面なら 1 分に 1 行までに間引き、文面が変われば出す(仕様 5.2 節)。
+// 間引いた数は次に出す行に添える。
+func TestReconnectLogThinsIdenticalLines(t *testing.T) {
+	var buf bytes.Buffer
+	prev, flags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(flags) })
+
+	var l reconnectLog
+	l.print("reconnecting in 8s")
+	for i := 0; i < 5; i++ {
+		l.print("reconnecting in 10s")
+	}
+	l.print("reconnecting in 20s")
+	l.reset()
+	l.print("reconnecting in 20s")
+	got := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	want := []string{
+		"reconnecting in 8s",
+		"reconnecting in 10s",
+		"reconnecting in 20s; 4 repeat(s) of the previous line not logged",
+		"reconnecting in 20s",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("logged\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// 公開鍵の拒否で閉じる server に対しても、トンネルが新しいことを理由に待ちを縮めない(仕様 5.2 節)。
+func TestReconnectWaitAfterAPolicyViolationIgnoresTheFreshCap(t *testing.T) {
+	const (
+		backoffMin = 50 * time.Millisecond
+		freshMax   = 60 * time.Millisecond
+	)
+	attempts := make(chan time.Time, 64)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/stream", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case attempts <- time.Now():
+		default:
+		}
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		if _, _, err := ws.Read(r.Context()); err != nil {
+			return
+		}
+		ws.Close(websocket.StatusPolicyViolation, "public key belongs to another agent")
+	})
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	rt := newAliveTestRuntime(t, strings.TrimPrefix(srv.URL, "https://"), sha256.Sum256(srv.Certificate().Raw))
+	rt.reconnectBackoffMin, rt.reconnectBackoffMax, rt.reconnectBackoffFreshMax = backoffMin, 5*time.Second, freshMax
+	now := time.Now()
+	rt.handshakeSeen.Store(&handshakeObservation{handshake: now, observedAt: now})
+	runStreamLoop(t, rt)
+
+	iv, _ := attemptIntervals(t, attempts, time.Time{}, 5)
+	if last := iv[len(iv)-1]; last < 300*time.Millisecond {
+		t.Errorf("after a policy violation close the wait stayed at %s; the fresh-tunnel cap must not apply; intervals %v", last, iv)
 	}
 }
