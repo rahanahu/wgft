@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -209,7 +210,17 @@ const (
 )
 
 // writeLine は 1 つの検査を出す。短い detail は判定の右に、長い detail は次の行に出す。
+//
+// detail can carry text an agent's heartbeat contributed (design.md 5.2, 11 節: the agent tunnel
+// and rule checks read doctor.TunnelHealth and similar). `group`・`label`・`detail`・`next` are
+// explicitly not part of `server doctor --json`'s guarantee (design.md 10.2a 節: "これらは人向けの
+// 文であり、保証の対象ではない"), so sanitizing here would not by itself touch any guaranteed value
+// either way. It is done here, at the one place every check's human text passes through, rather
+// than where checks.go builds Detail, to keep internal/vpsd/doctor a pure judgment layer that does
+// not need to import internal/textsafe, and because the Web UI (10.2d 節) already has its own,
+// separate escaping (html/template) for the same values.
 func writeLine(w io.Writer, label, status, detail string) {
+	detail = textsafe.SanitizeForTerminal(detail)
 	indent := 2 + labelWidth + 1
 	if detail != "" && len(detail) <= inlineDetail {
 		fmt.Fprintf(w, "  %-*s %-*s%s\n", labelWidth, label, statusWidth, status, detail)
@@ -252,7 +263,7 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 				fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", indent), wrapAt(c.ReplyLine, indent))
 			}
 			if c.Next != "" && (c.Status != statusOK || verbose) {
-				fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(c.Next, indent+7))
+				writeNext(w, c.Next, indent)
 			}
 			writeInternal(w, c.Internal, verbose, indent)
 		}
@@ -283,12 +294,25 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 	writeHistory(w, rep.History.Detail)
 	writeNotTested(w, notTestedLines(rep.NotTested))
 }
+
+// writeNext prints a check's "Check: ..." follow-up line. Next can carry text derived from
+// something outside the trust boundary too (design.md 11 節: a kernel-mode agent doctor check,
+// agentdoctorkernel.go, puts ki.ServerAddress, read from agent.json, into some of its own Next
+// text), and like Detail it is not part of any --json guarantee, so it is sanitized here, at the
+// one place every caller in this file and agentdoctor.go prints it.
+func writeNext(w io.Writer, next string, indent int) {
+	fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(textsafe.SanitizeForTerminal(next), indent+7))
+}
+
 func writeInternal(w io.Writer, lines []string, verbose bool, indent int) {
 	if !verbose {
 		return
 	}
 	for _, v := range lines {
-		fmt.Fprintf(w, "%s[%s]\n", strings.Repeat(" ", indent), v)
+		// Check.Internal can carry agent-supplied text too (checks.go's handshakeCheck puts
+		// "agent tunnel report is ..." here), and, like Detail and Next, is not part of any
+		// --json guarantee. Sanitized here rather than at the source, matching writeLine.
+		fmt.Fprintf(w, "%s[%s]\n", strings.Repeat(" ", indent), textsafe.SanitizeForTerminal(v))
 	}
 }
 
@@ -304,7 +328,7 @@ func checkLabelOf(rep doctorReport, ruleID, id string) string {
 func checkDetailOf(rep doctorReport, ruleID, id string) string {
 	for _, c := range rep.Checks {
 		if c.ID == id && (c.RuleID == ruleID || c.RuleID == "") {
-			return c.Detail
+			return textsafe.SanitizeForTerminal(c.Detail)
 		}
 	}
 	return ""
@@ -322,7 +346,7 @@ func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
 	fmt.Fprintln(w, "Server")
 	writeLine(w, dp.Label, displayStatus(dp), dp.Detail)
 	if dp.Status != statusOK && dp.Next != "" {
-		fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(dp.Next, indent+7))
+		writeNext(w, dp.Next, indent)
 	}
 	writeInternal(w, dp.Internal, verbose, indent)
 
@@ -334,7 +358,7 @@ func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
 	for _, a := range agents {
 		writeLine(w, a.Label, displayStatus(a), a.Detail)
 		if a.Status != statusOK && a.Next != "" {
-			fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(a.Next, indent+7))
+			writeNext(w, a.Next, indent)
 		}
 		writeInternal(w, a.Internal, verbose, indent)
 	}
@@ -369,7 +393,7 @@ func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
 func firstNotOKDetail(rep doctorReport, ruleID string) string {
 	for _, c := range checksOfRule(rep, ruleID) {
 		if c.Status == statusUnknown || c.Status == statusSkipped {
-			return c.Label + ": " + c.Detail
+			return c.Label + ": " + textsafe.SanitizeForTerminal(c.Detail)
 		}
 	}
 	return ""
@@ -390,14 +414,14 @@ func countStatus(rules []ruleReport, want string) int {
 func writeHistory(w io.Writer, detail string) {
 	fmt.Fprintln(w, "\nHistory")
 	writeLine(w, "when it broke", "NOT AVAILABLE", "")
-	fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", 2+labelWidth+1), wrapAt(detail, 2+labelWidth+1))
+	fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", 2+labelWidth+1), wrapAt(textsafe.SanitizeForTerminal(detail), 2+labelWidth+1))
 }
 
 // writeNotTested は試していない範囲を出す。項目を引数に取るのは History と同じ理由である。
 func writeNotTested(w io.Writer, items []notTested) {
 	fmt.Fprintln(w, "\nNot tested by this command")
 	for _, n := range items {
-		fmt.Fprintf(w, "  %-16s %s\n", n.ID, wrapAt(n.Detail, 19))
+		fmt.Fprintf(w, "  %-16s %s\n", n.ID, wrapAt(textsafe.SanitizeForTerminal(n.Detail), 19))
 	}
 }
 

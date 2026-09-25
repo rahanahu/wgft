@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
@@ -554,6 +555,14 @@ func statusExit(rep statusReport) error {
 }
 
 func writeStatusLine(w io.Writer, label, value, detail string) {
+	// detail can carry text an agent's heartbeat contributed (Agents and Rules rows read
+	// doctor.TunnelHealth and agent_rule_states, both agent-supplied; design.md 5.2, 11 節). The
+	// admin API's stored copy is already capped and scrubbed at the hub, so this display-time
+	// pass is a second, independent layer, not a compatibility requirement: `server.detail`・
+	// `rules.detail`・`agents.detail`・`warnings.detail` are explicitly not part of `status
+	// --json`'s guarantee either (design.md 10.2b 節, 7a.11 節: they are printed verbatim into
+	// this same table, so they are human text, not a guaranteed value).
+	detail = textsafe.SanitizeForTerminal(detail)
 	if detail == "" {
 		fmt.Fprintf(w, "%-*s%s\n", statusLabelWidth, label, value)
 		return

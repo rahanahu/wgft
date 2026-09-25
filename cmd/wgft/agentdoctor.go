@@ -23,6 +23,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/resource"
+	"github.com/rahanahu/wgft/internal/textsafe"
 )
 
 // このファイルは `wgft agent doctor`(設計文書 10.2c 節)を持つ。エージェントを動かしている
@@ -1334,7 +1335,7 @@ func writeAgentDoctorReport(w io.Writer, rep agentDoctorReport) {
 		writeLine(w, c.Label, statusWord(c.Status), c.Detail)
 		// FAILED の所見には必ず次に見るものを添える(10.2a、10.2c 節)。
 		if c.Next != "" && c.Status != statusOK {
-			fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(c.Next, indent+7))
+			writeNext(w, c.Next, indent)
 		}
 	}
 	writeAgentDoctorObserved(w, observed)
@@ -1369,7 +1370,7 @@ func writeAgentDoctorObserved(w io.Writer, checks []agentDoctorCheck) {
 		}
 		writeLine(w, c.Label, statusWord(c.Status), c.Detail)
 		if c.Next != "" && c.Status != statusOK {
-			fmt.Fprintf(w, "%sCheck: %s\n", strings.Repeat(" ", indent), wrapAt(c.Next, indent+7))
+			writeNext(w, c.Next, indent)
 		}
 	}
 }
@@ -1378,5 +1379,9 @@ func writeAgentDoctorObserved(w io.Writer, checks []agentDoctorCheck) {
 // 始め、続く行は値の桁で折り返す。「Not tested by this command」の節と同じ形である。
 func writeValueLine(w io.Writer, label, detail string) {
 	indent := 2 + labelWidth + 1
-	fmt.Fprintf(w, "  %-*s %s\n", labelWidth, label, wrapAt(detail, indent))
+	// detail here is one of the "Observed values" (agent.control's allow_targets, or the running
+	// agent's own report), which can carry text from agent.json or the control socket reply; both
+	// are outside the trust boundary (design.md 11 節). writeLine sanitizes its own detail
+	// argument, but this function prints directly and does not go through it.
+	fmt.Fprintf(w, "  %-*s %s\n", labelWidth, label, wrapAt(textsafe.SanitizeForTerminal(detail), indent))
 }

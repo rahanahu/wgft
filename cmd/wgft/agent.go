@@ -16,6 +16,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/startup"
+	"github.com/rahanahu/wgft/internal/textsafe"
 )
 
 // agentGOOS はエージェントの入口が Linux 以外での kernel の指定を判定するための OS 名である。
@@ -321,16 +322,30 @@ On the VPS, against the admin API:
 						protoVal = "-"
 					}
 				}
-				tun := a.Tunnel.State
+				// a.Tunnel.Reason and each rule's ID and Reason come from the agent's own
+				// heartbeat (design.md 5.2 節), and the agent is outside the trust boundary
+				// (design.md 11 節): the hub already caps and scrubs these before storing
+				// them, but this display-time pass is a second, independent layer, and the
+				// one this build's own text keeps working under if it ever talks to an
+				// older server that predates the hub-side fix.
+				tun := textsafe.SanitizeForTerminal(a.Tunnel.State)
 				if a.Tunnel.Reason != "" {
-					tun += ": " + a.Tunnel.Reason
+					tun += ": " + textsafe.SanitizeForTerminal(a.Tunnel.Reason)
 				}
-				rules := ""
+				// Built with a strings.Builder rather than += in the loop: the += form
+				// reallocates and copies the whole string on every rule, making this
+				// quadratic in the rule count (a security review's finding, not just a
+				// style cleanup).
+				var rulesB strings.Builder
 				for _, r := range a.Rules {
 					if r.State != "ok" {
-						rules += r.ID + ":" + r.Reason + " "
+						rulesB.WriteString(textsafe.SanitizeForTerminal(r.ID))
+						rulesB.WriteByte(':')
+						rulesB.WriteString(textsafe.SanitizeForTerminal(r.Reason))
+						rulesB.WriteByte(' ')
 					}
 				}
+				rules := rulesB.String()
 				if rules == "" && len(a.Rules) > 0 {
 					rules = fmt.Sprintf("%d ok", len(a.Rules))
 				}

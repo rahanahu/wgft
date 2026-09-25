@@ -185,8 +185,8 @@ func TestDependencyDirection(t *testing.T) {
 // its sub-packages, the nftables-row and Go-evaluator Admission Policy compilers, design.md 7a.7
 // 節's package layout) and internal/planner "know nothing about the OS, nftables, or gVisor": inside
 // the module, they import only proto and each other, never dataplane/*, frontend/*, platform/*,
-// vpsd or agent. internal/resource, internal/lograte and internal/startup are even stricter and
-// import nothing at all from the module (design.md 7a.7 節).
+// vpsd or agent. internal/resource, internal/lograte, internal/startup and internal/textsafe are
+// even stricter and import nothing at all from the module (design.md 7a.7 節).
 func TestPureLayersStayPure(t *testing.T) {
 	root := moduleRoot(t)
 	var pure []string
@@ -212,7 +212,7 @@ func TestPureLayersStayPure(t *testing.T) {
 	// by cmd/wgft, internal/vpsd, internal/agent and internal/dataplane/linuxkernel/wg alike, so it
 	// stays a leaf. If it grew an import of, say, internal/vpsd/store, every one of those layers
 	// would pull the control plane in through it and the direction of 7a.7 節 would break.
-	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup"} {
+	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup", "internal/textsafe"} {
 		pkgs := packagesUnder(t, root, name)
 		if len(pkgs) == 0 {
 			t.Fatalf("found no packages under %s; did it move?", name)
