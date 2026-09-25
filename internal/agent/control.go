@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -196,6 +197,9 @@ var rotateKeyLockedHook func()
 // エージェントが起動した場合を模すために差し替える。
 var inspectLock = credentials.Inspect
 
+// rotateKeyReplyLimit は、稼働中の rotate-key が制御ソケットから読む応答の大きさの上限である。
+const rotateKeyReplyLimit = 64 << 10
+
 // rotateKeyRunning は、稼働中のエージェントに制御ソケットで鍵の作り直しを指示する。
 func rotateKeyRunning(path string) (string, error) {
 	c, err := net.DialTimeout("unix", ControlPath(path), 5*time.Second)
@@ -205,7 +209,9 @@ func rotateKeyRunning(path string) (string, error) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(30 * time.Second))
 	fmt.Fprintln(c, "rotate-key")
-	line, err := bufio.NewReader(c).ReadString('\n')
+	// 応答の 1 行は "ok <公開鍵>" か "error: <文言>" で短い。読む量に上限を置き、root の CLI が
+	// 改行を送らない相手にメモリを使い切られないようにする(仕様 11 節)
+	line, err := bufio.NewReader(io.LimitReader(c, rotateKeyReplyLimit)).ReadString('\n')
 	if err != nil {
 		return "", err
 	}

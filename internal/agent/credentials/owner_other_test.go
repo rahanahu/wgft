@@ -27,10 +27,10 @@ func TestSaveKeepsTheOwnerWhenRoot(t *testing.T) {
 		uid, gid int
 	}
 	var calls []call
-	defer func(e func() int, c func(string, int, int) error) { geteuid, chown = e, c }(geteuid, chown)
+	defer func(e func() int, c func(*os.File, int, int) error) { geteuid, fchown = e, c }(geteuid, fchown)
 	geteuid = func() int { return 0 }
-	chown = func(name string, uid, gid int) error {
-		calls = append(calls, call{name, uid, gid})
+	fchown = func(f *os.File, uid, gid int) error {
+		calls = append(calls, call{f.Name(), uid, gid})
 		return nil
 	}
 	f.Mode = ModeKernel
@@ -77,11 +77,11 @@ func TestSaveGoesOnWhenChownFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	var warned []string
-	defer func(e func() int, c func(string, int, int) error, l func(string, ...any)) {
-		geteuid, chown, logf = e, c, l
-	}(geteuid, chown, logf)
+	defer func(e func() int, c func(*os.File, int, int) error, l func(string, ...any)) {
+		geteuid, fchown, logf = e, c, l
+	}(geteuid, fchown, logf)
 	geteuid = func() int { return 0 }
-	chown = func(string, int, int) error { return os.ErrPermission }
+	fchown = func(*os.File, int, int) error { return os.ErrPermission }
 	logf = func(f string, a ...any) { warned = append(warned, fmt.Sprintf(f, a...)) }
 	if err := (&Credentials{Name: "renamed"}).Save(path); err != nil {
 		t.Fatalf("Save failed on a chown failure: %v", err)

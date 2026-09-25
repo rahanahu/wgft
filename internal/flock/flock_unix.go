@@ -26,3 +26,13 @@ func trySharedLock(f *os.File) error {
 	}
 	return err
 }
+
+// noFollowFlags は OpenRegular が付ける旗である。O_NOFOLLOW は最後の要素の symlink を辿らずに ELOOP で
+// 失敗させる。O_NONBLOCK は FIFO を開く時点で書き手や読み手を待たないためである。
+const noFollowFlags = syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+
+// isSymlinkRefusal は、O_NOFOLLOW が symlink を拒んだときの誤りかどうかである。Linux と macOS は ELOOP を
+// 返す。FreeBSD は EMLINK を返す。
+func isSymlinkRefusal(err error) bool {
+	return errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK)
+}

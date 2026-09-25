@@ -17,6 +17,11 @@ const tempPrefix = ".wgft-credentials-"
 // 確かめるために設定する。
 var saveBeforeRenameHook func(tmpName string)
 
+// saveAfterCreateHook は、Save が一時ファイルを作った直後、権限を締める前に、その一時ファイルのパスを
+// 渡して呼ばれる。テストだけが、書き込みの途中で一時ファイルの名前を差し替えられても、Save が差し替え先の
+// 権限と持ち主を変えないことを確かめるために設定する。
+var saveAfterCreateHook func(tmpName string)
+
 // errLockNotHeld は、ロックを持たずに RemoveLeftoverTemps を呼んだことを示す。
 var errLockNotHeld = errors.New("remove leftover temporary credentials files: the credentials file lock is not held")
 

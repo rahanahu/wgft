@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -88,14 +90,74 @@ func (f *Credentials) KeepPreviousKey() {
 	f.PreviousWGPrivateKey = f.WGPrivateKey
 }
 
-// Load はファイルを読む。なければ os.ErrNotExist。Windows では、この修正より前に緩い ACL の
-// 下で作られていた既存のファイルがありうるため、読むたびに secureExisting で単独に締め直す
-// (仕様 9・11a 節)。隣のファイルやディレクトリには触れない。Unix では secureExisting は
+// MaxFileSize は認証情報ファイルの大きさの上限である(仕様 9 節)。Load と ReadFile はこれより大きい
+// ファイルを読まずに拒み、Save はこれより大きい中身を書かずに拒む。wgft が書いたファイルを wgft が
+// 読めなくなることはない。
+//
+// 値は、エージェントが書きうる最大の大きさを上回るように決める。last_state は制御ストリームの
+// 1 通の読み取りの上限の内に収まる。カーネルモードの公開の記録は、直近の公開と、収束が済んでいない
+// 前の公開の列の上限の数の分だけ並び、1 つの公開の大きさは last_state のルールの数で決まる。許可一覧が
+// 範囲のルールを多数の範囲に分ける場合と、公開しなかった理由の文言の長さは見積もりの外である(仕様 9 節)。
+// 見積もりの外で上限を超える中身は、Save が誤りとして拒む。
+// 最大の大きさの見積もりと、この値が上回ることは、internal/agent のテスト
+// TestCredentialsFileSizeLimitCoversTheLargestFile が確かめる。
+const MaxFileSize = 512 << 20
+
+// fileSizeLimit は読み書きで使う上限である。値は MaxFileSize で、テストだけが小さくする。
+var fileSizeLimit int64 = MaxFileSize
+
+// ErrTooLarge は、認証情報ファイルが MaxFileSize を超えることを示す。
+var ErrTooLarge = errors.New("the credentials file is larger than wgft ever writes")
+
+// ReadFile は認証情報ファイルの中身を読む。最後の要素が symlink なら辿らず、通常のファイルでなければ
+// 拒み、MaxFileSize を超えれば読まずに拒む(仕様 9・11 節)。種別と大きさは開いた記述子で確かめる。
+// 返す FileInfo はその記述子の fstat である。root の CLI は、エージェントの利用者が書けるデータ
+// ディレクトリの agent.json を読むので、パスの先を信頼しない。無ければ os.ErrNotExist を包んだ誤りを返す。
+// 中身の締め直しはしないので、副作用を持たない読み取り(agent doctor)にも使える。
+func ReadFile(path string) ([]byte, os.FileInfo, error) {
+	fh, fi, err := flock.OpenRegular(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer fh.Close()
+	b, err := readLimited(fh, fi, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return b, fi, nil
+}
+
+// readLimited は開いた認証情報ファイルを fileSizeLimit まで読む。fstat の大きさで先に拒み、読んでいる
+// 間に伸びた場合も上限を超えた時点で拒む。
+func readLimited(fh *os.File, fi os.FileInfo, path string) ([]byte, error) {
+	if fi.Size() > fileSizeLimit {
+		return nil, fmt.Errorf("%s is %d bytes: %w", path, fi.Size(), ErrTooLarge)
+	}
+	b, err := io.ReadAll(io.LimitReader(fh, fileSizeLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > fileSizeLimit {
+		return nil, fmt.Errorf("%s grew while being read: %w", path, ErrTooLarge)
+	}
+	return b, nil
+}
+
+// Load はファイルを読む。なければ os.ErrNotExist。読み方の制限は ReadFile と同じである。Windows では、
+// この修正より前に緩い ACL の下で作られていた既存のファイルがありうるため、読むたびに secureExisting で
+// 単独に締め直す(仕様 9・11a 節)。締め直しは開いたファイルを閉じる前に行う。Windows の os.OpenFile は
+// 削除の共有を許さずに開くので、開いている間はその名前を別のファイルに差し替えられず、締め直すのは
+// 種別を確かめたファイルである。隣のファイルやディレクトリには触れない。Unix では secureExisting は
 // 何もしない no-op で、この修正の前後で Load の挙動は変わらない(Unix の chmod はこの修正
 // より前から機能しており、締め直す理由が無いうえ、管理者が意図して絞った権限を緩めたり、
 // ファイルを所有しない構成で失敗させたりしないため)。
 func Load(path string) (*Credentials, error) {
-	b, err := os.ReadFile(path)
+	fh, fi, err := flock.OpenRegular(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close()
+	b, err := readLimited(fh, fi, path)
 	if err != nil {
 		return nil, err
 	}
@@ -120,8 +182,20 @@ func LoadOrNew(path string) (*Credentials, error) {
 
 // Save は一時ファイルに書いて rename する。パーミッションは 0600(Windows は保護 DACL。
 // 仕様 9・11a 節)。
+//
+// root の CLI(停止中の rotate-key、agent pubkey、agent teardown)も Save を呼ぶ。データディレクトリは
+// エージェントの利用者のもので、その利用者は一時ファイルや path の名前を書き込みの途中で差し替えられる。
+// そのため、一時ファイルの権限と持ち主はパスではなく開いた記述子に対して設定する。path が既にあれば
+// Lstat で種別を確かめ、通常のファイルでなければ何も書かずに拒む(仕様 9・11 節)。
 func (f *Credentials) Save(path string) error {
 	b, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return err
+	}
+	if int64(len(b)) > fileSizeLimit {
+		return fmt.Errorf("the credentials file %s would be %d bytes: %w", path, len(b), ErrTooLarge)
+	}
+	old, err := existingRegular(path)
 	if err != nil {
 		return err
 	}
@@ -130,18 +204,22 @@ func (f *Credentials) Save(path string) error {
 	// (os.CreateTemp してから締め直すのでは、締め直すまでの間に別の利用者がハンドルを開けて
 	// しまう、緩い ACL のままの期間ができ、後から DACL を締めても取り消せない。レビュー指摘、仕様 11a 節)。
 	// Unix では os.CreateTemp そのもので、作成の瞬間から 0600 であることに変わりはない。
+	// どちらも既存の名前を開かずに新しく作るので、symlink を辿らない。
 	tmp, err := createSecureTemp(dir, tempPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("create temp credentials file: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // rename に成功していれば何も起きない
+	if saveAfterCreateHook != nil {
+		saveAfterCreateHook(tmpName)
+	}
 	// 秘密を書き込む前に、この一時ファイルだけを締める。Windows では createSecureTemp が
-	// 既に締めているので、ここでの SecureFile は重ねての確認(冪等)にすぎない。Unix では
-	// これが唯一の締めで、この手順は変えていない。同じディレクトリ内での rename はこの
-	// ファイル自身の DACL(Windows)・パーミッション(Unix)をそのまま持ち越すので、緩い
+	// 既に締めているので、ここでの締めは重ねての確認(冪等)にすぎない。Unix では
+	// これが唯一の締めである。同じディレクトリ内での rename はこのファイル自身の
+	// DACL(Windows)・パーミッション(Unix)をそのまま持ち越すので、緩い
 	// ACL のまま秘密が書かれる期間は生じない。
-	if err := SecureFile(tmpName); err != nil {
+	if err := secureTemp(tmp); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -153,16 +231,34 @@ func (f *Credentials) Save(path string) error {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
+	if err := keepOwner(tmp, old, path); err != nil {
+		tmp.Close()
 		return err
 	}
-	if err := keepOwner(tmpName, path); err != nil {
+	if err := tmp.Close(); err != nil {
 		return err
 	}
 	if saveBeforeRenameHook != nil {
 		saveBeforeRenameHook(tmpName)
 	}
 	return os.Rename(tmpName, path)
+}
+
+// existingRegular は、置き換える前の path を Lstat で見る。無ければ nil を返す。symlink、FIFO、デバイス、
+// ディレクトリなら flock.ErrNotRegular を包んだ誤りを返す。Lstat は symlink を辿らないので、root の
+// Save が symlink の先の持ち主を読むことはない。
+func existingRegular(path string) (os.FileInfo, error) {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file, so it was left untouched: %w", path, flock.ErrNotRegular)
+	}
+	return fi, nil
 }
 
 // EnsureKey は wg 鍵対がなければ生成する。鍵を作り直すのは agent rotate-key だけ。

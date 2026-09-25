@@ -481,6 +481,13 @@ type agentCredentialsFile struct {
 	HasMode bool
 }
 
+// refusedBeforeParsing は、JSON として読む前に拒んだかどうかである。symlink、通常のファイルでない
+// もの、大きすぎるものがこれに当たり、エージェントも同じ理由で起動しない(9 節)。状態は credMalformed の
+// ままにし、文言だけを分ける。
+func (f agentCredentialsFile) refusedBeforeParsing() bool {
+	return f.State == credMalformed && (errors.Is(f.Err, flock.ErrNotRegular) || errors.Is(f.Err, credentials.ErrTooLarge))
+}
+
 // Registered は登録が済んでいるかどうかである。判定は internal/agent の ensureRegistered と同じく
 // 恒久トークンの有無で行う(設計文書 5.1 節)。
 func (f agentCredentialsFile) Registered() bool {
@@ -489,10 +496,12 @@ func (f agentCredentialsFile) Registered() bool {
 
 // readAgentCredentials は認証情報ファイルを読む。credentials.Load は使わない。Load は読み取りに
 // 続けて secureExisting を呼び、Windows では DACL を毎回書き直すためである。診断が副作用を持たない
-// という 10.2c 節の約束を保つには、締め直しを伴わない経路で読む必要がある。
+// という 10.2c 節の約束を保つには、締め直しを伴わない経路で読む必要がある。読むのは
+// credentials.ReadFile で、root の実行でも symlink を辿らず、通常のファイルでないものと大きすぎる
+// ものを開いた記述子で拒む(9・11 節)。パーミッションもその記述子から取る。
 func readAgentCredentials(path string) agentCredentialsFile {
 	var out agentCredentialsFile
-	b, err := os.ReadFile(path)
+	b, fi, err := credentials.ReadFile(path)
 	if err != nil {
 		out.Err = err
 		switch {
@@ -505,9 +514,7 @@ func readAgentCredentials(path string) agentCredentialsFile {
 		}
 		return out
 	}
-	if fi, serr := os.Stat(path); serr == nil {
-		out.Mode, out.HasMode = fi.Mode().Perm(), true
-	}
+	out.Mode, out.HasMode = fi.Mode().Perm(), true
 	var c credentials.Credentials
 	if err := json.Unmarshal(b, &c); err != nil {
 		out.Err, out.State = err, credMalformed
@@ -795,6 +802,9 @@ func agentCredentialsCheck(in agentDoctorInput, cred agentCredentialsFile) agent
 	case credMalformed:
 		c.Status, c.Reason = statusFailed, agentReasonCredentialsMalformed
 		c.Detail = "the credentials file at " + in.CredentialsPath + " cannot be read as JSON: " + errText(cred.Err)
+		if cred.refusedBeforeParsing() {
+			c.Detail = "the credentials file at " + in.CredentialsPath + " is not one the agent reads: " + errText(cred.Err)
+		}
 		c.Next = "the agent cannot start from this file. Keep a copy, remove it, and register again with a fresh join string; the server keeps the old registration until you revoke it"
 		return c
 	}
@@ -1037,6 +1047,9 @@ func agentSkipForCredentials(cred agentCredentialsFile, what string) (agentDocto
 	case cred.State == credMalformed:
 		c.Reason = agentReasonCredentialsMalformed
 		c.Detail = "not tested: the credentials file cannot be read as JSON, so " + what + " could not be taken from it"
+		if cred.refusedBeforeParsing() {
+			c.Detail = "not tested: the credentials file is not one the agent reads, so " + what + " could not be taken from it"
+		}
 	case !cred.Registered():
 		c.Reason = agentReasonNotRegistered
 		c.Detail = "not tested: this host has not registered yet, so " + what + " is not recorded anywhere"
@@ -1099,8 +1112,20 @@ func nearestExistingDir(path string) string {
 
 // readableAccess は、そのパスを読めるかどうかを実際に開いて判定する。読み取りだけなので副作用を
 // 持たない。ディレクトリは、開けるだけでなく中身を 1 件読めることまで見る。
+//
+// ファイルは flock.OpenRegular で開く。root の実行でも、エージェントの利用者が置いた symlink を辿らず、
+// FIFO で止まらず、デバイスを開かない(9・11 節)。通常のファイルでなければ判定できないものとして返す。
+// ディレクトリは設定で指したデータディレクトリそのもので、その親はエージェントの利用者が差し替えられない
+// ので、そのまま開く。
 func readableAccess(path string, dir bool) (accessResult, error) {
-	f, err := os.Open(path)
+	open := func() (*os.File, error) {
+		if dir {
+			return os.Open(path)
+		}
+		f, _, err := flock.OpenRegular(path, os.O_RDONLY, 0)
+		return f, err
+	}
+	f, err := open()
 	if err != nil {
 		if errors.Is(err, fs.ErrPermission) {
 			return accessDenied, err
