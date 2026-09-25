@@ -233,14 +233,27 @@ func serverStatusOf(res *admin.BatchResponse) serverStatus {
 		return serverStatus{Status: statusUnknown, Detail: "this server does not report apply generations"}
 	}
 	haveGenerations := res.DesiredGeneration != nil && res.ActiveGeneration != nil
+	// この VPS の ip_forward が 0 で、カーネルで転送するルールが止まっていることは、`server doctor` の
+	// server.dataplane と同じ判定と同じ文で拾う(design.md 10.2b 節)。
+	stop := doctor.IPForwardStop(res)
 	if haveGenerations {
 		if gap := doctor.GenerationGap(res); gap != "" {
 			detail := gap
 			if res.ApplyError != "" {
 				detail += "; " + res.ApplyError
 			}
+			if stop != "" {
+				detail += "; " + stop
+			}
 			return serverStatus{Status: serverDegraded, Detail: detail}
 		}
+	}
+	if stop != "" {
+		detail := stop
+		if res.ApplyError != "" {
+			detail += "; " + res.ApplyError
+		}
+		return serverStatus{Status: serverDegraded, Detail: detail}
 	}
 	if res.ApplyError != "" {
 		return serverStatus{Status: serverDegraded, Detail: res.ApplyError}

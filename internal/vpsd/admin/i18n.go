@@ -34,6 +34,12 @@ var tr = map[string][2]string{
 	"svConntrack": {"conntrack UDP", "conntrack UDP"},
 	"ipfBywgft":   {"wgft が設定", "set by wgft"},
 	"ipfDefault":  {"既定のまま", "unchanged"},
+	// ip_forward の今の値。起動時に 1 にしても稼働中に外から 0 にされうるので、今の値を先に示す
+	// (設計文書 10.1 節)
+	"ipfOnBywgft":     {"1 (wgft が設定)", "1, set by wgft"},
+	"ipfOnDefault":    {"1 (既定のまま)", "1, unchanged"},
+	"ipfOffKernel":    {"%s: カーネルの転送が止まっています。sysctl -w net.ipv4.ip_forward=1 で戻せます", "%s: kernel forwarding is stopped; sysctl -w net.ipv4.ip_forward=1 restores it"},
+	"ipfOffUserspace": {"%s (ユーザー空間モードでは使いません)", "%s, not used in userspace mode"},
 	// health
 	"healthOK":   {"すべてのシステムが正常です", "All systems operational"},
 	"healthWarn": {"警告があります", "Warnings present"},

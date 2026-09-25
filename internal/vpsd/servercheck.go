@@ -276,6 +276,12 @@ func checkMeta(out io.Writer, st *store.Store, key, label, want string) {
 // same way EnableIPForward's real write would face at startup.
 func checkIPForward(out io.Writer) {
 	val, openErr, err := linux.IPForwardStatus()
+	writeIPForwardCheck(out, val, openErr, err)
+}
+
+// writeIPForwardCheck は checkIPForward の出力を書く。読み取りと分けてあるのは、/proc を読まずに
+// 試験するためである。
+func writeIPForwardCheck(out io.Writer, val string, openErr, err error) {
 	if err != nil {
 		fmt.Fprintf(out, "ip_forward: cannot read %s: %v\n", linux.IPForwardPath, err)
 		return
@@ -284,13 +290,26 @@ func checkIPForward(out io.Writer) {
 	if val == "1" {
 		return
 	}
+	fmt.Fprintf(out, "  - %s\n", ipForwardFinding(val, openErr))
+}
+
+// ipForwardFinding は、ip_forward が 1 でないときの所見である。書けない場合に加えて、書ける場合も
+// 所見にする(設計文書 6.1 節)。server は起動時にだけ 1 にするので、稼働中の server の横で 0 に
+// された値は、server を起動し直すか手で戻すまで 0 のままであり、その間カーネルで転送するルールは
+// 止まる。書けるからといって黙ると、その状態の server check が何も言わない。
+func ipForwardFinding(val string, openErr error) linux.Finding {
 	if openErr != nil {
-		finding := linux.Finding{
+		return linux.Finding{
 			Where:   "net.ipv4.ip_forward",
 			Problem: fmt.Sprintf("is %s and not writable: %v; kernel-mode forwarding needs it at 1", val, openErr),
 			Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
 		}
-		fmt.Fprintf(out, "  - %s\n", finding)
+	}
+	return linux.Finding{
+		Where: "net.ipv4.ip_forward",
+		Problem: fmt.Sprintf("is %s; rules the kernel forwards do not reach the tunnel while it is. A server that starts now sets it to 1, "+
+			"but a running server sets it only at its start, so set it by hand or restart the server", val),
+		Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
 	}
 }
 

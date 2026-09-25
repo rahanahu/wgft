@@ -127,6 +127,10 @@ const (
 	// 1 でないためにそのルールを転送できないと報告したことである(設計文書 7b.1・10.2a 節)。直す場所は
 	// VPS ではなくエージェントのホストである。
 	ReasonAgentIPForwardOff = "agent_ip_forward_off"
+	// ReasonIPForwardOff は、この VPS の net.ipv4.ip_forward が 1 でないことである(設計文書 6.1・
+	// 10.2a 節)。server は起動時にだけ 1 にするので、稼働中に外から 0 にされると、カーネルで
+	// 転送するルールは 1 に戻るまで止まる。
+	ReasonIPForwardOff = "ip_forward_off"
 )
 
 // 検査のまとまり。人向けの出力の見出しになる。保証の対象ではない。

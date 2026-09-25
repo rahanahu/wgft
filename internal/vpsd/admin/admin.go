@@ -76,6 +76,9 @@ type ServerInfo struct {
 	IPForwardSetAt   string `json:"ip_forward_set_at"`
 	UDPTimeout       int    `json:"udp_timeout"`
 	UDPTimeoutStream int    `json:"udp_timeout_stream"`
+	// IPForward は net.ipv4.ip_forward の今の値("1" か "0")で、読めなければ省く(仕様 6.1、10.1 節)。
+	// v1 への加算である。IPForwardSetAt は wgft が起動時に 0 から 1 にした記録であり、今の値ではない。
+	IPForward string `json:"ip_forward,omitempty"`
 }
 
 // ReservedFromServerInfo builds the proto.Reserved set a real Batch refuses a listen_port for,
@@ -373,6 +376,7 @@ func (s *Server) rulesResponse() (BatchResponse, error) {
 	s.withResourceStatus(&resp)
 	s.withAgentRuleStatus(&resp)
 	s.withUDPReplies(&resp)
+	s.withIPForward(&resp)
 	return resp, nil
 }
 
@@ -405,6 +409,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	s.withResourceStatus(&resp)
 	s.withAgentRuleStatus(&resp)
 	s.withUDPReplies(&resp)
+	s.withIPForward(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 

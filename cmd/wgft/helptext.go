@@ -42,9 +42,10 @@ unknown means there is no evidence either way, such as an older server that
 predates a field this command reads, and it is never counted as healthy or as
 degraded. Server is healthy when the server's forwarding has caught up with
 the current rules and the last change applied without error, degraded when it
-has fallen behind, the last change failed, or a repair after a published
-change failed, and unknown when a generation field is missing and there is no
-apply_error to fall back on.
+has fallen behind, the last change failed, a repair after a published
+change failed, or net.ipv4.ip_forward on a kernel-mode server is 0 while it
+publishes rules the kernel forwards, and unknown when a generation field is
+missing and there is no apply_error to fall back on.
 
 Agents counts registered agents as healthy, degraded or unknown; a healthy
 agent needs both its control connection and its WireGuard tunnel to be

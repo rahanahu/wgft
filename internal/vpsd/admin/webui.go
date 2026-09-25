@@ -673,6 +673,9 @@ func (s *Server) redirectOrErrorTo(w http.ResponseWriter, r *http.Request, to st
 // serverView はダッシュボード上部の「サーバー」帯。
 type serverView struct {
 	Version, Uptime, Mode, Endpoint, WG, AgentAPI, MTU, Kernel, NFT, IPForward, Conntrack string
+	// IPForwardBad は、カーネルモードの server で ip_forward の今の値が 1 でないことである。値を
+	// 危険の色で示す。
+	IPForwardBad bool
 }
 
 func serverToView(info ServerInfo, locale string) serverView {
@@ -692,12 +695,30 @@ func serverToView(info ServerInfo, locale string) serverView {
 	} else {
 		v.Uptime = "-"
 	}
-	if info.IPForwardSetAt != "" {
-		v.IPForward = T(locale, "ipfBywgft")
-	} else {
-		v.IPForward = T(locale, "ipfDefault")
-	}
+	v.IPForward, v.IPForwardBad = ipForwardView(info, locale)
 	return v
+}
+
+// ipForwardView は ip_forward の欄を作る。今の値を先に示し、wgft が起動時に 0 から 1 にしたかどうかを
+// 添える(設計文書 10.1 節)。起動時の記録だけを示すと、稼働中に外から 0 にされた server でも
+// 「wgft が設定」と出て、転送が止まっていることが見えない。今の値を報告しない server(旧い版と、
+// 報告を持たない Backend)では、今までどおり記録だけを示す。
+func ipForwardView(info ServerInfo, locale string) (string, bool) {
+	switch {
+	case info.IPForward == "":
+		if info.IPForwardSetAt != "" {
+			return T(locale, "ipfBywgft"), false
+		}
+		return T(locale, "ipfDefault"), false
+	case info.IPForward == "1":
+		if info.IPForwardSetAt != "" {
+			return T(locale, "ipfOnBywgft"), false
+		}
+		return T(locale, "ipfOnDefault"), false
+	case info.Mode == "userspace":
+		return fmt.Sprintf(T(locale, "ipfOffUserspace"), info.IPForward), false
+	}
+	return fmt.Sprintf(T(locale, "ipfOffKernel"), info.IPForward), true
 }
 
 func orDash(s string) string {

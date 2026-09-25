@@ -41,6 +41,17 @@ func publicPortCheck(r proto.Rule, in Input) Check {
 	c.ObservedAt = in.Now.UTC().Format(time.RFC3339)
 	switch st.ApplyState {
 	case adminapi.ApplyActive:
+		if ipForwardOff(res) && kernelForwarded(r) {
+			// DNAT は公開してあるが、カーネルはそれを wg0 へ転送しない。server が今読んだ値なので、
+			// 転送が止まっていることの観測である(設計文書 10.2a 節)。
+			c.Status, c.Reason = StatusFailed, ReasonIPForwardOff
+			// 一覧の 1 行は detail の最初の句だけを出すので(cmd/wgft の firstClause)、止まった理由を
+			// 最初の句に置く。
+			c.Detail = fmt.Sprintf("net.ipv4.ip_forward is %s on this VPS; the kernel does not forward %s %s into the tunnel although the server publishes it",
+				res.IPForward.Value, r.Proto, r.ListenPort)
+			c.Next = ipForwardNext
+			return c
+		}
 		c.Status, c.Reason = StatusNotTested, ReasonExternalNotTested
 		c.Detail = fmt.Sprintf("serving %s %s; reachability from outside was not tested", r.Proto, r.ListenPort)
 		if d := driftNote(r.ID, res.Drift); d != "" {
@@ -102,24 +113,92 @@ func DataplaneCheck(in Input) Check {
 	if b := FlowBudgetLine(res.FlowBudget); b != "" {
 		c.Internal = append(c.Internal, b)
 	}
+	if f := res.IPForward; f != nil {
+		if f.Error != "" {
+			c.Internal = append(c.Internal, "ip_forward could not be read: "+f.Error)
+		} else {
+			c.Internal = append(c.Internal, "ip_forward "+f.Value)
+		}
+	}
+	stop := IPForwardStop(res)
 	if gap := GenerationGap(res); gap != "" {
 		c.Status, c.Reason = StatusFailed, ReasonNotPublished
 		c.Detail = "the last change has not reached the forwarding path: " + gap
 		if res.ApplyError != "" {
 			c.Detail += "; apply error: " + res.ApplyError
 		}
+		if stop != "" {
+			c.Detail += "; " + stop
+		}
 		c.Next = "free whatever the reason names; the server retries every 30s and publishes the change when it succeeds"
+		return c
+	}
+	if stop != "" {
+		c.Status, c.Reason = StatusFailed, ReasonIPForwardOff
+		c.Detail = stop
+		if res.ApplyError != "" {
+			c.Detail += "; apply error: " + res.ApplyError
+		}
+		c.Next = ipForwardNext
 		return c
 	}
 	if res.ApplyError != "" {
 		c.Status, c.Reason = StatusUnknown, ReasonRepairFailed
-		c.Detail = "the rules are published, but a repair after that failed: " + res.ApplyError
+		c.Detail = "the rules are published, but a repair after that failed: " + res.ApplyError + ipForwardIdleNote(res)
 		c.Next = "new traffic follows the current rules; connections that should have been cut may still run. The server retries every 30s."
 		return c
 	}
 	c.Status = StatusOK
-	c.Detail = fmt.Sprintf("the server's forwarding matches the current rules, generation %d, read just now", res.Generation)
+	c.Detail = fmt.Sprintf("the server's forwarding matches the current rules, generation %d, read just now", res.Generation) + ipForwardIdleNote(res)
 	return c
+}
+
+// ipForwardNext は、この VPS の ip_forward が 0 のときの次の一手である。server は起動時にだけ 1 に
+// するので、稼働中の server は自分では戻さない(設計文書 6.1 節)。0 にしたものを探すことも添える。
+const ipForwardNext = "set it on this VPS with sysctl -w net.ipv4.ip_forward=1, or restart the server, which sets it on start; " +
+	"a running server does not set it again. Then find what set it to 0, such as a file in /etc/sysctl.d or a hardening script"
+
+// ipForwardOff は、この VPS の net.ipv4.ip_forward が 1 でないと server が報告したかどうかである。
+// 報告の無い server(ユーザー空間モード、旧い版)と、値を読めなかった報告では偽である。
+func ipForwardOff(res *adminapi.BatchResponse) bool {
+	return res != nil && res.IPForward != nil && res.IPForward.Value != "" && res.IPForward.Value != "1"
+}
+
+// kernelForwarded は、そのルールをこの VPS のカーネルが転送するかどうかである。プロキシのルールは
+// vpsd が受けて自分から wg0 へ接続し直すので、ip_forward に依らない(設計文書 6.1、6.2 節)。
+func kernelForwarded(r proto.Rule) bool { return r.VPSMode != proto.ModeProxy }
+
+// IPForwardStop は、この VPS の ip_forward が 0 で、カーネルで転送する公開中のルールがあるときに、
+// それを 1 文で返す。無ければ空文字を返す。`server.dataplane` と `wgft status` の Server 行
+// (設計文書 10.2a、10.2b 節)が同じ判定を同じ文で出すために呼ぶ。止まるルールが無いときに FAILED に
+// しないのは、FAILED を転送の停止を観測した場合にだけ使うためである。
+func IPForwardStop(res *adminapi.BatchResponse) string {
+	if !ipForwardOff(res) {
+		return ""
+	}
+	n := 0
+	for _, r := range res.Rules {
+		if !r.Enabled || !kernelForwarded(r) {
+			continue
+		}
+		if st, ok := res.RuleStates[r.ID]; ok && st.ApplyState != adminapi.ApplyActive {
+			continue
+		}
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("net.ipv4.ip_forward on this VPS is %s, so the kernel forwards none of the %d published kernel-mode rule%s",
+		res.IPForward.Value, n, pluralS(n))
+}
+
+// ipForwardIdleNote は、ip_forward が 0 でも止まるルールが無い実行に添える句である。
+func ipForwardIdleNote(res *adminapi.BatchResponse) string {
+	if !ipForwardOff(res) {
+		return ""
+	}
+	return "; net.ipv4.ip_forward on this VPS is " + res.IPForward.Value + ", which stops no rule now since none is forwarded by the kernel, but a kernel-mode rule added later would not forward"
 }
 
 // GenerationGap は desired と active の世代の食い違いを 1 文で返す。差が無ければ空文字を返す。
