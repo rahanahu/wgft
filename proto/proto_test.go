@@ -300,6 +300,24 @@ func TestForAgentAndEffectiveTarget(t *testing.T) {
 			t.Errorf("EffectiveTarget(%d) = %q, %v; want %q, %v", tt.port, got, ok, tt.want, tt.wantOK)
 		}
 	}
+
+	// The upper boundary itself: an effective target of exactly 65535 is valid and must stay
+	// ok=true, whether it is the target's own port (no offset) or reached through a listen_port
+	// offset. Only ports past 65535 are rejected.
+	for _, tt := range []struct {
+		ar     AgentRule
+		port   uint16
+		want   string
+		wantOK bool
+	}{
+		{AgentRule{Target: "h:65535", ListenPort: PortRange{Lo: 1, Hi: 1}}, 1, "h:65535", true},
+		{AgentRule{Target: "h:65534", ListenPort: PortRange{Lo: 10, Hi: 11}}, 11, "h:65535", true},
+	} {
+		got, ok := tt.ar.EffectiveTarget(tt.port)
+		if got != tt.want || ok != tt.wantOK {
+			t.Errorf("EffectiveTarget(%d) on %+v = %q, %v; want %q, %v", tt.port, tt.ar, got, ok, tt.want, tt.wantOK)
+		}
+	}
 }
 
 // 仕様 5.2 節の全体状態の例を読めること。

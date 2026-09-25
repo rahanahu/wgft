@@ -52,6 +52,10 @@ func (r *Rule) ForAgent() AgentRule {
 
 // EffectiveTarget は listen_port 内のポート p に対応する実効宛先(仕様 7 節)。
 // target のポートに、範囲内での位置を足したもの。p が範囲外なら ok は false。
+// Rule.Validate は「target のポートに範囲の幅を足した実効宛先が 65535 を超える場合」を拒否する
+// (仕様 5.3 節)が、AgentRule は Validate を経ずに vpsd から届いた State 経由でも組み立てられる
+// (internal/dataplane/linuxkernel/nft.planAgentRule も同じ算出を自前で検査しているのはこのため)。
+// ここでも同じ上限を検査し、越える p には ok=false を返す。
 func (r AgentRule) EffectiveTarget(p uint16) (target string, ok bool) {
 	if !r.ListenPort.Contains(p) {
 		return "", false
@@ -60,5 +64,9 @@ func (r AgentRule) EffectiveTarget(p uint16) (target string, ok bool) {
 	if err != nil {
 		return "", false
 	}
-	return net.JoinHostPort(host, strconv.Itoa(int(port)+int(p-r.ListenPort.Lo))), true
+	eff := int(port) + int(p-r.ListenPort.Lo)
+	if eff > 65535 {
+		return "", false
+	}
+	return net.JoinHostPort(host, strconv.Itoa(eff)), true
 }
