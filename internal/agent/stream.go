@@ -29,8 +29,47 @@ const (
 	defaultReconnectBackoffMax = 5 * time.Minute
 )
 
+// defaultReconnectBackoffFreshMax は、WireGuard の最終ハンドシェイクが新しい間の再接続の待ちの
+// 既定の上限(仕様 5.2 節)。データの経路が生きているという追加の証拠がある間だけ、制御の経路を
+// 積極的に探す。カーネルモードの vpsd はプロセスが止まっても wg0 と鍵を残すので、プロセスが戻った
+// ことは新しいハンドシェイクに現れず、待ちを打ち切る合図にならないためである。
+const defaultReconnectBackoffFreshMax = 10 * time.Second
+
+// tunnelFreshFor は、最終ハンドシェイクを新しいと数える期間(仕様 5.2 節)。WireGuard の
+// RejectAfterTime の 180 秒で、server doctor の tunnel.handshake の 3 分の閾値(設計文書 10.2a 節)
+// と同じ値である。健全なトンネルの最終ハンドシェイクは 145 秒(RekeyAfterTime 120 秒 + keepalive
+// 25 秒)より古くならず、30 秒ごとの点検の遅れを足しても 175 秒なので、健全なトンネルを古いと
+// 数えない。180 秒を過ぎた鍵は送信にも使えないので、それより古いハンドシェイクはデータの経路が
+// 生きている証拠にならない。
+const tunnelFreshFor = 180 * time.Second
+
+// handshakeObservation は、トンネルの点検(checkTunnel)が読んだ最終ハンドシェイクの値と、その値を
+// 最初に観測した時刻の組である。handshake は WireGuard が返す壁時計の時刻で、observedAt は
+// time.Now が返す単調な読みを持つ。
+type handshakeObservation struct {
+	handshake  time.Time
+	observedAt time.Time
+}
+
+// fresh は、観測した最終ハンドシェイクが now の時点で新しいかどうかを返す(仕様 5.2 節)。観測が
+// 無いか、ハンドシェイクが一度も成立していなければ新しくない。
+//
+// 経過時間は 2 つの起点から測り、どちらも tunnelFreshFor 未満のときだけ新しいとする。観測した時刻
+// からの時間は単調な時計で測るので、壁時計が戻っても古い値を新しいと数え続けない(トンネルの
+// 作り直しの判定と同じ理由。仕様 7 節)。値そのものからの時間は、起動の直後に初めて読んだ古い値を
+// 新しいと数えないために見る。カーネルモードのエージェントは停止の間も wgft0 を残すので、起動の
+// 直後に読む値は何時間も前のものでありうる。壁時計が進んだ場合は新しいトンネルを古いと数えるが、
+// そのときの待ちは通常の上限に戻るだけである。
+func (o *handshakeObservation) fresh(now time.Time) bool {
+	if o == nil || o.handshake.IsZero() {
+		return false
+	}
+	return now.Sub(o.observedAt) < tunnelFreshFor && now.Sub(o.handshake) < tunnelFreshFor
+}
+
 // streamLoop は stream に繋ぎ続ける。切れたら指数バックオフ(1 秒-5 分)で繋ぎ直す(仕様 5.2 節)。
 // WireGuard の新しいハンドシェイクを観測したときは、残りの待ちを打ち切って直ちに繋ぎ直す。
+// 最終ハンドシェイクが新しい間は、繋がらなかった後の待ちの上限を 10 秒にする。
 // 認証拒否で復帰できないときだけ、誤りを返して終わる。
 func (rt *runtime) streamLoop(ctx context.Context) error {
 	backoffMin, backoffMax := rt.reconnectBackoffMin, rt.reconnectBackoffMax
@@ -39,6 +78,10 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 	}
 	if backoffMax < backoffMin {
 		backoffMax = max(defaultReconnectBackoffMax, backoffMin)
+	}
+	freshMax := rt.reconnectBackoffFreshMax
+	if freshMax <= 0 {
+		freshMax = defaultReconnectBackoffFreshMax
 	}
 	backoff := backoffMin
 	for {
@@ -102,6 +145,14 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 			// (どちらかを上げない限り解決しないが、無闇に速く再試行しても意味が無い)
 			log.Printf("stream: %v; the agent or server needs an upgrade to share a protocol version; retrying in %s", err, backoff)
 		default:
+			// 繋がらなかったか、繋がっていた接続が切れた。トンネルが新しい間は、データの経路が
+			// 生きている追加の証拠があるので、待ちの上限を下げて制御の経路を探す(仕様 5.2 節)。
+			// ローカル変数そのものを下げるので、トンネルが古くなった後の待ちはこの上限から倍々に
+			// 伸びて通常の上限に戻る。上の 4 つの場合は、制御の経路の先の相手が応じたうえで
+			// 食い違いを示しているので、制御の経路を探す理由が無く、上限を下げない
+			if backoff > freshMax && rt.handshakeSeen.Load().fresh(time.Now()) {
+				backoff = freshMax
+			}
 			log.Printf("stream: disconnected: %v; reconnecting in %s", err, backoff)
 		}
 		// 待ちに入る間隔と次に試す時刻を控える(設計文書 10.2c 節の観測)。待つ値は下の

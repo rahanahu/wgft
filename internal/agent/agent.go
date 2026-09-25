@@ -69,6 +69,15 @@ type runtime struct {
 	// (仕様 5.2 節)。既定は 1 秒と 5 分。テストで短くできるよう runtime に持たせる
 	reconnectBackoffMin time.Duration
 	reconnectBackoffMax time.Duration
+	// reconnectBackoffFreshMax は、WireGuard の最終ハンドシェイクが新しい間の再接続の待ちの上限
+	// (仕様 5.2 節)。既定は 10 秒で、0 以下なら既定を使う。テストで短くできるよう runtime に持たせる
+	reconnectBackoffFreshMax time.Duration
+
+	// handshakeSeen は、checkTunnel が直近に読んだ最終ハンドシェイクの値と、その値を最初に観測した
+	// 時刻である(仕様 5.2 節)。streamLoop が、再接続の待ちの上限を決めるときに rt.mu の外から読む。
+	// rt.mu は全体状態の適用の間じゅう保たれるので、その後ろで再接続を待たせないよう atomic に置く。
+	// nil なら一度も観測していない
+	handshakeSeen atomic.Pointer[handshakeObservation]
 
 	// doctorLockWait は制御ソケットの doctor が実行時の状態を守る排他を待つ期限
 	// (設計文書 10.2c 節)。0 以下なら defaultDoctorLockWait を使う。テストで短くできるよう
@@ -272,21 +281,22 @@ func (rt *runtime) serve(ctx context.Context, errc <-chan error, tick <-chan tim
 func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *runtime {
 	return &runtime{
 		opts: opts, f: f, priv: priv,
-		fatal:                  make(chan error, 1),
-		stateNotify:            make(chan struct{}, 1),
-		heartbeatInterval:      30 * time.Second,
-		handshakeRetryInterval: time.Second,
-		handshakeRetryTimeout:  10 * time.Second,
-		pingInterval:           30 * time.Second,
-		pongTimeout:            20 * time.Second,
-		reconnectBackoffMin:    defaultReconnectBackoffMin,
-		reconnectBackoffMax:    defaultReconnectBackoffMax,
-		doctorLockWait:         defaultDoctorLockWait,
-		handshakeWake:          make(chan struct{}, 1),
-		kernelWake:             make(chan struct{}, 1),
-		notifyDebounce:         reconcile.DefaultTriggers.Debounce,
-		dp:                     newUserspaceDataplane(opts.AllowTargets, opts.Limits),
-		rebuild:                rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
+		fatal:                    make(chan error, 1),
+		stateNotify:              make(chan struct{}, 1),
+		heartbeatInterval:        30 * time.Second,
+		handshakeRetryInterval:   time.Second,
+		handshakeRetryTimeout:    10 * time.Second,
+		pingInterval:             30 * time.Second,
+		pongTimeout:              20 * time.Second,
+		reconnectBackoffMin:      defaultReconnectBackoffMin,
+		reconnectBackoffMax:      defaultReconnectBackoffMax,
+		reconnectBackoffFreshMax: defaultReconnectBackoffFreshMax,
+		doctorLockWait:           defaultDoctorLockWait,
+		handshakeWake:            make(chan struct{}, 1),
+		kernelWake:               make(chan struct{}, 1),
+		notifyDebounce:           reconcile.DefaultTriggers.Debounce,
+		dp:                       newUserspaceDataplane(opts.AllowTargets, opts.Limits),
+		rebuild:                  rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
 	}
 }
 
@@ -735,6 +745,9 @@ func (rt *runtime) checkTunnel(now time.Time) {
 		notifyNonBlocking(rt.handshakeWake)
 	}
 	idle, rebuild := rt.rebuild.step(now, rt.tunStart, handshake)
+	// 同じ読みを、再接続の待ちの上限を決める証拠として streamLoop に渡す(仕様 5.2 節)。step が
+	// 控えた値と、その値を最初に観測した時刻をそのまま写すので、判定はモードによらず同じになる
+	rt.handshakeSeen.Store(&handshakeObservation{handshake: rt.rebuild.lastHandshake, observedAt: rt.rebuild.observedAt})
 	if !rebuild {
 		return
 	}

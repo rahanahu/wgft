@@ -61,6 +61,14 @@
 #       The server is then moved back and forwarding returns without restarting the agent. Last, the
 #       two /1 routes a VPN such as OpenVPN's redirect-gateway def1 installs do not stop a restart,
 #       and forwarding works with them in place.
+#   reconnect. with a kernel-mode server, whose wg interface outlives its process, the control
+#       stream comes back within 20 s of the server's restart while the tunnel is fresh. The server
+#       stays stopped until 70 s after a rekey's new handshake cut the agent's wait short, the point
+#       where the wait without the fresh-tunnel cap has grown to a minute (design 5.2). About four
+#       minutes.
+#   stale. with WireGuard's UDP dropped at homerouter and the server stopped, the agent's reconnect
+#       wait grows past 10 s within 240 s, once the last handshake is older than 180 s; after both
+#       come back the control stream returns. About five minutes.
 #   teardown. wgft agent teardown: it refuses while the agent runs; pointed at a directory without
 #       agent.json while the agent runs, it removes nothing and forwarding goes on; a stopped
 #       kernel-mode agent's leftovers make a userspace start refuse; teardown removes the agent's
@@ -96,7 +104,7 @@ ELOG=$W/wgft-ak-echo.log
 ADMIN=127.0.0.1:8686
 SERVER_MODE=kernel
 case "${1:-}" in kernel|userspace) SERVER_MODE=$1; shift ;; esac
-CHECKS=${*:-16 17 18 19 22 24 25 resolve drift notify session route pin teardown}
+CHECKS=${*:-16 17 18 19 22 24 25 resolve drift notify session route pin reconnect stale teardown}
 HOSTS=/etc/netns/$HOME_NS/hosts
 fail=0
 
@@ -151,6 +159,7 @@ cleanup() {
   home ip link del wgunrel 2>/dev/null
   home nft delete table inet unrelated 2>/dev/null
   client 'nft delete table inet noicmp 2>/dev/null'
+  ip netns exec "$ROUTER_NS" nft delete table inet ak_cutwg 2>/dev/null
   lan nft delete table inet noicmp 2>/dev/null
   home nft delete table inet stalereject 2>/dev/null
   lan ip addr del 192.168.50.200/24 dev eth0 2>/dev/null
@@ -1135,6 +1144,89 @@ check_25() {
   wait_until 30 tcp_ok 39971
   check "enabling brings forwarding back after the restart" "tcp-echo" "$(tcp_echo 39971)"
 }
+agent_connected() { [ "$(agent_field connected)" = True ]; }
+stop_server() {
+  local p
+  for p in $(server_pids); do kill "$p"; done
+  wait_until 20 server_stopped
+}
+# log_since <line-count>: the agent's log after its first <line-count> lines
+log_since() { tail -n +"$(( $1 + 1 ))" "$ALOG"; }
+# wake_count <line-count>: handshake wakes of the stream's reconnect wait since then
+wake_count() { log_since "$1" | grep -c "a new wireguard handshake shows the server is reachable"; }
+wakes_above() { [ "$(wake_count "$1")" -gt "$2" ]; }
+# waits_since <line-count>: every reconnect wait the agent logged since then, in seconds, one per line
+waits_since() {
+  log_since "$1" | grep -oE 'reconnecting in [0-9hms.]+' | awk '{print $3}' | python3 -c '
+import re, sys
+for w in sys.stdin:
+    s = 0.0
+    for n, u in re.findall(r"([0-9.]+)([hms])", w):
+        s += float(n) * {"h": 3600, "m": 60, "s": 1}[u]
+    print(int(s))
+'
+}
+wait_above_10() { waits_since "$1" | awk '$1 > 10 {f=1} END {exit !f}'; }
+check_reconnect() {
+  echo "== reconnect: the control stream after a server restart while the tunnel is fresh"
+  if [ "$SERVER_MODE" != kernel ]; then
+    skip "reconnect" "a userspace-mode server takes the tunnel down with its process"
+    return
+  fi
+  local n0 t0 t1 lag
+  wait_until 60 agent_connected || echo "!! the agent is not connected before the check"
+  # let the agent's 30-second tunnel check read the current handshake
+  sleep 35
+  n0=$(wc -l < "$ALOG")
+  stop_server
+  # the next rekey renews the handshake while the server is stopped; that wake resets the wait
+  if ! wait_until 200 wakes_above "$n0" 0; then
+    echo "FAIL  no handshake wake within 200 s of stopping the server"; fail=1
+    start_server
+    wait_until 60 agent_connected
+    return
+  fi
+  sleep 70
+  t0=$(date +%s.%N)
+  start_server
+  wait_until 30 vps wgft agent ls --admin "$ADMIN"
+  wait_until 120 agent_connected
+  t1=$(date +%s.%N)
+  lag=$(python3 -c "print('%.1f' % ($t1 - $t0))")
+  echo "INFO  reconnect waits while the server was stopped: $(waits_since "$n0" | tr '\n' ' ')"
+  okcheck "the control stream is back within 20 s of the server's restart: ${lag}s" "$(python3 -c "print(1 if $lag < 20 else 0)")"
+  okcheck "no reconnect wait above 10 s while the tunnel was fresh" "$(wait_above_10 "$n0" && echo 0 || echo 1)"
+}
+check_stale() {
+  echo "== stale: the reconnect wait grows once the tunnel is stale"
+  if [ "$SERVER_MODE" != kernel ]; then
+    skip "stale" "a userspace-mode server takes the tunnel down with its process"
+    return
+  fi
+  local n0 t0 t1 grown
+  wait_until 60 agent_connected || echo "!! the agent is not connected before the check"
+  n0=$(wc -l < "$ALOG")
+  t0=$SECONDS
+  stop_server
+  ip netns exec "$ROUTER_NS" nft -f - <<'NFT'
+table inet ak_cutwg {
+  chain cutfwd {
+    type filter hook forward priority -10; policy accept;
+    udp dport 51820 drop
+    udp sport 51820 drop
+  }
+}
+NFT
+  # the last handshake before the cut is at most one rekey old, so it is stale within 180 s of the
+  # cut; the reconnect check above covers the waits while it is fresh
+  if wait_until 240 wait_above_10 "$n0"; then grown=1; else grown=0; fi
+  echo "INFO  reconnect waits after the cut: $(waits_since "$n0" | tr '\n' ' ')"
+  okcheck "the wait grows past 10 s once the tunnel is stale: $((SECONDS - t0))s after the cut" "$grown"
+  ip netns exec "$ROUTER_NS" nft delete table inet ak_cutwg
+  start_server
+  wait_until 30 vps wgft agent ls --admin "$ADMIN"
+  okcheck "the control stream is back after the tunnel and the server" "$(wait_until 300 agent_connected && echo 1 || echo 0)"
+}
 home_dnat_rows() { home nft list chain inet wgft_agent nat_pre | grep dnat; }
 home_no_dnat() { ! home_dnat_rows | grep -q .; }
 home_flows() { home conntrack -L -p tcp --dport "$1" 2>/dev/null | grep -c . ; }
@@ -1179,7 +1271,7 @@ handshake_after() { local h; h=$(agent_field last_handshake); [ -n "$h" ] && [ "
 
 for c in $CHECKS; do
   case "$c" in
-    16|17|18|19|22|24|25|resolve|drift|notify|session|route|pin|teardown) "check_$c" ;;
+    16|17|18|19|22|24|25|resolve|drift|notify|session|route|pin|reconnect|stale|teardown) "check_$c" ;;
     *) echo "FAIL  unknown check $c"; fail=1 ;;
   esac
 done

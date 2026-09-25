@@ -371,7 +371,10 @@ that item's own status can be OK or FAILED.
 How to read the six values; --json keeps each item's own "next":
 
   reconnect backoff  a wait that keeps growing while the control connection
-                     stays down points at the server or the line to it
+                     stays down points at the server or the line to it; a
+                     wait that stays at 10s means the WireGuard handshake is
+                     recent, so the line works and the server is not
+                     accepting the control connection
   liveness           the agent's own keepalives on the control stream; they
                      are cleared on every reconnect, so an empty pair on a
                      stream that is up means the connection is new
