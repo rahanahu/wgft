@@ -186,6 +186,14 @@ The Diagnostics page of the Web UI shows the same verdicts, built from the same 
 
 `wgft agent doctor` runs on the agent host and answers whether an agent runs there, whether it holds credentials, and whether the host can resolve the names it needs. For a kernel-mode agent it also checks the WireGuard interface, the nftables table and IP forwarding. A stopped kernel-mode agent whose interface, table and forwarding are in place exits 0, because the kernel keeps forwarding; reading that state while the agent is stopped needs root. Otherwise, run it as the user the agent runs as. It answers for the permissions of the user who runs it. Run as root, it cannot tell whether the agent's own user can reach its files, and reports the privileges item as UNKNOWN. Where the agent itself runs as root, running the command as root is correct and that UNKNOWN is expected. With `--json`, both doctor commands print a diagnostic model. Its check ids and reason codes may gain new values in later versions, but an existing value never changes its meaning.
 
+Give it the same data directory as the agent. For the agent started in the Quick start above:
+
+```sh
+wgft agent doctor --data-dir ~/.wgft
+```
+
+Without `--data-dir`, it reads `/var/lib/wgft`, the default that the provided systemd unit uses, and does not see an agent that keeps its credentials elsewhere.
+
 See the [CLI reference](docs/cli.md) for what each state means and for the exit codes, and the [design](docs/design.md) for how the checks are judged.
 
 ## Documentation

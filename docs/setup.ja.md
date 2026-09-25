@@ -90,10 +90,11 @@ sudo firewall-cmd --permanent --add-port=51820/udp --add-port=8443/tcp
 sudo firewall-cmd --reload
 ```
 
-付属の systemd unit を使う場合:
+付属の systemd unit を使う場合は、次のように導入します。unit のファイルはリリースの配布物に含まれないため、バイナリと同じリリースのタグから取得します。リリースのバイナリの `wgft version` は、1 行目にそのタグを出力します。
 
 ```sh
-sudo install -m 0644 deploy/server.service /etc/systemd/system/wgft.service
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/server.service"
+sudo install -m 0644 server.service /etc/systemd/system/wgft.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now wgft
 ```
@@ -272,16 +273,17 @@ wgft は更新の経路を保証しますが、更新後に旧版へ戻すこと
 
 ### systemd で起動する
 
-付属の unit は非特権の `wgft` ユーザーで動きます。
+付属の unit は非特権の `wgft` ユーザーで動きます。server と同じく、unit のファイルはバイナリと同じリリースのタグから取得します。
 
 ```sh
 sudo install -m 0755 ~/.local/bin/wgft /usr/local/bin/wgft
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/agent.service"
 sudo useradd --system --home-dir /var/lib/wgft --shell /usr/sbin/nologin wgft
 sudo mkdir -p /etc/wgft
 printf 'WGFT_JOIN=<join string>\n' | sudo tee /etc/wgft/agent.env >/dev/null
 sudo chown root:wgft /etc/wgft/agent.env
 sudo chmod 0640 /etc/wgft/agent.env
-sudo install -m 0644 deploy/agent.service /etc/systemd/system/wgft-agent.service
+sudo install -m 0644 agent.service /etc/systemd/system/wgft-agent.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now wgft-agent
 ```
@@ -304,13 +306,14 @@ sudo systemctl enable --now wgft-agent
 カーネルモードの手順は、前節の systemd の構成を前提にします。付属の `agent.service` は権限を持たないままとし、drop-in の [deploy/agent.kernel.conf](../deploy/agent.kernel.conf) が `CAP_NET_ADMIN` だけを加えます。エージェントは引き続き `wgft` ユーザーで動作し、unit の他のサンドボックスの設定も変わりません。drop-in を unit の隣に置き、`agent.env` に `WGFT_MODE=kernel` を加えます。
 
 ```sh
-sudo install -D -m 0644 deploy/agent.kernel.conf /etc/systemd/system/wgft-agent.service.d/kernel.conf
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/agent.kernel.conf"
+sudo install -D -m 0644 agent.kernel.conf /etc/systemd/system/wgft-agent.service.d/kernel.conf
 printf 'WGFT_MODE=kernel\n' | sudo tee -a /etc/wgft/agent.env >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl restart wgft-agent
 ```
 
-新しいホストでは、systemd の構成の `systemctl enable --now wgft-agent` の前に最初の 3 つのコマンドを実行します。エージェントは登録を済ませ、カーネルモードで起動します。ユーザー空間モードで動いているエージェントは、最後の restart でカーネルモードに切り替わります。`ProtectKernelTunables=` は `/proc/sys` を読み取り専用にし、エージェントによる `ip_forward` の書き換えを止めるため、drop-in に加えないでください。
+新しいホストでは、systemd の構成の `systemctl enable --now wgft-agent` の前に最初の 4 つのコマンドを実行します。エージェントは登録を済ませ、カーネルモードで起動します。ユーザー空間モードで動いているエージェントは、最後の restart でカーネルモードに切り替わります。`ProtectKernelTunables=` は `/proc/sys` を読み取り専用にし、エージェントによる `ip_forward` の書き換えを止めるため、drop-in に加えないでください。
 
 結果は `agent doctor` で確かめます。エージェントの稼働中は、エージェントの利用者として実行します。Dataplane の群の項目は、エージェント自身が報告する `wgft0`、テーブル、転送の設定を示し、終了コード 0 はこのホストが転送できることを意味します。
 

@@ -90,10 +90,11 @@ sudo firewall-cmd --permanent --add-port=51820/udp --add-port=8443/tcp
 sudo firewall-cmd --reload
 ```
 
-Install the provided service:
+Install the provided service. The unit files are not release assets, so download the one from the same release tag as the binary; `wgft version` prints that tag on its first line for a release binary:
 
 ```sh
-sudo install -m 0644 deploy/server.service /etc/systemd/system/wgft.service
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/server.service"
+sudo install -m 0644 server.service /etc/systemd/system/wgft.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now wgft
 ```
@@ -272,16 +273,17 @@ Two macOS behaviors shape this setup:
 
 ### Run the agent with systemd
 
-The provided unit runs as an unprivileged `wgft` user:
+The provided unit runs as an unprivileged `wgft` user. As with the server, download it from the same release tag as the binary:
 
 ```sh
 sudo install -m 0755 ~/.local/bin/wgft /usr/local/bin/wgft
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/agent.service"
 sudo useradd --system --home-dir /var/lib/wgft --shell /usr/sbin/nologin wgft
 sudo mkdir -p /etc/wgft
 printf 'WGFT_JOIN=<join string>\n' | sudo tee /etc/wgft/agent.env >/dev/null
 sudo chown root:wgft /etc/wgft/agent.env
 sudo chmod 0640 /etc/wgft/agent.env
-sudo install -m 0644 deploy/agent.service /etc/systemd/system/wgft-agent.service
+sudo install -m 0644 agent.service /etc/systemd/system/wgft-agent.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now wgft-agent
 ```
@@ -304,13 +306,14 @@ Kernel mode differs from userspace mode in these points:
 Kernel mode builds on the systemd setup above. The provided `agent.service` stays unprivileged; the drop-in [deploy/agent.kernel.conf](../deploy/agent.kernel.conf) adds `CAP_NET_ADMIN` and nothing else, so the agent still runs as the `wgft` user with the rest of the unit's sandbox. Install the drop-in next to the unit and add `WGFT_MODE=kernel` to `agent.env`:
 
 ```sh
-sudo install -D -m 0644 deploy/agent.kernel.conf /etc/systemd/system/wgft-agent.service.d/kernel.conf
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/agent.kernel.conf"
+sudo install -D -m 0644 agent.kernel.conf /etc/systemd/system/wgft-agent.service.d/kernel.conf
 printf 'WGFT_MODE=kernel\n' | sudo tee -a /etc/wgft/agent.env >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl restart wgft-agent
 ```
 
-On a new host, run the first three commands before `systemctl enable --now wgft-agent` in the systemd setup; the agent then registers and starts in kernel mode. On a host where the agent already runs in userspace mode, the restart switches it. Do not add `ProtectKernelTunables=` to the drop-in: it makes `/proc/sys` read-only, which stops the agent from writing `ip_forward`.
+On a new host, run the first four commands before `systemctl enable --now wgft-agent` in the systemd setup; the agent then registers and starts in kernel mode. On a host where the agent already runs in userspace mode, the restart switches it. Do not add `ProtectKernelTunables=` to the drop-in: it makes `/proc/sys` read-only, which stops the agent from writing `ip_forward`.
 
 Check the result with `agent doctor`. While the agent runs, run it as the agent's user; the Dataplane items show `wgft0`, the table and forwarding as the agent reports them, and exit code 0 means this host can forward:
 
