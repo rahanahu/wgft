@@ -164,6 +164,21 @@ func TestEnterMode(t *testing.T) {
 			}
 		}
 	})
+	t.Run("the record is reconciled before the prerequisites are checked", func(t *testing.T) {
+		// 記録との照合の拒否を先に示す。前提を先に確かめると、読めない記録を持つ agent.json に
+		// CAP_NET_ADMIN の案内を返し、記録の矛盾が見えなくなる(仕様 11b 節)
+		setKernelModeAvailable(t, true)
+		setKernelPrerequisites(t, startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN"))
+		body := `{"name":"home","mode":"future"}`
+		path := write(t, body)
+		_, err := enterMode(load(t, path), "kernel", path)
+		if r := startup.Of(err); r == nil || r.Category != startup.CategoryConflict || r.Subject != "WGFT_MODE" {
+			t.Fatalf("err = %v, want the conflict refusal for WGFT_MODE", err)
+		}
+		if got := read(t, path); got != body {
+			t.Errorf("the refused start rewrote agent.json:\n%s", got)
+		}
+	})
 	t.Run("userspace does not check the kernel prerequisites", func(t *testing.T) {
 		setKernelModeAvailable(t, true)
 		setKernelPrerequisites(t, startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN"))
