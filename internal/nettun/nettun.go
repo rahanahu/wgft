@@ -134,14 +134,21 @@ func (t *Device) WriteNotify() {
 }
 
 // Close は device を閉じる。2 回目以降の呼び出しは何もしない。
+//
+// closed は最初に閉じる。gVisor の TCP の Connect は LockUser を持ったまま SYN を送り、
+// その送信は channel.Endpoint 経由で WriteNotify を呼ぶので、下流 (Read の読み手) が
+// 止まっていると、その goroutine は無バッファの incomingPacket への送信で LockUser を
+// 持ったままブロックする。stack.Close は Abort 経由でその LockUser を待つので、closed を
+// 後で閉じる順序では両者が待ち合って戻らない。closed を先に閉じれば、ブロックしている
+// WriteNotify は t.closed を選んでパケットを捨てて戻り、LockUser を手放す。
 func (t *Device) Close() error {
 	t.closeOnce.Do(func() {
+		close(t.closed)
 		t.stack.RemoveNIC(1)
 		t.stack.Close()
 		t.ep.RemoveNotify(t.notifyHandle)
 		t.ep.Close()
 		close(t.events)
-		close(t.closed)
 	})
 	return nil
 }
