@@ -363,10 +363,10 @@ func TestAgentPrivilegeRefusal(t *testing.T) {
 	}
 }
 
-// サーバのトンネルアドレスへの通信を wgft0 から奪うものだけを拒む:サーバのアドレスそのもの、
-// サーバのアドレスを含み wgft0 と同じかより細かいアドレスの帯と経路。帯の中でもサーバのアドレスを
-// 含まないものと、wgft0 より広い経路 (既定経路を含む) は妨げない (design.md 7b.1 節)。
-// 各行の後ろの注は、どの条件を外すとその行が落ちるかを示す。
+// wgft0 の帯と重なる他のインタフェースのアドレスと main の経路を、向きを問わず拒む。帯が含むものも、
+// 帯を含むものも拒み、既定経路だけを対象にしない (design.md 7b.1 節)。covers は、重なりがサーバの
+// トンネルアドレスへの通信も wgft0 から奪うかどうかで、エラーの文面を分ける。各行の後ろの注は、どの
+// 条件を外すとその行が落ちるかを示す。
 func TestBandOverlap(t *testing.T) {
 	own := netip.MustParsePrefix("10.200.0.2/24")
 	server := netip.MustParseAddr("10.200.0.1")
@@ -377,33 +377,58 @@ func TestBandOverlap(t *testing.T) {
 		addrs  []hostAddr
 		routes []hostRoute
 		want   string // 空なら妨げない
+		covers bool
 	}{
-		{"nothing else", nil, nil, ""},
-		{"own address and route", []hostAddr{a("wgft0", "10.200.0.2/24")}, []hostRoute{r("wgft0", "10.200.0.0/24")}, ""},
-		// 同じ帯の LAN のアドレス:接続経路が wgft0 と並ぶ (アドレスの帯の細かさと包含の条件)
-		{"LAN address in the same /24", []hostAddr{a("eth0", "10.200.0.50/24")}, nil, `address 10.200.0.50/24 on interface "eth0"`},
+		{"nothing else", nil, nil, "", false},
+		// 自分のインタフェースは比べない (self の条件)
+		{"own address and route", []hostAddr{a("wgft0", "10.200.0.2/24")}, []hostRoute{r("wgft0", "10.200.0.0/24")}, "", false},
+		// 同じ帯の LAN のアドレス:接続経路が wgft0 と並ぶ
+		{"LAN address in the same /24", []hostAddr{a("eth0", "10.200.0.50/24")}, nil, `address 10.200.0.50/24 on interface "eth0"`, true},
 		// サーバのアドレスそのもの:広い帯でもローカルに届く (一致の条件)
-		{"the server's own address on the same host", []hostAddr{a("wg0", "10.200.0.1/16")}, nil, `address 10.200.0.1/16 on interface "wg0"`},
-		// 広い帯の LAN のアドレス:サーバを含むが接続経路は wgft0 に負ける (アドレスの帯の細かさの条件)
-		{"LAN address with a wider mask", []hostAddr{a("eth0", "10.200.0.50/16")}, nil, ""},
-		// 帯の上半分の bridge:サーバを含まない (アドレスの包含の条件)
-		{"container bridge on the upper half", []hostAddr{a("docker0", "10.200.0.129/25")}, []hostRoute{r("docker0", "10.200.0.128/25")}, ""},
+		{"the server's own address on the same host", []hostAddr{a("wg0", "10.200.0.1/16")}, nil, `address 10.200.0.1/16 on interface "wg0"`, true},
+		// 帯を含む広い LAN のアドレス:wgft0 の接続経路が LAN の一部を奪う (含まれる向き)
+		{"LAN address with a wider mask", []hostAddr{a("eth0", "10.200.0.50/16")}, nil, `address 10.200.0.50/16 on interface "eth0"`, false},
+		// 帯の上半分の bridge:帯がその帯を含む (含む向き)
+		{"container bridge on the upper half", []hostAddr{a("docker0", "10.200.0.129/25")}, nil, `address 10.200.0.129/25 on interface "docker0"`, false},
 		// サーバを含む細かい経路 (経路の条件の両方が真)
-		{"a narrower route covering the server", nil, []hostRoute{r("eth1", "10.200.0.0/25")}, `route 10.200.0.0/25 on interface "eth1"`},
-		{"a host route to the server", nil, []hostRoute{r("tun0", "10.200.0.1/32")}, `route 10.200.0.1/32 on interface "tun0"`},
-		{"the same route on another interface", nil, []hostRoute{r("eth1", "10.200.0.0/24")}, `route 10.200.0.0/24 on interface "eth1"`},
-		{"a blackhole route has no interface", nil, []hostRoute{r("", "10.200.0.0/24")}, "route 10.200.0.0/24"},
-		// サーバを含まない細かい経路 (経路の包含の条件)
-		{"a narrower route not covering the server", nil, []hostRoute{r("eth1", "10.200.0.128/25")}, ""},
-		// 網のアドレスが帯の中にある広い経路:wgft0 の /24 に負ける (経路の細かさの条件)
-		{"a broader route starting inside the range", nil, []hostRoute{r("eth0", "10.200.0.0/16")}, ""},
-		{"broader routes", []hostAddr{a("eth0", "192.168.1.2/24")}, []hostRoute{r("tun0", "10.0.0.0/8"), r("eth0", "0.0.0.0/0")}, ""},
-		{"an address next to the range", []hostAddr{a("eth0", "10.200.1.5/24")}, []hostRoute{r("eth0", "10.200.1.0/24")}, ""},
+		{"a narrower route covering the server", nil, []hostRoute{r("eth1", "10.200.0.0/25")}, `route 10.200.0.0/25 on interface "eth1"`, true},
+		{"a host route to the server", nil, []hostRoute{r("tun0", "10.200.0.1/32")}, `route 10.200.0.1/32 on interface "tun0"`, true},
+		{"the same route on another interface", nil, []hostRoute{r("eth1", "10.200.0.0/24")}, `route 10.200.0.0/24 on interface "eth1"`, true},
+		{"a blackhole route has no interface", nil, []hostRoute{r("", "10.200.0.0/24")}, "route 10.200.0.0/24", true},
+		// サーバを含まない細かい経路 (含む向き)
+		{"a narrower route not covering the server", nil, []hostRoute{r("eth1", "10.200.0.128/25")}, `route 10.200.0.128/25 on interface "eth1"`, false},
+		// 帯を含む広い経路 (含まれる向き)
+		{"a broader route starting inside the range", nil, []hostRoute{r("eth0", "10.200.0.0/16")}, `route 10.200.0.0/16 on interface "eth0"`, false},
+		{"a broad route far outside", nil, []hostRoute{r("tun0", "10.0.0.0/8")}, `route 10.0.0.0/8 on interface "tun0"`, false},
+		// 既定経路は、どの帯も含むので対象にしない (既定経路の条件)
+		{"the default route", []hostAddr{a("eth0", "192.168.1.2/24")}, []hostRoute{r("eth0", "0.0.0.0/0"), r("eth0", "192.168.1.0/24")}, "", false},
+		// 隣の帯は重ならない (重なりの条件)
+		{"an address next to the range", []hostAddr{a("eth0", "10.200.1.5/24")}, []hostRoute{r("eth0", "10.200.1.0/24")}, "", false},
 	}
 	for _, c := range cases {
-		got, overlap := bandOverlap(own, server, "wgft0", c.addrs, c.routes)
-		if overlap != (c.want != "") || got != c.want {
-			t.Errorf("%s: got %q %v, want %q", c.name, got, overlap, c.want)
+		got, covers, overlap := bandOverlap(own, server, "wgft0", c.addrs, c.routes)
+		if overlap != (c.want != "") || got != c.want || covers != c.covers {
+			t.Errorf("%s: got %q covers=%v overlap=%v, want %q covers=%v", c.name, got, covers, overlap, c.want, c.covers)
+		}
+	}
+}
+
+// server が配る帯が LAN の帯の一部を覆う場合と、LAN の帯を覆う場合を拒む。所有者の決定で重なりの検査を
+// 両方向にした理由の場合である (design.md 7b.1 節)。LAN の帯 192.168.1.0/24 に対し、その一部を覆う /25 と、
+// それを含む /16 を配る。
+func TestBandOverlapWithTheLAN(t *testing.T) {
+	addrs := []hostAddr{{Iface: "eth0", Prefix: netip.MustParsePrefix("192.168.1.10/24")}}
+	routes := []hostRoute{{Iface: "eth0", Dst: netip.MustParsePrefix("192.168.1.0/24")}, {Iface: "eth0", Dst: netip.MustParsePrefix("0.0.0.0/0")}}
+	for _, band := range []string{"192.168.1.100/25", "192.168.1.2/24", "192.168.0.2/16"} {
+		own := netip.MustParsePrefix(band)
+		what, covers, overlap := bandOverlap(own, own.Masked().Addr().Next(), "wgft0", addrs, routes)
+		if !overlap {
+			t.Errorf("%s: a band overlapping the LAN was allowed", band)
+			continue
+		}
+		e := (&OverlapError{Range: own.Masked(), What: what, Server: own.Masked().Addr().Next(), Interface: "wgft0", CoversServer: covers}).Error()
+		if !strings.Contains(e, "192.168.1.") || strings.ContainsAny(e, "()") {
+			t.Errorf("%s: %q", band, e)
 		}
 	}
 }

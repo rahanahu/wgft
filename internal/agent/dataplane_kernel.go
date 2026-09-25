@@ -368,19 +368,12 @@ func logHostFindings(iface string) {
 	}
 }
 
+// build は wg 設定 w を受け取る。検証は checkWG に任せ、カーネルには何も書かない。wgft0 を収束させるのは
+// applyRules である。
 func (d *kernelDataplane) build(priv wgtypes.Key, w proto.WGConfig) (bool, error) {
-	if _, err := wgtypes.ParseKey(w.ServerPubkey); err != nil {
-		return false, fmt.Errorf("server_pubkey: %w", err)
-	}
-	addr, err := netip.ParsePrefix(w.Address)
-	if err != nil || !addr.Addr().Is4() {
-		return false, fmt.Errorf("address %q is not an IPv4 CIDR", w.Address)
-	}
-	if w.MTU <= 0 {
-		return false, fmt.Errorf("mtu %d is not positive", w.MTU)
-	}
-	if w.Keepalive < 0 || w.Keepalive > 65535 {
-		return false, fmt.Errorf("keepalive %d is not between 0 and 65535", w.Keepalive)
+	addr, err := d.checkWG(w)
+	if err != nil {
+		return false, err
 	}
 	d.priv, d.wg, d.have = priv, w, true
 	d.server = agentServerAddress(addr)
@@ -389,6 +382,38 @@ func (d *kernelDataplane) build(priv wgtypes.Key, w proto.WGConfig) (bool, error
 	d.epMu.Unlock()
 	d.startKeepalive()
 	return true, nil
+}
+
+// checkWG は、server から届いた wg 設定 w を、カーネルに書く前に検証する(設計文書 7b.1・11 節)。
+// server が配る wg 設定のうち、エージェントがホストに書く前に確かめる値の検証はここに集める。runtime は
+// 今のトンネルを閉じる前にこれを呼び(wgChecker)、build も同じ検証を通す。返すのは wgft0 のアドレスで
+// ある。
+//
+// トンネルのアドレスは、認証情報ファイルに記録した登録時のアドレスと照合する。VPS を奪った攻撃者が
+// LAN の帯より細かい帯を配ると、wgft0 の接続経路が LAN の経路に勝ち、ホストから LAN へ向かう通信の
+// 一部がトンネルへ入るためである。正規の運用では、登録の後にエージェントのアドレスは変わらない。
+// 記録は書き換えない。記録するのは適用が済んだ後の runtime である(finishApplyLocked)。
+func (d *kernelDataplane) checkWG(w proto.WGConfig) (netip.Prefix, error) {
+	if _, err := wgtypes.ParseKey(w.ServerPubkey); err != nil {
+		return netip.Prefix{}, fmt.Errorf("server_pubkey: %w", err)
+	}
+	addr, err := netip.ParsePrefix(w.Address)
+	if err != nil || !addr.Addr().Is4() {
+		return netip.Prefix{}, fmt.Errorf("address %q is not an IPv4 CIDR", w.Address)
+	}
+	if err := d.f.CheckTunnelAddress(addr); err != nil {
+		return netip.Prefix{}, fmt.Errorf("%w; kernel mode refuses it and leaves %s, its address and its routes as they are, "+
+			"since an address the agent was not registered with could route part of this host's LAN into the tunnel; "+
+			"the server moves an agent to a new address only when the agent registers again, after `wgft server teardown --purge` on the VPS, "+
+			"so register this agent again with a new join string to take a new address, and otherwise find out who changed the server", err, d.iface)
+	}
+	if w.MTU <= 0 {
+		return netip.Prefix{}, fmt.Errorf("mtu %d is not positive", w.MTU)
+	}
+	if w.Keepalive < 0 || w.Keepalive > 65535 {
+		return netip.Prefix{}, fmt.Errorf("keepalive %d is not between 0 and 65535", w.Keepalive)
+	}
+	return addr, nil
 }
 
 // startKeepalive は、keepalive ごとに wgft0 を通して vpsd のトンネルアドレスへ小さな UDP のデータ

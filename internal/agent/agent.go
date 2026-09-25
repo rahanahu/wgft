@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net/netip"
 	"os/signal"
 	"path/filepath"
 	"reflect"
@@ -115,6 +116,13 @@ type runtime struct {
 	// 認証情報ファイルの last_state は適用を終えた全体状態しか指さないので、新しい全体状態の適用が
 	// 失敗した後の試し直しには使えない(仕様 7 節)。メモリの上だけに持ち、保存はしない
 	retrySt *proto.State
+
+	// refused は、トンネルが立っている間に届き、dataplane が wg 設定を拒んだ全体状態の世代と理由である
+	// (wgChecker、設計文書 7b.1・11 節)。拒んだ全体状態は適用せず、今のトンネルとルールを残す。
+	// ハートビートのトンネルの状態に載せ、wg 設定を受け入れた次の全体状態で消す。メモリの上だけに持つ
+	refused *refusedState
+	// tunnelWarned は、記録と違うトンネルのアドレスとして直前に警告した値である(recordTunnelAddressLocked)
+	tunnelWarned string
 
 	streamMu     sync.Mutex
 	streamCancel context.CancelFunc // 今の stream 接続を切る(rotate-key で張り直すとき)
@@ -390,6 +398,9 @@ func (rt *runtime) apply(st *proto.State) error {
 // rotate-key が 1 つ前の全体状態の wg 設定で立て直した後でも、控えた全体状態の wg 設定で適用する
 // ためである。呼び出し側は rt.mu を持つ。
 func (rt *runtime) applyLocked(st *proto.State, prepared any) error {
+	if err := rt.checkWGLocked(st); err != nil {
+		return err
+	}
 	if !rt.dp.built() || !reflect.DeepEqual(rt.wgCfg, st.WG) {
 		if rt.dp.built() {
 			log.Printf("wg config changed; rebuilding tunnel")
@@ -406,6 +417,29 @@ func (rt *runtime) applyLocked(st *proto.State, prepared any) error {
 		return nil
 	}
 	return rt.finishApplyLocked(st, prepared)
+}
+
+// refusedState は、dataplane が wg 設定を拒んだ全体状態の世代と理由である。
+type refusedState struct {
+	gen uint64
+	err error
+}
+
+// checkWGLocked は、トンネルが立っている間に届いた全体状態の wg 設定を、今のトンネルに手を付ける前に
+// dataplane に確かめさせる(wgChecker、設計文書 7b.1・11 節)。拒んだら、トンネルもルールも処理済み世代も
+// そのままにして誤りを返す。トンネルが無い間は確かめない。build が同じ検証を通し、他の wg 設定の誤りと
+// 同じく作成の失敗になるためである。呼び出し側は rt.mu を持つ。
+func (rt *runtime) checkWGLocked(st *proto.State) error {
+	c, ok := rt.dp.(wgChecker)
+	if !ok || !rt.dp.built() {
+		return nil
+	}
+	if _, err := c.checkWG(st.WG); err != nil {
+		rt.refused = &refusedState{gen: st.Generation, err: err}
+		return fmt.Errorf("refused the wg configuration; the tunnel and rules stay as generation %d left them: %w", rt.gen, err)
+	}
+	rt.refused = nil
+	return nil
 }
 
 // prepare は、dataplane が preparer なら st の適用の準備を行う。rt.mu を持たずに呼ぶ。rt.dp は
@@ -454,11 +488,37 @@ func (rt *runtime) finishApplyLocked(st *proto.State, prepared any) error {
 	}
 	rt.gen = st.Generation
 	rt.f.LastState = st
+	rt.recordTunnelAddressLocked(st.WG)
 	if err := rt.f.Save(rt.opts.CredentialsPath); err != nil {
 		firstErr = fmt.Errorf("save credentials file: %w", err)
 	}
 	log.Printf("applied generation %d: %s", st.Generation, summary)
 	return firstErr
+}
+
+// recordTunnelAddressLocked は、適用が済んだ全体状態のトンネルのアドレスを認証情報ファイルに記録する
+// (設計文書 9・11 節)。記録が無いか、登録の応答からアドレスだけを記録していれば、ここで帯の長さまで
+// 記録する。保存は呼び出し側が行う。カーネルモードは記録と違うアドレスを適用の前に拒むので、ここで
+// 記録と違うのはユーザー空間モードだけである。ユーザー空間モードは記録と違うアドレスも使う。トンネルが
+// netstack の中に閉じ、ホストのアドレスと経路に触れないためである。記録は書き換えず、同じ値の間は
+// 1 度だけ警告する。呼び出し側は rt.mu を持つ。
+func (rt *runtime) recordTunnelAddressLocked(w proto.WGConfig) {
+	p, err := netip.ParsePrefix(w.Address)
+	if err != nil || !p.Addr().Is4() {
+		return
+	}
+	if err := rt.f.CheckTunnelAddress(p); err != nil {
+		if w.Address != rt.tunnelWarned {
+			log.Printf("warning: %v; userspace mode uses it, since its tunnel does not touch this host's addresses or routes, but kernel mode would refuse it; "+
+				"the server moves an agent to a new address only when the agent registers again", err)
+			rt.tunnelWarned = w.Address
+		}
+		return
+	}
+	rt.tunnelWarned = ""
+	if rt.f.RecordTunnelAddress(p) {
+		log.Printf("recorded the tunnel address %s in the credentials file; kernel mode refuses any other address the server sends until this agent registers again", p)
+	}
 }
 
 // defaultRebuildAfter と defaultRebuildBackoffMax は、トンネルを作り直す判定の既定の閾値(仕様 7 節)。
@@ -753,6 +813,13 @@ func (rt *runtime) tunnelSnapshotLocked(r tunnelReading) tunnelSnapshot {
 	if r.endpoint.IsValid() {
 		snap.hb.Endpoint = r.endpoint.String()
 	}
+	// 拒んだ全体状態は、トンネルの読みの誤りより先に示す。server が送った設定をエージェントが使って
+	// いないことは、運用者が最初に知るべきことである(設計文書 7b.1・11 節)
+	if rt.refused != nil {
+		snap.hb.State = proto.StatusError
+		snap.hb.Reason = fmt.Sprintf("refused the wg configuration of generation %d; the tunnel and rules stay as generation %d left them: %v", rt.refused.gen, rt.gen, rt.refused.err)
+		return snap
+	}
 	if r.err != nil {
 		snap.hb.State, snap.hb.Reason = proto.StatusError, r.err.Error()
 	} else if r.lastHandshake.IsZero() {
@@ -805,6 +872,8 @@ func (rt *runtime) recover() error {
 	rt.f.Name, rt.f.Endpoint, rt.f.PermanentToken = name, j.Endpoint, tok
 	rt.f.CertSHA256 = hex.EncodeToString(j.Pin[:])
 	rt.f.UsedJoinTokenSHA256 = j.TokenHash()
+	// 登録のし直しは、記録したトンネルのアドレスを置き換える唯一の経路である(設計文書 9・11 節)
+	rt.f.TunnelAddress = credentials.RegisteredTunnelAddress(addr)
 	err = rt.f.Save(rt.opts.CredentialsPath)
 	rt.mu.Unlock()
 	if err != nil {
@@ -882,6 +951,7 @@ func ensureRegistered(f *credentials.Credentials, opts Options) error {
 	f.Name, f.Endpoint, f.PermanentToken = name, j.Endpoint, tok
 	f.CertSHA256 = hex.EncodeToString(j.Pin[:])
 	f.UsedJoinTokenSHA256 = j.TokenHash()
+	f.TunnelAddress = credentials.RegisteredTunnelAddress(addr)
 	if err := f.Save(opts.CredentialsPath); err != nil {
 		return err
 	}

@@ -77,6 +77,10 @@ func TestEnsureRegisteredStoresConfirmedName(t *testing.T) {
 	if g.Name != "home" {
 		t.Errorf("persisted name = %q, want %q", g.Name, "home")
 	}
+	// 登録の応答のアドレスを記録する。応答は帯の長さを持たないので、アドレスだけである(設計文書 9 節)
+	if g.TunnelAddress != "10.200.0.2" {
+		t.Errorf("persisted tunnel address = %q, want the registration's 10.200.0.2", g.TunnelAddress)
+	}
 }
 
 // 名前を送っても一致すれば通る。
@@ -216,6 +220,28 @@ func TestRecoverReplacesPinAndToken(t *testing.T) {
 	}
 	if saved.WGPrivateKey != "keep" {
 		t.Errorf("wg private key changed: %q", saved.WGPrivateKey)
+	}
+}
+
+// 登録のし直しは、記録したトンネルのアドレスを新しい登録の応答のアドレスで置き換える。server の帯を
+// 移した後に再登録したエージェントが、新しい帯を受け入れられるようにするためである(設計文書 9・11 節)。
+func TestRecoverReplacesTheTunnelAddress(t *testing.T) {
+	_, join := newTestRegisterServer(t, "home")
+	path := filepath.Join(t.TempDir(), "agent.json")
+	rt := &runtime{
+		dp:   newTestUserspace(),
+		opts: Options{Join: join, CredentialsPath: path},
+		f:    &credentials.Credentials{Name: "home", PermanentToken: "OLD", TunnelAddress: "10.99.0.7/16"},
+	}
+	if err := rt.recover(); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := credentials.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.TunnelAddress != "10.200.0.2" {
+		t.Errorf("tunnel address after re-registering = %q, want 10.200.0.2", saved.TunnelAddress)
 	}
 }
 

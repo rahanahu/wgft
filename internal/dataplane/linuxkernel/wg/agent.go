@@ -375,44 +375,46 @@ type hostRoute struct {
 	Dst   netip.Prefix
 }
 
-// bandOverlap is the overlap rule on values already read. It reports what on another interface
-// would take traffic to the server's tunnel address away from the agent's interface:
-//   - an address that is the server address itself, which the local table delivers to this host;
-//   - an address whose prefix contains the server address and is as specific as own or more, whose
-//     connected route then wins over, or ties with, the one of the agent's interface;
-//   - a main-table route that contains the server address and is as specific as own or more.
+// bandOverlap is the overlap rule on values already read. It reports the first address or
+// main-table route on another interface whose range overlaps own, in either direction: one that
+// own contains, and one that contains own (design.md 7b.1 節). Only the default route, which every
+// range is inside, is left out. covers is true when the overlap would also take traffic to the
+// server's tunnel address away from the agent's interface: the address is the server address
+// itself, which the local table delivers to this host, or its range or the route contains the
+// server address and is as specific as own or more, so it wins over or ties with the agent's
+// connected route.
 //
-// Anything else is allowed: an address or route inside the range that does not cover the server
-// address, such as a container bridge on the upper half of the range, and a broader route, the
-// default route included, which loses to the agent's connected route.
-func bandOverlap(own netip.Prefix, server netip.Addr, self string, addrs []hostAddr, routes []hostRoute) (string, bool) {
+// A narrower address or route inside own takes that part of the range away from the tunnel. A
+// broader one loses to the agent's connected route, which then takes that part of the other
+// interface's range away from it; with a range the server chose, that would carry this host's
+// traffic to a LAN host into the tunnel. Both are refused.
+func bandOverlap(own netip.Prefix, server netip.Addr, self string, addrs []hostAddr, routes []hostRoute) (what string, covers, overlap bool) {
+	own = own.Masked()
+	takesServer := func(p netip.Prefix) bool {
+		return p.Addr() == server || (p.Bits() >= own.Bits() && p.Masked().Contains(server))
+	}
 	for _, a := range addrs {
-		if a.Iface == self {
+		if a.Iface == self || !a.Prefix.Masked().Overlaps(own) {
 			continue
 		}
-		if a.Prefix.Addr() == server || (a.Prefix.Bits() >= own.Bits() && a.Prefix.Masked().Contains(server)) {
-			return fmt.Sprintf("address %s on interface %q", a.Prefix, a.Iface), true
-		}
+		return fmt.Sprintf("address %s on interface %q", a.Prefix, a.Iface), takesServer(a.Prefix), true
 	}
 	for _, r := range routes {
-		if r.Iface == self {
+		if r.Iface == self || r.Dst.Bits() == 0 || !r.Dst.Masked().Overlaps(own) {
 			continue
 		}
-		if r.Dst.Bits() >= own.Bits() && r.Dst.Contains(server) {
-			if r.Iface == "" {
-				return fmt.Sprintf("route %s", r.Dst), true
-			}
-			return fmt.Sprintf("route %s on interface %q", r.Dst, r.Iface), true
+		if r.Iface == "" {
+			return fmt.Sprintf("route %s", r.Dst), takesServer(r.Dst), true
 		}
+		return fmt.Sprintf("route %s on interface %q", r.Dst, r.Iface), takesServer(r.Dst), true
 	}
-	return "", false
+	return "", false, false
 }
 
-// checkAgentOverlap refuses when an address or a main-table route on another interface of the host
-// would take traffic to the server's tunnel address away from the agent's interface, by the rule
-// of bandOverlap (design.md 7b.1 節). It is a plain error, exit code 1: the range
-// comes from the server, so the agent's own settings cannot avoid it, and once the host's
-// interface or the server's range changes the next start goes through.
+// checkAgentOverlap refuses when the agent's range overlaps an address or a main-table route on
+// another interface of the host, by the rule of bandOverlap (design.md 7b.1 節). It is a plain
+// error, exit code 1: the range comes from the server, so the agent's own settings cannot avoid it,
+// and once the host's interface or the server's range changes the next start goes through.
 func checkAgentOverlap(cfg AgentConfig) error {
 	links, err := netlink.LinkList()
 	if err != nil {
@@ -450,11 +452,11 @@ func checkAgentOverlap(cfg AgentConfig) error {
 		ones, _ := r.Dst.Mask.Size()
 		routes = append(routes, hostRoute{Iface: names[r.LinkIndex], Dst: netip.PrefixFrom(ip.Unmap(), ones)})
 	}
-	what, overlap := bandOverlap(cfg.Address, cfg.Server.Address, cfg.Interface, addrs, routes)
+	what, covers, overlap := bandOverlap(cfg.Address, cfg.Server.Address, cfg.Interface, addrs, routes)
 	if !overlap {
 		return nil
 	}
-	return &OverlapError{Range: cfg.Address.Masked(), What: what, Server: cfg.Server.Address, Interface: cfg.Interface}
+	return &OverlapError{Range: cfg.Address.Masked(), What: what, Server: cfg.Server.Address, Interface: cfg.Interface, CoversServer: covers}
 }
 
 // OverlapError is EnsureAgent's refusal of an address range that overlaps an address or a route on
@@ -465,13 +467,21 @@ type OverlapError struct {
 	What      string // the overlapping address or route and its interface
 	Server    netip.Addr
 	Interface string
+	// CoversServer is true when the overlap also takes traffic to the server's tunnel address away
+	// from the agent's interface.
+	CoversServer bool
 }
 
 func (e *OverlapError) Error() string {
-	return fmt.Sprintf("the agent's WireGuard address range %s overlaps %s on this host, which covers the server at %s, so traffic to the server would not go through %s. "+
-		"Remove that address or route from this host, or have the server's operator move the range with WGFT_WG_ADDRESS, "+
-		"which takes `wgft server teardown --purge` and registering the agents again",
-		e.Range, e.What, e.Server, e.Interface)
+	const next = "Remove that address or route from this host, or have the server's operator move the range with WGFT_WG_ADDRESS, " +
+		"which takes `wgft server teardown --purge` and registering the agents again"
+	if e.CoversServer {
+		return fmt.Sprintf("the agent's WireGuard address range %s overlaps %s on this host, which covers the server at %s, so traffic to the server would not go through %s. %s",
+			e.Range, e.What, e.Server, e.Interface, next)
+	}
+	return fmt.Sprintf("the agent's WireGuard address range %s overlaps %s on this host; the routes of the two would compete for the addresses they share, "+
+		"and traffic from this host to those addresses could go through %s instead of reaching them. %s",
+		e.Range, e.What, e.Interface, next)
 }
 
 // AgentPrivilegeRefusal turns a permission failure of a read the agent makes before converging,
