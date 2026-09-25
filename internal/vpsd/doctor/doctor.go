@@ -808,11 +808,14 @@ func uniq(in []string) []string {
 // 使う(設計文書 10.2 節)。CLI の findRule は末尾の省略記号を落として前方一致で受けるので、
 // 短い形を貼っても通るが、前方一致が 2 つ以上あれば拒む。
 func ShortID(id string) string {
-	if len(id) > 12 {
-		return id[:12] + "…"
+	if len(id) > ShortIDLen {
+		return id[:ShortIDLen] + "…"
 	}
 	return id
 }
+
+// ShortIDLen は ShortID が残す先頭の文字数である。CLI は、省略記号を落とした引数にこの長さを求める。
+const ShortIDLen = 12
 
 // ResourceRefusalTotal は、そのルールに対する Resource Guard の拒否の総数(理由を問わない)。
 // design.md 7a.10 節「拒否の報告」の値で、報告を持たない Backend や、その理由でまだ 1 度も

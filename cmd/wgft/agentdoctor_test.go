@@ -1021,6 +1021,22 @@ func TestAgentDoctorPointsAtTheDataDirBeforeANewJoin(t *testing.T) {
 		t.Errorf("a registered default directory still doubts itself: %v", err)
 	}
 
+	// 既定のディレクトリに agent.json はあるが未登録の場合も、エージェントの登録済みのファイルではない
+	// ので、ディレクトリの取り違えを疑う。
+	stub := testAgentDoctorInput(t, t.TempDir())
+	stub.DataDirDefault = true
+	writeTestCredentials(t, stub.CredentialsPath, &credentials.Credentials{})
+	stubRep := agentDiagnose(stub)
+	if c, _ := findAgentCheck(stubRep, agentCheckCredentials); c.Reason != agentReasonNotRegistered {
+		t.Fatalf("credentials = %s, want %s", c.Reason, agentReasonNotRegistered)
+	}
+	if c, _ := findAgentCheck(stubRep, agentCheckProcess); !strings.HasPrefix(c.Next, "This run looked at the default data directory") {
+		t.Errorf("an unregistered agent.json in the default directory does not raise the doubt on process: %q", c.Next)
+	}
+	if err := agentDoctorExit(stubRep); err == nil || !strings.Contains(err.Error(), "run it again with the same --data-dir") {
+		t.Errorf("an unregistered agent.json in the default directory does not raise the doubt on the closing line: %v", err)
+	}
+
 	// 明示したディレクトリでも、見たディレクトリを名指して取り違えを先に疑う。
 	explicit := testAgentDoctorInput(t, t.TempDir())
 	c, _ := findAgentCheck(agentDiagnose(explicit), agentCheckCredentials)

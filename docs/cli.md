@@ -191,7 +191,7 @@ connection to a service.
 
 It answers for one data directory only. If the agent runs with --data-dir or
 WGFT_DATA_DIR, give this command the same value; otherwise it reads the
-default directory, where no credentials file is found. A run on the default
+default directory, which then is not the agent's. A run on the default
 directory that finds no registered credentials file names the directory it
 read and suggests the agent's --data-dir before a new join string, since a new
 registration under a running agent's name is refused and revoking that name
@@ -950,8 +950,10 @@ Flags inherited from parent commands:
 ## wgft rule ls
 
 List rules, grouped by --group. ID is shortened; every rule command accepts such
-a prefix as long as it is unambiguous, with or without the trailing "…", and
-lists the matching IDs when it is not. TARGET shows the effective target range.
+a prefix as long as it is unambiguous, with or without a trailing "…" or
+"...", and lists the matching IDs when it is not. A prefix that ends in either
+mark needs at least the 12 characters shown here, and an ID that matches the
+input exactly, mark included, is taken first. TARGET shows the effective target range.
 MODE is proxy for rules added with --proxy and kernel for all others; in
 userspace mode "kernel" rules are relayed by the wgft process, not the kernel.
 DENY and ALLOW are the number of CIDRs, RATES the configured limits, DROPPED

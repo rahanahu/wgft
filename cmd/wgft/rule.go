@@ -796,14 +796,24 @@ func findRule(c *admin.Client, id string) (*proto.Rule, error) {
 // maxRuleCandidates は、前方一致が 2 つ以上のときに挙げる候補の数の上限である。
 const maxRuleCandidates = 5
 
-// matchRule は rules から、ID の完全一致か、前方一致が 1 つだけのルールを返す。末尾の省略記号は
-// 落としてから照合する。表の ID の列は short が省略記号を付けた短い形で出すので、それを貼っても
-// 通すためである。ルールの ID は ASCII だけからなるので、省略記号を落としても別のルールを指す
-// ことはない。前方一致が 2 つ以上なら、候補の完全な ID を挙げて拒む(設計文書 10.2 節)。
+// matchRule は rules から、ID の完全一致か、前方一致が 1 つだけのルールを返す。表の ID の列は short が
+// 省略記号を付けた短い形で出すので、末尾の省略記号を落としても照合する。ただし rule import と管理用
+// API は空でない任意の ID を受けるので、省略記号で終わる ID もありうる。そこで生の入力の完全一致を
+// 先に試し、省略記号を落とした場合は残りに短い形の長さを求める。`r_...` のようなプレースホルダを
+// 貼った入力が、ルールが 1 本しか無い配置でそのルールを指さないようにするためである。前方一致が
+// 2 つ以上なら、候補の完全な ID を挙げて拒む(設計文書 10.2 節)。
 func matchRule(rules []proto.Rule, id string) (*proto.Rule, error) {
+	for i := range rules {
+		if rules[i].ID == id {
+			return &rules[i], nil
+		}
+	}
 	prefix := strings.TrimSuffix(strings.TrimSuffix(id, "…"), "...")
 	if prefix == "" {
 		return nil, fmt.Errorf("rule %q not found; give a rule ID or its beginning", id)
+	}
+	if prefix != id && len(prefix) < doctor.ShortIDLen {
+		return nil, fmt.Errorf("rule %q not found; an ID that ends in an ellipsis needs at least the first %d characters, as rule ls shows them", id, doctor.ShortIDLen)
 	}
 	var matches []proto.Rule
 	for _, r := range rules {

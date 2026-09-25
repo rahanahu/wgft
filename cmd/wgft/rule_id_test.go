@@ -125,3 +125,34 @@ func TestMatchRuleCapsTheCandidates(t *testing.T) {
 		t.Errorf("the refusal lists more candidates than the cap: %v", err)
 	}
 }
+
+// rule import と管理用 API は空でない任意の ID を受けるので、省略記号で終わる ID もありうる。生の入力の
+// 完全一致を先に試し、省略記号を落とした照合で別のルールを指さない。省略記号を落とした残りには短い形の
+// 長さを求め、プレースホルダの貼り付けがルール 1 本の配置でそのルールを指さないようにする。
+func TestMatchRuleKeepsIDsThatEndInAnEllipsis(t *testing.T) {
+	web := proto.Rule{ID: "web"}
+	webDots := proto.Rule{ID: "web..."}
+	for _, rules := range [][]proto.Rule{{web, webDots}, {webDots, web}} {
+		got, err := matchRule(rules, "web...")
+		if err != nil || got.ID != "web..." {
+			t.Errorf("matchRule(%q) over %v = %v %v, want web...", "web...", rules, got, err)
+		}
+		got, err = matchRule(rules, "web")
+		if err != nil || got.ID != "web" {
+			t.Errorf("matchRule(%q) over %v = %v %v, want web", "web", rules, got, err)
+		}
+	}
+	one := []proto.Rule{{ID: "r_01M3AWMEPZAAAAAAAAAAAAAAAA"}}
+	for _, arg := range []string{"r_...", "r_…", "r_01M3AWMEP…", "r_01M3AWMEP..."} {
+		if got, err := matchRule(one, arg); err == nil {
+			t.Errorf("matchRule(%q) over one rule = %s, want refused: shorter than the short form", arg, got.ID)
+		}
+	}
+	// 省略記号の無い前方一致は今までどおり短くてもよい。
+	if got, err := matchRule(one, "r_01M3"); err != nil || got.ID != one[0].ID {
+		t.Errorf("a plain prefix no longer matches: %v %v", got, err)
+	}
+	if got, err := matchRule(one, short(one[0].ID)); err != nil || got.ID != one[0].ID {
+		t.Errorf("the short form no longer matches: %v %v", got, err)
+	}
+}

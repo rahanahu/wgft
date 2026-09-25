@@ -83,3 +83,37 @@ func TestIPForwardOnOrUnknownChangesNothing(t *testing.T) {
 		}
 	}
 }
+
+// 止まるルールは、カーネルで転送する公開中のルールだけを数える。公開していない(not_active の)
+// カーネルのルールしか無ければ、ip_forward が 0 でも止まる転送は無いので FAILED にしない。
+func TestIPForwardOffIgnoresUnpublishedRules(t *testing.T) {
+	r := tcpRule()
+	in := withIPForward(healthyInput(r), "0")
+	in.Rules.RuleStates[r.ID] = admin.RuleApply{ApplyState: admin.ApplyNotActive, Reason: "agent \"home\" is not registered"}
+	if dp := dataplaneCheck(in); dp.Status == statusFailed {
+		t.Errorf("dataplane = %s %q with no published kernel rule, want not failed", dp.Status, dp.Detail)
+	}
+	st := buildStatusReport(statusInput{Now: doctorNow, Rules: in.Rules, Agents: in.Agents})
+	if strings.Contains(st.Server.Detail, "ip_forward") {
+		t.Errorf("status server names ip_forward with no published kernel rule: %+v", st.Server)
+	}
+}
+
+// 世代の遅れと ip_forward の 0 が重なれば、世代の遅れの FAILED を先に示し、所見に ip_forward を併せて
+// 示す(設計文書 10.2a 節)。status の Server 行も両方を述べる。
+func TestIPForwardOffAlongsideAGenerationGap(t *testing.T) {
+	r := tcpRule()
+	in := withIPForward(healthyInput(r), "0")
+	in.Rules.ActiveGeneration = u64(9)
+	dp := dataplaneCheck(in)
+	if dp.Status != statusFailed || dp.Reason != reasonNotPublished {
+		t.Fatalf("dataplane = %s/%s, want failed/%s", dp.Status, dp.Reason, reasonNotPublished)
+	}
+	if !strings.Contains(dp.Detail, "generation 9") || !strings.Contains(dp.Detail, "net.ipv4.ip_forward on this VPS is 0") {
+		t.Errorf("dataplane detail does not name both: %q", dp.Detail)
+	}
+	st := buildStatusReport(statusInput{Now: doctorNow, Rules: in.Rules, Agents: in.Agents})
+	if !strings.Contains(st.Server.Detail, "generation 9") || !strings.Contains(st.Server.Detail, "net.ipv4.ip_forward on this VPS is 0") {
+		t.Errorf("status server detail does not name both: %q", st.Server.Detail)
+	}
+}
