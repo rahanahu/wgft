@@ -13,19 +13,25 @@ import (
 	"unicode/utf8"
 )
 
-// SanitizeForTerminal replaces every rune unicode.IsPrint reports as not printable, and every
+// SanitizeForTerminal replaces every rune unicode.IsGraphic reports as not graphic, and every
 // invalid UTF-8 byte, in s with a visible, inert escape in the style of strconv.Quote, and leaves
-// every other rune unchanged, including non-ASCII scripts. This is the same rule strconv.Quote
-// itself uses to decide what to escape (design.md 11 節, 所有者の決定 2026-09-25), so it reaches
-// past the C0/C1 control bytes (ESC-led escape sequences, BEL, CR used to overwrite a line, the
-// rest of C0/C1) to also cover bidirectional-override controls (U+202A-202E, U+2066-2069), zero-
-// width characters (U+200B-200F, U+FEFF), the line and paragraph separators (U+2028, U+2029) and
-// language tag characters, all of which can misrepresent a line on a terminal without using a C0 or
-// C1 byte at all. A string with nothing unsafe in it comes back byte-for-byte identical, so text an
-// operator wrote themselves (Japanese, emoji, ordinary punctuation and spacing) reads exactly as
-// typed. This is display-time hardening for text this process reads from something outside its
-// trust boundary; it never lengthens a clean string and is safe to call more than once on the same
-// value (its own output contains nothing it would escape again).
+// every other rune unchanged, including non-ASCII scripts and ordinary spacing. Unicode's graphic
+// characters are its letters, marks, numbers, punctuation, symbols and spaces (category Zs, which
+// includes the ordinary U+0020 space, the no-break space U+00A0 and the ideographic space U+3000
+// used inside Japanese sentences); the runes this function still escapes are the ones that are
+// neither text nor spacing: the C0 and C1 control ranges, DEL, bidirectional-override controls
+// (U+202A-202E, U+2066-2069), most zero-width characters (U+200B-200C, U+200E-200F, U+FEFF), the
+// line and paragraph separators (U+2028, U+2029), and language tag characters, all of which can
+// misrepresent a line on a terminal without using a C0 or C1 byte at all (design.md 11 節, 所有者の
+// 決定 2026-09-25 と 2026-09-27 で範囲を決めた。前者は strconv.Quote と同じ unicode.IsPrint を基準に
+// したが、それは Zs の空白も逃がしてしまい、日本語の文中の全角スペースが変わって見えたため、後者で
+// unicode.IsGraphic に改めた)。zero-width joiner (U+200D) は Cf のカテゴリなのでこの規則でも逃がし、
+// 絵文字の合成(家族の絵文字など)は崩れうるが、これは許容している。A string with nothing unsafe in
+// it comes back byte-for-byte identical, so text an operator wrote themselves (Japanese including
+// its full-width space, emoji, ordinary punctuation and spacing) reads exactly as typed. This is
+// display-time hardening for text this process reads from something outside its trust boundary; it
+// never lengthens a clean string and is safe to call more than once on the same value (its own
+// output contains nothing it would escape again).
 func SanitizeForTerminal(s string) string {
 	if utf8.ValidString(s) && !strings.ContainsFunc(s, isUnsafeRune) {
 		return s
@@ -50,12 +56,14 @@ func SanitizeForTerminal(s string) string {
 	return b.String()
 }
 
-// isUnsafeRune reports whether r is a rune strconv.Quote would itself escape: anything
-// unicode.IsPrint reports as not printable. This includes the C0 and C1 control ranges, DEL, and
-// the wider set of invisible and directional-override code points strconv.Quote already treats the
-// same way, so this function's notion of "unsafe" never drifts from escapeRune's own.
+// isUnsafeRune reports whether r is a rune that carries neither text nor ordinary spacing: anything
+// unicode.IsGraphic reports as not graphic. This includes the C0 and C1 control ranges, DEL, and
+// the wider set of invisible and directional-override code points, but, unlike unicode.IsPrint,
+// leaves every Unicode space separator (Zs: U+0020, U+00A0, U+3000, and the others in that
+// category) untouched, since those carry no terminal control meaning and a Japanese sentence's
+// full-width space is exactly this category (design.md 11 節, 所有者の決定 2026-09-27).
 func isUnsafeRune(r rune) bool {
-	return !unicode.IsPrint(r)
+	return !unicode.IsGraphic(r)
 }
 
 // escapeRune renders r the way strconv.Quote would inside a quoted string, without the quotes:

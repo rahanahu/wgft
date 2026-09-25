@@ -42,11 +42,13 @@ func TestSanitizeForTerminalEscapesControlBytes(t *testing.T) {
 		{"C1 control (CSI, valid UTF-8)", "a\u009bb"},
 		{"newline", "a\nb"},
 		{"tab", "a\tb"},
-		// The following are not C0/C1 controls at all: unicode.IsPrint reports them as not
-		// printable for other reasons (bidirectional override, zero width, line/paragraph
+		// The following are not C0/C1 controls at all: unicode.IsGraphic reports them as not
+		// graphic for other reasons (bidirectional override, zero width, line/paragraph
 		// separator, language tag), so they are only caught because isUnsafeRune is defined as
-		// "not unicode.IsPrint", matching strconv.Quote's own rule (design.md 11 節, 所有者の決定
-		// 2026-09-25). A narrower, C0/C1-only isUnsafeRune would leave every one of these
+		// "not unicode.IsGraphic" (design.md 11 節, 所有者の決定 2026-09-25 と 2026-09-27; 前者は
+		// unicode.IsPrint を基準にしたが、それもこれらを逃がす。後者で規則を IsGraphic に絞り、下で別に
+		// 試す普通の空白だけを逃がさないようにした。
+		// A narrower, C0/C1-only isUnsafeRune would leave every one of these
 		// unchanged, which is exactly the mutation this table is meant to catch.
 		{"RTL override (U+202E)", "safe\u202edetcefni"},
 		{"zero-width space (U+200B)", "a\u200bb"},
@@ -54,6 +56,7 @@ func TestSanitizeForTerminalEscapesControlBytes(t *testing.T) {
 		{"line separator (U+2028)", "a\u2028b"},
 		{"paragraph separator (U+2029)", "a\u2029b"},
 		{"language tag (U+E0001)", "a\U000E0001b"},
+		{"tag character (U+E0041)", "a\U000E0041b"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -75,13 +78,28 @@ func TestSanitizeForTerminalEscapesControlBytes(t *testing.T) {
 	}
 }
 
-// TestSanitizeForTerminalLeavesOrdinarySpacingAlone confirms the wider, unicode.IsPrint-based rule
-// (design.md 11 節) does not sweep up an ordinary space, unlike the invisible and directional
-// characters above.
+// TestSanitizeForTerminalLeavesOrdinarySpacingAlone confirms the unicode.IsGraphic-based rule
+// (design.md 11 節, 所有者の決定 2026-09-27) keeps every Unicode space separator (category Zs)
+// unchanged, unlike the invisible and directional characters in the table above. This is exactly
+// the property the earlier unicode.IsPrint-based rule got wrong: IsPrint reports every space
+// other than the plain ASCII one as not printable, so a Japanese sentence's own full-width
+// space (U+3000, common inside and between Japanese clauses) or a non-breaking space would have
+// come back escaped, changing text an operator wrote themselves (レビューの指摘, 2026-09-27).
 func TestSanitizeForTerminalLeavesOrdinarySpacingAlone(t *testing.T) {
-	s := "two words, one space"
-	if got := SanitizeForTerminal(s); got != s {
-		t.Errorf("SanitizeForTerminal(%q) = %q, want the ordinary space unchanged", s, got)
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"ASCII space", "two words, one space"},
+		{"no-break space (U+00A0)", "a\u00a0b"},
+		{"ideographic space (U+3000), Japanese sentence", "接続を確認できませんでした\u3000ルール ID: r_01H"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := SanitizeForTerminal(c.in); got != c.in {
+				t.Errorf("SanitizeForTerminal(%q) = %q, want the space unchanged", c.in, got)
+			}
+		})
 	}
 }
 

@@ -8,11 +8,12 @@ import (
 // このファイルは、ハートビートに乗る文字列を受け口で締める(design.md 11 節、5.2 節)。agent は
 // 信頼の境界の外にあり、乗っ取られた agent は Tunnel.State・Tunnel.Reason・Tunnel.Endpoint・
 // Rules[].ID・Rules[].State・Rules[].Reason に何でも書ける。ここで切り詰めて、表示できない文字
-// (unicode.IsPrint が偽の文字。internal/textsafe の SanitizeForTerminal を見よ)を読める形に
-// 置き換えた値だけを h.status[agent].Heartbeat に保存するので、admin API・agent ls・rule ls・
-// status・server doctor のどの読み手も同じ、すでに安全な値を読む。CLI 側の表示時のもう 1 段
-// (textsafe.SanitizeForTerminal を個別に呼ぶ箇所)は、この受け口を経ない値(agent doctor・
-// rotate-key が制御ソケットから直接読む応答)のための、独立したもう 1 つの守りである。
+// (unicode.IsGraphic が偽の文字。日本語の文中の全角スペースのような Unicode の空白(Zs)は対象外。
+// internal/textsafe の SanitizeForTerminal を見よ)を読める形に置き換えた値だけを
+// h.status[agent].Heartbeat に保存するので、admin API・agent ls・rule ls・status・server doctor の
+// どの読み手も同じ、すでに安全な値を読む。CLI 側の表示時のもう 1 段(textsafe.SanitizeForTerminal
+// を個別に呼ぶ箇所)は、この受け口を経ない値(agent doctor・rotate-key が制御ソケットから直接読む
+// 応答)のための、独立したもう 1 つの守りである。
 
 // maxHeartbeatStateLen は Tunnel.State と Rules[].State に許す長さの上限である。実際の値は
 // proto.StatusOK("ok")・proto.StatusError("error")の 2 語だけで、どちらも 5 バイトに満たない。
