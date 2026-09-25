@@ -18,8 +18,11 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/rahanahu/wgft/internal/startup"
 )
 
 // AgentConfig declares the agent's kernel WireGuard interface (design.md 7b.1 節).
@@ -476,6 +479,26 @@ func (e *OverlapError) Error() string {
 // returned as they are.
 func AgentPrivilegeRefusal(err error) error {
 	return privilegeRefusal(err, agentPrivilegeFormat)
+}
+
+// agentNoWireGuardBeforeFormat is agentNoWireGuardFormat for the check made before anything is
+// created, so it names no interface.
+const agentNoWireGuardBeforeFormat = "this kernel has no WireGuard support; the wireguard module is missing or cannot be loaded, and `modprobe wireguard` shows why. Kernel mode needs it; without it, run the agent in userspace mode by setting WGFT_MODE=userspace"
+
+// AgentWireGuardSupport asks the kernel for the wireguard generic netlink family, without writing
+// anything and without CAP_NET_ADMIN (design.md 7b.5 節). The lookup makes the kernel try to load
+// the module first, as creating the link does, so a family still missing after it is the same
+// prerequisite refusal createLink makes for a kernel without WireGuard. Any other failure is
+// returned as it is; it says nothing about the module.
+func AgentWireGuardSupport() error { return genlFamilySupport("wireguard") }
+
+// genlFamilySupport is AgentWireGuardSupport with the family name as a parameter, for the tests.
+func genlFamilySupport(family string) error {
+	_, err := netlink.GenlFamilyGet(family)
+	if errors.Is(err, unix.ENOENT) {
+		return startup.Prerequisite("wireguard module", agentNoWireGuardBeforeFormat)
+	}
+	return err
 }
 
 // AgentKeyHolders lists the WireGuard devices other than iface that hold current or previous

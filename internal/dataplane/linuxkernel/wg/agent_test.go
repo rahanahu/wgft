@@ -463,3 +463,21 @@ func TestAgentStagingName(t *testing.T) {
 		}
 	}
 }
+
+// WireGuard の汎用 netlink のファミリが無いことは、種別 prerequisite の拒否になる。カーネルは知らない
+// ファミリの問い合わせに ENOENT を返すので、無い名前で確かめる。ファミリの問い合わせに権限は要らない
+// (design.md 7b.5 節)。
+func TestGenlFamilySupport(t *testing.T) {
+	err := genlFamilySupport("wgft-test-none")
+	r := startup.Of(err)
+	if r == nil || r.Category != startup.CategoryPrerequisite || r.Subject != "wireguard module" {
+		t.Fatalf("err = %v; want a prerequisite refusal about the wireguard module", err)
+	}
+	if strings.ContainsAny(err.Error(), "()") {
+		t.Errorf("refusal %q uses round parentheses; tool output avoids them", err)
+	}
+	// 汎用 netlink の制御のファミリそのものは、どのカーネルにもある
+	if err := genlFamilySupport("nlctrl"); err != nil {
+		t.Errorf("nlctrl: %v; want nil", err)
+	}
+}

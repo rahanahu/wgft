@@ -1775,3 +1775,61 @@ func TestKernelLogsARepeatedConvergenceFailureOnce(t *testing.T) {
 		t.Errorf("the recovery did not log the closed flows:\n%s", out)
 	}
 }
+
+// カーネルモードの前提の検査は、前提の欠如と言い切れる誤りだけを拒否にする(設計文書 7b.5 節)。
+// テーブルの読み出しの権限の誤りは CAP_NET_ADMIN の拒否で、WireGuard の検査より先に止まる。他の
+// 誤りでは止めず、後の最初の収束に分類を任せる。
+func TestCheckKernelPrerequisites(t *testing.T) {
+	eperm := fmt.Errorf("listing tables: netlink receive: %w", syscall.EPERM)
+	noWG := startup.Prerequisite("wireguard module", "this kernel has no WireGuard support")
+	cases := []struct {
+		name      string
+		tables    error
+		wireGuard error
+		want      string // 拒否の対象。空なら止めない
+		wgCalled  bool
+	}{
+		{"both met", nil, nil, "", true},
+		{"no CAP_NET_ADMIN", eperm, nil, "CAP_NET_ADMIN", false},
+		{"no CAP_NET_ADMIN and no WireGuard", eperm, noWG, "CAP_NET_ADMIN", false},
+		{"no WireGuard", nil, noWG, "wireguard module", true},
+		{"another table error is left to the first convergence", fmt.Errorf("listing tables: %w", syscall.EAFNOSUPPORT), nil, "", true},
+		{"another family error is left to the first convergence", nil, fmt.Errorf("netlink: %w", syscall.EAFNOSUPPORT), "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			called := false
+			err := checkKernelPrerequisites(
+				func() (bool, error) { return false, c.tables },
+				func() error { called = true; return c.wireGuard })
+			if called != c.wgCalled {
+				t.Errorf("WireGuard checked = %v, want %v", called, c.wgCalled)
+			}
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			r := startup.Of(err)
+			if r == nil || r.Category != startup.CategoryPrerequisite || r.Subject != c.want {
+				t.Fatalf("err = %v, want a prerequisite refusal about %s", err, c.want)
+			}
+			if c.want == "CAP_NET_ADMIN" && !strings.Contains(err.Error(), "WGFT_MODE=userspace") {
+				t.Errorf("refusal %q does not name the way back to userspace mode", err)
+			}
+		})
+	}
+}
+
+// 既定の検査は、CAP_NET_ADMIN を持たないプロセスでは、本物のテーブルの読み出しで権限の拒否になる。
+// 権限を持つプロセス(root での実行)では確かめられないので飛ばす。
+func TestKernelPrerequisitesWithoutNetAdmin(t *testing.T) {
+	if has := processNetAdmin(); has == nil || *has {
+		t.Skip("this process may hold CAP_NET_ADMIN")
+	}
+	err := kernelPrerequisites()
+	if r := startup.Of(err); r == nil || r.Category != startup.CategoryPrerequisite || r.Subject != "CAP_NET_ADMIN" {
+		t.Fatalf("kernelPrerequisites = %v; want the CAP_NET_ADMIN prerequisite refusal", err)
+	}
+}

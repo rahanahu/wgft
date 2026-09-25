@@ -66,8 +66,9 @@ func reconcileMode(recorded, want string) (mode string, record bool, err error) 
 	}
 }
 
-// enterMode は起動時に reconcileMode を通し、必要なら記録を書き換えて保存する。起動するモードを返す。
-// 呼び出し側は、認証情報ファイルの排他を取った後、鍵を作るよりも、カーネルに何かを書くよりも前に呼ぶ。
+// enterMode は起動時に reconcileMode を通し、カーネルモードならホストの前提を確かめ、必要なら記録を
+// 書き換えて保存する。起動するモードを返す。呼び出し側は、認証情報ファイルの排他を取った後、鍵を作る
+// よりも、登録よりも、カーネルに何かを書くよりも前に呼ぶ。
 // カーネルモードの記録を最初の書き込みより前に残すので、途中で落ちても関門は残骸を見落とさない。
 func enterMode(f *credentials.Credentials, want, path string) (string, error) {
 	mode, record, err := reconcileMode(f.Mode, want)
@@ -76,6 +77,14 @@ func enterMode(f *credentials.Credentials, want, path string) (string, error) {
 	}
 	if mode == credentials.ModeKernel && !kernelModeAvailable {
 		return "", startup.Prerequisite("WGFT_MODE", "this build does not include the agent's kernel mode yet, so it cannot start in kernel mode; use a build that includes it")
+	}
+	// カーネルモードの前提は、記録を書き換えるより前に確かめる。Run は登録をこの後に行うので、登録より
+	// 前でもある。前提で止まる起動が記録を残すと、案内どおりユーザー空間モードへ戻す起動が関門に
+	// 止められ、撤去には root が要る。カーネルには何も作られていないのに、戻す道が閉じる(仕様 11a 節)
+	if mode == credentials.ModeKernel {
+		if err := kernelPrerequisites(); err != nil {
+			return "", err
+		}
 	}
 	if !record {
 		return mode, nil
