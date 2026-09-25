@@ -49,6 +49,15 @@
 #   route. a policy routing rule that sends the server's tunnel address to another table, the way
 #       Tailscale's table 52 can, is named in the agent's log within one 30-second check, and so is
 #       its removal; so are a main-table route that covers the address and its removal.
+#   pin. a server that sends the agent a tunnel address it was not registered with, as a server taken
+#       over would: the server is stopped, its database is edited to move the band and the agent's
+#       address, and it is started again. agent.json records 10.200.0.2/24; another band and then a
+#       /25 that covers half of the home LAN are refused, with wgft0's address, the home routes and
+#       the table left as they were, the refusal in the agent's log and the heartbeat, and the
+#       30-second check still repairing the table; home still reaches the LAN host inside the /25.
+#       The server is then moved back and forwarding returns without restarting the agent. Last, the
+#       two /1 routes a VPN such as OpenVPN's redirect-gateway def1 installs do not stop a restart,
+#       and forwarding works with them in place.
 #   teardown. wgft agent teardown: it refuses while the agent runs; pointed at a directory without
 #       agent.json while the agent runs, it removes nothing and forwarding goes on; a stopped
 #       kernel-mode agent's leftovers make a userspace start refuse; teardown removes the agent's
@@ -84,7 +93,7 @@ ELOG=$W/wgft-ak-echo.log
 ADMIN=127.0.0.1:8686
 SERVER_MODE=kernel
 case "${1:-}" in kernel|userspace) SERVER_MODE=$1; shift ;; esac
-CHECKS=${*:-16 17 18 19 22 24 25 resolve drift session route teardown}
+CHECKS=${*:-16 17 18 19 22 24 25 resolve drift session route pin teardown}
 HOSTS=/etc/netns/$HOME_NS/hosts
 fail=0
 
@@ -141,6 +150,9 @@ cleanup() {
   client 'nft delete table inet noicmp 2>/dev/null'
   lan nft delete table inet noicmp 2>/dev/null
   home nft delete table inet stalereject 2>/dev/null
+  lan ip addr del 192.168.50.200/24 dev eth0 2>/dev/null
+  home ip route del 0.0.0.0/1 2>/dev/null
+  home ip route del 128.0.0.0/1 2>/dev/null
   rm -rf "$DATA" "$ADATA" "/etc/netns/$HOME_NS"
 }
 # set_hosts <line>...: the home namespace's /etc/hosts. `ip netns exec` bind-mounts the file when it
@@ -222,14 +234,14 @@ printf 'nameserver 127.0.0.1\n' > "/etc/netns/$HOME_NS/resolv.conf"
 # first address instead of the smallest would fail the echo.
 set_hosts "192.168.50.4 game.lan" "192.168.50.3 game.lan"
 : > "$ALOG"
-start_server() {
+start_server() { # start_server [flag...]: extra flags for wgft server run
   if [ "$SERVER_MODE" = userspace ]; then
     id wgftlab >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin wgftlab
     chown wgftlab "$DATA"
-    vps setsid nohup runuser -u wgftlab -- wgft server run --mode userspace --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+    vps setsid nohup runuser -u wgftlab -- wgft server run --mode userspace --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" "$@" \
       >> "$SLOG" 2>&1 < /dev/null &
   else
-    vps setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+    vps setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" "$@" \
       >> "$SLOG" 2>&1 < /dev/null &
   fi
   disown
@@ -920,6 +932,97 @@ check_route() {
 }
 count_above() { [ "$(grep -c "$1" "$ALOG")" -gt "$2" ]; } # count_above <pattern> <count>: in the agent's log
 
+# move_server <band> <home address>: stops the server, rewrites the band it recorded and the home
+# agent's address in its database, and starts it with that band, as someone who took the VPS over
+# could. The database is edited as the server's own user, so SQLite's side files keep their owner.
+move_server() {
+  local p
+  for p in $(server_pids); do kill "$p"; done
+  wait_until 20 server_stopped
+  local py='import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("UPDATE meta SET value = ? WHERE key = ?", (sys.argv[2].encode(), "wg_address"))
+c.execute("UPDATE agents SET address = ? WHERE name = ?", (sys.argv[3], "home"))
+c.commit()'
+  if [ "$SERVER_MODE" = userspace ]; then
+    runuser -u wgftlab -- python3 -c "$py" "$DATA/wgft.sqlite" "$1" "$2"
+  else
+    python3 -c "$py" "$DATA/wgft.sqlite" "$1" "$2"
+  fi
+  start_server --wg-address "$1"
+  wait_until 30 vps wgft agent ls --admin "$ADMIN" || echo "!! the server did not come up with $1"
+}
+home_routes() { home ip -4 route show | sort; }
+agents_json() { vps wgft agent ls --admin "$ADMIN" --json; }
+hb_refused() { agents_json | grep -q "refused the wg configuration"; }
+hb_clear() { ! hb_refused; }
+
+check_pin() {
+  echo "== pin: a tunnel address the agent was not registered with"
+  check "agent.json records the tunnel address" '"tunnel_address": "10.200.0.2/24"' "$(grep tunnel_address "$ADATA/agent.json")"
+  # a LAN host in the upper half of 192.168.50.0/24, the half the /25 below would take
+  lan ip addr add 192.168.50.200/24 dev eth0 2>/dev/null
+  local routes addr n
+  routes=$(home_routes)
+  addr=$(home ip -4 -br addr show wgft0)
+  echo "INFO  home routes before: $(echo "$routes" | tr '\n' ';')"
+
+  # a. another band
+  n=$(grep -c "refused the wg configuration" "$ALOG")
+  move_server 10.201.0.1/24 10.201.0.2
+  wait_until 60 count_above "refused the wg configuration" "$n"
+  check "another band is refused" "the server sent the tunnel address 10.201.0.2/24, but agent.json records 10.200.0.2/24" "$(grep -m1 "10.201.0.2/24" "$ALOG")"
+  check "wgft0 keeps its address after another band" "$addr" "$(home ip -4 -br addr show wgft0)"
+  okcheck "the home routes stay after another band" "$([ "$(home_routes)" = "$routes" ] && echo 1 || echo 0)"
+  check "the table stays after another band" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
+  wait_until 40 hb_refused
+  check "the heartbeat names the refusal" "refused the wg configuration" "$(agents_json | grep -m1 '"reason"')"
+  home wgft agent doctor --data-dir "$ADATA" 2>&1 | grep -iE "tunnel|refused" | sed 's/^/INFO  doctor | /'
+  check "agent doctor names the refusal" "refused the wg configuration" "$(home wgft agent doctor --data-dir "$ADATA" 2>&1 | tr -s ' \n' ' ')"
+  not_forwarded "no forwarding end to end while the server uses another band" "tcp-echo" "$(tcp_echo 39971)"
+  # the 30-second check keeps repairing the table of the last applied state while refusing
+  home nft delete table inet wgft_agent
+  wait_until 45 home nft list table inet wgft_agent
+  check "the table is repaired while refusing" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
+
+  # b. a /25 that covers half of the home LAN 192.168.50.0/24
+  n=$(grep -c "refused the wg configuration" "$ALOG")
+  move_server 192.168.50.129/25 192.168.50.130
+  wait_until 60 count_above "refused the wg configuration" "$n"
+  check "a band inside the LAN is refused" "the server sent the tunnel address 192.168.50.130/25" "$(grep -m1 "192.168.50.130/25" "$ALOG")"
+  check "wgft0 keeps its address after the LAN band" "$addr" "$(home ip -4 -br addr show wgft0)"
+  okcheck "the home routes stay after the LAN band" "$([ "$(home_routes)" = "$routes" ] && echo 1 || echo 0)"
+  echo "INFO  home routes after the LAN band: $(home_routes | tr '\n' ';')"
+  check "the LAN route to the upper half still leaves through eth0" "dev eth0" "$(home ip route get 192.168.50.129)"
+  check "home still reaches the LAN host in the upper half" "1 received" "$(home ping -c 1 -W 2 192.168.50.200 2>&1)"
+
+  # the server moves back; the agent takes it without a restart
+  move_server 10.200.0.1/24 10.200.0.2
+  wait_until 60 caught_up
+  wait_until 30 tcp_ok 39971
+  check "forwarding is back after the server moves back" "tcp-echo" "$(tcp_echo 39971)"
+  wait_until 40 hb_clear
+  not_forwarded "the heartbeat no longer names a refusal" "refused the wg configuration" "$(agents_json | grep -m1 '"tunnel"' -A3 | tr -s ' \n' ' ')"
+  check "agent.json still records the tunnel address" '"tunnel_address": "10.200.0.2/24"' "$(grep tunnel_address "$ADATA/agent.json")"
+  lan ip addr del 192.168.50.200/24 dev eth0 2>/dev/null
+
+  # the two /1 routes of a VPN's redirect-gateway def1, through the home router like the default
+  # route, are not an overlap: the restart's first convergence goes through and forwarding works
+  home ip route add 0.0.0.0/1 via 192.168.50.1 dev eth0
+  home ip route add 128.0.0.0/1 via 192.168.50.1 dev eth0
+  stop_agent
+  local before
+  before=$(wc -l < "$ALOG")
+  start_agent
+  wait_until 30 caught_up
+  wait_until 30 tcp_ok 39971
+  okcheck "the agent runs with the two /1 routes in place" "$(agent_running && echo 1 || echo 0)"
+  not_forwarded "no overlap is named for the /1 routes" "overlaps" "$(tail -n +"$((before + 1))" "$ALOG")"
+  check "forwarding works with the two /1 routes in place" "tcp-echo" "$(tcp_echo 39971)"
+  home ip route del 0.0.0.0/1 via 192.168.50.1 dev eth0
+  home ip route del 128.0.0.0/1 via 192.168.50.1 dev eth0
+}
+
 check_19() {
   echo "== 19: a retarget or a delete closes the old target's flows"
   local out=$W/wgft-ak-flow19 r closed
@@ -1033,7 +1136,7 @@ handshake_after() { local h; h=$(agent_field last_handshake); [ -n "$h" ] && [ "
 
 for c in $CHECKS; do
   case "$c" in
-    16|17|18|19|22|24|25|resolve|drift|session|route|teardown) "check_$c" ;;
+    16|17|18|19|22|24|25|resolve|drift|session|route|pin|teardown) "check_$c" ;;
     *) echo "FAIL  unknown check $c"; fail=1 ;;
   esac
 done

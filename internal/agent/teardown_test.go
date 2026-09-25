@@ -150,6 +150,7 @@ func kernelCreds(t *testing.T, cur, prev wgtypes.Key) (string, *credentials.Cred
 		IPForwardEnabledAt:   &at,
 		KernelPublication:    json.RawMessage(`{"generation":9,"rules":[]}`),
 		KernelUnconverged:    json.RawMessage(`[{"generation":7,"rules":[]},{"generation":8,"rules":[]}]`),
+		TunnelAddress:        "10.200.0.2/24",
 	}
 	path := filepath.Join(t.TempDir(), "agent.json")
 	if err := f.Save(path); err != nil {
@@ -216,6 +217,10 @@ func TestTeardownRemovesWhatTheKeysOwn(t *testing.T) {
 	}
 	if after.Name != "home" || after.PermanentToken != "tok" || after.WGPrivateKey != cur.String() || after.LastState == nil || after.LastState.Generation != 9 {
 		t.Errorf("the registration, key or last_state changed: %+v", after)
+	}
+	// 登録時のトンネルのアドレスの記録は登録の一部であり、撤去は消さない(設計文書 7b.1・9 節)
+	if after.TunnelAddress != "10.200.0.2/24" {
+		t.Errorf("teardown changed the tunnel address record to %q", after.TunnelAddress)
 	}
 	for _, s := range []string{
 		"remove: the WireGuard interface wgft0, which holds this agent's key",

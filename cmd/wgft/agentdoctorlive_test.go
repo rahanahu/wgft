@@ -292,8 +292,22 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
 				st.Tunnel.State, st.Tunnel.Reason = proto.StatusError, "resolve vps.example.net: no such host"
 			}))),
-			want:     []wantCheck{{agentCheckTunnelLocal, statusUnknown, agentReasonTunnelErrorEndpointKept}},
-			wantExit: 0,
+			want:       []wantCheck{{agentCheckTunnelLocal, statusUnknown, agentReasonTunnelErrorEndpointKept}},
+			wantExit:   0,
+			wantDetail: map[string]string{agentCheckTunnelLocal: "which can keep carrying traffic"},
+		},
+		{
+			// カーネルモードのエージェントが wg 設定を拒んだ場合も同じ状態と符号だが、server が拒んだ設定で
+			// 動く間は転送が止まりうるので、エンドポイントが転送を続けられるとは言わない(設計文書 7b.1 節)。
+			name: "the agent refused the wg configuration",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+				st.Tunnel.State = proto.StatusError
+				st.Tunnel.Reason = agent.ReasonWGRefused + " of generation 5; the tunnel and rules stay as generation 4 left them: the server sent the tunnel address 10.201.0.2/24"
+			}))),
+			want:       []wantCheck{{agentCheckTunnelLocal, statusUnknown, agentReasonTunnelErrorEndpointKept}},
+			wantExit:   0,
+			wantDetail: map[string]string{agentCheckTunnelLocal: "refused the wg configuration the server sent and keeps the interface"},
+			wantNext:   map[string]string{agentCheckTunnelLocal: "traffic through the tunnel stops"},
 		},
 		{
 			// トンネルを閉じた直後は正常な遷移でも生じる。FAILED にすると一過性の状態を故障として

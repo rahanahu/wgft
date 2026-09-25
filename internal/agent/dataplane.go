@@ -68,6 +68,15 @@ type preparer interface {
 	prepareApply(st *proto.State) any
 }
 
+// wgChecker は、server から届いた wg 設定を、今のトンネルに手を付ける前に検証する dataplane である。
+// カーネルモードの実装だけが持つ(設計文書 7b.1・11 節)。runtime は、トンネルが立っている間に届いた
+// 全体状態の wg 設定をこれで確かめ、拒んだ全体状態は適用しない。今のトンネルとルールはそのまま残し、
+// 30 秒ごとの見直しも続ける。build も同じ検証を通すので、トンネルが無い間に届いた全体状態は、他の
+// wg 設定の誤りと同じく作成の失敗になる。
+type wgChecker interface {
+	checkWG(w proto.WGConfig) (netip.Prefix, error)
+}
+
 // observer は、30 秒ごとに実際の状態を宣言と比べ直す dataplane である。カーネルモードの実装だけが
 // 持つ(仕様 7b.2 節の名前の解決し直し、7b.4 節の外からの変更)。見直しは 2 つに分かれる。
 // observePrepare は名前の解決だけを行い、rt.mu の外で呼ぶ。DNS を待つ間に排他を持たないためである。

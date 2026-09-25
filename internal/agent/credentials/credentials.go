@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"time"
@@ -50,6 +51,80 @@ type Credentials struct {
 	// 並ぶ。収束に失敗している間だけ持ち、収束が済めば消す。再起動の後も、その公開で成立したフローを
 	// wgft のものと見分けるために残す。中身は KernelPublication と同じ形の JSON の配列である
 	KernelUnconverged json.RawMessage `json:"kernel_unconverged,omitempty"`
+	// TunnelAddress は、登録で割り当てられたトンネルのアドレスの記録である(仕様 9・11 節)。形は 2 つある。
+	// "10.200.0.2/24" は帯の長さまで記録したもので、"10.200.0.2" は登録の応答だけから記録し、帯の長さを
+	// まだ知らないものである。登録の応答はアドレスだけを返すので、長さは最初に適用した全体状態から記録する。
+	// 記録の無いファイル(この項目より前の版が書いたもの)も、最初に適用した全体状態から記録する。
+	// カーネルモードのエージェントは、記録と違う wg.address を拒む(CheckTunnelAddress)。登録のし直しだけが
+	// 記録を置き換え、撤去は消さない
+	TunnelAddress string `json:"tunnel_address,omitempty"`
+}
+
+// RegisteredTunnelAddress は、登録の応答のアドレス addr を TunnelAddress の値に写す。応答はアドレスだけを
+// 返すが、帯の長さの付いた形も受け付ける。どちらでもなければ空を返し、記録は最初に適用した全体状態を待つ。
+func RegisteredTunnelAddress(addr string) string {
+	if a, err := netip.ParseAddr(addr); err == nil && a.Unmap().Is4() {
+		return a.Unmap().String()
+	}
+	if p, err := netip.ParsePrefix(addr); err == nil && p.Addr().Is4() {
+		return p.String()
+	}
+	return ""
+}
+
+// TunnelAddressMismatch は、server から届いたトンネルのアドレスが記録と違うことを表す(仕様 11 節)。
+// 記録が読めない場合も、比べられないので同じ誤りにする。
+type TunnelAddressMismatch struct {
+	Recorded string       // agent.json の tunnel_address
+	Got      netip.Prefix // 全体状態の wg.address
+}
+
+func (e *TunnelAddressMismatch) Error() string {
+	if _, ok := parseTunnelAddress(e.Recorded); !ok {
+		return fmt.Sprintf("the server sent the tunnel address %s, and the tunnel address recorded in agent.json, %q, cannot be read to compare it with", e.Got, e.Recorded)
+	}
+	return fmt.Sprintf("the server sent the tunnel address %s, but agent.json records %s, the address this agent was registered with", e.Got, e.Recorded)
+}
+
+// recordedTunnel は TunnelAddress を読んだ値である。bits が -1 なら、帯の長さはまだ記録していない。
+type recordedTunnel struct {
+	addr netip.Addr
+	bits int
+}
+
+func parseTunnelAddress(s string) (recordedTunnel, bool) {
+	if p, err := netip.ParsePrefix(s); err == nil && p.Addr().Is4() {
+		return recordedTunnel{p.Addr(), p.Bits()}, true
+	}
+	if a, err := netip.ParseAddr(s); err == nil && a.Is4() {
+		return recordedTunnel{a, -1}, true
+	}
+	return recordedTunnel{}, false
+}
+
+// CheckTunnelAddress は、server から届いたトンネルのアドレス got を記録と照合する(仕様 11 節)。記録が
+// 無ければ通す。帯の長さを記録していなければアドレスだけを、記録していれば長さまで比べる。違えば、
+// または記録が読めなければ *TunnelAddressMismatch を返す。記録は書き換えない。
+func (f *Credentials) CheckTunnelAddress(got netip.Prefix) error {
+	if f.TunnelAddress == "" {
+		return nil
+	}
+	rec, ok := parseTunnelAddress(f.TunnelAddress)
+	if !ok || rec.addr != got.Addr() || (rec.bits >= 0 && rec.bits != got.Bits()) {
+		return &TunnelAddressMismatch{Recorded: f.TunnelAddress, Got: got}
+	}
+	return nil
+}
+
+// RecordTunnelAddress は、適用できたトンネルのアドレス p を記録する。記録が無いか、帯の長さを記録して
+// いない同じアドレスの記録なら p で置き換えて真を返す。記録と違う p では何もしない。記録を置き換える
+// のは、ここと登録だけである。
+func (f *Credentials) RecordTunnelAddress(p netip.Prefix) bool {
+	if f.CheckTunnelAddress(p) != nil || f.TunnelAddress == p.String() {
+		return false
+	}
+	f.TunnelAddress = p.String()
+	return true
 }
 
 // PreviousKey は 1 つ前の wg の秘密鍵である。記録が無ければゼロの鍵を返す。ゼロの鍵はどの

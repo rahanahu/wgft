@@ -486,3 +486,33 @@ func TestRetryRebuildsForThePendingStatesWGConfig(t *testing.T) {
 		t.Errorf("generation %d, want 2", rt.generation())
 	}
 }
+
+// ユーザー空間モードは、記録と違うトンネルのアドレスも使う。トンネルが netstack の中に閉じ、ホストの
+// アドレスと経路に触れないためである。記録は書き換えず、同じ値の間は 1 度だけ警告する。記録の無い
+// ファイルでは、最初に適用した全体状態のアドレスを記録する。モードを後でカーネルモードへ切り替えても、
+// 照合の元が残る(設計文書 9・11 節)。
+func TestUserspaceUsesAnAddressItWasNotRegisteredWith(t *testing.T) {
+	logs := captureLog(t)
+	dp := &fakeDataplane{}
+	rt := newFakeDataplaneRuntime(t, dp)
+	if err := rt.apply(&proto.State{Generation: 1, WG: proto.WGConfig{Address: "10.200.0.2/24"}}); err != nil {
+		t.Fatal(err)
+	}
+	if rt.f.TunnelAddress != "10.200.0.2/24" {
+		t.Fatalf("record after the first state = %q", rt.f.TunnelAddress)
+	}
+	for gen := uint64(2); gen <= 3; gen++ {
+		if err := rt.apply(&proto.State{Generation: gen, WG: proto.WGConfig{Address: "192.168.1.100/25"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rt.gen != 3 || dp.builtWith[len(dp.builtWith)-1].Address != "192.168.1.100/25" {
+		t.Errorf("gen=%d built with %+v; userspace mode must use the address", rt.gen, dp.builtWith)
+	}
+	if rt.f.TunnelAddress != "10.200.0.2/24" {
+		t.Errorf("the record changed to %q", rt.f.TunnelAddress)
+	}
+	if n := strings.Count(logs.String(), "warning: the server sent the tunnel address 192.168.1.100/25"); n != 1 {
+		t.Errorf("warned %d times, want once:\n%s", n, logs)
+	}
+}
