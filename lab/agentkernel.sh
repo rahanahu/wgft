@@ -32,7 +32,13 @@
 #   resolve. the 30-second check resolves a rule's host name again: a change that keeps the chosen
 #       address publishes nothing, a changed address moves new flows to it, and a name that stops
 #       resolving keeps forwarding to the last good address and says so in the rule's state. The
-#       name is served from the home namespace's own /etc/hosts, /etc/netns/<ns>/hosts.
+#       name is served from the home namespace's own /etc/hosts, /etc/netns/<ns>/hosts. server
+#       doctor reads that rule as still forwarding (design 10.2a): target resolve unknown, shown
+#       DEGRADED, exit 0. When the old address then refuses, the agent's report carries the probe
+#       error and doctor stops the rule at the target. A name that never resolved still stops at
+#       target resolve. agent doctor's dataplane.table agrees: once check 22's refused rules are
+#       removed, unknown resolve_failed and exit 0 while the rule still forwards, and failed
+#       listener_error and exit 1 once the old address refuses. The refused rules are not put back.
 #   drift. the 30-second check repairs changes made outside wgft: a deleted table, a deleted row,
 #       a changed MTU and a deleted wgft0, without a route warning while wgft0 is gone.
 #   session. the keepalive datagram: with a kernel-mode server it reaches the server's tunnel
@@ -134,6 +140,7 @@ cleanup() {
   home nft delete table inet unrelated 2>/dev/null
   client 'nft delete table inet noicmp 2>/dev/null'
   lan nft delete table inet noicmp 2>/dev/null
+  home nft delete table inet stalereject 2>/dev/null
   rm -rf "$DATA" "$ADATA" "/etc/netns/$HOME_NS"
 }
 # set_hosts <line>...: the home namespace's /etc/hosts. `ip netns exec` bind-mounts the file when it
@@ -208,6 +215,9 @@ PY
 echo "== agent kernel mode: setup"
 cleanup
 mkdir -p "$DATA" "$ADATA" "/etc/netns/$HOME_NS"
+# The home namespace's resolver points at its own loopback, where nothing listens, so a name that is
+# not in its hosts file fails at once and no lookup leaves the lab.
+printf 'nameserver 127.0.0.1\n' > "/etc/netns/$HOME_NS/resolv.conf"
 # 192.168.50.4 and .5 answer nothing. They are listed first and allowed, so a rule that took the
 # first address instead of the smallest would fail the echo.
 set_hosts "192.168.50.4 game.lan" "192.168.50.3 game.lan"
@@ -478,11 +488,99 @@ check_resolve() {
   check "a name that stops resolving keeps the last good address" "still forwarding to 192.168.50.2" "$(rule_status "$R_NAME")"
   check "and says the name did not resolve" "name resolution" "$(rule_status "$R_NAME")"
   check "and keeps forwarding" "tcp-echo 192.168.50.2:25565" "$(tcp_echo 39977)"
+  # server doctor does not call a rule that still forwards from the last good address stopped
+  # (design 10.2a): target resolve is unknown, read DEGRADED, and the command exits 0.
+  local out rcode
+  eqcheck "doctor: target resolve while the name fails" "unknown target_resolve_failed" "$(doctor_field "$R_NAME" check rule.target_resolve)"
+  eqcheck "doctor: target while the old address answers" "ok -" "$(doctor_field "$R_NAME" check rule.target)"
+  eqcheck "doctor: the rule is unknown, not stopped" "unknown -" "$(doctor_field "$R_NAME" rule)"
+  out=$(vps wgft server doctor "$R_NAME" --admin "$ADMIN" 2>&1); rcode=$?
+  eqcheck "doctor exits 0 while the rule still forwards" 0 "$rcode"
+  check "doctor reads the resolve line DEGRADED" "target resolve     DEGRADED" "$out"
+  check "doctor's result says it still forwards" "Result: still forwarding to 192.168.50.2" "$out"
+  not_forwarded "doctor does not say traffic stops" "traffic stops" "$out"
+  echo "INFO  server doctor while the name fails:"; echo "$out" | sed -n '/^Agent/,/^Result/p' | sed 's/^/INFO    /'
+  # agent doctor on the agent host agrees (design 10.2c). The refused rules from check 22 (outside the
+  # allowlist, loopback) still fail the table as listener_error, and its detail names the rule that
+  # forwards from the last resolution besides. Without them, the table is unknown resolve_failed, not
+  # a failure, and the command exits 0.
+  eqcheck "agent doctor: the table with refused rules beside" "exit=1 failed listener_error" "$(agent_doctor_table)"
+  check "agent doctor names the rule forwarding from the last resolution beside them" \
+    "Rules still forwarding from the last successful resolution while their name does not resolve, 1: $R_NAME" \
+    "$(home wgft agent doctor --data-dir "$ADATA" --json 2>/dev/null | tr -d '\n')"
+  vps wgft rule rm "$R_OUT" --admin "$ADMIN" >/dev/null
+  vps wgft rule rm "$R_LO" --admin "$ADMIN" >/dev/null
+  wait_until 30 caught_up
+  eqcheck "agent doctor: the table while the name fails" "exit=0 unknown resolve_failed" "$(agent_doctor_table)"
+  out=$(home wgft agent doctor --data-dir "$ADATA" 2>&1)
+  check "agent doctor says the kernel keeps forwarding to the old address" "keeps forwarding it to the address from the last successful resolution" "$(echo "$out" | tr -s ' \n' ' ')"
+  echo "INFO  agent doctor while the name fails:"; echo "$out" | grep -A6 "^  table" | sed 's/^/INFO    /'
+  # the old address stops answering too: now traffic does stop at the target
+  home nft -f - <<'NFT'
+table inet stalereject {
+  chain in {
+    type filter hook input priority -10; policy accept;
+    ip daddr 192.168.50.2 tcp dport 25565 reject with tcp reset
+  }
+}
+NFT
+  # The lookup's own error can read "connection refused" too (the resolver on the loopback), so wait
+  # for the probe's error, which names the old address after the stale part of the reason. The probe
+  # runs every 30 s and the heartbeat that carries it every 30 s, so allow up to 90 s.
+  wait_until 90 rule_reason_has "$R_NAME" "resolution; target 192.168.50.2:25565"
+  check "the agent reports the old address refusing" "resolution; target 192.168.50.2:25565" "$(rule_status "$R_NAME")"
+  echo "INFO  the rule's state: $(rule_status "$R_NAME")"
+  not_forwarded "and the rule does not forward" "tcp-echo" "$(tcp_echo 39977)"
+  eqcheck "doctor: target resolve stays unknown" "unknown target_resolve_failed" "$(doctor_field "$R_NAME" check rule.target_resolve)"
+  eqcheck "doctor: target fails with connection_refused" "failed connection_refused" "$(doctor_field "$R_NAME" check rule.target)"
+  eqcheck "doctor: the rule stops at the target" "failed rule.target" "$(doctor_field "$R_NAME" rule)"
+  vps wgft server doctor "$R_NAME" --admin "$ADMIN" >/dev/null 2>&1; rcode=$?
+  eqcheck "doctor exits 1 when the old address refuses" 1 "$rcode"
+  eqcheck "agent doctor: the table when the old address refuses" "exit=1 failed listener_error" "$(agent_doctor_table)"
+  home nft delete table inet stalereject
+  wait_until 90 rule_reason_lacks "$R_NAME" "resolution; target 192.168.50.2:25565"
+  eqcheck "doctor: target is ok again once the old address answers" "ok -" "$(doctor_field "$R_NAME" check rule.target)"
+  # a name that never resolved has no old address and no DNAT: doctor still says it stops there
+  local never
+  never=$(add_rule --tcp 39978 --to never.lan:25565)
+  wait_until 30 caught_up
+  wait_until 30 rule_reason_has "$never" "name resolution"
+  eqcheck "doctor: a name that never resolved fails" "failed target_resolve_failed" "$(doctor_field "$never" check rule.target_resolve)"
+  eqcheck "doctor: that rule stops at target resolve" "failed rule.target_resolve" "$(doctor_field "$never" rule)"
+  vps wgft rule rm "$never" --admin "$ADMIN" >/dev/null
+  wait_until 30 caught_up
   set_hosts "192.168.50.3 game.lan"
   wait_until 60 rule_state_ok "$R_NAME"
   check "the name resolves again" "ok" "$(rule_status "$R_NAME")"
 }
 rule_reason_has() { [[ "$(rule_status "$1")" == *"$2"* ]]; }
+rule_reason_lacks() { [[ "$(rule_status "$1")" != *"$2"* ]]; }
+eqcheck() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: want '$2', got '$3'"; fail=1; fi; }
+# agent_doctor_table: "exit=<code> <status> <reason>" of dataplane.table from agent doctor --json, run
+# as root on the agent host.
+agent_doctor_table() {
+  local out code
+  out=$(home wgft agent doctor --data-dir "$ADATA" --json 2>/dev/null); code=$?
+  printf 'exit=%s %s' "$code" "$(printf '%s' "$out" | python3 -c '
+import json, sys
+c = next((x for x in json.load(sys.stdin).get("checks") or [] if x.get("id") == "dataplane.table"), {})
+print(c.get("status", "none"), c.get("reason") or "-")
+')"
+}
+# doctor_field <rule-id> check <check-id> | doctor_field <rule-id> rule: "<status> <reason>" of one
+# check, or "<status> <stopped_at>" of the rule, from server doctor --json on that rule ("-" if empty).
+doctor_field() {
+  vps wgft server doctor "$1" --json --admin "$ADMIN" 2>/dev/null | python3 -c "
+import json, sys
+rep = json.load(sys.stdin)
+if '$2' == 'rule':
+    r = next((x for x in rep.get('rules') or [] if x.get('rule_id') == '$1'), {})
+    print(r.get('status', 'none'), r.get('stopped_at') or '-')
+else:
+    c = next((x for x in rep.get('checks') or [] if x.get('rule_id') == '$1' and x.get('id') == '${3:-}'), {})
+    print(c.get('status', 'none'), c.get('reason') or '-')
+"
+}
 rule_state_ok() { [[ "$(rule_status "$1")" == "ok "* ]]; }
 
 check_drift() {

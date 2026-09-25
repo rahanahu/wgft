@@ -216,6 +216,10 @@ type Check struct {
 	// ReplyLine は上の観測を人向けの 1 行にしたもので、人向けの出力が detail の下に出す。
 	// 保証の対象ではないので JSON には載せない。
 	ReplyLine string `json:"-"`
+	// resultLine は、この検査がルールの結論の行を決めるときの 1 文である。今は、名前の解決に失敗して
+	// 直前の解決の結果で転送を続けている rule.target_resolve だけが持つ(設計文書 10.2a 節)。
+	// 人向けの文であり JSON には載せない。
+	resultLine string
 	// hideWhenOK と hideWhenUntested は、既定の表示から外す条件である。JSON には常に載せる。
 	// 経路の要になる検査(公開ポート、トンネル、接続、target)はどちらも立てない。
 	hideWhenOK       bool
@@ -555,18 +559,47 @@ func findAgentInfo(agents []adminapi.AgentInfo, name string) *adminapi.AgentInfo
 
 // --- 判定の見せ方(CLI と Web UI が共有する) ---
 
-// DisplayStatus は 1 つの検査を人向けの語にする。1 か所だけ、JSON の値と画面の語が意図して
-// 食い違う(設計文書 10.2a 節)。制御の経路が切れていてトンネルが生きている状態は、JSON では
-// unknown と `agent_disconnected` のままだが、画面には DEGRADED と出す。この状態は「判定に
-// 足りない」のではなく「運用として劣化している」と読むほうが人には正確であり、終了コードが 0 で
-// あっても出力が黙らないためである。機械はあくまで status と reason を読む。
+// DisplayStatus は 1 つの検査を人向けの語にする。DEGRADED は、転送の停止とは判定しないが、今の
+// 正常な状態から劣化していることは確かめている検査を表す(設計文書 10.2a 節「DEGRADED の意味」、
+// 2026-09-25 の所有者の決定)。JSON の status は unknown のままで、機械は status と reason を読む。
+// 劣化を確かめているので「判定に足りない」の UNKNOWN より人には正確であり、終了コードが 0 でも
+// 出力が黙らない。
 //
-// 条件はこの 1 つだけに絞る。他の unknown は UNKNOWN のまま出す。
+// 今この意味に当たる例は 2 つである。制御の経路が切れているがトンネルが生きている agent.connection
+// (agent_disconnected)と、名前の解決に失敗したが直前の解決の結果で転送を続けている
+// rule.target_resolve(target_resolve_failed。unknown と組になるのはこの場合だけである)。
+// 他の unknown は劣化を確かめていないので UNKNOWN のまま出す。
 func DisplayStatus(c Check) string {
-	if c.ID == CheckConnection && c.Status == StatusUnknown && c.Reason == ReasonAgentDisconnected {
+	if c.Status == StatusUnknown &&
+		((c.ID == CheckConnection && c.Reason == ReasonAgentDisconnected) ||
+			(c.ID == CheckTargetResolve && c.Reason == ReasonResolveFailed)) {
 		return "DEGRADED"
 	}
 	return StatusWord(c.Status)
+}
+
+// RuleResultNote は、止まった位置を持たないルールの結論の行に、既定の文の代わりに出す 1 文である。
+// 今は、名前の解決に失敗して直前の解決の結果で転送を続けているルールだけが持つ(設計文書 10.2a 節)。
+// 経路の上に他の unknown の検査もあれば、既定の文が述べていたこと(他の証拠が古いか確かめられて
+// いないこと)を後ろに続け、その事実を消さない。無ければ空を返す。CLI の `Result:` の行と Web UI の
+// 結論が同じ文をここから引く。
+func (rep Report) RuleResultNote(ruleID string) string {
+	note, others := "", false
+	for _, c := range rep.Checks {
+		if c.RuleID != ruleID {
+			continue
+		}
+		switch {
+		case c.resultLine != "":
+			note = c.resultLine
+		case !c.offPath && c.Status == StatusUnknown:
+			others = true
+		}
+	}
+	if note != "" && others {
+		note += "; other evidence above is also stale or untested"
+	}
+	return note
 }
 
 // StatusWord は判定を人向けの語にする。表そのものは保証の対象ではない(設計文書 7a.11 節)。

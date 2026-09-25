@@ -77,7 +77,21 @@ func pathCases() []pathCase {
 	udp := pathRule("r_udp", proto.UDP)
 	off := pathRule("r_off", proto.TCP)
 	off.Enabled = false
+	// named は宛先がホスト名のルールである。カーネルモードのエージェントは、名前の解決に失敗すると
+	// 直前の解決の結果で転送を続け、そのことを理由に書く(設計文書 7b.2 節)。
+	named := pathRule("r_named", proto.TCP)
+	named.Target = "game.lan:25565"
+	stale := `name resolution of target host "game.lan" failed: lookup game.lan: no such host; still forwarding to 192.168.1.30 from the last successful resolution`
 	return []pathCase{
+		{"name fails, still forwarding", []proto.Rule{named}, func(in *doctor.Input) {
+			in.Rules.AgentRuleStates["r_named"] = AgentRuleStatus{Agent: "home", State: proto.StatusError,
+				Reason: stale, At: pathAt(10 * time.Second), Connected: true}
+		}},
+		{"name fails, the old address refuses", []proto.Rule{named}, func(in *doctor.Input) {
+			in.Rules.AgentRuleStates["r_named"] = AgentRuleStatus{Agent: "home", State: proto.StatusError,
+				Reason: stale + "; target 192.168.1.30:25565: dial tcp 192.168.1.30:25565: connect: connection refused",
+				At:     pathAt(10 * time.Second), Connected: true}
+		}},
 		{"healthy TCP", []proto.Rule{tcp}, nil},
 		{"UDP rule without probe", []proto.Rule{udp}, nil},
 		{"stop at WireGuard", []proto.Rule{tcp}, staleTunnel},
@@ -161,6 +175,7 @@ func TestDoctorPathFollowsTheVerdict(t *testing.T) {
 		"probe failed at target": "failed", "probe did not reach the listener": "failed",
 		"probe reached the target": "ok", "stream down, tunnel alive": "unknown", "disabled rule": "skipped", "disabled agent": "skipped",
 		"unregistered agent": "failed", "public port not served": "failed", "dataplane behind": "ok",
+		"name fails, still forwarding": "unknown", "name fails, the old address refuses": "failed",
 	}
 	for _, c := range pathCases() {
 		t.Run(c.name, func(t *testing.T) {
@@ -252,6 +267,10 @@ func TestDoctorPathShapes(t *testing.T) {
 		"unregistered agent":               "untested skipped failed unreached",
 		"public port not served":           "failed unreached unreached unreached",
 		"dataplane behind":                 "untested ok ok ok",
+		// 名前の解決に失敗しても直前の解決の結果で転送を続けているなら、宛先の節点は ? であって
+		// ✕ ではない(設計文書 10.2a 節)。直前のアドレスの宛先も拒めば、そこで止まる。
+		"name fails, still forwarding":        "untested ok ok unknown",
+		"name fails, the old address refuses": "untested ok ok failed",
 	}
 	for _, c := range pathCases() {
 		w, ok := want[c.name]
@@ -791,4 +810,59 @@ func TestDoctorAgentRowsKeepCausesAndNext(t *testing.T) {
 	if home := rows["home"]; !strings.Contains(home, `<details class="row-finding agent-finding">`) {
 		t.Errorf("a healthy agent row keeps its checks closed, row:\n%s", home)
 	}
+}
+
+// TestDoctorPathStaleResolutionReadsDegraded は、名前の解決に失敗して直前の解決の結果で転送を続けて
+// いるルールを、画面が「止まった」と描かないことを確かめる(設計文書 10.2a 節)。宛先の節点は
+// DEGRADED の ? で、ダッシュボードの印はエラーに数えず、結論は転送を続けていることを述べる。
+func TestDoctorPathStaleResolutionReadsDegraded(t *testing.T) {
+	found := false
+	for _, c := range pathCases() {
+		if c.name != "name fails, still forwarding" {
+			continue
+		}
+		found = true
+		rep, paths := buildPath(t, c)
+		rr := rep.Rules[0]
+		node := paths[0].Nodes[doctorNodeIndex(doctor.CheckTargetResolve)]
+		if node.State != nodeUnknown || node.Word != "DEGRADED" || node.Stop != "" {
+			t.Errorf("target node = %s %q stop %q, want unknown DEGRADED with no stop", node.State, node.Word, node.Stop)
+		}
+		m := doctorMark(rr, rep.ChecksOf(rr.RuleID), paths[0], "en")
+		if m.Failed || m.State != nodeUnknown || m.Node != node.Name {
+			t.Errorf("dashboard mark = %+v, want an unknown mark at %q that is not counted as an error", m, node.Name)
+		}
+		line := doctorResultLine(rr, rep)
+		if !strings.Contains(line, "still forwarding to 192.168.1.30") || !strings.Contains(line, "fix name resolution") {
+			t.Errorf("result line = %q, want it to say the rule still forwards and to fix name resolution", line)
+		}
+	}
+	if !found {
+		t.Fatal("the case is missing from pathCases")
+	}
+}
+
+// 前の解決の結果で転送を続けるルールの経路に別の UNKNOWN もあれば、画面の結論も両方を述べる。
+// CLI の Result: の行と同じ文である。
+func TestDoctorResultLineStaleResolutionKeepsOtherUnknowns(t *testing.T) {
+	for _, c := range pathCases() {
+		if c.name != "name fails, still forwarding" {
+			continue
+		}
+		edit := c.edit
+		c.edit = func(in *doctor.Input) {
+			edit(in)
+			in.Agents[0].Generation = 11
+			in.Agents[0].GenerationBehindSince = pathAt(5 * time.Second)
+		}
+		rep, _ := buildPath(t, c)
+		line := doctorResultLine(rep.Rules[0], rep)
+		for _, want := range []string{"still forwarding to 192.168.1.30", "other evidence above is also stale or untested"} {
+			if !strings.Contains(line, want) {
+				t.Errorf("result line = %q, want it to hold %q", line, want)
+			}
+		}
+		return
+	}
+	t.Fatal("the case is missing from pathCases")
 }

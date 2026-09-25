@@ -1602,8 +1602,9 @@ func TestDisconnectedNextDoesNotSuggestAProbeForUDP(t *testing.T) {
 	}
 }
 
-// TestDegradedIsADisplayWordOnly は、画面の語と JSON の値が意図して食い違う 1 か所を固定する
-// (設計文書 10.2a 節)。制御の経路が切れていてトンネルが生きている状態は、人には DEGRADED と
+// TestDegradedIsADisplayWordOnly は、画面の語と JSON の値が意図して食い違う 2 か所のうち、
+// agent.connection の 1 か所を固定する(設計文書 10.2a 節)。もう 1 か所の rule.target_resolve は
+// doctor_staleresolve_test.go が確かめる。制御の経路が切れていてトンネルが生きている状態は、人には DEGRADED と
 // 見せる。終了コードが 0 でも出力が黙らないためである。機械が読む値は unknown と
 // `agent_disconnected` のままで、状態は 5 つから増やさない。
 func TestDegradedIsADisplayWordOnly(t *testing.T) {
@@ -1638,10 +1639,10 @@ func TestDegradedIsADisplayWordOnly(t *testing.T) {
 		t.Errorf("the rendered line must not also read UNKNOWN, got %q", line)
 	}
 
-	// 他の unknown は UNKNOWN のままである。この 1 つの条件だけに絞る。
+	// 他の unknown は UNKNOWN のままである。
 	for _, id := range []string{checkRulesReceived, checkTarget} {
 		if got := displayStatus(checkOf(t, rep.Checks, id)); got != "UNKNOWN" {
-			t.Errorf("%s: displayStatus = %q, want %q: only agent.connection reads DEGRADED", id, got, "UNKNOWN")
+			t.Errorf("%s: displayStatus = %q, want %q: a stale report does not read DEGRADED", id, got, "UNKNOWN")
 		}
 	}
 	// 同じ検査でも、理由が違う unknown は UNKNOWN のままである。

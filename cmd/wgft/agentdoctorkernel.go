@@ -7,6 +7,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -401,14 +402,23 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		return
 	}
 	compared := agentTableCompared(t)
-	var bad, good []agent.DoctorRule
+	// stale は、名前の解決に失敗して直前の解決の結果で転送を続けているだけのルールである(設計文書
+	// 7b.2 節)。DNAT は残っており転送の停止は観測していないので、error でも bad に数えない(10.2c 節、
+	// 2026-09-25 の所有者の決定)。理由の後ろに試し接続か ip_forward の誤りが続くルールは bad のままで
+	// ある。文言は server doctor と同じ関数で読む。
+	var bad, good, stale []agent.DoctorRule
 	for _, r := range ev.rules {
-		if r.State == proto.StatusError {
-			bad = append(bad, r)
-		} else {
+		if r.State != proto.StatusError {
 			good = append(good, r)
+			continue
 		}
+		if _, rest, ok := doctor.StaleResolution(r.Reason); ok && rest == "" {
+			stale = append(stale, r)
+			continue
+		}
+		bad = append(bad, r)
 	}
+	staleNote := agentStaleText(stale)
 	switch {
 	case t.MissingCount > 0:
 		// 転送を担う行の欠けだけが FAILED である。守りの行の欠けは、同じ所見に添えるだけにする
@@ -425,6 +435,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		if len(bad) > 0 {
 			c.Detail += fmt.Sprintf(". Rules in error besides, %d: %s", len(bad), strings.Join(agentKernelRuleLines(bad), "; "))
 		}
+		c.Detail += staleNote
 		c.Next = agentKernelTableNext(ev)
 		return
 	case len(bad) > 0:
@@ -433,6 +444,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		if len(good) > 0 {
 			c.Detail += fmt.Sprintf(". Rules without an error: %d", len(good))
 		}
+		c.Detail += staleNote
 		if t.GuardMissingCount > 0 {
 			c.Detail += ". " + agentGuardText(t)
 		}
@@ -441,8 +453,8 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		}
 		c.Detail += agentKernelStoppedNote(ev)
 		c.Next = "a rule without DNAT names why: a target outside WGFT_AGENT_ALLOW_TARGETS, a name that does not resolve, or a loopback target, which kernel mode does not forward to; " +
-			"use the host's LAN address for a service on this host. A rule with DNAT in place and an error names a target that does not answer, a name that stopped resolving " +
-			"while the last address keeps forwarding, or net.ipv4.ip_forward"
+			"use the host's LAN address for a service on this host. A rule with DNAT in place and an error names a target that does not answer, " +
+			"including one at the address kept from the last successful resolution, or net.ipv4.ip_forward"
 		return
 	case t.GuardMissingCount > 0:
 		c.Status, c.Reason = statusUnknown, agentReasonGuardRowsMissing
@@ -450,7 +462,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		if ch := agentChangeText(t); ch != "" {
 			c.Detail += ". " + ch
 		}
-		c.Detail += agentKernelStoppedNote(ev)
+		c.Detail += staleNote + agentKernelStoppedNote(ev)
 		if ev.running {
 			c.Next = "the running agent publishes the table again on its next 30s check; if they stay missing, another program on this host removes them"
 		} else {
@@ -459,17 +471,28 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		return
 	case ev.publishError != "":
 		c.Status, c.Reason = statusUnknown, agentReasonPublishFailed
-		c.Detail = "the agent could not publish its latest full state, so the table from the previous publication keeps forwarding: " + ev.publishError
+		c.Detail = "the agent could not publish its latest full state, so the table from the previous publication keeps forwarding: " + ev.publishError + staleNote
 		c.Next = "the agent retries every 30s; the server shows the lag as agent.rules_received in wgft server doctor. Read the error above and the agent's log"
 		return
 	case t.UnexpectedCount > 0 || t.MovedCount > 0:
 		c.Status, c.Reason = statusUnknown, agentReasonTableChanged
-		c.Detail = fmt.Sprintf("table inet wgft_agent holds every row %s. %s", compared, agentChangeText(t)) + agentKernelStoppedNote(ev)
+		c.Detail = fmt.Sprintf("table inet wgft_agent holds every row %s. %s", compared, agentChangeText(t)) + staleNote + agentKernelStoppedNote(ev)
 		if ev.running {
 			c.Next = "the running agent publishes the table again on its next 30s check; if the change keeps coming back, another program on this host writes into the table"
 		} else {
 			c.Next = "start the agent; it publishes the table again. Whether the added or moved items stop forwarding is not known here"
 		}
+		return
+	}
+	if len(stale) > 0 && ev.running {
+		c.Status, c.Reason = statusUnknown, agentReasonResolveFailed
+		c.Detail = fmt.Sprintf("table inet wgft_agent holds everything %s, but the target name of %d rule%s does not resolve; the kernel keeps forwarding %s to the address from the last successful resolution: %s",
+			compared, len(stale), pluralS(len(stale)), itThem(len(stale)), strings.Join(agentKernelRuleLines(stale), "; "))
+		// OK の枝と同じく、30 秒ごとの見直しの失敗を添える。表が UNKNOWN のときに消さないためである
+		if ev.checkError != "" {
+			c.Detail += "; the last 30s check failed: " + ev.checkError
+		}
+		c.Next = "fix name resolution on this host; until then new connections still go to the address from the last successful resolution, which may no longer be the right one"
 		return
 	}
 	summary := fmt.Sprintf("table inet wgft_agent holds everything %s", compared)
@@ -489,6 +512,24 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 	}
 	c.Status = statusOK
 	c.Detail = summary
+}
+
+// itThem returns "it" for n == 1 and "them" otherwise, for a pronoun that stands for a count of rules.
+func itThem(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+// agentStaleText は、名前の解決に失敗して直前の解決の結果で転送を続けているルールを、他の所見に
+// 添える 1 文にする。無ければ空である。
+func agentStaleText(stale []agent.DoctorRule) string {
+	if len(stale) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(". Rules still forwarding from the last successful resolution while their name does not resolve, %d: %s",
+		len(stale), strings.Join(agentKernelRuleLines(stale), "; "))
 }
 
 // agentGuardText は守りの行の欠けを述べる。drop の行は層になっているので、開きうる面は欠けた行の組み合わせ
