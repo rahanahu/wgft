@@ -181,7 +181,7 @@ func sourceFilterCheck(r proto.Rule, in Input) Check {
 		if p.Contains(in.From) {
 			c.Status, c.Reason = StatusFailed, ReasonDeniedByDenyList
 			c.Detail = "the deny list drops " + in.From.String() + ": it is inside " + p.String()
-			c.Next = fmt.Sprintf("if that is wrong: wgft rule deny rm %s %s", ShortID(r.ID), p)
+			c.Next = fmt.Sprintf("if that is wrong: wgft rule deny rm %s %s", r.ID, p)
 			return c
 		}
 	}
@@ -195,7 +195,7 @@ func sourceFilterCheck(r proto.Rule, in Input) Check {
 		}
 		c.Status, c.Reason = StatusFailed, ReasonNotInAllowList
 		c.Detail = fmt.Sprintf("the allow list holds %d %s and none covers %s, so every other client is dropped", len(r.SourceAllow), entryNoun(len(r.SourceAllow)), in.From)
-		c.Next = fmt.Sprintf("if that is wrong: wgft rule allow add %s %s/32", ShortID(r.ID), in.From)
+		c.Next = fmt.Sprintf("if that is wrong: wgft rule allow add %s %s/32", r.ID, in.From)
 		return c
 	}
 	c.Status = StatusOK

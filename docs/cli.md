@@ -950,7 +950,8 @@ Flags inherited from parent commands:
 ## wgft rule ls
 
 List rules, grouped by --group. ID is shortened; every rule command accepts such
-a prefix as long as it is unambiguous. TARGET shows the effective target range.
+a prefix as long as it is unambiguous, with or without the trailing "…", and
+lists the matching IDs when it is not. TARGET shows the effective target range.
 MODE is proxy for rules added with --proxy and kernel for all others; in
 userspace mode "kernel" rules are relayed by the wgft process, not the kernel.
 DENY and ALLOW are the number of CIDRs, RATES the configured limits, DROPPED

@@ -378,7 +378,7 @@ func Diagnose(r proto.Rule, in Input) []Check {
 			ID: CheckEnabled, RuleID: r.ID, Group: GroupServer, Label: "enabled", Status: StatusSkipped,
 			Reason: ReasonRuleDisabled,
 			Detail: "the rule is disabled, so nothing is forwarded; that is a declared state, not a fault",
-			Next:   "enable it: wgft rule enable " + ShortID(r.ID),
+			Next:   "enable it: wgft rule enable " + r.ID,
 		}}
 		for _, id := range checkOrder {
 			if id == CheckEnabled || id == CheckDataplane {
@@ -388,7 +388,7 @@ func Diagnose(r proto.Rule, in Input) []Check {
 				ID: id, RuleID: r.ID, Agent: agentOf(id, r), Group: checkGroup(id), Label: checkLabel(id, r),
 				Status: StatusSkipped, Reason: ReasonRuleDisabled,
 				Detail: "not tested: the rule is disabled",
-				Next:   "enable it first: wgft rule enable " + ShortID(r.ID),
+				Next:   "enable it first: wgft rule enable " + r.ID,
 				// 無効なルールの下流は、同じ 1 つの理由を 11 回繰り返すだけなので既定では
 				// 出さない。--verbose では出す。
 				hideWhenUntested: true,
@@ -771,8 +771,11 @@ func uniq(in []string) []string {
 	return out
 }
 
-// ShortID はルール ID を短く表示する(先頭 12 文字)。CLI の findRule が前方一致で受けるので
-// 選択には困らない。所見の中の "wgft rule enable <id>" のような次の一手も同じ形にする。
+// ShortID はルール ID を短く表示する(先頭 12 文字と省略記号)。表の ID の列のように、ルールを
+// 見分けるために示す場所だけで使う。そのまま打つコマンドとして示す場所、つまり所見の次の一手
+// ("wgft rule enable <id>" など)と、`server doctor` の終了の 1 行が名指すルールには、完全な ID を
+// 使う(設計文書 10.2 節)。CLI の findRule は末尾の省略記号を落として前方一致で受けるので、
+// 短い形を貼っても通るが、前方一致が 2 つ以上あれば拒む。
 func ShortID(id string) string {
 	if len(id) > 12 {
 		return id[:12] + "…"

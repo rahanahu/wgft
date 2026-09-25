@@ -718,8 +718,9 @@ func dryRunRuleSummary(r proto.Rule) string {
 	return fmt.Sprintf("%s %s -> %s %s", strings.ToUpper(string(r.Proto)), r.ListenPort.String(), r.Agent, r.TargetDisplay())
 }
 
-// short はルール ID を短く表示する(先頭 12 文字)。findRule が前方一致で受けるので選択には
-// 困らない。診断の所見も同じ形で ID を出すので、切り方は internal/vpsd/doctor と共有する。
+// short はルール ID を短く表示する(先頭 12 文字と省略記号)。表の ID の列のように、ルールを
+// 見分けるために示す場所だけで使い、そのまま打つコマンドとして示す場所には完全な ID を使う
+// (設計文書 10.2 節)。切り方は internal/vpsd/doctor と共有する。
 func short(id string) string { return doctor.ShortID(id) }
 
 // truncNote は一覧用に note を 40 文字で切る。
@@ -789,12 +790,27 @@ func findRule(c *admin.Client, id string) (*proto.Rule, error) {
 	if err != nil {
 		return nil, &rulesUnreachableError{err: err}
 	}
+	return matchRule(res.Rules, id)
+}
+
+// maxRuleCandidates は、前方一致が 2 つ以上のときに挙げる候補の数の上限である。
+const maxRuleCandidates = 5
+
+// matchRule は rules から、ID の完全一致か、前方一致が 1 つだけのルールを返す。末尾の省略記号は
+// 落としてから照合する。表の ID の列は short が省略記号を付けた短い形で出すので、それを貼っても
+// 通すためである。ルールの ID は ASCII だけからなるので、省略記号を落としても別のルールを指す
+// ことはない。前方一致が 2 つ以上なら、候補の完全な ID を挙げて拒む(設計文書 10.2 節)。
+func matchRule(rules []proto.Rule, id string) (*proto.Rule, error) {
+	prefix := strings.TrimSuffix(strings.TrimSuffix(id, "…"), "...")
+	if prefix == "" {
+		return nil, fmt.Errorf("rule %q not found; give a rule ID or its beginning", id)
+	}
 	var matches []proto.Rule
-	for _, r := range res.Rules {
-		if r.ID == id {
+	for _, r := range rules {
+		if r.ID == prefix {
 			return &r, nil
 		}
-		if strings.HasPrefix(r.ID, id) {
+		if strings.HasPrefix(r.ID, prefix) {
 			matches = append(matches, r)
 		}
 	}
@@ -802,7 +818,15 @@ func findRule(c *admin.Client, id string) (*proto.Rule, error) {
 	case 1:
 		return &matches[0], nil
 	case 0:
-		return nil, fmt.Errorf("rule %q not found", id)
+		return nil, fmt.Errorf("rule %q not found; wgft rule ls lists the rules", id)
 	}
-	return nil, fmt.Errorf("rule %q matches multiple rules", id)
+	var ids []string
+	for i, r := range matches {
+		if i == maxRuleCandidates {
+			ids = append(ids, fmt.Sprintf("and %d more", len(matches)-maxRuleCandidates))
+			break
+		}
+		ids = append(ids, r.ID)
+	}
+	return nil, fmt.Errorf("rule %q matches %d rules: %s; give more of the ID", id, len(matches), strings.Join(ids, ", "))
 }
