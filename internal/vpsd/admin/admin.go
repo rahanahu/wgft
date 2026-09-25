@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
@@ -227,8 +228,19 @@ type ErrorBody struct {
 type Server struct {
 	backend Backend
 	mux     *http.ServeMux
-	// AllowedHosts は localhost / 127.0.0.1 / [::1] に加えて許可する Host(tailnet 名・IP、--admin-host)。
+	// AllowedHosts は localhost / 127.0.0.1 / [::1] に加えて許可する Host(--admin-host)。
+	// 応答を始める前に決め、以後は変えない。
 	AllowedHosts []string
+	// tailnetHosts は --admin-tailscale で検出した tailnet の IP と MagicDNS 名。tailnet のアドレスが
+	// 変わると待ち受けの見張りが応答中に差し替えるので、AllowedHosts と分けて原子的に持つ。
+	tailnetHosts atomic.Pointer[[]string]
+}
+
+// SetTailnetHosts は Host の検査で許可する tailnet の IP と名前を差し替える(設計文書 11 節)。
+// 応答の最中に呼んでよい。
+func (s *Server) SetTailnetHosts(hosts []string) {
+	h := append([]string(nil), hosts...)
+	s.tailnetHosts.Store(&h)
 }
 
 // New はハンドラを組み立てる。
@@ -302,6 +314,13 @@ func (s *Server) hostAllowed(host string) bool {
 	for _, h := range s.AllowedHosts {
 		if host == h {
 			return true
+		}
+	}
+	if ts := s.tailnetHosts.Load(); ts != nil {
+		for _, h := range *ts {
+			if host == h {
+				return true
+			}
 		}
 	}
 	return false

@@ -437,7 +437,7 @@ and forward to the loopback listener instead:
 ssh -L 8686:127.0.0.1:8686 vps
 ```
 
-For Tailscale access, set `WGFT_ADMIN_TAILSCALE=true`. `WGFT_ADMIN_HOST` can add accepted host names.
+For Tailscale access, set `WGFT_ADMIN_TAILSCALE=true`. `WGFT_ADMIN_HOST` can add accepted host names. The server accepts this listener only on the Tailscale interface and only from tailnet addresses. A subnet router that forwards LAN addresses without SNAT therefore cannot reach it. When Tailscale restarts and recreates its interface, or the tailnet address changes, the server closes the listener and opens it again within a few seconds. It writes one log line for each. If the server starts before Tailscale has an address, it does not open this listener at all until wgft is restarted.
 
 ## Publishing HTTPS
 
