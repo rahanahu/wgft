@@ -31,3 +31,13 @@ func trySharedLock(f *os.File) error {
 	}
 	return err
 }
+
+// noFollowFlags は OpenRegular が付ける旗である。Go の os.OpenFile は Windows で flag の上位の
+// ビットを CreateFile の FILE_FLAG_* として渡す。FILE_FLAG_OPEN_REPARSE_POINT は最後の要素の
+// symlink や junction を辿らずにその reparse point 自身を開くので、種別の確認が通常のファイルで
+// ないとして拒む。
+const noFollowFlags = windows.FILE_FLAG_OPEN_REPARSE_POINT
+
+// isSymlinkRefusal は Windows では常に偽である。FILE_FLAG_OPEN_REPARSE_POINT は symlink を拒まずに
+// symlink 自身を開き、拒むのは OpenRegular の種別の確認である。
+func isSymlinkRefusal(error) bool { return false }

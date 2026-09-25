@@ -4,9 +4,11 @@ package credentials
 
 import "os"
 
-// SecureFile は Windows 以外では 0600 の Chmod。Save の一時ファイルの締めに使い、この修正
-// より前と同じく失敗を呼び出し元に伝える(元の tmp.Chmod(0o600) と同じ)。
-func SecureFile(path string) error { return os.Chmod(path, 0o600) }
+// secureTemp は Windows 以外では、Save の一時ファイルを開いた記述子に対して 0600 に chmod する。
+// 失敗は呼び出し元に伝える。パスで chmod しないのは、root の Save の途中でエージェントの利用者が
+// 一時ファイルの名前を別のファイルへの symlink に差し替えても、その先の権限を変えないためである
+// (仕様 9・11 節)。
+func secureTemp(f *os.File) error { return f.Chmod(0o600) }
 
 // secureExisting は Unix では何もしない。既存の agent.json・.lock を起動のたびに chmod する
 // と、管理者が意図して締めた 0400 を 0600 へ緩めてしまい、9 節の「余分な権限だけを外し、

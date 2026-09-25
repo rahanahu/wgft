@@ -2,7 +2,10 @@
 
 package credentials
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 // SecureFile は path 1 つだけを、SYSTEM・BUILTIN\Administrators・今の実行者だけに絞った
 // 保護 DACL(親からの継承を切ったもの)に締める。ディレクトリにも、隣のファイルにも触れ
@@ -19,6 +22,11 @@ func SecureFile(path string) error {
 	}
 	return nil
 }
+
+// secureTemp は、Save の一時ファイルを SecureFile で締める。パスで締めるが、createSecureTemp は一時
+// ファイルを共有を許さずに開いており、開いている間は削除も名前の変更もできない。締めるのは作った
+// ファイルそのものである(仕様 11 節)。
+func secureTemp(f *os.File) error { return SecureFile(f.Name()) }
 
 // secureExisting は、この修正より前に緩い ACL の下で作られていた既存のファイルを
 // Windows でだけ締め直す。Load(agent.json)と Acquire(lock.go の .lock)が、読む・開く

@@ -24,9 +24,62 @@ var ErrLocked = errors.New("locked by another process")
 // LockPath は状態ファイルに対応するロックファイルの場所。
 func LockPath(statePath string) string { return statePath + ".lock" }
 
-// Acquire はロックを取る。取れなければ ErrLocked。
+// ErrNotRegular は、開こうとしたパスが通常のファイルでないことを示す。symlink、FIFO、デバイス、
+// ディレクトリがこれに当たる(設計文書 9・11 節)。
+var ErrNotRegular = errors.New("not a regular file")
+
+// OpenRegular は、path の最後の要素が symlink なら辿らずに失敗し、開いたものが通常のファイルでなければ
+// 閉じて ErrNotRegular を返す(設計文書 9・11 節)。種別は開いた記述子に対して確かめるので、パスを
+// 差し替えられても、確かめたものと返すものが食い違うことは無い。FIFO を開いた時点で止まらない
+// よう、Unix では O_NONBLOCK を付けて開く。通常のファイルの読み書きには O_NONBLOCK は効かない。
+// 返す FileInfo は開いた記述子の fstat である。
+//
+// root の CLI は、エージェントの利用者が書けるデータディレクトリの中のファイルをこれで開く。その利用者は
+// ディレクトリの中の名前を自由に差し替えられるので、root はそのパスを信頼しない。
+func OpenRegular(path string, flag int, perm os.FileMode) (*os.File, os.FileInfo, error) {
+	f, err := os.OpenFile(path, flag|noFollowFlags, perm)
+	if err != nil {
+		if isSymlinkRefusal(err) {
+			if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&fs.ModeSymlink != 0 {
+				return nil, nil, fmt.Errorf("%s is a symbolic link, which wgft does not follow: %w", path, ErrNotRegular)
+			}
+		}
+		return nil, nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s is not a regular file but %s: %w", path, describeType(fi.Mode()), ErrNotRegular)
+	}
+	return f, fi, nil
+}
+
+// describeType は通常のファイルでないものの種別を 1 語で表す。誤りの文言に使う。
+func describeType(m fs.FileMode) string {
+	switch {
+	case m&fs.ModeSymlink != 0:
+		return "a symbolic link"
+	case m.IsDir():
+		return "a directory"
+	case m&fs.ModeNamedPipe != 0:
+		return "a named pipe"
+	case m&fs.ModeSocket != 0:
+		return "a socket"
+	case m&fs.ModeDevice != 0:
+		return "a device"
+	default:
+		return "an irregular file"
+	}
+}
+
+// Acquire はロックを取る。取れなければ ErrLocked。ロックファイルは OpenRegular で開くので、symlink を
+// 辿らず、通常のファイルでなければ ErrNotRegular を包んだ誤りになる。symlink の先にファイルを作ることもない。
 func Acquire(statePath string) (*Lock, error) {
-	f, err := os.OpenFile(LockPath(statePath), os.O_CREATE|os.O_RDWR, 0o600)
+	f, _, err := OpenRegular(LockPath(statePath), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("lock file: %w", err)
 	}
@@ -79,8 +132,10 @@ func (s State) String() string {
 // 共有ロックを取る一瞬は、同時に起動したプロセスの Acquire が ErrLocked で失敗しうる期間として
 // 残る。設計 10.2c 節は、この期間を無くすのではなく最小にすると決めている。配布対象の OS に
 // ロックを取らずに状態だけを問い合わせる手段が揃わないためである。
+//
+// ロックファイルは OpenRegular で開く。symlink や FIFO なら Unknown と誤りを返し、辿りも止まりもしない。
 func Inspect(statePath string) (State, error) {
-	f, err := os.OpenFile(LockPath(statePath), os.O_RDONLY, 0)
+	f, _, err := OpenRegular(LockPath(statePath), os.O_RDONLY, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return Absent, nil

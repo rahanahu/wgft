@@ -15,6 +15,10 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
+// streamReadLimit は制御ストリームの 1 通の大きさの上限である。全体状態はこの 1 通に収まるので、
+// 認証情報ファイルの last_state の大きさもこれで決まる(credentials.MaxFileSize の根拠の 1 つ)。
+const streamReadLimit = 4 << 20
+
 // errUnauthorized は stream の認証が拒否された(恒久トークンが無効)。復帰は WGFT_JOIN による再登録(仕様 5.1 節)。
 var errUnauthorized = errors.New("stream authentication rejected: the permanent token may have been revoked")
 
@@ -146,7 +150,7 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 		return err
 	}
 	defer ws.CloseNow()
-	ws.SetReadLimit(4 << 20)
+	ws.SetReadLimit(streamReadLimit)
 
 	// 版と機能の交渉(仕様 7a.6 節)。agent は対応する範囲を毎回そのまま宣言する。今のところ
 	// capabilities の語彙は無いので常に空配列を送り、legacy v0(語彙が無いこと自体)とは区別する
