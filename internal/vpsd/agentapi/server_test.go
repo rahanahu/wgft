@@ -5,14 +5,17 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -557,4 +560,73 @@ func TestHTTPServerDoesNotNegotiateHTTP2(t *testing.T) {
 	if got := conn.ConnectionState().NegotiatedProtocol; got == "h2" {
 		t.Fatalf("negotiated %q, want http/1.1", got)
 	}
+}
+
+// 相手が証明書を拒んだハンドシェイクの行には、古い証明書を固定したエージェントの読み方を添える
+// (設計文書 10.2c 節)。エージェントは固定したハッシュと合わなければハンドシェイクを拒み、server の
+// ログには net/http の "TLS handshake error ... bad certificate" の行だけが残っていた。
+func TestHandshakeErrorNamesAPinnedAgent(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(lockedWriter{&mu, &buf})
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+
+	certSrc := httptest.NewTLSServer(nil)
+	cert := certSrc.TLS.Certificates[0]
+	certSrc.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newHTTPServer("", http.NotFoundHandler(), &tls.Config{Certificates: []tls.Certificate{cert}}, defaultTimeouts)
+	go srv.ServeTLS(ln, "", "")
+	defer srv.Close()
+	// internal/agent の PinnedClient と同じく、固定したハッシュに合わない証明書を VerifyConnection で拒む。
+	_, err = tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		InsecureSkipVerify: true,
+		VerifyConnection:   func(tls.ConnectionState) error { return errors.New("pin mismatch") },
+	})
+	if err == nil {
+		t.Fatal("the handshake succeeded although the client refused the certificate")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		got := buf.String()
+		mu.Unlock()
+		if strings.Contains(got, "bad certificate") {
+			if !strings.Contains(got, "cannot tell which agent") || !strings.Contains(got, "wgft agent join-string") {
+				t.Errorf("the handshake error is not explained: %q", got)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no handshake error was logged: %q", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 他の誤りの行はそのまま渡す。
+	mu.Lock()
+	buf.Reset()
+	mu.Unlock()
+	handshakeErrorLog{}.Write([]byte("http: TLS handshake error from 192.0.2.1:1234: EOF\n"))
+	mu.Lock()
+	defer mu.Unlock()
+	if got := buf.String(); got != "http: TLS handshake error from 192.0.2.1:1234: EOF\n" {
+		t.Errorf("another error line was changed: %q", got)
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }

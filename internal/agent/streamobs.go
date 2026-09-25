@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"time"
 )
 
@@ -29,6 +30,10 @@ type streamObservation struct {
 	// 試みの失敗も同じ組に記録する。どちらも「今つながっていない理由」を答えるためである
 	DisconnectedAt   time.Time
 	DisconnectReason string
+	// PinMismatch は、直近の接続の終わりか試みの失敗が、server の証明書が登録のときに固定したものと
+	// 一致しないためだったことである。再試行では直らないので、`agent doctor` が他の切断と分けて示す
+	// (設計文書 10.2c 節)。
+	PinMismatch bool
 
 	// Backoff は直近に待った再接続の間隔で、RetryAt は次に繋ぎ直す時刻。どちらも streamLoop が待ちに
 	// 入るたびに書く。待ちに入っていない間、RetryAt はゼロである。Backoff は streamLoop のローカル
@@ -88,6 +93,7 @@ func (rt *runtime) noteStreamDisconnected(now time.Time, err error) {
 	defer rt.streamMu.Unlock()
 	rt.streamObs.Connected, rt.streamObs.AwaitingPong = false, false
 	rt.streamObs.DisconnectedAt, rt.streamObs.DisconnectReason = now, reason
+	rt.streamObs.PinMismatch = errors.Is(err, ErrPinMismatch)
 }
 
 // noteStreamWaiting は、次の接続までの待ちに入ったことを記録する。backoff は streamLoop が実際に

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 
 	"golang.org/x/net/netutil"
@@ -134,7 +135,30 @@ func newHTTPServer(addr string, h http.Handler, tlsConfig *tls.Config, t serverT
 		// h2 は公開面を広げるだけになる。空でない map を置くと net/http は h2 を広告しない。
 		// 鍵交換の曲線は Go の既定に任せる(既定には耐量子のハイブリッドが含まれ、固定すると外れる)。
 		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
+		ErrorLog:     log.New(handshakeErrorLog{}, "", 0),
 	}
+}
+
+// handshakeErrorLog は net/http が書く誤りの行を、このプロセスのログへそのまま渡す。TLS の
+// ハンドシェイクを相手が証明書を理由に拒んだ行にだけ、読み方を添える。エージェントは登録のときに
+// 固定した証明書のハッシュと合わなければ拒むので、server teardown --purge で作り直した server には、
+// 古い証明書を固定したままのエージェントの行が "remote error: tls: bad certificate" として並ぶ。
+// どのエージェントかは言えない。相手は名乗る前にハンドシェイクを終え、作り直した server のデータ
+// ベースにはそのエージェントの記録も無いためである。送信元のアドレスは net/http の行が既に持つ。
+type handshakeErrorLog struct{}
+
+// badCertHint は、相手が証明書を拒んだハンドシェイクの行に添える句である。
+const badCertHint = "; the client refused this server's certificate. An agent does this when it pinned another certificate " +
+	"at registration, as after wgft server teardown --purge; the handshake ends before the agent names itself, so this server " +
+	"cannot tell which agent it is. That agent needs a new join string from wgft agent join-string --name <agent>"
+
+func (handshakeErrorLog) Write(p []byte) (int, error) {
+	line := strings.TrimRight(string(p), "\n")
+	if strings.Contains(line, "TLS handshake error") && strings.Contains(line, "bad certificate") {
+		line += badCertHint
+	}
+	log.Print(line)
+	return len(p), nil
 }
 
 // maxAgentConns はエージェント用 API の同時接続数の固定上限(仕様 11 節)。11a 節の設定項目には

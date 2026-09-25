@@ -91,6 +91,9 @@ type DoctorStream struct {
 	// IsZero で判定する
 	DisconnectedAt   time.Time `json:"disconnected_at"`
 	DisconnectReason string    `json:"disconnect_reason,omitempty"`
+	// PinMismatch は、直近の切断か試みの失敗が、server の証明書と登録のときに固定したハッシュとの
+	// 不一致だったことである。旧い版のエージェントは送らない
+	PinMismatch bool `json:"pin_mismatch,omitempty"`
 	// Backoff は直近に待った再接続の間隔。単位はナノ秒
 	Backoff      time.Duration `json:"backoff,omitempty"`
 	RetryAt      time.Time     `json:"retry_at"`
