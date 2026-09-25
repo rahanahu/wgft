@@ -1,6 +1,7 @@
 package nettun
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"os"
@@ -77,6 +78,100 @@ func TestReadReturnsOnClose(t *testing.T) {
 	if err := readWithin(dev, 5*time.Second); err != os.ErrClosed {
 		t.Fatalf("Read = %v, want os.ErrClosed", err)
 	}
+}
+
+// gVisor の tcp.(*Endpoint).Connect は LockUser を持ったまま SYN を送る。その送信は
+// channel.Endpoint 経由で Device.WriteNotify を呼び、無バッファの incomingPacket が
+// Read で引き取られるまで、その goroutine は LockUser を持ったままブロックする。
+// Device.Close の stack.Close は Abort 経由で同じ LockUser を待つので、closed を
+// 閉じて WriteNotify のブロックを解く前に stack.Close を呼ぶ順序では、両者が
+// 待ち合ったまま戻らない。この試験は、下流 (Read) が止まったまま接続中の TCP dial が
+// あっても、Close が戻ることを確かめる。
+func TestDeviceCloseWithStalledTCPConnect(t *testing.T) {
+	dev, err := Create(netip.MustParseAddr("10.99.0.1"), 1420)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dial := goDone(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if c, err := dev.DialTCP(ctx, netip.MustParseAddrPort("10.99.0.2:80")); err == nil {
+			c.Close()
+		}
+	})
+	waitGoroutine(t, "nettun.(*Device).WriteNotify", "tcp.(*Endpoint).Connect")
+	dc := goDone(func() { dev.Close() })
+	if !waitOrUnstick(dev, dc, 5*time.Second) {
+		t.Fatal("Device.Close blocked behind a stalled TCP connect")
+	}
+	within(t, dial, 5*time.Second, "DialTCP after Device.Close")
+}
+
+// waitGoroutine は、want の全部を 1 つの goroutine のスタックに含むものが現れるまで待つ。
+func waitGoroutine(t *testing.T, want ...string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		for _, gr := range strings.Split(string(buf[:n]), "\n\n") {
+			ok := true
+			for _, w := range want {
+				if !strings.Contains(gr, w) {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no goroutine with %q in its stack", want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// goDone は fn を別の goroutine で走らせ、終わると閉じる channel を返す。
+func goDone(fn func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	return done
+}
+
+// within は done が d の間に閉じることを確かめる。
+func within(t *testing.T, done <-chan struct{}, d time.Duration, what string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not return within %v", what, d)
+	}
+}
+
+// waitOrUnstick は done を d まで待つ。戻らなければ Device.Read で下流を動かして後始末し、false を返す。
+func waitOrUnstick(dev *Device, done <-chan struct{}, d time.Duration) bool {
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+	}
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			dev.Read([][]byte{make([]byte, 2048)}, []int{0}, 0)
+		}
+	}()
+	<-done
+	return false
 }
 
 // readWithin は dev.Read の誤りを返す。timeout の間に返らなければ errReadTimeout を返す。
