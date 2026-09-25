@@ -402,6 +402,13 @@ func TestBandOverlap(t *testing.T) {
 		{"a broad route far outside", nil, []hostRoute{r("tun0", "10.0.0.0/8")}, `route 10.0.0.0/8 on interface "tun0"`, false},
 		// 既定経路は、どの帯も含むので対象にしない (既定経路の条件)
 		{"the default route", []hostAddr{a("eth0", "192.168.1.2/24")}, []hostRoute{r("eth0", "0.0.0.0/0"), r("eth0", "192.168.1.0/24")}, "", false},
+		// OpenVPN の redirect-gateway def1 が入れる 2 本の /1 は、既定経路と同じ働きをするので対象にしない (/1 の条件)
+		{"the two /1 routes of a VPN", nil, []hostRoute{r("tun0", "0.0.0.0/1"), r("tun0", "128.0.0.0/1")}, "", false},
+		{"an address with a /1 prefix", []hostAddr{a("tun0", "10.8.0.6/1")}, nil, "", false},
+		// ただしサーバのアドレスそのものは、/1 でもローカルに届く
+		{"the server's own address with a /1 prefix", []hostAddr{a("wg0", "10.200.0.1/1")}, nil, `address 10.200.0.1/1 on interface "wg0"`, true},
+		// /2 はもう既定経路の代わりではないので対象にする
+		{"a /2 route", nil, []hostRoute{r("tun0", "0.0.0.0/2")}, `route 0.0.0.0/2 on interface "tun0"`, false},
 		// 隣の帯は重ならない (重なりの条件)
 		{"an address next to the range", []hostAddr{a("eth0", "10.200.1.5/24")}, []hostRoute{r("eth0", "10.200.1.0/24")}, "", false},
 	}
@@ -427,7 +434,7 @@ func TestBandOverlapWithTheLAN(t *testing.T) {
 			continue
 		}
 		e := (&OverlapError{Range: own.Masked(), What: what, Server: own.Masked().Addr().Next(), Interface: "wgft0", CoversServer: covers}).Error()
-		if !strings.Contains(e, "192.168.1.") || strings.ContainsAny(e, "()") {
+		if !strings.Contains(e, "192.168.1.") || !strings.Contains(e, "WGFT_MODE=userspace") || !strings.Contains(e, "registering every agent again") || strings.ContainsAny(e, "()") {
 			t.Errorf("%s: %q", band, e)
 		}
 	}

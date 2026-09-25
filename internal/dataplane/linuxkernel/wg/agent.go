@@ -377,12 +377,16 @@ type hostRoute struct {
 
 // bandOverlap is the overlap rule on values already read. It reports the first address or
 // main-table route on another interface whose range overlaps own, in either direction: one that
-// own contains, and one that contains own (design.md 7b.1 節). Only the default route, which every
-// range is inside, is left out. covers is true when the overlap would also take traffic to the
+// own contains, and one that contains own (design.md 7b.1 節). covers is true when the overlap would also take traffic to the
 // server's tunnel address away from the agent's interface: the address is the server address
 // itself, which the local table delivers to this host, or its range or the route contains the
 // server address and is as specific as own or more, so it wins over or ties with the agent's
 // connected route.
+//
+// The default route and the two /1 routes, 0.0.0.0/1 and 128.0.0.0/1, are left out: a VPN such as
+// OpenVPN with redirect-gateway def1 installs the two /1 routes to override the default route
+// without replacing it, so they do what a default route does and contain every band. An address
+// with a /0 or /1 prefix is left out for the same reason, unless it is the server address itself.
 //
 // A narrower address or route inside own takes that part of the range away from the tunnel. A
 // broader one loses to the agent's connected route, which then takes that part of the other
@@ -394,13 +398,13 @@ func bandOverlap(own netip.Prefix, server netip.Addr, self string, addrs []hostA
 		return p.Addr() == server || (p.Bits() >= own.Bits() && p.Masked().Contains(server))
 	}
 	for _, a := range addrs {
-		if a.Iface == self || !a.Prefix.Masked().Overlaps(own) {
+		if a.Iface == self || !a.Prefix.Masked().Overlaps(own) || (a.Prefix.Bits() <= 1 && a.Prefix.Addr() != server) {
 			continue
 		}
 		return fmt.Sprintf("address %s on interface %q", a.Prefix, a.Iface), takesServer(a.Prefix), true
 	}
 	for _, r := range routes {
-		if r.Iface == self || r.Dst.Bits() == 0 || !r.Dst.Masked().Overlaps(own) {
+		if r.Iface == self || r.Dst.Bits() <= 1 || !r.Dst.Masked().Overlaps(own) {
 			continue
 		}
 		if r.Iface == "" {
@@ -473,8 +477,9 @@ type OverlapError struct {
 }
 
 func (e *OverlapError) Error() string {
-	const next = "Remove that address or route from this host, or have the server's operator move the range with WGFT_WG_ADDRESS, " +
-		"which takes `wgft server teardown --purge` and registering the agents again"
+	const next = "Remove that address or route from this host; or have the server's operator move the range with WGFT_WG_ADDRESS, " +
+		"which takes `wgft server teardown --purge` on the VPS and registering every agent again with a new join string; " +
+		"or run this agent in userspace mode with WGFT_MODE=userspace, whose tunnel does not add routes to this host, after `wgft agent teardown`"
 	if e.CoversServer {
 		return fmt.Sprintf("the agent's WireGuard address range %s overlaps %s on this host, which covers the server at %s, so traffic to the server would not go through %s. %s",
 			e.Range, e.What, e.Server, e.Interface, next)

@@ -158,3 +158,82 @@ func TestKernelRefusalText(t *testing.T) {
 		t.Errorf("parentheses in output: %q", s)
 	}
 }
+
+// 公開に失敗した古い世代を試し直して通しても、新しい世代の拒否の表示は消えない。表示を消すのは、拒んだ
+// 世代と同じか新しい世代の wg 設定を受け入れたときだけである。古い世代の試し直しが拒まれても、新しい
+// 世代の拒否の表示を古い世代で置き換えない。
+func TestKernelRefusalSurvivesARetryOfAnOlderGeneration(t *testing.T) {
+	k := &fakeKernel{}
+	f := &credentials.Credentials{TunnelAddress: "10.200.0.2/24"}
+	rt, d := kernelRuntime(t, k, f)
+	if err := rt.apply(&proto.State{Generation: 1, WG: d.wg}); err != nil {
+		t.Fatal(err)
+	}
+	k.publishErr = errors.New("batch refused")
+	if err := rt.apply(&proto.State{Generation: 2, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r2", "192.168.1.21:81", 81, 81)}}); err == nil {
+		t.Fatal("the failed publication was not reported")
+	}
+	if rt.pendingSt == nil || rt.pendingSt.Generation != 2 {
+		t.Fatalf("pending = %+v, want generation 2", rt.pendingSt)
+	}
+	if err := rt.apply(&proto.State{Generation: 3, WG: withAddress(d.wg, "192.168.1.100/25")}); err == nil {
+		t.Fatal("generation 3 was not refused")
+	}
+	k.publishErr = nil
+	if err := rt.retryPending(); err != nil {
+		t.Fatal(err)
+	}
+	if rt.gen != 2 {
+		t.Fatalf("gen = %d after the retry, want 2", rt.gen)
+	}
+	hb := rt.heartbeat()
+	if !strings.Contains(hb.Tunnel.Reason, "refused the wg configuration of generation 3") || !strings.Contains(hb.Tunnel.Reason, "192.168.1.100/25") {
+		t.Errorf("the retry of generation 2 cleared the refusal of generation 3: %+v", hb.Tunnel)
+	}
+
+	// 古い世代が拒まれても、表示は新しい世代のまま
+	rt.mu.Lock()
+	_ = rt.checkWGLocked(&proto.State{Generation: 2, WG: withAddress(d.wg, "10.9.0.2/24")})
+	rt.mu.Unlock()
+	if hb := rt.heartbeat(); !strings.Contains(hb.Tunnel.Reason, "generation 3") {
+		t.Errorf("an older refusal replaced the newer one: %+v", hb.Tunnel)
+	}
+
+	if err := rt.apply(&proto.State{Generation: 4, WG: d.wg}); err != nil {
+		t.Fatal(err)
+	}
+	if hb := rt.heartbeat(); strings.Contains(hb.Tunnel.Reason, "refused") {
+		t.Errorf("a newer accepted state did not clear the refusal: %+v", hb.Tunnel)
+	}
+}
+
+// トンネルが立っている間に届いた、形の誤った wg 設定(mtu、keepalive、公開鍵)も、アドレスの拒否と同じく
+// インタフェースと表を残したまま拒み、ハートビートに示す(設計文書 7b.1 節)。
+func TestKernelRefusesAMalformedConfigWhileUp(t *testing.T) {
+	bad := map[string]func(*proto.WGConfig){
+		"mtu":       func(w *proto.WGConfig) { w.MTU = 0 },
+		"keepalive": func(w *proto.WGConfig) { w.Keepalive = -1 },
+		"pubkey":    func(w *proto.WGConfig) { w.ServerPubkey = "not a key" },
+	}
+	for name, mutate := range bad {
+		t.Run(name, func(t *testing.T) {
+			k := &fakeKernel{}
+			rt, d := kernelRuntime(t, k, &credentials.Credentials{})
+			if err := rt.apply(&proto.State{Generation: 1, WG: d.wg}); err != nil {
+				t.Fatal(err)
+			}
+			w := d.wg
+			mutate(&w)
+			ensured := len(k.ensured)
+			if err := rt.apply(&proto.State{Generation: 2, WG: w}); err == nil {
+				t.Fatal("not refused")
+			}
+			if !d.built() || len(k.ensured) != ensured || rt.gen != 1 {
+				t.Errorf("built=%v convergences=%d gen=%d", d.built(), len(k.ensured)-ensured, rt.gen)
+			}
+			if hb := rt.heartbeat(); !strings.Contains(hb.Tunnel.Reason, ReasonWGRefused) {
+				t.Errorf("heartbeat = %+v", hb.Tunnel)
+			}
+		})
+	}
+}

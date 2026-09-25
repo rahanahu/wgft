@@ -517,6 +517,15 @@ func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.D
 		return
 	}
 	c.Status, c.Reason = statusUnknown, agentReasonTunnelErrorEndpointKept
+	// wg 設定の拒否では、インタフェースは直前の設定のまま残るが、server が拒んだ設定で動く間はトンネルの
+	// 中の宛先が合わず、転送が止まりうる。エンドポイントが転送を続けられるとは言わない(設計文書 7b.1 節)
+	if strings.HasPrefix(t.Reason, agent.ReasonWGRefused) {
+		c.Detail = "the agent refused the wg configuration the server sent and keeps the interface and rules of the last configuration it applied, " +
+			"with the endpoint " + t.Endpoint + ": " + t.Reason
+		c.Next = "while the server runs with the configuration this agent refused, such as another tunnel address, traffic through the tunnel stops, since the two sides no longer agree. " +
+			"If the server's operator moved the range on purpose, register this agent again with a new join string; otherwise find out who changed the server"
+		return
+	}
 	c.Detail = "the tunnel reports an error but still holds the resolved endpoint " + t.Endpoint + ", which can keep carrying traffic: " + t.Reason
 	c.Next = "read the agent's log for the same error with its context, with journalctl -u wgft-agent, or docker logs for a container. " +
 		"Traffic can still flow over the endpoint it resolved earlier, so this is not by itself a stop"

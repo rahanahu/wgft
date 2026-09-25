@@ -55,7 +55,9 @@
 #       /25 that covers half of the home LAN are refused, with wgft0's address, the home routes and
 #       the table left as they were, the refusal in the agent's log and the heartbeat, and the
 #       30-second check still repairing the table; home still reaches the LAN host inside the /25.
-#       The server is then moved back and forwarding returns without restarting the agent.
+#       The server is then moved back and forwarding returns without restarting the agent. Last, the
+#       two /1 routes a VPN such as OpenVPN's redirect-gateway def1 installs do not stop a restart,
+#       and forwarding works with them in place.
 #   teardown. wgft agent teardown: it refuses while the agent runs; pointed at a directory without
 #       agent.json while the agent runs, it removes nothing and forwarding goes on; a stopped
 #       kernel-mode agent's leftovers make a userspace start refuse; teardown removes the agent's
@@ -149,6 +151,8 @@ cleanup() {
   lan nft delete table inet noicmp 2>/dev/null
   home nft delete table inet stalereject 2>/dev/null
   lan ip addr del 192.168.50.200/24 dev eth0 2>/dev/null
+  home ip route del 0.0.0.0/1 2>/dev/null
+  home ip route del 128.0.0.0/1 2>/dev/null
   rm -rf "$DATA" "$ADATA" "/etc/netns/$HOME_NS"
 }
 # set_hosts <line>...: the home namespace's /etc/hosts. `ip netns exec` bind-mounts the file when it
@@ -1001,6 +1005,22 @@ check_pin() {
   not_forwarded "the heartbeat no longer names a refusal" "refused the wg configuration" "$(agents_json | grep -m1 '"tunnel"' -A3 | tr -s ' \n' ' ')"
   check "agent.json still records the tunnel address" '"tunnel_address": "10.200.0.2/24"' "$(grep tunnel_address "$ADATA/agent.json")"
   lan ip addr del 192.168.50.200/24 dev eth0 2>/dev/null
+
+  # the two /1 routes of a VPN's redirect-gateway def1, through the home router like the default
+  # route, are not an overlap: the restart's first convergence goes through and forwarding works
+  home ip route add 0.0.0.0/1 via 192.168.50.1 dev eth0
+  home ip route add 128.0.0.0/1 via 192.168.50.1 dev eth0
+  stop_agent
+  local before
+  before=$(wc -l < "$ALOG")
+  start_agent
+  wait_until 30 caught_up
+  wait_until 30 tcp_ok 39971
+  okcheck "the agent runs with the two /1 routes in place" "$(agent_running && echo 1 || echo 0)"
+  not_forwarded "no overlap is named for the /1 routes" "overlaps" "$(tail -n +"$((before + 1))" "$ALOG")"
+  check "forwarding works with the two /1 routes in place" "tcp-echo" "$(tcp_echo 39971)"
+  home ip route del 0.0.0.0/1 via 192.168.50.1 dev eth0
+  home ip route del 128.0.0.0/1 via 192.168.50.1 dev eth0
 }
 
 check_19() {

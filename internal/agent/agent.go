@@ -435,10 +435,17 @@ func (rt *runtime) checkWGLocked(st *proto.State) error {
 		return nil
 	}
 	if _, err := c.checkWG(st.WG); err != nil {
-		rt.refused = &refusedState{gen: st.Generation, err: err}
-		return fmt.Errorf("refused the wg configuration; the tunnel and rules stay as generation %d left them: %w", rt.gen, err)
+		// 古い世代の試し直しが拒まれても、新しい世代の拒否の表示を古い世代で置き換えない
+		if rt.refused == nil || st.Generation >= rt.refused.gen {
+			rt.refused = &refusedState{gen: st.Generation, err: err}
+		}
+		return fmt.Errorf("%s; the tunnel and rules stay as generation %d left them: %w", ReasonWGRefused, rt.gen, err)
 	}
-	rt.refused = nil
+	// 受け入れた wg 設定が拒んだ世代と同じか新しいときだけ、拒否の表示を消す。公開できなかった古い世代の
+	// 試し直し(retryPending)が通っても、新しい世代を拒んでいることは変わらない
+	if rt.refused != nil && st.Generation >= rt.refused.gen {
+		rt.refused = nil
+	}
 	return nil
 }
 
@@ -762,6 +769,11 @@ func (rt *runtime) close() {
 // 取り残される。
 const ReasonHandshakePending = "handshake not established"
 
+// ReasonWGRefused は、トンネルが立っている間に届いた wg 設定をカーネルモードのエージェントが拒んだときの、
+// ハートビートのトンネルの理由の書き出しである(設計文書 7b.1 節)。agent doctor の tunnel.local が同じ
+// 場合を見分けて所見の文面を変えるので、ReasonHandshakePending と同じく公開する。
+const ReasonWGRefused = "refused the wg configuration"
+
 func (rt *runtime) heartbeat() proto.Heartbeat {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -817,7 +829,7 @@ func (rt *runtime) tunnelSnapshotLocked(r tunnelReading) tunnelSnapshot {
 	// いないことは、運用者が最初に知るべきことである(設計文書 7b.1・11 節)
 	if rt.refused != nil {
 		snap.hb.State = proto.StatusError
-		snap.hb.Reason = fmt.Sprintf("refused the wg configuration of generation %d; the tunnel and rules stay as generation %d left them: %v", rt.refused.gen, rt.gen, rt.refused.err)
+		snap.hb.Reason = fmt.Sprintf("%s of generation %d; the tunnel and rules stay as generation %d left them: %v", ReasonWGRefused, rt.refused.gen, rt.gen, rt.refused.err)
 		return snap
 	}
 	if r.err != nil {
