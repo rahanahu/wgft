@@ -13,7 +13,7 @@
 //   - agent_backend.go: 登録(agentapi.Backend)と stream(stream.Backend)の実装
 //   - watch.go: 窃取検知(IP の食い違いと往復。仕様 5.2 節)
 //   - startup.go: サーバ鍵、環境の読み取り、ip_forward
-//   - tailnet.go: --admin-tailscale の待ち受け(インタフェースへの縛りと接続元の検査)
+//   - tailnet.go: --admin-tailscale の待ち受け(インタフェースへの縛り、接続元の検査、作り直しの見張り)
 package vpsd
 
 import (
@@ -533,17 +533,29 @@ func (d *Daemon) listenAdmin(ctx context.Context, errc chan<- error) error {
 	srv.AllowedHosts = append(srv.AllowedHosts, d.opts.AdminHost...)
 	if d.opts.AdminTailscale {
 		if ip, dnsName, detail, other := detectAdminTailscale(ctx); ip != "" {
-			srv.AllowedHosts = append(srv.AllowedHosts, ip)
-			if dnsName != "" {
-				srv.AllowedHosts = append(srv.AllowedHosts, dnsName)
-			}
 			tsAddr := net.JoinHostPort(ip, adminTailscalePort)
 			tsLn, iface, err := listenTailnet(ctx, ip, adminTailscalePort)
 			if err != nil {
 				return fmt.Errorf("admin API tailscale: %w", err)
 			}
-			log.Printf("also listening for the admin API on Tailscale %s, %s; bound to interface %s and accepting tailnet sources only", tsAddr, detail, iface)
-			go func() { errc <- fmt.Errorf("admin API tailscale: %w", admin.ServeListener(tsLn, srv)) }()
+			srv.SetTailnetHosts(tailnetHosts(ip, dnsName))
+			log.Printf("also listening for the admin API on Tailscale %s, %s; bound to interface %s index %d and accepting tailnet sources only", tsAddr, detail, iface.name, iface.index)
+			ta := &tailnetAdmin{
+				port:     adminTailscalePort,
+				interval: tailnetWatchInterval,
+				links:    hostLinks{},
+				detect: func(ctx context.Context) (string, string, string) {
+					ip, dnsName, detail, _ := detectAdminTailscale(ctx)
+					return ip, dnsName, detail
+				},
+				listen:   listenTailnet,
+				serve:    func(ln net.Listener) error { return admin.ServeListener(ln, srv) },
+				setHosts: srv.SetTailnetHosts,
+				errc:     errc,
+			}
+			addr, _ := netip.ParseAddr(ip)
+			ta.start(tsLn, addr.Unmap(), iface)
+			go ta.run(ctx)
 		} else if other != "" {
 			log.Printf("warning: --admin-tailscale set but %s has a 100.64.0.0/10 address and is not a Tailscale interface; the admin API is NOT listening there", other)
 		} else {
