@@ -386,7 +386,9 @@ func rulesStatusOf(res *admin.BatchResponse, agents []admin.AgentInfo, now time.
 			switch {
 			case fresh && ars.State == proto.StatusError:
 				st.Degraded++
-				bad = append(bad, short(r.ID)+" "+reasonOr(ars.Reason, "the agent reports an error"))
+				// エージェントが報告した理由は、そのエージェントのホストについて述べる。VPS の上で
+				// 読む行なので、どのエージェントの報告かを名指す(design.md 10.2b 節)。
+				bad = append(bad, short(r.ID)+" agent "+r.Agent+": "+reasonOr(ars.Reason, "the agent reports an error"))
 			case fresh && ars.State == proto.StatusOK:
 				st.Active++
 			default:

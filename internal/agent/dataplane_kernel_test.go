@@ -434,6 +434,10 @@ func TestKernelIPForwardFailureReportsOnlyRemoteTargets(t *testing.T) {
 	if s := statusOf(t, d, "other"); s.State != proto.StatusError || !strings.Contains(s.Reason, "ip_forward") {
 		t.Errorf("other = %+v, want an ip_forward error", s)
 	}
+	// 理由は VPS の上で読まれるので、どのホストの値かを名指す(設計文書 7b.1 節)。
+	if s := statusOf(t, d, "other"); !strings.HasPrefix(s.Reason, "on the agent host, ") || strings.Contains(s.Reason, "not this host") {
+		t.Errorf("other's reason does not name the agent host: %q", s.Reason)
+	}
 	if f.IPForwardEnabledAt != nil {
 		t.Error("a failed write left a record of a change")
 	}

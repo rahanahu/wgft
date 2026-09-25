@@ -44,9 +44,11 @@ func TestKernelStaleReasonIsReadByServerDoctor(t *testing.T) {
 		{name: "tcp, the old address refuses", rule: tcp, probeErr: errors.New("connect: connection refused"),
 			wantStale: true, wantRest: "connection refused", wantResolv: doctor.StatusUnknown,
 			wantTarget: doctor.StatusFailed, wantReason: doctor.ReasonConnectionRefused},
+		// ip_forward の誤りは、直前の解決の結果の後ろに続いても、エージェントのホストの値として
+		// agent_ip_forward_off に分類される(10.2a 節)
 		{name: "tcp, ip_forward cannot be set", rule: tcp, noForward: true,
-			wantStale: true, wantRest: "ip_forward", wantResolv: doctor.StatusUnknown,
-			wantTarget: doctor.StatusFailed, wantReason: doctor.ReasonTargetError},
+			wantStale: true, wantRest: "on the agent host, net.ipv4.ip_forward", wantResolv: doctor.StatusUnknown,
+			wantTarget: doctor.StatusFailed, wantReason: doctor.ReasonAgentIPForwardOff},
 		{name: "udp", rule: udp,
 			wantStale: true, wantResolv: doctor.StatusUnknown, wantTarget: doctor.StatusNotTested, wantReason: doctor.ReasonUDPListenerOnly},
 		{name: "the old address is not usable either", rule: tcp, narrow: true,

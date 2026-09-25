@@ -699,6 +699,12 @@ func targetCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 		}
 		c.Status, c.Reason = StatusFailed, targetReasonCode(st.Reason)
 		c.Detail = "the agent could not use this rule: " + ReasonOr(st.Reason, "no reason reported") + ", last check " + reportAge.String() + " ago"
+		if c.Reason == ReasonAgentIPForwardOff {
+			// 旧い版のエージェントの文言は「this host」と書き、VPS で読むと VPS のことに読める。
+			// どのホストの値かを所見の側で名指す。
+			c.Detail = fmt.Sprintf("agent %q reports that its own host does not forward this rule: %s, last check %s ago",
+				r.Agent, ReasonOr(st.Reason, "no reason reported"), reportAge)
+		}
 		c.Next = agentRuleNextStep(st.Reason, r)
 		return c
 	}
@@ -790,6 +796,10 @@ func targetReasonCode(reason string) string {
 	switch {
 	case strings.Contains(reason, allowtargets.Env) || strings.Contains(reason, "is not allowed"):
 		return ReasonTargetNotAllowed
+	case strings.Contains(reason, "net.ipv4.ip_forward"):
+		// カーネルモードのエージェントの文言(internal/agent の ruleStatuses)。書けなかった場合の
+		// 文言は下層の誤りを包むので、時間切れや拒否の語を含みうる。それらより先に当てる
+		return ReasonAgentIPForwardOff
 	case looksLikeBindFailure(reason):
 		return ReasonListenerBindFailed
 	case looksLikeResolveFailure(reason):
@@ -855,6 +865,11 @@ func agentRuleNextStep(reason string, r proto.Rule) string {
 			"not another process on the agent host. The agent retries every 30s and clears once that hold ends; restarting the agent also frees it at once."
 	case ReasonResolveFailed:
 		return "fix name resolution on the agent host, or point the rule at a literal address"
+	case ReasonAgentIPForwardOff:
+		return fmt.Sprintf("the setting to fix is on the host that runs agent %q, not on this VPS: net.ipv4.ip_forward is 0 there, so its kernel "+
+			"forwards nothing from the tunnel to %s. On that host, set it with sysctl -w net.ipv4.ip_forward=1, or restart the agent, "+
+			"which sets it on start; then find what set it to 0, such as a file in /etc/sysctl.d. wgft agent doctor on that host shows it "+
+			"under forwarding", r.Agent, r.TargetDisplay())
 	case ReasonTargetLoopbackUnsupported:
 		return "the agent runs in kernel mode, which does not forward to a loopback target. Point the rule at the agent host's LAN address instead of " + r.TargetDisplay() + "."
 	}

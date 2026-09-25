@@ -1048,7 +1048,9 @@ func (d *kernelDataplane) ruleStatuses() []proto.RuleStatus {
 				parts = append(parts, e)
 			}
 			if d.forwardErr != nil && !d.allLocal(r) {
-				parts = append(parts, d.forwardErr.Error()+"; the kernel does not forward to a target that is not this host")
+				// 理由は server の診断、`status`、`agent ls`、Web UI で VPS の上で読まれる。「このホスト」と
+				// 書くと VPS と読めるので、エージェントのホストであることを名指す(設計文書 10.2a 節)。
+				parts = append(parts, "on the agent host, "+d.forwardErr.Error()+"; its kernel does not forward to a target other than the agent host itself")
 			}
 		}
 		if len(parts) > 0 {
