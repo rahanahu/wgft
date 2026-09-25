@@ -318,6 +318,10 @@ func TestCheckTunnelWakesTheStreamOncePerHandshake(t *testing.T) {
 	default:
 		t.Fatal("no wake after the first handshake was observed; a recovered data path must cut the reconnect wait short")
 	}
+	// 実物のトンネルが返す秒の単位の値も、再接続の待ちの上限を決める新しい証拠になる
+	if !rt.handshakeSeen.Load().fresh(time.Now()) {
+		t.Error("the handshake just read from the userspace tunnel does not count as fresh")
+	}
 	// 値が変わらない限り、何度観測しても通知は生まれない
 	for i := 0; i < 5; i++ {
 		rt.checkTunnel(time.Now())

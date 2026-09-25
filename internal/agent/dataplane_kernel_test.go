@@ -1833,3 +1833,41 @@ func TestKernelPrerequisitesWithoutNetAdmin(t *testing.T) {
 		t.Fatalf("kernelPrerequisites = %v; want the CAP_NET_ADMIN prerequisite refusal", err)
 	}
 }
+
+// カーネルモードの dataplane が読む最終ハンドシェイクも、ユーザー空間モードと同じ判定で、再接続の
+// 待ちの上限を決める証拠になる(仕様 5.2 節)。カーネルモードの runtime は作り直しの閾値を持たない。
+func TestKernelHandshakeIsTheSameEvidenceForTheReconnectCap(t *testing.T) {
+	k := &fakeKernel{}
+	d := newTestKernel(t, k, nil, nil)
+	rt := newFakeDataplaneRuntime(t, nil)
+	rt.dp = d
+	rt.f.LastState = &proto.State{Generation: 1}
+	rt.rebuild = rebuildState{}
+	link := ours(t, d)
+	k.link = link
+
+	now := time.Now()
+	rt.checkTunnel(now)
+	if rt.handshakeSeen.Load().fresh(now) {
+		t.Fatal("wgft0 without a handshake counts as fresh")
+	}
+	link.Peers[0].LastHandshake = now.Add(-10 * time.Second)
+	k.link = link
+	rt.checkTunnel(now)
+	if !rt.handshakeSeen.Load().fresh(now) {
+		t.Fatal("a handshake 10 s old on wgft0 does not count as fresh")
+	}
+	if rt.handshakeSeen.Load().fresh(now.Add(170 * time.Second)) {
+		t.Error("a handshake 180 s old on wgft0 still counts as fresh")
+	}
+	// 停止の間も残っていた wgft0 の古いハンドシェイクは、初めて読んでも新しくない
+	rt2 := newFakeDataplaneRuntime(t, nil)
+	rt2.dp = d
+	rt2.f.LastState = &proto.State{Generation: 1}
+	link.Peers[0].LastHandshake = now.Add(-time.Hour)
+	k.link = link
+	rt2.checkTunnel(now)
+	if rt2.handshakeSeen.Load().fresh(now) {
+		t.Error("an hour-old handshake left on wgft0 counts as fresh when first read")
+	}
+}

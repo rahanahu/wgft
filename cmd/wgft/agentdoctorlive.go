@@ -454,7 +454,8 @@ func agentStreamBackoffCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.
 	}
 	c.Detail = strings.Join(parts, "; ")
 	c.Next = "read it with the control connection above: a wait that keeps growing while the stream stays down points at the server or the line to it, " +
-		"not at this host"
+		"not at this host; a wait that stays at 10s means the WireGuard handshake is recent, so the line works and the server is not accepting " +
+		"the control connection"
 }
 
 // agentStreamLivenessCheck は、直近の ping と pong の時刻と、pong を待っている最中かどうかを示す。

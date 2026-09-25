@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -22,6 +23,10 @@ const streamReadLimit = 4 << 20
 // errUnauthorized は stream の認証が拒否された(恒久トークンが無効)。復帰は WGFT_JOIN による再登録(仕様 5.1 節)。
 var errUnauthorized = errors.New("stream authentication rejected: the permanent token may have been revoked")
 
+// errServerProtocolVersion は、server が選んだ版をエージェントが受け入れられないことを表す(仕様 7a.6 節)。
+// 文面は checkServerProtocolVersion が版の値と理由を続ける。
+var errServerProtocolVersion = errors.New("server selected protocol version")
+
 // defaultReconnectBackoffMin と defaultReconnectBackoffMax は stream を繋ぎ直す間隔の既定の
 // 初期値と上限(仕様 5.2 節)。
 const (
@@ -29,8 +34,98 @@ const (
 	defaultReconnectBackoffMax = 5 * time.Minute
 )
 
+// defaultReconnectBackoffFreshMax は、WireGuard の最終ハンドシェイクが新しい間の再接続の待ちの
+// 既定の上限(仕様 5.2 節)。データの経路が生きているという追加の証拠がある間だけ、制御の経路を
+// 積極的に探す。カーネルモードの vpsd はプロセスが止まっても wg0 と鍵を残すので、プロセスが戻った
+// ことは新しいハンドシェイクに現れず、待ちを打ち切る合図にならないためである。
+const defaultReconnectBackoffFreshMax = 10 * time.Second
+
+// tunnelFreshFor は、最終ハンドシェイクを新しいと数える期間(仕様 5.2 節)。WireGuard の
+// RejectAfterTime の 180 秒で、server doctor の tunnel.handshake の 3 分の閾値(設計文書 10.2a 節)
+// と同じ値である。健全なトンネルの最終ハンドシェイクは 145 秒(RekeyAfterTime 120 秒 + keepalive
+// 25 秒)より古くならず、30 秒ごとの点検の遅れを足しても 175 秒なので、健全なトンネルを古いと
+// 数えない。180 秒を過ぎた鍵は送信にも使えないので、それより古いハンドシェイクはデータの経路が
+// 生きている証拠にならない。ただし、vpsd が鍵の更新を始める側で、vpsd から送るデータが無い場合は、
+// 更新が vpsd がエージェントの keepalive を受けた時点になり、約 190 秒まで古く見えうる。その間は
+// 上限が一時的に外れるだけである(未確認)。
+const tunnelFreshFor = 180 * time.Second
+
+// capsWhileFresh は、err で終わった接続の試みの後の待ちに、トンネルが新しい間の上限を当てるかどうかを
+// 返す(仕様 5.2 節)。当てないのは、server が応答したうえで、再試行では直らない食い違いを示した切断で
+// ある。恒久トークンの拒否と取り消し、同じエージェントの新しい接続による置き換え、版の不一致(server が
+// 理由コードで閉じた場合と、server が選んだ版をエージェントが拒んだ場合)、証明書のピンの不一致、
+// 公開鍵の拒否が当たる。公開鍵の拒否は、vpsd が WebSocket の標準の符号 1008(policy violation)で
+// 閉じるもので、vpsd はこの符号を公開鍵の検証の失敗にだけ使うので、理由の文言は見ない。それ以外、
+// つまり接続の失敗、429 のような一時的な拒否、ping の期限切れ、ハートビートの期限切れ(4002)、
+// 版の宣言の形の誤り(4004)、server の内部の誤り(1011)には当てる。
+func capsWhileFresh(err error) bool {
+	if errors.Is(err, errUnauthorized) || errors.Is(err, ErrPinMismatch) || errors.Is(err, errServerProtocolVersion) {
+		return false
+	}
+	switch websocket.CloseStatus(err) {
+	case websocket.StatusCode(proto.CloseSuperseded), websocket.StatusCode(proto.CloseRevoked),
+		websocket.StatusCode(proto.CloseProtocolMismatch), websocket.StatusPolicyViolation:
+		return false
+	}
+	return true
+}
+
+// reconnectLog は、再接続の待ちに入るたびの 1 行を間引く(仕様 5.2 節、10.4 節)。vpsd のプロセスが
+// 止まっていてトンネルが新しい間は、待ちが 10 秒の上限に留まり、同じ 1 行が毎分 6 行ほど続くためで
+// ある。前の行と違う行はすぐに出し、同じ行は 1 分に 1 行までにする。間引いた行があれば、次に出す行に
+// 前の行を間引いた数を添える。streamLoop の goroutine だけが使う。
+type reconnectLog struct {
+	last       string
+	gate       *lograte.Gate
+	suppressed int
+}
+
+// print は msg を出すか間引く。
+func (l *reconnectLog) print(msg string) {
+	if msg != l.last || l.gate == nil {
+		l.last, l.gate = msg, new(lograte.Gate)
+		l.gate.Allow()
+	} else if !l.gate.Allow() {
+		l.suppressed++
+		return
+	}
+	if l.suppressed > 0 {
+		msg = fmt.Sprintf("%s; %d repeat(s) of the previous line not logged", msg, l.suppressed)
+		l.suppressed = 0
+	}
+	log.Print(msg)
+}
+
+// reset は、待ちが打ち切られた後の最初の行を、前と同じ文面でもすぐに出させる。
+func (l *reconnectLog) reset() { l.last = "" }
+
+// handshakeObservation は、トンネルの点検(checkTunnel)が読んだ最終ハンドシェイクの値と、その値を
+// 最初に観測した時刻の組である。handshake は WireGuard が返す壁時計の時刻で、observedAt は
+// time.Now が返す単調な読みを持つ。
+type handshakeObservation struct {
+	handshake  time.Time
+	observedAt time.Time
+}
+
+// fresh は、観測した最終ハンドシェイクが now の時点で新しいかどうかを返す(仕様 5.2 節)。観測が
+// 無いか、ハンドシェイクが一度も成立していなければ新しくない。
+//
+// 経過時間は 2 つの起点から測り、どちらも tunnelFreshFor 未満のときだけ新しいとする。観測した時刻
+// からの時間は単調な時計で測るので、壁時計が戻っても古い値を新しいと数え続けない(トンネルの
+// 作り直しの判定と同じ理由。仕様 7 節)。値そのものからの時間は、起動の直後に初めて読んだ古い値を
+// 新しいと数えないために見る。カーネルモードのエージェントは停止の間も wgft0 を残すので、起動の
+// 直後に読む値は何時間も前のものでありうる。壁時計が進んだ場合は新しいトンネルを古いと数えるが、
+// そのときの待ちは通常の上限に戻るだけである。
+func (o *handshakeObservation) fresh(now time.Time) bool {
+	if o == nil || o.handshake.IsZero() {
+		return false
+	}
+	return now.Sub(o.observedAt) < tunnelFreshFor && now.Sub(o.handshake) < tunnelFreshFor
+}
+
 // streamLoop は stream に繋ぎ続ける。切れたら指数バックオフ(1 秒-5 分)で繋ぎ直す(仕様 5.2 節)。
 // WireGuard の新しいハンドシェイクを観測したときは、残りの待ちを打ち切って直ちに繋ぎ直す。
+// 最終ハンドシェイクが新しい間は、繋がらなかった後の待ちの上限を 10 秒にする。
 // 認証拒否で復帰できないときだけ、誤りを返して終わる。
 func (rt *runtime) streamLoop(ctx context.Context) error {
 	backoffMin, backoffMax := rt.reconnectBackoffMin, rt.reconnectBackoffMax
@@ -40,7 +135,12 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 	if backoffMax < backoffMin {
 		backoffMax = max(defaultReconnectBackoffMax, backoffMin)
 	}
+	freshMax := rt.reconnectBackoffFreshMax
+	if freshMax <= 0 {
+		freshMax = defaultReconnectBackoffFreshMax
+	}
 	backoff := backoffMin
+	var waitLog reconnectLog
 	for {
 		started := time.Now()
 		connCtx, cancel := context.WithCancel(ctx)
@@ -74,6 +174,14 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 		if time.Since(started) > time.Minute {
 			backoff = backoffMin
 		}
+		// 繋がらなかったか、繋がっていた接続が切れた。トンネルが新しい間は、データの経路が生きている
+		// 追加の証拠があるので、待ちの上限を下げて制御の経路を探す(仕様 5.2 節)。ローカル変数
+		// そのものを下げるので、トンネルが古くなった後の待ちはこの上限から倍々に伸びて通常の上限に
+		// 戻る。server が応じたうえで、再試行では直らない食い違いを示した切断には当てない
+		if backoff > freshMax && capsWhileFresh(err) && rt.handshakeSeen.Load().fresh(time.Now()) {
+			backoff = freshMax
+		}
+		var msg string
 		switch {
 		case errors.Is(err, errUnauthorized):
 			// 一時的な失敗(5xx、接続不能)とは区別し、認証拒否だけが復帰経路に入る
@@ -86,24 +194,25 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 			// 証明書が変わった。未使用でピンの違う WGFT_JOIN があれば再登録し、なければ再接続を続ける
 			if j := rt.joinForNewPin(); j != nil {
 				if rerr := rt.recover(); rerr != nil {
-					log.Printf("stream: %v; re-registration with the provided join string failed: %v; retrying in %s", err, rerr, backoff)
+					msg = fmt.Sprintf("stream: %v; re-registration with the provided join string failed: %v; retrying in %s", err, rerr, backoff)
 					break
 				}
 				backoff = backoffMin
 				continue
 			}
-			log.Printf("stream: %v; if the server was rebuilt with teardown --purge, issue a new join string and restart with it in WGFT_JOIN; retrying in %s", err, backoff)
+			msg = fmt.Sprintf("stream: %v; if the server was rebuilt with teardown --purge, issue a new join string and restart with it in WGFT_JOIN; retrying in %s", err, backoff)
 		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseSuperseded):
-			log.Printf("stream: superseded by another connection for the same agent: double start or copied agent.json credentials; reconnecting in %s", backoff)
+			msg = fmt.Sprintf("stream: superseded by another connection for the same agent: double start or copied agent.json credentials; reconnecting in %s", backoff)
 		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseRevoked):
-			log.Printf("stream: permanent token was revoked; retrying in %s", backoff)
+			msg = fmt.Sprintf("stream: permanent token was revoked; retrying in %s", backoff)
 		case websocket.CloseStatus(err) == websocket.StatusCode(proto.CloseProtocolMismatch):
 			// 版の範囲に共通部分が無い(仕様 7a.6 節)。通常のバックオフで再接続を続ける
 			// (どちらかを上げない限り解決しないが、無闇に速く再試行しても意味が無い)
-			log.Printf("stream: %v; the agent or server needs an upgrade to share a protocol version; retrying in %s", err, backoff)
+			msg = fmt.Sprintf("stream: %v; the agent or server needs an upgrade to share a protocol version; retrying in %s", err, backoff)
 		default:
-			log.Printf("stream: disconnected: %v; reconnecting in %s", err, backoff)
+			msg = fmt.Sprintf("stream: disconnected: %v; reconnecting in %s", err, backoff)
 		}
+		waitLog.print(msg)
 		// 待ちに入る間隔と次に試す時刻を控える(設計文書 10.2c 節の観測)。待つ値は下の
 		// time.After と同じ backoff であり、この記録は待ちの長さを変えない。記録が動くのは
 		// ここだけなので、下の倍加も、上の 3 つと下の select の中の 1 つ、あわせて 4 つの
@@ -118,6 +227,7 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 			// ハンドシェイクは 2 分に 1 回程度しか新しくならないので、API だけが止まっていても
 			// この経路の再試行は 2 分に 1 回を超えない
 			log.Printf("stream: a new wireguard handshake shows the server is reachable; reconnecting now")
+			waitLog.reset()
 			backoff = backoffMin
 			continue
 		case <-time.After(backoff):
@@ -316,10 +426,10 @@ func checkServerProtocolVersion(local proto.ProtocolRange, st *proto.State) erro
 	}
 	v := *st.ServerProtocolVersion
 	if v < 1 {
-		return fmt.Errorf("server selected protocol version %d, which is not a valid numbered version; versions start at 1", v)
+		return fmt.Errorf("%w %d, which is not a valid numbered version; versions start at 1", errServerProtocolVersion, v)
 	}
 	if v < local.Min || v > local.Max {
-		return fmt.Errorf("server selected protocol version %d, outside the agent's supported range [%d,%d]", v, local.Min, local.Max)
+		return fmt.Errorf("%w %d, outside the agent's supported range [%d,%d]", errServerProtocolVersion, v, local.Min, local.Max)
 	}
 	return nil
 }
