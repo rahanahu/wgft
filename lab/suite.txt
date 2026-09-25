@@ -83,6 +83,38 @@ parallel         yes  lifecycle.sh userspace 9
 parallel         yes  lifecycle.sh userspace 10
 parallel         yes  lifecycle.sh userspace 11
 
+# agentkernel.sh runs the kernel-mode agent's checks (design section 7b) against the given server
+# mode, taking the checks to run as a space-separated list of its own. Its default list of checks
+# takes over 10 minutes end to end, past labhost's default per-job timeout, so it is split here
+# into five groups instead of the one-job-per-check granularity lifecycle.sh above uses; several of
+# these checks share tens of seconds of setup, so grouping them costs less than splitting further.
+# Within a group the checks run in the given order. teardown removes the agent's WireGuard
+# interface, table and records that the group's earlier checks depend on, so it must be a group's
+# last check; 22 leaves rules that resolve then removes, so a group must not run both (this file
+# avoids that by keeping them in different groups). reconnect and stale only apply with a
+# kernel-mode server and print SKIP with a userspace-mode one; they are still registered for both
+# modes, the same as this file already does for lifecycle.sh's mode-specific checks. Five such
+# groups, one sandbox each, ran inside the full default suite's pool of 8 (`labhost run -parallel
+# 8 all`) with 0 FAIL for every group in both server modes; the slowest group (resolve, in either
+# mode) took under 5 minutes, comfortably inside labhost's per-job timeout. See docs/testing.md
+# for L16 and for how this suite's total wall-clock time changed once these groups joined the pool.
+parallel         yes  agentkernel.sh kernel drift 22 25 16 teardown
+parallel         yes  agentkernel.sh kernel route session
+parallel         yes  agentkernel.sh kernel resolve 24 17 18 19
+parallel         yes  agentkernel.sh kernel notify pin reconnect
+parallel         yes  agentkernel.sh kernel stale
+parallel         yes  agentkernel.sh userspace drift 22 25 16 teardown
+parallel         yes  agentkernel.sh userspace route session
+parallel         yes  agentkernel.sh userspace resolve 24 17 18 19
+parallel         yes  agentkernel.sh userspace notify pin reconnect
+parallel         yes  agentkernel.sh userspace stale
+
+# agentdoctor.sh runs `wgft agent doctor` against a kernel-mode agent (design section 10.2c), with
+# the server in the given mode. One run takes about a minute, well inside labhost's per-job
+# timeout, so each mode is its own single job, the same granularity as e2e.sh and ipv6.sh above.
+parallel         yes  agentdoctor.sh kernel
+parallel         yes  agentdoctor.sh userspace
+
 exclusive-heavy  yes  rates.sh kernel
 exclusive-heavy  yes  rates.sh userspace
 # connlimit.sh opens 160 to 320 concurrent flows, but what it asserts on is a kernel-side
