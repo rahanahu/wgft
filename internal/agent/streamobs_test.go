@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -273,4 +274,19 @@ func TestStreamLoopRecordsThePingAndThePong(t *testing.T) {
 	waitStreamObs(t, rt, 5*time.Second, "a later pong", func(o streamObservation) bool {
 		return o.LastPongAt.After(prev)
 	})
+}
+
+// 証明書の不一致で終わった試みは、他の切断と分けて印を付ける。再試行では直らないので、agent doctor が
+// 他の切断と分けて示すためである(設計文書 10.2c 節)。次の切断が別の理由なら印は消える。
+func TestStreamObservationMarksAPinMismatch(t *testing.T) {
+	rt := &runtime{dp: newTestUserspace()}
+	now := time.Now()
+	rt.noteStreamDisconnected(now, fmt.Errorf("failed to WebSocket dial: %w", fmt.Errorf("%w: got sha256 0a1b2c3d", ErrPinMismatch)))
+	if obs := rt.streamStatus(); !obs.PinMismatch {
+		t.Errorf("a wrapped pin mismatch was not marked: %+v", obs)
+	}
+	rt.noteStreamDisconnected(now.Add(time.Second), errors.New("dial tcp: connection refused"))
+	if obs := rt.streamStatus(); obs.PinMismatch {
+		t.Errorf("the mark outlived a disconnect for another reason: %+v", obs)
+	}
 }

@@ -184,7 +184,9 @@ func doctorExit(rep doctorReport) error {
 	var bad []string
 	for _, r := range rep.Rules {
 		if r.Status == statusFailed {
-			bad = append(bad, short(r.RuleID)+" at "+r.StoppedAt)
+			// 終了の 1 行は、次に `server doctor <rule>` へ貼る ID を名指すので、完全な ID を
+			// 使う(設計文書 10.2 節)。
+			bad = append(bad, r.RuleID+" at "+r.StoppedAt)
 		}
 	}
 	if len(bad) == 0 {

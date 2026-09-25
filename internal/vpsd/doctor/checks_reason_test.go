@@ -1,6 +1,11 @@
 package doctor
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/rahanahu/wgft/proto"
+)
 
 // TestTargetReasonCode は、エージェントが報告する人向けの文言を、targetReasonCode がどの機械向けの
 // 符号に写すかを確かめる。文言はいずれも実装が返しうるものである。timeout の行は、
@@ -112,6 +117,24 @@ func TestTargetReasonCode(t *testing.T) {
 			want:   ReasonTargetNotAllowed,
 		},
 		{
+			// この変更より前のカーネルモードのエージェントの文言である。「this host」はエージェントの
+			// ホストを指すが、VPS で読むと VPS に読める。
+			name:   "kernel-mode agent host with ip_forward 0, older wording",
+			reason: "net.ipv4.ip_forward is 0; the kernel does not forward to a target that is not this host",
+			want:   ReasonAgentIPForwardOff,
+		},
+		{
+			name:   "kernel-mode agent host with ip_forward 0",
+			reason: "on the agent host, net.ipv4.ip_forward is 0; its kernel does not forward to a target other than the agent host itself",
+			want:   ReasonAgentIPForwardOff,
+		},
+		{
+			// 書けなかった場合の文言は下層の誤りを包む。包んだ誤りの語に引きずられない。
+			name:   "kernel-mode agent host that could not set ip_forward",
+			reason: "on the agent host, net.ipv4.ip_forward is not 1 and cannot be set: open /proc/sys/net/ipv4/ip_forward: read-only file system; its kernel does not forward to a target other than the agent host itself",
+			want:   ReasonAgentIPForwardOff,
+		},
+		{
 			name:   "unrecognized text falls back to target_error",
 			reason: "dial tcp 192.168.50.50:2456: some future wrapped error nobody has seen yet",
 			want:   ReasonTargetError,
@@ -124,4 +147,24 @@ func TestTargetReasonCode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// エージェントのホストの ip_forward が 0 のルールは、所見と次の一手がエージェントのホストを名指し、
+// 宛先のサービスを疑わせない。VPS で読むと「this host」は VPS に読めるためである。
+func TestAgentIPForwardOffNamesTheAgentHost(t *testing.T) {
+	r := testRuleForReason()
+	next := agentRuleNextStep("net.ipv4.ip_forward is 0; the kernel does not forward to a target that is not this host", r)
+	for _, want := range []string{`agent "home"`, "not on this VPS", "sysctl -w net.ipv4.ip_forward=1", "wgft agent doctor"} {
+		if !strings.Contains(next, want) {
+			t.Errorf("next step lacks %q: %s", want, next)
+		}
+	}
+	if strings.Contains(next, "Check that a service is listening") {
+		t.Errorf("next step blames the service: %s", next)
+	}
+}
+
+func testRuleForReason() proto.Rule {
+	return proto.Rule{ID: "r_01M2R009AAAAAAAAAAAAAAAAA", Agent: "home", Proto: proto.TCP,
+		ListenPort: proto.PortRange{Lo: 4000, Hi: 4000}, Target: "192.168.50.2:4000", VPSMode: proto.ModeKernel, Enabled: true}
 }

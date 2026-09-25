@@ -352,6 +352,33 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			},
 		},
 		{
+			// 証明書の不一致は、待って試し直しても直らない。再試行を待つよう案内する他の切断と
+			// 分けて FAILED とし、エージェントのログと同じく新しい招待で登録し直すことを示す。
+			// 総合判定は動かさない。受け取り済みのルールの転送は、トンネルが保つ限り続く(10.2c 節)。
+			name: "the server certificate no longer matches the pin",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {}, func(s *agent.DoctorStream) {
+				s.Connected = false
+				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
+				s.DisconnectReason = "server certificate does not match the pinned hash: got sha256 0a1b2c3d"
+				s.PinMismatch = true
+			}))),
+			want:       []wantCheck{{agentCheckStreamConn, statusFailed, agentReasonServerCertMismatch}},
+			wantExit:   0,
+			wantDetail: map[string]string{agentCheckStreamConn: "retrying will not bring it up"},
+			wantNext:   map[string]string{agentCheckStreamConn: "wgft agent join-string --name <agent>"},
+		},
+		{
+			// 旧い版のエージェントは pin_mismatch を送らない。記録した理由の文言でも見分ける。
+			name: "an older agent reports the pin mismatch in its reason only",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {}, func(s *agent.DoctorStream) {
+				s.Connected = false
+				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
+				s.DisconnectReason = "failed to WebSocket dial: failed to send handshake request: Get \"https://vps.example.net:8443/api/v1/stream\": server certificate does not match the pinned hash: got sha256 0a1b2c3d"
+			}))),
+			want:     []wantCheck{{agentCheckStreamConn, statusFailed, agentReasonServerCertMismatch}},
+			wantExit: 0,
+		},
+		{
 			// 宛先の許可一覧を持たない稼働中のエージェントは、そのことを事実として示す。
 			name: "the running agent enforces no allowlist",
 			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {}, func(s *agent.DoctorStream) {}, func(a *agent.DoctorAllowTargets) {

@@ -67,6 +67,31 @@ type UDPReplyBackend interface {
 	UDPReplies(rules []proto.Rule) (replies map[string]UDPReply, ok bool)
 }
 
+// IPForwardStatus is net.ipv4.ip_forward as the server read it (design.md 6.1、10.2a 節). 宣言は
+// internal/vpsd/adminapi にある。
+type IPForwardStatus = adminapi.IPForwardStatus
+
+// IPForwardBackend is implemented by a Backend that forwards through the kernel and so depends on
+// net.ipv4.ip_forward (design.md 6.1、10.2a 節). It is optional like UDPReplyBackend: a Backend without
+// it, and a userspace-mode server, serve the rules without ip_forward.
+type IPForwardBackend interface {
+	// IPForward reads the sysctl now. ok is false when this server does not forward through the
+	// kernel, so the value would say nothing about its rules.
+	IPForward() (status IPForwardStatus, ok bool)
+}
+
+// withIPForward adds ip_forward to a rules response, when the Backend reports it (design.md 10.2a、
+// 7a.11 節; additive to API v1).
+func (s *Server) withIPForward(resp *BatchResponse) {
+	b, ok := s.backend.(IPForwardBackend)
+	if !ok {
+		return
+	}
+	if st, ok := b.IPForward(); ok {
+		resp.IPForward = &st
+	}
+}
+
 // withUDPReplies adds udp_replies to a rules response, when the Backend observes them (design.md
 // 10.2a、7a.11 節; additive to API v1).
 func (s *Server) withUDPReplies(resp *BatchResponse) {

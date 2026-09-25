@@ -1102,3 +1102,25 @@ func TestStatusRunEJSONEncodeFailureExitsUnavailable(t *testing.T) {
 		t.Errorf("exit code = %d, want %d (not 1: the report itself could not be delivered)", code, exitUnavailable)
 	}
 }
+
+// エージェントが報告したルールの失敗は、そのエージェントのホストについて述べるので、Rules 行の
+// 要約はどのエージェントの報告かを名指す。カーネルモードのエージェントのホストで ip_forward が 0 の
+// 場合に、VPS のこととして読まれないためである。
+func TestStatusNamesTheAgentOfAnAgentReportedError(t *testing.T) {
+	in := healthyStatusInput()
+	var r proto.Rule
+	for _, x := range in.Rules.Rules {
+		if x.Enabled {
+			r = x
+			break
+		}
+	}
+	in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{
+		Agent: r.Agent, State: proto.StatusError, Connected: true, At: at(5 * time.Second),
+		Reason: "on the agent host, net.ipv4.ip_forward is 0; its kernel does not forward to a target other than the agent host itself",
+	}
+	rep := buildStatusReport(in)
+	if want := short(r.ID) + " agent " + r.Agent + ": on the agent host"; !strings.Contains(rep.Rules.Detail, want) {
+		t.Errorf("Rules detail %q lacks %q", rep.Rules.Detail, want)
+	}
+}

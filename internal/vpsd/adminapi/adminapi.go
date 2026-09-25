@@ -104,6 +104,20 @@ type BatchResponse struct {
 	// 応答の観測」、7a.11 節). v1 への加算で、報告を持たない Backend では省く(admin の
 	// withUDPReplies)。キーは、server が今公開している有効な UDP のルールの ID だけである。
 	UDPReplies map[string]UDPReply `json:"udp_replies,omitempty"`
+	// IPForward is net.ipv4.ip_forward on this VPS, read when the response is built (design.md 6.1、
+	// 10.2a 節、7a.11 節). v1 への加算で、カーネルモードの server だけが載せる。ユーザー空間モードの
+	// server と報告を持たない Backend では省く。
+	IPForward *IPForwardStatus `json:"ip_forward,omitempty"`
+}
+
+// IPForwardStatus is net.ipv4.ip_forward as the server read it just now (design.md 6.1、10.2a 節).
+// The server writes 1 at its start only; a later 0 from outside stops every rule the kernel
+// forwards until it is 1 again, and this is how the diagnosis sees it.
+type IPForwardStatus struct {
+	// Value is the sysctl's text, "1" or "0". Omitted when it could not be read.
+	Value string `json:"value,omitempty"`
+	// Error says why it could not be read. Omitted when Value is set.
+	Error string `json:"error,omitempty"`
 }
 
 // Apply states of a rule on the server (RuleApply.ApplyState).

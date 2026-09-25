@@ -99,6 +99,10 @@ const (
 	agentReasonCredentialsMissing = "credentials_missing"
 	// agentReasonCredentialsUnreadable は、認証情報ファイルがあるのに権限で読めない場合である。
 	agentReasonCredentialsUnreadable = "credentials_unreadable"
+	// agentReasonDataDirUnreadable は、データディレクトリを権限で開けず、認証情報ファイルがあるか
+	// どうかを判定できない場合である。ファイルがあって読めない credentials_unreadable とは別の事実で
+	// ある(10.2c 節)。
+	agentReasonDataDirUnreadable = "data_dir_unreadable"
 	// agentReasonCredentialsMalformed は、認証情報ファイルを JSON として読めない場合である。
 	agentReasonCredentialsMalformed = "credentials_malformed"
 	// agentReasonNotRegistered は、認証情報ファイルはあるが登録が済んでいない場合である。
@@ -166,6 +170,9 @@ type agentDoctorReport struct {
 	Checks    []agentDoctorCheck
 	History   string
 	NotTested []notTested
+	// defaultDirNote は、既定のデータディレクトリを見た実行で、未登録か停止を断定したときに、
+	// 終了の 1 行へ添える句である。人向けの文であり、--json には出さない。
+	defaultDirNote string
 }
 
 // accessResult は、ある権限を持つかどうかの判定である。副作用なしには判定できない場合を、成功
@@ -206,6 +213,11 @@ type agentDoctorInput struct {
 	// 偽である。真の実行では、読めなかったファイルが別のディレクトリを指している場合があり、
 	// 報告が別の場所について述べていることになる。
 	DataDirAssumed bool
+	// DataDirDefault は、データディレクトリがフラグ、環境変数、設定ファイルのどれからも与えられず、
+	// 既定値から取ったことである。エージェントを --data-dir か WGFT_DATA_DIR で別のディレクトリで
+	// 動かしている配置では、この実行はエージェントの居ない場所について答える。未登録や停止を断定する
+	// 所見には、同じ --data-dir で打ち直すことを先に案内する(10.2c 節)。
+	DataDirDefault bool
 
 	// Inspect はロックファイルの状態を読む。既定は flock.Inspect で、ロックファイルを作らない。
 	Inspect func(statePath string) (flock.State, error)
@@ -357,6 +369,7 @@ func agentDoctorInputFrom(cmd *cobra.Command) (agentDoctorInput, error) {
 		ConfigPath:       configPath,
 		ConfigUnreadable: cfgErr,
 		DataDirAssumed:   cfgErr != nil && c.source("WGFT_DATA_DIR") == "default",
+		DataDirDefault:   c.source("WGFT_DATA_DIR") == "default",
 		WGInterface:      c.str("WGFT_WG_INTERFACE"),
 	}, nil
 }
@@ -394,11 +407,15 @@ func agentDoctorExit(rep agentDoctorReport) error {
 			failed = append(failed, c.Label)
 		}
 	}
+	note := ""
+	if rep.defaultDirNote != "" {
+		note = "; " + rep.defaultDirNote
+	}
 	switch agentDoctorVerdict(rep) {
 	case statusUnknown:
-		return unavailable(fmt.Errorf("the diagnosis is incomplete: %s could not be read with this command's permissions; %s", strings.Join(unreachable, ", "), agentIncompleteNext(rep)))
+		return unavailable(fmt.Errorf("the diagnosis is incomplete: %s could not be read with this command's permissions%s; %s", strings.Join(unreachable, ", "), note, agentIncompleteNext(rep)))
 	case statusFailed:
-		return fmt.Errorf("this host's agent cannot forward traffic as it stands: %s", strings.Join(failed, ", "))
+		return fmt.Errorf("this host's agent cannot forward traffic as it stands: %s%s", strings.Join(failed, ", "), note)
 	}
 	return nil
 }
@@ -411,7 +428,7 @@ func agentDiagnose(in agentDoctorInput) agentDoctorReport {
 	run := inspectAgentProcess(in)
 	live := readAgentLive(in, run)
 	mode := agentModeOf(cred, live)
-	privileges := agentPrivilegesCheck(in)
+	privileges := agentPrivilegesCheck(in, agentDataDirInDoubt(in, cred))
 	agentPrivilegesWithAgent(&privileges, live, mode)
 	checks := []agentDoctorCheck{
 		agentPlatformCheck(in),
@@ -419,7 +436,7 @@ func agentDiagnose(in agentDoctorInput) agentDoctorReport {
 		agentInterfacesCheck(in),
 		agentEndpointResolveCheck(in, cred),
 		agentCredentialsCheck(in, cred),
-		agentProcessCheck(in, run, mode),
+		agentProcessCheck(in, run, mode, agentDataDirInDoubt(in, cred)),
 		agentLastStateCheck(in, cred),
 		agentWGResolveCheck(in, cred),
 	}
@@ -429,9 +446,10 @@ func agentDiagnose(in agentDoctorInput) agentDoctorReport {
 		return agentCheckIndex(checks[i].ID) < agentCheckIndex(checks[j].ID)
 	})
 	return agentDoctorReport{
-		CheckedAt: in.Now,
-		DataDir:   absDataDir(in.DataDir),
-		Checks:    checks,
+		CheckedAt:      in.Now,
+		DataDir:        absDataDir(in.DataDir),
+		Checks:         checks,
+		defaultDirNote: agentDefaultDirExitNote(in, cred),
 		History: "this command only evaluates the current state. To find when this agent stopped working, read its log on this host " +
 			"with journalctl -u wgft-agent, or docker logs for a container, and the server log on the VPS.",
 		NotTested: agentNotTested(mode),
@@ -469,6 +487,11 @@ const (
 	credMissing
 	credUnreadable
 	credMalformed
+	// credDirUnreadable は、データディレクトリを権限で開けず、ファイルがあるかどうかを判定できない
+	// 状態である。os.ReadFile の EACCES は、ファイルがあって読めない場合と、途中のディレクトリを
+	// 辿れない場合の両方で返る。後者を「ファイルはあるが読めない」と言うと、無いファイルについて
+	// 事実でないことを述べる。
+	credDirUnreadable
 )
 
 // agentCredentialsFile は認証情報ファイルの読み取りの結果である。
@@ -509,6 +532,11 @@ func readAgentCredentials(path string) agentCredentialsFile {
 			out.State = credMissing
 		case errors.Is(err, fs.ErrPermission):
 			out.State = credUnreadable
+			// ファイル自身の stat は、途中のディレクトリを辿れれば読み取りの権限が無くても通る。
+			// 通らなければ、拒んでいるのはディレクトリであり、ファイルの有無は分からない。
+			if _, serr := os.Stat(path); serr != nil && errors.Is(serr, fs.ErrPermission) {
+				out.State, out.Err = credDirUnreadable, serr
+			}
 		default:
 			out.State = credMalformed
 		}
@@ -586,12 +614,14 @@ func agentPlatformCheck(in agentDoctorInput) agentDoctorCheck {
 //
 // root で実行した場合は、拒まれた対象が無ければ UNKNOWN とする。root はパーミッションを迂回する
 // ので、この実行ではエージェント自身の利用者が届くかどうかを答えられない(10.2c 節)。
-func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
+func agentPrivilegesCheck(in agentDoctorInput, dirInDoubt bool) agentDoctorCheck {
 	c := agentDoctorCheck{ID: agentCheckPrivileges, Group: agentGroupHost, Label: "privileges"}
 	var have []string
 	var denied []string
 	var undetermined []string
 
+	// dataDirDenied は、拒まれた対象にデータディレクトリかその親が含まれることである。
+	dataDirDenied := false
 	dirExists := false
 	if fi, err := os.Stat(in.DataDir); err == nil && fi.IsDir() {
 		dirExists = true
@@ -602,6 +632,7 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 			have = append(have, "the data directory is readable")
 		case accessDenied:
 			denied = append(denied, "the data directory "+in.DataDir+" cannot be read")
+			dataDirDenied = true
 		default:
 			undetermined = append(undetermined, "whether the data directory can be read: "+errText(err))
 		}
@@ -617,6 +648,7 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 		have = append(have, "new files can be created in "+createLabel)
 	case accessDenied:
 		denied = append(denied, "no new file can be created in "+createLabel)
+		dataDirDenied = true
 	default:
 		// Windows では unix.Access に当たる呼び出しが無く、ACL を読んで判定を自前で組むほかに
 		// 手段が無い。7a.11 節が Windows のエージェントを暫定としているので、その判定は組まない。
@@ -660,6 +692,12 @@ func agentPrivilegesCheck(in agentDoctorInput) agentDoctorCheck {
 		// ならず、層 2 として 2 になる。状態の語と終了コードは別のものとして扱う(10.2c 節)。
 		c.Status, c.Reason, c.evidenceUnreachable = statusFailed, agentReasonPermissionDenied, true
 		c.Next = agentSamePrincipalNext
+		if dataDirDenied && dirInDoubt {
+			// データディレクトリが拒むのは、利用者の取り違えのほかに、ディレクトリの取り違えでも
+			// 起きる。既定値を見て登録済みのファイルが見つからなかった実行では、エージェントが
+			// --data-dir で別の場所に居る配置がありうるので、先にそれを案内する(10.2c 節)。
+			c.Next = agentDataDirFirst(in) + upperFirst(agentSamePrincipalNext)
+		}
 		switch {
 		case configDenied && sawConfigFile:
 			// エージェントを動かす利用者で実行し直しても読めない配置がある。その場合に残る
@@ -729,6 +767,47 @@ func agentIncompleteNext(rep agentDoctorReport) string {
 // 答え、前提の崩れそのものを検出できなくなる(10.2c 節)。
 const agentSamePrincipalNext = "run this command as the user the agent runs as; it answers for that user's permissions, so another user's answer does not describe the agent"
 
+// agentJoinNext は、まだ登録していないホストの次の手である。
+const agentJoinNext = "issue a join string on the VPS with wgft agent join-string --name <agent>, then start the agent with WGFT_JOIN set to it"
+
+// agentDataDirFirst は、未登録、停止、権限の不足を断定する所見の前に置く句である。この実行が見た
+// データディレクトリを名指し、エージェントが別のディレクトリで動いているなら同じ --data-dir で
+// 打ち直すよう先に案内する。既定値を見た実行では、利用者がディレクトリを選んでいないので、
+// 取り違えが最もありうる原因になる。
+func agentDataDirFirst(in agentDoctorInput) string {
+	if in.DataDirDefault {
+		return "This run looked at the default data directory " + in.DataDir + ". If the agent runs with --data-dir or WGFT_DATA_DIR, " +
+			"run this command again with the same --data-dir first. "
+	}
+	return "This run looked at " + in.DataDir + ". If the agent runs with another data directory, run this command with that --data-dir first. "
+}
+
+// agentDataDirInDoubt は、既定のデータディレクトリを見た実行で、そこに登録済みの認証情報ファイルが
+// 見つからなかったことである。エージェントが別のディレクトリで動いている配置を最も疑う場合であり、
+// 未登録と停止の所見と終了の 1 行が、同じ --data-dir で打ち直すことを先に案内する。登録済みの
+// ファイルがあれば、そのディレクトリがエージェントのものなので疑わない。
+func agentDataDirInDoubt(in agentDoctorInput, cred agentCredentialsFile) bool {
+	if !in.DataDirDefault {
+		return false
+	}
+	switch cred.State {
+	case credMissing, credDirUnreadable:
+		return true
+	case credOK:
+		return !cred.Registered()
+	}
+	return false
+}
+
+// agentDefaultDirExitNote は、agentDataDirInDoubt の実行で、終了の 1 行へ添える句である。それ以外の
+// 実行では空である。
+func agentDefaultDirExitNote(in agentDoctorInput, cred agentCredentialsFile) string {
+	if !agentDataDirInDoubt(in, cred) {
+		return ""
+	}
+	return "this run looked at the default data directory " + in.DataDir + "; if the agent runs with --data-dir or WGFT_DATA_DIR, run it again with the same --data-dir"
+}
+
 // agentInterfacesCheck はこのホストのインタフェースとアドレスを示す。
 func agentInterfacesCheck(in agentDoctorInput) agentDoctorCheck {
 	c := agentDoctorCheck{ID: agentCheckInterfaces, Group: agentGroupHost, Label: "interfaces"}
@@ -783,13 +862,25 @@ func agentCredentialsCheck(in agentDoctorInput, cred agentCredentialsFile) agent
 	switch cred.State {
 	case credMissing:
 		c.Status, c.Reason = statusFailed, agentReasonCredentialsMissing
-		c.Detail = "there is no credentials file at " + in.CredentialsPath + ", so this host has never registered as an agent"
-		// 登録したことがないという断定は、見たディレクトリについてのものである。設定ファイルを
-		// 読めずに既定値を使った実行では、登録済みのホストについて偽になりうる。
+		// 登録したことがないという断定は、見たディレクトリについてのものである。このホストの
+		// エージェントが別のデータディレクトリで動いていれば、ホストについては偽になる。所見は
+		// ディレクトリについてだけ述べる。
+		c.Detail = "there is no credentials file at " + in.CredentialsPath + ", so no agent has registered from this data directory"
 		if note := agentAssumedDataDirNote(in); note != "" {
 			c.Detail += "; " + note
 		}
-		c.Next = "issue a join string on the VPS with wgft agent join-string --name <agent>, then start the agent with WGFT_JOIN set to it"
+		// 新しい招待を先に案内すると、別のディレクトリで動いているエージェントと同じ名前の登録に
+		// 当たって拒まれ、その先の revoke は動いているエージェントを切る。データディレクトリの
+		// 取り違えを先に疑う(10.2c 節)。
+		c.Next = agentDataDirFirst(in) + "If no agent has registered on this host yet, " + agentJoinNext
+		return c
+	case credDirUnreadable:
+		// ファイルがあるかどうかを判定できない。呼び出し元の権限が届かなかった実行であり、
+		// credentials_unreadable と同じく層 2 に入る(10.2c 節)。
+		c.Status, c.Reason, c.evidenceUnreachable = statusUnknown, agentReasonDataDirUnreadable, true
+		c.Detail = "whether a credentials file exists at " + in.CredentialsPath + " could not be determined: the data directory " +
+			in.DataDir + " cannot be searched here: " + errText(cred.Err)
+		c.Next = agentDataDirFirst(in) + upperFirst(agentSamePrincipalNext)
 		return c
 	case credUnreadable:
 		// 状態は UNKNOWN にする。証拠であるファイルはあるが、読めないので判定に足りない。
@@ -811,8 +902,8 @@ func agentCredentialsCheck(in agentDoctorInput, cred agentCredentialsFile) agent
 	f := cred.Creds
 	if f.PermanentToken == "" {
 		c.Status, c.Reason = statusFailed, agentReasonNotRegistered
-		c.Detail = "the credentials file holds no permanent token, so this host has not registered with a server yet"
-		c.Next = "issue a join string on the VPS with wgft agent join-string --name <agent>, then start the agent with WGFT_JOIN set to it"
+		c.Detail = "the credentials file holds no permanent token, so no agent has registered from this data directory yet"
+		c.Next = agentDataDirFirst(in) + "If no agent has registered on this host yet, " + agentJoinNext
 		return c
 	}
 	c.Status = statusOK
@@ -856,7 +947,7 @@ func credentialsModeNote(cred agentCredentialsFile) string {
 //
 // カーネルモードでは、停止中もカーネルに残した設定で転送が続きうるので、この FAILED だけで総合判定を
 // 決めない。転送の実体は Dataplane の群の検査が答える(10.2c 節の「カーネルモードの総合判定」)。
-func agentProcessCheck(in agentDoctorInput, run agentRunState, mode string) agentDoctorCheck {
+func agentProcessCheck(in agentDoctorInput, run agentRunState, mode string, dirInDoubt bool) agentDoctorCheck {
 	kernel := mode == credentials.ModeKernel
 	c := agentDoctorCheck{ID: agentCheckProcess, Group: agentGroupCredentials, Label: "process", verdict: !kernel}
 	if run.Err != nil {
@@ -866,6 +957,9 @@ func agentProcessCheck(in agentDoctorInput, run agentRunState, mode string) agen
 		c.evidenceUnreachable = run.PermissionDenied
 		c.Detail = "whether an agent is running here could not be determined: " + errText(run.Err)
 		c.Next = agentSamePrincipalNext
+		if run.PermissionDenied && dirInDoubt {
+			c.Next = agentDataDirFirst(in) + upperFirst(agentSamePrincipalNext)
+		}
 		if !run.PermissionDenied {
 			c.Next = "read the lock file next to the credentials file, " + flock.LockPath(in.CredentialsPath) + ", and why it cannot be opened"
 		}
@@ -897,6 +991,12 @@ func agentProcessCheck(in agentDoctorInput, run agentRunState, mode string) agen
 	}
 	c.Next = "start it and read why it stopped: systemctl status wgft-agent and journalctl -u wgft-agent, or docker ps and docker logs for a container. " +
 		"This answers for " + in.DataDir + " alone; an agent running with another WGFT_DATA_DIR is not visible here"
+	if dirInDoubt {
+		// 既定値を見て登録済みのファイルが無かった実行では、ディレクトリの取り違えを先に疑う。起動を先に案内すると、別の
+		// ディレクトリで動いているエージェントの横に 2 つ目を起動させることになる。
+		c.Next = agentDataDirFirst(in) + "Otherwise start it and read why it stopped: systemctl status wgft-agent and journalctl -u wgft-agent, " +
+			"or docker ps and docker logs for a container"
+	}
 	return c
 }
 
@@ -1044,6 +1144,9 @@ func agentSkipForCredentials(cred agentCredentialsFile, what string) (agentDocto
 	case cred.State == credUnreadable:
 		c.Reason = agentReasonCredentialsUnreadable
 		c.Detail = "not tested: the credentials file cannot be read here, so " + what + " could not be taken from it"
+	case cred.State == credDirUnreadable:
+		c.Reason = agentReasonDataDirUnreadable
+		c.Detail = "not tested: the data directory cannot be searched here, so " + what + " could not be read from a credentials file"
 	case cred.State == credMalformed:
 		c.Reason = agentReasonCredentialsMalformed
 		c.Detail = "not tested: the credentials file cannot be read as JSON, so " + what + " could not be taken from it"

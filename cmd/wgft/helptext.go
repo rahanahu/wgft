@@ -42,9 +42,10 @@ unknown means there is no evidence either way, such as an older server that
 predates a field this command reads, and it is never counted as healthy or as
 degraded. Server is healthy when the server's forwarding has caught up with
 the current rules and the last change applied without error, degraded when it
-has fallen behind, the last change failed, or a repair after a published
-change failed, and unknown when a generation field is missing and there is no
-apply_error to fall back on.
+has fallen behind, the last change failed, a repair after a published
+change failed, or net.ipv4.ip_forward on a kernel-mode server is 0 while it
+publishes rules the kernel forwards, and unknown when a generation field is
+missing and there is no apply_error to fall back on.
 
 Agents counts registered agents as healthy, degraded or unknown; a healthy
 agent needs both its control connection and its WireGuard tunnel to be
@@ -330,6 +331,14 @@ a target. The two exceptions to reading alone are name resolution: it resolves
 the agent API endpoint and the WireGuard peer, neither of which opens a
 connection to a service.
 
+It answers for one data directory only. If the agent runs with --data-dir or
+WGFT_DATA_DIR, give this command the same value; otherwise it reads the
+default directory, which then is not the agent's. A run on the default
+directory that finds no registered credentials file names the directory it
+read and suggests the agent's --data-dir before a new join string, since a new
+registration under a running agent's name is refused and revoking that name
+cuts the running agent off.
+
 Its own settings come from where "agent run" takes them: the flags, the
 environment and the dotenv file named by --config. A dotenv file that is there
 but cannot be read here is reported as a finding, and the report is built from
@@ -526,7 +535,10 @@ be accepted, which is not the same as finding it acceptable.`,
 	},
 	"rule ls": {
 		Long: `List rules, grouped by --group. ID is shortened; every rule command accepts such
-a prefix as long as it is unambiguous. TARGET shows the effective target range.
+a prefix as long as it is unambiguous, with or without a trailing "…" or
+"...", and lists the matching IDs when it is not. A prefix that ends in either
+mark needs at least the 12 characters shown here, and an ID that matches the
+input exactly, mark included, is taken first. TARGET shows the effective target range.
 MODE is proxy for rules added with --proxy and kernel for all others; in
 userspace mode "kernel" rules are relayed by the wgft process, not the kernel.
 DENY and ALLOW are the number of CIDRs, RATES the configured limits, DROPPED
@@ -733,7 +745,9 @@ to UNKNOWN once its evidence is older than that item allows: 90s for a
 heartbeat and for the agent's own report of a rule, 3m for a WireGuard
 handshake. The public port therefore reads NOT TESTED even when the server
 serves it: DNAT applies to input from outside, so the server cannot reach its
-own public port from itself. Test that from another host. A UDP rule's target
+own public port from itself. Test that from another host: nc -vz for a TCP
+port, and the real client for a UDP port, since a bare UDP send such as nc -u
+cannot show whether the datagram arrived. A UDP rule's target
 reads at best NOT TESTED, never OK: the agent can report only that its listener
 is open, and a UDP send cannot tell whether the target received it or answered.
 Its target line also shows the last reply this server saw from the target;

@@ -94,6 +94,9 @@ const (
 	agentReasonNoThreshold = "no_threshold"
 	// agentReasonReconnecting は、制御ストリームが切れて繋ぎ直している場合である(10.2c 節)。
 	agentReasonReconnecting = "reconnecting"
+	// agentReasonServerCertMismatch は、制御ストリームの直近の試みが、server の証明書と登録のときに
+	// 固定したハッシュとの不一致で終わった場合である。再試行では直らない(10.2c 節)。
+	agentReasonServerCertMismatch = "server_cert_mismatch"
 	// agentReasonHandshakePending は、トンネルはあるがハンドシェイクがまだ成立していない場合で
 	// ある(10.2c 節)。
 	agentReasonHandshakePending = "handshake_pending"
@@ -423,6 +426,21 @@ func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.Doc
 		c.Detail = "the control stream to the server is up"
 		return
 	}
+	if agentPinMismatch(s) {
+		// 証明書の不一致は、エージェントが待って試し直しても直らない。server が作り直されたか、経路の
+		// 途中で TLS を終端するものがある。再試行を待つよう案内する他の切断と分け、FAILED として
+		// エージェントのログと同じ手当てを示す。総合判定は動かさない。受け取り済みのルールの転送は
+		// トンネルが保つ限り続き、転送を担えるかどうかは tunnel と listeners か Dataplane の検査が
+		// 答える(10.2c 節)。
+		c.Status, c.Reason = statusFailed, agentReasonServerCertMismatch
+		c.Detail = "the control stream to the server is not up, and retrying will not bring it up: the server's certificate does not match " +
+			"the one this agent pinned when it registered; the last attempt ended " + agentWhen(in.Now, s.DisconnectedAt) + ": " +
+			reasonOr(s.DisconnectReason, "no reason was recorded")
+		c.Next = "if the server was rebuilt, for example with wgft server teardown --purge, issue a new join string on the VPS with " +
+			"wgft agent join-string --name <agent> and restart the agent with WGFT_JOIN set to it; the agent then registers again with the new server. " +
+			"If the server was not rebuilt, something on the path answers TLS in its place; find it before registering again"
+		return
+	}
 	c.Status, c.Reason = statusUnknown, agentReasonReconnecting
 	// 示す理由には、接続が切れた理由だけでなく、接続に至らなかった試みの失敗も入る(10.2c 節)。
 	switch {
@@ -434,6 +452,13 @@ func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.Doc
 	}
 	c.Next = "the agent retries by itself, so this alone is not a fault. Rules it already holds keep being forwarded while the stream is down. " +
 		"If it stays down, read the reason above and the server's log on the VPS"
+}
+
+// agentPinMismatch は、制御ストリームの直近の試みが証明書の不一致で終わったかどうかである。旧い版の
+// エージェントは pin_mismatch を送らないので、そのエージェントが記録した理由の文言でも見る。文言は
+// internal/agent の ErrPinMismatch である。
+func agentPinMismatch(s *agent.DoctorStream) bool {
+	return s.PinMismatch || strings.Contains(s.DisconnectReason, agent.ErrPinMismatch.Error())
 }
 
 // agentStreamBackoffCheck は、直近に待った再接続の間隔と、待っている場合の次に試す時刻を示す。

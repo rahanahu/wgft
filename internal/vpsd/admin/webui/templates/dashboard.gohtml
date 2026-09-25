@@ -30,7 +30,7 @@
           <div class="sv"><span class="sv-k">{{ T .Locale "svWG" }}</span><span class="sv-v mono">{{ .Server.WG }}</span></div>
           <div class="sv"><span class="sv-k">{{ T .Locale "svAgentAPI" }}</span><span class="sv-v mono">{{ .Server.AgentAPI }}</span></div>
           <div class="sv"><span class="sv-k">{{ T .Locale "svMTU" }}</span><span class="sv-v mono">{{ .Server.MTU }}</span></div>
-          <div class="sv"><span class="sv-k">{{ T .Locale "svIPForward" }}</span><span class="sv-v">{{ .Server.IPForward }}</span></div>
+          <div class="sv"><span class="sv-k">{{ T .Locale "svIPForward" }}</span><span class="sv-v{{ if .Server.IPForwardBad }} danger-text{{ end }}">{{ .Server.IPForward }}</span></div>
           <div class="sv"><span class="sv-k">{{ T .Locale "svConntrack" }}</span><span class="sv-v mono">{{ .Server.Conntrack }}</span></div>
           <div class="sv"><span class="sv-k">{{ T .Locale "svKernel" }}</span><span class="sv-v mono">{{ .Server.Kernel }}</span></div>
           <div class="sv"><span class="sv-k">{{ T .Locale "svNFT" }}</span><span class="sv-v mono">{{ .Server.NFT }}</span></div>

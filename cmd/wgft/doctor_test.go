@@ -1692,3 +1692,25 @@ func TestAgentLineIgnoresADisabledRuleListedFirst(t *testing.T) {
 		t.Errorf("the Agents section speaks of the disabled rule instead of the agent:\n%s", agents)
 	}
 }
+
+// カーネルモードのエージェントのホストで ip_forward が 0 のルールは、専用の理由の符号に分け、所見で
+// どのエージェントのホストの値かを名指す。旧い版のエージェントの文言は「this host」と書き、VPS で
+// 読むと VPS の値に読めるためである。
+func TestTargetAgentIPForwardOff(t *testing.T) {
+	r := tcpRule()
+	in := healthyInput(r)
+	in.Rules.AgentRuleStates[r.ID] = admin.AgentRuleStatus{
+		Agent: "home", State: proto.StatusError, Connected: true, At: at(10 * time.Second),
+		Reason: "net.ipv4.ip_forward is 0; the kernel does not forward to a target that is not this host",
+	}
+	c := checkOf(t, diagnose(r, in), checkTarget)
+	if c.Status != statusFailed || c.Reason != doctor.ReasonAgentIPForwardOff {
+		t.Fatalf("target = %s/%s, want failed/%s", c.Status, c.Reason, doctor.ReasonAgentIPForwardOff)
+	}
+	if !strings.HasPrefix(c.Detail, `agent "home" reports that its own host does not forward this rule`) {
+		t.Errorf("detail does not name the agent's host: %q", c.Detail)
+	}
+	if !strings.Contains(c.Next, "not on this VPS") {
+		t.Errorf("next step does not point away from the VPS: %q", c.Next)
+	}
+}

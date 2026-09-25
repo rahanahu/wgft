@@ -123,6 +123,14 @@ const (
 	// ReasonTargetLoopbackUnsupported は、カーネルモードのエージェントがループバックか未指定のアドレスの
 	// 宛先を公開しないことである(設計文書 7b.2・7b.3 節)。宛先をホストの LAN のアドレスに直せば通る。
 	ReasonTargetLoopbackUnsupported = "target_loopback_unsupported"
+	// ReasonAgentIPForwardOff は、ルールの持ち主のエージェントが、自分のホストの net.ipv4.ip_forward が
+	// 1 でないためにそのルールを転送できないと報告したことである(設計文書 7b.1・10.2a 節)。直す場所は
+	// VPS ではなくエージェントのホストである。
+	ReasonAgentIPForwardOff = "agent_ip_forward_off"
+	// ReasonIPForwardOff は、この VPS の net.ipv4.ip_forward が 1 でないことである(設計文書 6.1・
+	// 10.2a 節)。server は起動時にだけ 1 にするので、稼働中に外から 0 にされると、カーネルで
+	// 転送するルールは 1 に戻るまで止まる。
+	ReasonIPForwardOff = "ip_forward_off"
 )
 
 // 検査のまとまり。人向けの出力の見出しになる。保証の対象ではない。
@@ -317,6 +325,29 @@ func BuildReport(rules []proto.Rule, in Input) Report {
 	return rep
 }
 
+// outsideHow は、試していない範囲の「外からの到達」に添える確かめ方である。TCP は nc -vz が
+// 答えるが、UDP の送信は成否を知らせないので、UDP のポートには実際のクライアントを案内する
+// (設計文書 10.2a 節)。両方が混じる実行では両方を示す。
+func outsideHow(rules []proto.Rule) string {
+	tcp, udp := false, false
+	for _, r := range rules {
+		if r.Proto == proto.UDP {
+			udp = true
+		} else {
+			tcp = true
+		}
+	}
+	const tcpHow = "Test a TCP port from another host: nc -vz <vps> <port>."
+	const udpHow = "Test a UDP port from another host with the real client; a bare UDP send such as nc -u cannot show whether the datagram arrived."
+	switch {
+	case udp && tcp:
+		return tcpHow + " " + udpHow
+	case udp:
+		return udpHow
+	}
+	return tcpHow
+}
+
 // notTestedList は、この診断が試していない範囲を返す。何も壊れていない実行でも必ず出す。
 // 黙っていると運用者が沈黙を健全と読むためである(設計文書 10.2a 節)。
 func notTestedList(rules []proto.Rule, in Input) []NotTested {
@@ -326,7 +357,7 @@ func notTestedList(rules []proto.Rule, in Input) []NotTested {
 	}
 	out := []NotTested{
 		{"from outside", "whether the internet reaches " + ports + " on this VPS. DNAT applies to input from outside, so the " +
-			"server cannot reach its own public port from itself. Test it from another host: nc -vz <vps> <port>. Invisible here: " +
+			"server cannot reach its own public port from itself. " + outsideHow(rules) + " Invisible here: " +
 			"the provider's security group, this host's input firewall, the ISP, and, in userspace mode, a listen port inside the " +
 			"ephemeral range; see docs/setup.md."},
 		{"udp end to end", "a UDP rule cannot be tested end to end, because a UDP send cannot tell success. It is judged from " +
@@ -378,7 +409,7 @@ func Diagnose(r proto.Rule, in Input) []Check {
 			ID: CheckEnabled, RuleID: r.ID, Group: GroupServer, Label: "enabled", Status: StatusSkipped,
 			Reason: ReasonRuleDisabled,
 			Detail: "the rule is disabled, so nothing is forwarded; that is a declared state, not a fault",
-			Next:   "enable it: wgft rule enable " + ShortID(r.ID),
+			Next:   "enable it: wgft rule enable " + r.ID,
 		}}
 		for _, id := range checkOrder {
 			if id == CheckEnabled || id == CheckDataplane {
@@ -388,7 +419,7 @@ func Diagnose(r proto.Rule, in Input) []Check {
 				ID: id, RuleID: r.ID, Agent: agentOf(id, r), Group: checkGroup(id), Label: checkLabel(id, r),
 				Status: StatusSkipped, Reason: ReasonRuleDisabled,
 				Detail: "not tested: the rule is disabled",
-				Next:   "enable it first: wgft rule enable " + ShortID(r.ID),
+				Next:   "enable it first: wgft rule enable " + r.ID,
 				// 無効なルールの下流は、同じ 1 つの理由を 11 回繰り返すだけなので既定では
 				// 出さない。--verbose では出す。
 				hideWhenUntested: true,
@@ -771,14 +802,20 @@ func uniq(in []string) []string {
 	return out
 }
 
-// ShortID はルール ID を短く表示する(先頭 12 文字)。CLI の findRule が前方一致で受けるので
-// 選択には困らない。所見の中の "wgft rule enable <id>" のような次の一手も同じ形にする。
+// ShortID はルール ID を短く表示する(先頭 12 文字と省略記号)。表の ID の列のように、ルールを
+// 見分けるために示す場所だけで使う。そのまま打つコマンドとして示す場所、つまり所見の次の一手
+// ("wgft rule enable <id>" など)と、`server doctor` の終了の 1 行が名指すルールには、完全な ID を
+// 使う(設計文書 10.2 節)。CLI の findRule は末尾の省略記号を落として前方一致で受けるので、
+// 短い形を貼っても通るが、前方一致が 2 つ以上あれば拒む。
 func ShortID(id string) string {
-	if len(id) > 12 {
-		return id[:12] + "…"
+	if len(id) > ShortIDLen {
+		return id[:ShortIDLen] + "…"
 	}
 	return id
 }
+
+// ShortIDLen は ShortID が残す先頭の文字数である。CLI は、省略記号を落とした引数にこの長さを求める。
+const ShortIDLen = 12
 
 // ResourceRefusalTotal は、そのルールに対する Resource Guard の拒否の総数(理由を問わない)。
 // design.md 7a.10 節「拒否の報告」の値で、報告を持たない Backend や、その理由でまだ 1 度も

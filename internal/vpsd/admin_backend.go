@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/buildinfo"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/reconcile"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
@@ -403,6 +404,7 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 		Kernel:           d.kernel,
 		NFT:              d.nftVer,
 		IPForwardSetAt:   ipf,
+		IPForward:        readIPForward().Value,
 		UDPTimeout:       timeouts.Timeout,
 		UDPTimeoutStream: timeouts.TimeoutStream,
 	}, nil
@@ -529,4 +531,23 @@ func applyStatusToAdmin(st reconcile.Status) admin.ApplyStatus {
 	}
 	out.Drift = admin.Drift{ActiveOnly: conv(st.ActiveOnly), Retiring: conv(st.Retiring)}
 	return out
+}
+
+// IPForward is admin.IPForwardBackend's implementation (design.md 6.1、10.2a 節). Only a kernel-mode
+// server reports it: its DNAT rules reach wg0 only while net.ipv4.ip_forward is 1. The server writes
+// 1 at its start and does not write it again (6.1 節), so this read is how a later 0 shows up.
+func (d *Daemon) IPForward() (admin.IPForwardStatus, bool) {
+	if d.opts.Mode != modeKernel {
+		return admin.IPForwardStatus{}, false
+	}
+	return readIPForward(), true
+}
+
+// readIPForward reads net.ipv4.ip_forward now, as the admin API reports it.
+func readIPForward() admin.IPForwardStatus {
+	v, _, err := linux.IPForwardStatus()
+	if err != nil {
+		return admin.IPForwardStatus{Error: err.Error()}
+	}
+	return admin.IPForwardStatus{Value: v}
 }
