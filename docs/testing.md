@@ -47,7 +47,7 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 | `rule-ops` | `internal/vpsd/admin/**`、`internal/vpsd/agent_disable.go`、`proto/rule.go`、`proto/splitmerge.go`、`proto/importdiff.go`、`cmd/wgft/rule.go` | 無し | L5、L11、L12、L14、L15 (両モード) |
 | `protocol` | `proto/stream.go`、`proto/state.go`、`proto/version.go`、`internal/vpsd/stream/**`、`internal/vpsd/agentapi/**`、`internal/agent/**` | B7 | L1、L4、L14、L15 |
 | `agent-platform` | `internal/agent/**`、`internal/flock/**`、`internal/dataplane/userspace/relay/**`、`internal/dataplane/userspace/tunnel/**`、`cmd/wgft/**`、`*_windows.go`、`*_darwin.go` | B4、B8 | L1、L14 |
-| `deploy` | `deploy/*.service`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
+| `deploy` | `deploy/*.service`、`deploy/*.conf`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
 | `phase` | 7a.8 節の段階の完了 | C 類 | すべて |
@@ -241,7 +241,7 @@ v1 の前に 1 回流し、以後は関係する領域を変えたときにだ�
 - 実 VPS と実回線の確認:E1、E2、E3。導入の手順、kernel 側の経路、stream の接続を変えたときに流し直します
 - 実アプリケーションでの長時間の利用:E6。転送の経路か Resource Guard を変えたときに流し直します
 
-v1 の条件のうち、公式に対応をうたう 3 つのディストリビューションでの配布物の確認 (B9) は、`scripts/dist-vm.sh` として実装済みで、Debian 12、Ubuntu 24.04、Fedora 44 のいずれでも確かめました。版の組み合わせ (B7) は `lab/version-skew.sh` として実装済みです。ただし、旧い側が表せない機能のルールを理由付きの `not_active` にすることの確認だけは、該当する capability がまだ無いため未了です (後述の「B7 の not_active の確認」)。旧版からの更新 (D4) のうち、同梱の unit と実際の VM の再起動を経由する部分は `scripts/dist-vm.sh --upgrade` として実装済みで、Debian 12 で確かめました (後述の「D4 の残りの項目 (実装済み)」)。Ubuntu 24.04 と Fedora 44 でのこの部分は未確認です。
+v1 の条件のうち、公式に対応をうたう 3 つのディストリビューションでの配布物の確認 (B9) は、`scripts/dist-vm.sh` として実装済みで、Debian 12、Ubuntu 24.04、Fedora 44 のいずれでも確かめました。版の組み合わせ (B7) は `lab/version-skew.sh` として実装済みです。ただし、旧い側が表せない機能のルールを理由付きの `not_active` にすることの確認だけは、該当する capability がまだ無いため未了です (後述の「B7 の not_active の確認」)。旧版からの更新 (D4) のうち、同梱の unit と実際の VM の再起動を経由する部分は `scripts/dist-vm.sh --upgrade` として実装済みで、Debian 12 で確かめました (後述の「D4 の残りの項目 (実装済み)」)。Ubuntu 24.04 と Fedora 44 でのこの部分は未確認です。エージェントのカーネルモードの配布物は `scripts/dist-vm.sh --agent-kernel` で確かめます。このフラグは、エージェントを drop-in の `deploy/agent.kernel.conf` と `WGFT_MODE=kernel` で入れて B9 の確認を流し、権限、エージェントの停止中の転送、`agent doctor`、drop-in が無い場合の終了コード 3、`wgft agent teardown` によるユーザー空間モードへの戻し、カーネルモードへの切り替え直しの確認を加えます。`deploy/agent.kernel.conf` を変える PR では、B9 をこのフラグ付きで流します。Debian 12 で確かめました。Ubuntu 24.04 と Fedora 44 では未確認です。
 
 別のディストリビューションでのラボの一式 (C4) のうち、Ubuntu 24.04 での実行は完了しました。カーネル 6.8.0、nftables v1.0.9 の Ubuntu 24.04 の Lab Host VM で `labhost run -parallel 8 all` を流し、同じコミットの既定の Debian 12 (カーネル 6.1.0、nftables v1.0.6) の結果と比較したところ、判定はどちらも PASS 291、FAIL 0、SKIP 16 で一致し、確認ごとの PASS と SKIP の数も一致しました。C4 が挙げていた、新しいカーネルと nftables の版による挙動の違い (通知の出方、`ct count` の値、式の表記) は、今回流した一式の範囲では表れませんでした。もっと大きな規模や、この 2 つより新しいカーネルと nftables での挙動は未確認です。
 

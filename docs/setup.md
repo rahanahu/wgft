@@ -6,7 +6,7 @@ This guide contains the detailed installation and operating steps that are inten
 
 The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11, and on macOS on Apple silicon, verified on macOS 27. Intel Macs are not supported. wgft is currently IPv4-only.
 
-The home agent does not need root or a TUN device. Server requirements depend on the selected mode:
+In its default userspace mode, the home agent does not need root or a TUN device. A Linux agent can also run in kernel mode, which needs `CAP_NET_ADMIN`; see [Run the agent in kernel mode](#run-the-agent-in-kernel-mode). Server requirements depend on the selected mode:
 
 | | Kernel mode `kernel` | Userspace mode `userspace` |
 |---|---|---|
@@ -90,10 +90,11 @@ sudo firewall-cmd --permanent --add-port=51820/udp --add-port=8443/tcp
 sudo firewall-cmd --reload
 ```
 
-Install the provided service:
+Install the provided service. The unit files are not release assets, so download the one from the same release tag as the binary; `wgft version` prints that tag on its first line for a release binary:
 
 ```sh
-sudo install -m 0644 deploy/server.service /etc/systemd/system/wgft.service
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/server.service"
+sudo install -m 0644 server.service /etc/systemd/system/wgft.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now wgft
 ```
@@ -272,21 +273,73 @@ Two macOS behaviors shape this setup:
 
 ### Run the agent with systemd
 
-The provided unit runs as an unprivileged `wgft` user:
+The provided unit runs as an unprivileged `wgft` user. As with the server, download it from the same release tag as the binary:
 
 ```sh
 sudo install -m 0755 ~/.local/bin/wgft /usr/local/bin/wgft
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/agent.service"
 sudo useradd --system --home-dir /var/lib/wgft --shell /usr/sbin/nologin wgft
 sudo mkdir -p /etc/wgft
 printf 'WGFT_JOIN=<join string>\n' | sudo tee /etc/wgft/agent.env >/dev/null
 sudo chown root:wgft /etc/wgft/agent.env
 sudo chmod 0640 /etc/wgft/agent.env
-sudo install -m 0644 deploy/agent.service /etc/systemd/system/wgft-agent.service
+sudo install -m 0644 agent.service /etc/systemd/system/wgft-agent.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now wgft-agent
 ```
 
 The credentials then live in `/var/lib/wgft/agent.json`.
+
+### Run the agent in kernel mode
+
+In kernel mode, `WGFT_MODE=kernel`, a Linux agent creates a kernel WireGuard interface, `wgft0` unless `WGFT_WG_INTERFACE` names another, and `table inet wgft_agent` on its host, and the kernel forwards traffic to the LAN targets with DNAT. The agent process relays nothing, so forwarding continues while the agent is stopped or restarting. While it is stopped, though, nothing follows rule changes, re-resolves target names or repairs the table after outside changes. [design.md](design.md) section 7b has the details.
+
+Kernel mode differs from userspace mode in these points:
+
+- Privileges: the agent needs `CAP_NET_ADMIN`, and the host needs the kernel's WireGuard module. Without the capability, the agent stops at startup with exit code 3 and names `CAP_NET_ADMIN` in its log.
+- Targets: only IPv4 targets are forwarded, and loopback targets such as `127.0.0.1` are refused. For a service on the agent host itself, give the host's LAN address as the target. Such a service sees the server's tunnel address, `10.200.0.1` by default, as the source; a service on another LAN host sees the agent host's LAN address.
+- Host forwarding: the agent sets `net.ipv4.ip_forward` to 1 at startup when it is 0, and records that change in `agent.json`. The host then routes packets between its interfaces for any traffic, not only for wgft; wgft's own table filters only the forwarding that involves `wgft0`. The agent never sets `ip_forward` back to 0.
+- Flow caps: `WGFT_MAX_UDP_FLOWS` and `WGFT_MAX_TCP_FLOWS` are not used. The host's conntrack table holds the flows.
+
+`WGFT_AGENT_ALLOW_TARGETS` keeps its meaning in kernel mode: a target outside the list gets no DNAT.
+
+Kernel mode builds on the systemd setup above. The provided `agent.service` stays unprivileged; the drop-in [deploy/agent.kernel.conf](../deploy/agent.kernel.conf) adds `CAP_NET_ADMIN` and nothing else, so the agent still runs as the `wgft` user with the rest of the unit's sandbox. Install the drop-in next to the unit and add `WGFT_MODE=kernel` to `agent.env`:
+
+```sh
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/agent.kernel.conf"
+sudo install -D -m 0644 agent.kernel.conf /etc/systemd/system/wgft-agent.service.d/kernel.conf
+printf 'WGFT_MODE=kernel\n' | sudo tee -a /etc/wgft/agent.env >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart wgft-agent
+```
+
+On a new host, run every command above except the restart before `systemctl enable --now wgft-agent` in the systemd setup; the agent then registers and starts in kernel mode. On a host where the agent already runs in userspace mode, the restart switches it. Do not add `ProtectKernelTunables=` to the drop-in: it makes `/proc/sys` read-only, which stops the agent from writing `ip_forward`.
+
+Check the result with `agent doctor`. While the agent runs, run it as the agent's user; the Dataplane items show `wgft0`, the table and forwarding as the agent reports them, and exit code 0 means this host can forward:
+
+```sh
+sudo runuser -u wgft -- wgft agent doctor
+```
+
+While the agent is stopped, only root can read the kernel state, so run `sudo wgft agent doctor`. The process item reads FAILED, but the exit code stays 0 while `wgft0`, the table and `ip_forward` are in place, because the kernel keeps forwarding. Run as the `wgft` user instead, the Dataplane items of a stopped agent read UNKNOWN with `needs_cap_net_admin`, and the exit code is 2.
+
+While the agent is stopped, nothing puts its table back. On a host whose `nftables.conf` starts with `flush ruleset`, `systemctl reload nftables` then removes `table inet wgft_agent` but leaves `wgft0` and `ip_forward` at 1, so nothing stops traffic from the VPS peer to this host and the LAN until the agent starts again and publishes the table; `sudo wgft agent doctor` reads the table as FAILED meanwhile.
+
+To go back to userspace mode, stop the agent, remove what kernel mode left with `wgft agent teardown`, then remove `WGFT_MODE=kernel` and the drop-in:
+
+```sh
+sudo systemctl stop wgft-agent
+sudo wgft agent teardown --dry-run
+sudo wgft agent teardown
+sudo sed -i '/^WGFT_MODE=/d' /etc/wgft/agent.env
+sudo rm /etc/systemd/system/wgft-agent.service.d/kernel.conf
+sudo systemctl daemon-reload
+sudo systemctl start wgft-agent
+```
+
+`wgft agent teardown` removes `wgft0`, the conntrack entries of the flows the agent forwarded, `table inet wgft_agent` and the kernel-mode records in `agent.json`. The registration and the key stay, so the agent reconnects as the same agent. It refuses while the agent runs. It does not set `ip_forward` back; when the agent changed it from 0, the output prints the command to restore it. An agent started in userspace mode before the teardown refuses to start while those kernel-mode records remain, and names `wgft agent teardown`.
+
+These steps have been verified on a Debian 12 VM in the development lab, with the server in kernel mode: TCP and UDP forwarding to the agent host's own address, TCP forwarding to another host, reboots, forwarding while the agent is stopped, `agent doctor` running and stopped, the exit code 3 without the drop-in, the teardown and the switch back and forth. On a staging machine, the drop-in has been verified in an unprivileged Debian 13 LXC container on Proxmox VE, with nesting enabled and the container's AppArmor profile unconfined. There, forwarding came back after `systemctl restart wgft-agent` and after restarting the container itself, forwarding continued while the agent was stopped for about 40 seconds, and `wgft agent rotate-key` worked with the agent running and with it stopped. Not verified: other distributions such as Ubuntu and Fedora, distributions that enforce SELinux or AppArmor, Proxmox VE containers with nesting disabled or with an AppArmor profile that confines them, Incus containers, and Docker. This guide has no kernel-mode steps for Docker.
 
 ### Run the agent in Docker
 
@@ -454,6 +507,8 @@ sudo wgft server teardown --purge --yes
 ```
 
 Without `--purge`, keys and certificates remain so the server keeps the same identity after restart. With `--purge`, server keys, rules, and agent registrations are removed and agents must be registered again.
+
+A kernel-mode agent leaves its interface and nftables table in the kernel after it stops. Stop it and run `sudo wgft agent teardown` before you delete its credentials; see [Run the agent in kernel mode](#run-the-agent-in-kernel-mode).
 
 For the Docker agent, remove its volume as well when you want to delete its credentials:
 

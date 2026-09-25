@@ -57,7 +57,19 @@ In kernel mode, forwarding stays in the kernel if the wgft process crashes or re
 
 Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container.
 
-The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11, and on macOS on Apple silicon, verified on macOS 27. Intel Macs are not supported. wgft is IPv4-only. The home agent does not need root or a TUN device, and no administrator rights on Windows. On macOS it runs with your user's rights.
+The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11, and on macOS on Apple silicon, verified on macOS 27. Intel Macs are not supported. wgft is IPv4-only. In its default userspace mode, the home agent does not need root or a TUN device, and no administrator rights on Windows. On macOS it runs with your user's rights.
+
+### Kernel mode on the home agent
+
+On Linux, the home agent can forward in kernel mode as well. With `WGFT_MODE=kernel` in its `agent.env`, the agent creates a kernel WireGuard interface, `wgft0`, and an nftables table on the home host, and the kernel forwards traffic to the LAN targets with DNAT. The agent process relays nothing, so forwarding continues while the agent is stopped or restarting. Without `WGFT_MODE=kernel`, the agent stays in userspace mode.
+
+Kernel mode needs `CAP_NET_ADMIN`. The provided `agent.service` stays unprivileged, and the drop-in [deploy/agent.kernel.conf](deploy/agent.kernel.conf) adds that one capability; the agent still runs as the `wgft` user. Kernel mode forwards only to IPv4 targets and refuses loopback targets. To reach a service on the agent host itself, give the host's LAN address as the target.
+
+Kernel mode turns the home host into a router. The agent sets `net.ipv4.ip_forward` to 1 when it is 0, so the host routes packets between its interfaces for any traffic, not only for wgft. wgft's own table filters only the forwarding that involves `wgft0`.
+
+To go back to userspace mode, stop the agent and run `sudo wgft agent teardown`. It removes the interface, the table and the kernel-mode records, and leaves `ip_forward` as it is but prints how to restore it. `wgft agent doctor` shows whether the interface, the table and IP forwarding of a kernel-mode agent are in place. The [setup guide](docs/setup.md#run-the-agent-in-kernel-mode) has the steps.
+
+On a staging machine, the drop-in has been verified in an unprivileged Debian 13 LXC container on Proxmox VE, with nesting enabled and the container's AppArmor profile unconfined. There, forwarding came back after `systemctl restart wgft-agent` and after restarting the container itself, forwarding continued while the agent was stopped for about 40 seconds, and `wgft agent rotate-key` worked with the agent running and with it stopped. On a Debian 12 VM in the development lab, forwarding, reboots, a stopped agent, `wgft agent doctor` and the way back with teardown have been verified. Not verified: Proxmox VE containers with nesting disabled or with an AppArmor profile that confines them, Incus containers, Docker, and distributions that enforce SELinux or AppArmor. The setup guide does not describe kernel mode in Docker.
 
 ## Quick start
 
@@ -172,7 +184,15 @@ The Diagnostics page of the Web UI shows the same verdicts, built from the same 
 
 ![Diagnostics page of one rule](docs/images/doctor-rule.png)
 
-`wgft agent doctor` runs on the agent host and answers whether an agent runs there, whether it holds credentials, and whether the host can resolve the names it needs. Run it as the user the agent runs as. It answers for the permissions of the user who runs it. Run as root, it cannot tell whether the agent's own user can reach its files, and reports the privileges item as UNKNOWN. Where the agent itself runs as root, running the command as root is correct and that UNKNOWN is expected. With `--json`, both doctor commands print a diagnostic model. Its check ids and reason codes may gain new values in later versions, but an existing value never changes its meaning.
+`wgft agent doctor` runs on the agent host and answers whether an agent runs there, whether it holds credentials, and whether the host can resolve the names it needs. For a kernel-mode agent it also checks the WireGuard interface, the nftables table and IP forwarding. A stopped kernel-mode agent whose interface, table and forwarding are in place exits 0, because the kernel keeps forwarding; reading that state while the agent is stopped needs root. Otherwise, run it as the user the agent runs as. It answers for the permissions of the user who runs it. Run as root, it cannot tell whether the agent's own user can reach its files, and reports the privileges item as UNKNOWN. Where the agent itself runs as root, running the command as root is correct and that UNKNOWN is expected. With `--json`, both doctor commands print a diagnostic model. Its check ids and reason codes may gain new values in later versions, but an existing value never changes its meaning.
+
+Give it the same data directory as the agent. For the agent started in the Quick start above:
+
+```sh
+~/.local/bin/wgft agent doctor --data-dir ~/.wgft
+```
+
+Without `--data-dir`, it reads `/var/lib/wgft`, the default that the provided systemd unit uses, and does not see an agent that keeps its credentials elsewhere.
 
 See the [CLI reference](docs/cli.md) for what each state means and for the exit codes, and the [design](docs/design.md) for how the checks are judged.
 

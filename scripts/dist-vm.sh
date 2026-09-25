@@ -30,6 +30,7 @@
 #   scripts/dist-vm.sh --image images:fedora/44
 #   scripts/dist-vm.sh --keep-failed            # leave the VMs behind for inspection on failure
 #   scripts/dist-vm.sh --upgrade                # also run the upgrade-from-a-previous-release phase
+#   scripts/dist-vm.sh --agent-kernel           # run the agent in kernel mode with deploy/agent.kernel.conf
 #
 # docs/testing.md calls for one distribution per PR and three per release candidate; this script
 # takes the distribution as a parameter instead of hard-coding a loop, so a release candidate runs
@@ -76,8 +77,22 @@
 # and not exercised here. A single pass only (old server + old agent, then server-first, then
 # agent-first swap order); the reverse swap order (agent first) is not run - see the report for why.
 #
+# --agent-kernel: installs the agent the way docs/setup.md's kernel-mode agent section does, with
+# the shipped drop-in deploy/agent.kernel.conf next to the unchanged deploy/agent.service and
+# WGFT_MODE=kernel in agent.env, and runs every check above against it. Kernel mode refuses loopback
+# targets, so the target service binds to the agent VM's own address instead of 127.0.0.1; that
+# target is reached through the input path. A third TCP rule points at a second target on the SERVER
+# VM, which the agent VM reaches over the bridge the way it would reach another LAN host, so the
+# forward path, masquerade and net.ipv4.ip_forward are exercised too. On top of the common checks it
+# checks the agent process's capabilities, that forwarding goes on while the agent is stopped,
+# `wgft agent doctor` running and stopped, and, as the last step, the documented way back:
+# `wgft agent teardown`, then userspace mode without the drop-in, and the switch of that running
+# userspace agent back to kernel mode. It cannot be combined with
+# --upgrade, whose previous release has no kernel-mode agent.
+#
 # Topology (2 VMs, not 3): the "server" VM runs wgft server (kernel mode). The "agent" VM runs
-# wgft agent and also hosts the target service (tools/echo, bound to 127.0.0.1 on the agent VM,
+# wgft agent and also hosts the target service (tools/echo, bound to 127.0.0.1 on the agent VM, or
+# to the agent VM's own address with --agent-kernel,
 # standing in for a LAN game server next to the agent). The "client" is this HOST for TCP: the
 # Incus bridge (incusbr0) puts the host on the same L2 network as both VMs, so a TCP probe sent
 # from the host to the server VM's address arrives over a real network interface and is genuinely
@@ -156,6 +171,7 @@ IMAGE=images:debian/12
 KEEP_FAILED=0
 FORCE=0
 UPGRADE=0
+AGENT_KERNEL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --image) IMAGE=$2; shift 2 ;;
@@ -163,6 +179,7 @@ while [ $# -gt 0 ]; do
     --keep-failed) KEEP_FAILED=1; shift ;;
     --force) FORCE=1; shift ;;
     --upgrade) UPGRADE=1; shift ;;
+    --agent-kernel) AGENT_KERNEL=1; shift ;;
     -h | --help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -170,6 +187,11 @@ while [ $# -gt 0 ]; do
     *) echo "dist-vm: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ "$UPGRADE" = 1 ] && [ "$AGENT_KERNEL" = 1 ]; then
+  echo "dist-vm: --agent-kernel and --upgrade cannot be combined: the previous release has no kernel-mode agent" >&2
+  exit 2
+fi
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "dist-vm: '$1' not found" >&2; exit 2; }; }
 need incus
@@ -314,7 +336,9 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo "== dist-vm: image=$IMAGE server=$server_vm agent=$agent_vm"
+agent_mode=userspace
+[ "$AGENT_KERNEL" = 1 ] && agent_mode=kernel
+echo "== dist-vm: image=$IMAGE server=$server_vm agent=$agent_vm agent-mode=$agent_mode"
 
 # --- host capacity: shared with everyone else's VMs, so check before creating any ---------------
 # Hard rule (the host's owner set an explicit ceiling of 16 running instances in total, shared
@@ -468,6 +492,10 @@ incus exec "$agent_vm" -- /root/netstatic.sh "$agent_ip" "$net_prefix" >"$tmp/ne
 retry 30 ping -c1 -W1 "$server_ip" || { cat "$tmp/netstatic.server.log" >&2; echo "FAIL  $server_vm: static IP $server_ip never came up"; exit 1; }
 retry 30 ping -c1 -W1 "$agent_ip" || { cat "$tmp/netstatic.agent.log" >&2; echo "FAIL  $agent_vm: static IP $agent_ip never came up"; exit 1; }
 echo "PASS  static IPv4 on $bridge_cidr: server=$server_ip agent=$agent_ip"
+# The target service's address. Kernel mode refuses loopback targets (docs/design.md 7b.2), so there
+# the target binds to the agent VM's own address, which a real home host would give as its LAN address.
+target_ip=127.0.0.1
+[ "$AGENT_KERNEL" = 1 ] && target_ip=$agent_ip
 
 # Open firewalld's ports if the image has it active; never installed, only configured with the
 # tool already on the image, exactly as docs/setup.md's firewalld example shows. A Fedora Server
@@ -572,13 +600,14 @@ incus exec "$server_vm" -- systemctl enable --now wgft
 bring_up_server "check1: server starts from the shipped server.service" || exit 1
 
 # --- install and start the agent from the shipped unit (docs/setup.md "Run the agent with systemd") ---
-echo "== install agent: from the archive contents and deploy/agent.service"
+echo "== install agent: from the archive contents and deploy/agent.service (mode $agent_mode)"
 join=$(incus exec "$server_vm" -- wgft agent join-string --name home 2>/dev/null | head -1)
 check "server: join string issued" "wgft://" "$join"
 
 incus file push "$server_bin" "$agent_vm/root/wgft-linux-amd64" --mode 0644 >/dev/null
 incus file push "$server_sum" "$agent_vm/root/wgft-linux-amd64.sha256" --mode 0644 >/dev/null
 incus file push "$REPO/deploy/agent.service" "$agent_vm/root/agent.service" --mode 0644 >/dev/null
+[ "$AGENT_KERNEL" = 1 ] && incus file push "$REPO/deploy/agent.kernel.conf" "$agent_vm/root/agent.kernel.conf" --mode 0644 >/dev/null
 incus file push "$tmp/echo" "$agent_vm/root/echo" --mode 0755 >/dev/null
 # Also on the agent VM: UDP is probed from here, not from the host (see the header comment).
 incus file push "$tmp/probe" "$agent_vm/root/probe" --mode 0755 >/dev/null
@@ -590,11 +619,14 @@ incus exec "$agent_vm" -- install -m 0755 /root/wgft-linux-amd64 /usr/local/bin/
 incus exec "$agent_vm" -- useradd --system --home-dir /var/lib/wgft --shell /usr/sbin/nologin wgft
 incus exec "$agent_vm" -- mkdir -p /etc/wgft
 printf 'WGFT_JOIN=%s\n' "$join" >"$tmp/agent.env"
+[ "$AGENT_KERNEL" = 1 ] && printf 'WGFT_MODE=kernel\n' >>"$tmp/agent.env"
 incus file push "$tmp/agent.env" "$agent_vm/etc/wgft/agent.env" --mode 0640 >/dev/null
 incus exec "$agent_vm" -- chown root:wgft /etc/wgft/agent.env
 incus exec "$agent_vm" -- chmod 0640 /etc/wgft/agent.env
 
 incus exec "$agent_vm" -- install -m 0644 /root/agent.service /etc/systemd/system/wgft-agent.service
+# docs/setup.md's kernel-mode agent section: the drop-in goes next to the unchanged unit.
+[ "$AGENT_KERNEL" = 1 ] && incus exec "$agent_vm" -- install -D -m 0644 /root/agent.kernel.conf /etc/systemd/system/wgft-agent.service.d/kernel.conf
 incus exec "$agent_vm" -- systemctl daemon-reload
 since=$(incus exec "$agent_vm" -- date +%s)
 incus exec "$agent_vm" -- systemctl enable --now wgft-agent
@@ -617,7 +649,7 @@ Description=wgft-dist-vm disposable test target (not part of wgft)
 After=network.target
 
 [Service]
-ExecStart=/root/echo -bind 127.0.0.1 -tcp 25565 -udp 25566
+ExecStart=/root/echo -bind $target_ip -tcp 25565 -udp 25566
 Restart=always
 RestartSec=1
 
@@ -627,7 +659,7 @@ EOF
 incus file push "$tmp/wgft-dist-echo.service" "$agent_vm/etc/systemd/system/wgft-dist-echo.service" --mode 0644 >/dev/null
 incus exec "$agent_vm" -- systemctl daemon-reload
 incus exec "$agent_vm" -- systemctl enable --now wgft-dist-echo
-retry 10 wait_for_log_boot "$agent_vm" wgft-dist-echo "tcp 127.0.0.1:25565" || echo "dist-vm: warning: target service log line not seen yet" >&2
+retry 10 wait_for_log_boot "$agent_vm" wgft-dist-echo "tcp $target_ip:25565" || echo "dist-vm: warning: target service log line not seen yet" >&2
 
 # agent_col <column>: the value of that column on the "home" row of 'wgft agent ls'. The table is
 # aligned with text/tabwriter, so a column starts at the same offset on every line as its header
@@ -650,8 +682,8 @@ fi
 
 # --- check 2: a TCP and a UDP rule forward end to end --------------------------------------------
 echo "== check 2: add a tcp and a udp rule, probe from the host"
-t=$(incus exec "$server_vm" -- wgft rule add --agent home --tcp 39971 --to 127.0.0.1:25565 2>/dev/null | grep -oE 'r_[A-Z0-9]+')
-u=$(incus exec "$server_vm" -- wgft rule add --agent home --udp 27015 --to 127.0.0.1:25566 2>/dev/null | grep -oE 'r_[A-Z0-9]+')
+t=$(incus exec "$server_vm" -- wgft rule add --agent home --tcp 39971 --to "$target_ip:25565" 2>/dev/null | grep -oE 'r_[A-Z0-9]+')
+u=$(incus exec "$server_vm" -- wgft rule add --agent home --udp 27015 --to "$target_ip:25566" 2>/dev/null | grep -oE 'r_[A-Z0-9]+')
 check "server: tcp rule added" "r_" "$t"
 check "server: udp rule added" "r_" "$u"
 open_firewall "$server_vm" --add-port=39971/tcp --add-port=27015/udp
@@ -701,6 +733,76 @@ tcp_out=$(probe_until tcp "$server_ip:39971" tcp-echo 30)
 udp_out=$(probe_until udp "$server_ip:27015" udp-echo 30 "$agent_vm")
 check "check2: tcp forwards end to end (host -> server VM -> tunnel -> agent VM's target)" "tcp-echo" "$tcp_out" || dump_forwarding_diagnostics
 check "check2: udp forwards end to end (agent VM -> server VM -> tunnel -> back to the agent VM's target; see the header comment on why UDP is not probed from the host)" "udp-echo" "$udp_out" || dump_forwarding_diagnostics
+
+# --- kernel-mode agent (--agent-kernel): what the drop-in and kernel mode add ---------------------
+# agent_caps <field>: the Cap* line of the agent's main process, e.g. CapEff. 0x1000 is bit 12,
+# CAP_NET_ADMIN, and nothing else.
+agent_caps() {
+  local pid
+  pid=$(incus exec "$agent_vm" -- systemctl show -p MainPID --value wgft-agent 2>/dev/null)
+  incus exec "$agent_vm" -- awk -v f="$1:" '$1 == f { print $2 }' "/proc/$pid/status" 2>/dev/null
+}
+# doctor_check <label> <as> <want-exit-code>: runs 'wgft agent doctor' as root or, with "wgft", as
+# the agent's own user through runuser, the way docs/setup.md shows both, and prints its output on a
+# mismatch.
+doctor_check() {
+  local rc
+  if [ "$2" = wgft ]; then
+    incus exec "$agent_vm" -- runuser -u wgft -- wgft agent doctor >"$tmp/doctor.out" 2>&1
+  else
+    incus exec "$agent_vm" -- wgft agent doctor >"$tmp/doctor.out" 2>&1
+  fi
+  rc=$?
+  eqcheck "$1" "$3" "$rc"
+  [ "$rc" = "$3" ] || cat "$tmp/doctor.out" >&2
+}
+if [ "$AGENT_KERNEL" = 1 ]; then
+  echo "== kernel agent: the drop-in's capabilities, the kernel dataplane, a LAN target, a stopped agent"
+  strcheck "kernel: agent process runs as the wgft user" "wgft" "$(incus exec "$agent_vm" -- ps -o user= -p "$(incus exec "$agent_vm" -- systemctl show -p MainPID --value wgft-agent)" | tr -d ' ')"
+  strcheck "kernel: agent CapEff is CAP_NET_ADMIN only" "0000000000001000" "$(agent_caps CapEff)"
+  strcheck "kernel: agent CapAmb is CAP_NET_ADMIN only" "0000000000001000" "$(agent_caps CapAmb)"
+  strcheck "kernel: agent CapBnd is CAP_NET_ADMIN only" "0000000000001000" "$(agent_caps CapBnd)"
+  check "kernel: wgft0 is a WireGuard interface" "wireguard" "$(incus exec "$agent_vm" -- ip -d link show wgft0 2>&1)"
+  strcheck "kernel: net.ipv4.ip_forward is 1" "1" "$(incus exec "$agent_vm" -- cat /proc/sys/net/ipv4/ip_forward)"
+
+  # A second target on the server VM, reached from the agent VM over the bridge like another LAN
+  # host: this rule goes through the agent's forward chain, masquerade and ip_forward, which the
+  # rules to the agent VM's own address do not.
+  # An enabled unit, like the first target, so that it is back after check 3's reboots.
+  incus file push "$tmp/echo" "$server_vm/root/echo" --mode 0755 >/dev/null
+  sed "s#^ExecStart=.*#ExecStart=/root/echo -bind $server_ip -tcp 25567#" "$tmp/wgft-dist-echo.service" >"$tmp/wgft-dist-lan-echo.service"
+  incus file push "$tmp/wgft-dist-lan-echo.service" "$server_vm/etc/systemd/system/wgft-dist-lan-echo.service" --mode 0644 >/dev/null
+  incus exec "$server_vm" -- systemctl daemon-reload
+  incus exec "$server_vm" -- systemctl enable --now wgft-dist-lan-echo >/dev/null 2>&1
+  l=$(incus exec "$server_vm" -- wgft rule add --agent home --tcp 39972 --to "$server_ip:25567" 2>/dev/null | grep -oE 'r_[A-Z0-9]+')
+  check "server: tcp rule to a LAN host added" "r_" "$l"
+  open_firewall "$server_vm" --add-port=39972/tcp --add-port=25567/tcp
+  retry 15 rules_delivered 3 || echo "dist-vm: warning: the third rule not confirmed delivered within 15s" >&2
+  lan_out=$(probe_until tcp "$server_ip:39972" tcp-echo 30)
+  check "kernel: tcp forwards to a LAN host through the agent's forward path" "tcp-echo" "$lan_out" || dump_forwarding_diagnostics
+
+  doctor_check "kernel: agent doctor as root exits 0 while the agent runs" root 0
+  doctor_check "kernel: agent doctor as the wgft user exits 0 while the agent runs" wgft 0
+
+  echo "== kernel agent: stop the agent; the kernel keeps forwarding"
+  incus exec "$agent_vm" -- systemctl stop wgft-agent
+  tcp_out=$(probe_until tcp "$server_ip:39971" tcp-echo 30)
+  udp_out=$(probe_until udp "$server_ip:27015" udp-echo 30 "$agent_vm")
+  lan_out=$(probe_until tcp "$server_ip:39972" tcp-echo 30)
+  check "kernel: tcp still forwards while the agent is stopped" "tcp-echo" "$tcp_out"
+  check "kernel: udp still forwards while the agent is stopped" "udp-echo" "$udp_out"
+  check "kernel: tcp to the LAN host still forwards while the agent is stopped" "tcp-echo" "$lan_out"
+  doctor_check "kernel: agent doctor as root exits 0 while the agent is stopped" root 0
+  doctor_check "kernel: agent doctor as the wgft user exits 2 while the agent is stopped, as it cannot read the kernel" wgft 2
+  check "kernel: that exit 2 names needs_cap_net_admin" "needs_cap_net_admin" "$(incus exec "$agent_vm" -- runuser -u wgft -- wgft agent doctor --json 2>&1)"
+  incus exec "$agent_vm" -- systemctl start wgft-agent
+  if retry 40 tunnel_ok && [ "$(incus exec "$agent_vm" -- systemctl is-active wgft-agent)" = active ]; then
+    echo "PASS  kernel: agent started again and the tunnel is ok"
+  else
+    echo "FAIL  kernel: agent did not come back after the stop"
+    fail=1; unexpected_fail=1
+  fi
+fi
 
 # --- check 5: file modes and owners docs/setup.md and design.md 11a promise ---------------------
 echo "== check 5: file modes and owners"
@@ -760,6 +862,10 @@ verify_forwarding_after_reboot() { # verify_forwarding_after_reboot <label>
   udp_out=$(probe_until udp "$server_ip:27015" udp-echo 30 "$agent_vm")
   check "check3: tcp forwards again after $label (no manual step)" "tcp-echo" "$tcp_out" || dump_forwarding_diagnostics
   check "check3: udp forwards again after $label (no manual step)" "udp-echo" "$udp_out" || dump_forwarding_diagnostics
+  if [ "$AGENT_KERNEL" = 1 ]; then
+    tcp_out=$(probe_until tcp "$server_ip:39972" tcp-echo 30)
+    check "check3: tcp to the LAN host forwards again after $label (no manual step)" "tcp-echo" "$tcp_out" || dump_forwarding_diagnostics
+  fi
 }
 
 echo "== check 3a: reboot the server VM alone"
@@ -862,10 +968,15 @@ incus exec "$server_vm" -- systemctl daemon-reload
 incus exec "$server_vm" -- systemctl reset-failed wgft >/dev/null 2>&1
 since=$(incus exec "$server_vm" -- date +%s)
 incus exec "$server_vm" -- systemctl restart wgft
-if retry 30 wait_for_log_since "$server_vm" wgft "$since" "server started" && retry 40 tunnel_ok; then
+# 90 s for the tunnel, not 40: the server was down for well over a minute above, so the agent's
+# stream reconnect backoff has doubled to 64 s by now, and it cuts that wait short only on a new
+# WireGuard handshake, which a kernel-mode server that kept its interface does not need soon.
+if retry 30 wait_for_log_since "$server_vm" wgft "$since" "server started" && retry 90 tunnel_ok; then
   echo "PASS  restore: server healthy again with the shipped unit and a valid config"
 else
   echo "FAIL  restore: server did not come back healthy after the check4 teeth tests"
+  incus exec "$server_vm" -- systemctl status wgft --no-pager >&2 2>&1
+  dump_forwarding_diagnostics
   fail=1; unexpected_fail=1
 fi
 
@@ -1255,6 +1366,81 @@ EOF
     upgrade_elapsed=$(( $(date +%s) - upgrade_started ))
     echo "== upgrade phase (v$OLD_VERSION -> current): elapsed ${upgrade_elapsed}s"
   fi
+fi
+
+# --- kernel-mode agent (--agent-kernel): the documented way back to userspace mode ---------------
+# docs/setup.md: stop the agent, 'wgft agent teardown', remove WGFT_MODE=kernel from agent.env and
+# the drop-in, then start the agent again. Last, since it leaves the agent in userspace mode.
+if [ "$AGENT_KERNEL" = 1 ]; then
+  echo "== kernel agent: back to userspace mode with wgft agent teardown"
+  incus exec "$agent_vm" -- systemctl stop wgft-agent
+  td_out=$(incus exec "$agent_vm" -- wgft agent teardown --dry-run 2>&1)
+  td_rc=$?
+  eqcheck "teardown: --dry-run exits 0" 0 "$td_rc"
+  check "teardown: --dry-run would remove wgft0" "remove: the WireGuard interface wgft0" "$td_out"
+  check "teardown: --dry-run would remove the table" "remove: table inet wgft_agent" "$td_out"
+  check "teardown: --dry-run changes nothing" "dry run: nothing was changed" "$td_out"
+  check "teardown: wgft0 is still there after --dry-run" "wireguard" "$(incus exec "$agent_vm" -- ip -d link show wgft0 2>&1)"
+  td_out=$(incus exec "$agent_vm" -- wgft agent teardown 2>&1)
+  td_rc=$?
+  eqcheck "teardown: exits 0" 0 "$td_rc"
+  check "teardown: deleted wgft0" "deleted the WireGuard interface wgft0" "$td_out"
+  check "teardown: deleted the table" "deleted table inet wgft_agent" "$td_out"
+  check "teardown: names the ip_forward change to restore by hand" "the agent set it from 0 to 1" "$td_out"
+  absent "teardown: wgft0 is gone" "wireguard" "$(incus exec "$agent_vm" -- ip -d link show wgft0 2>&1)"
+  strcheck "teardown: agent.json keeps its owner wgft" "wgft" "$(incus exec "$agent_vm" -- stat -c '%U' /var/lib/wgft/agent.json)"
+  check "teardown: a second --dry-run finds nothing to remove" "nothing to remove" "$(incus exec "$agent_vm" -- wgft agent teardown --dry-run 2>&1)"
+
+  incus exec "$agent_vm" -- sed -i '/^WGFT_MODE=/d' /etc/wgft/agent.env
+  incus exec "$agent_vm" -- rm /etc/systemd/system/wgft-agent.service.d/kernel.conf
+  incus exec "$agent_vm" -- systemctl daemon-reload
+  check "userspace again: agent.env is still 0640 root:wgft" "640 root:wgft" "$(incus exec "$agent_vm" -- stat -c '%a %U:%G' /etc/wgft/agent.env)"
+  incus exec "$agent_vm" -- systemctl start wgft-agent
+  if retry 40 tunnel_ok && [ "$(incus exec "$agent_vm" -- systemctl is-active wgft-agent)" = active ]; then
+    echo "PASS  userspace again: agent started without the drop-in and the tunnel is ok"
+  else
+    incus exec "$agent_vm" -- journalctl -u wgft-agent --no-pager -n 30 >&2
+    echo "FAIL  userspace again: agent did not come back in userspace mode"
+    fail=1; unexpected_fail=1
+  fi
+  strcheck "userspace again: agent CapEff is empty" "0000000000000000" "$(agent_caps CapEff)"
+  tcp_out=$(probe_until tcp "$server_ip:39971" tcp-echo 30)
+  udp_out=$(probe_until udp "$server_ip:27015" udp-echo 30 "$agent_vm")
+  lan_out=$(probe_until tcp "$server_ip:39972" tcp-echo 30)
+  check "userspace again: tcp forwards" "tcp-echo" "$tcp_out" || dump_forwarding_diagnostics
+  check "userspace again: udp forwards" "udp-echo" "$udp_out" || dump_forwarding_diagnostics
+  check "userspace again: tcp to the LAN host forwards" "tcp-echo" "$lan_out" || dump_forwarding_diagnostics
+
+  # docs/setup.md also switches an agent that already runs in userspace mode: the same drop-in and
+  # WGFT_MODE=kernel, then a restart. WGFT_MODE=kernel without the drop-in comes first: the agent
+  # has no CAP_NET_ADMIN, so it must stop with exit code 3 and name the capability, not loop.
+  echo "== kernel agent: WGFT_MODE=kernel without the drop-in, then switch the userspace agent to kernel mode"
+  incus exec "$agent_vm" -- sh -c "printf 'WGFT_MODE=kernel\n' >>/etc/wgft/agent.env"
+  since=$(incus exec "$agent_vm" -- date +%s)
+  incus exec "$agent_vm" -- systemctl restart wgft-agent
+  sleep 5
+  check "no drop-in: the unit is failed, not restarting" "failed" "$(incus exec "$agent_vm" -- systemctl is-active wgft-agent 2>&1)"
+  eqcheck "no drop-in: the agent exits with code 3" 3 "$(incus exec "$agent_vm" -- systemctl show -p ExecMainStatus --value wgft-agent 2>&1)"
+  check "no drop-in: the log names CAP_NET_ADMIN" "CAP_NET_ADMIN" "$(incus exec "$agent_vm" -- journalctl -u wgft-agent -b --no-pager -q --since "@$since" 2>&1)"
+  incus exec "$agent_vm" -- install -D -m 0644 /root/agent.kernel.conf /etc/systemd/system/wgft-agent.service.d/kernel.conf
+  incus exec "$agent_vm" -- systemctl daemon-reload
+  incus exec "$agent_vm" -- systemctl reset-failed wgft-agent >/dev/null 2>&1
+  incus exec "$agent_vm" -- systemctl restart wgft-agent
+  if retry 40 tunnel_ok && [ "$(incus exec "$agent_vm" -- systemctl is-active wgft-agent)" = active ]; then
+    echo "PASS  kernel again: agent restarted in kernel mode and the tunnel is ok"
+  else
+    incus exec "$agent_vm" -- journalctl -u wgft-agent --no-pager -n 30 >&2
+    echo "FAIL  kernel again: agent did not come back in kernel mode"
+    fail=1; unexpected_fail=1
+  fi
+  strcheck "kernel again: agent CapEff is CAP_NET_ADMIN only" "0000000000001000" "$(agent_caps CapEff)"
+  check "kernel again: wgft0 is a WireGuard interface" "wireguard" "$(incus exec "$agent_vm" -- ip -d link show wgft0 2>&1)"
+  tcp_out=$(probe_until tcp "$server_ip:39971" tcp-echo 30)
+  udp_out=$(probe_until udp "$server_ip:27015" udp-echo 30 "$agent_vm")
+  lan_out=$(probe_until tcp "$server_ip:39972" tcp-echo 30)
+  check "kernel again: tcp forwards" "tcp-echo" "$tcp_out" || dump_forwarding_diagnostics
+  check "kernel again: udp forwards" "udp-echo" "$udp_out" || dump_forwarding_diagnostics
+  check "kernel again: tcp to the LAN host forwards" "tcp-echo" "$lan_out" || dump_forwarding_diagnostics
 fi
 
 elapsed=$(( $(date +%s) - started ))
