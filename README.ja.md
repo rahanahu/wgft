@@ -69,7 +69,7 @@ Linux の自宅側 agent も、カーネルモードで転送できます。`age
 
 ユーザー空間モードへ戻すには、agent を止めてから `sudo wgft agent teardown` を実行します。`wgft agent teardown` はインタフェース、テーブル、カーネルモードの記録を削除します。`ip_forward` は変更せず、元に戻す方法を表示します。`wgft agent doctor` は、カーネルモードの agent のインタフェース、テーブル、IP の転送の設定がそろっているかを示します。手順は[セットアップガイド](docs/setup.ja.md#カーネルモードで起動する)を参照してください。
 
-試験用の実機では、Proxmox VE の非特権の LXC コンテナで drop-in を確認済みです。このコンテナの OS は Debian 13 で、nesting を有効にし、AppArmor のプロファイルを unconfined にしています。確認した内容は、`systemctl restart wgft-agent` の後とコンテナ自体の再起動の後に転送が戻ること、約 40 秒 agent を止めている間も転送が続くこと、agent の稼働中と停止中の `wgft agent rotate-key` です。開発環境の Debian 12 の VM でも、転送、VM の再起動、agent の停止中の転送、`wgft agent doctor`、teardown によるユーザー空間モードへの戻しを確認済みです。nesting を無効にした Proxmox VE のコンテナ、AppArmor のプロファイルが制限をかける Proxmox VE のコンテナ、Incus のコンテナ、Docker、SELinux や AppArmor を有効にしたディストリビューションでは未確認です。Docker でカーネルモードを使う手順は、セットアップガイドに記載していません。
+試験用の実機では、Proxmox VE の非特権の LXC コンテナで drop-in を確認済みです。このコンテナの OS は Debian 13 で、nesting を有効にし、AppArmor のプロファイルを unconfined にしています。確認した内容は、`systemctl restart wgft-agent` の後とコンテナ自体の再起動の後に転送が戻ること、agent を約 40 秒止めている間も転送が続くこと、agent の稼働中と停止中の `wgft agent rotate-key` です。開発環境の Debian 12 の VM でも、転送、VM の再起動、agent の停止中の転送、`wgft agent doctor`、teardown によるユーザー空間モードへの戻しを確認済みです。nesting を無効にした Proxmox VE のコンテナ、AppArmor のプロファイルが制限をかける Proxmox VE のコンテナ、Incus のコンテナ、Docker、SELinux や AppArmor を有効にしたディストリビューションでは未確認です。Docker でカーネルモードを使う手順は、セットアップガイドに記載していません。
 
 ## クイックスタート
 
@@ -189,7 +189,7 @@ Web UI の診断の画面は、同じ証拠から組み立てた同じ判定を�
 データディレクトリは agent と同じものを指定します。上のクイックスタートで起動した agent では、次のように実行します。
 
 ```sh
-wgft agent doctor --data-dir ~/.wgft
+~/.local/bin/wgft agent doctor --data-dir ~/.wgft
 ```
 
 `--data-dir` を省くと、付属の systemd unit が使う既定の `/var/lib/wgft` を読むため、別の場所に認証情報を置く agent は見えません。

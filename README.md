@@ -189,7 +189,7 @@ The Diagnostics page of the Web UI shows the same verdicts, built from the same 
 Give it the same data directory as the agent. For the agent started in the Quick start above:
 
 ```sh
-wgft agent doctor --data-dir ~/.wgft
+~/.local/bin/wgft agent doctor --data-dir ~/.wgft
 ```
 
 Without `--data-dir`, it reads `/var/lib/wgft`, the default that the provided systemd unit uses, and does not see an agent that keeps its credentials elsewhere.

@@ -313,7 +313,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart wgft-agent
 ```
 
-新しいホストでは、systemd の構成の `systemctl enable --now wgft-agent` の前に最初の 4 つのコマンドを実行します。エージェントは登録を済ませ、カーネルモードで起動します。ユーザー空間モードで動いているエージェントは、最後の restart でカーネルモードに切り替わります。`ProtectKernelTunables=` は `/proc/sys` を読み取り専用にし、エージェントによる `ip_forward` の書き換えを止めるため、drop-in に加えないでください。
+新しいホストでは、systemd の構成の `systemctl enable --now wgft-agent` の前に、上のコマンドのうち restart 以外を実行します。エージェントは登録を済ませ、カーネルモードで起動します。ユーザー空間モードで動いているエージェントは、最後の restart でカーネルモードに切り替わります。`ProtectKernelTunables=` は `/proc/sys` を読み取り専用にし、エージェントによる `ip_forward` の書き換えを止めるため、drop-in に加えないでください。
 
 結果は `agent doctor` で確かめます。エージェントの稼働中は、エージェントの利用者として実行します。Dataplane の群の項目は、エージェント自身が報告する `wgft0`、テーブル、転送の設定を示し、終了コード 0 はこのホストが転送できることを意味します。
 
@@ -322,6 +322,8 @@ sudo runuser -u wgft -- wgft agent doctor
 ```
 
 エージェントの停止中は、カーネルの状態を root だけが読めるため、`sudo wgft agent doctor` を実行します。process の項目は FAILED になりますが、カーネルが転送を続けるので、`wgft0`、テーブル、`ip_forward` がそろっていれば終了コードは 0 です。停止中のエージェントを `wgft` ユーザーとして診断すると、Dataplane の群の項目は `needs_cap_net_admin` の UNKNOWN になり、終了コードは 2 になります。
+
+エージェントの停止中は、テーブルを戻すものがありません。`nftables.conf` が `flush ruleset` で始まるホストで `systemctl reload nftables` を実行すると、`table inet wgft_agent` だけが消え、`wgft0` と 1 の `ip_forward` は残ります。このため、エージェントが起動してテーブルを公開し直すまで、VPS のピアからこのホストと LAN への通信を止めるものが無くなります。この間、`sudo wgft agent doctor` はテーブルを FAILED と示します。
 
 ユーザー空間モードへ戻すには、エージェントを止め、カーネルモードが残したものを `wgft agent teardown` で削除してから、`WGFT_MODE=kernel` と drop-in を取り除きます。
 
@@ -337,7 +339,7 @@ sudo systemctl start wgft-agent
 
 `wgft agent teardown` は、`wgft0`、エージェントが転送したフローの conntrack のエントリ、`table inet wgft_agent`、`agent.json` のカーネルモードの記録を削除します。登録の情報と鍵は残るため、エージェントは同じエージェントとして接続し直します。エージェントの稼働中は何も削除せずに拒否します。`ip_forward` は元に戻しません。エージェントが 0 から書き換えた場合は、元に戻すコマンドを出力に示します。teardown の前にユーザー空間モードで起動したエージェントは、カーネルモードの記録が残っている間は起動を拒否し、`wgft agent teardown` の実行を案内します。
 
-以上の手順は、開発環境の Debian 12 の VM で、server をカーネルモードにして確認済みです。確認した内容は、エージェントのホスト自身のアドレスと別のホストへの TCP と UDP の転送、VM の再起動、エージェントの停止中の転送、稼働中と停止中の `agent doctor`、drop-in が無い場合の終了コード 3、teardown、2 つのモードの間の切り替えです。試験用の実機では、Proxmox VE の非特権の LXC コンテナ (Debian 13) で drop-in を確認済みです。このコンテナは nesting を有効にし、AppArmor のプロファイルを unconfined にしています。確認した内容は、`systemctl restart wgft-agent` の後とコンテナ自体の再起動の後に転送が戻ること、約 40 秒 エージェントを止めている間も転送が続くこと、エージェントの稼働中と停止中の `wgft agent rotate-key` です。Ubuntu や Fedora のような他のディストリビューション、SELinux や AppArmor を有効にしたディストリビューション、nesting を無効にした Proxmox VE のコンテナ、AppArmor のプロファイルが制限をかける Proxmox VE のコンテナ、Incus のコンテナ、Docker では未確認です。Docker でカーネルモードを使う手順は、このガイドに記載していません。
+以上の手順は、開発環境の Debian 12 の VM で、server をカーネルモードにして確認済みです。確認した内容は、エージェントのホスト自身のアドレスへの TCP と UDP の転送、別のホストへの TCP の転送、VM の再起動、エージェントの停止中の転送、稼働中と停止中の `agent doctor`、drop-in が無い場合の終了コード 3、teardown、2 つのモードの間の切り替えです。試験用の実機では、Proxmox VE の非特権の LXC コンテナ (Debian 13) で drop-in を確認済みです。このコンテナは nesting を有効にし、AppArmor のプロファイルを unconfined にしています。確認した内容は、`systemctl restart wgft-agent` の後とコンテナ自体の再起動の後に転送が戻ること、エージェントを約 40 秒止めている間も転送が続くこと、エージェントの稼働中と停止中の `wgft agent rotate-key` です。Ubuntu や Fedora のような他のディストリビューション、SELinux や AppArmor を有効にしたディストリビューション、nesting を無効にした Proxmox VE のコンテナ、AppArmor のプロファイルが制限をかける Proxmox VE のコンテナ、Incus のコンテナ、Docker では未確認です。Docker でカーネルモードを使う手順は、このガイドに記載していません。
 
 ### Docker で起動する
 

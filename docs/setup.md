@@ -313,7 +313,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart wgft-agent
 ```
 
-On a new host, run the first four commands before `systemctl enable --now wgft-agent` in the systemd setup; the agent then registers and starts in kernel mode. On a host where the agent already runs in userspace mode, the restart switches it. Do not add `ProtectKernelTunables=` to the drop-in: it makes `/proc/sys` read-only, which stops the agent from writing `ip_forward`.
+On a new host, run every command above except the restart before `systemctl enable --now wgft-agent` in the systemd setup; the agent then registers and starts in kernel mode. On a host where the agent already runs in userspace mode, the restart switches it. Do not add `ProtectKernelTunables=` to the drop-in: it makes `/proc/sys` read-only, which stops the agent from writing `ip_forward`.
 
 Check the result with `agent doctor`. While the agent runs, run it as the agent's user; the Dataplane items show `wgft0`, the table and forwarding as the agent reports them, and exit code 0 means this host can forward:
 
@@ -322,6 +322,8 @@ sudo runuser -u wgft -- wgft agent doctor
 ```
 
 While the agent is stopped, only root can read the kernel state, so run `sudo wgft agent doctor`. The process item reads FAILED, but the exit code stays 0 while `wgft0`, the table and `ip_forward` are in place, because the kernel keeps forwarding. Run as the `wgft` user instead, the Dataplane items of a stopped agent read UNKNOWN with `needs_cap_net_admin`, and the exit code is 2.
+
+While the agent is stopped, nothing puts its table back. On a host whose `nftables.conf` starts with `flush ruleset`, `systemctl reload nftables` then removes `table inet wgft_agent` but leaves `wgft0` and `ip_forward` at 1, so nothing stops traffic from the VPS peer to this host and the LAN until the agent starts again and publishes the table; `sudo wgft agent doctor` reads the table as FAILED meanwhile.
 
 To go back to userspace mode, stop the agent, remove what kernel mode left with `wgft agent teardown`, then remove `WGFT_MODE=kernel` and the drop-in:
 
@@ -337,7 +339,7 @@ sudo systemctl start wgft-agent
 
 `wgft agent teardown` removes `wgft0`, the conntrack entries of the flows the agent forwarded, `table inet wgft_agent` and the kernel-mode records in `agent.json`. The registration and the key stay, so the agent reconnects as the same agent. It refuses while the agent runs. It does not set `ip_forward` back; when the agent changed it from 0, the output prints the command to restore it. An agent started in userspace mode before the teardown refuses to start while those kernel-mode records remain, and names `wgft agent teardown`.
 
-These steps have been verified on a Debian 12 VM in the development lab, with the server in kernel mode: TCP and UDP forwarding to the agent host's own address and to another host, reboots, forwarding while the agent is stopped, `agent doctor` running and stopped, the exit code 3 without the drop-in, the teardown and the switch back and forth. On a staging machine, the drop-in has been verified in an unprivileged Debian 13 LXC container on Proxmox VE, with nesting enabled and the container's AppArmor profile unconfined. There, forwarding came back after `systemctl restart wgft-agent` and after restarting the container itself, forwarding continued while the agent was stopped for about 40 seconds, and `wgft agent rotate-key` worked with the agent running and with it stopped. Not verified: other distributions such as Ubuntu and Fedora, distributions that enforce SELinux or AppArmor, Proxmox VE containers with nesting disabled or with an AppArmor profile that confines them, Incus containers, and Docker. This guide has no kernel-mode steps for Docker.
+These steps have been verified on a Debian 12 VM in the development lab, with the server in kernel mode: TCP and UDP forwarding to the agent host's own address, TCP forwarding to another host, reboots, forwarding while the agent is stopped, `agent doctor` running and stopped, the exit code 3 without the drop-in, the teardown and the switch back and forth. On a staging machine, the drop-in has been verified in an unprivileged Debian 13 LXC container on Proxmox VE, with nesting enabled and the container's AppArmor profile unconfined. There, forwarding came back after `systemctl restart wgft-agent` and after restarting the container itself, forwarding continued while the agent was stopped for about 40 seconds, and `wgft agent rotate-key` worked with the agent running and with it stopped. Not verified: other distributions such as Ubuntu and Fedora, distributions that enforce SELinux or AppArmor, Proxmox VE containers with nesting disabled or with an AppArmor profile that confines them, Incus containers, and Docker. This guide has no kernel-mode steps for Docker.
 
 ### Run the agent in Docker
 
