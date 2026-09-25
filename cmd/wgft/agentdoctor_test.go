@@ -647,6 +647,24 @@ func TestAgentDoctorScenarios(t *testing.T) {
 			wantExit: 0,
 		},
 		{
+			// データディレクトリを辿れないと、os.ReadFile は agent.json が無くても権限の誤りを
+			// 返す。ファイルがあって読めない場合と取り違えず、有無を判定できないことを別の符号で
+			// 示す。呼び出し元の権限が届かなかった実行なので、層 2 として終了コード 2 にする(10.2c 節)。
+			name:                 "the data directory cannot be searched and holds no credentials file",
+			needsUnixPermissions: true,
+			setup: func(t *testing.T, in *agentDoctorInput) {
+				chmodForTest(t, in.DataDir, 0)
+			},
+			want: []wantCheck{
+				{agentCheckPrivileges, statusFailed, agentReasonPermissionDenied},
+				{agentCheckCredentials, statusUnknown, agentReasonDataDirUnreadable},
+				{agentCheckHostResolve, statusSkipped, agentReasonDataDirUnreadable},
+				{agentCheckLastState, statusSkipped, agentReasonDataDirUnreadable},
+				{agentCheckWGResolve, statusSkipped, agentReasonDataDirUnreadable},
+			},
+			wantExit: 2,
+		},
+		{
 			name:                 "only the credentials file cannot be read",
 			needsUnixPermissions: true,
 			setup: func(t *testing.T, in *agentDoctorInput) {
@@ -962,6 +980,76 @@ func TestAgentDoctorSaysWhenTheDataDirCameFromTheDefaults(t *testing.T) {
 		if strings.Contains(c.Detail, "the default, because") {
 			t.Errorf("%s carries the note although the config file was read: %q", id, c.Detail)
 		}
+	}
+}
+
+// 既定のデータディレクトリに認証情報ファイルが無い実行は、ホストが未登録だと断定せず、エージェントが
+// 別のデータディレクトリで動いているなら同じ --data-dir で打ち直すことを先に案内する。新しい招待を
+// 先に案内すると、動いているエージェントと同じ名前の登録に当たり、その先の revoke がそのエージェントを
+// 切る。データディレクトリを明示した実行でも、見たディレクトリを名指す。
+func TestAgentDoctorPointsAtTheDataDirBeforeANewJoin(t *testing.T) {
+	dir := t.TempDir()
+	in := testAgentDoctorInput(t, dir)
+	in.DataDirDefault = true
+	rep := agentDiagnose(in)
+	want := "This run looked at the default data directory " + dir + ". If the agent runs with --data-dir"
+	for _, id := range []string{agentCheckCredentials, agentCheckProcess} {
+		c, _ := findAgentCheck(rep, id)
+		if c.Status != statusFailed {
+			t.Fatalf("%s = %s, want failed", id, c.Status)
+		}
+		if !strings.HasPrefix(c.Next, want) {
+			t.Errorf("%s does not lead with the data directory: %q", id, c.Next)
+		}
+		if strings.Contains(c.Detail, "this host has never registered") {
+			t.Errorf("%s asserts the host never registered from one directory's evidence: %q", id, c.Detail)
+		}
+	}
+	err := agentDoctorExit(rep)
+	if err == nil || !strings.Contains(err.Error(), "run it again with the same --data-dir") {
+		t.Errorf("the closing line does not name the data directory: %v", err)
+	}
+
+	// 登録済みのファイルがあれば、そのディレクトリがエージェントのものなので、停止の所見も終了の
+	// 1 行もディレクトリを疑わない。
+	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+	rep = agentDiagnose(in)
+	if c, _ := findAgentCheck(rep, agentCheckProcess); strings.HasPrefix(c.Next, "This run looked at") {
+		t.Errorf("a registered default directory still doubts itself: %q", c.Next)
+	}
+	if err := agentDoctorExit(rep); err != nil && strings.Contains(err.Error(), "same --data-dir") {
+		t.Errorf("a registered default directory still doubts itself: %v", err)
+	}
+
+	// 明示したディレクトリでも、見たディレクトリを名指して取り違えを先に疑う。
+	explicit := testAgentDoctorInput(t, t.TempDir())
+	c, _ := findAgentCheck(agentDiagnose(explicit), agentCheckCredentials)
+	if !strings.HasPrefix(c.Next, "This run looked at "+explicit.DataDir+". If the agent runs with another data directory") {
+		t.Errorf("an explicit data directory is not named first: %q", c.Next)
+	}
+}
+
+// 既定のデータディレクトリを辿れない実行は、権限の所見でも、同じ利用者での打ち直しより先に
+// データディレクトリの取り違えを案内する。エージェントを動かす利用者で打っていても、エージェントが
+// 別のディレクトリで動いていれば、既定のディレクトリは拒みうるためである。
+func TestAgentDoctorPrivilegesPointAtTheDefaultDataDir(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("this scenario needs a user that some directory refuses")
+	}
+	dir := t.TempDir()
+	in := testAgentDoctorInput(t, dir)
+	in.DataDirDefault = true
+	chmodForTest(t, dir, 0)
+	rep := agentDiagnose(in)
+	for _, id := range []string{agentCheckPrivileges, agentCheckCredentials} {
+		c, _ := findAgentCheck(rep, id)
+		if !strings.HasPrefix(c.Next, "This run looked at the default data directory") {
+			t.Errorf("%s does not lead with the data directory: %q", id, c.Next)
+		}
+	}
+	c, _ := findAgentCheck(rep, agentCheckCredentials)
+	if strings.Contains(c.Detail, "exists but cannot be read") {
+		t.Errorf("a directory that cannot be searched is reported as a file that exists: %q", c.Detail)
 	}
 }
 

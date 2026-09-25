@@ -189,6 +189,14 @@ a target. The two exceptions to reading alone are name resolution: it resolves
 the agent API endpoint and the WireGuard peer, neither of which opens a
 connection to a service.
 
+It answers for one data directory only. If the agent runs with --data-dir or
+WGFT_DATA_DIR, give this command the same value; otherwise it reads the
+default directory, where no credentials file is found. A run on the default
+directory that finds no registered credentials file names the directory it
+read and suggests the agent's --data-dir before a new join string, since a new
+registration under a running agent's name is refused and revoking that name
+cuts the running agent off.
+
 Its own settings come from where "agent run" takes them: the flags, the
 environment and the dotenv file named by --config. A dotenv file that is there
 but cannot be read here is reported as a finding, and the report is built from

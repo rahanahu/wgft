@@ -1,6 +1,10 @@
 package agent
 
 import (
+	"context"
+	"crypto/sha256"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -26,5 +30,25 @@ func TestParseJoin(t *testing.T) {
 		if _, err := ParseJoin(bad); err == nil {
 			t.Errorf("%q should be rejected", bad)
 		}
+	}
+}
+
+// 登録が 409 で拒まれた場合の文面は、revoke を案内する前に、その名前で動いているエージェントを
+// 指すよう述べる。別のデータディレクトリで動いているエージェントを見落として revoke すると、
+// 動いているエージェントを切るためである(設計文書 10.2c 節)。
+func TestRegisterConflictPointsAtTheRunningAgentFirst(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "agent already registered", http.StatusConflict)
+	}))
+	defer srv.Close()
+	j := &Join{Endpoint: strings.TrimPrefix(srv.URL, "https://"), Token: "t", Pin: sha256.Sum256(srv.Certificate().Raw)}
+	_, _, _, err := Register(context.Background(), j, "home")
+	if err == nil {
+		t.Fatal("a 409 registered")
+	}
+	msg := err.Error()
+	point, revoke := strings.Index(msg, "point WGFT_DATA_DIR at its directory"), strings.Index(msg, "wgft agent revoke")
+	if point < 0 || revoke < 0 || point > revoke {
+		t.Errorf("the refusal does not point at the running agent before the revoke: %s", msg)
 	}
 }
