@@ -161,21 +161,22 @@ func runTailscaleStatus(ctx context.Context) ([]byte, error) {
 // 使えるアドレスがないときは、tailscale で始まる名前のインタフェースから選ぶ
 // (tailscaleIP、仕様 11 節)。detail はログに添える出どころの説明。
 // どちらからも選べず、CGNAT アドレスを持つ他のインタフェースがあれば other に入れる。
-func detectAdminTailscale(ctx context.Context) (ip, dnsName, detail, other string) {
+// fromStatus は選んだアドレスが `tailscale status` の答えであることを表す。偽なら dnsName は分からない。
+func detectAdminTailscale(ctx context.Context) (ip, dnsName, detail, other string, fromStatus bool) {
 	if out, err := runTailscaleStatus(ctx); err == nil {
 		if sip, sdns, ok := parseTailscaleStatus(out); ok {
 			d := "from tailscale status"
 			if sdns != "" {
 				d = sdns + ", from tailscale status"
 			}
-			return sip, sdns, d, ""
+			return sip, sdns, d, "", true
 		}
 	}
 	iface, iip, iother := tailscaleIP()
 	if iip != "" {
-		return iip, "", "from interface " + iface, ""
+		return iip, "", "from interface " + iface, "", false
 	}
-	return "", "", "", iother
+	return "", "", "", iother, false
 }
 
 // Options は vpsd の起動オプション。
@@ -532,7 +533,7 @@ func (d *Daemon) listenAdmin(ctx context.Context, errc chan<- error) error {
 	srv := admin.New(d)
 	srv.AllowedHosts = append(srv.AllowedHosts, d.opts.AdminHost...)
 	if d.opts.AdminTailscale {
-		if ip, dnsName, detail, other := detectAdminTailscale(ctx); ip != "" {
+		if ip, dnsName, detail, other, _ := detectAdminTailscale(ctx); ip != "" {
 			tsAddr := net.JoinHostPort(ip, adminTailscalePort)
 			tsLn, iface, err := listenTailnet(ctx, ip, adminTailscalePort)
 			if err != nil {
@@ -544,9 +545,9 @@ func (d *Daemon) listenAdmin(ctx context.Context, errc chan<- error) error {
 				port:     adminTailscalePort,
 				interval: tailnetWatchInterval,
 				links:    hostLinks{},
-				detect: func(ctx context.Context) (string, string, string) {
-					ip, dnsName, detail, _ := detectAdminTailscale(ctx)
-					return ip, dnsName, detail
+				detect: func(ctx context.Context) (string, string, string, bool) {
+					ip, dnsName, detail, _, fromStatus := detectAdminTailscale(ctx)
+					return ip, dnsName, detail, fromStatus
 				},
 				listen:   listenTailnet,
 				serve:    func(ln net.Listener) error { return admin.ServeListener(ln, srv) },
@@ -554,6 +555,7 @@ func (d *Daemon) listenAdmin(ctx context.Context, errc chan<- error) error {
 				errc:     errc,
 			}
 			addr, _ := netip.ParseAddr(ip)
+			ta.dnsName = dnsName
 			ta.start(tsLn, addr.Unmap(), iface)
 			go ta.run(ctx)
 		} else if other != "" {

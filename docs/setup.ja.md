@@ -437,7 +437,7 @@ WGFT_ADMIN=127.0.0.1:8686
 ssh -L 8686:127.0.0.1:8686 vps
 ```
 
-Tailscale 経由で管理画面にアクセスする場合は `WGFT_ADMIN_TAILSCALE=true` を設定します。追加の Host 名は `WGFT_ADMIN_HOST` で指定できます。server はこの待ち受けで、Tailscale のインタフェースから届き、送信元が tailnet のアドレスである接続だけを受け付けます。このため、LAN のアドレスを SNAT せずに転送するサブネットルータからは届きません。Tailscale の再起動でインタフェースが作り直されたときと、tailnet のアドレスが変わったときは、server が待ち受けを閉じて数秒のうちに開き直し、それぞれをログに 1 行ずつ書きます。
+Tailscale 経由で管理画面にアクセスする場合は `WGFT_ADMIN_TAILSCALE=true` を設定します。追加の Host 名は `WGFT_ADMIN_HOST` で指定できます。server はこの待ち受けで、Tailscale のインタフェースから届き、送信元が tailnet のアドレスである接続だけを受け付けます。このため、LAN のアドレスを SNAT せずに転送するサブネットルータからは届きません。Tailscale の再起動でインタフェースが作り直されたときと、tailnet のアドレスが変わったときは、server が待ち受けを閉じて数秒のうちに開き直し、それぞれをログに 1 行ずつ書きます。server が Tailscale より先に起動して tailnet のアドレスが無かった場合は、wgft を再起動するまでこの待ち受けを開きません。
 
 ## HTTPS を公開する
 

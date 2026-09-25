@@ -162,6 +162,10 @@ func bindToIfindex(iface tailnetIface) func(network, address string, c syscall.R
 // tailnetWatchInterval は --admin-tailscale の待ち受けの縛り先を確かめる間隔。
 const tailnetWatchInterval = 2 * time.Second
 
+// tailnetWatchMaxInterval は、閉じている間に開き直しの試みが続けて失敗したときに伸ばす間隔の上限。
+// 試みは `tailscale status --json` を起こすので、失敗が続く間は 2 秒ごとに起こさない。
+const tailnetWatchMaxInterval = 30 * time.Second
+
 // tailnetLinks は、見張りが読むインタフェースの状態。単体テストで差し替えるための境目。
 type tailnetLinks interface {
 	// state は名前 name のインタフェースの番号と、それが ip を持つかを返す。無ければ exists は偽。
@@ -209,7 +213,9 @@ type tailnetAdmin struct {
 	port     string
 	interval time.Duration
 	links    tailnetLinks
-	detect   func(context.Context) (ip, dnsName, detail string)
+	// detect は起動時と同じ検出。nameKnown は dnsName が `tailscale status` の答えであることを表す。
+	// インタフェースからの検出では名前が分からないので偽になる。
+	detect   func(context.Context) (ip, dnsName, detail string, nameKnown bool)
 	listen   func(ctx context.Context, ip, port string) (net.Listener, tailnetIface, error)
 	serve    func(net.Listener) error
 	setHosts func([]string)
@@ -217,8 +223,12 @@ type tailnetAdmin struct {
 
 	ln      *servedListener
 	ip      netip.Addr
+	dnsName string // Host の許可に入れている MagicDNS 名。無ければ空
 	iface   tailnetIface
 	lastMsg string // 閉じている間の直前の試みの結果。同じ結果を繰り返しログに書かない
+	// failures は閉じている間に続けて失敗した開き直しの試みの数。次の見張りまでの間隔を伸ばす。
+	// 待ち受けを閉じるときと、見込みが無くて試みないときに 0 に戻す。開いている間は使わない
+	failures int
 }
 
 func tailnetHosts(ip, dnsName string) []string {
@@ -252,17 +262,31 @@ func (t *tailnetAdmin) stop() {
 	t.ln = nil
 }
 
-// run は ctx が終わるまで interval ごとに check を呼ぶ。
+// delay は次の見張りまでの間隔。開いている間と、閉じていても試みが失敗していない間は interval。
+// 閉じている間に試みが続けて失敗すると、失敗のたびに倍にし、tailnetWatchMaxInterval で止める。
+func (t *tailnetAdmin) delay() time.Duration {
+	d := t.interval
+	if t.ln != nil {
+		return d
+	}
+	for i := 0; i < t.failures && d < tailnetWatchMaxInterval; i++ {
+		d *= 2
+	}
+	return min(d, tailnetWatchMaxInterval)
+}
+
+// run は ctx が終わるまで delay ごとに check を呼ぶ。
 func (t *tailnetAdmin) run(ctx context.Context) {
-	tick := time.NewTicker(t.interval)
-	defer tick.Stop()
+	timer := time.NewTimer(t.delay())
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			t.stop()
 			return
-		case <-tick.C:
+		case <-timer.C:
 			t.check(ctx)
+			timer.Reset(t.delay())
 		}
 	}
 }
@@ -286,34 +310,44 @@ func (t *tailnetAdmin) check(ctx context.Context) {
 		addr := net.JoinHostPort(t.ip.String(), t.port)
 		t.stop()
 		t.lastMsg = ""
+		t.failures = 0
 		log.Printf("warning: admin API tailscale: %s; closed the listener on %s until a tailnet address is back", reason, addr)
 	}
 	if !t.links.candidate(t.iface.name) {
+		t.failures = 0
 		return
 	}
-	ip, dnsName, detail := t.detect(ctx)
+	ip, dnsName, detail, nameKnown := t.detect(ctx)
 	if ip == "" {
-		t.note("no tailnet address found yet")
+		t.fail("no tailnet address found yet")
 		return
 	}
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
-		t.note(err.Error())
+		t.fail(err.Error())
 		return
+	}
+	addr = addr.Unmap()
+	// インタフェースからの検出は MagicDNS 名を知らない。アドレスが前と同じなら、前の名前を保つ。
+	// アドレスが変わったなら、前の名前はもう自分を指さないので外す
+	if !nameKnown && addr == t.ip {
+		dnsName = t.dnsName
 	}
 	ln, iface, err := t.listen(ctx, ip, t.port)
 	if err != nil {
-		t.note(err.Error())
+		t.fail(err.Error())
 		return
 	}
 	t.setHosts(tailnetHosts(ip, dnsName))
-	t.start(ln, addr.Unmap(), iface)
+	t.dnsName = dnsName
+	t.start(ln, addr, iface)
 	t.lastMsg = ""
 	log.Printf("admin API tailscale: listening again on %s, %s; bound to interface %s index %d", net.JoinHostPort(ip, t.port), detail, iface.name, iface.index)
 }
 
-// note は閉じている間の試みの失敗を、直前と違うときだけログに書く。
-func (t *tailnetAdmin) note(msg string) {
+// fail は閉じている間の試みの失敗を数え、直前と違うときだけログに書く。
+func (t *tailnetAdmin) fail(msg string) {
+	t.failures++
 	if msg == t.lastMsg {
 		return
 	}

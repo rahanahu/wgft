@@ -285,6 +285,7 @@ type watchHarness struct {
 	links   *fakeLinks
 	tsIP    string // detect が返す tailnet の IP。空なら見つからない
 	tsDNS   string
+	byIface bool     // 真なら detect はインタフェースからの検出を模し、名前を知らない
 	opened  []string // listen の呼び出しの記録: "ip@name#index"
 	hosts   []string
 	errc    chan error
@@ -319,9 +320,12 @@ func newWatchHarness(t *testing.T) *watchHarness {
 	h.t = &tailnetAdmin{
 		port:  "8686",
 		links: h.links,
-		detect: func(context.Context) (string, string, string) {
+		detect: func(context.Context) (string, string, string, bool) {
 			h.detects++
-			return h.tsIP, h.tsDNS, "test"
+			if h.byIface {
+				return h.tsIP, "", "test", false
+			}
+			return h.tsIP, h.tsDNS, "test", true
 		},
 		listen: func(_ context.Context, ip, _ string) (net.Listener, tailnetIface, error) {
 			iface, ok := h.links.holderOf(ip)
@@ -343,6 +347,7 @@ func newWatchHarness(t *testing.T) *watchHarness {
 		t.Fatal(err)
 	}
 	h.opened = nil
+	h.t.dnsName = "vps.example.ts.net"
 	h.t.start(ln, netip.MustParseAddr("100.100.1.1"), iface)
 	return h
 }
@@ -456,4 +461,123 @@ func TestTailnetAdminRunStops(t *testing.T) {
 		t.Fatalf("run did not close the listener on ctx end")
 	}
 	h.noServeError(t)
+}
+
+// tailnetAdmin:開き直しの検出がインタフェースに落ちて名前を知らないとき、アドレスが前と同じなら前の
+// MagicDNS 名を Host の許可に保つ。アドレスが変わったなら前の名前は外す。
+func TestTailnetAdminKeepsNameOnInterfaceFallback(t *testing.T) {
+	h := newWatchHarness(t)
+	h.byIface = true
+	h.links.index["tailscale0"] = 5
+	h.t.check(context.Background())
+	if h.t.ln == nil {
+		t.Fatalf("recreated interface: not reopened")
+	}
+	if fmt.Sprint(h.hosts) != "[100.100.1.1 vps.example.ts.net]" {
+		t.Fatalf("same address from the interface: hosts = %v, want the name kept", h.hosts)
+	}
+	// 次の開き直しでも保たれる
+	h.links.index["tailscale0"] = 6
+	h.t.check(context.Background())
+	if fmt.Sprint(h.hosts) != "[100.100.1.1 vps.example.ts.net]" {
+		t.Fatalf("second reopen from the interface: hosts = %v", h.hosts)
+	}
+	// アドレスが変われば名前は外れる
+	h.tsIP = "100.101.0.9"
+	h.links.index["tailscale0"] = 7
+	h.links.addrs["tailscale0"] = []netip.Addr{netip.MustParseAddr("100.101.0.9")}
+	h.t.check(context.Background())
+	if fmt.Sprint(h.hosts) != "[100.101.0.9]" {
+		t.Fatalf("new address from the interface: hosts = %v, want the old name dropped", h.hosts)
+	}
+	// tailscale status の答えは名前が空でもそのまま使う
+	h.byIface, h.tsDNS = false, ""
+	h.links.index["tailscale0"] = 8
+	h.t.check(context.Background())
+	if fmt.Sprint(h.hosts) != "[100.101.0.9]" || h.t.dnsName != "" {
+		t.Fatalf("status without a name: hosts = %v dnsName = %q", h.hosts, h.t.dnsName)
+	}
+	h.tsDNS = "vps.example.ts.net"
+	h.links.index["tailscale0"] = 9
+	h.t.check(context.Background())
+	if fmt.Sprint(h.hosts) != "[100.101.0.9 vps.example.ts.net]" {
+		t.Fatalf("status with a name again: hosts = %v", h.hosts)
+	}
+}
+
+// tailnetAdmin:閉じている間に試みが続けて失敗すると、間隔を倍々に伸ばして 30 秒で止め、成功で戻す。
+// 見込みが無くて検出を起こさない間と、開いている間は元の間隔のまま。
+func TestTailnetAdminBacksOff(t *testing.T) {
+	h := newWatchHarness(t)
+	h.t.interval = 2 * time.Second
+	if d := h.t.delay(); d != 2*time.Second {
+		t.Fatalf("open: delay = %v, want 2s", d)
+	}
+	// status がどのインタフェースも持たないアドレスを返し続ける
+	h.tsIP = "100.99.9.9"
+	h.links.index["tailscale0"] = 5
+	var got []time.Duration
+	for i := 0; i < 6; i++ {
+		h.t.check(context.Background())
+		got = append(got, h.t.delay())
+	}
+	if want := "[4s 8s 16s 30s 30s 30s]"; fmt.Sprint(got) != want {
+		t.Fatalf("delays while failing = %v, want %s", got, want)
+	}
+	if h.detects != 6 {
+		t.Fatalf("detects = %d, want 6", h.detects)
+	}
+	// 失敗の途中で見込みが消えたら、元の間隔に戻る
+	saved := h.links.addrs["tailscale0"]
+	h.links.addrs["tailscale0"] = nil
+	h.t.check(context.Background())
+	if h.t.delay() != 2*time.Second {
+		t.Fatalf("candidate gone while failing: delay = %v, want 2s", h.t.delay())
+	}
+	h.links.addrs["tailscale0"] = saved
+	h.t.check(context.Background())
+	if h.t.delay() != 4*time.Second {
+		t.Fatalf("failing again: delay = %v, want 4s", h.t.delay())
+	}
+	h.tsIP = "100.100.1.1"
+	h.t.check(context.Background())
+	if h.t.ln == nil || h.t.delay() != 2*time.Second {
+		t.Fatalf("after success: ln=%v delay=%v, want open and 2s", h.t.ln, h.t.delay())
+	}
+	// 開き直した後の次の閉じは、前の失敗の数を持ち越さない
+	h.tsIP = "100.99.9.9"
+	h.links.index["tailscale0"] = 6
+	h.t.check(context.Background())
+	if h.t.ln != nil || h.t.delay() != 4*time.Second {
+		t.Fatalf("closed again and one failure: ln=%v delay=%v, want closed and 4s", h.t.ln, h.t.delay())
+	}
+	h.tsIP = "100.100.1.1"
+	h.t.check(context.Background())
+	// 見込みが無い間は検出を起こさず、間隔も伸ばさない
+	delete(h.links.index, "tailscale0")
+	delete(h.links.addrs, "tailscale0")
+	for i := 0; i < 3; i++ {
+		h.t.check(context.Background())
+	}
+	if h.t.delay() != 2*time.Second {
+		t.Fatalf("no candidate: delay = %v, want 2s", h.t.delay())
+	}
+}
+
+// tailnetAdmin:run は delay の間隔で見張る。失敗が続く間は検出の回数が伸びた間隔の分だけに減る。
+func TestTailnetAdminRunUsesBackoff(t *testing.T) {
+	h := newWatchHarness(t)
+	h.t.interval = 10 * time.Millisecond
+	h.tsIP = "100.99.9.9"           // どのインタフェースも持たない
+	h.links.index["tailscale0"] = 5 // 最初の見張りで閉じる
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { h.t.run(ctx); close(done) }()
+	time.Sleep(400 * time.Millisecond)
+	cancel()
+	<-done
+	// 伸ばす間隔では 10+20+40+80+160 ミリ秒で 5 回ほど。固定の 10 ミリ秒なら 40 回ほどになる
+	if h.detects < 2 || h.detects > 10 {
+		t.Fatalf("detects in 400ms = %d, want between 2 and 10", h.detects)
+	}
 }
