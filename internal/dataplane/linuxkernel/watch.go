@@ -15,7 +15,18 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane"
 )
 
-var _ dataplane.Sensor = (*Backend)(nil)
+var (
+	_ dataplane.Sensor = (*Backend)(nil)
+	_ dataplane.Sensor = Notifications{}
+)
+
+// Notifications is the same subscription as Backend.Watch, for a control plane that converges the
+// kernel without a Backend: the agent's kernel mode (design.md 7b.4 節: 変更の通知). It holds no
+// state, so its zero value is ready to use.
+type Notifications struct{}
+
+// Watch is Backend.Watch; see there.
+func (Notifications) Watch(ctx context.Context, wake func()) error { return watch(ctx, wake) }
 
 // notifyReceiveBuffer is the receive buffer requested for the netlink socket that carries the
 // nftables change notifications (NFNLGRP_NFTABLES) subscribed below. Publishing a large Admission
@@ -56,7 +67,9 @@ func sizeNotifySocket(c *mdnetlink.Conn) error {
 //
 // Watch returns nil when ctx is done. A failed subscription (a receive buffer overflow, ENOBUFS,
 // loses notifications) wakes once more and returns the error, for the caller to restart it.
-func (b *Backend) Watch(ctx context.Context, wake func()) error {
+func (b *Backend) Watch(ctx context.Context, wake func()) error { return watch(ctx, wake) }
+
+func watch(ctx context.Context, wake func()) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	failed := make(chan error, 3)

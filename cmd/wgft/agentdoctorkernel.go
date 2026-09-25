@@ -322,7 +322,7 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 		c.Status, c.Reason = statusUnknown, agentReasonInterfaceDiffers
 		c.Detail = facts + "; it differs from the declaration in " + strings.Join(differs, ", ")
 		if ev.running {
-			c.Next = "the running agent converges it back on its next 30s check; if this stays, read its log for the check's error"
+			c.Next = "the running agent converges it back within 30s, at once for a change the kernel notifies it of; if this stays, read its log for the check's error"
 		} else {
 			c.Next = "nothing converges it while the agent is stopped; start the agent, and it converges the interface to the declaration"
 		}
@@ -335,7 +335,7 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 // agentKernelLinkNext は、インタフェースが欠けた実行の次の手である。
 func agentKernelLinkNext(ev agentKernelEvidence, fix string) string {
 	if ev.running {
-		return "the running agent repairs this on its next 30s check; if it stays, read its log with journalctl -u wgft-agent, or docker logs for a container"
+		return "the running agent repairs this as soon as the kernel notifies it of the change, and its 30s check tries again after a failure; if it stays, read its log with journalctl -u wgft-agent, or docker logs for a container"
 	}
 	return "start the agent; " + fix + ". Until then the kernel does not forward for it"
 }
@@ -464,7 +464,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		}
 		c.Detail += staleNote + agentKernelStoppedNote(ev)
 		if ev.running {
-			c.Next = "the running agent publishes the table again on its next 30s check; if they stay missing, another program on this host removes them"
+			c.Next = "the running agent publishes the table again as soon as the kernel notifies it of the change, and its 30s check tries again after a failure; if they stay missing, another program on this host removes them"
 		} else {
 			c.Next = "start the agent; it publishes the whole table again on start. Until then nothing puts these rows back"
 		}
@@ -478,7 +478,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		c.Status, c.Reason = statusUnknown, agentReasonTableChanged
 		c.Detail = fmt.Sprintf("table inet wgft_agent holds every row %s. %s", compared, agentChangeText(t)) + staleNote + agentKernelStoppedNote(ev)
 		if ev.running {
-			c.Next = "the running agent publishes the table again on its next 30s check; if the change keeps coming back, another program on this host writes into the table"
+			c.Next = "the running agent publishes the table again as soon as the kernel notifies it of the change, and its 30s check tries again after a failure; if the change keeps coming back, another program on this host writes into the table"
 		} else {
 			c.Next = "start the agent; it publishes the table again. Whether the added or moved items stop forwarding is not known here"
 		}
@@ -502,7 +502,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		summary += fmt.Sprintf("; %d rule%s: %s", len(ev.rules), pluralS(len(ev.rules)), strings.Join(agentKernelRuleLines(ev.rules), "; "))
 	}
 	if ev.checkError != "" {
-		summary += "; the last 30s check failed: " + ev.checkError
+		summary += "; the agent's last check of the table and wgft0 failed: " + ev.checkError
 	}
 	if !ev.running {
 		c.Status, c.Reason = statusUnknown, agentReasonNotRunning
@@ -608,7 +608,7 @@ func agentTableCompared(t agent.DoctorKernelTable) string {
 
 func agentKernelTableNext(ev agentKernelEvidence) string {
 	if ev.running {
-		return "the running agent publishes the table again on its next 30s check; if this stays, read its log with journalctl -u wgft-agent, or docker logs for a container"
+		return "the running agent publishes the table again as soon as the kernel notifies it of the change, and its 30s check tries again after a failure; if this stays, read its log with journalctl -u wgft-agent, or docker logs for a container"
 	}
 	return "start the agent; it publishes the whole table again on start. Until then the kernel does not forward what is missing"
 }

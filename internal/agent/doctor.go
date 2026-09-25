@@ -130,7 +130,8 @@ type DoctorRuntimeState struct {
 	// PublishError は、公開できずに試し直している全体状態の誤りである(7b.3 節の 3 つ目の種類)。
 	// 旧いテーブルが残って転送を続けている
 	PublishError string `json:"publish_error,omitempty"`
-	// CheckError は、カーネルモードの直前の 30 秒ごとの見直しの誤りである(7b.4 節)
+	// CheckError は、カーネルモードの直前の見直しの誤りである。30 秒ごとの見直しと変更の通知の後の
+	// 見直しの両方を指す(7b.4 節)
 	CheckError string `json:"check_error,omitempty"`
 }
 
@@ -395,7 +396,8 @@ func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 type kernelDoctor interface {
 	// doctorKernel はカーネルを読む。停止中の agent doctor の ReadKernel と同じ読み方である
 	doctorKernel() *DoctorKernel
-	// checkError は直前の 30 秒ごとの見直しの誤りである。無ければ空
+	// checkError は直前の見直しの誤りである。30 秒ごとの見直しと変更の通知の後の見直しの両方を指す。
+	// 無ければ空
 	checkError() string
 }
 
