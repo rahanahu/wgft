@@ -155,3 +155,39 @@ func TestUDPReplyNotOnTCPRules(t *testing.T) {
 		t.Errorf("a TCP rule's target carries a reply observation: %+v", c)
 	}
 }
+
+// UDP のルールの外からの確かめ方は、TCP の nc -vz を指さない。nc -vz は UDP の宛先に届いたか
+// どうかを答えず、正常な UDP のルールが届かないように見える(設計文書 10.2a 節)。実際の
+// クライアントを案内する。TCP のルールは今までどおり nc -vz を案内する。
+func TestOutsideTestFollowsTheProtocol(t *testing.T) {
+	u := udpRule()
+	uc := checkOf(t, diagnose(u, healthyInput(u)), checkPublicPort)
+	if strings.Contains(uc.Next, "nc -vz") || !strings.Contains(uc.Next, "real client") {
+		t.Errorf("a UDP rule's public port points at the wrong test: %q", uc.Next)
+	}
+	tc := tcpRule()
+	if c := checkOf(t, diagnose(tc, healthyInput(tc)), checkPublicPort); !strings.Contains(c.Next, "nc -vz <this vps> 25565") {
+		t.Errorf("a TCP rule's public port lost nc -vz: %q", c.Next)
+	}
+
+	outside := func(rules []proto.Rule) string {
+		in := healthyInput(rules[0])
+		in.Rules.Rules = rules
+		for _, nt := range buildReport(rules, in).NotTested {
+			if nt.ID == "from outside" {
+				return nt.Detail
+			}
+		}
+		t.Fatal("no from outside item")
+		return ""
+	}
+	if d := outside([]proto.Rule{u}); strings.Contains(d, "nc -vz") || !strings.Contains(d, "real client") {
+		t.Errorf("a UDP-only run's from outside item: %q", d)
+	}
+	if d := outside([]proto.Rule{tc}); !strings.Contains(d, "nc -vz") || strings.Contains(d, "real client") {
+		t.Errorf("a TCP-only run's from outside item: %q", d)
+	}
+	if d := outside([]proto.Rule{tc, u}); !strings.Contains(d, "nc -vz") || !strings.Contains(d, "real client") {
+		t.Errorf("a mixed run's from outside item names one protocol only: %q", d)
+	}
+}

@@ -47,7 +47,7 @@ func publicPortCheck(r proto.Rule, in Input) Check {
 			c.Detail += "; " + d
 			c.Internal = append(c.Internal, "drift: "+d)
 		}
-		c.Next = "test it from another host: nc -vz <this vps> " + strings.Split(r.ListenPort.String(), "-")[0]
+		c.Next = outsideTestNext(r)
 		return c
 	case adminapi.ApplyNotActive:
 		c.Status = StatusFailed
@@ -68,6 +68,20 @@ func publicPortCheck(r proto.Rule, in Input) Check {
 	c.Detail = fmt.Sprintf("the server reports a state this build does not know: %q", st.ApplyState)
 	c.Next = "upgrade this CLI to the server's version"
 	return c
+}
+
+// outsideTestNext は、公開ポートを外から確かめる次の一手である。TCP は nc -vz が接続の成否を答える。
+// UDP には同じ答えが無い。nc -u は送るだけで、宛先が受け取ったかどうかを知らせないので、届いて
+// いない正常なルールと区別が付かない(設計文書 10.2a 節)。UDP のルールでは実際のクライアントを
+// 案内し、応答があれば target の行に server が見た応答の時刻が出ることを添える。
+func outsideTestNext(r proto.Rule) string {
+	port := strings.Split(r.ListenPort.String(), "-")[0]
+	if r.Proto == proto.UDP {
+		return "test it from another host with the real client, such as the game or app that uses this port. " +
+			"A bare UDP send such as nc -u <this vps> " + port + " cannot show whether the datagram arrived, so its quiet result proves nothing. " +
+			"When the service answers, the target line shows when this server last saw a reply"
+	}
+	return "test it from another host: nc -vz <this vps> " + port
 }
 
 // DataplaneCheck は server 全体の公開の状態を見る(設計文書 7a.3 節)。ルールに属さない唯一の

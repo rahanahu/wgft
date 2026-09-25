@@ -317,6 +317,29 @@ func BuildReport(rules []proto.Rule, in Input) Report {
 	return rep
 }
 
+// outsideHow は、試していない範囲の「外からの到達」に添える確かめ方である。TCP は nc -vz が
+// 答えるが、UDP の送信は成否を知らせないので、UDP のポートには実際のクライアントを案内する
+// (設計文書 10.2a 節)。両方が混じる実行では両方を示す。
+func outsideHow(rules []proto.Rule) string {
+	tcp, udp := false, false
+	for _, r := range rules {
+		if r.Proto == proto.UDP {
+			udp = true
+		} else {
+			tcp = true
+		}
+	}
+	const tcpHow = "Test a TCP port from another host: nc -vz <vps> <port>."
+	const udpHow = "Test a UDP port from another host with the real client; a bare UDP send such as nc -u cannot show whether the datagram arrived."
+	switch {
+	case udp && tcp:
+		return tcpHow + " " + udpHow
+	case udp:
+		return udpHow
+	}
+	return tcpHow
+}
+
 // notTestedList は、この診断が試していない範囲を返す。何も壊れていない実行でも必ず出す。
 // 黙っていると運用者が沈黙を健全と読むためである(設計文書 10.2a 節)。
 func notTestedList(rules []proto.Rule, in Input) []NotTested {
@@ -326,7 +349,7 @@ func notTestedList(rules []proto.Rule, in Input) []NotTested {
 	}
 	out := []NotTested{
 		{"from outside", "whether the internet reaches " + ports + " on this VPS. DNAT applies to input from outside, so the " +
-			"server cannot reach its own public port from itself. Test it from another host: nc -vz <vps> <port>. Invisible here: " +
+			"server cannot reach its own public port from itself. " + outsideHow(rules) + " Invisible here: " +
 			"the provider's security group, this host's input firewall, the ISP, and, in userspace mode, a listen port inside the " +
 			"ephemeral range; see docs/setup.md."},
 		{"udp end to end", "a UDP rule cannot be tested end to end, because a UDP send cannot tell success. It is judged from " +
