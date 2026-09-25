@@ -51,12 +51,16 @@
 # capacity check as soon as it is invoked, not on a function call); appending an optional phase here
 # keeps the one already-paid-for VM pair and every helper function in scope with no new plumbing.
 #
-# The previous release defaults to the newest tag reachable from HEAD (WGFT_DIST_VM_UPGRADE_OLD_VERSION
+# The previous release defaults to the newest stable "vX.Y.Z" tag this build can treat as already
+# shipped, including one tagged on a maintenance branch such as release-v1.1 - not the newest tag
+# reachable from HEAD, which git describe gives and which a maintenance-branch release is not; see
+# the comment at the resolution below for the full reasoning. WGFT_DIST_VM_UPGRADE_OLD_VERSION
 # overrides it, unprefixed, e.g. "0.4.0" - the same convention as lab/upgrade.sh's
-# WGFT_UPGRADE_OLD_VERSION); its linux-amd64 binary is fetched and sha256-verified on the HOST (this
-# host reaches GitHub; the VMs are not assumed to, same reasoning as lab/oldrelease.sh, whose
-# fetch_release this sources and reuses rather than copying) and pushed into both VMs with
-# "incus file push", the same way the current build already is above.
+# WGFT_UPGRADE_OLD_VERSION. Its linux-amd64 binary is then fetched
+# and sha256-verified on the HOST, since this host reaches GitHub and the VMs are not assumed to -
+# same reasoning as lab/oldrelease.sh, whose fetch_release this sources and reuses rather than
+# copying - and pushed into both VMs with "incus file push", the same way the current build
+# already is above.
 #
 # Scenario, against the SAME two VMs and the SAME two data directories throughout: install the old
 # release fresh (its own tag's units, a fresh join, a representative rule of every shape
@@ -994,14 +998,75 @@ if [ "$UPGRADE" = 1 ]; then
   need python3
 
   OLD_VERSION=${WGFT_DIST_VM_UPGRADE_OLD_VERSION:-}
+  old_tag=""
+  head_tag=$(git -C "$REPO" describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null)
   if [ -z "$OLD_VERSION" ]; then
-    old_tag=$(git -C "$REPO" describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null)
+    # The immediately-previous release: the newest stable "vX.Y.Z" tag this build can treat as
+    # already shipped - not "the newest tag reachable from HEAD" (git describe's own idea of
+    # that), because a maintenance-branch release such as v1.1.2 or v1.1.3, tagged on
+    # release-v1.1, is cut from an ancestor of an earlier main commit, so it is never an ancestor
+    # of today's main HEAD. describe's reachability search would silently skip past both and land
+    # on an older tag still on main's own line, v1.1.1, understating "the immediately-previous
+    # release" docs/testing.md D4 asks for.
+    #
+    # A candidate tag is either an ancestor of HEAD - git tag --merged HEAD, kept regardless of
+    # when it was created, since ancestry alone already proves it existed in this build's own
+    # history - or not an ancestor, kept only if it was created before HEAD's own commit and its
+    # major.minor does not exceed the highest ancestor tag's. That ceiling matters once a
+    # maintenance branch keeps shipping after main has moved to a newer minor: without it, a
+    # release-v1.1 HEAD preparing v1.1.4 after main already tagged v1.2.0 would pick v1.2.0 as its
+    # previous release purely because v1.2.0 is chronologically older than the release-v1.1 commit
+    # under test, even though this build's own history does not descend from it. The date check on
+    # a non-ancestor tag is only a heuristic, not a proof: a maintenance branch that ships with no
+    # further commits landing on main afterward can still be missed this way, since nothing on
+    # main's own line would then be dated after it; WGFT_DIST_VM_UPGRADE_OLD_VERSION is the way
+    # out of that case.
+    #
+    # A tag pointing at HEAD itself is never a candidate, checked with git tag --points-at HEAD
+    # rather than describe's single exact-match pick, since a release commit can carry more than
+    # one tag at once - a final release and the pre-release tag that led to it, for example - and
+    # every one of them must be excluded, not just whichever one describe happens to prefer. Only
+    # the "vX.Y.Z" shape matches at all, so a pre-release suffix such as "v1.2.0-rc1" is never a
+    # candidate either. Among survivors, the highest version wins, not the most recently created
+    # one; the two normally agree, but nothing here depends on tags being created in version order.
+    head_epoch=$(git -C "$REPO" log -1 --format=%ct HEAD 2>/dev/null)
+    if [ -n "$head_epoch" ]; then
+      git -C "$REPO" tag --points-at HEAD 'v[0-9]*.[0-9]*.[0-9]*' >"$tmp/upgrade-old-version-excl.txt" 2>/dev/null
+      git -C "$REPO" tag --merged HEAD 'v[0-9]*.[0-9]*.[0-9]*' >"$tmp/upgrade-old-version-reach.txt" 2>/dev/null
+      old_tag=$(git -C "$REPO" for-each-ref --format='%(creatordate:unix) %(refname:short)' 'refs/tags/v*' 2>/dev/null \
+        | awk -v head="$head_epoch" -v exclfile="$tmp/upgrade-old-version-excl.txt" -v reachfile="$tmp/upgrade-old-version-reach.txt" '
+            function majmin(v,   a) { sub(/^v/, "", v); split(v, a, "."); return a[1] "." a[2] }
+            BEGIN {
+              while ((getline line < exclfile) > 0) if (line != "") excl[line] = 1
+              close(exclfile)
+              cmaj = -1; cmin = -1
+              while ((getline line < reachfile) > 0) {
+                if (line == "" || (line in excl)) continue
+                if (line !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/) continue
+                split(majmin(line), p, ".")
+                if ((p[1] + 0) > cmaj || ((p[1] + 0) == cmaj && (p[2] + 0) > cmin)) { cmaj = p[1] + 0; cmin = p[2] + 0 }
+                reach[line] = 1
+              }
+              close(reachfile)
+            }
+            $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { next }
+            $2 in excl { next }
+            {
+              if (!($2 in reach) && $1 > head) next
+              if (cmaj >= 0) {
+                split(majmin($2), tm, ".")
+                if ((tm[1] + 0) > cmaj) next
+                if ((tm[1] + 0) == cmaj && (tm[2] + 0) > cmin) next
+              }
+              print $2
+            }' \
+        | sort -V | tail -1)
+    fi
     OLD_VERSION=${old_tag#v}
   fi
-  head_tag=$(git -C "$REPO" describe --tags --exact-match HEAD 2>/dev/null)
 
   if [ -z "$OLD_VERSION" ]; then
-    echo "FAIL  upgrade: could not determine a previous release (no v* tag reachable from HEAD); set WGFT_DIST_VM_UPGRADE_OLD_VERSION=X.Y.Z"
+    echo "FAIL  upgrade: could not determine a previous release: no vX.Y.Z tag was found that is either an ancestor of HEAD or created before it. If this checkout has no tags, run git fetch --tags and retry, or set WGFT_DIST_VM_UPGRADE_OLD_VERSION=X.Y.Z"
     fail=1; unexpected_fail=1
   elif [ "$head_tag" = "v$OLD_VERSION" ]; then
     echo "FAIL  upgrade: HEAD is exactly tagged v$OLD_VERSION, so there is no newer build to upgrade TO; set WGFT_DIST_VM_UPGRADE_OLD_VERSION to an older release"
@@ -1095,12 +1160,56 @@ if problems:
 print("%d rules identical across the upgrade" % len(old))
 PYEOF
     cat >"$tmp/stable_cred_hash.py" <<'PYEOF'
+# sha256 of the six identity fields that must survive an upgrade unchanged. They are
+# internal/agent/credentials.Credentials' own registration fields: name, endpoint, cert hash,
+# permanent token, used join-token hash, wg private key. This is a WHITELIST, not "everything but
+# last_state": last_state is rewritten on every reconnect, and a newer build can also add fields
+# the old release never wrote - tunnel_address as of docs/design.md's 2026-09-25 "トンネルの
+# アドレスの記録", checked separately by check_tunnel_address.py. Folding an added field into
+# this hash would fail the comparison on an upgrade that behaved correctly; see lab/upgrade.sh,
+# which has the same helper.
 import hashlib, json, sys
+IDENTITY_FIELDS = [
+    "name", "endpoint", "cert_sha256", "permanent_token",
+    "used_join_token_sha256", "wg_private_key",
+]
 with open(sys.argv[1]) as f:
     d = json.load(f)
-d.pop("last_state", None)  # rewritten on every reconnect; excluded so this isolates "same
-                            # credentials, no rotate-key, no re-enrolment" (see lab/upgrade.sh)
-print(hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest())
+identity = {k: d.get(k) for k in IDENTITY_FIELDS}
+print(hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest())
+PYEOF
+    cat >"$tmp/check_tunnel_address.py" <<'PYEOF'
+# check_tunnel_address.py <agent.json> <expected-address> <expected-prefix-bits>: docs/design.md's
+# 2026-09-25 "トンネルのアドレスの記録" promise for tunnel_address, a field an old release's
+# agent.json never had. It must exist once this build's agent has applied a full state. Its
+# address part must be the one the server assigned at registration - docs/design.md 9 section says
+# that does not change for the life of the registration - and, since by the time this runs the
+# agent has already applied a full state, tunnel_ok already waited for, it must carry the pool's
+# prefix length too. The address-only form is docs/design.md's other valid shape, right after
+# registration and before any full state, so it is not expected to still be showing at this point.
+import ipaddress, json, sys
+path, expected_addr, expected_bits = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(path) as f:
+    d = json.load(f)
+got = d.get("tunnel_address", "")
+if not got:
+    print("tunnel_address missing or empty")
+    sys.exit(1)
+if "/" in got:
+    addr, bits_s = got.split("/", 1)
+    bits = int(bits_s)
+else:
+    addr, bits = got, None
+if ipaddress.ip_address(addr) != ipaddress.ip_address(expected_addr):
+    print("tunnel_address %r: address %s does not match the one the server assigned, %s" % (got, addr, expected_addr))
+    sys.exit(1)
+if bits is None:
+    print("tunnel_address %r: still address-only; expected the %s/%d form since a full state was already applied" % (got, expected_addr, expected_bits))
+    sys.exit(1)
+if bits != expected_bits:
+    print("tunnel_address %r: prefix length %d does not match the pool's %d" % (got, bits, expected_bits))
+    sys.exit(1)
+print("tunnel_address %s matches the registered address and pool prefix" % got)
 PYEOF
 
     # ===============================================================================================
@@ -1224,6 +1333,18 @@ EOF
     old_agent_pubkey=$(incus exec "$agent_vm" -- wgft agent pubkey --data-dir /var/lib/wgft 2>/dev/null)
     if [ -n "$old_agent_pubkey" ]; then echo "PASS  upgrade: step1: v$OLD_VERSION agent public key read"; else echo "FAIL  upgrade: step1: v$OLD_VERSION agent public key empty"; fail=1; unexpected_fail=1; fi
     old_cred_hash=$(python3 "$tmp/stable_cred_hash.py" "$tmp/upgrade-old-agent.json" 2>/dev/null)
+    # home's tunnel address, as the server assigned it at registration - docs/design.md 9 section
+    # says it does not change for the life of the registration, so this baseline still holds after
+    # the swap below. server.env above never sets WGFT_WG_ADDRESS, so the pool is
+    # cmd/wgft/server.go's own default, 10.200.0.1/24 - hence the literal 24 passed to
+    # check_tunnel_address below.
+    home_addr=$(incus exec "$server_vm" -- wgft agent ls --json 2>/dev/null | python3 -c "
+import json, sys
+agents = json.load(sys.stdin)
+a = next((x for x in agents if x.get('name') == 'home'), {})
+print(a.get('address', ''))
+")
+    if [ -n "$home_addr" ]; then echo "PASS  upgrade: step1: agent ls reports home's assigned address"; else echo "FAIL  upgrade: step1: agent ls did not report home's assigned address"; fail=1; unexpected_fail=1; fi
     # server's own WireGuard public key (kernel mode): unlike lab/upgrade.sh, which runs inside a lab
     # image that has wireguard-tools installed, these VMs deliberately have neither wg(8) nor nft(8)
     # (header comment: wgft talks to the kernel over netlink itself, so the base image needs neither,
@@ -1296,6 +1417,12 @@ EOF
     incus exec "$agent_vm" -- cat /var/lib/wgft/agent.json >"$tmp/upgrade-new-agent.json" 2>/dev/null
     new_cred_hash=$(python3 "$tmp/stable_cred_hash.py" "$tmp/upgrade-new-agent.json" 2>/dev/null)
     strcheck "upgrade: step4: agent credentials (name/endpoint/cert/token/wg key) unchanged, no re-enrolment" "$old_cred_hash" "$new_cred_hash"
+    tunnel_addr_out=$(python3 "$tmp/check_tunnel_address.py" "$tmp/upgrade-new-agent.json" "$home_addr" 24); tunnel_addr_rc=$?
+    if [ "$tunnel_addr_rc" = 0 ]; then
+      echo "PASS  upgrade: step4: $tunnel_addr_out"
+    else
+      echo "FAIL  upgrade: step4: tunnel_address wrong after the upgrade: $tunnel_addr_out"; fail=1; unexpected_fail=1
+    fi
     new_agent_pubkey=$(incus exec "$agent_vm" -- wgft agent pubkey --data-dir /var/lib/wgft 2>/dev/null)
     strcheck "upgrade: step4: agent's WireGuard public key is unchanged" "$old_agent_pubkey" "$new_agent_pubkey"
 
