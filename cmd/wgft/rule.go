@@ -13,6 +13,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
@@ -755,9 +756,14 @@ func agentRuleNote(states map[string]admin.AgentRuleStatus, ruleID string) strin
 	}
 	note := "-"
 	if st.State != "" {
-		note = st.State
+		// st.State and st.Reason come from the rule's owning agent's own heartbeat
+		// (design.md 5.2 節), and the agent is outside the trust boundary (design.md 11
+		// 節): sanitize the branch taken and the comparison both read the raw value, so a
+		// hostile State this build does not know still falls through to the else branch
+		// exactly as before.
+		note = textsafe.SanitizeForTerminal(st.State)
 		if st.State != proto.StatusOK {
-			note = "error: " + st.Reason
+			note = "error: " + textsafe.SanitizeForTerminal(st.Reason)
 		}
 	}
 	if !st.Connected {

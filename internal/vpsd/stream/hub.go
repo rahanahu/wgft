@@ -307,7 +307,9 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 			current := false
 			if s := h.status[agent]; s != nil && h.conns[agent] == c {
 				s.LastHeartbeat = time.Now()
-				s.Heartbeat = m.Heartbeat
+				// agent の文字列は信頼の境界の外にある(design.md 11 節)。保存する前に
+				// 切り詰めて端末の制御文字を無害化する(design.md 5.2 節)
+				s.Heartbeat = sanitizeHeartbeat(m.Heartbeat)
 				current = true
 			}
 			h.mu.Unlock()

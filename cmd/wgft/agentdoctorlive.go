@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -173,7 +173,12 @@ func readAgentLive(in agentDoctorInput, run agentRunState) agentLive {
 	if _, err := fmt.Fprintln(c, agent.DoctorCommand); err != nil {
 		return agentLive{Kind: liveReplyUnreadable, Path: path, Err: err}
 	}
-	line, err := bufio.NewReader(c).ReadString('\n')
+	// design.md 11 節: the running agent that answers this socket is outside the trust boundary,
+	// so its reply is read under a size limit (agent.DoctorReplyMaxBytes) rather than trusted to
+	// end with a newline. agent.ReadControlReply turns hitting that limit into a message that
+	// says so, rather than the bare io.EOF a short, well-behaved reply's early close would also
+	// produce.
+	line, err := agent.ReadControlReply(c, agent.DoctorReplyMaxBytes)
 	if err != nil {
 		return agentLive{Kind: liveReplyUnreadable, Path: path, Err: err}
 	}
@@ -199,15 +204,27 @@ func dialFailureKind(path string, err error) agentLiveKind {
 // (internal/agent/doctor.go)。
 func classifyDoctorReply(path, line string) agentLive {
 	text := strings.TrimSpace(line)
+	// safeText is what this function stores in agentLive.Reply for display; text itself stays
+	// unsanitized so the two exact-string comparisons below keep matching the real, well-behaved
+	// wire values (design.md 11 節: a compromised agent's reply is not trusted before display,
+	// but neither of these comparisons displays it without going through safeText).
+	safeText := textsafe.SanitizeForTerminal(text)
 	if text == "error: unknown command" {
 		// 新しい実行ファイルを置いてから常駐プロセスを再起動するまでの間に出る応答である
 		// (10.2c 節の「制御ソケットの拡張」)。
-		return agentLive{Kind: liveUnsupported, Path: path, Reply: text}
+		return agentLive{Kind: liveUnsupported, Path: path, Reply: safeText}
 	}
 	var resp agent.DoctorResponse
 	if err := json.Unmarshal([]byte(text), &resp); err != nil {
-		return agentLive{Kind: liveReplyUnreadable, Path: path, Err: err, Reply: text}
+		return agentLive{Kind: liveReplyUnreadable, Path: path, Err: err, Reply: safeText}
 	}
+	// resp を組み立てた running agent は信頼の境界の外にある(design.md 11 節)。以後この resp を
+	// 読むどの検査も、すでに端末に無害な文字列だけを読む。resp のここから先の唯一の読み手
+	// (agentLiveValueCheck とその先の各検査)は、id・status・reason をこの構造体の値からではなく
+	// 呼び出し側が switch で選ぶ固定の定数から決めるので、これらは変わらない。変わるのは Detail・
+	// Next へ組み込む自由記述の部分だけであり、`agent doctor --json` ではそれも人向けの文で
+	// 保証の対象ではない(design.md 10.2c 節)ので、ここで変えて構わない。
+	textsafe.SanitizeStrings(&resp)
 	switch {
 	case resp.Error != "":
 		return agentLive{Kind: liveAgentError, Path: path, Resp: &resp}
@@ -218,7 +235,7 @@ func classifyDoctorReply(path, line string) agentLive {
 	}
 	// 3 つのどれでもない応答は、この型が約束する形を満たしていない。
 	return agentLive{Kind: liveReplyUnreadable, Path: path,
-		Err: errors.New("the reply carries neither a runtime state, a timeout nor an error"), Reply: text}
+		Err: errors.New("the reply carries neither a runtime state, a timeout nor an error"), Reply: safeText}
 }
 
 // dialAgentControl は制御ソケットに繋ぐ既定の入口である。

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/textsafe"
 )
 
 // このファイルは `wgft agent doctor --json`(設計文書 10.2c 節の「機械向けの出力」)の模型を持つ。
@@ -60,23 +62,32 @@ type agentDoctorJSONNotTested struct {
 }
 
 // agentDoctorJSONOf は報告を模型に写す。
+//
+// Detail・Next・History.Detail・NotTested[].Detail は、稼働中のエージェントの制御ソケットの
+// 応答に由来するとき(RuntimeState を経由するとき)は classifyDoctorReply の
+// textsafe.SanitizeStrings で既に無害化されているが、停止中の読み(agent.json の LastState、
+// カーネルの状態)に由来するときはまだ無害化されていない。ここで一括して掛けるのは、この模型が
+// 実行の状態(稼働中か停止中か)によって守りの有無が変わらないようにするためである。ID・
+// Status・Reason・EvidenceUnreachable は c の側で固定の定数から選ばれ、エージェントの文字列を
+// 経由しないので、この呼び出しの対象に含めない(design.md 11 節、2026-09-26)。
 func agentDoctorJSONOf(rep agentDoctorReport) agentDoctorJSON {
 	out := agentDoctorJSON{
 		Status:    agentDoctorVerdict(rep),
 		CheckedAt: rep.CheckedAt.UTC().Format(time.RFC3339),
 		DataDir:   rep.DataDir,
 		Checks:    make([]agentDoctorJSONCheck, 0, len(rep.Checks)),
-		History:   agentDoctorJSONHistory{Detail: rep.History},
+		History:   agentDoctorJSONHistory{Detail: textsafe.SanitizeForTerminal(rep.History)},
 		NotTested: make([]agentDoctorJSONNotTested, 0, len(rep.NotTested)),
 	}
 	for _, c := range rep.Checks {
 		out.Checks = append(out.Checks, agentDoctorJSONCheck{
 			ID: c.ID, Status: c.Status, Reason: c.Reason, EvidenceUnreachable: c.evidenceUnreachable,
-			Group: c.Group, Label: c.Label, Detail: c.Detail, Next: c.Next,
+			Group: c.Group, Label: c.Label,
+			Detail: textsafe.SanitizeForTerminal(c.Detail), Next: textsafe.SanitizeForTerminal(c.Next),
 		})
 	}
 	for _, n := range rep.NotTested {
-		out.NotTested = append(out.NotTested, agentDoctorJSONNotTested(n))
+		out.NotTested = append(out.NotTested, agentDoctorJSONNotTested{ID: n.ID, Detail: textsafe.SanitizeForTerminal(n.Detail)})
 	}
 	return out
 }
