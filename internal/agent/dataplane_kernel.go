@@ -174,8 +174,13 @@ type kernelDataplane struct {
 	fpKnown bool
 	// driftSeen は直前の見直しで見つけた食い違いの説明である。同じ食い違いが直らない間は 1 行だけ出す
 	driftSeen string
-	// observeErr は直前の見直しの誤りである。同じ誤りが続く間は 1 行だけ出す
+	// observeErr は直前の見直しの誤りである。同じ誤りが続く間は 1 行だけ出す。repairErr と endpointErr を
+	// つないだもので、agent doctor の check_error になる
 	observeErr string
+	// repairErr はテーブルと wgft0 の比べと修復の誤りで、30 秒ごとの見直しと通知の後の見直しの両方が
+	// 書く。endpointErr はエンドポイントの引き直しの後の wgft0 の収束の誤りで、30 秒ごとの見直しだけが
+	// 書く。通知の後の見直しはエンドポイントを扱わないので、その誤りを消さない
+	repairErr, endpointErr string
 	// gate は、公開し直しが失敗した後に、変更の通知による公開し直しの間隔を空ける(7b.4 節の変更の
 	// 通知、7a.3 節の再試行)。失敗した公開もテーブルを差し替えることがあり、その差し替えの通知で
 	// 公開し直すと、失敗が 1 秒に数回の間隔で繰り返されるためである。30 秒ごとの見直しは間隔を待たない
@@ -1166,28 +1171,40 @@ func (d *kernelDataplane) observeNotified(gen uint64, rules []proto.AgentRule) (
 // 後の見直しが食い違いを見つけない回は区切りに数えない。自分の公開の直後の通知は必ず一致を見つけるので、
 // 数えると、他のプロセスが同じ変更を繰り返すたびに 1 行出すことになるためである。
 func (d *kernelDataplane) compare(gen uint64, rules []proto.AgentRule, op *observePrepared) (saved bool, err error) {
-	defer func() { d.noteObserveErr(err) }()
+	// 引き直したエンドポイントの収束に失敗しても、表の修復と経路の確認へ進み、誤りは最後に返す。
+	// 印は残るので、次の見直しが試し直す。ここで返すと、収束の失敗が続く間(稼働中に現れた重なりなど)、
+	// 30 秒ごとの見直しが表の修復に届かない
+	var reErr error
+	if op != nil && op.endpoint != nil {
+		reErr = d.reResolved(op.endpoint)
+	}
+	saved, held, err := d.repair(gen, rules, op)
+	// 門が閉じて何も試さなかった見直しは、前の誤りを残す。試していないので、直ったとは言えない
+	if !held {
+		d.repairErr = errText(err)
+	}
+	// エンドポイントの誤りは 30 秒ごとの見直しだけが書き換える
+	if op != nil {
+		d.endpointErr = errText(reErr)
+	}
+	d.noteObserveErr()
+	if err == nil {
+		err = reErr
+	}
+	return saved, err
+}
+
+// repair は compare の本体で、テーブルと wgft0 を比べて直す。held は、通知の後の見直しが門のために
+// 何も試さずに終わったことを表す。
+func (d *kernelDataplane) repair(gen uint64, rules []proto.AgentRule, op *observePrepared) (saved, held bool, err error) {
 	next, changedDNAT := *d.pub, false
 	if op != nil {
 		next = d.planWith(gen, rules, op.resolved)
 		changedDNAT = !sameDNATs(*d.pub, next)
 	}
-
-	// 引き直したエンドポイントの収束に失敗しても、表の修復と経路の確認へ進み、誤りは最後に返す。
-	// 印は残るので、次の見直しが試し直す。ここで返すと、収束の失敗が続く間(稼働中に現れた重なりなど)、
-	// 30 秒ごとの見直しが表の修復に届かない
-	if op != nil && op.endpoint != nil {
-		if reErr := d.reResolved(op.endpoint); reErr != nil {
-			defer func() {
-				if err == nil {
-					err = reErr
-				}
-			}()
-		}
-	}
 	tableDrift, linkDrift, link, err := d.drift()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	d.watchHandshake(link)
 	drift := strings.Join(nonEmpty(tableDrift, linkDrift), "; ")
@@ -1199,17 +1216,17 @@ func (d *kernelDataplane) compare(gen uint64, rules []proto.AgentRule, op *obser
 		d.driftSeen = drift
 	}
 	if op == nil && drift != "" && !d.gate.Allow(fresh) {
-		return false, nil
+		return false, true, nil
 	}
 	if linkDrift != "" {
 		cfg, err := d.linkConfig()
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		changes, err := d.ops.ensureLink(cfg)
 		if err != nil {
 			d.gate.Failed()
-			return false, fmt.Errorf("converge %s: %w", d.iface, err)
+			return false, false, fmt.Errorf("converge %s: %w", d.iface, err)
 		}
 		if len(changes) > 0 {
 			log.Printf("kernel mode: %s: %s", d.iface, strings.Join(changes, "; "))
@@ -1224,37 +1241,47 @@ func (d *kernelDataplane) compare(gen uint64, rules []proto.AgentRule, op *obser
 	case drift != "":
 	default:
 		if reflect.DeepEqual(d.pub.Rules, next.Rules) {
-			return false, nil
+			return false, false, nil
 		}
 		// 理由の文言だけが変わった。テーブルは同じなので差し替えない
 		d.pub = &next
 		if b, err := json.Marshal(next); err == nil {
 			d.f.KernelPublication = b
 		}
-		return true, nil
+		return true, false, nil
 	}
 	if err := d.publish(next); err != nil {
-		return false, err
+		return false, false, err
 	}
 	// driftSeen は公開し直しても残す。他のプロセスが同じ変更を繰り返す間、見直しは直し続けるが、
 	// ログは 30 秒ごとの見直しが食い違いを見つけない回を挟むまで 1 行だけにする
 	if changedDNAT {
 		d.probeAll()
 	}
-	return true, nil
+	return true, false, nil
 }
 
-// noteObserveErr は見直しの誤りを、変わったときだけ 1 行出す。30 秒ごとの見直しと通知の後の見直しで
-// 同じ控えを使う。どちらも同じテーブルと wgft0 を読み、同じ誤りに当たるためである。
-func (d *kernelDataplane) noteObserveErr(err error) {
+// noteObserveErr は、repairErr と endpointErr をつないだ見直しの誤りを、変わったときだけ 1 行出す。
+// 30 秒ごとの見直しと通知の後の見直しで同じ控えを使う。どちらも同じテーブルと wgft0 を読み、同じ誤りに
+// 当たるためである。
+func (d *kernelDataplane) noteObserveErr() {
+	msg := strings.Join(nonEmpty(d.repairErr, d.endpointErr), "; ")
 	switch {
-	case err == nil && d.observeErr != "":
+	case msg == d.observeErr:
+	case msg == "":
 		log.Printf("kernel mode: checking table inet %s and %s works again", nft.AgentTableName, d.iface)
-		d.observeErr = ""
-	case err != nil && err.Error() != d.observeErr:
-		log.Printf("kernel mode: checking table inet %s and %s failed: %v; the previous publication stays in place and the next check tries again", nft.AgentTableName, d.iface, err)
-		d.observeErr = err.Error()
+	default:
+		log.Printf("kernel mode: checking table inet %s and %s failed: %s; the previous publication stays in place and the next check tries again", nft.AgentTableName, d.iface, msg)
 	}
+	d.observeErr = msg
+}
+
+// errText は誤りの文面である。nil なら空である。
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // drift は、実際のテーブルと wgft0 が直前の公開と宣言に一致しなければ、それぞれ何が違うかを返す。
