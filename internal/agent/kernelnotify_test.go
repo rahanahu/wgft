@@ -437,3 +437,59 @@ func TestKernelNotifiedCheckKeepsTheEndpointError(t *testing.T) {
 		t.Errorf("the 30-second check's successful convergence left check error %q", d.checkError())
 	}
 }
+
+// 名前の解決し直しで変わった DNAT の公開の誤りは、通知の後の見直しでは消えない。通知の後の見直しは
+// 名前を引かず、直前の公開と比べるので、テーブルが直前の公開のままなら食い違いを見つけないが、新しい
+// 宛先の DNAT はまだ公開されていない。30 秒ごとの見直しが公開できたときと、DNAT が元に戻ったときに
+// 消える(7b.4 節)。
+func TestKernelNotifiedCheckKeepsTheResolutionPublishError(t *testing.T) {
+	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.3")}}}
+	d := newTestKernel(t, k, nil, nil)
+	k.link = ours(t, d)
+	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
+	if _, err := d.applyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	fail := func() {
+		t.Helper()
+		k.publishErr = errors.New("netlink: permission denied")
+		if _, err := d.observeCommit(1, rules, d.observePrepare(rules)); err == nil {
+			t.Fatal("a failed publication of a changed DNAT returned no error")
+		}
+		if !strings.Contains(d.checkError(), "permission denied") {
+			t.Fatalf("check error = %q, want the publish error", d.checkError())
+		}
+		k.publishErr = nil
+		want := d.checkError()
+		for i := 0; i < 3; i++ {
+			if notified(t, d, 1, rules) {
+				t.Fatal("a notified check with nothing to repair published")
+			}
+		}
+		if got := d.checkError(); got != want {
+			t.Fatalf("a notified check changed the check error from %q to %q while the new DNAT is unpublished", want, got)
+		}
+		if strings.Contains(buf.String(), "works again") {
+			t.Fatalf("a notified check declared a recovery while the new DNAT is unpublished:\n%s", buf.String())
+		}
+	}
+	k.dns["game.lan"] = []netip.Addr{netip.MustParseAddr("192.168.1.9")}
+	fail()
+	if !observeOnce(t, d, 1, rules) || d.checkError() != "" || !strings.Contains(buf.String(), "works again") {
+		t.Fatalf("a successful publication of the changed DNAT left check error %q", d.checkError())
+	}
+	if got := d.pub.Rules[0].Ranges[0].Dest.Addr(); got != netip.MustParseAddr("192.168.1.9") {
+		t.Fatalf("published DNAT to %s, want 192.168.1.9", got)
+	}
+	// DNAT が元に戻れば、公開すべき変化が無くなるので、誤りも消える
+	buf.Reset()
+	k.dns["game.lan"] = []netip.Addr{netip.MustParseAddr("192.168.1.3")}
+	fail()
+	k.dns["game.lan"] = []netip.Addr{netip.MustParseAddr("192.168.1.9")}
+	if observeOnce(t, d, 1, rules) || d.checkError() != "" {
+		t.Errorf("a check that finds the DNAT back as published left check error %q", d.checkError())
+	}
+}
