@@ -435,6 +435,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		if len(bad) > 0 {
 			c.Detail += fmt.Sprintf(". Rules in error besides, %d: %s", len(bad), strings.Join(agentKernelRuleLines(bad), "; "))
 		}
+		c.Detail += staleNote
 		c.Next = agentKernelTableNext(ev)
 		return
 	case len(bad) > 0:
@@ -487,6 +488,10 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		c.Status, c.Reason = statusUnknown, agentReasonResolveFailed
 		c.Detail = fmt.Sprintf("table inet wgft_agent holds everything %s, but the target name of %d rule%s does not resolve; the kernel keeps forwarding %s to the address from the last successful resolution: %s",
 			compared, len(stale), pluralS(len(stale)), itThem(len(stale)), strings.Join(agentKernelRuleLines(stale), "; "))
+		// OK の枝と同じく、30 秒ごとの見直しの失敗を添える。表が UNKNOWN のときに消さないためである
+		if ev.checkError != "" {
+			c.Detail += "; the last 30s check failed: " + ev.checkError
+		}
 		c.Next = "fix name resolution on this host; until then new connections still go to the address from the last successful resolution, which may no longer be the right one"
 		return
 	}

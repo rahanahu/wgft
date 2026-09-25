@@ -75,6 +75,10 @@ type kernelScenario struct {
 	wantAbsent map[string]string
 }
 
+// staleKernelReason は、カーネルモードのエージェントが名前の解決に失敗して直前の解決の結果で転送を
+// 続けているルールに付ける理由である(internal/agent の staleReason の形、7b.2 節)。
+const staleKernelReason = `name resolution of target host "game.lan" failed: lookup game.lan: no such host; still forwarding to 192.168.1.20 from the last successful resolution`
+
 func TestAgentDoctorKernelScenarios(t *testing.T) {
 	scenarios := []kernelScenario{
 		{
@@ -707,10 +711,6 @@ func TestAgentDoctorIncompleteNamesRootForKernelState(t *testing.T) {
 // dataplane.table の判定は、転送の行の欠け、ルールの error、守りの行の欠け、公開の失敗、加わった行の順に見る(10.2c 節の
 // 「dataplane.table の判定」)。ルール単位の失敗は、同じ実行に公開の失敗があっても FAILED のまま示し、
 // 公開の失敗は、加わった行より先に示す。
-// staleKernelReason は、カーネルモードのエージェントが名前の解決に失敗して直前の解決の結果で転送を
-// 続けているルールに付ける理由である(internal/agent の staleReason の形、7b.2 節)。
-const staleKernelReason = `name resolution of target host "game.lan" failed: lookup game.lan: no such host; still forwarding to 192.168.1.20 from the last successful resolution`
-
 func TestAgentDoctorTableOrder(t *testing.T) {
 	ruleError := func(st *agent.DoctorRuntimeState) {
 		st.Rules[0].State, st.Rules[0].Reason = proto.StatusError, "target 192.168.1.20:2456: connection refused"
@@ -759,6 +759,8 @@ func TestAgentDoctorTableOrder(t *testing.T) {
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonTableChanged}},
 		{"a stale resolution alone", []func(*agent.DoctorRuntimeState){stale},
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonResolveFailed}},
+		{"missing rows before a stale resolution", []func(*agent.DoctorRuntimeState){stale, missing},
+			wantCheck{agentCheckDPTable, statusFailed, agentReasonTableRowsMissing}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := testAgentDoctorInput(t, t.TempDir())
@@ -813,5 +815,24 @@ func TestAgentDoctorReadsTheConfiguredInterface(t *testing.T) {
 	agentDiagnose(in)
 	if read != "wgfthome" {
 		t.Errorf("the stopped agent's kernel was read for %q, want the configured wgfthome", read)
+	}
+}
+
+// 直前の解決の結果で転送を続けるルールだけの表の所見は、OK の所見と同じく、30 秒ごとの見直しの失敗を
+// 添える(10.2c 節)。表が UNKNOWN のときに、その失敗を消さないためである。
+func TestAgentDoctorStaleResolutionKeepsTheCheckError(t *testing.T) {
+	in := testAgentDoctorInput(t, t.TempDir())
+	writeTestCredentials(t, in.CredentialsPath, kernelCredentials())
+	holdTheLock(t, in.CredentialsPath)
+	in.Dial = fakeDoctorSocket(t, liveReply(kernelRuntime(func(st *agent.DoctorRuntimeState) {
+		st.Rules[0].State, st.Rules[0].Reason = proto.StatusError, staleKernelReason
+		st.CheckError = "read table inet wgft_agent: netlink receive: no buffer space available"
+	})))
+	c, _ := findAgentCheck(agentDiagnose(in), agentCheckDPTable)
+	if c.Status != statusUnknown || c.Reason != agentReasonResolveFailed {
+		t.Fatalf("%s = %s/%s, want %s/%s", c.ID, c.Status, c.Reason, statusUnknown, agentReasonResolveFailed)
+	}
+	if !strings.Contains(c.Detail, "the last 30s check failed: read table inet wgft_agent") {
+		t.Errorf("detail = %q, want it to carry the failed 30s check", c.Detail)
 	}
 }
