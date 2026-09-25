@@ -144,7 +144,8 @@ func Run(opts Options) error {
 	if err != nil {
 		return err
 	}
-	// モードの照合は、鍵を作るよりも前に行う。関門で止まる起動は認証情報ファイルに何も書かない(仕様 11a 節)
+	// モードの照合とカーネルモードの前提の検査は、鍵を作るよりも、登録よりも前に行う。関門か前提で
+	// 止まる起動は、認証情報ファイルに何も書かず、接続文字列も使わない(仕様 7b.5・11a 節)
 	mode, err := enterMode(f, opts.Mode, opts.CredentialsPath)
 	if err != nil {
 		return err

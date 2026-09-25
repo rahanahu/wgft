@@ -1,9 +1,14 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
@@ -98,6 +103,7 @@ func TestEnterMode(t *testing.T) {
 
 	t.Run("kernel is recorded before anything else is written", func(t *testing.T) {
 		setKernelModeAvailable(t, true)
+		setKernelPrerequisites(t, nil)
 		path := write(t, `{"name":"home"}`)
 		f := load(t, path)
 		mode, err := enterMode(f, "kernel", path)
@@ -110,6 +116,7 @@ func TestEnterMode(t *testing.T) {
 	})
 	t.Run("a fresh data dir records kernel too", func(t *testing.T) {
 		setKernelModeAvailable(t, true)
+		setKernelPrerequisites(t, nil)
 		path := write(t, "")
 		if _, err := enterMode(load(t, path), "kernel", path); err != nil {
 			t.Fatal(err)
@@ -138,6 +145,50 @@ func TestEnterMode(t *testing.T) {
 			t.Errorf("a userspace start rewrote agent.json:\n%s", got)
 		}
 	})
+	t.Run("a missing prerequisite stops before recording", func(t *testing.T) {
+		setKernelModeAvailable(t, true)
+		for _, body := range []string{"", `{"name":"home","permanent_token":"PERM"}`} {
+			for _, missing := range []error{
+				startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN"),
+				startup.Prerequisite("wireguard module", "this kernel has no WireGuard support"),
+			} {
+				setKernelPrerequisites(t, missing)
+				path := write(t, body)
+				_, err := enterMode(load(t, path), "kernel", path)
+				if err != missing {
+					t.Fatalf("err = %v, want %v", err, missing)
+				}
+				if got := read(t, path); got != body {
+					t.Errorf("the refused start wrote agent.json:\n%s", got)
+				}
+			}
+		}
+	})
+	t.Run("the record is reconciled before the prerequisites are checked", func(t *testing.T) {
+		// 記録との照合の拒否を先に示す。前提を先に確かめると、読めない記録を持つ agent.json に
+		// CAP_NET_ADMIN の案内を返し、記録の矛盾が見えなくなる(仕様 11b 節)
+		setKernelModeAvailable(t, true)
+		setKernelPrerequisites(t, startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN"))
+		body := `{"name":"home","mode":"future"}`
+		path := write(t, body)
+		_, err := enterMode(load(t, path), "kernel", path)
+		if r := startup.Of(err); r == nil || r.Category != startup.CategoryConflict || r.Subject != "WGFT_MODE" {
+			t.Fatalf("err = %v, want the conflict refusal for WGFT_MODE", err)
+		}
+		if got := read(t, path); got != body {
+			t.Errorf("the refused start rewrote agent.json:\n%s", got)
+		}
+	})
+	t.Run("userspace does not check the kernel prerequisites", func(t *testing.T) {
+		setKernelModeAvailable(t, true)
+		setKernelPrerequisites(t, startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN"))
+		path := write(t, `{"name":"home"}`)
+		for _, want := range []string{"", "userspace"} {
+			if _, err := enterMode(load(t, path), want, path); err != nil {
+				t.Errorf("WGFT_MODE=%q: %v; want no check of kernel-mode prerequisites", want, err)
+			}
+		}
+	})
 	t.Run("a build without kernel mode stops before recording", func(t *testing.T) {
 		setKernelModeAvailable(t, false)
 		body := `{"name":"home"}`
@@ -150,6 +201,14 @@ func TestEnterMode(t *testing.T) {
 			t.Errorf("the refused start recorded something:\n%s", got)
 		}
 	})
+}
+
+// setKernelPrerequisites は、カーネルモードの前提の検査を、err を返すものに差し替える。
+func setKernelPrerequisites(t *testing.T, err error) {
+	t.Helper()
+	old := kernelPrerequisites
+	kernelPrerequisites = func() error { return err }
+	t.Cleanup(func() { kernelPrerequisites = old })
 }
 
 func setKernelModeAvailable(t *testing.T, v bool) {
@@ -349,4 +408,58 @@ func TestRotateKeyWithoutALockFileLeavesNone(t *testing.T) {
 	if g.WGPrivateKey != "" || g.PreviousWGPrivateKey != key {
 		t.Errorf("key %q previous %q; want the key cleared and kept as the previous key", g.WGPrivateKey, g.PreviousWGPrivateKey)
 	}
+}
+
+// カーネルモードの前提の検査は、登録(接続文字列の消費)とモードの記録より前に行う(仕様 7b.5・11a 節)。
+// 前提で止まる起動は登録の API を呼ばず、認証情報ファイルを作らない。前提を通れば、同じ起動は登録へ
+// 進む。対照として、登録の API は接続文字列を 401 で拒むので、Run はそこで止まる。
+func TestRunChecksKernelPrerequisitesBeforeRegistering(t *testing.T) {
+	var hits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/register", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+	})
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	pin := sha256.Sum256(srv.Certificate().Raw)
+	join := fmt.Sprintf("wgft://%s/tok#sha256:%x", strings.TrimPrefix(srv.URL, "https://"), pin)
+	setKernelModeAvailable(t, true)
+
+	t.Run("a missing prerequisite registers nothing", func(t *testing.T) {
+		missing := startup.Prerequisite("CAP_NET_ADMIN", "kernel mode needs CAP_NET_ADMIN")
+		setKernelPrerequisites(t, missing)
+		hits.Store(0)
+		path := filepath.Join(t.TempDir(), "agent.json")
+		err := Run(Options{CredentialsPath: path, Join: join, Mode: credentials.ModeKernel, WGInterface: "wgft0"})
+		if err != missing {
+			t.Fatalf("Run = %v; want %v", err, missing)
+		}
+		if n := hits.Load(); n != 0 {
+			t.Errorf("the registration API was called %d times; the join string must stay unused", n)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			b, _ := os.ReadFile(path)
+			t.Errorf("agent.json was written:\n%s", b)
+		}
+	})
+	t.Run("the prerequisites met, the start goes on to register", func(t *testing.T) {
+		setKernelPrerequisites(t, nil)
+		hits.Store(0)
+		path := filepath.Join(t.TempDir(), "agent.json")
+		err := Run(Options{CredentialsPath: path, Join: join, Mode: credentials.ModeKernel, WGInterface: "wgft0"})
+		if r := startup.Of(err); r == nil || r.Category != startup.CategoryConflict {
+			t.Fatalf("Run = %v; want the conflict refusal of the rejected join string", err)
+		}
+		if n := hits.Load(); n != 1 {
+			t.Errorf("the registration API was called %d times, want 1", n)
+		}
+		f, err := credentials.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Mode != credentials.ModeKernel {
+			t.Errorf("recorded mode = %q, want kernel", f.Mode)
+		}
+	})
 }

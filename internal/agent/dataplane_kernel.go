@@ -35,6 +35,30 @@ import (
 // kernelModeBuilt は、このビルドがカーネルモードの dataplane を持つかどうかである(mode.go)。
 const kernelModeBuilt = true
 
+// kernelPrerequisites はカーネルモードのホストの前提を、カーネルに何も書かずに確かめる(設計文書 7b.5 節)。
+// enterMode がモードを記録するより前、つまり登録より前に呼ぶ。テストだけが差し替える。
+var kernelPrerequisites = func() error {
+	return checkKernelPrerequisites(nft.AgentTablePresent, wg.AgentWireGuardSupport)
+}
+
+// checkKernelPrerequisites は、CAP_NET_ADMIN と WireGuard のモジュールの 2 つの前提を順に確かめる。
+// CAP_NET_ADMIN は、実際にそれを要する読み出し(nftables のテーブルの一覧)で確かめる。CapEff の
+// ビットではなく読み出しを使うのは、ネットワーク名前空間を持つ利用者名前空間での権限を、後の
+// 書き込みと同じ判定でカーネルに問うためである。
+//
+// 前提の欠如と言い切れる誤りだけを拒否にする。権限の誤り(EPERM)は種別 prerequisite の CAP_NET_ADMIN、
+// WireGuard の汎用 netlink のファミリが無いことは種別 prerequisite の wireguard module である。
+// それ以外の誤りでは起動を止めない。この検査が無かったときと同じく、後の最初の収束が分類する。
+func checkKernelPrerequisites(readTables func() (bool, error), wireGuard func() error) error {
+	if _, err := readTables(); errors.Is(err, os.ErrPermission) {
+		return wg.AgentPrivilegeRefusal(err)
+	}
+	if err := wireGuard(); startup.Of(err) != nil {
+		return err
+	}
+	return nil
+}
+
 // kernelOps はカーネルと外の世界に触れる操作である。単体テストだけが差し替える。
 type kernelOps struct {
 	ensureLink     func(wg.AgentConfig) ([]string, error)

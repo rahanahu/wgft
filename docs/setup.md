@@ -296,7 +296,7 @@ In kernel mode, `WGFT_MODE=kernel`, a Linux agent creates a kernel WireGuard int
 
 Kernel mode differs from userspace mode in these points:
 
-- Privileges: the agent needs `CAP_NET_ADMIN`, and the host needs the kernel's WireGuard module. Without the capability, the agent stops at startup with exit code 3 and names `CAP_NET_ADMIN` in its log.
+- Privileges: the agent needs `CAP_NET_ADMIN`, and the host needs the kernel's WireGuard module. Without the capability, the agent stops at startup with exit code 3 and names `CAP_NET_ADMIN` in its log. It stops before it uses the join string or records the mode in `agent.json`, so after you remove `WGFT_MODE=kernel` and restart it with `sudo systemctl restart wgft-agent`, it starts in userspace mode. Removing the line alone does not start it: `RestartPreventExitStatus=3` in the unit leaves it failed. A kernel without WireGuard support stops the agent at the same point.
 - Targets: only IPv4 targets are forwarded, and loopback targets such as `127.0.0.1` are refused. For a service on the agent host itself, give the host's LAN address as the target. Such a service sees the server's tunnel address, `10.200.0.1` by default, as the source; a service on another LAN host sees the agent host's LAN address.
 - Host forwarding: the agent sets `net.ipv4.ip_forward` to 1 at startup when it is 0, and records that change in `agent.json`. The host then routes packets between its interfaces for any traffic, not only for wgft; wgft's own table filters only the forwarding that involves `wgft0`. The agent never sets `ip_forward` back to 0.
 - Flow caps: `WGFT_MAX_UDP_FLOWS` and `WGFT_MAX_TCP_FLOWS` are not used. The host's conntrack table holds the flows.

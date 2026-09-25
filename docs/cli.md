@@ -559,7 +559,9 @@ the process relays nothing, so forwarding goes on while the agent is stopped
 or restarting. Kernel mode needs root or CAP_NET_ADMIN, forwards only to IPv4
 targets and refuses loopback targets; to reach a service on this host, target
 this host's LAN address. The mode is recorded in agent.json and checked on
-every start.
+every start. A kernel-mode start without CAP_NET_ADMIN or kernel WireGuard
+support stops before it records the mode or uses the join string, so the agent
+then starts in userspace mode once WGFT_MODE is unset or set to userspace.
 
 ```text
 wgft agent run [flags]
