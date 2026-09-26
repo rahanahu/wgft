@@ -15,7 +15,7 @@ VPS 側は Linux で動作します。自宅側の agent は Windows amd64 で�
 | 転送経路 | カーネル WireGuard + nftables DNAT | wireguard-go + ユーザー空間 netstack |
 | wgft プロセス停止・クラッシュ時 | 設定済みの転送は継続 | 転送も停止 |
 | レート制限の判定場所 | カーネル | wgft プロセス |
-| `wgft server` のメモリ | 通常の DNAT ルールはほぼ一定。proxy モードの TCP は接続数に応じて増える | フロー数に応じて増え、同時フロー数の上限で抑える |
+| `wgft server` のメモリ | 通常の DNAT ルールはほぼ一定。proxy モードの TCP は接続数に応じて増える | フロー数に応じて増える。同時フロー数の上限はフローの数を抑える |
 
 カーネルモードでは、wgft が WireGuard / nftables の実行時状態を作った後は、wgft プロセスがクラッシュまたは再起動しても、その状態がカーネルに残るため転送は継続します。一方、VPS 自体を再起動すると実行時状態は失われるため、wgft service が再び起動して状態を作り直す必要があります。通常運用では付属の systemd unit を有効にしておいてください。
 

@@ -15,7 +15,7 @@ In its default userspace mode, the home agent does not need root or a TUN device
 | Forwarding path | Kernel WireGuard + nftables DNAT | wireguard-go + userspace netstack |
 | If the wgft process stops or crashes | Configured forwarding continues | Forwarding stops |
 | Rate-limit evaluation | Kernel | wgft process |
-| Memory of `wgft server` | Mostly constant for normal DNAT rules; proxy-mode TCP grows with connection count | Grows with the number of flows, bounded by the flow caps |
+| Memory of `wgft server` | Mostly constant for normal DNAT rules; proxy-mode TCP grows with connection count | Grows with the number of flows; the flow caps limit the number of flows |
 
 In kernel mode, this resilience applies after wgft has created the WireGuard and nftables runtime state. If the wgft process crashes or restarts, that state remains in the kernel and forwarding continues. A VPS reboot clears the runtime state, so the wgft service must start again to rebuild it; keep the provided systemd service enabled for normal operation.
 
