@@ -9,6 +9,7 @@
 package nettun
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 	"os"
@@ -30,19 +31,15 @@ import (
 // Device は 1 つの IPv4 アドレスを持つ gVisor netstack 上の tun.Device で、wireguard-go の
 // device.Device に組み込める。wireguard-go 自身の netstack.Net と違い、Stack を公開する。
 //
-// 閉じたことは closed で知らせ、incomingPacket は閉じない。WriteNotify は gVisor の stack の
-// goroutine から呼ばれ、Close の途中や後にも走りうる (channel.Endpoint の RemoveNotify は、
-// 通知の途中の呼び出しを待たない)。incomingPacket を閉じると、受け渡しを待っている WriteNotify が
-// 閉じた channel への送信で panic する。上流の tun/netstack はこの形のままである。
+// 出力は channel.Endpoint の有限キューから Read が直接引き取る。Close は読み取りを取り消す。
 type Device struct {
-	ep             *channel.Endpoint
-	stack          *stack.Stack
-	events         chan tun.Event
-	notifyHandle   *channel.NotificationHandle
-	incomingPacket chan *buffer.View
-	closed         chan struct{}
-	closeOnce      sync.Once
-	mtu            int
+	ep         *channel.Endpoint
+	stack      *stack.Stack
+	events     chan tun.Event
+	readCtx    context.Context
+	cancelRead context.CancelFunc
+	closeOnce  sync.Once
+	mtu        int
 }
 
 // Create は addr (IPv4 のみ) を唯一のアドレスとする Device を作る。
@@ -50,6 +47,7 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 	if !addr.Is4() {
 		return nil, fmt.Errorf("tunnel address %s is not IPv4", addr)
 	}
+	readCtx, cancelRead := context.WithCancel(context.Background())
 	dev := &Device{
 		ep: channel.New(1024, uint32(mtu), ""),
 		stack: stack.New(stack.Options{
@@ -57,16 +55,15 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
 			HandleLocal:        true,
 		}),
-		events:         make(chan tun.Event, 10),
-		incomingPacket: make(chan *buffer.View),
-		closed:         make(chan struct{}),
-		mtu:            mtu,
+		events:     make(chan tun.Event, 10),
+		readCtx:    readCtx,
+		cancelRead: cancelRead,
+		mtu:        mtu,
 	}
 	sack := tcpip.TCPSACKEnabled(true) // 既定では無効
 	if err := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
 		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)
 	}
-	dev.notifyHandle = dev.ep.AddNotify(dev)
 	if err := dev.stack.CreateNIC(1, dev.ep); err != nil {
 		return nil, fmt.Errorf("CreateNIC: %v", err)
 	}
@@ -89,12 +86,20 @@ func (t *Device) MTU() (int, error)        { return t.mtu, nil }
 func (t *Device) BatchSize() int           { return 1 }
 
 func (t *Device) Read(buf [][]byte, sizes []int, offset int) (int, error) {
-	var view *buffer.View
-	select {
-	case view = <-t.incomingPacket:
-	case <-t.closed:
+	if t.readCtx.Err() != nil {
 		return 0, os.ErrClosed
 	}
+	pkt := t.ep.ReadContext(t.readCtx)
+	if pkt == nil {
+		return 0, os.ErrClosed
+	}
+	defer pkt.DecRef()
+	// 取り消しとキューの受信が同時に選ばれた場合、確認時に閉鎖済みなら捨てる。
+	if t.readCtx.Err() != nil {
+		return 0, os.ErrClosed
+	}
+	view := pkt.ToView()
+	defer view.Release()
 	n, err := view.Read(buf[0][offset:])
 	if err != nil {
 		return 0, err
@@ -118,35 +123,14 @@ func (t *Device) Write(buf [][]byte, offset int) (int, error) {
 	return len(buf), nil
 }
 
-func (t *Device) WriteNotify() {
-	pkt := t.ep.Read()
-	if pkt == nil {
-		return
-	}
-	view := pkt.ToView()
-	pkt.DecRef()
-	select {
-	case t.incomingPacket <- view:
-	case <-t.closed:
-		// 閉じた後は読む者がいないので捨てる。
-		view.Release()
-	}
-}
-
 // Close は device を閉じる。2 回目以降の呼び出しは何もしない。
 //
-// closed は最初に閉じる。gVisor の TCP の Connect は LockUser を持ったまま SYN を送り、
-// その送信は channel.Endpoint 経由で WriteNotify を呼ぶので、下流 (Read の読み手) が
-// 止まっていると、その goroutine は無バッファの incomingPacket への送信で LockUser を
-// 持ったままブロックする。stack.Close は Abort 経由でその LockUser を待つので、closed を
-// 後で閉じる順序では両者が待ち合って戻らない。closed を先に閉じれば、ブロックしている
-// WriteNotify は t.closed を選んでパケットを捨てて戻り、LockUser を手放す。
+// 読み取りの取り消しを先に行い、停止中の TUN.Read を解除する。
 func (t *Device) Close() error {
 	t.closeOnce.Do(func() {
-		close(t.closed)
+		t.cancelRead()
 		t.stack.RemoveNIC(1)
 		t.stack.Close()
-		t.ep.RemoveNotify(t.notifyHandle)
 		t.ep.Close()
 		close(t.events)
 	})

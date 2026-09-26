@@ -5,64 +5,164 @@ import (
 	"errors"
 	"net/netip"
 	"os"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-// inWriteNotify は、いずれかの goroutine が Device.WriteNotify の中にいるかを返す。
-func inWriteNotify() bool {
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	return strings.Contains(string(buf[:n]), "nettun.(*Device).WriteNotify")
-}
-
-// Close は、stack の goroutine が WriteNotify で受け渡しを待っている間に呼ばれても、その
-// goroutine を panic させずに返させる。読む者がいない間に stack が送ったパケットは、Read に
-// 渡るまで WriteNotify を止めておく。この状態で Close が受け渡しの channel を閉じると、閉じた
-// channel への送信で panic する。
-func TestCloseWhileWriteNotifyWaits(t *testing.T) {
+// 出力の通知を待たずに書き込みが戻り、Read がキューから順に受け取る。
+func TestReadPullsQueuedPackets(t *testing.T) {
 	dev, err := Create(netip.MustParseAddr("10.99.0.1"), 1420)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer dev.Close()
 
-	done := make(chan any, 1)
-	go func() {
-		defer func() { done <- recover() }()
+	for _, last := range []byte{1, 2} {
+		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData([]byte{0x45, 0, 0, last})})
 		var pkts stack.PacketBufferList
-		pkts.PushBack(stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData([]byte{0x45, 0, 0, 20})}))
-		// channel.Endpoint は書いた goroutine のまま WriteNotify を呼ぶ。
-		dev.ep.WritePackets(pkts)
-	}()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for !inWriteNotify() {
-		if time.Now().After(deadline) {
-			t.Fatal("the write never reached WriteNotify")
+		pkts.PushBack(pkt)
+		written, err := dev.ep.WritePackets(pkts)
+		pkt.DecRef()
+		if err != nil || written != 1 {
+			t.Fatalf("WritePackets = (%d, %v), want (1, nil)", written, err)
 		}
-		time.Sleep(time.Millisecond)
 	}
+	for _, last := range []byte{1, 2} {
+		buf := []byte{0xaa, 0, 0, 0, 0}
+		sizes := []int{0}
+		n, err := dev.Read([][]byte{buf}, sizes, 1)
+		if err != nil || n != 1 || sizes[0] != 4 {
+			t.Fatalf("Read = (%d, %v), sizes=%v", n, err, sizes)
+		}
+		if got := buf; got[0] != 0xaa || got[1] != 0x45 || got[4] != last {
+			t.Fatalf("Read buffer = %v, want offset preserved and last byte %d", got, last)
+		}
+	}
+}
 
+func TestQueuedPacketsDroppedOnClose(t *testing.T) {
+	dev, err := Create(netip.MustParseAddr("10.99.0.1"), 1420)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData([]byte{0x45, 0, 0, 20})})
+	var pkts stack.PacketBufferList
+	pkts.PushBack(pkt)
+	dev.ep.WritePackets(pkts)
+	pkt.DecRef()
 	dev.Close()
-	select {
-	case p := <-done:
-		if p != nil {
-			t.Fatalf("WriteNotify panicked after Close: %v", p)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("WriteNotify still waits 5s after Close")
-	}
 
 	if err := readWithin(dev, 5*time.Second); err != os.ErrClosed {
 		t.Fatalf("Read after Close = %v, want os.ErrClosed", err)
 	}
 	// 2 回目の Close は何もしない。
 	dev.Close()
+}
+
+// 読み手が止まっていても送信側は有限キューの容量まで進み、それを超える出力は入らない。
+func TestOutboundQueueBoundedWithoutReader(t *testing.T) {
+	dev, err := Create(netip.MustParseAddr("10.99.0.1"), 1420)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dev.Close()
+	var pkts stack.PacketBufferList
+	for i := 0; i < 1025; i++ {
+		pkts.PushBack(stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData([]byte{0x45, 0, 0, 20})}))
+	}
+	written, writeErr := dev.ep.WritePackets(pkts)
+	pkts.DecRef()
+	if writeErr != nil || written != 1024 {
+		t.Fatalf("WritePackets = (%d, %v), want (1024, nil)", written, writeErr)
+	}
+	if got := dev.ep.NumQueued(); got != 1024 {
+		t.Fatalf("NumQueued = %d, want 1024", got)
+	}
+}
+
+// キューの読み取り、次の送信、Close が競合しても、操作は待ち合わずに終了する。
+func TestReadWriteAndCloseConcurrent(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		dev, err := Create(netip.MustParseAddr("10.99.0.1"), 1420)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData([]byte{0x45, 0, 0, 1})})
+		var queued stack.PacketBufferList
+		queued.PushBack(first)
+		n, writeErr := dev.ep.WritePackets(queued)
+		first.DecRef()
+		if writeErr != nil || n != 1 {
+			dev.Close()
+			t.Fatalf("queue packet: (%d, %v)", n, writeErr)
+		}
+
+		start := make(chan struct{})
+		type readResult struct {
+			n    int
+			size int
+			data [4]byte
+			err  error
+		}
+		readDone := make(chan readResult, 1)
+		go func() {
+			<-start
+			buf := make([]byte, 4)
+			sizes := []int{0}
+			n, err := dev.Read([][]byte{buf}, sizes, 0)
+			readDone <- readResult{n: n, size: sizes[0], data: [4]byte(buf), err: err}
+		}()
+		type writeResult struct {
+			n   int
+			err tcpip.Error
+		}
+		writeDone := make(chan writeResult, 1)
+		go func() {
+			<-start
+			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData([]byte{0x45, 0, 0, 2})})
+			var pkts stack.PacketBufferList
+			pkts.PushBack(pkt)
+			n, err := dev.ep.WritePackets(pkts)
+			pkt.DecRef()
+			writeDone <- writeResult{n: n, err: err}
+		}()
+		closeDone := make(chan struct{})
+		go func() {
+			<-start
+			dev.Close()
+			close(closeDone)
+		}()
+		close(start)
+		within(t, closeDone, 5*time.Second, "Close racing with queue operations")
+		select {
+		case got := <-readDone:
+			if got.err == nil {
+				if got.n != 1 || got.size != 4 || got.data != [4]byte{0x45, 0, 0, 1} {
+					t.Fatalf("iteration %d: Read = %+v", i, got)
+				}
+			} else if got.err != os.ErrClosed || got.n != 0 {
+				t.Fatalf("iteration %d: Read = %+v", i, got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d: Read did not return", i)
+		}
+		select {
+		case got := <-writeDone:
+			if got.err == nil {
+				if got.n != 1 {
+					t.Fatalf("iteration %d: WritePackets = %+v", i, got)
+				}
+			} else if _, ok := got.err.(*tcpip.ErrClosedForSend); !ok || got.n != 0 {
+				t.Fatalf("iteration %d: WritePackets = %+v", i, got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d: WritePackets did not return", i)
+		}
+	}
 }
 
 // Read は、パケットを待っている間に Close されると os.ErrClosed で返る。
@@ -80,13 +180,7 @@ func TestReadReturnsOnClose(t *testing.T) {
 	}
 }
 
-// gVisor の tcp.(*Endpoint).Connect は LockUser を持ったまま SYN を送る。その送信は
-// channel.Endpoint 経由で Device.WriteNotify を呼び、無バッファの incomingPacket が
-// Read で引き取られるまで、その goroutine は LockUser を持ったままブロックする。
-// Device.Close の stack.Close は Abort 経由で同じ LockUser を待つので、closed を
-// 閉じて WriteNotify のブロックを解く前に stack.Close を呼ぶ順序では、両者が
-// 待ち合ったまま戻らない。この試験は、下流 (Read) が止まったまま接続中の TCP dial が
-// あっても、Close が戻ることを確かめる。
+// TUN の読み手が止まっていても、送信中の TCP dial と Close が戻る。
 func TestDeviceCloseWithStalledTCPConnect(t *testing.T) {
 	dev, err := Create(netip.MustParseAddr("10.99.0.1"), 1420)
 	if err != nil {
@@ -99,38 +193,16 @@ func TestDeviceCloseWithStalledTCPConnect(t *testing.T) {
 			c.Close()
 		}
 	})
-	waitGoroutine(t, "nettun.(*Device).WriteNotify", "tcp.(*Endpoint).Connect")
-	dc := goDone(func() { dev.Close() })
-	if !waitOrUnstick(dev, dc, 5*time.Second) {
-		t.Fatal("Device.Close blocked behind a stalled TCP connect")
-	}
-	within(t, dial, 5*time.Second, "DialTCP after Device.Close")
-}
-
-// waitGoroutine は、want の全部を 1 つの goroutine のスタックに含むものが現れるまで待つ。
-func waitGoroutine(t *testing.T, want ...string) {
-	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		buf := make([]byte, 1<<20)
-		n := runtime.Stack(buf, true)
-		for _, gr := range strings.Split(string(buf[:n]), "\n\n") {
-			ok := true
-			for _, w := range want {
-				if !strings.Contains(gr, w) {
-					ok = false
-					break
-				}
-			}
-			if ok {
-				return
-			}
-		}
+	for dev.ep.NumQueued() == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no goroutine with %q in its stack", want)
+			t.Fatal("TCP dial did not queue a SYN")
 		}
 		time.Sleep(time.Millisecond)
 	}
+	dc := goDone(func() { dev.Close() })
+	within(t, dc, 5*time.Second, "Device.Close with a stalled TUN reader")
+	within(t, dial, 5*time.Second, "DialTCP after Device.Close")
 }
 
 // goDone は fn を別の goroutine で走らせ、終わると閉じる channel を返す。
@@ -151,27 +223,6 @@ func within(t *testing.T, done <-chan struct{}, d time.Duration, what string) {
 	case <-time.After(d):
 		t.Fatalf("%s did not return within %v", what, d)
 	}
-}
-
-// waitOrUnstick は done を d まで待つ。戻らなければ Device.Read で下流を動かして後始末し、false を返す。
-func waitOrUnstick(dev *Device, done <-chan struct{}, d time.Duration) bool {
-	select {
-	case <-done:
-		return true
-	case <-time.After(d):
-	}
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-			}
-			dev.Read([][]byte{make([]byte, 2048)}, []int{0}, 0)
-		}
-	}()
-	<-done
-	return false
 }
 
 // readWithin は dev.Read の誤りを返す。timeout の間に返らなければ errReadTimeout を返す。
