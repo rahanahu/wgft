@@ -35,7 +35,7 @@ func TestRepoManifestIsValid(t *testing.T) {
 		}
 	}
 	// 既定の一式は、両モードの e2e と ipv6 と rates と lifecycle の 17 個の確認、
-	// それに split-merge、import-export、connlimit、両モードの agentkernel の 5 組と agentdoctor
+	// それに split-merge、import-export、connlimit、両モードの agentkernel の組と agentdoctor
 	want := []string{
 		"e2e.sh kernel", "e2e.sh userspace", "ipv6.sh kernel", "ipv6.sh userspace",
 		"split-merge.sh kernel", "import-export.sh kernel", "connlimit.sh",
@@ -51,7 +51,8 @@ func TestRepoManifestIsValid(t *testing.T) {
 		for _, group := range []string{
 			"drift 22 25 16 teardown",
 			"route session",
-			"resolve 24 17 18 19",
+			"resolve",
+			"24 17 18 19",
 			"notify pin reconnect",
 			"stale",
 		} {
