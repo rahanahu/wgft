@@ -1,11 +1,12 @@
 // Package nettun は、エージェントのトンネル(internal/dataplane/userspace/tunnel)とサーバのユーザー空間モードの
 // トンネル(internal/dataplane/userspace/utun)が共有する、netstack と TUN の接続部分。どちらも wireguard-go の
-// device を支える gVisor の stack.Stack への直接アクセスを要る。サーバ側は UDP の応答をバッファ
+// device を支える gVisor の stack.Stack への package 内のアクセスを要る。サーバ側は UDP の応答をバッファ
 // なしで待つため(waiter.Queue)、エージェント側は拒んだ TCP 接続を RST で即座に終える(Abort)
-// ため(listen.go)である。wireguard-go 自身の tun/netstack パッケージは組み立てた stack を
-// 公開しない(型 Net は非公開の netTun を包む)ため、このパッケージは tun/netstack.CreateNetTUN の
-// 必要な部分を写したもの(MIT License、Copyright (C) 2017-2025 WireGuard LLC)に、Stack を返す
-// アクセサを足したものである。
+// ため(listen.go)、どちらも UDP の受信を会計に通すため(udp_accounting.go)である。wireguard-go 自身の
+// tun/netstack パッケージは組み立てた stack を公開しない(型 Net は非公開の netTun を包む)ため、この
+// パッケージは tun/netstack.CreateNetTUN の必要な部分を写したもの(MIT License、Copyright (C) 2017-2025
+// WireGuard LLC)を基にする。stack はこのパッケージの外に出さない。外で UDP の endpoint を作れると、
+// 会計の外で datagram を受け取れるためである。
 package nettun
 
 import (
@@ -29,10 +30,11 @@ import (
 )
 
 // Device は 1 つの IPv4 アドレスを持つ gVisor netstack 上の tun.Device で、wireguard-go の
-// device.Device に組み込める。wireguard-go 自身の netstack.Net と違い、Stack を公開する。
+// device.Device に組み込める。UDP の endpoint は DialUDP と ListenUDP だけが登録表を通して作る。
 //
 // 出力は channel.Endpoint の有限キューから Read が直接引き取る。入力の IPv4 の断片は有限な
-// 再組み立て(ingress.go)を通し、完成した datagram だけを stack に渡す。Close は読み取りを取り消す。
+// 再組み立て(ingress.go)を通し、完成した datagram だけを stack に渡す。この Device 宛ての UDP は
+// 受信の会計(udp_accounting.go)を通す。Close は読み取りを取り消す。
 type Device struct {
 	ep         *channel.Endpoint
 	stack      *stack.Stack
@@ -42,6 +44,7 @@ type Device struct {
 	closeOnce  sync.Once
 	mtu        int
 	local      netip.Addr
+	registry   *udpRegistry
 	reassembly *ipv4Reassembly
 	sweepStop  chan struct{}
 	sweepDone  chan struct{}
@@ -79,6 +82,10 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		return nil, fmt.Errorf("AddProtocolAddress(%v): %v", addr, err)
 	}
 	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
+	if err := dev.initUDP(); err != nil {
+		dev.Close()
+		return nil, err
+	}
 	if err := dev.initReassembly(); err != nil {
 		dev.Close()
 		return nil, err
@@ -87,8 +94,17 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 	return dev, nil
 }
 
-// Stack はこの device を支える gVisor の stack を返す。
-func (t *Device) Stack() *stack.Stack { return t.stack }
+// Wait は stack の goroutine の終了を待つ。Close の後に呼ぶ。stack そのものは公開しない。
+func (t *Device) Wait() { t.stack.Wait() }
+
+// UDPReceiveFault は、UDP の受信の会計が不変条件の違反を検出してこの Device の UDP を止めた
+// ときの誤りを返す。会計が健全な間は nil である(設計文書 7 節)。
+func (t *Device) UDPReceiveFault() error {
+	if t.registry == nil {
+		return nil
+	}
+	return t.registry.accounting.faultErr()
+}
 
 func (t *Device) Name() (string, error)    { return "go", nil }
 func (t *Device) File() *os.File           { return nil }
@@ -150,11 +166,11 @@ func (t *Device) Write(buf [][]byte, offset int) (int, error) {
 // Close は device を閉じる。2 回目以降の呼び出しは何もしない。
 //
 // 読み取りの取り消しを先に行い、停止中の TUN.Read を解除する。再組み立ての sweeper は stack を
-// 閉じる前に止めて待つ。
+// 閉じる前に止めて待つ。UDP の endpoint は、閉じた印を付けてから全部閉じる。
 func (t *Device) Close() error {
 	t.closeOnce.Do(func() {
 		t.cancelRead()
-		t.closeReassembly()
+		t.closeIngress()
 		t.stack.RemoveNIC(1)
 		t.stack.Close()
 		t.ep.Close()

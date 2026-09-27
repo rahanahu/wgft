@@ -61,6 +61,7 @@ const (
 	agentCheckWGResolve    = "tunnel.resolve"
 	agentCheckTunnelLocal  = "tunnel.local"
 	agentCheckSocketBufs   = "tunnel.socket_buffers"
+	agentCheckUDPAcct      = "tunnel.udp_accounting"
 	agentCheckWatchdog     = "tunnel.watchdog"
 	agentCheckTransfer     = "tunnel.transfer"
 	agentCheckListeners    = "relay.listeners"
@@ -134,7 +135,7 @@ var agentCheckOrder = []string{
 	agentCheckPlatform, agentCheckPrivileges, agentCheckInterfaces, agentCheckHostResolve,
 	agentCheckCredentials, agentCheckProcess, agentCheckLastState,
 	agentCheckControl, agentCheckStreamConn, agentCheckStreamBackfl, agentCheckStreamLive,
-	agentCheckWGResolve, agentCheckTunnelLocal, agentCheckSocketBufs, agentCheckWatchdog, agentCheckTransfer,
+	agentCheckWGResolve, agentCheckTunnelLocal, agentCheckSocketBufs, agentCheckUDPAcct, agentCheckWatchdog, agentCheckTransfer,
 	agentCheckListeners, agentCheckSessions, agentCheckRefusals, agentCheckAllowTargets,
 	agentCheckDPInterface, agentCheckDPTable, agentCheckForwarding,
 }
@@ -152,8 +153,8 @@ type agentDoctorCheck struct {
 	Detail string
 	Next   string
 	// verdict は、この検査が総合判定と終了コード 1 を動かすかどうかである。10.2c 節の表の
-	// 「総合判定」の列であり、動かすのは agent.credentials、agent.process、tunnel.local、
-	// relay.listeners の 4 つだけである。
+	// 「総合判定」の列であり、ユーザー空間モードで動かすのは agent.credentials、agent.process、
+	// tunnel.local、tunnel.udp_accounting、relay.listeners の 5 つだけである。
 	verdict bool
 	// evidenceUnreachable は、10.2c 節の層 2 に当たる実行である。呼び出し元が権限で証拠に届かず、
 	// 診断そのものが成立しなかったことを表し、終了コード 2 に倒す。状態の語とは別のものとして
@@ -1099,6 +1100,7 @@ var agentLiveOnly = []agentLiveOnlyCheck{
 	{ID: agentCheckStreamLive, Group: agentGroupConnection, Label: "liveness", valueOnly: true},
 	{ID: agentCheckTunnelLocal, Group: agentGroupTunnel, Label: "tunnel", verdict: true},
 	{ID: agentCheckSocketBufs, Group: agentGroupTunnel, Label: "socket buffers"},
+	{ID: agentCheckUDPAcct, Group: agentGroupTunnel, Label: "UDP accounting", verdict: true},
 	{ID: agentCheckWatchdog, Group: agentGroupTunnel, Label: "watchdog", valueOnly: true},
 	{ID: agentCheckTransfer, Group: agentGroupTunnel, Label: "transfer", valueOnly: true},
 	{ID: agentCheckListeners, Group: agentGroupRelay, Label: "listeners", verdict: true},

@@ -117,6 +117,15 @@ func New(cfg Config) (*Tunnel, error) {
 // SocketBuffers は、このトンネルを立てた直後に測った WireGuard の UDP ソケットのバッファである。
 func (t *Tunnel) SocketBuffers() sockbuf.Reading { return t.bufs }
 
+// UDPReceiveFault は、netstack の UDP の受信の会計が不変条件の違反を検出してこのトンネルの UDP を
+// 止めたときの誤りである。健全なら nil である(設計文書 7 節)。
+func (t *Tunnel) UDPReceiveFault() error {
+	if t.tnet == nil {
+		return nil
+	}
+	return t.tnet.UDPReceiveFault()
+}
+
 // ListenUDP / ListenTCP は relay.Network の実装。
 func (t *Tunnel) ListenUDP(port uint16) (net.PacketConn, error) {
 	return t.tnet.ListenUDP(netip.AddrPortFrom(t.cfg.Address, port))

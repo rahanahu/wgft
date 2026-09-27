@@ -162,6 +162,17 @@ type DoctorTunnel struct {
 	// ある(設計文書 7 節と 10.2c 節)。ユーザー空間モードのトンネルがあるときだけ載る。旧い版の
 	// エージェントは送らない
 	SocketBuffers *DoctorSocketBuffers `json:"socket_buffers,omitempty"`
+	// UDPAccounting は netstack の UDP の受信の会計の状態である(設計文書 7 節と 10.2c 節)。
+	// ユーザー空間モードのトンネルがあるときだけ載る。旧い版のエージェントは送らない
+	UDPAccounting *DoctorUDPAccounting `json:"udp_accounting,omitempty"`
+}
+
+// DoctorUDPAccounting は UDP の受信の会計の状態である。
+type DoctorUDPAccounting struct {
+	// Stopped は、会計が不変条件の違反を検出して、トンネルの UDP を止めたかどうかである
+	Stopped bool `json:"stopped"`
+	// Error は検出した違反である。Stopped のときだけ載る
+	Error string `json:"error,omitempty"`
 }
 
 // DoctorSocketBuffers は WireGuard の UDP ソケットのバッファを測った結果である。値は
@@ -413,6 +424,13 @@ func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 		st.Tunnel.StartedAt = rt.tunStart
 		if b := tun.raw.socketBuffers; b != nil {
 			st.Tunnel.SocketBuffers = doctorSocketBuffers(*b)
+		}
+		if u := tun.raw.udpAccounting; u != nil {
+			st.Tunnel.UDPAccounting = &DoctorUDPAccounting{}
+			if u.fault != nil {
+				st.Tunnel.UDPAccounting.Stopped = true
+				st.Tunnel.UDPAccounting.Error = clipText(u.fault.Error())
+			}
 		}
 	}
 	if r.relay == nil {

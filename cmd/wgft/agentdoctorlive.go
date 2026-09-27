@@ -139,6 +139,12 @@ const (
 	// agentReasonNotMeasuredOnThisOS は、エージェントの OS では WireGuard の UDP ソケットのバッファを
 	// 測らない場合である。測るのは Linux だけである(設計文書 7 節)。
 	agentReasonNotMeasuredOnThisOS = "not_measured_on_this_os"
+	// agentReasonUDPAccountingStopped は、netstack の UDP の受信の会計が不変条件の違反を検出して、
+	// トンネルの UDP を止めた場合である(設計文書 7 節)。
+	agentReasonUDPAccountingStopped = "udp_accounting_stopped"
+	// agentReasonUDPAccountingNotReported は、稼働中のエージェントが UDP の受信の会計の状態を答え
+	// なかった場合である。会計を持つ前の版の実行ファイルで動いているエージェントが当たる。
+	agentReasonUDPAccountingNotReported = "udp_accounting_not_reported"
 )
 
 // 所見に並べる項目の数の上限。ルールの本数にも拒否の組み合わせの数にも上限が無いので、1 行が
@@ -310,7 +316,7 @@ func agentLiveValueRead(id string, live agentLive) bool {
 // agentLiveNeedsRuntimeState は、その検査が実行時の排他の下でしか読めない値を見るかどうかである。
 func agentLiveNeedsRuntimeState(id string) bool {
 	switch id {
-	case agentCheckTunnelLocal, agentCheckSocketBufs, agentCheckWatchdog, agentCheckTransfer,
+	case agentCheckTunnelLocal, agentCheckSocketBufs, agentCheckUDPAcct, agentCheckWatchdog, agentCheckTransfer,
 		agentCheckListeners, agentCheckSessions, agentCheckRefusals:
 		return true
 	}
@@ -435,6 +441,8 @@ func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *agent.D
 		agentTunnelLocalCheck(c, in, resp.RuntimeState)
 	case agentCheckSocketBufs:
 		agentSocketBuffersCheck(c, in, resp.RuntimeState)
+	case agentCheckUDPAcct:
+		agentUDPAccountingCheck(c, resp.RuntimeState)
 	case agentCheckWatchdog:
 		agentWatchdogCheck(c, in, resp.RuntimeState)
 	case agentCheckTransfer:
@@ -664,6 +672,35 @@ var sockbufFixNext = fmt.Sprintf("set net.core.rmem_max and net.core.wmem_max to
 	"for example in a file under /etc/sysctl.d applied with sysctl --system, then restart the agent so that it opens new sockets. "+
 	"Linux gives a socket twice the size it asks for, so %d in the sysctl reads here as %d. wgft never changes these sysctls",
 	sockbuf.Requested, sockbuf.Requested, sockbuf.Required)
+
+// agentUDPAccountingCheck は、netstack の UDP の受信の会計がトンネルの UDP を止めていないかを見る
+// (設計文書 7 節、10.2c 節)。止めていれば FAILED とし、総合判定を動かす。止まった会計は、再起動
+// までこのエージェントの UDP のルールをすべて転送しないためである。この停止は資源の逼迫ではなく、
+// 会計の不変条件の違反を検出したときだけ起きる。
+func agentUDPAccountingCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
+	t := st.Tunnel
+	if !t.Present {
+		c.Status, c.Reason = statusSkipped, agentReasonNoTunnel
+		c.Detail = "there is no tunnel now, so there is no UDP to account for"
+		c.Next = "the tunnel line above says why there is none"
+		return
+	}
+	u := t.UDPAccounting
+	switch {
+	case u == nil:
+		c.Status, c.Reason = statusUnknown, agentReasonUDPAccountingNotReported
+		c.Detail = "the running agent did not report its UDP receive accounting"
+		c.Next = agentRestartForDoctorNext
+	case u.Stopped:
+		c.Status, c.Reason = statusFailed, agentReasonUDPAccountingStopped
+		c.Detail = "the UDP receive accounting of the tunnel found an internal inconsistency and stopped all UDP on the tunnel: " + u.Error +
+			"; TCP rules keep working"
+		c.Next = "restart the agent to resume UDP, and report this as a bug with the agent's log, from journalctl -u wgft-agent or docker logs for a container"
+	default:
+		c.Status = statusOK
+		c.Detail = "the UDP receive accounting of the tunnel is consistent"
+	}
+}
 
 // agentHandshakeText は最終ハンドシェイクを事実として述べる。健全かどうかは言わない(10.2c 節)。
 func agentHandshakeText(now, h time.Time) string {

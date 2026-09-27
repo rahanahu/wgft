@@ -114,6 +114,7 @@ func (d *userspaceDataplane) read() dataplaneReading {
 		}
 		bufs := d.tun.SocketBuffers()
 		r.tunnel.socketBuffers = &bufs
+		r.tunnel.udpAccounting = &udpAccountingReading{fault: d.tun.UDPReceiveFault()}
 	}
 	if d.rl != nil {
 		sts := d.rl.Status()
