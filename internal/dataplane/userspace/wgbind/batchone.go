@@ -127,6 +127,8 @@ func (r *receiver) receive(bufs [][]byte, sizes []int, eps []conn.Endpoint) (int
 		r.drop()
 		return 0, net.ErrClosed
 	}
+	// inner は 0 件で (0, nil) を返すことがある。標準のバインドは、GRO でまとめて読んだ先頭が
+	// 0 byte の datagram のとき 0 件を返すので、1 件得られるまで読み直す。
 	for r.next >= r.held {
 		n, err := r.recv(r.bufs, r.sizes, r.eps)
 		if err != nil {

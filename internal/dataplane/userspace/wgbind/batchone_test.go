@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 )
@@ -162,6 +163,26 @@ func TestBatchOneHandsOutOneDatagramPerCallInOrder(t *testing.T) {
 	}
 }
 
+// 標準のバインドは GRO でまとめて読んだ先頭が 0 byte の datagram のとき (0, nil) を返す。包みは
+// 何も持たない 1 件を渡さず、内側を読み直す。
+func TestBatchOneReadsTheInnerBindAgainWhenItReturnsNothing(t *testing.T) {
+	inner := &fakeBind{batch: 4, script: []fakeResult{
+		{datagrams: nil},
+		{datagrams: []string{"a"}},
+	}}
+	_, fn := open(t, inner)
+	got, ep, err := one(t, fn)
+	if err != nil || got != "a" {
+		t.Fatalf("first call: %q, %v; want \"a\", nil", got, err)
+	}
+	if e, ok := ep.(fakeEndpoint); !ok || e.id != 1 {
+		t.Fatalf("first call: endpoint %#v, want fake-1", ep)
+	}
+	if len(inner.calls) != 2 {
+		t.Fatalf("inner receive called %d times, want 2", len(inner.calls))
+	}
+}
+
 func TestBatchOneReturnsTheInnerErrorUnwrappedAfterHandingOutWhatItHolds(t *testing.T) {
 	sentinel := permanentError{}
 	inner := &fakeBind{batch: 3, script: []fakeResult{
@@ -281,6 +302,9 @@ func TestBatchOneCloseRacesWithReceive(t *testing.T) {
 
 // 実際の標準のバインドを包み、loopback の UDP で 1 件ずつ届くことを確かめる。標準のバインドの
 // BatchSize が 1 の OS では包まれないので、そのことだけを確かめる。
+//
+// 受信の関数は名前で選ばない。包みの関数の PrettyName は method の名前の "receive" になり、
+// "v4" にはならない。wireguard-go と同じく受信の関数ごとに goroutine で読み、届いた順に集める。
 func TestBatchOneWithTheStandardBind(t *testing.T) {
 	inner := conn.NewStdNetBind()
 	b := BatchOne(inner)
@@ -294,37 +318,77 @@ func TestBatchOneWithTheStandardBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer b.Close()
-	var recv4 conn.ReceiveFunc
+	if len(fns) == 0 {
+		b.Close()
+		t.Fatal("Open returned no receive functions")
+	}
+
+	type received struct {
+		data string
+		ep   conn.Endpoint
+	}
+	const count = 5
+	got := make(chan received, count)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
 	for _, fn := range fns {
-		if fn.PrettyName() == "v4" {
-			recv4 = fn
+		wg.Add(1)
+		go func(fn conn.ReceiveFunc) {
+			defer wg.Done()
+			buf := make([]byte, maxDatagram)
+			sizes := make([]int, 1)
+			eps := make([]conn.Endpoint, 1)
+			for {
+				n, err := fn([][]byte{buf}, sizes, eps)
+				if err != nil {
+					if !errors.Is(err, net.ErrClosed) {
+						t.Errorf("receive returned %v, want net.ErrClosed after Close", err)
+					}
+					return
+				}
+				if n != 1 {
+					t.Errorf("receive returned n=%d, want 1", n)
+					return
+				}
+				select {
+				case got <- received{string(buf[:sizes[0]]), eps[0]}:
+				case <-done:
+					return
+				}
+			}
+		}(fn)
+	}
+	defer func() {
+		close(done)
+		if err := b.Close(); err != nil {
+			t.Errorf("Close: %v", err)
 		}
-	}
-	if recv4 == nil {
-		t.Skip("no IPv4 receive function")
-	}
+		wg.Wait()
+	}()
+
 	sender, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer sender.Close()
-	const count = 5
 	for i := 0; i < count; i++ {
 		if _, err := sender.Write([]byte(fmt.Sprintf("datagram-%d", i))); err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
 	}
+	timeout := time.After(10 * time.Second)
 	for i := 0; i < count; i++ {
-		got, ep, err := one(t, recv4)
-		if err != nil {
-			t.Fatalf("receive %d: %v", i, err)
+		var r received
+		select {
+		case r = <-got:
+		case <-timeout:
+			t.Fatalf("received %d of %d datagrams within 10s", i, count)
 		}
-		if want := fmt.Sprintf("datagram-%d", i); got != want {
-			t.Fatalf("receive %d: got %q, want %q", i, got, want)
+		if want := fmt.Sprintf("datagram-%d", i); r.data != want {
+			t.Fatalf("receive %d: got %q, want %q", i, r.data, want)
 		}
-		if ep.DstIP() != netip.MustParseAddr("127.0.0.1") {
-			t.Fatalf("receive %d: endpoint %s, want 127.0.0.1", i, ep.DstToString())
+		if r.ep == nil || r.ep.DstIP() != netip.MustParseAddr("127.0.0.1") {
+			t.Fatalf("receive %d: endpoint %v, want 127.0.0.1", i, r.ep)
 		}
 	}
 }
