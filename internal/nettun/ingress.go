@@ -31,9 +31,10 @@ const (
 
 // UDP の受信の予算。値は設計文書 7 節に書く。byte は payload に 1 件あたり udpDatagramCharge を
 // 足して数える。endpoint 1 つは、どちらの単位でも Device の予算の 1/udpEndpointShare までしか
-// 持てない。
+// 持てない。gVisor の endpoint の受信のキューの上限は、開くときに endpoint 1 つの上限の byte に
+// 揃える(udp_registry.go の open)。
 const (
-	udpReceiveBytes     = 1 << 20
+	udpReceiveBytes     = 4 << 20
 	udpReceiveDatagrams = 4096
 	udpDatagramCharge   = 64
 	udpEndpointShare    = 4

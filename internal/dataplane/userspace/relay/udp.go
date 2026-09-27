@@ -58,7 +58,7 @@ type replySender interface {
 }
 
 // waitingSender は WriteTo で送る。netstack の待ち受け(エージェント)と、カーネルのソケットでない
-// 公開側がこれになる。netstack の WriteTo(nettun の adapter)は、endpoint の送信バッファ(32 KiB)が
+// 公開側がこれになる。netstack の WriteTo(nettun の adapter)は、endpoint の送信バッファ(gVisor の既定 212 KiB)が
 // 使われている間は書けるようになるまで待つ。使われたままになるのは、出力のキューにパケットが
 // 留まっている間、つまりトンネルの送信が止まっているときで、そのときは全ルールの応答が同じく
 // 止まるので、枠がルール間の新しい飢餓を作ることは無い(設計文書 7 節)。

@@ -61,6 +61,13 @@ func (r *udpRegistry) open(local, remote *netip.AddrPort) (*rawUDPAdapter, error
 		c.ep.Close()
 		return nil, err
 	}
+	// gVisor の受信のキューの上限(既定 212 KiB、payload の byte だけを数える)を endpoint 1 つの
+	// 上限の byte に揃える。会計は payload に 1 件あたりの byte を足して数えるので、会計の上限が
+	// 常に先に効き、endpoint ごとの drop はすべて会計の拒否として数えられる(設計文書 7 節)。
+	// 固定版の gVisor の UDP の endpoint は通知を受けても値を変えないので、notify の値で結果は
+	// 変わらない。gVisor 自身が endpoint を作るとき(newEndpoint)と同じく false で呼ぶ。mu を
+	// 持ったままなので、揃える前に datagram が届くことは無い。
+	c.ep.SocketOptions().SetReceiveBufferSize(int64(t.maxEndpointBytes), false)
 	return c, nil
 }
 
