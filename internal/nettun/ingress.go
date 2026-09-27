@@ -3,11 +3,13 @@ package nettun
 // TUN の入口(wireguard-go から netstack への向き)。IPv4 の断片はすべて有限な再組み立て
 // (reassembly.go)に渡し、完成した datagram だけを gVisor に渡す。gVisor の再組み立ては、
 // 断片化された datagram ごとに取り消されない 30 秒のタイマーを残し、保持する量が到着の速さで
-// 決まるので、断片を gVisor に一度も渡さない(設計文書 7 節)。
+// 決まるので、断片を gVisor に一度も渡さない(設計文書 7 節)。この Device 宛ての完成した UDP は
+// 登録表(udp_registry.go)を通し、受信の会計の予約を持って endpoint に届ける。
 
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
 // 再組み立ての表の上限。値は設計文書 7 節に書く。
@@ -25,6 +28,29 @@ const (
 	reassemblyLifetime  = 30 * time.Second
 	reassemblySweep     = time.Second
 )
+
+// UDP の受信の予算。値は設計文書 7 節に書く。byte は payload に 1 件あたり udpDatagramCharge を
+// 足して数える。endpoint 1 つは、どちらの単位でも Device の予算の 1/udpEndpointShare までしか
+// 持てない。
+const (
+	udpReceiveBytes     = 1 << 20
+	udpReceiveDatagrams = 4096
+	udpDatagramCharge   = 64
+	udpEndpointShare    = 4
+)
+
+func (t *Device) initUDP() error {
+	r, err := newUDPRegistry(t, t.local, udpReceiveBytes, udpReceiveDatagrams, udpDatagramCharge)
+	if err != nil {
+		return err
+	}
+	r.accounting.setEndpointLimits(udpReceiveBytes/udpEndpointShare, udpReceiveDatagrams/udpEndpointShare)
+	if err := r.accounting.faultErr(); err != nil {
+		return err
+	}
+	t.registry = r
+	return nil
+}
 
 func (t *Device) initReassembly() error {
 	fragments, err := newIPv4Reassembly(ipv4ReassemblyLimits{
@@ -101,6 +127,15 @@ func (t *Device) writeIPv4(packet []byte) error {
 	if t.closed.Load() {
 		return os.ErrClosed
 	}
+	// Bytes after the IPv4 Total Length are not part of the packet. wireguard-go
+	// already cuts them off; the Device does it itself rather than rely on
+	// that, because gVisor ignores them too and the UDP accounting reserves by
+	// the length it hands to gVisor.
+	if len(packet) >= header.IPv4MinimumSize {
+		if n := int(binary.BigEndian.Uint16(packet[2:4])); n >= header.IPv4MinimumSize && n < len(packet) {
+			packet = packet[:n]
+		}
+	}
 	if isIPv4Fragment(packet) {
 		result := t.reassembly.Process(packet, time.Now())
 		if result.Status == ipv4FragmentRejected && result.Notice.Reason == ipv4ReasonExpired {
@@ -125,8 +160,34 @@ func (t *Device) writeIPv4(packet []byte) error {
 			return nil
 		}
 	}
+	if t.isLocalUDP(packet) {
+		// A refusal by the receive budget and a stopped accounting are drops,
+		// not Write errors, for the same reason as a refused fragment.
+		if _, err := t.registry.inject(packet); errors.Is(err, os.ErrClosed) {
+			return os.ErrClosed
+		}
+		return nil
+	}
 	injectInbound(t.ep, packet)
 	return nil
+}
+
+// isLocalUDP reports whether packet is a complete IPv4 UDP datagram for the
+// Device's own address, the only kind gVisor can deliver to a UDP endpoint:
+// every endpoint is bound to that address. Anything else goes to gVisor with
+// no lock, and gVisor drops what it cannot parse.
+func (t *Device) isLocalUDP(packet []byte) bool {
+	if len(packet) < header.IPv4MinimumSize {
+		return false
+	}
+	ip := header.IPv4(packet)
+	if !ip.IsValid(len(packet)) || int(ip.TotalLength()) != len(packet) ||
+		ip.More() || ip.FragmentOffset() != 0 || ip.Protocol() != uint8(udp.ProtocolNumber) ||
+		int(ip.TotalLength()) < int(ip.HeaderLength())+header.UDPMinimumSize {
+		return false
+	}
+	dst := ip.DestinationAddress()
+	return bytes.Equal(dst.AsSlice(), t.local.AsSlice())
 }
 
 func injectInbound(ep *channel.Endpoint, packet []byte) {
@@ -135,12 +196,16 @@ func injectInbound(ep *channel.Endpoint, packet []byte) {
 	pkt.DecRef()
 }
 
-func (t *Device) closeReassembly() {
+func (t *Device) closeIngress() {
 	if t.sweepStop != nil {
 		close(t.sweepStop)
 		<-t.sweepDone // join before the stack closes; see sweepReassembly
 	}
-	t.closed.Store(true)
+	if t.registry != nil {
+		t.registry.closeAll() // marks the Device closed, then closes every UDP endpoint
+	} else {
+		t.closed.Store(true)
+	}
 	if t.reassembly != nil {
 		t.reassembly.Close()
 	}

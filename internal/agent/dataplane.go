@@ -149,6 +149,15 @@ type tunnelReading struct {
 	// socketBuffers は、トンネルを立てた直後に測った WireGuard の UDP ソケットのバッファである
 	// (設計文書 7 節)。ユーザー空間モードのトンネルだけが持ち、doctor だけが使う
 	socketBuffers *sockbuf.Reading
+	// udpAccounting は netstack の UDP の受信の会計の状態である(設計文書 7 節)。ユーザー空間モードの
+	// トンネルだけが持ち、doctor だけが使う
+	udpAccounting *udpAccountingReading
+}
+
+// udpAccountingReading は UDP の受信の会計を 1 回読んだ値である。fault が nil でなければ、会計が
+// 不変条件の違反を検出してトンネルの UDP を止めている。
+type udpAccountingReading struct {
+	fault error
 }
 
 // relayReading はユーザー空間の中継を 1 回読んだ値である。listeners は rules と同じ 1 回の読みから

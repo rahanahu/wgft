@@ -273,8 +273,8 @@ stay unread. An agent started from an older binary answers that it does not know
 the command; restart it to read its live state.
 
 Being stopped is a failure here: a stopped agent forwards nothing, so "process"
-reads FAILED. In userspace mode four items decide the verdict: credentials,
-process, tunnel and listeners. The rest are printed and never raise the exit code, because they
+reads FAILED. In userspace mode five items decide the verdict: credentials,
+process, tunnel, UDP accounting and listeners. The rest are printed and never raise the exit code, because they
 state a value rather than whether this host can forward. Name resolution is one
 of them: an address resolved earlier can still carry traffic. When the server
 has disabled this agent, listeners reads SKIPPED by design instead of counting
@@ -291,6 +291,12 @@ socket keeps the size it got when it was opened, so restart the agent after
 changing them. In a container, the container host sets them. The item reads
 NOT TESTED in kernel mode, and on Windows and macOS, where the agent does not
 measure its sockets.
+
+The UDP accounting item under Tunnel reads FAILED when the tunnel's UDP receive
+accounting found an internal inconsistency and stopped all UDP on the tunnel.
+That is a bug rather than load: a full receive budget drops datagrams and logs
+a line, but does not stop anything. TCP keeps working; restart the agent to
+resume UDP. The item reads NOT TESTED in kernel mode.
 
 A kernel-mode agent, WGFT_MODE=kernel, is judged by what the kernel forwards
 with rather than by its process. The Dataplane group answers for it: interface

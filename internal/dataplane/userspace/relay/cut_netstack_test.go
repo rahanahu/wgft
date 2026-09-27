@@ -71,7 +71,7 @@ func netstackPair(t *testing.T) (*nettun.Device, netstackNet) {
 			d.Close()
 		}
 		for _, d := range []*nettun.Device{client, agent} {
-			d.Stack().Wait()
+			d.Wait()
 		}
 	})
 	return client, netstackNet{dev: agent, addr: cutAgentAddr}

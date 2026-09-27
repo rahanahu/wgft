@@ -17,11 +17,9 @@ import (
 const maxListenBacklog = 4096
 
 // ListenUDP は ap で未接続の UDP リスナーを開く(エージェントの公開側リスナー。仕様 7 節)。
-// DialUDP と違い ReadWaiter は要らない。リスナーの Read はデータグラムが実際に届いてから
-// しか戻らないので、無通信の間バッファを持つ必要が無いためである。
+// endpoint は DialUDP と同じく登録表を通して作る。
 func (t *Device) ListenUDP(ap netip.AddrPort) (net.PacketConn, error) {
-	a := fullAddr(ap)
-	return gonet.DialUDP(t.stack, &a, nil, ipv4.ProtocolNumber)
+	return t.registry.open(&ap, nil)
 }
 
 // TCPListener は、Accept が *TCPConn を返す net.Listener。呼び出し側は、拒む接続をグレース

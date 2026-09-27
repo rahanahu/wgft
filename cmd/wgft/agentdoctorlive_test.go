@@ -914,6 +914,7 @@ func runtimeResponse(edit func(*agent.DoctorRuntimeState), more ...any) *agent.D
 			StartedAt:     testLiveNow.Add(-time.Hour),
 			Watchdog:      agent.DoctorWatchdog{RebuildInterval: 5 * time.Minute},
 			SocketBuffers: &agent.DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 14680064, Send: 14680064, Required: 14680064},
+			UDPAccounting: &agent.DoctorUDPAccounting{},
 		},
 		Rules: []agent.DoctorRule{
 			{ID: "r_1", State: proto.StatusOK, Proto: proto.TCP, Listeners: 1, Listening: 1, Sessions: 2, Flows: 1},
