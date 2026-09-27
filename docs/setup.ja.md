@@ -55,17 +55,21 @@ sudo runuser -u wgft -- wgft agent doctor
 
 Tunnel の群の `socket buffers` の項目は、OK か、測った値と設定する値を添えた FAILED を示します。条件に届かないエージェントも転送は続けるので、この項目は終了コードを変えません。
 
-VPS では、ユーザー空間モードの `sudo wgft server check` が、2 つの sysctl の値、`CAP_NET_ADMIN` を持たないソケットが得る値、条件の値を示します。`server check` は server の判定をしません。VM か専用のホストでは、付属の systemd の unit で起動した server は `CAP_NET_ADMIN` を持ち、sysctl の値を超えるバッファを得られるためです。コンテナの中と LXC ベースの VPS では、unit が与える権限はコンテナの中に限られ、上限を超えさせません。そこで条件を満たせるかどうかは未確認です。判定の決め手は server 自身のログで、server はソケットが条件に届かないときだけ前述の警告を出します。
+VPS では、ユーザー空間モードの `sudo wgft server check` が、2 つの sysctl の値、`CAP_NET_ADMIN` を持たないソケットが得る値、条件の値を示します。`server check` は server の判定をしません。VM か専用のホストでは、付属の systemd の unit で起動した server は `CAP_NET_ADMIN` を持ち、sysctl の値を超えるバッファを得られるためです。コンテナの中と LXC ベースの VPS では、unit が与える権限はコンテナの中に限られ、上限を超えさせないので、条件はコンテナのホストの sysctl で決まります。LXC のコンテナの中と LXC ベースの VPS の server が条件を満たせるかどうかは未確認です。判定の決め手は server 自身のログで、server はソケットが条件に届かないときだけ前述の警告を出します。
 
-コンテナでは、2 つの sysctl をコンテナのホストで設定します。コンテナの中からは変えられず、`docker run --sysctl` による設定も失敗します。付属の compose ファイルは非特権のまま使い、ホストの設定だけで条件を満たします。前述の手順でコンテナのホストに設定し、コンテナを再起動してから、コンテナの中のソケットが得た値を確かめます。
+コンテナでは、2 つの sysctl をコンテナのホストで設定します。コンテナの中からは変えられず、`docker run --sysctl` による設定も失敗します。LXC や Incus のコンテナでは、コンテナの root が中から書き込んでも、ホストの値は変わりません。カーネルによっては、コンテナの中の `sysctl -w` はエラーを表示しても終了コード 0 で終わります。前述のファイルと `sysctl --system` をコンテナの中で実行しても変わらず、カーネル 6.1 と 6.8 では、この 2 つの設定を何も表示せずに読み飛ばしました。付属の compose ファイルは非特権のまま使い、ホストの設定だけで条件を満たします。前述の手順でコンテナのホストに設定し、コンテナを再起動してから、コンテナの中のソケットが得た値を確かめます。
 
 ```sh
 docker compose -f deploy/agent.compose.yaml exec wgft-agent wgft agent doctor
 ```
 
-server のコンテナでは、`docker compose -f deploy/server.compose.yaml logs` でログを確かめます。コンテナの中の `server check` は、2 つの sysctl を見えないものとして示すことがあります。その場合も、`CAP_NET_ADMIN` を持たないソケットが得る値は示します。
+server のコンテナでは、`docker compose -f deploy/server.compose.yaml logs` でログを確かめます。
 
-この手順は、開発用ラボの Debian 12(カーネル 6.1)で確かめました。既定の値では、`agent doctor` がこの項目を FAILED とし、終了コードは 0 で、エージェントは警告を出しました。前述の 2 つのコマンドと再起動の後は、この項目が OK になりました。Docker でも、付属の compose ファイルで動かしたエージェントと server で同じ結果になり、server は設定の前だけ警告を出しました。同じ VM で既定の値のまま、`CAP_NET_ADMIN` だけを持つ server のプロセスは条件を満たすバッファを得て、警告を出しませんでした。付属の unit そのものでは確かめていません。非特権の LXC のコンテナ、rootless のコンテナ、他のディストリビューションは未確認です。Windows と macOS のエージェントはソケットを測らず、`agent doctor` はこの項目を NOT TESTED として示します。この 2 つの OS で得られるバッファの大きさと、設定が要るかどうかは未確認です。
+LXC や Incus のコンテナのエージェントでは、前述の手順でコンテナのホストに 2 つの sysctl を設定します。その後、コンテナの中で `systemctl restart wgft-agent` によってエージェントを再起動し、前述のとおり `agent doctor` を実行します。コンテナ自体の再起動は要りません。
+
+コンテナの中から 2 つの sysctl が見えるかどうかは、カーネルによって違います。ラボでは、2 つの sysctl はカーネル 6.1 と 6.8 ではコンテナの中に存在せず、カーネル 6.17 では読み取り専用で、ホストの値を示しました。Fedora 44 のホストのカーネル 7.2 でも、分けた network namespace の中で読み取り専用でした。このため、コンテナの中の `server check` は、2 つの sysctl を見えないものとして示すことがあります。その場合も、`CAP_NET_ADMIN` を持たないソケットが得る値は示します。
+
+この手順は、開発用ラボの Debian 12(カーネル 6.1)で確かめました。既定の値では、`agent doctor` がこの項目を FAILED とし、終了コードは 0 で、エージェントは警告を出しました。前述の 2 つのコマンドと再起動の後は、この項目が OK になりました。Docker でも、付属の compose ファイルで動かしたエージェントと server で同じ結果になり、server は設定の前だけ警告を出しました。同じ VM で既定の値のまま、`CAP_NET_ADMIN` だけを持つ server のプロセスは条件を満たすバッファを得て、警告を出しませんでした。付属の unit そのものでは確かめていません。非特権の Incus のコンテナのエージェントでも同じ結果になりました。このコンテナは Incus の既定のままで、security の設定も nesting もありません。エージェントは付属の unit で専用の利用者として動き、capability を持ちません。設定の前は `agent doctor` がこの項目を FAILED とし、終了コードは 0 で、エージェントは警告を出しました。コンテナのホストで前述のファイルを適用し、エージェントを再起動した後は、この項目が OK になり、警告は出なくなりました。`wgft agent rotate-key` の後もこの項目は OK のままでした。確かめたカーネルは、Debian 12 のカーネル 6.1、Ubuntu 24.04 のカーネル 6.8、Ubuntu のカーネル 6.17 です。6.17 では、ファイルを置いたままコンテナのホストを再起動し、再起動の後もこの項目が OK になることも確かめました。Proxmox VE のコンテナ、nesting を有効にしたコンテナ、非特権の LXC や Incus のコンテナの中のユーザー空間モードの server、rootless のコンテナ、LXC や Incus のコンテナのエージェントでのカーネル 7.x、他のディストリビューションは未確認です。Windows と macOS のエージェントはソケットを測らず、`agent doctor` はこの項目を NOT TESTED として示します。この 2 つの OS で得られるバッファの大きさと、設定が要るかどうかは未確認です。
 
 ## 1. バイナリをインストールする
 
@@ -149,7 +153,7 @@ sudo wgft server run
 printf 'WGFT_MODE=userspace\nWGFT_WG_ENDPOINT=vps.example.com:51820\n' | sudo tee /etc/wgft/server.env
 ```
 
-UDP 51820、TCP 8443、および転送する各ポートを VPS の firewall で開けてください。ユーザー空間モードでは `wgft server` が停止すると転送も停止します。付属の unit は `CAP_NET_ADMIN` を与えます。VM か専用のホストでは、この権限により、server の WireGuard のソケットは sysctl を上げなくても[ソケットのバッファの条件](#ユーザー空間モードのソケットのバッファ)を満たします。LXC ベースの VPS では、この権限は上限を超えさせず、条件を満たせるかどうかは未確認です。どの場合も、ソケットが条件に届かなければ server のログに警告が出ます。
+UDP 51820、TCP 8443、および転送する各ポートを VPS の firewall で開けてください。ユーザー空間モードでは `wgft server` が停止すると転送も停止します。付属の unit は `CAP_NET_ADMIN` を与えます。VM か専用のホストでは、この権限により、server の WireGuard のソケットは sysctl を上げなくても[ソケットのバッファの条件](#ユーザー空間モードのソケットのバッファ)を満たします。LXC ベースの VPS では、この権限は上限を超えさせないので、条件はコンテナのホストの sysctl で決まります。LXC ベースの VPS の server が条件を満たせるかどうかは未確認です。どの場合も、ソケットが条件に届かなければ server のログに警告が出ます。
 
 ### root なしでユーザー空間モードを使う
 

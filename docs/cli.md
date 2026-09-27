@@ -1263,10 +1263,12 @@ asks for, so 7340032 in both sysctls is what gives 14680064. It does not judge
 the server, since check cannot know what the server will hold. On a VM or a
 dedicated host, CAP_NET_ADMIN, which the provided systemd unit grants, gets
 the size past these sysctls. Inside a container or on an LXC-based VPS, that
-capability does not lift the limit, and whether the requirement can be met
-there has not been verified. The running server measures its own sockets and
-logs a warning when they fall short; that measurement decides. Inside a
-container the two sysctls may not be visible; the container host sets them.
+capability does not lift the limit, so the container host's sysctls decide.
+A server run with the provided compose file has met the requirement once the
+host raised them; a server in an LXC container or on an LXC-based VPS has not
+been verified. The running server measures its own sockets and logs a warning
+when they fall short; that measurement decides. Inside a container the two
+sysctls may not be visible; the container host sets them.
 
 ```text
 wgft server check [flags]
