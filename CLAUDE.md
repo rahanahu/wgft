@@ -8,11 +8,13 @@ wgft の VPS 側はカーネルの nftables、WireGuard、conntrack を直接操
 
 コードの編集と `go test` はホストで行います。nftables、wg0、conntrack が絡む実験と、通しの結合テストは、Incus の VM `wgft-lab` の中の network namespace で行います。ホストや Docker でカーネル機能を試すと、ホスト自身のカーネルバージョンや、Docker が有効にする `br_netfilter` 経由のルールと conntrack が結果に混ざるため、VM に切り分けます。
 
-ラボの起動は `lab/lab up` の 1 コマンドで済みます。Incus が入っていて自分が `incus-admin` グループに属していれば、VM の作成、パッケージの導入、`client - vps - homerouter(NAT) - home` の 4 つの network namespace によるトポロジの構築までがこの 1 コマンドに含まれます。ビルドは `lab/lab build` がホスト上の Go コードを VM の `/usr/local/bin` にインストールし、`lab/lab exec <ns> <コマンド>` で各 namespace 内のプロセスを起動します。壊れた状態になったら `lab/lab reset` でスナップショットに戻せます。詳しい手順は [lab/README.md](lab/README.md) にあります。
+ラボの起動は `lab/lab up` の 1 コマンドで済みます。Incus が入っていて自分が `incus-admin` グループに属していれば、VM の作成、パッケージの導入、`client - vps - homerouter(NAT) - home` と homerouter の先の `lan` の 5 つの network namespace によるトポロジの構築までがこの 1 コマンドに含まれます。ビルドは `lab/lab build` がホスト上の Go コードを VM の `/usr/local/bin` にインストールし、`lab/lab exec <ns> <コマンド>` で各 namespace 内のプロセスを起動します。壊れた状態になったら `lab/lab reset` でスナップショットに戻せます。VM の名前は `WGFT_LAB_VM` で変えられ、既定は `wgft-lab` です。名前を変えると複数の VM を並べて立てられます。
+
+マージの前に流すラボの一式は、1 台の VM を Lab Host とし、Lab Host の中に使い捨ての Sandbox を並べて流します。Sandbox は確認ごとの network namespace、作業ディレクトリ、プロセスをひとまとまりに持つ隔離の単位で、発行と後片付けは [tools/labhost](tools/labhost) が担います。一式は `lab/lab build` のあとに `lab/lab exec vm labhost run -parallel 8 all` の 1 コマンドで流し、結果を PR の本文に書きます。詳しい手順は [lab/README.md](lab/README.md) に、一式の位置づけは [docs/testing.md](docs/testing.md) の「マージの前に流すテスト」にあります。
 
 ## テストの分け方
 
-`go test ./...` はホストで実行する単体テストで、ネットワーク namespace や root 権限を必要としません。`lab/` 配下の結合テストは Incus の VM を必要とするため、CI では実行されません。開発者はコードを変える PR のマージの前にラボの結合テストの一式を流し、CI には単体テストと後述の静的検査だけを任せます。文書だけを変える PR では、ラボを流しません。どのテストをどの変更と時点で流すかは [docs/testing.md](docs/testing.md) に定めてあります。
+`go test ./...` はホストで実行する単体テストで、ネットワーク namespace や root 権限を必要としません。`lab/` 配下の結合テストは Incus の VM を必要とするため、CI では実行されません。開発者はコードを変える PR のマージの前にラボの結合テストの一式を流します。CI は単体テストと静的検査のほか、Windows と macOS でのテスト、リリースの成果物の検査、既知の脆弱性の検査を、変更の内容に応じて流します。文書だけを変える PR では、ラボを流しません。どのテストをどの変更と時点で流すかは [docs/testing.md](docs/testing.md) に定めてあります。
 
 ## 実験の置き場所
 
@@ -61,7 +63,15 @@ nftables や WireGuard の挙動を確かめる使い捨ての実験コードは
 
 ## CI が通す検査
 
-`.github/workflows/ci.yml` は push と pull request のたびに次を検査します。`gofmt -l` によるフォーマットの確認、`go vet`、ビルドと `go test ./...`、`staticcheck` による静的解析、文字列リテラルへの日本語混入の検査([scripts/check-japanese](scripts/check-japanese/)。ツールの出力は英語だけを使う約束のためです)、公開対象ファイルの全角記号の検査([scripts/check-ascii-punct.sh](scripts/check-ascii-punct.sh))です。Go の検査は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。全角記号の検査は、どの PR でも流します。ラボの結合テストは Incus の VM を必要とするため、CI には含まれません。
+`.github/workflows/ci.yml` は main への push と pull request のたびに、変更されたパスに応じて次のジョブを流します。流す条件の決め方は [docs/testing.md](docs/testing.md) の「CI とラボの関係」にあります。
+
+- `build-test`:`gofmt -l` によるフォーマットの確認、`go mod tidy` が `go.mod` と `go.sum` を変えないことの確認、`go vet`、ビルドと `go test ./...`、Windows と macOS 向けのクロスビルドと `go vet`、`staticcheck` による静的解析です。Markdown の文書と `docs/images/` の画像だけを変える変更では流しません。ヘルプから生成する `docs/cli.md` を変える変更は、文書だけの変更に当たりません
+- `windows-test` と `macos-test`:Windows と macOS の runner で、[scripts/portable-test-packages.sh](scripts/portable-test-packages.sh) が選ぶ package のテストを流します。Windows ではテストの前に全体のビルドと `go vet` も流します。Go のソースファイル、`go.mod`、`go.sum`、このスクリプトのどれかを変える変更で流します
+- `release-snapshot`:GoReleaser を snapshot のモードで動かし、成果物の名前とチェックサムを確かめます。GoReleaser の設定、リリースに関わるスクリプト、`deploy/` の Dockerfile と compose のファイル、`go.mod`、`go.sum`、`.github/workflows/` のどれかを変える変更で流します
+- `govulncheck`:既知の脆弱性の検査です。`release-snapshot` を流す変更と Go のソースファイルの変更で流します。週に 1 回の定期実行でも流し、定期実行で流す検査はこれだけです
+- `lint-output`:文字列リテラルへの日本語混入の検査([scripts/check-japanese](scripts/check-japanese/)。ツールの出力は英語だけを使う約束のためです)、公開対象ファイルの全角記号の検査([scripts/check-ascii-punct.sh](scripts/check-ascii-punct.sh))、トークンの値をログに出す行の検査([scripts/check-log-tokens.sh](scripts/check-log-tokens.sh))です。どの変更でも流します
+
+変更されたパスを判定できないとき、手動で実行したとき (`workflow_dispatch`)、`.github/workflows/` を変えたときは、すべてのジョブを流します。ラボの結合テストは Incus の VM を必要とするため、CI には含まれません。
 
 ## 内部構造の固定の終了後も効く制約
 
@@ -108,4 +118,4 @@ Web UI のテンプレートや文言を変えたとき、サンプルデータ�
 
 ## 単体テストのカバレッジが低いパッケージ
 
-`internal/vpsd`、`internal/vpsd/wg`、`internal/agent` は、単体テストのカバレッジが意図的に低いパッケージです。これらはカーネルの nftables や WireGuard、実ネットワークとの配線を担う層であり、モックに置き換えると確かめられる範囲が狭くなります。この層は `lab/` の結合テストで、実機に近い環境での動作を確かめる方針を取っています。
+`internal/vpsd` と `internal/dataplane/linuxkernel/wg` は、単体テストのカバレッジが意図的に低いパッケージです。これらはカーネルの nftables や WireGuard、実ネットワークとの配線を担う層であり、モックに置き換えると確かめられる範囲が狭くなります。この層は `lab/` の結合テストで、実機に近い環境での動作を確かめる方針を取っています。
