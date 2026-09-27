@@ -14,10 +14,10 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"golang.zx2c4.com/wireguard/tun"
-	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
@@ -31,7 +31,8 @@ import (
 // Device は 1 つの IPv4 アドレスを持つ gVisor netstack 上の tun.Device で、wireguard-go の
 // device.Device に組み込める。wireguard-go 自身の netstack.Net と違い、Stack を公開する。
 //
-// 出力は channel.Endpoint の有限キューから Read が直接引き取る。Close は読み取りを取り消す。
+// 出力は channel.Endpoint の有限キューから Read が直接引き取る。入力の IPv4 の断片は有限な
+// 再組み立て(ingress.go)を通し、完成した datagram だけを stack に渡す。Close は読み取りを取り消す。
 type Device struct {
 	ep         *channel.Endpoint
 	stack      *stack.Stack
@@ -40,6 +41,11 @@ type Device struct {
 	cancelRead context.CancelFunc
 	closeOnce  sync.Once
 	mtu        int
+	local      netip.Addr
+	reassembly *ipv4Reassembly
+	sweepStop  chan struct{}
+	sweepDone  chan struct{}
+	closed     atomic.Bool
 }
 
 // Create は addr (IPv4 のみ) を唯一のアドレスとする Device を作る。
@@ -59,6 +65,7 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		readCtx:    readCtx,
 		cancelRead: cancelRead,
 		mtu:        mtu,
+		local:      addr,
 	}
 	sack := tcpip.TCPSACKEnabled(true) // 既定では無効
 	if err := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
@@ -72,6 +79,10 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		return nil, fmt.Errorf("AddProtocolAddress(%v): %v", addr, err)
 	}
 	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
+	if err := dev.initReassembly(); err != nil {
+		dev.Close()
+		return nil, err
+	}
 	dev.events <- tun.EventUp
 	return dev, nil
 }
@@ -109,26 +120,41 @@ func (t *Device) Read(buf [][]byte, sizes []int, offset int) (int, error) {
 }
 
 func (t *Device) Write(buf [][]byte, offset int) (int, error) {
+	// A failed packet must not starve later packets in the same WireGuard
+	// batch. Return the number accepted and the first error after trying all.
+	accepted := 0
+	var firstErr error
 	for _, b := range buf {
 		packet := b[offset:]
 		if len(packet) == 0 {
+			accepted++
 			continue
 		}
 		if packet[0]>>4 != 4 {
-			return 0, syscall.EAFNOSUPPORT
+			if firstErr == nil {
+				firstErr = syscall.EAFNOSUPPORT
+			}
+			continue
 		}
-		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
-		t.ep.InjectInbound(header.IPv4ProtocolNumber, pkb)
+		if err := t.writeIPv4(packet); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		accepted++
 	}
-	return len(buf), nil
+	return accepted, firstErr
 }
 
 // Close は device を閉じる。2 回目以降の呼び出しは何もしない。
 //
-// 読み取りの取り消しを先に行い、停止中の TUN.Read を解除する。
+// 読み取りの取り消しを先に行い、停止中の TUN.Read を解除する。再組み立ての sweeper は stack を
+// 閉じる前に止めて待つ。
 func (t *Device) Close() error {
 	t.closeOnce.Do(func() {
 		t.cancelRead()
+		t.closeReassembly()
 		t.stack.RemoveNIC(1)
 		t.stack.Close()
 		t.ep.Close()
