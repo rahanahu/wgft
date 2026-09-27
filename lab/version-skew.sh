@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # version-skew.sh checks the wire-protocol version negotiation (design 7a.6 section) across the
 # combinations the design promises to keep working during a rolling upgrade: the current build
-# talks to an agent with no protocol fields at all (legacy v0), the current build talks to the
-# immediately-previous release's agent, and the immediately-previous release's server talks to
-# the current build's agent. For each pairing this checks: the agent registers, the tunnel comes
-# up, a TCP and a UDP rule forward, a rule added after registration reaches the agent, and the
-# selected protocol version is what design 7a.6 requires, both in the server's own log line
-# ("protocol legacy v0" or "protocol v<N>") and in the agent's ("server selected protocol ...").
+# talks to an agent with no protocol fields at all (legacy v0), the current build talks to
+# OLD_AGENT_VERSION's agent (a previous release that speaks the current protocol v1; see below),
+# and that release's server talks to the current build's agent. For each pairing this checks: the
+# agent registers, the tunnel comes up, a TCP and a UDP rule forward, a rule added after
+# registration reaches the agent, and the selected protocol version is what design 7a.6 requires,
+# both in the server's own log line ("protocol legacy v0" or "protocol v<N>") and in the agent's
+# ("server selected protocol ...").
 # The server and then the agent are restarted in turn (data and credentials kept, so this is a
 # reconnect, not a fresh setup) and the same negotiation, registration and forwarding checks are
 # repeated, because a rolling upgrade restarts one side while the other keeps running.
@@ -23,8 +24,9 @@
 #                             the v1.0.x line (7a.6's own wording), so LEGACY_VERSION stays
 #                             v0.3.0 - the only release that predates negotiation - regardless of
 #                             which release OLD_AGENT_VERSION points at.
-#   old agent   (old-agent)   current server build, OLD_AGENT_VERSION agent (the
-#                             immediately-previous release; it already speaks protocol v1). Also
+#   old agent   (old-agent)   current server build, OLD_AGENT_VERSION agent (a previous release,
+#                             not necessarily the immediately-previous one; it already speaks
+#                             protocol v1). Also
 #                             checks agent disable/enable against this old agent (see below).
 #   old server  (old-server)  OLD_AGENT_VERSION server, current agent build.
 #   baseline    (baseline)    current server build, current agent build (both v1); a sanity
@@ -36,8 +38,9 @@
 # and immediately-previous NUMBERED protocol version, and every release from v0.4.0 onward speaks
 # the same protocol v1 (no v2 has been introduced yet), so old-agent/old-server exist to exercise
 # an actual previous release's registration/forwarding/reconnect behaviour, not to add protocol
-# coverage a unit test does not already have. It moves forward with each release: v1.1.3 as of
-# this revision (main is v1.1.3 plus whatever has landed since), v0.6.0 previously.
+# coverage a unit test does not already have. It is meant to move forward with each release, but
+# this constant lags: it is v1.1.3 here, even though main has since released v1.2.0 (v0.6.0 was
+# the value before v1.1.3).
 #
 # v0.3.0 predates the "stream: server selected protocol ..." log line by design (it has no
 # concept of a negotiated version to log), so the legacy combination only checks the server's own
@@ -91,7 +94,8 @@
 set -u
 
 GH_REPO=rahanahu/wgft
-OLD_AGENT_VERSION=1.1.3  # immediately-previous release: already speaks protocol v1 (design 7a.6)
+OLD_AGENT_VERSION=1.1.3  # a previous release, not necessarily the immediately-previous one (see
+  # header comment): already speaks protocol v1 (design 7a.6)
 LEGACY_VERSION=0.3.0     # predates version negotiation entirely: legacy v0. Fixed regardless of
   # OLD_AGENT_VERSION (see the "legacy" combination's own comment above): design 7a.6 requires
   # legacy v0 support through v1.0.x, and v0.3.0 is the only release that is actually legacy v0.
