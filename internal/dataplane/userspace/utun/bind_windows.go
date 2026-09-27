@@ -2,10 +2,15 @@
 
 package utun
 
-import "golang.zx2c4.com/wireguard/conn"
+import (
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgbind"
+	"golang.zx2c4.com/wireguard/conn"
+)
 
 // newBind は、Windows でだけ conn.NewDefaultBind() の既定(Registered I/O を使う
-// WinRingBind)を避け、conn.NewStdNetBind() を明示して使う。
+// WinRingBind)を避け、conn.NewStdNetBind() を明示して使う。他の OS と同じく wgbind.BatchOne に
+// 通すが、Windows の StdNetBind は BatchSize が 1 なので包まれず、そのまま device に渡る
+// (設計文書 7 節の「WireGuard の受信の 1 回の件数」)。
 //
 // WinRingBind は Winsock のソケットを自前で開き、SIO_UDP_CONNRESET を無効にしない。
 // このため、到達できない宛先へ送った UDP に対して Windows 自身のスタックが生成する
@@ -32,5 +37,5 @@ import "golang.zx2c4.com/wireguard/conn"
 // 同じ理由でこの対を複製している。5 行程度のこの選択のためだけに新しい package を
 // 設ける実利は無いため、共有はしない。
 func newBind() conn.Bind {
-	return conn.NewStdNetBind()
+	return wgbind.BatchOne(conn.NewStdNetBind())
 }
