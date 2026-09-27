@@ -48,8 +48,9 @@ services:
       # CIDR:port or CIDR:lo-hi; a bare address means that one host. Unset means no restriction.
       # WGFT_AGENT_ALLOW_TARGETS: "192.168.1.20:25565,192.168.1.21:2456-2458"
       # Optional: process-wide caps on concurrent flows. The values below are the defaults. They
-      # bound the memory of the agent when many flows are opened and held, and the memory soft
-      # limit printed at startup is derived from them. Lower them on a host with little memory.
+      # cap how many flows the agent holds when many are opened and held; the memory soft limit
+      # printed at startup is derived from them, but a soft limit is a GC target, not a memory
+      # bound (docs/design.md section 7). Lower them on a host with little memory.
       # WGFT_MAX_UDP_FLOWS: "8192"
       # WGFT_MAX_TCP_FLOWS: "2048"
     volumes:
