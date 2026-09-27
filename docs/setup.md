@@ -271,10 +271,10 @@ WGFT_JOIN='<join string>' /usr/local/bin/wgft agent run
 
 The first successful registration prints `registered as agent <name>` and writes `~/Library/Application Support/wgft/agent.json`. The directory is created with mode 0700 and the file with mode 0600. Press Ctrl+C to stop this foreground agent before installing the daemon below; the credentials stay in `agent.json`. The daemon and a terminal agent cannot run at the same time, because the second one refuses to start with `credentials file is in use by another process`.
 
-To keep the agent running, install [deploy/io.github.rahanahu.wgft.agent.plist](../deploy/io.github.rahanahu.wgft.agent.plist) as a LaunchDaemon. It runs `wgft agent run` with your user's rights through `UserName`, not as root, and points `WGFT_DATA_DIR` at the same `~/Library/Application Support/wgft`. Replace the `YOUR_USER` placeholders with your user name and home directory, then install and load it:
+To keep the agent running, install [deploy/io.github.rahanahu.wgft.agent.plist](../deploy/io.github.rahanahu.wgft.agent.plist) as a LaunchDaemon. It runs `wgft agent run` with your user's rights through `UserName`, not as root, and points `WGFT_DATA_DIR` at the same `~/Library/Application Support/wgft`. The plist is not a release asset, so download the one from the same release tag as the binary; `wgft version` prints that tag on its first line for a release binary. Replace the `YOUR_USER` placeholders with your user name and home directory, then install and load it:
 
 ```sh
-curl -LO https://raw.githubusercontent.com/rahanahu/wgft/main/deploy/io.github.rahanahu.wgft.agent.plist
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/io.github.rahanahu.wgft.agent.plist"
 sed -e "s|/Users/YOUR_USER|$HOME|g" -e "s|YOUR_USER|$(id -un)|g" io.github.rahanahu.wgft.agent.plist > wgft-agent.plist
 plutil -lint wgft-agent.plist
 sudo install -m 0644 -o root -g wheel wgft-agent.plist /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
