@@ -82,13 +82,13 @@ func TestUDPIngressReassembledAndLocalDatagramsAreAccounted(t *testing.T) {
 	assertDeviceUsage(t, d, 0, 0)
 }
 
-// The Device's budget: 1 MiB and 4096 datagrams, 64 bytes charged per
+// The Device's budget: 4 MiB and 4096 datagrams, 64 bytes charged per
 // datagram, and a quarter of each for one endpoint.
 func TestUDPIngressBudgetValues(t *testing.T) {
 	d := ingressDevice(t)
 	acc := d.registry.accounting
-	if acc.maxBytes != 1<<20 || acc.maxPackets != 4096 || acc.fixedOverhead != 64 ||
-		acc.maxEndpointBytes != 1<<18 || acc.maxEndpointPackets != 1024 {
+	if acc.maxBytes != 4<<20 || acc.maxPackets != 4096 || acc.fixedOverhead != 64 ||
+		acc.maxEndpointBytes != 1<<20 || acc.maxEndpointPackets != 1024 {
 		t.Fatalf("budget = %d/%d charge %d, endpoint %d/%d", acc.maxBytes, acc.maxPackets, acc.fixedOverhead,
 			acc.maxEndpointBytes, acc.maxEndpointPackets)
 	}
@@ -128,8 +128,8 @@ func TestUDPIngressRefusalsCountedAndLoggedOnce(t *testing.T) {
 		t.Fatalf("endpoint refusals changed to %d by a device refusal", got)
 	}
 	// The one line so far was written at the first refusal.
-	if got := lines(); len(got) != 1 || !strings.Contains(got[0], "1 refused at one socket's cap of 262144 bytes or 1024 datagrams") ||
-		!strings.Contains(got[0], "0 refused at the tunnel's total of 1048576 bytes or 4096 datagrams") || strings.ContainsAny(got[0], "()") {
+	if got := lines(); len(got) != 1 || !strings.Contains(got[0], "1 refused at one socket's cap of 1048576 bytes or 1024 datagrams") ||
+		!strings.Contains(got[0], "0 refused at the tunnel's total of 4194304 bytes or 4096 datagrams") || strings.ContainsAny(got[0], "()") {
 		t.Fatalf("refusal log = %q", got)
 	}
 	// Opening the gate again logs both counts on one new line.

@@ -1,9 +1,13 @@
 package nettun
 
 import (
+	"bytes"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
+
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 // These tests pin the per-endpoint (per-generation) cap of the UDP
@@ -143,8 +147,8 @@ func TestUDPEndpointCapBoundaries(t *testing.T) {
 func TestUDPEndpointCapIntegratedDevice(t *testing.T) {
 	d := ingressDevice(t)
 	acc := d.registry.accounting
-	if acc.maxEndpointPackets != 1024 || acc.maxEndpointBytes != 256<<10 {
-		t.Fatalf("integrated caps %d bytes / %d packets, want 262144/1024", acc.maxEndpointBytes, acc.maxEndpointPackets)
+	if acc.maxEndpointPackets != 1024 || acc.maxEndpointBytes != 1<<20 {
+		t.Fatalf("integrated caps %d bytes / %d packets, want 1048576/1024", acc.maxEndpointBytes, acc.maxEndpointPackets)
 	}
 	stalled := listenAdapter(t, d, 40010)
 	quiet := listenAdapter(t, d, 40011)
@@ -161,6 +165,45 @@ func TestUDPEndpointCapIntegratedDevice(t *testing.T) {
 	sendIngress(t, d, registryPacket([]byte("q"), 50001, 40011))
 	readOne(t, quiet)
 	assertDeviceUsage(t, d, 1024*67, 1024)
+}
+
+// A stream of large datagrams at one endpoint whose reader never reads stops
+// at the accounting's endpoint cap, not at gVisor's own receive buffer: the
+// gVisor limit counts payload bytes only and is set to the cap's bytes when
+// the endpoint opens, so every drop at one endpoint is a counted refusal.
+// With gVisor's default buffer, datagrams of this size overflowed it while
+// the accounting still had room, and that drop was not counted.
+func TestUDPEndpointCapBindsBeforeGVisorReceiveBuffer(t *testing.T) {
+	d := ingressDevice(t)
+	acc := d.registry.accounting
+	x := listenAdapter(t, d, 40030)
+	stats := x.ep.Stats().(*tcpip.TransportEndpointStats)
+	payload := bytes.Repeat([]byte{'x'}, 1300)
+	cost := len(payload) + udpDatagramCharge
+	fit := acc.maxEndpointBytes / cost
+	for i := 1; i <= fit+10; i++ {
+		sendIngress(t, d, registryPacket(payload, 50000, 40030))
+		if o := stats.ReceiveErrors.ReceiveBufferOverflow.Value(); o != 0 {
+			t.Fatalf("gVisor's receive buffer dropped datagram %d with %d endpoint refusals", i, acc.refusedEndpoint.Load())
+		}
+	}
+	if got := acc.refusedEndpoint.Load(); got != 10 {
+		t.Fatalf("endpoint refusals = %d, want 10", got)
+	}
+	if got := acc.refusedDevice.Load(); got != 0 {
+		t.Fatalf("device refusals = %d, want 0", got)
+	}
+	assertDeviceUsage(t, d, fit*cost, fit)
+	if got := x.ep.SocketOptions().GetReceiveBufferSize(); got != int64(acc.maxEndpointBytes) {
+		t.Fatalf("gVisor receive buffer = %d, want the endpoint cap %d", got, acc.maxEndpointBytes)
+	}
+	readOne(t, x)
+	assertDeviceUsage(t, d, (fit-1)*cost, fit-1)
+	// An endpoint opened by DialUDP takes the same path through open.
+	dialed := dialAdapter(t, d, netip.AddrPortFrom(accountingRemote, 9))
+	if got := dialed.ep.SocketOptions().GetReceiveBufferSize(); got != int64(acc.maxEndpointBytes) {
+		t.Fatalf("dialed endpoint's gVisor receive buffer = %d, want the endpoint cap %d", got, acc.maxEndpointBytes)
+	}
 }
 
 // Concurrent injections into a capped endpoint and a drained endpoint, with
