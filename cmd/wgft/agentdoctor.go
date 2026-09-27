@@ -654,8 +654,8 @@ func agentPrivilegesCheck(in agentDoctorInput, dirInDoubt bool) agentDoctorCheck
 		dataDirDenied = true
 	default:
 		// Windows では unix.Access に当たる呼び出しが無く、ACL を読んで判定を自前で組むほかに
-		// 手段が無い。7a.11 節が Windows のエージェントを暫定としているので、その判定は組まない。
-		// 黙って OK を返す形にもしない(10.2c 節)。
+		// 手段が無い。Windows のエージェントを暫定としていた時点で、この判定は組まないことにした。
+		// Windows だけ黙って OK を返す形にもしない(10.2c 節)。
 		undetermined = append(undetermined, "whether new files can be created in "+createLabel+": "+errText(err))
 	}
 	if _, err := os.Stat(in.CredentialsPath); err == nil {
