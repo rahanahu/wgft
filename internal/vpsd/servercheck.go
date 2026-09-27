@@ -392,7 +392,8 @@ func writeSocketBufferCheck(out io.Writer, l sockbuf.Limits, p sockbuf.Probe) {
 		})
 	}
 	fmt.Fprintln(out, "  with CAP_NET_ADMIN, which the provided systemd unit grants, a socket on a VM or a dedicated host can get the required size past these sysctls; "+
-		"inside a container or on an LXC-based VPS that capability does not lift the limit, and whether the requirement can be met there has not been verified")
+		"inside a container or on an LXC-based VPS that capability does not lift the limit, so the container host's sysctls decide")
+	fmt.Fprintln(out, "  whether a server in an LXC container or on an LXC-based VPS can meet the requirement has not been verified")
 	fmt.Fprintln(out, "  the running server measures its own sockets and logs a warning when they fall short, and that measurement is what decides")
 }
 
