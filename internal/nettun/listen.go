@@ -25,8 +25,9 @@ func (t *Device) ListenUDP(ap netip.AddrPort) (net.PacketConn, error) {
 // TCPListener は、Accept が *TCPConn を返す net.Listener。呼び出し側は、拒む接続をグレース
 // フルクローズの代わりに RST(TCPConn.Abort)で終えられる。
 type TCPListener struct {
-	ep tcpip.Endpoint
-	wq *waiter.Queue
+	dev *Device
+	ep  tcpip.Endpoint
+	wq  *waiter.Queue
 }
 
 // ListenTCP は ap で TCP リスナーを開く。gonet.ListenTCP の Bind+Listen をそのまま写したもの
@@ -47,7 +48,7 @@ func (t *Device) ListenTCP(ap netip.AddrPort) (*TCPListener, error) {
 		ep.Close()
 		return nil, &net.OpError{Op: "listen", Net: "tcp", Addr: net.TCPAddrFromAddrPort(ap), Err: errors.New(err.String())}
 	}
-	return &TCPListener{ep: ep, wq: &wq}, nil
+	return &TCPListener{dev: t, ep: ep, wq: &wq}, nil
 }
 
 // Accept は net.Listener の実装。
@@ -68,7 +69,14 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, &net.OpError{Op: "accept", Net: "tcp", Addr: l.Addr(), Err: errors.New(err.String())}
 	}
-	return &TCPConn{TCPConn: gonet.NewTCPConn(wq, n), ep: n}, nil
+	// accept した endpoint にも gVisor の既定値の TCP keepalive を有効にする(仕様 7 節「接続の寿命」)。
+	// 待ち受けの endpoint に設定しても accept した endpoint には引き継がれないので、1 本ごとに設定する。
+	// vpsd が再起動してもハンドシェイクは止まらず netstack は作り直されないため、両側が黙った接続が
+	// 同時フロー数の枠を永久に占めないためである。値は既定のまま変えず、wgft のタイマーと goroutine は
+	// 増えない。probe に ACK を返す生きた相手は切らず、未確認応答のデータがある間はタイマーが止まるので
+	// 読みの遅い相手も切らない。
+	n.SocketOptions().SetKeepAlive(true)
+	return &TCPConn{TCPConn: gonet.NewTCPConn(wq, n), ep: n, dev: l.dev}, nil
 }
 
 // Close は net.Listener の実装。
@@ -86,15 +94,28 @@ func (l *TCPListener) Addr() net.Addr {
 	return &net.TCPAddr{IP: net.IP(a.Addr.AsSlice()), Port: int(a.Port)}
 }
 
-// TCPConn は *gonet.TCPConn に、accept した tcpip.Endpoint へのアクセスを足したもの。これにより、
-// 拒む接続をグレースフルクローズ(FIN の後、既定で 60 秒の tcp.DefaultTCPTimeWaitTimeout の
-// TIME_WAIT)ではなく Abort(RST)で終えられる。relay パッケージでの Abort の使用と、
+// TCPConn は *gonet.TCPConn に、accept か dial した tcpip.Endpoint へのアクセスを足したもの。
+// これにより、拒む接続をグレースフルクローズ(FIN の後、既定で 60 秒の tcp.DefaultTCPTimeWaitTimeout
+// の TIME_WAIT)ではなく Abort(RST)で終えられる。relay パッケージでの Abort の使用と、
 // GitHub issue #25、仕様 7 節を見よ。
 type TCPConn struct {
 	*gonet.TCPConn
-	ep tcpip.Endpoint
+	ep  tcpip.Endpoint
+	dev *Device
 }
+
+func (c *TCPConn) endpoint() tcpip.Endpoint { return c.ep }
 
 // Abort は RST を送り、Close が行うグレースフルシャットダウン(とその結果の TIME_WAIT)を
 // 経ずに、接続の資源を即座に解放する。
 func (c *TCPConn) Abort() { c.ep.Abort() }
+
+// Close は net.Conn の実装。閉じかけの endpoint の数が Device の天井に達している間は、この
+// endpoint を graceful close の代わりに RST で直ちに解放する(tcp_closing.go、仕様 7 節)。
+// それ以外は gonet の Close、つまり gVisor の Close で、endpoint は FIN と TIME_WAIT を経て消える。
+func (c *TCPConn) Close() error {
+	if c.dev != nil && c.dev.closeTCP(c.ep) {
+		return nil
+	}
+	return c.TCPConn.Close()
+}

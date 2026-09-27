@@ -5,7 +5,9 @@
 // ため(listen.go)、どちらも UDP の受信を会計に通すため(udp_accounting.go)である。wireguard-go 自身の
 // tun/netstack パッケージは組み立てた stack を公開しない(型 Net は非公開の netTun を包む)ため、この
 // パッケージは tun/netstack.CreateNetTUN の必要な部分を写したもの(MIT License、Copyright (C) 2017-2025
-// WireGuard LLC)を基にする。stack はこのパッケージの外に出さない。外で UDP の endpoint を作れると、
+// WireGuard LLC)を基にする。dial_tcp.go は gVisor の gonet.DialTCPWithBind の写し(Apache License 2.0、
+// Copyright 2018 The gVisor Authors。表示はその file に置く)で、dial した接続の endpoint を持つために
+// 写した。stack はこのパッケージの外に出さない。外で UDP の endpoint を作れると、
 // 会計の外で datagram を受け取れるためである。
 package nettun
 
@@ -49,7 +51,12 @@ type Device struct {
 	sweepStop  chan struct{}
 	sweepDone  chan struct{}
 	closed     atomic.Bool
+	tcpClosing tcpClosing
 }
+
+// stackClock は stack の時計。nil なら gVisor の既定(実時間)である。TCP の keepalive のように
+// 数時間のタイマーを試す単体試験だけが、faketime の時計に差し替える。
+var stackClock tcpip.Clock
 
 // Create は addr (IPv4 のみ) を唯一のアドレスとする Device を作る。
 func Create(addr netip.Addr, mtu int) (*Device, error) {
@@ -63,6 +70,7 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 			NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
 			HandleLocal:        true,
+			Clock:              stackClock,
 		}),
 		events:     make(chan tun.Event, 10),
 		readCtx:    readCtx,
@@ -70,6 +78,7 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		mtu:        mtu,
 		local:      addr,
 	}
+	dev.SetTCPClosingCap(DefaultTCPClosingCap)
 	sack := tcpip.TCPSACKEnabled(true) // 既定では無効
 	if err := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
 		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)

@@ -179,7 +179,7 @@ func (b *Backend) EnsureDevice(cfg dataplane.WGConfig) ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.tun == nil {
-		t, err := utun.New(utun.Config{PrivateKey: cfg.PrivateKey, ListenPort: uint16(cfg.ListenPort), Address: cfg.Address.Addr(), MTU: cfg.MTU, Logf: b.logf})
+		t, err := utun.New(utun.Config{PrivateKey: cfg.PrivateKey, ListenPort: uint16(cfg.ListenPort), Address: cfg.Address.Addr(), MTU: cfg.MTU, TCPFlows: b.relay.TCPPool().Total(), Logf: b.logf})
 		if err != nil {
 			return nil, err
 		}

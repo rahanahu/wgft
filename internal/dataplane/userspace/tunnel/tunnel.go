@@ -37,7 +37,10 @@ type Config struct {
 	ServerAddress   netip.Addr // vpsd のアドレス(10.200.0.1)。AllowedIPs はこれの /32 だけ
 	MTU             int
 	Keepalive       time.Duration
-	Logf            func(format string, args ...any)
+	// TCPFlows は同時フロー数の予算 T(resource.Limits.TCPTotal)。netstack の閉じた後の TCP の
+	// endpoint の天井 K をこの値にする(設計文書 7 節)。0 以下なら nettun の既定を使う
+	TCPFlows int
+	Logf     func(format string, args ...any)
 }
 
 // Tunnel は動いているトンネル。relay.Network として netstack 上にリスナーを開ける。
@@ -81,6 +84,7 @@ func New(cfg Config) (*Tunnel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
+	tnet.SetTCPClosingCap(cfg.TCPFlows)
 	t := &Tunnel{cfg: cfg, tnet: tnet}
 	t.dev = device.NewDevice(tnet, bindForDevice(), device.NewLogger(device.LogLevelError, "wg: "))
 

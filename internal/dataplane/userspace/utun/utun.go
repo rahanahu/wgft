@@ -30,7 +30,10 @@ type Config struct {
 	ListenPort uint16
 	Address    netip.Addr // 10.200.0.1
 	MTU        int
-	Logf       func(format string, args ...any)
+	// TCPFlows は同時フロー数の予算 T(resource.Limits.TCPTotal)。netstack の閉じた後の TCP の
+	// endpoint の天井 K をこの値にする(設計文書 7 節)。0 以下なら nettun の既定を使う
+	TCPFlows int
+	Logf     func(format string, args ...any)
 }
 
 // Tunnel は動いているサーバ側トンネル。
@@ -64,6 +67,7 @@ func New(cfg Config) (*Tunnel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
+	tnet.SetTCPClosingCap(cfg.TCPFlows)
 	t := &Tunnel{cfg: cfg, tnet: tnet, peers: map[wgtypes.Key]netip.Addr{}}
 	t.dev = device.NewDevice(tnet, newBind(), device.NewLogger(device.LogLevelError, "wg: "))
 	ipc := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(cfg.PrivateKey[:]), cfg.ListenPort)

@@ -50,6 +50,7 @@ func (d *userspaceDataplane) build(priv wgtypes.Key, wg proto.WGConfig) (retryab
 	if err != nil {
 		return false, err
 	}
+	cfg.TCPFlows = d.limits.WithDefaults().TCPTotal
 	tun, err := newTunnel(cfg)
 	if err != nil {
 		return true, err // 資源の不足など、環境による失敗
