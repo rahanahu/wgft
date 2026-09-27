@@ -267,10 +267,10 @@ WGFT_JOIN='<join string>' /usr/local/bin/wgft agent run
 
 初回登録に成功すると、`registered as agent <name>` が表示され、`~/Library/Application Support/wgft/agent.json` が作成されます。ディレクトリの権限は 0700、ファイルの権限は 0600 です。下の LaunchDaemon を登録する前に、Ctrl+C でこの agent を止めます。認証情報は `agent.json` に残ります。LaunchDaemon とターミナルの agent は同時に動かせません。後から起動した側が `credentials file is in use by another process` を表示して起動を止めるためです。
 
-agent を常駐させる場合は、[deploy/io.github.rahanahu.wgft.agent.plist](../deploy/io.github.rahanahu.wgft.agent.plist) を LaunchDaemon として登録します。この LaunchDaemon は `UserName` により root ではなく利用者の権限で `wgft agent run` を実行し、`WGFT_DATA_DIR` で同じ `~/Library/Application Support/wgft` を指します。プレースホルダ `YOUR_USER` を利用者名とホームディレクトリに置き換えてから、インストールして読み込みます。
+agent を常駐させる場合は、[deploy/io.github.rahanahu.wgft.agent.plist](../deploy/io.github.rahanahu.wgft.agent.plist) を LaunchDaemon として登録します。この LaunchDaemon は `UserName` により root ではなく利用者の権限で `wgft agent run` を実行し、`WGFT_DATA_DIR` で同じ `~/Library/Application Support/wgft` を指します。plist のファイルはリリースの配布物に含まれないため、バイナリと同じリリースのタグから取得します。リリースのバイナリの `wgft version` は、1 行目にそのタグを出力します。プレースホルダ `YOUR_USER` を利用者名とホームディレクトリに置き換えてから、インストールして読み込みます。
 
 ```sh
-curl -LO https://raw.githubusercontent.com/rahanahu/wgft/main/deploy/io.github.rahanahu.wgft.agent.plist
+curl -fLO "https://raw.githubusercontent.com/rahanahu/wgft/$(wgft version | head -n 1)/deploy/io.github.rahanahu.wgft.agent.plist"
 sed -e "s|/Users/YOUR_USER|$HOME|g" -e "s|YOUR_USER|$(id -un)|g" io.github.rahanahu.wgft.agent.plist > wgft-agent.plist
 plutil -lint wgft-agent.plist
 sudo install -m 0644 -o root -g wheel wgft-agent.plist /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
