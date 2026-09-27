@@ -28,7 +28,7 @@ wgft は、任意の TCP/UDP ポートをそのまま転送したい用途、特
 
 - 1 つのバイナリに VPS 側 server、自宅側 agent、CLI を収録
 - カーネルモードでは Linux の WireGuard と nftables DNAT を使うため、wgft プロセスを再起動しても既存の転送は継続
-- ユーザー空間モードは root 不要で、コンテナ内だけでも動作
+- ユーザー空間モードは、ホストのソケットのバッファの上限を一度上げれば、root 権限なしでもコンテナ内だけでも動作
 - TCP/UDP の単一ポート・ポート範囲を転送
 - ルールごとの allow/deny とレート制限
 - ルール変更時も無関係なセッションは切断しない
@@ -49,15 +49,16 @@ wgft は Pangolin から着想を得ています。Pangolin を使って、VPS �
 |---|---|---|
 | VPS の root 権限 | 必要 | 不要 |
 | カーネル / nftables | Linux 6.1+、nftables 1.0.6+ | 不要 |
+| ホストのソケットのバッファの上限 | 条件なし | `net.core.rmem_max` と `net.core.wmem_max` が 7340032 以上。VM か専用のホストで server が `CAP_NET_ADMIN` を持つ場合を除く |
 | 転送経路 | カーネル WireGuard + nftables DNAT | wireguard-go + ユーザー空間 netstack |
 | wgft プロセス停止・クラッシュ時 | 設定済みの転送は継続 | 転送も停止 |
 | レート制限の判定場所 | カーネル | wgft プロセス |
 
 カーネルモードでは、起動後に wgft プロセスがクラッシュまたは再起動しても転送はカーネル側で継続します。ただし VPS 自体を再起動すると WireGuard / nftables の実行時状態が失われるため、wgft が再起動して転送状態を復旧する必要があります。通常運用では付属の systemd unit を有効にしておけば、VPS 再起動後も自動で復旧します。
 
-VPS で root が使える場合はカーネルモードを使います。root やカーネル WireGuard が使えない場合、または server をコンテナ内だけで動かしたい場合はユーザー空間モードを使います。
+VPS で root が使える場合はカーネルモードを使います。root やカーネル WireGuard が使えない場合、または server をコンテナ内だけで動かしたい場合はユーザー空間モードを使います。ユーザー空間モードでは、ホストかコンテナのホストで、ソケットのバッファの上限を 2 つ上げる必要があります。上げるには、そのホストで一度だけ root の権限が要ります。VM か専用のホストでは、付属の systemd の unit で起動した server は、上げなくても済む権限を持ちます。コンテナの中と LXC ベースの VPS では、この権限は上限を超えさせません。そこで条件を満たせるかどうかは未確認です。ソケットが条件に届かない場合は、server と agent がログに警告を出し、判定はそのログで決まります。詳しくは[ユーザー空間モードのソケットのバッファ](docs/setup.ja.md#ユーザー空間モードのソケットのバッファ)を参照してください。
 
-VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。Apple シリコンの macOS でも動作し、macOS 27 で実機確認済みです。Intel Mac には対応していません。wgft は IPv4 のみに対応しています。既定のユーザー空間モードでは、自宅側の agent には root 権限も TUN デバイスも不要で、Windows でも管理者権限は不要です。macOS の agent は利用者の権限で動作します。
+VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。Apple シリコンの macOS でも動作し、macOS 27 で実機確認済みです。Intel Mac には対応していません。wgft は IPv4 のみに対応しています。既定のユーザー空間モードでは、自宅側の agent には root 権限も TUN デバイスも不要で、Windows でも管理者権限は不要です。macOS の agent は利用者の権限で動作します。Linux では、agent のホストでも同じ 2 つのソケットのバッファの上限を上げる必要があります。稼働中の agent のソケットが条件を満たすかどうかは、`wgft agent doctor` が示します。
 
 ### 自宅側 agent のカーネルモード
 

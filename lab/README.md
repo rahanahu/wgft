@@ -35,8 +35,8 @@ lab/lab exec vm bash /wgft/lab/rates.sh kernel   # 3 つのレートと Relay �
 lab/lab exec vm bash /wgft/lab/connlimit.sh      # カーネルモードの接続元 IP ごとの同時フロー数の上限(ct count)。userspace には無い機能なので kernel だけ
 lab/lab exec vm bash /wgft/lab/split-merge.sh kernel   # Web UI の分割・統合。流れている UDP セッションが切れないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/import-export.sh kernel # Web UI の書き出しと読み込み。確認画面の差分、確認後の変更による適用の拒否を確認。userspace も同じ
-lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、ルールの増減、撤去、プロキシの bind 失敗、既定と半分の予算下でのメモリ、Resource Guard のルール間の隔離、ルール単位/backend 全体の適用失敗と再試行、エージェントの無効化と有効化(その間の server doctor と status の結果を含む)を確認。userspace も同じ
-lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10 11)を並べると、その確認だけを流す
+lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、ルールの増減、撤去、プロキシの bind 失敗、既定と半分の予算下でのメモリ、Resource Guard のルール間の隔離、ルール単位/backend 全体の適用失敗と再試行、エージェントの無効化と有効化(その間の server doctor と status の結果を含む)、WireGuard のソケットのバッファの条件を確認。userspace も同じ
+lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10 11 12)を並べると、その確認だけを流す
 lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定するポートに届かず、集約のレートのトークンも使わないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/version-skew.sh         # 版の組み合わせ(新旧の server・agent、legacy v0)。旧いバイナリは GitHub の Releases から取得しキャッシュする(スクリプト冒頭のコメント参照)
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel       # 旧版からの更新(D4)。既定は直前のリリース(v0.6.0)のデータに現在のビルドを重ね、ルール・鍵・認証情報が保たれ、転送が戻ることを確認。WGFT_UPGRADE_OLD_VERSION=0.4.0 を付けると、release notes が更新を約束するもう一方の版でも同じ確認を流せる。userspace も同じ
@@ -208,7 +208,7 @@ Sandbox 1 つだけを扱う手作業の道具なので、ロックを取りま�
 | `parallel` | 他の Sandbox と同時に流せます。触るものが自分の namespace と自分の作業ディレクトリの中に閉じます | `e2e.sh`、`ipv6.sh`、`split-merge.sh`、`import-export.sh`、`connlimit.sh`、`version-skew.sh`、`lifecycle.sh` の check 1 2 3 3b 4 5c 5d 6 7 8 9 |
 | `exclusive-heavy` | Lab Host VM の中で単独で流します。主張の根拠になる値そのものが、メモリか到達頻度の測定値です | `lifecycle.sh` の check 5、5b、5e、`rates.sh` |
 | `exclusive-timing` | Lab Host VM の中で単独で流します。壁時計で測る区間の中で何が起きないかを主張するので、その区間が始まる前に収束を確認できないと、同じ VM を分け合ったときに失敗します | 該当する確認は今はありません |
-| `exclusive-global` | Lab Host VM の中で単独で流します。network namespace が隔てない値を変えます | 該当する確認は今はありません |
+| `exclusive-global` | Lab Host VM の中で単独で流します。network namespace が隔てない値を変えます | `lifecycle.sh` の check 12 |
 
 `lifecycle.sh` の check 5c と check 5d は、主張の根拠が到達頻度でもメモリでもなく、ルールごとの受け付けの判定です。8 つの Sandbox のプールの中で、しかも 5c と 5d が同時に流れる状態で、20 回ずつ流して 160 件のすべてが成功し、保持数も毎回同じでした。この測定により、分類は `parallel` です。
 
@@ -218,6 +218,11 @@ Sandbox 1 つだけを扱う手作業の道具なので、ロックを取りま�
 中からの書き込みはカーネルが拒みます。この値を変える確認を新たに作るときは `exclusive-global` に
 入れます。`nf_conntrack_acct` は namespace ごとの値なので、`lifecycle.sh` の check 6 の扱いは
 `parallel` のままです。
+
+`net.core.rmem_max` と `net.core.wmem_max` も VM 全体で 1 つの値です。Debian 12 のカーネルでは、
+分けた network namespace の中にこの 2 つのファイルが現れません。この 2 つを変える `lifecycle.sh`
+の check 12 は、Sandbox の runner の namespace から `nsenter -t 1 -n` で初期の namespace に入って
+書き、終わりに元の値へ戻します。分類は `exclusive-global` です。
 
 `lifecycle.sh` の check 8 と check 9 は、server の 30 秒の再試行に合わせた 45 秒の壁時計の
 budget を持ちます。実際の待ちは、単独で流したときも、8 並列のプールの中で流したときも、

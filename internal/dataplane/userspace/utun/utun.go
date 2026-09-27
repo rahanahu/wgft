@@ -20,6 +20,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/nettun"
 )
 
@@ -75,6 +76,9 @@ func New(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("wireguard up: %w", err)
 	}
 	cfg.Logf("userspace tunnel: up addr=%s mtu=%d listen=%d", cfg.Address, cfg.MTU, cfg.ListenPort)
+	// CAP_NET_ADMIN を持つ server は sysctl の値を超えるバッファを得られるので、sysctl ではなく
+	// 実際のソケットを測る(設計文書 7 節の「ソケットのバッファの条件」)
+	sockbuf.Warn(sockbuf.MeasureDevice(t.dev.IpcGet), cfg.Logf)
 	return t, nil
 }
 

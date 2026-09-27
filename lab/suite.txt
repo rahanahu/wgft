@@ -19,9 +19,9 @@
 #                             negative claim genuinely cannot be made to wait for convergence
 #                             first has a home.
 #            exclusive-global runs alone in the Lab Host VM: it changes a value a network namespace
-#                             does not isolate, such as net.netfilter.nf_conntrack_max or the
-#                             conntrack hash size. No check needs this class today; the class
-#                             exists so that a check that starts changing such a value has a home.
+#                             does not isolate, such as net.netfilter.nf_conntrack_max,
+#                             net.core.rmem_max or the conntrack hash size. lifecycle.sh's
+#                             check 12 is the one check in this class today.
 #   default  yes              part of `labhost run all`
 #            no               run it by naming it (it needs something the Lab Host cannot always
 #                             provide, e.g. release binaries fetched from the network)
@@ -82,6 +82,10 @@ parallel         yes  lifecycle.sh userspace 8
 parallel         yes  lifecycle.sh userspace 9
 parallel         yes  lifecycle.sh userspace 10
 parallel         yes  lifecycle.sh userspace 11
+# check 12 sets net.core.rmem_max and net.core.wmem_max, which are one value for the whole VM, and
+# writes /etc/sysctl.d/90-wgft.conf, so it runs alone and restores both at its end.
+exclusive-global yes  lifecycle.sh kernel 12
+exclusive-global yes  lifecycle.sh userspace 12
 
 # agentkernel.sh runs the kernel-mode agent's checks (design section 7b) against the given server
 # mode, taking the checks to run as a space-separated list of its own. Its default list of checks

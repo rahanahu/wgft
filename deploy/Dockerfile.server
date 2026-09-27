@@ -1,6 +1,8 @@
 # Container for the VPS-side server, running the userspace mode only (docs/design.md section
 # 6.3): wireguard-go + gVisor netstack, so it needs neither a TUN device, NET_ADMIN, nftables,
-# nor host networking. Kernel mode (section 6.1) configures wg0 and nftables over netlink and is
+# nor host networking. The Docker host needs net.core.rmem_max and net.core.wmem_max of 7340032 or
+# more, which a container cannot set itself; see docs/setup.md, "Socket buffers for userspace
+# mode". Kernel mode (section 6.1) configures wg0 and nftables over netlink and is
 # not supported in a container; run it as the systemd unit in deploy/server.service instead.
 #
 #   docker build -f deploy/Dockerfile.server -t wgft-server:latest .

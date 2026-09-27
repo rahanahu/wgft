@@ -9,6 +9,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -145,6 +146,9 @@ type tunnelReading struct {
 	rxBytes, txBytes int64
 	// err はトンネルの誤り(エンドポイントの解決の失敗など)である
 	err error
+	// socketBuffers は、トンネルを立てた直後に測った WireGuard の UDP ソケットのバッファである
+	// (設計文書 7 節)。ユーザー空間モードのトンネルだけが持ち、doctor だけが使う
+	socketBuffers *sockbuf.Reading
 }
 
 // relayReading はユーザー空間の中継を 1 回読んだ値である。listeners は rules と同じ 1 回の読みから

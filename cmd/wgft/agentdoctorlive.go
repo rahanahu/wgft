@@ -13,6 +13,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -126,6 +127,18 @@ const (
 	// 作らない。カーネルモードの dataplane.interface、dataplane.table、host.forwarding(同節の
 	// 「カーネルモードのエージェント」の項)も同じ符号を使う。
 	agentReasonAgentDisabled = "agent_disabled"
+	// agentReasonSocketBufferShort は、WireGuard の UDP ソケットが得た実効の受信か送信のバッファが、
+	// ユーザー空間モードの条件に届かない場合である(設計文書 7 節、10.2c 節)。
+	agentReasonSocketBufferShort = "socket_buffer_below_requirement"
+	// agentReasonSocketBuffersUnreadable は、稼働中のエージェントが自分の WireGuard の UDP ソケットを
+	// 測れなかった場合である。
+	agentReasonSocketBuffersUnreadable = "socket_buffers_unreadable"
+	// agentReasonSocketBuffersNotReported は、稼働中のエージェントが測った値を答えなかった場合である。
+	// 測る前の版の実行ファイルで動いているエージェントが当たる。
+	agentReasonSocketBuffersNotReported = "socket_buffers_not_reported"
+	// agentReasonNotMeasuredOnThisOS は、エージェントの OS では WireGuard の UDP ソケットのバッファを
+	// 測らない場合である。測るのは Linux だけである(設計文書 7 節)。
+	agentReasonNotMeasuredOnThisOS = "not_measured_on_this_os"
 )
 
 // 所見に並べる項目の数の上限。ルールの本数にも拒否の組み合わせの数にも上限が無いので、1 行が
@@ -297,7 +310,7 @@ func agentLiveValueRead(id string, live agentLive) bool {
 // agentLiveNeedsRuntimeState は、その検査が実行時の排他の下でしか読めない値を見るかどうかである。
 func agentLiveNeedsRuntimeState(id string) bool {
 	switch id {
-	case agentCheckTunnelLocal, agentCheckWatchdog, agentCheckTransfer,
+	case agentCheckTunnelLocal, agentCheckSocketBufs, agentCheckWatchdog, agentCheckTransfer,
 		agentCheckListeners, agentCheckSessions, agentCheckRefusals:
 		return true
 	}
@@ -420,6 +433,8 @@ func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *agent.D
 		agentAllowTargetsValue(c, resp.AllowTargets)
 	case agentCheckTunnelLocal:
 		agentTunnelLocalCheck(c, in, resp.RuntimeState)
+	case agentCheckSocketBufs:
+		agentSocketBuffersCheck(c, in, resp.RuntimeState)
 	case agentCheckWatchdog:
 		agentWatchdogCheck(c, in, resp.RuntimeState)
 	case agentCheckTransfer:
@@ -596,6 +611,59 @@ func agentNoTunnelCheck(c *agentDoctorCheck, reason string) {
 			"Run this command again to see whether one comes back"
 	}
 }
+
+// agentSocketBuffersCheck は、稼働中のエージェントが今のトンネルを立てた直後に測った WireGuard の UDP
+// ソケットのバッファを、ユーザー空間モードの条件と比べる(設計文書 7 節、10.2c 節)。条件に届かなければ
+// FAILED とするが、総合判定と終了コードは動かさない。host.* の検査と同じく、転送を担えないことを
+// 述べる検査ではないためである。値はトンネルを立てたときのもので、予測ではない。
+func agentSocketBuffersCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
+	t := st.Tunnel
+	if !t.Present {
+		c.Status, c.Reason = statusSkipped, agentReasonNoTunnel
+		c.Detail = "there is no tunnel now, so there are no WireGuard UDP sockets to measure"
+		c.Next = "the tunnel line above says why there is none; the agent measures its sockets each time it builds the tunnel"
+		return
+	}
+	b := t.SocketBuffers
+	switch {
+	case b == nil:
+		c.Status, c.Reason = statusUnknown, agentReasonSocketBuffersNotReported
+		c.Detail = "the running agent did not report its WireGuard UDP socket buffers"
+		c.Next = agentRestartForDoctorNext
+		return
+	case !b.Supported:
+		c.Status, c.Reason = statusNotTested, agentReasonNotMeasuredOnThisOS
+		c.Detail = "the WireGuard UDP socket buffers are measured on Linux only; how this OS sizes them has not been verified"
+		return
+	case b.Error != "":
+		c.Status, c.Reason = statusUnknown, agentReasonSocketBuffersUnreadable
+		c.Detail = "the running agent could not measure its WireGuard UDP socket buffers: " + b.Error
+		c.Next = "read the agent's log from the time the tunnel was built, with journalctl -u wgft-agent, or docker logs for a container"
+		return
+	}
+	req := b.Required
+	if req <= 0 {
+		req = sockbuf.Required
+	}
+	measured := fmt.Sprintf("the WireGuard UDP sockets on port %d got a receive buffer of %d bytes and a send buffer of %d bytes when the tunnel was built %s",
+		b.Port, b.Recv, b.Send, agentWhen(in.Now, t.StartedAt))
+	if b.Recv >= req && b.Send >= req {
+		c.Status = statusOK
+		c.Detail = measured + fmt.Sprintf("; userspace mode requires %d bytes each", req)
+		return
+	}
+	c.Status, c.Reason = statusFailed, agentReasonSocketBufferShort
+	c.Detail = measured + fmt.Sprintf("; userspace mode requires at least %d bytes each", req)
+	c.Next = sockbufFixNext
+}
+
+// sockbufFixNext は、条件に届かないソケットに添える次の手である。sysctl の値は要求の値であり、
+// Linux が報告する実効の値はその 2 倍になることを添え、7 MiB を設定した運用者が 14 MiB の条件を
+// 読み違えないようにする(設計文書 7 節)。
+var sockbufFixNext = fmt.Sprintf("set net.core.rmem_max and net.core.wmem_max to %d or more on this host, or on the container host when the agent runs in a container, "+
+	"for example in a file under /etc/sysctl.d applied with sysctl --system, then restart the agent so that it opens new sockets. "+
+	"Linux gives a socket twice the size it asks for, so %d in the sysctl reads here as %d. wgft never changes these sysctls",
+	sockbuf.Requested, sockbuf.Requested, sockbuf.Required)
 
 // agentHandshakeText は最終ハンドシェイクを事実として述べる。健全かどうかは言わない(10.2c 節)。
 func agentHandshakeText(now, h time.Time) string {

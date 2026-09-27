@@ -97,6 +97,19 @@
 #      setting, including a rule added while disabled. Kernel mode also checks that a port bound
 #      on the VPS refuses the enable with nothing saved, and that a disable which cannot be
 #      published is saved, delivered to the agent, and published by the retry.
+#   12. the WireGuard socket buffer requirement of userspace mode (design 7 and 10.2c sections).
+#      The agent runs as the unprivileged user wgftlab with no capability. With net.core.rmem_max
+#      and net.core.wmem_max at the Debian 12 kernel's default, agent doctor reads socket buffers
+#      FAILED with socket_buffer_below_requirement and still exits 0, and the agent logs one warning
+#      line; a userspace server running as wgftlab logs the same warning. The setup guide's
+#      /etc/sysctl.d file and sysctl --system raise both to 7340032; after an agent restart the item
+#      reads OK with 14680064 each, and in userspace mode server check reads "meets the
+#      requirement". With the sysctls lowered again, the running sockets keep their size until
+#      agent rotate-key rebuilds the tunnel, which measures the new sockets: FAILED again, on
+#      another port. The two sysctls are global to the VM, not per network namespace, so this
+#      check writes them from the initial network namespace, restores them and removes the file on
+#      every way out, early returns and a stopped script included, and runs alone
+#      (lab/suite.txt's exclusive-global).
 #
 # Requires `lab/lab build` (wgft and echo in /usr/local/bin of the VM) and the netns topology
 # (`lab/lab net up`). Leftovers from earlier runs are killed first. Wherever a step waits on
@@ -112,8 +125,8 @@ ulimit -n 100000 2>/dev/null || true  # check 5 floods thousands of sockets from
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: lifecycle.sh kernel|userspace [check...]" >&2; exit 2;; esac
 shift || true
-# Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9 10 11) run only those checks; none runs all.
-ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10 11"
+# Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9 10 11 12) run only those checks; none runs all.
+ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10 11 12"
 CHECKS="${*:-$ALL_CHECKS}"
 for c in $CHECKS; do
   case " $ALL_CHECKS " in *" $c "*) ;; *) echo "lifecycle.sh: unknown check '$c' (use: $ALL_CHECKS)" >&2; exit 2;; esac
@@ -2924,6 +2937,129 @@ print(by.get('$1', {}).get('detail', ''))
 
   kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$DATA" "$HDATA" "$ODATA"
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 12: the WireGuard socket buffer requirement (design 7 and 10.2c sections).
+# The sysctls are global and exist only in the initial network namespace on this kernel, while
+# this shell may run in a sandbox's runner namespace (tools/labhost), so every read and write of
+# them goes through init_ns.
+init_ns() { nsenter -t 1 -n -- "$@"; }
+# sb_doctor <data dir>: agent doctor --json as the agent's user; prints "exit=N status=S" and the
+# socket_buffers item as "<status> <reason> <detail>".
+sb_doctor() {
+  local out code
+  out=$(ip netns exec "$HOME_NS" runuser -u wgftlab -- wgft agent doctor --data-dir "$1" --json 2>/dev/null); code=$?
+  printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+c = next(c for c in d["checks"] if c["id"] == "tunnel.socket_buffers")
+print("exit=%s status=%s" % (sys.argv[1], d["status"]))
+print(c["status"], c.get("reason", "-"), c["detail"])
+' "$code" 2>/dev/null
+}
+# sb_port <doctor output>: the WireGuard port the item names.
+sb_port() { echo "$1" | grep -oE 'on port [0-9]+' | head -1 | awk '{print $3}'; }
+sb_answers() { [[ "$(sb_doctor "$1")" == *$'\n'"$2 "* ]]; }
+start_sb_agent() { # start_sb_agent <data dir> <log> [join]
+  WGFT_JOIN="${3:-}" ip netns exec "$HOME_NS" setsid nohup runuser -u wgftlab -- wgft agent run --data-dir "$1" > "$2" 2>&1 < /dev/null &
+  disown
+}
+stop_sb_agent() {
+  local p
+  for p in $(sandbox_wgft_pids); do
+    if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q ' agent run'; then
+      kill "$p"
+      must_wait "check12: pid $p (agent run) exited" 5 proc_gone "$p"
+    fi
+  done
+}
+# The sysctls check 12 found at its start, and sb_restore, which puts them back and removes the
+# setup guide's file. check12 calls it on every way out of the check: after check12_body returns,
+# whether it finished or returned early, and from traps if the script itself is stopped midway,
+# so that a timeout or a kill does not leave the VM with the raised values for later jobs.
+SB_RMEM0=; SB_WMEM0=
+sb_restore() {
+  rm -f /etc/sysctl.d/90-wgft.conf
+  [ -n "$SB_RMEM0" ] && init_ns sysctl -qw net.core.rmem_max="$SB_RMEM0" net.core.wmem_max="$SB_WMEM0"
+}
+check12() {
+  SB_RMEM0=$(init_ns sysctl -n net.core.rmem_max); SB_WMEM0=$(init_ns sysctl -n net.core.wmem_max)
+  trap sb_restore EXIT
+  trap 'sb_restore; exit 130' INT
+  trap 'sb_restore; exit 143' TERM
+  check12_body
+  kill_all; vps wgft server teardown --data-dir "$W/wgft-lifecycle-c12" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$W/wgft-lifecycle-c12" "$W/wgft-lifecycle-c12-agent"
+  sb_restore
+  trap - EXIT INT TERM
+}
+check12_body() {
+  echo "== $mode: check 12: agent doctor and the daemons report WireGuard socket buffers below the userspace requirement, and the setup guide's sysctl fixes it"
+  local DATA=$W/wgft-lifecycle-c12 ADATA=$W/wgft-lifecycle-c12-agent SLOG=$W/wgft-lifecycle-c12-server.log
+  local ALOG=$W/wgft-lifecycle-c12-agent.log ALOG2=$W/wgft-lifecycle-c12-agent2.log
+  local out port1 port2
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA" "$ADATA"
+  ensure_wgftlab; chown wgftlab:wgftlab "$ADATA"
+  rm -f /etc/sysctl.d/90-wgft.conf
+  # The Debian 12 kernel's default; set it explicitly so that the check does not depend on the image.
+  init_ns sysctl -qw net.core.rmem_max=212992 net.core.wmem_max=212992
+
+  start_server "$DATA" "$SLOG"
+  if ! wait_admin; then echo "FAIL  check12 setup: admin api never came up"; fail=1; return; fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  start_sb_agent "$ADATA" "$ALOG" "$join"
+  must_wait "check12: the agent answers doctor with a measured tunnel" 30 sb_answers "$ADATA" failed || return
+
+  echo "-- the default sysctls: the item is FAILED, the exit code stays 0, and the agent warns"
+  out=$(sb_doctor "$ADATA")
+  check "agent doctor exits 0 with the requirement unmet" "exit=0 status=ok" "$out"
+  check "socket buffers reads FAILED with the reason" "failed socket_buffer_below_requirement" "$out"
+  check "the item names the measured value and the requirement" "receive buffer of 425984 bytes and a send buffer of 425984 bytes" "$out"
+  check "the item names the requirement" "requires at least 14680064 bytes each" "$out"
+  port1=$(sb_port "$out")
+  check "the agent logs one warning line" "warning: the WireGuard UDP sockets on port $port1 got a receive buffer of 425984 bytes" "$(cat "$ALOG")"
+  eqcheck "the agent logs the warning once" 1 "$(grep -c 'warning: the WireGuard UDP sockets' "$ALOG")"
+  if [ "$mode" = userspace ]; then
+    check "the userspace server without CAP_NET_ADMIN logs the same warning" "warning: the WireGuard UDP sockets on port 51820 got a receive buffer of 425984 bytes" "$(cat "$SLOG")"
+    out=$(vps wgft server check --mode userspace --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --config /nonexistent 2>&1)
+    check "server check shows what a process without CAP_NET_ADMIN gets" "without CAP_NET_ADMIN: a socket gets receive 425984 and send 425984 bytes, below the requirement" "$out"
+  else
+    skip "check12: the server's own sockets; a kernel-mode server has none in its process"
+  fi
+
+  echo "-- the setup guide's /etc/sysctl.d file and sysctl --system"
+  # The two commands exactly as the setup guide gives them; sudo is only left out where the VM image
+  # has none, since this shell is root anyway.
+  local sudo=; command -v sudo >/dev/null && sudo=sudo
+  init_ns bash -c "printf 'net.core.rmem_max = 7340032\nnet.core.wmem_max = 7340032\n' | $sudo tee /etc/sysctl.d/90-wgft.conf >/dev/null && $sudo sysctl --system >/dev/null"
+  strcheck "sysctl --system applies the file" "7340032 7340032" "$(init_ns sysctl -n net.core.rmem_max) $(init_ns sysctl -n net.core.wmem_max)"
+  out=$(sb_doctor "$ADATA")
+  check "the running agent's sockets keep their size until they are opened again" "failed socket_buffer_below_requirement" "$out"
+  stop_sb_agent
+  start_sb_agent "$ADATA" "$ALOG2"
+  must_wait "check12: the restarted agent answers doctor with a measured tunnel" 30 sb_answers "$ADATA" ok
+  out=$(sb_doctor "$ADATA")
+  check "after a restart the item reads OK" "exit=0 status=ok"$'\n'"ok - " "$out"
+  check "the new sockets got 14680064 each" "receive buffer of 14680064 bytes and a send buffer of 14680064 bytes" "$out"
+  absent "the restarted agent logs no warning" "warning: the WireGuard UDP sockets" "$(cat "$ALOG2")"
+  if [ "$mode" = userspace ]; then
+    out=$(vps wgft server check --mode userspace --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --config /nonexistent 2>&1)
+    check "server check reads the raised sysctls as enough" "receive 14680064 and send 14680064 bytes, which meets the requirement" "$out"
+  fi
+
+  echo "-- lowered again: rotate-key rebuilds the tunnel and measures the new sockets"
+  rm -f /etc/sysctl.d/90-wgft.conf
+  init_ns sysctl -qw net.core.rmem_max=212992 net.core.wmem_max=212992
+  out=$(sb_doctor "$ADATA"); port1=$(sb_port "$out")
+  check "the sockets in place keep 14680064 after the sysctls drop" "ok - " "$out"
+  ip netns exec "$HOME_NS" runuser -u wgftlab -- wgft agent rotate-key --data-dir "$ADATA" >/dev/null 2>&1
+  must_wait "check12: the rebuilt tunnel is measured" 30 sb_answers "$ADATA" failed
+  out=$(sb_doctor "$ADATA"); port2=$(sb_port "$out")
+  check "rotate-key's new sockets read FAILED" "failed socket_buffer_below_requirement" "$out"
+  okcheck "rotate-key's new sockets are on another port: $port1 then $port2" "$([ -n "$port2" ] && [ "$port1" != "$port2" ] && echo 1 || echo 0)"
+  check "the agent warns after rotate-key" "warning: the WireGuard UDP sockets on port $port2" "$(cat "$ALOG2")"
 }
 
 # ---------------------------------------------------------------------------------------------

@@ -109,7 +109,7 @@ func agentModeOf(cred agentCredentialsFile, live agentLive) string {
 // agentKernelOnlyNotTested は、カーネルモードに試す対象が無い検査である(10.2c 節)。
 func agentKernelOnlyNotTested(id string) bool {
 	switch id {
-	case agentCheckListeners, agentCheckSessions, agentCheckRefusals, agentCheckWatchdog:
+	case agentCheckListeners, agentCheckSessions, agentCheckRefusals, agentCheckWatchdog, agentCheckSocketBufs:
 		return true
 	}
 	return false
@@ -121,6 +121,8 @@ func agentKernelNotTested(c *agentDoctorCheck) {
 	switch c.ID {
 	case agentCheckWatchdog:
 		c.Detail = "kernel mode has no tunnel of its own to rebuild; the kernel keeps the WireGuard interface, and the interface line under Dataplane shows it"
+	case agentCheckSocketBufs:
+		c.Detail = "kernel mode has no WireGuard UDP socket in this process; the kernel's WireGuard holds its own, and the socket buffer requirement is for userspace mode"
 	default:
 		c.Detail = "kernel mode has no relay, listeners or flow budget; the kernel forwards with DNAT, and the table line under Dataplane shows each rule"
 	}

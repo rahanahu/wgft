@@ -15,6 +15,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -157,6 +158,47 @@ type DoctorTunnel struct {
 	// StartedAt は今のトンネルを立てた時刻。トンネルが無ければゼロ値の時刻になる
 	StartedAt time.Time      `json:"started_at"`
 	Watchdog  DoctorWatchdog `json:"watchdog"`
+	// SocketBuffers は、今のトンネルを立てた直後に測った WireGuard の UDP ソケットのバッファで
+	// ある(設計文書 7 節と 10.2c 節)。ユーザー空間モードのトンネルがあるときだけ載る。旧い版の
+	// エージェントは送らない
+	SocketBuffers *DoctorSocketBuffers `json:"socket_buffers,omitempty"`
+}
+
+// DoctorSocketBuffers は WireGuard の UDP ソケットのバッファを測った結果である。値は
+// internal/dataplane/userspace/sockbuf の Reading をそのまま写す。
+type DoctorSocketBuffers struct {
+	// Supported は、エージェントの OS で測る手段を持つかどうかである。Linux だけが真である。
+	// 偽のとき、他の項目は無い
+	Supported bool `json:"supported"`
+	// Port は測った WireGuard の listen port である
+	Port uint16 `json:"port,omitempty"`
+	// Sockets はその port に bind した UDP ソケットのうち測れたものの数である
+	Sockets int `json:"sockets,omitempty"`
+	// Recv と Send は、測ったソケットのうち最も小さい実効の受信と送信のバッファである。単位はバイト
+	Recv int `json:"recv,omitempty"`
+	Send int `json:"send,omitempty"`
+	// Required は条件の値である。単位はバイト。受信と送信のどちらにも同じ値を求める
+	Required int `json:"required,omitempty"`
+	// Error は測れなかった理由である
+	Error string `json:"error,omitempty"`
+}
+
+// doctorSocketBuffers は測った結果を応答の形に写す。
+func doctorSocketBuffers(r sockbuf.Reading) *DoctorSocketBuffers {
+	if !r.Supported {
+		return &DoctorSocketBuffers{}
+	}
+	out := &DoctorSocketBuffers{Supported: true, Port: r.Port, Required: sockbuf.Required}
+	if !r.Measured() {
+		err := r.Err
+		if err == nil {
+			err = fmt.Errorf("no UDP socket bound to port %d was found", r.Port)
+		}
+		out.Error = clipText(err.Error())
+		return out
+	}
+	out.Sockets, out.Recv, out.Send = r.Sockets, r.Recv, r.Send
+	return out
 }
 
 // DoctorWatchdog はトンネルを作り直す判定の状態である。次の作り直しまでの残り時間は載せない。
@@ -369,6 +411,9 @@ func (rt *runtime) runtimeStateLocked() *DoctorRuntimeState {
 	if tun.present {
 		st.Tunnel.RxBytes, st.Tunnel.TxBytes = tun.raw.rxBytes, tun.raw.txBytes
 		st.Tunnel.StartedAt = rt.tunStart
+		if b := tun.raw.socketBuffers; b != nil {
+			st.Tunnel.SocketBuffers = doctorSocketBuffers(*b)
+		}
 	}
 	if r.relay == nil {
 		// カーネルモードのルールごとの状態はハートビートと同じ読みから来る(設計文書 10.2c 節)。

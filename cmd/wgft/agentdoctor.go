@@ -60,6 +60,7 @@ const (
 	agentCheckStreamLive   = "stream.liveness"
 	agentCheckWGResolve    = "tunnel.resolve"
 	agentCheckTunnelLocal  = "tunnel.local"
+	agentCheckSocketBufs   = "tunnel.socket_buffers"
 	agentCheckWatchdog     = "tunnel.watchdog"
 	agentCheckTransfer     = "tunnel.transfer"
 	agentCheckListeners    = "relay.listeners"
@@ -133,7 +134,7 @@ var agentCheckOrder = []string{
 	agentCheckPlatform, agentCheckPrivileges, agentCheckInterfaces, agentCheckHostResolve,
 	agentCheckCredentials, agentCheckProcess, agentCheckLastState,
 	agentCheckControl, agentCheckStreamConn, agentCheckStreamBackfl, agentCheckStreamLive,
-	agentCheckWGResolve, agentCheckTunnelLocal, agentCheckWatchdog, agentCheckTransfer,
+	agentCheckWGResolve, agentCheckTunnelLocal, agentCheckSocketBufs, agentCheckWatchdog, agentCheckTransfer,
 	agentCheckListeners, agentCheckSessions, agentCheckRefusals, agentCheckAllowTargets,
 	agentCheckDPInterface, agentCheckDPTable, agentCheckForwarding,
 }
@@ -1097,6 +1098,7 @@ var agentLiveOnly = []agentLiveOnlyCheck{
 	{ID: agentCheckStreamBackfl, Group: agentGroupConnection, Label: "reconnect backoff", valueOnly: true},
 	{ID: agentCheckStreamLive, Group: agentGroupConnection, Label: "liveness", valueOnly: true},
 	{ID: agentCheckTunnelLocal, Group: agentGroupTunnel, Label: "tunnel", verdict: true},
+	{ID: agentCheckSocketBufs, Group: agentGroupTunnel, Label: "socket buffers"},
 	{ID: agentCheckWatchdog, Group: agentGroupTunnel, Label: "watchdog", valueOnly: true},
 	{ID: agentCheckTransfer, Group: agentGroupTunnel, Label: "transfer", valueOnly: true},
 	{ID: agentCheckListeners, Group: agentGroupRelay, Label: "listeners", verdict: true},

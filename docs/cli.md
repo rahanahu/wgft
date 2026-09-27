@@ -281,6 +281,17 @@ has disabled this agent, listeners reads SKIPPED by design instead of counting
 against the verdict: a disabled agent opens no listeners until wgft agent
 enable <name> is run on the VPS.
 
+The socket buffers item under Tunnel compares the WireGuard UDP sockets that
+the running agent measured when it built its tunnel with what userspace mode
+needs: 14680064 bytes each for receive and send. Below that it reads FAILED
+and says what to set, but it never raises the exit code: an agent short of it
+still forwards. Linux reports twice the size a process asks for, so
+net.core.rmem_max and net.core.wmem_max at 7340032 read here as 14680064. A
+socket keeps the size it got when it was opened, so restart the agent after
+changing them. In a container, the container host sets them. The item reads
+NOT TESTED in kernel mode, and on Windows and macOS, where the agent does not
+measure its sockets.
+
 A kernel-mode agent, WGFT_MODE=kernel, is judged by what the kernel forwards
 with rather than by its process. The Dataplane group answers for it: interface
 reads the WireGuard interface, wgft0 unless WGFT_WG_INTERFACE names another,
@@ -296,12 +307,13 @@ decide the verdict in kernel mode, and process does not: it still reads FAILED
 for a stopped agent, but the kernel keeps forwarding, so a stopped agent whose
 interface, table and ip_forward are in place exits 0. Its table then reads
 UNKNOWN, since the target checks only the running agent makes are missing.
-Listeners, sessions, refusals and watchdog read NOT TESTED, as kernel mode has
-none of them; a userspace agent reads the three Dataplane items NOT TESTED
-instead. A running agent reports its kernel state over the control socket. For
-a stopped one this command reads the kernel itself, which needs CAP_NET_ADMIN:
-without it, what cannot be read is UNKNOWN with needs_cap_net_admin and the
-exit code is 2. Start the agent, or run this command as root, to read it.
+Listeners, sessions, refusals, watchdog and socket buffers read NOT TESTED, as
+kernel mode has none of them; a userspace agent reads the three Dataplane items
+NOT TESTED instead. A running agent reports its kernel state over the control
+socket. For a stopped one this command reads the kernel itself, which needs
+CAP_NET_ADMIN: without it, what cannot be read is UNKNOWN with
+needs_cap_net_admin and the exit code is 2. Start the agent, or run this
+command as root, to read it.
 
 Every run ends with what it did NOT test, and with the fact that it keeps no
 history: it evaluates the current state only.
@@ -563,16 +575,21 @@ comma-separated CIDR, CIDR:port or CIDR:lo-hi; a bare address means one host.
 Unset means no limit.
 
 WGFT_MODE chooses how the agent forwards. Unset or userspace, the agent relays
-traffic itself and needs no privileges. WGFT_MODE=kernel, on Linux only, puts a
-kernel WireGuard interface, wgft0 unless WGFT_WG_INTERFACE names another, and
-table inet wgft_agent on this host and forwards with DNAT to the LAN targets;
-the process relays nothing, so forwarding goes on while the agent is stopped
-or restarting. Kernel mode needs root or CAP_NET_ADMIN, forwards only to IPv4
-targets and refuses loopback targets; to reach a service on this host, target
-this host's LAN address. The mode is recorded in agent.json and checked on
-every start. A kernel-mode start without CAP_NET_ADMIN or kernel WireGuard
-support stops before it records the mode or uses the join string, so the agent
-then starts in userspace mode once WGFT_MODE is unset or set to userspace.
+traffic itself and needs no privileges. On Linux the host must still let its
+WireGuard UDP sockets get 7 MiB buffers: net.core.rmem_max and
+net.core.wmem_max at 7340032 or more, set on the container host for a
+container. The agent measures its sockets each time it builds the tunnel and
+logs a warning when they fall short; agent doctor shows the measured values.
+WGFT_MODE=kernel, on Linux only, puts a kernel WireGuard interface, wgft0
+unless WGFT_WG_INTERFACE names another, and table inet wgft_agent on this host
+and forwards with DNAT to the LAN targets; the process relays nothing, so
+forwarding goes on while the agent is stopped or restarting. Kernel mode needs
+root or CAP_NET_ADMIN, forwards only to IPv4 targets and refuses loopback
+targets; to reach a service on this host, target this host's LAN address. The
+mode is recorded in agent.json and checked on every start. A kernel-mode start
+without CAP_NET_ADMIN or kernel WireGuard support stops before it records the
+mode or uses the join string, so the agent then starts in userspace mode once
+WGFT_MODE is unset or set to userspace.
 
 ```text
 wgft agent run [flags]
@@ -1219,7 +1236,8 @@ Web UI on a Unix socket.
 
 Two forwarding modes, chosen with WGFT_MODE on the first start and recorded:
   kernel     kernel WireGuard and nftables; needs root to install
-  userspace  wireguard-go inside the process; no root, runs in a container
+  userspace  wireguard-go inside the process; no root, runs in a container;
+             needs 7 MiB WireGuard socket buffers, see "server check"
 
 Configuration is WGFT_* environment variables, a dotenv file set with --config and
 defaulting to /etc/wgft/server.env, or flags. The admin API has no password: only root and the
@@ -1236,6 +1254,19 @@ connection tracking table, and the recorded mode and address range. The ports
 checked are WireGuard, the agent API, and any rule's listen port that wgft
 itself binds: proxy-mode rules in kernel mode, every rule in userspace mode.
 Run it as root; without root the nftables and firewall parts are skipped.
+
+In userspace mode it also shows what decides the WireGuard socket buffers,
+which userspace mode needs at 14680064 bytes each for receive and send:
+net.core.rmem_max and net.core.wmem_max, and what a socket gets without
+CAP_NET_ADMIN, from a trial socket. Linux reports twice the size a process
+asks for, so 7340032 in both sysctls is what gives 14680064. It does not judge
+the server, since check cannot know what the server will hold. On a VM or a
+dedicated host, CAP_NET_ADMIN, which the provided systemd unit grants, gets
+the size past these sysctls. Inside a container or on an LXC-based VPS, that
+capability does not lift the limit, and whether the requirement can be met
+there has not been verified. The running server measures its own sockets and
+logs a warning when they fall short; that measurement decides. Inside a
+container the two sysctls may not be visible; the container host sets them.
 
 ```text
 wgft server check [flags]

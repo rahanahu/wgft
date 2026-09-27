@@ -1,6 +1,7 @@
 // Package tunnel は、エージェント側が wireguard-go と gVisor の netstack でユーザー空間に持つトンネル
-// (仕様 7 節)。カーネルの設定は変更しないので、特権も NET_ADMIN も要らない。VPS 側の
-// internal/dataplane/userspace/utun と対になる。
+// (仕様 7 節)。カーネルの設定は変更しないので、特権も NET_ADMIN も要らない。ただしホストは、
+// 7 節のソケットのバッファの条件を満たす必要がある。VPS 側の internal/dataplane/userspace/utun と
+// 対になる。
 package tunnel
 
 import (
@@ -22,6 +23,7 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/nettun"
 )
@@ -43,6 +45,11 @@ type Tunnel struct {
 	cfg  Config
 	dev  *device.Device
 	tnet *nettun.Device
+
+	// bufs は、このトンネルを立てた直後に測った WireGuard の UDP ソケットのバッファである
+	// (設計文書 7 節の「ソケットのバッファの条件」)。値はソケットを開いたときに決まり、その後は
+	// sysctl を変えても変わらないので、立てるたびに 1 回だけ測る
+	bufs sockbuf.Reading
 
 	mu       sync.Mutex
 	endpoint netip.AddrPort
@@ -100,8 +107,15 @@ func New(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("start wireguard: %w", err)
 	}
 	cfg.Logf("tunnel: up addr=%s mtu=%d endpoint=%s", cfg.Address, cfg.MTU, cfg.Endpoint)
+	// エージェントはトンネルを作り直すたびに新しいソケットを開くので、立てるたびに測る。作り直しは
+	// 起動、rotate-key、watchdog、wg 設定の変更のどれでもこの関数を通る
+	t.bufs = sockbuf.MeasureDevice(t.dev.IpcGet)
+	sockbuf.Warn(t.bufs, cfg.Logf)
 	return t, nil
 }
+
+// SocketBuffers は、このトンネルを立てた直後に測った WireGuard の UDP ソケットのバッファである。
+func (t *Tunnel) SocketBuffers() sockbuf.Reading { return t.bufs }
 
 // ListenUDP / ListenTCP は relay.Network の実装。
 func (t *Tunnel) ListenUDP(port uint16) (net.PacketConn, error) {

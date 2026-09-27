@@ -6,12 +6,13 @@ This guide contains the detailed installation and operating steps that are inten
 
 The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11, and on macOS on Apple silicon, verified on macOS 27. Intel Macs are not supported. wgft is currently IPv4-only.
 
-In its default userspace mode, the home agent does not need root or a TUN device. A Linux agent can also run in kernel mode, which needs `CAP_NET_ADMIN`; see [Run the agent in kernel mode](#run-the-agent-in-kernel-mode). Server requirements depend on the selected mode:
+In its default userspace mode, the home agent does not need root or a TUN device. On Linux, its host needs two socket buffer limits raised; see [Socket buffers for userspace mode](#socket-buffers-for-userspace-mode). A Linux agent can also run in kernel mode, which needs `CAP_NET_ADMIN`; see [Run the agent in kernel mode](#run-the-agent-in-kernel-mode). Server requirements depend on the selected mode:
 
 | | Kernel mode `kernel` | Userspace mode `userspace` |
 |---|---|---|
 | Root on the VPS | Required | Not required |
 | Kernel and nftables | Kernel 6.1+, nftables 1.0.6+ | None |
+| Host socket buffer limits | No requirement | `net.core.rmem_max` and `net.core.wmem_max` of 7340032 or more, unless the server holds `CAP_NET_ADMIN` on a VM or a dedicated host; see [Socket buffers for userspace mode](#socket-buffers-for-userspace-mode) |
 | Forwarding path | Kernel WireGuard + nftables DNAT | wireguard-go + userspace netstack |
 | If the wgft process stops or crashes | Configured forwarding continues | Forwarding stops |
 | Rate-limit evaluation | Kernel | wgft process |
@@ -19,11 +20,11 @@ In its default userspace mode, the home agent does not need root or a TUN device
 
 In kernel mode, this resilience applies after wgft has created the WireGuard and nftables runtime state. If the wgft process crashes or restarts, that state remains in the kernel and forwarding continues. A VPS reboot clears the runtime state, so the wgft service must start again to rebuild it; keep the provided systemd service enabled for normal operation.
 
-Use kernel mode when you have root on the VPS. Userspace mode is intended for VPS environments without root, kernels without WireGuard support, or container-only deployments.
+Use kernel mode when you have root on the VPS. Userspace mode is intended for VPS environments without root, kernels without WireGuard support, or container-only deployments. Raising the socket buffer limits it needs takes root on the host, or on the container host, once.
 
 In userspace mode, `wgft server` itself listens on each rule's listen port. If that port lies inside the host's ephemeral port range (the Linux default is 32768-60999, `net.ipv4.ip_local_port_range`), an outbound connection made by any process on the VPS can be using it as a source port, or holding it in TIME_WAIT for 60 seconds, at the moment the server tries to bind it. The bind then fails, and the rule stays declared but is reported not active, with the reason `bind failed: listen tcp4 :<port>: bind: address already in use`; the server log shows `rule <id>: not active: bind failed: ...`, and the Web UI's rule state and `rule_states` in `wgft rule ls --json` show the same reason. `wgft server` retries every 30 seconds, so the rule recovers on its own once the port is free; `SO_REUSEADDR` does not help. Kernel mode is not affected, because nothing on the VPS listens on the forwarded port. To avoid the collision, choose listen ports outside the ephemeral range, or reserve them with `sysctl net.ipv4.ip_local_reserved_ports=<ports>`.
 
-In kernel mode, a rule set is applied to the kernel as one nftables batch, and wgft sizes the netlink socket buffers to that batch ([design.md](design.md) section 6.1). In the lab, the shipped systemd unit applied rule sets of up to 2000 rules in kernel mode both as a single `rule import` batch and as one generation per `rule add`; larger sets were not tried. No currently documented kernel-mode deployment is limited by `net.core.rmem_max` or `net.core.wmem_max`: the shipped systemd unit grants the capability wgft needs to size its own buffers past those sysctls, and the Docker deployment documented above runs userspace mode only, not kernel mode.
+In kernel mode, a rule set is applied to the kernel as one nftables batch, and wgft sizes the netlink socket buffers to that batch ([design.md](design.md) section 6.1). In the lab, the shipped systemd unit applied rule sets of up to 2000 rules in kernel mode both as a single `rule import` batch and as one generation per `rule add`; larger sets were not tried. No currently documented kernel-mode deployment is limited by `net.core.rmem_max` or `net.core.wmem_max`: the shipped systemd unit grants the capability wgft needs to size its own buffers past those sysctls, and the Docker deployment documented below runs userspace mode only, not kernel mode. Userspace mode has its own requirement on the same two sysctls, for its WireGuard sockets; see [Socket buffers for userspace mode](#socket-buffers-for-userspace-mode).
 
 Kernel mode also relies on the host's conntrack table. `wgft server check` and the startup log warn if `nf_conntrack_max` is below wgft's recommended minimum of 65536, and suggest `sysctl -w net.netfilter.nf_conntrack_max=65536` to raise it.
 
@@ -32,6 +33,39 @@ Flows are capped at three levels: per rule, per source address, and process-wide
 The process-wide caps are `WGFT_MAX_UDP_FLOWS`, 8192 by default, and `WGFT_MAX_TCP_FLOWS`, 2048 by default. Server and agent are separate processes, so configure them separately when needed. From the two values wgft derives a Go runtime soft memory limit and prints it at startup. The soft limit is a target for the Go garbage collector, not a cap on the process's memory. In the lab, a userspace-mode server with the default caps filled plus a traffic flood peaked at 208 MiB RSS. With `WGFT_MAX_UDP_FLOWS=2048` and `WGFT_MAX_TCP_FLOWS=1024`, the same load ran inside a 150 MiB cgroup limit. This has not yet been verified on a real 256 MiB VPS. With systemd, the provided unit also contains a commented `MemoryMax=` example; if enabled, keep it above the soft limit printed at startup. Because the soft limit is not a cap, that setting alone does not guarantee the service avoids an OOM kill.
 
 To keep one rule from taking all of the capacity, wgft also caps each rule internally. That cap is not a setting. While only one rule accepts new flows, it may hold the whole process-wide budget. Once two or more rules accept new flows, a single rule stops at half the budget, rounded up, and the other half is reserved so that a flood against one rule still leaves room for the others. The per-source cap is a `wgft server`-only setting, `WGFT_MAX_UDP_FLOWS_PER_SOURCE` (default 256) and `WGFT_MAX_TCP_FLOWS_PER_SOURCE` (default 128), summed across all rules; it stops one source address from filling a rule's cap and locking out other users. It does not scale with the process-wide caps, so an operator with a lot of memory who raises those still keeps the default per-source cap unless they also raise this setting explicitly; 0 disables it for that protocol. The agent has no such setting: its only peer is the server, so every flow looks like it comes from the same address.
+
+### Socket buffers for userspace mode
+
+Userspace mode needs its WireGuard UDP sockets to get a 7 MiB receive buffer and a 7 MiB send buffer, which wireguard-go asks for when it opens them. This holds for the Linux agent and for a server in userspace mode; kernel mode has no such requirement. Linux caps the request at `net.core.rmem_max` and `net.core.wmem_max` unless the process holds `CAP_NET_ADMIN` in the host's own user namespace; a process inside an unprivileged container or on an LXC-based VPS does not, whatever capabilities it has there. The Debian 12 kernel of the development lab has 212992 in both, and Fedora 44 has 4194304; both fall short. wgft never changes these sysctls itself.
+
+Set both to 7340032 or more on the host, in a file that is applied again at every boot:
+
+```sh
+printf 'net.core.rmem_max = 7340032\nnet.core.wmem_max = 7340032\n' | sudo tee /etc/sysctl.d/90-wgft.conf
+sudo sysctl --system
+```
+
+A socket keeps the size it got when it was opened, so restart the agent or the server afterwards. Linux reports twice the size a process asks for, so with 7340032 in the sysctls a socket reports 14680064. That reported value is what wgft checks: the requirement is met when the real WireGuard socket reports 14680064 bytes or more for both receive and send.
+
+The agent and a userspace-mode server measure their own WireGuard sockets each time they build the tunnel. When the requirement is not met, they log a line starting with `warning: the WireGuard UDP sockets`. On the agent host, `agent doctor` shows the values the running agent measured; run it as the agent's user, for the provided unit:
+
+```sh
+sudo runuser -u wgft -- wgft agent doctor
+```
+
+The `socket buffers` item under Tunnel reads OK, or FAILED with the measured values and what to set. It does not change the exit code, because an agent short of the requirement still forwards.
+
+On the VPS, `sudo wgft server check` in userspace mode shows the two sysctls, what a socket gets without `CAP_NET_ADMIN`, and the requirement. It does not judge the server. On a VM or a dedicated host, a server started by the provided systemd unit holds `CAP_NET_ADMIN`, which lets its sockets get the size past these sysctls. Inside a container or on an LXC-based VPS, the capability the unit grants applies only inside the container and does not lift the limits; whether the requirement can be met there has not been verified. The server's own log decides: it prints the warning above only when its sockets fall short.
+
+In a container, the container host sets the two sysctls; the container cannot change them, and `docker run --sysctl` fails for them. The provided compose files stay unprivileged, and the host setting is enough. Set them on the container host as above, restart the container, and read the value the container's own sockets got:
+
+```sh
+docker compose -f deploy/agent.compose.yaml exec wgft-agent wgft agent doctor
+```
+
+For the server container, read its log with `docker compose -f deploy/server.compose.yaml logs`. Inside a container, `server check` may show the two sysctls as not visible; the value a socket gets without `CAP_NET_ADMIN` is still shown.
+
+These steps have been verified in the development lab on Debian 12 with kernel 6.1: with the default values, `agent doctor` read the item as FAILED with exit code 0 and the agent logged the warning; after the two commands above and a restart, the item read OK. The same held under Docker for the agent and the server run with the provided compose files: the server logged the warning before the change and not after it. On the same VM, with the default values, a server process holding only `CAP_NET_ADMIN` got the full size and logged no warning; the provided unit itself was not run for this. Not verified: unprivileged LXC containers, rootless containers, and other distributions. On Windows and macOS the agent does not measure its sockets and `agent doctor` reads the item as NOT TESTED; what buffer size those systems give, and whether they need any setting, has not been verified.
 
 ## 1. Install the binary
 
@@ -115,7 +149,7 @@ Use the same service as kernel mode, but change the mode:
 printf 'WGFT_MODE=userspace\nWGFT_WG_ENDPOINT=vps.example.com:51820\n' | sudo tee /etc/wgft/server.env
 ```
 
-Open UDP 51820, TCP 8443, and every forwarded port in the VPS firewall. Forwarding stops while the server process is down.
+Open UDP 51820, TCP 8443, and every forwarded port in the VPS firewall. Forwarding stops while the server process is down. The provided unit grants `CAP_NET_ADMIN`. On a VM or a dedicated host, that lets the server's WireGuard sockets meet [the socket buffer requirement](#socket-buffers-for-userspace-mode) without raising the sysctls. On an LXC-based VPS the capability does not lift the limits, and whether the requirement can be met there has not been verified. Either way, the server log prints a warning when the sockets fall short.
 
 ### Userspace mode without root
 
@@ -130,6 +164,8 @@ wgft server run --config ~/wgft/server.env
 
 Ports below 1024 cannot be bound directly by an ordinary user. In the remaining examples, use `--config ~/wgft/server.env` instead of `sudo` when running this way.
 
+Run this way, the server holds no `CAP_NET_ADMIN`, so [the socket buffer requirement](#socket-buffers-for-userspace-mode) depends on the host's sysctls. Setting them needs root on the host; without that, the requirement can be met only on a host whose values are already high enough, and the server logs a warning at startup otherwise.
+
 ### Userspace mode in Docker
 
 The server container uses userspace mode. Clone the repository, set `WGFT_WG_ENDPOINT` in [deploy/server.compose.yaml](../deploy/server.compose.yaml), and start it:
@@ -141,6 +177,8 @@ docker compose -f deploy/server.compose.yaml up -d
 ```
 
 Every forwarded port must appear under `ports:` in the compose file. `network_mode: host` avoids maintaining that list, but an unprivileged container cannot bind host ports below 1024.
+
+The container runs without `CAP_NET_ADMIN`, so the Docker host must meet [the socket buffer requirement](#socket-buffers-for-userspace-mode) with its sysctls.
 
 When using the container, run CLI commands through:
 
@@ -354,6 +392,8 @@ docker compose -f deploy/agent.compose.yaml up -d
 ```
 
 If the container cannot reach LAN targets, enable `network_mode: host` in the compose file.
+
+The Docker host must meet [the socket buffer requirement](#socket-buffers-for-userspace-mode); a container cannot set the two sysctls itself. Check it with `docker compose -f deploy/agent.compose.yaml exec wgft-agent wgft agent doctor`.
 
 ### Restrict the agent to the LAN addresses it needs
 

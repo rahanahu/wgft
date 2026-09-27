@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
@@ -51,6 +53,8 @@ func Check(opts Options, out io.Writer) error {
 	if mode != modeUserspace {
 		checkIPForward(out)
 		checkConntrack(out)
+	} else {
+		checkSocketBuffers(out)
 	}
 	// own ports の検査:host の input firewall が vpsd 自身の待ち受けポート(WireGuard の UDP と
 	// agent API の TCP)を塞いでいないか。host の input firewall はモードに関係しない層なので、
@@ -348,4 +352,59 @@ func checkConntrack(out io.Writer) {
 	if f := usage.Finding(); f != nil {
 		fmt.Fprintf(out, "  - %s\n", f)
 	}
+}
+
+// checkSocketBuffers は、ユーザー空間モードの動作条件である WireGuard の UDP ソケットのバッファ
+// (設計文書 7 節)について、人が判断できる材料を出す。今の net.core.rmem_max と net.core.wmem_max、
+// CAP_NET_ADMIN を持たないプロセスが得る値、条件の値の 3 つである。値は変えない。
+//
+// 判定はしない。VM や専用のホストで CAP_NET_ADMIN を持つ server は sysctl の値を超えるバッファを得られ、
+// 付属の systemd の unit はその権限を与えるが、check はこれから起動する server の権限を知らないためで
+// ある。コンテナや LXC ベースの VPS の中では、unit が与える CAP_NET_ADMIN はコンテナの user namespace
+// に限られ、上限を超えさせない(設計文書 6.1 節、7 節)。付属の unit だからといって省かない。決め手は稼働中の server が自分のソケットを測った値であり、条件に届かなければ
+// server がログに警告を出す。終了コードは他の所見と同じく 0 のままである(7a.11 節)。
+func checkSocketBuffers(out io.Writer) {
+	writeSocketBufferCheck(out, sockbuf.ReadLimits(), sockbuf.PlainProbe())
+}
+
+// writeSocketBufferCheck は checkSocketBuffers の出力を書く。読み取りと分けてあるのは、/proc と
+// ソケットを使わずに試験するためである。
+func writeSocketBufferCheck(out io.Writer, l sockbuf.Limits, p sockbuf.Probe) {
+	fmt.Fprintf(out, "socket buffers: userspace mode requires %d bytes each for receive and send on the WireGuard UDP sockets\n", sockbuf.Required)
+	fmt.Fprintf(out, "  net.core.rmem_max: %s\n", sysctlText(l.RmemMax, l.RmemErr))
+	fmt.Fprintf(out, "  net.core.wmem_max: %s\n", sysctlText(l.WmemMax, l.WmemErr))
+	switch {
+	case p.Err != nil:
+		fmt.Fprintf(out, "  without CAP_NET_ADMIN: cannot tell: %v\n", p.Err)
+	case p.Recv >= sockbuf.Required && p.Send >= sockbuf.Required:
+		fmt.Fprintf(out, "  without CAP_NET_ADMIN: a socket gets receive %d and send %d bytes, which meets the requirement\n", p.Recv, p.Send)
+	default:
+		fmt.Fprintf(out, "  without CAP_NET_ADMIN: a socket gets receive %d and send %d bytes, below the requirement\n", p.Recv, p.Send)
+		fmt.Fprintf(out, "  - %s\n", linux.Finding{
+			Where: "net.core.rmem_max and net.core.wmem_max",
+			Problem: fmt.Sprintf("are too small for a server without CAP_NET_ADMIN; Linux gives a socket twice the size it asks for, "+
+				"so %d in each sysctl is what gives %d", sockbuf.Requested, sockbuf.Required),
+			Suggest: []string{
+				fmt.Sprintf("printf 'net.core.rmem_max = %d\\nnet.core.wmem_max = %d\\n' | tee /etc/sysctl.d/90-wgft.conf", sockbuf.Requested, sockbuf.Requested),
+				"sysctl --system",
+				"in a container, set them on the container host; a container cannot change them",
+			},
+		})
+	}
+	fmt.Fprintln(out, "  with CAP_NET_ADMIN, which the provided systemd unit grants, a socket on a VM or a dedicated host can get the required size past these sysctls; "+
+		"inside a container or on an LXC-based VPS that capability does not lift the limit, and whether the requirement can be met there has not been verified")
+	fmt.Fprintln(out, "  the running server measures its own sockets and logs a warning when they fall short, and that measurement is what decides")
+}
+
+// sysctlText は sysctl の値 1 つを出力の形にする。ファイルが無いのは、初期の network namespace の外で
+// 読んだ場合である。この 2 つの sysctl はホスト全体で 1 つの値であり、カーネルによっては分けた
+// namespace に現れない(設計文書 6.1 節)。コンテナの中の server check がこれに当たる。
+func sysctlText(v int, err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "not visible in this network namespace; the host sets it for every namespace, a container included"
+	case err != nil:
+		return "cannot read: " + err.Error()
+	}
+	return fmt.Sprint(v)
 }
