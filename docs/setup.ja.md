@@ -6,12 +6,13 @@
 
 VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。Apple シリコンの macOS でも動作し、macOS 27 で実機確認済みです。Intel Mac には対応していません。wgft は現在 IPv4 のみに対応しています。
 
-既定のユーザー空間モードでは、自宅側のエージェントには root 権限も TUN デバイスも不要です。Linux のエージェントはカーネルモードでも動作し、カーネルモードには `CAP_NET_ADMIN` が必要です。詳しくは[カーネルモードで起動する](#カーネルモードで起動する)を参照してください。VPS 側の要件は動作モードで変わります。
+既定のユーザー空間モードでは、自宅側のエージェントには root 権限も TUN デバイスも不要です。ただし Linux では、ホストのソケットのバッファの上限を 2 つ上げる必要があります。詳しくは[ユーザー空間モードのソケットのバッファ](#ユーザー空間モードのソケットのバッファ)を参照してください。Linux のエージェントはカーネルモードでも動作し、カーネルモードには `CAP_NET_ADMIN` が必要です。詳しくは[カーネルモードで起動する](#カーネルモードで起動する)を参照してください。VPS 側の要件は動作モードで変わります。
 
 | | カーネルモード `kernel` | ユーザー空間モード `userspace` |
 |---|---|---|
 | VPS の root 権限 | 必要 | 不要 |
 | カーネル / nftables | Linux 6.1 以上、nftables 1.0.6 以上 | 不要 |
+| ホストのソケットのバッファの上限 | 条件なし | `net.core.rmem_max` と `net.core.wmem_max` が 7340032 以上。VM か専用のホストで server が `CAP_NET_ADMIN` を持つ場合を除く。[ユーザー空間モードのソケットのバッファ](#ユーザー空間モードのソケットのバッファ)を参照 |
 | 転送経路 | カーネル WireGuard + nftables DNAT | wireguard-go + ユーザー空間 netstack |
 | wgft プロセス停止・クラッシュ時 | 設定済みの転送は継続 | 転送も停止 |
 | レート制限の判定場所 | カーネル | wgft プロセス |
@@ -19,11 +20,11 @@ VPS 側は Linux で動作します。自宅側の agent は Windows amd64 で�
 
 カーネルモードでは、wgft が WireGuard / nftables の実行時状態を作った後は、wgft プロセスがクラッシュまたは再起動しても、その状態がカーネルに残るため転送は継続します。一方、VPS 自体を再起動すると実行時状態は失われるため、wgft service が再び起動して状態を作り直す必要があります。通常運用では付属の systemd unit を有効にしておいてください。
 
-VPS で root が使えるならカーネルモードを推奨します。ユーザー空間モードは、root が使えない環境、カーネルに WireGuard がない環境、コンテナだけで完結させたい場合向けです。
+VPS で root が使えるならカーネルモードを推奨します。ユーザー空間モードは、root が使えない環境、カーネルに WireGuard がない環境、コンテナだけで完結させたい場合向けです。ただし、ユーザー空間モードに要るソケットのバッファの上限を上げるには、ホストかコンテナのホストで一度だけ root の権限が要ります。
 
 ユーザー空間モードでは、`wgft server` 自身がルールの listen port で待ち受けます。この listen port がホストのエフェメラルポートの範囲(Linux の既定は 32768-60999、`net.ipv4.ip_local_port_range`)に入っていると、VPS 上のどのプロセスの外向きの接続でも、その番号を送信元ポートとして使っているあいだや、切断後 60 秒の TIME_WAIT のあいだは、server の bind と衝突します。衝突すると bind は失敗し、ルールは宣言に残ったまま not active として報告されます。理由は `bind failed: listen tcp4 :<port>: bind: address already in use` で、server のログには `rule <id>: not active: bind failed: ...` の行が出て、Web UI のルールの状態にも同じ理由が表示されます。`wgft rule ls --json` の `rule_states` にも同じ理由が入ります。`wgft server` は 30 秒ごとに適用をやり直すため、ポートが空けば自然に回復します。`SO_REUSEADDR` はこの衝突を防ぎません。カーネルモードでは VPS 上で公開ポートを待ち受けるプロセスが無いため、この問題は起きません。衝突を避けるには、listen port をエフェメラルポートの範囲外から選ぶか、`sysctl net.ipv4.ip_local_reserved_ports=<ports>` で予約してください。
 
-カーネルモードでは、ルール集合をカーネルへ 1 つの nftables バッチとして適用します。wgft はこのバッチに合わせて netlink ソケットのバッファの大きさを調整します([design.md](design.md) の 6.1 節)。付属の systemd unit でカーネルモードを動かしたラボでは、1 回の `rule import` によるバッチでも 1 本ずつの `rule add` による追加でも、2000 本までのルール集合を適用できました。2000 本を超える規模は確かめていません。文書にあるカーネルモードの配置には、`net.core.rmem_max` と `net.core.wmem_max` で制限されるものがありません。付属の systemd unit は、この 2 つの sysctl の値を超えてバッファを要求するための権限を wgft に与えます。Docker の配置はユーザー空間モードだけを対象にしており、カーネルモードを対象にしていません。
+カーネルモードでは、ルール集合をカーネルへ 1 つの nftables バッチとして適用します。wgft はこのバッチに合わせて netlink ソケットのバッファの大きさを調整します([design.md](design.md) の 6.1 節)。付属の systemd unit でカーネルモードを動かしたラボでは、1 回の `rule import` によるバッチでも 1 本ずつの `rule add` による追加でも、2000 本までのルール集合を適用できました。2000 本を超える規模は確かめていません。文書にあるカーネルモードの配置には、`net.core.rmem_max` と `net.core.wmem_max` で制限されるものがありません。付属の systemd unit は、この 2 つの sysctl の値を超えてバッファを要求するための権限を wgft に与えます。Docker の配置はユーザー空間モードだけを対象にしており、カーネルモードを対象にしていません。ユーザー空間モードには、WireGuard のソケットのために、同じ 2 つの sysctl についての別の条件があります。[ユーザー空間モードのソケットのバッファ](#ユーザー空間モードのソケットのバッファ)を参照してください。
 
 カーネルモードは、ホストの conntrack の表にも依存します。`wgft server check` と起動時のログは、`nf_conntrack_max` が wgft の推奨する下限 65536 を下回っている場合に警告し、上げるための `sysctl -w net.netfilter.nf_conntrack_max=65536` を提示します。
 
@@ -32,6 +33,39 @@ VPS で root が使えるならカーネルモードを推奨します。ユー�
 プロセス全体の上限は `WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS` で設定し、既定値はそれぞれ 8192 と 2048 です。server と agent は別プロセスなので、必要ならそれぞれに設定してください。wgft はこの 2 つの値から Go ランタイムのメモリのソフト上限を計算し、起動時に表示します。ソフト上限は Go のガベージコレクションの目標であり、プロセスのメモリの上限ではありません。開発用ラボでは、ユーザー空間モードの server で既定値の上限を埋め、さらに大量の通信を送ったときの最大 RSS は 208 MiB でした。`WGFT_MAX_UDP_FLOWS=2048` と `WGFT_MAX_TCP_FLOWS=1024` では同じ負荷を 150 MiB の cgroup 制限内で動かせました。実際の 256 MiB VPS ではまだ確認していません。systemd では、必要なら付属 unit のコメント例を使って `MemoryMax=` を起動時に表示されるソフト上限より大きい値に設定できます。ソフト上限はメモリの上限ではないので、この設定だけで OOM を避けられるとは限りません。
 
 1 つのルールが全体の容量を独占しないよう、wgft は内部でルールごとの上限も設けます。この上限は設定項目ではありません。新しいフローを受け付けているルールが 1 本だけなら、そのルールはプロセス全体の上限のすべてを保持できます。2 本以上あるときは、1 本のルールはプロセス全体の上限の半分(切り上げ)で止まり、残りの半分は他のルールのために予約されるので、1 本のルールへのフラッドの最中も他のルールが新しいフローを通せます。接続元アドレスごとの上限は `wgft server` だけの設定項目で、`WGFT_MAX_UDP_FLOWS_PER_SOURCE`(既定 256)と `WGFT_MAX_TCP_FLOWS_PER_SOURCE`(既定 128)を全ルールの合計に対して適用し、1 つの接続元アドレスがルールの上限を埋めて他の利用者を締め出すことを防ぎます。プロセス全体の上限と連動しないため、メモリに余裕がありプロセス全体の上限を上げた運用者も、この設定を明示して上げない限り接続元ごとの上限は既定値のままです。0 にするとそのプロトコルの上限を無効にできます。agent にはこの設定項目がありません。agent から見た相手は server だけなので、どのフローも同じアドレスから来ているように見えるためです。
+
+### ユーザー空間モードのソケットのバッファ
+
+ユーザー空間モードは、WireGuard の UDP ソケットが 7 MiB の受信バッファと 7 MiB の送信バッファを得ることを動作条件とします。wireguard-go はソケットを開くときにこの大きさを要求します。条件は Linux のエージェントとユーザー空間モードの server に当てはまり、カーネルモードにはありません。Linux は、ホスト自身の user namespace で `CAP_NET_ADMIN` を持たないプロセスの要求を、`net.core.rmem_max` と `net.core.wmem_max` の値で切り詰めます。非特権のコンテナの中と LXC ベースの VPS のプロセスは、そこでどの権限を持っていても、この権限を持ちません。開発用ラボの Debian 12 のカーネルでは 2 つとも 212992、Fedora 44 では 4194304 で、どちらも条件に届きません。wgft はこの sysctl を書き換えません。
+
+ホストで 2 つとも 7340032 以上に設定します。起動のたびに適用されるように、`/etc/sysctl.d` のファイルに書きます。
+
+```sh
+printf 'net.core.rmem_max = 7340032\nnet.core.wmem_max = 7340032\n' | sudo tee /etc/sysctl.d/90-wgft.conf
+sudo sysctl --system
+```
+
+ソケットのバッファは開いたときに決まるので、設定の後にエージェントか server を再起動します。Linux は要求の 2 倍の値を報告するので、sysctl が 7340032 のとき、ソケットは 14680064 を報告します。wgft が確かめるのはこの報告の値です。実際の WireGuard のソケットの受信と送信がどちらも 14680064 バイト以上なら、条件を満たします。
+
+エージェントとユーザー空間モードの server は、トンネルを立てるたびに自分の WireGuard のソケットを測ります。条件に届かなければ、`warning: the WireGuard UDP sockets` で始まる行をログに出します。エージェントのホストでは、稼働中のエージェントが測った値を `agent doctor` で確かめます。エージェントと同じ利用者で実行し、付属の unit では次のコマンドになります。
+
+```sh
+sudo runuser -u wgft -- wgft agent doctor
+```
+
+Tunnel の群の `socket buffers` の項目は、OK か、測った値と設定する値を添えた FAILED を示します。条件に届かないエージェントも転送は続けるので、この項目は終了コードを変えません。
+
+VPS では、ユーザー空間モードの `sudo wgft server check` が、2 つの sysctl の値、`CAP_NET_ADMIN` を持たないソケットが得る値、条件の値を示します。`server check` は server の判定をしません。VM か専用のホストでは、付属の systemd の unit で起動した server は `CAP_NET_ADMIN` を持ち、sysctl の値を超えるバッファを得られるためです。コンテナの中と LXC ベースの VPS では、unit が与える権限はコンテナの中に限られ、上限を超えさせません。そこで条件を満たせるかどうかは未確認です。判定の決め手は server 自身のログで、server はソケットが条件に届かないときだけ前述の警告を出します。
+
+コンテナでは、2 つの sysctl をコンテナのホストで設定します。コンテナの中からは変えられず、`docker run --sysctl` による設定も失敗します。付属の compose ファイルは非特権のまま使い、ホストの設定だけで条件を満たします。前述の手順でコンテナのホストに設定し、コンテナを再起動してから、コンテナの中のソケットが得た値を確かめます。
+
+```sh
+docker compose -f deploy/agent.compose.yaml exec wgft-agent wgft agent doctor
+```
+
+server のコンテナでは、`docker compose -f deploy/server.compose.yaml logs` でログを確かめます。コンテナの中の `server check` は、2 つの sysctl を見えないものとして示すことがあります。その場合も、`CAP_NET_ADMIN` を持たないソケットが得る値は示します。
+
+この手順は、開発用ラボの Debian 12(カーネル 6.1)で確かめました。既定の値では、`agent doctor` がこの項目を FAILED とし、終了コードは 0 で、エージェントは警告を出しました。前述の 2 つのコマンドと再起動の後は、この項目が OK になりました。Docker でも、付属の compose ファイルで動かしたエージェントと server で同じ結果になり、server は設定の前だけ警告を出しました。同じ VM で既定の値のまま、`CAP_NET_ADMIN` だけを持つ server のプロセスは条件を満たすバッファを得て、警告を出しませんでした。付属の unit そのものでは確かめていません。非特権の LXC のコンテナ、rootless のコンテナ、他のディストリビューションは未確認です。Windows と macOS のエージェントはソケットを測らず、`agent doctor` はこの項目を NOT TESTED として示します。この 2 つの OS で得られるバッファの大きさと、設定が要るかどうかは未確認です。
 
 ## 1. バイナリをインストールする
 
@@ -115,7 +149,7 @@ sudo wgft server run
 printf 'WGFT_MODE=userspace\nWGFT_WG_ENDPOINT=vps.example.com:51820\n' | sudo tee /etc/wgft/server.env
 ```
 
-UDP 51820、TCP 8443、および転送する各ポートを VPS の firewall で開けてください。ユーザー空間モードでは `wgft server` が停止すると転送も停止します。
+UDP 51820、TCP 8443、および転送する各ポートを VPS の firewall で開けてください。ユーザー空間モードでは `wgft server` が停止すると転送も停止します。付属の unit は `CAP_NET_ADMIN` を与えます。VM か専用のホストでは、この権限により、server の WireGuard のソケットは sysctl を上げなくても[ソケットのバッファの条件](#ユーザー空間モードのソケットのバッファ)を満たします。LXC ベースの VPS では、この権限は上限を超えさせず、条件を満たせるかどうかは未確認です。どの場合も、ソケットが条件に届かなければ server のログに警告が出ます。
 
 ### root なしでユーザー空間モードを使う
 
@@ -130,6 +164,8 @@ wgft server run --config ~/wgft/server.env
 
 通常ユーザーでは 1024 未満のポートを直接 bind できません。この構成では、以降の `sudo` の代わりに `--config ~/wgft/server.env` を付けて CLI を実行します。
 
+この構成の server は `CAP_NET_ADMIN` を持たないので、[ソケットのバッファの条件](#ユーザー空間モードのソケットのバッファ)を満たすかどうかはホストの sysctl で決まります。sysctl の設定にはホストの root の権限が要ります。設定できない場合、条件を満たせるのは既に十分な値を持つホストだけで、それ以外のホストでは server が起動時に警告を出します。
+
 ### Docker でユーザー空間モードを使う
 
 server コンテナはユーザー空間モードで動きます。リポジトリを clone し、[deploy/server.compose.yaml](../deploy/server.compose.yaml) の `WGFT_WG_ENDPOINT` を設定して起動します。
@@ -141,6 +177,8 @@ docker compose -f deploy/server.compose.yaml up -d
 ```
 
 転送するポートは compose の `ports:` に列挙する必要があります。`network_mode: host` を使えば列挙は不要ですが、非特権コンテナでは 1024 未満のポートを bind できません。
+
+コンテナは `CAP_NET_ADMIN` を持たないので、Docker のホストの sysctl で[ソケットのバッファの条件](#ユーザー空間モードのソケットのバッファ)を満たす必要があります。
 
 コンテナ利用時の CLI は次の形で実行します。
 
@@ -354,6 +392,8 @@ docker compose -f deploy/agent.compose.yaml up -d
 ```
 
 コンテナから LAN 側の転送先に到達できない場合は、compose の `network_mode: host` を有効にしてください。
+
+Docker のホストは[ソケットのバッファの条件](#ユーザー空間モードのソケットのバッファ)を満たす必要があります。コンテナは 2 つの sysctl を自分では設定できません。条件を満たしたかどうかは `docker compose -f deploy/agent.compose.yaml exec wgft-agent wgft agent doctor` で確かめます。
 
 ### 転送先のアドレスを必要な範囲に絞る
 

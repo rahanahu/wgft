@@ -34,7 +34,7 @@ func TestRepoManifestIsValid(t *testing.T) {
 			heavy++
 		}
 	}
-	// 既定の一式は、両モードの e2e と ipv6 と rates と lifecycle の 16 個の確認、
+	// 既定の一式は、両モードの e2e と ipv6 と rates と lifecycle の 17 個の確認、
 	// それに split-merge、import-export、connlimit、両モードの agentkernel の 5 組と agentdoctor
 	want := []string{
 		"e2e.sh kernel", "e2e.sh userspace", "ipv6.sh kernel", "ipv6.sh userspace",
@@ -43,7 +43,7 @@ func TestRepoManifestIsValid(t *testing.T) {
 		"agentdoctor.sh kernel", "agentdoctor.sh userspace",
 	}
 	for _, mode := range []string{"kernel", "userspace"} {
-		for _, c := range []string{"1", "2", "3", "3b", "4", "5", "5b", "5c", "5d", "5e", "6", "7", "8", "9", "10", "11"} {
+		for _, c := range []string{"1", "2", "3", "3b", "4", "5", "5b", "5c", "5d", "5e", "6", "7", "8", "9", "10", "11", "12"} {
 			want = append(want, "lifecycle.sh "+mode+" "+c)
 		}
 	}
@@ -68,6 +68,12 @@ func TestRepoManifestIsValid(t *testing.T) {
 	}
 	if heavy == 0 {
 		t.Error("no exclusive-heavy job: check 5, rates and connlimit must not run beside others")
+	}
+	// lifecycle.sh の check 12 は VM 全体の sysctl を変えるので、単独で流す
+	for _, j := range jobs {
+		if (j.Scenario == "lifecycle.sh kernel 12" || j.Scenario == "lifecycle.sh userspace 12") && j.Class != classGlobal {
+			t.Errorf("%q is %q; it changes net.core.rmem_max for the whole VM and must be exclusive-global", j.Scenario, j.Class)
+		}
 	}
 	if optional == 0 {
 		t.Error("no optional job: version-skew.sh needs staged binaries and stays opt-in")

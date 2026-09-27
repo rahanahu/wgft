@@ -112,6 +112,8 @@ func (d *userspaceDataplane) read() dataplaneReading {
 			txBytes:       ts.TxBytes,
 			err:           ts.Err,
 		}
+		bufs := d.tun.SocketBuffers()
+		r.tunnel.socketBuffers = &bufs
 	}
 	if d.rl != nil {
 		sts := d.rl.Status()

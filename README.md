@@ -28,7 +28,7 @@ wgft is aimed at workloads where arbitrary TCP/UDP forwarding matters, especiall
 
 - One binary contains the VPS server, home agent, and CLI
 - Kernel mode uses the kernel's WireGuard and nftables DNAT path, so forwarding survives a wgft process restart
-- Userspace mode works without root and can run entirely in a container
+- Userspace mode runs wgft without root and can run entirely in a container, on a host whose socket buffer limits are raised once
 - TCP and UDP port/range forwarding
 - Per-rule allow/deny lists and rate limits
 - Rule changes do not disconnect unrelated sessions
@@ -49,15 +49,16 @@ wgft therefore stays deliberately narrow: WireGuard for the tunnel, nftables for
 |---|---|---|
 | Root on the VPS | Required | Not required |
 | Kernel and nftables | Kernel 6.1+, nftables 1.0.6+ | None |
+| Host socket buffer limits | No requirement | `net.core.rmem_max` and `net.core.wmem_max` of 7340032 or more, unless the server holds `CAP_NET_ADMIN` on a VM or a dedicated host |
 | Forwarding path | Kernel WireGuard + nftables DNAT | wireguard-go + userspace netstack |
 | If the wgft process stops or crashes | Configured forwarding continues | Forwarding stops |
 | Rate-limit evaluation | Kernel | wgft process |
 
 In kernel mode, forwarding stays in the kernel if the wgft process crashes or restarts after startup. A VPS reboot clears that runtime state, so wgft must start again to restore forwarding. Keep the provided systemd service enabled for normal operation so reboot recovery happens automatically.
 
-Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container.
+Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container. Userspace mode needs two socket buffer limits raised on the host, or on the container host, which takes root there once. On a VM or a dedicated host, a server started by the provided systemd unit holds the capability that makes this unnecessary. Inside a container or on an LXC-based VPS that capability does not lift the limits, and whether the requirement can be met there has not been verified. The server and the agent log a warning when their sockets fall short, and that log decides; see [Socket buffers for userspace mode](docs/setup.md#socket-buffers-for-userspace-mode).
 
-The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11, and on macOS on Apple silicon, verified on macOS 27. Intel Macs are not supported. wgft is IPv4-only. In its default userspace mode, the home agent does not need root or a TUN device, and no administrator rights on Windows. On macOS it runs with your user's rights.
+The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11, and on macOS on Apple silicon, verified on macOS 27. Intel Macs are not supported. wgft is IPv4-only. In its default userspace mode, the home agent does not need root or a TUN device, and no administrator rights on Windows. On macOS it runs with your user's rights. On Linux, the agent's host needs the same two socket buffer limits raised; `wgft agent doctor` shows whether the running agent's sockets meet the requirement.
 
 ### Kernel mode on the home agent
 

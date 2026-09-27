@@ -1,5 +1,7 @@
 # Container for the home agent. It runs user-space wireguard-go + gVisor netstack, so it needs
-# neither a TUN device nor NET_ADMIN. Outbound UDP and reachability to the LAN targets are enough.
+# neither a TUN device nor NET_ADMIN. It needs outbound UDP, reachability to the LAN targets, and
+# net.core.rmem_max and net.core.wmem_max of 7340032 or more on the Docker host, which a container
+# cannot set itself; see docs/setup.md, "Socket buffers for userspace mode".
 #
 #   docker build -f deploy/Dockerfile.agent -t wgft-agent:latest .
 #   docker build -f deploy/Dockerfile.agent --build-arg VERSION=v0.1.0 -t wgft-agent:v0.1.0 .

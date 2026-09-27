@@ -51,6 +51,8 @@ var agentDoctorTable = []struct {
 	{"stream.liveness", "Connection", "liveness", false, true},
 	{"tunnel.resolve", "Tunnel", "wg endpoint resolve", false, false},
 	{"tunnel.local", "Tunnel", "tunnel", true, false},
+	// ソケットのバッファの条件に届かなければ FAILED になるが、総合判定は動かさない(10.2c 節)
+	{"tunnel.socket_buffers", "Tunnel", "socket buffers", false, false},
 	{"tunnel.watchdog", "Tunnel", "watchdog", false, true},
 	{"tunnel.transfer", "Tunnel", "transfer", false, true},
 	{"relay.listeners", "Relay", "listeners", true, false},

@@ -1,6 +1,7 @@
 # Docker Compose for the VPS-side server, running the userspace mode (docs/design.md section 6.3).
-# No root, no kernel WireGuard, no nftables. For kernel mode, use deploy/server.service instead;
-# it is not supported in a container (see deploy/Dockerfile.server).
+# No root, no kernel WireGuard, no nftables; the Docker host still needs larger socket buffer
+# limits, see Notes. For kernel mode, use deploy/server.service instead; it is not supported in a
+# container (see deploy/Dockerfile.server).
 #
 #   docker compose -f deploy/server.compose.yaml up -d
 #
@@ -9,6 +10,11 @@
 #
 # Notes
 # - No privileges: no --privileged, no cap_add, no devices (user-space netstack, so no TUN).
+# - Socket buffers: the Docker host must have net.core.rmem_max and net.core.wmem_max at 7340032
+#   or more, since the WireGuard sockets need 7 MiB buffers; a container cannot set them, and
+#   docker run --sysctl fails for them. Set them on the host and restart the container; the
+#   server logs a warning at start while they fall short. See docs/setup.md, "Socket buffers
+#   for userspace mode".
 # - The image runs as uid 65532 (the distroless "nonroot" user), not root. The named volume
 #   below is fine as is: Docker/Podman initialise a named volume from the image directory,
 #   ownership included, so /var/lib/wgft in the volume comes out owned by 65532.

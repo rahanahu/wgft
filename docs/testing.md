@@ -23,7 +23,7 @@ v1 に必須の項目には、繰り返しの頻度として「リリース候�
 
 ## マージの前に流すテスト
 
-コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L17 です。流し方は、1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行することです。この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。文書だけを変える PR は、ラボを流しません。CI の検査のうち A8 は、どちらの PR でも流します。A1 から A7 は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。
+コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L18 です。流し方は、1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行することです。この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。文書だけを変える PR は、ラボを流しません。CI の検査のうち A8 は、どちらの PR でも流します。A1 から A7 は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。
 
 コードは、実行時の挙動かテストの結果を変えうるすべての変更を指します。Go のコード (`go.mod`、`go.sum` を含む)、`deploy/`、`lab/` 自身、設定と dotenv の扱い、`scripts/`、`.goreleaser.yaml`、`.github/workflows/` がこれに当たります。変更がコードに当たらないのは、Markdown とテキストの文書 (README、`docs/` の文書とその画像) だけです。`docs/cli.md` はヘルプから生成するので、ヘルプを変えた PR は Go のコードを変える PR です。
 
@@ -43,10 +43,10 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 | `resource` | `internal/resource/**`、`internal/lograte/**`、`internal/dataplane/userspace/**`、`internal/netpipe/**`、`internal/nettun/**`、`cmd/wgft/limits.go` | 無し (C5 と C6 は次の段階の完了時に流し直す) | L8 (両モード) |
 | `reconcile` | `internal/reconcile/**`、`internal/planner/**`、`internal/model/**`、`internal/dataplane/*.go`、`internal/vpsd/apply.go`、`internal/vpsd/watch.go`、`internal/vpsd/dataplane*.go` | 無し (C2 は次の段階の完了時に流し直す) | L4、L5、L6、L9、L10、L15 (両モード) |
 | `relay` | `internal/vpsd/proxyrelay/**` | B3 | L1、L3、L6、L9、L13 |
-| `userspace` | `internal/dataplane/userspace/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` | 無し | L1、L3、L4、L8 (userspace モード) |
+| `userspace` | `internal/dataplane/userspace/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` | 無し | L1、L3、L4、L8、L18 (userspace モード) |
 | `rule-ops` | `internal/vpsd/admin/**`、`internal/vpsd/agent_disable.go`、`proto/rule.go`、`proto/splitmerge.go`、`proto/importdiff.go`、`cmd/wgft/rule.go` | 無し | L5、L11、L12、L14、L15 (両モード) |
 | `protocol` | `proto/stream.go`、`proto/state.go`、`proto/version.go`、`internal/vpsd/stream/**`、`internal/vpsd/agentapi/**`、`internal/agent/**` | B7 | L1、L4、L14、L15 |
-| `agent-platform` | `internal/agent/**`、`internal/flock/**`、`internal/dataplane/userspace/relay/**`、`internal/dataplane/userspace/tunnel/**`、`cmd/wgft/**`、`*_windows.go`、`*_darwin.go` | B4、B8 | L1、L14、L16、L17 |
+| `agent-platform` | `internal/agent/**`、`internal/flock/**`、`internal/dataplane/userspace/relay/**`、`internal/dataplane/userspace/tunnel/**`、`cmd/wgft/**`、`*_windows.go`、`*_darwin.go` | B4、B8 | L1、L14、L16、L17、L18 |
 | `deploy` | `deploy/*.service`、`deploy/*.conf`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
@@ -134,7 +134,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | コードを変える PR | PR の更新ごと | 1 分前後 | 自動 |
 | A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 数分 | 自動 |
 | A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力 | CI (Linux) | すべての PR | PR の更新ごと | 1 分未満 | 自動 |
-| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L17。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。7a.8 節の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | Sandbox で 約 10 分以内 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は、L15 を加える前で 338 秒、L16 と L17 を加えた後で 600 秒)、複数の VM で並列に約 2.5 分から 3 分 (3 台で約 185 秒)、1 台で順に 10 分以上 | 自動 (開発者が起動) |
+| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L18。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。7a.8 節の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | Sandbox で 約 10 分以内 (既定の 2 vCPU / 2 GiB の Lab Host VM で並列数 8 のときの実測は、L15 を加える前で 338 秒、L16 と L17 を加えた後で 600 秒)、複数の VM で並列に約 2.5 分から 3 分 (3 台で約 185 秒)、1 台で順に 10 分以上 | 自動 (開発者が起動) |
 
 ### ラボの一式の内訳
 
@@ -157,6 +157,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと (design.md の 5.1 節)、無効なエージェントのルールで `server doctor` と `status` が失敗を報告すること、削除したエージェントに残ったルールの `server doctor` と `status` の結果が変わること (design.md の 10.2a、10.2b 節) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 単独で kernel モードは約 5 秒、userspace モードは約 40 秒 (userspace は server の再起動の後のトンネルの張り直しを待つ)。kernel モードの約 5 秒は、保持していたテーブルの削除の通知ですぐに公開し直す最善の場合です。通知で公開し直さなければ 30 秒ごとの再試行を待ち、確認はその待ちに 40 秒を許します | 自動 |
 | L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、resolve、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧とループバックの拒否、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (design.md の 7b、9、10.3 節) | ラボ | `agent-platform` | A9 として | kernel モードは 1 組あたり数十秒から約 5 分、userspace モードは同じ組で数十秒から約 5 分 (reconnect と stale は kernel モードだけの検査で、userspace モードでは SKIP になり数秒で終わります) | 自動 |
 | L17 | `lab/agentdoctor.sh` (kernel と userspace) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと (design.md の 10.2c 節) | ラボ | `agent-platform` | A9 として | モードごとに約 1 分 | 自動 |
+| L18 | `lab/lifecycle.sh` check 12 (kernel と userspace) | ユーザー空間モードの WireGuard のソケットのバッファの条件 (design.md の 7 節) を、`agent doctor` とログが実際のソケットの値で示さないこと、条件に届かないときに `agent doctor` の終了コードが 0 でなくなること、セットアップの文書の `/etc/sysctl.d` の手順で条件を満たせないこと、`rotate-key` で開き直したソケットを測らないこと | ラボ (VM 全体の sysctl を変えるので単独で) | `userspace`、`agent-platform` | A9 として | モードごとに約 2 秒 | 自動 |
 
 ### B 類 (関係する変更の関門)
 
