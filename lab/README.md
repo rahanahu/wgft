@@ -11,7 +11,7 @@ VPS 側のカーネル機能(nftables、WireGuard、conntrack)を、ホストを
 
 - ホストや Docker でカーネル機能を試すと、ホストのカーネルのバージョン、読み込まれるモジュール、Docker が有効にする `br_netfilter` 経由のホストのルールと conntrack が結果に混ざる。VM に閉じ込めて切り分ける
 - Docker は開発環境には使わない。使うのは server とエージェントの配布用イメージを確かめるときだけ(`scripts/docker-smoke.sh`)
-- VM は 1 台。トポロジは VM 内の netns で組むので、同じ `netns.sh` を CI でも使える
+- トポロジは VM 内の netns で組む。VM の名前は `WGFT_LAB_VM` で変えられるので、複数の VM を並べて使える(下記「対応する VPS の環境」)
 - ホストのリポジトリを VM の `/wgft` に**読み取り専用**で共有する。ホストでビルドし、VM で実行する
 
 ## 前提
@@ -26,7 +26,7 @@ lab/lab up                      # 初回:VM 作成、パッケージ導入、ス
 lab/lab status                  # 状態確認
 lab/lab exec client ping 198.51.100.1
 lab/lab build                   # ホストで ./cmd/... ./tools/... を bin/ にビルドし、VM の /usr/local/bin に install
-lab/lab test internal/vpsd/nft  # build tag lab 付きのテストを VM の vps ns で実行(root と nft が要るゴールデンテストなど)
+lab/lab test internal/dataplane/linuxkernel/nft  # build tag lab 付きのテストを VM の vps ns で実行(root と nft が要るゴールデンテストなど)
 lab/lab exec vps wgft server run ...  # VM では /usr/local/bin の名前で実行する(/wgft/bin を直接 exec しない。下の注意)
 lab/lab shell home              # home ns で bash
 lab/lab exec vm bash /wgft/lab/e2e.sh kernel     # 通しのシナリオ(登録、TCP/UDP、PROXY protocol、deny の即時反映、撤去)を PASS/FAIL で
@@ -39,7 +39,7 @@ lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、�
 lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10 11 12)を並べると、その確認だけを流す
 lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定するポートに届かず、集約のレートのトークンも使わないことを確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/version-skew.sh         # 版の組み合わせ(新旧の server・agent、legacy v0)。旧いバイナリは GitHub の Releases から取得しキャッシュする(スクリプト冒頭のコメント参照)
-lab/lab exec vm bash /wgft/lab/upgrade.sh kernel       # 旧版からの更新(D4)。既定は直前のリリース(v0.6.0)のデータに現在のビルドを重ね、ルール・鍵・認証情報が保たれ、転送が戻ることを確認。WGFT_UPGRADE_OLD_VERSION=0.4.0 を付けると、release notes が更新を約束するもう一方の版でも同じ確認を流せる。userspace も同じ
+lab/lab exec vm bash /wgft/lab/upgrade.sh kernel       # 旧版からの更新(D4)。既定は v1.1.3 のデータに現在のビルドを重ね、ルール・鍵・認証情報が保たれ、転送が戻ることを確認。WGFT_UPGRADE_OLD_VERSION=0.4.0 を付けると、release notes が更新を約束するもう一方の版でも同じ確認を流せる。userspace も同じ
 lab/lab exec vm bash /wgft/lab/scale.sh kernel         # 規模の試験(C3)。1 台の server と 5 台のエージェントで、ルール数を 10 から 1000 まで段階的に増やし、適用時間・全体状態の大きさ・RSS を測定。kernel モードも userspace モードも 1000 本まで通る(kernel モードが 100 本前後で失敗していた netlink のバッファの問題は解決済み。design.md の 6.1 節と改訂の記録を参照)
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
 lab/lab destroy                 # VM ごと消す
@@ -48,12 +48,13 @@ lab/lab destroy                 # VM ごと消す
 VM の中で一式を動かす例(`lab/lab shell vm` で入ってから):
 
 ```sh
-# 設定は WGFT_* かフラグで渡す。ラボでは管理用 API を Unix ソケットの代わりにループバック TCP で開くと楽(--admin)
+# 設定は WGFT_* かフラグで渡す。ラボでは管理用 API を Unix ソケットの代わりにループバック TCP で開くと楽(--admin)。
+# vps ns で動くクライアントコマンドには、この --admin を毎回付ける(既定は unix:///run/wgft/admin.sock)
 ip netns exec vps wgft server run --mode kernel --data-dir /tmp/wgft --wg-endpoint 203.0.113.1:51820 --admin 127.0.0.1:8686 &
-JOIN=$(ip netns exec vps wgft agent join-string --name home)
+JOIN=$(ip netns exec vps wgft agent join-string --name home --admin 127.0.0.1:8686)
 ip netns exec home env WGFT_JOIN="$JOIN" WGFT_NAME=home wgft agent run --data-dir /var/lib/wgft-agent &
-ip netns exec vps wgft rule add --agent home --udp 2456-2457 --to 192.168.50.2:3000   # stream で即配信される
-ip netns exec vps wgft agent ls                                                      # 接続・ハートビート・ハンドシェイク
+ip netns exec vps wgft rule add --agent home --udp 2456-2457 --to 192.168.50.2:3000 --admin 127.0.0.1:8686   # stream で即配信される
+ip netns exec vps wgft agent ls --admin 127.0.0.1:8686                                                      # 接続・ハートビート・ハンドシェイク
 ip netns exec home echo -bind 192.168.50.2 -udp 3000,3001 -tcp 25565 &
 ip netns exec client sh -c 'echo hi | socat -t2 - UDP:198.51.100.1:2456'
 ```
@@ -107,7 +108,7 @@ client と vps だけが IPv6(ドキュメント用のプレフィクス `2001:d
 
 - `vps` の `ip_forward` は設定しない。`vpsd` が起動時に設定する(仕様 6.1 節)
 - netns はメモリ上にしかないので、VM を再起動すると消える。`lab up` か `lab net up` で立て直す
-- `netns.sh` は Incus に依存しない。CI では root で `lab/netns.sh up` を直接実行する
+- `netns.sh` は Incus に依存しない。GitHub の runner の上で root としてラボの一式を流す案はあるが、v1 では採っていない([docs/testing.md](../docs/testing.md) の「CI とラボの関係」)
 
 ## 既知の問題:VM が IPv4 で外に出られない
 
@@ -205,14 +206,14 @@ Sandbox 1 つだけを扱う手作業の道具なので、ロックを取りま�
 
 | 分類 | 意味 | 対象 |
 |---|---|---|
-| `parallel` | 他の Sandbox と同時に流せます。触るものが自分の namespace と自分の作業ディレクトリの中に閉じます | `e2e.sh`、`ipv6.sh`、`split-merge.sh`、`import-export.sh`、`connlimit.sh`、`version-skew.sh`、`lifecycle.sh` の check 1 2 3 3b 4 5c 5d 6 7 8 9 |
+| `parallel` | 他の Sandbox と同時に流せます。触るものが自分の namespace と自分の作業ディレクトリの中に閉じます | `e2e.sh`、`ipv6.sh`、`split-merge.sh`、`import-export.sh`、`connlimit.sh`、`version-skew.sh`、`agentkernel.sh`、`agentdoctor.sh`、`lifecycle.sh` の check 1 2 3 3b 4 5c 5d 6 7 8 9 10 11 |
 | `exclusive-heavy` | Lab Host VM の中で単独で流します。主張の根拠になる値そのものが、メモリか到達頻度の測定値です | `lifecycle.sh` の check 5、5b、5e、`rates.sh` |
 | `exclusive-timing` | Lab Host VM の中で単独で流します。壁時計で測る区間の中で何が起きないかを主張するので、その区間が始まる前に収束を確認できないと、同じ VM を分け合ったときに失敗します | 該当する確認は今はありません |
 | `exclusive-global` | Lab Host VM の中で単独で流します。network namespace が隔てない値を変えます | `lifecycle.sh` の check 12 |
 
 `lifecycle.sh` の check 5c と check 5d は、主張の根拠が到達頻度でもメモリでもなく、ルールごとの受け付けの判定です。8 つの Sandbox のプールの中で、しかも 5c と 5d が同時に流れる状態で、20 回ずつ流して 160 件のすべてが成功し、保持数も毎回同じでした。この測定により、分類は `parallel` です。
 
-`rates.sh` と `lifecycle.sh` の check 5 を単独で流す理由は、隣の Sandbox が結果を壊すからではなく、読む値が測定値そのものだからです。ラボでの実測では、両方とも隣に 4 つと 8 つの Sandbox がある状態でも同じ判定を出しました。check 5 の RSS は 85 MiB から 110 MiB の幅に収まり、上限の 224 MiB に対して半分以上の余裕がありました。`rates.sh` の上限なしの到達数は 500 回中 405 回から 500 回の幅で動きますが、隣の Sandbox の数とは相関しませんでした。`connlimit.sh` は 9 回の実行で 1 つの値も動かなかったので、`parallel` に分類しています。
+`rates.sh` と `lifecycle.sh` の check 5 を単独で流す理由は、隣の Sandbox が結果を壊すからではなく、読む値が測定値そのものだからです。ラボでの実測では、両方とも隣に 4 つと 8 つの Sandbox がある状態でも同じ判定を出しました。check 5 の RSS は 85 MiB から 110 MiB の幅に収まり、判定の閾値 (ソフト上限と上乗せ分の和) の 224 MiB に対して半分以上の余裕がありました。`rates.sh` の上限なしの到達数は 500 回中 405 回から 500 回の幅で動きますが、隣の Sandbox の数とは相関しませんでした。`connlimit.sh` は 9 回の実行で 1 つの値も動かなかったので、`parallel` に分類しています。
 
 `nf_conntrack_max` と conntrack のハッシュの大きさは VM 全体で 1 つの値です。network namespace の
 中からの書き込みはカーネルが拒みます。この値を変える確認を新たに作るときは `exclusive-global` に
@@ -325,11 +326,10 @@ Lab Host VM のまま Sandbox を 32 個まで並列に流せ、そのときの�
 
 check 9 を `parallel` に移した前後を 1 回ずつ実測すると、移す前が 339.3 秒、移した後が 313.7 秒
 でした。単独で流していた check 9 kernel (約 37 秒) と check 9 userspace (対象外で即 SKIP) の分だけ
-縮んだ差で、10 回の実測ではなく前後 1 回ずつの比較です。
-
-一式の所要時間のうち約 240 秒は、単独で流す確認を 1 つずつ流す時間です (check 9 を移した後は単独の
-確認が 10 個から 8 個に減っています)。Lab Host VM を 2 台にして、1 台に並列のプール、もう 1 台に
-単独の待ち行列を割り当てると、一式は約 240 秒に縮む見込みです (未確認)。
+縮んだ差で、10 回の実測ではなく前後 1 回ずつの比較です。単独で流す確認は、check 9 を移した時点では
+8 個で、一式の所要時間のうち約 240 秒がそれを 1 つずつ流す時間でした。その後 `exclusive-global`
+の check 12 が加わっており、この時間は測り直していません。今の一式全体の所要時間は
+[docs/testing.md](../docs/testing.md) の「マージの前に流すテスト」にあります。
 
 CPU は、この実測の範囲では制約になっていません。2 vCPU のまま並列数を 1 から 32 まで上げても、
 1 つあたりの確認の壁時計の時間はほぼ変わらず (約 39 秒から 42 秒)、並列数に応じて全体の時間が

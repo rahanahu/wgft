@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wgft ラボのトポロジを netns で組む。VM 内か CI 上で root として実行する(Incus には依存しない)。
+# wgft ラボのトポロジを netns で組む。VM 内で root として実行する(Incus には依存しないが、CI では流していない。docs/testing.md の「CI とラボの関係」)。
 #
 #   client ── vps ── homerouter(NAT) ─┬─ home(エージェント)
 #                                     └─ lan(自宅 LAN 上の別ホスト。ゲームサーバ役)

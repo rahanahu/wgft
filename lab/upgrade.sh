@@ -7,11 +7,11 @@
 # protocol negotiates correctly with FRESH data on both sides, the point here is OLD DATA: a
 # database and a credentials file that the old release itself created.
 #
-# The old release is $OLD_VERSION (below), default v1.1.3: the immediately-previous release,
-# which is the upgrade operators actually run next now that the current build is v1.1.3 plus
-# whatever has landed since. v0.4.0, the oldest release the project has promised an upgrade from
-# in the past, is covered by overriding the version, which every v0.4.0-specific assertion below
-# still runs under in full:
+# The old release is $OLD_VERSION (below), default v1.1.3. Main has since released v1.2.0, so
+# v1.1.3 is no longer the immediately-previous release; this default has not been advanced past
+# it. v0.4.0, the oldest release the project has promised an upgrade from in the past, is covered
+# by overriding the version, which every v0.4.0-specific assertion below still runs under in
+# full:
 #
 #   lab/lab exec vm bash /wgft/lab/upgrade.sh kernel                              # v1.1.3 -> current
 #   lab/lab exec vm bash /wgft/lab/upgrade.sh userspace                           # v1.1.3 -> current
@@ -109,9 +109,9 @@ set -u
 # pid already reaches everything the job forked, and the group kill is an extra safety net.
 set -m
 GH_REPO=rahanahu/wgft
-OLD_VERSION=${WGFT_UPGRADE_OLD_VERSION:-1.1.3}  # default: the immediately-previous release, the
-  # upgrade operators actually run next. Override with WGFT_UPGRADE_OLD_VERSION=0.4.0 for the
-  # oldest release the project has promised an upgrade from in the past (see header comment).
+OLD_VERSION=${WGFT_UPGRADE_OLD_VERSION:-1.1.3}  # default v1.1.3, not necessarily the
+  # immediately-previous release (see header comment). Override with WGFT_UPGRADE_OLD_VERSION=0.4.0
+  # for the oldest release the project has promised an upgrade from in the past.
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: upgrade.sh kernel|userspace" >&2; exit 2;; esac
 # old_has below knows what 0.4.0 lacks and treats every other version as having all of it, which
