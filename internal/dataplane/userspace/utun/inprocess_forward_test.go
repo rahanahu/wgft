@@ -394,9 +394,12 @@ func logHandshakeDiagnostics(t *testing.T, srv *Tunnel, agent *tunnel.Tunnel, pe
 // expose the device's private bind, so this cannot read it back from either type.
 func boundKindDescription() string {
 	if runtime.GOOS == "windows" {
-		return "*conn.StdNetBind (newBind() calls conn.NewStdNetBind() explicitly on Windows; see bind_windows.go)"
+		return "*conn.StdNetBind (newBind() calls conn.NewStdNetBind() explicitly on Windows; wgbind.BatchOne leaves it unwrapped because its BatchSize is 1; see bind_windows.go)"
 	}
-	return "whatever conn.NewDefaultBind() gives on this GOOS (newBind() calls it unchanged; see bind_other.go)"
+	if runtime.GOOS == "linux" {
+		return "wgbind.BatchOne wrapping conn.NewDefaultBind() (the standard bind reads 128 datagrams per call on Linux; the wrapper hands WireGuard one at a time; see bind_other.go)"
+	}
+	return "whatever conn.NewDefaultBind() gives on this GOOS (its BatchSize is 1 here, so wgbind.BatchOne leaves it unwrapped; see bind_other.go)"
 }
 
 // checkTCPRoundTrip はクライアントとして接続し、payload を書いて半クローズし、echo された同じ
