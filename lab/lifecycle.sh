@@ -38,11 +38,12 @@
 #      relay and for the agent (which relays every connection regardless of the server's mode). The
 #      budget is halved so that one rule alone (which may now hold the whole budget, design 7a.10)
 #      can be filled by a flood from the client namespace's own address space.
-#   5b. the same RSS bound, but under the DEFAULT (unhalved) flow caps, so the memory soft limit's
-#      designed-for figure (design 7a.10: about 210 MiB against a 216 MiB limit) is exercised by an
-#      actual single-rule flood rather than only by the halved-budget check 5. Needs roughly twice
-#      check 5's source addresses, since one address can supply at most the per-source caps (256
-#      UDP, 128 TCP) toward the larger default budgets (8192 UDP, 2048 TCP).
+#   5b. the same RSS bound, but under the DEFAULT (unhalved) flow caps, so an actual single-rule
+#      flood exercises the default soft limit of 216 MiB, rather than only the halved-budget check
+#      5; design 7a.10 records a measured peak of about 210 MiB under a flood filling the default
+#      caps, not a bound. Needs roughly twice check 5's source addresses, since one address can
+#      supply at most the per-source caps (256 UDP, 128 TCP) toward the larger default budgets
+#      (8192 UDP, 2048 TCP).
 #   5c. Resource Guard isolation with 2 rules (design 7a.10 節): flooding one TCP rule to its
 #      per-rule cap C does not stop a second rule from opening new connections up to its reserve q,
 #      and does not evict the first rule's held connections. With 2 rules C and q are equal, so the
@@ -145,9 +146,8 @@ C5_TCP_BUDGET=1024
 # design 7: 32 MiB + 12 KiB * WGFT_MAX_UDP_FLOWS + 44 KiB * WGFT_MAX_TCP_FLOWS, so 124 MiB for the
 # budgets above (the default budgets give 216 MiB).
 SOFT_LIMIT_MIB=124
-# The margin absorbs Go's GC catching up rather than papering over a real regression: the flows
-# held at the budget cost about 86 MiB (4096 UDP sessions at ~14 KiB, 1024 TCP connections at
-# ~30 to 55 KiB, design 7), and the soft limit is what holds the rest down.
+# The margin absorbs Go's GC lagging behind the soft limit, not a real regression. The soft
+# limit is Go's GC target for all of its managed memory, not a bound on RSS (design 7).
 MARGIN_MIB=100
 fail=0
 
@@ -1234,7 +1234,8 @@ NFT
 }
 
 # ---------------------------------------------------------------------------------------------
-# check 5: memory stays bounded when one rule fills the whole flow budget (design 7, 7a.10)
+# check 5: RSS stays under the derived memory soft limit plus a margin when one rule fills
+# the whole flow budget (design 7, 7a.10)
 # ---------------------------------------------------------------------------------------------
 check5_server_memory() {
   echo "-- the userspace server's own relay"
@@ -1376,7 +1377,7 @@ check5_agent_memory() {
 }
 
 check5() {
-  echo "== $mode: check 5: memory stays bounded when one rule fills the whole flow budget"
+  echo "== $mode: check 5: RSS stays under the derived memory soft limit plus a margin when one rule fills the whole flow budget"
   if [ "$mode" = userspace ]; then
     check5_server_memory
   else
@@ -1390,11 +1391,11 @@ check5() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# check 5b: memory stays bounded when one rule fills the DEFAULT (unhalved) flow budget (design
-# 7, 7a.10 節). Same shape as check 5, but without C5_FLOW_FLAGS, so the budget is the built-in
-# default (8192 UDP, 2048 TCP) and the soft limit is the built-in default (216 MiB). Needs roughly
-# twice check 5's source addresses (42, not 21): one address can supply at most the per-source caps
-# (256 UDP, 128 TCP) toward these larger totals.
+# check 5b: RSS stays under the derived memory soft limit plus a margin when one rule fills the
+# DEFAULT (unhalved) flow budget (design 7, 7a.10 節). Same shape as check 5, but without
+# C5_FLOW_FLAGS, so the budget is the built-in default (8192 UDP, 2048 TCP) and the soft limit is
+# the built-in default (216 MiB). Needs roughly twice check 5's source addresses (42, not 21):
+# one address can supply at most the per-source caps (256 UDP, 128 TCP) toward these larger totals.
 #
 # EXCLUSIVE-HEAVY: like check 5 itself, 5b/5c/5d/5e all flood thousands of connections/datagrams
 # from the client namespace under load. The ones that read RSS (5, 5b and 5e) must not run at the
@@ -1429,8 +1430,8 @@ DEFAULT_TCP_BUDGET=2048
 # design 7: 32 MiB + 12 KiB * 8192 + 44 KiB * 2048 = 216 MiB.
 DEFAULT_SOFT_LIMIT_MIB=216
 # Same reasoning as check 5's MARGIN_MIB: absorbs GC catching up, not a real regression. design
-# 7a.10 節 notes this configuration's RSS should already sit close to the soft limit (about 210
-# MiB), so this margin is generous on purpose.
+# 7a.10 節 records a measured peak RSS of about 210 MiB in this configuration, close to the soft
+# limit, so this margin is generous on purpose.
 DEFAULT_MARGIN_MIB=100
 
 # addrs_add <first> <last>: adds 198.51.100.<first> through 198.51.100.<last> to the client's eth0
@@ -1573,7 +1574,7 @@ check5b_agent_default_memory() {
 }
 
 check5b() {
-  echo "== $mode: check 5b: memory stays bounded under the default (unhalved) flow budget"
+  echo "== $mode: check 5b: RSS stays under the derived memory soft limit plus a margin under the default, unhalved flow budget"
   if [ "$mode" = userspace ]; then
     check5b_server_default_memory
   else
