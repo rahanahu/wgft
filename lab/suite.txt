@@ -34,100 +34,112 @@
 # load and run alone. 5c and 5d assert on an admission decision instead, and 20 repetitions of each
 # in a pool of eight sandboxes, overlapping each other, passed with identical held counts, so they
 # run in the pool.
-
-parallel         yes  e2e.sh kernel
-parallel         yes  e2e.sh userspace
-parallel         yes  ipv6.sh kernel
-parallel         yes  ipv6.sh userspace
-parallel         yes  split-merge.sh kernel
-parallel         yes  import-export.sh kernel
-
-parallel         yes  lifecycle.sh kernel 1
-parallel         yes  lifecycle.sh kernel 2
-parallel         yes  lifecycle.sh kernel 3
-parallel         yes  lifecycle.sh kernel 3b
-parallel         yes  lifecycle.sh kernel 4
-exclusive-heavy  yes  lifecycle.sh kernel 5
-exclusive-heavy  yes  lifecycle.sh kernel 5b
-parallel         yes  lifecycle.sh kernel 5c
-parallel         yes  lifecycle.sh kernel 5d
-exclusive-heavy  yes  lifecycle.sh kernel 5e
-parallel         yes  lifecycle.sh kernel 6
-parallel         yes  lifecycle.sh kernel 7
-parallel         yes  lifecycle.sh kernel 8
-# check 9c asserts that nothing is applied during a 35 s window with nothing changed. It used to
-# wait only for forwarding to come back after the preceding flush/delete, not for their own
-# "applied"/drift log lines to actually land, so a neighbour's load could delay one of those
-# lines into the window and read as an unexplained apply (17 of 20 in a pool of 8, 18 of 20 in
-# the whole suite, always alone 20 of 20). Restructured to wait for both prior repairs' own log
-# lines before taking the window's baseline (docs/testing.md); measured again at 20 of 20 alone,
-# 20 of 20 in a pool of 8 beside the rest of this file's parallel jobs, so it now runs in the pool.
-parallel         yes  lifecycle.sh kernel 9
-parallel         yes  lifecycle.sh kernel 10
-parallel         yes  lifecycle.sh kernel 11
-
-parallel         yes  lifecycle.sh userspace 1
-parallel         yes  lifecycle.sh userspace 2
-parallel         yes  lifecycle.sh userspace 3
-parallel         yes  lifecycle.sh userspace 3b
-parallel         yes  lifecycle.sh userspace 4
-exclusive-heavy  yes  lifecycle.sh userspace 5
-exclusive-heavy  yes  lifecycle.sh userspace 5b
-parallel         yes  lifecycle.sh userspace 5c
-parallel         yes  lifecycle.sh userspace 5d
-exclusive-heavy  yes  lifecycle.sh userspace 5e
-parallel         yes  lifecycle.sh userspace 6
-parallel         yes  lifecycle.sh userspace 7
-parallel         yes  lifecycle.sh userspace 8
-parallel         yes  lifecycle.sh userspace 9
-parallel         yes  lifecycle.sh userspace 10
-parallel         yes  lifecycle.sh userspace 11
-# check 12 sets net.core.rmem_max and net.core.wmem_max, which are one value for the whole VM, and
-# writes /etc/sysctl.d/90-wgft.conf, so it runs alone and restores both at its end.
-exclusive-global yes  lifecycle.sh kernel 12
-exclusive-global yes  lifecycle.sh userspace 12
-
+#
+# Order: `labhost run all` hands the parallel jobs to its pool in the order of this file, and runs
+# the exclusive jobs one at a time, in the order of this file, once the pool is empty. The parallel
+# jobs are therefore listed longest first, so that the jobs that take minutes start at once and
+# the short ones fill the pool around them; listed in any other order, one of the long jobs can
+# start last, and the pool then waits for it alone. A new parallel job goes where its running time
+# puts it. Where the exclusive jobs are listed does not change when they run; they come last.
+#
 # agentkernel.sh runs the kernel-mode agent's checks (design section 7b) against the given server
 # mode, taking the checks to run as a space-separated list of its own. Its default list of checks
 # takes over 10 minutes end to end, past labhost's default per-job timeout, so it is split here
-# into five groups instead of the one-job-per-check granularity lifecycle.sh above uses; several of
-# these checks share tens of seconds of setup, so grouping them costs less than splitting further.
-# Within a group the checks run in the given order. teardown removes the agent's WireGuard
-# interface, table and records that the group's earlier checks depend on, so it must be a group's
-# last check; 22 leaves rules that resolve then removes, so a group must not run both (this file
-# avoids that by keeping them in different groups). reconnect and stale only apply with a
-# kernel-mode server and print SKIP with a userspace-mode one; they are still registered for both
-# modes, the same as this file already does for lifecycle.sh's mode-specific checks. Five such
-# groups, one sandbox each, ran inside the full default suite's pool of 8 (`labhost run -parallel
-# 8 all`) with 0 FAIL for every group in both server modes; the slowest group (resolve, in either
-# mode) took under 5 minutes, comfortably inside labhost's per-job timeout. See docs/testing.md
-# for L16 and for how this suite's total wall-clock time changed once these groups joined the pool.
-parallel         yes  agentkernel.sh kernel drift 22 25 16 teardown
-parallel         yes  agentkernel.sh kernel route session
-parallel         yes  agentkernel.sh kernel resolve 24 17 18 19
-parallel         yes  agentkernel.sh kernel notify pin reconnect
-parallel         yes  agentkernel.sh kernel stale
-parallel         yes  agentkernel.sh userspace drift 22 25 16 teardown
-parallel         yes  agentkernel.sh userspace route session
-parallel         yes  agentkernel.sh userspace resolve 24 17 18 19
-parallel         yes  agentkernel.sh userspace notify pin reconnect
-parallel         yes  agentkernel.sh userspace stale
-
+# into groups instead of the one-job-per-check granularity lifecycle.sh uses: each job starts its
+# own server and agent before its first check, and a group pays for that once. Within a group the
+# checks run in the given order. teardown removes the agent's WireGuard interface, table and
+# records that the group's earlier checks depend on, so it must be a group's last check; 22 leaves
+# rules that resolve then removes, so a group must not run both (this file avoids that by keeping
+# them in different groups). resolve is a job of its own: it waits on the agent's 30-second check
+# again and again, which makes it one of the longest checks, and a group that runs other checks
+# after it becomes the longest job of the suite, the one the pool ends up waiting for. 24, 17, 18
+# and 19 are a group without it, and so run right after the setup, before resolve, as they do in
+# the script's own default list. reconnect and stale only apply with a kernel-mode server and print
+# SKIP with a userspace-mode one; they are still registered for both modes, the same as this file
+# already does for lifecycle.sh's mode-specific checks. Every group runs well inside labhost's
+# per-job timeout. See docs/testing.md for L16.
+#
 # agentdoctor.sh runs `wgft agent doctor` against a kernel-mode agent (design section 10.2c), with
-# the server in the given mode. One run takes about a minute, well inside labhost's per-job
-# timeout, so each mode is its own single job, the same granularity as e2e.sh and ipv6.sh above.
-parallel         yes  agentdoctor.sh kernel
-parallel         yes  agentdoctor.sh userspace
-
-exclusive-heavy  yes  rates.sh kernel
-exclusive-heavy  yes  rates.sh userspace
+# the server in the given mode, one job per mode, the same granularity as e2e.sh and ipv6.sh.
+#
+# lifecycle.sh's check 9c asserts that nothing is applied during a 35 s window with nothing
+# changed. It used to wait only for forwarding to come back after the preceding flush/delete, not
+# for their own "applied"/drift log lines to actually land, so a neighbour's load could delay one
+# of those lines into the window and read as an unexplained apply (17 of 20 in a pool of 8, 18 of
+# 20 in the whole suite, always alone 20 of 20). Restructured to wait for both prior repairs' own
+# log lines before taking the window's baseline (docs/testing.md); measured again at 20 of 20
+# alone, 20 of 20 in a pool of 8 beside the rest of this file's parallel jobs, so it now runs in
+# the pool.
+#
 # connlimit.sh opens 160 to 320 concurrent flows, but what it asserts on is a kernel-side
 # per-source cap: three rounds beside 0, 4 and 8 sandboxes gave byte-identical counts and the
 # same 12 PASS lines, so it belongs in the pool.
-parallel         yes  connlimit.sh
-
+#
+# lifecycle.sh check 12 sets net.core.rmem_max and net.core.wmem_max, which are one value for the
+# whole VM, and writes /etc/sysctl.d/90-wgft.conf, so it runs alone and restores both at its end.
+#
 # version-skew.sh needs the v0.3.0 and v1.1.3 release binaries (v1.1.3 is OLD_AGENT_VERSION as of
 # this revision; see the script's own header comment). A lab VM on a host without outbound IPv4
 # cannot fetch them (GitHub has no IPv6), so they have to be staged into the VM first, and the
 # check is opt-in for that reason, exactly as it is in the per-VM suite today.
+
+parallel         yes  agentkernel.sh kernel resolve
+parallel         yes  agentkernel.sh userspace route session
+parallel         yes  agentkernel.sh kernel notify pin reconnect
+parallel         yes  agentkernel.sh kernel route session
+parallel         yes  agentkernel.sh userspace resolve
+parallel         yes  agentkernel.sh kernel drift 22 25 16 teardown
+parallel         yes  agentkernel.sh userspace drift 22 25 16 teardown
+parallel         yes  agentkernel.sh kernel 24 17 18 19
+parallel         yes  agentdoctor.sh kernel
+parallel         yes  lifecycle.sh kernel 2
+parallel         yes  lifecycle.sh kernel 8
+parallel         yes  lifecycle.sh userspace 2
+parallel         yes  lifecycle.sh userspace 8
+parallel         yes  agentkernel.sh userspace 24 17 18 19
+parallel         yes  split-merge.sh kernel
+parallel         yes  agentkernel.sh userspace notify pin reconnect
+parallel         yes  lifecycle.sh userspace 11
+parallel         yes  lifecycle.sh kernel 9
+parallel         yes  e2e.sh kernel
+parallel         yes  e2e.sh userspace
+parallel         yes  agentkernel.sh kernel stale
+parallel         yes  lifecycle.sh kernel 6
+parallel         yes  connlimit.sh
+parallel         yes  lifecycle.sh userspace 1
+parallel         yes  lifecycle.sh userspace 5c
+parallel         yes  lifecycle.sh userspace 5d
+parallel         yes  ipv6.sh kernel
+parallel         yes  ipv6.sh userspace
+parallel         yes  agentdoctor.sh userspace
+parallel         yes  import-export.sh kernel
+parallel         yes  lifecycle.sh kernel 1
+parallel         yes  agentkernel.sh userspace stale
+parallel         yes  lifecycle.sh kernel 7
+parallel         yes  lifecycle.sh kernel 11
+parallel         yes  lifecycle.sh kernel 3
+parallel         yes  lifecycle.sh userspace 10
+parallel         yes  lifecycle.sh kernel 3b
+parallel         yes  lifecycle.sh kernel 4
+parallel         yes  lifecycle.sh kernel 10
+parallel         yes  lifecycle.sh userspace 6
+parallel         yes  lifecycle.sh kernel 5c
+parallel         yes  lifecycle.sh kernel 5d
+parallel         yes  lifecycle.sh userspace 3
+parallel         yes  lifecycle.sh userspace 3b
+parallel         yes  lifecycle.sh userspace 4
+parallel         yes  lifecycle.sh userspace 7
+parallel         yes  lifecycle.sh userspace 9
+
+exclusive-heavy  yes  lifecycle.sh kernel 5
+exclusive-heavy  yes  lifecycle.sh kernel 5b
+exclusive-heavy  yes  lifecycle.sh kernel 5e
+exclusive-heavy  yes  lifecycle.sh userspace 5
+exclusive-heavy  yes  lifecycle.sh userspace 5b
+exclusive-heavy  yes  lifecycle.sh userspace 5e
+exclusive-global yes  lifecycle.sh kernel 12
+exclusive-global yes  lifecycle.sh userspace 12
+exclusive-heavy  yes  rates.sh kernel
+exclusive-heavy  yes  rates.sh userspace
+
 parallel         no   version-skew.sh
