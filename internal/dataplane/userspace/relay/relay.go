@@ -110,6 +110,12 @@ type Manager struct {
 	// bindFail は Prepare の経路で bind に失敗し続けているキーの記録。同じ理由の失敗はログに 1 回だけ
 	// 出し、開けたときに 1 回だけ回復を出す(適用は 30 秒ごとに再試行されるため)。
 	bindFail map[Key]*bindFailure
+
+	// replies は UDP の応答のバッファの貸し出し(設計文書 7 節)。プロセス全体で 1 つの
+	// defaultReplyPool を指す。単体テストだけが New の後に差し替える
+	replies *replyPool
+	// replyDrops は公開側の送信バッファの満杯で捨てた応答の累計とログの門(設計文書 7 節)
+	replyDrops replyDropReport
 }
 
 // bindFailure は bind の失敗が続いている 1 つのキーの記録。
@@ -182,7 +188,7 @@ func New(n Network, opts Options) *Manager {
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
 	}
-	return &Manager{net: n, opts: opts, probeTimeout: targetProbeTimeout, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}}
+	return &Manager{net: n, opts: opts, probeTimeout: targetProbeTimeout, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}, replies: defaultReplyPool}
 }
 
 // DesiredFromRules は全体状態のルールから、ポートごとの宣言値を計算する。
