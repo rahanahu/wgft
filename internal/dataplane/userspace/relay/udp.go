@@ -17,6 +17,23 @@ const udpBufMax = 65535
 type udpSession struct {
 	conn     net.Conn
 	lastSeen atomic.Int64 // UnixNano
+	// closed は、このセッションを閉じたときに閉じる。応答のバッファの枠の待ちを取り消す
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newUDPSession(c net.Conn) *udpSession {
+	s := &udpSession{conn: c, closed: make(chan struct{})}
+	s.lastSeen.Store(time.Now().UnixNano())
+	return s
+}
+
+// close は接続を閉じ、枠の待ちを取り消す。2 回目以降は何もしない。
+func (s *udpSession) close() {
+	s.closeOnce.Do(func() {
+		close(s.closed)
+		s.conn.Close()
+	})
 }
 
 // ReadWaiter は、バッファを持たずに次のデータグラムの到着を待てる接続。
@@ -34,22 +51,54 @@ func readWaiterOf(c net.Conn) ReadWaiter {
 	return kernelReadWaiter(c)
 }
 
-var udpBufPool = sync.Pool{New: func() any { b := make([]byte, udpBufMax); return &b }}
+// replySender は 1 つのセッションの応答を公開側へ送る。full は、公開側のソケットの送信バッファが
+// 満杯で、そのデータグラムを捨てたことを表す(設計文書 7 節)。err は送信の失敗で、セッションを閉じる。
+type replySender interface {
+	send(b []byte) (full bool, err error)
+}
+
+// waitingSender は WriteTo で送る。netstack の待ち受け(エージェント)と、カーネルのソケットでない
+// 公開側がこれになる。netstack の WriteTo(nettun の adapter)は、endpoint の送信バッファ(32 KiB)が
+// 使われている間は書けるようになるまで待つ。使われたままになるのは、出力のキューにパケットが
+// 留まっている間、つまりトンネルの送信が止まっているときで、そのときは全ルールの応答が同じく
+// 止まるので、枠がルール間の新しい飢餓を作ることは無い(設計文書 7 節)。
+type waitingSender struct {
+	pc net.PacketConn
+	to net.Addr
+}
+
+func (s waitingSender) send(b []byte) (bool, error) {
+	_, err := s.pc.WriteTo(b, s.to)
+	return false, err
+}
 
 // replyMarkEvery は、待ち受けの最後の応答の時刻(listener.lastReply)を書き直す最短の間隔である。
 // 1 つの待ち受けの多数のセッションの goroutine が、応答のたびに同じ値へ書き込むことを避ける。
 // 表示の粒度は秒なので、間引いても失う情報は無い(設計文書 10.2a 節「UDP の応答の観測」)。
 const replyMarkEvery = int64(time.Second)
 
-// forwardReply は target からの応答を 1 個読んで公開側へ返す。own が nil ならプールのバッファを借りる。
+// replyDropReport は、公開側の送信バッファの満杯で応答を捨てたことの累計と、そのログの門である。
+// Manager が 1 つ持ち、ログは 1 分に 1 回までにする(設計文書 7 節)。
+type replyDropReport struct {
+	drops atomic.Uint64
+	log   lograte.Gate
+}
+
+// forwardReply は target からの応答を 1 個読んで公開側へ返す。own が nil なら、応答のバッファの枠を
+// 取ってプールのバッファを借りる。枠が無ければ、空くか、セッションが閉じるまで待つ。
 // 読めた応答は、セッションの無通信の判定(lastSeen)と同じ時刻で、待ち受けの最後の応答の時刻 reply
 // にも記す。reply への書き込みは replyMarkEvery に 1 回までにする。読み取りの誤り(宛先が ICMP で
-// 拒んだ場合の ECONNREFUSED を含む)は応答ではないので記さない。
-func forwardReply(s *udpSession, pc net.PacketConn, from net.Addr, own []byte, reply *atomic.Int64) bool {
+// 拒んだ場合の ECONNREFUSED を含む)は応答ではないので記さない。公開側の送信バッファが満杯で捨てた
+// 応答は数えて、ログに 1 分に 1 回まで出し、セッションは続ける。それ以外の送信の失敗はセッションを閉じる。
+// 偽を返すのはセッションを終えるときである。
+func (m *Manager) forwardReply(s *udpSession, l *listener, sender replySender, own []byte) bool {
 	rb := own
 	if rb == nil {
-		bp := udpBufPool.Get().(*[]byte)
-		defer udpBufPool.Put(bp)
+		bp, ok := m.replies.acquire(s.closed)
+		if !ok {
+			return false
+		}
+		defer m.replies.release(bp)
 		rb = *bp
 	}
 	rn, err := s.conn.Read(rb)
@@ -58,11 +107,20 @@ func forwardReply(s *udpSession, pc net.PacketConn, from net.Addr, own []byte, r
 	}
 	now := time.Now().UnixNano()
 	s.lastSeen.Store(now)
-	if now-reply.Load() >= replyMarkEvery {
-		reply.Store(now)
+	if now-l.lastReply.Load() >= replyMarkEvery {
+		l.lastReply.Store(now)
 	}
-	_, err = pc.WriteTo(rb[:rn], from)
-	return err == nil
+	full, err := sender.send(rb[:rn])
+	if err != nil {
+		return false
+	}
+	if full {
+		n := m.replyDrops.drops.Add(1)
+		if m.replyDrops.log.Allow() {
+			m.opts.Logf("udp %s: dropped a reply of %d bytes because the send buffer of the public socket is full; %d replies dropped this way since this relay started", l.key, rn, n)
+		}
+	}
+	return true
 }
 
 // serveUDP は開いたソケット pc で中継を始める。bind は呼び出し側(Apply の経路の openLocked と、
@@ -84,7 +142,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 			delete(sessions, k)
 		}
 		mu.Unlock()
-		s.conn.Close()
+		s.close()
 	}
 	l.sweep = func(keep func(src netip.Addr) bool) int {
 		mu.Lock()
@@ -97,7 +155,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 		}
 		mu.Unlock()
 		for _, s := range victims {
-			s.conn.Close()
+			s.close()
 		}
 		return len(victims)
 	}
@@ -113,7 +171,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 		sessions = map[string]*udpSession{}
 		mu.Unlock()
 		for _, s := range all {
-			s.conn.Close()
+			s.close()
 		}
 	}
 
@@ -141,7 +199,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				}
 				mu.Unlock()
 				for _, s := range victims {
-					s.conn.Close()
+					s.close()
 				}
 			}
 		}
@@ -223,8 +281,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					continue
 				}
 				raiseUDPSendBuffer(c)
-				s = &udpSession{conn: c}
-				s.lastSeen.Store(time.Now().UnixNano())
+				s = newUDPSession(c)
 				mu.Lock()
 				sessions[k] = s
 				mu.Unlock()
@@ -232,20 +289,22 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					defer release()
 					defer l.budget.Release()
 					defer closeSession(k, s)
-					// 応答は、届いてからプールのバッファを借りて読む(仕様 7 節)。待つ間はバッファを持たない。
-					// 待てない接続(unix でも windows でもないカーネルのソケット)は、最大長のバッファを持ち続ける
+					// 応答は、届いてから応答のバッファの枠を取り、プールのバッファを借りて読む(仕様 7 節)。
+					// 待つ間はバッファを持たない。待てない接続(unix でも windows でもないカーネルのソケット)は、
+					// 枠の外で最大長のバッファを持ち続ける
 					w := readWaiterOf(s.conn)
 					var own []byte
 					if w == nil {
 						own = make([]byte, udpBufMax)
 					}
+					sender := newReplySender(pc, from)
 					for {
 						if w != nil {
 							if err := w.WaitReadable(); err != nil {
 								return
 							}
 						}
-						if !forwardReply(s, pc, from, own, &l.lastReply) {
+						if !m.forwardReply(s, l, sender, own) {
 							return
 						}
 					}

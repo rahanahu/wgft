@@ -24,6 +24,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/utun"
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/policy/goengine"
 	"github.com/rahanahu/wgft/internal/resource"
@@ -46,6 +47,10 @@ type Backend struct {
 	logf   func(format string, args ...any)
 	policy *goengine.Engine
 	relay  *relay.Manager
+	// sendBufWarn は公開側の UDP ソケットの送信バッファの警告の門(pubsock.go)。hostNet はその門と
+	// ログを持つ、公開側の待ち受けを開く Network で、relay に渡したものと同じ値である
+	sendBufWarn lograte.Gate
+	hostNet     hostNetwork
 
 	mu  sync.Mutex
 	tun *utun.Tunnel
@@ -80,10 +85,21 @@ var (
 // hostNetwork opens the relay's listeners on all host IPv4 addresses (the public ports). v1 handles
 // IPv4 only (design.md 4, 7a.9 節): a dual-stack listener would let an IPv6 source past deny lists
 // that hold IPv4 prefixes only. The evaluator also refuses non-IPv4 sources on its own.
-type hostNetwork struct{}
+//
+// Every public UDP socket asks for a fixed send buffer (publicSendBufferRequest) as it is opened and
+// warns once a minute when the kernel granted less (design.md 7 節「公開側のソケットの送信バッファ」).
+type hostNetwork struct {
+	logf     func(format string, args ...any)
+	warnGate *lograte.Gate
+}
 
-func (hostNetwork) ListenUDP(port uint16) (net.PacketConn, error) {
-	return net.ListenUDP("udp4", &net.UDPAddr{Port: int(port)})
+func (n hostNetwork) ListenUDP(port uint16) (net.PacketConn, error) {
+	uc, err := net.ListenUDP("udp4", &net.UDPAddr{Port: int(port)})
+	if err != nil {
+		return nil, err
+	}
+	warnShortSendBuffer(n.warnGate, port, requestPublicSendBuffer(uc), n.logf)
+	return uc, nil
 }
 func (hostNetwork) ListenTCP(port uint16) (net.Listener, error) {
 	return net.Listen("tcp4", ":"+strconv.Itoa(int(port)))
@@ -102,7 +118,8 @@ func New(opts Options) *Backend {
 		policy: goengine.New(nil),
 		now:    time.Now,
 	}
-	b.relay = relay.New(hostNetwork{}, relay.Options{
+	b.hostNet = hostNetwork{logf: logf, warnGate: &b.sendBufWarn}
+	b.relay = relay.New(b.hostNet, relay.Options{
 		UDPIdleTimeout: 120 * time.Second, // the default of conntrack's udp_timeout_stream
 		Dial:           b.Dial,
 		Logf:           logf,
