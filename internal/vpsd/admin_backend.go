@@ -396,8 +396,8 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 // (設計文書 7a.3 節)を管理用 API の形に写す。最初の適用を試みるまでは false を返す。
 func (d *Daemon) ApplyStatus() (admin.ApplyStatus, bool) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	rec := d.rec
-	d.mu.Unlock()
 	if rec == nil {
 		return admin.ApplyStatus{}, false
 	}
@@ -405,7 +405,10 @@ func (d *Daemon) ApplyStatus() (admin.ApplyStatus, bool) {
 	if !st.Reconciled {
 		return admin.ApplyStatus{}, false
 	}
-	return applyStatusToAdmin(st), true
+	out := applyStatusToAdmin(st)
+	generation, pending := d.delivery.status()
+	out.AgentStateGeneration, out.AgentStatePending = generation, &pending
+	return out, true
 }
 
 // udpPooler is implemented by a serverDataplane that tracks UDP flows in a resource.Pool. Only

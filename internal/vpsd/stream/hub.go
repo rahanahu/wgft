@@ -54,6 +54,8 @@ type conn struct {
 	from     string
 	cancel   context.CancelFunc
 	sendMu   sync.Mutex
+	pushCh   chan struct{} // one pending push; repeated requests coalesce
+	pushDone chan struct{}
 	timedOut atomic.Bool // heartbeatTimer が閉じた(ログの重複を避けるための印)
 	// sel はこの接続で交渉した版と機能。serve() が接続の確立前に一度だけ設定し、以後は
 	// 読み取り専用として扱う(Push からも参照するが、書き込みは無いので mu は要らない)
@@ -190,7 +192,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Conn) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	c := &conn{ws: ws, from: from, cancel: cancel}
+	c := &conn{ws: ws, from: from, cancel: cancel, pushCh: make(chan struct{}, 1), pushDone: make(chan struct{})}
 
 	// 2. 鍵の検証(最初のメッセージ)。失敗した接続は旧接続に影響を与えない
 	readCtx, readCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -277,6 +279,11 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 	}
 	// 選んだ版は接続ごとに 1 回だけログに出す(仕様 7a.6 節。メッセージごとには出さない)
 	log.Printf("stream: %s connected from %s, protocol %s, sent generation %d", agent, from, protocolLabel(sel), st.Generation)
+	go h.pushWorker(ctx, agent, c)
+	defer func() {
+		cancel()
+		<-c.pushDone
+	}()
 
 	// ハートビートを受け続ける。期限内にメッセージが来なければ vpsd 側から理由コード付きで閉じる。
 	// readJSON の ctx を期限で切ると、このライブラリは内部で無条件に接続を閉じてしまい
@@ -332,34 +339,51 @@ func (h *Hub) drop(agent string, c *conn) {
 	}
 }
 
-// Push は接続中のエージェントに全体状態を送り直す(配る内容が変わったとき)。
+// Push は接続中のエージェントへ最新の全体状態の送信を予約する。
+// 接続ごとに待機は 1 件だけで、連続する要求は同じ送信にまとめる。
 func (h *Hub) Push(agent string) {
 	h.mu.Lock()
 	c := h.conns[agent]
+	if c != nil {
+		select {
+		case c.pushCh <- struct{}{}:
+		default:
+		}
+	}
 	h.mu.Unlock()
-	if c == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	st, err := h.sendState(ctx, agent, c)
-	if err != nil {
-		log.Printf("stream: %s: delivery: %v", agent, err)
-		return
-	}
-	log.Printf("stream: %s: delivered generation %d", agent, st.Generation)
 }
 
-// PushAll は接続中の全エージェントに配り直す。
+// PushAll は接続中の全エージェントへの送信を予約する。
 func (h *Hub) PushAll() {
 	h.mu.Lock()
-	names := make([]string, 0, len(h.conns))
-	for n := range h.conns {
-		names = append(names, n)
+	for _, c := range h.conns {
+		select {
+		case c.pushCh <- struct{}{}:
+		default:
+		}
 	}
 	h.mu.Unlock()
-	for _, n := range names {
-		h.Push(n)
+}
+
+func (h *Hub) pushWorker(ctx context.Context, agent string, c *conn) {
+	defer close(c.pushDone)
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.pushCh:
+		}
+		st, err := h.sendState(ctx, agent, c)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("stream: %s: delivery: %v", agent, err)
+			}
+			continue
+		}
+		log.Printf("stream: %s: delivered generation %d", agent, st.Generation)
 	}
 }
 

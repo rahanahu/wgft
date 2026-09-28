@@ -155,6 +155,11 @@ func TestNoOpDeliveryMismatchForcesCommitAndRetainsOldStateOnFailure(t *testing.
 	if !errors.Is(err, ErrDeliveryProjectionMismatch) {
 		t.Fatalf("NoOp mismatch error = %v", err)
 	}
+	status, ok := f.d.ApplyStatus()
+	if !ok || status.AgentStateGeneration == nil || *status.AgentStateGeneration != initial.Generation ||
+		status.AgentStatePending == nil || !*status.AgentStatePending {
+		t.Fatalf("failed forced Commit reported full State published: %+v, %v", status, ok)
+	}
 	f.p.mu.Lock()
 	commits := f.p.commits
 	f.p.failCommit = false
@@ -309,5 +314,31 @@ func TestBootstrapTimeoutReadFailureLeavesStateUnservable(t *testing.T) {
 	}
 	if _, err := f.d.AgentState("home"); err == nil {
 		t.Fatal("State escaped after timeout read failure")
+	}
+}
+
+func TestMatchingNoOpClearsPendingAfterTransientRepairFailure(t *testing.T) {
+	f := newDisableFixture(t)
+	f.p.setErr(errors.New("temporary publication failure"))
+	f.d.mu.Lock()
+	err := f.d.applyNFT(rulesOf(t, f.st))
+	f.d.mu.Unlock()
+	if err == nil {
+		t.Fatal("failed apply reported success")
+	}
+	_, pending := f.d.delivery.status()
+	if !pending {
+		t.Fatal("failed apply did not report pending")
+	}
+	f.p.setErr(nil)
+	f.d.mu.Lock()
+	_, err = f.d.apply(rulesOf(t, f.st), true)
+	f.d.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pending = f.d.delivery.status()
+	if pending {
+		t.Fatal("matching successful NoOp retained stale pending status")
 	}
 }

@@ -23,8 +23,9 @@ type deliveryEntry struct {
 }
 
 type deliverySnapshot struct {
-	entries map[string]deliveryEntry
-	serial  uint64
+	entries    map[string]deliveryEntry
+	generation uint64
+	serial     uint64
 }
 
 type disableOverlay struct {
@@ -65,7 +66,7 @@ func (d *Daemon) deliveryCandidate(rules []proto.Rule, agents []store.Agent, gen
 		}
 		entries[a.Name] = deliveryEntry{identity: a.Identity, key: a.PublicKey, state: st}
 	}
-	return &deliverySnapshot{entries: entries}
+	return &deliverySnapshot{entries: entries, generation: gen}
 }
 
 func equalDelivery(a, b *deliverySnapshot) bool {
@@ -160,7 +161,7 @@ func (o *deliveryOwner) revoke(name string) {
 				entries[n] = e
 			}
 		}
-		return &deliverySnapshot{entries: entries, serial: s.serial}
+		return &deliverySnapshot{entries: entries, generation: s.generation, serial: s.serial}
 	}
 	o.latest = remove(o.latest)
 	o.full = remove(o.full)
@@ -173,6 +174,22 @@ func (o *deliveryOwner) markPending() {
 	o.mu.Lock()
 	o.pending = true
 	o.mu.Unlock()
+}
+
+func (o *deliveryOwner) clearPending() {
+	o.mu.Lock()
+	o.pending = false
+	o.mu.Unlock()
+}
+
+func (o *deliveryOwner) status() (*uint64, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if o.full == nil {
+		return nil, true
+	}
+	g := o.full.generation
+	return &g, o.pending
 }
 
 func (o *deliveryOwner) state(name, identity, key string) (*proto.State, error) {

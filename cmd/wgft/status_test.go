@@ -455,6 +455,16 @@ func TestServerStatusOfGenerationGap(t *testing.T) {
 	}
 }
 
+func TestServerStatusOfPendingAgentStateWithEqualDataplaneGeneration(t *testing.T) {
+	desired, active, full, pending := uint64(11), uint64(11), uint64(10), true
+	res := &admin.BatchResponse{DesiredGeneration: &desired, ActiveGeneration: &active,
+		AgentStateGeneration: &full, AgentStatePending: &pending}
+	got := serverStatusOf(res)
+	if got.Status != serverDegraded || !strings.Contains(got.Detail, "full agent State") {
+		t.Fatalf("saved but unpublished State reported healthy: %+v", got)
+	}
+}
+
 // TestServerStatusOfApplyError は、世代が揃っていても apply_error が残っていれば健全でない
 // ことを確かめる(戻れない地点の後の修復の失敗、design.md 7a.3 節)。
 func TestServerStatusOfApplyError(t *testing.T) {

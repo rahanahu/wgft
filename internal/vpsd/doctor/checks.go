@@ -36,7 +36,7 @@ func publicPortCheck(r proto.Rule, in Input) Check {
 	}
 	c.Internal = append(c.Internal, "apply_state "+st.ApplyState)
 	if st.ActiveGeneration != nil {
-		c.Internal = append(c.Internal, fmt.Sprintf("published at generation %d", *st.ActiveGeneration))
+		c.Internal = append(c.Internal, fmt.Sprintf("forwarding value at generation %d", *st.ActiveGeneration))
 	}
 	c.ObservedAt = in.Now.UTC().Format(time.RFC3339)
 	switch st.ApplyState {
@@ -110,6 +110,9 @@ func DataplaneCheck(in Input) Check {
 	if res.DesiredGeneration != nil && res.ActiveGeneration != nil {
 		c.Internal = append(c.Internal, fmt.Sprintf("desired %d, active %d", *res.DesiredGeneration, *res.ActiveGeneration))
 	}
+	if res.AgentStateGeneration != nil {
+		c.Internal = append(c.Internal, fmt.Sprintf("full agent State at generation %d", *res.AgentStateGeneration))
+	}
 	if b := FlowBudgetLine(res.FlowBudget); b != "" {
 		c.Internal = append(c.Internal, b)
 	}
@@ -131,6 +134,15 @@ func DataplaneCheck(in Input) Check {
 			c.Detail += "; " + stop
 		}
 		c.Next = "free whatever the reason names; the server retries every 30s and publishes the change when it succeeds"
+		return c
+	}
+	if res.AgentStatePending != nil && *res.AgentStatePending {
+		c.Status, c.Reason = StatusUnknown, ReasonAgentStatePending
+		c.Detail = "the saved declaration has not reached the full agent State publication"
+		if res.ApplyError != "" {
+			c.Detail += ": " + res.ApplyError
+		}
+		c.Next = "fix the apply error; the server retries every 30s. Check agent State after the retry succeeds"
 		return c
 	}
 	if stop != "" {

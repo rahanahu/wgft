@@ -108,6 +108,7 @@ const (
 	ReasonNotReported         = "not_reported"
 	ReasonStaleReport         = "stale_report"
 	ReasonRepairFailed        = "repair_failed"
+	ReasonAgentStatePending   = "agent_state_pending"
 	ReasonResourceRefusals    = "resource_refusals"
 	ReasonCredentialWarning   = "credential_warning"
 	ReasonNotIPv4             = "not_ipv4"

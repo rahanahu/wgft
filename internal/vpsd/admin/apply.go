@@ -24,10 +24,12 @@ type (
 
 // ApplyStatus is the server's Desired against Active report.
 type ApplyStatus struct {
-	DesiredGeneration uint64
-	ActiveGeneration  uint64
-	Rules             map[string]RuleApply
-	Drift             Drift
+	DesiredGeneration    uint64
+	ActiveGeneration     uint64
+	AgentStateGeneration *uint64
+	AgentStatePending    *bool
+	Rules                map[string]RuleApply
+	Drift                Drift
 	// LastError is the failure of the last transaction that failed as a whole, or, when it
 	// published but a repair after the publication failed, that failure (design.md 7a.3 節: 戻れない
 	// 地点の後の修復). Empty once everything succeeded.
@@ -59,6 +61,7 @@ func (s *Server) withApply(resp *BatchResponse) {
 	}
 	desired, active := st.DesiredGeneration, st.ActiveGeneration
 	resp.DesiredGeneration, resp.ActiveGeneration = &desired, &active
+	resp.AgentStateGeneration, resp.AgentStatePending = st.AgentStateGeneration, st.AgentStatePending
 	resp.RuleStates = st.Rules
 	drift := st.Drift
 	if drift.ActiveOnly == nil {

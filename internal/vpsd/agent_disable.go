@@ -153,6 +153,6 @@ func (d *Daemon) pushAll() {
 		return
 	}
 	if d.hub != nil {
-		go d.hub.PushAll()
+		d.hub.PushAll()
 	}
 }

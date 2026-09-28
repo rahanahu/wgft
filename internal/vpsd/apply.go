@@ -248,6 +248,9 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 		if d.delivery.committed(prepared.candidate) {
 			d.pushAll()
 		}
+	} else {
+		// The saved full declaration is already the successful delivery token.
+		d.delivery.clearPending()
 	}
 	d.noteApplied()
 	return out, err

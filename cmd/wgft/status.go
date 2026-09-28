@@ -249,6 +249,13 @@ func serverStatusOf(res *admin.BatchResponse) serverStatus {
 			return serverStatus{Status: serverDegraded, Detail: detail}
 		}
 	}
+	if res.AgentStatePending != nil && *res.AgentStatePending {
+		detail := "the saved declaration has not reached the full agent State publication"
+		if res.ApplyError != "" {
+			detail += "; " + res.ApplyError
+		}
+		return serverStatus{Status: serverDegraded, Detail: detail}
+	}
 	if stop != "" {
 		detail := stop
 		if res.ApplyError != "" {
