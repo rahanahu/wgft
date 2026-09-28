@@ -136,6 +136,18 @@ func DataplaneCheck(in Input) Check {
 		c.Next = "free whatever the reason names; the server retries every 30s and publishes the change when it succeeds"
 		return c
 	}
+	if stop != "" {
+		c.Status, c.Reason = StatusFailed, ReasonIPForwardOff
+		c.Detail = stop
+		if res.AgentStatePending != nil && *res.AgentStatePending {
+			c.Detail += "; the saved declaration has not reached the full agent State publication"
+		}
+		if res.ApplyError != "" {
+			c.Detail += "; apply error: " + res.ApplyError
+		}
+		c.Next = ipForwardNext
+		return c
+	}
 	if res.AgentStatePending != nil && *res.AgentStatePending {
 		c.Status, c.Reason = StatusUnknown, ReasonAgentStatePending
 		c.Detail = "the saved declaration has not reached the full agent State publication"
@@ -143,15 +155,6 @@ func DataplaneCheck(in Input) Check {
 			c.Detail += ": " + res.ApplyError
 		}
 		c.Next = "fix the apply error; the server retries every 30s. Check agent State after the retry succeeds"
-		return c
-	}
-	if stop != "" {
-		c.Status, c.Reason = StatusFailed, ReasonIPForwardOff
-		c.Detail = stop
-		if res.ApplyError != "" {
-			c.Detail += "; apply error: " + res.ApplyError
-		}
-		c.Next = ipForwardNext
 		return c
 	}
 	if res.ApplyError != "" {

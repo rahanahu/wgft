@@ -465,6 +465,22 @@ func TestServerStatusOfPendingAgentStateWithEqualDataplaneGeneration(t *testing.
 	}
 }
 
+func TestServerStatusOfStoppedForwardingAndPendingAgentState(t *testing.T) {
+	generation, pending := uint64(11), true
+	res := &admin.BatchResponse{
+		Generation: generation, DesiredGeneration: &generation, ActiveGeneration: &generation,
+		AgentStatePending: &pending,
+		IPForward:         &admin.IPForwardStatus{Value: "0"},
+		Rules:             []proto.Rule{{ID: "active-rule", Enabled: true, VPSMode: proto.ModeKernel}},
+		RuleStates:        map[string]admin.RuleApply{"active-rule": {ApplyState: admin.ApplyActive}},
+	}
+	got := serverStatusOf(res)
+	if got.Status != serverDegraded || !strings.Contains(got.Detail, "kernel forwards none") ||
+		!strings.Contains(got.Detail, "full agent State publication") {
+		t.Fatalf("observed forwarding stop or pending State was hidden: %+v", got)
+	}
+}
+
 // TestServerStatusOfApplyError は、世代が揃っていても apply_error が残っていれば健全でない
 // ことを確かめる(戻れない地点の後の修復の失敗、design.md 7a.3 節)。
 func TestServerStatusOfApplyError(t *testing.T) {
