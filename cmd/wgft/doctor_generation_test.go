@@ -48,10 +48,12 @@ func TestMatchingGenerationDoesNotVerifyStateContent(t *testing.T) {
 // generation_pending、60 秒以上は止まった遅れとして FAILED generation_behind である。
 // 始まりが無い応答は v1.1 のまま FAILED、切れているエージェントは stale_report のままである。
 func TestRulesReceivedGenerationLag(t *testing.T) {
-	// v1.1 の原因の候補と次の手順。始まりを返さない旧い server の場合はこのまま出す
-	const v11Advice = "the new generation may still be in flight\n" +
-		"the agent is connected but is not applying them; see its log\n" +
-		"re-run in a few seconds; if it stays behind, read the agent's log. A rule moved to another agent carries no traffic until that agent takes the new rule set."
+	const oldServerAdvice = "the new generation may still be in flight\n" +
+		"the agent may have failed to apply the new rule set; see its log\n" +
+		"re-run in a few seconds; if it still has not reported the latest generation, read the agent's log and this server's log"
+	const laggedAdvice = "the agent may have failed to apply the new rule set; see its log\n" +
+		"this server may have failed to deliver the new rule set to the agent; see this server's log for errors about this agent\n" +
+		"read the agent's log and this server's log; re-run until the agent reports the latest generation"
 	cases := []struct {
 		name       string
 		connected  bool
@@ -150,16 +152,18 @@ func TestRulesReceivedGenerationLag(t *testing.T) {
 			if c.Next == "" {
 				t.Errorf("every finding says what to do next; got none for %s/%s", c.Status, c.Reason)
 			}
-			// 60 秒以上の遅れは 10.2a 節の定めで届く途中ではないので、「すぐ届く」「数秒後に再実行」を
-			// 言ってはならない。始まりを返さない旧い server の場合だけ v1.1 の文言を残す
+			// 遅延した番号から State の適用・配達を断定せず、新しい番号の報告を次の観測条件にする。
+			// 遅れの開始が分かる場合は 60 秒以降を「届く途中」とも呼ばない。
 			advice := strings.Join(append(append([]string{}, c.Causes...), c.Next), "\n")
 			inFlight := strings.Contains(advice, "in flight") || strings.Contains(advice, "in a moment") ||
 				strings.Contains(advice, "in a few seconds")
 			switch {
 			case tc.wantReason == reasonGenerationBehind && tc.since != "" && inFlight:
 				t.Errorf("a lag of 60s or more must not be called in flight, got causes/next %q", advice)
-			case tc.wantReason == reasonGenerationBehind && tc.since == "" && advice != v11Advice:
-				t.Errorf("without the lag start the v1.1 wording stays:\ngot  %q\nwant %q", advice, v11Advice)
+			case tc.wantReason == reasonGenerationBehind && tc.since != "" && advice != laggedAdvice:
+				t.Errorf("lagged advice = %q, want %q", advice, laggedAdvice)
+			case tc.wantReason == reasonGenerationBehind && tc.since == "" && advice != oldServerAdvice:
+				t.Errorf("old-server advice = %q, want %q", advice, oldServerAdvice)
 			}
 			if got := rep.Rules[0].Status; got != tc.wantRule {
 				t.Errorf("rule status = %s, want %s", got, tc.wantRule)

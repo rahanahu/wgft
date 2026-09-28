@@ -242,7 +242,7 @@ func TestDiagnose(t *testing.T) {
 			wantNext:   "ip_local_port_range",
 		},
 		{
-			// 別のエージェントへ移され、移った先がまだ受け取っていないルール
+			// 別のエージェントへ移され、移った先が最新の番号をまだ報告していないルール
 			name: "rule moved to an agent whose rule set is behind",
 			mutate: func(r *proto.Rule, in *doctorInput) {
 				in.Agents[0].Generation = 11
@@ -250,7 +250,7 @@ func TestDiagnose(t *testing.T) {
 			},
 			wantFailed: checkRulesReceived, wantReason: reasonGenerationBehind,
 			wantDetail: "reported generation 11 while this server reports 12",
-			wantNext:   "moved to another agent",
+			wantNext:   "reported the latest generation",
 		},
 		{
 			name: "tunnel without a recent handshake",

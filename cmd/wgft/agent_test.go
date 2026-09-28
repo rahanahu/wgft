@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -251,6 +252,66 @@ func TestAgentLsConnectedStillShowsLiveState(t *testing.T) {
 	}
 	if fields.proto != "v1" {
 		t.Errorf("connected agent's PROTO = %q, want \"v1\" (the version negotiated on this connection)", fields.proto)
+	}
+}
+
+func TestAgentLsExplainsUnverifiedStateContent(t *testing.T) {
+	const note = "GEN is the agent-reported number; RULES is its heartbeat report; applied State content is UNKNOWN."
+	cases := []struct {
+		name      string
+		agents    []admin.AgentInfo
+		wantRules string
+	}{
+		{
+			name: "connected with a reported generation and healthy rules",
+			agents: []admin.AgentInfo{{Name: "home", Connected: true, Generation: 12,
+				LastHeartbeat: time.Now().Format(time.RFC3339),
+				Rules:         []proto.RuleStatus{{ID: "r_a", State: proto.StatusOK}}}},
+			wantRules: "1 ok",
+		},
+		{
+			name: "disconnected with a last report",
+			agents: []admin.AgentInfo{{Name: "office", Generation: 11,
+				LastHeartbeat: time.Now().Add(-time.Hour).Format(time.RFC3339),
+				Rules:         []proto.RuleStatus{{ID: "r_a", State: proto.StatusOK}}}},
+			wantRules: "last:1 ok",
+		},
+		{
+			name: "no rules",
+			agents: []admin.AgentInfo{{Name: "empty", Connected: true, Generation: 12,
+				LastHeartbeat: time.Now().Format(time.RFC3339)}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			adminURL := newAgentCLITestServer(t, tc.agents)
+			stdout, _, err := runAgentCmd(t, adminURL, "ls")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(stdout, note) != 1 || !strings.HasSuffix(stdout, note+"\n") {
+				t.Errorf("agent ls must explain its evidence once after the table:\n%s", stdout)
+			}
+			if !strings.Contains(stdout, tc.agents[0].Name) || !strings.Contains(stdout, "GEN") {
+				t.Errorf("agent ls table missing: %s", stdout)
+			}
+			if got := agentLsFields(t, stdout, tc.agents[0].Name).rules; got != tc.wantRules {
+				t.Errorf("RULES = %q, want %q", got, tc.wantRules)
+			}
+			lines := strings.Split(stdout, "\n")
+			genStart := strings.Index(lines[0], "GEN")
+			genEnd := strings.Index(lines[0], "TUNNEL")
+			if genStart < 0 || genEnd < genStart || len(lines[1]) < genEnd || strings.TrimSpace(lines[1][genStart:genEnd]) != fmt.Sprint(tc.agents[0].Generation) {
+				t.Errorf("GEN does not show reported generation %d: %s", tc.agents[0].Generation, stdout)
+			}
+			jsonOut, _, err := runAgentCmd(t, adminURL, "ls", "--json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(jsonOut, note) || !json.Valid([]byte(jsonOut)) {
+				t.Errorf("agent ls --json changed shape: %s", jsonOut)
+			}
+		})
 	}
 }
 

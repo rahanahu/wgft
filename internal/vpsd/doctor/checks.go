@@ -552,15 +552,15 @@ func rulesReceivedCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 			c.Next = "re-run in a few seconds; if it is still behind after a minute, this check turns failed"
 			return withUnverifiedStateContent(c)
 		}
-		// 閾値を超えた遅れは、10.2a 節の定めで届く途中ではない。「すぐ届く」「数秒後に再実行」を
-		// 言わず、止まった遅れの原因だけを挙げる
+		// 閾値を超えた番号の遅れは、10.2a 節の定めで FAILED とする。
+		// 配達・適用の成否は断定せず、原因は可能性として挙げる。
 		c.Status, c.Reason = StatusFailed, ReasonGenerationBehind
 		c.Detail = fmt.Sprintf("this agent reported generation %d while this server reports %d; it has been behind for %s without reporting the latest generation", ai.Generation, cur, age)
 		c.Causes = []string{
-			"the agent is connected but has not applied the new rule set; see its log",
-			"this server could not deliver the new rule set to the agent; see this server's log for errors about this agent",
+			"the agent may have failed to apply the new rule set; see its log",
+			"this server may have failed to deliver the new rule set to the agent; see this server's log for errors about this agent",
 		}
-		c.Next = "read the agent's log and this server's log. A rule moved to another agent carries no traffic until that agent takes the new rule set."
+		c.Next = "read the agent's log and this server's log; re-run until the agent reports the latest generation"
 		return withUnverifiedStateContent(c)
 	}
 	// 始まりを返さない旧い server:v1.1 と同じ判定を保つ
@@ -568,9 +568,9 @@ func rulesReceivedCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 	c.Detail = fmt.Sprintf("this agent reported generation %d while this server reports %d; it has not reported the latest generation yet", ai.Generation, cur)
 	c.Causes = []string{
 		"the new generation may still be in flight",
-		"the agent is connected but is not applying them; see its log",
+		"the agent may have failed to apply the new rule set; see its log",
 	}
-	c.Next = "re-run in a few seconds; if it stays behind, read the agent's log. A rule moved to another agent carries no traffic until that agent takes the new rule set."
+	c.Next = "re-run in a few seconds; if it still has not reported the latest generation, read the agent's log and this server's log"
 	return withUnverifiedStateContent(c)
 }
 
