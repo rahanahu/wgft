@@ -40,6 +40,16 @@ func reasmReassembler(t *testing.T, entries, pieces, budget int) *ipv4Reassembly
 	return r
 }
 
+func TestIPv4ReassemblyRejectsDontFragmentWithFragments(t *testing.T) {
+	r := reasmReassembler(t, 1, 2, 1024)
+	p := reasmIPv4Fragment(17, 7, 0, true, 0, nil, []byte("abcdefgh"))
+	binary.BigEndian.PutUint16(p[6:], 0x6000)
+	ipv4SetChecksum(p[:20])
+	if got := r.Process(p, time.Unix(100, 0)); got.Status != ipv4FragmentRejected || got.Notice.Reason != ipv4ReasonMalformed {
+		t.Fatalf("DF+MF fragment = %+v, want malformed rejection", got)
+	}
+}
+
 func TestIPv4ReassemblyAllProtocolsOptionsAndECN(t *testing.T) {
 	for _, proto := range []byte{1, 6, 17, 99} {
 		t.Run(string(rune('A'+proto%26)), func(t *testing.T) {
