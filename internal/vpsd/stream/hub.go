@@ -181,6 +181,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// HTTP does not close hijacked connections when the handler returns.
+	defer ws.CloseNow()
 	ws.SetReadLimit(1 << 20)
 	h.serve(r.Context(), agent, from, ws)
 }
