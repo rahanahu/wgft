@@ -137,15 +137,6 @@ func enableConflict(agent string, rules []proto.Rule, rep *linux.Report, bound l
 	return nil
 }
 
-// activeGeneration は Reconciler の状態である。NoOp でも進みうるため、配信用の全体状態が
-// 更新されたことの判定には使わない。
-func (d *Daemon) activeGeneration() uint64 {
-	if d.rec == nil {
-		return 0
-	}
-	return d.rec.Status().ActiveGeneration
-}
-
 // pushAll は接続中の全エージェントへ全体状態を配り直す。配信は待たない。
 func (d *Daemon) pushAll() {
 	if d.onPushAll != nil {

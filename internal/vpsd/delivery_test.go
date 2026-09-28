@@ -235,6 +235,8 @@ func TestFailedKeyRotationAllowsTemporaryOldKeyReconnectAndRetiresIt(t *testing.
 		t.Fatalf("admin P/D observation lost after failed key save: %+v, %v", observed, err)
 	}
 	f.p.setErr(nil)
+	// Retirement must happen during publication, even if no Push is queued.
+	f.d.onPushAll = func() {}
 	if _, err := f.d.Batch(admin.BatchRequest{}); err != nil {
 		t.Fatal(err)
 	}
