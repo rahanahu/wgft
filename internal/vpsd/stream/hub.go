@@ -93,42 +93,79 @@ type Hub struct {
 	// HeartbeatTimeout は読みの期限(既定 90 秒。テストで短くできるよう差し替え可能にしてある)
 	HeartbeatTimeout time.Duration
 
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex // 同一エージェントの接続処理の直列化
-	// hookLocks は、同一エージェントの OnHeartbeat の呼び出しと、接続の置き換えおよび Disconnect を
-	// 直列化する。取る順は locks、hookLocks、mu である。OnHeartbeat は mu を持たずに呼ぶので、
-	// OnHeartbeat の中から Status のような mu を取る関数を呼んでもよい
-	hookLocks map[string]*sync.Mutex
-	conns     map[string]*conn
-	status    map[string]*Status
+	mu sync.Mutex
+	// locks は、同一エージェントの接続処理と hook の直列化に使う。
+	// 待機中も参照として数え、最後の利用が終わると表から外す。mu を持ったまま
+	// 名前別の錠を待たない。両方が必要なときは agent、hook の順に取る。
+	locks  map[string]*agentLocks
+	conns  map[string]*conn
+	status map[string]*Status
+}
+
+type agentLocks struct {
+	agent sync.Mutex
+	hook  sync.Mutex
+	refs  int // h.mu で保護する。錠の待機中と保持中を含む
+}
+
+// heldAgentLock は名前別の錠と表の参照を一緒に所有する。
+// OnHeartbeat と StatusWithHook の callback は hook を持ち、Hub.mu は持たないため
+// Status を呼べる。OnStreamConnect は agent のみを持ち、hook を取れる。
+// 同じ錠を再帰的に取る callback は対象外。
+type heldAgentLock struct {
+	h     *Hub
+	name  string
+	entry *agentLocks
+	hook  bool
 }
 
 // New は空の Hub を作る。
 func New(b Backend) *Hub {
 	return &Hub{
-		backend: b, locks: map[string]*sync.Mutex{}, hookLocks: map[string]*sync.Mutex{},
+		backend: b, locks: map[string]*agentLocks{},
 		conns: map[string]*conn{}, status: map[string]*Status{},
 		HeartbeatTimeout: defaultHeartbeatTimeout,
 	}
 }
 
-func (h *Hub) agentLock(name string) *sync.Mutex {
-	return h.lockOf(h.locks, name)
+func (h *Hub) agentLock(name string) *heldAgentLock {
+	return h.lockOf(name, false)
 }
 
-func (h *Hub) hookLock(name string) *sync.Mutex {
-	return h.lockOf(h.hookLocks, name)
+func (h *Hub) hookLock(name string) *heldAgentLock {
+	return h.lockOf(name, true)
 }
 
-func (h *Hub) lockOf(m map[string]*sync.Mutex, name string) *sync.Mutex {
+func (h *Hub) lockOf(name string, hook bool) *heldAgentLock {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	l, ok := m[name]
+	l, ok := h.locks[name]
 	if !ok {
-		l = &sync.Mutex{}
-		m[name] = l
+		l = &agentLocks{}
+		h.locks[name] = l
 	}
-	return l
+	l.refs++ // pin before waiting so a waiter keeps this entry alive
+	h.mu.Unlock()
+	mu := &l.agent
+	if hook {
+		mu = &l.hook
+	}
+	mu.Lock()
+	return &heldAgentLock{h: h, name: name, entry: l, hook: hook}
+}
+
+func (l *heldAgentLock) unlock() {
+	if l.hook {
+		l.entry.hook.Unlock()
+	} else {
+		l.entry.agent.Unlock()
+	}
+	l.h.mu.Lock()
+	l.entry.refs--
+	if l.entry.refs == 0 && l.h.locks[l.name] == l.entry {
+		delete(l.h.locks, l.name)
+	}
+	l.h.mu.Unlock()
+	l.entry = nil
 }
 
 // Status はエージェントの stream の状態(なければ未接続)。
@@ -152,8 +189,7 @@ func (h *Hub) Status(agent string) Status {
 // OnHeartbeat は hookLock を持って呼ばれ、その中から Status を呼んでよいためである。
 func (h *Hub) StatusWithHook(agent string, f func(Status)) {
 	hook := h.hookLock(agent)
-	hook.Lock()
-	defer hook.Unlock()
+	defer hook.unlock()
 	f(h.Status(agent))
 }
 
@@ -250,22 +286,20 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 
 	// 3-5 は同一エージェントで直列化:ピアの置き換え → 旧接続の切断 → 全体状態の送信
 	lock := h.agentLock(agent)
-	lock.Lock()
 
 	if err := h.backend.SetPublicKey(agent, identity, key); err != nil {
-		lock.Unlock()
+		lock.unlock()
 		log.Printf("stream: %s: peer setup: %v", agent, err)
 		ws.Close(websocket.StatusInternalError, "peer setup failed")
 		return
 	}
 	hook := h.hookLock(agent)
-	hook.Lock()
 	// A saved key may have failed publication, or this registration may have
 	// been revoked while the connection waited for its first message. Revoke's
 	// Disconnect takes hookLock and removes any connection admitted before it.
 	if _, err := h.backend.StateFor(agent, identity, key, sel); err != nil {
-		hook.Unlock()
-		lock.Unlock()
+		hook.unlock()
+		lock.unlock()
 		log.Printf("stream: %s: state admission: %v", agent, err)
 		ws.CloseNow()
 		return
@@ -282,12 +316,12 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 	h.conns[agent] = c
 	h.status[agent] = &Status{Connected: true, StreamFrom: from, ConnectedAt: time.Now(), Protocol: sel}
 	h.mu.Unlock()
-	hook.Unlock()
+	hook.unlock()
 	if h.OnStreamConnect != nil {
 		h.OnStreamConnect(agent, from)
 	}
 	st, err := h.sendState(ctx, agent, c)
-	lock.Unlock()
+	lock.unlock()
 	if err != nil {
 		log.Printf("stream: %s: sending state: %v", agent, err)
 		h.drop(agent, c)
@@ -324,7 +358,6 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 		heartbeatTimer.Reset(h.HeartbeatTimeout)
 		if m.Type == proto.MsgHeartbeat && m.Heartbeat != nil {
 			hook := h.hookLock(agent)
-			hook.Lock()
 			h.mu.Lock()
 			current := false
 			if s := h.status[agent]; s != nil && h.conns[agent] == c {
@@ -338,7 +371,7 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 			if current && h.OnHeartbeat != nil {
 				h.OnHeartbeat(agent, m.Heartbeat.Generation)
 			}
-			hook.Unlock()
+			hook.unlock()
 		}
 	}
 }
@@ -407,13 +440,12 @@ func (h *Hub) pushWorker(ctx context.Context, agent string, c *conn) {
 func (h *Hub) Disconnect(agent string, code int, reason string) {
 	// 実行中の OnHeartbeat が終わるのを待ってから外す。外した後にその接続の OnHeartbeat は呼ばれない
 	hook := h.hookLock(agent)
-	hook.Lock()
 	h.mu.Lock()
 	c := h.conns[agent]
 	delete(h.conns, agent)
 	delete(h.status, agent)
 	h.mu.Unlock()
-	hook.Unlock()
+	hook.unlock()
 	if c != nil {
 		// close の応答待ち(最大 5 秒)で呼び出し側(管理用 API)を止めない
 		go func() {
@@ -428,7 +460,6 @@ func (h *Hub) Disconnect(agent string, code int, reason string) {
 // happens before another State can be queued for that connection.
 func (h *Hub) RetireIfDifferent(agent, identity, key string) {
 	hook := h.hookLock(agent)
-	hook.Lock()
 	h.mu.Lock()
 	c := h.conns[agent]
 	if c != nil && c.identity == identity && c.key.String() == key {
@@ -439,7 +470,7 @@ func (h *Hub) RetireIfDifferent(agent, identity, key string) {
 		delete(h.status, agent)
 	}
 	h.mu.Unlock()
-	hook.Unlock()
+	hook.unlock()
 	if c != nil {
 		c.cancel()
 		c.ws.CloseNow()
