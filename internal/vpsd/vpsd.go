@@ -229,7 +229,8 @@ type Daemon struct {
 	// lag はエージェントごとのルール集合の世代の遅れの始まり(genlag.go、設計文書 10.2a 節)
 	lag genLag
 
-	mu sync.Mutex // ルール・エージェントの変更と、wg0・nftables の適用を直列化する
+	mu       sync.Mutex // ルール・エージェントの変更と、wg0・nftables の適用を直列化する
+	delivery deliveryOwner
 
 	// dp は転送面。カーネル(nftables + カーネル WireGuard、仕様 6.1 節)とユーザー空間(仕様 6.3 節)の 2 つの実装がある
 	dp serverDataplane
@@ -261,9 +262,6 @@ type Daemon struct {
 	// onPushAll は単体テスト用の差し込み口。pushAll(agent_disable.go)が hub への配信の代わりに呼ぶ。
 	// エージェントの無効化と有効化の、保存・配信・公開の順序を確かめるために使う。本番では nil。
 	onPushAll func()
-	// pushedAhead は、公開の前に配った世代である。無効化は公開の成否を待たずに配る(仕様 5.1 節)ので、
-	// apply はこの世代を公開したときに配り直さない。
-	pushedAhead uint64
 }
 
 // reservedPorts は Daemon.reserved を組む。vpsd 自身が既に使っているポートへの listen_port を
@@ -457,7 +455,7 @@ func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
 	// 適用後もなお読めない場合の扱いは apply.go の applyThenReadConntrack を見よ(設計文書 11b 節)。
 	// 最初の適用が失敗したときは終了せず、管理用 API だけを開いて試し直す(起動の保留。11b 節)。
 	held := false
-	timeouts, err := applyThenReadConntrack(
+	_, err = applyThenReadConntrack(
 		func() error {
 			err := d.applyFirst(rules)
 			if err == nil {
@@ -471,7 +469,7 @@ func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
 			held = true
 			return d.hold(ctx, err, openAdmin, errc)
 		},
-		d.dp.ReadUDPTimeouts,
+		func() (linux.UDPTimeouts, error) { return d.bindDeliveryTimeouts(d.dp.ReadUDPTimeouts) },
 		d.dp.ConntrackWarning,
 	)
 	if err != nil {
@@ -483,7 +481,7 @@ func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
 		}
 		return err
 	}
-	d.timeouts.Store(&timeouts)
+	// bindDeliveryTimeouts installed both fields before the listener opens.
 	if held {
 		// 保留の間に運用者が宣言を直しているので、起動完了の行に出す数を読み直す
 		if rules, err = d.st.Rules(); err != nil {

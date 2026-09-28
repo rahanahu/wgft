@@ -27,6 +27,13 @@ import (
 func (d *Daemon) DisableAgent(name string) (admin.AgentDisabledResponse, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	cur, err := d.st.AgentByName(name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return admin.AgentDisabledResponse{}, &store.AgentNotFoundError{Name: name}
+		}
+		return admin.AgentDisabledResponse{}, err
+	}
 	res, err := d.st.SetAgentDisabled(name, true, time.Now(), nil)
 	if err != nil {
 		if errors.Is(err, store.ErrAgentNotFound) {
@@ -40,7 +47,7 @@ func (d *Daemon) DisableAgent(name string) (admin.AgentDisabledResponse, error) 
 	}
 	d.lag.serverAt(res.Generation, time.Now())
 	log.Printf("disabled agent %s at generation %d", name, res.Generation)
-	d.pushedAhead = res.Generation
+	d.delivery.disable(name, cur.Identity, res.Generation)
 	d.pushAll()
 	if err := d.applyNFT(res.Rules); err != nil {
 		log.Printf("agent %s: disable saved, but applying the data plane failed: %v", name, err)
@@ -130,7 +137,8 @@ func enableConflict(agent string, rules []proto.Rule, rep *linux.Report, bound l
 	return nil
 }
 
-// activeGeneration は最後に公開に成功した世代である。まだ一度も適用を試みていなければ 0。
+// activeGeneration は Reconciler の状態である。NoOp でも進みうるため、配信用の全体状態が
+// 更新されたことの判定には使わない。
 func (d *Daemon) activeGeneration() uint64 {
 	if d.rec == nil {
 		return 0

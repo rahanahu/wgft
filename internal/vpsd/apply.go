@@ -222,37 +222,70 @@ func (d *Daemon) reapply() {
 // 保留のループにそれを伝える(hold.go の noteApplied)。管理用 API のバッチ操作も自分で適用を試すので、
 // この 1 点で伝えることで、運用者が宣言を直した時点で保留が解ける(設計文書 11b 節)。
 //
-// 公開した世代(ActiveGeneration)が進んだら、接続中の全エージェントへ配るのもこの 1 点である。
-// 公開に失敗した変更(ルールのバッチ、エージェントの有効化)はエージェントに配られていないので、
-// その世代を後から公開した経路が、再試行でも、別のバッチでも、削除や登録や鍵の宣言でも、ここで配る。
-// 呼び出し側ごとに配ると、変更の無いバッチのような経路が前の世代を公開したときに配り漏れる。
-// 無効化は公開の前に配る(仕様 5.1 節)ので、その世代(pushedAhead)の公開では配り直さない。
+// Commit に対応する配信用の全体状態を保持し、配信内容が変わったときだけ接続中の全エージェントへ
+// 配る。保存後の適用に失敗した変更は保持済みの配信内容を変えない。無効化は保存確定後に停止だけを
+// 先に配り、その後の Commit が同じ内容を作った場合は重複して配らない。
 func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error) {
-	before := d.activeGeneration()
-	out, err := d.applyOnce(rules, retry)
-	if err == nil {
-		d.noteApplied()
-		if gen := d.activeGeneration(); gen != before && gen != d.pushedAhead {
+	out, prepared, err := d.applyOnce(rules, retry, nil)
+	if err != nil {
+		d.delivery.markPending()
+		return out, err
+	}
+	if out.NoOp && !equalDelivery(prepared.candidate, d.delivery.currentFull()) {
+		// Runtime's NoOp predicate compares the dataplane plan, which omits
+		// fields delivered to agents. Force one real Commit for this input.
+		out, _, err = d.applyOnce(rules, false, prepared)
+		if err != nil {
+			d.delivery.markPending()
+			return out, fmt.Errorf("%w: %w", ErrDeliveryProjectionMismatch, err)
+		}
+		if out.NoOp {
+			d.delivery.markPending()
+			return out, ErrDeliveryProjectionMismatch
+		}
+	}
+	if !out.NoOp {
+		if d.delivery.committed(prepared.candidate) {
 			d.pushAll()
 		}
 	}
+	d.noteApplied()
 	return out, err
 }
 
 // applyOnce は applyNFT の本体。retry が真なら、前回と同じものを公開するだけのときに何も commit せず、
 // ログも出さない。
-func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, error) {
-	wgCfg, agentAddr, disabled, err := d.wgConfig()
-	if err != nil {
-		return reconcile.Outcome{}, err
+type preparedDeliveryApply struct {
+	input     reconcile.Input
+	candidate *deliverySnapshot
+	agentAddr map[string]netip.Addr
+	disabled  map[string]bool
+}
+
+func (d *Daemon) applyOnce(rules []proto.Rule, retry bool, prepared *preparedDeliveryApply) (reconcile.Outcome, *preparedDeliveryApply, error) {
+	if prepared == nil {
+		wgCfg, agentAddr, disabled, err := d.wgConfig()
+		if err != nil {
+			return reconcile.Outcome{}, nil, err
+		}
+		gen, err := d.st.Generation()
+		if err != nil {
+			return reconcile.Outcome{}, nil, err
+		}
+		agents, err := d.st.Agents()
+		if err != nil {
+			return reconcile.Outcome{}, nil, err
+		}
+		plan, excluded := d.buildPlan(rules, agentAddr, disabled)
+		plan.Generation = gen
+		prepared = &preparedDeliveryApply{
+			input:     reconcile.Input{Plan: plan, WG: wgCfg, Excluded: excluded},
+			candidate: d.deliveryCandidate(rules, agents, gen), agentAddr: agentAddr, disabled: disabled,
+		}
 	}
-	gen, err := d.st.Generation()
-	if err != nil {
-		return reconcile.Outcome{}, err
-	}
-	plan, excluded := d.buildPlan(rules, agentAddr, disabled)
-	plan.Generation = gen
-	out, err := d.reconciler().Reconcile(reconcile.Input{Plan: plan, WG: wgCfg, Excluded: excluded, Retry: retry})
+	in := prepared.input
+	in.Retry = retry
+	out, err := d.reconciler().Reconcile(in)
 	// 通知による適用し直しの間隔(observeOnce)は、トランザクションの成否だけで決める。Reconcile の
 	// 手前の失敗(サーバのデータベースの読み取り)は Reconciler の状態を変えず、30 秒ごとの再試行も
 	// 予定しないので、ここで間隔を空けると、通知による試し直しの道だけが塞がる
@@ -265,9 +298,9 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 		// This is the one failure path for both modes (design.md 7a.2 節の Runtime), but only the
 		// kernel backend's Commit is an nftables transaction; userspace has no nftables to blame.
 		if d.opts.Mode == modeUserspace {
-			return out, fmt.Errorf("failed to apply the userspace dataplane: %w", err)
+			return out, prepared, fmt.Errorf("failed to apply the userspace dataplane: %w", err)
 		}
-		return out, fmt.Errorf("failed to apply nftables: %w", err)
+		return out, prepared, fmt.Errorf("failed to apply nftables: %w", err)
 	}
 	if len(out.Drift) > 0 {
 		log.Printf("data plane changed outside wgft: %s; applying the rules again", strings.Join(out.Drift, "; "))
@@ -282,7 +315,7 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 		if out.Repaired {
 			d.logRepair(out.Committed, true)
 		}
-		return out, nil
+		return out, prepared, nil
 	}
 	// 差し替えの直前に読んだ drop カウンタ(前回の差し替え以降の増分)を SQLite に累積する(仕様 6.1 節)。
 	// 差し替えが成功したときだけ返るので、失敗した差し替えのカウンタを二重に数えない
@@ -293,7 +326,7 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 	}
 	d.logRepair(out.Committed, retry)
 	// 数と入力の塞がりの提示は、転送する宣言だけを対象にする。無効なエージェントのルールは転送しない
-	effective := effectiveRules(rules, disabled)
+	effective := effectiveRules(rules, prepared.disabled)
 	active := 0
 	for _, r := range effective {
 		if r.Enabled && r.VPSMode == proto.ModeKernel {
@@ -301,15 +334,15 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool) (reconcile.Outcome, e
 		}
 	}
 	if d.opts.Mode == modeUserspace {
-		log.Printf("applied %d rules in userspace mode: %d agents, %d peers", len(rules), len(agentAddr), len(wgCfg.Peers))
+		log.Printf("applied %d rules in userspace mode: %d agents, %d peers", len(rules), len(prepared.agentAddr), len(prepared.input.WG.Peers))
 	} else {
 		log.Printf("applied table inet %s: %d rules, %d enabled in kernel mode, %d agents, %d peers",
-			nft.TableName, len(rules), active, len(agentAddr), len(wgCfg.Peers))
+			nft.TableName, len(rules), active, len(prepared.agentAddr), len(prepared.input.WG.Peers))
 	}
 	if d.proxy != nil {
 		d.proxyInputHints(effective)
 	}
-	return out, nil
+	return out, prepared, nil
 }
 
 // effectiveRules は、無効なエージェント(仕様 5.1 節)のルールの Enabled を false にした写しを返す。

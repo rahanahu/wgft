@@ -89,7 +89,7 @@ func (d *Daemon) StateFor(agent string, sel proto.Negotiated) (*proto.State, err
 	}
 	if !sel.Legacy {
 		version := sel.Version
-		caps := proto.SupportedCapabilities
+		caps := append([]string{}, proto.SupportedCapabilities...)
 		st.ServerProtocolVersion = &version
 		st.ServerCapabilities = &caps
 	}

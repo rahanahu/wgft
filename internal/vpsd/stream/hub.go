@@ -268,10 +268,7 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 	if h.OnStreamConnect != nil {
 		h.OnStreamConnect(agent, from)
 	}
-	st, err := h.backend.StateFor(agent, sel)
-	if err == nil {
-		err = c.send(ctx, proto.Message{Type: proto.MsgState, State: st})
-	}
+	st, err := h.sendState(ctx, agent, c)
 	lock.Unlock()
 	if err != nil {
 		log.Printf("stream: %s: sending state: %v", agent, err)
@@ -343,14 +340,10 @@ func (h *Hub) Push(agent string) {
 	if c == nil {
 		return
 	}
-	st, err := h.backend.StateFor(agent, c.sel)
-	if err != nil {
-		log.Printf("stream: %s: state: %v", agent, err)
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := c.send(ctx, proto.Message{Type: proto.MsgState, State: st}); err != nil {
+	st, err := h.sendState(ctx, agent, c)
+	if err != nil {
 		log.Printf("stream: %s: delivery: %v", agent, err)
 		return
 	}
@@ -390,16 +383,31 @@ func (h *Hub) Disconnect(agent string, code int, reason string) {
 	}
 }
 
-func (c *conn) send(ctx context.Context, m proto.Message) error {
-	b, err := json.Marshal(m)
+func (h *Hub) sendState(ctx context.Context, agent string, c *conn) (*proto.State, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	h.mu.Lock()
+	current := h.conns[agent] == c
+	h.mu.Unlock()
+	if !current {
+		return nil, errors.New("agent connection was replaced")
+	}
+	// Select the authorized State only after owning this connection's writer.
+	// A queued push cannot retain an old State while waiting behind a send.
+	st, err := h.backend.StateFor(agent, c.sel)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	b, err := json.Marshal(proto.Message{Type: proto.MsgState, State: st})
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
-	return c.ws.Write(ctx, websocket.MessageText, b)
+	if err := c.ws.Write(ctx, websocket.MessageText, b); err != nil {
+		return nil, err
+	}
+	return st, nil
 }
 
 // negotiateVersion は pubkey メッセージから、この接続の版と機能を決める(仕様 7a.6 節)。
