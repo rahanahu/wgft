@@ -40,9 +40,9 @@ type statusReport struct {
 	Warnings warningsStatus `json:"warnings"`
 }
 
-// serverStatus は server 側のデータプレーンへの適用が、宣言に追いついているかどうかである。
-// 証拠は `GET /api/v1/rules` の desired_generation、active_generation、apply_error の 3 つだけ
-// である(design.md 10.2b 節)。
+// serverStatus は、server の転送面と配信用の全体 State が宣言に追いついているかを見る。
+// 証拠は `GET /api/v1/rules` の desired_generation、active_generation、apply_error、
+// agent_state_pending、ip_forward である(design.md 10.2b 節)。
 type serverStatus struct {
 	// Status は serverHealthy、serverDegraded、statusUnknown(doctor.go)のいずれかである。
 	// bool では unknown を表せないので、この版から文字列にした(design.md 10.2b 節)。
