@@ -245,7 +245,9 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 		}
 	}
 	if !out.NoOp {
-		if d.delivery.committed(prepared.candidate) {
+		changed := d.delivery.committed(prepared.candidate)
+		d.retireChangedKeyStreams(prepared.candidate)
+		if changed {
 			d.pushAll()
 		}
 	} else {
@@ -254,6 +256,15 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 	}
 	d.noteApplied()
 	return out, err
+}
+
+func (d *Daemon) retireChangedKeyStreams(s *deliverySnapshot) {
+	if d.hub == nil {
+		return
+	}
+	for name, entry := range s.entries {
+		d.hub.RetireIfDifferent(name, entry.identity, entry.key)
+	}
 }
 
 // applyOnce は applyNFT の本体。retry が真なら、前回と同じものを公開するだけのときに何も commit せず、

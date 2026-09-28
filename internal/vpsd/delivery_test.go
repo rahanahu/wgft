@@ -140,7 +140,7 @@ func TestSavedKeyAfterFailedApplyCannotUseSameKeyReconnect(t *testing.T) {
 	}
 }
 
-func TestFailedKeyRotationDoesNotBlockDisableOnOldStream(t *testing.T) {
+func TestFailedKeyRotationAllowsTemporaryOldKeyReconnectAndRetiresIt(t *testing.T) {
 	f := newDisableFixture(t)
 	f.d.onPushAll = nil
 	srv := httptest.NewServer(f.d.hub)
@@ -201,10 +201,27 @@ func TestFailedKeyRotationDoesNotBlockDisableOnOldStream(t *testing.T) {
 			t.Fatal("unpublished new key displaced the old stream")
 		}
 	}
+	old.CloseNow() // the previously authorized stream is lost
+	deadline := time.Now().Add(5 * time.Second)
+	for f.d.hub.Status("home").Connected && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if f.d.hub.Status("home").Connected {
+		t.Fatal("lost old stream did not leave the hub")
+	}
+	temporary := open(oldPrivate.PublicKey())
+	defer temporary.CloseNow()
+	if msg, err := read(temporary); err != nil || msg.Type != proto.MsgState || msg.State == nil || msg.State.AgentDisabled {
+		t.Fatalf("temporary old-key reconnect did not receive P: %+v, %v", msg, err)
+	}
+	saved, err := f.st.AgentByName("home")
+	if err != nil || saved.PublicKey != newPrivate.PublicKey().String() {
+		t.Fatalf("temporary reconnect overwrote saved new key: %+v, %v", saved, err)
+	}
 	if _, err := f.d.DisableAgent("home"); err == nil {
 		t.Fatal("failed disable publication reported success")
 	}
-	msg, err := read(old)
+	msg, err := read(temporary)
 	if err != nil || msg.Type != proto.MsgState || msg.State == nil || !msg.State.AgentDisabled {
 		t.Fatalf("old key did not receive stop State: %+v, %v", msg, err)
 	}
@@ -216,6 +233,28 @@ func TestFailedKeyRotationDoesNotBlockDisableOnOldStream(t *testing.T) {
 	observed, err := f.d.AgentState("home")
 	if err != nil || !observed.AgentDisabled || observed.WG != msg.State.WG {
 		t.Fatalf("admin P/D observation lost after failed key save: %+v, %v", observed, err)
+	}
+	f.p.setErr(nil)
+	if _, err := f.d.Batch(admin.BatchRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := read(temporary); err == nil || msg.Type == proto.MsgState {
+		t.Fatalf("retired old key received new full State: %+v, %v", msg, err)
+	}
+	if f.d.hub.Status("home").Connected {
+		t.Fatal("old-key stream remained installed after new-key publication")
+	}
+	current, err := f.st.AgentByName("home")
+	if err != nil || current.PublicKey != newPrivate.PublicKey().String() {
+		t.Fatalf("successful publication lost new key declaration: %+v, %v", current, err)
+	}
+	if _, err := f.d.StateFor("home", current.Identity, oldPrivate.PublicKey(), proto.Negotiated{Legacy: true}); err == nil {
+		t.Fatal("retired old key selected the new full publication")
+	}
+	fresh := open(newPrivate.PublicKey())
+	defer fresh.CloseNow()
+	if msg, err := read(fresh); err != nil || msg.Type != proto.MsgState || msg.State == nil || !msg.State.AgentDisabled {
+		t.Fatalf("new published key did not receive State: %+v, %v", msg, err)
 	}
 }
 

@@ -423,6 +423,29 @@ func (h *Hub) Disconnect(agent string, code int, reason string) {
 	}
 }
 
+// RetireIfDifferent removes a connection whose authenticated registration or
+// declared key differs from a newly successful full publication. The removal
+// happens before another State can be queued for that connection.
+func (h *Hub) RetireIfDifferent(agent, identity, key string) {
+	hook := h.hookLock(agent)
+	hook.Lock()
+	h.mu.Lock()
+	c := h.conns[agent]
+	if c != nil && c.identity == identity && c.key.String() == key {
+		c = nil
+	}
+	if c != nil {
+		delete(h.conns, agent)
+		delete(h.status, agent)
+	}
+	h.mu.Unlock()
+	hook.Unlock()
+	if c != nil {
+		c.cancel()
+		c.ws.CloseNow()
+	}
+}
+
 func (h *Hub) sendState(ctx context.Context, agent string, c *conn) (*proto.State, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()

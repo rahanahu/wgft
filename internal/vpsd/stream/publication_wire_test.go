@@ -240,3 +240,29 @@ func TestAlreadySelectedStateMayFinishAfterDisable(t *testing.T) {
 	h.Push("home")
 	requirePublicationState(t, c, 2, true) // selected after the commit
 }
+
+func TestRetiredKeyCancelsQueuedPushWorker(t *testing.T) {
+	h, b, url, key := publicationFixture(t, nil)
+	c := openPublicationStream(t, url, key)
+	requirePublicationState(t, c, 1, false)
+	old := currentConn(t, h)
+	old.sendMu.Lock()
+	for i := 0; i < 1000; i++ {
+		h.Push("home")
+	}
+	h.RetireIfDifferent("home", "tok-home", "new published key")
+	old.sendMu.Unlock()
+	if msg, err := readMsg(t, c); err == nil || msg.Type == proto.MsgState {
+		t.Fatalf("retired key received queued State: %+v, %v", msg, err)
+	}
+	waitWorkerDone(t, old)
+	if h.Status("home").Connected {
+		t.Fatal("retired key remained connected")
+	}
+	b.mu.Lock()
+	calls := b.calls
+	b.mu.Unlock()
+	if calls != 2 { // admission and initial send only
+		t.Fatalf("retired key selected State after publication: %d calls", calls)
+	}
+}
