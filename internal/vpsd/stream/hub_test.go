@@ -34,14 +34,14 @@ type fakeBackend struct {
 	keyCheckErr error
 }
 
-func (b *fakeBackend) Authenticate(tok string) (string, error) {
+func (b *fakeBackend) Authenticate(tok string) (string, string, error) {
 	if b.authErr != nil {
-		return "", b.authErr
+		return "", "", b.authErr
 	}
 	if strings.HasPrefix(tok, "tok-") {
-		return strings.TrimPrefix(tok, "tok-"), nil
+		return strings.TrimPrefix(tok, "tok-"), tok, nil
 	}
-	return "", ErrUnauthorized
+	return "", "", ErrUnauthorized
 }
 func (b *fakeBackend) ServerPublicKey() wgtypes.Key { return b.server.PublicKey() }
 func (b *fakeBackend) OtherAgentHasKey(agent string, key wgtypes.Key) (bool, error) {
@@ -57,13 +57,13 @@ func (b *fakeBackend) OtherAgentHasKey(agent string, key wgtypes.Key) (bool, err
 	}
 	return false, nil
 }
-func (b *fakeBackend) SetPublicKey(agent string, key wgtypes.Key) error {
+func (b *fakeBackend) SetPublicKey(agent, _ string, key wgtypes.Key) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.keys[agent] = key
 	return nil
 }
-func (b *fakeBackend) StateFor(agent string, _ wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
+func (b *fakeBackend) StateFor(agent, _ string, _ wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	st := &proto.State{Generation: b.gen, WG: proto.WGConfig{Address: "10.200.0.2/24"}}

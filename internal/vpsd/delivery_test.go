@@ -116,19 +116,23 @@ func TestRevokeTombstonesBeforeFailedApplyAndReregistration(t *testing.T) {
 
 func TestSavedKeyAfterFailedApplyCannotUseSameKeyReconnect(t *testing.T) {
 	f := newDisableFixture(t)
+	agent, err := f.st.AgentByName("home")
+	if err != nil {
+		t.Fatal(err)
+	}
 	private, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	key := private.PublicKey()
 	f.p.setErr(errors.New("publication failed"))
-	if err := f.d.SetPublicKey("home", key); err == nil {
+	if err := f.d.SetPublicKey("home", agent.Identity, key); err == nil {
 		t.Fatal("failed key publication reported success")
 	}
-	if err := f.d.SetPublicKey("home", key); err != nil {
+	if err := f.d.SetPublicKey("home", agent.Identity, key); err != nil {
 		t.Fatalf("same-key path: %v", err)
 	}
-	if _, err := f.d.StateFor("home", key, proto.Negotiated{Legacy: true}); err == nil {
+	if _, err := f.d.StateFor("home", agent.Identity, key, proto.Negotiated{Legacy: true}); err == nil {
 		t.Fatal("same-key reconnect obtained State from an unpublished key")
 	}
 	if _, err := f.d.AgentState("other"); err != nil {
@@ -212,6 +216,91 @@ func TestFailedKeyRotationDoesNotBlockDisableOnOldStream(t *testing.T) {
 	observed, err := f.d.AgentState("home")
 	if err != nil || !observed.AgentDisabled || observed.WG != msg.State.WG {
 		t.Fatalf("admin P/D observation lost after failed key save: %+v, %v", observed, err)
+	}
+}
+
+func TestAuthenticatedOldStreamCannotClaimReregisteredName(t *testing.T) {
+	f := newDisableFixture(t)
+	srv := httptest.NewServer(f.d.hub)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	old, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + f.tokens["home"]}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.CloseNow()
+	// Dial completes only after Authenticate and Accept. Keep the first pubkey
+	// withheld while this registration is revoked and the name is reused.
+	prior, err := f.st.AgentByName("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.Revoke("home"); err != nil {
+		t.Fatal(err)
+	}
+	join, err := f.st.IssueJoinToken("home", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newToken, _, _, err := f.d.Register(join, "home", "203.0.113.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := f.st.AgentByName("home")
+	if err != nil || current.Identity == prior.Identity || current.PublicKey != "" {
+		t.Fatalf("new registration precondition: %+v, %v", current, err)
+	}
+	oldPrivate, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := json.Marshal(proto.Message{Type: proto.MsgPublicKey, PublicKey: oldPrivate.PublicKey().String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Write(ctx, websocket.MessageText, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, payload, err := old.Read(ctx); err == nil {
+		t.Fatalf("old authenticated stream received a message from new registration: %s", payload)
+	}
+	current, err = f.st.AgentByName("home")
+	if err != nil || current.Identity == prior.Identity || current.PublicKey != "" {
+		t.Fatalf("old stream changed new registration: %+v, %v", current, err)
+	}
+	if f.d.hub.Status("home").Connected {
+		t.Fatal("old stream was installed for the new registration")
+	}
+	// The new token and its key still have a normal publication path.
+	fresh, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + newToken}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.CloseNow()
+	newPrivate, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = json.Marshal(proto.Message{Type: proto.MsgPublicKey, PublicKey: newPrivate.PublicKey().String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.Write(ctx, websocket.MessageText, first); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := fresh.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg proto.Message
+	if err := json.Unmarshal(payload, &msg); err != nil || msg.Type != proto.MsgState || msg.State == nil {
+		t.Fatalf("new registration did not receive State: %+v, %v", msg, err)
 	}
 }
 

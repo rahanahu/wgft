@@ -24,7 +24,7 @@ type publicationBackend struct {
 	after   func(int)
 }
 
-func (b *publicationBackend) StateFor(_ string, _ wgtypes.Key, _ proto.Negotiated) (*proto.State, error) {
+func (b *publicationBackend) StateFor(_, _ string, _ wgtypes.Key, _ proto.Negotiated) (*proto.State, error) {
 	b.mu.Lock()
 	b.calls++
 	call, before := b.calls, b.before

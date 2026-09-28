@@ -33,15 +33,15 @@ type fakeStreamBackend struct {
 	server wgtypes.Key
 }
 
-func (b *fakeStreamBackend) Authenticate(tok string) (string, error) {
-	return strings.TrimPrefix(tok, "tok-"), nil
+func (b *fakeStreamBackend) Authenticate(tok string) (string, string, error) {
+	return strings.TrimPrefix(tok, "tok-"), tok, nil
 }
 func (b *fakeStreamBackend) ServerPublicKey() wgtypes.Key { return b.server.PublicKey() }
 func (b *fakeStreamBackend) OtherAgentHasKey(string, wgtypes.Key) (bool, error) {
 	return false, nil
 }
-func (b *fakeStreamBackend) SetPublicKey(string, wgtypes.Key) error { return nil }
-func (b *fakeStreamBackend) StateFor(agent string, _ wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
+func (b *fakeStreamBackend) SetPublicKey(string, string, wgtypes.Key) error { return nil }
+func (b *fakeStreamBackend) StateFor(agent, _ string, _ wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
 	return &proto.State{Generation: 1, WG: proto.WGConfig{Address: "10.200.0.2/24"}}, nil
 }
 

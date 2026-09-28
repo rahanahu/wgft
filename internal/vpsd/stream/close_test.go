@@ -51,13 +51,13 @@ type initialStateFailure struct {
 	release chan struct{}
 }
 
-func (b *initialStateFailure) StateFor(agent string, key wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
+func (b *initialStateFailure) StateFor(agent, identity string, key wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
 	if agent == "first" {
 		close(b.entered)
 		<-b.release
 		return nil, errBackendFailure
 	}
-	return b.fakeBackend.StateFor(agent, key, sel)
+	return b.fakeBackend.StateFor(agent, identity, key, sel)
 }
 
 func closeTestReceive[T any](t *testing.T, ch <-chan T, label string) T {
