@@ -32,10 +32,11 @@ type Backend interface {
 	OtherAgentHasKey(agent string, key wgtypes.Key) (bool, error)
 	// SetPublicKey は宣言された公開鍵を保存し、wg0 のピアを置き換える(初回なら作る)。
 	SetPublicKey(agent string, key wgtypes.Key) error
-	// StateFor はそのエージェントに配る全体状態。sel はその stream 接続で選んだ版と、agent が
+	// StateFor はそのエージェントに配る全体状態。key はこの接続が認証後に宣言した鍵で、
+	// 成功済みの配信状態に属する鍵だけを認める。sel はその stream 接続で選んだ版と、agent が
 	// 宣言した機能(仕様 7a.6 節)。sel.Legacy なら agent は legacy v0 なので、実装は
 	// server_protocol_version/server_capabilities を全体状態に載せない
-	StateFor(agent string, sel proto.Negotiated) (*proto.State, error)
+	StateFor(agent string, key wgtypes.Key, sel proto.Negotiated) (*proto.State, error)
 }
 
 // Status は vpsd が UI に見せる、エージェントごとの stream の状態。
@@ -54,6 +55,7 @@ type conn struct {
 	from     string
 	cancel   context.CancelFunc
 	sendMu   sync.Mutex
+	key      wgtypes.Key   // declared by this authenticated connection before it is installed
 	pushCh   chan struct{} // one pending push; repeated requests coalesce
 	pushDone chan struct{}
 	timedOut atomic.Bool // heartbeatTimer が閉じた(ログの重複を避けるための印)
@@ -241,6 +243,7 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		return
 	}
 	c.sel = sel
+	c.key = key
 
 	// 3-5 は同一エージェントで直列化:ピアの置き換え → 旧接続の切断 → 全体状態の送信
 	lock := h.agentLock(agent)
@@ -250,6 +253,14 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		lock.Unlock()
 		log.Printf("stream: %s: peer setup: %v", agent, err)
 		ws.Close(websocket.StatusInternalError, "peer setup failed")
+		return
+	}
+	// A saved key may have failed publication. It cannot replace an existing
+	// authorized stream until this declared key has a published State.
+	if _, err := h.backend.StateFor(agent, key, sel); err != nil {
+		lock.Unlock()
+		log.Printf("stream: %s: state admission: %v", agent, err)
+		ws.CloseNow()
 		return
 	}
 	hook := h.hookLock(agent)
@@ -418,7 +429,7 @@ func (h *Hub) sendState(ctx context.Context, agent string, c *conn) (*proto.Stat
 	}
 	// Select the authorized State only after owning this connection's writer.
 	// A queued push cannot retain an old State while waiting behind a send.
-	st, err := h.backend.StateFor(agent, c.sel)
+	st, err := h.backend.StateFor(agent, c.key, c.sel)
 	if err != nil {
 		return nil, err
 	}

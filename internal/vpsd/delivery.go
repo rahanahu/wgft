@@ -192,14 +192,17 @@ func (o *deliveryOwner) status() (*uint64, bool) {
 	return &g, o.pending
 }
 
-func (o *deliveryOwner) state(name, identity, key string) (*proto.State, error) {
+// state checks the current registration identity. Stream selections additionally
+// require the key declared by that connection to match the successful token.
+// An admin read has no connection key and observes that token directly.
+func (o *deliveryOwner) state(name, identity string, key *string) (*proto.State, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	if o.full == nil {
 		return nil, errors.New("agent state is not published")
 	}
 	e, ok := o.full.entries[name]
-	if !ok || e.identity != identity || e.key != key {
+	if !ok || e.identity != identity || (key != nil && e.key != *key) {
 		return nil, fmt.Errorf("agent %q has no published state for this registration and key", name)
 	}
 	st := e.state

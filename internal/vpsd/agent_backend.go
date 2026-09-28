@@ -80,10 +80,16 @@ func (d *Daemon) SetPublicKey(agent string, key wgtypes.Key) error {
 	return d.applyNFT(rules)
 }
 
-// StateFor は stream.Backend の実装。AgentState が組み立てた全体状態に、sel(この接続で交渉した
-// 版と機能。仕様 7a.6 節)を足す。sel.Legacy な agent には版のフィールドを載せない(今の形のまま)。
-func (d *Daemon) StateFor(agent string, sel proto.Negotiated) (*proto.State, error) {
-	st, err := d.AgentState(agent)
+// StateFor は stream.Backend の実装。現在の登録 identity と、この接続が宣言した鍵を成功済みの
+// 配信状態と照合し、sel(この接続で交渉した版と機能。仕様 7a.6 節)を足す。
+// sel.Legacy な agent には版のフィールドを載せない。
+func (d *Daemon) StateFor(agent string, key wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
+	a, err := d.st.AgentByName(agent)
+	if err != nil {
+		return nil, err
+	}
+	presented := key.String()
+	st, err := d.delivery.state(agent, a.Identity, &presented)
 	if err != nil {
 		return nil, err
 	}

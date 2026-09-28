@@ -24,7 +24,7 @@ type publicationBackend struct {
 	after   func(int)
 }
 
-func (b *publicationBackend) StateFor(_ string, _ proto.Negotiated) (*proto.State, error) {
+func (b *publicationBackend) StateFor(_ string, _ wgtypes.Key, _ proto.Negotiated) (*proto.State, error) {
 	b.mu.Lock()
 	b.calls++
 	call, before := b.calls, b.before
@@ -115,7 +115,7 @@ func waitWorkerDone(t *testing.T, c *conn) {
 func TestInitialAndPushSelectLatestStateAtSend(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	h, b, url, key := publicationFixture(t, func(call int) {
-		if call == 1 {
+		if call == 2 {
 			close(entered)
 			<-release
 		}
@@ -163,8 +163,8 @@ func TestQueuedPushAfterRevokeDoesNotSendState(t *testing.T) {
 	b.mu.Lock()
 	calls := b.calls
 	b.mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("queued push selected revoked State %d times", calls-1)
+	if calls != 2 {
+		t.Fatalf("queued push selected revoked State %d times", calls-2)
 	}
 }
 
@@ -188,7 +188,7 @@ func TestReplacementSkipsOldQueuedPushAndSendsNewInitialState(t *testing.T) {
 	b.mu.Lock()
 	calls := b.calls
 	b.mu.Unlock()
-	if calls != 2 {
+	if calls != 4 {
 		t.Fatalf("old queued push selected State after replacement: %d calls", calls)
 	}
 }
@@ -196,7 +196,7 @@ func TestReplacementSkipsOldQueuedPushAndSendsNewInitialState(t *testing.T) {
 func TestInFlightSelectionMayFinishAfterReplacement(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	h, _, url, key := publicationFixture(t, func(call int) {
-		if call == 2 {
+		if call == 3 {
 			close(entered)
 			<-release
 		}
@@ -222,7 +222,7 @@ func TestAlreadySelectedStateMayFinishAfterDisable(t *testing.T) {
 	selected, release := make(chan struct{}), make(chan struct{})
 	b.mu.Lock()
 	b.after = func(call int) {
-		if call == 2 {
+		if call == 3 {
 			close(selected)
 			<-release
 		}

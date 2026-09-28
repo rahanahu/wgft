@@ -41,7 +41,7 @@ func (b *fakeStreamBackend) OtherAgentHasKey(string, wgtypes.Key) (bool, error) 
 	return false, nil
 }
 func (b *fakeStreamBackend) SetPublicKey(string, wgtypes.Key) error { return nil }
-func (b *fakeStreamBackend) StateFor(agent string, sel proto.Negotiated) (*proto.State, error) {
+func (b *fakeStreamBackend) StateFor(agent string, _ wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
 	return &proto.State{Generation: 1, WG: proto.WGConfig{Address: "10.200.0.2/24"}}, nil
 }
 

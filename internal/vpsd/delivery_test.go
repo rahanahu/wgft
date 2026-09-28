@@ -3,11 +3,17 @@
 package vpsd
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/platform/linux"
@@ -28,7 +34,7 @@ func ruleTarget(st *proto.State, id string) string {
 // disable may change only the disabled bit, rule enabled bits, and generation.
 func TestFailedEditDoesNotEnterDisableDelivery(t *testing.T) {
 	f := newDisableFixture(t)
-	before, err := f.d.StateFor("home", proto.Negotiated{Legacy: true})
+	before, err := f.d.AgentState("home")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +47,7 @@ func TestFailedEditDoesNotEnterDisableDelivery(t *testing.T) {
 	if _, err := f.d.DisableAgent("other"); err == nil {
 		t.Fatal("failed disable publication reported success")
 	}
-	home, err := f.d.StateFor("home", proto.Negotiated{Legacy: true})
+	home, err := f.d.AgentState("home")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,11 +128,90 @@ func TestSavedKeyAfterFailedApplyCannotUseSameKeyReconnect(t *testing.T) {
 	if err := f.d.SetPublicKey("home", key); err != nil {
 		t.Fatalf("same-key path: %v", err)
 	}
-	if _, err := f.d.StateFor("home", proto.Negotiated{Legacy: true}); err == nil {
+	if _, err := f.d.StateFor("home", key, proto.Negotiated{Legacy: true}); err == nil {
 		t.Fatal("same-key reconnect obtained State from an unpublished key")
 	}
 	if _, err := f.d.AgentState("other"); err != nil {
 		t.Fatalf("unrelated published State was lost: %v", err)
+	}
+}
+
+func TestFailedKeyRotationDoesNotBlockDisableOnOldStream(t *testing.T) {
+	f := newDisableFixture(t)
+	f.d.onPushAll = nil
+	srv := httptest.NewServer(f.d.hub)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	open := func(key wgtypes.Key) *websocket.Conn {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+			HTTPHeader: http.Header{"Authorization": {"Bearer " + f.tokens["home"]}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := json.Marshal(proto.Message{Type: proto.MsgPublicKey, PublicKey: key.String()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ws.Write(ctx, websocket.MessageText, msg); err != nil {
+			t.Fatal(err)
+		}
+		return ws
+	}
+	read := func(ws *websocket.Conn) (proto.Message, error) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, data, err := ws.Read(ctx)
+		if err != nil {
+			return proto.Message{}, err
+		}
+		var msg proto.Message
+		err = json.Unmarshal(data, &msg)
+		return msg, err
+	}
+	oldPrivate, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := open(oldPrivate.PublicKey())
+	defer old.CloseNow()
+	if msg, err := read(old); err != nil || msg.Type != proto.MsgState || msg.State == nil || msg.State.AgentDisabled {
+		t.Fatalf("old connection initial State: %+v, %v", msg, err)
+	}
+	newPrivate, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.p.setErr(errors.New("publication failed"))
+	for attempt := 0; attempt < 2; attempt++ {
+		candidate := open(newPrivate.PublicKey())
+		if msg, err := read(candidate); err == nil || msg.Type == proto.MsgState {
+			t.Fatalf("unpublished new key got State on attempt %d: %+v, %v", attempt, msg, err)
+		}
+		candidate.CloseNow()
+		if !f.d.hub.Status("home").Connected {
+			t.Fatal("unpublished new key displaced the old stream")
+		}
+	}
+	if _, err := f.d.DisableAgent("home"); err == nil {
+		t.Fatal("failed disable publication reported success")
+	}
+	msg, err := read(old)
+	if err != nil || msg.Type != proto.MsgState || msg.State == nil || !msg.State.AgentDisabled {
+		t.Fatalf("old key did not receive stop State: %+v, %v", msg, err)
+	}
+	for _, rule := range msg.State.Rules {
+		if rule.Enabled {
+			t.Fatalf("stop State retained enabled rule: %+v", msg.State)
+		}
+	}
+	observed, err := f.d.AgentState("home")
+	if err != nil || !observed.AgentDisabled || observed.WG != msg.State.WG {
+		t.Fatalf("admin P/D observation lost after failed key save: %+v, %v", observed, err)
 	}
 }
 

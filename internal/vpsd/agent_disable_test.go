@@ -116,11 +116,12 @@ func (d *disableDataplane) Inspect() (*linux.Report, error) {
 }
 
 type disableFixture struct {
-	d   *Daemon
-	st  *store.Store
-	dp  *disableDataplane
-	p   *recordingParticipant
-	log *eventLog
+	d      *Daemon
+	st     *store.Store
+	dp     *disableDataplane
+	p      *recordingParticipant
+	log    *eventLog
+	tokens map[string]string
 }
 
 // newDisableFixture builds a Daemon with two registered agents, home and other. home has rules A
@@ -129,14 +130,17 @@ type disableFixture struct {
 func newDisableFixture(t *testing.T) *disableFixture {
 	t.Helper()
 	st := openTestStore(t)
+	tokens := make(map[string]string)
 	for _, name := range []string{"home", "other"} {
 		tok, err := st.IssueJoinToken(name, time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := st.Register(tok, name, "203.0.113.2", netip.MustParsePrefix("10.200.0.0/24")); err != nil {
+		permanent, _, err := st.Register(tok, name, "203.0.113.2", netip.MustParsePrefix("10.200.0.0/24"))
+		if err != nil {
 			t.Fatal(err)
 		}
+		tokens[name] = permanent
 	}
 	port := func(p uint16) proto.PortRange { return proto.PortRange{Lo: p, Hi: p} }
 	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
@@ -169,7 +173,7 @@ func newDisableFixture(t *testing.T) *disableFixture {
 	if got := log.take(); !sameEvents(got, "publish r_a,r_c,r_o", "deliver") {
 		t.Fatalf("first apply = %v", got)
 	}
-	return &disableFixture{d: d, st: st, dp: dp, p: p, log: log}
+	return &disableFixture{d: d, st: st, dp: dp, p: p, log: log, tokens: tokens}
 }
 
 func sameEvents(got []string, want ...string) bool {

@@ -63,7 +63,7 @@ func (b *fakeBackend) SetPublicKey(agent string, key wgtypes.Key) error {
 	b.keys[agent] = key
 	return nil
 }
-func (b *fakeBackend) StateFor(agent string, sel proto.Negotiated) (*proto.State, error) {
+func (b *fakeBackend) StateFor(agent string, _ wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	st := &proto.State{Generation: b.gen, WG: proto.WGConfig{Address: "10.200.0.2/24"}}

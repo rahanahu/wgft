@@ -275,8 +275,8 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 // エージェントは既存の enabled の扱いでリスナーとセッションを閉じるので、無効化を知らない旧い版の
 // エージェントも止まる。AgentDisabled は診断のためのもので、守りには使わない。
 //
-// 配信内容は、成功した適用の時点で保持した全体状態から得る。データベースの行は、登録と鍵が
-// その全体状態に対応することの確認にだけ使う。
+// 配信内容は、成功した適用の時点で保持した全体状態から得る。データベースの行は登録 identity
+// の確認にだけ使う。保存済みの鍵がまだ適用されていなくても、管理用 API は最後の成功状態を示す。
 func (d *Daemon) AgentState(agent string) (*proto.State, error) {
 	a, err := d.st.AgentByName(agent)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -285,7 +285,7 @@ func (d *Daemon) AgentState(agent string) (*proto.State, error) {
 	if err != nil {
 		return nil, err
 	}
-	return d.delivery.state(agent, a.Identity, a.PublicKey)
+	return d.delivery.state(agent, a.Identity, nil)
 }
 
 // DismissWarning は警告を消す(管理者が正当と確認したとき。仕様 5.2 節)。ip-mismatch では、
