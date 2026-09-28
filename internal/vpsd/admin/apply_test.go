@@ -50,7 +50,7 @@ func TestRulesResponseApplyFields(t *testing.T) {
 	base := &fakeBackend{st: st}
 
 	plain := getRulesJSON(t, base, st)
-	for _, k := range []string{"desired_generation", "active_generation", "rule_states", "drift", "apply_error"} {
+	for _, k := range []string{"desired_generation", "active_generation", "agent_state_generation", "agent_state_pending", "rule_states", "drift", "apply_error"} {
 		if _, ok := plain[k]; ok {
 			t.Errorf("a Backend without the report must not add %q", k)
 		}
@@ -68,6 +68,7 @@ func TestRulesResponseApplyFields(t *testing.T) {
 
 	status := ApplyStatus{
 		DesiredGeneration: 7, ActiveGeneration: 6,
+		AgentStateGeneration: u64p(5), AgentStatePending: func() *bool { v := true; return &v }(),
 		Rules: map[string]RuleApply{
 			"r_ok":   {ApplyState: ApplyActive, ActiveGeneration: u64p(6)},
 			"r_bind": {ApplyState: ApplyNotActive, Reason: "bind failed: address already in use", ActiveGeneration: u64p(5)},
@@ -77,6 +78,15 @@ func TestRulesResponseApplyFields(t *testing.T) {
 	got := getRulesJSON(t, &applyBackend{fakeBackend: base, status: status, ok: true}, st)
 	if string(got["desired_generation"]) != "7" || string(got["active_generation"]) != "6" {
 		t.Errorf("generations = %s / %s, want 7 / 6", got["desired_generation"], got["active_generation"])
+	}
+	if string(got["agent_state_generation"]) != "5" || string(got["agent_state_pending"]) != "true" {
+		t.Errorf("agent State publication = %s / %s, want 5 / true", got["agent_state_generation"], got["agent_state_pending"])
+	}
+	clear := false
+	status.AgentStatePending = &clear
+	got = getRulesJSON(t, &applyBackend{fakeBackend: base, status: status, ok: true}, st)
+	if string(got["agent_state_pending"]) != "false" {
+		t.Errorf("a reporting server must emit explicit false, got %s", got["agent_state_pending"])
 	}
 	var states map[string]RuleApply
 	if err := json.Unmarshal(got["rule_states"], &states); err != nil {

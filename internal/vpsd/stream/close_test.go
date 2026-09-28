@@ -51,13 +51,13 @@ type initialStateFailure struct {
 	release chan struct{}
 }
 
-func (b *initialStateFailure) StateFor(agent string, sel proto.Negotiated) (*proto.State, error) {
+func (b *initialStateFailure) StateFor(agent, identity string, key wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
 	if agent == "first" {
 		close(b.entered)
 		<-b.release
 		return nil, errBackendFailure
 	}
-	return b.fakeBackend.StateFor(agent, sel)
+	return b.fakeBackend.StateFor(agent, identity, key, sel)
 }
 
 func closeTestReceive[T any](t *testing.T, ch <-chan T, label string) T {
@@ -120,12 +120,15 @@ func TestAcceptedStreamReturnsTransportSlot(t *testing.T) {
 			transport := closeTestReceive(t, observed.accepted, "first transport")
 			key, _ := wgtypes.GeneratePrivateKey()
 			sendJSON(t, first, proto.Message{Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String()})
-			strong := closeTestReceive(t, retained, "server connection")
-			t.Cleanup(func() { strong.CloseNow() })
+			var strong *websocket.Conn
 			if stateFailure {
 				closeTestReceive(t, failure.entered, "StateFor entry")
-			} else if m, err := readMsg(t, first); err != nil || m.State == nil {
-				t.Fatalf("initial state: %v %v", m, err)
+			} else {
+				strong = closeTestReceive(t, retained, "server connection")
+				t.Cleanup(func() { strong.CloseNow() })
+				if m, err := readMsg(t, first); err != nil || m.State == nil {
+					t.Fatalf("initial state: %v %v", m, err)
+				}
 			}
 
 			// Establish the second TCP connection in the listen backlog before
@@ -177,8 +180,10 @@ func TestAcceptedStreamReturnsTransportSlot(t *testing.T) {
 			if m, err := readMsg(t, next.ws); err != nil || m.State == nil {
 				t.Fatalf("replacement state: %v %v", m, err)
 			}
-			strong.CloseNow()
-			strong.CloseNow()
+			if strong != nil {
+				strong.CloseNow()
+				strong.CloseNow()
+			}
 			if transport.closes.Load() != 1 || nextTransport.closes.Load() != 0 || !h.Status("next").Connected {
 				t.Fatal("duplicate old cleanup affected the replacement")
 			}

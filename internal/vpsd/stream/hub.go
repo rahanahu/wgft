@@ -24,18 +24,21 @@ import (
 
 // Backend は Hub が呼ぶ vpsd 側の操作。
 type Backend interface {
-	// Authenticate は恒久トークンからエージェント名を返す。無効なら store.ErrInvalidToken 相当の誤り。
-	Authenticate(permanentToken string) (agent string, err error)
+	// Authenticate は恒久トークンからエージェント名と登録 identity を返す。無効なら
+	// store.ErrInvalidToken 相当の誤り。identity は最初の鍵の受信まで保持する。
+	Authenticate(permanentToken string) (agent, identity string, err error)
 	// ServerPublicKey はサーバの公開鍵(エージェントの鍵と同じなら拒否する)。
 	ServerPublicKey() wgtypes.Key
 	// OtherAgentHasKey は、他のエージェントが同じ公開鍵を保存しているか。
 	OtherAgentHasKey(agent string, key wgtypes.Key) (bool, error)
-	// SetPublicKey は宣言された公開鍵を保存し、wg0 のピアを置き換える(初回なら作る)。
-	SetPublicKey(agent string, key wgtypes.Key) error
-	// StateFor はそのエージェントに配る全体状態。sel はその stream 接続で選んだ版と、agent が
+	// SetPublicKey は認証時の登録 identity を照合してから公開鍵を保存し、wg0 のピアを置き換える。
+	SetPublicKey(agent, identity string, key wgtypes.Key) error
+	// StateFor はそのエージェントに配る全体状態。identity は認証時の登録で、
+	// key はこの接続が認証後に宣言した鍵で、
+	// 成功済みの配信状態に属する鍵だけを認める。sel はその stream 接続で選んだ版と、agent が
 	// 宣言した機能(仕様 7a.6 節)。sel.Legacy なら agent は legacy v0 なので、実装は
 	// server_protocol_version/server_capabilities を全体状態に載せない
-	StateFor(agent string, sel proto.Negotiated) (*proto.State, error)
+	StateFor(agent, identity string, key wgtypes.Key, sel proto.Negotiated) (*proto.State, error)
 }
 
 // Status は vpsd が UI に見せる、エージェントごとの stream の状態。
@@ -54,6 +57,10 @@ type conn struct {
 	from     string
 	cancel   context.CancelFunc
 	sendMu   sync.Mutex
+	key      wgtypes.Key   // declared by this authenticated connection before it is installed
+	identity string        // registration authenticated before the first WebSocket message
+	pushCh   chan struct{} // one pending push; repeated requests coalesce
+	pushDone chan struct{}
 	timedOut atomic.Bool // heartbeatTimer が閉じた(ログの重複を避けるための印)
 	// sel はこの接続で交渉した版と機能。serve() が接続の確立前に一度だけ設定し、以後は
 	// 読み取り専用として扱う(Push からも参照するが、書き込みは無いので mu は要らない)
@@ -162,7 +169,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	agent, err := h.backend.Authenticate(tok)
+	agent, identity, err := h.backend.Authenticate(tok)
 	if err != nil {
 		// トークンが無効(未知・期限切れ・使用済み)なのと、backend 自体が失敗した(SQLite の
 		// エラーなど)のとは分ける。前者だけが日常的に起きる想定の応答で、ログは残さない。
@@ -184,13 +191,13 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// HTTP does not close hijacked connections when the handler returns.
 	defer ws.CloseNow()
 	ws.SetReadLimit(1 << 20)
-	h.serve(r.Context(), agent, from, ws)
+	h.serve(r.Context(), agent, identity, from, ws)
 }
 
-func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Conn) {
+func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *websocket.Conn) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	c := &conn{ws: ws, from: from, cancel: cancel}
+	c := &conn{ws: ws, from: from, identity: identity, cancel: cancel, pushCh: make(chan struct{}, 1), pushDone: make(chan struct{})}
 
 	// 2. 鍵の検証(最初のメッセージ)。失敗した接続は旧接続に影響を与えない
 	readCtx, readCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -239,12 +246,13 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 		return
 	}
 	c.sel = sel
+	c.key = key
 
 	// 3-5 は同一エージェントで直列化:ピアの置き換え → 旧接続の切断 → 全体状態の送信
 	lock := h.agentLock(agent)
 	lock.Lock()
 
-	if err := h.backend.SetPublicKey(agent, key); err != nil {
+	if err := h.backend.SetPublicKey(agent, identity, key); err != nil {
 		lock.Unlock()
 		log.Printf("stream: %s: peer setup: %v", agent, err)
 		ws.Close(websocket.StatusInternalError, "peer setup failed")
@@ -252,6 +260,16 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 	}
 	hook := h.hookLock(agent)
 	hook.Lock()
+	// A saved key may have failed publication, or this registration may have
+	// been revoked while the connection waited for its first message. Revoke's
+	// Disconnect takes hookLock and removes any connection admitted before it.
+	if _, err := h.backend.StateFor(agent, identity, key, sel); err != nil {
+		hook.Unlock()
+		lock.Unlock()
+		log.Printf("stream: %s: state admission: %v", agent, err)
+		ws.CloseNow()
+		return
+	}
 	h.mu.Lock()
 	if old := h.conns[agent]; old != nil {
 		// 旧 TCP が死んでいる場合に備え、常に新しい方を優先する
@@ -268,10 +286,7 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 	if h.OnStreamConnect != nil {
 		h.OnStreamConnect(agent, from)
 	}
-	st, err := h.backend.StateFor(agent, sel)
-	if err == nil {
-		err = c.send(ctx, proto.Message{Type: proto.MsgState, State: st})
-	}
+	st, err := h.sendState(ctx, agent, c)
 	lock.Unlock()
 	if err != nil {
 		log.Printf("stream: %s: sending state: %v", agent, err)
@@ -280,6 +295,11 @@ func (h *Hub) serve(parent context.Context, agent, from string, ws *websocket.Co
 	}
 	// 選んだ版は接続ごとに 1 回だけログに出す(仕様 7a.6 節。メッセージごとには出さない)
 	log.Printf("stream: %s connected from %s, protocol %s, sent generation %d", agent, from, protocolLabel(sel), st.Generation)
+	go h.pushWorker(ctx, agent, c)
+	defer func() {
+		cancel()
+		<-c.pushDone
+	}()
 
 	// ハートビートを受け続ける。期限内にメッセージが来なければ vpsd 側から理由コード付きで閉じる。
 	// readJSON の ctx を期限で切ると、このライブラリは内部で無条件に接続を閉じてしまい
@@ -335,38 +355,51 @@ func (h *Hub) drop(agent string, c *conn) {
 	}
 }
 
-// Push は接続中のエージェントに全体状態を送り直す(配る内容が変わったとき)。
+// Push は接続中のエージェントへ最新の全体状態の送信を予約する。
+// 接続ごとに待機は 1 件だけで、連続する要求は同じ送信にまとめる。
 func (h *Hub) Push(agent string) {
 	h.mu.Lock()
 	c := h.conns[agent]
+	if c != nil {
+		select {
+		case c.pushCh <- struct{}{}:
+		default:
+		}
+	}
 	h.mu.Unlock()
-	if c == nil {
-		return
-	}
-	st, err := h.backend.StateFor(agent, c.sel)
-	if err != nil {
-		log.Printf("stream: %s: state: %v", agent, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := c.send(ctx, proto.Message{Type: proto.MsgState, State: st}); err != nil {
-		log.Printf("stream: %s: delivery: %v", agent, err)
-		return
-	}
-	log.Printf("stream: %s: delivered generation %d", agent, st.Generation)
 }
 
-// PushAll は接続中の全エージェントに配り直す。
+// PushAll は接続中の全エージェントへの送信を予約する。
 func (h *Hub) PushAll() {
 	h.mu.Lock()
-	names := make([]string, 0, len(h.conns))
-	for n := range h.conns {
-		names = append(names, n)
+	for _, c := range h.conns {
+		select {
+		case c.pushCh <- struct{}{}:
+		default:
+		}
 	}
 	h.mu.Unlock()
-	for _, n := range names {
-		h.Push(n)
+}
+
+func (h *Hub) pushWorker(ctx context.Context, agent string, c *conn) {
+	defer close(c.pushDone)
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.pushCh:
+		}
+		st, err := h.sendState(ctx, agent, c)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("stream: %s: delivery: %v", agent, err)
+			}
+			continue
+		}
+		log.Printf("stream: %s: delivered generation %d", agent, st.Generation)
 	}
 }
 
@@ -390,16 +423,54 @@ func (h *Hub) Disconnect(agent string, code int, reason string) {
 	}
 }
 
-func (c *conn) send(ctx context.Context, m proto.Message) error {
-	b, err := json.Marshal(m)
+// RetireIfDifferent removes a connection whose authenticated registration or
+// declared key differs from a newly successful full publication. The removal
+// happens before another State can be queued for that connection.
+func (h *Hub) RetireIfDifferent(agent, identity, key string) {
+	hook := h.hookLock(agent)
+	hook.Lock()
+	h.mu.Lock()
+	c := h.conns[agent]
+	if c != nil && c.identity == identity && c.key.String() == key {
+		c = nil
+	}
+	if c != nil {
+		delete(h.conns, agent)
+		delete(h.status, agent)
+	}
+	h.mu.Unlock()
+	hook.Unlock()
+	if c != nil {
+		c.cancel()
+		c.ws.CloseNow()
+	}
+}
+
+func (h *Hub) sendState(ctx context.Context, agent string, c *conn) (*proto.State, error) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	h.mu.Lock()
+	current := h.conns[agent] == c
+	h.mu.Unlock()
+	if !current {
+		return nil, errors.New("agent connection was replaced")
+	}
+	// Select the authorized State only after owning this connection's writer.
+	// A queued push cannot retain an old State while waiting behind a send.
+	st, err := h.backend.StateFor(agent, c.identity, c.key, c.sel)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	b, err := json.Marshal(proto.Message{Type: proto.MsgState, State: st})
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
-	return c.ws.Write(ctx, websocket.MessageText, b)
+	if err := c.ws.Write(ctx, websocket.MessageText, b); err != nil {
+		return nil, err
+	}
+	return st, nil
 }
 
 // negotiateVersion は pubkey メッセージから、この接続の版と機能を決める(仕様 7a.6 節)。

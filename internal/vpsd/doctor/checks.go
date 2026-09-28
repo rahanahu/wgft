@@ -36,7 +36,7 @@ func publicPortCheck(r proto.Rule, in Input) Check {
 	}
 	c.Internal = append(c.Internal, "apply_state "+st.ApplyState)
 	if st.ActiveGeneration != nil {
-		c.Internal = append(c.Internal, fmt.Sprintf("published at generation %d", *st.ActiveGeneration))
+		c.Internal = append(c.Internal, fmt.Sprintf("forwarding value at generation %d", *st.ActiveGeneration))
 	}
 	c.ObservedAt = in.Now.UTC().Format(time.RFC3339)
 	switch st.ApplyState {
@@ -100,6 +100,7 @@ func outsideTestNext(r proto.Rule) string {
 func DataplaneCheck(in Input) Check {
 	c := Check{ID: CheckDataplane, Group: GroupServer, Label: "dataplane", ObservedAt: in.Now.UTC().Format(time.RFC3339)}
 	res := in.Rules
+	c.GenerationDetail = AgentStateGenerationDetail(res)
 	if res.DesiredGeneration == nil && res.ApplyError == "" && res.RuleStates == nil {
 		c.Status, c.Reason = StatusUnknown, ReasonNotReportedByServer
 		c.Detail = "this server does not report its forwarding state"
@@ -109,6 +110,9 @@ func DataplaneCheck(in Input) Check {
 	c.Internal = append(c.Internal, fmt.Sprintf("generation %d", res.Generation))
 	if res.DesiredGeneration != nil && res.ActiveGeneration != nil {
 		c.Internal = append(c.Internal, fmt.Sprintf("desired %d, active %d", *res.DesiredGeneration, *res.ActiveGeneration))
+	}
+	if res.AgentStateGeneration != nil {
+		c.Internal = append(c.Internal, fmt.Sprintf("full agent State at generation %d", *res.AgentStateGeneration))
 	}
 	if b := FlowBudgetLine(res.FlowBudget); b != "" {
 		c.Internal = append(c.Internal, b)
@@ -136,10 +140,22 @@ func DataplaneCheck(in Input) Check {
 	if stop != "" {
 		c.Status, c.Reason = StatusFailed, ReasonIPForwardOff
 		c.Detail = stop
+		if res.AgentStatePending != nil && *res.AgentStatePending {
+			c.Detail += "; the saved declaration has not reached the full agent State publication"
+		}
 		if res.ApplyError != "" {
 			c.Detail += "; apply error: " + res.ApplyError
 		}
 		c.Next = ipForwardNext
+		return c
+	}
+	if res.AgentStatePending != nil && *res.AgentStatePending {
+		c.Status, c.Reason = StatusUnknown, ReasonAgentStatePending
+		c.Detail = "the saved declaration has not reached the full agent State publication"
+		if res.ApplyError != "" {
+			c.Detail += ": " + res.ApplyError
+		}
+		c.Next = "fix the apply error; the server retries every 30s. Check agent State after the retry succeeds"
 		return c
 	}
 	if res.ApplyError != "" {
@@ -151,6 +167,28 @@ func DataplaneCheck(in Input) Check {
 	c.Status = StatusOK
 	c.Detail = fmt.Sprintf("the server's forwarding matches the current rules, generation %d, read just now", res.Generation) + ipForwardIdleNote(res)
 	return c
+}
+
+// AgentStateGenerationDetail names both publication generations only when the
+// values differ or the server reports a saved full declaration as pending.
+func AgentStateGenerationDetail(res *adminapi.BatchResponse) string {
+	if res == nil {
+		return ""
+	}
+	pending := res.AgentStatePending != nil && *res.AgentStatePending
+	different := res.ActiveGeneration != nil && res.AgentStateGeneration != nil &&
+		*res.ActiveGeneration != *res.AgentStateGeneration
+	if !pending && !different {
+		return ""
+	}
+	value := func(n *uint64) string {
+		if n == nil {
+			return "unreported"
+		}
+		return fmt.Sprint(*n)
+	}
+	return "active_generation=" + value(res.ActiveGeneration) +
+		", agent_state_generation=" + value(res.AgentStateGeneration)
 }
 
 // ipForwardNext は、この VPS の ip_forward が 0 のときの次の一手である。server は起動時にだけ 1 に

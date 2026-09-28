@@ -88,8 +88,14 @@ type BatchResponse struct {
 	// 以下は server のデータプレーンへの適用状態(設計文書 7a.3 節)。v1 への加算で、報告を持たない
 	// Backend では省く。DesiredGeneration は最後に適用を試みた宣言の世代、ActiveGeneration は
 	// 最後に成功した適用の世代(backend 全体の失敗では進まない)。
-	DesiredGeneration *uint64              `json:"desired_generation,omitempty"`
-	ActiveGeneration  *uint64              `json:"active_generation,omitempty"`
+	DesiredGeneration *uint64 `json:"desired_generation,omitempty"`
+	ActiveGeneration  *uint64 `json:"active_generation,omitempty"`
+	// AgentStateGeneration is the last successful full State publication. A disable-only
+	// overlay can advance the delivered wire generation without changing this value.
+	AgentStateGeneration *uint64 `json:"agent_state_generation,omitempty"`
+	// AgentStatePending reports a saved full declaration without a matching successful
+	// State publication. Its explicit false value distinguishes a reporting server.
+	AgentStatePending *bool                `json:"agent_state_pending,omitempty"`
 	RuleStates        map[string]RuleApply `json:"rule_states,omitempty"` // rule_id → 適用状態
 	Drift             *Drift               `json:"drift,omitempty"`
 	ApplyError        string               `json:"apply_error,omitempty"` // 最後の適用の backend 全体の失敗か、公開の後の修復の失敗

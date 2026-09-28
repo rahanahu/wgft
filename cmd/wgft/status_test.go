@@ -455,6 +455,74 @@ func TestServerStatusOfGenerationGap(t *testing.T) {
 	}
 }
 
+func TestServerStatusOfPendingAgentStateWithEqualDataplaneGeneration(t *testing.T) {
+	desired, active, full, pending := uint64(11), uint64(11), uint64(10), true
+	res := &admin.BatchResponse{DesiredGeneration: &desired, ActiveGeneration: &active,
+		AgentStateGeneration: &full, AgentStatePending: &pending}
+	got := serverStatusOf(res)
+	if got.Status != serverDegraded || !strings.Contains(got.Detail, "full agent State") {
+		t.Fatalf("saved but unpublished State reported healthy: %+v", got)
+	}
+}
+
+func TestStatusHumanPublicationGenerations(t *testing.T) {
+	active, older := uint64(11), uint64(10)
+	falseValue, trueValue := false, true
+	for _, tc := range []struct {
+		name    string
+		full    *uint64
+		pending *bool
+		want    string
+	}{
+		{name: "matching healthy", full: &active, pending: &falseValue},
+		{name: "different healthy", full: &older, pending: &falseValue, want: "active_generation=11, agent_state_generation=10"},
+		{name: "equal pending", full: &active, pending: &trueValue, want: "active_generation=11, agent_state_generation=11"},
+		{name: "pending with missing full generation", pending: &trueValue, want: "active_generation=11, agent_state_generation=unreported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &admin.BatchResponse{DesiredGeneration: &active, ActiveGeneration: &active,
+				AgentStateGeneration: tc.full, AgentStatePending: tc.pending}
+			rep := buildStatusReport(statusInput{Rules: res})
+			var buf bytes.Buffer
+			writeStatusReport(&buf, rep)
+			firstLine := strings.SplitN(buf.String(), "\n", 2)[0]
+			if tc.want == "" {
+				if strings.Contains(firstLine, "active_generation=") {
+					t.Fatalf("normal status showed internal generations: %s", firstLine)
+				}
+			} else if !strings.Contains(firstLine, tc.want) {
+				t.Fatalf("status omitted publication generations: %s", firstLine)
+			}
+			if tc.pending != nil && *tc.pending && !strings.Contains(firstLine, "has not reached the full agent State publication") {
+				t.Fatalf("equal generations hid the pending declaration: %s", firstLine)
+			}
+			data, err := json.Marshal(rep.Server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "active_generation") || strings.Contains(string(data), "agent_state_generation") {
+				t.Fatalf("human generation detail changed status JSON: %s", data)
+			}
+		})
+	}
+}
+
+func TestServerStatusOfStoppedForwardingAndPendingAgentState(t *testing.T) {
+	generation, pending := uint64(11), true
+	res := &admin.BatchResponse{
+		Generation: generation, DesiredGeneration: &generation, ActiveGeneration: &generation,
+		AgentStatePending: &pending,
+		IPForward:         &admin.IPForwardStatus{Value: "0"},
+		Rules:             []proto.Rule{{ID: "active-rule", Enabled: true, VPSMode: proto.ModeKernel}},
+		RuleStates:        map[string]admin.RuleApply{"active-rule": {ApplyState: admin.ApplyActive}},
+	}
+	got := serverStatusOf(res)
+	if got.Status != serverDegraded || !strings.Contains(got.Detail, "kernel forwards none") ||
+		!strings.Contains(got.Detail, "full agent State publication") {
+		t.Fatalf("observed forwarding stop or pending State was hidden: %+v", got)
+	}
+}
+
 // TestServerStatusOfApplyError は、世代が揃っていても apply_error が残っていれば健全でない
 // ことを確かめる(戻れない地点の後の修復の失敗、design.md 7a.3 節)。
 func TestServerStatusOfApplyError(t *testing.T) {

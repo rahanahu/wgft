@@ -3,6 +3,7 @@
 package vpsd
 
 import (
+	"fmt"
 	"github.com/rahanahu/wgft/proto"
 	"log"
 	"net/netip"
@@ -29,12 +30,12 @@ func (d *Daemon) Register(joinToken, name, from string) (string, string, netip.A
 }
 
 // Authenticate / ServerPublicKey / OtherAgentHasKey / SetPublicKey / StateFor は stream.Backend の実装。
-func (d *Daemon) Authenticate(token string) (string, error) {
+func (d *Daemon) Authenticate(token string) (string, string, error) {
 	a, err := d.st.AuthenticateAgent(token)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return a.Name, nil
+	return a.Name, a.Identity, nil
 }
 
 func (d *Daemon) ServerPublicKey() wgtypes.Key { return d.serverKey.PublicKey() }
@@ -52,17 +53,29 @@ func (d *Daemon) OtherAgentHasKey(agent string, key wgtypes.Key) (bool, error) {
 	return false, nil
 }
 
-// SetPublicKey は宣言された公開鍵を保存し、wg0 のピアを置き換える(初回なら作る)。ピアの変更は
+// SetPublicKey は認証時の登録 identity が現在も有効なときに宣言された公開鍵を扱う。
+// 保存済みの新しい鍵が未公開なら、成功済みの旧鍵の再接続は保存値を変えずに通す。
+// それ以外の鍵変更は保存し、wg0 のピアを置き換える(初回なら作る)。ピアの変更は
 // トランザクション(applyNFT)の一部で、新しいピアをテーブルの差し替えの前に足し、古いピアを差し替えの
 // 後に外す(設計文書 7a.3 節)。テーブルの中身は変わらない(アドレスは同じ)が、差し替えは行う。
-func (d *Daemon) SetPublicKey(agent string, key wgtypes.Key) error {
+func (d *Daemon) SetPublicKey(agent, identity string, key wgtypes.Key) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	cur, err := d.st.AgentByName(agent)
 	if err != nil {
 		return err
 	}
+	if cur.Identity != identity {
+		return fmt.Errorf("agent %q registration changed", agent)
+	}
 	if cur.PublicKey == key.String() {
+		return nil
+	}
+	// The database may hold a newer key whose full apply failed. A reconnect
+	// with the last successfully published key may use P/D temporarily without
+	// replacing that saved declaration or attempting a reverse rotation.
+	presented := key.String()
+	if _, err := d.delivery.state(agent, identity, &presented); err == nil {
 		return nil
 	}
 	if err := d.st.SetAgentPublicKey(agent, key.String()); err != nil {
@@ -80,16 +93,25 @@ func (d *Daemon) SetPublicKey(agent string, key wgtypes.Key) error {
 	return d.applyNFT(rules)
 }
 
-// StateFor は stream.Backend の実装。AgentState が組み立てた全体状態に、sel(この接続で交渉した
-// 版と機能。仕様 7a.6 節)を足す。sel.Legacy な agent には版のフィールドを載せない(今の形のまま)。
-func (d *Daemon) StateFor(agent string, sel proto.Negotiated) (*proto.State, error) {
-	st, err := d.AgentState(agent)
+// StateFor は stream.Backend の実装。認証時と現在の登録 identity、およびこの接続が宣言した鍵を成功済みの
+// 配信状態と照合し、sel(この接続で交渉した版と機能。仕様 7a.6 節)を足す。
+// sel.Legacy な agent には版のフィールドを載せない。
+func (d *Daemon) StateFor(agent, identity string, key wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
+	a, err := d.st.AgentByName(agent)
+	if err != nil {
+		return nil, err
+	}
+	if a.Identity != identity {
+		return nil, fmt.Errorf("agent %q registration changed", agent)
+	}
+	presented := key.String()
+	st, err := d.delivery.state(agent, identity, &presented)
 	if err != nil {
 		return nil, err
 	}
 	if !sel.Legacy {
 		version := sel.Version
-		caps := proto.SupportedCapabilities
+		caps := append([]string{}, proto.SupportedCapabilities...)
 		st.ServerProtocolVersion = &version
 		st.ServerCapabilities = &caps
 	}

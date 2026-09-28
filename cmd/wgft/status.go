@@ -40,9 +40,9 @@ type statusReport struct {
 	Warnings warningsStatus `json:"warnings"`
 }
 
-// serverStatus は server 側のデータプレーンへの適用が、宣言に追いついているかどうかである。
-// 証拠は `GET /api/v1/rules` の desired_generation、active_generation、apply_error の 3 つだけ
-// である(design.md 10.2b 節)。
+// serverStatus は、server の転送面と配信用の全体 State が宣言に追いついているかを見る。
+// 証拠は `GET /api/v1/rules` の desired_generation、active_generation、apply_error、
+// agent_state_pending、ip_forward である(design.md 10.2b 節)。
 type serverStatus struct {
 	// Status は serverHealthy、serverDegraded、statusUnknown(doctor.go)のいずれかである。
 	// bool では unknown を表せないので、この版から文字列にした(design.md 10.2b 節)。
@@ -50,6 +50,8 @@ type serverStatus struct {
 	// Detail は人向けの 1 文で、Status が serverHealthy 以外のときだけ持つ。保証の対象ではない
 	// (design.md 10.2b 節)。
 	Detail string `json:"detail,omitempty"`
+	// generationDetail is for ordinary output only; the JSON summary keeps its shape.
+	generationDetail string
 }
 
 // serverStatus.Status の値。healthy と degraded は `wgft status` 独自の語彙で、`server doctor`
@@ -204,8 +206,10 @@ func newStatusCmd() *cobra.Command {
 // 節点しか読まないが、目的が違うので判定はここに独立して持つ。1 つの故障が見つかった時点で
 // 「どこで止まったか」を決めつけず、4 つの数を淡々と数えるだけにとどめる。
 func buildStatusReport(in statusInput) statusReport {
+	server := serverStatusOf(in.Rules)
+	server.generationDetail = doctor.AgentStateGenerationDetail(in.Rules)
 	return statusReport{
-		Server:   serverStatusOf(in.Rules),
+		Server:   server,
 		Agents:   agentsStatusOf(in.Agents, in.Now),
 		Rules:    rulesStatusOf(in.Rules, in.Agents, in.Now),
 		Warnings: warningsStatusOf(in.Warnings, in.Now),
@@ -251,6 +255,16 @@ func serverStatusOf(res *admin.BatchResponse) serverStatus {
 	}
 	if stop != "" {
 		detail := stop
+		if res.AgentStatePending != nil && *res.AgentStatePending {
+			detail += "; the saved declaration has not reached the full agent State publication"
+		}
+		if res.ApplyError != "" {
+			detail += "; " + res.ApplyError
+		}
+		return serverStatus{Status: serverDegraded, Detail: detail}
+	}
+	if res.AgentStatePending != nil && *res.AgentStatePending {
+		detail := "the saved declaration has not reached the full agent State publication"
 		if res.ApplyError != "" {
 			detail += "; " + res.ApplyError
 		}
@@ -463,10 +477,17 @@ const (
 	statusValueWidth = 15
 )
 
-// writeStatusReport は 4 行を出す。正常な行は理由を出さず、内部の値(世代、apply_state の
-// 文字列、エンドポイント)も出さない(design.md 10.2b 節)。
+// writeStatusReport は 4 行を出す。世代の食い違いか未公開の宣言があるときだけ、
+// Server 行に両方の世代を示す(design.md 10.2b 節)。
 func writeStatusReport(w io.Writer, rep statusReport) {
-	writeStatusLine(w, "Server", rep.Server.Status, rep.Server.Detail)
+	serverDetail := rep.Server.Detail
+	if rep.Server.generationDetail != "" {
+		if serverDetail != "" {
+			serverDetail += "; "
+		}
+		serverDetail += rep.Server.generationDetail
+	}
+	writeStatusLine(w, "Server", rep.Server.Status, serverDetail)
 	writeStatusLine(w, "Agents", agentsValue(rep.Agents), rep.Agents.Detail)
 	writeStatusLine(w, "Rules", rulesValue(rep.Rules), rep.Rules.Detail)
 	warnings := "none"

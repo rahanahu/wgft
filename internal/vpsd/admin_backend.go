@@ -16,7 +16,6 @@ import (
 	"github.com/rahanahu/wgft/proto"
 	"log"
 	"net"
-	"net/netip"
 	"strconv"
 	"time"
 )
@@ -173,6 +172,7 @@ func (d *Daemon) Revoke(name string) error {
 	if err := d.st.RevokeAgent(name); err != nil {
 		return err
 	}
+	d.delivery.revoke(name)
 	_ = d.st.ClearWarning(name, store.WarnIPMismatch, "")
 	_ = d.st.ClearWarning(name, store.WarnIPFlapping, "")
 	log.Printf("revoked agent %s", name)
@@ -275,35 +275,17 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 // エージェントは既存の enabled の扱いでリスナーとセッションを閉じるので、無効化を知らない旧い版の
 // エージェントも止まる。AgentDisabled は診断のためのもので、守りには使わない。
 //
-// エージェントの行、ルール集合、世代は 1 回の読み(store.AgentSnapshot)で得る。配信は goroutine から
-// 並行に走り、その間に管理者の変更が確定しうるので、別々に読むと世代と内容が食い違う。
+// 配信内容は、成功した適用の時点で保持した全体状態から得る。データベースの行は登録 identity
+// の確認にだけ使う。保存済みの鍵がまだ適用されていなくても、管理用 API は最後の成功状態を示す。
 func (d *Daemon) AgentState(agent string) (*proto.State, error) {
-	snap, err := d.st.AgentSnapshot(agent)
+	a, err := d.st.AgentByName(agent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("agent %q is not registered", agent)
 	}
 	if err != nil {
 		return nil, err
 	}
-	addr, disabled, rules, gen := snap.Agent.Address, snap.Agent.Disabled(), snap.Rules, snap.Generation
-	wgAddr := d.network
-	timeouts := d.udpTimeouts()
-	st := &proto.State{
-		Generation: gen,
-		WG: proto.WGConfig{
-			ServerPubkey: d.serverKey.PublicKey().String(), Endpoint: d.opts.WGEndpoint,
-			Address: netip.PrefixFrom(addr, wgAddr.Bits()).String(), MTU: d.opts.MTU, Keepalive: 25,
-			UDPTimeout: timeouts.Timeout, UDPTimeoutStream: timeouts.TimeoutStream,
-		},
-		Rules:         []proto.AgentRule{},
-		AgentDisabled: disabled,
-	}
-	for i := range rules {
-		if rules[i].Agent == agent {
-			st.Rules = append(st.Rules, store.DeliveredRule(&rules[i], disabled))
-		}
-	}
-	return st, nil
+	return d.delivery.state(agent, a.Identity, nil)
 }
 
 // DismissWarning は警告を消す(管理者が正当と確認したとき。仕様 5.2 節)。ip-mismatch では、
@@ -414,8 +396,8 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 // (設計文書 7a.3 節)を管理用 API の形に写す。最初の適用を試みるまでは false を返す。
 func (d *Daemon) ApplyStatus() (admin.ApplyStatus, bool) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	rec := d.rec
-	d.mu.Unlock()
 	if rec == nil {
 		return admin.ApplyStatus{}, false
 	}
@@ -423,7 +405,10 @@ func (d *Daemon) ApplyStatus() (admin.ApplyStatus, bool) {
 	if !st.Reconciled {
 		return admin.ApplyStatus{}, false
 	}
-	return applyStatusToAdmin(st), true
+	out := applyStatusToAdmin(st)
+	generation, pending := d.delivery.status()
+	out.AgentStateGeneration, out.AgentStatePending = generation, &pending
+	return out, true
 }
 
 // udpPooler is implemented by a serverDataplane that tracks UDP flows in a resource.Pool. Only

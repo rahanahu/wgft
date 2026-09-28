@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -26,6 +27,7 @@ func ValidAgentName(name string) bool {
 // Agent は登録済みのエージェント。
 type Agent struct {
 	Name           string
+	Identity       string // hash of the permanent registration token
 	Address        netip.Addr
 	PublicKey      string // base64。未接続なら空
 	CreatedAt      time.Time
@@ -242,11 +244,12 @@ func agentByTx(q querier, where string, arg any) (*Agent, error) {
 		a        Agent
 		addr     string
 		pub      sql.NullString
+		identity []byte
 		created  int64
 		disabled sql.NullInt64
 	)
-	err := q.QueryRow("SELECT name, address, public_key, created_at, registered_from, disabled_at FROM agents WHERE "+where, arg).
-		Scan(&a.Name, &addr, &pub, &created, &a.RegisteredFrom, &disabled)
+	err := q.QueryRow("SELECT name, address, public_key, token_hash, created_at, registered_from, disabled_at FROM agents WHERE "+where, arg).
+		Scan(&a.Name, &addr, &pub, &identity, &created, &a.RegisteredFrom, &disabled)
 	if err != nil {
 		return nil, err
 	}
@@ -258,13 +261,14 @@ func agentByTx(q querier, where string, arg any) (*Agent, error) {
 		return nil, fmt.Errorf("agent %s: stored address %q: %w", a.Name, addr, err)
 	}
 	a.PublicKey = pub.String
+	a.Identity = hex.EncodeToString(identity)
 	a.CreatedAt = time.Unix(created, 0)
 	return &a, nil
 }
 
 // Agents は登録済みのエージェントを名前順で返す。
 func (s *Store) Agents() ([]Agent, error) {
-	rows, err := s.db.Query("SELECT name, address, public_key, created_at, registered_from, disabled_at FROM agents ORDER BY name")
+	rows, err := s.db.Query("SELECT name, address, public_key, token_hash, created_at, registered_from, disabled_at FROM agents ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -275,10 +279,11 @@ func (s *Store) Agents() ([]Agent, error) {
 			a        Agent
 			addr     string
 			pub      sql.NullString
+			identity []byte
 			created  int64
 			disabled sql.NullInt64
 		)
-		if err := rows.Scan(&a.Name, &addr, &pub, &created, &a.RegisteredFrom, &disabled); err != nil {
+		if err := rows.Scan(&a.Name, &addr, &pub, &identity, &created, &a.RegisteredFrom, &disabled); err != nil {
 			return nil, err
 		}
 		a.DisabledAt = disabledTime(disabled)
@@ -287,6 +292,7 @@ func (s *Store) Agents() ([]Agent, error) {
 			return nil, fmt.Errorf("agent %s: stored address %q: %w", a.Name, addr, err)
 		}
 		a.PublicKey = pub.String
+		a.Identity = hex.EncodeToString(identity)
 		a.CreatedAt = time.Unix(created, 0)
 		out = append(out, a)
 	}

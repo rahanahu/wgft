@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,6 +80,59 @@ var doctorNow = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 func at(d time.Duration) string { return doctorNow.Add(-d).Format(time.RFC3339) }
 
 func u64(v uint64) *uint64 { return &v }
+
+func TestDoctorHumanPublicationGenerations(t *testing.T) {
+	active, older := uint64(11), uint64(10)
+	falseValue, trueValue := false, true
+	for _, tc := range []struct {
+		name    string
+		full    uint64
+		pending *bool
+		want    string
+	}{
+		{name: "matching healthy", full: active, pending: &falseValue},
+		{name: "different healthy", full: older, pending: &falseValue, want: "agent_state_generation=10"},
+		{name: "equal pending", full: active, pending: &trueValue, want: "agent_state_generation=11"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &admin.BatchResponse{
+				Generation: active, DesiredGeneration: &active, ActiveGeneration: &active,
+				AgentStateGeneration: &tc.full, AgentStatePending: tc.pending,
+				RuleStates: map[string]admin.RuleApply{},
+			}
+			rep := buildReport(nil, doctorInput{Now: doctorNow, Rules: res})
+			var survey bytes.Buffer
+			writeSurvey(&survey, rep, false)
+			if tc.want == "" {
+				if strings.Contains(survey.String(), "active_generation=") {
+					t.Fatalf("normal doctor showed internal generations: %s", survey.String())
+				}
+			} else if !strings.Contains(survey.String(), "active_generation=11") ||
+				!strings.Contains(survey.String(), tc.want) {
+				t.Fatalf("doctor omitted publication generations: %s", survey.String())
+			}
+			if tc.pending != nil && *tc.pending &&
+				!strings.Contains(survey.String(), "has not reached the full agent State publication") {
+				t.Fatalf("equal generations hid the pending declaration: %s", survey.String())
+			}
+			data, err := json.Marshal(rep.Checks[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "active_generation=") || strings.Contains(string(data), "agent_state_generation=") {
+				t.Fatalf("human generation detail changed doctor JSON: %s", data)
+			}
+			if tc.want != "" {
+				rep.Rules = []ruleReport{{RuleID: "rule", Proto: "tcp", ListenPort: "4000", Target: "target", Status: statusOK}}
+				var single bytes.Buffer
+				writeRuleReport(&single, rep, false)
+				if !strings.Contains(single.String(), "active_generation=11") || !strings.Contains(single.String(), tc.want) {
+					t.Fatalf("single-rule doctor omitted publication generations: %s", single.String())
+				}
+			}
+		})
+	}
+}
 
 // tcpRule は診断の対象にする健全な TCP のルールである。
 func tcpRule() proto.Rule {
