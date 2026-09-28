@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -11,6 +12,36 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
+// 同じ番号は番号の一致だけを示す。内容の確認不能は JSON の detail と通常の一覧の両方に残し、
+// ルールの健全性や終了コードを下げない。
+func TestMatchingGenerationDoesNotVerifyStateContent(t *testing.T) {
+	r := tcpRule()
+	in := healthyInput(r)
+	rep := buildReport([]proto.Rule{r}, in)
+	c := checkOf(t, rep.Checks, checkRulesReceived)
+	if c.Status != statusOK || c.Reason != "" || c.Label != "rule generation" {
+		t.Fatalf("generation check = %+v", c)
+	}
+	if !strings.Contains(c.Detail, "matching this server's generation") || !strings.Contains(c.Detail, "applied State content is UNKNOWN") {
+		t.Errorf("equal numbers must not confirm State content: %q", c.Detail)
+	}
+	if rep.Rules[0].Status != statusOK || doctorExit(rep) != nil {
+		t.Errorf("an unverified content alone must not mark forwarding failed: %+v", rep.Rules[0])
+	}
+	var out bytes.Buffer
+	writeSurvey(&out, rep, false)
+	if n := strings.Count(out.String(), "whether the agent applied the exact State content"); n != 1 {
+		t.Errorf("survey should show the limitation once, got %d:\n%s", n, out.String())
+	}
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`applied State content is UNKNOWN`)) || bytes.Contains(b, []byte(`"agent.state_content"`)) {
+		t.Errorf("JSON must retain the existing check shape and explicit content limit: %s", b)
+	}
+}
+
 // TestRulesReceivedGenerationLag は、`agent.rules_received` がルール集合の世代の遅れを、
 // 遅れの始まり(管理用 API の generation_behind_since)からの長さで 2 つに分けることを確かめる
 // (設計文書 10.2a 節、v1.1.1 の所有者の決定)。60 秒未満は届きかけとして UNKNOWN
@@ -18,7 +49,7 @@ import (
 // 始まりが無い応答は v1.1 のまま FAILED、切れているエージェントは stale_report のままである。
 func TestRulesReceivedGenerationLag(t *testing.T) {
 	// v1.1 の原因の候補と次の手順。始まりを返さない旧い server の場合はこのまま出す
-	const v11Advice = "the new rules are in flight and will be applied in a moment\n" +
+	const v11Advice = "the new generation may still be in flight\n" +
 		"the agent is connected but is not applying them; see its log\n" +
 		"re-run in a few seconds; if it stays behind, read the agent's log. A rule moved to another agent carries no traffic until that agent takes the new rule set."
 	cases := []struct {
@@ -45,7 +76,7 @@ func TestRulesReceivedGenerationLag(t *testing.T) {
 		{
 			name: "lag of exactly 60s", connected: true, since: at(60 * time.Second),
 			wantStatus: statusFailed, wantReason: reasonGenerationBehind,
-			wantDetail: "it has been behind for 1m0s without taking", wantRule: statusFailed, wantExit: true,
+			wantDetail: "it has been behind for 1m0s without reporting", wantRule: statusFailed, wantExit: true,
 		},
 		{
 			name: "lag of 10m", connected: true, since: at(10 * time.Minute),
@@ -55,7 +86,7 @@ func TestRulesReceivedGenerationLag(t *testing.T) {
 		{
 			name: "server that does not report the lag start", connected: true, since: "",
 			wantStatus: statusFailed, wantReason: reasonGenerationBehind,
-			wantDetail: "it has not taken the latest rule set yet", wantRule: statusFailed, wantExit: true,
+			wantDetail: "it has not reported the latest generation yet", wantRule: statusFailed, wantExit: true,
 		},
 		{
 			name: "reconnected agent before its first heartbeat, no lag start", connected: true, noHB: true,
@@ -77,7 +108,7 @@ func TestRulesReceivedGenerationLag(t *testing.T) {
 		{
 			name: "disconnected agent keeps stale_report", connected: false, since: at(10 * time.Minute),
 			wantStatus: statusUnknown, wantReason: reasonStaleReport,
-			wantDetail: "last: it held rule set 11", wantRule: statusUnknown,
+			wantDetail: "last: the agent reported generation 11", wantRule: statusUnknown,
 		},
 	}
 	for _, tc := range cases {
@@ -109,6 +140,9 @@ func TestRulesReceivedGenerationLag(t *testing.T) {
 			}
 			if !strings.Contains(c.Detail, tc.wantDetail) {
 				t.Errorf("detail = %q, want it to contain %q", c.Detail, tc.wantDetail)
+			}
+			if !strings.Contains(c.Detail, "applied State content is UNKNOWN") {
+				t.Errorf("detail hides the unverifiable State content: %q", c.Detail)
 			}
 			if strings.Contains(c.Detail, "this rule") {
 				t.Errorf("detail must not claim this particular rule has not arrived, got %q", c.Detail)

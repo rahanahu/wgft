@@ -447,7 +447,7 @@ func TestDoctorPathKeepsDataplaneOutOfTheNodes(t *testing.T) {
 	}
 }
 
-// TestDoctorAgentPathShowsTheStatusAsIs は、エージェントの行が tunnel、stream、rules の順で、
+// TestDoctorAgentPathShowsTheStatusAsIs は、エージェントの行が tunnel、stream、generation の順で、
 // 状態をそのまま出すことを確かめる。エージェントには StoppedAt が無いので、「届いていない」への
 // 置き換えをしない。
 func TestDoctorAgentPathShowsTheStatusAsIs(t *testing.T) {
@@ -464,8 +464,8 @@ func TestDoctorAgentPathShowsTheStatusAsIs(t *testing.T) {
 			t.Errorf("agent node %s is drawn not reached; the agent row shows statuses as is", n.Name)
 		}
 	}
-	if strings.Join(names, " ") != "tunnel stream rules" {
-		t.Errorf("agent row order = %v, want tunnel stream rules", names)
+	if strings.Join(names, " ") != "tunnel stream generation" {
+		t.Errorf("agent row order = %v, want tunnel stream generation", names)
 	}
 	if p.Nodes[0].State != nodeFailed {
 		t.Errorf("a stale tunnel must read failed in the agent row, got %s", p.Nodes[0].State)

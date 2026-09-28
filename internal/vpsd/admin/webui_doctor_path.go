@@ -53,7 +53,7 @@ var doctorNodeDefs = []doctorNodeDef{
 var doctorAgentNodeDefs = []doctorNodeDef{
 	{"tunnel", []string{doctor.CheckHandshake}},
 	{"stream", []string{doctor.CheckConnection}},
-	{"rules", []string{doctor.CheckRulesReceived}},
+	{"generation", []string{doctor.CheckRulesReceived}},
 }
 
 // 節点の描き方の種類。styles.css の .node の修飾子と同じ名前である。
