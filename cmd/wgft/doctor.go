@@ -232,6 +232,16 @@ func writeLine(w io.Writer, label, status, detail string) {
 	}
 }
 
+func checkHumanDetail(c checkReport) string {
+	if c.GenerationDetail == "" {
+		return c.Detail
+	}
+	if c.Detail == "" {
+		return c.GenerationDetail
+	}
+	return c.Detail + "; " + c.GenerationDetail
+}
+
 // writeRuleReport は 1 本のルールの経路を、まとまりごとに出す。
 func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 	indent := 2 + labelWidth + 1
@@ -254,7 +264,7 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 				fmt.Fprintln(w, g)
 				group = g
 			}
-			writeLine(w, c.Label, displayStatus(c), c.Detail)
+			writeLine(w, c.Label, displayStatus(c), checkHumanDetail(c))
 			for _, cause := range c.Causes {
 				fmt.Fprintf(w, "%s- %s\n", strings.Repeat(" ", indent), wrapAt(cause, indent+2))
 			}
@@ -344,7 +354,7 @@ func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
 		}
 	}
 	fmt.Fprintln(w, "Server")
-	writeLine(w, dp.Label, displayStatus(dp), dp.Detail)
+	writeLine(w, dp.Label, displayStatus(dp), checkHumanDetail(dp))
 	if dp.Status != statusOK && dp.Next != "" {
 		writeNext(w, dp.Next, indent)
 	}

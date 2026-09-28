@@ -213,6 +213,9 @@ type Check struct {
 	Next string `json:"next,omitempty"`
 	// Internal は wgft 自身を追うときだけ要る値である。人向けの出力では --verbose で出す。
 	Internal []string `json:"internal,omitempty"`
+	// GenerationDetail is shown in ordinary CLI output only when forwarding and full State
+	// publication differ or a saved declaration is pending. JSON keeps its existing shape.
+	GenerationDetail string `json:"-"`
 	// LastReplyAt、ReplySince、ReplyNotObserved は、UDP のルールの rule.target だけが持つ、server
 	// 自身が見た宛先の応答の観測である(設計文書 10.2a 節「UDP の応答の観測」)。管理用 API の
 	// udp_replies の写しで、報告の無い server では省く。どれも Status、Reason、ObservedAt を

@@ -100,6 +100,7 @@ func outsideTestNext(r proto.Rule) string {
 func DataplaneCheck(in Input) Check {
 	c := Check{ID: CheckDataplane, Group: GroupServer, Label: "dataplane", ObservedAt: in.Now.UTC().Format(time.RFC3339)}
 	res := in.Rules
+	c.GenerationDetail = AgentStateGenerationDetail(res)
 	if res.DesiredGeneration == nil && res.ApplyError == "" && res.RuleStates == nil {
 		c.Status, c.Reason = StatusUnknown, ReasonNotReportedByServer
 		c.Detail = "this server does not report its forwarding state"
@@ -166,6 +167,28 @@ func DataplaneCheck(in Input) Check {
 	c.Status = StatusOK
 	c.Detail = fmt.Sprintf("the server's forwarding matches the current rules, generation %d, read just now", res.Generation) + ipForwardIdleNote(res)
 	return c
+}
+
+// AgentStateGenerationDetail names both publication generations only when the
+// values differ or the server reports a saved full declaration as pending.
+func AgentStateGenerationDetail(res *adminapi.BatchResponse) string {
+	if res == nil {
+		return ""
+	}
+	pending := res.AgentStatePending != nil && *res.AgentStatePending
+	different := res.ActiveGeneration != nil && res.AgentStateGeneration != nil &&
+		*res.ActiveGeneration != *res.AgentStateGeneration
+	if !pending && !different {
+		return ""
+	}
+	value := func(n *uint64) string {
+		if n == nil {
+			return "unreported"
+		}
+		return fmt.Sprint(*n)
+	}
+	return "active_generation=" + value(res.ActiveGeneration) +
+		", agent_state_generation=" + value(res.AgentStateGeneration)
 }
 
 // ipForwardNext は、この VPS の ip_forward が 0 のときの次の一手である。server は起動時にだけ 1 に

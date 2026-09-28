@@ -50,6 +50,8 @@ type serverStatus struct {
 	// Detail は人向けの 1 文で、Status が serverHealthy 以外のときだけ持つ。保証の対象ではない
 	// (design.md 10.2b 節)。
 	Detail string `json:"detail,omitempty"`
+	// generationDetail is for ordinary output only; the JSON summary keeps its shape.
+	generationDetail string
 }
 
 // serverStatus.Status の値。healthy と degraded は `wgft status` 独自の語彙で、`server doctor`
@@ -204,8 +206,10 @@ func newStatusCmd() *cobra.Command {
 // 節点しか読まないが、目的が違うので判定はここに独立して持つ。1 つの故障が見つかった時点で
 // 「どこで止まったか」を決めつけず、4 つの数を淡々と数えるだけにとどめる。
 func buildStatusReport(in statusInput) statusReport {
+	server := serverStatusOf(in.Rules)
+	server.generationDetail = doctor.AgentStateGenerationDetail(in.Rules)
 	return statusReport{
-		Server:   serverStatusOf(in.Rules),
+		Server:   server,
 		Agents:   agentsStatusOf(in.Agents, in.Now),
 		Rules:    rulesStatusOf(in.Rules, in.Agents, in.Now),
 		Warnings: warningsStatusOf(in.Warnings, in.Now),
@@ -473,10 +477,17 @@ const (
 	statusValueWidth = 15
 )
 
-// writeStatusReport は 4 行を出す。正常な行は理由を出さず、内部の値(世代、apply_state の
-// 文字列、エンドポイント)も出さない(design.md 10.2b 節)。
+// writeStatusReport は 4 行を出す。世代の食い違いか未公開の宣言があるときだけ、
+// Server 行に両方の世代を示す(design.md 10.2b 節)。
 func writeStatusReport(w io.Writer, rep statusReport) {
-	writeStatusLine(w, "Server", rep.Server.Status, rep.Server.Detail)
+	serverDetail := rep.Server.Detail
+	if rep.Server.generationDetail != "" {
+		if serverDetail != "" {
+			serverDetail += "; "
+		}
+		serverDetail += rep.Server.generationDetail
+	}
+	writeStatusLine(w, "Server", rep.Server.Status, serverDetail)
 	writeStatusLine(w, "Agents", agentsValue(rep.Agents), rep.Agents.Detail)
 	writeStatusLine(w, "Rules", rulesValue(rep.Rules), rep.Rules.Detail)
 	warnings := "none"
