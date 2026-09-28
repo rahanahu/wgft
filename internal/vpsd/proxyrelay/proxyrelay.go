@@ -56,6 +56,7 @@ type Options struct {
 	// ユーザー空間モードの vpsd は Go の評価器(userspace.Backend.AdmitRelayFlow)を渡す。カーネル
 	// モードでは nil で、段は nftables が待ち受けを開けているポートの行で評価する(仕様 6.1 節)。
 	// nil のときに中継に残るのは、deny と allow の状態を持たない確認だけである(仕様 6.2 節)
+	// Admit must return without calling Manager methods; stopping joins its synchronous call.
 	Admit func(ruleID string, src netip.Addr) (release func(), ok bool)
 }
 
@@ -79,15 +80,19 @@ type failure struct {
 }
 
 type listener struct {
-	rule   Rule
-	ln     net.Listener
-	mu     sync.Mutex
-	conns  map[net.Conn]string // 進行中の中継(公開側の接続 → 接続元 IP 文字列)
-	closed bool
+	rule       Rule
+	ln         net.Listener
+	mu         sync.Mutex
+	conns      map[net.Conn]string // 進行中の中継(公開側の接続 → 接続元 IP 文字列)
+	closed     bool
+	stopping   bool
+	admitting  net.Conn // owned by the accept loop until the locked handoff
+	stopAccept chan struct{}
+	serveDone  chan struct{}
 	// pending は枠を取ってから track するまでの接続の数(エージェントへの接続中)。Retiring の
 	// 待ち受けを閉じてよいか(idle)の判定に使う
 	pending int
-	// gen は実効宛先(エージェントのアドレスと待ち受けポート)を差し替えた回数。handle は accept の
+	// gen は実効宛先(エージェントのアドレスと待ち受けポート)を差し替えた回数。admission は accept の
 	// 時点の値を控え、track のときに値が変わっていれば、その接続は旧い実効宛先へつながっているので
 	// 中継を始めずに閉じる(仕様 6.2 節の実効宛先の変更)
 	gen int
@@ -233,33 +238,45 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 	m := p.m
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	kept := m.retiring[:0]
+	var stopped []*listener
+	kept := make([]*listener, 0, len(m.retiring))
 	for _, l := range m.retiring {
 		keep, ok := retiring[l.ruleID()]
 		if !ok {
-			l.close()
+			l.beginClose()
+			stopped = append(stopped, l)
 			m.opts.Logf("proxy: closed retiring relay for %d: rule %s is no longer retiring", l.port(), l.ruleID())
 			continue
 		}
 		if l.retire(keep); l.idle() {
-			l.close()
+			l.beginClose()
+			stopped = append(stopped, l)
 			continue
 		}
 		kept = append(kept, l)
 	}
-	m.retiring = kept
 	for port, l := range m.ls {
 		if _, ok := p.want[port]; !ok {
-			delete(m.ls, port)
 			if keep, ok := retiring[l.ruleID()]; ok {
-				l.stopAccepting()
+				l.beginStopAccepting()
+				stopped = append(stopped, l)
 				n := l.retire(keep)
-				m.retiring = append(m.retiring, l)
+				kept = append(kept, l)
 				m.opts.Logf("proxy: relay for %d stopped accepting: rule %s is not active; closed %d connections its new declaration refuses", port, l.ruleID(), n)
 				continue
 			}
-			l.close()
+			l.beginClose()
+			stopped = append(stopped, l)
 			m.opts.Logf("proxy: closed relay for %d", port)
+		}
+	}
+	for _, l := range stopped {
+		l.waitServeDone()
+	}
+	m.retiring = kept
+	for port := range m.ls {
+		if _, ok := p.want[port]; !ok {
+			delete(m.ls, port)
 		}
 	}
 	for port, r := range p.want {
@@ -276,7 +293,7 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 		// 枠は bind の済んだ待ち受けにだけ付け、中継を始める前に付ける。Prepare で bind に失敗した
 		// ポートはここに来ないので、そのルールは受け付けているルールの集合 A に入らない
 		// (設計文書 7a.10 節)
-		l := &listener{rule: r, ln: ln, conns: map[net.Conn]string{}, budget: m.opts.Pool.Listener(r.ID)}
+		l := &listener{rule: r, ln: ln, conns: map[net.Conn]string{}, budget: m.opts.Pool.Listener(r.ID), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
 		m.ls[port] = l
 		go m.serve(l)
 		m.opts.Logf("proxy: opened relay %d -> %s:%d proxy_protocol=%v", port, r.AgentAddr, r.AgentPort, r.ProxyProtocol)
@@ -303,34 +320,53 @@ func (p *Prepared) Rollback() {
 func (m *Manager) CloseAgent(agent string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var stopped []*listener
+	for _, l := range m.ls {
+		if l.agent() == agent {
+			l.beginClose()
+			stopped = append(stopped, l)
+		}
+	}
+	for _, l := range m.retiring {
+		if l.agent() == agent {
+			l.beginClose()
+			stopped = append(stopped, l)
+		}
+	}
+	for _, l := range stopped {
+		l.waitServeDone()
+	}
 	for port, l := range m.ls {
 		if l.agent() == agent {
-			l.close()
 			delete(m.ls, port)
 		}
 	}
 	kept := m.retiring[:0]
 	for _, l := range m.retiring {
-		if l.agent() == agent {
-			l.close()
-			continue
+		if l.agent() != agent {
+			kept = append(kept, l)
 		}
-		kept = append(kept, l)
 	}
 	m.retiring = kept
 }
 
-// Close は全中継を閉じる。Retiring の中継も閉じる。
+// Close stops every listener before joining any admission call.
 func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for port, l := range m.ls {
-		l.close()
-		delete(m.ls, port)
+	for _, l := range m.ls {
+		l.beginClose()
 	}
 	for _, l := range m.retiring {
-		l.close()
+		l.beginClose()
 	}
+	for _, l := range m.ls {
+		l.waitServeDone()
+	}
+	for _, l := range m.retiring {
+		l.waitServeDone()
+	}
+	clear(m.ls)
 	m.retiring = nil
 }
 
@@ -353,13 +389,14 @@ const (
 	acceptRetryMax = time.Second
 )
 
-// serve は待ち受けで accept を続ける。待ち受けを閉じた場合(close、stopAccepting、Rollback)は
+// serve は待ち受けで accept を続ける。待ち受けを閉じた場合(beginClose、beginStopAccepting)は
 // net.ErrClosed で戻る。それ以外の失敗、例えばファイル記述子の枯渇(EMFILE、ENFILE)では、待ち受けを
 // 開いたまま後退して試し直す。戻ってしまうと、ソケットは bind されたまま accept しない状態で残り、
 // Prepare は m.ls にあるポートを開き直さないので、`vpsd` を再起動するまでそのポートの中継が止まる。
 // Go の runtime は EINTR、EAGAIN、ECONNABORTED を自分で握って accept をやり直すので、ここに来る
 // 失敗は一時的でないものだけである。
 func (m *Manager) serve(l *listener) {
+	defer close(l.serveDone)
 	delay := time.Duration(0)
 	for {
 		c, err := l.ln.Accept()
@@ -377,48 +414,101 @@ func (m *Manager) serve(l *listener) {
 			if delay > acceptRetryMax {
 				delay = acceptRetryMax
 			}
-			time.Sleep(delay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-l.stopAccept:
+				timer.Stop()
+				return
+			}
 			continue
 		}
 		delay = 0
-		go m.handle(l, c)
+		if a := m.admitAccepted(l, c); a != nil {
+			go m.relayAdmitted(l, a)
+		}
 	}
 }
 
-func (m *Manager) handle(l *listener, c net.Conn) {
+// admitted owns both admission charges after the locked handoff.
+type admitted struct {
+	c             net.Conn
+	src           netip.Addr
+	rule          Rule
+	gen           int
+	releasePolicy func()
+}
+
+// admitAccepted runs only in the accept loop, never in a per-connection goroutine.
+func (m *Manager) admitAccepted(l *listener, c net.Conn) *admitted {
 	src := ipOf(c.RemoteAddr())
 	l.mu.Lock()
+	if l.stopping || l.closed {
+		l.mu.Unlock()
+		abortRefused(c)
+		return nil
+	}
 	rule, gen := l.rule, l.gen
+	l.admitting = c
 	l.mu.Unlock()
-	// Admission Policy(仕様 6.2 節)。ユーザー空間モードでは Go の評価器がすべての段を判定し、
-	// 拒んだ段の drop を数える。カーネルモードでは nftables が状態を持つ段を判定してパケットを捨てる
-	// ので、ここに残るのは deny と allow の状態を持たない確認だけで、その拒否は drop に数えない
+	releasePolicy := func() {}
+	handed := false
+	defer func() {
+		if !handed {
+			l.mu.Lock()
+			l.admitting = nil
+			l.mu.Unlock()
+			abortRefused(c)
+			releasePolicy()
+		}
+	}()
+	// Policy must precede the shared resource budget, including its refusal accounting.
 	if m.opts.Admit != nil {
 		release, ok := m.opts.Admit(rule.ID, src)
 		if !ok {
-			abortRefused(c)
-			return
+			return nil
 		}
-		defer release()
+		releasePolicy = release
 	} else if !sourceAllowed(src, rule) {
-		abortRefused(c)
-		return
+		return nil
 	}
-	// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の上限、他の
-	// ルールの隔離予約を Pool が 1 つの排他の中で判定する。拒んだ接続はすぐ閉じる(既存の接続は
-	// 追い出さない)
-	ref, ok := l.budget.Acquire()
+	ref, ok, cancelled := l.acquireAdmission(gen, l.budget.Acquire)
+	if cancelled {
+		return nil
+	}
 	if !ok {
-		abortRefused(c)
 		if l.capLog.Allow() {
 			m.opts.Logf("proxy: %d: %s; refusing new connections", rule.ListenPort, ref)
 		}
-		return
+		return nil
 	}
-	defer l.budget.Release()
+	handed = true
+	return &admitted{c: c, src: src, rule: rule, gen: gen, releasePolicy: releasePolicy}
+}
+
+// acquireAdmission serializes cancellation, the budget attempt and handoff.
+// acquire is the synchronous Pool operation; it must not reenter the listener.
+// The listener -> Pool lock order is also used by stop and restriction updates.
+func (l *listener) acquireAdmission(gen int, acquire func() (resource.Refusal, bool)) (ref resource.Refusal, ok, cancelled bool) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stopping || l.closed || l.gen != gen {
+		return ref, false, true
+	}
+	ref, ok = acquire()
+	if !ok {
+		return ref, false, false
+	}
+	// A committed worker may start after stop; it owns the charges until done.
+	l.admitting = nil
 	l.pending++
-	l.mu.Unlock()
+	return ref, true, false
+}
+
+func (m *Manager) relayAdmitted(l *listener, a *admitted) {
+	c, src, rule, gen := a.c, a.src, a.rule, a.gen
+	defer a.releasePolicy()
+	defer l.budget.Release()
 	pending := true
 	unpend := func() {
 		if pending {
@@ -474,7 +564,7 @@ func (l *listener) updateRestriction(r Rule) (retargeted bool, closed int) {
 	l.rule.Policy = r.Policy
 	l.rule.ProxyProtocol, l.rule.AgentAddr, l.rule.AgentPort = r.ProxyProtocol, r.AgentAddr, r.AgentPort
 	if retargeted {
-		// 旧い実効宛先へ接続中の handle は、track のときに gen の違いで気付いて閉じる
+		// 旧い実効宛先へ接続中の worker は、track のときに gen の違いで気付いて閉じる
 		l.gen++
 		for c := range l.conns {
 			c.Close()
@@ -534,16 +624,16 @@ func (l *listener) port() uint16 {
 func (l *listener) idle() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.conns) == 0 && l.pending == 0
+	return len(l.conns) == 0 && l.pending == 0 && l.admitting == nil
 }
 
-// stopAccepting は待ち受けソケットだけを閉じ、成立済みの接続には触れない(設計文書 7a.3 節の
+// beginStopAccepting は待ち受けと判定中のソケットを閉じ、成立済みの接続には触れない(設計文書 7a.3 節の
 // StopAccepting)。触れなかった接続は Retiring になり、自然に終わるまで中継を続ける。
 // 残る接続はプロセス全体の数に入り続け、ルールごとの数からは外れる(設計文書 7a.10 節の A)。
-func (l *listener) stopAccepting() {
+func (l *listener) beginStopAccepting() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.ln.Close()
+	l.stopLocked()
 	l.budget.StopAccepting()
 }
 
@@ -562,10 +652,24 @@ func (l *listener) retire(keep func(src netip.Addr) bool) int {
 	return n
 }
 
-func (l *listener) close() {
+// stopLocked invalidates uncommitted admission; it never waits for policy work.
+func (l *listener) stopLocked() {
+	if !l.stopping {
+		l.stopping = true
+		close(l.stopAccept)
+		l.ln.Close()
+		if l.admitting != nil {
+			abortRefused(l.admitting)
+		}
+	}
+}
+
+func (l *listener) waitServeDone() { <-l.serveDone }
+
+func (l *listener) beginClose() {
 	l.mu.Lock()
 	l.closed = true
-	l.ln.Close()
+	l.stopLocked()
 	// 閉じ終えていない接続の枠は、中継の goroutine が Release を呼ぶまでプロセス全体の数に残る
 	l.budget.Close()
 	for c := range l.conns {
