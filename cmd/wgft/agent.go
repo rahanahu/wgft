@@ -367,7 +367,11 @@ On the VPS, against the admin API:
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, state, a.Address, stream, ago(a.LastHeartbeat), a.Generation, tun, a.WGEndpoint, ago(a.LastHandshake), rules, protoVal, warn)
 			}
-			return w.Flush()
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(os.Stdout, "GEN is the agent-reported number; RULES is its heartbeat report; applied State content is UNKNOWN.")
+			return err
 		},
 	}
 	ls.Flags().BoolVar(&asJSON, "json", false, "output as JSON")

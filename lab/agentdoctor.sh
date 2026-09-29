@@ -226,8 +226,11 @@ sdoc=$(vps wgft server doctor "$R_LO" --admin "$ADMIN" --json 2>/dev/null | pyth
 import json, sys
 d = json.load(sys.stdin)
 print(" ".join(c["id"] + "=" + c.get("reason", "") for c in d["checks"] if c["id"] == "rule.target"))
+print(" ".join("generation=" + c["status"] + " " + c["detail"] for c in d["checks"] if c["id"] == "agent.rules_received"))
 ')
 check "server doctor names target_loopback_unsupported" "rule.target=target_loopback_unsupported" "$sdoc"
+check "server doctor keeps equal generation number-only" "generation=ok the agent reported generation" "$sdoc"
+check "server doctor leaves applied State content unknown" "applied State content is UNKNOWN" "$sdoc"
 vps wgft rule rm "$R_LO" --admin "$ADMIN" >/dev/null
 wait_until 30 caught_up
 

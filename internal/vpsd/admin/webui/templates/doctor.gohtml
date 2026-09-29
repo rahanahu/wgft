@@ -68,13 +68,13 @@
   <div class="table-scroll">
     <table class="data-table doctor-table">
       <thead>
-        <tr><th>{{ T .Locale "colAgent" }}</th><th class="path-head">tunnel - stream - rules</th><th>{{ T .Locale "doctorFinding" }}</th></tr>
+        <tr><th>{{ T .Locale "colAgent" }}</th><th class="path-head">tunnel - stream - generation</th><th>{{ T .Locale "doctorFinding" }}</th></tr>
       </thead>
       <tbody>
         {{ range .Agents }}
         <tr>
           <td data-label="{{ T $.Locale "colAgent" }}"><span class="check-label">{{ .Name }}</span> <span class="badge {{ .Badge }}">{{ .Status }}</span></td>
-          <td data-label="tunnel - stream - rules">{{ template "doctorpathmini" .Path }}</td>
+          <td data-label="tunnel - stream - generation">{{ template "doctorpathmini" .Path }}</td>
           <td data-label="{{ T $.Locale "doctorFinding" }}" class="check-detail">{{ .Detail }}
             {{ if .Checks }}<details class="row-finding agent-finding"{{ if .Open }} open{{ end }}><summary>{{ T $.Locale "doctorAgentChecks" }}</summary><ul class="check-list">{{ range .Checks }}{{ template "doctorcheck" . }}{{ end }}</ul></details>{{ end }}
           </td>

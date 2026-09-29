@@ -505,24 +505,24 @@ func connectionCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 	return c
 }
 
-// rulesReceivedCheck は、そのエージェントが今のルール集合を持っているかを見る。ルールを別の
-// エージェントへ移した直後は、移った先がまだ受け取っていない状態として出る。
+// rulesReceivedCheck は、エージェントが報告した世代番号を server の番号と比べる。
+// State の内容の一致は確認できない(設計文書 10.2a 節)。
 func rulesReceivedCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
-	c := Check{ID: CheckRulesReceived, RuleID: r.ID, Agent: r.Agent, Group: GroupAgent, Label: "rules received"}
+	c := Check{ID: CheckRulesReceived, RuleID: r.ID, Agent: r.Agent, Group: GroupAgent, Label: "rule generation"}
 	if ai == nil {
 		c.Status, c.Reason = StatusSkipped, ReasonAgentNotRegistered
 		c.Detail = "not tested: no agent is registered under that name"
 		c.Next = "register one: wgft agent join-string --name " + r.Agent
-		return c
+		return withUnverifiedStateContent(c)
 	}
 	cur := in.Rules.Generation
 	c.Internal = append(c.Internal, fmt.Sprintf("agent generation %d, server generation %d", ai.Generation, cur))
 	if !ai.Connected {
 		c.Status, c.Reason = StatusUnknown, ReasonStaleReport
 		c.ObservedAt = ai.LastHeartbeat
-		c.Detail = fmt.Sprintf("last: it held rule set %d before it went away; this server now serves %d", ai.Generation, cur)
+		c.Detail = fmt.Sprintf("last: the agent reported generation %d before it went away; this server now reports generation %d", ai.Generation, cur)
 		c.Next = "the control connection line above says what to do; this value is history"
-		return c
+		return withUnverifiedStateContent(c)
 	}
 	// 接続してからまだハートビートが無い間は、server はこの接続のエージェントの世代を観測して
 	// いない。Generation の 0 は報告された世代ではないので比べない。判定の条件は
@@ -530,15 +530,15 @@ func rulesReceivedCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 	// ようにする(設計文書 10.2a 節)。遅れの始まりが再接続の前から記録されていても同じである
 	if _, ok := ParseWhen(ai.LastHeartbeat); !ok {
 		c.Status, c.Reason = StatusUnknown, ReasonNotReported
-		c.Detail = fmt.Sprintf("the agent is connected but has not sent a heartbeat yet, so which rule set it holds is not known; this server serves %d", cur)
+		c.Detail = fmt.Sprintf("the agent is connected but has not sent a heartbeat yet, so its generation is not known; this server reports generation %d", cur)
 		c.Next = "re-run in about 30 seconds; the agent reports every 30s"
-		return c
+		return withUnverifiedStateContent(c)
 	}
 	c.ObservedAt = ai.LastHeartbeat
 	if ai.Generation == cur {
 		c.Status = StatusOK
-		c.Detail = fmt.Sprintf("it holds rule set %d, this server's current one%s", cur, heartbeatAgeSuffix(ai, in))
-		return c
+		c.Detail = fmt.Sprintf("the agent reported generation %d, matching this server's generation%s", cur, heartbeatAgeSuffix(ai, in))
+		return withUnverifiedStateContent(c)
 	}
 	// 遅れの始まりは server がメモリに持ち、管理用 API が generation_behind_since で返す
 	// (設計文書 10.2a 節)。閾値の内側の遅れは、配り直しの途中でありうるので UNKNOWN にする。
@@ -547,30 +547,35 @@ func rulesReceivedCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 		age := Since(in.Now, since)
 		if age < GenerationBehindLimit {
 			c.Status, c.Reason = StatusUnknown, ReasonGenerationPending
-			c.Detail = fmt.Sprintf("this agent still holds rule set %d while this server serves %d; it has been behind for %s, and an agent normally takes a new rule set within seconds",
+			c.Detail = fmt.Sprintf("this agent reported generation %d while this server reports %d; it has been behind for %s, and an agent normally reports a new generation within seconds",
 				ai.Generation, cur, age)
 			c.Next = "re-run in a few seconds; if it is still behind after a minute, this check turns failed"
-			return c
+			return withUnverifiedStateContent(c)
 		}
-		// 閾値を超えた遅れは、10.2a 節の定めで届く途中ではない。「すぐ届く」「数秒後に再実行」を
-		// 言わず、止まった遅れの原因だけを挙げる
+		// 閾値を超えた番号の遅れは、10.2a 節の定めで FAILED とする。
+		// 配達・適用の成否は断定せず、原因は可能性として挙げる。
 		c.Status, c.Reason = StatusFailed, ReasonGenerationBehind
-		c.Detail = fmt.Sprintf("this agent still holds rule set %d while this server serves %d; it has been behind for %s without taking the latest rule set", ai.Generation, cur, age)
+		c.Detail = fmt.Sprintf("this agent reported generation %d while this server reports %d; it has been behind for %s without reporting the latest generation", ai.Generation, cur, age)
 		c.Causes = []string{
-			"the agent is connected but has not applied the new rule set; see its log",
-			"this server could not deliver the new rule set to the agent; see this server's log for errors about this agent",
+			"the agent may have failed to apply the new rule set; see its log",
+			"this server may have failed to deliver the new rule set to the agent; see this server's log for errors about this agent",
 		}
-		c.Next = "read the agent's log and this server's log. A rule moved to another agent carries no traffic until that agent takes the new rule set."
-		return c
+		c.Next = "read the agent's log and this server's log; re-run until the agent reports the latest generation"
+		return withUnverifiedStateContent(c)
 	}
-	// 始まりを返さない旧い server:v1.1 と同じ判定と文言
+	// 始まりを返さない旧い server:v1.1 と同じ判定を保つ
 	c.Status, c.Reason = StatusFailed, ReasonGenerationBehind
-	c.Detail = fmt.Sprintf("this agent still holds rule set %d while this server serves %d; it has not taken the latest rule set yet", ai.Generation, cur)
+	c.Detail = fmt.Sprintf("this agent reported generation %d while this server reports %d; it has not reported the latest generation yet", ai.Generation, cur)
 	c.Causes = []string{
-		"the new rules are in flight and will be applied in a moment",
-		"the agent is connected but is not applying them; see its log",
+		"the new generation may still be in flight",
+		"the agent may have failed to apply the new rule set; see its log",
 	}
-	c.Next = "re-run in a few seconds; if it stays behind, read the agent's log. A rule moved to another agent carries no traffic until that agent takes the new rule set."
+	c.Next = "re-run in a few seconds; if it still has not reported the latest generation, read the agent's log and this server's log"
+	return withUnverifiedStateContent(c)
+}
+
+func withUnverifiedStateContent(c Check) Check {
+	c.Detail += "; applied State content is UNKNOWN because generations do not verify its contents"
 	return c
 }
 

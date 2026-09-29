@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -11,16 +12,48 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
+// 同じ番号は番号の一致だけを示す。内容の確認不能は JSON の detail と通常の一覧の両方に残し、
+// ルールの健全性や終了コードを下げない。
+func TestMatchingGenerationDoesNotVerifyStateContent(t *testing.T) {
+	r := tcpRule()
+	in := healthyInput(r)
+	rep := buildReport([]proto.Rule{r}, in)
+	c := checkOf(t, rep.Checks, checkRulesReceived)
+	if c.Status != statusOK || c.Reason != "" || c.Label != "rule generation" {
+		t.Fatalf("generation check = %+v", c)
+	}
+	if !strings.Contains(c.Detail, "matching this server's generation") || !strings.Contains(c.Detail, "applied State content is UNKNOWN") {
+		t.Errorf("equal numbers must not confirm State content: %q", c.Detail)
+	}
+	if rep.Rules[0].Status != statusOK || doctorExit(rep) != nil {
+		t.Errorf("an unverified content alone must not mark forwarding failed: %+v", rep.Rules[0])
+	}
+	var out bytes.Buffer
+	writeSurvey(&out, rep, false)
+	if n := strings.Count(out.String(), "whether the agent applied the exact State content"); n != 1 {
+		t.Errorf("survey should show the limitation once, got %d:\n%s", n, out.String())
+	}
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`applied State content is UNKNOWN`)) || bytes.Contains(b, []byte(`"agent.state_content"`)) {
+		t.Errorf("JSON must retain the existing check shape and explicit content limit: %s", b)
+	}
+}
+
 // TestRulesReceivedGenerationLag は、`agent.rules_received` がルール集合の世代の遅れを、
 // 遅れの始まり(管理用 API の generation_behind_since)からの長さで 2 つに分けることを確かめる
 // (設計文書 10.2a 節、v1.1.1 の所有者の決定)。60 秒未満は届きかけとして UNKNOWN
 // generation_pending、60 秒以上は止まった遅れとして FAILED generation_behind である。
 // 始まりが無い応答は v1.1 のまま FAILED、切れているエージェントは stale_report のままである。
 func TestRulesReceivedGenerationLag(t *testing.T) {
-	// v1.1 の原因の候補と次の手順。始まりを返さない旧い server の場合はこのまま出す
-	const v11Advice = "the new rules are in flight and will be applied in a moment\n" +
-		"the agent is connected but is not applying them; see its log\n" +
-		"re-run in a few seconds; if it stays behind, read the agent's log. A rule moved to another agent carries no traffic until that agent takes the new rule set."
+	const oldServerAdvice = "the new generation may still be in flight\n" +
+		"the agent may have failed to apply the new rule set; see its log\n" +
+		"re-run in a few seconds; if it still has not reported the latest generation, read the agent's log and this server's log"
+	const laggedAdvice = "the agent may have failed to apply the new rule set; see its log\n" +
+		"this server may have failed to deliver the new rule set to the agent; see this server's log for errors about this agent\n" +
+		"read the agent's log and this server's log; re-run until the agent reports the latest generation"
 	cases := []struct {
 		name       string
 		connected  bool
@@ -45,7 +78,7 @@ func TestRulesReceivedGenerationLag(t *testing.T) {
 		{
 			name: "lag of exactly 60s", connected: true, since: at(60 * time.Second),
 			wantStatus: statusFailed, wantReason: reasonGenerationBehind,
-			wantDetail: "it has been behind for 1m0s without taking", wantRule: statusFailed, wantExit: true,
+			wantDetail: "it has been behind for 1m0s without reporting", wantRule: statusFailed, wantExit: true,
 		},
 		{
 			name: "lag of 10m", connected: true, since: at(10 * time.Minute),
@@ -55,7 +88,7 @@ func TestRulesReceivedGenerationLag(t *testing.T) {
 		{
 			name: "server that does not report the lag start", connected: true, since: "",
 			wantStatus: statusFailed, wantReason: reasonGenerationBehind,
-			wantDetail: "it has not taken the latest rule set yet", wantRule: statusFailed, wantExit: true,
+			wantDetail: "it has not reported the latest generation yet", wantRule: statusFailed, wantExit: true,
 		},
 		{
 			name: "reconnected agent before its first heartbeat, no lag start", connected: true, noHB: true,
@@ -77,7 +110,7 @@ func TestRulesReceivedGenerationLag(t *testing.T) {
 		{
 			name: "disconnected agent keeps stale_report", connected: false, since: at(10 * time.Minute),
 			wantStatus: statusUnknown, wantReason: reasonStaleReport,
-			wantDetail: "last: it held rule set 11", wantRule: statusUnknown,
+			wantDetail: "last: the agent reported generation 11", wantRule: statusUnknown,
 		},
 	}
 	for _, tc := range cases {
@@ -110,22 +143,27 @@ func TestRulesReceivedGenerationLag(t *testing.T) {
 			if !strings.Contains(c.Detail, tc.wantDetail) {
 				t.Errorf("detail = %q, want it to contain %q", c.Detail, tc.wantDetail)
 			}
+			if !strings.Contains(c.Detail, "applied State content is UNKNOWN") {
+				t.Errorf("detail hides the unverifiable State content: %q", c.Detail)
+			}
 			if strings.Contains(c.Detail, "this rule") {
 				t.Errorf("detail must not claim this particular rule has not arrived, got %q", c.Detail)
 			}
 			if c.Next == "" {
 				t.Errorf("every finding says what to do next; got none for %s/%s", c.Status, c.Reason)
 			}
-			// 60 秒以上の遅れは 10.2a 節の定めで届く途中ではないので、「すぐ届く」「数秒後に再実行」を
-			// 言ってはならない。始まりを返さない旧い server の場合だけ v1.1 の文言を残す
+			// 遅延した番号から State の適用・配達を断定せず、新しい番号の報告を次の観測条件にする。
+			// 遅れの開始が分かる場合は 60 秒以降を「届く途中」とも呼ばない。
 			advice := strings.Join(append(append([]string{}, c.Causes...), c.Next), "\n")
 			inFlight := strings.Contains(advice, "in flight") || strings.Contains(advice, "in a moment") ||
 				strings.Contains(advice, "in a few seconds")
 			switch {
 			case tc.wantReason == reasonGenerationBehind && tc.since != "" && inFlight:
 				t.Errorf("a lag of 60s or more must not be called in flight, got causes/next %q", advice)
-			case tc.wantReason == reasonGenerationBehind && tc.since == "" && advice != v11Advice:
-				t.Errorf("without the lag start the v1.1 wording stays:\ngot  %q\nwant %q", advice, v11Advice)
+			case tc.wantReason == reasonGenerationBehind && tc.since != "" && advice != laggedAdvice:
+				t.Errorf("lagged advice = %q, want %q", advice, laggedAdvice)
+			case tc.wantReason == reasonGenerationBehind && tc.since == "" && advice != oldServerAdvice:
+				t.Errorf("old-server advice = %q, want %q", advice, oldServerAdvice)
 			}
 			if got := rep.Rules[0].Status; got != tc.wantRule {
 				t.Errorf("rule status = %s, want %s", got, tc.wantRule)

@@ -1842,6 +1842,10 @@ target             UNKNOWN
 
 #### ルール集合の世代の遅れ
 
+`agent.rules_received` は互換性のため ID を保つが、検査するのはエージェントがハートビートで報告した世代番号と server の世代番号だけである。人向けの名前は「rule generation」とし、番号が等しい場合の OK は番号の比較に限る。番号が等しくても、エージェントが適用した State の内容が server の公開した State と同一かどうかは UNKNOWN である。現在の wire には内容の確認値や受領の確認が無く、この変更で wire と認証情報の保存形式を変えない。診断の所見は、この限界を世代番号の一致、不一致のどちらでも明示する。適用済み State の内容は継続して検証不能であり、番号がそろっても OK と報告しない。
+
+ルール別の CLI と Web UI では、この検査の詳細に内容の UNKNOWN を記す。一覧では同じ制約をルールごとに繰り返さず、「この診断が試していない範囲」に一度示す。内容の検証不能は転送失敗の証拠ではないので、ルールの総合判定、終了コード、ダッシュボードの印を変えない。検査の ID、status、reason の機械向けの値と管理用 API のフィールドも変えない。
+
 `agent.rules_received` は、接続中のエージェントの世代が server の世代と違うとき、その遅れが続いている長さで判定を 2 つに分ける (2026-09-24、所有者の決定)。60 秒未満は UNKNOWN とし、理由の符号を `generation_pending` とする。60 秒以上は FAILED とし、理由の符号を `generation_behind` とする。世代はルール集合全体に 1 つだけあり (5.2 節)、どのルールを変えても、そのエージェントを名指す有効なすべてのルールがこの検査を経由する。遅れを直ちに FAILED にすると、ルールを 1 本変えるたびに、そのエージェントのすべてのルールが一時的に FAILED になる。ラボではエージェントは新しい世代を 1 秒未満で取り、取った直後にハートビートを送る (5.2 節) ので、60 秒続く遅れは届く途中の遅れではない。このため 60 秒以上の FAILED は、原因の候補にも次の手順にも、届く途中であることや数秒後の再実行を挙げない。
 
 遅れの長さは、server がエージェントごとにメモリに持つ遅れの始まりの時刻から測る。管理用 API のエージェント一覧は、この時刻を `generation_behind_since` として返し、遅れていないエージェントでは省く。一覧は、直近のハートビートの内容 (`last_heartbeat`、`generation`) とこの時刻を、ハートビートの記録が済んだ後の 1 つの時点の組として返す。別々に読むと、ハートビートの内容だけが新しく、始まりの時刻の記録がまだの途中を返すことがあり、その形は `generation_behind_since` を返さない旧い server の応答と区別できない。診断は管理用 API だけを読むので、この値を経由する。始まりの時刻は次の規則で決める。
@@ -1907,7 +1911,7 @@ target             NOT TESTED
 | `server.dataplane` | dataplane | `desired_generation`、`active_generation`、`agent_state_generation`、`agent_state_pending`、`apply_error`、`ip_forward` | `GET /api/v1/rules` |
 | `tunnel.handshake` | WireGuard | `AgentInfo.LastHandshake`、`AgentInfo.Tunnel` | `GET /api/v1/agents` |
 | `agent.connection` | connected | `AgentInfo.Connected`、`LastHeartbeat`、`StreamFrom` | `GET /api/v1/agents` |
-| `agent.rules_received` | rules received | `AgentInfo.Generation`、`AgentInfo.GenerationBehindSince` と応答の `generation` | `GET /api/v1/agents`、`GET /api/v1/rules` |
+| `agent.rules_received` | rule generation | `AgentInfo.Generation`、`AgentInfo.GenerationBehindSince` と応答の `generation` | `GET /api/v1/agents`、`GET /api/v1/rules` |
 | `agent.credentials` | credentials | `AgentInfo.Warnings` | `GET /api/v1/agents` |
 | `rule.target_resolve` | target resolve | `agent_rule_states[id].reason` の文言 | `GET /api/v1/rules` |
 | `rule.target` | target | `agent_rule_states[id]` の `state`・`reason`・`at`・`connected`。UDP のルールの補足の行は `udp_replies[id]` | `GET /api/v1/rules` |
@@ -1947,7 +1951,8 @@ Tunnel
   WireGuard          OK         handshake 32s ago
 Agent "home"
   connected          OK         heartbeat 12s ago
-  rules received     OK         it holds rule set 12, this server's current one
+  rule generation    OK         the agent reported generation 12, matching this server's generation;
+                                applied State content is UNKNOWN because generations do not verify its contents
   target             FAILED
                      the agent could not use this rule: connection refused, last check 8s ago
                      Check: the tunnel and the agent are healthy up to this point. Check that a
@@ -2025,7 +2030,7 @@ VPS の側からは原因を 1 つに決められない所見がある。決め�
 
 #### 試していない範囲
 
-何も壊れていない実行でも、試していない範囲を必ず出力する。黙っていると運用者が沈黙を健全と読むためであり、沈黙する診断は無いほうがましである。項目は次の 8 つである。最後の 1 つが外れる条件は、その項目の説明に書く。
+何も壊れていない実行でも、試していない範囲を必ず出力する。黙っていると運用者が沈黙を健全と読むためであり、沈黙する診断は無いほうがましである。次のうち最初の 8 項目は常に出し、最後の「内側の経路」だけは条件に応じて出す。
 
 - 外から公開ポートへの到達: DNAT は外部からの入力にしか効かないので、`vpsd` は自分の公開ポートに自分から到達できない (10.1 節)。見えない原因は、事業者のセキュリティグループ、このホストの input のファイアウォール、ISP、そしてユーザー空間モードでエフェメラルポートの範囲に入った待ち受けポート (docs/setup.md) である。別のホストから試すよう示す。試し方はプロトコルで分ける (2026-09-25)。TCP のポートには `nc -vz` を、UDP のポートには実際のクライアントを示す。`nc -u` のような UDP の送信は届いたかどうかを知らせないので、正常な UDP のルールも届かないように見えるためである。`rule.public_port` の次の一手も同じ分け方をし、UDP のルールでは、宛先が応答すれば `rule.target` の補足の行に server が見た応答の時刻が出ることを添える
 - UDP の端から端まで: 疎通確認は TCP だけである。UDP の送信では成否が分からないため、UDP のルールは静的な信号だけで判定する。エージェントがリスナーを開けたと報告している間も、`rule.target` は OK にならず NOT TESTED にとどまる。server が見た宛先の応答を補足の行に示しても、状態は変わらない(本節「UDP の応答の観測」)
@@ -2033,6 +2038,7 @@ VPS の側からは原因を 1 つに決められない所見がある。決め�
 - 負荷に依存する故障: レート制限、フロー予算、conntrack の表は、ある瞬間の値しか読まない。負荷のときだけ達する上限は現れない
 - 宛先の先にあるサービス: どの確認も接続して閉じるだけで、プロトコルで対話しない。ポートは受け付けるがアプリケーションが拒む場合、満員の場合、別のサービスである場合は、健全に見える
 - 片方向だけのトンネルの故障の最初の 3 分: 受信が止まったトンネルも、最終ハンドシェイクは `tunnel.handshake` の閾値のあいだは新しいままである
+- 適用済み State の内容: 世代番号が一致しても、エージェントが server の公開した State と同じ内容を適用したかどうかは UNKNOWN である。現在の通信には内容の確認が無い
 - エージェントのホストの環境: OS、権限、インタフェース、名前解決は、ハートビートが運ぶ範囲しか見えない。自宅側の診断を動かすよう示す
 - 内側の経路: `--probe` を付けない実行は何も dial しない。この項目が外れるのは、`--probe` を付けた実行と、診断の対象がすべて UDP のルールである実行の 2 つである。後者は、UDP のルールが `--probe` を付けても管理用 API に確認そのものを拒まれ、この項目の案内が意味を持たないためであり、同じ一覧の「UDP の端から端まで」が同じ事実を既に述べている。1 本でも TCP のルールが混じっていれば、そのルールには `--probe` が意味を持つので出す
 
@@ -3690,3 +3696,5 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - プロキシ中継の予算取得前の処理を、公開ポートごとの accept ループで同期して行うようにした。接続ごとの goroutine は Admission Policy と Resource Guard を通過した後にだけ作る。停止時は判定中のソケットを閉じ、全対象へ停止を要求してから古いループの終了を待つ。同じポートの停止と再作成を繰り返しても予算取得前の処理が積み重ならないようにした。公開の接続数上限と拒否の判定順は変えない。
 
 - エージェントへの全体状態の配信を、直近の成功した転送面の適用に対応する写しから行うようにした。保存後の適用に失敗した変更が、再接続や遅れて動く配信から届くことを防ぐ。無効化の保存後は対象の停止だけを先に重ね、登録の削除後はその登録を直ちに除く。起動時の UDP タイムアウトは、最後に成功した適用と直列化して読んでから配信用の写しを完成させる。転送面が変更なしと判定しても配信内容が異なるときは、一度だけ明示的な適用を試み、失敗した内容は配らない。管理用 API は転送面の世代と全体状態の最後の成功世代・保留の印を分けて返し、診断も保留中を完了と呼ばない。配信要求は接続ごとにまとめ、接続終了時に送信処理を終える。送った内容をエージェントが適用したかどうかの確認は、この改訂には含めない。
+
+- `agent.rules_received` の世代番号の一致を、適用済み State の内容の一致と読めないようにした。wire と認証情報の保存形式は変えず、内容は常に UNKNOWN と明記する。既存の検査 ID と判定、世代の遅れに関する理由、ルールの総合判定は維持する。CLI と Web UI のルール別診断では検査の所見に、一覧では試していない範囲にこの限界を示す。`agent ls` の GEN も報告された番号と説明する。単体テストでは、番号が一致したときの所見、遅れたときの判定、一覧の制約の表示を確かめた。ラボのカーネルモードでは、実際に接続したエージェントの番号が一致しても `server doctor --json` の所見が内容を UNKNOWN と示すことを確かめた。未確認:エージェントの適用済み State の内容。現在の通信には内容を照合する証拠が無い。

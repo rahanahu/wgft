@@ -33,6 +33,7 @@ strcheck() { # strcheck <label> <want> <got>: exact string equality, for a liste
   if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3', want '$2'"; fail=1; fi
 }
 vps() { ip netns exec "$VPS_NS" "$@"; }
+agent_row() { vps wgft agent ls --admin "$ADMIN" | awk '$1 == "home" { print; found=1 } END { if (!found) exit 1 }'; }
 client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
 kill_all() { sandbox_kill_named wgft echo; sleep 1; }
 kill_server() {
@@ -71,7 +72,7 @@ disown
 ip netns exec "$HOME_NS" setsid nohup echo -udp 19132 > $W/wgft-splitmerge-echo.log 2>&1 < /dev/null &
 disown
 sleep 6
-check "agent registered" "home" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)"
+check "agent registered" "home" "$(agent_row)"
 
 r=$(vps wgft rule add --agent home --udp 2456-2457 --to 192.168.50.2:19132 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
 sleep 2

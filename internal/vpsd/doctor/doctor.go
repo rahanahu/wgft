@@ -378,6 +378,8 @@ func notTestedList(rules []proto.Rule, in Input) []NotTested {
 			"for that long, so a check run inside that window calls it healthy."},
 		// 10.2a 節の「agent doctor ができた時点で案内し直す」に従って向け直した案内である
 		// (10.2c 節の「置き場所」)。
+		{"State content", "whether the agent applied the exact State content published by this server is UNKNOWN. Matching " +
+			"generation numbers only compare numbers; the current protocol has no content acknowledgment."},
 		{"the agent host", "the agent's own environment: its OS, its permissions, its interfaces and its name resolution. This " +
 			"server sees only what the heartbeat carries. To see it, run wgft agent doctor on that host."},
 	}
@@ -558,7 +560,7 @@ func checkLabel(id string, r proto.Rule) string {
 		// "connected DEGRADED" は 1 行の中で矛盾して読めるので、状態の語ではなく対象の名前にする。
 		return "control connection"
 	case CheckRulesReceived:
-		return "rules received"
+		return "rule generation"
 	case CheckCredentials:
 		return "credentials"
 	case CheckTargetResolve:

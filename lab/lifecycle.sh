@@ -233,6 +233,7 @@ must_wait() {
 }
 
 vps() { ip netns exec "$VPS_NS" "$@"; }
+agent_row() { vps wgft agent ls --admin "$ADMIN" | awk '$1 == "home" { print; found=1 } END { if (!found) exit 1 }'; }
 client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
 
 admin_up() { vps wgft agent ls --admin "$ADMIN" >/dev/null 2>&1; }
@@ -2520,7 +2521,7 @@ print(a.get('$1', ''))
   }
   must_wait "check10: the agent's heartbeat reports the tunnel ok and both rules ok" 20 agent_reports_settled || return
 
-  local ls_line; ls_line=$(vps wgft agent ls --admin "$ADMIN" | tail -1)
+  local ls_line; ls_line=$(agent_row) || { echo "FAIL  check10: home agent row is missing"; fail=1; return; }
   absent "agent ls carries no last: prefix while the agent is connected" "last:" "$ls_line"
 
   local ep_before hb_before
@@ -2530,11 +2531,11 @@ print(a.get('$1', ''))
   kill "$agent_pid" 2>/dev/null
   must_wait "check10: agent pid $agent_pid exited" 5 proc_gone "$agent_pid"
 
-  agent_shows_stale() { vps wgft agent ls --admin "$ADMIN" | tail -1 | grep -q 'last:'; }
+  agent_shows_stale() { agent_row | grep -q 'last:'; }
   # bare wait_until: re-checked immediately below by the check() calls, which redo the same
   # agent ls read.
   wait_until 30 agent_shows_stale
-  ls_line=$(vps wgft agent ls --admin "$ADMIN" | tail -1)
+  ls_line=$(agent_row) || { echo "FAIL  check10: home agent row is missing"; fail=1; return; }
   check "agent ls TUNNEL carries the last: prefix once the agent process is gone" "last:ok" "$ls_line"
   check "agent ls RULES carries the last: prefix once the agent process is gone" "last:2 ok" "$ls_line"
 
@@ -2553,7 +2554,7 @@ print(a.get('$1', ''))
   # without the live-OK style. Until that heartbeat arrives the agent is shown with the previous
   # connection's last report, so the wait also asks for a report newer than the one read above.
   must_wait "check10: the restarted agent's heartbeat reports the tunnel ok and both rules ok" 30 agent_reports_settled "$ep_before" "$hb_before" || return
-  ls_line=$(vps wgft agent ls --admin "$ADMIN" | tail -1)
+  ls_line=$(agent_row) || { echo "FAIL  check10: home agent row is missing"; fail=1; return; }
   absent "agent ls carries no last: prefix again once the agent has reconnected" "last:" "$ls_line"
   html=$(vps curl -s "http://$ADMIN/ui/agents?lang=en")
   check "the Web UI (en) shows the live tunnel state again once the agent has reconnected" "stack success-text" "$html"

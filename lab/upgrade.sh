@@ -211,6 +211,7 @@ wait_until() {
 }
 
 vps() { ip netns exec "$NS_VPS" "$@"; }
+agent_row() { vps wgft agent ls --admin "$ADMIN" | awk '$1 == "home" { print; found=1 } END { if (!found) exit 1 }'; }
 client() { ip netns exec "$NS_CLIENT" bash -c "$1"; }
 home() { ip netns exec "$NS_HOME" "$@"; }
 lan() { ip netns exec "$NS_LAN" "$@"; }
@@ -585,7 +586,7 @@ t = d[-1].get('tunnel', {}) if d else {}
 print('state=%s reason=%s' % (t.get('state'), t.get('reason', '')))
 "
 }
-agent_registered() { vps wgft agent ls --admin "$ADMIN" 2>/dev/null | tail -1 | grep -q home; }
+agent_registered() { agent_row >/dev/null 2>&1; }
 # wait_reconnected <timeout>: the shared "did the agent actually come back up" wait used after
 # every start_server/start_agent pairing below (register, THEN reset, THEN up - see tunnel_reset's
 # comment on why the reset must be awaited first).

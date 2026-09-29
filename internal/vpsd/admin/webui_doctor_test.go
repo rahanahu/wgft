@@ -174,9 +174,19 @@ func TestDoctorPageKeepsTheDiagnosisVocabularyInEnglish(t *testing.T) {
 
 	for _, lang := range []string{"ja", "en"} {
 		body := getBody(t, srv.URL+"/ui/doctor/r_ok?lang="+lang)
+		if !strings.Contains(body, "applied State content is UNKNOWN") {
+			t.Errorf("%s: rule detail hides unverifiable State content:\n%s", lang, body)
+		}
+		survey := getBody(t, srv.URL+"/ui/doctor?lang="+lang)
+		if !strings.Contains(survey, "whether the agent applied the exact State content") {
+			t.Errorf("%s: survey hides unverifiable State content:\n%s", lang, survey)
+		}
+		if !strings.Contains(survey, "tunnel - stream - generation") {
+			t.Errorf("%s: agent table still describes its generation node as rules:\n%s", lang, survey)
+		}
 		for _, want := range []string{
 			// 検査の見出し(design.md 10.2a 節の一覧)
-			"public port", "dataplane", "WireGuard", "control connection", "rules received", "target",
+			"public port", "dataplane", "WireGuard", "control connection", "rule generation", "target",
 			// 経路の図の節点の名前(webui_doctor_path.go)
 			"agent", "listener / target",
 			// 状態の語

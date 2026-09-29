@@ -37,6 +37,7 @@ not_forwarded() { # not_forwarded <label> <forbidden-substring> <actual>: the in
   if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1 (got '$3')"; fi
 }
 vps() { ip netns exec "$VPS_NS" "$@"; }
+agent_row() { vps wgft agent ls --admin "$ADMIN" | awk '$1 == "home" { print; found=1 } END { if (!found) exit 1 }'; }
 client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
 kill_all() { sandbox_kill_named wgft echo ppecho socat; sleep 1; }
 kill_server() {
@@ -82,7 +83,7 @@ disown
 ip netns exec "$LAN_NS" setsid nohup ppecho -addr 192.168.50.3:8444 > "$PLOG" 2>&1 < /dev/null &
 disown
 sleep 6
-check "agent registered" "home" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)"
+check "agent registered" "home" "$(agent_row)"
 
 t=$(vps wgft rule add --agent home --tcp 39971 --to 192.168.50.3:25565 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
 u=$(vps wgft rule add --agent home --udp 27015 --to 192.168.50.3:19132 --admin "$ADMIN" | grep -oE 'r_[A-Z0-9]+')
@@ -100,7 +101,7 @@ vps wgft rule add --agent home --tcp 39972 --to 192.168.50.3:25567 --admin "$ADM
 sleep 4
 not_forwarded "target outside the allowlist does not forward" "tcp-echo" \
   "$(client 'echo hi | timeout -k 5 20 socat -t 2 -T 10 - TCP:198.51.100.1:39972 2>&1')"
-check "target outside the allowlist is reported" "WGFT_AGENT_ALLOW_TARGETS" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)"
+check "target outside the allowlist is reported" "WGFT_AGENT_ALLOW_TARGETS" "$(agent_row)"
 
 # deny: a TCP session opened before the deny must be cut at once. Seen from the VPS: in kernel
 # mode the conntrack entry of the flow disappears (its later packets hit the deny rule), in

@@ -74,7 +74,7 @@ type doctorCheckView struct {
 	Internal []string
 }
 
-// doctorAgentRowView は一覧の画面のエージェントの 1 行である。図は tunnel、stream、rules の
+// doctorAgentRowView は一覧の画面のエージェントの 1 行である。図は tunnel、stream、generation の
 // 3 つの節点で、状態はそのまま出す(webui_doctor_path.go)。
 type doctorAgentRowView struct {
 	Name   string
@@ -82,7 +82,7 @@ type doctorAgentRowView struct {
 	Badge  string
 	Detail string
 	Path   doctorPathView
-	// Checks は tunnel、stream、rules の検査の行で、行ごとの折りたたみに入れる。Causes、Next、
+	// Checks は tunnel、stream、generation の検査の行で、行ごとの折りたたみに入れる。Causes、Next、
 	// Internal を一覧の画面から読めるようにするためである。
 	Checks []doctorCheckView
 	// Open は折りたたみを既定で開くかどうかで、どれかの検査が OK でないときに開く。

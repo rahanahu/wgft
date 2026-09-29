@@ -144,7 +144,7 @@ Columns: STATE is enabled or disabled with how long ago "agent disable" was
 run; see design.md section 5.1. A disabled agent can still show a connected
 STREAM and an ok TUNNEL while forwarding nothing. STREAM is the address the
 agent's control connection comes from, HEARTBEAT its age, GEN the rule
-generation the agent has applied, TUNNEL ok or
+generation the agent reported (it does not verify applied State content), TUNNEL ok or
 error, WG_ENDPOINT and HANDSHAKE the WireGuard peer as the VPS sees it, RULES
 lists id:reason for the rules currently failing, or "N ok" once none are, PROTO
 the protocol negotiated on the agent's current connection, WARN the number of
