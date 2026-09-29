@@ -3,7 +3,6 @@ package userspace
 import (
 	"net"
 	"net/netip"
-	"strconv"
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
@@ -28,12 +27,17 @@ func freeTCPPort(t *testing.T) uint16 {
 // 節): Prepare reports it, Commit serves none of it and leaves it out of the evaluator, and the
 // other rule is served. Binding happens in Prepare, so Commit cannot fail part way.
 func TestPrepareBindFailureIsFailClosed(t *testing.T) {
-	blocked, free := freeTCPPort(t), freeTCPPort(t)
-	blocker, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(int(blocked))))
+	// bind the blocker itself on port 0 and read back the assigned port, instead of picking a
+	// number with freeTCPPort and then binding it: nothing else can ever steal a number that was
+	// never released. free then stays with plain freeTCPPort, and is guaranteed distinct from
+	// blocked because blocked is still held open when free is picked.
+	blocker, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blocker.Close()
+	blocked := uint16(blocker.Addr().(*net.TCPAddr).Port)
+	free := freeTCPPort(t)
 	rules, err := model.NormalizeRules([]proto.Rule{
 		{ID: "r_blocked", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: blocked, Hi: blocked},
 			Target: "192.168.1.30:80", VPSMode: proto.ModeKernel, Enabled: true,
