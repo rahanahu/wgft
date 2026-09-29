@@ -41,6 +41,7 @@ absent() { # absent <label> <substring-that-must-not-appear> <actual>
   if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1"; fi
 }
 vps() { ip netns exec "$VPS_NS" "$@"; }
+agent_row() { vps wgft agent ls --admin "$ADMIN" | awk '$1 == "home" { print; found=1 } END { if (!found) exit 1 }'; }
 client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
 rule_count() { vps wgft rule ls --admin "$ADMIN" --json | python3 -c 'import json, sys; print(len(json.load(sys.stdin)["rules"]))'; }
 hidden_field() { # hidden_field <name> <html-file>, unescaping the HTML attribute entities
@@ -88,7 +89,7 @@ disown
 ip netns exec "$HOME_NS" setsid nohup echo -udp 19132 > $W/wgft-importexport-echo.log 2>&1 < /dev/null &
 disown
 sleep 6
-check "agent registered" "home" "$(vps wgft agent ls --admin "$ADMIN" | tail -1)"
+check "agent registered" "home" "$(agent_row)"
 
 r1=$(vps wgft rule add --agent home --udp 2456 --to 192.168.50.2:19132 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
 r2=$(vps wgft rule add --agent home --udp 2555 --to 192.168.50.2:19132 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')

@@ -123,6 +123,7 @@ check() { # check <label> <expected-substring> <actual>
 }
 skip() { echo "SKIP  $1"; }
 vps() { ip netns exec "$VPS_NS" "$@"; }
+agent_row() { vps "$1" agent ls --admin "$ADMIN" | awk '$1 == "home" { print; found=1 } END { if (!found) exit 1 }'; }
 client() { ip netns exec "$CLIENT_NS" bash -c "$1"; }
 
 # wait_until <timeout-seconds> <command...>: polls every 0.2s until <command...> exits 0, or the
@@ -168,7 +169,7 @@ teardown_data() { # teardown_data <server-bin>
 }
 
 admin_up() { vps "$1" agent ls --admin "$ADMIN" >/dev/null 2>&1; }
-agent_registered() { vps "$1" agent ls --admin "$ADMIN" 2>/dev/null | tail -1 | grep -q home; }
+agent_registered() { agent_row "$1" >/dev/null 2>&1; }
 tcp_probe_ok() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 10 - TCP:198.51.100.1:$1" 2>/dev/null)" == *tcp-echo* ]]; }
 udp_probe_ok() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 10 - UDP:198.51.100.1:$1" 2>/dev/null)" == *udp-echo* ]]; }
 tcp_refused() { ! tcp_probe_ok "$1"; }
@@ -311,7 +312,7 @@ run_combo() {
     echo "FAIL  $name: agent never registered"; fail=1
     kill_all; teardown_data "$server_bin"; return
   fi
-  check "$name: agent registers" "home" "$(vps "$server_bin" agent ls --admin "$ADMIN" | tail -1)"
+  check "$name: agent registers" "home" "$(agent_row "$server_bin")"
 
   vps "$server_bin" rule add --agent home --tcp "$TCP_PORT" --to 192.168.50.3:"$LAN_TCP" --admin "$ADMIN" >/dev/null
   vps "$server_bin" rule add --agent home --udp "$UDP_PORT" --to 192.168.50.3:"$LAN_UDP" --admin "$ADMIN" >/dev/null
@@ -347,7 +348,7 @@ run_combo() {
     disown
     if wait_until 15 admin_up "$server_bin"; then
       if wait_until 40 agent_registered "$server_bin"; then
-        check "$name: agent re-registers after a server restart" "home" "$(vps "$server_bin" agent ls --admin "$ADMIN" | tail -1)"
+        check "$name: agent re-registers after a server restart" "home" "$(agent_row "$server_bin")"
       else
         echo "FAIL  $name: agent never re-registered after a server restart"; fail=1
       fi
@@ -382,7 +383,7 @@ run_combo() {
       > "$ralog" 2>&1 < /dev/null &
     disown
     if wait_until 40 agent_registered "$server_bin"; then
-      check "$name: agent re-registers after an agent restart" "home" "$(vps "$server_bin" agent ls --admin "$ADMIN" | tail -1)"
+      check "$name: agent re-registers after an agent restart" "home" "$(agent_row "$server_bin")"
     else
       echo "FAIL  $name: agent never re-registered after an agent restart"; fail=1
     fi
@@ -463,7 +464,7 @@ print(a.get('generation', ''))
     else
       echo "FAIL  $name: tcp or udp still forwards after disabling home"; fail=1
     fi
-    check "$name: agent ls shows home disabled" "disabled" "$(vps "$server_bin" agent ls --admin "$ADMIN" | tail -1)"
+    check "$name: agent ls shows home disabled" "disabled" "$(agent_row "$server_bin")"
     check "$name: status shows home out of the healthy ratio" "0 / 0 healthy, 1 disabled" "$(vps "$server_bin" status --admin "$ADMIN" 2>&1)"
     check "$name: status counts every rule as agent disabled" "0 active, 3 agent disabled / 3" "$(vps "$server_bin" status --admin "$ADMIN" 2>&1)"
     check "$name: server doctor's survey skips home as disabled" 'SKIPPED    not tested: agent "home" is disabled' "$(vps "$server_bin" server doctor --admin "$ADMIN" 2>&1)"
@@ -511,7 +512,7 @@ print(a.get('generation', ''))
     wait_until 10 udp_probe_ok "$UDP_PORT"
     check "$name: tcp forwards again once home is enabled" "tcp-echo" "$(client "echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:$TCP_PORT")"
     check "$name: udp forwards again once home is enabled" "udp-echo" "$(client "echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:$UDP_PORT")"
-    check "$name: agent ls shows home enabled again" "enabled" "$(vps "$server_bin" agent ls --admin "$ADMIN" | tail -1)"
+    check "$name: agent ls shows home enabled again" "enabled" "$(agent_row "$server_bin")"
   fi
 
   kill_all
