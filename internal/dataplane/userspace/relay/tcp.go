@@ -54,6 +54,30 @@ func cutConn(c net.Conn) {
 	c.Close()
 }
 
+// tcpEntry は中継中の接続 1 本の記録である。公開側の接続の記録は接続元 src を持ち、宛先への接続を
+// 登録した後は peer にその接続を持つ。宛先への接続の記録は src がゼロ値で、peer に公開側の接続を持つ。
+// cut は sweep がこの中継を切ったことを示す。公開側の記録にだけ立て、mu で守る。
+type tcpEntry struct {
+	src  netip.Addr
+	peer net.Conn
+	cut  bool
+}
+
+// cutPair は中継中の 1 組を切る。宛先への接続がまだ無ければ(dial の最中)公開側だけを切る。
+// closeF と同じ理由で、netstack の側を先に Abort する。
+func cutPair(c, t net.Conn) {
+	if t == nil {
+		cutConn(c)
+		return
+	}
+	first, second := c, t
+	if _, ok := t.(aborter); ok {
+		first, second = t, c
+	}
+	cutConn(first)
+	cutConn(second)
+}
+
 // retryMin と retryMax は、TCP の accept と UDP の読み取りが、待ち受けを閉じた以外の理由で失敗した
 // ときの待ち時間の下限と上限。プロキシモードの中継(internal/vpsd/proxyrelay)と同じく、閉じた場合
 // 以外の誤りはすべて試し直す。値は net/http.Server.Serve の後退と同じだが、net/http が試し直すのは
@@ -72,7 +96,7 @@ func nextRetry(d time.Duration) time.Duration { return min(max(2*d, retryMin), r
 func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 	var (
 		mu    sync.Mutex
-		conns = map[net.Conn]netip.Addr{} // 公開側の接続はその接続元、target 側はゼロ値
+		conns = map[net.Conn]*tcpEntry{} // 公開側の接続と宛先への接続の両方を持つ
 		done  = make(chan struct{})
 		once  sync.Once
 		// closed は closeF が中継中の接続を切った後に真になる。mu で守る。done は stopAccept でも
@@ -89,11 +113,21 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		mu.Lock()
 		defer mu.Unlock()
 		n := 0
-		for c, src := range conns {
-			if src.IsValid() && !keep(src) {
-				cutConn(c)
-				n++
+		for c, e := range conns {
+			if !e.src.IsValid() || keep(e.src) {
+				continue
 			}
+			// 公開側だけを切ると、netpipe は宛先へ FIN を送った後も宛先からの読み取りを続けるので、
+			// FIN を受けても閉じない宛先では宛先への接続と枠が残る。組の両側を切り、記録からも外す。
+			// 外すのは、直後に sessions を見る Retiring の判定(Commit)が、切った中継を数えないため。
+			// dial の最中なら cut を見た接続の goroutine が宛先への接続を登録せずに切る
+			e.cut = true
+			cutPair(c, e.peer)
+			delete(conns, c)
+			if e.peer != nil {
+				delete(conns, e.peer)
+			}
+			n++
 		}
 		return n
 	}
@@ -188,7 +222,8 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				continue
 			default:
 			}
-			conns[c] = src
+			entry := &tcpEntry{src: src}
+			conns[c] = entry
 			mu.Unlock()
 			go func() {
 				defer func() {
@@ -214,17 +249,18 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					}
 					return
 				}
-				// dial の間に closeF が走っていれば、closeF は公開側の接続 c を切ったが、まだ登録していない
-				// t を見ていない。登録すると誰にも切られず、netpipe は c の読み取りの失敗で t へ FIN を
-				// 送った後も t を読み続けるので、FIN を受けても閉じない宛先では枠と接続が残り続ける。
-				// 登録せずにここで切り、中継も始めない。c は closeF が切っており、枠は上の defer が返す
+				// dial の間に closeF か sweep が走っていれば、どちらも公開側の接続 c を切ったが、まだ登録
+				// していない t を見ていない。登録すると誰にも切られず、netpipe は c の読み取りの失敗で t へ
+				// FIN を送った後も t を読み続けるので、FIN を受けても閉じない宛先では枠と接続が残り続ける。
+				// 登録せずにここで切り、中継も始めない。c は closeF か sweep が切っており、枠は上の defer が返す
 				mu.Lock()
-				if closed {
+				if closed || entry.cut {
 					mu.Unlock()
 					cutConn(t)
 					return
 				}
-				conns[t] = netip.Addr{}
+				entry.peer = t
+				conns[t] = &tcpEntry{peer: c}
 				mu.Unlock()
 				defer func() {
 					mu.Lock()

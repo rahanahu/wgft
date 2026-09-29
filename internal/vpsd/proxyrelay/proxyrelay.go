@@ -83,7 +83,7 @@ type listener struct {
 	rule       Rule
 	ln         net.Listener
 	mu         sync.Mutex
-	conns      map[net.Conn]string // 進行中の中継(公開側の接続 → 接続元 IP 文字列)
+	conns      map[net.Conn]relayed // 進行中の中継(公開側の接続 → 接続元とエージェントへの接続)
 	closed     bool
 	stopping   bool
 	admitting  net.Conn // owned by the accept loop until the locked handoff
@@ -105,6 +105,20 @@ type listener struct {
 	// acceptLog は accept の失敗のログを絞る(ファイル記述子の枯渇のように、失敗が続く間は
 	// 再試行のたびに 1 行出るため。仕様 10.4 節)。
 	acceptLog lograte.Gate
+}
+
+// relayed は進行中の中継 1 本の記録で、公開側の接続を鍵にして conns に置く。中継を切るときは、
+// エージェントへの接続 up も閉じる。公開側だけを閉じると、netpipe はエージェントへ FIN を送った後も
+// エージェントからの読み取りを続けるので、FIN を受けても閉じない相手では up と枠が残り続ける。
+type relayed struct {
+	src string // 接続元 IP の文字列
+	up  net.Conn
+}
+
+// cut は中継の両側を閉じる。
+func (r relayed) cut(c net.Conn) {
+	c.Close()
+	r.up.Close()
 }
 
 // abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う
@@ -293,7 +307,7 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 		// 枠は bind の済んだ待ち受けにだけ付け、中継を始める前に付ける。Prepare で bind に失敗した
 		// ポートはここに来ないので、そのルールは受け付けているルールの集合 A に入らない
 		// (設計文書 7a.10 節)
-		l := &listener{rule: r, ln: ln, conns: map[net.Conn]string{}, budget: m.opts.Pool.Listener(r.ID), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
+		l := &listener{rule: r, ln: ln, conns: map[net.Conn]relayed{}, budget: m.opts.Pool.Listener(r.ID), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
 		m.ls[port] = l
 		go m.serve(l)
 		m.opts.Logf("proxy: opened relay %d -> %s:%d proxy_protocol=%v", port, r.AgentAddr, r.AgentPort, r.ProxyProtocol)
@@ -536,9 +550,8 @@ func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 		}
 	}
 	unpend()
-	if !l.track(c, src, gen) {
+	if !l.track(c, up, src, gen) {
 		// 実効宛先が変わった後にこの接続を残すと、旧いエージェントへ中継し続ける
-		up.Close()
 		return
 	}
 	defer l.untrack(c)
@@ -566,32 +579,33 @@ func (l *listener) updateRestriction(r Rule) (retargeted bool, closed int) {
 	if retargeted {
 		// 旧い実効宛先へ接続中の worker は、track のときに gen の違いで気付いて閉じる
 		l.gen++
-		for c := range l.conns {
-			c.Close()
+		for c, rc := range l.conns {
+			rc.cut(c)
 			closed++
 		}
 		return retargeted, closed
 	}
-	for c, srcStr := range l.conns {
-		src, err := netip.ParseAddr(srcStr)
+	for c, rc := range l.conns {
+		src, err := netip.ParseAddr(rc.src)
 		if err == nil && !sourceAllowed(src, l.rule) {
-			c.Close()
+			rc.cut(c)
 			closed++
 		}
 	}
 	return retargeted, closed
 }
 
-// track は中継を始める接続を記録する。待ち受けが閉じた後の接続と、接続している間に実効宛先が
-// 変わった接続(gen の違い)は記録せずに閉じ、偽を返す。
-func (l *listener) track(c net.Conn, src netip.Addr, gen int) bool {
+// track は中継を始める接続 c と、そのエージェントへの接続 up を記録する。待ち受けが閉じた後の接続と、
+// 接続している間に実効宛先が変わった接続(gen の違い)は記録せずに両側を閉じ、偽を返す。
+func (l *listener) track(c, up net.Conn, src netip.Addr, gen int) bool {
+	r := relayed{src: src.String(), up: up}
 	l.mu.Lock()
 	if l.closed || l.gen != gen {
 		l.mu.Unlock()
-		c.Close()
+		r.cut(c)
 		return false
 	}
-	l.conns[c] = src.String()
+	l.conns[c] = r
 	l.mu.Unlock()
 	return true
 }
@@ -638,14 +652,16 @@ func (l *listener) beginStopAccepting() {
 }
 
 // retire は keep が偽を返す接続元の接続だけを閉じ、閉じた数を返す(設計文書 7a.3 節の Retire)。
+// 閉じた接続は記録から外すので、直後の idle は閉じた接続を数えない。
 func (l *listener) retire(keep func(src netip.Addr) bool) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	n := 0
-	for c, srcStr := range l.conns {
-		src, err := netip.ParseAddr(srcStr)
+	for c, r := range l.conns {
+		src, err := netip.ParseAddr(r.src)
 		if err != nil || !keep(src) {
-			c.Close()
+			r.cut(c)
+			delete(l.conns, c)
 			n++
 		}
 	}
@@ -672,10 +688,10 @@ func (l *listener) beginClose() {
 	l.stopLocked()
 	// 閉じ終えていない接続の枠は、中継の goroutine が Release を呼ぶまでプロセス全体の数に残る
 	l.budget.Close()
-	for c := range l.conns {
-		c.Close()
+	for c, r := range l.conns {
+		r.cut(c)
 	}
-	l.conns = map[net.Conn]string{}
+	l.conns = map[net.Conn]relayed{}
 	l.mu.Unlock()
 }
 

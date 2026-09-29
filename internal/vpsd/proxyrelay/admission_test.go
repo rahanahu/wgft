@@ -211,7 +211,7 @@ func TestAdmissionStopBlocksSamePortReplacement(t *testing.T) {
 }
 
 func admissionState(pool *resource.Pool) *listener {
-	return &listener{rule: admissionRule("a", 1), ln: newAdmissionListener(), conns: map[net.Conn]string{}, budget: pool.Listener("a"), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
+	return &listener{rule: admissionRule("a", 1), ln: newAdmissionListener(), conns: map[net.Conn]relayed{}, budget: pool.Listener("a"), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
 }
 
 // Exercise the two linearization orders directly, without a scheduler-dependent pause hook.
