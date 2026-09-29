@@ -8,6 +8,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
@@ -117,9 +118,9 @@ func TestUDPAccountingAcceptedAndReadTotal(t *testing.T) {
 
 func TestUDPAccountingOverflow(t *testing.T) {
 	dev, ep, stats := newAccountingEndpoint(t)
-	ep.SocketOptions().SetReceiveBufferSize(1000, false)
-	before := snapshotUDPStats(stats)
 	p := accountingDatagram(make([]byte, 800), 0, 0)
+	ep.SocketOptions().SetReceiveBufferSize(int64(2*(len(p)+stack.PacketBufferStructSize)), false)
+	before := snapshotUDPStats(stats)
 	for i := 0; i < 3; i++ {
 		injectAccountingDatagram(t, dev, p)
 	}
@@ -166,8 +167,8 @@ func TestUDPAccountingInputLengthAndShortRead(t *testing.T) {
 		t.Fatalf("short UDP length accepted delta = %d, want 1", got)
 	}
 	res, b, err := readAccountingDatagram(ep, 2)
-	if err != nil || res.Total != 4 || res.Count != 2 || !bytes.Equal(b, payload[:2]) {
-		t.Fatalf("short Read = (%+v, %q, %v), want Count 2 and Total 4", res, b, err)
+	if err != nil || res.Total != 1 || res.Count != 1 || !bytes.Equal(b[:res.Count], payload[:1]) {
+		t.Fatalf("short Read = (%+v, %q, %v), want Count 1 and Total 1", res, b, err)
 	}
 	if _, _, err := readAccountingDatagram(ep, 1); err == nil {
 		t.Fatal("truncated datagram remained queued")

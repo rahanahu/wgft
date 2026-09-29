@@ -47,6 +47,12 @@ func newRawUDPAdapter(t *Device, local, remote *netip.AddrPort) (*rawUDPAdapter,
 	if terr != nil {
 		return nil, errors.New(terr.String())
 	}
+	// The newer stack defaults UDP to PMTUDiscoveryWant. Its local IPv4
+	// fragmentation retains DF on fragments, which remote stacks reject.
+	if terr := ep.SetSockOptInt(tcpip.MTUDiscoverOption, int(tcpip.PMTUDiscoveryDont)); terr != nil {
+		ep.Close()
+		return nil, errors.New(terr.String())
+	}
 	if local != nil {
 		if terr := ep.Bind(fullAddr(*local)); terr != nil {
 			ep.Close()

@@ -1,8 +1,8 @@
 package nettun
 
 // UDP の受信の会計(設計文書 7 節)。Device の全ての UDP endpoint の受信のキューに溜まる datagram を、
-// Device 全体の予算と endpoint 1 つの上限の 2 段で数える。予算の単位は payload の byte に 1 件あたり
-// 固定の byte を足したものと件数であり、Go のヒープの実際の費用ではない。
+// Device 全体の予算と endpoint 1 つの上限の 2 段で数える。予算の単位は IPv4 の UDP header 後の
+// 全 byte に 1 件あたり固定の byte を足したものと件数であり、Go のヒープの実際の費用ではない。
 
 import (
 	"bytes"
@@ -191,10 +191,16 @@ func (t *udpAccounting) setEndpointLimits(maxBytes, maxPackets int) {
 // by a limit is counted by kind: the endpoint's cap when g is at it, the
 // Device budget otherwise.
 func (t *udpAccounting) reserveLocked(g *udpGeneration, payload int) (udpReservation, udpRefusal) {
-	if t.fault != nil || g == nil || payload < 0 || payload > math.MaxInt-t.fixedOverhead {
+	return t.reserveWithChargeLocked(g, payload, payload)
+}
+
+// delivered is the payload length returned by Read. charged includes any
+// bytes after UDP Length that may still be retained by the packet buffer.
+func (t *udpAccounting) reserveWithChargeLocked(g *udpGeneration, delivered, charged int) (udpReservation, udpRefusal) {
+	if t.fault != nil || g == nil || delivered < 0 || charged < delivered || charged > math.MaxInt-t.fixedOverhead {
 		return udpReservation{}, udpRefusedFault
 	}
-	r := udpReservation{payload: payload, cost: payload + t.fixedOverhead, g: g}
+	r := udpReservation{payload: delivered, cost: charged + t.fixedOverhead, g: g}
 	if g.usedPackets >= t.maxEndpointPackets || r.cost > t.maxEndpointBytes-g.usedBytes {
 		t.refusedEndpoint.Add(1)
 		return udpReservation{}, udpRefusedEndpoint

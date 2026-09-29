@@ -194,15 +194,15 @@ func TestUDPEndpointCapBindsBeforeGVisorReceiveBuffer(t *testing.T) {
 		t.Fatalf("device refusals = %d, want 0", got)
 	}
 	assertDeviceUsage(t, d, fit*cost, fit)
-	if got := x.ep.SocketOptions().GetReceiveBufferSize(); got != int64(acc.maxEndpointBytes) {
-		t.Fatalf("gVisor receive buffer = %d, want the endpoint cap %d", got, acc.maxEndpointBytes)
+	if got := x.ep.SocketOptions().GetReceiveBufferSize(); got != acc.endpointReceiveBufferSize() {
+		t.Fatalf("gVisor receive buffer = %d, want %d", got, acc.endpointReceiveBufferSize())
 	}
 	readOne(t, x)
 	assertDeviceUsage(t, d, (fit-1)*cost, fit-1)
 	// An endpoint opened by DialUDP takes the same path through open.
 	dialed := dialAdapter(t, d, netip.AddrPortFrom(accountingRemote, 9))
-	if got := dialed.ep.SocketOptions().GetReceiveBufferSize(); got != int64(acc.maxEndpointBytes) {
-		t.Fatalf("dialed endpoint's gVisor receive buffer = %d, want the endpoint cap %d", got, acc.maxEndpointBytes)
+	if got := dialed.ep.SocketOptions().GetReceiveBufferSize(); got != acc.endpointReceiveBufferSize() {
+		t.Fatalf("dialed endpoint's gVisor receive buffer = %d, want %d", got, acc.endpointReceiveBufferSize())
 	}
 }
 

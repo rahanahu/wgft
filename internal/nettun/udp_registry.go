@@ -6,11 +6,13 @@ package nettun
 
 import (
 	"errors"
+	"math"
 	"net"
 	"net/netip"
 	"os"
 
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
@@ -61,14 +63,20 @@ func (r *udpRegistry) open(local, remote *netip.AddrPort) (*rawUDPAdapter, error
 		c.ep.Close()
 		return nil, err
 	}
-	// gVisor の受信のキューの上限(既定 212 KiB、payload の byte だけを数える)を endpoint 1 つの
-	// 上限の byte に揃える。会計は payload に 1 件あたりの byte を足して数えるので、会計の上限が
-	// 常に先に効き、endpoint ごとの drop はすべて会計の拒否として数えられる(設計文書 7 節)。
-	// 固定版の gVisor の UDP の endpoint は通知を受けても値を変えないので、notify の値で結果は
-	// 変わらない。gVisor 自身が endpoint を作るとき(newEndpoint)と同じく false で呼ぶ。mu を
-	// 持ったままなので、揃える前に datagram が届くことは無い。
-	c.ep.SocketOptions().SetReceiveBufferSize(int64(t.maxEndpointBytes), false)
+	// gVisor は packet 全体と PacketBuffer 自体を受信キューに算入する。
+	// 会計の byte/件数上限が先に効くよう、その最大の追加費用を確保する。
+	// mu を持ったまま設定するので、設定前に datagram は届かない。
+	c.ep.SocketOptions().SetReceiveBufferSize(t.endpointReceiveBufferSize(), false)
 	return c, nil
+}
+
+func (t *udpAccounting) endpointReceiveBufferSize() int64 {
+	perPacket := int64(header.IPv4MaximumHeaderSize + header.UDPMinimumSize + stack.PacketBufferStructSize)
+	base := int64(t.maxEndpointBytes)
+	if int64(t.maxEndpointPackets) > (math.MaxInt64-base)/perPacket {
+		return math.MaxInt64
+	}
+	return base + int64(t.maxEndpointPackets)*perPacket
 }
 
 func (r *udpRegistry) listen(port uint16) (*rawUDPAdapter, error) {
@@ -108,8 +116,15 @@ func (r *udpRegistry) inject(datagram []byte) (bool, error) {
 	if !ok || !dest.Is4() || dest.IsMulticast() || dest.IsUnspecified() || dest != t.local {
 		return false, errors.New("registry accepts only local IPv4 unicast")
 	}
-	port := header.UDP(datagram[int(ip.HeaderLength()):]).DestinationPort()
-	payload := len(datagram) - int(ip.HeaderLength()) - header.UDPMinimumSize
+	udpHeader := header.UDP(datagram[int(ip.HeaderLength()):])
+	available := len(datagram) - int(ip.HeaderLength())
+	udpLength := int(udpHeader.Length())
+	if udpLength < header.UDPMinimumSize || udpLength > available {
+		return false, nil
+	}
+	port := udpHeader.DestinationPort()
+	payload := udpLength - header.UDPMinimumSize
+	charged := available - header.UDPMinimumSize
 	for {
 		t.mu.Lock()
 		if t.fault != nil {
@@ -131,7 +146,7 @@ func (r *udpRegistry) inject(datagram []byte) (bool, error) {
 			return false, nil
 		}
 		g := t.generations[receiver]
-		res, why := t.reserveLocked(g, payload)
+		res, why := t.reserveWithChargeLocked(g, payload, charged)
 		t.mu.Unlock()
 		if why != udpReserved {
 			t.noteRefusal(why)

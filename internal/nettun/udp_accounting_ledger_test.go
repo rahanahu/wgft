@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 // These tests pin the ledger with small budgets, through a registry of their
@@ -80,6 +81,23 @@ func TestUDPAccountingLedgerInputBudgetFIFOAndTruncation(t *testing.T) {
 	assertRegistryUsage(t, r, 0, 0)
 }
 
+func TestUDPAccountingLedgerPaddedDatagram(t *testing.T) {
+	r := newLedger(t, 1000, 2)
+	rx := ledgerReceiver(t, r)
+	p := accountingDatagram([]byte("data-and-padding"), 0, 0)
+	// The UDP length covers only the first four payload bytes. The remaining
+	// IPv4 bytes may be retained by the packet and must still be charged.
+	p[24], p[25] = 0, 12
+	ledgerInject(t, r, p, true)
+	assertRegistryUsage(t, r, len(p)-20-8+64, 1)
+	b := make([]byte, 32)
+	n, _, err := rx.ReadFrom(b)
+	if err != nil || n != 4 || string(b[:n]) != "data" {
+		t.Fatalf("padded ReadFrom = (%q, %v), want data", b[:n], err)
+	}
+	assertRegistryUsage(t, r, 0, 0)
+}
+
 func TestUDPAccountingLedgerEmptyCountBoundAndBadBuffer(t *testing.T) {
 	r := newLedger(t, 1000, 3)
 	rx := ledgerReceiver(t, r)
@@ -113,8 +131,8 @@ func TestUDPAccountingLedgerChecksumAndEndpointOverflowRefund(t *testing.T) {
 	rx := ledgerReceiver(t, r)
 	ledgerInject(t, r, accountingDatagram([]byte("bad"), 0, 1), false)
 	assertRegistryUsage(t, r, 0, 0)
-	rx.ep.SocketOptions().SetReceiveBufferSize(1000, false)
 	p := accountingDatagram(make([]byte, 800), 0, 0)
+	rx.ep.SocketOptions().SetReceiveBufferSize(int64(2*(len(p)+stack.PacketBufferStructSize)), false)
 	for i := 0; i < 3; i++ {
 		ledgerInject(t, r, p, i < 2)
 	}
