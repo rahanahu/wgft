@@ -282,7 +282,22 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				}
 				raiseUDPSendBuffer(c)
 				s = newUDPSession(c)
+				// 読み取りから登録までの間に closeF が走っていれば(Apply が m.mu を持つ間、上の ruleOf と
+				// targetOf が待たされる)、closeF はこのセッションを見ていない。無通信のセッションを閉じる
+				// goroutine も done で戻っているので、登録すると誰にも閉じられず、枠と宛先へのソケットが
+				// 残り続ける。登録せずにここで閉じ、データグラムも送らない。closeF は mu を取る前に done を
+				// 閉じるので、done が閉じていなければ closeF はこの後に mu を取り、登録したセッションを閉じる
+				// (TCP の accept のループと同じ)
 				mu.Lock()
+				select {
+				case <-done:
+					mu.Unlock()
+					s.close()
+					l.budget.Release()
+					release()
+					continue
+				default:
+				}
 				sessions[k] = s
 				mu.Unlock()
 				go func(k string, s *udpSession, from net.Addr) {
