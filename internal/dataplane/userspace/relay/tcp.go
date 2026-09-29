@@ -75,6 +75,10 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		conns = map[net.Conn]netip.Addr{} // 公開側の接続はその接続元、target 側はゼロ値
 		done  = make(chan struct{})
 		once  sync.Once
+		// closed は closeF が中継中の接続を切った後に真になる。mu で守る。done は stopAccept でも
+		// 閉じる(Retiring の待ち受けは成立済みの接続を残す)ので、宛先への接続の登録は done ではなく
+		// これで判定する
+		closed bool
 		// 同時フロー数の上限の対象は公開側の接続だけで、conns は target 側も含むため一致しない。
 		// 上限の対象の数を数えるのは l.budget で、Status.Flows がその数を返す
 		capLog  lograte.Gate // 上限で拒んだログの頻度
@@ -106,6 +110,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		// netstack の側を先に Abort する。実ソケットの側を先に閉じると、netpipe がその EOF を
 		// netstack の側へ FIN として伝え、RST の前に FIN が出ることがあるため
 		mu.Lock()
+		closed = true
 		for c := range conns {
 			if _, ok := c.(aborter); ok {
 				cutConn(c)
@@ -209,7 +214,16 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					}
 					return
 				}
+				// dial の間に closeF が走っていれば、closeF は公開側の接続 c を切ったが、まだ登録していない
+				// t を見ていない。登録すると誰にも切られず、netpipe は c の読み取りの失敗で t へ FIN を
+				// 送った後も t を読み続けるので、FIN を受けても閉じない宛先では枠と接続が残り続ける。
+				// 登録せずにここで切り、中継も始めない。c は closeF が切っており、枠は上の defer が返す
 				mu.Lock()
+				if closed {
+					mu.Unlock()
+					cutConn(t)
+					return
+				}
 				conns[t] = netip.Addr{}
 				mu.Unlock()
 				defer func() {
