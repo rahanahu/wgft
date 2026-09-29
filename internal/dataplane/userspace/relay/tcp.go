@@ -161,6 +161,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		var (
 			delay     time.Duration
 			acceptLog lograte.Gate
+			peerLog   lograte.Gate // 相手のアドレスが分からない接続を拒んだログの頻度
 		)
 		for {
 			c, err := ln.Accept()
@@ -186,7 +187,18 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				continue
 			}
 			delay = 0
+			// 相手のアドレスが分からない接続は、accept の前か直後に相手が RST で切った接続である。
+			// gVisor は accept の待ち行列にある接続が RST を受けても待ち行列に残して Accept で返し、
+			// その RemoteAddr は nil になる。接続元を判定できないので、Admission Policy にも同時フロー数の
+			// 上限にも数えず、枠を取る前に拒む
 			src := addrOf(c.RemoteAddr())
+			if !src.IsValid() {
+				abortRefused(c)
+				if peerLog.Allow() {
+					m.opts.Logf("tcp %s: refused a connection whose remote address is unknown; the client likely reset it before it was accepted", l.key)
+				}
+				continue
+			}
 			ruleID := m.ruleOf(l)
 			release := func() {}
 			if m.opts.Admit != nil {
