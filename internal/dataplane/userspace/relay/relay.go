@@ -545,10 +545,13 @@ func (m *Manager) CloseSessions(keep func(ruleID string, src netip.Addr) bool) i
 	return n
 }
 
-// addrOf は接続の相手のアドレスを netip.Addr にする(IPv4 射影は外す)。
+// addrOf は接続の相手のアドレスを netip.Addr にする(IPv4 射影は外す)。a が nil のときはゼロ値を返す。
+// gVisor の gonet の RemoteAddr は、エンドポイントが接続中の状態でなくなると nil を返す。
 func addrOf(a net.Addr) netip.Addr {
 	var ip net.IP
 	switch v := a.(type) {
+	case nil:
+		return netip.Addr{}
 	case *net.TCPAddr:
 		ip = v.IP
 	case *net.UDPAddr:
