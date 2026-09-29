@@ -106,6 +106,13 @@ func TestStream(t *testing.T) {
 	server, _ := wgtypes.GeneratePrivateKey()
 	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, gen: 5}
 	h := New(b)
+	h.OnStreamConnect = func(agent, _ string) {
+		h.StatusWithHook(agent, func(s Status) {
+			if !s.Connected {
+				t.Error("connect callback saw disconnected status")
+			}
+		})
+	}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -617,6 +624,9 @@ func TestOnHeartbeatReportsGeneration(t *testing.T) {
 	got := make(chan uint64, 4)
 	h.OnHeartbeat = func(agent string, generation uint64) {
 		if agent == "home" {
+			if s := h.Status(agent); s.Heartbeat == nil || s.Heartbeat.Generation != generation {
+				t.Error("heartbeat callback did not see the recorded status")
+			}
 			got <- generation
 		}
 	}
