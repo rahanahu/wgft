@@ -295,7 +295,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					delete(conns, t)
 					mu.Unlock()
 				}()
-				// 組のうちカーネルの TCP ソケットの受信のバッファを、netstack の接続の boost の枠に合わせる
+				// 組のうちカーネルの TCP ソケットの受信と送信のバッファを、netstack の接続の boost の枠に合わせる
 				// (設計文書 7 節)。vpsd では公開側の c、エージェントでは宛先への t がカーネルのソケットである
 				netpipe.FollowBoost(c, t)
 				netpipe.Pipe(c, t)

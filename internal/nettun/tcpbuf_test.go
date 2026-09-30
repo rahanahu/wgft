@@ -888,10 +888,11 @@ func TestTCPOnBoostReportsSlot(t *testing.T) {
 	defer s.Close()
 	var mu sync.Mutex
 	var got []bool
-	c.(*TCPConn).OnBoost(func(b bool) {
+	c.(*TCPConn).OnBoost(func(b bool) bool {
 		mu.Lock()
 		got = append(got, b)
 		mu.Unlock()
+		return true
 	})
 	events := func() []bool {
 		mu.Lock()
@@ -916,5 +917,59 @@ func TestTCPOnBoostReportsSlot(t *testing.T) {
 	}
 	if e := events(); len(e) != 3 || e[2] {
 		t.Fatalf("events after the slot was reclaimed = %v, want [false true false]", e)
+	}
+}
+
+// 組にしたカーネルのソケットの送信のキューが floor を超えている間(OnBoost の f(false) が偽を返す間)は、
+// 需要の無い保有者でも floor に戻らず、枠を持ち続ける。f(false) が真を返すようになれば回収される
+// (設計文書 7 節「送信のキューと枠の返却」)。
+func TestTCPOnBoostHoldsWhilePairedQueueIsHigh(t *testing.T) {
+	p := newTCPPair(t, 1)
+	c, s := p.dial(t)
+	defer c.Close()
+	defer s.Close()
+	var mu sync.Mutex
+	held := true
+	var asked int
+	c.(*TCPConn).OnBoost(func(b bool) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if b {
+			return true
+		}
+		asked++
+		return !held
+	})
+	bulk(t, c, s, 4<<20)
+	if !boosted(c) {
+		t.Fatal("bulk transfer did not take the slot")
+	}
+	time.Sleep(tcpIdleReclaim + 200*time.Millisecond)
+	c2, s2 := p.dial(t)
+	defer c2.Close()
+	defer s2.Close()
+	bulk(t, c2, s2, 4<<20)
+	if boosted(c2) || !boosted(c) {
+		t.Fatalf("while the paired queue is high: new flow boosted=%v, old holder boosted=%v; want false, true", boosted(c2), boosted(c))
+	}
+	mu.Lock()
+	n := asked
+	mu.Unlock()
+	if n == 0 {
+		t.Fatal("the reclaim never asked the paired socket")
+	}
+	// 断った保有者は gVisor の側でも boost の大きさのまま残る
+	so := connOf(c).ep.SocketOptions()
+	if so.GetReceiveBufferSize() != tcpBoostSize || so.GetSendBufferSize() != tcpBoostSize {
+		t.Fatalf("refused holder has buffers rcv=%d snd=%d, want both %d", so.GetReceiveBufferSize(), so.GetSendBufferSize(), tcpBoostSize)
+	}
+	mu.Lock()
+	held = false
+	mu.Unlock()
+	// 需要の区間ごとに 1 回だけ枠を求めるので、前の区間を終えてから転送する
+	time.Sleep(tcpDemandWindow + 50*time.Millisecond)
+	bulk(t, c2, s2, 4<<20)
+	if !boosted(c2) || boosted(c) {
+		t.Fatalf("after the paired queue drained: new flow boosted=%v, old holder boosted=%v; want true, false", boosted(c2), boosted(c))
 	}
 }

@@ -578,8 +578,8 @@ func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 		return
 	}
 	defer l.untrack(c)
-	// ユーザー空間モードでは、公開側のカーネルのソケットの受信のバッファを netstack の接続 up の boost の
-	// 枠に合わせる(設計文書 7 節)。カーネルモードの up は実ソケットなので何もしない
+	// ユーザー空間モードでは、公開側のカーネルのソケットの受信と送信のバッファを netstack の接続 up の
+	// boost の枠に合わせる(設計文書 7 節)。カーネルモードの up は実ソケットなので何もしない
 	netpipe.FollowBoost(c, up)
 	netpipe.Pipe(c, up)
 }

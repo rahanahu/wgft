@@ -17,13 +17,23 @@ import (
 
 func rcvBufOf(t *testing.T, c net.Conn) int {
 	t.Helper()
+	return sockOptOf(t, c, unix.SO_RCVBUF)
+}
+
+func sndBufOf(t *testing.T, c net.Conn) int {
+	t.Helper()
+	return sockOptOf(t, c, unix.SO_SNDBUF)
+}
+
+func sockOptOf(t *testing.T, c net.Conn, opt int) int {
+	t.Helper()
 	rc, err := c.(syscall.Conn).SyscallConn()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var n int
 	var gerr error
-	if err := rc.Control(func(fd uintptr) { n, gerr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF) }); err != nil {
+	if err := rc.Control(func(fd uintptr) { n, gerr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, opt) }); err != nil {
 		t.Fatal(err)
 	}
 	if gerr != nil {
@@ -36,17 +46,17 @@ func rcvBufOf(t *testing.T, c net.Conn) int {
 type boostPeer struct {
 	net.Conn
 	mu sync.Mutex
-	f  func(bool)
+	f  func(bool) bool
 }
 
-func (b *boostPeer) OnBoost(f func(bool)) {
+func (b *boostPeer) OnBoost(f func(bool) bool) {
 	b.mu.Lock()
 	b.f = f
 	b.mu.Unlock()
 	f(false)
 }
 
-func (b *boostPeer) hook() func(bool) {
+func (b *boostPeer) hook() func(bool) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.f
@@ -132,12 +142,21 @@ func TestProxyPublicSocketFollowsPeerBoost(t *testing.T) {
 	if got := rcvBufOf(t, pub); got != 2*netpipe.KernelRecvFloor {
 		t.Fatalf("public SO_RCVBUF at the floor = %d, want %d", got, 2*netpipe.KernelRecvFloor)
 	}
+	if got := sndBufOf(t, pub); got != 2*netpipe.KernelSendFloor {
+		t.Fatalf("public SO_SNDBUF at the floor = %d, want %d", got, 2*netpipe.KernelSendFloor)
+	}
 	f(true)
 	if got := rcvBufOf(t, pub); got <= 2*netpipe.KernelRecvFloor {
 		t.Fatalf("public SO_RCVBUF while the peer holds a slot = %d, want above %d", got, 2*netpipe.KernelRecvFloor)
 	}
+	if got := sndBufOf(t, pub); got <= 2*netpipe.KernelSendFloor {
+		t.Fatalf("public SO_SNDBUF while the peer holds a slot = %d, want above %d", got, 2*netpipe.KernelSendFloor)
+	}
 	f(false)
 	if got := rcvBufOf(t, pub); got != 2*netpipe.KernelRecvFloor {
 		t.Fatalf("public SO_RCVBUF after the slot went back = %d, want %d", got, 2*netpipe.KernelRecvFloor)
+	}
+	if got := sndBufOf(t, pub); got != 2*netpipe.KernelSendFloor {
+		t.Fatalf("public SO_SNDBUF after the slot went back = %d, want %d", got, 2*netpipe.KernelSendFloor)
 	}
 }
