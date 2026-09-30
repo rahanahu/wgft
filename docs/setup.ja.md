@@ -71,6 +71,8 @@ LXC や Incus のコンテナのエージェントでは、前述の手順でコ
 
 この手順は、開発用ラボの Debian 12(カーネル 6.1)で確かめました。既定の値では、`agent doctor` がこの項目を FAILED とし、終了コードは 0 で、エージェントは警告を出しました。前述の 2 つのコマンドと再起動の後は、この項目が OK になりました。Docker でも、付属の compose ファイルで動かしたエージェントと server で同じ結果になり、server は設定の前だけ警告を出しました。同じ VM で既定の値のまま、`CAP_NET_ADMIN` だけを持つ server のプロセスは条件を満たすバッファを得て、警告を出しませんでした。付属の unit そのものでは確かめていません。非特権の Incus のコンテナのエージェントでも同じ結果になりました。このコンテナは Incus の既定のままで、security の設定も nesting もありません。エージェントは付属の unit で専用の利用者として動き、capability を持ちません。設定の前は `agent doctor` がこの項目を FAILED とし、終了コードは 0 で、エージェントは警告を出しました。コンテナのホストで前述のファイルを適用し、エージェントを再起動した後は、この項目が OK になり、警告は出なくなりました。`wgft agent rotate-key` の後もこの項目は OK のままでした。確かめたカーネルは、Debian 12 のカーネル 6.1、Ubuntu 24.04 のカーネル 6.8、Ubuntu のカーネル 6.17 です。6.17 では、ファイルを置いたままコンテナのホストを再起動し、再起動の後もこの項目が OK になることも確かめました。Proxmox VE のコンテナ、nesting を有効にしたコンテナ、非特権の LXC や Incus のコンテナの中のユーザー空間モードの server、rootless のコンテナ、LXC や Incus のコンテナのエージェントでのカーネル 7.x、他のディストリビューションは未確認です。Windows と macOS のエージェントはソケットを測らず、`agent doctor` はこの項目を NOT TESTED として示します。この 2 つの OS で得られるバッファの大きさと、設定が要るかどうかは未確認です。
 
+ユーザー空間モードの server は、前述の WireGuard のソケットの要求とは別に UDP のルールごとの公開側の UDP ソケットにも固定 2 MiB の送信バッファを要求します。この要求は server の UDP のルールだけに当てはまり agent には当てはまりません。カーネルが要求より小さい値を割り当てると、server は `warning: the public UDP socket on port <port> got a send buffer of <bytes> bytes` で始まる行を 1 分に 1 回まで出します。送信バッファが小さいと、そのルールの応答の burst は届かず捨てられやすくなります。前述の `net.core.wmem_max` を 7340032 以上にする対処はこの小さい要求の切り詰めも防ぎます。`CAP_NET_ADMIN` は WireGuard のソケットの場合と違って効きません。この要求は FORCE を使わないため、この capability を持つ server でも、WireGuard のソケットが条件を満たしたままこの警告だけ出ることがあります。
+
 ## 1. バイナリをインストールする
 
 同じバイナリに server、agent、CLI が含まれています。VPS のイメージや Proxmox の LXC テンプレートのような最小構成のイメージは、curl を含まないことがあります。あらかじめ `sudo apt install curl` のように導入してください。
