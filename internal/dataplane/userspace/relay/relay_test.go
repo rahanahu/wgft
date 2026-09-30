@@ -311,15 +311,19 @@ func closedTarget(t *testing.T) (net.IP, uint16) {
 }
 
 // TestClosedTargetSurvivesALoopbackDial pins the reason closedTarget exists: a connection that
-// leaves 127.0.0.1 from the target's number, as any loopback dial on the host may in the gap, must
-// not stop the test from binding its server on the target afterwards.
+// leaves 127.0.0.1 from some number, as any loopback dial on the host may in the gap, must not
+// stop the test from binding its server on the target's address with that number afterwards.
+//
+// The source number comes from the kernel's own pick for the dial rather than from closedTarget:
+// closedTarget's number is free on 127.0.0.2, and on a busy host it can already be taken on
+// 127.0.0.1, which would fail the dial for a reason this test is not about.
 func TestClosedTargetSurvivesALoopbackDial(t *testing.T) {
 	probe, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 2)})
 	if err != nil {
 		t.Skipf("127.0.0.2 is not available on this host, so closedTarget falls back to 127.0.0.1: %v", err)
 	}
 	probe.Close()
-	ip, port := closedTarget(t)
+	ip, _ := closedTarget(t)
 	if !ip.Equal(net.IPv4(127, 0, 0, 2)) {
 		t.Fatalf("closedTarget chose %s although 127.0.0.2 is available", ip)
 	}
@@ -328,15 +332,15 @@ func TestClosedTargetSurvivesALoopbackDial(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer peer.Close()
-	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)}}
-	c, err := d.Dial("tcp4", peer.Addr().String())
+	c, err := net.DialTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}, peer.Addr().(*net.TCPAddr))
 	if err != nil {
-		t.Fatalf("dial from 127.0.0.1:%d: %v", port, err)
+		t.Fatal(err)
 	}
 	defer c.Close()
-	srv, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: ip, Port: int(port)})
+	port := c.LocalAddr().(*net.TCPAddr).Port
+	srv, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: ip, Port: port})
 	if err != nil {
-		t.Fatalf("a loopback dial holding the number must not block the target's own bind: %v", err)
+		t.Fatalf("a loopback dial from 127.0.0.1:%d must not block binding %s:%d: %v", port, ip, port, err)
 	}
 	srv.Close()
 }
