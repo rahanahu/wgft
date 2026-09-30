@@ -44,7 +44,11 @@ type Options struct {
 	Listen func(port uint16) (net.Listener, error)
 	// Dial はエージェントのリスナーへ繋ぐ。既定は net.Dial("tcp", addr)。
 	Dial func(addr string) (net.Conn, error)
-	Logf func(string, ...any)
+	// FloorAtAccept は、accept した公開側の接続の受信のバッファを、Admission と dial の前に floor に
+	// 固定するか(netpipe.FixAtAccept)。ユーザー空間モードの vpsd が立てる。カーネルモードでは組の
+	// 両側がカーネルのソケットで枠に合わせないので、立てない(設計文書 7 節)
+	FloorAtAccept bool
+	Logf          func(string, ...any)
 	// Pool はプロセス全体の予算と、そこから導くルールごとの上限と最低分(仕様 7 節、
 	// 設計文書 7a.10 節の Resource Guard)。nil なら既定値で作る。
 	// ユーザー空間モードの vpsd は relay と同じ Pool を渡し、合計で数える
@@ -105,6 +109,10 @@ type listener struct {
 	// acceptLog は accept の失敗のログを絞る(ファイル記述子の枯渇のように、失敗が続く間は
 	// 再試行のたびに 1 行出るため。仕様 10.4 節)。
 	acceptLog lograte.Gate
+	// heldLog と held は、数える前に floor に固定できなかった接続を切ったログの頻度と数。serve の
+	// goroutine だけが触る
+	heldLog lograte.Gate
+	held    int
 }
 
 // relayed は進行中の中継 1 本の記録で、公開側の接続を鍵にして conns に置く。中継を切るときは、
@@ -136,6 +144,10 @@ func abortUpstream(up net.Conn) {
 	}
 	up.Close()
 }
+
+// fixAtAccept は accept した接続を floor に固定して確かめる(netpipe.FixAtAccept)。テストが
+// 失敗を差し込むために差し替える。
+var fixAtAccept = netpipe.FixAtAccept
 
 // abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う
 // (Admission Policy と、ルールごととプロセス全体の同時フロー数の上限)。通常の Close はグレースフル
@@ -454,6 +466,17 @@ func (m *Manager) serve(l *listener) {
 			continue
 		}
 		delay = 0
+		// ユーザー空間モードでは、公開側のカーネルのソケットを Admission と dial を待つ間も floor に
+		// 固定する。固定する前に floor を超えて溜めていた接続と、固定か確かめに失敗した接続は、数えずに
+		// RST で切る(設計文書 7 節)
+		if m.opts.FloorAtAccept && !fixAtAccept(c) {
+			abortRefused(c)
+			l.held++
+			if l.heldLog.Allow() {
+				m.opts.Logf("proxy: %d: reset a new connection before it was counted: its receive memory was above the floor or could not be held at the floor; %d so far", l.port(), l.held)
+			}
+			continue
+		}
 		if a := m.admitAccepted(l, c); a != nil {
 			go m.relayAdmitted(l, a)
 		}
@@ -578,6 +601,9 @@ func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 		return
 	}
 	defer l.untrack(c)
+	// ユーザー空間モードでは、公開側のカーネルのソケットの受信のバッファを netstack の接続 up の boost の
+	// 枠に合わせる(設計文書 7 節)。カーネルモードの up は実ソケットなので何もしない
+	netpipe.FollowBoost(c, up)
 	netpipe.Pipe(c, up)
 }
 
