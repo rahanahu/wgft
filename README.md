@@ -2,7 +2,6 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/rahanahu/wgft/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
-[![Status: v1.1](https://img.shields.io/badge/status-v1.1-blue.svg)](#status)
 
 English | [日本語](README.ja.md)
 
@@ -22,72 +21,51 @@ flowchart LR
   end
 ```
 
-wgft is aimed at workloads where arbitrary TCP/UDP forwarding matters, especially game servers. HTTPS also works, but wgft does not terminate TLS or provide authentication; those stay with your reverse proxy at home.
+wgft is for forwarding arbitrary TCP and UDP ports, especially to game servers. It can forward HTTPS, but TLS termination and authentication belong on your reverse proxy at home.
 
 ## Features
 
 - One binary contains the VPS server, home agent, and CLI
-- Kernel mode uses the kernel's WireGuard and nftables DNAT path, so forwarding survives a wgft process restart
-- Userspace mode runs wgft without root and can run entirely in a container, on a host whose socket buffer limits are raised once
-- TCP and UDP port/range forwarding
-- Per-rule allow/deny lists and rate limits
-- Rule changes do not disconnect unrelated sessions
-- Optional PROXY protocol v2 for preserving the real client IP on TCP rules
-- Web dashboard for agents, rules, warnings, and forwarding state
-- Diagnostics that show how far a rule's traffic gets and where it stops, from the CLI and the Web UI
-- `wgft server teardown` removes only state created by wgft
+- Forwards a VPS port to a TCP or UDP service at home, including port ranges
+- Applies per-rule source allow/deny lists and rate limits
+- Changes rules without disconnecting unrelated sessions
+- Passes the real client IP to a TCP target with optional PROXY protocol v2
+- Shows agents, rules, and where traffic stops in the Web UI and CLI
 
 ## Why wgft?
 
-wgft was inspired by Pangolin. Pangolin showed how useful the VPS-to-home tunnel model can be, but for game servers and other raw TCP/UDP services I wanted a smaller tool focused on port forwarding. It is also intended for connections such as Japanese IPv4-over-IPv6 services, where arbitrary inbound IPv4 ports may not be available.
+wgft was inspired by Pangolin. Pangolin showed how useful the VPS-to-home tunnel model can be, but for game servers and other raw TCP/UDP services I wanted a smaller tool focused on port forwarding. This also fits connections, such as some Japanese IPv4-over-IPv6 services, where the home router cannot expose arbitrary IPv4 ports.
 
-wgft therefore stays deliberately narrow: WireGuard for the tunnel, nftables for kernel forwarding, and simple TCP/UDP rules. wgft manages the WireGuard and wgft-owned nftables state, so you do not have to hand-write the tunnel or DNAT rules. It does not provide TLS termination, SSO, certificate management, or application publishing; those are left to a reverse proxy or other software.
+wgft keeps to a WireGuard tunnel, kernel forwarding through nftables, and straightforward TCP/UDP rules. It manages its WireGuard and nftables state, so you do not have to build the tunnel and DNAT rules by hand. It leaves TLS termination, SSO, certificates, and web app publishing to other software.
 
-## Modes
+## Requirements and modes
+
+The server runs on Linux. The agent runs on Linux, Windows amd64, and Apple silicon macOS; Intel Macs are not supported. Forwarding is IPv4-only. The server and Linux agent each support two modes:
 
 | | Kernel mode `kernel` | Userspace mode `userspace` |
 |---|---|---|
-| Root on the VPS | Required | Not required |
-| Kernel and nftables | Kernel 6.1+, nftables 1.0.6+ | None |
-| Host socket buffer limits | No requirement | `net.core.rmem_max` and `net.core.wmem_max` of 7340032 or more, unless the server holds `CAP_NET_ADMIN` on a VM or a dedicated host |
-| Forwarding path | Kernel WireGuard + nftables DNAT | wireguard-go + userspace netstack |
-| If the wgft process stops or crashes | Configured forwarding continues | Forwarding stops |
-| Rate-limit evaluation | Kernel | wgft process |
+| Forwarding path | Linux WireGuard and nftables | wireguard-go and userspace netstack |
+| Privileges | Requires `CAP_NET_ADMIN` | Normally needs neither root nor a TUN device |
+| If the wgft process stops | Configured forwarding continues | Forwarding stops |
 
-In kernel mode, forwarding stays in the kernel if the wgft process crashes or restarts after startup. A VPS reboot clears that runtime state, so wgft must start again to restore forwarding. Keep the provided systemd service enabled for normal operation so reboot recovery happens automatically.
+Use kernel mode on a VPS where you have root. Userspace mode is available without root or kernel WireGuard and can run in a container. Kernel mode requires Linux 6.1+ and nftables 1.0.6+. The agent defaults to userspace mode. The [kernel-mode agent guide](docs/agent-kernel.md) covers the requirements for a Linux agent in kernel mode.
 
-Use kernel mode when you have root on the VPS. Use userspace mode when root or kernel WireGuard is unavailable, or when you want to run the server in a container. Userspace mode needs two socket buffer limits raised on the host, or on the container host, which takes root there once. On a VM or a dedicated host, a server started by the provided systemd unit holds the capability that makes this unnecessary. Inside a container or on an LXC-based VPS that capability does not lift the limits, so the limits must be raised on the container host. A server run with the provided compose file has met the requirement that way; a server in an LXC container or on an LXC-based VPS has not been verified. The server and the agent log a warning when their sockets fall short, and that log decides; see [Socket buffers for userspace mode](docs/setup.md#socket-buffers-for-userspace-mode).
-
-In userspace mode, the server and the agent keep forwarded flows and their buffers in process memory, and wgft does not refuse new flows because memory is short. The worst case comes when an attack fills every flow and every buffer at once; it is a bound, not the expected usage. With the default flow caps, a server with one agent and one forwarded TCP port needs a host with about 7.1 GiB of memory, and the agent's worst case is of the same order. Lower caps do not bring the server's host below about 4.1 GiB, so a smaller host can run out of memory under an attack that fills every flow and buffer. Section 7 of the [design document](docs/design.md) gives the terms, the host requirement, and a table of lower caps.
-
-The VPS side runs on Linux. The home agent also runs on Windows amd64, verified on Windows 11, and on macOS on Apple silicon, verified on macOS 27. Intel Macs are not supported. wgft is IPv4-only. In its default userspace mode, the home agent does not need root or a TUN device, and no administrator rights on Windows. On macOS it runs with your user's rights. On Linux, the agent's host needs the same two socket buffer limits raised; `wgft agent doctor` shows whether the running agent's sockets meet the requirement.
-
-### Kernel mode on the home agent
-
-On Linux, the home agent can forward in kernel mode as well. With `WGFT_MODE=kernel` in its `agent.env`, the agent creates a kernel WireGuard interface, `wgft0`, and an nftables table on the home host, and the kernel forwards traffic to the LAN targets with DNAT. The agent process relays nothing, so forwarding continues while the agent is stopped or restarting. Without `WGFT_MODE=kernel`, the agent stays in userspace mode.
-
-Kernel mode needs `CAP_NET_ADMIN`. The provided `agent.service` stays unprivileged, and the drop-in [deploy/agent.kernel.conf](deploy/agent.kernel.conf) adds that one capability; the agent still runs as the `wgft` user. Kernel mode forwards only to IPv4 targets and refuses loopback targets. To reach a service on the agent host itself, give the host's LAN address as the target. A UDP service there should also listen on that LAN address. If it listens on all addresses, such as `0.0.0.0`, its replies may not reach the client. Userspace mode does not have this limitation.
-
-Kernel mode turns the home host into a router. The agent sets `net.ipv4.ip_forward` to 1 when it is 0, so the host routes packets between its interfaces for any traffic, not only for wgft. wgft's own table filters only the forwarding that involves `wgft0`.
-
-To go back to userspace mode, stop the agent and run `sudo wgft agent teardown`. It removes the interface, the table and the kernel-mode records, and leaves `ip_forward` as it is but prints how to restore it. `wgft agent doctor` shows whether the interface, the table and IP forwarding of a kernel-mode agent are in place. The [setup guide](docs/setup.md#run-the-agent-in-kernel-mode) has the steps.
-
-On a staging machine, the drop-in has been verified in an unprivileged Debian 13 LXC container on Proxmox VE, with nesting enabled and the container's AppArmor profile unconfined. There, forwarding came back after `systemctl restart wgft-agent` and after restarting the container itself, forwarding continued while the agent was stopped for about 40 seconds, and `wgft agent rotate-key` worked with the agent running and with it stopped. On a Debian 12 VM in the development lab, forwarding, reboots, a stopped agent, `wgft agent doctor` and the way back with teardown have been verified. Not verified: Proxmox VE containers with nesting disabled or with an AppArmor profile that confines them, Incus containers, Docker, and distributions that enforce SELinux or AppArmor. The setup guide does not describe kernel mode in Docker.
+Linux userspace mode may need higher host socket buffer limits. With the default flow limits, a server with one agent and one forwarded TCP port needs about 7.1 GiB of host memory to withstand the documented worst-case attack. Lower flow limits cannot bring that requirement below about 4.1 GiB. These are worst-case bounds, not estimates of normal use. See [userspace mode on the VPS](docs/setup-server-userspace.md) for the requirement and the [design](docs/design.md#7a-内部アーキテクチャ) for the calculation.
 
 ## Quick start
 
-This is the shortest path for the common setup: kernel mode on a Linux VPS and a plain binary agent at home. For userspace mode, Docker, systemd details, firewall notes, HTTPS, logs, and teardown, see the [setup guide](docs/setup.md).
+This example uses kernel mode on a Linux VPS and a Linux home agent. Choose from [deployment options](docs/setup-alternatives.md) for [Windows](docs/setup-desktop.md#run-the-agent-on-windows), [macOS](docs/setup-desktop.md#run-the-agent-on-macos), Docker, and other environments. The [setup guide](docs/setup.md) covers Linux systemd.
 
-### 1. Install wgft
+### 1. Download wgft
 
-On Linux, download the release binary. Minimal images, such as some VPS templates and Proxmox LXC templates, do not include `curl`; install it first, for example `sudo apt install curl`.
+Run this on both the VPS and the home Linux machine. Install `curl` first if your image does not include it.
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64
 chmod +x wgft-linux-amd64
 ```
 
-Use `arm64` instead of `amd64` on Linux arm64 systems. Windows and macOS installation is covered in step 3 below.
+On Linux arm64, use `arm64` instead of `amd64` in the filename.
 
 ### 2. Start the VPS server
 
@@ -100,17 +78,15 @@ sudo wgft server check
 sudo wgft server run
 ```
 
-`server.env` is intentionally readable by all users: it contains no secrets, and the provided systemd service runs as a dynamic unprivileged user.
+Replace `vps.example.com` with the VPS hostname. Open UDP 51820 and TCP 8443 on the VPS firewall. `wgft server check` also reports exceptions needed by an existing firewall. Kernel mode enables IPv4 forwarding when needed. `server.env` contains no secrets and uses mode 0644 so the provided systemd unit can read it.
 
-Open UDP 51820 and TCP 8443 on the VPS firewall. `wgft server check` also prints any forwarding exceptions required by an existing firewall, and warns if the host's own input firewall would block wgft's own ports or a rule's listen port.
-
-Kernel mode requires IPv4 forwarding. wgft sets `net.ipv4.ip_forward=1` when needed; `wgft server teardown` reports how to revert it.
-
-In another VPS shell, create a one-time join string:
+In another VPS shell, create a join string for the first registration:
 
 ```sh
 sudo wgft agent join-string --name home
 ```
+
+The [setup guide](docs/setup.md#issue-a-join-string) also shows how to issue the join string in the Web UI.
 
 ### 3. Start the home agent
 
@@ -120,34 +96,9 @@ mv wgft-linux-amd64 ~/.local/bin/wgft
 WGFT_JOIN='<join string>' ~/.local/bin/wgft agent run --data-dir ~/.wgft
 ```
 
-The credentials are stored in `~/.wgft/agent.json`; the join string is needed only for the first registration.
+Put the issued join string inside the single quotes and treat it as a secret. Credentials are saved in `~/.wgft/agent.json`; later starts do not need the join string.
 
-On Windows, download `wgft-windows-amd64.exe` from the [Releases page](https://github.com/rahanahu/wgft/releases). Open PowerShell in the folder it was saved to, for example Downloads, and run:
-
-```powershell
-Rename-Item wgft-windows-amd64.exe wgft.exe
-$env:WGFT_JOIN = '<join string>'
-.\wgft.exe agent run
-```
-
-The join string contains `#`, so it needs single quotes.
-
-Later starts need only `.\wgft.exe agent run`; the saved credentials are reused. Windows Defender Firewall may prompt to allow `wgft.exe` on the first start. The tunnel keeps working whether you allow or cancel that prompt, because the agent only makes outbound connections. Stop the agent with Ctrl+C or by closing the window. Credentials are stored in `%ProgramData%\wgft\agent.json` and no administrator rights are needed. wgft installs no Windows service, so keeping the agent running across logons is up to you. A shortcut in the Startup folder is one untested option. See the [setup guide](docs/setup.md#run-the-agent-on-windows) for details.
-
-On macOS, download the binary with `curl` in Terminal, install it, and register once:
-
-```sh
-curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-darwin-arm64
-sudo mkdir -p /usr/local/bin
-sudo install -m 0755 wgft-darwin-arm64 /usr/local/bin/wgft
-WGFT_JOIN='<join string>' /usr/local/bin/wgft agent run
-```
-
-Use `curl` rather than a web browser. A browser marks the download as quarantined, and Gatekeeper blocks a binary that carries that mark and is not notarized by Apple, which is the case for wgft. `/usr/local/bin` may not exist on Apple silicon Macs, which is why the `mkdir` is there. Credentials are stored in `~/Library/Application Support/wgft/agent.json`.
-
-To keep the agent running, stop it with Ctrl+C after it prints `registered as agent`, and install it as a LaunchDaemon with [deploy/io.github.rahanahu.wgft.agent.plist](deploy/io.github.rahanahu.wgft.agent.plist). The daemon runs with your user's rights and uses the same credentials. Do not use a LaunchAgent: started that way, the agent could not reach other hosts on the LAN, most likely because of macOS Local Network privacy. On a Mac with FileVault on, the daemon starts only after the first login following a reboot. See the [setup guide](docs/setup.md#run-the-agent-on-macos) for the steps.
-
-### 4. Add a rule
+### 4. Add a forwarding rule
 
 Back on the VPS:
 
@@ -156,77 +107,40 @@ sudo wgft agent ls
 sudo wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group game
 ```
 
-For a port range, `--to` specifies the first destination port. This example maps VPS UDP 2456 to `192.168.1.20:2456` and UDP 2457 to `192.168.1.20:2457`.
+You can add the same forwarding rule with "+ Add rule" in the Web UI.
 
-Open the forwarded port on the VPS firewall. Once the rule is active, traffic arriving at the VPS is sent through the WireGuard tunnel to the home target.
+This maps UDP 2456 and 2457 on the VPS to the same ports on `192.168.1.20` at home. Open the forwarded ports on the VPS firewall too.
 
-## Web UI
+## After the first forward
 
 ![wgft dashboard](docs/images/dashboard.png)
 
-The dashboard shows agent connectivity, rules, drop counters, warnings, and the active nftables state. Next to each rule's state, a diagnosis mark shows where the rule's traffic stops and opens that rule's diagnostics page. The error counts in the header and the group headings count these marks. The dashboard can also issue join strings and manage ordinary rule operations.
-
-The admin API is not exposed publicly by default; it listens on `/run/wgft/admin.sock`. Reach it through SSH:
+The Web UI shows agent and rule status, lets you add rules, and helps diagnose failed forwarding. The admin API is local-only by default. Forward it over SSH, then open `http://localhost:8686`:
 
 ```sh
 ssh -L 8686:/run/wgft/admin.sock root@vps
 ```
 
-Then open `http://localhost:8686`. Other admin access options are documented in the [setup guide](docs/setup.md#web-ui).
+If traffic does not reach its target, run `sudo wgft server doctor` on the VPS. The Web UI's [rule diagnostics page](docs/images/doctor-rule.png) also shows where traffic stops. Use [agent doctor](docs/cli.md#wgft-agent-doctor) to check the home side, or [agent disable](docs/cli.md#wgft-agent-disable) to pause forwarding for an agent.
 
-## Disabling an agent
+You can restrict the LAN targets the agent will reach with [`WGFT_AGENT_ALLOW_TARGETS`](docs/operations.md#restrict-agent-targets).
 
-`wgft agent disable <name>` stops forwarding for all of an agent's rules without removing anything. The registration, the keys and the rules stay. `wgft agent enable <name>` undoes it. The Web UI offers both on the agent list and on each agent's page. `wgft agent revoke` is a different operation: it removes the agent, and the removal cannot be undone.
+## More detail
 
-On a staging machine, disabling an agent cut the sessions already open and stopped TCP and UDP forwarding for its rules, including a rule that adds PROXY protocol v2. Disabling the disabled agent again reported no change. `wgft status`, `wgft server doctor` and `wgft agent doctor` showed the agent as disabled, and it stayed disabled across restarts of the server and the agent. A rule disabled on its own stayed disabled after the agent was enabled again. The [CLI reference](docs/cli.md#wgft-agent-disable) has the details.
-
-## Diagnosing a rule that carries no traffic
-
-`wgft server doctor` on the VPS answers how far a rule's traffic gets, where it stops, and what to check next. Without an argument it surveys the server, the agents, and every rule. Given a rule ID, it follows that one rule from the public port to the target. It reads only what the running server has already observed and opens no connection unless you add `--probe`, which dials one real TCP connection through the tunnel and the agent to the target.
-
-```sh
-sudo wgft server doctor
-sudo wgft server doctor <rule ID>
-```
-
-The Diagnostics page of the Web UI shows the same verdicts, built from the same evidence. Each rule is drawn as a path through the nodes `public port`, `WireGuard`, `agent`, and `listener / target`, marked at the node where traffic stops. The probe runs only when you press its button on a single rule's page. The screenshot below shows a rule whose traffic stops at WireGuard because its agent has not completed a recent handshake. The page also has [a list of every rule](docs/images/doctor.png).
-
-![Diagnostics page of one rule](docs/images/doctor-rule.png)
-
-`wgft agent doctor` runs on the agent host and answers whether an agent runs there, whether it holds credentials, and whether the host can resolve the names it needs. For a kernel-mode agent it also checks the WireGuard interface, the nftables table and IP forwarding. A stopped kernel-mode agent whose interface, table and forwarding are in place exits 0, because the kernel keeps forwarding; reading that state while the agent is stopped needs root. Otherwise, run it as the user the agent runs as. It answers for the permissions of the user who runs it. Run as root, it cannot tell whether the agent's own user can reach its files, and reports the privileges item as UNKNOWN. Where the agent itself runs as root, running the command as root is correct and that UNKNOWN is expected. With `--json`, both doctor commands print a diagnostic model. Its check ids and reason codes may gain new values in later versions, but an existing value never changes its meaning.
-
-Give it the same data directory as the agent. For the agent started in the Quick start above:
-
-```sh
-~/.local/bin/wgft agent doctor --data-dir ~/.wgft
-```
-
-Without `--data-dir`, it reads `/var/lib/wgft`, the default that the provided systemd unit uses, and does not see an agent that keeps its credentials elsewhere.
-
-See the [CLI reference](docs/cli.md) for what each state means and for the exit codes, and the [design](docs/design.md) for how the checks are judged.
-
-## Documentation
-
-- [Setup guide](docs/setup.md) - kernel/userspace modes, rootless operation, Docker, systemd, HTTPS, Web UI access, logs, and teardown
-- [CLI reference](docs/cli.md) - generated command reference with examples
-- [Design](docs/design.md) - protocol, security, forwarding behavior, and design decisions
-- [Architecture](docs/architecture.md) - package layout and code paths
-- [CLAUDE.md](CLAUDE.md) - project development conventions and test setup
-
-`wgft <command> --help` also includes examples for every command.
+- [Setup guide](docs/setup.md): Run the Linux server and agent with systemd and add the first rule
+- [Deployment options](docs/setup-alternatives.md): Windows, macOS, Docker, and VPS hosts without root
+- [Operations guide](docs/operations.md): Web UI, HTTPS, logs, and teardown
+- [CLI reference](docs/cli.md): commands and examples
+- [Design](docs/design.md) and [architecture](docs/architecture.md): forwarding behavior and implementation
+- [Development conventions](CLAUDE.md): test environment and change process
+- [Security policy](SECURITY.md): vulnerability reporting
 
 ## Status
 
-v1.2.0. The compatibility contract has been in effect since v1.0; the version number is not a level of maturity. It covers the Linux server, the Linux agent, and the Windows agent within the range verified on a real Windows 11 machine. The Windows agent's behavior outside that covered range and the macOS agent are provisional and outside it. The server's kernel mode has been verified on the author's VPS/home setup for UDP and TCP forwarding, NAT traversal, reconnects, reboot recovery, and teardown. The server's userspace mode has been verified in the development lab and on a VPS. `wgft server doctor` and `wgft status` have been verified in kernel mode against a running server and one registered agent, across a healthy deployment, an agent refusing a target, and an agent whose control connection is down. Recovery from a rule set that fails to apply every time has been verified in the development lab: the server holds the rest of its startup with the admin API listening, so the rules can be made smaller without erasing the data directory. `wgft agent doctor`, including its `--json` output, and the Web UI diagnostics page have been verified against a server in kernel mode on a staging VPS and an agent in userspace mode in an LXC container running as its own system user, across a healthy deployment, a stopped agent, a target that refuses connections, and a target that silently drops them. Provisional status does not itself withdraw any currently published agent binary. The v1.2.0 Windows agent has been verified on a Windows 11 machine on a wired network, running as a user without administrator rights, against a kernel-mode server on another host. The verified range, which the contract covers, is registration, TCP and UDP forwarding, reconnecting the control connection, recovery from sleep, recovery after the network adapter is disabled and re-enabled, `wgft agent doctor`, and the key commands `agent pubkey` and `agent rotate-key`. On macOS, general agent behavior, such as registration, tunneling, and recovery after a restart, has been verified on real hardware. The connection-liveness check that now decides when the agent reconnects is a newer mechanism and has not been verified on real macOS hardware, which is the main reason the macOS agent stays outside the contract for now. Flows that the server relays are capped per rule, source, and process; flows that a userspace-mode agent relays, per rule and process. The upgrade path is supported, but reverting to an older version afterward is not promised. Back up the data directory before upgrading so you can restore it if you need to move back. From v1.2.0 on, the server database uses schema version 9. v1.1.x and earlier refuse to open it. On a staging machine, v1.1.3 exited with code 3 and left the database unchanged. Moving back to v1.1.1 through v1.1.3 therefore needs a backup taken before the upgrade to v1.2.0, and moving back to v1.1.0 or earlier needs one taken before the upgrade to v1.1.1 or later. See the design and setup documentation for implementation and deployment details.
+v1.2.0. The compatibility contract in effect since v1.0 covers the Linux server and agent, plus the Windows agent within the range verified on Windows 11 hardware. The macOS agent has been verified for basic operation on real hardware, but its newer reconnect liveness check has not been verified there, so it remains outside the contract. The covered behavior is defined in [design section 7a.11](docs/design.md#7a11-v10-の互換性の保証サーフェスごとの一覧).
 
-## Security
-
-The provided server systemd unit runs wgft as an unprivileged user with only the capabilities needed for forwarding. The public surface is WireGuard, the agent API, and ports you explicitly forward; the admin API is local-only by default.
-
-The agent connects to whatever target the server sends it, so `WGFT_AGENT_ALLOW_TARGETS` on the agent host restricts that to the LAN addresses you list, keeping a compromised server out of the rest of the LAN.
-
-To report a vulnerability, see [SECURITY.md](SECURITY.md).
+Downgrading after an upgrade is not guaranteed. Back up the server data directory before upgrading. The server database uses schema version 9 from v1.2.0 onward; v1.1.x and earlier servers cannot open it.
 
 ## License
 
-[MIT](LICENSE). Third-party module licenses are collected in `THIRD_PARTY_LICENSES.txt` and included with releases and container images.
+[MIT](LICENSE). The Go module licenses bundled in the binary are listed in `THIRD_PARTY_LICENSES.txt` and included with releases and container images.

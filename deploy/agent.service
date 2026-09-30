@@ -20,7 +20,7 @@ RestartPreventExitStatus=3
 
 # No privileges needed. The host needs net.core.rmem_max and net.core.wmem_max of 7340032 or more,
 # since the agent's WireGuard sockets need 7 MiB buffers and it holds no CAP_NET_ADMIN to get them
-# past these sysctls; see docs/setup.md, "Socket buffers for userspace mode". Create the user once with
+# past these sysctls; see docs/socket-buffers.md. Create the user once with
 #   useradd --system --home-dir /var/lib/wgft --shell /usr/sbin/nologin wgft
 User=wgft
 Group=wgft

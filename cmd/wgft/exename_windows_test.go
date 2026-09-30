@@ -10,7 +10,7 @@ import (
 // exeName reads os.Args[0], which the Go runtime sets from the path Explorer used to launch
 // the process. This pins the scenario the mousetrap message exists for: a user
 // double-clicking the file as downloaded from the Releases page
-// (wgft-windows-amd64.exe), before renaming it to wgft.exe per docs/setup.md's Windows
+// (wgft-windows-amd64.exe), before renaming it to wgft.exe per docs/setup-desktop.md's Windows
 // procedure. The backslash-separated path here is only meaningful on Windows - on Linux,
 // filepath.Base does not treat '\' as a separator, so this test is build-tagged windows
 // rather than written to be portable.

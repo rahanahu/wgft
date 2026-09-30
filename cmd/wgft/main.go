@@ -17,7 +17,7 @@ import (
 )
 
 // cobra's default MousetrapHelpText (spf13/cobra@v1.10.2 cobra.go:72) tells a user who
-// double-clicks the .exe in Explorer to open cmd.exe. docs/setup.md's Windows procedure
+// double-clicks the .exe in Explorer to open cmd.exe. docs/setup-desktop.md's Windows procedure
 // uses PowerShell instead ($env:WGFT_JOIN, .\wgft.exe agent run), which cmd.exe does not
 // accept, so the default sends the user to the wrong shell. init overrides it here rather
 // than in newRootCmd because it must run before cobra's Windows-only preExecHook, which
@@ -25,7 +25,7 @@ import (
 func init() {
 	// The scenario this message exists for is a user double-clicking the file they just
 	// downloaded from the Releases page, which is named wgft-windows-amd64.exe. Renaming
-	// it to wgft.exe is a step in docs/setup.md's Windows procedure, which they have not
+	// it to wgft.exe is a step in docs/setup-desktop.md's Windows procedure, which they have not
 	// followed yet at this point, so a hardcoded ".\wgft.exe" example would usually name a
 	// file that does not exist. os.Args[0] is set by the Go runtime from the command line
 	// Explorer used to start the process, which for a double-click is the executable's own
@@ -39,7 +39,7 @@ func init() {
 Open PowerShell in the folder holding this .exe and run:
   .\%s --help
 
-See the Windows setup guide on GitHub at docs/setup.md for the full procedure, including the join command.
+See the Windows setup guide on GitHub at docs/setup-desktop.md for the full procedure, including the join command.
 `, name)
 	// The default 5s auto-close (cobra.go:81) is too short for this longer message.
 	// 0 makes cobra print "Press return to continue..." and wait for Enter
@@ -49,7 +49,7 @@ See the Windows setup guide on GitHub at docs/setup.md for the full procedure, i
 }
 
 // exeName returns the file name the user actually double-clicked, falling back to the name
-// docs/setup.md's Windows procedure uses if os.Args[0] is empty or is only separators (Base
+// docs/setup-desktop.md's Windows procedure uses if os.Args[0] is empty or is only separators (Base
 // then returns "." or a bare separator, neither a usable example).
 func exeName() string {
 	name := filepath.Base(os.Args[0])

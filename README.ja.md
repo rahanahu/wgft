@@ -2,7 +2,6 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/rahanahu/wgft/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
-[![Status: v1.1](https://img.shields.io/badge/status-v1.1-blue.svg)](#開発状況)
 
 [English](README.md) | 日本語
 
@@ -26,16 +25,12 @@ wgft は、任意の TCP/UDP ポートをそのまま転送したい用途、特
 
 ## 特徴
 
-- 1 つのバイナリに VPS 側 server、自宅側 agent、CLI を収録
-- カーネルモードでは Linux の WireGuard と nftables DNAT を使うため、wgft プロセスを再起動しても既存の転送は継続
-- ユーザー空間モードは、ホストのソケットのバッファの上限を一度上げれば、root 権限なしでもコンテナ内だけでも動作
-- TCP/UDP の単一ポート・ポート範囲を転送
-- ルールごとの allow/deny とレート制限
-- ルール変更時も無関係なセッションは切断しない
-- TCP ルールでは PROXY protocol v2 により実クライアント IP を転送可能
-- agent、ルール、警告、転送状態を確認できる Web ダッシュボード
-- ルールの通信がどこまで届き、どこで止まるかを CLI と Web UI で診断
-- `wgft server teardown` は wgft が作成した状態だけを削除
+- 1 つのバイナリに VPS 側 server、自宅側 agent、CLI を収録しています。
+- VPS のポートを、自宅の TCP/UDP サービスへ転送します。単一ポートとポート範囲を指定できます。
+- ルールごとに接続元の allow/deny リストとレート制限を設定できます。
+- ルールを変えても、無関係なセッションは切断しません。
+- TCP では PROXY protocol v2 により、実際のクライアント IP を転送できます。
+- Web UI と CLI で、agent やルールの状態、通信が止まった箇所を確認できます。
 
 ## wgft を作った理由
 
@@ -43,51 +38,34 @@ wgft は Pangolin から着想を得ています。Pangolin を使って、VPS �
 
 そのため wgft は、WireGuard によるトンネル、nftables によるカーネル転送、シンプルな TCP/UDP ルールに機能を絞っています。必要な WireGuard と wgft 用 nftables ルールは wgft が管理するため、手作業でトンネルや DNAT ルールを組む必要はありません。TLS 終端、SSO、証明書管理、Web アプリ公開は扱わず、リバースプロキシなど別のソフトウェアに任せます。
 
-## 動作モード
+## 動作環境とモード
+
+VPS 側の server は Linux、agent は Linux、Windows amd64、Apple シリコンの macOS で動作します。Intel Mac には対応していません。転送は IPv4 のみです。server と Linux の agent には、次の 2 つの動作モードがあります。
 
 | | カーネルモード `kernel` | ユーザー空間モード `userspace` |
 |---|---|---|
-| VPS の root 権限 | 必要 | 不要 |
-| カーネル / nftables | Linux 6.1+、nftables 1.0.6+ | 不要 |
-| ホストのソケットのバッファの上限 | 条件なし | `net.core.rmem_max` と `net.core.wmem_max` が 7340032 以上。VM か専用のホストで server が `CAP_NET_ADMIN` を持つ場合を除く |
-| 転送経路 | カーネル WireGuard + nftables DNAT | wireguard-go + ユーザー空間 netstack |
-| wgft プロセス停止・クラッシュ時 | 設定済みの転送は継続 | 転送も停止 |
-| レート制限の判定場所 | カーネル | wgft プロセス |
+| 転送経路 | Linux の WireGuard と nftables | wireguard-go とユーザー空間 netstack |
+| 権限 | `CAP_NET_ADMIN` が必要 | 通常は root 権限と TUN デバイスが不要 |
+| wgft プロセス停止中 | 設定済みの転送は継続 | 転送も停止 |
 
-カーネルモードでは、起動後に wgft プロセスがクラッシュまたは再起動しても転送はカーネル側で継続します。ただし VPS 自体を再起動すると WireGuard / nftables の実行時状態が失われるため、wgft が再起動して転送状態を復旧する必要があります。通常運用では付属の systemd unit を有効にしておけば、VPS 再起動後も自動で復旧します。
+VPS で root が使える場合は、カーネルモードを使います。root やカーネル WireGuard が使えない場合、またはコンテナ内だけで動かす場合はユーザー空間モードを使います。カーネルモードには Linux 6.1 以降と nftables 1.0.6 以降が必要です。agent はユーザー空間モードが既定です。Linux の agent をカーネルモードで動かす条件と手順は [カーネルモードのエージェント](docs/agent-kernel.ja.md)にあります。
 
-VPS で root が使える場合はカーネルモードを使います。root やカーネル WireGuard が使えない場合、または server をコンテナ内だけで動かしたい場合はユーザー空間モードを使います。ユーザー空間モードでは、ホストかコンテナのホストで、ソケットのバッファの上限を 2 つ上げる必要があります。上げるには、そのホストで一度だけ root の権限が要ります。VM か専用のホストでは、付属の systemd の unit で起動した server は、上げなくても済む権限を持ちます。コンテナの中と LXC ベースの VPS では、この権限は上限を超えさせないので、コンテナのホストで上限を上げます。付属の compose ファイルで動かす server は、この方法で条件を満たしました。LXC のコンテナの中と LXC ベースの VPS の server では、条件を満たせるかどうかは未確認です。ソケットが条件に届かない場合は、server と agent がログに警告を出し、判定はそのログで決まります。詳しくは[ユーザー空間モードのソケットのバッファ](docs/setup.ja.md#ユーザー空間モードのソケットのバッファ)を参照してください。
-
-ユーザー空間モードでは、server と agent が転送中のフローとそのバッファをプロセスのメモリに持ちます。wgft は、メモリが足りないことを理由に新しいフローを断ることはしません。最悪の場合のメモリの量は、攻撃ですべてのフローとバッファが同時に埋まった場合の上界であり、普段の使用量の予想ではありません。既定のフロー数の上限では、agent が 1 つ、転送する TCP のポートが 1 つの server に、約 7.1 GiB のメモリを持つホストが要ります。agent の最悪の場合も同じ程度です。上限を下げても、server のホストに要るメモリは約 4.1 GiB より小さくならないので、これより小さいホストでは、すべてのフローとバッファを埋める攻撃でメモリが尽きることがあります。内訳、ホストの要件、上限を下げたときの表は [設計](docs/design.md) の 7 節にあります。
-
-VPS 側は Linux で動作します。自宅側の agent は Windows amd64 でも動作し、Windows 11 で実機確認済みです。Apple シリコンの macOS でも動作し、macOS 27 で実機確認済みです。Intel Mac には対応していません。wgft は IPv4 のみに対応しています。既定のユーザー空間モードでは、自宅側の agent には root 権限も TUN デバイスも不要で、Windows でも管理者権限は不要です。macOS の agent は利用者の権限で動作します。Linux では、agent のホストでも同じ 2 つのソケットのバッファの上限を上げる必要があります。稼働中の agent のソケットが条件を満たすかどうかは、`wgft agent doctor` が示します。
-
-### 自宅側 agent のカーネルモード
-
-Linux の自宅側 agent も、カーネルモードで転送できます。`agent.env` に `WGFT_MODE=kernel` を書くと、agent は自宅のホストにカーネルの WireGuard インタフェース `wgft0` と nftables のテーブルを作り、カーネルが DNAT で LAN の転送先へ転送します。agent のプロセスは通信を中継しないため、agent の停止中や再起動中も転送は続きます。`WGFT_MODE=kernel` を書かなければ、agent はユーザー空間モードで動作します。
-
-カーネルモードには `CAP_NET_ADMIN` が必要です。付属の `agent.service` は権限を持たないままとし、drop-in の [deploy/agent.kernel.conf](deploy/agent.kernel.conf) がこの権限だけを加えます。agent は引き続き `wgft` ユーザーで動作します。カーネルモードは IPv4 の転送先だけを扱い、ループバックの転送先を拒否します。agent のホスト自身のサービスへ転送する場合は、そのホストの LAN のアドレスを転送先に指定します。UDP のサービスは、待ち受けのアドレスもその LAN のアドレスにします。`0.0.0.0` のようにすべてのアドレスで待ち受けると、応答が client に届かないことがあります。ユーザー空間モードには、この制限はありません。
-
-カーネルモードでは、自宅のホストがルータとして働きます。agent は `net.ipv4.ip_forward` が 0 なら 1 に書き換えるため、ホストは wgft 以外の通信もインタフェースの間で転送するようになります。wgft のテーブルが制限するのは、`wgft0` が関わる転送だけです。
-
-ユーザー空間モードへ戻すには、agent を止めてから `sudo wgft agent teardown` を実行します。`wgft agent teardown` はインタフェース、テーブル、カーネルモードの記録を削除します。`ip_forward` は変更せず、元に戻す方法を表示します。`wgft agent doctor` は、カーネルモードの agent のインタフェース、テーブル、IP の転送の設定がそろっているかを示します。手順は[セットアップガイド](docs/setup.ja.md#カーネルモードで起動する)を参照してください。
-
-試験用の実機では、Proxmox VE の非特権の LXC コンテナで drop-in を確認済みです。このコンテナの OS は Debian 13 で、nesting を有効にし、AppArmor のプロファイルを unconfined にしています。確認した内容は、`systemctl restart wgft-agent` の後とコンテナ自体の再起動の後に転送が戻ること、agent を約 40 秒止めている間も転送が続くこと、agent の稼働中と停止中の `wgft agent rotate-key` です。開発環境の Debian 12 の VM でも、転送、VM の再起動、agent の停止中の転送、`wgft agent doctor`、teardown によるユーザー空間モードへの戻しを確認済みです。nesting を無効にした Proxmox VE のコンテナ、AppArmor のプロファイルが制限をかける Proxmox VE のコンテナ、Incus のコンテナ、Docker、SELinux や AppArmor を有効にしたディストリビューションでは未確認です。Docker でカーネルモードを使う手順は、セットアップガイドに記載していません。
+Linux のユーザー空間モードでは、ホストのソケットのバッファの設定が必要になる場合があります。また、既定のフロー数の上限で最悪の場合にもメモリを使い切らないためには、agent が 1 つ、TCP の転送ポートが 1 つの server に約 7.1 GiB のホストメモリが必要です。フロー数の上限を下げても、この要件は約 4.1 GiB 未満にはなりません。これは、攻撃によって資源が同時に最大まで使われる場合の上界であり、普段の使用量の予想ではありません。設定方法と条件は [VPS のユーザー空間モード](docs/setup-server-userspace.ja.md)、内訳は [設計文書](docs/design.md#7a-内部アーキテクチャ)を参照してください。
 
 ## クイックスタート
 
-ここでは最も一般的な構成として、Linux VPS 上のカーネルモードと、自宅側の通常バイナリ agent を使います。ユーザー空間モード、Docker、systemd の詳細、firewall、HTTPS、ログ、削除方法は [セットアップガイド](docs/setup.ja.md) を参照してください。
+Linux VPS のカーネルモードと、Linux の agent を使う例です。[Windows](docs/setup-desktop.ja.md#windows-で-agent-を実行する) と [macOS](docs/setup-desktop.ja.md#macos-で-agent-を実行する) の agent、Docker などの手順は[環境別の導入](docs/setup-alternatives.ja.md)から選べます。Linux の systemd 手順は[セットアップガイド](docs/setup.ja.md)にあります。
 
 ### 1. wgft を入手する
 
-Linux では release バイナリを取得します。VPS のイメージや Proxmox の LXC テンプレートのような最小構成のイメージは、curl を含まないことがあります。あらかじめ `sudo apt install curl` のように導入してください。
+VPS と自宅の Linux マシンで実行します。`curl` がない環境では、先にインストールしてください。
 
 ```sh
 curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-linux-amd64
 chmod +x wgft-linux-amd64
 ```
 
-Linux の arm64 環境では `amd64` を `arm64` に置き換えてください。Windows と macOS での取得手順は手順 3 で説明します。
+Linux arm64 では、ファイル名の `amd64` を `arm64` に置き換えます。
 
 ### 2. VPS 側 server を起動する
 
@@ -100,17 +78,15 @@ sudo wgft server check
 sudo wgft server run
 ```
 
-`server.env` は、意図的に全員が読める権限にします。秘密の値を含まず、付属の systemd の service は非特権の動的な利用者で動くためです。
+`vps.example.com` を VPS の名前に置き換えます。VPS の firewall で UDP 51820 と TCP 8443 を開けてください。`wgft server check` は、既存の firewall で追加の許可が必要な場合にも知らせます。カーネルモードでは必要に応じて IPv4 forwarding を有効にします。`server.env` は秘密を含まないため、付属の systemd unit からも読める 0644 にします。
 
-VPS の firewall で UDP 51820 と TCP 8443 を開けてください。`wgft server check` は、既存 firewall に追加で必要な forwarding 許可を表示するほか、host 自身の input firewall が wgft 自身のポートやルールの listen port を塞ぐ場合に警告します。
-
-カーネルモードでは IPv4 forwarding が必要です。wgft は必要に応じて `net.ipv4.ip_forward=1` を設定し、`wgft server teardown` は元に戻す方法を表示します。
-
-別の VPS shell で、一度だけ使える join string を発行します。
+別の VPS shell で、初回登録用の join string を発行します。
 
 ```sh
 sudo wgft agent join-string --name home
 ```
+
+Web UI から接続文字列を発行する方法も[セットアップガイド](docs/setup.ja.md#接続文字列を発行する)にあります。
 
 ### 3. 自宅側 agent を起動する
 
@@ -120,32 +96,7 @@ mv wgft-linux-amd64 ~/.local/bin/wgft
 WGFT_JOIN='<join string>' ~/.local/bin/wgft agent run --data-dir ~/.wgft
 ```
 
-認証情報は `~/.wgft/agent.json` に保存されます。join string が必要なのは初回登録時だけです。
-
-Windows では、[Releases ページ](https://github.com/rahanahu/wgft/releases) から `wgft-windows-amd64.exe` を取得します。ファイルを保存したフォルダで PowerShell を開きます。例えば Downloads フォルダです。次を実行します。
-
-```powershell
-Rename-Item wgft-windows-amd64.exe wgft.exe
-$env:WGFT_JOIN = '<join string>'
-.\wgft.exe agent run
-```
-
-join string は `#` を含むため、単一引用符で囲みます。
-
-2 回目以降は `.\wgft.exe agent run` だけで起動でき、保存済みの認証情報を使います。初回起動時、Windows Defender Firewall が `wgft.exe` の受信を許可するかどうかのダイアログを出すことがあります。agent は外向きの接続だけを使うため、許可してもキャンセルしてもトンネルは動作し続けます。停止は Ctrl+C を押すか、コンソールのウィンドウを閉じます。認証情報は `%ProgramData%\wgft\agent.json` に保存され、管理者権限は不要です。wgft は Windows のサービスを持たないため、ログオンのたびに自動で起動させるかどうかは利用者が決めます。スタートアップフォルダへの登録は未確認の選択肢の 1 つです。詳しくは[セットアップガイド](docs/setup.ja.md#windows-で-agent-を実行する)を参照してください。
-
-macOS では、ターミナルで `curl` を使ってバイナリを取得し、インストールしてから 1 回だけ登録します。
-
-```sh
-curl -LO https://github.com/rahanahu/wgft/releases/latest/download/wgft-darwin-arm64
-sudo mkdir -p /usr/local/bin
-sudo install -m 0755 wgft-darwin-arm64 /usr/local/bin/wgft
-WGFT_JOIN='<join string>' /usr/local/bin/wgft agent run
-```
-
-取得には Web ブラウザではなく `curl` を使います。ブラウザで取得したファイルには quarantine 属性が付き、Gatekeeper は、この属性が付いていて Apple の公証を受けていないバイナリの起動を止めるためです。wgft は公証を受けていません。Apple シリコンの Mac には `/usr/local/bin` が無い場合があるため、`mkdir` で作成します。認証情報は `~/Library/Application Support/wgft/agent.json` に保存されます。
-
-agent を常駐させる場合は、`registered as agent` が表示された後に Ctrl+C で止め、[deploy/io.github.rahanahu.wgft.agent.plist](deploy/io.github.rahanahu.wgft.agent.plist) を使って LaunchDaemon として登録します。この LaunchDaemon は利用者の権限で動作し、同じ認証情報を使います。LaunchAgent は使いません。LaunchAgent として起動した agent は LAN 内の他のホストに接続できなかったためです。原因は macOS のローカルネットワークのプライバシー保護だと推測しています。FileVault を有効にした Mac では、再起動後に最初にログインした時点で LaunchDaemon が起動します。手順は[セットアップガイド](docs/setup.ja.md#macos-で-agent-を実行する)を参照してください。
+発行した join string を単一引用符の中に入れ、秘密として扱います。認証情報は `~/.wgft/agent.json` に保存され、2 回目以降の起動には join string が不要です。
 
 ### 4. 転送ルールを追加する
 
@@ -156,76 +107,39 @@ sudo wgft agent ls
 sudo wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group game
 ```
 
-ポート範囲を指定した場合、`--to` は転送先の先頭ポートを示します。この例では VPS の UDP 2456 は `192.168.1.20:2456` へ、UDP 2457 は `192.168.1.20:2457` へ転送されます。
+Web UI の「+ ルールを追加」からも同じ転送を設定できます。
 
-転送対象のポートも VPS の firewall で開けてください。ルールが有効になると、VPS に届いた通信が WireGuard トンネルを通って自宅側の転送先へ届きます。
+この例では、VPS の UDP 2456 と 2457 を、自宅の `192.168.1.20` の同じポートへ転送します。転送対象のポートも VPS の firewall で開けてください。
 
-## Web UI
+## 転送後の操作
 
 ![wgft のダッシュボード](docs/images/dashboard.ja.png)
 
-ダッシュボードでは agent の接続状態、ルール、drop カウンタ、警告、適用中の nftables 状態を確認できます。各ルールの状態の隣には診断の印が付き、通信が止まった位置を示します。印を押すと、そのルールの診断の画面が開きます。ヘッダとグループの見出しのエラーの件数は、この印から数えます。join string の発行や通常のルール操作も行えます。
-
-管理 API は既定では外部公開されず、`/run/wgft/admin.sock` でのみ待ち受けます。SSH で手元へ転送します。
+Web UI では agent とルールの状態を確認し、ルールの追加や通信の診断ができます。管理 API は既定では外部公開されません。SSH で手元へ転送して `http://localhost:8686` を開きます。
 
 ```sh
 ssh -L 8686:/run/wgft/admin.sock root@vps
 ```
 
-その状態で `http://localhost:8686` を開きます。その他の管理画面への接続方法は [セットアップガイド](docs/setup.ja.md#web-ui) を参照してください。
+転送が届かないときは、VPS で `sudo wgft server doctor` を実行します。[Web UI の診断画面](docs/images/doctor-rule.ja.png)でも、ルールごとに通信が止まった箇所を確認できます。agent 側は [agent doctor](docs/cli.md#wgft-agent-doctor) で調べます。agent の転送を一時的に止める場合は、[agent disable](docs/cli.md#wgft-agent-disable) を使います。
 
-## agent の無効化
+agent が接続できる LAN の宛先は、[`WGFT_AGENT_ALLOW_TARGETS`](docs/operations.ja.md#エージェントの転送先を制限する) で限定できます。
 
-`wgft agent disable <name>` は、何も削除せずにその agent のすべてのルールの転送を止めます。登録、鍵、ルールは残ります。`wgft agent enable <name>` は無効化を戻します。Web UI では、agent の一覧と各 agent のページで同じ操作を行えます。`wgft agent revoke` は別の操作であり、agent を削除します。この削除は元に戻せません。
+## 詳しい手順
 
-試験用の実機では、次のことを確認済みです。agent を無効化すると、通信中のセッションが切れ、その agent のルールの TCP と UDP の転送が止まりました。PROXY protocol v2 を付けたルールも止まりました。無効な agent をもう一度無効化すると、コマンドは変更が無いことを報告しました。`wgft status`、`wgft server doctor`、`wgft agent doctor` は agent が無効であることを示し、無効の状態は server と agent の再起動の後も続きました。個別に無効にしたルールは、agent を有効に戻した後も無効のままでした。詳しくは [CLI リファレンス](docs/cli.md#wgft-agent-disable) を参照してください。
-
-## 転送が届かないときの診断
-
-VPS で実行する `wgft server doctor` は、ルールの通信がどこまで届き、どこで止まるかと、次に確かめる箇所を示します。引数を省くと server、agent、全ルールを一覧にします。ルール ID を渡すと、そのルールを公開ポートから転送先まで順にたどります。このコマンドは稼働中の server が既に観測した内容だけを読み、`--probe` を付けたときだけ接続を試します。`--probe` は、トンネルと agent を通して転送先へ実際の TCP 接続を 1 本開きます。
-
-```sh
-sudo wgft server doctor
-sudo wgft server doctor <ルール ID>
-```
-
-Web UI の診断の画面は、同じ証拠から組み立てた同じ判定を表示します。各ルールは `public port`、`WireGuard`、`agent`、`listener / target` の節点を結んだ経路の図になり、通信が止まった節点に印が付きます。Web UI は、1 本のルールの画面でボタンを押したときだけ疎通を確認します。次の図は、agent との最近のハンドシェイクが無いために WireGuard で止まったルールの診断の画面です。全ルールの[一覧の画面](docs/images/doctor.ja.png)もあります。
-
-![1 本のルールの診断の画面](docs/images/doctor-rule.ja.png)
-
-`wgft agent doctor` は agent のホストで実行し、agent が動いているか、認証情報を持っているか、必要な名前を解決できるかを示します。カーネルモードの agent では、WireGuard インタフェース、nftables のテーブル、IP の転送の設定も検査します。カーネルが転送を続けるため、停止中のカーネルモードの agent でも、インタフェース、テーブル、転送の設定がそろっていれば終了コードは 0 です。agent の停止中にこの状態を読むには root 権限が必要です。それ以外の場合、判定は実行した利用者の権限で行うため、agent と同じ利用者として実行します。root で実行すると、agent 自身の利用者がファイルを読めるかを判定できないので、privileges の項目は UNKNOWN になります。agent 自身が root で動く配置では root での実行が正しく、privileges の UNKNOWN は想定どおりの結果です。`--json` を付けると、どちらの doctor も診断の結果を JSON で出力します。JSON の検査の id と reason の値は、版が上がって種類が増えることはあっても、既にある値の意味は変わりません。
-
-データディレクトリは agent と同じものを指定します。上のクイックスタートで起動した agent では、次のように実行します。
-
-```sh
-~/.local/bin/wgft agent doctor --data-dir ~/.wgft
-```
-
-`--data-dir` を省くと、付属の systemd unit が使う既定の `/var/lib/wgft` を読むため、別の場所に認証情報を置く agent は見えません。
-
-各状態の意味と終了コードは [CLI リファレンス](docs/cli.md) を、検査の判定の仕方は [設計](docs/design.md) を参照してください。
-
-## ドキュメント
-
-- [セットアップガイド](docs/setup.ja.md) - カーネル / ユーザー空間モード、root なし運用、Docker、systemd、HTTPS、Web UI、ログ、削除方法
-- [CLI リファレンス](docs/cli.md) - 各コマンドと使用例
-- [設計](docs/design.md) - プロトコル、セキュリティ、転送動作、設計判断
-- [アーキテクチャ](docs/architecture.md) - package 構成と処理経路
-- [CLAUDE.md](CLAUDE.md) - 開発上のルール、テスト環境
-
-`wgft <command> --help` でも各コマンドの使用例を確認できます。
+- [セットアップガイド](docs/setup.ja.md): Linux の server と agent を systemd で常駐させ、最初のルールを追加する手順
+- [環境別の導入](docs/setup-alternatives.ja.md): Windows、macOS、Docker、root 権限のない VPS
+- [運用ガイド](docs/operations.ja.md): Web UI、HTTPS、ログ、削除方法
+- [CLI リファレンス](docs/cli.md): 各コマンドと使用例
+- [設計文書](docs/design.md)と[アーキテクチャ](docs/architecture.md): 転送動作と実装
+- [開発上の約束](CLAUDE.md): テスト環境と変更の進め方
+- [セキュリティポリシー](SECURITY.md): 脆弱性の報告方法
 
 ## 開発状況
 
-v1.2.0。互換性の保証は v1.0 から始まっています。版番号は成熟度の段階を示すものではありません。対象は、Linux の server と Linux の agent と、Windows の agent のうち Windows 11 の実機で確認した範囲です。Windows の agent の保証の範囲の外の挙動と、macOS の agent は暫定とし、保証の対象に含めません。server のカーネルモードは作者の VPS / 自宅環境で UDP/TCP 転送、NAT 越え、再接続、VPS 再起動からの復旧、teardown を確認済みです。server のユーザー空間モードは開発環境と VPS で確認済みです。`wgft server doctor` と `wgft status` は、カーネルモードの稼働中の server と登録済みの agent 1 台に対して、次の 3 つの場面で確認済みです。健全な配置、agent が宛先を拒む状態、制御の接続が切れた状態です。適用が毎回失敗するルール集合からの回復も開発環境で確認済みです。server は管理用 API を開いたまま起動の残りを保留するので、データディレクトリを削除せずにルールを小さくできます。`wgft agent doctor` とその `--json` の出力、Web UI の診断の画面は、カーネルモードで動く試験用の VPS の server と、LXC のコンテナの中で専用のシステムユーザーとしてユーザー空間モードで動く agent に対して確認済みです。場面は、健全な配置、agent を止めた状態、宛先が接続を拒む状態、宛先が応答せずに接続を破棄する状態です。暫定の扱いにしたことは、現在配っている agent のバイナリの配布を取りやめる決定ではありません。Windows の agent については、v1.2.0 を Windows 11 の実機で管理者でない利用者として動かし、別のホストのカーネルモードの server に対して確認しました。回線は有線です。確認した範囲は、登録、TCP と UDP の転送、制御の接続の再接続、スリープからの復帰、ネットワークアダプタを無効にして有効に戻した後の復帰、`wgft agent doctor`、鍵の操作である `agent pubkey` と `agent rotate-key` です。この範囲は保証の対象に含めます。macOS の agent は、登録、トンネルの確立、再起動からの復帰などの一般的な動作を実機で確認済みです。agent の再接続の契機を決める接続の生死の判定は新しく加えた仕組みで、macOS の実機では確認していません。この判定が実機で未確認であることが、macOS の agent を保証に含めていないおもな理由です。server が中継するフローには、ルール単位、接続元単位、プロセス単位で同時数の上限があります。ユーザー空間モードの agent が中継するフローには、ルール単位とプロセス単位で同時数の上限があります。更新の経路は保証しますが、更新後に旧版へ戻すことは保証しません。戻す場合に備え、更新前にデータディレクトリのバックアップを取ってください。v1.2.0 以降のサーバのデータベースは、スキーマの版 9 を使います。v1.1.x 以前の server はこのデータベースを開きません。試験用の実機では、v1.1.3 は終了コード 3 で止まり、データベースを変更しませんでした。このため、v1.1.1 から v1.1.3 へ戻すには v1.2.0 へ更新する前に取ったバックアップが必要で、v1.1.0 以前へ戻すには v1.1.1 以降へ更新する前に取ったバックアップが必要です。実装や構成の詳細は設計・セットアップ文書を参照してください。
+v1.2.0。v1.0 からの互換性の保証は Linux の server と agent、Windows 11 の実機で確認した範囲の Windows agent に適用します。macOS の agent は実機で基本動作を確認済みですが、再接続を決める新しい判定は実機で未確認のため、保証の対象外です。対応範囲の定義は [設計文書の 7a.11 節](docs/design.md#7a11-v10-の互換性の保証サーフェスごとの一覧)にあります。
 
-## セキュリティ
-
-付属の server 用 systemd unit では、wgft は転送に必要な capability だけを持つ非特権ユーザーとして動作します。外部へ公開されるのは WireGuard、agent API、明示的に転送したポートだけで、管理 API は既定ではローカル専用です。
-
-agent は server が配る転送先へそのまま接続します。agent 側の `WGFT_AGENT_ALLOW_TARGETS` は接続先を列挙したアドレスだけに絞り、奪われた server を LAN の他のホストから遠ざけます。
-
-脆弱性の報告方法は [SECURITY.md](SECURITY.md) を参照してください。
+更新後に旧版へ戻すことは保証しません。更新前にサーバのデータディレクトリをバックアップしてください。v1.2.0 以降のサーバのデータベースはスキーマの版 9 を使い、v1.1.x 以前の server は開きません。
 
 ## ライセンス
 

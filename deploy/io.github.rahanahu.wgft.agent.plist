@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  launchd daemon for the wgft home agent on macOS (docs/setup.md, "Run the agent on macOS").
+  launchd daemon for the wgft home agent on macOS (docs/setup-desktop.md, "Run the agent on macOS").
 
   Replace every YOUR_USER with your macOS short user name (`id -un`) before installing, and
   check that /Users/YOUR_USER is your home directory (`echo $HOME`).
@@ -48,7 +48,7 @@
 	<!-- Restart when the agent exits with an error or is killed, at most once every
 	     ThrottleInterval seconds. launchd has no counterpart to RestartPreventExitStatus=3 in
 	     agent.service, so a configuration error (exit code 3) is restarted too, as checked on
-	     macOS 27 (docs/setup.md). -->
+	     macOS 27 (docs/setup-desktop.md). -->
 	<key>KeepAlive</key>
 	<dict>
 		<key>SuccessfulExit</key>
