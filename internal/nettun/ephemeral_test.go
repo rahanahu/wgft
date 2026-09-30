@@ -149,13 +149,16 @@ func TestEphemeralExhaustionFailsOnlyThatDestination(t *testing.T) {
 
 // 受けた側が先に閉じると、受けた側の endpoint が TIME_WAIT に残る。4 つ組は一意なので、その数は
 // dial した側の一時ポートの数を超えない。同じ 4 つ組への新しい SYN は、系列番号が前の接続より
-// 進んでいれば TIME_WAIT から待ち受けへ渡り、SYN の再送を待たずに成立する。
+// 進んでいれば TIME_WAIT から待ち受けへ渡り、SYN の再送を待たずに成立する。系列番号は時刻で
+// 進むので、dial の間を空ける。Windows の単調な時計は刻みが粗く、間を空けないと同じ時刻に読めて
+// 系列番号が進まず、SYN が捨てられる。
 func TestTimeWaitOnAcceptedSideBoundedBySourcePorts(t *testing.T) {
 	const n = 16
 	p := newTCPPair(t, 1)
 	narrowPorts(t, p.a, n)
 	var slowest time.Duration
 	for i := 0; i < 4*n; i++ {
+		time.Sleep(20 * time.Millisecond)
 		start := time.Now()
 		c, s := p.dial(t)
 		if d := time.Since(start); d > slowest {
