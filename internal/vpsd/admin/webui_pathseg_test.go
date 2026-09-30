@@ -24,8 +24,10 @@ const oddRuleID = "x/../r_b/delete?"
 // ルール ID である。ページのリンクがこの経路へ解決すれば、ID の中の `..` が区切りとして働いている。
 const sentinelRuleID = "x/../../zz-sentinel?"
 
-// newOddIDTestServer は、oddID(TCP 8080-8081)と r_b(TCP 8090)の 2 本のルールを持つサーバを立てる。エージェントの
-// 無効化と有効化の呼び出しは返す一覧に記録する。
+// newOddIDTestServer は、oddID(TCP 8080-8081)と r_b(TCP 8082)の 2 本のルールを持つサーバを立てる。
+// どちらも拒否リストと許可リストを 1 件ずつ持ち、r_b は oddID と統合できる隣なので、詳細ページには
+// 拒否リストと許可リストの削除のボタンと、統合のボタンが出る。エージェントの無効化と有効化の呼び出しは
+// 返す一覧に記録する。
 func newOddIDTestServer(t *testing.T, oddID string) (*httptest.Server, *store.Store, *[]string) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
@@ -33,15 +35,16 @@ func newOddIDTestServer(t *testing.T, oddID string) (*httptest.Server, *store.St
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	rule := func(id string, lo, hi uint16) proto.Rule {
+	rule := func(id string, lo, hi uint16, target string) proto.Rule {
 		return proto.Rule{
 			ID: id, Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: lo, Hi: hi},
-			Target: "192.168.1.20:80", VPSMode: proto.ModeKernel, Enabled: true,
-			SourceAllow: []netip.Prefix{}, SourceDeny: []netip.Prefix{},
+			Target: target, VPSMode: proto.ModeKernel, Enabled: true,
+			SourceAllow: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")},
+			SourceDeny:  []netip.Prefix{netip.MustParsePrefix("192.0.2.66/32")},
 		}
 	}
 	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
-		return append(rules, rule(oddID, 8080, 8081), rule("r_b", 8090, 8090)), nil
+		return append(rules, rule(oddID, 8080, 8081, "192.168.1.20:80"), rule("r_b", 8082, 8082, "192.168.1.20:82")), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +89,7 @@ func getPage(t *testing.T, u string) string {
 }
 
 // TestRuleButtonsStayOnTheirOwnRule は、ルールの一覧のボタンが、ID に `/`、`..`、`?` を含むルールでも
-// そのルール自身の経路へ送信することを確かめる(設計文書 10.1 節)。前の形では、oddRuleID の行の無効化
+// そのルール自身の経路へ送信することを確かめる(設計文書 10.2 節)。前の形では、oddRuleID の行の無効化
 // のボタンが /ui/rules/r_b/delete へ送信し、別のルールを消した。同一オリジンなので、他オリジン発の
 // 変更の拒否には掛からない。
 // 変異の確認:rules.gohtml の無効化のボタンの PathSeg を外すと、r_b が消えて落ちる。
@@ -209,8 +212,10 @@ func TestRuleSettingsRedirectKeepsTheRuleID(t *testing.T) {
 }
 
 // TestClientCheckConnectivityEscapesTheRuleID は、CLI の疎通確認の依頼が、ID をパスの 1 つの区切りと
-// してサーバに届けることを確かめる。
-// 変異の確認:client.go の url.PathEscape を外すと、サーバが別の ID を受け取るか、誤りになって落ちる。
+// してサーバに届けることを確かめる。`.` と `..` も、Go のクライアントとサーバの間では区切りとして
+// 働かずに届く。
+// 変異の確認:client.go の pathSegment を外すと、サーバが別の ID を受け取るか、誤りになって落ちる。
+// url.PathEscape に変えると、`.` と `..` の依頼が別の経路になって落ちる。
 func TestClientCheckConnectivityEscapesTheRuleID(t *testing.T) {
 	var got string
 	mux := http.NewServeMux()
@@ -221,11 +226,86 @@ func TestClientCheckConnectivityEscapesTheRuleID(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	c := &Client{Base: srv.URL}
-	if _, err := c.CheckConnectivity(oddRuleID); err != nil {
-		t.Fatalf("CheckConnectivity: %v", err)
+	for _, id := range []string{oddRuleID, ".", ".."} {
+		got = ""
+		if _, err := c.CheckConnectivity(id); err != nil {
+			t.Errorf("CheckConnectivity(%q): %v", id, err)
+			continue
+		}
+		if got != id {
+			t.Errorf("server received rule ID %q, want %q", got, id)
+		}
 	}
-	if got != oddRuleID {
-		t.Errorf("server received rule ID %q, want %q", got, oddRuleID)
+}
+
+// formRe と hiddenRe は、ページのフォームの送信先と hidden の値を取り出す。
+var (
+	formRe   = regexp.MustCompile(`(?s)<form[^>]*action="([^"]*)"[^>]*>(.*?)</form>`)
+	hiddenRe = regexp.MustCompile(`<input type="hidden" name="([^"]*)" value="([^"]*)">`)
+)
+
+// TestOrphanBandButtonStaysOnItsAgent は、未登録のエージェントの帯の削除のボタンが、エージェント名に
+// `/`、`..`、`?` を含んでも、その名前の経路へ送信することを確かめる。ルールの agent は空でない任意の
+// 文字列で取り込めるので、帯の名前は登録済みのエージェントの名前の規則に縛られない。前の形では、
+// agent が `x/../home/disable?` の帯のボタンが登録済みの home を無効にし、`x/../../rules/r_b/delete?`
+// の帯のボタンが別のルール r_b を消した。
+// 変異の確認:rules.gohtml の帯の送信先の PathSeg を外すと、home が無効になり r_b が消えて落ちる。
+func TestOrphanBandButtonStaysOnItsAgent(t *testing.T) {
+	srv, st, changes := newOddIDTestServer(t, "r_a")
+	orphans := map[string]string{"r_o1": "x/../home/disable?", "r_o2": "x/../../rules/r_b/delete?"}
+	if _, err := st.ApplyBatch(nil, func(rules []proto.Rule) ([]proto.Rule, error) {
+		port := uint16(9001)
+		for _, id := range []string{"r_o1", "r_o2"} {
+			rules = append(rules, proto.Rule{ID: id, Agent: orphans[id], Proto: proto.TCP, ListenPort: proto.PortRange{Lo: port, Hi: port},
+				Target: "192.168.1.20:80", VPSMode: proto.ModeKernel, Enabled: true})
+			port++
+		}
+		return rules, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	base, _ := url.Parse(srv.URL + "/ui/rules")
+	// 帯を 1 本押すとルール集合のハッシュが変わるので、押すたびにページを読み直し、まだ押していない帯を押す
+	pressed := map[string]bool{}
+	for range orphans {
+		var band []string
+		for _, m := range formRe.FindAllStringSubmatch(getPage(t, base.String()), -1) {
+			if strings.Contains(m[2], `name="rules_digest"`) && !pressed[m[1]] {
+				band = m
+				break
+			}
+		}
+		if band == nil {
+			t.Fatal("no orphan band left to press")
+		}
+		pressed[band[1]] = true
+		ref, err := url.Parse(html.UnescapeString(band[1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		form := url.Values{}
+		for _, h := range hiddenRe.FindAllStringSubmatch(band[2], -1) {
+			form.Set(h[1], html.UnescapeString(h[2]))
+		}
+		resp, err := http.PostForm(base.ResolveReference(ref).String(), form)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if len(*changes) != 0 {
+		t.Errorf("an orphan band's button changed an agent: %v", *changes)
+	}
+	rules, err := st.Rules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range rules {
+		ids = append(ids, r.ID)
+	}
+	if got := strings.Join(ids, ","); got != "r_a,r_b" {
+		t.Errorf("rules after pressing both orphan bands = %s, want r_a,r_b: each band deletes only its own agent's rules", got)
 	}
 }
 

@@ -40,7 +40,7 @@ var staticFS embed.FS
 
 var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel, "DescribedBy": describedByIDs, "PathSeg": pathSegment}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
 
-// pathSegment は、ルール ID を URL のパスの 1 つの区切りとして埋め込める形にする(設計文書 10.1 節)。
+// pathSegment は、ルール ID を URL のパスの 1 つの区切りとして埋め込める形にする(設計文書 10.2 節)。
 // ルール ID は取り込みのファイルと管理用 API から任意の文字列で入りうる。html/template はパスの中の
 // `/`、`?`、`#`、`..` を escape しないので、そのまま埋めると、あるルールのボタンが別の経路
 // (例えば別のエージェントの無効化)へ送信する URL になる。url.PathEscape で `/` などを % の形にし、
