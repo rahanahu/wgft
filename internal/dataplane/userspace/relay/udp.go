@@ -135,6 +135,15 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 		writeLog lograte.Gate // 宛先への書き込み失敗。上限のログとは別に 1 分に 1 回まで
 		dialLog  lograte.Gate // target への dial 失敗のログの頻度(target が落ちている間、新規セッションのたびに鳴らさない)
 	)
+	// pending は、読み取りのループが作っている途中の新しいセッションの送信元である。セッションは
+	// 宛先への dial の後に表へ入るので、判定から登録までの間に走った sweep は表からそれを見ない。
+	// sweep はその送信元を閉じる判定をしたら cut を立て、ループは登録の時点でそれを見て捨てる
+	// (TCP の tcpEntry.cut と同じ役割)。読み取りのループは 1 つなので、途中のセッションは同時に
+	// 1 つしかない。mu で守る。
+	var pending struct {
+		src         netip.Addr
+		active, cut bool
+	}
 	count := func() int { mu.Lock(); defer mu.Unlock(); return len(sessions) }
 	l.sessions = count
 	closeSession := func(k string, s *udpSession) {
@@ -149,10 +158,13 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 		mu.Lock()
 		var victims []*udpSession
 		for k, s := range sessions {
-			if ap, err := netip.ParseAddrPort(k); err == nil && !keep(ap.Addr().Unmap()) {
+			if src, ok := udpSessionSource(k); ok && !keep(src) {
 				victims = append(victims, s)
 				delete(sessions, k)
 			}
+		}
+		if pending.active && !keep(pending.src) {
+			pending.cut = true
 		}
 		mu.Unlock()
 		for _, s := range victims {
@@ -240,6 +252,13 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 			k := from.String()
 			mu.Lock()
 			s := sessions[k]
+			if s == nil {
+				// 判定の前に途中のセッションとして記す。この後に走る sweep が、判定に使った方針と
+				// 読んだ宛先で作るこのセッションを閉じる判定をすれば、登録の時点で分かる。
+				// 前のデータグラムの途中のセッションが捨てられて記録が残っていても、ここで上書きする
+				pending.src, pending.active = udpSessionSource(k)
+				pending.cut = false
+			}
 			mu.Unlock()
 			if s == nil {
 				if !l.accepting.Load() {
@@ -319,6 +338,14 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					stopped = true
 				default:
 				}
+				// 判定から登録までの間に、宛先の付け替え(Staged.Commit)か接続元制限の変更
+				// (CloseSessions)の sweep がこの送信元を閉じる判定をしていれば、登録せずに捨てる。
+				// 登録すると、付け替えでは旧い宛先へ、接続元制限では拒むようになった送信元のまま
+				// 中継を続け、送り続ける送信元のセッションは無通信の期限でも閉じない(設計文書 6.3 節)
+				if pending.cut {
+					stopped = true
+				}
+				pending.active = false
 				if stopped {
 					mu.Unlock()
 					s.close()
@@ -367,4 +394,14 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 			}
 		}
 	}()
+}
+
+// udpSessionSource はセッションの表の鍵(送信元の "IP:ポート")から、sweep の判定に渡す送信元の
+// IP を取り出す。読めない鍵のセッションは sweep の対象にしない。
+func udpSessionSource(k string) (netip.Addr, bool) {
+	ap, err := netip.ParseAddrPort(k)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return ap.Addr().Unmap(), true
 }
