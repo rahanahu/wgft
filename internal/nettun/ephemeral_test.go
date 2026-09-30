@@ -2,6 +2,7 @@ package nettun
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -24,7 +25,7 @@ func tcpInState(d *Device, st tcp.EndpointState) int {
 	return n
 }
 
-// narrowPorts は a の一時ポートを n 個に絞る。Create の設定の上から、同じ仕組みを小さな数で試す。
+// narrowPorts は d の一時ポートを n 個に絞る。Create の設定の上から、同じ仕組みを小さな数で試す。
 func narrowPorts(t *testing.T, d *Device, n uint16) {
 	t.Helper()
 	if terr := d.stack.SetPortRange(ephemeralFirst, ephemeralFirst+n-1); terr != nil {
@@ -181,12 +182,15 @@ func TestTimeWaitOnAcceptedSideBoundedBySourcePorts(t *testing.T) {
 }
 
 // 固定版の gVisor は、TIME_WAIT の 4 つ組へ届いた SYN を、系列番号が前の接続の受信の位置より
-// 進んでいるときだけ待ち受けへ渡し、そうでなければ黙って捨てる。初期の系列番号は 64 ns ごとに
-// 1 進むので、前の接続でその速さより速く送ると、同じ 4 つ組への次の dial は SYN の再送も捨てられて
-// 期限まで成立しない(設計文書 7 節「TIME_WAIT の 4 つ組への SYN」)。一時ポートを 1 つにして同じ
-// 4 つ組を選ばせ、系列番号の進みと送った量の比から成否を予測して確かめる。予測が境界に近い回は
-// 判定しない。速さは環境で変わる(-race では遅い)。判定できた回が無ければ落とす。
-// gVisor の更新でこの性質が変われば落ちるので、設計文書を直す。
+// 進んでいるときだけ待ち受けへ渡し、そうでなければ黙って捨てる。比較は 32 ビットの循環の比較で、
+// 同じ 4 つ組の初期の系列番号は 64 ns ごとに 1 進むので、受け入れられるのは、前の SYN からの
+// 経過を 64 ns で数えた値から前の接続の受信の進み(データと SYN と FIN)を引いた差が、int32 として
+// 正のときだけである(設計文書 7 節「TIME_WAIT の 4 つ組への SYN」)。捨てられると SYN の再送も
+// 捨てられ、dial は期限まで成立しない。ここでは経過が短い場合だけを試す。一時ポートを 1 つにして
+// 同じ 4 つ組を選ばせ、経過と送った量の比から成否を予測して確かめる。予測が境界に近い回は
+// 判定しない。速さは環境で変わる(-race では遅い)。判定できた回が無ければ落とす。経過が約 137 秒
+// を超える長い接続の場合は時間がかかるので試さない。gVisor の更新でこの性質が変われば落ちるので、
+// 設計文書を直す。
 func TestTimeWaitSYNAfterFastTransfer(t *testing.T) {
 	judged := 0
 	for _, size := range []int{1, 1 << 20, 8 << 20} {
@@ -201,7 +205,13 @@ func TestTimeWaitSYNAfterFastTransfer(t *testing.T) {
 		s.Close()
 		io.Copy(io.Discard, c)
 		c.Close()
-		time.Sleep(20 * time.Millisecond)
+		// dial した側が LAST_ACK を抜け、ただ 1 つのポートが空くまで待つ
+		for deadline := time.Now().Add(2 * time.Second); tcpInState(p.a, tcp.StateLastAck) != 0 || tcpInState(p.a, tcp.StateCloseWait) != 0; {
+			if time.Now().After(deadline) {
+				t.Fatal("setup: the dialing side did not reach CLOSED")
+			}
+			time.Sleep(time.Millisecond)
+		}
 		// 系列番号の進みと、前の接続の受信の位置の進み(データと SYN と FIN)の比
 		ratio := float64(time.Since(t0).Nanoseconds()/64) / float64(size+2)
 		c2, err := dialTo(p.a, netip.AddrPortFrom(p.b.local, 9000), 1500*time.Millisecond)
@@ -215,8 +225,8 @@ func TestTimeWaitSYNAfterFastTransfer(t *testing.T) {
 			}
 			judged++
 		case ratio < 0.7:
-			if err == nil {
-				t.Fatalf("after %d bytes at ratio %.2f: dial succeeded, want the SYN dropped", size, ratio)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("after %d bytes at ratio %.2f: dial error %v, want the deadline to expire on dropped SYNs", size, ratio, err)
 			}
 			judged++
 		default:
