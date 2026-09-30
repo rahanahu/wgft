@@ -16,6 +16,18 @@ import (
 
 // 変異の確認は各テストの上に書く。どれも設計文書 11 節の管理用 API の Unix ソケットの作り方である。
 
+// shortSocketDir は、ソケットを置くための短い一時ディレクトリを作る。macOS の t.TempDir() はテストの名前を
+// 含む長いパスになり、ソケットのパスが sun_path の 104 バイトを超えて bind が invalid argument で落ちる。
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "as")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // TestListenUnixLeavesANonSocketInPlace は、ソケットのパスにソケットでない物があれば、消さずに
 // 誤りにすることを確かめる。WGFT_ADMIN を誤ってデータベースのファイルに向けた場合に、そのファイルを
 // 消さないためである。
@@ -42,7 +54,7 @@ func TestListenUnixLeavesANonSocketInPlace(t *testing.T) {
 // ファイルの権限も変えないことを確かめる。
 // 変異の確認:種別の判定を外すと symlink が消えて落ちる。
 func TestListenUnixLeavesASymlinkAndItsTarget(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	target := filepath.Join(dir, "target")
 	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -67,7 +79,7 @@ func TestListenUnixLeavesASymlinkAndItsTarget(t *testing.T) {
 // 確かめる。
 // 変異の確認:ソケットの枝で消さないと、bind が address already in use で落ちる。
 func TestListenUnixReplacesAStaleSocket(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "admin.sock")
+	p := filepath.Join(shortSocketDir(t), "admin.sock")
 	stale, err := net.Listen("unix", p)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +116,7 @@ func TestListenUnixSocketIsPrivateFromTheStart(t *testing.T) {
 		}
 	}
 	defer func() { listenedHook = nil }()
-	ln, err := Listen("unix://"+filepath.Join(t.TempDir(), "admin.sock"), true)
+	ln, err := Listen("unix://"+filepath.Join(shortSocketDir(t), "admin.sock"), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +146,7 @@ func TestListenUnixWarnsAboutAWritableDirectory(t *testing.T) {
 		{0o777 | fs.ModeSticky, false},
 	} {
 		buf.Reset()
-		dir := filepath.Join(t.TempDir(), "run")
+		dir := filepath.Join(shortSocketDir(t), "run")
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
