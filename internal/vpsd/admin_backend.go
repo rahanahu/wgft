@@ -421,7 +421,7 @@ type udpPooler interface {
 
 // ResourceStatus is admin.ResourceStatusBackend's implementation (design.md 7a.10 節「拒否の報告」).
 // TCP always has a pool: d.proxy judges every Relay connection (kernel mode: its own pool; userspace
-// mode: the same pool the relay uses, design.md 7a.10 節「共有プールと隔離予約」). UDP has one only
+// mode: the same pool the relay uses, design.md 7a.10 節「共有プール、最低分と予備」). UDP has one only
 // in userspace mode, so kernel mode's FlowBudget has no "udp" entry and no UDP rule ever appears in
 // Refusals.
 func (d *Daemon) ResourceStatus() admin.ResourceStatus {

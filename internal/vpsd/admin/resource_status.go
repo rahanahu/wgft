@@ -9,13 +9,13 @@ import (
 // 加算的に載せる型を持つ。既存のフィールドの意味は変えない(7a.6 節)。
 
 // FlowBudget is Resource Guard's process-wide flow budget for one protocol (design.md 7a.10 節
-// 「共有プールと隔離予約」). 宣言は internal/vpsd/adminapi にあり、ここは別名である
+// 「共有プール、最低分と予備」). 宣言は internal/vpsd/adminapi にあり、ここは別名である
 // (design.md 10.2d 節。admin.go の別名と同じ理由である)。
 type FlowBudget = adminapi.FlowBudget
 
 // ResourceStatus is Resource Guard's report (design.md 7a.10 節「拒否の報告」): the process-wide
 // flow budget by protocol, and the admission refusals accumulated since the process started, by
-// rule ID and reason. Reasons are "budget", "rule_cap" and "reserve" (internal/resource.Reason); a
+// rule ID and reason. Reasons are "budget", "rule_cap", "reserve", "floor" and "spare" (internal/resource.Reason); a
 // rule or reason that never triggered a refusal is simply absent from the map, not present with a
 // zero count, matching internal/resource.Pool.Refusals. Not persisted across restarts.
 type ResourceStatus struct {

@@ -45,7 +45,7 @@ type Options struct {
 	// Dial はエージェントのリスナーへ繋ぐ。既定は net.Dial("tcp", addr)。
 	Dial func(addr string) (net.Conn, error)
 	Logf func(string, ...any)
-	// Pool はプロセス全体の予算と、そこから導くルールごとの上限と隔離予約(仕様 7 節、
+	// Pool はプロセス全体の予算と、そこから導くルールごとの上限と最低分(仕様 7 節、
 	// 設計文書 7a.10 節の Resource Guard)。nil なら既定値で作る。
 	// ユーザー空間モードの vpsd は relay と同じ Pool を渡し、合計で数える
 	Pool *resource.Pool
@@ -467,6 +467,7 @@ type admitted struct {
 	rule          Rule
 	gen           int
 	releasePolicy func()
+	lease         *resource.Lease
 }
 
 // admitAccepted runs only in the accept loop, never in a per-connection goroutine.
@@ -502,7 +503,7 @@ func (m *Manager) admitAccepted(l *listener, c net.Conn) *admitted {
 	} else if !sourceAllowed(src, rule) {
 		return nil
 	}
-	ref, ok, cancelled := l.acquireAdmission(gen, l.budget.Acquire)
+	lease, ref, ok, cancelled := l.acquireAdmission(gen, l.budget.Take)
 	if cancelled {
 		return nil
 	}
@@ -513,32 +514,38 @@ func (m *Manager) admitAccepted(l *listener, c net.Conn) *admitted {
 		return nil
 	}
 	handed = true
-	return &admitted{c: c, src: src, rule: rule, gen: gen, releasePolicy: releasePolicy}
+	return &admitted{c: c, src: src, rule: rule, gen: gen, releasePolicy: releasePolicy, lease: lease}
 }
 
 // acquireAdmission serializes cancellation, the budget attempt and handoff.
 // acquire is the synchronous Pool operation; it must not reenter the listener.
 // The listener -> Pool lock order is also used by stop and restriction updates.
-func (l *listener) acquireAdmission(gen int, acquire func() (resource.Refusal, bool)) (ref resource.Refusal, ok, cancelled bool) {
+func (l *listener) acquireAdmission(gen int, take func() (*resource.Lease, resource.Refusal, resource.Outcome)) (lease *resource.Lease, ref resource.Refusal, ok, cancelled bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.stopping || l.closed || l.gen != gen {
-		return ref, false, true
+		return nil, ref, false, true
 	}
-	ref, ok = acquire()
-	if !ok {
-		return ref, false, false
+	lease, ref, outcome := take()
+	switch outcome {
+	case resource.NotAccepting:
+		// Unreachable while stopping, closed and gen are checked under l.mu, since a stop or
+		// retarget changes them under the same lock before closing the Pool handle. Treated like
+		// cancelled, a plain RST with no log, and not counted as a refusal (design.md 7a.10 節).
+		return nil, ref, false, true
+	case resource.Refused:
+		return nil, ref, false, false
 	}
 	// A committed worker may start after stop; it owns the charges until done.
 	l.admitting = nil
 	l.pending++
-	return ref, true, false
+	return lease, ref, true, false
 }
 
 func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 	c, src, rule, gen := a.c, a.src, a.rule, a.gen
 	defer a.releasePolicy()
-	defer l.budget.Release()
+	defer a.lease.Release()
 	pending := true
 	unpend := func() {
 		if pending {
@@ -588,7 +595,9 @@ func (l *listener) updateRestriction(r Rule) (retargeted bool, closed int) {
 	defer l.mu.Unlock()
 	retargeted = r.AgentAddr != l.rule.AgentAddr || r.AgentPort != l.rule.AgentPort
 	l.rule.ID, l.rule.Agent = r.ID, r.Agent
-	// 分割と統合で所属ルールが変わっても、既存の接続は移動先のルールで数える(仕様 7 節)
+	// 分割と統合で所属ルールが変わっても、既存の接続は受け付けたときのルールの登録に数えたままで、
+	// ルール 1 本の上限に使う listener が運ぶ数だけが移動先へ移る。元のルールの登録が退役すれば、
+	// 既存の接続は帰属の規則で移動先の登録へ移る(設計文書 7a.10 節)
 	l.budget.SetRule(r.ID)
 	l.rule.Policy = r.Policy
 	l.rule.ProxyProtocol, l.rule.AgentAddr, l.rule.AgentPort = r.ProxyProtocol, r.AgentAddr, r.AgentPort

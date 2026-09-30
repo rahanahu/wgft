@@ -34,7 +34,7 @@ type Options struct {
 	UDPIdleTimeout time.Duration // 無通信でセッションを閉じるまで(全体状態の udp_timeout_stream)
 	// Limits はプロセス全体の予算(設定値)。UDPPool と TCPPool の既定値を導くのに使う
 	Limits resource.Limits
-	// UDPPool と TCPPool はプロセス全体の予算と、そこから導くルールごとの上限と隔離予約
+	// UDPPool と TCPPool はプロセス全体の予算と、そこから導くルールごとの上限と最低分
 	// (仕様 7 節、設計文書 7a.10 節の Resource Guard)。nil なら Limits から作る。
 	// 今の呼び出し側はどちらも渡さない。vpsd は Limits だけを渡し、この Manager が作った Pool を
 	// TCPPool() から読んでプロキシモードの中継に渡すので、同時接続数は合計で数える(仕様 7 節)
@@ -46,7 +46,7 @@ type Options struct {
 	// Admission Policy のすべての段で判定する(設計文書 7a.9 節の AdmitFlow)。size は最初のパケットの
 	// 大きさ(UDP はデータグラムの長さ、TCP は 0)。通すときは、送信元ごとの同時フロー数の枠を返す
 	// release も返し、中継はフローの終わりに 1 回呼ぶ。後の Resource Guard(プロセス全体の予算、
-	// ルール 1 本の上限、隔離予約)が拒んだときも、その場で呼ぶ。nil なら全部通す。
+	// ルール 1 本の上限、最低分と予備)が拒んだときも、その場で呼ぶ。nil なら全部通す。
 	// VPS 側のユーザー空間モード(仕様 6.3 節)が使う。エージェントでは nil。
 	Admit func(ruleID string, src netip.Addr, size int) (release func(), ok bool)
 	// AdmitPacket は成立済みの UDP セッションのデータグラム 1 つを通すか(packet_rate)。nil なら全部通す。
@@ -104,6 +104,18 @@ type Manager struct {
 
 	mu        sync.Mutex
 	listeners map[Key]*listener
+
+	// 次の 3 つは単体テストだけが New の後に書き換える差し込み口で、本番では nil である。停止や適用と
+	// 取得が重なる窓は、止める位置を外から決められないと繰り返して確かめられないので残す
+	// (設計文書 7a.10 節の「受け付けていない」の拒否と帰属の規則の試験)。
+	// testHookAfterTake は取得の直後、停止の印を確かめる前に worker が呼ぶ。
+	testHookAfterTake func(l *listener)
+	// testHookRevive は、Retiring の UDP の待ち受けを再開する Commit の中で、受け付けの印を立てた後、
+	// Pool の Accept の前に呼ぶ。
+	testHookRevive func(l *listener)
+	// testHookCommitStep は、Staged.Commit が既存の待ち受けを 1 つ閉じるか止めるか付け替えるたびに呼ぶ。
+	// 1 回の適用の中の順(listeners の表の順)を試験が記録するためのもの。
+	testHookCommitStep func(k Key, op string)
 	// retiring は fail-closed にしたルールの待ち受け(新しいフローを受けず、成立済みのフローだけを
 	// 残す。設計文書 7a.3 節)。Prepare/Commit の経路(vpsd のユーザー空間モード)だけが使う。
 	retiring map[Key]*listener
@@ -141,10 +153,10 @@ type listener struct {
 	sweep func(keep func(src netip.Addr) bool) int
 	// セッション数(ハートビートの表示用)
 	sessions func() int
-	// budget は Resource Guard の枠(プロセス全体の予算と隔離予約。設計文書 7a.10 節)。
+	// budget は Resource Guard の枠(プロセス全体の予算と、ルールの登録ごとの最低分と予備。設計文書 7a.10 節)。
 	// 上限の対象になるフロー(UDP はセッション、TCP は公開側の接続)を 1 つずつここで取る。
-	// ルールごとの数は Pool が同じルールの待ち受けの合計で見るので、分割と統合で所属ルールが
-	// 変わったリスナーの既存のフローは移動先のルールで数える(仕様 7 節)
+	// 既存のフローは受け付けたときのルールの登録に数え、ルール 1 本の上限は登録の待ち受けが運ぶ
+	// 数で見る。分割と統合で元のルールの登録が退役すれば、既存のフローは移動先の登録へ移る
 	budget *resource.Listener
 	// bindErr は待ち受けを開けなかったこと。bind の失敗のほか、宛先が許可一覧の外にある IP
 	// リテラルで bind を試みなかった場合の誤りもここに入る(設計文書 7 節の openLocked)。

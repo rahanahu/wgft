@@ -261,8 +261,9 @@ type DoctorBudget struct {
 	// Total は予算 T、InUse は今のフロー数 u である
 	Total int `json:"total"`
 	InUse int `json:"in_use"`
-	// RuleCap はルールが 2 本以上あるときのルール 1 本の上限 C、Reserve はルール 1 本あたりの
-	// 隔離予約 q、Rules は今受け付けているルールの数 N である
+	// RuleCap はルールが 2 本以上あるときのルール 1 本の上限 C、Reserve はルールの登録ごとの
+	// 最低分 m、Rules は今受け付けているルールの数 N である。Reserve の名前は制御ソケットの形を
+	// 変えないために残す
 	RuleCap int `json:"rule_cap"`
 	Reserve int `json:"reserve"`
 	Rules   int `json:"rules"`
@@ -273,7 +274,7 @@ type DoctorBudget struct {
 // DoctorRefusal はルール 1 本の 1 つの理由の拒否の累計である。
 type DoctorRefusal struct {
 	RuleID string `json:"rule_id"`
-	// Reason は budget、rule_cap、reserve のいずれか(設計文書 7a.10 節)
+	// Reason は budget、rule_cap、reserve、floor、spare のいずれか(設計文書 7a.10 節)
 	Reason resource.Reason `json:"reason"`
 	Count  uint64          `json:"count"`
 }

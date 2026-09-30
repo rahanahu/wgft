@@ -974,7 +974,7 @@ func TestApplyKeepsTheAcceptingRulesWhileABindIsPending(t *testing.T) {
 	open := reserveUDP(t, lb)
 	pending := reserveUDP(t, lb)
 	g := &gatedNet{loopback: lb, gatedPort: pending, gate: make(chan struct{}), started: make(chan struct{}, 1)}
-	pool := resource.NewPool(10) // ルールが 1 本なら 10、2 本ならルール 1 本は ceil(10/2) = 5
+	pool := resource.NewPool(10) // ルールが 1 本なら予備を除いた 6、最低分はどちらでも下限の 4
 	m := New(g, Options{UDPPool: pool, Logf: testLogf(t)})
 	// 後始末は登録の逆順に走るので、gate を開ける後始末を後から登録して先に走らせる。テストが
 	// t.Fatalf で抜けても、bind の途中で止まった Apply が Manager の錠を握ったままにならない
@@ -985,8 +985,8 @@ func TestApplyKeepsTheAcceptingRulesWhileABindIsPending(t *testing.T) {
 	if got := pool.Rules(); got != 1 {
 		t.Fatalf("accepting rules after the first apply = %d, want 1", got)
 	}
-	// probe は r1 の 2 つ目の待ち受けの枠。r1 が A にただ 1 つのルールであるあいだは、予算のすべてを
-	// 取れる。誤って pending のルールが A に入れば、6 本目から rule_cap で拒まれる
+	// probe は r1 の 2 つ目の待ち受けの枠。r1 が A にただ 1 つのルールであるあいだは、予備を除いた
+	// 6 本を取れる。誤って pending のルールが A に入れば、5 本目から rule_cap で拒まれる
 	probe := pool.Listener("r1")
 	done := make(chan struct{})
 	go func() {
@@ -995,23 +995,23 @@ func TestApplyKeepsTheAcceptingRulesWhileABindIsPending(t *testing.T) {
 	}()
 	waitGatedBind(t, g)
 	var seenRules, seenReserve []int
-	for range 10 {
+	for range 6 {
 		seenRules = append(seenRules, pool.Rules())
 		seenReserve = append(seenReserve, pool.Reserve())
-		if ref, admitted := probe.Acquire(); !admitted {
+		if _, ref, o := probe.Take(); o != resource.Granted {
 			t.Fatalf("rule r1 was refused with %q while another rule's bind was still pending (in use %d of %d)",
 				ref.Reason, ref.InUse, ref.Total)
 		}
 		time.Sleep(time.Millisecond)
 	}
 	for i, n := range seenRules {
-		if n != 1 || seenReserve[i] != 0 {
-			t.Fatalf("sample %d while a bind was pending: %d accepting rules, reserve %d; want 1 and 0",
+		if n != 1 || seenReserve[i] != resource.FlowFloor {
+			t.Fatalf("sample %d while a bind was pending: %d accepting rules, minimum %d; want 1 and 4",
 				i, n, seenReserve[i])
 		}
 	}
-	if got := pool.InUse(); got != 10 {
-		t.Fatalf("InUse = %d, want 10 (r1 took the whole budget while the bind was pending)", got)
+	if got := pool.InUse(); got != 6 {
+		t.Fatalf("InUse = %d, want 6: r1 took the budget but the spare while the bind was pending", got)
 	}
 	release()
 	<-done
@@ -1019,8 +1019,8 @@ func TestApplyKeepsTheAcceptingRulesWhileABindIsPending(t *testing.T) {
 	if got, want := pool.Rules(), 2; got != want {
 		t.Errorf("accepting rules after the bind succeeded = %d, want %d", got, want)
 	}
-	if got, want := pool.Reserve(), 5; got != want {
-		t.Errorf("reserve after the bind succeeded = %d, want %d", got, want)
+	if got, want := pool.Reserve(), resource.FlowFloor; got != want {
+		t.Errorf("minimum after the bind succeeded = %d, want %d", got, want)
 	}
 	for _, st := range m.Status() {
 		if st.Err != nil {
@@ -1063,12 +1063,12 @@ func TestApplyFailedBindNeverEntersTheAcceptingRules(t *testing.T) {
 			t.Fatalf("sample %d: %d accepting rules, want 1 (the failing bind must never join A)", i, n)
 		}
 	}
-	if got := pool.Reserve(); got != 0 {
-		t.Errorf("reserve = %d, want 0 (only one rule accepts)", got)
+	if got := pool.Rules(); got != 1 {
+		t.Errorf("rules = %d, want 1: only one rule accepts", got)
 	}
-	// r1 は予算のすべてを取れる。ここで拒まれるなら、失敗した bind のルールが A に入っている
-	if n, ref := acquireN(probe, 10); n != 10 {
-		t.Errorf("r1 admitted %d flows, want the whole budget of 10 (refused with %q)", n, ref.Reason)
+	// r1 は予備を除いた 6 本を取れる。ここで拒まれるなら、失敗した bind のルールが A に入っている
+	if n, ref := acquireN(probe, 10); n != 6 {
+		t.Errorf("r1 admitted %d flows, want the budget but the spare, 6; refused with %q", n, ref.Reason)
 	}
 	// 失敗は状態として見え、再試行しても A には入らない
 	var failed int
@@ -1091,8 +1091,8 @@ func acquireN(l *resource.Listener, n int) (int, resource.Refusal) {
 	passed := 0
 	var last resource.Refusal
 	for range n {
-		ref, admitted := l.Acquire()
-		if !admitted {
+		_, ref, o := l.Take()
+		if o != resource.Granted {
 			last = ref
 			continue
 		}

@@ -964,6 +964,28 @@ func TestAgentDoctorShowsRefusalsAgainstTheirStart(t *testing.T) {
 	}
 }
 
+// ルールが 2 本以上あるとき、sessions はルール 1 本の上限と登録ごとの最低分を示し、refusals の
+// 説明は拒否の理由をすべて挙げる(設計文書 7a.10 節、10.2c 節)。
+func TestAgentDoctorShowsTheMinimum(t *testing.T) {
+	in := testAgentDoctorInput(t, t.TempDir())
+	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+	holdTheLock(t, in.CredentialsPath)
+	in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+		st.Budgets[0].Rules, st.Budgets[0].RuleCap, st.Budgets[0].Reserve = 2, 512, 510
+	})))
+	checks := agentDiagnose(in)
+	c, _ := findAgentCheck(checks, agentCheckSessions)
+	if !strings.Contains(c.Detail, "cap 512 per rule, minimum 510") {
+		t.Errorf("relay.sessions does not show the minimum: %q", c.Detail)
+	}
+	r, _ := findAgentCheck(checks, agentCheckRefusals)
+	for _, reason := range []string{"budget", "rule_cap", "reserve", "floor", "spare"} {
+		if !strings.Contains(r.Next, reason+" means") {
+			t.Errorf("relay.refusals does not explain %s: %q", reason, r.Next)
+		}
+	}
+}
+
 // 読み取りの入口の振り分けそのものを、誤りから直接確かめる。
 func TestDialFailureKind(t *testing.T) {
 	long := "/" + strings.Repeat("a", agent.ControlPathLimit)

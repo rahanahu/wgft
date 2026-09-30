@@ -36,24 +36,30 @@
 #   5. under HALF the default flow caps (design 7, 7a.10 sections), holding and flooding past them
 #      keeps RSS under the derived memory soft limit plus a margin, for the userspace server's own
 #      relay and for the agent (which relays every connection regardless of the server's mode). The
-#      budget is halved so that one rule alone (which may now hold the whole budget, design 7a.10)
-#      can be filled by a flood from the client namespace's own address space.
+#      budget is halved so that one rule alone (which may hold the whole budget less the 4 spare
+#      flows kept for a rule added later, design 7a.10) can be filled by a flood from the client
+#      namespace's own address space.
 #   5b. the same RSS bound, but under the DEFAULT (unhalved) flow caps, so an actual single-rule
 #      flood exercises the default soft limit of 216 MiB, rather than only the halved-budget check
 #      5; design 7a.10 records a measured peak of about 210 MiB under a flood filling the default
 #      caps, not a bound. Needs roughly twice check 5's source addresses, since one address can
 #      supply at most the per-source caps (256 UDP, 128 TCP) toward the larger default budgets
 #      (8192 UDP, 2048 TCP).
-#   5c. Resource Guard isolation with 2 rules (design 7a.10 節): flooding one TCP rule to its
-#      per-rule cap C does not stop a second rule from opening new connections up to its reserve q,
-#      and does not evict the first rule's held connections. With 2 rules C and q are equal, so the
-#      refusal reason is rule_cap for both rules.
-#   5d. the same isolation with 3 rules: q is now below C, so the two rules left un-flooded are
-#      each refused by reason reserve once they reach q, while the flooded rule is still refused by
-#      rule_cap at C.
-#   5e. isolation still holds under a budget smaller than the built-in default (design 7a.10 節's
-#      own examples, WGFT_MAX_TCP_FLOWS=1024 and 1500 on the agent): 5c's 2-rule case already runs
-#      at 1024 (check 5's halved TCP budget); 5e repeats it at 1500.
+#   5c. Resource Guard isolation with 2 rules (design 7a.10 節): flooding one TCP rule stops it
+#      where the other rule's unfilled minimum m and the spare begin, which does not stop the second
+#      rule from opening new connections up to m, and does not evict the first rule's held
+#      connections. Every refusal is reason spare.
+#   5d. the same isolation with 3 rules: the flooded rule stops at T less two minimums and the
+#      spare, and each of the two others opens new connections up to m; every refusal is spare.
+#   5e. isolation still holds under a budget smaller than the built-in default, on the agent
+#      (WGFT_MAX_TCP_FLOWS=1024 and 1500).
+#   5f. every other refusal reason on a real connection (design 7a.10 節's examples): rule_cap,
+#      budget and floor while a rule added to a full budget takes the spare, and reserve when a
+#      third rule joins two full ones.
+#   5g. the split remainder and its workaround (design 7a.10 節): after a flooded port is split
+#      off a range rule, the port left in the rule opens no new connection while the flood
+#      continues, and replacing the rule with a new id in one batch (rule import) lets it open
+#      new connections up to its minimum without cutting its existing ones.
 #   6. rule-local (Prepare) failures are fail-closed, not backend-wide (design 7a.3 section): a.
 #      kernel mode, a squatted proxy port reports that one rule not_active with a bind-failed
 #      reason, without blocking an unrelated rule's active state or the active generation, and
@@ -127,7 +133,7 @@ mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: lifecycle.sh kernel|userspace [check...]" >&2; exit 2;; esac
 shift || true
 # Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9 10 11 12) run only those checks; none runs all.
-ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10 11 12"
+ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 5f 5g 6 7 8 9 10 11 12"
 CHECKS="${*:-$ALL_CHECKS}"
 for c in $CHECKS; do
   case " $ALL_CHECKS " in *" $c "*) ;; *) echo "lifecycle.sh: unknown check '$c' (use: $ALL_CHECKS)" >&2; exit 2;; esac
@@ -138,8 +144,9 @@ ADMIN=127.0.0.1:8686
 PY=$W/wgft-lifecycle-py
 # check 5 runs the server and the agent with half the default flow budgets, so that the flood it
 # can generate from one client namespace fills the whole process-wide budget and goes past it.
-# One rule may hold the entire budget (design 7a.10: the per-rule cap of ceil(T/2) only applies
-# once two or more rules accept new flows), so filling it needs a budget the flood can reach.
+# One rule may hold the entire budget less the 4 spare flows (design 7a.10: the per-rule cap of
+# ceil(T/2) only applies once two or more rules accept new flows), so filling it needs a budget the
+# flood can reach.
 C5_FLOW_FLAGS=(--max-udp-flows 4096 --max-tcp-flows 1024)
 C5_UDP_BUDGET=4096
 C5_TCP_BUDGET=1024
@@ -1293,11 +1300,11 @@ check5_server_memory() {
       # the RSS bound only means something if the budget was actually filled: one rule holding
       # all of it, from 21 sources x 60 TCP (budget 1024) and x 260 UDP (budget 4096). Both
       # floods stay under the per-source caps (128 TCP, 256 UDP), so the budget is what refuses
-      okcheck "server: one rule's tcp flood fills the whole flow budget (held $held of $C5_TCP_BUDGET)" \
-        "$([ "$held" -ge $((C5_TCP_BUDGET - 24)) ] && [ "$held" -le "$C5_TCP_BUDGET" ] && echo 1 || echo 0)"
+      okcheck "server: one rule's tcp flood fills the flow budget but the spare (held $held of $C5_TCP_BUDGET)" \
+        "$([ "$held" -ge $((C5_TCP_BUDGET - 24)) ] && [ "$held" -le $((C5_TCP_BUDGET - 4)) ] && echo 1 || echo 0)"
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
-      okcheck "server: one rule's udp flood fills the whole flow budget and is refused beyond it (answered $udp_ans of $udp_att)" \
-        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le "$C5_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
+      okcheck "server: one rule's udp flood fills the flow budget but the spare and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le $((C5_UDP_BUDGET - 4)) ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "server RSS stays under the soft limit plus margin while flooded past its flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((SOFT_LIMIT_MIB + MARGIN_MIB))" ] && echo 1 || echo 0)"
       check "server logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' $W/wgft-lifecycle-c5s-server.log)"
@@ -1361,11 +1368,11 @@ check5_agent_memory() {
       # the RSS bound only means something if the budget was actually filled: one rule holding
       # all of it, from 21 sources x 60 TCP (budget 1024) and x 260 UDP (budget 4096). Both
       # floods stay under the per-source caps (128 TCP, 256 UDP), so the budget is what refuses
-      okcheck "agent: one rule's tcp flood fills the whole flow budget (held $held of $C5_TCP_BUDGET)" \
-        "$([ "$held" -ge $((C5_TCP_BUDGET - 24)) ] && [ "$held" -le "$C5_TCP_BUDGET" ] && echo 1 || echo 0)"
+      okcheck "agent: one rule's tcp flood fills the flow budget but the spare (held $held of $C5_TCP_BUDGET)" \
+        "$([ "$held" -ge $((C5_TCP_BUDGET - 24)) ] && [ "$held" -le $((C5_TCP_BUDGET - 4)) ] && echo 1 || echo 0)"
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
-      okcheck "agent: one rule's udp flood fills the whole flow budget and is refused beyond it (answered $udp_ans of $udp_att)" \
-        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le "$C5_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
+      okcheck "agent: one rule's udp flood fills the flow budget but the spare and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le $((C5_UDP_BUDGET - 4)) ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "agent RSS stays under the soft limit plus margin while flooded past its flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((SOFT_LIMIT_MIB + MARGIN_MIB))" ] && echo 1 || echo 0)"
       check "agent logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' $W/wgft-lifecycle-c5a-agent.log)"
@@ -1398,7 +1405,7 @@ check5() {
 # the built-in default (216 MiB). Needs roughly twice check 5's source addresses (42, not 21):
 # one address can supply at most the per-source caps (256 UDP, 128 TCP) toward these larger totals.
 #
-# EXCLUSIVE-HEAVY: like check 5 itself, 5b/5c/5d/5e all flood thousands of connections/datagrams
+# EXCLUSIVE-HEAVY: like check 5 itself, 5b through 5g all flood thousands of connections/datagrams
 # from the client namespace under load. The ones that read RSS (5, 5b and 5e) must not run at the
 # same time as another CPU- or memory-bound check (each other, or a flood elsewhere in the VM): a
 # shared CPU would blur the RSS bound they assert on. 5c and 5d were measured rather than assumed:
@@ -1406,9 +1413,10 @@ check5() {
 # rate or an RSS, and 20 repetitions of each inside a pool of eight sandboxes - including the two of
 # them overlapping each other - passed every time with identical held counts, so they may share the
 # VM. Every check in this family is independent of the checks OUTSIDE it (1-4, 6-9), which do not
-# flood.
+# flood. 5f and 5g assert on exact held counts too, but have not been repeated in the pool, so
+# lab/suite.txt runs them alone.
 #
-# check 5b through 5e (this whole block) are written for the lab's upcoming move to several
+# check 5b through 5g (this whole block) are written for the lab's upcoming move to several
 # sandboxes per VM: every file they write lives under $W (lab/sandbox.sh sets it from
 # WGFT_LAB_WORKDIR, default /tmp, so two sandboxes in one VM never share a path), every network
 # namespace is named through a variable ($VPS_NS, $CLIENT_NS, $HOME_NS, $LAN_NS)
@@ -1495,11 +1503,11 @@ check5b_server_default_memory() {
       echo "   $(cat "$W/wgft-lifecycle-c5bs-tcpflood.log")"
       echo "   tcp connections actually held: $held"
       echo "   server RSS while flooded past the default flow budget: ${rss:-unknown} MiB (soft limit $DEFAULT_SOFT_LIMIT_MIB MiB, margin $DEFAULT_MARGIN_MIB MiB)"
-      okcheck "server: one rule's tcp flood fills the default flow budget (held $held of $DEFAULT_TCP_BUDGET)" \
-        "$([ "$held" -ge $((DEFAULT_TCP_BUDGET - 48)) ] && [ "$held" -le "$DEFAULT_TCP_BUDGET" ] && echo 1 || echo 0)"
+      okcheck "server: one rule's tcp flood fills the default flow budget but the spare (held $held of $DEFAULT_TCP_BUDGET)" \
+        "$([ "$held" -ge $((DEFAULT_TCP_BUDGET - 48)) ] && [ "$held" -le $((DEFAULT_TCP_BUDGET - 4)) ] && echo 1 || echo 0)"
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
-      okcheck "server: one rule's udp flood fills the default flow budget and is refused beyond it (answered $udp_ans of $udp_att)" \
-        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le "$DEFAULT_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
+      okcheck "server: one rule's udp flood fills the default flow budget but the spare and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le $((DEFAULT_UDP_BUDGET - 4)) ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "server RSS stays under the default soft limit plus margin while flooded past the default flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((DEFAULT_SOFT_LIMIT_MIB + DEFAULT_MARGIN_MIB))" ] && echo 1 || echo 0)"
       check "server logs its derived memory soft limit at start" "memory soft limit: $DEFAULT_SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' "$W/wgft-lifecycle-c5bs-server.log")"
@@ -1554,11 +1562,11 @@ check5b_agent_default_memory() {
       echo "   $(cat "$W/wgft-lifecycle-c5ba-tcpflood.log")"
       echo "   tcp connections actually held: $held"
       echo "   agent RSS while flooded past the default flow budget: ${rss:-unknown} MiB (soft limit $DEFAULT_SOFT_LIMIT_MIB MiB, margin $DEFAULT_MARGIN_MIB MiB)"
-      okcheck "agent: one rule's tcp flood fills the default flow budget (held $held of $DEFAULT_TCP_BUDGET)" \
-        "$([ "$held" -ge $((DEFAULT_TCP_BUDGET - 48)) ] && [ "$held" -le "$DEFAULT_TCP_BUDGET" ] && echo 1 || echo 0)"
+      okcheck "agent: one rule's tcp flood fills the default flow budget but the spare (held $held of $DEFAULT_TCP_BUDGET)" \
+        "$([ "$held" -ge $((DEFAULT_TCP_BUDGET - 48)) ] && [ "$held" -le $((DEFAULT_TCP_BUDGET - 4)) ] && echo 1 || echo 0)"
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
-      okcheck "agent: one rule's udp flood fills the default flow budget and is refused beyond it (answered $udp_ans of $udp_att)" \
-        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le "$DEFAULT_UDP_BUDGET" ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
+      okcheck "agent: one rule's udp flood fills the default flow budget but the spare and is refused beyond it (answered $udp_ans of $udp_att)" \
+        "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le $((DEFAULT_UDP_BUDGET - 4)) ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
       okcheck "agent RSS stays under the default soft limit plus margin while flooded past the default flow budget" \
         "$([ -n "${rss:-}" ] && [ "$rss" -le "$((DEFAULT_SOFT_LIMIT_MIB + DEFAULT_MARGIN_MIB))" ] && echo 1 || echo 0)"
       check "agent logs its derived memory soft limit at start" "memory soft limit: $DEFAULT_SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' "$W/wgft-lifecycle-c5ba-agent.log")"
@@ -1589,29 +1597,36 @@ check5b() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# check 5c/5d: Resource Guard isolation (design 7a.10 節). Flooding one TCP rule of an N-rule
-# configuration to its per-rule cap C = ceil(T/2) does not stop the OTHER rules from opening new
-# connections up to their own reserve q, and does not evict the flooded rule's held connections.
-# The flooded rule (A, filled first while the total is still short of T) is refused by reason
-# rule_cap once it reaches C. Because C + q always equals T exactly for 2 rules (C = ceil(T/2), q =
-# floor(T/2), and a ceiling and a floor of the same half always sum to the whole - confirmed in the
-# lab, not assumed: internal/resource.Pool checks the total budget before the per-rule cap, design
-# 7a.10 節's stated order), the LAST rule to fill always exhausts the total at the very moment it
-# reaches its own share, so its refusal is reason budget, never rule_cap or reserve, regardless of
-# which of the two reasons would otherwise apply. With 3 rules and this budget (1024, so q=256
-# divides q*2 evenly into C), the same coincidence hits the last of the two un-flooded rules; the
-# other one fills first, while the total is still short of T, and is refused by reason reserve as
-# design 7a.10 節 states. So check 5c (2 rules) shows rule_cap then budget, and check 5d (3 rules)
-# shows rule_cap, then reserve, then budget - all three reasons the Pool can report, each on a real
-# connection. Both checks run against the userspace server's own relay pool
-# (kernel mode holds no per-flow Resource Guard state for a Transparent rule, design 6.1, 7a.10
-# 節; the equivalent scene for the agent, which always uses the same resource.Pool regardless of
-# the server's mode, is check 5e's small-budget case). All rules share one lan echo backend (one
-# port is enough: each rule's listen port is what ss below counts on, not the target).
+# check 5c/5d: Resource Guard isolation (design 7a.10 節). Each rule is given a minimum m, and 4
+# spare flows are kept for a rule added later. Flooding one TCP rule of an N-rule configuration
+# while the others hold nothing stops it where the others' unfilled minimums and the spare begin,
+# at T - P - (N - 1) * m: 510 of 1024 for 2 rules (m = 510) and for 3 rules (m = 255). That is
+# below C = ceil(T/2) = 512, so the refusal is reason spare, not rule_cap. Each other rule then
+# opens new connections up to m while the flood goes on, and is refused by reason spare too, since
+# every minimum is filled and only the spare is left. None of this evicts a held connection. Both
+# checks run against the userspace server's own relay pool (kernel mode holds no per-flow Resource
+# Guard state for a Transparent rule, design 6.1, 7a.10 節; the equivalent scene for the agent,
+# which always uses the same resource.Pool regardless of the server's mode, is check 5e). All rules
+# share one lan echo backend (one port is enough: each rule's listen port is what ss below counts
+# on, not the target).
 # ---------------------------------------------------------------------------------------------
+
+# spare_refusals_only <label> <log> <rule id>: every refusal line the log holds for the rule
+# names reason spare (the one reason whose text says the room is kept for a rule added later and
+# the rule is at or above its minimum) and at least one such line exists. Refusals are logged at
+# most once a minute per listener, so the counts in resource_refusals are checked as well.
+spare_refusals_only() {
+  local lines; lines=$(grep "rule $3 holds" "$2")
+  okcheck "$1" "$([ -n "$lines" ] && ! grep -q "below its minimum" <<<"$lines" && ! grep -vq "for a rule added later" <<<"$lines" && echo 1 || echo 0)"
+}
+
+# refusal_count <rule id> <reason>: the rule's resource_refusals count for the reason, 0 if none.
+refusal_count() {
+  vps wgft rule ls --json --admin "$ADMIN" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('resource_refusals', {}).get('$1', {}).get('$2', 0))"
+}
+
 resource_isolation_case() {
-  local tag=$1 nrules=$2 q=$3
-  local c=512  # ceil(1024/2), independent of N (check 5's halved TCP budget, C5_FLOW_FLAGS)
+  local tag=$1 nrules=$2 a_hold=$3 m=$4
   local DATA="$W/wgft-lifecycle-$tag" ADATA="$W/wgft-lifecycle-$tag-agent"
   local LOG="$W/wgft-lifecycle-$tag-server.log"
   local agent_pid="" echo_pid=""
@@ -1659,8 +1674,8 @@ resource_isolation_case() {
   # nothing to do with whether the cap actually holds once the relay catches up. Same fix as check
   # 5's own must_wait pair (finish attempting, only then check the held count).
   must_wait "$tag: rule A's flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-floodA.log" "tcp: attempted="
-  c5_iso_a_held() { [ "$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")" -ge $((c - 24)) ]; }
-  must_wait "$tag: rule A's flood reaches its per-rule cap C=$c" 10 c5_iso_a_held
+  c5_iso_a_held() { [ "$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")" -ge $((a_hold - 24)) ]; }
+  must_wait "$tag: rule A's flood reaches $a_hold, where the other rules' minimums and the spare begin" 10 c5_iso_a_held
   local heldA; heldA=$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")
 
   local -a otherPids=() otherHeld=()
@@ -1670,47 +1685,35 @@ resource_isolation_case() {
       > "$W/wgft-lifecycle-$tag-flood$i.log" 2>&1 &
     otherPids+=($!)
     must_wait "$tag: rule $((i + 1))'s flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-flood$i.log" "tcp: attempted="
-    c5_iso_other_held() { [ "$(vps ss -tn state established "( sport = :$p )" | grep -c ":$p")" -ge $((q - 24)) ]; }
-    must_wait "$tag: rule $((i + 1)) (${ids[$i]}) opens new connections up to its reserve q=$q while A is flooded" 10 c5_iso_other_held
+    c5_iso_other_held() { [ "$(vps ss -tn state established "( sport = :$p )" | grep -c ":$p")" -ge $((m - 24)) ]; }
+    must_wait "$tag: rule $((i + 1)) (${ids[$i]}) opens new connections up to its minimum m=$m while A is flooded" 10 c5_iso_other_held
     # captured HERE, before any wait below closes these connections back down
     otherHeld+=("$(vps ss -tn state established "( sport = :$p )" | grep -c ":$p")")
   done
   local heldA_after; heldA_after=$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")
+  local spareA; spareA=$(refusal_count "${ids[0]}" spare)
+  local -a otherSpare=()
+  for i in $(seq 1 $((nrules - 1))); do otherSpare+=("$(refusal_count "${ids[$i]}" spare)"); done
+  local budgetRefused; budgetRefused=$(vps wgft rule ls --json --admin "$ADMIN" 2>/dev/null | python3 -c "import json,sys; print(sum(v.get(k, 0) for v in json.load(sys.stdin).get('resource_refusals', {}).values() for k in ('budget', 'rule_cap', 'reserve', 'floor')))")
   wait "$pidA" "${otherPids[@]}" 2>/dev/null
 
   local held_desc="A(${ids[0]})=$heldA"
   for i in $(seq 1 $((nrules - 1))); do held_desc+=" $((i + 1))(${ids[$i]})=${otherHeld[$((i - 1))]}"; done
-  echo "   $tag: held $held_desc (before/after A: $heldA/$heldA_after; C=$c q=$q)"
-  okcheck "$tag: rule A (flooded) is refused at its per-rule cap" \
-    "$([ "$heldA" -ge $((c - 24)) ] && [ "$heldA" -le "$c" ] && echo 1 || echo 0)"
+  echo "   $tag: held $held_desc (before/after A: $heldA/$heldA_after; A stops at $a_hold, m=$m)"
+  okcheck "$tag: rule A (flooded) stops where the other rules' minimums and the spare begin" \
+    "$([ "$heldA" -ge $((a_hold - 24)) ] && [ "$heldA" -le "$a_hold" ] && echo 1 || echo 0)"
   eqcheck "$tag: rule A's held connections are not evicted by the other rule(s)' admission" "$heldA" "$heldA_after"
-  # The rule_cap and reserve messages both start "rule <id> holds <n> flows", so matching only
-  # that much would pass for either reason (caught by this block's own teeth proof: disabling the
-  # rule_cap check in internal/resource/pool.go left this check passing on the reserve message
-  # alone, since a 2-rule config's C and q are equal - see this commit's body). Matching rule_cap's
-  # own, further text ("and the rest of the budget is reserved for", not reserve's "above its
-  # reserve of") is what actually tells the two reasons apart.
-  check "$tag: rule A's refusal is logged with reason rule_cap, not reserve" \
-    "and the rest of the budget is reserved for" "$(grep "rule ${ids[0]} holds" "$LOG")"
+  okcheck "$tag: rule A's refusals are counted as reason spare ($spareA)" "$([ "${spareA:-0}" -gt 0 ] && echo 1 || echo 0)"
+  spare_refusals_only "$tag: rule A's refusal is logged with reason spare" "$LOG" "${ids[0]}"
   for i in $(seq 1 $((nrules - 1))); do
     local hb=${otherHeld[$((i - 1))]}
-    okcheck "$tag: rule $((i + 1)) opens new connections up to its reserve while A is flooded (held $hb of $q)" \
-      "$([ "$hb" -ge $((q - 24)) ] && [ "$hb" -le "$q" ] && echo 1 || echo 0)"
+    okcheck "$tag: rule $((i + 1)) opens new connections up to its minimum while A is flooded (held $hb of $m)" \
+      "$([ "$hb" -ge $((m - 24)) ] && [ "$hb" -le "$m" ] && echo 1 || echo 0)"
+    okcheck "$tag: rule $((i + 1))'s refusals are counted as reason spare (${otherSpare[$((i - 1))]})" \
+      "$([ "${otherSpare[$((i - 1))]:-0}" -gt 0 ] && echo 1 || echo 0)"
+    spare_refusals_only "$tag: rule $((i + 1))'s refusal is logged with reason spare" "$LOG" "${ids[$i]}"
   done
-  # The last "other" rule to fill always coincides with exhausting the whole budget (this
-  # function's block comment explains why), so its refusal is reason budget - a message that
-  # names the listener (proto/port), not the rule id, so it is matched by port instead. Every
-  # earlier "other" rule fills while the total is still short of T and is refused by reason
-  # reserve, matched by rule id like rule A's rule_cap refusal above.
-  for i in $(seq 1 $((nrules - 1))); do
-    if [ "$i" = $((nrules - 1)) ]; then
-      check "$tag: rule $((i + 1)) (the last to fill) is refused by reason budget, not reserve or rule_cap" \
-        "flow budget full: " "$(grep "tcp/${ports[$i]}:" "$LOG")"
-    else
-      check "$tag: rule $((i + 1))'s refusal is reason reserve (q is below C, and the total is not yet full)" \
-        "above its reserve of $q" "$(grep "rule ${ids[$i]} holds" "$LOG")"
-    fi
-  done
+  eqcheck "$tag: no refusal of another reason while every rule is at or under its share" 0 "${budgetRefused:-x}"
 
   addrs_del 10 30
   kill "$agent_pid" "$echo_pid" 2>/dev/null
@@ -1724,7 +1727,7 @@ check5c() {
   echo "== $mode: check 5c: Resource Guard isolation with 2 rules"
   if [ "$mode" = userspace ]; then
     ADATA_EXTRA_FLAGS=()
-    resource_isolation_case c5c-server 2 512
+    resource_isolation_case c5c-server 2 510 510
   else
     skip "exercised against the userspace server's own relay pool only (see check 5c/5d/5e's block comment)"
   fi
@@ -1734,26 +1737,26 @@ check5d() {
   echo "== $mode: check 5d: Resource Guard isolation with 3 rules"
   if [ "$mode" = userspace ]; then
     ADATA_EXTRA_FLAGS=()
-    resource_isolation_case c5d-server 3 256
+    resource_isolation_case c5d-server 3 510 255
   else
     skip "exercised against the userspace server's own relay pool only (see check 5c/5d/5e's block comment)"
   fi
 }
 
 # ---------------------------------------------------------------------------------------------
-# check 5e: isolation holds under a budget smaller than the built-in default, on the AGENT (design
-# 7a.10 節's own examples): WGFT_MAX_TCP_FLOWS=1024 (2 rules: one stops at 512, the other opens up
-# to 512) and WGFT_MAX_TCP_FLOWS=1500 (2 rules: one stops at 750, the other opens up to 750). The
-# 1024 case is exactly check 5c's budget, but exercised on the agent (kernel-mode server) instead
-# of the userspace server, which is the process design 7a.10 節 names; the 1500 case adds the
-# second value the design section calls out. Each rule dials a DIFFERENT lan target port, so the
-# agent's own outgoing dial (counted with ss in the home namespace, the same technique check 5's
-# check5_agent_memory uses) can tell the two rules' held connections apart. The server here is a
-# directly-spawned kernel-mode process, so its pid is a genuine, capturable $! like the agent's
-# and the echo target's - no find_wgft_pid needed anywhere in this one.
+# check 5e: isolation holds under a budget smaller than the built-in default, on the AGENT:
+# WGFT_MAX_TCP_FLOWS=1024 (2 rules: m = 510; one stops at 510, the other opens up to 510) and
+# WGFT_MAX_TCP_FLOWS=1500 (m = 748; one stops at 748, the other opens up to 748). The 1024 case is
+# exactly check 5c's budget, but exercised on the agent (kernel-mode server) instead of the
+# userspace server; the 1500 case adds a budget whose half is not the minimum. Each rule dials a
+# DIFFERENT lan target port, so the agent's own outgoing dial (counted with ss in the home
+# namespace, the same technique check 5's check5_agent_memory uses) can tell the two rules' held
+# connections apart. The server here is a directly-spawned kernel-mode process, so its pid is a
+# genuine, capturable $! like the agent's and the echo target's - no find_wgft_pid needed anywhere
+# in this one.
 # ---------------------------------------------------------------------------------------------
 agent_isolation_case() {
-  local tag=$1 tcp_total=$2 c=$3 q=$4
+  local tag=$1 tcp_total=$2 a_hold=$3 m=$4
   local DATA="$W/wgft-lifecycle-$tag" ADATA="$W/wgft-lifecycle-$tag-agent"
   local server_pid="" agent_pid="" echo_pid=""
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
@@ -1796,31 +1799,27 @@ agent_isolation_case() {
   # identical comment (accept() marks a socket ESTABLISHED before this relay's own admission
   # check can close an over-cap one, so sampling mid-burst can catch a transient overshoot).
   must_wait "$tag: rule A's flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-floodA.log" "tcp: attempted="
-  a_held() { [ "$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25599 )' | grep -c ':25599')" -ge $((c - 24)) ]; }
-  must_wait "$tag: rule A's flood reaches its per-rule cap C=$c" 10 a_held
+  a_held() { [ "$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25599 )' | grep -c ':25599')" -ge $((a_hold - 24)) ]; }
+  must_wait "$tag: rule A's flood reaches $a_hold, where rule B's minimum and the spare begin" 10 a_held
   local heldA; heldA=$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25599 )' | grep -c ':25599')
 
   ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 39911 "$addrs" 40 10 \
     > "$W/wgft-lifecycle-$tag-floodB.log" 2>&1 &
   local pidB=$!
   must_wait "$tag: rule B's flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-floodB.log" "tcp: attempted="
-  b_held() { [ "$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25600 )' | grep -c ':25600')" -ge $((q - 24)) ]; }
-  must_wait "$tag: rule B opens new connections up to its reserve q=$q while A is flooded" 10 b_held
+  b_held() { [ "$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25600 )' | grep -c ':25600')" -ge $((m - 24)) ]; }
+  must_wait "$tag: rule B opens new connections up to its minimum m=$m while A is flooded" 10 b_held
   local heldB; heldB=$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25600 )' | grep -c ':25600')
   local heldA_after; heldA_after=$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25599 )' | grep -c ':25599')
   wait "$pidA" "$pidB" 2>/dev/null
 
-  echo "   $tag (WGFT_MAX_TCP_FLOWS=$tcp_total): rule A held $heldA before / $heldA_after after, rule B held $heldB (C=$c q=$q)"
-  okcheck "$tag: rule A (flooded) is refused at its per-rule cap" \
-    "$([ "$heldA" -ge $((c - 24)) ] && [ "$heldA" -le "$c" ] && echo 1 || echo 0)"
-  okcheck "$tag: rule B opens new connections up to its reserve while A is flooded" \
-    "$([ "$heldB" -ge $((q - 24)) ] && [ "$heldB" -le "$q" ] && echo 1 || echo 0)"
+  echo "   $tag (WGFT_MAX_TCP_FLOWS=$tcp_total): rule A held $heldA before / $heldA_after after, rule B held $heldB (A stops at $a_hold, m=$m)"
+  okcheck "$tag: rule A (flooded) stops where rule B's minimum and the spare begin" \
+    "$([ "$heldA" -ge $((a_hold - 24)) ] && [ "$heldA" -le "$a_hold" ] && echo 1 || echo 0)"
+  okcheck "$tag: rule B opens new connections up to its minimum while A is flooded" \
+    "$([ "$heldB" -ge $((m - 24)) ] && [ "$heldB" -le "$m" ] && echo 1 || echo 0)"
   eqcheck "$tag: rule A's held connections are not evicted by rule B's admission" "$heldA" "$heldA_after"
-  # See resource_isolation_case's identical comment: rule_cap and reserve messages share the same
-  # "rule <id> holds <n> flows" prefix, so the further, rule_cap-only text is what actually tells
-  # them apart.
-  check "$tag: rule A's refusal is logged with reason rule_cap, not reserve" \
-    "and the rest of the budget is reserved for" "$(grep "rule $idA holds" "$LOG")"
+  spare_refusals_only "$tag: rule A's refusal is logged with reason spare" "$LOG" "$idA"
 
   addrs_del 10 30
   kill "$agent_pid" "$echo_pid" 2>/dev/null
@@ -1833,11 +1832,173 @@ agent_isolation_case() {
 check5e() {
   echo "== $mode: check 5e: isolation under a budget smaller than the default, on the agent"
   if [ "$mode" = kernel ]; then
-    agent_isolation_case c5e-1024 1024 512 512
-    agent_isolation_case c5e-1500 1500 750 750
+    agent_isolation_case c5e-1024 1024 510 510
+    agent_isolation_case c5e-1500 1500 748 748
   else
     skip "the small-budget agent scenario runs via the kernel-mode server (see check 5c/5d/5e's block comment)"
   fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# check 5f/5g: userspace server with the halved TCP budget (T = 1024, C = 512, f = P = 4). Both
+# start the server, the agent and a lan echo target the way resource_isolation_case does, through
+# c5_setup and c5_teardown below. held_on <port> counts the connections the server holds on a
+# listen port, after the flood that opened them has finished attempting (resource_isolation_case's
+# comment on sampling mid-burst).
+# ---------------------------------------------------------------------------------------------
+c5_setup() { # c5_setup <tag> <first addr> <last addr>: sets C5_LOG, C5_AGENT_PID, C5_ECHO_PID, C5_ADDRS
+  local tag=$1
+  C5_DATA="$W/wgft-lifecycle-$tag" C5_ADATA="$W/wgft-lifecycle-$tag-agent" C5_LOG="$W/wgft-lifecycle-$tag-server.log"
+  C5_AGENT_PID="" C5_ECHO_PID="" C5_FIRST=$2 C5_LAST=$3
+  vps wgft server teardown --data-dir "$C5_DATA" --purge --yes >/dev/null 2>&1
+  rm -rf "$C5_DATA" "$C5_ADATA"; mkdir -p "$C5_DATA"
+  C5_ADDRS=$(addrs_add "$2" "$3")
+  start_server "$C5_DATA" "$C5_LOG" "${C5_FLOW_FLAGS[@]}"
+  if ! wait_admin; then echo "FAIL  $tag setup: admin api never came up"; fail=1; c5_teardown; return 1; fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$C5_ADATA" > "$W/wgft-lifecycle-$tag-agent.log" 2>&1 < /dev/null &
+  C5_AGENT_PID=$!
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25599,25600 > "$W/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
+  C5_ECHO_PID=$!
+  if ! wait_agent home; then echo "FAIL  $tag setup: agent never registered"; fail=1; c5_teardown; return 1; fi
+}
+c5_teardown() {
+  addrs_del "$C5_FIRST" "$C5_LAST"
+  [ -n "$C5_AGENT_PID" ] && kill "$C5_AGENT_PID" 2>/dev/null && must_wait "agent pid $C5_AGENT_PID exited" 5 proc_gone "$C5_AGENT_PID"
+  [ -n "$C5_ECHO_PID" ] && kill "$C5_ECHO_PID" 2>/dev/null
+  local spid; spid=$(find_wgft_pid 'server run'); [ -n "$spid" ] && kill "$spid" 2>/dev/null
+  vps wgft server teardown --data-dir "$C5_DATA" --purge --yes >/dev/null 2>&1
+  rm -rf "$C5_DATA" "$C5_ADATA"
+}
+held_on() { vps ss -tn state established "( sport = :$1 )" | grep -c ":$1"; }
+# c5_flood <tag> <name> <port> <addrs-csv> <per-addr> <hold>: floods in the background, waits until
+# every attempt has completed, and sets C5_PID to the flood's pid (it holds its connections for
+# <hold> seconds, then exits).
+c5_flood() {
+  ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 "$3" "$4" "$5" "$6" > "$W/wgft-lifecycle-$1-$2.log" 2>&1 &
+  C5_PID=$!
+  must_wait "$1: flood $2 finished attempting all connections" 15 log_has "$W/wgft-lifecycle-$1-$2.log" "tcp: attempted="
+  sleep 1
+}
+addr_csv() { local out="" i; for i in $(seq "$1" "$2"); do out+="198.51.100.$i,"; done; echo "${out%,}"; }
+# listening_on <port>: the server listens on the port (its rule is applied), without taking a flow
+# slot the way tcp_probe_ok would.
+listening_on() { vps ss -ltn 2>/dev/null | grep -q ":$1 "; }
+
+# check 5f: the reasons rule_cap, budget, floor and reserve on real connections (design 7a.10 節's
+# examples). Rule A alone holds 1020 flows. Rule B joins (m becomes 510): A is refused by rule_cap
+# (it carries 1020 >= C), B takes the 4 spare flows at once and is then refused by budget. When 12
+# of A's flows end, B opens 8 more and is refused by floor: it is below its minimum, and the room
+# left is kept spare. Then with two rules at 510 each, a third rule X joins (m becomes 255): the
+# two are refused by reserve (at or above their minimum, and the room is held for X's), and X
+# takes the spare and is refused by budget. Refusals are logged at most once a minute per
+# listener, so the reasons are read from resource_refusals.
+check5f() {
+  echo "== $mode: check 5f: the refusal reasons rule_cap, budget, floor and reserve"
+  if [ "$mode" != userspace ]; then
+    skip "exercised against the userspace server's own relay pool only (see check 5c/5d/5e's block comment)"
+    return
+  fi
+  local tag=c5f pids=()
+  c5_setup "$tag" 10 40 || return
+  local idA idB
+  idA=$(vps wgft rule add --agent home --tcp 39960 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  must_wait "$tag: rule A listens" 10 listening_on 39960
+  c5_flood "$tag" fillA 39960 "$(addr_csv 10 30)" 48 120; pids+=("$C5_PID")
+  c5_flood "$tag" topA 39960 "$(addr_csv 31 31)" 12 12; local pidA2=$C5_PID; pids+=("$C5_PID")
+  local heldA; heldA=$(held_on 39960)
+  eqcheck "$tag: rule A alone holds the budget but the spare" 1020 "$heldA"
+  idB=$(vps wgft rule add --agent home --tcp 39961 --to 192.168.50.3:25600 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  must_wait "$tag: rule B listens" 10 listening_on 39961
+  c5_flood "$tag" overA 39960 "$(addr_csv 32 32)" 5 1; pids+=("$C5_PID")
+  okcheck "$tag: rule A is refused by rule_cap once rule B joins ($(refusal_count "$idA" rule_cap))" "$([ "$(refusal_count "$idA" rule_cap)" -gt 0 ] && echo 1 || echo 0)"
+  c5_flood "$tag" fillB 39961 "$(addr_csv 33 33)" 10 120; pids+=("$C5_PID")
+  eqcheck "$tag: rule B takes the 4 spare flows at once" 4 "$(held_on 39961)"
+  okcheck "$tag: rule B is then refused by budget ($(refusal_count "$idB" budget))" "$([ "$(refusal_count "$idB" budget)" -gt 0 ] && echo 1 || echo 0)"
+  wait "$pidA2" 2>/dev/null
+  must_wait "$tag: 12 of rule A's flows end" 15 bash -c "[ \$(ip netns exec '$VPS_NS' ss -tn state established '( sport = :39960 )' | grep -c ':39960') -le 1008 ]"
+  c5_flood "$tag" moreB 39961 "$(addr_csv 34 34)" 20 120; pids+=("$C5_PID")
+  eqcheck "$tag: rule B opens new connections below its minimum until only the spare is left" 12 "$(held_on 39961)"
+  okcheck "$tag: rule B is then refused by floor ($(refusal_count "$idB" floor))" "$([ "$(refusal_count "$idB" floor)" -gt 0 ] && echo 1 || echo 0)"
+  for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done
+  wait "${pids[@]}" 2>/dev/null
+  pids=()
+  must_wait "$tag: every flow of the first scene ends" 15 bash -c "[ \$(ip netns exec '$VPS_NS' ss -tn state established | grep -cE ':3996[01] ') -eq 0 ]"
+  vps wgft rule rm "$idA" --admin "$ADMIN" >/dev/null && vps wgft rule rm "$idB" --admin "$ADMIN" >/dev/null
+
+  local idC idD idX
+  idC=$(vps wgft rule add --agent home --tcp 39962 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  idD=$(vps wgft rule add --agent home --tcp 39963 --to 192.168.50.3:25600 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  must_wait "$tag: rules C and D listen" 10 bash -c "ip netns exec '$VPS_NS' ss -ltn | grep -q ':39962 ' && ip netns exec '$VPS_NS' ss -ltn | grep -q ':39963 '"
+  c5_flood "$tag" C 39962 "$(addr_csv 10 20)" 60 120; pids+=("$C5_PID")
+  c5_flood "$tag" D 39963 "$(addr_csv 21 31)" 60 120; pids+=("$C5_PID")
+  eqcheck "$tag: rule C holds its minimum of 510" 510 "$(held_on 39962)"
+  eqcheck "$tag: rule D holds its minimum of 510" 510 "$(held_on 39963)"
+  idX=$(vps wgft rule add --agent home --tcp 39964 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  must_wait "$tag: rule X listens" 10 listening_on 39964
+  c5_flood "$tag" overC 39962 "$(addr_csv 32 32)" 5 1; pids+=("$C5_PID")
+  okcheck "$tag: rule C is refused by reserve once rule X joins ($(refusal_count "$idC" reserve))" "$([ "$(refusal_count "$idC" reserve)" -gt 0 ] && echo 1 || echo 0)"
+  c5_flood "$tag" X 39964 "$(addr_csv 33 33)" 10 120; pids+=("$C5_PID")
+  eqcheck "$tag: rule X takes the 4 spare flows at once" 4 "$(held_on 39964)"
+  okcheck "$tag: rule X is then refused by budget ($(refusal_count "$idX" budget))" "$([ "$(refusal_count "$idX" budget)" -gt 0 ] && echo 1 || echo 0)"
+  eqcheck "$tag: rule C's held connections are not evicted" 510 "$(held_on 39962)"
+  for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done
+  wait "${pids[@]}" 2>/dev/null
+  c5_teardown
+}
+
+# check 5g: the split remainder and its workaround (design 7a.10 節, what the design does not guarantee). Rule B covers
+# 39970-39971 and holds 4 long connections on 39970. A flood on 39971 fills B up to its minimum
+# (510 with rule X, m = 510). Splitting 39971 off into D keeps B's registration, which still counts
+# the flood's connections, so the port left in B opens no new connection (reason spare) while D and
+# X each get their minimum (N = 3, m = 255). Replacing B with a new id in one batch (rule import
+# with B's id removed) retires B's registration: the flood's connections move to D, and the port
+# left opens new connections up to its minimum without cutting its 4 existing ones.
+check5g() {
+  echo "== $mode: check 5g: a port left in a split rule, and replacing the rule to free it"
+  if [ "$mode" != userspace ]; then
+    skip "exercised against the userspace server's own relay pool only (see check 5c/5d/5e's block comment)"
+    return
+  fi
+  local tag=c5g pids=()
+  c5_setup "$tag" 10 50 || return
+  local idB idD idX idB2
+  idB=$(vps wgft rule add --agent home --tcp 39970-39971 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  idX=$(vps wgft rule add --agent home --tcp 39972 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
+  must_wait "$tag: rules B and X listen" 10 bash -c "ip netns exec '$VPS_NS' ss -ltn | grep -q ':39971 ' && ip netns exec '$VPS_NS' ss -ltn | grep -q ':39972 '"
+  c5_flood "$tag" keep 39970 "$(addr_csv 40 40)" 4 300; pids+=("$C5_PID")
+  c5_flood "$tag" flood 39971 "$(addr_csv 10 30)" 40 300; pids+=("$C5_PID")
+  eqcheck "$tag: the flood fills B up to its minimum" 506 "$(held_on 39971)"
+  vps wgft rule split "$idB" 39971 --admin "$ADMIN" >/dev/null
+  idD=$(vps wgft rule ls --json --admin "$ADMIN" | python3 -c "import json,sys; print([r['id'] for r in json.load(sys.stdin)['rules'] if r['listen_port'] == '39971'][0])")
+  local spare0; spare0=$(refusal_count "$idB" spare)
+  c5_flood "$tag" left1 39970 "$(addr_csv 41 41)" 10 5; pids+=("$C5_PID")
+  eqcheck "$tag: after the split, the port left in B opens no new connection" 4 "$(held_on 39970)"
+  okcheck "$tag: the port left in B is refused by reason spare" "$([ "$(refusal_count "$idB" spare)" -gt "$spare0" ] && echo 1 || echo 0)"
+  c5_flood "$tag" x1 39972 "$(addr_csv 42 44)" 100 300; pids+=("$C5_PID")
+  eqcheck "$tag: after the split, rule X opens new connections up to its minimum" 255 "$(held_on 39972)"
+  vps wgft rule ls --json --admin "$ADMIN" | python3 -c "
+import json,sys
+rules=json.load(sys.stdin)['rules']
+for r in rules:
+    if r['id'] == '$idB':
+        del r['id']
+json.dump(rules, open('$W/wgft-lifecycle-$tag-import.json', 'w'))"
+  vps wgft rule import "$W/wgft-lifecycle-$tag-import.json" --admin "$ADMIN" >/dev/null
+  idB2=$(vps wgft rule ls --json --admin "$ADMIN" | python3 -c "import json,sys; print([r['id'] for r in json.load(sys.stdin)['rules'] if r['listen_port'] == '39970'][0])")
+  okcheck "$tag: rule import replaced B with a new id ($idB2)" "$([ -n "$idB2" ] && [ "$idB2" != "$idB" ] && echo 1 || echo 0)"
+  check "$tag: the replacement is one batch" "added [$idB2], deleted [$idB]" "$(grep 'rules: cli rule import' "$C5_LOG")"
+  c5_flood "$tag" left2 39970 "$(addr_csv 45 47)" 100 300; pids+=("$C5_PID")
+  # m is 255; the 4 flows past it are what is left once D's minimum is filled by the moved flows
+  local left; left=$(held_on 39970)
+  okcheck "$tag: after the replacement, the port left opens new connections up to its minimum (held $left, minimum 255)" \
+    "$([ "$left" -ge 255 ] && [ "$left" -le 259 ] && echo 1 || echo 0)"
+  eqcheck "$tag: the port left keeps its 4 connections from before the split" 4 "$(vps ss -tn state established '( sport = :39970 )' | grep -c '198.51.100.40:')"
+  eqcheck "$tag: rule X keeps its minimum" 255 "$(held_on 39972)"
+  eqcheck "$tag: D's held connections are not evicted" 506 "$(held_on 39971)"
+  for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done
+  wait "${pids[@]}" 2>/dev/null
+  c5_teardown
 }
 
 # ---------------------------------------------------------------------------------------------
