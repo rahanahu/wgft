@@ -3,6 +3,7 @@ package relay
 // relay の UDP の停止、再開、閉鎖と取得の競合 (設計文書 7a.10 節)。
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"sync"
@@ -26,6 +27,7 @@ type udpRig struct {
 	entered  chan struct{}
 	proceed  chan struct{}
 	blocker  *net.UDPConn
+	failDial atomic.Bool
 	hook     atomic.Pointer[func()]
 }
 
@@ -55,6 +57,9 @@ func newUDPRig(t *testing.T, total int) *udpRig {
 		},
 		Dial: func(network, addr string) (net.Conn, error) {
 			r.dials.Add(1)
+			if r.failDial.Load() {
+				return nil, errors.New("dial refused by the test")
+			}
 			return net.Dial(network, addr)
 		},
 	})
@@ -241,7 +246,7 @@ func TestUDPCloseAfterTake(t *testing.T) {
 }
 
 // 再開した待ち受けの旧いセッションは加入の発火で今の登録へ移り、新しいセッションも今の登録に数える。
-// 再開と同時に所属ルールが変わる場合は、旧い ID の登録が一瞬でき、付け替えで退役して新しい ID へ移る。
+// 再開と同時に所属ルールが変わる場合は、再開の前に付け替えるので、旧いセッションは新しい ID の登録へ移る。
 func TestUDPResumeJoinMovesSessions(t *testing.T) {
 	for _, rule := range []string{"r1", "r2"} {
 		t.Run("resume as "+rule, func(t *testing.T) {
@@ -366,4 +371,71 @@ func TestUDPLedgerUnderConfigChurn(t *testing.T) {
 		t.Errorf("in use after close %d", lg.InUse)
 	}
 	t.Logf("commits=%d sent=%d replies=%d notAccepting=%d refusals=%v dials=%d releases=%d", iter, sent.Load(), replies.Load(), lg.NotAccepting, r.pool.Refusals(), r.dials.Load(), r.releases.Load())
+}
+
+// 宛先への dial に失敗した新しい送信元は、取った枠を返す。返し忘れると u が減らず、予算が漏れる。
+func TestUDPDialFailureReleasesTheLease(t *testing.T) {
+	r := newUDPRig(t, 8)
+	r.failDial.Store(true)
+	c := r.client(t)
+	for i := 0; i < 3; i++ {
+		c.Write([]byte("x"))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for r.dials.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	lg := checkPool(t, r.pool)
+	if r.dials.Load() == 0 || lg.InUse != 0 || r.releases.Load() != r.dials.Load() {
+		t.Errorf("dials %d, in use %d, releases %d; want every failed dial to return its flow slot", r.dials.Load(), lg.InUse, r.releases.Load())
+	}
+	// 枠が漏れていなければ、宛先が戻った後に予算のすべてを使える
+	r.failDial.Store(false)
+	if !udpRoundTrip(c, 2*time.Second) {
+		t.Fatal("no relay once the target is back")
+	}
+	if lg := checkPool(t, r.pool); lg.InUse != 1 {
+		t.Errorf("in use %d after one session, want 1", lg.InUse)
+	}
+}
+
+// 2 ポートの UDP ルール r1 の待ち受けが両方 Retiring のとき、次の Commit で片方を r2 へ切り出しつつ
+// r1 を復旧する。再開する待ち受けは宣言のルールに付け替えてから受け付けを再開するので、付け替えた
+// 待ち受けの旧いセッションは r2 に数え、残った待ち受けの旧いセッションは r1 に数える
+// (設計文書 7a.10 節の「退役した登録のフローの帰属」)。
+func TestUDPResumeUnderAnotherRuleMovesItsSessions(t *testing.T) {
+	r := newUDPRig(t, 64)
+	lb := r.m.net.(*loopback)
+	k2 := Key{proto.UDP, reserveUDP(t, lb)}
+	r.m.Prepare(map[Key]Desired{r.key: {r.target, "r1"}, k2: {r.target, "r1"}}).Commit(nil)
+	c1 := r.client(t)
+	if !udpRoundTrip(c1, 2*time.Second) {
+		t.Fatal("no relay on the first port")
+	}
+	c2, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(k2.Port)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	if !udpRoundTrip(c2, 2*time.Second) {
+		t.Fatal("no relay on the second port")
+	}
+	blocked := Key{proto.UDP, uint16(r.blocker.LocalAddr().(*net.UDPAddr).Port)}
+	s := r.m.Prepare(map[Key]Desired{blocked: {r.target, "r1"}})
+	s.Commit(map[string]func(netip.Addr) bool{"r1": func(netip.Addr) bool { return true }})
+	if got := r.m.Retiring(); len(got) != 2 {
+		t.Fatalf("Retiring = %v, want both ports", got)
+	}
+	if lg := checkPool(t, r.pool); lg.RetiredFlows != 2 {
+		t.Fatalf("retiring ledger %+v", lg)
+	}
+	r.m.Prepare(map[Key]Desired{r.key: {r.target, "r2"}, k2: {r.target, "r1"}}).Commit(nil)
+	lg := checkPool(t, r.pool)
+	if lg.RegFlows["r2"] != 1 || lg.RegCarried["r2"] != 1 || lg.RegFlows["r1"] != 1 || lg.RegCarried["r1"] != 1 || lg.RetiredFlows != 0 {
+		t.Errorf("after resuming one port under r2: %+v, want one old session in each rule", lg)
+	}
+	if !udpRoundTrip(c1, 2*time.Second) || !udpRoundTrip(c2, 2*time.Second) {
+		t.Error("an old session stopped")
+	}
 }
