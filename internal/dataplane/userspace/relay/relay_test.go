@@ -261,16 +261,15 @@ func udpEcho(t *testing.T) (addr string, packets *atomic.Int64) {
 // hold open in the meantime: TestStagedBindFailureFailsWholeRule's `free` (Manager may never claim
 // it at all, since Prepare skips a rule's later ports once an earlier one of the same rule already
 // failed, so a held-open reservation could still be sitting there when the test's own re-bind
-// check runs), TestTCPTargetCheck's target port (deliberately unreachable at first; a real server
-// only binds it later, in the test itself, to prove the target coming back is noticed),
-// TestStatusSeparatesBindFailureFromTargetFailure's `deadTarget` (it must stay unreachable for the
-// whole test, so that the listener bound in front of it reports a target failure and not a bind
-// failure), and the UDP destinations that stay unreachable for the whole test in
-// TestUDPNoTargetCheck and readwait_windows_test.go.
+// check runs), TestStatusSeparatesBindFailureFromTargetFailure's `deadTarget` (it must stay
+// unreachable for the whole test, so that the listener bound in front of it reports a target
+// failure and not a bind failure), and the UDP destinations that stay unreachable for the whole test in
+// TestUDPNoTargetCheck and readwait_windows_test.go. A TCP target that the test itself later binds
+// a real server on uses closedTarget instead, for the reason given there.
 //
 // The number is closed when freePort returns, so the next bind to port 0 in the same test can be
 // handed that same number. A test whose freePort number must differ from a port it reserves makes
-// the reservation first, as TestTCPTargetCheck, TestStagedBindFailureFailsWholeRule and
+// the reservation first, as TestStagedBindFailureFailsWholeRule and
 // TestStatusSeparatesBindFailureFromTargetFailure do: the reservation stays open, so freePort
 // cannot pick it. freePort only knows about TCP; a UDP destination that must stay closed uses
 // freeUDPPort (lastreply_test.go) instead, after the test's other UDP sockets are open.
@@ -283,6 +282,63 @@ func freePort(t *testing.T) uint16 {
 	p := l.Addr().(*net.TCPAddr).Port
 	l.Close()
 	return uint16(p)
+}
+
+// closedTarget returns a TCP address nothing listens on yet, for a test that first checks the
+// target is unreachable and then binds a real server on the same address to bring it back.
+//
+// Like freePort it picks the number by binding port 0 and closing the socket, and the gap until the
+// test binds the server is open to the rest of the host. The part of that gap that matters on a
+// busy host is outgoing connections: a dial to 127.0.0.1 leaves from 127.0.0.1, so any process
+// that dials loopback in the gap can take the number as its source port, and the test's own bind
+// then fails with "address already in use". Such a source port is bound on 127.0.0.1 and does not
+// conflict with the same number on 127.0.0.2, so the address is put there. A host that cannot bind
+// 127.0.0.2, as macOS by default, gets 127.0.0.1 and keeps the gap as it was. A socket bound to the
+// wildcard address in the gap can still take the number on either address.
+func closedTarget(t *testing.T) (net.IP, uint16) {
+	t.Helper()
+	ip := net.IPv4(127, 0, 0, 2)
+	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: ip})
+	if err != nil {
+		ip = net.IPv4(127, 0, 0, 1)
+		if l, err = net.ListenTCP("tcp4", &net.TCPAddr{IP: ip}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	return ip, uint16(p)
+}
+
+// TestClosedTargetSurvivesALoopbackDial pins the reason closedTarget exists: a connection that
+// leaves 127.0.0.1 from the target's number, as any loopback dial on the host may in the gap, must
+// not stop the test from binding its server on the target afterwards.
+func TestClosedTargetSurvivesALoopbackDial(t *testing.T) {
+	probe, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 2)})
+	if err != nil {
+		t.Skipf("127.0.0.2 is not available on this host, so closedTarget falls back to 127.0.0.1: %v", err)
+	}
+	probe.Close()
+	ip, port := closedTarget(t)
+	if !ip.Equal(net.IPv4(127, 0, 0, 2)) {
+		t.Fatalf("closedTarget chose %s although 127.0.0.2 is available", ip)
+	}
+	peer, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)}}
+	c, err := d.Dial("tcp4", peer.Addr().String())
+	if err != nil {
+		t.Fatalf("dial from 127.0.0.1:%d: %v", port, err)
+	}
+	defer c.Close()
+	srv, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: ip, Port: int(port)})
+	if err != nil {
+		t.Fatalf("a loopback dial holding the number must not block the target's own bind: %v", err)
+	}
+	srv.Close()
 }
 
 func TestUDPRelaySessionsAndIdle(t *testing.T) {
@@ -413,12 +469,13 @@ func TestOpenFailureAndRetry(t *testing.T) {
 // TCP ルールは、bind できても target に接続できなければ error。target が復帰したら Retry で ok に戻る。
 func TestTCPTargetCheck(t *testing.T) {
 	// 待ち受けのポートを先に押さえてから、まだ誰も listen していないポートを target に選ぶ(接続拒否)。
-	// 逆の順では、freePort が閉じたポートを reserveTCP の bind がそのまま受け取ることがあり、target が
-	// 自分自身の待ち受けになって「繋がらない」の確認が成り立たない
+	// target が 127.0.0.1 に戻るホスト (既定の macOS) で逆の順にすると、closedTarget が閉じたポートを
+	// reserveTCP の bind がそのまま受け取ることがあり、target が自分自身の待ち受けになって「繋がらない」の
+	// 確認が成り立たない
 	lb := &loopback{}
 	listenPort := reserveTCP(t, lb)
-	targetPort := freePort(t)
-	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(targetPort)))
+	targetIP, targetPort := closedTarget(t)
+	target := net.JoinHostPort(targetIP.String(), strconv.Itoa(int(targetPort)))
 	m := New(lb, Options{Logf: testLogf(t)})
 	defer m.Close()
 	m.Apply(map[Key]Desired{{proto.TCP, listenPort}: {target, "r1"}})
@@ -430,7 +487,7 @@ func TestTCPTargetCheck(t *testing.T) {
 	}
 
 	// target のサービスを起動 → Retry で ok に戻る
-	srv, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(targetPort)})
+	srv, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: targetIP, Port: int(targetPort)})
 	if err != nil {
 		t.Fatal(err)
 	}
