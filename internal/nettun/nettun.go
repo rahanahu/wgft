@@ -79,6 +79,11 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		dev.Wait()
 		return nil, err
 	}
+	if err := setEphemeralPorts(dev.stack); err != nil {
+		dev.Close()
+		dev.Wait()
+		return nil, err
+	}
 	sack := tcpip.TCPSACKEnabled(true) // 既定では無効
 	if err := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
 		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)
@@ -101,6 +106,28 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 	}
 	dev.events <- tun.EventUp
 	return dev, nil
+}
+
+// 一時ポートの範囲(両端を含む)。gVisor の既定の 16000-65535 より狭い(設計文書 7 節「netstack の
+// 一時ポートの範囲」)。
+const (
+	ephemeralFirst = 49152
+	ephemeralLast  = 65535
+)
+
+// setEphemeralPorts は一時ポートの範囲を狭め、TIME_WAIT の endpoint が持つポートの再利用を許す。
+// 固定版の gVisor の TCP の dial は宛先ごとにポートを予約し、TIME_WAIT の間も持つので、範囲の
+// 大きさが宛先 1 つあたりに残る接続の数の上限になる。再利用が無いと、狭めた範囲は同じ宛先への
+// 開閉の速さも抑える。
+func setEphemeralPorts(s *stack.Stack) error {
+	if terr := s.SetPortRange(ephemeralFirst, ephemeralLast); terr != nil {
+		return fmt.Errorf("could not set the ephemeral port range: %v", terr)
+	}
+	reuse := tcpip.TCPTimeWaitReuseGlobal
+	if terr := s.SetTransportProtocolOption(tcp.ProtocolNumber, &reuse); terr != nil {
+		return fmt.Errorf("could not enable TIME_WAIT port reuse: %v", terr)
+	}
+	return nil
 }
 
 // Wait は stack の goroutine の終了を待つ。Close の後に呼ぶ。stack そのものは公開しない。
