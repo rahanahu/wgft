@@ -41,11 +41,16 @@ var staticFS embed.FS
 var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel, "DescribedBy": describedByIDs, "PathSeg": pathSegment}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
 
 // pathSegment は、ルール ID を URL のパスの 1 つの区切りとして埋め込める形にする(設計文書 10.2 節)。
-// ルール ID は取り込みのファイルと管理用 API から任意の文字列で入りうる。html/template はパスの中の
-// `/`、`?`、`#`、`..` を escape しないので、そのまま埋めると、あるルールのボタンが別の経路
-// (例えば別のエージェントの無効化)へ送信する URL になる。url.PathEscape で `/` などを % の形にし、
-// それだけでは残る `.` と `..` の区切りも % の形にして、ブラウザが区切りとして解釈しないようにする。
-// サーバの ServeMux は {id} の値を元の文字列に戻して渡す。
+// ルール ID は取り込みのファイルと管理用 API から、`.` と `..` を除く任意の文字列で入りうる。
+// html/template はパスの中の `/`、`?`、`#`、`..` を escape しないので、そのまま埋めると、あるルールの
+// ボタンが別の経路(例えば別のエージェントの無効化)へ送信する URL になる。url.PathEscape で `/` などを
+// % の形にする。サーバの ServeMux は {id} の値を元の文字列に戻して渡す。
+//
+// `.` と `..` は url.PathEscape では変わらないので %2E の形にする。Go の net/url、http クライアント、
+// ServeMux はこの形を区切りの `.` と見なさないので、CLI の依頼はその ID のまま届く。ブラウザは
+// WHATWG URL 標準に従って %2E も区切りの `.` と見なすので、Web UI のボタンはこの形でも別の経路へ
+// 送信する。このため Rule.Validate が `.` と `..` の ID と agent を拒む。この形が効くのは、拒むように
+// する前に保存されたルールへの CLI の依頼だけである。
 func pathSegment(id string) string {
 	switch e := url.PathEscape(id); e {
 	case ".":

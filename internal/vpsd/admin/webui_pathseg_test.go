@@ -60,7 +60,10 @@ func newOddIDTestServer(t *testing.T, oddID string) (*httptest.Server, *store.St
 
 var linkAttr = regexp.MustCompile(`(?:href|action)="([^"]*)"`)
 
-// pageLinks は、ページの href と action の値を、ブラウザと同じく base に対して解決した URL で返す。
+// pageLinks は、ページの href と action の値を、base に対して RFC 3986 の規則(net/url)で解決した URL で
+// 返す。ブラウザは WHATWG URL 標準で解決するので、この関数はブラウザの代わりにならない。両者は %2E を
+// 区切りの `.` と見なすかどうかで異なることが分かっており、試験の ID はその形の区切りを含まない。
+// 実際のブラウザでの解決は確かめていない。
 func pageLinks(t *testing.T, base *url.URL, page string) []*url.URL {
 	t.Helper()
 	var out []*url.URL
@@ -132,7 +135,7 @@ func TestRuleButtonsStayOnTheirOwnRule(t *testing.T) {
 }
 
 // TestRuleIDIsOnePathSegmentOnEveryPage は、ルール ID をパスに埋めるどのページでも、ID が 1 つの
-// パスの区切りとして埋まり、ブラウザが解決しても ID の中の `..` や `?` が区切りとして働かないことを
+// パスの区切りとして埋まり、リンクを解決しても ID の中の `..` や `?` が区切りとして働かないことを
 // 確かめる。
 // 変異の確認:どれか 1 つのテンプレートか、Go の側で作るパンくず(疎通確認のページ)の pathSegment を
 // 外すと落ちる。
@@ -310,6 +313,8 @@ func TestOrphanBandButtonStaysOnItsAgent(t *testing.T) {
 }
 
 // TestPathSegment は、`/`、`?`、`#` と、区切り全体が `.` か `..` の ID を % の形にすることを確かめる。
+// `.` と `..` の %2E の形は Go のクライアントとサーバの間でだけ効く。ブラウザはこの形も区切りと見なす
+// ので、この 2 つの ID は Rule.Validate が拒む(設計文書 10.2 節)。
 func TestPathSegment(t *testing.T) {
 	for in, want := range map[string]string{
 		"r_01J":      "r_01J",

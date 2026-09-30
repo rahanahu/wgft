@@ -63,13 +63,25 @@ type Rule struct {
 	Enabled       bool           `json:"enabled"`
 }
 
+// isDotSegment は、s が URL のパスの区切りとして `.` か `..` に当たるかを返す。ルールの ID と agent は
+// 空でない任意の文字列を受けるが、この 2 つだけは拒む(仕様 10.2 節)。ブラウザは WHATWG URL 標準に
+// 従い、%2E と %2E%2E も区切りの `.` と `..` として扱うので、escape しても Web UI のボタンが別の経路へ
+// 送信するためである。
+func isDotSegment(s string) bool { return s == "." || s == ".." }
+
 // Validate はルール単体で判定できる制約を検査する。ルール間の制約は ValidateRules が見る。
 func (r *Rule) Validate() error {
 	if r.ID == "" {
 		return errors.New("id is empty")
 	}
+	if isDotSegment(r.ID) {
+		return fmt.Errorf("id %q is not allowed: browsers read it as a dot segment in the Web UI's URLs, even when escaped", r.ID)
+	}
 	if r.Agent == "" {
 		return errors.New("agent is empty")
+	}
+	if isDotSegment(r.Agent) {
+		return fmt.Errorf("agent %q is not allowed: browsers read it as a dot segment in the Web UI's URLs, even when escaped", r.Agent)
 	}
 	switch r.Proto {
 	case TCP, UDP:
