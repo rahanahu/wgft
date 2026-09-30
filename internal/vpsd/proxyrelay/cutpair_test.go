@@ -25,6 +25,21 @@ func (c *closeTracked) Close() error {
 	return c.TCPConn.Close()
 }
 
+// abortOnly stands for a server in userspace mode, whose connection to the agent is a netstack
+// conn (*nettun.TCPConn): it has Abort, which sends a reset, and no SetLinger. Abort here resets
+// the underlying loopback socket, so the fake agent sees what an agent sees after a netstack Abort.
+type abortOnly struct {
+	net.Conn // the *closeTracked, without its SetLinger
+	tc       *net.TCPConn
+	aborted  atomic.Bool
+}
+
+func (c *abortOnly) Abort() {
+	c.aborted.Store(true)
+	c.tc.SetLinger(0)
+	c.Conn.Close()
+}
+
 // halfOpenAgent echoes what it reads and never closes its side, not even after reading the
 // relay's FIN, like an agent whose relay half-closes toward a target that stays open. The error
 // that ends each read loop goes to ends, if there is room: a reset, not EOF, is what makes the
@@ -91,6 +106,9 @@ type cutRig struct {
 	addrs    map[uint16]string // public port -> loopback listener
 	agents   map[string]string // agent address:port -> fake agent
 	ups      []*closeTracked
+	// abortable makes each upstream an abortOnly; aborts holds them
+	abortable bool
+	aborts    []*abortOnly
 	// agentEnds receives the error that ended an agent-side connection's reads
 	agentEnds chan error
 }
@@ -147,8 +165,13 @@ func newCutRig(t *testing.T, busy map[uint16]bool) *cutRig {
 			}
 			tracked := &closeTracked{TCPConn: c.(*net.TCPConn)}
 			r.mu.Lock()
+			defer r.mu.Unlock()
 			r.ups = append(r.ups, tracked)
-			r.mu.Unlock()
+			if r.abortable {
+				a := &abortOnly{Conn: tracked, tc: tracked.TCPConn}
+				r.aborts = append(r.aborts, a)
+				return a, nil
+			}
 			return tracked, nil
 		},
 		Logf: testLogf(t),
@@ -370,5 +393,39 @@ func TestRetiringKeepsAdmittedUpstream(t *testing.T) {
 	}
 	if got := r.pool.InUse(); got != 1 {
 		t.Errorf("pool in use = %d, want 1", got)
+	}
+}
+
+// In userspace mode the server reaches the agent through the netstack, so the upstream is a
+// *nettun.TCPConn: it has Abort and no SetLinger. The cut must use Abort, or the agent sees a FIN
+// and keeps its target connection and slots while the target stays open (design.md 6.2 節).
+func TestCutAbortsANetstackUpstream(t *testing.T) {
+	const port = 8443
+	home := agentRule("r", port, "home", "10.200.0.2", nil)
+	for _, tc := range []struct {
+		name    string
+		dialing bool
+		cut     func(r *cutRig)
+	}{
+		{"rule removed", false, func(r *cutRig) { r.m.Apply(nil) }},
+		{"rule removed while dialing", true, func(r *cutRig) { r.m.Apply(nil) }},
+		{"source restriction", false, func(r *cutRig) {
+			r.m.Apply([]Rule{agentRule("r", port, "home", "10.200.0.2", []string{"127.0.0.1/32"})})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newCutRig(t, nil)
+			r.abortable = true
+			r.m.Apply([]Rule{home})
+			client := r.connect(t, port, tc.dialing)
+			tc.cut(r)
+			r.resume()
+			r.waitCut(t, client)
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if len(r.aborts) != 1 || !r.aborts[0].aborted.Load() {
+				t.Error("the relay did not Abort its netstack upstream")
+			}
+		})
 	}
 }

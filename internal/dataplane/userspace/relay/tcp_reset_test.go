@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,17 +19,22 @@ import (
 )
 
 // silentPeer accepts connections on ln, reads until the read fails and never writes or closes,
-// like a target or an agent that keeps its side open after EOF. accepted signals each accept and
-// ends receives the error that ended the read loop of each connection that received data, which
-// leaves out the relay's reachability probe (checkTarget) when the listener opens.
+// like a target or an agent that keeps its side open after EOF. accepted receives the remote
+// address of each accepted connection, and ends its remote address and the error that ended its
+// reads.
 type silentPeer struct {
-	accepted chan struct{}
-	ends     chan error
+	accepted chan string
+	ends     chan peerEnd
+}
+
+type peerEnd struct {
+	from string
+	err  error
 }
 
 func serveSilent(t *testing.T, ln net.Listener) *silentPeer {
 	t.Helper()
-	p := &silentPeer{accepted: make(chan struct{}, 8), ends: make(chan error, 8)}
+	p := &silentPeer{accepted: make(chan string, 16), ends: make(chan peerEnd, 16)}
 	conns := make(chan net.Conn, 8)
 	t.Cleanup(func() {
 		ln.Close()
@@ -47,15 +53,22 @@ func serveSilent(t *testing.T, ln net.Listener) *silentPeer {
 			if err != nil {
 				return
 			}
+			// read the address at once: a netstack conn has none once it has ended, which a
+			// reachability probe may have done already
+			var from string
+			if a := c.RemoteAddr(); a != nil {
+				from = a.String()
+			}
 			conns <- c
-			p.accepted <- struct{}{}
+			p.accepted <- from
 			go func() {
-				n, err := io.Copy(io.Discard, c)
+				_, err := io.Copy(io.Discard, c)
 				if err == nil {
 					err = io.EOF
 				}
-				if n > 0 {
-					p.ends <- err
+				select {
+				case p.ends <- peerEnd{from, err}:
+				default:
 				}
 			}()
 		}
@@ -69,6 +82,38 @@ func (p *silentPeer) waitAccepted(t *testing.T) {
 	case <-p.accepted:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the relay never connected to the peer")
+	}
+}
+
+// waitAcceptedFrom waits until the peer has accepted the connection from the address from.
+func (p *silentPeer) waitAcceptedFrom(from string) bool {
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case a := <-p.accepted:
+			if a == from {
+				return true
+			}
+		case <-timeout:
+			return false
+		}
+	}
+}
+
+// endOf waits for the connection from the address from to end and returns the error that ended
+// it. It skips the others, such as the relay's reachability probe (checkTarget).
+func (p *silentPeer) endOf(t *testing.T, from string) error {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case e := <-p.ends:
+			if e.from == from {
+				return e.err
+			}
+		case <-timeout:
+			t.Fatalf("the connection from %s is still open", from)
+		}
 	}
 }
 
@@ -145,16 +190,25 @@ func TestTCPResetFromTheTunnelEndsTheSession(t *testing.T) {
 // In the server's userspace mode the relay dials the agent through the netstack. When the relay
 // cuts such a session (a source-restriction change through CloseSessions, or the rule removed),
 // the agent must see a reset, not a FIN: the agent's relay treats a FIN as a half-close and keeps
-// its target connection and slots while the target stays open (design.md 6.2 節, 6.3 節).
+// its target connection and slots while the target stays open (design.md 6.2 節, 6.3 節). A cut
+// that comes while the relay is still dialling the agent must reset the conn the dial returns:
+// relaying it would let netpipe close it with a FIN on the public side's read failure.
 func TestTCPCutReachesTheAgentAsReset(t *testing.T) {
+	closeSessions := func(m *Manager) {
+		if n := m.CloseSessions(func(string, netip.Addr) bool { return false }); n != 1 {
+			t.Errorf("CloseSessions = %d, want 1", n)
+		}
+	}
 	for _, tc := range []struct {
 		name string
-		cut  func(m *Manager)
+		// dialing stops the connection's goroutine in its dial to the agent while cut runs
+		dialing bool
+		cut     func(m *Manager)
 	}{
-		{"CloseSessions", func(m *Manager) {
-			m.CloseSessions(func(string, netip.Addr) bool { return false })
-		}},
-		{"rule removed", func(m *Manager) { m.Apply(nil) }},
+		{"CloseSessions", false, closeSessions},
+		{"CloseSessions while dialing", true, closeSessions},
+		{"rule removed", false, func(m *Manager) { m.Apply(nil) }},
+		{"rule removed while dialing", true, func(m *Manager) { m.Apply(nil) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, agentNet := netstackPair(t)
@@ -166,39 +220,71 @@ func TestTCPCutReachesTheAgentAsReset(t *testing.T) {
 			agentSide := serveSilent(t, ln)
 			lb := &loopback{}
 			port := reserveTCP(t, lb)
+			var (
+				armed   atomic.Bool
+				entered = make(chan struct{})
+				proceed = make(chan struct{})
+				session = make(chan net.Conn, 1)
+			)
+			resume := sync.OnceFunc(func() { close(proceed) })
+			t.Cleanup(resume)
 			m := New(lb, Options{
 				Logf: testLogf(t),
 				Dial: func(network, addr string) (net.Conn, error) {
+					// the reachability probe when the listener opens is not armed
+					relayed := armed.CompareAndSwap(true, false)
+					if relayed {
+						close(entered)
+						<-proceed
+					}
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
-					return client.DialTCP(ctx, netip.MustParseAddrPort(addr))
+					c, err := client.DialTCP(ctx, netip.MustParseAddrPort(addr))
+					if relayed && err == nil {
+						// hand the conn to the relay only once the agent has accepted it, so a reset
+						// right after the dial reaches a conn the agent holds. Without this wait, the
+						// agent at times never reported a conn reset while it was still in the
+						// netstack's accept queue
+						if !agentSide.waitAcceptedFrom(c.LocalAddr().String()) {
+							t.Error("the agent did not accept the relay's connection")
+						}
+						session <- c
+					}
+					return c, err
 				},
 			})
 			defer m.Close()
 			m.Apply(map[Key]Desired{{proto.TCP, port}: {netip.AddrPortFrom(cutAgentAddr, agentPort).String(), "r1"}})
+			armed.Store(true)
 			c, err := net.DialTCP("tcp4", nil, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer c.Close()
-			if _, err := c.Write([]byte("x")); err != nil {
-				t.Fatal(err)
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the relay did not dial the agent")
 			}
-			agentSide.waitAccepted(t)
-			k := Key{proto.TCP, port}
-			waitUntil(t, func() string { return "the relay did not register the session" }, func() bool {
-				return statusOf(t, m, k).Sessions == 2
-			})
+			if !tc.dialing {
+				resume()
+				k := Key{proto.TCP, port}
+				waitUntil(t, func() string { return "the relay did not register the session" }, func() bool {
+					return statusOf(t, m, k).Sessions == 2
+				})
+			}
 
 			tc.cut(m)
+			resume()
 
+			var up net.Conn
 			select {
-			case err := <-agentSide.ends:
-				if !isCutByReset(err) {
-					t.Fatalf("the agent side of the cut session ended with %v, want a reset", err)
-				}
+			case up = <-session:
 			case <-time.After(5 * time.Second):
-				t.Fatal("the agent side of the cut session is still open")
+				t.Fatal("the relay's dial to the agent did not return")
+			}
+			if err := agentSide.endOf(t, up.LocalAddr().String()); !isCutByReset(err) {
+				t.Fatalf("the agent side of the cut session ended with %v, want a reset", err)
 			}
 		})
 	}
