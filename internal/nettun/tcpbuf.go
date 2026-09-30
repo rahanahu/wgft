@@ -274,6 +274,8 @@ type tcpConn struct {
 	cmu     sync.Mutex // バッファの設定と閉じ始めの短い排他
 	closing bool
 	sndShut bool // CloseWrite で送信の向きを閉じた
+	// onBoost は OnBoost で登録した関数。枠を得たときと floor に戻ったときに cmu の中で呼ぶ
+	onBoost func(boosted bool)
 
 	boosted    atomic.Bool
 	acquiring  atomic.Bool  // 読み取りと書き込みが同時に枠を求めないため
@@ -404,6 +406,9 @@ func (c *tcpConn) demote(now time.Time) bool {
 	so.SetSendBufferSize(tcpSendFloor, true)
 	c.hist.resize(floorHist)
 	c.boosted.Store(false)
+	if c.onBoost != nil {
+		c.onBoost(false)
+	}
 	return true
 }
 
@@ -423,9 +428,23 @@ func (c *tcpConn) noteDemand(now time.Time) {
 	c.cmu.Lock()
 	if !c.closing {
 		c.ep.SocketOptions().SetReceiveBufferSize(tcpBoostSize, true)
+		if c.onBoost != nil {
+			c.onBoost(true)
+		}
 	}
 	c.boosted.Store(true) // 送信のバッファは次の Write が広げる
 	c.cmu.Unlock()
+}
+
+// OnBoost は、この接続が枠を得たときに f(true) を、需要の無い保有者として floor に戻ったときに
+// f(false) を呼ぶよう登録し、今の状態で 1 回呼ぶ。中継は、この接続と組にしたカーネルのソケットの
+// 受信のバッファを枠に合わせるのに使う(設計文書 7 節)。枠を返す時機には呼ばない。そのとき接続は
+// 閉じているためである。f は接続の排他の中で呼ぶので、待たずに戻り、この接続を呼ばないこと。
+func (c *tcpConn) OnBoost(f func(boosted bool)) {
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	c.onBoost = f
+	f(c.boosted.Load())
 }
 
 func (c *tcpConn) Read(b []byte) (int, error) {

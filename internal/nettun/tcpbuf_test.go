@@ -878,3 +878,43 @@ func TestWriteHistorySums(t *testing.T) {
 		t.Fatal("boost history not full")
 	}
 }
+
+// OnBoost は登録の時点の状態で 1 回呼び、枠を得たときに真を、需要の無い保有者として floor に戻った
+// ときに偽を知らせる。中継はこれで組にしたカーネルのソケットの受信のバッファを合わせる(設計文書 7 節)。
+func TestTCPOnBoostReportsSlot(t *testing.T) {
+	p := newTCPPair(t, 1)
+	c, s := p.dial(t)
+	defer c.Close()
+	defer s.Close()
+	var mu sync.Mutex
+	var got []bool
+	c.(*TCPConn).OnBoost(func(b bool) {
+		mu.Lock()
+		got = append(got, b)
+		mu.Unlock()
+	})
+	events := func() []bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]bool(nil), got...)
+	}
+	if e := events(); len(e) != 1 || e[0] {
+		t.Fatalf("events after registering = %v, want [false]", e)
+	}
+	bulk(t, c, s, 4<<20)
+	if e := events(); !boosted(c) || len(e) != 2 || !e[1] {
+		t.Fatalf("events after a bulk transfer = %v (boosted=%v), want [false true]", e, boosted(c))
+	}
+	// 保有者が 1 秒需要を持たない間に、別の接続が枠を求めて回収する
+	time.Sleep(tcpIdleReclaim + 200*time.Millisecond)
+	c2, s2 := p.dial(t)
+	defer c2.Close()
+	defer s2.Close()
+	bulk(t, c2, s2, 4<<20)
+	if !boosted(c2) || boosted(c) {
+		t.Fatalf("after reclaim: new flow boosted=%v, old holder boosted=%v", boosted(c2), boosted(c))
+	}
+	if e := events(); len(e) != 3 || e[2] {
+		t.Fatalf("events after the slot was reclaimed = %v, want [false true false]", e)
+	}
+}
