@@ -123,6 +123,13 @@ func declaredAgentLink(iface string, cur, prev wgtypes.Key, w proto.WGConfig) (w
 	if err != nil || !addr.Addr().Is4() {
 		return wg.AgentConfig{}, false
 	}
+	// checkWG (dataplane_kernel.go) rejects w.Keepalive outside 0-65535 before it ever
+	// reaches a running dataplane, so st.WG here should already be in range; this repeats
+	// the same bound defensively so a tampered or corrupted agent.json cannot make this
+	// read-only diagnostic multiply an out-of-range value into a nonsense Keepalive display.
+	if w.Keepalive < 0 || w.Keepalive > keepaliveMaxSeconds {
+		return wg.AgentConfig{}, false
+	}
 	return wg.AgentConfig{
 		Interface: iface, PrivateKey: cur, PreviousKey: prev, Address: addr, MTU: w.MTU,
 		Server: wg.ServerPeer{PublicKey: serverPub, Address: agentServerAddress(addr),
