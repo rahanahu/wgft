@@ -230,6 +230,7 @@ type tcpConn struct {
 
 	cmu     sync.Mutex // バッファの設定と閉じ始めの短い排他
 	closing bool
+	sndShut bool // CloseWrite で送信の向きを閉じた
 
 	boosted    atomic.Bool
 	acquiring  atomic.Bool  // 読み取りと書き込みが同時に枠を求めないため
@@ -316,7 +317,11 @@ func (c *tcpConn) idleSince(now time.Time) bool {
 // 受信に使っているメモリが受信のバッファ以下のときだけ新しい segment を受け入れることを使って、
 // その後に受信のキューが空であることを求める。送信は、キューに残る byte が floor と直前の
 // floorHist 回の長さの和の小さい方より少ないことを、Write と同じ方法で確かめる。どれかが
-// 成り立たなければ boost の大きさに戻し、枠を持たせたままにする。
+// 成り立たなければ boost の大きさに戻し、枠を持たせたままにする。送信の向きを閉じた保有者は
+// 戻さない。固定版の gVisor の Readiness は、送信を閉じた endpoint を、キューにデータが残って
+// いても書き込める状態と答えるので、送信の確かめが何も示さないためである。そのような保有者は、
+// 返せる状態になるまで枠を持つ。CloseWrite は cmu の中で印を付けてから閉じるので、この確かめの
+// 途中で送信の向きが閉じることはない。
 func (c *tcpConn) demote(now time.Time) bool {
 	if !c.wmu.TryLock() {
 		return false
@@ -324,7 +329,7 @@ func (c *tcpConn) demote(now time.Time) bool {
 	defer c.wmu.Unlock()
 	c.cmu.Lock()
 	defer c.cmu.Unlock()
-	if c.closing || !c.boosted.Load() || !c.idleSince(now) {
+	if c.closing || c.sndShut || !c.boosted.Load() || !c.idleSince(now) {
 		return false
 	}
 	so := c.ep.SocketOptions()
@@ -492,6 +497,8 @@ func (c *tcpConn) Write(b []byte) (int, error) {
 				so.SetSendBufferSize(s, true)
 			}
 		} else {
+			// 送信の向きを閉じた後は Readiness が常に書き込める状態を返し、確かめは何も示さないが、
+			// そのときは続く gVisor の書き込みが失敗してキューに何も入らないので、上限は崩れない
 			so.SetSendBufferSize(x, true)
 			ready := c.ep.Readiness(waiter.WritableEvents)&waiter.WritableEvents != 0
 			if so.GetSendBufferSize() != x {
@@ -537,9 +544,16 @@ func (c *tcpConn) Write(b []byte) (int, error) {
 }
 
 func (c *tcpConn) CloseRead() error     { return c.gc.CloseRead() }
-func (c *tcpConn) CloseWrite() error    { return c.gc.CloseWrite() }
 func (c *tcpConn) LocalAddr() net.Addr  { return c.gc.LocalAddr() }
 func (c *tcpConn) RemoteAddr() net.Addr { return c.gc.RemoteAddr() }
+
+// CloseWrite は送信の向きを閉じる。閉じる前に印を付け、demote が送信の確かめに頼らないようにする。
+func (c *tcpConn) CloseWrite() error {
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	c.sndShut = true
+	return c.gc.CloseWrite()
+}
 
 // markClosing は以後の boost を止め、待っている書き込みを解く。
 func (c *tcpConn) markClosing() {

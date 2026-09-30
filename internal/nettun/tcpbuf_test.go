@@ -567,6 +567,38 @@ func TestTCPNoReclaimQueued(t *testing.T) {
 	}
 }
 
+// 送信の向きを閉じた保有者は floor に戻さない。gVisor は送信を閉じた endpoint を、キューに
+// データが残っていても書き込める状態と答える。戻すと、boost の大きさのデータを持つ接続が
+// floor の扱いになる。netpipe は EOF を CloseWrite で伝えるので、相手が読むのを止めた転送で起こる。
+func TestTCPNoDemoteAfterCloseWrite(t *testing.T) {
+	p := newTCPPair(t, 1)
+	c, s := p.dial(t)
+	defer c.Close()
+	defer s.Close()
+	bulk(t, c, s, 2<<20)
+	if !boosted(c) {
+		t.Fatal("setup: not boosted")
+	}
+	written := fillNonReader(c)
+	if err := c.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(tcpIdleReclaim + 300*time.Millisecond)
+	c2, s2 := p.dial(t)
+	defer c2.Close()
+	defer s2.Close()
+	bulk(t, c2, s2, 4<<20)
+	held := written - recvQueue(s)
+	snd, _ := bufSizes(c)
+	t.Logf("written=%d peer queue=%d held=%d holder boosted=%v snd=%d state=%v new flow boosted=%v", written, recvQueue(s), held, boosted(c), snd, state(c), boosted(c2))
+	if held <= tcpSendFloor {
+		t.Fatalf("setup: holder holds only %d unacknowledged bytes", held)
+	}
+	if !boosted(c) || snd != tcpBoostSize || boosted(c2) {
+		t.Fatalf("half-closed holder with %d unacknowledged bytes demoted: boosted=%v snd=%d, new flow boosted=%v", held, boosted(c), snd, boosted(c2))
+	}
+}
+
 // 書き込みの途中にいる保有者は、需要が無くても floor に戻さない。途中で戻すと、boost を前提に
 // 進む書き込みが、boost を返した接続に boost の大きさの送信のバッファを残す。保有者の書き込みを
 // hook で止めた間に、別の接続が同じ枠の集まりに枠を求める。
