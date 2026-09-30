@@ -140,7 +140,7 @@ func udpRoundTrip(c *net.UDPConn, d time.Duration) bool {
 	return err == nil
 }
 
-// Retiring の直後の新しい送信元: Admit で止めた読み取りのループが、Retiring の後に取得する。
+// Retiring の直後の新しい送信元: Admit で止めた読み取りのループを、Retiring の後に進める。
 func TestUDPRetiringNewSourceMakesNoSession(t *testing.T) {
 	r := newUDPRig(t, 8)
 	r.keeper(t)
@@ -157,8 +157,9 @@ func TestUDPRetiringNewSourceMakesNoSession(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	l := r.listener()
 	lg := checkPool(t, r.pool)
-	// keeper の 1 セッションだけが残る
-	if l.sessions() != 1 || lg.InUse != 1 || r.dials.Load() != 1 || len(r.pool.Refusals()) != 0 || lg.NotAccepting != 1 || r.releases.Load() != 1 {
+	// keeper の 1 セッションだけが残る。止めた読み取りは判定の後の受け付けの印の確認で捨てられ、
+	// フロー予算の枠を取らない(設計文書 7a.3 節)
+	if l.sessions() != 1 || lg.InUse != 1 || r.dials.Load() != 1 || len(r.pool.Refusals()) != 0 || lg.NotAccepting != 0 || r.releases.Load() != 1 {
 		t.Errorf("sessions %d, in use %d, dials %d, refusals %v, not accepting %d, releases %d",
 			l.sessions(), lg.InUse, r.dials.Load(), r.pool.Refusals(), lg.NotAccepting, r.releases.Load())
 	}
