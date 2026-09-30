@@ -20,7 +20,7 @@ import (
 const maxPreAuthConnsPerSource = 16
 
 // sourceLimitListener は、送信元ごとの未認証の接続の数を accept の時点で数え、上限を超えた接続を
-// TLS のハンドシェイクより前に閉じる。上限を超えた接続は accept を待たせずに RST で閉じる。1 つの
+// TLS のハンドシェイクより前に閉じる。上限を超えた接続は accept を待たせずに閉じる。1 つの
 // 送信元が netutil.LimitListener の全体の枠(maxAgentConns)を埋めて、他の送信元の登録と stream の
 // 再接続を止めることを防ぐ。
 type sourceLimitListener struct {
@@ -48,9 +48,6 @@ func (l *sourceLimitListener) Accept() (net.Conn, error) {
 		l.mu.Lock()
 		if l.open[key] >= l.max {
 			l.mu.Unlock()
-			if tc, ok := c.(*net.TCPConn); ok {
-				tc.SetLinger(0)
-			}
 			c.Close()
 			if l.refusedLog.Allow() {
 				log.Printf("agent api: refusing connections from %s: it already holds %d unauthenticated connections", key, l.max)

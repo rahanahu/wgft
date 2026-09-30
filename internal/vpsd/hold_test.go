@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/netip"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -264,6 +265,8 @@ func TestServeStartsWithoutAHoldWhenTheFirstApplyWorks(t *testing.T) {
 	// (design.md 11 節).
 	if d.hub.Authenticated == nil {
 		t.Error("the stream hub does not report authenticated connections to the agent API")
+	} else if got, want := reflect.ValueOf(d.hub.Authenticated).Pointer(), reflect.ValueOf(d.agentAPI.Authenticated).Pointer(); got != want {
+		t.Error("the stream hub reports authenticated connections to a function other than the agent API's Authenticated")
 	}
 	if code, err := adminGet(adminAddr, "/api/v1/rules"); err != nil || code != 200 {
 		t.Errorf("the admin API must answer after an ordinary startup; got %d, %v", code, err)
