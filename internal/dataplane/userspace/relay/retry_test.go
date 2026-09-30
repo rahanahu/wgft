@@ -187,6 +187,11 @@ func TestServeRetriesAfterAFailure(t *testing.T) {
 			if c := strings.Count(logs.String(), failed); c != 1 {
 				t.Errorf("%s logged %d times, want once a minute:\n%s", failed, c, logs)
 			}
+			// l.key already formats as "tcp/<port>" or "udp/<port>"; the log line must not
+			// repeat the protocol as a literal prefix in front of it.
+			if strings.Contains(logs.String(), "tcp %s") || strings.Contains(logs.String(), "udp %s") {
+				t.Errorf("log format doubles the protocol prefix already carried by %%s:\n%s", logs)
+			}
 		})
 	}
 }

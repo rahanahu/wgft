@@ -179,7 +179,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				// されたまま accept しない状態で残り、Apply も Prepare も開いている待ち受けを開き直さない
 				// ので、プロセスを再起動するまでそのポートの中継が止まる(設計文書 6.3、7 節)
 				if acceptLog.Allow() {
-					m.opts.Logf("tcp %s: accept failed: %v; the listener stays open and retries", l.key, err)
+					m.opts.Logf("%s: accept failed: %v; the listener stays open and retries", l.key, err)
 				}
 				delay = nextRetry(delay)
 				select {
@@ -198,7 +198,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 			if !src.IsValid() {
 				abortRefused(c)
 				if peerLog.Allow() {
-					m.opts.Logf("tcp %s: refused a connection whose remote address is unknown; the client likely reset it before it was accepted", l.key)
+					m.opts.Logf("%s: refused a connection whose remote address is unknown; the client likely reset it before it was accepted", l.key)
 				}
 				continue
 			}
@@ -266,7 +266,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				m.noteTargetAllowErr(l, err)
 				if err != nil {
 					if dialLog.Allow() {
-						m.opts.Logf("tcp %s: dial %s: %v", l.key, target, err)
+						m.opts.Logf("%s: dial %s: %v", l.key, target, err)
 					}
 					// 許可一覧による拒否は、上限や接続元の拒否と同じく RST で即座に終える。
 					// 宛先が落ちているなどの失敗は今までどおり通常の close にする

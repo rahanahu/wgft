@@ -276,6 +276,10 @@ func TestTCPConnResetBeforeAcceptIsRefused(t *testing.T) {
 	for _, line := range logs {
 		if strings.Contains(line, "remote address is unknown") {
 			refusedLogged = true
+			// l.key already formats as "tcp/<port>"; the line must not repeat "tcp" in front of it.
+			if strings.Contains(line, "tcp tcp/") {
+				t.Errorf("log line doubles the protocol prefix: %q", line)
+			}
 		}
 	}
 	if !refusedLogged {

@@ -118,7 +118,7 @@ func (m *Manager) forwardReply(s *udpSession, l *listener, sender replySender, o
 	if full {
 		n := m.replyDrops.drops.Add(1)
 		if m.replyDrops.log.Allow() {
-			m.opts.Logf("udp %s: dropped a reply of %d bytes because the send buffer of the public socket is full; %d replies dropped this way since this relay started", l.key, rn, n)
+			m.opts.Logf("%s: dropped a reply of %d bytes because the send buffer of the public socket is full; %d replies dropped this way since this relay started", l.key, rn, n)
 		}
 	}
 	return true
@@ -226,7 +226,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				// (sock_diag の SOCK_DESTROY、ss -K)の ECONNABORTED がこれに当たる。ソケットは
 				// bind したポートを持ったままなので、次の読み取りから元に戻る(設計文書 6.3 節)
 				if readLog.Allow() {
-					m.opts.Logf("udp %s: read failed: %v; the listener stays open and retries", l.key, err)
+					m.opts.Logf("%s: read failed: %v; the listener stays open and retries", l.key, err)
 				}
 				delay = nextRetry(delay)
 				select {
@@ -293,7 +293,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					lease.Release()
 					release()
 					if dialLog.Allow() {
-						m.opts.Logf("udp %s: dial %s: %v", l.key, target, err)
+						m.opts.Logf("%s: dial %s: %v", l.key, target, err)
 					}
 					continue
 				}
@@ -361,7 +361,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 			s.lastSeen.Store(time.Now().UnixNano())
 			if _, err := s.conn.Write(buf[:n]); err != nil {
 				if writeLog.Allow() {
-					m.opts.Logf("udp %s: write %d bytes to %s: %v; closing session", l.key, n, m.targetOf(l), err)
+					m.opts.Logf("%s: write %d bytes to %s: %v; closing session", l.key, n, m.targetOf(l), err)
 				}
 				closeSession(k, s)
 			}
