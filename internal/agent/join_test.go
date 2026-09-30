@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,14 +42,23 @@ func TestParseJoin(t *testing.T) {
 // whole string into u.Host, so an error that quotes u.Host quotes the token
 // (scripts/check-log-tokens.sh forbids a token value in tool output). This must hold for every
 // rejection path, not only the missing-port one, because a caller logs whichever error comes
-// back (cmd/wgft/agent.go's "WGFT_JOIN is malformed" warning).
+// back (cmd/wgft/agent.go's "WGFT_JOIN is malformed" warning), and a malformed or truncated join
+// string can put the token where any of the other fields are expected too, for example by
+// dropping the "/" before it. Each case below puts the token where u.Host ends up, then drives a
+// different rejection path (no-port, port-range, no-token, no-#sha256, bad-hash) past it. Two
+// checks per case: the token substring must be absent from the error text, and the error must be
+// one of ParseJoin's fixed messages (parseJoinErrors), so a rewrite that reintroduces a %q or %s
+// of the input is caught even for a token that happens not to collide with this test's literal.
 func TestParseJoinNeverEchoesTheToken(t *testing.T) {
 	const token = "sekritjointoken1234567890"
+	pin := "sha256:" + strings.Repeat("ab", 32)
 	for _, bad := range []string{
-		"wgft://" + token,
-		"wgft://" + token + "#sha256:" + strings.Repeat("ab", 32),
-		"wgft://vps.example.com:" + token,
-		"wgft://vps.example.com:8443" + token,
+		"wgft://" + token,                       // no port, no path: the no-port path
+		"wgft://" + token + "#" + pin,           // same, with a fragment attached
+		"wgft://" + token + ":8443",             // token as host, no path: the no-token path
+		"wgft://" + token + ":0#" + pin,         // token as host, port 0: the port-range path
+		"wgft://" + token + ":8443/x",           // token as host, no fragment: the no-#sha256 path
+		"wgft://" + token + ":8443/x#sha256:zz", // token as host, bad hex: the bad-hash path
 	} {
 		_, err := ParseJoin(bad)
 		if err == nil {
@@ -57,13 +67,27 @@ func TestParseJoinNeverEchoesTheToken(t *testing.T) {
 		if strings.Contains(err.Error(), token) {
 			t.Errorf("ParseJoin(%q) error %q echoes the token", bad, err.Error())
 		}
+		known := false
+		for _, want := range parseJoinErrors {
+			if errors.Is(err, want) {
+				known = true
+				break
+			}
+		}
+		if !known {
+			t.Errorf("ParseJoin(%q) error %q is not one of ParseJoin's fixed messages", bad, err.Error())
+		}
 	}
 }
 
 // TestParseJoinRejectsBadPorts covers the port values a malformed or truncated join string
-// could carry: no digits at all, zero, and a value past the 16-bit port range. All three used to
-// be accepted because net.SplitHostPort only requires a port field to be present, not that it be
-// a usable TCP port.
+// could carry: no digits at all, zero, and a value past the 16-bit port range. Of these, only the
+// empty port ("", from "host:") and the two in-range-shaped-but-invalid values (0, 70000) used to
+// be accepted, because net.SplitHostPort only requires a port field to be present, not that it be
+// a usable TCP port. "-1" and "not-a-port" were always rejected already, one level up, by
+// url.Parse's own port syntax check (it requires the text after the last ":" to be all decimal
+// digits), so ParseJoin never saw them; they stay in this list as a regression guard on that
+// syntax check's shape, not as cases this change newly rejects.
 func TestParseJoinRejectsBadPorts(t *testing.T) {
 	pin := "#sha256:" + strings.Repeat("ab", 32)
 	for _, port := range []string{"", "0", "70000", "-1", "not-a-port"} {

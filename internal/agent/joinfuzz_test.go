@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net"
 	"net/url"
 	"strconv"
@@ -19,11 +20,14 @@ import (
 // denial of service, and this is the kind of layered string-splitting logic (host:port inside a
 // URL, a hex-encoded pin inside a fragment) that is easy to get subtly wrong at the edges.
 //
-// The property: ParseJoin never panics, and on success its result is internally consistent --
-// Endpoint really is host:port shaped, Token is non-empty and holds no slash (the code path that
-// rejects a Path containing an extra "/" must actually have rejected it), Pin is the exact 32
-// bytes the connect string's own #sha256:HASH fragment decodes to (recomputed independently of
-// ParseJoin), and TokenHash is the actual sha256 of Token, not merely a string of the right shape.
+// The property: ParseJoin never panics; on failure the error is one of the fixed values in
+// parseJoinErrors, never a message built from s (join.go's doc comment on that var explains why
+// this must hold for every rejection path, not only the ones join_test.go names explicitly); and
+// on success its result is internally consistent -- Endpoint really is host:port shaped with a
+// port from 1 to 65535, Token is non-empty and holds no slash (the code path that rejects a Path
+// containing an extra "/" must actually have rejected it), Pin is the exact 32 bytes the connect
+// string's own #sha256:HASH fragment decodes to (recomputed independently of ParseJoin), and
+// TokenHash is the actual sha256 of Token, not merely a string of the right shape.
 func FuzzParseJoin(f *testing.F) {
 	f.Add("wgft://vps.example.com:8443/abcDEF-123#sha256:" + strings.Repeat("ab", 32))
 	f.Add("https://vps.example.com:8443/tok#sha256:" + strings.Repeat("ab", 32))
@@ -47,6 +51,16 @@ func FuzzParseJoin(f *testing.F) {
 	f.Fuzz(func(t *testing.T, s string) {
 		j, err := ParseJoin(s)
 		if err != nil {
+			known := false
+			for _, want := range parseJoinErrors {
+				if errors.Is(err, want) {
+					known = true
+					break
+				}
+			}
+			if !known {
+				t.Fatalf("ParseJoin(%q) error %q is not one of ParseJoin's fixed messages", s, err.Error())
+			}
 			return
 		}
 		_, port, err := net.SplitHostPort(j.Endpoint)
