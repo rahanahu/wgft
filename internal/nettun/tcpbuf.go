@@ -13,11 +13,14 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"reflect"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
+	"gvisor.dev/gvisor/pkg/atomicbitops"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
@@ -71,6 +74,46 @@ type boostPool struct {
 
 	// writeHook は、試験が書き込みの途中で止めるためのもの。製品では nil。
 	writeHook func(*tcpConn)
+	// recvMemHook は、試験が受信のメモリの読み取りを差し替えるためのもの。製品では nil。
+	recvMemHook func(tcpip.Endpoint) (int, bool)
+}
+
+// recvMem は、gVisor の TCP endpoint が受信の segment に使っているメモリ(非公開の rcvMemUsed)の
+// 位置である。gVisor はこの値を公開しない。回収で受信のバッファを縮めてよいかを決めるのに要る
+// (demote を見よ)。名前と型は go.mod の固定の版のもので、起動時に endpoint の型から確かめる。
+// 合わなければ ok は偽で、回収をしない。読むだけで書かない。
+var recvMem = lookupRecvMem(reflect.TypeFor[tcp.Endpoint]())
+
+type recvMemLayout struct {
+	off uintptr
+	ok  bool
+}
+
+// lookupRecvMem は、型 t の直下に atomicbitops.Int32 の rcvMemUsed があればその位置を返す。
+func lookupRecvMem(t reflect.Type) recvMemLayout {
+	f, ok := t.FieldByName("rcvMemUsed")
+	if !ok || len(f.Index) != 1 || f.Type != reflect.TypeFor[atomicbitops.Int32]() {
+		return recvMemLayout{}
+	}
+	return recvMemLayout{off: f.Offset, ok: true}
+}
+
+var recvMemWarn sync.Once
+
+// receiveMemUsed は ep の rcvMemUsed を原子的に読む。gVisor はこの値を atomicbitops.Int32 の
+// Load と Add だけで読み書きし、錠を使わないので、同じ Load で競合なく読める。
+func (p *boostPool) receiveMemUsed(ep tcpip.Endpoint) (int, bool) {
+	if h := p.recvMemHook; h != nil {
+		return h(ep)
+	}
+	e, ok := ep.(*tcp.Endpoint)
+	if !ok || !recvMem.ok {
+		recvMemWarn.Do(func() {
+			logf("tcp buffers: the gVisor endpoint does not have the layout this build expects, so idle boost holders are not reclaimed")
+		})
+		return 0, false
+	}
+	return int((*atomicbitops.Int32)(unsafe.Add(unsafe.Pointer(e), recvMem.off)).Load()), true
 }
 
 func newBoostPool(q int) *boostPool {
@@ -313,11 +356,18 @@ func (c *tcpConn) idleSince(now time.Time) bool {
 // demote は需要の無い保有者を floor に戻せたかを返す。待たない。書き込みが実行中なら(wmu を
 // 持っていれば)戻さない。書き込みは確かめと gVisor への書き込みの間に送信のバッファを設定するので、
 // 並行して floor に戻すと、boost を返した接続に boost の大きさの送信のバッファが残りうる。
-// wmu を持つ間は新しい書き込みがキューに入らない。受信は先にバッファを floor に縮め、gVisor が
-// 受信に使っているメモリが受信のバッファ以下のときだけ新しい segment を受け入れることを使って、
-// その後に受信のキューが空であることを求める。送信は、キューに残る byte が floor と直前の
+// wmu を持つ間は新しい書き込みがキューに入らない。受信は先にバッファを floor に縮め、その後に
+// 受信のメモリが floor 以下であることを求める(下の段落)。送信は、キューに残る byte が floor と直前の
 // floorHist 回の長さの和の小さい方より少ないことを、Write と同じ方法で確かめる。どれかが
-// 成り立たなければ boost の大きさに戻し、枠を持たせたままにする。送信の向きを閉じた保有者は
+// 成り立たなければ boost の大きさに戻し、枠を持たせたままにする。
+//
+// 受信は、縮めた後に endpoint の受信のメモリ(順序外の segment と処理待ちの segment を含む)が
+// floor 以下であることも求める。gVisor は、データのある segment を受信のメモリが受信のバッファ
+// 以下のときだけ受け入れる(segment_queue.go の enqueue)。順序外が floor を超えたまま縮めると、
+// 穴を埋める再送も受け入れず、接続が止まる。floor 以下なら、縮めた後に積める順序外は
+// 「PendingBufUsed + 長さ < floor の 3/4」の分だけで(rcv.go)、処理待ちの segment が処理されれば
+// 受信のメモリは floor 以下に戻り、穴を埋める segment は大きさによらず受け入れられる。
+// 受信のメモリを読めないときは回収しない。送信の向きを閉じた保有者は
 // 戻さない。固定版の gVisor の Readiness は、送信を閉じた endpoint を、キューにデータが残って
 // いても書き込める状態と答えるので、送信の確かめが何も示さないためである。そのような保有者は、
 // 返せる状態になるまで枠を持つ。CloseWrite は cmu の中で印を付けてから閉じるので、この確かめの
@@ -334,7 +384,9 @@ func (c *tcpConn) demote(now time.Time) bool {
 	}
 	so := c.ep.SocketOptions()
 	so.SetReceiveBufferSize(tcpRecvFloor, true)
-	if n, err := c.ep.GetSockOptInt(tcpip.ReceiveQueueSizeOption); err != nil || n != 0 {
+	// 縮めた後に読む。縮める前に読むと、その間に古い大きさで受け入れた segment を見落とす。
+	// このメモリは受信のキューの byte も含む
+	if m, ok := c.pool.receiveMemUsed(c.ep); !ok || m > tcpRecvFloor {
 		so.SetReceiveBufferSize(tcpBoostSize, true)
 		return false
 	}

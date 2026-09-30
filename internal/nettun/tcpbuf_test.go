@@ -33,39 +33,51 @@ func newTCPPair(t *testing.T, q int) *tcpPair {
 	return newTCPPairOpts(t, q, nil, nil)
 }
 
-// newTCPPairOpts は、a の書き込みの hook と、2 つの Device の間を渡る packet を見る inspect を付ける。
-func newTCPPairOpts(t *testing.T, q int, hookA func(*tcpConn), inspect func([]byte)) *tcpPair {
+// newTCPPairOpts は、a の書き込みの hook と、2 つの Device の間を渡る packet を捨てるかを決める drop を付ける。
+func newTCPPairOpts(t *testing.T, q int, hookA func(*tcpConn), drop func([]byte) bool) *tcpPair {
+	return newTCPPairMTU(t, q, 1420, hookA, drop)
+}
+
+// tcpPairAddr は n 番目の組のアドレス。1 つの試験のプロセスで 255 組を超えても正しい IPv4 になる。
+func tcpPairAddr(n int32, host byte) netip.Addr {
+	return netip.AddrFrom4([4]byte{10, byte(100 + n/256), byte(n % 256), host})
+}
+
+func newTCPPairMTU(t *testing.T, q, mtu int, hookA func(*tcpConn), drop func([]byte) bool) *tcpPair {
 	t.Helper()
 	n := tcpPairN.Add(1)
-	a, err := Create(netip.MustParseAddr(fmt.Sprintf("10.97.%d.1", n)), 1420)
+	if n >= 150*256 {
+		t.Fatal("too many pairs in one test process")
+	}
+	a, err := Create(tcpPairAddr(n, 1), mtu)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Create(netip.MustParseAddr(fmt.Sprintf("10.97.%d.2", n)), 1420)
+	b, err := Create(tcpPairAddr(n, 2), mtu)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.pool, b.pool = newBoostPool(q), newBoostPool(q)
 	a.pool.writeHook = hookA
 	var wg sync.WaitGroup
-	fwd := func(from, to *Device) {
+	fwd := func(from, to *Device, drop func([]byte) bool) {
 		defer wg.Done()
-		buf := make([]byte, 1500)
+		buf := make([]byte, mtu+100)
 		sizes := []int{0}
 		for {
 			n, err := from.Read([][]byte{buf}, sizes, 0)
 			if err != nil || n != 1 {
 				return
 			}
-			if inspect != nil {
-				inspect(buf[:sizes[0]])
+			if drop != nil && drop(buf[:sizes[0]]) {
+				continue
 			}
 			to.Write([][]byte{buf[:sizes[0]]}, 0)
 		}
 	}
 	wg.Add(2)
-	go fwd(a, b)
-	go fwd(b, a)
+	go fwd(a, b, drop)
+	go fwd(b, a, drop)
 	ln, err := b.ListenTCP(netip.AddrPortFrom(b.local, 9000))
 	if err != nil {
 		t.Fatal(err)
@@ -236,10 +248,10 @@ func TestTCPFloorAfterHandshake(t *testing.T) {
 func TestTCPHandshakeScaleFromBoost(t *testing.T) {
 	var mu sync.Mutex
 	scales := map[bool]int{} // SYN-ACK か
-	p := newTCPPairOpts(t, 1, nil, func(pkt []byte) {
+	p := newTCPPairOpts(t, 1, nil, func(pkt []byte) bool {
 		ip := header.IPv4(pkt)
 		if !ip.IsValid(len(pkt)) || ip.TransportProtocol() != header.TCPProtocolNumber {
-			return
+			return false
 		}
 		th := header.TCP(ip.Payload())
 		if f := th.Flags(); f.Contains(header.TCPFlagSyn) {
@@ -248,6 +260,7 @@ func TestTCPHandshakeScaleFromBoost(t *testing.T) {
 			scales[isAck] = header.ParseSynOptions(th.Options(), isAck).WS
 			mu.Unlock()
 		}
+		return false
 	})
 	c, s := p.dial(t)
 	defer c.Close()
