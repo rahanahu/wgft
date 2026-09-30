@@ -2832,7 +2832,13 @@ print(by.get('$1', {}).get('detail', ''))
   # The disable cut A's live session on the agent as well. The agent aborts the netstack side of
   # such a session (design 7), so A's port is free at once and its listener opens again on the
   # enable, without a bind failure and a 30-second retry.
-  must_wait "check11: A forwards again" 15 tcp_probe_ok 39970
+  # A gets 45s, not 15s: in userspace mode home's tunnel may still be down from the restart.
+  # After a server restart, an idle userspace agent re-handshakes only once its in-tunnel ping
+  # (every keepalive, 25s) has gone unanswered for WireGuard's 15s, so recovery takes 15 to 40s
+  # (design 7, 7b.1). A 15s wait passed only because home answered the FIN of the cut just
+  # before the restart, and that answer started WireGuard's 15s timer; the cut now sends a RST,
+  # which gets no answer. Once A forwards, the tunnel is up, so the waits below keep 15s.
+  must_wait "check11: A forwards again" 45 tcp_probe_ok 39970
   absent "the agent reopens A's listener without a bind failure" "listener tcp/39970: bind" "$(grep 'listener tcp/39970' $W/wgft-lifecycle-c11-home.log)"
   must_wait "check11: C forwards again" 15 udp_probe_ok 27002
   must_wait "check11: P forwards again" 15 tcp_probe_ok 39972

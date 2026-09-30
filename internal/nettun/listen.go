@@ -86,10 +86,10 @@ func (l *TCPListener) Addr() net.Addr {
 	return &net.TCPAddr{IP: net.IP(a.Addr.AsSlice()), Port: int(a.Port)}
 }
 
-// TCPConn は *gonet.TCPConn に、accept した tcpip.Endpoint へのアクセスを足したもの。これにより、
-// 拒む接続をグレースフルクローズ(FIN の後、既定で 60 秒の tcp.DefaultTCPTimeWaitTimeout の
-// TIME_WAIT)ではなく Abort(RST)で終えられる。relay パッケージでの Abort の使用と、
-// GitHub issue #25、仕様 7 節を見よ。
+// TCPConn は *gonet.TCPConn に、その tcpip.Endpoint へのアクセスを足したもの。ListenTCP の Accept と
+// DialTCP が返す。これにより、拒む接続と中継が切る接続をグレースフルクローズ(FIN の後、既定で 60 秒の
+// tcp.DefaultTCPTimeWaitTimeout の TIME_WAIT)ではなく Abort(RST)で終えられる。relay パッケージでの
+// Abort の使用と、GitHub issue #25、仕様 6.2 節と 7 節を見よ。
 type TCPConn struct {
 	*gonet.TCPConn
 	ep tcpip.Endpoint

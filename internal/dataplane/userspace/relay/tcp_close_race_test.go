@@ -77,9 +77,9 @@ func halfOpenEcho(t *testing.T) (addr string, received *atomic.Int64) {
 
 // TCP の待ち受けが accept した接続の宛先への dial の最中に、待ち受けを閉じても、宛先への接続は
 // 残らない。公開側の接続は accept のループが done を確かめて登録するので closeF が切るが、宛先への
-// 接続は dial の後に登録する。closeF の後に登録すると誰にも切られず、netpipe は公開側の読み取りの
-// 失敗で宛先へ FIN を送った後、宛先からの読み取りを続ける。FIN を受けても自分の側を閉じない宛先では、
-// フローの予算の枠、送信元ごとの枠、宛先への接続、中継の goroutine が残り続ける。
+// 接続は dial の後に登録する。closeF の後に登録すると closeF には切られない。接続の goroutine は
+// 登録せずに宛先への接続を切り、フローの予算の枠、送信元ごとの枠、宛先への接続、中継の goroutine を
+// 残さない。
 //
 // 試験は宛先への dial(Options.Dial)で接続の goroutine を止め、その間に待ち受けを閉じてから
 // 再開する。Retiring にする操作(stopAccept)も done を閉じるが、成立済みの接続を残す(設計文書

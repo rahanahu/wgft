@@ -25,10 +25,26 @@ func (c *closeTracked) Close() error {
 	return c.TCPConn.Close()
 }
 
+// abortOnly stands for a server in userspace mode, whose connection to the agent is a netstack
+// conn (*nettun.TCPConn): it has Abort, which sends a reset, and no SetLinger. Abort here resets
+// the underlying loopback socket, so the fake agent sees what an agent sees after a netstack Abort.
+type abortOnly struct {
+	net.Conn // the *closeTracked, without its SetLinger
+	tc       *net.TCPConn
+	aborted  atomic.Bool
+}
+
+func (c *abortOnly) Abort() {
+	c.aborted.Store(true)
+	c.tc.SetLinger(0)
+	c.Conn.Close()
+}
+
 // halfOpenAgent echoes what it reads and never closes its side, not even after reading the
-// relay's FIN. A relay that cuts only the public side of a connection keeps the upstream
-// connection to such an agent until the test cleans up.
-func halfOpenAgent(t *testing.T) string {
+// relay's FIN, like an agent whose relay half-closes toward a target that stays open. The error
+// that ends each read loop goes to ends, if there is room: a reset, not EOF, is what makes the
+// agent's relay end the session.
+func halfOpenAgent(t *testing.T, ends chan<- error) string {
 	t.Helper()
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -63,6 +79,10 @@ func halfOpenAgent(t *testing.T) string {
 						c.Write(b[:n])
 					}
 					if err != nil {
+						select {
+						case ends <- err:
+						default:
+						}
 						return // never closes
 					}
 				}
@@ -86,19 +106,26 @@ type cutRig struct {
 	addrs    map[uint16]string // public port -> loopback listener
 	agents   map[string]string // agent address:port -> fake agent
 	ups      []*closeTracked
+	// abortable makes each upstream an abortOnly; aborts holds them
+	abortable bool
+	aborts    []*abortOnly
+	// agentEnds receives the error that ended an agent-side connection's reads
+	agentEnds chan error
 }
 
 func newCutRig(t *testing.T, busy map[uint16]bool) *cutRig {
 	t.Helper()
+	ends := make(chan error, 8)
 	r := &cutRig{
 		pool:    resource.NewPool(8),
 		addrs:   map[uint16]string{},
 		entered: make(chan struct{}),
 		proceed: make(chan struct{}),
 		agents: map[string]string{
-			"10.200.0.2:8443": halfOpenAgent(t),
-			"10.200.0.3:8443": halfOpenAgent(t),
+			"10.200.0.2:8443": halfOpenAgent(t, ends),
+			"10.200.0.3:8443": halfOpenAgent(t, ends),
 		},
+		agentEnds: ends,
 	}
 	t.Cleanup(func() {
 		r.resume()
@@ -138,8 +165,13 @@ func newCutRig(t *testing.T, busy map[uint16]bool) *cutRig {
 			}
 			tracked := &closeTracked{TCPConn: c.(*net.TCPConn)}
 			r.mu.Lock()
+			defer r.mu.Unlock()
 			r.ups = append(r.ups, tracked)
-			r.mu.Unlock()
+			if r.abortable {
+				a := &abortOnly{Conn: tracked, tc: tracked.TCPConn}
+				r.aborts = append(r.aborts, a)
+				return a, nil
+			}
 			return tracked, nil
 		},
 		Logf: testLogf(t),
@@ -243,6 +275,16 @@ func (r *cutRig) waitCut(t *testing.T, client net.Conn) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	// The agent sees a reset, not EOF. Its relay treats EOF as a half-close and keeps its
+	// target connection and slots while the target stays open (design.md 6.2 節).
+	select {
+	case err := <-r.agentEnds:
+		if !isReset(err) {
+			t.Errorf("the agent side of the cut connection ended with %v, want a reset", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the agent side of the cut connection is still open")
+	}
 	// the cleanup runs once: wait a little and check that no slot was returned twice
 	time.Sleep(50 * time.Millisecond)
 	if got := r.releases.Load(); got != 1 {
@@ -254,11 +296,11 @@ func (r *cutRig) waitCut(t *testing.T, client net.Conn) {
 }
 
 // Every operation that cuts a relayed connection closes both its public connection and its
-// upstream connection to the agent (design.md 6.2 節「進行中の中継を閉じる契機」, 7a.3 節 Retire).
-// Closing only the public side makes netpipe send FIN upstream and keep reading from the agent, so
-// an agent that never closes after EOF keeps the upstream connection, the budget slot and the
-// per-source slot until it closes. A connection that is still dialling when its listener closes
-// or its target changes is not tracked yet; it closes both sides when it finds that out.
+// upstream connection to the agent (design.md 6.2 節「進行中の中継を閉じる契機」, 7a.3 節 Retire),
+// and the upstream with a reset. A FIN would reach the agent's relay as a half-close, and the agent
+// would keep its target connection and slots while the target stays open. A connection that is
+// still dialling when its listener closes or its target changes is not tracked yet; it closes both
+// sides when it finds that out.
 func TestCutClosesUpstream(t *testing.T) {
 	const port = 8443
 	home := agentRule("r", port, "home", "10.200.0.2", nil)
@@ -351,5 +393,39 @@ func TestRetiringKeepsAdmittedUpstream(t *testing.T) {
 	}
 	if got := r.pool.InUse(); got != 1 {
 		t.Errorf("pool in use = %d, want 1", got)
+	}
+}
+
+// In userspace mode the server reaches the agent through the netstack, so the upstream is a
+// *nettun.TCPConn: it has Abort and no SetLinger. The cut must use Abort, or the agent sees a FIN
+// and keeps its target connection and slots while the target stays open (design.md 6.2 節).
+func TestCutAbortsANetstackUpstream(t *testing.T) {
+	const port = 8443
+	home := agentRule("r", port, "home", "10.200.0.2", nil)
+	for _, tc := range []struct {
+		name    string
+		dialing bool
+		cut     func(r *cutRig)
+	}{
+		{"rule removed", false, func(r *cutRig) { r.m.Apply(nil) }},
+		{"rule removed while dialing", true, func(r *cutRig) { r.m.Apply(nil) }},
+		{"source restriction", false, func(r *cutRig) {
+			r.m.Apply([]Rule{agentRule("r", port, "home", "10.200.0.2", []string{"127.0.0.1/32"})})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newCutRig(t, nil)
+			r.abortable = true
+			r.m.Apply([]Rule{home})
+			client := r.connect(t, port, tc.dialing)
+			tc.cut(r)
+			r.resume()
+			r.waitCut(t, client)
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if len(r.aborts) != 1 || !r.aborts[0].aborted.Load() {
+				t.Error("the relay did not Abort its netstack upstream")
+			}
+		})
 	}
 }

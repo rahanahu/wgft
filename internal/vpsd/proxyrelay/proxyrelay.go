@@ -108,17 +108,33 @@ type listener struct {
 }
 
 // relayed は進行中の中継 1 本の記録で、公開側の接続を鍵にして conns に置く。中継を切るときは、
-// エージェントへの接続 up も閉じる。公開側だけを閉じると、netpipe はエージェントへ FIN を送った後も
-// エージェントからの読み取りを続けるので、FIN を受けても閉じない相手では up と枠が残り続ける。
+// エージェントへの接続 up も cut で RST で切る。公開側だけを閉じると、netpipe はその読み取りの失敗を
+// 受けて up を通常の Close で閉じるので、エージェントには RST ではなく FIN が届く。
 type relayed struct {
 	src string // 接続元 IP の文字列
 	up  net.Conn
 }
 
-// cut は中継の両側を閉じる。
+// cut は中継の両側を閉じる。エージェントへの接続 up は RST で切る(仕様 6.2 節)。FIN で閉じると、
+// エージェントの中継はそれをハーフクローズとして扱い、宛先へ FIN を送った後も宛先からの読み取りを
+// 続けるので、FIN を受けても閉じない宛先では、エージェント側の宛先への接続と枠が残り続ける。
+// up を先に切る。公開側を先に閉じると、netpipe がその読み取りの失敗を受けて up を通常の Close で
+// 閉じ、RST の前に FIN が出ることがあるため
 func (r relayed) cut(c net.Conn) {
+	abortUpstream(r.up)
 	c.Close()
-	r.up.Close()
+}
+
+// abortUpstream はエージェントへの接続を RST で閉じる。ユーザー空間モードの接続は netstack の
+// 接続(nettun.TCPConn)で Abort を持ち、カーネルモードの接続は実ソケットで SetLinger(0) を使う。
+func abortUpstream(up net.Conn) {
+	switch v := up.(type) {
+	case interface{ Abort() }:
+		v.Abort()
+	case interface{ SetLinger(int) error }:
+		v.SetLinger(0)
+	}
+	up.Close()
 }
 
 // abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う
