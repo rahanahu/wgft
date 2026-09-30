@@ -837,7 +837,7 @@ func agentSessionsCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
 	for _, b := range st.Budgets {
 		part := fmt.Sprintf("%s budget %d, %d in use, %d rule%s admitted", b.Proto, b.Total, b.InUse, b.Rules, pluralS(b.Rules))
 		if b.Rules > 1 {
-			part += fmt.Sprintf(", cap %d per rule, reserve %d", b.RuleCap, b.Reserve)
+			part += fmt.Sprintf(", cap %d per rule, minimum %d", b.RuleCap, b.Reserve)
 		}
 		parts = append(parts, part)
 	}
@@ -896,7 +896,8 @@ func agentRefusalsCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.Doct
 		c.Detail = fmt.Sprintf("%d flow%s refused %s: %s", total, pluralS(int(total)), start, strings.Join(lines, "; "))
 	}
 	c.Next = "the count starts again at zero whenever the tunnel is rebuilt, so read it against the time above. " +
-		"budget means the whole process was full, rule_cap means that one rule hit its share, reserve means the room left was held for other rules"
+		"budget means the whole process was full, rule_cap means that one rule hit its share, reserve means the room left was held for the unfilled minimums of rules, " +
+		"floor means a rule below its minimum left the room to the first flows of other rules and the spare, spare means the room left was kept for a rule added later"
 }
 
 // agentNoRelay は、中継がまだ無い実行の扱いを当てる。中継はトンネルと一緒に作られるので、

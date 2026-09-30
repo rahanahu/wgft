@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rahanahu/wgft/internal/lograte"
+	"github.com/rahanahu/wgft/internal/resource"
 )
 
 const udpBufMax = 65535
@@ -264,14 +265,24 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					continue
 				}
 				// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の
-				// 上限、他のルールの隔離予約を Pool が 1 つの排他の中で判定する。拒んだ新規パケットは
+				// 上限、ルールの登録ごとの最低分と予備を Pool が 1 つの排他の中で判定する。拒んだ新規パケットは
 				// 捨てる(既存セッションは追い出さない)
-				if ref, ok := l.budget.Acquire(); !ok {
+				lease, ref, outcome := l.budget.Take()
+				switch outcome {
+				case resource.NotAccepting:
+					// 受け付けの印を見た後に、この待ち受けが Retiring になったか閉じられた。データグラムを
+					// 捨て、拒否の数にもログにも入れない(設計文書 7a.10 節)
+					release()
+					continue
+				case resource.Refused:
 					release()
 					if capLog.Allow() {
 						m.opts.Logf("%s: %s; dropping new flows", l.key, ref)
 					}
 					continue
+				}
+				if h := m.testHookAfterTake; h != nil {
+					h(l)
 				}
 				// target のホスト名はセッション確立時に解決する(DNS の変更は新規セッションだけに効く)。
 				// 許可一覧があれば、解決したアドレスで判定し、一覧の外ならデータグラムを捨てる(設計文書 7 節)
@@ -279,7 +290,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				c, err := m.dialTarget("udp", target)
 				m.noteTargetAllowErr(l, err)
 				if err != nil {
-					l.budget.Release()
+					lease.Release()
 					release()
 					if dialLog.Allow() {
 						m.opts.Logf("udp %s: dial %s: %v", l.key, target, err)
@@ -311,7 +322,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				if stopped {
 					mu.Unlock()
 					s.close()
-					l.budget.Release()
+					lease.Release()
 					release()
 					continue
 				}
@@ -319,7 +330,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				mu.Unlock()
 				go func(k string, s *udpSession, from net.Addr) {
 					defer release()
-					defer l.budget.Release()
+					defer lease.Release()
 					defer closeSession(k, s)
 					// 応答は、届いてから応答のバッファの枠を取り、プールのバッファを借りて読む(仕様 7 節)。
 					// 待つ間はバッファを持たない。待てない接続(unix でも windows でもないカーネルのソケット)は、

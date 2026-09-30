@@ -67,14 +67,14 @@ func TestResourceStatusUserspaceModeHasBothPools(t *testing.T) {
 	// past both the cap and the reserve to exercise every reason (design.md 7a.10 節).
 	lFlood := tcpPool.Listener("r_flood")
 	lOther := tcpPool.Listener("r_other")
-	if _, ok := lOther.Acquire(); !ok {
+	if _, _, o := lOther.Take(); o != resource.Granted {
 		t.Fatal("r_other's first flow must be admitted")
 	}
 	for i := 0; i < 2048; i++ {
-		lFlood.Acquire() // fills the rule cap, then the reserve, then the whole budget
+		lFlood.Take() // fills r_flood's share up to the others' minimum and the spare
 	}
-	refusal, ok := lFlood.Acquire()
-	if ok {
+	_, refusal, o := lFlood.Take()
+	if o == resource.Granted {
 		t.Fatal("r_flood must be refused once the budget and its cap are exhausted")
 	}
 	if refusal.Reason == "" {

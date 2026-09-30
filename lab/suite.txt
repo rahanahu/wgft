@@ -33,7 +33,8 @@
 # The check 5 family floods thousands of connections and datagrams. 5, 5b and 5e read RSS under that
 # load and run alone. 5c and 5d assert on an admission decision instead, and 20 repetitions of each
 # in a pool of eight sandboxes, overlapping each other, passed with identical held counts, so they
-# run in the pool.
+# run in the pool. 5f and 5g also assert on admission decisions, with exact held counts, but have not
+# been repeated in the pool, so they run alone.
 #
 # Order: `labhost run all` hands the parallel jobs to its pool in the order of this file, and runs
 # the exclusive jobs one at a time, in the order of this file, once the pool is empty. The parallel
@@ -125,6 +126,8 @@ parallel         yes  lifecycle.sh kernel 10
 parallel         yes  lifecycle.sh userspace 6
 parallel         yes  lifecycle.sh kernel 5c
 parallel         yes  lifecycle.sh kernel 5d
+parallel         yes  lifecycle.sh kernel 5f
+parallel         yes  lifecycle.sh kernel 5g
 parallel         yes  lifecycle.sh userspace 3
 parallel         yes  lifecycle.sh userspace 3b
 parallel         yes  lifecycle.sh userspace 4
@@ -137,6 +140,8 @@ exclusive-heavy  yes  lifecycle.sh kernel 5e
 exclusive-heavy  yes  lifecycle.sh userspace 5
 exclusive-heavy  yes  lifecycle.sh userspace 5b
 exclusive-heavy  yes  lifecycle.sh userspace 5e
+exclusive-heavy  yes  lifecycle.sh userspace 5f
+exclusive-heavy  yes  lifecycle.sh userspace 5g
 exclusive-global yes  lifecycle.sh kernel 12
 exclusive-global yes  lifecycle.sh userspace 12
 exclusive-heavy  yes  rates.sh kernel

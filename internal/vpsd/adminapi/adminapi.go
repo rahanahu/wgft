@@ -167,7 +167,7 @@ type Drift struct {
 }
 
 // FlowBudget is Resource Guard's process-wide flow budget for one protocol (design.md 7a.10 節
-// 「共有プールと隔離予約」).
+// 「共有プール、最低分と予備」).
 type FlowBudget struct {
 	// InUse is u, the number of flows the process currently holds for this protocol, across every
 	// rule.

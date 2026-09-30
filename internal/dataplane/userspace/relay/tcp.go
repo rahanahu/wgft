@@ -9,6 +9,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/netpipe"
+	"github.com/rahanahu/wgft/internal/resource"
 )
 
 // aborter は、通常の Close(グレースフルクローズ。FIN の後 TIME_WAIT)の代わりに、
@@ -212,9 +213,17 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				release = rel
 			}
 			// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の上限、
-			// 他のルールの隔離予約を Pool が 1 つの排他の中で判定する。拒んだ接続はすぐ閉じる
+			// ルールの登録ごとの最低分と予備を Pool が 1 つの排他の中で判定する。拒んだ接続はすぐ閉じる
 			// (既存の接続は追い出さない)
-			if ref, ok := l.budget.Acquire(); !ok {
+			lease, ref, outcome := l.budget.Take()
+			switch outcome {
+			case resource.NotAccepting:
+				// ruleOf を済ませた後に、この待ち受けが閉じられたか Retiring になった。予算の拒否ではない
+				// ので、拒否の数にもログにも入れない(設計文書 7a.10 節)
+				release()
+				abortRefused(c)
+				continue
+			case resource.Refused:
 				release()
 				abortRefused(c)
 				if capLog.Allow() {
@@ -222,17 +231,22 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				}
 				continue
 			}
-			// accept から登録までの間に closeF が走っていれば(Apply が m.mu を持つ間、上の ruleOf が
-			// 待たされる)、closeF はこの接続を見ていない。登録せずにここで切り、ポートを保持させない。
+			if h := m.testHookAfterTake; h != nil {
+				h(l)
+			}
+			// accept から登録までの間に closeF が走っていれば、closeF はこの接続を見ていない。ruleOf を
+			// 済ませた worker の取得は Pool の排他だけを取るので、Apply や Commit の途中にも入る。
+			// 登録せずにここで切り、ポートを保持させない。
 			// closeF は mu を取る前に done を閉じるので、done が閉じていなければ closeF はこの後に mu を
 			// 取り、登録した接続を切る
 			mu.Lock()
 			select {
 			case <-done:
 				mu.Unlock()
-				l.budget.Release()
+				lease.Release()
 				release()
-				cutConn(c)
+				// まだ宛先へ dial しておらずデータもやり取りしていないので、7a.5 節の拒否と同じく RST にする
+				abortRefused(c)
 				continue
 			default:
 			}
@@ -244,7 +258,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					mu.Lock()
 					delete(conns, c)
 					mu.Unlock()
-					l.budget.Release()
+					lease.Release()
 					release()
 				}()
 				target := m.targetOf(l)

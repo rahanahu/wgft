@@ -550,7 +550,7 @@ func testLogf(t *testing.T) func(string, ...any) {
 // 済んだ待ち受けにだけ付け、中継を始める前に付ける(設計文書 7a.10 節)。
 func TestOnlyBoundListenersJoinTheAcceptingRules(t *testing.T) {
 	busy := map[uint16]bool{9443: true}
-	pool := resource.NewPool(10) // ルールが 1 本なら 10、2 本ならルール 1 本は ceil(10/2) = 5
+	pool := resource.NewPool(10) // ルールが 1 本なら予備を除いた 6、最低分はどちらでも下限の 4
 	m := New(Options{
 		Listen: func(port uint16) (net.Listener, error) {
 			if busy[port] {
@@ -567,18 +567,21 @@ func TestOnlyBoundListenersJoinTheAcceptingRules(t *testing.T) {
 	if got := pool.Rules(); got != 1 {
 		t.Fatalf("accepting rules = %d, want 1 (the busy port's rule must stay out)", got)
 	}
-	if got := pool.Reserve(); got != 0 {
-		t.Errorf("reserve = %d, want 0 (only one rule accepts)", got)
+	if got := pool.Reserve(); got != resource.FlowFloor {
+		t.Errorf("minimum = %d, want 4: only one rule accepts", got)
 	}
 	// 開けたルールは予算のすべてを使える。ここで拒まれるなら、開けなかったルールが A に入っている
 	probe := pool.Listener("ok")
-	for i := range 10 {
-		if ref, admitted := probe.Acquire(); !admitted {
+	var held []*resource.Lease
+	for i := range 6 {
+		x, ref, o := probe.Take()
+		if o != resource.Granted {
 			t.Fatalf("flow %d of the budget was refused with %q", i+1, ref.Reason)
 		}
+		held = append(held, x)
 	}
-	for range 10 {
-		probe.Release()
+	for _, x := range held {
+		x.Release()
 	}
 	// ポートが空いて開けた時点で、そのルールが A に入る
 	delete(busy, 9443)
@@ -586,7 +589,7 @@ func TestOnlyBoundListenersJoinTheAcceptingRules(t *testing.T) {
 	if got := pool.Rules(); got != 2 {
 		t.Errorf("accepting rules after the port was freed = %d, want 2", got)
 	}
-	if got := pool.Reserve(); got != 5 {
-		t.Errorf("reserve with two rules = %d, want 5", got)
+	if got := pool.Reserve(); got != resource.FlowFloor {
+		t.Errorf("minimum with two rules = %d, want 4", got)
 	}
 }

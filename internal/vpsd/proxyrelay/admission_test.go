@@ -211,7 +211,8 @@ func TestAdmissionStopBlocksSamePortReplacement(t *testing.T) {
 }
 
 func admissionState(pool *resource.Pool) *listener {
-	return &listener{rule: admissionRule("a", 1), ln: newAdmissionListener(), conns: map[net.Conn]relayed{}, budget: pool.Listener("a"), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
+	l := &listener{rule: admissionRule("a", 1), ln: newAdmissionListener(), conns: map[net.Conn]relayed{}, budget: pool.Listener("a"), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
+	return l
 }
 
 // Exercise the two linearization orders directly, without a scheduler-dependent pause hook.
@@ -255,10 +256,11 @@ func TestAdmissionDenialReleasesPolicyAndBudget(t *testing.T) {
 			l := admissionState(pool)
 			var releases atomic.Int32
 			if kind == "pool" {
-				if _, ok := l.budget.Acquire(); !ok {
+				x, _, o := l.budget.Take()
+				if o != resource.Granted {
 					t.Fatal("fixture acquire")
 				}
-				defer l.budget.Release()
+				defer x.Release()
 			}
 			m := New(Options{Pool: pool, Admit: func(string, netip.Addr) (func(), bool) {
 				if kind == "policy" {
@@ -304,10 +306,11 @@ func TestAdmissionDenialReleasesPolicyAndBudget(t *testing.T) {
 func TestAdmissionStopDuringPolicyDoesNotCountBudgetRefusal(t *testing.T) {
 	pool := resource.NewPool(1)
 	l := admissionState(pool)
-	if _, ok := l.budget.Acquire(); !ok {
+	fx, _, fo := l.budget.Take()
+	if fo != resource.Granted {
 		t.Fatal("fixture acquire")
 	}
-	defer l.budget.Release()
+	defer fx.Release()
 	var releases atomic.Int32
 	m := New(Options{Pool: pool, Admit: func(string, netip.Addr) (func(), bool) { l.beginClose(); return func() { releases.Add(1) }, true }})
 	c, _ := admissionPipe(t)
@@ -388,10 +391,11 @@ func TestAdmissionRetirementPreservesPendingBehavior(t *testing.T) {
 func TestAdmissionBudgetAttemptSerializesStop(t *testing.T) {
 	pool := resource.NewPool(1)
 	l := admissionState(pool)
-	if _, ok := l.budget.Acquire(); !ok {
+	fx, _, fo := l.budget.Take()
+	if fo != resource.Granted {
 		t.Fatal("fixture acquire")
 	}
-	defer l.budget.Release()
+	defer fx.Release()
 	c, _ := admissionPipe(t)
 	l.admitting = c
 	entered, proceed, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -400,7 +404,11 @@ func TestAdmissionBudgetAttemptSerializesStop(t *testing.T) {
 	defer unblock()
 	go func() {
 		defer close(done)
-		ref, ok, cancelled := l.acquireAdmission(0, func() (resource.Refusal, bool) { close(entered); <-proceed; return l.budget.Acquire() })
+		_, ref, ok, cancelled := l.acquireAdmission(0, func() (*resource.Lease, resource.Refusal, resource.Outcome) {
+			close(entered)
+			<-proceed
+			return l.budget.Take()
+		})
 		if ok || cancelled || ref.Reason != resource.ReasonBudget {
 			t.Errorf("budget decision = %+v, %v, %v", ref, ok, cancelled)
 		}
@@ -423,9 +431,9 @@ func TestAdmissionBudgetAttemptSerializesStop(t *testing.T) {
 		t.Fatalf("ordinary refusal count=%d, want 1", got)
 	}
 	// Stop won the next attempt: the Pool function must never be invoked.
-	_, ok, cancelled := l.acquireAdmission(0, func() (resource.Refusal, bool) {
+	_, _, ok, cancelled := l.acquireAdmission(0, func() (*resource.Lease, resource.Refusal, resource.Outcome) {
 		t.Error("cancelled admission attempted budget")
-		return l.budget.Acquire()
+		return l.budget.Take()
 	})
 	if ok || !cancelled || pool.Refusals()["a"][resource.ReasonBudget] != 1 {
 		t.Fatal("cancelled attempt added a refusal")

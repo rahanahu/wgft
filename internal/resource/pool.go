@@ -13,66 +13,95 @@ const (
 	// ReasonBudget はプロセス全体の予算が埋まっていること(u < T を満たさない)。
 	ReasonBudget Reason = "budget"
 	// ReasonRuleCap はルール 1 本の上限 C に達していること(ルールが 2 本以上あるときだけ効く)。
+	// 登録の listener が運ぶ数 c_g で判定する。
 	ReasonRuleCap Reason = "rule_cap"
-	// ReasonReserve は、自分の隔離予約を超えていて、残りの空きが他のルールの予約で埋まっていること。
+	// ReasonReserve は、x_g で見て自分の最低分に届いていて、残りの空きが満たされていない最低分で
+	// 埋まっていること(u + 1 + S > T)。
 	ReasonReserve Reason = "reserve"
+	// ReasonFloor は、x_g で見て自分の最低分に届いていない予約の部分の取得が、他の登録の満たされて
+	// いない下限と予備を残せないこと。
+	ReasonFloor Reason = "floor"
+	// ReasonSpare は、x_g で見て自分の最低分に届いていて、満たされていない最低分を残しても空きは
+	// あるが、予備を残すと空きが無いこと。
+	ReasonSpare Reason = "spare"
 )
 
+// FlowFloor は登録ごとの下限 f。予備 P も同じ値である(設計文書 7a.10 節)。
+const FlowFloor = 4
+
+// Outcome は Take の結果。
+type Outcome int
+
+const (
+	Granted Outcome = iota
+	Refused
+	NotAccepting
+)
+
+func (o Outcome) String() string {
+	switch o {
+	case Granted:
+		return "granted"
+	case Refused:
+		return "refused"
+	case NotAccepting:
+		return "not accepting"
+	}
+	return fmt.Sprintf("outcome(%d)", int(o))
+}
+
 // Pool は 1 つのプロトコルのフロー予算(設計文書 7a.5、7a.10 節の Resource Guard)。プロセス全体の
-// 予算 T を共有プールとし、受け付けているルールごとの隔離予約で 1 つのルールへのフラッドが他の
-// ルールの新しいフローを止めることを防ぐ。判定は 1 つの排他の中で行い、ルールごと、理由ごとの
-// 拒否の数を、この Pool を作ってからの累計として持つ。SQLite には保存しない。累計の起点は
-// 呼び出し側の作り方で決まる。vpsd はプロセスの起動時に 1 つ作るのでプロセスが起動してからの
-// 累計になり、エージェントはトンネルを立て直すたびに中継ごと作り直すので、そのたびに 0 に戻る
-// (設計文書 10.2c 節の relay.refusals)。
+// 予算 T を、ルールの登録ごとの最低分 m と予備 P と、固定の上限の中の先着順の共有に分ける。判定は
+// 1 つの排他の中で行い、ルールごと、理由ごとの拒否の数を、この Pool を作ってからの累計として持つ。
+// SQLite には保存しない。累計の起点は呼び出し側の作り方で決まる。vpsd はプロセスの起動時に 1 つ作る
+// のでプロセスが起動してからの累計になり、エージェントはトンネルを立て直すたびに中継ごと作り直すので、
+// そのたびに 0 に戻る(設計文書 10.2c 節の relay.refusals)。
 //
-// フローは待ち受け(Listener)に付けて数え、待ち受けから所属ルールへの対応は Pool が持つ。
-// ルールのフロー数は、そのルールの受け付けている待ち受けのフロー数の合計である。分割と統合で
-// 待ち受けの所属ルールが変わると、その待ち受けの既存のフローは移動先のルールで数える
-// (仕様 7 節の規則のまま)。
+// 記号は設計文書 7a.10 節に合わせる。登録 g はルール ID が受け付けている listener を持ち続ける 1 期間で、
+// A は受け付けている登録の集合、N はその大きさである。a_g は g に数えるフローの数(受け付けたときの
+// 登録に数え、退役した登録のフローの帰属の規則でだけ移る)、c_g は g に今属する受け付けている listener
+// が運ぶフローの数、x_g = max(a_g, c_g) である。u はプロセス全体のフロー数、m = max(f, q)、
+// q = floor(floor((T - f) / 2) / (N - 1))(N ≥ 2)、S = Σ max(0, m - a_g)、S_f = Σ max(0, f - a_g)
+// (和は A)、P = f である。判定の順は Take の注釈にある。
 //
-// 記号は設計文書 7a.10 節に合わせる。T は予算、C はルールが 2 本以上あるときのルール 1 本の上限
-// (ceil(T/2))、A は受け付けているルールの集合、N は A の大きさ、q は N が 2 以上のときの
-// floor((T - C) / (N - 1))、u はプロセス全体のフロー数、u_r はルール r のフロー数である。
-// ルール r の新しいフローは、u < T であり、N が 2 以上なら u_r < C であり、かつ u_r < q または
-// T - u - Σ max(0, q - u_s) >= 1(和は A のうち r 以外)のときに通す。
-//
-// 判定を 1 回あたり一定の手間で済ませるため、u_r と Σ max(0, q - u_s) は足し引きで保つ。
-// q は N が変わったときだけ変わるので、待ち受けの登録、閉鎖、受け付けの開始と停止、所属ルールの
-// 付け替えのときに作り直す(設計文書 7a.10 節が A と q を Commit で更新すると定めているとおり、
-// この 5 つの操作はどれも収束の Commit から呼ばれる)。
+// a_g、c_g、u、S、S_f は足し引きで保つ。m は N が変わるときだけ変わるので、S は登録の始まりと退役の
+// ときだけ A の全登録について作り直す(refreshLocked)。どちらも収束の Commit(エージェントでは Apply)
+// から呼ばれる。
 type Pool struct {
-	total   int // T。0 以下なら予算を持たない(判定を行わない)
-	ruleCap int // C。T から導く
+	total   int // T。0 以下なら予算の判定を行わない
+	ruleCap int // C
 
 	mu    sync.Mutex
 	inUse int // u
-	// accepting は集合 A。受け付けているルールから、その待ち受けの数とフロー数への表。
-	accepting map[string]*ruleFlows
-	// shortfall は Σ max(0, q - u_s)。和は A のすべてのルールを取る(判定では r の分を引く)。
-	// q 自体は値のために持たず、reserveFor(total, len(accepting)) の場で求める(引き算 1 回と
-	// 除算 1 回で済むため)。shortfall は q に依存するので、A(と q)が変わるときだけ作り直す。
-	shortfall int
-	refusals  map[string]map[Reason]uint64
+	// regs は A。ルール ID から今の登録への表。
+	regs map[string]*registration
+	// retired は退役した登録のうち、まだ数えるフローを持つもの。
+	retired map[*registration]struct{}
+	minimum int // m。N が変わるたびに求め直す
+	// unfilled は S、floorShort は S_f。unfilledRegs と floorShortRegs はそれぞれの項が正の登録の数で、
+	// 拒否の文言にだけ使う。
+	unfilled, floorShort         int
+	unfilledRegs, floorShortRegs int
+	refusals                     map[string]map[Reason]uint64
+	notAccepting                 uint64
+	doubleReleases               uint64
+	regSerial                    int
 }
 
-// ruleFlows は受け付けているルール 1 本の内訳。
-type ruleFlows struct {
-	listeners int // そのルールの受け付けている待ち受けの数。0 になったらルールは A から外れる
-	flows     int // u_r
-}
-
-// NewPool は予算 total のプールを作る。ルール 1 本の上限と隔離予約は total から導く。
+// NewPool は予算 total のプールを作る。ルール 1 本の上限と最低分は total から導く。
 func NewPool(total int) *Pool {
-	return &Pool{
-		total:     total,
-		ruleCap:   ruleCapFor(total),
-		accepting: map[string]*ruleFlows{},
-		refusals:  map[string]map[Reason]uint64{},
+	p := &Pool{
+		total:    total,
+		ruleCap:  ruleCapFor(total),
+		regs:     map[string]*registration{},
+		retired:  map[*registration]struct{}{},
+		refusals: map[string]map[Reason]uint64{},
 	}
+	p.minimum = minimumFor(total, 0)
+	return p
 }
 
-// ruleCapFor は C。どの T でも ceil(T/2) で、残りの floor(T/2) は他のルールの予約に回る。
+// ruleCapFor は C = ceil(T/2)。
 func ruleCapFor(total int) int {
 	if total <= 0 {
 		return 0
@@ -80,12 +109,12 @@ func ruleCapFor(total int) int {
 	return (total + 1) / 2
 }
 
-// reserveFor は q。ルールが 1 本以下なら 0 で、そのルールは予算のすべてを使える。
-func reserveFor(total, rules int) int {
-	if total <= 0 || rules < 2 {
-		return 0
+// minimumFor は登録ごとの最低分 m = max(f, q)。q は予備を除いた T - f から求める。
+func minimumFor(total, rules int) int {
+	if rules < 2 {
+		return FlowFloor
 	}
-	return (total - ruleCapFor(total)) / (rules - 1)
+	return max(FlowFloor, (total-FlowFloor)/2/(rules-1))
 }
 
 // Total は予算 T。
@@ -98,14 +127,14 @@ func (p *Pool) RuleCap() int { return p.ruleCap }
 func (p *Pool) Rules() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.accepting)
+	return len(p.regs)
 }
 
-// Reserve はルール 1 本あたりの隔離予約 q。
+// Reserve は登録ごとの最低分 m。
 func (p *Pool) Reserve() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return reserveFor(p.total, len(p.accepting))
+	return p.minimum
 }
 
 // InUse は今保持しているフローの数 u。受け付けをやめた待ち受けと、閉じた待ち受けの残りのフローも含む。
@@ -115,12 +144,12 @@ func (p *Pool) InUse() int {
 	return p.inUse
 }
 
-// RuleFlows はそのルールのフロー数 u_r(受け付けている待ち受けの合計)。
+// RuleFlows はそのルールの登録の listener が運ぶフローの数 c_g(改訂の前のルールのフロー数と同じ数)。
 func (p *Pool) RuleFlows(ruleID string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if st := p.accepting[ruleID]; st != nil {
-		return st.flows
+	if g := p.regs[ruleID]; g != nil {
+		return g.carried
 	}
 	return 0
 }
@@ -141,23 +170,12 @@ func (p *Pool) Refusals() map[string]map[Reason]uint64 {
 }
 
 // Listener は待ち受け 1 つ分の枠を Pool に登録する。呼び出し側は待ち受けを閉じるときに Close を呼ぶ。
-// この handle は登録した時点で新しいフローを受け付けている状態になり、そのルールは A に入る。
-// bind をまだ試みていない、または bind の成否に関わらず handle を保ちたい呼び出し側は、代わりに
-// PendingListener を使う。
+// この handle は登録した時点で新しいフローを受け付けている状態になる。bind の成否に関わらず handle を
+// 保ちたい呼び出し側は、代わりに PendingListener を使い、bind の後に Accept を呼ぶ。A は開けた待ち受け
+// を持つルールの集合なので(設計文書 7a.10 節)、bind の最中と失敗した待ち受けのルールを N に数えない。
 func (p *Pool) Listener(ruleID string) *Listener { return p.listener(ruleID, true) }
 
-// PendingListener は、まだ新しいフローを受け付けられない待ち受けの枠を登録する。そのルールは Accept
-// を呼ぶまで A に入らない。A は開けた待ち受けを持つルールの集合なので(設計文書 7a.10 節)、bind の
-// 最中の待ち受けと bind に失敗した待ち受けが、その間だけ N を増やして他のルールの予約を減らすことを
-// 防ぐ。
-//
-// 2026-09-20 より前はこの handle をソケットの bind の前に作る設計だったが、今の本番の呼び出し側は
-// どちらも bind を試みた後に handle を作る。relay.Manager.newListener は bind の成否に関わらず
-// handle を作り(30 秒ごとの Retry が失敗した待ち受けを扱えるようにするため)、成功したときだけ
-// Accept を呼ぶ。proxyrelay は逆に、bind に失敗したポートには handle を一切作らず(Prepare の時点で
-// 開けたポートだけを Commit で登録し、Listener を直接使う)、Pending の状態を経ない。どちらの形でも
-// bind が終わる前や失敗した待ち受けのルールを N に数えないことに変わりは無く、Pending の状態は
-// この防止のために残す。
+// PendingListener は、まだ新しいフローを受け付けられない待ち受けの枠を登録する。
 func (p *Pool) PendingListener(ruleID string) *Listener { return p.listener(ruleID, false) }
 
 func (p *Pool) listener(ruleID string, accepting bool) *Listener {
@@ -175,70 +193,79 @@ type Listener struct {
 	rule      string
 	accepting bool
 	open      bool
-	// counted は、この待ち受けのフローを Pool の accepting の表に足しているか(open かつ accepting)。
+	// counted は、この待ち受けが登録に加わっているか(open かつ accepting)。
 	counted bool
 	flows   int
+	// reg は counted のときの今の登録。cells はこの待ち受けが運ぶフローの、登録ごとの cell。
+	reg   *registration
+	cells map[*cell]struct{}
+	cur   *cell
 }
 
-// Acquire はフロー 1 つ分の枠を取る。取れたら真を返し、呼び出し側はフローの終わりに Release を
-// 1 回呼ぶ。取れなければ理由を返し、何も数えない。拒否は理由ごとの数に 1 を足す。
+// Take はフロー 1 つ分の枠を取る。受け付けていない handle(保留、Retiring、閉鎖済み)では
+// NotAccepting を返し、拒否の数にもログにも入れない。予算で拒んだときは Refused と理由を返し、
+// 理由ごとの数に 1 を足す。取れたら Lease を返し、呼び出し側はフローの終わりにその Release を
+// 1 度呼ぶ。
 //
-// 判定は数の帳簿だけを見るので、受け付けていない handle(Retiring と、bind の済んでいない
-// PendingListener)でも枠は取れる。取った枠はプロセス全体の数 u に入り、ルールごとの数 u_r には
-// 入らず、そのルールを A にも入れない。中継は、待ち受けを Retiring にするときにソケットを閉じ、
-// bind が済んで Accept を呼んでから中継を始めるので、この状態で Acquire を呼ぶのは、閉じる直前に
-// accept してしまったフローだけである。
-func (l *Listener) Acquire() (Refusal, bool) {
+// 判定の順は、受け付けていない、予算(u < T)、ルール 1 本の上限(N ≥ 2 なら c_g < C)、下限の部分
+// (a_g < f なら通す)、予約の部分(x_g < m なら u + 1 + S_f + P ≤ T で通し、満たさなければ floor)、
+// 共有分(u + 1 + S + P ≤ T で通し、満たさなければ u + 1 + S > T なら reserve、そうでなければ spare)
+// である。T ≤ 0 の Pool は受け付けていない handle だけを拒み、予算の判定を行わない。
+func (l *Listener) Take() (*Lease, Refusal, Outcome) {
 	p := l.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if !l.counted {
+		p.notAccepting++
+		return nil, Refusal{}, NotAccepting
+	}
+	g := l.reg
 	if p.total > 0 {
-		if p.inUse >= p.total {
-			return p.refuseLocked(ReasonBudget, l, 0), false
-		}
-		ruleFlows := p.ruleFlowsForLocked(l)
-		if len(p.accepting) >= 2 && ruleFlows >= p.ruleCap {
-			return p.refuseLocked(ReasonRuleCap, l, ruleFlows), false
-		}
-		// 自分の予約の内側にいないときは、他のルールの予約の未使用分を残しても空きが要る
-		q := reserveFor(p.total, len(p.accepting))
-		if ruleFlows >= q && p.total-p.inUse-p.otherReserveLocked(l, q) < 1 {
-			return p.refuseLocked(ReasonReserve, l, ruleFlows), false
+		if reason, flows := p.judgeLocked(g); reason != "" {
+			return nil, p.refuseLocked(reason, l, flows), Refused
 		}
 	}
 	p.inUse++
 	l.flows++
-	if l.counted {
-		p.addRuleFlowsLocked(l.rule, 1)
-	}
-	return Refusal{}, true
+	g.carried++
+	c := p.cellFor(l)
+	c.n++
+	p.addCountLocked(g, 1)
+	return &Lease{l: l, c: c}, Refusal{}, Granted
 }
 
-// Release は Acquire で取った枠を返す。Acquire が真を返した回数より多く呼ばれたときは何もしない。
-// 数を負にすると、以後の判定が予算を過大に空いていると見て守りが外れるためである。
-func (l *Listener) Release() {
-	p := l.p
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if l.flows == 0 {
-		return
+// judgeLocked は受け付けている登録 g の取得の判定。通すなら空の理由を返す。2 つ目の値は拒否の文言が
+// 示すそのルールのフローの数(rule_cap では c_g、floor、spare、reserve では x_g)。
+func (p *Pool) judgeLocked(g *registration) (Reason, int) {
+	u, T := p.inUse, p.total
+	if u >= T {
+		return ReasonBudget, 0
 	}
-	l.flows--
-	p.inUse--
-	if l.counted {
-		p.addRuleFlowsLocked(l.rule, -1)
+	if len(p.regs) >= 2 && g.carried >= p.ruleCap {
+		return ReasonRuleCap, g.carried
 	}
+	if g.count < FlowFloor {
+		return "", 0
+	}
+	x := max(g.count, g.carried)
+	if x < p.minimum {
+		if u+1+p.floorShort+FlowFloor <= T {
+			return "", 0
+		}
+		return ReasonFloor, x
+	}
+	if u+1+p.unfilled+FlowFloor <= T {
+		return "", 0
+	}
+	if u+1+p.unfilled > T {
+		return ReasonReserve, x
+	}
+	return ReasonSpare, x
 }
 
-// Flows はこの待ち受けが保持しているフローの数。
-func (l *Listener) Flows() int {
-	p := l.p
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return l.flows
-}
-
-// SetRule は所属ルールを付け替える(分割と統合の relabel)。既存のフローは移動先のルールで数える。
+// SetRule は所属ルールを付け替える(分割と統合の relabel)。既存のフローは受け付けたときの登録に
+// 数えたままで、この待ち受けが運ぶ数 c_g だけが付け替え先の登録へ移る。元の登録が退役すれば、
+// 退役した登録のフローの帰属の規則が働く。
 func (l *Listener) SetRule(ruleID string) {
 	p := l.p
 	p.mu.Lock()
@@ -251,10 +278,8 @@ func (l *Listener) SetRule(ruleID string) {
 	p.attachLocked(l)
 }
 
-// StopAccepting は、この待ち受けを新しいフローを受け付けない状態にする(設計文書 7a.3 節の
-// Retiring)。残っているフローはプロセス全体の数 u に入り続けるが、ルールごとの数 u_r からは
-// 外れ、そのルールは待ち受けが他に無ければ A から外れる。ルール単位の fail-closed はそのルールの
-// 待ち受けをすべて Retiring にするので、そのルールは新しいフローを受け付けているルールではなくなる。
+// StopAccepting は、この待ち受けを新しいフローを受け付けない状態にする(設計文書 7a.3 節の Retiring)。
+// 残っているフローは u と登録の数に残るが、この待ち受けは登録から外れる。
 func (l *Listener) StopAccepting() {
 	p := l.p
 	p.mu.Lock()
@@ -263,7 +288,7 @@ func (l *Listener) StopAccepting() {
 	p.detachLocked(l)
 }
 
-// Accept は StopAccepting でやめた受け付けを再開する(宣言に戻った UDP の待ち受け)。
+// Accept は保留の待ち受けの受け付けを始めるか、StopAccepting でやめた受け付けを再開する。
 func (l *Listener) Accept() {
 	p := l.p
 	p.mu.Lock()
@@ -272,8 +297,7 @@ func (l *Listener) Accept() {
 	p.attachLocked(l)
 }
 
-// Close は待ち受けを Pool から外す。まだ返していないフローは、Release を呼ぶまでプロセス全体の数に
-// 残る(閉じた待ち受けのフローは、中継が閉じ終えるまで資源を使っているため)。
+// Close は待ち受けを Pool から外す。まだ返していないフローは、Release を呼ぶまで u と登録の数に残る。
 func (l *Listener) Close() {
 	p := l.p
 	p.mu.Lock()
@@ -285,143 +309,90 @@ func (l *Listener) Close() {
 	p.detachLocked(l)
 }
 
-// ruleFlowsForLocked は判定に使う u_r。受け付けている待ち受けの合計で、判定する待ち受け自身が
-// 受け付けから外れている(Retiring、閉鎖済み)ときは、その待ち受けのフローも足す。
-func (p *Pool) ruleFlowsForLocked(l *Listener) int {
-	n := 0
-	if st := p.accepting[l.rule]; st != nil {
-		n = st.flows
-	}
-	if !l.counted {
-		n += l.flows
-	}
-	return n
+// Flows はこの待ち受けが保持しているフローの数。
+func (l *Listener) Flows() int {
+	p := l.p
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return l.flows
 }
 
-// otherReserveLocked は Σ max(0, q - u_s)(和は A のうち l のルール以外)。q は呼び出し側が
-// (Acquire の判定と同じ)len(p.accepting) から求めた値を渡す。
-func (p *Pool) otherReserveLocked(l *Listener, q int) int {
-	n := p.shortfall
-	if st := p.accepting[l.rule]; st != nil {
-		n -= shortfallOf(q, st.flows)
+// refreshLocked は今の N から m を求め、S と S_f を A の全登録について作り直す。N が変わったとき
+// (登録の始まりと退役)だけ呼ぶ。
+func (p *Pool) refreshLocked() {
+	p.minimum = minimumFor(p.total, len(p.regs))
+	p.unfilled, p.floorShort, p.unfilledRegs, p.floorShortRegs = 0, 0, 0, 0
+	for _, g := range p.regs {
+		p.termsLocked(g, 1)
 	}
-	return n
 }
 
-// addRuleFlowsLocked はルールのフロー数を delta だけ動かし、予約の未使用分の合計を合わせる。
-// フローの取得と返却の経路(Acquire、Release)だけが呼ぶので、A の大きさに関わらず一定の手間で
-// 済ませる。N は変わらないので、q はここでは変わらない。
-func (p *Pool) addRuleFlowsLocked(rule string, delta int) {
-	st := p.accepting[rule]
-	q := reserveFor(p.total, len(p.accepting))
-	p.shortfall -= shortfallOf(q, st.flows)
-	st.flows += delta
-	p.shortfall += shortfallOf(q, st.flows)
-}
-
-// detachLocked は待ち受けのフローをルールごとの数から外す(閉鎖、受け付けの停止、付け替えの前)。
-func (p *Pool) detachLocked(l *Listener) {
-	if !l.counted {
+// termsLocked は受け付けている登録 g の S と S_f の項を sign の向きに足す。退役した登録は項を持たない。
+func (p *Pool) termsLocked(g *registration, sign int) {
+	if g.retired {
 		return
 	}
-	before := len(p.accepting)
-	st := p.accepting[l.rule]
-	q := reserveFor(p.total, before)
-	p.shortfall -= shortfallOf(q, st.flows)
-	st.flows -= l.flows
-	st.listeners--
-	if st.listeners == 0 {
-		delete(p.accepting, l.rule)
-	} else {
-		p.shortfall += shortfallOf(q, st.flows)
+	if d := p.minimum - g.count; d > 0 {
+		p.unfilled += sign * d
+		p.unfilledRegs += sign
 	}
-	l.counted = false
-	// N (と、それから導く q)が変わるのは、ルールが A から外れたときだけである。そのときだけ、
-	// 残る全ルールの予約の未使用分を新しい q で作り直す(設計文書 7a.10 節: A のルールの数に
-	// 比例する計算は A と q が変わるときだけ行う)。
-	if len(p.accepting) != before {
-		p.refreshShortfallLocked()
+	if d := FlowFloor - g.count; d > 0 {
+		p.floorShort += sign * d
+		p.floorShortRegs += sign
 	}
 }
 
-// attachLocked は待ち受けのフローをルールごとの数に入れる(登録、受け付けの再開、付け替えの後)。
-func (p *Pool) attachLocked(l *Listener) {
-	if l.counted || !l.open || !l.accepting {
-		return
-	}
-	before := len(p.accepting)
-	st := p.accepting[l.rule]
-	q := reserveFor(p.total, before)
-	if st == nil {
-		st = &ruleFlows{}
-		p.accepting[l.rule] = st
-	} else {
-		p.shortfall -= shortfallOf(q, st.flows)
-	}
-	st.flows += l.flows
-	st.listeners++
-	l.counted = true
-	if len(p.accepting) != before {
-		// 新しいルールが A に入り、N(と q)が変わった。全ルールぶん作り直す
-		p.refreshShortfallLocked()
-	} else {
-		p.shortfall += shortfallOf(q, st.flows)
+// addCountLocked は a_g を delta だけ動かし、S と S_f を合わせる。
+func (p *Pool) addCountLocked(g *registration, delta int) {
+	p.termsLocked(g, -1)
+	g.count += delta
+	p.termsLocked(g, 1)
+	if g.retired && g.count == 0 {
+		delete(p.retired, g)
 	}
 }
 
-// refreshShortfallLocked は今の N から q を求め、Σ max(0, q - u_s) を全ルールぶん作り直す。
-// attachLocked と detachLocked から、N が実際に変わったときだけ呼ぶ。
-func (p *Pool) refreshShortfallLocked() {
-	q := reserveFor(p.total, len(p.accepting))
-	p.shortfall = 0
-	for _, st := range p.accepting {
-		p.shortfall += shortfallOf(q, st.flows)
-	}
-}
-
-// shortfallOf は 1 つのルールの予約の未使用分 max(0, q - u_s)。
-func shortfallOf(reserve, flows int) int {
-	if flows >= reserve {
-		return 0
-	}
-	return reserve - flows
-}
-
-func (p *Pool) refuseLocked(reason Reason, l *Listener, ruleFlows int) Refusal {
+func (p *Pool) refuseLocked(reason Reason, l *Listener, flows int) Refusal {
 	byReason := p.refusals[l.rule]
 	if byReason == nil {
 		byReason = map[Reason]uint64{}
 		p.refusals[l.rule] = byReason
 	}
 	byReason[reason]++
-	// 他のルールの数は、予約を持つルールのうち自分を除いた数。Retiring の待ち受けからの判定では
-	// そのルールが A に無いので、A のすべてが「他のルール」になる
-	others := len(p.accepting)
-	if _, ok := p.accepting[l.rule]; ok {
-		others--
-	}
 	return Refusal{
 		Reason: reason, RuleID: l.rule,
 		InUse: p.inUse, Total: p.total,
-		RuleFlows: ruleFlows, RuleCap: p.ruleCap,
-		Reserve: reserveFor(p.total, len(p.accepting)), OtherRules: others,
+		RuleFlows: flows, RuleCap: p.ruleCap,
+		Minimum: p.minimum, Spare: FlowFloor,
+		Unfilled: p.unfilled, UnfilledRules: p.unfilledRegs, UnfilledSelf: l.reg.count < p.minimum,
+		FloorShort: p.floorShort, FloorShortRules: p.floorShortRegs,
+		OtherRules: len(p.regs) - 1,
 	}
 }
 
 // Refusal は拒んだ 1 回の判定の内訳。中継はこれをログの文言にする(設計文書 7a.10 節)。
 type Refusal struct {
-	Reason     Reason
-	RuleID     string
-	InUse      int // 判定したときのプロセス全体のフロー数 u
-	Total      int // プロセス全体の予算 T
-	RuleFlows  int // 判定したときのそのルールのフロー数 u_r。予算で拒んだときは数えないので 0
-	RuleCap    int // ルールが 2 本以上あるときのルール 1 本の上限 C
-	Reserve    int // ルール 1 本あたりの隔離予約 q
-	OtherRules int // 予約を持つ他のルールの数(新しいフローを受け付けているルールのうち自分以外)
+	Reason    Reason
+	RuleID    string
+	InUse     int // u
+	Total     int // T
+	RuleFlows int // 判定に使ったそのルールの数。rule_cap では c_g、floor、spare、reserve では x_g
+	RuleCap   int // C
+	Minimum   int // m
+	Spare     int // P
+	// Unfilled は S、UnfilledRules は S の項が正の登録の数。UnfilledSelf はそのうちに自分が入るか。
+	Unfilled      int
+	UnfilledRules int
+	UnfilledSelf  bool
+	// FloorShort は S_f、FloorShortRules は S_f の項が正の登録の数(floor では自分は入らない)。
+	FloorShort      int
+	FloorShortRules int
+	OtherRules      int // 受け付けている他のルールの数
 }
 
 // String は理由を説明する 1 文。中継は待ち受けの名前と処置を前後に付けてログに出す。
 func (r Refusal) String() string {
+	free := r.Total - r.InUse
 	switch r.Reason {
 	case ReasonBudget:
 		return fmt.Sprintf("flow budget full: %d of %d in use in this process", r.InUse, r.Total)
@@ -429,11 +400,37 @@ func (r Refusal) String() string {
 		return fmt.Sprintf("rule %s holds %d flows and the rest of the budget is reserved for %s",
 			r.RuleID, r.RuleFlows, otherRules(r.OtherRules))
 	case ReasonReserve:
-		return fmt.Sprintf("rule %s holds %d flows, above its reserve of %d, and the free part of the budget, %d of %d, is reserved for %s",
-			r.RuleID, r.RuleFlows, r.Reserve, r.Total-r.InUse, r.Total, otherRules(r.OtherRules))
+		return fmt.Sprintf("rule %s holds %d flows, at or above its minimum of %d, and the free part of the budget, %d of %d, is held for the unfilled minimums of %s, %d flows",
+			r.RuleID, r.RuleFlows, r.Minimum, free, r.Total, r.unfilledOwners(), r.Unfilled)
+	case ReasonSpare:
+		if r.Unfilled == 0 {
+			return fmt.Sprintf("rule %s holds %d flows and the free part of the budget, %d of %d, is kept spare for a rule added later",
+				r.RuleID, r.RuleFlows, free, r.Total)
+		}
+		return fmt.Sprintf("rule %s holds %d flows, at or above its minimum of %d, and the free part of the budget, %d of %d, is held for the unfilled minimums of %s, %d flows, and %d spare flows for a rule added later",
+			r.RuleID, r.RuleFlows, r.Minimum, free, r.Total, r.unfilledOwners(), r.Unfilled, r.Spare)
+	case ReasonFloor:
+		if r.FloorShort == 0 {
+			return fmt.Sprintf("rule %s holds %d flows, below its minimum of %d, and the free part of the budget, %d of %d, is kept spare for a rule added later",
+				r.RuleID, r.RuleFlows, r.Minimum, free, r.Total)
+		}
+		return fmt.Sprintf("rule %s holds %d flows, below its minimum of %d, and the free part of the budget, %d of %d, is held for the first flows of %s and %d spare flows for a rule added later",
+			r.RuleID, r.RuleFlows, r.Minimum, free, r.Total, otherRules(r.FloorShortRules), r.Spare)
 	default:
 		return fmt.Sprintf("refused by the flow budget: %s", r.Reason)
 	}
+}
+
+// unfilledOwners は満たされていない最低分を持つ登録の言い方。自分の不足が S に入るのは、予約の部分の
+// 入口が閉じて共有分に回った登録だけである。
+func (r Refusal) unfilledOwners() string {
+	if !r.UnfilledSelf {
+		return otherRules(r.UnfilledRules)
+	}
+	if r.UnfilledRules <= 1 {
+		return "this rule"
+	}
+	return "this rule and " + otherRules(r.UnfilledRules-1)
 }
 
 // otherRules は "1 other rule" か "3 other rules"。拒否の文言に埋める。

@@ -255,8 +255,11 @@ How to read the six values; --json keeps each item's own "next":
                      count both sides of a TCP relay
   refusals           counted from the time the tunnel was built; budget means
                      the whole process was full, rule_cap that one rule hit
-                     its share, reserve that the room left was held for
-                     other rules
+                     its share, reserve that the room left was held for the
+                     unfilled minimums of rules, floor that a rule below its
+                     minimum left the room to the first flows of other
+                     rules and the spare, spare that the room left was kept
+                     for a rule added later
 
 The Connection, Tunnel and Relay items other than "wg endpoint resolve", and
 the six items printed under Observed values, are held only by the running

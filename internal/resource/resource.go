@@ -8,7 +8,7 @@
 package resource
 
 // 仕様 7 節の値。プロセス全体の上限(WGFT_MAX_UDP_FLOWS、WGFT_MAX_TCP_FLOWS)が設定項目で、
-// ここはその既定値。ルール 1 本の上限と隔離予約は設定項目ではなく、この上限から Pool が導く。
+// ここはその既定値。ルール 1 本の上限と最低分は設定項目ではなく、この上限から Pool が導く。
 const (
 	UDPTotal = 8192
 	TCPTotal = 2048

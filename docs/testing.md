@@ -152,7 +152,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | L5 | `lab/lifecycle.sh` check 2 | 無関係なルールの追加、変更、削除で既存のフローが切れること、成立済みの TCP のセッションを切ったルールが 10 秒以内に転送に戻らないこと | ラボ | `reconcile`、`rule-ops`、`kernel` | A9 として | 1 分前後 | 自動 |
 | L6 | `lab/lifecycle.sh` check 3、3b | Relay の bind の失敗が nftables に漏れること、テーブルの差し替えの失敗で待ち受けが戻らないこと | ラボ | `relay`、`reconcile` | A9 として | 1 分前後 | 自動 |
 | L7 | `lab/lifecycle.sh` check 4 | `server teardown` が wgft の物以外を削除すること | ラボ | `kernel`、`deploy` | A9 として | 1 分未満 | 自動 |
-| L8 | `lab/lifecycle.sh` check 5、5b、5c、5d、5e | 上限までのフラッドでメモリがソフト上限と余裕の和を超えること (check 5 は半分の予算、5b は既定の予算)、1 本のルールへのフラッドが他のルールの新しいフローまで止めること (5c は 2 本、5d は 3 本のルール)、既定より小さい予算で隔離が崩れること (5e) | ラボ (CPU を占有できる VM) | `resource`、`userspace` | A9 として | 3 から 4 分 | 自動 |
+| L8 | `lab/lifecycle.sh` check 5、5b、5c、5d、5e、5f、5g | 上限までのフラッドでメモリがソフト上限と余裕の和を超えること (check 5 は半分の予算、5b は既定の予算)、1 本のルールへのフラッドが他のルールの最低分までの新しいフローを止めること (5c は 2 本、5d は 3 本のルール)、既定より小さい予算で隔離が崩れること (5e)、拒否の理由 `rule_cap`、`budget`、`floor`、`reserve` が実際の接続で出ないこと (5f)、分割元に残ったポートが分割元の置き換えの後も新しい接続を通せないこと (5g) | ラボ (CPU を占有できる VM) | `resource`、`userspace` | A9 として | 3 から 4 分 | 自動 |
 | L9 | `lab/lifecycle.sh` check 6、7、8 | ルール単位の失敗が fail-closed にならないこと、backend 全体の失敗で世代が進むこと、再試行で回復しないこと | ラボ | `reconcile`、`relay` | A9 として | 数分 | 自動 |
 | L10 | `lab/lifecycle.sh` check 9 | 外から削除された nftables のテーブルが戻らないこと | ラボ | `kernel`、`reconcile` | A9 として | 1 分前後 | 自動 |
 | L11 | `lab/split-merge.sh` (kernel と userspace) | Web UI の分割と統合で流れている UDP のセッションが切れること | ラボ | `rule-ops` | A9 として | 約 50 秒 | 自動 |

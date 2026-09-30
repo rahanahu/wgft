@@ -136,6 +136,10 @@ func TestUDPSessionCreatedWhileListenerClosesIsNotLeaked(t *testing.T) {
 				connMu.Lock()
 				defer connMu.Unlock()
 				closed := len(dialed) == 1 && dialed[0].closed.Load()
+				if tc.pauseInAdmit {
+					// 閉じた後の取得は Pool が受け付けていないとして拒むので、宛先へ dial しない
+					closed = len(dialed) == 0
+				}
 				desc = fmt.Sprintf("dialed %d, upstream closed %v, sessions %d, pool in use %d, per-source releases %d",
 					len(dialed), closed, l.sessions(), pool.InUse(), releases.Load())
 				return closed && l.sessions() == 0 && pool.InUse() == 0 && releases.Load() == 1, desc

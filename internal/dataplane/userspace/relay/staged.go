@@ -161,28 +161,50 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 	for k := range s.revived {
 		l := m.retiring[k]
 		delete(m.retiring, k)
+		// 宣言のルールが変わっていれば、受け付けを再開する前に付け替える。受け付けていない待ち受けの
+		// 付け替えはラベルだけを変えるので、再開の加入で旧いセッションは宣言のルールの登録へ移る。
+		// 再開の後に付け替えると、同じルールの別の待ち受けも同じ Commit で再開するとき、旧いセッションが
+		// 生きている元のルールの登録に残る(設計文書 7a.10 節の「退役した登録のフローの帰属」)
+		if d := s.desired[k]; d.RuleID != l.ruleID {
+			l.ruleID = d.RuleID
+			l.budget.SetRule(d.RuleID)
+		}
+		// 受け付けの印を先に立て、Pool の Accept を後に呼ぶ(設計文書 7a.10 節)。読み取りの goroutine
+		// は印を見た後に ruleOf で m.mu を待つので、取得はこの Commit の後になる。仮に 2 文の間に取得が
+		// 入っても、Pool は受け付けていない handle として拒むので帳簿は崩れない
 		l.accepting.Store(true)
+		if h := m.testHookRevive; h != nil {
+			h(l)
+		}
 		l.budget.Accept()
 		m.listeners[k] = l
 		m.opts.Logf("listener %s accepting again", k)
 	}
 	for k, l := range m.listeners {
 		d, ok := s.desired[k]
+		step := ""
 		switch {
 		case !ok:
 			if keep, r := retiring[l.ruleID]; r {
 				m.retireLocked(k, l, keep)
+				step = "retire"
 			} else {
 				m.closeLocked(k)
+				step = "close"
 			}
 		case d.Target != l.target:
 			l.target, l.ruleID = d.Target, d.RuleID
 			l.budget.SetRule(d.RuleID)
 			n := l.sweep(func(netip.Addr) bool { return false })
 			m.opts.Logf("listener %s -> %s retargeted; rule %s; closed %d sessions", k, d.Target, d.RuleID, n)
+			step = "retarget"
 		case d.RuleID != l.ruleID:
 			l.ruleID = d.RuleID
 			l.budget.SetRule(d.RuleID)
+			step = "relabel"
+		}
+		if h := m.testHookCommitStep; h != nil && step != "" {
+			h(k, step)
 		}
 	}
 	for k, sock := range s.opened {

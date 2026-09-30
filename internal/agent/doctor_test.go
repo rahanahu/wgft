@@ -359,16 +359,18 @@ func TestDoctorReportsFlowBudget(t *testing.T) {
 	}
 	t.Cleanup(rt.us().rl.Close)
 	rt.us().rl.Apply(relay.DesiredFromRules(rules))
-	// 予算を使い切らせて、拒否を 1 件作る
+	// 取れるだけ取らせて、拒否を 1 件作る
 	pool := rt.us().rl.UDPPool()
 	l := pool.Listener("r1")
-	for i := 0; i < 16; i++ {
-		if _, ok := l.Acquire(); !ok {
-			t.Fatalf("flow %d was refused while the budget still had room", i)
+	refused := false
+	for i := 0; i < 17; i++ {
+		if _, _, o := l.Take(); o == resource.Refused {
+			refused = true
+			break
 		}
 	}
-	if _, ok := l.Acquire(); ok {
-		t.Fatal("the 17th flow was admitted into a budget of 16")
+	if !refused {
+		t.Fatal("17 flows were admitted into a budget of 16")
 	}
 
 	ask := serveTestControl(t, rt)
@@ -385,11 +387,12 @@ func TestDoctorReportsFlowBudget(t *testing.T) {
 	if udp == nil {
 		t.Fatalf("the answer holds no UDP budget: %+v", res.RuntimeState.Budgets)
 	}
-	if udp.Total != 16 || udp.InUse != 16 {
-		t.Errorf("udp budget = %d of %d in use, want 16 of 16", udp.InUse, udp.Total)
+	// ルールが 1 本なら予備の 4 本を残した 12 本で spare
+	if udp.Total != 16 || udp.InUse != 12 {
+		t.Errorf("udp budget = %d of %d in use, want 12 of 16", udp.InUse, udp.Total)
 	}
-	if len(udp.Refusals) != 1 || udp.Refusals[0].RuleID != "r1" || udp.Refusals[0].Reason != resource.ReasonBudget || udp.Refusals[0].Count != 1 {
-		t.Errorf("udp refusals = %+v, want 1 budget refusal for r1", udp.Refusals)
+	if len(udp.Refusals) != 1 || udp.Refusals[0].RuleID != "r1" || udp.Refusals[0].Reason != resource.ReasonSpare || udp.Refusals[0].Count != 1 {
+		t.Errorf("udp refusals = %+v, want 1 spare refusal for r1", udp.Refusals)
 	}
 }
 
