@@ -3,6 +3,7 @@
 package netpipe
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -12,12 +13,18 @@ import (
 type closeWriter interface{ CloseWrite() error }
 
 // Pipe は a と b を双方向に中継する。片方向の EOF は CloseWrite で反対側に伝え、
-// 両方向が閉じたら両方を閉じる。
+// 両方向が閉じたら両方を閉じる。片方向が EOF 以外で終わったとき(読み取りが RST などの誤りで
+// 失敗したとき、書き込みが失敗したとき)は、すぐに両方を閉じる。ハーフクローズとして扱うと、
+// 反対向きは黙ったままの相手を読み続け、相手が閉じるまで中継が終わらない(仕様 6.2 節)。
 func Pipe(a, b net.Conn) {
 	var wg sync.WaitGroup
 	half := func(dst, src net.Conn) {
 		defer wg.Done()
-		copyConn(dst, src)
+		if err := copyConn(dst, src); err != nil {
+			a.Close()
+			b.Close()
+			return
+		}
 		if cw, ok := dst.(closeWriter); ok {
 			cw.CloseWrite()
 		} else {
@@ -43,12 +50,13 @@ var bulkPool = sync.Pool{New: func() any { b := make([]byte, bulkBufSize); retur
 
 // copyConn は src を dst へ写す。io.Copy は接続ごと、方向ごとに 32 KiB を持ち続けるので、
 // 開いたまま黙っている接続の費用を抑えるために、待つ間は小さいバッファだけを持つ。
-func copyConn(dst, src net.Conn) {
+// src の EOF で終わったときは nil を、読み取りか書き込みの誤りで終わったときはその誤りを返す。
+func copyConn(dst, src net.Conn) error {
 	// カーネルの TCP 同士は io.Copy が splice を使い、ユーザー空間のバッファを持たない
 	if _, ok := src.(*net.TCPConn); ok {
 		if _, ok := dst.(*net.TCPConn); ok {
-			io.Copy(dst, src)
-			return
+			_, err := io.Copy(dst, src)
+			return err
 		}
 	}
 	idle := make([]byte, idleBufSize)
@@ -56,21 +64,26 @@ func copyConn(dst, src net.Conn) {
 		n, err := src.Read(idle)
 		if n > 0 {
 			if _, werr := dst.Write(idle[:n]); werr != nil {
-				return
+				return werr
 			}
 		}
-		if err != nil {
-			return
+		if errors.Is(err, io.EOF) {
+			return nil
 		}
-		if n == len(idle) && !copyBulk(dst, src) {
-			return
+		if err != nil {
+			return err
+		}
+		if n == len(idle) {
+			if more, err := copyBulk(dst, src); !more {
+				return err
+			}
 		}
 	}
 }
 
 // copyBulk はプールの大きいバッファで写す。データが途切れたらバッファを返して真を返す。
-// 偽は接続の終わり(EOF か誤り)。
-func copyBulk(dst, src net.Conn) bool {
+// 偽は接続の終わりで、誤りは copyConn と同じく EOF なら nil、それ以外はその誤りである。
+func copyBulk(dst, src net.Conn) (bool, error) {
 	bp := bulkPool.Get().(*[]byte)
 	defer bulkPool.Put(bp)
 	defer src.SetReadDeadline(time.Time{})
@@ -84,14 +97,17 @@ func copyBulk(dst, src net.Conn) bool {
 		n, err := src.Read(*bp)
 		if n > 0 {
 			if _, werr := dst.Write((*bp)[:n]); werr != nil {
-				return false
+				return false, werr
 			}
+		}
+		if errors.Is(err, io.EOF) {
+			return false, nil
 		}
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return true
+				return true, nil
 			}
-			return false
+			return false, err
 		}
 	}
 }

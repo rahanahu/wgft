@@ -117,8 +117,10 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 			if !e.src.IsValid() || keep(e.src) {
 				continue
 			}
-			// 公開側だけを切ると、netpipe は宛先へ FIN を送った後も宛先からの読み取りを続けるので、
-			// FIN を受けても閉じない宛先では宛先への接続と枠が残る。組の両側を切り、記録からも外す。
+			// 組の両側を切り、記録からも外す。公開側だけを切ると、netpipe はその読み取りの失敗を受けて
+			// 宛先への接続を通常の Close で閉じる。宛先への接続が netstack の接続(vpsd のユーザー空間
+			// モードでエージェントへ張った接続)なら、エージェントには RST ではなく FIN が届き、エージェントの
+			// 中継はハーフクローズとして宛先への接続と枠を持ち続ける(設計文書 6.2 節)。
 			// 外すのは、直後に sessions を見る Retiring の判定(Commit)が、切った中継を数えないため。
 			// dial の最中なら cut を見た接続の goroutine が宛先への接続を登録せずに切る
 			e.cut = true
@@ -141,8 +143,8 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		once.Do(func() { close(done) })
 		ln.Close()
 		// 中継中の TCP 接続もすべて切る(仕様 7 節:ポートが宣言から消えたとき、開き直すとき)。
-		// netstack の側を先に Abort する。実ソケットの側を先に閉じると、netpipe がその EOF を
-		// netstack の側へ FIN として伝え、RST の前に FIN が出ることがあるため
+		// netstack の側を先に Abort する。実ソケットの側を先に閉じると、netpipe がその読み取りの失敗を
+		// 受けて netstack の側を通常の Close で閉じ、RST の前に FIN が出ることがあるため
 		mu.Lock()
 		closed = true
 		for c := range conns {
@@ -262,9 +264,9 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					return
 				}
 				// dial の間に closeF か sweep が走っていれば、どちらも公開側の接続 c を切ったが、まだ登録
-				// していない t を見ていない。登録すると誰にも切られず、netpipe は c の読み取りの失敗で t へ
-				// FIN を送った後も t を読み続けるので、FIN を受けても閉じない宛先では枠と接続が残り続ける。
-				// 登録せずにここで切り、中継も始めない。c は closeF か sweep が切っており、枠は上の defer が返す
+				// していない t を見ていない。中継を始めると、netpipe は c の読み取りの失敗を受けて t を通常の
+				// Close で閉じるので、t が netstack の接続なら相手に RST ではなく FIN が届く。登録せずに
+				// ここで cutConn で切り、中継も始めない。c は closeF か sweep が切っており、枠は上の defer が返す
 				mu.Lock()
 				if closed || entry.cut {
 					mu.Unlock()
