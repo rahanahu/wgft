@@ -259,6 +259,12 @@ func TestServeStartsWithoutAHoldWhenTheFirstApplyWorks(t *testing.T) {
 	if !agentAPIAnswers(d, agentAddr) {
 		t.Error("the agent API must be listening after an ordinary startup")
 	}
+	// The stream handler must tell the agent API which connections authenticated, or every agent's
+	// stream behind one NAT would count toward that source's cap of unauthenticated connections
+	// (design.md 11 節).
+	if d.hub.Authenticated == nil {
+		t.Error("the stream hub does not report authenticated connections to the agent API")
+	}
 	if code, err := adminGet(adminAddr, "/api/v1/rules"); err != nil || code != 200 {
 		t.Errorf("the admin API must answer after an ordinary startup; got %d, %v", code, err)
 	}

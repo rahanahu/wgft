@@ -126,7 +126,6 @@ func testTimeouts() serverTimeouts {
 	return serverTimeouts{
 		ReadHeaderTimeout: 100 * time.Millisecond,
 		ReadTimeout:       200 * time.Millisecond,
-		IdleTimeout:       150 * time.Millisecond,
 		MaxHeaderBytes:    1 << 20,
 	}
 }
@@ -209,37 +208,13 @@ func TestServerTimeouts_BodyStall(t *testing.T) {
 	expectClosedWithin(t, conn, timeouts.ReadTimeout*10)
 }
 
-// (c) 何もしない keep-alive 接続は IdleTimeout で切れる。
-func TestServerTimeouts_IdleKeepAlive(t *testing.T) {
-	timeouts := testTimeouts()
+// (c) keep-alive は使わない。応答を返したら、次のリクエストを待たずにサーバ側から閉じる。応答の後に
+// 残る接続は、未認証の接続として送信元の枠(maxPreAuthConnsPerSource)を占め続けるためである。
+// 変異の確認:newHTTPServer の SetKeepAlivesEnabled(false) を外すと、接続が期限まで開いたままになり落ちる。
+func TestServerClosesAfterResponse(t *testing.T) {
+	longTimeouts := serverTimeouts{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20}
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") })
-
-	// startTestServer は使わず、ここだけ ConnState を差し込めるように組み立てる。net/http は
-	// (HTTP/1.x で) 1 リクエストへの応答を終えると ConnState を StateIdle で呼んでから
-	// SetReadDeadline で idle タイマを仕掛ける。つまり StateIdle の通知時刻は、サーバ側の
-	// idle タイマの起点と同時かそれより前になる。ここを起点に経過を測れば、その値は接続が
-	// 実際に idle のまま待たされた時間そのものになり、応答の生成にかかった時間を含めて
-	// 下限を水増ししない。リクエストを送る前に起点を取る旧方式は、その水増し分だけ
-	// IdleTimeout を早く切っても見逃してしまう。
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := newHTTPServer("", h, nil, timeouts)
-	idleAt := make(chan time.Time, 1)
-	srv.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state != http.StateIdle {
-			return
-		}
-		select {
-		case idleAt <- time.Now():
-		default: // 最初の値がチャンネルに残っている間に来た後続の通知を捨てる。このテストは
-			// リクエストを 1 回しか送らないので、StateIdle はもともと 1 回しか起きない。
-		}
-	}
-	go srv.Serve(ln)
-	t.Cleanup(func() { srv.Close() })
-	addr := ln.Addr().String()
+	addr := startTestServer(t, h, longTimeouts)
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -256,24 +231,15 @@ func TestServerTimeouts_IdleKeepAlive(t *testing.T) {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-
-	var start time.Time
-	select {
-	case start = <-idleAt:
-	case <-time.After(timeouts.IdleTimeout * 10):
-		t.Fatal("connection never reached http.StateIdle")
+	if !resp.Close {
+		t.Error("response does not announce Connection: close")
 	}
-
-	// リクエストを完了させたあと、何も送らずに待つ
-	conn.SetReadDeadline(start.Add(timeouts.IdleTimeout * 10))
-	buf := make([]byte, 16)
-	if _, err := conn.Read(buf); err == nil {
-		t.Fatal("expected the idle connection to be closed")
+	// 期限(5 秒)よりずっと短い間に閉じること
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Fatal("server sent more bytes after the response")
 	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
-		t.Fatalf("connection still open after %s", timeouts.IdleTimeout*10)
-	}
-	if elapsed := time.Since(start); elapsed < timeouts.IdleTimeout {
-		t.Errorf("closed after %s, want at least IdleTimeout %s", elapsed, timeouts.IdleTimeout)
+		t.Fatal("connection still open 2s after the response; keep-alive is on")
 	}
 }
 
@@ -295,7 +261,7 @@ func TestServerConnLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	longTimeouts := serverTimeouts{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20}
+	longTimeouts := serverTimeouts{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, MaxHeaderBytes: 1 << 20}
 	srv := newHTTPServer("", h, nil, longTimeouts)
 	go srv.Serve(limitListener(ln, n))
 	t.Cleanup(func() { srv.Close() })

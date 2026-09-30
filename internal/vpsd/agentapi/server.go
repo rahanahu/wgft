@@ -103,11 +103,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 }
 
 // serverTimeouts は http.Server の期限(仕様 5 節。占有された接続がファイル記述子を
-// 使い果たすのを防ぐ)。テストでは短い値に差し替える。
+// 使い果たすのを防ぐ)。テストでは短い値に差し替える。keep-alive は使わない(newHTTPServer)ので、
+// 次のリクエストを待つ期限(IdleTimeout)は持たない。
 type serverTimeouts struct {
 	ReadHeaderTimeout time.Duration // ヘッダを送り終えるまでの上限。既存
 	ReadTimeout       time.Duration // 本文を含む、リクエスト全体を読み終えるまでの上限
-	IdleTimeout       time.Duration // 次のリクエストを待つ keep-alive の上限
 	MaxHeaderBytes    int
 }
 
@@ -117,26 +117,32 @@ type serverTimeouts struct {
 var defaultTimeouts = serverTimeouts{
 	ReadHeaderTimeout: 10 * time.Second,
 	ReadTimeout:       15 * time.Second,
-	IdleTimeout:       60 * time.Second,
 	MaxHeaderBytes:    64 << 10, // 64 KiB
 }
 
 // newHTTPServer は http.Server を組み立てる(テストが短い期限を注入できるよう分けてある)。
 func newHTTPServer(addr string, h http.Handler, tlsConfig *tls.Config, t serverTimeouts) *http.Server {
-	return &http.Server{
+	srv := &http.Server{
 		Addr:              addr,
 		Handler:           h,
 		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: t.ReadHeaderTimeout,
 		ReadTimeout:       t.ReadTimeout,
-		IdleTimeout:       t.IdleTimeout,
 		MaxHeaderBytes:    t.MaxHeaderBytes,
 		// HTTP/2 は使わない。エージェントとの通信は登録の POST と WebSocket(HTTP/1.1 の Upgrade)だけで、
 		// h2 は公開面を広げるだけになる。空でない map を置くと net/http は h2 を広告しない。
 		// 鍵交換の曲線は Go の既定に任せる(既定には耐量子のハイブリッドが含まれ、固定すると外れる)。
 		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 		ErrorLog:     log.New(handshakeErrorLog{}, "", 0),
+		// stream のハンドラが、認証を通った接続を送信元の未認証の数から外せるようにする(sourcelimit.go)
+		ConnContext: withSourceConn,
 	}
+	// keep-alive は使わない。エージェントは登録と stream の接続のたびに新しい HTTP クライアントを
+	// 作るので、応答の後に接続を残しても使い直されない。残すと、未認証の接続として送信元の枠
+	// (maxPreAuthConnsPerSource)を占め続ける。WebSocket への切り替え(101)の応答は net/http が
+	// Connection: close を付けないので、stream には影響しない。
+	srv.SetKeepAlivesEnabled(false)
+	return srv
 }
 
 // handshakeErrorLog は net/http が書く誤りの行を、このプロセスのログへそのまま渡す。TLS の
@@ -196,7 +202,15 @@ func (s *Server) Listen(addr string) (net.Listener, error) {
 
 // ServeListener は Listen で開いた待ち受けで TLS の応答を続ける。
 func (s *Server) ServeListener(ln net.Listener) error {
+	return s.serveListener(ln, maxAgentConns, maxPreAuthConnsPerSource)
+}
+
+// serveListener は ServeListener の本体である。2 つの上限はテストが小さい値を注入できるよう引数にしてある。
+func (s *Server) serveListener(ln net.Listener, total, perSource int) error {
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{s.cert}, MinVersion: tls.VersionTLS12}
 	srv := newHTTPServer(ln.Addr().String(), s, tlsConfig, defaultTimeouts)
-	return srv.ServeTLS(limitListener(ln, maxAgentConns), "", "")
+	// 送信元ごとの枠を外側に置く。TLS の接続の下に sourceConn が直接来るので、stream のハンドラが
+	// 認証を通った接続を枠から外せる(withSourceConn)。上限を超えて閉じた接続は、全体の枠も閉じた
+	// ときに返す。
+	return srv.ServeTLS(newSourceLimitListener(limitListener(ln, total), perSource), "", "")
 }

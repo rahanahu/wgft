@@ -433,6 +433,7 @@ func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
 	}
 	d.hub = d.newHub(d)
 	d.hub.RateLimit = d.agentAPI.Allow
+	d.hub.Authenticated = d.agentAPI.Authenticated
 	d.agentAPI.Handle("GET /api/v1/agents/stream", d.hub.ServeHTTP)
 	_ = d.st.PurgeExpiredJoinTokens()
 
