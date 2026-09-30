@@ -34,6 +34,12 @@
 #     docker compose -f deploy/server.compose.yaml exec wgft-server wgft agent join-string --name home
 #     docker compose -f deploy/server.compose.yaml exec wgft-server wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group game
 #     docker compose -f deploy/server.compose.yaml exec wgft-server wgft agent ls
+# - Logging: the json-file driver below caps the container log at about 30 MiB (3 files of 10 MiB)
+#   instead of Docker's unbounded default. The agent API's listening port is reachable by anyone on
+#   the internet before any authentication, so the server's own log rate does not bound what an
+#   unauthenticated sender can make it write; the driver-level cap is the backstop. Setting driver
+#   here overrides any other default set in the Docker daemon's daemon.json, such as journald or
+#   local; edit the logging section below instead if you rely on that default.
 services:
   wgft-server:
     image: ghcr.io/rahanahu/wgft-server:latest
@@ -42,6 +48,11 @@ services:
     #   dockerfile: deploy/Dockerfile.server
     container_name: wgft-server
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # No capabilities, no privilege escalation, read-only root file system. The only writable
     # path is the state volume.
     cap_drop: [ALL]
