@@ -248,10 +248,12 @@ var (
 )
 
 // TestOrphanBandButtonStaysOnItsAgent は、未登録のエージェントの帯の削除のボタンが、エージェント名に
-// `/`、`..`、`?` を含んでも、その名前の経路へ送信することを確かめる。ルールの agent は空でない任意の
-// 文字列で取り込めるので、帯の名前は登録済みのエージェントの名前の規則に縛られない。前の形では、
-// agent が `x/../home/disable?` の帯のボタンが登録済みの home を無効にし、`x/../../rules/r_b/delete?`
-// の帯のボタンが別のルール r_b を消した。
+// `/`、`..`、`?` を含んでも、その名前の経路へ送信することを確かめる。本物のサーバでは、書き込むルールの
+// agent は登録済みのエージェントの名前に限られ、その名前は文字種の検査を通るので、このような帯が出るのは
+// 文字種の検査ができる前に保存されたエージェントの名前だけである。この試験は、登録の確認を持たない
+// fakeBackend でそのような名前を作る。帯の escape は多重の守りである。前の形では、この試験で agent が
+// `x/../home/disable?` の帯のボタンが home を無効にし、`x/../../rules/r_b/delete?` の帯のボタンが
+// 別のルール r_b を消した。
 // 変異の確認:rules.gohtml の帯の送信先の PathSeg を外すと、home が無効になり r_b が消えて落ちる。
 func TestOrphanBandButtonStaysOnItsAgent(t *testing.T) {
 	srv, st, changes := newOddIDTestServer(t, "r_a")
