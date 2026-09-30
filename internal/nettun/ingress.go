@@ -4,7 +4,8 @@ package nettun
 // (reassembly.go)に渡し、完成した datagram だけを gVisor に渡す。gVisor の再組み立ては、
 // 断片化された datagram ごとに取り消されない 30 秒のタイマーを残し、保持する量が到着の速さで
 // 決まるので、断片を gVisor に一度も渡さない(設計文書 7 節)。この Device 宛ての完成した UDP は
-// 登録表(udp_registry.go)を通し、受信の会計の予約を持って endpoint に届ける。
+// 登録表(udp_registry.go)を通し、受信の会計の予約を持って endpoint に届ける。ICMP の誤りは、
+// 外側の送信元が引用の宛先と一致するものだけを gVisor に渡す(admitICMPv4Error)。
 
 import (
 	"bytes"
@@ -161,6 +162,9 @@ func (t *Device) writeIPv4(packet []byte) error {
 			return nil
 		}
 	}
+	if !admitICMPv4Error(packet) {
+		return nil
+	}
 	if t.isLocalUDP(packet) {
 		// A refusal by the receive budget and a stopped accounting are drops,
 		// not Write errors, for the same reason as a refused fragment.
@@ -171,6 +175,52 @@ func (t *Device) writeIPv4(packet []byte) error {
 	}
 	injectInbound(t.ep, packet)
 	return nil
+}
+
+// icmpv4FragNeededMinMTU は、Fragmentation Needed が示す next-hop MTU の下限。Linux の既定の
+// min_pmtu (net.ipv4.route.min_pmtu) と同じ値で、カーネルモードの server のホストが受け入れる
+// 範囲にそろえる(設計文書 7 節)。
+const icmpv4FragNeededMinMTU = 552
+
+// admitICMPv4Error reports whether packet may go on to gVisor as far as ICMP
+// errors are concerned. An ICMP error (Destination Unreachable, Source Quench,
+// Redirect, Time Exceeded, Parameter Problem) passes only when its outer
+// source equals the destination of the datagram it quotes. Every peer shares
+// one Device in vpsd's userspace mode and wireguard-go checks only that the
+// outer source is in the sending peer's AllowedIPs, so without this check a
+// peer could quote a flow between this Device and another peer; the pinned
+// gVisor compares neither the outer source nor a TCP sequence number. A
+// Fragmentation Needed also needs a next-hop MTU of at least
+// icmpv4FragNeededMinMTU, since gVisor has no floor of its own. packet is a
+// complete datagram: fragments are checked after reassembly. Anything that
+// is not an ICMP error passes, and so does a packet too short to carry an
+// ICMP header, which gVisor drops. An ICMP error too short to quote the
+// destination is dropped. No ICMP is sent and nothing is logged for a drop.
+func admitICMPv4Error(packet []byte) bool {
+	if len(packet) < header.IPv4MinimumSize || packet[9] != uint8(header.ICMPv4ProtocolNumber) {
+		return true
+	}
+	hlen := int(packet[0]&0x0f) * 4
+	if hlen < header.IPv4MinimumSize || len(packet) < hlen+header.ICMPv4MinimumSize {
+		return true
+	}
+	icmp := packet[hlen:]
+	switch header.ICMPv4Type(icmp[0]) {
+	case header.ICMPv4DstUnreachable, header.ICMPv4SrcQuench, header.ICMPv4Redirect,
+		header.ICMPv4TimeExceeded, header.ICMPv4ParamProblem:
+	default:
+		return true
+	}
+	quote := icmp[header.ICMPv4MinimumSize:]
+	if len(quote) < header.IPv4MinimumSize || !bytes.Equal(quote[16:20], packet[12:16]) {
+		return false
+	}
+	if header.ICMPv4Type(icmp[0]) == header.ICMPv4DstUnreachable &&
+		header.ICMPv4Code(icmp[1]) == header.ICMPv4FragmentationNeeded &&
+		binary.BigEndian.Uint16(icmp[6:8]) < icmpv4FragNeededMinMTU {
+		return false
+	}
+	return true
 }
 
 // isLocalUDP reports whether packet is a complete IPv4 UDP datagram for the
