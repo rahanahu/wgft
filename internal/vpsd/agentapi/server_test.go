@@ -578,12 +578,268 @@ func TestHandshakeErrorNamesAPinnedAgent(t *testing.T) {
 	mu.Lock()
 	buf.Reset()
 	mu.Unlock()
-	handshakeErrorLog{}.Write([]byte("http: TLS handshake error from 192.0.2.1:1234: EOF\n"))
+	(&handshakeErrorLog{}).Write([]byte("http: TLS handshake error from 192.0.2.1:1234: EOF\n"))
 	mu.Lock()
 	defer mu.Unlock()
 	if got := buf.String(); got != "http: TLS handshake error from 192.0.2.1:1234: EOF\n" {
 		t.Errorf("another error line was changed: %q", got)
 	}
+}
+
+// formatHandshakeErrorLine が組み立てる文面を、lograte.Gate の実時間を待たずに確かめる。
+func TestFormatHandshakeErrorLine(t *testing.T) {
+	const line = "http: TLS handshake error from 192.0.2.1:1234: EOF"
+	cases := []struct {
+		name       string
+		isBadCert  bool
+		suppressed int
+		want       string
+	}{
+		{"plain, nothing suppressed", false, 0, line},
+		{
+			"plain, some suppressed",
+			false, 3,
+			line + "; 3 similar line(s) not logged since the previous one",
+		},
+		{
+			"bad certificate, nothing suppressed",
+			true, 0,
+			line + badCertHint,
+		},
+		{
+			"bad certificate, some suppressed",
+			true, 2,
+			line + badCertHint + "; 2 similar line(s) not logged since the previous one",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := formatHandshakeErrorLine(line, c.isBadCert, c.suppressed); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// gatedCount.record は、gate.Allow() の結果を受け取って帳簿を更新する側だけを切り出したもので、
+// lograte.Gate の実時間を待たずに、件数の受け渡しと 0 への戻しを直接確かめられる。
+func TestGatedCountRecord(t *testing.T) {
+	var gc gatedCount
+
+	if open, suppressed := gc.record(true); !open || suppressed != 0 {
+		t.Fatalf("first open: got open=%v suppressed=%d, want true, 0", open, suppressed)
+	}
+	for i := 0; i < 3; i++ {
+		if open, suppressed := gc.record(false); open || suppressed != 0 {
+			t.Fatalf("closed call %d: got open=%v suppressed=%d, want false, 0", i, open, suppressed)
+		}
+	}
+	// 3 回閉じた後に開くと、間引いた 3 回が返る。
+	if open, suppressed := gc.record(true); !open || suppressed != 3 {
+		t.Fatalf("reopen after 3 closed calls: got open=%v suppressed=%d, want true, 3", open, suppressed)
+	}
+	// 開いた直後にまた開けば、前回渡した件数は 0 に戻っているので、今回は 0 が返る。
+	if open, suppressed := gc.record(true); !open || suppressed != 0 {
+		t.Fatalf("reopen immediately after a reopen: got open=%v suppressed=%d, want true, 0 (count was not reset)", open, suppressed)
+	}
+}
+
+// 未認証の相手は、TLS のハンドシェイクを送らずに閉じるだけで行を出させられる。
+// 同じ理由の行を立て続けに送っても、最初の 1 行しか出ないことを確かめる。証明書を理由に拒んだ行
+// (運用の案内を持つ)は、他の理由の連続に埋もれず、別の門を持つので出ることも確かめる。
+func TestHandshakeErrorLogThinsRepeatedReason(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(lockedWriter{&mu, &buf})
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+
+	h := &handshakeErrorLog{}
+	// 同じ送信元からの、同じ理由の行を装う 50 本(garbage bytes による "first record does not
+	// look like a TLS handshake" を想定。文面は net/http が付ける形をまねる)。
+	for i := 0; i < 50; i++ {
+		h.Write([]byte(fmt.Sprintf("http: TLS handshake error from 192.0.2.1:%d: tls: first record does not look like a TLS handshake\n", 10000+i)))
+	}
+	mu.Lock()
+	otherLines := strings.Count(buf.String(), "\n")
+	firstOtherLine := buf.String()
+	mu.Unlock()
+	if otherLines != 1 {
+		t.Errorf("50 handshake errors of the same reason produced %d log lines, want 1", otherLines)
+	}
+	if !strings.Contains(firstOtherLine, "192.0.2.1:10000") {
+		t.Errorf("the one line logged was not the first attempt: %q", firstOtherLine)
+	}
+
+	// 証明書を理由に拒んだ行は、直前の "other" の門が閉じていても出る(別の門を持つ)。
+	mu.Lock()
+	buf.Reset()
+	mu.Unlock()
+	h.Write([]byte("http: TLS handshake error from 192.0.2.2:1234: remote error: tls: bad certificate\n"))
+	mu.Lock()
+	got := buf.String()
+	mu.Unlock()
+	if !strings.Contains(got, "bad certificate") || !strings.Contains(got, "cannot tell which agent") {
+		t.Errorf("the bad-certificate line did not appear although its own gate was still open: %q", got)
+	}
+
+	// もう一度、同じ garbage の理由を送っても、まだ閉じたまま(1 分は経っていない)。
+	mu.Lock()
+	buf.Reset()
+	mu.Unlock()
+	h.Write([]byte("http: TLS handshake error from 192.0.2.1:19999: tls: first record does not look like a TLS handshake\n"))
+	mu.Lock()
+	got = buf.String()
+	mu.Unlock()
+	if got != "" {
+		t.Errorf("the other-reason gate reopened within the same minute: %q", got)
+	}
+}
+
+// handshakeErrorLog は http.Server.ErrorLog として net/http のすべての誤りの行を受けるが、
+// 間引くのは "TLS handshake error" を含む行だけである。ハンドラの panic や Accept の誤りの行は、
+// 相手が接続ごとに自由に出させられる行ではないので、"other" の門が閉じていてもそのまま出ることを
+// 確かめる。
+func TestHandshakeErrorLogWritesNonHandshakeLinesUngated(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(lockedWriter{&mu, &buf})
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+
+	h := &handshakeErrorLog{}
+	// 1 本目の TLS ハンドシェイクの誤りで "other" の門を閉じる。
+	h.Write([]byte("http: TLS handshake error from 192.0.2.1:1234: EOF\n"))
+	mu.Lock()
+	buf.Reset()
+	mu.Unlock()
+	// 2 本目の同じ種類の誤りは、門が閉じているので出ない。ここまでが前提の確認である。
+	h.Write([]byte("http: TLS handshake error from 192.0.2.1:1235: EOF\n"))
+	mu.Lock()
+	if buf.Len() != 0 {
+		mu.Unlock()
+		t.Fatalf("setup failed: the other gate did not close on the second handshake error")
+	}
+	buf.Reset()
+	mu.Unlock()
+
+	// "other" の門が閉じたままでも、TLS のハンドシェイクの誤りではない行はそのまま出る。
+	const panicLine = "http: panic serving 192.0.2.1:1236: some handler panic\ngoroutine 1 [running]:\n..."
+	h.Write([]byte(panicLine + "\n"))
+	mu.Lock()
+	got := buf.String()
+	mu.Unlock()
+	if got != panicLine+"\n" {
+		t.Errorf("a non-handshake ErrorLog line was gated or altered: got %q, want %q", got, panicLine+"\n")
+	}
+}
+
+// 証明書を理由に拒んだかどうかは、行の終わりが crypto/tls の alert の文面と一致するかで決める。
+// 相手が ALPN の一覧などに同じ文字列を混ぜても、行の終わりには出ないので分類されないことを確かめる。
+func TestHandshakeErrorLogClassifiesBadCertificateBySuffix(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(lockedWriter{&mu, &buf})
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+
+	h := &handshakeErrorLog{}
+	// "bad certificate" appears in the line as attacker-supplied ALPN data, not as the alert that
+	// ends the line, so this must not be classified as a certificate rejection.
+	line := `http: TLS handshake error from 198.51.100.7:4444: tls: client requested unsupported application protocols ("bad certificate")`
+	h.Write([]byte(line + "\n"))
+	mu.Lock()
+	got := buf.String()
+	mu.Unlock()
+	if strings.Contains(got, "cannot tell which agent") {
+		t.Errorf("a line carrying \"bad certificate\" only as embedded attacker data was classified as a certificate rejection: %q", got)
+	}
+
+	// The real alert, at the end of the line, is still classified as a certificate rejection
+	// (otherwise the check above would be vacuous).
+	mu.Lock()
+	buf.Reset()
+	mu.Unlock()
+	h.Write([]byte("http: TLS handshake error from 198.51.100.8:4444: remote error: tls: bad certificate\n"))
+	mu.Lock()
+	got = buf.String()
+	mu.Unlock()
+	if !strings.Contains(got, "cannot tell which agent") {
+		t.Errorf("a line ending in the real certificate alert was not classified as a certificate rejection: %q", got)
+	}
+}
+
+// Write は、間引かれずに出た行に、gc.allow() が返した件数をそのまま渡す。gatedCount.record は
+// TestGatedCountRecord で確かめているが、gc.other.suppressed を直に立ててから Write を呼び、
+// 出た行にその件数が付くことを Write 自身の通しでも確かめる。
+func TestHandshakeErrorLogWriteReportsSuppressedCount(t *testing.T) {
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(lockedWriter{&mu, &buf})
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(prevFlags) })
+
+	h := &handshakeErrorLog{}
+	h.other.suppressed = 5 // 直前に 5 回間引いたのを装う。門は未使用のゼロ値なのでまだ開いている。
+	h.Write([]byte("http: TLS handshake error from 192.0.2.1:1234: EOF\n"))
+	mu.Lock()
+	got := buf.String()
+	mu.Unlock()
+	if !strings.Contains(got, "5 similar line(s) not logged since the previous one") {
+		t.Errorf("the logged line did not carry the pre-existing suppressed count: %q", got)
+	}
+	if h.other.suppressed != 0 {
+		t.Errorf("the suppressed count was not reset after being reported: got %d, want 0", h.other.suppressed)
+	}
+}
+
+// Write は、門が閉じていて行を出さないときも (len(p), nil) を返す。net/http の ErrorLog はこの
+// Writer を log.Logger 経由で使うので、違う長さや誤りを返すと呼び出し側の動きが変わりうる。
+func TestHandshakeErrorLogWriteAlwaysReportsFullLength(t *testing.T) {
+	prev := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	h := &handshakeErrorLog{}
+	p := []byte("http: TLS handshake error from 192.0.2.1:1234: EOF\n")
+	for i := 0; i < 3; i++ {
+		n, err := h.Write(p)
+		if err != nil {
+			t.Errorf("write %d: unexpected error: %v", i, err)
+		}
+		if n != len(p) {
+			t.Errorf("write %d: got n=%d, want %d", i, n, len(p))
+		}
+	}
+}
+
+// net/http calls ErrorLog.Write from as many goroutines as it has connections in flight. The
+// gate and the suppressed counters are shared mutable state, so concurrent writes must not race.
+func TestHandshakeErrorLogConcurrentWrites(t *testing.T) {
+	prev := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	h := &handshakeErrorLog{}
+	var wg sync.WaitGroup
+	for g := 0; g < 32; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				line := fmt.Sprintf("http: TLS handshake error from 192.0.2.%d:%d: EOF\n", g, i)
+				if g%2 == 0 {
+					line = fmt.Sprintf("http: TLS handshake error from 192.0.2.%d:%d: remote error: tls: bad certificate\n", g, i)
+				}
+				h.Write([]byte(line))
+			}
+		}(g)
+	}
+	wg.Wait()
 }
 
 type lockedWriter struct {

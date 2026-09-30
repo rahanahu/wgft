@@ -4,15 +4,18 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/netutil"
 
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
 
@@ -133,7 +136,7 @@ func newHTTPServer(addr string, h http.Handler, tlsConfig *tls.Config, t serverT
 		// h2 は公開面を広げるだけになる。空でない map を置くと net/http は h2 を広告しない。
 		// 鍵交換の曲線は Go の既定に任せる(既定には耐量子のハイブリッドが含まれ、固定すると外れる)。
 		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
-		ErrorLog:     log.New(handshakeErrorLog{}, "", 0),
+		ErrorLog:     log.New(&handshakeErrorLog{}, "", 0),
 		// stream のハンドラが、認証を通った接続を送信元の未認証の数から外せるようにする(sourcelimit.go)
 		ConnContext: withSourceConn,
 	}
@@ -145,26 +148,104 @@ func newHTTPServer(addr string, h http.Handler, tlsConfig *tls.Config, t serverT
 	return srv
 }
 
-// handshakeErrorLog は net/http が書く誤りの行を、このプロセスのログへそのまま渡す。TLS の
+// handshakeErrorLog は net/http が書く誤りの行を、このプロセスのログへ渡す。TLS の
 // ハンドシェイクを相手が証明書を理由に拒んだ行にだけ、読み方を添える。エージェントは登録のときに
 // 固定した証明書のハッシュと合わなければ拒むので、server teardown --purge で作り直した server には、
 // 古い証明書を固定したままのエージェントの行が "remote error: tls: bad certificate" として並ぶ。
 // どのエージェントかは言えない。相手は名乗る前にハンドシェイクを終え、作り直した server のデータ
 // ベースにはそのエージェントの記録も無いためである。送信元のアドレスは net/http の行が既に持つ。
-type handshakeErrorLog struct{}
+//
+// 未認証の相手は、TLS のハンドシェイクを送らずに閉じるだけで、"TLS handshake error" の行を
+// 1 本につき 1 行ここに出させられる(仕様 11 節。送信元ごとの上限 maxPreAuthConnsPerSource は
+// 同時の本数しか縛らない)。行数は相手の接続の速さで決まり、Docker の既定の json-file のログ
+// (回転しない)ではディスクを、systemd では journald の速度の制限を埋める。中継の接続ごとの行を
+// 待ち受けごとに 1 分に 1 回へ間引く方針(改訂の記録 2026-09-19)に合わせ、この行を、証明書を
+// 理由に拒んだもの(cert)とその他(other)の 2 つに分け、理由ごとに 1 分に 1 回まで間引く。
+// cert は運用の案内(badCertHint)を持つので、その他の理由が続いても埋もれないよう別の門を持つ。
+// 理由の文面そのもの(TLS の誤りの種類)を鍵にした間引きはしない。ALPN の一覧や暗号方式の一覧
+// など相手が送った値をそのまま埋め込む理由文があり(Go の crypto/tls の一部のエラー文言)、鍵の
+// 数を相手が増やせてしまうため。間引いた行があれば、次に出す行に件数を添える
+// (internal/agent/stream.go の reconnectLog と同じ形)。
+//
+// この Writer は http.Server.ErrorLog として net/http のすべての誤りの行(ハンドラの panic、
+// Accept の誤りなど)も受ける。相手が接続ごとに自由に出させられるのは "TLS handshake error" の
+// 行だけなので、間引きはこの行だけに掛け、他の行はそのまま出す。他の行まで間引くと、走査の雑音が
+// 門を閉じている間に panic や fd の枯渇のような、運用に要る行が出なくなる。
+type handshakeErrorLog struct {
+	mu    sync.Mutex
+	cert  gatedCount
+	other gatedCount
+}
+
+// gatedCount は 1 分に 1 回まで開く門(lograte.Gate)と、閉じている間に間引いた回数の組である。
+type gatedCount struct {
+	gate       lograte.Gate
+	suppressed int
+}
+
+// allow は、この理由の行を今出してよいかと、出す場合に前回出した行からの間に間引いた回数を返す
+// (回数は返した時点で 0 に戻す)。呼び出し側が持つ鎖(handshakeErrorLog.mu)の下で呼ぶ。
+func (gc *gatedCount) allow() (open bool, suppressed int) {
+	return gc.record(gc.gate.Allow())
+}
+
+// record は、gc.gate.Allow() の結果を受け取って帳簿を更新する。門の実時間の判定(allow)から
+// 分けてあるので、件数の受け渡しと 0 への戻しは、1 分を待たずに record を直接呼ぶテストで
+// 固定できる。
+func (gc *gatedCount) record(opened bool) (open bool, suppressed int) {
+	if !opened {
+		gc.suppressed++
+		return false, 0
+	}
+	suppressed, gc.suppressed = gc.suppressed, 0
+	return true, suppressed
+}
 
 // badCertHint は、相手が証明書を拒んだハンドシェイクの行に添える句である。
 const badCertHint = "; the client refused this server's certificate. An agent does this when it pinned another certificate " +
 	"at registration, as after wgft server teardown --purge; the handshake ends before the agent names itself, so this server " +
 	"cannot tell which agent it is. That agent needs a new join string from wgft agent join-string --name <agent>"
 
-func (handshakeErrorLog) Write(p []byte) (int, error) {
+func (h *handshakeErrorLog) Write(p []byte) (int, error) {
 	line := strings.TrimRight(string(p), "\n")
-	if strings.Contains(line, "TLS handshake error") && strings.Contains(line, "bad certificate") {
+	if !strings.Contains(line, "TLS handshake error") {
+		// 相手が接続ごとに自由に出させられる行ではない(ハンドラの panic、Accept の誤りなど)ので
+		// 間引かない。
+		log.Print(line)
+		return len(p), nil
+	}
+	// net/http の行は "...: <err>" で終わり、証明書を拒んだ alert のエラー文は "remote error:
+	// tls: bad certificate" である(crypto/tls の net.OpError{Op: "remote error", Err: alert(...)})。
+	// 行のどこかに部分文字列があるかではなく、行の終わりがこれと一致するかで判定する。相手が
+	// ALPN の一覧などに同じ文字列を混ぜても、行の終わりには出ないため判定されない。
+	isBadCert := strings.HasSuffix(line, "remote error: tls: bad certificate")
+
+	h.mu.Lock()
+	gc := &h.other
+	if isBadCert {
+		gc = &h.cert
+	}
+	opened, suppressed := gc.allow()
+	h.mu.Unlock()
+
+	if !opened {
+		return len(p), nil
+	}
+	log.Print(formatHandshakeErrorLine(line, isBadCert, suppressed))
+	return len(p), nil
+}
+
+// formatHandshakeErrorLine は、門を通った行の文面を組み立てる。件数は、前回出した行からの
+// 間に間引いた行の数であり、必ずしも同じ文面とは限らない("other" は複数の理由をまとめる)ので、
+// 時間の幅や同一性を言わない文面にする(internal/agent/stream.go の reconnectLog と同じ考え方)。
+func formatHandshakeErrorLine(line string, isBadCert bool, suppressed int) string {
+	if isBadCert {
 		line += badCertHint
 	}
-	log.Print(line)
-	return len(p), nil
+	if suppressed > 0 {
+		line = fmt.Sprintf("%s; %d similar line(s) not logged since the previous one", line, suppressed)
+	}
+	return line
 }
 
 // maxAgentConns はエージェント用 API の同時接続数の固定上限(仕様 11 節)。11a 節の設定項目には

@@ -28,6 +28,10 @@
 #   empty unless you want to double-check it against the name the join string is bound to.
 # - WGFT_AGENT_ALLOW_TARGETS restricts the addresses this agent connects to, so that a compromised
 #   server cannot use it to reach the rest of the LAN (SECURITY.md). Unset means no restriction.
+# - Logging: the json-file driver below caps the container log at about 30 MiB (3 files of 10 MiB)
+#   instead of Docker's unbounded default, matching deploy/server.compose.yaml. Setting driver here
+#   overrides any other default set in the Docker daemon's daemon.json, such as journald or local;
+#   edit the logging section below instead if you rely on that default.
 services:
   wgft-agent:
     image: ghcr.io/rahanahu/wgft-agent:latest
@@ -36,6 +40,11 @@ services:
     #   dockerfile: deploy/Dockerfile.agent
     container_name: wgft-agent
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # No capabilities, no privilege escalation, read-only root file system. The only writable
     # path is the state volume.
     cap_drop: [ALL]
