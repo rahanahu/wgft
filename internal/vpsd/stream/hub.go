@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -77,6 +78,23 @@ const defaultHeartbeatTimeout = 3 * heartbeatInterval
 // writeTimeout は書きの期限(既存の Push の context に揃える)。
 const writeTimeout = 10 * time.Second
 
+// 確立前の stream の上限(設計文書 5.2 節、11 節)。恒久トークンの確認を通った stream は送信元ごとの
+// 未認証の接続の数から外れる(agentapi の Authenticated)ので、最初のメッセージを受け取って接続を
+// 確立するまでの間は、次の 3 つで抑える。
+const (
+	// defaultFirstMessageTimeout は、最初のメッセージ(pubkey)を待つ期限。エージェントは WebSocket
+	// の接続の直後に pubkey を送るので、往復 1 回で届く。
+	defaultFirstMessageTimeout = 10 * time.Second
+	// firstMessageReadLimit は、最初のメッセージの大きさの上限。今の pubkey は約 130 byte で、
+	// capabilities の語彙が増えても収まる大きさにしてある。確立の後は streamReadLimit に戻す。
+	firstMessageReadLimit = 4 << 10
+	// streamReadLimit は、確立した stream のメッセージ(ハートビート)の大きさの上限。
+	streamReadLimit = 1 << 20
+	// maxPendingPerAgent は、1 つのエージェントが同時に持てる確立前の stream の数。1 本が半開きの
+	// まま期限を待つ間も、つなぎ直しの 1 本が通るよう 2 にしてある。
+	maxPendingPerAgent = 2
+)
+
 // Hub はエージェントごとの接続と状態を持つ。
 type Hub struct {
 	backend Backend
@@ -95,6 +113,8 @@ type Hub struct {
 	OnHeartbeat func(agent string, generation uint64)
 	// HeartbeatTimeout は読みの期限(既定 90 秒。テストで短くできるよう差し替え可能にしてある)
 	HeartbeatTimeout time.Duration
+	// firstMessageTimeout は最初のメッセージを待つ期限(既定 defaultFirstMessageTimeout。テストが短くする)
+	firstMessageTimeout time.Duration
 
 	mu sync.Mutex
 	// locks は、同一エージェントの接続処理と hook の直列化に使う。
@@ -103,6 +123,11 @@ type Hub struct {
 	locks  map[string]*agentLocks
 	conns  map[string]*conn
 	status map[string]*Status
+	// pending は、エージェントごとの確立前の stream の数(恒久トークンの確認の後、接続の表に
+	// 入るまで)。0 になった項目は消す
+	pending map[string]int
+
+	pendingLog lograte.Gate // maxPendingPerAgent で断った行
 }
 
 type agentLocks struct {
@@ -126,8 +151,9 @@ type heldAgentLock struct {
 func New(b Backend) *Hub {
 	return &Hub{
 		backend: b, locks: map[string]*agentLocks{},
-		conns: map[string]*conn{}, status: map[string]*Status{},
-		HeartbeatTimeout: defaultHeartbeatTimeout,
+		conns: map[string]*conn{}, status: map[string]*Status{}, pending: map[string]int{},
+		HeartbeatTimeout:    defaultHeartbeatTimeout,
+		firstMessageTimeout: defaultFirstMessageTimeout,
 	}
 }
 
@@ -222,6 +248,17 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// 確立前の stream をエージェントごとに数える。送信元ごとの未認証の数から外す前に確かめ、
+	// 断る接続は未認証のまま閉じる
+	release, ok := h.reservePending(agent)
+	if !ok {
+		if h.pendingLog.Allow() {
+			log.Printf("stream: %s: refusing a stream: %d streams of this agent are already waiting to be established", agent, maxPendingPerAgent)
+		}
+		http.Error(w, "too many attempts", http.StatusTooManyRequests)
+		return
+	}
+	defer release()
 	if h.Authenticated != nil {
 		h.Authenticated(r)
 	}
@@ -232,17 +269,42 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// HTTP does not close hijacked connections when the handler returns.
 	defer ws.CloseNow()
-	ws.SetReadLimit(1 << 20)
-	h.serve(r.Context(), agent, identity, from, ws)
+	ws.SetReadLimit(firstMessageReadLimit)
+	h.serve(r.Context(), agent, identity, from, ws, release)
 }
 
-func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *websocket.Conn) {
+// reservePending は agent の確立前の stream の枠を 1 つ取る。上限に達していれば ok は false。
+// release は何度呼んでもよく、最初の 1 回だけ枠を返す。
+func (h *Hub) reservePending(agent string) (release func(), ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.pending[agent] >= maxPendingPerAgent {
+		return nil, false
+	}
+	h.pending[agent]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if h.pending[agent] <= 1 {
+				delete(h.pending, agent)
+				return
+			}
+			h.pending[agent]--
+		})
+	}, true
+}
+
+// serve は認証を通った stream を最後まで扱う。established は、接続を表に入れた時点で、確立前の
+// stream の枠を返すために呼ぶ。
+func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *websocket.Conn, established func()) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	c := &conn{ws: ws, from: from, identity: identity, cancel: cancel, pushCh: make(chan struct{}, 1), pushDone: make(chan struct{})}
 
 	// 2. 鍵の検証(最初のメッセージ)。失敗した接続は旧接続に影響を与えない
-	readCtx, readCancel := context.WithTimeout(ctx, 30*time.Second)
+	readCtx, readCancel := context.WithTimeout(ctx, h.firstMessageTimeout)
 	var first proto.Message
 	err := readJSON(readCtx, ws, &first)
 	readCancel()
@@ -250,6 +312,7 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 		ws.Close(websocket.StatusPolicyViolation, "first message must be pubkey")
 		return
 	}
+	ws.SetReadLimit(streamReadLimit)
 	key, err := wgtypes.ParseKey(first.PublicKey)
 	if err != nil {
 		ws.Close(websocket.StatusPolicyViolation, "invalid public key")
@@ -323,6 +386,7 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 	h.status[agent] = &Status{Connected: true, StreamFrom: from, ConnectedAt: time.Now(), Protocol: sel}
 	h.mu.Unlock()
 	hook.unlock()
+	established()
 	if h.OnStreamConnect != nil {
 		h.OnStreamConnect(agent, from)
 	}
