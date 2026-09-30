@@ -209,3 +209,48 @@ func TestResolveErrorKeepsItsTextAcrossLookups(t *testing.T) {
 		t.Errorf("the error keeps the socket pair: %q", err2)
 	}
 }
+
+// 奪われた VPS が全体状態の wg.keepalive に桁あふれする秒の値を送ると、internal/agent の呼び出し側で
+// `* time.Second` が極めて短い値に巻き戻ることがある。New はそのような極端に短い(1 秒未満の)
+// Keepalive でも、Run の ticker (Keepalive をそのまま period に使う) が minKeepalive を
+// 下回らないことを確かめる、呼び出し側の防御の 2 段目である。
+func TestNewFloorsATinyKeepalive(t *testing.T) {
+	srvKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name      string
+		keepalive time.Duration
+		want      time.Duration
+	}{
+		{"normal value: kept", 25 * time.Second, 25 * time.Second},
+		{"overflowed to a tiny duration: floored to the 25s default", 512, 25 * time.Second},
+		{"zero: floored to the 25s default (unrelated to this finding, pre-existing)", 0, 25 * time.Second},
+		{"negative: floored to the 25s default", -time.Second, 25 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				PrivateKey: agentKey, ServerPublicKey: srvKey.PublicKey(),
+				Address:       netip.MustParseAddr("10.200.0.2"),
+				ServerAddress: netip.MustParseAddr("10.200.0.1"),
+				MTU:           1420,
+				Keepalive:     tt.keepalive,
+				Logf:          func(string, ...any) {},
+			}
+			tun, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer tun.Close()
+			if tun.cfg.Keepalive != tt.want {
+				t.Errorf("cfg.Keepalive = %v, want %v", tun.cfg.Keepalive, tt.want)
+			}
+		})
+	}
+}

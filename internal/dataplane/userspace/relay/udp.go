@@ -13,6 +13,25 @@ import (
 
 const udpBufMax = 65535
 
+// minSweepInterval is a floor on the idle-sweep ticker below, independent of
+// Options.UDPIdleTimeout. The VPS-sent seconds value that UDPIdleTimeout is built from is
+// already bounded before it reaches here (internal/agent secondsToDuration), but this floor
+// keeps the ticker from spinning the host's CPU should that bound ever be bypassed, an
+// overflowing multiplication wrap it to a tiny or negative duration, or a future caller pass
+// through an unvalidated value. It is far below any interval a real UDPIdleTimeout (whole
+// seconds, minimum useful value around a second) produces, so it never changes behavior for
+// a legitimate value or the sub-second values existing tests use for fast idle timeouts.
+const minSweepInterval = 20 * time.Millisecond
+
+// sweepInterval is the idle-sweep ticker's period for a given UDPIdleTimeout: a quarter of
+// it, floored at minSweepInterval.
+func sweepInterval(idle time.Duration) time.Duration {
+	if iv := idle / 4; iv >= minSweepInterval {
+		return iv
+	}
+	return minSweepInterval
+}
+
 // udpSession は (送信元 IP, 送信元ポート) ごとの、target への接続。
 // エージェントから見た送信元は VPS の masquerade により常に 10.200.0.1 なので、実質は送信元ポートで区別される。
 type udpSession struct {
@@ -190,7 +209,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 
 	// 無通信のセッションを閉じる
 	go func() {
-		t := time.NewTicker(m.opts.UDPIdleTimeout / 4)
+		t := time.NewTicker(sweepInterval(m.opts.UDPIdleTimeout))
 		defer t.Stop()
 		for {
 			select {

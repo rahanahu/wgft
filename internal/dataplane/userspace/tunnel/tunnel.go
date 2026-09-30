@@ -28,6 +28,9 @@ import (
 	"github.com/rahanahu/wgft/internal/nettun"
 )
 
+// minKeepalive is the floor New applies to Config.Keepalive; see the comment at its use.
+const minKeepalive = time.Second
+
 // Config はトンネルの宣言。全体状態の wg 節から作る。
 type Config struct {
 	PrivateKey      wgtypes.Key
@@ -74,7 +77,13 @@ func New(cfg Config) (*Tunnel, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = log.Printf
 	}
-	if cfg.Keepalive <= 0 {
+	// The VPS-sent seconds value that Keepalive is built from is already bounded before it
+	// reaches here (internal/agent secondsToDuration), but this floor keeps Run's ticker
+	// (below) from spinning the host's CPU should that bound ever be bypassed, or an
+	// overflowing multiplication wrap it to a tiny or negative duration. minKeepalive is far
+	// below any real keepalive: WireGuard's own persistent_keepalive_interval defaults to
+	// disabled, and wgft's own default below is 25s; nothing sane runs it under a second.
+	if cfg.Keepalive < minKeepalive {
 		cfg.Keepalive = 25 * time.Second
 	}
 	tnet, err := nettun.Create(cfg.Address, cfg.MTU)

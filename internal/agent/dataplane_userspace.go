@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
+	"math"
 	"net/netip"
 	"sort"
 	"time"
@@ -15,6 +17,37 @@ import (
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
+
+// keepaliveMaxSeconds は wg.keepalive として受け入れる上限で、カーネルモードの checkWG
+// (dataplane_kernel.go)がすでに同じ全体状態の値に課している範囲(0 から 65535 秒、WireGuard の
+// persistent_keepalive_interval の幅)と揃える。
+const keepaliveMaxSeconds = 65535
+
+// udpTimeoutStreamMaxSeconds は wg.udp_timeout_stream として受け入れる上限。VPS は
+// nf_conntrack_udp_timeout_stream を 32 bit の int として持つ(internal/platform/linux の
+// ReadUDPTimeouts)ので、正規の VPS が読んで送る値はこれを超えない。math.MaxInt64/int64(time.Second)
+// (秒を time.Duration の int64 ナノ秒に変えたときに桁あふれする境目、約 292 年)より十分小さい
+const udpTimeoutStreamMaxSeconds = math.MaxInt32
+
+// secondsToDuration は、VPS から届く全体状態の秒の値(wg.udp_timeout_stream、wg.keepalive)を
+// time.Duration に変える。0 以下、max を超える値、あるいは max 以下でも変換の結果が 1 秒に届かない
+// 値(max の選び方が正しければ起こらないはずだが、2 段目の守りとして確かめる)は、奪われた VPS が
+// 送りうる桁あふれする値(例:20211507185753197 は `* time.Second` で 512ns に巻き戻る)への備えとして
+// def に落とす。桁あふれが作る極めて短い間隔は、無通信の掃除の goroutine や keepalive の ticker を
+// 回し続けて家のホストの CPU を使い切る。0 は値を送らない旧い server の正当な値なので、黙って def に
+// 落とす。0 以外で拒んだときは、build のときにしか呼ばれないこの経路から英語で 1 行を記録する
+func secondsToDuration(name string, seconds, max int, def time.Duration) time.Duration {
+	if seconds == 0 {
+		return def
+	}
+	if seconds > 0 && seconds <= max {
+		if d := time.Duration(seconds) * time.Second; d >= time.Second {
+			return d
+		}
+	}
+	log.Printf("wg.%s %d is out of the accepted range 1-%d seconds; using the default %v instead", name, seconds, max, def)
+	return def
+}
 
 // userspaceDataplane はユーザー空間モードの dataplane である(仕様 7 節)。wireguard-go と netstack の
 // トンネル(internal/dataplane/userspace/tunnel)と、その上の中継(internal/dataplane/userspace/relay)
@@ -128,7 +161,7 @@ func (d *userspaceDataplane) read() dataplaneReading {
 // 使う判定として渡す(仕様 7 節)。一覧が無ければ渡さないので、中継の挙動は一覧の導入前と同じになる。
 func (d *userspaceDataplane) relayOptions(wg proto.WGConfig) relay.Options {
 	o := relay.Options{
-		UDPIdleTimeout: time.Duration(wg.UDPTimeoutStream) * time.Second,
+		UDPIdleTimeout: secondsToDuration("udp_timeout_stream", wg.UDPTimeoutStream, udpTimeoutStreamMaxSeconds, 120*time.Second),
 		Limits:         d.limits,
 	}
 	if d.allow != nil {
@@ -176,6 +209,6 @@ func tunnelConfig(priv wgtypes.Key, w proto.WGConfig) (tunnel.Config, error) {
 	return tunnel.Config{
 		PrivateKey: priv, ServerPublicKey: serverPub, Endpoint: w.Endpoint,
 		Address: addr.Addr(), ServerAddress: server, MTU: w.MTU,
-		Keepalive: time.Duration(w.Keepalive) * time.Second,
+		Keepalive: secondsToDuration("keepalive", w.Keepalive, keepaliveMaxSeconds, 25*time.Second),
 	}, nil
 }

@@ -481,3 +481,49 @@ func TestGuardEffectsFollowTheLayers(t *testing.T) {
 		})
 	}
 }
+
+// Same overflow shape as secondsToDuration guards against (dataplane_userspace.go): if
+// agent.json is corrupted or tampered with, st.WG.Keepalive could sit outside the 0-65535
+// range that kernel mode's checkWG (dataplane_kernel.go) normally enforces before this value
+// is ever recorded. declaredAgentLink rejects it rather than let `agent doctor` display an
+// out-of-range or overflowed Keepalive.
+func TestDeclaredAgentLinkRejectsOutOfRangeKeepalive(t *testing.T) {
+	serverPriv, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := proto.WGConfig{
+		ServerPubkey: serverPriv.PublicKey().String(),
+		Address:      "10.200.0.2/24",
+		MTU:          1420,
+	}
+
+	tests := []struct {
+		name      string
+		keepalive int64
+		wantOK    bool
+	}{
+		{"typical value in range", 25, true},
+		{"at the upper bound", 65535, true},
+		{"overflow value that wraps to 512ns is rejected", 20211507185753197, false},
+		{"one past the upper bound is rejected", 65536, false},
+		{"negative is rejected", -1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !fitsInt(tt.keepalive) {
+				t.Skip("the keepalive value does not fit in int on this platform")
+			}
+			w := base
+			w.Keepalive = int(tt.keepalive)
+			_, ok := declaredAgentLink("wgft0", cur, wgtypes.Key{}, w)
+			if ok != tt.wantOK {
+				t.Errorf("declaredAgentLink ok = %v, want %v", ok, tt.wantOK)
+			}
+		})
+	}
+}
