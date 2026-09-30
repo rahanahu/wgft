@@ -213,16 +213,15 @@ func TestUDPRegistrationChecksRetiringUnderSessionLock(t *testing.T) {
 		armed    atomic.Bool
 		hookIn   = make(chan struct{})
 		hookGo   = make(chan struct{})
-		releases atomic.Int32
-		connMu   sync.Mutex
-		dialed   []*closeTrackedConn
+		hookOnce sync.Once
+		// releaseHook は止めた読み取りのループを進める。2 回目以降は何もしない
+		releaseHook = func() { hookOnce.Do(func() { close(hookGo) }) }
+		releases    atomic.Int32
+		connMu      sync.Mutex
+		dialed      []*closeTrackedConn
 	)
 	t.Cleanup(func() {
-		select {
-		case <-hookGo:
-		default:
-			close(hookGo)
-		}
+		releaseHook()
 		connMu.Lock()
 		defer connMu.Unlock()
 		for _, c := range dialed {
@@ -262,6 +261,10 @@ func TestUDPRegistrationChecksRetiringUnderSessionLock(t *testing.T) {
 		},
 	})
 	defer m.Close()
+	// 失敗して途中で戻るときは、m.Close より先にループを進める。ループはセッションの錠を持って
+	// 止まっており、Retiring の Commit は m.mu を持ったまま sweep でその錠を待つので、先に進めないと
+	// m.Close が m.mu を待ち続ける
+	defer releaseHook()
 	// 中継を始める前に設定する。止めるのは armed を立てた後の 1 回だけ
 	m.testUDPRegistering = func() {
 		if armed.CompareAndSwap(true, false) {
@@ -323,7 +326,7 @@ func TestUDPRegistrationChecksRetiringUnderSessionLock(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	close(hookGo)
+	releaseHook()
 	select {
 	case <-retired:
 	case <-time.After(5 * time.Second):
