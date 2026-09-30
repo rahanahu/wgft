@@ -64,8 +64,8 @@ services:
       # flows and holds them; the memory soft limit printed at startup is derived from them, but a
       # soft limit is a GC target, not a memory bound. In the worst case, when an attack fills every
       # flow and buffer at once, this server with the default caps, one agent and one forwarded TCP
-      # port needs a host with about 7.1 GiB of memory; lower caps shrink that, but not below about
-      # 4.1 GiB. docs/design.md section 7 gives the terms and a table of lower caps for smaller hosts.
+      # port needs a host with about 5.9 GiB of memory; lower caps shrink that, but not below about
+      # 2.9 GiB. docs/design.md section 7 gives the terms and a table of lower caps for smaller hosts.
       # WGFT_MAX_UDP_FLOWS: "8192"
       # WGFT_MAX_TCP_FLOWS: "2048"
     ports:

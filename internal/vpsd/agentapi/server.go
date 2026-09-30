@@ -117,9 +117,15 @@ type serverTimeouts struct {
 // defaultTimeouts は公開の agent API の既定値。
 // WriteTimeout は持たない: stream は WebSocket へ hijack した接続で、hijack 後は
 // net/http の WriteTimeout が効かないため、書きの期限は stream 側で別に持つ(stream/hub.go)。
+//
+// net/http は TLS のハンドシェイクの期限に、これらの期限の正の最小値を使う。したがって
+// ReadHeaderTimeout の 5 秒は、ハンドシェイクの期限でもある。未認証の接続が枠を持つのは、
+// ハンドシェイクの期限と ReadTimeout の和(15 秒)までになる(仕様 11 節)。エージェントは
+// TCP の接続の直後にハンドシェイクを始め、ヘッダと 4 KiB 以下の登録の本文をその直後に送る。
+// ハンドシェイクは往復 1 回か 2 回なので、往復に 1 秒かかる回線でも収まると推測している(未確認)。
 var defaultTimeouts = serverTimeouts{
-	ReadHeaderTimeout: 10 * time.Second,
-	ReadTimeout:       15 * time.Second,
+	ReadHeaderTimeout: 5 * time.Second,
+	ReadTimeout:       10 * time.Second,
 	MaxHeaderBytes:    64 << 10, // 64 KiB
 }
 
@@ -271,6 +277,9 @@ func (s *Server) Serve(addr string) error {
 
 // Listen は addr の TCP で待ち受けを開く。TLS は ServeListener が掛ける。待ち受けを開くところまでを
 // 応答と分けるのは、vpsd が全部の待ち受けを開けてから起動完了のログを出すため(仕様 10.4 節)。
+// 既定の 0.0.0.0:8443 のようにホストが未指定のアドレスでは、Go は IPv6 が使えるホストで IPv6 の
+// ソケットを IPV6_V6ONLY を外して開くので、IPv4 と IPv6 の両方に応じる(net.ipv6.bindv6only の設定に
+// 依らない)。tcp4 にはしない。WGFT_AGENT_API の意味が変わるためである(仕様 7a.11 節)。
 func (s *Server) Listen(addr string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -283,15 +292,15 @@ func (s *Server) Listen(addr string) (net.Listener, error) {
 
 // ServeListener は Listen で開いた待ち受けで TLS の応答を続ける。
 func (s *Server) ServeListener(ln net.Listener) error {
-	return s.serveListener(ln, maxAgentConns, maxPreAuthConnsPerSource)
+	return s.serveListener(ln, maxAgentConns, defaultPreAuthLimits)
 }
 
-// serveListener は ServeListener の本体である。2 つの上限はテストが小さい値を注入できるよう引数にしてある。
-func (s *Server) serveListener(ln net.Listener, total, perSource int) error {
+// serveListener は ServeListener の本体である。上限はテストが小さい値を注入できるよう引数にしてある。
+func (s *Server) serveListener(ln net.Listener, total int, preAuth preAuthLimits) error {
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{s.cert}, MinVersion: tls.VersionTLS12}
 	srv := newHTTPServer(ln.Addr().String(), s, tlsConfig, defaultTimeouts)
 	// 送信元ごとの枠を外側に置く。TLS の接続の下に sourceConn が直接来るので、stream のハンドラが
 	// 認証を通った接続を枠から外せる(withSourceConn)。上限を超えて閉じた接続は、全体の枠も閉じた
 	// ときに返す。
-	return srv.ServeTLS(newSourceLimitListener(limitListener(ln, total), perSource), "", "")
+	return srv.ServeTLS(newSourceLimitListener(limitListener(ln, total), preAuth), "", "")
 }
