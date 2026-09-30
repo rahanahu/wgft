@@ -6,7 +6,6 @@ import (
 	"net/netip"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
@@ -25,13 +24,14 @@ func (t *Device) ListenUDP(ap netip.AddrPort) (net.PacketConn, error) {
 // TCPListener は、Accept が *TCPConn を返す net.Listener。呼び出し側は、拒む接続をグレース
 // フルクローズの代わりに RST(TCPConn.Abort)で終えられる。
 type TCPListener struct {
-	ep tcpip.Endpoint
-	wq *waiter.Queue
+	ep   tcpip.Endpoint
+	wq   *waiter.Queue
+	pool *boostPool
 }
 
 // ListenTCP は ap で TCP リスナーを開く。gonet.ListenTCP の Bind+Listen をそのまま写したもの
 // (gonet.ListenTCP 自体を使わない理由は、その Accept が accept した tcpip.Endpoint を公開せず、
-// TCPConn.Abort に要るため。パッケージ doc を見よ)。
+// TCPConn.Abort と TCP のバッファの floor の設定に要るため。パッケージ doc を見よ)。
 func (t *Device) ListenTCP(ap netip.AddrPort) (*TCPListener, error) {
 	var wq waiter.Queue
 	ep, err := t.stack.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
@@ -47,11 +47,28 @@ func (t *Device) ListenTCP(ap netip.AddrPort) (*TCPListener, error) {
 		ep.Close()
 		return nil, &net.OpError{Op: "listen", Net: "tcp", Addr: net.TCPAddrFromAddrPort(ap), Err: errors.New(err.String())}
 	}
-	return &TCPListener{ep: ep, wq: &wq}, nil
+	return &TCPListener{ep: ep, wq: &wq, pool: t.pool}, nil
 }
 
-// Accept は net.Listener の実装。
+// Accept は net.Listener の実装。返す接続には握手の後に TCP のバッファの floor を設定する
+// (tcpbuf.go)。通常の握手と SYN cookie のどちらで成立した接続も、gVisor の Accept から
+// この経路を通る。floor を設定できなかった接続は RST で閉じ、次の接続を待つ。
 func (l *TCPListener) Accept() (net.Conn, error) {
+	for {
+		n, wq, err := l.accept()
+		if err != nil {
+			return nil, err
+		}
+		c, herr := newTCPConn(wq, n, l.pool)
+		if herr != nil {
+			n.Abort()
+			continue
+		}
+		return &TCPConn{c}, nil
+	}
+}
+
+func (l *TCPListener) accept() (tcpip.Endpoint, *waiter.Queue, error) {
 	n, wq, err := l.ep.Accept(nil)
 	if _, ok := err.(*tcpip.ErrWouldBlock); ok {
 		waitEntry, notifyCh := waiter.NewChannelEntry(waiter.ReadableEvents)
@@ -66,9 +83,9 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 		}
 	}
 	if err != nil {
-		return nil, &net.OpError{Op: "accept", Net: "tcp", Addr: l.Addr(), Err: errors.New(err.String())}
+		return nil, nil, &net.OpError{Op: "accept", Net: "tcp", Addr: l.Addr(), Err: errors.New(err.String())}
 	}
-	return &TCPConn{TCPConn: gonet.NewTCPConn(wq, n), ep: n}, nil
+	return n, wq, nil
 }
 
 // Close は net.Listener の実装。
@@ -85,16 +102,3 @@ func (l *TCPListener) Addr() net.Addr {
 	}
 	return &net.TCPAddr{IP: net.IP(a.Addr.AsSlice()), Port: int(a.Port)}
 }
-
-// TCPConn は *gonet.TCPConn に、その tcpip.Endpoint へのアクセスを足したもの。ListenTCP の Accept と
-// DialTCP が返す。これにより、拒む接続と中継が切る接続をグレースフルクローズ(FIN の後、既定で 60 秒の
-// tcp.DefaultTCPTimeWaitTimeout の TIME_WAIT)ではなく Abort(RST)で終えられる。relay パッケージでの
-// Abort の使用と、GitHub issue #25、仕様 6.2 節と 7 節を見よ。
-type TCPConn struct {
-	*gonet.TCPConn
-	ep tcpip.Endpoint
-}
-
-// Abort は RST を送り、Close が行うグレースフルシャットダウン(とその結果の TIME_WAIT)を
-// 経ずに、接続の資源を即座に解放する。
-func (c *TCPConn) Abort() { c.ep.Abort() }

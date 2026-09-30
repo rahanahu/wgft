@@ -2,7 +2,8 @@
 // トンネル(internal/dataplane/userspace/utun)が共有する、netstack と TUN の接続部分。どちらも wireguard-go の
 // device を支える gVisor の stack.Stack への package 内のアクセスを要る。サーバ側は UDP の応答をバッファ
 // なしで待つため(waiter.Queue)、エージェント側は拒んだ TCP 接続を RST で即座に終える(Abort)
-// ため(listen.go)、どちらも UDP の受信を会計に通すため(udp_accounting.go)である。wireguard-go 自身の
+// ため(listen.go)、どちらも UDP の受信を会計に通すため(udp_accounting.go)と、TCP の送信と受信の
+// バッファに上限を置くため(tcpbuf.go)である。wireguard-go 自身の
 // tun/netstack パッケージは組み立てた stack を公開しない(型 Net は非公開の netTun を包む)ため、この
 // パッケージは tun/netstack.CreateNetTUN の必要な部分を写したもの(MIT License、Copyright (C) 2017-2025
 // WireGuard LLC)を基にする。stack はこのパッケージの外に出さない。外で UDP の endpoint を作れると、
@@ -49,6 +50,7 @@ type Device struct {
 	sweepStop  chan struct{}
 	sweepDone  chan struct{}
 	closed     atomic.Bool
+	pool       *boostPool // TCP のバッファの枠。プロセスで 1 つ(tcpbuf.go)
 }
 
 // Create は addr (IPv4 のみ) を唯一のアドレスとする Device を作る。
@@ -69,6 +71,13 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		cancelRead: cancelRead,
 		mtu:        mtu,
 		local:      addr,
+		pool:       processTCPBoost,
+	}
+	// TCP の endpoint を作る前に設定する。失敗した stack は閉じて使わない
+	if err := setTCPBufferRanges(dev.stack); err != nil {
+		dev.Close()
+		dev.Wait()
+		return nil, err
 	}
 	sack := tcpip.TCPSACKEnabled(true) // 既定では無効
 	if err := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
