@@ -82,6 +82,9 @@ type Hub struct {
 	backend Backend
 	// RateLimit は接続試行の送信元 IP ごとの制限(agentapi のものを使う)。nil なら制限しない
 	RateLimit func(remoteAddr string) bool
+	// Authenticated は恒久トークンの確認が通った直後に呼ぶ。agentapi はその接続を送信元ごとの
+	// 未認証の接続の数から外す(設計文書 11 節)。nil なら何もしない
+	Authenticated func(r *http.Request)
 	// OnStreamConnect は stream の認証が通って接続が確立したときに呼ぶ(窃取検知の「IP の往復」用。
 	// 短命な supersede も取りこぼさないよう、サンプリングではなく接続の事象で記録する)。nil なら何もしない
 	OnStreamConnect func(agent, from string)
@@ -218,6 +221,9 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("stream: authenticate: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	if h.Authenticated != nil {
+		h.Authenticated(r)
 	}
 	from, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})

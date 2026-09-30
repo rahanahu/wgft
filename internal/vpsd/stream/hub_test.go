@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -770,5 +771,45 @@ func TestSupersedeWaitsForTheHeartbeatHook(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the new connection did not get its state after OnHeartbeat finished")
+	}
+}
+
+// TestAuthenticatedHookRunsOnlyAfterAuthentication は、Authenticated が恒久トークンの確認を通った
+// 接続にだけ、最初のメッセージを待つ前に呼ばれることを確かめる。agentapi はこの呼び出しで、その接続を
+// 送信元ごとの未認証の接続の数から外す(設計文書 11 節)。レート制限や無効なトークンで断った接続で
+// 呼ぶと、未認証の接続が数から外れ、上限を回り込める。
+// 変異の確認:呼び出しを Authenticate の前に動かすと、無効なトークンで呼ばれて落ちる。呼び出しを
+// 消すと、有効なトークンで呼ばれずに落ちる。
+func TestAuthenticatedHookRunsOnlyAfterAuthentication(t *testing.T) {
+	server, _ := wgtypes.GeneratePrivateKey()
+	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}}
+	h := New(b)
+	var calls atomic.Int32
+	h.Authenticated = func(*http.Request) { calls.Add(1) }
+	var limited atomic.Bool
+	limited.Store(true)
+	h.RateLimit = func(string) bool { return !limited.Load() }
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	if _, resp, err := dial(t, url, "tok-home"); err == nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("rate-limited attempt: err=%v resp=%v", err, resp)
+	}
+	limited.Store(false)
+	if _, resp, err := dial(t, url, "bad"); err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad token: err=%v resp=%v", err, resp)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("Authenticated ran %d times for refused attempts, want 0", n)
+	}
+	// 有効なトークン:最初のメッセージを送る前に呼ばれている
+	c, _, err := dial(t, url, "tok-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	if n := calls.Load(); n != 1 {
+		t.Errorf("Authenticated ran %d times for an authenticated stream before its first message, want 1", n)
 	}
 }
