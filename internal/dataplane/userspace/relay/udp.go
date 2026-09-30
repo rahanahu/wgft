@@ -299,6 +299,9 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				// stopAccept で受け付けの印を下ろしてから mu を取って sweep するので、mu の下で印が立って
 				// いれば、登録したセッションはその sweep が接続元制限で判定する
 				mu.Lock()
+				if h := m.testUDPRegistering; h != nil {
+					h()
+				}
 				stopped := !l.accepting.Load()
 				select {
 				case <-done:
