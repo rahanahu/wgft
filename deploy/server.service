@@ -22,9 +22,11 @@ RestartPreventExitStatus=3
 # Optional, off by default: a hard cgroup memory cap for this service. wgft also sets a Go runtime
 # soft limit derived from the flow caps (printed at startup; 216 MiB with the default caps), but a
 # soft limit is a GC target, not a memory bound (docs/design.md section 7). If you enable
-# MemoryMax=, keep it above the printed soft limit. In the lab, userspace mode with the default
-# flow caps stayed within 300M under a held-flow attack; a deliberately small 60M limit OOM-killed
-# the service after 8 s and Restart= brought it back 2 s later.
+# MemoryMax=, keep it above the printed soft limit. 300M below is a lab measurement, not a bound:
+# userspace mode with the default flow caps stayed within 300M under one held-flow attack, and a
+# deliberately small 60M limit OOM-killed the service after 8 s and Restart= brought it back 2 s
+# later. An attack that fills every flow and buffer needs far more; the host memory that
+# userspace mode needs in the worst case is in docs/design.md section 7.
 #MemoryMax=300M
 #MemorySwapMax=0
 

@@ -188,7 +188,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | C3 | 規模の試験 | ルール数とエージェント数が多いときの適用時間、テーブルの差し替え、全体状態の大きさの問題 | ラボ | `phase` | 段階の完了ごとに 1 回 | kernel 約 3 分、userspace 約 1 分半 (実測) | 自動 (開発者が起動) |
 | C4 | ラボの一式を別のディストリビューションで | カーネルと nftables の版の違いによる挙動の違い (通知、`ct count`、式の表記) | ラボ (`WGFT_LAB_IMAGE` で別のイメージの VM) | `phase`、`kernel` | v1 の前に一度、以後は関係する変更 (kernel 側の経路) を含む段階の完了時 | A9 と同じ | 自動 (開発者が起動。Fedora は未対応) |
 | C5 | 長時間の TCP と UDP (新設) | 通常の WireGuard のセッションの鍵の更新、ハートビート、conntrack の期限をまたいで長いセッションが切れること。`agent rotate-key` の後に新しい通信が戻らないこと | ラボ | `phase`、`resource`、`dataplane-net` | v1 の前に一度 (Phase 6 の完了時)、以後は関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 1 時間以上 (見込み) | 自動 (新設) |
-| C6 | 小さいメモリの環境 (新設) | 256 MiB の VPS の目安の設定で、フラッドの下で server が OOM で落ちること | ラボ (メモリを制限した cgroup) | `phase`、`resource`、`dataplane-net` | v1 の前に一度 (Phase 6 の完了時)、以後は関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 数分 (見込み) | 自動 (新設) |
+| C6 | 小さいメモリの環境 (新設) | 上限を下げた設定と 256 MiB に制限したメモリで、フラッドの下で server が OOM で落ちること | ラボ (メモリを制限した cgroup) | `phase`、`resource`、`dataplane-net` | v1 の前に一度 (Phase 6 の完了時)、以後は関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 数分 (見込み) | 自動 (新設) |
 
 ### D 類 (リリース候補の関門)
 
@@ -326,13 +326,13 @@ Fedora 44 (カーネル 7.2.5、nftables v1.1.6) でも同じ一式を既定の�
 
 ### C6 小さいメモリの環境
 
-- 内容:メモリを 256 MiB に制限した server と agent を、設計文書 7 節の目安の設定 (`WGFT_MAX_UDP_FLOWS=2048`、`WGFT_MAX_TCP_FLOWS=1024`) で動かし、上限を超えるフラッドの下でも OOM で落ちないことを確かめます
+- 内容:メモリを 256 MiB に制限した server と agent を、上限を下げた設定 (`WGFT_MAX_UDP_FLOWS=2048`、`WGFT_MAX_TCP_FLOWS=1024`) で動かし、上限を超えるフラッドの下でも OOM で落ちないことを確かめます。この確認はそのフラッドでの退行を見つけるためのものです。設計文書 7 節の上界はすべての保持点を埋めた場合の値で、この設定でも 256 MiB を大きく超えるので、この確認は上界の内側に収まることを示しません
 - 足りない理由:ラボの VM は 2 GiB のメモリを持ち、check 5 はプロセスのメモリを制限しません
 - 環境:cgroup でプロセスのメモリを制限したラボです
-- 時期:v1 の前に一度 (Phase 6 の完了時) 流し、以後は関係する変更 (Resource Guard、network dataplane) と目安の値の変更を含む段階の完了時に流し直します
+- 時期:v1 の前に一度 (Phase 6 の完了時) 流し、以後は関係する変更 (Resource Guard、network dataplane) を含む段階の完了時に流し直します
 - 契機:`phase`、`resource`、`dataplane-net`
 - 自動化:自動です
-- v1:必須で、v1 の前に 1 回の項目です。文書に書いた目安の値を確かめる手段が他にありません
+- v1:必須で、v1 の前に 1 回の項目です。上限を下げた設定でのフラッドの退行を確かめる手段が他にありません
 
 ### D1 と D2:Windows と macOS のエージェントの smoke
 

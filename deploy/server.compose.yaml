@@ -52,12 +52,12 @@ services:
       # Optional: process-wide caps on concurrent flows (defaults 8192 UDP sessions and 2048 TCP
       # connections). They cap how many flows the server holds at once under an attack that opens
       # flows and holds them; the memory soft limit printed at startup is derived from them, but a
-      # soft limit is a GC target, not a memory bound (docs/design.md section 7). Lower them on a
-      # VPS with little memory: in the lab, outside a container, a userspace-mode server with the
-      # values below stayed within a 150 MiB memory limit under such an attack; this has not yet
-      # been verified on a real 256 MiB VPS.
-      # WGFT_MAX_UDP_FLOWS: "2048"
-      # WGFT_MAX_TCP_FLOWS: "1024"
+      # soft limit is a GC target, not a memory bound. In the worst case, when an attack fills every
+      # flow and buffer at once, this server with the default caps, one agent and one forwarded TCP
+      # port needs a host with about 7.1 GiB of memory; lower caps shrink that, but not below about
+      # 4.1 GiB. docs/design.md section 7 gives the terms and a table of lower caps for smaller hosts.
+      # WGFT_MAX_UDP_FLOWS: "8192"
+      # WGFT_MAX_TCP_FLOWS: "2048"
     ports:
       - "51820:51820/udp"
       - "8443:8443/tcp"
