@@ -5,13 +5,13 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  packages: write
+permissions: {}
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its assets
     steps:
       - uses: actions/checkout@v7
         with:
@@ -112,6 +112,9 @@ jobs:
   agent-image:
     needs: goreleaser
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout only
+      packages: write # push the image to ghcr.io
     steps:
       - uses: actions/checkout@v7
       # buildx builds both platforms in one go; the Dockerfile cross-compiles, so no QEMU is needed.
@@ -137,6 +140,9 @@ jobs:
   server-image:
     needs: goreleaser
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout only
+      packages: write # push the image to ghcr.io
     steps:
       - uses: actions/checkout@v7
       # buildx builds both platforms in one go; the Dockerfile cross-compiles, so no QEMU is needed
