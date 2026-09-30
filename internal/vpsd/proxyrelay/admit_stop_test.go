@@ -52,7 +52,7 @@ func newAdmitRig(t *testing.T, total int, halfOpen bool) *admitRig {
 	r := &admitRig{pool: resource.NewPool(total), addrs: map[uint16]string{}}
 	a1, a2 := closingAgent(t), closingAgent(t)
 	if halfOpen {
-		a1, a2 = halfOpenAgent(t), halfOpenAgent(t)
+		a1, a2 = halfOpenAgent(t, nil), halfOpenAgent(t, nil)
 	}
 	r.agents = map[string]string{"10.200.0.2:8443": a1, "10.200.0.3:8443": a2, "10.200.0.2:8444": a1, "10.200.0.3:8444": a2}
 	r.m = New(Options{
