@@ -25,11 +25,60 @@ func TestParseJoin(t *testing.T) {
 		"wgft://vps.example.com:8443/tok",
 		"wgft://vps.example.com:8443/tok#sha256:zz",
 		"wgft://vps.example.com:8443/tok#md5:" + strings.Repeat("ab", 32),
+		"wgft://vps.example.com:/tok#sha256:" + strings.Repeat("ab", 32),
+		"wgft://vps.example.com:0/tok#sha256:" + strings.Repeat("ab", 32),
+		"wgft://vps.example.com:70000/tok#sha256:" + strings.Repeat("ab", 32),
 		"",
 	} {
 		if _, err := ParseJoin(bad); err == nil {
 			t.Errorf("%q should be rejected", bad)
 		}
+	}
+}
+
+// TestParseJoinNeverEchoesTheToken guards against the join token reaching a log through
+// ParseJoin's own error text. When a join string has no port and no path, url.Parse puts the
+// whole string into u.Host, so an error that quotes u.Host quotes the token
+// (scripts/check-log-tokens.sh forbids a token value in tool output). This must hold for every
+// rejection path, not only the missing-port one, because a caller logs whichever error comes
+// back (cmd/wgft/agent.go's "WGFT_JOIN is malformed" warning).
+func TestParseJoinNeverEchoesTheToken(t *testing.T) {
+	const token = "sekritjointoken1234567890"
+	for _, bad := range []string{
+		"wgft://" + token,
+		"wgft://" + token + "#sha256:" + strings.Repeat("ab", 32),
+		"wgft://vps.example.com:" + token,
+		"wgft://vps.example.com:8443" + token,
+	} {
+		_, err := ParseJoin(bad)
+		if err == nil {
+			t.Fatalf("%q should be rejected", bad)
+		}
+		if strings.Contains(err.Error(), token) {
+			t.Errorf("ParseJoin(%q) error %q echoes the token", bad, err.Error())
+		}
+	}
+}
+
+// TestParseJoinRejectsBadPorts covers the port values a malformed or truncated join string
+// could carry: no digits at all, zero, and a value past the 16-bit port range. All three used to
+// be accepted because net.SplitHostPort only requires a port field to be present, not that it be
+// a usable TCP port.
+func TestParseJoinRejectsBadPorts(t *testing.T) {
+	pin := "#sha256:" + strings.Repeat("ab", 32)
+	for _, port := range []string{"", "0", "70000", "-1", "not-a-port"} {
+		bad := "wgft://vps.example.com:" + port + "/tok" + pin
+		if _, err := ParseJoin(bad); err == nil {
+			t.Errorf("port %q should be rejected", port)
+		}
+	}
+	good := "wgft://vps.example.com:1/tok" + pin
+	if _, err := ParseJoin(good); err != nil {
+		t.Errorf("port 1 should be accepted: %v", err)
+	}
+	good = "wgft://vps.example.com:65535/tok" + pin
+	if _, err := ParseJoin(good); err != nil {
+		t.Errorf("port 65535 should be accepted: %v", err)
 	}
 }
 

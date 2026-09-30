@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -34,8 +35,11 @@ func FuzzParseJoin(f *testing.F) {
 	f.Add("wgft://vps.example.com:8443/a/b#sha256:" + strings.Repeat("ab", 32))
 	f.Add("wgft:///tok#sha256:" + strings.Repeat("ab", 32))
 	f.Add("wgft://[::1]:8443/tok#sha256:" + strings.Repeat("ab", 32))
-	f.Add("wgft://vps:8443/tok#sha256:" + strings.Repeat("ab", 40)) // pin too long
-	f.Add("wgft://vps:8443/tok#sha256:" + strings.Repeat("ab", 16)) // pin too short
+	f.Add("wgft://vps:8443/tok#sha256:" + strings.Repeat("ab", 40))  // pin too long
+	f.Add("wgft://vps:8443/tok#sha256:" + strings.Repeat("ab", 16))  // pin too short
+	f.Add("wgft://vps:/tok#sha256:" + strings.Repeat("ab", 32))      // empty port
+	f.Add("wgft://vps:0/tok#sha256:" + strings.Repeat("ab", 32))     // port 0
+	f.Add("wgft://vps:70000/tok#sha256:" + strings.Repeat("ab", 32)) // port out of range
 	f.Add("")
 	f.Add("wgft://")
 	f.Add("not a url at all \x00\x01")
@@ -45,8 +49,12 @@ func FuzzParseJoin(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if _, _, err := net.SplitHostPort(j.Endpoint); err != nil {
+		_, port, err := net.SplitHostPort(j.Endpoint)
+		if err != nil {
 			t.Fatalf("ParseJoin(%q).Endpoint = %q, not host:port: %v", s, j.Endpoint, err)
+		}
+		if p, perr := strconv.ParseUint(port, 10, 32); perr != nil || p < 1 || p > 65535 {
+			t.Fatalf("ParseJoin(%q).Endpoint = %q, port %q is not between 1 and 65535", s, j.Endpoint, port)
 		}
 		if j.Token == "" || strings.Contains(j.Token, "/") {
 			t.Fatalf("ParseJoin(%q).Token = %q, want non-empty and slash-free", s, j.Token)

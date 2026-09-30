@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,13 +29,24 @@ type Join struct {
 }
 
 // ParseJoin は接続文字列を解釈する。scheme、ポート、sha256 のピンをすべて要求する。
+//
+// エラーは、接続文字列のどの部分も引用しない。トークンは秘密であり(scripts/check-log-tokens.sh の
+// 約束)、host:port の形が崩れた入力では、トークンがどの断片に入り込むか判別できないためである。例えば
+// ポートも "/" も無い "wgft://<token>" は、url.Parse のもとで u.Host がトークンそのものになる。
+// net.SplitHostPort が host と port を切り離した後でも、host の側がトークンの断片である可能性は残る
+// (host の許す文字集合と、base64url でエンコードするトークンの文字集合が大きく重なるため)。したがって
+// host を「ホスト名らしい」形で検査して引用してよいことにはしない。
 func ParseJoin(s string) (*Join, error) {
 	u, err := url.Parse(strings.TrimSpace(s))
 	if err != nil || u.Scheme != "wgft" {
 		return nil, errors.New("join string must look like wgft://host:port/token#sha256:HASH")
 	}
-	if _, _, err := net.SplitHostPort(u.Host); err != nil {
-		return nil, fmt.Errorf("join string host has no port: %q", u.Host)
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return nil, errors.New("join string host has no port")
+	}
+	if portNum, perr := strconv.ParseUint(port, 10, 32); perr != nil || portNum < 1 || portNum > 65535 {
+		return nil, errors.New("join string port must be a number from 1 to 65535")
 	}
 	tok := strings.TrimPrefix(u.Path, "/")
 	if tok == "" || strings.Contains(tok, "/") {
