@@ -175,24 +175,41 @@ func parseDotenv(path string) (map[string]string, error) {
 		if s == "" || strings.HasPrefix(s, "#") {
 			continue
 		}
+		// 誤りの文言には行の中身も値も出さない。ファイル:行 と、名前の形をしたキーだけを出す。
+		// WGFT_JOIN の接続文字列のような秘密の値が、起動の失敗の文言としてジャーナルに残らない
+		// ようにするためである(設計文書 11a 節)。
 		eq := strings.IndexByte(s, '=')
 		if eq <= 0 {
-			return nil, configErrorf(at(i), "not in KEY=value form: %q", line)
+			return nil, configErrorf(at(i), "not in KEY=value form; the line is not shown, since it may hold a secret")
 		}
 		key := s[:eq]
 		val := s[eq+1:]
 		if key != strings.TrimSpace(key) || strings.ContainsAny(key, " \t") {
-			return nil, configErrorf(at(i), "key name may not contain whitespace: %q", key)
+			return nil, configErrorf(at(i), "key name may not contain whitespace; the line is not shown, since it may hold a secret")
 		}
 		if strings.HasPrefix(val, "\"") || strings.HasPrefix(val, "'") {
-			return nil, configErrorf(at(i), "do not quote values; Docker keeps quotes as part of the value: %q", val)
+			return nil, configErrorf(at(i), "do not quote the value of %s; Docker keeps quotes as part of the value", dotenvKeyLabel(key))
 		}
 		if strings.ContainsAny(val, " \t") {
-			return nil, configErrorf(at(i), "value may not contain whitespace: %q", val)
+			return nil, configErrorf(at(i), "the value of %s may not contain whitespace", dotenvKeyLabel(key))
 		}
 		out[key] = val
 	}
 	return out, nil
+}
+
+// dotenvKeyLabel は、構文の誤りの文言に出すキーの名前である。英数字と _ だけの名前はそのまま出し、
+// それ以外は出さない。行が壊れていると、= より前に値の一部が入りうるためである。
+func dotenvKeyLabel(key string) string {
+	if key == "" {
+		return "this key"
+	}
+	for _, r := range key {
+		if !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			return "this key"
+		}
+	}
+	return key
 }
 
 // loadConfig は specs を優先順位に従って解決する。configPath は dotenv のパス。

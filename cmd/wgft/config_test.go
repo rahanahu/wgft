@@ -100,6 +100,51 @@ func TestDotenvSyntax(t *testing.T) {
 	}
 }
 
+// TestDotenvSyntaxErrorsHideValues は、構文の誤りの文言が行の中身と値を出さないことを確かめる
+// (設計文書 11a 節)。引用符や空白の誤りは手で書いた agent.env で起きやすく、起動の失敗の文言は
+// ジャーナルに残る。そこに WGFT_JOIN の接続文字列が載ると、ジャーナルを読める利用者が、まだ使われて
+// いない接続文字列で先に登録できる。文言は ファイル:行 と、名前の形をしたキーだけを示す。
+// 変異の確認:どの分岐でも、値か行を %q で文言に戻すと落ちる。dotenvKeyLabel が名前の形を確かめずに
+// キーを返すと、最後の行で落ちる。
+func TestDotenvSyntaxErrorsHideValues(t *testing.T) {
+	const secret = "s3cr3tTOKENvalue"
+	for _, tc := range []struct {
+		line    string
+		wantKey string // 文言に出てよいキー。空なら確かめない
+	}{
+		{"WGFT_JOIN='wgft://vps.example:8443/" + secret + "#sha256:ab'", "WGFT_JOIN"},
+		{`WGFT_JOIN="wgft://vps.example:8443/` + secret + `#sha256:ab"`, "WGFT_JOIN"},
+		{"WGFT_JOIN=wgft://vps.example:8443/" + secret + "#sha256:ab trailing", "WGFT_JOIN"},
+		{"wgft://vps.example:8443/" + secret + "#sha256:ab", ""},
+		{"WGFT_JOIN wgft://vps.example:8443/" + secret + "?x=y", ""},
+		{" WGFT_JOIN=wgft://vps.example:8443/" + secret + "#sha256:ab", ""},
+		{"wgft://vps.example:8443/" + secret + "?a='b", ""},
+	} {
+		p := filepath.Join(t.TempDir(), "agent.env")
+		if err := os.WriteFile(p, []byte("# comment\n"+tc.line+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := parseDotenv(p)
+		if err == nil {
+			t.Errorf("%q: accepted, want a syntax error", tc.line)
+			continue
+		}
+		msg := err.Error()
+		if strings.Contains(msg, secret) {
+			t.Errorf("%q: the error shows the secret: %s", tc.line, msg)
+		}
+		if !strings.Contains(msg, p+":2") {
+			t.Errorf("%q: the error does not name the file and line: %s", tc.line, msg)
+		}
+		if tc.wantKey != "" && !strings.Contains(msg, tc.wantKey) {
+			t.Errorf("%q: the error does not name the key %s: %s", tc.line, tc.wantKey, msg)
+		}
+		if got := exitCode(err); got != exitRefusal {
+			t.Errorf("%q: exit code %d, want %d", tc.line, got, exitRefusal)
+		}
+	}
+}
+
 // 値の誤り(同時フロー数の上限の範囲外)は終了コード 3。範囲内は通る。
 func TestLimitsOutOfRangeExitCode(t *testing.T) {
 	for _, v := range []string{"abc", "15", "65536"} {
