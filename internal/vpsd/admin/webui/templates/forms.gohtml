@@ -125,10 +125,10 @@
     <span class="flow-arrow">→</span> {{ .Agent }} <span class="mono">{{ .Target }}</span>
     <span class="badge neutral">{{ .Mode }}</span>
     <span class="badge {{ .StateBadge }}"><span aria-hidden="true">{{ .StateIcon }}</span> {{ .StateLabel }}</span>
-    <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
+    <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
       <button class="small-btn" type="submit">{{ if .Enabled }}{{ T .Locale "disable" }}{{ else }}{{ T .Locale "enable" }}{{ end }}</button>
     </form>
-    <a class="small-btn accent" href="/ui/doctor/{{ .ID }}">{{ T .Locale "doctorTitle" }}</a>
+    <a class="small-btn accent" href="/ui/doctor/{{ PathSeg .ID }}">{{ T .Locale "doctorTitle" }}</a>
   </div>
   {{ if .StateReason }}<p class="danger-text">{{ .StateReason }}</p>{{ end }}
   {{ if .HeadNote }}<p class="muted">{{ .HeadNote }}</p>{{ end }}
@@ -141,7 +141,7 @@
   <p class="field-help">{{ T .Locale "settingsHelp" }}</p>
   {{ if .SettingsError }}<p class="danger-text">{{ .SettingsError }}</p>{{ end }}
   {{ $loc := .Locale }}
-  <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/settings" class="settings-form" id="settings-form">
+  <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg .ID }}/settings" class="settings-form" id="settings-form">
     <input type="hidden" name="orig_group" value="{{ .OrigGroup }}">
     <input type="hidden" name="orig_note" value="{{ .OrigNote }}">
     <input type="hidden" name="orig_per_source" value="{{ .Rates.PerSource.Orig }}">
@@ -239,14 +239,14 @@
     <ul class="cidr-list">
       {{ range .DenyList }}
       <li><span class="mono">{{ .CIDR }}</span>
-        <form autocomplete="off" method="post" action="/ui/rules/{{ $.ID }}/deny/rm">
+        <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg $.ID }}/deny/rm">
           <input type="hidden" name="cidr" value="{{ .CIDR }}">
           <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
         </form>
       </li>
       {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
     </ul>
-    <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/deny/add" class="inline-form">
+    <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg .ID }}/deny/add" class="inline-form">
       <div class="field">
         <textarea autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" name="cidrs" rows="3" placeholder="203.0.113.7&#10;198.51.100.0/24">{{ .DenyInput }}</textarea>
         <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
@@ -262,14 +262,14 @@
     <ul class="cidr-list">
       {{ range .AllowList }}
       <li><span class="mono">{{ .CIDR }}</span>
-        <form autocomplete="off" method="post" action="/ui/rules/{{ $.ID }}/allow/rm" {{ if .Confirm }}data-confirm="{{ T $.Locale "confirmAllowLast" }}"{{ end }}>
+        <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg $.ID }}/allow/rm" {{ if .Confirm }}data-confirm="{{ T $.Locale "confirmAllowLast" }}"{{ end }}>
           <input type="hidden" name="cidr" value="{{ .CIDR }}">
           <button class="small-btn" type="submit">{{ T $.Locale "remove" }}</button>
         </form>
       </li>
       {{ else }}<li class="muted">{{ T $.Locale "listEmpty" }}</li>{{ end }}
     </ul>
-    <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/allow/add" class="inline-form" {{ if .AllowConfirmAdd }}data-confirm="{{ T .Locale "confirmAllowFirst" }}"{{ end }}>
+    <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg .ID }}/allow/add" class="inline-form" {{ if .AllowConfirmAdd }}data-confirm="{{ T .Locale "confirmAllowFirst" }}"{{ end }}>
       <div class="field">
         <textarea autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" name="cidrs" rows="3" placeholder="203.0.113.7">{{ .AllowInput }}</textarea>
         <small class="field-help">{{ T .Locale "addSourcesHelp" }}</small>
@@ -288,7 +288,7 @@
     <h3>{{ T .Locale "splitHead" }}</h3>
     <p class="field-help">{{ T .Locale "splitHelp" }}</p>
     {{ if .SplitError }}<p class="danger-text">{{ .SplitError }}</p>{{ end }}
-    <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/split" class="split-form" id="split-form"
+    <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg .ID }}/split" class="split-form" id="split-form"
           data-listen-lo="{{ .ListenLo }}" data-listen-hi="{{ .ListenHi }}"
           data-target-host="{{ .TargetHost }}" data-target-port="{{ .TargetPort }}">
       <div class="field">
@@ -313,7 +313,7 @@
       <li>
         <span><strong class="proto {{ $.ProtoClass }}">{{ $.ProtoUpper }}</strong> <span class="mono">{{ .Ports }}</span>
           <span class="flow-arrow">→</span> <span class="mono">{{ .Target }}</span></span>
-        <form autocomplete="off" method="post" action="/ui/rules/{{ $.ID }}/merge">
+        <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg $.ID }}/merge">
           <input type="hidden" name="other" value="{{ .ID }}">
           <button class="btn" type="submit">{{ T $.Locale "mergeWithThis" }}</button>
         </form>

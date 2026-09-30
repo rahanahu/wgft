@@ -104,11 +104,11 @@
         <tr>
           <td data-label="{{ T $loc "colState" }}"><span class="badge {{ .Badge }}">{{ .Status }}</span></td>
           <td data-label="{{ T $loc "doctorRuleCol" }}">
-            <a class="rule-link" href="/ui/doctor/{{ .ID }}"><strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> {{ .Ports }} <span class="flow-arrow">→</span> {{ .Agent }} <span class="mono">{{ .Target }}</span></a>
+            <a class="rule-link" href="/ui/doctor/{{ PathSeg .ID }}"><strong class="proto {{ .ProtoClass }}">{{ .ProtoUpper }}</strong> {{ .Ports }} <span class="flow-arrow">→</span> {{ .Agent }} <span class="mono">{{ .Target }}</span></a>
             {{ if .Why }}<details class="row-finding"><summary>{{ T $loc "doctorFindingMore" }}</summary><p class="check-detail">{{ .Why }}</p></details>{{ end }}
           </td>
           <td data-label="public port - WireGuard - agent - listener / target">
-            <a class="path-link" href="/ui/doctor/{{ .ID }}">{{ template "doctorpathmini" .Path }}{{ if .Path.Caption }}<span class="path-caption mono">{{ .Path.Caption }}</span>{{ end }}</a>
+            <a class="path-link" href="/ui/doctor/{{ PathSeg .ID }}">{{ template "doctorpathmini" .Path }}{{ if .Path.Caption }}<span class="path-caption mono">{{ .Path.Caption }}</span>{{ end }}</a>
           </td>
         </tr>
         {{ else }}
@@ -180,7 +180,7 @@
 <section class="detail-section">
   <h3>{{ T .Locale "doctorProbeHead" }}</h3>
   {{ if .CanProbe }}
-  <form autocomplete="off" method="get" action="/ui/doctor/{{ .Rule.ID }}">
+  <form autocomplete="off" method="get" action="/ui/doctor/{{ PathSeg .Rule.ID }}">
     <input type="hidden" name="probe" value="1">
     <button class="small-btn accent" type="submit">{{ T .Locale "doctorProbe" }}</button>
   </form>

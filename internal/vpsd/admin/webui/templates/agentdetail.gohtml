@@ -44,7 +44,7 @@
   {{ if .Rules }}
   <ul class="agent-rule-list">
     {{ range .Rules }}
-    <li><a href="/ui/rules/{{ .ID }}">{{ .Label }}</a> <span class="mono muted">{{ .Target }}</span>{{ if not .Enabled }} <span class="badge neutral">{{ T $loc "disabled" }}</span>{{ end }}{{ if .Note }} <small class="rule-note">{{ .Note }}</small>{{ end }}</li>
+    <li><a href="/ui/rules/{{ PathSeg .ID }}">{{ .Label }}</a> <span class="mono muted">{{ .Target }}</span>{{ if not .Enabled }} <span class="badge neutral">{{ T $loc "disabled" }}</span>{{ end }}{{ if .Note }} <small class="rule-note">{{ .Note }}</small>{{ end }}</li>
     {{ end }}
   </ul>
   {{ else }}

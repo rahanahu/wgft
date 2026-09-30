@@ -403,3 +403,64 @@ func TestInvisibleFieldsDoNotBumpGeneration(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyBatchRefusesDotIDsAndKeepsAnExistingOne は、ID か agent が `.` か `..` のルールを
+// 新しく書き込めないこと(仕様 10.2 節)と、この検査の前から保存されている `.` のルールの扱いを
+// 確かめる。そのルールは読み込まれ、無関係なバッチも通り、削除もできるが、変更は拒まれる。
+// 変異の確認:Rule.Validate の `.` と `..` の検査を外すと、新しく書き込むバッチが通って落ちる。
+func TestApplyBatchRefusesDotIDsAndKeepsAnExistingOne(t *testing.T) {
+	s := openTemp(t)
+	for _, bad := range []proto.Rule{
+		rule(".", proto.UDP, 3001, 3001, "h:3001"),
+		rule("..", proto.UDP, 3001, 3001, "h:3001"),
+		func() proto.Rule { r := rule("r_x", proto.UDP, 3001, 3001, "h:3001"); r.Agent = "."; return r }(),
+		func() proto.Rule { r := rule("r_x", proto.UDP, 3001, 3001, "h:3001"); r.Agent = ".."; return r }(),
+	} {
+		_, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) { return append(r, bad), nil })
+		if err == nil || !strings.Contains(err.Error(), "is not allowed") {
+			t.Errorf("batch adding id %q agent %q = %v, want it refused", bad.ID, bad.Agent, err)
+		}
+	}
+	if rules, _ := s.Rules(); len(rules) != 0 {
+		t.Fatalf("a refused batch stored rules: %+v", rules)
+	}
+
+	// この検査の前に保存された `.` のルールを、SQL で直接作る
+	legacy := rule(".", proto.UDP, 3002, 3002, "h:3002")
+	js, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO rules (id, position, json) VALUES (?, 0, ?)", legacy.ID, string(js)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		return append(r, rule("a", proto.UDP, 2456, 2457, "h:2456")), nil
+	}); err != nil {
+		t.Fatalf("an unrelated batch must not fail because of an existing . rule: %v", err)
+	}
+	if _, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		for i := range r {
+			if r[i].ID == "." {
+				r[i].Enabled = false
+			}
+		}
+		return r, nil
+	}); err == nil || !strings.Contains(err.Error(), `id "." is not allowed`) {
+		t.Errorf("changing the existing . rule = %v, want it refused", err)
+	}
+	if _, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
+		var out []proto.Rule
+		for _, x := range r {
+			if x.ID != "." {
+				out = append(out, x)
+			}
+		}
+		return out, nil
+	}); err != nil {
+		t.Errorf("deleting the existing . rule must work: %v", err)
+	}
+	if rules, _ := s.Rules(); len(rules) != 1 || rules[0].ID != "a" {
+		t.Errorf("rules after deleting the . rule = %+v, want only a", rules)
+	}
+}

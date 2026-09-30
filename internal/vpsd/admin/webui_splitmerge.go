@@ -114,7 +114,7 @@ func (s *Server) uiRuleSplit(w http.ResponseWriter, r *http.Request) {
 		s.renderDetailPage(w, locale, d)
 		return
 	}
-	http.Redirect(w, r, "/ui/rules/"+head.ID, http.StatusSeeOther)
+	http.Redirect(w, r, "/ui/rules/"+pathSegment(head.ID), http.StatusSeeOther)
 }
 
 // uiRuleMerge は統合区画の送信(仕様 10.1 節)。このルール(パスの ID)が self、
@@ -144,5 +144,5 @@ func (s *Server) uiRuleMerge(w http.ResponseWriter, r *http.Request) {
 		s.renderDetailPage(w, locale, d)
 		return
 	}
-	http.Redirect(w, r, "/ui/rules/"+merged.ID, http.StatusSeeOther)
+	http.Redirect(w, r, "/ui/rules/"+pathSegment(merged.ID), http.StatusSeeOther)
 }

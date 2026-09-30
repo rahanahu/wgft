@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -37,7 +38,29 @@ var tmplFS embed.FS
 //go:embed webui/static/*
 var staticFS embed.FS
 
-var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel, "DescribedBy": describedByIDs}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
+var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel, "DescribedBy": describedByIDs, "PathSeg": pathSegment}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
+
+// pathSegment は、ルール ID を URL のパスの 1 つの区切りとして埋め込める形にする(設計文書 10.2 節)。
+// ルール ID は取り込みのファイルと管理用 API から、`.` と `..` を除く任意の文字列で入りうる。
+// html/template はパスの中の `/`、`?`、`#`、`..` を escape しないので、そのまま埋めると、あるルールの
+// ボタンが別の経路(例えば別のエージェントの無効化)へ送信する URL になる。url.PathEscape で `/` などを
+// % の形にする。サーバの ServeMux は {id} の値を元の文字列に戻して渡す。
+//
+// `.` と `..` は url.PathEscape では変わらないので %2E の形にする。Go の net/url、http クライアント、
+// ServeMux はこの形を区切りの `.` と見なさないので、CLI の依頼はその ID のまま届く。ブラウザは
+// WHATWG URL 標準に従って %2E も区切りの `.` と見なすので、Web UI のボタンはこの形でも別の経路へ
+// 送信する。このため Rule.Validate が `.` と `..` の ID と agent を拒む。この形が効くのは、拒むように
+// する前に保存されたルールへの CLI の依頼だけである。
+func pathSegment(id string) string {
+	switch e := url.PathEscape(id); e {
+	case ".":
+		return "%2E"
+	case "..":
+		return "%2E%2E"
+	default:
+		return e
+	}
+}
 
 // registerUI は Web UI のルートを mux に足す(認証は ServeHTTP でかかる)。
 func (s *Server) registerUI() {
@@ -654,7 +677,7 @@ func ruleCrumbLabel(protoUpper, ports, agent string) string {
 
 // ruleCrumb はルール詳細ページへのリンクになるパンくずの項目である。
 func ruleCrumb(r proto.Rule) pageCrumb {
-	return pageCrumb{Label: ruleCrumbLabel(strings.ToUpper(string(r.Proto)), r.ListenPort.String(), r.Agent), Href: "/ui/rules/" + r.ID}
+	return pageCrumb{Label: ruleCrumbLabel(strings.ToUpper(string(r.Proto)), r.ListenPort.String(), r.Agent), Href: "/ui/rules/" + pathSegment(r.ID)}
 }
 
 func (s *Server) redirectOrError(w http.ResponseWriter, r *http.Request, err error) {
