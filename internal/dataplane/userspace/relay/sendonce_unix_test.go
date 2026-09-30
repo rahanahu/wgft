@@ -106,6 +106,10 @@ func TestUDPReplyDroppedWhenThePublicSendBufferIsFull(t *testing.T) {
 			if !strings.Contains(l, "dropped a reply of 1 bytes") || !strings.Contains(l, "1 replies dropped this way") {
 				t.Errorf("first drop log line = %q", l)
 			}
+			// l.key already formats as "udp/<port>"; the line must not repeat "udp" in front of it.
+			if strings.Contains(l, "udp udp/") {
+				t.Errorf("log line doubles the protocol prefix: %q", l)
+			}
 		}
 	}
 	mu.Unlock()

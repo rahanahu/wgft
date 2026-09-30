@@ -609,6 +609,10 @@ func TestUDPRelayWriteFailureLogged(t *testing.T) {
 	for _, l := range lines {
 		if strings.Contains(l, "injected write failure") && strings.Contains(l, "closing session") {
 			n++
+			// l.key already formats as "udp/<port>"; the line must not repeat "udp" in front of it.
+			if strings.Contains(l, "udp udp/") {
+				t.Errorf("log line doubles the protocol prefix: %q", l)
+			}
 		}
 	}
 	if n != 1 {
@@ -674,6 +678,11 @@ func TestTCPDialFailureLogRateLimited(t *testing.T) {
 			if strings.Contains(format, "dial") {
 				dialLogs.Add(1)
 			}
+			// l.key already formats as "tcp/<port>" or "udp/<port>"; the format string must
+			// not repeat the protocol as a literal prefix in front of it.
+			if strings.Contains(format, "tcp %s") || strings.Contains(format, "udp %s") {
+				t.Errorf("log format doubles the protocol prefix already carried by %%s: %q", format)
+			}
 		},
 	})
 	defer m.Close()
@@ -705,6 +714,11 @@ func TestUDPDialFailureLogRateLimited(t *testing.T) {
 		Logf: func(format string, args ...any) {
 			if strings.Contains(format, "dial") {
 				dialLogs.Add(1)
+			}
+			// l.key already formats as "tcp/<port>" or "udp/<port>"; the format string must
+			// not repeat the protocol as a literal prefix in front of it.
+			if strings.Contains(format, "tcp %s") || strings.Contains(format, "udp %s") {
+				t.Errorf("log format doubles the protocol prefix already carried by %%s: %q", format)
 			}
 		},
 	})
