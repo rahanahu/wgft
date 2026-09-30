@@ -710,8 +710,11 @@ func readTimeoutsConcurrently(d *Daemon) func() {
 	return func() { close(stop); wg.Wait() }
 }
 
-// syncBuffer collects the log while serve runs in another goroutine; captureLog's plain
-// bytes.Buffer would be read and written at the same time.
+// syncBuffer collects the log under a mutex, so that a goroutine still writing to it - serve
+// running in the background, or a listener a test left open past its own end (captureLog's doc
+// comment in watch_test.go) - cannot race the test's own read of String(). captureLog and
+// newSyncBuffer both return one; newSyncBuffer exists separately only for the tests that also want
+// to name where in the test the redirection starts (before starting serve in a goroutine, here).
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
