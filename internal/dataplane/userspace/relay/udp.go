@@ -257,6 +257,12 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 					}
 					release = rel
 				}
+				// 判定の間に待ち受けが Retiring になっていれば(fail-closed。設計文書 7a.3 節)、枠を取らず、
+				// 宛先へ dial もせずに捨てる。この後に Retiring になる場合は、下の登録の確認が捨てる
+				if !l.accepting.Load() {
+					release()
+					continue
+				}
 				// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の
 				// 上限、他のルールの隔離予約を Pool が 1 つの排他の中で判定する。拒んだ新規パケットは
 				// 捨てる(既存セッションは追い出さない)
@@ -287,16 +293,27 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				// goroutine も done で戻っているので、登録すると誰にも閉じられず、枠と宛先へのソケットが
 				// 残り続ける。登録せずにここで閉じ、データグラムも送らない。closeF は mu を取る前に done を
 				// 閉じるので、done が閉じていなければ closeF はこの後に mu を取り、登録したセッションを閉じる
-				// (TCP の accept のループと同じ)
+				// (TCP の accept のループと同じ)。
+				// 読み取りから登録までの間に待ち受けが Retiring になっていれば、この送信元は Retiring の後に
+				// 来た新しい送信元と同じなので、同じく登録せずに捨てる(設計文書 7a.3 節)。retireLocked は
+				// stopAccept で受け付けの印を下ろしてから mu を取って sweep するので、mu の下で印が立って
+				// いれば、登録したセッションはその sweep が接続元制限で判定する
 				mu.Lock()
+				if h := m.testUDPRegistering; h != nil {
+					h()
+				}
+				stopped := !l.accepting.Load()
 				select {
 				case <-done:
+					stopped = true
+				default:
+				}
+				if stopped {
 					mu.Unlock()
 					s.close()
 					l.budget.Release()
 					release()
 					continue
-				default:
 				}
 				sessions[k] = s
 				mu.Unlock()

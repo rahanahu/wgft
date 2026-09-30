@@ -116,6 +116,9 @@ type Manager struct {
 	replies *replyPool
 	// replyDrops は公開側の送信バッファの満杯で捨てた応答の累計とログの門(設計文書 7 節)
 	replyDrops replyDropReport
+	// testUDPRegistering は、UDP の新しいセッションの登録で、セッションの錠を取った直後に呼ぶ。
+	// 単体テストだけが New の後、中継を始める前に設定する。nil なら呼ばない
+	testUDPRegistering func()
 }
 
 // bindFailure は bind の失敗が続いている 1 つのキーの記録。
