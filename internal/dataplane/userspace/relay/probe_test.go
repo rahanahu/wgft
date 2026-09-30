@@ -252,12 +252,13 @@ func TestTargetReachabilityIsLoggedOnChangeOnly(t *testing.T) {
 		return n
 	}
 	// 待ち受けを先に押さえてから、まだ誰も listen していないポートを target に選ぶ(接続は拒まれる)。
-	// 逆の順では、freePort が閉じた番号を reserveTCP がそのまま受け取ることがあり、target が自分自身の
-	// 待ち受けになって「繋がらない」の確かめが成り立たない
+	// target が 127.0.0.1 に戻るホスト (既定の macOS) で逆の順にすると、closedTarget が閉じた番号を
+	// reserveTCP がそのまま受け取ることがあり、target が自分自身の待ち受けになって「繋がらない」の確かめが
+	// 成り立たない
 	lb := &loopback{}
 	port := reserveTCP(t, lb)
-	targetPort := freePort(t)
-	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(targetPort)))
+	targetIP, targetPort := closedTarget(t)
+	target := net.JoinHostPort(targetIP.String(), strconv.Itoa(int(targetPort)))
 	m := New(lb, Options{Logf: func(f string, a ...any) {
 		mu.Lock()
 		lines = append(lines, fmt.Sprintf(f, a...))
@@ -272,7 +273,7 @@ func TestTargetReachabilityIsLoggedOnChangeOnly(t *testing.T) {
 		t.Errorf("unreachable logged %d times over an apply and 3 sweeps, want 1; log: %v", n, lines)
 	}
 
-	srv, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(targetPort)})
+	srv, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: targetIP, Port: int(targetPort)})
 	if err != nil {
 		t.Fatal(err)
 	}
