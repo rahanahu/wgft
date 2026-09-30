@@ -480,7 +480,7 @@ func (s *Server) uiSaveSettings(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.renderSettingsInput(w, locale, cur, in, err.Error())
 	default:
-		http.Redirect(w, r, "/ui/rules/"+cur.ID, http.StatusSeeOther)
+		http.Redirect(w, r, "/ui/rules/"+pathSegment(cur.ID), http.StatusSeeOther)
 	}
 }
 
@@ -601,7 +601,7 @@ func (s *Server) uiSourceAdd(w http.ResponseWriter, r *http.Request, allow bool)
 		s.renderSourceError(w, locale, rule, allow, input, err)
 		return
 	}
-	http.Redirect(w, r, "/ui/rules/"+rule.ID, http.StatusSeeOther)
+	http.Redirect(w, r, "/ui/rules/"+pathSegment(rule.ID), http.StatusSeeOther)
 }
 
 func (s *Server) uiSourceRm(w http.ResponseWriter, r *http.Request, allow bool) {
@@ -622,7 +622,7 @@ func (s *Server) uiSourceRm(w http.ResponseWriter, r *http.Request, allow bool) 
 		updated.SourceDeny = proto.RemoveSources(rule.SourceDeny, []netip.Prefix{p})
 	}
 	_, err = s.backend.Batch(BatchRequest{Upsert: []proto.Rule{updated}, Op: "ui edit"})
-	s.redirectOrErrorTo(w, r, "/ui/rules/"+rule.ID, err)
+	s.redirectOrErrorTo(w, r, "/ui/rules/"+pathSegment(rule.ID), err)
 }
 
 func (s *Server) renderSourceError(w http.ResponseWriter, locale string, rule proto.Rule, allow bool, input string, err error) {

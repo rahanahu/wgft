@@ -54,19 +54,19 @@
         <td data-label="{{ T $loc "colState" }}">
           <div class="state-cell">
             <span class="badge {{ .StateBadge }}"><span aria-hidden="true">{{ .StateIcon }}</span> {{ .StateLabel }}</span>
-            <a class="diag-mark {{ .Diag.State }}" href="/ui/doctor/{{ .ID }}" title="{{ .Diag.Alt }}"><span class="node {{ .Diag.State }} node-inline"><span class="node-mark" aria-hidden="true">{{ .Diag.Symbol }}</span></span>{{ if .Diag.Node }}<span class="diag-node" aria-hidden="true">{{ .Diag.Node }}</span>{{ end }}<span class="sr-only">{{ .Diag.Alt }}</span></a>
+            <a class="diag-mark {{ .Diag.State }}" href="/ui/doctor/{{ PathSeg .ID }}" title="{{ .Diag.Alt }}"><span class="node {{ .Diag.State }} node-inline"><span class="node-mark" aria-hidden="true">{{ .Diag.Symbol }}</span></span>{{ if .Diag.Node }}<span class="diag-node" aria-hidden="true">{{ .Diag.Node }}</span>{{ end }}<span class="sr-only">{{ .Diag.Alt }}</span></a>
           </div>
         </td>
         <td data-label="{{ T $loc "colDenied" }}">{{ .Dropped }}</td>
         <td data-label="{{ T $loc "colRestrict" }}">{{ .Restriction }}</td>
         <td data-label="{{ T $loc "colActions" }}">
           <div class="row-actions">
-            <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
+            <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg .ID }}/{{ if .Enabled }}disable{{ else }}enable{{ end }}">
               <button class="small-btn" type="submit">{{ if .Enabled }}{{ T $loc "disable" }}{{ else }}{{ T $loc "enable" }}{{ end }}</button>
             </form>
-            {{ if .CanCheck }}<a class="small-btn accent" href="/ui/rules/{{ .ID }}/check">{{ T $loc "testConn" }}</a>{{ end }}
-            <a class="small-btn" href="/ui/rules/{{ .ID }}">{{ T $loc "detailLink" }}</a>
-            <form autocomplete="off" method="post" action="/ui/rules/{{ .ID }}/delete" data-confirm="{{ printf (T $loc "confirmDelete") .Ports }}">
+            {{ if .CanCheck }}<a class="small-btn accent" href="/ui/rules/{{ PathSeg .ID }}/check">{{ T $loc "testConn" }}</a>{{ end }}
+            <a class="small-btn" href="/ui/rules/{{ PathSeg .ID }}">{{ T $loc "detailLink" }}</a>
+            <form autocomplete="off" method="post" action="/ui/rules/{{ PathSeg .ID }}/delete" data-confirm="{{ printf (T $loc "confirmDelete") .Ports }}">
               <button class="small-btn" type="submit">{{ T $loc "delete" }}</button>
             </form>
           </div>

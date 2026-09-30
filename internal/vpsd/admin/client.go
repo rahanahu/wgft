@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -174,7 +175,7 @@ func (c *Client) DismissWarning(name, kind, detail string) error {
 // CheckConnectivity は TCP ルールの疎通確認を server に依頼する(仕様 10.1 節)。
 func (c *Client) CheckConnectivity(ruleID string) (*ConnCheck, error) {
 	var out ConnCheck
-	return &out, c.do("POST", "/api/v1/rules/"+ruleID+"/check", struct{}{}, &out)
+	return &out, c.do("POST", "/api/v1/rules/"+url.PathEscape(ruleID)+"/check", struct{}{}, &out)
 }
 
 // AgentState はそのエージェントに配られる全体状態を取る(確認用)。

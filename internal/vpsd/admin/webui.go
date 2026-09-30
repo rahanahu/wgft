@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -37,7 +38,24 @@ var tmplFS embed.FS
 //go:embed webui/static/*
 var staticFS embed.FS
 
-var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel, "DescribedBy": describedByIDs}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
+var uiTmpl = template.Must(template.New("").Funcs(template.FuncMap{"T": T, "UnitLabel": unitLabel, "DescribedBy": describedByIDs, "PathSeg": pathSegment}).ParseFS(tmplFS, "webui/templates/*.gohtml"))
+
+// pathSegment は、ルール ID を URL のパスの 1 つの区切りとして埋め込める形にする(設計文書 10.1 節)。
+// ルール ID は取り込みのファイルと管理用 API から任意の文字列で入りうる。html/template はパスの中の
+// `/`、`?`、`#`、`..` を escape しないので、そのまま埋めると、あるルールのボタンが別の経路
+// (例えば別のエージェントの無効化)へ送信する URL になる。url.PathEscape で `/` などを % の形にし、
+// それだけでは残る `.` と `..` の区切りも % の形にして、ブラウザが区切りとして解釈しないようにする。
+// サーバの ServeMux は {id} の値を元の文字列に戻して渡す。
+func pathSegment(id string) string {
+	switch e := url.PathEscape(id); e {
+	case ".":
+		return "%2E"
+	case "..":
+		return "%2E%2E"
+	default:
+		return e
+	}
+}
 
 // registerUI は Web UI のルートを mux に足す(認証は ServeHTTP でかかる)。
 func (s *Server) registerUI() {
@@ -654,7 +672,7 @@ func ruleCrumbLabel(protoUpper, ports, agent string) string {
 
 // ruleCrumb はルール詳細ページへのリンクになるパンくずの項目である。
 func ruleCrumb(r proto.Rule) pageCrumb {
-	return pageCrumb{Label: ruleCrumbLabel(strings.ToUpper(string(r.Proto)), r.ListenPort.String(), r.Agent), Href: "/ui/rules/" + r.ID}
+	return pageCrumb{Label: ruleCrumbLabel(strings.ToUpper(string(r.Proto)), r.ListenPort.String(), r.Agent), Href: "/ui/rules/" + pathSegment(r.ID)}
 }
 
 func (s *Server) redirectOrError(w http.ResponseWriter, r *http.Request, err error) {
