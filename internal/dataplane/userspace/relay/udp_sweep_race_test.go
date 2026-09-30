@@ -13,15 +13,18 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// UDP の読み取りのループが新しい送信元のセッションを作る間(Admission Policy の判定から登録まで)に、
+// UDP の読み取りのループが新しい送信元のセッションを作る間(セッションの表を引いてから登録まで)に、
 // 宛先の付け替え(Commit の retarget)か接続元制限の変更(CloseSessions)の sweep が走っても、
-// その sweep が閉じるはずのセッションは登録されない(設計文書 7 節、6.2 節)。セッションは dial の後に
+// その sweep が閉じるはずのセッションは登録されない(設計文書 6.3 節)。セッションは dial の後に
 // 表へ入るので、sweep はまだ表に無いセッションを見ない。登録すれば、付け替えでは旧い宛先へ、
 // 接続元制限では拒むようになった送信元のまま中継を続け、送り続ける送信元のセッションは無通信の
 // 期限でも閉じない。
 //
 // 試験は、読み取りのループを Admit(判定を済ませた後)か Dial(宛先を読んだ後)で止め、その間に
 // sweep を走らせてから進める。sweep がこの送信元を残す場合は、登録して中継を続けなければならない。
+// Admit で止めている間の付け替えは、ループがその後に新しい宛先を読んで dial しても最初のデータグラムを
+// 捨てる(設計文書 6.3 節の記述どおり。途中のセッションは表を引いた時点で記す)。次のデータグラムは
+// 新しい宛先へのセッションを作る。
 func TestUDPNewSourceAcrossSweep(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -33,8 +36,10 @@ func TestUDPNewSourceAcrossSweep(t *testing.T) {
 		dropped bool
 	}{
 		{"retarget while dialing", false, (*sweepUDPRig).retarget, true},
+		{"retarget while admitting", true, (*sweepUDPRig).retarget, true},
 		{"source filter change while admitting", true, (*sweepUDPRig).denySource, true},
 		{"source filter change while dialing", false, (*sweepUDPRig).denySource, true},
+		{"sweep that keeps the source while admitting", true, (*sweepUDPRig).keepAll, false},
 		{"sweep that keeps the source while dialing", false, (*sweepUDPRig).keepAll, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,6 +101,23 @@ func TestUDPNewSourceAcrossSweep(t *testing.T) {
 			if got := r.packetsA.Load(); got != 0 {
 				t.Errorf("target A received %d datagrams through a session the sweep cut", got)
 			}
+			if got := r.packetsB.Load(); got != 0 {
+				t.Errorf("target B received %d datagrams through a session the sweep cut", got)
+			}
+			if retargeted {
+				// Dial で止めた場合は旧い宛先を読んだ後、Admit で止めた場合は付け替えの後に宛先を読む。
+				// 後者でも最初のデータグラムは捨てる(設計文書 6.3 節)
+				want := r.targetA
+				if tc.pauseInAdmit {
+					want = r.targetB
+				}
+				r.connMu.Lock()
+				got := r.dialedTo[0]
+				r.connMu.Unlock()
+				if got != want {
+					t.Errorf("the dropped session dialed %s, want %s", got, want)
+				}
+			}
 			// 片付けが 1 回だけであること
 			time.Sleep(50 * time.Millisecond)
 			if got := r.releases.Load(); got != 1 {
@@ -140,6 +162,7 @@ type sweepUDPRig struct {
 	proceedOnce        sync.Once
 	connMu             sync.Mutex
 	dialed             []*closeTrackedConn
+	dialedTo           []string
 }
 
 func newSweepUDPRig(t *testing.T, pauseInAdmit bool) *sweepUDPRig {
@@ -189,6 +212,7 @@ func newSweepUDPRig(t *testing.T, pauseInAdmit bool) *sweepUDPRig {
 			c := &closeTrackedConn{UDPConn: uc}
 			r.connMu.Lock()
 			r.dialed = append(r.dialed, c)
+			r.dialedTo = append(r.dialedTo, addr)
 			r.connMu.Unlock()
 			return c, nil
 		},
