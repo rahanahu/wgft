@@ -26,7 +26,12 @@ func rule(id string, p proto.Proto, lo, hi uint16, target string) proto.Rule {
 }
 
 func TestApplyBatchGeneration(t *testing.T) {
-	s := openTemp(t)
+	path := filepath.Join(t.TempDir(), "wgft.sqlite")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
 	reserved := proto.Reserved{51820: "WireGuard"}
 
 	res, err := s.ApplyBatch(reserved, func(r []proto.Rule) ([]proto.Rule, error) {
@@ -79,7 +84,7 @@ func TestApplyBatchGeneration(t *testing.T) {
 		t.Fatalf("split: %+v %v", res, err)
 	}
 	// 開き直しても残る
-	s2, err := Open(s.path())
+	s2, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,7 +25,6 @@ type deliveryEntry struct {
 type deliverySnapshot struct {
 	entries    map[string]deliveryEntry
 	generation uint64
-	serial     uint64
 }
 
 type disableOverlay struct {
@@ -42,7 +41,6 @@ type deliveryOwner struct {
 	latest   *deliverySnapshot // successful Commit, including before bootstrap binding
 	full     *deliverySnapshot // nil until bootstrap timeout binding succeeds
 	disabled map[string]disableOverlay
-	serial   uint64
 	revision uint64
 	pending  bool // saved full declaration lacks a successful matching Commit
 }
@@ -117,8 +115,6 @@ func (o *deliveryOwner) currentFull() *deliverySnapshot {
 func (o *deliveryOwner) committed(candidate *deliverySnapshot) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.serial++
-	candidate.serial = o.serial
 	previous := o.full
 	if previous == nil {
 		previous = o.latest
@@ -161,7 +157,7 @@ func (o *deliveryOwner) revoke(name string) {
 				entries[n] = e
 			}
 		}
-		return &deliverySnapshot{entries: entries, generation: s.generation, serial: s.serial}
+		return &deliverySnapshot{entries: entries, generation: s.generation}
 	}
 	o.latest = remove(o.latest)
 	o.full = remove(o.full)

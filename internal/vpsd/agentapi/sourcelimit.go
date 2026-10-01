@@ -185,20 +185,6 @@ func (l *sourceLimitListener) release(keys []sourceKeyMax) {
 	}
 }
 
-// count は key の段が今数えられている接続の数である(テスト用)。
-func (l *sourceLimitListener) count(key string) int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.open[key]
-}
-
-// totalCount は全体で今数えられている接続の数である(テスト用)。
-func (l *sourceLimitListener) totalCount() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.total
-}
-
 // sourceKey は接続の相手のアドレスから最初の段の鍵を作る。レート制限と同じ規則(ipLimiterKey)である。
 func sourceKey(a net.Addr) string { return ipLimiterKey(a.String()) }
 
