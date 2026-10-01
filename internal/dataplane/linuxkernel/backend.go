@@ -4,12 +4,12 @@
 // WireGuard (linuxkernel/wg), nftables DNAT and admission (linuxkernel/nft), and conntrack
 // convergence (linuxkernel/conntrack), behind the same dataplane.Backend interface the userspace
 // Backend implements. It never imports internal/vpsd or internal/agent (design.md 7a.7 節;
-// internal/dataplane/deps_test.go checks this), so the future agent kernel backend (Phase 7) can
-// reuse its common kernel components: WireGuard, the platform checks, and the nft and conntrack
-// primitives. The table built here (public ports DNATed to an agent's wg address) and the
-// convergence of those DNATed flows are server-specific; the agent needs its own nft and conntrack
-// path (DNAT to the LAN target, MASQUERADE toward the LAN, agent-side convergence), to be added in
-// this package next to the server's.
+// internal/dataplane/deps_test.go checks this), so the agent's kernel backend (internal/agent,
+// design.md 7b 節) reuses its common kernel components: WireGuard, the platform checks, and the nft
+// and conntrack primitives. The table built here (public ports DNATed to an agent's wg address) and
+// the convergence of those DNATed flows are server-specific; the agent's own nft, wg and conntrack
+// paths (DNAT to the LAN target, MASQUERADE toward the LAN, agent-side convergence) sit in the same
+// subpackages next to the server's.
 //
 // One transaction (design.md 7a.2, 7a.3 節) runs as follows. Prepare adds the WireGuard peers the
 // declaration newly needs and builds the table replacement without sending it (nft.Stage). Commit

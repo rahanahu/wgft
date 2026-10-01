@@ -2,9 +2,9 @@
 // backend-independent description of what wgft should forward (design.md 7a.2 節).
 //
 // Planner "は、normalize したルール集合と AdmissionPolicy から Plan を組み立てる。OS、nftables、
-// gVisor の実装詳細を知らない。" This package holds no Backend, Runtime, or reconcile logic (those
-// come later; design.md 7a.7 節 assigns them to internal/dataplane and internal/reconcile). It only
-// computes what should exist, never applies anything.
+// gVisor の実装詳細を知らない。" This package holds no Backend, Runtime, or reconcile logic
+// (design.md 7a.7 節 assigns them to internal/dataplane and internal/reconcile). It only computes
+// what should exist, never applies anything.
 //
 // This package is pure: it imports internal/model, internal/policy (OS-free types, admission
 // limits included) and proto (the external contract), and nothing from
@@ -21,7 +21,7 @@ import (
 )
 
 // Agent is a registered agent as the Planner sees it: its name and its address on wg0. This is the
-// only agent-derived Planner input in Phase 1 (design.md 7a.8 節: "normalize したルール集合と
+// only agent-derived Planner input (design.md 7a.8 節: "normalize したルール集合と
 // AdmissionPolicy から Plan を組み立てる"). The full WireGuard peer configuration (public key,
 // allowed IPs, keepalive) is assembled by the dataplane Backend from this address, not by Planner;
 // see dataplane.WGConfig.Peers.
@@ -60,8 +60,8 @@ type PortPlan struct {
 	SourceMetadata model.SourceMetadata
 	// Target is the rule's declared LAN destination (host:port, unshifted). The agent, not the VPS
 	// side, maps a range's individual ports onto it (design.md 5.3, 7 節 "実効宛先"); it is carried
-	// through here only as the informational tail end of the route, for a future Backend/agent-wire
-	// layer to consume (Phase 2+), not because the VPS side computes anything from it.
+	// through here only as the informational tail end of the route (dataplane.UDPReplyIdentity
+	// includes it), not because the VPS side forwards to it.
 	Target string
 	// AgentAddr is the agent's wg0 address wgft routes to. The VPS side never rewrites the port
 	// (design.md 6.1 節: "DNAT では宛先アドレスだけを書き換え...ポートは書き換えない"; the relay in
@@ -90,8 +90,8 @@ type PortPlan struct {
 // left out), and PerSourceFlowCaps holds the global caps. It is not just the rule-level entries: a
 // Backend given only a Plan must be able to compile admission policy end to end, including the
 // per-source concurrent flow caps (design.md 7a.5 節), without reaching back into whatever built
-// the Plan. This is also what the future nftables/Go-evaluator compilers (Phase 5, design.md 7a.8
-// 節) will compile from. PortPlan.Policy is a per-port copy of the matching Admission.Rules entry,
+// the Plan. This is also what the nftables compiler (internal/policy/nftables) and the Go
+// evaluator (internal/policy/goengine) compile from (design.md 7a.9 節). PortPlan.Policy is a per-port copy of the matching Admission.Rules entry,
 // not a second, independently-computed value; see PortPlan.Policy's doc comment.
 type Plan struct {
 	Generation uint64

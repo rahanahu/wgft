@@ -106,7 +106,8 @@ func (s Step) DropKind() string {
 }
 
 // Order is the fixed evaluation order (design.md 6.1, 7a.2 節). It is recorded once, here; both
-// future compilers (Phase 5) apply it in this order instead of each hard-coding their own copy.
+// compilers (internal/policy/nftables and internal/policy/goengine) apply it in this order instead
+// of each hard-coding their own copy.
 var Order = []Step{
 	StepSourceDeny,
 	StepSourceAllow,
@@ -176,9 +177,9 @@ type Policy struct {
 //
 // design.md 7a.4 節 further restricts the kernel ingress layer to ports wgft has actually bound or
 // DNATed ("wgft が実際に待ち受けを開けている、または DNAT を持つポートだけ"), which is a Runtime
-// property (whether an agent is known, whether a listener bound). Phase 1 has no Runtime, so Build
+// property (whether an agent is known, whether a listener bound). Build sees no Runtime, so it
 // applies only the rule-level condition; joining rules to actually-owned ports is
-// internal/planner's job (and, from Phase 4 onward, Prepare/Commit's).
+// internal/planner's job and the Runtime's Prepare/Commit's.
 //
 // Build is deterministic: Policy.Rules is always sorted by RuleID, regardless of the input rules'
 // order, so a Policy embedded in a larger deterministic structure (internal/planner.Plan.Admission)

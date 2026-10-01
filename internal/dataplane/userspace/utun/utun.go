@@ -112,7 +112,7 @@ func (t *Tunnel) ListenPort() (uint16, error) {
 }
 
 // SetPeers は宣言のピア集合に収束させる(足りないものを足し、余分を消す)。
-// カーネルモードの wg.Ensure(internal/vpsd/wg)のピア部分に相当し、変えた点を返す。
+// カーネルモードの wg.Ensure(internal/dataplane/linuxkernel/wg)のピア部分に相当し、変えた点を返す。
 // ピアのエンドポイントは、エージェントからのハンドシェイクで学習する。例外は鍵を替えたエージェントの
 // 新しいピアで、同じアドレスを持っていた古いピアのエンドポイントを引き継ぐ(設計文書 5.2 節。
 // dataplane.InheritedEndpoint)。
