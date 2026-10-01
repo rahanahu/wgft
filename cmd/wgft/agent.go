@@ -19,6 +19,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/teardown"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/textsafe"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // agentGOOS はエージェントの入口が Linux 以外での kernel の指定を判定するための OS 名である。
@@ -362,7 +363,7 @@ On the VPS, against the admin API:
 				// style cleanup).
 				var rulesB strings.Builder
 				for _, r := range a.Rules {
-					if r.State != "ok" {
+					if r.State != proto.StatusOK {
 						rulesB.WriteString(textsafe.SanitizeForTerminal(r.ID))
 						rulesB.WriteByte(':')
 						rulesB.WriteString(textsafe.SanitizeForTerminal(r.Reason))
