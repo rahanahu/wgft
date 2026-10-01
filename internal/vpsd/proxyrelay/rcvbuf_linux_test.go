@@ -32,7 +32,10 @@ func rcvBufOf(t *testing.T, c net.Conn) int {
 	return n
 }
 
-// boostPeer はユーザー空間モードのエージェントへの接続(nettun.TCPConn)を模す。
+// boostPeer はユーザー空間モードのエージェントへの接続(nettun.TCPConn)を模す。nettun.TCPConn と
+// 同じく、登録のときの 1 回を含めて、知らせの関数を錠の中で 1 つずつ呼ぶ。netpipe.FollowBoost の関数は
+// この直列化を前提にする。登録は中継の goroutine で、試験の知らせは試験の goroutine で呼ぶので、錠の
+// 外で呼ぶと 2 つが重なる。
 type boostPeer struct {
 	net.Conn
 	mu sync.Mutex
@@ -41,15 +44,23 @@ type boostPeer struct {
 
 func (b *boostPeer) OnBoost(f func(bool) bool) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.f = f
-	b.mu.Unlock()
 	f(false)
 }
 
-func (b *boostPeer) hook() func(bool) bool {
+// linked は、登録のときの呼び出しまで終えたかを返す。
+func (b *boostPeer) linked() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.f
+	return b.f != nil
+}
+
+// set は枠の知らせを錠の中で送る。
+func (b *boostPeer) set(on bool) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.f(on)
 }
 
 type spyListener struct {
@@ -122,21 +133,20 @@ func TestProxyPublicSocketFollowsPeerBoost(t *testing.T) {
 		t.Fatal("the proxy relay did not dial the agent")
 	}
 	deadline := time.Now().Add(3 * time.Second)
-	for peer.hook() == nil && time.Now().Before(deadline) {
+	for !peer.linked() && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	f := peer.hook()
-	if f == nil {
+	if !peer.linked() {
 		t.Fatal("the proxy relay never linked the public socket to the peer's boost")
 	}
 	if got := rcvBufOf(t, pub); got != 2*netpipe.KernelRecvFloor {
 		t.Fatalf("public SO_RCVBUF at the floor = %d, want %d", got, 2*netpipe.KernelRecvFloor)
 	}
-	f(true)
+	peer.set(true)
 	if got := rcvBufOf(t, pub); got <= 2*netpipe.KernelRecvFloor {
 		t.Fatalf("public SO_RCVBUF while the peer holds a slot = %d, want above %d", got, 2*netpipe.KernelRecvFloor)
 	}
-	f(false)
+	peer.set(false)
 	if got := rcvBufOf(t, pub); got != 2*netpipe.KernelRecvFloor {
 		t.Fatalf("public SO_RCVBUF after the slot went back = %d, want %d", got, 2*netpipe.KernelRecvFloor)
 	}
