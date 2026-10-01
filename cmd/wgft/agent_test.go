@@ -482,7 +482,7 @@ func TestRegisteredAgentIsNotRefusedForMalformedJoin(t *testing.T) {
 	cmd.Flags().String("name", "", "")
 	cmd.Flags().String("agent-allow-targets", "", "")
 	cmd.Flags().String("config", filepath.Join(dir, "none.env"), "")
-	registerLimitFlags(cmd.Flags())
+	registerSpecFlags(cmd.Flags(), limitSpecs()...)
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}

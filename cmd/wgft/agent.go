@@ -40,16 +40,45 @@ func ago(s string) string {
 	return time.Since(t).Truncate(time.Second).String() + " ago"
 }
 
-// agentSpecs は agent run の設定項目。
+// agentDataDirSpec はエージェントのデータの置き場 WGFT_DATA_DIR である。agent run、agent doctor、
+// agent teardown、agent pubkey、agent rotate-key が共有する。
+func agentDataDirSpec() spec {
+	return spec{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir(),
+		Usage: "data dir, env WGFT_DATA_DIR; holds agent.json"}
+}
+
+// agentWGInterfaceSpec はカーネルモードのエージェントの WireGuard インタフェース名
+// WGFT_WG_INTERFACE である。agent run と agent teardown が共有する。
+func agentWGInterfaceSpec() spec {
+	return spec{Env: "WGFT_WG_INTERFACE", Flag: "wg-interface", Default: "wgft0",
+		Usage: "kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE"}
+}
+
+// agentSpecs は agent run の設定項目。agent run はこの全部をフラグ別名として登録する。
 func agentSpecs() []spec {
 	return append([]spec{
-		{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir()},
-		{Env: "WGFT_JOIN", Flag: "join", Default: "", Secret: true},
-		{Env: "WGFT_NAME", Flag: "name", Default: ""},
-		{Env: "WGFT_MODE", Flag: "mode", Default: ""},
-		{Env: "WGFT_WG_INTERFACE", Flag: "wg-interface", Default: "wgft0"},
-		{Env: allowtargets.Env, Flag: "agent-allow-targets", Default: "", Slice: true},
+		agentDataDirSpec(),
+		{Env: "WGFT_JOIN", Flag: "join", Default: "", Secret: true,
+			Usage: "join string wgft://host:port/token#sha256:..., env WGFT_JOIN"},
+		{Env: "WGFT_NAME", Flag: "name", Default: "",
+			Usage: "agent name, env WGFT_NAME; optional, the join string is already bound to a name"},
+		{Env: "WGFT_MODE", Flag: "mode", Default: "",
+			Usage: "forwarding mode userspace or kernel, env WGFT_MODE; unset means userspace, and kernel is Linux only"},
+		agentWGInterfaceSpec().withUsage("kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE; unused in userspace mode"),
+		{Env: allowtargets.Env, Flag: "agent-allow-targets", Default: "", Slice: true,
+			Usage: "comma-separated targets the server may send traffic to, env " + allowtargets.Env + "; entries are CIDR, CIDR:port or CIDR:lo-hi; unset means no restriction"},
 	}, limitSpecs()...)
+}
+
+// agentCredentialsSpecs は、認証情報ファイルの場所だけを読む agent pubkey と agent rotate-key の
+// 設定項目である。
+func agentCredentialsSpecs() []spec {
+	return []spec{agentDataDirSpec().withUsage("data dir, env WGFT_DATA_DIR")}
+}
+
+// agentTeardownSpecs は agent teardown の設定項目である。
+func agentTeardownSpecs() []spec {
+	return []spec{agentDataDirSpec(), agentWGInterfaceSpec()}
 }
 
 // logUnusedKernelLimits は、カーネルモードで同時フロー数の上限が設定されていれば、使わないことを
@@ -142,7 +171,7 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 
 // agentCredentialsPath は WGFT_DATA_DIR から agent.json (認証情報) のパスを決める(home 側コマンド用)。
 func agentCredentialsPath(cmd *cobra.Command) (string, error) {
-	c, err := loadConfig(cmd, []spec{{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir()}}, resolveConfigPath(cmd, agentConfigPath))
+	c, err := loadConfig(cmd, agentCredentialsSpecs(), resolveConfigPath(cmd, agentConfigPath))
 	if err != nil {
 		return "", err
 	}
@@ -195,14 +224,7 @@ On the VPS, against the admin API:
 		},
 	}
 	rf := run.Flags()
-	rf.String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR; holds agent.json")
-	registerLimitFlags(rf)
-	rf.String("join", "", "join string wgft://host:port/token#sha256:..., env WGFT_JOIN")
-	rf.String("name", "", "agent name, env WGFT_NAME; optional, the join string is already bound to a name")
-	rf.String("mode", "", "forwarding mode userspace or kernel, env WGFT_MODE; unset means userspace, and kernel is Linux only")
-	rf.String("wg-interface", "wgft0", "kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE; unused in userspace mode")
-	rf.String("agent-allow-targets", "",
-		"comma-separated targets the server may send traffic to, env "+allowtargets.Env+"; entries are CIDR, CIDR:port or CIDR:lo-hi; unset means no restriction")
+	registerSpecFlags(rf, agentSpecs()...)
 	rf.String("config", agentConfigPath, "dotenv config file")
 
 	pubkey := &cobra.Command{
@@ -222,7 +244,7 @@ On the VPS, against the admin API:
 			return nil
 		},
 	}
-	pubkey.Flags().String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR")
+	registerSpecFlags(pubkey.Flags(), agentCredentialsSpecs()...)
 	pubkey.Flags().String("config", agentConfigPath, "dotenv config file")
 
 	rotate := &cobra.Command{
@@ -242,7 +264,7 @@ On the VPS, against the admin API:
 			return nil
 		},
 	}
-	rotate.Flags().String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR")
+	registerSpecFlags(rotate.Flags(), agentCredentialsSpecs()...)
 	rotate.Flags().String("config", agentConfigPath, "dotenv config file")
 
 	teardown := newAgentTeardownCmd()
@@ -534,10 +556,7 @@ func newAgentTeardownCmd() *cobra.Command {
 				return startup.Prerequisite("operating system", "the agent's kernel mode, which agent teardown cleans up after, runs on Linux only, and this is %s; a userspace-mode agent leaves nothing in the kernel", agentGOOS)
 			}
 			configPath := resolveConfigPath(cmd, agentConfigPath)
-			c, err := loadConfig(cmd, []spec{
-				{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: defaultDataDir()},
-				{Env: "WGFT_WG_INTERFACE", Flag: "wg-interface", Default: "wgft0"},
-			}, configPath)
+			c, err := loadConfig(cmd, agentTeardownSpecs(), configPath)
 			if err != nil {
 				return withUnreadableHint(err, configPath, agentUnreadableHint)
 			}
@@ -555,8 +574,7 @@ func newAgentTeardownCmd() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR; holds agent.json")
-	f.String("wg-interface", "wgft0", "kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE")
+	registerSpecFlags(f, agentTeardownSpecs()...)
 	f.String("config", agentConfigPath, "dotenv config file")
 	f.BoolVar(&dryRun, "dry-run", false, "only print what would be removed and the list to restore by hand")
 	return cmd

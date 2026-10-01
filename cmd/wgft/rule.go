@@ -19,10 +19,21 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
+// adminSetting は管理用 API の場所 WGFT_ADMIN である。server は待ち受けに、管理系のコマンドは
+// 接続先に使うので、名前と既定値を両方で共有する。既定は Unix ソケット。
+func adminSetting() spec {
+	return spec{Env: "WGFT_ADMIN", Flag: "admin", Default: "unix:///run/wgft/admin.sock"}
+}
+
+// adminClientSpec は、管理系のコマンドが接続先として読む WGFT_ADMIN である。
+func adminClientSpec() spec {
+	return adminSetting().withUsage("admin API address, env WGFT_ADMIN")
+}
+
 // adminClient は WGFT_ADMIN(またはフラグ --admin、dotenv)からクライアントを作る。
 // 既定は Unix ソケット。パスワードは無い(仕様 11 節)。
 func adminClient(cmd *cobra.Command) (*admin.Client, error) {
-	c, err := loadConfig(cmd, []spec{{Env: "WGFT_ADMIN", Flag: "admin", Default: "unix:///run/wgft/admin.sock"}}, resolveConfigPath(cmd, defaultConfigPath))
+	c, err := loadConfig(cmd, []spec{adminClientSpec()}, resolveConfigPath(cmd, defaultConfigPath))
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +42,7 @@ func adminClient(cmd *cobra.Command) (*admin.Client, error) {
 
 // addAdminFlag は管理系サブコマンドに --admin と --config を付ける。
 func addAdminFlag(c *cobra.Command) {
-	c.Flags().String("admin", "unix:///run/wgft/admin.sock", "admin API address, env WGFT_ADMIN")
+	registerSpecFlags(c.Flags(), adminClientSpec())
 	c.Flags().String("config", defaultConfigPath, "dotenv config file")
 }
 
@@ -52,7 +63,7 @@ func notePacketRateTCP(r *proto.Rule) {
 // newRuleCmd は `wgft rule` の木を組み立てる。サブコマンドはそれぞれ newRuleXxxCmd が作る。
 func newRuleCmd() *cobra.Command {
 	root := &cobra.Command{Use: "rule", Short: "Manage forwarding rules via the admin API"}
-	root.PersistentFlags().String("admin", "unix:///run/wgft/admin.sock", "admin API address, env WGFT_ADMIN")
+	registerSpecFlags(root.PersistentFlags(), adminClientSpec())
 	root.PersistentFlags().String("config", defaultConfigPath, "dotenv config file")
 	root.AddCommand(
 		newRuleAddCmd(),

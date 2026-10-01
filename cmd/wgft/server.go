@@ -15,42 +15,51 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd"
 )
 
-// serverSpecs は server の設定項目(WGFT_ 名とフラグ別名。仕様 11a 節)。
+// serverDataDirSetting は server のデータの置き場 WGFT_DATA_DIR である。run、check、teardown が
+// 共有する。
+func serverDataDirSetting() spec {
+	return spec{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: "/var/lib/wgft"}
+}
+
+// serverSpecs は server の設定項目(WGFT_ 名とフラグ別名。仕様 11a 節)。run と check はこの全部を
+// フラグ別名として登録する。
 func serverSpecs() []spec {
 	return append([]spec{
-		{Env: "WGFT_MODE", Flag: "mode", Default: ""},
-		{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: "/var/lib/wgft"},
-		{Env: "WGFT_WG_INTERFACE", Flag: "wg-interface", Default: "wgft0"},
-		{Env: "WGFT_WG_PORT", Flag: "wg-port", Default: "51820"},
-		{Env: "WGFT_WG_ADDRESS", Flag: "wg-address", Default: "10.200.0.1/24"},
-		{Env: "WGFT_WG_ENDPOINT", Flag: "wg-endpoint", Default: ""},
-		{Env: "WGFT_MTU", Flag: "mtu", Default: "1420"},
-		{Env: "WGFT_AGENT_API", Flag: "agent-api", Default: "0.0.0.0:8443"},
-		{Env: "WGFT_AGENT_API_HOST", Flag: "agent-api-host", Default: ""},
-		{Env: "WGFT_ADMIN", Flag: "admin", Default: "unix:///run/wgft/admin.sock"},
-		{Env: "WGFT_ADMIN_TAILSCALE", Flag: "admin-tailscale", Default: "false"},
-		{Env: "WGFT_ADMIN_HOST", Flag: "admin-host", Default: "", Slice: true},
+		{Env: "WGFT_MODE", Flag: "mode", Default: "",
+			Usage: "forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter"},
+		serverDataDirSetting().withUsage("data dir, env WGFT_DATA_DIR; holds wgft.sqlite"),
+		{Env: "WGFT_WG_INTERFACE", Flag: "wg-interface", Default: "wgft0",
+			Usage: "WireGuard interface name, env WGFT_WG_INTERFACE"},
+		{Env: "WGFT_WG_PORT", Flag: "wg-port", Default: "51820", Kind: flagUint16,
+			Usage: "WireGuard listen UDP port, env WGFT_WG_PORT"},
+		{Env: "WGFT_WG_ADDRESS", Flag: "wg-address", Default: "10.200.0.1/24",
+			Usage: "wg address range, env WGFT_WG_ADDRESS"},
+		{Env: "WGFT_WG_ENDPOINT", Flag: "wg-endpoint", Default: "",
+			Usage: "WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT"},
+		{Env: "WGFT_MTU", Flag: "mtu", Default: "1420", Kind: flagInt,
+			Usage: "wg MTU, env WGFT_MTU"},
+		{Env: "WGFT_AGENT_API", Flag: "agent-api", Default: "0.0.0.0:8443",
+			Usage: "agent API listen address, env WGFT_AGENT_API, public"},
+		{Env: "WGFT_AGENT_API_HOST", Flag: "agent-api-host", Default: "",
+			Usage: "host:port to embed in the join string, env WGFT_AGENT_API_HOST"},
+		adminSetting().withUsage("admin API listen address, env WGFT_ADMIN; unix:///path or host:port"),
+		{Env: "WGFT_ADMIN_TAILSCALE", Flag: "admin-tailscale", Default: "false", Kind: flagBool,
+			Usage: "also listen on the tailnet address, env WGFT_ADMIN_TAILSCALE"},
+		{Env: "WGFT_ADMIN_HOST", Flag: "admin-host", Default: "", Slice: true, Kind: flagStringSlice,
+			Usage: "extra names allowed by the Host check, env WGFT_ADMIN_HOST, comma-separated"},
 	}, append(limitSpecs(), perSourceLimitSpecs()...)...)
 }
 
 // registerServerFlags は run / check にフラグ別名を付ける。
 func registerServerFlags(f *cobra.Command) {
 	fl := f.Flags()
-	fl.String("mode", "", "forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter")
-	fl.String("data-dir", "/var/lib/wgft", "data dir, env WGFT_DATA_DIR; holds wgft.sqlite")
-	fl.String("wg-interface", "wgft0", "WireGuard interface name, env WGFT_WG_INTERFACE")
-	fl.Uint16("wg-port", 51820, "WireGuard listen UDP port, env WGFT_WG_PORT")
-	fl.String("wg-address", "10.200.0.1/24", "wg address range, env WGFT_WG_ADDRESS")
-	fl.String("wg-endpoint", "", "WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT")
-	fl.Int("mtu", 1420, "wg MTU, env WGFT_MTU")
-	fl.String("agent-api", "0.0.0.0:8443", "agent API listen address, env WGFT_AGENT_API, public")
-	fl.String("agent-api-host", "", "host:port to embed in the join string, env WGFT_AGENT_API_HOST")
-	fl.String("admin", "unix:///run/wgft/admin.sock", "admin API listen address, env WGFT_ADMIN; unix:///path or host:port")
-	fl.Bool("admin-tailscale", false, "also listen on the tailnet address, env WGFT_ADMIN_TAILSCALE")
-	fl.StringSlice("admin-host", nil, "extra names allowed by the Host check, env WGFT_ADMIN_HOST, comma-separated")
-	registerLimitFlags(fl)
-	registerPerSourceLimitFlags(fl)
+	registerSpecFlags(fl, serverSpecs()...)
 	fl.String("config", defaultConfigPath, "dotenv config file")
+}
+
+// serverTeardownSpecs は server teardown の設定項目である。
+func serverTeardownSpecs() []spec {
+	return []spec{serverDataDirSetting().withUsage("data dir, env WGFT_DATA_DIR")}
 }
 
 // buildServerOptions は設定層から vpsd.Options を組む。
@@ -248,7 +257,7 @@ func newServerCmd() *cobra.Command {
 			return nil
 		},
 	}
-	nft.Flags().String("admin", "unix:///run/wgft/admin.sock", "admin API address, env WGFT_ADMIN")
+	registerSpecFlags(nft.Flags(), adminClientSpec())
 
 	// doctor の実装は build tag の無い cmd/wgft/doctor.go にあり、管理用 API しか使わない。
 	// 登録だけがこのファイル(Linux)にあるので、Linux 以外のビルドでは server の一群ごと
@@ -268,7 +277,7 @@ interface, and with --purge the server database too, including keys, certificate
 reverted automatically; it only prints a list to revert by hand.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := loadConfig(cmd, []spec{{Env: "WGFT_DATA_DIR", Flag: "data-dir", Default: "/var/lib/wgft"}}, resolveConfigPath(cmd, defaultConfigPath))
+			c, err := loadConfig(cmd, serverTeardownSpecs(), resolveConfigPath(cmd, defaultConfigPath))
 			if err != nil {
 				return err
 			}
@@ -277,7 +286,7 @@ reverted automatically; it only prints a list to revert by hand.`,
 		},
 	}
 	f := cmd.Flags()
-	f.String("data-dir", "/var/lib/wgft", "data dir, env WGFT_DATA_DIR")
+	registerSpecFlags(f, serverTeardownSpecs()...)
 	f.String("config", defaultConfigPath, "dotenv config file")
 	f.BoolVar(&o.Purge, "purge", false, "also remove the server database: keys, certificates, rules, agents; agents must re-register")
 	f.BoolVar(&o.DryRun, "dry-run", false, "only print what would be removed and the list to revert by hand")

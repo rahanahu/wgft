@@ -195,7 +195,7 @@ func newStatusCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON; the stable summary model of this command")
-	cmd.Flags().String("admin", "unix:///run/wgft/admin.sock", "admin API address, env WGFT_ADMIN")
+	registerSpecFlags(cmd.Flags(), adminClientSpec())
 	cmd.Flags().String("config", defaultConfigPath, "dotenv config file")
 	// フラグの誤りも、引数の数の誤りと同じ理由で終了コード 2 にする(design.md 10.2b 節)。
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return unavailable(err) })

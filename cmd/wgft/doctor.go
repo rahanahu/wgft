@@ -117,7 +117,7 @@ func newServerDoctorCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&probe, "probe", false, "also open a real TCP connection through the tunnel to the target; one rule only")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "also print the internal detail: generations, apply state, endpoints, counters")
 	cmd.Flags().StringVar(&from, "from", "", "client address to evaluate the deny and allow lists against")
-	cmd.Flags().String("admin", "unix:///run/wgft/admin.sock", "admin API address, env WGFT_ADMIN")
+	registerSpecFlags(cmd.Flags(), adminClientSpec())
 	cmd.Flags().String("config", defaultConfigPath, "dotenv config file")
 	// フラグの誤りも、引数の数の誤りと同じく「報告を作れなかった」失敗である(設計文書 10.2a 節)。
 	// フラグの解析は Args の検査より前に行われるので、上の Args だけでは届かない。
