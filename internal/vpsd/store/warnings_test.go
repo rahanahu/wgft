@@ -432,3 +432,37 @@ func TestFlappingWarningCapBreaksTiesByInsertionOrder(t *testing.T) {
 		}
 	}
 }
+
+// AgentWarnings は同じ秒の警告を記録した順に返す。全警告を読んで絞っていた以前の版と同じ順序で、
+// 主キー(種類と detail)の順ではない。
+func TestAgentWarningsKeepsInsertionOrderWithinSameSecond(t *testing.T) {
+	s := openTemp(t)
+	insertWarningAt(t, s, "home", WarnIPMismatch, IPMismatchDetail("198.51.100.9", "203.0.113.9"), 100)
+	insertWarningAt(t, s, "home", WarnIPFlapping, "wg endpoint alternated between 198.51.100.2 and 203.0.113.9", 100)
+	insertWarningAt(t, s, "home", WarnIPFlapping, "stream alternated between 198.51.100.1 and 203.0.113.9", 100)
+	insertWarningAt(t, s, "home", WarnIPMismatch, IPMismatchDetail("198.51.100.1", "203.0.113.9"), 100)
+	insertWarningAt(t, s, "home", WarnIPFlapping, flapDetail(5), 200)
+	all, err := s.Warnings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := s.AgentWarnings("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		flapDetail(5),
+		IPMismatchDetail("198.51.100.9", "203.0.113.9"),
+		"wg endpoint alternated between 198.51.100.2 and 203.0.113.9",
+		"stream alternated between 198.51.100.1 and 203.0.113.9",
+		IPMismatchDetail("198.51.100.1", "203.0.113.9"),
+	}
+	if len(ws) != len(want) || len(all) != len(want) {
+		t.Fatalf("AgentWarnings = %+v, Warnings = %+v", ws, all)
+	}
+	for i := range want {
+		if ws[i].Detail != want[i] || all[i].Detail != want[i] {
+			t.Errorf("row %d: AgentWarnings %q, Warnings %q, want %q", i, ws[i].Detail, all[i].Detail, want[i])
+		}
+	}
+}

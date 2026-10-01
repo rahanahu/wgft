@@ -27,8 +27,8 @@ type Warning struct {
 
 // MaxFlappingWarnings はエージェントごとに持つ ip-flapping の警告の行の上限(仕様 5.2 節)。
 // detail は往復した 2 つの IP を含むので、上限が無いと IP の組の数だけ行が増える。64 行は
-// 2 つのチャネルのそれぞれで 32 通りの組にあたり、8 つの回線の間を行き来するエージェントの
-// すべての組(各チャネルで 28 通り)を収める。
+// 2 つのチャネルで共有し、8 つの回線(1 回線を 1 つの IP と数える)の間を行き来する
+// エージェントのすべての組(2 つのチャネルを合わせて 56 通り)を収める。
 const MaxFlappingWarnings = 64
 
 // AddWarning は警告を記録する(同じ内容なら時刻を更新するだけ)。ip-flapping なら、記録と同じ
@@ -85,9 +85,11 @@ func (s *Store) Warnings() ([]Warning, error) {
 	return s.queryWarnings("SELECT agent, kind, detail, created_at FROM warnings ORDER BY created_at DESC")
 }
 
-// AgentWarnings はそのエージェントの警告を新しい順に返す。
+// AgentWarnings はそのエージェントの警告を新しい順に返す。同じ秒の警告は記録した順に並べる。
+// 全警告を読んで絞っていた以前の版と同じ順序である。WHERE は主キーの索引を使うので、rowid を
+// 明示しないと同じ秒の警告が種類と detail の順になる。
 func (s *Store) AgentWarnings(agent string) ([]Warning, error) {
-	return s.queryWarnings("SELECT agent, kind, detail, created_at FROM warnings WHERE agent = ? ORDER BY created_at DESC", agent)
+	return s.queryWarnings("SELECT agent, kind, detail, created_at FROM warnings WHERE agent = ? ORDER BY created_at DESC, rowid ASC", agent)
 }
 
 func (s *Store) queryWarnings(query string, args ...any) ([]Warning, error) {
