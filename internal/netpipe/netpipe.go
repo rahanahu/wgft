@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -21,13 +20,20 @@ type closeWriter interface{ CloseWrite() error }
 func Pipe(a, b net.Conn) { PipeResetB(a, b, nil) }
 
 // PipeResetB は Pipe と同じく中継する。加えて、a の読み取りか a への書き込みが RST による誤り
-// (isReset)で失敗して中継が終わるときは、両方を閉じる前に resetB を呼ぶ。resetB は、続く通常の
-// Close の代わりに b を RST で切るためのもの(netstack の接続の Abort、実ソケットの SetLinger(0))で、
-// nil なら Pipe と同じである。b の読み書きの誤りでは呼ばない。ただしカーネルの TCP 同士の
-// io.Copy(splice)は、誤りがどちらの接続の操作のものかを返さないので、その経路では RST による
-// 誤りを a のものとして扱う。誤りが b のものなら、b は RST を受けて既に CLOSED にあり、Linux の
-// tcp_close はその状態のソケットに RST を送らないので、resetB の後の Close は何も送らない
-// (カーネルのコードから導いたもので、パケットでは確かめていない)。
+// (isReset)で失敗して中継が終わるときは、その向きが両方を閉じる前に resetB を呼ぶ。resetB は、
+// 続く通常の Close の代わりに b を RST で切るためのもの(netstack の接続の Abort、実ソケットの
+// SetLinger(0))で、nil なら Pipe と同じである。b の読み書きの誤りでは呼ばない。
+//
+// 「閉じる前」はその向きの中だけの順序である。もう一方の向きは先に終わり、すでに b を CloseWrite
+// か Close で閉じていることがある。例えば a への書き込みが RST の誤りを先に受け取ると、a の
+// 読み取りは誤りではなく EOF を返し、その向きが CloseWrite(b) で FIN を送る。b にはその FIN の後に
+// resetB の RST が届く。
+//
+// カーネルの TCP 同士の io.Copy(splice)は、誤りがどちらの接続の操作のものかを返さないので、その
+// 経路では RST による誤りを a のものとして扱う。誤りが b のものなら、b は RST を受けて既に CLOSED に
+// あり、Linux の tcp_close はその状態のソケットに RST を送らないので、resetB の後の Close は何も
+// 送らない。これはカーネルのコードから導き、network namespace の Tcp OutRsts の計数器が増えない
+// ことでも確かめた。パケットのキャプチャでは確かめていない。
 func PipeResetB(a, b net.Conn, resetB func()) {
 	var wg sync.WaitGroup
 	half := func(dst, src net.Conn) {
@@ -57,13 +63,13 @@ func PipeResetB(a, b net.Conn, resetB func()) {
 
 // isReset は、カーネルのソケットが RST を受けて読み書きが失敗した誤り(ECONNRESET)かを返す。
 // PipeResetB の a は公開側のカーネルのソケットなので、カーネルの誤りだけを見る。Windows の
-// WSAECONNRESET(10054)は syscall.ECONNRESET と別の値なので、数値でも比べる。
+// WSAECONNRESET は syscall.ECONNRESET と別の値なので、isPlatformReset で比べる。
 func isReset(err error) bool {
 	var errno syscall.Errno
 	if !errors.As(err, &errno) {
 		return false
 	}
-	return errno == syscall.ECONNRESET || (runtime.GOOS == "windows" && errno == 10054)
+	return errno == syscall.ECONNRESET || isPlatformReset(errno)
 }
 
 // errSide は、copyConn の誤りがどちらの接続の操作で起きたかである。
