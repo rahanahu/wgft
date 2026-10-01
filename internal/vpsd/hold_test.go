@@ -268,6 +268,13 @@ func TestServeStartsWithoutAHoldWhenTheFirstApplyWorks(t *testing.T) {
 	} else if got, want := reflect.ValueOf(d.hub.Authenticated).Pointer(), reflect.ValueOf(d.agentAPI.Authenticated).Pointer(); got != want {
 		t.Error("the stream hub reports authenticated connections to a function other than the agent API's Authenticated")
 	}
+	// The stream handler must apply the agent API's per-source rate limit to connection attempts, or
+	// the stream endpoint would take token guesses without any limit (the hub admits all when nil).
+	if d.hub.RateLimit == nil {
+		t.Error("the stream hub does not rate-limit connection attempts")
+	} else if got, want := reflect.ValueOf(d.hub.RateLimit).Pointer(), reflect.ValueOf(d.agentAPI.Allow).Pointer(); got != want {
+		t.Error("the stream hub rate-limits connection attempts with a function other than the agent API's Allow")
+	}
 	if code, err := adminGet(adminAddr, "/api/v1/rules"); err != nil || code != 200 {
 		t.Errorf("the admin API must answer after an ordinary startup; got %d, %v", code, err)
 	}

@@ -20,6 +20,17 @@ import (
 	"time"
 )
 
+// 管理用 API はこれらの任意の Backend を型アサーションだけで探し、満たさなければ「古い server」として
+// そのフィールドを黙って省く(admin の apply.go、resource_status.go、agent_rule_status.go)。
+// メソッドの形がずれたらコンパイルで気付けるよう、ここで固定する。
+var (
+	_ admin.ApplyStatusBackend     = (*Daemon)(nil)
+	_ admin.ResourceStatusBackend  = (*Daemon)(nil)
+	_ admin.AgentRuleStatusBackend = (*Daemon)(nil)
+	_ admin.IPForwardBackend       = (*Daemon)(nil)
+	_ admin.UDPReplyBackend        = (*Daemon)(nil)
+)
+
 // Rules / Generation / Agents / JoinString / Revoke / DisableAgent / EnableAgent は admin.Backend の実装。
 // 操作名を付けて包むのは、admin.go の 500 応答が err.Error() をそのまま本文にするため。
 // 包まないと運用者は "database is locked" のような文言だけを見て、どの読み取りが失敗したか分からない。
@@ -418,6 +429,9 @@ func (d *Daemon) ApplyStatus() (admin.ApplyStatus, bool) {
 type udpPooler interface {
 	UDPPool() *resource.Pool
 }
+
+// ResourceStatus はこれを型アサーションだけで探すので、ずれたらコンパイルで気付けるよう固定する。
+var _ udpPooler = (*userspaceDataplane)(nil)
 
 // ResourceStatus is admin.ResourceStatusBackend's implementation (design.md 7a.10 節「拒否の報告」).
 // TCP always has a pool: d.proxy judges every Relay connection (kernel mode: its own pool; userspace

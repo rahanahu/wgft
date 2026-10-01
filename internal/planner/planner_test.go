@@ -161,3 +161,70 @@ func TestBuildEmptyInput(t *testing.T) {
 		t.Fatalf("Build(Input{}) = %+v, want an empty Plan", got)
 	}
 }
+
+// policyCopiesMatch reports where p's two views of the per-rule policy disagree: every PortPlan's
+// Policy must equal the Plan.Admission.Rules entry of the same rule, and every entry must belong to
+// a PortPlan. Readers are split between the two (the relay declarations read PortPlan.Policy, the
+// policy compilers read Plan.Admission), so a drift would make them enforce different policies.
+func policyCopiesMatch(p Plan) []string {
+	var bad []string
+	byID := make(map[string]policy.RulePolicy, len(p.Admission.Rules))
+	for _, rp := range p.Admission.Rules {
+		if _, dup := byID[rp.RuleID]; dup {
+			bad = append(bad, rp.RuleID+": two Admission entries")
+		}
+		byID[rp.RuleID] = rp
+	}
+	ports := make(map[string]bool, len(p.Ports))
+	for _, pp := range p.Ports {
+		ports[pp.RuleID] = true
+		rp, ok := byID[pp.RuleID]
+		if !ok {
+			bad = append(bad, pp.RuleID+": a port without an Admission entry")
+		} else if !reflect.DeepEqual(rp, pp.Policy) {
+			bad = append(bad, pp.RuleID+": PortPlan.Policy differs from its Admission entry")
+		}
+	}
+	for id := range byID {
+		if !ports[id] {
+			bad = append(bad, id+": an Admission entry without a port")
+		}
+	}
+	return bad
+}
+
+// TestPlanPolicyCopiesStayInStep checks that PortPlan.Policy stays the copy of the matching
+// Plan.Admission.Rules entry its doc comment promises, after Build and after Without (the
+// fail-closed Plan the Runtime publishes; design.md 7a.3 節).
+func TestPlanPolicyCopiesStayInStep(t *testing.T) {
+	rate := func(s string) *proto.Rate { r, _ := proto.ParseRate(s); return &r }
+	deny := []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}
+	plan := Build(Input{
+		Rules: []model.Rule{
+			{ID: "r_relay", Agent: "home", Proto: proto.TCP, ListenPort: pr(443, 443), Target: "192.168.1.1:443",
+				Forwarding: model.Relay, Enabled: true, NewFlowRate: rate("50/second"), SourceDeny: deny},
+			{ID: "r_udp", Agent: "home", Proto: proto.UDP, ListenPort: pr(2456, 2457), Target: "192.168.1.2:2456",
+				Forwarding: model.Transparent, Enabled: true, PacketRate: rate("100/second")},
+			{ID: "r_plain", Agent: "office", Proto: proto.TCP, ListenPort: pr(8080, 8080), Target: "192.168.2.1:80",
+				Forwarding: model.Transparent, Enabled: true},
+			{ID: "r_off", Agent: "home", Proto: proto.TCP, ListenPort: pr(9000, 9000), Target: "192.168.1.3:80",
+				Forwarding: model.Transparent, Enabled: false, SourceDeny: deny},
+			{ID: "r_ghost", Agent: "ghost", Proto: proto.TCP, ListenPort: pr(9001, 9001), Target: "192.168.1.4:80",
+				Forwarding: model.Transparent, Enabled: true, SourceDeny: deny},
+		},
+		Agents: []Agent{{Name: "home", Addr: addr("10.200.0.2")}, {Name: "office", Addr: addr("10.200.0.3")}},
+	})
+	if len(plan.Ports) != 3 {
+		t.Fatalf("Build forwards %d rules, want 3", len(plan.Ports))
+	}
+	if bad := policyCopiesMatch(plan); len(bad) != 0 {
+		t.Errorf("after Build: %v", bad)
+	}
+	without := plan.Without(map[string]bool{"r_udp": true})
+	if bad := policyCopiesMatch(without); len(bad) != 0 {
+		t.Errorf("after Without: %v", bad)
+	}
+	if _, ok := without.Port("r_udp"); ok {
+		t.Error("Without kept the port of the rule it was told to leave out")
+	}
+}

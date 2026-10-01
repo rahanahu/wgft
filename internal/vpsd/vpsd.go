@@ -395,10 +395,25 @@ func Run(opts Options) error {
 	if f := d.dp.EnableIPForward(st); f != nil {
 		log.Printf("warning: %s", f)
 	}
-	// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)。Admission Policy は、待ち受けを
-	// 開けたポートに付ける nftables の行が判定する(6.1、7 節)ので、中継では判定しない。起動時の
-	// applyNFT が待ち受けを開き、開けたポートだけに行を付けるよう、先に作る
-	lim := opts.Limits.WithDefaults()
+	// 起動時の applyNFT が待ち受けを開き、開けたポートだけに行を付けるよう、先に作る
+	d.proxy = proxyrelay.New(relayFrontendOptions(opts.Limits, uspace))
+	// 起動時に SQLite のルールを適用する(手作業で変えられたテーブルは宣言に戻る)
+	rules, err := st.Rules()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return d.serve(ctx, rules)
+}
+
+// relayFrontendOptions は Relay のルールの中継(proxyrelay)の設定を組む。uspace はユーザー空間モード
+// の Backend で、カーネルモードでは nil である。
+//
+// カーネルモードのプロキシ中継も同じ上限で数える(仕様 6.2 節)。Admission Policy は、待ち受けを
+// 開けたポートに付ける nftables の行が判定する(6.1、7 節)ので、中継では判定しない。
+func relayFrontendOptions(limits resource.Limits, uspace *userspace.Backend) proxyrelay.Options {
+	lim := limits.WithDefaults()
 	proxyOpts := proxyrelay.Options{Pool: resource.NewPool(lim.TCPTotal)}
 	if uspace != nil {
 		// ユーザー空間モードでは netstack 越しにエージェントへ
@@ -409,15 +424,7 @@ func Run(opts Options) error {
 		// Transparent の TCP のルールと合わせて数える(6.2、6.3 節)
 		proxyOpts.Admit = uspace.AdmitRelayFlow
 	}
-	d.proxy = proxyrelay.New(proxyOpts)
-	// 起動時に SQLite のルールを適用する(手作業で変えられたテーブルは宣言に戻る)
-	rules, err := st.Rules()
-	if err != nil {
-		return err
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	return d.serve(ctx, rules)
+	return proxyOpts
 }
 
 // serve は、サーバのデータベースと転送面が立ち上がった後の起動の残りである。最初のルールの適用、
