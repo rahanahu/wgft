@@ -34,11 +34,8 @@ func (rt *runtime) recover() error {
 		return fmt.Errorf("re-register failed: %w", err)
 	}
 	rt.mu.Lock()
-	rt.f.Name, rt.f.Endpoint, rt.f.PermanentToken = name, j.Endpoint, tok
-	rt.f.CertSHA256 = hex.EncodeToString(j.Pin[:])
-	rt.f.UsedJoinTokenSHA256 = j.TokenHash()
 	// 登録のし直しは、記録したトンネルのアドレスを置き換える唯一の経路である(設計文書 9・11 節)
-	rt.f.TunnelAddress = credentials.RegisteredTunnelAddress(addr)
+	recordRegistration(rt.f, j, tok, addr, name)
 	err = rt.f.Save(rt.opts.CredentialsPath)
 	rt.mu.Unlock()
 	if err != nil {
@@ -103,13 +100,19 @@ func ensureRegistered(f *credentials.Credentials, opts Options) error {
 		return err
 	}
 	// 登録が成功した時点で認証情報ファイルを置き換える(失敗したら既存のファイルはそのまま)
-	f.Name, f.Endpoint, f.PermanentToken = name, j.Endpoint, tok
-	f.CertSHA256 = hex.EncodeToString(j.Pin[:])
-	f.UsedJoinTokenSHA256 = j.TokenHash()
-	f.TunnelAddress = credentials.RegisteredTunnelAddress(addr)
+	recordRegistration(f, j, tok, addr, name)
 	if err := f.Save(opts.CredentialsPath); err != nil {
 		return err
 	}
 	log.Printf("registered as agent %s; assigned %s, API %s", name, addr, j.Endpoint)
 	return nil
+}
+
+// recordRegistration は登録の結果を認証情報に写す。初回の登録(ensureRegistered)と登録のし直し
+// (recover)が共有する。排他は取らない。recover は rt.mu を持ったまま呼び、保存も呼び出し側が行う。
+func recordRegistration(f *credentials.Credentials, j *Join, tok, addr, name string) {
+	f.Name, f.Endpoint, f.PermanentToken = name, j.Endpoint, tok
+	f.CertSHA256 = hex.EncodeToString(j.Pin[:])
+	f.UsedJoinTokenSHA256 = j.TokenHash()
+	f.TunnelAddress = credentials.RegisteredTunnelAddress(addr)
 }
