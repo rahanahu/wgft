@@ -167,19 +167,30 @@ func readAllErr(r net.Conn, n int, timeout time.Duration) (int, error) {
 	return int(got), err
 }
 
-// holeIdle は、穴を埋めた後に読み進めない状態を止まったとみなすまでの時間。穴を開けていた間に
+// holeIdle は、穴を埋めた後に読み進めない状態を止まったとみなすまでの時間の下限。穴を開けていた間に
 // 送り手の再送の間隔は延びるので、最初の再送までの待ちを含めて余裕を取る。
 const holeIdle = 40 * time.Second
 
-// readProgress は r から n byte を読み、idle の間 1 byte も読めなければ止まったとして誤りを返す。
-// 全体の期限は置かない。遅い環境では、穴を埋めた後の転送が、送り手の queue の溢れと再送で
-// 遅くなるが、読み進めている限り、受け取れなくなった接続ではない。
-func readProgress(r net.Conn, n int, idle time.Duration) (int, error) {
+// stallBound は、穴を埋めた後に送り手 c から何も届かない状態を止まったとみなすまでの時間。
+// 送り手の今の再送の間隔(RTO)に holeIdle の 4 分の 1 を足した値と、holeIdle の大きい方である。
+// 穴の segment の再送は穴を開けている間すべて捨てるので、そのたびに RTO が倍に延びる。遅い環境で
+// 穴を長く開けると、RTO は holeIdle を超え(gVisor の上限は 120 秒)、穴を埋めた後の最初の再送は、
+// 今の RTO の分だけ後になりうる。その前に止まったとみなすと、受け入れる受け手を誤って落とす。
+func stallBound(c net.Conn) time.Duration {
+	var ti tcpip.TCPInfoOption
+	connOf(c).ep.GetSockOpt(&ti)
+	return max(holeIdle, ti.RTO+holeIdle/4)
+}
+
+// readProgress は r から n byte を読み、idle() の間 1 byte も読めなければ止まったとして誤りを返す。
+// idle は読むたびに求め直す。全体の期限は置かない。遅い環境では、穴を埋めた後の転送が、送り手の
+// queue の溢れと再送で遅くなるが、読み進めている限り、受け取れなくなった接続ではない。
+func readProgress(r net.Conn, n int, idle func() time.Duration) (int, error) {
 	defer r.SetReadDeadline(time.Time{})
 	buf := make([]byte, 64<<10)
 	got := 0
 	for got < n {
-		r.SetReadDeadline(time.Now().Add(idle))
+		r.SetReadDeadline(time.Now().Add(idle()))
 		k, err := r.Read(buf[:min(len(buf), n-got)])
 		got += k
 		if err != nil {
@@ -339,14 +350,14 @@ func TestGVisorShrinkBoundary(t *testing.T) {
 				// 止まるのが、再送が届かないからではなく、届いた再送を受け手が受け入れないからで
 				// あることを確かめる。拒んだ数か受信のメモリが変わるまで待ち、その後も何も読めない
 				// ことを見る
-				for deadline := time.Now().Add(holeIdle); queueDrops(s) == drops && recvMemOf(t, s) == m; time.Sleep(20 * time.Millisecond) {
+				for deadline := time.Now().Add(stallBound(c)); queueDrops(s) == drops && recvMemOf(t, s) == m; time.Sleep(20 * time.Millisecond) {
 					if time.Now().After(deadline) {
 						t.Fatalf("B below M: no retransmission reached the receiver: %s", holeDiag(t, p, c, s))
 					}
 				}
 				got, err = readAllErr(s, tc.ooo, 8*time.Second)
 			} else {
-				got, err = readProgress(s, tc.ooo, holeIdle)
+				got, err = readProgress(s, tc.ooo, func() time.Duration { return stallBound(c) })
 			}
 			ok := err == nil
 			close(stop)
@@ -407,7 +418,7 @@ func TestTCPReclaimWithHole(t *testing.T) {
 				t.Fatalf("holder kept at rcv=%d", rcv)
 			}
 			h.on.Store(false)
-			if got, err := readProgress(s, tc.ooo, holeIdle); err != nil {
+			if got, err := readProgress(s, tc.ooo, func() time.Duration { return stallBound(c) }); err != nil {
 				t.Fatalf("read only %d of %d after the hole was filled: %v; %s", got, tc.ooo, err, holeDiag(t, p, c, s))
 			}
 		})
