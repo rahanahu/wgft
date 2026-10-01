@@ -78,11 +78,47 @@ func newHolePair(t *testing.T, mtu int, h *holeFilter) *tcpPair {
 // sndNxtOf は試験のためだけに、送り手の次に送る順序番号(SndNxt)を読む。gVisor は endpoint の錠を
 // 持って書き換えるので、同じ錠を持って読む。
 func sndNxtOf(c net.Conn) uint32 {
+	return uint32(tcpStateOf(c, "snd", "SndNxt")[0])
+}
+
+// tcpStateOf は試験のためだけに、endpoint の snd か rcv の数のフィールドを、endpoint の錠を持って読む。
+func tcpStateOf(c net.Conn, side string, names ...string) []uint64 {
 	e := connOf(c).ep.(*tcp.Endpoint)
 	e.LockUser()
 	defer e.UnlockUser()
-	f := reflect.ValueOf(e).Elem().FieldByName("snd").Elem().FieldByName("SndNxt")
-	return uint32(reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Uint())
+	v := reflect.ValueOf(e).Elem().FieldByName(side).Elem()
+	out := make([]uint64, len(names))
+	for i, name := range names {
+		f := v.FieldByName(name)
+		out[i] = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Uint()
+	}
+	return out
+}
+
+// syncWindow は、受け手 s が今の受信の窓を送り手 c に知らせ、c がそれを受け取るまで待つ。gVisor の
+// 受け手は、読み手が読んで窓が開いても、前に知らせた窓が閾値(1 segment と受信のバッファの半分の
+// 小さい方)以上なら知らせ直さない。遅い環境では、bulk の終わりに知らせた窓が 64 KiB の segment
+// 1 つか 2 つ分のまま残ることがある。そのまま穴を作ると、送り手は穴の segment だけを送り、残りの
+// 窓に収まらない次の segment は送らずに待つ。穴の segment は捨て続けるので受け手から何も返らず、
+// 順序外が積まれない。s から c へ 1 byte を送ると、その segment が今の窓を運ぶ。待つのは、送り手の
+// 送ったものがすべて確認され、送り手の窓の右端が受け手の知らせた右端に等しいことである。
+func syncWindow(t *testing.T, c, s net.Conn) {
+	t.Helper()
+	s.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err := s.Write([]byte{0})
+	s.SetWriteDeadline(time.Time{})
+	if err != nil {
+		t.Fatalf("setup: write the window update: %v", err)
+	}
+	if _, err := readAllErr(c, 1, 10*time.Second); err != nil {
+		t.Fatalf("setup: read the window update: %v", err)
+	}
+	var snd, rcv []uint64
+	waitFor(t, 10*time.Second, "setup: the sender learns the receiver's window", func() bool {
+		snd, rcv = tcpStateOf(c, "snd", "SndUna", "SndNxt", "SndWnd"), tcpStateOf(s, "rcv", "RcvNxt", "RcvAcc")
+		return snd[0] == snd[1] && snd[1] == rcv[0] && uint32(snd[0]+snd[2]) == uint32(rcv[1]) && recvQueue(s) == 0
+	})
+	t.Logf("sender window %d", snd[2])
 }
 
 // queueDrops は、受け手が受信のメモリの不足で受け入れなかった segment の数を返す。
@@ -97,8 +133,8 @@ func holeDiag(t *testing.T, p *tcpPair, c, s net.Conn) string {
 	connOf(c).ep.GetSockOpt(&ti)
 	st := p.a.stack.Stats().TCP
 	pb, n := pendingOf(s)
-	return fmt.Sprintf("sender %v error %v rto %v retransmits %d timeouts %d; receiver %v pending %d in %d rcvMemUsed %d queue drops %d",
-		state(c), connOf(c).ep.LastError(), ti.RTO, st.Retransmits.Value(), st.Timeouts.Value(),
+	return fmt.Sprintf("sender %v error %v rto %v retransmits %d timeouts %d cwnd %d window %d; receiver %v pending %d in %d rcvMemUsed %d queue drops %d",
+		state(c), connOf(c).ep.LastError(), ti.RTO, st.Retransmits.Value(), st.Timeouts.Value(), ti.SndCwnd, tcpStateOf(c, "snd", "SndWnd")[0],
 		state(s), pb, n, recvMemOf(t, s), queueDrops(s))
 }
 
@@ -204,15 +240,23 @@ func readProgress(r net.Conn, n int, idle func() time.Duration) (int, error) {
 // 順序外として積ませる。積み終わったら、以後 c からのデータを穴を埋めるまですべて捨て、受け手が
 // 受け取った segment をすべて処理し終えた後の受信のメモリを返す。時間だけで積み終わりを判断しない。
 // 遅い環境では、送り手が送り始める前や送る途中で、受け手のメモリが一時的に変わらないことがある。
-func makeHole(t *testing.T, h *holeFilter, c, s net.Conn, ooo int) int {
+func makeHole(t *testing.T, p *tcpPair, h *holeFilter, c, s net.Conn, ooo int) int {
 	t.Helper()
+	syncWindow(t, c, s)
 	h.start(c)
 	c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if _, err := c.Write(make([]byte, ooo)); err != nil {
-		t.Fatalf("setup: write %d: %v", ooo, err)
+		t.Fatalf("setup: write %d: %v; %s", ooo, err, holeDiag(t, p, c, s))
 	}
 	c.SetWriteDeadline(time.Time{})
-	waitFor(t, 10*time.Second, "setup: out-of-order data behind the hole", func() bool { _, n := pendingOf(s); return n > 0 })
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, n := pendingOf(s); n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("setup: no out-of-order data behind the hole within 10s: %s", holeDiag(t, p, c, s))
+		}
+	}
 	// 送り手が送り終え、受け手が積み終えるまで待つ
 	settle(t, "setup: the burst behind the hole", func() [3]int { return [3]int{recvMemOf(t, s), int(sndNxtOf(c)), 0} })
 	h.frozen.Store(true)
@@ -304,7 +348,7 @@ func TestGVisorShrinkBoundary(t *testing.T) {
 			if !boosted(c) || !boosted(s) {
 				t.Fatal("setup: not boosted")
 			}
-			m := makeHole(t, h, c, s, tc.ooo)
+			m := makeHole(t, p, h, c, s, tc.ooo)
 			pb, n := pendingOf(s)
 			seg := pb / n
 			if tc.mtu > 1500 && seg < 60<<10 {
@@ -400,7 +444,7 @@ func TestTCPReclaimWithHole(t *testing.T) {
 			if !boosted(c) || !boosted(s) {
 				t.Fatal("setup: not boosted")
 			}
-			m := makeHole(t, h, c, s, tc.ooo)
+			m := makeHole(t, p, h, c, s, tc.ooo)
 			if (m <= tcpRecvFloor) != tc.demoted {
 				t.Fatalf("setup: rcvMemUsed %d is on the wrong side of the floor", m)
 			}
