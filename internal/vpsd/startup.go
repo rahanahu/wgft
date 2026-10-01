@@ -70,7 +70,7 @@ func EnableIPForward(st *store.Store) *linux.Finding {
 	}
 	if changed {
 		log.Printf("set net.ipv4.ip_forward to 1")
-		// この記録が無いと、後の teardown の「手で戻す一覧」(manualRestoreList)は
+		// この記録が無いと、後の teardown の「手で戻す一覧」(internal/vpsd/teardown の manualRestoreList)は
 		// 「wgft did not change it, already 1; no action needed」と、実際には変えたのに
 		// 変えていないかのように出す。書き込みが失敗しても起動は続けるが、この食い違いを
 		// 見逃さないよう、失敗はログに残す(design.md 10.3・10.5 節)。

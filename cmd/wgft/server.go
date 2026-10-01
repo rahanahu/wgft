@@ -14,6 +14,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/vpsd"
 	"github.com/rahanahu/wgft/internal/vpsd/servercheck"
+	"github.com/rahanahu/wgft/internal/vpsd/teardown"
 )
 
 // serverDataDirSetting は server のデータの置き場 WGFT_DATA_DIR である。run、check、teardown が
@@ -280,7 +281,7 @@ func newServerCmd() *cobra.Command {
 }
 
 func newTeardownCmd() *cobra.Command {
-	var o vpsd.TeardownOptions
+	var o teardown.Options
 	cmd := &cobra.Command{
 		Use:   "teardown",
 		Short: "remove what wgft created: table inet wgft and the wg interface",
@@ -295,7 +296,7 @@ reverted automatically; it only prints a list to revert by hand.`,
 				return err
 			}
 			o.DBPath = c.str("WGFT_DATA_DIR") + "/wgft.sqlite"
-			return vpsd.Teardown(o, os.Stdout)
+			return teardown.Run(o, os.Stdout)
 		},
 	}
 	f := cmd.Flags()

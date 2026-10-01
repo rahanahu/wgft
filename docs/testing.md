@@ -38,7 +38,7 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 | 契機 | 対象のパス | B 類 | ラボの一式のうち開発の途中で選ぶ確認 |
 |---|---|---|---|
 | `nft-emit` | `internal/policy/nftables/**`、`internal/dataplane/linuxkernel/nft/**`、`internal/policy/*.go`、`internal/planner/**` | B1 | L2、L3 (kernel モード) |
-| `kernel` | `internal/dataplane/linuxkernel/**`、`internal/platform/linux/**`、`internal/vpsd/teardown.go`、`lab/netns.sh`、`lab/lab` | B1、B2 | L2、L4、L5、L7、L10 (kernel モード) |
+| `kernel` | `internal/dataplane/linuxkernel/**`、`internal/platform/linux/**`、`internal/vpsd/teardown/**`、`lab/netns.sh`、`lab/lab` | B1、B2 | L2、L4、L5、L7、L10 (kernel モード) |
 | `admission` | `internal/policy/**`、`proto/rate.go`、`proto/source.go` | B1 | L2、L3、L13 |
 | `resource` | `internal/resource/**`、`internal/lograte/**`、`internal/dataplane/userspace/**`、`internal/netpipe/**`、`internal/nettun/**`、`cmd/wgft/limits.go` | B11 (C5 と C6 は次の段階の完了時に流し直す) | L8 (両モード) |
 | `reconcile` | `internal/reconcile/**`、`internal/planner/**`、`internal/model/**`、`internal/dataplane/*.go`、`internal/vpsd/apply.go`、`internal/vpsd/watch.go`、`internal/vpsd/dataplane*.go` | 無し (C2 は次の段階の完了時に流し直す) | L4、L5、L6、L9、L10、L15 (両モード) |
@@ -169,7 +169,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 所要時間 | 自動化 |
 |---|---|---|---|---|---|---|---|
 | B1 | build tag `lab` の nftables のテスト (`lab/lab test internal/dataplane/linuxkernel/nft`。server の `table inet wgft` とエージェントの `table inet wgft_agent` のゴールデンテスト、他のテーブルを触らないこと、wg からの転送の遮断、google/nftables での読み戻し、エージェントの表の全幅までの範囲の読み込みと、network namespace の間で他のテーブルの DNAT に wgft0 から届かないこと) | 生成した式が実際のカーネルで同じ `nft list` にならないこと。エージェントの表では `nft --debug=netlink list` の式の列も比べる。大きな範囲の map の要素が欠けること。wgft0 から公開していないポートに届くこと | ラボ | `nft-emit`、`kernel`、`admission` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
-| B2 | build tag `lab` の WireGuard、ホストの検査、teardown のテスト (`internal/dataplane/linuxkernel/wg`、`internal/platform/linux`、`internal/vpsd`) | 他の wg インタフェースの乗っ取り、所有の判定の誤り、他のテーブルの削除 | ラボ | `kernel`、`deploy` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
+| B2 | build tag `lab` の WireGuard、ホストの検査、teardown のテスト (`internal/dataplane/linuxkernel/wg`、`internal/platform/linux`、`internal/vpsd/teardown`) | 他の wg インタフェースの乗っ取り、所有の判定の誤り、他のテーブルの削除 | ラボ | `kernel`、`deploy` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
 | B3 | 実際の Caddy での HTTPS の経路 ([lab/caddy/README.md](../lab/caddy/README.md)) | PROXY protocol のヘッダを実際のリバースプロキシが読めないこと | ラボ | `relay` | 契機に当たる PR ごとに 1 回 | 10 分前後 (見込み) | 手作業 |
 | B4 | CI の `windows-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方) の退行と、エージェントのトンネル・中継の転送そのものの退行 (D1 の一部の置き換え) | CI (Windows の runner) | `agent-platform` | 契機に当たる PR の更新ごと | 数分 | 自動 |
 | B5 | CI の `release-snapshot` | GoReleaser の設定、フック、成果物の名前の食い違い | CI (Linux) | `build`、`rc` | 契機に当たる PR の更新ごと | 数分 | 自動 |

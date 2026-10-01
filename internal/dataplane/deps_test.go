@@ -224,6 +224,26 @@ func TestPureLayersStayPure(t *testing.T) {
 	}
 }
 
+// TestVpsdTeardownImportsOnlyTheStore checks design.md 7a.7 節's rule for internal/vpsd/teardown:
+// `wgft server teardown` runs only after the server has stopped and reads the server database for
+// what to remove, so of the packages under internal/vpsd it imports the store alone, never the
+// daemon nor the packages the running daemon serves through (admin, agentapi, stream, proxyrelay).
+func TestVpsdTeardownImportsOnlyTheStore(t *testing.T) {
+	root := moduleRoot(t)
+	const vpsd = module + "/internal/vpsd"
+	pkgs := packagesUnder(t, root, "internal/vpsd/teardown")
+	if len(pkgs) == 0 {
+		t.Fatal("found no package under internal/vpsd/teardown; did it move?")
+	}
+	for _, pkg := range pkgs {
+		for _, dep := range deps(t, root, pkg) {
+			if (dep == vpsd || strings.HasPrefix(dep, vpsd+"/")) && dep != vpsd+"/store" {
+				t.Errorf("%s imports %s (design.md 7a.7 節: server teardown imports only internal/vpsd/store from internal/vpsd)", pkg, dep)
+			}
+		}
+	}
+}
+
 // TestPolicyNftablesDoesNotImportGoogleNftables checks design.md 7a.9 節's rule that
 // internal/policy/nftables ("IR から nftables の行の列へのコンパイラ(google/nftables を import
 // しない。7a.9 節)") produces a row program and stays out of netlink: only the kernel backend,
