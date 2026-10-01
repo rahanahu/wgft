@@ -2,11 +2,13 @@ package agent
 
 import (
 	"math"
+	"net/netip"
 	"testing"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -130,5 +132,31 @@ func TestTunnelConfigKeepaliveOverflow(t *testing.T) {
 				t.Errorf("Keepalive = %v, want %v", cfg.Keepalive, tt.want)
 			}
 		})
+	}
+}
+
+// 宛先の許可一覧を設定しなければ、中継に判定を渡さない(仕様 7 節の「一覧が無いときは制限しない」)。
+// 設定したときは判定と設定の名前を渡す。
+func TestRelayOptionsAllowTargets(t *testing.T) {
+	st := &proto.State{WG: proto.WGConfig{UDPTimeoutStream: 120}}
+	if o := newUserspaceDataplane(nil, resource.Limits{}).relayOptions(st.WG); o.AllowTarget != nil || o.AllowTargetSource != "" {
+		t.Errorf("without a list: AllowTarget=%v source=%q, want none", o.AllowTarget != nil, o.AllowTargetSource)
+	}
+	list, err := allowtargets.Parse("192.168.1.20:25565")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := newUserspaceDataplane(list, resource.Limits{}).relayOptions(st.WG)
+	if o.AllowTarget == nil {
+		t.Fatal("with a list: AllowTarget is nil")
+	}
+	if o.AllowTargetSource != allowtargets.Env {
+		t.Errorf("source = %q, want %q", o.AllowTargetSource, allowtargets.Env)
+	}
+	if !o.AllowTarget(netip.MustParseAddrPort("192.168.1.20:25565")) {
+		t.Error("the listed target must be allowed")
+	}
+	if o.AllowTarget(netip.MustParseAddrPort("192.168.1.1:22")) {
+		t.Error("a target outside the list must be denied")
 	}
 }

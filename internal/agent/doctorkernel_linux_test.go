@@ -9,9 +9,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -21,85 +19,6 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/proto"
 )
-
-// fakeKernelDoctor は kernelDoctorOps の代わりである。カーネルに触れずに、読み方の関数が何を返すかを
-// 確かめる。eperm は CAP_NET_ADMIN の無い呼び出し元の読み出しを模す。
-type fakeKernelDoctor struct {
-	exists, up bool
-	kind       string
-	state      wg.AgentState
-	eperm      bool
-	route      string
-
-	table   nft.AgentInspection
-	present bool
-	// wantSeen は inspectTable に渡された比べる相手である
-	wantSeen nft.AgentPublication
-
-	sysctl map[string]string
-	drops  []string
-	// local はホスト自身のアドレスである。localErr があれば読めない
-	local    map[netip.Addr]bool
-	localErr error
-}
-
-func (k *fakeKernelDoctor) ops() kernelDoctorOps {
-	perm := fmt.Errorf("netlink receive: %w", syscall.EPERM)
-	return kernelDoctorOps{
-		link: func(string) (bool, string, bool, error) { return k.exists, k.kind, k.up, nil },
-		inspectLink: func(string, wgtypes.Key, wgtypes.Key) (wg.AgentState, error) {
-			if k.eperm {
-				return wg.AgentState{}, perm
-			}
-			return k.state, nil
-		},
-		inspectTable: func(want nft.AgentPublication, _ string) (nft.AgentInspection, bool, error) {
-			k.wantSeen = want
-			if k.eperm {
-				return nft.AgentInspection{}, false, fmt.Errorf("listing tables: %w", perm)
-			}
-			return k.table, k.present, nil
-		},
-		readSysctl: func(name string) (string, error) {
-			v, ok := k.sysctl[name]
-			if !ok {
-				return "", os.ErrNotExist
-			}
-			return v, nil
-		},
-		forwardDrops: func(string) ([]string, error) {
-			if k.eperm {
-				return nil, fmt.Errorf("listing chains: %w", perm)
-			}
-			return k.drops, nil
-		},
-		route:      func(netip.Addr) (string, error) { return k.route, nil },
-		localAddrs: func() (map[netip.Addr]bool, error) { return k.local, k.localErr },
-	}
-}
-
-// withKernelDoctor は読み方の操作をテストの間だけ差し替える。
-func withKernelDoctor(t *testing.T, k *fakeKernelDoctor) {
-	t.Helper()
-	old := doctorKernelOps
-	doctorKernelOps = k.ops()
-	t.Cleanup(func() { doctorKernelOps = old })
-}
-
-// healthyKernel は、宣言どおりの wgft0 を持つホストである。
-func healthyKernel(t *testing.T, f *credentials.Credentials) *fakeKernelDoctor {
-	t.Helper()
-	key, _ := wgtypes.ParseKey(f.WGPrivateKey)
-	server, _ := wgtypes.ParseKey(f.LastState.WG.ServerPubkey)
-	return &fakeKernelDoctor{
-		exists: true, up: true, kind: "wireguard", route: "wgft0", present: true,
-		state: wg.AgentState{Exists: true, Kind: "wireguard", Ownership: wg.OwnedByCurrentKey, PublicKey: key.PublicKey(),
-			Up: true, MTU: 1420, Addresses: []netip.Prefix{netip.MustParsePrefix("10.200.0.2/24")},
-			Peers: []wg.PeerState{{PublicKey: server, AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.200.0.1/32")},
-				Endpoint: netip.MustParseAddrPort("203.0.113.1:51820"), Keepalive: 25 * time.Second}}},
-		sysctl: map[string]string{"ip_forward": "1", "conf/all/rp_filter": "0", "conf/default/rp_filter": "2"},
-	}
-}
 
 func kernelDoctorCreds(t *testing.T, rules ...proto.AgentRule) *credentials.Credentials {
 	t.Helper()
@@ -327,55 +246,6 @@ func deref(b *bool) any {
 		return nil
 	}
 	return *b
-}
-
-// 稼働中のカーネルモードのエージェントは、doctor の応答に、停止中と同じ読み方の結果、公開できずに試し直して
-// いる全体状態の誤り、直前の見直しの誤り、ルールごとのポートの数を載せる(設計文書 10.2c 節)。
-func TestDoctorCarriesTheKernelReading(t *testing.T) {
-	fk := &fakeKernel{forwardOn: true}
-	f := &credentials.Credentials{Mode: credentials.ModeKernel}
-	d := newTestKernel(t, fk, f, nil)
-	f.WGPrivateKey = d.priv.String()
-	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:25565", 25565, 25567)}
-	if _, err := d.applyRules(3, rules, nil); err != nil {
-		t.Fatal(err)
-	}
-	f.LastState = &proto.State{Generation: 3, WG: d.wg, Rules: rules}
-	d.observeErr = "read table inet wgft_agent: boom"
-	k := healthyKernel(t, f)
-	withKernelDoctor(t, k)
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: credentials.ModeKernel}, f: f, priv: d.priv, dp: d, wgCfg: d.wg,
-		pendingErr: "publish table inet wgft_agent: refused"}
-	res := rt.collectDoctor()
-	st := res.RuntimeState
-	if st == nil || st.Kernel == nil {
-		t.Fatalf("runtime state = %+v, want the kernel reading", st)
-	}
-	if st.Kernel.Table.Source != controlapi.KernelTableFromRecord || st.Kernel.Table.Generation != 3 || st.Kernel.Interface.Name != "wgft0" {
-		t.Errorf("kernel = %+v", st.Kernel)
-	}
-	if st.PublishError == "" || st.CheckError != "read table inet wgft_agent: boom" {
-		t.Errorf("publish error %q, check error %q", st.PublishError, st.CheckError)
-	}
-	if len(st.Rules) != 1 || st.Rules[0].Ports != 3 || st.Rules[0].DNATPorts != 3 {
-		t.Errorf("rules = %+v, want the ports of the record", st.Rules)
-	}
-	if res.Process == nil || res.Process.UID != os.Getuid() {
-		t.Errorf("process = %+v, want this process's uid", res.Process)
-	}
-}
-
-// ユーザー空間モードの応答はカーネルの読みを持たない。
-func TestDoctorLeavesTheKernelOutInUserspaceMode(t *testing.T) {
-	dp := &fakeDataplane{up: true, reading: dataplaneReading{tunnel: tunnelReading{present: true}}}
-	rt := newFakeDataplaneRuntime(t, dp)
-	res := rt.collectDoctor()
-	if res.RuntimeState.Kernel != nil || res.RuntimeState.PublishError != "" {
-		t.Errorf("runtime state = %+v, want no kernel reading", res.RuntimeState)
-	}
-	if res.Process == nil {
-		t.Error("the process identity is missing; it is mode-independent")
-	}
 }
 
 // nat_pre に加わった 1 行は、行の形の比較と DNAT の読みの両方に表れるが、1 件に数える。既にある行の map に

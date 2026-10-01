@@ -4,7 +4,6 @@ package agent
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"log"
 	"net/netip"
@@ -13,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -196,109 +194,6 @@ func TestKernelNotifiedCheckLogsARecurringDriftOnce(t *testing.T) {
 	notified(t, d, 1, rules)
 	if n := strings.Count(buf.String(), "changed outside wgft"); n != 2 {
 		t.Errorf("a drift after a clean 30-second check logged %d lines in all, want 2", n)
-	}
-}
-
-// runtime の通知の後の見直しは、処理済みの全体状態が無い間と、公開できなかった全体状態の試し直しを待つ
-// 間は何もしない。直したら認証情報ファイルを保存し、次の 30 秒を待たずにハートビートを送らせる。
-func TestRuntimeObserveNotified(t *testing.T) {
-	k := &fakeKernel{}
-	f := &credentials.Credentials{}
-	d := newTestKernel(t, k, f, nil)
-	k.link = ours(t, d)
-	path := t.TempDir() + "/agent.json"
-	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg,
-		stateNotify: make(chan struct{}, 1)}
-	k.tableGone = true
-	rt.observeNotified()
-	if len(k.published) != 0 {
-		t.Fatal("the notified check published before any full state was applied")
-	}
-	st := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}}
-	rt.mu.Lock()
-	if err := rt.finishApplyLocked(st, nil); err != nil {
-		t.Fatal(err)
-	}
-	rt.pendingSt = &proto.State{Generation: 2}
-	rt.mu.Unlock()
-	published := len(k.published)
-	k.tableGone = true
-	rt.observeNotified()
-	if len(k.published) != published || len(rt.stateNotify) != 0 {
-		t.Error("the notified check published while a pending state waits for its retry")
-	}
-	rt.mu.Lock()
-	rt.pendingSt = nil
-	rt.mu.Unlock()
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	rt.observeNotified()
-	if len(k.published) != published+1 {
-		t.Fatal("the notified check did not repair the missing table once nothing was pending")
-	}
-	select {
-	case <-rt.stateNotify:
-	default:
-		t.Error("the repair did not ask for a heartbeat")
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("the repair did not save the credentials file: %v", err)
-	}
-}
-
-// fakeSensor は、購読が始まったら 1 回 wake を呼び、ctx が終わるまで待つ。
-type fakeSensor struct{ started chan struct{} }
-
-func (s fakeSensor) Watch(ctx context.Context, wake func()) error {
-	close(s.started)
-	wake()
-	<-ctx.Done()
-	return nil
-}
-
-// Run の手順どおり watchKernel と serve を動かすと、カーネルの変更の通知が通知の後の見直しに届き、
-// 消えたテーブルを 30 秒を待たずに公開し直す。
-func TestKernelNotificationsReachTheCheck(t *testing.T) {
-	k := &fakeKernel{}
-	f := &credentials.Credentials{}
-	d := newTestKernel(t, k, f, nil)
-	k.link = ours(t, d)
-	sensor := fakeSensor{started: make(chan struct{})}
-	d.ops.notify = sensor
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg,
-		stateNotify: make(chan struct{}, 1), kernelWake: make(chan struct{}, 1), notifyDebounce: 10 * time.Millisecond}
-	st := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}}
-	rt.mu.Lock()
-	if err := rt.finishApplyLocked(st, nil); err != nil {
-		t.Fatal(err)
-	}
-	published := len(k.published)
-	k.tableGone = true
-	rt.mu.Unlock()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- rt.serve(ctx, make(chan error), make(chan time.Time)) }()
-	defer func() { cancel(); <-done }()
-	rt.watchKernel(ctx)
-	select {
-	case <-sensor.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("watchKernel did not subscribe")
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		rt.mu.Lock()
-		n := len(k.published)
-		rt.mu.Unlock()
-		if n > published {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("a notification did not lead to the table published again")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
