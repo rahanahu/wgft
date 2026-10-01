@@ -265,6 +265,22 @@ func (h *writeHistory) sum(s int64) (int64, bool) {
 
 // tcpConn は、floor と boost の上限を守る netstack の TCP 接続。読み取り、ハーフクローズ、アドレス、
 // 読み取りの期限は gonet.TCPConn に任せ、書き込みは書き込みの数の上限のために自分で行う。
+//
+// 錠の構造。接続の錠は wmu、cmu、rmu、dlmu で、枠の集まりの錠は boostPool.mu である。同じ接続の
+// 中の順は wmu -> cmu で、逆には取らない。Write は書き込みの間ずっと wmu を持ち、その中の
+// noteDemand が cmu を取る。rmu、dlmu、boostPool.mu は末端で、持ったまま他の錠を取らない。
+// noteDemand は cmu を放してから acquire を呼ぶ。
+//
+// 2 つの接続の錠を同時に持つのは、枠を求める接続 X が空きの無いときに reclaimIdle から別の接続 S の
+// demote を呼ぶ経路だけである。X が Write の中にいれば X.wmu を持ったままなので、demote は S.wmu を
+// TryLock でだけ取り、取れなければ回収をやめる。2 つの書き手が互いを回収しようとしても待ち合わない。
+// 順は X.wmu -> S.wmu(TryLock)-> S.cmu である。
+//
+// OnBoost で登録した関数 onBoost は、登録のときの 1 回も含めて cmu の中で呼ぶ。noteDemand から
+// 呼ぶときは X.cmu を持ち、Write の中なら X.wmu も持つ。demote から呼ぶときは S.wmu と S.cmu を持ち、
+// X が Write の中なら X.wmu も持つ。
+// 今の登録元は netpipe.FollowBoost だけで、その関数は組にしたカーネルのソケットのオプションを
+// RawConn.Control の中で読み書きするだけで、wgft の錠を取らない。
 type tcpConn struct {
 	gc   *gonet.TCPConn
 	ep   tcpip.Endpoint

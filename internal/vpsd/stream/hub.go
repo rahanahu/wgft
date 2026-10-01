@@ -120,6 +120,14 @@ type Hub struct {
 	// locks は、同一エージェントの接続処理と hook の直列化に使う。
 	// 待機中も参照として数え、最後の利用が終わると表から外す。mu を持ったまま
 	// 名前別の錠を待たない。両方が必要なときは agent、hook の順に取る。
+	//
+	// Backend と差し込み口は次の錠を持って呼ぶ。serve は agent を持って Backend.SetPublicKey を、
+	// agent と hook を持って Backend.StateFor を、agent だけを持って OnStreamConnect を呼ぶ。
+	// OnHeartbeat は hook を持って呼ぶ。sendState は接続の sendMu を持って Backend.StateFor を
+	// 呼び、serve の中では agent も持つ。mu を持ったまま Backend と差し込み口を呼ぶことは無い。
+	// vpsd の Backend の SetPublicKey は Daemon の錠を取り、その錠を持つ apply と Revoke は
+	// RetireIfDifferent と Disconnect から hook と mu を取る。このため Daemon の錠は agent と hook の
+	// 間に入る(internal/vpsd の Daemon.mu の注釈)。
 	locks  map[string]*agentLocks
 	conns  map[string]*conn
 	status map[string]*Status

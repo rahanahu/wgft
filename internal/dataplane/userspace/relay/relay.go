@@ -96,6 +96,26 @@ const targetProbeTimeout = 2 * time.Second
 const targetProbeConcurrency = 32
 
 // Manager は現在のリスナー集合を持ち、宣言に収束させる。
+//
+// 錠の構造。錠は Manager の mu と、serveTCP と serveUDP が待ち受けごとに持つ局所の錠(接続か
+// セッションの表を守る)の 2 段で、順は mu -> 待ち受けの錠である。Apply、Staged.Commit、Close、
+// Status は mu を持ったまま待ち受けの closeF、sweep、sessions のどれかを呼び、それらが待ち受けの
+// 錠を取る。中継の goroutine(accept と読み取りのループ、接続ごとの goroutine)は、
+// 待ち受けの錠を持たずに ruleOf、targetOf、noteTargetAllowErr で mu を取る。CloseSessions は mu を
+// 放してから sweep を呼ぶ。
+//
+// 錠の内側で呼ぶ外のものは次のとおりである。mu の内側では、待ち受けの budget を通して
+// resource.Pool の錠を取り、Options.Logf を呼び、Apply、Retry、Prepare では Network で bind する。
+// Apply と Retry は、IP の宛先を bind の前に mu の内側で Options.AllowTarget に問う。
+// 待ち受けの錠の内側では、sweep が keep を呼ぶ。ユーザー空間モードの vpsd が Staged.Commit に渡す
+// keep は dataplane.Retiring.SourceAllowed で錠を取らず、CloseSessions に渡す keep は評価器
+// (goengine)の錠を取る。TCP の待ち受けの錠の内側では cutConn も呼び、netstack の接続の Abort が
+// nettun の接続の錠を取る。Options の Admit、AdmitPacket、Dial、LookupTarget と、中継と到達確認の
+// 中の AllowTarget は、relay の錠を持たずに呼ぶ。
+//
+// 次の 2 つの説明は、中継の goroutine が mu を待つことに依っている。udp.go の新しいセッションの
+// 登録(Apply が mu を持つ間、ruleOf と targetOf が待たされる)と、Staged.Commit の Retiring からの
+// 再開(読み取りの goroutine は受け付けの印を見た後に ruleOf で mu を待つ)である。
 type Manager struct {
 	net  Network
 	opts Options

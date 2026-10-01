@@ -229,6 +229,17 @@ type Daemon struct {
 	// lag はエージェントごとのルール集合の世代の遅れの始まり(genlag.go、設計文書 10.2a 節)
 	lag genLag
 
+	// 錠の構造。stream の hub の錠と合わせた順は、hub の agentLock -> mu -> hub の hookLock ->
+	// hub の Hub.mu で、逆には取らない。agentLock と hookLock はエージェントごとの錠である。
+	// hub の serve は agentLock を持って SetPublicKey を呼び、SetPublicKey が mu を取る。mu を持って
+	// 呼ぶ apply(apply.go)は retireChangedKeyStreams から hub の RetireIfDifferent を、Revoke は hub の
+	// Disconnect を呼び、どちらも hookLock と Hub.mu を取る。hub は agentLock と hookLock を待つ間
+	// Hub.mu を持たない。deliveryOwner の錠と genLag の錠は末端で、持ったまま他の錠を取らない。
+	// deliveryOwner の錠は、書き手が mu の下で取り、StateFor が hub の hookLock の下か接続の書き込みの
+	// 錠の下で取る。genLag の錠は、mu の下と、hookLock の下(OnHeartbeat の observeAgentGeneration と、
+	// Agents が StatusWithHook に渡す関数)で取る。mu の下では SQLite の読み書きと転送面への適用も
+	// 行う。hookLock の下でも SQLite を読む。OnHeartbeat の observeAgentGeneration は世代を、serve が
+	// hookLock を持って呼ぶ StateFor はエージェントの行を読む。
 	mu       sync.Mutex // ルール・エージェントの変更と、wg0・nftables の適用を直列化する
 	delivery deliveryOwner
 
