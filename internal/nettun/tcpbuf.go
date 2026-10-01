@@ -266,7 +266,7 @@ func (h *writeHistory) sum(s int64) (int64, bool) {
 // tcpConn は、floor と boost の上限を守る netstack の TCP 接続。読み取り、ハーフクローズ、アドレス、
 // 読み取りの期限は gonet.TCPConn に任せ、書き込みは書き込みの数の上限のために自分で行う。
 //
-// 錠の構造。接続の錠は wmu、cmu、rmu、dlmu で、枠の集まりの錠は boostPool.mu である。同じ接続の
+// 接続の錠は wmu、cmu、rmu、dlmu で、枠の集まりの錠は boostPool.mu である。同じ接続の
 // 中の順は wmu -> cmu で、逆には取らない。Write は書き込みの間ずっと wmu を持ち、その中の
 // noteDemand が cmu を取る。rmu、dlmu、boostPool.mu は末端で、持ったまま他の錠を取らない。
 // noteDemand は cmu を放してから acquire を呼ぶ。

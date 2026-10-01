@@ -125,9 +125,9 @@ type Hub struct {
 	// agent と hook を持って Backend.StateFor を、agent だけを持って OnStreamConnect を呼ぶ。
 	// OnHeartbeat は hook を持って呼ぶ。sendState は接続の sendMu を持って Backend.StateFor を
 	// 呼び、serve の中では agent も持つ。mu を持ったまま Backend と差し込み口を呼ぶことは無い。
-	// vpsd の Backend の SetPublicKey は Daemon の錠を取り、その錠を持つ apply と Revoke は
-	// RetireIfDifferent と Disconnect から hook と mu を取る。このため Daemon の錠は agent と hook の
-	// 間に入る(internal/vpsd の Daemon.mu の注釈)。
+	// vpsd の Backend の SetPublicKey は Daemon の錠を取り、Daemon の錠を持つ apply と Revoke は
+	// RetireIfDifferent と Disconnect から hook と mu を取る。Daemon の錠は agent と hook の間に入る
+	// (internal/vpsd の Daemon.mu の注釈)。
 	locks  map[string]*agentLocks
 	conns  map[string]*conn
 	status map[string]*Status

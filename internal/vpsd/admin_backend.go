@@ -128,8 +128,10 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 // observeAgentGeneration は hub の OnHeartbeat である。server の今の世代を読んでから、
 // エージェントが報告した世代を記録する(genlag.go)。
 //
-// hub はこれをそのエージェントの hookLock を持って呼ぶ。世代は SQLite から読むので、その読み取りの
-// 間、同じエージェントの接続処理、Disconnect、StatusWithHook は待つ。
+// hub は observeAgentGeneration をエージェントの hookLock を持って呼ぶ。世代は SQLite から読むので、
+// 世代の読み取りの間、同じエージェントの接続処理、Disconnect、RetireIfDifferent、StatusWithHook は
+// 待つ。RetireIfDifferent を呼ぶ apply は、Daemon の mu を持ったまま待つ。サーバのデータベースは
+// 接続が 1 本なので、世代の読み取り自体も他の文とトランザクションの後ろで待ちうる。
 func (d *Daemon) observeAgentGeneration(agent string, generation uint64) {
 	now := time.Now()
 	if gen, err := d.st.Generation(); err != nil {
@@ -398,8 +400,8 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 // ApplyStatus は admin.ApplyStatusBackend の実装。Reconciler が持つ Desired と Active の対応
 // (設計文書 7a.3 節)を管理用 API の形に写す。最初の適用を試みるまでは false を返す。
 //
-// d.mu を持って、d.rec と、Reconciler の状態と、配信の状態(d.delivery.status)を読む。これらを書く
-// 経路はどれも d.mu を持つので、読んだ組は同じ時点のものになる。
+// d.mu を持って、d.rec と、Reconciler の状態と、配信の状態(d.delivery.status)を読む。d.rec と
+// 2 つの状態を書く経路はどれも d.mu を持つので、読んだ組は同じ時点のものになる。
 func (d *Daemon) ApplyStatus() (admin.ApplyStatus, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
