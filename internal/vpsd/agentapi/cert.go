@@ -20,21 +20,16 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
 
-const (
-	certMeta = "agent_api_cert_pem"
-	keyMeta  = "agent_api_key_pem"
-)
-
 // LoadOrCreateCert は SQLite の証明書を読み、なければ作って保存する。
 func LoadOrCreateCert(st *store.Store) (tls.Certificate, error) {
-	certPEM, err := st.GetMeta(certMeta)
+	certPEM, err := st.GetMeta(store.MetaAgentAPICert)
 	if errors.Is(err, store.ErrNotFound) {
 		return createCert(st)
 	}
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	keyPEM, err := st.GetMeta(keyMeta)
+	keyPEM, err := st.GetMeta(store.MetaAgentAPIKey)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("certificate private key: %w", err)
 	}
@@ -65,10 +60,10 @@ func createCert(st *store.Store) (tls.Certificate, error) {
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := st.SetMeta(certMeta, certPEM); err != nil {
+	if err := st.SetMeta(store.MetaAgentAPICert, certPEM); err != nil {
 		return tls.Certificate{}, err
 	}
-	if err := st.SetMeta(keyMeta, keyPEM); err != nil {
+	if err := st.SetMeta(store.MetaAgentAPIKey, keyPEM); err != nil {
 		return tls.Certificate{}, err
 	}
 	return tls.X509KeyPair(certPEM, keyPEM)

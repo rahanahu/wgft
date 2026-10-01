@@ -41,7 +41,7 @@ func TestPrintDBModes(t *testing.T) {
 // server check は読み取り専用:権限、補助ファイルの有無、スキーマの版を変えない(仕様 9 節)。
 func TestCheckLeavesDatabaseUntouched(t *testing.T) {
 	opts := func(path string) Options {
-		return Options{Mode: modeUserspace, DBPath: path, WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
+		return Options{Mode: store.ModeUserspace, DBPath: path, WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
 	}
 	t.Run("current schema, broad mode", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "wgft.sqlite")
@@ -49,7 +49,7 @@ func TestCheckLeavesDatabaseUntouched(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		st.SetMeta(modeMeta, []byte(modeUserspace))
+		st.SetMeta(store.MetaMode, []byte(store.ModeUserspace))
 		st.Close()
 		if err := os.Chmod(path, 0o644); err != nil {
 			t.Fatal(err)
@@ -95,4 +95,31 @@ func TestCheckLeavesDatabaseUntouched(t *testing.T) {
 			t.Errorf("check migrated the schema: user_version = %d %v", v, err)
 		}
 	})
+}
+
+// TestCheckComparesTheRecordedAddressRange checks that server check reads the address range under
+// the key the server records it with, and compares it with the setting.
+func TestCheckComparesTheRecordedAddressRange(t *testing.T) {
+	for _, tc := range []struct{ recorded, want string }{
+		{"10.200.0.1/24", "recorded address range: 10.200.0.1/24\n"},
+		{"10.9.0.1/24", "warning: recorded address range differs from the record 10.9.0.1/24; setting is 10.200.0.1/24;"},
+	} {
+		path := filepath.Join(t.TempDir(), "wgft.sqlite")
+		st, err := store.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetMeta(store.MetaWGAddress, []byte(tc.recorded)); err != nil {
+			t.Fatal(err)
+		}
+		st.Close()
+		var out bytes.Buffer
+		opts := Options{Mode: store.ModeUserspace, DBPath: path, WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
+		if err := Check(opts, &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), tc.want) {
+			t.Errorf("recorded %s: output lacks %q:\n%s", tc.recorded, tc.want, out.String())
+		}
+	}
 }

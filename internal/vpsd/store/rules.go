@@ -12,8 +12,6 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-const generationMeta = "generation"
-
 // Rules は現在のルール集合を並び順で返す。
 func (s *Store) Rules() ([]proto.Rule, error) {
 	return s.rulesTx(s.db)
@@ -52,7 +50,7 @@ func (s *Store) Generation() (uint64, error) {
 
 func generationTx(q querier) (uint64, error) {
 	var v []byte
-	err := q.QueryRow("SELECT value FROM meta WHERE key = ?", generationMeta).Scan(&v)
+	err := q.QueryRow("SELECT value FROM meta WHERE key = ?", MetaGeneration).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -109,7 +107,7 @@ func (s *Store) ApplyBatch(reserved proto.Reserved, mutate func(rules []proto.Ru
 	if changed {
 		gen++
 		if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-			generationMeta, []byte(strconv.FormatUint(gen, 10))); err != nil {
+			MetaGeneration, []byte(strconv.FormatUint(gen, 10))); err != nil {
 			return nil, err
 		}
 	}

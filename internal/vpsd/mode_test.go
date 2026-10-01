@@ -12,16 +12,16 @@ import (
 
 // modeGate:kernel→userspace は残骸ありで拒否・なしで許可・不明で許可(bind へ)、userspace→kernel は許可。
 func TestModeGate(t *testing.T) {
-	if allow, _ := modeGate(modeKernel, modeUserspace, true, true); allow {
+	if allow, _ := modeGate(store.ModeKernel, store.ModeUserspace, true, true); allow {
 		t.Error("kernel→userspace 残骸ありは拒否のはず")
 	}
-	if allow, _ := modeGate(modeKernel, modeUserspace, false, true); !allow {
+	if allow, _ := modeGate(store.ModeKernel, store.ModeUserspace, false, true); !allow {
 		t.Error("kernel→userspace 残骸なしは許可のはず")
 	}
-	if allow, _ := modeGate(modeKernel, modeUserspace, false, false); !allow {
+	if allow, _ := modeGate(store.ModeKernel, store.ModeUserspace, false, false); !allow {
 		t.Error("kernel→userspace 残骸不明は bind へ進むため許可のはず")
 	}
-	if allow, _ := modeGate(modeUserspace, modeKernel, true, true); !allow {
+	if allow, _ := modeGate(store.ModeUserspace, store.ModeKernel, true, true); !allow {
 		t.Error("userspace→kernel は許可のはず")
 	}
 }
@@ -42,7 +42,7 @@ func TestReconcileModeAndAddress(t *testing.T) {
 	if err := reconcileModeAndAddress(st, opts, false); err != nil {
 		t.Fatalf("初回: %v", err)
 	}
-	if b, _ := st.GetMeta(modeMeta); string(b) != "kernel" {
+	if b, _ := st.GetMeta(store.MetaMode); string(b) != "kernel" {
 		t.Errorf("mode 記録 = %q", b)
 	}
 	// 2 回目:アドレス帯を変えると拒否
@@ -58,7 +58,7 @@ func TestReconcileModeAndAddress(t *testing.T) {
 	if err := reconcileModeAndAddress(st, Options{WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}, true); err != nil {
 		t.Fatalf("legacy: %v", err)
 	}
-	if b, _ := st.GetMeta(modeMeta); string(b) != "kernel" {
+	if b, _ := st.GetMeta(store.MetaMode); string(b) != "kernel" {
 		t.Errorf("legacy mode = %q", b)
 	}
 	st.Close()

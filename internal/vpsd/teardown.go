@@ -26,28 +26,20 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// 撤去のために vpsd が起動時に残す meta。teardown が --state だけで手掛かりを得られる。
-const (
-	metaWGInterface    = "teardown_wg_interface"
-	metaWGPort         = "teardown_wg_port"
-	metaAgentAPIPort   = "teardown_agent_api_port"
-	metaIPForwardSetAt = "ip_forward_set_by_wgft_at"
-)
-
 // recordTeardownHints records the values `wgft server teardown` needs (10.3 節) to find what to
 // remove without a --wg-interface flag of its own. A write failure here is not fatal to startup
 // (this hint is only ever read by a later, separate teardown run), but it must not be silent: an
 // operator who never sees it in the log has no way to know teardown may later have to guess
 // (design.md 10.5・10.3 節).
 func recordTeardownHints(st *store.Store, opts Options) {
-	if err := st.SetMeta(metaWGInterface, []byte(opts.WGInterface)); err != nil {
+	if err := st.SetMeta(store.MetaTeardownWGInterface, []byte(opts.WGInterface)); err != nil {
 		log.Printf("warning: recording the wg interface name for teardown failed: %v; a later `wgft server teardown` may not find %s and will say so", err, opts.WGInterface)
 	}
-	if err := st.SetMeta(metaWGPort, []byte(strconv.Itoa(int(opts.WGPort)))); err != nil {
+	if err := st.SetMeta(store.MetaTeardownWGPort, []byte(strconv.Itoa(int(opts.WGPort)))); err != nil {
 		log.Printf("warning: recording the wg port for teardown's manual-restore list failed: %v", err)
 	}
 	if _, port, err := net.SplitHostPort(opts.AgentAPIAddr); err == nil {
-		if err := st.SetMeta(metaAgentAPIPort, []byte(port)); err != nil {
+		if err := st.SetMeta(store.MetaTeardownAgentAPIPort, []byte(port)); err != nil {
 			log.Printf("warning: recording the agent API port for teardown's manual-restore list failed: %v", err)
 		}
 	}
@@ -89,7 +81,7 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 			return fmt.Errorf("server database: %w", err)
 		}
 		defer st.Close()
-		if b, e := st.GetMeta(metaWGInterface); e == nil && len(b) > 0 {
+		if b, e := st.GetMeta(store.MetaTeardownWGInterface); e == nil && len(b) > 0 {
 			iface = string(b)
 		} else {
 			// 記録が無い(recordTeardownHints が一度も成功していない)か読めない場合、既定名を
@@ -98,17 +90,17 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 			// 消しかねない(design.md 10.3・10.5 節)。
 			fmt.Fprintf(out, "warning: no recorded wg interface name in the server database: %v; assuming the default %s; if the server used a different --wg-interface, this teardown will not find it, and --adopt-existing could delete an unrelated interface named %s\n", e, iface, iface)
 		}
-		if b, e := st.GetMeta(serverKeyMeta); e == nil && len(b) == wgtypes.KeyLen {
+		if b, e := st.GetMeta(store.MetaServerKey); e == nil && len(b) == wgtypes.KeyLen {
 			serverKey, _ = wgtypes.NewKey(b)
 		}
-		if b, e := st.GetMeta(wgAddressMeta); e == nil && len(b) > 0 {
+		if b, e := st.GetMeta(store.MetaWGAddress); e == nil && len(b) > 0 {
 			if p, perr := netip.ParsePrefix(string(b)); perr == nil {
 				wgNet = p.Masked()
 			} else {
 				fmt.Fprintf(out, "warning: recorded wg address %q is invalid; using %s for the conntrack cleanup\n", b, wgNet)
 			}
 		}
-		if b, e := st.GetMeta(modeMeta); e == nil && string(b) == modeUserspace {
+		if b, e := st.GetMeta(store.MetaMode); e == nil && string(b) == store.ModeUserspace {
 			userspace = true
 		}
 		manual = manualRestoreList(st, userspace, iface)
@@ -200,10 +192,10 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 	var list []string
 
 	// ファイアウォールで開けたポート
-	if b, err := st.GetMeta(metaWGPort); err == nil && len(b) > 0 {
+	if b, err := st.GetMeta(store.MetaTeardownWGPort); err == nil && len(b) > 0 {
 		list = append(list, "close UDP "+string(b)+" opened in the firewall for WireGuard")
 	}
-	if b, err := st.GetMeta(metaAgentAPIPort); err == nil && len(b) > 0 {
+	if b, err := st.GetMeta(store.MetaTeardownAgentAPIPort); err == nil && len(b) > 0 {
 		list = append(list, "close TCP "+string(b)+" opened in the firewall for the agent API")
 	}
 	if rules, err := st.Rules(); err == nil {
@@ -222,7 +214,7 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 	}
 
 	// ip_forward
-	if b, err := st.GetMeta(metaIPForwardSetAt); err == nil && len(b) > 0 {
+	if b, err := st.GetMeta(store.MetaIPForwardSetAt); err == nil && len(b) > 0 {
 		list = append(list, "net.ipv4.ip_forward: wgft set it 0->1 at "+string(b)+"; if nothing else uses forwarding, restore with `sysctl -w net.ipv4.ip_forward=0`, and delete the file in /etc/sysctl.d if it was made persistent")
 	} else {
 		list = append(list, "net.ipv4.ip_forward: wgft did not change it, already 1; no action needed")

@@ -40,12 +40,12 @@ func TestCheckRecordedModeWording(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.SetMeta(modeMeta, []byte(modeKernel)); err != nil {
+	if err := st.SetMeta(store.MetaMode, []byte(store.ModeKernel)); err != nil {
 		t.Fatal(err)
 	}
 
 	var out bytes.Buffer
-	checkRecordedMode(&out, st, modeUserspace)
+	checkRecordedMode(&out, st, store.ModeUserspace)
 	// 文言には拒否の種別を添える(設計文書 11b 節)。運用者が check の出力だけで、起動が止まる場合の
 	// 種別を選べるようにするためである。
 	want := "warning: the recorded mode is kernel but the setting is userspace; the mode change gate runs at start and refuses with [mode-gate] if leftovers of the old mode remain\n"
@@ -54,7 +54,7 @@ func TestCheckRecordedModeWording(t *testing.T) {
 	}
 
 	out.Reset()
-	checkRecordedMode(&out, st, modeKernel)
+	checkRecordedMode(&out, st, store.ModeKernel)
 	if got := out.String(); got != "recorded mode: kernel\n" {
 		t.Errorf("matching mode = %q", got)
 	}

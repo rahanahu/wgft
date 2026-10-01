@@ -65,9 +65,9 @@ func setupStore(t *testing.T, iface string, key wgtypes.Key) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = st.SetMeta(serverKeyMeta, key[:])
-	_ = st.SetMeta(metaWGInterface, []byte(iface))
-	_ = st.SetMeta(metaWGPort, []byte("51820"))
+	_ = st.SetMeta(store.MetaServerKey, key[:])
+	_ = st.SetMeta(store.MetaTeardownWGInterface, []byte(iface))
+	_ = st.SetMeta(store.MetaTeardownWGPort, []byte("51820"))
 	st.Close()
 	return path
 }
