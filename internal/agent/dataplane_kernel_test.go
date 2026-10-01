@@ -18,8 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/conntrack"
@@ -28,175 +26,6 @@ import (
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
 )
-
-// fakeKernel は kernelOps の記録器である。カーネルにも DNS にも触れずに、カーネルモードの dataplane が
-// 何をどの順で呼ぶかを確かめる。
-type fakeKernel struct {
-	ensured   []wg.AgentConfig
-	ensureErr error
-	link      wg.AgentState
-	linkErr   error
-	holders   []string
-
-	published  []nft.AgentPublication
-	publishErr error
-	// table は実際のテーブルの指紋の元である。公開のたびに進み、外からの変更は tableEdit を進めて模す
-	tableGen  int
-	tableEdit int
-	tableGone bool
-	// fpErr は、次の指紋の読みを 1 回だけ失敗させる
-	fpErr error
-
-	dns    map[string][]netip.Addr // 無い名前は解決できない
-	dnsErr error                   // 設定すれば、どの名前も解決できない
-	// probed は試し接続の宛先である。probeAll は同時に試すので、mu が守る
-	mu       sync.Mutex
-	probed   []netip.AddrPort
-	probeErr map[netip.AddrPort]error
-	// forwardOn は ip_forward の今の値、forwardReadEr と forwardWriteEr は読み書きの誤りである
-	forwardOn      bool
-	forwardReadEr  error
-	forwardWriteEr error
-	forwardWrites  int
-	local          map[netip.Addr]bool
-	// datagrams は keepalive ごとのデータグラムの宛先である。別の goroutine が送るので、mu が守る
-	datagrams []netip.AddrPort
-	// sendErr は、設定すればデータグラムの n 回目(0 から)の送信の誤りを返す。mu が守る
-	sendErr func(n int) error
-	// route は vpsd のトンネルアドレスへの経路が出るインタフェースである。空なら wgft0
-	route    string
-	routeErr error
-	// onEnsure は、設定すれば wgft0 の収束が成功したときに呼ばれる
-	onEnsure func()
-	// lookups は引いた名前の記録である
-	lookups []string
-	// converged は conntrack の収束の呼び出しの記録である。convergeErr を設定すれば失敗させる
-	converged   []convergeCall
-	convergeErr error
-	convergeRes conntrack.AgentResult
-}
-
-type convergeCall struct {
-	prev  []nft.AgentPublication
-	cur   nft.AgentPublication
-	scope conntrack.AgentScope
-}
-
-func (k *fakeKernel) ops() kernelOps {
-	return kernelOps{
-		ensureLink: func(cfg wg.AgentConfig) ([]string, error) {
-			k.ensured = append(k.ensured, cfg)
-			if k.ensureErr == nil && k.onEnsure != nil {
-				k.onEnsure()
-			}
-			return nil, k.ensureErr
-		},
-		inspectLink: func(string, wgtypes.Key, wgtypes.Key) (wg.AgentState, error) { return k.link, k.linkErr },
-		keyHolders:  func(string, wgtypes.Key, wgtypes.Key) ([]string, error) { return k.holders, nil },
-		publish: func(p nft.AgentPublication, _ nft.AgentConfig) error {
-			if k.publishErr != nil {
-				return k.publishErr
-			}
-			k.published = append(k.published, p)
-			k.tableGen++
-			k.tableGone = false
-			return nil
-		},
-		fingerprint: func(string) (string, bool, error) {
-			if err := k.fpErr; err != nil {
-				k.fpErr = nil
-				return "", false, err
-			}
-			if k.tableGone {
-				return "", false, nil
-			}
-			return fmt.Sprintf("fp-%d-%d", k.tableGen, k.tableEdit), true, nil
-		},
-		lookup: func(_ context.Context, host string) ([]netip.Addr, error) {
-			k.mu.Lock()
-			k.lookups = append(k.lookups, host)
-			k.mu.Unlock()
-			if k.dnsErr != nil {
-				return nil, k.dnsErr
-			}
-			a, ok := k.dns[host]
-			if !ok {
-				return nil, fmt.Errorf("no such host %s", host)
-			}
-			return a, nil
-		},
-		probe: func(_ context.Context, d netip.AddrPort) error {
-			k.mu.Lock()
-			defer k.mu.Unlock()
-			k.probed = append(k.probed, d)
-			return k.probeErr[d]
-		},
-		readIPForward: func() (bool, error) { return k.forwardOn, k.forwardReadEr },
-		writeIPForward: func() error {
-			k.forwardWrites++
-			if k.forwardWriteEr != nil {
-				return k.forwardWriteEr
-			}
-			k.forwardOn = true
-			return nil
-		},
-		localAddrs: func() (map[netip.Addr]bool, error) { return k.local, nil },
-		sendDatagram: func(dst netip.AddrPort) error {
-			k.mu.Lock()
-			defer k.mu.Unlock()
-			k.datagrams = append(k.datagrams, dst)
-			if k.sendErr != nil {
-				return k.sendErr(len(k.datagrams) - 1)
-			}
-			return nil
-		},
-		convergeFlows: func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error) {
-			k.converged = append(k.converged, convergeCall{append([]nft.AgentPublication(nil), prev...), cur, scope})
-			return k.convergeRes, k.convergeErr
-		},
-		routeIface: func(netip.Addr) (string, error) {
-			if k.route == "" {
-				return "wgft0", k.routeErr
-			}
-			return k.route, k.routeErr
-		},
-		now: func() time.Time { return time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC) },
-	}
-}
-
-// newTestKernel は fakeKernel を使うカーネルモードの dataplane を、wg 設定を受け取った状態で作る。
-func newTestKernel(t *testing.T, k *fakeKernel, f *credentials.Credentials, allow *allowtargets.List) *kernelDataplane {
-	t.Helper()
-	if f == nil {
-		f = &credentials.Credentials{}
-	}
-	d := &kernelDataplane{ops: k.ops(), iface: "wgft0", allow: allow, f: f, ctx: context.Background(),
-		lkg: map[string]lkgEntry{}, probeErr: map[string]string{}}
-	d.loadRecord()
-	if _, err := d.build(testKey(t), testWG(t)); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(d.close)
-	return d
-}
-
-func testKey(t *testing.T) wgtypes.Key {
-	t.Helper()
-	k, err := wgtypes.GeneratePrivateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return k
-}
-
-func testWG(t *testing.T) proto.WGConfig {
-	return proto.WGConfig{ServerPubkey: testKey(t).PublicKey().String(), Endpoint: "203.0.113.1:51820",
-		Address: "10.200.0.2/24", MTU: 1420, Keepalive: 25}
-}
-
-func tcpRule(id, target string, lo, hi uint16) proto.AgentRule {
-	return proto.AgentRule{ID: id, Proto: proto.TCP, ListenPort: proto.PortRange{Lo: lo, Hi: hi}, Target: target, Enabled: true}
-}
 
 func statusOf(t *testing.T, d *kernelDataplane, id string) proto.RuleStatus {
 	t.Helper()
@@ -666,19 +495,6 @@ func TestKernelResolvesTargetsConcurrently(t *testing.T) {
 	}
 }
 
-// ours は、宣言どおりの wgft0 の状態を返す。
-func ours(t *testing.T, d *kernelDataplane) wg.AgentState {
-	t.Helper()
-	cfg, err := d.linkConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return wg.AgentState{Exists: true, Kind: "wireguard", Ownership: wg.OwnedByCurrentKey, Up: true, MTU: cfg.MTU,
-		Addresses: []netip.Prefix{cfg.Address},
-		Peers: []wg.PeerState{{PublicKey: cfg.Server.PublicKey, AllowedIPs: []netip.Prefix{netip.PrefixFrom(cfg.Server.Address, 32)},
-			Keepalive: cfg.Server.Keepalive, Endpoint: netip.MustParseAddrPort("198.51.100.200:51820")}}}
-}
-
 func observeOnce(t *testing.T, d *kernelDataplane, gen uint64, rules []proto.AgentRule) bool {
 	t.Helper()
 	saved, err := d.observeCommit(gen, rules, d.observePrepare(rules))
@@ -797,65 +613,6 @@ func TestKernelObserveReasonOnlyChangeDoesNotRepublish(t *testing.T) {
 	k.dnsErr = errors.New("server misbehaving")
 	if !observeOnce(t, d, 1, rules) || len(k.published) != 1 {
 		t.Error("a new error text republished the table")
-	}
-}
-
-// runtime の見直しは、名前を引く間に処理済みの全体状態が変われば、その解決の結果を捨てる。古い宣言の
-// 解決の結果で新しい公開を上書きしないためである。試し直しを待つ間も見直しを行わない。
-func TestObserveDiscardsAStaleResolution(t *testing.T) {
-	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.3")}}}
-	f := &credentials.Credentials{}
-	d := newTestKernel(t, k, f, nil)
-	k.link = ours(t, d)
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
-	old := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
-	rt.mu.Lock()
-	if err := rt.finishApplyLocked(old, nil); err != nil {
-		t.Fatal(err)
-	}
-	rt.mu.Unlock()
-	published := len(k.published)
-
-	newer := &proto.State{Generation: 2, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.50:80", 80, 80)}}
-	d.ops.lookup = func(_ context.Context, host string) ([]netip.Addr, error) {
-		// 名前を引いている間に、stream が新しい全体状態を適用し終える
-		rt.mu.Lock()
-		if err := rt.finishApplyLocked(newer, nil); err != nil {
-			t.Error(err)
-		}
-		rt.mu.Unlock()
-		return []netip.Addr{netip.MustParseAddr("192.168.1.99")}, nil
-	}
-	rt.observe()
-	if len(k.published) != published+1 {
-		t.Fatalf("published %d tables during the check, want only the new state's 1", len(k.published)-published)
-	}
-	if got := d.pub.Rules[0].Ranges[0].Dest.Addr(); got != netip.MustParseAddr("192.168.1.50") {
-		t.Errorf("the check overwrote the new state with the old one's resolution: DNAT to %s", got)
-	}
-
-	rt.mu.Lock()
-	rt.pendingSt = &proto.State{Generation: 3}
-	rt.mu.Unlock()
-	k.tableGone = true
-	before := len(k.published)
-	rt.observe()
-	if len(k.published) != before {
-		t.Error("the check published while a pending state waits for its retry")
-	}
-	rt.mu.Lock()
-	rt.pendingSt = nil
-	rt.mu.Unlock()
-	rt.stateNotify = make(chan struct{}, 1)
-	rt.observe()
-	if len(k.published) != before+1 {
-		t.Error("the check did not repair the missing table once nothing was pending")
-	}
-	// 見直しが公開し直したら、次の 30 秒を待たずにハートビートを送らせる
-	select {
-	case <-rt.stateNotify:
-	default:
-		t.Error("the repair did not ask for a heartbeat")
 	}
 }
 
@@ -1003,34 +760,6 @@ func TestKernelObserveLogsARecurringDriftOnce(t *testing.T) {
 	observeOnce(t, d, 1, rules)
 	if !strings.Contains(buf.String(), "differs from the declaration in the MTU") {
 		t.Errorf("an MTU drift right after a table drift was not logged:\n%s", buf.String())
-	}
-}
-
-// runtime の見直しは、名前を引く間に公開できなかった全体状態の控えが現れたら、解決の結果を捨てる。
-// 控えの試し直しが公開を担うためである。
-func TestObserveDiscardsAResolutionWhenAPendingStateAppears(t *testing.T) {
-	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.3")}}}
-	f := &credentials.Credentials{}
-	d := newTestKernel(t, k, f, nil)
-	k.link = ours(t, d)
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
-	st := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
-	rt.mu.Lock()
-	if err := rt.finishApplyLocked(st, nil); err != nil {
-		t.Fatal(err)
-	}
-	rt.mu.Unlock()
-	k.tableGone = true
-	d.ops.lookup = func(context.Context, string) ([]netip.Addr, error) {
-		rt.mu.Lock()
-		rt.pendingSt = &proto.State{Generation: 2}
-		rt.mu.Unlock()
-		return []netip.Addr{netip.MustParseAddr("192.168.1.3")}, nil
-	}
-	published := len(k.published)
-	rt.observe()
-	if len(k.published) != published {
-		t.Error("the check published although a pending state appeared while it resolved names")
 	}
 }
 
@@ -1482,57 +1211,6 @@ func TestKernelObserveRepairsTheTableWhileTheEndpointCannotConverge(t *testing.T
 	}
 }
 
-// runtime は、見直しが誤りを返しても記録が変わっていれば認証情報ファイルを保存し、ハートビートを送らせる。
-// 引き直したエンドポイントの収束に失敗した見直しも、表を公開し直していることがあるためである。
-func TestObserveSavesARepairThatAlsoReturnsAnError(t *testing.T) {
-	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
-	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
-	f := &credentials.Credentials{}
-	d := newTestKernel(t, k, f, nil)
-	d.ops.now = func() time.Time { return now }
-	w := testWG(t)
-	w.Endpoint = "vps.example:51820"
-	if _, err := d.build(d.priv, w); err != nil {
-		t.Fatal(err)
-	}
-	k.link = ours(t, d)
-	path := t.TempDir() + "/agent.json"
-	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
-	st := &proto.State{Generation: 1, WG: w}
-	rt.mu.Lock()
-	if err := rt.finishApplyLocked(st, nil); err != nil {
-		t.Fatal(err)
-	}
-	rt.mu.Unlock()
-	k.link = ours(t, d)
-	rt.observe()
-	now = now.Add(200 * time.Second)
-	rt.observe() // 印を付ける
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	k.ensureErr = errors.New("netlink: operation not permitted")
-	k.tableGone = true
-	rt.stateNotify = make(chan struct{}, 1)
-	rt.observe()
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("the repair was not saved: %v", err)
-	}
-	select {
-	case <-rt.stateNotify:
-	default:
-		t.Error("the repair did not ask for a heartbeat")
-	}
-}
-
-func gens(ps []nft.AgentPublication) []uint64 {
-	var out []uint64
-	for _, p := range ps {
-		out = append(out, p.Generation)
-	}
-	return out
-}
-
 // 公開のたびに、直前の公開を前の公開として conntrack を収束させる。前の公開が無ければ呼ばない。
 // 範囲は wgft0 のアドレスと vpsd のトンネルアドレスと今の許可一覧である(7b.4 節)。
 func TestKernelConvergesConntrackAfterEachPublication(t *testing.T) {
@@ -1835,43 +1513,5 @@ func TestKernelPrerequisitesWithoutNetAdmin(t *testing.T) {
 	err := kernelPrerequisites()
 	if r := startup.Of(err); r == nil || r.Category != startup.CategoryPrerequisite || r.Subject != "CAP_NET_ADMIN" {
 		t.Fatalf("kernelPrerequisites = %v; want the CAP_NET_ADMIN prerequisite refusal", err)
-	}
-}
-
-// カーネルモードの dataplane が読む最終ハンドシェイクも、ユーザー空間モードと同じ判定で、再接続の
-// 待ちの上限を決める証拠になる(仕様 5.2 節)。カーネルモードの runtime は作り直しの閾値を持たない。
-func TestKernelHandshakeIsTheSameEvidenceForTheReconnectCap(t *testing.T) {
-	k := &fakeKernel{}
-	d := newTestKernel(t, k, nil, nil)
-	rt := newFakeDataplaneRuntime(t, nil)
-	rt.dp = d
-	rt.f.LastState = &proto.State{Generation: 1}
-	rt.rebuild = rebuildState{}
-	link := ours(t, d)
-	k.link = link
-
-	now := time.Now()
-	rt.checkTunnel(now)
-	if rt.handshakeSeen.Load().fresh(now) {
-		t.Fatal("wgft0 without a handshake counts as fresh")
-	}
-	link.Peers[0].LastHandshake = now.Add(-10 * time.Second)
-	k.link = link
-	rt.checkTunnel(now)
-	if !rt.handshakeSeen.Load().fresh(now) {
-		t.Fatal("a handshake 10 s old on wgft0 does not count as fresh")
-	}
-	if rt.handshakeSeen.Load().fresh(now.Add(170 * time.Second)) {
-		t.Error("a handshake 180 s old on wgft0 still counts as fresh")
-	}
-	// 停止の間も残っていた wgft0 の古いハンドシェイクは、初めて読んでも新しくない
-	rt2 := newFakeDataplaneRuntime(t, nil)
-	rt2.dp = d
-	rt2.f.LastState = &proto.State{Generation: 1}
-	link.Peers[0].LastHandshake = now.Add(-time.Hour)
-	k.link = link
-	rt2.checkTunnel(now)
-	if rt2.handshakeSeen.Load().fresh(now) {
-		t.Error("an hour-old handshake left on wgft0 counts as fresh when first read")
 	}
 }
