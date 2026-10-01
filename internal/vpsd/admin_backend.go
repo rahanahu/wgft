@@ -353,7 +353,7 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 		apiPort = p
 	}
 	ipf := ""
-	if b, err := d.st.GetMeta(metaIPForwardSetAt); err == nil {
+	if b, err := d.st.GetMeta(store.MetaIPForwardSetAt); err == nil {
 		ipf = string(b)
 	}
 	timeouts := d.udpTimeouts()
@@ -514,7 +514,7 @@ func applyStatusToAdmin(st reconcile.Status) admin.ApplyStatus {
 // server reports it: its DNAT rules reach wg0 only while net.ipv4.ip_forward is 1. The server writes
 // 1 at its start and does not write it again (6.1 節), so this read is how a later 0 shows up.
 func (d *Daemon) IPForward() (admin.IPForwardStatus, bool) {
-	if d.opts.Mode != modeKernel {
+	if d.opts.Mode != store.ModeKernel {
 		return admin.IPForwardStatus{}, false
 	}
 	return readIPForward(), true

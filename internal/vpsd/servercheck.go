@@ -36,7 +36,7 @@ func Check(opts Options, out io.Writer) error {
 	// nft の検査(他テーブルの policy drop・DOCKER-USER・DNAT 衝突。仕様 6.1 節)。root が要る。
 	// ユーザー空間モードは nftables も ip_forward も使わない(仕様 6.3 節)。
 	root := os.Geteuid() == 0
-	if mode == modeUserspace {
+	if mode == store.ModeUserspace {
 		fmt.Fprintln(out, "nft check: not used in userspace mode; rules are relayed by the wgft process")
 	} else if !root {
 		fmt.Fprintln(out, "nft check: skipped because not root; run sudo wgft server check")
@@ -50,7 +50,7 @@ func Check(opts Options, out io.Writer) error {
 			fmt.Fprintf(out, "  - %s\n", f)
 		}
 	}
-	if mode != modeUserspace {
+	if mode != store.ModeUserspace {
 		checkIPForward(out)
 		checkConntrack(out)
 	} else {
@@ -79,7 +79,7 @@ func Check(opts Options, out io.Writer) error {
 	}
 	defer st.Close()
 	checkRecordedMode(out, st, opts.Mode)
-	checkMeta(out, st, wgAddressMeta, "recorded address range", opts.WGAddress)
+	checkMeta(out, st, store.MetaWGAddress, "recorded address range", opts.WGAddress)
 	// rule ports の検査:個々のルールの listen port が host の input firewall で塞がれていないか。
 	// own ports check と同じく root が要り、rules は SQLite からしか読めないのでここで行う
 	// (実機の Debian 13、ユーザー空間モードで見つかった。改訂の記録参照)。
@@ -90,7 +90,7 @@ func Check(opts Options, out io.Writer) error {
 	} else {
 		checkRulePorts(out, rules, mode)
 	}
-	if b, err := st.GetMeta(serverKeyMeta); err == nil && mode != modeUserspace {
+	if b, err := st.GetMeta(store.MetaServerKey); err == nil && mode != store.ModeUserspace {
 		if k, err := wgtypes.NewKey(b); err == nil {
 			if other, ok := wg.OtherDeviceWithKey(opts.WGInterface, k); ok {
 				fmt.Fprintf(out, "warning: another interface %q with the same server key exists; suspect leftovers from changing WGFT_WG_INTERFACE\n", other)
@@ -163,7 +163,7 @@ func checkRulePorts(out io.Writer, rules []proto.Rule, mode string) {
 		if !r.Enabled {
 			continue
 		}
-		if mode != modeUserspace && r.VPSMode != proto.ModeProxy {
+		if mode != store.ModeUserspace && r.VPSMode != proto.ModeProxy {
 			continue
 		}
 		lines, err := linux.InputPortSuggestions(r.ListenPort, r.Proto, nft.TableName)
@@ -236,7 +236,7 @@ func printDBModes(out io.Writer, path string) {
 // ここでは拒否しない。実際にモードを切り替えられるかどうかは、次の `server run` で
 // reconcileModeAndAddress の関門(mode.go の modeGate)が決める。
 func checkRecordedMode(out io.Writer, st *store.Store, want string) {
-	have, err := st.GetMeta(modeMeta)
+	have, err := st.GetMeta(store.MetaMode)
 	if errors.Is(err, store.ErrNotFound) {
 		fmt.Fprintln(out, "recorded mode: not recorded")
 		return

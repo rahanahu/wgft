@@ -16,7 +16,7 @@ import (
 )
 
 func serverKey(st *store.Store) (wgtypes.Key, error) {
-	b, err := st.GetOrCreateMeta(serverKeyMeta, func() ([]byte, error) {
+	b, err := st.GetOrCreateMeta(store.MetaServerKey, func() ([]byte, error) {
 		k, err := wgtypes.GeneratePrivateKey()
 		if err != nil {
 			return nil, err
@@ -74,7 +74,7 @@ func EnableIPForward(st *store.Store) *linux.Finding {
 		// 「wgft did not change it, already 1; no action needed」と、実際には変えたのに
 		// 変えていないかのように出す。書き込みが失敗しても起動は続けるが、この食い違いを
 		// 見逃さないよう、失敗はログに残す(design.md 10.3・10.5 節)。
-		if err := st.SetMeta(metaIPForwardSetAt, []byte(time.Now().UTC().Format(time.RFC3339))); err != nil {
+		if err := st.SetMeta(store.MetaIPForwardSetAt, []byte(time.Now().UTC().Format(time.RFC3339))); err != nil {
 			log.Printf("warning: recording that ip_forward was set to 1 failed: %v; a later `wgft server teardown` will not know to mention reverting it", err)
 		}
 	}

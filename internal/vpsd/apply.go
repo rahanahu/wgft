@@ -309,7 +309,7 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool, prepared *preparedDel
 	if err != nil {
 		// This is the one failure path for both modes (design.md 7a.2 節の Runtime), but only the
 		// kernel backend's Commit is an nftables transaction; userspace has no nftables to blame.
-		if d.opts.Mode == modeUserspace {
+		if d.opts.Mode == store.ModeUserspace {
 			return out, prepared, fmt.Errorf("failed to apply the userspace dataplane: %w", err)
 		}
 		return out, prepared, fmt.Errorf("failed to apply nftables: %w", err)
@@ -345,7 +345,7 @@ func (d *Daemon) applyOnce(rules []proto.Rule, retry bool, prepared *preparedDel
 			active++
 		}
 	}
-	if d.opts.Mode == modeUserspace {
+	if d.opts.Mode == store.ModeUserspace {
 		log.Printf("applied %d rules in userspace mode: %d agents, %d peers", len(rules), len(prepared.agentAddr), len(prepared.input.WG.Peers))
 	} else {
 		log.Printf("applied table inet %s: %d rules, %d enabled in kernel mode, %d agents, %d peers",
@@ -487,7 +487,7 @@ func (d *Daemon) proxyInputHints(rules []proto.Rule) {
 		if !r.Enabled {
 			continue
 		}
-		if d.opts.Mode != modeUserspace && r.VPSMode != proto.ModeProxy {
+		if d.opts.Mode != store.ModeUserspace && r.VPSMode != proto.ModeProxy {
 			continue
 		}
 		if lines, err := d.dp.InputPortSuggestions(r.ListenPort, r.Proto); err == nil && len(lines) > 0 {

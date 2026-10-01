@@ -869,7 +869,7 @@ K に比例しない部分は、エージェントが 1 つ、宛先が 1 つで
 
 ドメインモデルは backend の実装詳細を持たない。`Rule` は ID、プロトコル、待ち受けポート、宛先、所属エージェントだけを持ち、転送方式は別の型で表す。
 
-- `Forwarding`:転送の意味を選ぶ。`Transparent`(素通し。今の `vps_mode=kernel`)と `Relay`(`vpsd` 自身が TCP を終端して中継する。今の `vps_mode=proxy`)の 2 値を持つ。server・agent 全体の転送方式(今の `WGFT_MODE`。`internal/vpsd` が持つ `modeKernel`/`modeUserspace` の文字列の語彙であり、この層の型ではない)ともう一方の軸であり、これと紛れる「kernel」という語を、ルール単位の選択には使わない
+- `Forwarding`:転送の意味を選ぶ。`Transparent`(素通し。今の `vps_mode=kernel`)と `Relay`(`vpsd` 自身が TCP を終端して中継する。今の `vps_mode=proxy`)の 2 値を持つ。server・agent 全体の転送方式(今の `WGFT_MODE`。`internal/vpsd/store` が持つ `ModeKernel`/`ModeUserspace` の文字列の語彙であり、この層の型ではない)ともう一方の軸であり、これと紛れる「kernel」という語を、ルール単位の選択には使わない
 - `SourceMetadata`:送信元の情報を付けるかどうかを選ぶ。`None`(付けない)と `ProxyV2`(PROXY protocol v2 ヘッダを付ける。今の `proxy_protocol=true`)の 2 値を持つ。`Transparent` と組み合わせられるのは `None` だけで、`Transparent` + `ProxyV2` は無効な組み合わせである(今の `proxy_protocol` が `vps_mode=proxy` でしか立てられない制約のまま)。`vps_mode=proxy` と `proxy_protocol` は別の軸なので、`Forwarding` と `SourceMetadata` も別の型にする
 
 外部の表現(rule import/export の JSON、CLI のフラグ、admin API のリクエスト)は変えない。`vps_mode` フィールドの値 `kernel`/`proxy` は、normalize 時に `Forwarding` の `Transparent`/`Relay` へ写す。`proxy_protocol` フィールドは `SourceMetadata` の `None`/`ProxyV2` へ写す。書き出し時はどちらも元のフィールドへ戻す。この写像は、維持する外部仕様である `proto.Rule` と内部モデルの `Rule` の間のアダプタが持つ。
@@ -3975,3 +3975,5 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - 制御ソケットの wire の型を `internal/agent/controlapi` へ移した(2026-10-01、7a.7 節):`internal/agent` の `doctor` の応答の型、カーネルモードの読み取りの型と列挙の値、制御ソケットのパスの規則と長さの上限、応答の読み取りとその大きさの上限、トンネルの理由の文字列を、新しい葉の package へ移した。`cmd/wgft` はこの package から読む。`internal/agent` に別名は残していない。`internal/agent` は `internal` の下にあり、モジュールの外からは import できないので、別名を要する読み手が無いためである。JSON のタグ、項目の順、定数の値は変えていない。挙動も変えていない。7a.7 節の配置の図と本文に `controlapi` を加え、`internal/vpsd/adminapi` と並ぶ葉としての規則を書いた。この規則は `internal/dataplane/deps_test.go` の試験で検査する。応答の JSON の形と定数の値は、移す前の型から書き出した値と比べる試験を `controlapi` に加えて固定した。それまでの試験は、CLI と常駐プロセスの両方が同じ型を使うため、JSON のタグや定数の値を変えても落ちない箇所があった。
 
 - エージェントの登録のクライアントの側を `internal/agent/enroll` へ移した(2026-10-01、7a.7 節):接続文字列の解釈(`ParseJoin`)、証明書の SHA-256 でサーバを確かめる HTTP クライアント(`PinnedClient`)、登録 API の呼び出し(`Register`)を `internal/agent` から `internal/agent/enroll` へ移した。初回の登録と登録のし直しが共有する、登録の結果を認証情報に写す関数も、`enroll.Record` として同じ package に置いた。挙動は変えていない。移した宣言は、名前を改めた `Record` を除き、本文もコメントも移動の前と同じであり、呼び出し側は package の名前を付けて呼ぶだけである。7a.7 節の配置と本文に `agent/enroll/` を加えた。
+
+- サーバのデータベースの meta 表のキーを `internal/vpsd/store` の定数にまとめた(2026-10-01、7a.2 節。挙動は変えていない):meta 表のキーは、`internal/vpsd` の `mode.go`、`teardown.go`、`vpsd.go` と、`internal/vpsd/agentapi`、`internal/vpsd/store` のそれぞれが非公開の定数として持っていた。同じ表を読み書きする `server check` と `server teardown` は、`internal/vpsd` の中にあることでこの定数を共有していた。キーと、`mode` のキーに記録する転送方式の値 `ModeKernel`/`ModeUserspace` を `internal/vpsd/store` の `meta.go` に移し、7a.2 節が述べる転送方式の語彙の置き場所を直した。キーの文字列は変えていないので、既存のデータベースの記録はそのまま読める。単体テスト `TestMetaKeysKeepTheirStoredNames` が各キーの文字列を固定する。

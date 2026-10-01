@@ -125,7 +125,7 @@ func TestWaitForApplyReturnsTheAdminServeFailure(t *testing.T) {
 func TestHoldFailsWhenTheAdminAPICannotListen(t *testing.T) {
 	st := openTestStore(t)
 	d := &Daemon{st: st, dp: holdDataplane{p: newHoldParticipant(errors.New("boom"))},
-		opts: Options{Mode: modeUserspace}}
+		opts: Options{Mode: store.ModeUserspace}}
 	buf := captureLog(t)
 
 	// A deadline so that a hold which ignores the failure ends the test instead of hanging until
@@ -165,7 +165,7 @@ func TestHoldFailsWhenTheAdminAPICannotListen(t *testing.T) {
 func TestRetryHoldLogsOnlyWhenTheReasonChanges(t *testing.T) {
 	st := openTestStore(t)
 	p := newHoldParticipant(errors.New("no buffer space available"))
-	d := &Daemon{st: st, dp: holdDataplane{p: p}, opts: Options{Mode: modeUserspace}}
+	d := &Daemon{st: st, dp: holdDataplane{p: p}, opts: Options{Mode: store.ModeUserspace}}
 	// The hold was entered with the failure the dataplane keeps returning.
 	d.beginHold(errors.New("failed to apply the userspace dataplane: no buffer space available"))
 
@@ -205,7 +205,7 @@ func TestRetryHoldLogsOnlyWhenTheReasonChanges(t *testing.T) {
 func TestRetryHoldDoesNotAdviseARuleChangeWhenTheDatabaseCannotBeRead(t *testing.T) {
 	st := openTestStore(t)
 	d := &Daemon{st: st, dp: holdDataplane{p: newHoldParticipant(errors.New("boom"))},
-		opts: Options{Mode: modeUserspace}}
+		opts: Options{Mode: store.ModeUserspace}}
 	d.beginHold(errors.New("failed to apply the userspace dataplane: boom"))
 	st.Close() // every read of the declaration now fails
 
@@ -535,7 +535,7 @@ func newHoldDaemon(t *testing.T, st *store.Store, p dataplane.Participant, admin
 		st: st, dp: holdDataplane{p: p}, serverKey: testKey(t),
 		network: netip.MustParsePrefix("10.200.0.0/24"),
 		proxy:   proxyrelay.New(proxyrelay.Options{Pool: resource.NewPool(16)}),
-		opts: Options{Mode: modeUserspace, WGInterface: "wgft0", Version: "test",
+		opts: Options{Mode: store.ModeUserspace, WGInterface: "wgft0", Version: "test",
 			AdminAddr: adminAddr, AgentAPIAddr: agentAddr},
 	}
 }

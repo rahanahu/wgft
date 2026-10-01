@@ -124,7 +124,7 @@ func (s *Store) SetAgentDisabled(name string, disabled bool, now time.Time, chec
 	}
 	gen++
 	if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-		generationMeta, []byte(strconv.FormatUint(gen, 10))); err != nil {
+		MetaGeneration, []byte(strconv.FormatUint(gen, 10))); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

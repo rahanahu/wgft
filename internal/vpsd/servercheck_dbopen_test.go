@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
 
 // server check の終了コードは、サーバのデータベースを開けない場合も 0 のままである(7a.11 節の
@@ -19,7 +21,7 @@ import (
 // エラーではないことを確かめる(仕様 9 節)。
 func TestCheckNotPresentIsNotAFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wgft.sqlite")
-	opts := Options{Mode: modeUserspace, DBPath: path, WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
+	opts := Options{Mode: store.ModeUserspace, DBPath: path, WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
 	var out bytes.Buffer
 	if err := Check(opts, &out); err != nil {
 		t.Fatalf("Check returned %v for a database that does not exist yet", err)
@@ -49,7 +51,7 @@ func TestCheckOnNewerSchemaStaysExitZeroWithADedicatedLine(t *testing.T) {
 	}
 	db.Close()
 
-	opts := Options{Mode: modeUserspace, DBPath: path, WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
+	opts := Options{Mode: store.ModeUserspace, DBPath: path, WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
 	var out bytes.Buffer
 	if err := Check(opts, &out); err != nil {
 		t.Fatalf("Check returned %v for a database written by a newer schema; exit code must stay 0 (7a.11 section)", err)
@@ -80,7 +82,7 @@ func TestCheckOnUnopenableDatabaseStaysExitZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	opts := Options{Mode: modeUserspace, DBPath: path, WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
+	opts := Options{Mode: store.ModeUserspace, DBPath: path, WGInterface: "wgft0", WGAddress: "10.200.0.1/24"}
 	var out bytes.Buffer
 	if err := Check(opts, &out); err != nil {
 		t.Fatalf("Check returned %v for a database it could not open; exit code must stay 0 (7a.11 section)", err)

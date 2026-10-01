@@ -50,8 +50,6 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-const serverKeyMeta = "wg_server_private_key"
-
 // adminTailscalePort は --admin-tailscale での待ち受けポート(TCP)。
 const adminTailscalePort = "8686"
 
@@ -343,7 +341,7 @@ func Run(opts Options) error {
 	}}
 	d.reserved = reservedPorts(opts)
 	// モードとアドレス帯の初回記録・照合は、鍵やインタフェースを作る前に済ませる(仕様 9・11a 節)。
-	_, keyErr := st.GetMeta(serverKeyMeta)
+	_, keyErr := st.GetMeta(store.MetaServerKey)
 	hadServerKey := keyErr == nil
 	if err := reconcileModeAndAddress(st, opts, hadServerKey); err != nil {
 		return err
@@ -351,7 +349,7 @@ func Run(opts Options) error {
 	// ログに出すモードは、この起動で実際に使う値(WGFT_MODE 未指定なら記録済みの値)を
 	// SQLite から読み直して使う。opts.Mode は未指定なら空のままなので、それを出すと
 	// 空欄のログになる(reconcileModeAndAddress の「WGFT_MODE unset」の分岐参照)。
-	recordedMode, err := st.GetMeta(modeMeta)
+	recordedMode, err := st.GetMeta(store.MetaMode)
 	if err != nil {
 		return fmt.Errorf("reading recorded mode: %w", err)
 	}
@@ -361,7 +359,7 @@ func Run(opts Options) error {
 	// ログ(apply.go)と管理用 API(admin_backend.go)が見る d.opts.Mode も同じ値にそろえる
 	d.opts.Mode = mode
 	var uspace *userspace.Backend
-	if mode == modeUserspace {
+	if mode == store.ModeUserspace {
 		uspace = userspace.New(userspace.Options{Limits: opts.Limits})
 		d.dp = &userspaceDataplane{b: uspace}
 	}
@@ -535,7 +533,7 @@ func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
 	go d.pollUDPReplies(ctx)
 	select {
 	case <-ctx.Done():
-		if d.opts.Mode == modeUserspace {
+		if d.opts.Mode == store.ModeUserspace {
 			log.Printf("shutting down")
 		} else {
 			log.Printf("shutting down; keeping interface %s and the table", d.opts.WGInterface)

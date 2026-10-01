@@ -157,7 +157,7 @@ func newDisableFixture(t *testing.T) *disableFixture {
 	p := &recordingParticipant{log: log}
 	dp := &disableDataplane{holdDataplane: holdDataplane{p: p}, bound: linux.Bound{}}
 	d := &Daemon{st: st, dp: dp, serverKey: testKey(t), network: netip.MustParsePrefix("10.200.0.0/24"),
-		opts: Options{Mode: modeKernel, WGInterface: "wgft0", MTU: 1420}}
+		opts: Options{Mode: store.ModeKernel, WGInterface: "wgft0", MTU: 1420}}
 	d.onPushAll = func() { log.add("deliver") }
 	d.hub = d.newHub(d)
 	captureLog(t)
