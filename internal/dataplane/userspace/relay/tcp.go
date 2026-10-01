@@ -316,7 +316,16 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				// 組のうちカーネルの TCP ソケットの受信のバッファを、netstack の接続の boost の枠に合わせる
 				// (設計文書 7 節)。vpsd では公開側の c、エージェントでは宛先への t がカーネルのソケットである
 				netpipe.FollowBoost(c, t)
-				netpipe.Pipe(c, t)
+				// 公開側のクライアントが RST で切ったときは、宛先への接続も通常の Close ではなく Abort の
+				// RST で切る(設計文書 6.2 節)。FIN で閉じると、エージェントの中継はハーフクローズとして
+				// 扱い、FIN を受けても閉じない宛先では、宛先への接続と枠を宛先が閉じるまで持ち続ける。
+				// 宛先への接続が netstack の接続になるのは vpsd のユーザー空間モードでエージェントへ張った
+				// 接続だけで、エージェントの宛先への接続は実ソケットなので、今までどおり通常の Close で閉じる
+				var resetT func()
+				if a, ok := t.(aborter); ok {
+					resetT = a.Abort
+				}
+				netpipe.PipeResetB(c, t, resetT)
 			}()
 		}
 	}()
