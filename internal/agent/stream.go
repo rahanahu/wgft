@@ -13,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
+	"github.com/rahanahu/wgft/internal/agent/enroll"
 	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -60,7 +61,7 @@ const tunnelFreshFor = 180 * time.Second
 // つまり接続の失敗、429 のような一時的な拒否、ping の期限切れ、ハートビートの期限切れ(4002)、
 // 版の宣言の形の誤り(4004)、server の内部の誤り(1011)には当てる。
 func capsWhileFresh(err error) bool {
-	if errors.Is(err, errUnauthorized) || errors.Is(err, ErrPinMismatch) || errors.Is(err, errServerProtocolVersion) {
+	if errors.Is(err, errUnauthorized) || errors.Is(err, enroll.ErrPinMismatch) || errors.Is(err, errServerProtocolVersion) {
 		return false
 	}
 	switch websocket.CloseStatus(err) {
@@ -191,7 +192,7 @@ func (rt *runtime) streamLoop(ctx context.Context) error {
 			}
 			backoff = backoffMin
 			continue
-		case errors.Is(err, ErrPinMismatch):
+		case errors.Is(err, enroll.ErrPinMismatch):
 			// 証明書が変わった。未使用でピンの違う WGFT_JOIN があれば再登録し、なければ再接続を続ける
 			if j := rt.joinForNewPin(); j != nil {
 				if rerr := rt.recover(); rerr != nil {
@@ -250,7 +251,7 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 	copy(pin[:], pinBytes)
 	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	ws, resp, err := websocket.Dial(dialCtx, "wss://"+f.Endpoint+"/api/v1/agents/stream", &websocket.DialOptions{
-		HTTPClient: PinnedClient(pin),
+		HTTPClient: enroll.PinnedClient(pin),
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + f.PermanentToken}},
 	})
 	cancel()

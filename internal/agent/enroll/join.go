@@ -1,4 +1,8 @@
-package agent
+// Package enroll はエージェントの登録のクライアントの側である。接続文字列の解釈、証明書の SHA-256 で
+// サーバを確かめる HTTP クライアント、登録 API の呼び出し、登録の結果の認証情報への記録を持つ(仕様 5.1 節)。
+// internal/agent の初回の登録と登録のし直し、cmd/wgft の接続文字列の検査が使う。internal/agent は
+// import しない(設計文書 7a.7 節)。
+package enroll
 
 import (
 	"bytes"

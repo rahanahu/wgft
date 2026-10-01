@@ -3,6 +3,8 @@ package agent
 import (
 	"errors"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/agent/enroll"
 )
 
 // 制御ストリームの観測(設計文書 10.2c 節)。`wgft agent doctor` の stream.connection・stream.backoff・
@@ -93,7 +95,7 @@ func (rt *runtime) noteStreamDisconnected(now time.Time, err error) {
 	defer rt.streamMu.Unlock()
 	rt.streamObs.Connected, rt.streamObs.AwaitingPong = false, false
 	rt.streamObs.DisconnectedAt, rt.streamObs.DisconnectReason = now, reason
-	rt.streamObs.PinMismatch = errors.Is(err, ErrPinMismatch)
+	rt.streamObs.PinMismatch = errors.Is(err, enroll.ErrPinMismatch)
 }
 
 // noteStreamWaiting は、次の接続までの待ちに入ったことを記録する。backoff は streamLoop が実際に

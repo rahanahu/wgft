@@ -1099,6 +1099,7 @@ internal/
   agent/allowtargets/    エージェントが接続してよい宛先の一覧(7 節)
   agent/teardown/        wgft agent teardown の判定と順序、撤去のカーネル操作(10.3 節)。実行時の状態に依存しない
   agent/controlapi/      制御ソケットの wire の型と定数(proto と resource だけを import する葉。下記)
+  agent/enroll/          登録のクライアントの側(接続文字列の解釈、ピン留めした登録 API の呼び出し、登録の結果の認証情報への記録)
 proto/                   維持する外部仕様としての wire スキーマ(既存フィールドの意味は変えず、加算のみ許す)
 ```
 
@@ -1115,6 +1116,8 @@ agent は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` をまだ�
 `internal/agent` の下位の package は `internal/agent` を import しない。実行時の状態を持つ `internal/agent` が下位の package を使う向きだけを許し、`wgft agent teardown` のような 1 回限りのコマンドを実行時の状態から切り離すためである。`internal/vpsd` の下位の package と同じ規則であり、`internal/dataplane/deps_test.go` の `TestAgentSubpackagesDoNotImportAgent` が検査する。
 
 制御ソケット(9 節、10.2c 節)の wire の型と定数は `internal/agent/controlapi` に置く。`doctor` の要求と応答の型、応答が載せるカーネルモードの読み取りの型と列挙の値、ソケットのパスの規則と長さの上限、応答の 1 行の読み取りとその大きさの上限、読み手が照らし合わせるトンネルの理由の文字列が含まれる。応答を組み立てる処理と制御ソケットのサーバは `internal/agent` に残る。`cmd/wgft` の `agent doctor` は、稼働中のエージェントの実装に依存せずに応答の形を読む。server の `internal/vpsd/adminapi`(管理用 API の読み取りの型。10.2d 節)と同じ位置づけの葉である。モジュールの中から、`adminapi` は `proto` だけを、`controlapi` は `proto` と `internal/resource` だけを import する。`controlapi` が `internal/resource` を import するのは、フロー予算の拒否の理由が `resource.Reason` の型を持つためである。`internal/resource` 自身はモジュールの中を何も import しない。`internal/dataplane/deps_test.go` の `TestWireShapesStayLeaf` がこの規則を検査する。
+
+`internal/agent/enroll` は登録のクライアントの側を持ち、`internal/agent` の初回の登録と登録のし直しの両方が使う。`cmd/wgft` も、`agent run` の起動時に接続文字列の形を確かめて警告するために `internal/agent/enroll` を直接使う。
 
 `internal/startup` は、この向きの例外ではなく葉である。モジュールの中の何も import せず、`cmd/wgft` から `internal/dataplane/linuxkernel/wg` までのどの層も import できる。起動の拒否は、値を受け取る入口と、カーネルに書き込む層の両方が作るので、どちらからも見える場所に置く必要がある。`internal/resource` と `internal/lograte` と同じ扱いであり、`internal/dataplane/deps_test.go` がモジュールの中を import しないことを検査する。`internal/textsafe`(信頼できない文字列の無害化。11 節)も同じ理由で葉に置く。`cmd/wgft`、`internal/agent`、`internal/vpsd/stream` のように、エージェントが選ぶ文字列を端末へ出す層すべてから見える必要があるためである(2026-09-25、所有者の決定)。
 
@@ -3970,3 +3973,5 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - v1.3.0 のユーザー空間モードの資源の上界をソースで点検した独立レビューを受け、6.2 節、6.3 節と 7 節の記述を実装に合わせた(2026-10-01、6.2・6.3・7 節。コードは変えていない):レビューは設計文書とコードの食い違いを 5 つ示した。1 つめは、中継が通常の `Close` で閉じた netstack の接続を解放したと書いていた点である。送り残しを持つ接続は FIN_WAIT_1 などに残り、K に数えず、boost の枠を持たないものは 16 本にも数えない。この状態を終わらせる仕組みが無いことはコードから判断し、接続が残ることは別の試験で観察した。boost の枠を持つ接続が 16 本に数えたまま残ることと、中継の側から意図して切る経路が RST で切ることはコードで確かめた。7 節にこの保持点を書き、上界の式に入っていないことを明記した。2 つめは、警告の行を量の小さい保持点に入れていた点である。`ip-flapping` の行は IP の組ごとに別の行になり、行の数に上限が無いことをコードで確かめた。3 つめは、認証済みの stream の 1.5 MiB × A が測った形のハートビートでの値であることを書いていなかった点で、ハートビートの項目の数に上限が無いことをコードで確かめた。保存する量は推定のままである。4 つめは、K を 1 減らしたときのエージェントの上界の減り方が、`vpsd` とエージェントの K をそろえる前提の値であることを書いていなかった点である。エージェントの K だけを下げたときの値と、エージェントに残る送り残しを持った接続がエージェントの K に数えられないことを書き加えた。5 つめは、待ち受けの固定費を攻撃者から増やせないと書いていた点で、エージェントの待ち受けの数は `vpsd` が配る全体状態で決まり、エージェントはその数に上限を持たないことをコードで確かめた。エージェントの上界のうち待ち受けの数と accept の待ち行列の項が `vpsd` を信頼する前提に立つことを、1 つの段落にまとめて書いた。プロセスの上界は式に数えた保持点についての値であり、プロセスのメモリがこの値を超えないことは示せていないと書き改め、6.3 節のホストの要件の文も同じ意味に合わせた。未確認:送り残しを持って閉じた接続の長い保持、その数の上限と合計の量、プロキシモードの中継での再現、エージェントに残るこの接続の数、警告の行の増える速さとメモリの量、項目の多いハートビートが保存する量、エージェントが多数の待ち受けを開いたときの量。
 
 - 制御ソケットの wire の型を `internal/agent/controlapi` へ移した(2026-10-01、7a.7 節):`internal/agent` の `doctor` の応答の型、カーネルモードの読み取りの型と列挙の値、制御ソケットのパスの規則と長さの上限、応答の読み取りとその大きさの上限、トンネルの理由の文字列を、新しい葉の package へ移した。`cmd/wgft` はこの package から読む。`internal/agent` に別名は残していない。`internal/agent` は `internal` の下にあり、モジュールの外からは import できないので、別名を要する読み手が無いためである。JSON のタグ、項目の順、定数の値は変えていない。挙動も変えていない。7a.7 節の配置の図と本文に `controlapi` を加え、`internal/vpsd/adminapi` と並ぶ葉としての規則を書いた。この規則は `internal/dataplane/deps_test.go` の試験で検査する。応答の JSON の形と定数の値は、移す前の型から書き出した値と比べる試験を `controlapi` に加えて固定した。それまでの試験は、CLI と常駐プロセスの両方が同じ型を使うため、JSON のタグや定数の値を変えても落ちない箇所があった。
+
+- エージェントの登録のクライアントの側を `internal/agent/enroll` へ移した(2026-10-01、7a.7 節):接続文字列の解釈(`ParseJoin`)、証明書の SHA-256 でサーバを確かめる HTTP クライアント(`PinnedClient`)、登録 API の呼び出し(`Register`)を `internal/agent` から `internal/agent/enroll` へ移した。初回の登録と登録のし直しが共有する、登録の結果を認証情報に写す関数も、`enroll.Record` として同じ package に置いた。挙動は変えていない。移した宣言は、名前を改めた `Record` を除き、本文もコメントも移動の前と同じであり、呼び出し側は package の名前を付けて呼ぶだけである。7a.7 節の配置と本文に `agent/enroll/` を加えた。

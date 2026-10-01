@@ -15,6 +15,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/enroll"
 	"github.com/rahanahu/wgft/internal/agent/teardown"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/textsafe"
@@ -123,7 +124,7 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 	}
 	join := c.str("WGFT_JOIN")
 	if join != "" {
-		if _, err := agent.ParseJoin(join); err != nil {
+		if _, err := enroll.ParseJoin(join); err != nil {
 			log.Printf("warning: WGFT_JOIN is malformed: %v; it is used only for a first registration or after a revocation, so this agent starts if it is already registered", err)
 		}
 	}

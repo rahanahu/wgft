@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/enroll"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
@@ -498,9 +498,9 @@ func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *controlap
 
 // agentPinMismatch は、制御ストリームの直近の試みが証明書の不一致で終わったかどうかである。旧い版の
 // エージェントは pin_mismatch を送らないので、そのエージェントが記録した理由の文言でも見る。文言は
-// internal/agent の ErrPinMismatch である。
+// internal/agent/enroll の ErrPinMismatch である。
 func agentPinMismatch(s *controlapi.DoctorStream) bool {
-	return s.PinMismatch || strings.Contains(s.DisconnectReason, agent.ErrPinMismatch.Error())
+	return s.PinMismatch || strings.Contains(s.DisconnectReason, enroll.ErrPinMismatch.Error())
 }
 
 // agentStreamBackoffCheck は、直近に待った再接続の間隔と、待っている場合の次に試す時刻を示す。

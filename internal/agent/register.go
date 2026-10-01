@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/enroll"
 	"github.com/rahanahu/wgft/internal/startup"
 )
 
@@ -20,7 +21,7 @@ func (rt *runtime) recover() error {
 	if rt.opts.Join == "" {
 		return startup.Config("WGFT_JOIN", "permanent token was revoked; provide a new join string via WGFT_JOIN and restart")
 	}
-	j, err := ParseJoin(rt.opts.Join)
+	j, err := enroll.ParseJoin(rt.opts.Join)
 	if err != nil {
 		return startup.Config("WGFT_JOIN", "%v", err)
 	}
@@ -29,13 +30,13 @@ func (rt *runtime) recover() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	tok, addr, name, err := Register(ctx, j, rt.opts.Name)
+	tok, addr, name, err := enroll.Register(ctx, j, rt.opts.Name)
 	if err != nil {
 		return fmt.Errorf("re-register failed: %w", err)
 	}
 	rt.mu.Lock()
 	// 登録のし直しは、記録したトンネルのアドレスを置き換える唯一の経路である(設計文書 9・11 節)
-	recordRegistration(rt.f, j, tok, addr, name)
+	enroll.Record(rt.f, j, tok, addr, name)
 	err = rt.f.Save(rt.opts.CredentialsPath)
 	rt.mu.Unlock()
 	if err != nil {
@@ -47,11 +48,11 @@ func (rt *runtime) recover() error {
 
 // joinForNewPin は、ピンの不一致からの再登録に使える接続文字列を返す(仕様 5.1 節)。
 // 未使用で、かつピンが認証情報のピンと違うものだけ。なければ nil。
-func (rt *runtime) joinForNewPin() *Join {
+func (rt *runtime) joinForNewPin() *enroll.Join {
 	if rt.opts.Join == "" {
 		return nil
 	}
-	j, err := ParseJoin(rt.opts.Join)
+	j, err := enroll.ParseJoin(rt.opts.Join)
 	if err != nil {
 		return nil
 	}
@@ -73,7 +74,7 @@ func ensureRegistered(f *credentials.Credentials, opts Options) error {
 			log.Printf("WGFT_NAME=%s differs from the registered name %s; keeping %s", opts.Name, f.Name, f.Name)
 		}
 		if opts.Join != "" {
-			if j, err := ParseJoin(opts.Join); err == nil && j.TokenHash() != f.UsedJoinTokenSHA256 {
+			if j, err := enroll.ParseJoin(opts.Join); err == nil && j.TokenHash() != f.UsedJoinTokenSHA256 {
 				log.Printf("already registered; ignoring the provided join string and using the existing permanent token")
 			}
 		}
@@ -86,7 +87,7 @@ func ensureRegistered(f *credentials.Credentials, opts Options) error {
 	if opts.Join == "" {
 		return startup.Config("WGFT_JOIN", "not registered and no join string; provide via WGFT_JOIN or --join")
 	}
-	j, err := ParseJoin(opts.Join)
+	j, err := enroll.ParseJoin(opts.Join)
 	if err != nil {
 		return startup.Config("WGFT_JOIN", "%v", err)
 	}
@@ -95,24 +96,15 @@ func ensureRegistered(f *credentials.Credentials, opts Options) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	tok, addr, name, err := Register(ctx, j, opts.Name)
+	tok, addr, name, err := enroll.Register(ctx, j, opts.Name)
 	if err != nil {
 		return err
 	}
 	// 登録が成功した時点で認証情報ファイルを置き換える(失敗したら既存のファイルはそのまま)
-	recordRegistration(f, j, tok, addr, name)
+	enroll.Record(f, j, tok, addr, name)
 	if err := f.Save(opts.CredentialsPath); err != nil {
 		return err
 	}
 	log.Printf("registered as agent %s; assigned %s, API %s", name, addr, j.Endpoint)
 	return nil
-}
-
-// recordRegistration は登録の結果を認証情報に写す。初回の登録(ensureRegistered)と登録のし直し
-// (recover)が共有する。排他は取らない。recover は rt.mu を持ったまま呼び、保存も呼び出し側が行う。
-func recordRegistration(f *credentials.Credentials, j *Join, tok, addr, name string) {
-	f.Name, f.Endpoint, f.PermanentToken = name, j.Endpoint, tok
-	f.CertSHA256 = hex.EncodeToString(j.Pin[:])
-	f.UsedJoinTokenSHA256 = j.TokenHash()
-	f.TunnelAddress = credentials.RegisteredTunnelAddress(addr)
 }
