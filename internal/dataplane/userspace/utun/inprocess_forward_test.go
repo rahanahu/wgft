@@ -25,7 +25,7 @@ import (
 
 // TestAgentServerInProcessForwarding は、エージェント側のトンネルと中継 (internal/agent が
 // internal/dataplane/userspace/tunnel と internal/dataplane/userspace/relay を組む配線、
-// internal/agent/agent.go の runtime.apply を見よ) と、VPS 側のユーザー空間モードの Backend が
+// internal/agent/apply.go の runtime.apply を見よ) と、VPS 側のユーザー空間モードの Backend が
 // 組む配線 (internal/dataplane/userspace/userspace.go の Backend.New / EnsureDevice / Prepare /
 // Commit) を、1 プロセスの中で実 UDP (127.0.0.1) で繋ぎ、TCP と UDP を実際に転送して確かめる。
 //
@@ -110,7 +110,7 @@ func TestAgentServerInProcessForwarding(t *testing.T) {
 	tcpAddr := fmt.Sprintf("127.0.0.1:%d", tcpPort)
 	udpAddr := fmt.Sprintf("127.0.0.1:%d", udpPort)
 
-	// 3. エージェント側 (internal/agent/agent.go の runtime.apply と同じ組み方)。
+	// 3. エージェント側 (internal/agent/apply.go の runtime.apply と同じ組み方)。
 	agentRules := []proto.AgentRule{
 		{ID: "tcp1", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: tcpPort, Hi: tcpPort}, Target: targetTCPAddr, Enabled: true},
 		{ID: "udp1", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: udpPort, Hi: udpPort}, Target: targetUDPAddr, Enabled: true},
@@ -202,7 +202,7 @@ func newServerTunnel(t *testing.T, priv wgtypes.Key, addr netip.Addr) (*Tunnel, 
 	return tun, port
 }
 
-// newAgentTunnel はエージェント側のトンネルを立てて Run を回す (internal/agent/agent.go の
+// newAgentTunnel はエージェント側のトンネルを立てて Run を回す (internal/agent/apply.go の
 // runtime.apply と同じ: tunnel.New に続けて Run を goroutine で回す)。戻り値の cancel は Run を
 // 止めるだけで、Close は呼び出し側が行う (internal/agent/agent.go の runtime.closeLocked と同じ順序)。
 func newAgentTunnel(t *testing.T, priv, serverPub wgtypes.Key, serverPort uint16, addr, serverAddr netip.Addr) (*tunnel.Tunnel, context.CancelFunc) {
