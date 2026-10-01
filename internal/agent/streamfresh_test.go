@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,18 +127,73 @@ func attemptIntervals(t *testing.T, attempts <-chan time.Time, prev time.Time, n
 	return out, prev
 }
 
+// streamAttempt は、refusing server が受けた 1 回の試みの時刻と、その試みの直前に streamLoop が
+// 待った間隔(観測の Backoff)。
+type streamAttempt struct {
+	at   time.Time
+	wait time.Duration
+}
+
+// newWaitRecordingStreamServer は stream の要求をいつも 503 で断る server を立て、試みごとに、
+// 応答する前に rt の観測から直前の待ちを読む。streamLoop は応答を受けるまで次の待ちを記録しない
+// ので、読んだ値はこの試みの直前の待ちである。rt は最初の試みの前に Store する。
+func newWaitRecordingStreamServer(t *testing.T) (endpoint string, pin [32]byte, rt *atomic.Pointer[runtime], attempts chan streamAttempt) {
+	t.Helper()
+	rt = new(atomic.Pointer[runtime])
+	attempts = make(chan streamAttempt, 256)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/stream", func(w http.ResponseWriter, r *http.Request) {
+		a := streamAttempt{at: time.Now(), wait: rt.Load().streamStatus().Backoff}
+		select {
+		case attempts <- a:
+		default:
+		}
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "https://"), sha256.Sum256(srv.Certificate().Raw), rt, attempts
+}
+
+// recordedWaits は attempts から n 回分の試みを受け取り、各試みの直前の待ちを返す。前の試みからの
+// 実時間の間隔は、その待ち以上で、待ちに stall を足した値以下でなければならない。下の限りは、記録した
+// 待ちを実際に待ったことを確かめる。上の限りは、記録よりはるかに長く待つ誤りを捉えるためのもので、
+// 試みそのものに要する時間と、混んだ機械で timer と goroutine が遅れる分を含めて広く取る。
+func recordedWaits(t *testing.T, attempts <-chan streamAttempt, prev time.Time, n int) ([]time.Duration, time.Time) {
+	t.Helper()
+	const stall = 2 * time.Second
+	var out []time.Duration
+	for i := 0; i < n; i++ {
+		select {
+		case a := <-attempts:
+			if !prev.IsZero() {
+				if d := a.at.Sub(prev); d < a.wait || d > a.wait+stall {
+					t.Fatalf("attempt %d came %s after the previous one, but the recorded wait was %s; waits so far %v", i, d, a.wait, out)
+				}
+			}
+			out = append(out, a.wait)
+			prev = a.at
+		case <-time.After(15 * time.Second):
+			t.Fatalf("only %d of %d attempts within 15s; waits so far %v", i, n, out)
+		}
+	}
+	return out, prev
+}
+
 // トンネルが新しい間は待ちが上限で止まり、古くなると上限から倍々に伸び、再び新しくなると
 // 上限に戻る(仕様 5.2 節)。上限が無ければ、1 つ目の段で待ちは初期値から倍々に伸び続ける。
+// 待ちの長さは streamLoop が待ちに入るときに記録する観測(設計文書 10.2c 節)の値で比べる。
+// 試みの間隔の実時間には試みそのものの時間と機械の混み具合が乗るので、上限との比較には使わず、
+// 記録した待ちを実際に待ったことの確かめにだけ使う(recordedWaits)。
 func TestReconnectWaitIsCappedWhileTheTunnelIsFresh(t *testing.T) {
 	const (
 		backoffMin = 50 * time.Millisecond
 		freshMax   = 200 * time.Millisecond
 		backoffMax = 5 * time.Second
-		// slack は、試みそのものに要する時間と、機械の混み具合の余裕である
-		slack = 150 * time.Millisecond
 	)
-	endpoint, pin, attempts := newRefusingStreamServer(t)
+	endpoint, pin, rtp, attempts := newWaitRecordingStreamServer(t)
 	rt := newAliveTestRuntime(t, endpoint, pin)
+	rtp.Store(rt)
 	rt.reconnectBackoffMin, rt.reconnectBackoffMax, rt.reconnectBackoffFreshMax = backoffMin, backoffMax, freshMax
 	setFresh := func() {
 		now := time.Now()
@@ -150,38 +206,42 @@ func TestReconnectWaitIsCappedWhileTheTunnelIsFresh(t *testing.T) {
 	setFresh()
 	runStreamLoop(t, rt)
 
-	// 1 つ目の段: 新しい間。上限が無ければ 400 ms、800 ms、1.6 s と伸びる
-	iv, last := attemptIntervals(t, attempts, time.Time{}, 8)
-	for i, d := range iv {
-		if d > freshMax+slack {
-			t.Fatalf("while the tunnel is fresh, interval %d was %s, above the %s cap; intervals %v", i, d, freshMax, iv)
+	// 1 つ目の段: 新しい間。待ちは 50 ms、100 ms、200 ms と伸びて上限で止まる。上限が無ければ
+	// 400 ms、800 ms、1.6 s と伸びる。最初の試みの前には待たない
+	w, last := recordedWaits(t, attempts, time.Time{}, 8)
+	for i, d := range w[1:] {
+		if d > freshMax {
+			t.Fatalf("while the tunnel is fresh, wait %d was %s, above the %s cap; waits %v", i+1, d, freshMax, w)
 		}
+	}
+	if w[len(w)-1] != freshMax {
+		t.Fatalf("while the tunnel is fresh, the wait did not reach the %s cap; waits %v", freshMax, w)
 	}
 
 	// 2 つ目の段: 古くなった。切り替えの直前に決まった待ちは上限のままでありうるので、その次から見る
 	setStale()
-	iv, last = attemptIntervals(t, attempts, last, 3)
+	w, last = recordedWaits(t, attempts, last, 3)
 	grew := false
-	for _, d := range iv {
-		if d > 2*freshMax+slack/2 {
+	for _, d := range w {
+		if d > freshMax {
 			grew = true
 		}
 	}
 	if !grew {
-		t.Errorf("after the tunnel went stale the wait did not grow past the %s cap; intervals %v", freshMax, iv)
+		t.Errorf("after the tunnel went stale the wait did not grow past the %s cap; waits %v", freshMax, w)
 	}
 	// 伸び始めは上限の 2 倍からであり、上限の下で倍加を続けた値からではない
-	if iv[1] > 4*freshMax+slack {
-		t.Errorf("the first stale wait was %s; it must grow from the %s cap, not jump toward the %s maximum; intervals %v",
-			iv[1], freshMax, backoffMax, iv)
+	if w[1] > 4*freshMax {
+		t.Errorf("the first stale wait was %s; it must grow from the %s cap, not jump toward the %s maximum; waits %v",
+			w[1], freshMax, backoffMax, w)
 	}
 
 	// 3 つ目の段: 再び新しくなった。今の待ちが明けた次から上限に戻る
 	setFresh()
-	iv, _ = attemptIntervals(t, attempts, last, 3)
-	for i, d := range iv[1:] {
-		if d > freshMax+slack {
-			t.Errorf("after the tunnel was fresh again, interval %d was %s, above the %s cap; intervals %v", i+1, d, freshMax, iv)
+	w, _ = recordedWaits(t, attempts, last, 3)
+	for i, d := range w[1:] {
+		if d > freshMax {
+			t.Errorf("after the tunnel was fresh again, wait %d was %s, above the %s cap; waits %v", i+1, d, freshMax, w)
 		}
 	}
 }
