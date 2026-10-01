@@ -11,16 +11,16 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgbind"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgipc"
 	"github.com/rahanahu/wgft/internal/nettun"
 )
 
@@ -44,13 +44,7 @@ type Tunnel struct {
 }
 
 // PeerStatus は IpcGet から読んだピアの状態。カーネルモードの wgtypes.Peer に相当する。
-type PeerStatus struct {
-	PublicKey     wgtypes.Key
-	Endpoint      netip.AddrPort // 未確立ならゼロ値
-	LastHandshake time.Time      // ゼロなら未確立
-	RxBytes       int64
-	TxBytes       int64
-}
+type PeerStatus = wgipc.Peer
 
 // New はトンネルを作って up する。listen_port が使えなければエラー(bind の失敗で分かる)。
 func New(cfg Config) (*Tunnel, error) {
@@ -65,7 +59,7 @@ func New(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
 	t := &Tunnel{cfg: cfg, tnet: tnet, peers: map[wgtypes.Key]netip.Addr{}}
-	t.dev = device.NewDevice(tnet, newBind(), device.NewLogger(device.LogLevelError, "wg: "))
+	t.dev = device.NewDevice(tnet, wgbind.New(), device.NewLogger(device.LogLevelError, "wg: "))
 	ipc := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(cfg.PrivateKey[:]), cfg.ListenPort)
 	if err := t.dev.IpcSet(ipc); err != nil {
 		t.dev.Close()
@@ -97,18 +91,7 @@ func (t *Tunnel) ListenPort() (uint16, error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, line := range strings.Split(out, "\n") {
-		k, v, ok := strings.Cut(line, "=")
-		if !ok || k != "listen_port" {
-			continue
-		}
-		n, err := strconv.ParseUint(v, 10, 16)
-		if err != nil {
-			return 0, fmt.Errorf("parse listen_port %q: %w", v, err)
-		}
-		return uint16(n), nil
-	}
-	return 0, fmt.Errorf("IpcGet output has no listen_port line")
+	return wgipc.ListenPort(out)
 }
 
 // SetPeers は宣言のピア集合に収束させる(足りないものを足し、余分を消す)。
@@ -182,53 +165,7 @@ func (t *Tunnel) Peers() (map[wgtypes.Key]PeerStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	res := map[wgtypes.Key]PeerStatus{}
-	var cur *PeerStatus
-	flush := func() {
-		if cur != nil {
-			res[cur.PublicKey] = *cur
-		}
-	}
-	for _, line := range strings.Split(out, "\n") {
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		switch k {
-		case "public_key":
-			flush()
-			raw, err := hex.DecodeString(v)
-			if err != nil || len(raw) != wgtypes.KeyLen {
-				cur = nil
-				continue
-			}
-			var key wgtypes.Key
-			copy(key[:], raw)
-			cur = &PeerStatus{PublicKey: key}
-		case "endpoint":
-			if cur != nil {
-				if ap, err := netip.ParseAddrPort(v); err == nil {
-					cur.Endpoint = ap
-				}
-			}
-		case "last_handshake_time_sec":
-			if cur != nil {
-				if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-					cur.LastHandshake = time.Unix(n, 0)
-				}
-			}
-		case "rx_bytes":
-			if cur != nil {
-				cur.RxBytes, _ = strconv.ParseInt(v, 10, 64)
-			}
-		case "tx_bytes":
-			if cur != nil {
-				cur.TxBytes, _ = strconv.ParseInt(v, 10, 64)
-			}
-		}
-	}
-	flush()
-	return res, nil
+	return wgipc.Peers(out), nil
 }
 
 // DialContext は netstack 越しにエージェントへ TCP 接続する(中継の向きの反転。仕様 6.3 節)。

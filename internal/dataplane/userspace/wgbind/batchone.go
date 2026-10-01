@@ -1,6 +1,6 @@
-// Package wgbind は、wireguard-go の device に渡す UDP のバインド(conn.Bind)の包みを持つ。
+// Package wgbind は、wireguard-go の device に渡す UDP のバインド(conn.Bind)の作り方と包みを持つ。
 // エージェントのトンネル(internal/dataplane/userspace/tunnel)と `vpsd` のユーザー空間モードの
-// トンネル(internal/dataplane/userspace/utun)が共有する。
+// トンネル(internal/dataplane/userspace/utun)は、どちらも New でバインドを作る。
 package wgbind
 
 import (

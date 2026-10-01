@@ -48,7 +48,7 @@ import (
 // の修正の対象で、そちらは一切変えていない (raiseUDPSendBuffer は relay パッケージの非公開関数の
 // ままで、この修正が効くかどうかを 12000 バイトのケースで確かめる)。
 //
-// Windows では newBind() が conn.NewStdNetBind() を使う (bind_windows.go)。wireguard-go の既定の
+// Windows では wgbind.New() が conn.NewStdNetBind() を使う (wgbind/new_windows.go)。wireguard-go の既定の
 // WinRingBind では、このテストのエージェント側が受信を止めた (docs/design.md の改訂の記録)。
 func TestAgentServerInProcessForwarding(t *testing.T) {
 	quiet := func(string, ...any) {}
@@ -369,12 +369,12 @@ func waitForHandshake(t *testing.T, srv *Tunnel, agent *tunnel.Tunnel, peer wgty
 // logHandshakeDiagnostics prints both sides' IpcGet-derived status (endpoint, last handshake,
 // rx/tx bytes: tx>0 with rx=0 on the other side says packets are sent and not received, tx=0
 // says never sent) plus the server's bound wg port, runtime.GOOS, and which conn.Bind this
-// package's and tunnel's newBind() gives on it, to help diagnose a failed handshake without
+// package and tunnel get from wgbind.New() on it, to help diagnose a failed handshake without
 // another blind CI round. It is called only from the failure path, so it costs nothing when the
 // test passes.
 func logHandshakeDiagnostics(t *testing.T, srv *Tunnel, agent *tunnel.Tunnel, peer wgtypes.Key, wgPort uint16) {
 	t.Helper()
-	t.Logf("GOOS=%s; newBind() gives %s", runtime.GOOS, boundKindDescription())
+	t.Logf("GOOS=%s; wgbind.New() gives %s", runtime.GOOS, boundKindDescription())
 	t.Logf("server tunnel bound at 127.0.0.1:%d (agent's tunnel.Config.Endpoint points here)", wgPort)
 	if peers, err := srv.Peers(); err != nil {
 		t.Logf("server side: reading peers failed: %v", err)
@@ -389,17 +389,17 @@ func logHandshakeDiagnostics(t *testing.T, srv *Tunnel, agent *tunnel.Tunnel, pe
 		ast.Endpoint, ast.LastHandshake, ast.RxBytes, ast.TxBytes, ast.Err)
 }
 
-// boundKindDescription documents, rather than detects, which conn.Bind this package's newBind()
-// (bind_windows.go, bind_other.go) gives on this GOOS: utun.Tunnel and tunnel.Tunnel do not
+// boundKindDescription documents, rather than detects, which conn.Bind wgbind.New()
+// (wgbind/new_windows.go, wgbind/new_other.go) gives on this GOOS: utun.Tunnel and tunnel.Tunnel do not
 // expose the device's private bind, so this cannot read it back from either type.
 func boundKindDescription() string {
 	if runtime.GOOS == "windows" {
-		return "*conn.StdNetBind (newBind() calls conn.NewStdNetBind() explicitly on Windows; wgbind.BatchOne leaves it unwrapped because its BatchSize is 1; see bind_windows.go)"
+		return "*conn.StdNetBind (wgbind.New() calls conn.NewStdNetBind() explicitly on Windows; wgbind.BatchOne leaves it unwrapped because its BatchSize is 1; see wgbind/new_windows.go)"
 	}
 	if runtime.GOOS == "linux" {
-		return "wgbind.BatchOne wrapping conn.NewDefaultBind() (the standard bind reads 128 datagrams per call on Linux; the wrapper hands WireGuard one at a time; see bind_other.go)"
+		return "wgbind.BatchOne wrapping conn.NewDefaultBind() (the standard bind reads 128 datagrams per call on Linux; the wrapper hands WireGuard one at a time; see wgbind/new_other.go)"
 	}
-	return "whatever conn.NewDefaultBind() gives on this GOOS (its BatchSize is 1 here, so wgbind.BatchOne leaves it unwrapped; see bind_other.go)"
+	return "whatever conn.NewDefaultBind() gives on this GOOS (its BatchSize is 1 here, so wgbind.BatchOne leaves it unwrapped; see wgbind/new_other.go)"
 }
 
 // checkTCPRoundTrip はクライアントとして接続し、payload を書いて半クローズし、echo された同じ

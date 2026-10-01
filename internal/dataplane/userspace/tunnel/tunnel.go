@@ -24,6 +24,8 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgbind"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgipc"
 	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/nettun"
 )
@@ -68,9 +70,9 @@ type Status struct {
 	Err           error // エンドポイントの解決失敗など
 }
 
-// bindForDevice は device に渡す UDP バインドを作る。値は GOOS ごとの newBind
-// (bind_other.go と bind_windows.go)で、テストだけが受信の停止を模すために差し替える。
-var bindForDevice = newBind
+// bindForDevice は device に渡す UDP バインドを作る。値は utun と共有する wgbind.New で、テスト
+// だけが受信の停止を模すために差し替える。
+var bindForDevice = wgbind.New
 
 // New はトンネルを作って up する。エンドポイントの解決に失敗しても起こし、引き直しに任せる。
 func New(cfg Config) (*Tunnel, error) {
@@ -156,19 +158,9 @@ func (t *Tunnel) Status() Status {
 		st.Err = err
 		return st
 	}
-	for _, line := range strings.Split(out, "\n") {
-		k, v, _ := strings.Cut(line, "=")
-		switch k {
-		case "last_handshake_time_sec":
-			if sec, _ := strconv.ParseInt(v, 10, 64); sec > 0 {
-				st.LastHandshake = time.Unix(sec, 0)
-			}
-		case "rx_bytes":
-			st.RxBytes, _ = strconv.ParseInt(v, 10, 64)
-		case "tx_bytes":
-			st.TxBytes, _ = strconv.ParseInt(v, 10, 64)
-		}
-	}
+	// device のピアは New が設定した VPS の 1 つだけである
+	p := wgipc.Peers(out)[t.cfg.ServerPublicKey]
+	st.LastHandshake, st.RxBytes, st.TxBytes = p.LastHandshake, p.RxBytes, p.TxBytes
 	return st
 }
 

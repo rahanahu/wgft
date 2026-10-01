@@ -1,16 +1,15 @@
 //go:build windows
 
-package tunnel
+package wgbind
 
 import (
-	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgbind"
 	"golang.zx2c4.com/wireguard/conn"
 )
 
-// newBind は、Windows でだけ conn.NewDefaultBind() の既定(Registered I/O を使う
-// WinRingBind)を避け、conn.NewStdNetBind() を明示して使う。他の OS と同じく wgbind.BatchOne に
-// 通すが、Windows の StdNetBind は BatchSize が 1 なので包まれず、そのまま device に渡る
-// (設計文書 7 節の「WireGuard の受信の 1 回の件数」)。
+// New は wireguard-go の device に渡す UDP のバインドを作る。Windows でだけ conn.NewDefaultBind() の
+// 既定(Registered I/O を使う WinRingBind)を避け、conn.NewStdNetBind() を明示して使う。他の OS と
+// 同じく BatchOne に通すが、Windows の StdNetBind は BatchSize が 1 なので包まれず、そのまま device
+// に渡る(設計文書 7 節の「WireGuard の受信の 1 回の件数」)。
 //
 // WinRingBind は Winsock のソケットを自前で開き、SIO_UDP_CONNRESET を無効にしない。
 // このため、到達できない宛先へ送った UDP に対して Windows 自身のスタックが生成する
@@ -32,8 +31,10 @@ import (
 // 自前のリングバッファと Go の netpoller 経由の UDP ソケットとの間の、パケットごとの
 // syscall や I/O 完了通知のオーバーヘッドであり、その大きさは未測定である。
 //
-// tunnel と internal/dataplane/userspace/utun は同じ理由でこの対を複製している。
-// 5 行程度のこの選択のためだけに新しい package を設ける実利は無いため、共有はしない。
-func newBind() conn.Bind {
-	return wgbind.BatchOne(conn.NewStdNetBind())
+// エージェントのトンネル(internal/dataplane/userspace/tunnel)と vpsd のユーザー空間モードの
+// トンネル(internal/dataplane/userspace/utun)は、どちらもこの関数でバインドを作る。vpsd 自体は
+// Linux でしか動かないが、この package と utun は CI の windows-test がビルドと単体テストの対象に
+// している。
+func New() conn.Bind {
+	return BatchOne(conn.NewStdNetBind())
 }
