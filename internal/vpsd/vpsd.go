@@ -13,12 +13,12 @@
 //   - agent_backend.go: 登録(agentapi.Backend)と stream(stream.Backend)の実装
 //   - watch.go: 窃取検知(IP の食い違いと往復。仕様 5.2 節)
 //   - startup.go: サーバ鍵、環境の読み取り、ip_forward
-//   - tailnet.go: --admin-tailscale の待ち受け(インタフェースへの縛り、接続元の検査、作り直しの見張り)
+//
+// --admin-tailscale の待ち受けは下位の package internal/vpsd/tailnet が持つ。
 package vpsd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/rahanahu/wgft/internal/dataplane"
@@ -36,14 +36,13 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd/servercheck"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/internal/vpsd/stream"
+	"github.com/rahanahu/wgft/internal/vpsd/tailnet"
 	"github.com/rahanahu/wgft/internal/vpsd/teardown"
 	"github.com/rahanahu/wgft/proto"
 	"log"
 	"net"
 	"net/netip"
-	"os/exec"
 	"os/signal"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -51,133 +50,6 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
-
-// adminTailscalePort は --admin-tailscale での待ち受けポート(TCP)。
-const adminTailscalePort = "8686"
-
-// ifaceAddrs はネットワークインタフェース 1 つぶんの名前とアドレス一覧。
-// pickTailscaleAddr を実際のインタフェースなしに単体テストするための型。
-type ifaceAddrs struct {
-	name  string
-	addrs []net.Addr
-}
-
-// pickTailscaleAddr は、名前が "tailscale" で始まるインタフェースにある
-// 100.64.0.0/10 の最初の IPv4 アドレスを選ぶ(iface, ip)。
-// CGNAT 帯は Tailscale 専用ではなく VPS 事業者の内部網にも使われ得るため、
-// インタフェース名で絞る(仕様 11 節)。該当がないとき、CGNAT アドレスを
-// 持つ他のインタフェースがあれば、その名前を other に入れる(なければ空)。
-func pickTailscaleAddr(ifaces []ifaceAddrs) (iface, ip string, other string) {
-	cgnat := netip.MustParsePrefix("100.64.0.0/10")
-	firstCGNAT := func(f ifaceAddrs) (string, bool) {
-		for _, a := range f.addrs {
-			ipn, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			addr, ok := netip.AddrFromSlice(ipn.IP)
-			if !ok {
-				continue
-			}
-			addr = addr.Unmap()
-			if addr.Is4() && cgnat.Contains(addr) {
-				return addr.String(), true
-			}
-		}
-		return "", false
-	}
-	for _, f := range ifaces {
-		if !strings.HasPrefix(f.name, "tailscale") {
-			continue
-		}
-		if a, ok := firstCGNAT(f); ok {
-			return f.name, a, ""
-		}
-	}
-	for _, f := range ifaces {
-		if strings.HasPrefix(f.name, "tailscale") {
-			continue
-		}
-		if _, ok := firstCGNAT(f); ok {
-			return "", "", f.name
-		}
-	}
-	return "", "", ""
-}
-
-// tailscaleIP は稼働中のインタフェースから pickTailscaleAddr で選んだ結果を返す。
-func tailscaleIP() (iface, ip, other string) {
-	ifs, err := net.Interfaces()
-	if err != nil {
-		return "", "", ""
-	}
-	list := make([]ifaceAddrs, 0, len(ifs))
-	for _, i := range ifs {
-		addrs, err := i.Addrs()
-		if err != nil {
-			continue
-		}
-		list = append(list, ifaceAddrs{name: i.Name, addrs: addrs})
-	}
-	return pickTailscaleAddr(list)
-}
-
-// tailscaleStatusSelf は `tailscale status --json` の出力のうち使う部分だけ。
-type tailscaleStatusSelf struct {
-	Self struct {
-		TailscaleIPs []string `json:"TailscaleIPs"`
-		DNSName      string   `json:"DNSName"`
-	} `json:"Self"`
-}
-
-// parseTailscaleStatus は `tailscale status --json` の出力から、Self.TailscaleIPs の
-// 最初の IPv4 アドレスと Self.DNSName(MagicDNS 名。末尾のドットを外す)を取り出す。
-// IPv4 のアドレスが 1 つもなければ ok は偽。
-func parseTailscaleStatus(data []byte) (ip, dnsName string, ok bool) {
-	var st tailscaleStatusSelf
-	if err := json.Unmarshal(data, &st); err != nil {
-		return "", "", false
-	}
-	for _, s := range st.Self.TailscaleIPs {
-		addr, err := netip.ParseAddr(s)
-		if err != nil || !addr.Is4() {
-			continue
-		}
-		return addr.String(), strings.TrimSuffix(st.Self.DNSName, "."), true
-	}
-	return "", "", false
-}
-
-// runTailscaleStatus は `tailscale status --json` を実行し、その標準出力を返す。
-// tailscale コマンドが PATH になければ、それも失敗として err に返る。
-func runTailscaleStatus(ctx context.Context) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	return exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
-}
-
-// detectAdminTailscale は --admin-tailscale の待ち受け先を選ぶ。
-// まず `tailscale status --json` の Self から選び、コマンドがない・失敗する・
-// 使えるアドレスがないときは、tailscale で始まる名前のインタフェースから選ぶ
-// (tailscaleIP、仕様 11 節)。detail はログに添える出どころの説明。
-// どちらからも選べず、CGNAT アドレスを持つ他のインタフェースがあれば other に入れる。
-// fromStatus は選んだアドレスが `tailscale status` の答えであることを表す。偽なら dnsName は分からない。
-func detectAdminTailscale(ctx context.Context) (ip, dnsName, detail, other string, fromStatus bool) {
-	if out, err := runTailscaleStatus(ctx); err == nil {
-		if sip, sdns, ok := parseTailscaleStatus(out); ok {
-			d := "from tailscale status"
-			if sdns != "" {
-				d = sdns + ", from tailscale status"
-			}
-			return sip, sdns, d, "", true
-		}
-	}
-	iface, iip, iother := tailscaleIP()
-	if iip != "" {
-		return iip, "", "from interface " + iface, "", false
-	}
-	return "", "", "", iother, false
-}
 
 // Options は vpsd の起動オプション。
 type Options struct {
@@ -562,35 +434,9 @@ func (d *Daemon) listenAdmin(ctx context.Context, errc chan<- error) error {
 	srv := admin.New(d)
 	srv.AllowedHosts = append(srv.AllowedHosts, d.opts.AdminHost...)
 	if d.opts.AdminTailscale {
-		if ip, dnsName, detail, other, _ := detectAdminTailscale(ctx); ip != "" {
-			tsAddr := net.JoinHostPort(ip, adminTailscalePort)
-			tsLn, iface, err := listenTailnet(ctx, ip, adminTailscalePort)
-			if err != nil {
-				return fmt.Errorf("admin API tailscale: %w", err)
-			}
-			srv.SetTailnetHosts(tailnetHosts(ip, dnsName))
-			log.Printf("also listening for the admin API on Tailscale %s, %s; bound to interface %s index %d and accepting tailnet sources only", tsAddr, detail, iface.name, iface.index)
-			ta := &tailnetAdmin{
-				port:     adminTailscalePort,
-				interval: tailnetWatchInterval,
-				links:    hostLinks{},
-				detect: func(ctx context.Context) (string, string, string, bool) {
-					ip, dnsName, detail, _, fromStatus := detectAdminTailscale(ctx)
-					return ip, dnsName, detail, fromStatus
-				},
-				listen:   listenTailnet,
-				serve:    func(ln net.Listener) error { return admin.ServeListener(ln, srv) },
-				setHosts: srv.SetTailnetHosts,
-				errc:     errc,
-			}
-			addr, _ := netip.ParseAddr(ip)
-			ta.dnsName = dnsName
-			ta.start(tsLn, addr.Unmap(), iface)
-			go ta.run(ctx)
-		} else if other != "" {
-			log.Printf("warning: --admin-tailscale set but %s has a 100.64.0.0/10 address and is not a Tailscale interface; the admin API is NOT listening there", other)
-		} else {
-			log.Printf("warning: --admin-tailscale set but no tailnet address within 100.64.0.0/10 found")
+		serve := func(ln net.Listener) error { return admin.ServeListener(ln, srv) }
+		if err := tailnet.ListenAdmin(ctx, serve, srv.SetTailnetHosts, errc); err != nil {
+			return err
 		}
 	}
 	adminLn, err := admin.Listen(d.opts.AdminAddr, true)
