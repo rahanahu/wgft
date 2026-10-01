@@ -189,13 +189,13 @@ func (rt *runtime) rotateKey() (wgtypes.Key, error) {
 
 // RotateKey は CLI から呼ぶ。稼働中なら制御ソケット経由で、停止中なら認証情報ファイルの鍵と last_state を直接消す。
 func RotateKey(path string) (string, error) {
-	// 判定とロックの取り方は lockWhileStopped にある。判定はロックファイルを作らない Inspect で行う
+	// 判定とロックの取り方は credentials.LockWhileStopped にある。判定はロックファイルを作らない Inspect で行う
 	// (設計 10.2c 節)。Acquire 経由の判定は、ロックファイルの無いデータディレクトリで rotate-key を
 	// 打っただけで、呼び出し元の権限のロックファイルを残し、後から非特権で動くエージェントの起動を塞いだ。
 	// ロックファイルがあって誰も持っていなければ、ロックを取ってから書き換える。取らないと、判定の後に
 	// 起動したエージェントが書いた記録(カーネルモードへの切り替えの記録など)を、この書き換えが古い
 	// 内容で上書きしうる(仕様 9 節)
-	release, running, err := lockWhileStopped(path)
+	release, running, err := credentials.LockWhileStopped(path, inspectLock)
 	if err != nil {
 		return "", err
 	}

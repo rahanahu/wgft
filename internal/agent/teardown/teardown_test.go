@@ -1,4 +1,4 @@
-package agent
+package teardown
 
 import (
 	"bytes"
@@ -240,10 +240,8 @@ func TestTeardownRemovesWhatTheKeysOwn(t *testing.T) {
 	if strings.Contains(out, "wg-other") {
 		t.Errorf("output names an interface that is not the agent's and not under its names:\n%s", out)
 	}
-	// ユーザー空間モードで起動し直せる。関門は記録だけを見る
-	if _, err := enterMode(after, "", path); err != nil {
-		t.Errorf("the mode gate still refuses after teardown: %v", err)
-	}
+	// ユーザー空間モードで起動し直せる。関門は記録だけを見るので、上でモードの記録が空であることを確かめた。
+	// 撤去が残す形の agent.json を関門が通すことは、internal/agent の TestEnterMode が確かめる
 }
 
 // 稼働中のエージェントには何もせずに拒否する。ロックの状態を読めない場合も同じ(設計文書 10.3 節)。

@@ -1,12 +1,12 @@
-package agent
-
-// 撤去(wgft agent teardown、設計文書 10.3 節)。停止したカーネルモードのエージェントが残した資源を消す。
+// Package teardown は撤去(wgft agent teardown、設計文書 10.3 節)。停止したカーネルモードのエージェントが残した資源を消す。
 // 消すのは、今の鍵か 1 つ前の鍵を持つ WireGuard インタフェース、wgft が DNAT した conntrack のエントリ、
 // table inet wgft_agent、agent.json のカーネルモードの記録である。登録の情報、今の鍵、last_state は残し、
 // 撤去の後にユーザー空間モードで起動し直せるようにする。
 //
-// 判定と順序はこのファイルが持ち、カーネルに触れる操作は teardownOps に分けてある。Linux の操作は
+// 判定と順序は teardown.go が持ち、カーネルに触れる操作は teardownOps に分けてある。Linux の操作は
 // teardown_linux.go にある。Linux 以外では入口(cmd/wgft)が先に拒むので、ここには届かない。
+// エージェントの実行時の状態(internal/agent)には依存しない。
+package teardown
 
 import (
 	"encoding/json"

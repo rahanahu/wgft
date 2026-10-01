@@ -264,3 +264,30 @@ func TestVpsdSubpackagesDoNotImportVpsd(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentSubpackagesDoNotImportAgent checks design.md 7a.7 節's rule that internal/agent's own
+// sub-packages (credentials, allowtargets, teardown, ...) never import internal/agent itself, the
+// same rule TestVpsdSubpackagesDoNotImportVpsd checks for the server: the agent's runtime lives in
+// internal/agent and uses its sub-packages, so an upward import is either an import cycle or ties a
+// one-shot command such as agent teardown to the runtime it is meant to stay apart from.
+func TestAgentSubpackagesDoNotImportAgent(t *testing.T) {
+	root := moduleRoot(t)
+	const agent = module + "/internal/agent"
+	pkgs := packagesUnder(t, root, "internal/agent")
+	var sub []string
+	for _, pkg := range pkgs {
+		if pkg != agent {
+			sub = append(sub, pkg)
+		}
+	}
+	if len(sub) == 0 {
+		t.Fatalf("found no sub-packages under internal/agent (only %v); did they move?", pkgs)
+	}
+	for _, pkg := range sub {
+		for _, dep := range deps(t, root, pkg) {
+			if dep == agent {
+				t.Errorf("%s imports %s (design.md 7a.7 節: an agent sub-package must not import agent itself)", pkg, dep)
+			}
+		}
+	}
+}
