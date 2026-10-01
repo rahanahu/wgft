@@ -279,3 +279,156 @@ func TestV8DatabaseIsNewerForV7Binary(t *testing.T) {
 		t.Fatal("OpenReadOnly with 7 migrations must refuse a version 8 database")
 	}
 }
+
+// insertWarningAt は created_at を指定して警告の行を直接入れる。上限の前の版で増えた行を持つ
+// データベースを再現するために使う。
+func insertWarningAt(t *testing.T, s *Store, agent, kind, detail string, at int64) {
+	t.Helper()
+	if _, err := s.db.Exec("INSERT INTO warnings (agent, kind, detail, created_at) VALUES (?, ?, ?, ?)",
+		agent, kind, detail, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func warningDetails(t *testing.T, s *Store, agent, kind string) map[string]bool {
+	t.Helper()
+	ws, err := s.AgentWarnings(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	for _, w := range ws {
+		if w.Agent != agent {
+			t.Fatalf("AgentWarnings(%q) returned a row of %q", agent, w.Agent)
+		}
+		if w.Kind == kind {
+			out[w.Detail] = true
+		}
+	}
+	return out
+}
+
+func flapDetail(i int) string {
+	return fmt.Sprintf("wg endpoint alternated between 198.51.100.%d and 203.0.113.9", i)
+}
+
+// ip-flapping の行は、エージェントごとに MaxFlappingWarnings 行までに絞る(仕様 5.2 節)。上限を
+// 超えた行を持つ既存のデータベースは、次の記録で、いま記録した行と日時の新しい行だけになる。
+// 上限に達した後も新しい往復は記録され、ほかのエージェントとほかの種類の行は減らない。
+func TestFlappingWarningsKeepNewestPerAgent(t *testing.T) {
+	s := openTemp(t)
+	const extra = 10
+	base := time.Now().Unix() - 100000
+	for i := 0; i < MaxFlappingWarnings+extra; i++ {
+		insertWarningAt(t, s, "home", WarnIPFlapping, flapDetail(i), base+int64(i))
+		insertWarningAt(t, s, "home", WarnIPMismatch, IPMismatchDetail(fmt.Sprintf("198.51.100.%d", i), "203.0.113.9"), base+int64(i))
+		insertWarningAt(t, s, "other", WarnIPFlapping, flapDetail(i), base+int64(i))
+	}
+
+	if err := s.AddWarning("home", WarnIPFlapping, "stream alternated between 192.0.2.1 and 192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+	got := warningDetails(t, s, "home", WarnIPFlapping)
+	if len(got) != MaxFlappingWarnings {
+		t.Fatalf("home ip-flapping rows = %d, want %d", len(got), MaxFlappingWarnings)
+	}
+	if !got["stream alternated between 192.0.2.1 and 192.0.2.2"] {
+		t.Error("the warning just recorded must be kept")
+	}
+	// 残るのは古い行のうち新しい MaxFlappingWarnings-1 行。
+	for i := 0; i < MaxFlappingWarnings+extra; i++ {
+		want := i >= extra+1
+		if got[flapDetail(i)] != want {
+			t.Errorf("legacy row %d kept = %v, want %v", i, got[flapDetail(i)], want)
+		}
+	}
+	if n := len(warningDetails(t, s, "home", WarnIPMismatch)); n != MaxFlappingWarnings+extra {
+		t.Errorf("home ip-mismatch rows = %d, want %d untouched", n, MaxFlappingWarnings+extra)
+	}
+	if n := len(warningDetails(t, s, "other", WarnIPFlapping)); n != MaxFlappingWarnings+extra {
+		t.Errorf("other agent's ip-flapping rows = %d, want %d untouched", n, MaxFlappingWarnings+extra)
+	}
+	// ip-mismatch は上限の対象ではない。上限を超えていても、記録で行は減らない。
+	if err := s.AddWarning("home", WarnIPMismatch, IPMismatchDetail("192.0.2.1", "203.0.113.9")); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(warningDetails(t, s, "home", WarnIPMismatch)); n != MaxFlappingWarnings+extra+1 {
+		t.Errorf("home ip-mismatch rows after recording one = %d, want %d", n, MaxFlappingWarnings+extra+1)
+	}
+
+	// 上限に達した後も検知は止まらない。新しい組は記録され、最も古い行が消える。
+	if err := s.AddWarning("home", WarnIPFlapping, "stream alternated between 192.0.2.3 and 192.0.2.4"); err != nil {
+		t.Fatal(err)
+	}
+	got = warningDetails(t, s, "home", WarnIPFlapping)
+	if len(got) != MaxFlappingWarnings || !got["stream alternated between 192.0.2.3 and 192.0.2.4"] ||
+		!got["stream alternated between 192.0.2.1 and 192.0.2.2"] || got[flapDetail(extra+1)] {
+		t.Errorf("after a second new pair: %d rows, new=%v previous=%v oldest legacy kept=%v",
+			len(got), got["stream alternated between 192.0.2.3 and 192.0.2.4"],
+			got["stream alternated between 192.0.2.1 and 192.0.2.2"], got[flapDetail(extra+1)])
+	}
+
+	// 既にある組の再検出は時刻を更新するだけで、行を増やさず、その行を最も新しい側に移す。
+	if err := s.AddWarning("home", WarnIPFlapping, flapDetail(extra+2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddWarning("home", WarnIPFlapping, "stream alternated between 192.0.2.5 and 192.0.2.6"); err != nil {
+		t.Fatal(err)
+	}
+	got = warningDetails(t, s, "home", WarnIPFlapping)
+	if len(got) != MaxFlappingWarnings || !got[flapDetail(extra+2)] || got[flapDetail(extra+3)] {
+		t.Errorf("after re-detecting row %d: %d rows, re-detected kept=%v next oldest kept=%v",
+			extra+2, len(got), got[flapDetail(extra+2)], got[flapDetail(extra+3)])
+	}
+}
+
+// 時計が戻って既存の行の日時が未来にあっても、いま記録した往復は残る。
+func TestFlappingWarningCapKeepsNewRecordWhenClockWentBack(t *testing.T) {
+	s := openTemp(t)
+	future := time.Now().Unix() + 100000
+	for i := 0; i < MaxFlappingWarnings; i++ {
+		insertWarningAt(t, s, "home", WarnIPFlapping, flapDetail(i), future+int64(i))
+	}
+	if err := s.AddWarning("home", WarnIPFlapping, "stream alternated between 192.0.2.1 and 192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+	got := warningDetails(t, s, "home", WarnIPFlapping)
+	if len(got) != MaxFlappingWarnings || !got["stream alternated between 192.0.2.1 and 192.0.2.2"] || got[flapDetail(0)] {
+		t.Errorf("rows = %d, new kept = %v, oldest kept = %v", len(got),
+			got["stream alternated between 192.0.2.1 and 192.0.2.2"], got[flapDetail(0)])
+	}
+}
+
+// AgentWarnings はそのエージェントの行だけを、新しい順に返す。
+func TestAgentWarningsReturnsOnlyThatAgentNewestFirst(t *testing.T) {
+	s := openTemp(t)
+	insertWarningAt(t, s, "home", WarnIPFlapping, flapDetail(1), 100)
+	insertWarningAt(t, s, "other", WarnIPFlapping, flapDetail(2), 300)
+	insertWarningAt(t, s, "home", WarnIPMismatch, IPMismatchDetail("198.51.100.7", "203.0.113.9"), 200)
+	ws, err := s.AgentWarnings("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ws) != 2 || ws[0].Kind != WarnIPMismatch || ws[1].Kind != WarnIPFlapping ||
+		ws[0].CreatedAt.Unix() != 200 || ws[1].CreatedAt.Unix() != 100 {
+		t.Errorf("AgentWarnings(home) = %+v", ws)
+	}
+}
+
+// 最後に検出した日時が同じ秒の行どうしでは、後から記録した行を新しいものとして残す。
+func TestFlappingWarningCapBreaksTiesByInsertionOrder(t *testing.T) {
+	s := openTemp(t)
+	at := time.Now().Unix() - 100
+	for i := 0; i < MaxFlappingWarnings+5; i++ {
+		insertWarningAt(t, s, "home", WarnIPFlapping, flapDetail(i), at)
+	}
+	if err := s.AddWarning("home", WarnIPFlapping, "stream alternated between 192.0.2.1 and 192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+	got := warningDetails(t, s, "home", WarnIPFlapping)
+	for i := 0; i < MaxFlappingWarnings+5; i++ {
+		if want := i >= 6; got[flapDetail(i)] != want {
+			t.Errorf("row %d inserted at the same second kept = %v, want %v", i, got[flapDetail(i)], want)
+		}
+	}
+}
