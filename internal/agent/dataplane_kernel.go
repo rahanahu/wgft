@@ -112,7 +112,7 @@ const (
 // table inet wgft_agent を宣言へ収束させる。エージェントのプロセスはパケットを中継しない。Close はカーネルの
 // 資源を消さないので、停止の間も転送は続く(7b.4 節)。
 //
-// どのメソッドも、runtime が rt.mu を持った状態で呼ぶ(dataplane.go)。f は runtime と共有する認証情報
+// どのメソッドも、runtime が rt.mu を持った状態で呼ぶ(agentdp.Dataplane)。f は runtime と共有する認証情報
 // ファイルで、ApplyRules が公開の記録を書き込み、runtime が last_state と同じ 1 回の保存で書き出す。
 type kernelDataplane struct {
 	ops   kernelOps

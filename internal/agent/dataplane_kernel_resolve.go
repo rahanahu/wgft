@@ -26,7 +26,7 @@ func (d *kernelDataplane) cachedEndpoint() netip.AddrPort {
 	return d.endpoint
 }
 
-// kernelPrepared は、rt.mu の外で行った名前の解決の結果である(prepareApply)。
+// kernelPrepared は、rt.mu の外で行った名前の解決の結果である(PrepareApply)。
 type kernelPrepared struct {
 	// endpoint は、エンドポイントを引いたときの結果である。引かなかったら tried が偽である
 	tried      bool
@@ -107,7 +107,7 @@ func resolveTargets(ctx context.Context, rules []proto.AgentRule, lookup nft.Loo
 	})
 }
 
-// useEndpoint は、prepareApply で引いたエンドポイントを控えに入れる。引けなかったら、控えたアドレスを
+// useEndpoint は、PrepareApply で引いたエンドポイントを控えに入れる。引けなかったら、控えたアドレスを
 // 使い続け、理由が変わったときだけ 1 行出す。
 func (d *kernelDataplane) useEndpoint(p *kernelPrepared) {
 	if !p.tried {

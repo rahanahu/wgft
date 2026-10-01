@@ -74,6 +74,10 @@ func (d *fakeDataplane) Read() agentdp.Reading {
 // ここで固定する。
 var _ agentdp.Preparer = (*fakeDataplane)(nil)
 
+// 通知の後の見直しを確かめる偽物も、agentdp.Sensed を型アサーションで探される。形がずれると、
+// 通知を待つ試験が待ちの期限まで待ってから落ちるので、ここで固定する。
+var _ agentdp.Sensed = (*fakeSensedDataplane)(nil)
+
 func newFakeDataplaneRuntime(t *testing.T, dp *fakeDataplane) *runtime {
 	t.Helper()
 	priv, err := wgtypes.GeneratePrivateKey()
