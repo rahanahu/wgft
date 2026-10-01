@@ -1,11 +1,13 @@
-// Package reconcile holds the transaction skeleton shared by the server and the agent (design.md
-// 7a.2, 7a.3, 7a.7 節): the frontend participant interface, the Runtime, which binds one frontend
-// participant and one dataplane participant in a fixed order, and the Reconciler, which drives the
-// Runtime and keeps the Active state and the generations.
+// Package reconcile holds the server's transaction skeleton (design.md 7a.2, 7a.3, 7a.7 節): the
+// frontend participant interface, the Runtime, which binds one frontend participant and one
+// dataplane participant in a fixed order, and the Reconciler, which drives the Runtime and keeps
+// the Active state and the generations.
 //
 // It depends only on internal/planner (the Plan), internal/policy and internal/dataplane (the
-// participant interface), never on a concrete frontend or dataplane implementation. The control
-// plane (vpsd, later the agent) assembles a Runtime from implementations at startup.
+// participant interface), never on a concrete frontend or dataplane implementation. The server's
+// control plane (vpsd) assembles a Runtime from implementations at startup. The agent does not use
+// the Runtime or the Reconciler (design.md 7a.8 節); it uses this package's Watch, DefaultTriggers,
+// DefaultBackoff and RetryGate.
 package reconcile
 
 import (

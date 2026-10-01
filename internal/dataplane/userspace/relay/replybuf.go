@@ -24,7 +24,7 @@ type replyPool struct {
 	slots chan struct{} // 空きの枠 1 つにつき値 1 つ
 	bufs  sync.Pool
 
-	// 待ちの観測。ログにも status にも出さず、試験とラボから読む(設計文書 7 節)
+	// 待ちの観測。ログにも status にも出さず、読むのは単体試験だけである(設計文書 7 節)
 	waits     atomic.Uint64 // 枠が無くて待った回数(取り消された待ちを含む)
 	cancelled atomic.Uint64 // 待ちのうち、セッションの終了で取り消された回数
 	waitNanos atomic.Int64  // 枠を得た待ちの時間の合計。取り消された待ちは含めない

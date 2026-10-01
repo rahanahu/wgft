@@ -140,9 +140,8 @@ func packagesUnder(t *testing.T, root, dir string) []string {
 //   - a dataplane implementation (userspace, linuxkernel, and their subpackages: nft, wg, conntrack,
 //     relay, utun, ...) imports no other dataplane implementation.
 //
-// The walk is generic over the implementation directories under internal/dataplane, so a future
-// implementation (e.g. the agent's kernel backend reusing linuxkernel, design.md 7a.8 節 Phase 7)
-// is checked without editing this test; the explicit count below only guards against the walk
+// The walk is generic over the implementation directories under internal/dataplane, so a new
+// implementation directory is checked without editing this test; the explicit count below only guards against the walk
 // silently covering zero packages if internal/dataplane's layout changes.
 func TestDependencyDirection(t *testing.T) {
 	root := moduleRoot(t)

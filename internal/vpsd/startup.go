@@ -52,8 +52,8 @@ func readNFTVersion() string {
 }
 
 // EnableIPForward は net.ipv4.ip_forward を確認し、1 でなければ 1 にする(仕様 6.1 節)。実際の
-// 読み書きは internal/platform/linux.EnableIPForward が持つ(agent の kernel backend でも使う
-// ため。設計文書 7a.7 節)。すでに 1 なら何も書かない。書けなくても落ちず、警告して続ける。
+// 読み書きは internal/platform/linux.EnableIPForward が持つ(その部品の ReadIPForward と
+// WriteIPForward は agent の kernel backend も使う。設計文書 7a.7 節)。すでに 1 なら何も書かない。書けなくても落ちず、警告して続ける。
 // 1 にした値は 0 に戻さない。0→1 にしたときは meta に日時を残し、撤去(teardown)で戻す候補として
 // 示せるようにする(この記録は store を知らない platform/linux の役目ではなく、ここで行う)。
 // 書き込みに失敗したときは、他テーブルの policy drop と同じ流儀の Finding を返す。
