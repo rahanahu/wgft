@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/rahanahu/wgft/internal/agent/enroll"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -245,7 +246,7 @@ func TestCapsWhileFreshClassifiesTheDisconnect(t *testing.T) {
 		{"no shared protocol version", closeErr(websocket.StatusCode(proto.CloseProtocolMismatch)), false},
 		{"the server selected a version outside the agent's range", versionErr, false},
 		{"the server selected version 0", zeroErr, false},
-		{"certificate pin mismatch", fmt.Errorf("dial: %w", ErrPinMismatch), false},
+		{"certificate pin mismatch", fmt.Errorf("dial: %w", enroll.ErrPinMismatch), false},
 		{"public key belongs to another agent", closeErr(websocket.StatusPolicyViolation), false},
 
 		{"connection refused", errors.New("dial tcp 203.0.113.1:8443: connect: connection refused"), true},

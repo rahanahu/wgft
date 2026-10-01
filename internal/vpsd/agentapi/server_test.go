@@ -549,7 +549,7 @@ func TestHandshakeErrorNamesAPinnedAgent(t *testing.T) {
 	srv := newHTTPServer("", http.NotFoundHandler(), &tls.Config{Certificates: []tls.Certificate{cert}}, defaultTimeouts)
 	go srv.ServeTLS(ln, "", "")
 	defer srv.Close()
-	// internal/agent の PinnedClient と同じく、固定したハッシュに合わない証明書を VerifyConnection で拒む。
+	// internal/agent/enroll の PinnedClient と同じく、固定したハッシュに合わない証明書を VerifyConnection で拒む。
 	_, err = tls.Dial("tcp", ln.Addr().String(), &tls.Config{
 		InsecureSkipVerify: true,
 		VerifyConnection:   func(tls.ConnectionState) error { return errors.New("pin mismatch") },

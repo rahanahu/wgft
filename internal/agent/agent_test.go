@@ -24,6 +24,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/enroll"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
@@ -130,7 +131,7 @@ func TestEnsureRegisteredKeepsStoredNameOnMismatch(t *testing.T) {
 // is conflict, since only an operator issuing a new join string clears it.
 func TestEnsureRegisteredJoinFailuresAreRefusals(t *testing.T) {
 	_, usedJoin := newTestRegisterServer(t, "home")
-	usedJ, err := ParseJoin(usedJoin)
+	usedJ, err := enroll.ParseJoin(usedJoin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +168,7 @@ func TestStreamOnceReportsPinMismatch(t *testing.T) {
 		PermanentToken: "OLD",
 	}}
 	err := rt.streamOnce(context.Background())
-	if !errors.Is(err, ErrPinMismatch) {
+	if !errors.Is(err, enroll.ErrPinMismatch) {
 		t.Fatalf("streamOnce = %v, want ErrPinMismatch", err)
 	}
 }
@@ -175,7 +176,7 @@ func TestStreamOnceReportsPinMismatch(t *testing.T) {
 // ピンの不一致からの再登録に使うのは、未使用でピンの違う接続文字列だけ。
 func TestJoinForNewPin(t *testing.T) {
 	_, join := newTestRegisterServer(t, "home")
-	j, err := ParseJoin(join)
+	j, err := enroll.ParseJoin(join)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +212,7 @@ func TestRecoverReplacesPinAndToken(t *testing.T) {
 	if err := rt.recover(); err != nil {
 		t.Fatal(err)
 	}
-	j, _ := ParseJoin(join)
+	j, _ := enroll.ParseJoin(join)
 	saved, err := credentials.Load(path)
 	if err != nil {
 		t.Fatal(err)

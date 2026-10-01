@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/agent/enroll"
 )
 
 // 制御ストリームの観測の試験(設計文書 10.2c 節)。前半は記録そのものを直接動かし、後半は
@@ -281,7 +283,7 @@ func TestStreamLoopRecordsThePingAndThePong(t *testing.T) {
 func TestStreamObservationMarksAPinMismatch(t *testing.T) {
 	rt := &runtime{dp: newTestUserspace()}
 	now := time.Now()
-	rt.noteStreamDisconnected(now, fmt.Errorf("failed to WebSocket dial: %w", fmt.Errorf("%w: got sha256 0a1b2c3d", ErrPinMismatch)))
+	rt.noteStreamDisconnected(now, fmt.Errorf("failed to WebSocket dial: %w", fmt.Errorf("%w: got sha256 0a1b2c3d", enroll.ErrPinMismatch)))
 	if obs := rt.streamStatus(); !obs.PinMismatch {
 		t.Errorf("a wrapped pin mismatch was not marked: %+v", obs)
 	}
