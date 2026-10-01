@@ -33,6 +33,7 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/agentapi"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
+	"github.com/rahanahu/wgft/internal/vpsd/servercheck"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/internal/vpsd/stream"
 	"github.com/rahanahu/wgft/proto"
@@ -404,9 +405,9 @@ func Run(opts Options) error {
 	// 自分の待ち受けポート(WireGuard の UDP と agent API の TCP)も、同じ input firewall の検査に
 	// 含める(仕様 4・6.1 節。実機の Debian 13 で見つかった。改訂の記録参照)。proxyInputHints と
 	// 同じく、読めなければ黙って省く(非 root や、userspace モードで nftables が無い場合)
-	for _, t := range ownPortTargets(opts) {
-		if lines, err := d.dp.InputPortSuggestions(proto.PortRange{Lo: t.port, Hi: t.port}, t.proto); err == nil && len(lines) > 0 {
-			log.Printf("warning: input firewall blocks the %s port %d/%s; add the following:", t.purpose, t.port, t.proto)
+	for _, t := range servercheck.OwnPortTargets(opts.WGPort, opts.AgentAPIAddr) {
+		if lines, err := d.dp.InputPortSuggestions(proto.PortRange{Lo: t.Port, Hi: t.Port}, t.Proto); err == nil && len(lines) > 0 {
+			log.Printf("warning: input firewall blocks the %s port %d/%s; add the following:", t.Purpose, t.Port, t.Proto)
 			for _, l := range lines {
 				log.Printf("    %s", l)
 			}

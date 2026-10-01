@@ -238,6 +238,26 @@ func TestPolicyNftablesDoesNotImportGoogleNftables(t *testing.T) {
 	}
 }
 
+// TestVpsdServerCheckImportsOnlyTheStore checks design.md 7a.7 節's rule for
+// internal/vpsd/servercheck: `wgft server check` runs without starting the server and only reads
+// the server database, so of the packages under internal/vpsd it imports the store alone, never the
+// daemon nor the packages the running daemon serves through (admin, agentapi, stream, proxyrelay).
+func TestVpsdServerCheckImportsOnlyTheStore(t *testing.T) {
+	root := moduleRoot(t)
+	const vpsd = module + "/internal/vpsd"
+	pkgs := packagesUnder(t, root, "internal/vpsd/servercheck")
+	if len(pkgs) == 0 {
+		t.Fatal("found no package under internal/vpsd/servercheck; did it move?")
+	}
+	for _, pkg := range pkgs {
+		for _, dep := range deps(t, root, pkg) {
+			if (dep == vpsd || strings.HasPrefix(dep, vpsd+"/")) && dep != vpsd+"/store" {
+				t.Errorf("%s imports %s (design.md 7a.7 節: server check imports only internal/vpsd/store from internal/vpsd)", pkg, dep)
+			}
+		}
+	}
+}
+
 // TestVpsdSubpackagesDoNotImportVpsd checks design.md 7a.7 節's rule that internal/vpsd's own
 // sub-packages never import internal/vpsd itself: the daemon (internal/vpsd) implements the
 // sub-packages' interfaces (Backend and friends), so an upward import would defeat that and, for

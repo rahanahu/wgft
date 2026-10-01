@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/vpsd"
+	"github.com/rahanahu/wgft/internal/vpsd/servercheck"
 )
 
 // serverDataDirSetting は server のデータの置き場 WGFT_DATA_DIR である。run、check、teardown が
@@ -188,6 +189,18 @@ func validateListenAddr(env, val string, allowUnix bool) error {
 	return nil
 }
 
+// serverCheckOptions は server の設定から server check が読む項目を写す。
+func serverCheckOptions(o vpsd.Options) servercheck.Options {
+	return servercheck.Options{
+		DBPath:       o.DBPath,
+		WGInterface:  o.WGInterface,
+		WGPort:       o.WGPort,
+		WGAddress:    o.WGAddress,
+		AgentAPIAddr: o.AgentAPIAddr,
+		Mode:         o.Mode,
+	}
+}
+
 func newServerCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "server",
@@ -237,7 +250,7 @@ func newServerCmd() *cobra.Command {
 			c.print(os.Stdout)
 			applyMemoryLimit(os.Stdout, opts.Limits, false)
 			fmt.Println()
-			return vpsd.Check(opts, os.Stdout)
+			return servercheck.Check(serverCheckOptions(opts), os.Stdout)
 		},
 	}
 	registerServerFlags(check)
