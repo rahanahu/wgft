@@ -5,9 +5,11 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/rahanahu/wgft/internal/startup"
 )
@@ -21,12 +23,80 @@ var defaultConfigPath = joinPath(defaultConfigDir(), "server.env")
 
 // spec は 1 つの設定項目。Env は WGFT_ 名、Flag は同義のフラグ名、Default は既定の文字列表現。
 // Secret が真なら印字で伏せる。Slice はコンマ区切りの複数値。
+//
+// spec は設定の解決(resolveConfig)とフラグ別名の登録(registerSpecFlags)の両方の元である。
+// フラグの名前と既定値を spec から取って登録するので、2 つの名前と既定値は食い違わない。Kind は
+// フラグの型、Usage は --help に出すフラグの説明である。同じ設定項目でもコマンドによって説明が
+// 違うので、説明は withUsage で差し替える。
 type spec struct {
 	Env     string
 	Flag    string
 	Default string
 	Secret  bool
 	Slice   bool
+	Kind    flagKind
+	Usage   string
+}
+
+// flagKind は、設定項目のフラグ別名の型である。登録のとき、spec の Default をこの型の既定値に
+// する。
+type flagKind int
+
+const (
+	flagString      flagKind = iota // fl.String
+	flagInt                         // fl.Int。Default は 10 進の整数
+	flagUint16                      // fl.Uint16。Default は 10 進の整数
+	flagBool                        // fl.Bool。Default は strconv.ParseBool が読む値
+	flagStringSlice                 // fl.StringSlice。Default は空で、nil を既定値にする
+)
+
+// specEnvAnnotation は、spec から登録したフラグに付ける注記の鍵である。値は spec の Env で、
+// テストが、どのフラグ別名も spec から登録されたことを確かめるために読む。--help には出ない。
+const specEnvAnnotation = "wgft_env"
+
+// withUsage は、Usage だけを差し替えた写しを返す。
+func (sp spec) withUsage(usage string) spec {
+	sp.Usage = usage
+	return sp
+}
+
+// registerSpecFlags は、specs のフラグ別名を fl に登録する。名前、既定値、型は spec から取る。
+// Default を Kind の型として読めない spec は作りの誤りなので、コマンドを組み立てる時点で panic する。
+func registerSpecFlags(fl *pflag.FlagSet, specs ...spec) {
+	for _, sp := range specs {
+		switch sp.Kind {
+		case flagString:
+			fl.String(sp.Flag, sp.Default, sp.Usage)
+		case flagInt:
+			n, err := strconv.Atoi(sp.Default)
+			if err != nil {
+				panic(fmt.Sprintf("setting %s: default %q is not an integer", sp.Env, sp.Default))
+			}
+			fl.Int(sp.Flag, n, sp.Usage)
+		case flagUint16:
+			n, err := strconv.ParseUint(sp.Default, 10, 16)
+			if err != nil {
+				panic(fmt.Sprintf("setting %s: default %q is not a 16-bit unsigned integer", sp.Env, sp.Default))
+			}
+			fl.Uint16(sp.Flag, uint16(n), sp.Usage)
+		case flagBool:
+			b, err := strconv.ParseBool(sp.Default)
+			if err != nil {
+				panic(fmt.Sprintf("setting %s: default %q is not a boolean", sp.Env, sp.Default))
+			}
+			fl.Bool(sp.Flag, b, sp.Usage)
+		case flagStringSlice:
+			if sp.Default != "" {
+				panic(fmt.Sprintf("setting %s: a list flag takes no default, not %q", sp.Env, sp.Default))
+			}
+			fl.StringSlice(sp.Flag, nil, sp.Usage)
+		default:
+			panic(fmt.Sprintf("setting %s: unknown flag kind %d", sp.Env, sp.Kind))
+		}
+		if err := fl.SetAnnotation(sp.Flag, specEnvAnnotation, []string{sp.Env}); err != nil {
+			panic(err)
+		}
+	}
 }
 
 // resolved は 1 項目の解決結果(値と出所)。

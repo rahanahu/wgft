@@ -320,10 +320,10 @@ func newAgentDoctorCmd() *cobra.Command {
 	}
 	fl := cmd.Flags()
 	fl.BoolVar(&asJSON, "json", false, "output as JSON; the stable diagnostic model of this command")
-	fl.String("data-dir", defaultDataDir(), "data dir, env WGFT_DATA_DIR; holds agent.json")
 	// フロー数の上限は、メモリのソフト上限の予測に要る。エージェントが読むのと同じ設定を同じ
-	// 経路で読まなければ、予測が当たらない。
-	registerLimitFlags(fl)
+	// 経路で読まなければ、予測が当たらない。設定は agent run と同じ agentSpecs で解決し、
+	// フラグ別名はそのうちこの 2 種類だけを登録する。
+	registerSpecFlags(fl, append([]spec{agentDataDirSpec()}, limitSpecs()...)...)
 	fl.String("config", agentConfigPath, "dotenv config file")
 	// フラグの誤りも、引数の数の誤りと同じく報告を作れなかった失敗である。
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return unavailable(err) })

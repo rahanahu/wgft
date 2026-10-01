@@ -7,8 +7,6 @@ import (
 	"runtime/debug"
 	"strconv"
 
-	"github.com/spf13/pflag"
-
 	"github.com/rahanahu/wgft/internal/policy"
 	"github.com/rahanahu/wgft/internal/resource"
 )
@@ -16,14 +14,11 @@ import (
 // limitSpecs は同時フロー数のプロセス全体の上限(仕様 7 節、11a 節)。server と agent が共有する。
 func limitSpecs() []spec {
 	return []spec{
-		{Env: "WGFT_MAX_UDP_FLOWS", Flag: "max-udp-flows", Default: strconv.Itoa(resource.UDPTotal)},
-		{Env: "WGFT_MAX_TCP_FLOWS", Flag: "max-tcp-flows", Default: strconv.Itoa(resource.TCPTotal)},
+		{Env: "WGFT_MAX_UDP_FLOWS", Flag: "max-udp-flows", Default: strconv.Itoa(resource.UDPTotal), Kind: flagInt,
+			Usage: "process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory"},
+		{Env: "WGFT_MAX_TCP_FLOWS", Flag: "max-tcp-flows", Default: strconv.Itoa(resource.TCPTotal), Kind: flagInt,
+			Usage: "process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory"},
 	}
-}
-
-func registerLimitFlags(fl *pflag.FlagSet) {
-	fl.Int("max-udp-flows", resource.UDPTotal, "process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS; lower it on hosts with little memory")
-	fl.Int("max-tcp-flows", resource.TCPTotal, "process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS; lower it on hosts with little memory")
 }
 
 // limitsFromConfig は設定値を読み、範囲を確かめる。
@@ -47,16 +42,11 @@ func limitsFromConfig(c *config) (resource.Limits, error) {
 // 接続元ごとに数えず、この設定を持たない。
 func perSourceLimitSpecs() []spec {
 	return []spec{
-		{Env: "WGFT_MAX_UDP_FLOWS_PER_SOURCE", Flag: "max-udp-flows-per-source", Default: strconv.Itoa(policy.UDPPerSource)},
-		{Env: "WGFT_MAX_TCP_FLOWS_PER_SOURCE", Flag: "max-tcp-flows-per-source", Default: strconv.Itoa(policy.TCPPerSource)},
+		{Env: "WGFT_MAX_UDP_FLOWS_PER_SOURCE", Flag: "max-udp-flows-per-source", Default: strconv.Itoa(policy.UDPPerSource), Kind: flagInt,
+			Usage: "cap on concurrent UDP sessions from one source address, summed over all rules, env WGFT_MAX_UDP_FLOWS_PER_SOURCE; 0 disables the per-source cap"},
+		{Env: "WGFT_MAX_TCP_FLOWS_PER_SOURCE", Flag: "max-tcp-flows-per-source", Default: strconv.Itoa(policy.TCPPerSource), Kind: flagInt,
+			Usage: "cap on concurrent TCP connections from one source address, summed over all rules, env WGFT_MAX_TCP_FLOWS_PER_SOURCE; 0 disables the per-source cap"},
 	}
-}
-
-func registerPerSourceLimitFlags(fl *pflag.FlagSet) {
-	fl.Int("max-udp-flows-per-source", policy.UDPPerSource,
-		"cap on concurrent UDP sessions from one source address, summed over all rules, env WGFT_MAX_UDP_FLOWS_PER_SOURCE; 0 disables the per-source cap")
-	fl.Int("max-tcp-flows-per-source", policy.TCPPerSource,
-		"cap on concurrent TCP connections from one source address, summed over all rules, env WGFT_MAX_TCP_FLOWS_PER_SOURCE; 0 disables the per-source cap")
 }
 
 // perSourceLimitsFromConfig reads and validates WGFT_MAX_*_FLOWS_PER_SOURCE. Unlike the
