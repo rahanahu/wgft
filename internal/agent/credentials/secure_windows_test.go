@@ -9,6 +9,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/rahanahu/wgft/internal/flock"
 	"golang.org/x/sys/windows"
 )
 
@@ -301,7 +302,7 @@ func TestAcquireSecuresLockFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Release()
-	assertProtectedTo3(t, LockPath(path))
+	assertProtectedTo3(t, flock.LockPath(path))
 }
 
 // TestSecureSocketAppliesProtectedDACL は、control.go が使う SecureSocket が、Windows では

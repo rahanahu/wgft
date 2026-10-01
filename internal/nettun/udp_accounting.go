@@ -76,7 +76,6 @@ type udpGeneration struct {
 	stats       *tcpip.TransportEndpointStats
 	fifo        []udpReservation
 	local       tcpip.FullAddress
-	remote      *tcpip.FullAddress
 	usedBytes   int // this generation's share of the Device usage, guarded by mu
 	usedPackets int
 }
@@ -135,14 +134,9 @@ func newUDPAccounting(dev *Device, local netip.Addr, maxBytes, maxPackets, fixed
 	return t
 }
 
-// attach registers the adapter as a new generation. A new adapter is a new
-// generation even if it binds the same tuple after a prior Close.
-func (t *udpAccounting) attach(c *rawUDPAdapter) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.attachLocked(c)
-}
-
+// attachLocked registers the adapter as a new generation; the caller holds
+// t.mu. A new adapter is a new generation even if it binds the same tuple
+// after a prior Close.
 func (t *udpAccounting) attachLocked(c *rawUDPAdapter) error {
 	if t.fault != nil {
 		return t.fault
@@ -162,10 +156,10 @@ func (t *udpAccounting) attachLocked(c *rawUDPAdapter) error {
 		return errors.New("UDP accounting does not permit duplicate local UDP ports")
 	}
 	g := &udpGeneration{stats: stats, local: local}
-	if remote, terr := c.ep.GetRemoteAddress(); terr == nil {
-		g.remote = &remote
-	} else if _, ok := terr.(*tcpip.ErrNotConnected); !ok {
-		return errors.New(terr.String())
+	if _, terr := c.ep.GetRemoteAddress(); terr != nil {
+		if _, ok := terr.(*tcpip.ErrNotConnected); !ok {
+			return errors.New(terr.String())
+		}
 	}
 	t.generations[c] = g
 	t.localPorts[local.Port] = c

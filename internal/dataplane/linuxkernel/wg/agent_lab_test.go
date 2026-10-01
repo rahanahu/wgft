@@ -858,3 +858,10 @@ func TestAgentKeylessLinkIsNotOursAndCreatesNoStaging(t *testing.T) {
 		t.Error("a staging link was created while the interface exists")
 	}
 }
+
+// AgentOwnership reads what the link named iface is to an agent holding current and previous
+// (design.md 7b.4 節). It changes nothing.
+func AgentOwnership(iface string, current, previous wgtypes.Key) (Ownership, error) {
+	own, _, _, err := readOwnership(iface, current, previous)
+	return own, err
+}

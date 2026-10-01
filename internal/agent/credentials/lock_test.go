@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/rahanahu/wgft/internal/flock"
 )
 
 // 同じプロセス内の flock は同じ open file description を共有しないので、別 open で取り直せば衝突する。
@@ -26,7 +28,7 @@ func TestLock(t *testing.T) {
 		t.Errorf("Inspect while held = %v, %v; want Locked", state, err)
 	}
 	// 別プロセスからも取れない
-	out, err := exec.Command("flock", "-n", LockPath(path), "true").CombinedOutput()
+	out, err := exec.Command("flock", "-n", flock.LockPath(path), "true").CombinedOutput()
 	if err == nil {
 		t.Errorf("external flock should fail while held: %s", out)
 	}
@@ -40,7 +42,7 @@ func TestLock(t *testing.T) {
 	} else {
 		defer again.Release() // TempDir の掃除が開いたハンドルで失敗しないように、放す
 	}
-	assertFileSecured(t, LockPath(path))
+	assertFileSecured(t, flock.LockPath(path))
 }
 
 // 一度も起動していないデータディレクトリでは、Inspect は Absent を返し、ロックファイルを作らない。
@@ -50,7 +52,7 @@ func TestInspectNeverStarted(t *testing.T) {
 	if err != nil || state != Absent {
 		t.Fatalf("Inspect = %v, %v; want Absent and no error", state, err)
 	}
-	if _, err := os.Stat(LockPath(path)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("os.Stat(%s) = %v; the lock file must not exist after Inspect", LockPath(path), err)
+	if _, err := os.Stat(flock.LockPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("os.Stat(%s) = %v; the lock file must not exist after Inspect", flock.LockPath(path), err)
 	}
 }

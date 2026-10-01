@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/rahanahu/wgft/internal/flock"
 )
 
 func writeLeftoverTestFile(t *testing.T, path string) {
@@ -53,7 +55,7 @@ func TestRemoveLeftoverTemps(t *testing.T) {
 	}
 	keep := []string{
 		path,
-		LockPath(path),
+		flock.LockPath(path),
 		filepath.Join(dir, "wgft-credentials-x"),   // 先頭の点が無い
 		filepath.Join(dir, ".wgft-credentials"),    // 接頭辞の途中まで
 		filepath.Join(dir, "x.wgft-credentials-y"), // 途中に含むだけ

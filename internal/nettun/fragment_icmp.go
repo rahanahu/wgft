@@ -18,21 +18,21 @@ import (
 // emitReassemblyTimeout and emitOptionParameterProblem take no lock. They
 // read the immutable local address and call the stack, whose ICMP output is
 // a nonblocking write into the finite channel queue.
-func (t *Device) emitReassemblyTimeout(n ipv4FragmentNotice) bool {
+func (t *Device) emitReassemblyTimeout(n ipv4FragmentNotice) {
 	if !n.HasFirst || n.QuoteLen < 28 {
-		return false
+		return
 	}
 	quote := n.Quote[:n.QuoteLen]
 	hlen := int(quote[0]&15) * 4
 	if hlen < 20 || hlen > 60 || len(quote) < hlen+8 || !ipv4ChecksumOK(quote[:hlen]) ||
 		quote[6]&0x1f != 0 || quote[7] != 0 ||
 		!bytes.Equal(quote[16:20], t.local.AsSlice()) {
-		return false
+		return
 	}
 	proto := t.stack.NetworkProtocolInstance(ipv4.ProtocolNumber)
 	handler, ok := proto.(interface{ OnReassemblyTimeout(*stack.PacketBuffer) })
 	if !ok {
-		return false
+		return
 	}
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(quote)})
 	defer pkt.DecRef()
@@ -40,40 +40,28 @@ func (t *Device) emitReassemblyTimeout(n ipv4FragmentNotice) bool {
 	pkt.NetworkProtocolNumber = header.IPv4ProtocolNumber
 	pkt.NetworkPacketInfo.LocalAddressBroadcast = bytes.Equal(quote[16:20], []byte{255, 255, 255, 255})
 	if _, ok := pkt.NetworkHeader().Consume(hlen); !ok {
-		return false
+		return
 	}
 	if quote[9] == uint8(header.ICMPv4ProtocolNumber) {
 		if _, ok := pkt.TransportHeader().Consume(8); !ok {
-			return false
+			return
 		}
 	}
 	handler.OnReassemblyTimeout(pkt)
-	return true
 }
-
-// The status is deliberately separate from TUN acceptance. A suppressed ICMP
-// or a route failure is a network-layer outcome, not an unimplemented handoff.
-type icmpOptionOutcome uint8
-
-const (
-	icmpOptionUnavailable icmpOptionOutcome = iota
-	icmpOptionSent
-	icmpOptionSuppressed
-	icmpOptionFailed
-)
 
 // emitOptionParameterProblem handles malformed options on the offending
 // fragment. The offending packet is still owned by Device.Write, so the
 // quote can be copied synchronously up to gVisor's 576/route-MTU bound without
 // increasing the retained reassembly notice budget.
-func (t *Device) emitOptionParameterProblem(n ipv4FragmentNotice, offending []byte) icmpOptionOutcome {
+func (t *Device) emitOptionParameterProblem(n ipv4FragmentNotice, offending []byte) {
 	if n.Pointer < 20 || len(offending) < header.IPv4MinimumSize {
-		return icmpOptionUnavailable
+		return
 	}
 	var saved []byte
 	if n.HasFirst {
 		if n.QuoteLen < header.IPv4MinimumSize {
-			return icmpOptionUnavailable
+			return
 		}
 		saved = n.Quote[:n.QuoteLen]
 	} else {
@@ -83,19 +71,19 @@ func (t *Device) emitOptionParameterProblem(n ipv4FragmentNotice, offending []by
 	}
 	hlen := int(saved[0]&15) * 4
 	if hlen < 20 || hlen > 60 || len(saved) < hlen || len(offending) < hlen || int(n.Pointer) >= hlen {
-		return icmpOptionUnavailable
+		return
 	}
 	// The fixed stack can quote an actual payload shorter than eight bytes.
 	// A fragment with no payload is dropped before it checks options.
 	if len(saved) == hlen || len(offending) == hlen {
-		return icmpOptionSuppressed
+		return
 	}
 	quotePrefixLen := hlen + header.ICMPv4MinimumErrorPayloadSize
 	if quotePrefixLen > len(saved) {
 		quotePrefixLen = len(saved)
 	}
 	if len(offending) < quotePrefixLen {
-		return icmpOptionUnavailable
+		return
 	}
 	// A copied-option shape conflict can carry the saved first quote although
 	// the offending input was later. Only the exact original first is eligible.
@@ -103,12 +91,12 @@ func (t *Device) emitOptionParameterProblem(n ipv4FragmentNotice, offending []by
 		offending[6]&0x1f != 0 || offending[7] != 0)) ||
 		!ipv4ChecksumOK(saved[:hlen]) ||
 		int(header.IPv4(offending).TotalLength()) != len(offending) {
-		return icmpOptionUnavailable
+		return
 	}
 	if bytes.Equal(saved[12:16], []byte{0, 0, 0, 0}) ||
 		saved[16]&0xf0 == 0xe0 || bytes.Equal(saved[16:20], []byte{255, 255, 255, 255}) ||
 		!bytes.Equal(saved[16:20], t.local.AsSlice()) {
-		return icmpOptionSuppressed
+		return
 	}
 	if saved[9] == byte(header.ICMPv4ProtocolNumber) {
 		switch header.ICMPv4Type(saved[hlen]) {
@@ -116,18 +104,18 @@ func (t *Device) emitOptionParameterProblem(n ipv4FragmentNotice, offending []by
 			header.ICMPv4Timestamp, header.ICMPv4TimestampReply,
 			header.ICMPv4InfoRequest, header.ICMPv4InfoReply:
 		default:
-			return icmpOptionSuppressed
+			return
 		}
 	}
 	route, err := t.stack.FindRoute(1, tcpip.AddrFromSlice(saved[16:20]), tcpip.AddrFromSlice(saved[12:16]), ipv4.ProtocolNumber, false)
 	if err != nil {
-		return icmpOptionFailed
+		return
 	}
 	defer route.Release()
 	sent := t.stack.Stats().ICMP.V4.PacketsSent
 	if !t.stack.AllowICMPMessage() {
 		sent.RateLimited.Increment()
-		return icmpOptionSuppressed
+		return
 	}
 	mtu := int(route.MTU())
 	const maxIPData = header.IPv4MinimumProcessableDatagramSize - header.IPv4MinimumSize
@@ -136,7 +124,7 @@ func (t *Device) emitOptionParameterProblem(n ipv4FragmentNotice, offending []by
 	}
 	available := mtu - header.ICMPv4MinimumSize
 	if available < hlen+header.ICMPv4MinimumErrorPayloadSize {
-		return icmpOptionSuppressed
+		return
 	}
 	quoteLen := len(offending)
 	if quoteLen > available {
@@ -155,8 +143,7 @@ func (t *Device) emitOptionParameterProblem(n ipv4FragmentNotice, offending []by
 	icmp.SetChecksum(header.ICMPv4Checksum(icmp, pkt.Data().Checksum()))
 	if err := route.WritePacket(stack.NetworkHeaderParams{Protocol: header.ICMPv4ProtocolNumber, TTL: route.DefaultTTL(), TOS: stack.DefaultTOS}, pkt); err != nil {
 		sent.Dropped.Increment()
-		return icmpOptionFailed
+		return
 	}
 	sent.ParamProblem.Increment()
-	return icmpOptionSent
 }

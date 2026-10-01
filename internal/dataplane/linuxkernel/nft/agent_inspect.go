@@ -57,12 +57,6 @@ type MissingItem struct {
 	Guard string
 }
 
-// Matches は、表が記録どおりであるかどうかである。
-func (i AgentInspection) Matches() bool {
-	return i.Unrecognized == 0 && len(i.MissingDNATs) == 0 && len(i.ExtraDNATs) == 0 &&
-		len(i.Missing) == 0 && len(i.Unexpected) == 0 && len(i.Moved) == 0
-}
-
 // InspectAgent は table inet wgft_agent を読み戻し、記録した公開 want から組む表と比べる(7b.4 節。停止中の
 // agent doctor が使う)。nat_pre の DNAT はルールとポートごとの宛先と行の形で比べ、残りのチェーンは行の形で比べる。
 // wg は WireGuard インタフェースの名前である。テーブルを変えない。present はテーブルがあるかどうかである。

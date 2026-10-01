@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/startup"
 )
 
@@ -352,7 +353,7 @@ func TestRotateKeyWithoutCredentialsLeavesNoLockFile(t *testing.T) {
 	if _, err := RotateKey(path); err == nil {
 		t.Fatal("rotate-key succeeded without a credentials file")
 	}
-	if _, err := os.Stat(credentials.LockPath(path)); !os.IsNotExist(err) {
+	if _, err := os.Stat(flock.LockPath(path)); !os.IsNotExist(err) {
 		t.Errorf("a lock file was created: %v", err)
 	}
 }
@@ -398,7 +399,7 @@ func TestRotateKeyWithoutALockFileLeavesNone(t *testing.T) {
 	if _, err := RotateKey(path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(credentials.LockPath(path)); !os.IsNotExist(err) {
+	if _, err := os.Stat(flock.LockPath(path)); !os.IsNotExist(err) {
 		t.Errorf("stopped rotate-key created a lock file: %v", err)
 	}
 	g, err := credentials.Load(path)

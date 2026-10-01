@@ -318,3 +318,10 @@ func TestUDPAccountingLedgerLocalWriteRefusedByTheBudget(t *testing.T) {
 	}
 	assertRegistryUsage(t, r, 0, 0)
 }
+
+// attach is attachLocked with t.mu taken.
+func (t *udpAccounting) attach(c *rawUDPAdapter) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.attachLocked(c)
+}
