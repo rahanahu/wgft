@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 )
 
@@ -17,7 +18,7 @@ func TestDoctorCarriesTheSocketBuffers(t *testing.T) {
 	dp := &fakeDataplane{up: true, reading: dataplaneReading{tunnel: tunnelReading{present: true, socketBuffers: &short}}}
 	rt := newFakeDataplaneRuntime(t, dp)
 	got := rt.collectDoctor().RuntimeState.Tunnel.SocketBuffers
-	want := DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 425984, Send: 425984, Required: sockbuf.Required}
+	want := controlapi.DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 425984, Send: 425984, Required: sockbuf.Required}
 	if got == nil || *got != want {
 		t.Fatalf("socket_buffers = %+v, want %+v", got, want)
 	}
@@ -40,7 +41,7 @@ func TestDoctorCarriesTheSocketBuffers(t *testing.T) {
 }
 
 func TestDoctorSocketBuffersMapping(t *testing.T) {
-	if got := doctorSocketBuffers(sockbuf.Reading{Port: 1}); *got != (DoctorSocketBuffers{}) {
+	if got := doctorSocketBuffers(sockbuf.Reading{Port: 1}); *got != (controlapi.DoctorSocketBuffers{}) {
 		t.Errorf("an OS without a measurement maps to %+v, want only supported=false", got)
 	}
 	got := doctorSocketBuffers(sockbuf.Reading{Supported: true, Port: 35454, Err: errors.New("no UDP socket bound to port 35454 was found in this process")})

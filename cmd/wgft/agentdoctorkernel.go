@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
@@ -18,7 +18,7 @@ import (
 //
 // 証拠は、稼働中はエージェント自身が制御ソケットの doctor の応答で返し(runtime_state.kernel)、停止中
 // だけ、この CLI が internal/agent の ReadKernel で直接読む。読む関数は 1 つで、どちらの実行も同じ形の
-// agent.DoctorKernel を受け取り、この CLI が状態を選ぶ。
+// controlapi.DoctorKernel を受け取り、この CLI が状態を選ぶ。
 
 // カーネルモードの検査の識別子と群。
 const (
@@ -132,11 +132,11 @@ func agentKernelNotTested(c *agentDoctorCheck) {
 
 // agentKernelEvidence は、カーネルモードの 3 つの検査の材料である。
 type agentKernelEvidence struct {
-	kernel *agent.DoctorKernel
+	kernel *controlapi.DoctorKernel
 	// running は、稼働中のエージェントが答えた材料かどうかである
 	running bool
 	// rules はルールごとの状態である。稼働中はハートビートと同じ読みから、停止中は記録から来る
-	rules        []agent.DoctorRule
+	rules        []controlapi.DoctorRule
 	publishError string
 	checkError   string
 }
@@ -241,17 +241,17 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 		c.Detail = "there is no " + name + " on this host, so nothing receives the tunnel from the VPS" + agentKernelStoppedNote(ev)
 		c.Next = agentKernelLinkNext(ev, "the agent creates it on start")
 		return
-	case ki.Ownership == agent.KernelOwnershipNotWireGuard:
+	case ki.Ownership == controlapi.KernelOwnershipNotWireGuard:
 		c.Status, c.Reason = doctor.StatusFailed, agentReasonInterfaceNotOurs
 		c.Detail = name + " is a " + ki.Kind + " link, not WireGuard, so it does not carry the tunnel" + agentKernelStoppedNote(ev)
 		c.Next = "delete that link, or set WGFT_WG_INTERFACE to another name and restart the agent"
 		return
 	// 所有の判定を down より先に見る。他の所有者のインタフェースは、起動しても up にならず、エージェントは
 	// 起動を拒むためである(10.2c 節の「dataplane.interface の判定」)。鍵を読めた実行だけが所有を知る
-	case ki.Ownership == agent.KernelOwnershipForeign || ki.Ownership == agent.KernelOwnershipKeyless:
+	case ki.Ownership == controlapi.KernelOwnershipForeign || ki.Ownership == controlapi.KernelOwnershipKeyless:
 		c.Status, c.Reason = doctor.StatusFailed, agentReasonInterfaceNotOurs
 		what := "holds another key than this agent's"
-		if ki.Ownership == agent.KernelOwnershipKeyless {
+		if ki.Ownership == controlapi.KernelOwnershipKeyless {
 			what = "holds no key"
 		}
 		c.Detail = name + " is a WireGuard interface that " + what + ", so the VPS's packets for this agent are not accepted on it" + agentKernelStoppedNote(ev)
@@ -346,9 +346,9 @@ func agentKernelLinkNext(ev agentKernelEvidence, fix string) string {
 
 // agentInterfaceFacts はインタフェースの値を 1 句にまとめる。最終ハンドシェイクは値として示し、健全さを
 // 判定しない(10.2c 節の「2 つのコマンドの境目」)。
-func agentInterfaceFacts(now time.Time, ki agent.DoctorKernelInterface) string {
+func agentInterfaceFacts(now time.Time, ki controlapi.DoctorKernelInterface) string {
 	key := "the current key"
-	if ki.Ownership == agent.KernelOwnershipPrevious {
+	if ki.Ownership == controlapi.KernelOwnershipPrevious {
 		key = "the previous key"
 	}
 	parts := []string{fmt.Sprintf("%s is up with %s, mtu %d, address %s", ki.Name, key, ki.MTU, orDash(strings.Join(ki.Addresses, ", ")))}
@@ -356,7 +356,7 @@ func agentInterfaceFacts(now time.Time, ki agent.DoctorKernelInterface) string {
 	return strings.Join(parts, "; ")
 }
 
-func agentPeersText(now time.Time, ki agent.DoctorKernelInterface) string {
+func agentPeersText(now time.Time, ki controlapi.DoctorKernelInterface) string {
 	if len(ki.Peers) == 0 {
 		return "no peer"
 	}
@@ -410,7 +410,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 	// 7b.2 節)。DNAT は残っており転送の停止は観測していないので、error でも bad に数えない(10.2c 節、
 	// 2026-09-25 の所有者の決定)。理由の後ろに試し接続か ip_forward の誤りが続くルールは bad のままで
 	// ある。文言は server doctor と同じ関数で読む。
-	var bad, good, stale []agent.DoctorRule
+	var bad, good, stale []controlapi.DoctorRule
 	for _, r := range ev.rules {
 		if r.State != proto.StatusError {
 			good = append(good, r)
@@ -528,7 +528,7 @@ func itThem(n int) string {
 
 // agentStaleText は、名前の解決に失敗して直前の解決の結果で転送を続けているルールを、他の所見に
 // 添える 1 文にする。無ければ空である。
-func agentStaleText(stale []agent.DoctorRule) string {
+func agentStaleText(stale []controlapi.DoctorRule) string {
 	if len(stale) == 0 {
 		return ""
 	}
@@ -540,7 +540,7 @@ func agentStaleText(stale []agent.DoctorRule) string {
 // から来る値(GuardEffects)で言い、1 行だけの欠けでまだ閉じている面は、残っている行が閉じていると言う。表に
 // 位置の違う行か加わった行があれば、転送が続きうるとも、残っている行がまだ閉じているとも言わない。加わった
 // 行は残っている drop の行より前でパケットを通しうるので、どちらも言い切れないためである(10.2c 節)。
-func agentGuardText(t agent.DoctorKernelTable) string {
+func agentGuardText(t controlapi.DoctorKernelTable) string {
 	s := fmt.Sprintf("guard rows of table inet wgft_agent are missing: %s", agentItemsText(t.GuardMissing, t.GuardMissingCount))
 	unchanged := t.UnexpectedCount == 0 && t.MovedCount == 0
 	if unchanged {
@@ -549,17 +549,17 @@ func agentGuardText(t agent.DoctorKernelTable) string {
 	var effects []string
 	for _, e := range t.GuardEffects {
 		switch e {
-		case agent.KernelEffectHost:
+		case controlapi.KernelEffectHost:
 			effects = append(effects, "traffic from the tunnel may reach ports on this host that wgft does not publish")
-		case agent.KernelEffectOtherDNAT:
+		case controlapi.KernelEffectOtherDNAT:
 			effects = append(effects, "traffic from the tunnel may reach other tables' DNAT, such as ports a container runtime publishes")
-		case agent.KernelEffectLAN:
+		case controlapi.KernelEffectLAN:
 			effects = append(effects, "packets from the tunnel that no rule DNATs may be forwarded to LAN hosts")
-		case agent.KernelEffectHairpin:
+		case controlapi.KernelEffectHairpin:
 			effects = append(effects, "traffic from the tunnel may be forwarded back into it, such as a DNAT whose target lies through the tunnel")
-		case agent.KernelEffectToTunnel:
+		case controlapi.KernelEffectToTunnel:
 			effects = append(effects, "packets that answer no forwarded flow may be forwarded into the tunnel")
-		case agent.KernelEffectMSS:
+		case controlapi.KernelEffectMSS:
 			effects = append(effects, "large TCP transfers may stall on a path that drops ICMP")
 		}
 	}
@@ -569,13 +569,13 @@ func agentGuardText(t agent.DoctorKernelTable) string {
 	var closed []string
 	for _, c := range t.GuardClosed {
 		switch c {
-		case agent.KernelClosedHostByFilterPre:
+		case controlapi.KernelClosedHostByFilterPre:
 			closed = append(closed, "the drop row in filter_pre still keeps the tunnel from ports on this host")
-		case agent.KernelClosedHostByInput:
+		case controlapi.KernelClosedHostByInput:
 			closed = append(closed, "the drop row in input still keeps the tunnel from ports on this host")
-		case agent.KernelClosedLANByFilterPre:
+		case controlapi.KernelClosedLANByFilterPre:
 			closed = append(closed, "the drop row in filter_pre still keeps packets that no rule DNATs from the LAN")
-		case agent.KernelClosedLANByForward:
+		case controlapi.KernelClosedLANByForward:
 			closed = append(closed, "the drop row in forward still keeps packets that no rule DNATs from the LAN")
 		}
 	}
@@ -586,7 +586,7 @@ func agentGuardText(t agent.DoctorKernelTable) string {
 }
 
 // agentChangeText は、位置の違う行と加わった行を述べる。どちらも無ければ空である。
-func agentChangeText(t agent.DoctorKernelTable) string {
+func agentChangeText(t controlapi.DoctorKernelTable) string {
 	var parts []string
 	if t.MovedCount > 0 {
 		parts = append(parts, fmt.Sprintf("%d row%s that wgft writes in another position: %s", t.MovedCount, pluralS(t.MovedCount),
@@ -603,8 +603,8 @@ func agentChangeText(t agent.DoctorKernelTable) string {
 }
 
 // agentTableCompared は、何と比べたかを 1 句で言う。
-func agentTableCompared(t agent.DoctorKernelTable) string {
-	if t.Source == agent.KernelTableFromDeclaration {
+func agentTableCompared(t controlapi.DoctorKernelTable) string {
+	if t.Source == controlapi.KernelTableFromDeclaration {
 		return fmt.Sprintf("that the full state of generation %d declares; no publication record exists, so only each rule's DNAT was compared", t.Generation)
 	}
 	return fmt.Sprintf("that the publication of generation %d recorded", t.Generation)
@@ -627,7 +627,7 @@ func agentItemsText(items []string, total int) string {
 
 // agentKernelRuleLines はルールごとの 1 句を組み立てる。DNAT を置いたポートの数を示し、DNAT を置いたまま
 // error を報告するルールと、DNAT を持たないルールを見分けられるようにする(10.2c 節)。
-func agentKernelRuleLines(rules []agent.DoctorRule) []string {
+func agentKernelRuleLines(rules []controlapi.DoctorRule) []string {
 	out := make([]string, 0, agentMaxRuleLines+1)
 	for i, r := range rules {
 		if i == agentMaxRuleLines {

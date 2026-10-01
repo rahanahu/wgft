@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
@@ -37,8 +38,8 @@ func serveTestControl(t *testing.T, rt *runtime) controlAsk {
 	t.Helper()
 	dir := t.TempDir()
 	rt.opts.CredentialsPath = filepath.Join(dir, "agent.json")
-	path := ControlPath(rt.opts.CredentialsPath)
-	if len(path) > ControlPathLimit {
+	path := controlapi.ControlPath(rt.opts.CredentialsPath)
+	if len(path) > controlapi.ControlPathLimit {
 		t.Skipf("temp dir %q makes the control socket path too long for a Unix socket", dir)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -77,12 +78,12 @@ func serveTestControl(t *testing.T, rt *runtime) controlAsk {
 }
 
 // parseDoctor は応答の 1 行を読む。行が 1 つであることも確かめる。
-func parseDoctor(t *testing.T, line string) DoctorResponse {
+func parseDoctor(t *testing.T, line string) controlapi.DoctorResponse {
 	t.Helper()
 	if !strings.HasSuffix(line, "\n") || strings.Count(line, "\n") != 1 {
 		t.Fatalf("the doctor answer is not one line: %q", line)
 	}
-	var res DoctorResponse
+	var res controlapi.DoctorResponse
 	if err := json.Unmarshal([]byte(line), &res); err != nil {
 		t.Fatalf("the doctor answer is not JSON: %v; answer %q", err, line)
 	}
@@ -90,9 +91,9 @@ func parseDoctor(t *testing.T, line string) DoctorResponse {
 }
 
 // askDoctor は doctor を送り、応答を読む。
-func askDoctor(t *testing.T, ask controlAsk) DoctorResponse {
+func askDoctor(t *testing.T, ask controlAsk) controlapi.DoctorResponse {
 	t.Helper()
-	return parseDoctor(t, ask(t, DoctorCommand))
+	return parseDoctor(t, ask(t, controlapi.DoctorCommand))
 }
 
 // fakeTunnelStatus は readTunnelStatus を差し替え、読みの回数を返す。トンネルを本当に立てずに
@@ -212,8 +213,8 @@ func TestDoctorReportsHandshakePending(t *testing.T) {
 	if !tun.Present {
 		t.Fatal("tunnel present = false, want true")
 	}
-	if tun.State != proto.StatusError || tun.Reason != ReasonHandshakePending {
-		t.Errorf("tunnel state/reason = %q/%q, want %q/%q", tun.State, tun.Reason, proto.StatusError, ReasonHandshakePending)
+	if tun.State != proto.StatusError || tun.Reason != controlapi.ReasonHandshakePending {
+		t.Errorf("tunnel state/reason = %q/%q, want %q/%q", tun.State, tun.Reason, proto.StatusError, controlapi.ReasonHandshakePending)
 	}
 	if !tun.LastHandshake.IsZero() {
 		t.Errorf("last handshake = %s, want the zero time", tun.LastHandshake)
@@ -268,7 +269,7 @@ func TestDoctorShowsOnlyTheCurrentDeviceHandshake(t *testing.T) {
 		rebuild:  rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax, lastHandshake: stale, observedAt: stale},
 	}
 	ask := serveTestControl(t, rt)
-	line := ask(t, DoctorCommand)
+	line := ask(t, controlapi.DoctorCommand)
 	res := parseDoctor(t, line)
 	if !res.RuntimeState.Tunnel.LastHandshake.Equal(current) {
 		t.Errorf("last handshake = %s, want the value of the current device, %s", res.RuntimeState.Tunnel.LastHandshake, current)
@@ -290,7 +291,7 @@ func TestDoctorGroupsListenersByRule(t *testing.T) {
 	rt.us().rl.Apply(relay.DesiredFromRules(rules))
 
 	ask := serveTestControl(t, rt)
-	line := ask(t, DoctorCommand)
+	line := ask(t, controlapi.DoctorCommand)
 	res := parseDoctor(t, line)
 	if n := len(res.RuntimeState.Rules); n != 1 {
 		t.Fatalf("the answer holds %d entries for 1 rule with %d listeners, want 1", n, ports)
@@ -378,7 +379,7 @@ func TestDoctorReportsFlowBudget(t *testing.T) {
 	if !res.RuntimeState.RefusalsSince.Equal(rt.tunStart) {
 		t.Errorf("refusals_since = %s, want the time the tunnel was built, %s", res.RuntimeState.RefusalsSince, rt.tunStart)
 	}
-	var udp *DoctorBudget
+	var udp *controlapi.DoctorBudget
 	for i := range res.RuntimeState.Budgets {
 		if res.RuntimeState.Budgets[i].Proto == proto.UDP {
 			udp = &res.RuntimeState.Budgets[i]
@@ -411,7 +412,7 @@ func TestDoctorReportsTheRuntimeLockTimeout(t *testing.T) {
 
 	rt.mu.Lock()
 	start := time.Now()
-	line := ask(t, DoctorCommand)
+	line := ask(t, controlapi.DoctorCommand)
 	elapsed := time.Since(start)
 	rt.mu.Unlock()
 
@@ -462,8 +463,8 @@ func TestDoctorSurvivesAPanic(t *testing.T) {
 	ask := serveTestControl(t, rt)
 
 	real := doctorSnapshot
-	doctorSnapshot = func(*runtime) DoctorResponse { panic("simulated failure while collecting the agent state") }
-	line := ask(t, DoctorCommand)
+	doctorSnapshot = func(*runtime) controlapi.DoctorResponse { panic("simulated failure while collecting the agent state") }
+	line := ask(t, controlapi.DoctorCommand)
 	doctorSnapshot = real
 
 	res := parseDoctor(t, line)
@@ -477,7 +478,7 @@ func TestDoctorSurvivesAPanic(t *testing.T) {
 		t.Errorf("the answer to a panic carries state: %+v", res)
 	}
 	// 常駐プロセスは生きている。同じソケットが次の指示に答える
-	if got := ask(t, DoctorCommand); parseDoctor(t, got).RuntimeState == nil {
+	if got := ask(t, controlapi.DoctorCommand); parseDoctor(t, got).RuntimeState == nil {
 		t.Errorf("the next doctor answer has no runtime state: %q", got)
 	}
 	if got, want := ask(t, "no-such-command"), "error: unknown command\n"; got != want {
@@ -564,13 +565,13 @@ func TestControlDoesNotRecoverARotateKeyPanic(t *testing.T) {
 func TestControlRecoversADoctorPanic(t *testing.T) {
 	rt := &runtime{dp: newTestUserspace(), f: &credentials.Credentials{}}
 	real := doctorSnapshot
-	doctorSnapshot = func(*runtime) DoctorResponse { panic("simulated failure while collecting the agent state") }
+	doctorSnapshot = func(*runtime) controlapi.DoctorResponse { panic("simulated failure while collecting the agent state") }
 	t.Cleanup(func() { doctorSnapshot = real })
 
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
-	go fmt.Fprintln(client, DoctorCommand) //nolint:errcheck // 応答を読む側が続けて閉じる
+	go fmt.Fprintln(client, controlapi.DoctorCommand) //nolint:errcheck // 応答を読む側が続けて閉じる
 	done := make(chan string, 1)
 	go func() {
 		line, _ := bufio.NewReader(client).ReadString('\n')
@@ -651,7 +652,7 @@ func TestDoctorClipsLongText(t *testing.T) {
 	rt.us().rl.Apply(relay.DesiredFromRules([]proto.AgentRule{udpRule(t, "r1", 40000, 40000, "192.0.2.5:40000")}))
 
 	ask := serveTestControl(t, rt)
-	line := ask(t, DoctorCommand)
+	line := ask(t, controlapi.DoctorCommand)
 	if len(line) > 4096 {
 		t.Errorf("the answer is %d bytes although the only listener error was clipped", len(line))
 	}
@@ -672,7 +673,7 @@ func TestDoctorClipsLongText(t *testing.T) {
 func TestDoctorLeavesOutEmptyLists(t *testing.T) {
 	rt := &runtime{dp: newTestUserspace(), f: &credentials.Credentials{}}
 	ask := serveTestControl(t, rt)
-	line := ask(t, DoctorCommand)
+	line := ask(t, controlapi.DoctorCommand)
 	if strings.Contains(line, "null") {
 		t.Errorf("the answer carries a null: %s", line)
 	}
@@ -695,7 +696,7 @@ func TestDoctorLeavesOutEmptyLists(t *testing.T) {
 	}
 }
 
-// TestDoctorReportsAgentDisabled は、DoctorRuntimeState.AgentDisabled が、最後に適用した全体状態の
+// TestDoctorReportsAgentDisabled は、controlapi.DoctorRuntimeState.AgentDisabled が、最後に適用した全体状態の
 // proto.State.AgentDisabled をそのまま写すことを確かめる(仕様 5.1 節、設計文書 10.2c 節)。守りには
 // 使わない診断専用のフィールドである。中継の有無に関わらず読めることも確かめる。relay.listeners の
 // SKIPPED の判定は cmd/wgft の側の試験が持つ。

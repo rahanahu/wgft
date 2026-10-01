@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 )
 
 // doctor の応答は、netstack の UDP の受信の会計の状態を、トンネルの項目に加算のフィールドとして
@@ -14,7 +16,7 @@ func TestDoctorCarriesTheUDPAccounting(t *testing.T) {
 	dp := &fakeDataplane{up: true, reading: dataplaneReading{tunnel: tunnelReading{present: true, udpAccounting: &udpAccountingReading{}}}}
 	rt := newFakeDataplaneRuntime(t, dp)
 	got := rt.collectDoctor().RuntimeState.Tunnel.UDPAccounting
-	if got == nil || *got != (DoctorUDPAccounting{}) {
+	if got == nil || *got != (controlapi.DoctorUDPAccounting{}) {
 		t.Fatalf("udp_accounting of a healthy ledger = %+v", got)
 	}
 	b, err := json.Marshal(got)

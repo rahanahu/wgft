@@ -8,13 +8,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 )
 
 // TestListenControlExplainsLongPath は、sun_path に収まらないパスで制御ソケットを開けないとき、
 // エラーがバイト数と対処を言うことを確かめる。Go の net は OS を呼ぶ前に拒否するので、
 // ディレクトリが実在しなくても同じエラーになる。
 func TestListenControlExplainsLongPath(t *testing.T) {
-	path := ControlPath(filepath.Join(t.TempDir(), strings.Repeat("d", 120), "agent.json"))
+	path := controlapi.ControlPath(filepath.Join(t.TempDir(), strings.Repeat("d", 120), "agent.json"))
 	ln, err := listenControl(path)
 	if err == nil {
 		ln.Close()
@@ -30,8 +32,8 @@ func TestListenControlExplainsLongPath(t *testing.T) {
 // TestListenControlShortPath は、短いパスでは説明を足さずに開けることを確かめる。
 func TestListenControlShortPath(t *testing.T) {
 	dir := t.TempDir()
-	path := ControlPath(filepath.Join(dir, "agent.json"))
-	if len(path) > ControlPathLimit {
+	path := controlapi.ControlPath(filepath.Join(dir, "agent.json"))
+	if len(path) > controlapi.ControlPathLimit {
 		t.Skipf("temp dir %q is already too long for a Unix socket", dir)
 	}
 	ln, err := listenControl(path)
@@ -41,20 +43,20 @@ func TestListenControlShortPath(t *testing.T) {
 	ln.Close()
 }
 
-// fakeControlServer opens a real Unix listener at ControlPath(path) and answers a single
+// fakeControlServer opens a real Unix listener at controlapi.ControlPath(path) and answers a single
 // connection's "rotate-key\n" request with reply (verbatim, not necessarily well-formed), so the
 // tests below exercise rotateKeyRunning's actual socket read rather than a simulated one.
 //
 // t.TempDir() can be long enough on its own (macOS's /var/folders/.../T/<test name><random>/001,
-// Windows's C:\Users\RUNNER~1\AppData\Local\Temp\<test name><random>\001) to push ControlPath(path)
+// Windows's C:\Users\RUNNER~1\AppData\Local\Temp\<test name><random>\001) to push controlapi.ControlPath(path)
 // past sun_path's limit before this test ever adds anything of its own; skip rather than fail in
 // that case, the same way TestListenControlShortPath (this file) and serveTestControl
 // (doctor_test.go) do. This is not the path-too-long behavior under test here, so skipping loses no
 // coverage of it.
 func fakeControlServer(t *testing.T, path string, reply func(net.Conn)) {
 	t.Helper()
-	sock := ControlPath(path)
-	if len(sock) > ControlPathLimit {
+	sock := controlapi.ControlPath(path)
+	if len(sock) > controlapi.ControlPathLimit {
 		t.Skipf("temp dir makes the control socket path %d bytes, over the sun_path limit: %s", len(sock), sock)
 	}
 	ln, err := net.Listen("unix", sock)
@@ -125,7 +127,7 @@ func TestRotateKeyRunningCapsAnUnboundedReply(t *testing.T) {
 		}
 		// The message should name the limit, not just say "EOF": a bare EOF reads like the
 		// agent closed the connection early, not like this size cap was hit (レビューの指摘,
-		// 2026-09-26; see ReadControlReply's own doc comment).
+		// 2026-09-26; see controlapi.ReadControlReply's own doc comment).
 		if !strings.Contains(err.Error(), "exceeded") || !strings.Contains(err.Error(), "limit") {
 			t.Errorf("rotateKeyRunning error = %q, want it to say the reply exceeded the limit, not a bare EOF", err)
 		}

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/proto"
@@ -258,7 +258,7 @@ func TestAgentDoctorLastStateNamesADisabledAgent(t *testing.T) {
 	// SKIPPED になることは TestAgentDoctorLiveScenarios が別に確かめる。
 	holdTheLock(t, path)
 	inRunning := testAgentDoctorInput(t, dir)
-	inRunning.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+	inRunning.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 		st.AgentDisabled = true
 		st.Rules = nil
 	})))

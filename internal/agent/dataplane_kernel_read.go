@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -87,7 +88,7 @@ func (d *kernelDataplane) allLocal(r nft.AgentRuleResult) bool {
 // doctorKernel は agent doctor のためにカーネルを読む(設計文書 10.2c 節)。停止中の agent doctor と同じ
 // readKernel を、メモリの上の認証情報ファイルと公開の記録で呼ぶ。記録は公開に成功するたびに d.f に
 // 写すので、d.pub と同じ中身である。
-func (d *kernelDataplane) doctorKernel() *DoctorKernel {
+func (d *kernelDataplane) doctorKernel() *controlapi.DoctorKernel {
 	return readKernel(kernelReadInput{iface: d.iface, creds: d.f, pub: d.f.KernelPublication})
 }
 

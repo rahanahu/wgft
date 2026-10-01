@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -116,7 +117,7 @@ func (rt *runtime) checkWGLocked(st *proto.State) error {
 		if rt.refused == nil || st.Generation >= rt.refused.gen {
 			rt.refused = &refusedState{gen: st.Generation, err: err}
 		}
-		return fmt.Errorf("%s; the tunnel and rules stay as generation %d left them: %w", ReasonWGRefused, rt.gen, err)
+		return fmt.Errorf("%s; the tunnel and rules stay as generation %d left them: %w", controlapi.ReasonWGRefused, rt.gen, err)
 	}
 	// 受け入れた wg 設定が拒んだ世代と同じか新しいときだけ、拒否の表示を消す。公開できなかった古い世代の
 	// 試し直し(retryPending)が通っても、新しい世代を拒んでいることは変わらない
