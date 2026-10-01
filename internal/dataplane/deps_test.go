@@ -362,3 +362,23 @@ func TestWireShapesStayLeaf(t *testing.T) {
 		}
 	}
 }
+
+// TestVpsdTailnetImportsNoServerPackage checks design.md 7a.7 節's rule for
+// internal/vpsd/tailnet: the --admin-tailscale listener does not depend on the daemon. It takes the
+// admin API's handler and the Host check's update as function values, so it imports no package
+// under internal/vpsd, not even the admin API's own; the daemon wires the two together.
+func TestVpsdTailnetImportsNoServerPackage(t *testing.T) {
+	root := moduleRoot(t)
+	const vpsd = module + "/internal/vpsd"
+	pkgs := packagesUnder(t, root, "internal/vpsd/tailnet")
+	if len(pkgs) == 0 {
+		t.Fatal("found no package under internal/vpsd/tailnet; did it move?")
+	}
+	for _, pkg := range pkgs {
+		for _, dep := range deps(t, root, pkg) {
+			if dep == vpsd || strings.HasPrefix(dep, vpsd+"/") {
+				t.Errorf("%s imports %s (design.md 7a.7 節: the tailnet listener imports no server package)", pkg, dep)
+			}
+		}
+	}
+}
