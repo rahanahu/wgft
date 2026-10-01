@@ -24,6 +24,7 @@ import (
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/textsafe"
+	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 )
 
 // このファイルは `wgft agent doctor`(設計文書 10.2c 節)を持つ。エージェントを動かしている
@@ -140,7 +141,7 @@ var agentCheckOrder = []string{
 	agentCheckDPInterface, agentCheckDPTable, agentCheckForwarding,
 }
 
-// agentDoctorCheck は 1 つの検査の結果である。`server doctor` の checkReport とは別の型にして
+// agentDoctorCheck は 1 つの検査の結果である。`server doctor` の doctor.Check とは別の型にして
 // ある。10.2c 節が、運用者が読む出力も機械が読む模型もこのコマンド専用のものだと定めているため
 // である。
 type agentDoctorCheck struct {
@@ -387,16 +388,16 @@ func agentDoctorVerdict(rep agentDoctorReport) string {
 	failed := false
 	for _, c := range rep.Checks {
 		if c.evidenceUnreachable {
-			return statusUnknown
+			return doctor.StatusUnknown
 		}
-		if c.verdict && c.Status == statusFailed {
+		if c.verdict && c.Status == doctor.StatusFailed {
 			failed = true
 		}
 	}
 	if failed {
-		return statusFailed
+		return doctor.StatusFailed
 	}
-	return statusOK
+	return doctor.StatusOK
 }
 
 // agentDoctorExit は報告を終了コードに写す。ok は 0、failed は 1、unknown は 2 である(10.2c 節)。
@@ -406,7 +407,7 @@ func agentDoctorExit(rep agentDoctorReport) error {
 		if c.evidenceUnreachable {
 			unreachable = append(unreachable, c.Label)
 		}
-		if c.verdict && c.Status == statusFailed {
+		if c.verdict && c.Status == doctor.StatusFailed {
 			failed = append(failed, c.Label)
 		}
 	}
@@ -415,9 +416,9 @@ func agentDoctorExit(rep agentDoctorReport) error {
 		note = "; " + rep.defaultDirNote
 	}
 	switch agentDoctorVerdict(rep) {
-	case statusUnknown:
+	case doctor.StatusUnknown:
 		return unavailable(fmt.Errorf("the diagnosis is incomplete: %s could not be read with this command's permissions%s; %s", strings.Join(unreachable, ", "), note, agentIncompleteNext(rep)))
-	case statusFailed:
+	case doctor.StatusFailed:
 		return fmt.Errorf("this host's agent cannot forward traffic as it stands: %s%s", strings.Join(failed, ", "), note)
 	}
 	return nil
@@ -583,7 +584,7 @@ func inspectAgentProcess(in agentDoctorInput) agentRunState {
 // 予測であり、稼働中のエージェントが最後に適用した値ではない。debug.SetMemoryLimit は自分の
 // プロセスに対する設定であって、外から読む手段が無いためである(10.2c 節)。
 func agentPlatformCheck(in agentDoctorInput) agentDoctorCheck {
-	c := agentDoctorCheck{ID: agentCheckPlatform, Group: agentGroupHost, Label: "platform", Status: statusOK}
+	c := agentDoctorCheck{ID: agentCheckPlatform, Group: agentGroupHost, Label: "platform", Status: doctor.StatusOK}
 	head := in.Platform + ", wgft " + in.Version
 	if v := strings.TrimSpace(in.MemoryLimitEnv); v != "" {
 		// GOMEMLIMIT が設定されている配置では applyMemoryLimit が debug.SetMemoryLimit を
@@ -596,7 +597,7 @@ func agentPlatformCheck(in agentDoctorInput) agentDoctorCheck {
 		// (10.2c 節の「示す値の定め方」)。設定ファイルを読めない実行で既定値から計算した数を
 		// 示すと、上限を絞った配置では事実でない数を述べることになる。数を出さずに、出せない
 		// 理由を述べる。
-		c.Status, c.Reason = statusUnknown, agentReasonConfigUnreadable
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonConfigUnreadable
 		c.Detail = head + "; the memory soft limit is not predicted here: it follows the flow caps, and " + in.ConfigPath +
 			", which sets them for the agent, could not be read"
 		c.Next = agentSamePrincipalNext
@@ -693,7 +694,7 @@ func agentPrivilegesCheck(in agentDoctorInput, dirInDoubt bool) agentDoctorCheck
 	case len(denied) > 0:
 		// 状態は FAILED でよい。この検査は総合判定を動かす 4 つに無いので、終了コードは 1 に
 		// ならず、層 2 として 2 になる。状態の語と終了コードは別のものとして扱う(10.2c 節)。
-		c.Status, c.Reason, c.evidenceUnreachable = statusFailed, agentReasonPermissionDenied, true
+		c.Status, c.Reason, c.evidenceUnreachable = doctor.StatusFailed, agentReasonPermissionDenied, true
 		c.Next = agentSamePrincipalNext
 		if dataDirDenied && dirInDoubt {
 			// データディレクトリが拒むのは、利用者の取り違えのほかに、ディレクトリの取り違えでも
@@ -717,14 +718,14 @@ func agentPrivilegesCheck(in agentDoctorInput, dirInDoubt bool) agentDoctorCheck
 		// 報告に隠れる。エージェントが root で動く配置では前提が満たされているので、FAILED にも
 		// 層 2 にもしない(10.2c 節)。root でも拒まれた対象がある実行は、root の迂回が及ばない
 		// 拒否という事実があるので、前の分岐で層 2 の FAILED として扱う。
-		c.Status, c.Reason = statusUnknown, agentReasonRunningAsRoot
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonRunningAsRoot
 		c.Detail += "; root bypasses file permissions, so this run cannot say whether the user the agent runs as can reach them"
 		c.Next = "run this command as the same user as the agent. For the packaged systemd unit, that is wgft: runuser -u wgft -- wgft agent doctor. If the agent itself runs as root, this result is expected"
 	case len(undetermined) > 0:
-		c.Status, c.Reason = statusUnknown, agentReasonPermissionNotDetermined
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonPermissionNotDetermined
 		c.Next = "if the agent cannot start, read its log for the first write it fails; this command does not answer it"
 	default:
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 	}
 	return c
 }
@@ -816,7 +817,7 @@ func agentInterfacesCheck(in agentDoctorInput) agentDoctorCheck {
 	c := agentDoctorCheck{ID: agentCheckInterfaces, Group: agentGroupHost, Label: "interfaces"}
 	ifs, err := in.Interfaces()
 	if err != nil {
-		c.Status, c.Reason = statusUnknown, agentReasonInterfacesUnreadable
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonInterfacesUnreadable
 		c.Detail = "this host's network interfaces could not be read: " + errText(err)
 		c.Next = "read them with ip addr on Linux, ifconfig on macOS, or ipconfig on Windows"
 		return c
@@ -835,7 +836,7 @@ func agentInterfacesCheck(in agentDoctorInput) agentDoctorCheck {
 			break
 		}
 	}
-	c.Status = statusOK
+	c.Status = doctor.StatusOK
 	c.Detail = fmt.Sprintf("%d interface%s", len(ifs), pluralS(len(ifs)))
 	if len(named) > 0 {
 		c.Detail += "; up and not loopback: " + strings.Join(named, ", ")
@@ -864,7 +865,7 @@ func agentCredentialsCheck(in agentDoctorInput, cred agentCredentialsFile) agent
 	c := agentDoctorCheck{ID: agentCheckCredentials, Group: agentGroupCredentials, Label: "credentials", verdict: true}
 	switch cred.State {
 	case credMissing:
-		c.Status, c.Reason = statusFailed, agentReasonCredentialsMissing
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonCredentialsMissing
 		// 登録したことがないという断定は、見たディレクトリについてのものである。このホストの
 		// エージェントが別のデータディレクトリで動いていれば、ホストについては偽になる。所見は
 		// ディレクトリについてだけ述べる。
@@ -880,7 +881,7 @@ func agentCredentialsCheck(in agentDoctorInput, cred agentCredentialsFile) agent
 	case credDirUnreadable:
 		// ファイルがあるかどうかを判定できない。呼び出し元の権限が届かなかった実行であり、
 		// credentials_unreadable と同じく層 2 に入る(10.2c 節)。
-		c.Status, c.Reason, c.evidenceUnreachable = statusUnknown, agentReasonDataDirUnreadable, true
+		c.Status, c.Reason, c.evidenceUnreachable = doctor.StatusUnknown, agentReasonDataDirUnreadable, true
 		c.Detail = "whether a credentials file exists at " + in.CredentialsPath + " could not be determined: the data directory " +
 			in.DataDir + " cannot be searched here: " + errText(cred.Err)
 		c.Next = agentDataDirFirst(in) + upperFirst(agentSamePrincipalNext)
@@ -889,12 +890,12 @@ func agentCredentialsCheck(in agentDoctorInput, cred agentCredentialsFile) agent
 		// 状態は UNKNOWN にする。証拠であるファイルはあるが、読めないので判定に足りない。
 		// 呼び出し元がエージェントと同じ実行主体で動いていないために起きる失敗であり、
 		// エージェントが転送を担えるかどうかについては何も述べない(10.2c 節)。
-		c.Status, c.Reason, c.evidenceUnreachable = statusUnknown, agentReasonCredentialsUnreadable, true
+		c.Status, c.Reason, c.evidenceUnreachable = doctor.StatusUnknown, agentReasonCredentialsUnreadable, true
 		c.Detail = "the credentials file at " + in.CredentialsPath + " exists but cannot be read here: " + errText(cred.Err)
 		c.Next = agentSamePrincipalNext
 		return c
 	case credMalformed:
-		c.Status, c.Reason = statusFailed, agentReasonCredentialsMalformed
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonCredentialsMalformed
 		c.Detail = "the credentials file at " + in.CredentialsPath + " cannot be read as JSON: " + errText(cred.Err)
 		if cred.refusedBeforeParsing() {
 			c.Detail = "the credentials file at " + in.CredentialsPath + " is not one the agent reads: " + errText(cred.Err)
@@ -904,12 +905,12 @@ func agentCredentialsCheck(in agentDoctorInput, cred agentCredentialsFile) agent
 	}
 	f := cred.Creds
 	if f.PermanentToken == "" {
-		c.Status, c.Reason = statusFailed, agentReasonNotRegistered
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonNotRegistered
 		c.Detail = "the credentials file holds no permanent token, so no agent has registered from this data directory yet"
 		c.Next = agentDataDirFirst(in) + "If no agent has registered on this host yet, " + agentJoinNext
 		return c
 	}
-	c.Status = statusOK
+	c.Status = doctor.StatusOK
 	// agent.json から読んだ値は、稼働中でも停止中でも保存した時点の値なので、`agent ls` および
 	// 10.2a 節と同じ last: の接頭辞を付け、今の観測と区別する(10.2c 節)。
 	parts := []string{fmt.Sprintf("last: registered as %q to %s", f.Name, orDash(f.Endpoint))}
@@ -956,7 +957,7 @@ func agentProcessCheck(in agentDoctorInput, run agentRunState, mode string, dirI
 	if run.Err != nil {
 		// 稼働中か停止中かを判定できないので、FAILED にはしない。権限で開けない場合は、
 		// 次の前提が崩れている実行として終了コード 2 の側に置く(10.2c 節)。
-		c.Status, c.Reason = statusUnknown, agentReasonLockUnreadable
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonLockUnreadable
 		c.evidenceUnreachable = run.PermissionDenied
 		c.Detail = "whether an agent is running here could not be determined: " + errText(run.Err)
 		c.Next = agentSamePrincipalNext
@@ -970,17 +971,17 @@ func agentProcessCheck(in agentDoctorInput, run agentRunState, mode string, dirI
 	}
 	switch run.State {
 	case flock.Locked:
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = "an agent process holds the lock next to the credentials file, so one is running for this data directory"
 		return c
 	case flock.Absent:
 		// ロックファイルが無いのは、一度も起動していない場合と、運用者が消した場合がある。
 		// 診断はその 2 つを区別できないが、どちらも稼働の証拠が無い点では同じである(10.2c 節)。
-		c.Status, c.Reason = statusFailed, agentReasonNotRunning
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonNotRunning
 		c.Detail = "no agent is running for this data directory: there is no lock file at " + flock.LockPath(in.CredentialsPath) +
 			", so either no agent has ever started here or the file was removed"
 	default:
-		c.Status, c.Reason = statusFailed, agentReasonNotRunning
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonNotRunning
 		c.Detail = "no agent is running for this data directory: the lock file at " + flock.LockPath(in.CredentialsPath) + " is there, but no process holds it"
 	}
 	// 止まっているという断定も、見たディレクトリについてのものである。設定ファイルを読めずに
@@ -1012,12 +1013,12 @@ func agentLastStateCheck(in agentDoctorInput, cred agentCredentialsFile) agentDo
 	}
 	ls := cred.Creds.LastState
 	if ls == nil {
-		c.Status, c.Reason = statusUnknown, agentReasonNoLastState
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoLastState
 		c.Detail = "agent.json holds no full state, so this host holds no rules of its own yet"
 		c.Next = "start the agent and let it reach the server; the server sends the whole state on every connection"
 		return c
 	}
-	c.Status = statusOK
+	c.Status = doctor.StatusOK
 	c.Detail = fmt.Sprintf("last: generation %d, %d rule%s", ls.Generation, len(ls.Rules), pluralS(len(ls.Rules)))
 	if ls.WG.Address != "" {
 		c.Detail += ", tunnel address " + ls.WG.Address
@@ -1060,13 +1061,13 @@ func agentWGResolveCheck(in agentDoctorInput, cred agentCredentialsFile) agentDo
 	ls := cred.Creds.LastState
 	if ls == nil {
 		// agent.json が全体状態を持たない事実を理由に示す(10.2c 節)。
-		c.Status, c.Reason = statusUnknown, agentReasonNoLastState
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoLastState
 		c.Detail = "agent.json holds no full state, so this host does not know which WireGuard peer to resolve"
 		c.Next = "start the agent and let it reach the server; the peer's address arrives with the full state"
 		return c
 	}
 	if strings.TrimSpace(ls.WG.Endpoint) == "" {
-		c.Status, c.Reason = statusUnknown, agentReasonNoWGEndpoint
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoWGEndpoint
 		c.Detail = "the recorded full state carries no WireGuard peer address, so there is nothing to resolve"
 		c.Next = "read the server's WGFT_WG_ENDPOINT on the VPS; the agent takes the peer's address from the state the server sends"
 		return c
@@ -1122,7 +1123,7 @@ func agentAllowTargetsState(c *agentDoctorCheck, run agentRunState) {
 	if run.running() {
 		return
 	}
-	c.Status = statusUnknown
+	c.Status = doctor.StatusUnknown
 	if run.undetermined() {
 		c.Detail = "the allowlist this agent enforces is the one its running process holds, and whether a process holds it now could not be determined"
 		c.Next = "settle whether an agent is running first: the process check above says why that could not be read here. " +
@@ -1141,7 +1142,7 @@ func agentAllowTargetsState(c *agentDoctorCheck, run agentRunState) {
 // 項目であり、SKIPPED の定義に沿う(10.2c 節)。
 func agentSkipForCredentials(cred agentCredentialsFile, what string) (agentDoctorCheck, bool) {
 	var c agentDoctorCheck
-	c.Status = statusSkipped
+	c.Status = doctor.StatusSkipped
 	switch {
 	case cred.State == credMissing:
 		c.Reason = agentReasonCredentialsMissing
@@ -1177,7 +1178,7 @@ func agentResolveInto(c agentDoctorCheck, in agentDoctorInput, endpoint, what st
 		host = endpoint
 	}
 	if _, perr := netip.ParseAddr(host); perr == nil {
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = what + " is the literal address " + host + ", so there is no name to resolve"
 		return c
 	}
@@ -1185,12 +1186,12 @@ func agentResolveInto(c agentDoctorCheck, in agentDoctorInput, endpoint, what st
 	defer cancel()
 	addrs, err := in.Resolve(ctx, host)
 	if err != nil || len(addrs) == 0 {
-		c.Status, c.Reason = statusUnknown, agentReasonResolveFailed
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonResolveFailed
 		c.Detail = "this host cannot resolve " + host + ", the name of " + what + ": " + errText(err)
 		c.Next = "fix name resolution on this host. An address resolved earlier can still carry traffic, so this alone does not mean the agent has stopped forwarding"
 		return c
 	}
-	c.Status = statusOK
+	c.Status = doctor.StatusOK
 	c.Detail = host + ", the name of " + what + ", resolves to " + strings.Join(trimAddrs(addrs), ", ")
 	return c
 }
@@ -1336,9 +1337,9 @@ func writeAgentDoctorReport(w io.Writer, rep agentDoctorReport) {
 			fmt.Fprintln(w, c.Group)
 			group = c.Group
 		}
-		writeLine(w, c.Label, statusWord(c.Status), c.Detail)
+		writeLine(w, c.Label, doctor.StatusWord(c.Status), c.Detail)
 		// FAILED の所見には必ず次に見るものを添える(10.2a、10.2c 節)。
-		if c.Next != "" && c.Status != statusOK {
+		if c.Next != "" && c.Status != doctor.StatusOK {
 			writeNext(w, c.Next, indent)
 		}
 	}
@@ -1368,12 +1369,12 @@ func writeAgentDoctorObserved(w io.Writer, checks []agentDoctorCheck) {
 	indent := 2 + labelWidth + 1
 	fmt.Fprintln(w, "\nObserved values")
 	for _, c := range checks {
-		if c.Status == statusUnknown {
+		if c.Status == doctor.StatusUnknown {
 			writeValueLine(w, c.Label, c.Detail)
 			continue
 		}
-		writeLine(w, c.Label, statusWord(c.Status), c.Detail)
-		if c.Next != "" && c.Status != statusOK {
+		writeLine(w, c.Label, doctor.StatusWord(c.Status), c.Detail)
+		if c.Next != "" && c.Status != doctor.StatusOK {
 			writeNext(w, c.Next, indent)
 		}
 	}

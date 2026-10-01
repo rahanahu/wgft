@@ -21,37 +21,6 @@ import (
 // ファイルに残るのは、コマンドの組み立て、終了コードへの写し、端末の桁に合わせた表示である。
 // コマンドの登録は cmd/wgft/server.go(Linux の build tag)が行う。
 
-// 判定の型と語は internal/vpsd/doctor が持つ。ここでは切り出しの前と同じ名前で参照できるよう
-// 別名を置く。`wgft agent doctor`(10.2c 節)の出力もこの名前の一部を使う(agentdoctor.go)。
-type (
-	// checkReport は 1 つの検査である。
-	checkReport = doctor.Check
-	// doctorReport は 1 回の診断の結果全体であり、--json はこの形で出す。
-	doctorReport = doctor.Report
-	// doctorInput は診断が読む証拠一式である。
-	doctorInput = doctor.Input
-	// probeResult は 1 本のルールに対する能動的な疎通確認の結果である。
-	probeResult = doctor.ProbeResult
-	// ruleReport は 1 本のルールの要約である。
-	ruleReport = doctor.RuleReport
-)
-
-// 検査の状態(設計文書 10.2a 節の 5 つ)。
-const (
-	statusOK        = doctor.StatusOK
-	statusFailed    = doctor.StatusFailed
-	statusUnknown   = doctor.StatusUnknown
-	statusNotTested = doctor.StatusNotTested
-	statusSkipped   = doctor.StatusSkipped
-)
-
-// checkDataplane は server 全体の検査、groupAgent はエージェントのまとまりである。人向けの
-// 出力だけがこの 2 つを名指しする。
-const (
-	checkDataplane = doctor.CheckDataplane
-	groupAgent     = doctor.GroupAgent
-)
-
 // notTested は試していない範囲 1 件である。判定が返す doctor.NotTested と同じ形だが、この
 // package の型として残してある。`wgft agent doctor`(10.2c 節)が同じ writeNotTested に自分で
 // 組み立てた一覧を渡すためである(agentdoctor.go)。
@@ -69,26 +38,6 @@ func notTestedLines(items []doctor.NotTested) []notTested {
 	return out
 }
 
-// buildReport は証拠から報告を組み立てる(internal/vpsd/doctor)。
-var buildReport = doctor.BuildReport
-
-// statusWord、displayStatus、hidden、checksOfRule、agentLines は判定の見せ方であり、Web UI の
-// 画面と共有する(設計文書 10.2d 節)。ここは名前を保つための呼び出しだけを置く。
-func statusWord(s string) string { return doctor.StatusWord(s) }
-
-func displayStatus(c checkReport) string { return doctor.DisplayStatus(c) }
-
-func hidden(c checkReport, verbose bool) bool { return c.Hidden(verbose) }
-
-func checksOfRule(rep doctorReport, ruleID string) []checkReport { return rep.ChecksOf(ruleID) }
-
-func agentLines(rep doctorReport) []checkReport { return rep.AgentSummaries() }
-
-// parseWhen と since は、この package の他の出力(status.go)も同じ規則で時刻を読むための
-// 呼び出しである。
-func parseWhen(s string) (time.Time, bool) { return doctor.ParseWhen(s) }
-
-func since(now, t time.Time) time.Duration { return doctor.Since(now, t) }
 func newServerDoctorCmd() *cobra.Command {
 	var (
 		asJSON  bool
@@ -147,7 +96,7 @@ func newServerDoctorCmd() *cobra.Command {
 			if probe {
 				in.AddProbe(c, rules[0].ID)
 			}
-			rep := buildReport(rules, in)
+			rep := doctor.BuildReport(rules, in)
 			out := cmd.OutOrStdout()
 			switch {
 			case asJSON:
@@ -178,13 +127,13 @@ func newServerDoctorCmd() *cobra.Command {
 
 // doctorExit は報告を終了コードに写す。failed の検査が 1 つでもあれば誤りを返し、呼び出し元の
 // exitCode が 1 にする。unknown と not_tested だけでは 0 のままにする(設計文書 10.2a 節)。
-func doctorExit(rep doctorReport) error {
-	if rep.Status != statusFailed {
+func doctorExit(rep doctor.Report) error {
+	if rep.Status != doctor.StatusFailed {
 		return nil
 	}
 	var bad []string
 	for _, r := range rep.Rules {
-		if r.Status == statusFailed {
+		if r.Status == doctor.StatusFailed {
 			// 終了の 1 行は、次に `server doctor <rule>` へ貼る ID を名指すので、完全な ID を
 			// 使う(設計文書 10.2 節)。
 			bad = append(bad, r.RuleID+" at "+r.StoppedAt)
@@ -232,7 +181,7 @@ func writeLine(w io.Writer, label, status, detail string) {
 	}
 }
 
-func checkHumanDetail(c checkReport) string {
+func checkHumanDetail(c doctor.Check) string {
 	if c.GenerationDetail == "" {
 		return c.Detail
 	}
@@ -243,7 +192,7 @@ func checkHumanDetail(c checkReport) string {
 }
 
 // writeRuleReport は 1 本のルールの経路を、まとまりごとに出す。
-func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
+func writeRuleReport(w io.Writer, rep doctor.Report, verbose bool) {
 	indent := 2 + labelWidth + 1
 	for _, rr := range rep.Rules {
 		name := short(rr.RuleID)
@@ -252,19 +201,19 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 		}
 		fmt.Fprintf(w, "%s  %s %s to %s\n\n", name, rr.Proto, rr.ListenPort, rr.Target)
 		group := ""
-		for _, c := range checksOfRule(rep, rr.RuleID) {
-			if hidden(c, verbose) {
+		for _, c := range rep.ChecksOf(rr.RuleID) {
+			if c.Hidden(verbose) {
 				continue
 			}
 			g := c.Group
-			if g == groupAgent {
+			if g == doctor.GroupAgent {
 				g = fmt.Sprintf("Agent %q", rr.Agent)
 			}
 			if g != group {
 				fmt.Fprintln(w, g)
 				group = g
 			}
-			writeLine(w, c.Label, displayStatus(c), checkHumanDetail(c))
+			writeLine(w, c.Label, doctor.DisplayStatus(c), checkHumanDetail(c))
 			for _, cause := range c.Causes {
 				fmt.Fprintf(w, "%s- %s\n", strings.Repeat(" ", indent), wrapAt(cause, indent+2))
 			}
@@ -272,16 +221,16 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 			if c.ReplyLine != "" {
 				fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", indent), wrapAt(c.ReplyLine, indent))
 			}
-			if c.Next != "" && (c.Status != statusOK || verbose) {
+			if c.Next != "" && (c.Status != doctor.StatusOK || verbose) {
 				writeNext(w, c.Next, indent)
 			}
 			writeInternal(w, c.Internal, verbose, indent)
 		}
 		fmt.Fprintln(w)
 		switch rr.Status {
-		case statusFailed:
+		case doctor.StatusFailed:
 			fmt.Fprintf(w, "Result: traffic stops at %q\n", checkLabelOf(rep, rr.RuleID, rr.StoppedAt))
-		case statusSkipped:
+		case doctor.StatusSkipped:
 			// skipped は、ルール自身が無効な場合と、ルールは有効で持ち主のエージェントが無効な
 			// 場合の 2 つである(設計文書 10.2a 節)。直す操作が違うので書き分ける。
 			if rep.RuleAgentDisabled(rr.RuleID) {
@@ -289,7 +238,7 @@ func writeRuleReport(w io.Writer, rep doctorReport, verbose bool) {
 			} else {
 				fmt.Fprintln(w, "Result: the rule is disabled, so nothing is forwarded")
 			}
-		case statusUnknown:
+		case doctor.StatusUnknown:
 			// 名前の解決に失敗して直前の解決の結果で転送を続けているルールは、そのことを結論にする
 			// (設計文書 10.2a 節)
 			if note := rep.RuleResultNote(rr.RuleID); note != "" {
@@ -326,7 +275,7 @@ func writeInternal(w io.Writer, lines []string, verbose bool, indent int) {
 	}
 }
 
-func checkLabelOf(rep doctorReport, ruleID, id string) string {
+func checkLabelOf(rep doctor.Report, ruleID, id string) string {
 	for _, c := range rep.Checks {
 		if c.ID == id && (c.RuleID == ruleID || c.RuleID == "") {
 			return c.Label
@@ -335,7 +284,7 @@ func checkLabelOf(rep doctorReport, ruleID, id string) string {
 	return id
 }
 
-func checkDetailOf(rep doctorReport, ruleID, id string) string {
+func checkDetailOf(rep doctor.Report, ruleID, id string) string {
 	for _, c := range rep.Checks {
 		if c.ID == id && (c.RuleID == ruleID || c.RuleID == "") {
 			return textsafe.SanitizeForTerminal(c.Detail)
@@ -345,29 +294,29 @@ func checkDetailOf(rep doctorReport, ruleID, id string) string {
 }
 
 // writeSurvey は server、エージェント、全ルールを短く出す。
-func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
+func writeSurvey(w io.Writer, rep doctor.Report, verbose bool) {
 	indent := 2 + labelWidth + 1
-	dp := checkReport{}
+	dp := doctor.Check{}
 	for _, c := range rep.Checks {
-		if c.ID == checkDataplane {
+		if c.ID == doctor.CheckDataplane {
 			dp = c
 		}
 	}
 	fmt.Fprintln(w, "Server")
-	writeLine(w, dp.Label, displayStatus(dp), checkHumanDetail(dp))
-	if dp.Status != statusOK && dp.Next != "" {
+	writeLine(w, dp.Label, doctor.DisplayStatus(dp), checkHumanDetail(dp))
+	if dp.Status != doctor.StatusOK && dp.Next != "" {
 		writeNext(w, dp.Next, indent)
 	}
 	writeInternal(w, dp.Internal, verbose, indent)
 
 	fmt.Fprintln(w, "\nAgents")
-	agents := agentLines(rep)
+	agents := rep.AgentSummaries()
 	if len(agents) == 0 {
 		fmt.Fprintln(w, "  no agent is named by any rule")
 	}
 	for _, a := range agents {
-		writeLine(w, a.Label, displayStatus(a), a.Detail)
-		if a.Status != statusOK && a.Next != "" {
+		writeLine(w, a.Label, doctor.DisplayStatus(a), a.Detail)
+		if a.Status != doctor.StatusOK && a.Next != "" {
 			writeNext(w, a.Next, indent)
 		}
 		writeInternal(w, a.Internal, verbose, indent)
@@ -382,17 +331,17 @@ func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
 			why := "-"
 			if rr.StoppedAt != "" {
 				why = "stops at " + checkLabelOf(rep, rr.RuleID, rr.StoppedAt) + ": " + firstClause(checkDetailOf(rep, rr.RuleID, rr.StoppedAt))
-			} else if rr.Status == statusUnknown || rr.Status == statusSkipped {
+			} else if rr.Status == doctor.StatusUnknown || rr.Status == doctor.StatusSkipped {
 				why = firstClause(firstNotOKDetail(rep, rr.RuleID))
 			}
-			fmt.Fprintf(tw, "  %s\t%s\t%s %s\t%s\t%s\n", statusWord(rr.Status), short(rr.RuleID), rr.Proto, rr.ListenPort, rr.Agent, why)
+			fmt.Fprintf(tw, "  %s\t%s\t%s %s\t%s\t%s\n", doctor.StatusWord(rr.Status), short(rr.RuleID), rr.Proto, rr.ListenPort, rr.Agent, why)
 		}
 		tw.Flush()
 	}
 
 	fmt.Fprintln(w)
-	if rep.Status == statusFailed {
-		fmt.Fprintf(w, "Result: %d of %d rules not carrying traffic\n", countStatus(rep.Rules, statusFailed), len(rep.Rules))
+	if rep.Status == doctor.StatusFailed {
+		fmt.Fprintf(w, "Result: %d of %d rules not carrying traffic\n", countStatus(rep.Rules, doctor.StatusFailed), len(rep.Rules))
 	} else {
 		fmt.Fprintln(w, "Result: no failing check")
 	}
@@ -400,16 +349,16 @@ func writeSurvey(w io.Writer, rep doctorReport, verbose bool) {
 	writeHistory(w, rep.History.Detail)
 	writeNotTested(w, notTestedLines(rep.NotTested))
 }
-func firstNotOKDetail(rep doctorReport, ruleID string) string {
-	for _, c := range checksOfRule(rep, ruleID) {
-		if c.Status == statusUnknown || c.Status == statusSkipped {
+func firstNotOKDetail(rep doctor.Report, ruleID string) string {
+	for _, c := range rep.ChecksOf(ruleID) {
+		if c.Status == doctor.StatusUnknown || c.Status == doctor.StatusSkipped {
 			return c.Label + ": " + textsafe.SanitizeForTerminal(c.Detail)
 		}
 	}
 	return ""
 }
 
-func countStatus(rules []ruleReport, want string) int {
+func countStatus(rules []doctor.RuleReport, want string) int {
 	n := 0
 	for _, r := range rules {
 		if r.Status == want {

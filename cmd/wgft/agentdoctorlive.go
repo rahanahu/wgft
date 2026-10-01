@@ -15,6 +15,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/textsafe"
+	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -325,7 +326,7 @@ func agentLiveNeedsRuntimeState(id string) bool {
 
 // agentLiveSkip は、値を読めなかった検査を SKIPPED にする。理由の符号は場合ごとに分ける。
 func agentLiveSkip(c *agentDoctorCheck, run agentRunState, live agentLive) {
-	c.Status = statusSkipped
+	c.Status = doctor.StatusSkipped
 	switch live.Kind {
 	case liveNotAttempted:
 		if run.undetermined() {
@@ -383,42 +384,42 @@ func agentControlCheck(c *agentDoctorCheck, run agentRunState, live agentLive) {
 	case liveNotAttempted:
 		agentLiveSkip(c, run, live)
 	case liveOK:
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = "the running agent answered doctor on its control socket at " + live.Path
 	case liveRuntimeBusy:
 		// 制御ソケットに繋げて応答も得ているので、この検査が答える問いは満たされている。欠けた
 		// のは実行時の部分だけであり、そのことは続く検査の SKIPPED が述べる(10.2c 節)。
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = "the running agent answered doctor on its control socket at " + live.Path +
 			"; its reply left out the runtime state, and the lines below say so"
 	case liveUnsupported:
 		// 接続そのものは成功しているので SKIPPED には当たらず、FAILED にすると転送が健全な配置に
 		// 対しても壊れている印象を与える(10.2c 節)。
-		c.Status, c.Reason = statusUnknown, agentReasonDoctorUnsupported
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonDoctorUnsupported
 		c.Detail = "the control socket at " + live.Path + " answered, but the running agent does not carry the doctor command: it replied " + live.Reply
 		c.Next = agentRestartForDoctorNext
 	case liveAgentError:
-		c.Status, c.Reason = statusUnknown, agentReasonDoctorFailed
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonDoctorFailed
 		c.Detail = "the control socket at " + live.Path + " answered, but the agent could not collect its own state: " + live.Resp.Error
 		c.Next = agentDoctorFailedNext
 	case liveReplyUnreadable:
-		c.Status, c.Reason = statusUnknown, agentReasonDoctorUnreadable
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonDoctorUnreadable
 		c.Detail = "the control socket at " + live.Path + " answered, but its reply could not be read: " + errText(live.Err)
 		c.Next = "run this command again; if the reply stays unreadable, restart the agent so both sides run the installed binary"
 	case liveDenied:
 		// 制御ソケットへ権限の不足で接続できず、総合判定を動かす検査まで取れないので、診断そのもの
 		// が十分に成立しなかった場合に当たる(10.2c 節)。3 つの原因のうちこの 1 つだけが 2 である。
-		c.Status, c.Reason, c.evidenceUnreachable = statusFailed, agentReasonControlUnreachable, true
+		c.Status, c.Reason, c.evidenceUnreachable = doctor.StatusFailed, agentReasonControlUnreachable, true
 		c.Detail = "the agent is running, but its control socket at " + live.Path + " refuses this command's permissions: " + errText(live.Err)
 		c.Next = agentSamePrincipalNext
 	case livePathTooLong:
-		c.Status, c.Reason = statusFailed, agentReasonControlPathTooLong
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonControlPathTooLong
 		c.Detail = fmt.Sprintf("the agent is running, but its control socket path is %d bytes: %s. Unix socket paths hold at most 107 bytes on Linux and Windows and 103 on macOS, "+
 			"so this path cannot be opened at all", len(live.Path), live.Path)
 		c.Next = "move the data directory to a shorter path and restart the agent; forwarding itself is not affected, only this socket. " +
 			"Set it with WGFT_DATA_DIR, the same way agent rotate-key needs it"
 	case liveUnreachable:
-		c.Status, c.Reason = statusFailed, agentReasonControlUnreachable
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonControlUnreachable
 		c.Detail = "the agent is running, but its control socket at " + live.Path + " could not be reached: " + errText(live.Err)
 		c.Next = "the agent keeps forwarding without this socket, so this is not a forwarding fault. Read its log with journalctl -u wgft-agent, " +
 			"or docker logs for a container: it prints a line when it cannot open the socket. If it printed none, the socket file at that path is " +
@@ -462,7 +463,7 @@ func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *agent.D
 // いることは、受け取り済みのルールを転送し続けている間も起こるためである(10.2c 節)。
 func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.DoctorStream) {
 	if s.Connected {
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = "the control stream to the server is up"
 		return
 	}
@@ -472,7 +473,7 @@ func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.Doc
 		// エージェントのログと同じ手当てを示す。総合判定は動かさない。受け取り済みのルールの転送は
 		// トンネルが保つ限り続き、転送を担えるかどうかは tunnel と listeners か Dataplane の検査が
 		// 答える(10.2c 節)。
-		c.Status, c.Reason = statusFailed, agentReasonServerCertMismatch
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonServerCertMismatch
 		c.Detail = "the control stream to the server is not up, and retrying will not bring it up: the server's certificate does not match " +
 			"the one this agent pinned when it registered; the last attempt ended " + agentWhen(in.Now, s.DisconnectedAt) + ": " +
 			reasonOr(s.DisconnectReason, "no reason was recorded")
@@ -481,7 +482,7 @@ func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.Doc
 			"If the server was not rebuilt, something on the path answers TLS in its place; find it before registering again"
 		return
 	}
-	c.Status, c.Reason = statusUnknown, agentReasonReconnecting
+	c.Status, c.Reason = doctor.StatusUnknown, agentReasonReconnecting
 	// 示す理由には、接続が切れた理由だけでなく、接続に至らなかった試みの失敗も入る(10.2c 節)。
 	switch {
 	case s.DisconnectedAt.IsZero():
@@ -505,7 +506,7 @@ func agentPinMismatch(s *agent.DoctorStream) bool {
 // 値を述べるだけの検査なので、状態は UNKNOWN、理由の符号は no_threshold とする。良し悪しを言う
 // 閾値をこのコマンドは持たない(10.2c 節が tunnel.transfer に与えたのと同じ扱い)。
 func agentStreamBackoffCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.DoctorStream) {
-	c.Status, c.Reason = statusUnknown, agentReasonNoThreshold
+	c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoThreshold
 	parts := []string{}
 	if s.Backoff > 0 {
 		parts = append(parts, "the last reconnect wait was "+s.Backoff.Round(time.Second).String())
@@ -525,7 +526,7 @@ func agentStreamBackoffCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.
 
 // agentStreamLivenessCheck は、直近の ping と pong の時刻と、pong を待っている最中かどうかを示す。
 func agentStreamLivenessCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.DoctorStream) {
-	c.Status, c.Reason = statusUnknown, agentReasonNoThreshold
+	c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoThreshold
 	var parts []string
 	switch {
 	case s.LastPingAt.IsZero():
@@ -556,7 +557,7 @@ func agentStreamLivenessCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent
 func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
 	t := st.Tunnel
 	if t.State != proto.StatusError {
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = "the tunnel is up to " + orDash(t.Endpoint) + "; " + agentHandshakeText(in.Now, t.LastHandshake)
 		return
 	}
@@ -567,7 +568,7 @@ func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.D
 	// トンネルがある場合は、ts.Err があることを先に見て、LastHandshake が無いことを後に見る。
 	// ハートビートの分岐がこの順であり、両方が成り立つ実行の理由は ts.Err の側になる(10.2c 節)。
 	if t.Reason == agent.ReasonHandshakePending {
-		c.Status, c.Reason = statusUnknown, agentReasonHandshakePending
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonHandshakePending
 		c.Detail = "the tunnel is up to " + orDash(t.Endpoint) + ", but no handshake has been established on it yet"
 		c.Next = "a tunnel that was just built always passes through this state. If it stays here, the VPS's WireGuard UDP port, this line's firewall or the ISP " +
 			"may be dropping the tunnel's UDP; run wgft server doctor on the VPS to see the same tunnel from the other side"
@@ -576,13 +577,13 @@ func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.D
 	// 誤りの種類でも、どの呼び出しが失敗したかでも分けない。判定に使えるのは、その時点で転送に
 	// 使える解決済みのエンドポイントが残っているかどうかだけである(10.2c 節)。
 	if t.Endpoint == "" {
-		c.Status, c.Reason = statusFailed, agentReasonTunnelErrorNoEndpoint
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonTunnelErrorNoEndpoint
 		c.Detail = "the tunnel reports an error and holds no resolved endpoint to carry traffic: " + t.Reason
 		c.Next = "read the agent's log for what it says while building and driving the tunnel, with journalctl -u wgft-agent, or docker logs for a container. " +
 			"The wg endpoint resolve line above says whether the peer's name resolves from here"
 		return
 	}
-	c.Status, c.Reason = statusUnknown, agentReasonTunnelErrorEndpointKept
+	c.Status, c.Reason = doctor.StatusUnknown, agentReasonTunnelErrorEndpointKept
 	// wg 設定の拒否では、インタフェースは直前の設定のまま残るが、server が拒んだ設定で動く間はトンネルの
 	// 中の宛先が合わず、転送が止まりうる。エンドポイントが転送を続けられるとは言わない(設計文書 7b.1 節)
 	if strings.HasPrefix(t.Reason, agent.ReasonWGRefused) {
@@ -604,16 +605,16 @@ func agentNoTunnelCheck(c *agentDoctorCheck, reason string) {
 	// 理由は UNKNOWN の側に倒す。壊れていると断じるより、判定できないと述べるほうが害が小さい。
 	switch {
 	case strings.HasPrefix(reason, "no tunnel; building it failed"):
-		c.Status, c.Reason = statusFailed, agentReasonTunnelBuildFailed
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonTunnelBuildFailed
 		c.Detail = "there is no tunnel: " + reason
 		c.Next = "read why the build failed in the agent's log, with journalctl -u wgft-agent, or docker logs for a container. " +
 			"The wg configuration comes from the server, so wgft rule ls and the server's log on the VPS say what it was told to build"
 	case strings.Contains(reason, "full state not received"):
-		c.Status, c.Reason = statusUnknown, agentReasonFullStatePending
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonFullStatePending
 		c.Detail = "there is no tunnel yet: " + reason
 		c.Next = "this is where an agent sits until the server answers it. The control connection line above says whether the stream is up"
 	default:
-		c.Status, c.Reason = statusUnknown, agentReasonNoTunnel
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoTunnel
 		c.Detail = "there is no tunnel right now: " + reason
 		c.Next = "closing the tunnel is also a normal step, after agent rotate-key or while the agent stops, so this alone is not a fault. " +
 			"Run this command again to see whether one comes back"
@@ -627,7 +628,7 @@ func agentNoTunnelCheck(c *agentDoctorCheck, reason string) {
 func agentSocketBuffersCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
 	t := st.Tunnel
 	if !t.Present {
-		c.Status, c.Reason = statusSkipped, agentReasonNoTunnel
+		c.Status, c.Reason = doctor.StatusSkipped, agentReasonNoTunnel
 		c.Detail = "there is no tunnel now, so there are no WireGuard UDP sockets to measure"
 		c.Next = "the tunnel line above says why there is none; the agent measures its sockets each time it builds the tunnel"
 		return
@@ -635,16 +636,16 @@ func agentSocketBuffersCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent
 	b := t.SocketBuffers
 	switch {
 	case b == nil:
-		c.Status, c.Reason = statusUnknown, agentReasonSocketBuffersNotReported
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonSocketBuffersNotReported
 		c.Detail = "the running agent did not report its WireGuard UDP socket buffers"
 		c.Next = agentRestartForDoctorNext
 		return
 	case !b.Supported:
-		c.Status, c.Reason = statusNotTested, agentReasonNotMeasuredOnThisOS
+		c.Status, c.Reason = doctor.StatusNotTested, agentReasonNotMeasuredOnThisOS
 		c.Detail = "the WireGuard UDP socket buffers are measured on Linux only; how this OS sizes them has not been verified"
 		return
 	case b.Error != "":
-		c.Status, c.Reason = statusUnknown, agentReasonSocketBuffersUnreadable
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonSocketBuffersUnreadable
 		c.Detail = "the running agent could not measure its WireGuard UDP socket buffers: " + b.Error
 		c.Next = "read the agent's log from the time the tunnel was built, with journalctl -u wgft-agent, or docker logs for a container"
 		return
@@ -656,11 +657,11 @@ func agentSocketBuffersCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent
 	measured := fmt.Sprintf("the WireGuard UDP sockets on port %d got a receive buffer of %d bytes and a send buffer of %d bytes when the tunnel was built %s",
 		b.Port, b.Recv, b.Send, agentWhen(in.Now, t.StartedAt))
 	if b.Recv >= req && b.Send >= req {
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = measured + fmt.Sprintf("; userspace mode requires %d bytes each", req)
 		return
 	}
-	c.Status, c.Reason = statusFailed, agentReasonSocketBufferShort
+	c.Status, c.Reason = doctor.StatusFailed, agentReasonSocketBufferShort
 	c.Detail = measured + fmt.Sprintf("; userspace mode requires at least %d bytes each", req)
 	c.Next = sockbufFixNext
 }
@@ -680,7 +681,7 @@ var sockbufFixNext = fmt.Sprintf("set net.core.rmem_max and net.core.wmem_max to
 func agentUDPAccountingCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
 	t := st.Tunnel
 	if !t.Present {
-		c.Status, c.Reason = statusSkipped, agentReasonNoTunnel
+		c.Status, c.Reason = doctor.StatusSkipped, agentReasonNoTunnel
 		c.Detail = "there is no tunnel now, so there is no UDP to account for"
 		c.Next = "the tunnel line above says why there is none"
 		return
@@ -688,16 +689,16 @@ func agentUDPAccountingCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) 
 	u := t.UDPAccounting
 	switch {
 	case u == nil:
-		c.Status, c.Reason = statusUnknown, agentReasonUDPAccountingNotReported
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonUDPAccountingNotReported
 		c.Detail = "the running agent did not report its UDP receive accounting"
 		c.Next = agentRestartForDoctorNext
 	case u.Stopped:
-		c.Status, c.Reason = statusFailed, agentReasonUDPAccountingStopped
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonUDPAccountingStopped
 		c.Detail = "the UDP receive accounting of the tunnel found an internal inconsistency and stopped all UDP on the tunnel: " + u.Error +
 			"; TCP rules keep working"
 		c.Next = "restart the agent to resume UDP, and report this as a bug with the agent's log, from journalctl -u wgft-agent or docker logs for a container"
 	default:
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = "the UDP receive accounting of the tunnel is consistent"
 	}
 }
@@ -714,7 +715,7 @@ func agentHandshakeText(now, h time.Time) string {
 // 場合の予定を示す。次の作り直しまでの残り時間は示さない。値が保持されておらず、示すには起点を
 // 求める規則を診断の側に写すことになる(10.2c 節)。
 func agentWatchdogCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
-	c.Status, c.Reason = statusUnknown, agentReasonNoThreshold
+	c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoThreshold
 	t := st.Tunnel
 	var parts []string
 	switch {
@@ -740,12 +741,12 @@ func agentWatchdogCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.Doct
 func agentTransferCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
 	t := st.Tunnel
 	if !t.Present {
-		c.Status, c.Reason = statusUnknown, agentReasonNoTunnel
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoTunnel
 		c.Detail = "there is no tunnel now, so it carries no counters"
 		c.Next = "the tunnel line above says why there is none"
 		return
 	}
-	c.Status, c.Reason = statusUnknown, agentReasonNoThreshold
+	c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoThreshold
 	c.Detail = fmt.Sprintf("%d bytes received and %d bytes sent on the tunnel built %s", t.RxBytes, t.TxBytes, agentWhen(in.Now, t.StartedAt))
 	if st.Mode == credentials.ModeKernel {
 		// カーネルは数をインタフェースを作ったときから数え、エージェントの再起動では 0 に戻さない
@@ -776,7 +777,7 @@ func agentListenersCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState, agen
 		return
 	}
 	if len(st.Rules) == 0 {
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = "the relay holds no rules, so it opens no listeners"
 		return
 	}
@@ -789,11 +790,11 @@ func agentListenersCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState, agen
 		good = append(good, r)
 	}
 	if len(bad) == 0 {
-		c.Status = statusOK
+		c.Status = doctor.StatusOK
 		c.Detail = fmt.Sprintf("%d rule%s, all listening: %s", len(good), pluralS(len(good)), strings.Join(agentRuleLines(good), "; "))
 		return
 	}
-	c.Status, c.Reason = statusFailed, agentReasonListenerError
+	c.Status, c.Reason = doctor.StatusFailed, agentReasonListenerError
 	c.Detail = fmt.Sprintf("%d of %d rule%s cannot serve: %s", len(bad), len(st.Rules), pluralS(len(st.Rules)), strings.Join(agentRuleLines(bad), "; "))
 	if len(good) > 0 {
 		c.Detail += fmt.Sprintf(". The other %d rule%s listen", len(good), pluralS(len(good)))
@@ -832,7 +833,7 @@ func agentSessionsCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
 	if agentNoRelay(c, st, "how many connections it carries") {
 		return
 	}
-	c.Status, c.Reason = statusUnknown, agentReasonNoThreshold
+	c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoThreshold
 	var parts []string
 	for _, b := range st.Budgets {
 		part := fmt.Sprintf("%s budget %d, %d in use, %d rule%s admitted", b.Proto, b.Total, b.InUse, b.Rules, pluralS(b.Rules))
@@ -871,7 +872,7 @@ func agentRefusalsCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.Doct
 	if agentNoRelay(c, st, "how many flows it refused") {
 		return
 	}
-	c.Status, c.Reason = statusUnknown, agentReasonNoThreshold
+	c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoThreshold
 	start := "since this tunnel was built " + agentWhen(in.Now, st.RefusalsSince)
 	// 拒否は、ルールと理由の組ごとに立つ。組の数にも上限が無いので、並べる数を抑え、抑えたことを
 	// 末尾に書く。切ったことが読み取れないと、運用者は並びが全部だと読む。
@@ -906,7 +907,7 @@ func agentNoRelay(c *agentDoctorCheck, st *agent.DoctorRuntimeState, what string
 	if len(st.Budgets) > 0 {
 		return false
 	}
-	c.Status, c.Reason = statusSkipped, agentReasonNoRelay
+	c.Status, c.Reason = doctor.StatusSkipped, agentReasonNoRelay
 	c.Detail = "there is no relay running, so " + what + " could not be read: the relay is built with the tunnel, and there is no tunnel now"
 	c.Next = "the tunnel line above says why there is none"
 	return true
@@ -915,13 +916,13 @@ func agentNoRelay(c *agentDoctorCheck, st *agent.DoctorRuntimeState, what string
 // agentDisabledSkip は状態と理由の符号を SKIPPED / agent_disabled に置く。呼び出し側が Detail を
 // 組み立てる。relay.listeners と、カーネルモードの 3 つの検査(agentdoctorkernel.go)が使う。
 func agentDisabledSkip(c *agentDoctorCheck) {
-	c.Status, c.Reason = statusSkipped, agentReasonAgentDisabled
+	c.Status, c.Reason = doctor.StatusSkipped, agentReasonAgentDisabled
 }
 
 // agentAllowTargetsValue は、稼働中のエージェントが実際に持っている宛先の許可一覧を示す。組み立てた
 // 値ではなく、常駐プロセスが enforce している値である(10.2c 節)。
 func agentAllowTargetsValue(c *agentDoctorCheck, a *agent.DoctorAllowTargets) {
-	c.Status = statusOK
+	c.Status = doctor.StatusOK
 	env := a.Env
 	if env == "" {
 		env = allowtargets.Env
@@ -939,7 +940,7 @@ func agentAllowTargetsValue(c *agentDoctorCheck, a *agent.DoctorAllowTargets) {
 
 // agentWhen は過ぎた時刻を、その時刻と今からの隔たりで表す。
 func agentWhen(now, t time.Time) string {
-	return "at " + t.UTC().Format(time.RFC3339) + ", " + since(now, t).String() + " ago"
+	return "at " + t.UTC().Format(time.RFC3339) + ", " + doctor.Since(now, t).String() + " ago"
 }
 
 // agentDue はこれから来る時刻を、その時刻と今からの隔たりで表す。

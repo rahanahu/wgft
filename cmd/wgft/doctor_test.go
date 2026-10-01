@@ -25,7 +25,22 @@ import (
 // `wgft server doctor` の判定を固定したものであり、切り出しが挙動を変えていないことを示すため、
 // 本文を変えずにそのまま残してある。下の別名は、切り出しの前と同じ名前でその package を指す
 // ためだけのものである。
+type (
+	checkReport  = doctor.Check
+	doctorReport = doctor.Report
+	doctorInput  = doctor.Input
+	probeResult  = doctor.ProbeResult
+	ruleReport   = doctor.RuleReport
+)
+
 const (
+	statusOK        = doctor.StatusOK
+	statusFailed    = doctor.StatusFailed
+	statusUnknown   = doctor.StatusUnknown
+	statusNotTested = doctor.StatusNotTested
+	statusSkipped   = doctor.StatusSkipped
+
+	checkDataplane     = doctor.CheckDataplane
 	checkEnabled       = doctor.CheckEnabled
 	checkPublicPort    = doctor.CheckPublicPort
 	checkSourceFilter  = doctor.CheckSourceFilter
@@ -66,6 +81,14 @@ const (
 
 // checkOrder は経路の順である。判定と同じ並びを使う。
 var checkOrder = doctor.CheckOrder()
+
+var buildReport = doctor.BuildReport
+
+func statusWord(s string) string { return doctor.StatusWord(s) }
+
+func displayStatus(c checkReport) string { return doctor.DisplayStatus(c) }
+
+func agentLines(rep doctorReport) []checkReport { return rep.AgentSummaries() }
 
 func diagnose(r proto.Rule, in doctorInput) []checkReport { return doctor.Diagnose(r, in) }
 
