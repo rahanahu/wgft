@@ -80,14 +80,14 @@ type ServerInfo struct {
 }
 
 // ReservedFromServerInfo builds the proto.Reserved set a real Batch refuses a listen_port for,
-// from a ServerInfo report of the server's own ports. It mirrors, field for field, how
-// internal/vpsd/vpsd.go builds Daemon.reserved at startup (around opts.WGPort/AdminAddr/
-// AgentAPIAddr): the WireGuard port is always reserved; the admin API's port is reserved only
-// when AdminAddr parses as host:port (a Unix socket, e.g. the default
+// from a ServerInfo report of the server's own ports. It is the one implementation of the rule:
+// internal/vpsd builds Daemon.reserved at startup with this function too, from the same three
+// fields its Daemon.ServerInfo reports. The WireGuard port is always reserved; the admin API's port
+// is reserved only when AdminAddr parses as host:port (a Unix socket, e.g. the default
 // "unix:///run/wgft/admin.sock", does not reserve a port); the agent API's port comes from
 // AgentAPIPort, which this struct's producers (Daemon.ServerInfo, the admin client's ServerInfo)
 // already return net.SplitHostPort'd (an empty or unparseable value reserves nothing for it, the
-// same as a net.SplitHostPort failure in vpsd.go).
+// same as a net.SplitHostPort failure on the server's own setting).
 //
 // Both `rule add`/`rule set --dry-run` (cmd/wgft/rule.go) and the Web UI's read-import
 // confirmation (webui_import.go's renderImportConfirm) call this function so the reserved-port rule

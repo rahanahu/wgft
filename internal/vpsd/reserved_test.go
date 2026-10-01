@@ -10,9 +10,9 @@ import (
 )
 
 // TestReservedPorts pins reservedPorts's rule with explicit inputs and outputs: this is the
-// authoritative construction of Daemon.reserved (Options -> proto.Reserved), which
-// internal/vpsd/admin.ReservedFromServerInfo mirrors from admin.ServerInfo for the CLI's
-// `rule add`/`rule set --dry-run` and the Web UI's read-import confirmation. Before this test
+// construction of Daemon.reserved (Options -> proto.Reserved), which goes through
+// internal/vpsd/admin.ReservedFromServerInfo, the function the CLI's `rule add`/`rule set
+// --dry-run` and the Web UI's read-import confirmation call on admin.ServerInfo. Before this test
 // existed, nothing in the repository exercised this construction: a mutation dropping the admin
 // API's reservation, for example, left `go test ./...` green everywhere. Guarding the real
 // construction (as opposed to only a copy of it, the way admin's own tests necessarily do) is

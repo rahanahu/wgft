@@ -348,10 +348,7 @@ func (d *Daemon) Warnings() ([]admin.Warning, error) {
 
 // ServerInfo は vpsd/VPS の構成と環境を返す(ダッシュボード上部、仕様 10.1)。
 func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
-	apiPort := ""
-	if _, p, err := net.SplitHostPort(d.opts.AgentAPIAddr); err == nil {
-		apiPort = p
-	}
+	ports := serverPortsInfo(d.opts)
 	ipf := ""
 	if b, err := d.st.GetMeta(store.MetaIPForwardSetAt); err == nil {
 		ipf = string(b)
@@ -363,10 +360,10 @@ func (d *Daemon) ServerInfo() (admin.ServerInfo, error) {
 		StartedAt:        d.startedAt.UTC().Format(time.RFC3339),
 		WGInterface:      d.opts.WGInterface,
 		WGAddress:        d.opts.WGAddress,
-		WGPort:           int(d.opts.WGPort),
+		WGPort:           ports.WGPort,
 		WGEndpoint:       d.opts.WGEndpoint,
-		AgentAPIPort:     apiPort,
-		AdminAddr:        d.opts.AdminAddr,
+		AgentAPIPort:     ports.AgentAPIPort,
+		AdminAddr:        ports.AdminAddr,
 		MTU:              d.opts.MTU,
 		ServerPubKey:     d.serverKey.PublicKey().String(),
 		Kernel:           d.kernel,
