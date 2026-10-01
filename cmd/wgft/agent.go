@@ -15,6 +15,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/teardown"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/textsafe"
 )
@@ -545,7 +546,7 @@ func newAgentTeardownCmd() *cobra.Command {
 			if err := validateInterfaceName("WGFT_WG_INTERFACE", c.str("WGFT_WG_INTERFACE")); err != nil {
 				return err
 			}
-			return agent.Teardown(agent.TeardownOptions{
+			return teardown.Teardown(teardown.TeardownOptions{
 				CredentialsPath: joinPath(c.str("WGFT_DATA_DIR"), "agent.json"),
 				Interface:       c.str("WGFT_WG_INTERFACE"),
 				DryRun:          dryRun,

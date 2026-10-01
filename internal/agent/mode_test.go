@@ -11,9 +11,12 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/startup"
+	"github.com/rahanahu/wgft/proto"
 )
 
 // reconcileMode の表(仕様 11a 節)。記録の無いファイルはユーザー空間モード、設定の省略もユーザー空間
@@ -134,6 +137,28 @@ func TestEnterMode(t *testing.T) {
 		}
 		if got := read(t, path); got != body {
 			t.Errorf("the refused start rewrote agent.json:\n%s", got)
+		}
+	})
+	t.Run("the records teardown leaves start in userspace mode", func(t *testing.T) {
+		// wgft agent teardown(internal/agent/teardown)は登録の情報、今の鍵、last_state、トンネルの
+		// アドレスの記録を残し、カーネルモードの記録だけを消す。その agent.json で、WGFT_MODE を省略した
+		// 起動が関門を通る(設計文書 10.3 節)
+		cur, err := wgtypes.GeneratePrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := &credentials.Credentials{
+			Name: "home", Endpoint: "vps:8443", CertSHA256: strings.Repeat("ab", 32), PermanentToken: "tok",
+			WGPrivateKey:  cur.String(),
+			LastState:     &proto.State{Generation: 9, WG: proto.WGConfig{Address: "10.200.0.2/24", ServerPubkey: "x"}},
+			TunnelAddress: "10.200.0.2/24",
+		}
+		path := write(t, "")
+		if err := f.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		if mode, err := enterMode(load(t, path), "", path); err != nil || mode != credentials.ModeUserspace {
+			t.Errorf("= %q, %v; want userspace and no refusal after teardown", mode, err)
 		}
 	})
 	t.Run("userspace writes nothing", func(t *testing.T) {

@@ -27,7 +27,7 @@ var kernelModeAvailable = kernelModeBuilt
 //     文面は WGFT_MODE=kernel を設定する道と、撤去してから切り替える道の両方を示す
 //
 // 記録が kernel でも userspace でもない値なら、認証情報ファイルと設定が矛盾するものとして拒否する。撤去も
-// この記録を消さずに止まる(teardown.go)ので、文面は撤去を案内しない。
+// この記録を消さずに止まる(teardown/teardown.go)ので、文面は撤去を案内しない。
 // want が kernel でも userspace でも空でもなければ、種別 config で拒否する。
 func reconcileMode(recorded, want string) (mode string, record bool, err error) {
 	have := recorded

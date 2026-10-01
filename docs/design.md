@@ -1095,6 +1095,9 @@ internal/
   platform/linux/        sysctl、capability、他ファイアウォールとの衝突の検査
   vpsd/                  制御プレーン(登録、stream、SQLite、admin API)。proxyrelay が frontend の participant を実装する(下記)
   agent/                 制御プレーン(認証情報、stream クライアント、rotate-key)と、2 つのモードの dataplane を切り替える境目(下記)
+  agent/credentials/     認証情報ファイル(agent.json)、そのロック、停止中に CLI が認証情報ファイルを書くための排他(9 節)
+  agent/allowtargets/    エージェントが接続してよい宛先の一覧(7 節)
+  agent/teardown/        wgft agent teardown の判定と順序、撤去のカーネル操作(10.3 節)。実行時の状態に依存しない
 proto/                   維持する外部仕様としての wire スキーマ(既存フィールドの意味は変えず、加算のみ許す)
 ```
 
@@ -1107,6 +1110,8 @@ agent は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` をまだ�
 この境目は依存の向きの規則を変えない。カーネルモードのために加える部品は `internal/dataplane/linuxkernel` の下に置き、`internal/agent` を import しない。`internal/dataplane/deps_test.go` の `TestDependencyDirection`、`TestPureLayersStayPure`、`TestVpsdSubpackagesDoNotImportVpsd`、`TestPolicyNftablesDoesNotImportGoogleNftables` は変えずに、この配置を検査する。
 
 境目は `internal/agent/dataplane.go` の interface `agentDataplane` である。ユーザー空間モードの実装 `userspaceDataplane` は同じ package の `dataplane_userspace.go` にあり、カーネルモードの実装も同じ package に置く。境目の後ろの実装が持つのは、トンネルを立てることと閉じること、ルールの宣言への収束、30 秒ごとの見直し、watchdog が読む最終ハンドシェイク、ハートビートと `agent doctor` が共有する 1 回の読み取りである。処理済み世代と `last_state` の記録、トンネルの作成の試し直しの予定、トンネルを作り直すかどうかの判定は、境目の手前の実行時の状態に残す。ルールの収束は、宣言をまとめて公開できなかった backend 全体の失敗(7b.3 節の 3 つ目の種類)を誤りとして返し、このとき処理済み世代は進まない。ルール単位の失敗は誤りにせず、ルールごとの状態として読み取りに載せる。
+
+`internal/agent` の下位の package は `internal/agent` を import しない。実行時の状態を持つ `internal/agent` が下位の package を使う向きだけを許し、`wgft agent teardown` のような 1 回限りのコマンドを実行時の状態から切り離すためである。`internal/vpsd` の下位の package と同じ規則であり、`internal/dataplane/deps_test.go` の `TestAgentSubpackagesDoNotImportAgent` が検査する。
 
 `internal/startup` は、この向きの例外ではなく葉である。モジュールの中の何も import せず、`cmd/wgft` から `internal/dataplane/linuxkernel/wg` までのどの層も import できる。起動の拒否は、値を受け取る入口と、カーネルに書き込む層の両方が作るので、どちらからも見える場所に置く必要がある。`internal/resource` と `internal/lograte` と同じ扱いであり、`internal/dataplane/deps_test.go` がモジュールの中を import しないことを検査する。`internal/textsafe`(信頼できない文字列の無害化。11 節)も同じ理由で葉に置く。`cmd/wgft`、`internal/agent`、`internal/vpsd/stream` のように、エージェントが選ぶ文字列を端末へ出す層すべてから見える必要があるためである(2026-09-25、所有者の決定)。
 

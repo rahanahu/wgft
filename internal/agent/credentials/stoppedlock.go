@@ -1,12 +1,10 @@
-package agent
+package credentials
 
 import (
 	"errors"
-
-	"github.com/rahanahu/wgft/internal/agent/credentials"
 )
 
-// lockWhileStopped は、エージェントが止まっている間に CLI が認証情報ファイルを書くための排他を取る
+// LockWhileStopped は、エージェントが止まっている間に CLI が認証情報ファイルを書くための排他を取る
 // (仕様 9 節)。停止中の rotate-key と agent pubkey が使う。
 //
 // 稼働中のエージェントは認証情報ファイルの中身をメモリの上に持ち、保存のたびに全体を書き直す。
@@ -14,7 +12,8 @@ import (
 // CLI の変更もエージェントの次の保存で消える。そこで、稼働中なら running を true で返し、呼び出し側は
 // 書かない。
 //
-// 判定はロックファイルを作らない Inspect で行う(設計 10.2c 節)。
+// 判定はロックファイルを作らない Inspect で行う(設計 10.2c 節)。inspect は普通 Inspect であり、
+// 呼び出し側のテストだけが、判定と取得の間にエージェントが起動した場合を模すために差し替える。
 //   - Locked: 別のプロセスがロックを持つ。多くは稼働中のエージェントだが、停止中に書いている別の CLI
 //     (別の agent pubkey や停止中の rotate-key)のこともある。どちらでも running を true で返す。
 //   - Unlocked: ロックを取ってから返す。既にあるロックファイルを開くだけなので、持ち主は変わらない。
@@ -28,17 +27,17 @@ import (
 //
 // release は、ロックを取った場合はそれを放し、取らなかった場合は何もしない。running が true か err が
 // nil でなければ、release は nil である。
-func lockWhileStopped(path string) (release func(), running bool, err error) {
-	state, err := inspectLock(path)
+func LockWhileStopped(path string, inspect func(path string) (State, error)) (release func(), running bool, err error) {
+	state, err := inspect(path)
 	if err != nil {
 		return nil, false, err
 	}
 	switch state {
-	case credentials.Locked:
+	case Locked:
 		return nil, true, nil
-	case credentials.Unlocked:
-		lock, err := credentials.Acquire(path)
-		if errors.Is(err, credentials.ErrLocked) {
+	case Unlocked:
+		lock, err := Acquire(path)
+		if errors.Is(err, ErrLocked) {
 			return nil, true, nil
 		}
 		if err != nil {

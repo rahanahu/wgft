@@ -22,9 +22,9 @@ var publicKeyLockedHook func()
 
 // PublicKey は認証情報ファイルの鍵の公開鍵を返す。エージェントが止まっていて鍵が無ければ、生成して
 // 保存する。別のプロセスがロックを持っていれば読むだけで書かない(仕様 9 節)。排他の取り方は停止中の
-// rotate-key と同じで、lockWhileStopped にある。
+// rotate-key と同じで、credentials.LockWhileStopped にある。
 func PublicKey(path string) (wgtypes.Key, error) {
-	release, running, err := lockWhileStopped(path)
+	release, running, err := credentials.LockWhileStopped(path, inspectLock)
 	if err != nil {
 		return wgtypes.Key{}, err
 	}
