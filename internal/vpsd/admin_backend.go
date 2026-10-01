@@ -224,52 +224,22 @@ func (d *Daemon) Batch(req admin.BatchRequest) (*store.BatchResult, error) {
 		// 行う。読み取りと変更の間に他経路が割り込む余地が無いので、Web UI の読み込み確認・
 		// 適用のように、確認を描いた時点から適用までに間がある操作で、その間の別経路の変更を
 		// 見逃さず塞げる(仕様 5.4、10.1 節)。
-		if req.ExpectedDigest != "" && proto.RulesDigest(rules) != req.ExpectedDigest {
-			return nil, admin.ErrBatchConflict
+		// 受理の規則と併合の規則は、CLI の --dry-run と Web UI の読み込みの確認と共有する
+		// (internal/vpsd/admin の batchrules.go)。無い ID の削除と、登録されていない
+		// エージェントを指す upsert の行も、ここで拒む
+		registered := func(name string) bool { _, ok := agentAddr[name]; return ok }
+		m, err := admin.AdmitBatch(rules, req, registered)
+		if err != nil {
+			return nil, err
 		}
-		added, updated, deleted = nil, nil, nil
-		byID := map[string]int{}
-		for i, r := range rules {
-			byID[r.ID] = i
-		}
-		// 無い ID の削除は成功扱いにしない(`rule ls` の短縮表示をそのまま渡した場合など)
-		del := map[string]bool{}
-		for _, id := range req.Delete {
-			if _, ok := byID[id]; !ok {
-				return nil, fmt.Errorf("rule %q not found", id)
-			}
-			del[id] = true
-			deleted = append(deleted, id)
-		}
-		for _, u := range req.Upsert {
-			if _, ok := agentAddr[u.Agent]; !ok {
-				return nil, fmt.Errorf("rule %s: agent %q is not registered", u.ID, u.Agent)
-			}
-			if i, ok := byID[u.ID]; ok {
-				// 読み込みは変わっていない行も upsert に含むので、中身が変わった行だけを記録する
-				if proto.RulesDigest([]proto.Rule{rules[i]}) != proto.RulesDigest([]proto.Rule{u}) {
-					updated = append(updated, u.ID)
-				}
-				rules[i] = u
-			} else {
-				byID[u.ID] = len(rules)
-				rules = append(rules, u)
-				added = append(added, u.ID)
-			}
-		}
-		out := rules[:0]
-		for _, r := range rules {
-			if !del[r.ID] {
-				out = append(out, r)
-			}
-		}
+		added, updated, deleted = m.Added, m.Updated, m.Deleted
 		// 追加・変更されたルールだけ、他テーブルの DNAT と bind 中のポートを検査する
 		for _, u := range req.Upsert {
 			if err := d.checkRule(&u, rep, req.Force); err != nil {
 				return nil, err
 			}
 		}
-		return out, nil
+		return m.Rules, nil
 	})
 	if err != nil {
 		return nil, err

@@ -175,34 +175,20 @@ func (s *Server) renderImportConfirm(w http.ResponseWriter, locale, filename str
 	s.renderImportPage(w, locale, "importConfirmTitle", "importconfirm", data)
 }
 
-// importIssues は、適用ボタンを出さない条件(仕様 10.1 節)を集める。未登録の
+// importIssues は、適用ボタンを出さない条件(仕様 10.1 節)を集める。条件は Batch の受理の規則
+// を持つ PreflightBatch(batchrules.go)が決め、CLI の --dry-run と共有する。未登録の
 // エージェントを指すルールと、Rule.Validate / 全体の重複・重なり・予約ポートに落ちるルールで
 // ある。Rule.Validate は、適用時のバッチ(proto.ValidateUpsert)と同じく、current から変わって
 // いない行には掛けない。後から増えた検査に落ちる古い行(例:proxy の範囲)があっても、
-// その行を変えない読み込みは CLI と同じく適用できる。reserved は呼び出し元が
-// admin.ReservedFromServerInfo で組んだ、実際の Daemon.Batch が拒む予約ポートの集合であり、
-// これを nil のまま ValidateUpsert に渡すと、予約ポートに重なる読み込みを「受理される」と
-// 見せかけてしまう(design.md 改訂の記録の --dry-run の項と同じ欠陥)。
+// その行を変えない読み込みは CLI と同じく適用できる。全体の検査は、適用時に併合される集合では
+// なく、読み込んだ desired をそのまま見る。desired に同じ ID が 2 度ある読み込みは、ここで
+// 拒まれる。reserved は呼び出し元が admin.ReservedFromServerInfo で組んだ、実際の Daemon.Batch
+// が拒む予約ポートの集合であり、これを nil のまま ValidateUpsert に渡すと、予約ポートに重なる
+// 読み込みを「受理される」と見せかけてしまう(design.md 改訂の記録の --dry-run の項と同じ欠陥)。
 func importIssues(desired, current []proto.Rule, agents map[string]bool, reserved proto.Reserved) []string {
 	var out []string
-	unchanged := proto.UnchangedIDs(desired, current)
-	for _, r := range desired {
-		if !unchanged[r.ID] {
-			if err := r.Validate(); err != nil {
-				out = append(out, fmt.Sprintf("rule %s: %v", r.ID, err))
-				continue
-			}
-		}
-		if !agents[r.Agent] {
-			out = append(out, fmt.Sprintf("rule %s: agent %q is not registered", r.ID, r.Agent))
-		}
-	}
-	// 行ごとの誤りが無いときだけ全体の検査(ID の重複、予約ポート、重なり)を足す。行ごとの
-	// 誤りを全体の検査がもう一度報告して、同じ行が 2 回出るのを避ける
-	if len(out) == 0 {
-		if err := proto.ValidateUpsert(desired, current, reserved); err != nil {
-			out = append(out, err.Error())
-		}
+	for _, err := range PreflightBatch(desired, current, desired, agents, reserved) {
+		out = append(out, err.Error())
 	}
 	return out
 }

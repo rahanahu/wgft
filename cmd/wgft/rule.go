@@ -586,7 +586,7 @@ func runRuleDryRun(c *admin.Client, upsert []proto.Rule) error {
 	for _, a := range agentList {
 		agents[a.Name] = true
 	}
-	desired, _ := admin.ApplyBatchToRules(current.Rules, admin.BatchRequest{Upsert: upsert})
+	desired := admin.MergeBatch(current.Rules, admin.BatchRequest{Upsert: upsert}).Rules
 
 	fmt.Println("dry-run: changes if this were applied:")
 	printed := false
@@ -620,37 +620,36 @@ func runRuleDryRun(c *admin.Client, upsert []proto.Rule) error {
 // for, from GET /api/v1/server's report of the server's own ports. It delegates to
 // admin.ReservedFromServerInfo, the rule internal/vpsd/vpsd.go's construction of Daemon.reserved
 // at startup mirrors, so this CLI path and the Web UI's read-import confirmation
-// (internal/vpsd/admin/webui_import.go's importIssues) share one implementation instead of two
+// (internal/vpsd/admin/webui_import.go's renderImportConfirm) share one implementation instead of two
 // that can drift apart the way they once did (design.md's revision record, --dry-run entry).
 func reservedFromServerInfo(info *admin.ServerInfo) proto.Reserved {
 	return admin.ReservedFromServerInfo(*info)
 }
 
-// ruleDryRunIssues collects the reasons a dry run would refuse upsert. A row's own shape
-// (proto.Rule.Validate) is not checked here: both callers of runRuleDryRun (`rule add` and
-// `rule set`'s RunE, cmd/wgft/rule.go) already run it and return early on failure before ever
-// calling runRuleDryRun, so a re-check here could never fail and would only mislead a reader of
-// this function into thinking shape errors are caught at this point. Per row of upsert, it
-// checks the agent's registration against the names GET /api/v1/agents returns, matching what
-// Daemon.Batch itself checks per row of req.Upsert (internal/vpsd/admin_backend.go). Only if
-// every row passes does it check the merged set (current with upsert applied, via the exported
-// admin.ApplyBatchToRules, the same helper the fake and demo Backends use to build that set) for
-// ID duplicates, reserved ports, and listen_port overlaps with proto.ValidateUpsert, matching
-// what store.ApplyBatch validates before saving (internal/vpsd/store/rules.go). reserved must be
-// built from the same GET /api/v1/server response this dry run just read
-// (reservedFromServerInfo); passing nil here was the defect an independent review found.
+// ruleDryRunIssues collects the reasons a dry run would refuse upsert, through
+// admin.PreflightBatch: the one place that holds Batch's admission rules and that the Web UI's
+// read-import confirmation also calls (internal/vpsd/admin/batchrules.go). The set it validates is
+// current with upsert applied by admin.MergeBatch, the same merge Daemon.Batch saves. Per row of
+// upsert, PreflightBatch checks the agent's registration against the names GET /api/v1/agents
+// returns, matching what Daemon.Batch itself checks per row of req.Upsert; only if every row
+// passes does it check the merged set for ID duplicates, reserved ports, and listen_port overlaps
+// with proto.ValidateUpsert, matching what store.ApplyBatch validates before saving. It also
+// checks a changed row's own shape (proto.Rule.Validate) first, but both callers of runRuleDryRun
+// (`rule add` and `rule set`'s RunE) already run that check and return early on failure, so that
+// check never fails here. reserved must be built from the same GET /api/v1/server response this
+// dry run just read (reservedFromServerInfo); passing nil here was the defect an independent
+// review found.
 func ruleDryRunIssues(upsert, current []proto.Rule, agents map[string]bool, reserved proto.Reserved) []string {
+	desired := admin.MergeBatch(current, admin.BatchRequest{Upsert: upsert}).Rules
 	var out []string
-	for _, r := range upsert {
-		if !agents[r.Agent] {
+	for _, err := range admin.PreflightBatch(upsert, current, desired, agents, reserved) {
+		var unregistered *admin.AgentNotRegisteredError
+		if errors.As(err, &unregistered) {
+			r := unregistered.Rule
 			out = append(out, fmt.Sprintf("%s: agent %q is not registered", dryRunRuleLabel(r, current), r.Agent))
+			continue
 		}
-	}
-	if len(out) == 0 {
-		desired, _ := admin.ApplyBatchToRules(current, admin.BatchRequest{Upsert: upsert})
-		if err := proto.ValidateUpsert(desired, current, reserved); err != nil {
-			out = append(out, redactThrowawayRuleIDs(err.Error(), upsert, current))
-		}
+		out = append(out, redactThrowawayRuleIDs(err.Error(), upsert, current))
 	}
 	return out
 }

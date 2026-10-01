@@ -222,6 +222,33 @@ func TestImportConfirmWithholdsApplyOnIssues(t *testing.T) {
 	}
 }
 
+// TestImportConfirmRefusesDuplicateIDs は、同じ ID を 2 度持つ読み込みを確認ページが拒むことを
+// 確かめる。確認ページは、適用時に併合される集合ではなく、読み込んだ desired をそのまま
+// proto.ValidateUpsert に掛ける(importIssues)。併合では後の行が前の行を置き換えるので、併合した
+// 集合を検査すると、この読み込みは受理されると表示される。
+func TestImportConfirmRefusesDuplicateIDs(t *testing.T) {
+	srv, _ := newImportTestServer(t)
+	desired := []proto.Rule{
+		{ID: "r_keep", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 443, Hi: 443}, Target: "192.168.1.30:443", VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_twice", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 8080, Hi: 8080}, Target: "192.168.1.40:8080", VPSMode: proto.ModeKernel, Enabled: true},
+		{ID: "r_twice", Agent: "home", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 8081, Hi: 8081}, Target: "192.168.1.40:8081", VPSMode: proto.ModeKernel, Enabled: true},
+	}
+	body, err := json.Marshal(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := multipartUpload(t, srv.URL+"/ui/rules/import?lang=en", "rules.json", body)
+	defer resp.Body.Close()
+	page, _ := io.ReadAll(resp.Body)
+	s := string(page)
+	if !strings.Contains(s, "Cannot apply") || !strings.Contains(s, "rule ID r_twice is duplicated") {
+		t.Errorf("expected the duplicated ID to be listed as an issue: %s", s)
+	}
+	if !strings.Contains(s, `type="submit" disabled`) {
+		t.Errorf("the apply button must be disabled when issues are present: %s", s)
+	}
+}
+
 // TestImportApplyAndStaleRefusal は、確認ページを描いた後にルール集合が変わると適用を
 // 拒むこと、変わらないまま出せば適用が通ることを確かめる(仕様 10.1 節)。
 // group/note/接続元制限/レートだけの変更は世代を上げない(5.3 節)ので、ここでは世代を
