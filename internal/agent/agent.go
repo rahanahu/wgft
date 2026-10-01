@@ -10,6 +10,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/resource"
@@ -97,9 +98,9 @@ type runtime struct {
 	// mu(rt.mu)は以下の値と dataplane を守り、全体状態の適用の間じゅう持つ。ただし rt.mu の外で行う
 	// 準備(名前の解決)はこの間に含まない。
 	//
-	// agentDataplane のメソッドは rt.mu を持って呼び、dataplane の中の排他はその内側で取る。ユーザー
+	// agentdp.Dataplane のメソッドは rt.mu を持って呼び、dataplane の中の排他はその内側で取る。ユーザー
 	// 空間モードでは relay.Manager の排他、カーネルモードでは epMu(dataplane_kernel.go)である。
-	// 任意の interface の prepareApply と observePrepare は rt.mu の外で呼び、その中でも epMu を取る。
+	// 任意の interface の PrepareApply と ObservePrepare は rt.mu の外で呼び、その中でも epMu を取る。
 	// epMu を持ったまま rt.mu を取ることは無いので、順は rt.mu -> epMu である。epMu の中では値の
 	// 読み書きとログの出力だけを行う。streamMu は rt.mu を持ったまま取らず、streamMu を持ったまま
 	// wgft の他の排他を取らない(streamobs.go)。rt.mu の中の checkTunnel から streamLoop へは、
@@ -107,7 +108,7 @@ type runtime struct {
 	// 放してから適用し直し、その後に streamMu を取って stream を張り直す(control.go の rotateKey)。
 	mu sync.Mutex
 	// dp はトンネルと転送を担う dataplane である(設計文書 7a.7 節の境目)。rt.mu が守る
-	dp    agentDataplane
+	dp    agentdp.Dataplane
 	wgCfg proto.WGConfig // 適用済みの wg 設定
 	gen   uint64         // 処理済み世代
 
@@ -126,7 +127,7 @@ type runtime struct {
 	// チャネルで、次の 30 秒を待たずにハートビートを 1 回送らせる。nil なら何も伝えない
 	stateNotify chan struct{}
 
-	// fatal は、stream の側の適用がプロセスを終える誤り(fatalError)に当たったことを Run に伝える。
+	// fatal は、stream の側の適用がプロセスを終える誤り(agentdp.FatalError)に当たったことを Run に伝える。
 	// 大きさ 1 の非ブロッキングのチャネルで、最初の 1 つだけが届けば足りる
 	fatal chan error
 
@@ -136,7 +137,7 @@ type runtime struct {
 	retrySt *proto.State
 
 	// refused は、トンネルが立っている間に届き、dataplane が wg 設定を拒んだ全体状態の世代と理由である
-	// (wgChecker、設計文書 7b.1・11 節)。拒んだ全体状態は適用せず、今のトンネルとルールを残す。
+	// (agentdp.WGChecker、設計文書 7b.1・11 節)。拒んだ全体状態は適用せず、今のトンネルとルールを残す。
 	// ハートビートのトンネルの状態に載せ、wg 設定を受け入れた次の全体状態で消す。メモリの上だけに持つ
 	refused *refusedState
 	// tunnelWarned は、記録と違うトンネルのアドレスとして直前に警告した値である(recordTunnelAddressLocked)
@@ -161,7 +162,7 @@ func (rt *runtime) closeLocked() {
 	// buildLocked が控え直す
 	rt.rebuild.clearRetry()
 	rt.retrySt = nil
-	rt.dp.close()
+	rt.dp.Close()
 }
 
 func (rt *runtime) close() {

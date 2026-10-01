@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/enroll"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -65,7 +66,7 @@ func TestCheckTunnelRecordsTheHandshakeEvidence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hs := time.Date(2026, 9, 25, 9, 0, 0, 0, time.UTC)
-			dp := &fakeDataplane{up: true, reading: dataplaneReading{tunnel: tunnelReading{present: true}}}
+			dp := &fakeDataplane{up: true, reading: agentdp.Reading{Tunnel: agentdp.TunnelReading{Present: true}}}
 			rt := newFakeDataplaneRuntime(t, dp)
 			rt.f.LastState = &proto.State{Generation: 1}
 			rt.rebuild = tc.rebuild
@@ -75,7 +76,7 @@ func TestCheckTunnelRecordsTheHandshakeEvidence(t *testing.T) {
 			if rt.handshakeSeen.Load().fresh(now) {
 				t.Fatal("a tunnel without a handshake counts as fresh")
 			}
-			dp.reading.tunnel.lastHandshake = hs
+			dp.reading.Tunnel.LastHandshake = hs
 			rt.checkTunnel(now)
 			if !rt.handshakeSeen.Load().fresh(now) {
 				t.Fatal("a handshake 5 s old does not count as fresh")
@@ -91,14 +92,14 @@ func TestCheckTunnelRecordsTheHandshakeEvidence(t *testing.T) {
 				t.Error("the handshake is still fresh 180 s after it; one fresh handshake must not keep the cap forever")
 			}
 			// 新しいハンドシェイクで再び新しくなる
-			dp.reading.tunnel.lastHandshake = hs.Add(200 * time.Second)
+			dp.reading.Tunnel.LastHandshake = hs.Add(200 * time.Second)
 			rt.checkTunnel(hs.Add(205 * time.Second))
 			if !rt.handshakeSeen.Load().fresh(hs.Add(205 * time.Second)) {
 				t.Error("a new handshake did not make the tunnel fresh again")
 			}
 			// 壁時計が戻ると、値は未来に見え続ける。同じ値を読み続けても、最初に観測してから 180 秒で古くなる
 			back := hs.Add(300 * time.Second)
-			dp.reading.tunnel.lastHandshake = back.Add(time.Hour)
+			dp.reading.Tunnel.LastHandshake = back.Add(time.Hour)
 			for i := 0; i <= 6; i++ {
 				rt.checkTunnel(back.Add(time.Duration(i) * 30 * time.Second))
 			}

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -17,8 +18,8 @@ type fakeSensedDataplane struct {
 	calls []time.Time
 }
 
-func (d *fakeSensedDataplane) sensor() dataplane.Sensor { return nil }
-func (d *fakeSensedDataplane) observeNotified(uint64, []proto.AgentRule) (bool, error) {
+func (d *fakeSensedDataplane) Sensor() dataplane.Sensor { return nil }
+func (d *fakeSensedDataplane) ObserveNotified(uint64, []proto.AgentRule) (bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, time.Now())
@@ -78,7 +79,7 @@ func TestServeDebouncesKernelNotifications(t *testing.T) {
 // ユーザー空間モードの dataplane は通知を購読せず、通知の後の見直しも何もしない。
 func TestUserspaceDoesNotWatchTheKernel(t *testing.T) {
 	rt := newRuntime(Options{}, nil, [32]byte{})
-	if _, ok := rt.dp.(sensed); ok {
+	if _, ok := rt.dp.(agentdp.Sensed); ok {
 		t.Fatal("the userspace dataplane subscribes to kernel notifications")
 	}
 	rt.watchKernel(context.Background())

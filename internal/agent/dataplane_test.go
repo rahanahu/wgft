@@ -12,6 +12,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/resource"
@@ -31,42 +32,47 @@ type fakeDataplane struct {
 	up       bool
 	applyErr error
 	applied  [][]proto.AgentRule
-	reading  dataplaneReading
+	reading  agentdp.Reading
 	reads    int
-	// builtWith は build が受け取った wg 設定の並びである
+	// builtWith は Build が受け取った wg 設定の並びである
 	builtWith []proto.WGConfig
-	// prepareHook は prepareApply の中で呼ばれる。名前を引いている間に他の経路が動く場合を模す
+	// prepareHook は PrepareApply の中で呼ばれる。名前を引いている間に他の経路が動く場合を模す
 	prepareHook func()
 }
 
-func (d *fakeDataplane) build(_ wgtypes.Key, wg proto.WGConfig) (bool, error) {
+func (d *fakeDataplane) Build(_ wgtypes.Key, wg proto.WGConfig) (bool, error) {
 	d.up = true
 	d.builtWith = append(d.builtWith, wg)
 	return true, nil
 }
 
-// prepareApply は、runtime が rt.mu の外で準備を呼ぶことを確かめるための口である。
-func (d *fakeDataplane) prepareApply(*proto.State) any {
+// PrepareApply は、runtime が rt.mu の外で準備を呼ぶことを確かめるための口である。
+func (d *fakeDataplane) PrepareApply(*proto.State) any {
 	if d.prepareHook != nil {
 		d.prepareHook()
 	}
 	return nil
 }
-func (d *fakeDataplane) built() bool { return d.up }
-func (d *fakeDataplane) applyRules(_ uint64, rules []proto.AgentRule, _ any) (string, error) {
+func (d *fakeDataplane) Built() bool { return d.up }
+func (d *fakeDataplane) ApplyRules(_ uint64, rules []proto.AgentRule, _ any) (string, error) {
 	if d.applyErr != nil {
 		return "", d.applyErr
 	}
 	d.applied = append(d.applied, rules)
 	return "fake", nil
 }
-func (d *fakeDataplane) refresh()                 {}
-func (d *fakeDataplane) close()                   { d.up = false }
-func (d *fakeDataplane) lastHandshake() time.Time { return d.reading.tunnel.lastHandshake }
-func (d *fakeDataplane) read() dataplaneReading {
+func (d *fakeDataplane) Refresh()                 {}
+func (d *fakeDataplane) Close()                   { d.up = false }
+func (d *fakeDataplane) LastHandshake() time.Time { return d.reading.Tunnel.LastHandshake }
+func (d *fakeDataplane) Read() agentdp.Reading {
 	d.reads++
 	return d.reading
 }
+
+// runtime は agentdp.Preparer を型アサーションだけで探すので、PrepareApply の形がずれると
+// アサーションが黙って偽になる。準備を呼ぶ経路の試験が落ちるより先にコンパイルで気付けるよう、
+// ここで固定する。
+var _ agentdp.Preparer = (*fakeDataplane)(nil)
 
 func newFakeDataplaneRuntime(t *testing.T, dp *fakeDataplane) *runtime {
 	t.Helper()
@@ -159,7 +165,7 @@ func TestApplyKeepsTheGenerationWhenTheDataplaneFails(t *testing.T) {
 // 数え直すと、stream の再接続の待ちを 30 秒ごとに打ち切ってしまう(仕様 5.2 節)。
 func TestCheckTunnelWakesOncePerHandshakeWithoutAThreshold(t *testing.T) {
 	hs := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
-	dp := &fakeDataplane{up: true, reading: dataplaneReading{tunnel: tunnelReading{present: true, lastHandshake: hs}}}
+	dp := &fakeDataplane{up: true, reading: agentdp.Reading{Tunnel: agentdp.TunnelReading{Present: true, LastHandshake: hs}}}
 	rt := newFakeDataplaneRuntime(t, dp)
 	rt.f.LastState = &proto.State{Generation: 1}
 	rt.handshakeWake = make(chan struct{}, 1)
@@ -177,7 +183,7 @@ func TestCheckTunnelWakesOncePerHandshakeWithoutAThreshold(t *testing.T) {
 		t.Errorf("wakes = %d over 5 checks of one handshake, want 1", wakes)
 	}
 	// 新しいハンドシェイクは、閾値が無くても再び数える
-	dp.reading.tunnel.lastHandshake = hs.Add(2 * time.Minute)
+	dp.reading.Tunnel.LastHandshake = hs.Add(2 * time.Minute)
 	rt.checkTunnel(now.Add(5 * 30 * time.Second))
 	select {
 	case <-rt.handshakeWake:
@@ -215,9 +221,9 @@ func TestNewRuntimePassesTheAllowlistToTheDataplane(t *testing.T) {
 // 状態を同じ読みから載せ、フロー予算と拒否の累計の起点を載せない。
 func TestHeartbeatAndDoctorReadTheDataplaneOnce(t *testing.T) {
 	hs := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
-	dp := &fakeDataplane{up: true, reading: dataplaneReading{
-		tunnel: tunnelReading{present: true, lastHandshake: hs, rxBytes: 5, txBytes: 7},
-		rules:  []proto.RuleStatus{{ID: "r1", State: proto.StatusError, Reason: "target refused"}},
+	dp := &fakeDataplane{up: true, reading: agentdp.Reading{
+		Tunnel: agentdp.TunnelReading{Present: true, LastHandshake: hs, RxBytes: 5, TxBytes: 7},
+		Rules:  []proto.RuleStatus{{ID: "r1", State: proto.StatusError, Reason: "target refused"}},
 	}}
 	rt := newFakeDataplaneRuntime(t, dp)
 	rt.gen = 4
@@ -296,9 +302,9 @@ func TestFatalApplyErrorIsNotRetried(t *testing.T) {
 	dp := &fakeDataplane{}
 	rt := newFakeDataplaneRuntime(t, dp)
 	rt.fatal = make(chan error, 1)
-	dp.applyErr = &fatalError{err: errors.New("wgft0 is not ours")}
+	dp.applyErr = &agentdp.FatalError{Err: errors.New("wgft0 is not ours")}
 	err := rt.apply(&proto.State{Generation: 1})
-	if !isFatal(err) {
+	if !agentdp.IsFatal(err) {
 		t.Fatalf("err = %v, want fatal", err)
 	}
 	if rt.pendingSt != nil {
@@ -308,7 +314,7 @@ func TestFatalApplyErrorIsNotRetried(t *testing.T) {
 	rt.reportFatal(err) // 2 つ目は捨てられ、止まらない
 	select {
 	case got := <-rt.fatal:
-		if !isFatal(got) {
+		if !agentdp.IsFatal(got) {
 			t.Errorf("Run received %v", got)
 		}
 	default:
@@ -318,7 +324,7 @@ func TestFatalApplyErrorIsNotRetried(t *testing.T) {
 	rt.pendingSt = &proto.State{Generation: 1}
 	err = rt.retryPendingLocked(nil)
 	rt.mu.Unlock()
-	if !isFatal(err) {
+	if !agentdp.IsFatal(err) {
 		t.Errorf("retry: err = %v, want fatal", err)
 	}
 }
@@ -326,9 +332,9 @@ func TestFatalApplyErrorIsNotRetried(t *testing.T) {
 // カーネルモードのルールごとの状態は、中継が無くても doctor に届く。リスナーと予算は無い(設計文書
 // 10.2c 節)。モードも応答に載る。
 func TestDoctorShowsKernelRuleStates(t *testing.T) {
-	dp := &fakeDataplane{up: true, reading: dataplaneReading{
-		tunnel: tunnelReading{present: true, lastHandshake: time.Now()},
-		rules:  []proto.RuleStatus{{ID: "r1", State: proto.StatusError, Reason: "target 192.168.1.20:80: connection refused"}},
+	dp := &fakeDataplane{up: true, reading: agentdp.Reading{
+		Tunnel: agentdp.TunnelReading{Present: true, LastHandshake: time.Now()},
+		Rules:  []proto.RuleStatus{{ID: "r1", State: proto.StatusError, Reason: "target 192.168.1.20:80: connection refused"}},
 	}}
 	rt := newFakeDataplaneRuntime(t, dp)
 	rt.opts.Mode = "kernel"
@@ -357,7 +363,7 @@ func TestDoctorShowsKernelRuleStates(t *testing.T) {
 // stream の側の適用がプロセスを終える誤りに当たったら、Run の本体のループがその誤りで終わる
 // (設計文書 11b 節)。stream の適用から Run の終わりまでを通して確かめる。
 func TestFatalApplyFromTheStreamEndsRun(t *testing.T) {
-	dp := &fakeDataplane{applyErr: &fatalError{err: errors.New("wgft0 is not ours")}}
+	dp := &fakeDataplane{applyErr: &agentdp.FatalError{Err: errors.New("wgft0 is not ours")}}
 	rt := newFakeDataplaneRuntime(t, dp)
 	rt.fatal = make(chan error, 1)
 	done := make(chan error, 1)
@@ -367,7 +373,7 @@ func TestFatalApplyFromTheStreamEndsRun(t *testing.T) {
 	rt.applyFromStream(&proto.State{Generation: 1})
 	select {
 	case err := <-done:
-		if !isFatal(err) {
+		if !agentdp.IsFatal(err) {
 			t.Errorf("Run ended with %v, want the fatal error", err)
 		}
 	case <-time.After(5 * time.Second):

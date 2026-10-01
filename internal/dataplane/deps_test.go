@@ -363,6 +363,45 @@ func TestWireShapesStayLeaf(t *testing.T) {
 	}
 }
 
+// TestAgentDataplaneBoundaryImports checks design.md 7a.7 節's rule for internal/agent/agentdp,
+// the boundary between the agent's runtime and its two dataplane modes. The runtime and both modes
+// import it, so it stays below all of them: from the module it imports directly only the wire
+// schema, the resource budgets, the dataplane's Sensor, the userspace relay and socket-buffer types
+// its reading carries, and controlapi for the kernel reading of agent doctor. Through these it never
+// reaches internal/agent, another agent sub-package, or the kernel layer under
+// internal/dataplane/linuxkernel.
+func TestAgentDataplaneBoundaryImports(t *testing.T) {
+	root := moduleRoot(t)
+	const pkg = module + "/internal/agent/agentdp"
+	const agent = module + "/internal/agent"
+	if _, err := os.Stat(filepath.Join(root, strings.TrimPrefix(pkg, module))); err != nil {
+		t.Fatalf("%s: %v; did it move?", pkg, err)
+	}
+	allowed := map[string]bool{
+		module + "/proto":                                true,
+		module + "/internal/resource":                    true,
+		module + "/internal/dataplane":                   true,
+		module + "/internal/dataplane/userspace/relay":   true,
+		module + "/internal/dataplane/userspace/sockbuf": true,
+		module + "/internal/agent/controlapi":            true,
+	}
+	for _, dep := range moduleImports(t, root, pkg) {
+		if !allowed[dep] {
+			t.Errorf("%s imports %s; design.md 7a.7 節 does not allow it", pkg, dep)
+		}
+	}
+	for _, dep := range deps(t, root, pkg) {
+		switch {
+		case dep == agent:
+			t.Errorf("%s depends on %s (design.md 7a.7 節: the boundary sits below the runtime)", pkg, dep)
+		case strings.HasPrefix(dep, agent+"/") && dep != agent+"/controlapi":
+			t.Errorf("%s depends on %s (design.md 7a.7 節: of internal/agent, the boundary imports only controlapi)", pkg, dep)
+		case dep == module+"/internal/dataplane/linuxkernel" || strings.HasPrefix(dep, module+"/internal/dataplane/linuxkernel/"):
+			t.Errorf("%s depends on %s (design.md 7a.7 節: the boundary does not pull in the kernel layer)", pkg, dep)
+		}
+	}
+}
+
 // TestVpsdTailnetImportsNoServerPackage checks design.md 7a.7 節's rule for
 // internal/vpsd/tailnet: the --admin-tailscale listener does not depend on the daemon. It takes the
 // admin API's handler and the Host check's update as function values, so it imports no package

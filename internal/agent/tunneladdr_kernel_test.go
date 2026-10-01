@@ -57,8 +57,8 @@ func TestKernelRefusesAnAddressItWasNotRegisteredWith(t *testing.T) {
 			if rt.gen != 1 || rt.f.LastState != good || f.TunnelAddress != "10.200.0.2/24" {
 				t.Errorf("gen=%d last_state=%v record=%q; want 1, the good state and the old record", rt.gen, rt.f.LastState, f.TunnelAddress)
 			}
-			if !d.built() || d.wg.Address != "10.200.0.2/24" || rt.wgCfg.Address != "10.200.0.2/24" {
-				t.Errorf("the tunnel changed: built=%v address=%s applied=%s", d.built(), d.wg.Address, rt.wgCfg.Address)
+			if !d.Built() || d.wg.Address != "10.200.0.2/24" || rt.wgCfg.Address != "10.200.0.2/24" {
+				t.Errorf("the tunnel changed: built=%v address=%s applied=%s", d.Built(), d.wg.Address, rt.wgCfg.Address)
 			}
 			hb := rt.heartbeat()
 			if hb.Tunnel.State != proto.StatusError || !strings.Contains(hb.Tunnel.Reason, "refused") || !strings.Contains(hb.Tunnel.Reason, bad) || hb.Generation != 1 {
@@ -133,8 +133,8 @@ func TestKernelRefusesAnAddressBeforeTheFirstTunnel(t *testing.T) {
 	if !errors.As(err, &mm) {
 		t.Fatalf("apply = %v, want a tunnel address mismatch", err)
 	}
-	if d.built() || len(k.ensured) != 0 || len(k.published) != 0 || f.TunnelAddress != "10.200.0.2" {
-		t.Errorf("built=%v ensured=%d published=%d record=%q", d.built(), len(k.ensured), len(k.published), f.TunnelAddress)
+	if d.Built() || len(k.ensured) != 0 || len(k.published) != 0 || f.TunnelAddress != "10.200.0.2" {
+		t.Errorf("built=%v ensured=%d published=%d record=%q", d.Built(), len(k.ensured), len(k.published), f.TunnelAddress)
 	}
 	if hb := rt.heartbeat(); hb.Tunnel.Reason != "no tunnel; building it failed" {
 		t.Errorf("heartbeat = %+v", hb)
@@ -145,7 +145,7 @@ func TestKernelRefusesAnAddressBeforeTheFirstTunnel(t *testing.T) {
 func TestKernelRefusalText(t *testing.T) {
 	k := &fakeKernel{}
 	d := newTestKernel(t, k, &credentials.Credentials{TunnelAddress: "10.200.0.2/24"}, nil)
-	_, err := d.checkWG(withAddress(d.wg, "192.168.1.100/25"))
+	_, err := d.CheckWG(withAddress(d.wg, "192.168.1.100/25"))
 	if err == nil {
 		t.Fatal("no refusal")
 	}
@@ -229,8 +229,8 @@ func TestKernelRefusesAMalformedConfigWhileUp(t *testing.T) {
 			if err := rt.apply(&proto.State{Generation: 2, WG: w}); err == nil {
 				t.Fatal("not refused")
 			}
-			if !d.built() || len(k.ensured) != ensured || rt.gen != 1 {
-				t.Errorf("built=%v convergences=%d gen=%d", d.built(), len(k.ensured)-ensured, rt.gen)
+			if !d.Built() || len(k.ensured) != ensured || rt.gen != 1 {
+				t.Errorf("built=%v convergences=%d gen=%d", d.Built(), len(k.ensured)-ensured, rt.gen)
 			}
 			if hb := rt.heartbeat(); !strings.Contains(hb.Tunnel.Reason, controlapi.ReasonWGRefused) {
 				t.Errorf("heartbeat = %+v", hb.Tunnel)

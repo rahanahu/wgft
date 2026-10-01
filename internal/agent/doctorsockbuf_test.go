@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 )
@@ -15,7 +16,7 @@ import (
 // カーネルモードの応答には載らない。
 func TestDoctorCarriesTheSocketBuffers(t *testing.T) {
 	short := sockbuf.Reading{Supported: true, Port: 35454, Sockets: 2, Recv: 425984, Send: 425984}
-	dp := &fakeDataplane{up: true, reading: dataplaneReading{tunnel: tunnelReading{present: true, socketBuffers: &short}}}
+	dp := &fakeDataplane{up: true, reading: agentdp.Reading{Tunnel: agentdp.TunnelReading{Present: true, SocketBuffers: &short}}}
 	rt := newFakeDataplaneRuntime(t, dp)
 	got := rt.collectDoctor().RuntimeState.Tunnel.SocketBuffers
 	want := controlapi.DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 425984, Send: 425984, Required: sockbuf.Required}
@@ -30,11 +31,11 @@ func TestDoctorCarriesTheSocketBuffers(t *testing.T) {
 		t.Errorf("JSON = %s", b)
 	}
 
-	dp.reading = dataplaneReading{tunnel: tunnelReading{present: false, socketBuffers: &short}}
+	dp.reading = agentdp.Reading{Tunnel: agentdp.TunnelReading{Present: false, SocketBuffers: &short}}
 	if sb := rt.collectDoctor().RuntimeState.Tunnel.SocketBuffers; sb != nil {
 		t.Errorf("a missing tunnel reports socket buffers %+v", sb)
 	}
-	dp.reading = dataplaneReading{tunnel: tunnelReading{present: true}}
+	dp.reading = agentdp.Reading{Tunnel: agentdp.TunnelReading{Present: true}}
 	if sb := rt.collectDoctor().RuntimeState.Tunnel.SocketBuffers; sb != nil {
 		t.Errorf("a tunnel without a measurement, as in kernel mode, reports %+v", sb)
 	}

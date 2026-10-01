@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/conntrack"
@@ -29,12 +30,12 @@ import (
 
 func statusOf(t *testing.T, d *kernelDataplane, id string) proto.RuleStatus {
 	t.Helper()
-	for _, s := range d.read().rules {
+	for _, s := range d.Read().Rules {
 		if s.ID == id {
 			return s
 		}
 	}
-	t.Fatalf("no status for rule %s in %+v", id, d.read().rules)
+	t.Fatalf("no status for rule %s in %+v", id, d.Read().Rules)
 	return proto.RuleStatus{}
 }
 
@@ -44,7 +45,7 @@ func TestKernelApplyPublishesAndRecords(t *testing.T) {
 	k := &fakeKernel{}
 	f := &credentials.Credentials{}
 	d := newTestKernel(t, k, f, nil)
-	if _, err := d.applyRules(7, []proto.AgentRule{tcpRule("r1", "192.168.1.20:25565", 25565, 25565)}, nil); err != nil {
+	if _, err := d.ApplyRules(7, []proto.AgentRule{tcpRule("r1", "192.168.1.20:25565", 25565, 25565)}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(k.ensured) != 1 || len(k.published) != 1 {
@@ -69,13 +70,13 @@ func TestKernelPublishFailureKeepsTheRecord(t *testing.T) {
 	k := &fakeKernel{}
 	f := &credentials.Credentials{}
 	d := newTestKernel(t, k, f, nil)
-	if _, err := d.applyRules(1, []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}, nil); err != nil {
+	if _, err := d.ApplyRules(1, []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}, nil); err != nil {
 		t.Fatal(err)
 	}
 	before := string(f.KernelPublication)
 	k.publishErr = errors.New("batch refused")
-	_, err := d.applyRules(2, []proto.AgentRule{tcpRule("r2", "192.168.1.21:81", 81, 81)}, nil)
-	if err == nil || isFatal(err) {
+	_, err := d.ApplyRules(2, []proto.AgentRule{tcpRule("r2", "192.168.1.21:81", 81, 81)}, nil)
+	if err == nil || agentdp.IsFatal(err) {
 		t.Fatalf("err = %v, want a plain error", err)
 	}
 	if string(f.KernelPublication) != before || d.pub.Generation != 1 {
@@ -98,19 +99,19 @@ func TestKernelFirstConvergenceFailuresAreFatal(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			k := &fakeKernel{ensureErr: cause}
 			d := newTestKernel(t, k, nil, nil)
-			_, err := d.applyRules(1, nil, nil)
-			if !isFatal(err) {
+			_, err := d.ApplyRules(1, nil, nil)
+			if !agentdp.IsFatal(err) {
 				t.Fatalf("first convergence: err = %v, want fatal", err)
 			}
 			if (name == "prerequisite") != (startup.Of(err) != nil) {
 				t.Errorf("refusal = %v; only the prerequisite case exits 3", startup.Of(err))
 			}
 			k.ensureErr = nil
-			if _, err := d.applyRules(1, nil, nil); err != nil {
+			if _, err := d.ApplyRules(1, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			k.ensureErr = cause
-			if _, err := d.applyRules(2, nil, nil); err == nil || isFatal(err) {
+			if _, err := d.ApplyRules(2, nil, nil); err == nil || agentdp.IsFatal(err) {
 				t.Errorf("after a convergence: err = %v, want a retried error", err)
 			}
 		})
@@ -118,7 +119,7 @@ func TestKernelFirstConvergenceFailuresAreFatal(t *testing.T) {
 	t.Run("other errors are retried even first", func(t *testing.T) {
 		k := &fakeKernel{ensureErr: errors.New("netlink: device or resource busy")}
 		d := newTestKernel(t, k, nil, nil)
-		if _, err := d.applyRules(1, nil, nil); err == nil || isFatal(err) {
+		if _, err := d.ApplyRules(1, nil, nil); err == nil || agentdp.IsFatal(err) {
 			t.Errorf("err = %v, want a retried error", err)
 		}
 	})
@@ -131,11 +132,11 @@ func TestKernelLastKnownGoodResolution(t *testing.T) {
 	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.30")}}}
 	d := newTestKernel(t, k, nil, nil)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:25565", 25565, 25565)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.dnsErr = errors.New("server misbehaving")
-	if _, err := d.applyRules(2, rules, nil); err != nil {
+	if _, err := d.ApplyRules(2, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	pub := k.published[len(k.published)-1]
@@ -149,7 +150,7 @@ func TestKernelLastKnownGoodResolution(t *testing.T) {
 
 	// 同じ名前でもポートが変われば新しい宛先であり、公開しない
 	moved := []proto.AgentRule{tcpRule("r1", "game.lan:25566", 25565, 25565)}
-	if _, err := d.applyRules(3, moved, nil); err != nil {
+	if _, err := d.ApplyRules(3, moved, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := k.published[len(k.published)-1].Rules[0]; len(got.Ranges) != 0 || !strings.Contains(got.Reason, "name resolution") {
@@ -157,7 +158,7 @@ func TestKernelLastKnownGoodResolution(t *testing.T) {
 	}
 	// 一度も解決できていないルールも公開しない
 	fresh := []proto.AgentRule{tcpRule("r2", "new.lan:80", 80, 80)}
-	if _, err := d.applyRules(4, fresh, nil); err != nil {
+	if _, err := d.ApplyRules(4, fresh, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := k.published[len(k.published)-1].Rules[0]; len(got.Ranges) != 0 {
@@ -171,7 +172,7 @@ func TestKernelLastKnownGoodHonoursTheAllowlist(t *testing.T) {
 	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.30")}}}
 	d := newTestKernel(t, k, nil, nil)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:25565", 25565, 25565)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	narrow, err := allowtargets.Parse("192.168.2.0/24")
@@ -180,7 +181,7 @@ func TestKernelLastKnownGoodHonoursTheAllowlist(t *testing.T) {
 	}
 	d.allow = narrow
 	k.dnsErr = errors.New("timeout")
-	if _, err := d.applyRules(2, rules, nil); err != nil {
+	if _, err := d.ApplyRules(2, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	got := k.published[len(k.published)-1].Rules[0]
@@ -200,7 +201,7 @@ func TestKernelLastKnownGoodSurvivesARestart(t *testing.T) {
 	k := &fakeKernel{dnsErr: errors.New("no route to the resolver")}
 	d := newTestKernel(t, k, &credentials.Credentials{KernelPublication: b}, nil)
 	rules := []proto.AgentRule{{ID: "r1", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 2456, Hi: 2457}, Target: "game.lan:2456", Enabled: true}}
-	if _, err := d.applyRules(5, rules, nil); err != nil {
+	if _, err := d.ApplyRules(5, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	got := k.published[0].Rules[0]
@@ -219,7 +220,7 @@ func TestKernelProbesOnePortPerRange(t *testing.T) {
 		tcpRule("down", "192.168.1.21:2000", 2000, 2000),
 		{ID: "udp", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 3000, Hi: 3000}, Target: "192.168.1.22:3000", Enabled: true},
 	}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := map[netip.AddrPort]bool{netip.MustParseAddrPort("192.168.1.20:1000"): true, netip.MustParseAddrPort("192.168.1.21:2000"): true}
@@ -254,7 +255,7 @@ func TestKernelIPForwardFailureReportsOnlyRemoteTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := []proto.AgentRule{tcpRule("self", "192.168.1.10:80", 80, 80), tcpRule("other", "192.168.1.20:81", 81, 81)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	if s := statusOf(t, d, "self"); s.State != proto.StatusOK {
@@ -274,7 +275,7 @@ func TestKernelIPForwardFailureReportsOnlyRemoteTargets(t *testing.T) {
 		t.Errorf("saved %d times, want the record saved before the write and removed after it failed", saves)
 	}
 	k.forwardOn = true
-	d.refresh()
+	d.Refresh()
 	if s := statusOf(t, d, "other"); s.State != proto.StatusOK {
 		t.Errorf("other = %+v after ip_forward became 1", s)
 	}
@@ -355,7 +356,7 @@ func TestKernelStartupJudgesOwnership(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			k := &fakeKernel{link: c.link, linkErr: c.linkErr}
 			d := newTestKernel(t, k, nil, nil)
-			err := d.startup(priv, func() error { return nil })
+			err := d.Startup(priv, func() error { return nil })
 			var notOurs *wg.NotOursError
 			switch c.want {
 			case "ok":
@@ -388,7 +389,7 @@ func TestKernelDoesNotPublishWhileStopping(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.ctx = ctx
 	cancel()
-	if _, err := d.applyRules(1, []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}, nil); err == nil {
+	if _, err := d.ApplyRules(1, []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}, nil); err == nil {
 		t.Fatal("applyRules succeeded while stopping")
 	}
 	if len(k.published) != 0 {
@@ -396,23 +397,23 @@ func TestKernelDoesNotPublishWhileStopping(t *testing.T) {
 	}
 }
 
-// close はカーネルに触れず、鍵を忘れるだけである。rotate-key が次の build で渡す新しい鍵で wgft0 を
+// Close はカーネルに触れず、鍵を忘れるだけである。rotate-key が次の Build で渡す新しい鍵で wgft0 を
 // 収束させ、1 つ前の鍵を認証情報ファイルから渡す(7b.4 節)。
 func TestKernelCloseAndRebuildUsesTheNewKey(t *testing.T) {
 	k := &fakeKernel{}
 	old, next := testKey(t), testKey(t)
 	f := &credentials.Credentials{Mode: "kernel", WGPrivateKey: old.String()}
 	d := newTestKernel(t, k, f, nil)
-	d.close()
-	if d.built() {
+	d.Close()
+	if d.Built() {
 		t.Fatal("still built after close")
 	}
 	f.KeepPreviousKey()
 	f.WGPrivateKey = next.String()
-	if _, err := d.build(next, testWG(t)); err != nil {
+	if _, err := d.Build(next, testWG(t)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.applyRules(1, nil, nil); err != nil {
+	if _, err := d.ApplyRules(1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	got := k.ensured[len(k.ensured)-1]
@@ -427,7 +428,7 @@ func TestKernelCancelDuringResolutionPublishesNothing(t *testing.T) {
 	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.30")}}}
 	d := newTestKernel(t, k, nil, nil)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -437,8 +438,8 @@ func TestKernelCancelDuringResolutionPublishesNothing(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	prepared := d.prepareApply(&proto.State{Generation: 2, WG: d.wg, Rules: rules})
-	if _, err := d.applyRules(2, rules, prepared); err == nil {
+	prepared := d.PrepareApply(&proto.State{Generation: 2, WG: d.wg, Rules: rules})
+	if _, err := d.ApplyRules(2, rules, prepared); err == nil {
 		t.Fatal("applyRules published with a resolution cancelled by stopping")
 	}
 	if len(k.published) != 1 || d.pub.Generation != 1 || len(d.pub.Rules[0].Ranges) != 1 {
@@ -452,12 +453,12 @@ func TestKernelLastKnownGoodAcrossRepeatedFailures(t *testing.T) {
 	k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr("192.168.1.30")}}}
 	d := newTestKernel(t, k, nil, nil)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.dnsErr = errors.New("timeout")
 	for gen := uint64(2); gen <= 4; gen++ {
-		if _, err := d.applyRules(gen, rules, nil); err != nil {
+		if _, err := d.ApplyRules(gen, rules, nil); err != nil {
 			t.Fatal(err)
 		}
 		got := k.published[len(k.published)-1].Rules[0]
@@ -480,7 +481,7 @@ func TestKernelResolvesTargetsConcurrently(t *testing.T) {
 	}
 	rules := []proto.AgentRule{tcpRule("a", "a.lan:80", 80, 80), tcpRule("b", "b.lan:81", 81, 81)}
 	done := make(chan any, 1)
-	go func() { done <- d.prepareApply(&proto.State{WG: d.wg, Rules: rules}) }()
+	go func() { done <- d.PrepareApply(&proto.State{WG: d.wg, Rules: rules}) }()
 	for i := 0; i < 2; i++ {
 		select {
 		case <-started:
@@ -497,7 +498,7 @@ func TestKernelResolvesTargetsConcurrently(t *testing.T) {
 
 func observeOnce(t *testing.T, d *kernelDataplane, gen uint64, rules []proto.AgentRule) bool {
 	t.Helper()
-	saved, err := d.observeCommit(gen, rules, d.observePrepare(rules))
+	saved, err := d.ObserveCommit(gen, rules, d.ObservePrepare(rules))
 	if err != nil {
 		t.Fatalf("observe: %v", err)
 	}
@@ -512,7 +513,7 @@ func TestKernelObserveRepublishesOnlyWhenTheDNATChanges(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:25565", 25565, 25565)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	if observeOnce(t, d, 1, rules) || len(k.published) != 1 {
@@ -541,7 +542,7 @@ func TestKernelObserveRepairsDrift(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.tableEdit++ // nft で行を消したなど
@@ -575,13 +576,13 @@ func TestKernelObserveFailureKeepsTheRecord(t *testing.T) {
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	before := string(f.KernelPublication)
 	k.tableGone = true
 	k.publishErr = errors.New("table is owned by another process")
-	if _, err := d.observeCommit(1, rules, d.observePrepare(rules)); err == nil {
+	if _, err := d.ObserveCommit(1, rules, d.ObservePrepare(rules)); err == nil {
 		t.Fatal("a failed republish returned no error")
 	}
 	if string(f.KernelPublication) != before {
@@ -600,7 +601,7 @@ func TestKernelObserveReasonOnlyChangeDoesNotRepublish(t *testing.T) {
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.dnsErr = errors.New("i/o timeout")
@@ -624,7 +625,7 @@ func TestKernelObserveRepublishesAfterAnUnreadFingerprint(t *testing.T) {
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
 	k.fpErr = errors.New("netlink: message truncated")
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !observeOnce(t, d, 1, rules) || len(k.published) != 2 {
@@ -645,7 +646,7 @@ func TestKernelObserveProbesAfterADNATChange(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.dns["game.lan"] = []netip.Addr{a4}
@@ -669,7 +670,7 @@ func TestKernelObserveDoesNothingWhenStopping(t *testing.T) {
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	before := string(f.KernelPublication)
@@ -705,7 +706,7 @@ func TestKernelObserveFindsEachLinkDrift(t *testing.T) {
 			d := newTestKernel(t, k, nil, nil)
 			k.link = ours(t, d)
 			rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
-			if _, err := d.applyRules(1, rules, nil); err != nil {
+			if _, err := d.ApplyRules(1, rules, nil); err != nil {
 				t.Fatal(err)
 			}
 			st := ours(t, d)
@@ -725,7 +726,7 @@ func TestKernelObserveLogsARecurringDriftOnce(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
@@ -771,7 +772,7 @@ func TestKernelObserveSameLookupErrorFromANewPortSavesNothing(t *testing.T) {
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	refused := func(port int) error {
@@ -791,14 +792,14 @@ func TestKernelObserveSameLookupErrorFromANewPortSavesNothing(t *testing.T) {
 	}
 }
 
-// keepalive ごとに、vpsd のトンネルアドレスのポート 9 へデータグラムを 1 つ送る。close で止まり、
-// build で立て直す。keepalive が 0 なら送らない(7b.1 節のセッションの回復)。
+// keepalive ごとに、vpsd のトンネルアドレスのポート 9 へデータグラムを 1 つ送る。Close で止まり、
+// Build で立て直す。keepalive が 0 なら送らない(7b.1 節のセッションの回復)。
 func TestKernelSendsTheKeepaliveDatagram(t *testing.T) {
 	k := &fakeKernel{}
 	d := newTestKernel(t, k, nil, nil)
-	d.close()
+	d.Close()
 	d.kaUnit = 10 * time.Millisecond
-	if _, err := d.build(d.priv, testWG(t)); err != nil { // keepalive 25 → 250 ms
+	if _, err := d.Build(d.priv, testWG(t)); err != nil { // keepalive 25 → 250 ms
 		t.Fatal(err)
 	}
 	count := func() int {
@@ -816,7 +817,7 @@ func TestKernelSendsTheKeepaliveDatagram(t *testing.T) {
 	if len(got) < 2 || got[0] != netip.MustParseAddrPort("10.200.0.1:9") {
 		t.Fatalf("datagrams = %v, want repeated datagrams to 10.200.0.1:9", got)
 	}
-	d.close()
+	d.Close()
 	time.Sleep(50 * time.Millisecond)
 	stopped := count()
 	time.Sleep(600 * time.Millisecond)
@@ -825,7 +826,7 @@ func TestKernelSendsTheKeepaliveDatagram(t *testing.T) {
 	}
 	w := testWG(t)
 	w.Keepalive = 0
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -843,11 +844,11 @@ func TestKernelReResolvesTheEndpointWithoutHandshakes(t *testing.T) {
 	d.ops.now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
-	if _, err := d.applyRules(1, nil, nil); err != nil {
+	if _, err := d.ApplyRules(1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := k.ensured[len(k.ensured)-1].Server.Endpoint; got != netip.MustParseAddrPort("203.0.113.1:51820") {
@@ -905,10 +906,10 @@ func TestKernelDoesNotReResolveWithAKeepaliveOfZero(t *testing.T) {
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
 	w.Keepalive = 0
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.applyRules(1, nil, nil); err != nil {
+	if _, err := d.ApplyRules(1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
@@ -935,10 +936,10 @@ func TestKernelKeepsTheCachedEndpointWhenReResolutionFails(t *testing.T) {
 	d.ops.now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.applyRules(1, nil, nil); err != nil {
+	if _, err := d.ApplyRules(1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
@@ -960,7 +961,7 @@ func TestKernelKeepsTheCachedEndpointWhenReResolutionFails(t *testing.T) {
 func TestKernelWarnsWhenTheRouteToTheServerLeavesElsewhere(t *testing.T) {
 	k := &fakeKernel{route: "tailscale0"}
 	d := newTestKernel(t, k, nil, nil)
-	if _, err := d.applyRules(1, nil, nil); err != nil {
+	if _, err := d.ApplyRules(1, nil, nil); err != nil {
 		t.Fatalf("a policy route stopped the apply: %v", err)
 	}
 	if !strings.Contains(d.routeFinding, "tailscale0") || !strings.Contains(d.routeFinding, "10.200.0.1") {
@@ -1022,9 +1023,9 @@ func TestKernelLogsAKeepaliveSendFailureOncePerReason(t *testing.T) {
 		return nil
 	}
 	d := newTestKernel(t, k, nil, nil)
-	d.close()
+	d.Close()
 	d.kaUnit = 5 * time.Millisecond
-	if _, err := d.build(d.priv, testWG(t)); err != nil { // keepalive 25 → 125 ms
+	if _, err := d.Build(d.priv, testWG(t)); err != nil { // keepalive 25 → 125 ms
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -1037,7 +1038,7 @@ func TestKernelLogsAKeepaliveSendFailureOncePerReason(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	d.close()
+	d.Close()
 	time.Sleep(20 * time.Millisecond)
 	out := buf.String()
 	if n := strings.Count(out, "has no endpoint"); n != 1 {
@@ -1063,10 +1064,10 @@ func TestKernelReResolutionConvergesUntilItSucceeds(t *testing.T) {
 	d.ops.now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.applyRules(1, nil, nil); err != nil {
+	if _, err := d.ApplyRules(1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
@@ -1084,7 +1085,7 @@ func TestKernelReResolutionConvergesUntilItSucceeds(t *testing.T) {
 	now = now.Add(200 * time.Second)
 	observeOnce(t, d, 1, nil) // 印を付ける
 	k.ensureErr = errors.New("netlink: device busy")
-	if _, err := d.observeCommit(1, nil, d.observePrepare(nil)); err == nil {
+	if _, err := d.ObserveCommit(1, nil, d.ObservePrepare(nil)); err == nil {
 		t.Fatal("a failed convergence was not reported")
 	}
 	k.ensureErr = nil
@@ -1104,20 +1105,20 @@ func TestKernelReResolvesTheDeclaredEndpointName(t *testing.T) {
 	d.ops.now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "old.example:51820"
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
 	st := &proto.State{WG: w}
-	if _, err := d.applyRules(1, nil, d.prepareApply(st)); err != nil {
+	if _, err := d.ApplyRules(1, nil, d.PrepareApply(st)); err != nil {
 		t.Fatal(err)
 	}
 	// 宣言が、まだ解決できない新しい名前に変わる。控えは旧い名前のアドレスのまま
 	w.Endpoint = "new.example:51820"
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
 	st = &proto.State{WG: w}
-	if _, err := d.applyRules(2, nil, d.prepareApply(st)); err != nil {
+	if _, err := d.ApplyRules(2, nil, d.PrepareApply(st)); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
@@ -1140,7 +1141,7 @@ func TestKernelReResolvesTheDeclaredEndpointName(t *testing.T) {
 func TestKernelChecksTheRouteAfterRepairingWgft0(t *testing.T) {
 	k := &fakeKernel{}
 	d := newTestKernel(t, k, nil, nil)
-	if _, err := d.applyRules(1, nil, nil); err != nil {
+	if _, err := d.ApplyRules(1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// wgft0 が消え、経路は既定経路の eth0 へ出る。収束させると wgft0 へ戻る
@@ -1154,7 +1155,7 @@ func TestKernelChecksTheRouteAfterRepairingWgft0(t *testing.T) {
 	// 収束に失敗した間は経路を確かめない
 	k.route = "eth0"
 	k.ensureErr = errors.New("netlink: operation not permitted")
-	if _, err := d.observeCommit(1, nil, d.observePrepare(nil)); err == nil {
+	if _, err := d.ObserveCommit(1, nil, d.ObservePrepare(nil)); err == nil {
 		t.Fatal("a failed convergence was not reported")
 	}
 	if d.routeFinding != "" {
@@ -1172,10 +1173,10 @@ func TestKernelObserveRepairsTheTableWhileTheEndpointCannotConverge(t *testing.T
 	d.ops.now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.applyRules(1, nil, nil); err != nil {
+	if _, err := d.ApplyRules(1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
@@ -1188,7 +1189,7 @@ func TestKernelObserveRepairsTheTableWhileTheEndpointCannotConverge(t *testing.T
 	k.tableGone = true
 	published := len(k.published)
 	for i := 0; i < 10; i++ {
-		saved, err := d.observeCommit(1, nil, d.observePrepare(nil))
+		saved, err := d.ObserveCommit(1, nil, d.ObservePrepare(nil))
 		if err == nil {
 			t.Fatalf("check %d: the failed convergence was not reported", i)
 		}
@@ -1221,13 +1222,13 @@ func TestKernelConvergesConntrackAfterEachPublication(t *testing.T) {
 	k := &fakeKernel{}
 	f := &credentials.Credentials{}
 	d := newTestKernel(t, k, f, allow)
-	if _, err := d.applyRules(1, []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}, nil); err != nil {
+	if _, err := d.ApplyRules(1, []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(k.converged) != 0 {
 		t.Fatalf("converged %d times with no earlier publication", len(k.converged))
 	}
-	if _, err := d.applyRules(2, []proto.AgentRule{tcpRule("r1", "192.168.1.21:80", 80, 80)}, nil); err != nil {
+	if _, err := d.ApplyRules(2, []proto.AgentRule{tcpRule("r1", "192.168.1.21:80", 80, 80)}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(k.converged) != 1 {
@@ -1254,14 +1255,14 @@ func TestKernelKeepsUnconvergedPublicationsUntilConverged(t *testing.T) {
 	d := newTestKernel(t, k, f, nil)
 	d.save = func() error { saves++; return nil }
 	rule := func(target string) []proto.AgentRule { return []proto.AgentRule{tcpRule("r1", target, 80, 80)} }
-	if _, err := d.applyRules(1, rule("192.168.1.20:80"), nil); err != nil {
+	if _, err := d.ApplyRules(1, rule("192.168.1.20:80"), nil); err != nil {
 		t.Fatal(err)
 	}
 	k.convergeErr = errors.New("conntrack: operation not permitted")
-	if _, err := d.applyRules(2, rule("192.168.1.21:80"), nil); err != nil {
+	if _, err := d.ApplyRules(2, rule("192.168.1.21:80"), nil); err != nil {
 		t.Fatalf("a failed convergence failed the apply: %v", err)
 	}
-	if _, err := d.applyRules(3, rule("192.168.1.22:80"), nil); err != nil {
+	if _, err := d.ApplyRules(3, rule("192.168.1.22:80"), nil); err != nil {
 		t.Fatal(err)
 	}
 	last := k.converged[len(k.converged)-1]
@@ -1273,7 +1274,7 @@ func TestKernelKeepsUnconvergedPublicationsUntilConverged(t *testing.T) {
 		t.Fatalf("persisted %s (%v), want two publications", f.KernelUnconverged, err)
 	}
 	published := len(k.published)
-	d.refresh()
+	d.Refresh()
 	if len(k.published) != published {
 		t.Error("the retry replaced the table")
 	}
@@ -1281,7 +1282,7 @@ func TestKernelKeepsUnconvergedPublicationsUntilConverged(t *testing.T) {
 		t.Errorf("the retry converged from %v, want the same list", got)
 	}
 	k.convergeErr = nil
-	d.refresh()
+	d.Refresh()
 	if len(d.unconverged) != 0 || len(f.KernelUnconverged) != 0 || saves != 1 {
 		t.Errorf("after a good retry: list %v, persisted %s, saves %d; want it cleared and saved once", gens(d.unconverged), f.KernelUnconverged, saves)
 	}
@@ -1302,7 +1303,7 @@ func TestKernelConvergesFromTheRecordAfterARestart(t *testing.T) {
 	d := newTestKernel(t, k, &credentials.Credentials{KernelPublication: b, KernelUnconverged: u}, nil)
 	// 止まっている間にエージェントが無効にされ、すべてのルールが enabled:false で届く
 	disabled := []proto.AgentRule{{ID: "r1", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 80, Hi: 80}, Target: "192.168.1.20:80"}}
-	if _, err := d.applyRules(6, disabled, nil); err != nil {
+	if _, err := d.ApplyRules(6, disabled, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(k.converged) != 1 {
@@ -1332,11 +1333,11 @@ func TestKernelWaitsForTheFirstConvergenceBeforeRetrying(t *testing.T) {
 	u, _ := json.Marshal([]nft.AgentPublication{older})
 	k := &fakeKernel{}
 	d := newTestKernel(t, k, &credentials.Credentials{KernelPublication: b, KernelUnconverged: u}, nil)
-	d.refresh()
+	d.Refresh()
 	if len(k.converged) != 0 {
 		t.Fatalf("the check converged conntrack %d times before wgft0 was converged", len(k.converged))
 	}
-	if _, err := d.applyRules(6, []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}, nil); err != nil {
+	if _, err := d.ApplyRules(6, []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(k.converged) != 1 {
@@ -1353,7 +1354,7 @@ func TestKernelIgnoresAnUnreadableUnconvergedList(t *testing.T) {
 	k := &fakeKernel{}
 	d := newTestKernel(t, k, &credentials.Credentials{KernelPublication: b,
 		KernelUnconverged: json.RawMessage(`[{"generation":4,"rules":[]},"not a publication"]`)}, nil)
-	if _, err := d.applyRules(6, []proto.AgentRule{tcpRule("r1", "192.168.1.21:80", 80, 80)}, nil); err != nil {
+	if _, err := d.ApplyRules(6, []proto.AgentRule{tcpRule("r1", "192.168.1.21:80", 80, 80)}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(k.converged) != 1 {
@@ -1403,7 +1404,7 @@ func TestKernelKeepsARetargetThatReturnsToTheSameDNAT(t *testing.T) {
 	apply := func(gen uint64, target string) {
 		t.Helper()
 		st := &proto.State{WG: testWG(t), Rules: rule(target)}
-		if _, err := d.applyRules(gen, st.Rules, d.prepareApply(st)); err != nil {
+		if _, err := d.ApplyRules(gen, st.Rules, d.PrepareApply(st)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1429,7 +1430,7 @@ func TestKernelLogsARepeatedConvergenceFailureOnce(t *testing.T) {
 	k := &fakeKernel{}
 	d := newTestKernel(t, k, nil, nil)
 	rule := func(target string) []proto.AgentRule { return []proto.AgentRule{tcpRule("r1", target, 80, 80)} }
-	if _, err := d.applyRules(1, rule("192.168.1.20:80"), nil); err != nil {
+	if _, err := d.ApplyRules(1, rule("192.168.1.20:80"), nil); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
@@ -1437,11 +1438,11 @@ func TestKernelLogsARepeatedConvergenceFailureOnce(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 	k.convergeRes = conntrack.AgentResult{Failed: 2}
 	k.convergeErr = errors.New("conntrack delete: closing 2 of the agent's flows failed, the first with: operation not permitted")
-	if _, err := d.applyRules(2, rule("192.168.1.21:80"), nil); err != nil {
+	if _, err := d.ApplyRules(2, rule("192.168.1.21:80"), nil); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		d.refresh()
+		d.Refresh()
 	}
 	out := buf.String()
 	if n := strings.Count(out, "closing 2 of the agent's flows failed"); n != 1 {
@@ -1452,7 +1453,7 @@ func TestKernelLogsARepeatedConvergenceFailureOnce(t *testing.T) {
 	}
 	k.convergeRes = conntrack.AgentResult{Retargeted: 2}
 	k.convergeErr = nil
-	d.refresh()
+	d.Refresh()
 	if out := buf.String(); !strings.Contains(out, "closed 2 flows") || !strings.Contains(out, "converges again") {
 		t.Errorf("the recovery did not log the closed flows:\n%s", out)
 	}

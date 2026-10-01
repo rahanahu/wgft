@@ -58,7 +58,7 @@ func TestKernelStaleReasonIsReadByServerDoctor(t *testing.T) {
 			k := &fakeKernel{dns: map[string][]netip.Addr{"game.lan": {netip.MustParseAddr(old)}}}
 			d := newTestKernel(t, k, nil, nil)
 			rules := []proto.AgentRule{tc.rule}
-			if _, err := d.applyRules(1, rules, nil); err != nil {
+			if _, err := d.ApplyRules(1, rules, nil); err != nil {
 				t.Fatal(err)
 			}
 			k.dnsErr = errors.New("lookup game.lan on 127.0.0.53:53: no such host")
@@ -78,7 +78,7 @@ func TestKernelStaleReasonIsReadByServerDoctor(t *testing.T) {
 				}
 				d.allow = narrow
 			}
-			if _, err := d.applyRules(2, rules, nil); err != nil {
+			if _, err := d.ApplyRules(2, rules, nil); err != nil {
 				t.Fatal(err)
 			}
 			st := statusOf(t, d, tc.rule.ID)
@@ -142,11 +142,11 @@ func TestKernelErrorsAfterAReasonOnlyOnPublishedRules(t *testing.T) {
 		tcpRule("lo", "127.0.0.1:81", 81, 81),
 		tcpRule("stale", "game.lan:82", 82, 82),
 	}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.dnsErr = errors.New("lookup game.lan: no such host")
-	if _, err := d.applyRules(2, rules, nil); err != nil {
+	if _, err := d.ApplyRules(2, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"never", "lo"} {

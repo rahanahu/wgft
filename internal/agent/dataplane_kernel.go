@@ -15,6 +15,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane"
@@ -108,11 +109,11 @@ const (
 )
 
 // kernelDataplane はカーネルモードの dataplane である(仕様 7b 節)。カーネルの WireGuard インタフェースと
-// table inet wgft_agent を宣言へ収束させる。エージェントのプロセスはパケットを中継しない。close はカーネルの
+// table inet wgft_agent を宣言へ収束させる。エージェントのプロセスはパケットを中継しない。Close はカーネルの
 // 資源を消さないので、停止の間も転送は続く(7b.4 節)。
 //
 // どのメソッドも、runtime が rt.mu を持った状態で呼ぶ(dataplane.go)。f は runtime と共有する認証情報
-// ファイルで、applyRules が公開の記録を書き込み、runtime が last_state と同じ 1 回の保存で書き出す。
+// ファイルで、ApplyRules が公開の記録を書き込み、runtime が last_state と同じ 1 回の保存で書き出す。
 type kernelDataplane struct {
 	ops   kernelOps
 	iface string
@@ -129,7 +130,7 @@ type kernelDataplane struct {
 	// endpoint は直前に解決したエンドポイントであり、endpointOf はその元にした名前である(7b.1 節)。
 	// 解決できていない間はゼロで、インタフェースの収束はカーネルが持つエンドポイントを残す
 	//
-	// この 3 つは epMu が守る。名前を引く準備(prepareApply)が rt.mu の外で読むためである。epMu は
+	// この 3 つは epMu が守る。名前を引く準備(PrepareApply)が rt.mu の外で読むためである。epMu は
 	// rt.mu の中からも外からも取るので、順は rt.mu -> epMu である。epMu の中では値の読み書きとログの
 	// 出力だけを行う
 	epMu       sync.Mutex
@@ -140,7 +141,7 @@ type kernelDataplane struct {
 	declared string
 
 	// converged は、このプロセスが wgft0 を一度でも収束させたかどうかである。偽の間の所有の衝突、
-	// アドレス帯の重なり、前提の欠如は起動の失敗として扱う(11b 節、fatalError)
+	// アドレス帯の重なり、前提の欠如は起動の失敗として扱う(11b 節、agentdp.FatalError)
 	converged bool
 
 	// pub は直近に公開に成功したテーブルの記録である。起動時は認証情報ファイルの記録から読む
@@ -198,14 +199,14 @@ type kernelDataplane struct {
 }
 
 // runtime はこれらの任意の interface を型アサーションだけで探し、満たさなければ黙ってその処理を
-// 飛ばす(dataplane.go、doctor.go)。メソッドの形がずれたらコンパイルで気付けるよう、ここで固定する。
+// 飛ばす(internal/agent/agentdp)。メソッドの形がずれたらコンパイルで気付けるよう、ここで固定する。
 var (
-	_ preparer       = (*kernelDataplane)(nil)
-	_ wgChecker      = (*kernelDataplane)(nil)
-	_ observer       = (*kernelDataplane)(nil)
-	_ sensed         = (*kernelDataplane)(nil)
-	_ startupChecker = (*kernelDataplane)(nil)
-	_ kernelDoctor   = (*kernelDataplane)(nil)
+	_ agentdp.Preparer       = (*kernelDataplane)(nil)
+	_ agentdp.WGChecker      = (*kernelDataplane)(nil)
+	_ agentdp.Observer       = (*kernelDataplane)(nil)
+	_ agentdp.Sensed         = (*kernelDataplane)(nil)
+	_ agentdp.StartupChecker = (*kernelDataplane)(nil)
+	_ agentdp.KernelDoctor   = (*kernelDataplane)(nil)
 )
 
 // lkgEntry は、ルールの宛先の名前を最後に解決できたときの結果である。
@@ -222,7 +223,7 @@ func startupFatal(err error) bool {
 }
 
 // newKernelDataplane はカーネルモードの dataplane を作る。カーネルには何も書かない。
-func newKernelDataplane(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error) (agentDataplane, error) {
+func newKernelDataplane(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error) (agentdp.Dataplane, error) {
 	d := &kernelDataplane{ops: defaultKernelOps(), iface: iface, allow: allow, f: f, ctx: ctx, save: save,
 		lkg: map[string]lkgEntry{}, probeErr: map[string]string{}}
 	d.loadRecord()
@@ -264,10 +265,10 @@ func (d *kernelDataplane) loadRecord() {
 	}
 }
 
-// build は wg 設定 w を受け取る。検証は checkWG に任せ、カーネルには何も書かない。wgft0 を収束させるのは
-// applyRules である。
-func (d *kernelDataplane) build(priv wgtypes.Key, w proto.WGConfig) (bool, error) {
-	addr, err := d.checkWG(w)
+// Build は wg 設定 w を受け取る。検証は CheckWG に任せ、カーネルには何も書かない。wgft0 を収束させるのは
+// ApplyRules である。
+func (d *kernelDataplane) Build(priv wgtypes.Key, w proto.WGConfig) (bool, error) {
+	addr, err := d.CheckWG(w)
 	if err != nil {
 		return false, err
 	}
@@ -280,16 +281,16 @@ func (d *kernelDataplane) build(priv wgtypes.Key, w proto.WGConfig) (bool, error
 	return true, nil
 }
 
-// checkWG は、server から届いた wg 設定 w を、カーネルに書く前に検証する(設計文書 7b.1・11 節)。
+// CheckWG は、server から届いた wg 設定 w を、カーネルに書く前に検証する(設計文書 7b.1・11 節)。
 // server が配る wg 設定のうち、エージェントがホストに書く前に確かめる値の検証はここに集める。runtime は
-// 今のトンネルを閉じる前にこれを呼び(wgChecker)、build も同じ検証を通す。返すのは wgft0 のアドレスで
+// 今のトンネルを閉じる前にこれを呼び(agentdp.WGChecker)、Build も同じ検証を通す。返すのは wgft0 のアドレスで
 // ある。
 //
 // トンネルのアドレスは、認証情報ファイルに記録した登録時のアドレスと照合する。VPS を奪った攻撃者が
 // LAN の帯より細かい帯を配ると、wgft0 の接続経路が LAN の経路に勝ち、ホストから LAN へ向かう通信の
 // 一部がトンネルへ入るためである。正規の運用では、登録の後にエージェントのアドレスは変わらない。
 // 記録は書き換えない。記録するのは適用が済んだ後の runtime である(finishApplyLocked)。
-func (d *kernelDataplane) checkWG(w proto.WGConfig) (netip.Prefix, error) {
+func (d *kernelDataplane) CheckWG(w proto.WGConfig) (netip.Prefix, error) {
 	if _, err := wgtypes.ParseKey(w.ServerPubkey); err != nil {
 		return netip.Prefix{}, fmt.Errorf("server_pubkey: %w", err)
 	}
@@ -312,7 +313,7 @@ func (d *kernelDataplane) checkWG(w proto.WGConfig) (netip.Prefix, error) {
 	return addr, nil
 }
 
-func (d *kernelDataplane) built() bool { return d.have }
+func (d *kernelDataplane) Built() bool { return d.have }
 
 // linkConfig は wgft0 の宣言である。
 func (d *kernelDataplane) linkConfig() (wg.AgentConfig, error) {
@@ -337,15 +338,15 @@ func (d *kernelDataplane) nftConfig() nft.AgentConfig {
 	return c
 }
 
-// close はカーネルに何もしない。wgft0 とテーブルは停止の間も残し、転送を続ける(7b.4 節)。撤去は
-// wgft agent teardown が行う。受け取った wg 設定と鍵だけを忘れるので、runtime は次に build を呼ぶ。
+// Close はカーネルに何もしない。wgft0 とテーブルは停止の間も残し、転送を続ける(7b.4 節)。撤去は
+// wgft agent teardown が行う。受け取った wg 設定と鍵だけを忘れるので、runtime は次に Build を呼ぶ。
 // rotate-key はこの経路で新しい鍵を渡す。直前の公開の記録と、直前に解決できたアドレスは残す。
-func (d *kernelDataplane) close() {
+func (d *kernelDataplane) Close() {
 	d.have = false
 	d.stopKeepalive()
 }
 
-func (d *kernelDataplane) lastHandshake() time.Time {
+func (d *kernelDataplane) LastHandshake() time.Time {
 	prev, _ := d.f.PreviousKey()
 	st, err := d.ops.inspectLink(d.iface, d.priv, prev)
 	if err != nil || !st.Ownership.Ours() {

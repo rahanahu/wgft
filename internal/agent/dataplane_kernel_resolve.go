@@ -39,14 +39,14 @@ type kernelPrepared struct {
 	err error
 }
 
-// prepareApply は全体状態 st の適用に要る名前を rt.mu の外で引く。runtime は結果を applyRules に
+// PrepareApply は全体状態 st の適用に要る名前を rt.mu の外で引く。runtime は結果を ApplyRules に
 // 渡す。DNS を待つ間、ハートビートと doctor が排他を待たないためである。読むのは変わらない値
 // (ops と ctx)と、epMu が守るエンドポイントの控えだけである。
 //
 // エンドポイントを引くのは、宣言のエンドポイントが変わったときと、まだ一度も解決できていないとき
 // だけである(7b.1 節)。解決できていた名前を引けなくなっても、控えたアドレスを使い続ける。
 // 宛先の名前は同時に引き、1 つの遅い名前が他の名前の期限を使い切らないようにする。
-func (d *kernelDataplane) prepareApply(st *proto.State) any {
+func (d *kernelDataplane) PrepareApply(st *proto.State) any {
 	p := &kernelPrepared{endpointOf: st.WG.Endpoint}
 	d.epMu.Lock()
 	need := !d.endpoint.IsValid() || d.endpointOf != st.WG.Endpoint

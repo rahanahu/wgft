@@ -38,11 +38,11 @@ func checkKernelPrerequisites(readTables func() (bool, error), wireGuard func() 
 	return nil
 }
 
-// startup は起動時に、何かを書く前に行う検査と準備である(7b.1・7b.4 節)。wgft0 の所有を判定し、
+// Startup は起動時に、何かを書く前に行う検査と準備である(7b.1・7b.4 節)。wgft0 の所有を判定し、
 // 他の所有者のものなら終了コード 1 の誤りを返す。権限が足りなければ種別 prerequisite の拒否を返す。
 // 続けて、別の名前で自分の鍵を持つインタフェースを警告し、ip_forward を 1 にし、ホストの設定の
 // 手掛かりを 1 行ずつ出す。save は認証情報ファイルを保存する。ip_forward を変える記録に使う。
-func (d *kernelDataplane) startup(priv wgtypes.Key, save func() error) error {
+func (d *kernelDataplane) Startup(priv wgtypes.Key, save func() error) error {
 	prev, err := d.f.PreviousKey()
 	if err != nil {
 		return err

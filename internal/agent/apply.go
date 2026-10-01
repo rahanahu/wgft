@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -17,7 +18,7 @@ import (
 func (rt *runtime) retryPending() error {
 	rt.mu.Lock()
 	st := rt.pendingSt
-	ok := st != nil && rt.dp.built()
+	ok := st != nil && rt.dp.Built()
 	rt.mu.Unlock()
 	if !ok {
 		return nil
@@ -36,7 +37,7 @@ func (rt *runtime) retryPending() error {
 // 送らせる。呼び出し側は rt.mu を持つ。
 func (rt *runtime) retryPendingLocked(prepared any) error {
 	st := rt.pendingSt
-	if st == nil || !rt.dp.built() {
+	if st == nil || !rt.dp.Built() {
 		return nil
 	}
 	before := rt.pendingErr
@@ -45,7 +46,7 @@ func (rt *runtime) retryPendingLocked(prepared any) error {
 	case err == nil:
 		log.Printf("applied generation %d on retry", st.Generation)
 		notifyNonBlocking(rt.stateNotify)
-	case isFatal(err):
+	case agentdp.IsFatal(err):
 		return err
 	case rt.pendingSt == st && rt.pendingErr != before:
 		log.Printf("retrying generation %d: %v; the previous publication stays in place", st.Generation, err)
@@ -79,15 +80,15 @@ func (rt *runtime) applyLocked(st *proto.State, prepared any) error {
 	if err := rt.checkWGLocked(st); err != nil {
 		return err
 	}
-	if !rt.dp.built() || !reflect.DeepEqual(rt.wgCfg, st.WG) {
-		if rt.dp.built() {
+	if !rt.dp.Built() || !reflect.DeepEqual(rt.wgCfg, st.WG) {
+		if rt.dp.Built() {
 			log.Printf("wg config changed; rebuilding tunnel")
 		}
 		// 作成に失敗したら、世代も認証情報ファイルも進めずに返す。作成そのものの失敗なら
 		// buildLocked が試し直しを控えるので、次の全体状態を待たずに watchdog が立て直す(仕様 7 節)。
 		// トンネルが立った後の誤り(ルールの適用と認証情報ファイルの保存)には wireguard の接頭辞を付けない
 		if err := rt.buildLocked(time.Now(), st, false, prepared); err != nil {
-			if rt.dp.built() {
+			if rt.dp.Built() {
 				return err
 			}
 			return fmt.Errorf("wireguard: %w", err)
@@ -104,15 +105,15 @@ type refusedState struct {
 }
 
 // checkWGLocked は、トンネルが立っている間に届いた全体状態の wg 設定を、今のトンネルに手を付ける前に
-// dataplane に確かめさせる(wgChecker、設計文書 7b.1・11 節)。拒んだら、トンネルもルールも処理済み世代も
-// そのままにして誤りを返す。トンネルが無い間は確かめない。build が同じ検証を通し、他の wg 設定の誤りと
+// dataplane に確かめさせる(agentdp.WGChecker、設計文書 7b.1・11 節)。拒んだら、トンネルもルールも処理済み世代も
+// そのままにして誤りを返す。トンネルが無い間は確かめない。Build が同じ検証を通し、他の wg 設定の誤りと
 // 同じく作成の失敗になるためである。呼び出し側は rt.mu を持つ。
 func (rt *runtime) checkWGLocked(st *proto.State) error {
-	c, ok := rt.dp.(wgChecker)
-	if !ok || !rt.dp.built() {
+	c, ok := rt.dp.(agentdp.WGChecker)
+	if !ok || !rt.dp.Built() {
 		return nil
 	}
-	if _, err := c.checkWG(st.WG); err != nil {
+	if _, err := c.CheckWG(st.WG); err != nil {
 		// 古い世代の試し直しが拒まれても、新しい世代の拒否の表示を古い世代で置き換えない
 		if rt.refused == nil || st.Generation >= rt.refused.gen {
 			rt.refused = &refusedState{gen: st.Generation, err: err}
@@ -127,11 +128,11 @@ func (rt *runtime) checkWGLocked(st *proto.State) error {
 	return nil
 }
 
-// prepare は、dataplane が preparer なら st の適用の準備を行う。rt.mu を持たずに呼ぶ。rt.dp は
+// prepare は、dataplane が agentdp.Preparer なら st の適用の準備を行う。rt.mu を持たずに呼ぶ。rt.dp は
 // 組み立ての後に替わらないので、排他なしで読める。
 func (rt *runtime) prepare(st *proto.State) any {
-	if p, ok := rt.dp.(preparer); ok {
-		return p.prepareApply(st)
+	if p, ok := rt.dp.(agentdp.Preparer); ok {
+		return p.PrepareApply(st)
 	}
 	return nil
 }
@@ -145,7 +146,7 @@ func (rt *runtime) applyFromStream(st *proto.State) {
 	rt.applySeq.Add(1)
 	if err != nil {
 		log.Printf("stream: applying generation %d: %v", st.Generation, err)
-		if isFatal(err) {
+		if agentdp.IsFatal(err) {
 			rt.reportFatal(err)
 		}
 	}
@@ -161,9 +162,9 @@ func (rt *runtime) applyFromStream(st *proto.State) {
 // 適用し直して失敗した場合に、控えていた新しい世代を古い世代で置き換えないためである。
 func (rt *runtime) finishApplyLocked(st *proto.State, prepared any) error {
 	var firstErr error
-	summary, err := rt.dp.applyRules(st.Generation, st.Rules, prepared)
+	summary, err := rt.dp.ApplyRules(st.Generation, st.Rules, prepared)
 	if err != nil {
-		if !isFatal(err) && (rt.pendingSt == nil || st.Generation >= rt.pendingSt.Generation) {
+		if !agentdp.IsFatal(err) && (rt.pendingSt == nil || st.Generation >= rt.pendingSt.Generation) {
 			rt.pendingSt, rt.pendingErr = st, err.Error()
 		}
 		return fmt.Errorf("dataplane: %w", err)

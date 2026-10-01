@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 )
 
@@ -13,7 +14,7 @@ import (
 // 載せる(設計文書 10.2c 節の制御ソケットの拡張)。トンネルが無い応答とカーネルモードの応答には
 // 載らない。
 func TestDoctorCarriesTheUDPAccounting(t *testing.T) {
-	dp := &fakeDataplane{up: true, reading: dataplaneReading{tunnel: tunnelReading{present: true, udpAccounting: &udpAccountingReading{}}}}
+	dp := &fakeDataplane{up: true, reading: agentdp.Reading{Tunnel: agentdp.TunnelReading{Present: true, UDPAccounting: &agentdp.UDPAccountingReading{}}}}
 	rt := newFakeDataplaneRuntime(t, dp)
 	got := rt.collectDoctor().RuntimeState.Tunnel.UDPAccounting
 	if got == nil || *got != (controlapi.DoctorUDPAccounting{}) {
@@ -27,7 +28,7 @@ func TestDoctorCarriesTheUDPAccounting(t *testing.T) {
 		t.Errorf("JSON = %s", b)
 	}
 
-	dp.reading.tunnel.udpAccounting = &udpAccountingReading{fault: errors.New("unreserved UDP dequeue")}
+	dp.reading.Tunnel.UDPAccounting = &agentdp.UDPAccountingReading{Fault: errors.New("unreserved UDP dequeue")}
 	got = rt.collectDoctor().RuntimeState.Tunnel.UDPAccounting
 	if got == nil || !got.Stopped || got.Error != "unreserved UDP dequeue" {
 		t.Fatalf("udp_accounting of a stopped ledger = %+v", got)
@@ -37,11 +38,11 @@ func TestDoctorCarriesTheUDPAccounting(t *testing.T) {
 		t.Errorf("JSON = %s", b)
 	}
 
-	dp.reading = dataplaneReading{tunnel: tunnelReading{present: false, udpAccounting: &udpAccountingReading{}}}
+	dp.reading = agentdp.Reading{Tunnel: agentdp.TunnelReading{Present: false, UDPAccounting: &agentdp.UDPAccountingReading{}}}
 	if u := rt.collectDoctor().RuntimeState.Tunnel.UDPAccounting; u != nil {
 		t.Errorf("a missing tunnel reports udp_accounting %+v", u)
 	}
-	dp.reading = dataplaneReading{tunnel: tunnelReading{present: true}}
+	dp.reading = agentdp.Reading{Tunnel: agentdp.TunnelReading{Present: true}}
 	if u := rt.collectDoctor().RuntimeState.Tunnel.UDPAccounting; u != nil {
 		t.Errorf("a tunnel without a netstack, as in kernel mode, reports %+v", u)
 	}

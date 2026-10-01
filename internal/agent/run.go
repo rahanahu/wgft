@@ -10,6 +10,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/reconcile"
@@ -65,8 +66,8 @@ func Run(opts Options) error {
 
 	// カーネルモードでは、stream に繋ぐ前に wgft0 の所有を判定する(仕様 7b.4 節)。他の所有者の
 	// インタフェースなら、何も書かずに終わる
-	if sc, ok := rt.dp.(startupChecker); ok {
-		if err := sc.startup(priv, func() error { return f.Save(opts.CredentialsPath) }); err != nil {
+	if sc, ok := rt.dp.(agentdp.StartupChecker); ok {
+		if err := sc.Startup(priv, func() error { return f.Save(opts.CredentialsPath) }); err != nil {
 			return err
 		}
 		if err := f.Save(opts.CredentialsPath); err != nil {
@@ -78,7 +79,7 @@ func Run(opts Options) error {
 	// カーネルモードでは、このプロセスの最初の wgft0 の収束が起動の失敗に当たれば終わる(11b 節)
 	if f.LastState != nil {
 		if err := rt.apply(f.LastState); err != nil {
-			if isFatal(err) {
+			if agentdp.IsFatal(err) {
 				return err
 			}
 			log.Printf("apply saved generation %d: %v; waiting for full state from stream", f.LastState.Generation, err)
@@ -128,7 +129,7 @@ func (rt *runtime) serve(ctx context.Context, errc <-chan error, tick <-chan tim
 			}
 			rt.observe()
 			rt.mu.Lock()
-			rt.dp.refresh()
+			rt.dp.Refresh()
 			rt.mu.Unlock()
 			rt.logStatus()
 		}

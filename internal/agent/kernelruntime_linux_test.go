@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/proto"
@@ -112,7 +113,7 @@ func TestObserveSavesARepairThatAlsoReturnsAnError(t *testing.T) {
 	d.ops.now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
@@ -294,7 +295,7 @@ func TestDoctorCarriesTheKernelReading(t *testing.T) {
 	d := newTestKernel(t, fk, f, nil)
 	f.WGPrivateKey = d.priv.String()
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:25565", 25565, 25567)}
-	if _, err := d.applyRules(3, rules, nil); err != nil {
+	if _, err := d.ApplyRules(3, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	f.LastState = &proto.State{Generation: 3, WG: d.wg, Rules: rules}
@@ -324,7 +325,7 @@ func TestDoctorCarriesTheKernelReading(t *testing.T) {
 
 // ユーザー空間モードの応答はカーネルの読みを持たない。
 func TestDoctorLeavesTheKernelOutInUserspaceMode(t *testing.T) {
-	dp := &fakeDataplane{up: true, reading: dataplaneReading{tunnel: tunnelReading{present: true}}}
+	dp := &fakeDataplane{up: true, reading: agentdp.Reading{Tunnel: agentdp.TunnelReading{Present: true}}}
 	rt := newFakeDataplaneRuntime(t, dp)
 	res := rt.collectDoctor()
 	if res.RuntimeState.Kernel != nil || res.RuntimeState.PublishError != "" {
