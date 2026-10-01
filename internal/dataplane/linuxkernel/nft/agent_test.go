@@ -1146,3 +1146,9 @@ func TestInspectAgentCountsAMissingDNATRowOnce(t *testing.T) {
 		t.Errorf("missing items %v, missing DNATs %v; want the row once, and the DNAT kept for Matches", ins.MissingItems, ins.MissingDNATs)
 	}
 }
+
+// Matches は、表が記録どおりであるかどうかである。
+func (i AgentInspection) Matches() bool {
+	return i.Unrecognized == 0 && len(i.MissingDNATs) == 0 && len(i.ExtraDNATs) == 0 &&
+		len(i.Missing) == 0 && len(i.Unexpected) == 0 && len(i.Moved) == 0
+}

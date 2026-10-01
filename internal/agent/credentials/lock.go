@@ -17,9 +17,6 @@ type Lock = flock.Lock
 // ErrLocked は別のプロセスがロックを持っている。
 var ErrLocked = errors.New("credentials file is in use by another process")
 
-// LockPath は認証情報ファイルに対応するロックファイルの場所。
-func LockPath(path string) string { return flock.LockPath(path) }
-
 // Acquire はロックを取る。取れなければ ErrLocked。Windows では、ロックファイル自体も
 // agent.json と同じ基準(SYSTEM・BUILTIN\Administrators・実行中の利用者だけ。仕様 11a 節)
 // へ secureExisting で単独に締める。Unix では secureExisting は何もしない no-op で、この

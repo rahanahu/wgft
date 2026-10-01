@@ -11,6 +11,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -238,7 +239,7 @@ func TestPublicKeyWithoutALockFileLeavesNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(credentials.LockPath(path)); !os.IsNotExist(err) {
+	if _, err := os.Stat(flock.LockPath(path)); !os.IsNotExist(err) {
 		t.Errorf("agent pubkey created a lock file: %v", err)
 	}
 	again, err := PublicKey(path)

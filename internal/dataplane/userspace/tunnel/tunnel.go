@@ -216,9 +216,7 @@ func (t *Tunnel) Run(ctx context.Context) {
 				t.cfg.Logf("tunnel: re-resolve endpoint: %v", err)
 			}
 		}
-		if rtt, err := t.Ping(2 * time.Second); err == nil {
-			_ = rtt
-		}
+		_, _ = t.Ping(2 * time.Second)
 	}
 }
 

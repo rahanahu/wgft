@@ -275,3 +275,22 @@ func TestUDPRegistryLocalReflexiveZeroAndShortRead(t *testing.T) {
 	}
 	assertRegistryUsage(t, r, 0, 0)
 }
+
+func (r *udpRegistry) listen(port uint16) (*rawUDPAdapter, error) {
+	local := netip.AddrPortFrom(r.accounting.local, port)
+	return r.open(&local, nil)
+}
+
+func (r *udpRegistry) usage() (bytes, packets int, fault error) {
+	t := r.accounting
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.usedBytes, t.usedPackets, t.fault
+}
+
+func (r *udpRegistry) endpoint(port uint16) *rawUDPAdapter {
+	t := r.accounting
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.localPorts[port]
+}

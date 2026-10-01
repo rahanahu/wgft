@@ -85,19 +85,3 @@ func (p *replyPool) release(b *[]byte) {
 	p.bufs.Put(b)
 	p.slots <- struct{}{}
 }
-
-// free は今空いている枠の数。試験用。
-func (p *replyPool) free() int { return len(p.slots) }
-
-// replyWaitStats は枠の待ちの観測値である。Total と Longest は枠を得た待ちだけの値で、
-// 取り消された待ちは Cancelled に数える。
-type replyWaitStats struct {
-	Waits     uint64
-	Cancelled uint64
-	Total     time.Duration
-	Longest   time.Duration
-}
-
-func (p *replyPool) stats() replyWaitStats {
-	return replyWaitStats{Waits: p.waits.Load(), Cancelled: p.cancelled.Load(), Total: time.Duration(p.waitNanos.Load()), Longest: time.Duration(p.maxWait.Load())}
-}

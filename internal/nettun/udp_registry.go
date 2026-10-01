@@ -79,11 +79,6 @@ func (t *udpAccounting) endpointReceiveBufferSize() int64 {
 	return base + int64(t.maxEndpointPackets)*perPacket
 }
 
-func (r *udpRegistry) listen(port uint16) (*rawUDPAdapter, error) {
-	local := netip.AddrPortFrom(r.accounting.local, port)
-	return r.open(&local, nil)
-}
-
 func (r *udpRegistry) dial(remote netip.AddrPort) (*rawUDPAdapter, error) {
 	return r.open(nil, &remote)
 }
@@ -161,20 +156,6 @@ func (r *udpRegistry) inject(datagram []byte) (bool, error) {
 		}
 		return kept, err
 	}
-}
-
-func (r *udpRegistry) usage() (bytes, packets int, fault error) {
-	t := r.accounting
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.usedBytes, t.usedPackets, t.fault
-}
-
-func (r *udpRegistry) endpoint(port uint16) *rawUDPAdapter {
-	t := r.accounting
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.localPorts[port]
 }
 
 // closeAll marks the Device closed and lists the endpoints under the lock

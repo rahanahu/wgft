@@ -489,9 +489,8 @@ func (e *OverlapError) Error() string {
 		e.Range, e.What, e.Interface, next)
 }
 
-// AgentPrivilegeRefusal turns a permission failure of a read the agent makes before converging,
-// such as AgentOwnership, into the same prerequisite refusal EnsureAgent returns. Other errors are
-// returned as they are.
+// AgentPrivilegeRefusal turns a permission failure of a read the agent makes before converging
+// into the same prerequisite refusal EnsureAgent returns. Other errors are returned as they are.
 func AgentPrivilegeRefusal(err error) error {
 	return privilegeRefusal(err, agentPrivilegeFormat)
 }
@@ -650,16 +649,9 @@ func peerEndpoint(p *wgtypes.Peer) netip.AddrPort {
 	return unmapped(p.Endpoint.AddrPort())
 }
 
-// AgentOwnership reads what the link named iface is to an agent holding current and previous
-// (design.md 7b.4 節). It changes nothing. The mode gate and teardown judge the agent's leftovers
-// with it.
-func AgentOwnership(iface string, current, previous wgtypes.Key) (Ownership, error) {
-	own, _, _, err := readOwnership(iface, current, previous)
-	return own, err
-}
-
-// readOwnership is AgentOwnership that also returns the link type and whether a WireGuard link
-// holds no key, for the text of NotOursError.
+// readOwnership reads what the link named iface is to an agent holding current and previous
+// (design.md 7b.4 節). It changes nothing. It also returns the link type and whether a WireGuard
+// link holds no key, for the text of NotOursError.
 func readOwnership(iface string, current, previous wgtypes.Key) (own Ownership, kind string, keyless bool, err error) {
 	link, err := netlink.LinkByName(iface)
 	if _, nf := err.(netlink.LinkNotFoundError); nf {

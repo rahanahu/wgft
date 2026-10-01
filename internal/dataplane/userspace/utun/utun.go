@@ -247,11 +247,6 @@ func (t *Tunnel) DialContext(ctx context.Context, network, addr string) (net.Con
 	return nil, fmt.Errorf("dial %s: unknown network %q", addr, network)
 }
 
-// DialUDP は netstack 越しにエージェントの UDP リスナーへつなぐ。
-func (t *Tunnel) DialUDP(raddr netip.AddrPort) (net.Conn, error) {
-	return t.tnet.DialUDP(raddr)
-}
-
 // Close はトンネルを閉じる。
 func (t *Tunnel) Close() { t.dev.Close() }
 

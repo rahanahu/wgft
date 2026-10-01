@@ -182,3 +182,8 @@ func TestServerTunnelWithAgentTunnel(t *testing.T) {
 	}
 	_ = net.IPv4zero
 }
+
+// DialUDP は netstack 越しにエージェントの UDP リスナーへつなぐ。
+func (t *Tunnel) DialUDP(raddr netip.AddrPort) (net.Conn, error) {
+	return t.tnet.DialUDP(raddr)
+}
