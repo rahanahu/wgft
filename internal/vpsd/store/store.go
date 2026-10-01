@@ -19,11 +19,8 @@ import (
 
 // Store は開いた SQLite ファイル。
 type Store struct {
-	db       *sql.DB
-	filePath string
+	db *sql.DB
 }
-
-func (s *Store) path() string { return s.filePath }
 
 // スキーマは版ごとに追記する。起動時に、未適用の版だけを順に適用する。
 // 順序が正本なので、ここに 1 つのリストとして持つ(init() で各ファイルから追記すると、
@@ -244,7 +241,7 @@ func Open(path string) (*Store, error) {
 		}
 		// 単一プロセスからしか使わないので接続は 1 本にし、トランザクションの直列化を SQLite に任せる
 		db.SetMaxOpenConns(1)
-		s = &Store{db: db, filePath: path}
+		s = &Store{db: db}
 		migErr := s.migrate()
 		if migErr == nil {
 			break
@@ -296,7 +293,7 @@ func OpenReadOnly(path string) (*Store, error) {
 		db.Close()
 		return nil, &SchemaNewerError{Version: version, MaxSupported: len(migrations)}
 	}
-	return &Store{db: db, filePath: path}, nil
+	return &Store{db: db}, nil
 }
 
 func exists(path string) bool {

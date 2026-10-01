@@ -234,14 +234,12 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 	if out.NoOp && !equalDelivery(prepared.candidate, d.delivery.currentFull()) {
 		// Runtime's NoOp predicate compares the dataplane plan, which omits
 		// fields delivered to agents. Force one real Commit for this input.
+		// With retry false the Reconciler sets no Tx.Unchanged, so a
+		// successful forced call is never NoOp.
 		out, _, err = d.applyOnce(rules, false, prepared)
 		if err != nil {
 			d.delivery.markPending()
 			return out, fmt.Errorf("%w: %w", ErrDeliveryProjectionMismatch, err)
-		}
-		if out.NoOp {
-			d.delivery.markPending()
-			return out, ErrDeliveryProjectionMismatch
 		}
 	}
 	if !out.NoOp {

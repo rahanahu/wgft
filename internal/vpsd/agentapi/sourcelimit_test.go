@@ -449,3 +449,17 @@ func TestDefaultPreAuthLimitsCountIPv4MappedAsIPv4(t *testing.T) {
 		t.Fatalf("accepted %d of %d IPv4 sources that arrived as IPv4-mapped addresses", len(got), len(conns))
 	}
 }
+
+// count は key の段が今数えられている接続の数である。
+func (l *sourceLimitListener) count(key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.open[key]
+}
+
+// totalCount は全体で今数えられている接続の数である。
+func (l *sourceLimitListener) totalCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.total
+}
