@@ -121,12 +121,23 @@ func convergeAgent(c agentConn, prev []nft.AgentPublication, cur nft.AgentPublic
 	var res AgentResult
 	var firstErr error
 	for _, f := range flows {
-		v := classifyAgentFlow(f, prevIdx, curIdx, scope)
-		switch v {
+		// 判定ごとの扱いをこの 1 つの switch に並べる。判定を足したら、ここに扱いを書く
+		// (TestAgentVerdictSwitchIsExhaustive が検査する)。
+		var deleted *int
+		switch classifyAgentFlow(f, prevIdx, curIdx, scope) {
 		case agentForeign:
 			continue
 		case agentKeep:
 			res.Kept++
+			continue
+		case agentRemoved:
+			deleted = &res.Removed
+		case agentRetargeted:
+			deleted = &res.Retargeted
+		case agentNotAllowed:
+			deleted = &res.NotAllowed
+		default:
+			// classifyAgentFlow が返さない値である。消すと決めた判定ではないので、触らない
 			continue
 		}
 		// 既に消えていたエントリは、消したのと同じに扱う(タイムアウトや競合で先に消える)
@@ -137,14 +148,7 @@ func convergeAgent(c agentConn, prev []nft.AgentPublication, cur nft.AgentPublic
 			}
 			continue
 		}
-		switch v {
-		case agentRemoved:
-			res.Removed++
-		case agentRetargeted:
-			res.Retargeted++
-		case agentNotAllowed:
-			res.NotAllowed++
-		}
+		*deleted++
 	}
 	if firstErr != nil {
 		return res, fmt.Errorf("conntrack delete: closing %d of the agent's flows failed, the first with: %w", res.Failed, firstErr)
