@@ -27,6 +27,7 @@ type stopRig struct {
 	target   string
 	target2  string
 	releases atomic.Int32
+	tickets  ticketLedger
 	armAdmit atomic.Bool
 	armTake  atomic.Bool
 	entered  chan struct{}
@@ -68,7 +69,8 @@ func newStopRigT(t *testing.T, staged bool, rule string, second bool, total int,
 			if r.armAdmit.CompareAndSwap(true, false) {
 				pause()
 			}
-			return func() { r.releases.Add(1) }, true
+			ticket := r.tickets.issue()
+			return func() { r.releases.Add(1); ticket() }, true
 		},
 		Dial: func(network, addr string) (net.Conn, error) {
 			c, err := net.Dial(network, addr)
@@ -157,6 +159,7 @@ func (r *stopRig) waitIdle(t *testing.T, wantReleases int32) {
 	if got := r.releases.Load(); got != wantReleases {
 		t.Errorf("per-source releases = %d, want %d", got, wantReleases)
 	}
+	r.tickets.settle(t)
 }
 
 func checkPool(t *testing.T, p *resource.Pool) resource.Ledger {
@@ -409,6 +412,7 @@ func TestTCPLedgerUnderConfigChurn(t *testing.T) {
 	if lg.InUse != 0 {
 		t.Errorf("in use after close = %d", lg.InUse)
 	}
+	r.tickets.settle(t)
 	var sb []string
 	results.Range(func(k, v any) bool {
 		sb = append(sb, fmt.Sprintf("%s=%d", k, v.(*atomic.Int64).Load()))

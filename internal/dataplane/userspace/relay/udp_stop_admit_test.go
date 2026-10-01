@@ -22,6 +22,7 @@ type udpRig struct {
 	target   string
 	echoed   *atomic.Int64
 	releases atomic.Int32
+	tickets  ticketLedger
 	dials    atomic.Int32
 	armAdmit atomic.Bool
 	entered  chan struct{}
@@ -53,7 +54,8 @@ func newUDPRig(t *testing.T, total int) *udpRig {
 				close(r.entered)
 				<-r.proceed
 			}
-			return func() { r.releases.Add(1) }, true
+			ticket := r.tickets.issue()
+			return func() { r.releases.Add(1); ticket() }, true
 		},
 		Dial: func(network, addr string) (net.Conn, error) {
 			r.dials.Add(1)
@@ -371,6 +373,7 @@ func TestUDPLedgerUnderConfigChurn(t *testing.T) {
 	if lg.InUse != 0 {
 		t.Errorf("in use after close %d", lg.InUse)
 	}
+	r.tickets.settle(t)
 	t.Logf("commits=%d sent=%d replies=%d notAccepting=%d refusals=%v dials=%d releases=%d", iter, sent.Load(), replies.Load(), lg.NotAccepting, r.pool.Refusals(), r.dials.Load(), r.releases.Load())
 }
 

@@ -44,6 +44,7 @@ type admitRig struct {
 	addrs    map[uint16]string
 	agents   map[string]string
 	releases atomic.Int32
+	tickets  ticketLedger
 	admitFn  atomic.Pointer[func(id string)]
 }
 
@@ -83,7 +84,8 @@ func newAdmitRig(t *testing.T, total int, halfOpen bool) *admitRig {
 			if f := r.admitFn.Load(); f != nil {
 				(*f)(id)
 			}
-			return func() { r.releases.Add(1) }, true
+			ticket := r.tickets.issue()
+			return func() { r.releases.Add(1); ticket() }, true
 		},
 	})
 	t.Cleanup(r.m.Close)
@@ -342,4 +344,5 @@ func TestLedgerUnderConfigChurn(t *testing.T) {
 	if lg.NotAccepting != 0 || lg.InUse != 0 {
 		t.Errorf("not accepting %d, in use %d", lg.NotAccepting, lg.InUse)
 	}
+	r.tickets.settle(t)
 }

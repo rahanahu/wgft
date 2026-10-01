@@ -288,18 +288,20 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				// (設計文書 7a.9 節)
 				src := addrOf(from)
 				ruleID := m.ruleOf(l)
-				release := func() {}
+				// charge はこのセッションの 2 つの枠(Admission Policy の送信元ごとの枠と Pool の枠)を
+				// 持ち、捨てる分岐か、登録の後はセッションの goroutine の終わりで、両方をまとめて返す
+				var charge resource.Charge
 				if m.opts.Admit != nil {
 					rel, ok := m.opts.Admit(ruleID, src, n)
 					if !ok {
 						continue
 					}
-					release = rel
+					charge.HoldPolicy(rel)
 				}
 				// 判定の間に待ち受けが Retiring になっていれば(fail-closed。設計文書 7a.3 節)、枠を取らず、
 				// 宛先へ dial もせずに捨てる。この後に Retiring になる場合は、下の登録の確認が捨てる
 				if !l.accepting.Load() {
-					release()
+					charge.Release()
 					continue
 				}
 				// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の
@@ -310,15 +312,16 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				case resource.NotAccepting:
 					// 受け付けの印を見た後に、この待ち受けが Retiring になったか閉じられた。データグラムを
 					// 捨て、拒否の数にもログにも入れない(設計文書 7a.10 節)
-					release()
+					charge.Release()
 					continue
 				case resource.Refused:
-					release()
+					charge.Release()
 					if capLog.Allow() {
 						m.opts.Logf("%s: %s; dropping new flows", l.key, ref)
 					}
 					continue
 				}
+				charge.HoldLease(lease)
 				if h := m.testHookAfterTake; h != nil {
 					h(l)
 				}
@@ -328,8 +331,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				c, err := m.dialTarget("udp", target)
 				m.noteTargetAllowErr(l, err)
 				if err != nil {
-					lease.Release()
-					release()
+					charge.Release()
 					if dialLog.Allow() {
 						m.opts.Logf("%s: dial %s: %v", l.key, target, err)
 					}
@@ -368,15 +370,13 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 				if stopped {
 					mu.Unlock()
 					s.close()
-					lease.Release()
-					release()
+					charge.Release()
 					continue
 				}
 				sessions[k] = s
 				mu.Unlock()
 				go func(k string, s *udpSession, from net.Addr) {
-					defer release()
-					defer lease.Release()
+					defer charge.Release()
 					defer closeSession(k, s)
 					// 応答は、届いてから応答のバッファの枠を取り、プールのバッファを借りて読む(仕様 7 節)。
 					// 待つ間はバッファを持たない。待てない接続(unix でも windows でもないカーネルのソケット)は、
