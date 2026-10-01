@@ -303,7 +303,7 @@ jobs:
     # scripts/portable-test-packages.sh, on GitHub's Apple silicon runner, including
     # internal/dataplane/userspace/utun: its inprocess_forward_test.go
     # (TestAgentServerInProcessForwarding) is cross-platform and this is where it gives B8
-    # coverage (docs/testing.md). utun's bind_windows_test.go carries its own
+    # coverage (docs/testing.md). wgbind's new_windows_test.go carries its own
     # `//go:build windows` tag, so it does not compile or run here, and this job makes no
     # claim about the Windows-specific bind fix it regression-tests. This is
     # the first job that actually executes the darwin-specific code paths (sndbuf_darwin.go's

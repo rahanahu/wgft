@@ -37,19 +37,6 @@ func TestMet(t *testing.T) {
 	}
 }
 
-func TestListenPort(t *testing.T) {
-	p, err := ListenPort("private_key=00\nlisten_port=35454\npublic_key=11\n")
-	if err != nil || p != 35454 {
-		t.Errorf("ListenPort = %d, %v; want 35454", p, err)
-	}
-	if _, err := ListenPort("private_key=00\n"); err == nil {
-		t.Error("an IpcGet output without listen_port must be an error")
-	}
-	if _, err := ListenPort("listen_port=70000\n"); err == nil {
-		t.Error("a listen_port past 65535 must be an error")
-	}
-}
-
 // 警告は英語の 1 行で、丸括弧を使わない。測った値、条件、sysctl に書く値、コンテナのホストで
 // 設定することを含む。
 func TestWarningText(t *testing.T) {

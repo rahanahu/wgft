@@ -13,9 +13,8 @@ package sockbuf
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgipc"
 	"github.com/rahanahu/wgft/internal/lograte"
 )
 
@@ -64,27 +63,11 @@ func MeasureDevice(ipcGet func() (string, error)) Reading {
 	if err != nil {
 		return Reading{Supported: true, Err: fmt.Errorf("read the listen port: %w", err)}
 	}
-	port, err := ListenPort(out)
+	port, err := wgipc.ListenPort(out)
 	if err != nil {
 		return Reading{Supported: true, Err: err}
 	}
 	return Measure(port)
-}
-
-// ListenPort は、wireguard-go の IpcGet の出力から listen_port の値を取り出す。
-func ListenPort(ipcGet string) (uint16, error) {
-	for _, line := range strings.Split(ipcGet, "\n") {
-		k, v, ok := strings.Cut(line, "=")
-		if !ok || k != "listen_port" {
-			continue
-		}
-		n, err := strconv.ParseUint(v, 10, 16)
-		if err != nil {
-			return 0, fmt.Errorf("parse listen_port %q: %w", v, err)
-		}
-		return uint16(n), nil
-	}
-	return 0, fmt.Errorf("IpcGet output has no listen_port line")
 }
 
 // warnGate は Warn の警告を 1 分に 1 回までに絞る門である。1 つのプロセスは 1 つのトンネルしか
