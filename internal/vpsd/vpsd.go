@@ -36,6 +36,7 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd/servercheck"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/internal/vpsd/stream"
+	"github.com/rahanahu/wgft/internal/vpsd/teardown"
 	"github.com/rahanahu/wgft/proto"
 	"log"
 	"net"
@@ -389,7 +390,7 @@ func Run(opts Options) error {
 		return err
 	}
 	// teardown が --state だけで正しいインタフェース名とポートを知れるよう meta に残す。
-	recordTeardownHints(st, opts)
+	teardown.RecordHints(st, teardown.Hints{WGInterface: opts.WGInterface, WGPort: opts.WGPort, AgentAPIAddr: opts.AgentAPIAddr})
 	d.startedAt = time.Now()
 	d.kernel = readKernel()
 	d.nftVer = readNFTVersion()

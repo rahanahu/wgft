@@ -1,15 +1,28 @@
 //go:build linux
 
-package vpsd
+package teardown
 
 import (
 	"bytes"
+	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
+
+// captureLog redirects the standard logger into a buffer for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &buf
+}
 
 // TestRecordTeardownHintsLogsSetMetaFailure confirms that a failure to persist the teardown
 // hints at startup is not silent. Before this fix, `_ = st.SetMeta(...)` discarded the error;
@@ -23,7 +36,7 @@ func TestRecordTeardownHintsLogsSetMetaFailure(t *testing.T) {
 	st.Close() // force every subsequent SetMeta to fail
 
 	buf := captureLog(t)
-	recordTeardownHints(st, Options{WGInterface: "wgft0", WGPort: 51820, AgentAPIAddr: "0.0.0.0:8443"})
+	RecordHints(st, Hints{WGInterface: "wgft0", WGPort: 51820, AgentAPIAddr: "0.0.0.0:8443"})
 
 	got := buf.String()
 	if !strings.Contains(got, "wg interface") {
@@ -38,7 +51,7 @@ func TestRecordTeardownHintsLogsSetMetaFailure(t *testing.T) {
 }
 
 // TestTeardownWarnsWhenInterfaceNameNotRecorded confirms that, when the server database has no
-// recorded wg interface name (whether recordTeardownHints never ran or failed every time),
+// recorded wg interface name (whether RecordHints never ran or failed every time),
 // teardown says so in its output instead of silently assuming the default name. Silently
 // assuming it is dangerous together with --adopt-existing, which skips the key check: it could
 // then delete an unrelated interface that happens to share the default name (design.md 10.3・
@@ -51,11 +64,11 @@ func TestTeardownWarnsWhenInterfaceNameNotRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 意図して store.MetaTeardownWGInterface を記録しない(recordTeardownHints を呼ばない)。
+	// 意図して store.MetaTeardownWGInterface を記録しない(RecordHints を呼ばない)。
 	st.Close()
 
 	var buf bytes.Buffer
-	if err := Teardown(TeardownOptions{DBPath: path, Adopt: true, DryRun: true}, &buf); err != nil {
+	if err := Run(Options{DBPath: path, Adopt: true, DryRun: true}, &buf); err != nil {
 		t.Fatalf("teardown: %v\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -78,7 +91,7 @@ func TestTeardownDryRunReadsTheRecordedHints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recordTeardownHints(st, Options{WGInterface: "wgtest0", WGPort: 51999, AgentAPIAddr: "0.0.0.0:9443"})
+	RecordHints(st, Hints{WGInterface: "wgtest0", WGPort: 51999, AgentAPIAddr: "0.0.0.0:9443"})
 	for k, v := range map[string]string{store.MetaIPForwardSetAt: "2026-01-02T03:04:05Z", store.MetaWGAddress: "not-a-prefix"} {
 		if err := st.SetMeta(k, []byte(v)); err != nil {
 			t.Fatal(err)
@@ -87,7 +100,7 @@ func TestTeardownDryRunReadsTheRecordedHints(t *testing.T) {
 	st.Close()
 
 	var buf bytes.Buffer
-	if err := Teardown(TeardownOptions{DBPath: path, Adopt: true, DryRun: true}, &buf); err != nil {
+	if err := Run(Options{DBPath: path, Adopt: true, DryRun: true}, &buf); err != nil {
 		t.Fatalf("teardown: %v\n%s", err, buf.String())
 	}
 	out := buf.String()
@@ -121,10 +134,55 @@ func TestTeardownDryRunReadsTheRecordedUserspaceMode(t *testing.T) {
 	st.Close()
 
 	var buf bytes.Buffer
-	if err := Teardown(TeardownOptions{DBPath: path, Adopt: true, DryRun: true}, &buf); err != nil {
+	if err := Run(Options{DBPath: path, Adopt: true, DryRun: true}, &buf); err != nil {
 		t.Fatalf("teardown: %v\n%s", err, buf.String())
 	}
 	if !strings.Contains(buf.String(), "userspace mode: nothing to remove in the kernel") {
 		t.Errorf("teardown did not read the recorded userspace mode:\n%s", buf.String())
+	}
+}
+
+// TestTeardownPurgeNeedsYes checks that --purge without --yes refuses before removing anything,
+// the server database included. A database recording the userspace mode keeps the test free of
+// the kernel.
+func TestTeardownPurgeNeedsYes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMeta(store.MetaMode, []byte(store.ModeUserspace)); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	var buf bytes.Buffer
+	err = Run(Options{DBPath: path, Purge: true}, &buf)
+	if err == nil || !strings.Contains(err.Error(), "pass --yes to continue") {
+		t.Fatalf("--purge without --yes: err = %v\n%s", err, buf.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the server database is gone after a refused --purge: %v", err)
+	}
+}
+
+// TestTeardownRefusesWhileTheServerHoldsTheLock checks the refusal without the kernel: while the
+// startup lock of the server database is held, teardown refuses before reading anything else.
+// teardown_lab_test.go's TestTeardownRefusesWhenRunning checks the same in the lab.
+func TestTeardownRefusesWhileTheServerHoldsTheLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.sqlite")
+	lock, err := flock.Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+
+	var buf bytes.Buffer
+	err = Run(Options{DBPath: path, Adopt: true, DryRun: true}, &buf)
+	if err == nil || !strings.Contains(err.Error(), "server is running") {
+		t.Fatalf("err = %v\n%s", err, buf.String())
+	}
+	if buf.Len() != 0 {
+		t.Errorf("teardown wrote output before refusing:\n%s", buf.String())
 	}
 }

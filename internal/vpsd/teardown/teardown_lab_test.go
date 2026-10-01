@@ -1,8 +1,8 @@
 //go:build lab && linux
 
-package vpsd
+package teardown
 
-// ラボの vps ns で root として実行する(lab/lab test internal/vpsd)。
+// ラボの vps ns で root として実行する(lab/lab test internal/vpsd/teardown)。
 // 撤去が「自分の作ったものだけ消す」を守るかを、他人の wg0 と他テーブルを置いた状態で確かめる。
 
 import (
@@ -90,7 +90,7 @@ func TestTeardownRemovesOwnOnly(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := Teardown(TeardownOptions{DBPath: path}, &buf); err != nil {
+	if err := Run(Options{DBPath: path}, &buf); err != nil {
 		t.Fatalf("teardown: %v\n%s", err, buf.String())
 	}
 	if linkExists("wgft0") {
@@ -120,7 +120,7 @@ func TestTeardownRefusesForeignInterface(t *testing.T) {
 	_ = nft.Apply(planner.Plan{}, nil, nft.Config{WGInterface: "wgft0"})
 
 	var buf bytes.Buffer
-	err := Teardown(TeardownOptions{DBPath: path}, &buf)
+	err := Run(Options{DBPath: path}, &buf)
 	if err == nil {
 		t.Fatal("鍵不一致なのに拒否しなかった")
 	}
@@ -144,7 +144,7 @@ func TestTeardownRefusesWhenRunning(t *testing.T) {
 	defer lock.Release()
 
 	var buf bytes.Buffer
-	err = Teardown(TeardownOptions{DBPath: path}, &buf)
+	err = Run(Options{DBPath: path}, &buf)
 	if err == nil || !strings.Contains(err.Error(), "running") {
 		t.Fatalf("稼働中の拒否にならない: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestTeardownDryRun(t *testing.T) {
 	defer exec.Command("nft", "delete", "table", "inet", "wgft").Run()
 
 	var buf bytes.Buffer
-	if err := Teardown(TeardownOptions{DBPath: path, DryRun: true}, &buf); err != nil {
+	if err := Run(Options{DBPath: path, DryRun: true}, &buf); err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
 	if !linkExists("wgft0") || !nftTableExists("inet", "wgft") {

@@ -1,10 +1,11 @@
 //go:build linux
 
-package vpsd
-
-// 撤去(アンインストール、仕様 10.3 節)。vpsd が自分で作ったものだけを消し、
-// 手で足したもの(ファイアウォールのポート、他テーブルの wg 参照行、ip_forward)は
-// 一覧を出して手で戻してもらう。停止した vpsd の後片付けとして行い、稼働中なら拒否する。
+// Package teardown は `wgft server teardown` を持つ。撤去(アンインストール、仕様 10.3 節)。vpsd が
+// 自分で作ったものだけを消し、手で足したもの(ファイアウォールのポート、他テーブルの wg 参照行、
+// ip_forward)は一覧を出して手で戻してもらう。停止した vpsd の後片付けとして行い、稼働中なら拒否する。
+// 稼働中の server(internal/vpsd の Daemon)には依存せず、internal/vpsd の下位の package のうち
+// store だけを使う。撤去の手掛かりを起動時に記録する RecordHints も、読む側と同じこの package に置く。
+package teardown
 
 import (
 	"fmt"
@@ -26,27 +27,35 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// recordTeardownHints records the values `wgft server teardown` needs (10.3 節) to find what to
+// Hints は撤去の手掛かりとして起動時に記録する、server の設定の値である。各項目の意味は
+// internal/vpsd.Options の同じ名前の項目と同じである。
+type Hints struct {
+	WGInterface  string
+	WGPort       uint16
+	AgentAPIAddr string
+}
+
+// RecordHints records the values `wgft server teardown` needs (10.3 節) to find what to
 // remove without a --wg-interface flag of its own. A write failure here is not fatal to startup
 // (this hint is only ever read by a later, separate teardown run), but it must not be silent: an
 // operator who never sees it in the log has no way to know teardown may later have to guess
 // (design.md 10.5・10.3 節).
-func recordTeardownHints(st *store.Store, opts Options) {
-	if err := st.SetMeta(store.MetaTeardownWGInterface, []byte(opts.WGInterface)); err != nil {
-		log.Printf("warning: recording the wg interface name for teardown failed: %v; a later `wgft server teardown` may not find %s and will say so", err, opts.WGInterface)
+func RecordHints(st *store.Store, h Hints) {
+	if err := st.SetMeta(store.MetaTeardownWGInterface, []byte(h.WGInterface)); err != nil {
+		log.Printf("warning: recording the wg interface name for teardown failed: %v; a later `wgft server teardown` may not find %s and will say so", err, h.WGInterface)
 	}
-	if err := st.SetMeta(store.MetaTeardownWGPort, []byte(strconv.Itoa(int(opts.WGPort)))); err != nil {
+	if err := st.SetMeta(store.MetaTeardownWGPort, []byte(strconv.Itoa(int(h.WGPort)))); err != nil {
 		log.Printf("warning: recording the wg port for teardown's manual-restore list failed: %v", err)
 	}
-	if _, port, err := net.SplitHostPort(opts.AgentAPIAddr); err == nil {
+	if _, port, err := net.SplitHostPort(h.AgentAPIAddr); err == nil {
 		if err := st.SetMeta(store.MetaTeardownAgentAPIPort, []byte(port)); err != nil {
 			log.Printf("warning: recording the agent API port for teardown's manual-restore list failed: %v", err)
 		}
 	}
 }
 
-// TeardownOptions は撤去の指定。
-type TeardownOptions struct {
+// Options は撤去の指定。
+type Options struct {
 	DBPath string
 	Purge  bool // 状態ファイル(鍵・証明書含む SQLite 3 ファイル)も消す
 	DryRun bool // 消すものと一覧を出すだけ
@@ -54,8 +63,8 @@ type TeardownOptions struct {
 	Adopt  bool // 鍵が一致しない/状態ファイルが無いときでも wg を消す
 }
 
-// Teardown は撤去を実行する。out に進捗と「手で戻す一覧」を書く。
-func Teardown(opts TeardownOptions, out io.Writer) error {
+// Run は撤去を実行する。out に進捗と「手で戻す一覧」を書く。
+func Run(opts Options, out io.Writer) error {
 	// 停止した vpsd の後片付けとして行う。稼働中なら何もしないで拒否する。判定はロックファイルを
 	// 作らない Inspect で行う(設計 10.2c 節)。Acquire 経由の判定は、まだサーバのデータベースが
 	// 無いホストで teardown を打っただけでロックファイルを残した。読めなかった場合に撤去を続ける
@@ -84,7 +93,7 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 		if b, e := st.GetMeta(store.MetaTeardownWGInterface); e == nil && len(b) > 0 {
 			iface = string(b)
 		} else {
-			// 記録が無い(recordTeardownHints が一度も成功していない)か読めない場合、既定名を
+			// 記録が無い(RecordHints が一度も成功していない)か読めない場合、既定名を
 			// 仮定していることを出力に出す。黙って仮定すると、--adopt-existing(鍵の一致を
 			// 見ずに削除する)と組み合わさったとき、実際とは無関係な同名のインタフェースを
 			// 消しかねない(design.md 10.3・10.5 節)。
@@ -173,7 +182,7 @@ func Teardown(opts TeardownOptions, out io.Writer) error {
 }
 
 // purgeState は --purge のときだけ、サーバのデータベースとその付随ファイルを消す。
-func purgeState(opts TeardownOptions, out io.Writer) {
+func purgeState(opts Options, out io.Writer) {
 	if !opts.Purge {
 		return
 	}

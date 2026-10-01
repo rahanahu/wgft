@@ -30,8 +30,8 @@
 #      Rollback).
 #   4. `server teardown`, with and without --purge, removes only wgft's own wg interface and
 #      nft table, leaving a foreign wg interface and a foreign nft table with a rule untouched
-#      (design 10.3 section). internal/vpsd/teardown_lab_test.go already covers this at the
-#      package level (`lab/lab test internal/vpsd`); this check drives the same scenario
+#      (design 10.3 section). internal/vpsd/teardown/teardown_lab_test.go already covers this at
+#      the package level (`lab/lab test internal/vpsd/teardown`); this check drives the same scenario
 #      through the CLI, in the netns topology, end to end.
 #   5. under HALF the default flow caps (design 7, 7a.10 sections), holding and flooding past them
 #      keeps RSS under the derived memory soft limit plus a margin, for the userspace server's own
