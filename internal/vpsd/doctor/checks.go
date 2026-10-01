@@ -704,7 +704,7 @@ func FreshAgentRuleStatus(st adminapi.AgentRuleStatus, now time.Time) (adminapi.
 }
 
 // 直前の解決の結果で転送を続けているルールの理由の目印である。カーネルモードのエージェントの
-// staleReason(internal/agent/dataplane_kernel.go)が組み立てる文言であり、その側の試験
+// staleReason(internal/agent/dataplane_kernel_resolve.go)が組み立てる文言であり、その側の試験
 // (TestKernelStaleReasonIsReadByServerDoctor)がこの関数で読めることを固定している。
 const (
 	staleForwardMark = "; still forwarding to "
