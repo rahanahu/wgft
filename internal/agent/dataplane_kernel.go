@@ -155,7 +155,9 @@ type kernelDataplane struct {
 	// endpoint は直前に解決したエンドポイントであり、endpointOf はその元にした名前である(7b.1 節)。
 	// 解決できていない間はゼロで、インタフェースの収束はカーネルが持つエンドポイントを残す
 	//
-	// この 3 つは epMu が守る。名前を引く準備(prepareApply)が rt.mu の外で読むためである
+	// この 3 つは epMu が守る。名前を引く準備(prepareApply)が rt.mu の外で読むためである。epMu は
+	// rt.mu の中からも外からも取るので、順は rt.mu -> epMu である。epMu の中では値の読み書きとログの
+	// 出力だけを行う
 	epMu       sync.Mutex
 	endpoint   netip.AddrPort
 	endpointOf string

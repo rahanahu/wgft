@@ -104,6 +104,17 @@ type runtime struct {
 	// pong の期限より長くなりうる
 	applySeq atomic.Uint64
 
+	// mu(rt.mu)は以下の値と dataplane を守り、全体状態の適用の間じゅう持つ。ただし rt.mu の外で行う
+	// 準備(名前の解決)はこの間に含まない。
+	//
+	// agentDataplane のメソッドは rt.mu を持って呼び、dataplane の中の排他はその内側で取る。ユーザー
+	// 空間モードでは relay.Manager の排他、カーネルモードでは epMu(dataplane_kernel.go)である。
+	// 任意の interface の prepareApply と observePrepare は rt.mu の外で呼び、その中でも epMu を取る。
+	// epMu を持ったまま rt.mu を取ることは無いので、順は rt.mu -> epMu である。epMu の中では値の
+	// 読み書きとログの出力だけを行う。streamMu は rt.mu を持ったまま取らず、streamMu を持ったまま
+	// wgft の他の排他を取らない(streamobs.go)。rt.mu の中の checkTunnel から streamLoop へは、
+	// handshakeWake の待たない送信と handshakeSeen の atomic で伝える。agent doctor は rt.mu を期限付きで取る(doctor.go の lockRuntime)。rotate-key は rt.mu を
+	// 放してから適用し直し、その後に streamMu を取って stream を張り直す(control.go の rotateKey)。
 	mu sync.Mutex
 	// dp はトンネルと転送を担う dataplane である(設計文書 7a.7 節の境目)。rt.mu が守る
 	dp    agentDataplane
