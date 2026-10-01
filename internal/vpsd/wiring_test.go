@@ -39,8 +39,11 @@ func TestParticipantsKeepTheirOptionalInterfaces(t *testing.T) {
 }
 
 // TestRelayFrontendOptionsPerMode は、Relay のルールの中継の設定がモードごとに組まれることを
-// 確かめる。ユーザー空間モードで Admit が外れると、Admission Policy が黙って効かなくなる
-// (proxyrelay は nil なら通す)。FloorAtAccept が外れると、受信のバッファを floor に固定しない。
+// 確かめる。ユーザー空間モードでは、Admit が Backend の評価器の判定を返すこと、FloorAtAccept が
+// 立つこと、Dial が Backend の netstack を通ること、Pool が relay の TCP の Pool であることを見る。
+// カーネルモードでは、この 3 つが無く、Pool の予算が設定の TCPTotal であることを見る。Admit が
+// 外れると Admission Policy が黙って効かなくなり(proxyrelay は nil なら通す)、FloorAtAccept が
+// 外れると受信のバッファを floor に固定しない。
 func TestRelayFrontendOptionsPerMode(t *testing.T) {
 	b := userspace.New(userspace.Options{Logf: t.Logf})
 	o := relayFrontendOptions(resource.Limits{}, b)
@@ -58,16 +61,26 @@ func TestRelayFrontendOptionsPerMode(t *testing.T) {
 	if o.Pool != b.TCPPool() {
 		t.Error("userspace mode: the Relay frontend does not share the relay's TCP pool")
 	}
+	// トンネルを立てていない Backend の Dial は "tunnel is not up" で失敗する。ホストの dial なら
+	// ループバックの閉じたポートへの接続の拒否になる
 	if o.Dial == nil {
 		t.Error("userspace mode: the Relay frontend does not dial through the netstack")
+	} else if c, err := o.Dial("127.0.0.1:1"); err == nil {
+		c.Close()
+		t.Error("userspace mode: the Relay frontend's Dial reached 127.0.0.1:1; it does not go through the Backend's netstack")
+	} else if !strings.Contains(err.Error(), "tunnel is not up") {
+		t.Errorf("userspace mode: the Relay frontend's Dial failed with %q; want the Backend's \"tunnel is not up\"", err)
 	}
 
-	k := relayFrontendOptions(resource.Limits{}, nil)
+	const tcpTotal = 123
+	k := relayFrontendOptions(resource.Limits{TCPTotal: tcpTotal}, nil)
 	if k.Admit != nil || k.FloorAtAccept || k.Dial != nil {
 		t.Errorf("kernel mode: Admit set %v, FloorAtAccept %v, Dial set %v; want none of them", k.Admit != nil, k.FloorAtAccept, k.Dial != nil)
 	}
 	if k.Pool == nil {
 		t.Error("kernel mode: the Relay frontend has no pool")
+	} else if got := k.Pool.Total(); got != tcpTotal {
+		t.Errorf("kernel mode: the Relay frontend's pool holds %d flows; want the configured TCPTotal %d", got, tcpTotal)
 	}
 }
 
