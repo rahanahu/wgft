@@ -1,7 +1,9 @@
 package nettun
 
 import (
+	"fmt"
 	"io"
+	"math"
 	"net"
 	"reflect"
 	"sync/atomic"
@@ -18,18 +20,17 @@ import (
 // 回収で受信のバッファを縮めるときの、gVisor の受信のメモリ(rcvMemUsed)に関する試験。穴を作って
 // 順序外の segment を積み、縮め、穴を埋める再送を通して、接続が読み進めるかを見る。
 
-// holeFilter は、有効な間、port から 9000 へ向かう最初のデータの segment と、その再送をすべて捨てる。
+// holeFilter は、有効な間、port から 9000 へ向かうデータの segment のうち、順序番号 holeSeq の byte を
+// 含むもの(穴を作る segment とその再送)をすべて捨てる。frozen の間は、その向きのデータの segment を
+// すべて捨て、受け手の順序外の積み方を固定する。
 type holeFilter struct {
 	on      atomic.Bool
+	frozen  atomic.Bool
 	port    atomic.Uint32
-	holeSeq atomic.Int64
+	holeSeq atomic.Uint32
 }
 
-func newHoleFilter() *holeFilter {
-	h := &holeFilter{}
-	h.holeSeq.Store(-1)
-	return h
-}
+func newHoleFilter() *holeFilter { return &holeFilter{} }
 
 func (h *holeFilter) drop(pkt []byte) bool {
 	if !h.on.Load() {
@@ -40,19 +41,65 @@ func (h *holeFilter) drop(pkt []byte) bool {
 		return false
 	}
 	th := header.TCP(ip.Payload())
-	pl := int64(len(th.Payload()))
+	pl := uint32(len(th.Payload()))
 	if th.DestinationPort() != 9000 || uint32(th.SourcePort()) != h.port.Load() || pl == 0 {
 		return false
 	}
-	seq := int64(th.SequenceNumber())
-	h.holeSeq.CompareAndSwap(-1, seq)
-	hs := h.holeSeq.Load()
-	return seq <= hs && hs < seq+pl
+	if h.frozen.Load() {
+		return true
+	}
+	// 順序番号の一周をまたいでも正しい差で比べる
+	return h.holeSeq.Load()-th.SequenceNumber() < pl
 }
 
+// start は、c がまだ送っていない次の byte を穴にする。最初に見えたデータの segment を穴にすると、
+// 遅い環境では、先に送ったデータの遅れた再送(tail loss probe など)が穴に選ばれ、新しいデータが
+// 順序どおりに届いてしまう。
 func (h *holeFilter) start(c net.Conn) {
 	h.port.Store(uint32(c.LocalAddr().(*net.TCPAddr).Port))
+	h.holeSeq.Store(sndNxtOf(c))
 	h.on.Store(true)
+}
+
+// newHolePair は穴の試験の組を作る。送り手の stack の再送の回数の上限(gVisor の既定は 15 回)を
+// 外す。穴を埋める segment の再送は、穴を開けている間すべて捨てる。遅い環境では、その間に
+// 順序外の segment に応える ACK が長く続き、SACK と RACK による再送が上限を超え、送り手が接続を
+// 中断する(ErrTimeout)。上限は、この試験が確かめる受け手の受け入れとは関係しない。
+func newHolePair(t *testing.T, mtu int, h *holeFilter) *tcpPair {
+	t.Helper()
+	p := newTCPPairMTU(t, 1, mtu, nil, h.drop)
+	opt := tcpip.TCPMaxRetriesOption(math.MaxUint32)
+	if err := p.a.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &opt); err != nil {
+		t.Fatalf("setup: TCP max retries: %v", err)
+	}
+	return p
+}
+
+// sndNxtOf は試験のためだけに、送り手の次に送る順序番号(SndNxt)を読む。gVisor は endpoint の錠を
+// 持って書き換えるので、同じ錠を持って読む。
+func sndNxtOf(c net.Conn) uint32 {
+	e := connOf(c).ep.(*tcp.Endpoint)
+	e.LockUser()
+	defer e.UnlockUser()
+	f := reflect.ValueOf(e).Elem().FieldByName("snd").Elem().FieldByName("SndNxt")
+	return uint32(reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Uint())
+}
+
+// queueDrops は、受け手が受信のメモリの不足で受け入れなかった segment の数を返す。
+func queueDrops(c net.Conn) uint64 {
+	return connOf(c).ep.Stats().(*tcp.Stats).ReceiveErrors.SegmentQueueDropped.Value()
+}
+
+// holeDiag は、穴を埋めた後に読み進めなかったときの手がかりを返す。
+func holeDiag(t *testing.T, p *tcpPair, c, s net.Conn) string {
+	t.Helper()
+	var ti tcpip.TCPInfoOption
+	connOf(c).ep.GetSockOpt(&ti)
+	st := p.a.stack.Stats().TCP
+	pb, n := pendingOf(s)
+	return fmt.Sprintf("sender %v error %v rto %v retransmits %d timeouts %d; receiver %v pending %d in %d rcvMemUsed %d queue drops %d",
+		state(c), connOf(c).ep.LastError(), ti.RTO, st.Retransmits.Value(), st.Timeouts.Value(),
+		state(s), pb, n, recvMemOf(t, s), queueDrops(s))
 }
 
 // recvMemOf は試験のために gVisor の受信のメモリを読む。
@@ -77,20 +124,34 @@ func pendingOf(c net.Conn) (bytes, n int) {
 	return int(reflect.NewAt(pb.Type(), unsafe.Pointer(pb.UnsafeAddr())).Elem().Int()), h.Len()
 }
 
-// quiesce は、受信のメモリが 300 ms 変わらなくなるまで待ち、その値を返す。
-func quiesce(t *testing.T, c net.Conn) int {
+// waitFor は cond が成り立つまで 20 ms ごとに調べ、d の間に成り立たなければ試験を止める。
+func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 	t.Helper()
-	last, since := -1, time.Now()
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		m := recvMemOf(t, c)
-		if m != last {
-			last, since = m, time.Now()
-		} else if time.Since(since) > 300*time.Millisecond {
-			return m
+	for deadline := time.Now().Add(d); !cond(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: not within %v", what, d)
 		}
 	}
-	t.Fatal("receive memory did not settle")
-	return 0
+}
+
+// settle は、sample の値が 300 ms 以上、かつ 15 回続けて変わらなくなるまで待つ。回数も求めるのは、
+// プロセス全体が止められた後の最初の 1 回だけで、変わらないと判断しないためである。
+func settle(t *testing.T, what string, sample func() [3]int) [3]int {
+	t.Helper()
+	last, since, same := sample(), time.Now(), 0
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+		v := sample()
+		if v != last {
+			last, since, same = v, time.Now(), 0
+			continue
+		}
+		if same++; same >= 15 && time.Since(since) >= 300*time.Millisecond {
+			return v
+		}
+	}
+	t.Fatalf("%s did not settle: last %v", what, last)
+	return last
 }
 
 // readAll は r から n byte を timeout の間に読めたかを返す。
@@ -106,8 +167,32 @@ func readAllErr(r net.Conn, n int, timeout time.Duration) (int, error) {
 	return int(got), err
 }
 
+// holeIdle は、穴を埋めた後に読み進めない状態を止まったとみなすまでの時間。穴を開けていた間に
+// 送り手の再送の間隔は延びるので、最初の再送までの待ちを含めて余裕を取る。
+const holeIdle = 40 * time.Second
+
+// readProgress は r から n byte を読み、idle の間 1 byte も読めなければ止まったとして誤りを返す。
+// 全体の期限は置かない。遅い環境では、穴を埋めた後の転送が、送り手の queue の溢れと再送で
+// 遅くなるが、読み進めている限り、受け取れなくなった接続ではない。
+func readProgress(r net.Conn, n int, idle time.Duration) (int, error) {
+	defer r.SetReadDeadline(time.Time{})
+	buf := make([]byte, 64<<10)
+	got := 0
+	for got < n {
+		r.SetReadDeadline(time.Now().Add(idle))
+		k, err := r.Read(buf[:min(len(buf), n-got)])
+		got += k
+		if err != nil {
+			return got, err
+		}
+	}
+	return got, nil
+}
+
 // makeHole は、送り手 c から大きさ ooo のデータを 1 回で書き、先頭の segment を捨てて、受け手 s に
-// 順序外として積ませる。積み終わった受け手の受信のメモリを返す。
+// 順序外として積ませる。積み終わったら、以後 c からのデータを穴を埋めるまですべて捨て、受け手が
+// 受け取った segment をすべて処理し終えた後の受信のメモリを返す。時間だけで積み終わりを判断しない。
+// 遅い環境では、送り手が送り始める前や送る途中で、受け手のメモリが一時的に変わらないことがある。
 func makeHole(t *testing.T, h *holeFilter, c, s net.Conn, ooo int) int {
 	t.Helper()
 	h.start(c)
@@ -116,9 +201,19 @@ func makeHole(t *testing.T, h *holeFilter, c, s net.Conn, ooo int) int {
 		t.Fatalf("setup: write %d: %v", ooo, err)
 	}
 	c.SetWriteDeadline(time.Time{})
-	m := quiesce(t, s)
-	if pb, n := pendingOf(s); pb == 0 || n == 0 || recvQueue(s) != 0 {
-		t.Fatalf("setup: no out-of-order data behind the hole: pending=%d segments=%d queue=%d", pb, n, recvQueue(s))
+	waitFor(t, 10*time.Second, "setup: out-of-order data behind the hole", func() bool { _, n := pendingOf(s); return n > 0 })
+	// 送り手が送り終え、受け手が積み終えるまで待つ
+	settle(t, "setup: the burst behind the hole", func() [3]int { return [3]int{recvMemOf(t, s), int(sndNxtOf(c)), 0} })
+	h.frozen.Store(true)
+	// 捨て始める前に渡った segment を受け手が処理し終えると、受信のメモリは順序外のキューの byte に
+	// 等しく、受信のキューは空になる。以後は何も届かないので、この値は穴を埋めるまで変わらない
+	v := settle(t, "setup: the receiver", func() [3]int { pb, _ := pendingOf(s); return [3]int{recvMemOf(t, s), pb, recvQueue(s)} })
+	m := v[0]
+	if pb, n := pendingOf(s); pb == 0 || n == 0 || recvQueue(s) != 0 || m != pb {
+		t.Fatalf("setup: no out-of-order data behind the hole: pending=%d segments=%d queue=%d rcvMemUsed=%d", pb, n, recvQueue(s), m)
+	}
+	if st := state(c); st != tcp.StateEstablished {
+		t.Fatalf("setup: sender %v with the hole open: %v", st, connOf(c).ep.LastError())
 	}
 	return m
 }
@@ -156,13 +251,15 @@ func TestGVisorRecvMemLayout(t *testing.T) {
 		t.Fatalf("fresh endpoint rcvMemUsed = %d", m)
 	}
 	c.Write(make([]byte, 100<<10))
-	m := quiesce(t, s)
-	if q := recvQueue(s); q != 100<<10 || m < q {
+	waitFor(t, 10*time.Second, "100 KiB queued at the receiver", func() bool { return recvQueue(s) == 100<<10 })
+	if m, q := recvMemOf(t, s), recvQueue(s); m < q {
 		t.Fatalf("rcvMemUsed = %d with %d bytes queued", m, q)
 	}
-	readAll(s, 100<<10, 5*time.Second)
-	if m := quiesce(t, s); m != 0 {
-		t.Fatalf("rcvMemUsed = %d after reading everything", m)
+	if got, ok := readAll(s, 100<<10, 5*time.Second); !ok {
+		t.Fatalf("read %d of %d", got, 100<<10)
+	}
+	if m := settle(t, "receive memory after reading", func() [3]int { return [3]int{recvMemOf(t, s), 0, 0} }); m[0] != 0 {
+		t.Fatalf("rcvMemUsed = %d after reading everything", m[0])
 	}
 }
 
@@ -188,7 +285,7 @@ func TestGVisorShrinkBoundary(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHoleFilter()
-			p := newTCPPairMTU(t, 1, tc.mtu, nil, h.drop)
+			p := newHolePair(t, tc.mtu, h)
 			c, s := p.dial(t)
 			defer c.Close()
 			defer s.Close()
@@ -207,6 +304,9 @@ func TestGVisorShrinkBoundary(t *testing.T) {
 			so.SetReceiveBufferSize(int64(b), true)
 			if got := so.GetReceiveBufferSize(); got != int64(b) {
 				t.Fatalf("receive buffer %d, want %d", got, b)
+			}
+			if got := recvMemOf(t, s); got != m {
+				t.Fatalf("setup: rcvMemUsed moved from %d to %d while the hole was frozen", m, got)
 			}
 			var more atomic.Int64
 			stop := make(chan struct{})
@@ -229,18 +329,31 @@ func TestGVisorShrinkBoundary(t *testing.T) {
 			} else {
 				close(done)
 			}
+			drops := queueDrops(s)
 			h.on.Store(false)
-			timeout := 40 * time.Second
+			var (
+				got int
+				err error
+			)
 			if tc.stall {
-				timeout = 8 * time.Second
+				// 止まるのが、再送が届かないからではなく、届いた再送を受け手が受け入れないからで
+				// あることを確かめる。拒んだ数か受信のメモリが変わるまで待ち、その後も何も読めない
+				// ことを見る
+				for deadline := time.Now().Add(holeIdle); queueDrops(s) == drops && recvMemOf(t, s) == m; time.Sleep(20 * time.Millisecond) {
+					if time.Now().After(deadline) {
+						t.Fatalf("B below M: no retransmission reached the receiver: %s", holeDiag(t, p, c, s))
+					}
+				}
+				got, err = readAllErr(s, tc.ooo, 8*time.Second)
+			} else {
+				got, err = readProgress(s, tc.ooo, holeIdle)
 			}
-			got, ok := readAll(s, tc.ooo, timeout)
+			ok := err == nil
 			close(stop)
 			<-done
 			pbAfter, nAfter := pendingOf(s)
 			t.Logf("M=%d pending=%d in %d segments (%d each) B=%d: read %d of %d ok=%v; pending after %d in %d; written after %d; queue drops %d",
-				m, pb, n, seg, b, got, tc.ooo, ok, pbAfter, nAfter, more.Load(),
-				connOf(s).ep.Stats().(*tcp.Stats).ReceiveErrors.SegmentQueueDropped.Value())
+				m, pb, n, seg, b, got, tc.ooo, ok, pbAfter, nAfter, more.Load(), queueDrops(s)-drops)
 			if tc.stall {
 				if got != 0 || recvMemOf(t, s) != m {
 					t.Fatalf("B below M: read %d, rcvMemUsed %d; want a stall with nothing accepted", got, recvMemOf(t, s))
@@ -248,7 +361,7 @@ func TestGVisorShrinkBoundary(t *testing.T) {
 				return
 			}
 			if !ok {
-				t.Fatalf("B >= M: read only %d of %d after the hole was filled", got, tc.ooo)
+				t.Fatalf("B >= M: read only %d of %d after the hole was filled: %v; %s", got, tc.ooo, err, holeDiag(t, p, c, s))
 			}
 		})
 	}
@@ -268,7 +381,7 @@ func TestTCPReclaimWithHole(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHoleFilter()
-			p := newTCPPairOpts(t, 1, nil, h.drop)
+			p := newHolePair(t, 1420, h)
 			c, s := p.dial(t)
 			defer c.Close()
 			defer s.Close()
@@ -294,12 +407,8 @@ func TestTCPReclaimWithHole(t *testing.T) {
 				t.Fatalf("holder kept at rcv=%d", rcv)
 			}
 			h.on.Store(false)
-			if got, err := readAllErr(s, tc.ooo, 40*time.Second); err != nil {
-				var ti tcpip.TCPInfoOption
-				connOf(c).ep.GetSockOpt(&ti)
-				pb, n := pendingOf(s)
-				t.Fatalf("read only %d of %d after the hole was filled: %v; sender %v rto %v; receiver %v pending %d in %d rcvMemUsed %d",
-					got, tc.ooo, err, state(c), ti.RTO, state(s), pb, n, recvMemOf(t, s))
+			if got, err := readProgress(s, tc.ooo, holeIdle); err != nil {
+				t.Fatalf("read only %d of %d after the hole was filled: %v; %s", got, tc.ooo, err, holeDiag(t, p, c, s))
 			}
 		})
 	}
