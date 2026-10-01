@@ -1,6 +1,6 @@
 //go:build linux
 
-package vpsd
+package servercheck
 
 import (
 	"bytes"
@@ -15,18 +15,18 @@ import (
 // 2 つだけであり、admin API(既定 Unix ソケット。design.md 6.1 節参照)を含まないことを確かめる。
 func TestOwnPortTargets(t *testing.T) {
 	opts := Options{WGPort: 51820, AgentAPIAddr: "0.0.0.0:8443"}
-	got := ownPortTargets(opts)
+	got := OwnPortTargets(opts.WGPort, opts.AgentAPIAddr)
 	if len(got) != 2 {
 		t.Fatalf("targets = %+v, want 2 (WireGuard, agent API)", got)
 	}
-	if got[0].purpose != "WireGuard" || got[0].proto != proto.UDP || got[0].port != 51820 {
+	if got[0].Purpose != "WireGuard" || got[0].Proto != proto.UDP || got[0].Port != 51820 {
 		t.Errorf("WireGuard target = %+v", got[0])
 	}
-	if got[1].purpose != "agent API" || got[1].proto != proto.TCP || got[1].port != 8443 {
+	if got[1].Purpose != "agent API" || got[1].Proto != proto.TCP || got[1].Port != 8443 {
 		t.Errorf("agent API target = %+v", got[1])
 	}
 	for _, target := range got {
-		if target.purpose == "admin API" {
+		if target.Purpose == "admin API" {
 			t.Errorf("admin API must not be a target: %+v", got)
 		}
 	}

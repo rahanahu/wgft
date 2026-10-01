@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/startup"
+	"github.com/rahanahu/wgft/internal/vpsd"
 )
 
 // server の値の誤りと必須の値の欠落は、システムに触る前に終了コード 3 で止まる(設計文書 11b 節)。
@@ -358,6 +360,37 @@ func TestDoorValueChecks(t *testing.T) {
 		}
 		if r := startup.Of(tc.err); tc.err != nil && (r == nil || r.Category != startup.CategoryConfig) {
 			t.Errorf("%s: %v is not a config refusal", tc.name, tc.err)
+		}
+	}
+}
+
+// TestServerCheckOptionsCopiesEveryField checks that server check receives every setting it reads
+// from the server's options: each field of servercheck.Options is copied from the field of the
+// same name in vpsd.Options. A field added to servercheck.Options without a source in vpsd.Options,
+// or left out of serverCheckOptions, fails here.
+func TestServerCheckOptionsCopiesEveryField(t *testing.T) {
+	in := vpsd.Options{
+		DBPath:       "/var/lib/wgft/wgft.sqlite",
+		WGInterface:  "wgtest0",
+		WGPort:       51999,
+		WGAddress:    "10.9.0.1/24",
+		AgentAPIAddr: "0.0.0.0:9443",
+		Mode:         "userspace",
+	}
+	out := reflect.ValueOf(serverCheckOptions(in))
+	src := reflect.ValueOf(in)
+	for i := 0; i < out.NumField(); i++ {
+		name := out.Type().Field(i).Name
+		from := src.FieldByName(name)
+		if !from.IsValid() {
+			t.Errorf("servercheck.Options.%s has no field of the same name in vpsd.Options", name)
+			continue
+		}
+		if from.IsZero() {
+			t.Errorf("the test input leaves vpsd.Options.%s unset", name)
+		}
+		if !reflect.DeepEqual(out.Field(i).Interface(), from.Interface()) {
+			t.Errorf("servercheck.Options.%s = %v, want %v", name, out.Field(i).Interface(), from.Interface())
 		}
 	}
 }

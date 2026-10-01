@@ -1094,6 +1094,7 @@ internal/
   dataplane/linuxkernel/ カーネルの WireGuard、nftables、conntrack、所有判定
   platform/linux/        sysctl、capability、他ファイアウォールとの衝突の検査
   vpsd/                  制御プレーン(登録、stream、SQLite、admin API)。proxyrelay が frontend の participant を実装する(下記)
+  vpsd/servercheck/      `wgft server check`。internal/vpsd の下位の package のうち store だけを import する(下記)
   agent/                 制御プレーン(認証情報、stream クライアント、rotate-key)と、2 つのモードの dataplane を切り替える境目(下記)
   agent/credentials/     認証情報ファイル(agent.json)、そのロック、停止中に CLI が認証情報ファイルを書くための排他(9 節)
   agent/allowtargets/    エージェントが接続してよい宛先の一覧(7 節)
@@ -1106,6 +1107,8 @@ proto/                   維持する外部仕様としての wire スキーマ(
 `platform/windows/`、`platform/darwin/` は、Windows・macOS の agent(13 節)に着手するときに設ける。今は `platform/linux/` だけがあり、目標の木には含めない。
 
 依存の向きは一方向である。`model`、`policy`、`planner`、`resource` は OS、nftables、gVisor を知らない純粋な Go の型と関数だけを持ち、`dataplane/*`、`platform/*` を一切 import しない。`reconcile` は `planner` の `Plan` と、`Runtime` を組み立てる participant の interface(dataplane の `Backend`、frontend の `Frontend`/`FrontendPrepared`)だけを持ち、`dataplane/userspace`・`dataplane/linuxkernel` にも、frontend の実装にも依存しない。`dataplane/*` は `model`、`policy`、`planner`、`resource`、`platform/*` を import できるが、互いには依存しない。`planner` を含めるのは、`Backend` が収束先を `Plan` と実行時の入力(frontend が待ち受けているポートの集合など)だけから受け取り、設定やルール集合を別の経路から読まないためである。`Relay` の listener 集合という frontend 側の資源には独立した package を置かない。server では `internal/vpsd/proxyrelay` が `Prepare`/`Commit`/`Rollback` を持ち、`internal/vpsd` がそれを `reconcile.Frontend`/`FrontendPrepared` へ橋渡しする(7a.2 節)。`vpsd` と `agent` は上記すべてを import できる唯一の層である。`vpsd` は起動時に dataplane と frontend の実装から `Runtime` を組み立て、`reconcile` に渡す。この向きにより `internal/dataplane/linuxkernel` が `internal/vpsd` に依存しない構造になり、agent のカーネルモード(7b 節)が server の kernel backend の共通の部品(WireGuard、host 側の検査、nftables と conntrack の基本操作)を再利用できる。VPS 用の table(公開ポートから agent への DNAT)とその収束は server に固有で、agent には LAN の宛先への DNAT、MASQUERADE、agent 側の conntrack 収束という別の経路を同じ package に足す。
+
+`internal/vpsd` の根には、実行時の状態を持つ `Daemon` と、下位の package が定める `Backend` の実装と、起動の配線を置く。`Daemon` に依存しない機能は下位の package に置く。`internal/vpsd/servercheck` は `wgft server check`(6.1・10.3・11a 節)を持つ。このコマンドは server を起動せずにサーバのデータベースを読むだけなので、`internal/vpsd` の下位の package のうち `store` だけを import する。`internal/dataplane/deps_test.go` の `TestVpsdServerCheckImportsOnlyTheStore` がこれを検査する。
 
 agent は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` をまだ使わない。`internal/agent` は userspace のトンネル(`internal/dataplane/userspace/tunnel`)と中継(`internal/dataplane/userspace/relay`)を直接駆動し、全体状態(`proto.AgentRule` を含む)を自分で収束させる。v1.2 はこの形を保ったまま、`internal/agent` の中に狭い dataplane の境目を切り、その後ろにユーザー空間モードとカーネルモードの 2 つの実装を置く(2026-09-24、所有者の決定)。ユーザー空間モードの実装は今のトンネルと中継をそのまま包み、カーネルモードの実装は `internal/dataplane/linuxkernel` の部品から組み立てる。agent 全体を `Runtime` へ移してからカーネルモードを足す案は採らなかった。移行はトンネルの作り直し(7 節)、全体状態の適用の試し直し、`agent doctor`(10.2c 節)の経路を巻き込み、カーネルモードを加えるという目的より大きいためである。agent を `Runtime` へ移すのは後の段階とする。
 
@@ -1569,7 +1572,7 @@ CLI のコマンドとフラグ、`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`、
 
 共通の保証が言う成功は、要求された操作を完了できたことを指す。その結果が肯定であるかどうかは含めない(2026-09-23、所有者の決定)。診断の結果そのものを終了コードに載せるのは、各節が名指しするコマンドに限る。`server doctor`、`status`、`rule add` と `rule set` の `--dry-run` は、検査に失敗があること、配置に劣化があること、その変更が受理されない見込みであることを、答えそのものとして 0 以外で表す。各節がそう定めているためであり、共通の保証に反しない。
 
-成功をここまでに狭める理由は、共通の保証を広げすぎないことにある。処理は正常に完了したが、内容として警告や否定的な所見を含むコマンドまで終了コードに意味を持たせると、既存の挙動と衝突する。`wgft server check` がその例である。`internal/vpsd` の `Check` は、所見を印字しても、nft の検査を実行できなくても、サーバのデータベースを開けなくても `nil` を返し、終了コードは 0 のままである。`server check` の所見と部分的な読み取りの失敗は出力で伝え、終了コードには反映しない。この挙動は変えない。共通の保証は要求された操作を完了できたかまでにとどめ、診断の結果そのものを終了コードに載せるコマンドだけを各節で明示するほうが一貫する。サーバのデータベースが新しい版の書いたスキーマで開けない場合(`store.ErrSchemaNewer`)だけは、他の所見と紛れないよう専用の見落としにくい行で示す。運用者は、入れ替えの巻き戻しの最中に旧い版の `server check` でこれに気付く必要があり、終了コードでは気付けないためである(改訂の記録参照)。
+成功をここまでに狭める理由は、共通の保証を広げすぎないことにある。処理は正常に完了したが、内容として警告や否定的な所見を含むコマンドまで終了コードに意味を持たせると、既存の挙動と衝突する。`wgft server check` がその例である。`internal/vpsd/servercheck` の `Check` は、所見を印字しても、nft の検査を実行できなくても、サーバのデータベースを開けなくても `nil` を返し、終了コードは 0 のままである。`server check` の所見と部分的な読み取りの失敗は出力で伝え、終了コードには反映しない。この挙動は変えない。共通の保証は要求された操作を完了できたかまでにとどめ、診断の結果そのものを終了コードに載せるコマンドだけを各節で明示するほうが一貫する。サーバのデータベースが新しい版の書いたスキーマで開けない場合(`store.ErrSchemaNewer`)だけは、他の所見と紛れないよう専用の見落としにくい行で示す。運用者は、入れ替えの巻き戻しの最中に旧い版の `server check` でこれに気付く必要があり、終了コードでは気付けないためである(改訂の記録参照)。
 
 以下、サーフェスごとに保つものと保たないものを示す。
 
@@ -3977,3 +3980,5 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - エージェントの登録のクライアントの側を `internal/agent/enroll` へ移した(2026-10-01、7a.7 節):接続文字列の解釈(`ParseJoin`)、証明書の SHA-256 でサーバを確かめる HTTP クライアント(`PinnedClient`)、登録 API の呼び出し(`Register`)を `internal/agent` から `internal/agent/enroll` へ移した。初回の登録と登録のし直しが共有する、登録の結果を認証情報に写す関数も、`enroll.Record` として同じ package に置いた。挙動は変えていない。移した宣言は、名前を改めた `Record` を除き、本文もコメントも移動の前と同じであり、呼び出し側は package の名前を付けて呼ぶだけである。7a.7 節の配置と本文に `agent/enroll/` を加えた。
 
 - サーバのデータベースの meta 表のキーを `internal/vpsd/store` の定数にまとめた(2026-10-01、7a.2 節。挙動は変えていない):meta 表のキーは、`internal/vpsd` の `mode.go`、`teardown.go`、`vpsd.go` と、`internal/vpsd/agentapi`、`internal/vpsd/store` のそれぞれが非公開の定数として持っていた。同じ表を読み書きする `server check` と `server teardown` は、`internal/vpsd` の中にあることでこの定数を共有していた。キーと、`mode` のキーに記録する転送方式の値 `ModeKernel`/`ModeUserspace` を `internal/vpsd/store` の `meta.go` に移し、7a.2 節が述べる転送方式の語彙の置き場所を直した。キーの文字列は変えていないので、既存のデータベースの記録はそのまま読める。単体テスト `TestMetaKeysKeepTheirStoredNames` が各キーの文字列を固定する。
+
+- `server check` を `internal/vpsd/servercheck` に移した(2026-10-01、7a.7 節。挙動は変えていない):`server check` の実装は `internal/vpsd` の `servercheck.go` にあり、`Daemon` に依存していなかった。共有していたのは、起動の設定 `Options`、meta 表のキー、起動時の同じ検査が使う自分の待ち受けポートの一覧だけであった。キーは `internal/vpsd/store` の定数になっている。実装を下位の package `internal/vpsd/servercheck` に移し、読む設定だけを持つ `servercheck.Options` を設けた。`cmd/wgft` が server の設定からこれを組む。自分の待ち受けポートの一覧は `servercheck.OwnPortTargets` として公開し、`internal/vpsd` の `Run` も起動時の検査に使う。7a.7 節の配置の木にこの package を加え、`internal/vpsd` の根に置くものと下位の package に置くものの分け方を書いた。`TestVpsdServerCheckImportsOnlyTheStore` が、この package が `internal/vpsd` の下位の package のうち `store` だけを import することを検査する。`server check` の出力と終了コード、起動時のログの文言は変えていない。

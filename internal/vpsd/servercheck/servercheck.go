@@ -1,6 +1,9 @@
 //go:build linux
 
-package vpsd
+// Package servercheck は `wgft server check` を持つ。起動せずに、設定、環境、サーバのデータベースを
+// 読んで結果を書く読み取り専用のコマンドである(仕様 6.1・10.3・11a 節)。稼働中の server
+// (internal/vpsd の Daemon)には依存せず、internal/vpsd の下位の package のうち store だけを使う。
+package servercheck
 
 import (
 	"errors"
@@ -21,6 +24,18 @@ import (
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
+
+// Options は server check が読む設定である。cmd/wgft が server の設定から組む。各項目の意味は
+// internal/vpsd.Options の同じ名前の項目と同じである。
+type Options struct {
+	DBPath       string
+	WGInterface  string
+	WGPort       uint16
+	WGAddress    string
+	AgentAPIAddr string
+	// Mode は WGFT_MODE の値で、未指定なら空である。
+	Mode string
+}
 
 // Check は起動せずに、そのモードで必要な検査を走らせて結果を書く読み取り専用コマンド
 // (仕様 6.1・10.3・11a 節)。
@@ -100,37 +115,38 @@ func Check(opts Options, out io.Writer) error {
 	return nil
 }
 
-// ownPortTarget は、input firewall との突き合わせ対象にする vpsd 自身の待ち受けポート 1 つ。
-type ownPortTarget struct {
-	purpose string // ログとエラーメッセージに出す呼び名("WireGuard"、"agent API")
-	proto   proto.Proto
-	port    uint16
+// OwnPortTarget は、input firewall との突き合わせ対象にする vpsd 自身の待ち受けポート 1 つ。
+type OwnPortTarget struct {
+	Purpose string // ログとエラーメッセージに出す呼び名("WireGuard"、"agent API")
+	Proto   proto.Proto
+	Port    uint16
 }
 
-// ownPortTargets は、host の input firewall と突き合わせる vpsd 自身の待ち受けポートを列挙する
+// OwnPortTargets は、host の input firewall と突き合わせる vpsd 自身の待ち受けポートを列挙する
 // (仕様 4 節「VPS で外に開けるポートは次の 3 種類だけ」のうち、転送対象のポートを除く 2 つ)。
 // 管理用 API(WGFT_ADMIN)は含めない。既定は Unix ソケットで、host:port にした場合も
 // localhost や Tailscale のアドレスで使う想定であり(11 節)、インターネットから直接受ける
-// ポートではないため、input firewall を開ける提示の対象にする理由が無い。
-func ownPortTargets(opts Options) []ownPortTarget {
-	targets := []ownPortTarget{{purpose: "WireGuard", proto: proto.UDP, port: opts.WGPort}}
-	if _, portStr, err := net.SplitHostPort(opts.AgentAPIAddr); err == nil {
+// ポートではないため、input firewall を開ける提示の対象にする理由が無い。server check と、起動時の
+// 同じ検査(internal/vpsd の Run)の両方が使う。
+func OwnPortTargets(wgPort uint16, agentAPIAddr string) []OwnPortTarget {
+	targets := []OwnPortTarget{{Purpose: "WireGuard", Proto: proto.UDP, Port: wgPort}}
+	if _, portStr, err := net.SplitHostPort(agentAPIAddr); err == nil {
 		if v, err := strconv.ParseUint(portStr, 10, 16); err == nil {
-			targets = append(targets, ownPortTarget{purpose: "agent API", proto: proto.TCP, port: uint16(v)})
+			targets = append(targets, OwnPortTarget{Purpose: "agent API", Proto: proto.TCP, Port: uint16(v)})
 		}
 	}
 	return targets
 }
 
-// checkOwnPorts は、ownPortTargets の各ポートが host の input firewall で塞がれていないかを
+// checkOwnPorts は、OwnPortTargets の各ポートが host の input firewall で塞がれていないかを
 // linux.InputPortSuggestions で確かめ、他の nft check と同じ Finding の形で表示する。呼び出し元は
 // 事前に root を確かめておく(nftables の読み取りに要るため)。
 func checkOwnPorts(out io.Writer, opts Options) {
 	var findings []linux.Finding
-	for _, t := range ownPortTargets(opts) {
-		lines, err := linux.InputPortSuggestions(proto.PortRange{Lo: t.port, Hi: t.port}, t.proto, nft.TableName)
+	for _, t := range OwnPortTargets(opts.WGPort, opts.AgentAPIAddr) {
+		lines, err := linux.InputPortSuggestions(proto.PortRange{Lo: t.Port, Hi: t.Port}, t.Proto, nft.TableName)
 		if err != nil {
-			fmt.Fprintf(out, "own ports check %s %d/%s: cannot run: %v\n", t.purpose, t.port, t.proto, err)
+			fmt.Fprintf(out, "own ports check %s %d/%s: cannot run: %v\n", t.Purpose, t.Port, t.Proto, err)
 			continue
 		}
 		if len(lines) == 0 {
@@ -138,7 +154,7 @@ func checkOwnPorts(out io.Writer, opts Options) {
 		}
 		findings = append(findings, linux.Finding{
 			Where:   "input firewall",
-			Problem: fmt.Sprintf("blocks the %s port %d/%s; no agent could ever reach it from outside", t.purpose, t.port, t.proto),
+			Problem: fmt.Sprintf("blocks the %s port %d/%s; no agent could ever reach it from outside", t.Purpose, t.Port, t.Proto),
 			Suggest: lines,
 		})
 	}
@@ -156,7 +172,7 @@ func checkOwnPorts(out io.Writer, opts Options) {
 // カーネルモードでは、host のソケットで受けるのはプロキシモード(Relay。TCP のみ)のルールだけで、
 // Transparent なルールは他テーブルの DNAT と forward を経由し input を通らない(仕様 6.1・6.2 節)。
 // ユーザー空間モードは vps_mode の区別に意味を持たず、有効なルールすべてが host のソケットで受ける
-// 中継になるため、全ルールを対象にする(仕様 6.3 節)。判定は apply.go の proxyInputHints と同じ。
+// 中継になるため、全ルールを対象にする(仕様 6.3 節)。判定は internal/vpsd の apply.go の proxyInputHints と同じ。
 func checkRulePorts(out io.Writer, rules []proto.Rule, mode string) {
 	var findings []linux.Finding
 	for _, r := range rules {
@@ -234,7 +250,7 @@ func printDBModes(out io.Writer, path string) {
 
 // checkRecordedMode は、記録済みのモードと今回の設定を照合して 1 行出す。食い違いがあっても
 // ここでは拒否しない。実際にモードを切り替えられるかどうかは、次の `server run` で
-// reconcileModeAndAddress の関門(mode.go の modeGate)が決める。
+// reconcileModeAndAddress の関門(internal/vpsd の mode.go の modeGate)が決める。
 func checkRecordedMode(out io.Writer, st *store.Store, want string) {
 	have, err := st.GetMeta(store.MetaMode)
 	if errors.Is(err, store.ErrNotFound) {

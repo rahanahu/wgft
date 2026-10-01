@@ -345,7 +345,7 @@ func (s *Store) Close() error { return s.db.Close() }
 // wgft, whose schema this binary does not know. Open's caller (internal/vpsd.Run) turns it into a
 // startup refusal: no amount of restarting teaches an older binary a newer schema, only installing
 // that binary again or restoring a copy of the database does (design.md 11b 節). OpenReadOnly's
-// caller (internal/vpsd.Check, "server check") cannot refuse: its exit code stays 0 by design
+// caller (internal/vpsd/servercheck.Check, "server check") cannot refuse: its exit code stays 0 by design
 // (design.md 7a.11 節), so it prints a dedicated line instead (改訂の記録参照).
 var ErrSchemaNewer = errors.New("server database schema is newer than this binary")
 
