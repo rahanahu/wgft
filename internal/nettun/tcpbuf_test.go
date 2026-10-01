@@ -878,3 +878,183 @@ func TestWriteHistorySums(t *testing.T) {
 		t.Fatal("boost history not full")
 	}
 }
+
+// OnBoost は登録の時点の状態で 1 回呼び、枠を得たときに真を、需要の無い保有者として floor に戻った
+// ときに偽を知らせる。中継はこれで組にしたカーネルのソケットの受信のバッファを合わせる(設計文書 7 節)。
+func TestTCPOnBoostReportsSlot(t *testing.T) {
+	p := newTCPPair(t, 1)
+	c, s := p.dial(t)
+	defer c.Close()
+	defer s.Close()
+	var mu sync.Mutex
+	var got []bool
+	c.(*TCPConn).OnBoost(func(b bool) bool {
+		mu.Lock()
+		got = append(got, b)
+		mu.Unlock()
+		return true
+	})
+	events := func() []bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]bool(nil), got...)
+	}
+	if e := events(); len(e) != 1 || e[0] {
+		t.Fatalf("events after registering = %v, want [false]", e)
+	}
+	bulk(t, c, s, 4<<20)
+	if e := events(); !boosted(c) || len(e) != 2 || !e[1] {
+		t.Fatalf("events after a bulk transfer = %v (boosted=%v), want [false true]", e, boosted(c))
+	}
+	// 保有者が 1 秒需要を持たない間に、別の接続が枠を求めて回収する
+	time.Sleep(tcpIdleReclaim + 200*time.Millisecond)
+	c2, s2 := p.dial(t)
+	defer c2.Close()
+	defer s2.Close()
+	bulk(t, c2, s2, 4<<20)
+	if !boosted(c2) || boosted(c) {
+		t.Fatalf("after reclaim: new flow boosted=%v, old holder boosted=%v", boosted(c2), boosted(c))
+	}
+	if e := events(); len(e) != 3 || e[2] {
+		t.Fatalf("events after the slot was reclaimed = %v, want [false true false]", e)
+	}
+}
+
+// 枠が満ちていて得られない接続は、需要があっても真を知らせない。大きいバッファを持つ中継のカーネルの
+// ソケットは、これで枠の数までに収まる(設計文書 7 節)。
+func TestTCPOnBoostSilentWithoutSlot(t *testing.T) {
+	p := newTCPPair(t, 1)
+	hc, hs := p.dial(t)
+	defer hc.Close()
+	defer hs.Close()
+	// 保有者は転送を続けるので、枠は回収されない
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go io.Copy(io.Discard, hs)
+	go func() {
+		defer close(done)
+		buf := make([]byte, 32<<10)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := hc.Write(buf); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !boosted(hc) || !boosted(hs) {
+		if time.Now().After(deadline) {
+			t.Fatalf("holder never took the slots: boosted c=%v s=%v", boosted(hc), boosted(hs))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	c, s := p.dial(t)
+	defer c.Close()
+	defer s.Close()
+	var mu sync.Mutex
+	got := map[string][]bool{}
+	for name, x := range map[string]net.Conn{"dialer": c, "acceptor": s} {
+		x.(*TCPConn).OnBoost(func(b bool) bool {
+			mu.Lock()
+			got[name] = append(got[name], b)
+			mu.Unlock()
+			return true
+		})
+	}
+	bulk(t, c, s, 4<<20)
+	bulk(t, s, c, 4<<20)
+	if !boosted(hc) || !boosted(hs) || boosted(c) || boosted(s) {
+		t.Fatalf("holder boosted c=%v s=%v, new flow boosted c=%v s=%v; want only the holder", boosted(hc), boosted(hs), boosted(c), boosted(s))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, name := range []string{"dialer", "acceptor"} {
+		if e := got[name]; len(e) != 1 || e[0] {
+			t.Fatalf("%s events without a slot = %v, want [false]", name, e)
+		}
+	}
+}
+
+// 組にしたカーネルのソケットが floor への戻りを断る保有者からは回収しない。保有者は boost のまま枠を
+// 持つ。断りが止めば、次に別の接続が枠を求めたときに改めて試され、回収される(設計文書 7 節)。
+func TestTCPReclaimWaitsForKernelSide(t *testing.T) {
+	p := newTCPPair(t, 1)
+	hc, hs := p.dial(t)
+	defer hc.Close()
+	defer hs.Close()
+	var refuse atomic.Bool
+	var refused atomic.Int32
+	refuse.Store(true)
+	hc.(*TCPConn).OnBoost(func(b bool) bool {
+		if !b && boosted(hc) && refuse.Load() {
+			refused.Add(1)
+			return false
+		}
+		return true
+	})
+	bulk(t, hc, hs, 4<<20)
+	if !boosted(hc) {
+		t.Fatal("holder did not take the slot")
+	}
+	time.Sleep(tcpIdleReclaim + 200*time.Millisecond)
+	c, s := p.dial(t)
+	defer c.Close()
+	defer s.Close()
+	bulk(t, c, s, 4<<20)
+	if refused.Load() == 0 {
+		t.Fatal("the new flow never tried to reclaim the idle holder")
+	}
+	if !boosted(hc) || boosted(c) {
+		t.Fatalf("after a refused return: holder boosted=%v, new flow boosted=%v", boosted(hc), boosted(c))
+	}
+	if snd, rcv := bufSizes(hc); snd != tcpBoostSize || rcv != tcpBoostSize {
+		t.Fatalf("holder after a refused return: snd=%d rcv=%d, want the boost %d", snd, rcv, tcpBoostSize)
+	}
+	refuse.Store(false)
+	// 需要の区間を新しくし、次の転送で枠を求め直させる
+	time.Sleep(tcpDemandWindow + 50*time.Millisecond)
+	bulk(t, c, s, 4<<20)
+	waitFor(t, 2*time.Second, "the new flow takes the slot once the kernel side lets go", func() bool {
+		return boosted(c) && !boosted(hc)
+	})
+}
+
+// 組にしたカーネルのソケットに floor への戻りを聞くのは、gVisor の側の確かめがすべて通った後だけで
+// ある。先に聞くと、gVisor の側が断ったときに、枠を持つ接続のカーネルのソケットだけが floor に残る。
+func TestTCPKernelSideAskedLast(t *testing.T) {
+	p := newTCPPair(t, 1)
+	hc, hs := p.dial(t)
+	defer hc.Close()
+	defer hs.Close()
+	var asked atomic.Int32
+	for _, x := range []net.Conn{hc, hs} {
+		x.(*TCPConn).OnBoost(func(b bool) bool {
+			if !b && boosted(x) {
+				asked.Add(1)
+			}
+			return true
+		})
+	}
+	bulk(t, hc, hs, 2<<20)
+	fillNonReader(hc)
+	time.Sleep(tcpIdleReclaim + 200*time.Millisecond)
+	c, s := p.dial(t)
+	defer c.Close()
+	defer s.Close()
+	bulk(t, c, s, 4<<20)
+	if !boosted(hc) || !boosted(hs) || boosted(c) || boosted(s) {
+		t.Fatalf("setup: holders boosted c=%v s=%v, new flow boosted c=%v s=%v", boosted(hc), boosted(hs), boosted(c), boosted(s))
+	}
+	if n := asked.Load(); n != 0 {
+		t.Fatalf("asked the kernel side %d times although gVisor's side refused", n)
+	}
+}

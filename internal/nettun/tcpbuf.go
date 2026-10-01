@@ -274,6 +274,8 @@ type tcpConn struct {
 	cmu     sync.Mutex // バッファの設定と閉じ始めの短い排他
 	closing bool
 	sndShut bool // CloseWrite で送信の向きを閉じた
+	// onBoost は OnBoost で登録した関数。枠を得たときと floor に戻るときに cmu の中で呼ぶ
+	onBoost func(boosted bool) bool
 
 	boosted    atomic.Bool
 	acquiring  atomic.Bool  // 読み取りと書き込みが同時に枠を求めないため
@@ -358,8 +360,9 @@ func (c *tcpConn) idleSince(now time.Time) bool {
 // 並行して floor に戻すと、boost を返した接続に boost の大きさの送信のバッファが残りうる。
 // wmu を持つ間は新しい書き込みがキューに入らない。受信は先にバッファを floor に縮め、その後に
 // 受信のメモリが floor 以下であることを求める(下の段落)。送信は、キューに残る byte が floor と直前の
-// floorHist 回の長さの和の小さい方より少ないことを、Write と同じ方法で確かめる。どれかが
-// 成り立たなければ boost の大きさに戻し、枠を持たせたままにする。
+// floorHist 回の長さの和の小さい方より少ないことを、Write と同じ方法で確かめる。最後に、OnBoost で
+// 登録した関数が floor への戻りを受け入れることを求める。どれかが成り立たなければ boost の大きさに
+// 戻し、枠を持たせたままにする。
 //
 // 受信は、縮めた後に endpoint の受信のメモリ(順序外の segment と処理待ちの segment を含む)が
 // floor 以下であることも求める。gVisor は、データのある segment を受信のメモリが受信のバッファ
@@ -396,7 +399,9 @@ func (c *tcpConn) demote(now time.Time) bool {
 	}
 	so.SetSendBufferSize(probe, true)
 	ready := c.ep.Readiness(waiter.WritableEvents)&waiter.WritableEvents != 0
-	if so.GetSendBufferSize() != probe || !ready {
+	// 中継の組のカーネルのソケットも floor に戻せたときだけ枠を返す。カーネルのソケットが floor を
+	// 超える受信のデータを持つ間は、戻せない(設計文書 7 節)
+	if so.GetSendBufferSize() != probe || !ready || (c.onBoost != nil && !c.onBoost(false)) {
 		so.SetSendBufferSize(tcpBoostSize, true)
 		so.SetReceiveBufferSize(tcpBoostSize, true)
 		return false
@@ -423,9 +428,25 @@ func (c *tcpConn) noteDemand(now time.Time) {
 	c.cmu.Lock()
 	if !c.closing {
 		c.ep.SocketOptions().SetReceiveBufferSize(tcpBoostSize, true)
+		if c.onBoost != nil {
+			c.onBoost(true)
+		}
 	}
 	c.boosted.Store(true) // 送信のバッファは次の Write が広げる
 	c.cmu.Unlock()
+}
+
+// OnBoost は、この接続が枠を得たときに f(true) を、需要の無い保有者として floor に戻るときに
+// f(false) を呼ぶよう登録し、今の状態で 1 回呼ぶ。中継は、この接続と組にしたカーネルのソケットの
+// 受信のバッファを枠に合わせるのに使う(設計文書 7 節)。floor に戻るときの f が偽を返すと、この接続は
+// boost に戻って枠を持ち続け、次に別の接続が枠を求めたときに改めて試される。それ以外の f の値は
+// 使わない。閉じた接続の枠を返す時機には呼ばない。そのとき接続は閉じているためである。f は接続の
+// 排他の中で呼ぶので、待たずに戻り、この接続を呼ばないこと。
+func (c *tcpConn) OnBoost(f func(boosted bool) bool) {
+	c.cmu.Lock()
+	defer c.cmu.Unlock()
+	c.onBoost = f
+	f(c.boosted.Load())
 }
 
 func (c *tcpConn) Read(b []byte) (int, error) {

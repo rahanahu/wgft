@@ -38,6 +38,7 @@ lab/lab exec vm bash /wgft/lab/import-export.sh kernel # Web UI の書き出し�
 lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel     # server の再起動、ルールの増減、撤去、プロキシの bind 失敗、既定と半分の予算下でのメモリ、Resource Guard のルール間の隔離、ルール単位/backend 全体の適用失敗と再試行、エージェントの無効化と有効化(その間の server doctor と status の結果を含む)、WireGuard のソケットのバッファの条件を確認。userspace も同じ
 lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b  # 確認の番号(1 2 3 3b 4 5 5b 5c 5d 5e 6 7 8 9 10 11 12)を並べると、その確認だけを流す
 lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定するポートに届かず、集約のレートのトークンも使わないことを確認。userspace も同じ
+lab/lab exec vm bash /wgft/lab/rcvwin.sh         # ユーザー空間モードの中継が、穴の後ろの順序外のデータを持つ公開側のソケットの boost の枠を返さず、穴が埋まった後に返すことを確認(userspace だけ)
 lab/lab exec vm bash /wgft/lab/version-skew.sh         # 版の組み合わせ(新旧の server・agent、legacy v0)。旧いバイナリは GitHub の Releases から取得しキャッシュする(スクリプト冒頭のコメント参照)
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel       # 旧版からの更新(D4)。既定は v1.1.3 のデータに現在のビルドを重ね、ルール・鍵・認証情報が保たれ、転送が戻ることを確認。WGFT_UPGRADE_OLD_VERSION=0.4.0 を付けると、release notes が更新を約束するもう一方の版でも同じ確認を流せる。userspace も同じ
 lab/lab exec vm bash /wgft/lab/scale.sh kernel         # 規模の試験(C3)。1 台の server と 5 台のエージェントで、ルール数を 10 から 1000 まで段階的に増やし、適用時間・全体状態の大きさ・RSS を測定。kernel モードも userspace モードも 1000 本まで通る(kernel モードが 100 本前後で失敗していた netlink のバッファの問題は解決済み。design.md の 6.1 節と改訂の記録を参照)

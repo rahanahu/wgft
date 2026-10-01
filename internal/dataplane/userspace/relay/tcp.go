@@ -16,6 +16,10 @@ import (
 // 即座に RST を送れる接続が満たす。nettun.TCPConn.Abort を見よ。
 type aborter interface{ Abort() }
 
+// fixAtAccept は accept した接続を floor に固定して確かめる(netpipe.FixAtAccept)。テストが
+// 失敗を差し込むために差し替える。
+var fixAtAccept = netpipe.FixAtAccept
+
 // abortRefused は、accept の直後、まだデータをやり取りしていない接続を拒むときに使う(同時フロー
 // 数の上限、接続元の拒否)。netstack 上で通常の Close を使うと、graceful shutdown を経て
 // 既定の TIME_WAIT(gVisor では 60 秒)にエンドポイントが残り、毎秒数千の拒否ではその分だけ
@@ -165,6 +169,8 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 			delay     time.Duration
 			acceptLog lograte.Gate
 			peerLog   lograte.Gate // 相手のアドレスが分からない接続を拒んだログの頻度
+			heldLog   lograte.Gate // 数える前に floor に固定できなかった接続を切ったログの頻度
+			held      int          // 数える前に floor に固定できなかった接続を切った数
 		)
 		for {
 			c, err := ln.Accept()
@@ -190,6 +196,17 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				continue
 			}
 			delay = 0
+			// カーネルのソケットは、Admission と dial を待つ間も受信のバッファを floor に固定する。固定する
+			// 前に floor を超えて溜めていた接続と、固定か確かめに失敗した接続は、数えずに RST で切る
+			// (設計文書 7 節)
+			if !fixAtAccept(c) {
+				abortRefused(c)
+				held++
+				if heldLog.Allow() {
+					m.opts.Logf("%s: reset a new connection before it was counted: its receive memory was above the floor or could not be held at the floor; %d so far", l.key, held)
+				}
+				continue
+			}
 			// 相手のアドレスが分からない接続は、accept の前か直後に相手が RST で切った接続である。
 			// gVisor は accept の待ち行列にある接続が RST を受けても待ち行列に残して Accept で返し、
 			// その RemoteAddr は nil になる。接続元を判定できないので、Admission Policy にも同時フロー数の
@@ -295,6 +312,9 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					delete(conns, t)
 					mu.Unlock()
 				}()
+				// 組のうちカーネルの TCP ソケットの受信のバッファを、netstack の接続の boost の枠に合わせる
+				// (設計文書 7 節)。vpsd では公開側の c、エージェントでは宛先への t がカーネルのソケットである
+				netpipe.FollowBoost(c, t)
 				netpipe.Pipe(c, t)
 			}()
 		}
