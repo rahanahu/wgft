@@ -181,21 +181,66 @@ func TestRawUDPAdapterReadWriteAndAddresses(t *testing.T) {
 	}
 }
 
-func TestRawUDPAdapterDeadlineUpdateAndClear(t *testing.T) {
-	_, listener, client := adapterPair(t)
-	if err := listener.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
+// extendWhileReading starts a ReadFrom on c under a read deadline window ahead,
+// waits until that ReadFrom has registered for readable events, and then
+// moves the deadline to extended. It reports whether the move landed before
+// the first deadline. If it did not, the first deadline may have expired
+// first and a timeout is then the correct result, so the attempt ends the
+// ReadFrom and tells the caller to try again with a wider window.
+func extendWhileReading(t *testing.T, c *rawUDPAdapter, window, extended time.Duration) (first time.Time, readDone <-chan error, inTime bool) {
+	t.Helper()
+	first = time.Now().Add(window)
+	if err := c.SetReadDeadline(first); err != nil {
 		t.Fatal(err)
 	}
-	readDone := make(chan error, 1)
+	done := make(chan error, 1)
 	go func() {
-		b := make([]byte, 8)
-		_, _, err := listener.ReadFrom(b)
-		readDone <- err
+		_, _, err := c.ReadFrom(make([]byte, 8))
+		done <- err
 	}()
-	// Move the deadline while Read is waiting; the old timer must not win.
-	time.Sleep(5 * time.Millisecond)
-	if err := listener.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+	for c.wq.Events()&waiter.ReadableEvents == 0 && time.Now().Before(first) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := c.SetReadDeadline(time.Now().Add(extended)); err != nil {
 		t.Fatal(err)
+	}
+	if time.Now().Before(first) {
+		return first, done, true
+	}
+	if err := c.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("an expired deadline did not end ReadFrom")
+	}
+	return first, nil, false
+}
+
+func TestRawUDPAdapterDeadlineUpdateAndClear(t *testing.T) {
+	_, listener, client := adapterPair(t)
+	// Move the deadline while Read is waiting; the old timer must not win.
+	// The move must land before the old deadline; a slow runner can let a
+	// short fixed window pass first, so the window grows until it does.
+	const extended = 10 * time.Second
+	var (
+		first    time.Time
+		readDone <-chan error
+		inTime   bool
+	)
+	for window := 20 * time.Millisecond; !inTime; window *= 2 {
+		if window > 10*time.Second {
+			t.Fatal("could not move the read deadline before it expired")
+		}
+		first, readDone, inTime = extendWhileReading(t, listener, window, extended)
+	}
+	// Let the old deadline pass while Read waits under the new one.
+	time.Sleep(time.Until(first) + 50*time.Millisecond)
+	select {
+	case err := <-readDone:
+		t.Fatalf("Read ended at the old deadline after the extension: %v", err)
+	default:
 	}
 	if _, err := client.Write([]byte("ready")); err != nil {
 		t.Fatal(err)
@@ -205,7 +250,7 @@ func TestRawUDPAdapterDeadlineUpdateAndClear(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Read after deadline extension: %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(extended + 5*time.Second):
 		t.Fatal("Read did not finish")
 	}
 	if err := listener.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
