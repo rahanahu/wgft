@@ -90,7 +90,7 @@ type ServerInfo struct {
 // same as a net.SplitHostPort failure in vpsd.go).
 //
 // Both `rule add`/`rule set --dry-run` (cmd/wgft/rule.go) and the Web UI's read-import
-// confirmation (webui_import.go's importIssues) call this function so the reserved-port rule
+// confirmation (webui_import.go's renderImportConfirm) call this function so the reserved-port rule
 // cannot drift between the two callers the way it once did (design.md's revision record,
 // --dry-run entry): the CLI reconstructed the rule from ServerInfo on its own, the Web UI passed
 // nil, and only the CLI's copy was ever fixed to match Daemon.reserved.
@@ -178,41 +178,24 @@ type BatchRequest struct {
 var ErrBatchConflict = errors.New("rules changed since the expected digest was read")
 
 // ApplyBatchToRules は ExpectedDigest を照合したうえで、req の upsert/delete を rules に
-// ID で当てはめた結果を返す(ID があれば置き換え、なければ追加。delete は最後に外す)。
-// 本物の Backend(internal/vpsd の Daemon.Batch)はエージェントの登録確認や nftables への
-// 反映、同じ ExpectedDigest の照合も行うが、ここにはその一部が無い。fake や demo の
-// Backend 実装(admin_test.go の fakeBackend、tools/uidemo のもの)が、CLI/Web UI から見た
-// 見た目だけを本物に合わせるために共有する組み立てである。store.ApplyBatch の mutate に
-// そのまま渡せる ([]proto.Rule, error) を返す形にしているのは、rules がその関数の中で
-// 読み取る「今の」集合そのもの(トランザクションの内側)であることを利用して、
-// ExpectedDigest の照合を読み取りと変更の間に割り込みの余地なく行うためである。
+// MergeBatch で当てはめた結果を返す(ID があれば置き換え、なければ追加。delete は最後に外す)。
+// 本物の Backend(internal/vpsd の Daemon.Batch)は AdmitBatch で同じ照合と MergeBatch に加えて
+// 無い ID の削除の拒否とエージェントの登録確認を行い、nftables への反映も行うが、ここにはその
+// 一部が無い。無い ID の削除は黙って無視する。fake や demo の Backend 実装(admin_test.go の
+// fakeBackend、tools/uidemo のもの)が、CLI/Web UI から見た見た目だけを本物に合わせるために共有
+// する組み立てである。store.ApplyBatch の mutate にそのまま渡せる ([]proto.Rule, error) を返す
+// 形にしているのは、rules がその関数の中で読み取る「今の」集合そのもの(トランザクションの内側)
+// であることを利用して、ExpectedDigest の照合を読み取りと変更の間に割り込みの余地なく行うため
+// である。返す集合は空でも nil ではない。
 func ApplyBatchToRules(rules []proto.Rule, req BatchRequest) ([]proto.Rule, error) {
-	if req.ExpectedDigest != "" && proto.RulesDigest(rules) != req.ExpectedDigest {
-		return nil, ErrBatchConflict
+	if err := checkBatchDigest(rules, req.ExpectedDigest); err != nil {
+		return nil, err
 	}
-	del := make(map[string]bool, len(req.Delete))
-	for _, id := range req.Delete {
-		del[id] = true
+	merged := MergeBatch(rules, req).Rules
+	if merged == nil {
+		merged = []proto.Rule{}
 	}
-	kept := make([]proto.Rule, 0, len(rules))
-	for _, r := range rules {
-		if !del[r.ID] {
-			kept = append(kept, r)
-		}
-	}
-	byID := make(map[string]int, len(kept))
-	for i, r := range kept {
-		byID[r.ID] = i
-	}
-	for _, u := range req.Upsert {
-		if i, ok := byID[u.ID]; ok {
-			kept[i] = u
-		} else {
-			byID[u.ID] = len(kept)
-			kept = append(kept, u)
-		}
-	}
-	return kept, nil
+	return merged, nil
 }
 
 // ErrorBody は失敗時の本文。

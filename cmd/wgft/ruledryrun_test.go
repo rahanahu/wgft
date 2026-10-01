@@ -74,8 +74,9 @@ func TestRuleAddDryRunUnregisteredAgent(t *testing.T) {
 	if err == nil {
 		t.Fatal("dry-run add with an unregistered agent must fail")
 	}
-	if !strings.Contains(stdout, `agent "ghost" is not registered`) {
-		t.Errorf("stdout must report the unregistered agent: %q", stdout)
+	// 新しい行は使い捨ての ID ではなく、内容で示す(dryRunRuleLabel)
+	if !strings.Contains(stdout, `  new rule UDP 2456 -> ghost 192.168.1.20:2456: agent "ghost" is not registered`+"\n") {
+		t.Errorf("stdout must report the unregistered agent against the new rule's summary: %q", stdout)
 	}
 	if !strings.Contains(stderr, "issue") {
 		t.Errorf("stderr must report the failure: %q", stderr)
@@ -182,8 +183,9 @@ func TestRuleSetDryRunUnregisteredAgent(t *testing.T) {
 	if err == nil {
 		t.Fatal("dry-run set on a rule owned by an unregistered agent must fail")
 	}
-	if !strings.Contains(stdout, `agent "ghost" is not registered`) {
-		t.Errorf("stdout must report the unregistered agent: %q", stdout)
+	// 保存済みの行は、その ID の短縮形で示す(dryRunRuleLabel)
+	if !strings.Contains(stdout, "  rule "+short(id)+`: agent "ghost" is not registered`+"\n") {
+		t.Errorf("stdout must report the unregistered agent against the rule's short ID: %q", stdout)
 	}
 	if backend.batchCalls != callsBefore {
 		t.Fatalf("dry-run set must not call Batch, went from %d to %d", callsBefore, backend.batchCalls)
