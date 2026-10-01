@@ -117,7 +117,7 @@ func agentKernelOnlyNotTested(id string) bool {
 
 // agentKernelNotTested は、カーネルモードの実行で、試す対象の無い検査を NOT TESTED にする。
 func agentKernelNotTested(c *agentDoctorCheck) {
-	c.Status, c.Reason, c.Next = statusNotTested, agentReasonKernelMode, ""
+	c.Status, c.Reason, c.Next = doctor.StatusNotTested, agentReasonKernelMode, ""
 	switch c.ID {
 	case agentCheckWatchdog:
 		c.Detail = "kernel mode has no tunnel of its own to rebuild; the kernel keeps the WireGuard interface, and the interface line under Dataplane shows it"
@@ -157,7 +157,7 @@ func agentKernelChecks(in agentDoctorInput, cred agentCredentialsFile, run agent
 		return out
 	case credentials.ModeUserspace:
 		set(func(c *agentDoctorCheck) {
-			c.Status, c.Reason = statusNotTested, agentReasonUserspaceMode
+			c.Status, c.Reason = doctor.StatusNotTested, agentReasonUserspaceMode
 			c.Detail = "the agent runs in userspace mode and relays traffic itself, so there is no kernel dataplane to read; the Relay lines above answer for forwarding"
 		})
 		return out
@@ -172,7 +172,7 @@ func agentKernelChecks(in agentDoctorInput, cred agentCredentialsFile, run agent
 		case live.Resp.RuntimeState.Kernel == nil:
 			// この変更より前のカーネルモードのエージェントは、カーネルの状態を返さない
 			set(func(c *agentDoctorCheck) {
-				c.Status, c.Reason = statusSkipped, agentReasonDoctorUnsupported
+				c.Status, c.Reason = doctor.StatusSkipped, agentReasonDoctorUnsupported
 				c.Detail = "the running agent does not report its kernel state, so this was not read"
 				c.Next = agentRestartForDoctorNext
 			})
@@ -232,24 +232,24 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 	}
 	switch {
 	case ki.ReadError != "":
-		c.Status, c.Reason = statusUnknown, agentReasonKernelUnreadable
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonKernelUnreadable
 		c.Detail = name + " could not be read: " + ki.ReadError
 		c.Next = "read it with ip -d link show " + name
 		return
 	case !ki.Exists:
-		c.Status, c.Reason = statusFailed, agentReasonInterfaceMissing
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonInterfaceMissing
 		c.Detail = "there is no " + name + " on this host, so nothing receives the tunnel from the VPS" + agentKernelStoppedNote(ev)
 		c.Next = agentKernelLinkNext(ev, "the agent creates it on start")
 		return
 	case ki.Ownership == agent.KernelOwnershipNotWireGuard:
-		c.Status, c.Reason = statusFailed, agentReasonInterfaceNotOurs
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonInterfaceNotOurs
 		c.Detail = name + " is a " + ki.Kind + " link, not WireGuard, so it does not carry the tunnel" + agentKernelStoppedNote(ev)
 		c.Next = "delete that link, or set WGFT_WG_INTERFACE to another name and restart the agent"
 		return
 	// 所有の判定を down より先に見る。他の所有者のインタフェースは、起動しても up にならず、エージェントは
 	// 起動を拒むためである(10.2c 節の「dataplane.interface の判定」)。鍵を読めた実行だけが所有を知る
 	case ki.Ownership == agent.KernelOwnershipForeign || ki.Ownership == agent.KernelOwnershipKeyless:
-		c.Status, c.Reason = statusFailed, agentReasonInterfaceNotOurs
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonInterfaceNotOurs
 		what := "holds another key than this agent's"
 		if ki.Ownership == agent.KernelOwnershipKeyless {
 			what = "holds no key"
@@ -261,7 +261,7 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 	case !ki.Up && (ki.NeedsNetAdmin || ki.DeviceError != ""):
 		// 鍵を読めないので所有は分からないが、down は鍵を読まずに分かる事実であり、転送を担えないと言える。
 		// 読めなかった理由は、権限の不足と読み出しの誤りで分けて示す
-		c.Status, c.Reason = statusFailed, agentReasonInterfaceDown
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonInterfaceDown
 		start := "start the agent; if " + name + " holds its key, it sets the interface up again, and if not, it refuses to start and says why. "
 		if ki.NeedsNetAdmin {
 			c.Detail = name + " is down, so it carries no traffic; whether it holds this agent's key could not be read without CAP_NET_ADMIN" + agentKernelStoppedNote(ev)
@@ -272,12 +272,12 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 		}
 		return
 	case !ki.Up:
-		c.Status, c.Reason = statusFailed, agentReasonInterfaceDown
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonInterfaceDown
 		c.Detail = name + " is down, so it carries no traffic" + agentKernelStoppedNote(ev)
 		c.Next = agentKernelLinkNext(ev, "the agent sets it up again")
 		return
 	case ki.NeedsNetAdmin:
-		c.Status, c.Reason, c.evidenceUnreachable = statusUnknown, agentReasonNeedsNetAdmin, true
+		c.Status, c.Reason, c.evidenceUnreachable = doctor.StatusUnknown, agentReasonNeedsNetAdmin, true
 		c.Detail = name + " exists and is up, but its key and peer cannot be read without CAP_NET_ADMIN, which this command does not hold"
 		if route != "" {
 			c.Detail += "; " + route
@@ -285,17 +285,17 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 		c.Next = agentNeedsNetAdminNext
 		return
 	case ki.DeviceError != "":
-		c.Status, c.Reason = statusUnknown, agentReasonKernelUnreadable
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonKernelUnreadable
 		c.Detail = "the key and peer of " + name + " could not be read: " + ki.DeviceError
 		c.Next = "read them with wg show " + name
 		return
 	case !ki.Declared:
-		c.Status, c.Reason = statusUnknown, agentReasonNoLastState
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoLastState
 		c.Detail = name + " is a WireGuard interface with this agent's key, but agent.json holds no full state to compare it with" + agentKernelStoppedNote(ev)
 		c.Next = "start the agent and let it reach the server; the server sends the whole state on every connection"
 		return
 	case !ki.PeerOK:
-		c.Status, c.Reason = statusFailed, agentReasonPeerMissing
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonPeerMissing
 		c.Detail = name + " has no peer with the server's key that allows " + ki.ServerAddress + ", so it accepts nothing from the VPS: " + agentPeersText(in.Now, ki) + agentKernelStoppedNote(ev)
 		c.Next = agentKernelLinkNext(ev, "the agent puts the peer back")
 		return
@@ -308,7 +308,7 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 	}
 	switch {
 	case ki.RouteInterface != "" && ki.RouteInterface != name:
-		c.Status, c.Reason = statusUnknown, agentReasonRouteNotViaInterface
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonRouteNotViaInterface
 		c.Detail = facts + ", not " + name + ". Replies to the VPS may leave through " + ki.RouteInterface + " instead of the tunnel, and then forwarding stops. " +
 			"This reads the route of packets this host sends itself; a policy rule that matches on the input interface or a mark can route forwarded replies differently"
 		c.Next = "find what claims the address with ip rule and ip route get " + ki.ServerAddress + "; a VPN such as Tailscale that accepts routes for that range is a common cause. " +
@@ -323,7 +323,7 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 		differs = append(differs, d)
 	}
 	if len(differs) > 0 {
-		c.Status, c.Reason = statusUnknown, agentReasonInterfaceDiffers
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonInterfaceDiffers
 		c.Detail = facts + "; it differs from the declaration in " + strings.Join(differs, ", ")
 		if ev.running {
 			c.Next = "the running agent converges it back within 30s, at once for a change the kernel notifies it of; if this stays, read its log for the check's error"
@@ -332,7 +332,7 @@ func agentInterfaceCheck(c *agentDoctorCheck, in agentDoctorInput, ev agentKerne
 		}
 		return
 	}
-	c.Status = statusOK
+	c.Status = doctor.StatusOK
 	c.Detail = facts + agentKernelStoppedNote(ev)
 }
 
@@ -382,17 +382,17 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 	t := ev.kernel.Table
 	switch {
 	case t.ReadError != "" && t.NeedsNetAdmin:
-		c.Status, c.Reason, c.evidenceUnreachable = statusUnknown, agentReasonNeedsNetAdmin, true
+		c.Status, c.Reason, c.evidenceUnreachable = doctor.StatusUnknown, agentReasonNeedsNetAdmin, true
 		c.Detail = "table inet wgft_agent cannot be read without CAP_NET_ADMIN, which this command does not hold, so whether the kernel still forwards the rules is not known"
 		c.Next = agentNeedsNetAdminNext
 		return
 	case t.ReadError != "":
-		c.Status, c.Reason = statusUnknown, agentReasonKernelUnreadable
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonKernelUnreadable
 		c.Detail = "table inet wgft_agent could not be read: " + t.ReadError
 		c.Next = "read it with nft list table inet wgft_agent"
 		return
 	case t.Source == "":
-		c.Status, c.Reason = statusUnknown, agentReasonNoLastState
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoLastState
 		c.Detail = "agent.json holds neither a publication record nor a full state, so there is nothing to compare table inet wgft_agent with"
 		if t.Present {
 			c.Detail += "; the table is there"
@@ -400,7 +400,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		c.Next = "start the agent and let it reach the server; it publishes the table from the full state it receives"
 		return
 	case !t.Present:
-		c.Status, c.Reason = statusFailed, agentReasonTableMissing
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonTableMissing
 		c.Detail = "there is no table inet wgft_agent, so the kernel forwards none of this agent's rules" + agentKernelStoppedNote(ev)
 		c.Next = agentKernelTableNext(ev)
 		return
@@ -427,7 +427,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 	case t.MissingCount > 0:
 		// 転送を担う行の欠けだけが FAILED である。守りの行の欠けは、同じ所見に添えるだけにする
 		// (10.2c 節の「dataplane.table の判定」)
-		c.Status, c.Reason = statusFailed, agentReasonTableRowsMissing
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonTableRowsMissing
 		c.Detail = fmt.Sprintf("table inet wgft_agent lacks %d item%s that forwarding needs, among those %s: %s", t.MissingCount, pluralS(t.MissingCount), compared, agentItemsText(t.Missing, t.MissingCount)) +
 			agentKernelStoppedNote(ev)
 		if t.GuardMissingCount > 0 {
@@ -443,7 +443,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		c.Next = agentKernelTableNext(ev)
 		return
 	case len(bad) > 0:
-		c.Status, c.Reason = statusFailed, agentReasonListenerError
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonListenerError
 		c.Detail = fmt.Sprintf("%d of %d rule%s cannot serve: %s", len(bad), len(ev.rules), pluralS(len(ev.rules)), strings.Join(agentKernelRuleLines(bad), "; "))
 		if len(good) > 0 {
 			c.Detail += fmt.Sprintf(". Rules without an error: %d", len(good))
@@ -461,7 +461,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 			"including one at the address kept from the last successful resolution, or net.ipv4.ip_forward"
 		return
 	case t.GuardMissingCount > 0:
-		c.Status, c.Reason = statusUnknown, agentReasonGuardRowsMissing
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonGuardRowsMissing
 		c.Detail = agentGuardText(t)
 		if ch := agentChangeText(t); ch != "" {
 			c.Detail += ". " + ch
@@ -474,12 +474,12 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		}
 		return
 	case ev.publishError != "":
-		c.Status, c.Reason = statusUnknown, agentReasonPublishFailed
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonPublishFailed
 		c.Detail = "the agent could not publish its latest full state, so the table from the previous publication keeps forwarding: " + ev.publishError + staleNote
 		c.Next = "the agent retries every 30s; the server shows the lag as agent.rules_received in wgft server doctor. Read the error above and the agent's log"
 		return
 	case t.UnexpectedCount > 0 || t.MovedCount > 0:
-		c.Status, c.Reason = statusUnknown, agentReasonTableChanged
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonTableChanged
 		c.Detail = fmt.Sprintf("table inet wgft_agent holds every row %s. %s", compared, agentChangeText(t)) + staleNote + agentKernelStoppedNote(ev)
 		if ev.running {
 			c.Next = "the running agent publishes the table again as soon as the kernel notifies it of the change, and its 30s check tries again after a failure; if the change keeps coming back, another program on this host writes into the table"
@@ -489,7 +489,7 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		return
 	}
 	if len(stale) > 0 && ev.running {
-		c.Status, c.Reason = statusUnknown, agentReasonResolveFailed
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonResolveFailed
 		c.Detail = fmt.Sprintf("table inet wgft_agent holds everything %s, but the target name of %d rule%s does not resolve; the kernel keeps forwarding %s to the address from the last successful resolution: %s",
 			compared, len(stale), pluralS(len(stale)), itThem(len(stale)), strings.Join(agentKernelRuleLines(stale), "; "))
 		// OK の枝と同じく、30 秒ごとの見直しの失敗を添える。表が UNKNOWN のときに消さないためである
@@ -509,12 +509,12 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		summary += "; the agent's last check of the table and wgft0 failed: " + ev.checkError
 	}
 	if !ev.running {
-		c.Status, c.Reason = statusUnknown, agentReasonNotRunning
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonNotRunning
 		c.Detail = summary + agentKernelStoppedNote(ev) + ". Whether TCP targets answer is tested only by the running agent, so it is not known now"
 		c.Next = "the kernel keeps forwarding these rules while the agent is stopped. Start the agent to have its changes, name re-resolution and target checks back"
 		return
 	}
-	c.Status = statusOK
+	c.Status = doctor.StatusOK
 	c.Detail = summary
 }
 
@@ -652,19 +652,19 @@ func agentForwardingCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 	}
 	switch {
 	case f.IPForwardError != "":
-		c.Status, c.Reason = statusUnknown, agentReasonIPForwardUnreadable
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonIPForwardUnreadable
 		c.Detail = "net.ipv4.ip_forward could not be read: " + f.IPForwardError
 		c.Next = "read it with sysctl net.ipv4.ip_forward"
 		return
 	case f.IPForward != "1":
-		c.Status, c.Reason = statusFailed, agentReasonIPForwardOff
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonIPForwardOff
 		c.Detail = "net.ipv4.ip_forward is " + f.IPForward + ", so the kernel forwards nothing from the tunnel to the LAN; only rules whose target is this host itself are reached" +
 			agentKernelStoppedNote(ev)
 		c.Next = "set it with sysctl -w net.ipv4.ip_forward=1, or restart the agent, which sets it on start. If something on this host keeps setting it to 0, " +
 			"find it in /etc/sysctl.d and in the container runtime's settings"
 		return
 	case f.PolicyNeedsNetAdmin:
-		c.Status, c.Reason, c.evidenceUnreachable = statusUnknown, agentReasonNeedsNetAdmin, true
+		c.Status, c.Reason, c.evidenceUnreachable = doctor.StatusUnknown, agentReasonNeedsNetAdmin, true
 		c.Detail = "net.ipv4.ip_forward is 1, but the other nftables tables cannot be read without CAP_NET_ADMIN, which this command does not hold, so a forward chain that drops by default would not show"
 		if len(notes) > 0 {
 			c.Detail += "; " + strings.Join(notes, "; ")
@@ -672,7 +672,7 @@ func agentForwardingCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		c.Next = agentNeedsNetAdminNext
 		return
 	case len(f.PolicyDrops) > 0:
-		c.Status, c.Reason = statusUnknown, agentReasonForwardPolicyDrop
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonForwardPolicyDrop
 		verb := " drops"
 		if len(f.PolicyDrops) > 1 {
 			verb = " drop"
@@ -685,12 +685,12 @@ func agentForwardingCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 			"and for established packets out to it. wgft does not change other tables"
 		return
 	case len(f.RPFilterStrict) > 0:
-		c.Status, c.Reason = statusUnknown, agentReasonRPFilterStrict
+		c.Status, c.Reason = doctor.StatusUnknown, agentReasonRPFilterStrict
 		c.Detail = "net.ipv4.ip_forward is 1, and " + strings.Join(notes, "; ")
 		c.Next = "on a home with more than one LAN segment, strict rp_filter can drop forwarded replies; wgft does not change it. Set it to 2, loose, if replies go missing"
 		return
 	}
-	c.Status = statusOK
+	c.Status = doctor.StatusOK
 	c.Detail = "net.ipv4.ip_forward is 1, no other table drops forwarded packets by default, and rp_filter is not strict"
 	if f.PolicyError != "" {
 		c.Detail = "net.ipv4.ip_forward is 1 and rp_filter is not strict; the other tables could not be read: " + f.PolicyError
@@ -723,14 +723,14 @@ func agentPrivilegesWithAgent(c *agentDoctorCheck, live agentLive, mode string) 
 		}
 		return
 	}
-	if mode != credentials.ModeKernel || p.NetAdmin == nil || c.Status != statusOK {
+	if mode != credentials.ModeKernel || p.NetAdmin == nil || c.Status != doctor.StatusOK {
 		return
 	}
 	if *p.NetAdmin {
 		c.Detail += "; the running agent holds CAP_NET_ADMIN, which kernel mode needs"
 		return
 	}
-	c.Status, c.Reason = statusFailed, agentReasonAgentLacksNetAdmin
+	c.Status, c.Reason = doctor.StatusFailed, agentReasonAgentLacksNetAdmin
 	c.Detail += "; the running agent, " + who + ", does not hold CAP_NET_ADMIN, which kernel mode needs to keep the interface and the table converged"
 	c.Next = "give the agent CAP_NET_ADMIN, for example with AmbientCapabilities=CAP_NET_ADMIN in its systemd unit, and restart it"
 }

@@ -30,7 +30,7 @@ import (
 // rolling upgrade の最中にフィールドがまだ返らないだけで健全だと報告してしまう(design.md
 // 10.2b 節)。unknown は終了コードを動かさない。degraded だけが動かす(下の exitCode 節を見よ)。
 
-// statusReport は `wgft status --json` の形である。`doctor` の doctorReport とは別の、この
+// statusReport は `wgft status --json` の形である。`doctor` の doctor.Report とは別の、この
 // コマンド専用の模型である(design.md 10.2b 節)。最上位はオブジェクトで、7a.11 節の規則どおり
 // 加算的に扱う。項目は増やせるが、名前も意味も変えない。
 type statusReport struct {
@@ -44,7 +44,7 @@ type statusReport struct {
 // 証拠は `GET /api/v1/rules` の desired_generation、active_generation、apply_error、
 // agent_state_pending、ip_forward である(design.md 10.2b 節)。
 type serverStatus struct {
-	// Status は serverHealthy、serverDegraded、statusUnknown(doctor.go)のいずれかである。
+	// Status は serverHealthy、serverDegraded、doctor.StatusUnknown のいずれかである。
 	// bool では unknown を表せないので、この版から文字列にした(design.md 10.2b 節)。
 	Status string `json:"status"`
 	// Detail は人向けの 1 文で、Status が serverHealthy 以外のときだけ持つ。保証の対象ではない
@@ -56,7 +56,7 @@ type serverStatus struct {
 
 // serverStatus.Status の値。healthy と degraded は `wgft status` 独自の語彙で、`server doctor`
 // の 5 つの状態(ok/failed/unknown/not_tested/skipped、doctor.go)とは別である。unknown だけは
-// 文字列も意味も両方の語彙で共有するので、doctor.go の statusUnknown をそのまま使う。
+// 文字列も意味も両方の語彙で共有するので、internal/vpsd/doctor の StatusUnknown をそのまま使う。
 const (
 	serverHealthy  = "healthy"
 	serverDegraded = "degraded"
@@ -141,7 +141,7 @@ type warningsStatus struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// statusInput は `wgft status` が読む証拠をまとめたものである。doctor.go の doctorInput と
+// statusInput は `wgft status` が読む証拠をまとめたものである。internal/vpsd/doctor の Input と
 // 同じ理由で、管理用 API の呼び出しと判定を分け、判定を純粋な関数として試験できるようにする。
 type statusInput struct {
 	Now      time.Time
@@ -219,7 +219,7 @@ func buildStatusReport(in statusInput) statusReport {
 // serverStatusOf は GenerationGap(internal/vpsd/doctor)をそのまま使い、doctor の dataplaneCheck と同じ
 // 優先順位(apply_error を伴う世代の遅れを先に、次に単独の apply_error)で見る。ただし判定その
 // ものは dataplaneCheck と違う。世代の遅れが無く apply_error だけが残る場合、dataplaneCheck は
-// これを statusUnknown(reasonRepairFailed)にとどめて `server doctor` の終了コードを 0 のままに
+// これを doctor.StatusUnknown(reasonRepairFailed)にとどめて `server doctor` の終了コードを 0 のままに
 // するが、ここでは degraded にして status の終了コードを 1 にする。順位が同じでも判定を変えて
 // よい理由は、問うている範囲が違うからである。`server doctor` はそのルールの転送が今も通っている
 // かどうかに答え、公開された値は現行の generation のままなので unknown で足りる。`status` は
@@ -235,7 +235,7 @@ func serverStatusOf(res *admin.BatchResponse) serverStatus {
 	// above only reaches buildStatusReport after that call has succeeded. This branch is defensive
 	// only, kept so this function stays safe to call with a zero statusInput (as the tests do).
 	if res == nil {
-		return serverStatus{Status: statusUnknown, Detail: "this server does not report apply generations"}
+		return serverStatus{Status: doctor.StatusUnknown, Detail: "this server does not report apply generations"}
 	}
 	haveGenerations := res.DesiredGeneration != nil && res.ActiveGeneration != nil
 	// この VPS の ip_forward が 0 で、カーネルで転送するルールが止まっていることは、`server doctor` の
@@ -274,7 +274,7 @@ func serverStatusOf(res *admin.BatchResponse) serverStatus {
 		return serverStatus{Status: serverDegraded, Detail: res.ApplyError}
 	}
 	if !haveGenerations {
-		return serverStatus{Status: statusUnknown, Detail: "this server does not report apply generations"}
+		return serverStatus{Status: doctor.StatusUnknown, Detail: "this server does not report apply generations"}
 	}
 	return serverStatus{Status: serverHealthy}
 }
@@ -290,22 +290,22 @@ func serverStatusOf(res *admin.BatchResponse) serverStatus {
 // 待たずに返す(2026-09-22、所有者の決定)。
 func agentHealthOf(a admin.AgentInfo, now time.Time) (status, detail string) {
 	if !a.Connected {
-		if hb, ok := parseWhen(a.LastHeartbeat); ok {
-			return serverDegraded, a.Name + " last seen " + since(now, hb).String() + " ago"
+		if hb, ok := doctor.ParseWhen(a.LastHeartbeat); ok {
+			return serverDegraded, a.Name + " last seen " + doctor.Since(now, hb).String() + " ago"
 		}
 		return serverDegraded, a.Name + " never connected"
 	}
 	tStatus, _, tDetail, _ := doctor.TunnelHealth(&a, now)
 	switch tStatus {
-	case statusFailed:
+	case doctor.StatusFailed:
 		return serverDegraded, a.Name + " tunnel: " + tDetail
-	case statusOK:
+	case doctor.StatusOK:
 		return serverHealthy, ""
 	default:
 		// TunnelHealth returns only ok, failed and unknown today. A fourth state added later
 		// must not be counted as healthy: this command never calls something healthy on
 		// evidence it has not read (design.md 10.2b section).
-		return statusUnknown, a.Name + " tunnel: " + tDetail
+		return doctor.StatusUnknown, a.Name + " tunnel: " + tDetail
 	}
 }
 
@@ -324,7 +324,7 @@ func agentsStatusOf(agents []admin.AgentInfo, now time.Time) agentsStatus {
 		switch status {
 		case serverHealthy:
 			st.Healthy++
-		case statusUnknown:
+		case doctor.StatusUnknown:
 			st.Unknown++
 			bad = append(bad, detail)
 		default: // serverDegraded
@@ -459,8 +459,8 @@ func warningsStatusOf(warnings []admin.Warning, now time.Time) warningsStatus {
 	lines := make([]string, 0, len(warnings))
 	for _, w := range warnings {
 		line := w.Kind + " on " + w.Agent
-		if at, ok := parseWhen(w.At); ok {
-			line += ", " + since(now, at).String() + " ago"
+		if at, ok := doctor.ParseWhen(w.At); ok {
+			line += ", " + doctor.Since(now, at).String() + " ago"
 		}
 		lines = append(lines, line)
 	}
