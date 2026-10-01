@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -16,11 +18,25 @@ type closeWriter interface{ CloseWrite() error }
 // 両方向が閉じたら両方を閉じる。片方向が EOF 以外で終わったとき(読み取りが RST などの誤りで
 // 失敗したとき、書き込みが失敗したとき)は、すぐに両方を閉じる。ハーフクローズとして扱うと、
 // 反対向きは黙ったままの相手を読み続け、相手が閉じるまで中継が終わらない(仕様 6.2 節)。
-func Pipe(a, b net.Conn) {
+func Pipe(a, b net.Conn) { PipeResetB(a, b, nil) }
+
+// PipeResetB は Pipe と同じく中継する。加えて、a の読み取りか a への書き込みが RST による誤り
+// (isReset)で失敗して中継が終わるときは、両方を閉じる前に resetB を呼ぶ。resetB は、続く通常の
+// Close の代わりに b を RST で切るためのもの(netstack の接続の Abort、実ソケットの SetLinger(0))で、
+// nil なら Pipe と同じである。b の読み書きの誤りでは呼ばない。ただしカーネルの TCP 同士の
+// io.Copy(splice)は、誤りがどちらの接続の操作のものかを返さないので、その経路では RST による
+// 誤りを a のものとして扱う。誤りが b のものなら、b は RST を受けて既に CLOSED にあり、Linux の
+// tcp_close はその状態のソケットに RST を送らないので、resetB の後の Close は何も送らない
+// (カーネルのコードから導いたもので、パケットでは確かめていない)。
+func PipeResetB(a, b net.Conn, resetB func()) {
 	var wg sync.WaitGroup
 	half := func(dst, src net.Conn) {
 		defer wg.Done()
-		if err := copyConn(dst, src); err != nil {
+		if at, err := copyConn(dst, src); err != nil {
+			onA := at == onEither || (at == onSrc && src == a) || (at == onDst && dst == a)
+			if resetB != nil && onA && isReset(err) {
+				resetB()
+			}
 			a.Close()
 			b.Close()
 			return
@@ -39,6 +55,26 @@ func Pipe(a, b net.Conn) {
 	b.Close()
 }
 
+// isReset は、カーネルのソケットが RST を受けて読み書きが失敗した誤り(ECONNRESET)かを返す。
+// PipeResetB の a は公開側のカーネルのソケットなので、カーネルの誤りだけを見る。Windows の
+// WSAECONNRESET(10054)は syscall.ECONNRESET と別の値なので、数値でも比べる。
+func isReset(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	return errno == syscall.ECONNRESET || (runtime.GOOS == "windows" && errno == 10054)
+}
+
+// errSide は、copyConn の誤りがどちらの接続の操作で起きたかである。
+type errSide int
+
+const (
+	onSrc    errSide = iota // src の読み取り
+	onDst                   // dst への書き込み
+	onEither                // 分からない(splice の io.Copy)
+)
+
 const (
 	idleBufSize = 2048     // 無通信の接続が持ち続けるバッファ(仕様 7 節)
 	bulkBufSize = 32 << 10 // データが続く間だけプールから借りるバッファ
@@ -50,13 +86,14 @@ var bulkPool = sync.Pool{New: func() any { b := make([]byte, bulkBufSize); retur
 
 // copyConn は src を dst へ写す。io.Copy は接続ごと、方向ごとに 32 KiB を持ち続けるので、
 // 開いたまま黙っている接続の費用を抑えるために、待つ間は小さいバッファだけを持つ。
-// src の EOF で終わったときは nil を、読み取りか書き込みの誤りで終わったときはその誤りを返す。
-func copyConn(dst, src net.Conn) error {
+// src の EOF で終わったときは nil の誤りを、読み取りか書き込みの誤りで終わったときは、誤りが src と
+// dst のどちらの操作で起きたかとその誤りを返す。
+func copyConn(dst, src net.Conn) (errSide, error) {
 	// カーネルの TCP 同士は io.Copy が splice を使い、ユーザー空間のバッファを持たない
 	if _, ok := src.(*net.TCPConn); ok {
 		if _, ok := dst.(*net.TCPConn); ok {
 			_, err := io.Copy(dst, src)
-			return err
+			return onEither, err
 		}
 	}
 	idle := make([]byte, idleBufSize)
@@ -64,26 +101,26 @@ func copyConn(dst, src net.Conn) error {
 		n, err := src.Read(idle)
 		if n > 0 {
 			if _, werr := dst.Write(idle[:n]); werr != nil {
-				return werr
+				return onDst, werr
 			}
 		}
 		if errors.Is(err, io.EOF) {
-			return nil
+			return onSrc, nil
 		}
 		if err != nil {
-			return err
+			return onSrc, err
 		}
 		if n == len(idle) {
-			if more, err := copyBulk(dst, src); !more {
-				return err
+			if more, at, err := copyBulk(dst, src); !more {
+				return at, err
 			}
 		}
 	}
 }
 
 // copyBulk はプールの大きいバッファで写す。データが途切れたらバッファを返して真を返す。
-// 偽は接続の終わりで、誤りは copyConn と同じく EOF なら nil、それ以外はその誤りである。
-func copyBulk(dst, src net.Conn) (bool, error) {
+// 偽は接続の終わりで、誤りとその側は copyConn と同じく EOF なら nil、それ以外はその誤りである。
+func copyBulk(dst, src net.Conn) (bool, errSide, error) {
 	bp := bulkPool.Get().(*[]byte)
 	defer bulkPool.Put(bp)
 	defer src.SetReadDeadline(time.Time{})
@@ -97,17 +134,17 @@ func copyBulk(dst, src net.Conn) (bool, error) {
 		n, err := src.Read(*bp)
 		if n > 0 {
 			if _, werr := dst.Write((*bp)[:n]); werr != nil {
-				return false, werr
+				return false, onDst, werr
 			}
 		}
 		if errors.Is(err, io.EOF) {
-			return false, nil
+			return false, onSrc, nil
 		}
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return true, nil
+				return true, onSrc, nil
 			}
-			return false, err
+			return false, onSrc, err
 		}
 	}
 }
