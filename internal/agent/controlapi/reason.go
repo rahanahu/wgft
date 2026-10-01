@@ -14,3 +14,21 @@ const ReasonHandshakePending = "handshake not established"
 // ハートビートのトンネルの理由の書き出しである(設計文書 7b.1 節)。agent doctor の tunnel.local が同じ
 // 場合を見分けて所見の文面を変えるので、ReasonHandshakePending と同じく公開する。
 const ReasonWGRefused = "refused the wg configuration"
+
+// トンネルが無いときのハートビートと doctor の応答のトンネルの理由である(設計文書 7 節、10.2c 節)。
+// agent doctor の tunnel.local は、作成に失敗した場合(FAILED)と全体状態をまだ受け取っていない場合
+// (UNKNOWN)をこの文言で見分けるので、ReasonHandshakePending と同じく公開する。
+//
+//   - ReasonNoTunnel は、rotate-key や停止で閉じた直後のような、ほかに当たらない場合である
+//   - ReasonNoTunnelBuildRetrying は、作成に失敗して試し直しを待っている場合である
+//   - ReasonNoTunnelBuildFailed は、作成が試し直さない失敗で終わった場合であり、
+//     ReasonNoTunnelBuildRetrying の書き出しでもある
+//   - ReasonNoTunnelFullStatePending は、全体状態をまだ受け取っていない場合であり、
+//     ReasonFullStateNotReceived を含む
+const (
+	ReasonNoTunnel                 = "no tunnel"
+	ReasonNoTunnelBuildFailed      = ReasonNoTunnel + "; building it failed"
+	ReasonNoTunnelBuildRetrying    = ReasonNoTunnelBuildFailed + " and will be retried"
+	ReasonFullStateNotReceived     = "full state not received"
+	ReasonNoTunnelFullStatePending = ReasonNoTunnel + "; " + ReasonFullStateNotReceived
+)
