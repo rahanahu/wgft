@@ -54,6 +54,9 @@ func sinkTarget(t *testing.T) string {
 }
 
 // boostPeer は vpsd の netstack の接続(nettun.TCPConn)を模す。枠の知らせを試験が起こす。
+// nettun.TCPConn と同じく、登録のときの 1 回を含めて、知らせの関数を錠の中で 1 つずつ呼ぶ。
+// netpipe.FollowBoost の関数はこの直列化を前提にする。登録は中継の goroutine で、試験の知らせは
+// 試験の goroutine で呼ぶので、錠の外で呼ぶと 2 つが重なる。
 type boostPeer struct {
 	net.Conn
 	mu sync.Mutex
@@ -62,15 +65,23 @@ type boostPeer struct {
 
 func (b *boostPeer) OnBoost(f func(bool) bool) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.f = f
-	b.mu.Unlock()
 	f(false)
 }
 
-func (b *boostPeer) hook() func(bool) bool {
+// linked は、登録のときの呼び出しまで終えたかを返す。
+func (b *boostPeer) linked() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.f
+	return b.f != nil
+}
+
+// set は枠の知らせを錠の中で送る。
+func (b *boostPeer) set(on bool) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.f(on)
 }
 
 // acceptSpy は accept した接続を試験に渡す待ち受け。wrap なら、接続を boostPeer に包んで
@@ -143,27 +154,25 @@ func TestPublicSocketFollowsPeerBoost(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("relay did not accept")
 	}
-	var f func(bool) bool
 	deadline := time.After(3 * time.Second)
-	for f == nil {
+	for peer == nil || !peer.linked() {
 		select {
 		case peer = <-peers:
 		case <-deadline:
 			t.Fatal("the relay never linked the public socket to the peer's boost")
 		}
-		for i := 0; i < 100 && peer.hook() == nil; i++ {
+		for i := 0; i < 100 && !peer.linked(); i++ {
 			time.Sleep(5 * time.Millisecond)
 		}
-		f = peer.hook()
 	}
 	if got := rcvBufOf(t, pub); got != 2*netpipe.KernelRecvFloor {
 		t.Fatalf("public SO_RCVBUF at the floor = %d, want %d", got, 2*netpipe.KernelRecvFloor)
 	}
-	f(true)
+	peer.set(true)
 	if got := rcvBufOf(t, pub); got <= 2*netpipe.KernelRecvFloor {
 		t.Fatalf("public SO_RCVBUF while the peer holds a slot = %d, want above %d", got, 2*netpipe.KernelRecvFloor)
 	}
-	f(false)
+	peer.set(false)
 	if got := rcvBufOf(t, pub); got != 2*netpipe.KernelRecvFloor {
 		t.Fatalf("public SO_RCVBUF after the slot went back = %d, want %d", got, 2*netpipe.KernelRecvFloor)
 	}
@@ -206,11 +215,10 @@ func TestTargetSocketFollowsPeerBoost(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("relay did not accept")
 	}
-	for i := 0; i < 600 && peer.hook() == nil; i++ {
+	for i := 0; i < 600 && !peer.linked(); i++ {
 		time.Sleep(5 * time.Millisecond)
 	}
-	f := peer.hook()
-	if f == nil {
+	if !peer.linked() {
 		t.Fatal("the relay never linked the target socket to the peer's boost")
 	}
 	mu.Lock()
@@ -219,11 +227,11 @@ func TestTargetSocketFollowsPeerBoost(t *testing.T) {
 	if got := rcvBufOf(t, tgt); got != 2*netpipe.KernelRecvFloor {
 		t.Fatalf("target SO_RCVBUF at the floor = %d, want %d", got, 2*netpipe.KernelRecvFloor)
 	}
-	f(true)
+	peer.set(true)
 	if got := rcvBufOf(t, tgt); got <= 2*netpipe.KernelRecvFloor {
 		t.Fatalf("target SO_RCVBUF while the peer holds a slot = %d, want above %d", got, 2*netpipe.KernelRecvFloor)
 	}
-	f(false)
+	peer.set(false)
 	if got := rcvBufOf(t, tgt); got != 2*netpipe.KernelRecvFloor {
 		t.Fatalf("target SO_RCVBUF after the slot went back = %d, want %d", got, 2*netpipe.KernelRecvFloor)
 	}
