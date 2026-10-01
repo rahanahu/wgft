@@ -52,6 +52,9 @@ func assertDeviceUsage(t *testing.T, d *Device, bytes, packets int) {
 	if b != bytes || p != packets || fault != nil {
 		t.Fatalf("device UDP usage = %d/%d fault %v, want %d/%d", b, p, fault, bytes, packets)
 	}
+	if err := udpLedgerMismatch(d.registry.accounting); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func lockTestTCPSYN() []byte {

@@ -11,6 +11,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
 )
 
@@ -119,10 +120,12 @@ func TestServerTunnelWithAgentTunnel(t *testing.T) {
 	for i := range big {
 		big[i] = byte(i)
 	}
-	// UDP の接続は、届くまでバッファを持たずに待てる(仕様 7 節)。届く前は戻らず、届いたら戻る
-	w, ok := u.(interface{ WaitReadable() error })
+	// UDP の接続は、届くまでバッファを持たずに待てる(仕様 7 節)。届く前は戻らず、届いたら戻る。
+	// relay はこの接続を relay.ReadWaiter として探し、満たさなければ接続ごとに読みのバッファを
+	// 持ち続ける。字面の写しの interface ではなく relay の型で確かめ、どちらの側の変更でも落ちるようにする
+	w, ok := u.(relay.ReadWaiter)
 	if !ok {
-		t.Fatal("udp conn of the tunnel must implement WaitReadable")
+		t.Fatal("udp conn of the tunnel must implement relay.ReadWaiter")
 	}
 	ready := make(chan error, 1)
 	go func() { ready <- w.WaitReadable() }()
@@ -166,7 +169,7 @@ func TestServerTunnelWithAgentTunnel(t *testing.T) {
 		t.Fatal("agent still reachable after the peer was removed")
 	}
 	// 閉じた接続の WaitReadable は誤りで戻る(relay の読み手の goroutine が終われる)
-	go func() { ready <- u2.(interface{ WaitReadable() error }).WaitReadable() }()
+	go func() { ready <- u2.(relay.ReadWaiter).WaitReadable() }()
 	time.Sleep(100 * time.Millisecond)
 	u2.Close()
 	select {

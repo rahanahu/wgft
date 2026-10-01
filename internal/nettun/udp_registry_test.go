@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -60,6 +61,38 @@ func assertRegistryUsage(t *testing.T, r *udpRegistry, bytes, packets int) {
 	if b != bytes || p != packets || fault != nil {
 		t.Fatalf("registry usage = %d/%d fault %v, want %d/%d", b, p, fault, bytes, packets)
 	}
+	if err := udpLedgerMismatch(r.accounting); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// udpLedgerMismatch reports where the accounting's three views of the queued
+// datagrams disagree: the Device totals, each generation's share, and each
+// generation's FIFO of reservations. Callers use it only while nothing is in
+// flight; a send racing a Close keeps its reservation on a generation that is
+// already out of the table until it returns, so the totals differ meanwhile.
+func udpLedgerMismatch(a *udpAccounting) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	sumBytes, sumPackets := 0, 0
+	for _, g := range a.generations {
+		cost := 0
+		for _, res := range g.fifo {
+			if res.g != g {
+				return errors.New("ledger: a FIFO holds a reservation charged to another generation")
+			}
+			cost += res.cost
+		}
+		if g.usedPackets != len(g.fifo) || g.usedBytes != cost {
+			return fmt.Errorf("ledger: a generation counts %d/%d but its FIFO holds %d/%d", g.usedBytes, g.usedPackets, cost, len(g.fifo))
+		}
+		sumBytes += g.usedBytes
+		sumPackets += g.usedPackets
+	}
+	if a.usedBytes != sumBytes || a.usedPackets != sumPackets {
+		return fmt.Errorf("ledger: the Device counts %d/%d but its generations add up to %d/%d", a.usedBytes, a.usedPackets, sumBytes, sumPackets)
+	}
+	return nil
 }
 
 func requirePortUnreachable(t *testing.T, dev *Device, original []byte) {

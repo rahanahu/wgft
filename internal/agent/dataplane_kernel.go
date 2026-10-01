@@ -221,6 +221,17 @@ type kernelDataplane struct {
 	local map[netip.Addr]bool
 }
 
+// runtime はこれらの任意の interface を型アサーションだけで探し、満たさなければ黙ってその処理を
+// 飛ばす(dataplane.go、doctor.go)。メソッドの形がずれたらコンパイルで気付けるよう、ここで固定する。
+var (
+	_ preparer       = (*kernelDataplane)(nil)
+	_ wgChecker      = (*kernelDataplane)(nil)
+	_ observer       = (*kernelDataplane)(nil)
+	_ sensed         = (*kernelDataplane)(nil)
+	_ startupChecker = (*kernelDataplane)(nil)
+	_ kernelDoctor   = (*kernelDataplane)(nil)
+)
+
 // lkgEntry は、ルールの宛先の名前を最後に解決できたときの結果である。
 type lkgEntry struct {
 	target string

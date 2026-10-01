@@ -24,6 +24,10 @@ type udpReplyPoller interface {
 	PollUDPReplies() error
 }
 
+// pollUDPReplies はこれを型アサーションだけで探すので、ずれたらコンパイルで気付けるよう固定する。
+// participant() がこの型を返し続けることは participant_test.go が確かめる。
+var _ udpReplyPoller = (*linuxkernel.Backend)(nil)
+
 // pollUDPReplies reads the kernel backend's reply counters every linuxkernel.UDPReplyPollInterval
 // until ctx is done. It does nothing for a Backend that observes replies as they come (userspace).
 // A failure to read is logged when it starts and when it ends, not on every poll; the admin API
