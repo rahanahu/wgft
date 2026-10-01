@@ -89,11 +89,13 @@ func TestRelayAppliesTheAdmissionPolicy(t *testing.T) {
 		return false
 	}
 
-	c, err := net.DialTimeout("tcp4", "127.0.0.1:"+strconv.Itoa(int(tcpPort)), 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
+	// The refusal resets the connection, which may reach the dial itself (macOS reports it there),
+	// so a dial error is not a failure here; the drop counter is what this checks.
+	if c, err := net.DialTimeout("tcp4", "127.0.0.1:"+strconv.Itoa(int(tcpPort)), 5*time.Second); err == nil {
+		defer c.Close()
+	} else {
+		t.Logf("dial: %v", err)
 	}
-	defer c.Close()
 	if !waitDrop("r_tcp", "deny") {
 		t.Errorf("a TCP connection from a source in source_deny was not refused by the policy (drops %v); the relay's Admit is not wired", seen)
 	}
