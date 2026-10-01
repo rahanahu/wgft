@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -19,18 +19,18 @@ import (
 // 符号、終了コードを確かめる。カーネルの読み方そのものは internal/agent のテストが確かめる。
 
 // kernelEvidence は、宣言どおりの wgft0、記録どおりのテーブル、転送の設定を持つホストの読みである。
-func kernelEvidence() *agent.DoctorKernel {
-	return &agent.DoctorKernel{
-		Interface: agent.DoctorKernelInterface{
-			Name: "wgft0", Exists: true, Kind: "wireguard", Up: true, Ownership: agent.KernelOwnershipCurrent,
+func kernelEvidence() *controlapi.DoctorKernel {
+	return &controlapi.DoctorKernel{
+		Interface: controlapi.DoctorKernelInterface{
+			Name: "wgft0", Exists: true, Kind: "wireguard", Up: true, Ownership: controlapi.KernelOwnershipCurrent,
 			MTU: 1420, Addresses: []string{"10.200.0.2/24"},
-			Peers: []agent.DoctorKernelPeer{{PublicKey: "c2VydmVyLWtleQ==", AllowedIPs: []string{"10.200.0.1/32"}, Endpoint: "203.0.113.10:51820",
+			Peers: []controlapi.DoctorKernelPeer{{PublicKey: "c2VydmVyLWtleQ==", AllowedIPs: []string{"10.200.0.1/32"}, Endpoint: "203.0.113.10:51820",
 				Keepalive: 25 * time.Second, LastHandshake: testLiveNow.Add(-40 * time.Second), RxBytes: 100, TxBytes: 200}},
 			Declared: true, ServerAddress: "10.200.0.1", PeerOK: true, RouteInterface: "wgft0",
 		},
-		Table: agent.DoctorKernelTable{Present: true, Source: agent.KernelTableFromRecord, Generation: 12,
-			Rules: []agent.DoctorRule{{ID: "r_1", State: proto.StatusOK, Proto: proto.TCP, Ports: 1, DNATPorts: 1}}},
-		Forwarding: agent.DoctorKernelForwarding{IPForward: "1"},
+		Table: controlapi.DoctorKernelTable{Present: true, Source: controlapi.KernelTableFromRecord, Generation: 12,
+			Rules: []controlapi.DoctorRule{{ID: "r_1", State: proto.StatusOK, Proto: proto.TCP, Ports: 1, DNATPorts: 1}}},
+		Forwarding: controlapi.DoctorKernelForwarding{IPForward: "1"},
 	}
 }
 
@@ -41,16 +41,16 @@ func kernelCredentials() *credentials.Credentials {
 }
 
 // kernelRuntime は稼働中のカーネルモードのエージェントの応答を組み、渡された手で書き換える。
-func kernelRuntime(edit func(st *agent.DoctorRuntimeState)) *agent.DoctorResponse {
-	resp := runtimeResponse(func(st *agent.DoctorRuntimeState) {
+func kernelRuntime(edit func(st *controlapi.DoctorRuntimeState)) *controlapi.DoctorResponse {
+	resp := runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 		st.Mode = credentials.ModeKernel
 		st.Budgets, st.RefusalsSince = nil, time.Time{}
-		st.Rules = []agent.DoctorRule{{ID: "r_1", State: proto.StatusOK, Proto: proto.TCP, Ports: 1, DNATPorts: 1}}
+		st.Rules = []controlapi.DoctorRule{{ID: "r_1", State: proto.StatusOK, Proto: proto.TCP, Ports: 1, DNATPorts: 1}}
 		st.Kernel = kernelEvidence()
 		edit(st)
 	})
 	netAdmin := true
-	resp.Process = &agent.DoctorProcess{UID: 999, User: "wgft", NetAdmin: &netAdmin}
+	resp.Process = &controlapi.DoctorProcess{UID: 999, User: "wgft", NetAdmin: &netAdmin}
 	return resp
 }
 
@@ -58,9 +58,9 @@ type kernelScenario struct {
 	name string
 	// stopped は、止まっているエージェントの場面である。readKernel はその読みを与える
 	stopped    bool
-	readKernel func(k *agent.DoctorKernel)
+	readKernel func(k *controlapi.DoctorKernel)
 	// resp は稼働中のエージェントの応答である
-	resp     *agent.DoctorResponse
+	resp     *controlapi.DoctorResponse
 	creds    func(f *credentials.Credentials)
 	root     bool
 	dial     func(string) (net.Conn, error)
@@ -105,7 +105,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "a stopped agent whose table lost a DNAT row",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.MissingCount, k.Table.Missing = 1, []string{"DNAT tcp 2456 of rule r_1 to 192.168.1.20:2456"}
 			},
 			want: []wantCheck{
@@ -119,9 +119,9 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			// 欠けても転送が止まらない守りの行だけが欠けた表は、転送を担えないとは言えない(10.2c 節)
 			name:    "a stopped agent whose table lost only guard rows",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.GuardMissingCount, k.Table.GuardMissing = 2, []string{"filter_pre: drop the rest from wgft0", "input: drop the rest from wgft0"}
-				k.Table.GuardEffects = []string{agent.KernelEffectHost, agent.KernelEffectOtherDNAT}
+				k.Table.GuardEffects = []string{controlapi.KernelEffectHost, controlapi.KernelEffectOtherDNAT}
 			},
 			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
 			wantExit:   0,
@@ -133,7 +133,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			// 変更として table_changed とし、転送が続きうるとは言わない
 			name:    "a stopped agent whose drop row moved to the top",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.MovedCount, k.Table.Moved = 1, []string{"filter_pre: drop the rest from wgft0, now at row 1"}
 			},
 			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonTableChanged}},
@@ -144,8 +144,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "a missing guard row and a moved row",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Table.GuardMissingCount, k.Table.GuardMissing, k.Table.GuardEffects = 1, []string{"input: drop the rest from wgft0"}, []string{agent.KernelEffectHost}
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Table.GuardMissingCount, k.Table.GuardMissing, k.Table.GuardEffects = 1, []string{"input: drop the rest from wgft0"}, []string{controlapi.KernelEffectHost}
 				k.Table.MovedCount, k.Table.Moved = 1, []string{"forward: drop the rest from wgft0, now at row 1"}
 			},
 			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
@@ -156,7 +156,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "a missing guard row and an added row",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.GuardMissingCount, k.Table.GuardMissing = 1, []string{"filter_pre: drop the rest from wgft0"}
 				k.Table.UnexpectedCount, k.Table.Unexpected = 1, []string{"chain filter_pre: row 1 is not one wgft writes"}
 			},
@@ -169,9 +169,9 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			// 閉じたままである(10.2c 節)
 			name:    "a missing forward drop alone opens nothing",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.GuardMissingCount, k.Table.GuardMissing = 1, []string{"forward: drop the rest from wgft0"}
-				k.Table.GuardClosed = []string{agent.KernelClosedLANByFilterPre}
+				k.Table.GuardClosed = []string{controlapi.KernelClosedLANByFilterPre}
 			},
 			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
 			wantDetail: map[string]string{agentCheckDPTable: "Forwarding may still work without them. The drop row in filter_pre still keeps packets that no rule DNATs from the LAN"},
@@ -182,9 +182,9 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			// (10.2c 節)。input の drop を消し、filter_pre の先頭に accept を加えた表である
 			name:    "a missing input drop and an accept added to filter_pre",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.GuardMissingCount, k.Table.GuardMissing = 1, []string{"input: drop the rest from wgft0"}
-				k.Table.GuardClosed = []string{agent.KernelClosedHostByFilterPre}
+				k.Table.GuardClosed = []string{controlapi.KernelClosedHostByFilterPre}
 				k.Table.UnexpectedCount, k.Table.Unexpected = 1, []string{"chain filter_pre: row 1 is not one wgft writes"}
 			},
 			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
@@ -194,9 +194,9 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "a missing forward drop and a moved row",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.GuardMissingCount, k.Table.GuardMissing = 1, []string{"forward: drop the rest from wgft0"}
-				k.Table.GuardClosed = []string{agent.KernelClosedLANByFilterPre}
+				k.Table.GuardClosed = []string{controlapi.KernelClosedLANByFilterPre}
 				k.Table.MovedCount, k.Table.Moved = 1, []string{"filter_pre: accept established and related flows from wgft0, now at row 4"}
 			},
 			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
@@ -205,10 +205,10 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "missing filter_pre and forward drops open the LAN",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.GuardMissingCount, k.Table.GuardMissing = 2, []string{"filter_pre: drop the rest from wgft0", "forward: drop the rest from wgft0"}
-				k.Table.GuardEffects = []string{agent.KernelEffectOtherDNAT, agent.KernelEffectLAN}
-				k.Table.GuardClosed = []string{agent.KernelClosedHostByInput}
+				k.Table.GuardEffects = []string{controlapi.KernelEffectOtherDNAT, controlapi.KernelEffectLAN}
+				k.Table.GuardClosed = []string{controlapi.KernelClosedHostByInput}
 			},
 			want: []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
 			wantDetail: map[string]string{agentCheckDPTable: "Without them, traffic from the tunnel may reach other tables' DNAT, such as ports a container runtime publishes; " +
@@ -218,7 +218,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "a forwarding row missing and a moved row",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.MissingCount, k.Table.Missing = 1, []string{"postrouting: masquerade DNATed flows from wgft0 leaving by another interface"}
 				k.Table.MovedCount, k.Table.Moved = 1, []string{"filter_pre: drop the rest from wgft0, now at row 1"}
 			},
@@ -228,7 +228,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name: "a running agent whose table lost only guard rows",
-			resp: kernelRuntime(func(st *agent.DoctorRuntimeState) {
+			resp: kernelRuntime(func(st *controlapi.DoctorRuntimeState) {
 				st.Kernel.Table.GuardMissingCount, st.Kernel.Table.GuardMissing = 1, []string{"input: drop the rest from wgft0"}
 			}),
 			want:     []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
@@ -237,7 +237,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "a stopped agent whose table lost a forwarding row and a guard row",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.MissingCount, k.Table.Missing = 1, []string{"postrouting: masquerade DNATed flows from wgft0 leaving by another interface"}
 				k.Table.GuardMissingCount, k.Table.GuardMissing = 1, []string{"filter_pre: drop the rest from wgft0"}
 			},
@@ -247,7 +247,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name: "a rule error and a missing guard row",
-			resp: kernelRuntime(func(st *agent.DoctorRuntimeState) {
+			resp: kernelRuntime(func(st *controlapi.DoctorRuntimeState) {
 				st.Rules[0].State, st.Rules[0].Reason = proto.StatusError, "target 192.168.1.20:2456: connection refused"
 				st.Kernel.Table.GuardMissingCount, st.Kernel.Table.GuardMissing = 1, []string{"filter_pre: drop the rest from wgft0"}
 			}),
@@ -258,18 +258,18 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:       "a stopped agent whose table is gone",
 			stopped:    true,
-			readKernel: func(k *agent.DoctorKernel) { k.Table.Present = false },
+			readKernel: func(k *controlapi.DoctorKernel) { k.Table.Present = false },
 			want:       []wantCheck{{agentCheckDPTable, statusFailed, agentReasonTableMissing}},
 			wantExit:   1,
 		},
 		{
 			name:    "a stopped agent diagnosed without CAP_NET_ADMIN",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Interface = agent.DoctorKernelInterface{Name: "wgft0", Exists: true, Kind: "wireguard", Up: true, NeedsNetAdmin: true,
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface = controlapi.DoctorKernelInterface{Name: "wgft0", Exists: true, Kind: "wireguard", Up: true, NeedsNetAdmin: true,
 					Declared: true, ServerAddress: "10.200.0.1", RouteInterface: "wgft0"}
-				k.Table = agent.DoctorKernelTable{ReadError: "listing tables: operation not permitted", NeedsNetAdmin: true, Source: agent.KernelTableFromRecord}
-				k.Forwarding = agent.DoctorKernelForwarding{IPForward: "1", PolicyError: "operation not permitted", PolicyNeedsNetAdmin: true}
+				k.Table = controlapi.DoctorKernelTable{ReadError: "listing tables: operation not permitted", NeedsNetAdmin: true, Source: controlapi.KernelTableFromRecord}
+				k.Forwarding = controlapi.DoctorKernelForwarding{IPForward: "1", PolicyError: "operation not permitted", PolicyNeedsNetAdmin: true}
 			},
 			want: []wantCheck{
 				{agentCheckDPInterface, statusUnknown, agentReasonNeedsNetAdmin},
@@ -283,9 +283,9 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "a stopped agent without CAP_NET_ADMIN whose interface is missing",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Interface = agent.DoctorKernelInterface{Name: "wgft0", Ownership: agent.KernelOwnershipAbsent, Declared: true}
-				k.Table = agent.DoctorKernelTable{ReadError: "operation not permitted", NeedsNetAdmin: true}
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface = controlapi.DoctorKernelInterface{Name: "wgft0", Ownership: controlapi.KernelOwnershipAbsent, Declared: true}
+				k.Table = controlapi.DoctorKernelTable{ReadError: "operation not permitted", NeedsNetAdmin: true}
 			},
 			want: []wantCheck{
 				{agentCheckDPInterface, statusFailed, agentReasonInterfaceMissing},
@@ -297,7 +297,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:       "a down interface",
 			stopped:    true,
-			readKernel: func(k *agent.DoctorKernel) { k.Interface.Up = false },
+			readKernel: func(k *controlapi.DoctorKernel) { k.Interface.Up = false },
 			want:       []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonInterfaceDown}},
 			wantExit:   1,
 		},
@@ -305,8 +305,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			// up の印は権限なしで読めるので、鍵を読めなくても down は FAILED と言える(10.2c 節)
 			name:    "a down interface read without CAP_NET_ADMIN",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Interface = agent.DoctorKernelInterface{Name: "wgft0", Exists: true, Kind: "wireguard", NeedsNetAdmin: true, Declared: true}
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface = controlapi.DoctorKernelInterface{Name: "wgft0", Exists: true, Kind: "wireguard", NeedsNetAdmin: true, Declared: true}
 			},
 			want:     []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonInterfaceDown}},
 			wantExit: 1,
@@ -318,8 +318,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			// 鍵とピアを権限以外の理由で読めなかった down のインタフェースも、所有は分からない
 			name:    "a down interface whose key could not be read",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Interface = agent.DoctorKernelInterface{Name: "wgft0", Exists: true, Kind: "wireguard", Declared: true,
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface = controlapi.DoctorKernelInterface{Name: "wgft0", Exists: true, Kind: "wireguard", Declared: true,
 					DeviceError: "read wgft0: no such device"}
 			},
 			want:       []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonInterfaceDown}},
@@ -330,8 +330,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "another program's link under the interface name",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Interface.Kind, k.Interface.Ownership = "dummy", agent.KernelOwnershipNotWireGuard
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface.Kind, k.Interface.Ownership = "dummy", controlapi.KernelOwnershipNotWireGuard
 			},
 			want:     []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonInterfaceNotOurs}},
 			wantExit: 1,
@@ -341,8 +341,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			// 案内すると、エージェントは起動を拒んで再起動を繰り返す(10.2c 節)
 			name:    "a keyless WireGuard interface that is down",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Interface.Up, k.Interface.Ownership = false, agent.KernelOwnershipKeyless
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface.Up, k.Interface.Ownership = false, controlapi.KernelOwnershipKeyless
 			},
 			want:       []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonInterfaceNotOurs}},
 			wantExit:   1,
@@ -352,8 +352,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "another key's WireGuard interface that is down",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Interface.Up, k.Interface.Ownership = false, agent.KernelOwnershipForeign
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface.Up, k.Interface.Ownership = false, controlapi.KernelOwnershipForeign
 			},
 			want:     []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonInterfaceNotOurs}},
 			wantExit: 1,
@@ -361,8 +361,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:    "this agent's interface with the previous key, down",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Interface.Up, k.Interface.Ownership = false, agent.KernelOwnershipPrevious
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface.Up, k.Interface.Ownership = false, controlapi.KernelOwnershipPrevious
 			},
 			want:     []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonInterfaceDown}},
 			wantExit: 1,
@@ -371,22 +371,24 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:       "a WireGuard interface with another key",
 			stopped:    true,
-			readKernel: func(k *agent.DoctorKernel) { k.Interface.Ownership = agent.KernelOwnershipForeign },
+			readKernel: func(k *controlapi.DoctorKernel) { k.Interface.Ownership = controlapi.KernelOwnershipForeign },
 			want:       []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonInterfaceNotOurs}},
 			wantExit:   1,
 		},
 		{
-			name:       "no server peer",
-			stopped:    true,
-			readKernel: func(k *agent.DoctorKernel) { k.Interface.PeerOK, k.Interface.Differs = false, []string{"the peer"} },
-			want:       []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonPeerMissing}},
-			wantExit:   1,
+			name:    "no server peer",
+			stopped: true,
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface.PeerOK, k.Interface.Differs = false, []string{"the peer"}
+			},
+			want:     []wantCheck{{agentCheckDPInterface, statusFailed, agentReasonPeerMissing}},
+			wantExit: 1,
 		},
 		{
 			name:    "the interface still holds the previous key",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Interface.Ownership, k.Interface.Differs = agent.KernelOwnershipPrevious, []string{"the key"}
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Interface.Ownership, k.Interface.Differs = controlapi.KernelOwnershipPrevious, []string{"the key"}
 			},
 			want:       []wantCheck{{agentCheckDPInterface, statusUnknown, agentReasonInterfaceDiffers}},
 			wantExit:   0,
@@ -395,7 +397,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name:       "the route to the server leaves through another interface",
-			resp:       kernelRuntime(func(st *agent.DoctorRuntimeState) { st.Kernel.Interface.RouteInterface = "tailscale0" }),
+			resp:       kernelRuntime(func(st *controlapi.DoctorRuntimeState) { st.Kernel.Interface.RouteInterface = "tailscale0" }),
 			want:       []wantCheck{{agentCheckDPInterface, statusUnknown, agentReasonRouteNotViaInterface}},
 			wantExit:   0,
 			wantDetail: map[string]string{agentCheckDPInterface: "goes through tailscale0"},
@@ -403,14 +405,14 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:       "ip_forward is 0",
 			stopped:    true,
-			readKernel: func(k *agent.DoctorKernel) { k.Forwarding.IPForward = "0" },
+			readKernel: func(k *controlapi.DoctorKernel) { k.Forwarding.IPForward = "0" },
 			want:       []wantCheck{{agentCheckForwarding, statusFailed, agentReasonIPForwardOff}},
 			wantExit:   1,
 		},
 		{
 			name:    "another table drops forwarded packets by default",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Forwarding.PolicyDrops = []string{"inet otherfw forward_drop"}
 				k.Forwarding.RPFilterStrict = []string{"all"}
 			},
@@ -421,13 +423,13 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			name:       "strict rp_filter",
 			stopped:    true,
-			readKernel: func(k *agent.DoctorKernel) { k.Forwarding.RPFilterStrict = []string{"default"} },
+			readKernel: func(k *controlapi.DoctorKernel) { k.Forwarding.RPFilterStrict = []string{"default"} },
 			want:       []wantCheck{{agentCheckForwarding, statusUnknown, agentReasonRPFilterStrict}},
 			wantExit:   0,
 		},
 		{
 			name: "a healthy running agent",
-			resp: kernelRuntime(func(*agent.DoctorRuntimeState) {}),
+			resp: kernelRuntime(func(*controlapi.DoctorRuntimeState) {}),
 			want: []wantCheck{
 				{agentCheckProcess, statusOK, ""},
 				{agentCheckDPInterface, statusOK, ""},
@@ -450,7 +452,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			// 直前の解決の結果で転送を続けているだけのルールは、転送の停止ではない。server doctor と同じく
 			// FAILED にせず、名前の解決の失敗として示す(10.2c 節、2026-09-25 の所有者の決定)
 			name: "a rule that keeps forwarding to the last resolved address",
-			resp: kernelRuntime(func(st *agent.DoctorRuntimeState) {
+			resp: kernelRuntime(func(st *controlapi.DoctorRuntimeState) {
 				st.Rules[0].State = proto.StatusError
 				st.Rules[0].Reason = staleKernelReason
 			}),
@@ -462,7 +464,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		{
 			// 直前のアドレスの宛先も応えなければ、転送は宛先で止まっている。listener_error のままである
 			name: "a rule forwarding to the last resolved address that refuses",
-			resp: kernelRuntime(func(st *agent.DoctorRuntimeState) {
+			resp: kernelRuntime(func(st *controlapi.DoctorRuntimeState) {
 				st.Rules[0].State = proto.StatusError
 				st.Rules[0].Reason = staleKernelReason + "; target 192.168.1.20:2456: dial tcp 192.168.1.20:2456: connect: connection refused"
 			}),
@@ -475,7 +477,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			// 所見のルールの一覧に理由を示す
 			name:    "a stopped agent whose record holds a rule forwarding from the last resolution",
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
+			readKernel: func(k *controlapi.DoctorKernel) {
 				k.Table.Rules[0].State, k.Table.Rules[0].Reason = proto.StatusError, staleKernelReason
 			},
 			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonNotRunning}},
@@ -484,8 +486,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name: "a rule refused by the allowlist",
-			resp: kernelRuntime(func(st *agent.DoctorRuntimeState) {
-				st.Rules[0] = agent.DoctorRule{ID: "r_1", State: proto.StatusError, Proto: proto.TCP, Ports: 1,
+			resp: kernelRuntime(func(st *controlapi.DoctorRuntimeState) {
+				st.Rules[0] = controlapi.DoctorRule{ID: "r_1", State: proto.StatusError, Proto: proto.TCP, Ports: 1,
 					Reason: "target 192.168.1.30:2456 is not in WGFT_AGENT_ALLOW_TARGETS"}
 			}),
 			want:       []wantCheck{{agentCheckDPTable, statusFailed, agentReasonListenerError}},
@@ -498,8 +500,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 				f.LastState.Rules[0].Target = "127.0.0.1:2456"
 			},
 			stopped: true,
-			readKernel: func(k *agent.DoctorKernel) {
-				k.Table.Rules[0] = agent.DoctorRule{ID: "r_1", State: proto.StatusError, Proto: proto.TCP, Ports: 1,
+			readKernel: func(k *controlapi.DoctorKernel) {
+				k.Table.Rules[0] = controlapi.DoctorRule{ID: "r_1", State: proto.StatusError, Proto: proto.TCP, Ports: 1,
 					Reason: "target 127.0.0.1 is a loopback address; kernel mode does not forward to loopback targets, use this host's LAN address"}
 			},
 			want:     []wantCheck{{agentCheckDPTable, statusFailed, agentReasonListenerError}},
@@ -507,7 +509,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name: "the last full state could not be published",
-			resp: kernelRuntime(func(st *agent.DoctorRuntimeState) {
+			resp: kernelRuntime(func(st *controlapi.DoctorRuntimeState) {
 				st.PublishError = "publish table inet wgft_agent: netlink receive: invalid argument"
 			}),
 			want:       []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonPublishFailed}},
@@ -516,7 +518,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name: "rows another program added",
-			resp: kernelRuntime(func(st *agent.DoctorRuntimeState) {
+			resp: kernelRuntime(func(st *controlapi.DoctorRuntimeState) {
 				st.Kernel.Table.UnexpectedCount, st.Kernel.Table.Unexpected = 1, []string{"filter_pre: a row wgft does not write"}
 			}),
 			want:     []wantCheck{{agentCheckDPTable, statusUnknown, agentReasonTableChanged}},
@@ -524,7 +526,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name:     "a running agent the server disabled",
-			resp:     kernelRuntime(func(st *agent.DoctorRuntimeState) { st.AgentDisabled = true }),
+			resp:     kernelRuntime(func(st *controlapi.DoctorRuntimeState) { st.AgentDisabled = true }),
 			want:     []wantCheck{{agentCheckDPInterface, statusSkipped, agentReasonAgentDisabled}, {agentCheckDPTable, statusSkipped, agentReasonAgentDisabled}, {agentCheckForwarding, statusSkipped, agentReasonAgentDisabled}},
 			wantExit: 0,
 		},
@@ -538,13 +540,13 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name:     "a running kernel-mode agent from before the kernel reading",
-			resp:     kernelRuntime(func(st *agent.DoctorRuntimeState) { st.Kernel = nil }),
+			resp:     kernelRuntime(func(st *controlapi.DoctorRuntimeState) { st.Kernel = nil }),
 			want:     []wantCheck{{agentCheckDPTable, statusSkipped, agentReasonDoctorUnsupported}},
 			wantExit: 0,
 		},
 		{
 			name: "a running agent diagnosed as root",
-			resp: kernelRuntime(func(*agent.DoctorRuntimeState) {}),
+			resp: kernelRuntime(func(*controlapi.DoctorRuntimeState) {}),
 			root: true,
 			want: []wantCheck{{agentCheckPrivileges, statusUnknown, agentReasonRunningAsRoot}},
 			wantDetail: map[string]string{
@@ -554,8 +556,8 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name: "a running agent without CAP_NET_ADMIN",
-			resp: func() *agent.DoctorResponse {
-				r := kernelRuntime(func(*agent.DoctorRuntimeState) {})
+			resp: func() *controlapi.DoctorResponse {
+				r := kernelRuntime(func(*controlapi.DoctorRuntimeState) {})
 				no := false
 				r.Process.NetAdmin = &no
 				return r
@@ -566,7 +568,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 		},
 		{
 			name:     "a running agent whose control socket refuses this command",
-			resp:     kernelRuntime(func(*agent.DoctorRuntimeState) {}),
+			resp:     kernelRuntime(func(*controlapi.DoctorRuntimeState) {}),
 			dial:     func(string) (net.Conn, error) { return nil, &net.OpError{Op: "dial", Err: fs.ErrPermission} },
 			want:     []wantCheck{{agentCheckDPTable, statusSkipped, agentReasonControlUnreachable}, {agentCheckListeners, statusNotTested, agentReasonKernelMode}},
 			wantExit: 2,
@@ -580,7 +582,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 				sc.creds(f)
 			}
 			writeTestCredentials(t, in.CredentialsPath, f)
-			in.ReadKernel = func(*credentials.Credentials, string) *agent.DoctorKernel {
+			in.ReadKernel = func(*credentials.Credentials, string) *controlapi.DoctorKernel {
 				if !sc.stopped {
 					t.Error("a running agent's kernel was read directly; only a stopped agent's is")
 				}
@@ -645,7 +647,7 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 func TestAgentDoctorUserspaceKeepsItsAnswers(t *testing.T) {
 	in := testAgentDoctorInput(t, t.TempDir())
 	healthyAgentForTest(t, &in)
-	in.ReadKernel = func(*credentials.Credentials, string) *agent.DoctorKernel {
+	in.ReadKernel = func(*credentials.Credentials, string) *controlapi.DoctorKernel {
 		t.Error("a userspace agent's kernel was read")
 		return nil
 	}
@@ -674,7 +676,7 @@ func TestAgentDoctorModeFromTheRunningAgent(t *testing.T) {
 	in := testAgentDoctorInput(t, t.TempDir())
 	writeTestCredentials(t, in.CredentialsPath, registeredCredentials()) // 記録はユーザー空間モード
 	holdTheLock(t, in.CredentialsPath)
-	in.Dial = fakeDoctorSocket(t, liveReply(kernelRuntime(func(*agent.DoctorRuntimeState) {})))
+	in.Dial = fakeDoctorSocket(t, liveReply(kernelRuntime(func(*controlapi.DoctorRuntimeState) {})))
 	rep := agentDiagnose(in)
 	if c, _ := findAgentCheck(rep, agentCheckDPTable); c.Status != statusOK {
 		t.Errorf("dataplane.table = %s/%s, want the running agent's kernel mode to count", c.Status, c.Reason)
@@ -691,9 +693,9 @@ func TestAgentDoctorModeFromTheRunningAgent(t *testing.T) {
 func TestAgentDoctorIncompleteNamesRootForKernelState(t *testing.T) {
 	in := testAgentDoctorInput(t, t.TempDir())
 	writeTestCredentials(t, in.CredentialsPath, kernelCredentials())
-	in.ReadKernel = func(*credentials.Credentials, string) *agent.DoctorKernel {
+	in.ReadKernel = func(*credentials.Credentials, string) *controlapi.DoctorKernel {
 		k := kernelEvidence()
-		k.Table = agent.DoctorKernelTable{ReadError: "operation not permitted", NeedsNetAdmin: true}
+		k.Table = controlapi.DoctorKernelTable{ReadError: "operation not permitted", NeedsNetAdmin: true}
 		return k
 	}
 	rep := agentDiagnose(in)
@@ -712,61 +714,61 @@ func TestAgentDoctorIncompleteNamesRootForKernelState(t *testing.T) {
 // 「dataplane.table の判定」)。ルール単位の失敗は、同じ実行に公開の失敗があっても FAILED のまま示し、
 // 公開の失敗は、加わった行より先に示す。
 func TestAgentDoctorTableOrder(t *testing.T) {
-	ruleError := func(st *agent.DoctorRuntimeState) {
+	ruleError := func(st *controlapi.DoctorRuntimeState) {
 		st.Rules[0].State, st.Rules[0].Reason = proto.StatusError, "target 192.168.1.20:2456: connection refused"
 	}
 	// stale は、2 本目のルールとして、直前の解決の結果で転送を続けているだけのルールを加える
-	stale := func(st *agent.DoctorRuntimeState) {
-		st.Rules = append(st.Rules, agent.DoctorRule{ID: "r_2", State: proto.StatusError, Proto: proto.TCP, Ports: 1, DNATPorts: 1,
+	stale := func(st *controlapi.DoctorRuntimeState) {
+		st.Rules = append(st.Rules, controlapi.DoctorRule{ID: "r_2", State: proto.StatusError, Proto: proto.TCP, Ports: 1, DNATPorts: 1,
 			Reason: staleKernelReason})
 	}
-	publishFailed := func(st *agent.DoctorRuntimeState) {
+	publishFailed := func(st *controlapi.DoctorRuntimeState) {
 		st.PublishError = "publish table inet wgft_agent: invalid argument"
 	}
-	added := func(st *agent.DoctorRuntimeState) {
+	added := func(st *controlapi.DoctorRuntimeState) {
 		st.Kernel.Table.UnexpectedCount, st.Kernel.Table.Unexpected = 1, []string{"chain nat_pre: row 3 is not one wgft writes"}
 	}
-	guard := func(st *agent.DoctorRuntimeState) {
+	guard := func(st *controlapi.DoctorRuntimeState) {
 		st.Kernel.Table.GuardMissingCount, st.Kernel.Table.GuardMissing = 1, []string{"filter_pre: drop the rest from wgft0"}
 	}
-	missing := func(st *agent.DoctorRuntimeState) {
+	missing := func(st *controlapi.DoctorRuntimeState) {
 		st.Kernel.Table.MissingCount, st.Kernel.Table.Missing = 1, []string{"postrouting: masquerade"}
 	}
 	for _, tc := range []struct {
 		name  string
-		edits []func(*agent.DoctorRuntimeState)
+		edits []func(*controlapi.DoctorRuntimeState)
 		want  wantCheck
 	}{
-		{"missing rows before rule errors", []func(*agent.DoctorRuntimeState){missing, ruleError, publishFailed, added},
+		{"missing rows before rule errors", []func(*controlapi.DoctorRuntimeState){missing, ruleError, publishFailed, added},
 			wantCheck{agentCheckDPTable, statusFailed, agentReasonTableRowsMissing}},
-		{"rule errors before a failed publication", []func(*agent.DoctorRuntimeState){ruleError, publishFailed, added},
+		{"rule errors before a failed publication", []func(*controlapi.DoctorRuntimeState){ruleError, publishFailed, added},
 			wantCheck{agentCheckDPTable, statusFailed, agentReasonListenerError}},
-		{"rule errors before missing guard rows", []func(*agent.DoctorRuntimeState){ruleError, guard, publishFailed},
+		{"rule errors before missing guard rows", []func(*controlapi.DoctorRuntimeState){ruleError, guard, publishFailed},
 			wantCheck{agentCheckDPTable, statusFailed, agentReasonListenerError}},
-		{"missing guard rows before a failed publication", []func(*agent.DoctorRuntimeState){guard, publishFailed, added},
+		{"missing guard rows before a failed publication", []func(*controlapi.DoctorRuntimeState){guard, publishFailed, added},
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
-		{"a failed publication before added rows", []func(*agent.DoctorRuntimeState){publishFailed, added},
+		{"a failed publication before added rows", []func(*controlapi.DoctorRuntimeState){publishFailed, added},
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonPublishFailed}},
 		// 直前の解決の結果で転送を続けるルールは、他のどの所見よりも後ろで、OK の前である。他の所見が
 		// あれば、そちらの符号を採り、このルールは所見に併せて示す(10.2c 節)
-		{"rule errors before a stale resolution", []func(*agent.DoctorRuntimeState){stale, ruleError},
+		{"rule errors before a stale resolution", []func(*controlapi.DoctorRuntimeState){stale, ruleError},
 			wantCheck{agentCheckDPTable, statusFailed, agentReasonListenerError}},
-		{"missing guard rows before a stale resolution", []func(*agent.DoctorRuntimeState){stale, guard},
+		{"missing guard rows before a stale resolution", []func(*controlapi.DoctorRuntimeState){stale, guard},
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonGuardRowsMissing}},
-		{"a failed publication before a stale resolution", []func(*agent.DoctorRuntimeState){stale, publishFailed},
+		{"a failed publication before a stale resolution", []func(*controlapi.DoctorRuntimeState){stale, publishFailed},
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonPublishFailed}},
-		{"added rows before a stale resolution", []func(*agent.DoctorRuntimeState){stale, added},
+		{"added rows before a stale resolution", []func(*controlapi.DoctorRuntimeState){stale, added},
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonTableChanged}},
-		{"a stale resolution alone", []func(*agent.DoctorRuntimeState){stale},
+		{"a stale resolution alone", []func(*controlapi.DoctorRuntimeState){stale},
 			wantCheck{agentCheckDPTable, statusUnknown, agentReasonResolveFailed}},
-		{"missing rows before a stale resolution", []func(*agent.DoctorRuntimeState){stale, missing},
+		{"missing rows before a stale resolution", []func(*controlapi.DoctorRuntimeState){stale, missing},
 			wantCheck{agentCheckDPTable, statusFailed, agentReasonTableRowsMissing}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := testAgentDoctorInput(t, t.TempDir())
 			writeTestCredentials(t, in.CredentialsPath, kernelCredentials())
 			holdTheLock(t, in.CredentialsPath)
-			in.Dial = fakeDoctorSocket(t, liveReply(kernelRuntime(func(st *agent.DoctorRuntimeState) {
+			in.Dial = fakeDoctorSocket(t, liveReply(kernelRuntime(func(st *controlapi.DoctorRuntimeState) {
 				for _, e := range tc.edits {
 					e(st)
 				}
@@ -808,7 +810,7 @@ func TestAgentDoctorReadsTheConfiguredInterface(t *testing.T) {
 	in.Now, in.Euid = testLiveNow, func() int { return 1000 }
 	writeTestCredentials(t, in.CredentialsPath, kernelCredentials())
 	var read string
-	in.ReadKernel = func(_ *credentials.Credentials, iface string) *agent.DoctorKernel {
+	in.ReadKernel = func(_ *credentials.Credentials, iface string) *controlapi.DoctorKernel {
 		read = iface
 		return kernelEvidence()
 	}
@@ -824,7 +826,7 @@ func TestAgentDoctorStaleResolutionKeepsTheCheckError(t *testing.T) {
 	in := testAgentDoctorInput(t, t.TempDir())
 	writeTestCredentials(t, in.CredentialsPath, kernelCredentials())
 	holdTheLock(t, in.CredentialsPath)
-	in.Dial = fakeDoctorSocket(t, liveReply(kernelRuntime(func(st *agent.DoctorRuntimeState) {
+	in.Dial = fakeDoctorSocket(t, liveReply(kernelRuntime(func(st *controlapi.DoctorRuntimeState) {
 		st.Rules[0].State, st.Rules[0].Reason = proto.StatusError, staleKernelReason
 		st.CheckError = "read table inet wgft_agent: netlink receive: no buffer space available"
 	})))

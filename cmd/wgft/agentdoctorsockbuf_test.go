@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -14,10 +14,10 @@ import (
 // FAILED になるが、総合判定と終了コードは動かさない。値は稼働中のエージェントが測ったものであり、
 // 予測を条件の判定に使わない。
 func TestAgentDoctorSocketBuffers(t *testing.T) {
-	short := &agent.DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 425984, Send: 425984, Required: sockbuf.Required}
+	short := &controlapi.DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 425984, Send: 425984, Required: sockbuf.Required}
 	cases := []struct {
 		name       string
-		resp       *agent.DoctorResponse
+		resp       *controlapi.DoctorResponse
 		stopped    bool
 		kernel     bool
 		wantStatus string
@@ -28,31 +28,31 @@ func TestAgentDoctorSocketBuffers(t *testing.T) {
 	}{
 		{name: "met", resp: healthyLiveResponse(), wantStatus: statusOK,
 			wantDetail: []string{"port 35454", "receive buffer of 14680064 bytes", "send buffer of 14680064 bytes", "requires 14680064 bytes each"}},
-		{name: "short on both", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) { st.Tunnel.SocketBuffers = short }),
+		{name: "short on both", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) { st.Tunnel.SocketBuffers = short }),
 			wantStatus: statusFailed, wantReason: "socket_buffer_below_requirement",
 			wantDetail: []string{"receive buffer of 425984 bytes", "at least 14680064 bytes each"},
 			// sysctl に書く値と、Linux が報告する 2 倍の値を並べ、7 MiB を設定した運用者が 14 MiB を読み違えない
 			wantNext: []string{"net.core.rmem_max and net.core.wmem_max to 7340032", "/etc/sysctl.d", "sysctl --system", "container host",
 				"restart the agent", "7340032 in the sysctl reads here as 14680064"}},
-		{name: "short on send only", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) {
+		{name: "short on send only", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 			b := *short
 			b.Recv, b.Send = 14680064, 8388608
 			st.Tunnel.SocketBuffers = &b
 		}), wantStatus: statusFailed, wantReason: "socket_buffer_below_requirement", wantDetail: []string{"send buffer of 8388608 bytes"}},
-		{name: "not measured on this os", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) {
-			st.Tunnel.SocketBuffers = &agent.DoctorSocketBuffers{}
+		{name: "not measured on this os", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+			st.Tunnel.SocketBuffers = &controlapi.DoctorSocketBuffers{}
 		}), wantStatus: statusNotTested, wantReason: "not_measured_on_this_os", wantDetail: []string{"Linux only", "not been verified"}},
-		{name: "measurement failed", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) {
-			st.Tunnel.SocketBuffers = &agent.DoctorSocketBuffers{Supported: true, Port: 35454, Required: sockbuf.Required, Error: "no UDP socket bound to port 35454 was found"}
+		{name: "measurement failed", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+			st.Tunnel.SocketBuffers = &controlapi.DoctorSocketBuffers{Supported: true, Port: 35454, Required: sockbuf.Required, Error: "no UDP socket bound to port 35454 was found"}
 		}), wantStatus: statusUnknown, wantReason: "socket_buffers_unreadable", wantDetail: []string{"no UDP socket bound to port 35454"}},
-		{name: "an older agent does not report it", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) { st.Tunnel.SocketBuffers = nil }),
+		{name: "an older agent does not report it", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) { st.Tunnel.SocketBuffers = nil }),
 			wantStatus: statusUnknown, wantReason: "socket_buffers_not_reported", wantNext: []string{"restart the agent"}},
-		{name: "no tunnel", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) {
-			st.Tunnel = agent.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel"}
+		{name: "no tunnel", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+			st.Tunnel = controlapi.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel"}
 			st.Rules, st.Budgets = nil, nil
 		}), wantStatus: statusSkipped, wantReason: "no_tunnel"},
 		{name: "stopped", stopped: true, wantStatus: statusSkipped, wantReason: "agent_not_running", wantExit: 1},
-		{name: "kernel mode", kernel: true, resp: kernelRuntime(func(*agent.DoctorRuntimeState) {}), wantStatus: statusNotTested, wantReason: "kernel_mode"},
+		{name: "kernel mode", kernel: true, resp: kernelRuntime(func(*controlapi.DoctorRuntimeState) {}), wantStatus: statusNotTested, wantReason: "kernel_mode"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

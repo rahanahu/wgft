@@ -12,6 +12,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/textsafe"
@@ -23,7 +24,7 @@ import (
 // しか取れない検査を持つ。節の表で「停止中」が「成立しない」の行である。
 //
 // 証拠は、認証情報ファイルの隣の `agent.json.sock` に `doctor` の 1 行を送って得た 1 行の JSON で
-// ある。応答の型は internal/agent の DoctorResponse で、その形だけで 3 つの状態を区別できる。
+// ある。応答の型は internal/agent/controlapi の DoctorResponse で、その形だけで 3 つの状態を区別できる。
 // error だけがあれば応答を組む処理が panic した実行、runtime_state が無く runtime_state_timeout が
 // あれば実行時の排他を期限内に取れなかった実行、runtime_state があれば正常な実行である。
 // allow_targets と stream は実行時の排他を要らないので、排他を取れなかった応答にも載る。
@@ -172,7 +173,7 @@ type agentLive struct {
 	// Err は繋げなかった、または応答を読めなかった理由である。
 	Err error
 	// Resp は得た応答である。Kind が liveOK、liveRuntimeBusy、liveAgentError のときだけ値を持つ。
-	Resp *agent.DoctorResponse
+	Resp *controlapi.DoctorResponse
 	// Reply は JSON として読めなかった応答の本文である。
 	Reply string
 }
@@ -183,22 +184,22 @@ func readAgentLive(in agentDoctorInput, run agentRunState) agentLive {
 	if !run.running() {
 		return agentLive{Kind: liveNotAttempted}
 	}
-	path := agent.ControlPath(in.CredentialsPath)
+	path := controlapi.ControlPath(in.CredentialsPath)
 	c, err := in.Dial(path)
 	if err != nil {
 		return agentLive{Kind: dialFailureKind(path, err), Path: path, Err: err}
 	}
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(agentControlReplyTimeout))
-	if _, err := fmt.Fprintln(c, agent.DoctorCommand); err != nil {
+	if _, err := fmt.Fprintln(c, controlapi.DoctorCommand); err != nil {
 		return agentLive{Kind: liveReplyUnreadable, Path: path, Err: err}
 	}
 	// design.md 11 節: the running agent that answers this socket is outside the trust boundary,
-	// so its reply is read under a size limit (agent.DoctorReplyMaxBytes) rather than trusted to
-	// end with a newline. agent.ReadControlReply turns hitting that limit into a message that
+	// so its reply is read under a size limit (controlapi.DoctorReplyMaxBytes) rather than trusted to
+	// end with a newline. controlapi.ReadControlReply turns hitting that limit into a message that
 	// says so, rather than the bare io.EOF a short, well-behaved reply's early close would also
 	// produce.
-	line, err := agent.ReadControlReply(c, agent.DoctorReplyMaxBytes)
+	line, err := controlapi.ReadControlReply(c, controlapi.DoctorReplyMaxBytes)
 	if err != nil {
 		return agentLive{Kind: liveReplyUnreadable, Path: path, Err: err}
 	}
@@ -211,7 +212,7 @@ func dialFailureKind(path string, err error) agentLiveKind {
 	switch {
 	case errors.Is(err, fs.ErrPermission):
 		return liveDenied
-	case errors.Is(err, syscall.EINVAL) && len(path) > agent.ControlPathLimit:
+	case errors.Is(err, syscall.EINVAL) && len(path) > controlapi.ControlPathLimit:
 		// Go の net は sun_path に収まらない名前を OS を呼ぶ前に EINVAL で拒むので、もとの誤りは
 		// invalid argument としか言わない(internal/agent/control.go)。
 		return livePathTooLong
@@ -221,7 +222,7 @@ func dialFailureKind(path string, err error) agentLiveKind {
 }
 
 // classifyDoctorReply は応答の 1 行を区分に写す。応答の形だけで 3 つの状態を区別できる
-// (internal/agent/doctor.go)。
+// (internal/agent/controlapi/doctor.go)。
 func classifyDoctorReply(path, line string) agentLive {
 	text := strings.TrimSpace(line)
 	// safeText is what this function stores in agentLive.Reply for display; text itself stays
@@ -234,7 +235,7 @@ func classifyDoctorReply(path, line string) agentLive {
 		// (10.2c 節の「制御ソケットの拡張」)。
 		return agentLive{Kind: liveUnsupported, Path: path, Reply: safeText}
 	}
-	var resp agent.DoctorResponse
+	var resp controlapi.DoctorResponse
 	if err := json.Unmarshal([]byte(text), &resp); err != nil {
 		return agentLive{Kind: liveReplyUnreadable, Path: path, Err: err, Reply: safeText}
 	}
@@ -428,7 +429,7 @@ func agentControlCheck(c *agentDoctorCheck, run agentRunState, live agentLive) {
 }
 
 // agentLiveValueCheck は、読めた値を検査に写す。
-func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *agent.DoctorResponse, agentName string) {
+func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *controlapi.DoctorResponse, agentName string) {
 	switch c.ID {
 	case agentCheckStreamConn:
 		agentStreamConnCheck(c, in, resp.Stream)
@@ -461,7 +462,7 @@ func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *agent.D
 
 // agentStreamConnCheck は制御ストリームが今つながっているかを示す。総合判定は動かさない。切れて
 // いることは、受け取り済みのルールを転送し続けている間も起こるためである(10.2c 節)。
-func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.DoctorStream) {
+func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *controlapi.DoctorStream) {
 	if s.Connected {
 		c.Status = doctor.StatusOK
 		c.Detail = "the control stream to the server is up"
@@ -498,14 +499,14 @@ func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.Doc
 // agentPinMismatch は、制御ストリームの直近の試みが証明書の不一致で終わったかどうかである。旧い版の
 // エージェントは pin_mismatch を送らないので、そのエージェントが記録した理由の文言でも見る。文言は
 // internal/agent の ErrPinMismatch である。
-func agentPinMismatch(s *agent.DoctorStream) bool {
+func agentPinMismatch(s *controlapi.DoctorStream) bool {
 	return s.PinMismatch || strings.Contains(s.DisconnectReason, agent.ErrPinMismatch.Error())
 }
 
 // agentStreamBackoffCheck は、直近に待った再接続の間隔と、待っている場合の次に試す時刻を示す。
 // 値を述べるだけの検査なので、状態は UNKNOWN、理由の符号は no_threshold とする。良し悪しを言う
 // 閾値をこのコマンドは持たない(10.2c 節が tunnel.transfer に与えたのと同じ扱い)。
-func agentStreamBackoffCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.DoctorStream) {
+func agentStreamBackoffCheck(c *agentDoctorCheck, in agentDoctorInput, s *controlapi.DoctorStream) {
 	c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoThreshold
 	parts := []string{}
 	if s.Backoff > 0 {
@@ -525,7 +526,7 @@ func agentStreamBackoffCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.
 }
 
 // agentStreamLivenessCheck は、直近の ping と pong の時刻と、pong を待っている最中かどうかを示す。
-func agentStreamLivenessCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent.DoctorStream) {
+func agentStreamLivenessCheck(c *agentDoctorCheck, in agentDoctorInput, s *controlapi.DoctorStream) {
 	c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoThreshold
 	var parts []string
 	switch {
@@ -554,7 +555,7 @@ func agentStreamLivenessCheck(c *agentDoctorCheck, in agentDoctorInput, s *agent
 // ハートビートのために計算している状態をそのまま入力とし、doctor のための 2 つ目の計算を持たない
 // (10.2c 節)。最終ハンドシェイクが健全かどうかは言わない。その判定と 3 分の閾値は 10.2a 節が
 // 持っている。
-func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
+func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *controlapi.DoctorRuntimeState) {
 	t := st.Tunnel
 	if t.State != proto.StatusError {
 		c.Status = doctor.StatusOK
@@ -567,7 +568,7 @@ func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.D
 	}
 	// トンネルがある場合は、ts.Err があることを先に見て、LastHandshake が無いことを後に見る。
 	// ハートビートの分岐がこの順であり、両方が成り立つ実行の理由は ts.Err の側になる(10.2c 節)。
-	if t.Reason == agent.ReasonHandshakePending {
+	if t.Reason == controlapi.ReasonHandshakePending {
 		c.Status, c.Reason = doctor.StatusUnknown, agentReasonHandshakePending
 		c.Detail = "the tunnel is up to " + orDash(t.Endpoint) + ", but no handshake has been established on it yet"
 		c.Next = "a tunnel that was just built always passes through this state. If it stays here, the VPS's WireGuard UDP port, this line's firewall or the ISP " +
@@ -586,7 +587,7 @@ func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.D
 	c.Status, c.Reason = doctor.StatusUnknown, agentReasonTunnelErrorEndpointKept
 	// wg 設定の拒否では、インタフェースは直前の設定のまま残るが、server が拒んだ設定で動く間はトンネルの
 	// 中の宛先が合わず、転送が止まりうる。エンドポイントが転送を続けられるとは言わない(設計文書 7b.1 節)
-	if strings.HasPrefix(t.Reason, agent.ReasonWGRefused) {
+	if strings.HasPrefix(t.Reason, controlapi.ReasonWGRefused) {
 		c.Detail = "the agent refused the wg configuration the server sent and keeps the interface and rules of the last configuration it applied, " +
 			"with the endpoint " + t.Endpoint + ": " + t.Reason
 		c.Next = "while the server runs with the configuration this agent refused, such as another tunnel address, traffic through the tunnel stops, since the two sides no longer agree. " +
@@ -625,7 +626,7 @@ func agentNoTunnelCheck(c *agentDoctorCheck, reason string) {
 // ソケットのバッファを、ユーザー空間モードの条件と比べる(設計文書 7 節、10.2c 節)。条件に届かなければ
 // FAILED とするが、総合判定と終了コードは動かさない。host.* の検査と同じく、転送を担えないことを
 // 述べる検査ではないためである。値はトンネルを立てたときのもので、予測ではない。
-func agentSocketBuffersCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
+func agentSocketBuffersCheck(c *agentDoctorCheck, in agentDoctorInput, st *controlapi.DoctorRuntimeState) {
 	t := st.Tunnel
 	if !t.Present {
 		c.Status, c.Reason = doctor.StatusSkipped, agentReasonNoTunnel
@@ -678,7 +679,7 @@ var sockbufFixNext = fmt.Sprintf("set net.core.rmem_max and net.core.wmem_max to
 // (設計文書 7 節、10.2c 節)。止めていれば FAILED とし、総合判定を動かす。止まった会計は、再起動
 // までこのエージェントの UDP のルールをすべて転送しないためである。この停止は資源の逼迫ではなく、
 // 会計の不変条件の違反を検出したときだけ起きる。
-func agentUDPAccountingCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
+func agentUDPAccountingCheck(c *agentDoctorCheck, st *controlapi.DoctorRuntimeState) {
 	t := st.Tunnel
 	if !t.Present {
 		c.Status, c.Reason = doctor.StatusSkipped, agentReasonNoTunnel
@@ -714,7 +715,7 @@ func agentHandshakeText(now, h time.Time) string {
 // agentWatchdogCheck は、今のトンネルを作った時刻、作り直しの間隔の実効値、試し直しを待っている
 // 場合の予定を示す。次の作り直しまでの残り時間は示さない。値が保持されておらず、示すには起点を
 // 求める規則を診断の側に写すことになる(10.2c 節)。
-func agentWatchdogCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
+func agentWatchdogCheck(c *agentDoctorCheck, in agentDoctorInput, st *controlapi.DoctorRuntimeState) {
 	c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoThreshold
 	t := st.Tunnel
 	var parts []string
@@ -738,7 +739,7 @@ func agentWatchdogCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.Doct
 
 // agentTransferCheck はトンネルの送受信バイト数を示す。状態は UNKNOWN とし、理由の符号を
 // no_threshold とする。多い少ないは、それだけでは健全さを意味しない(10.2c 節)。
-func agentTransferCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
+func agentTransferCheck(c *agentDoctorCheck, in agentDoctorInput, st *controlapi.DoctorRuntimeState) {
 	t := st.Tunnel
 	if !t.Present {
 		c.Status, c.Reason = doctor.StatusUnknown, agentReasonNoTunnel
@@ -767,7 +768,7 @@ func agentTransferCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.Doct
 // SKIPPED とする(設計文書 10.2c 節の relay.listeners の粒度)。無効なエージェントは宣言どおり
 // リスナーを 1 つも持たなくなるので、中継そのものは生きていても「ルールを持たない健全な配置」
 // (agentNoRelay の下の分岐)と区別が付かない。無効を示すための新しい検査は作らない。
-func agentListenersCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState, agentName string) {
+func agentListenersCheck(c *agentDoctorCheck, st *controlapi.DoctorRuntimeState, agentName string) {
 	if st.AgentDisabled {
 		agentDisabledSkip(c)
 		c.Detail = "the server has disabled this agent; it opens no listeners until wgft agent enable " + orDash(agentName) + " is run on the VPS"
@@ -781,7 +782,7 @@ func agentListenersCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState, agen
 		c.Detail = "the relay holds no rules, so it opens no listeners"
 		return
 	}
-	var bad, good []agent.DoctorRule
+	var bad, good []controlapi.DoctorRule
 	for _, r := range st.Rules {
 		if r.State == proto.StatusError {
 			bad = append(bad, r)
@@ -805,7 +806,7 @@ func agentListenersCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState, agen
 
 // agentRuleLines はルールごとの 1 句を組み立てる。長くなりすぎないよう先頭のいくつかだけを返す。
 // 誤りの文字列は internal/agent の側で既に 512 バイトに切られているので、ここでは切らない。
-func agentRuleLines(rules []agent.DoctorRule) []string {
+func agentRuleLines(rules []controlapi.DoctorRule) []string {
 	out := make([]string, 0, agentMaxRuleLines+1)
 	for i, r := range rules {
 		if i == agentMaxRuleLines {
@@ -829,7 +830,7 @@ func agentRuleLines(rules []agent.DoctorRule) []string {
 
 // agentSessionsCheck はルールごとの公開側の接続の数と、フロー予算の使用量と上限を示す。上限の
 // 対象である公開側の接続の数を示す(10.2c 節)。
-func agentSessionsCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
+func agentSessionsCheck(c *agentDoctorCheck, st *controlapi.DoctorRuntimeState) {
 	if agentNoRelay(c, st, "how many connections it carries") {
 		return
 	}
@@ -853,7 +854,7 @@ func agentSessionsCheck(c *agentDoctorCheck, st *agent.DoctorRuntimeState) {
 }
 
 // agentSessionLines はルールごとの接続の数の 1 句を組み立てる。
-func agentSessionLines(rules []agent.DoctorRule) []string {
+func agentSessionLines(rules []controlapi.DoctorRule) []string {
 	out := make([]string, 0, agentMaxRuleLines+1)
 	for i, r := range rules {
 		if i == agentMaxRuleLines {
@@ -868,7 +869,7 @@ func agentSessionLines(rules []agent.DoctorRule) []string {
 // agentRefusalsCheck は、今のトンネルを作ってからのフロー予算の拒否の累計を示す。フロー予算は
 // トンネルを立て直すたびに中継ごと作り直され、累計はそのたびに 0 に戻るので、起点を並べて示す
 // (10.2c 節)。
-func agentRefusalsCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.DoctorRuntimeState) {
+func agentRefusalsCheck(c *agentDoctorCheck, in agentDoctorInput, st *controlapi.DoctorRuntimeState) {
 	if agentNoRelay(c, st, "how many flows it refused") {
 		return
 	}
@@ -903,7 +904,7 @@ func agentRefusalsCheck(c *agentDoctorCheck, in agentDoctorInput, st *agent.Doct
 
 // agentNoRelay は、中継がまだ無い実行の扱いを当てる。中継はトンネルと一緒に作られるので、
 // トンネルが無い間は中継も無い。フロー予算の項目の有無が、中継の有無をそのまま表す。
-func agentNoRelay(c *agentDoctorCheck, st *agent.DoctorRuntimeState, what string) bool {
+func agentNoRelay(c *agentDoctorCheck, st *controlapi.DoctorRuntimeState, what string) bool {
 	if len(st.Budgets) > 0 {
 		return false
 	}
@@ -921,7 +922,7 @@ func agentDisabledSkip(c *agentDoctorCheck) {
 
 // agentAllowTargetsValue は、稼働中のエージェントが実際に持っている宛先の許可一覧を示す。組み立てた
 // 値ではなく、常駐プロセスが enforce している値である(10.2c 節)。
-func agentAllowTargetsValue(c *agentDoctorCheck, a *agent.DoctorAllowTargets) {
+func agentAllowTargetsValue(c *agentDoctorCheck, a *controlapi.DoctorAllowTargets) {
 	c.Status = doctor.StatusOK
 	env := a.Env
 	if env == "" {

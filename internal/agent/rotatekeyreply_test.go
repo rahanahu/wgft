@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 )
 
 // 稼働中の rotate-key が読む応答には上限がある。制御ソケットの相手が改行を送らずに書き続けても、root の
@@ -20,7 +22,7 @@ func TestRotateKeyRunningStopsReadingAtTheReplyLimit(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	path := filepath.Join(dir, "agent.json")
-	ln, err := net.Listen("unix", ControlPath(path))
+	ln, err := net.Listen("unix", controlapi.ControlPath(path))
 	if err != nil {
 		t.Skipf("cannot listen on a Unix socket here: %v", err)
 	}

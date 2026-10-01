@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
@@ -53,8 +53,8 @@ var agentJSONScenarios = []struct {
 	{"the running agent waits for its first full state", func(t *testing.T, in *agentDoctorInput) {
 		writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 		holdTheLock(t, in.CredentialsPath)
-		in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
-			st.Tunnel = agent.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel; full state not received"}
+		in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+			st.Tunnel = controlapi.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel; full state not received"}
 			st.Rules, st.Budgets = nil, nil
 		})))
 	}, statusOK},
@@ -630,8 +630,8 @@ func TestAgentDoctorReasonsNameOneFactEach(t *testing.T) {
 	in = testAgentDoctorInput(t, t.TempDir())
 	writeTestCredentials(t, in.CredentialsPath, f)
 	holdTheLock(t, in.CredentialsPath)
-	in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
-		st.Tunnel = agent.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel; full state not received"}
+	in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+		st.Tunnel = controlapi.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel; full state not received"}
 		st.Rules, st.Budgets = nil, nil
 	})))
 	live, _ := findAgentCheck(agentDiagnose(in), agentCheckTunnelLocal)

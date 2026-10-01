@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -52,7 +52,7 @@ func useLongSocketPath(t *testing.T, in *agentDoctorInput) {
 	}
 	in.DataDir = deep
 	in.CredentialsPath = filepath.Join(deep, "agent.json")
-	if len(agent.ControlPath(in.CredentialsPath)) <= agent.ControlPathLimit {
+	if len(controlapi.ControlPath(in.CredentialsPath)) <= controlapi.ControlPathLimit {
 		t.Skipf("the temporary directory is too short to exceed the limit: %s", in.CredentialsPath)
 	}
 }
@@ -108,9 +108,9 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// ある。制御ソケットに繋げて doctor の応答も得ているためである(10.2c 節)。排他を
 			// 要らない allow_targets と stream は応答に載るので、実際の値で埋まる。
 			name: "the lock that guards the runtime state is not taken in time",
-			dial: fakeDoctorSocket(t, liveReply(&agent.DoctorResponse{
-				AllowTargets:        &agent.DoctorAllowTargets{Env: allowtargets.Env},
-				Stream:              &agent.DoctorStream{Connected: true},
+			dial: fakeDoctorSocket(t, liveReply(&controlapi.DoctorResponse{
+				AllowTargets:        &controlapi.DoctorAllowTargets{Env: allowtargets.Env},
+				Stream:              &controlapi.DoctorStream{Connected: true},
 				RuntimeStateTimeout: 2 * time.Second,
 			})),
 			want: []wantCheck{
@@ -134,7 +134,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 		{
 			// 応答を組む処理が panic した実行。error だけがあり、他の 3 つの項目が無い。
 			name: "the agent panicked while collecting its state",
-			dial: fakeDoctorSocket(t, liveReply(&agent.DoctorResponse{Error: "the agent panicked while collecting its state: boom"})),
+			dial: fakeDoctorSocket(t, liveReply(&controlapi.DoctorResponse{Error: "the agent panicked while collecting its state: boom"})),
 			want: []wantCheck{
 				{agentCheckControl, statusUnknown, agentReasonDoctorFailed},
 				{agentCheckStreamConn, statusSkipped, agentReasonDoctorFailed},
@@ -149,8 +149,8 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// トンネルの構築が失敗している実行。総合判定を動かす検査が FAILED になり、終了コード
 			// 1 が出る(10.2c 節)。
 			name: "building the tunnel failed",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
-				st.Tunnel = agent.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel; building it failed and will be retried"}
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+				st.Tunnel = controlapi.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel; building it failed and will be retried"}
 				st.Rules, st.Budgets = nil, nil
 			}))),
 			want: []wantCheck{
@@ -169,7 +169,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// なくフロー予算の項目の有無で行う。ルールの並びは、中継が無い実行でも中継がルールを
 			// 持たない実行でも同じく空になるためである。
 			name: "the relay is up and holds no rules",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 				st.Rules = nil
 			}))),
 			want: []wantCheck{
@@ -190,7 +190,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// 中継が無い場合と区別する(仕様 5.1 節、設計文書 10.2c 節の relay.listeners の粒度)。
 			// SKIPPED は総合判定と終了コードを動かさない。
 			name: "the server has disabled this agent while the relay is up",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 				st.AgentDisabled = true
 				st.Rules = nil
 			}))),
@@ -209,7 +209,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// ならない。この判定の順序を入れ替えても両方とも SKIPPED になり状態だけでは区別が付かない
 			// ので、理由の符号で固定する。
 			name: "the server has disabled this agent while there is no relay",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 				st.AgentDisabled = true
 				st.Rules, st.Budgets = nil, nil
 			}))),
@@ -225,7 +225,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// ハンドシェイクがまだ成立していない実行。トンネルを作り直した直後に必ず通る状態で
 			// あり、UNKNOWN とする。総合判定は動かさない(10.2c 節)。
 			name: "no handshake has been established yet",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 				st.Tunnel.State, st.Tunnel.Reason = proto.StatusError, "handshake not established"
 				st.Tunnel.LastHandshake = time.Time{}
 			}))),
@@ -236,8 +236,8 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// リスナーの開放に失敗している実行。判定も所見もルール単位であり、FAILED になるのは
 			// ルール単位の状態が error の場合だけである(10.2c 節)。
 			name: "a listener cannot be opened",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
-				st.Rules = []agent.DoctorRule{
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+				st.Rules = []controlapi.DoctorRule{
 					{ID: "r_1", State: proto.StatusError, Proto: proto.TCP, Listeners: 2, Listening: 1,
 						BindErrors: 1, BindError: "tcp 0.0.0.0:2456: bind: address already in use"},
 					{ID: "r_2", State: proto.StatusOK, Proto: proto.UDP, Listeners: 1, Listening: 1},
@@ -254,8 +254,8 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// 待ち受けは開いていて宛先に届かないリスナーは、bind の失敗と別に数える。運用者の
 			// 次の行動が違う(10.2c 節)。
 			name: "a listener is open but its target cannot be reached",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
-				st.Rules = []agent.DoctorRule{{ID: "r_1", State: proto.StatusError, Proto: proto.TCP, Listeners: 1, Listening: 1,
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+				st.Rules = []controlapi.DoctorRule{{ID: "r_1", State: proto.StatusError, Proto: proto.TCP, Listeners: 1, Listening: 1,
 					TargetErrors: 1, TargetError: "tcp 0.0.0.0:2456: dial 192.168.1.20:2456: connection refused"}}
 			}))),
 			want:       []wantCheck{{agentCheckListeners, statusFailed, agentReasonListenerError}},
@@ -266,7 +266,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// トンネルはあるが誤りを報告し、転送に使える解決済みのエンドポイントが残っていない
 			// 実行。FAILED とする(10.2c 節)。
 			name: "the tunnel reports an error and holds no endpoint",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 				st.Tunnel.State, st.Tunnel.Reason, st.Tunnel.Endpoint = proto.StatusError, "resolve vps.example.net: no such host", ""
 			}))),
 			want:     []wantCheck{{agentCheckTunnelLocal, statusFailed, agentReasonTunnelErrorNoEndpoint}},
@@ -278,7 +278,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// UNKNOWN にはならない(10.2c 節)。順序を逆にすると、転送に使えるエンドポイントを
 			// 一度も持たないトンネルが UNKNOWN になり、前段の決定と食い違う。
 			name: "the tunnel never resolved an endpoint and has no handshake",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 				st.Tunnel.State, st.Tunnel.Reason = proto.StatusError, "resolve vps.example.net: no such host"
 				st.Tunnel.Endpoint, st.Tunnel.LastHandshake = "", time.Time{}
 			}))),
@@ -289,7 +289,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// 同じ誤りでも、解決済みのエンドポイントが残っていれば UNKNOWN とする。誤りの種類でも、
 			// どの呼び出しが失敗したかでも分けない(10.2c 節)。
 			name: "the tunnel reports an error but keeps its endpoint",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 				st.Tunnel.State, st.Tunnel.Reason = proto.StatusError, "resolve vps.example.net: no such host"
 			}))),
 			want:       []wantCheck{{agentCheckTunnelLocal, statusUnknown, agentReasonTunnelErrorEndpointKept}},
@@ -300,9 +300,9 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// カーネルモードのエージェントが wg 設定を拒んだ場合も同じ状態と符号だが、server が拒んだ設定で
 			// 動く間は転送が止まりうるので、エンドポイントが転送を続けられるとは言わない(設計文書 7b.1 節)。
 			name: "the agent refused the wg configuration",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 				st.Tunnel.State = proto.StatusError
-				st.Tunnel.Reason = agent.ReasonWGRefused + " of generation 5; the tunnel and rules stay as generation 4 left them: the server sent the tunnel address 10.201.0.2/24"
+				st.Tunnel.Reason = controlapi.ReasonWGRefused + " of generation 5; the tunnel and rules stay as generation 4 left them: the server sent the tunnel address 10.201.0.2/24"
 			}))),
 			want:       []wantCheck{{agentCheckTunnelLocal, statusUnknown, agentReasonTunnelErrorEndpointKept}},
 			wantExit:   0,
@@ -313,8 +313,8 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// トンネルを閉じた直後は正常な遷移でも生じる。FAILED にすると一過性の状態を故障として
 			// 扱うことになる(10.2c 節)。
 			name: "there is no tunnel after it was closed",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
-				st.Tunnel = agent.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel"}
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+				st.Tunnel = controlapi.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel"}
 				st.Rules, st.Budgets = nil, nil
 			}))),
 			want:     []wantCheck{{agentCheckTunnelLocal, statusUnknown, agentReasonNoTunnel}},
@@ -323,8 +323,8 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 		{
 			// トンネルが無く stream にまだ繋がっていない通常の起動直後の状態も UNKNOWN である。
 			name: "the full state has not arrived yet",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
-				st.Tunnel = agent.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel; full state not received"}
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+				st.Tunnel = controlapi.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel; full state not received"}
 				st.Rules, st.Budgets = nil, nil
 			}))),
 			want:     []wantCheck{{agentCheckTunnelLocal, statusUnknown, agentReasonFullStatePending}},
@@ -334,7 +334,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// 制御ストリームが切れている実行。総合判定は動かさない。受け取り済みのルールを転送し
 			// 続けている間も起こるためである(10.2c 節)。
 			name: "the control stream is down",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {}, func(s *agent.DoctorStream) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
 				s.Connected = false
 				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
 				s.DisconnectReason = "read tcp: connection reset by peer"
@@ -356,7 +356,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			// 分けて FAILED とし、エージェントのログと同じく新しい招待で登録し直すことを示す。
 			// 総合判定は動かさない。受け取り済みのルールの転送は、トンネルが保つ限り続く(10.2c 節)。
 			name: "the server certificate no longer matches the pin",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {}, func(s *agent.DoctorStream) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
 				s.Connected = false
 				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
 				s.DisconnectReason = "server certificate does not match the pinned hash: got sha256 0a1b2c3d"
@@ -370,7 +370,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 		{
 			// 旧い版のエージェントは pin_mismatch を送らない。記録した理由の文言でも見分ける。
 			name: "an older agent reports the pin mismatch in its reason only",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {}, func(s *agent.DoctorStream) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
 				s.Connected = false
 				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
 				s.DisconnectReason = "failed to WebSocket dial: failed to send handshake request: Get \"https://vps.example.net:8443/api/v1/stream\": server certificate does not match the pinned hash: got sha256 0a1b2c3d"
@@ -381,7 +381,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 		{
 			// 宛先の許可一覧を持たない稼働中のエージェントは、そのことを事実として示す。
 			name: "the running agent enforces no allowlist",
-			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {}, func(s *agent.DoctorStream) {}, func(a *agent.DoctorAllowTargets) {
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {}, func(a *controlapi.DoctorAllowTargets) {
 				a.Set, a.List = false, ""
 			}))),
 			want:       []wantCheck{{agentCheckAllowTargets, statusOK, ""}},
@@ -445,7 +445,7 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 		{
 			// 3 つのどれでもない応答も、この型が約束する形を満たしていない。
 			name: "the reply carries none of the three shapes",
-			dial: fakeDoctorSocket(t, liveReply(&agent.DoctorResponse{Stream: &agent.DoctorStream{}})),
+			dial: fakeDoctorSocket(t, liveReply(&controlapi.DoctorResponse{Stream: &controlapi.DoctorStream{}})),
 			want: []wantCheck{
 				{agentCheckControl, statusUnknown, agentReasonDoctorUnreadable},
 				{agentCheckAllowTargets, statusSkipped, agentReasonDoctorUnreadable},
@@ -543,9 +543,9 @@ func TestAgentDoctorControlIsOKWhenOnlyTheRuntimeStateIsMissing(t *testing.T) {
 	in := testAgentDoctorInput(t, t.TempDir())
 	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 	holdTheLock(t, in.CredentialsPath)
-	in.Dial = fakeDoctorSocket(t, liveReply(&agent.DoctorResponse{
-		AllowTargets:        &agent.DoctorAllowTargets{Set: true, List: "192.168.1.0/24", Env: allowtargets.Env},
-		Stream:              &agent.DoctorStream{Connected: true},
+	in.Dial = fakeDoctorSocket(t, liveReply(&controlapi.DoctorResponse{
+		AllowTargets:        &controlapi.DoctorAllowTargets{Set: true, List: "192.168.1.0/24", Env: allowtargets.Env},
+		Stream:              &controlapi.DoctorStream{Connected: true},
 		RuntimeStateTimeout: 2 * time.Second,
 	}))
 	rep := agentDiagnose(in)
@@ -605,8 +605,8 @@ func TestAgentDoctorDoesNotTruncateTheReplyAgain(t *testing.T) {
 	in := testAgentDoctorInput(t, t.TempDir())
 	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 	holdTheLock(t, in.CredentialsPath)
-	in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
-		st.Rules = []agent.DoctorRule{{ID: "r_1", State: proto.StatusError, Proto: proto.TCP, Listeners: 1,
+	in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+		st.Rules = []controlapi.DoctorRule{{ID: "r_1", State: proto.StatusError, Proto: proto.TCP, Listeners: 1,
 			BindErrors: 1, BindError: long}}
 	})))
 	c, _ := findAgentCheck(agentDiagnose(in), agentCheckListeners)
@@ -625,7 +625,7 @@ func TestAgentDoctorAgainstAnUnreadableSocket(t *testing.T) {
 	in := testAgentDoctorInput(t, dir)
 	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 	holdTheLock(t, in.CredentialsPath)
-	sock := agent.ControlPath(in.CredentialsPath)
+	sock := controlapi.ControlPath(in.CredentialsPath)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Skipf("this host cannot open a unix socket at %s: %v", sock, err)
@@ -652,7 +652,7 @@ func TestAgentDoctorAgainstARealSocket(t *testing.T) {
 	in := testAgentDoctorInput(t, dir)
 	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 	holdTheLock(t, in.CredentialsPath)
-	sock := agent.ControlPath(in.CredentialsPath)
+	sock := controlapi.ControlPath(in.CredentialsPath)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Skipf("this host cannot open a unix socket at %s: %v", sock, err)
@@ -872,7 +872,7 @@ func fakeDoctorSocket(t *testing.T, reply string) func(string) (net.Conn, error)
 			if err != nil {
 				return
 			}
-			if strings.TrimSpace(line) != agent.DoctorCommand {
+			if strings.TrimSpace(line) != controlapi.DoctorCommand {
 				io.WriteString(srv, "error: unknown command\n")
 				return
 			}
@@ -883,7 +883,7 @@ func fakeDoctorSocket(t *testing.T, reply string) func(string) (net.Conn, error)
 }
 
 // liveReply は応答を制御ソケットが流す 1 行に写す。
-func liveReply(resp *agent.DoctorResponse) string {
+func liveReply(resp *controlapi.DoctorResponse) string {
 	b, err := json.Marshal(resp)
 	if err != nil {
 		panic(err)
@@ -895,16 +895,16 @@ func liveReply(resp *agent.DoctorResponse) string {
 var testLiveNow = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 
 // healthyLiveResponse は、何も壊れていない稼働中のエージェントの応答である。
-func healthyLiveResponse() *agent.DoctorResponse {
-	return runtimeResponse(func(*agent.DoctorRuntimeState) {})
+func healthyLiveResponse() *controlapi.DoctorResponse {
+	return runtimeResponse(func(*controlapi.DoctorRuntimeState) {})
 }
 
 // runtimeResponse は正常な応答を組み、渡された手で書き換える。場面ごとに違うのは 1 か所か 2 か所
 // なので、その差だけを場面の側に書く。
-func runtimeResponse(edit func(*agent.DoctorRuntimeState), more ...any) *agent.DoctorResponse {
-	st := &agent.DoctorRuntimeState{
+func runtimeResponse(edit func(*controlapi.DoctorRuntimeState), more ...any) *controlapi.DoctorResponse {
+	st := &controlapi.DoctorRuntimeState{
 		Generation: 12,
-		Tunnel: agent.DoctorTunnel{
+		Tunnel: controlapi.DoctorTunnel{
 			Present:       true,
 			State:         proto.StatusOK,
 			Endpoint:      "203.0.113.10:51820",
@@ -912,37 +912,37 @@ func runtimeResponse(edit func(*agent.DoctorRuntimeState), more ...any) *agent.D
 			RxBytes:       1024,
 			TxBytes:       2048,
 			StartedAt:     testLiveNow.Add(-time.Hour),
-			Watchdog:      agent.DoctorWatchdog{RebuildInterval: 5 * time.Minute},
-			SocketBuffers: &agent.DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 14680064, Send: 14680064, Required: 14680064},
-			UDPAccounting: &agent.DoctorUDPAccounting{},
+			Watchdog:      controlapi.DoctorWatchdog{RebuildInterval: 5 * time.Minute},
+			SocketBuffers: &controlapi.DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 14680064, Send: 14680064, Required: 14680064},
+			UDPAccounting: &controlapi.DoctorUDPAccounting{},
 		},
-		Rules: []agent.DoctorRule{
+		Rules: []controlapi.DoctorRule{
 			{ID: "r_1", State: proto.StatusOK, Proto: proto.TCP, Listeners: 1, Listening: 1, Sessions: 2, Flows: 1},
 		},
-		Budgets: []agent.DoctorBudget{
+		Budgets: []controlapi.DoctorBudget{
 			{Proto: proto.TCP, Total: 1024, InUse: 1, Rules: 1},
 			{Proto: proto.UDP, Total: 4096, Rules: 1},
 		},
 		RefusalsSince: testLiveNow.Add(-time.Hour),
 	}
 	edit(st)
-	stream := &agent.DoctorStream{
+	stream := &controlapi.DoctorStream{
 		Connected:  true,
 		LastPingAt: testLiveNow.Add(-20 * time.Second),
 		LastPongAt: testLiveNow.Add(-20 * time.Second),
 	}
-	allow := &agent.DoctorAllowTargets{Set: true, List: "192.168.1.0/24", Env: allowtargets.Env}
+	allow := &controlapi.DoctorAllowTargets{Set: true, List: "192.168.1.0/24", Env: allowtargets.Env}
 	for _, m := range more {
 		switch f := m.(type) {
-		case func(*agent.DoctorStream):
+		case func(*controlapi.DoctorStream):
 			f(stream)
-		case func(*agent.DoctorAllowTargets):
+		case func(*controlapi.DoctorAllowTargets):
 			f(allow)
 		default:
 			panic(fmt.Sprintf("unknown editor %T", m))
 		}
 	}
-	return &agent.DoctorResponse{AllowTargets: allow, Stream: stream, RuntimeState: st}
+	return &controlapi.DoctorResponse{AllowTargets: allow, Stream: stream, RuntimeState: st}
 }
 
 // 拒否の累計は、今のトンネルを作った時刻を起点として示す(10.2c 節)。
@@ -950,8 +950,8 @@ func TestAgentDoctorShowsRefusalsAgainstTheirStart(t *testing.T) {
 	in := testAgentDoctorInput(t, t.TempDir())
 	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 	holdTheLock(t, in.CredentialsPath)
-	in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
-		st.Budgets[0].Refusals = []agent.DoctorRefusal{{RuleID: "r_1", Reason: resource.ReasonBudget, Count: 7}}
+	in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+		st.Budgets[0].Refusals = []controlapi.DoctorRefusal{{RuleID: "r_1", Reason: resource.ReasonBudget, Count: 7}}
 	})))
 	c, _ := findAgentCheck(agentDiagnose(in), agentCheckRefusals)
 	if c.Status != statusUnknown || c.Reason != agentReasonNoThreshold {
@@ -970,7 +970,7 @@ func TestAgentDoctorShowsTheMinimum(t *testing.T) {
 	in := testAgentDoctorInput(t, t.TempDir())
 	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 	holdTheLock(t, in.CredentialsPath)
-	in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *agent.DoctorRuntimeState) {
+	in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 		st.Budgets[0].Rules, st.Budgets[0].RuleCap, st.Budgets[0].Reserve = 2, 512, 510
 	})))
 	checks := agentDiagnose(in)
@@ -988,7 +988,7 @@ func TestAgentDoctorShowsTheMinimum(t *testing.T) {
 
 // 読み取りの入口の振り分けそのものを、誤りから直接確かめる。
 func TestDialFailureKind(t *testing.T) {
-	long := "/" + strings.Repeat("a", agent.ControlPathLimit)
+	long := "/" + strings.Repeat("a", controlapi.ControlPathLimit)
 	for _, tc := range []struct {
 		name string
 		path string
@@ -1041,10 +1041,10 @@ func TestAgentDoctorNamesALongSocketPath(t *testing.T) {
 // 期待も一緒に動き、変えたことが誰にも見えない。
 func TestAgentDoctorCapsTheRuleLines(t *testing.T) {
 	const rules = 6
-	in := testRunningAgent(t, runtimeResponse(func(st *agent.DoctorRuntimeState) {
+	in := testRunningAgent(t, runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 		st.Rules = nil
 		for i := 0; i < rules; i++ {
-			st.Rules = append(st.Rules, agent.DoctorRule{ID: fmt.Sprintf("r_%d", i), State: proto.StatusOK,
+			st.Rules = append(st.Rules, controlapi.DoctorRule{ID: fmt.Sprintf("r_%d", i), State: proto.StatusOK,
 				Proto: proto.TCP, Listeners: 1, Listening: 1})
 		}
 	}))
@@ -1074,11 +1074,11 @@ func TestAgentDoctorCapsTheRuleLines(t *testing.T) {
 // 組の数にも上限が無い。上限の値を数そのもので書く理由は、ルールの並びの試験と同じである。
 func TestAgentDoctorCapsTheRefusalLines(t *testing.T) {
 	const groups = 8
-	in := testRunningAgent(t, runtimeResponse(func(st *agent.DoctorRuntimeState) {
+	in := testRunningAgent(t, runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 		st.Budgets[0].Refusals = nil
 		for i := 0; i < groups; i++ {
 			st.Budgets[0].Refusals = append(st.Budgets[0].Refusals,
-				agent.DoctorRefusal{RuleID: fmt.Sprintf("r_%d", i), Reason: resource.ReasonBudget, Count: 1})
+				controlapi.DoctorRefusal{RuleID: fmt.Sprintf("r_%d", i), Reason: resource.ReasonBudget, Count: 1})
 		}
 	}))
 	c, _ := findAgentCheck(agentDiagnose(in), agentCheckRefusals)
@@ -1101,11 +1101,11 @@ func TestAgentDoctorCapsTheRefusalLines(t *testing.T) {
 // 応答を読み違えるので、この試験が落ちる。
 func TestAgentDoctorReadsTheHandshakePendingReasonAReleasedAgentSends(t *testing.T) {
 	const sent = "handshake not established"
-	if agent.ReasonHandshakePending != sent {
+	if controlapi.ReasonHandshakePending != sent {
 		t.Fatalf("the agent now sends %q for a pending handshake; agent doctor reads %q, so a CLI newer than the running process misreads it",
-			agent.ReasonHandshakePending, sent)
+			controlapi.ReasonHandshakePending, sent)
 	}
-	in := testRunningAgent(t, runtimeResponse(func(st *agent.DoctorRuntimeState) {
+	in := testRunningAgent(t, runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 		st.Tunnel.State, st.Tunnel.Reason = proto.StatusError, sent
 		st.Tunnel.LastHandshake = time.Time{}
 	}))
@@ -1117,7 +1117,7 @@ func TestAgentDoctorReadsTheHandshakePendingReasonAReleasedAgentSends(t *testing
 }
 
 // testRunningAgent は、稼働中のエージェントに対する実行の入力を組む。
-func testRunningAgent(t *testing.T, resp *agent.DoctorResponse) agentDoctorInput {
+func testRunningAgent(t *testing.T, resp *controlapi.DoctorResponse) agentDoctorInput {
 	t.Helper()
 	in := testAgentDoctorInput(t, t.TempDir())
 	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())

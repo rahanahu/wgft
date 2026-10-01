@@ -15,6 +15,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
@@ -115,7 +116,7 @@ func TestReadKernelHealthyInterface(t *testing.T) {
 	k := healthyKernel(t, f)
 	withKernelDoctor(t, k)
 	got := ReadKernel(f, "wgft0").Interface
-	if got.Ownership != KernelOwnershipCurrent || !got.PeerOK || len(got.Differs) != 0 || !got.Declared ||
+	if got.Ownership != controlapi.KernelOwnershipCurrent || !got.PeerOK || len(got.Differs) != 0 || !got.Declared ||
 		got.RouteInterface != "wgft0" || got.ServerAddress != "10.200.0.1" || got.NeedsNetAdmin {
 		t.Errorf("interface = %+v", got)
 	}
@@ -131,15 +132,15 @@ func TestReadKernelInterfaceDifferences(t *testing.T) {
 		peerOK bool
 		differ []string
 	}{
-		{"previous key", func(s *wg.AgentState) { s.Ownership = wg.OwnedByPreviousKey }, KernelOwnershipPrevious, true, []string{"the key"}},
-		{"foreign key", func(s *wg.AgentState) { s.Ownership = wg.ForeignKey }, KernelOwnershipForeign, false, nil},
-		{"keyless", func(s *wg.AgentState) { s.Ownership, s.PublicKey = wg.ForeignKey, wgtypes.Key{} }, KernelOwnershipKeyless, false, nil},
-		{"no peer", func(s *wg.AgentState) { s.Peers = nil }, KernelOwnershipCurrent, false, []string{"the peer"}},
+		{"previous key", func(s *wg.AgentState) { s.Ownership = wg.OwnedByPreviousKey }, controlapi.KernelOwnershipPrevious, true, []string{"the key"}},
+		{"foreign key", func(s *wg.AgentState) { s.Ownership = wg.ForeignKey }, controlapi.KernelOwnershipForeign, false, nil},
+		{"keyless", func(s *wg.AgentState) { s.Ownership, s.PublicKey = wg.ForeignKey, wgtypes.Key{} }, controlapi.KernelOwnershipKeyless, false, nil},
+		{"no peer", func(s *wg.AgentState) { s.Peers = nil }, controlapi.KernelOwnershipCurrent, false, []string{"the peer"}},
 		{"peer without the server address", func(s *wg.AgentState) {
 			s.Peers[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("10.200.0.9/32")}
-		}, KernelOwnershipCurrent, false, []string{"the peer"}},
-		{"keepalive", func(s *wg.AgentState) { s.Peers[0].Keepalive = 0 }, KernelOwnershipCurrent, true, []string{"the peer"}},
-		{"mtu", func(s *wg.AgentState) { s.MTU = 1280 }, KernelOwnershipCurrent, true, []string{"the MTU"}},
+		}, controlapi.KernelOwnershipCurrent, false, []string{"the peer"}},
+		{"keepalive", func(s *wg.AgentState) { s.Peers[0].Keepalive = 0 }, controlapi.KernelOwnershipCurrent, true, []string{"the peer"}},
+		{"mtu", func(s *wg.AgentState) { s.MTU = 1280 }, controlapi.KernelOwnershipCurrent, true, []string{"the MTU"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			k := healthyKernel(t, f)
@@ -178,11 +179,11 @@ func TestReadKernelLinkLevelFacts(t *testing.T) {
 	f := kernelDoctorCreds(t)
 	k := &fakeKernelDoctor{eperm: true}
 	withKernelDoctor(t, k)
-	if got := ReadKernel(f, "wgft0").Interface; got.Exists || got.Ownership != KernelOwnershipAbsent || got.NeedsNetAdmin {
+	if got := ReadKernel(f, "wgft0").Interface; got.Exists || got.Ownership != controlapi.KernelOwnershipAbsent || got.NeedsNetAdmin {
 		t.Errorf("absent = %+v", got)
 	}
 	k.exists, k.kind, k.up = true, "dummy", true
-	if got := ReadKernel(f, "wgft0").Interface; got.Ownership != KernelOwnershipNotWireGuard || got.NeedsNetAdmin || got.Kind != "dummy" {
+	if got := ReadKernel(f, "wgft0").Interface; got.Ownership != controlapi.KernelOwnershipNotWireGuard || got.NeedsNetAdmin || got.Kind != "dummy" {
 		t.Errorf("not wireguard = %+v", got)
 	}
 }
@@ -213,15 +214,15 @@ func TestReadKernelTableAgainstTheRecord(t *testing.T) {
 	}
 	withKernelDoctor(t, k)
 	got := ReadKernel(f, "wgft0").Table
-	if got.Source != KernelTableFromRecord || got.Generation != 9 || !reflect.DeepEqual(k.wantSeen, pub) {
+	if got.Source != controlapi.KernelTableFromRecord || got.Generation != 9 || !reflect.DeepEqual(k.wantSeen, pub) {
 		t.Errorf("compared with %+v from %q gen %d; want the record", k.wantSeen, got.Source, got.Generation)
 	}
 	if got.MissingCount != 2 || !strings.Contains(strings.Join(got.Missing, "|"), "DNAT tcp 101 of rule r1 to 192.168.1.2:101") {
 		t.Errorf("missing = %d %v", got.MissingCount, got.Missing)
 	}
 	if got.GuardMissingCount != 3 || got.GuardMissing[0] != "filter_pre: drop the rest from wgft0" ||
-		!reflect.DeepEqual(got.GuardEffects, []string{KernelEffectOtherDNAT, KernelEffectMSS}) ||
-		!reflect.DeepEqual(got.GuardClosed, []string{KernelClosedHostByInput, KernelClosedLANByForward}) {
+		!reflect.DeepEqual(got.GuardEffects, []string{controlapi.KernelEffectOtherDNAT, controlapi.KernelEffectMSS}) ||
+		!reflect.DeepEqual(got.GuardClosed, []string{controlapi.KernelClosedHostByInput, controlapi.KernelClosedLANByForward}) {
 		t.Errorf("guard missing = %d %v, effects %v, closed %v", got.GuardMissingCount, got.GuardMissing, got.GuardEffects, got.GuardClosed)
 	}
 	if got.MovedCount != 1 || got.Moved[0] != "forward: drop the rest from wgft0, now at row 1" {
@@ -230,7 +231,7 @@ func TestReadKernelTableAgainstTheRecord(t *testing.T) {
 	if got.UnexpectedCount != 1 {
 		t.Errorf("unexpected = %d %v, want the added row once", got.UnexpectedCount, got.Unexpected)
 	}
-	want := []DoctorRule{
+	want := []controlapi.DoctorRule{
 		{ID: "r1", State: proto.StatusOK, Proto: proto.TCP, Ports: 2, DNATPorts: 2},
 		{ID: "r2", State: proto.StatusError, Reason: pub.Rules[1].Reason, Proto: proto.TCP, Ports: 1},
 	}
@@ -255,13 +256,13 @@ func TestReadKernelTableFromTheDeclaration(t *testing.T) {
 	}}
 	withKernelDoctor(t, k)
 	got := ReadKernel(f, "wgft0").Table
-	if got.Source != KernelTableFromDeclaration || got.Generation != 5 {
+	if got.Source != controlapi.KernelTableFromDeclaration || got.Generation != 5 {
 		t.Fatalf("source %q gen %d", got.Source, got.Generation)
 	}
 	if got.MissingCount != 1 || !strings.Contains(got.Missing[0], "rule lit") || !strings.Contains(got.Missing[0], "1 of 2 ports") {
 		t.Errorf("missing = %v", got.Missing)
 	}
-	byID := map[string]DoctorRule{}
+	byID := map[string]controlapi.DoctorRule{}
 	for _, r := range got.Rules {
 		byID[r.ID] = r
 	}
@@ -350,7 +351,7 @@ func TestDoctorCarriesTheKernelReading(t *testing.T) {
 	if st == nil || st.Kernel == nil {
 		t.Fatalf("runtime state = %+v, want the kernel reading", st)
 	}
-	if st.Kernel.Table.Source != KernelTableFromRecord || st.Kernel.Table.Generation != 3 || st.Kernel.Interface.Name != "wgft0" {
+	if st.Kernel.Table.Source != controlapi.KernelTableFromRecord || st.Kernel.Table.Generation != 3 || st.Kernel.Interface.Name != "wgft0" {
 		t.Errorf("kernel = %+v", st.Kernel)
 	}
 	if st.PublishError == "" || st.CheckError != "read table inet wgft_agent: boom" {
@@ -458,19 +459,19 @@ func TestGuardEffectsFollowTheLayers(t *testing.T) {
 		missing         []string
 		effects, closed []string
 	}{
-		{"input drop only", []string{nft.GuardInputDrop}, nil, []string{KernelClosedHostByFilterPre}},
-		{"filter_pre drop only", []string{nft.GuardPreDrop}, []string{KernelEffectOtherDNAT},
-			[]string{KernelClosedHostByInput, KernelClosedLANByForward}},
-		{"filter_pre and input drops", []string{nft.GuardPreDrop, nft.GuardInputDrop}, []string{KernelEffectHost, KernelEffectOtherDNAT},
-			[]string{KernelClosedLANByForward}},
-		{"forward drop from wgft0 only", []string{nft.GuardForwardFromDrop}, nil, []string{KernelClosedLANByFilterPre}},
-		{"filter_pre and forward drops", []string{nft.GuardPreDrop, nft.GuardForwardFromDrop}, []string{KernelEffectOtherDNAT, KernelEffectLAN},
-			[]string{KernelClosedHostByInput}},
-		{"hairpin drop", []string{nft.GuardHairpinDrop}, []string{KernelEffectHairpin}, nil},
-		{"drop to wgft0", []string{nft.GuardForwardToDrop}, []string{KernelEffectToTunnel}, nil},
-		{"MSS rows", []string{nft.GuardMSS}, []string{KernelEffectMSS}, nil},
+		{"input drop only", []string{nft.GuardInputDrop}, nil, []string{controlapi.KernelClosedHostByFilterPre}},
+		{"filter_pre drop only", []string{nft.GuardPreDrop}, []string{controlapi.KernelEffectOtherDNAT},
+			[]string{controlapi.KernelClosedHostByInput, controlapi.KernelClosedLANByForward}},
+		{"filter_pre and input drops", []string{nft.GuardPreDrop, nft.GuardInputDrop}, []string{controlapi.KernelEffectHost, controlapi.KernelEffectOtherDNAT},
+			[]string{controlapi.KernelClosedLANByForward}},
+		{"forward drop from wgft0 only", []string{nft.GuardForwardFromDrop}, nil, []string{controlapi.KernelClosedLANByFilterPre}},
+		{"filter_pre and forward drops", []string{nft.GuardPreDrop, nft.GuardForwardFromDrop}, []string{controlapi.KernelEffectOtherDNAT, controlapi.KernelEffectLAN},
+			[]string{controlapi.KernelClosedHostByInput}},
+		{"hairpin drop", []string{nft.GuardHairpinDrop}, []string{controlapi.KernelEffectHairpin}, nil},
+		{"drop to wgft0", []string{nft.GuardForwardToDrop}, []string{controlapi.KernelEffectToTunnel}, nil},
+		{"MSS rows", []string{nft.GuardMSS}, []string{controlapi.KernelEffectMSS}, nil},
 		{"every drop", []string{nft.GuardPreDrop, nft.GuardInputDrop, nft.GuardForwardFromDrop, nft.GuardForwardToDrop, nft.GuardHairpinDrop},
-			[]string{KernelEffectHost, KernelEffectOtherDNAT, KernelEffectLAN, KernelEffectHairpin, KernelEffectToTunnel}, nil},
+			[]string{controlapi.KernelEffectHost, controlapi.KernelEffectOtherDNAT, controlapi.KernelEffectLAN, controlapi.KernelEffectHairpin, controlapi.KernelEffectToTunnel}, nil},
 		{"an established accept only", nil, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

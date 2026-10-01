@@ -291,3 +291,34 @@ func TestAgentSubpackagesDoNotImportAgent(t *testing.T) {
 		}
 	}
 }
+
+// TestWireShapesStayLeaf checks design.md 7a.7 節's rule for the two packages that hold a control
+// plane's wire shapes: internal/vpsd/adminapi (the admin API's read model) and
+// internal/agent/controlapi (the agent's control socket). Inside the module they import only
+// proto, so a reader of the shapes (cmd/wgft, internal/vpsd/doctor) never pulls in the daemon or
+// the agent that serves them. controlapi may also import internal/resource, whose Reason type the
+// flow-budget refusals carry; TestPureLayersStayPure holds internal/resource to importing nothing
+// from the module, so the leaf stays a leaf.
+func TestWireShapesStayLeaf(t *testing.T) {
+	root := moduleRoot(t)
+	allowed := map[string][]string{
+		module + "/internal/vpsd/adminapi":    {module + "/proto"},
+		module + "/internal/agent/controlapi": {module + "/proto", module + "/internal/resource"},
+	}
+	for pkg, ok := range allowed {
+		if _, err := os.Stat(filepath.Join(root, strings.TrimPrefix(pkg, module))); err != nil {
+			t.Fatalf("%s: %v; did it move?", pkg, err)
+		}
+		for _, dep := range deps(t, root, pkg) {
+			found := false
+			for _, a := range ok {
+				if dep == a {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s depends on %s; design.md 7a.7 節 allows only %v from the module", pkg, dep, ok)
+			}
+		}
+	}
+}

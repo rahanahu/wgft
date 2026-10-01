@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/resource"
@@ -245,7 +246,7 @@ type agentDoctorInput struct {
 	WGInterface string
 	// ReadKernel は、停止中のカーネルモードのエージェントのカーネルの状態を直接読む。既定は
 	// internal/agent の ReadKernel で、稼働中のエージェントが自分を読むのと同じ関数である。
-	ReadKernel func(f *credentials.Credentials, iface string) *agent.DoctorKernel
+	ReadKernel func(f *credentials.Credentials, iface string) *controlapi.DoctorKernel
 }
 
 // resolveTimeout は名前解決を待つ長さである。診断はトラブルの最中に繰り返し使うので、応答しない

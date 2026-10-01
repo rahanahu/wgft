@@ -17,6 +17,7 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
@@ -93,7 +94,7 @@ func defaultKernelDoctorOps() kernelDoctorOps {
 var doctorKernelOps = defaultKernelDoctorOps()
 
 // readKernel はカーネルモードの dataplane を読む(設計文書 10.2c 節)。判定はしない。
-func readKernel(in kernelReadInput) *DoctorKernel {
+func readKernel(in kernelReadInput) *controlapi.DoctorKernel {
 	ops := doctorKernelOps
 	var cur wgtypes.Key
 	if in.creds.WGPrivateKey != "" {
@@ -101,7 +102,7 @@ func readKernel(in kernelReadInput) *DoctorKernel {
 	}
 	prev, _ := in.creds.PreviousKey()
 	st := in.creds.LastState
-	return &DoctorKernel{
+	return &controlapi.DoctorKernel{
 		Interface:  readKernelInterface(ops, in.iface, cur, prev, st),
 		Table:      readKernelTable(ops, in.iface, in.pub, st),
 		Forwarding: readKernelForwarding(ops, in.iface),
@@ -137,8 +138,8 @@ func declaredAgentLink(iface string, cur, prev wgtypes.Key, w proto.WGConfig) (w
 	}, true
 }
 
-func readKernelInterface(ops kernelDoctorOps, iface string, cur, prev wgtypes.Key, st *proto.State) DoctorKernelInterface {
-	ki := DoctorKernelInterface{Name: iface}
+func readKernelInterface(ops kernelDoctorOps, iface string, cur, prev wgtypes.Key, st *proto.State) controlapi.DoctorKernelInterface {
+	ki := controlapi.DoctorKernelInterface{Name: iface}
 	var cfg wg.AgentConfig
 	if st != nil {
 		cfg, ki.Declared = declaredAgentLink(iface, cur, prev, st.WG)
@@ -160,10 +161,10 @@ func readKernelInterface(ops kernelDoctorOps, iface string, cur, prev wgtypes.Ke
 	ki.Exists, ki.Kind, ki.Up = exists, kind, up
 	switch {
 	case !exists:
-		ki.Ownership = KernelOwnershipAbsent
+		ki.Ownership = controlapi.KernelOwnershipAbsent
 		return ki
 	case kind != "wireguard":
-		ki.Ownership = KernelOwnershipNotWireGuard
+		ki.Ownership = controlapi.KernelOwnershipNotWireGuard
 		return ki
 	}
 	s, err := ops.inspectLink(iface, cur, prev)
@@ -181,7 +182,7 @@ func readKernelInterface(ops kernelDoctorOps, iface string, cur, prev wgtypes.Ke
 		ki.Addresses = append(ki.Addresses, a.String())
 	}
 	for _, p := range s.Peers {
-		dp := DoctorKernelPeer{PublicKey: p.PublicKey.String(), Keepalive: p.Keepalive,
+		dp := controlapi.DoctorKernelPeer{PublicKey: p.PublicKey.String(), Keepalive: p.Keepalive,
 			LastHandshake: p.LastHandshake, RxBytes: p.ReceiveBytes, TxBytes: p.TransmitBytes}
 		if p.Endpoint.IsValid() {
 			dp.Endpoint = p.Endpoint.String()
@@ -201,17 +202,17 @@ func readKernelInterface(ops kernelDoctorOps, iface string, cur, prev wgtypes.Ke
 func ownershipWord(s wg.AgentState) string {
 	switch {
 	case !s.Exists:
-		return KernelOwnershipAbsent
+		return controlapi.KernelOwnershipAbsent
 	case s.Ownership == wg.NotWireGuard:
-		return KernelOwnershipNotWireGuard
+		return controlapi.KernelOwnershipNotWireGuard
 	case s.Ownership == wg.OwnedByCurrentKey:
-		return KernelOwnershipCurrent
+		return controlapi.KernelOwnershipCurrent
 	case s.Ownership == wg.OwnedByPreviousKey:
-		return KernelOwnershipPrevious
+		return controlapi.KernelOwnershipPrevious
 	case s.PublicKey == (wgtypes.Key{}):
-		return KernelOwnershipKeyless
+		return controlapi.KernelOwnershipKeyless
 	}
-	return KernelOwnershipForeign
+	return controlapi.KernelOwnershipForeign
 }
 
 // serverPeerPresent は、server の公開鍵を持ち、server のトンネルアドレスを AllowedIPs に含むピアが
@@ -230,16 +231,16 @@ func serverPeerPresent(s wg.AgentState, cfg wg.AgentConfig) bool {
 	return false
 }
 
-func readKernelTable(ops kernelDoctorOps, iface string, raw json.RawMessage, st *proto.State) DoctorKernelTable {
-	var t DoctorKernelTable
+func readKernelTable(ops kernelDoctorOps, iface string, raw json.RawMessage, st *proto.State) controlapi.DoctorKernelTable {
+	var t controlapi.DoctorKernelTable
 	var want nft.AgentPublication
 	switch {
 	case len(raw) > 0 && json.Unmarshal(raw, &want) == nil:
-		t.Source, t.Generation = KernelTableFromRecord, want.Generation
+		t.Source, t.Generation = controlapi.KernelTableFromRecord, want.Generation
 	case st != nil:
 		// 記録が無い。宣言から、名前の解決と許可一覧を当てはめずに組む(10.2c 節の「記録が無い場合」)
 		want = nft.PlanAgent(nft.AgentInput{Generation: st.Generation, Rules: st.Rules}, nft.AgentConfig{WGInterface: iface})
-		t.Source, t.Generation = KernelTableFromDeclaration, st.Generation
+		t.Source, t.Generation = controlapi.KernelTableFromDeclaration, st.Generation
 	}
 	ins, present, err := ops.inspectTable(want, iface)
 	if err != nil {
@@ -253,7 +254,7 @@ func readKernelTable(ops kernelDoctorOps, iface string, raw json.RawMessage, st 
 		return t
 	}
 	var missing, unexpected []string
-	if t.Source == KernelTableFromRecord {
+	if t.Source == controlapi.KernelTableFromRecord {
 		var guard []string
 		var names []string
 		missing, guard, names = splitMissing(ins.MissingItems, want, ops.localAddrs)
@@ -314,31 +315,31 @@ func guardEffects(names []string) (effects, closed []string) {
 	pre, in, from := gone(nft.GuardPreDrop), gone(nft.GuardInputDrop), gone(nft.GuardForwardFromDrop)
 	switch {
 	case pre && in:
-		effects = append(effects, KernelEffectHost)
+		effects = append(effects, controlapi.KernelEffectHost)
 	case pre:
-		closed = append(closed, KernelClosedHostByInput)
+		closed = append(closed, controlapi.KernelClosedHostByInput)
 	case in:
-		closed = append(closed, KernelClosedHostByFilterPre)
+		closed = append(closed, controlapi.KernelClosedHostByFilterPre)
 	}
 	if pre {
-		effects = append(effects, KernelEffectOtherDNAT)
+		effects = append(effects, controlapi.KernelEffectOtherDNAT)
 	}
 	switch {
 	case pre && from:
-		effects = append(effects, KernelEffectLAN)
+		effects = append(effects, controlapi.KernelEffectLAN)
 	case pre:
-		closed = append(closed, KernelClosedLANByForward)
+		closed = append(closed, controlapi.KernelClosedLANByForward)
 	case from:
-		closed = append(closed, KernelClosedLANByFilterPre)
+		closed = append(closed, controlapi.KernelClosedLANByFilterPre)
 	}
 	if gone(nft.GuardHairpinDrop) {
-		effects = append(effects, KernelEffectHairpin)
+		effects = append(effects, controlapi.KernelEffectHairpin)
 	}
 	if gone(nft.GuardForwardToDrop) {
-		effects = append(effects, KernelEffectToTunnel)
+		effects = append(effects, controlapi.KernelEffectToTunnel)
 	}
 	if gone(nft.GuardMSS) {
-		effects = append(effects, KernelEffectMSS)
+		effects = append(effects, controlapi.KernelEffectMSS)
 	}
 	return effects, closed
 }
@@ -360,10 +361,10 @@ func unexpectedItems(ins nft.AgentInspection) []string {
 
 // recordRules は記録をルールごとの状態にする。covered は、宣言から導いた場合に、実際の表で DNAT を
 // 置いていたポートの数である。
-func recordRules(pub nft.AgentPublication, covered map[string]int) []DoctorRule {
-	out := make([]DoctorRule, 0, len(pub.Rules))
+func recordRules(pub nft.AgentPublication, covered map[string]int) []controlapi.DoctorRule {
+	out := make([]controlapi.DoctorRule, 0, len(pub.Rules))
 	for _, r := range pub.Rules {
-		dr := DoctorRule{ID: r.RuleID, State: proto.StatusOK, Proto: r.Proto, Ports: r.ListenPort.Len()}
+		dr := controlapi.DoctorRule{ID: r.RuleID, State: proto.StatusOK, Proto: r.Proto, Ports: r.ListenPort.Len()}
 		if r.Reason != "" {
 			dr.State, dr.Reason = proto.StatusError, clipText(r.Reason)
 		}
@@ -382,7 +383,7 @@ func recordRules(pub nft.AgentPublication, covered map[string]int) []DoctorRule 
 // ルールは、そのポートの DNAT がその宛先を指すことを、ホスト名の宛先のルールは、そのポートに DNAT が
 // あることだけを確かめる。ループバックの宛先のように宣言から公開できないと分かるルールは、理由を持つ。
 // 許可一覧は当てはめない。
-func declarationDiff(want nft.AgentPublication, st *proto.State, got []nft.AgentDNAT) (missing []string, rules []DoctorRule) {
+func declarationDiff(want nft.AgentPublication, st *proto.State, got []nft.AgentDNAT) (missing []string, rules []controlapi.DoctorRule) {
 	type key struct {
 		rule  string
 		proto proto.Proto
@@ -472,8 +473,8 @@ func plural(n int) string {
 	return "s"
 }
 
-func readKernelForwarding(ops kernelDoctorOps, iface string) DoctorKernelForwarding {
-	var f DoctorKernelForwarding
+func readKernelForwarding(ops kernelDoctorOps, iface string) controlapi.DoctorKernelForwarding {
+	var f controlapi.DoctorKernelForwarding
 	if v, err := ops.readSysctl("ip_forward"); err != nil {
 		f.IPForwardError = err.Error()
 	} else {

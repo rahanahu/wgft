@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -231,7 +232,7 @@ func TestKernelRefusesAMalformedConfigWhileUp(t *testing.T) {
 			if !d.built() || len(k.ensured) != ensured || rt.gen != 1 {
 				t.Errorf("built=%v convergences=%d gen=%d", d.built(), len(k.ensured)-ensured, rt.gen)
 			}
-			if hb := rt.heartbeat(); !strings.Contains(hb.Tunnel.Reason, ReasonWGRefused) {
+			if hb := rt.heartbeat(); !strings.Contains(hb.Tunnel.Reason, controlapi.ReasonWGRefused) {
 				t.Errorf("heartbeat = %+v", hb.Tunnel)
 			}
 		})

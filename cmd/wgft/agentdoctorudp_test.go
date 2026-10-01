@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -14,7 +14,7 @@ import (
 func TestAgentDoctorUDPAccounting(t *testing.T) {
 	cases := []struct {
 		name       string
-		resp       *agent.DoctorResponse
+		resp       *controlapi.DoctorResponse
 		stopped    bool
 		kernel     bool
 		wantStatus string
@@ -26,23 +26,23 @@ func TestAgentDoctorUDPAccounting(t *testing.T) {
 		wantSocketBufs string
 	}{
 		{name: "consistent", resp: healthyLiveResponse(), wantStatus: statusOK, wantDetail: []string{"consistent"}},
-		{name: "stopped by a fault", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) {
-			st.Tunnel.UDPAccounting = &agent.DoctorUDPAccounting{Stopped: true, Error: "unreserved UDP dequeue"}
+		{name: "stopped by a fault", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+			st.Tunnel.UDPAccounting = &controlapi.DoctorUDPAccounting{Stopped: true, Error: "unreserved UDP dequeue"}
 		}), wantStatus: statusFailed, wantReason: "udp_accounting_stopped",
 			wantDetail: []string{"stopped all UDP", "unreserved UDP dequeue", "TCP rules keep working"},
 			wantNext:   []string{"restart the agent", "report this as a bug"}, wantExit: 1},
-		{name: "an older agent does not report it", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) { st.Tunnel.UDPAccounting = nil }),
+		{name: "an older agent does not report it", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) { st.Tunnel.UDPAccounting = nil }),
 			wantStatus: statusUnknown, wantReason: "udp_accounting_not_reported", wantNext: []string{"restart the agent"}},
-		{name: "no tunnel", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) {
-			st.Tunnel = agent.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel"}
+		{name: "no tunnel", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+			st.Tunnel = controlapi.DoctorTunnel{State: proto.StatusError, Reason: "no tunnel"}
 			st.Rules, st.Budgets = nil, nil
 		}), wantStatus: statusSkipped, wantReason: "no_tunnel"},
 		// ソケットのバッファだけが条件に届かない実行は、従来どおり終了コード 0 のままである
-		{name: "socket buffers alone short", resp: runtimeResponse(func(st *agent.DoctorRuntimeState) {
-			st.Tunnel.SocketBuffers = &agent.DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 425984, Send: 425984, Required: 14680064}
+		{name: "socket buffers alone short", resp: runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
+			st.Tunnel.SocketBuffers = &controlapi.DoctorSocketBuffers{Supported: true, Port: 35454, Sockets: 2, Recv: 425984, Send: 425984, Required: 14680064}
 		}), wantStatus: statusOK, wantDetail: []string{"consistent"}, wantSocketBufs: statusFailed},
 		{name: "stopped agent", stopped: true, wantStatus: statusSkipped, wantReason: "agent_not_running", wantExit: 1},
-		{name: "kernel mode", kernel: true, resp: kernelRuntime(func(*agent.DoctorRuntimeState) {}), wantStatus: statusNotTested, wantReason: "kernel_mode"},
+		{name: "kernel mode", kernel: true, resp: kernelRuntime(func(*controlapi.DoctorRuntimeState) {}), wantStatus: statusNotTested, wantReason: "kernel_mode"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -5,24 +5,11 @@ import (
 	"log"
 	"reflect"
 
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // heartbeat は処理済み世代、トンネルの状態、ルールごとの状態をまとめる(仕様 5.2 節)。
-// ReasonHandshakePending は、トンネルはあるが WireGuard のハンドシェイクがまだ済んでいないときの理由。
-// 適用直後の追送り(needsHandshakeFollowUp)がこの値で判定するので、文言を変えるときは両方に効く。
-//
-// 公開しているのは、制御ソケットの doctor の応答から同じ場合を見分ける読み手がいるためである
-// (設計文書 10.2c 節)。応答が載せるのは理由の文字列だけで、ハンドシェイク待ちを tunnel.Status の
-// Err による誤りと分ける材料は他に無い。写しを持たせると、この文言を変えたときに読み手だけが
-// 取り残される。
-const ReasonHandshakePending = "handshake not established"
-
-// ReasonWGRefused は、トンネルが立っている間に届いた wg 設定をカーネルモードのエージェントが拒んだときの、
-// ハートビートのトンネルの理由の書き出しである(設計文書 7b.1 節)。agent doctor の tunnel.local が同じ
-// 場合を見分けて所見の文面を変えるので、ReasonHandshakePending と同じく公開する。
-const ReasonWGRefused = "refused the wg configuration"
-
 func (rt *runtime) heartbeat() proto.Heartbeat {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -78,13 +65,13 @@ func (rt *runtime) tunnelSnapshotLocked(r tunnelReading) tunnelSnapshot {
 	// いないことは、運用者が最初に知るべきことである(設計文書 7b.1・11 節)
 	if rt.refused != nil {
 		snap.hb.State = proto.StatusError
-		snap.hb.Reason = fmt.Sprintf("%s of generation %d; the tunnel and rules stay as generation %d left them: %v", ReasonWGRefused, rt.refused.gen, rt.gen, rt.refused.err)
+		snap.hb.Reason = fmt.Sprintf("%s of generation %d; the tunnel and rules stay as generation %d left them: %v", controlapi.ReasonWGRefused, rt.refused.gen, rt.gen, rt.refused.err)
 		return snap
 	}
 	if r.err != nil {
 		snap.hb.State, snap.hb.Reason = proto.StatusError, r.err.Error()
 	} else if r.lastHandshake.IsZero() {
-		snap.hb.State, snap.hb.Reason = proto.StatusError, ReasonHandshakePending
+		snap.hb.State, snap.hb.Reason = proto.StatusError, controlapi.ReasonHandshakePending
 	}
 	return snap
 }

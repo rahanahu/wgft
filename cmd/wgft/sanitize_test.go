@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/proto"
@@ -17,7 +17,7 @@ import (
 // collectStrings walks v (a pointer to a struct) with reflect and returns every string value it
 // finds, however deeply nested. It mirrors textsafe.SanitizeStrings' own walk so this test can
 // check every field classifyDoctorReply's textsafe.SanitizeStrings call is supposed to cover,
-// without listing agent.DoctorResponse's fields by hand here too.
+// without listing controlapi.DoctorResponse's fields by hand here too.
 func collectStrings(t *testing.T, v any) []string {
 	t.Helper()
 	var out []string
@@ -56,10 +56,10 @@ func collectStrings(t *testing.T, v any) []string {
 // 確かめる(design.md 11 節)。textsafe.SanitizeStrings が構造体を再帰的に歩く実装なので、個々の
 // フィールドを列挙する代わりに reflect で全文字列を集めて調べる。
 func TestClassifyDoctorReplySanitizesEveryStringField(t *testing.T) {
-	resp := runtimeResponse(func(st *agent.DoctorRuntimeState) {
+	resp := runtimeResponse(func(st *controlapi.DoctorRuntimeState) {
 		st.Tunnel.Reason = "hijacked\x1b[2Jreason"
 		st.Tunnel.Endpoint = "10.0.0.1:1\x07234"
-		st.Rules = []agent.DoctorRule{{
+		st.Rules = []controlapi.DoctorRule{{
 			ID:          "r_evil\x1b]0;pwned\x07",
 			State:       proto.StatusError,
 			Reason:      "bad\rCR",
@@ -82,7 +82,7 @@ func TestClassifyDoctorReplySanitizesEveryStringField(t *testing.T) {
 // TestClassifyDoctorReplySanitizesTheUnsupportedReply confirms the "it replied ..." text
 // agentControlCheck shows for a legacy/unsupported reply (agentdoctorlive.go's liveUnsupported
 // branch, live.Reply) is also sanitized: this field is set directly, bypassing
-// textsafe.SanitizeStrings' struct walk over agent.DoctorResponse.
+// textsafe.SanitizeStrings' struct walk over controlapi.DoctorResponse.
 func TestClassifyDoctorReplySanitizesTheUnsupportedReply(t *testing.T) {
 	live := classifyDoctorReply("/tmp/does-not-matter.sock", "not json at all \x1b[31m\n")
 	if live.Kind != liveReplyUnreadable {
@@ -99,13 +99,13 @@ func TestClassifyDoctorReplySanitizesTheUnsupportedReply(t *testing.T) {
 // Mutation check: wrapping readAgentLive's bufio.NewReader back around the bare net.Conn (removing
 // the io.LimitReader) makes this test time out instead of observing an error quickly, since the
 // read would then wait for the connection's own deadline instead of hitting EOF at
-// agent.DoctorReplyMaxBytes.
+// controlapi.DoctorReplyMaxBytes.
 func TestReadAgentLiveCapsAnUnboundedReply(t *testing.T) {
 	dir := t.TempDir()
 	in := testAgentDoctorInput(t, dir)
 	writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
 	holdTheLock(t, in.CredentialsPath)
-	sock := agent.ControlPath(in.CredentialsPath)
+	sock := controlapi.ControlPath(in.CredentialsPath)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Skipf("this host cannot open a unix socket at %s: %v", sock, err)
@@ -121,7 +121,7 @@ func TestReadAgentLiveCapsAnUnboundedReply(t *testing.T) {
 		defer c.Close()
 		buf := make([]byte, 512)
 		c.Read(buf) //nolint:errcheck // the "doctor" request line; its content does not matter here
-		c.Write(make([]byte, agent.DoctorReplyMaxBytes))
+		c.Write(make([]byte, controlapi.DoctorReplyMaxBytes))
 		<-block
 	}()
 	in.Dial = dialAgentControl // 既定の入口(net.DialTimeout)を使う
@@ -134,7 +134,7 @@ func TestReadAgentLiveCapsAnUnboundedReply(t *testing.T) {
 			t.Fatalf("Kind = %v, want liveReplyUnreadable (the cap was hit)", live.Kind)
 		}
 		// The error should name the limit, not just say "EOF" (レビューの指摘, 2026-09-26; see
-		// agent.ReadControlReply's own doc comment).
+		// controlapi.ReadControlReply's own doc comment).
 		if live.Err == nil || !strings.Contains(live.Err.Error(), "exceeded") || !strings.Contains(live.Err.Error(), "limit") {
 			t.Errorf("live.Err = %v, want it to say the reply exceeded the limit, not a bare EOF", live.Err)
 		}
