@@ -660,6 +660,32 @@ func (c *tcpConn) Close() error {
 	return err
 }
 
+// relayCloseUserTimeout は、中継の終わりに閉じる、boost の枠を持たない接続に置く gVisor の user timeout
+// (設計文書 7 節の「送り残しを持って閉じた netstack の接続」)。gVisor の再送の間隔の上限 tcp.MaxRTO と
+// 同じ値にする。設定項目にしない。var なのは単体試験が短くするためである。
+var relayCloseUserTimeout = tcp.MaxRTO
+
+// CloseAfterRelay は、中継が終わったときに netpipe.Pipe が通常の Close の代わりに呼ぶ。boost の枠を
+// 持たない接続には、閉じる前に user timeout を置く。送り残しを持って閉じた接続は K にも枠にも数えないので、
+// 送ったデータが確認されないか窓が 0 のままの停滞が続くと、gVisor がこの期限で接続を ERROR にして送信の
+// キューを捨てる。期限は停滞の始まりから数え、閉じる前の停滞も含む。相手が窓を開くと gVisor は始まりを
+// 戻すので、この期限は 1 本の保持の合計の時間を抑えない。時間切れのとき gVisor は RST を送らない。
+//
+// boost の枠を持つ接続には置かない。その接続は返せる状態になるまで枠に数えたまま残る(設計文書 7 節)。
+// markClosing の後は新しく枠を求めないが、取得の途中の要求が閉じた後に枠を渡すことはある。そのときこの
+// 接続は期限を持ったまま枠を得るが、期限の後に ERROR になって枠を返せる状態になるだけで、枠の上限は
+// 崩れない。固定版の gVisor の SetSockOpt は、この選択肢では誤りを返さない。
+func (c *tcpConn) CloseAfterRelay() error {
+	c.markClosing()
+	if !c.boosted.Load() {
+		uto := tcpip.TCPUserTimeoutOption(relayCloseUserTimeout)
+		c.ep.SetSockOpt(&uto)
+	}
+	err := c.gc.Close()
+	c.closed.Store(true)
+	return err
+}
+
 func (c *tcpConn) abort() {
 	c.markClosing()
 	c.ep.Abort()

@@ -12,17 +12,31 @@ import (
 
 type closeWriter interface{ CloseWrite() error }
 
+// relayEndCloser は、中継の終わりに通常の Close の代わりに呼ぶ閉じ方を持つ接続が満たす
+// (nettun.TCPConn.CloseAfterRelay。設計文書 7 節の「送り残しを持って閉じた netstack の接続」)。
+type relayEndCloser interface{ CloseAfterRelay() error }
+
+// closeEnd は中継の終わりに c を閉じる。
+func closeEnd(c net.Conn) {
+	if r, ok := c.(relayEndCloser); ok {
+		r.CloseAfterRelay()
+		return
+	}
+	c.Close()
+}
+
 // Pipe は a と b を双方向に中継する。片方向の EOF は CloseWrite で反対側に伝え、
 // 両方向が閉じたら両方を閉じる。片方向が EOF 以外で終わったとき(読み取りが RST などの誤りで
 // 失敗したとき、書き込みが失敗したとき)は、すぐに両方を閉じる。ハーフクローズとして扱うと、
 // 反対向きは黙ったままの相手を読み続け、相手が閉じるまで中継が終わらない(仕様 6.2 節)。
+// 両方を閉じる 2 か所は、CloseAfterRelay を持つ接続ではそれを呼ぶ。片方向の EOF の CloseWrite は変えない。
 func Pipe(a, b net.Conn) {
 	var wg sync.WaitGroup
 	half := func(dst, src net.Conn) {
 		defer wg.Done()
 		if err := copyConn(dst, src); err != nil {
-			a.Close()
-			b.Close()
+			closeEnd(a)
+			closeEnd(b)
 			return
 		}
 		if cw, ok := dst.(closeWriter); ok {
@@ -35,8 +49,8 @@ func Pipe(a, b net.Conn) {
 	go half(a, b)
 	go half(b, a)
 	wg.Wait()
-	a.Close()
-	b.Close()
+	closeEnd(a)
+	closeEnd(b)
 }
 
 const (

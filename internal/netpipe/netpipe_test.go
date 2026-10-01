@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -232,4 +233,74 @@ func TestPipeEOFKeepsTheOtherDirection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// endRecorder stands in for a netstack conn that has a relay-end close. It records which close the
+// relay used.
+type endRecorder struct {
+	net.Conn
+	plain, relayEnd atomic.Int32
+}
+
+func (r *endRecorder) CloseWrite() error { return r.Conn.(closeWriter).CloseWrite() }
+
+func (r *endRecorder) Close() error {
+	r.plain.Add(1)
+	return r.Conn.Close()
+}
+
+func (r *endRecorder) CloseAfterRelay() error {
+	r.relayEnd.Add(1)
+	return r.Conn.Close()
+}
+
+// The relay closes a conn that has a relay-end close only through it, at both places where the
+// relay ends: after both directions reached EOF and after one direction failed. A half-close
+// stays a CloseWrite and does not use it.
+func TestPipeUsesRelayEndClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(t *testing.T, r *pipeRig)
+	}{
+		{"both directions EOF", func(t *testing.T, r *pipeRig) {
+			r.target.(*net.TCPConn).CloseWrite()
+			readEOF(t, r.client)
+			r.client.(*net.TCPConn).CloseWrite()
+		}},
+		{"one direction fails", func(t *testing.T, r *pipeRig) {
+			resetConn(t, r.client)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec *endRecorder
+			r := newPipeRig(t, true, func(c net.Conn) net.Conn {
+				rec = &endRecorder{Conn: c}
+				return rec
+			})
+			r.client.Write([]byte("hello"))
+			readSome(t, r.target, "hello")
+			if n := rec.relayEnd.Load() + rec.plain.Load(); n != 0 {
+				t.Fatalf("closed %d times while relaying", n)
+			}
+			tc.end(t, r)
+			select {
+			case <-r.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the pipe did not end")
+			}
+			if rec.relayEnd.Load() == 0 || rec.plain.Load() != 0 {
+				t.Fatalf("relay-end close %d, plain Close %d; want only the relay-end close", rec.relayEnd.Load(), rec.plain.Load())
+			}
+		})
+	}
+}
+
+// readEOF reads from c until EOF.
+func readEOF(t *testing.T, c net.Conn) {
+	t.Helper()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.Copy(io.Discard, c); err != nil {
+		t.Fatalf("read to EOF: %v", err)
+	}
+	c.SetReadDeadline(time.Time{})
 }
