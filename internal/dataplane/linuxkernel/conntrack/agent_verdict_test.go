@@ -5,10 +5,10 @@ package conntrack
 import (
 	"go/ast"
 	"go/build"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"strings"
 	"testing"
 
 	"github.com/ti-mo/conntrack"
@@ -38,12 +38,15 @@ func TestAgentVerdictSwitchIsExhaustive(t *testing.T) {
 		}
 		files = append(files, f)
 	}
-	conf := types.Config{Importer: importer.ForCompiler(fset, "source", nil)}
-	info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}}
-	pkg, err := conf.Check("conntrack", fset, files, info)
-	if err != nil {
-		t.Fatalf("type-checking the package: %v", err)
+	// 依存の package は空の package として渡し、それによる型の誤りは無視する。定数の型と、case に
+	// 書いた名前が指す定数は、依存の中身に関わらず決まる。Go の道具も依存のソースも無いラボの VM
+	// (lab/lab test)でも同じに動く。
+	conf := types.Config{
+		Importer: emptyImporter{},
+		Error:    func(error) {},
 	}
+	info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}}
+	pkg, _ := conf.Check("conntrack", fset, files, info)
 	verdictType := pkg.Scope().Lookup("agentVerdict")
 	if verdictType == nil {
 		t.Fatal("the type agentVerdict is gone; did it move?")
@@ -89,6 +92,15 @@ func TestAgentVerdictSwitchIsExhaustive(t *testing.T) {
 			t.Errorf("deleteCount does not name the verdict %s in its switch; a flow with it would be left alone", v.Name())
 		}
 	}
+}
+
+// emptyImporter は、どの import にも中身の無い package を返す。
+type emptyImporter struct{}
+
+func (emptyImporter) Import(path string) (*types.Package, error) {
+	p := types.NewPackage(path, path[strings.LastIndex(path, "/")+1:])
+	p.MarkComplete()
+	return p, nil
 }
 
 // deleteCount は、消す判定にだけ数を返し、それ以外の値には nil を返す。convergeAgent は nil のフローを
