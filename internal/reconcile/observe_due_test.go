@@ -186,3 +186,35 @@ func TestObserveDueIgnoresLastErrorText(t *testing.T) {
 		t.Error("Observe is not due after a failed first transaction because LastError is empty")
 	}
 }
+
+// flipErr is an error whose text alternates between non-empty and empty on each call.
+type flipErr struct{ n int }
+
+func (e *flipErr) Error() string {
+	e.n++
+	if e.n%2 == 1 {
+		return "nftables: transaction failed"
+	}
+	return ""
+}
+
+// unsettled is derived from the LastError the status stores, so it agrees with it even when the
+// error's text changes from one Error() call to the next.
+func TestUnsettledFollowsTheStoredLastError(t *testing.T) {
+	for _, first := range []int{0, 1} {
+		rec := &recorder{}
+		e := &flipErr{n: first}
+		dp := &fakeDataplane{rec: rec, commitErr: e}
+		r := New(Runtime{Dataplane: dp})
+		if _, err := r.Reconcile(Input{Plan: testPlan(t, 3, tcpRule("r_a", 25565, proto.ModeKernel))}); err == nil {
+			t.Fatal("Reconcile succeeded")
+		}
+		if r.unsettled != (r.status.LastError != "") {
+			t.Errorf("starting at call %d: unsettled %v with LastError %q", first, r.unsettled, r.status.LastError)
+		}
+		want := formerObserveDue(r)
+		if _, due, _ := r.Observe(); due != want {
+			t.Errorf("starting at call %d: Observe due %v, the former rule says %v", first, due, want)
+		}
+	}
+}

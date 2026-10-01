@@ -122,8 +122,8 @@ type Reconciler struct {
 	repair bool
 	// unsettled is set while the last transaction failed as a whole (or an Observe failed and was
 	// recorded like such a failure), and while it published with a repair pending. Observe is due
-	// while it is set. It changes exactly where the status's LastError does, and is set exactly
-	// when LastError is not empty, so the status only reports it.
+	// while it is set. It is derived from LastError right where LastError is written, and set
+	// exactly when LastError is not empty; nothing else reads LastError to decide.
 	unsettled bool
 	// last is the Desired value of the last Reconcile, for the status a failed Observe reports.
 	last    Input
@@ -229,10 +229,10 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 	r.repair = out.Committed.RepairPending
 	r.status.ActiveGeneration = gen
 	r.status.LastError = ""
-	r.unsettled = r.repair
 	if r.repair {
 		r.status.LastError = repairError(gen, out.Committed.Errors)
 	}
+	r.unsettled = r.status.LastError != ""
 	r.status.NeedsRetry = len(out.Failed) > 0 || r.repair
 	r.status.Rules = r.ruleStates(in, out.Failed, nil)
 	r.status.ActiveOnly = r.activeOnly(in)
@@ -297,8 +297,9 @@ func (r *Reconciler) Observe() (drift []string, due bool, err error) {
 // was Active may no longer be forwarding.
 func (r *Reconciler) fail(in Input, err error) {
 	r.status.LastError = err.Error()
+	// Derived from the stored text, not from a second err.Error(), which need not return the same.
 	// An error with an empty text leaves LastError empty, and Observe has never been due for it.
-	r.unsettled = err.Error() != ""
+	r.unsettled = r.status.LastError != ""
 	r.status.NeedsRetry = true
 	r.status.Rules = r.ruleStates(in, nil, err)
 	r.status.ActiveOnly = r.activeOnly(in)
