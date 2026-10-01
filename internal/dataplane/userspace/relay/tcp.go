@@ -220,14 +220,16 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 				continue
 			}
 			ruleID := m.ruleOf(l)
-			release := func() {}
+			// charge はこのフローの 2 つの枠(Admission Policy の送信元ごとの枠と Pool の枠)を持ち、
+			// 拒否の分岐か、登録の後は接続の goroutine の終わりで、両方をまとめて返す
+			var charge resource.Charge
 			if m.opts.Admit != nil {
 				rel, ok := m.opts.Admit(ruleID, src, 0)
 				if !ok {
 					abortRefused(c)
 					continue
 				}
-				release = rel
+				charge.HoldPolicy(rel)
 			}
 			// 同時フロー数の上限(仕様 7 節、Resource Guard)。プロセス全体の予算、ルール 1 本の上限、
 			// ルールの登録ごとの最低分と予備を Pool が 1 つの排他の中で判定する。拒んだ接続はすぐ閉じる
@@ -237,17 +239,18 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 			case resource.NotAccepting:
 				// ruleOf を済ませた後に、この待ち受けが閉じられたか Retiring になった。予算の拒否ではない
 				// ので、拒否の数にもログにも入れない(設計文書 7a.10 節)
-				release()
+				charge.Release()
 				abortRefused(c)
 				continue
 			case resource.Refused:
-				release()
+				charge.Release()
 				abortRefused(c)
 				if capLog.Allow() {
 					m.opts.Logf("%s: %s; refusing new connections", l.key, ref)
 				}
 				continue
 			}
+			charge.HoldLease(lease)
 			if h := m.testHookAfterTake; h != nil {
 				h(l)
 			}
@@ -260,8 +263,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 			select {
 			case <-done:
 				mu.Unlock()
-				lease.Release()
-				release()
+				charge.Release()
 				// まだ宛先へ dial しておらずデータもやり取りしていないので、7a.5 節の拒否と同じく RST にする
 				abortRefused(c)
 				continue
@@ -275,8 +277,7 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 					mu.Lock()
 					delete(conns, c)
 					mu.Unlock()
-					lease.Release()
-					release()
+					charge.Release()
 				}()
 				target := m.targetOf(l)
 				t, err := m.dialTarget("tcp", target)

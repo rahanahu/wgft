@@ -485,12 +485,11 @@ func (m *Manager) serve(l *listener) {
 
 // admitted owns both admission charges after the locked handoff.
 type admitted struct {
-	c             net.Conn
-	src           netip.Addr
-	rule          Rule
-	gen           int
-	releasePolicy func()
-	lease         *resource.Lease
+	c      net.Conn
+	src    netip.Addr
+	rule   Rule
+	gen    int
+	charge resource.Charge
 }
 
 // admitAccepted runs only in the accept loop, never in a per-connection goroutine.
@@ -505,7 +504,7 @@ func (m *Manager) admitAccepted(l *listener, c net.Conn) *admitted {
 	rule, gen := l.rule, l.gen
 	l.admitting = c
 	l.mu.Unlock()
-	releasePolicy := func() {}
+	var charge resource.Charge
 	handed := false
 	defer func() {
 		if !handed {
@@ -513,7 +512,7 @@ func (m *Manager) admitAccepted(l *listener, c net.Conn) *admitted {
 			l.admitting = nil
 			l.mu.Unlock()
 			abortRefused(c)
-			releasePolicy()
+			charge.Release()
 		}
 	}()
 	// Policy must precede the shared resource budget, including its refusal accounting.
@@ -522,7 +521,7 @@ func (m *Manager) admitAccepted(l *listener, c net.Conn) *admitted {
 		if !ok {
 			return nil
 		}
-		releasePolicy = release
+		charge.HoldPolicy(release)
 	} else if !sourceAllowed(src, rule) {
 		return nil
 	}
@@ -536,8 +535,9 @@ func (m *Manager) admitAccepted(l *listener, c net.Conn) *admitted {
 		}
 		return nil
 	}
+	charge.HoldLease(lease)
 	handed = true
-	return &admitted{c: c, src: src, rule: rule, gen: gen, releasePolicy: releasePolicy, lease: lease}
+	return &admitted{c: c, src: src, rule: rule, gen: gen, charge: charge}
 }
 
 // acquireAdmission serializes cancellation, the budget attempt and handoff.
@@ -567,8 +567,7 @@ func (l *listener) acquireAdmission(gen int, take func() (*resource.Lease, resou
 
 func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 	c, src, rule, gen := a.c, a.src, a.rule, a.gen
-	defer a.releasePolicy()
-	defer a.lease.Release()
+	defer a.charge.Release()
 	pending := true
 	unpend := func() {
 		if pending {
