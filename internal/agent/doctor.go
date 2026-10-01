@@ -10,13 +10,13 @@ import (
 	"sort"
 	"strconv"
 	"time"
-	"unicode/utf8"
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/resource"
+	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -337,14 +337,7 @@ const maxDoctorText = 512
 // clipText は上限を超える文字列を切り、切ったことを添える。切る位置は rune の境目に合わせるので、
 // 結果は正しい UTF-8 のままである。
 func clipText(s string) string {
-	if len(s) <= maxDoctorText {
-		return s
-	}
-	n := maxDoctorText
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n] + "... truncated"
+	return textsafe.ClipText(s, maxDoctorText)
 }
 
 // collectDoctor は doctor の応答を組む。実行時の状態を守る排他は期限付きで取り、取れなければ
