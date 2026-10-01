@@ -9,10 +9,13 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+
+	"github.com/rahanahu/wgft/internal/reasontext"
 )
 
-// Env は一覧を渡す設定の名前。起動ログと拒否の理由に出す。
-const Env = "WGFT_AGENT_ALLOW_TARGETS"
+// Env は一覧を渡す設定の名前。起動ログと拒否の理由に出す。server doctor が拒否の理由をこの名前で
+// 読むので、値は両側が共有する internal/reasontext に置く。
+const Env = reasontext.AllowTargetsEnv
 
 // entry は一覧の 1 項目。lo が 0 なら prefix の全ポートを許す。
 type entry struct {

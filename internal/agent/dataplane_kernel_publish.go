@@ -16,6 +16,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/conntrack"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -249,7 +250,7 @@ func (d *kernelDataplane) refresh() {
 		log.Printf("net.ipv4.ip_forward is 1 now; rules whose target is not this host are no longer reported as errors")
 		d.forwardErr = nil
 	case err == nil && !on && d.forwardErr == nil:
-		d.forwardErr = errors.New("net.ipv4.ip_forward is 0")
+		d.forwardErr = errors.New(reasontext.IPForward + " is 0")
 		log.Printf("warning: net.ipv4.ip_forward is 0; rules whose target is not this host are reported as errors until it is 1")
 	}
 	if d.forwardErr != nil {

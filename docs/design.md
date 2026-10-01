@@ -1089,6 +1089,7 @@ internal/
   lograte/               同じ理由で繰り返すログを間引く門(7a.10 節)と、名前の解決の誤りの文面をそろえる関数(5.2 節)
   startup/               起動の拒否の型と種別(11b 節)
   textsafe/              信頼できない文字列を端末向けに無害化する関数(11 節)
+  reasontext/            ルールの理由の文言のうち、理由を書く側と server doctor が共有する断片(10.2a 節)
   reconcile/             Observe -> diff -> Prepare -> Commit の骨格(今は server が使う。agent は変更の通知の購読の張り直しと公開し直しの間隔だけを使い、移行は後の段階)
   dataplane/             Backend interface(Observe、Prepare、Commit、Rollback)
   dataplane/userspace/   wireguard-go + netstack + 中継
@@ -1126,6 +1127,10 @@ agent は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` をまだ�
 `internal/agent/enroll` は登録のクライアントの側を持ち、`internal/agent` の初回の登録と登録のし直しの両方が使う。`cmd/wgft` も、`agent run` の起動時に接続文字列の形を確かめて警告するために `internal/agent/enroll` を直接使う。
 
 `internal/startup` は、この向きの例外ではなく葉である。モジュールの中の何も import せず、`cmd/wgft` から `internal/dataplane/linuxkernel/wg` までのどの層も import できる。起動の拒否は、値を受け取る入口と、カーネルに書き込む層の両方が作るので、どちらからも見える場所に置く必要がある。`internal/resource` と `internal/lograte` と同じ扱いであり、`internal/dataplane/deps_test.go` がモジュールの中を import しないことを検査する。`internal/textsafe`(信頼できない文字列の無害化。11 節)も同じ理由で葉に置く。`cmd/wgft`、`internal/agent`、`internal/vpsd/stream` のように、エージェントが選ぶ文字列を端末へ出す層すべてから見える必要があるためである(2026-09-25、所有者の決定)。
+
+`internal/reasontext` も葉である。ルールの理由の文言のうち、理由を書く側と、それを部分一致で読む `server doctor`(10.2a 節)の両方が使う断片を持つ。書く側は、エージェント(`internal/agent`、`internal/dataplane/linuxkernel/nft`、`internal/dataplane/userspace/relay`)と、ルールを公開しなかった server(`internal/vpsd`、`internal/vpsd/proxyrelay`、中継の `Prepare`)である。dataplane の実装と 2 つの制御プレーンのどこからも見える必要があるので、葉に置く。エージェントの宛先の許可一覧の設定の名前も拒否の理由に入るので、この package に置き、`internal/agent/allowtargets` はその値を使う。`internal/dataplane/deps_test.go` の `TestPureLayersStayPure` が、この package がモジュールの中を import しないことを検査する。
+
+2 つの制御プレーンは互いを import しない。`internal/vpsd` の下のどの package も `internal/agent` の下の package に依存せず、その逆も無い。両側が共有するものは、`internal/reasontext` のような下の層に置く。`internal/dataplane/deps_test.go` の `TestControlPlanesDoNotImportEachOther` がこれを検査する。
 
 `internal/flowcap` は、Phase 6 の移行の手順 1 で `internal/resource` に改めた。送信元ごとの上限を `internal/policy` の `AdmissionLimits` へ、上限で拒んだログを間引く門を `internal/lograte` へ移し、`internal/resource` には Resource Guard の予算だけを残した(7a.10 節)。
 
@@ -3997,3 +4002,5 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - 公開の文書のメモリの要件の言い回しを 7 節の定義に合わせた(2026-10-02、7 節、所有者の決定。設計は変えていない):`README.ja.md` と `docs/setup-server-userspace.ja.md` は、ユーザー空間モードのホストに要るメモリを「最悪の場合にもメモリを使い切らない」「攻撃時の最悪値に耐える」のように、7 節の上界の定義より強く書いていた。7 節の上界は式に数えた保持点の値であり、プロセスのメモリがそれを超えないことは示せていない。これらの文書と英語の対の文書の言い回しを改め、この値が、計算に数えた保持点がそれぞれの上限まで同時に埋まった場合の最悪値の見積もりであることを書いた。`docs/testing.md` の C6 の「すべての保持点を埋めた場合の値」も、7 節の定義の「式に数えた保持点」に合わせた。
 
 - VPS のローカルの利用者についての前提を 11 節に書いた(2026-10-02、11 節、所有者の決定。コードは変えていない):11 節は、VPS の上のローカルの利用者やサービスについての前提を書いていなかった。VPS には信頼しないローカルの利用者やサービスを置かない前提とし、それらを wgft の脅威の範囲に含めないことと、既存の権限と鍵の守りはそのまま保つことを書いた。
+
+- ルールの理由の文言のうち、理由を書く側と `server doctor` が共有する断片を `internal/reasontext` に置いた(2026-10-02、7a.7 節。挙動は変えていない):`server doctor` は、エージェントと server が書くルールの理由を部分一致で分類する(10.2a 節)。分類に使う断片は、書く側と読む側に別々の文字列として書かれていた。名前の解決の失敗、直前の解決の結果で転送を続けている目印、許可一覧の拒否と設定の名前、bind の失敗、ループバックの宛先、`ip_forward`、server が公開しなかったルールの理由である。片側だけで言い回しを変えると、分類が黙って変わる形だった。断片を葉の package `internal/reasontext` に置き、両側がそれを使うようにした。値は変えていないので、稼働中の別の版のエージェントの理由も今までどおり分類する。許可一覧の設定の名前もこの package に置いたので、`internal/vpsd/doctor` は `internal/agent/allowtargets` を import しなくなった。2 つの制御プレーンが互いを import しないことを、`TestControlPlanesDoNotImportEachOther` が検査する。書く側が実際に組み立てる理由を `server doctor` に読ませる単体試験を、エージェントと server の両方に置いた。エージェントの理由は、hub が保存する形(`stream.HeartbeatReason` の切り詰め)に通してから読ませる。この試験で既知の問題を 1 つ確かめた。名前の解決に失敗して直前の解決の結果で転送を続けているルールの理由は、ホスト名を 2 回含む。ホスト名が長いと、hub の 512 バイトの切り詰めが目印を落とし、`server doctor` は転送を続けているルールを `target resolve` で止まったと判定する。253 バイトのホスト名で確かめた。この変更より前からある挙動であり、この変更では直していない。試験は今の挙動を固定し、既知の問題として印を付けた。

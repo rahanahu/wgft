@@ -10,6 +10,7 @@ import (
 	"github.com/rahanahu/wgft/internal/model"
 	"github.com/rahanahu/wgft/internal/planner"
 	"github.com/rahanahu/wgft/internal/platform/linux"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/reconcile"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/vpsd/proxyrelay"
@@ -528,13 +529,13 @@ func (d *Daemon) buildPlan(rules []proto.Rule, agentAddr map[string]netip.Addr, 
 		// 記録していなかった)、Plan がその区別を吸収した今は、組み立ての入り口であるここで
 		// Forwarding を問わず一様に記録する(設計文書 7a.8 節 Phase 3)。
 		if !m.Enabled {
-			excluded[m.ID] = "disabled"
+			excluded[m.ID] = reasontext.RuleDisabled
 		} else if disabled[m.Agent] {
 			m.Enabled = false
-			excluded[m.ID] = fmt.Sprintf("agent %q is disabled", m.Agent)
+			excluded[m.ID] = reasontext.AgentDisabled(m.Agent)
 		} else if _, ok := agentAddr[m.Agent]; !ok {
 			log.Printf("rule %s: agent %q is not registered, skipping", m.ID, m.Agent)
-			excluded[m.ID] = fmt.Sprintf("agent %q is not registered", m.Agent)
+			excluded[m.ID] = reasontext.AgentNotRegistered(m.Agent)
 		}
 		normalized = append(normalized, m)
 	}

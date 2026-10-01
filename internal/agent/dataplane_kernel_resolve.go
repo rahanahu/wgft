@@ -14,6 +14,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/lograte"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -202,11 +203,11 @@ func (d *kernelDataplane) planWith(gen uint64, rules []proto.AgentRule, resolved
 // staleReason は、名前の解決に失敗して直前の解決の結果を使ったルールの理由である。文言に
 // "name resolution" を含め、server doctor が target_resolve_failed に分類できるようにする。
 func staleReason(host string, err error, res nft.AgentRuleResult) string {
-	head := fmt.Sprintf("name resolution of target host %q failed: %v", host, err)
+	head := reasontext.NameResolutionFailed(host, err)
 	if len(res.Ranges) == 0 {
 		return head + "; the address from the last successful resolution is not usable either: " + res.Reason
 	}
-	s := fmt.Sprintf("%s; still forwarding to %s from the last successful resolution", head, res.Ranges[0].Dest.Addr())
+	s := head + reasontext.StillForwardingTo + res.Ranges[0].Dest.Addr().String() + reasontext.FromLastResolution
 	if res.Reason != "" {
 		s += "; " + res.Reason
 	}

@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"strconv"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/reasontext"
 )
 
 // targetLookupTimeout は、許可一覧があるときに中継が自分で行う target の名前解決の期限。
@@ -27,7 +29,7 @@ func (e *notAllowedError) Error() string {
 	if e.source != "" {
 		return fmt.Sprintf("target %s is not in %s", e.target, e.source)
 	}
-	return fmt.Sprintf("target %s is not allowed", e.target)
+	return fmt.Sprintf("target %s "+reasontext.NotAllowed, e.target)
 }
 
 func (e *notAllowedError) Unwrap() error { return ErrTargetNotAllowed }
