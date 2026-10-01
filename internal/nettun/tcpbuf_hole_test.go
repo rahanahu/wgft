@@ -95,31 +95,54 @@ func tcpStateOf(c net.Conn, side string, names ...string) []uint64 {
 	return out
 }
 
-// syncWindow は、受け手 s が今の受信の窓を送り手 c に知らせ、c がそれを受け取るまで待つ。gVisor の
+// syncWindow は、受け手 s が開いた受信の窓を送り手 c に知らせ、c がそれを受け取るまで待つ。gVisor の
 // 受け手は、読み手が読んで窓が開いても、前に知らせた窓が閾値(1 segment と受信のバッファの半分の
 // 小さい方)以上なら知らせ直さない。遅い環境では、bulk の終わりに知らせた窓が 64 KiB の segment
 // 1 つか 2 つ分のまま残ることがある。そのまま穴を作ると、送り手は穴の segment だけを送り、残りの
 // 窓に収まらない次の segment は送らずに待つ。穴の segment は捨て続けるので受け手から何も返らず、
-// 順序外が積まれない。s から c へ 1 byte を送ると、その segment が今の窓を運ぶ。待つのは、送り手の
-// 送ったものがすべて確認され、送り手の窓の右端が受け手の知らせた右端に等しいことである。
+// 順序外が積まれない。s から c へ 1 byte を送ると、その segment が今の窓を運ぶ。
+//
+// 待つのは、送り手の送ったものがすべて確認され、送り手の窓が syncWindowMin 以上になることである。
+// 窓の右端が受け手の知らせた右端に等しいことは待たない。送り手に届く窓は窓の scale の単位に
+// 切り捨てられ、1 byte を送った瞬間に受信のメモリが使われていれば、右端は一致しないまま残る。
+// 1 秒たっても窓が足りなければ、もう 1 byte 送って知らせ直させる。
 func syncWindow(t *testing.T, c, s net.Conn) {
 	t.Helper()
-	s.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, err := s.Write([]byte{0})
-	s.SetWriteDeadline(time.Time{})
-	if err != nil {
-		t.Fatalf("setup: write the window update: %v", err)
-	}
-	if _, err := readAllErr(c, 1, 10*time.Second); err != nil {
-		t.Fatalf("setup: read the window update: %v", err)
+	nudge := func() {
+		t.Helper()
+		s.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_, err := s.Write([]byte{0})
+		s.SetWriteDeadline(time.Time{})
+		if err != nil {
+			t.Fatalf("setup: write the window update: %v", err)
+		}
+		if _, err := readAllErr(c, 1, 10*time.Second); err != nil {
+			t.Fatalf("setup: read the window update: %v", err)
+		}
 	}
 	var snd, rcv []uint64
-	waitFor(t, 10*time.Second, "setup: the sender learns the receiver's window", func() bool {
+	ok := func() bool {
 		snd, rcv = tcpStateOf(c, "snd", "SndUna", "SndNxt", "SndWnd"), tcpStateOf(s, "rcv", "RcvNxt", "RcvAcc")
-		return snd[0] == snd[1] && snd[1] == rcv[0] && uint32(snd[0]+snd[2]) == uint32(rcv[1]) && recvQueue(s) == 0
-	})
-	t.Logf("sender window %d", snd[2])
+		return snd[0] == snd[1] && snd[1] == rcv[0] && snd[2] >= syncWindowMin
+	}
+	nudge()
+	for deadline, next := time.Now().Add(10*time.Second), time.Now().Add(time.Second); !ok(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("setup: the sender did not learn an open window within 10s: sender una %d nxt %d window %d; receiver nxt %d advertised %d, queue %d",
+				snd[0], snd[1], snd[2], rcv[0], uint32(rcv[1]-rcv[0]), recvQueue(s))
+		}
+		if time.Now().After(next) {
+			nudge()
+			next = time.Now().Add(time.Second)
+		}
+	}
 }
+
+// syncWindowMin は、穴を作る前に送り手に求める窓。boost を持つ受け手の受信のバッファは
+// tcpBoostSize で、空のときに知らせる窓は、go.mod の固定の版の gVisor ではその半分の 2 MiB である。
+// そのさらに半分を求める。これだけあれば、穴の segment の後に、試験が積ませる順序外(within the
+// floor の 128 KiB、over the floor の floor 超え、64 KiB の segment の並び)を送れる。
+const syncWindowMin = tcpBoostSize / 4
 
 // queueDrops は、受け手が受信のメモリの不足で受け入れなかった segment の数を返す。
 func queueDrops(c net.Conn) uint64 {
