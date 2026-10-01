@@ -629,8 +629,8 @@ func runRuleDryRun(c *admin.Client, upsert []proto.Rule) error {
 
 // reservedFromServerInfo builds the proto.Reserved set a real Batch would refuse a listen_port
 // for, from GET /api/v1/server's report of the server's own ports. It delegates to
-// admin.ReservedFromServerInfo, the rule internal/vpsd/vpsd.go's construction of Daemon.reserved
-// at startup mirrors, so this CLI path and the Web UI's read-import confirmation
+// admin.ReservedFromServerInfo, the rule internal/vpsd also builds Daemon.reserved with at
+// startup, so this CLI path and the Web UI's read-import confirmation
 // (internal/vpsd/admin/webui_import.go's renderImportConfirm) share one implementation instead of two
 // that can drift apart the way they once did (design.md's revision record, --dry-run entry).
 func reservedFromServerInfo(info *admin.ServerInfo) proto.Reserved {
