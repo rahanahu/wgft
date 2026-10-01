@@ -13,7 +13,6 @@ import (
 
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
-	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
 // errDeviceClosed is returned by the UDP constructors and writes after the
@@ -83,8 +82,9 @@ func (r *udpRegistry) dial(remote netip.AddrPort) (*rawUDPAdapter, error) {
 	return r.open(nil, &remote)
 }
 
-// inject accepts only complete unfragmented local IPv4 unicast UDP. The
-// registry chooses the candidate by its actual bound port. A connected peer
+// injectLocal delivers datagram, which parseLocalUDP accepted for the
+// Device's address with an IPv4 header of ipHeaderLen bytes. The registry
+// chooses the candidate by its actual bound port. A connected peer
 // mismatch still goes through gVisor so its existing rejection/ICMP semantics
 // are preserved; public endpoint Stats decide whether the reservation sticks.
 //
@@ -93,33 +93,15 @@ func (r *udpRegistry) dial(remote netip.AddrPort) (*rawUDPAdapter, error) {
 // opMu is taken, the reservation is refunded and the port is looked up again,
 // so a datagram that races a Close and a rebind reaches the new generation
 // reserved, or gVisor's ICMP when the port is gone.
-func (r *udpRegistry) inject(datagram []byte) (bool, error) {
+func (r *udpRegistry) injectLocal(datagram []byte, ipHeaderLen int) (bool, error) {
 	t := r.accounting
 	if t.device.closed.Load() {
 		return false, os.ErrClosed
 	}
-	if len(datagram) < header.IPv4MinimumSize {
-		return false, errors.New("incomplete IPv4 datagram")
+	port, payload, charged, ok, err := localUDPPayload(datagram, ipHeaderLen, t.local)
+	if !ok {
+		return false, err
 	}
-	ip := header.IPv4(datagram)
-	if !ip.IsValid(len(datagram)) || int(ip.TotalLength()) != len(datagram) || ip.More() || ip.FragmentOffset() != 0 ||
-		ip.Protocol() != uint8(udp.ProtocolNumber) || int(ip.TotalLength()) < int(ip.HeaderLength())+header.UDPMinimumSize {
-		return false, errors.New("registry accepts only complete IPv4 UDP datagrams")
-	}
-	rawDest := ip.DestinationAddress()
-	dest, ok := netip.AddrFromSlice(rawDest.AsSlice())
-	if !ok || !dest.Is4() || dest.IsMulticast() || dest.IsUnspecified() || dest != t.local {
-		return false, errors.New("registry accepts only local IPv4 unicast")
-	}
-	udpHeader := header.UDP(datagram[int(ip.HeaderLength()):])
-	available := len(datagram) - int(ip.HeaderLength())
-	udpLength := int(udpHeader.Length())
-	if udpLength < header.UDPMinimumSize || udpLength > available {
-		return false, nil
-	}
-	port := udpHeader.DestinationPort()
-	payload := udpLength - header.UDPMinimumSize
-	charged := available - header.UDPMinimumSize
 	for {
 		t.mu.Lock()
 		if t.fault != nil {
@@ -156,6 +138,27 @@ func (r *udpRegistry) inject(datagram []byte) (bool, error) {
 		}
 		return kept, err
 	}
+}
+
+// localUDPPayload reads the destination port of a datagram that
+// parseLocalUDP accepted for local, the UDP payload length, and the bytes the
+// receive accounting charges: everything after the UDP header up to the IPv4
+// Total Length. ok is false, with a nil error, when the UDP length does not
+// fit the datagram: the registry drops it. It is false with an error when
+// local is not a unicast address, which only unicast reaches an endpoint
+// through; parseLocalUDP compared the destination with local, so this is a
+// check of the Device's address.
+func localUDPPayload(datagram []byte, ipHeaderLen int, local netip.Addr) (port uint16, payload, charged int, ok bool, err error) {
+	if local.IsMulticast() || local.IsUnspecified() {
+		return 0, 0, 0, false, errNotLocalUDP
+	}
+	udpHeader := header.UDP(datagram[ipHeaderLen:])
+	available := len(datagram) - ipHeaderLen
+	udpLength := int(udpHeader.Length())
+	if udpLength < header.UDPMinimumSize || udpLength > available {
+		return 0, 0, 0, false, nil
+	}
+	return udpHeader.DestinationPort(), udpLength - header.UDPMinimumSize, available - header.UDPMinimumSize, true, nil
 }
 
 // closeAll marks the Device closed and lists the endpoints under the lock
