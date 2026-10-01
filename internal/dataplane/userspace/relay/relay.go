@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rahanahu/wgft/internal/lograte"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -467,7 +468,7 @@ func (m *Manager) probeTarget(target string) error {
 	case err := <-res:
 		return err
 	case <-t.C:
-		return fmt.Errorf("target %s did not answer within %s", target, m.probeTimeout)
+		return fmt.Errorf("target %s "+reasontext.DidNotAnswer+" within %s", target, m.probeTimeout)
 	}
 }
 

@@ -84,6 +84,7 @@ func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
 		allow  *allowtargets.List
 		source string // 空でなければ、エージェントが渡す設定の名前の代わりに使う
 		refuse error
+		hang   bool // 宛先への試し接続が応えない
 		want   string
 	}{
 		{name: "tcp bind failed", rule: reasonTCPRule("r1", "192.168.1.20:25565", 25565), refuse: netstackBindErr("tcp", 25565),
@@ -95,6 +96,9 @@ func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
 		// 設定の名前が無い拒否の文言("is not allowed")も同じ分類になる
 		{name: "target not allowed, no source name", rule: reasonTCPRule("r1", "192.168.9.9:25565", 25565), allow: narrow,
 			source: "-", want: doctor.ReasonTargetNotAllowed},
+		// TCP の宛先への試し接続が期限までに応えない。中継の期限(2 秒)を待つ
+		{name: "tcp target did not answer", rule: reasonTCPRule("r1", "192.168.1.20:25565", 25565), hang: true,
+			want: doctor.ReasonTargetTimeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newUserspaceDataplane(tc.allow, resource.Limits{})
@@ -107,8 +111,16 @@ func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
 			if tc.refuse != nil {
 				refuse[tc.rule.ListenPort.Lo] = tc.refuse
 			}
+			stop := make(chan struct{})
+			if tc.hang {
+				opts.Dial = func(string, string) (net.Conn, error) {
+					<-stop
+					return nil, errors.New("stopped")
+				}
+			}
 			m := relay.New(reasonNetwork{refuse: refuse}, opts)
 			t.Cleanup(m.Close)
+			t.Cleanup(func() { close(stop) }) // m.Close より先に、応えない接続を終わらせる
 			m.Apply(relay.DesiredFromRules([]proto.AgentRule{tc.rule}))
 			sts := ruleStatuses(m.Status())
 			if len(sts) != 1 || sts[0].State != proto.StatusError {

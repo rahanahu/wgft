@@ -51,6 +51,9 @@ const LoopbackUnsupported = "does not forward to loopback targets"
 // 含む sysctl の名前である(設計文書 7b.1 節)。
 const IPForward = "net.ipv4.ip_forward"
 
+// DidNotAnswer は、宛先への試し接続が期限までに応えなかった理由が含む句である(設計文書 5.2 節)。
+const DidNotAnswer = "did not answer"
+
 // RuleDisabled は、server がルール自身の無効のために公開しなかった理由である。
 const RuleDisabled = "disabled"
 

@@ -932,7 +932,7 @@ func targetReasonCode(reason string) string {
 		return ReasonTargetLoopbackUnsupported
 	case strings.Contains(reason, "connection refused"):
 		return ReasonConnectionRefused
-	case strings.Contains(reason, "timeout") || strings.Contains(reason, "timed out") || strings.Contains(reason, "did not answer"):
+	case strings.Contains(reason, "timeout") || strings.Contains(reason, "timed out") || strings.Contains(reason, reasontext.DidNotAnswer):
 		return ReasonTargetTimeout
 	case strings.Contains(reason, "no route to host") || strings.Contains(reason, "unreachable"):
 		return ReasonTargetUnreachable
