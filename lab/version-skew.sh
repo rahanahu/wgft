@@ -183,7 +183,7 @@ log_has() { grep -q -- "$2" "$1" 2>/dev/null; }
 # "agent ls --json" (the same --json + python3 idiom lab/lifecycle.sh's flows_established uses).
 # This test only ever has one agent ("home"), so the last entry is unambiguous. The state only
 # becomes "ok" once the WireGuard handshake has actually completed (heartbeat(),
-# internal/agent/agent.go); it is "error" with reason "handshake not established" until then.
+# internal/agent/heartbeat.go); it is "error" with reason "handshake not established" until then.
 # agent_registered (above) only means the admin API already knows the agent's name, which is
 # true well before that: after a restart, probing TCP/UDP before the tunnel is actually up sends
 # the first SYN into a wgft0 that has no peer configured yet, and that SYN is dropped and

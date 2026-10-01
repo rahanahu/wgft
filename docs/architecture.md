@@ -47,11 +47,11 @@ CLI の `wgft rule add`(`cmd/wgft/rule.go` の `newRuleAddCmd`)は `proto.Rule` 
 
 変更があった場合、`Daemon.Batch` は `internal/vpsd/stream` の `Hub.PushAll` を呼び、接続中の全エージェントへ新しい全体状態を配ります。
 
-エージェント側では、stream 経由で全体状態を受け取ると `internal/agent` の `runtime.apply`(`agent.go`)が呼ばれ、`internal/dataplane/userspace/relay` の `Manager.Apply` が宣言された `(proto, port)` と現在のリスナーを突き合わせて開閉します。
+エージェント側では、stream 経由で全体状態を受け取ると `internal/agent` の `runtime.apply`(`apply.go`)が呼ばれ、`internal/dataplane/userspace/relay` の `Manager.Apply` が宣言された `(proto, port)` と現在のリスナーを突き合わせて開閉します。
 
 ### エージェントの起動
 
-`internal/agent` の `Run`(`agent.go`)は、まず `credentials.Acquire` で認証情報ファイルの隣の `.lock` に排他をかけ、二重起動を検出します。続けて `credentials.LoadOrNew` で `agent.json` を読み、鍵が無ければ生成し、未登録であれば `ensureRegistered` が `WGFT_JOIN` を使って初回登録を行います。
+`internal/agent` の `Run`(`run.go`)は、まず `credentials.Acquire` で認証情報ファイルの隣の `.lock` に排他をかけ、二重起動を検出します。続けて `credentials.LoadOrNew` で `agent.json` を読み、鍵が無ければ生成し、未登録であれば `ensureRegistered` が `WGFT_JOIN` を使って初回登録を行います。
 
 認証情報ファイルに前回の全体状態(`LastState`)が残っていれば、`runtime.apply` が `internal/dataplane/userspace/tunnel` の `New` でトンネルを先に立て、`internal/dataplane/userspace/relay` の `Manager.Apply` でリスナーを開きます。これは、vpsd が停止中でも VPS 側に wg ピアが残っていれば転送が復旧するようにするための順序です。
 
