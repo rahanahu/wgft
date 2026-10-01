@@ -543,18 +543,22 @@ func addRoute(t *testing.T, l netlink.Link, dst string) {
 	}
 }
 
-// サーバのトンネルアドレスを覆う LAN のアドレスや細かい経路があれば、何も作らずに普通のエラーで止まる。
-// サーバのアドレスを覆わない細かい経路と、帯より広い経路は妨げない (design.md 7b.1 節)。
+// 他のインタフェースのアドレスか経路がエージェントの帯と重なれば、向きを問わず、何も作らずに普通のエラー
+// (OverlapError) で止まる。帯の中の細かい経路はサーバのトンネルアドレスを覆わなくても拒み、帯を含む広い
+// 経路も拒む。CoversServer は、重なりがサーバへの通信も wgft0 から奪うかどうかを示す。帯と重ならない
+// 経路は妨げない (design.md 7b.1 節)。
 func TestAgentEnsureRefusesAddressOverlap(t *testing.T) {
 	cfg := labAgentCfg(t)
 	cases := []struct {
 		name, addr, route string
 		want              string // 空なら通る
+		covers            bool
 	}{
-		{"LAN address in the range", "10.201.0.50/24", "", `address 10.201.0.50/24 on interface "` + lanIf + `"`},
-		{"narrower route covering the server", "192.168.77.1/24", "10.201.0.0/25", `route 10.201.0.0/25 on interface "` + lanIf + `"`},
-		{"narrower route not covering the server", "192.168.77.1/24", "10.201.0.128/25", ""},
-		{"broader route", "192.168.77.1/24", "10.0.0.0/8", ""},
+		{"LAN address in the range", "10.201.0.50/24", "", `address 10.201.0.50/24 on interface "` + lanIf + `"`, true},
+		{"narrower route covering the server", "192.168.77.1/24", "10.201.0.0/25", `route 10.201.0.0/25 on interface "` + lanIf + `"`, true},
+		{"narrower route not covering the server", "192.168.77.1/24", "10.201.0.128/25", `route 10.201.0.128/25 on interface "` + lanIf + `"`, false},
+		{"broader route", "192.168.77.1/24", "10.0.0.0/8", `route 10.0.0.0/8 on interface "` + lanIf + `"`, false},
+		{"route next to the range", "192.168.77.1/24", "10.201.1.0/24", "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -564,10 +568,15 @@ func TestAgentEnsureRefusesAddressOverlap(t *testing.T) {
 			if c.route != "" {
 				addRoute(t, l, c.route)
 			}
+			// 失敗した呼び出しは作ったリンクを消すので、後から見えないことでは順序を確かめられない。
+			// 作成の直後に呼ばれる hook で、拒否が作成より前だったことを確かめる。
+			var created bool
+			agentAfterCreate = func(string) error { created = true; return nil }
+			defer func() { agentAfterCreate = nil }()
 			_, err := EnsureAgent(cfg)
 			if c.want == "" {
 				if err != nil {
-					t.Fatalf("a route that does not take the server away refused the agent: %v", err)
+					t.Fatalf("a route that does not overlap the range refused the agent: %v", err)
 				}
 				assertConverged(t, cfg, cfg.Server.Endpoint)
 				return
@@ -578,13 +587,26 @@ func TestAgentEnsureRefusesAddressOverlap(t *testing.T) {
 			if startup.IsRefusal(err) {
 				t.Fatalf("the overlap became a startup refusal: %v", err)
 			}
+			var oe *OverlapError
+			if !errors.As(err, &oe) {
+				t.Fatalf("err = %v (%T), want an *OverlapError", err, err)
+			}
+			if oe.CoversServer != c.covers {
+				t.Errorf("CoversServer = %v, want %v: %v", oe.CoversServer, c.covers, err)
+			}
 			for _, want := range []string{c.want, "10.201.0.0/24", "WGFT_WG_ADDRESS", "server's operator"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error lacks %q: %v", want, err)
 				}
 			}
+			if created {
+				t.Error("the link was created before the overlap was refused")
+			}
 			if _, e := netlink.LinkByName(agentIf); e == nil {
 				t.Error("the link was created despite the overlap")
+			}
+			if _, e := netlink.LinkByName(AgentStagingName(agentIf)); e == nil {
+				t.Error("the staging link was created despite the overlap")
 			}
 		})
 	}
