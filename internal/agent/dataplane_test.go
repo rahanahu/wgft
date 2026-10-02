@@ -15,16 +15,17 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/usermode"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // us は runtime の dataplane をユーザー空間モードの実装として返す。トンネルと中継を直接確かめる
 // 試験のための口である。
-func (rt *runtime) us() *userspaceDataplane { return rt.dp.(*userspaceDataplane) }
+func (rt *runtime) us() *usermode.Dataplane { return rt.dp.(*usermode.Dataplane) }
 
 // newTestUserspace は、宛先の許可一覧も予算の指定も持たないユーザー空間モードの dataplane を作る。
-func newTestUserspace() *userspaceDataplane { return newUserspaceDataplane(nil, resource.Limits{}) }
+func newTestUserspace() *usermode.Dataplane { return usermode.New(nil, resource.Limits{}) }
 
 // fakeDataplane は runtime の境目の試験に使う記録器である。トンネルを本当に立てずに、runtime が
 // 境目をどう呼ぶかを確かめる。
@@ -208,15 +209,15 @@ func TestNewRuntimePassesTheAllowlistToTheDataplane(t *testing.T) {
 	}
 	limits := resource.Limits{UDPTotal: 16, TCPTotal: 8}
 	rt := newRuntime(Options{AllowTargets: list, Limits: limits}, &credentials.Credentials{}, wgtypes.Key{})
-	us, ok := rt.dp.(*userspaceDataplane)
+	us, ok := rt.dp.(*usermode.Dataplane)
 	if !ok {
-		t.Fatalf("dataplane is %T, want *userspaceDataplane", rt.dp)
+		t.Fatalf("dataplane is %T, want *usermode.Dataplane", rt.dp)
 	}
-	if us.allow != list || us.allow != rt.opts.AllowTargets {
-		t.Errorf("dataplane allowlist = %v, want the same list as opts.AllowTargets (%v)", us.allow, list)
+	if us.Allow != list || us.Allow != rt.opts.AllowTargets {
+		t.Errorf("dataplane allowlist = %v, want the same list as opts.AllowTargets (%v)", us.Allow, list)
 	}
-	if us.limits != limits {
-		t.Errorf("dataplane limits = %+v, want %+v", us.limits, limits)
+	if us.Limits != limits {
+		t.Errorf("dataplane limits = %+v, want %+v", us.Limits, limits)
 	}
 }
 

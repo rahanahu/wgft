@@ -56,7 +56,7 @@ func TestControlRotateKeyReplyOnSaveFailure(t *testing.T) {
 	rt.mu.Lock()
 	rt.f.WGPrivateKey = oldKey.String()
 	path := rt.opts.CredentialsPath
-	before := rt.us().tun
+	before := rt.us().Tun
 	rt.mu.Unlock()
 	if before == nil {
 		t.Fatal("no tunnel is running before the request")
@@ -74,7 +74,7 @@ func TestControlRotateKeyReplyOnSaveFailure(t *testing.T) {
 		t.Error("the old key is not in effect after the failed rotate-key")
 	}
 	// 閉じたトンネルは dataplane が nil に置き換えるので、同じ値が残っていれば閉じていない
-	if rt.us().tun != before {
+	if rt.us().Tun != before {
 		t.Error("the running tunnel was closed or replaced although the key was not saved")
 	}
 }

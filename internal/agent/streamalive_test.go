@@ -338,7 +338,7 @@ func TestCheckTunnelWakesTheStreamOncePerHandshake(t *testing.T) {
 // だけの健全な接続を切って繋ぎ直す繰り返しになる。相手は pong を返さない server なので、
 // applySeq の守りが無ければ必ず切られる。
 func TestPingIsNotJudgedWhileAFullStateIsApplied(t *testing.T) {
-	// 適用の最中(applySeq が奇数)は ping そのものを送らない。rl.Apply は届かない TCP の宛先 1 つに
+	// 適用の最中(applySeq が奇数)は ping そのものを送らない。Relay.Apply は届かない TCP の宛先 1 つに
 	// つき 10 秒を使うので、適用は ping の周期を何度も跨ぎうる。適用が終われば判定は戻る
 	t.Run("a long apply outlasts several ping periods", func(t *testing.T) {
 		endpoint, pin, conns := newSilentStreamServer(t, false)

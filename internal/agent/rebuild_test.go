@@ -14,6 +14,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/usermode"
 	"github.com/rahanahu/wgft/internal/dataplane"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/utun"
@@ -157,7 +158,7 @@ func TestCheckTunnelBacksOffWhileTheServerIsUnreachable(t *testing.T) {
 	rt.rebuild = rebuildState{after: 150 * time.Millisecond, backoffMax: 600 * time.Millisecond}
 
 	wants := []time.Duration{150 * time.Millisecond, 300 * time.Millisecond, 600 * time.Millisecond}
-	prev := rt.us().tun
+	prev := rt.us().Tun
 	last := rt.tunStart
 	for i, want := range wants {
 		at := waitRebuild(t, rt, prev, want+2*time.Second)
@@ -168,7 +169,7 @@ func TestCheckTunnelBacksOffWhileTheServerIsUnreachable(t *testing.T) {
 		if _, err := prev.ListenUDP(3000); err == nil {
 			t.Fatalf("rebuild %d: the replaced tunnel still opened a listener; it was not closed first", i+1)
 		}
-		prev, last = rt.us().tun, rt.tunStart
+		prev, last = rt.us().Tun, rt.tunStart
 	}
 
 	rt.close()
@@ -198,9 +199,9 @@ func TestCheckTunnelResetsAfterHandshake(t *testing.T) {
 
 	// 1. ハンドシェイクが成立している間は作り直さず、間隔は初期値のままである
 	waitHandshake(t, rt, 20*time.Second)
-	before := rt.us().tun
+	before := rt.us().Tun
 	rt.checkTunnel(time.Now())
-	if rt.us().tun != before {
+	if rt.us().Tun != before {
 		t.Fatal("a tunnel with a fresh handshake was rebuilt")
 	}
 	if rt.rebuild.wait != rt.rebuild.after {
@@ -213,10 +214,10 @@ func TestCheckTunnelResetsAfterHandshake(t *testing.T) {
 	if want := 2 * rt.rebuild.after; rt.rebuild.wait != want {
 		t.Fatalf("wait = %s after the first rebuild, want %s", rt.rebuild.wait, want)
 	}
-	if n := len(rt.us().rl.Status()); n != 1 {
+	if n := len(rt.us().Relay.Status()); n != 1 {
 		t.Fatalf("listeners after the rebuild = %d, want 1", n)
 	}
-	for _, s := range rt.us().rl.Status() {
+	for _, s := range rt.us().Relay.Status() {
 		if s.Err != nil {
 			t.Fatalf("listener %v after the rebuild: %v", s.Key, s.Err)
 		}
@@ -228,9 +229,9 @@ func TestCheckTunnelResetsAfterHandshake(t *testing.T) {
 		t.Fatalf("declare the agent peer again: %v", err)
 	}
 	waitHandshake(t, rt, 20*time.Second)
-	rebuilt := rt.us().tun
+	rebuilt := rt.us().Tun
 	rt.checkTunnel(time.Now())
-	if rt.us().tun != rebuilt {
+	if rt.us().Tun != rebuilt {
 		t.Fatal("the tunnel was rebuilt again although the handshake had succeeded")
 	}
 	if rt.rebuild.wait != rt.rebuild.after {
@@ -269,11 +270,11 @@ func TestCheckTunnelRetriesAfterAFailedRebuild(t *testing.T) {
 
 	// 2. 閾値を過ぎると作り直しが起き、作成に失敗してトンネルの無い状態になる
 	deadline := time.Now().Add(rt.rebuild.after + 5*time.Second)
-	for rt.us().tun != nil && time.Now().Before(deadline) {
+	for rt.us().Tun != nil && time.Now().Before(deadline) {
 		rt.checkTunnel(time.Now())
 		time.Sleep(10 * time.Millisecond)
 	}
-	if rt.us().tun != nil {
+	if rt.us().Tun != nil {
 		t.Fatal("the failing build did not leave the agent without a tunnel")
 	}
 	if rt.rebuild.retryAt.IsZero() {
@@ -287,13 +288,13 @@ func TestCheckTunnelRetriesAfterAFailedRebuild(t *testing.T) {
 
 	// 3. 次の判定で作成を試し直し、今度は成功してリスナーも開き直る
 	rt.checkTunnel(time.Now())
-	if rt.us().tun == nil {
+	if rt.us().Tun == nil {
 		t.Fatal("the retry did not build a tunnel")
 	}
-	if n := len(rt.us().rl.Status()); n != 1 {
+	if n := len(rt.us().Relay.Status()); n != 1 {
 		t.Fatalf("listeners after the retry = %d, want 1", n)
 	}
-	for _, s := range rt.us().rl.Status() {
+	for _, s := range rt.us().Relay.Status() {
 		if s.Err != nil {
 			t.Fatalf("listener %v after the retry: %v", s.Key, s.Err)
 		}
@@ -326,7 +327,7 @@ func TestCheckTunnelDoesNotResurrectAClosedTunnel(t *testing.T) {
 	rt.close()
 	for i := 0; i < 5; i++ {
 		rt.checkTunnel(time.Now())
-		if rt.us().tun != nil {
+		if rt.us().Tun != nil {
 			t.Fatal("the watchdog rebuilt a tunnel that was closed on purpose")
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -337,12 +338,12 @@ func TestCheckTunnelDoesNotResurrectAClosedTunnel(t *testing.T) {
 	rt2.rebuild = rebuildState{after: 50 * time.Millisecond, backoffMax: 100 * time.Millisecond}
 	failNextTunnel(t)
 	deadline := time.Now().Add(5 * time.Second)
-	for rt2.us().tun != nil && time.Now().Before(deadline) {
+	for rt2.us().Tun != nil && time.Now().Before(deadline) {
 		rt2.checkTunnel(time.Now())
 		time.Sleep(10 * time.Millisecond)
 	}
-	if rt2.us().tun != nil || rt2.rebuild.retryAt.IsZero() {
-		t.Fatalf("expected a failed build waiting for a retry: tun=%v retryAt=%v", rt2.us().tun != nil, rt2.rebuild.retryAt)
+	if rt2.us().Tun != nil || rt2.rebuild.retryAt.IsZero() {
+		t.Fatalf("expected a failed build waiting for a retry: tun=%v retryAt=%v", rt2.us().Tun != nil, rt2.rebuild.retryAt)
 	}
 	rt2.mu.Lock()
 	rt2.closeLocked() // rotate-key が全体状態を適用し直す前に行うのと同じ手順
@@ -352,7 +353,7 @@ func TestCheckTunnelDoesNotResurrectAClosedTunnel(t *testing.T) {
 	}
 	for i := 0; i < 5; i++ {
 		rt2.checkTunnel(time.Now())
-		if rt2.us().tun != nil {
+		if rt2.us().Tun != nil {
 			t.Fatal("the watchdog rebuilt a tunnel after it was closed while a retry was pending")
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -363,15 +364,15 @@ func TestCheckTunnelDoesNotResurrectAClosedTunnel(t *testing.T) {
 // (bind や資源の失敗)を、実際の故障なしに起こすための差し替え口。
 func failNextTunnel(t *testing.T) {
 	t.Helper()
-	real := newTunnel
+	real := usermode.NewTunnel
 	var failed atomic.Bool
-	newTunnel = func(cfg tunnel.Config) (*tunnel.Tunnel, error) {
+	usermode.NewTunnel = func(cfg tunnel.Config) (*tunnel.Tunnel, error) {
 		if failed.CompareAndSwap(false, true) {
 			return nil, errors.New("simulated failure to create the tunnel")
 		}
 		return real(cfg)
 	}
-	t.Cleanup(func() { newTunnel = real })
+	t.Cleanup(func() { usermode.NewTunnel = real })
 }
 
 // newRebuildTestRuntime は、endpoint へ向くトンネルと中継を立てた runtime を返す。
@@ -405,7 +406,7 @@ func waitRebuild(t *testing.T, rt *runtime, prev *tunnel.Tunnel, budget time.Dur
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		rt.checkTunnel(time.Now())
-		if rt.us().tun != prev {
+		if rt.us().Tun != prev {
 			return time.Now()
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -419,7 +420,7 @@ func waitHandshake(t *testing.T, rt *runtime, budget time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
-		if !rt.us().tun.Status().LastHandshake.IsZero() {
+		if !rt.us().Tun.Status().LastHandshake.IsZero() {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -526,19 +527,19 @@ func TestCheckTunnelBacksOffWhileTheBuildKeepsFailing(t *testing.T) {
 	defer rt.close()
 	rt.rebuild = rebuildState{after: 300 * time.Second, backoffMax: 900 * time.Second}
 
-	real := newTunnel
+	real := usermode.NewTunnel
 	var builds int
-	newTunnel = func(tunnel.Config) (*tunnel.Tunnel, error) {
+	usermode.NewTunnel = func(tunnel.Config) (*tunnel.Tunnel, error) {
 		builds++
 		return nil, errors.New("simulated failure to create the tunnel")
 	}
-	t.Cleanup(func() { newTunnel = real })
+	t.Cleanup(func() { usermode.NewTunnel = real })
 
 	// 閾値を過ぎた判定で作り直しが起き、作成に失敗する
 	now := rt.tunStart.Add(301 * time.Second)
 	rt.checkTunnel(now)
-	if rt.us().tun != nil || builds != 1 {
-		t.Fatalf("after the failed rebuild: tun=%v builds=%d, want no tunnel and 1 build", rt.us().tun != nil, builds)
+	if rt.us().Tun != nil || builds != 1 {
+		t.Fatalf("after the failed rebuild: tun=%v builds=%d, want no tunnel and 1 build", rt.us().Tun != nil, builds)
 	}
 	// 1 回目の再試行は次の判定。以後は 300、600、900、900 秒の間隔を空ける
 	for i, gap := range []time.Duration{30 * time.Second, 300 * time.Second, 600 * time.Second, 900 * time.Second, 900 * time.Second} {

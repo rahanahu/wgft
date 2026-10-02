@@ -14,7 +14,7 @@ import (
 // 黙って SYN を捨てるルールをラボで作って確認した)。"listen tcp4 ...: bind: ..." の行は、Go の
 // net.Listen がそのまま返す文言である。"tcp/8461: bind tcp ...: ..." と "udp/8462: bind udp ...:
 // ..." の行は、エージェントのユーザー空間モードの中継が bind の失敗で実際に組み立てる文言の形
-// である。internal/agent/dataplane_userspace.go の ruleStatuses は "<Key>: <Err>" を組む。
+// である。internal/agent/usermode の RuleStatuses は "<Key>: <Err>" を組む。
 // エージェントは gVisor の netstack の上で待ち受けを開くので、bind の失敗はその Err に Go の
 // net.OpError がそのまま乗り、internal/nettun/listen.go の ListenTCP と gonet.DialUDP(UDP の
 // リスナーが経由する。同ファイル ListenUDP)のどちらも Op を "listen" ではなく "bind" にするため、

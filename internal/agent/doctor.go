@@ -60,7 +60,7 @@ func doctorSocketBuffers(r sockbuf.Reading) *controlapi.DoctorSocketBuffers {
 const defaultDoctorLockWait = 2 * time.Second
 
 // doctorSnapshot は doctor の応答を組む。値は collectDoctor で、テストだけが panic を模すために
-// 差し替える(newTunnel と同じ流儀の、この package の中だけの口)。
+// 差し替える(この package の中だけの口)。
 var doctorSnapshot = (*runtime).collectDoctor
 
 // doctorResponseLine は制御ソケットに書く doctor の応答 1 行を組む。JSON は複数行にせず、

@@ -1100,12 +1100,13 @@ internal/
   vpsd/servercheck/      `wgft server check`。internal/vpsd の下位の package のうち store だけを import する(下記)
   vpsd/teardown/         `wgft server teardown`。internal/vpsd の下位の package のうち store だけを import する(下記)
   vpsd/tailnet/          --admin-tailscale の待ち受け(11 節)。internal/vpsd のどの package も import しない(下記)
-  agent/                 制御プレーン(認証情報、stream クライアント、rotate-key)と、2 つのモードの dataplane の実装と選択(下記)
+  agent/                 制御プレーン(認証情報、stream クライアント、rotate-key)と、カーネルモードの dataplane の実装と、2 つのモードの選択(下記)
   agent/credentials/     認証情報ファイル(agent.json)、そのロック、停止中に CLI が認証情報ファイルを書くための排他(9 節)
   agent/allowtargets/    エージェントが接続してよい宛先の一覧(7 節)
   agent/teardown/        wgft agent teardown の判定と順序、撤去のカーネル操作(10.3 節)。実行時の状態に依存しない
   agent/controlapi/      制御ソケットの wire の型と定数(proto と resource だけを import する葉。下記)
   agent/agentdp/         エージェントの dataplane の境目(Dataplane と任意の interface、1 回の読み取りの型、起動の失敗の型)。internal/agent の下では controlapi だけを import する(下記)
+  agent/usermode/        ユーザー空間モードの dataplane。wireguard-go と netstack のトンネルと中継を包む。internal/agent の下では agentdp と allowtargets だけを import する(下記)
   agent/enroll/          登録のクライアントの側(接続文字列の解釈、ピン留めした登録 API の呼び出し、登録の結果の認証情報への記録)
 proto/                   維持する外部仕様としての wire スキーマ(既存フィールドの意味は変えず、加算のみ許す)
 ```
@@ -1120,9 +1121,13 @@ agent は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` をまだ�
 
 この境目は依存の向きの規則を変えない。カーネルモードのために加える部品は `internal/dataplane/linuxkernel` の下に置き、`internal/agent` を import しない。`internal/dataplane/deps_test.go` の `TestDependencyDirection`、`TestPureLayersStayPure`、`TestVpsdSubpackagesDoNotImportVpsd`、`TestPolicyNftablesDoesNotImportGoogleNftables` は変えずに、この配置を検査する。
 
-境目は `internal/agent/agentdp` の interface `Dataplane` である。ユーザー空間モードの実装 `userspaceDataplane` とカーネルモードの実装 `kernelDataplane` は、どちらも `internal/agent` にある。境目の後ろの実装が持つのは、トンネルを立てることと閉じること、ルールの宣言への収束、30 秒ごとの見直し、watchdog が読む最終ハンドシェイク、ハートビートと `agent doctor` が共有する 1 回の読み取りである。処理済み世代と `last_state` の記録、トンネルの作成の試し直しの予定、トンネルを作り直すかどうかの判定は、境目の手前の実行時の状態に残す。ルールの収束は、宣言をまとめて公開できなかった backend 全体の失敗(7b.3 節の 3 つ目の種類)を誤りとして返し、このとき処理済み世代は進まない。ルール単位の失敗は誤りにせず、ルールごとの状態として読み取りに載せる。
+境目は `internal/agent/agentdp` の interface `Dataplane` である。ユーザー空間モードの実装は `internal/agent/usermode` の `Dataplane` であり、カーネルモードの実装 `kernelDataplane` は `internal/agent` にある。境目の後ろの実装が持つのは、トンネルを立てることと閉じること、ルールの宣言への収束、30 秒ごとの見直し、watchdog が読む最終ハンドシェイク、ハートビートと `agent doctor` が共有する 1 回の読み取りである。処理済み世代と `last_state` の記録、トンネルの作成の試し直しの予定、トンネルを作り直すかどうかの判定は、境目の手前の実行時の状態に残す。ルールの収束は、宣言をまとめて公開できなかった backend 全体の失敗(7b.3 節の 3 つ目の種類)を誤りとして返し、このとき処理済み世代は進まない。ルール単位の失敗は誤りにせず、ルールごとの状態として読み取りに載せる。
 
 カーネルモードの実装だけが持つ処理は、`internal/agent/agentdp` の任意の interface に置く。全体状態の適用の前の名前の解決、wg 設定の検証、30 秒ごとの見直し、変更の通知の購読、起動時の所有の判定、`agent doctor` のためのカーネルの読み取りである。実行時の状態は任意の interface を型アサーションで探し、満たさない実装ではその処理を飛ばす。メソッドの形がずれても黙って飛ばされないよう、カーネルモードの実装がそれぞれの interface を満たすことをコンパイル時に検査する。`agentdp` は実行時の状態と 2 つのモードの実装の両方から import されるので、それらより下に置く。モジュールの中から直接 import するのは、`proto`、`internal/resource`、`internal/dataplane`、読み取りの型が載せる中継とソケットのバッファの型の package(`internal/dataplane/userspace/relay`、`internal/dataplane/userspace/sockbuf`)、カーネルの読み取りの型を持つ `internal/agent/controlapi` だけである。`internal/agent` とその他の下位の package、`internal/dataplane/linuxkernel` には推移的にも依存しない。`internal/dataplane/deps_test.go` の `TestAgentDataplaneBoundaryImports` がこの規則を検査する。
+
+`internal/agent/usermode` はユーザー空間モードの実装を持ち、wireguard-go と netstack のトンネル(`internal/dataplane/userspace/tunnel`)と、その上の中継(`internal/dataplane/userspace/relay`)を包む。`internal/agent` の下で import するのは `agentdp` と `allowtargets` だけである。`internal/agent` 自身と `internal/dataplane/linuxkernel` には推移的にも依存しないので、`internal/agent` にあるカーネルモードの実装にも依存しない。`internal/agent/kernelmode` という package を設けたときも、その package に依存しないことを同じ検査が確かめる。`internal/dataplane/deps_test.go` の `TestAgentModesStayApart` がこの規則を検査する。
+
+Go には、package をまたいでテストにだけ名前を見せる仕組みが無い。`internal/agent` のテストがユーザー空間モードの実装の中身を読み書きできるよう、`usermode` はトンネルと中継のフィールド、宛先の許可一覧とフロー予算のフィールド、トンネルの作成と状態の読み取りの差し替え口、ルールごとの状態の合成、中継の調整値の組み立てを公開する。これらはテストのための口であり、本番のコードが `usermode` の外から使ってよいのは作成の関数 `New` だけである。`internal/dataplane/deps_test.go` の `TestAgentModeTestSeamsStayInTests` が、`usermode` を import するモジュールの中の package の本番のファイルを型検査し、この規則を検査する。
 
 `internal/agent` の下位の package は `internal/agent` を import しない。実行時の状態を持つ `internal/agent` が下位の package を使う向きだけを許し、`wgft agent teardown` のような 1 回限りのコマンドを実行時の状態から切り離すためである。`internal/vpsd` の下位の package と同じ規則であり、`internal/dataplane/deps_test.go` の `TestAgentSubpackagesDoNotImportAgent` が検査する。
 
@@ -4024,3 +4029,5 @@ macOS の launchd には `RestartPreventExitStatus` に当たる設定が無い�
 - `--admin-tailscale` の待ち受けがホスト自身からの接続を拒むようにした(2026-10-02、11 節、所有者の決定):この待ち受けは、VPS 自身から tailnet のアドレスへの接続を受け付けていた。この接続はループバックを通り、接続元が VPS 自身の tailnet のアドレスになるので、インタフェースへの縛りも接続元の検査も通る。11 節はこの到達を書いていた。所有者の決定により、VPS 上での管理は Unix ソケットに限り、tailnet の待ち受けは tailnet の他の端末だけを受ける。11 節の「ホスト自身からの接続の拒否」のとおり、接続元が接続の宛先かホストのどれかのアドレスと同じ接続を、HTTP を読まずに閉じる。CLI のフラグと HTTP の形は変えていない。ラボで、カーネルモードとユーザー空間モード(非特権の利用者)の両方について、tailscale0 という名前の veth に tailnet の帯のアドレスを付けて確かめた。修正前は VPS 自身から応答が返り、修正後は VPS 自身からの接続が、既定の接続元でも tailscale0 にある別のアドレスを接続元に選んでも閉じられ、veth の向こうの tailnet の端末からは応答が返った。縛ったインタフェースの外にある帯の内側のアドレスを接続元に選んだ接続は、修正の前から縛りで届かなかった。未確認:Tailscale そのものを動かしたホストでの確かめ
 
 - 名前の解決に失敗して直前の解決の結果で転送を続けているルールの理由で、長いホスト名が目印を切り落とす問題を直した(2026-10-02、7b.2 節、10.2a 節。理由の文言は人が読む値で、7a.11 節の保証の外):この理由はホスト名を 2 回含む。頭の引用と、解決の誤りの文面である。ホスト名は 253 バイトまで有効なので、hub の切り詰め(512 バイト)が目印 `; still forwarding to ` を落とし、`server doctor` は転送を続けているルールを解決できないと判定した。エージェントは、目印までの文言が切り詰めに収まるように、解決の誤りの文面だけを短くして切り詰めを示す。目印の後ろには、`server doctor` が `rule.target` を分類する試し接続の誤り(拒否、期限切れ、到達不能)を収める長さを残す。頭の文言、目印、目印の後ろの文言は変えない。`server doctor` の分類は変えていないので、稼働中の別の版のエージェントの理由も今までどおり分類する。253 バイトのホスト名の理由を実際の書き手、hub の切り詰め、`server doctor` に通す試験で、転送を続けていると読めることを確かめた。許可一覧の拒否の理由は、ホスト名に解決したアドレスの一覧が続いて、アドレスが多いと同じ切り詰めに当たりうる。同じ原因ではないので、この変更では直していない。
+
+- エージェントのユーザー空間モードの dataplane を `internal/agent/usermode` へ移した(2026-10-02、7a.7 節。挙動は変えていない):`internal/agent` の `dataplane_userspace.go` にあったユーザー空間モードの実装と、その単体試験を、下位の package `internal/agent/usermode` へ移した。カーネルモードの実装と実行時の状態は `internal/agent` に残した。実行時の状態が使う作成の関数を `New` として公開した。`internal/agent` の試験が使う型、フィールド、トンネルの作成と状態の読み取りの差し替え口、ルールごとの状態の合成、中継の調整値の組み立ても、名前を大文字に改めて公開した。Go には package をまたいで試験にだけ名前を見せる仕組みが無いためである。本番のコードが `usermode` の外からこれらを使わないことは、`TestAgentModeTestSeamsStayInTests` が型検査で確かめる。宣言の本文は、名前と package の修飾子と、注釈の中の名前を除いて変えていない。例外は試験の次の箇所である。カーネルモードの `agent doctor` の試験が使う 1 行の補助関数は、移した試験のファイルにあったので、その試験のファイルに写した。試験の失敗の文言の 1 つが移した型の名前を含んでいたので、新しい名前に直した。7a.7 節の配置の木と本文に `usermode` を加え、`TestAgentModesStayApart` が `usermode` の import を検査する。

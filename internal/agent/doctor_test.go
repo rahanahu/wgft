@@ -18,6 +18,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/usermode"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
 	"github.com/rahanahu/wgft/internal/resource"
@@ -28,7 +29,7 @@ import (
 // プロセスしか持たない証拠が 1 行の JSON で返ることを確かめる。応答を読んで表示する側は別の
 // コマンドが持つので、ここでは扱わない。
 //
-// readTunnelStatus と doctorSnapshot を差し替える試験があるので、この file の試験は並行させない。
+// usermode.ReadTunnelStatus と doctorSnapshot を差し替える試験があるので、この file の試験は並行させない。
 
 // controlAsk は制御ソケットに 1 行の指示を送り、応答の 1 行を返す。
 type controlAsk func(t *testing.T, req string) string
@@ -96,14 +97,14 @@ func askDoctor(t *testing.T, ask controlAsk) controlapi.DoctorResponse {
 	return parseDoctor(t, ask(t, controlapi.DoctorCommand))
 }
 
-// fakeTunnelStatus は readTunnelStatus を差し替え、読みの回数を返す。トンネルを本当に立てずに
+// fakeTunnelStatus は usermode.ReadTunnelStatus を差し替え、読みの回数を返す。トンネルを本当に立てずに
 // トンネルのある runtime を組むために使う。
 func fakeTunnelStatus(t *testing.T, next func(n int64) tunnel.Status) *atomic.Int64 {
 	t.Helper()
 	var reads atomic.Int64
-	real := readTunnelStatus
-	readTunnelStatus = func(*tunnel.Tunnel) tunnel.Status { return next(reads.Add(1)) }
-	t.Cleanup(func() { readTunnelStatus = real })
+	real := usermode.ReadTunnelStatus
+	usermode.ReadTunnelStatus = func(*tunnel.Tunnel) tunnel.Status { return next(reads.Add(1)) }
+	t.Cleanup(func() { usermode.ReadTunnelStatus = real })
 	return &reads
 }
 
@@ -200,7 +201,7 @@ func TestDoctorReportsHandshakePending(t *testing.T) {
 	})
 	built := time.Now().Add(-time.Minute)
 	rt := &runtime{
-		dp:       &userspaceDataplane{tun: &tunnel.Tunnel{}},
+		dp:       &usermode.Dataplane{Tun: &tunnel.Tunnel{}},
 		tunStart: built,
 		rebuild:  rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax, wait: 10 * time.Minute},
 	}
@@ -243,7 +244,7 @@ func TestDoctorReadsTheTunnelStatusOnce(t *testing.T) {
 		// 読むたびに別の時点の値を返す。混ざればどれかが食い違う
 		return tunnel.Status{LastHandshake: base.Add(time.Duration(n) * time.Second), RxBytes: n, TxBytes: n}
 	})
-	rt := &runtime{dp: &userspaceDataplane{tun: &tunnel.Tunnel{}}, tunStart: time.Now()}
+	rt := &runtime{dp: &usermode.Dataplane{Tun: &tunnel.Tunnel{}}, tunStart: time.Now()}
 	ask := serveTestControl(t, rt)
 	res := askDoctor(t, ask)
 	if got := reads.Load(); got != 1 {
@@ -264,7 +265,7 @@ func TestDoctorShowsOnlyTheCurrentDeviceHandshake(t *testing.T) {
 	current := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: current} })
 	rt := &runtime{
-		dp:       &userspaceDataplane{tun: &tunnel.Tunnel{}},
+		dp:       &usermode.Dataplane{Tun: &tunnel.Tunnel{}},
 		tunStart: time.Now(),
 		rebuild:  rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax, lastHandshake: stale, observedAt: stale},
 	}
@@ -286,9 +287,9 @@ func TestDoctorGroupsListenersByRule(t *testing.T) {
 	const ports = 500
 	rules := []proto.AgentRule{udpRule(t, "r1", 10000, 10000+ports-1, "192.0.2.5:10000")}
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: time.Now()} })
-	rt := &runtime{dp: &userspaceDataplane{tun: &tunnel.Tunnel{}, rl: relay.New(&fakeRelayNetwork{}, relay.Options{})}, tunStart: time.Now()}
-	t.Cleanup(rt.us().rl.Close)
-	rt.us().rl.Apply(relay.DesiredFromRules(rules))
+	rt := &runtime{dp: &usermode.Dataplane{Tun: &tunnel.Tunnel{}, Relay: relay.New(&fakeRelayNetwork{}, relay.Options{})}, tunStart: time.Now()}
+	t.Cleanup(rt.us().Relay.Close)
+	rt.us().Relay.Apply(relay.DesiredFromRules(rules))
 
 	ask := serveTestControl(t, rt)
 	line := ask(t, controlapi.DoctorCommand)
@@ -317,9 +318,9 @@ func TestDoctorReportsListenerBindFailure(t *testing.T) {
 	rules := []proto.AgentRule{udpRule(t, "r1", 20000, 20002, "192.0.2.5:20000")}
 	fakeNet := &fakeRelayNetwork{failPorts: map[uint16]bool{20001: true}}
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: time.Now()} })
-	rt := &runtime{dp: &userspaceDataplane{tun: &tunnel.Tunnel{}, rl: relay.New(fakeNet, relay.Options{})}, tunStart: time.Now()}
-	t.Cleanup(rt.us().rl.Close)
-	rt.us().rl.Apply(relay.DesiredFromRules(rules))
+	rt := &runtime{dp: &usermode.Dataplane{Tun: &tunnel.Tunnel{}, Relay: relay.New(fakeNet, relay.Options{})}, tunStart: time.Now()}
+	t.Cleanup(rt.us().Relay.Close)
+	rt.us().Relay.Apply(relay.DesiredFromRules(rules))
 
 	ask := serveTestControl(t, rt)
 	res := askDoctor(t, ask)
@@ -352,16 +353,16 @@ func TestDoctorReportsFlowBudget(t *testing.T) {
 	rules := []proto.AgentRule{udpRule(t, "r1", 30000, 30000, "192.0.2.5:30000")}
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: time.Now()} })
 	rt := &runtime{
-		dp: &userspaceDataplane{
-			tun: &tunnel.Tunnel{},
-			rl:  relay.New(&fakeRelayNetwork{}, relay.Options{Limits: resource.Limits{UDPTotal: 16, TCPTotal: 16}}),
+		dp: &usermode.Dataplane{
+			Tun:   &tunnel.Tunnel{},
+			Relay: relay.New(&fakeRelayNetwork{}, relay.Options{Limits: resource.Limits{UDPTotal: 16, TCPTotal: 16}}),
 		},
 		tunStart: time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC),
 	}
-	t.Cleanup(rt.us().rl.Close)
-	rt.us().rl.Apply(relay.DesiredFromRules(rules))
+	t.Cleanup(rt.us().Relay.Close)
+	rt.us().Relay.Apply(relay.DesiredFromRules(rules))
 	// 取れるだけ取らせて、拒否を 1 件作る
-	pool := rt.us().rl.UDPPool()
+	pool := rt.us().Relay.UDPPool()
 	l := pool.Listener("r1")
 	refused := false
 	for i := 0; i < 17; i++ {
@@ -629,7 +630,7 @@ func TestDoctorRulesMapSessionsAndFlowsSeparately(t *testing.T) {
 		{Key: relay.Key{Proto: proto.TCP, Port: 2456}, RuleID: "r1", Listening: true, Sessions: 6, Flows: 3},
 		{Key: relay.Key{Proto: proto.TCP, Port: 2457}, RuleID: "r1", Listening: true, Sessions: 2, Flows: 1},
 	}
-	rules := doctorRules(ruleStatuses(sts), sts)
+	rules := doctorRules(usermode.RuleStatuses(sts), sts)
 	if len(rules) != 1 {
 		t.Fatalf("doctorRules returned %d entries for 1 rule, want 1", len(rules))
 	}
@@ -647,9 +648,9 @@ func TestDoctorClipsLongText(t *testing.T) {
 	long := strings.Repeat("x", 100000)
 	fakeNet := &fakeRelayNetwork{failPorts: map[uint16]bool{40000: true}, failReason: long}
 	fakeTunnelStatus(t, func(int64) tunnel.Status { return tunnel.Status{LastHandshake: time.Now()} })
-	rt := &runtime{dp: &userspaceDataplane{tun: &tunnel.Tunnel{}, rl: relay.New(fakeNet, relay.Options{})}, tunStart: time.Now()}
-	t.Cleanup(rt.us().rl.Close)
-	rt.us().rl.Apply(relay.DesiredFromRules([]proto.AgentRule{udpRule(t, "r1", 40000, 40000, "192.0.2.5:40000")}))
+	rt := &runtime{dp: &usermode.Dataplane{Tun: &tunnel.Tunnel{}, Relay: relay.New(fakeNet, relay.Options{})}, tunStart: time.Now()}
+	t.Cleanup(rt.us().Relay.Close)
+	rt.us().Relay.Apply(relay.DesiredFromRules([]proto.AgentRule{udpRule(t, "r1", 40000, 40000, "192.0.2.5:40000")}))
 
 	ask := serveTestControl(t, rt)
 	line := ask(t, controlapi.DoctorCommand)
