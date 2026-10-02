@@ -120,6 +120,11 @@ type Reconciler struct {
 	// (dataplane.Committed.RepairPending; design.md 7a.3 節: 戻れない地点の後の修復). A retry then
 	// runs the dataplane's Repair even when it would publish the same again.
 	repair bool
+	// unsettled is set while the last transaction failed as a whole (or an Observe failed and was
+	// recorded like such a failure), and while it published with a repair pending. Observe is due
+	// while it is set. It is derived from LastError right where LastError is written, and set
+	// exactly when LastError is not empty; nothing else reads LastError to decide.
+	unsettled bool
 	// last is the Desired value of the last Reconcile, for the status a failed Observe reports.
 	last    Input
 	hasLast bool
@@ -227,6 +232,7 @@ func (r *Reconciler) Reconcile(in Input) (Outcome, error) {
 	if r.repair {
 		r.status.LastError = repairError(gen, out.Committed.Errors)
 	}
+	r.unsettled = r.status.LastError != ""
 	r.status.NeedsRetry = len(out.Failed) > 0 || r.repair
 	r.status.Rules = r.ruleStates(in, out.Failed, nil)
 	r.status.ActiveOnly = r.activeOnly(in)
@@ -266,7 +272,7 @@ func (r *Reconciler) Observe() (drift []string, due bool, err error) {
 	defer r.mu.Unlock()
 	if r.published == nil {
 		// まだ何も commit していないので、比べる相手が無い。最初のトランザクションの失敗だけを試し直す
-		return nil, r.status.LastError != "", nil
+		return nil, r.unsettled, nil
 	}
 	obs, err := r.rt.Dataplane.Observe()
 	if err != nil {
@@ -283,7 +289,7 @@ func (r *Reconciler) Observe() (drift []string, due bool, err error) {
 		r.resync = true
 		r.activePeers = obs.Peers
 	}
-	return drift, r.resync || r.status.LastError != "", nil
+	return drift, r.resync || r.unsettled, nil
 }
 
 // fail records a backend-wide failure: Active, its generation and the retiring set are unchanged.
@@ -291,6 +297,9 @@ func (r *Reconciler) Observe() (drift []string, due bool, err error) {
 // was Active may no longer be forwarding.
 func (r *Reconciler) fail(in Input, err error) {
 	r.status.LastError = err.Error()
+	// Derived from the stored text, not from a second err.Error(), which need not return the same.
+	// An error with an empty text leaves LastError empty, and Observe has never been due for it.
+	r.unsettled = r.status.LastError != ""
 	r.status.NeedsRetry = true
 	r.status.Rules = r.ruleStates(in, nil, err)
 	r.status.ActiveOnly = r.activeOnly(in)
