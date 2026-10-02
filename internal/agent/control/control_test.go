@@ -51,8 +51,8 @@ func TestListenControlShortPath(t *testing.T) {
 // Windows's C:\Users\RUNNER~1\AppData\Local\Temp\<test name><random>\001) to push controlapi.ControlPath(path)
 // past sun_path's limit before this test ever adds anything of its own; skip rather than fail in
 // that case, the same way TestListenControlShortPath (this file) and serveTestControl
-// (internal/agent's doctor_test.go) do. This is not the path-too-long behavior under test here, so skipping loses no
-// coverage of it.
+// (internal/agent's doctor_test.go) do. This is not the path-too-long behavior under test here,
+// so skipping loses no coverage of it.
 func fakeControlServer(t *testing.T, path string, reply func(net.Conn)) {
 	t.Helper()
 	sock := controlapi.ControlPath(path)

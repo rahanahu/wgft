@@ -450,8 +450,9 @@ print(a.get('generation', ''))
     # disconnected: ...; reconnecting in ..." instead, in the same function's default case); it only
     # fires when rt.reconnectNow is set, which only happens inside rt.reconnect() (internal/agent/
     # agent.go), whose only caller is the wg key-rotation path (internal/agent/rotatekey.go, which
-    # internal/agent/control calls for `agent rotate-key`) - unrelated to WGFT_JOIN re-registration. Counting "stream: reconnecting" would
-    # therefore never move on an ordinary disconnect/reconnect loop and would pass regardless.
+    # internal/agent/control calls for `agent rotate-key`) - unrelated to WGFT_JOIN
+    # re-registration. Counting "stream: reconnecting" would therefore never move on an ordinary
+    # disconnect/reconnect loop and would pass regardless.
     pre_connects=$(grep -c "stream: connected to" "$ralog" 2>/dev/null)
 
     dout=$(vps "$server_bin" agent disable home --admin "$ADMIN" 2>&1); drc=$?

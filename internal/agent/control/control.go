@@ -94,9 +94,10 @@ func ServeConn(c net.Conn, b Backend) {
 		// この枝には recover を置かない。抜けではなく、意図してそうしている。
 		//
 		// 設計文書 10.2c 節が recover を置く根拠は「rotate-key が触る値は少ないが、doctor は
-		// 多くの値を触る」であり、対象は doctor の枝である。Backend.RotateKey の実装(internal/agent の
-		// rotateKey)は rt.mu を defer ではなく手で放し、その区間で認証情報ファイルの保存とトンネルの後始末を行う。この区間の
-		// panic をここで受け止めると、常駐プロセスは rt.mu を誰も放さないまま生き続ける。
+		// 多くの値を触る」であり、対象は doctor の枝である。Backend.RotateKey の実装
+		// (internal/agent の rotateKey)は rt.mu を defer ではなく手で放し、その区間で
+		// 認証情報ファイルの保存とトンネルの後始末を行う。この区間の panic をここで受け止めると、
+		// 常駐プロセスは rt.mu を誰も放さないまま生き続ける。
 		// 既存の待ち受けは転送を続ける一方、ハートビート、トンネルの見張り、全体状態の適用、
 		// リスナーの再試行、次の doctor がすべて永久に止まり、service は active のまま無応答に
 		// なる。再起動の契機がどこにも無いので、落ちるより静かに悪い。落ちれば同梱の

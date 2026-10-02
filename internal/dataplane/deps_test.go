@@ -534,7 +534,10 @@ var modeSeams = map[string]map[string]bool{
 // package may not use them. A method that implements an interface of internal/agent/agentdp, the
 // boundary the runtime calls through, belongs to neither list. Every other exported name of a
 // listed package is in exactly one of the two lists, so a name exported later has to be placed in
-// one. The methods of an exported interface type, such as control.Backend's, are not enumerated.
+// one. The methods of an exported interface type, such as control.Backend's, are in neither list
+// and are not required to be: an implementation outside the package declares its own methods.
+// Production code outside the package may not use them through the interface type either; the
+// check reports such a use with a message of its own.
 var modeTestSeams = map[string]map[string]bool{
 	module + "/internal/agent/usermode": {
 		"Dataplane": true, "Dataplane.Allow": true, "Dataplane.Limits": true, "Dataplane.Tun": true,
@@ -659,7 +662,12 @@ func TestAgentModeTestSeamsStayInTests(t *testing.T) {
 			if recv := memberOf(obj); recv != "" {
 				name = recv + "." + name
 			}
-			if !ok[name] {
+			switch {
+			case ok[name]:
+			case isInterfaceMethod(obj):
+				t.Errorf("%s: %s uses %s.%s, a method of an interface that %s exports; production code outside that package may not use the methods of its interfaces (design.md 7a.7 節)",
+					fset.Position(id.Pos()), p.ImportPath, obj.Pkg().Name(), name, obj.Pkg().Path())
+			default:
 				t.Errorf("%s: %s uses %s.%s, which %s exports only for internal/agent's tests (design.md 7a.7 節)",
 					fset.Position(id.Pos()), p.ImportPath, obj.Pkg().Name(), name, obj.Pkg().Path())
 			}
@@ -742,6 +750,19 @@ func TestAgentModeTestSeamsStayInTests(t *testing.T) {
 			}
 		}
 	}
+}
+
+// isInterfaceMethod reports whether obj is a method declared by an interface type.
+func isInterfaceMethod(obj types.Object) bool {
+	f, ok := obj.(*types.Func)
+	if !ok {
+		return false
+	}
+	sig, ok := f.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return false
+	}
+	return types.IsInterface(sig.Recv().Type())
 }
 
 // memberOf returns the name of the type that declares obj when obj is a field or a method, and ""
