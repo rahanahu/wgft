@@ -1,12 +1,19 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/rahanahu/wgft/internal/agent/enroll"
+	"github.com/rahanahu/wgft/internal/reasontext"
 )
 
 // 制御ストリームの観測の試験(設計文書 10.2c 節)。前半は記録そのものを直接動かし、後半は
@@ -290,5 +297,52 @@ func TestStreamObservationMarksAPinMismatch(t *testing.T) {
 	rt.noteStreamDisconnected(now.Add(time.Second), errors.New("dial tcp: connection refused"))
 	if obs := rt.streamStatus(); obs.PinMismatch {
 		t.Errorf("the mark outlived a disconnect for another reason: %+v", obs)
+	}
+}
+
+// A close by the server's key change limit is marked from the real close frame: code 1008 and the
+// server's reason text (設計文書 5.2・10.2c 節). Another 1008, the same text with another code, and a
+// later disconnect for another reason do not carry the mark.
+func TestStreamObservationMarksAKeyChangeRefusal(t *testing.T) {
+	closeWith := func(code websocket.StatusCode, reason string) error {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			ws.Close(code, reason)
+		}))
+		defer srv.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ws.CloseNow()
+		_, _, err = ws.Read(ctx)
+		if err == nil {
+			t.Fatal("the read did not fail")
+		}
+		return err
+	}
+	rt := &runtime{dp: newTestUserspace()}
+	now := time.Now()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"the limit", closeWith(websocket.StatusPolicyViolation, reasontext.KeyChangeLimited), true},
+		{"another public key refusal", closeWith(websocket.StatusPolicyViolation, "public key belongs to another agent"), false},
+		{"the text with another code", closeWith(websocket.StatusInternalError, reasontext.KeyChangeLimited), false},
+		{"no close frame", errors.New("dial tcp: connection refused"), false},
+	} {
+		now = now.Add(time.Second)
+		rt.noteStreamDisconnected(now, tc.err)
+		if obs := rt.streamStatus(); obs.KeyChangeLimited != tc.want {
+			t.Errorf("%s: KeyChangeLimited = %v, want %v (err %v)", tc.name, obs.KeyChangeLimited, tc.want, tc.err)
+		}
 	}
 }

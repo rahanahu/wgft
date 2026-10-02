@@ -325,8 +325,14 @@ On the VPS, against the admin API:
 					}
 				}
 				stream := "-"
-				if a.Connected {
+				switch {
+				case a.Connected:
 					stream = a.StreamFrom
+				case a.KeyChangeRefusedAt != "":
+					// The server refused the agent's last new key by the key change limit and has
+					// accepted none since (design.md 5.2 section). It is a past event with its age,
+					// not a claim that the agent is being refused right now.
+					stream = "key change refused " + ago(a.KeyChangeRefusedAt)
 				}
 				// PROTO is the protocol version negotiated on this agent's current
 				// connection (design.md 7a.6 section), not the range this binary

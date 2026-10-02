@@ -448,6 +448,10 @@ the protocol negotiated on the agent's current connection, WARN the number of
 open warnings. When an agent is disconnected, shown as STREAM -, TUNNEL and
 RULES are its last report before the stream dropped, prefixed with "last:";
 they are not the current state. HEARTBEAT shows how long ago that report was.
+If the server refused the agent's new public key under the key change limit
+and has accepted no key from it since, a disconnected agent's STREAM shows key
+change refused and how long ago the latest refusal was, instead of -. It does
+not say that the agent is still being refused; see wgft agent rotate-key --help.
 
 PROTO shows vN for a connection that negotiated a numbered version, legacy
 for an agent whose advertisement carried no protocol_min/protocol_max at all,
@@ -560,7 +564,10 @@ Past the limit, the server refuses the new key and this agent's forwarding stops
 until the key is accepted. Do not run rotate-key again: the agent keeps
 reconnecting with the same new key, and the server accepts it once a change has
 come back. While the agent runs, the refusal shows in its log and in
-wgft agent doctor as "public key changes are limited; retry later".
+wgft agent doctor as "public key changes are limited; retry later". On the VPS,
+wgft agent ls shows the agent's STREAM as key change refused, and
+wgft server doctor names the refusal under the agent's control connection, with
+the reason key_change_limited in its --json output.
 
 The wait for a change to come back is extended by the agent's normal reconnect
 backoff, which can add up to 5 minutes. Waiting is the normal way to recover. If

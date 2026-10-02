@@ -446,6 +446,9 @@ func connectionCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 		if hbOK {
 			seen = ", last seen " + Since(in.Now, hb).String() + " ago"
 		}
+		if refused, ok := ParseWhen(ai.KeyChangeRefusedAt); ok {
+			return keyChangeRefusedCheck(c, r, ai, in, refused, seen)
+		}
 		if hs, ok := ParseWhen(ai.LastHandshake); ok && in.Now.Sub(hs) < HandshakeStale {
 			// 制御の経路だけが切れていて、トンネルは生きている状態である。この検査が測るのは
 			// 制御の経路の健全さであって、転送が止まった位置ではない(設計文書 10.2a 節)。
@@ -461,18 +464,7 @@ func connectionCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 				"this server has not yet noticed a connection that is in fact alive",
 			}
 			c.Next = "read this server's log for this agent's control connection, and run wgft agent doctor on the agent host."
-			switch {
-			case r.Proto == proto.UDP:
-				// UDP のルールには --probe を勧めない。管理用 API が UDP のルールの確認その
-				// ものを拒むためである。代わりに、`rule.probe` の判定が同じ状況で返す案内
-				// (udpProbeNext)をそのまま繰り返す(設計文書 10.2a 節の改訂の記録、
-				// 2026-09-23)。
-				c.Next += " " + strings.ToUpper(udpProbeNext[:1]) + udpProbeNext[1:] + "."
-			case !in.Probed:
-				// 既に疎通確認を行った実行に「--probe を付けよ」と言わない。今やったことを
-				// 勧める行は読み手にとって雑音である。
-				c.Next += " To see whether this rule still carries traffic, add --probe."
-			}
+			c.Next += probeHint(r, in)
 			return c
 		}
 		// ハンドシェイクも新しくない。転送が止まったことは `tunnel.handshake` が failed として
@@ -502,6 +494,54 @@ func connectionCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 	}
 	c.Status = StatusOK
 	c.Detail = "heartbeat " + age.String() + " ago"
+	return c
+}
+
+// probeHint は、stream が切れていてトンネルが新しいときに、ルールが今も転送しているかを確かめる
+// 手段を案内する 1 文を返す。前に空白を置く。案内が無ければ空を返す。
+func probeHint(r proto.Rule, in Input) string {
+	switch {
+	case r.Proto == proto.UDP:
+		// UDP のルールには --probe を勧めない。管理用 API が UDP のルールの確認その
+		// ものを拒むためである。代わりに、`rule.probe` の判定が同じ状況で返す案内
+		// (udpProbeNext)をそのまま繰り返す(設計文書 10.2a 節の改訂の記録、
+		// 2026-09-23)。
+		return " " + strings.ToUpper(udpProbeNext[:1]) + udpProbeNext[1:] + "."
+	case !in.Probed:
+		// 既に疎通確認を行った実行に「--probe を付けよ」と言わない。今やったことを
+		// 勧める行は読み手にとって雑音である。
+		return " To see whether this rule still carries traffic, add --probe."
+	}
+	return ""
+}
+
+// keyChangeRefusedCheck は、server が鍵の変更の頻度の上限でエージェントの宣言を断り、その後に
+// 公開鍵の宣言を受け付けていない場合の agent.connection である(設計文書 5.2・10.2a 節)。状態は agent_disconnected
+// と同じく最終ハンドシェイクの新しさで分ける。所見は断った時刻を過去の事実として述べ、今も断り続けて
+// いるとは述べない。受け取り済みのルールで転送が続くかもしれないとも述べない。断った鍵はこの VPS の
+// ピアに入っていないので、その鍵に替えたエージェントは転送できないためである。最終ハンドシェイクが
+// 新しくても FAILED にしないのは、断った宣言が正規のエージェントのものかどうかを server が見分け
+// られないためである。
+func keyChangeRefusedCheck(c Check, r proto.Rule, ai *adminapi.AgentInfo, in Input, refused time.Time, seen string) Check {
+	c.Reason = ReasonKeyChangeLimited
+	c.Internal = append(c.Internal, "key change refused at "+ai.KeyChangeRefusedAt)
+	c.Detail = "the control connection is down" + seen + ". This server refused a public key change from this agent " +
+		Since(in.Now, refused).String() + " ago because of the key change limit, and has not accepted a key from it since. " +
+		"The refused key was not installed on this VPS's WireGuard peer, so an agent that already uses it, as after a running " +
+		"wgft agent rotate-key, forwards nothing until this server accepts it"
+	c.Causes = []string{
+		"the agent's key was changed more often than the limit allows: 3 changes in a row, then one every 10 minutes, per registration",
+		"someone else holding this agent's token declared a different key",
+	}
+	c.Next = "the agent keeps reconnecting with the same key, and this server accepts it on the first attempt after a change comes back; " +
+		"do not run wgft agent rotate-key again. wgft agent rotate-key --help describes how to recover sooner."
+	if hs, ok := ParseWhen(ai.LastHandshake); ok && in.Now.Sub(hs) < HandshakeStale {
+		c.Status = StatusUnknown
+		c.Detail += ". The handshake " + Since(in.Now, hs).String() + " ago can be from the agent's previous key"
+		c.Next += probeHint(r, in)
+		return c
+	}
+	c.Status = StatusFailed
 	return c
 }
 

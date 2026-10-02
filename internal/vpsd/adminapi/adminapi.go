@@ -51,9 +51,14 @@ type AgentInfo struct {
 	// GenerationBehindSince は、このエージェントが server の今のルール集合の世代に追いついて
 	// いない状態の始まり(RFC3339)。遅れていなければ省く。server がメモリに持つ値で、再起動の
 	// 後は、起動の後に初めて遅れを観測した時刻から数え直す(設計文書 10.2a 節)。v1 への加算
-	GenerationBehindSince string             `json:"generation_behind_since,omitempty"`
-	Tunnel                TunnelStatus       `json:"tunnel"` // wire の proto.TunnelStatus とは別の見せ方(7a.11 節)
-	Rules                 []proto.RuleStatus `json:"rules,omitempty"`
+	GenerationBehindSince string `json:"generation_behind_since,omitempty"`
+	// KeyChangeRefusedAt は、server が鍵の変更の頻度の上限でこのエージェントの宣言を断った直近の
+	// 時刻(RFC3339)。その後にこのエージェントの公開鍵の宣言を受け付けていない間だけ持ち、無ければ省く。
+	// 今も断り続けていることは意味しない。server がメモリに持つ値で、再起動で消える(設計文書 5.2、
+	// 7a.11 節)。v1 への加算
+	KeyChangeRefusedAt string             `json:"key_change_refused_at,omitempty"`
+	Tunnel             TunnelStatus       `json:"tunnel"` // wire の proto.TunnelStatus とは別の見せ方(7a.11 節)
+	Rules              []proto.RuleStatus `json:"rules,omitempty"`
 	// 版の交渉(仕様 7a.6 節)。未接続、または接続が legacy v0 なら ProtocolVersion は 0 で、
 	// AgentProtocolLegacy が true な場合だけ「legacy v0 と判定した」ことを示す(未接続との違いは
 	// Connected を見る)

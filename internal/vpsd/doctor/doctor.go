@@ -132,6 +132,10 @@ const (
 	// 10.2a 節)。server は起動時にだけ 1 にするので、稼働中に外から 0 にされると、カーネルで
 	// 転送するルールは 1 に戻るまで止まる。
 	ReasonIPForwardOff = "ip_forward_off"
+	// ReasonKeyChangeLimited は、server が鍵の変更の頻度の上限でエージェントの公開鍵の宣言を断り、
+	// その後にそのエージェントの接続を受け付けていないことである(設計文書 5.2・10.2a 節)。今も
+	// 断り続けていることは意味しない。agent doctor の stream.connection も同じ値を使う(10.2c 節)。
+	ReasonKeyChangeLimited = "key_change_limited"
 )
 
 // 検査のまとまり。人向けの出力の見出しになる。保証の対象ではない。
@@ -602,13 +606,14 @@ func findAgentInfo(agents []adminapi.AgentInfo, name string) *adminapi.AgentInfo
 // 劣化を確かめているので「判定に足りない」の UNKNOWN より人には正確であり、終了コードが 0 でも
 // 出力が黙らない。
 //
-// 今この意味に当たる例は 2 つである。制御の経路が切れているがトンネルが生きている agent.connection
-// (agent_disconnected)と、名前の解決に失敗したが直前の解決の結果で転送を続けている
-// rule.target_resolve(target_resolve_failed。unknown と組になるのはこの場合だけである)。
+// 今この意味に当たる例は次のとおりである。制御の経路が切れているがトンネルが生きている
+// agent.connection(agent_disconnected)、同じく最終ハンドシェイクが新しく、鍵の変更を上限で断った
+// 記録がある agent.connection(key_change_limited)、名前の解決に失敗したが直前の解決の結果で転送を
+// 続けている rule.target_resolve(target_resolve_failed。unknown と組になるのはこの場合だけである)。
 // 他の unknown は劣化を確かめていないので UNKNOWN のまま出す。
 func DisplayStatus(c Check) string {
 	if c.Status == StatusUnknown &&
-		((c.ID == CheckConnection && c.Reason == ReasonAgentDisconnected) ||
+		((c.ID == CheckConnection && (c.Reason == ReasonAgentDisconnected || c.Reason == ReasonKeyChangeLimited)) ||
 			(c.ID == CheckTargetResolve && c.Reason == ReasonResolveFailed)) {
 		return "DEGRADED"
 	}

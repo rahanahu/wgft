@@ -19,6 +19,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/lograte"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -52,6 +53,12 @@ type Status struct {
 	Heartbeat     *proto.Heartbeat
 	// Protocol はこの接続で交渉した版(仕様 7a.6 節)。未接続なら zero 値(Legacy=false, Version=0)
 	Protocol proto.Negotiated
+	// KeyChangeRefusedAt は、鍵の変更の頻度の上限でこのエージェントの宣言を断った直近の時刻
+	// (設計文書 5.2 節)。公開鍵の宣言を受け付けると消し、接続を受け付けると状態ごと作り直すので
+	// 消える。値があることは、その時刻に断り、それより後にこのエージェントの公開鍵の宣言を受け付けて
+	// いないことを表し、今も断り続けていることは表さない。確立した接続はより後の拒否で置き換わらない
+	// ので、接続中のエージェントでも値を持ちうる
+	KeyChangeRefusedAt time.Time
 }
 
 type conn struct {
@@ -139,8 +146,12 @@ type Hub struct {
 	// 入るまで)。0 になった項目は消す
 	pending map[string]int
 
-	pendingLog   lograte.Gate // maxPendingPerAgent で断った行
-	keyChangeLog lograte.Gate // 鍵の変更の頻度の上限で断った行
+	pendingLog lograte.Gate // maxPendingPerAgent で断った行
+	// keyChangeLogNext は、鍵の変更の頻度の上限で断った行を、エージェントごとに次に出してよい
+	// 時刻である(設計文書 5.2 節)。間引きを Hub の全体で 1 つにすると、あるエージェントの行が別の
+	// エージェントの行を隠す。mu で保護する。項目は恒久トークンの確認が通った名前だけで、書くたびに
+	// 期限の過ぎた項目を外す
+	keyChangeLogNext map[string]time.Time
 }
 
 type agentLocks struct {
@@ -165,6 +176,7 @@ func New(b Backend) *Hub {
 	return &Hub{
 		backend: b, locks: map[string]*agentLocks{},
 		conns: map[string]*conn{}, status: map[string]*Status{}, pending: map[string]int{},
+		keyChangeLogNext:    map[string]time.Time{},
 		HeartbeatTimeout:    defaultHeartbeatTimeout,
 		firstMessageTimeout: defaultFirstMessageTimeout,
 	}
@@ -393,21 +405,28 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 	lock := h.agentLock(agent)
 
 	if err := h.backend.SetPublicKey(agent, identity, key); err != nil {
-		lock.unlock()
 		if errors.Is(err, ErrKeyChangeLimited) {
 			// 鍵の変更の頻度の上限(設計文書 5.2 節)。公開鍵の拒否と同じ 1008 で閉じる。エージェントは
-			// 通常のバックオフで再接続を続ける。恒久トークンの持ち主が試みを繰り返してもログが溢れない
-			// よう、行は 1 分に 1 行までにする
-			if h.keyChangeLog.Allow() {
+			// 通常のバックオフで再接続を続ける。拒否の記録は agent の錠を持ったまま書く。錠を放した後に
+			// 書くと、その間に受け付けた同じエージェントの接続の状態に、それより前の拒否を書いてしまう。
+			// 恒久トークンの持ち主が試みを繰り返してもログが溢れないよう、行はエージェントごとに 1 分に
+			// 1 行までにする
+			logIt := h.noteKeyChangeRefused(agent, time.Now())
+			lock.unlock()
+			if logIt {
 				log.Printf("stream: %s: refusing a public key change: %v", agent, err)
 			}
-			ws.Close(websocket.StatusPolicyViolation, "public key changes are limited; retry later")
+			ws.Close(websocket.StatusPolicyViolation, reasontext.KeyChangeLimited)
 			return
 		}
+		lock.unlock()
 		log.Printf("stream: %s: peer setup: %v", agent, err)
 		ws.Close(websocket.StatusInternalError, "peer setup failed")
 		return
 	}
+	// 受け付けた宣言は、それより前の拒否の記録を消す。この後の全体状態の判定で接続を断る場合も、
+	// 鍵そのものは受け付けているためである
+	h.clearKeyChangeRefused(agent)
 	hook := h.hookLock(agent)
 	// A saved key may have failed publication, or this registration may have
 	// been revoked while the connection waited for its first message. Revoke's
@@ -490,6 +509,38 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 			}
 			hook.unlock()
 		}
+	}
+}
+
+// noteKeyChangeRefused は、鍵の変更の頻度の上限で agent の宣言を断ったことを状態に記録し、その行を
+// ログに出してよいかを返す。状態の項目が無ければ未接続の項目を作る。
+func (h *Hub) noteKeyChangeRefused(agent string, now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := h.status[agent]
+	if s == nil {
+		s = &Status{}
+		h.status[agent] = s
+	}
+	s.KeyChangeRefusedAt = now
+	if next, ok := h.keyChangeLogNext[agent]; ok && now.Before(next) {
+		return false
+	}
+	for name, next := range h.keyChangeLogNext {
+		if !now.Before(next) {
+			delete(h.keyChangeLogNext, name)
+		}
+	}
+	h.keyChangeLogNext[agent] = now.Add(time.Minute)
+	return true
+}
+
+// clearKeyChangeRefused は、agent の拒否の記録を消す。
+func (h *Hub) clearKeyChangeRefused(agent string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s := h.status[agent]; s != nil {
+		s.KeyChangeRefusedAt = time.Time{}
 	}
 }
 

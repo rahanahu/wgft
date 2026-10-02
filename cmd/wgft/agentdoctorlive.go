@@ -15,6 +15,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/agent/enroll"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
@@ -100,6 +101,9 @@ const (
 	// agentReasonServerCertMismatch は、制御ストリームの直近の試みが、server の証明書と登録のときに
 	// 固定したハッシュとの不一致で終わった場合である。再試行では直らない(10.2c 節)。
 	agentReasonServerCertMismatch = "server_cert_mismatch"
+	// agentReasonKeyChangeLimited は、制御ストリームの直近の試みが、server の鍵の変更の頻度の上限に
+	// よる拒否で終わった場合である(5.2・10.2c 節)。server doctor の agent.connection と同じ符号である。
+	agentReasonKeyChangeLimited = "key_change_limited"
 	// agentReasonHandshakePending は、トンネルはあるがハンドシェイクがまだ成立していない場合で
 	// ある(10.2c 節)。
 	agentReasonHandshakePending = "handshake_pending"
@@ -484,6 +488,20 @@ func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *controlap
 		return
 	}
 	c.Status, c.Reason = doctor.StatusUnknown, agentReasonReconnecting
+	if agentKeyChangeLimited(s) {
+		// 鍵の変更の頻度の上限による拒否(5.2・10.2c 節)。再試行で解けるので UNKNOWN のままとし、
+		// 総合判定も動かさない。ただし受け取り済みのルールの転送が続くという案内は当たらない。断られた
+		// 鍵はこのエージェントが今使っている鍵で、server のピアに入っていないためである。所見は直近の
+		// 試みの時刻と理由を過去の事実として示し、今も断られ続けているとは述べない。
+		c.Reason = agentReasonKeyChangeLimited
+		c.Detail = "the control stream to the server is not up; the last attempt ended " + agentWhen(in.Now, s.DisconnectedAt) +
+			", refused by the server's key change limit: " +
+			reasonOr(s.DisconnectReason, "no reason was recorded")
+		c.Next = "the server has not installed the key this agent uses, so this agent forwards nothing until the server accepts it. " +
+			"The agent keeps reconnecting with the same key, and the server accepts it on the first attempt after a change comes back, " +
+			"one every 10 minutes; do not run wgft agent rotate-key again. wgft agent rotate-key --help describes how to recover sooner"
+		return
+	}
 	// 示す理由には、接続が切れた理由だけでなく、接続に至らなかった試みの失敗も入る(10.2c 節)。
 	switch {
 	case s.DisconnectedAt.IsZero():
@@ -494,6 +512,13 @@ func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *controlap
 	}
 	c.Next = "the agent retries by itself, so this alone is not a fault. Rules it already holds keep being forwarded while the stream is down. " +
 		"If it stays down, read the reason above and the server's log on the VPS"
+}
+
+// agentKeyChangeLimited は、制御ストリームの直近の試みが server の鍵の変更の頻度の上限による拒否で
+// 終わったかどうかである。旧い版のエージェントは key_change_limited を送らないので、記録された理由の
+// 文言でも見る。文言は server が送るものなので、エージェントの版に依らない。
+func agentKeyChangeLimited(s *controlapi.DoctorStream) bool {
+	return s.KeyChangeLimited || strings.Contains(s.DisconnectReason, reasontext.KeyChangeLimited)
 }
 
 // agentPinMismatch は、制御ストリームの直近の試みが証明書の不一致で終わったかどうかである。旧い版の

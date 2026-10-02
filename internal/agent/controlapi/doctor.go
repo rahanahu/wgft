@@ -93,6 +93,9 @@ type DoctorStream struct {
 	// PinMismatch は、直近の切断か試みの失敗が、server の証明書と登録のときに固定したハッシュとの
 	// 不一致だったことである。旧い版のエージェントは送らない
 	PinMismatch bool `json:"pin_mismatch,omitempty"`
+	// KeyChangeLimited は、直近の試みが server の鍵の変更の頻度の上限による拒否で終わったことである。
+	// 旧い版のエージェントは送らない
+	KeyChangeLimited bool `json:"key_change_limited,omitempty"`
 	// Backoff は直近に待った再接続の間隔。単位はナノ秒
 	Backoff      time.Duration `json:"backoff,omitempty"`
 	RetryAt      time.Time     `json:"retry_at"`

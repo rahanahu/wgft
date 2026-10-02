@@ -102,6 +102,10 @@ func (d *Daemon) Agents() ([]admin.AgentInfo, error) {
 		if behind {
 			info.GenerationBehindSince = since.Format(time.RFC3339)
 		}
+		if !st.KeyChangeRefusedAt.IsZero() {
+			// 鍵の変更の頻度の上限による拒否の記録(設計文書 5.2 節)。hub は接続を受け付けると消す
+			info.KeyChangeRefusedAt = st.KeyChangeRefusedAt.Format(time.RFC3339)
+		}
 		if st.Connected {
 			// 版の交渉(仕様 7a.6 節)。観測用の加算フィールドで、管理用 API の保証は変えない
 			info.ProtocolVersion = st.Protocol.Version

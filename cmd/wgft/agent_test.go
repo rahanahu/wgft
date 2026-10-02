@@ -128,8 +128,8 @@ func runAgentCmd(t *testing.T, adminURL string, args ...string) (stdout, stderr 
 	return stdout, stderr, err
 }
 
-// agentLsRow holds the parsed TUNNEL, RULES and PROTO columns for one row of `agent ls` output.
-type agentLsRow struct{ tunnel, rules, proto string }
+// agentLsRow holds the parsed STREAM, TUNNEL, RULES and PROTO columns for one row of `agent ls` output.
+type agentLsRow struct{ stream, tunnel, rules, proto string }
 
 // agentLsFields finds the row for the given agent name in tabwriter output and splits it on
 // runs of 2+ spaces (the column separator tabwriter pads with), returning the TUNNEL, RULES
@@ -159,6 +159,7 @@ func agentLsFields(t *testing.T, stdout, agentName string) agentLsRow {
 		}
 		return start, end
 	}
+	sStart, sEnd := col("STREAM", "HEARTBEAT")
 	tStart, tEnd := col("TUNNEL", "WG_ENDPOINT")
 	rStart, rEnd := col("RULES", "PROTO")
 	pStart, pEnd := col("PROTO", "WARN")
@@ -174,6 +175,7 @@ func agentLsFields(t *testing.T, stdout, agentName string) agentLsRow {
 	for _, line := range lines[1:] {
 		if strings.HasPrefix(line, agentName+" ") {
 			return agentLsRow{
+				stream: slice(line, sStart, sEnd),
 				tunnel: slice(line, tStart, tEnd),
 				rules:  slice(line, rStart, rEnd),
 				proto:  slice(line, pStart, pEnd),

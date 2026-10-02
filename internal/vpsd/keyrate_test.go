@@ -406,3 +406,87 @@ func TestAlternatingKeysOverTheStream(t *testing.T) {
 		t.Fatalf("other's next message is not the rule change: %+v, %v", msg.State, err)
 	}
 }
+
+// The agent list carries the hub's refusal record (design.md 5.2 and 7a.11 節): key_change_refused_at
+// appears for the refused agent only, stays while it makes no further accepted declaration, and is
+// gone once a change comes back and its key is accepted.
+func TestAgentsReportKeyChangeRefusal(t *testing.T) {
+	f := newDisableFixture(t)
+	f.d.onPushAll, f.d.onPush = nil, nil
+	now := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+	f.d.clock = func() time.Time { return now }
+	srv := httptest.NewServer(f.d.hub)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	declare := func(agent string, key wgtypes.Key) error {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+			HTTPHeader: http.Header{"Authorization": {"Bearer " + f.tokens[agent]}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ws.CloseNow()
+		msg, _ := json.Marshal(proto.Message{Type: proto.MsgPublicKey, PublicKey: key.String()})
+		if err := ws.Write(ctx, websocket.MessageText, msg); err != nil {
+			t.Fatal(err)
+		}
+		_, data, err := ws.Read(ctx)
+		if err != nil {
+			return err
+		}
+		var m proto.Message
+		if err := json.Unmarshal(data, &m); err != nil || m.Type != proto.MsgState {
+			t.Fatalf("%s: %s, %v", agent, data, err)
+		}
+		return nil
+	}
+	refusedAt := func(agent string) string {
+		t.Helper()
+		list, err := f.d.Agents()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range list {
+			if a.Name == agent {
+				return a.KeyChangeRefusedAt
+			}
+		}
+		t.Fatalf("no agent %s", agent)
+		return ""
+	}
+
+	if err := declare("other", newKey(t)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := declare("home", newKey(t)); err != nil {
+			t.Fatalf("home declaration %d: %v", i, err)
+		}
+	}
+	if got := refusedAt("home"); got != "" {
+		t.Fatalf("never refused: key_change_refused_at = %q", got)
+	}
+	pending := newKey(t)
+	for i := 0; i < 2; i++ {
+		if err := declare("home", pending); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+			t.Fatalf("over the limit, attempt %d: %v, want 1008", i, err)
+		}
+	}
+	got := refusedAt("home")
+	if _, err := time.Parse(time.RFC3339, got); err != nil {
+		t.Fatalf("refused: key_change_refused_at = %q, want an RFC3339 time", got)
+	}
+	if got := refusedAt("other"); got != "" {
+		t.Fatalf("another agent: key_change_refused_at = %q, want none", got)
+	}
+	now = now.Add(10 * time.Minute)
+	if err := declare("home", pending); err != nil {
+		t.Fatalf("after a change came back: %v", err)
+	}
+	if got := refusedAt("home"); got != "" {
+		t.Fatalf("accepted since: key_change_refused_at = %q, want none", got)
+	}
+}

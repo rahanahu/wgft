@@ -35,6 +35,8 @@ type fakeBackend struct {
 	keyCheckErr error
 	// setKeyErr, when set, makes SetPublicKey fail with this error and save nothing.
 	setKeyErr error
+	// stateErr, when set, makes StateFor fail with this error.
+	stateErr error
 }
 
 func (b *fakeBackend) Authenticate(tok string) (string, string, error) {
@@ -72,6 +74,9 @@ func (b *fakeBackend) SetPublicKey(agent, _ string, key wgtypes.Key) error {
 func (b *fakeBackend) StateFor(agent, _ string, _ wgtypes.Key, sel proto.Negotiated) (*proto.State, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.stateErr != nil {
+		return nil, b.stateErr
+	}
 	st := &proto.State{Generation: b.gen, WG: proto.WGConfig{Address: "10.200.0.2/24"}}
 	if !sel.Legacy {
 		version := sel.Version
