@@ -100,6 +100,7 @@ func TestKeyChangeLimitLogIsRateLimited(t *testing.T) {
 	defer log.SetOutput(prev)
 
 	for i := 0; i < 3; i++ {
+		waitNoPending(t, h, "home")
 		k, _ := wgtypes.GeneratePrivateKey()
 		c, _, err := dial(t, url, "tok-home")
 		if err != nil {
@@ -117,9 +118,13 @@ func TestKeyChangeLimitLogIsRateLimited(t *testing.T) {
 }
 
 // declare opens a stream for agent with a new key and returns how the server answered: the State
-// message, or the close error.
-func declare(t *testing.T, url, agent string) (proto.Message, error) {
+// message, or the close error. It first waits until no earlier stream of the agent holds a slot of
+// the per-agent limit on streams not yet established (maxPendingPerAgent), so that the new stream
+// is not turned away with 429 by a slot the server returns only after its side of the previous
+// close has finished, which can come after the client has read the close.
+func declare(t *testing.T, h *Hub, url, agent string) (proto.Message, error) {
 	t.Helper()
+	waitNoPending(t, h, agent)
 	k, _ := wgtypes.GeneratePrivateKey()
 	c, _, err := dial(t, url, "tok-"+agent)
 	if err != nil {
@@ -128,6 +133,25 @@ func declare(t *testing.T, url, agent string) (proto.Message, error) {
 	t.Cleanup(func() { c.CloseNow() })
 	sendJSON(t, c, proto.Message{Type: proto.MsgPublicKey, PublicKey: k.PublicKey().String()})
 	return readMsg(t, c)
+}
+
+// waitNoPending polls the hub until agent holds no slot of the per-agent limit on streams not yet
+// established.
+func waitNoPending(t *testing.T, h *Hub, agent string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		h.mu.Lock()
+		n := h.pending[agent]
+		h.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %d slots for streams not yet established were never returned", agent, n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // waitStatus polls h.Status(agent) until ok returns true.
@@ -164,27 +188,20 @@ func TestKeyChangeRefusalRecord(t *testing.T) {
 		b.mu.Unlock()
 	}
 
-	// Never refused: no record, connected or not.
-	if m, err := declare(t, url, "home"); err != nil || m.Type != proto.MsgState {
-		t.Fatalf("first declaration: %+v, %v", m, err)
-	}
+	// Never refused: no record. The established stream is opened directly, not by replacing another
+	// one: a replaced stream whose client does not answer the close keeps a slot of the per-agent
+	// limit taken until the WebSocket library gives up the close handshake, which is longer than this
+	// test runs (TestReplacedStreamHoldsPendingSlot).
+	k0, _ := wgtypes.GeneratePrivateKey()
+	old := establishStream(t, url, "tok-home", k0)
 	if st := h.Status("home"); !st.Connected || !st.KeyChangeRefusedAt.IsZero() {
 		t.Fatalf("never refused: %+v", st)
-	}
-	k0, _ := wgtypes.GeneratePrivateKey()
-	old, _, err := dial(t, url, "tok-home")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sendJSON(t, old, proto.Message{Type: proto.MsgPublicKey, PublicKey: k0.PublicKey().String()})
-	if m, err := readMsg(t, old); err != nil || m.Type != proto.MsgState {
-		t.Fatalf("established stream: %+v, %v", m, err)
 	}
 
 	// Refused while the established stream is up: recorded, the stream stays.
 	setErrs(limited, nil)
 	before := time.Now()
-	if _, err := declare(t, url, "home"); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+	if _, err := declare(t, h, url, "home"); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
 		t.Fatalf("over the limit: %v, want 1008", err)
 	}
 	st := h.Status("home")
@@ -202,7 +219,7 @@ func TestKeyChangeRefusalRecord(t *testing.T) {
 
 	// Another failure that is not the limit does not clear it.
 	setErrs(errBackendFailure, nil)
-	if _, err := declare(t, url, "home"); websocket.CloseStatus(err) != websocket.StatusInternalError {
+	if _, err := declare(t, h, url, "home"); websocket.CloseStatus(err) != websocket.StatusInternalError {
 		t.Fatalf("backend failure: %v, want 1011", err)
 	}
 	if st := h.Status("home"); !st.KeyChangeRefusedAt.Equal(refusedAt) {
@@ -211,7 +228,7 @@ func TestKeyChangeRefusalRecord(t *testing.T) {
 
 	// An accepted key whose connection is then turned away clears it: the key itself was accepted.
 	setErrs(nil, errBackendFailure)
-	if _, err := declare(t, url, "home"); err == nil {
+	if _, err := declare(t, h, url, "home"); err == nil {
 		t.Fatal("the connection was not turned away")
 	}
 	if st := h.Status("home"); !st.KeyChangeRefusedAt.IsZero() {
@@ -220,14 +237,14 @@ func TestKeyChangeRefusalRecord(t *testing.T) {
 
 	// Refused again, then accepted with a connection: cleared.
 	setErrs(limited, nil)
-	if _, err := declare(t, url, "home"); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+	if _, err := declare(t, h, url, "home"); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
 		t.Fatalf("over the limit again: %v, want 1008", err)
 	}
 	if st := h.Status("home"); st.Connected || st.KeyChangeRefusedAt.IsZero() {
 		t.Fatalf("refused while disconnected: %+v", st)
 	}
 	setErrs(nil, nil)
-	if m, err := declare(t, url, "home"); err != nil || m.Type != proto.MsgState {
+	if m, err := declare(t, h, url, "home"); err != nil || m.Type != proto.MsgState {
 		t.Fatalf("accepted declaration: %+v, %v", m, err)
 	}
 	if st := h.Status("home"); !st.Connected || !st.KeyChangeRefusedAt.IsZero() || st.KeyChangeRefusedBy != "" {
@@ -236,7 +253,7 @@ func TestKeyChangeRefusalRecord(t *testing.T) {
 
 	// An agent that never had a status entry gets one holding only the record.
 	setErrs(limited, nil)
-	if _, err := declare(t, url, "other"); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+	if _, err := declare(t, h, url, "other"); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
 		t.Fatalf("other agent: %v, want 1008", err)
 	}
 	if st := h.Status("other"); st.Connected || st.KeyChangeRefusedAt.IsZero() {
@@ -261,7 +278,7 @@ func TestKeyChangeLimitLogIsPerAgent(t *testing.T) {
 	defer log.SetOutput(prev)
 
 	for _, agent := range []string{"home", "home", "other", "other", "home"} {
-		if _, err := declare(t, url, agent); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		if _, err := declare(t, h, url, agent); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
 			t.Fatalf("%s: %v, want 1008", agent, err)
 		}
 	}
