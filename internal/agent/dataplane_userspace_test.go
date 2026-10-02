@@ -8,6 +8,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
@@ -35,8 +36,8 @@ func TestSecondsToDuration(t *testing.T) {
 		{"typical value in range", 120, udpTimeoutStreamMaxSeconds, 120 * time.Second},
 		{"zero falls back to default", 0, udpTimeoutStreamMaxSeconds, def},
 		{"negative falls back to default", -1, udpTimeoutStreamMaxSeconds, def},
-		{"exactly at max is accepted", keepaliveMaxSeconds, keepaliveMaxSeconds, keepaliveMaxSeconds * time.Second},
-		{"one past max falls back to default", keepaliveMaxSeconds + 1, keepaliveMaxSeconds, def},
+		{"exactly at max is accepted", agentdp.KeepaliveMaxSeconds, agentdp.KeepaliveMaxSeconds, agentdp.KeepaliveMaxSeconds * time.Second},
+		{"one past max falls back to default", agentdp.KeepaliveMaxSeconds + 1, agentdp.KeepaliveMaxSeconds, def},
 		// The reported overflow value: 20211507185753197 seconds wraps to 512ns under
 		// `* time.Second` (int64 nanoseconds overflow). It is far above
 		// udpTimeoutStreamMaxSeconds, so the upper-bound check alone rejects it.

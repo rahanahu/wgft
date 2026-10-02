@@ -26,7 +26,7 @@ func (d *kernelDataplane) cachedEndpoint() netip.AddrPort {
 	return d.endpoint
 }
 
-// kernelPrepared は、rt.mu の外で行った名前の解決の結果である(prepareApply)。
+// kernelPrepared は、rt.mu の外で行った名前の解決の結果である(PrepareApply)。
 type kernelPrepared struct {
 	// endpoint は、エンドポイントを引いたときの結果である。引かなかったら tried が偽である
 	tried      bool
@@ -39,14 +39,14 @@ type kernelPrepared struct {
 	err error
 }
 
-// prepareApply は全体状態 st の適用に要る名前を rt.mu の外で引く。runtime は結果を applyRules に
+// PrepareApply は全体状態 st の適用に要る名前を rt.mu の外で引く。runtime は結果を ApplyRules に
 // 渡す。DNS を待つ間、ハートビートと doctor が排他を待たないためである。読むのは変わらない値
 // (ops と ctx)と、epMu が守るエンドポイントの控えだけである。
 //
 // エンドポイントを引くのは、宣言のエンドポイントが変わったときと、まだ一度も解決できていないとき
 // だけである(7b.1 節)。解決できていた名前を引けなくなっても、控えたアドレスを使い続ける。
 // 宛先の名前は同時に引き、1 つの遅い名前が他の名前の期限を使い切らないようにする。
-func (d *kernelDataplane) prepareApply(st *proto.State) any {
+func (d *kernelDataplane) PrepareApply(st *proto.State) any {
 	p := &kernelPrepared{endpointOf: st.WG.Endpoint}
 	d.epMu.Lock()
 	need := !d.endpoint.IsValid() || d.endpointOf != st.WG.Endpoint
@@ -107,7 +107,7 @@ func resolveTargets(ctx context.Context, rules []proto.AgentRule, lookup nft.Loo
 	})
 }
 
-// useEndpoint は、prepareApply で引いたエンドポイントを控えに入れる。引けなかったら、控えたアドレスを
+// useEndpoint は、PrepareApply で引いたエンドポイントを控えに入れる。引けなかったら、控えたアドレスを
 // 使い続け、理由が変わったときだけ 1 行出す。
 func (d *kernelDataplane) useEndpoint(p *kernelPrepared) {
 	if !p.tried {

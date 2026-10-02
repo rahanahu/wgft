@@ -7,14 +7,15 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/proto"
 )
 
-// read はインタフェースとルールの状態を 1 回ずつ読む(10.2c 節)。
-func (d *kernelDataplane) read() dataplaneReading {
-	var r dataplaneReading
+// Read はインタフェースとルールの状態を 1 回ずつ読む(10.2c 節)。
+func (d *kernelDataplane) Read() agentdp.Reading {
+	var r agentdp.Reading
 	if !d.have {
 		return r
 	}
@@ -22,23 +23,23 @@ func (d *kernelDataplane) read() dataplaneReading {
 	st, err := d.ops.inspectLink(d.iface, d.priv, prev)
 	switch {
 	case err != nil:
-		r.tunnel = tunnelReading{present: d.converged, err: fmt.Errorf("read %s: %w", d.iface, err)}
+		r.Tunnel = agentdp.TunnelReading{Present: d.converged, Err: fmt.Errorf("read %s: %w", d.iface, err)}
 	case st.Exists && st.Ownership.Ours():
-		r.tunnel.present = true
+		r.Tunnel.Present = true
 		for _, p := range st.Peers {
-			r.tunnel.endpoint = p.Endpoint
-			r.tunnel.lastHandshake = p.LastHandshake
-			r.tunnel.rxBytes, r.tunnel.txBytes = p.ReceiveBytes, p.TransmitBytes
+			r.Tunnel.Endpoint = p.Endpoint
+			r.Tunnel.LastHandshake = p.LastHandshake
+			r.Tunnel.RxBytes, r.Tunnel.TxBytes = p.ReceiveBytes, p.TransmitBytes
 		}
 		d.epMu.Lock()
 		epErr := d.endpointEr
 		d.epMu.Unlock()
-		if !r.tunnel.endpoint.IsValid() && epErr != nil {
-			r.tunnel.err = fmt.Errorf("endpoint %s: %w", d.wg.Endpoint, epErr)
+		if !r.Tunnel.Endpoint.IsValid() && epErr != nil {
+			r.Tunnel.Err = fmt.Errorf("endpoint %s: %w", d.wg.Endpoint, epErr)
 		}
 	}
 	if d.pub != nil {
-		r.rules = d.ruleStatuses()
+		r.Rules = d.ruleStatuses()
 	}
 	return r
 }
@@ -85,11 +86,11 @@ func (d *kernelDataplane) allLocal(r nft.AgentRuleResult) bool {
 	return len(r.Ranges) > 0
 }
 
-// doctorKernel は agent doctor のためにカーネルを読む(設計文書 10.2c 節)。停止中の agent doctor と同じ
+// DoctorKernel は agent doctor のためにカーネルを読む(設計文書 10.2c 節)。停止中の agent doctor と同じ
 // readKernel を、メモリの上の認証情報ファイルと公開の記録で呼ぶ。記録は公開に成功するたびに d.f に
 // 写すので、d.pub と同じ中身である。
-func (d *kernelDataplane) doctorKernel() *controlapi.DoctorKernel {
+func (d *kernelDataplane) DoctorKernel() *controlapi.DoctorKernel {
 	return readKernel(kernelReadInput{iface: d.iface, creds: d.f, pub: d.f.KernelPublication})
 }
 
-func (d *kernelDataplane) checkError() string { return d.observeErr }
+func (d *kernelDataplane) CheckError() string { return d.observeErr }

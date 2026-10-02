@@ -11,17 +11,13 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
-
-// keepaliveMaxSeconds は wg.keepalive として受け入れる上限で、カーネルモードの checkWG
-// (dataplane_kernel.go)がすでに同じ全体状態の値に課している範囲(0 から 65535 秒、WireGuard の
-// persistent_keepalive_interval の幅)と揃える。
-const keepaliveMaxSeconds = 65535
 
 // udpTimeoutStreamMaxSeconds は wg.udp_timeout_stream として受け入れる上限。VPS は
 // nf_conntrack_udp_timeout_stream を 32 bit の int として持つ(internal/platform/linux の
@@ -35,7 +31,7 @@ const udpTimeoutStreamMaxSeconds = math.MaxInt32
 // 送りうる桁あふれする値(例:20211507185753197 は `* time.Second` で 512ns に巻き戻る)への備えとして
 // def に落とす。桁あふれが作る極めて短い間隔は、無通信の掃除の goroutine や keepalive の ticker を
 // 回し続けて家のホストの CPU を使い切る。0 は値を送らない旧い server の正当な値なので、黙って def に
-// 落とす。0 以外で拒んだときは、build のときにしか呼ばれないこの経路から英語で 1 行を記録する
+// 落とす。0 以外で拒んだときは、Build のときにしか呼ばれないこの経路から英語で 1 行を記録する
 func secondsToDuration(name string, seconds, max int, def time.Duration) time.Duration {
 	if seconds == 0 {
 		return def
@@ -76,9 +72,9 @@ var newTunnel = tunnel.New
 // 読みの回数と、1 つの応答に混ざる時点を確かめるために差し替える。
 var readTunnelStatus = (*tunnel.Tunnel).Status
 
-// build はトンネルを立て、その netstack の上に中継を作る(仕様 7 節)。リスナーは開かないので、
-// 呼び出し側が続けて applyRules を呼ぶ。
-func (d *userspaceDataplane) build(priv wgtypes.Key, wg proto.WGConfig) (retryable bool, err error) {
+// Build はトンネルを立て、その netstack の上に中継を作る(仕様 7 節)。リスナーは開かないので、
+// 呼び出し側が続けて ApplyRules を呼ぶ。
+func (d *userspaceDataplane) Build(priv wgtypes.Key, wg proto.WGConfig) (retryable bool, err error) {
 	cfg, err := tunnelConfig(priv, wg)
 	if err != nil {
 		return false, err
@@ -94,24 +90,24 @@ func (d *userspaceDataplane) build(priv wgtypes.Key, wg proto.WGConfig) (retryab
 	return true, nil
 }
 
-func (d *userspaceDataplane) built() bool { return d.tun != nil }
+func (d *userspaceDataplane) Built() bool { return d.tun != nil }
 
-// applyRules はリスナーを宣言に合わせる。変わったものだけを開閉する(仕様 5.2, 7 節)。
-// 開けなかったリスナーはルールの error として read に現れ、refresh が開き直す。
-func (d *userspaceDataplane) applyRules(_ uint64, rules []proto.AgentRule, _ any) (string, error) {
+// ApplyRules はリスナーを宣言に合わせる。変わったものだけを開閉する(仕様 5.2, 7 節)。
+// 開けなかったリスナーはルールの error として Read に現れ、Refresh が開き直す。
+func (d *userspaceDataplane) ApplyRules(_ uint64, rules []proto.AgentRule, _ any) (string, error) {
 	acts := d.rl.Apply(relay.DesiredFromRules(rules))
 	return fmt.Sprintf("%d actions, %d listeners", len(acts), len(d.rl.Status())), nil
 }
 
-func (d *userspaceDataplane) refresh() {
+func (d *userspaceDataplane) Refresh() {
 	if d.rl != nil {
 		d.rl.Retry()
 	}
 }
 
-// close は中継を閉じてからトンネルを閉じる。閉じるのが先なので、古い device と netstack、
-// その goroutine は、次の build が新しいものを作る前に必ず片付く。
-func (d *userspaceDataplane) close() {
+// Close は中継を閉じてからトンネルを閉じる。閉じるのが先なので、古い device と netstack、
+// その goroutine は、次の Build が新しいものを作る前に必ず片付く。
+func (d *userspaceDataplane) Close() {
 	if d.rl != nil {
 		d.rl.Close()
 		d.rl = nil
@@ -126,33 +122,33 @@ func (d *userspaceDataplane) close() {
 	}
 }
 
-// lastHandshake が読むのは今の device なので、ゼロでない値は必ず今のトンネルのものである。
-func (d *userspaceDataplane) lastHandshake() time.Time {
+// LastHandshake が読むのは今の device なので、ゼロでない値は必ず今のトンネルのものである。
+func (d *userspaceDataplane) LastHandshake() time.Time {
 	return d.tun.Status().LastHandshake
 }
 
-// read はトンネルの状態と中継の状態を 1 回ずつ読む。ルールごとの状態と doctor のリスナーの集計は、
+// Read はトンネルの状態と中継の状態を 1 回ずつ読む。ルールごとの状態と doctor のリスナーの集計は、
 // 同じ Manager.Status の読みから作る(設計文書 10.2c 節)。
-func (d *userspaceDataplane) read() dataplaneReading {
-	var r dataplaneReading
+func (d *userspaceDataplane) Read() agentdp.Reading {
+	var r agentdp.Reading
 	if d.tun != nil {
 		ts := readTunnelStatus(d.tun)
-		r.tunnel = tunnelReading{
-			present:       true,
-			endpoint:      ts.Endpoint,
-			lastHandshake: ts.LastHandshake,
-			rxBytes:       ts.RxBytes,
-			txBytes:       ts.TxBytes,
-			err:           ts.Err,
+		r.Tunnel = agentdp.TunnelReading{
+			Present:       true,
+			Endpoint:      ts.Endpoint,
+			LastHandshake: ts.LastHandshake,
+			RxBytes:       ts.RxBytes,
+			TxBytes:       ts.TxBytes,
+			Err:           ts.Err,
 		}
 		bufs := d.tun.SocketBuffers()
-		r.tunnel.socketBuffers = &bufs
-		r.tunnel.udpAccounting = &udpAccountingReading{fault: d.tun.UDPReceiveFault()}
+		r.Tunnel.SocketBuffers = &bufs
+		r.Tunnel.UDPAccounting = &agentdp.UDPAccountingReading{Fault: d.tun.UDPReceiveFault()}
 	}
 	if d.rl != nil {
 		sts := d.rl.Status()
-		r.rules = ruleStatuses(sts)
-		r.relay = &relayReading{listeners: sts, tcp: d.rl.TCPPool(), udp: d.rl.UDPPool()}
+		r.Rules = ruleStatuses(sts)
+		r.Relay = &agentdp.RelayReading{Listeners: sts, TCP: d.rl.TCPPool(), UDP: d.rl.UDPPool()}
 	}
 	return r
 }
@@ -209,6 +205,6 @@ func tunnelConfig(priv wgtypes.Key, w proto.WGConfig) (tunnel.Config, error) {
 	return tunnel.Config{
 		PrivateKey: priv, ServerPublicKey: serverPub, Endpoint: w.Endpoint,
 		Address: addr.Addr(), ServerAddress: server, MTU: w.MTU,
-		Keepalive: secondsToDuration("keepalive", w.Keepalive, keepaliveMaxSeconds, 25*time.Second),
+		Keepalive: secondsToDuration("keepalive", w.Keepalive, agentdp.KeepaliveMaxSeconds, 25*time.Second),
 	}, nil
 }

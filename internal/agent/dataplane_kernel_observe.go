@@ -18,9 +18,9 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// observePrepare は 30 秒ごとの見直しのうち、名前の解決だけを行う(7b.2 節)。rt.mu の外で呼ぶ。
+// ObservePrepare は 30 秒ごとの見直しのうち、名前の解決だけを行う(7b.2 節)。rt.mu の外で呼ぶ。
 // 停止で打ち切られたら nil を返し、見直しは何もしない。
-func (d *kernelDataplane) observePrepare(rules []proto.AgentRule) any {
+func (d *kernelDataplane) ObservePrepare(rules []proto.AgentRule) any {
 	ctx, cancel := context.WithTimeout(d.ctx, kernelResolveTimeout)
 	defer cancel()
 	p := &observePrepared{}
@@ -38,13 +38,13 @@ func (d *kernelDataplane) observePrepare(rules []proto.AgentRule) any {
 	return p
 }
 
-// observePrepared は observePrepare の結果である。endpoint は、エンドポイントを引き直したときだけある。
+// observePrepared は ObservePrepare の結果である。endpoint は、エンドポイントを引き直したときだけある。
 type observePrepared struct {
 	resolved map[string]nft.Resolution
 	endpoint *kernelPrepared
 }
 
-// observeCommit は 30 秒ごとの見直しの残りである(7b.2・7b.4 節)。rt.mu を持って呼ぶ。
+// ObserveCommit は 30 秒ごとの見直しの残りである(7b.2・7b.4 節)。rt.mu を持って呼ぶ。
 //
 //   - 名前の解決し直し:PlanAgent の結果の DNAT が直前の公開と違うときだけテーブルを公開し直す。解決の
 //     結果が変わっても、選ぶアドレスが同じなら公開し直さない。理由の文言だけが変わったときは、記録を
@@ -54,7 +54,7 @@ type observePrepared struct {
 //
 // saved は記録が変わったかどうかで、真なら呼び出し側が認証情報ファイルを保存する。見直しの失敗は
 // 旧いテーブルを残し、次の見直しで試し直す。
-func (d *kernelDataplane) observeCommit(gen uint64, rules []proto.AgentRule, prepared any) (saved bool, err error) {
+func (d *kernelDataplane) ObserveCommit(gen uint64, rules []proto.AgentRule, prepared any) (saved bool, err error) {
 	op, ok := prepared.(*observePrepared)
 	if !ok || !d.have || !d.converged || d.pub == nil {
 		return false, nil
@@ -62,14 +62,14 @@ func (d *kernelDataplane) observeCommit(gen uint64, rules []proto.AgentRule, pre
 	return d.compare(gen, rules, op)
 }
 
-// sensor はカーネルの変更の通知の購読である(7b.4 節の変更の通知)。
-func (d *kernelDataplane) sensor() dataplane.Sensor { return d.ops.notify }
+// Sensor はカーネルの変更の通知の購読である(7b.4 節の変更の通知)。
+func (d *kernelDataplane) Sensor() dataplane.Sensor { return d.ops.notify }
 
-// observeNotified は、変更の通知をまとめた後の見直しである(7b.4 節の変更の通知)。rt.mu を持って呼ぶ。
+// ObserveNotified は、変更の通知をまとめた後の見直しである(7b.4 節の変更の通知)。rt.mu を持って呼ぶ。
 // 30 秒ごとの見直しのうち外からの変更だけを扱い、名前を引かず、試し接続もしない。比べるのは直前の
 // 公開そのものである。自分の公開と wgft0 の収束も通知を生むが、公開の直後に指紋を読み直してあるので、
 // その通知の後の見直しは一致を確かめて終わる。
-func (d *kernelDataplane) observeNotified(gen uint64, rules []proto.AgentRule) (saved bool, err error) {
+func (d *kernelDataplane) ObserveNotified(gen uint64, rules []proto.AgentRule) (saved bool, err error) {
 	if !d.have || !d.converged || d.pub == nil {
 		return false, nil
 	}

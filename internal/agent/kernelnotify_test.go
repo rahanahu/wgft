@@ -19,7 +19,7 @@ import (
 // notified は、変更の通知の後の見直しを 1 回行い、誤りなら試験を落とす。
 func notified(t *testing.T, d *kernelDataplane, gen uint64, rules []proto.AgentRule) bool {
 	t.Helper()
-	saved, err := d.observeNotified(gen, rules)
+	saved, err := d.ObserveNotified(gen, rules)
 	if err != nil {
 		t.Fatalf("notified check: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestKernelNotifiedCheckRepairsOnlyOutsideChanges(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
@@ -68,7 +68,7 @@ func TestKernelNotifiedCheckDoesNotResolveNames(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	lookups, probes := len(k.lookups), len(k.probed)
@@ -96,7 +96,7 @@ func TestKernelNotifiedCheckSpacesRetriesAfterAFailure(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	d.gate.Now = func() time.Time { return now }
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	attempts := 0
@@ -112,30 +112,30 @@ func TestKernelNotifiedCheckSpacesRetriesAfterAFailure(t *testing.T) {
 	}
 	k.publishErr = errors.New("netlink receive: no buffer space available")
 	k.tableGone = true
-	if _, err := d.observeNotified(1, rules); err == nil || attempts != 1 {
+	if _, err := d.ObserveNotified(1, rules); err == nil || attempts != 1 {
 		t.Fatalf("a deleted table: %d attempts, err %v; want 1 failed attempt", attempts, err)
 	}
 	// 失敗した公開の差し替えが通知を生む。その食い違いはまだ新しいので、1 回だけ待たずに試す
-	_, _ = d.observeNotified(1, rules)
+	_, _ = d.ObserveNotified(1, rules)
 	if attempts != 2 {
 		t.Fatalf("the failed publication's own replacement led to %d attempts in all, want 2", attempts)
 	}
 	for i := 0; i < 5; i++ {
 		k.tableEdit++ // 失敗した公開がまた差し替え、その通知が届く
 		// 門が閉じた見直しは何も試さないので、誤りを返さず、前の誤りを残す
-		if _, err := d.observeNotified(1, rules); err != nil || d.checkError() == "" {
-			t.Fatalf("a check the gate held back returned %v with check error %q; want nil and the last failure kept", err, d.checkError())
+		if _, err := d.ObserveNotified(1, rules); err != nil || d.CheckError() == "" {
+			t.Fatalf("a check the gate held back returned %v with check error %q; want nil and the last failure kept", err, d.CheckError())
 		}
 	}
 	if attempts != 2 {
 		t.Fatalf("notifications right after a failure led to %d attempts in all, want 2 until the delay passes", attempts)
 	}
 	now = now.Add(2 * time.Second)
-	_, _ = d.observeNotified(1, rules)
+	_, _ = d.ObserveNotified(1, rules)
 	if attempts != 3 {
 		t.Fatalf("after the delay passed: %d attempts in all, want 3", attempts)
 	}
-	_, _ = d.observeNotified(1, rules)
+	_, _ = d.ObserveNotified(1, rules)
 	if attempts != 3 {
 		t.Fatalf("right after the third failure: %d attempts in all, want still 3", attempts)
 	}
@@ -143,19 +143,19 @@ func TestKernelNotifiedCheckSpacesRetriesAfterAFailure(t *testing.T) {
 	link := ours(t, d)
 	link.MTU = 1280
 	k.link = link
-	_, _ = d.observeNotified(1, rules)
+	_, _ = d.ObserveNotified(1, rules)
 	if attempts != 4 {
 		t.Fatalf("a new drift waited for the delay: %d attempts in all, want 4", attempts)
 	}
 	// 30 秒ごとの見直しは間隔を待たない
-	_, _ = d.observeCommit(1, rules, d.observePrepare(rules))
+	_, _ = d.ObserveCommit(1, rules, d.ObservePrepare(rules))
 	if attempts != 5 {
 		t.Fatalf("the 30-second check waited for the delay: %d attempts in all, want 5", attempts)
 	}
 	// 30 秒ごとの見直しの公開が成功すると間隔は 1 秒に戻り、同じ食い違いが続いても通知ですぐに直る
 	k.publishErr = nil
 	k.link = ours(t, d)
-	if saved, err := d.observeCommit(1, rules, d.observePrepare(rules)); err != nil || !saved || attempts != 6 {
+	if saved, err := d.ObserveCommit(1, rules, d.ObservePrepare(rules)); err != nil || !saved || attempts != 6 {
 		t.Fatalf("the 30-second check: %d attempts in all, err %v; want the 6th to succeed", attempts, err)
 	}
 	k.tableEdit++ // ログに出した食い違いと同じなので、新しい食い違いではない
@@ -172,7 +172,7 @@ func TestKernelNotifiedCheckLogsARecurringDriftOnce(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
@@ -206,27 +206,27 @@ func TestKernelNotifiedCheckSpacesRetriesAfterALinkFailure(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	d.gate.Now = func() time.Time { return now }
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	link := ours(t, d)
 	link.Exists = false
 	k.link = link
 	k.ensureErr = errors.New("10.200.0.1 is covered by a route on eth0")
-	if _, err := d.observeNotified(1, rules); err == nil || len(k.ensured) != 2 {
+	if _, err := d.ObserveNotified(1, rules); err == nil || len(k.ensured) != 2 {
 		t.Fatalf("a deleted wgft0: ensured %d times in all, err %v; want 1 failed attempt after the apply", len(k.ensured), err)
 	}
 	for i := 0; i < 5; i++ {
 		// リンクの通知が続く。門が閉じた見直しは前の誤りを残す
-		if _, err := d.observeNotified(1, rules); err != nil || !strings.Contains(d.checkError(), "covered by a route") {
-			t.Fatalf("a check the gate held back returned %v with check error %q; want nil and the last failure kept", err, d.checkError())
+		if _, err := d.ObserveNotified(1, rules); err != nil || !strings.Contains(d.CheckError(), "covered by a route") {
+			t.Fatalf("a check the gate held back returned %v with check error %q; want nil and the last failure kept", err, d.CheckError())
 		}
 	}
 	if len(k.ensured) != 2 {
 		t.Fatalf("notifications right after a failed convergence led to %d attempts in all, want 2 until the delay passes", len(k.ensured))
 	}
 	now = now.Add(2 * time.Second)
-	_, _ = d.observeNotified(1, rules)
+	_, _ = d.ObserveNotified(1, rules)
 	if len(k.ensured) != 3 {
 		t.Fatalf("after the delay passed: %d attempts in all, want 3", len(k.ensured))
 	}
@@ -241,7 +241,7 @@ func TestKernelGateClosedCheckKeepsTheError(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	d.gate.Now = func() time.Time { return now }
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
@@ -249,26 +249,26 @@ func TestKernelGateClosedCheckKeepsTheError(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 	k.publishErr = errors.New("netlink: permission denied")
 	k.tableGone = true
-	if _, err := d.observeNotified(1, rules); err == nil {
+	if _, err := d.ObserveNotified(1, rules); err == nil {
 		t.Fatal("a failed republish returned no error")
 	}
-	want := d.checkError()
+	want := d.CheckError()
 	if !strings.Contains(want, "permission denied") {
 		t.Fatalf("check error = %q, want the publish error", want)
 	}
 	for i := 0; i < 3; i++ {
 		// 無関係な通知(他のリンクの変更など)が、門が閉じている間に届く
-		if _, err := d.observeNotified(1, rules); err != nil {
+		if _, err := d.ObserveNotified(1, rules); err != nil {
 			t.Fatalf("a check the gate held back returned %v", err)
 		}
-		if got := d.checkError(); got != want {
+		if got := d.CheckError(); got != want {
 			t.Fatalf("a check the gate held back changed the check error from %q to %q", want, got)
 		}
 	}
 	now = now.Add(2 * time.Second)
-	_, _ = d.observeNotified(1, rules) // 門が開き、試して同じ誤りで失敗する
-	_, _ = d.observeNotified(1, rules) // 門がまた閉じている
-	if got := d.checkError(); got != want {
+	_, _ = d.ObserveNotified(1, rules) // 門が開き、試して同じ誤りで失敗する
+	_, _ = d.ObserveNotified(1, rules) // 門がまた閉じている
+	if got := d.CheckError(); got != want {
 		t.Errorf("check error = %q after the gate closed again, want %q", got, want)
 	}
 	if n := strings.Count(buf.String(), "works again"); n != 0 {
@@ -279,8 +279,8 @@ func TestKernelGateClosedCheckKeepsTheError(t *testing.T) {
 	}
 	k.publishErr = nil
 	now = now.Add(time.Minute)
-	if !notified(t, d, 1, rules) || d.checkError() != "" || !strings.Contains(buf.String(), "works again") {
-		t.Errorf("a successful repair left check error %q", d.checkError())
+	if !notified(t, d, 1, rules) || d.CheckError() != "" || !strings.Contains(buf.String(), "works again") {
+		t.Errorf("a successful repair left check error %q", d.CheckError())
 	}
 }
 
@@ -293,10 +293,10 @@ func TestKernelNotifiedCheckKeepsTheEndpointError(t *testing.T) {
 	d.ops.now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.build(d.priv, w); err != nil {
+	if _, err := d.Build(d.priv, w); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.applyRules(1, nil, nil); err != nil {
+	if _, err := d.ApplyRules(1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
@@ -307,10 +307,10 @@ func TestKernelNotifiedCheckKeepsTheEndpointError(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
 	k.ensureErr = errors.New("netlink: device busy")
-	if _, err := d.observeCommit(1, nil, d.observePrepare(nil)); err == nil {
+	if _, err := d.ObserveCommit(1, nil, d.ObservePrepare(nil)); err == nil {
 		t.Fatal("a failed convergence after the re-resolution was not reported")
 	}
-	want := d.checkError()
+	want := d.CheckError()
 	if !strings.Contains(want, "device busy") {
 		t.Fatalf("check error = %q, want the convergence error", want)
 	}
@@ -319,7 +319,7 @@ func TestKernelNotifiedCheckKeepsTheEndpointError(t *testing.T) {
 			t.Fatal("a notified check with nothing to repair published")
 		}
 	}
-	if got := d.checkError(); got != want {
+	if got := d.CheckError(); got != want {
 		t.Errorf("a notified check changed the check error from %q to %q", want, got)
 	}
 	if strings.Contains(buf.String(), "works again") {
@@ -328,8 +328,8 @@ func TestKernelNotifiedCheckKeepsTheEndpointError(t *testing.T) {
 	k.ensureErr = nil
 	now = now.Add(30 * time.Second)
 	observeOnce(t, d, 1, nil)
-	if d.checkError() != "" || !strings.Contains(buf.String(), "works again") {
-		t.Errorf("the 30-second check's successful convergence left check error %q", d.checkError())
+	if d.CheckError() != "" || !strings.Contains(buf.String(), "works again") {
+		t.Errorf("the 30-second check's successful convergence left check error %q", d.CheckError())
 	}
 }
 
@@ -342,7 +342,7 @@ func TestKernelNotifiedCheckKeepsTheResolutionPublishError(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	k.link = ours(t, d)
 	rules := []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}
-	if _, err := d.applyRules(1, rules, nil); err != nil {
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
@@ -351,20 +351,20 @@ func TestKernelNotifiedCheckKeepsTheResolutionPublishError(t *testing.T) {
 	fail := func() {
 		t.Helper()
 		k.publishErr = errors.New("netlink: permission denied")
-		if _, err := d.observeCommit(1, rules, d.observePrepare(rules)); err == nil {
+		if _, err := d.ObserveCommit(1, rules, d.ObservePrepare(rules)); err == nil {
 			t.Fatal("a failed publication of a changed DNAT returned no error")
 		}
-		if !strings.Contains(d.checkError(), "permission denied") {
-			t.Fatalf("check error = %q, want the publish error", d.checkError())
+		if !strings.Contains(d.CheckError(), "permission denied") {
+			t.Fatalf("check error = %q, want the publish error", d.CheckError())
 		}
 		k.publishErr = nil
-		want := d.checkError()
+		want := d.CheckError()
 		for i := 0; i < 3; i++ {
 			if notified(t, d, 1, rules) {
 				t.Fatal("a notified check with nothing to repair published")
 			}
 		}
-		if got := d.checkError(); got != want {
+		if got := d.CheckError(); got != want {
 			t.Fatalf("a notified check changed the check error from %q to %q while the new DNAT is unpublished", want, got)
 		}
 		if strings.Contains(buf.String(), "works again") {
@@ -373,8 +373,8 @@ func TestKernelNotifiedCheckKeepsTheResolutionPublishError(t *testing.T) {
 	}
 	k.dns["game.lan"] = []netip.Addr{netip.MustParseAddr("192.168.1.9")}
 	fail()
-	if !observeOnce(t, d, 1, rules) || d.checkError() != "" || !strings.Contains(buf.String(), "works again") {
-		t.Fatalf("a successful publication of the changed DNAT left check error %q", d.checkError())
+	if !observeOnce(t, d, 1, rules) || d.CheckError() != "" || !strings.Contains(buf.String(), "works again") {
+		t.Fatalf("a successful publication of the changed DNAT left check error %q", d.CheckError())
 	}
 	if got := d.pub.Rules[0].Ranges[0].Dest.Addr(); got != netip.MustParseAddr("192.168.1.9") {
 		t.Fatalf("published DNAT to %s, want 192.168.1.9", got)
@@ -384,7 +384,7 @@ func TestKernelNotifiedCheckKeepsTheResolutionPublishError(t *testing.T) {
 	k.dns["game.lan"] = []netip.Addr{netip.MustParseAddr("192.168.1.3")}
 	fail()
 	k.dns["game.lan"] = []netip.Addr{netip.MustParseAddr("192.168.1.9")}
-	if observeOnce(t, d, 1, rules) || d.checkError() != "" {
-		t.Errorf("a check that finds the DNAT back as published left check error %q", d.checkError())
+	if observeOnce(t, d, 1, rules) || d.CheckError() != "" {
+		t.Errorf("a check that finds the DNAT back as published left check error %q", d.CheckError())
 	}
 }

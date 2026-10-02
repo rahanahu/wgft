@@ -103,7 +103,7 @@ func (s *rebuildState) step(now, start, handshake time.Time) (idle time.Duration
 }
 
 // startTunnelLocked は今のトンネルと転送を閉じてから、全体状態の wg 設定で立て直す(仕様 7 節)。
-// 呼び出し側は rt.mu を持つ。ルールは適用しないので、呼び出し側が続けて dp.applyRules を呼ぶ。
+// 呼び出し側は rt.mu を持つ。ルールは適用しないので、呼び出し側が続けて dp.ApplyRules を呼ぶ。
 // 閉じるのが先なので、古い device と netstack、その goroutine は新しいものを作る前に必ず片付く。
 //
 // retryable は、失敗が試し直す価値のあるものかどうかを表す。誤りが無いときの値に意味は無い。
@@ -111,7 +111,7 @@ func (s *rebuildState) step(now, start, handshake time.Time) (idle time.Duration
 func (rt *runtime) startTunnelLocked(st *proto.State) (retryable bool, err error) {
 	rt.closeLocked()
 	rt.tunStart = time.Now()
-	retryable, err = rt.dp.build(rt.priv, st.WG)
+	retryable, err = rt.dp.Build(rt.priv, st.WG)
 	if err != nil {
 		return retryable, err
 	}
@@ -134,7 +134,7 @@ func (rt *runtime) startTunnelLocked(st *proto.State) (retryable bool, err error
 func (rt *runtime) checkTunnel(now time.Time) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if !rt.dp.built() {
+	if !rt.dp.Built() {
 		rt.retryBuildLocked(now)
 		return
 	}
@@ -143,7 +143,7 @@ func (rt *runtime) checkTunnel(now time.Time) {
 	}
 	st := rt.f.LastState
 	// 読むのは今の device なので、ゼロでない最終ハンドシェイクは必ず今のトンネルのものである
-	handshake := rt.dp.lastHandshake()
+	handshake := rt.dp.LastHandshake()
 	// 新しいハンドシェイクは、vpsd までの経路が戻ったことを示す。stream が再接続の待ちに入って
 	// いれば、その待ちを打ち切らせる(仕様 5.2 節)。判定は step が値を控え直す前に行う。観測は
 	// この 1 回の読みだけで、別の監視は持たない
@@ -178,7 +178,7 @@ func (rt *runtime) retryBuildLocked(now time.Time) {
 	st := rt.retrySt
 	// 作成の失敗は buildLocked が 1 行出す。立った後のルールの適用と認証情報ファイルの保存の誤りは
 	// buildLocked が出さないので、ここで出す
-	if err := rt.buildLocked(now, st, false, nil); err != nil && rt.dp.built() {
+	if err := rt.buildLocked(now, st, false, nil); err != nil && rt.dp.Built() {
 		log.Printf("applying generation %d after building the tunnel again: %v", st.Generation, err)
 	}
 }
@@ -209,7 +209,7 @@ func (rt *runtime) buildLocked(now time.Time, st *proto.State, applied bool, pre
 		return err
 	}
 	if applied {
-		if _, err := rt.dp.applyRules(st.Generation, st.Rules, prepared); err != nil {
+		if _, err := rt.dp.ApplyRules(st.Generation, st.Rules, prepared); err != nil {
 			log.Printf("apply rules after rebuilding the tunnel: %v", err)
 		}
 		return nil

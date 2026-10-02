@@ -14,23 +14,24 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/conntrack"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/proto"
 )
 
-// applyRules は wgft0 を収束させ、宛先を解決してテーブルを組み、1 つのバッチで公開する(7b.1 節から 7b.3 節)。
+// ApplyRules は wgft0 を収束させ、宛先を解決してテーブルを組み、1 つのバッチで公開する(7b.1 節から 7b.3 節)。
 // wgft0 を先に収束させるのは、ピアを公開の前に置くためである(7a.3 節)。
 //
 // 誤りを返すのはテーブル全体の失敗(7b.3 節の 3 つ目の種類)だけで、このとき旧いテーブルと記録を残す。
-// ルール単位の失敗は公開の記録の理由に載り、read が報告する。
+// ルール単位の失敗は公開の記録の理由に載り、Read が報告する。
 //
-// prepared は prepareApply の結果で、名前の解決を rt.mu の外で済ませてある。nil なら、ここで引く。
-func (d *kernelDataplane) applyRules(gen uint64, rules []proto.AgentRule, prepared any) (string, error) {
+// prepared は PrepareApply の結果で、名前の解決を rt.mu の外で済ませてある。nil なら、ここで引く。
+func (d *kernelDataplane) ApplyRules(gen uint64, rules []proto.AgentRule, prepared any) (string, error) {
 	p, ok := prepared.(*kernelPrepared)
 	if !ok || p == nil {
-		p = d.prepareApply(&proto.State{WG: d.wg, Rules: rules}).(*kernelPrepared)
+		p = d.PrepareApply(&proto.State{WG: d.wg, Rules: rules}).(*kernelPrepared)
 	}
 	if p.err != nil || d.ctx.Err() != nil {
 		return "", errors.New("not publishing: the agent is stopping")
@@ -43,7 +44,7 @@ func (d *kernelDataplane) applyRules(gen uint64, rules []proto.AgentRule, prepar
 	changes, err := d.ops.ensureLink(cfg)
 	if err != nil {
 		if !d.converged && startupFatal(err) {
-			return "", &fatalError{err: err}
+			return "", &agentdp.FatalError{Err: err}
 		}
 		return "", fmt.Errorf("converge %s: %w", d.iface, err)
 	}
@@ -239,8 +240,8 @@ func (d *kernelDataplane) summary() string {
 	return fmt.Sprintf("published table inet %s: %d rules with DNAT, %d rules with a reason", nft.AgentTableName, published, refused)
 }
 
-// refresh は 30 秒ごとの見直しである。TCP の宛先へ試し接続し直し、ip_forward を読み直す(7b.1・7b.3 節)。
-func (d *kernelDataplane) refresh() {
+// Refresh は 30 秒ごとの見直しである。TCP の宛先へ試し接続し直し、ip_forward を読み直す(7b.1・7b.3 節)。
+func (d *kernelDataplane) Refresh() {
 	if !d.have {
 		return
 	}

@@ -355,7 +355,7 @@ func TestGuardEffectsFollowTheLayers(t *testing.T) {
 
 // Same overflow shape as secondsToDuration guards against (dataplane_userspace.go): if
 // agent.json is corrupted or tampered with, st.WG.Keepalive could sit outside the 0-65535
-// range that kernel mode's checkWG (dataplane_kernel.go) normally enforces before this value
+// range that kernel mode's CheckWG (dataplane_kernel.go) normally enforces before this value
 // is ever recorded. declaredAgentLink rejects it rather than let `agent doctor` display an
 // out-of-range or overflowed Keepalive.
 func TestDeclaredAgentLinkRejectsOutOfRangeKeepalive(t *testing.T) {

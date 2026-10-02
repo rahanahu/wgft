@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
@@ -168,8 +169,8 @@ func (rt *runtime) runtimeStateLocked() *controlapi.DoctorRuntimeState {
 	if rt.f != nil && rt.f.LastState != nil {
 		st.AgentDisabled = rt.f.LastState.AgentDisabled
 	}
-	r := rt.dp.read()
-	tun := rt.tunnelSnapshotLocked(r.tunnel)
+	r := rt.dp.Read()
+	tun := rt.tunnelSnapshotLocked(r.Tunnel)
 	st.Tunnel = controlapi.DoctorTunnel{
 		Present:       tun.present,
 		State:         tun.hb.State,
@@ -182,28 +183,28 @@ func (rt *runtime) runtimeStateLocked() *controlapi.DoctorRuntimeState {
 		},
 	}
 	if tun.present {
-		st.Tunnel.RxBytes, st.Tunnel.TxBytes = tun.raw.rxBytes, tun.raw.txBytes
+		st.Tunnel.RxBytes, st.Tunnel.TxBytes = tun.raw.RxBytes, tun.raw.TxBytes
 		st.Tunnel.StartedAt = rt.tunStart
-		if b := tun.raw.socketBuffers; b != nil {
+		if b := tun.raw.SocketBuffers; b != nil {
 			st.Tunnel.SocketBuffers = doctorSocketBuffers(*b)
 		}
-		if u := tun.raw.udpAccounting; u != nil {
+		if u := tun.raw.UDPAccounting; u != nil {
 			st.Tunnel.UDPAccounting = &controlapi.DoctorUDPAccounting{}
-			if u.fault != nil {
+			if u.Fault != nil {
 				st.Tunnel.UDPAccounting.Stopped = true
-				st.Tunnel.UDPAccounting.Error = clipText(u.fault.Error())
+				st.Tunnel.UDPAccounting.Error = clipText(u.Fault.Error())
 			}
 		}
 	}
-	if r.relay == nil {
+	if r.Relay == nil {
 		// カーネルモードのルールごとの状態はハートビートと同じ読みから来る(設計文書 10.2c 節)。
 		// リスナーもフロー予算も無い
-		if r.rules != nil {
-			st.Rules = doctorRules(r.rules, nil)
+		if r.Rules != nil {
+			st.Rules = doctorRules(r.Rules, nil)
 		}
-		if kd, ok := rt.dp.(kernelDoctor); ok {
-			st.Kernel = kd.doctorKernel()
-			st.CheckError = clipText(kd.checkError())
+		if kd, ok := rt.dp.(agentdp.KernelDoctor); ok {
+			st.Kernel = kd.DoctorKernel()
+			st.CheckError = clipText(kd.CheckError())
 			st.PublishError = clipText(rt.pendingErr)
 			withRulePorts(st.Rules, st.Kernel.Table.Rules)
 		}
@@ -211,22 +212,12 @@ func (rt *runtime) runtimeStateLocked() *controlapi.DoctorRuntimeState {
 	}
 	// 中継とトンネルは一緒に作り直されるので、拒否の累計の起点はトンネルを立てた時刻である
 	st.RefusalsSince = rt.tunStart
-	st.Rules = doctorRules(r.rules, r.relay.listeners)
+	st.Rules = doctorRules(r.Rules, r.Relay.Listeners)
 	st.Budgets = []controlapi.DoctorBudget{
-		doctorBudget(proto.TCP, r.relay.tcp),
-		doctorBudget(proto.UDP, r.relay.udp),
+		doctorBudget(proto.TCP, r.Relay.TCP),
+		doctorBudget(proto.UDP, r.Relay.UDP),
 	}
 	return st
-}
-
-// kernelDoctor は、agent doctor のためにカーネルの状態を読む dataplane である。カーネルモードの実装だけが
-// 持つ(設計文書 10.2c 節)。呼び出し側は rt.mu を持つ。
-type kernelDoctor interface {
-	// doctorKernel はカーネルを読む。停止中の agent doctor の ReadKernel と同じ読み方である
-	doctorKernel() *controlapi.DoctorKernel
-	// checkError は直前の見直しの誤りである。30 秒ごとの見直しと変更の通知の後の見直しの両方を指す。
-	// 無ければ空
-	checkError() string
 }
 
 // withRulePorts は、ハートビートのルールごとの状態に、公開の記録が持つポートの数を写す。
