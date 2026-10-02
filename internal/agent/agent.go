@@ -105,7 +105,7 @@ type runtime struct {
 	// 読み書きとログの出力だけを行う。streamMu は rt.mu を持ったまま取らず、streamMu を持ったまま
 	// wgft の他の排他を取らない(streamobs.go)。rt.mu の中の checkTunnel から streamLoop へは、
 	// handshakeWake の待たない送信と handshakeSeen の atomic で伝える。agent doctor は rt.mu を期限付きで取る(doctor.go の lockRuntime)。rotate-key は rt.mu を
-	// 放してから適用し直し、その後に streamMu を取って stream を張り直す(control.go の rotateKey)。
+	// 放してから適用し直し、その後に streamMu を取って stream を張り直す(rotatekey.go の rotateKey)。
 	mu sync.Mutex
 	// dp はトンネルと転送を担う dataplane である(設計文書 7a.7 節の境目)。rt.mu が守る
 	dp    agentdp.Dataplane

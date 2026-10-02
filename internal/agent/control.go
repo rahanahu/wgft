@@ -12,11 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
-	"github.com/rahanahu/wgft/internal/textsafe"
 )
 
 // 稼働中のエージェントへの指示は、認証情報ファイルの隣の Unix ソケットで受ける(仕様 9 節の rotate-key)。
@@ -105,115 +102,4 @@ func (rt *runtime) serveControlConn(c net.Conn) {
 		// 場合として扱う(設計文書 10.2c 節)。版の交渉も capability も要らない
 		fmt.Fprintf(c, "error: unknown command\n")
 	}
-}
-
-// rotateKey は wg 鍵対を作り直し、トンネルを新しい鍵で張り直し、stream を張り直す(新しい公開鍵を宣言する)。
-func (rt *runtime) rotateKey() (wgtypes.Key, error) {
-	key, err := wgtypes.GeneratePrivateKey()
-	if err != nil {
-		return wgtypes.Key{}, err
-	}
-	rt.mu.Lock()
-	// カーネルモードでは、今の鍵を 1 つ前の鍵として新しい鍵と同じ保存で残す(仕様 7b.4 節)。wgft0 を
-	// 新しい鍵へ書き換える前に落ちても、次の起動は 1 つ前の鍵で wgft0 を自分のものと判定できる。
-	// 保存に失敗したら、メモリの上の 2 つの鍵も元に戻す。戻さないと、使われていない新しい鍵が今の鍵に、
-	// 使っている鍵が 1 つ前の鍵に残り、次の rotate-key の後に落ちると、wgft0 の鍵はどちらとも一致しない
-	oldKey, oldPrev := rt.f.WGPrivateKey, rt.f.PreviousWGPrivateKey
-	rt.f.KeepPreviousKey()
-	rt.f.WGPrivateKey = key.String()
-	if err := rt.f.Save(rt.opts.CredentialsPath); err != nil {
-		rt.f.WGPrivateKey, rt.f.PreviousWGPrivateKey = oldKey, oldPrev
-		rt.mu.Unlock()
-		return wgtypes.Key{}, err
-	}
-	rt.priv = key
-	last := rt.f.LastState
-	rt.closeLocked()
-	rt.mu.Unlock()
-	log.Printf("regenerated wg key pair; public key: %s", key.PublicKey())
-	if last != nil {
-		if err := rt.apply(last); err != nil {
-			log.Printf("wireguard: rebuild tunnel with the new key: %v", err)
-		} else {
-			log.Printf("wireguard: tunnel rebuilt with the new key")
-		}
-	}
-	// stream を張り直すと streamOnce が新しい公開鍵を送る(stream: connected to ... で確認できる)
-	rt.reconnect()
-	return key.PublicKey(), nil
-}
-
-// RotateKey は CLI から呼ぶ。稼働中なら制御ソケット経由で、停止中なら認証情報ファイルの鍵と last_state を直接消す。
-func RotateKey(path string) (string, error) {
-	// 判定とロックの取り方は credentials.LockWhileStopped にある。判定はロックファイルを作らない Inspect で行う
-	// (設計 10.2c 節)。Acquire 経由の判定は、ロックファイルの無いデータディレクトリで rotate-key を
-	// 打っただけで、呼び出し元の権限のロックファイルを残し、後から非特権で動くエージェントの起動を塞いだ。
-	// ロックファイルがあって誰も持っていなければ、ロックを取ってから書き換える。取らないと、判定の後に
-	// 起動したエージェントが書いた記録(カーネルモードへの切り替えの記録など)を、この書き換えが古い
-	// 内容で上書きしうる(仕様 9 節)
-	release, running, err := credentials.LockWhileStopped(path, inspectLock)
-	if err != nil {
-		return "", err
-	}
-	if running {
-		return rotateKeyRunning(path)
-	}
-	defer release()
-	f, err := credentials.Load(path)
-	if err != nil {
-		return "", err
-	}
-	// カーネルモードでは、消す鍵を 1 つ前の鍵として残す(仕様 7b.4 節)。wgft0 はまだその鍵を持つので、
-	// 次の起動は 1 つ前の鍵で wgft0 を自分のものと判定し、新しい鍵へ書き換える
-	kernel := f.RecordedMode() == credentials.ModeKernel
-	f.KeepPreviousKey()
-	f.WGPrivateKey, f.LastState = "", nil
-	if err := f.Save(path); err != nil {
-		return "", err
-	}
-	if rotateKeyLockedHook != nil {
-		rotateKeyLockedHook()
-	}
-	msg := "agent stopped: cleared the key and last_state in the credentials file, agent.json; the next start regenerates the key and receives full state over the stream"
-	if kernel {
-		msg += "; the old key is kept as the previous key, so the next start still recognises the kernel WireGuard interface that holds it and moves it to the new key"
-	}
-	return msg, nil
-}
-
-// rotateKeyLockedHook は、停止中の rotate-key が認証情報ファイルを書いた後、ロックを放す前に呼ばれる。
-// テストだけが、読んでから書き終えるまでロックを持っていることを確かめるために設定する。
-var rotateKeyLockedHook func()
-
-// inspectLock はロックの状態を読む。値は credentials.Inspect で、テストだけが、判定と取得の間に
-// エージェントが起動した場合を模すために差し替える。
-var inspectLock = credentials.Inspect
-
-// rotateKeyReplyLimit は、稼働中の rotate-key が制御ソケットから読む応答の大きさの上限である。
-const rotateKeyReplyLimit = 64 << 10
-
-// rotateKeyRunning は、稼働中のエージェントに制御ソケットで鍵の作り直しを指示する。
-func rotateKeyRunning(path string) (string, error) {
-	c, err := net.DialTimeout("unix", controlapi.ControlPath(path), 5*time.Second)
-	if err != nil {
-		return "", fmt.Errorf("agent is running but the control socket is unreachable: %w", explainControlErr(controlapi.ControlPath(path), err))
-	}
-	defer c.Close()
-	c.SetDeadline(time.Now().Add(30 * time.Second))
-	fmt.Fprintln(c, "rotate-key")
-	// 応答の 1 行は "ok <公開鍵>" か "error: <文言>" で短い。読む量に上限を置き、root の CLI が
-	// 改行を送らない相手にメモリを使い切られないようにする(仕様 11 節)。上限に当たった場合は
-	// controlapi.ReadControlReply がそのことを名指す誤りを返す(design.md 11 節、レビューの指摘)。
-	line, err := controlapi.ReadControlReply(c, rotateKeyReplyLimit)
-	if err != nil {
-		return "", err
-	}
-	// design.md 11 節: a compromised running agent answers this socket itself, so its reply is
-	// not trusted text before it reaches the operator's terminal, regardless of the "ok "/
-	// "error: " shape a well-behaved agent always uses.
-	line = textsafe.SanitizeForTerminal(strings.TrimSpace(line))
-	if !strings.HasPrefix(line, "ok ") {
-		return "", errors.New(strings.TrimPrefix(line, "error: "))
-	}
-	return "running agent regenerated its key; public key: " + strings.TrimPrefix(line, "ok "), nil
 }
