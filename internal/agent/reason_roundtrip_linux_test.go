@@ -227,3 +227,70 @@ func TestStaleReasonLimitMatchesTheHub(t *testing.T) {
 		t.Errorf("staleReasonLimit = %d, maxDoctorText = %d; they are the same cap", staleReasonLimit, maxDoctorText)
 	}
 }
+
+// 許可一覧がどのアドレスも通さないホスト名の理由は、解決のアドレスを先頭の数個だけ並べて残りを
+// "and N more" と書く。253 バイトのホスト名と多数のアドレスでも、設定の名前か "is not allowed" を含む
+// 後半が hub の 512 バイトの切り詰めの内に残り、server doctor が target_not_allowed と判定することを
+// 固定する。以前はアドレスを全部並べたので、12 から 26 個で後半が切り落とされ、target_error になった。
+// 最悪の長さとして、最長のアドレスと、ポート範囲全体が拒まれたときの追記も含める。
+func TestKernelRefusedReasonWithManyAddressesKeepsTheClassification(t *testing.T) {
+	refuseAll := func(netip.AddrPort) bool { return false }
+	for _, host := range []string{longTargetHost, "multi.lan"} {
+		for _, source := range []string{"", allowtargets.Env} {
+			for n := 2; n <= 60; n++ {
+				addrs := make([]netip.Addr, n)
+				for i := range addrs {
+					addrs[i] = netip.AddrFrom4([4]byte{250, 250, 250, byte(100 + i)})
+				}
+				rule := tcpRule("r1", host+":1", 1024, 65534)
+				cfg := nft.AgentConfig{AllowTarget: refuseAll, AllowTargetSource: source}
+				res := nft.PlanAgent(nft.AgentInput{Generation: 1, Rules: []proto.AgentRule{rule},
+					Resolved: map[string]nft.Resolution{host: {Addrs: addrs}}}, cfg).Rules[0]
+				if !strings.Contains(res.Reason, "ports are not published") {
+					t.Fatalf("reason %q: want the range suffix, the longest case", res.Reason)
+				}
+				stored := stream.HeartbeatReason(res.Reason)
+				if stored != res.Reason {
+					t.Fatalf("%d addresses, host %d bytes, source %q: the hub clips the reason (%d bytes)\n%q\nstored %q",
+						n, len(host), source, len(res.Reason), res.Reason, stored)
+				}
+				st := proto.RuleStatus{ID: rule.ID, State: proto.StatusError, Reason: res.Reason}
+				if c := serverDoctorReads(t, rule, st)[doctor.CheckTarget]; c.Reason != doctor.ReasonTargetNotAllowed {
+					t.Fatalf("%d addresses, host %d bytes, source %q: rule.target = %s %s, want %s (reason %q)",
+						n, len(host), source, c.Status, c.Reason, doctor.ReasonTargetNotAllowed, res.Reason)
+				}
+			}
+		}
+	}
+}
+
+// 解決のアドレスが少ないときの文言は変えない。多いときだけ、先頭の数個と "and N more" にする。
+func TestKernelRefusedReasonText(t *testing.T) {
+	refuseAll := func(netip.AddrPort) bool { return false }
+	addrs := func(n int) []netip.Addr {
+		out := make([]netip.Addr, n)
+		for i := range out {
+			out[i] = netip.AddrFrom4([4]byte{192, 168, 9, byte(10 + i)})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		n      int
+		source string
+		want   string
+	}{
+		{2, "", `target host "multi.lan" resolved to 192.168.9.10, 192.168.9.11; each of them at port 25565 is not allowed`},
+		{2, allowtargets.Env, `target host "multi.lan" resolved to 192.168.9.10, 192.168.9.11; none of them at port 25565 is in WGFT_AGENT_ALLOW_TARGETS`},
+		{4, "", `target host "multi.lan" resolved to 192.168.9.10, 192.168.9.11, 192.168.9.12, 192.168.9.13; each of them at port 25565 is not allowed`},
+		{5, "", `target host "multi.lan" resolved to 192.168.9.10, 192.168.9.11, 192.168.9.12, 192.168.9.13 and 1 more; each of them at port 25565 is not allowed`},
+		{30, allowtargets.Env, `target host "multi.lan" resolved to 192.168.9.10, 192.168.9.11, 192.168.9.12, 192.168.9.13 and 26 more; none of them at port 25565 is in WGFT_AGENT_ALLOW_TARGETS`},
+	} {
+		rule := tcpRule("r1", "multi.lan:25565", 25565, 25565)
+		res := nft.PlanAgent(nft.AgentInput{Generation: 1, Rules: []proto.AgentRule{rule},
+			Resolved: map[string]nft.Resolution{"multi.lan": {Addrs: addrs(tc.n)}}},
+			nft.AgentConfig{AllowTarget: refuseAll, AllowTargetSource: tc.source}).Rules[0]
+		if res.Reason != tc.want {
+			t.Errorf("%d addresses, source %q:\n got %q\nwant %q", tc.n, tc.source, res.Reason, tc.want)
+		}
+	}
+}

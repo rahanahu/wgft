@@ -220,7 +220,7 @@ func pickDest(addrs []netip.Addr, to uint16, allow func(netip.AddrPort) bool) (n
 
 // refusedReason は、実効宛先のポート to にどのアドレスも使えなかった理由である。文言は中継の拒否
 // (internal/dataplane/userspace/relay)と同じ形にする。server doctor は設定の名前か "is not allowed" で
-// target_not_allowed に分類する。
+// target_not_allowed に分類する。アドレスは先頭の maxRefusedAddrs 個だけを並べ、残りは "and N more" と書く。
 func refusedReason(host string, addrs []netip.Addr, to uint16, source string) string {
 	if len(addrs) == 1 {
 		d := netip.AddrPortFrom(addrs[0], to)
@@ -229,15 +229,27 @@ func refusedReason(host string, addrs []netip.Addr, to uint16, source string) st
 		}
 		return fmt.Sprintf("target %s "+reasontext.NotAllowed, d)
 	}
-	list := make([]string, len(addrs))
-	for i, a := range addrs {
+	shown := addrs[:min(len(addrs), maxRefusedAddrs)]
+	list := make([]string, len(shown))
+	for i, a := range shown {
 		list[i] = a.String()
 	}
-	if source != "" {
-		return fmt.Sprintf("target host %q resolved to %s; none of them at port %d is in %s", host, strings.Join(list, ", "), to, source)
+	resolvedTo := strings.Join(list, ", ")
+	if more := len(addrs) - len(shown); more > 0 {
+		resolvedTo += fmt.Sprintf(" and %d more", more)
 	}
-	return fmt.Sprintf("target host %q resolved to %s; each of them at port %d "+reasontext.NotAllowed, host, strings.Join(list, ", "), to)
+	if source != "" {
+		return fmt.Sprintf("target host %q resolved to %s; none of them at port %d is in %s", host, resolvedTo, to, source)
+	}
+	return fmt.Sprintf("target host %q resolved to %s; each of them at port %d "+reasontext.NotAllowed, host, resolvedTo, to)
 }
+
+// maxRefusedAddrs は、refusedReason が理由に並べるアドレスの数である。ホスト名は 253 バイトまで有効で、
+// 解決の結果は数十のアドレスになりうる。全部を並べると、hub のハートビートの理由の切り詰め
+// (stream.HeartbeatReason、512 バイト)が、server doctor が分類に使う後半(許可一覧の設定の名前か
+// "is not allowed")を落とす。4 つなら、253 バイトのホスト名、最長のアドレス、ポートの範囲の
+// 追記を合わせても 512 バイトに収まる(internal/agent の reason_roundtrip_linux_test.go が固定する)。
+const maxRefusedAddrs = 4
 
 // targetAddrs は宛先のホストを、DNAT に使える IPv4 のアドレスの昇順の並びにする。使えなければ理由を返す。
 // ホスト名の解決の結果にループバックか未指定のアドレスが混ざっていれば、それを除いて残りを使う。
