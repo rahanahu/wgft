@@ -38,7 +38,7 @@ func TestControlRotateKeyReplyOnSuccess(t *testing.T) {
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.priv != saved {
+	if rt.privKey() != saved {
 		t.Error("the runtime does not use the key it saved")
 	}
 }
@@ -70,7 +70,7 @@ func TestControlRotateKeyReplyOnSaveFailure(t *testing.T) {
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.f.WGPrivateKey != oldKey.String() || rt.priv != oldKey {
+	if rt.f.WGPrivateKey != oldKey.String() || rt.privKey() != oldKey {
 		t.Error("the old key is not in effect after the failed rotate-key")
 	}
 	// 閉じたトンネルは dataplane が nil に置き換えるので、同じ値が残っていれば閉じていない

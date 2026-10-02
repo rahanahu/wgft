@@ -298,7 +298,7 @@ func TestRotateKeyWhileRunningRestoresTheKeysWhenSaveFails(t *testing.T) {
 	if rt.f.WGPrivateKey != oldKey.String() || rt.f.PreviousWGPrivateKey != "earlier" {
 		t.Errorf("after a failed save: key %q previous %q; want %q and %q", rt.f.WGPrivateKey, rt.f.PreviousWGPrivateKey, oldKey.String(), "earlier")
 	}
-	if rt.priv != oldKey {
+	if rt.privKey() != oldKey {
 		t.Error("the runtime switched to the new key although it was not saved")
 	}
 	// 閉じたトンネルは dataplane が nil に置き換えるので、同じ値が残っていれば閉じていない

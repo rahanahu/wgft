@@ -87,10 +87,10 @@ func TestStreamDoesNotReapplyTheSameState(t *testing.T) {
 			CertSHA256:     hex.EncodeToString(pin[:]),
 			PermanentToken: "tok",
 		},
-		priv:              priv,
 		heartbeatInterval: time.Hour,
 		opts:              Options{CredentialsPath: t.TempDir() + "/agent.json"},
 	}
+	rt.setPrivKey(priv)
 	applies := func() int {
 		rt.mu.Lock()
 		defer rt.mu.Unlock()

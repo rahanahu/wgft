@@ -270,7 +270,7 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 	protoMin, protoMax := proto.SupportedProtocol.Min, proto.SupportedProtocol.Max
 	caps := proto.SupportedCapabilities
 	if err := writeJSON(ctx, ws, proto.Message{
-		Type: proto.MsgPublicKey, PublicKey: rt.priv.PublicKey().String(),
+		Type: proto.MsgPublicKey, PublicKey: rt.privKey().PublicKey().String(),
 		ProtocolMin: &protoMin, ProtocolMax: &protoMax, Capabilities: &caps,
 	}); err != nil {
 		return err

@@ -142,8 +142,8 @@ func (rt *runtime) serve(ctx context.Context, errc <-chan error, tick <-chan tim
 // 渡す。doctor が示す許可一覧も同じ opts.AllowTargets を読み、opts は起動の後に変わらないので、
 // 中継が守る一覧と doctor が示す一覧は食い違わない(設計文書 10.2c 節)。
 func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *runtime {
-	return &runtime{
-		opts: opts, f: f, priv: priv,
+	rt := &runtime{
+		opts: opts, f: f,
 		fatal:                    make(chan error, 1),
 		stateNotify:              make(chan struct{}, 1),
 		heartbeatInterval:        30 * time.Second,
@@ -161,6 +161,8 @@ func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *run
 		dp:                       usermode.New(opts.AllowTargets, opts.Limits),
 		rebuild:                  rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
 	}
+	rt.setPrivKey(priv)
+	return rt
 }
 
 // newModeRuntime は opts.Mode の dataplane で runtime を組む。カーネルモードの dataplane は

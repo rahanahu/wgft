@@ -23,7 +23,8 @@ func TestObserveDiscardsAStaleResolution(t *testing.T) {
 	f := &credentials.Credentials{}
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG}
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, dp: d, wgCfg: d.WG}
+	rt.setPrivKey(d.Priv)
 	old := &proto.State{Generation: 1, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
 	rt.mu.Lock()
 	if err := rt.finishApplyLocked(old, nil); err != nil {
@@ -82,7 +83,8 @@ func TestObserveDiscardsAResolutionWhenAPendingStateAppears(t *testing.T) {
 	f := &credentials.Credentials{}
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG}
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, dp: d, wgCfg: d.WG}
+	rt.setPrivKey(d.Priv)
 	st := &proto.State{Generation: 1, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
 	rt.mu.Lock()
 	if err := rt.finishApplyLocked(st, nil); err != nil {
@@ -118,7 +120,8 @@ func TestObserveSavesARepairThatAlsoReturnsAnError(t *testing.T) {
 	}
 	k.link = ours(t, d)
 	path := t.TempDir() + "/agent.json"
-	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG}
+	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, dp: d, wgCfg: d.WG}
+	rt.setPrivKey(d.Priv)
 	st := &proto.State{Generation: 1, WG: w}
 	rt.mu.Lock()
 	if err := rt.finishApplyLocked(st, nil); err != nil {
@@ -192,8 +195,9 @@ func TestRuntimeObserveNotified(t *testing.T) {
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
 	path := t.TempDir() + "/agent.json"
-	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG,
+	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, dp: d, wgCfg: d.WG,
 		stateNotify: make(chan struct{}, 1)}
+	rt.setPrivKey(d.Priv)
 	k.tableGone = true
 	rt.observeNotified()
 	if len(k.published) != 0 {
@@ -251,8 +255,9 @@ func TestKernelNotificationsReachTheCheck(t *testing.T) {
 	k.link = ours(t, d)
 	sensor := fakeSensor{started: make(chan struct{})}
 	d.Ops.Notify = sensor
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG,
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, dp: d, wgCfg: d.WG,
 		stateNotify: make(chan struct{}, 1), kernelWake: make(chan struct{}, 1), notifyDebounce: 10 * time.Millisecond}
+	rt.setPrivKey(d.Priv)
 	st := &proto.State{Generation: 1, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}}
 	rt.mu.Lock()
 	if err := rt.finishApplyLocked(st, nil); err != nil {
@@ -302,8 +307,9 @@ func TestDoctorCarriesTheKernelReading(t *testing.T) {
 	d.ObserveErr = "read table inet wgft_agent: boom"
 	k := healthyKernel(t, f)
 	withKernelDoctor(t, k)
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: credentials.ModeKernel}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG,
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: credentials.ModeKernel}, f: f, dp: d, wgCfg: d.WG,
 		pendingErr: "publish table inet wgft_agent: refused"}
+	rt.setPrivKey(d.Priv)
 	res := rt.collectDoctor()
 	st := res.RuntimeState
 	if st == nil || st.Kernel == nil {

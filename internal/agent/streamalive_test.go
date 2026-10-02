@@ -32,14 +32,13 @@ func newAliveTestRuntime(t *testing.T, endpoint string, pin [32]byte) *runtime {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &runtime{
+	rt := &runtime{
 		dp: newTestUserspace(),
 		f: &credentials.Credentials{
 			Endpoint:       endpoint,
 			CertSHA256:     hex.EncodeToString(pin[:]),
 			PermanentToken: "tok",
 		},
-		priv:                priv,
 		heartbeatInterval:   time.Hour,
 		pingInterval:        50 * time.Millisecond,
 		pongTimeout:         200 * time.Millisecond,
@@ -47,6 +46,8 @@ func newAliveTestRuntime(t *testing.T, endpoint string, pin [32]byte) *runtime {
 		reconnectBackoffMax: 20 * time.Millisecond,
 		handshakeWake:       make(chan struct{}, 1),
 	}
+	rt.setPrivKey(priv)
+	return rt
 }
 
 // newSilentStreamServer は、認証と公開鍵の受信までは普通に応じ、その後は相手に応じなくなる server を
