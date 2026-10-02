@@ -564,12 +564,20 @@ func KernelDeviceNames() ([]string, error) {
 // agentDeviceDiff is the wgctrl part of EnsureAgent on a device already read: the configuration
 // that moves dev to cfg, and one line per change. It never sets the listen port.
 //
-// When the private key changes, the server peer is removed and added again in the same
-// configuration (design.md 7b.4 節). The kernel keeps a peer's latest handshake and byte counts
-// across a change of the device's private key, so without this the peer would go on showing the
-// previous key's handshake as if the new key had made it. One configuration is one netlink message,
-// applied under the device's lock, so no read sees the new key with the old peer. The endpoint the
-// kernel has is carried over when cfg has none, as the update path keeps it.
+// When the private key changes and the server peer is there, the configuration replaces every
+// peer with a new server peer (ReplacePeers), in the same configuration as the key (design.md
+// 7b.4 節). The kernel keeps a peer's latest handshake and byte counts across a change of the
+// device's private key, so without this the peer would go on showing the previous key's handshake
+// as if the new key had made it. Any other peer is removed, as on every convergence. The
+// configuration then holds one peer with one AllowedIPs entry, and wgctrl splits a configuration
+// into several netlink messages only above 32 peers or 256 AllowedIPs entries, so it is one
+// message whatever peers wgft0 had. A crash cannot leave the new key with the old peer. In the
+// kernel source, setting and reading a device both hold rtnl_lock and the device's update lock,
+// and a lab run with concurrent readers over repeated key changes never read the new key with the
+// old peer; that is evidence, not a proof. The kernel does not roll back a partly applied message:
+// if adding the peer fails after the key is set, the new key stays with no peer until the next
+// convergence adds it. The resolved endpoint is used; when the name is not resolved, the endpoint
+// the kernel has is carried over, as the update path keeps it.
 func agentDeviceDiff(dev *wgtypes.Device, cfg AgentConfig) (wgtypes.Config, []string) {
 	var wc wgtypes.Config
 	var notes []string
@@ -604,8 +612,11 @@ func agentDeviceDiff(dev *wgtypes.Device, cfg AgentConfig) (wgtypes.Config, []st
 		endpoint := unmapped(cfg.Server.Endpoint)
 		if server != nil {
 			// 鍵を変えるときは server のピアを置き直す。カーネルはピアの最終ハンドシェイクを鍵の変更の
-			// 後も残すので、置き直さなければ前の鍵のハンドシェイクが今の鍵のものに見える
-			wc.Peers = append(wc.Peers, wgtypes.PeerConfig{PublicKey: server.PublicKey, Remove: true})
+			// 後も残すので、置き直さなければ前の鍵のハンドシェイクが今の鍵のものに見える。ReplacePeers で
+			// 全部のピアを外し、server のピア 1 つだけを足す。外すピアを 1 つずつ並べると、ピアが多い
+			// wgft0 では wgctrl が設定を複数のメッセージに分け、2 度目に現れる server のピアから
+			// エンドポイントと keepalive を落とす
+			wc.ReplacePeers, wc.Peers = true, nil
 			if !endpoint.IsValid() {
 				endpoint = peerEndpoint(server)
 			}

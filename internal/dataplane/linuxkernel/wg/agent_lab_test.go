@@ -416,8 +416,16 @@ func TestAgentHandshakeAfterReResolution(t *testing.T) {
 // カーネルは秘密鍵を変えてもピアの最終ハンドシェイクを残すため、置き直さなければ、新しい鍵で
 // 一度もハンドシェイクしていない間も前の鍵の時刻が読める。試験用のサーバが新しい鍵を知らない間は
 // ゼロのままで、知った後は新しい鍵のハンドシェイクが成立する。名前を解決できていない収束でも、
-// 置き直したピアはカーネルが持っていたエンドポイントを保つ。
+// 置き直したピアはカーネルが持っていたエンドポイントを保つ。wgft0 に余分なピアが多くあっても
+// 同じである。wgctrl は 32 を超えるピアの設定を複数のメッセージに分け、2 度目に現れるピアから
+// エンドポイントと keepalive を落とすので、その境を越える数でも確かめる。
 func TestAgentKeyChangeResetsHandshake(t *testing.T) {
+	for _, extra := range []int{0, 40} {
+		t.Run(fmt.Sprintf("%d extra peers", extra), func(t *testing.T) { testAgentKeyChangeResetsHandshake(t, extra) })
+	}
+}
+
+func testAgentKeyChangeResetsHandshake(t *testing.T, extra int) {
 	cleanup(agentIf, serverIf)
 	defer cleanup(agentIf, serverIf)
 	sk := serverKey(t)
@@ -428,6 +436,24 @@ func TestAgentKeyChangeResetsHandshake(t *testing.T) {
 	makeServer(t, sk, old.PrivateKey.PublicKey(), 51944)
 	ensureAgent(t, old)
 	waitHandshake(t, old, time.Now().Add(-time.Second))
+	c, err := wgctrl.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if extra > 0 {
+		var strays []wgtypes.PeerConfig
+		for i := range extra {
+			_, n, _ := net.ParseCIDR(fmt.Sprintf("10.9.%d.%d/32", i/250, i%250+1))
+			strays = append(strays, wgtypes.PeerConfig{PublicKey: serverKey(t).PublicKey(), AllowedIPs: []net.IPNet{*n}})
+		}
+		if err := c.ConfigureDevice(agentIf, wgtypes.Config{Peers: strays}); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(device(t, agentIf).Peers); n != extra+1 {
+			t.Fatalf("%d peers before the key change, want %d", n, extra+1)
+		}
+	}
 
 	rotated := old
 	rotated.PrivateKey, rotated.PreviousKey = serverKey(t), old.PrivateKey
@@ -457,11 +483,6 @@ func TestAgentKeyChangeResetsHandshake(t *testing.T) {
 	}
 
 	// サーバが新しい鍵を受け入れた後は、新しい鍵のハンドシェイクが成立する
-	c, err := wgctrl.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
 	_, allowed, _ := net.ParseCIDR("10.201.0.2/32")
 	if err := c.ConfigureDevice(serverIf, wgtypes.Config{ReplacePeers: true,
 		Peers: []wgtypes.PeerConfig{{PublicKey: rotated.PrivateKey.PublicKey(), AllowedIPs: []net.IPNet{*allowed}}}}); err != nil {

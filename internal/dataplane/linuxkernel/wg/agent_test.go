@@ -91,13 +91,24 @@ func TestAgentDeviceDiff(t *testing.T) {
 	base := agentCfg(t)
 	stray := mustKey(t).PublicKey()
 	prev := mustKey(t)
+	// manyStrays は、wgctrl が設定を複数のメッセージに分ける 32 を超えるピアを wgft0 に足す
+	var manyStrays []wgtypes.Peer
+	manyNotes := []string{"replace the previous private key"}
+	for range 40 {
+		k := mustKey(t).PublicKey()
+		manyStrays = append(manyStrays, wgtypes.Peer{PublicKey: k, AllowedIPs: []net.IPNet{*prefixToIPNet(netip.MustParsePrefix("10.9.0.1/32"))}})
+		manyNotes = append(manyNotes, "delete peer "+k.String())
+	}
+	manyNotes = append(manyNotes, "reset server peer")
 
 	cases := []struct {
-		name  string
-		cfg   func(c *AgentConfig)
-		dev   func(d *wgtypes.Device)
-		check func(t *testing.T, wc wgtypes.Config)
-		notes []string // 各行に含まれるべき文字列 (順に)
+		name string
+		// replace は、設定が ReplacePeers を持つべきかどうかである。鍵を変える置き直しだけが持つ
+		replace bool
+		cfg     func(c *AgentConfig)
+		dev     func(d *wgtypes.Device)
+		check   func(t *testing.T, wc wgtypes.Config)
+		notes   []string // 各行に含まれるべき文字列 (順に)
 	}{
 		{
 			name: "converged: nothing to do",
@@ -146,9 +157,10 @@ func TestAgentDeviceDiff(t *testing.T) {
 		},
 		{
 			// カーネルはピアの最終ハンドシェイクを鍵の変更の後も残すので、同じ設定の中でピアを置き直す
-			name: "previous key: replace it with the current one and reset the server peer",
-			cfg:  func(c *AgentConfig) { c.PreviousKey = prev },
-			dev:  func(d *wgtypes.Device) { d.PrivateKey, d.PublicKey = prev, prev.PublicKey() },
+			name:    "previous key: replace it with the current one and reset the server peer",
+			replace: true,
+			cfg:     func(c *AgentConfig) { c.PreviousKey = prev },
+			dev:     func(d *wgtypes.Device) { d.PrivateKey, d.PublicKey = prev, prev.PublicKey() },
 			check: func(t *testing.T, wc wgtypes.Config) {
 				if wc.PrivateKey == nil || *wc.PrivateKey != base.PrivateKey {
 					t.Error("private key not moved to the current key")
@@ -158,8 +170,9 @@ func TestAgentDeviceDiff(t *testing.T) {
 			notes: []string{"replace the previous private key", "reset server peer"},
 		},
 		{
-			name: "previous key while the endpoint is not resolved: the reset peer keeps the kernel's endpoint",
-			cfg:  func(c *AgentConfig) { c.PreviousKey, c.Server.Endpoint = prev, netip.AddrPort{} },
+			name:    "previous key while the endpoint is not resolved: the reset peer keeps the kernel's endpoint",
+			replace: true,
+			cfg:     func(c *AgentConfig) { c.PreviousKey, c.Server.Endpoint = prev, netip.AddrPort{} },
 			dev: func(d *wgtypes.Device) {
 				d.PrivateKey, d.PublicKey = prev, prev.PublicKey()
 				d.Peers[0].Endpoint = udp("[::ffff:203.0.113.9]:51820")
@@ -168,8 +181,9 @@ func TestAgentDeviceDiff(t *testing.T) {
 			notes: []string{"replace the previous private key", "reset server peer"},
 		},
 		{
-			name: "previous key, no endpoint anywhere: the reset peer has none",
-			cfg:  func(c *AgentConfig) { c.PreviousKey, c.Server.Endpoint = prev, netip.AddrPort{} },
+			name:    "previous key, no endpoint anywhere: the reset peer has none",
+			replace: true,
+			cfg:     func(c *AgentConfig) { c.PreviousKey, c.Server.Endpoint = prev, netip.AddrPort{} },
 			dev: func(d *wgtypes.Device) {
 				d.PrivateKey, d.PublicKey = prev, prev.PublicKey()
 				d.Peers[0].Endpoint = nil
@@ -178,19 +192,39 @@ func TestAgentDeviceDiff(t *testing.T) {
 			notes: []string{"replace the previous private key", "reset server peer"},
 		},
 		{
-			name: "previous key and a stray peer: the stray is removed and the server peer reset",
-			cfg:  func(c *AgentConfig) { c.PreviousKey = prev },
+			name:    "previous key and a stray peer: the stray is removed and the server peer reset",
+			replace: true,
+			cfg:     func(c *AgentConfig) { c.PreviousKey = prev },
 			dev: func(d *wgtypes.Device) {
 				d.PrivateKey, d.PublicKey = prev, prev.PublicKey()
 				d.Peers = append([]wgtypes.Peer{{PublicKey: stray}}, d.Peers...)
 			},
-			check: func(t *testing.T, wc wgtypes.Config) {
-				if len(wc.Peers) != 3 || wc.Peers[0].PublicKey != stray || !wc.Peers[0].Remove {
-					t.Fatalf("peers = %+v", wc.Peers)
-				}
-				assertPeerReset(t, wgtypes.Config{Peers: wc.Peers[1:]}, base, "192.0.2.10:51820")
-			},
+			check: func(t *testing.T, wc wgtypes.Config) { assertPeerReset(t, wc, base, "192.0.2.10:51820") },
 			notes: []string{"replace the previous private key", "delete peer", "reset server peer"},
+		},
+		{
+			// 鍵の変更の時点で名前を引けていれば、カーネルの値ではなく引いた結果を使う
+			name:    "previous key: the resolved endpoint wins over the kernel's",
+			replace: true,
+			cfg:     func(c *AgentConfig) { c.PreviousKey = prev },
+			dev: func(d *wgtypes.Device) {
+				d.PrivateKey, d.PublicKey = prev, prev.PublicKey()
+				d.Peers[0].Endpoint = udp("203.0.113.9:51820")
+			},
+			check: func(t *testing.T, wc wgtypes.Config) { assertPeerReset(t, wc, base, "192.0.2.10:51820") },
+			notes: []string{"replace the previous private key", "reset server peer"},
+		},
+		{
+			// 32 を超えるピアがあっても、設定は server のピア 1 つだけを持ち、wgctrl が分けない
+			name:    "previous key and many stray peers: still one peer in the configuration",
+			replace: true,
+			cfg:     func(c *AgentConfig) { c.PreviousKey = prev },
+			dev: func(d *wgtypes.Device) {
+				d.PrivateKey, d.PublicKey = prev, prev.PublicKey()
+				d.Peers = append(append([]wgtypes.Peer{}, manyStrays...), d.Peers...)
+			},
+			check: func(t *testing.T, wc wgtypes.Config) { assertPeerReset(t, wc, base, "192.0.2.10:51820") },
+			notes: manyNotes,
 		},
 		{
 			name: "a stray peer is removed, the server is kept",
@@ -299,8 +333,8 @@ func TestAgentDeviceDiff(t *testing.T) {
 			if wc.ListenPort != nil {
 				t.Errorf("listen port set to %d", *wc.ListenPort)
 			}
-			if wc.ReplacePeers {
-				t.Error("ReplacePeers set")
+			if wc.ReplacePeers != c.replace {
+				t.Errorf("ReplacePeers = %v, want %v", wc.ReplacePeers, c.replace)
 			}
 			c.check(t, wc)
 			if len(notes) != len(c.notes) {
@@ -315,18 +349,15 @@ func TestAgentDeviceDiff(t *testing.T) {
 	}
 }
 
-// assertPeerReset は、wc.Peers が server のピアを外してから同じ鍵で足し直す 2 つだけであることを
-// 確かめる。足し直すピアは更新だけの指定を持たず、宣言の AllowedIPs と keepalive と、endpoint
-// (空なら無し) を持つ。
+// assertPeerReset は、wc が ReplacePeers で全部のピアを外し、server のピア 1 つだけを足し直す
+// ことを確かめる。足し直すピアは更新だけの指定を持たず、宣言の AllowedIPs と keepalive と、
+// endpoint (空なら無し) を持つ。
 func assertPeerReset(t *testing.T, wc wgtypes.Config, cfg AgentConfig, endpoint string) {
 	t.Helper()
-	if len(wc.Peers) != 2 {
-		t.Fatalf("peers = %+v, want the server peer removed and added again", wc.Peers)
+	if !wc.ReplacePeers || len(wc.Peers) != 1 {
+		t.Fatalf("ReplacePeers = %v, peers = %+v, want every peer replaced by the server peer alone", wc.ReplacePeers, wc.Peers)
 	}
-	rm, add := wc.Peers[0], wc.Peers[1]
-	if rm.PublicKey != cfg.Server.PublicKey || !rm.Remove {
-		t.Errorf("first = %+v, want the server peer removed", rm)
-	}
+	add := wc.Peers[0]
 	if add.PublicKey != cfg.Server.PublicKey || add.Remove || add.UpdateOnly || !add.ReplaceAllowedIPs ||
 		len(add.AllowedIPs) != 1 || add.AllowedIPs[0].String() != "10.200.0.1/32" {
 		t.Errorf("second = %+v, want the server peer added with its /32", add)
