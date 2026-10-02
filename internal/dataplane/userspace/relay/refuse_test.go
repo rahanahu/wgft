@@ -84,23 +84,113 @@ func TestRefuseTargetComesBeforeAllowList(t *testing.T) {
 	}
 }
 
-// RefuseTarget があれば、許可一覧が無くてもホスト名の宛先を自分で解決し、解決したアドレスで判定する。
-// 拒むアドレスへは接続せず、残りのアドレスへ接続する(設計文書 7 節)。
-func TestRefuseTargetResolvesHostNameWithoutAllowList(t *testing.T) {
+// 許可一覧が無ければ、RefuseTarget があっても中継は名前を自分で解決せず、宛先を名前のまま Dial に渡す。
+// Go の接続の名前の解決、2 つのアドレスの族の試し方、期限の分け方を、拒否の導入の前と同じに保つためである
+// (設計文書 7 節)。
+func TestRefuseTargetKeepsNameDialWithoutAllowList(t *testing.T) {
+	lb := &loopback{}
+	var got atomic.Value
+	m := New(lb, Options{
+		Logf:         testLogf(t),
+		RefuseTarget: refuseAddrs("239.1.2.3"),
+		Dial:         func(network, addr string) (net.Conn, error) { got.Store(addr); return nil, errors.New("refused") },
+		LookupTarget: func(ctx context.Context, host string) ([]netip.Addr, error) {
+			t.Error("LookupTarget must not be called without an allow list")
+			return nil, errors.New("unexpected")
+		},
+	})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.TCP, reserveTCP(t, lb)}: {"nas.lan:25565", "r1"}})
+	if got.Load() != "nas.lan:25565" {
+		t.Errorf("dialed %v, want the target name as it is", got.Load())
+	}
+}
+
+// 既定の Dial は、Go の接続が名前を解決したアドレスへ接続する前に RefuseTarget で判定する。拒むアドレスへは
+// 接続せずに次のアドレスを試し、どれも拒めばデータグラムを捨てて、RefuseTarget の文言そのものを状態に載せる。
+// 名前の解決は localhost で行う。判定を変えて使えるアドレスが残れば、新しいセッションは届き、拒否は消える。
+func TestDefaultDialRefusesResolvedAddresses(t *testing.T) {
+	echoAddr, packets := udpEcho(t) // 127.0.0.1 で待つ
+	_, portStr, err := net.SplitHostPort(echoAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var allowV4 atomic.Bool // 真なら 127.0.0.1 だけを通し、ほかのループバック(::1 など)を拒む
+	lb := &loopback{}
+	m := New(lb, Options{
+		Logf: testLogf(t),
+		RefuseTarget: func(a netip.Addr) string {
+			if !a.IsLoopback() || (allowV4.Load() && a == netip.MustParseAddr("127.0.0.1")) {
+				return ""
+			}
+			return "loopback refused for the test"
+		},
+		LookupTarget: func(ctx context.Context, host string) ([]netip.Addr, error) {
+			t.Error("LookupTarget must not be called without an allow list")
+			return nil, errors.New("unexpected")
+		},
+	})
+	defer m.Close()
+	listenPort := reserveUDP(t, lb)
+	m.Apply(map[Key]Desired{{proto.UDP, listenPort}: {"localhost:" + portStr, "r1"}})
+	if st := m.Status(); st[0].Err != nil {
+		t.Fatalf("a hostname target must open its listener: %v", st[0].Err)
+	}
+	send := func(src string) {
+		t.Helper()
+		c, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP(src)}, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(listenPort)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if _, err := c.Write([]byte("hi")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send("127.0.0.1")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && m.Status()[0].Err == nil {
+		time.Sleep(10 * time.Millisecond)
+	}
+	st := m.Status()
+	// 文言は Go の接続の文言("dial udp ...")で包まない。カーネルモードと同じ文言にするためである
+	if st[0].Err == nil || st[0].Err.Error() != "loopback refused for the test" || !errors.Is(st[0].Err, ErrTargetNotAllowed) {
+		t.Fatalf("status err = %v, want the RefuseTarget reason as it is", st[0].Err)
+	}
+	if st[0].Sessions != 0 || packets.Load() != 0 {
+		t.Errorf("sessions = %d, target datagrams = %d; want 0 and 0", st[0].Sessions, packets.Load())
+	}
+	// 127.0.0.1 を通すと、ほかのアドレスを拒んだうえで 127.0.0.1 へ接続し、拒否は消える
+	allowV4.Store(true)
+	send("127.0.0.2")
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && packets.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if packets.Load() == 0 {
+		t.Fatal("the datagram did not reach 127.0.0.1")
+	}
+	if st := m.Status(); st[0].Err != nil {
+		t.Errorf("status err = %v once an address is usable, want none", st[0].Err)
+	}
+}
+
+// 許可一覧があるときは従来どおり自分で解決し、RefuseTarget が拒むアドレスを飛ばして、許可一覧が通す次の
+// アドレスへ接続する。
+func TestRefuseTargetWithAllowListSkipsRefusedAddress(t *testing.T) {
 	echoAddr, packets := udpEcho(t)
 	_, portStr, err := net.SplitHostPort(echoAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var lookups atomic.Int64
 	var dialed atomic.Value
 	lb := &loopback{}
 	m := New(lb, Options{
-		Logf:         testLogf(t),
-		RefuseTarget: refuseAddrs("127.0.0.9"),
+		Logf:              testLogf(t),
+		AllowTarget:       func(netip.AddrPort) bool { return true },
+		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
+		RefuseTarget:      refuseAddrs("127.0.0.9"),
 		LookupTarget: func(ctx context.Context, host string) ([]netip.Addr, error) {
-			lookups.Add(1)
-			// 拒むアドレスを先に返す。それを飛ばして次へ接続すること
 			return []netip.Addr{netip.MustParseAddr("127.0.0.9"), netip.MustParseAddr("127.0.0.1")}, nil
 		},
 		Dial: func(network, addr string) (net.Conn, error) {
@@ -126,81 +216,7 @@ func TestRefuseTargetResolvesHostNameWithoutAllowList(t *testing.T) {
 	if packets.Load() == 0 {
 		t.Fatal("the datagram did not reach the unicast address")
 	}
-	if lookups.Load() == 0 {
-		t.Error("the relay must resolve the host name itself when RefuseTarget is set")
-	}
 	if got := dialed.Load(); got != "127.0.0.1:"+portStr {
 		t.Errorf("dialed %v, want only the address RefuseTarget lets through", got)
-	}
-	if st := m.Status(); st[0].Err != nil {
-		t.Errorf("status err = %v, want none while one address is usable", st[0].Err)
-	}
-}
-
-// ホスト名が拒むアドレスだけに解決されたら、UDP のデータグラムを捨て、RefuseTarget の文言を状態に載せる。
-// 名前が使えるアドレスに戻れば、状態の拒否は消える。
-func TestUDPHostNameResolvingOnlyToRefusedAddress(t *testing.T) {
-	echoAddr, packets := udpEcho(t)
-	_, portStr, err := net.SplitHostPort(echoAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var resolved atomic.Value
-	resolved.Store("192.168.50.255")
-	lb := &loopback{}
-	m := New(lb, Options{
-		Logf:         testLogf(t),
-		RefuseTarget: refuseAddrs("192.168.50.255"),
-		LookupTarget: func(ctx context.Context, host string) ([]netip.Addr, error) {
-			return []netip.Addr{netip.MustParseAddr(resolved.Load().(string))}, nil
-		},
-		Dial: func(network, addr string) (net.Conn, error) {
-			if addr != "127.0.0.1:"+portStr {
-				t.Errorf("dialed %s", addr)
-			}
-			return net.Dial(network, addr)
-		},
-	})
-	defer m.Close()
-	listenPort := reserveUDP(t, lb)
-	m.Apply(map[Key]Desired{{proto.UDP, listenPort}: {"bc.lan:" + portStr, "r1"}})
-	if st := m.Status(); st[0].Err != nil {
-		t.Fatalf("a hostname target must open its listener: %v", st[0].Err)
-	}
-	send := func(src string) {
-		t.Helper()
-		c, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP(src)}, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(listenPort)})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer c.Close()
-		if _, err := c.Write([]byte("hi")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	send("127.0.0.1")
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && m.Status()[0].Err == nil {
-		time.Sleep(10 * time.Millisecond)
-	}
-	st := m.Status()
-	if st[0].Err == nil || st[0].Err.Error() != "target 192.168.50.255 is refused for the test" || !errors.Is(st[0].Err, ErrTargetNotAllowed) {
-		t.Fatalf("status err = %v, want the RefuseTarget reason", st[0].Err)
-	}
-	if st[0].Sessions != 0 || packets.Load() != 0 {
-		t.Errorf("sessions = %d, target datagrams = %d; want 0 and 0", st[0].Sessions, packets.Load())
-	}
-	// 名前が使えるアドレスに戻った。新しいセッションは届き、状態の拒否は消える
-	resolved.Store("127.0.0.1")
-	send("127.0.0.2")
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && packets.Load() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if packets.Load() == 0 {
-		t.Fatal("the datagram did not arrive after the name pointed back to a unicast address")
-	}
-	if st := m.Status(); st[0].Err != nil {
-		t.Errorf("status err = %v after the name pointed back, want none", st[0].Err)
 	}
 }

@@ -53,18 +53,21 @@ type Options struct {
 	// AdmitPacket は成立済みの UDP セッションのデータグラム 1 つを通すか(packet_rate)。nil なら全部通す。
 	AdmitPacket func(ruleID string, size int) bool
 	// AllowTarget は宛先への接続を許すかを判定する(エージェントの宛先の許可一覧。設計文書 7 節)。
-	// nil なら制限しない。RefuseTarget も nil なら、宛先の名前解決も中継では行わない。nil でなければ、TCP の接続 1 本ごと、
+	// nil なら制限せず、宛先の名前解決も中継では行わない。nil でなければ、TCP の接続 1 本ごと、
 	// UDP のセッション 1 つごとに、実際に接続するアドレスとポートで呼ぶ。エージェントだけが渡す
 	AllowTarget func(netip.AddrPort) bool
 	// AllowTargetSource は許可一覧の出どころ。拒否の理由に添える(エージェントでは
 	// WGFT_AGENT_ALLOW_TARGETS)。AllowTarget が nil なら使わない
 	AllowTargetSource string
 	// RefuseTarget は、宛先のアドレスへ接続しない理由を返す。接続してよければ空を返す。エージェントが
-	// ブロードキャストとマルチキャストの宛先を拒むために渡す(設計文書 7 節)。判定の単位と報告は
-	// AllowTarget と同じで、AllowTarget より先に呼ぶ。nil なら判定しない
+	// ブロードキャストとマルチキャストの宛先を拒むために渡す(設計文書 7 節)。報告は AllowTarget と同じで、
+	// AllowTarget より先に呼ぶ。IP リテラルの宛先は適用のときに判定し、拒めば待ち受けを開かない。ホスト名の宛先は、
+	// 許可一覧があれば中継が自分で解決したアドレスで、無ければ既定の Dial の Control が Go の接続の
+	// 解決したアドレスで判定する。Dial を渡した場合、許可一覧の無いホスト名の判定はその Dial に任せる。
+	// nil なら判定しない
 	RefuseTarget func(netip.Addr) string
-	// LookupTarget は宛先のホスト名を解決する。nil なら net.DefaultResolver。AllowTarget か
-	// RefuseTarget を渡したときだけ使う(実際に接続するアドレスで判定するため)
+	// LookupTarget は宛先のホスト名を解決する。nil なら net.DefaultResolver。AllowTarget を
+	// 渡したときだけ使う(許可一覧は実際に接続するアドレスで判定するため)
 	LookupTarget func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
@@ -261,6 +264,9 @@ func New(n Network, opts Options) *Manager {
 	}
 	if opts.Dial == nil {
 		d := &net.Dialer{Timeout: 10 * time.Second}
+		if opts.RefuseTarget != nil {
+			d.ControlContext = refuseControl(opts.RefuseTarget)
+		}
 		opts.Dial = d.Dial
 	}
 	if opts.Logf == nil {

@@ -168,7 +168,8 @@ func (d *Dataplane) Read() agentdp.Reading {
 
 // RelayOptions は中継の調整値を作る。ブロードキャストとマルチキャストの宛先の拒否は常に渡し、
 // 宛先の許可一覧はあれば渡す。どちらも中継が宛先へ接続するときに使う判定である(仕様 7 節)。
-// 前者を常に渡すので、中継はホスト名の宛先を一覧の有無に依らず自分で解決する。
+// 一覧が無ければ、中継はホスト名の宛先を一覧の導入前と同じく名前のまま接続し、拒否は接続の Control が
+// 解決した各アドレスに当てる。
 func (d *Dataplane) RelayOptions(wg proto.WGConfig) relay.Options {
 	o := relay.Options{
 		UDPIdleTimeout: secondsToDuration("udp_timeout_stream", wg.UDPTimeoutStream, udpTimeoutStreamMaxSeconds, 120*time.Second),

@@ -79,7 +79,11 @@ Omitting the setting allows all targets.
 An out-of-list target does not open a listener, and `wgft agent ls` and the Web UI show the reason.
 Whether or not this setting is present, the agent refuses broadcast and multicast targets in both modes.
 These are `255.255.255.255`, multicast addresses, and the broadcast address of a network on the agent host, such as `192.168.1.255` for `192.168.1.0/24`.
+The agent finds the broadcast address from its host's interface networks, not from an address ending in `.255`, and both ends of a `/31` network are ordinary hosts.
 A rule with such a target does not forward, and `wgft agent ls` shows the reason.
+Sending Wake-on-LAN packets to a broadcast address through a rule is not supported.
+In userspace mode such packets may have reached the LAN before this check was added; they no longer do.
+When the agent runs in a container on a Docker bridge network, as `deploy/agent.compose.yaml` does by default, the agent host's networks are the container's own, so the broadcast address of your LAN is not refused as a broadcast address there.
 After changing the setting, run `sudo systemctl restart wgft-agent`.
 
 ## Logs and diagnostics

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/rahanahu/wgft/internal/reasontext"
@@ -43,8 +44,7 @@ func (e *refusedTargetError) Error() string { return e.reason }
 
 func (e *refusedTargetError) Unwrap() error { return ErrTargetNotAllowed }
 
-// checksTargets は、中継が宛先を判定するかどうかである。判定するなら、ホスト名の宛先は自分で解決し、
-// 実際に接続するアドレスで判定する。
+// checksTargets は、中継が宛先を判定するかどうかである。
 func (m *Manager) checksTargets() bool {
 	return m.opts.AllowTarget != nil || m.opts.RefuseTarget != nil
 }
@@ -79,10 +79,11 @@ func (m *Manager) allowedAtApply(target string) error {
 }
 
 // dialTarget は宛先へ接続する。中継が宛先へ接続する唯一の経路なので、宛先の判定もここに置く。
-// 判定するときは、実際に接続するアドレスで判定するために自分で名前解決し、許したアドレスだけに接続する。
+// 許可一覧があるときは、実際に接続するアドレスで判定するために自分で名前解決し、許したアドレスだけに接続する。
+// 許可一覧が無いときは dialByName を使う。
 func (m *Manager) dialTarget(network, target string) (net.Conn, error) {
-	if !m.checksTargets() {
-		return m.opts.Dial(network, target)
+	if m.opts.AllowTarget == nil {
+		return m.dialByName(network, target)
 	}
 	host, portStr, err := net.SplitHostPort(target)
 	if err != nil {
@@ -118,6 +119,37 @@ func (m *Manager) dialTarget(network, target string) (net.Conn, error) {
 		return nil, denied
 	default:
 		return nil, fmt.Errorf("target %q resolved to no address", target)
+	}
+}
+
+// dialByName は許可一覧が無いときの経路であり、宛先を名前のまま Options.Dial に渡す。名前の解決、
+// 2 つのアドレスの族を少しずらして試すこと、期限をアドレスの間で分けることを Go の接続に任せ、
+// ブロードキャストとマルチキャストの拒否の導入の前と同じ挙動に保つためである。拒否は、既定の Dial の
+// Control(refuseControl)が、解決した各アドレスへ接続する前に当てる。拒む IP リテラルの宛先は、
+// 適用のときに待ち受けを開かないので(allowedAtApply)、ここへは来ない。拒んだアドレスは飛ばされ、Go の接続は次のアドレスを試す。拒否で終わった接続の誤りは、
+// 理由の文言を 2 つのモードでそろえるため、Go の接続の文言で包まずに返す(設計文書 7 節)。
+func (m *Manager) dialByName(network, target string) (net.Conn, error) {
+	c, err := m.opts.Dial(network, target)
+	var refused *refusedTargetError
+	if err != nil && errors.As(err, &refused) {
+		return nil, refused
+	}
+	return c, err
+}
+
+// refuseControl は、既定の Dial の net.Dialer に置く Control である。Go の接続が名前を解決した後、
+// アドレスごとにソケットを作ってから接続する前に呼ばれるので、実際に接続するアドレスを refuse で判定できる。
+// 拒めば接続せず、Go の接続は次のアドレスへ進む。
+func refuseControl(refuse func(netip.Addr) string) func(ctx context.Context, network, address string, c syscall.RawConn) error {
+	return func(_ context.Context, _, address string, _ syscall.RawConn) error {
+		ap, err := netip.ParseAddrPort(address)
+		if err != nil {
+			return nil
+		}
+		if r := refuse(ap.Addr().Unmap()); r != "" {
+			return &refusedTargetError{reason: r}
+		}
+		return nil
 	}
 }
 

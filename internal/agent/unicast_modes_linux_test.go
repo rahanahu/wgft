@@ -51,7 +51,10 @@ func TestBothModesRefuseBroadcastAndMulticastAlike(t *testing.T) {
 		"mc.lan": {netip.MustParseAddr("239.1.2.3")},
 	}
 	for _, target := range []string{
-		"239.1.2.3:5000", "255.255.255.255:9", "192.168.50.255:9", "bc.lan:9", "mc.lan:5000",
+		// ホスト名の宛先は、カーネルモードでは nft と kernelmode の試験が、ユーザー空間モードでは relay の試験が、
+		// RefuseTarget の文言をそのまま理由にすることを確かめる。ユーザー空間モードは許可一覧が無ければ名前を
+		// Go の接続に解決させるので、ここでは偽の名前を引けない
+		"239.1.2.3:5000", "255.255.255.255:9", "192.168.50.255:9",
 	} {
 		t.Run(target, func(t *testing.T) {
 			rule := proto.AgentRule{ID: "r1", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 7001, Hi: 7001}, Target: target, Enabled: true}
