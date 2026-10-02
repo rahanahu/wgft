@@ -185,6 +185,9 @@ type Dataplane struct {
 	// 再起動をまたいで残す。convergeErr は直前の収束の誤りで、変わったときだけ 1 行出す
 	unconverged []nft.AgentPublication
 	convergeErr string
+	// marshalErr は、認証情報ファイルへ写す記録の JSON 化の直前の誤りを、記録の名前ごとに持つ。
+	// 変わったときだけ 1 行出す
+	marshalErr map[string]string
 	// save は認証情報ファイルを保存する。30 秒ごとの見直しで収束が済んだときに、列を消した記録を書く
 	save func() error
 	// lkg はルールごとの、直前に解決できた宛先のアドレスである(7b.2 節)。宣言の宛先の文字列が

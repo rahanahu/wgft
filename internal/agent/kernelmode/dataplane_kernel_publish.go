@@ -79,9 +79,7 @@ func (d *Dataplane) publish(pub nft.AgentPublication) error {
 	d.gate.Succeeded()
 	prev := d.Pub
 	d.Pub = &pub
-	if b, err := json.Marshal(pub); err == nil {
-		d.f.KernelPublication = b
-	}
+	d.writeRecord(recordPublication, &d.f.KernelPublication, pub)
 	// 指紋を読めなければ、比べる基準が分からない。次の見直しは食い違いとして公開し直し、読み直す
 	// (7a.3 節の指紋の読み直しの失敗と同じ扱い)
 	fp, present, err := d.Ops.Fingerprint(nft.AgentTableName)
@@ -174,11 +172,37 @@ func (d *Dataplane) convergeFlows() {
 func (d *Dataplane) recordUnconverged() {
 	if len(d.unconverged) == 0 {
 		d.f.KernelUnconverged = nil
+		delete(d.marshalErr, recordUnconverged)
 		return
 	}
-	if b, err := json.Marshal(d.unconverged); err == nil {
-		d.f.KernelUnconverged = b
+	d.writeRecord(recordUnconverged, &d.f.KernelUnconverged, d.unconverged)
+}
+
+// 認証情報ファイルへ写す記録の名前である。ログと marshalErr の鍵に使う。
+const (
+	recordPublication = "publication"
+	recordUnconverged = "list of unconverged publications"
+)
+
+// writeRecord は、v を JSON にして認証情報ファイルの項目 dst へ写す。what は記録の名前で、ログに出す。
+// 今の型では失敗しないので、失敗は将来の型の変更の誤りである。失敗したら dst を書き換えず、false を返す。
+// 書くかどうかは呼び出し側に任せず、ここで決める。同じ誤りが公開や収束のたびに繰り返しても、記録ごとに
+// 変わったときだけ 1 行出す。
+func (d *Dataplane) writeRecord(what string, dst *json.RawMessage, v any) bool {
+	b, err := json.Marshal(v)
+	if err == nil {
+		delete(d.marshalErr, what)
+		*dst = b
+		return true
 	}
+	if msg := err.Error(); d.marshalErr[what] != msg {
+		if d.marshalErr == nil {
+			d.marshalErr = map[string]string{}
+		}
+		d.marshalErr[what] = msg
+		log.Printf("kernel mode: cannot encode the %s for the credentials file: %v; the credentials file is left unchanged", what, err)
+	}
+	return false
 }
 
 // probeAll は、公開した TCP のルールの宛先へ試し接続する(7b.3 節の 2 つ目の種類)。試すのは、連続する
