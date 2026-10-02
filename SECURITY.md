@@ -1,8 +1,11 @@
 # Security Policy
 
-wgft's server (`vpsd`) runs as root on a public VPS to manage nftables, WireGuard,
-and conntrack. A vulnerability here can mean a remote root compromise of your
-VPS, so please report it privately.
+wgft's server (`vpsd`) runs on a public VPS and manages its firewall and tunnels.
+In kernel mode it manages nftables, WireGuard, and conntrack. The shipped systemd
+unit runs it as an unprivileged `DynamicUser=` user with only `CAP_NET_ADMIN` and
+`CAP_NET_BIND_SERVICE`, and the userspace mode runs without `CAP_NET_ADMIN`. A
+vulnerability here can still mean control of that VPS's firewall rules and
+tunnels, so please report it privately.
 
 ## Supported versions
 
