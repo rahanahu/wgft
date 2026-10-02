@@ -25,8 +25,9 @@ RestartPreventExitStatus=3
 # MemoryMax=, keep it above the printed soft limit. 300M below is a lab measurement, not a bound:
 # userspace mode with the default flow caps stayed within 300M under one held-flow attack, and a
 # deliberately small 60M limit OOM-killed the service after 8 s and Restart= brought it back 2 s
-# later. An attack that fills every flow and buffer needs far more; the host memory that
-# userspace mode needs in the worst case is in docs/design.md section 7.
+# later. An attack that holds more flows and fills more buffers needs far more. docs/design.md
+# section 7 gives the documented worst-case estimate of the host memory that userspace mode needs:
+# the holdings counted there, each filled to its limit at once.
 #MemoryMax=300M
 #MemorySwapMax=0
 
