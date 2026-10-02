@@ -547,9 +547,27 @@ Flags:
 ## wgft agent rotate-key
 
 Replace the agent's WireGuard key pair. With the agent running, the request goes
-through its control socket and the agent reconnects with the new key at once;
-with the agent stopped, the credentials file is rewritten. The server learns
-the new public key over the stream, so nothing has to be done on the VPS.
+through its control socket and the agent reconnects to the server with the new
+key; with the agent stopped, the key is cleared from the credentials file and the
+next start makes a new one. The server learns the new public key over the stream.
+
+The server limits key changes per agent registration: up to 3 changes are stored,
+and one more comes back every 10 minutes. Exiting 0, with the new public key or
+the message that the key was cleared, only means the agent changed its own key.
+It does not mean the server accepted the key or that forwarding has resumed.
+
+Past the limit, the server refuses the new key and this agent's forwarding stops
+until the key is accepted. Do not run rotate-key again: the agent keeps
+reconnecting with the same new key, and the server accepts it once a change has
+come back. While the agent runs, the refusal shows in its log and in
+wgft agent doctor as "public key changes are limited; retry later".
+
+The wait for a change to come back is extended by the agent's normal reconnect
+backoff, which can add up to 5 minutes. Waiting is the normal way to recover. If
+it is urgent, an administrator can restart the server, which clears the limit for
+every agent, since the limit lives in the server process that serves them all;
+restarting this agent as well clears its remaining backoff. Restarting only the
+agent does not reset the server's limit.
 
 ```text
 wgft agent rotate-key [flags]
