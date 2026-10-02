@@ -5,6 +5,7 @@ package vpsd
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -307,5 +308,77 @@ func TestMismatchStepDoesNotWarnForAcknowledgedPair(t *testing.T) {
 		if warn || len(discard) != 0 {
 			t.Fatalf("tick %d: warn = %v, discard = %+v; an acknowledged pair must neither warn nor be discarded", i+1, warn, discard)
 		}
+	}
+}
+
+func (m *mismatchDriver) hasWarning(streamIP, wgIP string) bool {
+	m.t.Helper()
+	for _, w := range m.warnings() {
+		if w.Detail == store.IPMismatchDetail(streamIP, wgIP) {
+			return true
+		}
+	}
+	return false
+}
+
+func rotatedWG(i int) string { return fmt.Sprintf("203.0.113.%d", 100+i) }
+
+// 確認済みの組が無い間は組が変わっても連続回数を数え直さないので、食い違いが 2 分続いた後は、
+// 観測のたびに新しい組の行が 1 行ずつ増える。行はエージェントごとに MaxIPMismatchWarnings 行で
+// 止まり、検知は続く。上限で消えた組は確認済みにならず、再び観測すれば警告に戻る(仕様 5.2 節)。
+func TestMismatchRowsCappedWhilePairsRotate(t *testing.T) {
+	m := newMismatchDriver(t, filepath.Join(t.TempDir(), "s.sqlite"))
+	m.tick(7, ackStream, ackWG)
+	const extra = 20
+	for i := 0; i < store.MaxIPMismatchWarnings+extra; i++ {
+		m.tick(1, ackStream, rotatedWG(i))
+		if i < store.MaxIPMismatchWarnings {
+			if n := len(m.warnings()); n != i+1 {
+				t.Fatalf("after %d rotated observations: %d rows, want one new row per observation", i+1, n)
+			}
+		}
+	}
+	if n := len(m.warnings()); n != store.MaxIPMismatchWarnings {
+		t.Fatalf("rows = %d, want %d", n, store.MaxIPMismatchWarnings)
+	}
+	if !m.hasWarning(ackStream, rotatedWG(store.MaxIPMismatchWarnings+extra-1)) {
+		t.Fatal("the latest pair must be kept")
+	}
+	if m.hasWarning(ackStream, rotatedWG(0)) {
+		t.Fatal("the oldest pair must be trimmed")
+	}
+	if a := m.acks(); len(a) != 0 {
+		t.Fatalf("trimming must not record acknowledgements, got %+v", a)
+	}
+	// 消えた組を再び観測すれば、連続回数は 8 以上のままなので、その回に警告に戻る
+	m.tick(1, ackStream, rotatedWG(0))
+	if !m.hasWarning(ackStream, rotatedWG(0)) || len(m.warnings()) != store.MaxIPMismatchWarnings {
+		t.Fatalf("the trimmed pair observed again must warn again within the cap, got %d rows", len(m.warnings()))
+	}
+}
+
+// 確認済みの組は、上限で行が消えた後も警告にならない。上限は確認済みの組を変えない。
+func TestMismatchAckSuppressesAfterCapTrims(t *testing.T) {
+	m := newMismatchDriver(t, filepath.Join(t.TempDir(), "s.sqlite"))
+	m.warnAndDismiss()
+	before := m.acks()
+	// 監視の回を通すと別の組の観測が確認済みの組を捨てるので、行は store に直接記録する
+	for i := 0; i < store.MaxIPMismatchWarnings+10; i++ {
+		if added, err := m.st.AddIPMismatchWarning("home", ackStream, rotatedWG(i)); err != nil || !added {
+			t.Fatalf("AddIPMismatchWarning(%d) = %v, %v", i, added, err)
+		}
+	}
+	if n := len(m.warnings()); n != store.MaxIPMismatchWarnings {
+		t.Fatalf("rows = %d, want %d", n, store.MaxIPMismatchWarnings)
+	}
+	if after := m.acks(); len(after) != 1 || after[0] != before[0] {
+		t.Fatalf("acknowledgements after trimming = %+v, want unchanged %+v", after, before)
+	}
+	m.tick(50, ackStream, ackWG)
+	if m.hasWarning(ackStream, ackWG) {
+		t.Fatal("the acknowledged pair must stay suppressed after trimming")
+	}
+	if len(m.acks()) != 1 || len(m.warnings()) != store.MaxIPMismatchWarnings {
+		t.Fatalf("after observing the acknowledged pair: acks %+v, %d rows", m.acks(), len(m.warnings()))
 	}
 }

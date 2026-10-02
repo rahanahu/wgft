@@ -348,12 +348,15 @@ func TestFlappingWarningsKeepNewestPerAgent(t *testing.T) {
 	if n := len(warningDetails(t, s, "other", WarnIPFlapping)); n != MaxFlappingWarnings+extra {
 		t.Errorf("other agent's ip-flapping rows = %d, want %d untouched", n, MaxFlappingWarnings+extra)
 	}
-	// ip-mismatch は上限の対象ではない。上限を超えていても、記録で行は減らない。
-	if err := s.AddWarning("home", WarnIPMismatch, IPMismatchDetail("192.0.2.1", "203.0.113.9")); err != nil {
-		t.Fatal(err)
+	// ip-mismatch の上限は ip-flapping と別に数える。ip-mismatch の記録は ip-flapping の行を減らさない。
+	if added, err := s.AddIPMismatchWarning("home", "192.0.2.1", "203.0.113.9"); err != nil || !added {
+		t.Fatalf("AddIPMismatchWarning = %v, %v", added, err)
 	}
-	if n := len(warningDetails(t, s, "home", WarnIPMismatch)); n != MaxFlappingWarnings+extra+1 {
-		t.Errorf("home ip-mismatch rows after recording one = %d, want %d", n, MaxFlappingWarnings+extra+1)
+	if n := len(warningDetails(t, s, "home", WarnIPMismatch)); n != MaxIPMismatchWarnings {
+		t.Errorf("home ip-mismatch rows after recording one = %d, want %d", n, MaxIPMismatchWarnings)
+	}
+	if n := len(warningDetails(t, s, "home", WarnIPFlapping)); n != MaxFlappingWarnings {
+		t.Errorf("home ip-flapping rows after an ip-mismatch record = %d, want %d", n, MaxFlappingWarnings)
 	}
 
 	// 上限に達した後も検知は止まらない。新しい組は記録され、最も古い行が消える。
@@ -464,5 +467,232 @@ func TestAgentWarningsKeepsInsertionOrderWithinSameSecond(t *testing.T) {
 		if ws[i].Detail != want[i] || all[i].Detail != want[i] {
 			t.Errorf("row %d: AgentWarnings %q, Warnings %q, want %q", i, ws[i].Detail, all[i].Detail, want[i])
 		}
+	}
+}
+
+func mismatchDetail(i int) string {
+	return IPMismatchDetail(fmt.Sprintf("198.51.100.%d", i), "203.0.113.9")
+}
+
+func warningAcksOf(t *testing.T, s *Store) []Ack {
+	t.Helper()
+	acks, err := s.WarningAcks(WarnIPMismatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return acks
+}
+
+// ip-mismatch の行は、エージェントごとに MaxIPMismatchWarnings 行までに絞る(仕様 5.2 節)。上限を
+// 超えた行を持つ既存のデータベースは、次の記録で、いま記録した行と日時の新しい行だけになる。
+// ip-flapping の行とは別に数え、ほかのエージェントの行は減らない。
+func TestIPMismatchWarningsKeepNewestPerAgent(t *testing.T) {
+	s := openTemp(t)
+	const extra = 10
+	base := time.Now().Unix() - 100000
+	for i := 0; i < MaxIPMismatchWarnings+extra; i++ {
+		insertWarningAt(t, s, "home", WarnIPMismatch, mismatchDetail(i), base+int64(i))
+		insertWarningAt(t, s, "home", WarnIPFlapping, flapDetail(i), base+int64(i))
+		insertWarningAt(t, s, "other", WarnIPMismatch, mismatchDetail(i), base+int64(i))
+	}
+
+	newPair := IPMismatchDetail("192.0.2.1", "203.0.113.9")
+	if added, err := s.AddIPMismatchWarning("home", "192.0.2.1", "203.0.113.9"); err != nil || !added {
+		t.Fatalf("AddIPMismatchWarning = %v, %v", added, err)
+	}
+	got := warningDetails(t, s, "home", WarnIPMismatch)
+	if len(got) != MaxIPMismatchWarnings {
+		t.Fatalf("home ip-mismatch rows = %d, want %d", len(got), MaxIPMismatchWarnings)
+	}
+	if !got[newPair] {
+		t.Error("the warning just recorded must be kept")
+	}
+	// 残るのは古い行のうち新しい MaxIPMismatchWarnings-1 行。
+	for i := 0; i < MaxIPMismatchWarnings+extra; i++ {
+		if want := i >= extra+1; got[mismatchDetail(i)] != want {
+			t.Errorf("legacy row %d kept = %v, want %v", i, got[mismatchDetail(i)], want)
+		}
+	}
+	if n := len(warningDetails(t, s, "home", WarnIPFlapping)); n != MaxFlappingWarnings+extra {
+		t.Errorf("home ip-flapping rows = %d, want %d untouched", n, MaxFlappingWarnings+extra)
+	}
+	if n := len(warningDetails(t, s, "other", WarnIPMismatch)); n != MaxIPMismatchWarnings+extra {
+		t.Errorf("other agent's ip-mismatch rows = %d, want %d untouched", n, MaxIPMismatchWarnings+extra)
+	}
+
+	// 上限に達した後も検知は止まらない。新しい組は記録され、最も古い行が消える。
+	if added, err := s.AddIPMismatchWarning("home", "192.0.2.3", "203.0.113.9"); err != nil || !added {
+		t.Fatalf("AddIPMismatchWarning = %v, %v", added, err)
+	}
+	got = warningDetails(t, s, "home", WarnIPMismatch)
+	if len(got) != MaxIPMismatchWarnings || !got[IPMismatchDetail("192.0.2.3", "203.0.113.9")] ||
+		!got[newPair] || got[mismatchDetail(extra+1)] {
+		t.Errorf("after a second new pair: %d rows, new=%v previous=%v oldest legacy kept=%v",
+			len(got), got[IPMismatchDetail("192.0.2.3", "203.0.113.9")], got[newPair], got[mismatchDetail(extra+1)])
+	}
+
+	// 既にある組の再検出は時刻を更新するだけで、行を増やさず、その行を最も新しい側に移す。
+	if added, err := s.AddIPMismatchWarning("home", fmt.Sprintf("198.51.100.%d", extra+2), "203.0.113.9"); err != nil || !added {
+		t.Fatalf("re-detecting = %v, %v", added, err)
+	}
+	if added, err := s.AddIPMismatchWarning("home", "192.0.2.5", "203.0.113.9"); err != nil || !added {
+		t.Fatalf("AddIPMismatchWarning = %v, %v", added, err)
+	}
+	got = warningDetails(t, s, "home", WarnIPMismatch)
+	if len(got) != MaxIPMismatchWarnings || !got[mismatchDetail(extra+2)] || got[mismatchDetail(extra+3)] {
+		t.Errorf("after re-detecting row %d: %d rows, re-detected kept=%v next oldest kept=%v",
+			extra+2, len(got), got[mismatchDetail(extra+2)], got[mismatchDetail(extra+3)])
+	}
+	if acks := warningAcksOf(t, s); len(acks) != 0 {
+		t.Errorf("trimming must not record acknowledgements, got %+v", acks)
+	}
+}
+
+// ip-flapping の記録は ip-mismatch の行を減らさない。2 つの種類はそれぞれの上限を持つ。
+func TestFlappingRecordLeavesIPMismatchRows(t *testing.T) {
+	s := openTemp(t)
+	base := time.Now().Unix() - 100000
+	for i := 0; i < MaxIPMismatchWarnings; i++ {
+		insertWarningAt(t, s, "home", WarnIPMismatch, mismatchDetail(i), base+int64(i))
+	}
+	for i := 0; i < MaxFlappingWarnings+5; i++ {
+		if err := s.AddWarning("home", WarnIPFlapping, flapDetail(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(warningDetails(t, s, "home", WarnIPMismatch)); n != MaxIPMismatchWarnings {
+		t.Errorf("home ip-mismatch rows = %d, want %d untouched", n, MaxIPMismatchWarnings)
+	}
+	if n := len(warningDetails(t, s, "home", WarnIPFlapping)); n != MaxFlappingWarnings {
+		t.Errorf("home ip-flapping rows = %d, want %d", n, MaxFlappingWarnings)
+	}
+}
+
+// 時計が戻って既存の行の日時が未来にあっても、いま記録した食い違いは残る。IPv4 射影の形やポート
+// つきで与えた組も、正規化した detail の行として記録し、その行を残す。
+func TestIPMismatchWarningCapKeepsNewRecordWhenClockWentBack(t *testing.T) {
+	for _, c := range []struct{ streamIP, wgIP string }{
+		{"192.0.2.1", "203.0.113.9"},
+		{"::ffff:192.0.2.1", "[::ffff:203.0.113.9]:51820"},
+	} {
+		s := openTemp(t)
+		future := time.Now().Unix() + 100000
+		for i := 0; i < MaxIPMismatchWarnings; i++ {
+			insertWarningAt(t, s, "home", WarnIPMismatch, mismatchDetail(i), future+int64(i))
+		}
+		if added, err := s.AddIPMismatchWarning("home", c.streamIP, c.wgIP); err != nil || !added {
+			t.Fatalf("AddIPMismatchWarning(%s, %s) = %v, %v", c.streamIP, c.wgIP, added, err)
+		}
+		got := warningDetails(t, s, "home", WarnIPMismatch)
+		newPair := IPMismatchDetail("192.0.2.1", "203.0.113.9")
+		if len(got) != MaxIPMismatchWarnings || !got[newPair] || got[mismatchDetail(0)] {
+			t.Errorf("%s / %s: rows = %d, new kept = %v, oldest kept = %v",
+				c.streamIP, c.wgIP, len(got), got[newPair], got[mismatchDetail(0)])
+		}
+	}
+}
+
+// 最後に検出した日時が同じ秒の行どうしでは、後から記録した行を新しいものとして残す。
+func TestIPMismatchWarningCapBreaksTiesByInsertionOrder(t *testing.T) {
+	s := openTemp(t)
+	at := time.Now().Unix() - 100
+	for i := 0; i < MaxIPMismatchWarnings+5; i++ {
+		insertWarningAt(t, s, "home", WarnIPMismatch, mismatchDetail(i), at)
+	}
+	if added, err := s.AddIPMismatchWarning("home", "192.0.2.1", "203.0.113.9"); err != nil || !added {
+		t.Fatalf("AddIPMismatchWarning = %v, %v", added, err)
+	}
+	got := warningDetails(t, s, "home", WarnIPMismatch)
+	for i := 0; i < MaxIPMismatchWarnings+5; i++ {
+		if want := i >= 6; got[mismatchDetail(i)] != want {
+			t.Errorf("row %d inserted at the same second kept = %v, want %v", i, got[mismatchDetail(i)], want)
+		}
+	}
+}
+
+// 上限で行を消しても確認済みの組は変わらない。確認済みの組の観測は、上限を超えた行があっても
+// 記録せず、行も消さない。
+func TestIPMismatchWarningCapLeavesAcksAlone(t *testing.T) {
+	s := openTemp(t)
+	registerAgent(t, s, "home")
+	acked := IPMismatchDetail("192.0.2.7", "203.0.113.9")
+	if err := s.AddWarning("home", WarnIPMismatch, acked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DismissWarning("home", WarnIPMismatch, acked); err != nil {
+		t.Fatal(err)
+	}
+	before := warningAcksOf(t, s)
+	if len(before) != 1 {
+		t.Fatalf("WarningAcks = %+v, want the dismissed pair", before)
+	}
+
+	base := time.Now().Unix() - 100000
+	for i := 0; i < MaxIPMismatchWarnings+10; i++ {
+		insertWarningAt(t, s, "home", WarnIPMismatch, mismatchDetail(i), base+int64(i))
+	}
+	// 確認済みの組は記録しない。記録しなかった回は行を消さない。
+	if added, err := s.AddIPMismatchWarning("home", "192.0.2.7", "203.0.113.9"); err != nil || added {
+		t.Fatalf("the acknowledged pair = %v, %v; want not added", added, err)
+	}
+	if n := len(warningDetails(t, s, "home", WarnIPMismatch)); n != MaxIPMismatchWarnings+10 {
+		t.Errorf("rows after an unrecorded observation = %d, want %d unchanged", n, MaxIPMismatchWarnings+10)
+	}
+
+	if added, err := s.AddIPMismatchWarning("home", "192.0.2.1", "203.0.113.9"); err != nil || !added {
+		t.Fatalf("AddIPMismatchWarning = %v, %v", added, err)
+	}
+	if n := len(warningDetails(t, s, "home", WarnIPMismatch)); n != MaxIPMismatchWarnings {
+		t.Errorf("rows after a record = %d, want %d", n, MaxIPMismatchWarnings)
+	}
+	after := warningAcksOf(t, s)
+	if len(after) != len(before) || after[0] != before[0] {
+		t.Errorf("WarningAcks after trimming = %+v, want unchanged %+v", after, before)
+	}
+	// 上限で行を消した後も、確認済みの組は警告にならない。
+	if added, err := s.AddIPMismatchWarning("home", "::ffff:192.0.2.7", "203.0.113.9"); err != nil || added {
+		t.Fatalf("the acknowledged pair after trimming = %v, %v; want not added", added, err)
+	}
+	if got := warningDetails(t, s, "home", WarnIPMismatch); got[acked] {
+		t.Error("the acknowledged pair must not be recorded after trimming")
+	}
+}
+
+// 上限で消えた行の組は確認済みにならない。「警告を消す」で確認済みになるのは、そのとき残っている
+// 行の組だけであり、消えた組は再び観測すれば記録される。
+func TestIPMismatchWarningCapDoesNotAcknowledgeTrimmedPair(t *testing.T) {
+	s := openTemp(t)
+	registerAgent(t, s, "home")
+	trimmed := IPMismatchDetail("192.0.2.7", "203.0.113.9")
+	if added, err := s.AddIPMismatchWarning("home", "192.0.2.7", "203.0.113.9"); err != nil || !added {
+		t.Fatalf("AddIPMismatchWarning = %v, %v", added, err)
+	}
+	// 同じ秒でも後から記録した行が新しい。上限の数だけ新しい組を記録すると、最初の組が消える。
+	for i := 0; i < MaxIPMismatchWarnings; i++ {
+		if added, err := s.AddIPMismatchWarning("home", fmt.Sprintf("198.51.100.%d", i), "203.0.113.9"); err != nil || !added {
+			t.Fatalf("AddIPMismatchWarning(%d) = %v, %v", i, added, err)
+		}
+	}
+	got := warningDetails(t, s, "home", WarnIPMismatch)
+	if len(got) != MaxIPMismatchWarnings || got[trimmed] {
+		t.Fatalf("rows = %d, trimmed pair kept = %v", len(got), got[trimmed])
+	}
+	if acks := warningAcksOf(t, s); len(acks) != 0 {
+		t.Fatalf("trimming must not record acknowledgements, got %+v", acks)
+	}
+	acks, err := s.DismissWarning("home", WarnIPMismatch, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acks) != MaxIPMismatchWarnings {
+		t.Errorf("dismissing all acknowledged %d pairs, want %d", len(acks), MaxIPMismatchWarnings)
+	}
+	for _, a := range acks {
+		if a.SamePair("192.0.2.7", "203.0.113.9") {
+			t.Error("dismissing all must not acknowledge the trimmed pair")
+		}
+	}
+	if added, err := s.AddIPMismatchWarning("home", "192.0.2.7", "203.0.113.9"); err != nil || !added {
+		t.Fatalf("the trimmed pair observed again = %v, %v; want added", added, err)
 	}
 }
