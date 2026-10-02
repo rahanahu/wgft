@@ -203,11 +203,15 @@ func (d *kernelDataplane) planWith(gen uint64, rules []proto.AgentRule, resolved
 
 // staleReasonLimit は、hub がハートビートの理由に許す長さ(internal/vpsd/stream の
 // maxHeartbeatReasonLen)である。agent は vpsd を import できないので値を写す。写しがずれれば、
-// reason_roundtrip_linux_test.go の長いホスト名の試験が落ちる。staleReasonTailReserve は、目印の後ろに続く
-// 文言(試し接続の誤りなど)のために残す長さである。
+// reason_roundtrip_linux_test.go の TestStaleReasonLimitMatchesTheHub が落ちる。staleReasonTailReserve は、
+// 目印の後ろに続く文言のために残す長さである。server doctor が rule.target を分類する試し接続の誤り
+// (`; target <宛先>: dial tcp <宛先>: connect: connection refused` など、最長で 91 バイト)を収める。解決の
+// 誤りの文面の切り詰めの印(staleClipMark)は、その外の予算から引く。
 const (
 	staleReasonLimit       = 512
-	staleReasonTailReserve = 64
+	staleReasonTailReserve = 128
+	// staleClipMark は textsafe.ClipText が切り詰めたときに後ろへ付ける印の長さである(予算の外に付く)
+	staleClipMark = len("... truncated")
 )
 
 // staleReason は、名前の解決に失敗して直前の解決の結果を使ったルールの理由である。文言に
@@ -228,7 +232,7 @@ func staleReason(host string, err error, res nft.AgentRuleResult) string {
 		cause = textsafe.SanitizeForTerminal(err.Error())
 	}
 	fixed := len(reasontext.NameResolutionFailed(host, errors.New(""))) + len(mark)
-	cause = textsafe.ClipText(cause, max(0, staleReasonLimit-staleReasonTailReserve-fixed))
+	cause = textsafe.ClipText(cause, max(0, staleReasonLimit-staleReasonTailReserve-fixed-staleClipMark))
 	s := reasontext.NameResolutionFailed(host, errors.New(cause)) + mark
 	if res.Reason != "" {
 		s += "; " + res.Reason

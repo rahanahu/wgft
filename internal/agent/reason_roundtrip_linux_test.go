@@ -145,13 +145,22 @@ func TestKernelPlanReasonsAreReadByServerDoctor(t *testing.T) {
 // 制御文字があるときも同じである。以前は目印が切り落とされ、server doctor は解決できない(FAILED)と
 // 判定した。
 func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
+	dest := netip.MustParseAddrPort("192.168.1.30:25565")
 	for _, tc := range []struct {
-		name string
-		err  string
+		name   string
+		err    string
+		probe  string // 直前のアドレスへの試し接続の誤り。空なら応える
+		target string // rule.target の理由の符号。空なら見ない
 	}{
-		{"resolver error repeats the host", "lookup " + longTargetHost + " on 127.0.0.53:53: no such host"},
-		{"resolver error is itself long", "lookup " + longTargetHost + ": " + strings.Repeat("x", 600)},
-		{"resolver error with control characters", strings.Repeat("\x1b", 200) + " lookup " + longTargetHost},
+		{name: "resolver error repeats the host", err: "lookup " + longTargetHost + " on 127.0.0.53:53: no such host"},
+		{name: "resolver error is itself long", err: "lookup " + longTargetHost + ": " + strings.Repeat("x", 600)},
+		{name: "resolver error with control characters", err: strings.Repeat("\x1b", 200) + " lookup " + longTargetHost},
+		{name: "old address refuses", err: "lookup " + longTargetHost + " on 127.0.0.53:53: no such host",
+			probe: "dial tcp 192.168.1.30:25565: connect: connection refused", target: doctor.ReasonConnectionRefused},
+		{name: "old address times out", err: "lookup " + longTargetHost + " on 127.0.0.53:53: no such host",
+			probe: "dial tcp 192.168.1.30:25565: i/o timeout", target: doctor.ReasonTargetTimeout},
+		{name: "old address is unreachable", err: "lookup " + longTargetHost + " on 127.0.0.53:53: no such host",
+			probe: "dial tcp 192.168.1.30:25565: connect: no route to host", target: doctor.ReasonTargetUnreachable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{longTargetHost: {netip.MustParseAddr("192.168.1.30")}}}
@@ -161,6 +170,9 @@ func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
 				t.Fatal(err)
 			}
 			k.dnsErr = errors.New(tc.err)
+			if tc.probe != "" {
+				k.probeErr = map[netip.AddrPort]error{dest: errors.New(tc.probe)}
+			}
 			if _, err := d.ApplyRules(2, []proto.AgentRule{rule}, nil); err != nil {
 				t.Fatal(err)
 			}
@@ -173,10 +185,28 @@ func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
 			if !stale || addr != "192.168.1.30" {
 				t.Fatalf("after the hub, StaleResolution(%q) = %q, %v; want the mark to survive", stored, addr, stale)
 			}
-			c := serverDoctorReads(t, rule, st)[doctor.CheckTargetResolve]
-			if c.Status != doctor.StatusUnknown {
+			got := serverDoctorReads(t, rule, st)
+			if c := got[doctor.CheckTargetResolve]; c.Status != doctor.StatusUnknown {
 				t.Errorf("rule.target_resolve = %s %s, want %s (still forwarding)", c.Status, c.Reason, doctor.StatusUnknown)
 			}
+			if tc.target != "" {
+				if c := got[doctor.CheckTarget]; c.Status != doctor.StatusFailed || c.Reason != tc.target {
+					t.Errorf("rule.target = %s %s, want %s %s; the probe error after the mark must survive the hub (reason %q)",
+						c.Status, c.Reason, doctor.StatusFailed, tc.target, stored)
+				}
+			}
 		})
+	}
+}
+
+// staleReasonLimit は hub の上限の写しである。ずれれば、目印の後ろに残る長さが黙って変わる。agent doctor
+// の応答の上限 maxDoctorText も同じ値である。
+func TestStaleReasonLimitMatchesTheHub(t *testing.T) {
+	long := strings.Repeat("a", 4096)
+	if got, want := len(stream.HeartbeatReason(long)), staleReasonLimit+staleClipMark; got != want {
+		t.Errorf("the hub keeps %d bytes of a long reason, staleReasonLimit says %d", got, want)
+	}
+	if staleReasonLimit != maxDoctorText {
+		t.Errorf("staleReasonLimit = %d, maxDoctorText = %d; they are the same cap", staleReasonLimit, maxDoctorText)
 	}
 }
