@@ -164,10 +164,13 @@ type bindFailure struct {
 
 // listener は待ち受け 1 つ。状態(設計文書 7a.3 節の Active、Retiring、閉じた状態)は、どちらの表
 // (Manager の listeners か retiring)に入っているか、UDP の accepting、budget の受け付けの状態、
-// serveTCP と serveUDP が持つ待ち受けソケットで表す。状態を変える操作は次の名前の付いたメソッドで行い、
-// どれも呼び出し側が Manager の mu を持つ。
-//   - shutdownLocked:待ち受けを閉じる。listeners の表からは closeLocked が、retiring の表からは
-//     closeRetiringLocked が、この後に消す
+// serveTCP と serveUDP が持つ待ち受けソケットで表す。閉じる、付け替える、退役させる、再開する
+// 操作は次の名前の付いたメソッドで行い、どれも呼び出し側が Manager の mu を持つ。待ち受けを開く経路
+// (openLocked と、Commit が Prepare で bind したソケットから待ち受けを作る箇所)は、これらのメソッドを
+// 通さず、budget の受け付けと表への登録をその場で行う。
+//   - shutdownLocked:待ち受けを閉じる。この後、listeners の表からは closeLocked が、retiring の表からは
+//     closeRetiringLocked が消す。retireLocked が閉じる古い Retiring の待ち受けは、同じキーへの新しい
+//     待ち受けの代入で表から外れる
 //   - setRuleLocked:所属ルールを付け替える
 //   - retireLocked:Active から Retiring へ移す
 //   - reviveLocked:Retiring の UDP の待ち受けを Active へ戻す
@@ -220,7 +223,8 @@ func (l *listener) err() error {
 }
 
 // shutdownLocked は待ち受けを閉じる。closeF で待ち受けソケットと中継中のフローを閉じ、その後に
-// Resource Guard の枠を Pool から外す。呼び出し側は m.mu を持ち、この後に待ち受けを表から消す。
+// Resource Guard の枠を Pool から外す。呼び出し側は m.mu を持ち、この後に待ち受けを表から外す。
+// 外し方は、delete で消すか、同じキーへ別の待ち受けを代入して置き換えるかである(retireLocked)。
 func (l *listener) shutdownLocked() {
 	l.closeF()
 	l.budget.Close()
