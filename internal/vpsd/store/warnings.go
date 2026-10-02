@@ -25,12 +25,37 @@ type Warning struct {
 	CreatedAt time.Time
 }
 
-// AddWarning は警告を記録する(同じ内容なら時刻を更新するだけ)。
+// MaxFlappingWarnings はエージェントごとに持つ ip-flapping の警告の行の上限(仕様 5.2 節)。
+// detail は往復した 2 つの IP を含むので、上限が無いと IP の組の数だけ行が増える。64 行は
+// 2 つのチャネルで共有し、8 つの回線(1 回線を 1 つの IP と数える)の間を行き来する
+// エージェントのすべての組(2 つのチャネルを合わせて 56 通り)を収める。
+const MaxFlappingWarnings = 64
+
+// AddWarning は警告を記録する(同じ内容なら時刻を更新するだけ)。ip-flapping なら、記録と同じ
+// トランザクションで、そのエージェントの ip-flapping の行を MaxFlappingWarnings 行に絞る。
+// 残すのは、いま記録した行と、ほかの行で最後に検出した日時が新しいものである。いま記録した行を
+// 必ず残すので、時計が戻って既存の行の日時が未来にあっても、新しい往復の記録は消えない。
+// 上限を超えた行を持つ既存のデータベースも、そのエージェントの次の記録で上限まで減る。
 func (s *Store) AddWarning(agent, kind, detail string) error {
-	_, err := s.db.Exec(`INSERT INTO warnings (agent, kind, detail, created_at) VALUES (?, ?, ?, ?)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO warnings (agent, kind, detail, created_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(agent, kind, detail) DO UPDATE SET created_at = excluded.created_at`,
-		agent, kind, detail, time.Now().Unix())
-	return err
+		agent, kind, detail, time.Now().Unix()); err != nil {
+		return err
+	}
+	if kind == WarnIPFlapping {
+		if _, err := tx.Exec(`DELETE FROM warnings WHERE agent = ? AND kind = ? AND rowid NOT IN (
+			SELECT rowid FROM warnings WHERE agent = ? AND kind = ?
+			ORDER BY detail = ? DESC, created_at DESC, rowid DESC LIMIT ?)`,
+			agent, kind, agent, kind, detail, MaxFlappingWarnings); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // AddIPMismatchWarning は ip-mismatch の警告を記録する。ただし、その組が確認済みなら記録しない
@@ -57,7 +82,18 @@ func (s *Store) AddIPMismatchWarning(agent, streamIP, wgIP string) (bool, error)
 
 // Warnings は全警告を新しい順に返す。
 func (s *Store) Warnings() ([]Warning, error) {
-	rows, err := s.db.Query("SELECT agent, kind, detail, created_at FROM warnings ORDER BY created_at DESC")
+	return s.queryWarnings("SELECT agent, kind, detail, created_at FROM warnings ORDER BY created_at DESC")
+}
+
+// AgentWarnings はそのエージェントの警告を新しい順に返す。同じ秒の警告は記録した順に並べる。
+// 全警告を読んで絞っていた以前の版と同じ順序である。WHERE は主キーの索引を使うので、rowid を
+// 明示しないと同じ秒の警告が種類と detail の順になる。
+func (s *Store) AgentWarnings(agent string) ([]Warning, error) {
+	return s.queryWarnings("SELECT agent, kind, detail, created_at FROM warnings WHERE agent = ? ORDER BY created_at DESC, rowid ASC", agent)
+}
+
+func (s *Store) queryWarnings(query string, args ...any) ([]Warning, error) {
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -73,21 +109,6 @@ func (s *Store) Warnings() ([]Warning, error) {
 		out = append(out, w)
 	}
 	return out, rows.Err()
-}
-
-// AgentWarnings はそのエージェントの警告。
-func (s *Store) AgentWarnings(agent string) ([]Warning, error) {
-	all, err := s.Warnings()
-	if err != nil {
-		return nil, err
-	}
-	var out []Warning
-	for _, w := range all {
-		if w.Agent == agent {
-			out = append(out, w)
-		}
-	}
-	return out, nil
 }
 
 // ClearWarning は種類と detail を指定して警告を消す(detail が空ならその種類を全部)。
