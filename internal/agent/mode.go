@@ -4,14 +4,15 @@ import (
 	"log"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/kernelmode"
 	"github.com/rahanahu/wgft/internal/startup"
 )
 
 // kernelModeAvailable は、このビルドがエージェントのカーネルモードの dataplane を持つかどうかである
-// (Linux のビルドだけが持つ。dataplane_kernel.go)。偽なら、関門を通った kernel の指定も記録する前に
+// (Linux のビルドだけが持つ。internal/agent/kernelmode の Built)。偽なら、関門を通った kernel の指定も記録する前に
 // 止める。記録してから止めると、ユーザー空間モードへ戻すために、まだ残骸の無いホストで撤去が要る。
 // テストだけが書き換える。
-var kernelModeAvailable = kernelModeBuilt
+var kernelModeAvailable = kernelmode.Built
 
 // reconcileMode は、認証情報ファイルに記録したモード recorded と、設定の WGFT_MODE の値 want を照合する
 // (仕様 9・11a 節)。want が空なら設定は省略されており、ユーザー空間モードを指す。カーネルモードは明示した
@@ -82,7 +83,7 @@ func enterMode(f *credentials.Credentials, want, path string) (string, error) {
 	// 前でもある。前提で止まる起動が記録を残すと、案内どおりユーザー空間モードへ戻す起動が関門に
 	// 止められ、撤去には root が要る。カーネルには何も作られていないのに、戻す道が閉じる(仕様 11a 節)
 	if mode == credentials.ModeKernel {
-		if err := kernelPrerequisites(); err != nil {
+		if err := kernelmode.Prerequisites(); err != nil {
 			return "", err
 		}
 	}

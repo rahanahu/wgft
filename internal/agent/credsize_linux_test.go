@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/kernelmode"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -17,7 +18,7 @@ import (
 // 書かないので、収まらなければ大きな配置のエージェントが状態を保存できなくなる。
 //
 // 最大の大きさは次の 3 つで決まる。last_state は制御ストリームの 1 通(streamReadLimit)に収まる。
-// カーネルモードの公開の記録は、直近の 1 つと、収束が済んでいない前の公開の列の maxUnconverged 個が並ぶ。
+// カーネルモードの公開の記録は、直近の 1 つと、収束が済んでいない前の公開の列の kernelmode.MaxUnconverged 個が並ぶ。
 // 1 つの公開はルールごとに 1 項目を持つ。見積もりは、1 通に最も多くのルールが入るよう各項目を最短にし、
 // 公開の項目の宛先を最長の IPv4 の値にする。範囲のルールを許可一覧が複数の範囲に分ける場合と、
 // 公開しなかった理由の文言の長さは含めない。この 2 つは見積もりの外として 9 節に明記してある。
@@ -49,7 +50,7 @@ func TestCredentialsFileSizeLimitCoversTheLargestFile(t *testing.T) {
 			pub.Rules = append(pub.Rules, nft.AgentRuleResult{RuleID: r.ID, Proto: r.Proto, ListenPort: r.ListenPort, Target: r.Target,
 				Ranges: []nft.AgentRange{{Ports: r.ListenPort, Dest: netip.MustParseAddrPort("255.255.255.255:65535")}}})
 		}
-		list := make([]nft.AgentPublication, maxUnconverged)
+		list := make([]nft.AgentPublication, kernelmode.MaxUnconverged)
 		for i := range list {
 			list[i] = pub
 		}

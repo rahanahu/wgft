@@ -11,16 +11,17 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/kernelmode"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // kernelRuntime は、fakeKernel を使うカーネルモードの dataplane を持つ runtime を作る。d は wg 設定を
 // 受け取った状態で、wgft0 は宣言どおりである。
-func kernelRuntime(t *testing.T, k *fakeKernel, f *credentials.Credentials) (*runtime, *kernelDataplane) {
+func kernelRuntime(t *testing.T, k *fakeKernel, f *credentials.Credentials) (*runtime, *kernelmode.Dataplane) {
 	t.Helper()
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
-	rt := &runtime{opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
+	rt := &runtime{opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG}
 	return rt, d
 }
 
@@ -39,13 +40,13 @@ func TestKernelRefusesAnAddressItWasNotRegisteredWith(t *testing.T) {
 			k := &fakeKernel{}
 			f := &credentials.Credentials{TunnelAddress: "10.200.0.2/24"}
 			rt, d := kernelRuntime(t, k, f)
-			good := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}}
+			good := &proto.State{Generation: 1, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}}
 			if err := rt.apply(good); err != nil {
 				t.Fatal(err)
 			}
 			ensured, published := len(k.ensured), len(k.published)
 
-			st := &proto.State{Generation: 2, WG: withAddress(d.wg, bad), Rules: []proto.AgentRule{tcpRule("r2", "192.168.1.21:81", 81, 81)}}
+			st := &proto.State{Generation: 2, WG: withAddress(d.WG, bad), Rules: []proto.AgentRule{tcpRule("r2", "192.168.1.21:81", 81, 81)}}
 			err := rt.apply(st)
 			var mm *credentials.TunnelAddressMismatch
 			if !errors.As(err, &mm) {
@@ -57,8 +58,8 @@ func TestKernelRefusesAnAddressItWasNotRegisteredWith(t *testing.T) {
 			if rt.gen != 1 || rt.f.LastState != good || f.TunnelAddress != "10.200.0.2/24" {
 				t.Errorf("gen=%d last_state=%v record=%q; want 1, the good state and the old record", rt.gen, rt.f.LastState, f.TunnelAddress)
 			}
-			if !d.Built() || d.wg.Address != "10.200.0.2/24" || rt.wgCfg.Address != "10.200.0.2/24" {
-				t.Errorf("the tunnel changed: built=%v address=%s applied=%s", d.Built(), d.wg.Address, rt.wgCfg.Address)
+			if !d.Built() || d.WG.Address != "10.200.0.2/24" || rt.wgCfg.Address != "10.200.0.2/24" {
+				t.Errorf("the tunnel changed: built=%v address=%s applied=%s", d.Built(), d.WG.Address, rt.wgCfg.Address)
 			}
 			hb := rt.heartbeat()
 			if hb.Tunnel.State != proto.StatusError || !strings.Contains(hb.Tunnel.Reason, "refused") || !strings.Contains(hb.Tunnel.Reason, bad) || hb.Generation != 1 {
@@ -75,7 +76,7 @@ func TestKernelRefusesAnAddressItWasNotRegisteredWith(t *testing.T) {
 				t.Errorf("the 30-second check did not repair the table of generation 1 while refusing: %v", gens(k.published))
 			}
 
-			ok := &proto.State{Generation: 3, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r3", "192.168.1.22:82", 82, 82)}}
+			ok := &proto.State{Generation: 3, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r3", "192.168.1.22:82", 82, 82)}}
 			if err := rt.apply(ok); err != nil {
 				t.Fatal(err)
 			}
@@ -96,14 +97,14 @@ func TestKernelRecordsTheFirstAppliedAddress(t *testing.T) {
 			f := &credentials.Credentials{TunnelAddress: before}
 			rt, d := kernelRuntime(t, k, f)
 			k.publishErr = errors.New("batch refused")
-			if err := rt.apply(&proto.State{Generation: 1, WG: d.wg}); err == nil {
+			if err := rt.apply(&proto.State{Generation: 1, WG: d.WG}); err == nil {
 				t.Fatal("the failed publication was not reported")
 			}
 			if f.TunnelAddress != before {
 				t.Errorf("a state that was not applied was recorded: %q", f.TunnelAddress)
 			}
 			k.publishErr = nil
-			if err := rt.apply(&proto.State{Generation: 1, WG: d.wg}); err != nil {
+			if err := rt.apply(&proto.State{Generation: 1, WG: d.WG}); err != nil {
 				t.Fatal(err)
 			}
 			saved, err := credentials.Load(rt.opts.CredentialsPath)
@@ -113,7 +114,7 @@ func TestKernelRecordsTheFirstAppliedAddress(t *testing.T) {
 			if f.TunnelAddress != "10.200.0.2/24" || saved.TunnelAddress != "10.200.0.2/24" {
 				t.Errorf("record = %q, saved %q; want 10.200.0.2/24", f.TunnelAddress, saved.TunnelAddress)
 			}
-			if err := rt.apply(&proto.State{Generation: 2, WG: withAddress(d.wg, "10.200.0.2/23")}); err == nil {
+			if err := rt.apply(&proto.State{Generation: 2, WG: withAddress(d.WG, "10.200.0.2/23")}); err == nil {
 				t.Error("an address other than the recorded one was accepted")
 			}
 		})
@@ -125,7 +126,7 @@ func TestKernelRecordsTheFirstAppliedAddress(t *testing.T) {
 func TestKernelRefusesAnAddressBeforeTheFirstTunnel(t *testing.T) {
 	k := &fakeKernel{}
 	f := &credentials.Credentials{TunnelAddress: "10.200.0.2"}
-	d := newKernelDataplaneWithOps(context.Background(), "wgft0", nil, f, nil, k.ops())
+	d := kernelmode.NewWithOps(context.Background(), "wgft0", nil, f, nil, k.ops())
 	rt := &runtime{opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Mode: "kernel"}, f: f, priv: testKey(t), dp: d}
 	st := &proto.State{Generation: 1, WG: withAddress(testWG(t), "192.168.1.100/25")}
 	err := rt.apply(st)
@@ -145,7 +146,7 @@ func TestKernelRefusesAnAddressBeforeTheFirstTunnel(t *testing.T) {
 func TestKernelRefusalText(t *testing.T) {
 	k := &fakeKernel{}
 	d := newTestKernel(t, k, &credentials.Credentials{TunnelAddress: "10.200.0.2/24"}, nil)
-	_, err := d.CheckWG(withAddress(d.wg, "192.168.1.100/25"))
+	_, err := d.CheckWG(withAddress(d.WG, "192.168.1.100/25"))
 	if err == nil {
 		t.Fatal("no refusal")
 	}
@@ -167,17 +168,17 @@ func TestKernelRefusalSurvivesARetryOfAnOlderGeneration(t *testing.T) {
 	k := &fakeKernel{}
 	f := &credentials.Credentials{TunnelAddress: "10.200.0.2/24"}
 	rt, d := kernelRuntime(t, k, f)
-	if err := rt.apply(&proto.State{Generation: 1, WG: d.wg}); err != nil {
+	if err := rt.apply(&proto.State{Generation: 1, WG: d.WG}); err != nil {
 		t.Fatal(err)
 	}
 	k.publishErr = errors.New("batch refused")
-	if err := rt.apply(&proto.State{Generation: 2, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r2", "192.168.1.21:81", 81, 81)}}); err == nil {
+	if err := rt.apply(&proto.State{Generation: 2, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r2", "192.168.1.21:81", 81, 81)}}); err == nil {
 		t.Fatal("the failed publication was not reported")
 	}
 	if rt.pendingSt == nil || rt.pendingSt.Generation != 2 {
 		t.Fatalf("pending = %+v, want generation 2", rt.pendingSt)
 	}
-	if err := rt.apply(&proto.State{Generation: 3, WG: withAddress(d.wg, "192.168.1.100/25")}); err == nil {
+	if err := rt.apply(&proto.State{Generation: 3, WG: withAddress(d.WG, "192.168.1.100/25")}); err == nil {
 		t.Fatal("generation 3 was not refused")
 	}
 	k.publishErr = nil
@@ -194,13 +195,13 @@ func TestKernelRefusalSurvivesARetryOfAnOlderGeneration(t *testing.T) {
 
 	// 古い世代が拒まれても、表示は新しい世代のまま
 	rt.mu.Lock()
-	_ = rt.checkWGLocked(&proto.State{Generation: 2, WG: withAddress(d.wg, "10.9.0.2/24")})
+	_ = rt.checkWGLocked(&proto.State{Generation: 2, WG: withAddress(d.WG, "10.9.0.2/24")})
 	rt.mu.Unlock()
 	if hb := rt.heartbeat(); !strings.Contains(hb.Tunnel.Reason, "generation 3") {
 		t.Errorf("an older refusal replaced the newer one: %+v", hb.Tunnel)
 	}
 
-	if err := rt.apply(&proto.State{Generation: 4, WG: d.wg}); err != nil {
+	if err := rt.apply(&proto.State{Generation: 4, WG: d.WG}); err != nil {
 		t.Fatal(err)
 	}
 	if hb := rt.heartbeat(); strings.Contains(hb.Tunnel.Reason, "refused") {
@@ -220,10 +221,10 @@ func TestKernelRefusesAMalformedConfigWhileUp(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			k := &fakeKernel{}
 			rt, d := kernelRuntime(t, k, &credentials.Credentials{})
-			if err := rt.apply(&proto.State{Generation: 1, WG: d.wg}); err != nil {
+			if err := rt.apply(&proto.State{Generation: 1, WG: d.WG}); err != nil {
 				t.Fatal(err)
 			}
-			w := d.wg
+			w := d.WG
 			mutate(&w)
 			ensured := len(k.ensured)
 			if err := rt.apply(&proto.State{Generation: 2, WG: w}); err == nil {

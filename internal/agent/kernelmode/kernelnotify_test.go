@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ import (
 )
 
 // notified は、変更の通知の後の見直しを 1 回行い、誤りなら試験を落とす。
-func notified(t *testing.T, d *kernelDataplane, gen uint64, rules []proto.AgentRule) bool {
+func notified(t *testing.T, d *Dataplane, gen uint64, rules []proto.AgentRule) bool {
 	t.Helper()
 	saved, err := d.ObserveNotified(gen, rules)
 	if err != nil {
@@ -100,8 +100,8 @@ func TestKernelNotifiedCheckSpacesRetriesAfterAFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	attempts := 0
-	publish := d.ops.publish
-	d.ops.publish = func(p nft.AgentPublication, c nft.AgentConfig) error {
+	publish := d.Ops.Publish
+	d.Ops.Publish = func(p nft.AgentPublication, c nft.AgentConfig) error {
 		attempts++
 		if k.publishErr != nil {
 			// 応答の受信に失敗した公開のように、テーブルは差し替わってから誤りが返る
@@ -290,10 +290,10 @@ func TestKernelNotifiedCheckKeepsTheEndpointError(t *testing.T) {
 	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
 	d := newTestKernel(t, k, nil, nil)
-	d.ops.now = func() time.Time { return now }
+	d.Ops.Now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.ApplyRules(1, nil, nil); err != nil {
@@ -376,7 +376,7 @@ func TestKernelNotifiedCheckKeepsTheResolutionPublishError(t *testing.T) {
 	if !observeOnce(t, d, 1, rules) || d.CheckError() != "" || !strings.Contains(buf.String(), "works again") {
 		t.Fatalf("a successful publication of the changed DNAT left check error %q", d.CheckError())
 	}
-	if got := d.pub.Rules[0].Ranges[0].Dest.Addr(); got != netip.MustParseAddr("192.168.1.9") {
+	if got := d.Pub.Rules[0].Ranges[0].Dest.Addr(); got != netip.MustParseAddr("192.168.1.9") {
 		t.Fatalf("published DNAT to %s, want 192.168.1.9", got)
 	}
 	// DNAT が元に戻れば、公開すべき変化が無くなるので、誤りも消える

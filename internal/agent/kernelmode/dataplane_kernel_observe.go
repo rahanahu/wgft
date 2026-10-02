@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 
 // ObservePrepare は 30 秒ごとの見直しのうち、名前の解決だけを行う(7b.2 節)。rt.mu の外で呼ぶ。
 // 停止で打ち切られたら nil を返し、見直しは何もしない。
-func (d *kernelDataplane) ObservePrepare(rules []proto.AgentRule) any {
+func (d *Dataplane) ObservePrepare(rules []proto.AgentRule) any {
 	ctx, cancel := context.WithTimeout(d.ctx, kernelResolveTimeout)
 	defer cancel()
 	p := &observePrepared{}
@@ -29,9 +29,9 @@ func (d *kernelDataplane) ObservePrepare(rules []proto.AgentRule) any {
 	d.epMu.Unlock()
 	if stale && name != "" {
 		p.endpoint = &kernelPrepared{tried: true, endpointOf: name}
-		p.endpoint.endpoint, p.endpoint.endpointEr = resolveEndpointAddr(ctx, name, d.ops.lookup)
+		p.endpoint.endpoint, p.endpoint.endpointEr = resolveEndpointAddr(ctx, name, d.Ops.Lookup)
 	}
-	p.resolved = resolveTargets(ctx, rules, d.ops.lookup)
+	p.resolved = resolveTargets(ctx, rules, d.Ops.Lookup)
 	if d.ctx.Err() != nil {
 		return nil
 	}
@@ -54,23 +54,23 @@ type observePrepared struct {
 //
 // saved は記録が変わったかどうかで、真なら呼び出し側が認証情報ファイルを保存する。見直しの失敗は
 // 旧いテーブルを残し、次の見直しで試し直す。
-func (d *kernelDataplane) ObserveCommit(gen uint64, rules []proto.AgentRule, prepared any) (saved bool, err error) {
+func (d *Dataplane) ObserveCommit(gen uint64, rules []proto.AgentRule, prepared any) (saved bool, err error) {
 	op, ok := prepared.(*observePrepared)
-	if !ok || !d.have || !d.converged || d.pub == nil {
+	if !ok || !d.have || !d.converged || d.Pub == nil {
 		return false, nil
 	}
 	return d.compare(gen, rules, op)
 }
 
 // Sensor はカーネルの変更の通知の購読である(7b.4 節の変更の通知)。
-func (d *kernelDataplane) Sensor() dataplane.Sensor { return d.ops.notify }
+func (d *Dataplane) Sensor() dataplane.Sensor { return d.Ops.Notify }
 
 // ObserveNotified は、変更の通知をまとめた後の見直しである(7b.4 節の変更の通知)。rt.mu を持って呼ぶ。
 // 30 秒ごとの見直しのうち外からの変更だけを扱い、名前を引かず、試し接続もしない。比べるのは直前の
 // 公開そのものである。自分の公開と wgft0 の収束も通知を生むが、公開の直後に指紋を読み直してあるので、
 // その通知の後の見直しは一致を確かめて終わる。
-func (d *kernelDataplane) ObserveNotified(gen uint64, rules []proto.AgentRule) (saved bool, err error) {
-	if !d.have || !d.converged || d.pub == nil {
+func (d *Dataplane) ObserveNotified(gen uint64, rules []proto.AgentRule) (saved bool, err error) {
+	if !d.have || !d.converged || d.Pub == nil {
 		return false, nil
 	}
 	return d.compare(gen, rules, nil)
@@ -85,7 +85,7 @@ func (d *kernelDataplane) ObserveNotified(gen uint64, rules []proto.AgentRule) (
 // 同じ食い違いのログは、30 秒ごとの見直しが食い違いを見つけない回を挟むまで 1 行だけにする。通知の
 // 後の見直しが食い違いを見つけない回は区切りに数えない。自分の公開の直後の通知は必ず一致を見つけるので、
 // 数えると、他のプロセスが同じ変更を繰り返すたびに 1 行出すことになるためである。
-func (d *kernelDataplane) compare(gen uint64, rules []proto.AgentRule, op *observePrepared) (saved bool, err error) {
+func (d *Dataplane) compare(gen uint64, rules []proto.AgentRule, op *observePrepared) (saved bool, err error) {
 	// 引き直したエンドポイントの収束に失敗しても、表の修復と経路の確認へ進み、誤りは最後に返す。
 	// 印は残るので、次の見直しが試し直す。ここで返すと、収束の失敗が続く間(稼働中に現れた重なりなど)、
 	// 30 秒ごとの見直しが表の修復に届かない
@@ -114,11 +114,11 @@ func (d *kernelDataplane) compare(gen uint64, rules []proto.AgentRule, op *obser
 // repair は compare の本体で、テーブルと wgft0 を比べて直す。held は、通知の後の見直しが門のために
 // 何も試さずに終わったことを表す。名前の解決し直しで変わった DNAT の公開の失敗は resolveErr に入れる。
 // 30 秒ごとの見直しは、DNAT が変わらなかったときと、変わった DNAT を公開できたときに resolveErr を消す。
-func (d *kernelDataplane) repair(gen uint64, rules []proto.AgentRule, op *observePrepared) (saved, held bool, err error) {
-	next, changedDNAT := *d.pub, false
+func (d *Dataplane) repair(gen uint64, rules []proto.AgentRule, op *observePrepared) (saved, held bool, err error) {
+	next, changedDNAT := *d.Pub, false
 	if op != nil {
 		next = d.planWith(gen, rules, op.resolved)
-		changedDNAT = !sameDNATs(*d.pub, next)
+		changedDNAT = !sameDNATs(*d.Pub, next)
 		if !changedDNAT {
 			d.resolveErr = ""
 		}
@@ -140,11 +140,11 @@ func (d *kernelDataplane) repair(gen uint64, rules []proto.AgentRule, op *observ
 		return false, true, nil
 	}
 	if linkDrift != "" {
-		cfg, err := d.linkConfig()
+		cfg, err := d.LinkConfig()
 		if err != nil {
 			return false, false, err
 		}
-		changes, err := d.ops.ensureLink(cfg)
+		changes, err := d.Ops.EnsureLink(cfg)
 		if err != nil {
 			d.gate.Failed()
 			return false, false, fmt.Errorf("converge %s: %w", d.iface, err)
@@ -158,14 +158,14 @@ func (d *kernelDataplane) repair(gen uint64, rules []proto.AgentRule, op *observ
 	d.checkRoute()
 	switch {
 	case changedDNAT:
-		log.Printf("kernel mode: target resolution changed the DNAT of %s; publishing the table again", strings.Join(changedRules(*d.pub, next), ", "))
+		log.Printf("kernel mode: target resolution changed the DNAT of %s; publishing the table again", strings.Join(changedRules(*d.Pub, next), ", "))
 	case drift != "":
 	default:
-		if reflect.DeepEqual(d.pub.Rules, next.Rules) {
+		if reflect.DeepEqual(d.Pub.Rules, next.Rules) {
 			return false, false, nil
 		}
 		// 理由の文言だけが変わった。テーブルは同じなので差し替えない
-		d.pub = &next
+		d.Pub = &next
 		if b, err := json.Marshal(next); err == nil {
 			d.f.KernelPublication = b
 		}
@@ -191,16 +191,16 @@ func (d *kernelDataplane) repair(gen uint64, rules []proto.AgentRule, op *observ
 // noteObserveErr は、repairErr と resolveErr と endpointErr をつないだ見直しの誤りを、変わったときだけ 1 行出す。
 // 30 秒ごとの見直しと通知の後の見直しで同じ控えを使う。どちらも同じテーブルと wgft0 を読み、同じ誤りに
 // 当たるためである。
-func (d *kernelDataplane) noteObserveErr() {
+func (d *Dataplane) noteObserveErr() {
 	msg := strings.Join(uniq(nonEmpty(d.repairErr, d.resolveErr, d.endpointErr)), "; ")
 	switch {
-	case msg == d.observeErr:
+	case msg == d.ObserveErr:
 	case msg == "":
 		log.Printf("kernel mode: checking table inet %s and %s works again", nft.AgentTableName, d.iface)
 	default:
 		log.Printf("kernel mode: checking table inet %s and %s failed: %s; the previous publication stays in place and the next check tries again", nft.AgentTableName, d.iface, msg)
 	}
-	d.observeErr = msg
+	d.ObserveErr = msg
 }
 
 // uniq は、同じ文面を 1 つにまとめる。テーブルの修復と名前の解決し直しの公開が同じ誤りで失敗した
@@ -226,8 +226,8 @@ func errText(err error) string {
 // drift は、実際のテーブルと wgft0 が直前の公開と宣言に一致しなければ、それぞれ何が違うかを返す。
 // 一致すれば空である。テーブルは指紋で、wgft0 は種別、鍵、up、MTU、アドレス、ピアの集合と
 // AllowedIPs と keepalive で比べる。エンドポイントは比べない(7b.1 節)。
-func (d *kernelDataplane) drift() (table, link string, st wg.AgentState, err error) {
-	fp, present, err := d.ops.fingerprint(nft.AgentTableName)
+func (d *Dataplane) drift() (table, link string, st wg.AgentState, err error) {
+	fp, present, err := d.Ops.Fingerprint(nft.AgentTableName)
 	switch {
 	case err != nil:
 		return "", "", st, fmt.Errorf("read table inet %s: %w", nft.AgentTableName, err)
@@ -239,7 +239,7 @@ func (d *kernelDataplane) drift() (table, link string, st wg.AgentState, err err
 		table = "table inet " + nft.AgentTableName + " was changed outside wgft"
 	}
 	prev, _ := d.f.PreviousKey()
-	st, err = d.ops.inspectLink(d.iface, d.priv, prev)
+	st, err = d.Ops.InspectLink(d.iface, d.Priv, prev)
 	if err != nil {
 		return "", "", st, fmt.Errorf("read %s: %w", d.iface, err)
 	}
@@ -252,8 +252,8 @@ func (d *kernelDataplane) drift() (table, link string, st wg.AgentState, err err
 // ここで見える。警告はカーネルの引き当てが示す事実だけを述べ、原因は決めつけない。警告だけを出し、
 // 起動は止めない(2026-09-24、所有者の決定)。ポリシールーティングは稼働中にも変わるためである。
 // 変わったときだけ 1 行出す。wgft0 が宣言どおりになった後に呼ぶ。
-func (d *kernelDataplane) checkRoute() {
-	iface, err := d.ops.routeIface(d.server)
+func (d *Dataplane) checkRoute() {
+	iface, err := d.Ops.RouteIface(d.server)
 	finding := ""
 	switch {
 	case err != nil:
@@ -284,8 +284,8 @@ func nonEmpty(s ...string) []string {
 }
 
 // linkDrift は wgft0 の状態 st が宣言と違えば、その説明を返す。
-func (d *kernelDataplane) linkDrift(st wg.AgentState) string {
-	cfg, err := d.linkConfig()
+func (d *Dataplane) linkDrift(st wg.AgentState) string {
+	cfg, err := d.LinkConfig()
 	if err != nil {
 		return ""
 	}

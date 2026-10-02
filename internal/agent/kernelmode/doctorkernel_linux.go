@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"encoding/json"
@@ -37,27 +37,27 @@ type kernelReadInput struct {
 	pub json.RawMessage
 }
 
-// kernelDoctorOps はカーネルを読む操作である。単体テストだけが差し替える。どれもカーネルに書かない。
-type kernelDoctorOps struct {
-	// link はリンクの属性を読む。CAP_NET_ADMIN は要らない
-	link func(iface string) (exists bool, kind string, up bool, err error)
-	// inspectLink は WireGuard の鍵とピアを読む。CAP_NET_ADMIN が要る
-	inspectLink func(iface string, current, previous wgtypes.Key) (wg.AgentState, error)
-	// inspectTable はテーブルを読み戻して記録と比べる。CAP_NET_ADMIN が要る
-	inspectTable func(want nft.AgentPublication, iface string) (nft.AgentInspection, bool, error)
-	// readSysctl は /proc/sys/net/ipv4 の下の値を読む。CAP_NET_ADMIN は要らない
-	readSysctl func(name string) (string, error)
-	// forwardDrops は、既定で落とす他のテーブルの forward のチェーンの場所を返す。CAP_NET_ADMIN が要る
-	forwardDrops func(iface string) ([]string, error)
-	// route は、宛先への経路が向かうインタフェースの名前を返す。CAP_NET_ADMIN は要らない
-	route func(dst netip.Addr) (string, error)
-	// localAddrs はホスト自身の IPv4 のアドレスである。CAP_NET_ADMIN は要らない
-	localAddrs func() (map[netip.Addr]bool, error)
+// DoctorOps はカーネルを読む操作である。単体テストだけが差し替える。どれもカーネルに書かない。
+type DoctorOps struct {
+	// Link はリンクの属性を読む。CAP_NET_ADMIN は要らない
+	Link func(iface string) (exists bool, kind string, up bool, err error)
+	// InspectLink は WireGuard の鍵とピアを読む。CAP_NET_ADMIN が要る
+	InspectLink func(iface string, current, previous wgtypes.Key) (wg.AgentState, error)
+	// InspectTable はテーブルを読み戻して記録と比べる。CAP_NET_ADMIN が要る
+	InspectTable func(want nft.AgentPublication, iface string) (nft.AgentInspection, bool, error)
+	// ReadSysctl は /proc/sys/net/ipv4 の下の値を読む。CAP_NET_ADMIN は要らない
+	ReadSysctl func(name string) (string, error)
+	// ForwardDrops は、既定で落とす他のテーブルの forward のチェーンの場所を返す。CAP_NET_ADMIN が要る
+	ForwardDrops func(iface string) ([]string, error)
+	// Route は、宛先への経路が向かうインタフェースの名前を返す。CAP_NET_ADMIN は要らない
+	Route func(dst netip.Addr) (string, error)
+	// LocalAddrs はホスト自身の IPv4 のアドレスである。CAP_NET_ADMIN は要らない
+	LocalAddrs func() (map[netip.Addr]bool, error)
 }
 
-func defaultKernelDoctorOps() kernelDoctorOps {
-	return kernelDoctorOps{
-		link: func(iface string) (bool, string, bool, error) {
+func defaultKernelDoctorOps() DoctorOps {
+	return DoctorOps{
+		Link: func(iface string) (bool, string, bool, error) {
 			l, err := netlink.LinkByName(iface)
 			if _, nf := err.(netlink.LinkNotFoundError); nf {
 				return false, "", false, nil
@@ -67,13 +67,13 @@ func defaultKernelDoctorOps() kernelDoctorOps {
 			}
 			return true, l.Type(), l.Attrs().Flags&net.FlagUp != 0, nil
 		},
-		inspectLink:  wg.InspectAgent,
-		inspectTable: nft.InspectAgent,
-		readSysctl: func(name string) (string, error) {
+		InspectLink:  wg.InspectAgent,
+		InspectTable: nft.InspectAgent,
+		ReadSysctl: func(name string) (string, error) {
 			b, err := os.ReadFile("/proc/sys/net/ipv4/" + name)
 			return strings.TrimSpace(string(b)), err
 		},
-		forwardDrops: func(iface string) ([]string, error) {
+		ForwardDrops: func(iface string) ([]string, error) {
 			rep, err := linux.Inspect(iface, nft.AgentTableName)
 			if err != nil {
 				return nil, err
@@ -87,17 +87,17 @@ func defaultKernelDoctorOps() kernelDoctorOps {
 			return out, nil
 		},
 		// 30 秒ごとの見直しの経路の判定(checkRoute)と同じ関数である
-		route:      wg.AgentRouteInterface,
-		localAddrs: hostAddrs,
+		Route:      wg.AgentRouteInterface,
+		LocalAddrs: hostAddrs,
 	}
 }
 
-// doctorKernelOps はテストだけが差し替える。
-var doctorKernelOps = defaultKernelDoctorOps()
+// DoctorKernelOps はテストだけが差し替える。
+var DoctorKernelOps = defaultKernelDoctorOps()
 
 // readKernel はカーネルモードの dataplane を読む(設計文書 10.2c 節)。判定はしない。
 func readKernel(in kernelReadInput) *controlapi.DoctorKernel {
-	ops := doctorKernelOps
+	ops := DoctorKernelOps
 	var cur wgtypes.Key
 	if in.creds.WGPrivateKey != "" {
 		cur, _ = wgtypes.ParseKey(in.creds.WGPrivateKey)
@@ -140,7 +140,7 @@ func declaredAgentLink(iface string, cur, prev wgtypes.Key, w proto.WGConfig) (w
 	}, true
 }
 
-func readKernelInterface(ops kernelDoctorOps, iface string, cur, prev wgtypes.Key, st *proto.State) controlapi.DoctorKernelInterface {
+func readKernelInterface(ops DoctorOps, iface string, cur, prev wgtypes.Key, st *proto.State) controlapi.DoctorKernelInterface {
 	ki := controlapi.DoctorKernelInterface{Name: iface}
 	var cfg wg.AgentConfig
 	if st != nil {
@@ -149,13 +149,13 @@ func readKernelInterface(ops kernelDoctorOps, iface string, cur, prev wgtypes.Ke
 	if ki.Declared {
 		// 経路は権限なしで読めるので、鍵を読めない実行でも示す
 		ki.ServerAddress = cfg.Server.Address.String()
-		if name, err := ops.route(cfg.Server.Address); err != nil {
+		if name, err := ops.Route(cfg.Server.Address); err != nil {
 			ki.RouteError = err.Error()
 		} else {
 			ki.RouteInterface = name
 		}
 	}
-	exists, kind, up, err := ops.link(iface)
+	exists, kind, up, err := ops.Link(iface)
 	if err != nil {
 		ki.ReadError = err.Error()
 		return ki
@@ -169,7 +169,7 @@ func readKernelInterface(ops kernelDoctorOps, iface string, cur, prev wgtypes.Ke
 		ki.Ownership = controlapi.KernelOwnershipNotWireGuard
 		return ki
 	}
-	s, err := ops.inspectLink(iface, cur, prev)
+	s, err := ops.InspectLink(iface, cur, prev)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			ki.NeedsNetAdmin = true
@@ -233,7 +233,7 @@ func serverPeerPresent(s wg.AgentState, cfg wg.AgentConfig) bool {
 	return false
 }
 
-func readKernelTable(ops kernelDoctorOps, iface string, raw json.RawMessage, st *proto.State) controlapi.DoctorKernelTable {
+func readKernelTable(ops DoctorOps, iface string, raw json.RawMessage, st *proto.State) controlapi.DoctorKernelTable {
 	var t controlapi.DoctorKernelTable
 	var want nft.AgentPublication
 	switch {
@@ -244,7 +244,7 @@ func readKernelTable(ops kernelDoctorOps, iface string, raw json.RawMessage, st 
 		want = nft.PlanAgent(nft.AgentInput{Generation: st.Generation, Rules: st.Rules}, nft.AgentConfig{WGInterface: iface})
 		t.Source, t.Generation = controlapi.KernelTableFromDeclaration, st.Generation
 	}
-	ins, present, err := ops.inspectTable(want, iface)
+	ins, present, err := ops.InspectTable(want, iface)
 	if err != nil {
 		t.ReadError = err.Error()
 		t.NeedsNetAdmin = errors.Is(err, os.ErrPermission)
@@ -259,7 +259,7 @@ func readKernelTable(ops kernelDoctorOps, iface string, raw json.RawMessage, st 
 	if t.Source == controlapi.KernelTableFromRecord {
 		var guard []string
 		var names []string
-		missing, guard, names = splitMissing(ins.MissingItems, want, ops.localAddrs)
+		missing, guard, names = splitMissing(ins.MissingItems, want, ops.LocalAddrs)
 		t.GuardEffects, t.GuardClosed = guardEffects(names)
 		t.GuardMissingCount, t.GuardMissing = len(guard), capItems(guard)
 		t.MovedCount, t.Moved = len(ins.Moved), capItems(ins.Moved)
@@ -469,7 +469,7 @@ func capItems(s []string) []string {
 }
 
 // clipKernelText は上限(controlapi.DoctorTextMaxBytes)を超える文字列を切り、切ったことを添える。
-// 実行時の状態の側の clipText と同じ値で同じように切る。カーネルモードの実装は実行時の状態の側の
+// 実行時の状態の側(internal/agent)の clipText と同じ値で同じように切る。カーネルモードの実装は実行時の状態の側の
 // 関数を呼ばないので、カーネルの読み取りの側にも同じ 1 行を置く。切る位置は rune の境目に合わせるので、
 // 結果は正しい UTF-8 のままである。
 func clipKernelText(s string) string {
@@ -483,19 +483,19 @@ func plural(n int) string {
 	return "s"
 }
 
-func readKernelForwarding(ops kernelDoctorOps, iface string) controlapi.DoctorKernelForwarding {
+func readKernelForwarding(ops DoctorOps, iface string) controlapi.DoctorKernelForwarding {
 	var f controlapi.DoctorKernelForwarding
-	if v, err := ops.readSysctl("ip_forward"); err != nil {
+	if v, err := ops.ReadSysctl("ip_forward"); err != nil {
 		f.IPForwardError = err.Error()
 	} else {
 		f.IPForward = v
 	}
 	for _, name := range []string{"all", "default"} {
-		if v, err := ops.readSysctl("conf/" + name + "/rp_filter"); err == nil && v == "1" {
+		if v, err := ops.ReadSysctl("conf/" + name + "/rp_filter"); err == nil && v == "1" {
 			f.RPFilterStrict = append(f.RPFilterStrict, name)
 		}
 	}
-	drops, err := ops.forwardDrops(iface)
+	drops, err := ops.ForwardDrops(iface)
 	switch {
 	case err != nil:
 		f.PolicyError = err.Error()
@@ -506,9 +506,9 @@ func readKernelForwarding(ops kernelDoctorOps, iface string) controlapi.DoctorKe
 	return f
 }
 
-// processNetAdmin は、このプロセスが実効として CAP_NET_ADMIN を持つかどうかを /proc/self/status の
+// ProcessNetAdmin は、このプロセスが実効として CAP_NET_ADMIN を持つかどうかを /proc/self/status の
 // CapEff から読む。読めなければ nil を返す。
-func processNetAdmin() *bool {
+func ProcessNetAdmin() *bool {
 	b, err := os.ReadFile("/proc/self/status")
 	if err != nil {
 		return nil

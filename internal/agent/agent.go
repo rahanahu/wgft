@@ -99,7 +99,7 @@ type runtime struct {
 	// 準備(名前の解決)はこの間に含まない。
 	//
 	// agentdp.Dataplane のメソッドは rt.mu を持って呼び、dataplane の中の排他はその内側で取る。ユーザー
-	// 空間モードでは relay.Manager の排他、カーネルモードでは epMu(dataplane_kernel.go)である。
+	// 空間モードでは relay.Manager の排他、カーネルモードでは epMu(internal/agent/kernelmode の dataplane_kernel.go)である。
 	// 任意の interface の PrepareApply と ObservePrepare は rt.mu の外で呼び、その中でも epMu を取る。
 	// epMu を持ったまま rt.mu を取ることは無いので、順は rt.mu -> epMu である。epMu の中では値の
 	// 読み書きとログの出力だけを行う。streamMu は rt.mu を持ったまま取らず、streamMu を持ったまま

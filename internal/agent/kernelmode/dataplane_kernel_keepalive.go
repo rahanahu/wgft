@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"context"
@@ -20,21 +20,21 @@ import (
 // グラムを 1 つ送る goroutine を立て直す(7b.1 節のセッションの回復)。keepalive のパケットだけでは、
 // vpsd の側がセッションを失ったときに新しいハンドシェイクが鍵の寿命まで始まらない。データを送れば、
 // 応答が無いまま 15 秒たったところで WireGuard がハンドシェイクをやり直す。応答は要らない。
-// keepalive が 0 なら送らない。goroutine は ops と、立てたときの宛先と間隔だけを使い、排他を取らない。
+// keepalive が 0 なら送らない。goroutine は Ops と、立てたときの宛先と間隔だけを使い、排他を取らない。
 // 送れない間は、理由が変わったときだけ 1 行出す。ピアにエンドポイントが無い間(名前がまだ解決できて
 // いないとき)は、そのことを出す。
-func (d *kernelDataplane) startKeepalive() {
+func (d *Dataplane) startKeepalive() {
 	d.stopKeepalive()
-	if d.wg.Keepalive <= 0 {
+	if d.WG.Keepalive <= 0 {
 		return
 	}
 	unit := d.kaUnit
 	if unit <= 0 {
 		unit = time.Second
 	}
-	every := time.Duration(d.wg.Keepalive) * unit
+	every := time.Duration(d.WG.Keepalive) * unit
 	dst := netip.AddrPortFrom(d.server, kernelSessionPort)
-	send, iface := d.ops.sendDatagram, d.iface
+	send, iface := d.Ops.SendDatagram, d.iface
 	ctx, cancel := context.WithCancel(d.ctx)
 	d.kaStop = cancel
 	go func() {
@@ -83,7 +83,7 @@ func sendFailure(err error) string {
 	return err.Error()
 }
 
-func (d *kernelDataplane) stopKeepalive() {
+func (d *Dataplane) stopKeepalive() {
 	if d.kaStop != nil {
 		d.kaStop()
 		d.kaStop = nil
@@ -93,26 +93,26 @@ func (d *kernelDataplane) stopKeepalive() {
 // watchHandshake は、wgft0 の最終ハンドシェイクが keepalive の 5 倍の間新しくならなければ、次の見直しで
 // エンドポイントの名前を引き直すよう印を付ける(7b.1 節、4 節と同じ契機)。カーネルの WireGuard は
 // 名前を自分では引き直さない。IP リテラルのエンドポイントと keepalive が 0 の設定では引き直さない。
-func (d *kernelDataplane) watchHandshake(st wg.AgentState) {
+func (d *Dataplane) watchHandshake(st wg.AgentState) {
 	var hs time.Time
 	for _, p := range st.Peers {
 		hs = p.LastHandshake
 	}
-	now := d.ops.now()
+	now := d.Ops.Now()
 	if !hs.Equal(d.hsValue) || d.hsSince.IsZero() {
 		d.hsValue, d.hsSince = hs, now
 	}
-	if d.wg.Keepalive <= 0 {
+	if d.WG.Keepalive <= 0 {
 		return
 	}
-	host, _, err := net.SplitHostPort(d.wg.Endpoint)
+	host, _, err := net.SplitHostPort(d.WG.Endpoint)
 	if err != nil {
 		return
 	}
 	if _, err := netip.ParseAddr(host); err == nil {
 		return
 	}
-	if now.Sub(d.hsSince) >= 5*time.Duration(d.wg.Keepalive)*time.Second {
+	if now.Sub(d.hsSince) >= 5*time.Duration(d.WG.Keepalive)*time.Second {
 		d.epMu.Lock()
 		d.endpointStale = true
 		d.epMu.Unlock()
@@ -122,7 +122,7 @@ func (d *kernelDataplane) watchHandshake(st wg.AgentState) {
 // reResolved は、見直しが引き直したエンドポイントを控えに入れ、wgft0 のピアへ設定する。引けなかった
 // 場合は控えを使い続ける。どちらの場合も、次に引き直すのはさらに keepalive の 5 倍の後である。ただし
 // wgft0 の収束に失敗したら、次の見直しで試し直す。
-func (d *kernelDataplane) reResolved(p *kernelPrepared) error {
+func (d *Dataplane) reResolved(p *kernelPrepared) error {
 	d.epMu.Lock()
 	before := d.endpoint
 	d.epMu.Unlock()
@@ -136,11 +136,11 @@ func (d *kernelDataplane) reResolved(p *kernelPrepared) error {
 	}
 	// アドレスが変わらなくても wgft0 を収束させる。カーネルのピアのエンドポイントが外から書き換えられて
 	// いれば、ここで戻る。収束に失敗したら印を残し、次の見直しで引き直しと収束を試し直す
-	cfg, err := d.linkConfig()
+	cfg, err := d.LinkConfig()
 	if err != nil {
 		return err
 	}
-	changes, err := d.ops.ensureLink(cfg)
+	changes, err := d.Ops.EnsureLink(cfg)
 	if err != nil {
 		return fmt.Errorf("converge %s: %w", d.iface, err)
 	}
@@ -152,9 +152,9 @@ func (d *kernelDataplane) reResolved(p *kernelPrepared) error {
 }
 
 // resolvedAgain は引き直しの印を消し、次に引き直すまでの keepalive の 5 倍を数え直す。
-func (d *kernelDataplane) resolvedAgain() {
+func (d *Dataplane) resolvedAgain() {
 	d.epMu.Lock()
 	d.endpointStale = false
 	d.epMu.Unlock()
-	d.hsSince = d.ops.now()
+	d.hsSince = d.Ops.Now()
 }

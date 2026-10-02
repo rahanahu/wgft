@@ -15,6 +15,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/kernelmode"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/resource"
@@ -231,7 +232,7 @@ func withRulePorts(rules, record []controlapi.DoctorRule) {
 
 // doctorProcess はこのプロセスの実行主体を読む。
 func doctorProcess() controlapi.DoctorProcess {
-	p := controlapi.DoctorProcess{UID: os.Getuid(), NetAdmin: processNetAdmin()}
+	p := controlapi.DoctorProcess{UID: os.Getuid(), NetAdmin: kernelmode.ProcessNetAdmin()}
 	if p.UID >= 0 {
 		if u, err := user.LookupId(strconv.Itoa(p.UID)); err == nil {
 			p.User = u.Username

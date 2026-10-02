@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-func statusOf(t *testing.T, d *kernelDataplane, id string) proto.RuleStatus {
+func statusOf(t *testing.T, d *Dataplane, id string) proto.RuleStatus {
 	t.Helper()
 	for _, s := range d.Read().Rules {
 		if s.ID == id {
@@ -79,7 +79,7 @@ func TestKernelPublishFailureKeepsTheRecord(t *testing.T) {
 	if err == nil || agentdp.IsFatal(err) {
 		t.Fatalf("err = %v, want a plain error", err)
 	}
-	if string(f.KernelPublication) != before || d.pub.Generation != 1 {
+	if string(f.KernelPublication) != before || d.Pub.Generation != 1 {
 		t.Errorf("a failed publication replaced the record: %s", f.KernelPublication)
 	}
 	if s := statusOf(t, d, "r1"); s.State != proto.StatusOK {
@@ -433,17 +433,17 @@ func TestKernelCancelDuringResolutionPublishesNothing(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d.ctx = ctx
-	d.ops.lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	d.Ops.Lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
 		cancel() // SIGTERM が名前の解決の最中に届く
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	prepared := d.PrepareApply(&proto.State{Generation: 2, WG: d.wg, Rules: rules})
+	prepared := d.PrepareApply(&proto.State{Generation: 2, WG: d.WG, Rules: rules})
 	if _, err := d.ApplyRules(2, rules, prepared); err == nil {
 		t.Fatal("applyRules published with a resolution cancelled by stopping")
 	}
-	if len(k.published) != 1 || d.pub.Generation != 1 || len(d.pub.Rules[0].Ranges) != 1 {
-		t.Errorf("published %d tables, record %+v; want the first publication kept as it was", len(k.published), d.pub)
+	if len(k.published) != 1 || d.Pub.Generation != 1 || len(d.Pub.Rules[0].Ranges) != 1 {
+		t.Errorf("published %d tables, record %+v; want the first publication kept as it was", len(k.published), d.Pub)
 	}
 }
 
@@ -474,14 +474,14 @@ func TestKernelResolvesTargetsConcurrently(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	started := make(chan string, 2)
 	release := make(chan struct{})
-	d.ops.lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	d.Ops.Lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
 		started <- host
 		<-release
 		return []netip.Addr{netip.MustParseAddr("192.168.1.40")}, nil
 	}
 	rules := []proto.AgentRule{tcpRule("a", "a.lan:80", 80, 80), tcpRule("b", "b.lan:81", 81, 81)}
 	done := make(chan any, 1)
-	go func() { done <- d.PrepareApply(&proto.State{WG: d.wg, Rules: rules}) }()
+	go func() { done <- d.PrepareApply(&proto.State{WG: d.WG, Rules: rules}) }()
 	for i := 0; i < 2; i++ {
 		select {
 		case <-started:
@@ -496,7 +496,7 @@ func TestKernelResolvesTargetsConcurrently(t *testing.T) {
 	}
 }
 
-func observeOnce(t *testing.T, d *kernelDataplane, gen uint64, rules []proto.AgentRule) bool {
+func observeOnce(t *testing.T, d *Dataplane, gen uint64, rules []proto.AgentRule) bool {
 	t.Helper()
 	saved, err := d.ObserveCommit(gen, rules, d.ObservePrepare(rules))
 	if err != nil {
@@ -676,7 +676,7 @@ func TestKernelObserveDoesNothingWhenStopping(t *testing.T) {
 	before := string(f.KernelPublication)
 	ctx, cancel := context.WithCancel(context.Background())
 	d.ctx = ctx
-	d.ops.lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	d.Ops.Lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
 		cancel()
 		return nil, ctx.Err()
 	}
@@ -799,7 +799,7 @@ func TestKernelSendsTheKeepaliveDatagram(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	d.Close()
 	d.kaUnit = 10 * time.Millisecond
-	if _, err := d.Build(d.priv, testWG(t)); err != nil { // keepalive 25 → 250 ms
+	if _, err := d.Build(d.Priv, testWG(t)); err != nil { // keepalive 25 → 250 ms
 		t.Fatal(err)
 	}
 	count := func() int {
@@ -826,7 +826,7 @@ func TestKernelSendsTheKeepaliveDatagram(t *testing.T) {
 	}
 	w := testWG(t)
 	w.Keepalive = 0
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -841,10 +841,10 @@ func TestKernelReResolvesTheEndpointWithoutHandshakes(t *testing.T) {
 	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
 	d := newTestKernel(t, k, nil, nil)
-	d.ops.now = func() time.Time { return now }
+	d.Ops.Now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
@@ -856,8 +856,8 @@ func TestKernelReResolvesTheEndpointWithoutHandshakes(t *testing.T) {
 	}
 	k.link = ours(t, d)
 	lookups := 0
-	lookup := d.ops.lookup
-	d.ops.lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	lookup := d.Ops.Lookup
+	d.Ops.Lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
 		lookups++
 		return lookup(ctx, host)
 	}
@@ -902,11 +902,11 @@ func TestKernelDoesNotReResolveWithAKeepaliveOfZero(t *testing.T) {
 	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
 	d := newTestKernel(t, k, nil, nil)
-	d.ops.now = func() time.Time { return now }
+	d.Ops.Now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
 	w.Keepalive = 0
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.ApplyRules(1, nil, nil); err != nil {
@@ -914,8 +914,8 @@ func TestKernelDoesNotReResolveWithAKeepaliveOfZero(t *testing.T) {
 	}
 	k.link = ours(t, d)
 	lookups := 0
-	lookup := d.ops.lookup
-	d.ops.lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	lookup := d.Ops.Lookup
+	d.Ops.Lookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
 		lookups++
 		return lookup(ctx, host)
 	}
@@ -933,10 +933,10 @@ func TestKernelKeepsTheCachedEndpointWhenReResolutionFails(t *testing.T) {
 	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
 	d := newTestKernel(t, k, nil, nil)
-	d.ops.now = func() time.Time { return now }
+	d.Ops.Now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.ApplyRules(1, nil, nil); err != nil {
@@ -1025,7 +1025,7 @@ func TestKernelLogsAKeepaliveSendFailureOncePerReason(t *testing.T) {
 	d := newTestKernel(t, k, nil, nil)
 	d.Close()
 	d.kaUnit = 5 * time.Millisecond
-	if _, err := d.Build(d.priv, testWG(t)); err != nil { // keepalive 25 → 125 ms
+	if _, err := d.Build(d.Priv, testWG(t)); err != nil { // keepalive 25 → 125 ms
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -1061,10 +1061,10 @@ func TestKernelReResolutionConvergesUntilItSucceeds(t *testing.T) {
 	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
 	d := newTestKernel(t, k, nil, nil)
-	d.ops.now = func() time.Time { return now }
+	d.Ops.Now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.ApplyRules(1, nil, nil); err != nil {
@@ -1102,10 +1102,10 @@ func TestKernelReResolvesTheDeclaredEndpointName(t *testing.T) {
 	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 	k := &fakeKernel{dns: map[string][]netip.Addr{"old.example": {netip.MustParseAddr("203.0.113.1")}}}
 	d := newTestKernel(t, k, nil, nil)
-	d.ops.now = func() time.Time { return now }
+	d.Ops.Now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "old.example:51820"
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	st := &proto.State{WG: w}
@@ -1114,7 +1114,7 @@ func TestKernelReResolvesTheDeclaredEndpointName(t *testing.T) {
 	}
 	// 宣言が、まだ解決できない新しい名前に変わる。控えは旧い名前のアドレスのまま
 	w.Endpoint = "new.example:51820"
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	st = &proto.State{WG: w}
@@ -1170,10 +1170,10 @@ func TestKernelObserveRepairsTheTableWhileTheEndpointCannotConverge(t *testing.T
 	now := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
 	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
 	d := newTestKernel(t, k, nil, nil)
-	d.ops.now = func() time.Time { return now }
+	d.Ops.Now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.ApplyRules(1, nil, nil); err != nil {
@@ -1386,11 +1386,11 @@ func TestAppendUnconverged(t *testing.T) {
 	if got := gens(appendUnconverged(append([]nft.AgentPublication(nil), list...), named)); len(got) != 2 {
 		t.Errorf("same DNATs, another declared target: %v, want both kept", got)
 	}
-	for g := uint64(3); g < 3+maxUnconverged+5; g++ {
+	for g := uint64(3); g < 3+MaxUnconverged+5; g++ {
 		list = appendUnconverged(list, pub(g, fmt.Sprintf("192.168.1.%d:80", g%200+2)))
 	}
-	if len(list) != maxUnconverged || list[len(list)-1].Generation != 3+maxUnconverged+4 {
-		t.Errorf("list of %d ending at %d, want %d ending at the newest", len(list), list[len(list)-1].Generation, maxUnconverged)
+	if len(list) != MaxUnconverged || list[len(list)-1].Generation != 3+MaxUnconverged+4 {
+		t.Errorf("list of %d ending at %d, want %d ending at the newest", len(list), list[len(list)-1].Generation, MaxUnconverged)
 	}
 }
 
@@ -1508,11 +1508,11 @@ func TestCheckKernelPrerequisites(t *testing.T) {
 // 既定の検査は、CAP_NET_ADMIN を持たないプロセスでは、本物のテーブルの読み出しで権限の拒否になる。
 // 権限を持つプロセス(root での実行)では確かめられないので飛ばす。
 func TestKernelPrerequisitesWithoutNetAdmin(t *testing.T) {
-	if has := processNetAdmin(); has == nil || *has {
+	if has := ProcessNetAdmin(); has == nil || *has {
 		t.Skip("this process may hold CAP_NET_ADMIN")
 	}
-	err := kernelPrerequisites()
+	err := Prerequisites()
 	if r := startup.Of(err); r == nil || r.Category != startup.CategoryPrerequisite || r.Subject != "CAP_NET_ADMIN" {
-		t.Fatalf("kernelPrerequisites = %v; want the CAP_NET_ADMIN prerequisite refusal", err)
+		t.Fatalf("Prerequisites = %v; want the CAP_NET_ADMIN prerequisite refusal", err)
 	}
 }

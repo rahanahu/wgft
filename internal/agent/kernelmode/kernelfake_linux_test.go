@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"context"
@@ -16,7 +16,6 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
-	"github.com/rahanahu/wgft/internal/agent/kernelmode"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/conntrack"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
@@ -28,7 +27,7 @@ import (
 // internal/agent を import できないためである。2 つは kernelmode の名前の修飾子と、package と import の
 // 行だけが違う。片方を直したら、もう片方も同じに直す。
 
-// fakeKernel は kernelmode.Ops の記録器である。カーネルにも DNS にも触れずに、カーネルモードの dataplane が
+// fakeKernel は Ops の記録器である。カーネルにも DNS にも触れずに、カーネルモードの dataplane が
 // 何をどの順で呼ぶかを確かめる。
 type fakeKernel struct {
 	ensured   []wg.AgentConfig
@@ -81,8 +80,8 @@ type convergeCall struct {
 	scope conntrack.AgentScope
 }
 
-func (k *fakeKernel) ops() kernelmode.Ops {
-	return kernelmode.Ops{
+func (k *fakeKernel) ops() Ops {
+	return Ops{
 		EnsureLink: func(cfg wg.AgentConfig) ([]string, error) {
 			k.ensured = append(k.ensured, cfg)
 			if k.ensureErr == nil && k.onEnsure != nil {
@@ -164,12 +163,12 @@ func (k *fakeKernel) ops() kernelmode.Ops {
 }
 
 // newTestKernel は fakeKernel を使うカーネルモードの dataplane を、wg 設定を受け取った状態で作る。
-func newTestKernel(t *testing.T, k *fakeKernel, f *credentials.Credentials, allow *allowtargets.List) *kernelmode.Dataplane {
+func newTestKernel(t *testing.T, k *fakeKernel, f *credentials.Credentials, allow *allowtargets.List) *Dataplane {
 	t.Helper()
 	if f == nil {
 		f = &credentials.Credentials{}
 	}
-	d := kernelmode.NewWithOps(context.Background(), "wgft0", allow, f, nil, k.ops())
+	d := NewWithOps(context.Background(), "wgft0", allow, f, nil, k.ops())
 	if _, err := d.Build(testKey(t), testWG(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +195,7 @@ func tcpRule(id, target string, lo, hi uint16) proto.AgentRule {
 }
 
 // ours は、宣言どおりの wgft0 の状態を返す。
-func ours(t *testing.T, d *kernelmode.Dataplane) wg.AgentState {
+func ours(t *testing.T, d *Dataplane) wg.AgentState {
 	t.Helper()
 	cfg, err := d.LinkConfig()
 	if err != nil {
@@ -216,7 +215,7 @@ func gens(ps []nft.AgentPublication) []uint64 {
 	return out
 }
 
-// fakeKernelDoctor は kernelmode.DoctorOps の代わりである。カーネルに触れずに、読み方の関数が何を返すかを
+// fakeKernelDoctor は DoctorOps の代わりである。カーネルに触れずに、読み方の関数が何を返すかを
 // 確かめる。eperm は CAP_NET_ADMIN の無い呼び出し元の読み出しを模す。
 type fakeKernelDoctor struct {
 	exists, up bool
@@ -237,9 +236,9 @@ type fakeKernelDoctor struct {
 	localErr error
 }
 
-func (k *fakeKernelDoctor) ops() kernelmode.DoctorOps {
+func (k *fakeKernelDoctor) ops() DoctorOps {
 	perm := fmt.Errorf("netlink receive: %w", syscall.EPERM)
-	return kernelmode.DoctorOps{
+	return DoctorOps{
 		Link: func(string) (bool, string, bool, error) { return k.exists, k.kind, k.up, nil },
 		InspectLink: func(string, wgtypes.Key, wgtypes.Key) (wg.AgentState, error) {
 			if k.eperm {
@@ -275,9 +274,9 @@ func (k *fakeKernelDoctor) ops() kernelmode.DoctorOps {
 // withKernelDoctor は読み方の操作をテストの間だけ差し替える。
 func withKernelDoctor(t *testing.T, k *fakeKernelDoctor) {
 	t.Helper()
-	old := kernelmode.DoctorKernelOps
-	kernelmode.DoctorKernelOps = k.ops()
-	t.Cleanup(func() { kernelmode.DoctorKernelOps = old })
+	old := DoctorKernelOps
+	DoctorKernelOps = k.ops()
+	t.Cleanup(func() { DoctorKernelOps = old })
 }
 
 // healthyKernel は、宣言どおりの wgft0 を持つホストである。

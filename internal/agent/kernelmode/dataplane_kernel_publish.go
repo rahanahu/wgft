@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"context"
@@ -28,20 +28,20 @@ import (
 // ルール単位の失敗は公開の記録の理由に載り、Read が報告する。
 //
 // prepared は PrepareApply の結果で、名前の解決を rt.mu の外で済ませてある。nil なら、ここで引く。
-func (d *kernelDataplane) ApplyRules(gen uint64, rules []proto.AgentRule, prepared any) (string, error) {
+func (d *Dataplane) ApplyRules(gen uint64, rules []proto.AgentRule, prepared any) (string, error) {
 	p, ok := prepared.(*kernelPrepared)
 	if !ok || p == nil {
-		p = d.PrepareApply(&proto.State{WG: d.wg, Rules: rules}).(*kernelPrepared)
+		p = d.PrepareApply(&proto.State{WG: d.WG, Rules: rules}).(*kernelPrepared)
 	}
 	if p.err != nil || d.ctx.Err() != nil {
 		return "", errors.New("not publishing: the agent is stopping")
 	}
 	d.useEndpoint(p)
-	cfg, err := d.linkConfig()
+	cfg, err := d.LinkConfig()
 	if err != nil {
 		return "", err
 	}
-	changes, err := d.ops.ensureLink(cfg)
+	changes, err := d.Ops.EnsureLink(cfg)
 	if err != nil {
 		if !d.converged && startupFatal(err) {
 			return "", &agentdp.FatalError{Err: err}
@@ -71,20 +71,20 @@ func (d *kernelDataplane) ApplyRules(gen uint64, rules []proto.AgentRule, prepar
 // 全体状態の適用の失敗は、試し直しを待つ間の通知の後の見直しを runtime が止めるので、間隔に関わらない。
 // エンドポイントの引き直しの後の収束の失敗は記録しない。通知の後の見直しはエンドポイントを比べないので、
 // 記録するとテーブルの修復だけを遅らせる。
-func (d *kernelDataplane) publish(pub nft.AgentPublication) error {
-	if err := d.ops.publish(pub, d.nftConfig()); err != nil {
+func (d *Dataplane) publish(pub nft.AgentPublication) error {
+	if err := d.Ops.Publish(pub, d.nftConfig()); err != nil {
 		d.gate.Failed()
 		return fmt.Errorf("publish table inet %s: %w", nft.AgentTableName, err)
 	}
 	d.gate.Succeeded()
-	prev := d.pub
-	d.pub = &pub
+	prev := d.Pub
+	d.Pub = &pub
 	if b, err := json.Marshal(pub); err == nil {
 		d.f.KernelPublication = b
 	}
 	// 指紋を読めなければ、比べる基準が分からない。次の見直しは食い違いとして公開し直し、読み直す
 	// (7a.3 節の指紋の読み直しの失敗と同じ扱い)
-	fp, present, err := d.ops.fingerprint(nft.AgentTableName)
+	fp, present, err := d.Ops.Fingerprint(nft.AgentTableName)
 	d.fp, d.fpKnown = fp, err == nil && present
 	if prev != nil {
 		d.unconverged = appendUnconverged(d.unconverged, *prev)
@@ -93,10 +93,10 @@ func (d *kernelDataplane) publish(pub nft.AgentPublication) error {
 	return nil
 }
 
-// maxUnconverged は、収束が済んでいない前の公開を残す数の上限である。収束が失敗し続ける間に公開が
+// MaxUnconverged は、収束が済んでいない前の公開を残す数の上限である。収束が失敗し続ける間に公開が
 // 続いても、認証情報ファイルが大きくならないようにする。上限を超えた古い公開のフローは見分けられなく
 // なり、残る。
-const maxUnconverged = 32
+const MaxUnconverged = 32
 
 // appendUnconverged は、収束が済んでいない前の公開の列に p を加える。直前の要素と DNAT も宣言も同じなら、
 // 収束の判定に使う中身が変わらないので、置き換えて並びを伸ばさない。DNAT が同じでも宣言の宛先の文字列が
@@ -108,8 +108,8 @@ func appendUnconverged(list []nft.AgentPublication, p nft.AgentPublication) []nf
 		return list
 	}
 	list = append(list, p)
-	if len(list) > maxUnconverged {
-		list = list[len(list)-maxUnconverged:]
+	if len(list) > MaxUnconverged {
+		list = list[len(list)-MaxUnconverged:]
 	}
 	return list
 }
@@ -137,12 +137,12 @@ func sameDeclarations(a, b nft.AgentPublication) bool {
 // DNAT したフローを消す。成功したら収束が済んでいない前の公開の列を消し、失敗したら列を残して、
 // 30 秒ごとの見直しでテーブルを差し替えずに試し直す(7a.3 節の修復)。列は認証情報ファイルに写す。
 // 前の公開が 1 つも無ければ、どのフローも wgft のものと見分けられないので、何もしない。
-func (d *kernelDataplane) convergeFlows() {
-	if d.pub == nil || len(d.unconverged) == 0 {
+func (d *Dataplane) convergeFlows() {
+	if d.Pub == nil || len(d.unconverged) == 0 {
 		d.recordUnconverged()
 		return
 	}
-	addr, err := netip.ParsePrefix(d.wg.Address)
+	addr, err := netip.ParsePrefix(d.WG.Address)
 	if err != nil {
 		return
 	}
@@ -150,7 +150,7 @@ func (d *kernelDataplane) convergeFlows() {
 	if d.allow != nil {
 		scope.AllowTarget = d.allow.Allows
 	}
-	res, err := d.ops.convergeFlows(d.unconverged, *d.pub, scope)
+	res, err := d.Ops.ConvergeFlows(d.unconverged, *d.Pub, scope)
 	// 閉じたフローがあれば出す。閉じられなかったフローは誤りに数が入るので、誤りと同じく変わったときだけ
 	// 出す。同じ削除の失敗が 30 秒ごとに繰り返す間、同じ行を出し続けないためである
 	if res.Deleted() > 0 {
@@ -171,7 +171,7 @@ func (d *kernelDataplane) convergeFlows() {
 }
 
 // recordUnconverged は、収束が済んでいない前の公開の列を認証情報ファイルの項目に写す。
-func (d *kernelDataplane) recordUnconverged() {
+func (d *Dataplane) recordUnconverged() {
 	if len(d.unconverged) == 0 {
 		d.f.KernelUnconverged = nil
 		return
@@ -184,9 +184,9 @@ func (d *kernelDataplane) recordUnconverged() {
 // probeAll は、公開した TCP のルールの宛先へ試し接続する(7b.3 節の 2 つ目の種類)。試すのは、連続する
 // ポートと宛先の範囲(公開の記録の AgentRange)ごとに、その先頭のポートの 1 つだけである(2026-09-24 の
 // 所有者の決定)。ユーザー空間モードはポートごとに試す。失敗は報告にだけ使い、DNAT は残す。
-func (d *kernelDataplane) probeAll() {
+func (d *Dataplane) probeAll() {
 	d.probeErr = map[string]string{}
-	if d.pub == nil {
+	if d.Pub == nil {
 		return
 	}
 	type job struct {
@@ -194,7 +194,7 @@ func (d *kernelDataplane) probeAll() {
 		dest netip.AddrPort
 	}
 	var jobs []job
-	for _, r := range d.pub.Rules {
+	for _, r := range d.Pub.Rules {
 		if r.Proto != proto.TCP {
 			continue
 		}
@@ -213,7 +213,7 @@ func (d *kernelDataplane) probeAll() {
 			defer func() { <-sem }()
 			ctx, cancel := context.WithTimeout(d.ctx, kernelProbeTimeout)
 			defer cancel()
-			errs[i] = d.ops.probe(ctx, j.dest)
+			errs[i] = d.Ops.Probe(ctx, j.dest)
 		}()
 	}
 	wg.Wait()
@@ -227,9 +227,9 @@ func (d *kernelDataplane) probeAll() {
 }
 
 // summary は適用のログの 1 行に載せる要約である。
-func (d *kernelDataplane) summary() string {
+func (d *Dataplane) summary() string {
 	published, refused := 0, 0
-	for _, r := range d.pub.Rules {
+	for _, r := range d.Pub.Rules {
 		if len(r.Ranges) > 0 {
 			published++
 		}
@@ -241,11 +241,11 @@ func (d *kernelDataplane) summary() string {
 }
 
 // Refresh は 30 秒ごとの見直しである。TCP の宛先へ試し接続し直し、ip_forward を読み直す(7b.1・7b.3 節)。
-func (d *kernelDataplane) Refresh() {
+func (d *Dataplane) Refresh() {
 	if !d.have {
 		return
 	}
-	on, err := d.ops.readIPForward()
+	on, err := d.Ops.ReadIPForward()
 	switch {
 	case err == nil && on && d.forwardErr != nil:
 		log.Printf("net.ipv4.ip_forward is 1 now; rules whose target is not this host are no longer reported as errors")
@@ -255,7 +255,7 @@ func (d *kernelDataplane) Refresh() {
 		log.Printf("warning: net.ipv4.ip_forward is 0; rules whose target is not this host are reported as errors until it is 1")
 	}
 	if d.forwardErr != nil {
-		if l, err := d.ops.localAddrs(); err == nil {
+		if l, err := d.Ops.LocalAddrs(); err == nil {
 			d.local = l
 		}
 	}

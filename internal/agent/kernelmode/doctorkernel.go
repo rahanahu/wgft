@@ -1,4 +1,4 @@
-package agent
+package kernelmode
 
 import (
 	"github.com/rahanahu/wgft/internal/agent/controlapi"

@@ -16,7 +16,7 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// このファイルと reason_roundtrip_linux_test.go は、エージェントが組み立てるルールの理由の文言を、
+// このファイルと internal/agent/kernelmode の reason_roundtrip_linux_test.go は、エージェントが組み立てるルールの理由の文言を、
 // hub が保存する形(stream.HeartbeatReason の 512 バイトの切り詰め)に通してから server doctor
 // (internal/vpsd/doctor)に読ませ、doctor の分類が今の値であることを固定する。doctor はエージェントの
 // 人の読む文言を部分一致で分類する(設計文書 10.2a 節)。どちらかの側だけで文言を変えると、ここが落ちる。
@@ -40,7 +40,7 @@ func serverDoctorReads(t *testing.T, r proto.AgentRule, st proto.RuleStatus) map
 	return got
 }
 
-// reasonTCPRule は 1 つのポートの TCP のルールである。dataplane_kernel_test.go の tcpRule は Linux の
+// reasonTCPRule は 1 つのポートの TCP のルールである。kernelfake_linux_test.go の tcpRule は Linux の
 // 試験にだけあるので、どの OS でも組み立てる試験はこちらを使う。
 func reasonTCPRule(id, target string, port uint16) proto.AgentRule {
 	return proto.AgentRule{ID: id, Proto: proto.TCP, ListenPort: proto.PortRange{Lo: port, Hi: port}, Target: target, Enabled: true}
