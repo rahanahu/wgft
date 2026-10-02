@@ -145,52 +145,69 @@ func TestKernelPlanReasonsAreReadByServerDoctor(t *testing.T) {
 // 制御文字があるときも同じである。以前は目印が切り落とされ、server doctor は解決できない(FAILED)と
 // 判定した。
 func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
-	dest := netip.MustParseAddrPort("192.168.1.30:25565")
+	const noSuchHost = " on 127.0.0.53:53: no such host"
 	for _, tc := range []struct {
 		name   string
-		err    string
+		host   string // 空なら longTargetHost
+		addr   string // 直前に解決できたアドレス。空なら 192.168.1.30
+		err    string // 解決の誤りの文面
 		probe  string // 直前のアドレスへの試し接続の誤り。空なら応える
 		target string // rule.target の理由の符号。空なら見ない
 	}{
-		{name: "resolver error repeats the host", err: "lookup " + longTargetHost + " on 127.0.0.53:53: no such host"},
+		{name: "resolver error repeats the host", err: "lookup " + longTargetHost + noSuchHost},
 		{name: "resolver error is itself long", err: "lookup " + longTargetHost + ": " + strings.Repeat("x", 600)},
-		{name: "resolver error with control characters", err: strings.Repeat("\x1b", 200) + " lookup " + longTargetHost},
-		{name: "old address refuses", err: "lookup " + longTargetHost + " on 127.0.0.53:53: no such host",
+		// 予算が小さい長いホスト名では、無害化を外しても目印が残る。無害化の順序は予算の大きい短いホスト名で固定する
+		{name: "short host, resolver error with control characters", host: "game.lan", err: strings.Repeat("\x1b", 300) + " lookup game.lan"},
+		{name: "old address refuses", err: "lookup " + longTargetHost + noSuchHost,
 			probe: "dial tcp 192.168.1.30:25565: connect: connection refused", target: doctor.ReasonConnectionRefused},
-		{name: "old address times out", err: "lookup " + longTargetHost + " on 127.0.0.53:53: no such host",
+		{name: "old address times out", err: "lookup " + longTargetHost + noSuchHost,
 			probe: "dial tcp 192.168.1.30:25565: i/o timeout", target: doctor.ReasonTargetTimeout},
-		{name: "old address is unreachable", err: "lookup " + longTargetHost + " on 127.0.0.53:53: no such host",
+		{name: "old address is unreachable", err: "lookup " + longTargetHost + noSuchHost,
 			probe: "dial tcp 192.168.1.30:25565: connect: no route to host", target: doctor.ReasonTargetUnreachable},
+		// doctor が分類する試し接続の誤りのうち最長のもの(95 バイト)
+		{name: "longest probe error", addr: "255.255.255.255", err: "lookup " + longTargetHost + noSuchHost,
+			probe: "dial tcp 255.255.255.255:65535: connect: network is unreachable", target: doctor.ReasonTargetUnreachable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{longTargetHost: {netip.MustParseAddr("192.168.1.30")}}}
+			host, addr := tc.host, tc.addr
+			if host == "" {
+				host = longTargetHost
+			}
+			if addr == "" {
+				addr = "192.168.1.30"
+			}
+			port := uint16(25565)
+			if addr == "255.255.255.255" {
+				port = 65535
+			}
+			k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{host: {netip.MustParseAddr(addr)}}}
 			d := newTestKernel(t, k, nil, nil)
-			rule := tcpRule("r1", longTargetHost+":25565", 25565, 25565)
+			rule := tcpRule("r1", fmt.Sprintf("%s:%d", host, port), port, port)
 			if _, err := d.ApplyRules(1, []proto.AgentRule{rule}, nil); err != nil {
 				t.Fatal(err)
 			}
 			k.dnsErr = errors.New(tc.err)
 			if tc.probe != "" {
-				k.probeErr = map[netip.AddrPort]error{dest: errors.New(tc.probe)}
+				k.probeErr = map[netip.AddrPort]error{netip.AddrPortFrom(netip.MustParseAddr(addr), port): errors.New(tc.probe)}
 			}
 			if _, err := d.ApplyRules(2, []proto.AgentRule{rule}, nil); err != nil {
 				t.Fatal(err)
 			}
 			st := statusOf(t, d, rule.ID)
-			if !strings.Contains(st.Reason, longTargetHost) {
+			if !strings.Contains(st.Reason, host) {
 				t.Fatalf("reason %q does not name the host", st.Reason)
 			}
 			stored := stream.HeartbeatReason(st.Reason)
-			addr, _, stale := doctor.StaleResolution(stored)
-			if !stale || addr != "192.168.1.30" {
-				t.Fatalf("after the hub, StaleResolution(%q) = %q, %v; want the mark to survive", stored, addr, stale)
+			got, _, stale := doctor.StaleResolution(stored)
+			if !stale || got != addr {
+				t.Fatalf("after the hub, StaleResolution(%q) = %q, %v; want the mark to survive", stored, got, stale)
 			}
-			got := serverDoctorReads(t, rule, st)
-			if c := got[doctor.CheckTargetResolve]; c.Status != doctor.StatusUnknown {
+			reads := serverDoctorReads(t, rule, st)
+			if c := reads[doctor.CheckTargetResolve]; c.Status != doctor.StatusUnknown {
 				t.Errorf("rule.target_resolve = %s %s, want %s (still forwarding)", c.Status, c.Reason, doctor.StatusUnknown)
 			}
 			if tc.target != "" {
-				if c := got[doctor.CheckTarget]; c.Status != doctor.StatusFailed || c.Reason != tc.target {
+				if c := reads[doctor.CheckTarget]; c.Status != doctor.StatusFailed || c.Reason != tc.target {
 					t.Errorf("rule.target = %s %s, want %s %s; the probe error after the mark must survive the hub (reason %q)",
 						c.Status, c.Reason, doctor.StatusFailed, tc.target, stored)
 				}
