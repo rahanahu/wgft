@@ -9,6 +9,8 @@ import (
 	"net/netip"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/rahanahu/wgft/internal/vpsd/stream"
 )
 
 // Register は agentapi.Backend の実装(仕様 5.1 節)。この時点では wg ピアはまだ作らない。
@@ -55,7 +57,8 @@ func (d *Daemon) OtherAgentHasKey(agent string, key wgtypes.Key) (bool, error) {
 
 // SetPublicKey は認証時の登録 identity が現在も有効なときに宣言された公開鍵を扱う。
 // 保存済みの新しい鍵が未公開なら、成功済みの旧鍵の再接続は保存値を変えずに通す。
-// それ以外の鍵変更は保存し、wg0 のピアを置き換える(初回なら作る)。ピアの変更は
+// それ以外の鍵変更は、頻度の上限(keyrate.go)の内側なら保存し、wg0 のピアを置き換える(初回なら作る)。
+// 上限を超えたら何も保存せず、stream.ErrKeyChangeLimited を包んだ誤りを返す。ピアの変更は
 // トランザクション(applyNFT)の一部で、新しいピアをテーブルの差し替えの前に足し、古いピアを差し替えの
 // 後に外す(設計文書 7a.3 節)。テーブルの中身は変わらない(アドレスは同じ)が、差し替えは行う。
 func (d *Daemon) SetPublicKey(agent, identity string, key wgtypes.Key) error {
@@ -77,6 +80,12 @@ func (d *Daemon) SetPublicKey(agent, identity string, key wgtypes.Key) error {
 	presented := key.String()
 	if _, err := d.delivery.state(agent, identity, &presented); err == nil {
 		return nil
+	}
+	// 保存している鍵を変える宣言だけを、登録ごとの頻度の上限で数える(設計文書 5.2 節)。初回の宣言と、
+	// 上の 2 つの再接続は数えない。適用に失敗する変更も数える。失敗した適用もテーブルを差し替えうる
+	// ためである(設計文書 6.1 節)
+	if cur.PublicKey != "" && !d.keyChanges.allow(agent, identity, d.now()) {
+		return fmt.Errorf("agent %q: %w", agent, stream.ErrKeyChangeLimited)
 	}
 	if err := d.st.SetAgentPublicKey(agent, key.String()); err != nil {
 		return err

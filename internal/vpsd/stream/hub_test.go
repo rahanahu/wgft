@@ -33,6 +33,8 @@ type fakeBackend struct {
 	// regardless of the token or key, for the backend-failure tests below.
 	authErr     error
 	keyCheckErr error
+	// setKeyErr, when set, makes SetPublicKey fail with this error and save nothing.
+	setKeyErr error
 }
 
 func (b *fakeBackend) Authenticate(tok string) (string, string, error) {
@@ -61,6 +63,9 @@ func (b *fakeBackend) OtherAgentHasKey(agent string, key wgtypes.Key) (bool, err
 func (b *fakeBackend) SetPublicKey(agent, _ string, key wgtypes.Key) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.setKeyErr != nil {
+		return b.setKeyErr
+	}
 	b.keys[agent] = key
 	return nil
 }

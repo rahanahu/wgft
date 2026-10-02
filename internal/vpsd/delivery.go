@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"sort"
 	"sync"
 
 	"github.com/rahanahu/wgft/internal/platform/linux"
@@ -112,21 +113,32 @@ func (o *deliveryOwner) currentFull() *deliverySnapshot {
 
 // committed installs only a successful full Commit. A new full publication
 // incorporates the serialized disable bits and removes their older overlays.
-func (o *deliveryOwner) committed(candidate *deliverySnapshot) bool {
+// It returns, sorted, the agents whose effective entry (registration, key and
+// State) is new or differs from the previous publication: the only agents a
+// delivery has anything new for (design.md 5.2 節). A key declaration changes
+// only the declaring agent's key, so no other agent is in the list.
+func (o *deliveryOwner) committed(candidate *deliverySnapshot) []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	previous := o.full
 	if previous == nil {
 		previous = o.latest
 	}
-	changed := !reflect.DeepEqual(effectiveDelivery(previous, o.disabled), effectiveDelivery(candidate, nil))
+	before, after := effectiveDelivery(previous, o.disabled), effectiveDelivery(candidate, nil)
+	var changed []string
+	for name, entry := range after {
+		if old, ok := before[name]; !ok || !reflect.DeepEqual(old, entry) {
+			changed = append(changed, name)
+		}
+	}
+	sort.Strings(changed)
 	o.latest = candidate
 	if o.full != nil {
 		o.full = candidate
 	}
 	o.disabled = nil
 	o.pending = false
-	if changed {
+	if !reflect.DeepEqual(before, after) {
 		o.revision++
 	}
 	return changed

@@ -21,7 +21,7 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// eventLog records, in order, the deliveries (onPushAll) and the publications (the participant's
+// eventLog records, in order, the deliveries (onPushAll and onPush) and the publications (the participant's
 // Prepare) a disable or an enable makes, so the tests can check the order design.md 5.1 節 fixes.
 type eventLog struct {
 	mu     sync.Mutex
@@ -159,6 +159,7 @@ func newDisableFixture(t *testing.T) *disableFixture {
 	d := &Daemon{st: st, dp: dp, serverKey: testKey(t), network: netip.MustParsePrefix("10.200.0.0/24"),
 		opts: Options{Mode: store.ModeKernel, WGInterface: "wgft0", MTU: 1420}}
 	d.onPushAll = func() { log.add("deliver") }
+	d.onPush = func([]string) { log.add("deliver") }
 	d.hub = d.newHub(d)
 	captureLog(t)
 	d.mu.Lock()

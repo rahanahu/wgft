@@ -33,6 +33,7 @@ type Backend interface {
 	// OtherAgentHasKey は、他のエージェントが同じ公開鍵を保存しているか。
 	OtherAgentHasKey(agent string, key wgtypes.Key) (bool, error)
 	// SetPublicKey は認証時の登録 identity を照合してから公開鍵を保存し、wg0 のピアを置き換える。
+	// 鍵の変更の頻度の上限で断ったときは ErrKeyChangeLimited を包んだ誤りを返す。
 	SetPublicKey(agent, identity string, key wgtypes.Key) error
 	// StateFor はそのエージェントに配る全体状態。identity は認証時の登録で、
 	// key はこの接続が認証後に宣言した鍵で、
@@ -138,7 +139,8 @@ type Hub struct {
 	// 入るまで)。0 になった項目は消す
 	pending map[string]int
 
-	pendingLog lograte.Gate // maxPendingPerAgent で断った行
+	pendingLog   lograte.Gate // maxPendingPerAgent で断った行
+	keyChangeLog lograte.Gate // 鍵の変更の頻度の上限で断った行
 }
 
 type agentLocks struct {
@@ -392,6 +394,16 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 
 	if err := h.backend.SetPublicKey(agent, identity, key); err != nil {
 		lock.unlock()
+		if errors.Is(err, ErrKeyChangeLimited) {
+			// 鍵の変更の頻度の上限(設計文書 5.2 節)。公開鍵の拒否と同じ 1008 で閉じる。エージェントは
+			// 通常のバックオフで再接続を続ける。恒久トークンの持ち主が試みを繰り返してもログが溢れない
+			// よう、行は 1 分に 1 行までにする
+			if h.keyChangeLog.Allow() {
+				log.Printf("stream: %s: refusing a public key change: %v", agent, err)
+			}
+			ws.Close(websocket.StatusPolicyViolation, "public key changes are limited; retry later")
+			return
+		}
 		log.Printf("stream: %s: peer setup: %v", agent, err)
 		ws.Close(websocket.StatusInternalError, "peer setup failed")
 		return
@@ -672,3 +684,7 @@ func readJSON(ctx context.Context, ws *websocket.Conn, v any) error {
 
 // ErrUnauthorized は Authenticate が返す誤り(Backend が store.ErrInvalidToken をそのまま返してもよい)。
 var ErrUnauthorized = errors.New("unauthorized")
+
+// ErrKeyChangeLimited は、Backend.SetPublicKey が鍵の変更の頻度の上限(設計文書 5.2 節)で宣言を
+// 断ったときに包んで返す誤り。Hub はこの接続を公開鍵の拒否と同じ 1008 で閉じる。
+var ErrKeyChangeLimited = errors.New("the public key changed too often")

@@ -147,6 +147,13 @@ type Daemon struct {
 	// onPushAll は単体テスト用の差し込み口。pushAll(agent_disable.go)が hub への配信の代わりに呼ぶ。
 	// エージェントの無効化と有効化の、保存・配信・公開の順序を確かめるために使う。本番では nil。
 	onPushAll func()
+	// onPush は単体テスト用の差し込み口。pushAgents(agent_disable.go)が hub への配信の代わりに、
+	// 配る先のエージェントの名前を渡して呼ぶ。本番では nil。
+	onPush func(names []string)
+	// keyChanges はエージェントの鍵の変更の頻度の上限(keyrate.go、設計文書 5.2 節)。mu の下で使う
+	keyChanges keyChangeLimiter
+	// clock は単体テスト用の時計の差し込み口。nil なら time.Now を使う(keyrate.go の now)。
+	clock func() time.Time
 }
 
 // reservedPorts は Daemon.reserved を組む。vpsd 自身が既に使っているポートへの listen_port を

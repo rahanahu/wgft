@@ -137,6 +137,19 @@ func enableConflict(agent string, rules []proto.Rule, rep *linux.Report, bound l
 	return nil
 }
 
+// pushAgents は names のエージェントのうち接続中のものへ全体状態を配り直す。配信は待たない。
+func (d *Daemon) pushAgents(names []string) {
+	if d.onPush != nil {
+		d.onPush(names)
+		return
+	}
+	if d.hub != nil {
+		for _, name := range names {
+			d.hub.Push(name)
+		}
+	}
+}
+
 // pushAll は接続中の全エージェントへ全体状態を配り直す。配信は待たない。
 func (d *Daemon) pushAll() {
 	if d.onPushAll != nil {
