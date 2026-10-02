@@ -2,45 +2,70 @@
 # version-skew.sh checks the wire-protocol version negotiation (design 7a.6 section) across the
 # combinations the design promises to keep working during a rolling upgrade: the current build
 # talks to an agent with no protocol fields at all (legacy v0), the current build talks to
-# OLD_AGENT_VERSION's agent (a previous release that speaks the current protocol v1; see below),
-# and that release's server talks to the current build's agent. For each pairing this checks: the
-# agent registers, the tunnel comes up, a TCP and a UDP rule forward, a rule added after
-# registration reaches the agent, and the selected protocol version is what design 7a.6 requires,
-# both in the server's own log line ("protocol legacy v0" or "protocol v<N>") and in the agent's
-# ("server selected protocol ...").
+# OLD_VERSION's agent (the immediately-previous release by default; it speaks the current protocol
+# v1, see below), that release's server talks to the current build's agent, and the same two
+# pairings are repeated with PREDISABLE_VERSION, the last release before agent disable (see
+# below). For each pairing this checks: the agent registers, the tunnel comes up, a TCP and a UDP
+# rule forward, a rule added after registration reaches the agent, and the selected protocol
+# version is what design 7a.6 requires, both in the server's own log line ("protocol legacy v0"
+# or "protocol v<N>") and in the agent's ("server selected protocol ...").
 # The server and then the agent are restarted in turn (data and credentials kept, so this is a
 # reconnect, not a fresh setup) and the same negotiation, registration and forwarding checks are
 # repeated, because a rolling upgrade restarts one side while the other keeps running.
 #
-#   lab/lab exec vm bash /wgft/lab/version-skew.sh                    # all four combinations
+#   lab/lab exec vm bash /wgft/lab/version-skew.sh                    # all six combinations
 #   lab/lab exec vm bash /wgft/lab/version-skew.sh old-agent baseline # only these two
+#   lab/lab exec vm env WGFT_SKEW_OLD_VERSION=1.3.0 bash /wgft/lab/version-skew.sh
+#                                                       # the same with v1.3.0 as OLD_VERSION
+#
+# `lab/lab exec` does not forward the host's environment into the VM, hence `env` inside it.
 #
 # Combinations (name used on the command line in parentheses):
-#   legacy      (legacy)      current server build, v0.3.0 agent. v0.3.0 predates version
-#                             negotiation entirely (no protocol_min/protocol_max/capabilities in
-#                             its pubkey message at all), so this is the legacy v0 case. Design
-#                             7a.6 keeps this a permanent, not a rolling, requirement: legacy v0
-#                             must be supported by both sides for as long as the product is in
-#                             the v1.0.x line (7a.6's own wording), so LEGACY_VERSION stays
-#                             v0.3.0 - the only release that predates negotiation - regardless of
-#                             which release OLD_AGENT_VERSION points at.
-#   old agent   (old-agent)   current server build, OLD_AGENT_VERSION agent (a previous release,
-#                             not necessarily the immediately-previous one; it already speaks
-#                             protocol v1). Also
-#                             checks agent disable/enable against this old agent (see below).
-#   old server  (old-server)  OLD_AGENT_VERSION server, current agent build.
-#   baseline    (baseline)    current server build, current agent build (both v1); a sanity
-#                             check that the harness itself works, run last so a failure here
-#                             says the script is wrong rather than the version combinations.
+#   legacy            (legacy)            current server build, v0.3.0 agent. v0.3.0 predates
+#                                         version negotiation entirely (no protocol_min/
+#                                         protocol_max/capabilities in its pubkey message at
+#                                         all), so this is the legacy v0 case. Design 7a.6 keeps
+#                                         this a permanent, not a rolling, requirement: legacy v0
+#                                         must be supported by both sides for as long as the
+#                                         product is in the v1.0.x line, and may be dropped from
+#                                         v1.1 on but has not been, so LEGACY_VERSION stays
+#                                         v0.3.0 - the only release that predates negotiation -
+#                                         regardless of which release OLD_VERSION points at.
+#   old agent         (old-agent)         current server build, OLD_VERSION agent. Also checks
+#                                         agent disable/enable against this agent (see below).
+#   old server        (old-server)        OLD_VERSION server, current agent build. Also checks
+#                                         agent disable/enable, issued through the OLD_VERSION
+#                                         server's own CLI, when that release has the command
+#                                         (see below); prints a SKIP when it does not.
+#   pre-disable agent (predisable-agent)  current server build, PREDISABLE_VERSION agent, with
+#                                         the same disable/enable check as old-agent.
+#   pre-disable server(predisable-server) PREDISABLE_VERSION server, current agent build. That
+#                                         server has no `agent disable`, so the disable/enable
+#                                         check prints a SKIP here.
+#   baseline          (baseline)          current server build, current agent build (both v1); a
+#                                         sanity check that the harness itself works, run last
+#                                         so a failure here says the script is wrong rather than
+#                                         the version combinations.
 #
-# OLD_AGENT_VERSION (below) tracks whichever release is immediately previous to the current
-# build, not a fixed protocol version: design 7a.6 promises interoperability between the current
-# and immediately-previous NUMBERED protocol version, and every release from v0.4.0 onward speaks
-# the same protocol v1 (no v2 has been introduced yet), so old-agent/old-server exist to exercise
-# an actual previous release's registration/forwarding/reconnect behaviour, not to add protocol
-# coverage a unit test does not already have. It is meant to move forward with each release, but
-# this constant lags: it is v1.1.3 here, even though main has since released v1.2.0 (v0.6.0 was
-# the value before v1.1.3).
+# OLD_VERSION is the immediately-previous release, which is what docs/testing.md B7 names. It
+# defaults to the constant below and can be overridden with WGFT_SKEW_OLD_VERSION (the same way
+# lab/upgrade.sh takes WGFT_UPGRADE_OLD_VERSION), for example on a release-candidate run made
+# before the constant has been moved forward. Every release from v0.4.0 onward speaks the same
+# protocol v1 (no v2 has been introduced yet), and design 7a.6 promises interoperability between
+# the current and immediately-previous NUMBERED protocol version, so old-agent/old-server
+# exercise an actual previous release's registration/forwarding/reconnect behaviour rather than
+# add protocol coverage a unit test does not already have. Anything older than v0.4.0 is refused
+# below: it would be legacy v0, which the legacy combination covers, and the "v1" expectations
+# and the "stream: connected to" counting below would not hold for it.
+#
+# PREDISABLE_VERSION is fixed at v1.1.3, the last release before `wgft agent disable` (v1.2.0
+# added it; checked directly: `git grep 'agent disable' v1.1.3 -- cmd/wgft` finds nothing, the
+# same for v1.2.0 finds cmd/wgft/agent.go). It is kept separately from OLD_VERSION because two
+# promises depend on a peer that predates agent disable, and the immediately-previous release no
+# longer does: design 5.1 states that an old agent which does not know about disable still stops
+# on the enabled:false copy of its rules, and design 7a.6 keeps every protocol v1 release
+# interoperable with the current build, including a server that sends no agent_disabled field in
+# its state message. Moving OLD_VERSION forward must not drop either pairing.
 #
 # v0.3.0 predates the "stream: server selected protocol ..." log line by design (it has no
 # concept of a negotiated version to log), so the legacy combination only checks the server's own
@@ -56,36 +81,39 @@
 # mismatched ranges as a table-driven unit test (docs/design.md's revision record entry for the
 # version negotiation feature has the detail on why the lab could not reach this either).
 #
-# The old-agent combination also checks agent disable/enable (design 5.1 section), since disable is
-# a server-side-only guarantee added after every release this script can fetch (checked directly:
-# neither OLD_AGENT_VERSION nor any 1.x release ancestors the commit that added `wgft agent
-# disable`). Disabling home with the current server's own CLI is checked to stop that agent's
-# forwarding, to show up in `wgft agent ls`, `wgft status` and `wgft server doctor`, and - not just
-# that the VPS side drops the DNAT, but that the disable actually reaches the old agent - to make
-# the old agent itself catch up and report zero rules; enabling it again is checked to bring
-# forwarding back. The OLD_AGENT_VERSION agent, which has no idea disable exists, is also checked to
-# neither crash nor reconnect-loop while disabled, counting its own "stream: connected to" log
-# line (OLD_AGENT_VERSION and the current build both log this once per successful connection;
-# see this combination's own code for why v0.3.0's lack of the line keeps this specific to
-# old-agent) across a fixed observation window entered only once the disable has converged both
-# on the VPS side and on the old agent's own reported state. lab/lifecycle.sh's check 11 (L15)
-# already covers disable/enable in full against a
-# current-build agent, so this only adds what is specific to an old agent watching it happen. Only
-# the old-agent combination runs this: old-server has no `agent disable` command to run at all
-# (that combination's server_bin predates the feature entirely), and baseline/legacy add no
-# version-skew information L15 does not already have.
+# The agent disable/enable check (design 5.1 section) disables home with the server's own CLI and
+# checks that this stops that agent's forwarding, shows up in `wgft agent ls`, `wgft status` and
+# `wgft server doctor`, and - not just that the VPS side drops the DNAT, but that the disable
+# actually reaches the agent - makes the agent itself catch up and report zero rules; enabling it
+# again is checked to bring forwarding back. The agent is also checked to neither crash nor
+# reconnect-loop while disabled, counting its own "stream: connected to" log line (every release
+# from v0.4.0 on and the current build log this once per successful connection; see this
+# check's own code for why v0.3.0's lack of the line keeps it away from the legacy combination)
+# across a fixed observation window entered only once the disable has converged both on the VPS
+# side and on the agent's own reported state. What each combination adds:
+#   predisable-agent  the PREDISABLE_VERSION agent has no idea disable exists and only sees its
+#                     rules arrive with enabled:false (design 5.1).
+#   old-agent         the OLD_VERSION agent; from v1.2.0 on it also reads the agent_disabled
+#                     field of the state message.
+#   old-server        the current agent under a disable issued by the OLD_VERSION server; the
+#                     status and doctor strings checked are that release's own output.
+# lab/lifecycle.sh's check 11 (L15) already covers disable/enable in full with the current build
+# on both sides, so baseline does not repeat it. predisable-server cannot run it (its server has
+# no `agent disable`) and prints a SKIP saying so. legacy does not run it: v0.3.0 logs no
+# "stream: connected to" line, so the reconnect-loop part would have no signal, and
+# predisable-agent already covers an agent that predates disable.
 #
-# Old binaries: OLD_AGENT_VERSION and v0.3.0 (wgft-linux-amd64) are downloaded from the GitHub
-# release assets of this repository and checked against the published .sha256 file. A download is
-# cached under $CACHE (below) so the two combinations that both need OLD_AGENT_VERSION do not
+# Old binaries: OLD_VERSION, PREDISABLE_VERSION and v0.3.0 (wgft-linux-amd64) are downloaded from
+# the GitHub release assets of this repository and checked against the published .sha256 file. A
+# download is cached under $CACHE (below) so the two combinations that share a release do not
 # fetch it twice, and so a repeat run of this script in the same VM does not re-download at all.
 # Nothing is added to the repository. Some hosts' Incus VMs have no outbound IPv4 on the bridge
 # and GitHub has no IPv6 (lab/README.md's "VM が IPv4 で外に出られない"); on such a host, place
-# the verified release binaries and their .sha256 files (named exactly wgft-v$OLD_AGENT_VERSION /
-# wgft-v0.3.0, matching what a successful download would leave) in $CACHE before running this
-# script. This script only fetches what is not already cached there, so pre-staged files are used
-# as they are. The download and verification itself (fetch_release) lives in lab/oldrelease.sh,
-# shared with lab/upgrade.sh (D4).
+# the verified release binaries and their .sha256 files (named exactly wgft-v$OLD_VERSION,
+# wgft-v$PREDISABLE_VERSION and wgft-v0.3.0, matching what a successful download would leave) in
+# $CACHE before running this script. This script only fetches what is not already cached there,
+# so pre-staged files are used as they are. The download and verification itself
+# (fetch_release) lives in lab/oldrelease.sh, shared with lab/upgrade.sh (D4).
 #
 # Requires `lab/lab build` (wgft in /usr/local/bin of the VM) and the netns topology (`lab/lab
 # net up`). Runs the server in kernel mode only; version negotiation does not depend on the
@@ -94,11 +122,22 @@
 set -u
 
 GH_REPO=rahanahu/wgft
-OLD_AGENT_VERSION=1.1.3  # a previous release, not necessarily the immediately-previous one (see
-  # header comment): already speaks protocol v1 (design 7a.6)
+OLD_VERSION=${WGFT_SKEW_OLD_VERSION:-1.4.0}  # the immediately-previous release (see header
+  # comment); already speaks protocol v1 (design 7a.6). Move the default forward with each release.
+PREDISABLE_VERSION=1.1.3  # the last release before `wgft agent disable` (see header comment).
+  # Fixed regardless of OLD_VERSION.
 LEGACY_VERSION=0.3.0     # predates version negotiation entirely: legacy v0. Fixed regardless of
-  # OLD_AGENT_VERSION (see the "legacy" combination's own comment above): design 7a.6 requires
+  # OLD_VERSION (see the "legacy" combination's own comment above): design 7a.6 requires
   # legacy v0 support through v1.0.x, and v0.3.0 is the only release that is actually legacy v0.
+# version_ge <a> <b>: a >= b for plain X.Y.Z release numbers.
+version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$2" ]; }
+# has_agent_disable <version>: that release's CLI has `wgft agent disable` (added in v1.2.0; see
+# PREDISABLE_VERSION).
+has_agent_disable() { version_ge "$1" 1.2.0; }
+if ! [[ "$OLD_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! version_ge "$OLD_VERSION" 0.4.0; then
+  echo "version-skew.sh: WGFT_SKEW_OLD_VERSION=$OLD_VERSION is not a release this check can judge; give 0.4.0 or later as X.Y.Z, without the v" >&2
+  exit 2
+fi
 . "$(dirname "$0")/sandbox.sh"   # sandbox: netns names, workdir, process scope
 CACHE=/tmp/wgft-version-skew-cache
 ADMIN=127.0.0.1:8686
@@ -111,7 +150,7 @@ UDP_PORT=27030
 TCP_PORT2=39996
 fail=0
 
-ALL_COMBOS="legacy old-agent old-server baseline"
+ALL_COMBOS="legacy old-agent old-server predisable-agent predisable-server baseline"
 COMBOS="${*:-$ALL_COMBOS}"
 for c in $COMBOS; do
   case " $ALL_COMBOS " in *" $c "*) ;; *) echo "usage: version-skew.sh [$ALL_COMBOS]" >&2; exit 2;; esac
@@ -283,11 +322,39 @@ ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp "$LAN_TCP" -ud
   > $W/wgft-version-skew-echo.log 2>&1 < /dev/null &
 disown
 
+# binary_is <name> <side> <bin> <want>: the first line of `<bin> version` is exactly <want>.
+# run_combo uses it to confirm that each side really runs the release the combination's name
+# promises, so a mix-up in the paths below (the current build standing in for an old release, or
+# one old release for another) fails here instead of passing every other check against the wrong
+# pairing.
+binary_is() {
+  local got
+  got=$("$3" version 2>/dev/null | head -1)
+  if [ -n "$4" ] && [ "$got" = "$4" ]; then
+    echo "PASS  $1: the $2 runs $4"
+  else
+    echo "FAIL  $1: the $2 should run ${4:-a known version} but its binary reports '$got'"; fail=1
+  fi
+}
+CURRENT_VERSION=$(wgft version 2>/dev/null | head -1)
+
 # run_combo <name> <server-bin> <agent-bin> <expect-protocol-label> <agent-has-protocol-log 0/1>
-#           <check-disable 0/1>
+#           <check-disable>
+# <check-disable> is 1 to run the agent disable/enable check, 0 (or absent) to leave it out, or
+# any other text to print a SKIP for it with that text as the reason.
 run_combo() {
   local name=$1 server_bin=$2 agent_bin=$3 want_label=$4 agent_logs_protocol=$5 check_disable=${6:-0}
   echo "== combination: $name (server=$(basename "$server_bin"), agent=$(basename "$agent_bin"))"
+  local want_server=$CURRENT_VERSION want_agent=$CURRENT_VERSION
+  case "$name" in
+    legacy) want_agent=v$LEGACY_VERSION ;;
+    old-agent) want_agent=v$OLD_VERSION ;;
+    old-server) want_server=v$OLD_VERSION ;;
+    predisable-agent) want_agent=v$PREDISABLE_VERSION ;;
+    predisable-server) want_server=v$PREDISABLE_VERSION ;;
+  esac
+  binary_is "$name" server "$server_bin" "$want_server"
+  binary_is "$name" agent "$agent_bin" "$want_agent"
   kill_all
   teardown_data "$server_bin"
   mkdir -p "$DATA"
@@ -405,7 +472,7 @@ run_combo() {
   fi
 
   if [ "$check_disable" = 1 ]; then
-    echo "-- $name: agent disable and enable, current server with the $(basename "$agent_bin") agent (design 5.1 section)"
+    echo "-- $name: agent disable and enable, $(basename "$server_bin") server with the $(basename "$agent_bin") agent (design 5.1 section)"
     # rules_reported <server-bin>: the count of rules "home" currently reports in its own
     # heartbeat (agent ls --json's "rules" field for the entry named "home"), the same field
     # lab/lifecycle.sh's check11 reads via its own agent_json helper. The server pushes a
@@ -423,9 +490,9 @@ print(len(a.get('rules') or []))
     # agent_caught_up_with_no_rules <server-bin>: home's OWN reported generation (from its
     # heartbeat) matches the server's current generation, and it reports zero rules. Checking
     # tcp_refused/udp_refused alone only proves the VPS side dropped the DNAT; it says nothing
-    # about whether the disable actually reached the old agent itself, which is the specific
+    # about whether the disable actually reached the agent itself, which is the specific
     # failure this adds: a server that stopped forwarding locally but never told (or never
-    # correctly told) an old agent about the disable would still fail this, even though the
+    # correctly told) the agent about the disable would still fail this, even though the
     # client-side probes above would already read as refused.
     agent_caught_up_with_no_rules() {
       local gen agen
@@ -439,12 +506,13 @@ print(a.get('generation', ''))
     }
     local pre_pid pre_connects dout drc eout erc
     pre_pid=$(find_pid "$agent_bin" "agent run")
-    # stream: connected to ... is logged once per successful stream connection, by OLD_AGENT_VERSION
-    # and the current build (checked directly: identical line in both, internal/agent/stream.go).
-    # v0.3.0 (the legacy combination) predates this line entirely (checked directly: `git grep
-    # "connected to" v0.3.0 -- internal/agent` finds nothing), so this counting only works for
-    # OLD_AGENT_VERSION; extending check_disable to the legacy combination would need a different
-    # signal for v0.3.0, or it would silently never detect a reconnect there.
+    # stream: connected to ... is logged once per successful stream connection, by every release
+    # from v0.4.0 on and the current build (checked directly: `git grep "stream: connected to"
+    # <tag> -- internal/agent` finds the line for v0.4.0, v1.1.3 and v1.4.0). v0.3.0 (the legacy
+    # combination) predates this line entirely (the same grep finds nothing), so this counting
+    # only works for v0.4.0 and later, which the OLD_VERSION check at the top enforces;
+    # extending check_disable to the legacy combination would need a different signal for
+    # v0.3.0, or it would silently never detect a reconnect there.
     #
     # "stream: reconnecting" is NOT what an ordinary disconnect/retry logs (that path logs "stream:
     # disconnected: ...; reconnecting in ..." instead, in the same function's default case); it only
@@ -473,9 +541,9 @@ print(a.get('generation', ''))
     # Convergence before the observation window below (docs/testing.md's wall-clock rule: confirm
     # convergence before entering an interval that claims nothing further happens). This is not
     # about the reconnect count below: pre_connects was already read before the disable was even
-    # issued, and post_connects is read only after the full window, so a reconnect during the old
+    # issued, and post_connects is read only after the full window, so a reconnect during the
     # agent's own catch-up would be counted correctly either way. What this wait_until actually
-    # gates is the PASS/FAIL right after it: without waiting here, that check could read the old
+    # gates is the PASS/FAIL right after it: without waiting here, that check could read the
     # agent's state before it has caught up at all, misreporting a slow-but-genuine catch-up as an
     # outright failure to convey the disable.
     wait_until 15 agent_caught_up_with_no_rules "$server_bin"
@@ -486,11 +554,11 @@ print(a.get('generation', ''))
     fi
 
     # Observation window for the negative claim below (docs/testing.md's wall-clock rule: state
-    # has already converged - forwarding stopped and the old agent caught up, confirmed above -
-    # before this interval starts). An old agent that could not make sense of a disable might drop
-    # its stream and reconnect repeatedly, or panic; watching this many seconds with no
-    # fixed-length sleep elsewhere in the combination gives a real reconnect loop room to show up
-    # before the post-* reads below.
+    # has already converged - forwarding stopped and the agent caught up, confirmed above -
+    # before this interval starts). An agent that could not make sense of a disable, or of the
+    # state a server of another release sends with it, might drop its stream and reconnect
+    # repeatedly, or panic; watching this many seconds with no fixed-length sleep elsewhere in
+    # the combination gives a real reconnect loop room to show up before the post-* reads below.
     sleep 8
     local post_pid post_connects
     post_pid=$(find_pid "$agent_bin" "agent run")
@@ -514,10 +582,19 @@ print(a.get('generation', ''))
     check "$name: tcp forwards again once home is enabled" "tcp-echo" "$(client "echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:$TCP_PORT")"
     check "$name: udp forwards again once home is enabled" "udp-echo" "$(client "echo hi | timeout -k 5 20 socat -t 3 -T 10 - UDP:198.51.100.1:$UDP_PORT")"
     check "$name: agent ls shows home enabled again" "enabled" "$(agent_row "$server_bin")"
+  elif [ "$check_disable" != 0 ]; then
+    skip "$name: agent disable and enable: $check_disable"
   fi
 
   kill_all
   teardown_data "$server_bin"
+}
+
+# disable_check <server-version>: run_combo's <check-disable> argument for a combination whose
+# server is that release: 1 when its CLI has `wgft agent disable`, otherwise the reason
+# run_combo prints in its SKIP line.
+disable_check() {
+  if has_agent_disable "$1"; then echo 1; else echo "the v$1 server predates \`wgft agent disable\`, added in v1.2.0"; fi
 }
 
 for c in $COMBOS; do
@@ -527,12 +604,20 @@ for c in $COMBOS; do
       run_combo legacy wgft "$CACHE/wgft-v$LEGACY_VERSION" "legacy v0" 0
       ;;
     old-agent)
-      fetch_release "$OLD_AGENT_VERSION" "$CACHE/wgft-v$OLD_AGENT_VERSION" || { echo "FAIL  old-agent: could not obtain v$OLD_AGENT_VERSION (see this script's header comment)"; fail=1; continue; }
-      run_combo old-agent wgft "$CACHE/wgft-v$OLD_AGENT_VERSION" "v1" 1 1
+      fetch_release "$OLD_VERSION" "$CACHE/wgft-v$OLD_VERSION" || { echo "FAIL  old-agent: could not obtain v$OLD_VERSION (see this script's header comment)"; fail=1; continue; }
+      run_combo old-agent wgft "$CACHE/wgft-v$OLD_VERSION" "v1" 1 1
       ;;
     old-server)
-      fetch_release "$OLD_AGENT_VERSION" "$CACHE/wgft-v$OLD_AGENT_VERSION" || { echo "FAIL  old-server: could not obtain v$OLD_AGENT_VERSION (see this script's header comment)"; fail=1; continue; }
-      run_combo old-server "$CACHE/wgft-v$OLD_AGENT_VERSION" wgft "v1" 1
+      fetch_release "$OLD_VERSION" "$CACHE/wgft-v$OLD_VERSION" || { echo "FAIL  old-server: could not obtain v$OLD_VERSION (see this script's header comment)"; fail=1; continue; }
+      run_combo old-server "$CACHE/wgft-v$OLD_VERSION" wgft "v1" 1 "$(disable_check "$OLD_VERSION")"
+      ;;
+    predisable-agent)
+      fetch_release "$PREDISABLE_VERSION" "$CACHE/wgft-v$PREDISABLE_VERSION" || { echo "FAIL  predisable-agent: could not obtain v$PREDISABLE_VERSION (see this script's header comment)"; fail=1; continue; }
+      run_combo predisable-agent wgft "$CACHE/wgft-v$PREDISABLE_VERSION" "v1" 1 1
+      ;;
+    predisable-server)
+      fetch_release "$PREDISABLE_VERSION" "$CACHE/wgft-v$PREDISABLE_VERSION" || { echo "FAIL  predisable-server: could not obtain v$PREDISABLE_VERSION (see this script's header comment)"; fail=1; continue; }
+      run_combo predisable-server "$CACHE/wgft-v$PREDISABLE_VERSION" wgft "v1" 1 "$(disable_check "$PREDISABLE_VERSION")"
       ;;
     baseline)
       run_combo baseline wgft wgft "v1" 1
