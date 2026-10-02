@@ -602,15 +602,16 @@ func agentTunnelLocalCheck(c *agentDoctorCheck, in agentDoctorInput, st *control
 // agentNoTunnelCheck は、トンネルが無い場合の判定である。理由ごとに定める(10.2c 節)。正常な
 // 遷移でも生じる理由を FAILED にすると、一過性の状態を故障として扱うことになる。
 func agentNoTunnelCheck(c *agentDoctorCheck, reason string) {
-	// 理由の文字列は internal/agent の tunnelSnapshotLocked が組み立てる 4 通りである。知らない
-	// 理由は UNKNOWN の側に倒す。壊れていると断じるより、判定できないと述べるほうが害が小さい。
+	// 理由の文字列は internal/agent の tunnelSnapshotLocked が controlapi の定数で組み立てる 4 通りで
+	// ある。知らない理由は UNKNOWN の側に倒す。壊れていると断じるより、判定できないと述べるほうが害が
+	// 小さい。
 	switch {
-	case strings.HasPrefix(reason, "no tunnel; building it failed"):
+	case strings.HasPrefix(reason, controlapi.ReasonNoTunnelBuildFailed):
 		c.Status, c.Reason = doctor.StatusFailed, agentReasonTunnelBuildFailed
 		c.Detail = "there is no tunnel: " + reason
 		c.Next = "read why the build failed in the agent's log, with journalctl -u wgft-agent, or docker logs for a container. " +
 			"The wg configuration comes from the server, so wgft rule ls and the server's log on the VPS say what it was told to build"
-	case strings.Contains(reason, "full state not received"):
+	case strings.Contains(reason, controlapi.ReasonFullStateNotReceived):
 		c.Status, c.Reason = doctor.StatusUnknown, agentReasonFullStatePending
 		c.Detail = "there is no tunnel yet: " + reason
 		c.Next = "this is where an agent sits until the server answers it. The control connection line above says whether the stream is up"

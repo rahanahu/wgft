@@ -43,14 +43,14 @@ func (rt *runtime) tunnelSnapshotLocked(r tunnelReading) tunnelSnapshot {
 		// トンネルが無い理由は 4 通りある。作成に失敗して試し直しを待っている場合(仕様 7 節)、
 		// 作成が wg 設定の誤りで終わって次の全体状態を待っている場合、全体状態をまだ受け取っていない
 		// 場合、rotate-key や停止で閉じた直後の場合である
-		reason := "no tunnel"
+		reason := controlapi.ReasonNoTunnel
 		switch {
 		case !rt.rebuild.retryAt.IsZero():
-			reason = "no tunnel; building it failed and will be retried"
+			reason = controlapi.ReasonNoTunnelBuildRetrying
 		case rt.retrySt != nil:
-			reason = "no tunnel; building it failed"
+			reason = controlapi.ReasonNoTunnelBuildFailed
 		case rt.f == nil || rt.f.LastState == nil:
-			reason = "no tunnel; full state not received"
+			reason = controlapi.ReasonNoTunnelFullStatePending
 		}
 		return tunnelSnapshot{hb: proto.TunnelStatus{State: proto.StatusError, Reason: reason}}
 	}
