@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -268,9 +269,13 @@ func TestTailnetListenerClosesOwnSource(t *testing.T) {
 	if ln.logged.Load() {
 		t.Errorf("no connection came from outside the tailnet ranges, but that log line was written")
 	}
+	if ln.loggedList.Load() {
+		t.Errorf("listing the host's addresses did not fail, but that log line was written")
+	}
 }
 
-// tailnetListener:ホストのアドレスを読めないときは、帯の内側の接続元でも閉じる。
+// tailnetListener:ホストのアドレスを読めないときは、帯の内側の接続元でも閉じる。その失敗のログは、
+// 先にホスト自身の接続元を閉じてログに書いた後でも書く。
 func TestTailnetListenerClosesWhenHostAddrsFail(t *testing.T) {
 	a, b := net.Pipe()
 	c := fakeConn{Conn: a, remote: &net.TCPAddr{IP: net.ParseIP("100.100.2.2"), Port: 40000}, local: &net.TCPAddr{IP: net.ParseIP("100.100.1.1"), Port: 8686}}
@@ -278,12 +283,90 @@ func TestTailnetListenerClosesWhenHostAddrsFail(t *testing.T) {
 		Listener: &fakeListener{conns: []net.Conn{c}},
 		own:      func() ([]netip.Addr, error) { return nil, errors.New("netlink failed") },
 	}
+	ln.loggedLocal.Store(true)
 	if got, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("Accept = %v, %v; want the connection closed and net.ErrClosed", got, err)
 	}
 	b.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := b.Read(make([]byte, 1)); err != io.EOF {
 		t.Errorf("peer read err = %v, want io.EOF", err)
+	}
+	if !ln.loggedList.Load() {
+		t.Errorf("the listing failure should have been logged even after a connection from this host was")
+	}
+}
+
+// tailnetListener:own を差し替えない待ち受けは hostAddrs でホストのアドレスを読む。テストの間だけ
+// tailnet の帯に 127.0.0.0/8 を加え、どの Linux でも lo にある 127.0.0.1 を接続元にした接続が、宛先が
+// 別のアドレスでも閉じられることを確かめる。lo のアドレスではない 127.0.0.2 の接続は返す。
+func TestTailnetListenerDefaultsToHostAddrs(t *testing.T) {
+	old := tailnetPrefixes
+	tailnetPrefixes = append(append([]netip.Prefix(nil), old...), netip.MustParsePrefix("127.0.0.0/8"))
+	t.Cleanup(func() { tailnetPrefixes = old })
+	addrs, err := hostAddrs()
+	if err != nil {
+		t.Fatalf("hostAddrs: %v", err)
+	}
+	if slices.Contains(addrs, netip.MustParseAddr("127.0.0.2")) {
+		t.Skip("127.0.0.2 is assigned on this host")
+	}
+	mk := func(remote string) (fakeConn, net.Conn) {
+		a, b := net.Pipe()
+		return fakeConn{
+			Conn:   a,
+			remote: &net.TCPAddr{IP: net.ParseIP(remote), Port: 40000},
+			local:  &net.TCPAddr{IP: net.ParseIP("100.100.1.1"), Port: 8686},
+		}, b
+	}
+	own, peerOwn := mk("127.0.0.1")
+	other, p := mk("127.0.0.2")
+	defer p.Close()
+	ln := &tailnetListener{Listener: &fakeListener{conns: []net.Conn{own, other}}}
+	c, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if c != other {
+		t.Fatalf("Accept returned the connection from %v, want the one from 127.0.0.2", c.RemoteAddr())
+	}
+	peerOwn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := peerOwn.Read(make([]byte, 1)); err != io.EOF {
+		t.Errorf("connection from 127.0.0.1: peer read err = %v, want io.EOF", err)
+	}
+}
+
+// hostAddrs:net.Interfaces の各インタフェースの Addrs を合わせたものと、IPv4 を写した形を戻して一致する。
+// ループバックだけ、IPv4 だけのような取りこぼしを見つける。
+func TestHostAddrsMatchesInterfaces(t *testing.T) {
+	ifs, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []netip.Addr
+	for i := range ifs {
+		addrs, err := ifs[i].Addrs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range addrs {
+			if ipn, ok := a.(*net.IPNet); ok {
+				if x, ok := netip.AddrFromSlice(ipn.IP); ok {
+					want = append(want, x.Unmap())
+				}
+			}
+		}
+	}
+	got, err := hostAddrs()
+	if err != nil {
+		t.Fatalf("hostAddrs: %v", err)
+	}
+	sortAddrs := func(a []netip.Addr) []netip.Addr {
+		a = slices.Clone(a)
+		slices.SortFunc(a, func(x, y netip.Addr) int { return x.Compare(y) })
+		return slices.Compact(a)
+	}
+	if g, w := sortAddrs(got), sortAddrs(want); !slices.Equal(g, w) {
+		t.Fatalf("hostAddrs = %v, want the interfaces' addresses %v", g, w)
 	}
 }
 

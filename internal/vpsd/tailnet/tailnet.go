@@ -108,6 +108,7 @@ type tailnetListener struct {
 	net.Listener
 	logged      atomic.Bool // 帯の外の接続元を閉じたことをログに書いたか
 	loggedLocal atomic.Bool // ホスト自身の接続元を閉じたことをログに書いたか
+	loggedList  atomic.Bool // ホストのアドレスを読めずに閉じたことをログに書いたか
 	// own はホスト自身のアドレスを返す。nil なら hostAddrs。単体テストで差し替えるための境目
 	own func() ([]netip.Addr, error)
 }
@@ -135,13 +136,14 @@ func (l *tailnetListener) Accept() (net.Conn, error) {
 		if !local {
 			return c, nil
 		}
-		// 帯の外の接続元と同じ理由で、最初の 1 回だけ書く
-		if l.loggedLocal.CompareAndSwap(false, true) {
-			if err != nil {
-				log.Printf("warning: admin API tailscale: closed a connection from %s because listing this host's addresses failed: %v; further connections from this host are closed without a log line", c.RemoteAddr(), err)
-			} else {
-				log.Printf("warning: admin API tailscale: closed a connection from %s, which is an address of this host; administer the server on this host through the admin Unix socket; further ones are closed without a log line", c.RemoteAddr())
+		// 帯の外の接続元と同じ理由で、最初の 1 回だけ書く。読めない間は帯の内側の接続がすべて
+		// 閉じられるので、ホスト自身の拒否とは別の印で書き、先にホスト自身を拒んでいても埋もれないようにする
+		if err != nil {
+			if l.loggedList.CompareAndSwap(false, true) {
+				log.Printf("warning: admin API tailscale: closed a connection from %s because listing this host's addresses failed: %v; while listing fails, every connection is closed, and further ones are closed without a log line", c.RemoteAddr(), err)
 			}
+		} else if l.loggedLocal.CompareAndSwap(false, true) {
+			log.Printf("warning: admin API tailscale: closed a connection from %s, which is an address of this host; administer the server on this host through the admin Unix socket; further ones are closed without a log line", c.RemoteAddr())
 		}
 		c.Close()
 	}
