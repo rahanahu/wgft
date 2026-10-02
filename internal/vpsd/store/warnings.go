@@ -31,11 +31,43 @@ type Warning struct {
 // エージェントのすべての組(2 つのチャネルを合わせて 56 通り)を収める。
 const MaxFlappingWarnings = 64
 
-// AddWarning は警告を記録する(同じ内容なら時刻を更新するだけ)。ip-flapping なら、記録と同じ
-// トランザクションで、そのエージェントの ip-flapping の行を MaxFlappingWarnings 行に絞る。
-// 残すのは、いま記録した行と、ほかの行で最後に検出した日時が新しいものである。いま記録した行を
-// 必ず残すので、時計が戻って既存の行の日時が未来にあっても、新しい往復の記録は消えない。
-// 上限を超えた行を持つ既存のデータベースも、そのエージェントの次の記録で上限まで減る。
+// MaxIPMismatchWarnings はエージェントごとに持つ ip-mismatch の警告の行の上限(仕様 5.2 節)。
+// ip-flapping の行とは別に数える。detail は stream の接続元 IP と wg エンドポイント IP を含むので、
+// 上限が無いと IP の組の数だけ行が増える。64 行は、8 つの回線(1 回線を 1 つの IP と数える)を
+// 持つエージェントで 2 つの IP が別の回線に出るすべての組(56 通り)を収める。
+const MaxIPMismatchWarnings = 64
+
+// warningLimit は種類ごとの、エージェントあたりの行の上限を返す。0 は上限が無いことを表す。
+func warningLimit(kind string) int {
+	switch kind {
+	case WarnIPFlapping:
+		return MaxFlappingWarnings
+	case WarnIPMismatch:
+		return MaxIPMismatchWarnings
+	}
+	return 0
+}
+
+// trimWarnings は、記録と同じトランザクションで、そのエージェントのその種類の警告の行を上限まで
+// 絞る。残すのは、いま記録した行(detail が keep の行)と、ほかの行で最後に検出した日時が新しい
+// ものである。同じ秒の行は後から記録した行を新しいものとする。いま記録した行を必ず残すので、
+// 時計が戻って既存の行の日時が未来にあっても、新しい記録は消えない。上限を超えた行を持つ既存の
+// データベースも、そのエージェントの次の記録で上限まで減る。消すのは warnings の行だけで、
+// 確認済みの組(warning_acks)には触れない。上限で消すことは管理者の「警告を消す」ではないためである。
+func trimWarnings(tx *sql.Tx, agent, kind, keep string) error {
+	limit := warningLimit(kind)
+	if limit == 0 {
+		return nil
+	}
+	_, err := tx.Exec(`DELETE FROM warnings WHERE agent = ? AND kind = ? AND rowid NOT IN (
+		SELECT rowid FROM warnings WHERE agent = ? AND kind = ?
+		ORDER BY detail = ? DESC, created_at DESC, rowid DESC LIMIT ?)`,
+		agent, kind, agent, kind, keep, limit)
+	return err
+}
+
+// AddWarning は警告を記録する(同じ内容なら時刻を更新するだけ)。記録と同じトランザクションで、
+// そのエージェントのその種類の行を上限まで絞る(trimWarnings)。
 func (s *Store) AddWarning(agent, kind, detail string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -47,13 +79,8 @@ func (s *Store) AddWarning(agent, kind, detail string) error {
 		agent, kind, detail, time.Now().Unix()); err != nil {
 		return err
 	}
-	if kind == WarnIPFlapping {
-		if _, err := tx.Exec(`DELETE FROM warnings WHERE agent = ? AND kind = ? AND rowid NOT IN (
-			SELECT rowid FROM warnings WHERE agent = ? AND kind = ?
-			ORDER BY detail = ? DESC, created_at DESC, rowid DESC LIMIT ?)`,
-			agent, kind, agent, kind, detail, MaxFlappingWarnings); err != nil {
-			return err
-		}
+	if err := trimWarnings(tx, agent, kind, detail); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -61,14 +88,22 @@ func (s *Store) AddWarning(agent, kind, detail string) error {
 // AddIPMismatchWarning は ip-mismatch の警告を記録する。ただし、その組が確認済みなら記録しない
 // (仕様 5.2 節)。確認済みかどうかの判定と記録を 1 つの文で行うので、監視の回が確認済みの組を
 // 読んでからこの記録までの間に管理者が警告を消しても、消した警告は戻らない。IP は NormalizeIP で
-// そろえてから照合する。記録した(新規か時刻の更新)なら true を返す。
+// そろえてから照合する。記録した(新規か時刻の更新)なら true を返す。記録したときだけ、同じ
+// トランザクションで、そのエージェントの ip-mismatch の行を MaxIPMismatchWarnings 行に絞る
+// (trimWarnings)。確認済みの組で記録しなかった回は、行を消さない。
 func (s *Store) AddIPMismatchWarning(agent, streamIP, wgIP string) (bool, error) {
 	sIP, wIP := NormalizeIP(streamIP), NormalizeIP(wgIP)
-	res, err := s.db.Exec(`INSERT INTO warnings (agent, kind, detail, created_at)
+	detail := IPMismatchDetail(sIP, wIP)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO warnings (agent, kind, detail, created_at)
 		SELECT ?, ?, ?, ? WHERE NOT EXISTS (
 			SELECT 1 FROM warning_acks WHERE agent = ? AND kind = ? AND stream_ip = ? AND wg_ip = ?)
 		ON CONFLICT(agent, kind, detail) DO UPDATE SET created_at = excluded.created_at`,
-		agent, WarnIPMismatch, IPMismatchDetail(sIP, wIP), time.Now().Unix(),
+		agent, WarnIPMismatch, detail, time.Now().Unix(),
 		agent, WarnIPMismatch, sIP, wIP)
 	if err != nil {
 		return false, err
@@ -77,7 +112,13 @@ func (s *Store) AddIPMismatchWarning(agent, streamIP, wgIP string) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n == 0 {
+		return false, tx.Commit()
+	}
+	if err := trimWarnings(tx, agent, WarnIPMismatch, detail); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // Warnings は全警告を新しい順に返す。
