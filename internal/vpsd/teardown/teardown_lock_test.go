@@ -353,9 +353,10 @@ func TestTeardownDryRunCreatesAndWritesNothing(t *testing.T) {
 	}
 }
 
-// 置き場のディレクトリが無ければ、ロックファイルを置けないので、ロックを取らずに進め、その旨を示す。
-// ディレクトリは作らない。
-func TestTeardownWithoutTheDirectoryRunsWithoutTheLock(t *testing.T) {
+// 置き場のディレクトリが無ければ、何かを変える撤去は 0700 で作ってからロックを取り、カーネルの操作の間
+// 持つ。取らずに進むと、撤去の途中に起動した server が systemd の作った置き場でロックを取れてしまう。
+// 何も変えない撤去はディレクトリを作らない。
+func TestTeardownCreatesAMissingDirectoryToHoldTheLock(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "never-created")
 	path := filepath.Join(dir, "wgft.sqlite")
 	r := &recorder{t: t, dbPath: path}
@@ -363,14 +364,46 @@ func TestTeardownWithoutTheDirectoryRunsWithoutTheLock(t *testing.T) {
 	if err := run(fakeOps(r), Options{DBPath: path, Adopt: true}, &buf); err != nil {
 		t.Fatalf("teardown: %v\n%s", err, buf.String())
 	}
-	if !strings.Contains(buf.String(), "does not exist, so no server is using it; continuing without the server's lock") {
-		t.Errorf("output does not say teardown runs without the lock:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "created the directory "+dir) {
+		t.Errorf("output does not say teardown created the directory:\n%s", buf.String())
 	}
-	if exists(dir) {
-		t.Error("teardown created the directory of the server database")
+	fi, err := os.Stat(dir)
+	if err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("directory after teardown = %v, %v; want it created with 0700", fi, err)
 	}
-	if !strings.Contains(buf.String(), "deleted wg wgft0") {
-		t.Errorf("teardown did not go on to the removal:\n%s", buf.String())
+	if len(r.unlocked) != 0 {
+		t.Errorf("called without holding the lock: %v", r.unlocked)
+	}
+	if !strings.Contains(strings.Join(r.calls, ","), "deleteTable,converge,deleteLink") {
+		t.Errorf("teardown did not go on to the removal: %v", r.calls)
+	}
+	assertReleased(t, path)
+
+	for _, opts := range []Options{{DryRun: true}, {Purge: true}} {
+		dir := filepath.Join(t.TempDir(), "never-created")
+		opts.DBPath = filepath.Join(dir, "wgft.sqlite")
+		opts.Adopt = true
+		buf.Reset()
+		_ = run(fakeOps(&recorder{t: t, dbPath: opts.DBPath}), opts, &buf)
+		if exists(dir) {
+			t.Errorf("%+v created the directory", opts)
+		}
+	}
+}
+
+// 置き場を作れなければ、何も消さずに止まる。
+func TestTeardownStopsWhenItCannotCreateTheDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "never-created", "wgft.sqlite")
+	r := &recorder{t: t, dbPath: path}
+	o := fakeOps(r)
+	o.mkdirAll = func(string) error { return fs.ErrPermission }
+	var buf bytes.Buffer
+	err := run(o, Options{DBPath: path, Adopt: true}, &buf)
+	if err == nil || !strings.Contains(err.Error(), "nothing was removed") || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("teardown went on to %v", r.calls)
 	}
 }
 

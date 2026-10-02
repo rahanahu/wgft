@@ -75,7 +75,9 @@ type ops struct {
 	// acquireLock はロックを取り、ロックファイルが無ければ作る。作ったかどうかも返す。
 	acquireLock func(dbPath string) (*flock.Lock, bool, error)
 	// adoptOwner は、撤去が作ったロックファイルの持ち主を dir の持ち主に合わせる。
-	adoptOwner  func(l *flock.Lock, dir string) error
+	adoptOwner func(l *flock.Lock, dir string) error
+	// mkdirAll は、何かを変える撤去が、無い置き場のディレクトリを作る。
+	mkdirAll    func(dir string) error
 	openStore   func(path string) (*store.Store, error)
 	wgOwned     func(iface string, key wgtypes.Key) (owned, exists bool, err error)
 	deleteTable func() error
@@ -89,6 +91,7 @@ func defaultOps() ops {
 		inspectLock: flock.Inspect,
 		acquireLock: flock.AcquireCreating,
 		adoptOwner:  adoptDirOwner,
+		mkdirAll:    func(dir string) error { return os.MkdirAll(dir, 0o700) },
 		// 撤去はデータベースを読むだけなので、スキーマの移行も権限の締め直しもしない読み取り専用で開く
 		// (設計文書 10.3 節)。
 		openStore:   store.OpenReadOnly,
@@ -123,10 +126,8 @@ func run(o ops, opts Options, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if lock != nil {
-			// --purge のロックファイルの削除(purgeState の最後)の後で放す
-			defer lock.Release()
-		}
+		// --purge のロックファイルの削除(purgeState の最後)の後で放す
+		defer lock.Release()
 	} else {
 		switch state, err := o.inspectLock(opts.DBPath); {
 		case err != nil:
@@ -208,21 +209,23 @@ func run(o ops, opts Options, out io.Writer) error {
 // lockForTeardown は、何かを変える撤去のためにサーバのデータベースのロックを取る(設計文書 10.3 節)。
 // ロックファイルが無ければ作り、持ち主をデータベースの置き場の持ち主に合わせる。同梱の unit は server を
 // DynamicUser で動かすので、root の撤去が作った 0600 のロックファイルが root の持ち物のまま残ると、
-// server は次の起動でそれを開けずに終了コード 1 を繰り返す。systemd は置き場の中のファイルの持ち主を
-// 直さない。置き場が無ければ、ロックファイルを置く場所が無いので、ロックを取らずに進め、その旨を示す。
-// 置き場を作ると、root の持ち物のディレクトリが server の起動を妨げうるためである。
-// 返すロックが nil なのは、置き場が無い場合だけである。
+// server は次の起動でそれを開けずに終了コード 1 を繰り返す。systemd は持ち主の正しい置き場の中の
+// ファイルの持ち主を直さない。
+// 置き場のディレクトリが無ければ、server と同じく 0700 で作ってからロックを取る。取らずに進むと、
+// 撤去の途中に起動した server が、systemd の作った置き場でロックを取って資源を作り、撤去がそれを消す。
+// 撤去が作ったディレクトリは root の持ち物のまま残す。合わせる先の持ち主が無いためである。同梱の unit
+// では、systemd が次の起動でその置き場を移して持ち主を付け替える。
 func lockForTeardown(o ops, dbPath string, out io.Writer) (*flock.Lock, error) {
 	dir := filepath.Dir(dbPath)
-	lock, created, err := o.acquireLock(dbPath)
-	switch {
-	case errors.Is(err, flock.ErrLocked):
-		return nil, errServerRunning
-	case errors.Is(err, fs.ErrNotExist):
-		if _, serr := os.Stat(dir); errors.Is(serr, fs.ErrNotExist) {
-			fmt.Fprintf(out, "the directory %s of the server database does not exist, so no server is using it; continuing without the server's lock\n", dir)
-			return nil, nil
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		if err := o.mkdirAll(dir); err != nil {
+			return nil, fmt.Errorf("cannot lock the server database, so nothing was removed: creating its directory %s failed: %w", dir, err)
 		}
+		fmt.Fprintf(out, "created the directory %s of the server database to hold the server's lock during teardown\n", dir)
+	}
+	lock, created, err := o.acquireLock(dbPath)
+	if errors.Is(err, flock.ErrLocked) {
+		return nil, errServerRunning
 	}
 	if err != nil {
 		return nil, fmt.Errorf("cannot tell whether the server is running, so nothing was removed: locking %s failed: %w", dbPath, err)
