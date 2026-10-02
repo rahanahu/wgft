@@ -225,7 +225,7 @@ func TestCheckTunnelResetsAfterHandshake(t *testing.T) {
 
 	// 3. サーバを同じ鍵とポートで戻すと、作り直したトンネルがハンドシェイクを済ませ、間隔が戻る
 	srv2, _ := newServerTunnel(t, srvKey, port)
-	if _, err := srv2.SetPeers([]dataplane.Peer{{PublicKey: rt.priv.PublicKey(), Address: netip.MustParseAddr("10.200.0.2")}}); err != nil {
+	if _, err := srv2.SetPeers([]dataplane.Peer{{PublicKey: rt.privKey().PublicKey(), Address: netip.MustParseAddr("10.200.0.2")}}); err != nil {
 		t.Fatalf("declare the agent peer again: %v", err)
 	}
 	waitHandshake(t, rt, 20*time.Second)
@@ -391,8 +391,8 @@ func newRebuildTestRuntime(t *testing.T, endpoint string, serverPub, priv wgtype
 		dp:   newTestUserspace(),
 		opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json")},
 		f:    &credentials.Credentials{},
-		priv: priv,
 	}
+	rt.setPrivKey(priv)
 	if err := rt.apply(st); err != nil {
 		t.Fatalf("apply the state: %v", err)
 	}

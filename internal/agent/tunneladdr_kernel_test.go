@@ -21,7 +21,8 @@ func kernelRuntime(t *testing.T, k *fakeKernel, f *credentials.Credentials) (*ru
 	t.Helper()
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
-	rt := &runtime{opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG}
+	rt := &runtime{opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Mode: "kernel"}, f: f, dp: d, wgCfg: d.WG}
+	rt.setPrivKey(d.Priv)
 	return rt, d
 }
 
@@ -127,7 +128,8 @@ func TestKernelRefusesAnAddressBeforeTheFirstTunnel(t *testing.T) {
 	k := &fakeKernel{}
 	f := &credentials.Credentials{TunnelAddress: "10.200.0.2"}
 	d := kernelmode.NewWithOps(context.Background(), "wgft0", nil, f, nil, k.ops())
-	rt := &runtime{opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Mode: "kernel"}, f: f, priv: testKey(t), dp: d}
+	rt := &runtime{opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Mode: "kernel"}, f: f, dp: d}
+	rt.setPrivKey(testKey(t))
 	st := &proto.State{Generation: 1, WG: withAddress(testWG(t), "192.168.1.100/25")}
 	err := rt.apply(st)
 	var mm *credentials.TunnelAddressMismatch

@@ -85,12 +85,13 @@ func newFakeDataplaneRuntime(t *testing.T, dp *fakeDataplane) *runtime {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &runtime{
+	rt := &runtime{
 		opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json")},
 		f:    &credentials.Credentials{},
-		priv: priv,
 		dp:   dp,
 	}
+	rt.setPrivKey(priv)
+	return rt
 }
 
 // dataplane が宣言をまとめて公開できなかったときは、処理済み世代も認証情報ファイルの last_state も

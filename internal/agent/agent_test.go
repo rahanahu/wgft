@@ -500,9 +500,9 @@ func TestStreamOnceSendsHeartbeatAfterApply(t *testing.T) {
 			CertSHA256:     hex.EncodeToString(pin[:]),
 			PermanentToken: "tok",
 		},
-		priv:              priv,
 		heartbeatInterval: time.Hour, // 十分長くし、ティッカーではなく適用の通知で届くことを確かめる
 	}
+	rt.setPrivKey(priv)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -550,9 +550,9 @@ func TestStreamOnceSendsProtocolRange(t *testing.T) {
 			CertSHA256:     hex.EncodeToString(pin[:]),
 			PermanentToken: "tok",
 		},
-		priv:              priv,
 		heartbeatInterval: time.Hour,
 	}
+	rt.setPrivKey(priv)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- rt.streamOnce(ctx) }()
@@ -597,9 +597,9 @@ func TestStreamOnceRejectsOutOfRangeServerVersion(t *testing.T) {
 			CertSHA256:     hex.EncodeToString(pin[:]),
 			PermanentToken: "tok",
 		},
-		priv:              priv,
 		heartbeatInterval: time.Hour,
 	}
+	rt.setPrivKey(priv)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)

@@ -40,8 +40,13 @@ type Options struct {
 type runtime struct {
 	opts              Options
 	f                 *credentials.Credentials
-	priv              wgtypes.Key
 	heartbeatInterval time.Duration
+
+	// priv は今の wg の秘密鍵である。読み書きは privKey と setPrivKey を通す。稼働中の rotate-key は
+	// rt.mu を持って書き換え、stream は接続のたびに rt.mu の外で読んで公開鍵を宣言する(stream.go の
+	// streamOnce)。rt.mu は全体状態の適用の間じゅう保たれるので、鍵の宣言をその後ろで待たせないよう
+	// atomic に置く。置いた値は書き換えず、新しい鍵は新しい値として置く。nil なら一度も置いていない
+	priv atomic.Pointer[wgtypes.Key]
 
 	// handshakeRetryInterval と handshakeRetryTimeout は、適用直後のハートビートがハンドシェイク待ちの
 	// 誤りを報告したときの追送りの間隔と期限(仕様 5.2 節)。既定はそれぞれ 1 秒と 10 秒。テストで
@@ -169,6 +174,19 @@ func (rt *runtime) close() {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.closeLocked()
+}
+
+// privKey は今の wg の秘密鍵を返す。一度も置いていなければゼロ値の鍵を返す。
+func (rt *runtime) privKey() wgtypes.Key {
+	if k := rt.priv.Load(); k != nil {
+		return *k
+	}
+	return wgtypes.Key{}
+}
+
+// setPrivKey は今の wg の秘密鍵を key に置き換える。
+func (rt *runtime) setPrivKey(key wgtypes.Key) {
+	rt.priv.Store(&key)
 }
 
 // reconnect は今の stream 接続を切り、バックオフなしで繋ぎ直させる。

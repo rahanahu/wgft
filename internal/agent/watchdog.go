@@ -111,7 +111,7 @@ func (s *rebuildState) step(now, start, handshake time.Time) (idle time.Duration
 func (rt *runtime) startTunnelLocked(st *proto.State) (retryable bool, err error) {
 	rt.closeLocked()
 	rt.tunStart = time.Now()
-	retryable, err = rt.dp.Build(rt.priv, st.WG)
+	retryable, err = rt.dp.Build(rt.privKey(), st.WG)
 	if err != nil {
 		return retryable, err
 	}

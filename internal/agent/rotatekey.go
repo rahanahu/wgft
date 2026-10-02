@@ -25,7 +25,7 @@ func (rt *runtime) rotateKey() (wgtypes.Key, error) {
 		rt.mu.Unlock()
 		return wgtypes.Key{}, err
 	}
-	rt.priv = key
+	rt.setPrivKey(key)
 	last := rt.f.LastState
 	rt.closeLocked()
 	rt.mu.Unlock()
