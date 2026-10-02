@@ -75,28 +75,47 @@ func equalDelivery(a, b *deliverySnapshot) bool {
 	return reflect.DeepEqual(a.entries, b.entries)
 }
 
-func effectiveDelivery(s *deliverySnapshot, disabled map[string]disableOverlay) map[string]deliveryEntry {
-	if s == nil {
-		return nil
-	}
-	out := make(map[string]deliveryEntry, len(s.entries))
+// overlayGeneration is the highest generation among the disable overlays, or
+// zero when there are none.
+func overlayGeneration(disabled map[string]disableOverlay) uint64 {
 	var generation uint64
 	for _, d := range disabled {
 		if d.generation > generation {
 			generation = d.generation
 		}
 	}
+	return generation
+}
+
+// applyOverlay returns the State that the published entry for name delivers
+// under the disable overlays: the generation is raised to generation, the
+// result of overlayGeneration, and an overlay whose identity matches the
+// entry disables the agent and every rule. Rules is copied, so the published
+// snapshot is never modified. It takes no lock; the caller holds
+// deliveryOwner.mu while disabled is the owner's map.
+func applyOverlay(name string, entry deliveryEntry, disabled map[string]disableOverlay, generation uint64) proto.State {
+	st := entry.state
+	st.Rules = append([]proto.AgentRule{}, st.Rules...)
+	if generation > st.Generation {
+		st.Generation = generation
+	}
+	if d, ok := disabled[name]; ok && d.identity == entry.identity {
+		st.AgentDisabled = true
+		for i := range st.Rules {
+			st.Rules[i].Enabled = false
+		}
+	}
+	return st
+}
+
+func effectiveDelivery(s *deliverySnapshot, disabled map[string]disableOverlay) map[string]deliveryEntry {
+	if s == nil {
+		return nil
+	}
+	out := make(map[string]deliveryEntry, len(s.entries))
+	generation := overlayGeneration(disabled)
 	for name, entry := range s.entries {
-		entry.state.Rules = append([]proto.AgentRule{}, entry.state.Rules...)
-		if generation > entry.state.Generation {
-			entry.state.Generation = generation
-		}
-		if d, ok := disabled[name]; ok && d.identity == entry.identity {
-			entry.state.AgentDisabled = true
-			for i := range entry.state.Rules {
-				entry.state.Rules[i].Enabled = false
-			}
-		}
+		entry.state = applyOverlay(name, entry, disabled, generation)
 		out[name] = entry
 	}
 	return out
@@ -213,23 +232,7 @@ func (o *deliveryOwner) state(name, identity string, key *string) (*proto.State,
 	if !ok || e.identity != identity || (key != nil && e.key != *key) {
 		return nil, fmt.Errorf("agent %q has no published state for this registration and key", name)
 	}
-	st := e.state
-	st.Rules = append([]proto.AgentRule{}, st.Rules...)
-	var generation uint64
-	for _, overlay := range o.disabled {
-		if overlay.generation > generation {
-			generation = overlay.generation
-		}
-	}
-	if generation > st.Generation {
-		st.Generation = generation
-	}
-	if overlay, ok := o.disabled[name]; ok && overlay.identity == identity {
-		st.AgentDisabled = true
-		for i := range st.Rules {
-			st.Rules[i].Enabled = false
-		}
-	}
+	st := applyOverlay(name, e, o.disabled, overlayGeneration(o.disabled))
 	return &st, nil
 }
 
