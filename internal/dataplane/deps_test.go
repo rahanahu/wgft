@@ -455,7 +455,9 @@ var modeSeams = map[string]map[string]bool{
 // tests alone, so the rule is checked here. It type-checks the non-test files of every package
 // in the module that imports a mode package, for the GOOS the test runs on, and resolves each
 // identifier to its object, so a field or method reached through a value is caught as well as a
-// qualified name. The imports are read from export data that `go list -export` builds.
+// qualified name. The imports are read from export data that `go list -export` builds. It does not
+// catch a use that never names the object, such as a type assertion to an interface the caller
+// defines or access through reflection.
 func TestAgentModeTestSeamsStayInTests(t *testing.T) {
 	root := moduleRoot(t)
 	type listed struct {

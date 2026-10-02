@@ -2,9 +2,10 @@
 // wireguard-go と netstack のトンネルと、その上の中継を包み、internal/agent/agentdp の Dataplane を
 // 満たす。internal/agent の下では agentdp と allowtargets だけを import する。
 //
-// 公開する名前のうち、New と型 Dataplane と agentdp.Dataplane のメソッドのほかは、internal/agent の
-// テストのための口である。フィールド Allow、Limits、Tun、Relay、変数 NewTunnel、ReadTunnelStatus、
-// 関数 RuleStatuses、メソッド RelayOptions が当たる。本番のコードは package の外からこれらを使わない。
+// 本番のコードが package の外から使ってよい名前は New だけである。実行時の状態は New の結果を
+// agentdp.Dataplane として持ち、型 Dataplane を名指さず、そのメソッドも直接は呼ばない。ほかの公開した
+// 名前は internal/agent のテストのための口であり、フィールド Allow、Limits、Tun、Relay、変数
+// NewTunnel、ReadTunnelStatus、関数 RuleStatuses、メソッド RelayOptions が当たる。
 // internal/dataplane/deps_test.go の TestAgentModeTestSeamsStayInTests がこれを検査する。
 package usermode
 
