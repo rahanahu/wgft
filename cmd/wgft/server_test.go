@@ -65,6 +65,45 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 	}
 }
 
+// TestServerJoinSettingPortsExitCode checks that a WGFT_WG_ENDPOINT or WGFT_AGENT_API_HOST whose
+// port is not decimal digits from 1 to 65535 stops `server run` and `server check` with exit
+// code 3, and that the refusal names that setting. Checking the subject matters: in kernel mode
+// an unprivileged run is also refused with exit code 3, for CAP_NET_ADMIN, so the exit code alone
+// would pass even if the entry check let the value through. Before 2026-10-02 the entry check
+// resolved these ports with net.LookupPort and accepted all of these values (design.md 11b 節).
+func TestServerJoinSettingPortsExitCode(t *testing.T) {
+	none := filepath.Join(t.TempDir(), "none.env")
+	for _, tc := range []struct {
+		env, val string
+	}{
+		{"WGFT_WG_ENDPOINT", "vps.example.com:https"},
+		{"WGFT_WG_ENDPOINT", "vps.example.com:+51820"},
+		{"WGFT_WG_ENDPOINT", "vps.example.com:0"},
+		{"WGFT_AGENT_API_HOST", "vps.example.com:https"},
+		{"WGFT_AGENT_API_HOST", "vps.example.com:+443"},
+		{"WGFT_AGENT_API_HOST", "vps.example.com:0"},
+	} {
+		for _, sub := range []string{"run", "check"} {
+			t.Run(sub+" "+tc.env+"="+tc.val, func(t *testing.T) {
+				t.Setenv("WGFT_WG_ENDPOINT", "vps.example.com:51820")
+				t.Setenv(tc.env, tc.val)
+				root := newRootCmd()
+				root.SetArgs([]string{"server", sub, "--mode", "kernel", "--config", none, "--data-dir", t.TempDir()})
+				root.SetOut(io.Discard)
+				root.SetErr(io.Discard)
+				err := root.Execute()
+				if got := exitCode(err); err == nil || got != exitRefusal {
+					t.Fatalf("err=%v exitCode=%d, want %d", err, got, exitRefusal)
+				}
+				r := startup.Of(err)
+				if r == nil || r.Category != startup.CategoryConfig || r.Subject != tc.env {
+					t.Errorf("%v is not a config refusal for %s", err, tc.env)
+				}
+			})
+		}
+	}
+}
+
 // A privilege failure from kernel mode (no root, no CAP_NET_ADMIN) is a prerequisite refusal, and
 // cmd/wgft must map any refusal, whatever layer raised it, to exit code 3 so the shipped
 // server.service's RestartPreventExitStatus=3 stops the 2-second restart loop. The counterpart is
@@ -341,6 +380,20 @@ func TestDoorValueChecks(t *testing.T) {
 		{"endpoint without port", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com"), false},
 		{"endpoint without host", validateHostPort("WGFT_WG_ENDPOINT", ":51820"), false},
 		{"endpoint bad port", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:nope"), false},
+		// The agent reads these two values and accepts only a port written as decimal digits, so a
+		// service name, a sign or port 0 is refused even though net.LookupPort resolves it.
+		{"endpoint service-name port", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:https"), false},
+		{"endpoint signed port", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:+51820"), false},
+		{"endpoint port 0", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:0"), false},
+		{"endpoint port 65536", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:65536"), false},
+		{"endpoint port 65535", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:65535"), true},
+		{"endpoint port 1", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:1"), true},
+		{"endpoint zero-padded port", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:051820"), true},
+		{"agent api host", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:8443"), true},
+		{"agent api host service-name port", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:https"), false},
+		{"agent api host signed port", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:+443"), false},
+		{"agent api host port 0", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:0"), false},
+		{"agent api host without host", validateHostPort("WGFT_AGENT_API_HOST", ":8443"), false},
 		{"bool true", validateBool("WGFT_ADMIN_TAILSCALE", "true"), true},
 		{"bool yes", validateBool("WGFT_ADMIN_TAILSCALE", "yes"), true},
 		{"bool off", validateBool("WGFT_ADMIN_TAILSCALE", "off"), true},

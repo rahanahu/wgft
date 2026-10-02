@@ -24,7 +24,7 @@ import (
 // parseJoinErrors, never a message built from s (join.go's doc comment on that var explains why
 // this must hold for every rejection path, not only the ones join_test.go names explicitly); and
 // on success its result is internally consistent -- Endpoint really is host:port shaped with a
-// port from 1 to 65535, Token is non-empty and holds no slash (the code path that rejects a Path
+// non-empty host and a port from 1 to 65535, Token is non-empty and holds no slash (the code path that rejects a Path
 // containing an extra "/" must actually have rejected it), Pin is the exact 32 bytes the connect
 // string's own #sha256:HASH fragment decodes to (recomputed independently of ParseJoin), and
 // TokenHash is the actual sha256 of Token, not merely a string of the right shape.
@@ -44,6 +44,8 @@ func FuzzParseJoin(f *testing.F) {
 	f.Add("wgft://vps:/tok#sha256:" + strings.Repeat("ab", 32))      // empty port
 	f.Add("wgft://vps:0/tok#sha256:" + strings.Repeat("ab", 32))     // port 0
 	f.Add("wgft://vps:70000/tok#sha256:" + strings.Repeat("ab", 32)) // port out of range
+	f.Add("wgft://:8443/tok#sha256:" + strings.Repeat("ab", 32))     // empty host
+	f.Add("wgft://[]:8443/tok#sha256:" + strings.Repeat("ab", 32))   // empty bracketed host
 	f.Add("")
 	f.Add("wgft://")
 	f.Add("not a url at all \x00\x01")
@@ -63,9 +65,12 @@ func FuzzParseJoin(f *testing.F) {
 			}
 			return
 		}
-		_, port, err := net.SplitHostPort(j.Endpoint)
+		host, port, err := net.SplitHostPort(j.Endpoint)
 		if err != nil {
 			t.Fatalf("ParseJoin(%q).Endpoint = %q, not host:port: %v", s, j.Endpoint, err)
+		}
+		if host == "" {
+			t.Fatalf("ParseJoin(%q).Endpoint = %q has no host", s, j.Endpoint)
 		}
 		if p, perr := strconv.ParseUint(port, 10, 32); perr != nil || p < 1 || p > 65535 {
 			t.Fatalf("ParseJoin(%q).Endpoint = %q, port %q is not between 1 and 65535", s, j.Endpoint, port)

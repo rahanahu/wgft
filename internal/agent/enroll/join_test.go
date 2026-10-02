@@ -29,6 +29,7 @@ func TestParseJoin(t *testing.T) {
 		"wgft://vps.example.com:/tok#sha256:" + strings.Repeat("ab", 32),
 		"wgft://vps.example.com:0/tok#sha256:" + strings.Repeat("ab", 32),
 		"wgft://vps.example.com:70000/tok#sha256:" + strings.Repeat("ab", 32),
+		"wgft://:8443/tok#sha256:" + strings.Repeat("ab", 32),
 		"",
 	} {
 		if _, err := ParseJoin(bad); err == nil {
@@ -45,7 +46,8 @@ func TestParseJoin(t *testing.T) {
 // back (cmd/wgft/agent.go's "WGFT_JOIN is malformed" warning), and a malformed or truncated join
 // string can put the token where any of the other fields are expected too, for example by
 // dropping the "/" before it. Each case below puts the token where u.Host ends up, then drives a
-// different rejection path (no-port, port-range, no-token, no-#sha256, bad-hash) past it. Two
+// different rejection path (no-port, port-range, no-token, no-#sha256, bad-hash) past it; the
+// no-host case keeps the token in its own place, since the host is empty there. Two
 // checks per case: the token substring must be absent from the error text, and the error must be
 // one of ParseJoin's fixed messages (parseJoinErrors), so a rewrite that reintroduces a %q or %s
 // of the input is caught even for a token that happens not to collide with this test's literal.
@@ -59,6 +61,7 @@ func TestParseJoinNeverEchoesTheToken(t *testing.T) {
 		"wgft://" + token + ":0#" + pin,         // token as host, port 0: the port-range path
 		"wgft://" + token + ":8443/x",           // token as host, no fragment: the no-#sha256 path
 		"wgft://" + token + ":8443/x#sha256:zz", // token as host, bad hex: the bad-hash path
+		"wgft://:8443/" + token + "#" + pin,     // empty host, token in place: the no-host path
 	} {
 		_, err := ParseJoin(bad)
 		if err == nil {
@@ -123,5 +126,22 @@ func TestRegisterConflictPointsAtTheRunningAgentFirst(t *testing.T) {
 	point, revoke := strings.Index(msg, "point WGFT_DATA_DIR at its directory"), strings.Index(msg, "wgft agent revoke")
 	if point < 0 || revoke < 0 || point > revoke {
 		t.Errorf("the refusal does not point at the running agent before the revoke: %s", msg)
+	}
+}
+
+// TestParseJoinRequiresAHost pins that a join string with an empty host is refused with its own
+// fixed error. Before, ParseJoin accepted it and the agent connected to its own host's port.
+// A bracketed or plain host, however short, still passes.
+func TestParseJoinRequiresAHost(t *testing.T) {
+	pin := "#sha256:" + strings.Repeat("ab", 32)
+	for _, bad := range []string{"wgft://:8443/tok" + pin, " wgft://:1/tok" + pin + "\n"} {
+		if _, err := ParseJoin(bad); !errors.Is(err, errJoinNoHost) {
+			t.Errorf("ParseJoin(%q) = %v, want %v", bad, err, errJoinNoHost)
+		}
+	}
+	for _, good := range []string{"wgft://v:8443/tok" + pin, "wgft://[::1]:8443/tok" + pin, "wgft://192.0.2.1:8443/tok" + pin} {
+		if _, err := ParseJoin(good); err != nil {
+			t.Errorf("ParseJoin(%q) = %v, want success", good, err)
+		}
 	}
 }

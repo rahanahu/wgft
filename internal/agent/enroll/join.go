@@ -32,17 +32,18 @@ type Join struct {
 	raw      string
 }
 
-// ParseJoin のエラーはこの 6 つの値のどれかに固定する(下記のコメントと FuzzParseJoin の不変条件)。
+// ParseJoin のエラーはこの 7 つの値のどれかに固定する(下記のコメントと FuzzParseJoin の不変条件)。
 // どれも接続文字列のどの部分も引用しない。トークンは秘密であり(scripts/check-log-tokens.sh の
 // 約束)、host:port の形が崩れた入力では、トークンがどの断片に入り込むか判別できないためである。例えば
 // ポートも "/" も無い "wgft://<token>" は、url.Parse のもとで u.Host がトークンそのものになる。
 // net.SplitHostPort が host と port を切り離した後でも、host の側がトークンの断片である可能性は残る
 // (host の許す文字集合と、base64url でエンコードするトークンの文字集合が大きく重なるため)。したがって
-// host を「ホスト名らしい」形で検査して引用してよいことにはしない。この 6 つを固定の値として持つのは、
+// host を「ホスト名らしい」形で検査して引用してよいことにはしない。この 7 つを固定の値として持つのは、
 // 新しいエラーを足す人が、うっかり %q や %s で入力の断片を差し込むのを防ぐためである。
 var (
 	errJoinScheme    = errors.New("join string must look like wgft://host:port/token#sha256:HASH")
 	errJoinNoPort    = errors.New("join string host has no port")
+	errJoinNoHost    = errors.New("join string has no host")
 	errJoinPortRange = errors.New("join string port must be a number from 1 to 65535")
 	errJoinNoToken   = errors.New("join string has no token")
 	errJoinNoPin     = errors.New("join string has no #sha256 certificate hash")
@@ -51,17 +52,22 @@ var (
 
 // parseJoinErrors is every error ParseJoin can return, for FuzzParseJoin's invariant that a
 // rejection is always one of these fixed values and never echoes the input.
-var parseJoinErrors = []error{errJoinScheme, errJoinNoPort, errJoinPortRange, errJoinNoToken, errJoinNoPin, errJoinBadPin}
+var parseJoinErrors = []error{errJoinScheme, errJoinNoPort, errJoinNoHost, errJoinPortRange, errJoinNoToken, errJoinNoPin, errJoinBadPin}
 
-// ParseJoin は接続文字列を解釈する。scheme、ポート、sha256 のピンをすべて要求する。
+// ParseJoin は接続文字列を解釈する。scheme、ホスト、ポート、sha256 のピンをすべて要求する。
+// ホストが空の接続文字列("wgft://:8443/...")を通すと、エージェントは自分のホストへ接続する。
+// server はホストが空の接続文字列を発行しないので、拒む(設計文書 11b 節)。
 func ParseJoin(s string) (*Join, error) {
 	u, err := url.Parse(strings.TrimSpace(s))
 	if err != nil || u.Scheme != "wgft" {
 		return nil, errJoinScheme
 	}
-	_, port, err := net.SplitHostPort(u.Host)
+	host, port, err := net.SplitHostPort(u.Host)
 	if err != nil {
 		return nil, errJoinNoPort
+	}
+	if host == "" {
+		return nil, errJoinNoHost
 	}
 	if portNum, perr := strconv.ParseUint(port, 10, 32); perr != nil || portNum < 1 || portNum > 65535 {
 		return nil, errJoinPortRange

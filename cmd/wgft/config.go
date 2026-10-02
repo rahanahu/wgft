@@ -149,8 +149,11 @@ func configErrorf(subject, format string, args ...any) error {
 
 // 入口で使う値だけの検査(設計文書 11b 節)。どれも環境を見ず、値の形だけを判定する。
 
-// validateHostPort は、値が host:port の形で、ホストが空でなく、ポートが解決できることを確かめる。
-// 待ち受けには使わない項目(WGFT_WG_ENDPOINT、WGFT_AGENT_API_HOST)に使う。
+// validateHostPort は、値が host:port の形で、ホストが空でなく、ポートが 1 から 65535 を 10 進の
+// 数字で書いた値であることを確かめる。待ち受けには使わず、エージェントが読む項目
+// (WGFT_WG_ENDPOINT、WGFT_AGENT_API_HOST)に使う。サービス名や "+443" は net.LookupPort なら
+// 通るが、エージェントの ParseJoin とユーザー空間モードのエンドポイントの解釈は 10 進の数字しか
+// 受け付けず、サービスの一覧もホストごとに違いうるので、入口で拒む(設計文書 11b 節)。
 func validateHostPort(env, val string) error {
 	host, port, err := net.SplitHostPort(val)
 	if err != nil {
@@ -162,8 +165,8 @@ func validateHostPort(env, val string) error {
 	if port == "" {
 		return configErrorf(env, "%q has no port", val)
 	}
-	if _, err := net.LookupPort("tcp", port); err != nil {
-		return configErrorf(env, "%q has an invalid port: %v", val, err)
+	if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+		return configErrorf(env, "%q has a port that is not a number from 1 to 65535; agents read this value and accept only decimal digits, not a service name", val)
 	}
 	return nil
 }
