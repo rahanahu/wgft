@@ -213,9 +213,16 @@ func (e *bulkError) Unwrap() []error {
 	return errs
 }
 
-// bulkRead は r から n byte を読み捨て、読んだ数を read に足し、終わりを done に送る。
+// bulkRead は r から n byte を読み捨て、読んだ数を read に足し、終わりを done に送る。1 回の読み込みは
+// 8 KiB で、残りが少なければ残りの分である。以前の io.CopyN(io.Discard, r, n) は io.Discard の
+// ReadFrom の 8 KiB の buffer で読んでおり、受け手の読み方を変えないためにこれと同じ大きさにする。
+// countingDiscard は ReadFrom を持たないので、buffer を渡さないと io.Copy は 32 KiB で読む。
+// 足りないまま EOF で終わったときは、io.CopyN と同じく io.EOF を返す。
 func bulkRead(r net.Conn, n int, read *atomic.Int64, done chan<- error) {
-	_, err := io.CopyN(countingDiscard{read}, r, int64(n))
+	got, err := io.CopyBuffer(countingDiscard{read}, io.LimitReader(r, int64(n)), make([]byte, 8<<10))
+	if got < int64(n) && err == nil {
+		err = io.EOF
+	}
 	done <- err
 }
 
@@ -523,10 +530,14 @@ func TestBulkStopsWhenStalled(t *testing.T) {
 		c, s := p.dial(t)
 		defer c.Close()
 		defer s.Close()
-		if err := bulkWithin(c, s, 1<<20, budget); err != nil {
+		// この転送は止めないので、遅い runner でも期限の内に終わる長さにする。確かめるのは期限が
+		// 過ぎた後の読み書きである
+		const transferBudget = 5 * time.Second
+		start := time.Now()
+		if err := bulkWithin(c, s, 1<<20, transferBudget); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(budget + 200*time.Millisecond)
+		time.Sleep(time.Until(start.Add(transferBudget + 200*time.Millisecond)))
 		for _, x := range [][2]net.Conn{{c, s}, {s, c}} {
 			if _, err := x[0].Write([]byte("ping")); err != nil {
 				t.Fatalf("write after the budget passed: %v", err)
