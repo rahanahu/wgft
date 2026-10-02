@@ -223,8 +223,9 @@ func (d *Daemon) reapply() {
 // 保留のループにそれを伝える(hold.go の noteApplied)。管理用 API のバッチ操作も自分で適用を試すので、
 // この 1 点で伝えることで、運用者が宣言を直した時点で保留が解ける(設計文書 11b 節)。
 //
-// Commit に対応する配信用の全体状態を保持し、配信内容が変わったときだけ接続中の全エージェントへ
-// 配る。保存後の適用に失敗した変更は保持済みの配信内容を変えない。無効化は保存確定後に停止だけを
+// Commit に対応する配信用の全体状態を保持し、配信内容が変わったエージェントにだけ配る(設計文書 5.2 節)。
+// 世代が上がれば全エージェントの配信内容が変わる。鍵の宣言は宣言したエージェントの配信内容だけを
+// 変えるので、他のエージェントには配らない。保存後の適用に失敗した変更は保持済みの配信内容を変えない。無効化は保存確定後に停止だけを
 // 先に配り、その後の Commit が同じ内容を作った場合は重複して配らない。
 func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error) {
 	out, prepared, err := d.applyOnce(rules, retry, nil)
@@ -246,8 +247,8 @@ func (d *Daemon) apply(rules []proto.Rule, retry bool) (reconcile.Outcome, error
 	if !out.NoOp {
 		changed := d.delivery.committed(prepared.candidate)
 		d.retireChangedKeyStreams(prepared.candidate)
-		if changed {
-			d.pushAll()
+		if len(changed) > 0 {
+			d.pushAgents(changed)
 		}
 	} else {
 		// The saved full declaration is already the successful delivery token.

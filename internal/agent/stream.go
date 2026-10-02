@@ -57,7 +57,8 @@ const tunnelFreshFor = 180 * time.Second
 // ある。恒久トークンの拒否と取り消し、同じエージェントの新しい接続による置き換え、版の不一致(server が
 // 理由コードで閉じた場合と、server が選んだ版をエージェントが拒んだ場合)、証明書のピンの不一致、
 // 公開鍵の拒否が当たる。公開鍵の拒否は、vpsd が WebSocket の標準の符号 1008(policy violation)で
-// 閉じるもので、vpsd はこの符号を公開鍵の検証の失敗にだけ使うので、理由の文言は見ない。それ以外、
+// 閉じるもので、vpsd はこの符号を公開鍵の検証の失敗と鍵の変更の頻度の上限による拒否にだけ使うので、
+// 理由の文言は見ない。上限による拒否は時間が経てば解けるが、待ちを短くしても早くは解けない。それ以外、
 // つまり接続の失敗、429 のような一時的な拒否、ping の期限切れ、ハートビートの期限切れ(4002)、
 // 版の宣言の形の誤り(4004)、server の内部の誤り(1011)には当てる。
 func capsWhileFresh(err error) bool {
@@ -338,6 +339,11 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 		}
 		if !first && m.State.Generation < rt.generation() {
 			log.Printf("stream: generation %d is older than local %d; dropping", m.State.Generation, rt.generation())
+			continue
+		}
+		// 最初の全体状態より後に届いた、最後に適用した全体状態と同じ世代で同じ中身の全体状態は
+		// 適用し直さない(設計文書 5.2 節)。旧い版の server は他のエージェントの鍵の変更でも配り直す
+		if !first && rt.alreadyApplied(m.State) {
 			continue
 		}
 		first = false

@@ -137,6 +137,18 @@ func (rt *runtime) prepare(st *proto.State) any {
 	return nil
 }
 
+// alreadyApplied は、st が手元で最後に適用に成功した全体状態と世代も中身も同じかどうかを返す
+// (設計文書 5.2 節)。トンネルが立っていて、試し直しを待つ全体状態も、拒んだ wg 設定も無いときだけ
+// 真にする。このとき適用し直しても宣言は変わらず、カーネルモードではテーブルの差し替えと宛先への
+// 試し接続だけが繰り返される。同じ世代でも中身が違えば偽にする。server は UDP のタイムアウトの値を、
+// 世代を上げずに全体状態へ書き込むことがあるためである。
+func (rt *runtime) alreadyApplied(st *proto.State) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.dp.Built() && rt.pendingSt == nil && rt.refused == nil && rt.f.LastState != nil &&
+		st.Generation == rt.gen && reflect.DeepEqual(rt.f.LastState, st)
+}
+
 // applyFromStream は stream が受け取った全体状態を適用する。適用の間は読みが止まるので、pingLoop に
 // 判定を見送らせる(仕様 5.2 節)。入るときと出るときに applySeq を 1 つ進めるので、適用の最中は値が
 // 奇数になる。プロセスを終える誤りは Run に伝える(11b 節)。

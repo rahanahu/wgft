@@ -143,6 +143,7 @@ func TestSavedKeyAfterFailedApplyCannotUseSameKeyReconnect(t *testing.T) {
 func TestFailedKeyRotationAllowsTemporaryOldKeyReconnectAndRetiresIt(t *testing.T) {
 	f := newDisableFixture(t)
 	f.d.onPushAll = nil
+	f.d.onPush = nil
 	srv := httptest.NewServer(f.d.hub)
 	defer srv.Close()
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -237,6 +238,7 @@ func TestFailedKeyRotationAllowsTemporaryOldKeyReconnectAndRetiresIt(t *testing.
 	f.p.setErr(nil)
 	// Retirement must happen during publication, even if no Push is queued.
 	f.d.onPushAll = func() {}
+	f.d.onPush = func([]string) {}
 	if _, err := f.d.Batch(admin.BatchRequest{}); err != nil {
 		t.Fatal(err)
 	}
