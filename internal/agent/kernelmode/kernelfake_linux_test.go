@@ -234,6 +234,8 @@ type fakeKernelDoctor struct {
 	// local はホスト自身のアドレスである。localErr があれば読めない
 	local    map[netip.Addr]bool
 	localErr error
+	// prefixes はホストのインタフェースのアドレスとプレフィクス長である。テストのホストの一覧は読まない
+	prefixes []netip.Prefix
 }
 
 func (k *fakeKernelDoctor) ops() DoctorOps {
@@ -268,6 +270,7 @@ func (k *fakeKernelDoctor) ops() DoctorOps {
 		},
 		Route:      func(netip.Addr) (string, error) { return k.route, nil },
 		LocalAddrs: func() (map[netip.Addr]bool, error) { return k.local, k.localErr },
+		Prefixes:   func() ([]netip.Prefix, error) { return k.prefixes, nil },
 	}
 }
 

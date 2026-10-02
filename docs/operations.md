@@ -77,6 +77,9 @@ Entries are comma-separated and may be `CIDR`, `CIDR:port`, or `CIDR:first-last`
 Bracket an IPv6 address with a port, as in `[2001:db8::/32]:8080`, although forwarding currently supports IPv4 only.
 Omitting the setting allows all targets.
 An out-of-list target does not open a listener, and `wgft agent ls` and the Web UI show the reason.
+Whether or not this setting is present, the agent refuses broadcast and multicast targets in both modes.
+These are `255.255.255.255`, multicast addresses, and the broadcast address of a network on the agent host, such as `192.168.1.255` for `192.168.1.0/24`.
+A rule with such a target does not forward, and `wgft agent ls` shows the reason.
 After changing the setting, run `sudo systemctl restart wgft-agent`.
 
 ## Logs and diagnostics

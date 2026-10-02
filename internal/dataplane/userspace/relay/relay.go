@@ -53,14 +53,18 @@ type Options struct {
 	// AdmitPacket は成立済みの UDP セッションのデータグラム 1 つを通すか(packet_rate)。nil なら全部通す。
 	AdmitPacket func(ruleID string, size int) bool
 	// AllowTarget は宛先への接続を許すかを判定する(エージェントの宛先の許可一覧。設計文書 7 節)。
-	// nil なら制限せず、宛先の名前解決も中継では行わない。nil でなければ、TCP の接続 1 本ごと、
+	// nil なら制限しない。RefuseTarget も nil なら、宛先の名前解決も中継では行わない。nil でなければ、TCP の接続 1 本ごと、
 	// UDP のセッション 1 つごとに、実際に接続するアドレスとポートで呼ぶ。エージェントだけが渡す
 	AllowTarget func(netip.AddrPort) bool
 	// AllowTargetSource は許可一覧の出どころ。拒否の理由に添える(エージェントでは
 	// WGFT_AGENT_ALLOW_TARGETS)。AllowTarget が nil なら使わない
 	AllowTargetSource string
-	// LookupTarget は宛先のホスト名を解決する。nil なら net.DefaultResolver。AllowTarget を
-	// 渡したときだけ使う(許可一覧は実際に接続するアドレスで判定するため)
+	// RefuseTarget は、宛先のアドレスへ接続しない理由を返す。接続してよければ空を返す。エージェントが
+	// ブロードキャストとマルチキャストの宛先を拒むために渡す(設計文書 7 節)。判定の単位と報告は
+	// AllowTarget と同じで、AllowTarget より先に呼ぶ。nil なら判定しない
+	RefuseTarget func(netip.Addr) string
+	// LookupTarget は宛先のホスト名を解決する。nil なら net.DefaultResolver。AllowTarget か
+	// RefuseTarget を渡したときだけ使う(実際に接続するアドレスで判定するため)
 	LookupTarget func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
@@ -117,7 +121,7 @@ const targetProbeConcurrency = 32
 // vpsd が Staged.Commit に渡す keep は dataplane.Retiring.SourceAllowed で錠を取らない。CloseSessions に
 // 渡す keep は、Retiring のルールでなければ評価器(goengine)の錠を取る。TCP の待ち受けの錠の内側では
 // cutConn も呼び、netstack の接続の Abort が nettun の接続の錠を取る。Options の Admit、AdmitPacket、
-// Dial、LookupTarget と、中継と到達確認の中の AllowTarget は、relay の錠を持たずに呼ぶ。
+// Dial、LookupTarget と、中継と到達確認の中の AllowTarget と RefuseTarget は、relay の錠を持たずに呼ぶ。
 //
 // 次の 2 つの説明は、中継の goroutine が mu を待つことに依っている。udp.go の新しいセッションの
 // 登録(Apply が mu を持つ間、ruleOf と targetOf が待たされる)と、Staged.Commit の Retiring からの

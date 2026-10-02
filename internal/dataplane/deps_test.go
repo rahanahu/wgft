@@ -555,7 +555,7 @@ var modeTestSeams = map[string]map[string]bool{
 		"MaxUnconverged": true,
 		"DoctorOps":      true, "DoctorOps.Link": true, "DoctorOps.InspectLink": true,
 		"DoctorOps.InspectTable": true, "DoctorOps.ReadSysctl": true, "DoctorOps.ForwardDrops": true,
-		"DoctorOps.Route": true, "DoctorOps.LocalAddrs": true, "DoctorKernelOps": true,
+		"DoctorOps.Route": true, "DoctorOps.LocalAddrs": true, "DoctorOps.Prefixes": true, "DoctorKernelOps": true,
 	},
 	module + "/internal/agent/control": {"ServeConn": true},
 }

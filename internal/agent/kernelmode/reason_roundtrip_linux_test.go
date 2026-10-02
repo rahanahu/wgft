@@ -30,6 +30,10 @@ func TestKernelReasonsAreReadByServerDoctor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	multicastAllowed, err := allowtargets.Parse("224.0.0.0/4,255.255.255.255")
+	if err != nil {
+		t.Fatal(err)
+	}
 	type step int
 	const (
 		resolveThenFail step = iota + 1 // 1 回目は解決でき、2 回目の適用で解決に失敗する
@@ -57,6 +61,13 @@ func TestKernelReasonsAreReadByServerDoctor(t *testing.T) {
 			addrs: []string{"192.168.9.9", "192.168.9.10"}, allow: narrow, wantTarget: doctor.ReasonTargetNotAllowed},
 		{name: "loopback target", target: "127.0.0.1:25565", wantTarget: doctor.ReasonTargetLoopbackUnsupported},
 		{name: "unspecified target", target: "0.0.0.0:25565", wantTarget: doctor.ReasonTargetLoopbackUnsupported},
+		{name: "multicast target", target: "239.1.2.3:25565", wantTarget: doctor.ReasonTargetNotUnicast},
+		{name: "limited broadcast target", target: "255.255.255.255:25565", wantTarget: doctor.ReasonTargetNotUnicast},
+		{name: "host name resolving to multicast", host: "mc.lan", target: "mc.lan:25565", addrs: []string{"239.1.2.3"},
+			wantTarget: doctor.ReasonTargetNotUnicast},
+		// 許可一覧に入る宛先でも、許可一覧ではなく宛先の種類の符号になる
+		{name: "multicast target the allowlist lets through", target: "239.1.2.3:25565", allow: multicastAllowed,
+			wantTarget: doctor.ReasonTargetNotUnicast},
 		{name: "ip_forward reads 0", target: "192.168.1.20:25565", step: forwardOff, wantTarget: doctor.ReasonAgentIPForwardOff},
 		{name: "ip_forward cannot be set", target: "192.168.1.20:25565", step: forwardUnset, wantTarget: doctor.ReasonAgentIPForwardOff},
 	} {
@@ -167,9 +178,10 @@ func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
 			probe: "dial tcp 192.168.1.30:25565: i/o timeout", target: doctor.ReasonTargetTimeout},
 		{name: "old address is unreachable", err: "lookup " + longTargetHost + noSuchHost,
 			probe: "dial tcp 192.168.1.30:25565: connect: no route to host", target: doctor.ReasonTargetUnreachable},
-		// doctor が分類する試し接続の誤りのうち最長のもの(95 バイト)
-		{name: "longest probe error", addr: "255.255.255.255", err: "lookup " + longTargetHost + noSuchHost,
-			probe: "dial tcp 255.255.255.255:65535: connect: network is unreachable", target: doctor.ReasonTargetUnreachable},
+		// doctor が分類する試し接続の誤りのうち最長のもの(95 バイト)。アドレスは最長の 15 文字で、
+		// エージェントが拒むブロードキャストのアドレスではないもの
+		{name: "longest probe error", addr: "223.255.255.254", err: "lookup " + longTargetHost + noSuchHost,
+			probe: "dial tcp 223.255.255.254:65535: connect: network is unreachable", target: doctor.ReasonTargetUnreachable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host, addr := tc.host, tc.addr
@@ -180,7 +192,7 @@ func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
 				addr = "192.168.1.30"
 			}
 			port := uint16(25565)
-			if addr == "255.255.255.255" {
+			if addr == "223.255.255.254" {
 				port = 65535
 			}
 			k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{host: {netip.MustParseAddr(addr)}}}

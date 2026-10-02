@@ -63,6 +63,9 @@ type Dataplane struct {
 	Allow *allowtargets.List
 	// Limits は同時フロー数のプロセス全体の予算(仕様 7 節)。ゼロ値は既定値
 	Limits resource.Limits
+	// unicast はブロードキャストとマルチキャストの宛先の判定である(仕様 7 節)。New がこのホストの
+	// インタフェースの一覧を読む判定を置く。nil なら一覧に依らない判定だけを行う
+	unicast *allowtargets.Unicast
 
 	// Tun と Relay は今のトンネルと中継である。どちらも Build が作り、Close が閉じて nil に戻す
 	Tun       *tunnel.Tunnel
@@ -72,7 +75,7 @@ type Dataplane struct {
 
 // New は何も立てていないユーザー空間モードの dataplane を作る。
 func New(allow *allowtargets.List, limits resource.Limits) *Dataplane {
-	return &Dataplane{Allow: allow, Limits: limits}
+	return &Dataplane{Allow: allow, Limits: limits, unicast: allowtargets.NewUnicast(nil, nil)}
 }
 
 // NewTunnel はトンネルを作る。値は tunnel.New で、テストだけが作成の失敗を模すために差し替える。
@@ -163,12 +166,14 @@ func (d *Dataplane) Read() agentdp.Reading {
 	return r
 }
 
-// RelayOptions は中継の調整値を作る。宛先の許可一覧があれば、中継が宛先へ接続するときに
-// 使う判定として渡す(仕様 7 節)。一覧が無ければ渡さないので、中継の挙動は一覧の導入前と同じになる。
+// RelayOptions は中継の調整値を作る。ブロードキャストとマルチキャストの宛先の拒否は常に渡し、
+// 宛先の許可一覧はあれば渡す。どちらも中継が宛先へ接続するときに使う判定である(仕様 7 節)。
+// 前者を常に渡すので、中継はホスト名の宛先を一覧の有無に依らず自分で解決する。
 func (d *Dataplane) RelayOptions(wg proto.WGConfig) relay.Options {
 	o := relay.Options{
 		UDPIdleTimeout: secondsToDuration("udp_timeout_stream", wg.UDPTimeoutStream, udpTimeoutStreamMaxSeconds, 120*time.Second),
 		Limits:         d.Limits,
+		RefuseTarget:   d.unicast.Refuse,
 	}
 	if d.Allow != nil {
 		o.AllowTarget = d.Allow.Allows

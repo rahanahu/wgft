@@ -50,6 +50,10 @@ const (
 // ある(設計文書 7b.2 節)。
 const LoopbackUnsupported = "does not forward to loopback targets"
 
+// UnicastOnly は、エージェントがブロードキャストかマルチキャストの宛先を拒んだ理由が含む句である
+// (設計文書 7 節)。2 つのモードが同じ文言を書く。
+const UnicastOnly = "the agent forwards only to unicast targets"
+
 // IPForward は、エージェントのホストの ip_forward が 1 でないために転送できないことを述べる理由が
 // 含む sysctl の名前である(設計文書 7b.1 節)。
 const IPForward = "net.ipv4.ip_forward"

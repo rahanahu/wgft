@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,10 @@ func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	multicastAllowed, err := allowtargets.Parse("224.0.0.0/4")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name   string
 		rule   proto.AgentRule
@@ -97,6 +102,12 @@ func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
 		// 設定の名前が無い拒否の文言("is not allowed")も同じ分類になる
 		{name: "target not allowed, no source name", rule: reasonTCPRule("r1", "192.168.9.9:25565", 25565), allow: narrow,
 			source: "-", want: doctor.ReasonTargetNotAllowed},
+		// ブロードキャストとマルチキャストの宛先は、許可一覧の有無に依らず拒む(設計文書 7 節)
+		{name: "multicast target", rule: reasonTCPRule("r1", "239.1.2.3:25565", 25565), want: doctor.ReasonTargetNotUnicast},
+		{name: "limited broadcast target", rule: proto.AgentRule{ID: "r1", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 9, Hi: 9},
+			Target: "255.255.255.255:9", Enabled: true}, want: doctor.ReasonTargetNotUnicast},
+		{name: "multicast target the allowlist lets through", rule: reasonTCPRule("r1", "239.1.2.3:25565", 25565), allow: multicastAllowed,
+			want: doctor.ReasonTargetNotUnicast},
 		// TCP の宛先への試し接続が期限までに応えない。中継の期限(2 秒)を待つ
 		{name: "tcp target did not answer", rule: reasonTCPRule("r1", "192.168.1.20:25565", 25565), hang: true,
 			want: doctor.ReasonTargetTimeout},
@@ -130,6 +141,11 @@ func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
 			got := serverDoctorReads(t, tc.rule, sts[0])
 			if c := got[doctor.CheckTarget]; c.Reason != tc.want {
 				t.Errorf("reason %q: rule.target = %s %s, want %s", sts[0].Reason, c.Status, c.Reason, tc.want)
+			}
+			// 宛先の種類で拒んだルールの次の手は、許可一覧へ加えることではなく、宛先を直すことを示す
+			if c := got[doctor.CheckTarget]; tc.want == doctor.ReasonTargetNotUnicast &&
+				(!strings.Contains(c.Next, "refuses broadcast and multicast targets") || strings.Contains(c.Next, "Add the target there")) {
+				t.Errorf("next step = %q", c.Next)
 			}
 		})
 	}

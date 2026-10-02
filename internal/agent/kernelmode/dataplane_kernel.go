@@ -118,7 +118,10 @@ type Dataplane struct {
 	Ops   Ops
 	iface string
 	allow *allowtargets.List
-	f     *credentials.Credentials
+	// unicast はブロードキャストとマルチキャストの宛先の判定である(7 節、7b.2 節)。nil なら一覧に
+	// 依らない判定だけを行う
+	unicast *allowtargets.Unicast
+	f       *credentials.Credentials
 	// ctx は停止で取り消される。名前の解決に使い、取り消された解決の結果では公開しない
 	ctx context.Context
 
@@ -233,7 +236,7 @@ func New(ctx context.Context, iface string, allow *allowtargets.List, f *credent
 // NewWithOps は、カーネルと名前解決への操作 ops を受け取って New と同じ dataplane を組む。本番の経路は
 // New が defaultKernelOps で呼ぶ。試験は偽物の ops を渡す。
 func NewWithOps(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error, ops Ops) *Dataplane {
-	d := &Dataplane{Ops: ops, iface: iface, allow: allow, f: f, ctx: ctx, save: save,
+	d := &Dataplane{Ops: ops, iface: iface, allow: allow, unicast: allowtargets.NewUnicast(nil, nil), f: f, ctx: ctx, save: save,
 		lkg: map[string]lkgEntry{}, probeErr: map[string]string{}}
 	d.loadRecord()
 	return d
@@ -340,7 +343,7 @@ func (d *Dataplane) LinkConfig() (wg.AgentConfig, error) {
 }
 
 func (d *Dataplane) nftConfig() nft.AgentConfig {
-	c := nft.AgentConfig{WGInterface: d.iface}
+	c := nft.AgentConfig{WGInterface: d.iface, RefuseTarget: d.unicast.Refuse}
 	if d.allow != nil {
 		c.AllowTarget, c.AllowTargetSource = d.allow.Allows, allowtargets.Env
 	}

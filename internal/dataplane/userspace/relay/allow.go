@@ -15,7 +15,8 @@ import (
 // targetLookupTimeout は、許可一覧があるときに中継が自分で行う target の名前解決の期限。
 const targetLookupTimeout = 5 * time.Second
 
-// ErrTargetNotAllowed は、宛先が許可一覧の外にあること(設計文書 7 節)。
+// ErrTargetNotAllowed は、エージェントが宛先を拒んだこと、つまり宛先が許可一覧の外にあるか、
+// ブロードキャストかマルチキャストのアドレスであること(設計文書 7 節)。
 // 呼び出し側は errors.Is でこの誤りを見分け、他の接続の失敗と区別できる。
 var ErrTargetNotAllowed = errors.New("target is not allowed")
 
@@ -34,27 +35,53 @@ func (e *notAllowedError) Error() string {
 
 func (e *notAllowedError) Unwrap() error { return ErrTargetNotAllowed }
 
-// allowedAtApply は、適用のときに宛先を許可一覧と照らす(設計文書 7 節の早い通知)。
-// 判定できるのは IP リテラルの宛先だけで、ホスト名は解決の結果が変わりうるので接続のときに照らす。
+// refusedTargetError は、Options.RefuseTarget が拒んだ 1 つの宛先。理由は RefuseTarget の文言そのもの
+// である。許可一覧による拒否と同じ扱いにするため、ErrTargetNotAllowed を包む。
+type refusedTargetError struct{ reason string }
+
+func (e *refusedTargetError) Error() string { return e.reason }
+
+func (e *refusedTargetError) Unwrap() error { return ErrTargetNotAllowed }
+
+// checksTargets は、中継が宛先を判定するかどうかである。判定するなら、ホスト名の宛先は自分で解決し、
+// 実際に接続するアドレスで判定する。
+func (m *Manager) checksTargets() bool {
+	return m.opts.AllowTarget != nil || m.opts.RefuseTarget != nil
+}
+
+// targetErr は、宛先 ap へ接続しない理由を返す。接続してよければ nil を返す。ブロードキャストと
+// マルチキャストの拒否を許可一覧より先に見る。許可一覧に加えても通らない宛先だからである。
+func (m *Manager) targetErr(ap netip.AddrPort) error {
+	ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+	if m.opts.RefuseTarget != nil {
+		if r := m.opts.RefuseTarget(ap.Addr()); r != "" {
+			return &refusedTargetError{reason: r}
+		}
+	}
+	if m.opts.AllowTarget != nil && !m.opts.AllowTarget(ap) {
+		return &notAllowedError{target: ap, source: m.opts.AllowTargetSource}
+	}
+	return nil
+}
+
+// allowedAtApply は、適用のときに宛先を許可一覧とブロードキャストとマルチキャストの拒否に照らす
+// (設計文書 7 節の早い通知)。判定できるのは IP リテラルの宛先だけで、ホスト名は解決の結果が
+// 変わりうるので接続のときに照らす。
 func (m *Manager) allowedAtApply(target string) error {
-	if m.opts.AllowTarget == nil {
+	if !m.checksTargets() {
 		return nil
 	}
 	ap, err := netip.ParseAddrPort(target)
 	if err != nil {
 		return nil // ホスト名
 	}
-	ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
-	if m.opts.AllowTarget(ap) {
-		return nil
-	}
-	return &notAllowedError{target: ap, source: m.opts.AllowTargetSource}
+	return m.targetErr(ap)
 }
 
-// dialTarget は宛先へ接続する。中継が宛先へ接続する唯一の経路なので、許可一覧の判定もここに置く。
-// 許可一覧があるときは、実際に接続するアドレスで判定するために自分で名前解決し、許したアドレスだけに接続する。
+// dialTarget は宛先へ接続する。中継が宛先へ接続する唯一の経路なので、宛先の判定もここに置く。
+// 判定するときは、実際に接続するアドレスで判定するために自分で名前解決し、許したアドレスだけに接続する。
 func (m *Manager) dialTarget(network, target string) (net.Conn, error) {
-	if m.opts.AllowTarget == nil {
+	if !m.checksTargets() {
 		return m.opts.Dial(network, target)
 	}
 	host, portStr, err := net.SplitHostPort(target)
@@ -72,9 +99,9 @@ func (m *Manager) dialTarget(network, target string) (net.Conn, error) {
 	var denied, dialErr error
 	for _, a := range addrs {
 		a = a.Unmap()
-		if !m.opts.AllowTarget(netip.AddrPortFrom(a, uint16(n))) {
+		if err := m.targetErr(netip.AddrPortFrom(a, uint16(n))); err != nil {
 			if denied == nil {
-				denied = &notAllowedError{target: netip.AddrPortFrom(a, uint16(n)), source: m.opts.AllowTargetSource}
+				denied = err
 			}
 			continue
 		}
@@ -117,14 +144,14 @@ func (m *Manager) lookupTarget(host string) ([]netip.Addr, error) {
 	return addrs, nil
 }
 
-// noteTargetAllowErr は、接続のときの許可一覧による拒否をリスナーの状態に載せる(設計文書 5.2 節)。
-// 扱うのは許可一覧による拒否だけで、宛先が落ちているなどの接続の失敗は今までどおりログだけにする。
-// err が nil なら、前に載せた拒否を消す(DNS が許す宛先に戻った場合)。
+// noteTargetAllowErr は、接続のときの宛先の拒否をリスナーの状態に載せる(設計文書 5.2 節)。
+// 扱うのは許可一覧と、ブロードキャストとマルチキャストの拒否だけで、宛先が落ちているなどの接続の
+// 失敗は今までどおりログだけにする。err が nil なら、前に載せた拒否を消す(DNS が許す宛先に戻った場合)。
 //
 // 接続 1 本ごと、UDP のセッション 1 つごとに呼ばれるので、状態が変わらない限り Manager の錠を取らない。
-// 許可一覧が無ければ何もせず、一覧があっても、拒否が続く間と通り続ける間は allowDenied の読みだけで返る。
+// 宛先を判定しなければ何もせず、判定しても、拒否が続く間と通り続ける間は allowDenied の読みだけで返る。
 func (m *Manager) noteTargetAllowErr(l *listener, err error) {
-	if m.opts.AllowTarget == nil {
+	if !m.checksTargets() {
 		return
 	}
 	denied := err != nil && errors.Is(err, ErrTargetNotAllowed)

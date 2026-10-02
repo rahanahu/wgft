@@ -456,7 +456,8 @@ func agentTableCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 			c.Detail += ". " + ch
 		}
 		c.Detail += agentKernelStoppedNote(ev)
-		c.Next = "a rule without DNAT names why: a target outside WGFT_AGENT_ALLOW_TARGETS, a name that does not resolve, or a loopback target, which kernel mode does not forward to; " +
+		c.Next = "a rule without DNAT names why: a target outside WGFT_AGENT_ALLOW_TARGETS, a name that does not resolve, a broadcast or multicast target, " +
+			"which the agent refuses in either mode, or a loopback target, which kernel mode does not forward to; " +
 			"use the host's LAN address for a service on this host. A rule with DNAT in place and an error names a target that does not answer, " +
 			"including one at the address kept from the last successful resolution, or net.ipv4.ip_forward"
 		return
