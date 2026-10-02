@@ -14,6 +14,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/proto"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
 // The tests in this file pin two conditions on how the userspace relay ends a TCP connection
@@ -108,12 +109,93 @@ func (relayEndLoopback) ListenUDP(port uint16) (net.PacketConn, error) {
 
 // relayEndRig is one relayed connection. Data flows from source, through the relay and its
 // netstack connection relayConn, to peer over the netstack. drop drops every packet the
-// relay's Device sends while it is true.
+// relay's Device sends while it is true. win follows the peer's receive window, and flow is
+// relayConn's local and remote port.
 type relayEndRig struct {
 	relayConn *tcpConn
 	peer      net.Conn
 	source    net.Conn
 	drop      *atomic.Bool
+	win       *relayEndWindow
+	flow      [2]uint16
+}
+
+// relayEndWindow follows, from the packets between the two Devices, how far into each stream
+// from the relay's Device the receiving end has offered room: the highest acknowledgment plus
+// scaled window it has sent. Data beyond that cannot be sent until the receiver advertises
+// more, as its reader takes data out.
+type relayEndWindow struct {
+	relayHost byte // the last address byte of the relay's Device
+	mu        sync.Mutex
+	flows     map[[2]uint16]*relayEndFlow // by the relay's port and the peer's port
+}
+
+type relayEndFlow struct {
+	relayISN   uint32
+	relaySYN   bool  // relayISN is known
+	peerScale  int   // the window scale in the peer's SYN
+	offeredEnd int64 // -1 until the peer's first acknowledgment after the relay's SYN
+}
+
+func newRelayEndWindow(relayHost byte) *relayEndWindow {
+	return &relayEndWindow{relayHost: relayHost, flows: make(map[[2]uint16]*relayEndFlow)}
+}
+
+func (w *relayEndWindow) observe(pkt []byte) {
+	if len(pkt) < header.IPv4MinimumSize {
+		return
+	}
+	ip := header.IPv4(pkt)
+	hl := int(ip.HeaderLength())
+	if ip.Protocol() != uint8(header.TCPProtocolNumber) || len(pkt) < hl+header.TCPMinimumSize {
+		return
+	}
+	tcp := header.TCP(pkt[hl:])
+	fromRelay := pkt[15] == w.relayHost
+	key := [2]uint16{tcp.DestinationPort(), tcp.SourcePort()}
+	if fromRelay {
+		key = [2]uint16{tcp.SourcePort(), tcp.DestinationPort()}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	f := w.flows[key]
+	if f == nil {
+		f = &relayEndFlow{offeredEnd: -1}
+		w.flows[key] = f
+	}
+	flags := tcp.Flags()
+	switch {
+	case flags.Contains(header.TCPFlagSyn) && fromRelay:
+		f.relayISN, f.relaySYN = tcp.SequenceNumber(), true
+	case flags.Contains(header.TCPFlagSyn):
+		f.peerScale = max(header.ParseSynOptions(tcp.Options(), flags.Contains(header.TCPFlagAck)).WS, 0)
+	case !fromRelay && f.relaySYN && flags.Contains(header.TCPFlagAck):
+		// the offset in the relay's stream up to which the peer has offered room
+		end := int64(int32(tcp.AckNumber() + uint32(tcp.WindowSize())<<f.peerScale - f.relayISN - 1))
+		f.offeredEnd = max(f.offeredEnd, end)
+	}
+}
+
+// offeredEnd is how far into the stream from the relay's port flow[0] to the peer's port
+// flow[1] the peer has offered room, or -1 if no acknowledgment from the peer has been seen.
+func (w *relayEndWindow) offeredEnd(flow [2]uint16) int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if f := w.flows[flow]; f != nil {
+		return f.offeredEnd
+	}
+	return -1
+}
+
+// flowOf is c's local and remote port, read while c is connected.
+func flowOf(t *testing.T, c *tcpConn) [2]uint16 {
+	t.Helper()
+	l, errL := netip.ParseAddrPort(c.LocalAddr().String())
+	r, errR := netip.ParseAddrPort(c.RemoteAddr().String())
+	if errL != nil || errR != nil {
+		t.Fatalf("the relay's connection has no addresses: %v, %v", errL, errR)
+	}
+	return [2]uint16{l.Port(), r.Port()}
 }
 
 func relayEndLogf(t *testing.T) func(string, ...any) {
@@ -133,21 +215,23 @@ func relayEndLogf(t *testing.T) func(string, ...any) {
 	}
 }
 
-// newRelayEndPair joins two Devices and drops the packets that the Device with the given last
-// address byte sends while drop is true. a (host 1) and b (host 2) both start without boost slots.
-func newRelayEndPair(t *testing.T, dropFrom byte) (*tcpPair, *atomic.Bool) {
-	drop := new(atomic.Bool)
-	p := newTCPPairOpts(t, 0, nil, func(pkt []byte) bool {
-		return drop.Load() && len(pkt) >= 20 && pkt[15] == dropFrom
+// newRelayEndPair joins two Devices and drops the packets that the relay's Device, the one with
+// the given last address byte, sends while drop is true. It follows the peer's receive window
+// in win. a (host 1) and b (host 2) both start without boost slots.
+func newRelayEndPair(t *testing.T, relayHost byte) (p *tcpPair, drop *atomic.Bool, win *relayEndWindow) {
+	drop, win = new(atomic.Bool), newRelayEndWindow(relayHost)
+	p = newTCPPairOpts(t, 0, nil, func(pkt []byte) bool {
+		win.observe(pkt)
+		return drop.Load() && len(pkt) >= 20 && pkt[15] == relayHost
 	})
-	return p, drop
+	return p, drop, win
 }
 
 // newAgentRelayEnd is the agent's role: the relay listens on the netstack (b) and dials a kernel
 // target on the loopback. The peer is the server's end on a; the source is the target.
 func newAgentRelayEnd(t *testing.T, slots int) *relayEndRig {
 	t.Helper()
-	p, drop := newRelayEndPair(t, 2)
+	p, drop, win := newRelayEndPair(t, 2)
 	p.b.pool = newBoostPool(slots)
 	tln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -189,10 +273,11 @@ func newAgentRelayEnd(t *testing.T, slots int) *relayEndRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { peer.Close() })
-	r := &relayEndRig{peer: peer, drop: drop}
+	r := &relayEndRig{peer: peer, drop: drop, win: win}
 	select {
 	case c := <-acc:
 		r.relayConn = connOf(c)
+		r.flow = flowOf(t, r.relayConn)
 	case <-time.After(5 * time.Second):
 		t.Fatal("the relay did not accept the peer's connection")
 	}
@@ -211,7 +296,7 @@ func newAgentRelayEnd(t *testing.T, slots int) *relayEndRig {
 // on b.
 func newServerRelayEnd(t *testing.T, slots int) *relayEndRig {
 	t.Helper()
-	p, drop := newRelayEndPair(t, 1)
+	p, drop, win := newRelayEndPair(t, 1)
 	p.a.pool = newBoostPool(slots)
 	aacc := make(chan net.Conn, 4)
 	go func() {
@@ -253,7 +338,7 @@ func newServerRelayEnd(t *testing.T, slots int) *relayEndRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { src.Close() })
-	r := &relayEndRig{source: src, drop: drop}
+	r := &relayEndRig{source: src, drop: drop, win: win}
 	var d net.Conn
 	select {
 	case d = <-dialed:
@@ -261,6 +346,7 @@ func newServerRelayEnd(t *testing.T, slots int) *relayEndRig {
 		t.Fatal("the relay did not dial the agent")
 	}
 	r.relayConn = connOf(d)
+	r.flow = flowOf(t, r.relayConn)
 	r.peer = matchAccepted(t, aacc, d.LocalAddr().String())
 	return r
 }
@@ -345,8 +431,8 @@ func relayFinished(c *tcpConn) bool {
 
 // runRelayEnd sends relayEndSize bytes from the source through the relay to the peer, which
 // reads slowly, and checks that the peer receives all of it and then EOF. It also checks the
-// scene: the relay finished writing while the peer still had data to receive, and an outage fell
-// where the scene says.
+// scene: the relay finished writing while the peer still had data to receive, more than the
+// peer had offered room for, and an outage fell where the scene says.
 func runRelayEnd(t *testing.T, r *relayEndRig, outage outageAt) {
 	t.Helper()
 	// The direction from the peer toward the source carries nothing: the peer half-closes it
@@ -367,9 +453,11 @@ func runRelayEnd(t *testing.T, r *relayEndRig, outage outageAt) {
 	go func() { got <- readSlowly(r.peer, deadline, &read) }()
 
 	// readAtEnd is how much the peer had read when the relay finished writing, or -1 if it had
-	// not by the deadline. The goroutine also runs the outage.
+	// not by the deadline, and offeredAtEnd how far into the stream the peer had offered room
+	// then. The goroutine also runs the outage.
 	var (
 		readAtEnd         = int64(-1)
+		offeredAtEnd      = int64(-1)
 		outageFrom        time.Time
 		outageTo          time.Time
 		endedBeforeOutage bool
@@ -388,6 +476,7 @@ func runRelayEnd(t *testing.T, r *relayEndRig, outage outageAt) {
 		for time.Now().Before(deadline) {
 			if relayFinished(r.relayConn) {
 				readAtEnd = read.Load()
+				offeredAtEnd = r.win.offeredEnd(r.flow)
 				if outage == outageAfterEnd {
 					dropFor()
 				}
@@ -403,8 +492,8 @@ func runRelayEnd(t *testing.T, r *relayEndRig, outage outageAt) {
 
 	res := <-got
 	<-watched
-	t.Logf("peer read %d bytes in %v, end: %v; the relay finished writing when the peer had read %d; outage %v; relay's side closed: %v",
-		res.n, time.Since(start).Round(time.Millisecond), res.err, readAtEnd, outageTo.Sub(outageFrom).Round(time.Millisecond), r.relayConn.closed.Load())
+	t.Logf("peer read %d bytes in %v, end: %v; the relay finished writing when the peer had read %d and offered room up to %d; outage %v; relay's side closed: %v",
+		res.n, time.Since(start).Round(time.Millisecond), res.err, readAtEnd, offeredAtEnd, outageTo.Sub(outageFrom).Round(time.Millisecond), r.relayConn.closed.Load())
 	if res.err != nil {
 		t.Fatalf("the peer did not receive all %d bytes and then EOF: read %d, then %v", relayEndSize, res.n, res.err)
 	}
@@ -413,6 +502,15 @@ func runRelayEnd(t *testing.T, r *relayEndRig, outage outageAt) {
 	}
 	if readAtEnd >= relayEndSize {
 		t.Fatalf("setup: the relay finished writing only after the peer had read everything (%d bytes), so nothing was left to deliver after the relay's end", readAtEnd)
+	}
+	// The relay's side must still hold data that it can send only after the peer reads more.
+	// Otherwise a peer whose receive buffer takes in everything makes the delivery after the
+	// relay's end, and an outage after it, trivial.
+	if offeredAtEnd < 0 {
+		t.Fatal("setup: no acknowledgment from the peer was seen by the time the relay finished writing")
+	}
+	if offeredAtEnd >= relayEndSize {
+		t.Fatalf("setup: when the relay finished writing, the peer had already offered room for all %d bytes, up to %d, so the relay's side did not need the peer to read before sending the rest", relayEndSize, offeredAtEnd)
 	}
 	if outage != noOutage && outageTo.IsZero() {
 		t.Fatal("setup: the outage did not happen")
