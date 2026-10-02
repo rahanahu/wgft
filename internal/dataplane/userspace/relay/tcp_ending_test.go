@@ -226,8 +226,8 @@ func wantObs(t *testing.T, side string, got, want endObs) {
 // A relayed connection that ends with an EOF in one direction stays half-closed: the other side
 // sees EOF, the other direction still carries data, and the relay holds the flow until the other
 // side closes too. A reset on either side, or a cut by the relay itself, ends the flow at once.
-// The client-reset case pins the current behaviour; the decision recorded in
-// TestTCPClientResetReachesTheAgentAsReset changes only what the agent observes in that case.
+// Besides the relay's own cuts, only a reset from the public client reaches the agent as a
+// reset; the client's side is closed normally in every case.
 func TestTCPEndingByCauseAndDirection(t *testing.T) {
 	cases := []struct {
 		name string
@@ -254,9 +254,8 @@ func TestTCPEndingByCauseAndDirection(t *testing.T) {
 		{"client reset", func(t *testing.T, r *endingRig) {
 			resetTCP(r.client)
 			r.wantReturned(t, "after the client's reset, while the agent stays open")
-			// current behaviour; the decided behaviour is a reset (see
-			// TestTCPClientResetReachesTheAgentAsReset)
-			wantObs(t, "agent", observe(r.agent, 5*time.Second), obsEOF)
+			// the relay resets its connection to the agent too (design.md 6.2 節)
+			wantObs(t, "agent", observe(r.agent, 5*time.Second), obsReset)
 		}},
 		{"agent half-close", func(t *testing.T, r *endingRig) {
 			r.agent.(interface{ CloseWrite() error }).CloseWrite()
@@ -307,18 +306,6 @@ func TestTCPEndingByCauseAndDirection(t *testing.T) {
 			tc.run(t, newEndingRig(t))
 		})
 	}
-}
-
-// Decided behaviour, not yet implemented: when the public client resets its connection, the
-// relay resets its connection to the agent instead of closing it, so the agent's relay ends the
-// flow even if its target never closes after a FIN. The current code closes the agent's side
-// normally and the agent observes EOF, so this test fails if enabled.
-func TestTCPClientResetReachesTheAgentAsReset(t *testing.T) {
-	t.Skip("expected to change: the relay does not yet pass a client's reset on to the agent")
-	r := newEndingRig(t)
-	resetTCP(r.client)
-	r.wantReturned(t, "after the client's reset, while the agent stays open")
-	wantObs(t, "agent", observe(r.agent, 5*time.Second), obsReset)
 }
 
 // agentEndingRig is one relayed connection in the agent's role: the relay listens on the tunnel's

@@ -134,16 +134,22 @@ func (r relayed) cut(c net.Conn) {
 	c.Close()
 }
 
-// abortUpstream はエージェントへの接続を RST で閉じる。ユーザー空間モードの接続は netstack の
-// 接続(nettun.TCPConn)で Abort を持ち、カーネルモードの接続は実ソケットで SetLinger(0) を使う。
+// abortUpstream はエージェントへの接続を RST で閉じる。
 func abortUpstream(up net.Conn) {
+	resetUpstream(up)
+	up.Close()
+}
+
+// resetUpstream はエージェントへの接続を RST で切る。ユーザー空間モードの接続は netstack の
+// 接続(nettun.TCPConn)で Abort を持ち、すぐに RST を送る。カーネルモードの接続は実ソケットで、
+// SetLinger(0) の後の Close が RST を送るので、Close は呼び出し側が行う。
+func resetUpstream(up net.Conn) {
 	switch v := up.(type) {
 	case interface{ Abort() }:
 		v.Abort()
 	case interface{ SetLinger(int) error }:
 		v.SetLinger(0)
 	}
-	up.Close()
 }
 
 // fixAtAccept は accept した接続を floor に固定して確かめる(netpipe.FixAtAccept)。テストが
@@ -604,7 +610,10 @@ func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 	// ユーザー空間モードでは、公開側のカーネルのソケットの受信のバッファを netstack の接続 up の boost の
 	// 枠に合わせる(設計文書 7 節)。カーネルモードの up は実ソケットなので何もしない
 	netpipe.FollowBoost(c, up)
-	netpipe.Pipe(c, up)
+	// 公開側のクライアントが RST で切ったときは、up も通常の Close ではなく RST で切る(設計文書 6.2 節)。
+	// FIN で閉じると、エージェントの中継はハーフクローズとして扱い、FIN を受けても閉じない宛先では、
+	// エージェント側の宛先への接続と枠が宛先が閉じるまで残る
+	netpipe.PipeResetB(c, up, func() { resetUpstream(up) })
 }
 
 // updateRestriction は待ち受けを残したまま宣言を更新し、閉じるべき進行中の接続を閉じる。
