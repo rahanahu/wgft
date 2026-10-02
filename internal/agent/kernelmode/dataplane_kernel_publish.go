@@ -200,7 +200,7 @@ func (d *Dataplane) writeRecord(what string, dst *json.RawMessage, v any) bool {
 			d.marshalErr = map[string]string{}
 		}
 		d.marshalErr[what] = msg
-		log.Printf("kernel mode: cannot encode the %s for the credentials file: %v; the credentials file is left unchanged", what, err)
+		log.Printf("kernel mode: cannot encode the %s for the credentials file: %v; the record is left unchanged", what, err)
 	}
 	return false
 }
