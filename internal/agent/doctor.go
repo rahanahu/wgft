@@ -95,13 +95,9 @@ func doctorErrorLine(msg string) []byte {
 	return append(b, '\n')
 }
 
-// maxDoctorText は応答に載せる 1 つの文字列の長さの上限である。単位はバイト。
-//
-// 制御ソケットの応答には大きさの上限が無く、リスナーの誤りも panic の値も長さに上限を持たない。
-// 節の趣旨は応答が大きくなりすぎないことなので(設計文書 10.2c 節)、リスナーの一覧をルール単位に
-// まとめるのと同じ理由でここにも上限を置く。実際の bind の失敗と宛先の到達確認の失敗はどちらも
-// 100 バイトに満たないので、512 バイトには 5 倍の余裕がある。
-const maxDoctorText = 512
+// maxDoctorText は応答に載せる 1 つの文字列の長さの上限である。単位はバイト。値と理由は
+// controlapi.DoctorTextMaxBytes にあり、カーネルモードの読み取りの側(clipKernelText)も同じ値で切る。
+const maxDoctorText = controlapi.DoctorTextMaxBytes
 
 // clipText は上限を超える文字列を切り、切ったことを添える。切る位置は rune の境目に合わせるので、
 // 結果は正しい UTF-8 のままである。

@@ -224,10 +224,16 @@ func startupFatal(err error) bool {
 
 // newKernelDataplane はカーネルモードの dataplane を作る。カーネルには何も書かない。
 func newKernelDataplane(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error) (agentdp.Dataplane, error) {
-	d := &kernelDataplane{ops: defaultKernelOps(), iface: iface, allow: allow, f: f, ctx: ctx, save: save,
+	return newKernelDataplaneWithOps(ctx, iface, allow, f, save, defaultKernelOps()), nil
+}
+
+// newKernelDataplaneWithOps は、カーネルと名前解決への操作 ops を受け取って newKernelDataplane と同じ
+// dataplane を組む。本番の経路は newKernelDataplane が defaultKernelOps で呼ぶ。試験は偽物の ops を渡す。
+func newKernelDataplaneWithOps(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error, ops kernelOps) *kernelDataplane {
+	d := &kernelDataplane{ops: ops, iface: iface, allow: allow, f: f, ctx: ctx, save: save,
 		lkg: map[string]lkgEntry{}, probeErr: map[string]string{}}
 	d.loadRecord()
-	return d, nil
+	return d
 }
 
 // loadRecord は認証情報ファイルの公開の記録を読み、直前に公開したテーブルと、ルールごとの直前に

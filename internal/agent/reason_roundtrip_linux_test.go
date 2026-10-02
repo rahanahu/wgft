@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/internal/vpsd/stream"
@@ -217,14 +218,14 @@ func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
 }
 
 // staleReasonLimit は hub の上限の写しである。ずれれば、目印の後ろに残る長さが黙って変わる。agent doctor
-// の応答の上限 maxDoctorText も同じ値である。
+// の応答の上限 controlapi.DoctorTextMaxBytes も同じ値である。
 func TestStaleReasonLimitMatchesTheHub(t *testing.T) {
 	long := strings.Repeat("a", 4096)
 	if got, want := len(stream.HeartbeatReason(long)), staleReasonLimit+staleClipMark; got != want {
 		t.Errorf("the hub keeps %d bytes of a long reason, staleReasonLimit says %d", got, want)
 	}
-	if staleReasonLimit != maxDoctorText {
-		t.Errorf("staleReasonLimit = %d, maxDoctorText = %d; they are the same cap", staleReasonLimit, maxDoctorText)
+	if staleReasonLimit != controlapi.DoctorTextMaxBytes {
+		t.Errorf("staleReasonLimit = %d, controlapi.DoctorTextMaxBytes = %d; they are the same cap", staleReasonLimit, controlapi.DoctorTextMaxBytes)
 	}
 }
 

@@ -1,7 +1,8 @@
 // Package controlapi holds the wire shapes and constants of the agent's control socket
 // (design.md 9 節 and 10.2c 節): the socket's path rule, the one-line `doctor` request and the
-// JSON reply it answers with, the kernel-mode reading that reply carries, the bound on how much of
-// a reply a reader takes, and the tunnel reasons a reader matches against.
+// JSON reply it answers with, the cap on each string in that reply, the kernel-mode reading that
+// reply carries, the bound on how much of a reply a reader takes, and the tunnel reasons a reader
+// matches against.
 //
 // internal/agent serves this socket and builds the reply; cmd/wgft's `agent doctor` and
 // `agent rotate-key` read it. The declarations live in this separate package so the reader can

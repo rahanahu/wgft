@@ -23,6 +23,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/platform/linux"
+	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -367,7 +368,7 @@ func recordRules(pub nft.AgentPublication, covered map[string]int) []controlapi.
 	for _, r := range pub.Rules {
 		dr := controlapi.DoctorRule{ID: r.RuleID, State: proto.StatusOK, Proto: r.Proto, Ports: r.ListenPort.Len()}
 		if r.Reason != "" {
-			dr.State, dr.Reason = proto.StatusError, clipText(r.Reason)
+			dr.State, dr.Reason = proto.StatusError, clipKernelText(r.Reason)
 		}
 		for _, rg := range r.Ranges {
 			dr.DNATPorts += rg.Ports.Len()
@@ -459,12 +460,20 @@ func capItems(s []string) []string {
 	}
 	out := make([]string, len(s))
 	for i, x := range s {
-		out[i] = clipText(x)
+		out[i] = clipKernelText(x)
 	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+// clipKernelText は上限(controlapi.DoctorTextMaxBytes)を超える文字列を切り、切ったことを添える。
+// 実行時の状態の側の clipText と同じ値で同じように切る。カーネルモードの実装は実行時の状態の側の
+// 関数を呼ばないので、カーネルの読み取りの側にも同じ 1 行を置く。切る位置は rune の境目に合わせるので、
+// 結果は正しい UTF-8 のままである。
+func clipKernelText(s string) string {
+	return textsafe.ClipText(s, controlapi.DoctorTextMaxBytes)
 }
 
 func plural(n int) string {
