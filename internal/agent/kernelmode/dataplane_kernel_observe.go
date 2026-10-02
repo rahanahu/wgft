@@ -4,7 +4,6 @@ package kernelmode
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/netip"
@@ -166,7 +165,7 @@ func (d *Dataplane) repair(gen uint64, rules []proto.AgentRule, op *observePrepa
 		}
 		// 理由の文言だけが変わった。テーブルは同じなので差し替えない
 		d.Pub = &next
-		if b, err := json.Marshal(next); err == nil {
+		if b, ok := d.marshalRecord("publication", next); ok {
 			d.f.KernelPublication = b
 		}
 		return true, false, nil

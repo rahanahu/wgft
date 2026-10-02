@@ -79,7 +79,7 @@ func (d *Dataplane) publish(pub nft.AgentPublication) error {
 	d.gate.Succeeded()
 	prev := d.Pub
 	d.Pub = &pub
-	if b, err := json.Marshal(pub); err == nil {
+	if b, ok := d.marshalRecord("publication", pub); ok {
 		d.f.KernelPublication = b
 	}
 	// 指紋を読めなければ、比べる基準が分からない。次の見直しは食い違いとして公開し直し、読み直す
@@ -176,9 +176,29 @@ func (d *Dataplane) recordUnconverged() {
 		d.f.KernelUnconverged = nil
 		return
 	}
-	if b, err := json.Marshal(d.unconverged); err == nil {
+	if b, ok := d.marshalRecord("list of unconverged publications", d.unconverged); ok {
 		d.f.KernelUnconverged = b
 	}
+}
+
+// marshalRecord は、認証情報ファイルの項目へ写す値を JSON にする。what は記録の名前で、ログに出す。
+// 今の型では失敗しないので、失敗は将来の型の変更の誤りである。失敗したら ok を false にし、呼び出し側は
+// 項目を書き換えず、前の記録を残す。同じ誤りが公開や収束のたびに繰り返しても、記録ごとに変わったときだけ
+// 1 行出す。
+func (d *Dataplane) marshalRecord(what string, v any) (b []byte, ok bool) {
+	b, err := json.Marshal(v)
+	if err == nil {
+		delete(d.marshalErr, what)
+		return b, true
+	}
+	if msg := err.Error(); d.marshalErr[what] != msg {
+		if d.marshalErr == nil {
+			d.marshalErr = map[string]string{}
+		}
+		d.marshalErr[what] = msg
+		log.Printf("kernel mode: cannot encode the %s for the credentials file: %v; the file keeps the previous record", what, err)
+	}
+	return nil, false
 }
 
 // probeAll は、公開した TCP のルールの宛先へ試し接続する(7b.3 節の 2 つ目の種類)。試すのは、連続する

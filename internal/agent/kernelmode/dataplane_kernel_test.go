@@ -1516,3 +1516,32 @@ func TestKernelPrerequisitesWithoutNetAdmin(t *testing.T) {
 		t.Fatalf("Prerequisites = %v; want the CAP_NET_ADMIN prerequisite refusal", err)
 	}
 }
+
+// marshalRecord は、JSON にできない値を 1 行で知らせて ok を false にし、同じ誤りが続く間は繰り返さない。
+// 失敗する値は今の型からは作れないので、直接渡す。
+func TestMarshalRecordLogsFailureOnce(t *testing.T) {
+	d := newTestKernel(t, &fakeKernel{}, nil, nil)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	for i := 0; i < 3; i++ {
+		if b, ok := d.marshalRecord("publication", make(chan int)); ok || b != nil {
+			t.Fatalf("marshalRecord of an unencodable value = %q, %v; want nil, false", b, ok)
+		}
+	}
+	if n := strings.Count(buf.String(), "cannot encode the publication for the credentials file"); n != 1 {
+		t.Errorf("logged the recurring failure %d times, want 1:\n%s", n, buf.String())
+	}
+	// 別の記録の失敗は別に出し、成功は控えを消す
+	d.marshalRecord("list of unconverged publications", make(chan int))
+	if n := strings.Count(buf.String(), "cannot encode"); n != 2 {
+		t.Errorf("logged %d failures, want 1 per record:\n%s", n, buf.String())
+	}
+	if b, ok := d.marshalRecord("publication", nft.AgentPublication{Generation: 1}); !ok || len(b) == 0 {
+		t.Fatalf("marshalRecord of a publication = %q, %v; want JSON, true", b, ok)
+	}
+	d.marshalRecord("publication", make(chan int))
+	if n := strings.Count(buf.String(), "cannot encode the publication"); n != 2 {
+		t.Errorf("a failure after a success logged %d times in all, want 2:\n%s", n, buf.String())
+	}
+}
