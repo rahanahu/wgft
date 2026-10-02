@@ -403,7 +403,10 @@ func TestTCPNoSlotStaysAtFloor(t *testing.T) {
 }
 
 // countBoosted は、pool の枠の排他を持ったまま、conns の side の端のうち boost の印が立つ数を返す。
-// 枠の排他の中では枠の付け替えが起きないので、数は 1 つの時点の値である。
+// boost の印は枠の排他の外で変わるので、走査の間に印が変わると、ある時点の値より 1 つ多く数えることはある
+// (demote が下ろした古い保有者の印を先に読み、枠を得た新しい保有者の印を後で読む場合)。それでも
+// Q を超えない。枠の排他を持つ間は枠の保有者の集まりが固定で、接続を閉じない限り印は保有者にしか
+// 立たないので、数は保有者の数以下で、Q 以下である。
 func countBoosted(pool *boostPool, conns [][2]net.Conn, side int) int {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
