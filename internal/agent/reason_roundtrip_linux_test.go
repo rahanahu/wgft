@@ -13,6 +13,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
+	"github.com/rahanahu/wgft/internal/vpsd/stream"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -138,34 +139,44 @@ func TestKernelPlanReasonsAreReadByServerDoctor(t *testing.T) {
 	}
 }
 
-// 名前の解決に失敗して直前の解決の結果で転送を続けているルールの理由は、ホスト名を 2 回含む。
-// ホスト名が長いと、hub の 512 バイトの切り詰めが目印 "; still forwarding to " を落とし、server
-// doctor は「転送を続けている」(UNKNOWN)ではなく「解決できない」(FAILED)と判定する。
-//
-// 既知の問題(この試験より前からある): 転送は続いているのに、server doctor は止まったと示す。この
-// 試験は今の挙動を固定するだけで、直すのは別の変更である。直したら、この試験の期待を UNKNOWN に
-// 改める。
-func TestKernelStaleReasonWithALongHostLosesTheMark(t *testing.T) {
-	k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{longTargetHost: {netip.MustParseAddr("192.168.1.30")}}}
-	d := newTestKernel(t, k, nil, nil)
-	rule := tcpRule("r1", longTargetHost+":25565", 25565, 25565)
-	if _, err := d.ApplyRules(1, []proto.AgentRule{rule}, nil); err != nil {
-		t.Fatal(err)
-	}
-	k.dnsErr = fmt.Errorf("lookup %s on 127.0.0.53:53: no such host", longTargetHost)
-	if _, err := d.ApplyRules(2, []proto.AgentRule{rule}, nil); err != nil {
-		t.Fatal(err)
-	}
-	st := statusOf(t, d, rule.ID)
-	if _, _, stale := doctor.StaleResolution(st.Reason); !stale {
-		t.Fatalf("before the hub, StaleResolution(%q) = false, want true", st.Reason)
-	}
-	if len(st.Reason) <= 512 {
-		t.Fatalf("reason is %d bytes; this case needs one past the hub's 512-byte cap", len(st.Reason))
-	}
-	c := serverDoctorReads(t, rule, st)[doctor.CheckTargetResolve]
-	if c.Status != doctor.StatusFailed || c.Reason != doctor.ReasonResolveFailed {
-		t.Errorf("rule.target_resolve = %s %s; the known issue reads %s %s here. If the mark now survives the cap, update this test",
-			c.Status, c.Reason, doctor.StatusFailed, doctor.ReasonResolveFailed)
+// 名前の解決に失敗して直前の解決の結果で転送を続けているルールの理由は、ホスト名を 2 回含む。253 バイト
+// のホスト名でも、目印 "; still forwarding to " が hub の 512 バイトの切り詰めの内に残り、server
+// doctor が転送を続けている(UNKNOWN)と判定することを固定する。誤りの文面が長いときと、誤りの文面に
+// 制御文字があるときも同じである。以前は目印が切り落とされ、server doctor は解決できない(FAILED)と
+// 判定した。
+func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  string
+	}{
+		{"resolver error repeats the host", "lookup " + longTargetHost + " on 127.0.0.53:53: no such host"},
+		{"resolver error is itself long", "lookup " + longTargetHost + ": " + strings.Repeat("x", 600)},
+		{"resolver error with control characters", strings.Repeat("\x1b", 200) + " lookup " + longTargetHost},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{longTargetHost: {netip.MustParseAddr("192.168.1.30")}}}
+			d := newTestKernel(t, k, nil, nil)
+			rule := tcpRule("r1", longTargetHost+":25565", 25565, 25565)
+			if _, err := d.ApplyRules(1, []proto.AgentRule{rule}, nil); err != nil {
+				t.Fatal(err)
+			}
+			k.dnsErr = errors.New(tc.err)
+			if _, err := d.ApplyRules(2, []proto.AgentRule{rule}, nil); err != nil {
+				t.Fatal(err)
+			}
+			st := statusOf(t, d, rule.ID)
+			if !strings.Contains(st.Reason, longTargetHost) {
+				t.Fatalf("reason %q does not name the host", st.Reason)
+			}
+			stored := stream.HeartbeatReason(st.Reason)
+			addr, _, stale := doctor.StaleResolution(stored)
+			if !stale || addr != "192.168.1.30" {
+				t.Fatalf("after the hub, StaleResolution(%q) = %q, %v; want the mark to survive", stored, addr, stale)
+			}
+			c := serverDoctorReads(t, rule, st)[doctor.CheckTargetResolve]
+			if c.Status != doctor.StatusUnknown {
+				t.Errorf("rule.target_resolve = %s %s, want %s (still forwarding)", c.Status, c.Reason, doctor.StatusUnknown)
+			}
+		})
 	}
 }
