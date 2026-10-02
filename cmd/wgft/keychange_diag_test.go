@@ -101,6 +101,53 @@ func TestServerDoctorKeyChangeRefused(t *testing.T) {
 		}
 	})
 
+	t.Run("record at the threshold is still current", func(t *testing.T) {
+		in := disconnectedButTunnelledInput(r)
+		in.Agents[0].KeyChangeRefusedAt = at(doctor.KeyChangeRefusalCurrent)
+		if c := checkOf(t, diagnose(r, in), checkConnection); c.Reason != doctor.ReasonKeyChangeLimited {
+			t.Errorf("reason = %q, want %q", c.Reason, doctor.ReasonKeyChangeLimited)
+		}
+	})
+
+	// A record older than one refill plus the longest reconnect wait cannot belong to an agent that is
+	// still retrying: its next attempt would have been refused again, renewing the record, or
+	// accepted, clearing it. Such a record is a past fact, not the current cause (design.md 10.2a 節).
+	stale := doctor.KeyChangeRefusalCurrent + time.Second
+	for _, tc := range []struct {
+		name      string
+		handshake time.Duration
+		status    string
+	}{
+		{"stale record, handshake recent", 20 * time.Second, statusUnknown},
+		{"stale record, handshake stale", 72 * time.Hour, statusFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plain := disconnectedButTunnelledInput(r)
+			plain.Agents[0].LastHandshake = at(tc.handshake)
+			want := checkOf(t, diagnose(r, plain), checkConnection)
+
+			in := disconnectedButTunnelledInput(r)
+			in.Agents[0].LastHandshake = at(tc.handshake)
+			in.Agents[0].KeyChangeRefusedAt = at(stale)
+			checks := diagnose(r, in)
+			c := checkOf(t, checks, checkConnection)
+			if c.Status != tc.status || c.Reason != reasonAgentDisconnected {
+				t.Fatalf("agent.connection = %s/%s, want %s/%s", c.Status, c.Reason, tc.status, reasonAgentDisconnected)
+			}
+			if c.Next != want.Next || strings.Join(c.Causes, "|") != strings.Join(want.Causes, "|") {
+				t.Errorf("a stale record must keep the generic causes and next step:\n got %q %q\nwant %q %q", c.Causes, c.Next, want.Causes, want.Next)
+			}
+			note := ". This server last refused a public key change from this agent " + doctor.Since(doctorNow, doctorNow.Add(-stale)).String() +
+				" ago because of the key change limit"
+			if c.Detail != want.Detail+note {
+				t.Errorf("detail = %q, want the generic detail plus %q", c.Detail, note)
+			}
+			if err, wantErr := doctorExit(buildReport([]proto.Rule{r}, in)), doctorExit(buildReport([]proto.Rule{r}, plain)); (err == nil) != (wantErr == nil) {
+				t.Errorf("exit differs from the generic case: %v vs %v", err, wantErr)
+			}
+		})
+	}
+
 	t.Run("never refused", func(t *testing.T) {
 		c := checkOf(t, diagnose(r, disconnectedButTunnelledInput(r)), checkConnection)
 		if c.Reason != reasonAgentDisconnected {
@@ -185,5 +232,16 @@ func TestAgentDoctorKeyChangeRefused(t *testing.T) {
 	c := run(controlapi.DoctorStream{DisconnectedAt: now.Add(-time.Minute), DisconnectReason: "read tcp: connection reset by peer"})
 	if c.Reason != agentReasonReconnecting || !strings.Contains(c.Next, "keep being forwarded") {
 		t.Errorf("another disconnect: %s %q, want reconnecting with the generic advice", c.Reason, c.Next)
+	}
+}
+
+// The threshold is one refill of the key change limit plus the agent's longest reconnect wait, the
+// values design.md 5.2 節 gives: 10 minutes and 5 minutes.
+func TestKeyChangeRefusalThreshold(t *testing.T) {
+	if proto.KeyChangeEvery != 10*time.Minute || proto.ReconnectBackoffMax != 5*time.Minute {
+		t.Fatalf("refill %v, backoff max %v; design.md 5.2 gives 10m and 5m", proto.KeyChangeEvery, proto.ReconnectBackoffMax)
+	}
+	if doctor.KeyChangeRefusalCurrent != proto.KeyChangeEvery+proto.ReconnectBackoffMax {
+		t.Fatalf("KeyChangeRefusalCurrent = %v, want the refill interval plus the longest reconnect wait", doctor.KeyChangeRefusalCurrent)
 	}
 }

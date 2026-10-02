@@ -133,8 +133,9 @@ const (
 	// 転送するルールは 1 に戻るまで止まる。
 	ReasonIPForwardOff = "ip_forward_off"
 	// ReasonKeyChangeLimited は、server が鍵の変更の頻度の上限でエージェントの公開鍵の宣言を断り、
-	// その後にそのエージェントの接続を受け付けていないことである(設計文書 5.2・10.2a 節)。今も
-	// 断り続けていることは意味しない。agent doctor の stream.connection も同じ値を使う(10.2c 節)。
+	// その後にそのエージェントの公開鍵の宣言を受け付けていないことである(設計文書 5.2・10.2a 節)。
+	// server doctor が使うのは、記録が KeyChangeRefusalCurrent より新しい場合だけである。agent doctor の
+	// stream.connection も同じ値を使う(10.2c 節)。
 	ReasonKeyChangeLimited = "key_change_limited"
 )
 
@@ -162,6 +163,13 @@ const (
 	// エージェント側の watchdog の閾値であって、診断が気付けない期間ではない。1 つの数に
 	// 2 つの定数を置いたことが、両者の取り違えを生んでいた。
 	HandshakeStale = 3 * time.Minute
+	// KeyChangeRefusalCurrent は、鍵の変更を上限で断った記録(管理用 API の key_change_refused_at)を、
+	// 試みを続けているエージェントへの拒否として読む長さである(設計文書 10.2a 節)。記録は直近の拒否の
+	// 時刻で、宣言を受け付けると消える。1 回分は KeyChangeEvery ごとに戻り、試みを続けるエージェントは
+	// ReconnectBackoffMax より長くは待たないので、その記録はこの長さのうちに新しい拒否で更新されるか、
+	// 鍵が通って消える。これより古い記録は、エージェントの試みが鍵の判定まで届いていないことを示すので、
+	// 拒否を今の原因として示さない。
+	KeyChangeRefusalCurrent = proto.KeyChangeEvery + proto.ReconnectBackoffMax
 	// TargetReportStale は、エージェントが報告したルールの状態が古くなる長さである。TCP の
 	// target への接続確認は 30 秒ごとに行われる(設計文書 5.2 節)ので、ハートビートと同じ
 	// 90 秒を越えた報告は、今の値として扱わない。

@@ -188,7 +188,7 @@ func TestKeyChangeRefusalRecord(t *testing.T) {
 		t.Fatalf("over the limit: %v, want 1008", err)
 	}
 	st := h.Status("home")
-	if !st.Connected || st.KeyChangeRefusedAt.Before(before) {
+	if !st.Connected || st.KeyChangeRefusedAt.Before(before) || st.KeyChangeRefusedBy != "tok-home" {
 		t.Fatalf("refused while connected: %+v", st)
 	}
 	refusedAt := st.KeyChangeRefusedAt
@@ -230,7 +230,7 @@ func TestKeyChangeRefusalRecord(t *testing.T) {
 	if m, err := declare(t, url, "home"); err != nil || m.Type != proto.MsgState {
 		t.Fatalf("accepted declaration: %+v, %v", m, err)
 	}
-	if st := h.Status("home"); !st.Connected || !st.KeyChangeRefusedAt.IsZero() {
+	if st := h.Status("home"); !st.Connected || !st.KeyChangeRefusedAt.IsZero() || st.KeyChangeRefusedBy != "" {
 		t.Fatalf("accepted since: %+v", st)
 	}
 
@@ -277,13 +277,13 @@ func TestKeyChangeLimitLogIsPerAgent(t *testing.T) {
 func TestKeyChangeLogGateExpires(t *testing.T) {
 	h := New(&fakeBackend{})
 	t0 := time.Now()
-	if !h.noteKeyChangeRefused("a", t0) || h.noteKeyChangeRefused("a", t0.Add(59*time.Second)) {
+	if !h.noteKeyChangeRefused("a", "tok-a", t0) || h.noteKeyChangeRefused("a", "tok-a", t0.Add(59*time.Second)) {
 		t.Fatal("the same agent was not gated within a minute")
 	}
-	if !h.noteKeyChangeRefused("b", t0.Add(30*time.Second)) {
+	if !h.noteKeyChangeRefused("b", "tok-b", t0.Add(30*time.Second)) {
 		t.Fatal("another agent was gated")
 	}
-	if !h.noteKeyChangeRefused("c", t0.Add(80*time.Second)) {
+	if !h.noteKeyChangeRefused("c", "tok-c", t0.Add(80*time.Second)) {
 		t.Fatal("a new agent was gated")
 	}
 	h.mu.Lock()
@@ -294,7 +294,7 @@ func TestKeyChangeLogGateExpires(t *testing.T) {
 	if a || !bb || n != 2 {
 		t.Fatalf("after a's minute passed: a kept=%v b kept=%v entries=%d, want false true 2", a, bb, n)
 	}
-	if !h.noteKeyChangeRefused("a", t0.Add(61*time.Second)) {
+	if !h.noteKeyChangeRefused("a", "tok-a", t0.Add(61*time.Second)) {
 		t.Fatal("the agent was not logged again after its minute")
 	}
 	if st := h.Status("a"); !st.KeyChangeRefusedAt.Equal(t0.Add(61 * time.Second)) {

@@ -59,6 +59,10 @@ type Status struct {
 	// いないことを表し、今も断り続けていることは表さない。確立した接続はより後の拒否で置き換わらない
 	// ので、接続中のエージェントでも値を持ちうる
 	KeyChangeRefusedAt time.Time
+	// KeyChangeRefusedBy は、KeyChangeRefusedAt の拒否を受けた接続が認証した登録 identity である。
+	// 登録の取り消しは状態を捨てるが、取り消しが上限の判定と記録の書き込みの間に済むと、取り消した
+	// 登録の記録が残りうる。読み手は今の登録の identity と一致する記録だけを使う
+	KeyChangeRefusedBy string
 }
 
 type conn struct {
@@ -411,7 +415,7 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 			// 書くと、その間に受け付けた同じエージェントの接続の状態に、それより前の拒否を書いてしまう。
 			// 恒久トークンの持ち主が試みを繰り返してもログが溢れないよう、行はエージェントごとに 1 分に
 			// 1 行までにする
-			logIt := h.noteKeyChangeRefused(agent, time.Now())
+			logIt := h.noteKeyChangeRefused(agent, identity, time.Now())
 			lock.unlock()
 			if logIt {
 				log.Printf("stream: %s: refusing a public key change: %v", agent, err)
@@ -512,9 +516,9 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 	}
 }
 
-// noteKeyChangeRefused は、鍵の変更の頻度の上限で agent の宣言を断ったことを状態に記録し、その行を
-// ログに出してよいかを返す。状態の項目が無ければ未接続の項目を作る。
-func (h *Hub) noteKeyChangeRefused(agent string, now time.Time) bool {
+// noteKeyChangeRefused は、鍵の変更の頻度の上限で agent の登録 identity の宣言を断ったことを状態に
+// 記録し、その行をログに出してよいかを返す。状態の項目が無ければ未接続の項目を作る。
+func (h *Hub) noteKeyChangeRefused(agent, identity string, now time.Time) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s := h.status[agent]
@@ -522,7 +526,7 @@ func (h *Hub) noteKeyChangeRefused(agent string, now time.Time) bool {
 		s = &Status{}
 		h.status[agent] = s
 	}
-	s.KeyChangeRefusedAt = now
+	s.KeyChangeRefusedAt, s.KeyChangeRefusedBy = now, identity
 	if next, ok := h.keyChangeLogNext[agent]; ok && now.Before(next) {
 		return false
 	}
@@ -540,7 +544,7 @@ func (h *Hub) clearKeyChangeRefused(agent string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if s := h.status[agent]; s != nil {
-		s.KeyChangeRefusedAt = time.Time{}
+		s.KeyChangeRefusedAt, s.KeyChangeRefusedBy = time.Time{}, ""
 	}
 }
 

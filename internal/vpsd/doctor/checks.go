@@ -446,8 +446,16 @@ func connectionCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 		if hbOK {
 			seen = ", last seen " + Since(in.Now, hb).String() + " ago"
 		}
+		// 鍵の変更を上限で断った記録は、試みを続けるエージェントのものと読める間だけ原因として示す。
+		// それより古い記録は過去の事実として 1 文だけ添え、判定と案内は切断の既定のものにする
+		// (設計文書 10.2a 節)。
+		pastRefusal := ""
 		if refused, ok := ParseWhen(ai.KeyChangeRefusedAt); ok {
-			return keyChangeRefusedCheck(c, r, ai, in, refused, seen)
+			if in.Now.Sub(refused) <= KeyChangeRefusalCurrent {
+				return keyChangeRefusedCheck(c, r, ai, in, refused, seen)
+			}
+			pastRefusal = ". This server last refused a public key change from this agent " + Since(in.Now, refused).String() +
+				" ago because of the key change limit"
 		}
 		if hs, ok := ParseWhen(ai.LastHandshake); ok && in.Now.Sub(hs) < HandshakeStale {
 			// 制御の経路だけが切れていて、トンネルは生きている状態である。この検査が測るのは
@@ -457,7 +465,8 @@ func connectionCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 			// 「転送はここで止まった」と報告してしまう。
 			c.Status = StatusUnknown
 			c.Detail = "the control connection is down" + seen + "; existing traffic can still flow, but rule changes will " +
-				"not arrive. The tunnel handshook " + Since(in.Now, hs).String() + " ago, so the rules the agent already holds may still be forwarding"
+				"not arrive. The tunnel handshook " + Since(in.Now, hs).String() + " ago, so the rules the agent already holds may still be forwarding" +
+				pastRefusal
 			c.Causes = []string{
 				"the control connection dropped and the agent has not reconnected yet; it backs off up to 5 minutes",
 				"the agent reached this server but was rejected; see the server log",
@@ -474,6 +483,7 @@ func connectionCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 		if hbOK {
 			c.Detail = "last seen " + Since(in.Now, hb).String() + " ago"
 		}
+		c.Detail += pastRefusal
 		c.Causes = []string{"the agent is not running", "it cannot reach this VPS's agent API port", "the home line or the ISP is down"}
 		c.Next = "run wgft agent doctor on the agent host; it answers whether the agent runs there and what its own state is, " +
 			"then check that it can reach this VPS's agent API port"
