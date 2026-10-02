@@ -101,9 +101,9 @@ const targetProbeConcurrency = 32
 // 本番では、1 つの Manager を Apply と Retry の経路(apply.go)か、Prepare と Commit の経路(staged.go)の
 // どちらか一方だけで使い、両方を混ぜない。エージェントは前者を、vpsd のユーザー空間モードは後者を使う。
 //
-// Manager の錠は mu と、serveTCP と serveUDP が待ち受けごとに持つ局所の錠(接続かセッションの表と、
-// TCP の closed と cut、UDP の pending を守る)の 2 段で、順は mu -> 待ち受けの錠である。Apply、
-// Staged.Commit、Close、Status は mu を持ったまま待ち受けの closeF、sweep、sessions のどれかを呼び、
+// Manager の錠は mu と、待ち受けごとの錠(TCP は tcpServer の mu、UDP は serveUDP の局所の mu。
+// 接続かセッションの表と、TCP の closed と cut、UDP の pending を守る)の 2 段で、順は mu -> 待ち受けの錠
+// である。Apply、Staged.Commit、Close、Status は mu を持ったまま待ち受けの closeF、sweep、sessions のどれかを呼び、
 // それらが待ち受けの錠を取る。中継の goroutine(accept と読み取りのループ、接続ごとの goroutine)は、
 // 待ち受けの錠を持たずに ruleOf、targetOf、noteTargetAllowErr で mu を取る。CloseSessions は mu を
 // 放してから sweep を呼ぶ。
@@ -167,7 +167,7 @@ type bindFailure struct {
 
 // listener は待ち受け 1 つ。状態(設計文書 7a.3 節の Active、Retiring、閉じた状態)は、どちらの表
 // (Manager の listeners か retiring)に入っているか、UDP の accepting、budget の受け付けの状態、
-// serveTCP と serveUDP が持つ待ち受けソケットで表す。閉じる、付け替える、退役させる、再開する
+// tcpServer と serveUDP が持つ待ち受けソケットで表す。閉じる、付け替える、退役させる、再開する
 // 操作は次の名前の付いたメソッドで行い、どれも呼び出し側が Manager の mu を持つ。待ち受けを開く経路
 // (openLocked と、Commit が Prepare で bind したソケットから待ち受けを作る箇所)は、これらのメソッドを
 // 通さず、budget の受け付けと表への登録をその場で行う。
