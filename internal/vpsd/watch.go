@@ -113,14 +113,18 @@ func (d *Daemon) judgeIPMismatch(counts map[string]int, obs []ipObservation) {
 			// 上で読んだ確認済みの組は、この記録までの間に管理者が警告を消すと古くなる。記録は
 			// 確認済みの組との照合と同じ文で行い、消したばかりの警告を戻さない
 			//
-			// 食い違いが続く間は、観測のたびに同じ行の時刻を更新する。ログは行を新しく作った回だけに
-			// 書く。組が変われば行も新しくなるので、そのときは書く
-			if _, created, err := d.st.AddIPMismatchWarning(o.Agent, streamIP, wgIP); err == nil && created {
+			// 食い違いが続く間は、観測のたびに同じ行の時刻を更新する。ログは、行を新しく作った回と、
+			// 連続の 8 回目(食い違いを警告に変える観測)に書く。続く間は 1 回で、止まった後の再発と
+			// 再起動の後(連続回数はメモリにしかない)の検知も 1 回ずつ書く。組が変われば行も新しくなる
+			if recorded, created, err := d.st.AddIPMismatchWarning(o.Agent, streamIP, wgIP); err == nil && recorded && (created || n == mismatchWarnAfter) {
 				log.Printf("agent %s: detected IP mismatch: %s", o.Agent, store.IPMismatchDetail(streamIP, wgIP))
 			}
 		}
 	}
 }
+
+// mismatchWarnAfter は、食い違いを警告に変える連続の観測の回数である(仕様 5.2 節)。
+const mismatchWarnAfter = 8
 
 // ipMismatchStep は 1 回の観測(仕様 5.2 節)。acks はそのエージェントの確認済みの組。
 //   - どちらかが観測できなければ 0 に戻し、確認済みの組は捨てない
@@ -146,7 +150,7 @@ func ipMismatchStep(count int, streamIP, wgIP string, acks []store.Ack) (n int, 
 		count = 0
 	}
 	count++
-	return count, count >= 8 && !acked, discard
+	return count, count >= mismatchWarnAfter && !acked, discard
 }
 
 // flapWindow は「以前の値へ戻った」とみなす時間区間(仕様 5.2 節)。

@@ -422,3 +422,46 @@ func TestMismatchDetectionLogsOncePerPair(t *testing.T) {
 		t.Fatalf("an acknowledged pair must not log, got %d\n%s", n, logs.String())
 	}
 }
+
+// 食い違いがいったん止まって同じ組で再発したときと、server の再起動の後に同じ組の食い違いが続くとき
+// は、行が残っていても、連続の 8 回目にログを 1 回書く。続く間は書かない。
+func TestMismatchDetectionLogsAgainAfterAGapAndARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.sqlite")
+	m := newMismatchDriver(t, path)
+	logs := captureLog(t)
+	count := func() int { return strings.Count(logs.String(), "detected IP mismatch") }
+	m.tick(20, ackStream, ackWG)
+	if n := count(); n != 1 {
+		t.Fatalf("first run: got %d logs, want 1\n%s", n, logs.String())
+	}
+	// 一致の観測で連続回数が 0 に戻る。行は残る
+	m.tick(1, ackStream, ackStream)
+	m.tick(7, ackStream, ackWG)
+	if n := count(); n != 1 {
+		t.Fatalf("7 observations of the recurrence must not log yet, got %d", n)
+	}
+	m.tick(30, ackStream, ackWG)
+	if n := count(); n != 2 {
+		t.Fatalf("a recurrence of the same pair must log once, got %d\n%s", n, logs.String())
+	}
+	// 観測できない回でも 0 に戻る
+	m.tick(3, "", ackWG)
+	m.tick(8, ackStream, ackWG)
+	if n := count(); n != 3 {
+		t.Fatalf("a recurrence after unobserved ticks must log once, got %d\n%s", n, logs.String())
+	}
+	// 再起動: 行は残り、連続回数はメモリにしか無いので 0 から始まる
+	m.st.Close()
+	m2 := newMismatchDriver(t, path)
+	m2.tick(7, ackStream, ackWG)
+	if n := count(); n != 3 {
+		t.Fatalf("7 observations after a restart must not log yet, got %d", n)
+	}
+	m2.tick(30, ackStream, ackWG)
+	if n := count(); n != 4 {
+		t.Fatalf("a restart must log the continuing mismatch once, got %d\n%s", n, logs.String())
+	}
+	if ws := m2.warnings(); len(ws) != 1 {
+		t.Fatalf("the pair must keep one row, got %+v", ws)
+	}
+}

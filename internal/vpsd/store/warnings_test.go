@@ -739,3 +739,27 @@ func TestAddIPMismatchWarningLeavesAnAcknowledgedPairsRowAlone(t *testing.T) {
 		t.Fatalf("acknowledged pair with a leftover row = %v, %v, %v; want neither recorded nor created", rec, created, err)
 	}
 }
+
+// 上限を超えた既存のデータベースでも、既存の組を更新するだけの記録で、行は上限まで減り、更新した行は残る
+// (仕様 5.2 節)。
+func TestAddIPMismatchWarningTrimsOnAnUpdateOnlyRecord(t *testing.T) {
+	s := openTemp(t)
+	registerAgent(t, s, "home")
+	const extra = 10
+	base := time.Now().Unix() - 100000
+	for i := 0; i < MaxIPMismatchWarnings+extra; i++ {
+		insertWarningAt(t, s, "home", WarnIPMismatch, mismatchDetail(i), base+int64(i))
+	}
+	// 最も古い行の組を観測する。更新だけの記録でも、その行は最も新しくなって残る
+	rec, created, err := s.AddIPMismatchWarning("home", "198.51.100.0", "203.0.113.9")
+	if err != nil || !rec || created {
+		t.Fatalf("update = %v, %v, %v; want recorded, not created", rec, created, err)
+	}
+	got := warningDetails(t, s, "home", WarnIPMismatch)
+	if len(got) != MaxIPMismatchWarnings {
+		t.Fatalf("rows after an update-only record = %d, want %d", len(got), MaxIPMismatchWarnings)
+	}
+	if !got[mismatchDetail(0)] || got[mismatchDetail(1)] {
+		t.Errorf("updated row kept = %v, next oldest kept = %v; want true, false", got[mismatchDetail(0)], got[mismatchDetail(1)])
+	}
+}
