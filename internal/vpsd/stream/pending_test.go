@@ -110,8 +110,8 @@ func TestFirstMessageTimeout(t *testing.T) {
 // TestPendingStreamsPerAgent は、1 つのエージェントが同時に持てる確立前の stream を 2 本に抑え、
 // 3 本目を 429 で断り、断った接続では Authenticated を呼ばないことを確かめる。確立した stream と
 // 閉じた stream は数から外れ、他のエージェントは影響を受けない(設計文書 11 節)。
-// 変異の確認:ServeHTTP の reservePending の判定を外すと 3 本目が通って落ちる。serve の established を
-// 呼ばないと、確立の後の接続が断られて落ちる。reservePending の release で数を戻さないと、閉じた
+// 変異の確認:ServeHTTP の reservePending の判定を外すと 3 本目が通って落ちる。serve が確立の時点で
+// returnSlot を呼ばないと、確立の後の接続が断られて落ちる。reservePending の release で数を戻さないと、閉じた
 // 後の接続が断られて落ちる。
 func TestPendingStreamsPerAgent(t *testing.T) {
 	h, url := newPendingTestHub(t)

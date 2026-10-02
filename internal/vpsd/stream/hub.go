@@ -309,8 +309,9 @@ func (h *Hub) reservePending(agent string) (release func(), ok bool) {
 
 // serve は認証を通った stream を最後まで扱う。release は確立前の stream の枠を返す関数で、serve が
 // 必ず 1 回呼ぶ。接続を表に入れた時点で返すが、旧接続を置き換えた場合は、旧接続の serve が戻るまで
-// 返さない。置き換えられた旧接続は、読みかけのメッセージを持ったまま close の手順で最長約 10 秒
-// 残りうるので、その間はこの枠で旧接続を数える(設計文書 7 節、11 節)。
+// 返さない。置き換えられた旧接続は、読みかけのメッセージを持ったまま、WebSocket の close の期限と
+// TLS の close_notify の書き込みの期限の間残りうるので、その間はこの枠で旧接続を数える
+// (設計文書 7 節、11 節)。
 func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *websocket.Conn, release func()) {
 	done := make(chan struct{})
 	defer close(done)
