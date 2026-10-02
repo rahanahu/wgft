@@ -62,6 +62,8 @@ type conn struct {
 	identity string        // registration authenticated before the first WebSocket message
 	pushCh   chan struct{} // one pending push; repeated requests coalesce
 	pushDone chan struct{}
+	// done は serve が戻ると閉じる。この接続を置き換えた接続は、これが閉じるまで確立前の枠を返さない
+	done     chan struct{}
 	timedOut atomic.Bool // heartbeatTimer が閉じた(ログの重複を避けるための印)
 	// sel はこの接続で交渉した版と機能。serve() が接続の確立前に一度だけ設定し、以後は
 	// 読み取り専用として扱う(Push からも参照するが、書き込みは無いので mu は要らない)
@@ -91,7 +93,8 @@ const (
 	// streamReadLimit は、確立した stream のメッセージ(ハートビート)の大きさの上限。
 	streamReadLimit = 1 << 20
 	// maxPendingPerAgent は、1 つのエージェントが同時に持てる確立前の stream の数。1 本が半開きの
-	// まま期限を待つ間も、つなぎ直しの 1 本が通るよう 2 にしてある。
+	// まま期限を待つ間も、つなぎ直しの 1 本が通るよう 2 にしてある。旧接続を置き換えた stream は、
+	// 旧接続の serve が戻るまで枠を返さないので、閉じる途中の旧接続もこの数に入る(設計文書 7 節、11 節)。
 	maxPendingPerAgent = 2
 )
 
@@ -261,18 +264,18 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	release, ok := h.reservePending(agent)
 	if !ok {
 		if h.pendingLog.Allow() {
-			log.Printf("stream: %s: refusing a stream: %d streams of this agent are already waiting to be established", agent, maxPendingPerAgent)
+			log.Printf("stream: %s: refusing a stream: %d streams of this agent are already waiting to be established or for a replaced stream to close", agent, maxPendingPerAgent)
 		}
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
 		return
 	}
-	defer release()
 	if h.Authenticated != nil {
 		h.Authenticated(r)
 	}
 	from, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
+		release()
 		return
 	}
 	// HTTP does not close hijacked connections when the handler returns.
@@ -304,12 +307,34 @@ func (h *Hub) reservePending(agent string) (release func(), ok bool) {
 	}, true
 }
 
-// serve は認証を通った stream を最後まで扱う。established は、接続を表に入れた時点で、確立前の
-// stream の枠を返すために呼ぶ。
-func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *websocket.Conn, established func()) {
+// serve は認証を通った stream を最後まで扱う。release は確立前の stream の枠を返す関数で、serve が
+// 必ず 1 回呼ぶ。接続を表に入れた時点で返すが、旧接続を置き換えた場合は、旧接続の serve が戻るまで
+// 返さない。置き換えられた旧接続は、読みかけのメッセージを持ったまま close の手順で最長約 10 秒
+// 残りうるので、その間はこの枠で旧接続を数える(設計文書 7 節、11 節)。
+func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *websocket.Conn, release func()) {
+	done := make(chan struct{})
+	defer close(done)
+	// replaced は、この接続が置き換えた旧接続の done。nil なら枠をすぐに返す
+	var replaced <-chan struct{}
+	slotReturned := false
+	returnSlot := func() {
+		if slotReturned {
+			return
+		}
+		slotReturned = true
+		if replaced == nil {
+			release()
+			return
+		}
+		go func(old <-chan struct{}) {
+			<-old
+			release()
+		}(replaced)
+	}
+	defer returnSlot()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	c := &conn{ws: ws, from: from, identity: identity, cancel: cancel, pushCh: make(chan struct{}, 1), pushDone: make(chan struct{})}
+	c := &conn{ws: ws, from: from, identity: identity, cancel: cancel, pushCh: make(chan struct{}, 1), pushDone: make(chan struct{}), done: done}
 
 	// 2. 鍵の検証(最初のメッセージ)。失敗した接続は旧接続に影響を与えない
 	readCtx, readCancel := context.WithTimeout(ctx, h.firstMessageTimeout)
@@ -389,12 +414,13 @@ func (h *Hub) serve(parent context.Context, agent, identity, from string, ws *we
 			old.cancel()
 		}()
 		log.Printf("stream: %s: closing old connection from %s as superseded", agent, old.from)
+		replaced = old.done
 	}
 	h.conns[agent] = c
 	h.status[agent] = &Status{Connected: true, StreamFrom: from, ConnectedAt: time.Now(), Protocol: sel}
 	h.mu.Unlock()
 	hook.unlock()
-	established()
+	returnSlot()
 	if h.OnStreamConnect != nil {
 		h.OnStreamConnect(agent, from)
 	}
