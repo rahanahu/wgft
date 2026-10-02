@@ -36,7 +36,7 @@ func listenAdmin(ctx context.Context,
 			return fmt.Errorf("admin API tailscale: %w", err)
 		}
 		setHosts(tailnetHosts(ip, dnsName))
-		log.Printf("also listening for the admin API on Tailscale %s, %s; bound to interface %s index %d and accepting tailnet sources only", tsAddr, detail, iface.name, iface.index)
+		log.Printf("also listening for the admin API on Tailscale %s, %s; bound to interface %s index %d and accepting tailnet sources other than this host", tsAddr, detail, iface.name, iface.index)
 		ta := &tailnetAdmin{
 			port:     adminTailscalePort,
 			interval: tailnetWatchInterval,
