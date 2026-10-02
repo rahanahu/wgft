@@ -136,9 +136,11 @@ func TestDefaultDialRefusesResolvedAddresses(t *testing.T) {
 	if st := m.Status(); st[0].Err != nil {
 		t.Fatalf("a hostname target must open its listener: %v", st[0].Err)
 	}
-	send := func(src string) {
+	// 送るたびに新しいソケット、つまり新しい送信元のポートから送るので、新しいセッションになる。
+	// 127.0.0.2 は macOS の既定では使えないので、送信元のアドレスは変えない
+	send := func() {
 		t.Helper()
-		c, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP(src)}, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(listenPort)})
+		c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(listenPort)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -147,7 +149,7 @@ func TestDefaultDialRefusesResolvedAddresses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	send("127.0.0.1")
+	send()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && m.Status()[0].Err == nil {
 		time.Sleep(10 * time.Millisecond)
@@ -162,7 +164,7 @@ func TestDefaultDialRefusesResolvedAddresses(t *testing.T) {
 	}
 	// 127.0.0.1 を通すと、ほかのアドレスを拒んだうえで 127.0.0.1 へ接続し、拒否は消える
 	allowV4.Store(true)
-	send("127.0.0.2")
+	send()
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && packets.Load() == 0 {
 		time.Sleep(10 * time.Millisecond)
