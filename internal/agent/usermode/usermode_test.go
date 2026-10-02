@@ -1,8 +1,12 @@
 package usermode
 
 import (
+	"fmt"
 	"math"
+	"net"
 	"net/netip"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +14,8 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -159,5 +165,133 @@ func TestRelayOptionsAllowTargets(t *testing.T) {
 	}
 	if o.AllowTarget(netip.MustParseAddrPort("192.168.1.1:22")) {
 		t.Error("a target outside the list must be denied")
+	}
+}
+
+// closeProbeNetwork は relay.Network で、開いた TCP リスナーが Close された時点で onClose を呼ぶ。
+// 中継が閉じた瞬間を、本物の Close の中で観測するための差し替えである。
+type closeProbeNetwork struct{ onClose func() }
+
+func (n *closeProbeNetwork) ListenUDP(uint16) (net.PacketConn, error) {
+	return net.ListenPacket("udp4", "127.0.0.1:0")
+}
+
+func (n *closeProbeNetwork) ListenTCP(uint16) (net.Listener, error) {
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	return &closeProbeListener{Listener: l, onClose: n.onClose}, nil
+}
+
+type closeProbeListener struct {
+	net.Listener
+	onClose func()
+	once    sync.Once
+}
+
+func (l *closeProbeListener) Close() error {
+	l.once.Do(l.onClose)
+	return l.Listener.Close()
+}
+
+// Close は中継、context の取り消し、トンネルの順に閉じる。順序は、古い device と netstack と
+// goroutine を次の Build の前に片付けるために要る。入れ替えると、中継がまだ使うトンネルを先に
+// 閉じる、または取り消しの前にトンネルを閉じる、のどちらかになる。3 つの段階はそれぞれの中で
+// 観測し、段階ごとに「先の段階は済み、後の段階はまだ」を確かめる。
+func TestCloseOrder(t *testing.T) {
+	var tun *tunnel.Tunnel
+	real := NewTunnel
+	NewTunnel = func(cfg tunnel.Config) (*tunnel.Tunnel, error) {
+		tt, err := real(cfg)
+		tun = tt
+		return tt, err
+	}
+	t.Cleanup(func() { NewTunnel = real })
+
+	srvKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg := proto.WGConfig{
+		ServerPubkey: srvKey.PublicKey().String(), Endpoint: "127.0.0.1:9",
+		Address: "10.200.0.2/24", MTU: 1420, Keepalive: 1, UDPTimeoutStream: 120,
+	}
+	d := New(nil, resource.Limits{})
+	if _, err := d.Build(priv, wg); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	t.Cleanup(d.Close)
+
+	// 中継は、Close を観測できるネットワークの上に作り直す。Build が作った中継はリスナーを持たない
+	d.Relay.Close()
+	tunnelClosed := func() bool {
+		l, err := tun.ListenTCP(18080)
+		if err != nil {
+			return true
+		}
+		l.Close()
+		return false
+	}
+	if tunnelClosed() {
+		t.Fatal("the probe reports a closed tunnel before Close; it cannot tell the steps apart")
+	}
+
+	var mu sync.Mutex
+	var order []string
+	var bad []string
+	step := func(name string, relayDone, cancelDone, tunDone bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		have := map[string]bool{"relay": false, "cancel": false}
+		for _, s := range order {
+			have[s] = true
+		}
+		if have["relay"] != relayDone {
+			bad = append(bad, fmt.Sprintf("%s: relay closed = %v, want %v", name, have["relay"], relayDone))
+		}
+		if have["cancel"] != cancelDone {
+			bad = append(bad, fmt.Sprintf("%s: context cancelled = %v, want %v", name, have["cancel"], cancelDone))
+		}
+		if got := tunnelClosed(); got != tunDone {
+			bad = append(bad, fmt.Sprintf("%s: tunnel closed = %v, want %v", name, got, tunDone))
+		}
+		order = append(order, name)
+	}
+
+	d.Relay = relay.New(&closeProbeNetwork{onClose: func() { step("relay", false, false, false) }}, d.RelayOptions(wg))
+	d.Relay.Apply(relay.DesiredFromRules([]proto.AgentRule{{
+		ID: "r", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: 18081, Hi: 18081},
+		Target: "127.0.0.1:9", Enabled: true,
+	}}))
+	if len(d.Relay.Status()) != 1 {
+		t.Fatalf("the probe listener did not open: %d listeners", len(d.Relay.Status()))
+	}
+
+	cancel := d.tunCancel
+	d.tunCancel = func() {
+		step("cancel", true, false, false)
+		cancel()
+	}
+
+	d.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(order, ","); got != "relay,cancel" {
+		t.Fatalf("observed steps = %q, want relay,cancel", got)
+	}
+	if !tunnelClosed() {
+		bad = append(bad, "after Close: the tunnel is still open")
+	}
+	for _, b := range bad {
+		t.Error(b)
+	}
+	if d.Relay != nil || d.Tun != nil || d.tunCancel != nil {
+		t.Error("Close must reset Relay, Tun and tunCancel to nil")
 	}
 }
