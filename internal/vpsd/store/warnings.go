@@ -86,39 +86,56 @@ func (s *Store) AddWarning(agent, kind, detail string) error {
 }
 
 // AddIPMismatchWarning は ip-mismatch の警告を記録する。ただし、その組が確認済みなら記録しない
-// (仕様 5.2 節)。確認済みかどうかの判定と記録を 1 つの文で行うので、監視の回が確認済みの組を
-// 読んでからこの記録までの間に管理者が警告を消しても、消した警告は戻らない。IP は NormalizeIP で
-// そろえてから照合する。記録した(新規か時刻の更新)なら true を返す。記録したときだけ、同じ
-// トランザクションで、そのエージェントの ip-mismatch の行を MaxIPMismatchWarnings 行に絞る
-// (trimWarnings)。確認済みの組で記録しなかった回は、行を消さない。
-func (s *Store) AddIPMismatchWarning(agent, streamIP, wgIP string) (bool, error) {
+// (仕様 5.2 節)。確認済みかどうかの判定と記録を 1 つのトランザクションの中の、確認済みの組を条件に
+// 持つ文で行うので、監視の回が確認済みの組を読んでからこの記録までの間に管理者が警告を消しても、
+// 消した警告は戻らない。IP は NormalizeIP でそろえてから照合する。記録した(新規か時刻の更新)なら
+// recorded が true で、そのうち行を新しく作ったときだけ created も true である。同じ組の食い違いが
+// 続く間の記録は時刻の更新だけなので created は false で、呼び出し側はこれでログを 1 回にする。
+// 記録したときだけ、同じトランザクションで、そのエージェントの ip-mismatch の行を
+// MaxIPMismatchWarnings 行に絞る(trimWarnings)。確認済みの組で記録しなかった回は、行を消さない。
+func (s *Store) AddIPMismatchWarning(agent, streamIP, wgIP string) (recorded, created bool, err error) {
 	sIP, wIP := NormalizeIP(streamIP), NormalizeIP(wgIP)
 	detail := IPMismatchDetail(sIP, wIP)
 	tx, err := s.db.Begin()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer tx.Rollback()
+	now := time.Now().Unix()
+	const notAcked = `NOT EXISTS (
+			SELECT 1 FROM warning_acks WHERE agent = ? AND kind = ? AND stream_ip = ? AND wg_ip = ?)`
 	res, err := tx.Exec(`INSERT INTO warnings (agent, kind, detail, created_at)
-		SELECT ?, ?, ?, ? WHERE NOT EXISTS (
-			SELECT 1 FROM warning_acks WHERE agent = ? AND kind = ? AND stream_ip = ? AND wg_ip = ?)
-		ON CONFLICT(agent, kind, detail) DO UPDATE SET created_at = excluded.created_at`,
-		agent, WarnIPMismatch, detail, time.Now().Unix(),
+		SELECT ?, ?, ?, ? WHERE `+notAcked+`
+		ON CONFLICT(agent, kind, detail) DO NOTHING`,
+		agent, WarnIPMismatch, detail, now,
 		agent, WarnIPMismatch, sIP, wIP)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	if n == 0 {
-		return false, tx.Commit()
+	created = n > 0
+	if !created {
+		res, err := tx.Exec(`UPDATE warnings SET created_at = ?
+			WHERE agent = ? AND kind = ? AND detail = ? AND `+notAcked,
+			now, agent, WarnIPMismatch, detail,
+			agent, WarnIPMismatch, sIP, wIP)
+		if err != nil {
+			return false, false, err
+		}
+		if n, err = res.RowsAffected(); err != nil {
+			return false, false, err
+		}
+		if n == 0 {
+			return false, false, tx.Commit()
+		}
 	}
 	if err := trimWarnings(tx, agent, WarnIPMismatch, detail); err != nil {
-		return false, err
+		return false, false, err
 	}
-	return true, tx.Commit()
+	return true, created, tx.Commit()
 }
 
 // Warnings は全警告を新しい順に返す。
