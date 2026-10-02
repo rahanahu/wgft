@@ -73,7 +73,7 @@ func FuzzRuleJSON(f *testing.F) {
 // readJSON hands to it on the server side (heartbeats from an agent). Both directions share this
 // one type, so one fuzz target covers both. The property is: never panic, and never let a State
 // message's rules produce a panic when the agent walks them for the effective target of every
-// port in range, the way internal/agent/dataplane_userspace.go does for every rule it applies (it
+// port in range, the way internal/agent/usermode does for every rule it applies (it
 // calls internal/dataplane/userspace/relay.DesiredFromRules, which calls EffectiveTarget once per
 // port in the rule's listen_port range).
 func FuzzMessageJSON(f *testing.F) {

@@ -21,8 +21,8 @@ import (
 )
 
 // Dataplane は、エージェントの制御プレーン(runtime)と、転送を担う実装との境目である
-// (設計文書 7a.7 節)。実装は internal/agent の、ユーザー空間モードの userspaceDataplane と
-// カーネルモードの kernelDataplane である。
+// (設計文書 7a.7 節)。実装は、ユーザー空間モードの internal/agent/usermode の Dataplane と、
+// カーネルモードの internal/agent の kernelDataplane である。
 //
 // 境目の手前の runtime は、処理済み世代と認証情報ファイルの last_state の記録、適用した wg 設定、
 // トンネルの作成に失敗したときの試し直しの予定、トンネルを作り直す判定(watchdog)を持つ。

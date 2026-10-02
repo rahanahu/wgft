@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/usermode"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/tunnel"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // tunnelIntercept は tunnel.New の呼び出しを記録し、指示された回数だけ失敗させる差し替え口
-// (newTunnel。bindForDevice と同じ流儀の、この package の中だけの口)。
+// (usermode.NewTunnel。bindForDevice と同じ流儀の、テストだけが差し替える口)。
 type tunnelIntercept struct {
 	mu    sync.Mutex
 	cfgs  []tunnel.Config
@@ -22,9 +23,9 @@ type tunnelIntercept struct {
 // interceptTunnel は差し替えを始め、テストの後に元へ戻す。
 func interceptTunnel(t *testing.T) *tunnelIntercept {
 	t.Helper()
-	real := newTunnel
+	real := usermode.NewTunnel
 	in := &tunnelIntercept{}
-	newTunnel = func(cfg tunnel.Config) (*tunnel.Tunnel, error) {
+	usermode.NewTunnel = func(cfg tunnel.Config) (*tunnel.Tunnel, error) {
 		in.mu.Lock()
 		in.cfgs = append(in.cfgs, cfg)
 		fail := in.fails > 0
@@ -37,7 +38,7 @@ func interceptTunnel(t *testing.T) *tunnelIntercept {
 		}
 		return real(cfg)
 	}
-	t.Cleanup(func() { newTunnel = real })
+	t.Cleanup(func() { usermode.NewTunnel = real })
 	return in
 }
 
@@ -98,7 +99,7 @@ func TestApplyBuildFailureIsRetriedWithTheFailedState(t *testing.T) {
 	}
 
 	// 1. 世代も認証情報ファイルも進めない。試し直しは失敗した全体状態を控える
-	if rt.us().tun != nil {
+	if rt.us().Tun != nil {
 		t.Fatal("the failing build left a tunnel behind")
 	}
 	if rt.gen != 1 {
@@ -119,7 +120,7 @@ func TestApplyBuildFailureIsRetriedWithTheFailedState(t *testing.T) {
 
 	// 2. 次の判定で、失敗した全体状態の wg 設定とルールで立て直す
 	rt.checkTunnel(time.Now())
-	if rt.us().tun == nil {
+	if rt.us().Tun == nil {
 		t.Fatal("the retry did not build a tunnel")
 	}
 	if got := in.last(t).MTU; got != 1380 {
@@ -128,7 +129,7 @@ func TestApplyBuildFailureIsRetriedWithTheFailedState(t *testing.T) {
 	if rt.wgCfg.MTU != 1380 {
 		t.Errorf("applied wg config MTU = %d, want 1380", rt.wgCfg.MTU)
 	}
-	st := rt.us().rl.Status()
+	st := rt.us().Relay.Status()
 	if len(st) != 1 || st[0].Key.Port != 2457 || st[0].RuleID != "r2" {
 		t.Fatalf("listeners after the retry = %+v, want one for rule r2 on port 2457", st)
 	}
@@ -167,7 +168,7 @@ func TestApplyConfigErrorIsNotRetried(t *testing.T) {
 	if err := rt.apply(broken); err == nil {
 		t.Fatal("apply with a malformed server public key returned no error")
 	}
-	if rt.us().tun != nil {
+	if rt.us().Tun != nil {
 		t.Fatal("the failed apply left a tunnel behind")
 	}
 	if !rt.rebuild.retryAt.IsZero() {
@@ -197,8 +198,8 @@ func TestApplyConfigErrorIsNotRetried(t *testing.T) {
 	if err := rt.apply(fixed); err != nil {
 		t.Fatalf("apply a corrected state: %v", err)
 	}
-	if rt.us().tun == nil || rt.gen != 3 {
-		t.Fatalf("a corrected state did not bring the tunnel back: tun=%v gen=%d", rt.us().tun != nil, rt.gen)
+	if rt.us().Tun == nil || rt.gen != 3 {
+		t.Fatalf("a corrected state did not bring the tunnel back: tun=%v gen=%d", rt.us().Tun != nil, rt.gen)
 	}
 }
 
@@ -218,7 +219,7 @@ func TestRotateKeyBuildFailureIsRetriedWithTheNewKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rotate-key: %v", err)
 	}
-	if rt.us().tun != nil {
+	if rt.us().Tun != nil {
 		t.Fatal("the failing build left a tunnel behind")
 	}
 	if rt.rebuild.retryAt.IsZero() {
@@ -226,7 +227,7 @@ func TestRotateKeyBuildFailureIsRetriedWithTheNewKey(t *testing.T) {
 	}
 
 	rt.checkTunnel(time.Now())
-	if rt.us().tun == nil {
+	if rt.us().Tun == nil {
 		t.Fatal("the retry did not build a tunnel after rotate-key")
 	}
 	if got := in.last(t).PrivateKey.PublicKey(); got != pub {
@@ -266,7 +267,7 @@ func TestShutdownDuringAPendingRetryBuildsNothing(t *testing.T) {
 	before := in.calls()
 	for i := 0; i < 5; i++ {
 		rt.checkTunnel(time.Now())
-		if rt.us().tun != nil {
+		if rt.us().Tun != nil {
 			t.Fatal("the watchdog built a tunnel after shutdown")
 		}
 		time.Sleep(2 * time.Millisecond)

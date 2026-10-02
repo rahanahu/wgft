@@ -1,9 +1,17 @@
 package dataplane_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -400,6 +408,195 @@ func TestAgentDataplaneBoundaryImports(t *testing.T) {
 			t.Errorf("%s depends on %s (design.md 7a.7 節: the boundary does not pull in the kernel layer)", pkg, dep)
 		}
 	}
+}
+
+// TestAgentModesStayApart checks design.md 7a.7 節's rule for the packages that hold the agent's
+// two dataplane modes. internal/agent/usermode, the userspace mode, imports from internal/agent
+// only the boundary (agentdp) and the allowlist (allowtargets). Through any import it reaches
+// neither internal/agent itself, where the runtime and the kernel mode live, nor
+// internal/agent/kernelmode, the package design.md 7a.7 節 names for the kernel mode, nor the
+// kernel layer under internal/dataplane/linuxkernel.
+func TestAgentModesStayApart(t *testing.T) {
+	root := moduleRoot(t)
+	const agent = module + "/internal/agent"
+	const pkg = agent + "/usermode"
+	if _, err := os.Stat(filepath.Join(root, strings.TrimPrefix(pkg, module))); err != nil {
+		t.Fatalf("%s: %v; did it move?", pkg, err)
+	}
+	allowed := map[string]bool{agent + "/agentdp": true, agent + "/allowtargets": true}
+	for _, dep := range moduleImports(t, root, pkg) {
+		if strings.HasPrefix(dep, agent+"/") && !allowed[dep] {
+			t.Errorf("%s imports %s; design.md 7a.7 節 allows only agentdp and allowtargets from internal/agent", pkg, dep)
+		}
+	}
+	for _, dep := range deps(t, root, pkg) {
+		switch {
+		case dep == agent:
+			t.Errorf("%s depends on %s (design.md 7a.7 節: a mode sits below the runtime)", pkg, dep)
+		case dep == agent+"/kernelmode" || strings.HasPrefix(dep, agent+"/kernelmode/"):
+			t.Errorf("%s depends on %s (design.md 7a.7 節: the two modes do not import each other)", pkg, dep)
+		case dep == module+"/internal/dataplane/linuxkernel" || strings.HasPrefix(dep, module+"/internal/dataplane/linuxkernel/"):
+			t.Errorf("%s depends on %s (design.md 7a.7 節: the userspace mode does not pull in the kernel layer)", pkg, dep)
+		}
+	}
+}
+
+// modeSeams lists, for each agent mode package, the names that production code outside the
+// package may use. Every other exported name of the package (a field, a variable, a function, a
+// method) is a seam for internal/agent's tests and may be used only from _test.go files. A
+// package-level name is spelled as is, a field or method as Type.Name.
+var modeSeams = map[string]map[string]bool{
+	module + "/internal/agent/usermode": {"New": true},
+}
+
+// TestAgentModeTestSeamsStayInTests checks design.md 7a.7 節's rule that the names an agent mode
+// package exports only for internal/agent's tests (internal/agent/usermode's Tun, Relay,
+// NewTunnel, ...) are not used by production code outside that package. Go has no visibility for
+// tests alone, so the rule is checked here. It type-checks the non-test files of every package
+// in the module that imports a mode package, for the GOOS the test runs on, and resolves each
+// identifier to its object, so a field or method reached through a value is caught as well as a
+// qualified name. The imports are read from export data that `go list -export` builds. It does not
+// catch a use that never names the object, such as a type assertion to an interface the caller
+// defines or access through reflection.
+func TestAgentModeTestSeamsStayInTests(t *testing.T) {
+	root := moduleRoot(t)
+	type listed struct {
+		ImportPath string
+		Dir        string
+		GoFiles    []string
+		Imports    []string
+		Export     string
+		Error      *struct{ Err string }
+	}
+	goList := func(args ...string) []listed {
+		t.Helper()
+		cmd := exec.Command("go", append([]string{"list", "-e", "-json=ImportPath,Dir,GoFiles,Imports,Export,Error"}, args...)...)
+		cmd.Dir = root
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("go list %v: %v\n%s", args, err, stderr.String())
+		}
+		var ps []listed
+		for dec := json.NewDecoder(bytes.NewReader(out)); ; {
+			var p listed
+			if err := dec.Decode(&p); errors.Is(err, io.EOF) {
+				break
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			ps = append(ps, p)
+		}
+		return ps
+	}
+	var importers []listed
+	for _, p := range goList("./...") {
+		if p.Error != nil {
+			t.Fatalf("go list %s: %s", p.ImportPath, p.Error.Err)
+		}
+		for _, imp := range p.Imports {
+			if _, ok := modeSeams[imp]; ok && p.ImportPath != imp {
+				importers = append(importers, p)
+				break
+			}
+		}
+	}
+	if len(importers) == 0 {
+		t.Fatal("no package imports an agent mode package; did internal/agent stop using internal/agent/usermode?")
+	}
+	var paths []string
+	for _, p := range importers {
+		paths = append(paths, p.ImportPath)
+	}
+	exports := map[string]string{}
+	for _, p := range goList(append([]string{"-export", "-deps"}, paths...)...) {
+		exports[p.ImportPath] = p.Export
+	}
+	for _, p := range importers {
+		fset := token.NewFileSet()
+		var files []*ast.File
+		for _, name := range p.GoFiles {
+			f, err := parser.ParseFile(fset, filepath.Join(p.Dir, name), nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, f)
+		}
+		imp := importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
+			if exports[path] == "" {
+				return nil, errors.New("no export data for " + path)
+			}
+			return os.Open(exports[path])
+		})
+		info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
+		if _, err := (&types.Config{Importer: imp}).Check(p.ImportPath, fset, files, info); err != nil {
+			t.Fatalf("type-checking %s: %v", p.ImportPath, err)
+		}
+		for id, obj := range info.Uses {
+			if obj.Pkg() == nil {
+				continue
+			}
+			ok, isMode := modeSeams[obj.Pkg().Path()]
+			if !isMode || obj.Pkg().Path() == p.ImportPath {
+				continue
+			}
+			name := obj.Name()
+			if recv := memberOf(obj); recv != "" {
+				name = recv + "." + name
+			}
+			if !ok[name] {
+				t.Errorf("%s: %s uses %s.%s, which %s exports only for internal/agent's tests (design.md 7a.7 節)",
+					fset.Position(id.Pos()), p.ImportPath, obj.Pkg().Name(), name, obj.Pkg().Path())
+			}
+		}
+	}
+}
+
+// memberOf returns the name of the type that declares obj when obj is a field or a method, and ""
+// otherwise. An embedded or anonymous struct's field is reported under the field's own name.
+func memberOf(obj types.Object) string {
+	var t types.Type
+	switch o := obj.(type) {
+	case *types.Var:
+		if !o.IsField() {
+			return ""
+		}
+		if o.Origin() != nil {
+			o = o.Origin()
+		}
+		// A field does not record its struct; find the named type in the package that declares it.
+		scope := o.Pkg().Scope()
+		for _, n := range scope.Names() {
+			tn, ok := scope.Lookup(n).(*types.TypeName)
+			if !ok {
+				continue
+			}
+			if st, ok := tn.Type().Underlying().(*types.Struct); ok {
+				for i := 0; i < st.NumFields(); i++ {
+					if st.Field(i) == o {
+						return tn.Name()
+					}
+				}
+			}
+		}
+		return "?"
+	case *types.Func:
+		sig, ok := o.Type().(*types.Signature)
+		if !ok || sig.Recv() == nil {
+			return ""
+		}
+		t = sig.Recv().Type()
+	default:
+		return ""
+	}
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	if n, ok := t.(*types.Named); ok {
+		return n.Obj().Name()
+	}
+	return "?"
 }
 
 // TestVpsdTailnetImportsNoServerPackage checks design.md 7a.7 節's rule for

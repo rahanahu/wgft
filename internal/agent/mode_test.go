@@ -284,7 +284,7 @@ func TestRotateKeyWhileRunningRestoresTheKeysWhenSaveFails(t *testing.T) {
 	rt.mu.Lock()
 	rt.f.Mode, rt.f.WGPrivateKey, rt.f.PreviousWGPrivateKey = "kernel", oldKey.String(), "earlier"
 	rt.opts.CredentialsPath = filepath.Join(t.TempDir(), "missing", "agent.json") // 保存が失敗する場所
-	before := rt.us().tun
+	before := rt.us().Tun
 	rt.mu.Unlock()
 	if before == nil {
 		t.Fatal("no tunnel is running before rotate-key")
@@ -301,7 +301,7 @@ func TestRotateKeyWhileRunningRestoresTheKeysWhenSaveFails(t *testing.T) {
 		t.Error("the runtime switched to the new key although it was not saved")
 	}
 	// 閉じたトンネルは dataplane が nil に置き換えるので、同じ値が残っていれば閉じていない
-	if rt.us().tun != before {
+	if rt.us().Tun != before {
 		t.Error("the running tunnel was closed or replaced although the key was not saved")
 	}
 }

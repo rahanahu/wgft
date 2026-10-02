@@ -13,6 +13,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/usermode"
 	"github.com/rahanahu/wgft/internal/reconcile"
 )
 
@@ -156,7 +157,7 @@ func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *run
 		handshakeWake:            make(chan struct{}, 1),
 		kernelWake:               make(chan struct{}, 1),
 		notifyDebounce:           reconcile.DefaultTriggers.Debounce,
-		dp:                       newUserspaceDataplane(opts.AllowTargets, opts.Limits),
+		dp:                       usermode.New(opts.AllowTargets, opts.Limits),
 		rebuild:                  rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
 	}
 }

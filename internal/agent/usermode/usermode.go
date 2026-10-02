@@ -1,4 +1,13 @@
-package agent
+// Package usermode はエージェントのユーザー空間モードの dataplane を持つ(設計文書 7a.7 節)。
+// wireguard-go と netstack のトンネルと、その上の中継を包み、internal/agent/agentdp の Dataplane を
+// 満たす。internal/agent の下では agentdp と allowtargets だけを import する。
+//
+// 本番のコードが package の外から使ってよい名前は New だけである。実行時の状態は New の結果を
+// agentdp.Dataplane として持ち、型 Dataplane を名指さず、そのメソッドも直接は呼ばない。ほかの公開した
+// 名前は internal/agent のテストのための口であり、フィールド Allow、Limits、Tun、Relay、変数
+// NewTunnel、ReadTunnelStatus、関数 RuleStatuses、メソッド RelayOptions が当たる。
+// internal/dataplane/deps_test.go の TestAgentModeTestSeamsStayInTests がこれを検査する。
+package usermode
 
 import (
 	"context"
@@ -45,94 +54,95 @@ func secondsToDuration(name string, seconds, max int, def time.Duration) time.Du
 	return def
 }
 
-// userspaceDataplane はユーザー空間モードの dataplane である(仕様 7 節)。wireguard-go と netstack の
+// Dataplane はユーザー空間モードの dataplane である(仕様 7 節)。wireguard-go と netstack の
 // トンネル(internal/dataplane/userspace/tunnel)と、その上の中継(internal/dataplane/userspace/relay)
 // を包む。中継はトンネルの netstack で待ち受けるので、2 つは一緒に立ち、一緒に閉じる。
-type userspaceDataplane struct {
-	// allow は宛先の許可一覧(仕様 7 節、WGFT_AGENT_ALLOW_TARGETS)。nil なら制限しない。
+type Dataplane struct {
+	// Allow は宛先の許可一覧(仕様 7 節、WGFT_AGENT_ALLOW_TARGETS)。nil なら制限しない。
 	// newRuntime が opts.AllowTargets から渡すので、doctor が示す一覧と同じ値である
-	allow *allowtargets.List
-	// limits は同時フロー数のプロセス全体の予算(仕様 7 節)。ゼロ値は既定値
-	limits resource.Limits
+	Allow *allowtargets.List
+	// Limits は同時フロー数のプロセス全体の予算(仕様 7 節)。ゼロ値は既定値
+	Limits resource.Limits
 
-	tun       *tunnel.Tunnel
+	// Tun と Relay は今のトンネルと中継である。どちらも Build が作り、Close が閉じて nil に戻す
+	Tun       *tunnel.Tunnel
 	tunCancel context.CancelFunc
-	rl        *relay.Manager
+	Relay     *relay.Manager
 }
 
-// newUserspaceDataplane は何も立てていないユーザー空間モードの dataplane を作る。
-func newUserspaceDataplane(allow *allowtargets.List, limits resource.Limits) *userspaceDataplane {
-	return &userspaceDataplane{allow: allow, limits: limits}
+// New は何も立てていないユーザー空間モードの dataplane を作る。
+func New(allow *allowtargets.List, limits resource.Limits) *Dataplane {
+	return &Dataplane{Allow: allow, Limits: limits}
 }
 
-// newTunnel はトンネルを作る。値は tunnel.New で、テストだけが作成の失敗を模すために差し替える。
-var newTunnel = tunnel.New
+// NewTunnel はトンネルを作る。値は tunnel.New で、テストだけが作成の失敗を模すために差し替える。
+var NewTunnel = tunnel.New
 
-// readTunnelStatus はトンネルの状態を 1 回読む。値は tunnel.Tunnel.Status で、テストだけが
+// ReadTunnelStatus はトンネルの状態を 1 回読む。値は tunnel.Tunnel.Status で、テストだけが
 // 読みの回数と、1 つの応答に混ざる時点を確かめるために差し替える。
-var readTunnelStatus = (*tunnel.Tunnel).Status
+var ReadTunnelStatus = (*tunnel.Tunnel).Status
 
 // Build はトンネルを立て、その netstack の上に中継を作る(仕様 7 節)。リスナーは開かないので、
 // 呼び出し側が続けて ApplyRules を呼ぶ。
-func (d *userspaceDataplane) Build(priv wgtypes.Key, wg proto.WGConfig) (retryable bool, err error) {
+func (d *Dataplane) Build(priv wgtypes.Key, wg proto.WGConfig) (retryable bool, err error) {
 	cfg, err := tunnelConfig(priv, wg)
 	if err != nil {
 		return false, err
 	}
-	tun, err := newTunnel(cfg)
+	tun, err := NewTunnel(cfg)
 	if err != nil {
 		return true, err // 資源の不足など、環境による失敗
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go tun.Run(ctx)
-	d.tun, d.tunCancel = tun, cancel
-	d.rl = relay.New(tun, d.relayOptions(wg))
+	d.Tun, d.tunCancel = tun, cancel
+	d.Relay = relay.New(tun, d.RelayOptions(wg))
 	return true, nil
 }
 
-func (d *userspaceDataplane) Built() bool { return d.tun != nil }
+func (d *Dataplane) Built() bool { return d.Tun != nil }
 
 // ApplyRules はリスナーを宣言に合わせる。変わったものだけを開閉する(仕様 5.2, 7 節)。
 // 開けなかったリスナーはルールの error として Read に現れ、Refresh が開き直す。
-func (d *userspaceDataplane) ApplyRules(_ uint64, rules []proto.AgentRule, _ any) (string, error) {
-	acts := d.rl.Apply(relay.DesiredFromRules(rules))
-	return fmt.Sprintf("%d actions, %d listeners", len(acts), len(d.rl.Status())), nil
+func (d *Dataplane) ApplyRules(_ uint64, rules []proto.AgentRule, _ any) (string, error) {
+	acts := d.Relay.Apply(relay.DesiredFromRules(rules))
+	return fmt.Sprintf("%d actions, %d listeners", len(acts), len(d.Relay.Status())), nil
 }
 
-func (d *userspaceDataplane) Refresh() {
-	if d.rl != nil {
-		d.rl.Retry()
+func (d *Dataplane) Refresh() {
+	if d.Relay != nil {
+		d.Relay.Retry()
 	}
 }
 
 // Close は中継を閉じてからトンネルを閉じる。閉じるのが先なので、古い device と netstack、
 // その goroutine は、次の Build が新しいものを作る前に必ず片付く。
-func (d *userspaceDataplane) Close() {
-	if d.rl != nil {
-		d.rl.Close()
-		d.rl = nil
+func (d *Dataplane) Close() {
+	if d.Relay != nil {
+		d.Relay.Close()
+		d.Relay = nil
 	}
 	if d.tunCancel != nil {
 		d.tunCancel()
 		d.tunCancel = nil
 	}
-	if d.tun != nil {
-		d.tun.Close()
-		d.tun = nil
+	if d.Tun != nil {
+		d.Tun.Close()
+		d.Tun = nil
 	}
 }
 
 // LastHandshake が読むのは今の device なので、ゼロでない値は必ず今のトンネルのものである。
-func (d *userspaceDataplane) LastHandshake() time.Time {
-	return d.tun.Status().LastHandshake
+func (d *Dataplane) LastHandshake() time.Time {
+	return d.Tun.Status().LastHandshake
 }
 
 // Read はトンネルの状態と中継の状態を 1 回ずつ読む。ルールごとの状態と doctor のリスナーの集計は、
 // 同じ Manager.Status の読みから作る(設計文書 10.2c 節)。
-func (d *userspaceDataplane) Read() agentdp.Reading {
+func (d *Dataplane) Read() agentdp.Reading {
 	var r agentdp.Reading
-	if d.tun != nil {
-		ts := readTunnelStatus(d.tun)
+	if d.Tun != nil {
+		ts := ReadTunnelStatus(d.Tun)
 		r.Tunnel = agentdp.TunnelReading{
 			Present:       true,
 			Endpoint:      ts.Endpoint,
@@ -141,36 +151,36 @@ func (d *userspaceDataplane) Read() agentdp.Reading {
 			TxBytes:       ts.TxBytes,
 			Err:           ts.Err,
 		}
-		bufs := d.tun.SocketBuffers()
+		bufs := d.Tun.SocketBuffers()
 		r.Tunnel.SocketBuffers = &bufs
-		r.Tunnel.UDPAccounting = &agentdp.UDPAccountingReading{Fault: d.tun.UDPReceiveFault()}
+		r.Tunnel.UDPAccounting = &agentdp.UDPAccountingReading{Fault: d.Tun.UDPReceiveFault()}
 	}
-	if d.rl != nil {
-		sts := d.rl.Status()
-		r.Rules = ruleStatuses(sts)
-		r.Relay = &agentdp.RelayReading{Listeners: sts, TCP: d.rl.TCPPool(), UDP: d.rl.UDPPool()}
+	if d.Relay != nil {
+		sts := d.Relay.Status()
+		r.Rules = RuleStatuses(sts)
+		r.Relay = &agentdp.RelayReading{Listeners: sts, TCP: d.Relay.TCPPool(), UDP: d.Relay.UDPPool()}
 	}
 	return r
 }
 
-// relayOptions は中継の調整値を作る。宛先の許可一覧があれば、中継が宛先へ接続するときに
+// RelayOptions は中継の調整値を作る。宛先の許可一覧があれば、中継が宛先へ接続するときに
 // 使う判定として渡す(仕様 7 節)。一覧が無ければ渡さないので、中継の挙動は一覧の導入前と同じになる。
-func (d *userspaceDataplane) relayOptions(wg proto.WGConfig) relay.Options {
+func (d *Dataplane) RelayOptions(wg proto.WGConfig) relay.Options {
 	o := relay.Options{
 		UDPIdleTimeout: secondsToDuration("udp_timeout_stream", wg.UDPTimeoutStream, udpTimeoutStreamMaxSeconds, 120*time.Second),
-		Limits:         d.limits,
+		Limits:         d.Limits,
 	}
-	if d.allow != nil {
-		o.AllowTarget = d.allow.Allows
+	if d.Allow != nil {
+		o.AllowTarget = d.Allow.Allows
 		o.AllowTargetSource = allowtargets.Env
 	}
 	return o
 }
 
-// ruleStatuses はリスナーの状態からルールごとの状態を合成する(仕様 5.2 節)。1 つでも error なら
+// RuleStatuses はリスナーの状態からルールごとの状態を合成する(仕様 5.2 節)。1 つでも error なら
 // そのルールは error である。ハートビートと doctor が同じ判定を使うので、この 1 か所に置く
 // (設計文書 10.2c 節)。呼び出し側は Manager.Status の結果を 1 回だけ読んで渡す。
-func ruleStatuses(sts []relay.Status) []proto.RuleStatus {
+func RuleStatuses(sts []relay.Status) []proto.RuleStatus {
 	byRule := map[string]*proto.RuleStatus{}
 	for _, s := range sts {
 		r := byRule[s.RuleID]

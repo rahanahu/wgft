@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/agent/usermode"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
@@ -70,7 +71,7 @@ func netstackBindErr(network string, port uint16) error {
 		Err: errors.New("port is in use")}
 }
 
-// ユーザー空間モードのエージェントの理由である。中継の状態から、ハートビートと同じ ruleStatuses で
+// ユーザー空間モードのエージェントの理由である。中継の状態から、ハートビートと同じ usermode.RuleStatuses で
 // ルールの理由を作る。bind の失敗の理由は netstack の誤りの文言("bind tcp ..." の形)だけを持ち、
 // 中継が server のために付ける "bind failed" は付かない(中継の Status は bind の誤りをそのまま返す)。
 func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
@@ -101,8 +102,8 @@ func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
 			want: doctor.ReasonTargetTimeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d := newUserspaceDataplane(tc.allow, resource.Limits{})
-			opts := d.relayOptions(proto.WGConfig{})
+			d := usermode.New(tc.allow, resource.Limits{})
+			opts := d.RelayOptions(proto.WGConfig{})
 			if tc.source == "-" {
 				opts.AllowTargetSource = ""
 			}
@@ -122,7 +123,7 @@ func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
 			t.Cleanup(m.Close)
 			t.Cleanup(func() { close(stop) }) // m.Close より先に、応えない接続を終わらせる
 			m.Apply(relay.DesiredFromRules([]proto.AgentRule{tc.rule}))
-			sts := ruleStatuses(m.Status())
+			sts := usermode.RuleStatuses(m.Status())
 			if len(sts) != 1 || sts[0].State != proto.StatusError {
 				t.Fatalf("rule statuses = %+v, want one error", sts)
 			}
@@ -141,13 +142,13 @@ func TestAllowTargetsNameReachesServerDoctorNextStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := reasonTCPRule("r1", "192.168.9.9:25565", 25565)
-	d := newUserspaceDataplane(narrow, resource.Limits{})
-	opts := d.relayOptions(proto.WGConfig{})
+	d := usermode.New(narrow, resource.Limits{})
+	opts := d.RelayOptions(proto.WGConfig{})
 	opts.Logf = func(string, ...any) {}
 	m := relay.New(reasonNetwork{}, opts)
 	t.Cleanup(m.Close)
 	m.Apply(relay.DesiredFromRules([]proto.AgentRule{r}))
-	sts := ruleStatuses(m.Status())
+	sts := usermode.RuleStatuses(m.Status())
 	if len(sts) != 1 {
 		t.Fatalf("rule statuses = %+v", sts)
 	}

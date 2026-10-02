@@ -5,6 +5,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/netip"
 	"os"
 	"reflect"
@@ -353,7 +354,11 @@ func TestGuardEffectsFollowTheLayers(t *testing.T) {
 	}
 }
 
-// Same overflow shape as secondsToDuration guards against (dataplane_userspace.go): if
+// fitsInt reports whether v fits in the platform's int type. It is a copy of the helper of the
+// same name in internal/agent/usermode's tests, which this file cannot reach.
+func fitsInt(v int64) bool { return v >= math.MinInt && v <= math.MaxInt }
+
+// Same overflow shape as secondsToDuration guards against (internal/agent/usermode): if
 // agent.json is corrupted or tampered with, st.WG.Keepalive could sit outside the 0-65535
 // range that kernel mode's CheckWG (dataplane_kernel.go) normally enforces before this value
 // is ever recorded. declaredAgentLink rejects it rather than let `agent doctor` display an

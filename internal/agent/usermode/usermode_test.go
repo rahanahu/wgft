@@ -1,4 +1,4 @@
-package agent
+package usermode
 
 import (
 	"math"
@@ -62,28 +62,28 @@ func TestSecondsToDuration(t *testing.T) {
 	}
 }
 
-// relayOptions が wg.udp_timeout_stream をそのまま `* time.Second` していた場合、この巻き戻った
+// RelayOptions が wg.udp_timeout_stream をそのまま `* time.Second` していた場合、この巻き戻った
 // 512ns が UDPIdleTimeout に渡り、relay.New はそれを 0 以下としては直さない(relay.go:189-191)。
 func TestRelayOptionsUDPTimeoutStreamOverflow(t *testing.T) {
-	d := newUserspaceDataplane(nil, resource.Limits{})
+	d := New(nil, resource.Limits{})
 
 	var overflowSeconds int64 = 20211507185753197
 	if !fitsInt(overflowSeconds) {
 		t.Skip("the overflow value does not fit in int on this platform")
 	}
-	o := d.relayOptions(proto.WGConfig{UDPTimeoutStream: int(overflowSeconds)})
+	o := d.RelayOptions(proto.WGConfig{UDPTimeoutStream: int(overflowSeconds)})
 	if o.UDPIdleTimeout != 120*time.Second {
 		t.Errorf("overflowing udp_timeout_stream: UDPIdleTimeout = %v, want the 120s default", o.UDPIdleTimeout)
 	}
 
 	// 正当な値はそのまま通る
-	o = d.relayOptions(proto.WGConfig{UDPTimeoutStream: 300})
+	o = d.RelayOptions(proto.WGConfig{UDPTimeoutStream: 300})
 	if o.UDPIdleTimeout != 300*time.Second {
 		t.Errorf("in-range udp_timeout_stream: UDPIdleTimeout = %v, want 300s", o.UDPIdleTimeout)
 	}
 
 	// 0(値が無い旧い server)も既定値に落ちる
-	o = d.relayOptions(proto.WGConfig{UDPTimeoutStream: 0})
+	o = d.RelayOptions(proto.WGConfig{UDPTimeoutStream: 0})
 	if o.UDPIdleTimeout != 120*time.Second {
 		t.Errorf("zero udp_timeout_stream: UDPIdleTimeout = %v, want the 120s default", o.UDPIdleTimeout)
 	}
@@ -140,14 +140,14 @@ func TestTunnelConfigKeepaliveOverflow(t *testing.T) {
 // 設定したときは判定と設定の名前を渡す。
 func TestRelayOptionsAllowTargets(t *testing.T) {
 	st := &proto.State{WG: proto.WGConfig{UDPTimeoutStream: 120}}
-	if o := newUserspaceDataplane(nil, resource.Limits{}).relayOptions(st.WG); o.AllowTarget != nil || o.AllowTargetSource != "" {
+	if o := New(nil, resource.Limits{}).RelayOptions(st.WG); o.AllowTarget != nil || o.AllowTargetSource != "" {
 		t.Errorf("without a list: AllowTarget=%v source=%q, want none", o.AllowTarget != nil, o.AllowTargetSource)
 	}
 	list, err := allowtargets.Parse("192.168.1.20:25565")
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := newUserspaceDataplane(list, resource.Limits{}).relayOptions(st.WG)
+	o := New(list, resource.Limits{}).RelayOptions(st.WG)
 	if o.AllowTarget == nil {
 		t.Fatal("with a list: AllowTarget is nil")
 	}
