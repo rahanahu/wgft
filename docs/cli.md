@@ -1516,7 +1516,9 @@ Flags:
 ## wgft server teardown
 
 Clean up after a stopped server. Removes only what wgft created itself.
-Refuses if it is still running: run systemctl disable --now wgft first. Removes table inet wgft and the wg
+Refuses if it is still running: run systemctl disable --now wgft first. It holds the server's lock
+until it finishes, so a server started meanwhile exits without touching anything; if it cannot read
+the lock, it removes nothing. Removes table inet wgft and the wg
 interface, and with --purge the server database too, including keys, certificates, rules and agents. Other tables, firewall ports, and ip_forward are not
 reverted automatically; it only prints a list to revert by hand.
 

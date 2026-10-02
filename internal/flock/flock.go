@@ -83,6 +83,37 @@ func Acquire(statePath string) (*Lock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lock file: %w", err)
 	}
+	return lockOpened(f)
+}
+
+// AcquireCreating は Acquire と同じくロックを取り、ロックファイルをこの呼び出しが作ったかどうかも返す。
+// 作った場合、ロックファイルの持ち主は呼び出し元である。root の撤去がロックファイルを作ったとき、
+// 持ち主を状態ファイルの置き場の持ち主に合わせ、非特権で動くプロセスの次の起動を塞がないために使う
+// (設計文書 9・10.3 節)。作るか開くかは O_EXCL で決めるので、他のプロセスが同時に作ったファイルを
+// 自分が作ったとは答えない。開き方は Acquire と同じく OpenRegular である。
+func AcquireCreating(statePath string) (*Lock, bool, error) {
+	path := LockPath(statePath)
+	// 既にあるので開こうとした間に消された場合だけ、作るところからやり直す。運用者がロックファイルを
+	// 消し続けない限り 2 回目で決まるので、回数には小さな上限を置く。
+	for i := 0; ; i++ {
+		f, _, err := OpenRegular(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		created := err == nil
+		if errors.Is(err, fs.ErrExist) {
+			f, _, err = OpenRegular(path, os.O_RDWR, 0)
+			if errors.Is(err, fs.ErrNotExist) && i < 3 {
+				continue
+			}
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("lock file: %w", err)
+		}
+		l, err := lockOpened(f)
+		return l, created, err
+	}
+}
+
+// lockOpened は開いたロックファイルに、待たずに排他ロックを取る。取れなければ閉じて ErrLocked を返す。
+func lockOpened(f *os.File) (*Lock, error) {
 	if err := tryLock(f); err != nil {
 		f.Close()
 		if errors.Is(err, ErrLocked) {
@@ -92,6 +123,13 @@ func Acquire(statePath string) (*Lock, error) {
 	}
 	return &Lock{f: f}, nil
 }
+
+// Stat はロックファイルの記述子の fstat である。
+func (l *Lock) Stat() (os.FileInfo, error) { return l.f.Stat() }
+
+// Chown はロックファイルの持ち主とグループを記述子に対して変える。名前を経由しないので、ロックを
+// 取った後にパスが差し替えられても、差し替え先の持ち主は変えない。Windows では失敗する。
+func (l *Lock) Chown(uid, gid int) error { return l.f.Chown(uid, gid) }
 
 // State は Inspect が読み取ったロックファイルの状態。
 type State int
