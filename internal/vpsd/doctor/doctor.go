@@ -132,6 +132,11 @@ const (
 	// 10.2a 節)。server は起動時にだけ 1 にするので、稼働中に外から 0 にされると、カーネルで
 	// 転送するルールは 1 に戻るまで止まる。
 	ReasonIPForwardOff = "ip_forward_off"
+	// ReasonKeyChangeLimited は、server が鍵の変更の頻度の上限でエージェントの公開鍵の宣言を断り、
+	// その後にそのエージェントの公開鍵の宣言を受け付けていないことである(設計文書 5.2・10.2a 節)。
+	// server doctor が使うのは、記録が KeyChangeRefusalCurrent より新しい場合だけである。agent doctor の
+	// stream.connection も同じ値を使う(10.2c 節)。
+	ReasonKeyChangeLimited = "key_change_limited"
 )
 
 // 検査のまとまり。人向けの出力の見出しになる。保証の対象ではない。
@@ -158,6 +163,15 @@ const (
 	// エージェント側の watchdog の閾値であって、診断が気付けない期間ではない。1 つの数に
 	// 2 つの定数を置いたことが、両者の取り違えを生んでいた。
 	HandshakeStale = 3 * time.Minute
+	// KeyChangeRefusalCurrent は、鍵の変更を上限で断った記録(管理用 API の key_change_refused_at)を、
+	// 試みを続けているエージェントへの拒否として読む長さである(設計文書 10.2a 節)。記録は直近の拒否の
+	// 時刻で、宣言を受け付けると消える。断られた試みは 1 回分を使わず、試みのたびに記録を新しくする。
+	// 試みを続けるエージェントは ReconnectBackoffMax より長くは待たないので、その記録は
+	// ReconnectBackoffMax に 1 回の試みの時間を足した長さより古くならない。KeyChangeEvery の項は必要な
+	// 長さではなく余裕である。これより古い記録は、エージェントの試みが鍵の判定まで届いていないことを
+	// 示すので、拒否を今の原因として示さない。余裕の分、断られた後に止まったエージェントでも、拒否から
+	// この長さの間は key_change_limited を示し続ける。
+	KeyChangeRefusalCurrent = proto.KeyChangeEvery + proto.ReconnectBackoffMax
 	// TargetReportStale は、エージェントが報告したルールの状態が古くなる長さである。TCP の
 	// target への接続確認は 30 秒ごとに行われる(設計文書 5.2 節)ので、ハートビートと同じ
 	// 90 秒を越えた報告は、今の値として扱わない。
@@ -602,13 +616,14 @@ func findAgentInfo(agents []adminapi.AgentInfo, name string) *adminapi.AgentInfo
 // 劣化を確かめているので「判定に足りない」の UNKNOWN より人には正確であり、終了コードが 0 でも
 // 出力が黙らない。
 //
-// 今この意味に当たる例は 2 つである。制御の経路が切れているがトンネルが生きている agent.connection
-// (agent_disconnected)と、名前の解決に失敗したが直前の解決の結果で転送を続けている
-// rule.target_resolve(target_resolve_failed。unknown と組になるのはこの場合だけである)。
+// 今この意味に当たる例は次のとおりである。制御の経路が切れているがトンネルが生きている
+// agent.connection(agent_disconnected)、同じく最終ハンドシェイクが新しく、鍵の変更を上限で断った
+// 記録がある agent.connection(key_change_limited)、名前の解決に失敗したが直前の解決の結果で転送を
+// 続けている rule.target_resolve(target_resolve_failed。unknown と組になるのはこの場合だけである)。
 // 他の unknown は劣化を確かめていないので UNKNOWN のまま出す。
 func DisplayStatus(c Check) string {
 	if c.Status == StatusUnknown &&
-		((c.ID == CheckConnection && c.Reason == ReasonAgentDisconnected) ||
+		((c.ID == CheckConnection && (c.Reason == ReasonAgentDisconnected || c.Reason == ReasonKeyChangeLimited)) ||
 			(c.ID == CheckTargetResolve && c.Reason == ReasonResolveFailed)) {
 		return "DEGRADED"
 	}

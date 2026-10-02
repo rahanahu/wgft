@@ -379,6 +379,33 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			wantExit: 0,
 		},
 		{
+			// server が鍵の変更の頻度の上限で断った。再試行で解けるので UNKNOWN のままで総合判定も
+			// 動かさないが、理由の符号を分け、受け取り済みのルールの転送が続くという案内を出さない
+			// (5.2・10.2c 節)。
+			name: "the server refused the key under its key change limit",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
+				s.Connected = false
+				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
+				s.DisconnectReason = "failed to get reader: received close frame: status = StatusPolicyViolation and reason = \"public key changes are limited; retry later\""
+				s.KeyChangeLimited = true
+			}))),
+			want:       []wantCheck{{agentCheckStreamConn, statusUnknown, agentReasonKeyChangeLimited}},
+			wantExit:   0,
+			wantDetail: map[string]string{agentCheckStreamConn: "the last attempt ended at 2026-09-23T11:59:00Z, 1m0s ago, refused by the server's key change limit"},
+			wantNext:   map[string]string{agentCheckStreamConn: "this agent forwards nothing until the server accepts it"},
+		},
+		{
+			// 旧い版のエージェントは key_change_limited を送らない。server が送った理由の文言で見分ける。
+			name: "an older agent reports the key change refusal in its reason only",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
+				s.Connected = false
+				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
+				s.DisconnectReason = "failed to get reader: received close frame: status = StatusPolicyViolation and reason = \"public key changes are limited; retry later\""
+			}))),
+			want:     []wantCheck{{agentCheckStreamConn, statusUnknown, agentReasonKeyChangeLimited}},
+			wantExit: 0,
+		},
+		{
 			// 宛先の許可一覧を持たない稼働中のエージェントは、そのことを事実として示す。
 			name: "the running agent enforces no allowlist",
 			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {}, func(a *controlapi.DoctorAllowTargets) {

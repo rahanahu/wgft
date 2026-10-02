@@ -7,6 +7,9 @@
 // 理由は管理用 API で doctor に届く。稼働中の別の版のエージェントも同じ文言を送り続けるので、
 // 断片の値は変えない。値を変えると、古いエージェントの理由を doctor が分類できなくなる。
 //
+// ルールの理由のほかに、vpsd が stream を閉じるときの理由の文言のうち、エージェントの側が読んで
+// 見分けるもの(KeyChangeLimited)もここに置く。値を変えてはならない理由は同じである。
+//
 // この package はモジュールの中の何も import しない葉である。dataplane の実装と 2 つの制御プレーンの
 // どこからも import できる。
 package reasontext
@@ -84,3 +87,8 @@ func AgentDisabled(agent string) string {
 func IsAgentDisabled(reason string) bool {
 	return strings.HasPrefix(reason, agentPrefix) && strings.HasSuffix(reason, agentDisabledSuffix)
 }
+
+// KeyChangeLimited は、vpsd が鍵の変更の頻度の上限(設計文書 5.2 節)で公開鍵の宣言を断るときの
+// stream の close の理由である。符号は公開鍵の拒否と同じ 1008 なので、エージェントはこの文言で上限に
+// よる拒否を見分け、agent doctor が示す(設計文書 10.2c 節)。
+const KeyChangeLimited = "public key changes are limited; retry later"

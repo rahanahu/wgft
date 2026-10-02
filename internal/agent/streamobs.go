@@ -4,7 +4,10 @@ import (
 	"errors"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/rahanahu/wgft/internal/agent/enroll"
+	"github.com/rahanahu/wgft/internal/reasontext"
 )
 
 // 制御ストリームの観測(設計文書 10.2c 節)。`wgft agent doctor` の stream.connection・stream.backoff・
@@ -36,6 +39,11 @@ type streamObservation struct {
 	// 一致しないためだったことである。再試行では直らないので、`agent doctor` が他の切断と分けて示す
 	// (設計文書 10.2c 節)。
 	PinMismatch bool
+	// KeyChangeLimited は、直近の接続の試みが、server の鍵の変更の頻度の上限による拒否で終わった
+	// ことである(設計文書 5.2 節)。server は公開鍵の拒否と同じ 1008 で閉じるので、close の理由の
+	// 文言で見分ける。`agent doctor` が、受け取り済みのルールの転送が続くという案内を出さないために
+	// 使う(設計文書 10.2c 節)。
+	KeyChangeLimited bool
 
 	// Backoff は直近に待った再接続の間隔で、RetryAt は次に繋ぎ直す時刻。どちらも streamLoop が待ちに
 	// 入るたびに書く。待ちに入っていない間、RetryAt はゼロである。Backoff は streamLoop のローカル
@@ -96,6 +104,13 @@ func (rt *runtime) noteStreamDisconnected(now time.Time, err error) {
 	rt.streamObs.Connected, rt.streamObs.AwaitingPong = false, false
 	rt.streamObs.DisconnectedAt, rt.streamObs.DisconnectReason = now, reason
 	rt.streamObs.PinMismatch = errors.Is(err, enroll.ErrPinMismatch)
+	rt.streamObs.KeyChangeLimited = isKeyChangeLimited(err)
+}
+
+// isKeyChangeLimited は、err が server の鍵の変更の頻度の上限による拒否の close かどうかである。
+func isKeyChangeLimited(err error) bool {
+	var ce websocket.CloseError
+	return errors.As(err, &ce) && ce.Code == websocket.StatusPolicyViolation && ce.Reason == reasontext.KeyChangeLimited
 }
 
 // noteStreamWaiting は、次の接続までの待ちに入ったことを記録する。backoff は streamLoop が実際に

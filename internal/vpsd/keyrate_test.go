@@ -406,3 +406,138 @@ func TestAlternatingKeysOverTheStream(t *testing.T) {
 		t.Fatalf("other's next message is not the rule change: %+v, %v", msg.State, err)
 	}
 }
+
+// The agent list carries the hub's refusal record (design.md 5.2 and 7a.11 節): key_change_refused_at
+// appears for the refused agent only, stays while it makes no further accepted declaration, and is
+// gone once a change comes back and its key is accepted.
+func TestAgentsReportKeyChangeRefusal(t *testing.T) {
+	f := newDisableFixture(t)
+	f.d.onPushAll, f.d.onPush = nil, nil
+	now := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+	f.d.clock = func() time.Time { return now }
+	srv := httptest.NewServer(f.d.hub)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	declare := func(agent string, key wgtypes.Key) error {
+		t.Helper()
+		return declareKey(t, url, f.tokens[agent], key)
+	}
+	refusedAt := func(agent string) string {
+		t.Helper()
+		list, err := f.d.Agents()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range list {
+			if a.Name == agent {
+				return a.KeyChangeRefusedAt
+			}
+		}
+		t.Fatalf("no agent %s", agent)
+		return ""
+	}
+
+	if err := declare("other", newKey(t)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := declare("home", newKey(t)); err != nil {
+			t.Fatalf("home declaration %d: %v", i, err)
+		}
+	}
+	if got := refusedAt("home"); got != "" {
+		t.Fatalf("never refused: key_change_refused_at = %q", got)
+	}
+	pending := newKey(t)
+	for i := 0; i < 2; i++ {
+		if err := declare("home", pending); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+			t.Fatalf("over the limit, attempt %d: %v, want 1008", i, err)
+		}
+	}
+	got := refusedAt("home")
+	if _, err := time.Parse(time.RFC3339, got); err != nil {
+		t.Fatalf("refused: key_change_refused_at = %q, want an RFC3339 time", got)
+	}
+	if got := refusedAt("other"); got != "" {
+		t.Fatalf("another agent: key_change_refused_at = %q, want none", got)
+	}
+	now = now.Add(10 * time.Minute)
+	if err := declare("home", pending); err != nil {
+		t.Fatalf("after a change came back: %v", err)
+	}
+	if got := refusedAt("home"); got != "" {
+		t.Fatalf("accepted since: key_change_refused_at = %q, want none", got)
+	}
+}
+
+// declareKey opens a stream with token, declares key and returns nil when a State comes back, or the
+// error the read ended with.
+func declareKey(t *testing.T, url, token string, key wgtypes.Key) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	msg, _ := json.Marshal(proto.Message{Type: proto.MsgPublicKey, PublicKey: key.String()})
+	if err := ws.Write(ctx, websocket.MessageText, msg); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := ws.Read(ctx)
+	if err != nil {
+		return err
+	}
+	var m proto.Message
+	if err := json.Unmarshal(data, &m); err != nil || m.Type != proto.MsgState {
+		t.Fatalf("declaration: %s, %v", data, err)
+	}
+	return nil
+}
+
+// A refusal recorded for a registration that has since been revoked is not reported for the name's
+// next registration (design.md 5.2 節). Revoke drops the hub's state, but a refusal written between
+// the limit check and that drop can outlive it; the store's revoke here, without the hub's drop,
+// leaves the hub in that state.
+func TestAgentsIgnoreARefusalOfAnotherRegistration(t *testing.T) {
+	f := newDisableFixture(t)
+	f.d.onPushAll, f.d.onPush = nil, nil
+	now := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+	f.d.clock = func() time.Time { return now }
+	srv := httptest.NewServer(f.d.hub)
+	defer srv.Close()
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	for i := 0; i < 4; i++ {
+		if err := declareKey(t, url, f.tokens["home"], newKey(t)); err != nil {
+			t.Fatalf("home declaration %d: %v", i, err)
+		}
+	}
+	if err := declareKey(t, url, f.tokens["home"], newKey(t)); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Fatalf("over the limit: %v, want 1008", err)
+	}
+	if st := f.d.hub.Status("home"); st.KeyChangeRefusedAt.IsZero() {
+		t.Fatal("the refusal was not recorded")
+	}
+	if err := f.st.RevokeAgent("home"); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := f.st.IssueJoinToken("home", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.st.Register(tok, "home", "203.0.113.2", netip.MustParsePrefix("10.200.0.0/24")); err != nil {
+		t.Fatal(err)
+	}
+	list, err := f.d.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range list {
+		if a.Name == "home" && a.KeyChangeRefusedAt != "" {
+			t.Fatalf("the new registration shows the old registration's refusal: %q", a.KeyChangeRefusedAt)
+		}
+	}
+}

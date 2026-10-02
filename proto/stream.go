@@ -26,6 +26,15 @@ type Message struct {
 	Capabilities *[]string `json:"capabilities,omitempty"`
 }
 
+// ReconnectBackoffMax は、エージェントが stream を繋ぎ直す待ちの上限である(仕様 5.2 節)。エージェントの
+// 既定の上限はこの値で、server doctor は、鍵の変更を断った記録が今も試みを続けるエージェントのものか
+// どうかを、この値と KeyChangeEvery から判断する(仕様 10.2a 節)。
+const ReconnectBackoffMax = 5 * time.Minute
+
+// KeyChangeEvery は、vpsd の鍵の変更の頻度の上限で 1 回分が戻る間隔である(仕様 5.2 節)。wire には
+// 載らない。vpsd の上限と server doctor が同じ値を使うためにここに置く。
+const KeyChangeEvery = 10 * time.Minute
+
 // Heartbeat はエージェントの状態(仕様 5.2 節)。
 type Heartbeat struct {
 	Generation uint64       `json:"generation"` // 最後に受け取って処理した世代(部分失敗でも進める)

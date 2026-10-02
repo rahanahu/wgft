@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/rahanahu/wgft/proto"
 )
 
 // 鍵の変更の頻度の上限(設計文書 5.2 節)。登録ごとのトークンバケットで、続けて keyChangeBurst 回までと、
@@ -16,7 +18,7 @@ import (
 // 作り直すので、恒久トークンの持ち主が起こせる回数をこの上限で抑える。
 const (
 	keyChangeBurst = 3
-	keyChangeEvery = 10 * time.Minute
+	keyChangeEvery = proto.KeyChangeEvery
 )
 
 // now は Daemon の時計である。単体テストは clock で差し替える。

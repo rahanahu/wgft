@@ -33,7 +33,7 @@ var errServerProtocolVersion = errors.New("server selected protocol version")
 // 初期値と上限(仕様 5.2 節)。
 const (
 	defaultReconnectBackoffMin = time.Second
-	defaultReconnectBackoffMax = 5 * time.Minute
+	defaultReconnectBackoffMax = proto.ReconnectBackoffMax
 )
 
 // defaultReconnectBackoffFreshMax は、WireGuard の最終ハンドシェイクが新しい間の再接続の待ちの
