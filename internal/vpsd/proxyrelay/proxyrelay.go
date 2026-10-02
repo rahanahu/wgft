@@ -19,6 +19,7 @@ import (
 	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/netpipe"
 	"github.com/rahanahu/wgft/internal/policy"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/resource"
 )
 
@@ -230,7 +231,7 @@ func (m *Manager) Prepare(rules []Rule) *Prepared {
 				f.reason = err.Error()
 				m.opts.Logf("proxy: cannot open listener for %d: %v", port, err)
 			}
-			p.failed[p.want[port].ID] = fmt.Errorf("bind failed: %w", err)
+			p.failed[p.want[port].ID] = fmt.Errorf(reasontext.BindFailed+": %w", err)
 			continue
 		}
 		p.opened[port] = ln

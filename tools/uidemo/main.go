@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
@@ -374,9 +375,9 @@ func (b *fakeBackend) ApplyStatus() (admin.ApplyStatus, bool) {
 		switch {
 		case !r.Enabled:
 		case disabledAgents[r.Agent]:
-			st.Rules[r.ID] = admin.RuleApply{ApplyState: admin.ApplyNotActive, Reason: fmt.Sprintf("agent %q is disabled", r.Agent)}
+			st.Rules[r.ID] = admin.RuleApply{ApplyState: admin.ApplyNotActive, Reason: reasontext.AgentDisabled(r.Agent)}
 		case revokedAgents[r.Agent]:
-			st.Rules[r.ID] = admin.RuleApply{ApplyState: admin.ApplyNotActive, Reason: fmt.Sprintf("agent %q is not registered", r.Agent)}
+			st.Rules[r.ID] = admin.RuleApply{ApplyState: admin.ApplyNotActive, Reason: reasontext.AgentNotRegistered(r.Agent)}
 		default:
 			st.Rules[r.ID] = admin.RuleApply{ApplyState: admin.ApplyActive, ActiveGeneration: &gen}
 		}

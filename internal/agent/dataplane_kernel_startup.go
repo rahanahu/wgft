@@ -16,6 +16,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/platform/linux"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/startup"
 )
 
@@ -101,7 +102,7 @@ func (d *kernelDataplane) enableForwarding(save func() error) error {
 				log.Printf("warning: cannot remove the ip_forward record after the write failed: %v", serr)
 			}
 		}
-		d.forwardErr = fmt.Errorf("net.ipv4.ip_forward is not 1 and cannot be set: %w", err)
+		d.forwardErr = fmt.Errorf(reasontext.IPForward+" is not 1 and cannot be set: %w", err)
 		log.Printf("warning: %v; rules whose target is not this host are reported as errors until it is 1", d.forwardErr)
 		if l, err := d.ops.localAddrs(); err == nil {
 			d.local = l

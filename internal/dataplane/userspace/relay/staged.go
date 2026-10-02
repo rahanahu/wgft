@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"sort"
 
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -84,7 +85,7 @@ func (m *Manager) Prepare(desired map[Key]Desired) *Staged {
 				f.reason = err.Error()
 				m.opts.Logf("listener %s: %v", k, err)
 			}
-			s.failed[d.RuleID] = fmt.Errorf("bind failed: %w", err)
+			s.failed[d.RuleID] = fmt.Errorf(reasontext.BindFailed+": %w", err)
 			continue
 		}
 		s.opened[k] = sock

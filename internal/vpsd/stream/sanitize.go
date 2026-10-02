@@ -41,7 +41,7 @@ func sanitizeHeartbeat(hb *proto.Heartbeat) *proto.Heartbeat {
 		Generation: hb.Generation,
 		Tunnel: proto.TunnelStatus{
 			State:         clipAndSanitize(hb.Tunnel.State, maxHeartbeatStateLen),
-			Reason:        clipAndSanitize(hb.Tunnel.Reason, maxHeartbeatReasonLen),
+			Reason:        HeartbeatReason(hb.Tunnel.Reason),
 			Endpoint:      clipAndSanitize(hb.Tunnel.Endpoint, maxHeartbeatEndpointLen),
 			LastHandshake: hb.Tunnel.LastHandshake,
 		},
@@ -52,11 +52,18 @@ func sanitizeHeartbeat(hb *proto.Heartbeat) *proto.Heartbeat {
 			out.Rules[i] = proto.RuleStatus{
 				ID:     clipAndSanitize(r.ID, maxHeartbeatIDLen),
 				State:  clipAndSanitize(r.State, maxHeartbeatStateLen),
-				Reason: clipAndSanitize(r.Reason, maxHeartbeatReasonLen),
+				Reason: HeartbeatReason(r.Reason),
 			}
 		}
 	}
 	return out
+}
+
+// HeartbeatReason は、ハートビートの Tunnel.Reason か Rules[].Reason を、hub が保存して読み手に渡す形に
+// する。server doctor が分類するのはこの値なので、エージェントの理由の文言と doctor の分類を結ぶ試験
+// (internal/agent の reason_roundtrip_test.go)もこれを通す。
+func HeartbeatReason(s string) string {
+	return clipAndSanitize(s, maxHeartbeatReasonLen)
 }
 
 // clipAndSanitize replaces every unsafe rune and invalid UTF-8 byte in s with a visible, inert

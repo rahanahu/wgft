@@ -184,8 +184,8 @@ func TestDependencyDirection(t *testing.T) {
 // its sub-packages, the nftables-row and Go-evaluator Admission Policy compilers, design.md 7a.7
 // 節's package layout) and internal/planner "know nothing about the OS, nftables, or gVisor": inside
 // the module, they import only proto and each other, never dataplane/*, frontend/*, platform/*,
-// vpsd or agent. internal/resource, internal/lograte, internal/startup and internal/textsafe are
-// even stricter and import nothing at all from the module (design.md 7a.7 節).
+// vpsd or agent. internal/resource, internal/lograte, internal/startup, internal/textsafe and
+// internal/reasontext are even stricter and import nothing at all from the module (design.md 7a.7 節).
 func TestPureLayersStayPure(t *testing.T) {
 	root := moduleRoot(t)
 	var pure []string
@@ -211,7 +211,7 @@ func TestPureLayersStayPure(t *testing.T) {
 	// by cmd/wgft, internal/vpsd, internal/agent and internal/dataplane/linuxkernel/wg alike, so it
 	// stays a leaf. If it grew an import of, say, internal/vpsd/store, every one of those layers
 	// would pull the control plane in through it and the direction of 7a.7 節 would break.
-	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup", "internal/textsafe"} {
+	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup", "internal/textsafe", "internal/reasontext"} {
 		pkgs := packagesUnder(t, root, name)
 		if len(pkgs) == 0 {
 			t.Fatalf("found no packages under %s; did it move?", name)
@@ -378,6 +378,32 @@ func TestVpsdTailnetImportsNoServerPackage(t *testing.T) {
 		for _, dep := range deps(t, root, pkg) {
 			if dep == vpsd || strings.HasPrefix(dep, vpsd+"/") {
 				t.Errorf("%s imports %s (design.md 7a.7 節: the tailnet listener imports no server package)", pkg, dep)
+			}
+		}
+	}
+}
+
+// TestControlPlanesDoNotImportEachOther checks design.md 7a.7 節's rule that the two control planes
+// share code only through the layers below them: no package under internal/vpsd depends on a
+// package under internal/agent, and no package under internal/agent depends on one under
+// internal/vpsd. The rule reasons the agent writes and server doctor reads share their fragments
+// through internal/reasontext, a leaf, rather than through either control plane.
+func TestControlPlanesDoNotImportEachOther(t *testing.T) {
+	root := moduleRoot(t)
+	for _, side := range []struct{ from, other string }{
+		{"internal/vpsd", "internal/agent"},
+		{"internal/agent", "internal/vpsd"},
+	} {
+		pkgs := packagesUnder(t, root, side.from)
+		if len(pkgs) == 0 {
+			t.Fatalf("found no package under %s; did it move?", side.from)
+		}
+		other := module + "/" + side.other
+		for _, pkg := range pkgs {
+			for _, dep := range deps(t, root, pkg) {
+				if dep == other || strings.HasPrefix(dep, other+"/") {
+					t.Errorf("%s imports %s (design.md 7a.7 節: one control plane does not import the other)", pkg, dep)
+				}
 			}
 		}
 	}

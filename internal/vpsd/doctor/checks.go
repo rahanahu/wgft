@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -63,7 +63,7 @@ func publicPortCheck(r proto.Rule, in Input) Check {
 	case adminapi.ApplyNotActive:
 		c.Status = StatusFailed
 		c.Reason = ReasonNotPublished
-		if strings.Contains(st.Reason, "bind failed") {
+		if strings.Contains(st.Reason, reasontext.BindFailed) {
 			c.Reason = ReasonBindFailed
 		}
 		c.Detail = "the server does not handle this port: " + ReasonOr(st.Reason, "no reason reported")
@@ -270,20 +270,20 @@ func driftNote(id string, d *adminapi.Drift) string {
 // モードでエフェメラルポートと衝突する形が多いので、その可能性を名指しする(docs/setup.md)。
 func applyNextStep(reason string) string {
 	switch {
-	case strings.Contains(reason, "bind failed"):
+	case strings.Contains(reason, reasontext.BindFailed):
 		return "another process on this VPS holds that port. In userspace mode the server binds every listen port, and a port inside " +
 			"net.ipv4.ip_local_port_range, 32768-60999 by default, can be taken by any outbound connection or its TIME_WAIT. Move the " +
 			"listen port outside that range, or reserve it with net.ipv4.ip_local_reserved_ports. The server retries every 30s."
-	case strings.HasPrefix(reason, "agent ") && strings.HasSuffix(reason, " is disabled"):
+	case reasontext.IsAgentDisabled(reason):
 		// 無効なエージェントのルールは、Diagnose が agent.enabled の agent_disabled として先に
 		// 扱うので、普段はここに来ない。来るのは、ルールの読み取りとエージェントの読み取りの間に
 		// エージェントが有効化された場合だけである。エージェントは既に有効なので agent enable は
 		// 案内せず、読み直しを勧める。rule enable も何も変えないので、下のルール自身の
 		// "disabled" より先に判定する(設計文書 5.1、10.2a 節)。
 		return "the agent may have just been enabled while this command read the evidence; run it again"
-	case strings.Contains(reason, "disabled"):
+	case strings.Contains(reason, reasontext.RuleDisabled):
 		return "enable it: wgft rule enable <rule>"
-	case strings.Contains(reason, "not registered") || strings.Contains(reason, "unregistered"):
+	case strings.Contains(reason, reasontext.NotRegistered) || strings.Contains(reason, "unregistered"):
 		return "register an agent under that name: wgft agent join-string --name <agent>"
 	}
 	return "fix what the reason names; the server retries every 30s on its own"
@@ -704,11 +704,11 @@ func FreshAgentRuleStatus(st adminapi.AgentRuleStatus, now time.Time) (adminapi.
 }
 
 // 直前の解決の結果で転送を続けているルールの理由の目印である。カーネルモードのエージェントの
-// staleReason(internal/agent/dataplane_kernel_resolve.go)が組み立てる文言であり、その側の試験
-// (TestKernelStaleReasonIsReadByServerDoctor)がこの関数で読めることを固定している。
+// staleReason(internal/agent/dataplane_kernel_resolve.go)が同じ断片(internal/reasontext)で組み立て、
+// その側の試験(TestKernelStaleReasonIsReadByServerDoctor)がこの関数で読めることを固定している。
 const (
-	staleForwardMark = "; still forwarding to "
-	staleFromMark    = " from the last successful resolution"
+	staleForwardMark = reasontext.StillForwardingTo
+	staleFromMark    = reasontext.FromLastResolution
 )
 
 // StaleResolution は、エージェントの理由が「名前の解決に失敗し、直前の解決の結果で転送を続けて
@@ -735,7 +735,7 @@ func StaleResolution(reason string) (addr, rest string, ok bool) {
 // looksLikeResolveFailure は、エージェントの理由が名前解決の失敗かどうかを見る。Go の net が
 // 返す文言に依る判定なので確実ではない。外したときは決めつけず、target の誤りとして扱う。
 func looksLikeResolveFailure(reason string) bool {
-	for _, m := range []string{"no such host", "lookup ", "server misbehaving", "name resolution"} {
+	for _, m := range []string{"no such host", "lookup ", "server misbehaving", reasontext.NameResolution} {
 		if strings.Contains(reason, m) {
 			return true
 		}
@@ -916,9 +916,9 @@ func reportAge(at string, now time.Time) (time.Duration, bool) {
 // 当てはまらないものは target_error にまとめる。符号は増やせるが、意味は変えない。
 func targetReasonCode(reason string) string {
 	switch {
-	case strings.Contains(reason, allowtargets.Env) || strings.Contains(reason, "is not allowed"):
+	case strings.Contains(reason, reasontext.AllowTargetsEnv) || strings.Contains(reason, reasontext.NotAllowed):
 		return ReasonTargetNotAllowed
-	case strings.Contains(reason, "net.ipv4.ip_forward"):
+	case strings.Contains(reason, reasontext.IPForward):
 		// カーネルモードのエージェントの文言(internal/agent の ruleStatuses)。書けなかった場合の
 		// 文言は下層の誤りを包むので、時間切れや拒否の語を含みうる。それらより先に当てる
 		return ReasonAgentIPForwardOff
@@ -926,13 +926,13 @@ func targetReasonCode(reason string) string {
 		return ReasonListenerBindFailed
 	case looksLikeResolveFailure(reason):
 		return ReasonResolveFailed
-	case strings.Contains(reason, "does not forward to loopback targets"):
+	case strings.Contains(reason, reasontext.LoopbackUnsupported):
 		// カーネルモードのエージェントの文言(internal/dataplane/linuxkernel/nft の targetAddrs)。名前の
 		// 解決に失敗して直前のアドレスも使えない場合は、解決の失敗の側を先に当てる
 		return ReasonTargetLoopbackUnsupported
 	case strings.Contains(reason, "connection refused"):
 		return ReasonConnectionRefused
-	case strings.Contains(reason, "timeout") || strings.Contains(reason, "timed out") || strings.Contains(reason, "did not answer"):
+	case strings.Contains(reason, "timeout") || strings.Contains(reason, "timed out") || strings.Contains(reason, reasontext.DidNotAnswer):
 		return ReasonTargetTimeout
 	case strings.Contains(reason, "no route to host") || strings.Contains(reason, "unreachable"):
 		return ReasonTargetUnreachable
@@ -954,7 +954,7 @@ func targetReasonCode(reason string) string {
 // でも、宛先が先に閉じるセッションの後にルールを閉じ直すと、TIME_WAIT の間ポートを保持する経路
 // (設計文書 7 節)から同じ文言に至ることをラボで確かめた(設計文書 改訂の記録)。
 func looksLikeBindFailure(reason string) bool {
-	if strings.Contains(reason, "bind failed") {
+	if strings.Contains(reason, reasontext.BindFailed) {
 		return true
 	}
 	if strings.Contains(reason, "listen") && strings.Contains(reason, "bind:") {
@@ -974,7 +974,7 @@ func agentStateText(st adminapi.AgentRuleStatus) string {
 func agentRuleNextStep(reason string, r proto.Rule) string {
 	switch targetReasonCode(reason) {
 	case ReasonTargetNotAllowed:
-		return "the agent refuses this target itself: " + allowtargets.Env + " on the agent host does not list it. Add the target there, or point the rule elsewhere."
+		return "the agent refuses this target itself: " + reasontext.AllowTargetsEnv + " on the agent host does not list it. Add the target there, or point the rule elsewhere."
 	case ReasonListenerBindFailed:
 		// ユーザー空間モードの中継の待ち受けはエージェントのプロセス内の netstack にあり、
 		// ホストの他のプロセスとポート空間を共有しない。「他のプロセスを探す」という以前の案内は

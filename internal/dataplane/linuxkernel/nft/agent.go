@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -226,7 +227,7 @@ func refusedReason(host string, addrs []netip.Addr, to uint16, source string) st
 		if source != "" {
 			return fmt.Sprintf("target %s is not in %s", d, source)
 		}
-		return fmt.Sprintf("target %s is not allowed", d)
+		return fmt.Sprintf("target %s "+reasontext.NotAllowed, d)
 	}
 	list := make([]string, len(addrs))
 	for i, a := range addrs {
@@ -235,7 +236,7 @@ func refusedReason(host string, addrs []netip.Addr, to uint16, source string) st
 	if source != "" {
 		return fmt.Sprintf("target host %q resolved to %s; none of them at port %d is in %s", host, strings.Join(list, ", "), to, source)
 	}
-	return fmt.Sprintf("target host %q resolved to %s; each of them at port %d is not allowed", host, strings.Join(list, ", "), to)
+	return fmt.Sprintf("target host %q resolved to %s; each of them at port %d "+reasontext.NotAllowed, host, strings.Join(list, ", "), to)
 }
 
 // targetAddrs は宛先のホストを、DNAT に使える IPv4 のアドレスの昇順の並びにする。使えなければ理由を返す。
@@ -251,9 +252,9 @@ func targetAddrs(host string, resolved map[string]Resolution) ([]netip.Addr, str
 			return nil, fmt.Sprintf("target host %q has only IPv6 addresses; kernel mode forwards only to IPv4 targets", host)
 		case !ok || (rs.Err == nil && len(rs.Addrs) == 0):
 			// 文言に "name resolution" を含め、server doctor が target_resolve_failed に分類できるようにする
-			return nil, fmt.Sprintf("target host %q has no name resolution result", host)
+			return nil, fmt.Sprintf("target host %q has no "+reasontext.NameResolution+" result", host)
 		case rs.Err != nil:
-			return nil, fmt.Sprintf("name resolution of target host %q failed: %v", host, rs.Err)
+			return nil, reasontext.NameResolutionFailed(host, rs.Err)
 		}
 		cands = rs.Addrs
 	}
@@ -267,10 +268,10 @@ func targetAddrs(host string, resolved map[string]Resolution) ([]netip.Addr, str
 			reason = fmt.Sprintf("target %s is an IPv6 address; kernel mode forwards only to IPv4 targets", a)
 		case a.IsLoopback():
 			// カーネルは DNAT でループバックへ向けたパケットを捨てる。route_localnet は使わない(7b.2 節)
-			reason = fmt.Sprintf("target %s is a loopback address; kernel mode does not forward to loopback targets, use this host's LAN address", a)
+			reason = fmt.Sprintf("target %s is a loopback address; kernel mode "+reasontext.LoopbackUnsupported+", use this host's LAN address", a)
 		case a.IsUnspecified():
 			// ユーザー空間モードでは 0.0.0.0 への接続はホスト自身に届くので、ループバックと同じく拒む(7b.2 節)
-			reason = fmt.Sprintf("target %s is the unspecified address, which reaches this host's loopback; kernel mode does not forward to loopback targets, use this host's LAN address", a)
+			reason = fmt.Sprintf("target %s is the unspecified address, which reaches this host's loopback; kernel mode "+reasontext.LoopbackUnsupported+", use this host's LAN address", a)
 		default:
 			usable = append(usable, a)
 		}
