@@ -462,3 +462,25 @@ func TestAdoptDirOwnerKeepsAMatchingOwner(t *testing.T) {
 		t.Errorf("adoptDirOwner on a missing directory = %v, want ErrNotExist", err)
 	}
 }
+
+// 置き場のパスが行き先の無い symlink なら、置き場を作れないので、何も消さずに止まる。
+func TestTeardownStopsOnADanglingDirectorySymlink(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "wgft")
+	if err := os.Symlink(filepath.Join(base, "private", "wgft"), dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "wgft.sqlite")
+	r := &recorder{t: t, dbPath: path}
+	var buf bytes.Buffer
+	err := run(fakeOps(r), Options{DBPath: path, Adopt: true, Purge: true, Yes: true}, &buf)
+	if err == nil || !strings.Contains(err.Error(), "nothing was removed") {
+		t.Fatalf("err = %v\n%s", err, buf.String())
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("teardown went on to %v", r.calls)
+	}
+	if exists(filepath.Join(base, "private")) {
+		t.Error("teardown created the symlink's target")
+	}
+}

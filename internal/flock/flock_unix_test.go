@@ -121,3 +121,89 @@ func TestAcquireGivesUpWhenTheLockFileKeepsChanging(t *testing.T) {
 	}
 	l.Release()
 }
+
+// 照合で食い違ったときは、古い記述子を閉じてそのロックを放す。閉じ忘れると、消されたファイルのロックを
+// 持ったまま新しいファイルのロックも持ち、古いファイルを開いた別のプロセスが取れなくなる。
+func TestAcquireReleasesTheStaleLockOnMismatch(t *testing.T) {
+	for _, creating := range []bool{false, true} {
+		t.Run(fmt.Sprintf("creating=%v", creating), func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "wgft.sqlite")
+			var old *os.File
+			afterLockForTest = func(attempt int) {
+				if attempt != 0 {
+					return
+				}
+				var err error
+				// 消す前の古いファイルを別の記述子で開いておく
+				if old, err = os.OpenFile(LockPath(state), os.O_RDWR, 0); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(LockPath(state)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Cleanup(func() { afterLockForTest = nil })
+			var l *Lock
+			var err error
+			if creating {
+				l, _, err = AcquireCreating(state)
+			} else {
+				l, err = Acquire(state)
+			}
+			if err != nil {
+				t.Fatalf("acquire: %v", err)
+			}
+			defer l.Release()
+			if old == nil {
+				t.Fatal("the hook did not run")
+			}
+			defer old.Close()
+			if err := tryLock(old); err != nil {
+				t.Errorf("locking the removed file from another descriptor = %v; acquire must close the stale descriptor and release its lock", err)
+			}
+		})
+	}
+}
+
+// ロックを取った後にロックファイルが、取ったファイルそのものへの symlink に差し替えられた場合も、パスは
+// もう通常のファイルではないので照合で食い違う。照合はパスを lstat で読み、symlink を辿らない。辿ると
+// 取ったファイルと同じに見えて、symlink の置かれたロックファイルのロックを返してしまう。開き直しは
+// symlink を拒む。
+func TestAcquireDetectsALockFileReplacedBySymlink(t *testing.T) {
+	for _, creating := range []bool{false, true} {
+		t.Run(fmt.Sprintf("creating=%v", creating), func(t *testing.T) {
+			dir := t.TempDir()
+			state := filepath.Join(dir, "wgft.sqlite")
+			afterLockForTest = func(attempt int) {
+				if attempt != 0 {
+					return
+				}
+				moved := filepath.Join(dir, "moved.lock")
+				if err := os.Rename(LockPath(state), moved); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(moved, LockPath(state)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Cleanup(func() { afterLockForTest = nil })
+			var err error
+			if creating {
+				var l *Lock
+				l, _, err = AcquireCreating(state)
+				if err == nil {
+					l.Release()
+				}
+			} else {
+				var l *Lock
+				l, err = Acquire(state)
+				if err == nil {
+					l.Release()
+				}
+			}
+			if !errors.Is(err, ErrNotRegular) {
+				t.Errorf("acquire after the lock file became a symlink = %v, want ErrNotRegular", err)
+			}
+		})
+	}
+}
