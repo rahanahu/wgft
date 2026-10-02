@@ -72,18 +72,18 @@ func TestKernelReasonsAreReadByServerDoctor(t *testing.T) {
 				}
 			}
 			rule := tcpRule("r1", tc.target, 25565, 25565)
-			if _, err := d.applyRules(1, []proto.AgentRule{rule}, nil); err != nil {
+			if _, err := d.ApplyRules(1, []proto.AgentRule{rule}, nil); err != nil {
 				t.Fatal(err)
 			}
 			switch tc.step {
 			case resolveThenFail:
 				k.dnsErr = fmt.Errorf("lookup %s on 127.0.0.53:53: no such host", tc.host)
-				if _, err := d.applyRules(2, []proto.AgentRule{rule}, nil); err != nil {
+				if _, err := d.ApplyRules(2, []proto.AgentRule{rule}, nil); err != nil {
 					t.Fatal(err)
 				}
 			case forwardOff:
 				k.forwardOn = false
-				d.refresh()
+				d.Refresh()
 			}
 			st := statusOf(t, d, rule.ID)
 			if st.State != proto.StatusError {
@@ -149,11 +149,11 @@ func TestKernelStaleReasonWithALongHostLosesTheMark(t *testing.T) {
 	k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{longTargetHost: {netip.MustParseAddr("192.168.1.30")}}}
 	d := newTestKernel(t, k, nil, nil)
 	rule := tcpRule("r1", longTargetHost+":25565", 25565, 25565)
-	if _, err := d.applyRules(1, []proto.AgentRule{rule}, nil); err != nil {
+	if _, err := d.ApplyRules(1, []proto.AgentRule{rule}, nil); err != nil {
 		t.Fatal(err)
 	}
 	k.dnsErr = fmt.Errorf("lookup %s on 127.0.0.53:53: no such host", longTargetHost)
-	if _, err := d.applyRules(2, []proto.AgentRule{rule}, nil); err != nil {
+	if _, err := d.ApplyRules(2, []proto.AgentRule{rule}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st := statusOf(t, d, rule.ID)
