@@ -73,31 +73,34 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		local:      addr,
 		pool:       processTCPBoost,
 	}
-	// TCP の endpoint を作る前に設定する。失敗した stack は閉じて使わない
-	if err := setTCPBufferRanges(dev.stack); err != nil {
+	// 失敗したときは、ここまでに作った stack と NIC を閉じ、goroutine の終了を待ってから誤りを返す。
+	// 成功した Device の Close と同じ片付けである
+	fail := func(err error) (*Device, error) {
 		dev.Close()
 		dev.Wait()
 		return nil, err
 	}
+	// TCP の endpoint を作る前に設定する。失敗した stack は閉じて使わない
+	if err := setTCPBufferRanges(dev.stack); err != nil {
+		return fail(err)
+	}
 	sack := tcpip.TCPSACKEnabled(true) // 既定では無効
 	if err := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
-		return nil, fmt.Errorf("could not enable TCP SACK: %v", err)
+		return fail(fmt.Errorf("could not enable TCP SACK: %v", err))
 	}
 	if err := dev.stack.CreateNIC(1, dev.ep); err != nil {
-		return nil, fmt.Errorf("CreateNIC: %v", err)
+		return fail(fmt.Errorf("CreateNIC: %v", err))
 	}
 	pa := tcpip.ProtocolAddress{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: tcpip.AddrFromSlice(addr.AsSlice()).WithPrefix()}
 	if err := dev.stack.AddProtocolAddress(1, pa, stack.AddressProperties{}); err != nil {
-		return nil, fmt.Errorf("AddProtocolAddress(%v): %v", addr, err)
+		return fail(fmt.Errorf("AddProtocolAddress(%v): %v", addr, err))
 	}
 	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
 	if err := dev.initUDP(); err != nil {
-		dev.Close()
-		return nil, err
+		return fail(err)
 	}
 	if err := dev.initReassembly(); err != nil {
-		dev.Close()
-		return nil, err
+		return fail(err)
 	}
 	dev.events <- tun.EventUp
 	return dev, nil

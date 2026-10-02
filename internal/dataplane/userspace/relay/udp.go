@@ -114,12 +114,12 @@ type replyDropReport struct {
 func (m *Manager) forwardReply(s *udpSession, l *listener, sender replySender, own []byte) bool {
 	rb := own
 	if rb == nil {
-		bp, ok := m.replies.acquire(s.closed)
+		lease, ok := m.replies.acquire(s.closed)
 		if !ok {
 			return false
 		}
-		defer m.replies.release(bp)
-		rb = *bp
+		defer lease.release()
+		rb = *lease.buf()
 	}
 	rn, err := s.conn.Read(rb)
 	if err != nil {
@@ -150,6 +150,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 		mu       sync.Mutex
 		sessions = map[string]*udpSession{}
 		done     = make(chan struct{})
+		doneOnce sync.Once    // closeF の 2 回目の呼び出しで done を二重に閉じない
 		capLog   lograte.Gate // 上限で拒んだログの頻度
 		writeLog lograte.Gate // 宛先への書き込み失敗。上限のログとは別に 1 分に 1 回まで
 		dialLog  lograte.Gate // target への dial 失敗のログの頻度(target が落ちている間、新規セッションのたびに鳴らさない)
@@ -196,7 +197,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 	l.accepting.Store(true)
 	l.stopAccept = func() { l.accepting.Store(false) }
 	l.closeF = func() {
-		close(done)
+		doneOnce.Do(func() { close(done) })
 		pc.Close()
 		mu.Lock()
 		all := sessions

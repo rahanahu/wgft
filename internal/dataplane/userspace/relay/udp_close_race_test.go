@@ -174,3 +174,21 @@ func TestUDPSessionCreatedWhileListenerClosesIsNotLeaked(t *testing.T) {
 		})
 	}
 }
+
+// 待ち受けの closeF は 2 回呼んでも panic しない(done を二重に閉じない)。
+func TestUDPListenerCloseFIsIdempotent(t *testing.T) {
+	echoAddr, _ := udpEcho(t)
+	lb := &loopback{}
+	port := reserveUDP(t, lb)
+	m := New(lb, Options{Logf: testLogf(t)})
+	defer m.Close()
+	m.Apply(map[Key]Desired{{proto.UDP, port}: {echoAddr, "r1"}})
+	m.mu.Lock()
+	l := m.listeners[Key{proto.UDP, port}]
+	m.mu.Unlock()
+	if l == nil {
+		t.Fatal("no listener")
+	}
+	l.closeF()
+	l.closeF()
+}

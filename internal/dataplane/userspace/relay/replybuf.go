@@ -48,10 +48,10 @@ func newReplyPool(k int) *replyPool {
 // acquire は枠を 1 つ取り、バッファを貸す。枠が無ければ、空くか、cancel が閉じるまで待つ。
 // 待ちを取り消されたら偽を返す。cancel はセッションの closed で、待ち受けを閉じるときも
 // その待ち受けのセッションを全部閉じるので、待ち受けの終了でも待ちは取り消される。
-func (p *replyPool) acquire(cancel <-chan struct{}) (*[]byte, bool) {
+func (p *replyPool) acquire(cancel <-chan struct{}) (*replyLease, bool) {
 	select {
 	case <-p.slots:
-		return p.bufs.Get().(*[]byte), true
+		return &replyLease{p: p, b: p.bufs.Get().(*[]byte)}, true
 	default:
 	}
 	// 枠が無い。待ちの時間を数える
@@ -63,7 +63,7 @@ func (p *replyPool) acquire(cancel <-chan struct{}) (*[]byte, bool) {
 	select {
 	case <-p.slots:
 		p.noteWait(time.Since(start))
-		return p.bufs.Get().(*[]byte), true
+		return &replyLease{p: p, b: p.bufs.Get().(*[]byte)}, true
 	case <-cancel:
 	}
 	p.cancelled.Add(1)
@@ -80,8 +80,22 @@ func (p *replyPool) noteWait(d time.Duration) {
 	}
 }
 
+// replyLease は acquire が貸した 1 つのバッファと枠である。release は 1 回だけ効き、2 回目以降は
+// 何もしない。呼び出しの誤りで枠の数が上限を超えたり、同じバッファが 2 つの借り手に渡ったりするのを防ぐ。
+// 正しい経路は 1 回の release だけで、返す時点と順序(バッファ、枠の順)は変わらない。
+type replyLease struct {
+	p    *replyPool
+	b    *[]byte
+	once sync.Once
+}
+
+// buf は貸したバッファである。
+func (l *replyLease) buf() *[]byte { return l.b }
+
 // release はバッファと枠を返す。
-func (p *replyPool) release(b *[]byte) {
-	p.bufs.Put(b)
-	p.slots <- struct{}{}
+func (l *replyLease) release() {
+	l.once.Do(func() {
+		l.p.bufs.Put(l.b)
+		l.p.slots <- struct{}{}
+	})
 }
