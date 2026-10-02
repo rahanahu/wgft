@@ -62,7 +62,10 @@ type Dataplane interface {
 	Close()
 
 	// LastHandshake は今のトンネルの最終ハンドシェイクを読む。watchdog が作り直しの判定と、
-	// stream の再接続の待ちを打ち切る判定に使う。Built が真のときだけ呼ぶ。
+	// stream の再接続の待ちを打ち切る判定に使う。Built が真のときだけ呼ぶ。返す値は今の鍵で成立した
+	// ハンドシェイクに限る(Reading の LastHandshake も同じ)。ユーザー空間モードは鍵を変えるたびに
+	// device を作り直し、カーネルモードは鍵を変える収束で server のピアを置き直すので、前の鍵の
+	// ハンドシェイクは読めない(設計文書 7b.4 節)。
 	LastHandshake() time.Time
 
 	// Read はハートビートと agent doctor が共有する 1 回の読みである(設計文書 10.2c 節)。

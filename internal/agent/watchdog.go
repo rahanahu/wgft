@@ -142,7 +142,8 @@ func (rt *runtime) checkTunnel(now time.Time) {
 		return
 	}
 	st := rt.f.LastState
-	// 読むのは今の device なので、ゼロでない最終ハンドシェイクは必ず今のトンネルのものである
+	// 読むのは今の device で、鍵を変えた後に前の鍵のハンドシェイクは残らない(agentdp.Dataplane の
+	// LastHandshake)。ゼロでない最終ハンドシェイクは必ず今のトンネルのものである
 	handshake := rt.dp.LastHandshake()
 	// 新しいハンドシェイクは、vpsd までの経路が戻ったことを示す。stream が再接続の待ちに入って
 	// いれば、その待ちを打ち切らせる(仕様 5.2 節)。判定は step が値を控え直す前に行う。観測は
