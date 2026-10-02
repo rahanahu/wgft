@@ -15,6 +15,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/lograte"
 	"github.com/rahanahu/wgft/internal/reasontext"
+	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -200,14 +201,39 @@ func (d *kernelDataplane) planWith(gen uint64, rules []proto.AgentRule, resolved
 	return pub
 }
 
+// staleReasonLimit は、hub がハートビートの理由に許す長さ(internal/vpsd/stream の
+// maxHeartbeatReasonLen)である。agent は vpsd を import できないので値を写す。写しがずれれば、
+// reason_roundtrip_linux_test.go の TestStaleReasonLimitMatchesTheHub が落ちる。staleReasonTailReserve は、
+// 目印の後ろに続く文言のために残す長さである。server doctor が rule.target を分類する試し接続の誤り
+// (`; target <宛先>: dial tcp <宛先>: connect: connection refused` など、最長で 95 バイト)を収める。解決の
+// 誤りの文面の切り詰めの印(staleClipMark)は、その外の予算から引く。
+const (
+	staleReasonLimit       = 512
+	staleReasonTailReserve = 128
+	// staleClipMark は textsafe.ClipText が切り詰めたときに後ろへ付ける印の長さである(予算の外に付く)
+	staleClipMark = len("... truncated")
+)
+
 // staleReason は、名前の解決に失敗して直前の解決の結果を使ったルールの理由である。文言に
 // "name resolution" を含め、server doctor が target_resolve_failed に分類できるようにする。
+//
+// ホスト名は、頭に引用して 1 回と、解決の誤りの文面に 1 回の計 2 回入る。ホスト名は 253 バイトまで
+// 有効なので、誤りの文面をそのまま置くと、目印 "; still forwarding to " が hub の切り詰めの外に出て、
+// server doctor が転送を続けているルールを止まったと判定する(10.2a 節)。そこで、目印までが切り詰めに
+// 収まるように、解決の誤りの文面だけを短くする。目印までの長さはホスト名と宛先のアドレスで決まり、
+// 253 バイトのホスト名でも 400 バイトに満たない。
 func staleReason(host string, err error, res nft.AgentRuleResult) string {
-	head := reasontext.NameResolutionFailed(host, err)
 	if len(res.Ranges) == 0 {
-		return head + "; the address from the last successful resolution is not usable either: " + res.Reason
+		return reasontext.NameResolutionFailed(host, err) + "; the address from the last successful resolution is not usable either: " + res.Reason
 	}
-	s := head + reasontext.StillForwardingTo + res.Ranges[0].Dest.Addr().String() + reasontext.FromLastResolution
+	mark := reasontext.StillForwardingTo + res.Ranges[0].Dest.Addr().String() + reasontext.FromLastResolution
+	cause := "<nil>"
+	if err != nil {
+		cause = textsafe.SanitizeForTerminal(err.Error())
+	}
+	fixed := len(reasontext.NameResolutionFailed(host, errors.New(""))) + len(mark)
+	cause = textsafe.ClipText(cause, max(0, staleReasonLimit-staleReasonTailReserve-fixed-staleClipMark))
+	s := reasontext.NameResolutionFailed(host, errors.New(cause)) + mark
 	if res.Reason != "" {
 		s += "; " + res.Reason
 	}

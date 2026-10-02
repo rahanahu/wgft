@@ -13,6 +13,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
+	"github.com/rahanahu/wgft/internal/vpsd/stream"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -138,34 +139,91 @@ func TestKernelPlanReasonsAreReadByServerDoctor(t *testing.T) {
 	}
 }
 
-// 名前の解決に失敗して直前の解決の結果で転送を続けているルールの理由は、ホスト名を 2 回含む。
-// ホスト名が長いと、hub の 512 バイトの切り詰めが目印 "; still forwarding to " を落とし、server
-// doctor は「転送を続けている」(UNKNOWN)ではなく「解決できない」(FAILED)と判定する。
-//
-// 既知の問題(この試験より前からある): 転送は続いているのに、server doctor は止まったと示す。この
-// 試験は今の挙動を固定するだけで、直すのは別の変更である。直したら、この試験の期待を UNKNOWN に
-// 改める。
-func TestKernelStaleReasonWithALongHostLosesTheMark(t *testing.T) {
-	k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{longTargetHost: {netip.MustParseAddr("192.168.1.30")}}}
-	d := newTestKernel(t, k, nil, nil)
-	rule := tcpRule("r1", longTargetHost+":25565", 25565, 25565)
-	if _, err := d.ApplyRules(1, []proto.AgentRule{rule}, nil); err != nil {
-		t.Fatal(err)
+// 名前の解決に失敗して直前の解決の結果で転送を続けているルールの理由は、ホスト名を 2 回含む。253 バイト
+// のホスト名でも、目印 "; still forwarding to " が hub の 512 バイトの切り詰めの内に残り、server
+// doctor が転送を続けている(UNKNOWN)と判定することを固定する。誤りの文面が長いときと、誤りの文面に
+// 制御文字があるときも同じである。以前は目印が切り落とされ、server doctor は解決できない(FAILED)と
+// 判定した。
+func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
+	const noSuchHost = " on 127.0.0.53:53: no such host"
+	for _, tc := range []struct {
+		name   string
+		host   string // 空なら longTargetHost
+		addr   string // 直前に解決できたアドレス。空なら 192.168.1.30
+		err    string // 解決の誤りの文面
+		probe  string // 直前のアドレスへの試し接続の誤り。空なら応える
+		target string // rule.target の理由の符号。空なら見ない
+	}{
+		{name: "resolver error repeats the host", err: "lookup " + longTargetHost + noSuchHost},
+		{name: "resolver error is itself long", err: "lookup " + longTargetHost + ": " + strings.Repeat("x", 600)},
+		// 予算が小さい長いホスト名では、無害化を外しても目印が残る。無害化の順序は予算の大きい短いホスト名で固定する
+		{name: "short host, resolver error with control characters", host: "game.lan", err: strings.Repeat("\x1b", 300) + " lookup game.lan"},
+		{name: "old address refuses", err: "lookup " + longTargetHost + noSuchHost,
+			probe: "dial tcp 192.168.1.30:25565: connect: connection refused", target: doctor.ReasonConnectionRefused},
+		{name: "old address times out", err: "lookup " + longTargetHost + noSuchHost,
+			probe: "dial tcp 192.168.1.30:25565: i/o timeout", target: doctor.ReasonTargetTimeout},
+		{name: "old address is unreachable", err: "lookup " + longTargetHost + noSuchHost,
+			probe: "dial tcp 192.168.1.30:25565: connect: no route to host", target: doctor.ReasonTargetUnreachable},
+		// doctor が分類する試し接続の誤りのうち最長のもの(95 バイト)
+		{name: "longest probe error", addr: "255.255.255.255", err: "lookup " + longTargetHost + noSuchHost,
+			probe: "dial tcp 255.255.255.255:65535: connect: network is unreachable", target: doctor.ReasonTargetUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, addr := tc.host, tc.addr
+			if host == "" {
+				host = longTargetHost
+			}
+			if addr == "" {
+				addr = "192.168.1.30"
+			}
+			port := uint16(25565)
+			if addr == "255.255.255.255" {
+				port = 65535
+			}
+			k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{host: {netip.MustParseAddr(addr)}}}
+			d := newTestKernel(t, k, nil, nil)
+			rule := tcpRule("r1", fmt.Sprintf("%s:%d", host, port), port, port)
+			if _, err := d.ApplyRules(1, []proto.AgentRule{rule}, nil); err != nil {
+				t.Fatal(err)
+			}
+			k.dnsErr = errors.New(tc.err)
+			if tc.probe != "" {
+				k.probeErr = map[netip.AddrPort]error{netip.AddrPortFrom(netip.MustParseAddr(addr), port): errors.New(tc.probe)}
+			}
+			if _, err := d.ApplyRules(2, []proto.AgentRule{rule}, nil); err != nil {
+				t.Fatal(err)
+			}
+			st := statusOf(t, d, rule.ID)
+			if !strings.Contains(st.Reason, host) {
+				t.Fatalf("reason %q does not name the host", st.Reason)
+			}
+			stored := stream.HeartbeatReason(st.Reason)
+			got, _, stale := doctor.StaleResolution(stored)
+			if !stale || got != addr {
+				t.Fatalf("after the hub, StaleResolution(%q) = %q, %v; want the mark to survive", stored, got, stale)
+			}
+			reads := serverDoctorReads(t, rule, st)
+			if c := reads[doctor.CheckTargetResolve]; c.Status != doctor.StatusUnknown {
+				t.Errorf("rule.target_resolve = %s %s, want %s (still forwarding)", c.Status, c.Reason, doctor.StatusUnknown)
+			}
+			if tc.target != "" {
+				if c := reads[doctor.CheckTarget]; c.Status != doctor.StatusFailed || c.Reason != tc.target {
+					t.Errorf("rule.target = %s %s, want %s %s; the probe error after the mark must survive the hub (reason %q)",
+						c.Status, c.Reason, doctor.StatusFailed, tc.target, stored)
+				}
+			}
+		})
 	}
-	k.dnsErr = fmt.Errorf("lookup %s on 127.0.0.53:53: no such host", longTargetHost)
-	if _, err := d.ApplyRules(2, []proto.AgentRule{rule}, nil); err != nil {
-		t.Fatal(err)
+}
+
+// staleReasonLimit は hub の上限の写しである。ずれれば、目印の後ろに残る長さが黙って変わる。agent doctor
+// の応答の上限 maxDoctorText も同じ値である。
+func TestStaleReasonLimitMatchesTheHub(t *testing.T) {
+	long := strings.Repeat("a", 4096)
+	if got, want := len(stream.HeartbeatReason(long)), staleReasonLimit+staleClipMark; got != want {
+		t.Errorf("the hub keeps %d bytes of a long reason, staleReasonLimit says %d", got, want)
 	}
-	st := statusOf(t, d, rule.ID)
-	if _, _, stale := doctor.StaleResolution(st.Reason); !stale {
-		t.Fatalf("before the hub, StaleResolution(%q) = false, want true", st.Reason)
-	}
-	if len(st.Reason) <= 512 {
-		t.Fatalf("reason is %d bytes; this case needs one past the hub's 512-byte cap", len(st.Reason))
-	}
-	c := serverDoctorReads(t, rule, st)[doctor.CheckTargetResolve]
-	if c.Status != doctor.StatusFailed || c.Reason != doctor.ReasonResolveFailed {
-		t.Errorf("rule.target_resolve = %s %s; the known issue reads %s %s here. If the mark now survives the cap, update this test",
-			c.Status, c.Reason, doctor.StatusFailed, doctor.ReasonResolveFailed)
+	if staleReasonLimit != maxDoctorText {
+		t.Errorf("staleReasonLimit = %d, maxDoctorText = %d; they are the same cap", staleReasonLimit, maxDoctorText)
 	}
 }
