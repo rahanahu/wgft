@@ -25,9 +25,9 @@ var tailnetPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
 }
 
-// tailnetSource は接続元のアドレスが tailnetPrefixes のどれかに入るかを返す。
-// IPv4 を写した IPv6 の形(::ffff:100.64.0.1)は IPv4 に戻してから比べる。
-func tailnetSource(a net.Addr) bool {
+// addrOf は TCP、UDP、IP のアドレスの IP を返す。IPv4 を写した IPv6 の形(::ffff:100.64.0.1)は
+// IPv4 に戻す。それ以外の型と、IP を持たないアドレスでは ok は偽。
+func addrOf(a net.Addr) (netip.Addr, bool) {
 	var ip net.IP
 	switch v := a.(type) {
 	case *net.TCPAddr:
@@ -37,13 +37,22 @@ func tailnetSource(a net.Addr) bool {
 	case *net.IPAddr:
 		ip = v.IP
 	default:
-		return false
+		return netip.Addr{}, false
 	}
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
+}
+
+// tailnetSource は接続元のアドレスが tailnetPrefixes のどれかに入るかを返す。
+// IPv4 を写した IPv6 の形(::ffff:100.64.0.1)は IPv4 に戻してから比べる。
+func tailnetSource(a net.Addr) bool {
+	addr, ok := addrOf(a)
+	if !ok {
 		return false
 	}
-	addr = addr.Unmap()
 	for _, p := range tailnetPrefixes {
 		if p.Contains(addr) {
 			return true
@@ -52,25 +61,87 @@ func tailnetSource(a net.Addr) bool {
 	return false
 }
 
-// tailnetListener は、接続元が tailnet の帯に無い接続を、HTTP を 1 バイトも読まずに閉じる。
-// Host の検査より前の受け口で落とすので、Host を偽っても届かない。
+// hostAddrs はホストのどれかのインタフェースにあるアドレスを、IPv4 を写した形を戻して返す。
+func hostAddrs() ([]netip.Addr, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]netip.Addr, 0, len(addrs))
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if x, ok := netip.AddrFromSlice(ipn.IP); ok {
+			out = append(out, x.Unmap())
+		}
+	}
+	return out, nil
+}
+
+// ownSource は接続元 src がホスト自身のアドレスかを返す(設計文書 11 節)。まず接続の宛先 local と
+// 比べる。ホスト自身から tailnet のアドレスへの接続は、既定では接続元も宛先と同じアドレスになる。
+// 次に own が返すホストのアドレスの全部と比べる。tailnet の帯にある別のインタフェースのアドレスを
+// 接続元に選んだ接続も、ホスト自身からの接続だからである。own が誤りを返したときは、ホスト自身か
+// どうかを決められないので真を返し、接続を閉じさせる。
+func ownSource(src netip.Addr, local net.Addr, own func() ([]netip.Addr, error)) (bool, error) {
+	if l, ok := addrOf(local); ok && l == src {
+		return true, nil
+	}
+	addrs, err := own()
+	if err != nil {
+		return true, err
+	}
+	for _, a := range addrs {
+		if a.Unmap() == src {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// tailnetListener は、接続元が tailnet の帯に無い接続と、接続元がホスト自身のアドレスである接続を、
+// HTTP を 1 バイトも読まずに閉じる。Host の検査より前の受け口で落とすので、Host を偽っても届かない。
+// ホスト自身からの管理は Unix ソケット(0600)が受け持つ(設計文書 11 節)。
 type tailnetListener struct {
 	net.Listener
-	logged atomic.Bool
+	logged      atomic.Bool // 帯の外の接続元を閉じたことをログに書いたか
+	loggedLocal atomic.Bool // ホスト自身の接続元を閉じたことをログに書いたか
+	// own はホスト自身のアドレスを返す。nil なら hostAddrs。単体テストで差し替えるための境目
+	own func() ([]netip.Addr, error)
 }
 
 func (l *tailnetListener) Accept() (net.Conn, error) {
+	own := l.own
+	if own == nil {
+		own = hostAddrs
+	}
 	for {
 		c, err := l.Listener.Accept()
 		if err != nil {
 			return nil, err
 		}
-		if tailnetSource(c.RemoteAddr()) {
+		if !tailnetSource(c.RemoteAddr()) {
+			// 拒否のたびに書くと、接続を繰り返すだけでログを溢れさせられるので、最初の 1 回だけ書く
+			if l.logged.CompareAndSwap(false, true) {
+				log.Printf("warning: admin API tailscale: closed a connection from %s, which is not a tailnet address; further ones are closed without a log line", c.RemoteAddr())
+			}
+			c.Close()
+			continue
+		}
+		src, _ := addrOf(c.RemoteAddr())
+		local, err := ownSource(src, c.LocalAddr(), own)
+		if !local {
 			return c, nil
 		}
-		// 拒否のたびに書くと、接続を繰り返すだけでログを溢れさせられるので、最初の 1 回だけ書く
-		if l.logged.CompareAndSwap(false, true) {
-			log.Printf("warning: admin API tailscale: closed a connection from %s, which is not a tailnet address; further ones are closed without a log line", c.RemoteAddr())
+		// 帯の外の接続元と同じ理由で、最初の 1 回だけ書く
+		if l.loggedLocal.CompareAndSwap(false, true) {
+			if err != nil {
+				log.Printf("warning: admin API tailscale: closed a connection from %s because listing this host's addresses failed: %v; further connections from this host are closed without a log line", c.RemoteAddr(), err)
+			} else {
+				log.Printf("warning: admin API tailscale: closed a connection from %s, which is an address of this host; administer the server on this host through the admin Unix socket; further ones are closed without a log line", c.RemoteAddr())
+			}
 		}
 		c.Close()
 	}
