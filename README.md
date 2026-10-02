@@ -137,7 +137,7 @@ You can restrict the LAN targets the agent will reach with [`WGFT_AGENT_ALLOW_TA
 
 ## Status
 
-v1.3.0. The compatibility contract in effect since v1.0 covers the Linux server and agent, plus the Windows agent within the range verified on Windows 11 hardware. The macOS agent has been verified for basic operation on real hardware, but its newer reconnect liveness check has not been verified there, so it remains outside the contract. The covered behavior is defined in [design section 7a.11](docs/design.md#7a11-v10-の互換性の保証サーフェスごとの一覧).
+v1.4.0. The compatibility contract in effect since v1.0 covers the Linux server and agent, plus the Windows agent within the range verified on Windows 11 hardware. The macOS agent has been verified for basic operation on real hardware, but its newer reconnect liveness check has not been verified there, so it remains outside the contract. The covered behavior is defined in [design section 7a.11](docs/design.md#7a11-v10-の互換性の保証サーフェスごとの一覧).
 
 Downgrading after an upgrade is not guaranteed. Back up the server data directory before upgrading. The server database uses schema version 9 from v1.2.0 onward; v1.1.x and earlier servers cannot open it.
 
