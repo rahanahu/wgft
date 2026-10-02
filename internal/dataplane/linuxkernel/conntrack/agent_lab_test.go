@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -85,6 +86,7 @@ func (l *ctLab) in(ns string, args ...string) {
 func (l *ctLab) start(ns string, args ...string) {
 	l.t.Helper()
 	cmd := exec.Command("ip", append([]string{"netns", "exec", ns}, args...)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		l.t.Fatal(err)
 	}
@@ -101,7 +103,9 @@ func newCtLab(t *testing.T) *ctLab {
 	t.Cleanup(func() {
 		for _, p := range l.procs {
 			if p.Process != nil {
-				p.Process.Kill()
+				// socat の fork した子は、接続が残る間 listener が死んでも生き残る。起動時に
+				// 独立したプロセスグループにしてあるので、グループごと止める
+				syscall.Kill(-p.Process.Pid, syscall.SIGKILL)
 				p.Wait()
 			}
 		}
@@ -196,6 +200,7 @@ func (l *ctLab) open(name, ns, kind, addr string) *ctClient {
 		l.t.Fatal(err)
 	}
 	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		l.t.Fatal(err)
 	}
