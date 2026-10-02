@@ -1,4 +1,4 @@
-package agent
+package control
 
 import (
 	"bufio"

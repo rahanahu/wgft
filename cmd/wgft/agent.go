@@ -14,6 +14,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/agent/control"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/agent/enroll"
 	"github.com/rahanahu/wgft/internal/agent/teardown"
@@ -237,7 +238,7 @@ On the VPS, against the admin API:
 			if err != nil {
 				return err
 			}
-			k, err := agent.PublicKey(sp)
+			k, err := control.PublicKey(sp)
 			if err != nil {
 				return err
 			}
@@ -257,7 +258,7 @@ On the VPS, against the admin API:
 			if err != nil {
 				return err
 			}
-			msg, err := agent.RotateKey(sp)
+			msg, err := control.RotateKey(sp)
 			if err != nil {
 				return err
 			}

@@ -71,7 +71,7 @@ var doctorSnapshot = (*runtime).collectDoctor
 // ある。受け止めが安全なのは、この経路が取る排他が、collectDoctor の rt.mu も、その下の中継と
 // フロー予算の排他も、すべて defer で放されるからである。持ったままになる排他は残らない。
 // 応答は 1 行を組み上げてから返し、書くのは呼び出し側なので、受け止めた応答が書きかけの行に
-// 足されることもない。rotate-key をこの受け止めに含めない理由は serveControlConn にある。
+// 足されることもない。rotate-key をこの受け止めに含めない理由は control.ServeConn にある。
 func (rt *runtime) doctorResponseLine() (line []byte) {
 	defer func() {
 		if r := recover(); r != nil {

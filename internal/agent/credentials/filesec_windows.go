@@ -35,6 +35,6 @@ func secureTemp(f *os.File) error { return SecureFile(f.Name()) }
 func secureExisting(path string) error { return SecureFile(path) }
 
 // SecureSocket は制御ソケット(.sock)を締める。Windows では SecureFile と同じく失敗を
-// 呼び出し元に伝え、control.go がソケットを諦める(仕様 11a 節)。Unix(filesec_other.go)
+// 呼び出し元に伝え、internal/agent/control がソケットを諦める(仕様 11a 節)。Unix(filesec_other.go)
 // では、この修正より前と同じく chmod の失敗を無視する。
 func SecureSocket(path string) error { return SecureFile(path) }

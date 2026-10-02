@@ -484,20 +484,60 @@ func TestAgentModesStayApart(t *testing.T) {
 	}
 }
 
-// modeSeams lists, for each agent mode package, the names that production code outside the
-// package may use. A package-level name is spelled as is, a field or method as Type.Name.
+// TestAgentControlImportsNoRuntimeOrMode checks design.md 7a.7 節's rule for
+// internal/agent/control, the agent's control socket: the server side, which a running agent opens,
+// and the CLI side that runs on the agent host (rotate-key, agent pubkey). The runtime's state sits
+// behind control.Backend, which internal/agent implements, so the package needs neither the runtime
+// nor a dataplane. From internal/agent it imports directly only controlapi and credentials.
+// Through any import it reaches neither internal/agent itself, nor internal/agent/agentdp,
+// internal/agent/usermode or internal/agent/kernelmode, nor any package under internal/dataplane.
+// The rule covers the non-test files only, as directImports and deps read no _test.go file.
+func TestAgentControlImportsNoRuntimeOrMode(t *testing.T) {
+	root := moduleRoot(t)
+	const agent = module + "/internal/agent"
+	const pkg = agent + "/control"
+	if _, err := os.Stat(filepath.Join(root, strings.TrimPrefix(pkg, module))); err != nil {
+		t.Fatalf("%s: %v; did it move?", pkg, err)
+	}
+	under := func(dep, p string) bool { return dep == p || strings.HasPrefix(dep, p+"/") }
+	allowed := map[string]bool{agent + "/controlapi": true, agent + "/credentials": true}
+	for _, dep := range moduleImports(t, root, pkg) {
+		if strings.HasPrefix(dep, agent+"/") && !allowed[dep] {
+			t.Errorf("%s imports %s; design.md 7a.7 節 allows only controlapi and credentials from internal/agent", pkg, dep)
+		}
+	}
+	for _, dep := range deps(t, root, pkg) {
+		switch {
+		case dep == agent:
+			t.Errorf("%s depends on %s (design.md 7a.7 節: the control socket does not depend on the runtime, which implements control.Backend)", pkg, dep)
+		case under(dep, agent+"/agentdp"), under(dep, agent+"/usermode"), under(dep, agent+"/kernelmode"):
+			t.Errorf("%s depends on %s (design.md 7a.7 節: the control socket does not pull in a dataplane mode or its boundary)", pkg, dep)
+		case under(dep, module+"/internal/dataplane"):
+			t.Errorf("%s depends on %s (design.md 7a.7 節: the control socket does not pull in the dataplane layer)", pkg, dep)
+		}
+	}
+}
+
+// modeSeams lists, for each agent mode package and for internal/agent/control, the names that
+// production code outside the package may use. A package-level name is spelled as is, a field or
+// method as Type.Name. Below, "a listed package" means a key of this table.
 var modeSeams = map[string]map[string]bool{
 	module + "/internal/agent/usermode": {"New": true},
 	module + "/internal/agent/kernelmode": {
 		"New": true, "Built": true, "Prerequisites": true, "ProcessNetAdmin": true, "ReadKernel": true,
 	},
+	module + "/internal/agent/control": {"Serve": true, "Backend": true, "RotateKey": true, "PublicKey": true},
 }
 
-// modeTestSeams lists, for each agent mode package, the names it exports only so that
+// modeTestSeams lists, for each listed package, the names it exports only so that
 // internal/agent's tests can reach them, spelled as in modeSeams. Production code outside the
 // package may not use them. A method that implements an interface of internal/agent/agentdp, the
-// boundary the runtime calls through, belongs to neither list. Every other exported name of a mode
-// package is in exactly one of the two lists, so a name exported later has to be placed in one.
+// boundary the runtime calls through, belongs to neither list. Every other exported name of a
+// listed package is in exactly one of the two lists, so a name exported later has to be placed in
+// one. The methods of an exported interface type, such as control.Backend's, are in neither list
+// and are not required to be: an implementation outside the package declares its own methods.
+// Production code outside the package may not use them through the interface type either; the
+// check reports such a use with a message of its own.
 var modeTestSeams = map[string]map[string]bool{
 	module + "/internal/agent/usermode": {
 		"Dataplane": true, "Dataplane.Allow": true, "Dataplane.Limits": true, "Dataplane.Tun": true,
@@ -517,19 +557,21 @@ var modeTestSeams = map[string]map[string]bool{
 		"DoctorOps.InspectTable": true, "DoctorOps.ReadSysctl": true, "DoctorOps.ForwardDrops": true,
 		"DoctorOps.Route": true, "DoctorOps.LocalAddrs": true, "DoctorKernelOps": true,
 	},
+	module + "/internal/agent/control": {"ServeConn": true},
 }
 
-// TestAgentModeTestSeamsStayInTests checks design.md 7a.7 節's rule that the names an agent mode
-// package exports only for internal/agent's tests (modeTestSeams) are not used by production code
-// outside that package; of a mode package, production code outside it uses only the names in
-// modeSeams. Go has no visibility for tests alone, so the rule is checked here. It type-checks the
-// non-test files of every package in the module that imports a mode package, for the GOOS the test
-// runs on, and resolves each identifier to its object, so a field or method reached through a
-// value is caught as well as a qualified name. The imports are read from export data that
-// `go list -export` builds. It does not catch a use that never names the object, such as a type
-// assertion to an interface the caller defines or access through reflection.
+// TestAgentModeTestSeamsStayInTests checks design.md 7a.7 節's rule that the names a listed
+// package (an agent mode package or internal/agent/control) exports only for internal/agent's
+// tests (modeTestSeams) are not used by production code outside that package; of a listed package,
+// production code outside it uses only the names in modeSeams. Go has no visibility for tests
+// alone, so the rule is checked here. It type-checks the non-test files of every package in the
+// module that imports a listed package, for the GOOS the test runs on, and resolves each
+// identifier to its object, so a field or method reached through a value is caught as well as a
+// qualified name. The imports are read from export data that `go list -export` builds. It does
+// not catch a use that never names the object, such as a type assertion to an interface the
+// caller defines or access through reflection.
 //
-// It also reads each mode package's exported names from its export data and checks that every
+// It also reads each listed package's exported names from its export data and checks that every
 // one is listed in exactly one of modeSeams and modeTestSeams, apart from the methods that
 // implement an interface of internal/agent/agentdp. On linux, where the mode packages export the
 // most, it checks too that no listed name is missing from the package.
@@ -578,7 +620,7 @@ func TestAgentModeTestSeamsStayInTests(t *testing.T) {
 		}
 	}
 	if len(importers) == 0 {
-		t.Fatal("no package imports an agent mode package; did internal/agent stop using internal/agent/usermode?")
+		t.Fatal("no package imports a listed package; did internal/agent stop using internal/agent/usermode?")
 	}
 	var paths []string
 	for _, p := range importers {
@@ -620,7 +662,12 @@ func TestAgentModeTestSeamsStayInTests(t *testing.T) {
 			if recv := memberOf(obj); recv != "" {
 				name = recv + "." + name
 			}
-			if !ok[name] {
+			switch {
+			case ok[name]:
+			case isInterfaceMethod(obj):
+				t.Errorf("%s: %s uses %s.%s, a method of an interface that %s exports; production code outside that package may not use the methods of its interfaces (design.md 7a.7 節)",
+					fset.Position(id.Pos()), p.ImportPath, obj.Pkg().Name(), name, obj.Pkg().Path())
+			default:
 				t.Errorf("%s: %s uses %s.%s, which %s exports only for internal/agent's tests (design.md 7a.7 節)",
 					fset.Position(id.Pos()), p.ImportPath, obj.Pkg().Name(), name, obj.Pkg().Path())
 			}
@@ -703,6 +750,19 @@ func TestAgentModeTestSeamsStayInTests(t *testing.T) {
 			}
 		}
 	}
+}
+
+// isInterfaceMethod reports whether obj is a method declared by an interface type.
+func isInterfaceMethod(obj types.Object) bool {
+	f, ok := obj.(*types.Func)
+	if !ok {
+		return false
+	}
+	sig, ok := f.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return false
+	}
+	return types.IsInterface(sig.Recv().Type())
 }
 
 // memberOf returns the name of the type that declares obj when obj is a field or a method, and ""

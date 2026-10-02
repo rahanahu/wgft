@@ -26,14 +26,15 @@ const ControlPathLimit = 103
 // matches internal/agent/stream.go's SetReadLimit for the full state this agent reads from the
 // server over the WebSocket stream, which is the same order of magnitude as the largest
 // legitimate reply this socket carries: a doctor response listing every rule this agent holds.
-// internal/agent's rotate-key read uses a much smaller limit, rotateKeyReplyLimit, since its
-// reply is always a short "ok <key>" or "error: <text>" line.
+// internal/agent/control's rotate-key read uses a much smaller limit, rotateKeyReplyLimit, since
+// its reply is always a short "ok <key>" or "error: <text>" line.
 const DoctorReplyMaxBytes = 4 << 20
 
 // ReadControlReply reads one line from a control-socket connection under max bytes, shared by
-// internal/agent's rotateKeyRunning (with rotateKeyReplyLimit) and cmd/wgft/agentdoctorlive.go's
-// readAgentLive (with DoctorReplyMaxBytes): both connect to this socket by their own means, but
-// both read a line off it, under their own size limit, the same way.
+// internal/agent/control's rotateKeyRunning (with rotateKeyReplyLimit) and
+// cmd/wgft/agentdoctorlive.go's readAgentLive (with DoctorReplyMaxBytes): both connect to this
+// socket by their own means, but both read a line off it, under their own size limit, the same
+// way.
 //
 // A reply that hits the cap without ever sending the newline bufio.Reader.ReadString waits for
 // comes back as a plain io.EOF from the underlying reader, indistinguishable on its face from a
