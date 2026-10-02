@@ -3,10 +3,15 @@
 package vpsd
 
 import (
+	"net"
+	"net/netip"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/agent/enroll"
+	"github.com/rahanahu/wgft/internal/vpsd/store"
 )
 
 // TestJoinHost pins how the join string's host:port is chosen (design.md 11b 節): the
@@ -35,6 +40,17 @@ func TestJoinHost(t *testing.T) {
 			t.Errorf("the agent refuses a join string for %q: %v", got, err)
 		}
 	}
+	// The listener looks the port up as TCP, so the join string must too: a name known only for
+	// TCP (Go's built-in table has "submissions") gives the TCP number. Left out on a host whose
+	// services database also lists it for UDP.
+	if p, err := net.LookupPort("tcp", "submissions"); err == nil {
+		if _, err := net.LookupPort("udp", "submissions"); err != nil {
+			want := net.JoinHostPort("vps.example.com", strconv.Itoa(p))
+			if got, err := joinHost("", "vps.example.com:51820", "0.0.0.0:submissions"); err != nil || got != want {
+				t.Errorf("joinHost with a TCP-only service name = %q, %v; want %q", got, err, want)
+			}
+		}
+	}
 	for _, tc := range []struct {
 		endpoint, apiAddr, inErr string
 	}{
@@ -47,5 +63,28 @@ func TestJoinHost(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.inErr) {
 			t.Errorf("joinHost(\"\", %q, %q) = %q, %v; want an error mentioning %q", tc.endpoint, tc.apiAddr, got, err, tc.inErr)
 		}
+	}
+}
+
+// TestDeliveredEndpointIsTheServerInfoEndpoint checks that the endpoint delivered to agents in
+// the state and the admin API's wg_endpoint are the same value, Options.WGEndpoint, which
+// cmd/wgft's buildServerOptions has already normalized (design.md 11b 節). Neither path reads the
+// setting again or rewrites the host.
+func TestDeliveredEndpointIsTheServerInfoEndpoint(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	const endpoint = "vps.example.com:51820"
+	d := &Daemon{opts: Options{WGEndpoint: endpoint}, st: st, network: netip.MustParsePrefix("10.200.0.0/24")}
+	info, err := d.ServerInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := d.deliveryCandidate(nil, []store.Agent{{Name: "home", Address: netip.MustParseAddr("10.200.0.2")}}, 1)
+	got := snap.entries["home"].state.WG.Endpoint
+	if got != endpoint || info.WGEndpoint != endpoint {
+		t.Errorf("delivered endpoint %q, admin API wg_endpoint %q; want both %q", got, info.WGEndpoint, endpoint)
 	}
 }

@@ -150,10 +150,9 @@ func configErrorf(subject, format string, args ...any) error {
 // 入口で使う値だけの検査(設計文書 11b 節)。どれも環境を見ず、値の形だけを判定する。
 
 // validateHostPort は、値が host:port の形で、ホストが空でなく、ポートが 1 から 65535 を 10 進の
-// 数字で書いた値であることを確かめる。待ち受けには使わず、エージェントが読む項目
-// (WGFT_WG_ENDPOINT、WGFT_AGENT_API_HOST)に使う。サービス名や "+443" は net.LookupPort なら
-// 通るが、エージェントの ParseJoin とユーザー空間モードのエンドポイントの解釈は 10 進の数字しか
-// 受け付けず、サービスの一覧もホストごとに違いうるので、入口で拒む(設計文書 11b 節)。
+// 数字で書いた値であることを確かめる。接続文字列にそのまま入る WGFT_AGENT_API_HOST に使う。
+// サービス名や "+443" は net.LookupPort なら通るが、エージェントの ParseJoin は 10 進の数字しか
+// 受け付けないので、入口で拒む(設計文書 11b 節)。WGFT_WG_ENDPOINT は normalizeEndpoint が扱う。
 func validateHostPort(env, val string) error {
 	host, port, err := net.SplitHostPort(val)
 	if err != nil {
@@ -169,6 +168,33 @@ func validateHostPort(env, val string) error {
 		return configErrorf(env, "%q has a port that is not a number from 1 to 65535; agents read this value and accept only decimal digits, not a service name", val)
 	}
 	return nil
+}
+
+// normalizeEndpoint は WGFT_WG_ENDPOINT の値を、エージェントに配る形に直す。値は host:port の形で
+// ホストが空でないことを求め、ポートの部分だけを net.LookupPort("udp", ...) で番号に直して 10 進の
+// 数字で書き直す。"+51820" や "051820" は 51820 に、"domain" のようなサービス名はこのホストの
+// サービスの一覧が示す番号になる。ホストは書かれたまま残し、IP アドレスに引かない。名前の引き直しは
+// エージェントが行うためである。ユーザー空間モードのエージェントは 10 進の数字しか受け付けず、
+// カーネルモードのエージェントはエージェントのホストのサービスの一覧で引くので、番号を決める場所を
+// server の入口の 1 か所にする。UDP として引けない名前は TCP で引き直さず、0 と範囲外の値と同じく
+// 拒む(設計文書 11b 節)。直すのはこの起動の Options だけで、設定ファイルは書き換えず、
+// 「値と出所」の表示も入力の値のままである。
+func normalizeEndpoint(env, val string) (string, error) {
+	host, port, err := net.SplitHostPort(val)
+	if err != nil {
+		return "", configErrorf(env, "%q is not host:port, for example vps.example.com:51820: %v", val, err)
+	}
+	if host == "" {
+		return "", configErrorf(env, "%q has no host; agents connect to this name or address", val)
+	}
+	if port == "" {
+		return "", configErrorf(env, "%q has no port", val)
+	}
+	p, err := net.LookupPort("udp", port)
+	if err != nil || p < 1 || p > 65535 {
+		return "", configErrorf(env, "%q does not give a UDP port from 1 to 65535; write the port as a number, for example vps.example.com:51820", val)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(p)), nil
 }
 
 // validateBool は、真偽値の設定に綴りの誤りを通さない。かつては 1/true/yes/on 以外のすべてを偽と
