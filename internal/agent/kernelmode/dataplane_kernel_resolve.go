@@ -201,14 +201,14 @@ func (d *Dataplane) planWith(gen uint64, rules []proto.AgentRule, resolved map[s
 	return pub
 }
 
-// staleReasonLimit は、hub がハートビートの理由に許す長さ(internal/vpsd/stream の
-// maxHeartbeatReasonLen)である。agent は vpsd を import できないので値を写す。写しがずれれば、
-// reason_roundtrip_linux_test.go の TestStaleReasonLimitMatchesTheHub が落ちる。staleReasonTailReserve は、
+// staleReasonLimit は、ハートビートの理由に許す長さ(proto.ReasonMaxBytes)である。エージェントは送る前に、
+// hub は保存する前に、理由をこの長さで切り詰める。hub の値がずれれば、reason_roundtrip_linux_test.go の
+// TestStaleReasonLimitMatchesTheHub が落ちる。staleReasonTailReserve は、
 // 目印の後ろに続く文言のために残す長さである。server doctor が rule.target を分類する試し接続の誤り
 // (`; target <宛先>: dial tcp <宛先>: connect: connection refused` など、最長で 95 バイト)を収める。解決の
 // 誤りの文面の切り詰めの印(staleClipMark)は、その外の予算から引く。
 const (
-	staleReasonLimit       = 512
+	staleReasonLimit       = proto.ReasonMaxBytes
 	staleReasonTailReserve = 128
 	// staleClipMark は textsafe.ClipText が切り詰めたときに後ろへ付ける印の長さである(予算の外に付く)
 	staleClipMark = len("... truncated")

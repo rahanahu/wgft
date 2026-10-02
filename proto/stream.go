@@ -56,6 +56,12 @@ type TunnelStatus struct {
 	LastHandshake time.Time `json:"last_handshake,omitempty"`
 }
 
+// ReasonMaxBytes は、ハートビートの TunnelStatus.Reason と RuleStatus.Reason の長さの上限である。
+// 単位はバイト(仕様 5.2 節)。エージェントは送る前に、vpsd は受け取った後に、どちらも表示できない文字を
+// 置き換えてからこの長さで切り詰める(internal/textsafe の SanitizeAndClip)。切り詰めたときは、
+// 後ろに切ったことを示す印を添える。印はこの長さの外に付く。
+const ReasonMaxBytes = 512
+
 // RuleStatus はルールごとの状態。error はリスナーの開放失敗か、TCP の target への接続確認の失敗。
 type RuleStatus struct {
 	ID     string `json:"id"`

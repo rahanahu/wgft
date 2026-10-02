@@ -14,6 +14,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
+	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/internal/vpsd/stream"
@@ -212,7 +213,7 @@ func TestKernelStaleReasonWithALongHostKeepsTheMark(t *testing.T) {
 			if !strings.Contains(st.Reason, host) {
 				t.Fatalf("reason %q does not name the host", st.Reason)
 			}
-			stored := stream.HeartbeatReason(st.Reason)
+			stored := storedReason(st.Reason)
 			got, _, stale := doctor.StaleResolution(stored)
 			if !stale || got != addr {
 				t.Fatalf("after the hub, StaleResolution(%q) = %q, %v; want the mark to survive", stored, got, stale)
@@ -264,7 +265,7 @@ func TestKernelRefusedReasonWithManyAddressesKeepsTheClassification(t *testing.T
 				if !strings.Contains(res.Reason, "ports are not published") {
 					t.Fatalf("reason %q: want the range suffix, the longest case", res.Reason)
 				}
-				stored := stream.HeartbeatReason(res.Reason)
+				stored := storedReason(res.Reason)
 				if stored != res.Reason {
 					t.Fatalf("%d addresses, host %d bytes, source %q: the hub clips the reason (%d bytes)\n%q\nstored %q",
 						n, len(host), source, len(res.Reason), res.Reason, stored)
@@ -311,7 +312,8 @@ func TestKernelRefusedReasonText(t *testing.T) {
 }
 
 // serverDoctorReads は、エージェントの 1 本のルールの状態を、接続中のエージェントの今の報告として
-// server doctor に渡し、検査の ID ごとの結果を返す。理由は hub が保存する形に通してから渡す。
+// server doctor に渡し、検査の ID ごとの結果を返す。理由は、エージェントが送る形(internal/agent の
+// wireReason と同じ textsafe.SanitizeAndClip)にし、さらに hub が保存する形に通してから渡す。
 // internal/agent の reason_roundtrip_test.go にある同じ名前の補助の写しである。この package の
 // テストからはそちらに届かない。
 func serverDoctorReads(t *testing.T, r proto.AgentRule, st proto.RuleStatus) map[string]doctor.Check {
@@ -321,7 +323,7 @@ func serverDoctorReads(t *testing.T, r proto.AgentRule, st proto.RuleStatus) map
 	rule := proto.Rule{ID: r.ID, Agent: "home", Proto: r.Proto, ListenPort: r.ListenPort, Target: r.Target, Enabled: true}
 	in := doctor.Input{Now: now,
 		Rules: &adminapi.BatchResponse{AgentRuleStates: map[string]adminapi.AgentRuleStatus{
-			rule.ID: {Agent: "home", State: st.State, Reason: stream.HeartbeatReason(st.Reason), At: at, Connected: true}}},
+			rule.ID: {Agent: "home", State: st.State, Reason: storedReason(st.Reason), At: at, Connected: true}}},
 		Agents: []adminapi.AgentInfo{{Name: "home", Connected: true, LastHeartbeat: at, LastHandshake: at}},
 	}
 	got := map[string]doctor.Check{}
@@ -329,4 +331,10 @@ func serverDoctorReads(t *testing.T, r proto.AgentRule, st proto.RuleStatus) map
 		got[c.ID] = c
 	}
 	return got
+}
+
+// storedReason は、エージェントの理由 s を、エージェントが送る形(internal/agent の wireReason と同じ
+// textsafe.SanitizeAndClip)にし、さらに hub が保存する形に通した値である。
+func storedReason(s string) string {
+	return stream.HeartbeatReason(textsafe.SanitizeAndClip(s, proto.ReasonMaxBytes))
 }

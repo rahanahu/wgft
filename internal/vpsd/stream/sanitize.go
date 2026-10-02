@@ -22,8 +22,10 @@ const maxHeartbeatStateLen = 64
 // maxHeartbeatReasonLen は Tunnel.Reason と Rules[].Reason に許す長さの上限である。internal/agent の
 // 同種の上限(agent 自身の doctor 応答が使う maxDoctorText)と同じ 512 バイトにそろえる。この経路が
 // 積む理由の文字列(bind の失敗、target への接続確認の失敗、宛先の許可一覧による拒否)は実測で
-// 100 バイトに満たないので、5 倍の余裕がある。
-const maxHeartbeatReasonLen = 512
+// 100 バイトに満たないので、5 倍の余裕がある。エージェントも送る前に同じ値と同じ変換で切り詰める
+// (proto.ReasonMaxBytes、設計文書 5.2 節)。ここでの切り詰めは、それより前の版のエージェントと、
+// 乗っ取られたエージェントのための守りである。
+const maxHeartbeatReasonLen = proto.ReasonMaxBytes
 
 // maxHeartbeatIDLen は Rules[].ID に許す長さの上限である。ルールの ID に許す長さの上限
 // (proto.MaxRuleIDLen、仕様 5.3 節)と同じ値にそろえ、受けたどの ID の報告も切り詰めずに保存する。
@@ -81,5 +83,5 @@ func HeartbeatReason(s string) string {
 // first; that input is already bounded by the hub's own WebSocket read limit (1 MiB), so this is a
 // bounded, one-time allocation per field per heartbeat, not an unbounded one.
 func clipAndSanitize(s string, max int) string {
-	return textsafe.ClipText(textsafe.SanitizeForTerminal(s), max)
+	return textsafe.SanitizeAndClip(s, max)
 }

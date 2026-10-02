@@ -92,6 +92,18 @@ func ClipText(s string, max int) string {
 	return s[:n] + "... truncated"
 }
 
+// SanitizeAndClip replaces every unsafe rune and invalid UTF-8 byte in s the way
+// SanitizeForTerminal does, then caps the escaped result at max bytes the way ClipText does. It
+// is the one transform both ends of the heartbeat apply to a tunnel or rule reason (design.md
+// 5.2 節): the agent before it sends one, and vpsd's hub before it stores one. Escaping runs
+// first so that what is kept never grows past max on escaping. SanitizeForTerminal leaves the
+// result unchanged, so applying SanitizeAndClip again with the same max keeps the same text before
+// the truncation marker: the result comes back byte for byte, except that when the first cut fell
+// inside a multi-byte rune, the second keeps the first one to three bytes of the first marker too.
+func SanitizeAndClip(s string, max int) string {
+	return ClipText(SanitizeForTerminal(s), max)
+}
+
 // SanitizeStrings walks v, which must be a pointer to a struct (or to a slice or array of such),
 // and replaces every exported string field it finds, however deeply nested through structs,
 // pointers, slices and arrays, with SanitizeForTerminal's escaped form. It is the one call a reader
