@@ -125,7 +125,7 @@ func TestKernelRecordsTheFirstAppliedAddress(t *testing.T) {
 func TestKernelRefusesAnAddressBeforeTheFirstTunnel(t *testing.T) {
 	k := &fakeKernel{}
 	f := &credentials.Credentials{TunnelAddress: "10.200.0.2"}
-	d := &kernelDataplane{ops: k.ops(), iface: "wgft0", f: f, ctx: context.Background(), lkg: map[string]lkgEntry{}, probeErr: map[string]string{}}
+	d := newKernelDataplaneWithOps(context.Background(), "wgft0", nil, f, nil, k.ops())
 	rt := &runtime{opts: Options{CredentialsPath: filepath.Join(t.TempDir(), "agent.json"), Mode: "kernel"}, f: f, priv: testKey(t), dp: d}
 	st := &proto.State{Generation: 1, WG: withAddress(testWG(t), "192.168.1.100/25")}
 	err := rt.apply(st)

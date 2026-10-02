@@ -163,9 +163,7 @@ func newTestKernel(t *testing.T, k *fakeKernel, f *credentials.Credentials, allo
 	if f == nil {
 		f = &credentials.Credentials{}
 	}
-	d := &kernelDataplane{ops: k.ops(), iface: "wgft0", allow: allow, f: f, ctx: context.Background(),
-		lkg: map[string]lkgEntry{}, probeErr: map[string]string{}}
-	d.loadRecord()
+	d := newKernelDataplaneWithOps(context.Background(), "wgft0", allow, f, nil, k.ops())
 	if _, err := d.Build(testKey(t), testWG(t)); err != nil {
 		t.Fatal(err)
 	}
