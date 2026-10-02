@@ -112,7 +112,10 @@ func (d *Daemon) judgeIPMismatch(counts map[string]int, obs []ipObservation) {
 		if warn {
 			// 上で読んだ確認済みの組は、この記録までの間に管理者が警告を消すと古くなる。記録は
 			// 確認済みの組との照合と同じ文で行い、消したばかりの警告を戻さない
-			if added, err := d.st.AddIPMismatchWarning(o.Agent, streamIP, wgIP); err == nil && added {
+			//
+			// 食い違いが続く間は、観測のたびに同じ行の時刻を更新する。ログは行を新しく作った回だけに
+			// 書く。組が変われば行も新しくなるので、そのときは書く
+			if _, created, err := d.st.AddIPMismatchWarning(o.Agent, streamIP, wgIP); err == nil && created {
 				log.Printf("agent %s: detected IP mismatch: %s", o.Agent, store.IPMismatchDetail(streamIP, wgIP))
 			}
 		}

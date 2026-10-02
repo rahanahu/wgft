@@ -364,7 +364,7 @@ func TestMismatchAckSuppressesAfterCapTrims(t *testing.T) {
 	before := m.acks()
 	// 監視の回を通すと別の組の観測が確認済みの組を捨てるので、行は store に直接記録する
 	for i := 0; i < store.MaxIPMismatchWarnings+10; i++ {
-		if added, err := m.st.AddIPMismatchWarning("home", ackStream, rotatedWG(i)); err != nil || !added {
+		if added, _, err := m.st.AddIPMismatchWarning("home", ackStream, rotatedWG(i)); err != nil || !added {
 			t.Fatalf("AddIPMismatchWarning(%d) = %v, %v", i, added, err)
 		}
 	}
@@ -380,5 +380,45 @@ func TestMismatchAckSuppressesAfterCapTrims(t *testing.T) {
 	}
 	if len(m.acks()) != 1 || len(m.warnings()) != store.MaxIPMismatchWarnings {
 		t.Fatalf("after observing the acknowledged pair: acks %+v, %d rows", m.acks(), len(m.warnings()))
+	}
+}
+
+// 食い違いが続く間、"detected IP mismatch" のログは行を新しく作った回の 1 回だけである。時刻を更新
+// するだけの観測では書かない。組が変われば新しい行になるので、もう 1 回書く。
+func TestMismatchDetectionLogsOncePerPair(t *testing.T) {
+	m := newMismatchDriver(t, filepath.Join(t.TempDir(), "s.sqlite"))
+	logs := captureLog(t)
+	count := func() int { return strings.Count(logs.String(), "detected IP mismatch") }
+	m.tick(7, ackStream, ackWG)
+	if n := count(); n != 0 {
+		t.Fatalf("7 observations must not log a detection, got %d", n)
+	}
+	m.tick(1, ackStream, ackWG)
+	if n := count(); n != 1 {
+		t.Fatalf("the 8th observation must log the detection once, got %d\n%s", n, logs.String())
+	}
+	m.tick(40, ackStream, ackWG)
+	if n := count(); n != 1 {
+		t.Fatalf("a continuing mismatch must not log again, got %d\n%s", n, logs.String())
+	}
+	if ws := m.warnings(); len(ws) != 1 {
+		t.Fatalf("the continuing mismatch must keep one refreshed row, got %+v", ws)
+	}
+	// 組が変われば新しい行になり、もう 1 回書く。続く間は書かない
+	m.tick(1, ackStream, otherWG)
+	if n := count(); n != 2 {
+		t.Fatalf("a new pair must log once, got %d\n%s", n, logs.String())
+	}
+	m.tick(10, ackStream, otherWG)
+	if n := count(); n != 2 {
+		t.Fatalf("the new pair continuing must not log again, got %d\n%s", n, logs.String())
+	}
+	// 警告を消すと確認済みの組になり、書かない
+	if err := m.d.DismissWarning("home", store.WarnIPMismatch, ""); err != nil {
+		t.Fatal(err)
+	}
+	m.tick(10, ackStream, otherWG)
+	if n := count(); n != 2 {
+		t.Fatalf("an acknowledged pair must not log, got %d\n%s", n, logs.String())
 	}
 }
