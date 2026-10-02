@@ -25,10 +25,12 @@ const maxHeartbeatStateLen = 64
 // 100 バイトに満たないので、5 倍の余裕がある。
 const maxHeartbeatReasonLen = 512
 
-// maxHeartbeatIDLen は Rules[].ID に許す長さの上限である。実際のルール ID は "r_" と ULID(26 文字)の
-// 28 バイトなので、4 倍を超える余裕がある。乗っ取られた agent は、この ID をそのルールの持ち主のもので
-// あるかのように偽って任意の文字列を送れるので、値の形を検証せず長さと文字種だけを締める。
-const maxHeartbeatIDLen = 128
+// maxHeartbeatIDLen は Rules[].ID に許す長さの上限である。ルールの ID に許す長さの上限
+// (proto.MaxRuleIDLen、仕様 5.3 節)と同じ値にそろえ、受けたどの ID の報告も切り詰めずに保存する。
+// CLI と Web UI が作る ID は "r_" と ULID(26 文字)の 28 バイトである。乗っ取られた agent は、
+// この ID をそのルールの持ち主のものであるかのように偽って任意の文字列を送れるので、値の形を
+// 検証せず長さと文字種だけを締める。
+const maxHeartbeatIDLen = proto.MaxRuleIDLen
 
 // maxHeartbeatEndpointLen は Tunnel.Endpoint(agent が解決した "host:port")に許す長さの上限である。
 // IPv6 の最長表記(45 バイト)にポートを添えても 128 バイトには収まらないので、ここも同じ値を使う。
