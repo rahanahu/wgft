@@ -1,22 +1,25 @@
 # Security Policy
 
-wgft's server (`vpsd`) runs on a public VPS and manages its firewall and tunnels.
-In kernel mode it manages nftables, WireGuard, and conntrack. How much a
-vulnerability exposes depends on how the server runs:
+wgft's server (`vpsd`) runs on a public VPS, terminates the agents' tunnels,
+and forwards public traffic through them. In kernel mode it also manages
+nftables, WireGuard, and conntrack. How much a vulnerability exposes depends on
+how the server runs:
 
-- Run as root, for example by hand with `sudo wgft server run`, it can mean a
-  remote root compromise of the VPS.
-- The shipped systemd unit runs it as an unprivileged `DynamicUser=` user with
-  only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`, in either mode. That still
-  means control of the VPS's whole network configuration: every nftables
-  table, interfaces, routes, and network sysctls. It also exposes the server's
-  keys.
+- When the server runs as root, for example by hand with
+  `sudo wgft server run`, a vulnerability can mean a remote root compromise of
+  the VPS.
+- The shipped systemd unit runs the server as an unprivileged `DynamicUser=`
+  user with only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`, in either mode. A
+  vulnerability there still means control of the VPS's whole network
+  configuration: every nftables table, interfaces, routes, and network sysctls.
 - The container image runs userspace mode as a non-root user with no
   capabilities.
 
-In every case, a compromised server can redirect forwarding rules to other
-hosts on the agents' home networks, limited only by each agent's
-`WGFT_AGENT_ALLOW_TARGETS`. Please report it privately.
+In every case, a compromised server holds the server's keys and the traffic it
+forwards. It can also point the agents' forwarding rules at any address an
+agent can reach: the agent's own host, other hosts on its network, or the
+internet. Each agent's `WGFT_AGENT_ALLOW_TARGETS` limits this; without it there
+is no limit. Please report it privately.
 
 ## Supported versions
 
