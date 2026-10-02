@@ -568,20 +568,27 @@ func TestFlappingRecordLeavesIPMismatchRows(t *testing.T) {
 	}
 }
 
-// 時計が戻って既存の行の日時が未来にあっても、いま記録した食い違いは残る。
+// 時計が戻って既存の行の日時が未来にあっても、いま記録した食い違いは残る。IPv4 射影の形やポート
+// つきで与えた組も、正規化した detail の行として記録し、その行を残す。
 func TestIPMismatchWarningCapKeepsNewRecordWhenClockWentBack(t *testing.T) {
-	s := openTemp(t)
-	future := time.Now().Unix() + 100000
-	for i := 0; i < MaxIPMismatchWarnings; i++ {
-		insertWarningAt(t, s, "home", WarnIPMismatch, mismatchDetail(i), future+int64(i))
-	}
-	if added, err := s.AddIPMismatchWarning("home", "192.0.2.1", "203.0.113.9"); err != nil || !added {
-		t.Fatalf("AddIPMismatchWarning = %v, %v", added, err)
-	}
-	got := warningDetails(t, s, "home", WarnIPMismatch)
-	newPair := IPMismatchDetail("192.0.2.1", "203.0.113.9")
-	if len(got) != MaxIPMismatchWarnings || !got[newPair] || got[mismatchDetail(0)] {
-		t.Errorf("rows = %d, new kept = %v, oldest kept = %v", len(got), got[newPair], got[mismatchDetail(0)])
+	for _, c := range []struct{ streamIP, wgIP string }{
+		{"192.0.2.1", "203.0.113.9"},
+		{"::ffff:192.0.2.1", "[::ffff:203.0.113.9]:51820"},
+	} {
+		s := openTemp(t)
+		future := time.Now().Unix() + 100000
+		for i := 0; i < MaxIPMismatchWarnings; i++ {
+			insertWarningAt(t, s, "home", WarnIPMismatch, mismatchDetail(i), future+int64(i))
+		}
+		if added, err := s.AddIPMismatchWarning("home", c.streamIP, c.wgIP); err != nil || !added {
+			t.Fatalf("AddIPMismatchWarning(%s, %s) = %v, %v", c.streamIP, c.wgIP, added, err)
+		}
+		got := warningDetails(t, s, "home", WarnIPMismatch)
+		newPair := IPMismatchDetail("192.0.2.1", "203.0.113.9")
+		if len(got) != MaxIPMismatchWarnings || !got[newPair] || got[mismatchDetail(0)] {
+			t.Errorf("%s / %s: rows = %d, new kept = %v, oldest kept = %v",
+				c.streamIP, c.wgIP, len(got), got[newPair], got[mismatchDetail(0)])
+		}
 	}
 }
 
