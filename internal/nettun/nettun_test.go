@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -241,3 +242,33 @@ func readWithin(dev *Device, timeout time.Duration) error {
 }
 
 var errReadTimeout = errors.New("read did not return")
+
+// Create の失敗の経路は、作りかけの stack を閉じてから誤りを返す。アドレスだけで 2 つの経路に
+// 入れる: ブロードキャストは AddProtocolAddress で、0.0.0.0 は UDP の会計の設定で失敗する。
+// 他の失敗(TCP の設定、CreateNIC、再構成の表)は、本番に差し込み口を足さないと起こせないので
+// ここでは扱わない。
+func TestCreateFailureClosesTheStack(t *testing.T) {
+	for _, a := range []string{"255.255.255.255", "0.0.0.0"} {
+		t.Run(a, func(t *testing.T) {
+			// 失敗した Create が goroutine を残さないことを、前後の数で見る
+			before := runtime.NumGoroutine()
+			for i := 0; i < 20; i++ {
+				dev, err := Create(netip.MustParseAddr(a), 1420)
+				if err == nil {
+					dev.Close()
+					t.Fatalf("Create(%s) succeeded, want an error", a)
+				}
+				if dev != nil {
+					t.Fatalf("Create(%s) returned a device with an error", a)
+				}
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if after := runtime.NumGoroutine(); after > before {
+				t.Fatalf("goroutines %d -> %d after failed Create calls", before, after)
+			}
+		})
+	}
+}

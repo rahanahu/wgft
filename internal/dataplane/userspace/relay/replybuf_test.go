@@ -245,3 +245,31 @@ type replyWaitStats struct {
 func (p *replyPool) stats() replyWaitStats {
 	return replyWaitStats{Waits: p.waits.Load(), Cancelled: p.cancelled.Load(), Total: time.Duration(p.waitNanos.Load()), Longest: time.Duration(p.maxWait.Load())}
 }
+
+// release は 1 回だけ効く。2 回目の呼び出しは枠を増やさず、バッファも 2 度は戻さない。
+func TestReplyLeaseReleaseIsOnceOnly(t *testing.T) {
+	p := newReplyPool(2)
+	l, ok := p.acquire(nil)
+	if !ok {
+		t.Fatal("acquire failed")
+	}
+	if p.free() != 1 {
+		t.Fatalf("free after acquire = %d, want 1", p.free())
+	}
+	// 二重に効くと、満杯の枠の channel への送信で止まる。止まったら失敗にする
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.release()
+		l.release()
+		l.release()
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a repeated release blocked on the slot channel")
+	}
+	if got := p.free(); got != 2 {
+		t.Fatalf("free after a repeated release = %d, want 2 (the slot count)", got)
+	}
+}
