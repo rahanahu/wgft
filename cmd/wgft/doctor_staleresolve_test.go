@@ -13,7 +13,7 @@ import (
 
 // このファイルは、名前の解決に失敗して直前の解決の結果で転送を続けているルール(設計文書 7b.2 節)を、
 // `server doctor` が「転送が止まっている」と言わないことを確かめる(10.2a 節)。理由の文言は、
-// カーネルモードのエージェントが実際に組み立てる形(internal/agent/dataplane_kernel_resolve.go の
+// カーネルモードのエージェントが実際に組み立てる形(internal/agent/kernelmode/dataplane_kernel_resolve.go の
 // staleReason と dataplane_kernel_read.go の ruleStatuses)をそのまま使う。その形は agent の側の
 // TestKernelStaleReasonIsReadByServerDoctor が固定している。
 

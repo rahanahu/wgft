@@ -248,7 +248,7 @@ func refusedReason(host string, addrs []netip.Addr, to uint16, source string) st
 // 解決の結果は数十のアドレスになりうる。全部を並べると、hub のハートビートの理由の切り詰め
 // (stream.HeartbeatReason、512 バイト)が、server doctor が分類に使う後半(許可一覧の設定の名前か
 // "is not allowed")を落とす。4 つなら、253 バイトのホスト名、最長のアドレス、ポートの範囲の
-// 追記を合わせても 512 バイトに収まる(internal/agent の reason_roundtrip_linux_test.go が固定する)。
+// 追記を合わせても 512 バイトに収まる(internal/agent/kernelmode の reason_roundtrip_linux_test.go が固定する)。
 const maxRefusedAddrs = 4
 
 // targetAddrs は宛先のホストを、DNAT に使える IPv4 のアドレスの昇順の並びにする。使えなければ理由を返す。

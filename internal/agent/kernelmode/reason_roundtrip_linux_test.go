@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"errors"
@@ -9,10 +9,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
+	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/internal/vpsd/stream"
 	"github.com/rahanahu/wgft/proto"
@@ -294,4 +296,25 @@ func TestKernelRefusedReasonText(t *testing.T) {
 			t.Errorf("%d addresses, source %q:\n got %q\nwant %q", tc.n, tc.source, res.Reason, tc.want)
 		}
 	}
+}
+
+// serverDoctorReads は、エージェントの 1 本のルールの状態を、接続中のエージェントの今の報告として
+// server doctor に渡し、検査の ID ごとの結果を返す。理由は hub が保存する形に通してから渡す。
+// internal/agent の reason_roundtrip_test.go にある同じ名前の補助の写しである。この package の
+// テストからはそちらに届かない。
+func serverDoctorReads(t *testing.T, r proto.AgentRule, st proto.RuleStatus) map[string]doctor.Check {
+	t.Helper()
+	now := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
+	at := now.Add(-5 * time.Second).Format(time.RFC3339)
+	rule := proto.Rule{ID: r.ID, Agent: "home", Proto: r.Proto, ListenPort: r.ListenPort, Target: r.Target, Enabled: true}
+	in := doctor.Input{Now: now,
+		Rules: &adminapi.BatchResponse{AgentRuleStates: map[string]adminapi.AgentRuleStatus{
+			rule.ID: {Agent: "home", State: st.State, Reason: stream.HeartbeatReason(st.Reason), At: at, Connected: true}}},
+		Agents: []adminapi.AgentInfo{{Name: "home", Connected: true, LastHeartbeat: at, LastHandshake: at}},
+	}
+	got := map[string]doctor.Check{}
+	for _, c := range doctor.Diagnose(rule, in) {
+		got[c.ID] = c
+	}
+	return got
 }

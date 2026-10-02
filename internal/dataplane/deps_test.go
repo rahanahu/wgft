@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -411,53 +412,122 @@ func TestAgentDataplaneBoundaryImports(t *testing.T) {
 }
 
 // TestAgentModesStayApart checks design.md 7a.7 節's rule for the packages that hold the agent's
-// two dataplane modes. internal/agent/usermode, the userspace mode, imports from internal/agent
-// only the boundary (agentdp) and the allowlist (allowtargets). Through any import it reaches
-// neither internal/agent itself, where the runtime and the kernel mode live, nor
-// internal/agent/kernelmode, the package design.md 7a.7 節 names for the kernel mode, nor the
-// kernel layer under internal/dataplane/linuxkernel.
+// two dataplane modes, and for how internal/agent reaches them. The rule covers the non-test files
+// only: directImports and deps read no _test.go file, and the tests of a mode package may import
+// what its production files may not, such as internal/vpsd/doctor for a reason round trip.
+//
+//   - internal/agent/usermode, the userspace mode, imports from internal/agent only the boundary
+//     (agentdp) and the allowlist (allowtargets). Through any import it reaches neither
+//     internal/agent itself, where the runtime lives, nor internal/agent/kernelmode, nor the kernel
+//     layer under internal/dataplane/linuxkernel.
+//   - internal/agent/kernelmode, the kernel mode, imports from internal/agent only agentdp,
+//     allowtargets, credentials and controlapi. Through any import it reaches neither
+//     internal/agent itself, nor internal/agent/usermode, nor any package under internal/vpsd. It
+//     does not import internal/dataplane/userspace or a package under it directly; it reaches the
+//     relay and socket-buffer types only through agentdp, whose reading carries them.
+//   - internal/agent itself does not import internal/dataplane/linuxkernel or a package under it
+//     directly. The runtime reaches the kernel only through internal/agent/kernelmode.
 func TestAgentModesStayApart(t *testing.T) {
 	root := moduleRoot(t)
 	const agent = module + "/internal/agent"
-	const pkg = agent + "/usermode"
-	if _, err := os.Stat(filepath.Join(root, strings.TrimPrefix(pkg, module))); err != nil {
-		t.Fatalf("%s: %v; did it move?", pkg, err)
-	}
-	allowed := map[string]bool{agent + "/agentdp": true, agent + "/allowtargets": true}
-	for _, dep := range moduleImports(t, root, pkg) {
-		if strings.HasPrefix(dep, agent+"/") && !allowed[dep] {
-			t.Errorf("%s imports %s; design.md 7a.7 節 allows only agentdp and allowtargets from internal/agent", pkg, dep)
+	under := func(dep, pkg string) bool { return dep == pkg || strings.HasPrefix(dep, pkg+"/") }
+	const linuxkernel = module + "/internal/dataplane/linuxkernel"
+	for _, mode := range []struct {
+		pkg, other string
+		allowed    []string
+	}{
+		{agent + "/usermode", agent + "/kernelmode", []string{"agentdp", "allowtargets"}},
+		{agent + "/kernelmode", agent + "/usermode", []string{"agentdp", "allowtargets", "credentials", "controlapi"}},
+	} {
+		pkg := mode.pkg
+		if _, err := os.Stat(filepath.Join(root, strings.TrimPrefix(pkg, module))); err != nil {
+			t.Fatalf("%s: %v; did it move?", pkg, err)
+		}
+		allowed := map[string]bool{}
+		for _, a := range mode.allowed {
+			allowed[agent+"/"+a] = true
+		}
+		for _, dep := range moduleImports(t, root, pkg) {
+			if strings.HasPrefix(dep, agent+"/") && !allowed[dep] {
+				t.Errorf("%s imports %s; design.md 7a.7 節 allows only %v from internal/agent", pkg, dep, mode.allowed)
+			}
+		}
+		for _, dep := range deps(t, root, pkg) {
+			switch {
+			case dep == agent:
+				t.Errorf("%s depends on %s (design.md 7a.7 節: a mode sits below the runtime)", pkg, dep)
+			case under(dep, mode.other):
+				t.Errorf("%s depends on %s (design.md 7a.7 節: the two modes do not import each other)", pkg, dep)
+			case pkg == agent+"/usermode" && under(dep, linuxkernel):
+				t.Errorf("%s depends on %s (design.md 7a.7 節: the userspace mode does not pull in the kernel layer)", pkg, dep)
+			case pkg == agent+"/kernelmode" && under(dep, module+"/internal/vpsd"):
+				t.Errorf("%s depends on %s (design.md 7a.7 節: the kernel mode does not pull in the server)", pkg, dep)
+			}
+		}
+		if pkg == agent+"/kernelmode" {
+			for _, dep := range directImports(t, root, pkg) {
+				if under(dep, module+"/internal/dataplane/userspace") {
+					t.Errorf("%s imports %s (design.md 7a.7 節: the kernel mode does not import the userspace layer directly)", pkg, dep)
+				}
+			}
 		}
 	}
-	for _, dep := range deps(t, root, pkg) {
-		switch {
-		case dep == agent:
-			t.Errorf("%s depends on %s (design.md 7a.7 節: a mode sits below the runtime)", pkg, dep)
-		case dep == agent+"/kernelmode" || strings.HasPrefix(dep, agent+"/kernelmode/"):
-			t.Errorf("%s depends on %s (design.md 7a.7 節: the two modes do not import each other)", pkg, dep)
-		case dep == module+"/internal/dataplane/linuxkernel" || strings.HasPrefix(dep, module+"/internal/dataplane/linuxkernel/"):
-			t.Errorf("%s depends on %s (design.md 7a.7 節: the userspace mode does not pull in the kernel layer)", pkg, dep)
+	for _, dep := range directImports(t, root, agent) {
+		if under(dep, linuxkernel) {
+			t.Errorf("%s imports %s (design.md 7a.7 節: the runtime reaches the kernel only through internal/agent/kernelmode)", agent, dep)
 		}
 	}
 }
 
 // modeSeams lists, for each agent mode package, the names that production code outside the
-// package may use. Every other exported name of the package (a field, a variable, a function, a
-// method) is a seam for internal/agent's tests and may be used only from _test.go files. A
-// package-level name is spelled as is, a field or method as Type.Name.
+// package may use. A package-level name is spelled as is, a field or method as Type.Name.
 var modeSeams = map[string]map[string]bool{
 	module + "/internal/agent/usermode": {"New": true},
+	module + "/internal/agent/kernelmode": {
+		"New": true, "Built": true, "Prerequisites": true, "ProcessNetAdmin": true, "ReadKernel": true,
+	},
+}
+
+// modeTestSeams lists, for each agent mode package, the names it exports only so that
+// internal/agent's tests can reach them, spelled as in modeSeams. Production code outside the
+// package may not use them. A method that implements an interface of internal/agent/agentdp, the
+// boundary the runtime calls through, belongs to neither list. Every other exported name of a mode
+// package is in exactly one of the two lists, so a name exported later has to be placed in one.
+var modeTestSeams = map[string]map[string]bool{
+	module + "/internal/agent/usermode": {
+		"Dataplane": true, "Dataplane.Allow": true, "Dataplane.Limits": true, "Dataplane.Tun": true,
+		"Dataplane.Relay": true, "Dataplane.RelayOptions": true,
+		"NewTunnel": true, "ReadTunnelStatus": true, "RuleStatuses": true,
+	},
+	module + "/internal/agent/kernelmode": {
+		"Dataplane": true, "NewWithOps": true, "Dataplane.LinkConfig": true,
+		"Dataplane.Ops": true, "Dataplane.Priv": true, "Dataplane.WG": true, "Dataplane.Pub": true,
+		"Dataplane.ObserveErr": true,
+		"Ops":                  true, "Ops.EnsureLink": true, "Ops.InspectLink": true, "Ops.KeyHolders": true,
+		"Ops.Publish": true, "Ops.Fingerprint": true, "Ops.Lookup": true, "Ops.Probe": true,
+		"Ops.ReadIPForward": true, "Ops.WriteIPForward": true, "Ops.LocalAddrs": true, "Ops.Now": true,
+		"Ops.SendDatagram": true, "Ops.RouteIface": true, "Ops.ConvergeFlows": true, "Ops.Notify": true,
+		"MaxUnconverged": true,
+		"DoctorOps":      true, "DoctorOps.Link": true, "DoctorOps.InspectLink": true,
+		"DoctorOps.InspectTable": true, "DoctorOps.ReadSysctl": true, "DoctorOps.ForwardDrops": true,
+		"DoctorOps.Route": true, "DoctorOps.LocalAddrs": true, "DoctorKernelOps": true,
+	},
 }
 
 // TestAgentModeTestSeamsStayInTests checks design.md 7a.7 節's rule that the names an agent mode
-// package exports only for internal/agent's tests (internal/agent/usermode's Tun, Relay,
-// NewTunnel, ...) are not used by production code outside that package. Go has no visibility for
-// tests alone, so the rule is checked here. It type-checks the non-test files of every package
-// in the module that imports a mode package, for the GOOS the test runs on, and resolves each
-// identifier to its object, so a field or method reached through a value is caught as well as a
-// qualified name. The imports are read from export data that `go list -export` builds. It does not
-// catch a use that never names the object, such as a type assertion to an interface the caller
-// defines or access through reflection.
+// package exports only for internal/agent's tests (modeTestSeams) are not used by production code
+// outside that package; of a mode package, production code outside it uses only the names in
+// modeSeams. Go has no visibility for tests alone, so the rule is checked here. It type-checks the
+// non-test files of every package in the module that imports a mode package, for the GOOS the test
+// runs on, and resolves each identifier to its object, so a field or method reached through a
+// value is caught as well as a qualified name. The imports are read from export data that
+// `go list -export` builds. It does not catch a use that never names the object, such as a type
+// assertion to an interface the caller defines or access through reflection.
+//
+// It also reads each mode package's exported names from its export data and checks that every
+// one is listed in exactly one of modeSeams and modeTestSeams, apart from the methods that
+// implement an interface of internal/agent/agentdp. On linux, where the mode packages export the
+// most, it checks too that no listed name is missing from the package.
 func TestAgentModeTestSeamsStayInTests(t *testing.T) {
 	root := moduleRoot(t)
 	type listed struct {
@@ -548,6 +618,83 @@ func TestAgentModeTestSeamsStayInTests(t *testing.T) {
 			if !ok[name] {
 				t.Errorf("%s: %s uses %s.%s, which %s exports only for internal/agent's tests (design.md 7a.7 節)",
 					fset.Position(id.Pos()), p.ImportPath, obj.Pkg().Name(), name, obj.Pkg().Path())
+			}
+		}
+	}
+
+	imp := importer.ForCompiler(token.NewFileSet(), "gc", func(path string) (io.ReadCloser, error) {
+		if exports[path] == "" {
+			return nil, errors.New("no export data for " + path)
+		}
+		return os.Open(exports[path])
+	})
+	boundary, err := imp.Import(module + "/internal/agent/agentdp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// implementsBoundary reports whether method m of named is a method of an agentdp interface that
+	// *named implements.
+	implementsBoundary := func(named *types.Named, m string) bool {
+		for _, n := range boundary.Scope().Names() {
+			iface, ok := boundary.Scope().Lookup(n).Type().Underlying().(*types.Interface)
+			if !ok || !types.Implements(types.NewPointer(named), iface) {
+				continue
+			}
+			for i := 0; i < iface.NumMethods(); i++ {
+				if iface.Method(i).Name() == m {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for path, prod := range modeSeams {
+		pkg, err := imp.Import(path)
+		if err != nil {
+			t.Fatalf("reading the export data of %s: %v", path, err)
+		}
+		seen := map[string]bool{}
+		place := func(name string) {
+			seen[name] = true
+			if prod[name] == modeTestSeams[path][name] {
+				t.Errorf("%s exports %s, which is in neither or both of modeSeams and modeTestSeams; list it in one (design.md 7a.7 節)", path, name)
+			}
+		}
+		for _, n := range pkg.Scope().Names() {
+			obj := pkg.Scope().Lookup(n)
+			if !obj.Exported() {
+				continue
+			}
+			place(n)
+			tn, ok := obj.(*types.TypeName)
+			if !ok {
+				continue
+			}
+			named, ok := tn.Type().(*types.Named)
+			if !ok {
+				continue
+			}
+			for i := 0; i < named.NumMethods(); i++ {
+				if m := named.Method(i); m.Exported() && !implementsBoundary(named, m.Name()) {
+					place(n + "." + m.Name())
+				}
+			}
+			if st, ok := named.Underlying().(*types.Struct); ok {
+				for i := 0; i < st.NumFields(); i++ {
+					if f := st.Field(i); f.Exported() {
+						place(n + "." + f.Name())
+					}
+				}
+			}
+		}
+		if runtime.GOOS != "linux" {
+			continue
+		}
+		for _, list := range []map[string]bool{prod, modeTestSeams[path]} {
+			for name := range list {
+				if !seen[name] {
+					t.Errorf("modeSeams or modeTestSeams lists %s for %s, which does not export it", name, path)
+				}
 			}
 		}
 	}

@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"context"
@@ -29,46 +29,46 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// kernelModeBuilt は、このビルドがカーネルモードの dataplane を持つかどうかである(mode.go)。
-const kernelModeBuilt = true
+// Built は、このビルドがカーネルモードの dataplane を持つかどうかである(internal/agent の mode.go)。
+const Built = true
 
-// kernelPrerequisites はカーネルモードのホストの前提を、カーネルに何も書かずに確かめる(設計文書 7b.5 節)。
-// enterMode がモードを記録するより前、つまり登録より前に呼ぶ。テストだけが差し替える。
-var kernelPrerequisites = func() error {
+// Prerequisites はカーネルモードのホストの前提を、カーネルに何も書かずに確かめる(設計文書 7b.5 節)。
+// internal/agent の enterMode がモードを記録するより前、つまり登録より前に呼ぶ。テストだけが差し替える。
+var Prerequisites = func() error {
 	return checkKernelPrerequisites(nft.AgentTablePresent, wg.AgentWireGuardSupport)
 }
 
-// kernelOps はカーネルと外の世界に触れる操作である。単体テストだけが差し替える。
-type kernelOps struct {
-	ensureLink     func(wg.AgentConfig) ([]string, error)
-	inspectLink    func(iface string, current, previous wgtypes.Key) (wg.AgentState, error)
-	keyHolders     func(iface string, current, previous wgtypes.Key) ([]string, error)
-	publish        func(nft.AgentPublication, nft.AgentConfig) error
-	fingerprint    func(table string) (fp string, present bool, err error)
-	lookup         nft.LookupFunc
-	probe          func(ctx context.Context, dest netip.AddrPort) error
-	readIPForward  func() (bool, error)
-	writeIPForward func() error
-	localAddrs     func() (map[netip.Addr]bool, error)
-	now            func() time.Time
-	sendDatagram   func(dst netip.AddrPort) error
-	routeIface     func(dst netip.Addr) (string, error)
-	convergeFlows  func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error)
+// Ops はカーネルと外の世界に触れる操作である。単体テストだけが差し替える。
+type Ops struct {
+	EnsureLink     func(wg.AgentConfig) ([]string, error)
+	InspectLink    func(iface string, current, previous wgtypes.Key) (wg.AgentState, error)
+	KeyHolders     func(iface string, current, previous wgtypes.Key) ([]string, error)
+	Publish        func(nft.AgentPublication, nft.AgentConfig) error
+	Fingerprint    func(table string) (fp string, present bool, err error)
+	Lookup         nft.LookupFunc
+	Probe          func(ctx context.Context, dest netip.AddrPort) error
+	ReadIPForward  func() (bool, error)
+	WriteIPForward func() error
+	LocalAddrs     func() (map[netip.Addr]bool, error)
+	Now            func() time.Time
+	SendDatagram   func(dst netip.AddrPort) error
+	RouteIface     func(dst netip.Addr) (string, error)
+	ConvergeFlows  func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error)
 	// notify はカーネルの変更の通知の購読である(7b.4 節の変更の通知)。vpsd の kernel backend と同じ購読を使う
-	notify dataplane.Sensor
+	Notify dataplane.Sensor
 }
 
-func defaultKernelOps() kernelOps {
-	return kernelOps{
-		ensureLink:  wg.EnsureAgent,
-		inspectLink: wg.InspectAgent,
-		keyHolders:  wg.AgentKeyHolders,
-		publish:     nft.ApplyAgent,
-		fingerprint: nft.Fingerprint,
-		lookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
+func defaultKernelOps() Ops {
+	return Ops{
+		EnsureLink:  wg.EnsureAgent,
+		InspectLink: wg.InspectAgent,
+		KeyHolders:  wg.AgentKeyHolders,
+		Publish:     nft.ApplyAgent,
+		Fingerprint: nft.Fingerprint,
+		Lookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		},
-		probe: func(ctx context.Context, dest netip.AddrPort) error {
+		Probe: func(ctx context.Context, dest netip.AddrPort) error {
 			var d net.Dialer
 			c, err := d.DialContext(ctx, "tcp", dest.String())
 			if err != nil {
@@ -76,11 +76,11 @@ func defaultKernelOps() kernelOps {
 			}
 			return c.Close()
 		},
-		readIPForward:  linux.ReadIPForward,
-		writeIPForward: linux.WriteIPForward,
-		localAddrs:     hostAddrs,
-		now:            time.Now,
-		sendDatagram: func(dst netip.AddrPort) error {
+		ReadIPForward:  linux.ReadIPForward,
+		WriteIPForward: linux.WriteIPForward,
+		LocalAddrs:     hostAddrs,
+		Now:            time.Now,
+		SendDatagram: func(dst netip.AddrPort) error {
 			c, err := net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(dst))
 			if err != nil {
 				return err
@@ -89,9 +89,9 @@ func defaultKernelOps() kernelOps {
 			_, err = c.Write([]byte{0})
 			return err
 		},
-		routeIface:    wg.AgentRouteInterface,
-		convergeFlows: conntrack.ConvergeAgent,
-		notify:        linuxkernel.Notifications{},
+		RouteIface:    wg.AgentRouteInterface,
+		ConvergeFlows: conntrack.ConvergeAgent,
+		Notify:        linuxkernel.Notifications{},
 	}
 }
 
@@ -108,14 +108,14 @@ const (
 	kernelProbeConcurrent = 32
 )
 
-// kernelDataplane はカーネルモードの dataplane である(仕様 7b 節)。カーネルの WireGuard インタフェースと
+// Dataplane はカーネルモードの dataplane である(仕様 7b 節)。カーネルの WireGuard インタフェースと
 // table inet wgft_agent を宣言へ収束させる。エージェントのプロセスはパケットを中継しない。Close はカーネルの
 // 資源を消さないので、停止の間も転送は続く(7b.4 節)。
 //
 // どのメソッドも、runtime が rt.mu を持った状態で呼ぶ(agentdp.Dataplane)。f は runtime と共有する認証情報
 // ファイルで、ApplyRules が公開の記録を書き込み、runtime が last_state と同じ 1 回の保存で書き出す。
-type kernelDataplane struct {
-	ops   kernelOps
+type Dataplane struct {
+	Ops   Ops
 	iface string
 	allow *allowtargets.List
 	f     *credentials.Credentials
@@ -123,8 +123,8 @@ type kernelDataplane struct {
 	ctx context.Context
 
 	have bool
-	priv wgtypes.Key
-	wg   proto.WGConfig
+	Priv wgtypes.Key
+	WG   proto.WGConfig
 	// server は vpsd のトンネルアドレスである。全体状態に無いので、自分のアドレスの帯の先頭とする(4 節)
 	server netip.Addr
 	// endpoint は直前に解決したエンドポイントであり、endpointOf はその元にした名前である(7b.1 節)。
@@ -145,7 +145,7 @@ type kernelDataplane struct {
 	converged bool
 
 	// pub は直近に公開に成功したテーブルの記録である。起動時は認証情報ファイルの記録から読む
-	pub *nft.AgentPublication
+	Pub *nft.AgentPublication
 	// fp は、このプロセスが直前に公開したテーブルの指紋である(7a.3 節)。fpKnown が偽なら、まだ公開して
 	// いないか読み直せなかったので、比べる基準が無い
 	fp      string
@@ -154,7 +154,7 @@ type kernelDataplane struct {
 	driftSeen string
 	// observeErr は直前の見直しの誤りである。同じ誤りが続く間は 1 行だけ出す。repairErr と
 	// resolveErr と endpointErr をつないだもので、agent doctor の check_error になる
-	observeErr string
+	ObserveErr string
 	// repairErr はテーブルと wgft0 の比べと修復の誤りで、30 秒ごとの見直しと通知の後の見直しの両方が
 	// 書く。resolveErr は名前の解決し直しで変わった DNAT の公開の誤り、endpointErr はエンドポイントの
 	// 引き直しの後の wgft0 の収束の誤りで、どちらも 30 秒ごとの見直しだけが書く。通知の後の見直しは
@@ -201,12 +201,12 @@ type kernelDataplane struct {
 // runtime はこれらの任意の interface を型アサーションだけで探し、満たさなければ黙ってその処理を
 // 飛ばす(internal/agent/agentdp)。メソッドの形がずれたらコンパイルで気付けるよう、ここで固定する。
 var (
-	_ agentdp.Preparer       = (*kernelDataplane)(nil)
-	_ agentdp.WGChecker      = (*kernelDataplane)(nil)
-	_ agentdp.Observer       = (*kernelDataplane)(nil)
-	_ agentdp.Sensed         = (*kernelDataplane)(nil)
-	_ agentdp.StartupChecker = (*kernelDataplane)(nil)
-	_ agentdp.KernelDoctor   = (*kernelDataplane)(nil)
+	_ agentdp.Preparer       = (*Dataplane)(nil)
+	_ agentdp.WGChecker      = (*Dataplane)(nil)
+	_ agentdp.Observer       = (*Dataplane)(nil)
+	_ agentdp.Sensed         = (*Dataplane)(nil)
+	_ agentdp.StartupChecker = (*Dataplane)(nil)
+	_ agentdp.KernelDoctor   = (*Dataplane)(nil)
 )
 
 // lkgEntry は、ルールの宛先の名前を最後に解決できたときの結果である。
@@ -222,15 +222,15 @@ func startupFatal(err error) bool {
 	return errors.As(err, &notOurs) || errors.As(err, &overlap) || startup.Of(err) != nil
 }
 
-// newKernelDataplane はカーネルモードの dataplane を作る。カーネルには何も書かない。
-func newKernelDataplane(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error) (agentdp.Dataplane, error) {
-	return newKernelDataplaneWithOps(ctx, iface, allow, f, save, defaultKernelOps()), nil
+// New はカーネルモードの dataplane を作る。カーネルには何も書かない。
+func New(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error) (agentdp.Dataplane, error) {
+	return NewWithOps(ctx, iface, allow, f, save, defaultKernelOps()), nil
 }
 
-// newKernelDataplaneWithOps は、カーネルと名前解決への操作 ops を受け取って newKernelDataplane と同じ
-// dataplane を組む。本番の経路は newKernelDataplane が defaultKernelOps で呼ぶ。試験は偽物の ops を渡す。
-func newKernelDataplaneWithOps(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error, ops kernelOps) *kernelDataplane {
-	d := &kernelDataplane{ops: ops, iface: iface, allow: allow, f: f, ctx: ctx, save: save,
+// NewWithOps は、カーネルと名前解決への操作 ops を受け取って New と同じ dataplane を組む。本番の経路は
+// New が defaultKernelOps で呼ぶ。試験は偽物の ops を渡す。
+func NewWithOps(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error, ops Ops) *Dataplane {
+	d := &Dataplane{Ops: ops, iface: iface, allow: allow, f: f, ctx: ctx, save: save,
 		lkg: map[string]lkgEntry{}, probeErr: map[string]string{}}
 	d.loadRecord()
 	return d
@@ -239,7 +239,7 @@ func newKernelDataplaneWithOps(ctx context.Context, iface string, allow *allowta
 // loadRecord は認証情報ファイルの公開の記録を読み、直前に公開したテーブルと、ルールごとの直前に
 // 解決できたアドレスの元にする。読めない記録は無いものとして扱う。記録は診断と比較のためのもので、
 // 起動を止める理由にはしない。
-func (d *kernelDataplane) loadRecord() {
+func (d *Dataplane) loadRecord() {
 	if len(d.f.KernelUnconverged) > 0 {
 		if err := json.Unmarshal(d.f.KernelUnconverged, &d.unconverged); err != nil {
 			log.Printf("kernel mode: ignoring the unreadable list of unconverged publications in the credentials file: %v", err)
@@ -254,7 +254,7 @@ func (d *kernelDataplane) loadRecord() {
 		log.Printf("kernel mode: ignoring the unreadable publication record in the credentials file: %v", err)
 		return
 	}
-	d.pub = &pub
+	d.Pub = &pub
 	for _, r := range pub.Rules {
 		host, _, err := net.SplitHostPort(r.Target)
 		if err != nil || len(r.Ranges) == 0 {
@@ -273,12 +273,12 @@ func (d *kernelDataplane) loadRecord() {
 
 // Build は wg 設定 w を受け取る。検証は CheckWG に任せ、カーネルには何も書かない。wgft0 を収束させるのは
 // ApplyRules である。
-func (d *kernelDataplane) Build(priv wgtypes.Key, w proto.WGConfig) (bool, error) {
+func (d *Dataplane) Build(priv wgtypes.Key, w proto.WGConfig) (bool, error) {
 	addr, err := d.CheckWG(w)
 	if err != nil {
 		return false, err
 	}
-	d.priv, d.wg, d.have = priv, w, true
+	d.Priv, d.WG, d.have = priv, w, true
 	d.server = agentServerAddress(addr)
 	d.epMu.Lock()
 	d.declared = w.Endpoint
@@ -295,8 +295,8 @@ func (d *kernelDataplane) Build(priv wgtypes.Key, w proto.WGConfig) (bool, error
 // トンネルのアドレスは、認証情報ファイルに記録した登録時のアドレスと照合する。VPS を奪った攻撃者が
 // LAN の帯より細かい帯を配ると、wgft0 の接続経路が LAN の経路に勝ち、ホストから LAN へ向かう通信の
 // 一部がトンネルへ入るためである。正規の運用では、登録の後にエージェントのアドレスは変わらない。
-// 記録は書き換えない。記録するのは適用が済んだ後の runtime である(finishApplyLocked)。
-func (d *kernelDataplane) CheckWG(w proto.WGConfig) (netip.Prefix, error) {
+// 記録は書き換えない。記録するのは適用が済んだ後の runtime である(internal/agent の finishApplyLocked)。
+func (d *Dataplane) CheckWG(w proto.WGConfig) (netip.Prefix, error) {
 	if _, err := wgtypes.ParseKey(w.ServerPubkey); err != nil {
 		return netip.Prefix{}, fmt.Errorf("server_pubkey: %w", err)
 	}
@@ -319,24 +319,24 @@ func (d *kernelDataplane) CheckWG(w proto.WGConfig) (netip.Prefix, error) {
 	return addr, nil
 }
 
-func (d *kernelDataplane) Built() bool { return d.have }
+func (d *Dataplane) Built() bool { return d.have }
 
-// linkConfig は wgft0 の宣言である。
-func (d *kernelDataplane) linkConfig() (wg.AgentConfig, error) {
+// LinkConfig は wgft0 の宣言である。
+func (d *Dataplane) LinkConfig() (wg.AgentConfig, error) {
 	prev, err := d.f.PreviousKey()
 	if err != nil {
 		return wg.AgentConfig{}, err
 	}
-	serverPub, _ := wgtypes.ParseKey(d.wg.ServerPubkey)
-	addr, _ := netip.ParsePrefix(d.wg.Address)
+	serverPub, _ := wgtypes.ParseKey(d.WG.ServerPubkey)
+	addr, _ := netip.ParsePrefix(d.WG.Address)
 	return wg.AgentConfig{
-		Interface: d.iface, PrivateKey: d.priv, PreviousKey: prev, Address: addr, MTU: d.wg.MTU,
+		Interface: d.iface, PrivateKey: d.Priv, PreviousKey: prev, Address: addr, MTU: d.WG.MTU,
 		Server: wg.ServerPeer{PublicKey: serverPub, Address: d.server, Endpoint: d.cachedEndpoint(),
-			Keepalive: time.Duration(d.wg.Keepalive) * time.Second},
+			Keepalive: time.Duration(d.WG.Keepalive) * time.Second},
 	}, nil
 }
 
-func (d *kernelDataplane) nftConfig() nft.AgentConfig {
+func (d *Dataplane) nftConfig() nft.AgentConfig {
 	c := nft.AgentConfig{WGInterface: d.iface}
 	if d.allow != nil {
 		c.AllowTarget, c.AllowTargetSource = d.allow.Allows, allowtargets.Env
@@ -347,14 +347,14 @@ func (d *kernelDataplane) nftConfig() nft.AgentConfig {
 // Close はカーネルに何もしない。wgft0 とテーブルは停止の間も残し、転送を続ける(7b.4 節)。撤去は
 // wgft agent teardown が行う。受け取った wg 設定と鍵だけを忘れるので、runtime は次に Build を呼ぶ。
 // rotate-key はこの経路で新しい鍵を渡す。直前の公開の記録と、直前に解決できたアドレスは残す。
-func (d *kernelDataplane) Close() {
+func (d *Dataplane) Close() {
 	d.have = false
 	d.stopKeepalive()
 }
 
-func (d *kernelDataplane) LastHandshake() time.Time {
+func (d *Dataplane) LastHandshake() time.Time {
 	prev, _ := d.f.PreviousKey()
-	st, err := d.ops.inspectLink(d.iface, d.priv, prev)
+	st, err := d.Ops.InspectLink(d.iface, d.Priv, prev)
 	if err != nil || !st.Ownership.Ours() {
 		return time.Time{}
 	}

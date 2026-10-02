@@ -13,6 +13,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/kernelmode"
 	"github.com/rahanahu/wgft/internal/agent/usermode"
 	"github.com/rahanahu/wgft/internal/reconcile"
 )
@@ -171,7 +172,7 @@ func newModeRuntime(ctx context.Context, opts Options, f *credentials.Credential
 	if opts.Mode != credentials.ModeKernel {
 		return rt, nil
 	}
-	dp, err := newKernelDataplane(ctx, opts.WGInterface, opts.AllowTargets, f, func() error { return f.Save(opts.CredentialsPath) })
+	dp, err := kernelmode.New(ctx, opts.WGInterface, opts.AllowTargets, f, func() error { return f.Save(opts.CredentialsPath) })
 	if err != nil {
 		return nil, err
 	}

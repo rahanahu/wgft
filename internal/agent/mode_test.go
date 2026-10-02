@@ -14,6 +14,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/kernelmode"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -231,9 +232,9 @@ func TestEnterMode(t *testing.T) {
 // setKernelPrerequisites は、カーネルモードの前提の検査を、err を返すものに差し替える。
 func setKernelPrerequisites(t *testing.T, err error) {
 	t.Helper()
-	old := kernelPrerequisites
-	kernelPrerequisites = func() error { return err }
-	t.Cleanup(func() { kernelPrerequisites = old })
+	old := kernelmode.Prerequisites
+	kernelmode.Prerequisites = func() error { return err }
+	t.Cleanup(func() { kernelmode.Prerequisites = old })
 }
 
 func setKernelModeAvailable(t *testing.T, v bool) {

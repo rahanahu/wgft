@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"fmt"
@@ -14,13 +14,13 @@ import (
 )
 
 // Read はインタフェースとルールの状態を 1 回ずつ読む(10.2c 節)。
-func (d *kernelDataplane) Read() agentdp.Reading {
+func (d *Dataplane) Read() agentdp.Reading {
 	var r agentdp.Reading
 	if !d.have {
 		return r
 	}
 	prev, _ := d.f.PreviousKey()
-	st, err := d.ops.inspectLink(d.iface, d.priv, prev)
+	st, err := d.Ops.InspectLink(d.iface, d.Priv, prev)
 	switch {
 	case err != nil:
 		r.Tunnel = agentdp.TunnelReading{Present: d.converged, Err: fmt.Errorf("read %s: %w", d.iface, err)}
@@ -35,10 +35,10 @@ func (d *kernelDataplane) Read() agentdp.Reading {
 		epErr := d.endpointEr
 		d.epMu.Unlock()
 		if !r.Tunnel.Endpoint.IsValid() && epErr != nil {
-			r.Tunnel.Err = fmt.Errorf("endpoint %s: %w", d.wg.Endpoint, epErr)
+			r.Tunnel.Err = fmt.Errorf("endpoint %s: %w", d.WG.Endpoint, epErr)
 		}
 	}
-	if d.pub != nil {
+	if d.Pub != nil {
 		r.Rules = d.ruleStatuses()
 	}
 	return r
@@ -50,9 +50,9 @@ func (d *kernelDataplane) Read() agentdp.Reading {
 // (7b.2 節)。直前のアドレスの宛先が応えないことを、理由の先頭の文言が隠さないようにするためである。
 // server doctor は、直前の解決の結果で転送を続けている文言の後ろの残りでこのルールの宛先を判定する
 // (10.2a 節、internal/vpsd/doctor の StaleResolution)。
-func (d *kernelDataplane) ruleStatuses() []proto.RuleStatus {
-	out := make([]proto.RuleStatus, 0, len(d.pub.Rules))
-	for _, r := range d.pub.Rules {
+func (d *Dataplane) ruleStatuses() []proto.RuleStatus {
+	out := make([]proto.RuleStatus, 0, len(d.Pub.Rules))
+	for _, r := range d.Pub.Rules {
 		s := proto.RuleStatus{ID: r.RuleID, State: proto.StatusOK}
 		var parts []string
 		if r.Reason != "" {
@@ -77,7 +77,7 @@ func (d *kernelDataplane) ruleStatuses() []proto.RuleStatus {
 	return out
 }
 
-func (d *kernelDataplane) allLocal(r nft.AgentRuleResult) bool {
+func (d *Dataplane) allLocal(r nft.AgentRuleResult) bool {
 	for _, rg := range r.Ranges {
 		if !d.local[rg.Dest.Addr()] {
 			return false
@@ -89,8 +89,8 @@ func (d *kernelDataplane) allLocal(r nft.AgentRuleResult) bool {
 // DoctorKernel は agent doctor のためにカーネルを読む(設計文書 10.2c 節)。停止中の agent doctor と同じ
 // readKernel を、メモリの上の認証情報ファイルと公開の記録で呼ぶ。記録は公開に成功するたびに d.f に
 // 写すので、d.pub と同じ中身である。
-func (d *kernelDataplane) DoctorKernel() *controlapi.DoctorKernel {
+func (d *Dataplane) DoctorKernel() *controlapi.DoctorKernel {
 	return readKernel(kernelReadInput{iface: d.iface, creds: d.f, pub: d.f.KernelPublication})
 }
 
-func (d *kernelDataplane) CheckError() string { return d.observeErr }
+func (d *Dataplane) CheckError() string { return d.ObserveErr }

@@ -19,9 +19,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rahanahu/wgft/internal/agent"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
+	"github.com/rahanahu/wgft/internal/agent/kernelmode"
 	"github.com/rahanahu/wgft/internal/flock"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/textsafe"
@@ -245,7 +245,7 @@ type agentDoctorInput struct {
 	// WGFT_WG_INTERFACE から取り、停止中のエージェントのカーネルを直接読むときに使う(10.2c 節)。
 	WGInterface string
 	// ReadKernel は、停止中のカーネルモードのエージェントのカーネルの状態を直接読む。既定は
-	// internal/agent の ReadKernel で、稼働中のエージェントが自分を読むのと同じ関数である。
+	// internal/agent/kernelmode の ReadKernel で、稼働中のエージェントが自分を読むのと同じ関数である。
 	ReadKernel func(f *credentials.Credentials, iface string) *controlapi.DoctorKernel
 }
 
@@ -277,7 +277,7 @@ func (in agentDoctorInput) withDefaults() agentDoctorInput {
 		in.Euid = os.Geteuid
 	}
 	if in.ReadKernel == nil {
-		in.ReadKernel = agent.ReadKernel
+		in.ReadKernel = kernelmode.ReadKernel
 	}
 	if in.WGInterface == "" {
 		in.WGInterface = "wgft0"

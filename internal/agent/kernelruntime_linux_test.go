@@ -23,8 +23,8 @@ func TestObserveDiscardsAStaleResolution(t *testing.T) {
 	f := &credentials.Credentials{}
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
-	old := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG}
+	old := &proto.State{Generation: 1, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
 	rt.mu.Lock()
 	if err := rt.finishApplyLocked(old, nil); err != nil {
 		t.Fatal(err)
@@ -32,8 +32,8 @@ func TestObserveDiscardsAStaleResolution(t *testing.T) {
 	rt.mu.Unlock()
 	published := len(k.published)
 
-	newer := &proto.State{Generation: 2, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.50:80", 80, 80)}}
-	d.ops.lookup = func(_ context.Context, host string) ([]netip.Addr, error) {
+	newer := &proto.State{Generation: 2, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.50:80", 80, 80)}}
+	d.Ops.Lookup = func(_ context.Context, host string) ([]netip.Addr, error) {
 		// 名前を引いている間に、stream が新しい全体状態を適用し終える
 		rt.mu.Lock()
 		if err := rt.finishApplyLocked(newer, nil); err != nil {
@@ -46,7 +46,7 @@ func TestObserveDiscardsAStaleResolution(t *testing.T) {
 	if len(k.published) != published+1 {
 		t.Fatalf("published %d tables during the check, want only the new state's 1", len(k.published)-published)
 	}
-	if got := d.pub.Rules[0].Ranges[0].Dest.Addr(); got != netip.MustParseAddr("192.168.1.50") {
+	if got := d.Pub.Rules[0].Ranges[0].Dest.Addr(); got != netip.MustParseAddr("192.168.1.50") {
 		t.Errorf("the check overwrote the new state with the old one's resolution: DNAT to %s", got)
 	}
 
@@ -82,15 +82,15 @@ func TestObserveDiscardsAResolutionWhenAPendingStateAppears(t *testing.T) {
 	f := &credentials.Credentials{}
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
-	st := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG}
+	st := &proto.State{Generation: 1, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r1", "game.lan:80", 80, 80)}}
 	rt.mu.Lock()
 	if err := rt.finishApplyLocked(st, nil); err != nil {
 		t.Fatal(err)
 	}
 	rt.mu.Unlock()
 	k.tableGone = true
-	d.ops.lookup = func(context.Context, string) ([]netip.Addr, error) {
+	d.Ops.Lookup = func(context.Context, string) ([]netip.Addr, error) {
 		rt.mu.Lock()
 		rt.pendingSt = &proto.State{Generation: 2}
 		rt.mu.Unlock()
@@ -110,15 +110,15 @@ func TestObserveSavesARepairThatAlsoReturnsAnError(t *testing.T) {
 	k := &fakeKernel{dns: map[string][]netip.Addr{"vps.example": {netip.MustParseAddr("203.0.113.1")}}}
 	f := &credentials.Credentials{}
 	d := newTestKernel(t, k, f, nil)
-	d.ops.now = func() time.Time { return now }
+	d.Ops.Now = func() time.Time { return now }
 	w := testWG(t)
 	w.Endpoint = "vps.example:51820"
-	if _, err := d.Build(d.priv, w); err != nil {
+	if _, err := d.Build(d.Priv, w); err != nil {
 		t.Fatal(err)
 	}
 	k.link = ours(t, d)
 	path := t.TempDir() + "/agent.json"
-	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg}
+	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG}
 	st := &proto.State{Generation: 1, WG: w}
 	rt.mu.Lock()
 	if err := rt.finishApplyLocked(st, nil); err != nil {
@@ -192,14 +192,14 @@ func TestRuntimeObserveNotified(t *testing.T) {
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
 	path := t.TempDir() + "/agent.json"
-	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg,
+	rt := &runtime{opts: Options{CredentialsPath: path, Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG,
 		stateNotify: make(chan struct{}, 1)}
 	k.tableGone = true
 	rt.observeNotified()
 	if len(k.published) != 0 {
 		t.Fatal("the notified check published before any full state was applied")
 	}
-	st := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}}
+	st := &proto.State{Generation: 1, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}}
 	rt.mu.Lock()
 	if err := rt.finishApplyLocked(st, nil); err != nil {
 		t.Fatal(err)
@@ -250,10 +250,10 @@ func TestKernelNotificationsReachTheCheck(t *testing.T) {
 	d := newTestKernel(t, k, f, nil)
 	k.link = ours(t, d)
 	sensor := fakeSensor{started: make(chan struct{})}
-	d.ops.notify = sensor
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.priv, dp: d, wgCfg: d.wg,
+	d.Ops.Notify = sensor
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: "kernel"}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG,
 		stateNotify: make(chan struct{}, 1), kernelWake: make(chan struct{}, 1), notifyDebounce: 10 * time.Millisecond}
-	st := &proto.State{Generation: 1, WG: d.wg, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}}
+	st := &proto.State{Generation: 1, WG: d.WG, Rules: []proto.AgentRule{tcpRule("r1", "192.168.1.20:80", 80, 80)}}
 	rt.mu.Lock()
 	if err := rt.finishApplyLocked(st, nil); err != nil {
 		t.Fatal(err)
@@ -293,16 +293,16 @@ func TestDoctorCarriesTheKernelReading(t *testing.T) {
 	fk := &fakeKernel{forwardOn: true}
 	f := &credentials.Credentials{Mode: credentials.ModeKernel}
 	d := newTestKernel(t, fk, f, nil)
-	f.WGPrivateKey = d.priv.String()
+	f.WGPrivateKey = d.Priv.String()
 	rules := []proto.AgentRule{tcpRule("r1", "192.168.1.20:25565", 25565, 25567)}
 	if _, err := d.ApplyRules(3, rules, nil); err != nil {
 		t.Fatal(err)
 	}
-	f.LastState = &proto.State{Generation: 3, WG: d.wg, Rules: rules}
-	d.observeErr = "read table inet wgft_agent: boom"
+	f.LastState = &proto.State{Generation: 3, WG: d.WG, Rules: rules}
+	d.ObserveErr = "read table inet wgft_agent: boom"
 	k := healthyKernel(t, f)
 	withKernelDoctor(t, k)
-	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: credentials.ModeKernel}, f: f, priv: d.priv, dp: d, wgCfg: d.wg,
+	rt := &runtime{opts: Options{CredentialsPath: t.TempDir() + "/agent.json", Mode: credentials.ModeKernel}, f: f, priv: d.Priv, dp: d, wgCfg: d.WG,
 		pendingErr: "publish table inet wgft_agent: refused"}
 	res := rt.collectDoctor()
 	st := res.RuntimeState

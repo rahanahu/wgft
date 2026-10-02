@@ -1,6 +1,6 @@
 //go:build !linux
 
-package agent
+package kernelmode
 
 import (
 	"encoding/json"
@@ -26,5 +26,5 @@ func readKernel(in kernelReadInput) *controlapi.DoctorKernel {
 	}
 }
 
-// processNetAdmin は Linux の外では値を持たない。
-func processNetAdmin() *bool { return nil }
+// ProcessNetAdmin は Linux の外では値を持たない。
+func ProcessNetAdmin() *bool { return nil }

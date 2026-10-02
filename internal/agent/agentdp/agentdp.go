@@ -22,7 +22,7 @@ import (
 
 // Dataplane は、エージェントの制御プレーン(runtime)と、転送を担う実装との境目である
 // (設計文書 7a.7 節)。実装は、ユーザー空間モードの internal/agent/usermode の Dataplane と、
-// カーネルモードの internal/agent の kernelDataplane である。
+// カーネルモードの internal/agent/kernelmode の Dataplane である。
 //
 // 境目の手前の runtime は、処理済み世代と認証情報ファイルの last_state の記録、適用した wg 設定、
 // トンネルの作成に失敗したときの試し直しの予定、トンネルを作り直す判定(watchdog)を持つ。
@@ -186,7 +186,7 @@ type RelayReading struct {
 }
 
 // KeepaliveMaxSeconds は wg.keepalive として受け入れる上限で、カーネルモードの CheckWG
-// (internal/agent の dataplane_kernel.go)がすでに同じ全体状態の値に課している範囲(0 から 65535 秒、
+// (internal/agent/kernelmode の dataplane_kernel.go)がすでに同じ全体状態の値に課している範囲(0 から 65535 秒、
 // WireGuard の persistent_keepalive_interval の幅)と揃える。ユーザー空間モードの実装と、agent doctor の
 // カーネルの読み取りが使う。
 const KeepaliveMaxSeconds = 65535

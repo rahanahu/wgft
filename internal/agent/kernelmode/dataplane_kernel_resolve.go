@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"context"
@@ -21,7 +21,7 @@ import (
 
 // cachedEndpoint は直前に解決できたエンドポイントである。まだ無ければゼロで、インタフェースの収束は
 // カーネルが持つエンドポイントを残す(7b.1 節)。
-func (d *kernelDataplane) cachedEndpoint() netip.AddrPort {
+func (d *Dataplane) cachedEndpoint() netip.AddrPort {
 	d.epMu.Lock()
 	defer d.epMu.Unlock()
 	return d.endpoint
@@ -47,7 +47,7 @@ type kernelPrepared struct {
 // エンドポイントを引くのは、宣言のエンドポイントが変わったときと、まだ一度も解決できていないとき
 // だけである(7b.1 節)。解決できていた名前を引けなくなっても、控えたアドレスを使い続ける。
 // 宛先の名前は同時に引き、1 つの遅い名前が他の名前の期限を使い切らないようにする。
-func (d *kernelDataplane) PrepareApply(st *proto.State) any {
+func (d *Dataplane) PrepareApply(st *proto.State) any {
 	p := &kernelPrepared{endpointOf: st.WG.Endpoint}
 	d.epMu.Lock()
 	need := !d.endpoint.IsValid() || d.endpointOf != st.WG.Endpoint
@@ -56,9 +56,9 @@ func (d *kernelDataplane) PrepareApply(st *proto.State) any {
 	defer cancel()
 	if need {
 		p.tried = true
-		p.endpoint, p.endpointEr = resolveEndpointAddr(ctx, st.WG.Endpoint, d.ops.lookup)
+		p.endpoint, p.endpointEr = resolveEndpointAddr(ctx, st.WG.Endpoint, d.Ops.Lookup)
 	}
-	p.resolved = resolveTargets(ctx, st.Rules, d.ops.lookup)
+	p.resolved = resolveTargets(ctx, st.Rules, d.Ops.Lookup)
 	if d.ctx.Err() != nil {
 		p.err = errors.New("not publishing: the agent is stopping")
 	}
@@ -110,7 +110,7 @@ func resolveTargets(ctx context.Context, rules []proto.AgentRule, lookup nft.Loo
 
 // useEndpoint は、PrepareApply で引いたエンドポイントを控えに入れる。引けなかったら、控えたアドレスを
 // 使い続け、理由が変わったときだけ 1 行出す。
-func (d *kernelDataplane) useEndpoint(p *kernelPrepared) {
+func (d *Dataplane) useEndpoint(p *kernelPrepared) {
 	if !p.tried {
 		return
 	}
@@ -163,7 +163,7 @@ func resolveEndpointAddr(ctx context.Context, endpoint string, lookup nft.Lookup
 // 文字列が同じ間だけ、直前に解決できたアドレスを使い続ける(2026-09-24 の所有者の決定)。使い続けるときも
 // 今の許可一覧、IPv4 だけの規則、ループバックと未指定のアドレスの拒否を当てはめ直し、そのことを理由に
 // 示す。一度も解決できていないルールは公開しない。
-func (d *kernelDataplane) planWith(gen uint64, rules []proto.AgentRule, resolved map[string]nft.Resolution) nft.AgentPublication {
+func (d *Dataplane) planWith(gen uint64, rules []proto.AgentRule, resolved map[string]nft.Resolution) nft.AgentPublication {
 	cfg := d.nftConfig()
 	pub := nft.PlanAgent(nft.AgentInput{Generation: gen, Rules: rules, Resolved: resolved}, cfg)
 	byID := make(map[string]proto.AgentRule, len(rules))

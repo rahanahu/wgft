@@ -1,6 +1,6 @@
 //go:build linux
 
-package agent
+package kernelmode
 
 import (
 	"errors"
@@ -42,12 +42,12 @@ func checkKernelPrerequisites(readTables func() (bool, error), wireGuard func() 
 // 他の所有者のものなら終了コード 1 の誤りを返す。権限が足りなければ種別 prerequisite の拒否を返す。
 // 続けて、別の名前で自分の鍵を持つインタフェースを警告し、ip_forward を 1 にし、ホストの設定の
 // 手掛かりを 1 行ずつ出す。save は認証情報ファイルを保存する。ip_forward を変える記録に使う。
-func (d *kernelDataplane) Startup(priv wgtypes.Key, save func() error) error {
+func (d *Dataplane) Startup(priv wgtypes.Key, save func() error) error {
 	prev, err := d.f.PreviousKey()
 	if err != nil {
 		return err
 	}
-	st, err := d.ops.inspectLink(d.iface, priv, prev)
+	st, err := d.Ops.InspectLink(d.iface, priv, prev)
 	if err != nil {
 		return wg.AgentPrivilegeRefusal(fmt.Errorf("read %s: %w", d.iface, err))
 	}
@@ -58,7 +58,7 @@ func (d *kernelDataplane) Startup(priv wgtypes.Key, save func() error) error {
 	if st.Ownership == wg.OwnedByPreviousKey {
 		log.Printf("kernel mode: %s holds the previous key; the first convergence moves it to the current key", d.iface)
 	}
-	if names, err := d.ops.keyHolders(d.iface, priv, prev); err != nil {
+	if names, err := d.Ops.KeyHolders(d.iface, priv, prev); err != nil {
 		log.Printf("kernel mode: cannot list WireGuard interfaces to look for this agent's key under another name: %v", err)
 	} else {
 		for _, n := range names {
@@ -78,8 +78,8 @@ func (d *kernelDataplane) Startup(priv wgtypes.Key, save func() error) error {
 // 残らないためである。記録を保存できなければ値を書かずに誤りを返し、起動は終了コード 1 で終わる。
 // 値を書けなければ記録を元に戻し、警告して続け、宛先がホスト自身でないルールを error として報告する。
 // 今の値を読めなかった場合は、0 だったとは言えないので、1 を書いても記録しない。
-func (d *kernelDataplane) enableForwarding(save func() error) error {
-	on, rerr := d.ops.readIPForward()
+func (d *Dataplane) enableForwarding(save func() error) error {
+	on, rerr := d.Ops.ReadIPForward()
 	if rerr == nil && on {
 		d.forwardErr = nil
 		return nil
@@ -87,7 +87,7 @@ func (d *kernelDataplane) enableForwarding(save func() error) error {
 	prev := d.f.IPForwardEnabledAt
 	recorded := false
 	if rerr == nil && prev == nil {
-		now := d.ops.now().UTC()
+		now := d.Ops.Now().UTC()
 		d.f.IPForwardEnabledAt = &now
 		if err := save(); err != nil {
 			d.f.IPForwardEnabledAt = prev
@@ -95,7 +95,7 @@ func (d *kernelDataplane) enableForwarding(save func() error) error {
 		}
 		recorded = true
 	}
-	if err := d.ops.writeIPForward(); err != nil {
+	if err := d.Ops.WriteIPForward(); err != nil {
 		if recorded {
 			d.f.IPForwardEnabledAt = prev
 			if serr := save(); serr != nil {
@@ -104,7 +104,7 @@ func (d *kernelDataplane) enableForwarding(save func() error) error {
 		}
 		d.forwardErr = fmt.Errorf(reasontext.IPForward+" is not 1 and cannot be set: %w", err)
 		log.Printf("warning: %v; rules whose target is not this host are reported as errors until it is 1", d.forwardErr)
-		if l, err := d.ops.localAddrs(); err == nil {
+		if l, err := d.Ops.LocalAddrs(); err == nil {
 			d.local = l
 		}
 		return nil
