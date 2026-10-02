@@ -121,12 +121,8 @@ func convergeAgent(c agentConn, prev []nft.AgentPublication, cur nft.AgentPublic
 	var res AgentResult
 	var firstErr error
 	for _, f := range flows {
-		v := classifyAgentFlow(f, prevIdx, curIdx, scope)
-		switch v {
-		case agentForeign:
-			continue
-		case agentKeep:
-			res.Kept++
+		deleted := res.deleteCount(classifyAgentFlow(f, prevIdx, curIdx, scope))
+		if deleted == nil {
 			continue
 		}
 		// 既に消えていたエントリは、消したのと同じに扱う(タイムアウトや競合で先に消える)
@@ -137,19 +133,36 @@ func convergeAgent(c agentConn, prev []nft.AgentPublication, cur nft.AgentPublic
 			}
 			continue
 		}
-		switch v {
-		case agentRemoved:
-			res.Removed++
-		case agentRetargeted:
-			res.Retargeted++
-		case agentNotAllowed:
-			res.NotAllowed++
-		}
+		*deleted++
 	}
 	if firstErr != nil {
 		return res, fmt.Errorf("conntrack delete: closing %d of the agent's flows failed, the first with: %w", res.Failed, firstErr)
 	}
 	return res, nil
+}
+
+// deleteCount は、判定 v のフローの扱いを決める。判定ごとの扱いはこの 1 つの switch に並べ、判定を
+// 足したらここに扱いを書く(TestAgentVerdictSwitchIsExhaustive が検査する)。消すフローには、消せた
+// ときに加える数を返す。nil なら消さない。残すフローは、ここで Kept に数える。
+//
+// 消すかどうかは数を返したかどうかだけで決まるので、case に名指しただけで数を返さない判定は、
+// 消さずに残す側に倒れる。classifyAgentFlow が返さない値(default)も同じく触らない。
+func (res *AgentResult) deleteCount(v agentVerdict) *int {
+	switch v {
+	case agentForeign:
+		return nil
+	case agentKeep:
+		res.Kept++
+		return nil
+	case agentRemoved:
+		return &res.Removed
+	case agentRetargeted:
+		return &res.Retargeted
+	case agentNotAllowed:
+		return &res.NotAllowed
+	default:
+		return nil
+	}
 }
 
 // agentVerdict は 1 つのフローの判定である。
