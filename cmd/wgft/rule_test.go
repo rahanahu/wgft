@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http/httptest"
 	"net/netip"
 	"os"
@@ -77,11 +78,25 @@ func (b *fakeRuleBackend) Batch(req admin.BatchRequest) (*store.BatchResult, err
 // so that this cross-check does not compare admin.ReservedFromServerInfo to itself.
 func reservedPortsLikeVPSD(info admin.ServerInfo) proto.Reserved {
 	reserved := proto.Reserved{uint16(info.WGPort): "WireGuard"}
-	if ap, err := netip.ParseAddrPort(info.AdminAddr); err == nil {
-		reserved[ap.Port()] = "admin API"
+	// The port a TCP listener binds, found the way net.Listen finds it: net.ResolveTCPAddr goes
+	// through the same port lookup. The host is fixed to 127.0.0.1 so no name is looked up; the
+	// host part does not change the port.
+	bound := func(port string) uint16 {
+		a, err := net.ResolveTCPAddr("tcp", net.JoinHostPort("127.0.0.1", port))
+		if err != nil {
+			return 0
+		}
+		return uint16(a.Port)
 	}
-	if ap, err := netip.ParseAddrPort("0.0.0.0:" + info.AgentAPIPort); err == nil {
-		reserved[ap.Port()] = "agent API"
+	if _, port, err := net.SplitHostPort(info.AdminAddr); err == nil && !strings.HasPrefix(info.AdminAddr, "unix://") {
+		if p := bound(port); p != 0 {
+			reserved[p] = "admin API"
+		}
+	}
+	if info.AgentAPIPort != "" {
+		if p := bound(info.AgentAPIPort); p != 0 {
+			reserved[p] = "agent API"
+		}
 	}
 	return reserved
 }

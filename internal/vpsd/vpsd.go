@@ -153,14 +153,14 @@ type Daemon struct {
 // store.ApplyBatch(proto.ValidateUpsert 経由)が拒むための、予約ポートの集合である。規則は
 // internal/vpsd/admin の ReservedFromServerInfo が持ち、CLI の `rule add`/`rule set --dry-run` と
 // Web UI の読み込みの確認も同じ関数を使う。入力は、管理用 API の ServerInfo が返すのと同じ写し方
-// (serverPortsInfo)で Options から組む。WireGuard のポートは常に予約する。管理用 API のポートは
-// AdminAddr が host:port として構文解析できたときだけ予約する(既定の Unix ソケット
-// "unix:///run/wgft/admin.sock" は予約しない。host:port 以外の理由で構文解析に失敗した値も
-// 同様に予約しない。固定のポートを代わりに予約したりはしない)。エージェント用 API のポートは
-// AgentAPIAddr を net.SplitHostPort で分けて取る。この関数を切り出す前は、この組み立てを検査する
-// テストがリポジトリのどこにも無く、例えば管理用 API のポートの予約を落とす変異を入れても
-// `go test ./...` はどこも落ちなかった。
-func reservedPorts(opts Options) proto.Reserved {
+// (serverPortsInfo)で Options から組む。WireGuard のポートは常に予約する。管理用 API と
+// エージェント用 API のポートは、待ち受けが実際に bind するポートを予約する。ホストの部分は
+// 問わず、サービス名は net.Listen と同じ net.LookupPort で番号に直す。管理用 API の Unix ソケット
+// と、host:port に分けられない値はポートを予約しない(固定のポートを代わりに予約したりはしない)。
+// ポートを番号に直せなければ誤りを返し、Run は起動を止める(design.md 11a 節)。この関数を
+// 切り出す前は、この組み立てを検査するテストがリポジトリのどこにも無く、例えば管理用 API の
+// ポートの予約を落とす変異を入れても `go test ./...` はどこも落ちなかった。
+func reservedPorts(opts Options) (proto.Reserved, error) {
 	return admin.ReservedFromServerInfo(serverPortsInfo(opts))
 }
 
@@ -222,7 +222,11 @@ func Run(opts Options) error {
 		iface: opts.WGInterface,
 		b:     linuxkernel.New(linuxkernel.Options{Interface: opts.WGInterface, AdoptExisting: opts.AdoptExisting}),
 	}}
-	d.reserved = reservedPorts(opts)
+	// 入口(cmd/wgft の validateListenAddr)が同じ net.LookupPort で値を検査しているので、ここで
+	// 失敗するのはその間にサービスの一覧が変わった場合だけである。予約を欠いたまま動かない。
+	if d.reserved, err = reservedPorts(opts); err != nil {
+		return fmt.Errorf("reserved ports: %w", err)
+	}
 	// モードとアドレス帯の初回記録・照合は、鍵やインタフェースを作る前に済ませる(仕様 9・11a 節)。
 	_, keyErr := st.GetMeta(store.MetaServerKey)
 	hadServerKey := keyErr == nil

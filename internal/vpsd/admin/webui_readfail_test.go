@@ -207,6 +207,11 @@ func TestImportConfirmReadFailureIsNotSilentZero(t *testing.T) {
 		{"generation", func(st *store.Store) Backend { return &errGenerationBackend{fakeBackend: &fakeBackend{st: st}} }},
 		{"agents", func(st *store.Store) Backend { return &errAgentsBackend{fakeBackend: &fakeBackend{st: st}} }},
 		{"server info", func(st *store.Store) Backend { return &errServerInfoBackend{fakeBackend: &fakeBackend{st: st}} }},
+		// ServerInfo succeeds, but a port it reports by name does not resolve, so the reserved
+		// ports cannot be built either (ReservedFromServerInfo).
+		{"unresolved port", func(st *store.Store) Backend {
+			return &reservedBackend{fakeBackend: &fakeBackend{st: st}, info: ServerInfo{WGPort: 51820, AgentAPIPort: "no-such-service-wgft"}}
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

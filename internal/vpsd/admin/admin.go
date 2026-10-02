@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/netip"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -82,27 +81,63 @@ type ServerInfo struct {
 // ReservedFromServerInfo builds the proto.Reserved set a real Batch refuses a listen_port for,
 // from a ServerInfo report of the server's own ports. It is the one implementation of the rule:
 // internal/vpsd builds Daemon.reserved at startup with this function too, from the same three
-// fields its Daemon.ServerInfo reports. The WireGuard port is always reserved; the admin API's port
-// is reserved only when AdminAddr parses as host:port (a Unix socket, e.g. the default
-// "unix:///run/wgft/admin.sock", does not reserve a port); the agent API's port comes from
-// AgentAPIPort, which this struct's producers (Daemon.ServerInfo, the admin client's ServerInfo)
-// already return net.SplitHostPort'd (an empty or unparseable value reserves nothing for it, the
-// same as a net.SplitHostPort failure on the server's own setting).
+// fields its Daemon.ServerInfo reports. The WireGuard port is always reserved. The admin API's
+// port is reserved only when AdminAddr splits as host:port with net.SplitHostPort (a Unix socket,
+// e.g. the default "unix:///run/wgft/admin.sock", does not reserve a port, and neither does a
+// value that does not split, which the server's own startup check refuses anyway). The agent
+// API's port comes from AgentAPIPort, which this struct's producers (Daemon.ServerInfo, the admin
+// client's ServerInfo) already return net.SplitHostPort'd; an empty value reserves nothing for it.
+//
+// The port reserved is the one the listener actually binds (design.md 5.3 節、11a 節): the host
+// part does not matter, so "localhost:8686" and ":8686" reserve 8686 just as "127.0.0.1:8686"
+// does, and the port goes through listenPort, the same net.LookupPort that net.Listen uses, so a
+// service name such as "https" reserves the number it resolves to and "+80" or "080" reserve 80.
+// A port that resolves to 0 (the kernel picks one) reserves nothing, since no rule can listen on
+// port 0. A port that does not resolve is an error rather than a reservation silently left out:
+// the caller cannot tell which port the server listens on, so it must not report a rule on that
+// port as acceptable. The server itself validates the same values with net.LookupPort at its
+// entry (cmd/wgft's validateListenAddr), so there this can only fail if the services database
+// changed in between; a CLI on another host resolves names with that host's database.
 //
 // Both `rule add`/`rule set --dry-run` (cmd/wgft/rule.go) and the Web UI's read-import
 // confirmation (webui_import.go's renderImportConfirm) call this function so the reserved-port rule
 // cannot drift between the two callers the way it once did (design.md's revision record,
 // --dry-run entry): the CLI reconstructed the rule from ServerInfo on its own, the Web UI passed
 // nil, and only the CLI's copy was ever fixed to match Daemon.reserved.
-func ReservedFromServerInfo(info ServerInfo) proto.Reserved {
+func ReservedFromServerInfo(info ServerInfo) (proto.Reserved, error) {
 	reserved := proto.Reserved{uint16(info.WGPort): "WireGuard"}
-	if ap, err := netip.ParseAddrPort(info.AdminAddr); err == nil {
-		reserved[ap.Port()] = "admin API"
+	if !strings.HasPrefix(info.AdminAddr, "unix://") {
+		if _, port, err := net.SplitHostPort(info.AdminAddr); err == nil {
+			p, err := listenPort(port)
+			if err != nil {
+				return nil, fmt.Errorf("admin API address %q: %w", info.AdminAddr, err)
+			}
+			if p != 0 {
+				reserved[p] = "admin API"
+			}
+		}
 	}
-	if ap, err := netip.ParseAddrPort("0.0.0.0:" + info.AgentAPIPort); err == nil {
-		reserved[ap.Port()] = "agent API"
+	if info.AgentAPIPort != "" {
+		p, err := listenPort(info.AgentAPIPort)
+		if err != nil {
+			return nil, fmt.Errorf("agent API port %q: %w", info.AgentAPIPort, err)
+		}
+		if p != 0 {
+			reserved[p] = "agent API"
+		}
 	}
-	return reserved
+	return reserved, nil
+}
+
+// listenPort は、TCP の待ち受けがポートの部分 port から実際に bind するポートの番号を返す。
+// net.Listen("tcp", addr) はポートの部分を net.LookupPort と同じ規則で番号に直す(サービス名は
+// サービスの一覧で引き、"+80" や "080" は 80 になる)ので、ここも同じ関数を使う。
+func listenPort(port string) (uint16, error) {
+	p, err := net.LookupPort("tcp", port)
+	if err != nil {
+		return 0, fmt.Errorf("cannot tell which port this listens on: %w", err)
+	}
+	return uint16(p), nil
 }
 
 // この API の読み取り側の型は internal/vpsd/adminapi が持ち、ここで同じ名前に別名を付ける

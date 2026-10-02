@@ -615,7 +615,11 @@ func runRuleDryRun(c *admin.Client, upsert []proto.Rule) error {
 		fmt.Println("  no changes")
 	}
 
-	issues := ruleDryRunIssues(upsert, current.Rules, agents, reservedFromServerInfo(info))
+	reserved, err := reservedFromServerInfo(info)
+	if err != nil {
+		return unavailable(fmt.Errorf("reading server info: %w", err))
+	}
+	issues := ruleDryRunIssues(upsert, current.Rules, agents, reserved)
 	if len(issues) > 0 {
 		fmt.Println("dry-run: issues found; nothing was saved:")
 		for _, msg := range issues {
@@ -633,7 +637,9 @@ func runRuleDryRun(c *admin.Client, upsert []proto.Rule) error {
 // startup, so this CLI path and the Web UI's read-import confirmation
 // (internal/vpsd/admin/webui_import.go's renderImportConfirm) share one implementation instead of two
 // that can drift apart the way they once did (design.md's revision record, --dry-run entry).
-func reservedFromServerInfo(info *admin.ServerInfo) proto.Reserved {
+// It fails when a port the server reports by service name does not resolve on this host;
+// runRuleDryRun then exits 2 like any other failure to read the reserved ports.
+func reservedFromServerInfo(info *admin.ServerInfo) (proto.Reserved, error) {
 	return admin.ReservedFromServerInfo(*info)
 }
 
