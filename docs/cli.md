@@ -278,7 +278,8 @@ the command; restart it to read its live state.
 Being stopped is a failure here: a stopped agent forwards nothing, so "process"
 reads FAILED. In userspace mode five items decide the verdict: credentials,
 process, tunnel, UDP accounting and listeners. The rest are printed and never raise the exit code, because they
-state a value rather than whether this host can forward. Name resolution is one
+state a value rather than whether this host can forward; the one exception, a
+control connection refused by the server's key change limit, is described below. Name resolution is one
 of them: an address resolved earlier can still carry traffic. When the server
 has disabled this agent, listeners reads SKIPPED by design instead of counting
 against the verdict: a disabled agent opens no listeners until wgft agent
@@ -323,6 +324,15 @@ socket. For a stopped one this command reads the kernel itself, which needs
 CAP_NET_ADMIN: without it, what cannot be read is UNKNOWN with
 needs_cap_net_admin and the exit code is 2. Start the agent, or run this
 command as root, to read it.
+
+In either mode, the control connection decides the verdict in one case only:
+when its last attempt was refused by the server's key change limit, it reads
+FAILED with the reason key_change_limited. The server has not installed the key
+this agent now uses, so the agent forwards nothing until a later attempt is
+accepted; the item then reads OK again. It judges the last attempt alone, so a
+later attempt that ends for another reason reads UNKNOWN with reconnecting.
+Every other state of the control connection, a certificate mismatch included,
+never raises the exit code.
 
 Every run ends with what it did NOT test, and with the fact that it keeps no
 history: it evaluates the current state only.
@@ -564,7 +574,9 @@ Past the limit, the server refuses the new key and this agent's forwarding stops
 until the key is accepted. Do not run rotate-key again: the agent keeps
 reconnecting with the same new key, and the server accepts it once a change has
 come back. While the agent runs, the refusal shows in its log and in
-wgft agent doctor as "public key changes are limited; retry later". On the VPS,
+wgft agent doctor as "public key changes are limited; retry later"; there the
+control connection reads FAILED and the command exits 1 until a later attempt
+is accepted. On the VPS,
 wgft agent ls shows the agent's STREAM as key change refused, and
 wgft server doctor names the refusal under the agent's control connection, with
 the reason key_change_limited in its --json output.

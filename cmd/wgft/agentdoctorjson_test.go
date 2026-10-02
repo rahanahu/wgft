@@ -67,6 +67,8 @@ var agentJSONScenarios = []struct {
 		holdTheLock(t, in.CredentialsPath)
 		in.Dial = func(string) (net.Conn, error) { return nil, &net.OpError{Op: "dial", Err: fs.ErrPermission} }
 	}, statusUnknown},
+	{"the server refused the agent's key under its key change limit", keyChangeRefusedAgentForTest(true), statusFailed},
+	{"an older agent reports the key change refusal in its reason only", keyChangeRefusedAgentForTest(false), statusFailed},
 	{"a verdict check fails while some evidence cannot be read", func(t *testing.T, in *agentDoctorInput) {
 		in.Readable = func(string, bool) (accessResult, error) { return accessDenied, fs.ErrPermission }
 	}, statusUnknown},
@@ -922,5 +924,48 @@ func TestAgentDoctorJSONNeverReadsValueOnly(t *testing.T) {
 	}
 	if strings.Contains(string(b), "valueOnly") {
 		t.Error("agentdoctorjson.go reads valueOnly; it must stay an internal marker for the human output alone")
+	}
+}
+
+// keyChangeRefusedAgentForTest は、直近の試みが server の鍵の変更の頻度の上限で断られた稼働中の
+// エージェントである。field が偽なら、key_change_limited を送らない旧い版のエージェントの応答に
+// する(10.2c 節)。
+func keyChangeRefusedAgentForTest(field bool) func(t *testing.T, in *agentDoctorInput) {
+	return func(t *testing.T, in *agentDoctorInput) {
+		writeTestCredentials(t, in.CredentialsPath, registeredCredentials())
+		holdTheLock(t, in.CredentialsPath)
+		in.Dial = fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
+			s.Connected = false
+			s.DisconnectedAt = testLiveNow.Add(-time.Minute)
+			s.DisconnectReason = `failed to get reader: received close frame: status = StatusPolicyViolation and reason = "public key changes are limited; retry later"`
+			s.KeyChangeLimited = field
+		})))
+	}
+}
+
+// 鍵の変更の頻度の上限による拒否は、--json の最上位の status を failed にし、stream.connection を
+// failed と key_change_limited で示す(7a.11・10.2c 節)。
+func TestAgentDoctorJSONKeyChangeRefused(t *testing.T) {
+	for _, field := range []bool{true, false} {
+		in := testAgentDoctorInput(t, t.TempDir())
+		keyChangeRefusedAgentForTest(field)(t, &in)
+		got := diagnoseJSON(t, agentDiagnose(in))
+		if got["status"] != statusFailed {
+			t.Errorf("field %v: status = %v, want %s", field, got["status"], statusFailed)
+		}
+		found := false
+		for _, c := range got["checks"].([]any) {
+			m := c.(map[string]any)
+			if m["id"] != agentCheckStreamConn {
+				continue
+			}
+			found = true
+			if m["status"] != statusFailed || m["reason"] != agentReasonKeyChangeLimited {
+				t.Errorf("field %v: %s = %v/%v, want %s/%s", field, agentCheckStreamConn, m["status"], m["reason"], statusFailed, agentReasonKeyChangeLimited)
+			}
+		}
+		if !found {
+			t.Errorf("field %v: %s is missing from the JSON", field, agentCheckStreamConn)
+		}
 	}
 }

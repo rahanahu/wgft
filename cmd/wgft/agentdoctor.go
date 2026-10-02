@@ -155,8 +155,10 @@ type agentDoctorCheck struct {
 	Detail string
 	Next   string
 	// verdict は、この検査が総合判定と終了コード 1 を動かすかどうかである。10.2c 節の表の
-	// 「総合判定」の列であり、ユーザー空間モードで動かすのは agent.credentials、agent.process、
-	// tunnel.local、tunnel.udp_accounting、relay.listeners の 5 つだけである。
+	// 「総合判定」の列であり、ユーザー空間モードで常に動かすのは agent.credentials、agent.process、
+	// tunnel.local、tunnel.udp_accounting、relay.listeners の 5 つだけである。stream.connection は、
+	// 直近の試みが鍵の変更の頻度の上限による拒否で終わった場合だけ、どちらのモードでも動かす。
+	// この値は検査の定義の既定であり、その場合は agentStreamConnCheck が検査ごとに立てる。
 	verdict bool
 	// evidenceUnreachable は、10.2c 節の層 2 に当たる実行である。呼び出し元が権限で証拠に届かず、
 	// 診断そのものが成立しなかったことを表し、終了コード 2 に倒す。状態の語とは別のものとして

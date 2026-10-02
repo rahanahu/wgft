@@ -192,15 +192,16 @@ func TestAgentLsShowsKeyChangeRefusal(t *testing.T) {
 	}
 }
 
-// agent doctor's stream.connection after the server refused the agent's key by the limit: the
-// reason is key_change_limited and the advice no longer says held rules keep forwarding. An agent
-// connected again reads OK, and another disconnect reason keeps the generic advice.
+// agent doctor's stream.connection after the server refused the agent's key by the limit: it is
+// FAILED with key_change_limited and moves the verdict, since the refused key is the one the agent
+// uses, and the advice no longer says held rules keep forwarding. An agent connected again reads OK,
+// and another disconnect reason keeps the generic advice; neither moves the verdict.
 func TestAgentDoctorKeyChangeRefused(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	in := agentDoctorInput{Now: now}
 	reason := `failed to get reader: received close frame: status = StatusPolicyViolation and reason = "public key changes are limited; retry later"`
 	run := func(s controlapi.DoctorStream) agentDoctorCheck {
-		c := agentDoctorCheck{ID: agentCheckStreamConn}
+		c := agentDoctorCheck{ID: agentCheckStreamConn, Label: "control connection"}
 		agentStreamConnCheck(&c, in, &s)
 		return c
 	}
@@ -211,8 +212,11 @@ func TestAgentDoctorKeyChangeRefused(t *testing.T) {
 		{DisconnectedAt: now.Add(-time.Minute), DisconnectReason: "some reason", KeyChangeLimited: true},
 	} {
 		c := run(s)
-		if c.Status != statusUnknown || c.Reason != agentReasonKeyChangeLimited {
-			t.Errorf("%+v: %s/%s, want %s/%s", s, c.Status, c.Reason, statusUnknown, agentReasonKeyChangeLimited)
+		if c.Status != statusFailed || c.Reason != agentReasonKeyChangeLimited || !c.verdict {
+			t.Errorf("%+v: %s/%s verdict %v, want %s/%s moving the verdict", s, c.Status, c.Reason, c.verdict, statusFailed, agentReasonKeyChangeLimited)
+		}
+		if c.Next == "" {
+			t.Errorf("%+v: FAILED with nothing to check next", s)
 		}
 		assertNoStillForwarding(t, "next", c.Next)
 		assertNoStillForwarding(t, "detail", c.Detail)
@@ -226,12 +230,18 @@ func TestAgentDoctorKeyChangeRefused(t *testing.T) {
 		}
 	}
 
-	if c := run(controlapi.DoctorStream{Connected: true, DisconnectedAt: now.Add(-time.Minute), DisconnectReason: reason, KeyChangeLimited: true}); c.Status != statusOK {
-		t.Errorf("accepted since: %s/%s, want ok", c.Status, c.Reason)
+	if c := run(controlapi.DoctorStream{Connected: true, DisconnectedAt: now.Add(-time.Minute), DisconnectReason: reason, KeyChangeLimited: true}); c.Status != statusOK || c.verdict {
+		t.Errorf("accepted since: %s/%s verdict %v, want ok not moving the verdict", c.Status, c.Reason, c.verdict)
 	}
 	c := run(controlapi.DoctorStream{DisconnectedAt: now.Add(-time.Minute), DisconnectReason: "read tcp: connection reset by peer"})
-	if c.Reason != agentReasonReconnecting || !strings.Contains(c.Next, "keep being forwarded") {
-		t.Errorf("another disconnect: %s %q, want reconnecting with the generic advice", c.Reason, c.Next)
+	if c.Status != statusUnknown || c.Reason != agentReasonReconnecting || c.verdict || !strings.Contains(c.Next, "keep being forwarded") {
+		t.Errorf("another disconnect: %s/%s verdict %v %q, want unknown reconnecting with the generic advice, not moving the verdict", c.Status, c.Reason, c.verdict, c.Next)
+	}
+	// The message the command exits with names the item, the same way it names the other verdict items.
+	refused := run(controlapi.DoctorStream{DisconnectedAt: now.Add(-time.Minute), DisconnectReason: reason, KeyChangeLimited: true})
+	err := agentDoctorExit(agentDoctorReport{Checks: []agentDoctorCheck{refused}})
+	if err == nil || !strings.Contains(err.Error(), "cannot forward traffic as it stands: control connection") {
+		t.Errorf("exit error = %v, want it to name the control connection", err)
 	}
 }
 

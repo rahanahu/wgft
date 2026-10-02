@@ -465,7 +465,8 @@ func agentLiveValueCheck(c *agentDoctorCheck, in agentDoctorInput, resp *control
 // --- Connection 群 ---
 
 // agentStreamConnCheck は制御ストリームが今つながっているかを示す。総合判定は動かさない。切れて
-// いることは、受け取り済みのルールを転送し続けている間も起こるためである(10.2c 節)。
+// いることは、受け取り済みのルールを転送し続けている間も起こるためである(10.2c 節)。例外は、直近の
+// 試みが鍵の変更の頻度の上限による拒否で終わった場合で、この場合だけ FAILED として総合判定を動かす。
 func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *controlapi.DoctorStream) {
 	if s.Connected {
 		c.Status = doctor.StatusOK
@@ -489,11 +490,14 @@ func agentStreamConnCheck(c *agentDoctorCheck, in agentDoctorInput, s *controlap
 	}
 	c.Status, c.Reason = doctor.StatusUnknown, agentReasonReconnecting
 	if agentKeyChangeLimited(s) {
-		// 鍵の変更の頻度の上限による拒否(5.2・10.2c 節)。再試行で解けるので UNKNOWN のままとし、
-		// 総合判定も動かさない。ただし受け取り済みのルールの転送が続くという案内は当たらない。断られた
-		// 鍵はこのエージェントが今使っている鍵で、server のピアに入っていないためである。所見は直近の
+		// 鍵の変更の頻度の上限による拒否(5.2・10.2c 節)。断られた鍵はこのエージェントが今使っている
+		// 鍵で、server のピアに入っていないので、エージェントは後の試みで鍵が通るまで転送できない。
+		// 終了コード 1 の「今の状態では転送を担えない」に当たるので、FAILED とし総合判定を動かす。
+		// 再試行で解けることは、今の状態を答える総合判定を動かさない理由にならない。判定に使うのは
+		// 直近の試みの結果だけで、後の試みで鍵が通れば上の Connected の枝で OK に戻る。所見は直近の
 		// 試みの時刻と理由を過去の事実として示し、今も断られ続けているとは述べない。
-		c.Reason = agentReasonKeyChangeLimited
+		c.Status, c.Reason = doctor.StatusFailed, agentReasonKeyChangeLimited
+		c.verdict = true
 		c.Detail = "the control stream to the server is not up; the last attempt ended " + agentWhen(in.Now, s.DisconnectedAt) +
 			", refused by the server's key change limit: " +
 			reasonOr(s.DisconnectReason, "no reason was recorded")
