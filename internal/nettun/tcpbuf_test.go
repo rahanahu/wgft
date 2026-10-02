@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -161,22 +162,106 @@ func bulk(t *testing.T, w, r net.Conn, n int) {
 	}
 }
 
-func bulkErr(w, r net.Conn, n int) error {
-	done := make(chan error, 1)
-	go func() {
-		_, err := io.CopyN(io.Discard, r, int64(n))
-		done <- err
-	}()
-	buf := make([]byte, 32<<10)
-	for sent := 0; sent < n; sent += len(buf) {
-		if _, err := w.Write(buf); err != nil {
-			return fmt.Errorf("write: %v", err)
+// bulkBudget は bulk の 1 回の転送に許す時間の上限で、転送の始めから測る。読み書きが進んでも延ばさない。
+// 上限を過ぎた転送は止まったとみなして試験を落とす。この上限は、止まった転送が CI の runner を
+// 占有し続けないための打ち切りである。止まった転送がこの時間の内に回復することは保証しない。
+// Device の送信のキューが溢れて窓の大半を失った転送は、SACK による回復が最小の再送の待ちごとに
+// 少しずつしか進まず、boost の窓では見積もりでこの上限に近い時間か、それを超える時間がかかる。
+// 見積もりは未確認である。
+const bulkBudget = 2 * time.Minute
+
+func bulkErr(w, r net.Conn, n int) error { return bulkWithin(w, r, n, bulkBudget) }
+
+// bulkError は bulk の転送の失敗と、それまでに動いた byte 数。
+type bulkError struct {
+	n, written      int
+	read            int64
+	elapsed, budget time.Duration
+	werr, rerr      error
+	// readerReleased は、書き込みが失敗した後に読み手の期限を今にして待ちを解いたか
+	readerReleased bool
+}
+
+func (e *bulkError) Error() string {
+	var b strings.Builder
+	if e.elapsed >= e.budget {
+		fmt.Fprintf(&b, "bulk transfer did not finish within its budget of %v", e.budget)
+	} else {
+		b.WriteString("bulk transfer failed")
+	}
+	fmt.Fprintf(&b, ": %d of %d bytes written, %d read, after %v", e.written, e.n, e.read, e.elapsed.Round(time.Millisecond))
+	if e.werr != nil {
+		fmt.Fprintf(&b, "; write: %v", e.werr)
+	}
+	if e.rerr != nil {
+		if e.readerReleased && e.elapsed < e.budget {
+			fmt.Fprintf(&b, "; read released after the write failed: %v", e.rerr)
+		} else {
+			fmt.Fprintf(&b, "; read: %v", e.rerr)
 		}
 	}
-	if err := <-done; err != nil {
-		return fmt.Errorf("read: %v", err)
+	return b.String()
+}
+
+func (e *bulkError) Unwrap() []error {
+	var errs []error
+	for _, err := range []error{e.werr, e.rerr} {
+		if err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	return errs
+}
+
+// bulkRead は r から n byte を読み捨て、読んだ数を read に足し、終わりを done に送る。
+func bulkRead(r net.Conn, n int, read *atomic.Int64, done chan<- error) {
+	_, err := io.CopyN(countingDiscard{read}, r, int64(n))
+	done <- err
+}
+
+type countingDiscard struct{ n *atomic.Int64 }
+
+func (c countingDiscard) Write(b []byte) (int, error) {
+	c.n.Add(int64(len(b)))
+	return len(b), nil
+}
+
+// bulkWithin は w から r へ n byte を送り、r が読み切るまで待つ。期限は転送の始めから budget 後の
+// 固定の時刻で、読み書きを始める前に両端の接続へ置く。期限は既に待っている読み書きも解く。
+// 書き込みが途中で失敗したら、読み手の期限を今にして待ちを解く。読み手の goroutine が終わってから
+// 戻り、戻る前に両端の期限を外す。
+func bulkWithin(w, r net.Conn, n int, budget time.Duration) error {
+	start := time.Now()
+	dl := start.Add(budget)
+	w.SetDeadline(dl)
+	r.SetDeadline(dl)
+	defer func() {
+		w.SetDeadline(time.Time{})
+		r.SetDeadline(time.Time{})
+	}()
+	var read atomic.Int64
+	done := make(chan error, 1)
+	go bulkRead(r, n, &read, done)
+	buf := make([]byte, 32<<10)
+	e := &bulkError{n: n, budget: budget}
+	for e.written < n {
+		m, err := w.Write(buf)
+		e.written += m
+		if err != nil {
+			e.werr = err
+			break
+		}
+	}
+	if e.werr != nil {
+		r.SetReadDeadline(time.Now())
+		e.readerReleased = true
+	}
+	e.rerr = <-done
+	e.read, e.elapsed = read.Load(), time.Since(start)
+	if e.werr == nil && e.rerr == nil {
+		return nil
+	}
+	return e
 }
 
 func recvQueue(c net.Conn) int {
@@ -357,15 +442,16 @@ func TestTCPBoostCap(t *testing.T) {
 			maxBoosted = max(maxBoosted, nA, nB)
 		}
 	}()
+	// 転送は bulkBudget で打ち切られ、止まった転送は試験を落とす。wg.Wait は打ち切りの後に戻る
 	var wg sync.WaitGroup
-	for _, cc := range conns {
+	for i, cc := range conns {
 		wg.Add(1)
-		go func(cc [2]net.Conn) {
+		go func(i int, cc [2]net.Conn) {
 			defer wg.Done()
 			if err := bulkErr(cc[0], cc[1], 4<<20); err != nil {
-				t.Error(err)
+				t.Errorf("flow %d of %d, %v to %v: %v", i, flows, cc[0].LocalAddr(), cc[1].LocalAddr(), err)
 			}
-		}(cc)
+		}(i, cc)
 	}
 	wg.Wait()
 	close(stop)
@@ -377,6 +463,92 @@ func TestTCPBoostCap(t *testing.T) {
 	if maxBoosted == 0 {
 		t.Fatal("no flow boosted")
 	}
+}
+
+// bulk の転送は、止まっても期限で試験を落として戻る。2 つの Device の間を渡る packet をすべて捨てて
+// 転送を止める。書き手と読み手がともに待つとき、書き終えた後に読み手だけが待つとき、書き込みが
+// 途中で失敗したときのどれでも、期限か失敗の後に戻り、読み手の goroutine を残さない。
+func TestBulkStopsWhenStalled(t *testing.T) {
+	const budget = time.Second
+	stalled := func(t *testing.T) (net.Conn, net.Conn) {
+		var hole atomic.Bool
+		p := newTCPPairOpts(t, 1, nil, func([]byte) bool { return hole.Load() })
+		c, s := p.dial(t)
+		t.Cleanup(func() {
+			c.Close()
+			s.Close()
+		})
+		hole.Store(true)
+		return c, s
+	}
+	run := func(t *testing.T, w, r net.Conn, n int, budget, guard time.Duration) *bulkError {
+		t.Helper()
+		ch := make(chan error, 1)
+		go func() { ch <- bulkWithin(w, r, n, budget) }()
+		var err error
+		select {
+		case err = <-ch:
+		case <-time.After(guard):
+			t.Fatalf("bulk did not return within %v", guard)
+		}
+		var be *bulkError
+		if !errors.As(err, &be) {
+			t.Fatalf("bulk on a stalled pair: %v, want a bulkError", err)
+		}
+		t.Log(be)
+		// 読み手は結果を送った直後にまだ終わりきっていないことがあるので、少し待つ
+		waitFor(t, 2*time.Second, "the reader goroutine ends after bulk returned", func() bool {
+			buf := make([]byte, 1<<20)
+			return !strings.Contains(string(buf[:runtime.Stack(buf, true)]), "nettun.bulkRead(")
+		})
+		return be
+	}
+	t.Run("writer and reader", func(t *testing.T) {
+		c, s := stalled(t)
+		e := run(t, c, s, 8<<20, budget, budget+10*time.Second)
+		if e.elapsed < budget || e.werr == nil || e.written >= e.n {
+			t.Fatalf("elapsed=%v written=%d write error=%v, want a write stopped by the budget", e.elapsed, e.written, e.werr)
+		}
+	})
+	t.Run("reader after the writes fit", func(t *testing.T) {
+		c, s := stalled(t)
+		e := run(t, c, s, 64<<10, budget, budget+10*time.Second)
+		if e.elapsed < budget || e.werr != nil || e.written != e.n || e.rerr == nil || e.read != 0 {
+			t.Fatalf("elapsed=%v written=%d read=%d errors %v and %v, want every write accepted and the read stopped by the budget", e.elapsed, e.written, e.read, e.werr, e.rerr)
+		}
+	})
+	// 期限は転送の後に外す。残すと、同じ接続を後で使う試験の読み書きが期限で失敗する
+	t.Run("deadlines cleared after a transfer", func(t *testing.T) {
+		p := newTCPPair(t, 1)
+		c, s := p.dial(t)
+		defer c.Close()
+		defer s.Close()
+		if err := bulkWithin(c, s, 1<<20, budget); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(budget + 200*time.Millisecond)
+		for _, x := range [][2]net.Conn{{c, s}, {s, c}} {
+			if _, err := x[0].Write([]byte("ping")); err != nil {
+				t.Fatalf("write after the budget passed: %v", err)
+			}
+			if _, err := io.ReadFull(x[1], make([]byte, 4)); err != nil {
+				t.Fatalf("read after the budget passed: %v", err)
+			}
+		}
+	})
+	t.Run("write fails midway", func(t *testing.T) {
+		c, s := stalled(t)
+		// 書き手を閉じて書き込みを失敗させる。閉じるのが書き始めより先でも書き込みは失敗する。
+		// 期限は試験の待ちより長いので、読み手の待ちは期限では解けない
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			c.Close()
+		}()
+		e := run(t, c, s, 8<<20, time.Minute, 10*time.Second)
+		if e.werr == nil || e.elapsed >= e.budget || !e.readerReleased || e.rerr == nil {
+			t.Fatalf("write error=%v elapsed=%v reader released=%v read error=%v, want the failed write to release the reader", e.werr, e.elapsed, e.readerReleased, e.rerr)
+		}
+	})
 }
 
 // Q 本が枠を持ったまま a の側から閉じると、a の endpoint は TIME_WAIT(既定の 60 秒)に、b の
