@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -557,5 +558,119 @@ func TestMatchingNoOpClearsPendingAfterTransientRepairFailure(t *testing.T) {
 	_, pending = f.d.delivery.status()
 	if pending {
 		t.Fatal("matching successful NoOp retained stale pending status")
+	}
+}
+
+// The disable overlay decides both what committed compares and what state
+// delivers. The two must agree for every agent, or a commit that changes
+// nothing the agent receives is reported as a change, or the reverse.
+func TestOverlayAgreesBetweenStateAndEffectiveDelivery(t *testing.T) {
+	rules := func(ids ...string) []proto.AgentRule {
+		out := make([]proto.AgentRule, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, proto.AgentRule{ID: id, Proto: proto.TCP, Target: "192.0.2.10:25565", Enabled: true})
+		}
+		return out
+	}
+	entry := func(identity, key string, gen uint64, ids ...string) deliveryEntry {
+		return deliveryEntry{identity: identity, key: key, state: proto.State{Generation: gen, Rules: rules(ids...)}}
+	}
+	cases := []struct {
+		name     string
+		entries  map[string]deliveryEntry
+		disabled map[string]disableOverlay
+	}{
+		{
+			name: "overlay generation above the snapshot",
+			entries: map[string]deliveryEntry{
+				"home":   entry("id-home", "key-home", 5, "r_a", "r_b"),
+				"other":  entry("id-other", "key-other", 5, "r_c"),
+				"stale":  entry("id-stale-new", "key-stale", 5, "r_d"),
+				"plain":  entry("id-plain", "key-plain", 5, "r_e"),
+				"norule": entry("id-norule", "key-norule", 5),
+			},
+			disabled: map[string]disableOverlay{
+				"home":   {identity: "id-home", generation: 7},
+				"other":  {identity: "id-other", generation: 9},
+				"stale":  {identity: "id-stale-old", generation: 8},
+				"norule": {identity: "id-norule", generation: 6},
+				"gone":   {identity: "id-gone", generation: 4},
+			},
+		},
+		{
+			name: "overlay generation below the snapshot",
+			entries: map[string]deliveryEntry{
+				"home":  entry("id-home", "key-home", 12, "r_a"),
+				"other": entry("id-other", "key-other", 12, "r_c"),
+				"stale": entry("id-stale-new", "key-stale", 12, "r_d"),
+			},
+			disabled: map[string]disableOverlay{
+				"home":  {identity: "id-home", generation: 10},
+				"stale": {identity: "id-stale-old", generation: 11},
+			},
+		},
+		{
+			name: "no overlay",
+			entries: map[string]deliveryEntry{
+				"home":  entry("id-home", "key-home", 3, "r_a"),
+				"other": entry("id-other", "key-other", 3, "r_c"),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := &deliverySnapshot{entries: tc.entries, generation: tc.entries["home"].state.Generation}
+			o := &deliveryOwner{latest: snap, full: snap, disabled: tc.disabled}
+			original := make(map[string]deliveryEntry, len(tc.entries))
+			for name, e := range tc.entries {
+				e.state.Rules = append([]proto.AgentRule{}, e.state.Rules...)
+				original[name] = e
+			}
+			want := effectiveDelivery(snap, tc.disabled)
+			if len(want) != len(tc.entries) {
+				t.Fatalf("effectiveDelivery returned %d agents, want %d", len(want), len(tc.entries))
+			}
+			disabledSeen := 0
+			for name, e := range tc.entries {
+				for _, key := range []*string{&e.key, nil} {
+					got, err := o.state(name, e.identity, key)
+					if err != nil {
+						t.Fatalf("%s: state: %v", name, err)
+					}
+					if !reflect.DeepEqual(*got, want[name].state) {
+						t.Fatalf("%s: state and effectiveDelivery disagree:\nstate     %+v\neffective %+v", name, *got, want[name].state)
+					}
+				}
+				if want[name].state.AgentDisabled {
+					disabledSeen++
+				}
+			}
+			if !reflect.DeepEqual(snap.entries, original) {
+				t.Fatal("the overlay modified the published snapshot")
+			}
+			// Guard against a vacuous pass: the overlay must have acted where
+			// the case expects it to.
+			for name, ov := range tc.disabled {
+				e, ok := tc.entries[name]
+				if !ok {
+					continue
+				}
+				if (ov.identity == e.identity) != want[name].state.AgentDisabled {
+					t.Fatalf("%s: AgentDisabled = %v with overlay identity %q and entry identity %q", name, want[name].state.AgentDisabled, ov.identity, e.identity)
+				}
+			}
+			if len(tc.disabled) > 0 && disabledSeen == 0 {
+				t.Fatal("no agent was disabled by the overlay")
+			}
+			wantGen := snap.generation
+			for _, ov := range tc.disabled {
+				wantGen = max(wantGen, ov.generation)
+			}
+			for name := range tc.entries {
+				if want[name].state.Generation != wantGen {
+					t.Fatalf("%s: generation %d, want %d", name, want[name].state.Generation, wantGen)
+				}
+			}
+		})
 	}
 }
