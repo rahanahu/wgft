@@ -114,8 +114,11 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 	}
 	// エンドポイントと接続文字列のホストは、待ち受けには使わないが、値の形が違えば接続文字列が
 	// 作れず、エージェントはトンネルを張れない。起動してから気付く項目にせず、入口で弾く。
-	if v := c.str("WGFT_WG_ENDPOINT"); v != "" {
-		if err := validateHostPort("WGFT_WG_ENDPOINT", v); err != nil {
+	// WGFT_WG_ENDPOINT は、ポートだけを番号に直した値を Options に入れる。エージェントに配る値と
+	// 管理用 API の wg_endpoint は、どちらもこの値を使う(設計文書 11b 節)。
+	endpoint := c.str("WGFT_WG_ENDPOINT")
+	if endpoint != "" {
+		if endpoint, err = normalizeEndpoint("WGFT_WG_ENDPOINT", endpoint); err != nil {
 			return vpsd.Options{}, nil, err
 		}
 	}
@@ -145,7 +148,7 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 		WGInterface:     c.str("WGFT_WG_INTERFACE"),
 		WGPort:          uint16(port),
 		WGAddress:       c.str("WGFT_WG_ADDRESS"),
-		WGEndpoint:      c.str("WGFT_WG_ENDPOINT"),
+		WGEndpoint:      endpoint,
 		MTU:             mtu,
 		AgentAPIAddr:    c.str("WGFT_AGENT_API"),
 		AgentAPIHost:    c.str("WGFT_AGENT_API_HOST"),

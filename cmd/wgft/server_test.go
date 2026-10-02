@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -62,6 +63,142 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 				t.Errorf("err=%v exitCode=%d, want %d", err, got, exitRefusal)
 			}
 		})
+	}
+}
+
+// TestServerJoinSettingPortsExitCode checks that a WGFT_AGENT_API_HOST whose port is not decimal
+// digits from 1 to 65535, and a WGFT_WG_ENDPOINT whose port does not give a UDP port from 1 to
+// 65535, stop `server run` and `server check` with exit code 3, and that the refusal names that
+// setting. Checking the subject matters: in kernel mode an unprivileged run is also refused with
+// exit code 3, for CAP_NET_ADMIN, so the exit code alone would pass even if the entry check let
+// the value through (design.md 11b 節).
+func TestServerJoinSettingPortsExitCode(t *testing.T) {
+	none := filepath.Join(t.TempDir(), "none.env")
+	cases := []struct {
+		env, val string
+	}{
+		{"WGFT_WG_ENDPOINT", "vps.example.com:no-such-service-wgft"},
+		{"WGFT_WG_ENDPOINT", "vps.example.com:0"},
+		{"WGFT_WG_ENDPOINT", "vps.example.com:65536"},
+		{"WGFT_WG_ENDPOINT", ":51820"},
+		{"WGFT_AGENT_API_HOST", "vps.example.com:https"},
+		{"WGFT_AGENT_API_HOST", "vps.example.com:+443"},
+		{"WGFT_AGENT_API_HOST", "vps.example.com:0"},
+	}
+	if name, ok := tcpOnlyServiceName(); ok {
+		cases = append(cases, struct{ env, val string }{"WGFT_WG_ENDPOINT", "vps.example.com:" + name})
+	}
+	for _, tc := range cases {
+		for _, sub := range []string{"run", "check"} {
+			t.Run(sub+" "+tc.env+"="+tc.val, func(t *testing.T) {
+				t.Setenv("WGFT_WG_ENDPOINT", "vps.example.com:51820")
+				t.Setenv(tc.env, tc.val)
+				root := newRootCmd()
+				root.SetArgs([]string{"server", sub, "--mode", "kernel", "--config", none, "--data-dir", t.TempDir()})
+				root.SetOut(io.Discard)
+				root.SetErr(io.Discard)
+				err := root.Execute()
+				if got := exitCode(err); err == nil || got != exitRefusal {
+					t.Fatalf("err=%v exitCode=%d, want %d", err, got, exitRefusal)
+				}
+				r := startup.Of(err)
+				if r == nil || r.Category != startup.CategoryConfig || r.Subject != tc.env {
+					t.Errorf("%v is not a config refusal for %s", err, tc.env)
+				}
+			})
+		}
+	}
+}
+
+// tcpOnlyServiceName returns a service name that net.LookupPort resolves for "tcp" but not for
+// "udp" on this host, to check that the endpoint's port is never looked up as TCP. Go's built-in
+// table knows "submissions" for TCP only; a host whose services database also lists it for UDP
+// has no such name here, and the case is left out.
+func tcpOnlyServiceName() (string, bool) {
+	for _, name := range []string{"submissions", "gopher", "imap3"} {
+		if _, err := net.LookupPort("tcp", name); err != nil {
+			continue
+		}
+		if _, err := net.LookupPort("udp", name); err == nil {
+			continue
+		}
+		return name, true
+	}
+	return "", false
+}
+
+// TestNormalizeEndpoint pins how WGFT_WG_ENDPOINT is written into the options the server runs
+// with (design.md 11b 節): only the port changes, looked up as UDP and written as decimal digits;
+// the host stays as given and is never replaced by an address. A port that does not give a UDP
+// port from 1 to 65535 is a config refusal that asks for a number, and a name known only for TCP
+// is not looked up as TCP.
+func TestNormalizeEndpoint(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"vps.example.com:51820", "vps.example.com:51820"},
+		{"vps.example.com:+51820", "vps.example.com:51820"},
+		{"vps.example.com:051820", "vps.example.com:51820"},
+		{"vps.example.com:domain", "vps.example.com:53"},
+		{"vps.example.com:1", "vps.example.com:1"},
+		{"vps.example.com:65535", "vps.example.com:65535"},
+		{"localhost:51820", "localhost:51820"},
+		{"192.0.2.1:+51820", "192.0.2.1:51820"},
+		{"[2001:db8::1]:51820", "[2001:db8::1]:51820"},
+		{"[2001:db8::1]:+51820", "[2001:db8::1]:51820"},
+	} {
+		got, err := normalizeEndpoint("WGFT_WG_ENDPOINT", tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("normalizeEndpoint(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+	}
+	bad := []string{
+		"vps.example.com:no-such-service-wgft", "vps.example.com:0", "vps.example.com:-0",
+		"vps.example.com:65536", "vps.example.com:-1", "vps.example.com:", "vps.example.com",
+		":51820", "[2001:db8::1]",
+	}
+	if name, ok := tcpOnlyServiceName(); ok {
+		bad = append(bad, "vps.example.com:"+name)
+	} else {
+		t.Log("no TCP-only service name on this host; the no-TCP-fallback case is not checked")
+	}
+	for _, in := range bad {
+		got, err := normalizeEndpoint("WGFT_WG_ENDPOINT", in)
+		if err == nil {
+			t.Errorf("normalizeEndpoint(%q) = %q, want a refusal", in, got)
+			continue
+		}
+		if r := startup.Of(err); r == nil || r.Category != startup.CategoryConfig || r.Subject != "WGFT_WG_ENDPOINT" {
+			t.Errorf("normalizeEndpoint(%q): %v is not a config refusal for WGFT_WG_ENDPOINT", in, err)
+		}
+	}
+	_, err := normalizeEndpoint("WGFT_WG_ENDPOINT", "vps.example.com:no-such-service-wgft")
+	if err == nil || !strings.Contains(err.Error(), "write the port as a number, for example vps.example.com:51820") {
+		t.Errorf("an unresolvable port must ask for a number with an example, got %v", err)
+	}
+}
+
+// TestServerOptionsCarryTheNormalizedEndpoint checks that buildServerOptions puts the normalized
+// WGFT_WG_ENDPOINT into vpsd.Options, which both the state delivered to agents and the admin
+// API's wg_endpoint read (TestDeliveredEndpointIsTheServerInfoEndpoint in internal/vpsd), and
+// that the "value and source" display keeps the value as given.
+func TestServerOptionsCarryTheNormalizedEndpoint(t *testing.T) {
+	none := filepath.Join(t.TempDir(), "none.env")
+	cmd := &cobra.Command{Use: "run", RunE: func(*cobra.Command, []string) error { return nil }}
+	registerServerFlags(cmd)
+	cmd.SetArgs([]string{"--wg-endpoint", "vps.example.com:+51820", "--config", none})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	opts, c, err := buildServerOptions(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.WGEndpoint != "vps.example.com:51820" {
+		t.Errorf("Options.WGEndpoint = %q, want vps.example.com:51820", opts.WGEndpoint)
+	}
+	var b strings.Builder
+	c.print(&b)
+	if !strings.Contains(b.String(), "vps.example.com:+51820") || strings.Contains(b.String(), "vps.example.com:51820 ") {
+		t.Errorf("the effective config must show the value as given:\n%s", b.String())
 	}
 }
 
@@ -336,11 +473,19 @@ func TestDoorValueChecks(t *testing.T) {
 		err  error
 		ok   bool
 	}{
-		{"endpoint host:port", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:51820"), true},
-		{"endpoint v6 host:port", validateHostPort("WGFT_WG_ENDPOINT", "[2001:db8::1]:51820"), true},
-		{"endpoint without port", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com"), false},
-		{"endpoint without host", validateHostPort("WGFT_WG_ENDPOINT", ":51820"), false},
-		{"endpoint bad port", validateHostPort("WGFT_WG_ENDPOINT", "vps.example.com:nope"), false},
+		// The join string carries WGFT_AGENT_API_HOST verbatim and the agent's ParseJoin accepts only
+		// a port written as decimal digits, so a service name, a sign or port 0 is refused even
+		// though net.LookupPort resolves it. WGFT_WG_ENDPOINT is normalized instead
+		// (TestNormalizeEndpoint).
+		{"agent api host", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:8443"), true},
+		{"agent api host port 65535", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:65535"), true},
+		{"agent api host port 1", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:1"), true},
+		{"agent api host zero-padded port", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:08443"), true},
+		{"agent api host port 65536", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:65536"), false},
+		{"agent api host service-name port", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:https"), false},
+		{"agent api host signed port", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:+443"), false},
+		{"agent api host port 0", validateHostPort("WGFT_AGENT_API_HOST", "vps.example.com:0"), false},
+		{"agent api host without host", validateHostPort("WGFT_AGENT_API_HOST", ":8443"), false},
 		{"bool true", validateBool("WGFT_ADMIN_TAILSCALE", "true"), true},
 		{"bool yes", validateBool("WGFT_ADMIN_TAILSCALE", "yes"), true},
 		{"bool off", validateBool("WGFT_ADMIN_TAILSCALE", "off"), true},

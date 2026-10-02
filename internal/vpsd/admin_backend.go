@@ -157,14 +157,9 @@ const joinTokenTTL = time.Hour
 
 // JoinString は接続文字列 wgft://host:port/token#sha256:<証明書のハッシュ> を発行する(仕様 5.1 節)。
 func (d *Daemon) JoinString(name string) (admin.JoinStringResponse, error) {
-	host := d.opts.AgentAPIHost
-	if host == "" {
-		h, _, _ := net.SplitHostPort(d.opts.WGEndpoint)
-		_, port, _ := net.SplitHostPort(d.opts.AgentAPIAddr)
-		if h == "" || port == "" {
-			return admin.JoinStringResponse{}, errors.New("cannot determine the host for the join string; set --agent-api-host or --wg-endpoint")
-		}
-		host = net.JoinHostPort(h, port)
+	host, err := joinHost(d.opts.AgentAPIHost, d.opts.WGEndpoint, d.opts.AgentAPIAddr)
+	if err != nil {
+		return admin.JoinStringResponse{}, err
 	}
 	tok, err := d.st.IssueJoinToken(name, joinTokenTTL)
 	if err != nil {
@@ -176,6 +171,31 @@ func (d *Daemon) JoinString(name string) (admin.JoinStringResponse, error) {
 		JoinString: fmt.Sprintf("wgft://%s/%s#sha256:%x", host, tok, fp[:]),
 		ExpiresAt:  time.Now().Add(joinTokenTTL).Format(time.RFC3339),
 	}, nil
+}
+
+// joinHost は接続文字列に入れる host:port を決める。WGFT_AGENT_API_HOST があればそのまま使う
+// (入口がポートを 10 進の数字に限っている)。無ければ WGFT_WG_ENDPOINT のホストと、
+// WGFT_AGENT_API の待ち受けが bind するポートを組み合わせる。待ち受けの値はサービス名や "+8443" を
+// 許すので、net.Listen と同じ net.LookupPort で番号に直し、10 進の数字で書く。エージェントの
+// ParseJoin は数字しか受け付けないためである。番号に直せない場合と 0(カーネルが選ぶポート)の
+// 場合は、エージェントが接続できるポートを書けないので誤りにする(設計文書 11b 節)。
+func joinHost(agentAPIHost, wgEndpoint, agentAPIAddr string) (string, error) {
+	if agentAPIHost != "" {
+		return agentAPIHost, nil
+	}
+	h, _, _ := net.SplitHostPort(wgEndpoint)
+	_, port, _ := net.SplitHostPort(agentAPIAddr)
+	if h == "" || port == "" {
+		return "", errors.New("cannot determine the host for the join string; set --agent-api-host or --wg-endpoint")
+	}
+	p, err := net.LookupPort("tcp", port)
+	if err != nil {
+		return "", fmt.Errorf("cannot determine the port for the join string from the agent API address %q: %v; set --agent-api-host", agentAPIAddr, err)
+	}
+	if p == 0 {
+		return "", fmt.Errorf("cannot determine the port for the join string: the agent API address %q lets the kernel pick the port; set --agent-api-host", agentAPIAddr)
+	}
+	return net.JoinHostPort(h, strconv.Itoa(p)), nil
 }
 
 // Revoke はエージェントを削除する(英語は revoke。仕様 5.1、11 節)。恒久トークンを使えなくし、ピアを消し、
