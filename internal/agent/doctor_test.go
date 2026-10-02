@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/agent/control"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/agent/usermode"
@@ -548,7 +549,7 @@ func TestControlDoesNotRecoverARotateKeyPanic(t *testing.T) {
 		defer client.Close()
 		defer server.Close()
 		go fmt.Fprintln(client, "rotate-key") //nolint:errcheck // 読み手が panic すれば書き手も終わる
-		rt.serveControlConn(server)
+		control.ServeConn(server, controlBackend{rt})
 		return nil
 	}()
 	if got == nil {
@@ -578,7 +579,7 @@ func TestControlRecoversADoctorPanic(t *testing.T) {
 		line, _ := bufio.NewReader(client).ReadString('\n')
 		done <- line
 	}()
-	rt.serveControlConn(server)
+	control.ServeConn(server, controlBackend{rt})
 	select {
 	case line := <-done:
 		if res := parseDoctor(t, line); res.Error == "" {

@@ -214,7 +214,7 @@ func dialFailureKind(path string, err error) agentLiveKind {
 		return liveDenied
 	case errors.Is(err, syscall.EINVAL) && len(path) > controlapi.ControlPathLimit:
 		// Go の net は sun_path に収まらない名前を OS を呼ぶ前に EINVAL で拒むので、もとの誤りは
-		// invalid argument としか言わない(internal/agent/control.go)。
+		// invalid argument としか言わない(internal/agent/control の control.go)。
 		return livePathTooLong
 	default:
 		return liveUnreachable

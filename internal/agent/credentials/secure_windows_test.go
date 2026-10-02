@@ -305,7 +305,7 @@ func TestAcquireSecuresLockFile(t *testing.T) {
 	assertProtectedTo3(t, flock.LockPath(path))
 }
 
-// TestSecureSocketAppliesProtectedDACL は、control.go が使う SecureSocket が、Windows では
+// TestSecureSocketAppliesProtectedDACL は、internal/agent/control が使う SecureSocket が、Windows では
 // SecureFile と同じ保護 DACL を適用し、失敗を呼び出し元に伝えることを確かめる
 // (Unix では chmod の失敗を無視する。filesec_other.go の TestSecureSocketIgnoresChmodFailure
 // を参照)。

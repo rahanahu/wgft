@@ -1,4 +1,4 @@
-package agent
+package control
 
 import (
 	"bufio"
@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
@@ -35,11 +37,22 @@ func listenControl(path string) (net.Listener, error) {
 	return ln, explainControlErr(path, err)
 }
 
-// serveControl は制御ソケットで 1 行の指示を受ける。今あるのは rotate-key と doctor である。
+// Backend は制御ソケットのサーバが呼ぶ実行時の状態である。internal/agent が実装する。
+type Backend interface {
+	// RotateKey は稼働中のエージェントの wg 鍵対を作り直し、新しい公開鍵を返す。panic を受け止めない
+	// (理由は ServeConn にある)。
+	RotateKey() (wgtypes.Key, error)
+	// DoctorLine は制御ソケットに書く doctor の応答 1 行を返す。応答を組む処理の panic は実装の側が
+	// 受け止める。
+	DoctorLine() []byte
+}
+
+// Serve は制御ソケットで 1 行の指示を受ける。今あるのは rotate-key と doctor である。
 // 応答の形式は指示ごとに定める。rotate-key は 1 行のテキスト、doctor は 1 行の JSON を返す
 // (設計文書 10.2c 節)。要求は今までどおり行ベースで、ソケットの framing は変わらない。
-func (rt *runtime) serveControl(ctx context.Context) {
-	path := controlapi.ControlPath(rt.opts.CredentialsPath)
+// credentialsPath は稼働中のエージェントの認証情報ファイルのパスで、ソケットはその隣に開く。
+func Serve(ctx context.Context, credentialsPath string, b Backend) {
+	path := controlapi.ControlPath(credentialsPath)
 	os.Remove(path)
 	ln, err := listenControl(path)
 	if err != nil {
@@ -63,14 +76,14 @@ func (rt *runtime) serveControl(ctx context.Context) {
 		}
 		go func() {
 			defer c.Close()
-			rt.serveControlConn(c)
+			ServeConn(c, b)
 		}()
 	}
 }
 
-// serveControlConn は制御ソケットの接続を 1 つ処理する。panic を受け止めるのは doctor の枝だけで、
-// その受け止めは doctorResponseLine の中にある。
-func (rt *runtime) serveControlConn(c net.Conn) {
+// ServeConn は制御ソケットの接続を 1 つ処理する。panic を受け止めるのは doctor の枝だけで、
+// その受け止めは Backend.DoctorLine の実装(internal/agent の doctorResponseLine)の中にある。
+func ServeConn(c net.Conn, b Backend) {
 	c.SetDeadline(time.Now().Add(30 * time.Second))
 	line, err := bufio.NewReader(c).ReadString('\n')
 	if err != nil {
@@ -81,21 +94,21 @@ func (rt *runtime) serveControlConn(c net.Conn) {
 		// この枝には recover を置かない。抜けではなく、意図してそうしている。
 		//
 		// 設計文書 10.2c 節が recover を置く根拠は「rotate-key が触る値は少ないが、doctor は
-		// 多くの値を触る」であり、対象は doctor の枝である。rotateKey は rt.mu を defer では
-		// なく手で放し、その区間で認証情報ファイルの保存とトンネルの後始末を行う。この区間の
+		// 多くの値を触る」であり、対象は doctor の枝である。Backend.RotateKey の実装(internal/agent の
+		// rotateKey)は rt.mu を defer ではなく手で放し、その区間で認証情報ファイルの保存とトンネルの後始末を行う。この区間の
 		// panic をここで受け止めると、常駐プロセスは rt.mu を誰も放さないまま生き続ける。
 		// 既存の待ち受けは転送を続ける一方、ハートビート、トンネルの見張り、全体状態の適用、
 		// リスナーの再試行、次の doctor がすべて永久に止まり、service は active のまま無応答に
 		// なる。再起動の契機がどこにも無いので、落ちるより静かに悪い。落ちれば同梱の
 		// agent.service の Restart=on-failure が立て直す
-		pub, err := rt.rotateKey()
+		pub, err := b.RotateKey()
 		if err != nil {
 			fmt.Fprintf(c, "error: %v\n", err)
 			return
 		}
 		fmt.Fprintf(c, "ok %s\n", pub)
 	case controlapi.DoctorCommand:
-		c.Write(rt.doctorResponseLine())
+		c.Write(b.DoctorLine())
 	default:
 		// 新しい実行ファイルを置いてから常駐プロセスを再起動するまでの間、新しい CLI が送る
 		// doctor は古い常駐プロセスのこの分岐に当たる。CLI はこれを、稼働中の診断が取れない

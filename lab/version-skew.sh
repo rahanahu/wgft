@@ -449,8 +449,8 @@ print(a.get('generation', ''))
     # "stream: reconnecting" is NOT what an ordinary disconnect/retry logs (that path logs "stream:
     # disconnected: ...; reconnecting in ..." instead, in the same function's default case); it only
     # fires when rt.reconnectNow is set, which only happens inside rt.reconnect() (internal/agent/
-    # agent.go), whose only caller is the wg key-rotation path (internal/agent/control.go, `agent
-    # rotate-key`) - unrelated to WGFT_JOIN re-registration. Counting "stream: reconnecting" would
+    # agent.go), whose only caller is the wg key-rotation path (internal/agent/rotatekey.go, which
+    # internal/agent/control calls for `agent rotate-key`) - unrelated to WGFT_JOIN re-registration. Counting "stream: reconnecting" would
     # therefore never move on an ordinary disconnect/reconnect loop and would pass regardless.
     pre_connects=$(grep -c "stream: connected to" "$ralog" 2>/dev/null)
 
