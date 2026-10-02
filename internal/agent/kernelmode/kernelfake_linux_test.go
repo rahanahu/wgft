@@ -226,7 +226,7 @@ type fakeKernelDoctor struct {
 
 	table   nft.AgentInspection
 	present bool
-	// wantSeen は inspectTable に渡された比べる相手である
+	// wantSeen は InspectTable に渡された比べる相手である
 	wantSeen nft.AgentPublication
 
 	sysctl map[string]string

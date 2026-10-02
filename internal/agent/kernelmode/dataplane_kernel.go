@@ -54,7 +54,7 @@ type Ops struct {
 	SendDatagram   func(dst netip.AddrPort) error
 	RouteIface     func(dst netip.Addr) (string, error)
 	ConvergeFlows  func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error)
-	// notify はカーネルの変更の通知の購読である(7b.4 節の変更の通知)。vpsd の kernel backend と同じ購読を使う
+	// Notify はカーネルの変更の通知の購読である(7b.4 節の変更の通知)。vpsd の kernel backend と同じ購読を使う
 	Notify dataplane.Sensor
 }
 
@@ -144,7 +144,7 @@ type Dataplane struct {
 	// アドレス帯の重なり、前提の欠如は起動の失敗として扱う(11b 節、agentdp.FatalError)
 	converged bool
 
-	// pub は直近に公開に成功したテーブルの記録である。起動時は認証情報ファイルの記録から読む
+	// Pub は直近に公開に成功したテーブルの記録である。起動時は認証情報ファイルの記録から読む
 	Pub *nft.AgentPublication
 	// fp は、このプロセスが直前に公開したテーブルの指紋である(7a.3 節)。fpKnown が偽なら、まだ公開して
 	// いないか読み直せなかったので、比べる基準が無い
@@ -152,7 +152,7 @@ type Dataplane struct {
 	fpKnown bool
 	// driftSeen は直前の見直しで見つけた食い違いの説明である。同じ食い違いが直らない間は 1 行だけ出す
 	driftSeen string
-	// observeErr は直前の見直しの誤りである。同じ誤りが続く間は 1 行だけ出す。repairErr と
+	// ObserveErr は直前の見直しの誤りである。同じ誤りが続く間は 1 行だけ出す。repairErr と
 	// resolveErr と endpointErr をつないだもので、agent doctor の check_error になる
 	ObserveErr string
 	// repairErr はテーブルと wgft0 の比べと修復の誤りで、30 秒ごとの見直しと通知の後の見直しの両方が
@@ -181,7 +181,7 @@ type Dataplane struct {
 	routeFinding string
 
 	// unconverged は、conntrack の収束が済んでいない前の公開の列である(7b.4 節)。古い順に並び、最後の
-	// 要素が pub の直前の公開である。空なら、pub への収束は済んでいる。認証情報ファイルに写して
+	// 要素が Pub の直前の公開である。空なら、Pub への収束は済んでいる。認証情報ファイルに写して
 	// 再起動をまたいで残す。convergeErr は直前の収束の誤りで、変わったときだけ 1 行出す
 	unconverged []nft.AgentPublication
 	convergeErr string

@@ -423,10 +423,15 @@ func TestAgentDataplaneBoundaryImports(t *testing.T) {
 //   - internal/agent/kernelmode, the kernel mode, imports from internal/agent only agentdp,
 //     allowtargets, credentials and controlapi. Through any import it reaches neither
 //     internal/agent itself, nor internal/agent/usermode, nor any package under internal/vpsd. It
-//     does not import internal/dataplane/userspace or a package under it directly; it reaches the
-//     relay and socket-buffer types only through agentdp, whose reading carries them.
+//     does not import internal/dataplane/userspace or a package under it directly. It does depend
+//     on the relay and socket-buffer packages transitively, through agentdp, whose reading carries
+//     their types.
 //   - internal/agent itself does not import internal/dataplane/linuxkernel or a package under it
-//     directly. The runtime reaches the kernel only through internal/agent/kernelmode.
+//     directly.
+//
+// The last two rules look at direct imports only. A transitive path through another package is
+// outside them: for example, internal/agent importing internal/agent/teardown, which imports the
+// kernel layer, does not fail this test.
 func TestAgentModesStayApart(t *testing.T) {
 	root := moduleRoot(t)
 	const agent = module + "/internal/agent"
@@ -474,7 +479,7 @@ func TestAgentModesStayApart(t *testing.T) {
 	}
 	for _, dep := range directImports(t, root, agent) {
 		if under(dep, linuxkernel) {
-			t.Errorf("%s imports %s (design.md 7a.7 節: the runtime reaches the kernel only through internal/agent/kernelmode)", agent, dep)
+			t.Errorf("%s imports %s (design.md 7a.7 節: internal/agent does not import the kernel layer directly)", agent, dep)
 		}
 	}
 }

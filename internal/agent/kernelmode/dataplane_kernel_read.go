@@ -88,7 +88,7 @@ func (d *Dataplane) allLocal(r nft.AgentRuleResult) bool {
 
 // DoctorKernel は agent doctor のためにカーネルを読む(設計文書 10.2c 節)。停止中の agent doctor と同じ
 // readKernel を、メモリの上の認証情報ファイルと公開の記録で呼ぶ。記録は公開に成功するたびに d.f に
-// 写すので、d.pub と同じ中身である。
+// 写すので、d.Pub と同じ中身である。
 func (d *Dataplane) DoctorKernel() *controlapi.DoctorKernel {
 	return readKernel(kernelReadInput{iface: d.iface, creds: d.f, pub: d.f.KernelPublication})
 }

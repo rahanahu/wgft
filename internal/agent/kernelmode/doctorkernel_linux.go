@@ -39,19 +39,19 @@ type kernelReadInput struct {
 
 // DoctorOps はカーネルを読む操作である。単体テストだけが差し替える。どれもカーネルに書かない。
 type DoctorOps struct {
-	// link はリンクの属性を読む。CAP_NET_ADMIN は要らない
+	// Link はリンクの属性を読む。CAP_NET_ADMIN は要らない
 	Link func(iface string) (exists bool, kind string, up bool, err error)
-	// inspectLink は WireGuard の鍵とピアを読む。CAP_NET_ADMIN が要る
+	// InspectLink は WireGuard の鍵とピアを読む。CAP_NET_ADMIN が要る
 	InspectLink func(iface string, current, previous wgtypes.Key) (wg.AgentState, error)
-	// inspectTable はテーブルを読み戻して記録と比べる。CAP_NET_ADMIN が要る
+	// InspectTable はテーブルを読み戻して記録と比べる。CAP_NET_ADMIN が要る
 	InspectTable func(want nft.AgentPublication, iface string) (nft.AgentInspection, bool, error)
-	// readSysctl は /proc/sys/net/ipv4 の下の値を読む。CAP_NET_ADMIN は要らない
+	// ReadSysctl は /proc/sys/net/ipv4 の下の値を読む。CAP_NET_ADMIN は要らない
 	ReadSysctl func(name string) (string, error)
-	// forwardDrops は、既定で落とす他のテーブルの forward のチェーンの場所を返す。CAP_NET_ADMIN が要る
+	// ForwardDrops は、既定で落とす他のテーブルの forward のチェーンの場所を返す。CAP_NET_ADMIN が要る
 	ForwardDrops func(iface string) ([]string, error)
-	// route は、宛先への経路が向かうインタフェースの名前を返す。CAP_NET_ADMIN は要らない
+	// Route は、宛先への経路が向かうインタフェースの名前を返す。CAP_NET_ADMIN は要らない
 	Route func(dst netip.Addr) (string, error)
-	// localAddrs はホスト自身の IPv4 のアドレスである。CAP_NET_ADMIN は要らない
+	// LocalAddrs はホスト自身の IPv4 のアドレスである。CAP_NET_ADMIN は要らない
 	LocalAddrs func() (map[netip.Addr]bool, error)
 }
 
