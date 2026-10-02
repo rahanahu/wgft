@@ -1540,6 +1540,9 @@ func TestWriteRecordKeepsDstOnFailureAndLogsOnce(t *testing.T) {
 	if n := strings.Count(buf.String(), "cannot encode the publication for the credentials file"); n != 1 {
 		t.Errorf("logged the recurring failure %d times, want 1:\n%s", n, buf.String())
 	}
+	if !strings.Contains(buf.String(), "; the record is left unchanged\n") {
+		t.Errorf("the log does not say only the record is left unchanged:\n%s", buf.String())
+	}
 	if n := strings.Count(buf.String(), "cannot encode"); n != 2 {
 		t.Errorf("logged %d failures, want 1 per record:\n%s", n, buf.String())
 	}
