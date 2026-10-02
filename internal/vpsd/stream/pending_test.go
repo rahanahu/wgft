@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -109,8 +110,8 @@ func TestFirstMessageTimeout(t *testing.T) {
 // TestPendingStreamsPerAgent は、1 つのエージェントが同時に持てる確立前の stream を 2 本に抑え、
 // 3 本目を 429 で断り、断った接続では Authenticated を呼ばないことを確かめる。確立した stream と
 // 閉じた stream は数から外れ、他のエージェントは影響を受けない(設計文書 11 節)。
-// 変異の確認:ServeHTTP の reservePending の判定を外すと 3 本目が通って落ちる。serve の established を
-// 呼ばないと、確立の後の接続が断られて落ちる。reservePending の release で数を戻さないと、閉じた
+// 変異の確認:ServeHTTP の reservePending の判定を外すと 3 本目が通って落ちる。serve が確立の時点で
+// returnSlot を呼ばないと、確立の後の接続が断られて落ちる。reservePending の release で数を戻さないと、閉じた
 // 後の接続が断られて落ちる。
 func TestPendingStreamsPerAgent(t *testing.T) {
 	h, url := newPendingTestHub(t)
@@ -169,4 +170,155 @@ func TestPendingStreamsPerAgent(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// establishStream は stream を張って pubkey を送り、最初の全体状態を受け取るまで待つ。
+func establishStream(t *testing.T, url, token string, key wgtypes.Key) *websocket.Conn {
+	t.Helper()
+	c, _, err := dial(t, url, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.CloseNow() })
+	sendJSON(t, c, proto.Message{Type: proto.MsgPublicKey, PublicKey: key.PublicKey().String()})
+	if m, err := readMsg(t, c); err != nil || m.Type != proto.MsgState {
+		t.Fatalf("establishing a stream: %+v %v", m, err)
+	}
+	return c
+}
+
+// requireRefused は、そのエージェントの次の stream が 429 で断られることを確かめる。
+func requireRefused(t *testing.T, url, token, label string) {
+	t.Helper()
+	if c, resp, err := dial(t, url, token); err == nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		if c != nil {
+			c.CloseNow()
+		}
+		t.Fatalf("%s: a stream over the agent's cap: err=%v resp=%v", label, err, resp)
+	}
+}
+
+// waitAccepted は、そのエージェントの stream が 2 秒以内に受け付けられることを確かめる。
+func waitAccepted(t *testing.T, url, token, label string) *websocket.Conn {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		c, resp, err := dial(t, url, token)
+		if err == nil {
+			t.Cleanup(func() { c.CloseNow() })
+			return c
+		}
+		if resp == nil || resp.StatusCode != http.StatusTooManyRequests || time.Now().After(deadline) {
+			t.Fatalf("%s: err=%v resp=%v", label, err, resp)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// requireSuperseded は、置き換えられた旧接続のクライアントが superseded の理由コードで閉じられる
+// ことを確かめる。旧接続のクライアントが読むと close の応答が返り、サーバの側の close の手順が終わる。
+func requireSuperseded(t *testing.T, c *websocket.Conn) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		if _, _, err := c.Read(ctx); err != nil {
+			if got := websocket.CloseStatus(err); got != websocket.StatusCode(proto.CloseSuperseded) {
+				t.Fatalf("old stream closed with %v (%v), want superseded", got, err)
+			}
+			return
+		}
+	}
+}
+
+// TestReplacedStreamHoldsPendingSlot は、旧接続を置き換えた stream が、旧接続の serve が戻るまで
+// 確立前の枠を返さないことを確かめる(設計文書 7 節、11 節)。旧接続のクライアントが close の
+// フレームに応えない間、サーバの側の旧接続は close の手順で待つ。その間は、置き換えた stream の枠と
+// 確立前の 1 本で上限に達し、3 本目は 429 で断られる。置き換えた stream はすぐに確立して全体状態を
+// 受け取る。旧接続のクライアントが close に応えると、旧接続は superseded で閉じ、枠が戻る。
+// 変異の確認:serve の returnSlot が旧接続の done を待たずに release を呼ぶと、3 本目が通って落ちる。
+// 旧接続の done を閉じないと、旧接続が閉じた後も枠が戻らずに落ちる。
+func TestReplacedStreamHoldsPendingSlot(t *testing.T) {
+	h, url := newPendingTestHub(t)
+	key, _ := wgtypes.GeneratePrivateKey()
+	old := establishStream(t, url, "tok-home", key)
+
+	// 置き換える stream は旧接続の close を待たずに確立する(establishStream が全体状態を待つ)
+	start := time.Now()
+	replacement := establishStream(t, url, "tok-home", key)
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("the replacing stream took %s to establish, want no wait for the old stream's close", took)
+	}
+	if !h.Status("home").Connected {
+		t.Fatal("the replacing stream is not registered")
+	}
+	// 置き換えた stream の枠は旧接続が閉じるまで残るので、確立前の 1 本で上限に達する
+	waitAccepted(t, url, "tok-home", "one pending stream next to the held slot")
+	requireRefused(t, url, "tok-home", "while the old stream is closing")
+	// 他のエージェントは影響を受けない
+	other, _, err := dial(t, url, "tok-office")
+	if err != nil {
+		t.Fatalf("another agent's stream was refused: %v", err)
+	}
+	other.CloseNow()
+
+	// 旧接続のクライアントが close に応えると、旧接続の serve が戻り、枠が戻る
+	requireSuperseded(t, old)
+	waitAccepted(t, url, "tok-home", "after the old stream closed")
+	// 置き換えた stream は使えるまま
+	h.Push("home")
+	if m, err := readMsg(t, replacement); err != nil || m.Type != proto.MsgState {
+		t.Fatalf("the replacing stream after the old one closed: %+v %v", m, err)
+	}
+}
+
+// TestReplacedStreamHoldsSlotAfterItsOwnExit は、旧接続を置き換えた stream が旧接続より先に
+// 終わっても、旧接続の serve が戻るまで枠を返さないことを確かめる。先に返すと、閉じる途中の旧接続が
+// どの枠にも数えられないまま残り、置き換えと切断を繰り返すと閉じる途中の stream を数の上限なく
+// 積める(設計文書 7 節)。
+// 変異の確認:serve を抜けるときの returnSlot が旧接続の done を待たずに release を呼ぶと、
+// 3 本目が通って落ちる。
+func TestReplacedStreamHoldsSlotAfterItsOwnExit(t *testing.T) {
+	h, url := newPendingTestHub(t)
+	key, _ := wgtypes.GeneratePrivateKey()
+	old := establishStream(t, url, "tok-home", key)
+	replacement := establishStream(t, url, "tok-home", key)
+
+	// 置き換えた stream を閉じ、サーバの側でも外れるまで待つ
+	replacement.CloseNow()
+	deadline := time.Now().Add(2 * time.Second)
+	for h.Status("home").Connected {
+		if time.Now().After(deadline) {
+			t.Fatal("the closed replacing stream is still registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 旧接続はまだ close の手順の途中なので、枠は 1 つしか空いていない
+	waitAccepted(t, url, "tok-home", "one pending stream next to the held slot")
+	requireRefused(t, url, "tok-home", "after the replacing stream exited while the old stream is closing")
+
+	requireSuperseded(t, old)
+	waitAccepted(t, url, "tok-home", "after the old stream closed")
+}
+
+// TestFailedUpgradeReturnsPendingSlot は、恒久トークンの確認を通ったが WebSocket への切り替えに
+// 失敗した要求が、確立前の枠を返すことを確かめる。
+// 変異の確認:ServeHTTP の websocket.Accept の失敗の分岐で release を呼ばないと、枠が戻らずに落ちる。
+func TestFailedUpgradeReturnsPendingSlot(t *testing.T) {
+	_, url := newPendingTestHub(t)
+	httpURL := "http" + strings.TrimPrefix(url, "ws")
+	for i := 0; i < maxPendingPerAgent+1; i++ {
+		req, _ := http.NewRequest(http.MethodGet, httpURL, nil)
+		req.Header.Set("Authorization", "Bearer tok-home")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusSwitchingProtocols {
+			t.Fatalf("plain request %d without an upgrade: status %d", i, resp.StatusCode)
+		}
+	}
+	waitAccepted(t, url, "tok-home", "after failed upgrades")
+	waitAccepted(t, url, "tok-home", "a second stream after failed upgrades")
 }
