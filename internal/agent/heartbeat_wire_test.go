@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -200,8 +201,9 @@ func TestHeartbeatOf512RulesFitsTheHubReadLimit(t *testing.T) {
 		if len(b) >= hubStreamReadLimit {
 			t.Errorf("%s: a heartbeat of %d rules is %d bytes, not under the hub's %d", name, rules, len(b), hubStreamReadLimit)
 		}
-		// 1 つの理由は、変換の後に 512 バイトと印までで、JSON では 1 バイトが高々 2 バイトになる
-		if enc := encodedLen(t, wire.Rules[0].Reason); enc > 2*(proto.ReasonMaxBytes+len(clipMark))+2 {
+		// 1 つの理由は、変換の後に 512 バイトと印までである。JSON では本文の 1 バイトが高々 2 バイトになり、
+		// 印は JSON で膨らまない ASCII なので、引用符を含めて 2*512+13+2 = 1039 バイトまでである
+		if enc := encodedLen(t, wire.Rules[0].Reason); enc > 2*proto.ReasonMaxBytes+len(clipMark)+2 {
 			t.Errorf("%s: one reason encodes to %d bytes", name, enc)
 		}
 		t.Logf("%s: %d bytes", name, len(b))
@@ -307,11 +309,15 @@ func TestStreamOnceSendsCappedReasons(t *testing.T) {
 
 	long := strings.Repeat("&", 2000)
 	dp := &fakeDataplane{up: true, reading: agentdp.Reading{
-		Tunnel: agentdp.TunnelReading{Present: true, Err: errors.New("endpoint " + long)},
+		Tunnel: agentdp.TunnelReading{Present: true, Err: errors.New("endpoint " + long),
+			Endpoint:      netip.MustParseAddrPort("203.0.113.1:51820"),
+			LastHandshake: time.Date(2026, 10, 3, 1, 2, 3, 0, time.UTC)},
 	}}
 	for i := 0; i < 3; i++ {
 		dp.reading.Rules = append(dp.reading.Rules, proto.RuleStatus{ID: fmt.Sprintf("r%d", i), State: proto.StatusError, Reason: "target " + long + ": connection refused"})
 	}
+	// 理由の無い ok のルールも混ぜ、状態と ID がそのまま届くことを見る
+	dp.reading.Rules = append(dp.reading.Rules, proto.RuleStatus{ID: "r_ok", State: proto.StatusOK})
 	priv, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -324,6 +330,7 @@ func TestStreamOnceSendsCappedReasons(t *testing.T) {
 			PermanentToken: "tok",
 		},
 		heartbeatInterval: 20 * time.Millisecond,
+		gen:               7,
 	}
 	rt.setPrivKey(priv)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -350,13 +357,29 @@ func TestStreamOnceSendsCappedReasons(t *testing.T) {
 	if got, want := m.Heartbeat.Tunnel.Reason, wireReason("endpoint "+long); got != want {
 		t.Errorf("tunnel reason = %d bytes %.40q..., want the capped %d bytes", len(got), got, len(want))
 	}
-	if len(m.Heartbeat.Rules) != 3 {
+	if len(m.Heartbeat.Rules) != 4 {
 		t.Fatalf("rules = %+v", m.Heartbeat.Rules)
 	}
-	for _, r := range m.Heartbeat.Rules {
+	for _, r := range m.Heartbeat.Rules[:3] {
 		if want := wireReason("target " + long + ": connection refused"); r.Reason != want || len(r.Reason) != proto.ReasonMaxBytes+len(clipMark) {
 			t.Errorf("rule %s reason = %d bytes, want the capped %d bytes", r.ID, len(r.Reason), len(want))
 		}
+	}
+	// 届いたハートビートは、元のハートビートの理由だけを切り詰めた形と全項目で同じである。世代、
+	// ルールの ID と状態、トンネルの状態、エンドポイント、最終ハンドシェイクを落とさない
+	want := rt.heartbeat()
+	want.Tunnel.Reason = wireReason(want.Tunnel.Reason)
+	want.Rules = append([]proto.RuleStatus(nil), want.Rules...)
+	for i := range want.Rules {
+		want.Rules[i].Reason = wireReason(want.Rules[i].Reason)
+	}
+	if want.Generation != 7 || want.Tunnel.Endpoint == "" || want.Tunnel.LastHandshake.IsZero() || want.Tunnel.State != proto.StatusError {
+		t.Fatalf("the test's own heartbeat lacks a field to compare: %+v", want.Tunnel)
+	}
+	gotJSON, _ := json.Marshal(m.Heartbeat)
+	wantJSON, _ := json.Marshal(want)
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("the sent heartbeat differs from the original with only the reasons capped:\n got %.400s\nwant %.400s", gotJSON, wantJSON)
 	}
 	// 送る写しを作っても、ログに使う値は切り詰めない
 	rt.mu.Lock()
@@ -367,5 +390,36 @@ func TestStreamOnceSendsCappedReasons(t *testing.T) {
 	}
 	if hb := rt.heartbeat(); hb.Rules[0].Reason != "target "+long+": connection refused" {
 		t.Errorf("rt.heartbeat() returned a capped reason of %d bytes; the log keeps the full text", len(hb.Rules[0].Reason))
+	}
+}
+
+// wireHeartbeat は理由だけを変え、他の項目(世代、ルールの ID と状態、トンネルの状態、エンドポイント、
+// 最終ハンドシェイク)をそのまま写す。元の hb は書き換えない。
+func TestWireHeartbeatKeepsEveryOtherField(t *testing.T) {
+	long := strings.Repeat("&", 1000)
+	hb := proto.Heartbeat{Generation: 42,
+		Tunnel: proto.TunnelStatus{State: proto.StatusError, Reason: long, Endpoint: "203.0.113.1:51820",
+			LastHandshake: time.Date(2026, 10, 3, 1, 2, 3, 0, time.UTC)},
+		Rules: []proto.RuleStatus{
+			{ID: "r_1", State: proto.StatusError, Reason: long},
+			{ID: "r_2", State: proto.StatusOK},
+		}}
+	orig := hb
+	orig.Rules = append([]proto.RuleStatus(nil), hb.Rules...)
+	got := wireHeartbeat(hb)
+	want := orig
+	want.Tunnel.Reason = wireReason(long)
+	want.Rules = []proto.RuleStatus{
+		{ID: "r_1", State: proto.StatusError, Reason: wireReason(long)},
+		{ID: "r_2", State: proto.StatusOK},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("wireHeartbeat = %+v, want %+v", got, want)
+	}
+	if !reflect.DeepEqual(hb, orig) {
+		t.Errorf("wireHeartbeat changed its argument: %+v", hb)
+	}
+	if empty := wireHeartbeat(proto.Heartbeat{Rules: []proto.RuleStatus{}}); empty.Rules == nil {
+		t.Error("an empty rule list became null; the server reads [] and null alike, but the wire form should not change")
 	}
 }
