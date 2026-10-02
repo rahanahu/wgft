@@ -403,6 +403,26 @@ func TestAgentDoctorKernelScenarios(t *testing.T) {
 			wantDetail: map[string]string{agentCheckDPInterface: "goes through tailscale0"},
 		},
 		{
+			// カーネルモードでも、鍵の変更の頻度の上限による拒否は総合判定を動かす。wgft0 は新しい鍵を
+			// 持ち、server のピアはその鍵を持たないので転送できない。wgft0 の最終ハンドシェイクは前の鍵の
+			// ものが残りうるので、Dataplane の群がこの状態を FAILED にするとは限らない(10.2c 節)。
+			name: "the server refused the key under its key change limit",
+			resp: func() *controlapi.DoctorResponse {
+				r := kernelRuntime(func(st *controlapi.DoctorRuntimeState) {})
+				r.Stream.Connected = false
+				r.Stream.DisconnectedAt = testLiveNow.Add(-time.Minute)
+				r.Stream.DisconnectReason = `failed to get reader: received close frame: status = StatusPolicyViolation and reason = "public key changes are limited; retry later"`
+				r.Stream.KeyChangeLimited = true
+				return r
+			}(),
+			want: []wantCheck{
+				{agentCheckStreamConn, statusFailed, agentReasonKeyChangeLimited},
+				{agentCheckDPInterface, statusOK, ""},
+			},
+			wantExit: 1,
+			wantNext: map[string]string{agentCheckStreamConn: "do not run wgft agent rotate-key again"},
+		},
+		{
 			name:       "ip_forward is 0",
 			stopped:    true,
 			readKernel: func(k *controlapi.DoctorKernel) { k.Forwarding.IPForward = "0" },

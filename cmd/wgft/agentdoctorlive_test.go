@@ -379,9 +379,9 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 			wantExit: 0,
 		},
 		{
-			// server が鍵の変更の頻度の上限で断った。再試行で解けるので UNKNOWN のままで総合判定も
-			// 動かさないが、理由の符号を分け、受け取り済みのルールの転送が続くという案内を出さない
-			// (5.2・10.2c 節)。
+			// server が鍵の変更の頻度の上限で断った。断られた鍵はこのエージェントが今使っている鍵で、
+			// server のピアに入っていないので、転送を担えない。FAILED とし総合判定を動かす。受け取り
+			// 済みのルールの転送が続くという案内は出さない(5.2・10.2c 節)。
 			name: "the server refused the key under its key change limit",
 			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
 				s.Connected = false
@@ -389,20 +389,64 @@ func TestAgentDoctorLiveScenarios(t *testing.T) {
 				s.DisconnectReason = "failed to get reader: received close frame: status = StatusPolicyViolation and reason = \"public key changes are limited; retry later\""
 				s.KeyChangeLimited = true
 			}))),
-			want:       []wantCheck{{agentCheckStreamConn, statusUnknown, agentReasonKeyChangeLimited}},
-			wantExit:   0,
+			want:       []wantCheck{{agentCheckStreamConn, statusFailed, agentReasonKeyChangeLimited}},
+			wantExit:   1,
 			wantDetail: map[string]string{agentCheckStreamConn: "the last attempt ended at 2026-09-23T11:59:00Z, 1m0s ago, refused by the server's key change limit"},
 			wantNext:   map[string]string{agentCheckStreamConn: "this agent forwards nothing until the server accepts it"},
 		},
 		{
-			// 旧い版のエージェントは key_change_limited を送らない。server が送った理由の文言で見分ける。
+			// 旧い版のエージェントは key_change_limited を送らない。server が送った理由の文言で見分け、
+			// 同じく総合判定を動かす。
 			name: "an older agent reports the key change refusal in its reason only",
 			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
 				s.Connected = false
 				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
 				s.DisconnectReason = "failed to get reader: received close frame: status = StatusPolicyViolation and reason = \"public key changes are limited; retry later\""
 			}))),
-			want:     []wantCheck{{agentCheckStreamConn, statusUnknown, agentReasonKeyChangeLimited}},
+			want:     []wantCheck{{agentCheckStreamConn, statusFailed, agentReasonKeyChangeLimited}},
+			wantExit: 1,
+		},
+		{
+			// 実行時の排他を取れなかった応答にも stream は載るので、拒否はその実行でも総合判定を動かす。
+			name: "the key change refusal with the runtime state busy",
+			dial: fakeDoctorSocket(t, liveReply(func() *controlapi.DoctorResponse {
+				r := runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
+					s.Connected = false
+					s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
+					s.DisconnectReason = "failed to get reader: received close frame: status = StatusPolicyViolation and reason = \"public key changes are limited; retry later\""
+					s.KeyChangeLimited = true
+				})
+				r.RuntimeState, r.RuntimeStateTimeout = nil, 2*time.Second
+				return r
+			}())),
+			want: []wantCheck{
+				{agentCheckStreamConn, statusFailed, agentReasonKeyChangeLimited},
+				{agentCheckTunnelLocal, statusSkipped, agentReasonRuntimeBusy},
+			},
+			wantExit: 1,
+		},
+		{
+			// 直近の試みで鍵が通った。前の拒否の記録が残っていても OK で、総合判定を動かさない。
+			name: "a key refused earlier and accepted since",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
+				s.Connected = true
+				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 50, 0, 0, time.UTC)
+				s.DisconnectReason = "failed to get reader: received close frame: status = StatusPolicyViolation and reason = \"public key changes are limited; retry later\""
+				s.KeyChangeLimited = true
+			}))),
+			want:     []wantCheck{{agentCheckStreamConn, statusOK, ""}},
+			wantExit: 0,
+		},
+		{
+			// 拒否の後の試みが別の理由で終わった。判定は直近の試みだけを見るので、reconnecting に戻る
+			// (10.2c 節)。
+			name: "a key refusal followed by an attempt that failed for another reason",
+			dial: fakeDoctorSocket(t, liveReply(runtimeResponse(func(st *controlapi.DoctorRuntimeState) {}, func(s *controlapi.DoctorStream) {
+				s.Connected = false
+				s.DisconnectedAt = time.Date(2026, 9, 23, 11, 59, 0, 0, time.UTC)
+				s.DisconnectReason = "failed to WebSocket dial: dial tcp 203.0.113.10:8443: connect: connection refused"
+			}))),
+			want:     []wantCheck{{agentCheckStreamConn, statusUnknown, agentReasonReconnecting}},
 			wantExit: 0,
 		},
 		{
