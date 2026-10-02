@@ -739,8 +739,9 @@ sessions stay up. The merged rule keeps the ID of <id1>.`,
 file are deleted, the others are created or updated. The file holds the array
 that "rule ls --json" prints under "rules", so an export can be edited and
 imported back. Every agent named in it must be registered. A new or changed
-rule's id must be at most 128 bytes of UTF-8 made of printable characters; the
-ASCII space is the only space allowed.`,
+rule's id must be at most 128 bytes of UTF-8 made of letters, marks, numbers,
+punctuation, symbols and spaces; control characters, line breaks and invisible
+format characters are refused.`,
 		Example: `  wgft rule ls --json | jq .rules > rules.json
   wgft rule import rules.json`,
 	},

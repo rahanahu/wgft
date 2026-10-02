@@ -7,9 +7,10 @@ import (
 )
 
 // TestRuleIDLimits は、ルールの ID の長さと文字の検査(仕様 5.3 節)を確かめる。長さは UTF-8 の
-// バイトで数え、文字は unicode.IsPrint が真のものだけを受ける。日本語と ASCII の空白は受ける。
-// 変異の確認:長さの比較を文字数に変えると「43 文字で 129 バイト」が通って落ちる。IsPrint の検査を
-// 外すと制御文字の行が通って落ちる。IsGraphic に変えると ASCII 以外の空白の行が通って落ちる。
+// バイトで数え、文字は unicode.IsGraphic が真のものだけを受ける。日本語、ASCII の空白、ASCII 以外の
+// 空白(Zs)は受け、ID は変えない。制御文字、行と段落の区切り(Zl、Zp)、書式の文字(Cf)は拒む。
+// 変異の確認:長さの比較を文字数に変えると「43 文字で 129 バイト」が通って落ちる。IsGraphic の検査を
+// 外すと制御文字の行が通って落ちる。IsPrint に変えると ASCII 以外の空白の行が拒まれて落ちる。
 // utf8.ValidString の検査を外すと不正な UTF-8 の行が別の文言になって落ちる。
 func TestRuleIDLimits(t *testing.T) {
 	ascii := func(n int) string { return strings.Repeat("a", n) }
@@ -41,8 +42,14 @@ func TestRuleIDLimits(t *testing.T) {
 		{"ゼロ幅接合子", "r_\u200d", "U+200D"},
 		{"BOM", "\ufeffr_a", "U+FEFF at byte 0"},
 		{"行区切り", "r_\u2028", "U+2028"},
-		{"全角スペース", "週末\u3000サーバ", "U+3000"},
-		{"ノーブレークスペース", "r_\u00a0a", "U+00A0"},
+		{"段落区切り", "r_\u2029", "U+2029"},
+		{"縦タブ", "r_\va", "U+000B"},
+		{"改ページ", "r_\fa", "U+000C"},
+		{"全角スペース", "週末\u3000サーバ", ""},
+		{"ノーブレークスペース", "r_\u00a0a", ""},
+		{"EN QUAD", "r_\u2000a", ""},
+		{"空白だけ", " ", ""},
+		{"前後の空白", " r_a\u3000", ""},
 		{"私用領域", "r_\ue000", "U+E000"},
 	}
 	for _, tt := range tests {
@@ -73,7 +80,7 @@ func TestRuleIDLimits(t *testing.T) {
 // そのまま戻すバッチも通る。同じ ID のまま変えるバッチは拒み、削除と、正しい ID への置き換えは通る。
 // 変異の確認:ValidateUpsert が変わらない行の検査を飛ばさないようにすると、無関係なバッチが落ちる。
 func TestValidateUpsertKeepsStoredRuleIDs(t *testing.T) {
-	for _, id := range []string{strings.Repeat("x", 200), "r_a\nr_b", "週末\u3000サーバ", "r_\u202e"} {
+	for _, id := range []string{strings.Repeat("x", 200), "r_a\nr_b", "r_a\tb", "r_\u2029", "r_\u202e"} {
 		legacy := validRule()
 		legacy.ID, legacy.ListenPort, legacy.Target = id, PortRange{3000, 3000}, "192.168.1.20:3000"
 		other := validRule()

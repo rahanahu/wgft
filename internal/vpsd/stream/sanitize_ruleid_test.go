@@ -10,8 +10,10 @@ import (
 // TestAcceptedRuleIDsSurviveTheHeartbeat は、ルールの検査(proto.Rule.Validate、仕様 5.3 節)が受ける
 // ID が、ハートビートの受け口を手を加えられずに通ることを確かめる。通らない ID のルールは、
 // エージェントが報告しても保存した ID がルールの ID と一致せず、状態が永久に「報告なし」になる。
-// 拒む側の値が受け口で変わることも確かめ、2 つの上限と文字の範囲が対応していることを示す。
+// 全角スペースやノーブレークスペースを含む ID も、報告の ID が変わらず一致する。拒む側の値が受け口で
+// 変わることも確かめ、2 つの上限と文字の範囲が対応していることを示す。
 // 変異の確認:maxHeartbeatIDLen を proto.MaxRuleIDLen より小さくすると、128 バイトの行が落ちる。
+// ID の検査を unicode.IsPrint に変えると、空白の行が拒まれて落ちる。
 func TestAcceptedRuleIDsSurviveTheHeartbeat(t *testing.T) {
 	accepted := []string{
 		strings.Repeat("a", proto.MaxRuleIDLen),
@@ -19,6 +21,9 @@ func TestAcceptedRuleIDsSurviveTheHeartbeat(t *testing.T) {
 		"週末 サーバ 2456",
 		"game:valley/#1 <a&b> 🎮",
 		"r_01JABCDEFGHJKMNPQRSTVWXYZ0",
+		"週末\u3000サーバ",
+		"r_\u00a0a",
+		strings.Repeat("\u3000", proto.MaxRuleIDLen/3) + "ab",
 	}
 	refused := []string{
 		strings.Repeat("a", proto.MaxRuleIDLen+1),
@@ -26,6 +31,9 @@ func TestAcceptedRuleIDsSurviveTheHeartbeat(t *testing.T) {
 		"r_\x1b[31m",
 		"r_\u202e",
 		"r_\xff",
+		"r_a\tb",
+		"r_\u2028",
+		"r_\u2029",
 	}
 	check := func(id string, wantValid bool) {
 		r := proto.Rule{ID: id, Agent: "home", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: 3000, Hi: 3000},

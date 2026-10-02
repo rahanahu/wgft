@@ -27,7 +27,8 @@ func badIDRule(id string, port uint16) proto.Rule {
 var badRuleIDs = []struct{ id, want string }{
 	{strings.Repeat("x", 129), "id is 129 bytes long; the limit is 128 bytes"},
 	{"r_a\nr_b", "id contains U+000A"},
-	{"週末\u3000サーバ", "id contains U+3000"},
+	{"r_a\tb", "id contains U+0009"},
+	{"r_\u2028", "id contains U+2028"},
 }
 
 // insertStoredRule は、ID の検査の前に保存された行を模して、検査を通さずに SQL で直接書く。
@@ -60,7 +61,8 @@ func postBatch(t *testing.T, srvURL string, req BatchRequest) (int, string) {
 }
 
 // TestBatchAPIRefusesBadRuleIDs は、管理用 API のルールのバッチが、長すぎるか表示できない文字を
-// 含む ID のルールを 422 で拒み、何も保存しないことを確かめる。
+// 含む ID のルールを 422 で拒み、何も保存しないことと、Unicode の空白を含む ID は受けてそのまま
+// 保存することを確かめる。
 // 変異の確認:Rule.Validate から ID の検査を外すと、バッチが通って落ちる。
 func TestBatchAPIRefusesBadRuleIDs(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.sqlite"))
@@ -78,6 +80,16 @@ func TestBatchAPIRefusesBadRuleIDs(t *testing.T) {
 	}
 	if rules, _ := st.Rules(); len(rules) != 0 {
 		t.Errorf("refused batches stored rules: %+v", rules)
+	}
+	// Unicode の空白(Zs)は受け、ID はそのまま保存する。削ることも置き換えることもしない
+	for i, id := range []string{"週末\u3000サーバ", " r_nbsp\u00a0"} {
+		if code, body := postBatch(t, srv.URL, BatchRequest{Upsert: []proto.Rule{badIDRule(id, uint16(3100+i))}}); code != http.StatusOK {
+			t.Errorf("batch with id %q = %d %s, want 200", id, code, body)
+		}
+	}
+	rules, _ := st.Rules()
+	if len(rules) != 2 || rules[0].ID != "週末\u3000サーバ" || rules[1].ID != " r_nbsp\u00a0" {
+		t.Errorf("stored rules = %+v, want the two ids unchanged", rules)
 	}
 }
 

@@ -79,11 +79,12 @@ const MaxRuleIDLen = 128
 
 // validateRuleID は ID の長さと文字を検査する(仕様 5.3 節、2026-10-03、所有者の決定)。長さは
 // 文字数ではなくバイトで数える。上限を決めている受け口の切り詰めと nftables の userdata がバイトで
-// 数えるためである。文字は unicode.IsPrint が真のものだけを受ける。制御文字、不正な UTF-8、
-// 双方向の上書きやゼロ幅の文字(Cf)、ASCII の空白以外の空白(全角スペースなど)を拒む。受け口の
-// 置き換え(unicode.IsGraphic が偽の文字)はこの範囲に掛からないので、受けた ID は報告と一致し、
-// ログの行を偽る改行や端末を操る値も入らない。この関数のエラーは ID の中身を繰り返さない。
-// バッチの検査(validateRuleSet)は従来どおり "rule <ID>: " を前に付ける。
+// 数えるためである。文字は unicode.IsGraphic が真のもの(文字、結合記号、数字、句読点、記号、
+// Unicode の空白 Zs)だけを受ける。制御文字、不正な UTF-8、双方向の上書きやゼロ幅の文字(Cf)、
+// 行と段落の区切り(Zl、Zp)、私用領域を拒む。ハートビートの受け口(internal/vpsd/stream)が
+// 置き換えるのは同じ unicode.IsGraphic が偽の文字なので、受けた ID は報告と一致し、ログの行を偽る
+// 改行や端末を操る値も入らない。空白を削ることも、全角と半角をそろえることもしない。この関数の
+// エラーは ID の中身を繰り返さない。バッチの検査(validateRuleSet)は従来どおり "rule <ID>: " を前に付ける。
 func validateRuleID(id string) error {
 	if len(id) > MaxRuleIDLen {
 		return fmt.Errorf("id is %d bytes long; the limit is %d bytes", len(id), MaxRuleIDLen)
@@ -92,8 +93,8 @@ func validateRuleID(id string) error {
 		return errors.New("id is not valid UTF-8")
 	}
 	for i, c := range id {
-		if !unicode.IsPrint(c) {
-			return fmt.Errorf("id contains %U at byte %d; only printable characters and the ASCII space are allowed", c, i)
+		if !unicode.IsGraphic(c) {
+			return fmt.Errorf("id contains %U at byte %d; only letters, marks, numbers, punctuation, symbols and spaces are allowed", c, i)
 		}
 	}
 	return nil

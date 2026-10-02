@@ -15,7 +15,7 @@ import (
 // 通る。
 // 変異の確認:Rule.Validate から ID の検査を外すと、新しく書き込むバッチが通って落ちる。
 func TestApplyBatchRuleIDLimitsAndStoredRows(t *testing.T) {
-	for _, id := range []string{strings.Repeat("x", 129), "r_a\nr_b", "週末\u3000サーバ"} {
+	for _, id := range []string{strings.Repeat("x", 129), "r_a\nr_b", "r_\u2029"} {
 		s := openTemp(t)
 		if _, err := s.ApplyBatch(nil, func(r []proto.Rule) ([]proto.Rule, error) {
 			return append(r, rule(id, proto.UDP, 3001, 3001, "h:3001")), nil
