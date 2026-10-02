@@ -165,9 +165,7 @@ func (d *Dataplane) repair(gen uint64, rules []proto.AgentRule, op *observePrepa
 		}
 		// 理由の文言だけが変わった。テーブルは同じなので差し替えない
 		d.Pub = &next
-		if b, ok := d.marshalRecord("publication", next); ok {
-			d.f.KernelPublication = b
-		}
+		d.writeRecord(recordPublication, &d.f.KernelPublication, next)
 		return true, false, nil
 	}
 	if err := d.publish(next); err != nil {

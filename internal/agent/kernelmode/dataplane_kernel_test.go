@@ -1517,31 +1517,48 @@ func TestKernelPrerequisitesWithoutNetAdmin(t *testing.T) {
 	}
 }
 
-// marshalRecord は、JSON にできない値を 1 行で知らせて ok を false にし、同じ誤りが続く間は繰り返さない。
-// 失敗する値は今の型からは作れないので、直接渡す。
-func TestMarshalRecordLogsFailureOnce(t *testing.T) {
+// writeRecord は、JSON にできない値を 1 行で知らせて dst を書き換えず、同じ誤りが続く間は繰り返さない。
+// 成功したら dst を置き換え、控えを消す。失敗する値は今の型からは作れないので、直接渡す。
+func TestWriteRecordKeepsDstOnFailureAndLogsOnce(t *testing.T) {
 	d := newTestKernel(t, &fakeKernel{}, nil, nil)
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
+	dst := json.RawMessage(`{"old":true}`)
 	for i := 0; i < 3; i++ {
-		if b, ok := d.marshalRecord("publication", make(chan int)); ok || b != nil {
-			t.Fatalf("marshalRecord of an unencodable value = %q, %v; want nil, false", b, ok)
+		if d.writeRecord(recordPublication, &dst, make(chan int)) {
+			t.Fatal("writeRecord of an unencodable value returned true")
 		}
+		if string(dst) != `{"old":true}` {
+			t.Fatalf("dst = %s after a failure, want it unchanged", dst)
+		}
+	}
+	var empty json.RawMessage
+	if d.writeRecord(recordUnconverged, &empty, make(chan int)) || empty != nil {
+		t.Fatalf("a failure wrote %q into an empty dst", empty)
 	}
 	if n := strings.Count(buf.String(), "cannot encode the publication for the credentials file"); n != 1 {
 		t.Errorf("logged the recurring failure %d times, want 1:\n%s", n, buf.String())
 	}
-	// 別の記録の失敗は別に出し、成功は控えを消す
-	d.marshalRecord("list of unconverged publications", make(chan int))
 	if n := strings.Count(buf.String(), "cannot encode"); n != 2 {
 		t.Errorf("logged %d failures, want 1 per record:\n%s", n, buf.String())
 	}
-	if b, ok := d.marshalRecord("publication", nft.AgentPublication{Generation: 1}); !ok || len(b) == 0 {
-		t.Fatalf("marshalRecord of a publication = %q, %v; want JSON, true", b, ok)
+	if !d.writeRecord(recordPublication, &dst, nft.AgentPublication{Generation: 1}) || !strings.Contains(string(dst), `"generation":1`) {
+		t.Fatalf("writeRecord of a publication left dst = %s", dst)
 	}
-	d.marshalRecord("publication", make(chan int))
+	d.writeRecord(recordPublication, &dst, make(chan int))
 	if n := strings.Count(buf.String(), "cannot encode the publication"); n != 2 {
 		t.Errorf("a failure after a success logged %d times in all, want 2:\n%s", n, buf.String())
+	}
+}
+
+// 収束が済んで列が空になったら、記録の控えも消す。
+func TestRecordUnconvergedClearsRememberedError(t *testing.T) {
+	d := newTestKernel(t, &fakeKernel{}, nil, nil)
+	d.marshalErr = map[string]string{recordUnconverged: "x"}
+	d.unconverged = nil
+	d.recordUnconverged()
+	if _, ok := d.marshalErr[recordUnconverged]; ok {
+		t.Error("an empty queue left the remembered error")
 	}
 }
