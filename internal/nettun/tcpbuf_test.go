@@ -402,6 +402,20 @@ func TestTCPNoSlotStaysAtFloor(t *testing.T) {
 	}
 }
 
+// countBoosted は、pool の枠の排他を持ったまま、conns の side の端のうち boost の印が立つ数を返す。
+// 枠の排他の中では枠の付け替えが起きないので、数は 1 つの時点の値である。
+func countBoosted(pool *boostPool, conns [][2]net.Conn, side int) int {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	n := 0
+	for _, cc := range conns {
+		if boosted(cc[side]) {
+			n++
+		}
+	}
+	return n
+}
+
 // 枠を超える数の同時の転送でも、枠は Q を超えず、どの接続も floor を下回らない。
 func TestTCPBoostCap(t *testing.T) {
 	p := newTCPPair(t, tcpBoostSlots)
@@ -430,22 +444,19 @@ func TestTCPBoostCap(t *testing.T) {
 			case <-time.After(5 * time.Millisecond):
 			}
 			maxA, maxB = max(maxA, p.a.pool.inUse()), max(maxB, p.b.pool.inUse())
-			nA, nB := 0, 0
 			for _, cc := range conns {
-				for i, x := range cc {
+				for _, x := range cc {
 					snd, rcv := bufSizes(x)
 					if snd < tcpSendFloor || rcv < tcpRecvFloor {
 						belowFloor++
 					}
-					if boosted(x) {
-						if i == 0 {
-							nA++
-						} else {
-							nB++
-						}
-					}
 				}
 			}
+			// 枠は戻してから渡す(demote が boost の印を下ろした後に、枠の排他の中で新しい保有者へ
+			// 渡り、新しい保有者が印を立てる)ので、印を接続ごとに時間をかけて読むと、ある接続の
+			// 古い印と別の接続の新しい印を両方数えて Q + 1 になりうる。枠の排他を持ったまま数える。
+			nA := countBoosted(p.a.pool, conns, 0)
+			nB := countBoosted(p.b.pool, conns, 1)
 			maxBoosted = max(maxBoosted, nA, nB)
 		}
 	}()
