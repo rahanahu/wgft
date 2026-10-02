@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"net/netip"
 	"os"
 	"time"
 
@@ -165,10 +166,10 @@ func (t *Device) writeIPv4(packet []byte) error {
 	if !admitICMPv4Error(packet) {
 		return nil
 	}
-	if t.isLocalUDP(packet) {
+	if ipHeaderLen, err := parseLocalUDP(packet, t.local); err == nil {
 		// A refusal by the receive budget and a stopped accounting are drops,
 		// not Write errors, for the same reason as a refused fragment.
-		if _, err := t.registry.inject(packet); errors.Is(err, os.ErrClosed) {
+		if _, err := t.registry.injectLocal(packet, ipHeaderLen); errors.Is(err, os.ErrClosed) {
 			return os.ErrClosed
 		}
 		return nil
@@ -223,22 +224,35 @@ func admitICMPv4Error(packet []byte) bool {
 	return true
 }
 
-// isLocalUDP reports whether packet is a complete IPv4 UDP datagram for the
-// Device's own address, the only kind gVisor can deliver to a UDP endpoint:
-// every endpoint is bound to that address. Anything else goes to gVisor with
-// no lock, and gVisor drops what it cannot parse.
-func (t *Device) isLocalUDP(packet []byte) bool {
+// The reasons parseLocalUDP refuses a packet, in the order it checks them.
+var (
+	errIncompleteIPv4 = errors.New("incomplete IPv4 datagram")
+	errNotWholeUDP    = errors.New("registry accepts only complete IPv4 UDP datagrams")
+	errNotLocalUDP    = errors.New("registry accepts only local IPv4 unicast")
+)
+
+// parseLocalUDP decides whether packet is a complete IPv4 UDP datagram for
+// local, the Device's own address: the only kind gVisor can deliver to a UDP
+// endpoint, since every endpoint is bound to that address. It returns the IPv4
+// header length of such a packet. Anything else goes to gVisor with no lock,
+// and gVisor drops what it cannot parse. The UDP header itself is checked by
+// the registry (localUDPPayload), which drops a datagram whose UDP length does
+// not fit.
+func parseLocalUDP(packet []byte, local netip.Addr) (ipHeaderLen int, err error) {
 	if len(packet) < header.IPv4MinimumSize {
-		return false
+		return 0, errIncompleteIPv4
 	}
 	ip := header.IPv4(packet)
 	if !ip.IsValid(len(packet)) || int(ip.TotalLength()) != len(packet) ||
 		ip.More() || ip.FragmentOffset() != 0 || ip.Protocol() != uint8(udp.ProtocolNumber) ||
 		int(ip.TotalLength()) < int(ip.HeaderLength())+header.UDPMinimumSize {
-		return false
+		return 0, errNotWholeUDP
 	}
 	dst := ip.DestinationAddress()
-	return bytes.Equal(dst.AsSlice(), t.local.AsSlice())
+	if !bytes.Equal(dst.AsSlice(), local.AsSlice()) {
+		return 0, errNotLocalUDP
+	}
+	return int(ip.HeaderLength()), nil
 }
 
 func injectInbound(ep *channel.Endpoint, packet []byte) {
