@@ -140,6 +140,13 @@ func (s *Server) renderImportConfirm(w http.ResponseWriter, locale, filename str
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// ポートの名前を番号に直せないときも、予約ポートを組めなかったときと同じく確認ページを止める
+	// (ReservedFromServerInfo のコメント、design.md 11a 節)。
+	reserved, err := ReservedFromServerInfo(info)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	agentNames := make(map[string]bool, len(agents))
 	for _, a := range agents {
 		agentNames[a.Name] = true
@@ -153,7 +160,7 @@ func (s *Server) renderImportConfirm(w http.ResponseWriter, locale, filename str
 	data := importConfirmData{
 		Locale: locale, FileName: filename, Force: force,
 		Content: string(content), Generation: strconv.FormatUint(gen, 10), Digest: proto.RulesDigest(current),
-		Issues: importIssues(desired, current, agentNames, ReservedFromServerInfo(info)),
+		Issues: importIssues(desired, current, agentNames, reserved),
 	}
 	for _, c := range proto.DiffRules(current, desired) {
 		switch c.Kind {

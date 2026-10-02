@@ -470,14 +470,57 @@ func TestReservedFromServerInfoDelegates(t *testing.T) {
 	}{
 		{name: "TCP admin_addr reserves its port", info: admin.ServerInfo{WGPort: 51820, AdminAddr: "10.0.0.5:8443", AgentAPIPort: "9443"}},
 		{name: "unix socket admin_addr reserves no port", info: admin.ServerInfo{WGPort: 51820, AdminAddr: "unix:///run/wgft/admin.sock", AgentAPIPort: "9443"}},
+		{name: "unresolved agent_api_port is an error", info: admin.ServerInfo{WGPort: 51820, AgentAPIPort: "no-such-service-wgft"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := reservedFromServerInfo(&tc.info)
-			want := admin.ReservedFromServerInfo(tc.info)
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("reservedFromServerInfo(%+v) = %v, want %v (admin.ReservedFromServerInfo's own answer)", tc.info, got, want)
+			got, gotErr := reservedFromServerInfo(&tc.info)
+			want, wantErr := admin.ReservedFromServerInfo(tc.info)
+			if !reflect.DeepEqual(got, want) || (gotErr == nil) != (wantErr == nil) {
+				t.Errorf("reservedFromServerInfo(%+v) = %v, %v, want %v, %v (admin.ReservedFromServerInfo's own answer)", tc.info, got, gotErr, want, wantErr)
 			}
 		})
+	}
+}
+
+// TestRuleAddDryRunNamedPortConflict は、host:port のホストの部分に名前を、ポートの部分に
+// サービス名を書いた admin_addr でも、待ち受けが実際に使うポートとの重なりを --dry-run が拒むこと、
+// 同じ fixture への実 Batch も拒むことを確かめる(design.md 11a 節)。
+func TestRuleAddDryRunNamedPortConflict(t *testing.T) {
+	adminURL, _, backend := newRuleCLITestServerWithAgents(t, "home")
+	backend.serverInfo = admin.ServerInfo{AdminAddr: "localhost:https"}
+
+	stdout, _, err := runRuleCmd(t, adminURL, "add", "--agent", "home", "--tcp", "443", "--to", "192.168.1.20:443", "--dry-run")
+	if err == nil {
+		t.Fatal("dry-run add on the port the admin API listens on must fail")
+	}
+	if !strings.Contains(stdout, "admin API port 443") {
+		t.Errorf("stdout must name the admin API's port 443 as the reason: %q", stdout)
+	}
+	if backend.batchCalls != 0 {
+		t.Fatalf("the failing dry-run must not call Batch, got %d call(s)", backend.batchCalls)
+	}
+
+	if _, _, err := runRuleCmd(t, adminURL, "add", "--agent", "home", "--tcp", "443", "--to", "192.168.1.20:443"); err == nil {
+		t.Fatal("the real add on the same port must be refused too, matching the dry-run's judgment")
+	}
+}
+
+// TestRuleAddDryRunUnresolvedPort は、GET /api/v1/server が返したポートのサービス名をこのホストで
+// 番号に直せない場合、--dry-run がそのポートを予約しないまま続行せず、読み取りの失敗と同じ
+// 終了コード 2(unavailable)で止まることを確かめる(design.md 11a 節)。
+func TestRuleAddDryRunUnresolvedPort(t *testing.T) {
+	adminURL, _, backend := newRuleCLITestServerWithAgents(t, "home")
+	backend.serverInfo = admin.ServerInfo{WGPort: 51820, AgentAPIPort: "no-such-service-wgft"}
+
+	_, _, err := runRuleCmd(t, adminURL, "add", "--agent", "home", "--udp", "2456", "--to", "192.168.1.20:2456", "--dry-run")
+	if err == nil {
+		t.Fatal("dry-run must fail when a reserved port does not resolve")
+	}
+	if code := exitCode(err); code != exitUnavailable {
+		t.Fatalf("dry-run must exit %d (unavailable) when a reserved port does not resolve, got %d: %v", exitUnavailable, code, err)
+	}
+	if !strings.Contains(err.Error(), "no-such-service-wgft") {
+		t.Errorf("the error must name the port that did not resolve: %v", err)
 	}
 }

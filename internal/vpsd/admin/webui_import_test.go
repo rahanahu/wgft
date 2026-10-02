@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -548,11 +549,25 @@ func TestImportIssuesGrandfathersUnchangedLegacyRow(t *testing.T) {
 // --dry-run tests.
 func reservedPortsLikeVPSD(info ServerInfo) proto.Reserved {
 	reserved := proto.Reserved{uint16(info.WGPort): "WireGuard"}
-	if ap, err := netip.ParseAddrPort(info.AdminAddr); err == nil {
-		reserved[ap.Port()] = "admin API"
+	// The port a TCP listener binds, found the way net.Listen finds it: net.ResolveTCPAddr goes
+	// through the same port lookup. The host is fixed to 127.0.0.1 so no name is looked up; the
+	// host part does not change the port.
+	bound := func(port string) uint16 {
+		a, err := net.ResolveTCPAddr("tcp", net.JoinHostPort("127.0.0.1", port))
+		if err != nil {
+			return 0
+		}
+		return uint16(a.Port)
 	}
-	if ap, err := netip.ParseAddrPort("0.0.0.0:" + info.AgentAPIPort); err == nil {
-		reserved[ap.Port()] = "agent API"
+	if _, port, err := net.SplitHostPort(info.AdminAddr); err == nil && !strings.HasPrefix(info.AdminAddr, "unix://") {
+		if p := bound(port); p != 0 {
+			reserved[p] = "admin API"
+		}
+	}
+	if info.AgentAPIPort != "" {
+		if p := bound(info.AgentAPIPort); p != 0 {
+			reserved[p] = "agent API"
+		}
 	}
 	return reserved
 }
@@ -585,13 +600,19 @@ func (b *reservedBackend) Batch(req BatchRequest) (*store.BatchResult, error) {
 // before this fix.
 func TestImportConfirmRejectsReservedPortOverlap(t *testing.T) {
 	cases := []struct {
-		name string
-		info ServerInfo
-		port uint16
+		name  string
+		label string
+		info  ServerInfo
+		port  uint16
 	}{
-		{"WireGuard", ServerInfo{WGPort: 51820}, 51820},
-		{"admin API", ServerInfo{WGPort: 51821, AdminAddr: "127.0.0.1:8686"}, 8686},
-		{"agent API", ServerInfo{WGPort: 51821, AgentAPIPort: "8687"}, 8687},
+		{"WireGuard", "WireGuard", ServerInfo{WGPort: 51820}, 51820},
+		{"admin API", "admin API", ServerInfo{WGPort: 51821, AdminAddr: "127.0.0.1:8686"}, 8686},
+		{"agent API", "agent API", ServerInfo{WGPort: 51821, AgentAPIPort: "8687"}, 8687},
+		// The listener binds these ports too, whatever the host part and however the port is
+		// written (design.md 11a 節).
+		{"admin API given with a host name", "admin API", ServerInfo{WGPort: 51821, AdminAddr: "localhost:8686"}, 8686},
+		{"admin API given with a service name", "admin API", ServerInfo{WGPort: 51821, AdminAddr: "0.0.0.0:https"}, 443},
+		{"agent API given as a service name", "agent API", ServerInfo{WGPort: 51821, AgentAPIPort: "https"}, 443},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -621,7 +642,7 @@ func TestImportConfirmRejectsReservedPortOverlap(t *testing.T) {
 			page, _ := io.ReadAll(confirm.Body)
 			s := string(page)
 			if !strings.Contains(s, "Cannot apply") {
-				t.Errorf("confirm page must withhold apply for a rule overlapping the reserved %s port: %s", tc.name, s)
+				t.Errorf("confirm page must withhold apply for a rule overlapping the reserved %s port: %s", tc.label, s)
 			}
 			if !strings.Contains(s, `type="submit" disabled`) {
 				t.Errorf("apply button must be disabled: %s", s)
@@ -631,7 +652,7 @@ func TestImportConfirmRejectsReservedPortOverlap(t *testing.T) {
 			// "Cannot apply" above would stay green even if importIssues refused this rule for an
 			// unrelated reason, such as wrongly treating every row as pointing at an unregistered
 			// agent.
-			wantReason := fmt.Sprintf("includes %s port %d", tc.name, tc.port)
+			wantReason := fmt.Sprintf("includes %s port %d", tc.label, tc.port)
 			if !strings.Contains(s, wantReason) {
 				t.Errorf("confirm page must list the reserved-port collision (%q), got: %s", wantReason, s)
 			}
@@ -649,7 +670,7 @@ func TestImportConfirmRejectsReservedPortOverlap(t *testing.T) {
 			defer applyResp.Body.Close()
 			applyBody, _ := io.ReadAll(applyResp.Body)
 			if applyResp.StatusCode != http.StatusUnprocessableEntity {
-				t.Errorf("apply of a %s-port-overlapping import must fail (422), got %d: %s", tc.name, applyResp.StatusCode, applyBody)
+				t.Errorf("apply of a %s-port-overlapping import must fail (422), got %d: %s", tc.label, applyResp.StatusCode, applyBody)
 			}
 			after, err := st.Rules()
 			if err != nil {

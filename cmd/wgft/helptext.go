@@ -553,8 +553,9 @@ it, e.g. by Docker; the latter is refused even with --force. Both need
 root and nft, which this command does not have; run "wgft server doctor
 <rule>" for reachability once the rule exists. If the server's reserved
 ports cannot be read, including because the admin API predates this
-check, --dry-run exits 2: it could not determine whether the rule would
-be accepted, which is not the same as finding it acceptable.`,
+check, or a port the server reports by service name does not resolve on
+this host, --dry-run exits 2: it could not determine whether the rule
+would be accepted, which is not the same as finding it acceptable.`,
 		Example: `  wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456
   wgft rule add --agent home --tcp 443 --to 192.168.1.30:443 --proxy --proxy-protocol
   wgft rule add --agent home --udp 2456 --to 192.168.1.20:2456 --dry-run`,
@@ -623,8 +624,9 @@ and exits 1 if it finds a problem, 0 if not, and never saves anything
 either way; run "wgft server doctor <rule>" for reachability, which this
 does not check. If the admin API cannot be reached, including to look up
 the rule itself, or the server's reserved ports cannot be read, including
-because the admin API predates this check, --dry-run exits 2: it could not
-determine whether the change would be accepted.`,
+because the admin API predates this check, or a port the server reports by
+service name does not resolve on this host, --dry-run exits 2: it could
+not determine whether the change would be accepted.`,
 		Example: `  wgft rule set r_01M2R009 --group game --note "game server"
   wgft rule set r_01M2R009 --note ""
   wgft rule set r_01M2R009 --note "game server" --dry-run`,
