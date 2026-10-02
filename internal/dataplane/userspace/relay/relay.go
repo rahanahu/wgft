@@ -162,6 +162,21 @@ type bindFailure struct {
 	attempts int
 }
 
+// listener は待ち受け 1 つ。状態(設計文書 7a.3 節の Active、Retiring、閉じた状態)は、どちらの表
+// (Manager の listeners か retiring)に入っているか、UDP の accepting、budget の受け付けの状態、
+// serveTCP と serveUDP が持つ待ち受けソケットで表す。閉じる、付け替える、退役させる、再開する
+// 操作は次の名前の付いたメソッドで行い、どれも呼び出し側が Manager の mu を持つ。待ち受けを開く経路
+// (openLocked と、Commit が Prepare で bind したソケットから待ち受けを作る箇所)は、これらのメソッドを
+// 通さず、budget の受け付けと表への登録をその場で行う。
+//   - shutdownLocked:待ち受けを閉じる。この後、listeners の表からは closeLocked が、retiring の表からは
+//     closeRetiringLocked が消す。retireLocked が閉じる古い Retiring の待ち受けは、同じキーへの新しい
+//     待ち受けの代入で表から外れる
+//   - setRuleLocked:所属ルールを付け替える
+//   - retireLocked:Active から Retiring へ移す
+//   - reviveLocked:Retiring の UDP の待ち受けを Active へ戻す
+//
+// Apply の経路の Retry が開き直す、bind に失敗した待ち受けは例外で、budget を閉じて表から消すだけである。
+// その closeF は何もしない関数なので呼ばない。
 type listener struct {
 	key    Key
 	target string
@@ -205,6 +220,22 @@ func (l *listener) err() error {
 		return l.bindErr
 	}
 	return l.targetErr
+}
+
+// shutdownLocked は待ち受けを閉じる。closeF で待ち受けソケットと中継中のフローを閉じ、その後に
+// Resource Guard の枠を Pool から外す。呼び出し側は m.mu を持ち、この後に待ち受けを表から外す。
+// 外し方は、delete で消すか、同じキーへ別の待ち受けを代入して置き換えるかである(retireLocked)。
+func (l *listener) shutdownLocked() {
+	l.closeF()
+	l.budget.Close()
+}
+
+// setRuleLocked は所属ルールを付け替える。relay の ruleID と Pool の登録のルールは同じ値でなければ
+// ならないので、対で変える。中継の goroutine は ruleOf で m.mu を取って ruleID を読むので、呼び出し側は
+// m.mu を持つ。
+func (l *listener) setRuleLocked(id string) {
+	l.ruleID = id
+	l.budget.SetRule(id)
 }
 
 // New は空の Manager を作る。
@@ -304,8 +335,7 @@ func (m *Manager) Apply(desired map[Key]Desired) []Action {
 			m.closeLocked(a.Key)
 			probes = appendProbe(probes, a.Key, m.openLocked(a.Key, d))
 		case "relabel":
-			m.listeners[a.Key].ruleID = d.RuleID
-			m.listeners[a.Key].budget.SetRule(d.RuleID)
+			m.listeners[a.Key].setRuleLocked(d.RuleID)
 		case "open":
 			probes = appendProbe(probes, a.Key, m.openLocked(a.Key, d))
 		}
@@ -318,8 +348,7 @@ func (m *Manager) Apply(desired map[Key]Desired) []Action {
 
 func (m *Manager) closeLocked(k Key) {
 	if l, ok := m.listeners[k]; ok {
-		l.closeF()
-		l.budget.Close()
+		l.shutdownLocked()
 		delete(m.listeners, k)
 		m.opts.Logf("listener %s closed", k)
 	}
@@ -406,6 +435,7 @@ func (m *Manager) Retry() {
 	for _, k := range rebind {
 		l := m.listeners[k]
 		d := Desired{Target: l.target, RuleID: l.ruleID}
+		// bind に失敗した待ち受けの closeF は何もしない関数なので、shutdownLocked は使わず枠だけを外す
 		l.budget.Close()
 		delete(m.listeners, k)
 		probes = appendProbe(probes, k, m.openLocked(k, d))
@@ -620,9 +650,7 @@ func (m *Manager) Close() {
 		m.closeLocked(k)
 	}
 	for k, l := range m.retiring {
-		l.closeF()
-		l.budget.Close()
-		delete(m.retiring, k)
+		m.closeRetiringLocked(k, l)
 	}
 }
 
