@@ -20,8 +20,13 @@ const (
 	MetaTeardownWGPort = "teardown_wg_port"
 	// MetaTeardownAgentAPIPort はエージェント用 API の TCP のポート。
 	MetaTeardownAgentAPIPort = "teardown_agent_api_port"
-	// MetaIPForwardSetAt は、wgft が net.ipv4.ip_forward を 0 から 1 にした日時。
+	// MetaIPForwardSetAt は、wgft が net.ipv4.ip_forward を 0 から 1 にした日時。書けた後に保存する
+	// 確定の記録である(仕様 6.1 節)。
 	MetaIPForwardSetAt = "ip_forward_set_by_wgft_at"
+	// MetaIPForwardWriteStartedAt は、wgft が net.ipv4.ip_forward の値 0 を読み、1 を書き始めた日時。
+	// 書く前に保存する予定の記録であり、書けたかどうかは述べない。確定の記録を保存するトランザクション
+	// で消す(仕様 6.1 節)。
+	MetaIPForwardWriteStartedAt = "ip_forward_write_started_by_wgft_at"
 
 	// MetaAgentAPICert と MetaAgentAPIKey はエージェント用 API の自己署名の証明書と秘密鍵(PEM)。
 	MetaAgentAPICert = "agent_api_cert_pem"

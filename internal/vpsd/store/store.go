@@ -412,6 +412,30 @@ func (s *Store) SetMeta(key string, value []byte) error {
 	return err
 }
 
+// DeleteMeta は meta の値を消す。キーが無くても誤りにしない。
+func (s *Store) DeleteMeta(key string) error {
+	_, err := s.db.Exec("DELETE FROM meta WHERE key = ?", key)
+	return err
+}
+
+// SetMetaAndDelete は、meta の key に value を置くことと del を消すことを 1 つのトランザクションで行う。
+// どちらかが失敗すれば、どちらも行わない。ip_forward の確定の記録の保存と予定の記録の削除に使う
+// (仕様 6.1 節)。del が無くても誤りにしない。
+func (s *Store) SetMetaAndDelete(key string, value []byte, del string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, value); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM meta WHERE key = ?", del); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // GetOrCreateMeta は値があればそれを返し、なければ gen で作って保存してから返す。
 // 初回起動でのサーバ秘密鍵の生成に使う。作成は 1 トランザクションで行い、同時起動で二重に作らない。
 func (s *Store) GetOrCreateMeta(key string, gen func() ([]byte, error)) ([]byte, error) {

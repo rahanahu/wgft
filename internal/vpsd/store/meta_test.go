@@ -8,16 +8,17 @@ import "testing"
 // and address range would be read as absent, and teardown would forget its hints.
 func TestMetaKeysKeepTheirStoredNames(t *testing.T) {
 	want := map[string]string{
-		MetaGeneration:           "generation",
-		MetaServerKey:            "wg_server_private_key",
-		MetaMode:                 "mode",
-		MetaWGAddress:            "wg_address",
-		MetaTeardownWGInterface:  "teardown_wg_interface",
-		MetaTeardownWGPort:       "teardown_wg_port",
-		MetaTeardownAgentAPIPort: "teardown_agent_api_port",
-		MetaIPForwardSetAt:       "ip_forward_set_by_wgft_at",
-		MetaAgentAPICert:         "agent_api_cert_pem",
-		MetaAgentAPIKey:          "agent_api_key_pem",
+		MetaGeneration:              "generation",
+		MetaServerKey:               "wg_server_private_key",
+		MetaMode:                    "mode",
+		MetaWGAddress:               "wg_address",
+		MetaTeardownWGInterface:     "teardown_wg_interface",
+		MetaTeardownWGPort:          "teardown_wg_port",
+		MetaTeardownAgentAPIPort:    "teardown_agent_api_port",
+		MetaIPForwardSetAt:          "ip_forward_set_by_wgft_at",
+		MetaIPForwardWriteStartedAt: "ip_forward_write_started_by_wgft_at",
+		MetaAgentAPICert:            "agent_api_cert_pem",
+		MetaAgentAPIKey:             "agent_api_key_pem",
 	}
 	// A map literal with a repeated constant key does not compile, so two keys sharing one name
 	// is caught here too.

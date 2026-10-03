@@ -52,31 +52,92 @@ func readNFTVersion() string {
 }
 
 // EnableIPForward は net.ipv4.ip_forward を確認し、1 でなければ 1 にする(仕様 6.1 節)。実際の
-// 読み書きは internal/platform/linux.EnableIPForward が持つ(その部品の ReadIPForward と
-// WriteIPForward は agent の kernel backend も使う。設計文書 7a.7 節)。すでに 1 なら何も書かない。書けなくても落ちず、警告して続ける。
-// 1 にした値は 0 に戻さない。0→1 にしたときは meta に日時を残し、撤去(teardown)で戻す候補として
-// 示せるようにする(この記録は store を知らない platform/linux の役目ではなく、ここで行う)。
-// 書き込みに失敗したときは、他テーブルの policy drop と同じ流儀の Finding を返す。
-// 呼び出し側(Run)がそれをログに出す。成功時、またはすでに 1 のときは nil を返す。
+// 読み書きは internal/platform/linux の ReadIPForward と WriteIPForward が持つ(agent の kernel backend
+// も同じ部品を使う。設計文書 7a.7 節)。すでに 1 なら何も書かない。書けなくても落ちず、警告して続ける。
+// 1 にした値は 0 に戻さない。0 を読んで 1 にするときは、撤去(teardown)が戻す候補として示せるよう、
+// meta に 2 段の記録を残す(この記録は store を知らない platform/linux の役目ではなく、ここで行う)。
+// 書き込みに失敗したときと、変えたことをどちらの段でも記録できなかったときは、他テーブルの policy drop
+// と同じ流儀の Finding を返す。呼び出し側(Run)がそれをログに出す。それ以外は nil を返す。
 func EnableIPForward(st *store.Store) *linux.Finding {
-	changed, err := linux.EnableIPForward()
-	if err != nil {
-		// 読み取り専用の /proc や seccomp/LSM で塞がれている場合など。落とさず警告する。
-		return &linux.Finding{
-			Where:   "net.ipv4.ip_forward",
-			Problem: fmt.Sprintf("is 0 and could not be set to 1: %v; kernel-mode forwarding will not work until this is set", err),
-			Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
-		}
+	return enableIPForward(defaultIPForwardOps(), st)
+}
+
+// ipForwardRecords は、ip_forward の 2 段の記録を保存するサーバのデータベースの操作である。
+// *store.Store が満たす。単体テストだけが失敗を差し込む。
+type ipForwardRecords interface {
+	SetMeta(key string, value []byte) error
+	DeleteMeta(key string) error
+	SetMetaAndDelete(key string, value []byte, del string) error
+}
+
+// ipForwardOps は、enableIPForward が触れるカーネルの値と時計である。単体テストだけが差し替える。
+type ipForwardOps struct {
+	read  func() (on bool, err error)
+	write func() error
+	now   func() time.Time
+}
+
+func defaultIPForwardOps() ipForwardOps {
+	return ipForwardOps{read: linux.ReadIPForward, write: linux.WriteIPForward, now: time.Now}
+}
+
+// enableIPForward は EnableIPForward の本体である。記録は 2 段にする(設計文書 6.1 節、
+// 2026-10-03、所有者の決定)。
+//
+//  1. 値を読む。1 なら何もしない。前の起動の予定の記録が残っていても消さない
+//  2. 読めなければ 1 を書き、どちらの記録も残さない。0 だったとは言えないためである
+//  3. 0 なら、書く前に予定の記録(MetaIPForwardWriteStartedAt)を保存する。保存できなくても警告して書く。
+//     転送が落ちたままになるほうが悪いためである(11b 節)
+//  4. 書けなければ予定の記録を消し、書けなかった Finding を返す
+//  5. 書けたら、確定の記録(MetaIPForwardSetAt)の保存と予定の記録の削除を 1 つのトランザクションで行う
+//
+// 書いた直後に止まった場合と 5 の失敗では予定の記録だけが残り、撤去は「wgft が変えたかもしれない」と
+// 示す。どちらの記録も残らないのは 3 と 5 の両方が失敗した場合だけで、そのときは Finding で知らせる。
+func enableIPForward(o ipForwardOps, rec ipForwardRecords) *linux.Finding {
+	on, rerr := o.read()
+	if rerr == nil && on {
+		return nil // すでに 1。触らない
 	}
-	if changed {
-		log.Printf("set net.ipv4.ip_forward to 1")
-		// この記録が無いと、後の teardown の「手で戻す一覧」(internal/vpsd/teardown の manualRestoreList)は
-		// 「wgft did not change it, already 1; no action needed」と、実際には変えたのに
-		// 変えていないかのように出す。書き込みが失敗しても起動は続けるが、この食い違いを
-		// 見逃さないよう、失敗はログに残す(design.md 10.3・10.5 節)。
-		if err := st.SetMeta(store.MetaIPForwardSetAt, []byte(time.Now().UTC().Format(time.RFC3339))); err != nil {
-			log.Printf("warning: recording that ip_forward was set to 1 failed: %v; a later `wgft server teardown` will not know to mention reverting it", err)
+	if rerr != nil {
+		if err := o.write(); err != nil {
+			return ipForwardWriteFailed(err)
 		}
+		return nil
+	}
+	plannedErr := rec.SetMeta(store.MetaIPForwardWriteStartedAt, []byte(o.now().UTC().Format(time.RFC3339)))
+	if plannedErr != nil {
+		// 書いた直後に止まっても手掛かりが残るよう、書く前にログへ出す
+		log.Printf("warning: recording that wgft read net.ipv4.ip_forward as 0 and is about to set it to 1 failed: %v; setting it anyway; unless the change is recorded after the write, a later `wgft server teardown` may not know that wgft changed it", plannedErr)
+	}
+	if err := o.write(); err != nil {
+		// 0 のままなので、予定の記録は撤去に何も示さない。消せなくても、撤去は今の値の 0 を添えて示す
+		if plannedErr == nil {
+			if derr := rec.DeleteMeta(store.MetaIPForwardWriteStartedAt); derr != nil {
+				log.Printf("warning: removing the record that wgft was about to set net.ipv4.ip_forward failed: %v; a later `wgft server teardown` will say wgft may have changed it", derr)
+			}
+		}
+		return ipForwardWriteFailed(err)
+	}
+	log.Printf("set net.ipv4.ip_forward to 1")
+	at := o.now().UTC().Format(time.RFC3339)
+	if err := rec.SetMetaAndDelete(store.MetaIPForwardSetAt, []byte(at), store.MetaIPForwardWriteStartedAt); err != nil {
+		if plannedErr != nil {
+			return &linux.Finding{
+				Where:   "net.ipv4.ip_forward",
+				Problem: fmt.Sprintf("wgft set it from 0 to 1 at %s, but recording that failed both before the write: %v, and after it: %v; a later `wgft server teardown` may not know that wgft changed it, so restore it by hand when removing wgft if nothing else uses forwarding", at, plannedErr, err),
+			}
+		}
+		log.Printf("warning: recording that wgft set net.ipv4.ip_forward to 1 failed: %v; a later `wgft server teardown` will say wgft may have changed it", err)
 	}
 	return nil
+}
+
+// ipForwardWriteFailed は、1 を書けなかったときの Finding である。読み取り専用の /proc や seccomp/LSM
+// で塞がれている場合などに当たる。落とさず警告する。
+func ipForwardWriteFailed(err error) *linux.Finding {
+	return &linux.Finding{
+		Where:   "net.ipv4.ip_forward",
+		Problem: fmt.Sprintf("is 0 and could not be set to 1: %v; kernel-mode forwarding will not work until this is set", err),
+		Suggest: []string{"sysctl -w net.ipv4.ip_forward=1"},
+	}
 }
