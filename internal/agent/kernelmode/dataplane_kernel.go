@@ -200,6 +200,9 @@ type Dataplane struct {
 	probeErr map[string]string
 	// forwardErr は net.ipv4.ip_forward が 1 でないことの理由である(7b.1 節)。nil なら 1
 	forwardErr error
+	// forwardUnknown は forwardErr が、値を読めず書けもしなかったことを述べるときに真になる。
+	// 値が分からないので、理由の文言は「転送しない」と断定しない
+	forwardUnknown bool
 	// local はホスト自身のアドレスである。forwardErr があるときだけ読む
 	local map[netip.Addr]bool
 }

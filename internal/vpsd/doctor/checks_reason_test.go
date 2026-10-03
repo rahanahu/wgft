@@ -150,6 +150,12 @@ func TestTargetReasonCode(t *testing.T) {
 			want:   ReasonAgentIPForwardOff,
 		},
 		{
+			// 値を読めず書けもしなかった場合の文言。読みの誤りの語に引きずられない。
+			name:   "kernel-mode agent host that could neither read nor set ip_forward",
+			reason: "on the agent host, net.ipv4.ip_forward could not be read: open /proc/sys/net/ipv4/ip_forward: permission denied; setting it to 1 failed too: open /proc/sys/net/ipv4/ip_forward: read-only file system; its value is unknown; its kernel may not forward to a target other than the agent host itself",
+			want:   ReasonAgentIPForwardOff,
+		},
+		{
 			name:   "unrecognized text falls back to target_error",
 			reason: "dial tcp 192.168.50.50:2456: some future wrapped error nobody has seen yet",
 			want:   ReasonTargetError,
@@ -176,6 +182,29 @@ func TestAgentIPForwardOffNamesTheAgentHost(t *testing.T) {
 	}
 	if strings.Contains(next, "Check that a service is listening") {
 		t.Errorf("next step blames the service: %s", next)
+	}
+}
+
+// 案内は、値を 0 と断定せず、再起動を勧めない。読めず書けもしなかった場合にも、0 を読んで書けなかった
+// 場合にも、旧い版のエージェントの理由にも当てはまる。
+func TestAgentIPForwardOffNextStepDoesNotClaimZeroOrAdviseRestart(t *testing.T) {
+	r := testRuleForReason()
+	for _, reason := range []string{
+		"net.ipv4.ip_forward is 0; the kernel does not forward to a target that is not this host",
+		"on the agent host, net.ipv4.ip_forward is not 1 and cannot be set: boom; its kernel does not forward to a target other than the agent host itself",
+		"on the agent host, net.ipv4.ip_forward could not be read: boom; setting it to 1 failed too: boom; its value is unknown; its kernel may not forward to a target other than the agent host itself",
+	} {
+		next := agentRuleNextStep(reason, r)
+		for _, bad := range []string{"is 0", "or restart the agent", "which sets it on start"} {
+			if strings.Contains(next, bad) {
+				t.Errorf("next step for %q contains %q: %s", reason, bad, next)
+			}
+		}
+		for _, want := range []string{"sysctl net.ipv4.ip_forward and", "sysctl -w net.ipv4.ip_forward=1", "restarting the agent does not help", "read-only /proc", "wgft agent doctor"} {
+			if !strings.Contains(next, want) {
+				t.Errorf("next step for %q lacks %q: %s", reason, want, next)
+			}
+		}
 	}
 }
 

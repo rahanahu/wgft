@@ -273,9 +273,10 @@ func (d *Dataplane) Refresh() {
 	switch {
 	case err == nil && on && d.forwardErr != nil:
 		log.Printf("net.ipv4.ip_forward is 1 now; rules whose target is not this host are no longer reported as errors")
-		d.forwardErr = nil
-	case err == nil && !on && d.forwardErr == nil:
-		d.forwardErr = errors.New(reasontext.IPForward + " is 0")
+		d.forwardErr, d.forwardUnknown = nil, false
+	case err == nil && !on && (d.forwardErr == nil || d.forwardUnknown):
+		// 読めなかった値を今は読めて 0 だったときも、断定できる文言に改める
+		d.forwardErr, d.forwardUnknown = errors.New(reasontext.IPForward+" is 0"), false
 		log.Printf("warning: net.ipv4.ip_forward is 0; rules whose target is not this host are reported as errors until it is 1")
 	}
 	if d.forwardErr != nil {

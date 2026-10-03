@@ -41,6 +41,7 @@ func TestKernelReasonsAreReadByServerDoctor(t *testing.T) {
 		resolveThenFail step = iota + 1 // 1 回目は解決でき、2 回目の適用で解決に失敗する
 		forwardOff                      // 適用の後、30 秒ごとの見直しで ip_forward が 0 と読める
 		forwardUnset                    // 起動のときに ip_forward を 1 にできない
+		forwardUnknown                  // 起動のときに ip_forward を読めず、1 にもできない
 	)
 	for _, tc := range []struct {
 		name        string
@@ -72,6 +73,7 @@ func TestKernelReasonsAreReadByServerDoctor(t *testing.T) {
 			wantTarget: doctor.ReasonTargetNotUnicast},
 		{name: "ip_forward reads 0", target: "192.168.1.20:25565", step: forwardOff, wantTarget: doctor.ReasonAgentIPForwardOff},
 		{name: "ip_forward cannot be set", target: "192.168.1.20:25565", step: forwardUnset, wantTarget: doctor.ReasonAgentIPForwardOff},
+		{name: "ip_forward can be neither read nor set", target: "192.168.1.20:25565", step: forwardUnknown, wantTarget: doctor.ReasonAgentIPForwardOff},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{}}
@@ -84,6 +86,12 @@ func TestKernelReasonsAreReadByServerDoctor(t *testing.T) {
 			d := newTestKernel(t, k, nil, tc.allow)
 			if tc.step == forwardUnset {
 				k.forwardOn, k.forwardWriteEr = false, os.ErrPermission
+				if err := d.enableForwarding(func() error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.step == forwardUnknown {
+				k.forwardReadEr, k.forwardWriteEr = os.ErrPermission, os.ErrPermission
 				if err := d.enableForwarding(func() error { return nil }); err != nil {
 					t.Fatal(err)
 				}
