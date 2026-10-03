@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strconv"
 	"unicode"
 	"unicode/utf8"
@@ -100,6 +101,30 @@ func validateRuleID(id string) error {
 	return nil
 }
 
+// MaxTargetLen は target に許す長さの上限で、UTF-8 のバイトで数える(仕様 5.3 節)。DNS の名前の
+// 上限の 253 バイトに ":" と 5 桁のポートを足した値である。エージェントあたりのルールの数の上限
+// (MaxRulesPerAgent)とともに、全体状態の 1 通の大きさを有限にする。
+const MaxTargetLen = 253 + len(":") + 5
+
+// validateTarget は target の長さと文字を検査する(仕様 5.3 節、2026-10-03、所有者の決定)。形
+// (host:port)の検査は splitTarget が行う。長さはバイトで数える。ポートの先頭の 0 で長くした値も
+// 長さで拒む。文字は ID と同じく unicode.IsGraphic が真のものだけを受け、制御文字と不正な UTF-8 を
+// 拒む。エラーは target の中身を繰り返さない。
+func validateTarget(target string) error {
+	if len(target) > MaxTargetLen {
+		return fmt.Errorf("target is %d bytes long; the limit is %d bytes", len(target), MaxTargetLen)
+	}
+	if !utf8.ValidString(target) {
+		return errors.New("target is not valid UTF-8")
+	}
+	for i, c := range target {
+		if !unicode.IsGraphic(c) {
+			return fmt.Errorf("target contains %U at byte %d; only letters, marks, numbers, punctuation, symbols and spaces are allowed", c, i)
+		}
+	}
+	return nil
+}
+
 // Validate はルール単体で判定できる制約を検査する。ルール間の制約は ValidateRules が見る。
 func (r *Rule) Validate() error {
 	if r.ID == "" {
@@ -124,6 +149,9 @@ func (r *Rule) Validate() error {
 	}
 	if r.ListenPort.Lo == 0 {
 		return errors.New("listen_port is empty")
+	}
+	if err := validateTarget(r.Target); err != nil {
+		return err
 	}
 	_, port, err := splitTarget(r.Target)
 	if err != nil {
@@ -186,8 +214,79 @@ func ValidateRules(rules []Rule, reserved Reserved) error {
 // 通常どおり検査する。ID の重複・予約ポート・listen_port の重なりは before の有無に関わらず
 // 全体に対して行う(これらは以前から常に全体を検査していたため、検査対象から外しても保存された
 // データが既に満たしている)。
+//
+// エージェントあたりのルールの数の上限(MaxRulesPerAgent)も、before と比べてここで判定する
+// (checkAgentRuleCounts)。保存の経路(store.ApplyBatch)と事前確認(internal/vpsd/admin の
+// PreflightBatch)の両方がこの関数を通るので、すべての入口に同じ判定が効く。ValidateRules は
+// before を持たないので数を見ない。
 func ValidateUpsert(rules, before []Rule, reserved Reserved) error {
-	return validateRuleSet(rules, reserved, UnchangedIDs(rules, before))
+	if err := validateRuleSet(rules, reserved, UnchangedIDs(rules, before)); err != nil {
+		return err
+	}
+	return checkAgentRuleCounts(rules, before)
+}
+
+// MaxRulesPerAgent は 1 つのエージェントが持てるルールの数の上限である(仕様 5.3 節、2026-10-03、
+// 所有者の決定)。設定項目にしない。根拠は全体状態とハートビートの 1 通の上限(仕様 5.2 節)で、
+// ルールの ID(MaxRuleIDLen)、target(MaxTargetLen)、ハートビートの理由(512 バイト)の上限の範囲で
+// 符号化の後が最も長くなる値でも、この数の全体状態はエージェントが読む 4 MiB に、ハートビートは vpsd が
+// 読む 1 MiB に収まる。収まることは internal/agent の単体試験が実際の符号化で確かめる。
+const MaxRulesPerAgent = 512
+
+// RuleCountsByAgent は、Rule.Agent の名前ごとのルールの数を返す。有効と無効を問わず数える。無効な
+// ルールも enabled:false として全体状態に載るためである。
+func RuleCountsByAgent(rules []Rule) map[string]int {
+	counts := make(map[string]int)
+	for _, r := range rules {
+		counts[r.Agent]++
+	}
+	return counts
+}
+
+// AgentsOverRuleLimit は、ルールの数が MaxRulesPerAgent を超えるエージェントの名前を、名前の順に返す。
+// vpsd が起動のときの警告に使う。上限の導入の前に保存されたデータでだけ起こりうる。
+func AgentsOverRuleLimit(rules []Rule) []string {
+	var out []string
+	for agent, n := range RuleCountsByAgent(rules) {
+		if n > MaxRulesPerAgent {
+			out = append(out, agent)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// checkAgentRuleCounts は、バッチの後の集合 rules が、あるエージェントのルールを MaxRulesPerAgent より
+// 多く、かつバッチの前の集合 before より多くするときに誤りを返す(仕様 5.4 節)。上限を超えていても
+// 増やさないバッチは通す。上限の導入の前に保存された、上限を超えるエージェントのルールを、削除、
+// 別のエージェントへの移し替え、統合、本数を変えない書き換えで減らせるようにするためである。持ち主を
+// 移す行は、移した先のエージェントの本数を同じ式で判定する。誤りは名前の順で最初のエージェントを示す。
+func checkAgentRuleCounts(rules, before []Rule) error {
+	after := RuleCountsByAgent(rules)
+	prev := RuleCountsByAgent(before)
+	var over []string
+	for agent, n := range after {
+		if n > MaxRulesPerAgent && n > prev[agent] {
+			over = append(over, agent)
+		}
+	}
+	if len(over) == 0 {
+		return nil
+	}
+	slices.Sort(over)
+	return &AgentRuleLimitError{Agent: over[0], Before: prev[over[0]], After: after[over[0]]}
+}
+
+// AgentRuleLimitError は、バッチがエージェントのルールの数を上限より多くするときの誤りである
+// (仕様 5.4 節)。管理用 API は他の検査の誤りと同じ 422 で返す。
+type AgentRuleLimitError struct {
+	Agent         string
+	Before, After int
+}
+
+func (e *AgentRuleLimitError) Error() string {
+	return fmt.Sprintf("agent %q would have %d rules, over the limit of %d rules per agent; delete rules or move them to another agent first",
+		e.Agent, e.After, MaxRulesPerAgent)
 }
 
 // UnchangedIDs は rules のうち、before に同じ ID で同じ内容の行がある ID の集合を返す。

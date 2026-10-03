@@ -269,7 +269,7 @@ func worstReasons() map[string]string {
 // 膨らむ表示できる文字 `"` で埋める。HTML 向けの書き換えを残すと `&` の理由で上限を超えることも
 // 確かめ、入力が意味のある最悪の値であることを示す。
 func TestHeartbeatOf512RulesFitsTheHubReadLimit(t *testing.T) {
-	const rules = 512
+	rules := proto.MaxRulesPerAgent
 	id := strings.Repeat(`"`, 128)
 	for name, reason := range worstReasons() {
 		hb := proto.Heartbeat{Generation: 1<<64 - 1, Tunnel: proto.TunnelStatus{State: proto.StatusError, Reason: reason,

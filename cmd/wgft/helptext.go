@@ -573,17 +573,20 @@ real client address to the target in a PROXY protocol v2 header. The target
 must expect that header.
 
 The command refuses a port that another process on the VPS already listens on;
---force overrides that.
+--force overrides that. An agent holds at most 512 rules, so adding a rule to
+an agent that already has 512 is refused. The target in --to must be at most
+259 bytes.
 
 --dry-run checks the rule against what a real "wgft rule add" would enforce
 before saving, as far as the admin API lets it observe: its own shape,
 whether it duplicates an ID or overlaps another rule's listen port, whether
 it overlaps a port the server has reserved for itself, such as WireGuard, the
-admin API, or the agent API, and whether --agent names a currently registered
-agent. --force has no effect together with --dry-run: --dry-run never calls
-Batch, the only place --force applies, so a rule overlapping a reserved
-port is still refused. It prints what would change and exits 1 if it finds
-a problem, 0 if not, and never saves anything either way. It does not try
+admin API, or the agent API, whether --agent names a currently registered
+agent, and whether the agent would go over 512 rules. --force has no
+effect together with --dry-run: --dry-run never calls Batch, the only place
+--force applies, so a rule overlapping a reserved port is still refused.
+It prints what would change and exits 1 if it finds a problem, 0 if not,
+and never saves anything either way. It does not try
 to reach --to, and it does not check for a port already bound by another
 process on the VPS or a DNAT some other nftables table has installed on
 it, e.g. by Docker; the latter is refused even with --force. Both need
@@ -741,7 +744,11 @@ that "rule ls --json" prints under "rules", so an export can be edited and
 imported back. Every agent named in it must be registered. A new or changed
 rule's id must be at most 128 bytes of UTF-8 made of letters, marks, numbers,
 punctuation, symbols and spaces; control characters, line breaks and invisible
-format characters are refused.`,
+format characters are refused. A new or changed rule's target must be at most
+259 bytes of the same characters. An agent holds at most 512 rules: an import
+that leaves an agent with more than 512 rules and more than it had before is
+refused, while one that keeps or lowers the count of an agent already over 512
+is accepted.`,
 		Example: `  wgft rule ls --json | jq .rules > rules.json
   wgft rule import rules.json`,
 	},
