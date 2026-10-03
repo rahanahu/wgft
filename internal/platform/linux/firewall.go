@@ -3,7 +3,7 @@
 // Package linux は、VPS と agent の kernel backend が共通に使う、Linux ホスト側の
 // 前段検査と sysctl の読み書きを持つ(設計文書 7a.7 節)。他テーブルの forward/input/DNAT の検査、
 // bind 中のポートの検査、ip_forward と conntrack テーブルの sysctl がここに属する。自動では何も
-// 書き換えず(ip_forward を除く。書き込みの WriteIPForward だけで、server と agent の起動時の処理が呼ぶ)、
+// 書き換えず(ip_forward を除く。書き込むのは WriteIPForward だけで、server と agent の起動時の処理が呼ぶ)、
 // 拒否か警告と提示に留める。
 //
 // このパッケージは internal/dataplane/linuxkernel を import しない(その逆に、linuxkernel がこの
