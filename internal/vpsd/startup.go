@@ -92,7 +92,7 @@ func defaultIPForwardOps() ipForwardOps {
 //  5. 書けたら、確定の記録(MetaIPForwardSetAt)の保存と予定の記録の削除を 1 つのトランザクションで行う
 //
 // 書いた直後に止まった場合と 5 の失敗では予定の記録だけが残り、撤去は「wgft が変えたかもしれない」と
-// 示す。0 を読んで 1 を書け、手順が 5 まで進んだ場合に、どちらの記録も残らないのは 3 と 5 の両方が
+// 示す。0 を読んで 1 を書き、手順が 5 まで進んだ場合に、どちらの記録も残らないのは 3 と 5 の両方が
 // 失敗したときだけで、そのときは Finding で知らせる。3 が失敗して値を書いた後、5 の前に止まった場合も
 // 記録は残らないが、そのときは 3 の警告がログに残るだけで、Finding は出ない。
 func enableIPForward(o ipForwardOps, rec ipForwardRecords) *linux.Finding {
