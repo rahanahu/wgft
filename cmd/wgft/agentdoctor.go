@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -1294,7 +1295,9 @@ func upperFirst(s string) string {
 	if s == "" {
 		return s
 	}
-	return strings.ToUpper(s[:1]) + s[1:]
+	// 先頭の 1 文字を rune で切る。バイトで切ると、多バイト文字が途中で割れる。
+	_, n := utf8.DecodeRuneInString(s)
+	return strings.ToUpper(s[:n]) + s[n:]
 }
 
 // agentNotTested は、この診断が試していない範囲である。何も壊れていない実行でも必ず出す。黙って

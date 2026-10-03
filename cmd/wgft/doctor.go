@@ -8,6 +8,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -391,8 +392,16 @@ func firstClause(s string) string {
 			s = s[:i]
 		}
 	}
-	if len(s) > 58 {
-		s = s[:57] + "…"
+	// 文字(rune)の数で切る。バイトで切ると、多バイト文字を含む値が文字の途中で切れて不正な UTF-8 になる。
+	// ASCII だけの文は、バイトで切った場合と同じ出力になる。
+	if utf8.RuneCountInString(s) > 58 {
+		n := 0
+		for i := range s {
+			if n == 57 {
+				return s[:i] + "…"
+			}
+			n++
+		}
 	}
 	return s
 }
