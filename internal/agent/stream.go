@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -309,7 +310,8 @@ func (rt *runtime) streamOnce(ctx context.Context) error {
 		defer t.Stop()
 		send := func() (proto.Heartbeat, bool) {
 			hb := rt.heartbeat()
-			return hb, writeJSON(hbCtx, ws, proto.Message{Type: proto.MsgHeartbeat, Heartbeat: &hb}) == nil
+			wire := wireHeartbeat(hb)
+			return hb, writeJSON(hbCtx, ws, proto.Message{Type: proto.MsgHeartbeat, Heartbeat: &wire}) == nil
 		}
 		runHeartbeats(hbCtx.Done(), t.C, applyNotify, rt.handshakeRetryInterval, rt.handshakeRetryTimeout, send)
 	}()
@@ -520,11 +522,27 @@ func needsHandshakeFollowUp(t proto.TunnelStatus) bool {
 }
 
 func writeJSON(ctx context.Context, ws *websocket.Conn, m proto.Message) error {
-	b, err := json.Marshal(m)
+	b, err := encodeMessage(m)
 	if err != nil {
 		return err
 	}
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return ws.Write(wctx, websocket.MessageText, b)
+}
+
+// encodeMessage は stream の 1 メッセージを JSON にする(仕様 5.2 節)。json.Marshal と違い、HTML に
+// 埋め込むための書き換え(`<`・`>`・`&` を `\u003c` のような 6 バイトにする)をしない。メッセージは
+// HTML に埋め込まれない。書き換えを残すと、理由の文言の `&` などの 1 文字が 6 バイトになり、ハートビートの
+// 1 通が、理由の長さの上限から見積もった大きさの数倍に達しうる。どちらの形も同じ JSON の文字列なので、vpsd の
+// json.Unmarshal はどの版でも同じ値に読む。json.Encoder が末尾に付ける改行は、json.Marshal の出力と
+// そろえるために除く。
+func encodeMessage(m proto.Message) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(m); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

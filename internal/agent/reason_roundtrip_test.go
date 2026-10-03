@@ -13,25 +13,32 @@ import (
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
-	"github.com/rahanahu/wgft/internal/vpsd/stream"
 	"github.com/rahanahu/wgft/proto"
 )
 
 // このファイルと internal/agent/kernelmode の reason_roundtrip_linux_test.go は、エージェントが組み立てるルールの理由の文言を、
-// hub が保存する形(stream.HeartbeatReason の 512 バイトの切り詰め)に通してから server doctor
+// エージェントが送る形(wireReason)と hub が保存する形(stream.HeartbeatReason の 512 バイトの切り詰め)に
+// 通してから server doctor
 // (internal/vpsd/doctor)に読ませ、doctor の分類が今の値であることを固定する。doctor はエージェントの
 // 人の読む文言を部分一致で分類する(設計文書 10.2a 節)。どちらかの側だけで文言を変えると、ここが落ちる。
 
 // serverDoctorReads は、エージェントの 1 本のルールの状態を、接続中のエージェントの今の報告として
-// server doctor に渡し、検査の ID ごとの結果を返す。理由は hub が保存する形に通してから渡す。
+// server doctor に渡し、検査の ID ごとの結果を返す。理由は、エージェントが送る形にし、JSON の往復を
+// 通し、さらに hub が保存する形に通してから渡す。
 func serverDoctorReads(t *testing.T, r proto.AgentRule, st proto.RuleStatus) map[string]doctor.Check {
+	t.Helper()
+	return serverDoctorReadsStored(t, r, st.State, storedFromNewAgent(t, st.Reason))
+}
+
+// serverDoctorReadsStored は serverDoctorReads と同じだが、hub が保存した後の理由 stored をそのまま渡す。
+func serverDoctorReadsStored(t *testing.T, r proto.AgentRule, state, stored string) map[string]doctor.Check {
 	t.Helper()
 	now := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
 	at := now.Add(-5 * time.Second).Format(time.RFC3339)
 	rule := proto.Rule{ID: r.ID, Agent: "home", Proto: r.Proto, ListenPort: r.ListenPort, Target: r.Target, Enabled: true}
 	in := doctor.Input{Now: now,
 		Rules: &adminapi.BatchResponse{AgentRuleStates: map[string]adminapi.AgentRuleStatus{
-			rule.ID: {Agent: "home", State: st.State, Reason: stream.HeartbeatReason(st.Reason), At: at, Connected: true}}},
+			rule.ID: {Agent: "home", State: state, Reason: stored, At: at, Connected: true}}},
 		Agents: []adminapi.AgentInfo{{Name: "home", Connected: true, LastHeartbeat: at, LastHandshake: at}},
 	}
 	got := map[string]doctor.Check{}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
+	"github.com/rahanahu/wgft/internal/textsafe"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -25,6 +26,33 @@ func (rt *runtime) heartbeat() proto.Heartbeat {
 		hb.Rules = r.Rules
 	}
 	return hb
+}
+
+// wireHeartbeat は、ハートビートを stream に載せる形にした写しを返す(仕様 5.2 節)。トンネルとルールの
+// 理由の不正な UTF-8 のバイトを U+FFFD に置き換え、続けて vpsd の受け口と同じ変換(表示できない文字の
+// 置き換えと proto.ReasonMaxBytes での切り詰め)にかける(wireReason)。理由はエージェントが作る文言で、宛先のホスト名や OS の誤りの文面を含むので、長さが決まら
+// ない。上限が無いと、ルールの数に比例してハートビートの 1 通が vpsd の読みの上限(1 MiB)を超え、
+// stream が切れる。受け口の変換は自分の結果を変えないので、vpsd が保存する理由は、この切り詰めの前と
+// 同じ文言を残す。ログ(logStatus)には切り詰める前の理由を書くので、元の hb は書き換えない。
+func wireHeartbeat(hb proto.Heartbeat) proto.Heartbeat {
+	out := hb
+	out.Tunnel.Reason = wireReason(hb.Tunnel.Reason)
+	if hb.Rules != nil {
+		out.Rules = make([]proto.RuleStatus, len(hb.Rules))
+		for i, r := range hb.Rules {
+			r.Reason = wireReason(r.Reason)
+			out.Rules[i] = r
+		}
+	}
+	return out
+}
+
+// wireReason は、1 つの理由を stream に載せる形にする。先に不正な UTF-8 のバイトを encoding/json と
+// 同じく 1 バイトずつ U+FFFD に置き換える。この変更より前は、JSON の符号化がこの置き換えをしてから hub が
+// 切り詰めていたので、同じ順にしないと、不正なバイトが 4 バイトの見える形(`\xfe`)になり、上限の内に
+// 残る文言が変わる(設計文書 5.2 節)。
+func wireReason(s string) string {
+	return textsafe.SanitizeAndClip(textsafe.ReplaceInvalidUTF8(s), proto.ReasonMaxBytes)
 }
 
 // tunnelSnapshot はトンネルの状態の写しである。present はトンネルがあるかどうか、hb はハートビートに

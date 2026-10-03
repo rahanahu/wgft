@@ -92,6 +92,44 @@ func ClipText(s string, max int) string {
 	return s[:n] + "... truncated"
 }
 
+// ReplaceInvalidUTF8 replaces each byte of s that does not start a valid UTF-8 sequence with
+// U+FFFD, one replacement per byte, and leaves everything else unchanged. This is exactly what
+// encoding/json does to a string it encodes, so a string passed through it comes back unchanged
+// from a JSON encode and decode. The agent applies it to a heartbeat reason before
+// SanitizeAndClip (design.md 5.2 節) so that what it cuts is the text the hub used to receive
+// after JSON had already replaced those bytes; SanitizeAndClip alone would turn each invalid byte
+// into a 4-byte visible escape instead and keep less of the text within the cap.
+func ReplaceInvalidUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteRune(utf8.RuneError)
+		} else {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// SanitizeAndClip replaces every unsafe rune and invalid UTF-8 byte in s the way
+// SanitizeForTerminal does, then caps the escaped result at max bytes the way ClipText does. It
+// is the one transform both ends of the heartbeat apply to a tunnel or rule reason (design.md
+// 5.2 節): the agent before it sends one, after ReplaceInvalidUTF8, and vpsd's hub before it
+// stores one. Escaping runs
+// first so that what is kept never grows past max on escaping. SanitizeForTerminal leaves the
+// result unchanged, so applying SanitizeAndClip again with the same max keeps the same text before
+// the truncation marker: the result comes back byte for byte, except that when the first cut fell
+// inside a multi-byte rune, the second keeps the first one to three bytes of the first marker too.
+func SanitizeAndClip(s string, max int) string {
+	return ClipText(SanitizeForTerminal(s), max)
+}
+
 // SanitizeStrings walks v, which must be a pointer to a struct (or to a slice or array of such),
 // and replaces every exported string field it finds, however deeply nested through structs,
 // pointers, slices and arrays, with SanitizeForTerminal's escaped form. It is the one call a reader

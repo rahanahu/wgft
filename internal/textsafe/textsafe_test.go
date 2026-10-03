@@ -1,6 +1,8 @@
 package textsafe
 
 import (
+	"encoding/json"
+	"math/rand"
 	"strconv"
 	"strings"
 	"testing"
@@ -208,4 +210,69 @@ func TestSanitizeStringsHandlesNilPointersWithoutPanic(t *testing.T) {
 	}
 	v := &outer{}
 	SanitizeStrings(v) // must not panic on a nil *inner and an empty slice
+}
+
+// SanitizeAndClip escapes before it clips, so what is kept never grows past max, and a second pass
+// with the same max keeps the same text before the truncation marker. This is what lets the agent
+// and the hub both apply it to a heartbeat reason (design.md 5.2 節) without the hub's pass
+// changing what the agent kept.
+func TestSanitizeAndClip(t *testing.T) {
+	const max = 16
+	const mark = "... truncated"
+	a := func(n int) string { return strings.Repeat("a", n) }
+	cases := []struct {
+		name, in, want string
+	}{
+		{"short and clean", "ok", "ok"},
+		{"exactly max", a(16), a(16)},
+		{"one over", a(17), a(16) + mark},
+		{"escaped, then clipped", strings.Repeat("\x1b", 8), `\x1b\x1b\x1b\x1b` + mark},
+		{"a rune across max is dropped", a(15) + "あ", a(15) + mark},
+	}
+	for _, c := range cases {
+		got := SanitizeAndClip(c.in, max)
+		if got != c.want {
+			t.Errorf("%s: SanitizeAndClip = %q, want %q", c.name, got, c.want)
+		}
+		again := SanitizeAndClip(got, max)
+		kept := strings.TrimSuffix(got, mark)
+		if !strings.HasPrefix(again, kept) || !strings.HasSuffix(again, strings.TrimPrefix(got, kept)) {
+			t.Errorf("%s: a second pass turned %q into %q", c.name, got, again)
+		}
+		if len(kept) == max || !strings.HasSuffix(got, mark) {
+			if again != got {
+				t.Errorf("%s: a second pass changed %q to %q", c.name, got, again)
+			}
+		}
+	}
+}
+
+// ReplaceInvalidUTF8 gives the same string encoding/json gives after an encode and decode, for
+// every invalid sequence: a lone byte, a truncated multi-byte sequence, a surrogate, an overlong
+// form, and random bytes.
+func TestReplaceInvalidUTF8MatchesJSON(t *testing.T) {
+	cases := []string{"", "ok", "\xfe", "a\xe3\x81b", "\xf0\x9f\x98", "\xed\xa0\x80", "\xc0\xaf", "\uFFFD", "\u3042\xff\u3042"}
+	rng := rand.New(rand.NewSource(1))
+	for i := 0; i < 2000; i++ {
+		b := make([]byte, rng.Intn(24))
+		rng.Read(b)
+		cases = append(cases, string(b))
+	}
+	for _, s := range cases {
+		enc, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var viaJSON string
+		if err := json.Unmarshal(enc, &viaJSON); err != nil {
+			t.Fatal(err)
+		}
+		got := ReplaceInvalidUTF8(s)
+		if got != viaJSON {
+			t.Fatalf("ReplaceInvalidUTF8(%q) = %q, JSON gives %q", s, got, viaJSON)
+		}
+		if ReplaceInvalidUTF8(got) != got {
+			t.Fatalf("ReplaceInvalidUTF8 is not stable on %q", got)
+		}
+	}
 }
