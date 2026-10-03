@@ -226,10 +226,10 @@ type listener struct {
 	bindErr error
 	// targetErr は TCP ルールで target への接続確認が失敗したときの誤り(仕様 5.2 節)。
 	// リスナー自体は開いているので、Retry では開き直さず再確認だけする。
-	// 書くのは、Apply と Retry が到達確認の結果を記す applyProbes と、許可一覧があるときの
-	// noteTargetAllowErr である。vpsd のユーザー空間モードが使う Prepare と Commit の経路は、到達確認を
-	// せず(設計文書 6.3 節)、Apply も Retry も呼ばず、許可一覧も渡さないので、この値を書かない。
-	// 読む Status も呼ばない
+	// 書くのは、Apply と Retry が到達確認の結果を記す applyProbes と、許可一覧か宛先の拒否
+	// (RefuseTarget)があるときの noteTargetAllowErr である。vpsd のユーザー空間モードが使う Prepare と
+	// Commit の経路は、到達確認をせず(設計文書 6.3 節)、Apply も Retry も呼ばず、許可一覧も宛先の
+	// 拒否も渡さないので、この値を書かない。読む Status も呼ばない
 	targetErr error
 	// allowDenied は targetErr が今、宛先の許可一覧による拒否かどうか(設計文書 7 節)。
 	// 接続ごとに呼ばれる noteTargetAllowErr が、状態が変わらないときに Manager の錠を
