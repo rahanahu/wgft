@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/rahanahu/wgft/internal/agent/allowtargets"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -288,6 +289,65 @@ func TestPlanAgentMultipleAddresses(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ブロードキャストとマルチキャストの宛先(設計文書 7 節、7b.2 節):cfg.RefuseTarget が拒むアドレスへは
+// DNAT を作らず、理由はその文言そのものである。IPv6 のマルチキャストも IPv4 だけの規則より先に拒み、
+// 解決の結果に混ざる拒むアドレスは除いて残りを使う。RefuseTarget が無ければ判定しない。
+func TestPlanAgentRefusesBroadcastAndMulticast(t *testing.T) {
+	a := netip.MustParseAddr
+	u := allowtargets.NewUnicast(func() ([]netip.Prefix, error) {
+		return []netip.Prefix{netip.MustParsePrefix("192.168.50.2/24"), netip.MustParsePrefix("10.0.0.0/31")}, nil
+	}, func(string, ...any) {})
+	allow, err := allowtargets.Parse("192.168.50.0/24,239.0.0.0/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := AgentConfig{WGInterface: "wgft0", RefuseTarget: u.Refuse}
+	resolved := map[string]Resolution{
+		"bc.lan":    {Addrs: []netip.Addr{a("192.168.50.255")}},
+		"mc.lan":    {Addrs: []netip.Addr{a("239.1.2.3")}},
+		"mixed.lan": {Addrs: []netip.Addr{a("192.168.50.3"), a("192.168.50.255")}},
+	}
+	for _, tc := range []struct {
+		name       string
+		target     string
+		cfg        AgentConfig
+		wantRanges []AgentRange
+		wantReason string
+	}{
+		{name: "limited broadcast", target: "255.255.255.255:9", cfg: cfg,
+			wantReason: "target 255.255.255.255 is the limited broadcast address; " + reasontext.UnicastOnly},
+		{name: "IPv4 multicast", target: "239.1.2.3:5000", cfg: cfg,
+			wantReason: "target 239.1.2.3 is a multicast address; " + reasontext.UnicastOnly},
+		{name: "IPv6 multicast gets the same reason as in userspace mode", target: "[ff02::1]:5000", cfg: cfg,
+			wantReason: "target ff02::1 is a multicast address; " + reasontext.UnicastOnly},
+		{name: "directed broadcast of the host's network", target: "192.168.50.255:9", cfg: cfg,
+			wantReason: "target 192.168.50.255 is the broadcast address of 192.168.50.0/24 on this host; " + reasontext.UnicastOnly},
+		{name: "both ends of a /31 are hosts", target: "10.0.0.1:9", cfg: cfg, wantRanges: []AgentRange{rng(7000, 7000, "10.0.0.1:9")}},
+		{name: "a .255 outside the host's networks is a host", target: "192.168.77.255:9", cfg: cfg,
+			wantRanges: []AgentRange{rng(7000, 7000, "192.168.77.255:9")}},
+		{name: "host name resolving to a directed broadcast", target: "bc.lan:9", cfg: cfg,
+			wantReason: "target 192.168.50.255 is the broadcast address of 192.168.50.0/24 on this host; " + reasontext.UnicastOnly},
+		{name: "host name resolving to multicast", target: "mc.lan:5000", cfg: cfg,
+			wantReason: "target 239.1.2.3 is a multicast address; " + reasontext.UnicastOnly},
+		{name: "a refused address among the answers is skipped", target: "mixed.lan:9", cfg: cfg,
+			wantRanges: []AgentRange{rng(7000, 7000, "192.168.50.3:9")}},
+		// 許可一覧が通す宛先も拒む。理由は許可一覧ではなく宛先の種類である
+		{name: "the allowlist does not let it through", target: "239.1.2.3:5000",
+			cfg:        AgentConfig{WGInterface: "wgft0", RefuseTarget: u.Refuse, AllowTarget: allow.Allows, AllowTargetSource: allowtargets.Env},
+			wantReason: "target 239.1.2.3 is a multicast address; " + reasontext.UnicastOnly},
+		{name: "without RefuseTarget nothing is refused", target: "239.1.2.3:5000", cfg: AgentConfig{WGInterface: "wgft0"},
+			wantRanges: []AgentRange{rng(7000, 7000, "239.1.2.3:5000")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := PlanAgent(AgentInput{Rules: []proto.AgentRule{agentRule("r", proto.UDP, 7000, 7000, tc.target)}, Resolved: resolved}, tc.cfg)
+			got := pub.Rules[0]
+			if !reflect.DeepEqual(got.Ranges, tc.wantRanges) || got.Reason != tc.wantReason {
+				t.Errorf("result = %+v, want ranges %v and reason %q", got, tc.wantRanges, tc.wantReason)
+			}
+		})
+	}
 }
 
 // 拒んだルールは他のルールを止めず、無効なルールは結果にも表にも出ない。結果は (Proto, Lo, ID) の順。

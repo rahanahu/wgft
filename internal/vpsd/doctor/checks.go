@@ -976,6 +976,10 @@ func targetReasonCode(reason string) string {
 		return ReasonListenerBindFailed
 	case looksLikeResolveFailure(reason):
 		return ReasonResolveFailed
+	case strings.Contains(reason, reasontext.UnicastOnly):
+		// エージェントの宛先の判定(internal/agent/allowtargets の Unicast)の文言。2 つのモードが同じ文言を
+		// 書く。ループバックと同じく、名前の解決に失敗して直前のアドレスも使えない場合は解決の失敗の側を先に当てる
+		return ReasonTargetNotUnicast
 	case strings.Contains(reason, reasontext.LoopbackUnsupported):
 		// カーネルモードのエージェントの文言(internal/dataplane/linuxkernel/nft の targetAddrs)。名前の
 		// 解決に失敗して直前のアドレスも使えない場合は、解決の失敗の側を先に当てる
@@ -1025,6 +1029,9 @@ func agentRuleNextStep(reason string, r proto.Rule) string {
 	switch targetReasonCode(reason) {
 	case ReasonTargetNotAllowed:
 		return "the agent refuses this target itself: " + reasontext.AllowTargetsEnv + " on the agent host does not list it. Add the target there, or point the rule elsewhere."
+	case ReasonTargetNotUnicast:
+		return "the agent refuses broadcast and multicast targets in either mode, whatever " + reasontext.AllowTargetsEnv +
+			" says. Point the rule at the unicast address of the host that runs the service instead of " + r.TargetDisplay() + "."
 	case ReasonListenerBindFailed:
 		// ユーザー空間モードの中継の待ち受けはエージェントのプロセス内の netstack にあり、
 		// ホストの他のプロセスとポート空間を共有しない。「他のプロセスを探す」という以前の案内は

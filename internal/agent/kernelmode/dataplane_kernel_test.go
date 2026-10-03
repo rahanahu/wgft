@@ -24,6 +24,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/conntrack"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -1563,5 +1564,93 @@ func TestRecordUnconvergedClearsRememberedError(t *testing.T) {
 	d.recordUnconverged()
 	if _, ok := d.marshalErr[recordUnconverged]; ok {
 		t.Error("an empty queue left the remembered error")
+	}
+}
+
+// ブロードキャストとマルチキャストの宛先(設計文書 7 節、7b.2 節):帯のブロードキャストのアドレスは
+// ホストのインタフェースの一覧で見分け、そのルールの DNAT を作らずに理由を報告する。/31 の両端と、
+// より大きな帯の中の .255 は公開する。conntrack の収束も、これらの宛先へ DNAT したフローを残さない。
+func TestKernelRefusesBroadcastAndMulticastTargets(t *testing.T) {
+	k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{
+		"bc.lan": {netip.MustParseAddr("192.168.50.255")},
+	}}
+	d := newTestKernel(t, k, nil, nil)
+	d.unicast = allowtargets.NewUnicast(func() ([]netip.Prefix, error) {
+		return []netip.Prefix{netip.MustParsePrefix("192.168.50.2/24"), netip.MustParsePrefix("192.168.0.10/23"),
+			netip.MustParsePrefix("10.1.1.0/31")}, nil
+	}, func(string, ...any) {})
+	rules := []proto.AgentRule{
+		tcpRule("dbc", "192.168.50.255:9", 7001, 7001),
+		tcpRule("hbc", "bc.lan:9", 7002, 7002),
+		tcpRule("mc", "239.1.2.3:5000", 7003, 7003),
+		tcpRule("host255", "192.168.0.255:80", 7004, 7004),
+		tcpRule("p2p", "10.1.1.1:80", 7005, 7005),
+	}
+	if _, err := d.ApplyRules(1, rules, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"dbc": "target 192.168.50.255 is the broadcast address of 192.168.50.0/24 on this host; " + reasontext.UnicastOnly,
+		"hbc": "target 192.168.50.255 is the broadcast address of 192.168.50.0/24 on this host; " + reasontext.UnicastOnly,
+		"mc":  "target 239.1.2.3 is a multicast address; " + reasontext.UnicastOnly,
+	}
+	for _, r := range d.Pub.Rules {
+		if w, ok := want[r.RuleID]; ok {
+			if len(r.Ranges) != 0 || r.Reason != w {
+				t.Errorf("rule %s = %+v, want no DNAT and the reason %q", r.RuleID, r, w)
+			}
+			if st := statusOf(t, d, r.RuleID); st.State != proto.StatusError || st.Reason != w {
+				t.Errorf("rule %s status = %+v", r.RuleID, st)
+			}
+			continue
+		}
+		if len(r.Ranges) != 1 || r.Reason != "" {
+			t.Errorf("rule %s = %+v, want it published", r.RuleID, r)
+		}
+	}
+	// conntrack の収束は、前の公開がある 2 回目の公開から走る
+	if _, err := d.ApplyRules(2, append(rules, tcpRule("more", "192.168.50.3:80", 7006, 7006)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.converged) == 0 {
+		t.Fatal("no conntrack convergence after the second publication")
+	}
+	scope := k.converged[len(k.converged)-1].scope
+	if scope.AllowTarget == nil {
+		t.Fatal("the conntrack scope has no target check")
+	}
+	for ap, keep := range map[string]bool{
+		"192.168.50.255:9": false, "239.1.2.3:5000": false, "255.255.255.255:9": false,
+		"192.168.0.255:80": true, "10.1.1.1:80": true,
+	} {
+		if got := scope.AllowTarget(netip.MustParseAddrPort(ap)); got != keep {
+			t.Errorf("conntrack keeps flows to %s = %v, want %v", ap, got, keep)
+		}
+	}
+}
+
+// 許可一覧があるときの conntrack の収束は、許可一覧の外と、ブロードキャストかマルチキャストの宛先の
+// どちらのフローも残さない。
+func TestKernelConntrackScopeCombinesAllowlistAndUnicast(t *testing.T) {
+	allow, err := allowtargets.Parse("192.168.1.0/24,239.0.0.0/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := &fakeKernel{forwardOn: true, dns: map[string][]netip.Addr{}}
+	d := newTestKernel(t, k, nil, allow)
+	if _, err := d.ApplyRules(1, []proto.AgentRule{tcpRule("r", "192.168.1.20:80", 80, 80)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ApplyRules(2, []proto.AgentRule{tcpRule("r", "192.168.1.20:80", 80, 80), tcpRule("s", "192.168.1.21:80", 81, 81)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(k.converged) == 0 {
+		t.Fatal("no conntrack convergence after the second publication")
+	}
+	scope := k.converged[len(k.converged)-1].scope
+	for ap, keep := range map[string]bool{"192.168.1.20:80": true, "10.0.0.1:80": false, "239.1.2.3:5000": false} {
+		if got := scope.AllowTarget(netip.MustParseAddrPort(ap)); got != keep {
+			t.Errorf("conntrack keeps flows to %s = %v, want %v", ap, got, keep)
+		}
 	}
 }

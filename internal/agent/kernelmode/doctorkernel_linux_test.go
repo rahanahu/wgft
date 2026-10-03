@@ -18,6 +18,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
+	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -161,14 +162,18 @@ func TestReadKernelTableAgainstTheRecord(t *testing.T) {
 }
 
 // 記録の無い実行では、宣言から導ける範囲だけを比べる。IP リテラルは宛先まで、ホスト名はポートだけを見て、
-// ループバックの宛先は理由を持つ。許可一覧は当てはめない(設計文書 10.2c 節の「記録が無い場合」)。
+// ループバック、ブロードキャスト、マルチキャストの宛先は理由を持つ。帯のブロードキャストはホストの
+// インタフェースの一覧で見分ける。許可一覧は当てはめない(設計文書 10.2c 節の「記録が無い場合」)。
 func TestReadKernelTableFromTheDeclaration(t *testing.T) {
 	f := kernelDoctorCreds(t,
 		tcpRule("lit", "192.168.1.2:80", 8080, 8081),
 		tcpRule("name", "game.lan:25565", 25565, 25566),
 		tcpRule("lo", "127.0.0.1:22", 2222, 2222),
+		tcpRule("mc", "239.1.2.3:5000", 5000, 5000),
+		tcpRule("bc", "192.168.1.255:9", 9, 9),
 	)
 	k := healthyKernel(t, f)
+	k.prefixes = []netip.Prefix{netip.MustParsePrefix("192.168.1.5/24")}
 	k.table = nft.AgentInspection{DNATs: []nft.AgentDNAT{
 		{RuleID: "lit", Proto: proto.TCP, Ports: proto.PortRange{Lo: 8080, Hi: 8080}, Dest: netip.MustParseAddrPort("192.168.1.2:80")},
 		{RuleID: "lit", Proto: proto.TCP, Ports: proto.PortRange{Lo: 8081, Hi: 8081}, Dest: netip.MustParseAddrPort("192.168.1.9:81")},
@@ -194,6 +199,13 @@ func TestReadKernelTableFromTheDeclaration(t *testing.T) {
 	}
 	if r := byID["lit"]; r.DNATPorts != 1 {
 		t.Errorf("literal rule = %+v, want 1 port in place", r)
+	}
+	if r := byID["mc"]; r.State != proto.StatusError || r.Reason != "target 239.1.2.3 is a multicast address; "+reasontext.UnicastOnly {
+		t.Errorf("multicast rule = %+v", r)
+	}
+	if r := byID["bc"]; r.State != proto.StatusError ||
+		r.Reason != "target 192.168.1.255 is the broadcast address of 192.168.1.0/24 on this host; "+reasontext.UnicastOnly {
+		t.Errorf("directed broadcast rule = %+v", r)
 	}
 
 	// ホスト名のルールのポートが欠ければ、それも欠けとして数える

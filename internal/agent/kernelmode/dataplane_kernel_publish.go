@@ -144,10 +144,10 @@ func (d *Dataplane) convergeFlows() {
 	if err != nil {
 		return
 	}
-	scope := conntrack.AgentScope{Local: addr.Addr(), Peer: d.server}
-	if d.allow != nil {
-		scope.AllowTarget = d.allow.Allows
-	}
+	// 許可一覧の外と、ブロードキャストかマルチキャストのアドレスへ DNAT したフローを残さない(7 節)
+	scope := conntrack.AgentScope{Local: addr.Addr(), Peer: d.server, AllowTarget: func(ap netip.AddrPort) bool {
+		return d.unicast.Refuse(ap.Addr()) == "" && (d.allow == nil || d.allow.Allows(ap))
+	}}
 	res, err := d.Ops.ConvergeFlows(d.unconverged, *d.Pub, scope)
 	// 閉じたフローがあれば出す。閉じられなかったフローは誤りに数が入るので、誤りと同じく変わったときだけ
 	// 出す。同じ削除の失敗が 30 秒ごとに繰り返す間、同じ行を出し続けないためである

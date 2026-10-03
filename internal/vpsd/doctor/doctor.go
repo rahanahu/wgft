@@ -124,6 +124,10 @@ const (
 	// ReasonTargetLoopbackUnsupported は、カーネルモードのエージェントがループバックか未指定のアドレスの
 	// 宛先を公開しないことである(設計文書 7b.2・7b.3 節)。宛先をホストの LAN のアドレスに直せば通る。
 	ReasonTargetLoopbackUnsupported = "target_loopback_unsupported"
+	// ReasonTargetNotUnicast は、エージェントがブロードキャストかマルチキャストのアドレスの宛先を拒んだ
+	// ことである(設計文書 7・7b.3 節)。2 つのモードに共通である。許可一覧に加えても通らないので、
+	// target_not_allowed と分ける。
+	ReasonTargetNotUnicast = "target_not_unicast"
 	// ReasonAgentIPForwardOff は、ルールの持ち主のエージェントが、自分のホストの net.ipv4.ip_forward が
 	// 1 でないためにそのルールを転送できないと報告したことである(設計文書 7b.1・10.2a 節)。直す場所は
 	// VPS ではなくエージェントのホストである。

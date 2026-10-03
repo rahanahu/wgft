@@ -35,7 +35,9 @@ type AgentScope struct {
 	// Peer は vpsd のトンネルアドレスである。wgft0 のピアの AllowedIPs はこのアドレスの /32 だけなので、
 	// wgft0 から入るパケットの送信元は必ずこのアドレスになる。
 	Peer netip.Addr
-	// AllowTarget は宛先の許可一覧の判定である(nft.AgentConfig.AllowTarget と同じもの)。nil なら制限しない。
+	// AllowTarget は、DNAT の宛先へのフローを残してよいかの判定である。エージェントは、宛先の許可一覧
+	// (nft.AgentConfig.AllowTarget と同じもの)と、ブロードキャストとマルチキャストの拒否
+	// (nft.AgentConfig.RefuseTarget と同じもの)を合わせて渡す。nil なら制限しない。
 	AllowTarget func(netip.AddrPort) bool
 }
 
@@ -48,7 +50,7 @@ type AgentResult struct {
 	Removed int
 	// Retargeted は、ポートの実効宛先の宣言が変わったので消したフローの数である。
 	Retargeted int
-	// NotAllowed は、宣言は変わらないが DNAT の宛先が今の許可一覧の外にあるので消したフローの数である。
+	// NotAllowed は、宣言は変わらないが DNAT の宛先を AllowTarget が今は通さないので消したフローの数である。
 	NotAllowed int
 	// Failed は、消すべきだったが削除に失敗したフローの数である。
 	Failed int

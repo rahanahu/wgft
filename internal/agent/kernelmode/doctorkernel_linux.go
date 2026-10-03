@@ -18,6 +18,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/rahanahu/wgft/internal/agent/agentdp"
+	"github.com/rahanahu/wgft/internal/agent/allowtargets"
 	"github.com/rahanahu/wgft/internal/agent/controlapi"
 	"github.com/rahanahu/wgft/internal/agent/credentials"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
@@ -53,6 +54,10 @@ type DoctorOps struct {
 	Route func(dst netip.Addr) (string, error)
 	// LocalAddrs はホスト自身の IPv4 のアドレスである。CAP_NET_ADMIN は要らない
 	LocalAddrs func() (map[netip.Addr]bool, error)
+	// Prefixes はホストのインタフェースのアドレスとプレフィクス長である。記録が無い場合に宣言から
+	// 組む表で、帯のブロードキャストのアドレスの宛先を見分けるために読む(10.2c 節)。nil ならこのホストの
+	// 一覧を読む。CAP_NET_ADMIN は要らない
+	Prefixes allowtargets.InterfacePrefixes
 }
 
 func defaultKernelDoctorOps() DoctorOps {
@@ -240,8 +245,11 @@ func readKernelTable(ops DoctorOps, iface string, raw json.RawMessage, st *proto
 	case len(raw) > 0 && json.Unmarshal(raw, &want) == nil:
 		t.Source, t.Generation = controlapi.KernelTableFromRecord, want.Generation
 	case st != nil:
-		// 記録が無い。宣言から、名前の解決と許可一覧を当てはめずに組む(10.2c 節の「記録が無い場合」)
-		want = nft.PlanAgent(nft.AgentInput{Generation: st.Generation, Rules: st.Rules}, nft.AgentConfig{WGInterface: iface})
+		// 記録が無い。宣言から、名前の解決と許可一覧を当てはめずに組む(10.2c 節の「記録が無い場合」)。
+		// ブロードキャストとマルチキャストの宛先は、稼働中のエージェントと同じく公開しないものとして組む。
+		// 一覧を読めないことは doctor の出力を乱さないようログに出さない
+		want = nft.PlanAgent(nft.AgentInput{Generation: st.Generation, Rules: st.Rules},
+			nft.AgentConfig{WGInterface: iface, RefuseTarget: allowtargets.NewUnicast(ops.Prefixes, func(string, ...any) {}).Refuse})
 		t.Source, t.Generation = controlapi.KernelTableFromDeclaration, st.Generation
 	}
 	ins, present, err := ops.InspectTable(want, iface)

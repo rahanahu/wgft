@@ -107,6 +107,21 @@ func TestTargetReasonCode(t *testing.T) {
 			want:   ReasonTargetLoopbackUnsupported,
 		},
 		{
+			name:   "broadcast or multicast target, either mode",
+			reason: "target 239.1.2.3 is a multicast address; the agent forwards only to unicast targets",
+			want:   ReasonTargetNotUnicast,
+		},
+		{
+			name:   "userspace directed broadcast with the listener name",
+			reason: "udp/7001: target 192.168.50.255 is the broadcast address of 192.168.50.0/24 on this host; the agent forwards only to unicast targets",
+			want:   ReasonTargetNotUnicast,
+		},
+		{
+			name:   "kernel-mode name that stopped resolving and whose last address is a broadcast",
+			reason: "name resolution of target host \"a.lan\" failed: no such host; the address from the last successful resolution is not usable either: target 255.255.255.255 is the limited broadcast address; the agent forwards only to unicast targets",
+			want:   ReasonResolveFailed,
+		},
+		{
 			name:   "kernel-mode name that stopped resolving and whose last address is loopback",
 			reason: "name resolution of target host \"a.lan\" failed: no such host; the address from the last successful resolution is not usable either: target 127.0.0.1 is a loopback address; kernel mode does not forward to loopback targets, use this host's LAN address",
 			want:   ReasonResolveFailed,

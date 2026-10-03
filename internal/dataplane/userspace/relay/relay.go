@@ -59,6 +59,13 @@ type Options struct {
 	// AllowTargetSource は許可一覧の出どころ。拒否の理由に添える(エージェントでは
 	// WGFT_AGENT_ALLOW_TARGETS)。AllowTarget が nil なら使わない
 	AllowTargetSource string
+	// RefuseTarget は、宛先のアドレスへ接続しない理由を返す。接続してよければ空を返す。エージェントが
+	// ブロードキャストとマルチキャストの宛先を拒むために渡す(設計文書 7 節)。報告は AllowTarget と同じで、
+	// AllowTarget より先に呼ぶ。IP リテラルの宛先は適用のときに判定し、拒めば待ち受けを開かない。ホスト名の宛先は、
+	// 許可一覧があれば中継が自分で解決したアドレスで、無ければ既定の Dial の Control が Go の接続の
+	// 解決したアドレスで判定する。Dial を渡した場合、許可一覧の無いホスト名の判定はその Dial に任せる。
+	// nil なら判定しない
+	RefuseTarget func(netip.Addr) string
 	// LookupTarget は宛先のホスト名を解決する。nil なら net.DefaultResolver。AllowTarget を
 	// 渡したときだけ使う(許可一覧は実際に接続するアドレスで判定するため)
 	LookupTarget func(ctx context.Context, host string) ([]netip.Addr, error)
@@ -117,7 +124,7 @@ const targetProbeConcurrency = 32
 // vpsd が Staged.Commit に渡す keep は dataplane.Retiring.SourceAllowed で錠を取らない。CloseSessions に
 // 渡す keep は、Retiring のルールでなければ評価器(goengine)の錠を取る。TCP の待ち受けの錠の内側では
 // cutConn も呼び、netstack の接続の Abort が nettun の接続の錠を取る。Options の Admit、AdmitPacket、
-// Dial、LookupTarget と、中継と到達確認の中の AllowTarget は、relay の錠を持たずに呼ぶ。
+// Dial、LookupTarget と、中継と到達確認の中の AllowTarget と RefuseTarget は、relay の錠を持たずに呼ぶ。
 //
 // 次の 2 つの説明は、中継の goroutine が mu を待つことに依っている。udp.go の新しいセッションの
 // 登録(Apply が mu を持つ間、ruleOf と targetOf が待たされる)と、Staged.Commit の Retiring からの
@@ -257,6 +264,9 @@ func New(n Network, opts Options) *Manager {
 	}
 	if opts.Dial == nil {
 		d := &net.Dialer{Timeout: 10 * time.Second}
+		if opts.RefuseTarget != nil {
+			d.ControlContext = refuseControl(opts.RefuseTarget)
+		}
 		opts.Dial = d.Dial
 	}
 	if opts.Logf == nil {

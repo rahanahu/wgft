@@ -40,6 +40,10 @@ type AgentConfig struct {
 	AllowTarget func(netip.AddrPort) bool
 	// AllowTargetSource は許可一覧の設定の名前である。拒否の理由に出す。
 	AllowTargetSource string
+	// RefuseTarget は、宛先のアドレスへ転送しない理由を返す。転送してよければ空を返す。エージェントが
+	// ブロードキャストとマルチキャストの宛先を拒むために渡す(7 節、7b.2 節)。理由はユーザー空間モードの
+	// 中継と同じ文言である。nil なら判定しない。
+	RefuseTarget func(netip.Addr) string
 }
 
 // Resolution は、ルールの宛先のホスト名を解決した結果である(7b.2 節)。ResolveAgentTargets が作る。
@@ -127,6 +131,7 @@ func sortDNATs(d []AgentDNAT) {
 //   - 宛先のホスト名を解決できない場合、または IPv4 のアドレスを持たない場合
 //   - 宛先が IPv6 のアドレスの場合。カーネルモードは IPv4 の宛先だけを扱う
 //   - 宛先がループバック(127.0.0.0/8)か未指定のアドレス(0.0.0.0)の場合
+//   - 宛先がブロードキャストかマルチキャストのアドレスの場合(cfg.RefuseTarget の判定)
 //
 // 宛先の許可一覧はポートごとの実効宛先で判定する。ホスト名が複数のアドレスに解決されたときは、ポートごとに
 // 一覧が通すアドレスだけを残し、その中で最も小さいアドレスを使う(7b.2 節)。どのアドレスも通らない
@@ -169,7 +174,7 @@ func planAgentRule(r proto.AgentRule, resolved map[string]Resolution, cfg AgentC
 		res.Reason = fmt.Sprintf("target port %d plus the width of range %s exceeds 65535", base, r.ListenPort)
 		return res
 	}
-	addrs, reason := targetAddrs(host, resolved)
+	addrs, reason := targetAddrs(host, resolved, cfg.RefuseTarget)
 	if reason != "" {
 		res.Reason = reason
 		return res
@@ -252,8 +257,8 @@ func refusedReason(host string, addrs []netip.Addr, to uint16, source string) st
 const maxRefusedAddrs = 4
 
 // targetAddrs は宛先のホストを、DNAT に使える IPv4 のアドレスの昇順の並びにする。使えなければ理由を返す。
-// ホスト名の解決の結果にループバックか未指定のアドレスが混ざっていれば、それを除いて残りを使う。
-func targetAddrs(host string, resolved map[string]Resolution) ([]netip.Addr, string) {
+// ホスト名の解決の結果にループバック、未指定、refuse が拒むアドレスが混ざっていれば、それを除いて残りを使う。
+func targetAddrs(host string, resolved map[string]Resolution, refuse func(netip.Addr) string) ([]netip.Addr, string) {
 	var cands []netip.Addr
 	if addr, err := netip.ParseAddr(host); err == nil {
 		cands = []netip.Addr{addr}
@@ -274,7 +279,15 @@ func targetAddrs(host string, resolved map[string]Resolution) ([]netip.Addr, str
 	reason := ""
 	for _, a := range cands {
 		a = a.Unmap()
+		var refused string
+		if refuse != nil {
+			refused = refuse(a)
+		}
 		switch {
+		case refused != "":
+			// ブロードキャストとマルチキャストは、IPv6 のマルチキャストも含めてユーザー空間モードと同じ理由で
+			// 拒む。IPv4 だけの規則より先に見るのはそのためである(7b.2 節)
+			reason = refused
 		case !a.Is4():
 			// カーネルモードは IPv4 の宛先だけを扱う。実装の制限ではなく、モードの機能の違いである(7b.2 節)
 			reason = fmt.Sprintf("target %s is an IPv6 address; kernel mode forwards only to IPv4 targets", a)
