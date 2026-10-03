@@ -134,7 +134,7 @@ func TestIPForwardOffNextStepDoesNotAdviseRestartAlone(t *testing.T) {
 				t.Errorf("%s next step contains %q: %s", name, bad, c.Next)
 			}
 		}
-		for _, want := range []string{"sysctl -w net.ipv4.ip_forward=1", "restarting the server alone does not fix it", "read-only /proc"} {
+		for _, want := range []string{"sysctl -w net.ipv4.ip_forward=1", "restarting the server alone does not fix it", "read-only /proc", "container limit"} {
 			if !strings.Contains(c.Next, want) {
 				t.Errorf("%s next step lacks %q: %s", name, want, c.Next)
 			}
