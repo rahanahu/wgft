@@ -46,6 +46,12 @@ type deliveryOwner struct {
 	pending  bool // saved full declaration lacks a successful matching Commit
 }
 
+// deliveryCandidate builds the snapshot a Commit of rules and agents at
+// generation gen publishes. Once the bootstrap has bound the conntrack UDP
+// timeouts, withTimeouts puts them into every State; before that they stay
+// zero, and the bind adds them. The caller holds Daemon.mu, as apply requires,
+// and the bind stores d.timeouts under the same lock, so one load serves the
+// whole candidate.
 func (d *Daemon) deliveryCandidate(rules []proto.Rule, agents []store.Agent, gen uint64) *deliverySnapshot {
 	entries := make(map[string]deliveryEntry, len(agents))
 	for _, a := range agents {
@@ -55,9 +61,6 @@ func (d *Daemon) deliveryCandidate(rules []proto.Rule, agents []store.Agent, gen
 			Address: netip.PrefixFrom(a.Address, d.network.Bits()).String(),
 			MTU:     d.opts.MTU, Keepalive: 25,
 		}
-		if t := d.timeouts.Load(); t != nil {
-			st.WG.UDPTimeout, st.WG.UDPTimeoutStream = t.Timeout, t.TimeoutStream
-		}
 		for i := range rules {
 			if rules[i].Agent == a.Name {
 				st.Rules = append(st.Rules, store.DeliveredRule(&rules[i], a.Disabled()))
@@ -65,7 +68,11 @@ func (d *Daemon) deliveryCandidate(rules []proto.Rule, agents []store.Agent, gen
 		}
 		entries[a.Name] = deliveryEntry{identity: a.Identity, key: a.PublicKey, state: st}
 	}
-	return &deliverySnapshot{entries: entries, generation: gen}
+	s := &deliverySnapshot{entries: entries, generation: gen}
+	if t := d.timeouts.Load(); t != nil {
+		return s.withTimeouts(*t)
+	}
+	return s
 }
 
 func equalDelivery(a, b *deliverySnapshot) bool {
@@ -226,10 +233,11 @@ func (o *deliveryOwner) state(name, identity string, key *string) (*proto.State,
 }
 
 // withTimeouts returns a new snapshot with the same entries and generation,
-// whose every State carries the conntrack UDP timeouts t. The entries map is
-// new and s is not modified, so a snapshot stays as committed installed it.
-// Only WG, a value, changes; Rules still shares its backing array with s,
-// which nothing writes to.
+// whose every State carries the conntrack UDP timeouts t. It is the only code
+// that writes the timeouts into a State. The entries map is new and s is not
+// modified, so a snapshot stays as committed installed it. Only WG, a value,
+// changes; Rules still shares its backing array with s, which nothing writes
+// to.
 func (s *deliverySnapshot) withTimeouts(t linux.UDPTimeouts) *deliverySnapshot {
 	entries := make(map[string]deliveryEntry, len(s.entries))
 	for name, e := range s.entries {

@@ -425,7 +425,8 @@ func (d *Daemon) serve(ctx context.Context, rules []proto.Rule) error {
 		}
 		return err
 	}
-	// bindDeliveryTimeouts installed both fields before the listener opens.
+	// bindDeliveryTimeouts has stored d.timeouts and installed the bound delivery
+	// snapshot, so both are in place before the agent API listener opens.
 	if held {
 		// 保留の間に運用者が宣言を直しているので、起動完了の行に出す数を読み直す
 		if rules, err = d.st.Rules(); err != nil {
