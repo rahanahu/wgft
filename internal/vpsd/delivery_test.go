@@ -547,6 +547,40 @@ func TestSuccessfulCommitBeforeBindingStaysUnservable(t *testing.T) {
 	}
 }
 
+// A successful Commit after the bind builds its snapshot with the bound
+// timeouts, so every agent keeps receiving them once the bound snapshot is
+// replaced.
+func TestCommitAfterBindingCarriesTimeouts(t *testing.T) {
+	f := newDisableFixture(t)
+	f.d.delivery.mu.Lock()
+	f.d.delivery.bound = false
+	f.d.delivery.mu.Unlock()
+	f.d.timeouts.Store(nil)
+	if _, err := f.d.bindDeliveryTimeouts(func() (linux.UDPTimeouts, error) {
+		return linux.UDPTimeouts{Timeout: 7, TimeoutStream: 19}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := f.d.AgentState("home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := rulesOf(t, f.st)
+	rules[0].Target = "192.0.2.70:25565"
+	if _, err := f.d.Batch(admin.BatchRequest{Upsert: []proto.Rule{rules[0]}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"home", "other"} {
+		st, err := f.d.AgentState(name)
+		if err != nil || st.Generation <= before.Generation || st.WG.UDPTimeout != 7 || st.WG.UDPTimeoutStream != 19 {
+			t.Fatalf("%s State after a Commit following the bind: %+v, %v; want generation above %d and timeouts 7 and 19", name, st, err, before.Generation)
+		}
+		if name == "home" && ruleTarget(st, "r_a") != rules[0].Target {
+			t.Fatalf("home State does not carry the committed target: %+v", st)
+		}
+	}
+}
+
 func TestBootstrapReadSerializesWithAdminApply(t *testing.T) {
 	f := newDisableFixture(t)
 	f.d.delivery.mu.Lock()
