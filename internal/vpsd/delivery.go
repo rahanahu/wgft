@@ -248,10 +248,28 @@ func (s *deliverySnapshot) withTimeouts(t linux.UDPTimeouts) *deliverySnapshot {
 	return &deliverySnapshot{entries: entries, generation: s.generation}
 }
 
+// bind makes latest serviceable with the conntrack UDP timeouts t. It
+// replaces latest with a copy that carries t instead of writing into the
+// published snapshot, calls publish, then marks latest bound, all under o.mu,
+// so a selection sees either the unbound or the bound snapshot. publish lets
+// the caller store t in that order without the owner holding the caller's
+// state. Without a latest, it changes nothing and does not call publish.
+func (o *deliveryOwner) bind(t linux.UDPTimeouts, publish func()) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.latest == nil {
+		return errors.New("no successful agent state publication")
+	}
+	o.latest = o.latest.withTimeouts(t)
+	publish()
+	o.bound = true
+	return nil
+}
+
 // bindDeliveryTimeouts makes the latest successful token serviceable. It holds
 // Daemon.mu for the whole call, so no in-process apply can interleave with the
-// read. It replaces latest with a copy that carries the timeouts instead of
-// writing into the published snapshot, then marks latest bound.
+// read, and takes deliveryOwner.mu only inside bind, after Daemon.mu. bind
+// installs the bound snapshot and stores d.timeouts before marking it bound.
 func (d *Daemon) bindDeliveryTimeouts(read func() (linux.UDPTimeouts, error)) (linux.UDPTimeouts, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -259,13 +277,8 @@ func (d *Daemon) bindDeliveryTimeouts(read func() (linux.UDPTimeouts, error)) (l
 	if err != nil {
 		return linux.UDPTimeouts{}, err
 	}
-	d.delivery.mu.Lock()
-	defer d.delivery.mu.Unlock()
-	if d.delivery.latest == nil {
-		return linux.UDPTimeouts{}, errors.New("no successful agent state publication")
+	if err := d.delivery.bind(t, func() { d.timeouts.Store(&t) }); err != nil {
+		return linux.UDPTimeouts{}, err
 	}
-	d.delivery.latest = d.delivery.latest.withTimeouts(t)
-	d.timeouts.Store(&t)
-	d.delivery.bound = true
 	return t, nil
 }

@@ -687,6 +687,72 @@ func TestBootstrapTimeoutReadFailureLeavesStateUnservable(t *testing.T) {
 	}
 }
 
+// Without a successful publication, binding fails before it stores the
+// timeouts or marks anything bound: the timeouts stay unset and no State is
+// served.
+func TestBootstrapBindWithoutPublicationStoresNoTimeouts(t *testing.T) {
+	f := newDisableFixture(t)
+	f.d.delivery.mu.Lock()
+	f.d.delivery.latest = nil
+	f.d.delivery.bound = false
+	f.d.delivery.mu.Unlock()
+	f.d.timeouts.Store(nil)
+	_, err := f.d.bindDeliveryTimeouts(func() (linux.UDPTimeouts, error) {
+		return linux.UDPTimeouts{Timeout: 7, TimeoutStream: 19}, nil
+	})
+	if err == nil || f.d.timeouts.Load() != nil {
+		t.Fatalf("bind without a publication = %v, timeouts = %+v", err, f.d.timeouts.Load())
+	}
+	if generation, _ := f.d.delivery.status(); generation != nil {
+		t.Fatalf("bind without a publication marked generation %d bound", *generation)
+	}
+}
+
+// The bootstrap read runs under Daemon.mu, and bind takes deliveryOwner.mu
+// inside it.
+func TestBootstrapReadHoldsDaemonLock(t *testing.T) {
+	f := newDisableFixture(t)
+	held := false
+	if _, err := f.d.bindDeliveryTimeouts(func() (linux.UDPTimeouts, error) {
+		if f.d.mu.TryLock() {
+			f.d.mu.Unlock()
+		} else {
+			held = true
+		}
+		return linux.UDPTimeouts{Timeout: 7, TimeoutStream: 19}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !held {
+		t.Fatal("the timeout read ran without Daemon.mu")
+	}
+}
+
+// bind calls publish under deliveryOwner.mu after it has installed the
+// snapshot with the timeouts and before it marks latest bound, so no
+// selection sees latest bound before the caller has stored the timeouts.
+func TestDeliveryOwnerBindPublishesBeforeMarkingBound(t *testing.T) {
+	committed := &deliverySnapshot{entries: map[string]deliveryEntry{"home": {identity: "i", key: "k"}}, generation: 3}
+	o := &deliveryOwner{latest: committed}
+	called := false
+	err := o.bind(linux.UDPTimeouts{Timeout: 7, TimeoutStream: 19}, func() {
+		called = true
+		if o.mu.TryRLock() {
+			o.mu.RUnlock()
+			t.Error("publish ran without deliveryOwner.mu")
+		}
+		if o.bound {
+			t.Error("latest was marked bound before publish")
+		}
+		if e := o.latest.entries["home"]; o.latest == committed || e.state.WG.UDPTimeout != 7 || e.state.WG.UDPTimeoutStream != 19 {
+			t.Errorf("snapshot with the timeouts not installed before publish: %+v", o.latest)
+		}
+	})
+	if err != nil || !called || !o.bound || o.latest.generation != committed.generation {
+		t.Fatalf("bind = %v, publish called %v, bound %v, generation %d", err, called, o.bound, o.latest.generation)
+	}
+}
+
 func TestMatchingNoOpClearsPendingAfterTransientRepairFailure(t *testing.T) {
 	f := newDisableFixture(t)
 	f.p.setErr(errors.New("temporary publication failure"))
