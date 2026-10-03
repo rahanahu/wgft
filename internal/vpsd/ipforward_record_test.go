@@ -180,6 +180,43 @@ func TestIPForwardUnreadableWritesWithoutRecords(t *testing.T) {
 	}
 }
 
+// TestIPForwardUnreadableAndUnwritableDoesNotClaimZero checks that a value that could not be read
+// and could not be set is not reported as 0: the finding names both errors, says the value is
+// unknown, and still points at the commands that read and set it.
+func TestIPForwardUnreadableAndUnwritableDoesNotClaimZero(t *testing.T) {
+	st := newRecordsDB(t)
+	readErr, writeErr := errors.New("read boom"), errors.New("write boom")
+	k := &fakeIPForward{t: t, st: st, readErr: readErr, writeErr: writeErr}
+	f := enableIPForward(k.ops(), &faultyRecords{Store: st})
+	if f == nil {
+		t.Fatal("no finding")
+	}
+	s := f.String()
+	if strings.Contains(s, "is 0") {
+		t.Errorf("finding claims the value is 0: %q", s)
+	}
+	for _, want := range []string{"could not be read: read boom", "setting it to 1 failed too: write boom", "unknown", "sysctl net.ipv4.ip_forward\n", "sysctl -w net.ipv4.ip_forward=1"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("finding lacks %q: %q", want, s)
+		}
+	}
+	if got := readRecords(t, st); got != (records{}) {
+		t.Errorf("database holds %+v; want no record", got)
+	}
+}
+
+// TestIPForwardZeroAndUnwritableKeepsTheWriteFailureFinding checks that a value read as 0 that
+// cannot be set keeps the wording that says it is 0.
+func TestIPForwardZeroAndUnwritableKeepsTheWriteFailureFinding(t *testing.T) {
+	st := newRecordsDB(t)
+	k := &fakeIPForward{t: t, st: st, writeErr: errors.New("write boom")}
+	f := enableIPForward(k.ops(), &faultyRecords{Store: st})
+	want := "net.ipv4.ip_forward: is 0 and could not be set to 1: write boom; kernel-mode forwarding will not work until this is set\n    sysctl -w net.ipv4.ip_forward=1"
+	if f == nil || f.String() != want {
+		t.Errorf("finding = %v; want %q", f, want)
+	}
+}
+
 // TestIPForwardWritesEvenWhenThePlannedRecordFails checks that a failed planned record is warned
 // about before the write and does not stop the write (design.md 11b 節). When the confirmed record
 // is then saved, nothing is missing and no finding is raised.

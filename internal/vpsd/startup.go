@@ -85,7 +85,8 @@ func defaultIPForwardOps() ipForwardOps {
 // 2026-10-03、所有者の決定)。
 //
 //  1. 値を読む。1 なら何もしない。前の起動の予定の記録が残っていても消さない
-//  2. 読めなければ 1 を書き、どちらの記録も残さない。0 だったとは言えないためである
+//  2. 読めなければ 1 を書き、どちらの記録も残さない。0 だったとは言えないためである。書けなければ、0 とは
+//     言わない Finding を返す
 //  3. 0 なら、書く前に予定の記録(MetaIPForwardWriteStartedAt)を保存する。保存できなくても警告して書く。
 //     転送が落ちたままになるほうが悪いためである(11b 節)
 //  4. 書けなければ予定の記録を消し、書けなかった Finding を返す
@@ -100,7 +101,7 @@ func enableIPForward(o ipForwardOps, rec ipForwardRecords) *linux.Finding {
 	}
 	if rerr != nil {
 		if err := o.write(); err != nil {
-			return ipForwardWriteFailed(err)
+			return ipForwardUnreadableAndUnwritable(rerr, err)
 		}
 		return nil
 	}
@@ -132,7 +133,18 @@ func enableIPForward(o ipForwardOps, rec ipForwardRecords) *linux.Finding {
 	return nil
 }
 
-// ipForwardWriteFailed は、1 を書けなかったときの Finding である。読み取り専用の /proc や seccomp/LSM
+// ipForwardUnreadableAndUnwritable は、値を読めず、1 も書けなかったときの Finding である。値を読めて
+// いないので、0 だったとは言わない。読みと書きの両方の誤りを示し、確かめ方と直し方を案内する。
+func ipForwardUnreadableAndUnwritable(readErr, writeErr error) *linux.Finding {
+	return &linux.Finding{
+		Where: "net.ipv4.ip_forward",
+		Problem: fmt.Sprintf("could not be read: %v; setting it to 1 failed too: %v; its value is unknown, so kernel-mode forwarding may not work. "+
+			"Read the value with the first command below; if it reads 0, set it with the second", readErr, writeErr),
+		Suggest: []string{"sysctl net.ipv4.ip_forward", "sysctl -w net.ipv4.ip_forward=1"},
+	}
+}
+
+// ipForwardWriteFailed は、0 を読んだ後に 1 を書けなかったときの Finding である。読み取り専用の /proc や seccomp/LSM
 // で塞がれている場合などに当たる。落とさず警告する。
 func ipForwardWriteFailed(err error) *linux.Finding {
 	return &linux.Finding{
