@@ -345,6 +345,13 @@ func TestKernelIPForwardUnreadableAndUnwritableDoesNotClaimTheValue(t *testing.T
 		if s := statusOf(t, d, remote.ID); s.State != proto.StatusOK {
 			t.Errorf("status = %+v after the value became 1", s)
 		}
+		// 1 になった後で外から 0 に戻されたときは、起動時の古い書きの誤りを残さず、0 と述べる
+		k.forwardOn = false
+		d.Refresh()
+		want = "on the agent host, net.ipv4.ip_forward is 0; its kernel does not forward to a target other than the agent host itself"
+		if r := statusOf(t, d, remote.ID).Reason; r != want {
+			t.Errorf("reason after 1 then 0 = %q, want %q", r, want)
+		}
 	})
 }
 

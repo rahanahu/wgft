@@ -1860,7 +1860,7 @@ server の `net.ipv4.ip_forward` の 2 段の記録(6.1 節、10.3 節、11b 節
 
 - ハートビートの理由の文言:値を読めず書けもしなかった場合の理由を、「is not 1 and cannot be set」から、読みと書きの両方の誤りと値が分からないことを述べる文に改める。0 を読んで書けなかった場合の理由は変えない。文言は保証の対象ではない
 - 版の組み合わせ:v1.2 から v1.4 の server は旧い案内(値を 0 と断定し、エージェントの再起動を勧める)と旧い所見を出す。新しいエージェントとの組でも、これはエージェントの側から直せない。案内は server が組むので、server を更新するまで旧いままである。分類は同じなので、符号は変わらない
-- `server doctor`:理由の符号の分類は変えない。理由が `net.ipv4.ip_forward` を含むかだけを見るので、新しい理由も旧い理由も `agent_ip_forward_off` に分類する。案内の文言は人向けの表示であり、保証の対象ではない
+- `server doctor`:理由の符号の分類は変えない。理由が `net.ipv4.ip_forward` を含むかだけを見るので、新しい理由も旧い理由も `agent_ip_forward_off` に分類する。所見の行は、値が分からないと述べる理由のとき、「does not forward this rule」ではなく「may not forward this rule, because it could not read the value」と述べる。所見の行と案内の文言は人向けの表示であり、保証の対象ではない
 - `agent doctor`:変えない。`host.forwarding` は制御ソケットから今の値を読み、読めなければ `ip_forward_unreadable` とするので、同じ断定を持たない
 - wire protocol、管理用 API、`--json` の形、CLI のコマンドとフラグ、設定:変えない
 
