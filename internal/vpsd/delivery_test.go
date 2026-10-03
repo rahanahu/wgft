@@ -429,6 +429,59 @@ func TestBootstrapBindsLatestSuccessfulProjection(t *testing.T) {
 	}
 }
 
+// Binding the timeouts installs a new snapshot. The snapshot committed
+// installed keeps its entries, so a holder of its pointer never sees the
+// timeouts change under it. The bound snapshot differs only in the timeouts.
+func TestBootstrapBindLeavesCommittedSnapshotUnchanged(t *testing.T) {
+	f := newDisableFixture(t)
+	f.d.delivery.mu.Lock()
+	f.d.delivery.full = nil
+	f.d.delivery.mu.Unlock()
+	f.d.timeouts.Store(nil)
+	f.d.mu.Lock()
+	err := f.d.applyNFT(rulesOf(t, f.st))
+	f.d.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.d.delivery.mu.RLock()
+	committed := f.d.delivery.latest
+	f.d.delivery.mu.RUnlock()
+	saved := make(map[string]deliveryEntry, len(committed.entries))
+	for name, e := range committed.entries {
+		if e.state.WG.UDPTimeout != 0 || e.state.WG.UDPTimeoutStream != 0 {
+			t.Fatalf("%s committed with timeouts before binding: %+v", name, e.state.WG)
+		}
+		saved[name] = e
+	}
+	if len(saved) != 2 {
+		t.Fatalf("committed snapshot has %d entries, want 2", len(saved))
+	}
+	if _, err := f.d.bindDeliveryTimeouts(func() (linux.UDPTimeouts, error) {
+		return linux.UDPTimeouts{Timeout: 7, TimeoutStream: 19}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(committed.entries, saved) {
+		t.Fatalf("binding modified the committed snapshot: %+v", committed.entries)
+	}
+	f.d.delivery.mu.RLock()
+	bound, full := f.d.delivery.latest, f.d.delivery.full
+	f.d.delivery.mu.RUnlock()
+	if bound == committed || full != bound {
+		t.Fatalf("bound snapshot not installed as latest and full: committed=%p latest=%p full=%p", committed, bound, full)
+	}
+	if bound.generation != committed.generation || len(bound.entries) != len(saved) {
+		t.Fatalf("bound snapshot: generation %d entries %d, want %d and %d", bound.generation, len(bound.entries), committed.generation, len(saved))
+	}
+	for name, e := range saved {
+		e.state.WG.UDPTimeout, e.state.WG.UDPTimeoutStream = 7, 19
+		if got, ok := bound.entries[name]; !ok || !reflect.DeepEqual(got, e) {
+			t.Fatalf("bound entry %s = %+v, want %+v", name, got, e)
+		}
+	}
+}
+
 func TestBootstrapReadSerializesWithAdminApply(t *testing.T) {
 	f := newDisableFixture(t)
 	f.d.delivery.mu.Lock()

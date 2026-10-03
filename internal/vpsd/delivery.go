@@ -236,8 +236,25 @@ func (o *deliveryOwner) state(name, identity string, key *string) (*proto.State,
 	return &st, nil
 }
 
+// withTimeouts returns a new snapshot with the same entries and generation,
+// whose every State carries the conntrack UDP timeouts t. The entries map is
+// new and s is not modified, so a snapshot stays as committed installed it.
+// Only WG, a value, changes; Rules still shares its backing array with s,
+// which nothing writes to.
+func (s *deliverySnapshot) withTimeouts(t linux.UDPTimeouts) *deliverySnapshot {
+	entries := make(map[string]deliveryEntry, len(s.entries))
+	for name, e := range s.entries {
+		e.state.WG.UDPTimeout = t.Timeout
+		e.state.WG.UDPTimeoutStream = t.TimeoutStream
+		entries[name] = e
+	}
+	return &deliverySnapshot{entries: entries, generation: s.generation}
+}
+
 // bindDeliveryTimeouts makes the latest successful token serviceable. The
 // caller owns Daemon.mu, so no in-process apply can interleave with the read.
+// It replaces latest with a copy that carries the timeouts instead of writing
+// into the published snapshot.
 func (d *Daemon) bindDeliveryTimeouts(read func() (linux.UDPTimeouts, error)) (linux.UDPTimeouts, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -250,11 +267,7 @@ func (d *Daemon) bindDeliveryTimeouts(read func() (linux.UDPTimeouts, error)) (l
 	if d.delivery.latest == nil {
 		return linux.UDPTimeouts{}, errors.New("no successful agent state publication")
 	}
-	for name, e := range d.delivery.latest.entries {
-		e.state.WG.UDPTimeout = t.Timeout
-		e.state.WG.UDPTimeoutStream = t.TimeoutStream
-		d.delivery.latest.entries[name] = e
-	}
+	d.delivery.latest = d.delivery.latest.withTimeouts(t)
 	d.timeouts.Store(&t)
 	d.delivery.full = d.delivery.latest
 	return t, nil
