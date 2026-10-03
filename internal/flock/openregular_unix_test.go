@@ -4,6 +4,7 @@ package flock
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -32,5 +33,27 @@ func TestLockFileFIFOIsRefusedWithoutBlocking(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("opening a FIFO lock file blocked")
+	}
+}
+
+// AcquireCreating も symlink と FIFO のロックファイルを辿らずに拒み、symlink の先にファイルを作らない。
+func TestAcquireCreatingRefusesIrregularLockFiles(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "a.sqlite")
+	if err := os.Symlink(filepath.Join(dir, "target"), LockPath(link)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := AcquireCreating(link); !errors.Is(err, ErrNotRegular) {
+		t.Errorf("AcquireCreating on a symlink = %v, want ErrNotRegular", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "target")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("AcquireCreating created the symlink's target: %v", err)
+	}
+	fifo := filepath.Join(dir, "b.sqlite")
+	if err := syscall.Mkfifo(LockPath(fifo), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := AcquireCreating(fifo); !errors.Is(err, ErrNotRegular) {
+		t.Errorf("AcquireCreating on a FIFO = %v, want ErrNotRegular", err)
 	}
 }

@@ -7,9 +7,11 @@ package teardown
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -171,5 +173,52 @@ func TestTeardownDryRun(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "restore by hand") {
 		t.Errorf("手で戻す一覧が出ていない:\n%s", buf.String())
+	}
+}
+
+// root の撤去が作ったロックファイルは、置き場のディレクトリの持ち主とグループに付け替わる。同梱の unit の
+// server は DynamicUser で動き、root の持ち物の 0600 のロックファイルを開けないためである(設計文書 10.3 節)。
+// 既にあったロックファイルの持ち主は変えない。
+func TestTeardownGivesTheCreatedLockFileTheDirectoryOwner(t *testing.T) {
+	const uid, gid = 61999, 61998
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(dir, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "wgft.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.SetMeta(store.MetaMode, []byte(store.ModeUserspace)) // カーネルに触れない
+	st.Close()
+
+	var buf bytes.Buffer
+	if err := Run(Options{DBPath: path}, &buf); err != nil {
+		t.Fatalf("teardown: %v\n%s", err, buf.String())
+	}
+	fi, err := os.Stat(flock.LockPath(path))
+	if err != nil {
+		t.Fatalf("lock file after teardown: %v", err)
+	}
+	s := fi.Sys().(*syscall.Stat_t)
+	if s.Uid != uid || s.Gid != gid || fi.Mode().Perm() != 0o600 {
+		t.Errorf("lock file owner %d:%d mode %04o, want %d:%d 0600", s.Uid, s.Gid, fi.Mode().Perm(), uid, gid)
+	}
+
+	// 既にあるロックファイルの持ち主には触れない
+	if err := os.Chown(flock.LockPath(path), 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	if err := Run(Options{DBPath: path}, &buf); err != nil {
+		t.Fatalf("second teardown: %v\n%s", err, buf.String())
+	}
+	fi, _ = os.Stat(flock.LockPath(path))
+	if s := fi.Sys().(*syscall.Stat_t); s.Uid != 0 || s.Gid != 0 {
+		t.Errorf("teardown changed the owner of an existing lock file to %d:%d", s.Uid, s.Gid)
 	}
 }

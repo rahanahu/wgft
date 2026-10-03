@@ -123,3 +123,31 @@ func TestStateString(t *testing.T) {
 		}
 	}
 }
+
+// AcquireCreating は、ロックファイルを自分が作ったときだけ created を返す。既にあれば開くだけで、
+// 別の記述子がロックを持っていれば ErrLocked になる。
+func TestAcquireCreatingReportsCreation(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "wgft.sqlite")
+	l, created, err := AcquireCreating(state)
+	if err != nil || !created {
+		t.Fatalf("first AcquireCreating = %v, %v; want created", created, err)
+	}
+	if _, _, err := AcquireCreating(state); !errors.Is(err, ErrLocked) {
+		t.Fatalf("AcquireCreating while held = %v, want ErrLocked", err)
+	}
+	if fi, err := l.Stat(); err != nil || !fi.Mode().IsRegular() {
+		t.Errorf("Stat = %v, %v", fi, err)
+	}
+	if err := l.Release(); err != nil {
+		t.Fatal(err)
+	}
+	again, created, err := AcquireCreating(state)
+	if err != nil || created {
+		t.Fatalf("AcquireCreating on an existing lock file = %v, %v; want not created", created, err)
+	}
+	again.Release()
+	// 状態ファイルは作らない
+	if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("os.Stat(%s) = %v; AcquireCreating must not create the state file", state, err)
+	}
+}

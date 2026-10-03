@@ -193,6 +193,21 @@ func agentAPIPort(addr string) string {
 
 // Run は起動して、シグナルまで動く。
 func Run(opts Options) error {
+	// 起動ロック。二重起動を防ぎ、teardown が「vpsd 稼働中」を検出できるようにする(仕様 9 節)。
+	// データベースを開く前に取る。ロックを持つ撤去や別の server がある間に、データベースを作ったり
+	// スキーマを上げたりしないためである。撤去が --purge でデータベースを消した後に、空のデータベースを
+	// 作り直して残すこともない(仕様 10.3 節)。
+	// flock は状態ファイルの呼び名を知らない汎用パッケージなので、ここで利用者向けの
+	// 呼び名(サーバのデータベース)に言い換える。
+	lock, err := flock.Acquire(opts.DBPath)
+	if errors.Is(err, flock.ErrLocked) {
+		return errors.New("server database is in use by another process")
+	}
+	if err != nil {
+		return fmt.Errorf("startup lock: %w", err)
+	}
+	defer lock.Release()
+
 	st, err := store.Open(opts.DBPath)
 	if errors.Is(err, store.ErrSchemaNewer) {
 		// 新しい版が書いたデータベースは、この版では読めない。運用者がその版を入れ直すか
@@ -212,18 +227,6 @@ func Run(opts Options) error {
 			log.Printf("warning: agent %q has a name that does not match the current validation rule from spec 5.1; keeping it as is", n)
 		}
 	}
-
-	// 起動ロック。二重起動を防ぎ、teardown が「vpsd 稼働中」を検出できるようにする(仕様 9 節)。
-	// flock は状態ファイルの呼び名を知らない汎用パッケージなので、ここで利用者向けの
-	// 呼び名(サーバのデータベース)に言い換える。
-	lock, err := flock.Acquire(opts.DBPath)
-	if errors.Is(err, flock.ErrLocked) {
-		return errors.New("server database is in use by another process")
-	}
-	if err != nil {
-		return fmt.Errorf("startup lock: %w", err)
-	}
-	defer lock.Release()
 
 	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{
 		iface: opts.WGInterface,
