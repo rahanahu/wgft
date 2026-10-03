@@ -20,8 +20,6 @@ import (
 	"github.com/rahanahu/wgft/proto"
 )
 
-// errBackendFailure simulates a genuine backend failure (e.g. a SQLite error), as opposed to a
-// routine authentication rejection or a real duplicate public key.
 // syncBuffer is a log destination that the test can read while the server's goroutines still write
 // to it. A stream's serve goroutine logs that it connected after it has sent the State, so the
 // client can read the State, and the test the log, before that line is written.
@@ -42,6 +40,8 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+// errBackendFailure simulates a genuine backend failure (e.g. a SQLite error), as opposed to a
+// routine authentication rejection or a real duplicate public key.
 var errBackendFailure = errors.New("simulated backend failure")
 
 type fakeBackend struct {
