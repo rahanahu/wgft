@@ -109,3 +109,42 @@ func TestProbeSkipsAnUnboundListener(t *testing.T) {
 		t.Errorf("targetErr = %v, want nil: a listener that never bound was probed", targetErr)
 	}
 }
+
+// bind に失敗した待ち受けは中継のフローを持たないので、Status の Sessions と Flows は 0 である。
+// 宣言から消えた待ち受けは、何もしない closeF の後に枠を閉じて表から消える(shutdownLocked)。
+func TestUnboundListenerReportsNoSessionsAndClosesItsBudget(t *testing.T) {
+	tcpBlocker, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpBlocker.Close()
+	for _, k := range []Key{
+		{proto.UDP, blockedUDP(t)},
+		{proto.TCP, uint16(tcpBlocker.Addr().(*net.TCPAddr).Port)},
+	} {
+		t.Run(string(k.Proto), func(t *testing.T) {
+			r := newTransitionRig(t)
+			r.m.Apply(map[Key]Desired{k: {"127.0.0.1:9", "r_x"}})
+			r.m.mu.Lock()
+			old := r.m.listeners[k]
+			r.m.mu.Unlock()
+			if old == nil || old.bound() {
+				t.Fatalf("setup: the listener must have failed to bind: %+v", old)
+			}
+			st := r.m.Status()
+			if len(st) != 1 || st[0].Listening || st[0].Sessions != 0 || st[0].Flows != 0 {
+				t.Fatalf("status = %+v, want one listener that failed to bind with no sessions and no flows", st)
+			}
+
+			r.m.Apply(map[Key]Desired{})
+			if st := r.m.Status(); len(st) != 0 {
+				t.Fatalf("status after the rule went away = %+v, want none", st)
+			}
+			old.budget.Accept()
+			if hasRule(r.pool(k), "r_x") {
+				t.Errorf("rules %v: the closed listener's budget accepted again, so it was not closed", rules(r.pool(k)))
+			}
+			r.check()
+		})
+	}
+}

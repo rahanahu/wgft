@@ -89,7 +89,7 @@ func (m *Manager) openLocked(k Key, d Desired) *listener {
 		// 開けなくても登録しておき、状態として見せる。次の Apply(再試行)で開き直す。枠は
 		// 受け付けていないままなので、このルールは A に入らない
 		l.bindErr = err
-		l.closeF = func() {}
+		l.listenerOps = unboundOps()
 		m.opts.Logf("listener %s: %v", k, err)
 	} else {
 		// 受け付けを先に始めてから中継を始める。逆の順にすると、A に入る前に来たフローが
@@ -129,7 +129,8 @@ func (m *Manager) Retry() {
 	for _, k := range rebind {
 		l := m.listeners[k]
 		d := Desired{Target: l.target, RuleID: l.ruleID}
-		// bind に失敗した待ち受けの closeF は何もしない関数なので、shutdownLocked は使わず枠だけを外す
+		// bind に失敗した待ち受けの closeF は unboundOps の何もしない関数なので、shutdownLocked は使わず
+		// 枠だけを外す
 		l.budget.Close()
 		delete(m.listeners, k)
 		probes = appendProbe(probes, k, m.openLocked(k, d))
