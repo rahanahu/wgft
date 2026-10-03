@@ -708,8 +708,7 @@ func TestBootstrapBindWithoutPublicationStoresNoTimeouts(t *testing.T) {
 	}
 }
 
-// The bootstrap read runs under Daemon.mu, and bind takes deliveryOwner.mu
-// inside it.
+// The bootstrap read runs under Daemon.mu.
 func TestBootstrapReadHoldsDaemonLock(t *testing.T) {
 	f := newDisableFixture(t)
 	held := false
@@ -725,6 +724,40 @@ func TestBootstrapReadHoldsDaemonLock(t *testing.T) {
 	}
 	if !held {
 		t.Fatal("the timeout read ran without Daemon.mu")
+	}
+}
+
+// The bind, and with it the store of the timeouts, runs under Daemon.mu, so
+// no apply can build a candidate between the read and the bind. The read
+// takes deliveryOwner.mu, which keeps the bind from finishing; while it is
+// held, Daemon.mu must stay held. The test cannot reach publish, a closure
+// inside bindDeliveryTimeouts, so it checks Daemon.mu while the bind waits.
+func TestBootstrapBindHoldsDaemonLock(t *testing.T) {
+	f := newDisableFixture(t)
+	released := make(chan bool, 1)
+	_, err := f.d.bindDeliveryTimeouts(func() (linux.UDPTimeouts, error) {
+		f.d.delivery.mu.Lock()
+		go func() {
+			defer f.d.delivery.mu.Unlock()
+			for deadline := time.Now().Add(200 * time.Millisecond); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+				if f.d.mu.TryLock() {
+					f.d.mu.Unlock()
+					released <- true
+					return
+				}
+			}
+			released <- false
+		}()
+		return linux.UDPTimeouts{Timeout: 7, TimeoutStream: 19}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if <-released {
+		t.Fatal("Daemon.mu was released before the bind finished")
+	}
+	if got := f.d.timeouts.Load(); got == nil || got.Timeout != 7 || got.TimeoutStream != 19 {
+		t.Fatalf("timeouts after the bind = %+v", got)
 	}
 }
 
