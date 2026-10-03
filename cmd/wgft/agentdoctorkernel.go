@@ -661,8 +661,9 @@ func agentForwardingCheck(c *agentDoctorCheck, ev agentKernelEvidence) {
 		c.Status, c.Reason = doctor.StatusFailed, agentReasonIPForwardOff
 		c.Detail = "net.ipv4.ip_forward is " + f.IPForward + ", so the kernel forwards nothing from the tunnel to the LAN; only rules whose target is this host itself are reached" +
 			agentKernelStoppedNote(ev)
-		c.Next = "set it with sysctl -w net.ipv4.ip_forward=1, or restart the agent, which sets it on start. If something on this host keeps setting it to 0, " +
-			"find it in /etc/sysctl.d and in the container runtime's settings"
+		c.Next = "set it with sysctl -w net.ipv4.ip_forward=1. If the write fails, restarting the agent alone does not fix it: " +
+			"remove what blocks the write, such as a read-only /proc or a container limit, and then set it. " +
+			"If something on this host keeps setting it to 0, find it in /etc/sysctl.d and in the container runtime's settings"
 		return
 	case f.PolicyNeedsNetAdmin:
 		c.Status, c.Reason, c.evidenceUnreachable = doctor.StatusUnknown, agentReasonNeedsNetAdmin, true

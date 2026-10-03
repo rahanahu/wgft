@@ -117,3 +117,27 @@ func TestIPForwardOffAlongsideAGenerationGap(t *testing.T) {
 		t.Errorf("status server detail does not name both: %q", st.Server.Detail)
 	}
 }
+
+// ip_forward が 0 で書き込みが塞がれている場合は、再起動では直らない。server doctor の次の一手は、
+// 再起動だけを勧めず、書けない原因を除く手順を含む。分類は変わらない。
+func TestIPForwardOffNextStepDoesNotAdviseRestartAlone(t *testing.T) {
+	r := tcpRule()
+	in := withIPForward(healthyInput(r), "0")
+	pp := checkOf(t, diagnose(r, in), checkPublicPort)
+	dp := dataplaneCheck(in)
+	for name, c := range map[string]checkReport{"public port": pp, "dataplane": dp} {
+		if c.Status != statusFailed || c.Reason != doctor.ReasonIPForwardOff {
+			t.Errorf("%s = %s/%s, want failed/%s", name, c.Status, c.Reason, doctor.ReasonIPForwardOff)
+		}
+		for _, bad := range []string{"or restart the server", "which sets it on start"} {
+			if strings.Contains(c.Next, bad) {
+				t.Errorf("%s next step contains %q: %s", name, bad, c.Next)
+			}
+		}
+		for _, want := range []string{"sysctl -w net.ipv4.ip_forward=1", "restarting the server alone does not fix it", "read-only /proc", "container limit"} {
+			if !strings.Contains(c.Next, want) {
+				t.Errorf("%s next step lacks %q: %s", name, want, c.Next)
+			}
+		}
+	}
+}
