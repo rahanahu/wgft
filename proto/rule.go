@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"reflect"
 	"strconv"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -63,12 +64,41 @@ type Rule struct {
 	Enabled       bool           `json:"enabled"`
 }
 
-// isDotSegment は、s が URL のパスの区切りとして `.` か `..` に当たるかを返す。ルールの ID は空でない
-// 任意の文字列を受けるが、この 2 つだけは拒む(仕様 10.2 節)。ブラウザは WHATWG URL 標準に従い、
+// isDotSegment は、s が URL のパスの区切りとして `.` か `..` に当たるかを返す。ルールの ID は
+// validateRuleID の範囲の文字列を受けるが、この 2 つは拒む(仕様 10.2 節)。ブラウザは WHATWG URL 標準に従い、
 // %2E と %2E%2E も区切りの `.` と `..` として扱うので、escape しても Web UI のボタンが別の経路へ
 // 送信するためである。agent は書き込むときに登録済みのエージェントの名前であることも求められ、その
 // 名前の文字種がこの 2 つを既に拒むので、agent の検査は多重の守りである。
 func isDotSegment(s string) bool { return s == "." || s == ".." }
+
+// MaxRuleIDLen はルールの ID に許す長さの上限で、UTF-8 のバイトで数える(仕様 5.3 節)。server の
+// ハートビートの受け口がエージェントの報告するルール ID を切り詰める長さ(internal/vpsd/stream の
+// maxHeartbeatIDLen)と同じ値である。超える ID のルールは、報告と一致せず状態が永久に届かない。
+// nftables のカウンタのコメント "wgft:<ID>:<種類>" も、この上限の下で 256 バイトの userdata に収まる。
+const MaxRuleIDLen = 128
+
+// validateRuleID は ID の長さと文字を検査する(仕様 5.3 節、2026-10-03、所有者の決定)。長さは
+// 文字数ではなくバイトで数える。上限を決めている受け口の切り詰めと nftables の userdata がバイトで
+// 数えるためである。文字は unicode.IsGraphic が真のもの(文字、結合記号、数字、句読点、記号、
+// Unicode の空白 Zs)だけを受ける。制御文字、不正な UTF-8、双方向の上書きやゼロ幅の文字(Cf)、
+// 行と段落の区切り(Zl、Zp)、私用領域を拒む。ハートビートの受け口(internal/vpsd/stream)が
+// 置き換えるのは同じ unicode.IsGraphic が偽の文字なので、受けた ID は報告と一致し、ログの行を偽る
+// 改行や端末を操る値も入らない。空白を削ることも、全角と半角をそろえることもしない。この関数の
+// エラーは ID の中身を繰り返さない。バッチの検査(validateRuleSet)は従来どおり "rule <ID>: " を前に付ける。
+func validateRuleID(id string) error {
+	if len(id) > MaxRuleIDLen {
+		return fmt.Errorf("id is %d bytes long; the limit is %d bytes", len(id), MaxRuleIDLen)
+	}
+	if !utf8.ValidString(id) {
+		return errors.New("id is not valid UTF-8")
+	}
+	for i, c := range id {
+		if !unicode.IsGraphic(c) {
+			return fmt.Errorf("id contains %U at byte %d; only letters, marks, numbers, punctuation, symbols and spaces are allowed", c, i)
+		}
+	}
+	return nil
+}
 
 // Validate はルール単体で判定できる制約を検査する。ルール間の制約は ValidateRules が見る。
 func (r *Rule) Validate() error {
@@ -77,6 +107,9 @@ func (r *Rule) Validate() error {
 	}
 	if isDotSegment(r.ID) {
 		return fmt.Errorf("id %q is not allowed: browsers read it as a dot segment in the Web UI's URLs, even when escaped", r.ID)
+	}
+	if err := validateRuleID(r.ID); err != nil {
+		return err
 	}
 	if r.Agent == "" {
 		return errors.New("agent is empty")
