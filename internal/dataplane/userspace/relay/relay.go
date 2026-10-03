@@ -116,7 +116,7 @@ const targetProbeConcurrency = 32
 // 本番では、1 つの Manager を Apply と Retry の経路(apply.go)か、Prepare と Commit の経路(staged.go)の
 // どちらか一方だけで使い、両方を混ぜない。エージェントは前者を、vpsd のユーザー空間モードは後者を使う。
 //
-// Manager の錠は mu と、待ち受けごとの錠(TCP は tcpServer の mu、UDP は serveUDP の局所の mu。
+// Manager の錠は mu と、待ち受けごとの錠(TCP は tcpServer の mu、UDP は udpServer の mu。
 // 接続かセッションの表と、TCP の closed と cut、UDP の pending を守る)の 2 段で、順は mu -> 待ち受けの錠
 // である。Apply、Staged.Commit、Close、Status は mu を持ったまま待ち受けの closeF、sweep、sessions のどれかを呼び、
 // それらが待ち受けの錠を取る。中継の goroutine(accept と読み取りのループ、接続ごとの goroutine)は、
@@ -187,7 +187,7 @@ type bindFailure struct {
 
 // listener は待ち受け 1 つ。状態(設計文書 7a.3 節の Active、Retiring、閉じた状態)は、どちらの表
 // (Manager の listeners か retiring)に入っているか、UDP の accepting、budget の受け付けの状態、
-// tcpServer と serveUDP が持つ待ち受けソケットで表す。閉じる、付け替える、退役させる、再開する
+// tcpServer と udpServer が持つ待ち受けソケットで表す。閉じる、付け替える、退役させる、再開する
 // 操作は次の名前の付いたメソッドで行い、どれも呼び出し側が Manager の mu を持つ。待ち受けを開く経路
 // (openLocked と、Commit が Prepare で bind したソケットから待ち受けを作る箇所)は、これらのメソッドを
 // 通さず、budget の受け付けと表への登録をその場で行う。
@@ -226,8 +226,10 @@ type listener struct {
 	bindErr error
 	// targetErr は TCP ルールで target への接続確認が失敗したときの誤り(仕様 5.2 節)。
 	// リスナー自体は開いているので、Retry では開き直さず再確認だけする。
-	// vpsd のユーザー空間モードが使う Prepare と Commit の経路は、到達確認をせず(設計文書 6.3 節)、
-	// Status と Retry も呼ばず許可一覧も渡さないので、この値を書かない
+	// 書くのは、Apply と Retry が到達確認の結果を記す applyProbes と、許可一覧があるときの
+	// noteTargetAllowErr である。vpsd のユーザー空間モードが使う Prepare と Commit の経路は、到達確認を
+	// せず(設計文書 6.3 節)、Apply も Retry も呼ばず、許可一覧も渡さないので、この値を書かない。
+	// 読む Status も呼ばない
 	targetErr error
 	// allowDenied は targetErr が今、宛先の許可一覧による拒否かどうか(設計文書 7 節)。
 	// 接続ごとに呼ばれる noteTargetAllowErr が、状態が変わらないときに Manager の錠を
