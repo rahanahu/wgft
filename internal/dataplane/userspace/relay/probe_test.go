@@ -205,7 +205,9 @@ func TestProbeResultIsDiscardedWhenTheTargetChanged(t *testing.T) {
 	m.probeTimeout = 5 * time.Second
 	defer m.Close()
 
+	// Commit は試し接続しない(設計文書 6.3 節)ので、最初の確認は Retry が行う
 	m.Prepare(map[Key]Desired{{proto.TCP, port}: {oldTarget, "r1"}}).Commit(nil)
+	m.Retry()
 	if st := m.Status(); len(st) != 1 || st[0].Err == nil {
 		t.Fatalf("status = %+v, want error: the first probe is refused", st)
 	}
@@ -331,5 +333,50 @@ func TestProbeErrorOfAFailedLookupKeepsItsText(t *testing.T) {
 	}
 	if strings.Contains(second, "->") {
 		t.Errorf("the probe error keeps the socket pair: %q", second)
+	}
+}
+
+// Prepare/Commit の経路(vpsd のユーザー空間モード)は、新しく開く TCP の待ち受けの target へ試し接続
+// しない(設計文書 6.3 節)。この経路の target はエージェントのトンネルのアドレスで、エージェントは
+// Commit の後に配られる全体状態で初めてそのポートを開く。カーネルモードのエージェントは開いていない
+// ポートへの SYN を黙って捨てるので、確認すると Commit が 1 件ごとに期限まで待ち、512 本の読み込みが
+// 管理用 API の CLI の待ちを超えた。ここでは黙って捨てる target を、同時に試す数の上限より多く開く。
+func TestCommitDoesNotProbeTargets(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	dial := func(network, addr string) (net.Conn, error) {
+		calls.Add(1)
+		<-release
+		return nil, errors.New("dropped")
+	}
+	lb := &loopback{}
+	desired := map[Key]Desired{}
+	for i := 0; i < targetProbeConcurrency+8; i++ {
+		desired[Key{proto.TCP, reserveTCP(t, lb)}] = Desired{Target: "10.200.0.2:" + strconv.Itoa(30000+i), RuleID: fmt.Sprintf("r%d", i)}
+	}
+	m := New(lb, Options{Logf: testLogf(t), Dial: dial})
+	defer m.Close()
+
+	start := time.Now()
+	s := m.Prepare(desired)
+	if len(s.Failed()) != 0 {
+		t.Fatalf("Prepare failed rules: %v", s.Failed())
+	}
+	s.Commit(nil)
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("Prepare and Commit took %v, want well under the probe timeout %v", d, m.probeTimeout)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("Commit dialed the targets %d times, want 0", n)
+	}
+	st := m.Status()
+	if len(st) != len(desired) {
+		t.Fatalf("status has %d listeners, want %d", len(st), len(desired))
+	}
+	for _, x := range st {
+		if !x.Listening || x.Err != nil {
+			t.Errorf("listener %s: listening %v, err %v; want listening with no error", x.Key, x.Listening, x.Err)
+		}
 	}
 }
