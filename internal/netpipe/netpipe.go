@@ -34,7 +34,18 @@ func Pipe(a, b net.Conn) { PipeResetB(a, b, nil) }
 // あり、Linux の tcp_close はその状態のソケットに RST を送らないので、resetB の後の Close は何も
 // 送らない。これはカーネルのコードから導き、network namespace の Tcp OutRsts の計数器が増えない
 // ことでも確かめた。パケットのキャプチャでは確かめていない。
-func PipeResetB(a, b net.Conn, resetB func()) {
+func PipeResetB(a, b net.Conn, resetB func()) { pipe(a, b, resetB, nil) }
+
+// pipe は PipeResetB と PipeHold の本体である。end は中継を終えるときに両側を閉じる関数で、nil なら
+// a、b の順に通常の Close で閉じる。誤りで終わる向きは、もう一方の向きの読み書きを解くために、その場で
+// end を呼ぶ。
+func pipe(a, b net.Conn, resetB func(), end func()) {
+	if end == nil {
+		end = func() {
+			a.Close()
+			b.Close()
+		}
+	}
 	var wg sync.WaitGroup
 	half := func(dst, src net.Conn) {
 		defer wg.Done()
@@ -43,8 +54,7 @@ func PipeResetB(a, b net.Conn, resetB func()) {
 			if resetB != nil && onA && isReset(err) {
 				resetB()
 			}
-			a.Close()
-			b.Close()
+			end()
 			return
 		}
 		if cw, ok := dst.(closeWriter); ok {
@@ -57,8 +67,7 @@ func PipeResetB(a, b net.Conn, resetB func()) {
 	go half(a, b)
 	go half(b, a)
 	wg.Wait()
-	a.Close()
-	b.Close()
+	end()
 }
 
 // isReset は、カーネルのソケットが RST を受けて読み書きが失敗した誤り(ECONNRESET)かを返す。

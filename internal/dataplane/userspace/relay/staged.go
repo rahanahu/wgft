@@ -211,7 +211,9 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 			continue
 		}
 		l.sweep(func(src netip.Addr) bool { return keep(src) })
-		if l.sessions() == 0 {
+		// 中継が終わった後に送り残しを届けている途中の組は sessions に数えないので、その組も届け終える
+		// まで待ち受けを残す(設計文書 7 節)
+		if l.sessions() == 0 && l.delivering() == 0 {
 			m.closeRetiringLocked(k, l)
 			m.opts.Logf("listener %s closed: no established flows left", k)
 		}

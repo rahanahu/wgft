@@ -205,7 +205,7 @@ type listener struct {
 	target string
 	ruleID string
 	// listenerOps は中継の状態を操作する関数の組である。埋め込みなので、呼び出し側は closeF、
-	// stopAccept、sweep、sessions を listener の欄として呼ぶ。
+	// stopAccept、sweep、sessions、delivering を listener の欄として呼ぶ。
 	listenerOps
 	// accepting は UDP が新しいセッションを作るか(stopAccept で偽になる)。
 	accepting atomic.Bool
@@ -237,7 +237,7 @@ type listener struct {
 }
 
 // listenerOps は、待ち受けの中継の状態(tcpServer か udpServer)を listener から操作する関数の組で
-// ある。TCP と UDP で同じ組を持つ。4 つの欄を埋めるのは次の 3 か所で、どれも 1 回の代入で 4 つを
+// ある。TCP と UDP で同じ組を持つ。5 つの欄を埋めるのは次の 3 か所で、どれも 1 回の代入で 5 つを
 // まとめて書く。serveTCP と serveUDP はそれぞれの型のメソッド値で埋め、openLocked は開けなかった
 // 待ち受けに unboundOps を入れる(bound の説明)。
 type listenerOps struct {
@@ -251,17 +251,22 @@ type listenerOps struct {
 	sweep func(keep func(src netip.Addr) bool) int
 	// セッション数(ハートビートの表示用)
 	sessions func() int
+	// delivering は、中継が終わり、送り残しを届けている途中の組の数である(TCP だけ。設計文書 7 節の
+	// 「中継が終わった後の末尾の配送」)。sessions に数えず、Resource Guard の枠には数える。Retiring の
+	// 待ち受けを閉じてよいかの判定に使う。UDP と bound が偽の待ち受けでは 0 を返す関数である
+	delivering func() int
 }
 
 // unboundOps は、開けなかった待ち受け(bound が偽)の listenerOps である。中継の状態を持たないので、
-// closeF は閉じるものが無く何もしない関数、sessions は中継中のフローが無いので 0 を返す関数である。
+// closeF は閉じるものが無く何もしない関数、sessions と delivering はフローが無いので 0 を返す関数である。
 // stopAccept と sweep は nil のままにする。この 2 つを呼ぶ前に bound で分ける箇所は CloseSessions と
 // retireLocked で、分け忘れると nil の関数を呼んで panic するので、試験(bound_test.go)で見つかる。
 // 何もしない関数にすると、分け忘れが表に出ず、試験で見つからない。
 func unboundOps() listenerOps {
 	return listenerOps{
-		closeF:   func() {},
-		sessions: func() int { return 0 },
+		closeF:     func() {},
+		sessions:   func() int { return 0 },
+		delivering: func() int { return 0 },
 	}
 }
 
