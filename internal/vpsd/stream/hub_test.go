@@ -22,6 +22,26 @@ import (
 
 // errBackendFailure simulates a genuine backend failure (e.g. a SQLite error), as opposed to a
 // routine authentication rejection or a real duplicate public key.
+// syncBuffer is a log destination that the test can read while the server's goroutines still write
+// to it. A stream's serve goroutine logs that it connected after it has sent the State, so the
+// client can read the State, and the test the log, before that line is written.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 var errBackendFailure = errors.New("simulated backend failure")
 
 type fakeBackend struct {
@@ -261,7 +281,7 @@ func TestAuthenticateBackendErrorIsNotUnauthorized(t *testing.T) {
 	defer srv.Close()
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	var buf bytes.Buffer
+	var buf syncBuffer
 	prev := log.Writer()
 	log.SetOutput(&buf)
 	defer log.SetOutput(prev)
@@ -287,7 +307,7 @@ func TestOtherAgentHasKeyBackendErrorIsNotDuplicateKey(t *testing.T) {
 	defer srv.Close()
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	var buf bytes.Buffer
+	var buf syncBuffer
 	prev := log.Writer()
 	log.SetOutput(&buf)
 	defer log.SetOutput(prev)

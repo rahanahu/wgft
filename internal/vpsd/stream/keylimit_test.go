@@ -1,7 +1,6 @@
 package stream
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"log"
@@ -28,7 +27,7 @@ func TestKeyChangeLimitClosesWithPolicyViolation(t *testing.T) {
 	defer srv.Close()
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	var buf bytes.Buffer
+	var buf syncBuffer
 	prev := log.Writer()
 	log.SetOutput(&buf)
 	defer log.SetOutput(prev)
@@ -94,7 +93,7 @@ func TestKeyChangeLimitLogIsRateLimited(t *testing.T) {
 	defer srv.Close()
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	var buf bytes.Buffer
+	var buf syncBuffer
 	prev := log.Writer()
 	log.SetOutput(&buf)
 	defer log.SetOutput(prev)
@@ -272,7 +271,7 @@ func TestKeyChangeLimitLogIsPerAgent(t *testing.T) {
 	defer srv.Close()
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
 
-	var buf bytes.Buffer
+	var buf syncBuffer
 	prev := log.Writer()
 	log.SetOutput(&buf)
 	defer log.SetOutput(prev)
