@@ -22,6 +22,8 @@ import (
 //     (セッションが切れる点は Apply の reopen と同じ)。開き直しの bind が失敗する余地を残さないため
 //   - 宣言から消えた待ち受けのうち、Retiring のルールのものは閉じずに新しいフローの受け付けだけを
 //     やめる(stopAccept)
+//   - 新しく開く TCP の待ち受けの target へ試し接続しない(設計文書 6.3 節)。target はエージェントの
+//     トンネルのアドレスで、エージェントがそのポートを開くのは Commit の後だからである
 type Staged struct {
 	m       *Manager
 	desired map[Key]Desired
@@ -142,20 +144,11 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 	}
 	s.done = true
 	m := s.m
-	// 新しく開く TCP の待ち受けの到達確認は、錠を取る前にまとめて行う(設計文書 5.2 節)。錠を持った
-	// まま 1 つずつ確認すると、黙ってパケットを捨てる target が 1 つあるだけで中継が止まる。Commit は
-	// 戻れない地点の後なので、確認の結果は状態として載せるだけであり、待ち受けは結果によらず開く。
-	var probes []targetProbe
-	for k := range s.opened {
-		if k.Proto == proto.TCP {
-			probes = append(probes, targetProbe{key: k, target: s.desired[k].Target})
-		}
-	}
-	m.runProbes(probes)
-	probed := make(map[Key]error, len(probes))
-	for i := range probes {
-		probed[probes[i].key] = probes[i].err
-	}
+	// 新しく開く TCP の待ち受けの target へは試し接続しない(設計文書 6.3 節)。この経路を使う vpsd の
+	// target はエージェントのトンネルのアドレスで、エージェントはこの Commit の後に配られる全体状態で
+	// 初めてそのポートを開く。この時点の確認は届かないのが普通で、カーネルモードのエージェントは開いて
+	// いないポートへの SYN を黙って捨てるので、1 件ごとに期限まで待ち、適用と起動を遅らせる。宛先に
+	// 届くかどうかは、エージェントが自分の確認の結果として報告する
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Retiring から宣言に戻った UDP の待ち受けは、ソケットを持ち続けているのでそのまま戻す
@@ -205,10 +198,6 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 		if f := m.bindFail[k]; f != nil {
 			m.opts.Logf("listener %s: opened after %d failed attempts", k, f.attempts)
 			delete(m.bindFail, k)
-		}
-		if err := probed[k]; err != nil {
-			setTargetErrLocked(l, err)
-			m.opts.Logf("listener %s: cannot connect to target %s: %v", k, d.Target, err)
 		}
 	}
 	// 以前から Retiring の待ち受けは、そのルールがまだ Retiring のあいだだけ残す。ルールが削除、
