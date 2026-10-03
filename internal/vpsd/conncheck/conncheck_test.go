@@ -132,18 +132,21 @@ func TestCheckObeysAgentAllowList(t *testing.T) {
 	// 取られていると、Check は無関係なプロセスに繋がってしまう。中継の bind が EADDRINUSE で失敗した
 	// ときだけ、新しい番号でやり直す。ほかの失敗は隠さない。
 	const attempts = 5
+	var last error
 	for i := 1; i <= attempts; i++ {
-		if checkObeysAgentAllowList(t) {
+		if last = checkObeysAgentAllowList(t); last == nil {
 			return
 		}
-		t.Logf("attempt %d of %d: the port picked for the relay was taken before the bind; retrying with a new port", i, attempts)
+		t.Logf("attempt %d of %d: the relay bind failed with address-in-use, retrying with a new port: %v", i, attempts, last)
 	}
-	t.Fatalf("the relay bind failed with address-in-use in all %d attempts", attempts)
+	t.Fatalf("the relay bind failed with address-in-use in all %d attempts: %v", attempts, last)
 }
 
-// checkObeysAgentAllowList runs the scenario once. It reports true when the scenario ran, and false
-// when the relay lost its port to another process, before it asserts anything.
-func checkObeysAgentAllowList(t *testing.T) (ran bool) {
+// checkObeysAgentAllowList runs the scenario once. It returns the relay's address-in-use error
+// before it asserts anything, and nil when the scenario ran. A listener that did not open for any
+// other reason fails the test. On Windows the errno does not match, so the scenario never retries
+// there, as before.
+func checkObeysAgentAllowList(t *testing.T) (collision error) {
 	t.Helper()
 	m := relay.New(loopbackNet{}, relay.Options{
 		Logf:              t.Logf,
@@ -162,8 +165,11 @@ func checkObeysAgentAllowList(t *testing.T) (ran bool) {
 	ln.Close() // 中継の待ち受けに使うポートを空ける
 	m.Apply(map[relay.Key]relay.Desired{{Proto: proto.TCP, Port: port}: {Target: "nas.lan:25565", RuleID: "r1"}})
 	for _, st := range m.Status() {
-		if !st.Listening && errors.Is(st.Err, syscall.EADDRINUSE) {
-			return false
+		if !st.Listening {
+			if errors.Is(st.Err, syscall.EADDRINUSE) {
+				return st.Err
+			}
+			t.Fatalf("the relay did not open its listener: %v", st.Err)
 		}
 	}
 
@@ -173,5 +179,5 @@ func checkObeysAgentAllowList(t *testing.T) (ran bool) {
 	if r.OK || (r.Reach != ReachAgent && r.Reach != ReachNone) {
 		t.Errorf("got OK=%v reach=%s (%s), want OK=false and reach %s or %s", r.OK, r.Reach, r.Detail, ReachAgent, ReachNone)
 	}
-	return true
+	return nil
 }

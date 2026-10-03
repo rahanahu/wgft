@@ -112,18 +112,19 @@ func TestReservedPortsAreWhatTheListenersBind(t *testing.T) {
 	// the number in the gap. Only an address-in-use failure of the listen repeats the pass with a new
 	// port; every other failure and every wrong reservation still fails the test.
 	const attempts = 5
+	var last error
 	for i := 1; i <= attempts; i++ {
-		if reservedPortsAreWhatTheListenersBind(t) {
+		if last = reservedPortsAreWhatTheListenersBind(t); last == nil {
 			return
 		}
-		t.Logf("attempt %d of %d: the port picked for the listeners was taken before the bind; retrying with a new port", i, attempts)
+		t.Logf("attempt %d of %d: a listen failed with address-in-use, retrying with a new port: %v", i, attempts, last)
 	}
-	t.Fatalf("a listen failed with address-in-use in all %d attempts", attempts)
+	t.Fatalf("a listen failed with address-in-use in all %d attempts: %v", attempts, last)
 }
 
-// reservedPortsAreWhatTheListenersBind runs one pass. It reports false when a listen lost the port
-// to another process, before it checks that pass any further.
-func reservedPortsAreWhatTheListenersBind(t *testing.T) (ran bool) {
+// reservedPortsAreWhatTheListenersBind runs one pass. It returns the address-in-use error when a
+// listen failed with it, before it checks that pass any further, and nil when the pass ran.
+func reservedPortsAreWhatTheListenersBind(t *testing.T) (collision error) {
 	t.Helper()
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -145,7 +146,7 @@ func reservedPortsAreWhatTheListenersBind(t *testing.T) (ran bool) {
 				ln, err = net.Listen("tcp", addr)
 			}
 			if errors.Is(err, syscall.EADDRINUSE) {
-				return false
+				return err
 			}
 			if err != nil {
 				t.Fatalf("listening on %q: %v", addr, err)
@@ -161,7 +162,7 @@ func reservedPortsAreWhatTheListenersBind(t *testing.T) (ran bool) {
 			}
 		}
 	}
-	return true
+	return nil
 }
 
 // FuzzReservedPortsMatchTheListeners extends TestReservedPortsMatchTheListeners to inputs the
