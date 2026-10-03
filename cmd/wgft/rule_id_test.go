@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rahanahu/wgft/proto"
 )
@@ -154,5 +155,25 @@ func TestMatchRuleKeepsIDsThatEndInAnEllipsis(t *testing.T) {
 	}
 	if got, err := matchRule(one, short(one[0].ID)); err != nil || got.ID != one[0].ID {
 		t.Errorf("the short form no longer matches: %v %v", got, err)
+	}
+}
+
+// 多バイト文字の ID でも、表の短い形は文字の途中で切れず、そのまま貼れば通る。省略記号を落とした
+// 残りの長さは、バイトでなく文字で数える(4 文字の日本語は 12 バイトあるが、短い形の長さに足りない)。
+func TestMatchRuleWithMultibyteIDs(t *testing.T) {
+	a := proto.Rule{ID: "週末のサーバー用ルールでA"}
+	b := proto.Rule{ID: "週末のサーバー用ルールでB"}
+	rules := []proto.Rule{a, b}
+	if got := short(a.ID); got != "週末のサーバー用ルールで…" || !utf8.ValidString(got) {
+		t.Fatalf("short(%q) = %q", a.ID, got)
+	}
+	if _, err := matchRule(rules, short(a.ID)); err == nil || !strings.Contains(err.Error(), a.ID) {
+		t.Errorf("the two-rule prefix was not refused with candidates: %v", err)
+	}
+	if got, err := matchRule(rules, "週末のサーバー用ルールでA…"); err != nil || got.ID != a.ID {
+		t.Errorf("matchRule of the long prefix = %v, %v", got, err)
+	}
+	if _, err := matchRule(rules, "週末のサ…"); err == nil || !strings.Contains(err.Error(), "needs at least") {
+		t.Errorf("a 4-rune prefix with an ellipsis was not refused for its length: %v", err)
 	}
 }
