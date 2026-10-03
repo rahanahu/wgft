@@ -38,15 +38,16 @@ func distinctID(alphabet string, n, i int) string {
 }
 
 // worstTarget は vpsd の符号化(json.Marshal、HTML 向けの書き換えあり)で最も長くなる、検査を通る
-// target である。253 バイトの `&` は 1 文字が 6 バイトになる。ポートは幅 2 の範囲の末尾が 65535 に
-// 収まる 5 桁の値である。
-var worstTarget = strings.Repeat("&", 253) + ":65534"
+// target である。検査は target 全体の長さ(proto.MaxTargetLen)を見て、ホストの長さを別に制限しない。
+// そのため、最も膨らむ 1 バイトの文字 `&`(1 文字が 6 バイトになる)をホストに詰め、ポートを最短の
+// 1 桁にした値が最も長い。表示できる文字のうち、符号化で 6 バイトより膨らむものは無い。
+var worstTarget = strings.Repeat("&", proto.MaxTargetLen-len(":1")) + ":1"
 
 // worstState は、vpsd の符号化で最も長くなる、上限の数のルールの全体状態である。ID は `<`・`>`・`&` の
 // 組み合わせで 128 バイト(どれも 1 文字が 6 バイト)、listen_port は 5 桁の範囲、ルールは無効である。
 func worstState() *proto.State {
 	version := 1 << 30
-	caps := []string{}
+	caps := proto.SupportedCapabilities
 	st := &proto.State{
 		Generation: 1<<64 - 1,
 		WG: proto.WGConfig{ServerPubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", Endpoint: strings.Repeat("&", 253) + ":65535",
@@ -75,6 +76,11 @@ func TestWorstRuleValuesPassValidation(t *testing.T) {
 	}
 	if len(worstTarget) != proto.MaxTargetLen {
 		t.Errorf("worstTarget is %d bytes, want %d", len(worstTarget), proto.MaxTargetLen)
+	}
+	// ホストを 1 バイト延ばすと上限を超えるので、worstTarget より長く膨らむ target は検査を通らない
+	r.Target = strings.Repeat("&", proto.MaxTargetLen-len(":1")+1) + ":1"
+	if err := r.Validate(); err == nil {
+		t.Errorf("a target one byte longer than worstTarget passes validation, so worstTarget is not the worst")
 	}
 }
 

@@ -327,15 +327,16 @@ func Run(opts Options) error {
 
 // ruleCountWarnings は、ルールの数がエージェントあたりの上限(proto.MaxRulesPerAgent、仕様 5.3 節)を
 // 超えるエージェントごとに、起動のときに出す警告の行を名前の順に返す。上限の導入の前に保存された
-// データでだけ起こる。そのエージェントの接続、配信、転送は続き、ルールを増やす保存だけが拒まれる
-// (仕様 5.4 節)。
+// データでだけ起こる。そのエージェントの配信と転送は続き、ルールを増やす保存だけが拒まれる。ただし
+// ハートビートか全体状態の 1 通が読む側の上限を超えると、stream は保てない(仕様 5.4 節)。
 func ruleCountWarnings(rules []proto.Rule) []string {
 	counts := proto.RuleCountsByAgent(rules)
 	var out []string
 	for _, agent := range proto.AgentsOverRuleLimit(rules) {
 		out = append(out, fmt.Sprintf("warning: agent %q has %d rules, over the limit of %d rules per agent; "+
-			"saving a change that adds rules to it is refused until rules are deleted or moved to another agent, "+
-			"and the agent cannot read a full state over 4 MiB", agent, counts[agent], proto.MaxRulesPerAgent))
+			"saving a change that adds rules to it is refused until rules are deleted or moved to another agent. "+
+			"With this many rules, a heartbeat can exceed the 1 MiB the server reads when many rules report errors, "+
+			"which closes the agent's stream, and the full state can exceed the 4 MiB the agent reads", agent, counts[agent], proto.MaxRulesPerAgent))
 	}
 	return out
 }

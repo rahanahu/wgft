@@ -43,8 +43,8 @@ func TestRuleCountWarnings(t *testing.T) {
 	rules = append(rules, overLimitRules("alpha", "a", 3000, 700)...)
 	got := ruleCountWarnings(rules)
 	want := []string{
-		`warning: agent "alpha" has 700 rules, over the limit of 512 rules per agent; saving a change that adds rules to it is refused until rules are deleted or moved to another agent, and the agent cannot read a full state over 4 MiB`,
-		`warning: agent "zeta" has 513 rules, over the limit of 512 rules per agent; saving a change that adds rules to it is refused until rules are deleted or moved to another agent, and the agent cannot read a full state over 4 MiB`,
+		`warning: agent "alpha" has 700 rules, over the limit of 512 rules per agent; saving a change that adds rules to it is refused until rules are deleted or moved to another agent. With this many rules, a heartbeat can exceed the 1 MiB the server reads when many rules report errors, which closes the agent's stream, and the full state can exceed the 4 MiB the agent reads`,
+		`warning: agent "zeta" has 513 rules, over the limit of 512 rules per agent; saving a change that adds rules to it is refused until rules are deleted or moved to another agent. With this many rules, a heartbeat can exceed the 1 MiB the server reads when many rules report errors, which closes the agent's stream, and the full state can exceed the 4 MiB the agent reads`,
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("ruleCountWarnings =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
