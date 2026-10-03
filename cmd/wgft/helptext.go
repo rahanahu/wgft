@@ -601,11 +601,13 @@ would be accepted, which is not the same as finding it acceptable.`,
   wgft rule add --agent home --udp 2456 --to 192.168.1.20:2456 --dry-run`,
 	},
 	"rule ls": {
-		Long: `List rules, grouped by --group. ID is shortened; every rule command accepts such
-a prefix as long as it is unambiguous, with or without a trailing "…" or
-"...", and lists the matching IDs when it is not. A prefix that ends in either
-mark needs at least the 12 characters shown here, and an ID that matches the
-input exactly, mark included, is taken first. TARGET shows the effective target range.
+		Long: `List rules, grouped by --group. An ID longer than 12 characters is cut to its
+first 12 and "…". Every rule command accepts a prefix of an ID of any length
+as long as it is unambiguous, with or without a trailing "…" or "...", and
+lists the matching IDs when it is not. An ID that matches the input exactly,
+mark included, is taken first. Otherwise an input with a mark is matched only
+as a prefix: with rules "web" and "webserver", "web" takes "web", but "web…"
+lists both. TARGET shows the effective target range.
 MODE is proxy for rules added with --proxy and kernel for all others; in
 userspace mode "kernel" rules are relayed by the wgft process, not the kernel.
 DENY and ALLOW are the number of CIDRs, RATES the configured limits, DROPPED

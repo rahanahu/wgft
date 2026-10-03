@@ -847,7 +847,8 @@ func ShortID(id string) string {
 	return id
 }
 
-// ShortIDLen は ShortID が残す先頭の文字数である。CLI は、省略記号を落とした引数にこの長さを求める。
+// ShortIDLen は ShortID が残す先頭の文字数で、表示で省略する長さにだけ使う。ルールの ID や、CLI が
+// 受け取る ID の先頭の最小の長さではない(設計文書 10.2 節)。
 const ShortIDLen = 12
 
 // ResourceRefusalTotal は、そのルールに対する Resource Guard の拒否の総数(理由を問わない)。
