@@ -204,17 +204,11 @@ type listener struct {
 	key    Key
 	target string
 	ruleID string
-	closeF func()
-	// stopAccept は新しいフローの受け付けだけをやめ、成立済みのフローを残す(TCP は待ち受けソケットを
-	// 閉じ、UDP は新しい送信元のデータグラムを捨てる)。bound が偽の待ち受けでは nil である。
-	stopAccept func()
+	// listenerOps は中継の状態を操作する関数の組である。埋め込みなので、呼び出し側は closeF、
+	// stopAccept、sweep、sessions を listener の欄として呼ぶ。
+	listenerOps
 	// accepting は UDP が新しいセッションを作るか(stopAccept で偽になる)。
 	accepting atomic.Bool
-	// sweep は keep が偽を返す接続元のセッションを閉じ、閉じた数を返す(接続元制限の変更の即時反映。仕様 6.2 節)。
-	// bound が偽の待ち受けでは nil である
-	sweep func(keep func(src netip.Addr) bool) int
-	// セッション数(ハートビートの表示用)
-	sessions func() int
 	// budget は Resource Guard の枠(プロセス全体の予算と、ルールの登録ごとの最低分と予備。設計文書 7a.10 節)。
 	// 上限の対象になるフロー(UDP はセッション、TCP は公開側の接続)を 1 つずつここで取る。
 	// 既存のフローは受け付けたときのルールの登録に数え、ルール 1 本の上限は登録の待ち受けが運ぶ
@@ -240,6 +234,23 @@ type listener struct {
 	// forwardReply が 1 秒に 1 回まで書く。待ち受けとともに生まれて消えるので、開き直しで捨てられる
 	// (設計文書 10.2a 節「UDP の応答の観測」)。TCP の待ち受けでは使わない
 	lastReply atomic.Int64
+}
+
+// listenerOps は、待ち受けの中継の状態(tcpServer か udpServer)を listener から操作する関数の組で
+// ある。TCP と UDP で同じ組を持つ。serveTCP と serveUDP は、それぞれの型のメソッド値で 4 つの欄を
+// 1 回の代入で埋める。bound が偽の待ち受けは serveTCP も serveUDP も通らないので、newListener と
+// openLocked が入れた値のままである(bound の説明)。
+type listenerOps struct {
+	// closeF は待ち受けソケットと中継中のフローをすべて閉じる。
+	closeF func()
+	// stopAccept は新しいフローの受け付けだけをやめ、成立済みのフローを残す(TCP は待ち受けソケットを
+	// 閉じ、UDP は新しい送信元のデータグラムを捨てる)。bound が偽の待ち受けでは nil である。
+	stopAccept func()
+	// sweep は keep が偽を返す接続元のセッションを閉じ、閉じた数を返す(接続元制限の変更の即時反映。仕様 6.2 節)。
+	// bound が偽の待ち受けでは nil である
+	sweep func(keep func(src netip.Addr) bool) int
+	// セッション数(ハートビートの表示用)
+	sessions func() int
 }
 
 // err は報告する状態。bind 失敗が優先(リスナーがないので)。
@@ -344,7 +355,7 @@ func (m *Manager) newListener(k Key, d Desired) *listener {
 	if k.Proto == proto.TCP {
 		pool = m.opts.TCPPool
 	}
-	return &listener{key: k, target: d.Target, ruleID: d.RuleID, sessions: zero, budget: pool.PendingListener(d.RuleID)}
+	return &listener{key: k, target: d.Target, ruleID: d.RuleID, listenerOps: listenerOps{sessions: zero}, budget: pool.PendingListener(d.RuleID)}
 }
 
 // checkTarget は TCP の target へ試し接続する(接続してすぐ閉じる)。UDP は到達確認ができないので呼ばない。
