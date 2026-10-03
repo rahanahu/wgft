@@ -199,7 +199,7 @@ type bindFailure struct {
 //   - reviveLocked:Retiring の UDP の待ち受けを Active へ戻す
 //
 // Apply の経路の Retry が開き直す、bind に失敗した待ち受け(bound が偽)は例外で、budget を閉じて表から
-// 消すだけである。その closeF は何もしない関数なので呼ばない。
+// 消すだけである。その closeF は unboundOps の何もしない関数なので呼ばない。
 type listener struct {
 	key    Key
 	target string
@@ -237,20 +237,32 @@ type listener struct {
 }
 
 // listenerOps は、待ち受けの中継の状態(tcpServer か udpServer)を listener から操作する関数の組で
-// ある。TCP と UDP で同じ組を持つ。serveTCP と serveUDP は、それぞれの型のメソッド値で 4 つの欄を
-// 1 回の代入で埋める。bound が偽の待ち受けは serveTCP も serveUDP も通らないので、newListener と
-// openLocked が入れた値のままである(bound の説明)。
+// ある。TCP と UDP で同じ組を持つ。4 つの欄を埋めるのは次の 3 か所で、どれも 1 回の代入で 4 つを
+// まとめて書く。serveTCP と serveUDP はそれぞれの型のメソッド値で埋め、openLocked は開けなかった
+// 待ち受けに unboundOps を入れる(bound の説明)。
 type listenerOps struct {
 	// closeF は待ち受けソケットと中継中のフローをすべて閉じる。
 	closeF func()
 	// stopAccept は新しいフローの受け付けだけをやめ、成立済みのフローを残す(TCP は待ち受けソケットを
-	// 閉じ、UDP は新しい送信元のデータグラムを捨てる)。bound が偽の待ち受けでは nil である。
+	// 閉じ、UDP は新しい送信元のデータグラムを捨てる)。bound が偽の待ち受けでは nil である(unboundOps)。
 	stopAccept func()
 	// sweep は keep が偽を返す接続元のセッションを閉じ、閉じた数を返す(接続元制限の変更の即時反映。仕様 6.2 節)。
-	// bound が偽の待ち受けでは nil である
+	// bound が偽の待ち受けでは nil である(unboundOps)
 	sweep func(keep func(src netip.Addr) bool) int
 	// セッション数(ハートビートの表示用)
 	sessions func() int
+}
+
+// unboundOps は、開けなかった待ち受け(bound が偽)の listenerOps である。中継の状態を持たないので、
+// closeF は閉じるものが無く何もしない関数、sessions は中継中のフローが無いので 0 を返す関数である。
+// stopAccept と sweep は nil のままにする。この 2 つを呼ぶ前に bound で分ける箇所は CloseSessions と
+// retireLocked で、分け忘れると nil の関数を呼んで panic するので、試験(bound_test.go)で見つかる。
+// 何もしない関数にすると、分け忘れが表に出ず、試験で見つからない。
+func unboundOps() listenerOps {
+	return listenerOps{
+		closeF:   func() {},
+		sessions: func() int { return 0 },
+	}
 }
 
 // err は報告する状態。bind 失敗が優先(リスナーがないので)。
@@ -263,11 +275,11 @@ func (l *listener) err() error {
 
 // bound は待ち受けがソケットを持っているかどうかである。偽になるのは、Apply の経路の openLocked が
 // 開けなかった待ち受けだけで、bindErr がその理由を持つ。偽の待ち受けは serveUDP も serveTCP も
-// 通っていないので、関数の欄の sweep と stopAccept は nil、closeF は何もしない関数、sessions は 0 を
-// 返す関数である。ソケットの有無で分ける箇所と、sweep と stopAccept を呼ぶ前の分岐は、関数の欄が nil
-// かどうかではなくこの値で分ける。bindErr は待ち受けを表に入れる前に書き、後から書き換えない(Retry は
-// 別の待ち受けに置き換える)。そのため、m.mu の下で表から取り出した待ち受けなら、m.mu を放した後に
-// 読んでもよい。
+// 通っておらず、関数の欄は openLocked が bindErr と同時に入れた unboundOps の値である。sweep と
+// stopAccept は nil、closeF は何もしない関数、sessions は 0 を返す関数である。ソケットの有無で分ける
+// 箇所と、sweep と stopAccept を呼ぶ前の分岐は、関数の欄が nil かどうかではなくこの値で分ける。
+// bindErr は待ち受けを表に入れる前に書き、後から書き換えない(Retry は別の待ち受けに置き換える)。
+// そのため、m.mu の下で表から取り出した待ち受けなら、m.mu を放した後に読んでもよい。
 func (l *listener) bound() bool { return l.bindErr == nil }
 
 // shutdownLocked は待ち受けを閉じる。closeF で待ち受けソケットと中継中のフローを閉じ、その後に
@@ -348,14 +360,14 @@ func (m *Manager) closeLocked(k Key) {
 // newListener は待ち受け 1 つ分の記録を作り、Resource Guard の枠を受け付けていない状態で登録する。
 // そのルールが受け付けているルールの集合 A に入るのは、呼び出し側が bind の済んだソケットを持って
 // budget.Accept を呼んだ時点である(設計文書 7a.10 節)。中継を始めるのは serveUDP/serveTCP で、
-// Accept より後に始める。
+// Accept より後に始める。関数の欄(listenerOps)は空で返す。呼び出し側は、表に入れる前に serveUDP か
+// serveTCP で、開けなかった待ち受けなら unboundOps で埋める。
 func (m *Manager) newListener(k Key, d Desired) *listener {
-	zero := func() int { return 0 }
 	pool := m.opts.UDPPool
 	if k.Proto == proto.TCP {
 		pool = m.opts.TCPPool
 	}
-	return &listener{key: k, target: d.Target, ruleID: d.RuleID, listenerOps: listenerOps{sessions: zero}, budget: pool.PendingListener(d.RuleID)}
+	return &listener{key: k, target: d.Target, ruleID: d.RuleID, budget: pool.PendingListener(d.RuleID)}
 }
 
 // checkTarget は TCP の target へ試し接続する(接続してすぐ閉じる)。UDP は到達確認ができないので呼ばない。
