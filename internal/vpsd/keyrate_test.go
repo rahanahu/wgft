@@ -346,9 +346,7 @@ func TestAlternatingKeysOverTheStream(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
-			HTTPHeader: http.Header{"Authorization": {"Bearer " + f.tokens[agent]}},
-		})
+		ws, err := dialStream(ctx, url, f.tokens[agent])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -470,15 +468,34 @@ func TestAgentsReportKeyChangeRefusal(t *testing.T) {
 	}
 }
 
+// dialStream opens a stream with token. The hub counts the streams of an agent that are not yet
+// established, and the slot of a stream that was refused or replaced is returned by the server's
+// goroutine after the client has already read the close, so a dial that follows at once can be
+// turned away with 429 while that goroutine is delayed. The slot is returned in a bounded time, so
+// the dial is repeated on 429 until ctx ends; any other failure is returned as it is.
+func dialStream(ctx context.Context, url, token string) (*websocket.Conn, error) {
+	for {
+		ws, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+			HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},
+		})
+		if err == nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+			return ws, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 // declareKey opens a stream with token, declares key and returns nil when a State comes back, or the
 // error the read ended with.
 func declareKey(t *testing.T, url, token string, key wgtypes.Key) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}},
-	})
+	ws, err := dialStream(ctx, url, token)
 	if err != nil {
 		t.Fatal(err)
 	}
