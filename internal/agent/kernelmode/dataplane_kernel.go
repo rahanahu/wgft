@@ -358,6 +358,9 @@ func (d *Dataplane) Close() {
 	d.stopKeepalive()
 }
 
+// LastHandshake は wgft0 の server のピアの最終ハンドシェイクを読む。カーネルは秘密鍵を変えても
+// ピアの最終ハンドシェイクを残すが、鍵を変える収束は同じ netlink のメッセージで server のピアを
+// 置き直すので(wg.EnsureAgent、設計文書 7b.4 節)、読める値は wgft0 が今持つ鍵のものだけである。
 func (d *Dataplane) LastHandshake() time.Time {
 	prev, _ := d.f.PreviousKey()
 	st, err := d.Ops.InspectLink(d.iface, d.Priv, prev)

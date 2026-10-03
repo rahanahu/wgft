@@ -55,7 +55,8 @@ func (rt *runtime) tunnelSnapshotLocked(r agentdp.TunnelReading) tunnelSnapshot 
 		}
 		return tunnelSnapshot{hb: proto.TunnelStatus{State: proto.StatusError, Reason: reason}}
 	}
-	// dataplane が読むのは今の device なので、最終ハンドシェイクは必ず今のトンネルのものである。
+	// dataplane が読むのは今の device で、鍵を変えた後に前の鍵のハンドシェイクは残らないので
+	// (agentdp.Dataplane の LastHandshake)、最終ハンドシェイクは必ず今のトンネルのものである。
 	// watchdog が rebuildState に持つ値は closeLocked が消さず、立て直した直後は前のトンネルの
 	// 値が残るので、2 つを混ぜない(設計文書 10.2c 節)
 	snap := tunnelSnapshot{present: true, raw: r, hb: proto.TunnelStatus{State: proto.StatusOK, LastHandshake: r.LastHandshake}}

@@ -563,12 +563,28 @@ func KernelDeviceNames() ([]string, error) {
 
 // agentDeviceDiff is the wgctrl part of EnsureAgent on a device already read: the configuration
 // that moves dev to cfg, and one line per change. It never sets the listen port.
+//
+// When the private key changes and the server peer is there, the configuration replaces every
+// peer with a new server peer (ReplacePeers), in the same configuration as the key (design.md
+// 7b.4 節). The kernel keeps a peer's latest handshake and byte counts across a change of the
+// device's private key, so without this the peer would go on showing the previous key's handshake
+// as if the new key had made it. Any other peer is removed, as on every convergence. The
+// configuration then holds one peer with one AllowedIPs entry, and wgctrl splits a configuration
+// into several netlink messages only above 32 peers or 256 AllowedIPs entries, so it is one
+// message whatever peers wgft0 had. A crash cannot leave the new key with the old peer. In the
+// kernel source, setting and reading a device both hold rtnl_lock and the device's update lock,
+// and a lab run with concurrent readers over repeated key changes never read the new key with the
+// old peer; that is evidence, not a proof. The kernel does not roll back a partly applied message:
+// if adding the peer fails after the key is set, the new key stays with no peer until the next
+// convergence adds it. The resolved endpoint is used; when the name is not resolved, the endpoint
+// the kernel has is carried over, as the update path keeps it.
 func agentDeviceDiff(dev *wgtypes.Device, cfg AgentConfig) (wgtypes.Config, []string) {
 	var wc wgtypes.Config
 	var notes []string
 	note := func(f string, a ...any) { notes = append(notes, fmt.Sprintf(f, a...)) }
 
-	if dev.PrivateKey != cfg.PrivateKey {
+	keyChange := dev.PrivateKey != cfg.PrivateKey
+	if keyChange {
 		key := cfg.PrivateKey
 		wc.PrivateKey = &key
 		if cfg.PreviousKey != (wgtypes.Key{}) && dev.PrivateKey == cfg.PreviousKey {
@@ -592,17 +608,33 @@ func agentDeviceDiff(dev *wgtypes.Device, cfg AgentConfig) (wgtypes.Config, []st
 		server = p
 	}
 
-	if server == nil {
+	if server == nil || keyChange {
+		endpoint := unmapped(cfg.Server.Endpoint)
+		if server != nil {
+			// 鍵を変えるときは server のピアを置き直す。カーネルはピアの最終ハンドシェイクを鍵の変更の
+			// 後も残すので、置き直さなければ前の鍵のハンドシェイクが今の鍵のものに見える。ReplacePeers で
+			// 全部のピアを外し、server のピア 1 つだけを足す。外すピアを 1 つずつ並べると、ピアが多い
+			// wgft0 では wgctrl が設定を複数のメッセージに分け、2 度目に現れる server のピアから
+			// エンドポイントと keepalive を落とす
+			wc.ReplacePeers, wc.Peers = true, nil
+			if !endpoint.IsValid() {
+				endpoint = peerEndpoint(server)
+			}
+		}
 		pc := wgtypes.PeerConfig{PublicKey: cfg.Server.PublicKey, ReplaceAllowedIPs: true, AllowedIPs: allowed}
 		ka := cfg.Server.Keepalive
 		pc.PersistentKeepaliveInterval = &ka
 		desc := "no endpoint yet"
-		if cfg.Server.Endpoint.IsValid() {
-			pc.Endpoint = net.UDPAddrFromAddrPort(unmapped(cfg.Server.Endpoint))
-			desc = "endpoint " + unmapped(cfg.Server.Endpoint).String()
+		if endpoint.IsValid() {
+			pc.Endpoint = net.UDPAddrFromAddrPort(endpoint)
+			desc = "endpoint " + endpoint.String()
 		}
 		wc.Peers = append(wc.Peers, pc)
-		note("add server peer %s at %s, %s, keepalive %v", cfg.Server.PublicKey, cfg.Server.Address, desc, cfg.Server.Keepalive)
+		if server != nil {
+			note("reset server peer %s for the new key, so the previous key's handshake is not shown as the new key's; %s, keepalive %v", cfg.Server.PublicKey, desc, cfg.Server.Keepalive)
+		} else {
+			note("add server peer %s at %s, %s, keepalive %v", cfg.Server.PublicKey, cfg.Server.Address, desc, cfg.Server.Keepalive)
+		}
 		return wc, notes
 	}
 

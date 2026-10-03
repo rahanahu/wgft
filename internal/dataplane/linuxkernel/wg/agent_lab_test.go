@@ -276,8 +276,8 @@ func TestAgentEnsureAcceptsPreviousKey(t *testing.T) {
 		t.Fatalf("ownership = %v, %v; want owned by the previous key", own, err)
 	}
 	ch := ensureAgent(t, rotated)
-	if len(ch) != 1 || !strings.Contains(ch[0], "replace the previous private key") {
-		t.Errorf("changes = %q, want only the key replacement", ch)
+	if len(ch) != 2 || !strings.Contains(ch[0], "replace the previous private key") || !strings.Contains(ch[1], "reset server peer") {
+		t.Errorf("changes = %q, want the key replacement and the reset of the server peer", ch)
 	}
 	assertConverged(t, rotated, rotated.Server.Endpoint)
 	if got := device(t, agentIf).ListenPort; got != port {
@@ -410,6 +410,86 @@ func TestAgentHandshakeAfterReResolution(t *testing.T) {
 		t.Errorf("endpoint after the move = %v", st.Peers[0].Endpoint)
 	}
 	t.Logf("handshake %v after the endpoint moved", st.Peers[0].LastHandshake.Sub(moved).Round(time.Millisecond))
+}
+
+// 鍵を変えると server のピアを置き直すので、前の鍵のハンドシェイクは残らない (design.md 7b.4 節)。
+// カーネルは秘密鍵を変えてもピアの最終ハンドシェイクを残すため、置き直さなければ、新しい鍵で
+// 一度もハンドシェイクしていない間も前の鍵の時刻が読める。試験用のサーバが新しい鍵を知らない間は
+// ゼロのままで、知った後は新しい鍵のハンドシェイクが成立する。名前を解決できていない収束でも、
+// 置き直したピアはカーネルが持っていたエンドポイントを保つ。wgft0 に余分なピアが多くあっても
+// 同じである。wgctrl は 32 を超えるピアの設定を複数のメッセージに分け、2 度目に現れるピアから
+// エンドポイントと keepalive を落とすので、その境を越える数でも確かめる。
+func TestAgentKeyChangeResetsHandshake(t *testing.T) {
+	for _, extra := range []int{0, 40} {
+		t.Run(fmt.Sprintf("%d extra peers", extra), func(t *testing.T) { testAgentKeyChangeResetsHandshake(t, extra) })
+	}
+}
+
+func testAgentKeyChangeResetsHandshake(t *testing.T, extra int) {
+	cleanup(agentIf, serverIf)
+	defer cleanup(agentIf, serverIf)
+	sk := serverKey(t)
+	old := labAgentCfg(t)
+	old.Server.PublicKey = sk.PublicKey()
+	old.Server.Endpoint = netip.MustParseAddrPort("127.0.0.1:51944")
+	old.Server.Keepalive = time.Second
+	makeServer(t, sk, old.PrivateKey.PublicKey(), 51944)
+	ensureAgent(t, old)
+	waitHandshake(t, old, time.Now().Add(-time.Second))
+	c, err := wgctrl.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if extra > 0 {
+		var strays []wgtypes.PeerConfig
+		for i := range extra {
+			_, n, _ := net.ParseCIDR(fmt.Sprintf("10.9.%d.%d/32", i/250, i%250+1))
+			strays = append(strays, wgtypes.PeerConfig{PublicKey: serverKey(t).PublicKey(), AllowedIPs: []net.IPNet{*n}})
+		}
+		if err := c.ConfigureDevice(agentIf, wgtypes.Config{Peers: strays}); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(device(t, agentIf).Peers); n != extra+1 {
+			t.Fatalf("%d peers before the key change, want %d", n, extra+1)
+		}
+	}
+
+	rotated := old
+	rotated.PrivateKey, rotated.PreviousKey = serverKey(t), old.PrivateKey
+	rotated.Server.Endpoint = netip.AddrPort{} // 鍵を変える収束の時点で名前を解決できていない
+	changed := time.Now()
+	ensureAgent(t, rotated)
+	time.Sleep(3 * time.Second) // keepalive 3 回分。サーバは新しい鍵を知らないので成立しない
+	st, err := InspectAgent(agentIf, rotated.PrivateKey, rotated.PreviousKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Ownership != OwnedByCurrentKey || len(st.Peers) != 1 {
+		t.Fatalf("state = %+v", st)
+	}
+	p := st.Peers[0]
+	if !p.LastHandshake.IsZero() {
+		t.Errorf("last handshake after the key change = %v, want none: the previous key's handshake is still shown", p.LastHandshake)
+	}
+	if p.ReceiveBytes != 0 {
+		t.Errorf("received %d bytes after the key change with a server that does not know the new key", p.ReceiveBytes)
+	}
+	if p.Endpoint != old.Server.Endpoint {
+		t.Errorf("endpoint after the reset = %v, want the kernel's %v kept", p.Endpoint, old.Server.Endpoint)
+	}
+	if p.Keepalive != time.Second || len(p.AllowedIPs) != 1 || p.AllowedIPs[0] != netip.MustParsePrefix("10.201.0.1/32") {
+		t.Errorf("peer after the reset = %+v", p)
+	}
+
+	// サーバが新しい鍵を受け入れた後は、新しい鍵のハンドシェイクが成立する
+	_, allowed, _ := net.ParseCIDR("10.201.0.2/32")
+	if err := c.ConfigureDevice(serverIf, wgtypes.Config{ReplacePeers: true,
+		Peers: []wgtypes.PeerConfig{{PublicKey: rotated.PrivateKey.PublicKey(), AllowedIPs: []net.IPNet{*allowed}}}}); err != nil {
+		t.Fatal(err)
+	}
+	st = waitHandshake(t, rotated, changed)
+	t.Logf("handshake with the new key %v after the key change", st.Peers[0].LastHandshake.Sub(changed).Round(time.Millisecond))
 }
 
 // 撤去は自分の鍵 (今の鍵か 1 つ前の鍵) のインタフェースだけを消す。
