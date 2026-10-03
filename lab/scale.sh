@@ -78,11 +78,13 @@ N_AGENTS=5
 AGENT_START_STAGGER=1.5     # seconds between starting each agent process; see the rate limiter
                             # note above. Not a claim about how fast registration should be.
 AGENT_REGISTER_BUDGET=45    # generous upper bound per agent (docs/testing.md's wall-clock rule)
-# All rules go to agent home0, so home0's own full-state message and RSS are the ones that grow
-# with the ladder (proto/state.go's AgentState filters rules by agent, design 5.2 節); home1..4
-# stay registered with zero rules the whole run, showing that a push to several idle agents does
-# not itself grow with the ladder.
+# The ladder's rules fill agent home0 up to the per-agent limit of PER_AGENT rules (design 5.3 節,
+# proto.MaxRulesPerAgent), then home1, and so on, so home0's own full-state message and RSS are the
+# ones that grow with the ladder up to that limit (proto/state.go's AgentState filters rules by
+# agent, design 5.2 節). Up to 512 rules, home1..4 stay registered with zero rules, showing that a
+# push to several idle agents does not itself grow with the ladder.
 RULE_AGENT=home0
+PER_AGENT=512
 BASE=20000                 # ladder rules occupy BASE..BASE+R-1
 # A first trial with the suggested 10/100/500/1000 ladder found a hard wall in between: kernel
 # mode's apply flushes the WHOLE table in one netlink SendMessages call
@@ -232,7 +234,10 @@ reset_rules() { # replace the whole rule set with nothing (proto's own full-repl
   wait_until 30 all_rules_active 0
 }
 
-# build_ladder_rules <R> <outfile>: R rules on RULE_AGENT, ports BASE..BASE+R-1, all TCP except
+# ladder_agent <i>: the agent of the ladder's rule i, filling home0 first (see PER_AGENT above).
+ladder_agent() { echo "home$(($1 / PER_AGENT))"; }
+
+# build_ladder_rules <R> <outfile>: R rules over ladder_agent, ports BASE..BASE+R-1, all TCP except
 # the last (index R-1), which is UDP -- so "the first rule" is always TCP on a fixed port, and
 # "the last rule" is always UDP on the ladder's top port, giving both a real TCP and a real UDP
 # probe across the two ends of the list, as the check policy asks for.
@@ -247,7 +252,7 @@ for i in range(R):
     p = base + i
     proto = 'udp' if i == R - 1 else 'tcp'
     rules.append({
-        'id': f'r_scale{i:05d}', 'agent': '$RULE_AGENT', 'proto': proto,
+        'id': f'r_scale{i:05d}', 'agent': f'home{i // $PER_AGENT}', 'proto': proto,
         'listen_port': str(p), 'target': f'192.168.50.2:{p}',
         'vps_mode': 'kernel', 'enabled': True,
     })
@@ -371,9 +376,9 @@ for R in $LADDER; do
     if (( SECONDS >= loop_deadline )); then break; fi
     p=$((BASE + i))
     if (( i == R - 1 )); then
-      last_add_err=$(vps wgft rule add --agent "$RULE_AGENT" --udp "$p" --to "192.168.50.2:$p" --admin "$ADMIN" 2>&1 1>/dev/null)
+      last_add_err=$(vps wgft rule add --agent "$(ladder_agent "$i")" --udp "$p" --to "192.168.50.2:$p" --admin "$ADMIN" 2>&1 1>/dev/null)
     else
-      last_add_err=$(vps wgft rule add --agent "$RULE_AGENT" --tcp "$p" --to "192.168.50.2:$p" --admin "$ADMIN" 2>&1 1>/dev/null)
+      last_add_err=$(vps wgft rule add --agent "$(ladder_agent "$i")" --tcp "$p" --to "192.168.50.2:$p" --admin "$ADMIN" 2>&1 1>/dev/null)
     fi
     [ -n "$last_add_err" ] && addfail=$((addfail + 1))
     added=$((added + 1))
@@ -448,6 +453,9 @@ overlimit_out=$(vps wgft rule import "$RFILE" --admin "$ADMIN" 2>&1)
 overlimit_rc=$?
 measure "overlimit N=$OVERLIMIT_N file_bytes=$overlimit_bytes exit=$overlimit_rc output=[$overlimit_out]"
 okcheck "oversized import is rejected (non-zero exit)" "$([ "$overlimit_rc" -ne 0 ] && echo 1 || echo 0)"
+# All of its rules are on one agent, so the per-agent limit would refuse it too; the refusal must
+# come from the request cap, which is read before the batch is admitted.
+check "oversized import is refused by the request cap" "request body too large" "$overlimit_out"
 eqcheck "oversized import left zero rules (no partial apply)" "0" "$(rule_count)"
 
 echo "== cleanup: delete every rule and confirm the leak check"

@@ -406,8 +406,13 @@ func TestImportConfirmLocales(t *testing.T) {
 	}
 }
 
-// manyRulesJSON marshals n distinct, valid kernel-mode UDP rules on agent "home" (registered
-// by fakeBackend's default) starting at port lo. It is used to build a rule set whose raw JSON
+// manyRulesAgents are the agents manyRulesJSON spreads its rules over, so that no agent goes over
+// proto.MaxRulesPerAgent (design.md 5.3 節). Every name has the length of "home", so the JSON is as
+// large as when every rule was on "home".
+var manyRulesAgents = []string{"home", "hom1", "hom2", "hom3", "hom4", "hom5", "hom6", "hom7"}
+
+// manyRulesJSON marshals n distinct, valid kernel-mode UDP rules over manyRulesAgents in turn,
+// starting at port lo. It is used to build a rule set whose raw JSON
 // stays under importMaxBytes but whose application/x-www-form-urlencoded encoding (as sent by
 // the confirm page's hidden "content" field) does not, because JSON's own punctuation ("{}:,)
 // percent-encodes to 3 bytes each.
@@ -417,7 +422,7 @@ func manyRulesJSON(t *testing.T, n int, lo uint16) []byte {
 	for i := 0; i < n; i++ {
 		port := lo + uint16(i)
 		rules[i] = proto.Rule{
-			ID: fmt.Sprintf("r_%05d", i), Agent: "home", Proto: proto.UDP,
+			ID: fmt.Sprintf("r_%05d", i), Agent: manyRulesAgents[i%len(manyRulesAgents)], Proto: proto.UDP,
 			ListenPort: proto.PortRange{Lo: port, Hi: port}, Target: fmt.Sprintf("192.168.1.20:%d", port),
 			VPSMode: proto.ModeKernel, Enabled: true,
 		}
@@ -435,7 +440,13 @@ func manyRulesJSON(t *testing.T, n int, lo uint16) []byte {
 // 超えうることの再現である(レビューの指摘)。修正前は適用の MaxBytesReader が upload と同じ
 // importMaxBytes だったため、この POST は "http: request body too large" で失敗した。
 func TestImportApplyBodyLimitSurvivesURLEncoding(t *testing.T) {
-	srv, st := newImportTestServer(t)
+	_, st := newImportTestServer(t)
+	var agents []AgentInfo
+	for _, name := range manyRulesAgents {
+		agents = append(agents, AgentInfo{Name: name})
+	}
+	srv := httptest.NewServer(New(&fakeBackend{st: st, agents: agents}))
+	t.Cleanup(srv.Close)
 
 	body := manyRulesJSON(t, 3000, 20000) // raw ~837 KB (< importMaxBytes)、url エンコードで ~1.31 MB (> importMaxBytes)
 	if len(body) >= importMaxBytes {

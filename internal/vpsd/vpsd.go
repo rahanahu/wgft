@@ -228,6 +228,16 @@ func Run(opts Options) error {
 		}
 	}
 
+	// エージェントあたりのルールの数の上限(仕様 5.3、5.4 節)を超える保存済みのデータ。起動も配信も
+	// 拒まず、警告だけする
+	if rules, err := st.Rules(); err != nil {
+		log.Printf("warning: checking rule counts per agent: %v", err)
+	} else {
+		for _, l := range ruleCountWarnings(rules) {
+			log.Print(l)
+		}
+	}
+
 	d := &Daemon{opts: opts, st: st, dp: &kernelDataplane{
 		iface: opts.WGInterface,
 		b:     linuxkernel.New(linuxkernel.Options{Interface: opts.WGInterface, AdoptExisting: opts.AdoptExisting}),
@@ -313,6 +323,21 @@ func Run(opts Options) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return d.serve(ctx, rules)
+}
+
+// ruleCountWarnings は、ルールの数がエージェントあたりの上限(proto.MaxRulesPerAgent、仕様 5.3 節)を
+// 超えるエージェントごとに、起動のときに出す警告の行を名前の順に返す。上限の導入の前に保存された
+// データでだけ起こる。そのエージェントの接続、配信、転送は続き、ルールを増やす保存だけが拒まれる
+// (仕様 5.4 節)。
+func ruleCountWarnings(rules []proto.Rule) []string {
+	counts := proto.RuleCountsByAgent(rules)
+	var out []string
+	for _, agent := range proto.AgentsOverRuleLimit(rules) {
+		out = append(out, fmt.Sprintf("warning: agent %q has %d rules, over the limit of %d rules per agent; "+
+			"saving a change that adds rules to it is refused until rules are deleted or moved to another agent, "+
+			"and the agent cannot read a full state over 4 MiB", agent, counts[agent], proto.MaxRulesPerAgent))
+	}
+	return out
 }
 
 // relayFrontendOptions は Relay のルールの中継(proxyrelay)の設定を組む。uspace はユーザー空間モード
