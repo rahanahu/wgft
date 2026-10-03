@@ -117,7 +117,7 @@ func (m *Manager) Retry() {
 	var probes []targetProbe
 	var rebind []Key
 	for k, l := range m.listeners {
-		if l.bindErr != nil {
+		if !l.bound() {
 			// 開き直しは map を書き換えるので、走査の後にまとめて行う
 			rebind = append(rebind, k)
 			continue
@@ -142,7 +142,7 @@ func (m *Manager) Retry() {
 // appendProbe は、開けた TCP の待ち受けを確認の対象に加える。UDP は到達確認ができないので加えない。
 // bind に失敗した待ち受けも、リスナーが無いので加えない。呼び出し側は m.mu を持つ。
 func appendProbe(probes []targetProbe, k Key, l *listener) []targetProbe {
-	if l == nil || l.bindErr != nil || k.Proto != proto.TCP {
+	if l == nil || !l.bound() || k.Proto != proto.TCP {
 		return probes
 	}
 	return append(probes, targetProbe{key: k, l: l, target: l.target})

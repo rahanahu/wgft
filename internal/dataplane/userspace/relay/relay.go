@@ -198,19 +198,20 @@ type bindFailure struct {
 //   - retireLocked:Active から Retiring へ移す
 //   - reviveLocked:Retiring の UDP の待ち受けを Active へ戻す
 //
-// Apply の経路の Retry が開き直す、bind に失敗した待ち受けは例外で、budget を閉じて表から消すだけである。
-// その closeF は何もしない関数なので呼ばない。
+// Apply の経路の Retry が開き直す、bind に失敗した待ち受け(bound が偽)は例外で、budget を閉じて表から
+// 消すだけである。その closeF は何もしない関数なので呼ばない。
 type listener struct {
 	key    Key
 	target string
 	ruleID string
 	closeF func()
 	// stopAccept は新しいフローの受け付けだけをやめ、成立済みのフローを残す(TCP は待ち受けソケットを
-	// 閉じ、UDP は新しい送信元のデータグラムを捨てる)。
+	// 閉じ、UDP は新しい送信元のデータグラムを捨てる)。bound が偽の待ち受けでは nil である。
 	stopAccept func()
 	// accepting は UDP が新しいセッションを作るか(stopAccept で偽になる)。
 	accepting atomic.Bool
-	// sweep は keep が偽を返す接続元のセッションを閉じ、閉じた数を返す(接続元制限の変更の即時反映。仕様 6.2 節)
+	// sweep は keep が偽を返す接続元のセッションを閉じ、閉じた数を返す(接続元制限の変更の即時反映。仕様 6.2 節)。
+	// bound が偽の待ち受けでは nil である
 	sweep func(keep func(src netip.Addr) bool) int
 	// セッション数(ハートビートの表示用)
 	sessions func() int
@@ -221,8 +222,8 @@ type listener struct {
 	budget *resource.Listener
 	// bindErr は待ち受けを開けなかったこと。bind の失敗のほか、宛先が許可一覧の外にある IP
 	// リテラルで bind を試みなかった場合の誤りもここに入る(設計文書 7 節の openLocked)。
-	// どちらも待ち受けを持たない状態を表すので、Status.Listening はこの値が nil かどうかである。
-	// Retry で開き直す
+	// どちらも待ち受けを持たない状態を表すので、この値が nil かどうかを bound が返し、Status.Listening は
+	// その値である。Retry で開き直す
 	bindErr error
 	// targetErr は TCP ルールで target への接続確認が失敗したときの誤り(仕様 5.2 節)。
 	// リスナー自体は開いているので、Retry では開き直さず再確認だけする。
@@ -248,6 +249,15 @@ func (l *listener) err() error {
 	}
 	return l.targetErr
 }
+
+// bound は待ち受けがソケットを持っているかどうかである。偽になるのは、Apply の経路の openLocked が
+// 開けなかった待ち受けだけで、bindErr がその理由を持つ。偽の待ち受けは serveUDP も serveTCP も
+// 通っていないので、関数の欄の sweep と stopAccept は nil、closeF は何もしない関数、sessions は 0 を
+// 返す関数である。ソケットの有無で分ける箇所と、sweep と stopAccept を呼ぶ前の分岐は、関数の欄が nil
+// かどうかではなくこの値で分ける。bindErr は待ち受けを表に入れる前に書き、後から書き換えない(Retry は
+// 別の待ち受けに置き換える)。そのため、m.mu の下で表から取り出した待ち受けなら、m.mu を放した後に
+// 読んでもよい。
+func (l *listener) bound() bool { return l.bindErr == nil }
 
 // shutdownLocked は待ち受けを閉じる。closeF で待ち受けソケットと中継中のフローを閉じ、その後に
 // Resource Guard の枠を Pool から外す。呼び出し側は m.mu を持ち、この後に待ち受けを表から外す。
@@ -425,7 +435,7 @@ func (m *Manager) Status() []Status {
 	for _, l := range m.listeners {
 		out = append(out, Status{
 			Key: l.key, Target: l.target, RuleID: l.ruleID,
-			Listening: l.bindErr == nil,
+			Listening: l.bound(),
 			Sessions:  l.sessions(),
 			Flows:     l.budget.Flows(),
 			Err:       l.err(),
@@ -477,7 +487,7 @@ func (m *Manager) CloseSessions(keep func(ruleID string, src netip.Addr) bool) i
 	m.mu.Unlock()
 	n := 0
 	for _, l := range ls {
-		if l.sweep == nil {
+		if !l.bound() {
 			continue
 		}
 		id := m.ruleOf(l)

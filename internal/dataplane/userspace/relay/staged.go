@@ -68,7 +68,7 @@ func (m *Manager) Prepare(desired map[Key]Desired) *Staged {
 		if _, ok := m.listeners[k]; ok {
 			continue
 		}
-		if l, ok := m.retiring[k]; ok && k.Proto == proto.UDP && l.sweep != nil {
+		if l, ok := m.retiring[k]; ok && k.Proto == proto.UDP && l.bound() {
 			s.revived[k] = true
 			continue
 		}
@@ -226,7 +226,7 @@ func (m *Manager) retireLocked(k Key, l *listener, keep func(src netip.Addr) boo
 	if old, ok := m.retiring[k]; ok {
 		old.shutdownLocked()
 	}
-	if l.stopAccept != nil {
+	if l.bound() {
 		l.stopAccept()
 	}
 	// Retiring の待ち受けのフローは、プロセス全体の数には残り、ルールごとの数からは外れる
@@ -234,7 +234,7 @@ func (m *Manager) retireLocked(k Key, l *listener, keep func(src netip.Addr) boo
 	// 上限の判定はこの待ち受けを見ない
 	l.budget.StopAccepting()
 	n := 0
-	if l.sweep != nil {
+	if l.bound() {
 		n = l.sweep(keep)
 	}
 	m.retiring[k] = l
