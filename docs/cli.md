@@ -1027,8 +1027,9 @@ List rules, grouped by --group. An ID longer than 12 characters is cut to its
 first 12 and "…". Every rule command accepts a prefix of an ID of any length
 as long as it is unambiguous, with or without a trailing "…" or "...", and
 lists the matching IDs when it is not. An ID that matches the input exactly,
-mark included, is taken first, then an ID that matches it with the mark
-removed. TARGET shows the effective target range.
+mark included, is taken first. Otherwise an input with a mark is matched only
+as a prefix: with rules "web" and "webserver", "web" takes "web", but "web…"
+lists both. TARGET shows the effective target range.
 MODE is proxy for rules added with --proxy and kernel for all others; in
 userspace mode "kernel" rules are relayed by the wgft process, not the kernel.
 DENY and ALLOW are the number of CIDRs, RATES the configured limits, DROPPED

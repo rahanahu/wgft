@@ -144,15 +144,20 @@ func TestMatchRuleKeepsIDsThatEndInAnEllipsis(t *testing.T) {
 	}
 }
 
-// 完全一致は前方一致より先に立つ。省略記号を落とした残りと完全に一致する ID があれば、前方一致が
-// 他にあってもそれを指す。省略記号が無い入力と同じ扱いである。
-func TestMatchRulePrefersAnExactMatchOfTheRest(t *testing.T) {
+// 省略記号の無い入力では、完全一致が前方一致より先に立つ。省略記号の付いた入力では、残りと完全に
+// 一致する ID を先に指さず、前方一致だけを見る。表は 13 文字の ID を "aaaaaaaaaaaa…" と示すので、
+// これを貼って 12 文字の ID を指すと、表の行と別のルールを指してしまう。
+func TestMatchRuleTakesAMarkedInputOnlyAsAPrefix(t *testing.T) {
 	web := proto.Rule{ID: "web"}
 	webserver := proto.Rule{ID: "webserver"}
 	for _, rules := range [][]proto.Rule{{web, webserver}, {webserver, web}} {
-		for _, arg := range []string{"web", "web…", "web..."} {
-			if got, err := matchRule(rules, arg); err != nil || got.ID != web.ID {
-				t.Errorf("matchRule(%q) over %v = %v %v, want web", arg, rules, got, err)
+		if got, err := matchRule(rules, "web"); err != nil || got.ID != web.ID {
+			t.Errorf("matchRule(%q) over %v = %v %v, want web", "web", rules, got, err)
+		}
+		for _, arg := range []string{"web…", "web..."} {
+			_, err := matchRule(rules, arg)
+			if err == nil || !strings.Contains(err.Error(), "matches 2 rules") || !strings.Contains(err.Error(), "webserver") {
+				t.Errorf("matchRule(%q) over %v = %v, want refused with both candidates", arg, rules, err)
 			}
 		}
 		for _, arg := range []string{"webs", "webs…", "webs..."} {
@@ -160,6 +165,27 @@ func TestMatchRulePrefersAnExactMatchOfTheRest(t *testing.T) {
 				t.Errorf("matchRule(%q) over %v = %v %v, want webserver", arg, rules, got, err)
 			}
 		}
+	}
+
+	twelve := proto.Rule{ID: "aaaaaaaaaaaa"}
+	thirteen := proto.Rule{ID: "aaaaaaaaaaaab"}
+	if short(twelve.ID) != twelve.ID || short(thirteen.ID) != "aaaaaaaaaaaa…" {
+		t.Fatalf("short forms: %q %q", short(twelve.ID), short(thirteen.ID))
+	}
+	for _, rules := range [][]proto.Rule{{twelve, thirteen}, {thirteen, twelve}} {
+		_, err := matchRule(rules, short(thirteen.ID))
+		if err == nil || !strings.Contains(err.Error(), "matches 2 rules") || !strings.Contains(err.Error(), thirteen.ID) {
+			t.Errorf("the table's %q over %v = %v, want refused with both candidates", short(thirteen.ID), rules, err)
+		}
+		for _, want := range []string{twelve.ID, thirteen.ID} {
+			if got, err := matchRule(rules, want); err != nil || got.ID != want {
+				t.Errorf("matchRule(%q) over %v = %v %v", want, rules, got, err)
+			}
+		}
+	}
+	// 他に前方一致が無ければ、省略記号の付いた入力も残りと同じ ID を指す。
+	if got, err := matchRule([]proto.Rule{twelve}, "aaaaaaaaaaaa…"); err != nil || got.ID != twelve.ID {
+		t.Errorf("a marked input over the one rule it names = %v %v", got, err)
 	}
 }
 

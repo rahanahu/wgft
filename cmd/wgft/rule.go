@@ -820,11 +820,13 @@ const maxRuleCandidates = 5
 
 // matchRule は rules から、ID の完全一致か、前方一致が 1 つだけのルールを返す。表の ID の列は short が
 // 省略記号を付けた短い形で出すので、末尾の省略記号を落としても照合する。ただし rule import と管理用
-// API は空でない任意の ID を受けるので、省略記号で終わる ID もありうる。そこで生の入力の完全一致、
-// 省略記号を落とした残りの完全一致、残りの前方一致の順に試す。前方一致に求める長さは省略記号の有無で
-// 変えない。12 文字(doctor.ShortIDLen)は表示で省略する長さであって、受け取る先頭の最小の長さでは
-// ない。残りが空の入力は、ルールが 1 本でも指さずに拒む。前方一致が 2 つ以上なら、候補の完全な ID を
-// 挙げて拒む(設計文書 10.2 節)。
+// API は空でない任意の ID を受けるので、省略記号で終わる ID もありうる。そこで生の入力の完全一致を
+// 先に試し、無ければ省略記号を落とした残りの前方一致を見る。省略記号の付いた入力では、残りと完全に
+// 一致する ID を先に指さない。表の "aaaaaaaaaaaa…" は aaaaaaaaaaaa の先に文字が続く ID を示すので、
+// 12 文字の aaaaaaaaaaaa を先に指すと、表の行と別のルールを指しうる。前方一致に求める長さは省略記号の
+// 有無で変えない。12 文字(doctor.ShortIDLen)は表示で省略する長さであって、受け取る先頭の最小の長さ
+// ではない。残りが空の入力は、ルールが 1 本でも指さずに拒む。前方一致が 2 つ以上なら、候補の完全な
+// ID を挙げて拒む(設計文書 10.2 節)。
 func matchRule(rules []proto.Rule, id string) (*proto.Rule, error) {
 	for i := range rules {
 		if rules[i].ID == id {
@@ -837,9 +839,6 @@ func matchRule(rules []proto.Rule, id string) (*proto.Rule, error) {
 	}
 	var matches []proto.Rule
 	for _, r := range rules {
-		if r.ID == prefix {
-			return &r, nil
-		}
 		if strings.HasPrefix(r.ID, prefix) {
 			matches = append(matches, r)
 		}
