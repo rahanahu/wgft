@@ -88,7 +88,7 @@ func TestReadConntrackUsage(t *testing.T) {
 func TestIPForwardStatus(t *testing.T) {
 	// This reads the real /proc file, so it only exercises the "already 1" and error paths; the
 	// lab's e2e/lifecycle scripts exercise the actual write through server startup on a real kernel.
-	// TestEnableIPForward covers EnableIPForward's decisions against a stand-in file.
+	// TestIPForwardReadAndWrite covers the read and write pieces against a stand-in file.
 	value, openErr, err := IPForwardStatus()
 	if err != nil {
 		t.Skipf("cannot read %s: %v", IPForwardPath, err)
@@ -101,45 +101,45 @@ func TestIPForwardStatus(t *testing.T) {
 	}
 }
 
-// EnableIPForward は、0 を読んで 1 を書けたときだけ変えたと答える。値を読めなかった場合は、1 を書けても
-// 変えたとは答えない。0 だったとは言えず、wgft が変えたと記録してはいけないためである。
-func TestEnableIPForward(t *testing.T) {
-	cases := []struct {
-		name        string
-		content     string
-		mode        os.FileMode
-		wantChanged bool
-		wantErr     bool
-		wantAfter   string
-	}{
-		{"already 1", "1\n", 0o600, false, false, "1\n"},
-		{"0 is changed", "0\n", 0o600, true, false, "1\n"},
-		{"unreadable but writable", "0\n", 0o200, false, false, "1\n"},
-		{"read-only 0", "0\n", 0o400, false, true, "0\n"},
+// TestIPForwardReadAndWrite checks the pieces the server's startup combines into the two-stage
+// record (design.md 6.1 節) against a stand-in file: ReadIPForward answers whether the value is 1,
+// ReadIPForwardValue returns it trimmed, and WriteIPForward writes 1 or returns the error.
+func TestIPForwardReadAndWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ip_forward")
+	old := ipForwardPath
+	ipForwardPath = path
+	t.Cleanup(func() { ipForwardPath = old })
+
+	if _, err := ReadIPForwardValue(); err == nil {
+		t.Error("ReadIPForwardValue of a missing file returned no error")
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if os.Geteuid() == 0 && c.mode != 0o600 {
-				t.Skip("root ignores the file mode")
-			}
-			path := filepath.Join(t.TempDir(), "ip_forward")
-			if err := os.WriteFile(path, []byte(c.content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(path, c.mode); err != nil {
-				t.Fatal(err)
-			}
-			old := ipForwardPath
-			ipForwardPath = path
-			t.Cleanup(func() { ipForwardPath = old })
-			changed, err := EnableIPForward()
-			if changed != c.wantChanged || (err != nil) != c.wantErr {
-				t.Errorf("= %v, %v; want changed %v, error %v", changed, err, c.wantChanged, c.wantErr)
-			}
-			_ = os.Chmod(path, 0o600)
-			if b, _ := os.ReadFile(path); string(b) != c.wantAfter {
-				t.Errorf("file = %q, want %q", b, c.wantAfter)
-			}
-		})
+	if err := os.WriteFile(path, []byte("0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := ReadIPForward(); on || err != nil {
+		t.Errorf("ReadIPForward = %v, %v; want false, nil", on, err)
+	}
+	if v, err := ReadIPForwardValue(); v != "0" || err != nil {
+		t.Errorf("ReadIPForwardValue = %q, %v; want 0", v, err)
+	}
+	if err := WriteIPForward(); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := ReadIPForward(); !on || err != nil {
+		t.Errorf("after WriteIPForward, ReadIPForward = %v, %v; want true, nil", on, err)
+	}
+	if v, err := ReadIPForwardValue(); v != "1" || err != nil {
+		t.Errorf("after WriteIPForward, ReadIPForwardValue = %q, %v; want 1", v, err)
+	}
+	if os.Geteuid() != 0 {
+		if err := os.WriteFile(path, []byte("0\n"), 0o400); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteIPForward(); err == nil {
+			t.Error("WriteIPForward to a read-only file returned no error")
+		}
 	}
 }

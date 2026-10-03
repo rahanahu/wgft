@@ -3,7 +3,7 @@
 package linux
 
 // sysctl の読み書き:conntrack の UDP タイムアウト、net.ipv4.ip_forward、conntrack テーブルの
-// 大きさ(仕様 4, 6.1 節)。EnableIPForward だけが実際に書き込む。
+// 大きさ(仕様 4, 6.1 節)。WriteIPForward だけが実際に書き込む。
 
 import (
 	"fmt"
@@ -65,33 +65,25 @@ func WriteIPForward() error {
 	return os.WriteFile(ipForwardPath, []byte("1\n"), 0)
 }
 
-// EnableIPForward は net.ipv4.ip_forward を確認し、1 でなければ 1 にする(仕様 6.1 節)。
-// すでに 1 なら何も書かず changed=false を返す。0 を読んだうえで 1 に書けたときだけ changed=true。
-// 今の値を読めなかったときは、1 を書けても changed=false とする。0 だったとは言えないので、wgft が
-// 変えたと記録しないためである。書き込みに失敗したとき(読み取り専用の /proc、seccomp/LSM で
-// 塞がれている場合など)は err を返す。
-// 1 にした値を 0 に戻す処理はここには無い(呼び出し側の責務ではなく、そもそも持たない)。
-func EnableIPForward() (changed bool, err error) {
-	on, rerr := ReadIPForward()
-	if rerr == nil && on {
-		return false, nil // すでに 1。触らない
+// ReadIPForwardValue は net.ipv4.ip_forward の値を、前後の空白を除いた文字列で読む。書き込みも、
+// 書けるかの probe もしない。撤去が今の値を示すのに使う(仕様 10.3 節)。
+func ReadIPForwardValue() (string, error) {
+	cur, err := os.ReadFile(ipForwardPath)
+	if err != nil {
+		return "", err
 	}
-	if err := WriteIPForward(); err != nil {
-		return false, err
-	}
-	return rerr == nil, nil
+	return strings.TrimSpace(string(cur)), nil
 }
 
 // IPForwardStatus は net.ipv4.ip_forward を書き込まずに読む、読み取り専用の検査
-// (`server check` コマンド、仕様 6.1 節)。value が "1" でなければ、EnableIPForward の実際の
+// (`server check` コマンド、仕様 6.1 節)。value が "1" でなければ、WriteIPForward の実際の
 // 書き込みと同じ開き方(O_WRONLY で開いて書かずに閉じる)で書けるかを probe し、開けなければ
 // openErr にその理由を返す(value が "1" のときは probe せず openErr は nil)。
 func IPForwardStatus() (value string, openErr error, err error) {
-	cur, err := os.ReadFile(ipForwardPath)
+	value, err = ReadIPForwardValue()
 	if err != nil {
 		return "", nil, err
 	}
-	value = strings.TrimSpace(string(cur))
 	if value == "1" {
 		return value, nil, nil
 	}

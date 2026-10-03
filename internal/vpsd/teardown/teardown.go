@@ -27,6 +27,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/flock"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/vpsd/store"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -84,6 +85,8 @@ type ops struct {
 	converge    func(wgNet netip.Prefix) (int, error)
 	deleteLink  func(iface string) (bool, error)
 	remove      func(path string) error
+	// readIPForward は net.ipv4.ip_forward の今の値を読む。書き込みも probe もしない。
+	readIPForward func() (string, error)
 }
 
 func defaultOps() ops {
@@ -94,12 +97,13 @@ func defaultOps() ops {
 		mkdirAll:    func(dir string) error { return os.MkdirAll(dir, 0o700) },
 		// 撤去はデータベースを読むだけなので、スキーマの移行も権限の締め直しもしない読み取り専用で開く
 		// (設計文書 10.3 節)。
-		openStore:   store.OpenReadOnly,
-		wgOwned:     wg.Owned,
-		deleteTable: nft.DeleteTable,
-		converge:    func(wgNet netip.Prefix) (int, error) { return ctconv.Converge(nil, wgNet) },
-		deleteLink:  wg.DeleteLink,
-		remove:      os.Remove,
+		openStore:     store.OpenReadOnly,
+		wgOwned:       wg.Owned,
+		deleteTable:   nft.DeleteTable,
+		converge:      func(wgNet netip.Prefix) (int, error) { return ctconv.Converge(nil, wgNet) },
+		deleteLink:    wg.DeleteLink,
+		remove:        os.Remove,
+		readIPForward: linux.ReadIPForwardValue,
 	}
 }
 
@@ -311,7 +315,7 @@ func readPlan(o ops, opts Options, out io.Writer) (plan, error) {
 	if b, e := st.GetMeta(store.MetaMode); e == nil && string(b) == store.ModeUserspace {
 		p.userspace = true
 	}
-	p.manual = manualRestoreList(st, p.userspace, p.iface)
+	p.manual = manualRestoreList(st, p.userspace, p.iface, o.readIPForward)
 	return p, nil
 }
 
@@ -332,7 +336,7 @@ func purgeState(o ops, opts Options, out io.Writer) {
 }
 
 // manualRestoreList は「手で戻す一覧」を SQLite と meta から具体値で作る。
-func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
+func manualRestoreList(st *store.Store, userspace bool, iface string, readIPForward func() (string, error)) []string {
 	var list []string
 
 	// ファイアウォールで開けたポート
@@ -357,12 +361,7 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 		return list
 	}
 
-	// ip_forward
-	if b, err := st.GetMeta(store.MetaIPForwardSetAt); err == nil && len(b) > 0 {
-		list = append(list, "net.ipv4.ip_forward: wgft set it 0->1 at "+string(b)+"; if nothing else uses forwarding, restore with `sysctl -w net.ipv4.ip_forward=0`, and delete the file in /etc/sysctl.d if it was made persistent")
-	} else {
-		list = append(list, "net.ipv4.ip_forward: wgft did not change it, already 1; no action needed")
-	}
+	list = append(list, ipForwardLine(st, readIPForward))
 
 	// 他テーブルの wg 参照行(自動では戻さない。所在を案内)
 	list = append(list, "if you added lines to other tables as server check suggested, e.g. `oifname \""+iface+"\" ...` for DOCKER-USER or FORWARD, restore them by hand; check their location with `nft list ruleset | grep "+iface+"`")
@@ -375,6 +374,42 @@ func manualRestoreList(st *store.Store, userspace bool, iface string) []string {
 	)
 
 	return list
+}
+
+// ipForwardLine は「手で戻す一覧」の ip_forward の行を、6.1 節の 2 段の記録と今の値から作る
+// (設計文書 10.3 節)。確定の記録があれば、wgft が 0 から 1 にしたと示す。予定の記録だけがあれば、
+// 書いた後に記録できなかったか書けなかったかを区別できないので、変えたかもしれないとだけ示し、今の値を
+// 添えて運用者に判断を任せる。どちらも無ければ、wgft は変えていないと示す。記録を読めなければ、
+// どれとも言わない。
+func ipForwardLine(st *store.Store, readIPForward func() (string, error)) string {
+	const head = "net.ipv4.ip_forward: "
+	confirmed, cerr := st.GetMeta(store.MetaIPForwardSetAt)
+	planned, perr := st.GetMeta(store.MetaIPForwardWriteStartedAt)
+	var recErrs []string
+	for _, e := range []error{cerr, perr} {
+		if e != nil && !errors.Is(e, store.ErrNotFound) {
+			recErrs = append(recErrs, e.Error())
+		}
+	}
+	cur, rerr := readIPForward()
+	now := "it is now " + cur
+	if rerr != nil {
+		now = fmt.Sprintf("reading its current value failed: %v", rerr)
+	}
+	switch {
+	case cerr == nil && len(confirmed) > 0:
+		return head + "wgft set it 0->1 at " + string(confirmed) + "; if nothing else uses forwarding, restore with `sysctl -w net.ipv4.ip_forward=0`, and delete the file in /etc/sysctl.d if it was made persistent"
+	case len(recErrs) > 0:
+		return head + "reading wgft's record of changing it failed: " + strings.Join(recErrs, "; ") + "; " + now + "; check the current value and decide whether to restore it with `sysctl -w net.ipv4.ip_forward=0`"
+	case perr == nil && len(planned) > 0:
+		return head + "wgft read 0 and started to set it to 1 at " + string(planned) + ", but the result was not recorded, so wgft may have changed it; " + now + "; check the current value and decide; if wgft set it and nothing else uses forwarding, restore with `sysctl -w net.ipv4.ip_forward=0`"
+	case rerr != nil:
+		return head + "wgft did not change it; no action needed; " + now
+	case cur == "1":
+		return head + "wgft did not change it, already 1; no action needed"
+	default:
+		return head + "wgft did not change it, now " + cur + "; no action needed"
+	}
 }
 
 func printManual(out io.Writer, manual []string) {
