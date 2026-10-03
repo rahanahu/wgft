@@ -86,8 +86,16 @@ type Desired struct {
 	RuleID string
 }
 
+// targetDialTimeout は、中継が実際の通信のために target へ接続するときの期限(既定の Options.Dial)。
+// 許可一覧があるときは、解決したアドレスの全体でこの期限を分け合う(設計文書 7 節、dialAddrs)。
+const targetDialTimeout = 10 * time.Second
+
+// targetFallbackDelay は、許可一覧があるときの TCP の接続で、先に試す族のアドレスが繋がらないまま
+// もう一方の族のアドレスを並行して試し始めるまでの待ち。net.Dialer の FallbackDelay の既定と同じ値である。
+const targetFallbackDelay = 300 * time.Millisecond
+
 // targetProbeTimeout は target への到達確認 1 件の期限(設計文書 5.2 節)。
-// 中継が実際の通信のために target へ接続するときの期限(Options.Dial の既定は 10 秒)とは別に持つ。
+// 中継が実際の通信のために target へ接続するときの期限(targetDialTimeout)とは別に持つ。
 // LAN の target の TCP のハンドシェイクは 1 ミリ秒の桁で済むので 2 秒には三桁の余裕があり、
 // 黙って捨てる target 1 つが確認を延ばす長さもこの値で決まる。ハンドシェイクに 2 秒を超える
 // target は、接続を受け付けていても error として報告される。error は報告にだけ使い、中継そのものは
@@ -134,6 +142,11 @@ type Manager struct {
 	opts Options
 	// probeTimeout は到達確認 1 件の期限。単体テストだけが New の後に書き換える
 	probeTimeout time.Duration
+	// dialCtx は、許可一覧があるときに解決したアドレス 1 つへ接続する(dialAddrs)。既定の Dial なら
+	// その net.Dialer の DialContext で、渡された Dial なら期限を無視してそれを呼ぶ。dialTimeout は
+	// そのアドレスの全体で分け合う接続の期限である。どちらも単体テストだけが New の後に書き換える
+	dialCtx     func(ctx context.Context, network, addr string) (net.Conn, error)
+	dialTimeout time.Duration
 
 	mu        sync.Mutex
 	listeners map[Key]*listener
@@ -262,17 +275,23 @@ func New(n Network, opts Options) *Manager {
 	if opts.TCPPool == nil {
 		opts.TCPPool = resource.NewPool(lim.TCPTotal)
 	}
+	var dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 	if opts.Dial == nil {
-		d := &net.Dialer{Timeout: 10 * time.Second}
+		d := &net.Dialer{Timeout: targetDialTimeout}
 		if opts.RefuseTarget != nil {
 			d.ControlContext = refuseControl(opts.RefuseTarget)
 		}
 		opts.Dial = d.Dial
+		dialCtx = d.DialContext
+	} else {
+		// 渡された Dial は期限を受け取らないので、アドレスごとの期限と打ち切りは効かない
+		dial := opts.Dial
+		dialCtx = func(_ context.Context, network, addr string) (net.Conn, error) { return dial(network, addr) }
 	}
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
 	}
-	return &Manager{net: n, opts: opts, probeTimeout: targetProbeTimeout, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}, replies: defaultReplyPool}
+	return &Manager{net: n, opts: opts, dialCtx: dialCtx, dialTimeout: targetDialTimeout, probeTimeout: targetProbeTimeout, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}, replies: defaultReplyPool}
 }
 
 // DesiredFromRules は全体状態のルールから、ポートごとの宣言値を計算する。
