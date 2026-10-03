@@ -335,8 +335,9 @@ func ruleCountWarnings(rules []proto.Rule) []string {
 	for _, agent := range proto.AgentsOverRuleLimit(rules) {
 		out = append(out, fmt.Sprintf("warning: agent %q has %d rules, over the limit of %d rules per agent; "+
 			"saving a change that adds rules to it is refused until rules are deleted or moved to another agent. "+
-			"With this many rules, a heartbeat can exceed the 1 MiB the server reads when many rules report errors, "+
-			"which closes the agent's stream, and the full state can exceed the 4 MiB the agent reads", agent, counts[agent], proto.MaxRulesPerAgent))
+			"Over the limit, the message sizes are no longer guaranteed to fit; as the count grows, a heartbeat in which "+
+			"many rules report errors can exceed the 1 MiB the server reads before the full state exceeds the 4 MiB "+
+			"the agent reads, and the server then closes the agent's stream", agent, counts[agent], proto.MaxRulesPerAgent))
 	}
 	return out
 }

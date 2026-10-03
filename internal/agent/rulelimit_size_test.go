@@ -43,9 +43,13 @@ func distinctID(alphabet string, n, i int) string {
 // 1 桁にした値が最も長い。表示できる文字のうち、符号化で 6 バイトより膨らむものは無い。
 var worstTarget = strings.Repeat("&", proto.MaxTargetLen-len(":1")) + ":1"
 
-// worstState は、vpsd の符号化で最も長くなる、上限の数のルールの全体状態である。ID は `<`・`>`・`&` の
+// worstState は、vpsd の符号化で最も長くなる、上限の数のルールの全体状態である。
+func worstState() *proto.State { return worstStateOf(proto.MaxRulesPerAgent) }
+
+// worstStateOf は、vpsd の符号化で最も長くなる、n 本のルールの全体状態である。ID は `<`・`>`・`&` の
 // 組み合わせで 128 バイト(どれも 1 文字が 6 バイト)、listen_port は 5 桁の範囲、ルールは無効である。
-func worstState() *proto.State {
+// n は 27767 以下とする(listen_port を 5 桁に保つため)。
+func worstStateOf(n int) *proto.State {
 	version := 1 << 30
 	caps := proto.SupportedCapabilities
 	st := &proto.State{
@@ -54,7 +58,7 @@ func worstState() *proto.State {
 			Address: "255.255.255.255/32", MTU: 65535, Keepalive: 65535, UDPTimeout: 1 << 30, UDPTimeoutStream: 1 << 30},
 		ServerProtocolVersion: &version, ServerCapabilities: &caps, AgentDisabled: true,
 	}
-	for i := 0; i < proto.MaxRulesPerAgent; i++ {
+	for i := 0; i < n; i++ {
 		lo := uint16(10000 + 2*i)
 		st.Rules = append(st.Rules, proto.AgentRule{ID: distinctID("<>&", proto.MaxRuleIDLen, i), Proto: proto.TCP,
 			ListenPort: proto.PortRange{Lo: lo, Hi: lo + 1}, Target: worstTarget, Enabled: false})
@@ -77,10 +81,20 @@ func TestWorstRuleValuesPassValidation(t *testing.T) {
 	if len(worstTarget) != proto.MaxTargetLen {
 		t.Errorf("worstTarget is %d bytes, want %d", len(worstTarget), proto.MaxTargetLen)
 	}
-	// ホストを 1 バイト延ばすと上限を超えるので、worstTarget より長く膨らむ target は検査を通らない
+	// worstTarget の符号化は、ポートの 1 桁を除くすべてのバイトが 6 バイトに膨らんだ大きさである。検査は
+	// target を 1 バイト以上、ポートを 1 桁以上とするので、上限の長さの target の符号化はこれより長く
+	// ならない。旧い値(`&` 253 個と 5 桁のポート)に戻すと落ちる
+	enc, err := json.Marshal(worstTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 6*(proto.MaxTargetLen-len(":1")) + len(":1") + len(`""`); len(enc) != want {
+		t.Errorf("worstTarget encodes to %d bytes, want %d", len(enc), want)
+	}
+	// ホストを 1 バイト延ばした target は検査を通らない
 	r.Target = strings.Repeat("&", proto.MaxTargetLen-len(":1")+1) + ":1"
 	if err := r.Validate(); err == nil {
-		t.Errorf("a target one byte longer than worstTarget passes validation, so worstTarget is not the worst")
+		t.Errorf("a target one byte longer than worstTarget passes validation")
 	}
 }
 
@@ -106,11 +120,23 @@ func TestFullStateOfMaxRulesFitsTheAgentReadLimit(t *testing.T) {
 // 確かめる。ID は、HTML 向けの書き換えをしない符号化で最も膨らむ `"` と `\` の組み合わせで 128 バイトである。
 // 変異の確認:proto.MaxRulesPerAgent を 1024 にすると落ちる。
 func TestHeartbeatOfMaxRulesFitsTheHubReadLimit(t *testing.T) {
+	largest, largestName := worstHeartbeatBytes(t, proto.MaxRulesPerAgent)
+	if largest >= hubStreamReadLimit {
+		t.Errorf("%s: a heartbeat of %d rules is %d bytes, not under the hub's %d", largestName, proto.MaxRulesPerAgent, largest, hubStreamReadLimit)
+	}
+	t.Logf("largest heartbeat of %d rules: %d bytes (%.2f MiB), reason %s; limit %d bytes", proto.MaxRulesPerAgent, largest, float64(largest)/(1<<20), largestName, hubStreamReadLimit)
+}
+
+// worstHeartbeatBytes は、n 本のルールがすべて最悪の理由で error のハートビートを、エージェントの符号化に
+// した大きさのうち最も大きいものと、その理由の名前を返す。ID は、HTML 向けの書き換えをしない符号化で
+// 最も膨らむ `"` と `\` の組み合わせで 128 バイトである。
+func worstHeartbeatBytes(t *testing.T, n int) (int, string) {
+	t.Helper()
 	largest, largestName := 0, ""
 	for name, reason := range worstReasons() {
 		hb := proto.Heartbeat{Generation: 1<<64 - 1, Tunnel: proto.TunnelStatus{State: proto.StatusError, Reason: reason,
 			Endpoint: "[ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255]:65535", LastHandshake: time.Now()}}
-		for i := 0; i < proto.MaxRulesPerAgent; i++ {
+		for i := 0; i < n; i++ {
 			hb.Rules = append(hb.Rules, proto.RuleStatus{ID: distinctID(`"\`, proto.MaxRuleIDLen, i), State: proto.StatusError, Reason: reason})
 		}
 		wire := wireHeartbeat(hb)
@@ -118,14 +144,30 @@ func TestHeartbeatOfMaxRulesFitsTheHubReadLimit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(b) >= hubStreamReadLimit {
-			t.Errorf("%s: a heartbeat of %d rules is %d bytes, not under the hub's %d", name, proto.MaxRulesPerAgent, len(b), hubStreamReadLimit)
-		}
 		if len(b) > largest {
 			largest, largestName = len(b), name
 		}
 	}
-	t.Logf("largest heartbeat of %d rules: %d bytes (%.2f MiB), reason %s; limit %d bytes", proto.MaxRulesPerAgent, largest, float64(largest)/(1<<20), largestName, hubStreamReadLimit)
+	return largest, largestName
+}
+
+// TestHeartbeatOverflowsBeforeTheFullState は、上限を超えて保存されたデータ(仕様 5.4 節)で、本数が
+// 増えると全体状態より先にハートビートが読む側の上限を超えうることを確かめる。上限の倍の本数では、
+// 最悪の値のハートビートは hub の 1 通の上限を超え、最悪の値の全体状態はエージェントの上限に収まる。
+func TestHeartbeatOverflowsBeforeTheFullState(t *testing.T) {
+	n := 2 * proto.MaxRulesPerAgent
+	hb, _ := worstHeartbeatBytes(t, n)
+	st, err := json.Marshal(proto.Message{Type: proto.MsgState, State: worstStateOf(n)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hb <= hubStreamReadLimit {
+		t.Errorf("a heartbeat of %d rules is %d bytes, not over the hub's %d", n, hb, hubStreamReadLimit)
+	}
+	if len(st) >= streamReadLimit {
+		t.Errorf("the full state of %d rules is %d bytes, not under the agent's %d", n, len(st), streamReadLimit)
+	}
+	t.Logf("%d rules: heartbeat %d bytes, full state %d bytes", n, hb, len(st))
 }
 
 // sizeBackend は、worstState を配る stream.Backend である。
