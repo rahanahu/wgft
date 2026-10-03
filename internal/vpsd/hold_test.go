@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -234,6 +235,12 @@ func TestRetryHoldDoesNotAdviseARuleChangeWhenTheDatabaseCannotBeRead(t *testing
 // This path opens the admin API once, so it says nothing about opening it twice; that is the hold's
 // path, and TestServeHoldsTheStartupUntilTheRulesApply is where it is checked.
 func TestServeStartsWithoutAHoldWhenTheFirstApplyWorks(t *testing.T) {
+	retryOnServeBindCollision(t, func() bool { return runServeStartsWithoutAHoldWhenTheFirstApplyWorks(t) })
+}
+
+// runServeStartsWithoutAHoldWhenTheFirstApplyWorks is one pass of TestServeStartsWithoutAHoldWhenTheFirstApplyWorks. It reports false when serve lost an address from
+// freeAPIAddrs to another process, before it asserts anything on that pass.
+func runServeStartsWithoutAHoldWhenTheFirstApplyWorks(t *testing.T) (ran bool) {
 	st := openTestStore(t)
 	adminAddr, agentAddr := freeAPIAddrs(t)
 	d := newHoldDaemon(t, st, newHoldParticipant(nil), adminAddr, agentAddr)
@@ -246,14 +253,18 @@ func TestServeStartsWithoutAHoldWhenTheFirstApplyWorks(t *testing.T) {
 	go func() { done <- d.serve(ctx, rulesOf(t, st)) }()
 
 	// Whichever line comes first decides: an apply that works has nothing to hold for.
-	waitFor(t, "the startup to report where it went", func() bool {
+	if waitForServe(t, "the startup to report where it went", done, func() bool {
 		s := buf.String()
 		return strings.Contains(s, "server started") || strings.Contains(s, "startup hold")
-	})
+	}) {
+		return false
+	}
 	if strings.Contains(buf.String(), "startup hold") {
 		t.Fatalf("an apply that works must not enter the hold, got:\n%s", buf.String())
 	}
-	waitForStartup(t, buf, done)
+	if waitForStartup(t, buf, done) {
+		return false
+	}
 	if took := time.Since(start); took > 25*time.Second {
 		t.Errorf("the startup took %s; an apply that works must not wait for the hold's retry timer", took)
 	}
@@ -283,6 +294,7 @@ func TestServeStartsWithoutAHoldWhenTheFirstApplyWorks(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Errorf("serve = %v, want nil on shutdown", err)
 	}
+	return true
 }
 
 // TestServeHoldsTheStartupUntilTheRulesApply is the whole of design.md 11b 節's 起動の保留 in one
@@ -297,6 +309,12 @@ func TestServeStartsWithoutAHoldWhenTheFirstApplyWorks(t *testing.T) {
 //   - the server started line then counts the declaration as the operator left it
 //   - an apply after the hold is over is an ordinary apply and must not disturb anything
 func TestServeHoldsTheStartupUntilTheRulesApply(t *testing.T) {
+	retryOnServeBindCollision(t, func() bool { return runServeHoldsTheStartupUntilTheRulesApply(t) })
+}
+
+// runServeHoldsTheStartupUntilTheRulesApply is one pass of TestServeHoldsTheStartupUntilTheRulesApply. It reports false when serve lost an address from
+// freeAPIAddrs to another process, before it asserts anything on that pass.
+func runServeHoldsTheStartupUntilTheRulesApply(t *testing.T) (ran bool) {
 	st := openTestStore(t)
 	addRule(t, st, "r_big")
 	addRule(t, st, "r_small")
@@ -311,7 +329,9 @@ func TestServeHoldsTheStartupUntilTheRulesApply(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.serve(ctx, rulesOf(t, st)) }()
 
-	waitFor(t, "the hold to be reported", func() bool { return strings.Contains(buf.String(), "startup hold:") })
+	if waitForServe(t, "the hold to be reported", done, func() bool { return strings.Contains(buf.String(), "startup hold:") }) {
+		return false
+	}
 	select {
 	case err := <-done:
 		t.Fatalf("serve returned %v; a first apply that fails must hold the startup, not end it", err)
@@ -374,7 +394,9 @@ func TestServeHoldsTheStartupUntilTheRulesApply(t *testing.T) {
 	if _, err := d.Batch(admin.BatchRequest{Op: "cli rule rm", Delete: []string{"r_small"}}); err != nil {
 		t.Fatalf("Batch: %v", err)
 	}
-	waitForStartup(t, buf, done)
+	if waitForStartup(t, buf, done) {
+		return false
+	}
 	stopReaders()
 
 	if !agentAPIAnswers(d, agentAddr) {
@@ -408,6 +430,7 @@ func TestServeHoldsTheStartupUntilTheRulesApply(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Errorf("serve = %v, want nil on shutdown", err)
 	}
+	return true
 }
 
 // TestServeDoesNotHoldOnAStartupRefusal pins the entry condition of design.md 11b 節: a startup
@@ -441,15 +464,24 @@ func TestServeDoesNotHoldOnAStartupRefusal(t *testing.T) {
 // quiet way (design.md 11b 節: 起動の保留は終了しないので終了コードを持たない): serve returns nil,
 // so cmd/wgft exits 0, and the server started line is never printed.
 func TestServeShutsDownDuringTheStartupHold(t *testing.T) {
+	retryOnServeBindCollision(t, func() bool { return runServeShutsDownDuringTheStartupHold(t) })
+}
+
+// runServeShutsDownDuringTheStartupHold is one pass of TestServeShutsDownDuringTheStartupHold. It reports false when serve lost an address from
+// freeAPIAddrs to another process, before it asserts anything on that pass.
+func runServeShutsDownDuringTheStartupHold(t *testing.T) (ran bool) {
 	st := openTestStore(t)
 	adminAddr, agentAddr := freeAPIAddrs(t)
 	d := newHoldDaemon(t, st, newHoldParticipant(errors.New("no buffer space available")), adminAddr, agentAddr)
 
 	buf := newSyncBuffer(t)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- d.serve(ctx, nil) }()
-	waitFor(t, "the hold to be reported", func() bool { return strings.Contains(buf.String(), "startup hold:") })
+	if waitForServe(t, "the hold to be reported", done, func() bool { return strings.Contains(buf.String(), "startup hold:") }) {
+		return false
+	}
 
 	cancel()
 	select {
@@ -463,6 +495,7 @@ func TestServeShutsDownDuringTheStartupHold(t *testing.T) {
 	if strings.Contains(buf.String(), "server started") {
 		t.Errorf("the server started line must not be printed, got %q", buf.String())
 	}
+	return true
 }
 
 // holdParticipant is a dataplane.Participant whose Prepare fails with whatever error it is given,
@@ -637,6 +670,52 @@ func adminGet(addr, path string) (int, error) {
 	return resp.StatusCode, nil
 }
 
+// serveBindCollision reports whether err is serve failing to listen because the address is taken.
+// freeAddr closes its socket before serve binds the number, so another process on the host can take
+// it in the gap, an outgoing connection's source port included.
+func serveBindCollision(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+// retryOnServeBindCollision runs attempt, which picks new addresses each time, up to five times
+// while it reports that serve lost an address to another process. Every other failure still fails
+// the test at once; address-in-use in all attempts fails it too, as it could be a product fault.
+func retryOnServeBindCollision(t *testing.T, attempt func() (ran bool)) {
+	t.Helper()
+	const attempts = 5
+	for i := 1; i <= attempts; i++ {
+		if attempt() {
+			return
+		}
+		t.Logf("attempt %d of %d: an address picked for serve was taken before the bind; retrying with new addresses", i, attempts)
+	}
+	t.Fatalf("serve failed with address-in-use in all %d attempts", attempts)
+}
+
+// waitForServe is waitFor for a test that started serve: it also watches done. It reports true when
+// serve returned because an address lost its port to another process, and fails the test when serve
+// returned for any other reason, with that reason, instead of waiting out the deadline.
+func waitForServe(t *testing.T, what string, done <-chan error, ok func() bool) (collided bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			if serveBindCollision(err) {
+				return true
+			}
+			t.Fatalf("serve returned %v while waiting for %s", err, what)
+		default:
+		}
+		if ok() {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+	return false
+}
+
 func waitFor(t *testing.T, what string, ok func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -650,22 +729,27 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 }
 
 // waitForStartup waits for the server started line, and fails at once if serve returns first, so
-// that a startup which ends in an error does not have to wait out the whole deadline.
-func waitForStartup(t *testing.T, buf *syncBuffer, done <-chan error) {
+// that a startup which ends in an error does not have to wait out the whole deadline. It reports
+// true instead when serve returned because an address lost its port to another process.
+func waitForStartup(t *testing.T, buf *syncBuffer, done <-chan error) (collided bool) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case err := <-done:
+			if serveBindCollision(err) {
+				return true
+			}
 			t.Fatalf("serve returned %v before the server started line; log:\n%s", err, buf.String())
 		default:
 		}
 		if strings.Contains(buf.String(), "server started") {
-			return
+			return false
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for the server started line; log:\n%s", buf.String())
+	return false
 }
 
 // appearsWithin reports whether want shows up in the log within d. It is for the cases where the

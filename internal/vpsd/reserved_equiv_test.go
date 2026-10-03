@@ -3,11 +3,13 @@
 package vpsd
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/vpsd/admin"
@@ -106,6 +108,23 @@ func TestReservedPortsMatchTheListeners(t *testing.T) {
 // TestReservedPortsMatchTheListeners: the well-known ones resolve to ports below 1024, which an
 // unprivileged test cannot bind.
 func TestReservedPortsAreWhatTheListenersBind(t *testing.T) {
+	// The free port is picked and closed before the listeners bind it, so another process can take
+	// the number in the gap. Only an address-in-use failure of the listen repeats the pass with a new
+	// port; every other failure and every wrong reservation still fails the test.
+	const attempts = 5
+	for i := 1; i <= attempts; i++ {
+		if reservedPortsAreWhatTheListenersBind(t) {
+			return
+		}
+		t.Logf("attempt %d of %d: the port picked for the listeners was taken before the bind; retrying with a new port", i, attempts)
+	}
+	t.Fatalf("a listen failed with address-in-use in all %d attempts", attempts)
+}
+
+// reservedPortsAreWhatTheListenersBind runs one pass. It reports false when a listen lost the port
+// to another process, before it checks that pass any further.
+func reservedPortsAreWhatTheListenersBind(t *testing.T) (ran bool) {
+	t.Helper()
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +144,9 @@ func TestReservedPortsAreWhatTheListenersBind(t *testing.T) {
 			} else {
 				ln, err = net.Listen("tcp", addr)
 			}
+			if errors.Is(err, syscall.EADDRINUSE) {
+				return false
+			}
 			if err != nil {
 				t.Fatalf("listening on %q: %v", addr, err)
 			}
@@ -139,6 +161,7 @@ func TestReservedPortsAreWhatTheListenersBind(t *testing.T) {
 			}
 		}
 	}
+	return true
 }
 
 // FuzzReservedPortsMatchTheListeners extends TestReservedPortsMatchTheListeners to inputs the
