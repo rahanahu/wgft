@@ -82,7 +82,7 @@ func TestRevokeTombstonesBeforeFailedApplyAndReregistration(t *testing.T) {
 		t.Fatal("revoke apply failure was hidden")
 	}
 	f.d.delivery.mu.RLock()
-	_, retained := f.d.delivery.full.entries["home"]
+	_, retained := f.d.delivery.latest.entries["home"]
 	f.d.delivery.mu.RUnlock()
 	if retained {
 		t.Fatal("revoked registration remained in the published projection")
@@ -112,6 +112,34 @@ func TestRevokeTombstonesBeforeFailedApplyAndReregistration(t *testing.T) {
 	}
 	if _, err := f.d.AgentState("home"); err != nil {
 		t.Fatalf("new registration was not published: %v", err)
+	}
+}
+
+// Revoke installs a copy of the published snapshot without the revoked
+// agent. The copy keeps the generation, so when the apply after the revoke
+// fails, the diagnostics and the remaining agents still see the generation of
+// the last successful publication.
+func TestRevokeKeepsPublishedGenerationWhenApplyFails(t *testing.T) {
+	f := newDisableFixture(t)
+	before, err := f.d.AgentState("other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Generation == 0 {
+		t.Fatal("fixture published generation 0")
+	}
+	f.p.setErr(errors.New("publication failed"))
+	if err := f.d.Revoke("home"); err == nil {
+		t.Fatal("revoke apply failure was hidden")
+	}
+	status, ok := f.d.ApplyStatus()
+	if !ok || status.AgentStateGeneration == nil || *status.AgentStateGeneration != before.Generation ||
+		status.AgentStatePending == nil || !*status.AgentStatePending {
+		t.Fatalf("diagnostics after failed revoke apply: %+v, %v; want generation %d and pending", status, ok, before.Generation)
+	}
+	other, err := f.d.AgentState("other")
+	if err != nil || other.Generation != before.Generation {
+		t.Fatalf("remaining agent after failed revoke apply: %+v, %v; want generation %d", other, err, before.Generation)
 	}
 }
 
@@ -401,7 +429,7 @@ func TestNoOpDeliveryMismatchForcesCommitAndRetainsOldStateOnFailure(t *testing.
 func TestBootstrapBindsLatestSuccessfulProjection(t *testing.T) {
 	f := newDisableFixture(t)
 	f.d.delivery.mu.Lock()
-	f.d.delivery.full = nil
+	f.d.delivery.bound = false
 	f.d.delivery.mu.Unlock()
 	f.d.timeouts.Store(nil)
 	old, err := f.st.Generation()
@@ -429,13 +457,14 @@ func TestBootstrapBindsLatestSuccessfulProjection(t *testing.T) {
 	}
 }
 
-// Binding the timeouts installs a new snapshot. The snapshot committed
-// installed keeps its entries, so a holder of its pointer never sees the
-// timeouts change under it. The bound snapshot differs only in the timeouts.
+// Binding the timeouts installs a new snapshot and marks it bound. The
+// snapshot committed installed keeps its entries, so a holder of its pointer
+// never sees the timeouts change under it. The bound snapshot differs only in
+// the timeouts.
 func TestBootstrapBindLeavesCommittedSnapshotUnchanged(t *testing.T) {
 	f := newDisableFixture(t)
 	f.d.delivery.mu.Lock()
-	f.d.delivery.full = nil
+	f.d.delivery.bound = false
 	f.d.delivery.mu.Unlock()
 	f.d.timeouts.Store(nil)
 	f.d.mu.Lock()
@@ -466,10 +495,10 @@ func TestBootstrapBindLeavesCommittedSnapshotUnchanged(t *testing.T) {
 		t.Fatalf("binding modified the committed snapshot: %+v", committed.entries)
 	}
 	f.d.delivery.mu.RLock()
-	bound, full := f.d.delivery.latest, f.d.delivery.full
+	bound, isBound := f.d.delivery.latest, f.d.delivery.bound
 	f.d.delivery.mu.RUnlock()
-	if bound == committed || full != bound {
-		t.Fatalf("bound snapshot not installed as latest and full: committed=%p latest=%p full=%p", committed, bound, full)
+	if bound == committed || !isBound {
+		t.Fatalf("bound snapshot not installed as latest and marked bound: committed=%p latest=%p bound=%v", committed, bound, isBound)
 	}
 	if bound.generation != committed.generation || len(bound.entries) != len(saved) {
 		t.Fatalf("bound snapshot: generation %d entries %d, want %d and %d", bound.generation, len(bound.entries), committed.generation, len(saved))
@@ -482,10 +511,46 @@ func TestBootstrapBindLeavesCommittedSnapshotUnchanged(t *testing.T) {
 	}
 }
 
+// A successful Commit before the timeouts are bound replaces latest but does
+// not make it servable: no State is selected, and the diagnostics report no
+// published generation, until bootstrap binding succeeds.
+func TestSuccessfulCommitBeforeBindingStaysUnservable(t *testing.T) {
+	f := newDisableFixture(t)
+	f.d.delivery.mu.Lock()
+	f.d.delivery.bound = false
+	f.d.delivery.mu.Unlock()
+	f.d.timeouts.Store(nil)
+	rules := rulesOf(t, f.st)
+	rules[0].Target = "192.0.2.60:25565"
+	if _, err := f.d.Batch(admin.BatchRequest{Upsert: []proto.Rule{rules[0]}}); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := f.d.AgentState("home"); err == nil {
+		t.Fatalf("State escaped before timeout binding: %+v", st)
+	}
+	status, ok := f.d.ApplyStatus()
+	if !ok || status.AgentStateGeneration != nil || status.AgentStatePending == nil || !*status.AgentStatePending {
+		t.Fatalf("diagnostics before timeout binding: %+v, %v; want no generation and pending", status, ok)
+	}
+	if _, err := f.d.bindDeliveryTimeouts(func() (linux.UDPTimeouts, error) {
+		return linux.UDPTimeouts{Timeout: 7, TimeoutStream: 19}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := f.d.AgentState("home")
+	if err != nil || ruleTarget(st, "r_a") != rules[0].Target {
+		t.Fatalf("bound State: %+v, %v", st, err)
+	}
+	status, ok = f.d.ApplyStatus()
+	if !ok || status.AgentStateGeneration == nil || *status.AgentStateGeneration != st.Generation {
+		t.Fatalf("diagnostics after timeout binding: %+v, %v; want generation %d", status, ok, st.Generation)
+	}
+}
+
 func TestBootstrapReadSerializesWithAdminApply(t *testing.T) {
 	f := newDisableFixture(t)
 	f.d.delivery.mu.Lock()
-	f.d.delivery.full = nil
+	f.d.delivery.bound = false
 	f.d.delivery.mu.Unlock()
 	f.d.timeouts.Store(nil)
 	rules := rulesOf(t, f.st)
@@ -574,7 +639,7 @@ func TestNoOpMismatchSuccessfulForcedCommitNotifiesOnce(t *testing.T) {
 func TestBootstrapTimeoutReadFailureLeavesStateUnservable(t *testing.T) {
 	f := newDisableFixture(t)
 	f.d.delivery.mu.Lock()
-	f.d.delivery.full = nil
+	f.d.delivery.bound = false
 	f.d.delivery.mu.Unlock()
 	f.d.timeouts.Store(nil)
 	_, err := f.d.bindDeliveryTimeouts(func() (linux.UDPTimeouts, error) {
@@ -673,7 +738,7 @@ func TestOverlayAgreesBetweenStateAndEffectiveDelivery(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			snap := &deliverySnapshot{entries: tc.entries, generation: tc.entries["home"].state.Generation}
-			o := &deliveryOwner{latest: snap, full: snap, disabled: tc.disabled}
+			o := &deliveryOwner{latest: snap, bound: true, disabled: tc.disabled}
 			original := make(map[string]deliveryEntry, len(tc.entries))
 			for name, e := range tc.entries {
 				e.state.Rules = append([]proto.AgentRule{}, e.state.Rules...)

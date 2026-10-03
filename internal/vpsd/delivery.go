@@ -40,7 +40,7 @@ type disableOverlay struct {
 type deliveryOwner struct {
 	mu       sync.RWMutex
 	latest   *deliverySnapshot // successful Commit, including before bootstrap binding
-	full     *deliverySnapshot // nil until bootstrap timeout binding succeeds
+	bound    bool              // bootstrap timeout binding succeeded; state and status serve latest only then
 	disabled map[string]disableOverlay
 	revision uint64
 	pending  bool // saved full declaration lacks a successful matching Commit
@@ -124,9 +124,6 @@ func effectiveDelivery(s *deliverySnapshot, disabled map[string]disableOverlay) 
 func (o *deliveryOwner) currentFull() *deliverySnapshot {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	if o.full != nil {
-		return o.full
-	}
 	return o.latest
 }
 
@@ -139,11 +136,7 @@ func (o *deliveryOwner) currentFull() *deliverySnapshot {
 func (o *deliveryOwner) committed(candidate *deliverySnapshot) []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	previous := o.full
-	if previous == nil {
-		previous = o.latest
-	}
-	before, after := effectiveDelivery(previous, o.disabled), effectiveDelivery(candidate, nil)
+	before, after := effectiveDelivery(o.latest, o.disabled), effectiveDelivery(candidate, nil)
 	var changed []string
 	for name, entry := range after {
 		if old, ok := before[name]; !ok || !reflect.DeepEqual(old, entry) {
@@ -152,9 +145,6 @@ func (o *deliveryOwner) committed(candidate *deliverySnapshot) []string {
 	}
 	sort.Strings(changed)
 	o.latest = candidate
-	if o.full != nil {
-		o.full = candidate
-	}
 	o.disabled = nil
 	o.pending = false
 	if !reflect.DeepEqual(before, after) {
@@ -191,7 +181,6 @@ func (o *deliveryOwner) revoke(name string) {
 		return &deliverySnapshot{entries: entries, generation: s.generation}
 	}
 	o.latest = remove(o.latest)
-	o.full = remove(o.full)
 	delete(o.disabled, name)
 	o.pending = true
 	o.revision++
@@ -212,10 +201,10 @@ func (o *deliveryOwner) clearPending() {
 func (o *deliveryOwner) status() (*uint64, bool) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	if o.full == nil {
+	if !o.bound {
 		return nil, true
 	}
-	g := o.full.generation
+	g := o.latest.generation
 	return &g, o.pending
 }
 
@@ -225,10 +214,10 @@ func (o *deliveryOwner) status() (*uint64, bool) {
 func (o *deliveryOwner) state(name, identity string, key *string) (*proto.State, error) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	if o.full == nil {
+	if !o.bound {
 		return nil, errors.New("agent state is not published")
 	}
-	e, ok := o.full.entries[name]
+	e, ok := o.latest.entries[name]
 	if !ok || e.identity != identity || (key != nil && e.key != *key) {
 		return nil, fmt.Errorf("agent %q has no published state for this registration and key", name)
 	}
@@ -251,10 +240,10 @@ func (s *deliverySnapshot) withTimeouts(t linux.UDPTimeouts) *deliverySnapshot {
 	return &deliverySnapshot{entries: entries, generation: s.generation}
 }
 
-// bindDeliveryTimeouts makes the latest successful token serviceable. The
-// caller owns Daemon.mu, so no in-process apply can interleave with the read.
-// It replaces latest with a copy that carries the timeouts instead of writing
-// into the published snapshot.
+// bindDeliveryTimeouts makes the latest successful token serviceable. It holds
+// Daemon.mu for the whole call, so no in-process apply can interleave with the
+// read. It replaces latest with a copy that carries the timeouts instead of
+// writing into the published snapshot, then marks latest bound.
 func (d *Daemon) bindDeliveryTimeouts(read func() (linux.UDPTimeouts, error)) (linux.UDPTimeouts, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -269,6 +258,6 @@ func (d *Daemon) bindDeliveryTimeouts(read func() (linux.UDPTimeouts, error)) (l
 	}
 	d.delivery.latest = d.delivery.latest.withTimeouts(t)
 	d.timeouts.Store(&t)
-	d.delivery.full = d.delivery.latest
+	d.delivery.bound = true
 	return t, nil
 }
