@@ -13,7 +13,6 @@ import (
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
 	"github.com/rahanahu/wgft/internal/vpsd/doctor"
-	"github.com/rahanahu/wgft/internal/vpsd/stream"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -24,11 +23,11 @@ import (
 // 人の読む文言を部分一致で分類する(設計文書 10.2a 節)。どちらかの側だけで文言を変えると、ここが落ちる。
 
 // serverDoctorReads は、エージェントの 1 本のルールの状態を、接続中のエージェントの今の報告として
-// server doctor に渡し、検査の ID ごとの結果を返す。理由は、エージェントが送る形にし、さらに hub が
-// 保存する形に通してから渡す。
+// server doctor に渡し、検査の ID ごとの結果を返す。理由は、エージェントが送る形にし、JSON の往復を
+// 通し、さらに hub が保存する形に通してから渡す。
 func serverDoctorReads(t *testing.T, r proto.AgentRule, st proto.RuleStatus) map[string]doctor.Check {
 	t.Helper()
-	return serverDoctorReadsStored(t, r, st.State, stream.HeartbeatReason(wireReason(st.Reason)))
+	return serverDoctorReadsStored(t, r, st.State, storedFromNewAgent(t, st.Reason))
 }
 
 // serverDoctorReadsStored は serverDoctorReads と同じだが、hub が保存した後の理由 stored をそのまま渡す。

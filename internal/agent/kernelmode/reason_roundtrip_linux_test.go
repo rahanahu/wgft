@@ -3,6 +3,7 @@
 package kernelmode
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -313,7 +314,7 @@ func TestKernelRefusedReasonText(t *testing.T) {
 
 // serverDoctorReads は、エージェントの 1 本のルールの状態を、接続中のエージェントの今の報告として
 // server doctor に渡し、検査の ID ごとの結果を返す。理由は、エージェントが送る形(internal/agent の
-// wireReason と同じ textsafe.SanitizeAndClip)にし、さらに hub が保存する形に通してから渡す。
+// wireReason と同じ変換)にし、JSON の往復を通し、さらに hub が保存する形に通してから渡す(storedReason)。
 // internal/agent の reason_roundtrip_test.go にある同じ名前の補助の写しである。この package の
 // テストからはそちらに届かない。
 func serverDoctorReads(t *testing.T, r proto.AgentRule, st proto.RuleStatus) map[string]doctor.Check {
@@ -334,7 +335,16 @@ func serverDoctorReads(t *testing.T, r proto.AgentRule, st proto.RuleStatus) map
 }
 
 // storedReason は、エージェントの理由 s を、エージェントが送る形(internal/agent の wireReason と同じ
-// textsafe.SanitizeAndClip)にし、さらに hub が保存する形に通した値である。
+// textsafe.ReplaceInvalidUTF8 と textsafe.SanitizeAndClip)にし、JSON の往復を通し、さらに hub が保存する
+// 形に通した値である。
 func storedReason(s string) string {
-	return stream.HeartbeatReason(textsafe.SanitizeAndClip(s, proto.ReasonMaxBytes))
+	b, err := json.Marshal(proto.RuleStatus{Reason: textsafe.SanitizeAndClip(textsafe.ReplaceInvalidUTF8(s), proto.ReasonMaxBytes)})
+	if err != nil {
+		panic(err)
+	}
+	var back proto.RuleStatus
+	if err := json.Unmarshal(b, &back); err != nil {
+		panic(err)
+	}
+	return stream.HeartbeatReason(back.Reason)
 }

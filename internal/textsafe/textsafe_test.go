@@ -1,6 +1,8 @@
 package textsafe
 
 import (
+	"encoding/json"
+	"math/rand"
 	"strconv"
 	"strings"
 	"testing"
@@ -241,6 +243,36 @@ func TestSanitizeAndClip(t *testing.T) {
 			if again != got {
 				t.Errorf("%s: a second pass changed %q to %q", c.name, got, again)
 			}
+		}
+	}
+}
+
+// ReplaceInvalidUTF8 gives the same string encoding/json gives after an encode and decode, for
+// every invalid sequence: a lone byte, a truncated multi-byte sequence, a surrogate, an overlong
+// form, and random bytes.
+func TestReplaceInvalidUTF8MatchesJSON(t *testing.T) {
+	cases := []string{"", "ok", "\xfe", "a\xe3\x81b", "\xf0\x9f\x98", "\xed\xa0\x80", "\xc0\xaf", "\uFFFD", "\u3042\xff\u3042"}
+	rng := rand.New(rand.NewSource(1))
+	for i := 0; i < 2000; i++ {
+		b := make([]byte, rng.Intn(24))
+		rng.Read(b)
+		cases = append(cases, string(b))
+	}
+	for _, s := range cases {
+		enc, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var viaJSON string
+		if err := json.Unmarshal(enc, &viaJSON); err != nil {
+			t.Fatal(err)
+		}
+		got := ReplaceInvalidUTF8(s)
+		if got != viaJSON {
+			t.Fatalf("ReplaceInvalidUTF8(%q) = %q, JSON gives %q", s, got, viaJSON)
+		}
+		if ReplaceInvalidUTF8(got) != got {
+			t.Fatalf("ReplaceInvalidUTF8 is not stable on %q", got)
 		}
 	}
 }

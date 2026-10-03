@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -51,7 +52,8 @@ func TestWireReasonCapsAt512Bytes(t *testing.T) {
 		{"a 3-byte rune starting at 511 is dropped whole", a(511) + "あ", a(511) + clipMark},
 		{"a 4-byte rune across 512 is dropped whole", a(509) + "😀", a(509) + clipMark},
 		{"an ESC is escaped before the cut", a(510) + "\x1b", a(510) + `\x` + clipMark},
-		{"an invalid byte is escaped before the cut", a(508) + "\xff", a(508) + `\xff`},
+		{"an invalid byte becomes U+FFFD as JSON made it", a(508) + "\xff", a(508) + "\uFFFD"},
+		{"a U+FFFD across 512 is dropped whole", a(510) + "\xff", a(510) + clipMark},
 		{"a short reason stays", "bind failed", "bind failed"},
 		{"an empty reason stays empty", "", ""},
 	}
@@ -70,7 +72,7 @@ func TestWireReasonCapsAt512Bytes(t *testing.T) {
 	// 多バイト文字を避けて 512 バイトより手前で切った理由は、hub がもう一度 512 バイトで切るので、印の前に
 	// エージェントの印の頭の `.` が 1 から 3 個残る(設計文書 5.2 節)。印より前の文言は変わらない
 	for n := 509; n <= 511; n++ {
-		got := stream.HeartbeatReason(wireReason(a(n) + "\u3042\u3042"))
+		got := storedFromNewAgent(t, a(n)+"\u3042\u3042")
 		want := a(n) + strings.Repeat(".", 512-n) + clipMark
 		if n == 509 {
 			want = a(509) + "\u3042" + clipMark
@@ -84,11 +86,46 @@ func TestWireReasonCapsAt512Bytes(t *testing.T) {
 	}
 }
 
-// エージェントが送る理由を hub が保存した値は、切り詰めの印より前の文言が、エージェントが切り詰めずに
-// 送った場合に hub が保存する値と同じである。server doctor が分類に使う語は、その文言の中で探すので、
-// 語が理由の中のどこにあっても、分類はエージェントの切り詰めの前後で変わらない。語の終わりを hub の
-// 上限の前後に 1 バイトずつずらし、膨らむ文字(`&`、制御文字、不正なバイト)と多バイト文字で埋めた
-// 前置きでも確かめる。
+// storedFromOldAgent は、この変更より前のエージェントが理由 raw を送った場合に hub が保存する値である。
+// 前のエージェントは json.Marshal で理由をそのまま符号化し、hub は json.Unmarshal で読んでから受け口の
+// 変換をかける。JSON の符号化は不正な UTF-8 のバイトを U+FFFD に置き換えるので、この往復を省くと比べる
+// 相手が実際の値と違う。
+func storedFromOldAgent(t *testing.T, raw string) string {
+	t.Helper()
+	b, err := json.Marshal(proto.Message{Type: proto.MsgHeartbeat, Heartbeat: &proto.Heartbeat{
+		Rules: []proto.RuleStatus{{ID: "r1", State: proto.StatusError, Reason: raw}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stream.HeartbeatReason(decodedRuleReason(t, b))
+}
+
+// storedFromNewAgent は、今のエージェントが理由 raw を送った場合に hub が保存する値である。wireHeartbeat と
+// encodeMessage で送る形にし、hub と同じく json.Unmarshal で読んでから受け口の変換をかける。
+func storedFromNewAgent(t *testing.T, raw string) string {
+	t.Helper()
+	wire := wireHeartbeat(proto.Heartbeat{Rules: []proto.RuleStatus{{ID: "r1", State: proto.StatusError, Reason: raw}}})
+	b, err := encodeMessage(proto.Message{Type: proto.MsgHeartbeat, Heartbeat: &wire})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stream.HeartbeatReason(decodedRuleReason(t, b))
+}
+
+func decodedRuleReason(t *testing.T, b []byte) string {
+	t.Helper()
+	var m proto.Message
+	if err := json.Unmarshal(b, &m); err != nil || m.Heartbeat == nil || len(m.Heartbeat.Rules) != 1 {
+		t.Fatalf("the hub cannot read %.80s: %v", b, err)
+	}
+	return m.Heartbeat.Rules[0].Reason
+}
+
+// エージェントが送る理由を hub が保存した値は、切り詰めの印より前の文言が、この変更より前のエージェントが
+// 送った場合に hub が保存する値と同じである。どちらも実際の JSON の往復を通す。server doctor が分類に
+// 使う語は、その文言の中で探すので、語が理由の中のどこにあっても、分類はエージェントの切り詰めの前後で
+// 変わらない。語の終わりを hub の上限の前後に 1 バイトずつずらし、膨らむ文字(`&`、制御文字、不正な
+// バイト)と多バイト文字で埋めた前置きでも確かめる。
 func TestWireReasonKeepsWhatTheHubKeeps(t *testing.T) {
 	rule := reasonTCPRule("r1", "game.lan:25565", 25565)
 	markers := []string{
@@ -118,8 +155,8 @@ func TestWireReasonKeepsWhatTheHubKeeps(t *testing.T) {
 				// 前置きは pad バイトに収まる分だけ unit を繰り返し、残りを "y" で埋める
 				prefix := strings.Repeat(unit, pad/len(unit)) + strings.Repeat("y", pad%len(unit))
 				raw := prefix + "; " + m + "; trailing words"
-				old := stream.HeartbeatReason(raw)
-				got := stream.HeartbeatReason(wireReason(raw))
+				old := storedFromOldAgent(t, raw)
+				got := storedFromNewAgent(t, raw)
 				kept := strings.TrimSuffix(old, clipMark)
 				if !strings.HasPrefix(got, kept) {
 					t.Fatalf("%s/%q/%d: the hub keeps %q without the agent's cap but %q with it", fname, m, pad, old, got)
@@ -142,6 +179,28 @@ func TestWireReasonKeepsWhatTheHubKeeps(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("no case ran")
 	}
+	// 無作為の前置き。不正なバイト、制御文字、`&`、`"`、多バイト文字、ASCII を混ぜる
+	rng := rand.New(rand.NewSource(1))
+	pieces := []string{"\xfe", "\xe3\x81", "\x01", "&", `"`, "\u3042", "\U0001F600", "x", "\u2028", "\uFFFD"}
+	for i := 0; i < 1000; i++ {
+		var b strings.Builder
+		for b.Len() < 300+rng.Intn(400) {
+			b.WriteString(pieces[rng.Intn(len(pieces))])
+		}
+		raw := b.String() + "; " + markers[rng.Intn(len(markers))]
+		old := storedFromOldAgent(t, raw)
+		got := storedFromNewAgent(t, raw)
+		if !strings.HasPrefix(got, strings.TrimSuffix(old, clipMark)) {
+			t.Fatalf("random %d: the hub keeps %q without the agent's cap but %q with it", i, old, got)
+		}
+		before := serverDoctorReadsStored(t, rule, proto.StatusError, old)
+		after := serverDoctorReadsStored(t, rule, proto.StatusError, got)
+		for id, c := range before {
+			if a := after[id]; a.Status != c.Status || a.Reason != c.Reason {
+				t.Fatalf("random %d: %s is %s %s without the agent's cap, %s %s with it (reason %q)", i, id, c.Status, c.Reason, a.Status, a.Reason, raw)
+			}
+		}
+	}
 }
 
 // 語が hub の上限の内側にあれば、エージェントの切り詰めの後も server doctor はその語で分類する。上の
@@ -150,7 +209,7 @@ func TestWireReasonKeepsAMarkerInsideTheCap(t *testing.T) {
 	rule := reasonTCPRule("r1", "game.lan:25565", 25565)
 	tail := "; " + reasontext.IPForward + " is 0"
 	raw := strings.Repeat("&", proto.ReasonMaxBytes-len(tail)) + tail + strings.Repeat("&", 4096)
-	stored := stream.HeartbeatReason(wireReason(raw))
+	stored := storedFromNewAgent(t, raw)
 	if !strings.Contains(stored, reasontext.IPForward) {
 		t.Fatalf("the marker ending at byte %d was cut: %q", proto.ReasonMaxBytes, stored)
 	}
@@ -166,6 +225,30 @@ func TestWireReasonKeepsAMarkerInsideTheCap(t *testing.T) {
 	}
 }
 
+// 不正な UTF-8 のバイトで始まる理由。前のエージェントの JSON は 128 個の不正なバイトを U+FFFD(3 バイト)
+// に置き換えて送り、hub は 404 バイトを保存して "connection refused" を残した。エージェントが不正な
+// バイトを 4 バイトの見える形(`\xfe`)に先に置き換えると、512 バイトの内に語が残らず、server doctor の
+// 分類が connection_refused から target_error に変わる。不正なバイトを JSON と同じく U+FFFD に置き換えて
+// から切り詰めれば、保存する値も分類も前と同じである。
+func TestWireReasonKeepsTheJSONReplacementOfInvalidBytes(t *testing.T) {
+	rule := reasonTCPRule("r1", "game.lan:25565", 25565)
+	raw := strings.Repeat("\xfe", 128) + "; connection refused"
+	old := storedFromOldAgent(t, raw)
+	got := storedFromNewAgent(t, raw)
+	if got != old {
+		t.Errorf("the hub stores %d bytes %.60q... from this agent, %d bytes %.60q... from the one before", len(got), got, len(old), old)
+	}
+	if !strings.Contains(got, "connection refused") {
+		t.Errorf("the hub lost the marker: %q", got)
+	}
+	before := serverDoctorReadsStored(t, rule, proto.StatusError, old)
+	after := serverDoctorReadsStored(t, rule, proto.StatusError, got)
+	if c := after[doctor.CheckTarget]; c.Reason != doctor.ReasonConnectionRefused || c.Reason != before[doctor.CheckTarget].Reason {
+		t.Errorf("rule.target = %s %s with this agent, %s %s before; want %s", c.Status, c.Reason,
+			before[doctor.CheckTarget].Status, before[doctor.CheckTarget].Reason, doctor.ReasonConnectionRefused)
+	}
+}
+
 // worstReasons は、エージェントの変換の後に JSON で最も膨らむ理由の候補である。
 func worstReasons() map[string]string {
 	return map[string]string{
@@ -175,6 +258,7 @@ func worstReasons() map[string]string {
 		"backslash":      strings.Repeat(`\`, 4096),
 		"NUL":            strings.Repeat("\x00", 4096),
 		"invalid byte":   strings.Repeat("\xff", 4096),
+		"U+FFFD":         strings.Repeat("\uFFFD", 2048),
 		"line separator": strings.Repeat("\u2028", 2048),
 		"C1 control":     strings.Repeat("\u009b", 2048),
 	}
