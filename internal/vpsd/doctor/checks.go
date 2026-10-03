@@ -193,8 +193,9 @@ func AgentStateGenerationDetail(res *adminapi.BatchResponse) string {
 
 // ipForwardNext は、この VPS の ip_forward が 0 のときの次の一手である。server は起動時にだけ 1 に
 // するので、稼働中の server は自分では戻さない(設計文書 6.1 節)。0 にしたものを探すことも添える。
-const ipForwardNext = "set it on this VPS with sysctl -w net.ipv4.ip_forward=1, or restart the server, which sets it on start; " +
-	"a running server does not set it again. Then find what set it to 0, such as a file in /etc/sysctl.d or a hardening script"
+const ipForwardNext = "set it on this VPS with sysctl -w net.ipv4.ip_forward=1; a running server does not set it again. " +
+	"If the write fails, restarting the server alone does not fix it: remove what blocks the write, such as a read-only /proc or a container limit, and then set it. " +
+	"Then find what set it to 0, such as a file in /etc/sysctl.d or a hardening script"
 
 // ipForwardOff は、この VPS の net.ipv4.ip_forward が 1 でないと server が報告したかどうかである。
 // 報告の無い server(ユーザー空間モード、旧い版)と、値を読めなかった報告では偽である。

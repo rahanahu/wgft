@@ -858,3 +858,27 @@ func TestAgentDoctorStaleResolutionKeepsTheCheckError(t *testing.T) {
 		t.Errorf("detail = %q, want it to carry the failed 30s check", c.Detail)
 	}
 }
+
+// ip_forward が 0 で書き込みが塞がれている場合は、再起動では直らない。次の一手は再起動だけを勧めず、
+// 書けない原因を除く手順を含む。分類は変わらない。
+func TestAgentForwardingOffNextStepDoesNotAdviseRestartAlone(t *testing.T) {
+	for _, running := range []bool{true, false} {
+		k := &controlapi.DoctorKernel{}
+		k.Forwarding.IPForward = "0"
+		var c agentDoctorCheck
+		agentForwardingCheck(&c, agentKernelEvidence{kernel: k, running: running})
+		if c.Status != statusFailed || c.Reason != agentReasonIPForwardOff {
+			t.Fatalf("running=%v: %s/%s, want failed/%s", running, c.Status, c.Reason, agentReasonIPForwardOff)
+		}
+		for _, bad := range []string{"or restart the agent", "which sets it on start"} {
+			if strings.Contains(c.Next, bad) {
+				t.Errorf("running=%v: next step contains %q: %s", running, bad, c.Next)
+			}
+		}
+		for _, want := range []string{"sysctl -w net.ipv4.ip_forward=1", "restarting the agent alone does not fix it", "read-only /proc", "container limit"} {
+			if !strings.Contains(c.Next, want) {
+				t.Errorf("running=%v: next step lacks %q: %s", running, want, c.Next)
+			}
+		}
+	}
+}
