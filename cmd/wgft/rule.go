@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf8"
 
 	"github.com/oklog/ulid/v2"
 	"github.com/spf13/cobra"
@@ -834,7 +835,7 @@ func matchRule(rules []proto.Rule, id string) (*proto.Rule, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("rule %q not found; give a rule ID or its beginning", id)
 	}
-	if prefix != id && len(prefix) < doctor.ShortIDLen {
+	if prefix != id && utf8.RuneCountInString(prefix) < doctor.ShortIDLen {
 		return nil, fmt.Errorf("rule %q not found; an ID that ends in an ellipsis needs at least the first %d characters, as rule ls shows them", id, doctor.ShortIDLen)
 	}
 	var matches []proto.Rule

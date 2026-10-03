@@ -833,8 +833,16 @@ func uniq(in []string) []string {
 // 使う(設計文書 10.2 節)。CLI の findRule は末尾の省略記号を落として前方一致で受けるので、
 // 短い形を貼っても通るが、前方一致が 2 つ以上あれば拒む。
 func ShortID(id string) string {
-	if len(id) > ShortIDLen {
-		return id[:ShortIDLen] + "…"
+	if len(id) <= ShortIDLen {
+		return id
+	}
+	// 文字(rune)の数で切る。バイトで切ると、多バイト文字の ID が文字の途中で切れて不正な UTF-8 になる。
+	n := 0
+	for i := range id {
+		if n == ShortIDLen {
+			return id[:i] + "…"
+		}
+		n++
 	}
 	return id
 }
