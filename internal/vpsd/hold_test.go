@@ -721,18 +721,6 @@ func waitForServe(t *testing.T, what string, done <-chan error, ok func() bool) 
 	return nil
 }
 
-func waitFor(t *testing.T, what string, ok func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if ok() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
-}
-
 // waitForStartup waits for the server started line, and fails at once if serve returns first, so
 // that a startup which ends in an error does not have to wait out the whole deadline. It returns
 // serve's address-in-use error instead when serve returned with one.
