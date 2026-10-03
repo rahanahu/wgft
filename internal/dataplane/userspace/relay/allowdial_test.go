@@ -367,3 +367,90 @@ func (c *closeTrackConn) Close() error {
 	c.closed.Store(true)
 	return c.Conn.Close()
 }
+
+// 先頭のアドレスの族が先に試される族である。IPv4 が先に並ぶ名前では、黙って捨てる IPv6 の
+// アドレスがあっても、IPv4 を先に試し、もう一方の族を待たずに繋がる。
+func TestAllowListDialTriesFirstAddressFamilyFirst(t *testing.T) {
+	port := acceptingTCP(t)
+	v4, v6 := "127.0.0.1:"+port, "[2001:db8::1]:"+port
+	d := newSilentDial(t, v6)
+	m := New(&loopback{}, Options{
+		Logf:              testLogf(t),
+		AllowTarget:       allowList(v4, v6),
+		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
+		LookupTarget:      lookupFixed("127.0.0.1", "2001:db8::1"),
+		Dial:              d.dial,
+	})
+	defer m.Close()
+	c, took, err := dialWithin(t, m, "tcp", "dual.lan:"+port, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c.Close()
+	if got := d.addrs(); len(got) == 0 || got[0] != v4 {
+		t.Errorf("dialed %v, want %s first", got, v4)
+	}
+	if took >= targetFallbackDelay*2/3 {
+		t.Errorf("connected after %s, want the first family to connect without waiting for the other", took)
+	}
+}
+
+// 既定の Dial から作る dialCtx は、ctx の期限と取り消しに従う。アドレスごとの期限の分割と、負けた族の
+// 打ち切りは、この性質に依る。
+func TestDefaultDialContextFollowsContext(t *testing.T) {
+	port := acceptingTCP(t)
+	m := New(&loopback{}, Options{Logf: testLogf(t)})
+	defer m.Close()
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	canceled, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	for name, ctx := range map[string]context.Context{"expired": expired, "canceled": canceled} {
+		c, err := m.dialCtx(ctx, "tcp", "127.0.0.1:"+port)
+		if err == nil {
+			c.Close()
+			t.Errorf("%s context: dial to a listening address succeeded, want the context to stop it", name)
+		}
+	}
+	// 同じ宛先へ、生きた ctx なら繋がる(上の失敗が宛先のせいでないことの確認)
+	c, err := m.dialCtx(context.Background(), "tcp", "127.0.0.1:"+port)
+	if err != nil {
+		t.Fatalf("dial with a live context: %v", err)
+	}
+	c.Close()
+}
+
+// 勝ちが決まったら、負けた族の試行の ctx を取り消す(期限まで走らせない)。
+func TestAllowListDialCancelsLosingFamily(t *testing.T) {
+	m := New(&loopback{}, Options{
+		Logf:              testLogf(t),
+		AllowTarget:       allowList("[2001:db8::1]:80", "192.0.2.1:80"),
+		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
+		LookupTarget:      lookupFixed("2001:db8::1", "192.0.2.1"),
+	})
+	defer m.Close()
+	loser := make(chan error, 1)
+	m.dialCtx = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr == "[2001:db8::1]:80" {
+			<-ctx.Done()
+			loser <- ctx.Err()
+			return nil, ctx.Err()
+		}
+		a, b := net.Pipe()
+		b.Close()
+		return a, nil
+	}
+	c, _, err := dialWithin(t, m, "tcp", "dual.lan:80", 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c.Close()
+	select {
+	case err := <-loser:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("losing dial ended with %v, want it canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the losing family's dial was not canceled after the other family won")
+	}
+}
