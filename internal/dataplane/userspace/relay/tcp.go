@@ -97,7 +97,7 @@ const (
 func nextRetry(d time.Duration) time.Duration { return min(max(2*d, retryMin), retryMax) }
 
 // tcpServer は TCP の待ち受け 1 つの中継の状態である。serveTCP が作り、メソッド sessions、sweep、
-// stopAccept、close を listener の同じ名前の関数値(close は closeF)に差し込む。accept のループ
+// stopAccept、close を listenerOps の同じ名前の欄(close は closeF)に差し込む。accept のループ
 // (acceptLoop)と接続ごとの goroutine(serveConn)もこの型のメソッドである。
 type tcpServer struct {
 	m  *Manager
@@ -128,10 +128,12 @@ func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 		conns: map[net.Conn]*tcpEntry{},
 		done:  make(chan struct{}),
 	}
-	l.sessions = s.sessions
-	l.sweep = s.sweep
-	l.stopAccept = s.stopAccept
-	l.closeF = s.close
+	l.listenerOps = listenerOps{
+		closeF:     s.close,
+		stopAccept: s.stopAccept,
+		sweep:      s.sweep,
+		sessions:   s.sessions,
+	}
 	go s.acceptLoop()
 }
 
