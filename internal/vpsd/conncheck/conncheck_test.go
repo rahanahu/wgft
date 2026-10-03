@@ -128,6 +128,26 @@ func (loopbackNet) ListenTCP(port uint16) (net.Listener, error) {
 // 疎通確認はエージェントの中継を通るので、エージェントの宛先の許可一覧に従う(仕様 7 節)。
 // 一覧の外の宛先へのルールでは中継が接続を拒み、確認は「エージェントまでは届くが宛先に届かない」になる。
 func TestCheckObeysAgentAllowList(t *testing.T) {
+	// 空きポートを選んで閉じてから中継が bind するまでの間に、別のプロセスが同じ番号を取ることがある。
+	// 取られていると、Check は無関係なプロセスに繋がってしまう。中継の bind が EADDRINUSE で失敗した
+	// ときだけ、新しい番号でやり直す。ほかの失敗は隠さない。
+	const attempts = 5
+	var last error
+	for i := 1; i <= attempts; i++ {
+		if last = checkObeysAgentAllowList(t); last == nil {
+			return
+		}
+		t.Logf("attempt %d of %d: the relay bind failed with address-in-use, retrying with a new port: %v", i, attempts, last)
+	}
+	t.Fatalf("the relay bind failed with address-in-use in all %d attempts: %v", attempts, last)
+}
+
+// checkObeysAgentAllowList runs the scenario once. It returns the relay's address-in-use error
+// before it asserts anything, and nil when the scenario ran. A listener that did not open for any
+// other reason fails the test. On Windows the errno does not match, so the scenario never retries
+// there, as before.
+func checkObeysAgentAllowList(t *testing.T) (collision error) {
+	t.Helper()
 	m := relay.New(loopbackNet{}, relay.Options{
 		Logf:              t.Logf,
 		AllowTarget:       func(ap netip.AddrPort) bool { return false },
@@ -144,6 +164,14 @@ func TestCheckObeysAgentAllowList(t *testing.T) {
 	port := uint16(ln.Addr().(*net.TCPAddr).Port)
 	ln.Close() // 中継の待ち受けに使うポートを空ける
 	m.Apply(map[relay.Key]relay.Desired{{Proto: proto.TCP, Port: port}: {Target: "nas.lan:25565", RuleID: "r1"}})
+	for _, st := range m.Status() {
+		if !st.Listening {
+			if errors.Is(st.Err, syscall.EADDRINUSE) {
+				return st.Err
+			}
+			t.Fatalf("the relay did not open its listener: %v", st.Err)
+		}
+	}
 
 	// 拒否は RST なので、結果は「エージェントまでは届く」か、RST が接続の途中に届いた場合の
 	// 「届かない」のどちらにもなる。どちらでも疎通は失敗で、宛先には届かない
@@ -151,4 +179,5 @@ func TestCheckObeysAgentAllowList(t *testing.T) {
 	if r.OK || (r.Reach != ReachAgent && r.Reach != ReachNone) {
 		t.Errorf("got OK=%v reach=%s (%s), want OK=false and reach %s or %s", r.OK, r.Reach, r.Detail, ReachAgent, ReachNone)
 	}
+	return nil
 }
