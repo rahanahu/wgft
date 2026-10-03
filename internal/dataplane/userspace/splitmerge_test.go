@@ -26,7 +26,7 @@ import (
 // is an RST (abortRefused), while an admitted connection ends with EOF because the tunnel is not
 // up and the relay cannot dial the agent.
 func TestSplitAndMergeRefuseNoNewConnections(t *testing.T) {
-	port := freeTCPPort(t)
+	var port uint16 // picked again when the first bind loses the number to another process
 	plan := func(id string) planner.Plan {
 		rules, err := model.NormalizeRules([]proto.Rule{{ID: id, Agent: "home", Proto: proto.TCP,
 			ListenPort: proto.PortRange{Lo: port, Hi: port}, Target: "192.168.1.30:80", VPSMode: proto.ModeKernel, Enabled: true}}, nil)
@@ -51,7 +51,28 @@ func TestSplitAndMergeRefuseNoNewConnections(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	commit(plan("r_a"))
+	// The first Prepare binds the number freeTCPPort closed a moment earlier. A collision there
+	// picks a new number; the later commits only relabel the listener that is already bound.
+	retryOnBindCollision(t, func() bool {
+		port = freeTCPPort(t)
+		prep, err := b.Prepare(dataplane.Desired{Plan: plan("r_a")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ferr := range prep.Failed() {
+			if bindCollision(ferr) {
+				prep.Rollback()
+				return true
+			}
+		}
+		if len(prep.Failed()) != 0 {
+			t.Fatalf("Failed = %v", prep.Failed())
+		}
+		if _, err := prep.Commit(nil); err != nil {
+			t.Fatal(err)
+		}
+		return false
+	})
 
 	var refused, served, other, attempts atomic.Int64
 	var otherErrs sync.Map // collects the "other" bucket's error strings, for a failure to show

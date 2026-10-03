@@ -41,6 +41,13 @@ func freeUDPPort(t *testing.T) uint16 {
 // connection from a source in the rule's source_deny must not carry any data to the agent, and a
 // UDP session whose packet_rate runs out must deliver no more datagrams than the bucket holds.
 func TestRelayAppliesTheAdmissionPolicy(t *testing.T) {
+	// The relay binds the host listeners itself in Prepare, long after the ports are picked (the
+	// tunnel handshake sits in between), so a number can be taken in the gap. Only that collision
+	// repeats the scenario with new ports.
+	retryOnBindCollision(t, func() bool { return relayAppliesTheAdmissionPolicy(t) })
+}
+
+func relayAppliesTheAdmissionPolicy(t *testing.T) (collided bool) {
 	tcpPort, udpPort := freeTCPPort(t), freeUDPPort(t)
 	minute := proto.Rate{Count: 1, Unit: proto.PerMinute}
 	rules, err := model.NormalizeRules([]proto.Rule{
@@ -147,6 +154,12 @@ func TestRelayAppliesTheAdmissionPolicy(t *testing.T) {
 		t.Fatalf("Prepare: %v", err)
 	}
 	if len(p.Failed()) != 0 {
+		for _, ferr := range p.Failed() {
+			if bindCollision(ferr) {
+				p.Rollback()
+				return true
+			}
+		}
 		t.Fatalf("Failed = %v", p.Failed())
 	}
 	if _, err := p.Commit(nil); err != nil {
@@ -214,4 +227,5 @@ func TestRelayAppliesTheAdmissionPolicy(t *testing.T) {
 	if n := tcpData.Load(); n != 0 {
 		t.Errorf("the agent received data on %d TCP connections; the connection from a denied source must not reach it", n)
 	}
+	return false
 }

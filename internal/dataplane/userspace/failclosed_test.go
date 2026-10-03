@@ -1,8 +1,11 @@
 package userspace
 
 import (
+	"errors"
 	"net"
 	"net/netip"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/dataplane"
@@ -21,6 +24,37 @@ func freeTCPPort(t *testing.T) uint16 {
 	}
 	defer l.Close()
 	return uint16(l.Addr().(*net.TCPAddr).Port)
+}
+
+// bindCollision reports whether err is a failed bind because the number is already taken. The
+// number came from freeTCPPort or freeUDPPort, which close the socket before the code under test
+// binds it, so any other process on the host can take the number in between (an outgoing
+// connection's source port included). Prepare reports the failure as text, so the message is
+// matched as well as the errno.
+func bindCollision(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "address already in use") || strings.Contains(msg, "Only one usage of each socket address")
+}
+
+// retryOnBindCollision runs attempt up to bindAttempts times with fresh ports, as long as it
+// reports that its bind lost the number to someone else. attempt must report a collision before it
+// asserts anything, and must release what it opened. The last attempt's collision fails the test.
+func retryOnBindCollision(t *testing.T, attempt func() (collided bool)) {
+	t.Helper()
+	const bindAttempts = 5
+	for i := 1; i <= bindAttempts; i++ {
+		if !attempt() {
+			return
+		}
+		t.Logf("attempt %d of %d: the port picked for the test was taken before the bind; retrying with new ports", i, bindAttempts)
+	}
+	t.Fatalf("the ports picked for the test were taken before the bind in all %d attempts", bindAttempts)
 }
 
 // A Transparent rule whose host listener cannot be bound is a rule-local failure (design.md 7a.3
