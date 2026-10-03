@@ -16,12 +16,34 @@ func TestHostListenersAreIPv4Only(t *testing.T) {
 	}
 	probe.Close()
 
-	port := freeTCPPort(t)
-	ln, err := hostNetwork{}.ListenTCP(port)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The number is picked and closed before the binds, and the TCP and UDP listeners need the
+	// same number, so a number taken in between is picked again.
+	var port uint16
+	var ln net.Listener
+	var pc net.PacketConn
+	retryOnBindCollision(t, func() bool {
+		port = freeTCPPort(t)
+		l, err := hostNetwork{}.ListenTCP(port)
+		if bindCollision(err) {
+			return true
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := hostNetwork{}.ListenUDP(port)
+		if bindCollision(err) {
+			l.Close()
+			return true
+		}
+		if err != nil {
+			l.Close()
+			t.Fatal(err)
+		}
+		ln, pc = l, p
+		return false
+	})
 	defer ln.Close()
+	defer pc.Close()
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -42,11 +64,6 @@ func TestHostListenersAreIPv4Only(t *testing.T) {
 		t.Error("an IPv6 client reached the TCP listener")
 	}
 
-	pc, err := hostNetwork{}.ListenUDP(port)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pc.Close()
 	if got := pc.LocalAddr().(*net.UDPAddr).IP; got.To4() == nil {
 		t.Errorf("UDP listener address %v is not IPv4", got)
 	}
