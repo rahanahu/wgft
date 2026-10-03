@@ -15,8 +15,8 @@
 #
 #   lab/lab exec vm bash /wgft/lab/upgrade.sh kernel                              # v1.1.3 -> current
 #   lab/lab exec vm bash /wgft/lab/upgrade.sh userspace                           # v1.1.3 -> current
-#   WGFT_UPGRADE_OLD_VERSION=0.4.0 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel     # v0.4.0 -> current
-#   WGFT_UPGRADE_OLD_VERSION=0.4.0 lab/lab exec vm bash /wgft/lab/upgrade.sh userspace  # v0.4.0 -> current
+#   lab/lab exec vm env WGFT_UPGRADE_OLD_VERSION=0.4.0 bash /wgft/lab/upgrade.sh kernel     # v0.4.0 -> current
+#   lab/lab exec vm env WGFT_UPGRADE_OLD_VERSION=0.4.0 bash /wgft/lab/upgrade.sh userspace  # v0.4.0 -> current
 #
 # Between v0.4.0 and v0.5.0, phase 5 (Admission Policy compilers: TCP packet_rate stops taking
 # effect, Relay listeners become IPv4-only) and phase 6 (Resource Guard: the flow budget line)
