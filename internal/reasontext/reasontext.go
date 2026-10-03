@@ -58,6 +58,10 @@ const UnicastOnly = "the agent forwards only to unicast targets"
 // 含む sysctl の名前である(設計文書 7b.1 節)。
 const IPForward = "net.ipv4.ip_forward"
 
+// IPForwardUnknown は、エージェントが ip_forward を読めず書けもしなかったために、値が分からないと
+// 述べる理由が含む語である(設計文書 7b.1 節)。
+const IPForwardUnknown = "its value is unknown"
+
 // DidNotAnswer は、宛先への試し接続が期限までに応えなかった理由が含む句である(設計文書 5.2 節)。
 const DidNotAnswer = "did not answer"
 

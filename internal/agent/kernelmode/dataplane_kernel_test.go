@@ -324,7 +324,7 @@ func TestKernelIPForwardUnreadableAndUnwritableDoesNotClaimTheValue(t *testing.T
 			t.Errorf("reason = %q, want %q", r, want)
 		}
 	})
-	t.Run("a later read of 0 states the value", func(t *testing.T) {
+	t.Run("a later read of 0 keeps the failed write", func(t *testing.T) {
 		k := &fakeKernel{forwardReadEr: errors.New("read boom"), forwardWriteEr: errors.New("write boom")}
 		d := newTestKernel(t, k, &credentials.Credentials{}, nil)
 		if err := d.enableForwarding(func() error { return nil }); err != nil {
@@ -335,9 +335,15 @@ func TestKernelIPForwardUnreadableAndUnwritableDoesNotClaimTheValue(t *testing.T
 		}
 		k.forwardReadEr = nil
 		d.Refresh()
-		want := "on the agent host, net.ipv4.ip_forward is 0; its kernel does not forward to a target other than the agent host itself"
+		// 起動時に書けなかった事実は、0 を読んだ後の理由にも保つ。0 を読んで書けなかった場合と同じ文言である
+		want := "on the agent host, net.ipv4.ip_forward is not 1 and cannot be set: write boom; its kernel does not forward to a target other than the agent host itself"
 		if r := statusOf(t, d, remote.ID).Reason; r != want {
 			t.Errorf("reason = %q, want %q", r, want)
+		}
+		k.forwardOn, k.forwardWriteEr = true, nil
+		d.Refresh()
+		if s := statusOf(t, d, remote.ID); s.State != proto.StatusOK {
+			t.Errorf("status = %+v after the value became 1", s)
 		}
 	})
 }

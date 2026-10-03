@@ -198,11 +198,16 @@ type Dataplane struct {
 	lkg map[string]lkgEntry
 	// probeErr は TCP のルールの宛先の試し接続の誤りである(7b.3 節の 2 つ目の種類)。ルール ID ごと
 	probeErr map[string]string
-	// forwardErr は net.ipv4.ip_forward が 1 でないことの理由である(7b.1 節)。nil なら 1
+	// forwardErr は net.ipv4.ip_forward が 1 でない、または 1 かどうか分からないことの理由である
+	// (7b.1 節)。値を読めず書けもしなかった場合は値が分からないと述べ、それ以外は 1 でないと述べる。
+	// nil なら 1
 	forwardErr error
-	// forwardUnknown は forwardErr が、値を読めず書けもしなかったことを述べるときに真になる。
-	// 値が分からないので、理由の文言は「転送しない」と断定しない
+	// forwardUnknown は forwardErr が値が分からないと述べるときに真になる。理由の文言は
+	// 「転送しない」と断定しない
 	forwardUnknown bool
+	// forwardWriteErr は起動時に 1 を書けなかった誤りである。値が 1 になるまで持ち、後の見直しで
+	// 0 を読んだ理由にも、書けなかった事実を保つ
+	forwardWriteErr error
 	// local はホスト自身のアドレスである。forwardErr があるときだけ読む
 	local map[netip.Addr]bool
 }
