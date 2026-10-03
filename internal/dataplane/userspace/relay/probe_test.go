@@ -367,9 +367,6 @@ func TestCommitDoesNotProbeTargets(t *testing.T) {
 	if d := time.Since(start); d > time.Second {
 		t.Errorf("Prepare and Commit took %v, want well under the probe timeout %v", d, m.probeTimeout)
 	}
-	if n := calls.Load(); n != 0 {
-		t.Errorf("Commit dialed the targets %d times, want 0", n)
-	}
 	st := m.Status()
 	if len(st) != len(desired) {
 		t.Fatalf("status has %d listeners, want %d", len(st), len(desired))
@@ -378,5 +375,15 @@ func TestCommitDoesNotProbeTargets(t *testing.T) {
 		if !x.Listening || x.Err != nil {
 			t.Errorf("listener %s: listening %v, err %v; want listening with no error", x.Key, x.Listening, x.Err)
 		}
+	}
+	// 確認を goroutine に出して Commit を待たせない形も、試し接続には違いない。そうした dial は Commit の
+	// 直後にはまだ始まっていないことがあるので、短い期間だけ待ってから数え、Close の後にもう一度数える
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) && calls.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	m.Close()
+	if n := calls.Load(); n != 0 {
+		t.Errorf("Commit dialed the targets %d times, want 0", n)
 	}
 }
