@@ -26,6 +26,7 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/wg"
 	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/internal/startup"
+	"github.com/rahanahu/wgft/internal/vpsd/doctor"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -280,6 +281,78 @@ func TestKernelIPForwardFailureReportsOnlyRemoteTargets(t *testing.T) {
 	if s := statusOf(t, d, "other"); s.State != proto.StatusOK {
 		t.Errorf("other = %+v after ip_forward became 1", s)
 	}
+}
+
+// 値を読めず、書けもしなかった場合は、1 でないとは言わない。値が分からないことと、読みと書きの両方の
+// 誤りを示し、転送しないとは断定しない。0 を読んで書けなかった場合の文言は変わらない。どちらも
+// server doctor は agent_ip_forward_off に分類する(7b.1 節、10.2a 節)。
+func TestKernelIPForwardUnreadableAndUnwritableDoesNotClaimTheValue(t *testing.T) {
+	remote := tcpRule("other", "192.168.1.20:81", 81, 81)
+	reasonFor := func(t *testing.T, k *fakeKernel) string {
+		t.Helper()
+		d := newTestKernel(t, k, &credentials.Credentials{}, nil)
+		if err := d.enableForwarding(func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.ApplyRules(1, []proto.AgentRule{remote}, nil); err != nil {
+			t.Fatal(err)
+		}
+		s := statusOf(t, d, remote.ID)
+		if s.State != proto.StatusError {
+			t.Fatalf("status = %+v, want an error", s)
+		}
+		if got := serverDoctorReads(t, remote, s)[doctor.CheckTarget].Reason; got != doctor.ReasonAgentIPForwardOff {
+			t.Errorf("server doctor classifies %q as %q, want %q", s.Reason, got, doctor.ReasonAgentIPForwardOff)
+		}
+		return s.Reason
+	}
+	t.Run("neither read nor set", func(t *testing.T) {
+		r := reasonFor(t, &fakeKernel{forwardReadEr: errors.New("read boom"), forwardWriteEr: errors.New("write boom")})
+		if strings.Contains(r, "is not 1") || strings.Contains(r, "does not forward") {
+			t.Errorf("reason states what it does not know: %q", r)
+		}
+		for _, want := range []string{"on the agent host, ", "could not be read: read boom", "setting it to 1 failed too: write boom", "unknown", "may not forward"} {
+			if !strings.Contains(r, want) {
+				t.Errorf("reason lacks %q: %q", want, r)
+			}
+		}
+	})
+	t.Run("read 0, could not set", func(t *testing.T) {
+		r := reasonFor(t, &fakeKernel{forwardWriteEr: errors.New("write boom")})
+		want := "on the agent host, net.ipv4.ip_forward is not 1 and cannot be set: write boom; its kernel does not forward to a target other than the agent host itself"
+		if r != want {
+			t.Errorf("reason = %q, want %q", r, want)
+		}
+	})
+	t.Run("a later read of 0 keeps the failed write", func(t *testing.T) {
+		k := &fakeKernel{forwardReadEr: errors.New("read boom"), forwardWriteEr: errors.New("write boom")}
+		d := newTestKernel(t, k, &credentials.Credentials{}, nil)
+		if err := d.enableForwarding(func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.ApplyRules(1, []proto.AgentRule{remote}, nil); err != nil {
+			t.Fatal(err)
+		}
+		k.forwardReadEr = nil
+		d.Refresh()
+		// 起動時に書けなかった事実は、0 を読んだ後の理由にも保つ。0 を読んで書けなかった場合と同じ文言である
+		want := "on the agent host, net.ipv4.ip_forward is not 1 and cannot be set: write boom; its kernel does not forward to a target other than the agent host itself"
+		if r := statusOf(t, d, remote.ID).Reason; r != want {
+			t.Errorf("reason = %q, want %q", r, want)
+		}
+		k.forwardOn, k.forwardWriteEr = true, nil
+		d.Refresh()
+		if s := statusOf(t, d, remote.ID); s.State != proto.StatusOK {
+			t.Errorf("status = %+v after the value became 1", s)
+		}
+		// 1 になった後で外から 0 に戻されたときは、起動時の古い書きの誤りを残さず、0 と述べる
+		k.forwardOn = false
+		d.Refresh()
+		want = "on the agent host, net.ipv4.ip_forward is 0; its kernel does not forward to a target other than the agent host itself"
+		if r := statusOf(t, d, remote.ID).Reason; r != want {
+			t.Errorf("reason after 1 then 0 = %q, want %q", r, want)
+		}
+	})
 }
 
 // 0 から 1 に変えるときは、値を書く前に日時を記録して保存する。保存できなければ値を書かずに誤りを

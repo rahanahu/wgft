@@ -81,7 +81,7 @@ func (d *Dataplane) Startup(priv wgtypes.Key, save func() error) error {
 func (d *Dataplane) enableForwarding(save func() error) error {
 	on, rerr := d.Ops.ReadIPForward()
 	if rerr == nil && on {
-		d.forwardErr = nil
+		d.forwardErr, d.forwardUnknown, d.forwardWriteErr = nil, false, nil
 		return nil
 	}
 	prev := d.f.IPForwardEnabledAt
@@ -102,14 +102,22 @@ func (d *Dataplane) enableForwarding(save func() error) error {
 				log.Printf("warning: cannot remove the ip_forward record after the write failed: %v", serr)
 			}
 		}
-		d.forwardErr = fmt.Errorf(reasontext.IPForward+" is not 1 and cannot be set: %w", err)
+		d.forwardWriteErr = err
+		if rerr != nil {
+			// 値を読めていないので、1 でないとは言えない。読みと書きの両方の誤りを示す(7b.1 節)
+			d.forwardErr = fmt.Errorf(reasontext.IPForward+" could not be read: %v; setting it to 1 failed too: %w; "+reasontext.IPForwardUnknown, rerr, err)
+			d.forwardUnknown = true
+		} else {
+			d.forwardErr = fmt.Errorf(reasontext.IPForward+" is not 1 and cannot be set: %w", err)
+			d.forwardUnknown = false
+		}
 		log.Printf("warning: %v; rules whose target is not this host are reported as errors until it is 1", d.forwardErr)
 		if l, err := d.Ops.LocalAddrs(); err == nil {
 			d.local = l
 		}
 		return nil
 	}
-	d.forwardErr = nil
+	d.forwardErr, d.forwardUnknown, d.forwardWriteErr = nil, false, nil
 	switch {
 	case rerr != nil:
 		log.Printf("net.ipv4.ip_forward could not be read: %v; wrote 1 without recording a change, since it may already have been 1", rerr)

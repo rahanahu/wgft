@@ -874,8 +874,13 @@ func targetCheck(r proto.Rule, ai *adminapi.AgentInfo, in Input) Check {
 		if c.Reason == ReasonAgentIPForwardOff {
 			// 旧い版のエージェントの文言は「this host」と書き、VPS で読むと VPS のことに読める。
 			// どのホストの値かを所見の側で名指す。
-			c.Detail = fmt.Sprintf("agent %q reports that its own host does not forward this rule: %s, last check %s ago",
-				r.Agent, ReasonOr(st.Reason, "no reason reported"), reportAge)
+			// 値が分からないと述べる理由のときは、転送しないと断定しない
+			verb := "reports that its own host does not forward this rule"
+			if strings.Contains(st.Reason, reasontext.IPForwardUnknown) {
+				verb = "reports that its own host may not forward this rule, because it could not read the value"
+			}
+			c.Detail = fmt.Sprintf("agent %q %s: %s, last check %s ago",
+				r.Agent, verb, ReasonOr(st.Reason, "no reason reported"), reportAge)
 		}
 		c.Next = agentRuleNextStep(st.Reason, r)
 		return c
@@ -1045,10 +1050,14 @@ func agentRuleNextStep(reason string, r proto.Rule) string {
 	case ReasonResolveFailed:
 		return "fix name resolution on the agent host, or point the rule at a literal address"
 	case ReasonAgentIPForwardOff:
-		return fmt.Sprintf("the setting to fix is on the host that runs agent %q, not on this VPS: net.ipv4.ip_forward is 0 there, so its kernel "+
-			"forwards nothing from the tunnel to %s. On that host, set it with sysctl -w net.ipv4.ip_forward=1, or restart the agent, "+
-			"which sets it on start; then find what set it to 0, such as a file in /etc/sysctl.d. wgft agent doctor on that host shows it "+
-			"under forwarding", r.Agent, r.TargetDisplay())
+		// 理由は、値が 0 の場合のほか、読めず書けもしなかった場合(値は不明)と、0 を読んで書けなかった場合にも
+		// 付く。古いエージェントの理由にも当てはまるよう、値を 0 と断定せず、再起動を勧めない。再起動は、
+		// エージェントが起動時に値を書く試みをやり直すだけで、書けない原因を除かない。
+		return fmt.Sprintf("the setting to fix is on the host that runs agent %q, not on this VPS: its net.ipv4.ip_forward is not 1 or could not be read, "+
+			"so its kernel may forward nothing from the tunnel to %s. On that host, read the value with sysctl net.ipv4.ip_forward and, if it is not 1, "+
+			"set it with sysctl -w net.ipv4.ip_forward=1. If the agent reported that it cannot set the value, restarting the agent alone does not fix it: "+
+			"remove what blocks the write, such as a read-only /proc or a container limit, and then set it. If it is back at 0 later, "+
+			"find what sets it, such as a file in /etc/sysctl.d. wgft agent doctor on that host shows it under forwarding", r.Agent, r.TargetDisplay())
 	case ReasonTargetLoopbackUnsupported:
 		return "the agent runs in kernel mode, which does not forward to a loopback target. Point the rule at the agent host's LAN address instead of " + r.TargetDisplay() + "."
 	}

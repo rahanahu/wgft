@@ -3,7 +3,9 @@ package doctor
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/rahanahu/wgft/internal/vpsd/adminapi"
 	"github.com/rahanahu/wgft/proto"
 )
 
@@ -150,6 +152,12 @@ func TestTargetReasonCode(t *testing.T) {
 			want:   ReasonAgentIPForwardOff,
 		},
 		{
+			// 値を読めず書けもしなかった場合の文言。読みの誤りの語に引きずられない。
+			name:   "kernel-mode agent host that could neither read nor set ip_forward",
+			reason: "on the agent host, net.ipv4.ip_forward could not be read: open /proc/sys/net/ipv4/ip_forward: permission denied; setting it to 1 failed too: open /proc/sys/net/ipv4/ip_forward: read-only file system; its value is unknown; its kernel may not forward to a target other than the agent host itself",
+			want:   ReasonAgentIPForwardOff,
+		},
+		{
 			name:   "unrecognized text falls back to target_error",
 			reason: "dial tcp 192.168.50.50:2456: some future wrapped error nobody has seen yet",
 			want:   ReasonTargetError,
@@ -179,7 +187,57 @@ func TestAgentIPForwardOffNamesTheAgentHost(t *testing.T) {
 	}
 }
 
+// 案内は、値を 0 と断定せず、再起動を勧めない。読めず書けもしなかった場合にも、0 を読んで書けなかった
+// 場合にも、旧い版のエージェントの理由にも当てはまる。
+func TestAgentIPForwardOffNextStepDoesNotClaimZeroOrAdviseRestart(t *testing.T) {
+	r := testRuleForReason()
+	for _, reason := range []string{
+		"net.ipv4.ip_forward is 0; the kernel does not forward to a target that is not this host",
+		"on the agent host, net.ipv4.ip_forward is not 1 and cannot be set: boom; its kernel does not forward to a target other than the agent host itself",
+		"on the agent host, net.ipv4.ip_forward could not be read: boom; setting it to 1 failed too: boom; its value is unknown; its kernel may not forward to a target other than the agent host itself",
+	} {
+		next := agentRuleNextStep(reason, r)
+		for _, bad := range []string{"is 0", "or restart the agent", "which sets it on start"} {
+			if strings.Contains(next, bad) {
+				t.Errorf("next step for %q contains %q: %s", reason, bad, next)
+			}
+		}
+		for _, want := range []string{"sysctl net.ipv4.ip_forward and", "sysctl -w net.ipv4.ip_forward=1", "restarting the agent alone does not fix it", "read-only /proc", "wgft agent doctor"} {
+			if !strings.Contains(next, want) {
+				t.Errorf("next step for %q lacks %q: %s", reason, want, next)
+			}
+		}
+	}
+}
+
 func testRuleForReason() proto.Rule {
 	return proto.Rule{ID: "r_01M2R009AAAAAAAAAAAAAAAAA", Agent: "home", Proto: proto.TCP,
 		ListenPort: proto.PortRange{Lo: 4000, Hi: 4000}, Target: "192.168.50.2:4000", VPSMode: proto.ModeKernel, Enabled: true}
+}
+
+// 値が分からないと述べる理由のときは、所見も転送しないと断定しない。値を述べる理由のときは従来のまま。
+func TestAgentIPForwardFindingDoesNotAssertWhenTheValueIsUnknown(t *testing.T) {
+	r := testRuleForReason()
+	unknown := "on the agent host, net.ipv4.ip_forward could not be read: boom; setting it to 1 failed too: boom; its value is unknown; its kernel may not forward to a target other than the agent host itself"
+	known := "on the agent host, net.ipv4.ip_forward is 0; its kernel does not forward to a target other than the agent host itself"
+	for _, tc := range []struct{ reason, want, notWant string }{
+		{unknown, "may not forward this rule, because it could not read the value", "does not forward this rule"},
+		{known, "reports that its own host does not forward this rule", "may not forward"},
+	} {
+		now := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
+		at := now.Add(-5 * time.Second).Format(time.RFC3339)
+		in := Input{Now: now,
+			Rules: &adminapi.BatchResponse{AgentRuleStates: map[string]adminapi.AgentRuleStatus{
+				r.ID: {Agent: "home", State: proto.StatusError, Reason: tc.reason, At: at, Connected: true}}},
+			Agents: []adminapi.AgentInfo{{Name: "home", Connected: true, LastHeartbeat: at, LastHandshake: at}}}
+		var c Check
+		for _, x := range Diagnose(r, in) {
+			if x.ID == CheckTarget {
+				c = x
+			}
+		}
+		if c.Reason != ReasonAgentIPForwardOff || !strings.Contains(c.Detail, tc.want) || strings.Contains(c.Detail, tc.notWant) {
+			t.Errorf("reason %q: check = %s %q", tc.reason, c.Reason, c.Detail)
+		}
+	}
 }

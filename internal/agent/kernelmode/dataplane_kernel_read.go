@@ -65,7 +65,11 @@ func (d *Dataplane) ruleStatuses() []proto.RuleStatus {
 			if d.forwardErr != nil && !d.allLocal(r) {
 				// 理由は server の診断、`status`、`agent ls`、Web UI で VPS の上で読まれる。「このホスト」と
 				// 書くと VPS と読めるので、エージェントのホストであることを名指す(設計文書 10.2a 節)。
-				parts = append(parts, "on the agent host, "+d.forwardErr.Error()+"; its kernel does not forward to a target other than the agent host itself")
+				verb := "does not"
+				if d.forwardUnknown {
+					verb = "may not"
+				}
+				parts = append(parts, "on the agent host, "+d.forwardErr.Error()+"; its kernel "+verb+" forward to a target other than the agent host itself")
 			}
 		}
 		if len(parts) > 0 {
