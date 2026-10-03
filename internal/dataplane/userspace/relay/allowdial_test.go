@@ -454,3 +454,64 @@ func TestAllowListDialCancelsLosingFamily(t *testing.T) {
 		t.Fatal("the losing family's dial was not canceled after the other family won")
 	}
 }
+
+// 2 つの族を並行に試す経路でも、どちらの族の試行にも期限があり、全体の期限の中に収まる。族ごとに
+// 残りのアドレスの数で分ける。
+func TestAllowListDialSharesDeadlineAcrossFamilies(t *testing.T) {
+	addrs := []string{"2001:db8::1", "2001:db8::2", "192.0.2.1", "192.0.2.2"}
+	var allowed []string
+	for _, a := range addrs {
+		allowed = append(allowed, net.JoinHostPort(a, "80"))
+	}
+	m := New(&loopback{}, Options{
+		Logf:              testLogf(t),
+		AllowTarget:       allowList(allowed...),
+		AllowTargetSource: "WGFT_AGENT_ALLOW_TARGETS",
+		LookupTarget:      lookupFixed(addrs...),
+	})
+	defer m.Close()
+	const total = 6 * time.Second
+	m.dialTimeout = total
+	var mu sync.Mutex
+	left := map[string]time.Duration{}
+	m.dialCtx = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dl, ok := ctx.Deadline()
+		mu.Lock()
+		if ok {
+			left[addr] = time.Until(dl)
+		} else {
+			left[addr] = -1
+		}
+		mu.Unlock()
+		// IPv6 はどちらもすぐ失敗し、IPv4 は 2 つ目だけが繋がる
+		if addr == "192.0.2.2:80" {
+			a, b := net.Pipe()
+			b.Close()
+			return a, nil
+		}
+		return nil, errors.New("refused " + addr)
+	}
+	c, _, err := dialWithin(t, m, "tcp", "dual.lan:80", 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(left) != len(addrs) {
+		t.Fatalf("dialed %v, want every address", left)
+	}
+	for addr, d := range left {
+		if d < 0 {
+			t.Errorf("%s: dialed without a deadline", addr)
+		} else if d > total {
+			t.Errorf("%s: deadline in %s, want it within the overall %s", addr, d, total)
+		}
+	}
+	// 各族の 1 つ目は、全体の残りを族の 2 つのアドレスで分けた分を受け取る
+	for _, first := range []string{"[2001:db8::1]:80", "192.0.2.1:80"} {
+		if d := left[first]; d > total/2 || d < total/2-300*time.Millisecond {
+			t.Errorf("%s: deadline in %s, want about %s", first, d, total/2)
+		}
+	}
+}
