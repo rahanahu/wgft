@@ -144,7 +144,8 @@ func (m *Manager) forwardReply(s *udpSession, l *listener, sender replySender, o
 }
 
 // udpServer は UDP の待ち受け 1 つの中継の状態である。serveUDP が作り、メソッド count、sweep、
-// stopAccept、close を listenerOps の欄 sessions、sweep、stopAccept、closeF に差し込む。無通信の
+// stopAccept、close を listenerOps の欄 sessions、sweep、stopAccept、closeF に差し込む。delivering には
+// 0 を返す関数を入れる。無通信の
 // セッションを閉じる goroutine(expireIdle)、読み取りのループ(readLoop)、セッションごとの
 // goroutine(serveSession)もこの型のメソッドである。
 type udpServer struct {
@@ -187,6 +188,7 @@ func (m *Manager) serveUDP(l *listener, pc net.PacketConn) {
 		stopAccept: u.stopAccept,
 		sweep:      u.sweep,
 		sessions:   u.count,
+		delivering: func() int { return 0 },
 	}
 	l.accepting.Store(true)
 

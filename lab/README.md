@@ -118,12 +118,13 @@ lab/lab exec vm labhost create
 `create` と `destroy` は手作業の Sandbox を名指しして扱い、`run` が所有する Sandbox を操作しません。
 
 `version-skew.sh` は旧版を取得する条件が必要なため、`run all` に含めません。
-B7、B11、C3、D4 など一式の外の試験は、契機に従って追加します。
+B7、B11、B12、C3、D4 など一式の外の試験は、契機に従って追加します。
 旧版の取得と上書き変数は各スクリプトの冒頭にあります。
 
 ```sh
 lab/lab exec vm labhost run version-skew.sh
 lab/lab exec vm bash /wgft/lab/rcvwin.sh
+lab/lab test internal/nettun vps -test.run=^TestRelayHoldOutOfOrderKernelData$
 lab/lab exec vm bash /wgft/lab/scale.sh kernel
 lab/lab exec vm bash /wgft/lab/scale.sh userspace
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel

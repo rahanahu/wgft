@@ -49,7 +49,12 @@ type Options struct {
 	// 固定するか(netpipe.FixAtAccept)。ユーザー空間モードの vpsd が立てる。カーネルモードでは組の
 	// 両側がカーネルのソケットで枠に合わせないので、立てない(設計文書 7 節)
 	FloorAtAccept bool
-	Logf          func(string, ...any)
+	// HoldUntilDelivered は、中継が終わった後も、組が送り残しを相手に届け終えるまで Resource Guard の
+	// 枠を持つか(netpipe.PipeHold と netpipe.AwaitDelivered。設計文書 7 節の「中継が終わった後の末尾の
+	// 配送」)。ユーザー空間モードの vpsd が立てる。カーネルモードでは立てず、今までどおり中継の終わりで
+	// 枠を返し、両側を閉じる
+	HoldUntilDelivered bool
+	Logf               func(string, ...any)
 	// Pool はプロセス全体の予算と、そこから導くルールごとの上限と最低分(仕様 7 節、
 	// 設計文書 7a.10 節の Resource Guard)。nil なら既定値で作る。
 	// ユーザー空間モードの vpsd は relay と同じ Pool を渡し、合計で数える
@@ -85,10 +90,13 @@ type failure struct {
 }
 
 type listener struct {
-	rule       Rule
-	ln         net.Listener
-	mu         sync.Mutex
-	conns      map[net.Conn]relayed // 進行中の中継(公開側の接続 → 接続元とエージェントへの接続)
+	rule  Rule
+	ln    net.Listener
+	mu    sync.Mutex
+	conns map[net.Conn]relayed // 進行中の中継(公開側の接続 → 接続元とエージェントへの接続)
+	// delivering は、中継が終わり、送り残しを届けている途中の組(HoldUntilDelivered のときだけ)。
+	// 枠を持ったままで、切る経路は conns と同じくこの組も切り、待ちを起こす
+	delivering map[net.Conn]delivering
 	closed     bool
 	stopping   bool
 	admitting  net.Conn // owned by the accept loop until the locked handoff
@@ -122,6 +130,18 @@ type listener struct {
 type relayed struct {
 	src string // 接続元 IP の文字列
 	up  net.Conn
+}
+
+// delivering は送り残しを届けている途中の組の記録。wake は切る経路が待ちを起こすために閉じる。
+type delivering struct {
+	relayed
+	wake chan struct{}
+}
+
+// cut は組を切り、待ちを起こす。
+func (d delivering) cut(c net.Conn) {
+	d.relayed.cut(c)
+	close(d.wake)
 }
 
 // cut は中継の両側を閉じる。エージェントへの接続 up は RST で切る(仕様 6.2 節)。FIN で閉じると、
@@ -342,7 +362,7 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 		// 枠は bind の済んだ待ち受けにだけ付け、中継を始める前に付ける。Prepare で bind に失敗した
 		// ポートはここに来ないので、そのルールは受け付けているルールの集合 A に入らない
 		// (設計文書 7a.10 節)
-		l := &listener{rule: r, ln: ln, conns: map[net.Conn]relayed{}, budget: m.opts.Pool.Listener(r.ID), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
+		l := &listener{rule: r, ln: ln, conns: map[net.Conn]relayed{}, delivering: map[net.Conn]delivering{}, budget: m.opts.Pool.Listener(r.ID), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
 		m.ls[port] = l
 		go m.serve(l)
 		m.opts.Logf("proxy: opened relay %d -> %s:%d proxy_protocol=%v", port, r.AgentAddr, r.AgentPort, r.ProxyProtocol)
@@ -613,7 +633,41 @@ func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 	// 公開側のクライアントが RST で切ったときは、up も通常の Close ではなく RST で切る(設計文書 6.2 節)。
 	// FIN で閉じると、エージェントの中継はハーフクローズとして扱い、FIN を受けても閉じない宛先では、
 	// エージェント側の宛先への接続と枠が宛先が閉じるまで残る
-	netpipe.PipeResetB(c, up, func() { resetUpstream(up) })
+	if !m.opts.HoldUntilDelivered {
+		netpipe.PipeResetB(c, up, func() { resetUpstream(up) })
+		return
+	}
+	// ユーザー空間モードでは、中継が終わった後も、組が送り残しを届け終えるまでフローの 2 つの枠
+	// (Resource Guard の枠と送信元ごとの枠)を持ち、届け終えた後に上の defer がまとめて返す(設計文書
+	// 7 節の「中継が終わった後の末尾の配送」)
+	netpipe.PipeHold(c, up, func() { resetUpstream(up) })
+	if wake := l.beginDelivery(c); wake != nil {
+		netpipe.AwaitDelivered(wake, c, up)
+		l.endDelivery(c)
+	}
+	c.Close()
+	up.Close()
+}
+
+// beginDelivery は、中継を終えた組を conns から delivering へ移し、待ちを起こす channel を返す。切る経路が
+// すでに組を切っていれば(conns に無ければ)nil を返す。
+func (l *listener) beginDelivery(c net.Conn) chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r, ok := l.conns[c]
+	if !ok {
+		return nil
+	}
+	delete(l.conns, c)
+	d := delivering{relayed: r, wake: make(chan struct{})}
+	l.delivering[c] = d
+	return d.wake
+}
+
+func (l *listener) endDelivery(c net.Conn) {
+	l.mu.Lock()
+	delete(l.delivering, c)
+	l.mu.Unlock()
 }
 
 // updateRestriction は待ち受けを残したまま宣言を更新し、閉じるべき進行中の接続を閉じる。
@@ -643,6 +697,11 @@ func (l *listener) updateRestriction(r Rule) (retargeted bool, closed int) {
 			rc.cut(c)
 			closed++
 		}
+		// 送り残しを届けている途中の組も切る。中継は終わっているので、閉じた数には入れない
+		for c, d := range l.delivering {
+			d.cut(c)
+		}
+		clear(l.delivering)
 		return retargeted, closed
 	}
 	for c, rc := range l.conns {
@@ -650,6 +709,13 @@ func (l *listener) updateRestriction(r Rule) (retargeted bool, closed int) {
 		if err == nil && !sourceAllowed(src, l.rule) {
 			rc.cut(c)
 			closed++
+		}
+	}
+	for c, d := range l.delivering {
+		src, err := netip.ParseAddr(d.src)
+		if err == nil && !sourceAllowed(src, l.rule) {
+			d.cut(c)
+			delete(l.delivering, c)
 		}
 	}
 	return retargeted, closed
@@ -694,11 +760,12 @@ func (l *listener) port() uint16 {
 	return l.rule.ListenPort
 }
 
-// idle は Retiring の中継に、成立済みの接続も接続中の接続も残っていないか。
+// idle は Retiring の中継に、成立済みの接続も接続中の接続も、送り残しを届けている途中の組も残って
+// いないか。
 func (l *listener) idle() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.conns) == 0 && l.pending == 0 && l.admitting == nil
+	return len(l.conns) == 0 && len(l.delivering) == 0 && l.pending == 0 && l.admitting == nil
 }
 
 // beginStopAccepting は待ち受けと判定中のソケットを閉じ、成立済みの接続には触れない(設計文書 7a.3 節の
@@ -723,6 +790,13 @@ func (l *listener) retire(keep func(src netip.Addr) bool) int {
 			r.cut(c)
 			delete(l.conns, c)
 			n++
+		}
+	}
+	for c, d := range l.delivering {
+		src, err := netip.ParseAddr(d.src)
+		if err != nil || !keep(src) {
+			d.cut(c)
+			delete(l.delivering, c)
 		}
 	}
 	return n
@@ -752,6 +826,10 @@ func (l *listener) beginClose() {
 		r.cut(c)
 	}
 	l.conns = map[net.Conn]relayed{}
+	for c, d := range l.delivering {
+		d.cut(c)
+	}
+	clear(l.delivering)
 	l.mu.Unlock()
 }
 

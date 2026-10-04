@@ -366,6 +366,28 @@ func (c *tcpConn) returnable() bool {
 	return false
 }
 
+// Delivered は、最後の Close か Abort の後、この接続が送ったデータと FIN を相手に届け終え、Resource
+// Guard の枠を返してよいかを返す。中継は、届け終えるまで枠を持つ(設計文書 7 節の「中継が終わった後の
+// 末尾の配送」)。endpoint が CLOSED か ERROR か TIME_WAIT なら真である。FIN_WAIT_2 は自分の FIN が
+// 確認された状態で、受信のメモリが 0 のときだけ真にする。0 でない FIN_WAIT_2 は Close の前に届いた
+// 順序外のデータを持ち、gVisor の期限で CLOSED になるまで残るためである。固定版の gVisor は、読み取りを
+// 閉じた後に届いたデータで接続を打ち切るので、Close の後に受信のメモリは増えない。受信のメモリを
+// 読めない版では、FIN_WAIT_2 を真にしない。boost の枠を返す条件(returnable)は FIN_WAIT_2 を
+// 含めず、この関数は使わない。
+func (c *tcpConn) Delivered() bool {
+	if !c.closed.Load() {
+		return false
+	}
+	switch tcp.EndpointState(c.ep.State()) {
+	case tcp.StateClose, tcp.StateError, tcp.StateTimeWait:
+		return true
+	case tcp.StateFinWait2:
+		m, ok := c.pool.receiveMemUsed(c.ep)
+		return ok && m == 0
+	}
+	return false
+}
+
 // idleSince は、tcpIdleReclaim の間どちらの向きにも需要が無かったかを返す。
 func (c *tcpConn) idleSince(now time.Time) bool {
 	return now.Sub(time.Unix(0, c.lastDemand.Load())) >= tcpIdleReclaim

@@ -354,6 +354,8 @@ func relayFrontendOptions(limits resource.Limits, uspace *userspace.Backend) pro
 		// ユーザー空間モードでは netstack 越しにエージェントへ
 		proxyOpts.Dial = func(addr string) (net.Conn, error) { return uspace.Dial("tcp", addr) }
 		proxyOpts.FloorAtAccept = true
+		// 中継が終わった後も、送り残しを届け終えるまで枠を持つ(設計文書 7 節)
+		proxyOpts.HoldUntilDelivered = true
 		proxyOpts.Pool = uspace.TCPPool() // 同時接続数は relay と合計で数える(仕様 7 節)
 		// Admission Policy のすべての段を Go の評価器が判定する。接続元 IP ごとの同時接続数は、
 		// Transparent の TCP のルールと合わせて数える(6.2、6.3 節)
