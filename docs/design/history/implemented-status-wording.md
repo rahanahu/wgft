@@ -19,7 +19,7 @@
 移動元: [docs/design/kernel-agent/targets.md](https://github.com/rahanahu/wgft/blob/a8260eb8812e4c7eafd2a662d7dfa1236a514d54/docs/design/kernel-agent/targets.md)。
 基準コミットは `a8260eb8`、元の行範囲は 49 です。
 移動元: [docs/design/resource/integration.md](https://github.com/rahanahu/wgft/blob/a8260eb8812e4c7eafd2a662d7dfa1236a514d54/docs/design/resource/integration.md)。
-基準コミットは `a8260eb8`、元の行範囲は 20, 24, 43, 56, 86 です。
+基準コミットは `a8260eb8`、元の行範囲は 20, 24, 43, 45, 56, 86 です。
 移動元: [docs/design/resource/reporting.md](https://github.com/rahanahu/wgft/blob/a8260eb8812e4c7eafd2a662d7dfa1236a514d54/docs/design/resource/reporting.md)。
 基準コミットは `a8260eb8`、元の行範囲は 16, 94, 96 です。
 移動元: [docs/design/resource/validation.md](https://github.com/rahanahu/wgft/blob/a8260eb8812e4c7eafd2a662d7dfa1236a514d54/docs/design/resource/validation.md)。
@@ -186,3 +186,7 @@ Docker:v1.2 ではカーネルモードの手順を書かない
 ## 38. resource/reporting.md
 
 admin API には、既存のフィールドを変えずに次の 2 つを加えます。
+
+## 39. resource/integration.md
+
+  管理用 API と Web UI への表示は、他の nftables の Finding(`ip_forward` を含む)と同じくこの段の対象外であり、今もログだけです

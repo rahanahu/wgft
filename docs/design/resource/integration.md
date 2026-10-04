@@ -42,7 +42,8 @@ kernel 側で Resource Guard が行うことは次のとおりです。
 - 起動時の Finding:以前は `server check` を実行したときにしか出なかった。
   同じ判定は、`ip_forward` と同様に起動時のログにも出します。
   `server check` を実行しない運用者にも気付けるようにするためです。
-  管理用 API と Web UI への表示は、他の nftables の Finding(`ip_forward` を含む)と同じくこの段の対象外であり、今もログだけです
+  conntrack の表の上限についての起動時の Finding はログに出し、管理用 API と Web UI には載せません。
+  kernel モードの server の `ip_forward` は別の経路で管理用 API が現在の値と読み取りの誤りを報告し、CLI と Web UI の診断が判定に使います ([server の観測と判定](../diagnosis/server-observations.md#102a-転送の診断-server-doctor))。
 - 提示する値:以前の提示は `nf_conntrack_max=262144` だった。
   所有者の決定により、`server check` と起動時の Finding のどちらも、メモリの数値(MiB、エントリ 1 件のバイト数、bucket 数のいずれも)を出さない。
   提示する値は 65536 に改めた。
