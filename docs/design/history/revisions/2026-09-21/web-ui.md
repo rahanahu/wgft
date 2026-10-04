@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 143 です。
+
 # 2026-09-21: web-ui
 
 - ダッシュボードのルール一覧とヘッダの全体ヘルスも部分更新する(2026-09-21、10.1 節):自動更新の対象はエージェント一覧と警告バナーの 2 つだけだった。

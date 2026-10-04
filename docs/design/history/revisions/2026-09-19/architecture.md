@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 68, 70 です。
+
 # 2026-09-19: architecture
 
 - userspace の dataplane を `Backend` の後ろへ移す(2026-09-19、7a.8 節の Phase 2):`internal/vpsd` のユーザー空間モードの転送面を、トンネル(`utun`)、評価器(`srcpolicy`)と合わせて `internal/dataplane/userspace` へ移した。

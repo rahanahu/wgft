@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 45, 59, 62 です。
+
 # 2026-09-19: control-plane
 
 - ルール集合の読み込み確認・適用とバッチ操作の競合を塞ぐ(2026-09-19、レビューの指摘):Web UI の読み込み確認・適用は、確認ページを描く際にルール集合とハッシュを読み、適用の直前にも同じものを取り直して食い違いを見ていたが、この取り直しと実際にバッチを確定させる呼び出しの間には、他経路(別の CLI 呼び出しや別タブの Web UI)が割り込むわずかな競合可能期間が残っていた。

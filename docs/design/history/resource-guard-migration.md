@@ -1,5 +1,10 @@
 <!-- docs-status: historical -->
 
+# Resource Guard の移行の計画
+
+移動元: [docs/design/resource-guard.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/resource-guard.md)。
+基準コミットは `8875f37e`、元の行範囲は 220-258 です。
+
 #### Phase 6 の移行の手順
 
 各段は、7a.8 節の共通の完了条件を満たしてから次へ進む。

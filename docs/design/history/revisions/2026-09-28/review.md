@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 293-294 です。
+
 # 2026-09-28: review
 
 - エージェントの keepalive の ping ごとに ICMP の endpoint と identifier が残る不具合を直した(2026-09-28、所有者の決定):ユーザー空間モードのエージェントがトンネル内へ送る ping は、ping ごとに ICMP の endpoint を bind してから接続し、応答を読むと閉じていた。

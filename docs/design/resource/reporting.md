@@ -13,7 +13,7 @@ CLI と管理用 API は、Go が数える予算と拒否を報告します。
 - 次に加わる 1 つの登録のために予備 `P = f = 4` を空けておき、残りは先着順に共有します
 
 置き換える前のルールごとの上限は `max(floor(T/2), min(F, T))` で、`F` は設定項目にする前の固定値(UDP 4096、TCP 1024)です。
-`F` は実際の資源の境界ではなく、以前の実装から引き継いだ定数なので、Phase 6 の式には使いません。
+`F` は実際の資源の境界ではなく、以前の実装から引き継いだ定数なので、現在の `Pool` の式には使いません。
 既定の予算はちょうど `T = 2F`(UDP 8192、TCP 2048)であり、`C` は以前の上限と同じ値(4096、1024)になります。
 `T` が既定以上なら、`C` は以前の上限と同じか、`T` が奇数のときだけ 1 大きい。
 ルールが 2 本以上の構成でルール 1 本の上限が下がるのは、`T` が既定より小さい場合だけです。
@@ -91,9 +91,10 @@ udp/2456: rule r1 holds 8188 flows and the free part of the budget, 4 of 8192, i
 udp/2456: rule r1 holds 300 flows, below its minimum of 4094, and the free part of the budget, 8 of 8192, is held for the first flows of 1 other rule and 4 spare flows for a rule added later; dropping new flows
 ```
 
-admin API には、既存のフィールドを変えずに次の 2 つを加えます。
+admin API は、既存のフィールドを変えずに加算した次の 2 つを返します。
 `GET /api/v1/rules` と `POST /api/v1/rules/batch` の応答に、プロトコルごとの `in_use` と `limit` を持つ `flow_budget` と、ルール ID から理由ごとの拒否の数への表 `resource_refusals` を加えます。
-Web UI の表示は Phase 6 では変えません。
+予算と拒否の数は、この項の CLI と管理用 API で報告します。
+Web UI に予算と拒否の数の専用の表示は追加していません。
 `rule ls --json` は応答をそのまま出力するので、同じキーが増える。
 kernel モードの server が数えるのは `Relay` のルールの TCP だけであり、`Transparent` のフローは conntrack が持つので、これらのフィールドには現れない。
 

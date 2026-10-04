@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 246 です。
+
 # 2026-09-24: lifecycle
 
 - エージェントの conntrack の収束を実装した(2026-09-24):`internal/dataplane/linuxkernel/conntrack` に、テーブルの公開の後に、wgft0 から入って DNAT されたフローを今の公開へ収束させる部品を加えた。

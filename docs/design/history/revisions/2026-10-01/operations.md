@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 342-343 です。
+
 # 2026-10-01: operations
 
 - `server check` を `internal/vpsd/servercheck` に移した(2026-10-01、7a.7 節。

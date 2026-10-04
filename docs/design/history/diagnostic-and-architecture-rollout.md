@@ -1,5 +1,20 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/agent-doctor.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/agent-doctor.md)。
+基準コミットは `8875f37e`、元の行範囲は 13, 35, 604 です。
+移動元: [docs/design/compatibility.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/compatibility.md)。
+基準コミットは `8875f37e`、元の行範囲は 133 です。
+移動元: [docs/design/internals.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/internals.md)。
+基準コミットは `8875f37e`、元の行範囲は 3 です。
+移動元: [docs/design/policy.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/policy.md)。
+基準コミットは `8875f37e`、元の行範囲は 3, 9, 53-57 です。
+移動元: [docs/design/resource-guard.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/resource-guard.md)。
+基準コミットは `8875f37e`、元の行範囲は 3, 18, 27, 216 です。
+移動元: [docs/design/server-doctor.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/server-doctor.md)。
+基準コミットは `8875f37e`、元の行範囲は 13-24 です。
+移動元: [docs/design/web-doctor.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/web-doctor.md)。
+基準コミットは `8875f37e`、元の行範囲は 3, 5, 9, 11 です。
+
 # 診断と内部構造の実装前の記述
 
 以下は、現在は実装済みの機能について、実装前に定めた範囲と移行の順序です。

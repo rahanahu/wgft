@@ -1,5 +1,10 @@
 <!-- docs-status: historical -->
 
+# 内部構造の移行の計画
+
+移動元: [docs/design/internals.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/internals.md)。
+基準コミットは `8875f37e`、元の行範囲は 310-321 です。
+
 ### 7a.8 移行の段取り
 
 各段階は、今のラボの結合テスト(`lab/e2e.sh`、rate、connlimit、split-merge、import-export)と、策定中の lifecycle テスト(再起動中の転送継続、無関係なフローを切らないこと、proxy の bind 失敗が nftables に漏れないこと、teardown が wgft の物だけを消すこと、上限到達時の RSS がソフト上限と余裕の和の内側にあること)を、その段階の終わりに通すことを共通の完了条件とする。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 190, 191 です。
+
 # 2026-09-23: agent-doctor
 
 - エージェント側の診断 `wgft agent doctor` を設計した(2026-09-23、所有者の決定):10.2c 節を新設した。

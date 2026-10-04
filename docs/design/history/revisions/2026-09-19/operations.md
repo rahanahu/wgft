@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 61 です。
+
 # 2026-09-19: operations
 
 - 同時フロー数の上限を設定項目にする(2026-09-19):接続元 IP ごとの上限(前項)とルールごとの上限が固定値だったため、メモリに余裕がある運用者がプロセス全体の上限(`WGFT_MAX_UDP_FLOWS`、`WGFT_MAX_TCP_FLOWS`)を上げても、この 2 つの上限で頭打ちになっていた。

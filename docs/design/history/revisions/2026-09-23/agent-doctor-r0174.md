@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 208, 211, 212, 213, 216, 219, 223 です。
+
 # 2026-09-23: agent-doctor
 
 - `agent doctor` の静的な検査を実装し、節が実装に委ねていた事柄を決めた(2026-09-23):10.2c 節の検査のうち、エージェントが止まっていても成立するものを実装した。

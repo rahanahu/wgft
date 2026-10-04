@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 392, 414 です。
+
 # 2026-10-03: agent-doctor
 
 - 鍵の変更の頻度の上限で直近の試みを断られたエージェントについて、`agent doctor` が終了コード 1 を返すようにした(2026-10-03、7a.11・10.2c 節、所有者の決定):稼働中の `rotate-key` が上限で断られると、エージェントは後の試みで鍵が通るまで転送できない。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 393-394 です。
+
 # 2026-10-03: operations
 
 - server の撤去の間の排他(2026-10-03、9・10.3・11b・7a.11 節、所有者の決定):`server teardown` はロックの状態を `Inspect` で読むだけで、ロックを取らなかった。

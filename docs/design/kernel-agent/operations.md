@@ -21,7 +21,7 @@ Linux の kernel エージェントは CAP_NET_ADMIN を要します。
 - 非特権の LXC:動作の対象にします。
   `ip_forward`、WireGuard、nftables、conntrack の操作はどれもコンテナの network namespace の中で完結し、ホストの値を変えないことを、ラボの非特権の LXC で確かめた。
   conntrack の表の上限はコンテナから変えられないので、読むだけにします
-- Docker:v1.2 ではカーネルモードの手順を書かない([13 節](../roadmap.md#制限と未実装の提案))
+- Docker:カーネルモードの配置に必要な権限とネットワークの設定は未確認です([13 節](../roadmap.md#制限と未実装の提案))
 - Linux 以外:Windows と macOS で `WGFT_MODE=kernel` を指定すると、種別 `prerequisite` の拒否として終了コード 3 で止まる([11b 節](../security/startup.md#11b-起動の失敗の意味論))
 - カーネルの前提:WireGuard のリンク種別を持たないカーネルと、権限が足りない配置は、[9 節](../state.md#9-状態の保存と再起動)の `vpsd` と同じく種別 `prerequisite` の拒否とし、ユーザー空間モードへの案内を添える
 - 前提の検査の時点:エージェントは上の 2 つの前提を、モードを `agent.json` に記録するより前、つまり登録で接続文字列を使うより前に確かめる(2026-09-25、所有者の決定)。

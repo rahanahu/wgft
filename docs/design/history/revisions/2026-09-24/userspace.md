@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 235, 240, 254, 255, 256, 258, 259 です。
+
 # 2026-09-24: userspace
 
 - 中継が切る TCP のセッションの netstack の側を RST で切るようにした(2026-09-24):エージェントの中継は、ポートが宣言から消えたとき(ルールの無効化と削除。

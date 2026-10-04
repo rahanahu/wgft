@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 25, 30, 33, 34, 35, 37 です。
+
 # 2026-09-18: review
 
 - エージェント用 API の HTTP/2 を無効化(2026-09-18):11 節に、TLS 1.2 以上かつ HTTP/1.1 だけで応じること、鍵交換の曲線は Go の既定に従うことを追記

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 188 です。
+
 # 2026-09-23: operations
 
 - 起動の保留をラボの実カーネルで確かめ、11b 節の転送の記述を直した(2026-09-23):保留はホストの単体テストでしか確かめていなかったので、使い捨ての VM で本物のカーネルに対して通した。**

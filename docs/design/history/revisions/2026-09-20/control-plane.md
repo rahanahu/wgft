@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 72, 82, 100, 106 です。
+
 # 2026-09-20: control-plane
 
 - `server check` がルールの listen port も input firewall で検査する(2026-09-20):同じ実機で、同じ input の構成のままユーザー空間モードのルール(TCP のポート、`vps_mode=kernel` 相当)を有効にすると、`active` のまま外部からの応答が無いことを確かめた。

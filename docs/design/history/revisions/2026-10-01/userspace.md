@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 328-329, 330-331, 332-333, 334-335, 336-337 です。
+
 # 2026-10-01: userspace
 
 - ユーザー空間モードのエージェントが、server から届く wg.keepalive と wg.udp_timeout_stream を time.Duration に変える前に境目で拒むようにした(2026-10-01、11 節、セキュリティレビューの指摘):奪われた VPS はこの 2 つの秒の値を自由に選べる。

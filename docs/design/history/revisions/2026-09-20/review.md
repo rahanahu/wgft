@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 74, 76, 77, 79, 90, 92, 94, 95, 103, 104, 110, 111, 112 です。
+
 # 2026-09-20: review
 
 - fail-closed で残るフローの範囲を明記(2026-09-20、7a.3 節):ラボの lifecycle テストで、`listen_port` を bind できないポートへ変えると、server は旧いポートの接続を `Retiring` として残すが、エージェントが旧いポートのリスナーを閉じ直すため接続は切れることを確かめた。

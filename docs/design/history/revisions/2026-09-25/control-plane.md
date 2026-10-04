@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 261, 272, 274, 276, 277, 278 です。
+
 # 2026-09-25: control-plane
 
 - 稼働中の `agent rotate-key` で、新しい鍵のピアに古いピアのエンドポイントを引き継ぐようにした(2026-09-25、ラボでの観測を受けて):稼働中の `rotate-key` のたびに、転送が WireGuard の REKEY_TIMEOUT(5 秒)ほど止まっていた。

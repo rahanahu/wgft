@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 148, 149, 151-181 です。
+
 # 2026-09-22: review
 
 - 接続中に観測したハンドシェイクで待ちを打ち切らないよう直す(2026-09-22、所有者のレビュー、5.2 節):直前の改訂で入れた打ち切りは、溜まっていた観測を捨てる位置が接続の試みの前にあった。

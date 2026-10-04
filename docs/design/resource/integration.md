@@ -17,11 +17,11 @@ kernel モードの server は Go で UDP のフローを持たないが、ソ�
 
 Resource Guard は、ヒープの量を見て新しいフローを拒む判定を持ちません。
 フロー数の予算はフローの数を抑え、ソフト上限は GC の目標です。
-Phase 6 はこの役割を変えません。
+最低分と予備の配分は、このメモリのソフト上限の役割を変えません。
 どちらもプロセスのメモリの量を抑える上限ではない([7 節](../agent-dataplane.md#7-データプレーン自宅側))。
 IPv4 の断片の再組み立ては gVisor に渡さず、TUN の入口の固定の大きさの表で行い([7 節](../agent-dataplane.md#7-データプレーン自宅側))、UDP の endpoint の受信のキューは TUN の入口の会計の予算で数え([7 節](../agent-dataplane.md#7-データプレーン自宅側))、拒んだ TCP の TIME_WAIT は RST で閉じて残さない([7a.5 節](../architecture/admission-resources.md#7a5-resource-guard))。
 宛先からの応答を読むバッファは、プロセス全体の枠で数える([7 節](../agent-dataplane.md#7-データプレーン自宅側))。
-Phase 6 はこれらに新しい上限を加えない。
+Resource Guard は、kernel のこれらの保持点に新しい上限を加えません。
 応答のバッファの枠はソフト上限の式に入れません。
 枠の上限は式の値に比べて小さく、ソフト上限は GC の目標であって上限ではないためです。
 netstack の出力のキューと wireguard-go の送信のキューに滞留するパケットの上限は、1 回の `Read` の件数を 1 に保つことで決まり、wireguard-go の受信のキューに滞留するパケットの上限は、バインドの 1 回の受信の件数を 1 に保つことで決まる([7 節](../agent-dataplane.md#7-データプレーン自宅側))。
@@ -40,7 +40,7 @@ kernel 側で Resource Guard が行うことは次のとおりです。
   実際の VPS(メモリ 462 MB)では、上限は 4096 で、この提示が出た。
   [6.1 節](../vps/kernel.md#61-カーネルモード)が例に挙げた 16384 より小さい上限の VPS もあります
 - 起動時の Finding:以前は `server check` を実行したときにしか出なかった。
-  Phase 6 のこの段で、同じ判定を `ip_forward` と同じ起動時のログにも出すようにした。
+  同じ判定は、`ip_forward` と同様に起動時のログにも出します。
   `server check` を実行しない運用者にも気付けるようにするためです。
   管理用 API と Web UI への表示は、他の nftables の Finding(`ip_forward` を含む)と同じくこの段の対象外であり、今もログだけです
 - 提示する値:以前の提示は `nf_conntrack_max=262144` だった。
@@ -53,7 +53,7 @@ kernel 側で Resource Guard が行うことは次のとおりです。
   これは kernel の版、設定、エントリの種類で変わるので、wgft の診断の出力にも推奨値の計算にも使いません。
   65536 はメモリの量から出した値ではなく、wgft が運用上の最低の推奨値として定める
 - set の大きさ:`meter_N` と `flows_udp`/`flows_tcp` の大きさ(65535)は、Phase 5 から IR の定数である([7a.9 節](../policy.md#7a9-admission-policy-のコンパイラ))。
-  埋まったときの劣化(送信元ごとの制限が外れ、集約上限に委ねる)は [6.1 節](../vps/kernel.md#61-カーネルモード)のとおりで、Phase 6 は変えません。
+  埋まったときの劣化(送信元ごとの制限が外れ、集約上限に委ねる)は [6.1 節](../vps/kernel.md#61-カーネルモード)のとおりで、Resource Guard の最低分と予備は、この kernel の扱いを変えません。
   set の要素数は監視しません
 
 kernel 側で Resource Guard が行わないことは次のとおりです。
@@ -83,6 +83,6 @@ agent の拒否の数は、ログと手元の制御ソケットの診断で報�
 ハートビートには加えず、server へは伝えません。
 ハートビートに加える場合は、wire protocol と capability の規則に従います ([7a.6 節](../architecture/wire-compatibility.md#7a6-維持する外部仕様と互換性))。
 
-agent の kernel dataplane(Phase 7)では、kernel 側の保護を server と同じく `internal/platform/linux` の読み取りと提示で行い、ルールごとの隔離は持ちません。
+agent の kernel dataplane では、kernel 側の保護を server と同じく `internal/platform/linux` の読み取りと提示で行い、ルールごとの隔離は持ちません。
 
 [Resource Guard](README.md)

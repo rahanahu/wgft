@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 192, 193, 201, 206, 207 です。
+
 # 2026-09-23: agent-doctor
 
 - 独立レビューの指摘とさらなる所有者の決定を反映し、`agent doctor` の設計を直した(2026-09-23、所有者の決定):プルリクエスト #163 への独立レビューの指摘と、所有者の決定 3 件を反映した。

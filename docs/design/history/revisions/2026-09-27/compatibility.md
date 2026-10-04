@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 291 です。
+
 # 2026-09-27: compatibility
 
 - Windows のエージェントを Windows 11 の実機で確かめ、確かめた範囲を 7a.11 節の保証に含めた(2026-09-27、GitHub issue #280、所有者の決定):v1.2.0 のリリースのバイナリを、Windows 11 Pro(25H2、amd64)の実機で管理者でない利用者として動かし、別のホストのカーネルモードの v1.2.0 の server に対して確かめた。

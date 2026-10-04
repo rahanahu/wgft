@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 295-296 です。
+
 # early-review: resource-guard
 
 - プロキシ中継の予算取得前の処理を、公開ポートごとの accept ループで同期して行うようにした。

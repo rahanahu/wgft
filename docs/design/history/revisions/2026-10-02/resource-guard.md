@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 370-371, 388-389 です。
+
 # 2026-10-02: resource-guard
 
 - 待ち受けのポートをホスト名やサービス名で書いた設定でも、管理用 API とエージェント用 API のポートを予約するようにした(2026-10-02、5.3 節、5.4 節、11a 節):予約ポートの組み立て(`internal/vpsd/admin` の `ReservedFromServerInfo`。

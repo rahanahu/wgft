@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 313-314 です。
+
 # 2026-09-30: review
 
 - userspace backend の `Retiring` の UDP の listener が、競合の窓の中で新しい送信元のセッションを作らないようにした(2026-09-30、7a.3 節):UDP の読み取りのループは、受け付けの印をデータグラムを読んだ直後にだけ確かめていた。

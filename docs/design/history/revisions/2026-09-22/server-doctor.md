@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 150, 187 です。
+
 # 2026-09-22: server-doctor
 
 - 転送の診断コマンド `wgft server doctor` を加える(2026-09-22、所有者の設計):転送が通らないときに運用者が `rule ls`、`agent ls`、`rule ls --json`、Web UI、ログを突き合わせて行っていた作業を、1 つのコマンドにまとめた。

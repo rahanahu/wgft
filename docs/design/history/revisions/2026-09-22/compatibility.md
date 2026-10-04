@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 183 です。
+
 # 2026-09-22: compatibility
 
 - v1.0 の互換性の保証(7a.11 節)の範囲を Linux に限定した(2026-09-22、所有者の決定):保証が拘束するのは Linux の server と Linux の agent であり、Windows と macOS の agent は暫定とし v1.0 の保証には含めない。

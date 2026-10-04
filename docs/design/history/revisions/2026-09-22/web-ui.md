@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 186 です。
+
 # 2026-09-22: web-ui
 
 - Web UI のルールの読み込みの確認を、予約ポートまで実際の `Batch` に合わせた(2026-09-22):`--dry-run` の改訂が「本改訂の対象に含めておらず、直していない」と書き残した欠陥を塞ぐ。

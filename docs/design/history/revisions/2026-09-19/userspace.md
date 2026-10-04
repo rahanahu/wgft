@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 52, 55 です。
+
 # 2026-09-19: userspace
 
 - Windows の UDP 中継をバッファなしで待つ形に修正(2026-09-19、Windows 11 実機の計測を受けて):前項で残した未確認のうち、UDP 中継のメモリ使用量を実機で測ったところ、Windows のエージェントは応答を待つ間もセッションごとに 65535 バイトを保持し続けており、UDP セッション 1 つが約 75 KiB を使うこと、既定の上限(8192 フロー)まで開くと私有メモリが約 660 MiB になり、Linux 向けの費用から計算するメモリのソフト上限(216 MiB、11a 節)を大きく超えるため GC が回り続け、既定の上限いっぱいでは 60 秒あたり CPU 21.8 秒を使うこと(`GOMEMLIMIT` を極端に大きくすると 1.6 秒まで下がる、メモリ量そのものは変わらない)が分かった。

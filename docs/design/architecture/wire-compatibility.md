@@ -18,12 +18,16 @@
 | join string と agent/server の通信 | 既存のメッセージの意味は変えず、版と機能の交渉を加算的なフィールドとして追加する(下記) |
 | 既存のデータの置き場からの更新 | SQLite と状態ファイルは自動の migration で吸収する。旧版への戻しは保証に含めない(下記) |
 
-wire protocol の版と機能の交渉は、既存のメッセージへ次のフィールドを追加するだけで足りる。
+wire protocol の版と機能の交渉は、既存のメッセージに加算した次のフィールドを使います。
 
-- agent が送る最初のメッセージ(`pubkey`)に、対応する版の範囲 `protocol_min` と `protocol_max`(整数)と、`capabilities`(文字列の配列)を追加します
-- server が送る全体状態(`state`)に、その接続で選んだ版 `server_protocol_version`(整数)と `server_capabilities`(文字列の配列)を追加します
+- agent が送る最初のメッセージ(`pubkey`)に、対応する版の範囲 `protocol_min` と `protocol_max`(整数)と、`capabilities`(文字列の配列)を載せます
+- server が送る全体状態(`state`)に、その接続で選んだ版 `server_protocol_version`(整数)と `server_capabilities`(文字列の配列)を載せます
 
-版の番号は 1 から始める。
+現在の server と agent は、`proto.SupportedProtocol = {Min: 1, Max: 1}` に従って v1 に対応します。
+`proto.SupportedCapabilities` は空配列です。
+追加の機能を表す capability の語彙は、まだ定義していません。
+
+版の番号は 1 から始めます。
 server は自分が対応する版の範囲と agent の範囲の共通部分を取り、その最大の版をその stream 接続の版として選ぶ(例:agent が 2 から 3、server が 1 から 2 なら 2、agent が 2 から 3、server が 2 から 3 なら 3)。
 共通部分が無ければ、server は双方の範囲を示すエラーで stream を断り、agent はそれをログに出す。
 `protocol_min`/`protocol_max` の片方だけがある宣言、または `protocol_min` が 1 未満か `protocol_max` を超える宣言(番号の付いた版は 1 から始まるため、どちらも版の範囲として意味を持たない)は、共通部分が無い場合とは別に malformed な advertisement として扱い、何が壊れているかを示すエラーで stream を断る。
@@ -34,14 +38,15 @@ agent は、返ってきた `server_protocol_version` が 1 以上の番号の�
 同じルール集合でも stream 接続ごとに形を作り分けられるため、全体状態の形そのものを変える機能追加でも、旧い実装との互換を保ったまま進められる。
 `capabilities`/`server_capabilities` が空の配列なら「版はあるが追加の機能は無い」を表します。
 
-版のフィールドを持たない実装(今の実装)は、legacy v0 として別に扱う。
-agent の `pubkey` に `protocol_min`/`protocol_max` が無ければ、その agent は legacy v0 にしか対応しないとみなし、server は今の形の全体状態を送る。
-server の `state` に `server_protocol_version` が無ければ、agent はその server を legacy v0 とみなし、今の機能だけを使います。
+版のフィールドを持たない旧い実装は、legacy v0 として別に扱います。
+agent の `pubkey` に `protocol_min`/`protocol_max` が無ければ、その agent は legacy v0 にしか対応しないとみなし、server は legacy v0 の形の全体状態を送ります。
+server の `state` に `server_protocol_version` が無ければ、agent はその server を legacy v0 とみなし、legacy v0 の機能だけを使います。
 Go の `encoding/json` は構造体に無いフィールドを無視するので、旧い側は新しいフィールドを読み飛ばすだけで済み、専用のネゴシエーションのラウンドトリップは要りません。
 
 どこまで旧い実装を支えるかは、製品の版ではなく版の番号で決める。
 server と agent は、番号の付いた版のうち現在の版と直前の版の 2 つを必ず支える。
-これにより、通常の rolling upgrade(server と agent のどちらを先に上げても)が通る。
+通常の rolling upgrade は、この規則で互換性を維持する設計です。
+現在は番号の付いた版が v1 だけで、v2 と v1 の組み合わせは未検証です ([互換性の範囲](../compatibility/surfaces.md))。
 legacy v0 はこの版の履歴に含めない特例で、server と agent の双方が v1.0.x の間は必ず支え、v1.1 以降は落としてよい。
 capability を追加しただけでは版を上げない。
 既存の版で意味を後方互換に表せなくなったときだけ上げる。

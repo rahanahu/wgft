@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 324-325, 338-339 です。
+
 # 2026-10-01: control-plane
 
 - エージェント用 API の認証前の接続を、IPv6 のプレフィクスの段と全体の上限で抑え、確立の前の stream をエージェントごとに抑えた(2026-10-01、5.2・7・7a.11・11 節、セキュリティ点検の指摘):送信元ごとの上限は IPv6 を /64 で数え、11 節は既定の待ち受けの `0.0.0.0:8443` を IPv4 だけと書いていた。

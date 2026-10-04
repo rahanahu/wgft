@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 73, 78, 108 です。
+
 # 2026-09-20: lifecycle
 
 - トランザクショナルな収束を実装(2026-09-20、7a.8 節の Phase 4):`internal/reconcile` に `Reconciler` を加え、`Runtime` を動かして `Active`、ルールごとの公開の世代、`Retiring` の値、`desired_generation`/`active_generation` を制御プレーンに持たせた。

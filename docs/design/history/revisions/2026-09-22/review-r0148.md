@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 182, 184 です。
+
 # 2026-09-22: review
 
 - `rule add` と `rule set` に `--dry-run` を追加(2026-09-22、所有者の設計。

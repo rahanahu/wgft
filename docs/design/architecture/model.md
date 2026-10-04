@@ -111,7 +111,9 @@ drop カウンタは公開が成功したときだけ制御プレーンへ渡す
 Phase 2 より前の `internal/vpsd/apply.go` の `applyNFT`(`proxyrelay.Prepare` → `dp.ApplyNFT` → `proxyrelay.Commit`/`Rollback`)が、この順序の実例であり、Phase 2 からは同じ順序を `internal/reconcile` の `Runtime` が実行します。
 `Runtime` の合成は `internal/reconcile` の participant interface として持ち、実際の組み立ては `vpsd` が起動時に `frontend` と `dataplane` の実装から行う([7a.7 節](packages.md#7a7-package-配置))。
 Observe → diff → Prepare → Commit の骨格そのものは共有 package `internal/reconcile` に置く。
-今この骨格を使うのは server であり、agent は `Runtime` へ移った後に同じ骨格を使う([7a.7 節](packages.md#7a7-package-配置))。
+この骨格を使うのは server です。
+agent は `Runtime` を使いません ([7a.7 節](packages.md#7a7-package-配置))。
+agent を移す場合は同じ骨格を共有する案ですが、移行は未実装です。
 `Backend` は kernel と userspace の 2 つを持ち、それぞれが OS、nftables、netstack などの実装詳細を隠す。
 
 `Resource Guard` は、`AdmissionPolicy` と分けて持つ、wgft 自身と OS の資源を守るための予算である([7a.5 節](admission-resources.md#7a5-resource-guard))。
@@ -121,9 +123,11 @@ userspace backend では両者は同じ中継コードを使う([6.3 節](../vps
 kernel backend では `Transparent` は nftables の DNAT で完結し、`Relay` は `vpsd` 自身の TCP リスナーを要します。
 `SourceMetadata=ProxyV2` は `Relay` の中継が接続先へ送るヘッダの有無を選ぶだけで、待ち受けの構造そのものは変えません。
 
-現在の実装から新しい層への対応は次のとおりです。
+外部形式と旧い部品から、現行の層への対応は次のとおりです。
+旧い部品の列には、移行で削除した名前も含みます。
+agent が `Runtime` を共有する案は未実装で、現在の境界は[package の配置](packages.md#7a7-package-配置)に定めます。
 
-| 現在の実装 | 新しい層 | 備考 |
+| 外部形式と旧い部品 | 現行の層または未実装の案 | 対応と現在の状態 |
 |---|---|---|
 | `proto.Rule` の `VPSMode`/`ProxyProtocol` | `Rule` + `Forwarding` + `SourceMetadata` | 外部 JSON の `vps_mode`/`proxy_protocol` は変えず、アダプタで写す |
 | `proto.ValidateRules`/`ValidateUpsert`/`UnchangedIDs` | normalize/validate | 変更のない行を検査し直さない規則を引き継ぐ |
@@ -139,7 +143,7 @@ kernel backend では `Transparent` は nftables の DNAT で完結し、`Relay`
 | `internal/dataplane/linuxkernel/conntrack`(Phase 3 で `internal/vpsd/conntrack` から移した) | kernel `Backend` の conntrack 収束 | `Backend.Converge` が `RulesFromPlan` で `Plan` の Transparent なポートから収束の判定材料を作る。呼び出し側(`vpsd`)はもうルール集合を組み立て直さない |
 | `internal/platform/linux`(Phase 3 で `internal/vpsd/check` から移した) | host 側の前段検査 | kernel `Backend` に同梱しない。agent の kernel backend(Phase 7)からも同じ検査を呼ぶため。`ip_forward` の確認・書き込み、conntrack テーブルの大きさ、conntrack の UDP タイムアウトの読み取り(旧 `internal/vpsd/wg` の一部)もここに合わせて移した |
 | `internal/resource`(Phase 6 の移行の手順 1 で `internal/flowcap` から改めた) | `Resource Guard` | `Limits` はプロセス全体の予算だけを持つ。接続元ごとの上限は `internal/policy` の `AdmissionLimits` へ、ログを間引く門は `internal/lograte` へ移した([7a.5 節](admission-resources.md#7a5-resource-guard)、[7a.10 節](../resource/admission.md#7a10-resource-guard-の再設計)) |
-| `internal/dataplane/userspace/relay`(Phase 2 で `internal/agent/relay` から移した)の `plan`/`Action` | `internal/reconcile` の骨格のひな型 | この型を `internal/reconcile` に一般化する。agent が `Runtime` へ移った後は、server と agent で共有する |
+| `internal/dataplane/userspace/relay`(Phase 2 で `internal/agent/relay` から移した)の `plan`/`Action` | `internal/reconcile` の骨格のひな型 | agent が `Runtime` を使う場合に共有する案で、agent の移行は未実装です |
 | `internal/dataplane/userspace/tunnel`(`internal/agent/tunnel` から移した)、`internal/dataplane/userspace/utun`(Phase 2 で `internal/vpsd/utun` から移した)、`internal/nettun` | userspace `Backend` の下位実装 | プラットフォーム配線そのままである |
 | `internal/vpsd/agentapi`、`internal/vpsd/stream`、`internal/vpsd/store`、`internal/vpsd/admin` | `vpsd` の制御プレーン | 変更なし(登録、配信、永続化、admin API) |
 | `internal/agent/credentials` | `agent` の制御プレーン | 変更なし |

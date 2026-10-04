@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 301-302, 303-304 です。
+
 # 2026-09-30: security
 
 - 設定ファイルの構文の誤りの文言から値を除いた(2026-09-30、11a 節、セキュリティ点検の指摘):dotenv の構文の誤り(`KEY=value` の形でない行、キーの空白、引用符で始まる値、値の空白)の文言は、行の中身か値をそのまま示していた。

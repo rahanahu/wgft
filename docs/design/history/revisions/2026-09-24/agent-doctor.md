@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 228, 252, 266 です。
+
 # 2026-09-24: agent-doctor
 
 - `agent doctor` の人向けの出力で、値だけを示す 6 つの検査を「Observed values」節に分けた(2026-09-24、所有者の決定):`stream.backoff`、`stream.liveness`、`tunnel.watchdog`、`tunnel.transfer`、`relay.sessions`、`relay.refusals` は、値を述べるだけで良し悪しを言う閾値を持たず、健全なエージェントでも UNKNOWN にしかならない。

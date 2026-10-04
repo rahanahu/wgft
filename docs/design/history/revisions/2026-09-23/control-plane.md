@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 198, 199, 217, 218, 221, 224 です。
+
 # 2026-09-23: control-plane
 
 - `stream.connection` が示す理由の範囲を広げ、その記述の誤りを正した (2026-09-23):制御ストリームの観測を実装したところ、理由の欄に入るのは `internal/agent/stream.go` の `streamOnce` が返す誤りそのものであり、接続が切れた理由だけでなく、接続に至らなかった試みの失敗も同じ欄に入ることが分かった。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 49, 50, 51, 53, 54, 56, 63 です。
+
 # 2026-09-19: compatibility
 
 - Windows の認証情報ファイルの ACL を保護(2026-09-19、Windows 11 の実機での確認を受けて):実機で非管理者のまま Windows agent を実サーバに対して確認したところ、登録・トンネル・中継・双方の再起動からの復帰・二重起動の拒否・認証情報ファイルの書き換え・稼働中の `rotate-key` は通ったが、`icacls` により `agent.json` が `%ProgramData%` から継承した `BUILTIN\Users:(RX)` を持ち、PC の他の利用者が wg 秘密鍵と恒久トークンを読める状態にあることが分かった(`.lock`・`.sock` は秘密を持たない)。

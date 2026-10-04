@@ -25,7 +25,9 @@
 - 次に見るもの: FAILED の所見には必ず次に見るものを添える。
   次の行動を伴わない所見は、[10.2a 節](server-observations.md#102a-転送の診断-server-doctor)と同じく機能の失敗として扱う
 - 試していない範囲: [10.2a 節](server-observations.md#102a-転送の診断-server-doctor)と同じく、何も壊れていない実行でも試していない範囲を必ず出力する (2026-09-23、所有者の決定)。
-  項目の一覧は、実装のときに定める
+  現在の一覧は、server 側の状態、VPS への到達性、LAN の宛先、手元の設定を含みます。
+  LAN の宛先への接続はこの診断から試さず、稼働中のエージェントが報告した結果を読みます。
+  kernel モードでは、その結果は各 TCP 範囲の先頭のポートを試したものです
 - 履歴: [10.2a 節](server-observations.md#102a-転送の診断-server-doctor)と同じく、診断のために保存の仕組みを追加せず、履歴を持ちません。
   [10.2a 節](server-observations.md#102a-転送の診断-server-doctor)が持つ `History` のまとまりは同じ形で出力します。
   一方 `Result:` の行は持ちません。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 232, 236, 243, 245, 247, 248 です。
+
 # 2026-09-24: review
 
 - エージェントの無効化と有効化を設計し、revoke の日本語を「削除」に改めた(2026-09-24、所有者の決定):エージェントを登録したまま一時的に止める手段は、これまで無かった。

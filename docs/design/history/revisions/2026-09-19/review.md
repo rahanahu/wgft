@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 48, 57, 58, 60, 65, 66 です。
+
 # 2026-09-19: review
 
 - 読み込みの確認ページも、変わっていない行に検査を掛け直さないようにしました(2026-09-19、レビューの指摘):プロキシモードの範囲を拒否した変更で、バッチは変わっていない古い行を検査から外すようになりましたが、Web UI の確認ページだけは全件に `Rule.Validate` を掛けていました。

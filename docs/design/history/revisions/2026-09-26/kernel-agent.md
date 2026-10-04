@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 282 です。
+
 # 2026-09-26: kernel-agent
 
 - v1.2.0 の候補の確認で分かったエージェントのカーネルモードの制限と、v1.1.x へ戻すときの注意を書いた(2026-09-26):試験用の実機とラボで v1.2.0 の候補を確かめた。

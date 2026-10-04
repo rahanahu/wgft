@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 121, 123, 125, 126, 133, 136, 137, 144 です。
+
 # 2026-09-21: control-plane
 
 - ルールごとの agent 側の状態を管理用 API に加える(2026-09-21、所有者の決定、5.2・7a.11 節):`rule ls` の REFUSED 列と `resource_refusals` は Resource Guard のフロー予算の拒否だけを数え、`WGFT_AGENT_ALLOW_TARGETS` によるエージェント側の宛先拒否、リスナーの開放失敗、TCP の接続確認の失敗は `agent ls` の RULES 列と Web UI にしか出ておらず(v0.5.0・v0.5.1 の Known issues)、`rule ls --json` だけを読む自動化が拒否・失敗の理由をすべて追うには `agent ls` との突き合わせが要った。

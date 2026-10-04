@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 283, 284, 285, 286, 287, 288, 290, 292 です。
+
 # 2026-09-27: userspace
 
 - ユーザー空間のトンネルの出力を pull に改め、gVisor と wireguard-go の間を深さ 1024 の FIFO 1 つにした(2026-09-27、所有者の決定):以前の `internal/nettun.Device` は、netstack が送り出すパケットを、gVisor が呼ぶ `WriteNotify` の中で同期して wireguard-go の読み取りへ渡していた(push)。

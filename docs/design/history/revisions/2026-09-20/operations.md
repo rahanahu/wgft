@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 71, 113, 114 です。
+
 # 2026-09-20: operations
 
 - `server check` が自分の待ち受けポートも input firewall で検査する(2026-09-20):実機の Debian 13(input が `policy drop` で SSH の TCP 22 しか accept していない構成)で、`wgft server check` が「no problems」と表示しても、WireGuard の UDP 51820 と agent API の TCP 8443 が実際には host の input で塞がれ、エージェントが一度も接続できないことが分かった。

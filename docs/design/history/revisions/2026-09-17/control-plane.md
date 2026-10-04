@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 20, 21 です。
+
 # 2026-09-17: control-plane
 
 - 他テーブルの DNAT のポートが読めない規則を警告する(2026-09-17、公開前レビューの指摘):6.1 節の DNAT の検査で、ポートが multiport や読めない無名 set、未知の式の形で判定できない規則は、それまで黙って読み飛ばし、wgft の DNAT(`dstnat - 1`)が知らずに勝っていた。

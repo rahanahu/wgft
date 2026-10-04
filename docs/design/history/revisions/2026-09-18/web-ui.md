@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 40, 41, 43 です。
+
 # 2026-09-18: web-ui
 
 - ルールの分割と統合を Web UI に持ち込む(2026-09-18):それまで `rule split` と `rule merge` は CLI にしかなく、対象の ID を探すのも人手だった。

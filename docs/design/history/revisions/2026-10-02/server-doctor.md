@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 354-355 です。
+
 # 2026-10-02: server-doctor
 
 - ルールの理由の文言のうち、理由を書く側と `server doctor` が共有する断片を `internal/reasontext` に置いた(2026-10-02、7a.7 節。

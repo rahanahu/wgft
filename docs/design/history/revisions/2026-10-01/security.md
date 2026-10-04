@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 323 です。
+
 # 2026-10-01: security
 
 - エージェント用 API の TLS ハンドシェイクの誤りの行を間引くようにした(2026-10-01、10.4 節、セキュリティ点検の指摘):この待ち受けは認証の前に TCP で届くので、相手は TLS のハンドシェイクを送らずに閉じるだけで net/http の誤りの行を 1 本につき 1 行出させられた。

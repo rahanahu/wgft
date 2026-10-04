@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 7 です。
+
 # 2026-09-14: review
 
 - 実装中の実験反映(2026-09-14、手動経路の実験):6.1 節の例から、空の `allow_1` に対する `!=` の行を注記に移した(例のままでは全送信元が落ちる)。

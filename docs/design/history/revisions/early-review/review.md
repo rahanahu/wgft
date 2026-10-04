@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 5, 6, 8 です。
+
 # early-review: review
 
 - v5 最終レビュー反映:警告の免除条件を既知エンドポイント集合との比較に変更。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 268 です。
+
 # 2026-09-25: server-doctor
 
 - 名前の解決に失敗して直前の解決の結果で転送を続けているルールを、`server doctor` が転送の停止と言わないようにした(2026-09-25):試験用の実機で、カーネルモードのエージェントのルールの宛先のホスト名が解決できなくなった場面を観測した。

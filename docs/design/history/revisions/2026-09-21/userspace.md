@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 130, 145, 146 です。
+
 # 2026-09-21: userspace
 
 - 制御ソケットのパスが長すぎる場合の説明を追加(2026-09-21、Windows 11 の実機での報告を受けて):既定でない深いデータディレクトリで agent を起動すると、制御ソケットが `bind: invalid argument` で開けず、稼働中の `rotate-key` が使えないという報告があった。

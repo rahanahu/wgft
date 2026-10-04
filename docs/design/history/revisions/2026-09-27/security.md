@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 289 です。
+
 # 2026-09-27: security
 
 - UDP の応答のバッファの貸し出しにプロセス全体の枠を置き、`vpsd` の公開側への送信を待たない形にした(2026-09-27、所有者の決定):以前の `relay` は、宛先からの応答が届いたセッションの goroutine が、共有プールから 65535 バイトのバッファを上限なしに借りていた。

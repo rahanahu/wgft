@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 86, 89 です。
+
 # 2026-09-20: userspace
 
 - conntrack の Finding からメモリの数値を落とす(2026-09-20、7a.10 節の Phase 6 移行手順 5):`server check` と起動時の Finding が示す `nf_conntrack_max` の推奨値は、以前の計画ではラボでのメモリの実測を添えて示すことにしていたが、所有者の決定によりメモリの数値(MiB、エントリ 1 件のバイト数、bucket 数)を一切出さない形に改めた。

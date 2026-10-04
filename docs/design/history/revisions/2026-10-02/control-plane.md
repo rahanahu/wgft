@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 348-349, 360-361, 364-365, 368-369, 380-381, 386-387 です。
+
 # 2026-10-02: control-plane
 
 - `ip-flapping` の警告の行に、エージェントごとの上限を置いた(2026-10-02、5.2・7 節、所有者の決定):7 節は、`ip-flapping` の警告の行が (エージェント, 種類, detail) の組で重複を除くだけであり、行の数に上限が無いことを記録していた。

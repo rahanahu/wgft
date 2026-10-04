@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 352-353, 358-359, 362-363, 372-373, 374-375, 376-377 です。
+
 # 2026-10-02: review
 
 - VPS のローカルの利用者についての前提を 11 節に書いた(2026-10-02、11 節、所有者の決定。

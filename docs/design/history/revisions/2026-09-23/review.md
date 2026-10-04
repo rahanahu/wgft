@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 194, 195, 196, 197, 200, 215, 222, 225, 226, 227 です。
+
 # 2026-09-23: review
 
 - `tunnel.local` の一般則を個別の規則に合わせて狭め、10.2c 節の他の矛盾も直した(2026-09-23):`tunnel.local` の一般則は「誤りの種類でも発生した場所でもなく、転送に使えるエンドポイントが残っているかどうかで判定する」と書いていたが、個別の規則は `IpcSet` の失敗と `IpcGet` の失敗を、解決済みのエンドポイントの有無に関わらず FAILED としており、一般則と食い違っていた。

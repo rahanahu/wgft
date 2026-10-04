@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 46 です。
+
 # 2026-09-19: admission-policy
 
 - バッチの防御的コピーが空の接続元制限を nil に取り違える不具合を修正(2026-09-19、`ExpectedDigest` のラボ検証中に発見):`store.ApplyBatch` が mutate に渡す前のコピー(`cloneRules`)は、`append([]netip.Prefix(nil), p...)` の形で `SourceAllow`/`SourceDeny` を複製していたため、空だが nil でないリスト(`rule add` や Web UI が明示的に設定する)を nil に変えてしまうことが分かった。

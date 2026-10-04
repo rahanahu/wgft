@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 305-306, 311-312, 317-318, 319-320, 321-322 です。
+
 # 2026-09-30: userspace
 
 - 管理用 API の Unix ソケットの作り方を改めた(2026-09-30、11 節、セキュリティ点検の指摘):起動のときにソケットのパスにあるものを種別を見ずに消し、`net.Listen` が umask の権限で作った後に、パスで(symlink を辿って)0600 に chmod していた。

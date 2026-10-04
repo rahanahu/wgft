@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 42 です。
+
 # 2026-09-18: admission-policy
 
 - レート制限の欄の言い直し(2026-09-18):利用者がパケット制限を接続数の制限と読み違えたため、10.1 節のレート制限の記述を改めた。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 263, 279 です。
+
 # 2026-09-25: review
 
 - `agent pubkey` が稼働中のエージェントの状態ファイルを書かないようにした(2026-09-25):`agent pubkey` は稼働の判定もロックも持たずに状態ファイルを読み、鍵が無ければ作って保存していた。

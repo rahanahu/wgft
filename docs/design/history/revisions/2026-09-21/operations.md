@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 120 です。
+
 # 2026-09-21: operations
 
 - 起動の失敗の意味論を非対称の規則に統一する(2026-09-21、所有者の決定、11b 節を新設):終了コードの決め方を、失敗の一覧から 2 つの問い(再試行で直るか、人が手を入れなければ直らないか)による規則に改めた。

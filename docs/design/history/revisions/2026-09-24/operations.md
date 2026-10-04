@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 238, 265 です。
+
 # 2026-09-24: operations
 
 - `server check` が、新しい版が書いたスキーマを開けないことを見落としにくくした(2026-09-24、所有者の決定):`internal/vpsd` の `Check` は、サーバのデータベースを読み取り専用で開けなかった場合、所見を他の nft の検査などと同じ 1 行の `cannot open` の文言で示し、終了コードは 0 のままにしていた。

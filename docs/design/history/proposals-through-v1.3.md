@@ -1,5 +1,12 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/roadmap.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/roadmap.md)。
+基準コミットは `8875f37e`、元の行範囲は 12-26 です。
+
+# 当時の未決事項と v1.3 までの提案
+
+## 13. 未決事項
+
 
 - IPv6 の扱い(VPS に v6 があるなら prerouting に `ip6` を足すだけで済む可能性が高いが、自宅側の宛先指定と絡む)
 - IPv6 の送信元の Admission Policy。

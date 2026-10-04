@@ -15,7 +15,8 @@ CLI と設定、wire、データの更新経路、配布物には、それぞれ
 `status --json`([10.2b 節](../status.md#102b-状態の要約wgft-status))と `server doctor --json`([10.2a 節](../diagnosis/server-observations.md#102a-転送の診断-server-doctor))はこれとは違う。
 どちらも管理用 API の応答だけを読んで組み立てるが、出力は `statusReport` と診断の報告の型という、admin パッケージのどの型とも一致しない模型です。
 `statusReport` は CLI だけが持ちます。
-診断の報告の型は、[10.2d 節](../web-doctor.md#102d-web-ui-の診断の画面)のとおり Web UI と共有する姉妹 package へ移るので、CLI 専用ではありません。
+診断の報告の型は `internal/vpsd/doctor.Report` です。
+CLI と Web UI が同じ型と判定ロジックを共有するため、CLI 専用ではありません ([10.2d 節](../web-doctor.md#102d-web-ui-の診断の画面))。
 保証するのは `server doctor --json` が出力する JSON の形であって、その型をどの package が持つかではありません。
 `agent doctor --json`([10.2c 節](../diagnosis/agent-evidence.md#102c-エージェント側の診断-wgft-agent-doctor))も CLI が組み立てる模型だが、管理用 API を読まない。
 エージェントのホストの認証情報ファイル、OS、稼働中のエージェントの制御ソケットから組み立て、CLI だけが持ちます。

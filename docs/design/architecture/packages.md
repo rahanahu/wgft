@@ -70,11 +70,11 @@ VPS 用の table(公開ポートから agent への DNAT)とその収束は serv
 
 agent は `reconcile.Runtime`、`dataplane.Backend`、`planner.Plan` をまだ使いません。
 `internal/agent` は userspace のトンネル(`internal/dataplane/userspace/tunnel`)と中継(`internal/dataplane/userspace/relay`)を直接駆動し、全体状態(`proto.AgentRule` を含む)を自分で収束させる。
-v1.2 はこの形を保ったまま、`internal/agent` の中に狭い dataplane の境目を切り、その後ろにユーザー空間モードとカーネルモードの 2 つの実装を置く(2026-09-24、所有者の決定)。
+現在の `internal/agent` は、この形を保ったまま狭い dataplane の境目を持ち、その後ろにユーザー空間モードとカーネルモードの 2 つの実装を置きます。
 ユーザー空間モードの実装は今のトンネルと中継をそのまま包み、カーネルモードの実装は `internal/dataplane/linuxkernel` の部品から組み立てる。
 agent 全体を `Runtime` へ移してからカーネルモードを足す案は採らなかった。
 移行はトンネルの作り直し([7 節](../agent-dataplane.md#7-データプレーン自宅側))、全体状態の適用の試し直し、`agent doctor`([10.2c 節](../diagnosis/agent-evidence.md#102c-エージェント側の診断-wgft-agent-doctor))の経路を巻き込み、カーネルモードを加えるという目的より大きいためです。
-agent を `Runtime` へ移すのは後の段階とします。
+agent を `Runtime` へ移す案は未実装で、実施する時期は定めていません。
 
 この境目は依存の向きの規則を変えません。
 カーネルモードのために加える部品は `internal/dataplane/linuxkernel` の下に置き、`internal/agent` を import しません。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 411-412 です。
+
 # 2026-10-03: server-doctor
 
 - エージェントが `net.ipv4.ip_forward` を読めず書けもしなかった場合の理由と、`server doctor` の案内から、0 という断定と再起動の勧めを外した(2026-10-03、7b.1 節、10.2a 節):カーネルモードのエージェントは、起動時に値を読めず、1 を書くことにも失敗すると、ルールの理由を「is not 1 and cannot be set」と述べていた。

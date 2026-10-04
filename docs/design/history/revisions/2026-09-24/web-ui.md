@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 233, 241, 250, 251 です。
+
 # 2026-09-24: web-ui
 
 - 持ち主が削除されたルールを、Web UI でだけ故障に数えないようにした(2026-09-24、所有者の決定):エージェントを削除しても、そのエージェントを持ち主とするルールは残る。

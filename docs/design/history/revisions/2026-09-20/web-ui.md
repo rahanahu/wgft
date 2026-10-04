@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 75, 99 です。
+
 # 2026-09-20: web-ui
 
 - 適用状態を admin API と Web UI に出す(2026-09-20、7a.3 節の実装):`GET /api/v1/rules` と `POST /api/v1/rules/batch` の応答に、`desired_generation`、`active_generation`、ルールごとの `rule_states`、`drift`(`active_only`/`retiring`)、`apply_error` を加算的に加えた。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 16, 17 です。
+
 # 2026-09-17: security
 
 - forward チェーンの取りこぼしを塞ぐ(2026-09-17、公開前レビューの指摘):6.1 節の forward に、DNAT 済みの accept の後で `iifname "wg0" drop` と `oifname "wg0" drop` を追加。

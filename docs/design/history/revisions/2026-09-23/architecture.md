@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 209 です。
+
 # 2026-09-23: architecture
 
 - 診断のロジックを姉妹 package へ切り出し、証拠の型の所有を決めた(2026-09-23):10.2d 節は診断のロジックの置き場所だけを固定し、証拠の型をどこが所有するかを実装に委ねていた。

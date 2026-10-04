@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 85, 96, 97, 98 です。
+
 # 2026-09-20: security
 
 - `proxyrelay` の拒否を RST で閉じる(2026-09-20、7a.10 節の Phase 6 移行手順 3):`internal/vpsd/proxyrelay` は、接続元制限と同時フロー数の上限による拒否を通常の `Close` で閉じており、6.3 節の「実ソケットでも拒否は `SetLinger(0)` の RST で閉じ」という記述と食い違っていた(改訂の記録 2026-09-20「Resource Guard の再設計を定める」で見つけた食い違いの 1 つ)。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 297-298 です。
+
 # early-review: control-plane
 
 - エージェントへの全体状態の配信を、直近の成功した転送面の適用に対応する写しから行うようにした。

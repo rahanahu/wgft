@@ -30,12 +30,14 @@ nftables へ渡す計画は、開き終えた後の listener 集合(残るもの
 dataplane への適用が失敗すれば、新しく開いた listener を閉じて(`Rollback`)、旧い listener と旧い nftables テーブルの組み合わせのまま保つ。
 成功すれば、新しい listener で中継を始め、削除対象の listener を閉じ、残る listener の制限を更新する(`Commit`)。
 
-[6.1 節](../vps/kernel.md#61-カーネルモード)が述べるとおり、この手順でも SQLite には新しい宣言(`Desired`)が既に保存されているのに、nftables への適用(`Commit`)だけが失敗する瞬間が生じる。今の実装は、この失敗を `log.Printf` で記録し、その場の管理用 API 呼び出しへのエラー応答として返すだけである(`internal/vpsd/apply.go` の `applyNFT`、`admin_backend.go` の `Batch`)。呼び出し元がその応答を見送れば、SQLite に保存された宣言と実際に転送しているルールとの食い違いは、どこにも残らない。これが埋めるべき隙間である。
+SQLite に新しい宣言(`Desired`)を保存した後でも、nftables への適用(`Commit`)は失敗し得ます。
+現在の `Reconciler` は、backend 全体の失敗を `LastError` とルールごとの `pending` に反映し、`Active` 世代を進めません。
+管理用 API は `apply_error` と適用状態を返すため、呼び出し元がバッチのエラー応答を見送っても、後の読み取りで状態と理由を観測できます。
 
-新しいアーキテクチャでは、制御プレーンが `Desired` と `Active` の両方を持ちます。
+制御プレーンは `Desired` と `Active` の両方を持ちます。
 admin API・CLI・Web UI はルール集合を `Desired` の値で示しつつ、ルールごとに `apply_state`(`active`、`pending`、`not_active`)、理由付きの `reason`、そのルールが最後に反映された `active_generation`、今の `desired_generation` を添えて返します。
 これは admin API v1 への加算的な変更であり、既存のフィールドは変えない(例:bind 失敗の理由は `bind failed: address in use`)。
-今はこの理由がログにしか残りません。
+理由はログと管理用 API の適用状態で観測できます。
 
 `Desired` のルール一覧だけでは、削除済みなのに backend 全体の失敗で残ったままのルールのように、`Active` にはあるが `Desired` には無い資源を見せられない。
 このため admin API は、ルール一覧とは別に、`Desired` に無いのに `Active` または `Retiring` のまま残っている資源(`active_only`/`retiring`)を観測できる経路を持ちます。

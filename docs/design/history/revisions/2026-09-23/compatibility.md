@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 189, 202 です。
+
 # 2026-09-23: compatibility
 
 - v1.0 までの内部構造の固定が終了した(2026-09-23、v1.0.0 のリリース):上の「移行の完了後の構造の点検と、v1.0 までの内部構造の固定」の項(2026-09-21、7a.7 節)が定めた固定は、v1.0.0 のリリースで終了した。

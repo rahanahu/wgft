@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 185 です。
+
 # 2026-09-22: operations
 
 - 適用できない宣言から運用者が戻る経路として、起動の保留を定めた(2026-09-22、所有者の決定):カーネルへ適用できない宣言をサーバのデータベースに保存できてしまう一方で、それを直すための入口が失われる欠陥を塞ぐ。

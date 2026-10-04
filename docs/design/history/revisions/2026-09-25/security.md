@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 260, 271, 281 です。
+
 # 2026-09-25: security
 
 - 認証情報ファイルの保存の途中で強制終了したときに残る一時ファイルを、エージェントの起動時に消すようにした(2026-09-25、ラボでの観測を受けて):ラボで保存の途中のエージェントを `kill -9` で止めると、データディレクトリに `.wgft-credentials-*` の一時ファイルが残ることが分かった。

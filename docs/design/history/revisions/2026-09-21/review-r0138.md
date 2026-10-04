@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 142 です。
+
 # 2026-09-21: review
 
 - トンネルの作り直しをラボと実回線で確かめた(2026-09-21):7 節の作り直しについて、閾値と間隔が実際にそのとおりに働くことを 2 つの環境で確かめた。

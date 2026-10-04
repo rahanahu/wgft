@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 44, 47 です。
+
 # 2026-09-19: security
 
 - 読み込み確認の拒否/許可リストの差分を内容で示す(2026-09-19、レビューの指摘):`equalPrefixSet` が長さと一方向の包含だけで集合を比べていたため、旧い CLI が許していた重複エントリ(同じ CIDR を 2 度持つ)がある場合に、実際には異なる集合を等しいと誤判定しうることが分かった。

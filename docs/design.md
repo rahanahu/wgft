@@ -152,7 +152,7 @@
 - <a id="登録の応答の扱い"></a> [登録の応答の扱い](design/security/startup-recovery.md#登録の応答の扱い)
 - <a id="監督するプロセスから見た効果の範囲"></a> [監督するプロセスから見た効果の範囲](design/security/startup-recovery.md#監督するプロセスから見た効果の範囲)
 - <a id="12-マイルストーン"></a> [12. マイルストーン](design/history/initial-milestones.md#12-マイルストーン)
-- <a id="13-未決事項"></a> [13. 未決事項](design/history/initial-milestones.md#13-未決事項)
+- <a id="13-未決事項"></a> [13. 未決事項](design/history/proposals-through-v1.3.md#13-未決事項)
 - <a id="改訂の記録"></a> [改訂の記録](design/history/revisions/README.md#改訂記録の索引)
 
 </details>

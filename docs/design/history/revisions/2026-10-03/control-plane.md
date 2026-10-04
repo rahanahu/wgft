@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 397-398, 399-400, 401-402, 405-406, 409-410, 415 です。
+
 # 2026-10-03: control-plane
 
 - 鍵を変えた後のカーネルモードのエージェントが、前の鍵の最終ハンドシェイクを今のトンネルの値として示していた不具合を直した(2026-10-03、5.2・7b.4・10.2c 節、所有者の決定):稼働中の `rotate-key` の後も、wgft0 の server のピアは前の鍵で成立した最終ハンドシェイクの時刻を持ち続けた。

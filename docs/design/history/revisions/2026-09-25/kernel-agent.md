@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 270, 273 です。
+
 # 2026-09-25: kernel-agent
 
 - エージェントのカーネルモードの前提の検査を、モードの記録と登録より前に移した(2026-09-25、所有者の決定):7b.5 節に「前提の検査の時点」の項を加え、11a 節の切り替えの関門と、11b 節の入口での判定の、値だけからは判定できない項目を合わせた。

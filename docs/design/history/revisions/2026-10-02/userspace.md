@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 350-351, 356-357, 366-367, 384-385 です。
+
 # 2026-10-02: userspace
 
 - 公開の文書のメモリの要件の言い回しを 7 節の定義に合わせた(2026-10-02、7 節、所有者の決定。

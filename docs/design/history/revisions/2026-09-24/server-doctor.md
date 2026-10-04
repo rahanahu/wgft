@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 239 です。
+
 # 2026-09-24: server-doctor
 
 - 無効なエージェントを `server doctor` と `status` で扱うようにした(2026-09-24):10.2a 節と 10.2b 節の定めのとおりに実装した。

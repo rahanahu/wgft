@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 115, 118, 122, 124, 128, 129, 134, 135, 138, 140, 141 です。
+
 # 2026-09-21: review
 
 - 7a.2 節と 7a.7 節を実装に合わせ、乖離していた死んだ型を消す(2026-09-21):コードを機械的に洗って、7a 節の記述が実装と食い違っている箇所と、本番のどこからも読まれない型を探した。

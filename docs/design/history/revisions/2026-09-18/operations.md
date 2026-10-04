@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 27, 29, 36 です。
+
 # 2026-09-18: operations
 
 - systemd の unit を非 root とサンドボックスに変更(2026-09-18):10.3 節に、`DynamicUser=yes` と 2 つの capability で動かすこと、`ProtectKernelTunables` を付けない理由、旧い root の unit からの更新でデータが引き継がれることを追記し、11 節と 10.3 節のソケットの所有者の記述を追随させた。

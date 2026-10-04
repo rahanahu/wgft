@@ -1,5 +1,10 @@
 <!-- docs-status: historical -->
 
+# 当初のマイルストーン
+
+移動元: [docs/design/roadmap.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/roadmap.md)。
+基準コミットは `8875f37e`、元の行範囲は 1-11 です。
+
 ## 12. マイルストーン
 
 1. `proto` のスキーマ(全体状態とルール)と `vpsd` の nftables 適用。
@@ -14,5 +19,3 @@
 6. 既存のリバースプロキシから 443 を移し、そちらを停止する
 
 2 が終われば当初の問題は解決しているので、3 以降は使いながら進める。
-
-## 13. 未決事項

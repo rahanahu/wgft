@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 10, 11 です。
+
 # 2026-09-15: review
 
 - 窃取検知の簡素化(2026-09-15):5.2 節の検知を「stream の接続元 IP と wg エンドポイント IP の食い違いが 2 分続いたら警告」の 1 判定に置き換え。

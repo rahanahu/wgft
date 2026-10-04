@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 407-408, 413, 416 です。
+
 # 2026-10-03: userspace
 
 - 許可一覧があるときのユーザー空間モードの中継の接続を、一覧が無いときの Go の接続と同じ試し方にした(2026-10-03、7 節):`WGFT_AGENT_ALLOW_TARGETS` があるとき、中継はホスト名の `target` を自分で解決し、一覧が通すアドレスを解決の結果の順に 1 つずつ、それぞれ 10 秒の期限で試していた。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 24, 38, 39 です。
+
 # 2026-09-18: control-plane
 
 - `ip_forward` の警告をルールの件数で弱めない(2026-09-18):6.1 節は、カーネルモードのルールが 0 件なら `ip_forward` を書けなかった警告を情報レベルにとどめるとしていたが、実装は常に警告で、Finding に重大度の区別もない。

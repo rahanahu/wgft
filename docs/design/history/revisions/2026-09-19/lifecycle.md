@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 64, 67, 69 です。
+
 # 2026-09-19: lifecycle
 
 - Runtime として frontend と dataplane の participant を束ねる(2026-09-19、レビュー反映):7a.2、7a.3、7a.7 を改めた。

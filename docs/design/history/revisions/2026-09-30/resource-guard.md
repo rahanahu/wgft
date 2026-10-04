@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 315-316 です。
+
 # 2026-09-30: resource-guard
 
 - フロー予算の隔離予約を、ルールの登録ごとの最低分と予備の形に改めた(2026-09-30、所有者の決定、6.2・6.3・7・7a.5・7a.10・7a.11・10.2c 節):所有者の決定により、wgft の資源予算を「利用単位ごとの小さな最低分の保証と、固定の上限の中の先着順の共有」とし、フロー予算には後から加わるルールのための空きを残すことにした。

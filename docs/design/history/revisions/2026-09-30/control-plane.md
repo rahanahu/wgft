@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 307-308, 309-310 です。
+
 # 2026-09-30: control-plane
 
 - ルールの ID を URL のパスに埋めるときに escape するようにした(2026-09-30、10.2 節、セキュリティ点検の指摘):ルールの ID は `rule import` と管理用 API から空でない任意の文字列で入るが、Web UI のテンプレートはリンクとフォームの送信先に ID をそのまま埋め、html/template はパスの中の `/`、`..`、`?`、`#` を escape しない。

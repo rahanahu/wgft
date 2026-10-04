@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 203, 204, 210, 214, 220 です。
+
 # 2026-09-23: web-ui
 
 - Web UI の doctor の骨組みをラボで動かし、設計に要る事実を取った(2026-09-23):`agent doctor` の設計(10.2c 節)は、実装に触れずに文章だけで詰めたため、独立レビューが何巡も要った。

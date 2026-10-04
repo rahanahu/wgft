@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 80, 83, 84, 88, 91, 93 です。
+
 # 2026-09-20: admission-policy
 
 - Admission Policy のコンパイラを定める(2026-09-20、7a.8 節の Phase 5):7a.9 節を新設した。

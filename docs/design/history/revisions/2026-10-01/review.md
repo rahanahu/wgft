@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 326-327, 340-341, 344-345, 346-347 です。
+
 # 2026-10-01: review
 
 - 独立レビューを受け、前項の文書の言い回しを改めた(2026-10-01、5.2・7・11 節、所有者の決定。

@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 269 です。
+
 # 2026-09-25: operations
 
 - root の CLI がデータディレクトリの中のパスを辿らないようにした(2026-09-25、所有者の決定):セキュリティのレビューで、root で実行する停止中の `rotate-key`、`agent pubkey`、`agent teardown` の保存が、一時ファイルのパーミッションと持ち主を名前で設定していることが分かった。

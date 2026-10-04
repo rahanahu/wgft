@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 31, 32 です。
+
 # 2026-09-18: userspace
 
 - 中継のメモリ費用を実測(2026-09-18):`vpsd`(ユーザー空間モード)とエージェントが共有する `relay.Manager` は、UDP のセッションごとに 65535 バイトの読み取りバッファを持ち続け、TCP の接続数に上限を持たない。

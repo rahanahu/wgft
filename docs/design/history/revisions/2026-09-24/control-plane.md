@@ -1,5 +1,8 @@
 <!-- docs-status: historical -->
 
+移動元: [docs/design/revisions.md](https://github.com/rahanahu/wgft/blob/8875f37e04e2576fed740c62e6a96a29a51e46b7/docs/design/revisions.md)。
+基準コミットは `8875f37e`、元の行範囲は 229, 230, 231, 234, 257 です。
+
 # 2026-09-24: control-plane
 
 - `agent.rules_received` の世代の遅れを、続いている長さで UNKNOWN と FAILED に分けた(2026-09-24、所有者の決定):`agent.rules_received` は、エージェントの世代が server の世代と違えば、すぐに FAILED `generation_behind` を返していた。
