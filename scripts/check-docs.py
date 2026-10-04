@@ -206,7 +206,11 @@ def check(root, files, policy=None):
             linked = any(((root / path).parent / unquote(urlsplit(dest).path)).resolve() == (root / other).resolve() for _, dest in destinations(contents[path]) if not urlsplit(dest).scheme)
             if not declared and not linked:
                 errors.append(f'{path}: missing reciprocal language link to {other}')
-    for stub, expected in policy.get('legacy_stubs', {}).items():
+    registered_stubs = policy.get('legacy_stubs', {})
+    for path, source in contents.items():
+        if path not in GENERATED and 'deprecated' in declarations(source, STATUS) and path not in registered_stubs:
+            errors.append(f'{path}: deprecated page is not registered in legacy_stubs')
+    for stub, expected in registered_stubs.items():
         if stub not in contents:
             errors.append(f'{stub}: registered legacy stub is missing')
             continue

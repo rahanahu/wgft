@@ -56,6 +56,17 @@ class DocumentationChecks(unittest.TestCase):
         self.assertFalse(self.run_check({'README.md': '[current](guide.md)', 'guide.md': 'Use `<!-- docs-status: historical -->` as an example.'}, {'current_indexes': ['README.md']}))
         self.assertFalse(self.run_check({'README.md': '[current](guide.md)', 'guide.md': '```html\n<!-- docs-status: historical -->\n<!-- docs-pair: missing.md -->\n```'}, {'current_indexes': ['README.md']}))
 
+    def test_deprecated_page_requires_registry_and_protects_original_anchors(self):
+        files = {'old.md': '<!-- docs-status: deprecated -->\n# Original\n# Original\n<a id="published"></a>'}
+        self.assertIn('deprecated page is not registered', self.run_check(files)[0])
+        policy = {'legacy_stubs': {'old.md': ['original', 'original-1', 'published']}}
+        self.assertFalse(self.run_check(files, policy))
+        files['old.md'] = '<!-- docs-status: deprecated -->\n# Original'
+        errors = self.run_check(files, policy)
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all('missing registered legacy anchor' in error for error in errors))
+        self.assertFalse(self.run_check({'current.md': '# Current', 'docs/cli.md': '# Generated'}))
+
     def test_legacy_registry_detects_deletion_and_anchor_loss(self):
         policy = {'legacy_stubs': {'old.md': ['old-anchor']}}
         self.assertIn('stub is missing', self.run_check({}, policy)[0])
