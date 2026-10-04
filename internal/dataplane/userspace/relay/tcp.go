@@ -353,11 +353,11 @@ func (s *tcpServer) serveConn(c net.Conn, entry *tcpEntry, charge *resource.Char
 			s.m.opts.Logf("%s: dial %s: %v", s.l.key, target, err)
 		}
 		// 許可一覧による拒否は、上限や接続元の拒否と同じく RST で即座に終える。
-		// 宛先が落ちているなどの失敗は今までどおり通常の close にする
+		// 宛先が落ちているなどの失敗は、受信のメモリが空なら今までどおり FIN で終える
 		if errors.Is(err, ErrTargetNotAllowed) {
 			abortRefused(c)
 		} else {
-			c.Close()
+			netpipe.StopForDelivery(c)
 		}
 		// 通常の close で閉じた netstack の接続は、Close の前に届いた順序外のデータを持って FIN_WAIT_2 に
 		// 残りうるので、中継の終わりと同じく届け終えるまで枠を持つ(設計文書 7 節)
