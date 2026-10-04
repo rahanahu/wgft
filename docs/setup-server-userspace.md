@@ -12,3 +12,5 @@
 - <a id="start-without-root"></a> [Start without root](manual/setup-server-userspace.md#start-without-root)
 
 </details>
+
+[日本語](setup-server-userspace.ja.md)

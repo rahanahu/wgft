@@ -47,3 +47,5 @@ After the agent connects, add the [forwarding rule](setup.md#4-add-a-forwarding-
 ```
 
 Allow UDP 2456 and 2457 in the VPS firewall too.
+
+[日本語](setup-server-userspace.ja.md)

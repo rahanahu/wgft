@@ -33,3 +33,5 @@ WGFT_JOIN='<join string>' ~/.local/bin/wgft agent run --data-dir ~/.wgft
 
 Put the issued join string in `<join string>`.
 After registration, start it with `wgft agent run --data-dir ~/.wgft`.
+
+[日本語](setup-alternatives.ja.md)

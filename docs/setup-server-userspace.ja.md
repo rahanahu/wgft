@@ -12,3 +12,5 @@
 - <a id="root-権限なしで起動する"></a> [root 権限なしで起動する](manual/setup-server-userspace.ja.md#root-権限なしで起動する)
 
 </details>
+
+[English](setup-server-userspace.md)

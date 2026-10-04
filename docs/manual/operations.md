@@ -113,3 +113,5 @@ sudo wgft server teardown --dry-run
 Omit `--purge` to retain them.
 A kernel-mode agent leaves an interface and nftables table after stopping; run [agent teardown](agent-kernel.md#return-to-userspace-mode) before removing credentials.
 To remove a Docker agent and its credentials, run `docker compose -f deploy/agent.compose.yaml down -v`.
+
+[日本語](operations.ja.md)

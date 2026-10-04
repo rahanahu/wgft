@@ -12,3 +12,5 @@
 - <a id="自宅側の-agent"></a> [自宅側の agent](manual/setup-docker.ja.md#自宅側の-agent)
 
 </details>
+
+[English](setup-docker.md)

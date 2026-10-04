@@ -17,3 +17,5 @@
 - <a id="4-転送ルールを追加する"></a> [4. 転送ルールを追加する](manual/setup.ja.md#4-転送ルールを追加する)
 
 </details>
+
+[English](setup.md)

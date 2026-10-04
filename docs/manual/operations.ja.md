@@ -119,3 +119,5 @@ sudo wgft server teardown --dry-run
 これらを残す場合は `--purge` を付けません。
 カーネルモードの agent は停止後もインタフェースと nftables のテーブルを残すため、認証情報を削除する前に[agent teardown](agent-kernel.ja.md#ユーザー空間モードへ戻す)を実行します。
 Docker の agent を認証情報ごと削除する場合は `docker compose -f deploy/agent.compose.yaml down -v` を使います。
+
+[English](operations.md)

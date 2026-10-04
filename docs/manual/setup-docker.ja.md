@@ -37,3 +37,5 @@ docker compose -f deploy/server.compose.yaml exec wgft-server wgft rule add --ag
 
 VPS の firewall でも UDP 2456 と 2457 を許可してください。
 別の公開ポートを使う場合は、VPS の compose ファイルの `ports:` も変更します。
+
+[English](setup-docker.md)

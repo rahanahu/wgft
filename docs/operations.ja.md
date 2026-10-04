@@ -15,3 +15,5 @@
 - <a id="削除"></a> [削除](manual/operations.ja.md#削除)
 
 </details>
+
+[English](operations.md)

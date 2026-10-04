@@ -52,3 +52,5 @@ If it logs `warning: the public UDP socket`, raise the host's `net.core.wmem_max
 `CAP_NET_ADMIN` alone does not prevent this warning for that socket.
 
 The [design document](../design/agent-dataplane.md) records the verified environments and mechanism.
+
+[日本語](socket-buffers.ja.md)

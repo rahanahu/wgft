@@ -64,3 +64,5 @@ The retained plist starts it again at the next boot.
 On a Mac with FileVault enabled, it started after the first login.
 Startup before login and operation after logout have not been verified.
 This setup follows an observed failure to reach LAN targets from a LaunchAgent.
+
+[日本語](setup-desktop.ja.md)

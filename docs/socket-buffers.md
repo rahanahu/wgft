@@ -12,3 +12,5 @@
 - <a id="server-notes"></a> [Server notes](manual/socket-buffers.md#server-notes)
 
 </details>
+
+[日本語](socket-buffers.ja.md)

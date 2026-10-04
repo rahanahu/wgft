@@ -52,3 +52,5 @@ server 自身が記録する警告を確認してください。
 このソケットでは `CAP_NET_ADMIN` だけでは警告を防げません。
 
 検証した環境と仕組みは[設計文書](../design/agent-dataplane.md)にあります。
+
+[English](socket-buffers.md)

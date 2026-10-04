@@ -12,3 +12,5 @@
 - <a id="server-の注意点"></a> [server の注意点](manual/socket-buffers.ja.md#server-の注意点)
 
 </details>
+
+[English](socket-buffers.md)

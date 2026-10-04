@@ -47,3 +47,5 @@ chmod 0600 ~/wgft/server.env
 ```
 
 VPS の firewall でも UDP 2456 と 2457 を許可してください。
+
+[English](setup-server-userspace.md)

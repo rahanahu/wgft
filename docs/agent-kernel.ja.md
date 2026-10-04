@@ -12,3 +12,5 @@
 - <a id="ユーザー空間モードへ戻す"></a> [ユーザー空間モードへ戻す](manual/agent-kernel.ja.md#ユーザー空間モードへ戻す)
 
 </details>
+
+[English](agent-kernel.md)

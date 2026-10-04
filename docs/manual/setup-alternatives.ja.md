@@ -33,3 +33,5 @@ WGFT_JOIN='<join string>' ~/.local/bin/wgft agent run --data-dir ~/.wgft
 
 発行した接続文字列を `<join string>` に入れます。
 初回登録後は `wgft agent run --data-dir ~/.wgft` で起動できます。
+
+[English](setup-alternatives.md)

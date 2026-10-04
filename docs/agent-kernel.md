@@ -12,3 +12,5 @@
 - <a id="return-to-userspace-mode"></a> [Return to userspace mode](manual/agent-kernel.md#return-to-userspace-mode)
 
 </details>
+
+[日本語](agent-kernel.ja.md)

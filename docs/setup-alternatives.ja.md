@@ -12,3 +12,5 @@
 - <a id="linux-の-agent-を前面で試す"></a> [Linux の agent を前面で試す](manual/setup-alternatives.ja.md#linux-の-agent-を前面で試す)
 
 </details>
+
+[English](setup-alternatives.md)

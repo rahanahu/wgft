@@ -121,3 +121,5 @@ sudo wgft rule ls
 VPS の firewall でも UDP 2456 と 2457 を許可し、Web UI のルール一覧で状態を確認してください。
 通信が届かない場合は `sudo wgft server doctor` を実行し、[ログと診断](operations.ja.md#ログと診断)を参照してください。
 TCP、HTTPS、削除の手順は[運用ガイド](operations.ja.md)に、別の OS とモードの手順は[環境別の導入](setup-alternatives.ja.md)にあります。
+
+[English](setup.md)

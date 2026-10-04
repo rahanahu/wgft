@@ -15,3 +15,5 @@
 - <a id="removal"></a> [Removal](manual/operations.md#removal)
 
 </details>
+
+[日本語](operations.ja.md)

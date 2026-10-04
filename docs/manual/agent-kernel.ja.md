@@ -58,3 +58,5 @@ sudo systemctl start wgft-agent
 v1.1.x へ戻すときも、v1.2 以降のバイナリで teardown を済ませてから旧版を起動してください。
 
 動作と未確認の環境の詳細は[設計文書の 7b 節](../design/agent-kernel.md)にあります。
+
+[English](agent-kernel.md)

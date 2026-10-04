@@ -12,3 +12,5 @@
 - <a id="try-a-linux-agent-in-the-foreground"></a> [Try a Linux agent in the foreground](manual/setup-alternatives.md#try-a-linux-agent-in-the-foreground)
 
 </details>
+
+[日本語](setup-alternatives.ja.md)

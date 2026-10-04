@@ -121,3 +121,5 @@ sudo wgft rule ls
 Allow UDP 2456 and 2457 in the VPS firewall and check the rule state in the Web UI list.
 If traffic does not arrive, run `sudo wgft server doctor` and see [logs and diagnostics](operations.md#logs-and-diagnostics).
 The [operations guide](operations.md) covers TCP, HTTPS, and removal; [deployment options](setup-alternatives.md) cover other OSes and modes.
+
+[日本語](setup.ja.md)

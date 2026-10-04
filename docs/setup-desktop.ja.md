@@ -12,3 +12,5 @@
 - <a id="macos-で-agent-を実行する"></a> [macOS で agent を実行する](manual/setup-desktop.ja.md#macos-で-agent-を実行する)
 
 </details>
+
+[English](setup-desktop.md)

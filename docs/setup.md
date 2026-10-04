@@ -17,3 +17,5 @@
 - <a id="4-add-a-forwarding-rule"></a> [4. Add a forwarding rule](manual/setup.md#4-add-a-forwarding-rule)
 
 </details>
+
+[日本語](setup.ja.md)

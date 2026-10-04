@@ -56,3 +56,5 @@ It does not restore `ip_forward` automatically; its output shows a command if a 
 Before downgrading to v1.1.x, run teardown with a v1.2 or newer binary, then start the old version.
 
 See section 7b of the [design document](../design/agent-kernel.md) for behavior and unverified environments.
+
+[日本語](agent-kernel.ja.md)

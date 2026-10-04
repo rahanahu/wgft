@@ -12,3 +12,5 @@
 - <a id="run-the-agent-on-macos"></a> [Run the agent on macOS](manual/setup-desktop.md#run-the-agent-on-macos)
 
 </details>
+
+[日本語](setup-desktop.ja.md)
