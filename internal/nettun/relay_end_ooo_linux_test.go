@@ -37,7 +37,7 @@ func TestRelayHoldOutOfOrderKernelData(t *testing.T) {
 		t.Logf("in a new user and network namespace:\n%s", out)
 		var pe *os.PathError
 		if errors.As(err, &pe) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EINVAL) {
-			t.Skipf("cannot create an unprivileged user and network namespace here: %v", err)
+			t.Fatalf("undetermined: cannot create an unprivileged user and network namespace here: %v", err)
 		}
 		if err != nil {
 			t.Fatalf("the test failed in the namespace: %v", err)
@@ -260,7 +260,7 @@ func oooScene(t *testing.T) error {
 	t.Logf("after K returned: the client's read ended with %v; sockets of the pair hold receive memory %v", rerr, mem)
 	for _, m := range mem {
 		if m > 0 {
-			t.Fatalf("a socket of the pair still holds %d bytes of receive memory after K was returned (reset seen by the client: %v)", m, reset)
+			t.Fatalf("a socket of the pair still holds %d bytes of receive memory after K was returned; reset seen by the client: %v", m, reset)
 		}
 	}
 	time.Sleep(100 * time.Millisecond)
