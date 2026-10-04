@@ -21,7 +21,7 @@ Resource Guard は、ヒープの量を見て新しいフローを拒む判定�
 どちらもプロセスのメモリの量を抑える上限ではない([7 節](../agent-dataplane.md#7-データプレーン自宅側))。
 IPv4 の断片の再組み立ては gVisor に渡さず、TUN の入口の固定の大きさの表で行い([7 節](../agent-dataplane.md#7-データプレーン自宅側))、UDP の endpoint の受信のキューは TUN の入口の会計の予算で数え([7 節](../agent-dataplane.md#7-データプレーン自宅側))、拒んだ TCP の TIME_WAIT は RST で閉じて残さない([7a.5 節](../architecture/admission-resources.md#7a5-resource-guard))。
 宛先からの応答を読むバッファは、プロセス全体の枠で数える([7 節](../agent-dataplane.md#7-データプレーン自宅側))。
-Resource Guard は、kernel のこれらの保持点に新しい上限を加えません。
+Resource Guard の最低分と予備の配分は、ユーザー空間のこれらの保持点に新しい上限を加えません。
 応答のバッファの枠はソフト上限の式に入れません。
 枠の上限は式の値に比べて小さく、ソフト上限は GC の目標であって上限ではないためです。
 netstack の出力のキューと wireguard-go の送信のキューに滞留するパケットの上限は、1 回の `Read` の件数を 1 に保つことで決まり、wireguard-go の受信のキューに滞留するパケットの上限は、バインドの 1 回の受信の件数を 1 に保つことで決まる([7 節](../agent-dataplane.md#7-データプレーン自宅側))。
