@@ -21,7 +21,7 @@ Proposals and past validation results have their own status; they do not establi
 Choose a task above, then open the relevant guide or specification section.
 For implementation work, read the project conventions and the affected test requirements before making changes.
 When a decision needs historical evidence, use the topic's history entry to select the relevant record.
-Normal searches under `docs/` select current documents through `docs/.ignore`.
+Normal `rg` searches under `docs/` select current documents through `docs/.ignore`.
 Search a selected history directory explicitly when checking an older decision.
 
 [日本語](README.ja.md)

@@ -23,6 +23,6 @@ The compatibility contract covers the Linux server and agent, plus the Windows a
 ## Design history
 
 [Historical plans and revision records](history/README.md) preserve completed migration plans and past reviews. <!-- docs-history -->
-[Legacy headings](../design.md) continue to forward to the corresponding specification.
+[Legacy headings](../design.md) continue to forward to the corresponding specification. <!-- docs-history -->
 
 [日本語](README.ja.md) · [All documentation](../README.md)

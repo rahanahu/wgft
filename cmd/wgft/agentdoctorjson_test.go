@@ -510,23 +510,14 @@ func agentReasonValues(t *testing.T) map[string]string {
 	return out
 }
 
-// designSection10_2c は設計文書の 10.2c 節の本文を返す。
-func designSection10_2c(t *testing.T) string {
+// designAgentDoctorOutput は agent doctor の出力の正本を返す。
+func designAgentDoctorOutput(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile("../../docs/design/agent-doctor.md")
+	b, err := os.ReadFile("../../docs/design/diagnosis/agent-output.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := strings.ReplaceAll(string(b), "\r\n", "\n")
-	start := strings.Index(s, "\n### 10.2c ")
-	if start < 0 {
-		t.Fatal("design.md has no 10.2c section")
-	}
-	end := strings.Index(s[start+1:], "\n### ")
-	if end < 0 {
-		t.Fatal("design.md's 10.2c section has no end")
-	}
-	return s[start : start+1+end]
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
 }
 
 // designTableColumn は、見出しの行が header で始まる表の 1 列目の、バッククォートで囲んだ値を返す。
@@ -566,7 +557,7 @@ func TestAgentDoctorReasonsMatchTheDesign(t *testing.T) {
 			t.Errorf("the reason code %q is held by %v; one code names one fact", v, names)
 		}
 	}
-	design := designTableColumn(t, designSection10_2c(t), "| 理由の符号 |")
+	design := designTableColumn(t, designAgentDoctorOutput(t), "| 理由の符号 |")
 	inDesign := map[string]bool{}
 	for _, v := range design {
 		if inDesign[v] {
@@ -586,7 +577,7 @@ func TestAgentDoctorReasonsMatchTheDesign(t *testing.T) {
 
 // 検査の ID も、実装と設計文書の表で同じ並びである。
 func TestAgentDoctorCheckIDsMatchTheDesign(t *testing.T) {
-	design := designTableColumn(t, designSection10_2c(t), "| 検査の ID |")
+	design := designTableColumn(t, designAgentDoctorOutput(t), "| 検査の ID |")
 	if !reflect.DeepEqual(design, agentCheckOrder) {
 		t.Errorf("design.md's 10.2c table lists %v, the implementation %v", design, agentCheckOrder)
 	}
@@ -770,7 +761,7 @@ func TestAgentDoctorJSONWritesNothingWhenNoReportIsBuilt(t *testing.T) {
 // 設計文書 10.2c 節の「機械向けの出力」の例は、節が定める規則を満たす。例は値を省いているので
 // JSON としては読まず、最上位の status、検査の id の並び、フィールドの名前だけを取り出して照らす。
 func TestAgentDoctorJSONDesignExampleFollowsTheRules(t *testing.T) {
-	sec := designSection10_2c(t)
+	sec := designAgentDoctorOutput(t)
 	i := strings.Index(sec, "#### 機械向けの出力")
 	if i < 0 {
 		t.Fatal("design.md's 10.2c section has no 機械向けの出力 subsection")

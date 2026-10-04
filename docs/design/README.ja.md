@@ -24,6 +24,6 @@ wgft は、VPS の公開ポートから WireGuard 経由で自宅へ TCP と UDP
 ## 設計の履歴
 
 [過去の計画と改訂記録](history/README.md)には、移行の手順と当時のレビューを残しています。 <!-- docs-history -->
-旧節番号のリンクは、[旧見出しの参照先](../design.md)から対応する仕様へ進めます。
+旧節番号のリンクは、[旧見出しの参照先](../design.md)から対応する仕様へ進めます。 <!-- docs-history -->
 
 [English index](README.md) · [文書の索引](../README.ja.md)
