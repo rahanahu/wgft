@@ -1,6 +1,8 @@
 # deploy - files for running wgft on real machines
 
 The Linux systemd procedure is in [docs/manual/setup.md](../docs/manual/setup.md), and other environments are listed in [deployment options](../docs/manual/setup-alternatives.md). This directory holds the files those guides use.
+For an existing installation, follow the [update guide](../docs/manual/upgrade.md) to preserve its data and registration; for failed forwarding, follow [troubleshooting](../docs/manual/troubleshooting.md).
+For an existing installation, follow the [update guide](../docs/manual/upgrade.md) to preserve its data and registration; for failed forwarding, follow [troubleshooting](../docs/manual/troubleshooting.md).
 
 | File | Purpose |
 | --- | --- |

@@ -1,7 +1,7 @@
 # Forwarding and operations
 
 The [setup guide](setup.md) adds the first forwarding rule.
-This page covers other forwarding options, the Web UI, diagnostics, and removal.
+For failed forwarding, use [troubleshooting](troubleshooting.md); for an existing installation, use the [update guide](upgrade.md).
 
 ## Web UI
 
@@ -97,19 +97,8 @@ sudo wgft server doctor
 sudo runuser -u wgft -- wgft agent doctor
 ```
 
-The server logs `server started` once forwarding and the APIs are ready.
-If it cannot apply saved rules, it logs `startup hold`, opens only the admin API, and retries.
-You can still use `wgft rule rm` and `wgft rule disable` to fix the rules causing the hold.
-After a process-only restart, old forwarding state may remain in the kernel.
-What actually forwards depends on where the apply failed; inspect kernel state with `wgft server nft`.
-
-In userspace mode, a public port can collide with the host's ephemeral port range.
-The rule then reads `not active` with a `bind failed` reason.
-Choose a port outside that range or reserve it with `net.ipv4.ip_local_reserved_ports`.
-
-If an agent returns to a network used in the last ten minutes, it reports `ip-flapping`.
-For expected roaming, dismiss it with `sudo wgft agent dismiss-warning home ip-flapping`.
-For an agent that should not roam, investigate possible key or permanent-token duplication; see `wgft agent warnings --help`.
+[Troubleshooting](troubleshooting.md) covers rule-by-rule checks, result and exit-code meanings, `startup hold`, port conflicts and `ip-flapping`.
+Diagnostics do not test every external connection or UDP response; check with the real service client too.
 
 ## Removal
 

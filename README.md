@@ -121,7 +121,9 @@ The Web UI shows agent and rule status, lets you add rules, and helps diagnose f
 ssh -L 8686:/run/wgft/admin.sock root@vps
 ```
 
-If traffic does not reach its target, run `sudo wgft server doctor` on the VPS. The Web UI's [rule diagnostics page](docs/images/doctor-rule.png) also shows where traffic stops. Use [agent doctor](docs/cli.md#wgft-agent-doctor) to check the home side, or [agent disable](docs/cli.md#wgft-agent-disable) to pause forwarding for an agent.
+If traffic does not reach its target, run `sudo wgft server doctor` on the VPS and follow [troubleshooting](docs/manual/troubleshooting.md) for agent checks and result meanings.
+The Web UI's [rule diagnostics page](docs/images/doctor-rule.png) also shows where traffic stops.
+Use [agent disable](docs/cli.md#wgft-agent-disable) to pause forwarding for an agent.
 
 You can restrict the LAN targets the agent will reach with [`WGFT_AGENT_ALLOW_TARGETS`](docs/manual/operations.md#restrict-agent-targets).
 
@@ -130,17 +132,17 @@ You can restrict the LAN targets the agent will reach with [`WGFT_AGENT_ALLOW_TA
 - [Setup guide](docs/manual/setup.md): Run the Linux server and agent with systemd and add the first rule
 - [Deployment options](docs/manual/setup-alternatives.md): Windows, macOS, Docker, and VPS hosts without root
 - [Operations guide](docs/manual/operations.md): Web UI, HTTPS, logs, and teardown
+- [Troubleshooting](docs/manual/troubleshooting.md): where traffic stops, observation meanings and external checks
+- [Update guide](docs/manual/upgrade.md): preserve data and registration, restart services and understand downgrade limits
 - [CLI reference](docs/cli.md): commands and examples
 - [Documentation index](docs/README.md): guides, design sections, and development references
-- [Design](docs/design/README.md) and [architecture](docs/development/architecture.md): forwarding behavior and implementation
-- [Development conventions](CLAUDE.md): test environment and change process
 - [Security policy](SECURITY.md): vulnerability reporting
 
 ## Status
 
 v1.4.1. The compatibility contract in effect since v1.0 covers the Linux server and agent, plus the Windows agent within the range verified on Windows 11 hardware. The macOS agent has been verified for basic operation on real hardware, but its newer reconnect liveness check has not been verified there, so it remains outside the contract. The covered behavior is defined in [design section 7a.11](docs/design/compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧).
 
-Downgrading after an upgrade is not guaranteed. Back up the server data directory before upgrading. The server database uses schema version 9 from v1.2.0 onward; v1.1.x and earlier servers cannot open it.
+Downgrading after an upgrade is not guaranteed. Follow the [update guide](docs/manual/upgrade.md) and back up the server data directory before upgrading. The server database uses schema version 9 from v1.2.0 onward; v1.1.x and earlier servers cannot open it.
 
 ## License
 

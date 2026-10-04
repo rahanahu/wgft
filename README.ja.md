@@ -121,7 +121,9 @@ Web UI では agent とルールの状態を確認し、ルールの追加や通
 ssh -L 8686:/run/wgft/admin.sock root@vps
 ```
 
-転送が届かないときは、VPS で `sudo wgft server doctor` を実行します。[Web UI の診断画面](docs/images/doctor-rule.ja.png)でも、ルールごとに通信が止まった箇所を確認できます。agent 側は [agent doctor](docs/cli.md#wgft-agent-doctor) で調べます。agent の転送を一時的に止める場合は、[agent disable](docs/cli.md#wgft-agent-disable) を使います。
+転送が届かないときは、VPS で `sudo wgft server doctor` を実行し、[診断手順](docs/manual/troubleshooting.ja.md)で agent 側の確認と結果の意味を調べます。
+[Web UI の診断画面](docs/images/doctor-rule.ja.png)でも、ルールごとに通信が止まった箇所を確認できます。
+agent の転送を一時的に止める場合は、[agent disable](docs/cli.md#wgft-agent-disable) を使います。
 
 agent が接続できる LAN の宛先は、[`WGFT_AGENT_ALLOW_TARGETS`](docs/manual/operations.ja.md#エージェントの転送先を制限する) で限定できます。
 
@@ -130,17 +132,17 @@ agent が接続できる LAN の宛先は、[`WGFT_AGENT_ALLOW_TARGETS`](docs/ma
 - [セットアップガイド](docs/manual/setup.ja.md): Linux の server と agent を systemd で常駐させ、最初のルールを追加する手順
 - [環境別の導入](docs/manual/setup-alternatives.ja.md): Windows、macOS、Docker、root 権限のない VPS
 - [運用ガイド](docs/manual/operations.ja.md): Web UI、HTTPS、ログ、削除方法
+- [診断手順](docs/manual/troubleshooting.ja.md): 転送が止まった箇所、観測結果、外部からの確認
+- [更新手順](docs/manual/upgrade.ja.md): データと登録の保持、再起動、旧版へ戻す制限
 - [CLI リファレンス](docs/cli.md): 各コマンドと使用例
 - [文書の索引](docs/README.ja.md): 手順、設計の各節、開発資料
-- [設計文書](docs/design/README.ja.md)と[アーキテクチャ](docs/development/architecture.md): 転送動作と実装
-- [開発上の約束](CLAUDE.md): テスト環境と変更の進め方
 - [セキュリティポリシー](SECURITY.md): 脆弱性の報告方法
 
 ## 開発状況
 
 v1.4.1。v1.0 からの互換性の保証は Linux の server と agent、Windows 11 の実機で確認した範囲の Windows agent に適用します。macOS の agent は実機で基本動作を確認済みですが、再接続を決める新しい判定は実機で未確認のため、保証の対象外です。対応範囲の定義は [設計文書の 7a.11 節](docs/design/compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)にあります。
 
-更新後に旧版へ戻すことは保証しません。更新前にサーバのデータディレクトリをバックアップしてください。v1.2.0 以降のサーバのデータベースはスキーマの版 9 を使い、v1.1.x 以前の server は開きません。
+更新後に旧版へ戻すことは保証しません。[更新手順](docs/manual/upgrade.ja.md)に従って、更新前にサーバのデータディレクトリをバックアップしてください。v1.2.0 以降のサーバのデータベースはスキーマの版 9 を使い、v1.1.x 以前の server は開きません。
 
 ## ライセンス
 

@@ -1,7 +1,7 @@
 # 転送と運用
 
 最初の転送は[セットアップ](setup.ja.md)で追加できます。
-このページには、ほかの転送方法、管理画面、診断、削除をまとめています。
+通信が届かない場合は[診断手順](troubleshooting.ja.md)、導入済みの wgft を更新する場合は[更新手順](upgrade.ja.md)に従います。
 
 ## Web UI
 
@@ -103,18 +103,8 @@ sudo wgft server doctor
 sudo runuser -u wgft -- wgft agent doctor
 ```
 
-server は転送と API の準備ができると `server started` を出します。
-保存済みのルールを適用できない場合は `startup hold` を出し、管理 API だけを開いて再試行します。
-この状態でも `wgft rule rm` と `wgft rule disable` で原因のルールを修正できます。
-プロセスだけを再起動した場合、カーネルに旧い転送状態が残ることがあります。
-どのルールが実際に転送されているかは失敗箇所で変わるため、`wgft server nft` でカーネルの状態を確認してください。
-
-ユーザー空間モードでは、公開ポートがホストの一時ポートと重なると `bind failed` になり、ルールが `not active` と表示されることがあります。
-公開ポートを一時ポートの範囲外から選ぶか、`net.ipv4.ip_local_reserved_ports` で予約してください。
-
-agent の利用場所が移動し、直近 10 分以内に使ったネットワークへ戻ると `ip-flapping` の警告が出ます。
-移動が想定どおりなら `sudo wgft agent dismiss-warning home ip-flapping` で削除できます。
-移動しない agent で警告が出た場合は、鍵や恒久トークンの複製を疑い、`wgft agent warnings --help` を参照してください。
+[診断手順](troubleshooting.ja.md)で、ルールごとの確認、結果と終了コードの意味、`startup hold`、ポートの競合、`ip-flapping` を確認します。
+診断は外部からの接続や UDP の応答をすべて検査するものではないため、実際のサービスのクライアントでの確認も必要です。
 
 ## 削除
 
