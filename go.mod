@@ -18,7 +18,7 @@ require (
 	golang.org/x/time v0.16.0
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
-	gvisor.dev/gvisor v0.0.0-20260928000043-30a83191d380
+	gvisor.dev/gvisor v0.0.0-20261004063249-f57b8fc79db4
 	modernc.org/sqlite v1.59.0
 )
 
