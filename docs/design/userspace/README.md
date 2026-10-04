@@ -14,6 +14,7 @@
 - [WireGuard のハンドシェイクの送信元の保持](wireguard-sources.ja.md) · [English](wireguard-sources.md)
 - [待ち受けの失敗と宛先の許可](targets.md)
 - [netstack の TCP バッファ](tcp-buffers.md)
+- [netstack の依存の固定](netstack-dependency.ja.md) · [English](netstack-dependency.md)
 - [中継のカーネル TCP ソケット](tcp-host-sockets.md)
 - [TCP の中継と終了](tcp-relay.md)
 - [TIME_WAIT と中継後の netstack の保持](tcp-retention.md)
