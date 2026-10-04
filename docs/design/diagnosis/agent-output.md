@@ -14,7 +14,7 @@
 - 群分け: 検査を `Host`、`Credentials`、`Connection`、`Tunnel`、`Relay`、`Dataplane` の群に分けて示します。
   `Dataplane` はカーネルモードの検査の群です。
   [10.2a 節](server-observations.md#102a-転送の診断-server-doctor)が `Server`、`Tunnel`、`Agent` に分けるのと同じ形です
-- 値だけを示す検査の節: 値だけを示し合否を持たない 6 つの検査 (`stream.backoff`、`stream.liveness`、`tunnel.watchdog`、`tunnel.transfer`、`relay.sessions`、`relay.refusals`) は群から抜き、群の後に「Observed values」という 1 つの節としてまとめて出す (2026-09-24、所有者の決定、改訂の記録に詳細)。
+- 値だけを示す検査の節: 値だけを示し合否を持たない 6 つの検査 (`stream.backoff`、`stream.liveness`、`tunnel.watchdog`、`tunnel.transfer`、`relay.sessions`、`relay.refusals`) は群から抜き、群の後に「Observed values」という 1 つの節としてまとめて出す (2026-09-24、所有者の決定、[以前の検証](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L2892))。
   値を読めた実行 (状態が UNKNOWN) は状態語も次に見るもの (Next) も出さず、ラベルと同じ行から値を示します。
   値の読み方は `--help` と、`--json` の `next` が持ちます。
   値そのものを読めなかった実行は、SKIPPED のまま判定済みの検査と同じく状態語と次に見るものを出す。

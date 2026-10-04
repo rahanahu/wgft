@@ -20,9 +20,7 @@ The compatibility contract covers the Linux server and agent, plus the Windows a
 | What remains compatible after an upgrade? | [Compatibility](compatibility.md): names and meanings of public surfaces |
 | What remains unsupported or proposed? | [Limitations and proposals](roadmap.md): current limitations, unverified behavior, and unimplemented designs |
 
-## Design history
-
-[Historical plans and revision records](history/README.md) preserve completed migration plans and past reviews. <!-- docs-history -->
+## Previous links
 [Legacy headings](../design.md) continue to forward to the corresponding specification. <!-- docs-history -->
 
 [日本語](README.ja.md) · [All documentation](../README.md)

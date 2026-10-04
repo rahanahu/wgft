@@ -92,7 +92,7 @@ agent doctor は、エージェントのホストで、停止中も読める事�
   今の実装がプロセスの中に持っているのは、トンネルの送受信バイト数、ルールごとの現在の接続の数、フロー予算の拒否の累計、トンネルを作り直す watchdog の内部状態、そして制御ストリームの観測です。
   制御ストリームの観測が保つのは、今つながっているかどうか、直近の切断または失敗の理由、直近に待った再接続の間隔と次に試す時刻、直近の ping と pong の時刻です。
   どれもハートビートには載らないので、server 側には届かない ([5.2 節](../control/connection.md#52-全体状態の配信とハートビート)、[7a.10 節](../resource/admission.md#7a10-resource-guard-の再設計))。
-  観測の保ち方は `internal/agent/streamobs.go` にあり、読み出しの入口が写しを返す (改訂の記録 2026-09-23)
+  観測の保ち方は `internal/agent/streamobs.go` にあり、読み出しの入口が写しを返す ([以前の検証 2026-09-23](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L2717))
 
 稼働中かどうかは、`agent.json.lock` にロックファイルを作らずに判定する (2026-09-23、所有者の決定)。
 判定には `internal/flock` の `Inspect` を使います。
@@ -112,7 +112,6 @@ agent doctor は、エージェントのホストで、停止中も読める事�
 ロックの状態を見ている間に他のプロセスがロックを取れない期間、つまり競合しうる期間は、無くすのではなく最小にする (2026-09-23、所有者の決定)。
 共有ロックを一瞬だけ取って放つ形を許す。
 Linux、Windows、macOS のいずれでも、ロックを取らずに状態だけを問い合わせる手段が揃わないためです。
-調査の内容は改訂の記録にあります。
 最も重い副作用は存在しないロックファイルを診断が作ることであり、それは `O_CREATE` を渡さないだけで消える。
 残る実害は、診断がロックの状態を見ている一瞬に起動したエージェントがロックを取れず、起動がそのまま終わることです。
 今の `deploy/agent.service` は `Restart=on-failure` を持つので、失うのは次の起動までの間だけです。
@@ -278,7 +277,7 @@ root でも拒まれた対象がある実行は、この扱いに含めず、層
 Windows の `host.privileges` の「新しいファイルを作れるか」は、`unix.Access` に当たる呼び出しが無く、ACL を読んで判定を自前で組むほかに手段がありません。
 [7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)が Windows のエージェントを暫定としていた時点で、その判定は組まないことにした。
 Windows だけ黙って OK を返す形にもしません。
-Windows 11 の実機では、この項目が理由 `permission_not_determined` の UNKNOWN になり、終了コードを上げないことを確かめた(改訂の記録 2026-09-27)。
+Windows 11 の実機では、この項目が理由 `permission_not_determined` の UNKNOWN になり、終了コードを上げないことを確かめた([以前の検証 2026-09-27](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L2795))。
 `LastState` が無い場合の `tunnel.resolve` も同じ扱いとし、`agent.json` が全体状態を持たない事実を理由の符号 `no_last_state` で示します。
 停止中の `rotate-key` も全体状態を消すので、一度も受け取っていないとは限らない。
 

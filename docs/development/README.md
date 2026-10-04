@@ -14,8 +14,3 @@
 
 The [project conventions](../../CLAUDE.md) apply to every change.
 Repository documents describe the branch being read; use a release tag and its release notes for released behavior.
-
-## Historical records
-
-- [Test plans and validation records before reorganization](history/testing-validation.md) retain the scope and provenance of old v1 conditions. <!-- docs-history -->
-- [Lab measurements](history/lab-validation.md) retain dated measurements, not current duration or PASS-count expectations. <!-- docs-history -->

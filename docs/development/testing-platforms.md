@@ -4,7 +4,7 @@ Windows と macOS のエージェントの試験は、Linux のラボに含め�
 Linux のラボは Incus の VM、network namespace、Linux のカーネル、nftables、WireGuard で組んだ環境であり、Windows と macOS に固有の経路 (認証情報の ACL、UDP の待ち方、UDP の送信バッファ、launchd、スリープ、ネットワークの変化) を再現しないためです。
 同じ理由で、Windows と macOS の試験をラボの一式 (A9) に含めません。
 
-過去に実機で見つかった不具合と回帰テストへの置き換えは[確認の記録](history/testing-validation.md#実機の確認を小さな回帰テストに置き換えた範囲)にあります。
+実機で見つかった不具合も、再現できる範囲を[回帰テストへ置き換えます](testing.md#高価な実験を小さな回帰テストへ置き換える規則)。
 
 Windows と macOS の試験は、次のように類を分けます。
 
@@ -66,4 +66,4 @@ runner の macOS が実機と同じ UDP の送信バッファの既定 (9216 バ
 FileVault を無効にした Mac でのログイン無しの起動と、ログアウトの後の動作は未確認です。
 
 
-検査の契機と頻度は[テストの規範](testing.md)、過去の回帰テストへの置き換えは[確認の記録](history/testing-validation.md#実機の確認を小さな回帰テストに置き換えた範囲)にあります。
+検査の契機と頻度は[テストの規範](testing.md)に従います。

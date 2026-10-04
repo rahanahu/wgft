@@ -21,9 +21,7 @@ wgft は、VPS の公開ポートから WireGuard 経由で自宅へ TCP と UDP
 | 更新後も何が維持されるか | [互換性](compatibility.md): 公開サーフェスごとの名前と意味を保証します |
 | 未対応と未確認の範囲は何か | [制限と未実装の提案](roadmap.md): 実装予定の版を確約せず、現在の制限と提案を分けます |
 
-## 設計の履歴
-
-[過去の計画と改訂記録](history/README.md)には、移行の手順と当時のレビューを残しています。 <!-- docs-history -->
+## 旧リンクの参照先
 旧節番号のリンクは、[旧見出しの参照先](../design.md)から対応する仕様へ進めます。 <!-- docs-history -->
 
 [English index](README.md) · [文書の索引](../README.ja.md)

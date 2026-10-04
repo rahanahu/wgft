@@ -219,7 +219,7 @@ kernel の conntrack の表が溢れる場合も、prerouting の判定の後に
 <details>
 <summary>旧見出しの参照先</summary>
 
-- <a id="phase-5-の移行の手順"></a> [phase-5-の移行の手順](history/admission-policy-migration.md#phase-5-の移行の手順) <!-- docs-history -->
-- <a id="利用者から見て変わらないものと変わるもの"></a> [利用者から見て変わらないものと変わるもの](history/admission-policy-migration.md#利用者から見て変わらないものと変わるもの) <!-- docs-history -->
+- <a id="phase-5-の移行の手順"></a> [phase-5-の移行の手順](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#phase-5-の移行の手順) <!-- docs-history -->
+- <a id="利用者から見て変わらないものと変わるもの"></a> [利用者から見て変わらないものと変わるもの](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#利用者から見て変わらないものと変わるもの) <!-- docs-history -->
 
 </details>

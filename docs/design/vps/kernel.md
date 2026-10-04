@@ -210,7 +210,7 @@ Desired が壁を越える大きさのままなら、公開し直しは同じ壁
 繰り返しに終端は無く、運用者が Desired を小さくするか、バッファの上限を引き上げるまで続く。
 食い違っている間も、DNAT の宛先のエージェントが新しいルールを受け取っていないため、新しい世代のポートへの転送は通らない。
 新しい宣言にも同じ内容で残っているルールの転送は続く。
-新しい宣言から外れたルールの転送は、テーブルが既に差し替わっているので続かない(改訂の記録 2026-09-23)。
+新しい宣言から外れたルールの転送は、テーブルが既に差し替わっているので続かない([以前の検証 2026-09-23](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L516))。
 
 繰り返しの間、運用者から見える手掛かりは薄い。
 `vpsd` は同じ文言の誤りを繰り返し出さないので([7a.3 節](../architecture/lifecycle.md#7a3-状態遷移と失敗の意味論))、ログは最初の 1 行で止まります。
@@ -229,7 +229,7 @@ drift を見つけた後は、宣言の変わっていないルールも含め�
 1 通の要素は `NFTA_SET_ELEM_LIST_ELEMENTS` という 1 つの入れ子の属性に入ります。
 netlink の属性の長さは 16 ビットなので、この属性は 65535 バイトを超えられない。
 依存する google/nftables と mdlayher/netlink は超えたことを検査せず、長さの下位 16 ビットだけを書きます。
-カーネルはその短い長さの分だけを要素として読むので、要素の欠けた set が誤りなく公開される(改訂の記録 2026-09-24)。
+カーネルはその短い長さの分だけを要素として読むので、要素の欠けた set が誤りなく公開される([以前の検証 2026-09-24](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L522))。
 `vpsd` は 1 通の要素の一覧を 32 KiB 以下にし、区間の開始と終端の印を同じ通に入れる。
 分けた通も同じバッチの中にあるので、差し替えの不可分性は変わりません。
 set には大きさ(`NFTA_SET_DESC_SIZE`)を付けないので、カーネルは要素の数を制限しません。
@@ -367,7 +367,7 @@ conntrack の操作は「宣言状態に収束させる」1 手順だけを持�
 起動時と `server check` で input フックの `policy drop` を検査し、塞がれていれば
 `udp dport <port> accept` / `tcp dport <port> accept` を提示する(実機の Debian 13、input が
 policy drop で SSH の TCP 22 しか accept していない構成で見つかった。
-改訂の記録参照)。
+[以前の検証](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L580))。
 host の input firewall はデータプレーンのモードに関係しない層なので、ユーザー空間モード
 ([6.3 節](userspace.md#63-ユーザー空間モード))でも同じ検査を行います。
 管理用 API(既定 Unix ソケット。

@@ -44,7 +44,7 @@
   一方、カーネルは差し替えを終えたのに `vpsd` が応答を受け取れなかった場合、つまり `ENOBUFS` で応答を取りこぼした場合([6.1 節](../vps/kernel.md#61-カーネルモード)の受信側の壁)は、テーブルは既に差し替わっています。
   このとき転送しているのは、`vpsd` が失敗として報告した新しい宣言のほうです。
   差し替えの後に読み直した送信元の一覧の set が送った要素を持たなかった場合([6.1 節](../vps/kernel.md#61-カーネルモード))も、テーブルは既に差し替わっています。
-  この 2 つが逆の結果になることは、ラボで実測した(改訂の記録 2026-09-23)。
+  この 2 つが逆の結果になることは、ラボで実測した([以前の検証 2026-09-23](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L3779))。
   プロキシモードの待ち受けはプロセスと一緒に消えるので、どちらの場合も止まります。
   したがって、保留を「転送が止まっている状態」とも「前回の宣言のまま転送している状態」とも説明してはなりません。
   実際のカーネルの内容を読む手段は `wgft server nft` であり、管理用 API が開いているので保留の間も使える。
@@ -95,7 +95,7 @@
 この場所を入口と呼ぶ。
 server の入口は `cmd/wgft` の `buildServerOptions`、エージェントの入口は同じ package の `buildAgentOptions` です。
 入口を通り抜けた値が起動の後半で初めて失敗すると、そこでは環境由来の失敗と区別が付かず、終了コード 1 の再起動の繰り返しになります。
-この形の穴は 3 つの設定項目で続けて見つかっている(改訂の記録 2026-09-20 と 2026-09-21)。
+この形の穴は 3 つの設定項目で続けて見つかっている([以前の検証 2026-09-20 と 2026-09-21](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L3794))。
 
 server の入口が判定する項目は次のとおりです。
 `WGFT_MODE` の値(`kernel` か `userspace` か)、`WGFT_DATA_DIR` が空でないこと、`WGFT_WG_INTERFACE` がカーネルの受け付ける名前であること、`WGFT_WG_PORT` が 1 から 65535 の整数であること、`WGFT_MTU` が 576 から 9216 の整数であること、`WGFT_WG_ADDRESS` が `netip.ParsePrefix` の通る形であること、`WGFT_AGENT_API` と `WGFT_ADMIN` が待ち受けられる形であること、`WGFT_WG_ENDPOINT` と `WGFT_AGENT_API_HOST` が `host:port` の形でホストが空でないこと、`WGFT_AGENT_API_HOST` のポートが 1 から 65535 を 10 進の数字で書いた値であること、`WGFT_WG_ENDPOINT` のポートが UDP のポートとして 1 から 65535 の番号に直せること、`WGFT_ADMIN_TAILSCALE` が真偽値であること、同時フロー数の 4 つの上限が範囲内であること、`run` では `WGFT_WG_ENDPOINT` があることです。

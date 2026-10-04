@@ -137,7 +137,7 @@ google/nftables v0.3.0 は MSS の行の `rt` と `byteorder` の式を読み戻
 エージェントは値を 30 秒ごとに読み直し、1 になればルールの `error` を消す。
 自宅のホストがルータとして振る舞える状態になることの影響は [11 節](../security/admin-transport.md#11-セキュリティ)に書きます。
 
-`rp_filter` の strict は、複数の LAN セグメントを持つ家で転送を壊しうる([7a.8 節](../history/architecture-migration.md#7a8-移行の段取り))。
+`rp_filter` の strict は、受信したインタフェースが送信元への戻りの経路と異なるパケットを拒むため、複数の LAN セグメントを持つホストで転送を壊し得ます。
 エージェントはこの値と、他のテーブルの forward の `policy drop` を検査して提示し、書き換えない([6.1 節](../vps/kernel.md#61-カーネルモード)と同じ方針)。
 
 他の値の扱いは次のとおりです。

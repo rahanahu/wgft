@@ -37,14 +37,14 @@
   したがって `vpsd` では、経路の監視を失う影響は事実上ありません
 - wireguard-go の UDP バインドは、Windows では `conn.NewDefaultBind()` ではなく `conn.NewStdNetBind()` を明示して使います。
   既定の `NewDefaultBind()` は Windows では Registered I/O を使う `WinRingBind` を返すが、`WinRingBind` は `SIO_UDP_CONNRESET` を無効にしません。
-  このため、到達できない宛先へ送った UDP に対して Windows 自身のスタックが生成する ICMP port unreachable では、Windows の非同期受信が WSAECONNRESET として報告し、`device.RoutineReceiveIncoming` がこれを回復不能な誤りと判定して受信ループを止め、そのトンネルは以後受信できなくなる(改訂の記録 2026-09-21)。
+  このため、到達できない宛先へ送った UDP に対して Windows 自身のスタックが生成する ICMP port unreachable では、Windows の非同期受信が WSAECONNRESET として報告し、`device.RoutineReceiveIncoming` がこれを回復不能な誤りと判定して受信ループを止め、そのトンネルは以後受信できなくなる([以前の検証 2026-09-21](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L702))。
   `conn.NewStdNetBind()` は Go の `net` パッケージ経由でソケットを開き、同じ状況でも受信を続けます。
   この選択は Windows でのバッチサイズを変えません。
   依存するこの版の `golang.zx2c4.com/wireguard` では、`WinRingBind.BatchSize()` も `StdNetBind.BatchSize()` も Windows で 1 を返し、差が無いためです。
   残る差は、自前のリングバッファと Go の netpoller 経由の UDP ソケットとの間の、パケットごとの syscall や I/O 完了通知のオーバーヘッドであり、その大きさは未測定です。
   受信が止まらないことを優先します。
   前述の[「WireGuard の受信の 1 回の件数」](tunnel-recovery.md#wireguard-の受信の-1-回の件数)の包みは、内側の 1 回の件数が 1 なので Windows では使われない。
-  この WSAECONNRESET は Windows 自身のスタックが答える ICMP で再現できる一方、実サーバーの到達不能な UDP ポートへインターネット越しに送る計測では現れなかった(改訂の記録 2026-09-21)。
+  この WSAECONNRESET は Windows 自身のスタックが答える ICMP で再現できる一方、実サーバーの到達不能な UDP ポートへインターネット越しに送る計測では現れなかった([以前の検証 2026-09-21](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L702))。
   ICMP がその経路のどこで失われているかと、他の経路でなら届きうるかは未確認です
 <a id="トンネルの作り直し"></a>
 - トンネルの作り直し:エージェントは、WireGuard のハンドシェイクが 300 秒新しくならない状態が続いたら、`device.Device` と netstack ごとトンネルを作り直す。
@@ -85,10 +85,10 @@
   Windows の `InterruptTime` は unbiased ではない方であり、スリープとハイバネートの時間を含むので、300 秒を超えるスリープからの復帰では最初の判定で 1 回作り直す。
   どちらの場合も、300 秒を超える中断の後のセッションは `RejectAfterTime` を過ぎて既に使えず、作り直しで切れるのは死んだフローだけです。
   Go の runtime がどの時計を読むかはこの版の原典で確かめた。
-  macOS の `mach_absolute_time` がサスペンド中に進まないことは、実機の Mac で時計そのものを測って確かめた(改訂の記録 2026-09-21、issue #124)。
+  macOS の `mach_absolute_time` がサスペンド中に進まないことは、実機の Mac で時計そのものを測って確かめた([以前の検証 2026-09-21](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L702)、issue #124)。
   Windows の `InterruptTime` がスリープの時間を含むことは、Windows 11 の実機でエージェントの挙動から確かめた。
   約 11 分 32 秒のスリープから復帰したエージェントは、新しいハンドシェイクの無い期間をスリープを含めて 11 分 36 秒と数え、復帰の直後にトンネルを 1 回作り直した。
-  時計そのものを測るプログラムは使っていない(改訂の記録 2026-09-27、issue #280)。
+  時計そのものを測るプログラムは使っていない([以前の検証 2026-09-27](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L707)、issue #280)。
   ハイバネートの時間を含むことは OS の文書に拠るもので、実機では未確認です。
   Linux の `CLOCK_MONOTONIC` がサスペンド中に進むかどうかは OS の文書に拠るものであり、実機では未確認です
 <a id="作り直しの間隔"></a>

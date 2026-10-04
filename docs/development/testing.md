@@ -11,7 +11,7 @@ wgft のテストは、実行の費用、所要時間、必要な機材、再現
   CI の検査はすべての PR で、ラボの一式はコードを変える PR のマージの前に流します
 - B 類 (関係する変更の関門):ラボの一式に含まれず、特定の領域を変えた PR とリリースの候補でだけ流すテストです。
   どの変更がどのテストを流すかは、後述の「変更の契機と対象のパス」の表で決まります
-- C 類 (段階の完了の関門):[設計文書](../design/internals.md#7a8-移行の段取り) 7a.8 節に記録した移行と同じように、関係する実装の段階を終えるときに流すテストです。
+- C 類 (段階の完了の関門):関係する実装の段階を終えるときに流すテストです。
   悪い条件のネットワーク、クラッシュからの回復、別のディストリビューションでのラボの一式、長時間の通信、小さいメモリの環境を含みます。
 関係する変更を含む段階の完了時に流し直す項目は、この類に置きます
 - D 類 (リリース候補の関門):リリースの候補の版ごとに流すテストです。
@@ -21,7 +21,6 @@ wgft のテストは、実行の費用、所要時間、必要な機材、再現
   仕様の根拠 (測定値や挙動の確認) を得たら、必要な範囲だけを小さな回帰テストに置き換え、高価な実験そのものは繰り返しません
 
 リリース候補で繰り返す条件と、関係する変更の後に繰り返す条件は、各類の表の頻度に従います。
-v1 の前の完了条件は[過去の計画と確認](history/testing-validation.md#v1-の項目と繰り返しの頻度)に保存しています。
 
 「新設」と記した項目は、実装されるまではマージの関門に含めません。
 実装された時点から、表の契機を適用します。
@@ -57,7 +56,7 @@ Go のコード (`go.mod`、`go.sum` を含む)、`deploy/`、`lab/` 自身、�
 
 ラボの一式は自動で実行できるため、コードを変えたらすべてを流します。
 一式の費用が大きく伸びた場合は、この規則を見直します。
-過去の所要時間は[ラボの確認の記録](history/lab-validation.md)にあります。
+所要時間と資源の費用は、実行時の結果を PR に記載します。
 
 B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧のうち実装済みのもの) を選ぶためと、開発の途中でラボの確認を流し直すときに、変えた領域の確認だけを選ぶために使います。
 開発の途中の選び方は、後述の「ラボの一式の内訳」の表の契機の列にあります。
@@ -84,7 +83,7 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 | `deploy` | `deploy/*.service`、`deploy/*.conf`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
-| `phase` | 関係する実装の段階の完了 (過去の移行は 7a.8 節) | C 類 | すべて |
+| `phase` | 関係する実装の段階の完了 | C 類 | すべて |
 | `rc` | リリースの候補の版 | 「リリース候補ごと」の項目 | すべて |
 | `manual-release` | 過去に 1 回の確認を求めた項目を関係する変更の後に流し直すとき | E 類の該当する項目 | 無し |
 
@@ -219,9 +218,6 @@ suite.txt は `parallel` の確認を
 - 環境:テストを流すのに必要な機材と場所を書きます
 - 契機:前節の表の契機を書きます
 - 頻度:契機に当たったときに流す回数の目安を書きます
-- 所要時間:ラボの VM が起動している状態での目安を書きます。
-  「見込み」は、まだ存在しないテストの見積もりです。
-表の実測値は過去の記録で、現在の HEAD の所要時間は未確認です
 - 自動化:「自動」は判定まで機械が行い、「半自動」は実行を機械が行って結果を人が読み、「手作業」は人が操作して確かめます
 
 「新設」の印の付いた項目は、まだ存在しないか自動化されていないテストです。
@@ -229,56 +225,59 @@ suite.txt は `parallel` の確認を
 
 ### A 類 (すべての PR)
 
-| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 所要時間 | 自動化 |
-|---|---|---|---|---|---|---|---|
-| A1 | `gofmt -l`、`go mod tidy` の差分、`go vet`、`go build ./...` | 書式の崩れ、`go.mod` の不整合、ビルドの失敗 | CI (Linux) | コードを変える PR | PR の更新ごと | 1 分前後 | 自動 |
-| A2 | `go test ./...` | 単体で確かめられる退行全般 (`docs/cli.md` とヘルプの食い違いを捉える `TestCLIDocUpToDate` を含めて) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 1 から 2 分 | 自動 |
-| A3 | Admission Policy の共有 fixture (`internal/policy/admissiontest`、`internal/policy/testdata/admission`) | nftables のコンパイラと Go の評価器の判定、drop の種類、カウンタの食い違い (7a.9 節) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 数秒 | 自動 |
-| A4 | 計画と収束の故障注入 (`internal/planner`、`internal/reconcile` の retry、repair、drift のテスト、`internal/dataplane` の fail-closed のテスト) | Prepare、Commit の失敗の扱い、世代の前進、再試行の誤り (7a.3 節) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 数秒 | 自動 |
-| A5 | nftables の行の生成 (`internal/dataplane/linuxkernel/nft` と `internal/policy/nftables` の単体テスト) | 行の順序、行の抜け、ルールごとの fail-closed の誤り (カーネルを使わない照合) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 数秒 | 自動 |
-| A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | コードを変える PR | PR の更新ごと | 1 分前後 | 自動 |
-| A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 数分 | 自動 |
-| A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`、`scripts/check-docs.py` とその fixture) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力、リンク切れ、日英の対の欠け、旧参照先の喪失 | CI (Linux) | すべての PR | PR の更新ごと | 1 分未満 | 自動 |
-| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L18。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。関係する実装の段階の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 実行時に測定します。過去の時間は[確認の記録](history/testing-validation.md#ラボの一式の所要時間)にあります | 自動 (開発者が起動) |
+| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 自動化 |
+|---|---|---|---|---|---|---|
+| A1 | `gofmt -l`、`go mod tidy` の差分、`go vet`、`go build ./...` | 書式の崩れ、`go.mod` の不整合、ビルドの失敗 | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
+| A2 | `go test ./...` | 単体で確かめられる退行全般 (`docs/cli.md` とヘルプの食い違いを捉える `TestCLIDocUpToDate` を含めて) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 自動 |
+| A3 | Admission Policy の共有 fixture (`internal/policy/admissiontest`、`internal/policy/testdata/admission`) | nftables のコンパイラと Go の評価器の判定、drop の種類、カウンタの食い違い (7a.9 節) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 自動 |
+| A4 | 計画と収束の故障注入 (`internal/planner`、`internal/reconcile` の retry、repair、drift のテスト、`internal/dataplane` の fail-closed のテスト) | Prepare、Commit の失敗の扱い、世代の前進、再試行の誤り (7a.3 節) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 自動 |
+| A5 | nftables の行の生成 (`internal/dataplane/linuxkernel/nft` と `internal/policy/nftables` の単体テスト) | 行の順序、行の抜け、ルールごとの fail-closed の誤り (カーネルを使わない照合) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 自動 |
+| A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
+| A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
+| A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`、`scripts/check-docs.py` とその fixture) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力、リンク切れ、日英の対の欠け、旧参照先の喪失 | CI (Linux) | すべての PR | PR の更新ごと | 自動 |
+| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L18。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。関係する実装の段階の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 自動 (開発者が起動) |
 
 ### ラボの一式の内訳
 
-| 番号 | テスト | リスク | 環境 | 開発の途中で選ぶ契機 | 頻度 | 所要時間 | 自動化 |
-|---|---|---|---|---|---|---|---|
-| L1 | `lab/e2e.sh` (kernel と userspace) | 登録、TCP と UDP の転送、3000 バイトの UDP、PROXY protocol、deny による切断、撤去の退行 | ラボ | `relay`、`userspace`、`protocol`、`agent-platform`、`dataplane-net` | A9 として | モードごとに約 35 秒 | 自動 |
-| L2 | `lab/connlimit.sh` | 送信元ごとの同時フロー数の上限 (`ct count`) が実際のパケットで守られないこと、既存のフローの追い出し | ラボ | `admission`、`kernel`、`nft-emit` | A9 として | 約 30 秒 | 自動 |
-| L3 | `lab/rates.sh` (kernel と userspace) | 3 つのレートと `Relay` のルールのレートの実際の通過数が両モードで食い違うこと、拒否した段が後の段のトークンを使うこと、TCP のルールに `packet_rate` が効くこと | ラボ | `admission`、`nft-emit`、`relay`、`userspace` | A9 として | モードごとに約 50 秒 | 自動 |
-| L4 | `lab/lifecycle.sh` check 1 | server の再起動の間に kernel モードの転送と conntrack が途切れること | ラボ | `reconcile`、`kernel`、`userspace`、`protocol` | A9 として | 1 分前後 | 自動 |
-| L5 | `lab/lifecycle.sh` check 2 | 無関係なルールの追加、変更、削除で既存のフローが切れること、成立済みの TCP のセッションを切ったルールが 10 秒以内に転送に戻らないこと | ラボ | `reconcile`、`rule-ops`、`kernel` | A9 として | 1 分前後 | 自動 |
-| L6 | `lab/lifecycle.sh` check 3、3b | Relay の bind の失敗が nftables に漏れること、テーブルの差し替えの失敗で待ち受けが戻らないこと | ラボ | `relay`、`reconcile` | A9 として | 1 分前後 | 自動 |
-| L7 | `lab/lifecycle.sh` check 4 | `server teardown` が wgft の物以外を削除すること | ラボ | `kernel`、`deploy` | A9 として | 1 分未満 | 自動 |
-| L8 | `lab/lifecycle.sh` check 5、5b、5c、5d、5e、5f、5g | 上限までのフラッドでメモリがソフト上限と余裕の和を超えること (check 5 は半分の予算、5b は既定の予算)、1 本のルールへのフラッドが他のルールの最低分までの新しいフローを止めること (5c は 2 本、5d は 3 本のルール)、既定より小さい予算で隔離が崩れること (5e)、拒否の理由 `rule_cap`、`budget`、`floor`、`reserve` が実際の接続で出ないこと (5f)、分割元に残ったポートが分割元の置き換えの後も新しい接続を通せないこと (5g) | ラボ (CPU を占有できる VM) | `resource`、`userspace` | A9 として | 3 から 4 分 | 自動 |
-| L9 | `lab/lifecycle.sh` check 6、7、8 | ルール単位の失敗が fail-closed にならないこと、backend 全体の失敗で世代が進むこと、再試行で回復しないこと | ラボ | `reconcile`、`relay` | A9 として | 数分 | 自動 |
-| L10 | `lab/lifecycle.sh` check 9 | 外から削除された nftables のテーブルが戻らないこと | ラボ | `kernel`、`reconcile` | A9 として | 1 分前後 | 自動 |
-| L11 | `lab/split-merge.sh` (kernel と userspace) | Web UI の分割と統合で流れている UDP のセッションが切れること | ラボ | `rule-ops` | A9 として | 約 50 秒 | 自動 |
-| L12 | `lab/import-export.sh` (kernel と userspace) | Web UI の書き出しと読み込みの形式の食い違い、確認後の変更の見落とし | ラボ | `rule-ops` | A9 として | 約 20 秒 | 自動 |
-| L13 | `lab/ipv6.sh` (kernel と userspace) | IPv6 の送信元が deny をすり抜けること、IPv6 のフラッドが集約のレートのトークンを使うこと | ラボ (IPv6 を加えた netns) | `admission`、`relay` | A9 として | モードごとに約 25 秒 | 自動 |
-| L14 | `lab/lifecycle.sh` check 10 (kernel と userspace) | エージェントの停止後も、`agent ls` と Web UI の一覧が最後のハートビートを生きた状態のまま示すこと ([設計文書の 5.2 節](../design/overview.md#52-全体状態の配信とハートビート)) | ラボ | `rule-ops`、`protocol`、`agent-platform` | A9 として | モードごとに約 1 秒から 2 秒 | 自動 |
-| L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと ([設計文書の 5.1 節](../design/overview.md#51-登録))、無効なエージェントのルールで `server doctor` と `status` が失敗を報告すること、削除したエージェントに残ったルールの `server doctor` と `status` の結果が変わること (設計文書の [10.2a 節](../design/server-doctor.md)と[10.2b 節](../design/status.md)) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 単独で kernel モードは約 5 秒、userspace モードは約 40 秒 (userspace は server の再起動の後のトンネルの張り直しを待つ)。kernel モードの約 5 秒は、保持していたテーブルの削除の通知ですぐに公開し直す最善の場合です。通知で公開し直さなければ 30 秒ごとの再試行を待ち、確認はその待ちに 40 秒を許します | 自動 |
-| L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、resolve、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧とループバックの拒否、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (設計文書の [7b 節](../design/agent-kernel.md)、[9 節](../design/state.md#9-状態の保存と再起動)、[10.3 節](../design/interface.md#103-運用の流れ)) | ラボ | `agent-platform` | A9 として | kernel モードは 1 組あたり数十秒から約 5 分、userspace モードは同じ組で数十秒から約 5 分 (reconnect と stale は kernel モードだけの検査で、userspace モードでは SKIP になり数秒で終わります) | 自動 |
-| L17 | `lab/agentdoctor.sh` (kernel と userspace) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと ([設計文書の 10.2c 節](../design/agent-doctor.md#102c-エージェント側の診断-wgft-agent-doctor)) | ラボ | `agent-platform` | A9 として | モードごとに約 1 分 | 自動 |
-| L18 | `lab/lifecycle.sh` check 12 (kernel と userspace) | ユーザー空間モードの WireGuard のソケットのバッファの条件 ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) を、`agent doctor` とログが実際のソケットの値で示さないこと、条件に届かないときに `agent doctor` の終了コードが 0 でなくなること、セットアップの文書の `/etc/sysctl.d` の手順で条件を満たせないこと、`rotate-key` で開き直したソケットを測らないこと | ラボ (VM 全体の sysctl を変えるので単独で) | `userspace`、`agent-platform` | A9 として | モードごとに約 2 秒 | 自動 |
+| 番号 | テスト | リスク | 環境 | 開発の途中で選ぶ契機 | 頻度 | 自動化 |
+|---|---|---|---|---|---|---|
+| L1 | `lab/e2e.sh` (kernel と userspace) | 登録、TCP と UDP の転送、3000 バイトの UDP、PROXY protocol、deny による切断、撤去の退行 | ラボ | `relay`、`userspace`、`protocol`、`agent-platform`、`dataplane-net` | A9 として | 自動 |
+| L2 | `lab/connlimit.sh` | 送信元ごとの同時フロー数の上限 (`ct count`) が実際のパケットで守られないこと、既存のフローの追い出し | ラボ | `admission`、`kernel`、`nft-emit` | A9 として | 自動 |
+| L3 | `lab/rates.sh` (kernel と userspace) | 3 つのレートと `Relay` のルールのレートの実際の通過数が両モードで食い違うこと、拒否した段が後の段のトークンを使うこと、TCP のルールに `packet_rate` が効くこと | ラボ | `admission`、`nft-emit`、`relay`、`userspace` | A9 として | 自動 |
+| L4 | `lab/lifecycle.sh` check 1 | server の再起動の間に kernel モードの転送と conntrack が途切れること | ラボ | `reconcile`、`kernel`、`userspace`、`protocol` | A9 として | 自動 |
+| L5 | `lab/lifecycle.sh` check 2 | 無関係なルールの追加、変更、削除で既存のフローが切れること、成立済みの TCP のセッションを切ったルールが 10 秒以内に転送に戻らないこと | ラボ | `reconcile`、`rule-ops`、`kernel` | A9 として | 自動 |
+| L6 | `lab/lifecycle.sh` check 3、3b | Relay の bind の失敗が nftables に漏れること、テーブルの差し替えの失敗で待ち受けが戻らないこと | ラボ | `relay`、`reconcile` | A9 として | 自動 |
+| L7 | `lab/lifecycle.sh` check 4 | `server teardown` が wgft の物以外を削除すること | ラボ | `kernel`、`deploy` | A9 として | 自動 |
+| L8 | `lab/lifecycle.sh` check 5、5b、5c、5d、5e、5f、5g | 上限までのフラッドでメモリがソフト上限と余裕の和を超えること (check 5 は半分の予算、5b は既定の予算)、1 本のルールへのフラッドが他のルールの最低分までの新しいフローを止めること (5c は 2 本、5d は 3 本のルール)、既定より小さい予算で隔離が崩れること (5e)、拒否の理由 `rule_cap`、`budget`、`floor`、`reserve` が実際の接続で出ないこと (5f)、分割元に残ったポートが分割元の置き換えの後も新しい接続を通せないこと (5g) | ラボ (CPU を占有できる VM) | `resource`、`userspace` | A9 として | 自動 |
+| L9 | `lab/lifecycle.sh` check 6、7、8 | ルール単位の失敗が fail-closed にならないこと、backend 全体の失敗で世代が進むこと、再試行で回復しないこと | ラボ | `reconcile`、`relay` | A9 として | 自動 |
+| L10 | `lab/lifecycle.sh` check 9 | 外から削除された nftables のテーブルが戻らないこと | ラボ | `kernel`、`reconcile` | A9 として | 自動 |
+| L11 | `lab/split-merge.sh` (kernel と userspace) | Web UI の分割と統合で流れている UDP のセッションが切れること | ラボ | `rule-ops` | A9 として | 自動 |
+| L12 | `lab/import-export.sh` (kernel と userspace) | Web UI の書き出しと読み込みの形式の食い違い、確認後の変更の見落とし | ラボ | `rule-ops` | A9 として | 自動 |
+| L13 | `lab/ipv6.sh` (kernel と userspace) | IPv6 の送信元が deny をすり抜けること、IPv6 のフラッドが集約のレートのトークンを使うこと | ラボ (IPv6 を加えた netns) | `admission`、`relay` | A9 として | 自動 |
+| L14 | `lab/lifecycle.sh` check 10 (kernel と userspace) | エージェントの停止後も、`agent ls` と Web UI の一覧が最後のハートビートを生きた状態のまま示すこと ([設計文書の 5.2 節](../design/overview.md#52-全体状態の配信とハートビート)) | ラボ | `rule-ops`、`protocol`、`agent-platform` | A9 として | 自動 |
+| L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと ([設計文書の 5.1 節](../design/overview.md#51-登録))、無効なエージェントのルールで `server doctor` と `status` が失敗を報告すること、削除したエージェントに残ったルールの `server doctor` と `status` の結果が変わること (設計文書の [10.2a 節](../design/server-doctor.md)と[10.2b 節](../design/status.md)) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 自動 |
+| L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、resolve、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧とループバックの拒否、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (設計文書の [7b 節](../design/agent-kernel.md)、[9 節](../design/state.md#9-状態の保存と再起動)、[10.3 節](../design/interface.md#103-運用の流れ)) | ラボ | `agent-platform` | A9 として | 自動 |
+| L17 | `lab/agentdoctor.sh` (kernel と userspace) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと ([設計文書の 10.2c 節](../design/agent-doctor.md#102c-エージェント側の診断-wgft-agent-doctor)) | ラボ | `agent-platform` | A9 として | 自動 |
+| L18 | `lab/lifecycle.sh` check 12 (kernel と userspace) | ユーザー空間モードの WireGuard のソケットのバッファの条件 ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) を、`agent doctor` とログが実際のソケットの値で示さないこと、条件に届かないときに `agent doctor` の終了コードが 0 でなくなること、セットアップの文書の `/etc/sysctl.d` の手順で条件を満たせないこと、`rotate-key` で開き直したソケットを測らないこと | ラボ (VM 全体の sysctl を変えるので単独で) | `userspace`、`agent-platform` | A9 として | 自動 |
+
+L15 は server の 30 秒ごとの再試行を待つ場合に、確認の待ち時間として 40 秒を許します。
+通知による早期の公開は、必ず起きる条件として扱いません。
 
 ### B 類 (関係する変更の関門)
 
-| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 所要時間 | 自動化 |
-|---|---|---|---|---|---|---|---|
-| B1 | build tag `lab` の nftables のテスト (`lab/lab test internal/dataplane/linuxkernel/nft`。server の `table inet wgft` とエージェントの `table inet wgft_agent` のゴールデンテスト、他のテーブルを触らないこと、wg からの転送の遮断、google/nftables での読み戻し、エージェントの表の全幅までの範囲の読み込みと、network namespace の間で他のテーブルの DNAT に wgft0 から届かないこと) | 生成した式が実際のカーネルで同じ `nft list` にならないこと。エージェントの表では `nft --debug=netlink list` の式の列も比べる。大きな範囲の map の要素が欠けること。wgft0 から公開していないポートに届くこと | ラボ | `nft-emit`、`kernel`、`admission` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
-| B2 | build tag `lab` の WireGuard、ホストの検査、teardown のテスト (`internal/dataplane/linuxkernel/wg`、`internal/platform/linux`、`internal/vpsd/teardown`) | 他の wg インタフェースの乗っ取り、所有の判定の誤り、他のテーブルの削除 | ラボ | `kernel`、`deploy` | 契機に当たる PR ごとに 1 回 | 数十秒 | 自動 (開発者が起動) |
-| B3 | 実際の Caddy での HTTPS の経路 ([lab/caddy/README.md](../../lab/caddy/README.md)) | PROXY protocol のヘッダを実際のリバースプロキシが読めないこと | ラボ | `relay` | 契機に当たる PR ごとに 1 回 | 10 分前後 (見込み) | 手作業 |
-| B4 | CI の `windows-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方) の退行と、エージェントのトンネル・中継の転送そのものの退行 (D1 の一部の置き換え) | CI (Windows の runner) | `agent-platform` | 契機に当たる PR の更新ごと | 数分 | 自動 |
-| B5 | CI の `release-snapshot` | GoReleaser の設定、フック、成果物の名前の食い違い | CI (Linux) | `build`、`rc` | 契機に当たる PR の更新ごと | 数分 | 自動 |
-| B6 | CI の `govulncheck` | 依存するモジュールの既知の脆弱性 | CI (Linux) | `build`、`rc`、週に 1 回の定期実行 | 契機に当たる PR の更新ごと。定期実行は週に 1 回 | 1 分前後 | 自動 |
-| B7 | `lab/version-skew.sh` | 旧 agent と新 server、新 agent と旧 server、legacy v0 の agent と新 server の組で、登録、全体状態の配信、転送、再接続が壊れること。旧い側には、直前のリリースと、agent の無効化より前の最後のリリースである v1.1.3 の 2 つを使う。旧い側が表せない機能のルールを理由付きの `not_active` にすること (7a.6 節) は、該当する capability がまだ無いため確認を SKIP する。新しい server と旧い agent の組では、agent の無効化で転送が止まらないこと、有効化で転送が戻らないこと、無効化が VPS 側だけにとどまり旧い agent 自身に届かないこと、`agent ls`、`status`、`server doctor` が無効を示さないこと、無効化の間に旧い agent が落ちたり再接続を繰り返したりすること (5.1 節)。v1.1.3 の agent との組は、無効化を知らない agent が `enabled:false` の写しで止まらないことを検出する。直前のリリースの server と新しい agent の組でも、その server の CLI で無効化と有効化をしたときの同じ失敗を検出する。v1.1.3 の server は無効化を持たないので、この組では無効化の確認を SKIP する | ラボ (直前のリリース、v1.1.3、legacy v0 のバイナリを GitHub の Releases から取得してキャッシュする。ラボの VM から GitHub への経路が無い場合は、バイナリを事前に置く。直前のリリースの版はスクリプトの定数を既定とし、環境変数 `WGFT_SKEW_OLD_VERSION` で上書きできる。定数が直前のリリースより古いまま流すときは、この変数で直前のリリースを明示する) | `protocol`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 数分 | 自動 (開発者が起動) |
-| B8 | CI の `macos-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む) | macOS でだけ通る経路 (UDP の送信バッファの既定 9216 バイトを超えるデータグラムの書き込み) の退行 (D2 の一部の置き換え。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | CI (macOS の runner) | `agent-platform`、`rc` | 契機に当たる PR の更新ごと | 1 分から 2 分 (初回の実行は 1 分 15 秒) | 自動 |
-| B9 | 配布物の VM 試験 (`scripts/dist-vm.sh`) | 同梱の unit で起動しないこと、VM の再起動の後に転送が戻らないこと、設定の誤りで再起動を繰り返すこと | 2 台の VM (server と agent) | `deploy`、`rc` | 契機に当たる PR ごとに 1 つのディストリビューションで、リリース候補ごとに 3 つのディストリビューションで | 約 4 分 (Debian 12、Ubuntu 24.04、Fedora 44 のいずれも) | 自動 (開発者が起動) |
-| B10 | Docker のイメージの疎通 (`scripts/docker-smoke.sh`) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (ホスト、CI の runner、ラボの VM のどれでも可) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | キャッシュが温まっていれば約 8 秒、初回はイメージの取得を含めて約 30 秒 | 自動 (開発者が起動) |
-| B11 | `lab/rcvwin.sh` | ユーザー空間モードの中継で、`vpsd` の公開側のカーネルの TCP ソケットが、穴の後ろの順序外のデータとして floor を超える受信のメモリを持ったまま boost の枠を返すこと。穴が埋まった後に、その枠が別の接続へ戻らないこと ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) | ラボ | `resource`、`userspace` | 契機に当たる PR ごとに 1 回 | 約 20 秒 | 自動 (開発者が起動) |
+| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 自動化 |
+|---|---|---|---|---|---|---|
+| B1 | build tag `lab` の nftables のテスト (`lab/lab test internal/dataplane/linuxkernel/nft`。server の `table inet wgft` とエージェントの `table inet wgft_agent` のゴールデンテスト、他のテーブルを触らないこと、wg からの転送の遮断、google/nftables での読み戻し、エージェントの表の全幅までの範囲の読み込みと、network namespace の間で他のテーブルの DNAT に wgft0 から届かないこと) | 生成した式が実際のカーネルで同じ `nft list` にならないこと。エージェントの表では `nft --debug=netlink list` の式の列も比べる。大きな範囲の map の要素が欠けること。wgft0 から公開していないポートに届くこと | ラボ | `nft-emit`、`kernel`、`admission` | 契機に当たる PR ごとに 1 回 | 自動 (開発者が起動) |
+| B2 | build tag `lab` の WireGuard、ホストの検査、teardown のテスト (`internal/dataplane/linuxkernel/wg`、`internal/platform/linux`、`internal/vpsd/teardown`) | 他の wg インタフェースの乗っ取り、所有の判定の誤り、他のテーブルの削除 | ラボ | `kernel`、`deploy` | 契機に当たる PR ごとに 1 回 | 自動 (開発者が起動) |
+| B3 | 実際の Caddy での HTTPS の経路 ([lab/caddy/README.md](../../lab/caddy/README.md)) | PROXY protocol のヘッダを実際のリバースプロキシが読めないこと | ラボ | `relay` | 契機に当たる PR ごとに 1 回 | 手作業 |
+| B4 | CI の `windows-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方) の退行と、エージェントのトンネル・中継の転送そのものの退行 (D1 の一部の置き換え) | CI (Windows の runner) | `agent-platform` | 契機に当たる PR の更新ごと | 自動 |
+| B5 | CI の `release-snapshot` | GoReleaser の設定、フック、成果物の名前の食い違い | CI (Linux) | `build`、`rc` | 契機に当たる PR の更新ごと | 自動 |
+| B6 | CI の `govulncheck` | 依存するモジュールの既知の脆弱性 | CI (Linux) | `build`、`rc`、週に 1 回の定期実行 | 契機に当たる PR の更新ごと。定期実行は週に 1 回 | 自動 |
+| B7 | `lab/version-skew.sh` | 旧 agent と新 server、新 agent と旧 server、legacy v0 の agent と新 server の組で、登録、全体状態の配信、転送、再接続が壊れること。旧い側には、直前のリリースと、agent の無効化より前の最後のリリースである v1.1.3 の 2 つを使う。旧い側が表せない機能のルールを理由付きの `not_active` にすること (7a.6 節) は、該当する capability がまだ無いため確認を SKIP する。新しい server と旧い agent の組では、agent の無効化で転送が止まらないこと、有効化で転送が戻らないこと、無効化が VPS 側だけにとどまり旧い agent 自身に届かないこと、`agent ls`、`status`、`server doctor` が無効を示さないこと、無効化の間に旧い agent が落ちたり再接続を繰り返したりすること (5.1 節)。v1.1.3 の agent との組は、無効化を知らない agent が `enabled:false` の写しで止まらないことを検出する。直前のリリースの server と新しい agent の組でも、その server の CLI で無効化と有効化をしたときの同じ失敗を検出する。v1.1.3 の server は無効化を持たないので、この組では無効化の確認を SKIP する | ラボ (直前のリリース、v1.1.3、legacy v0 のバイナリを GitHub の Releases から取得してキャッシュする。ラボの VM から GitHub への経路が無い場合は、バイナリを事前に置く。直前のリリースの版はスクリプトの定数を既定とし、環境変数 `WGFT_SKEW_OLD_VERSION` で上書きできる。定数が直前のリリースより古いまま流すときは、この変数で直前のリリースを明示する) | `protocol`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 自動 (開発者が起動) |
+| B8 | CI の `macos-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む) | macOS でだけ通る経路 (UDP の送信バッファの既定 9216 バイトを超えるデータグラムの書き込み) の退行 (D2 の一部の置き換え。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | CI (macOS の runner) | `agent-platform`、`rc` | 契機に当たる PR の更新ごと | 自動 |
+| B9 | 配布物の VM 試験 (`scripts/dist-vm.sh`) | 同梱の unit で起動しないこと、VM の再起動の後に転送が戻らないこと、設定の誤りで再起動を繰り返すこと | 2 台の VM (server と agent) | `deploy`、`rc` | 契機に当たる PR ごとに 1 つのディストリビューションで、リリース候補ごとに 3 つのディストリビューションで | 自動 (開発者が起動) |
+| B10 | Docker のイメージの疎通 (`scripts/docker-smoke.sh`) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (ホスト、CI の runner、ラボの VM のどれでも可) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 自動 (開発者が起動) |
+| B11 | `lab/rcvwin.sh` | ユーザー空間モードの中継で、`vpsd` の公開側のカーネルの TCP ソケットが、穴の後ろの順序外のデータとして floor を超える受信のメモリを持ったまま boost の枠を返すこと。穴が埋まった後に、その枠が別の接続へ戻らないこと ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) | ラボ | `resource`、`userspace` | 契機に当たる PR ごとに 1 回 | 自動 (開発者が起動) |
 
 B9 は、リリース候補ごとに Debian 12、Ubuntu 24.04、Fedora 44 の 3 つで実行します。
 `deploy/agent.kernel.conf` を変える PR は、B9 を `scripts/dist-vm.sh --agent-kernel` で実行します。
@@ -286,48 +285,47 @@ B9 は、リリース候補ごとに Debian 12、Ubuntu 24.04、Fedora 44 の 3 
 
 ### C 類 (段階の完了の関門)
 
-| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 所要時間 | 自動化 |
-|---|---|---|---|---|---|---|---|
-| C1 | 悪い条件のネットワーク (新設) | 損失、遅延、小さい経路 MTU と ICMP の遮断、自宅側のアドレスの変化で、トンネルと転送が回復しないこと | ラボ (netns に `tc netem` と経路の変更を加える) | `phase`、`dataplane-net` | 関係する変更 (network dataplane) を含む段階の完了時 | 10 分前後 (見込み) | 自動 (新設) |
-| C2 | クラッシュと強制停止からの収束 (新設) | Prepare と Commit の間での強制終了や VM の強制停止の後に、宣言した状態へ収束しないこと | ラボ | `phase`、`reconcile` | 関係する変更 (収束の仕組み) を含む段階の完了時 | 数分 (見込み) | 自動 (新設) |
-| C3 | 規模の試験 | ルール数とエージェント数が多いときの適用時間、テーブルの差し替え、全体状態の大きさの問題 | ラボ | `phase` | 段階の完了ごとに 1 回 | kernel 約 3 分、userspace 約 1 分半 (実測) | 自動 (開発者が起動) |
-| C4 | ラボの一式を別のディストリビューションで | カーネルと nftables の版の違いによる挙動の違い (通知、`ct count`、式の表記) | ラボ (`WGFT_LAB_IMAGE` で別のイメージの VM) | `phase`、`kernel` | 関係する変更 (kernel 側の経路) を含む段階の完了時 | A9 と同じ | 自動 (開発者が起動。Fedora の SELinux enforcing と firewalld 有効の条件は未確認) |
-| C5 | 長時間の TCP と UDP (新設) | 通常の WireGuard のセッションの鍵の更新、ハートビート、conntrack の期限をまたいで長いセッションが切れること。`agent rotate-key` の後に新しい通信が戻らないこと | ラボ | `phase`、`resource`、`dataplane-net` | 関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 1 時間以上 (見込み) | 自動 (新設) |
-| C6 | 小さいメモリの環境 (新設) | 上限を下げた設定と 256 MiB に制限したメモリで、フラッドの下で server が OOM で落ちること | ラボ (メモリを制限した cgroup) | `phase`、`resource`、`dataplane-net` | 関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 数分 (見込み) | 自動 (新設) |
+| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 自動化 |
+|---|---|---|---|---|---|---|
+| C1 | 悪い条件のネットワーク (新設) | 損失、遅延、小さい経路 MTU と ICMP の遮断、自宅側のアドレスの変化で、トンネルと転送が回復しないこと | ラボ (netns に `tc netem` と経路の変更を加える) | `phase`、`dataplane-net` | 関係する変更 (network dataplane) を含む段階の完了時 | 自動 (新設) |
+| C2 | クラッシュと強制停止からの収束 (新設) | Prepare と Commit の間での強制終了や VM の強制停止の後に、宣言した状態へ収束しないこと | ラボ | `phase`、`reconcile` | 関係する変更 (収束の仕組み) を含む段階の完了時 | 自動 (新設) |
+| C3 | 規模の試験 | ルール数とエージェント数が多いときの適用時間、テーブルの差し替え、全体状態の大きさの問題 | ラボ | `phase` | 段階の完了ごとに 1 回 | 自動 (開発者が起動) |
+| C4 | ラボの一式を別のディストリビューションで | カーネルと nftables の版の違いによる挙動の違い (通知、`ct count`、式の表記) | ラボ (`WGFT_LAB_IMAGE` で別のイメージの VM) | `phase`、`kernel` | 関係する変更 (kernel 側の経路) を含む段階の完了時 | 自動 (開発者が起動。Fedora の SELinux enforcing と firewalld 有効の条件は未確認) |
+| C5 | 長時間の TCP と UDP (新設) | 通常の WireGuard のセッションの鍵の更新、ハートビート、conntrack の期限をまたいで長いセッションが切れること。`agent rotate-key` の後に新しい通信が戻らないこと | ラボ | `phase`、`resource`、`dataplane-net` | 関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 自動 (新設) |
+| C6 | 小さいメモリの環境 (新設) | 上限を下げた設定と 256 MiB に制限したメモリで、フラッドの下で server が OOM で落ちること | ラボ (メモリを制限した cgroup) | `phase`、`resource`、`dataplane-net` | 関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 自動 (新設) |
 
 ### D 類 (リリース候補の関門)
 
-| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 所要時間 | 自動化 |
-|---|---|---|---|---|---|---|---|
-| D1 | Windows のエージェントの smoke (手作業) | リリースのバイナリが Windows で登録、転送、再接続、状態の保持に失敗すること | Windows の VM か Windows の実機 | `rc` | リリース候補ごとに 1 回 | 30 分前後 | 手作業。自動化は未実装 |
-| D2 | macOS のエージェントの smoke (手作業) | リリースのバイナリが Apple シリコンの Mac で登録、転送、再接続、launchd での起動に失敗すること | Mac の実機 | `rc` | リリース候補ごとに 1 回 | 30 分前後 | 手作業 |
-| D3 | リリースの成果物と署名の検証 | 成果物の欠け、`wgft version` の表記の誤り、`gh attestation verify` の失敗、GHCR のイメージの欠け | リリースの後の GitHub と GHCR | `rc` (タグの後) | リリースごとに 1 回 | 10 分前後 | 半自動 (成果物の名前は B5 が確かめる) |
-| D4 | `lab/upgrade.sh`、`scripts/dist-vm.sh --upgrade` | 選んだ旧版のデータベースと認証情報を現在のビルドが読めないこと、更新の間にルール・鍵・認証情報が変わること、片側だけを先に更新した組み合わせで転送が止まること、docs/manual/setup.md の手順で導入した VM でバイナリだけを入れ替え、同梱の unit を再起動し、VM も再起動する経路で転送が戻らないこと。`lab/upgrade.sh` の既定の v1.1.3 のデータは agent の無効化 (5.1 節) より前のものなので、更新した直後に既存の agent が無効として扱われて転送が止まること、更新の後に無効化した状態が server の再起動で失われること | ラボ (選んだ旧版のバイナリを GitHub の Releases から取得してキャッシュする) と、2 台の使い捨て VM (`scripts/dist-vm.sh` 自身の環境。直前のリリースのバイナリはホストで取得し、VM には push するだけです) | `rc` | リリース候補ごとに 1 回 | `lab/upgrade.sh` はモードごとに約 2 分半、両モードで約 5 分半。`scripts/dist-vm.sh --upgrade` は既定の確認に約 80 秒を足します (Debian 12 での実測) | 自動 (開発者が起動) |
+| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 自動化 |
+|---|---|---|---|---|---|---|
+| D1 | Windows のエージェントの smoke (手作業) | リリースのバイナリが Windows で登録、転送、再接続、状態の保持に失敗すること | Windows の VM か Windows の実機 | `rc` | リリース候補ごとに 1 回 | 手作業。自動化は未実装 |
+| D2 | macOS のエージェントの smoke (手作業) | リリースのバイナリが Apple シリコンの Mac で登録、転送、再接続、launchd での起動に失敗すること | Mac の実機 | `rc` | リリース候補ごとに 1 回 | 手作業 |
+| D3 | リリースの成果物と署名の検証 | 成果物の欠け、`wgft version` の表記の誤り、`gh attestation verify` の失敗、GHCR のイメージの欠け | リリースの後の GitHub と GHCR | `rc` (タグの後) | リリースごとに 1 回 | 半自動 (成果物の名前は B5 が確かめる) |
+| D4 | `lab/upgrade.sh`、`scripts/dist-vm.sh --upgrade` | 選んだ旧版のデータベースと認証情報を現在のビルドが読めないこと、更新の間にルール・鍵・認証情報が変わること、片側だけを先に更新した組み合わせで転送が止まること、docs/manual/setup.md の手順で導入した VM でバイナリだけを入れ替え、同梱の unit を再起動し、VM も再起動する経路で転送が戻らないこと。`lab/upgrade.sh` の既定の v1.1.3 のデータは agent の無効化 (5.1 節) より前のものなので、更新した直後に既存の agent が無効として扱われて転送が止まること、更新の後に無効化した状態が server の再起動で失われること | ラボ (選んだ旧版のバイナリを GitHub の Releases から取得してキャッシュする) と、2 台の使い捨て VM (`scripts/dist-vm.sh` 自身の環境。直前のリリースのバイナリはホストで取得し、VM には push するだけです) | `rc` | リリース候補ごとに 1 回 | 自動 (開発者が起動) |
 
 ### E 類 (手作業と実機の関門)
 
-| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 所要時間 | 自動化 |
-|---|---|---|---|---|---|---|---|
-| E1 | 実 VPS での導入、再起動、撤去 | 実際のクラウドのイメージ (最小構成、ホストのファイアウォール、`flush ruleset` で始まる設定) で手順どおりに動かないこと | 試験用の実 VPS と自宅の Linux のエージェント | `manual-release`、`deploy`、`kernel` | 契機に当たるとき | 1 時間前後 | 手作業 |
-| E2 | 実回線の自宅ルータと NAT | CGNAT や IPv4 over IPv6 の回線、経路 MTU の小さい回線で登録とトンネルが成り立たないこと | 実回線と実際の自宅ルータ | `manual-release`、`dataplane-net` | 契機に当たるとき | 30 分前後 | 手作業 |
-| E3 | 実回線での WAN のアドレスの変化 | 回線の再接続でアドレスが変わった後に、エージェントが戻らないこと、窃取の検知が誤って働くこと | 実回線 | `manual-release`、`protocol` | 契機に当たるとき | 30 分前後 | 手作業 |
-| E4 | Windows の実機での利用 | スリープと復帰、ネットワークアダプタの無効と有効、Wi-Fi の再接続の後に戻らないこと | Windows の実機 | `manual-release`、`agent-platform` | 契機に当たるとき | 1 時間前後 | 手作業 |
-| E5 | Mac の実機での利用 | スリープと復帰、Wi-Fi やインタフェースの変化、再起動の後に戻らないこと | Mac の実機 | `manual-release`、`agent-platform` | 契機に当たるとき | 1 時間前後 | 手作業 |
-| E6 | 実アプリケーションでの長時間の利用 | 実際の利用者の通信で数日単位に現れる切断、メモリの増加、ログの異常 | 実 VPS と実アプリケーション | `manual-release`、`dataplane-net`、`resource` | 契機に当たるとき | 数日 | 手作業 (外からの疎通の確認は機械でもできる) |
+| 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 自動化 |
+|---|---|---|---|---|---|---|
+| E1 | 実 VPS での導入、再起動、撤去 | 実際のクラウドのイメージ (最小構成、ホストのファイアウォール、`flush ruleset` で始まる設定) で手順どおりに動かないこと | 試験用の実 VPS と自宅の Linux のエージェント | `manual-release`、`deploy`、`kernel` | 契機に当たるとき | 手作業 |
+| E2 | 実回線の自宅ルータと NAT | CGNAT や IPv4 over IPv6 の回線、経路 MTU の小さい回線で登録とトンネルが成り立たないこと | 実回線と実際の自宅ルータ | `manual-release`、`dataplane-net` | 契機に当たるとき | 手作業 |
+| E3 | 実回線での WAN のアドレスの変化 | 回線の再接続でアドレスが変わった後に、エージェントが戻らないこと、窃取の検知が誤って働くこと | 実回線 | `manual-release`、`protocol` | 契機に当たるとき | 手作業 |
+| E4 | Windows の実機での利用 | スリープと復帰、ネットワークアダプタの無効と有効、Wi-Fi の再接続の後に戻らないこと | Windows の実機 | `manual-release`、`agent-platform` | 契機に当たるとき | 手作業 |
+| E5 | Mac の実機での利用 | スリープと復帰、Wi-Fi やインタフェースの変化、再起動の後に戻らないこと | Mac の実機 | `manual-release`、`agent-platform` | 契機に当たるとき | 手作業 |
+| E6 | 実アプリケーションでの長時間の利用 | 実際の利用者の通信で数日単位に現れる切断、メモリの増加、ログの異常 | 実 VPS と実アプリケーション | `manual-release`、`dataplane-net`、`resource` | 契機に当たるとき | 手作業 (外からの疎通の確認は機械でもできる) |
 
 ### F 類 (調査だけの実験)
 
-| 番号 | 実験 | 得たい根拠 | 環境 | 契機 | 頻度 | 所要時間 | 置き換え先の回帰テスト |
-|---|---|---|---|---|---|---|---|
-| F1 | conntrack のメモリの費用の実測 (実施済み) | 65536 という推奨値が小さいメモリの環境でも非現実的でないことの設計の根拠 (7a.10 節) | ラボ | 対応するカーネルの範囲の変更 | 対応するカーネルの範囲の変更時 | 1 時間前後 | 診断の文言にメモリの値が含まれないことの単体テスト (未実装) |
-| F2 | 毎秒 4000 接続以上の負荷 | 拒否の経路の費用が高い接続の頻度でも一定であること | ラボ (CPU を占有できる VM) | 根拠が要るとき | 1 回 | 数時間 | L8 (到達できる頻度でのフラッド) |
-| F3 | netlink の ENOBUFS の強制 | 通知の取りこぼしの後に購読を張り直して Observe すること | ラボ | 根拠が要るとき | 1 回 | 数時間 | 購読の失敗を模した単体テスト (未実装) と L10 |
-| F4 | カーネルの版による通知の違い | 版ごとに nftables と rtnetlink の通知の出方が違うかどうか | 版の違う VM | 根拠が要るとき | 1 回 | 数時間 | C4 での L10 |
-| F5 | メモリと CPU のプロファイル | フロー 1 本の費用、拒否した接続が残すメモリ | ラボ、実機 | 根拠が要るとき | 1 回 | 数時間 | L8 とメモリのソフト上限の計算式の単体テスト |
-| F6 | パケットキャプチャによる調査 | 不具合の原因の特定 | ラボ、実機 | 不具合の調査 | 必要なとき | 不定 | 不具合を再現するラボの確認 |
-| F7 | スループットの測定 | 転送の速さの目安 | ラボ、実機 | 性能の報告を受けたとき | 必要なとき | 1 時間前後 | 無し (性能の約束を文書に書いていないため) |
-| F8 | トークンバケットの補充の境界と meter の期限 | 7a.9 節の許容差のうち未確認の点 | ラボ | 根拠が要るとき | 1 回 | 数時間 | A3 の fixture (補充の時刻から 10% 以上離して出来事を置く) |
-| F9 | userspace と kernel の切り替えの断 | Phase 7 の受け入れ条件の値 | ラボ | Phase 7 の設計 | 1 回 | 1 時間前後 | Phase 7 の受け入れ条件のラボの確認 |
+| 番号 | 実験 | 得たい根拠 | 環境 | 契機 | 頻度 | 置き換え先の回帰テスト |
+|---|---|---|---|---|---|---|
+| F1 | conntrack のメモリの費用の実測 (実施済み) | 65536 という推奨値が小さいメモリの環境でも非現実的でないことの設計の根拠 (7a.10 節) | ラボ | 対応するカーネルの範囲の変更 | 対応するカーネルの範囲の変更時 | 診断の文言にメモリの値が含まれないことの単体テスト (未実装) |
+| F2 | 毎秒 4000 接続以上の負荷 | 拒否の経路の費用が高い接続の頻度でも一定であること | ラボ (CPU を占有できる VM) | 根拠が要るとき | 1 回 | L8 (到達できる頻度でのフラッド) |
+| F3 | netlink の ENOBUFS の強制 | 通知の取りこぼしの後に購読を張り直して Observe すること | ラボ | 根拠が要るとき | 1 回 | 購読の失敗を模した単体テスト (未実装) と L10 |
+| F4 | カーネルの版による通知の違い | 版ごとに nftables と rtnetlink の通知の出方が違うかどうか | 版の違う VM | 根拠が要るとき | 1 回 | C4 での L10 |
+| F5 | メモリと CPU のプロファイル | フロー 1 本の費用、拒否した接続が残すメモリ | ラボ、実機 | 根拠が要るとき | 1 回 | L8 とメモリのソフト上限の計算式の単体テスト |
+| F6 | パケットキャプチャによる調査 | 不具合の原因の特定 | ラボ、実機 | 不具合の調査 | 必要なとき | 不具合を再現するラボの確認 |
+| F7 | スループットの測定 | 転送の速さの目安 | ラボ、実機 | 性能の報告を受けたとき | 必要なとき | 無し (性能の約束を文書に書いていないため) |
+| F8 | トークンバケットの補充の境界と meter の期限 | 7a.9 節の許容差のうち未確認の点 | ラボ | 根拠が要るとき | 1 回 | A3 の fixture (補充の時刻から 10% 以上離して出来事を置く) |
 
 
 ## 更新と戻しの約束
@@ -344,7 +342,7 @@ D4 はこの約束に従い、更新を確かめ、戻しについては挙動�
 F 類の実験と、C 類から E 類の高価な確認は、次の規則で小さな回帰テストに置き換えます。
 
 1. 実験の目的は仕様の根拠を得ることなので、根拠を得たら実験を終えます。
-結果の要約と、設計と仕様への影響は、設計文書の「改訂の記録」に書きます ([文書の更新手順](documentation.ja.md#更新の時点))
+結果の要約、設計への影響、未確認の点は PR に記載し、現在の仕様に必要な理由と制約は該当する設計に反映します ([文書の更新手順](documentation.ja.md#更新の時点))。
 2. 根拠のうち、今後のコードの変更で崩れうるものだけを回帰テストにします。
 コードの変更で崩れない性質 (カーネルの定数、特定の機器の性能) は回帰テストにしません
 3. 回帰テストは、崩れうる性質を確かめられる最も安い環境に置きます。
@@ -362,7 +360,7 @@ macOS の UDP の送信バッファの不具合を relay の単体テストで�
 移動した節への旧リンクは維持します。
 
 <a id="v1-の項目と繰り返しの頻度"></a>
-[v1 の項目と繰り返しの頻度](history/testing-validation.md#v1-の項目と繰り返しの頻度)
+[v1 の項目と繰り返しの頻度](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/testing.md#v1-の項目と繰り返しの頻度)
 
 <a id="新設と自動化が未了の項目"></a>
 [新設と自動化が未了の項目](testing-catalog.md#実装状態と確認範囲)
@@ -410,4 +408,4 @@ macOS の UDP の送信バッファの不具合を relay の単体テストで�
 [macOS のエージェントの smoke の内容](testing-platforms.md#macos-のエージェントの-smoke-の内容)
 
 <a id="実機の確認を小さな回帰テストに置き換えた範囲"></a>
-[実機の確認を小さな回帰テストに置き換えた範囲](history/testing-validation.md#実機の確認を小さな回帰テストに置き換えた範囲)
+[実機の確認を小さな回帰テストに置き換えた範囲](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/testing.md#実機の確認を小さな回帰テストに置き換えた範囲)

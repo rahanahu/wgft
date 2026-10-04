@@ -137,7 +137,7 @@ D4 の旧版の選択と確認範囲は[追加テストの台帳](../docs/develo
 
 現在の分類は [lab/suite.txt](suite.txt) を参照します。
 `parallel` の後に `exclusive-heavy`、`exclusive-timing`、`exclusive-global` の確認を 1 つずつ実行します。
-分類を決める規範は[テストの規範](../docs/development/testing.md#ラボの一式を隔てる単位)、過去の測定は[ラボの記録](../docs/development/history/lab-validation.md#sandbox-の分類の測定)にあります。
+分類を決める規範は[テストの規範](../docs/development/testing.md#ラボの一式を隔てる単位)に従います。
 
 ### 失敗した Sandbox の調べ方
 
@@ -191,12 +191,12 @@ VM 全体を見る `pkill`、`pgrep`、`pidof` は使いません。
 現在の一式の費用は実行時の `metrics.csv` で確認します。
 VM を大きくする場合は `WGFT_LAB_CPU` と `WGFT_LAB_MEM` を指定して新しく作成します。
 実行中の `incus config set` の変更がゲストの `nproc` と `MemTotal` に反映されなかった記録があります。
-測定値の詳細は[ラボの記録](../docs/development/history/lab-validation.md#lab-host-vm-の大きさの測定)にあります。
 
 <a id="確認済み管理用-api-のアクセス経路2026-09-15"></a>
 ## 管理用 API の確認記録
 
-[過去の確認条件](../docs/development/history/lab-validation.md#確認済み管理用-api-のアクセス経路2026-09-15)を参照します。
+[当時の確認条件](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/lab/README.md#確認済み管理用-api-のアクセス経路2026-09-15)は旧版の文書を参照します。
+現在の経路と制約は[管理の接続経路](../docs/design/security/admin-transport.md)に従います。
 
 <a id="確認済み実-caddy-での-https-経路"></a>
 ## Caddy の確認記録

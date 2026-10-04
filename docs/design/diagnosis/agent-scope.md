@@ -28,7 +28,7 @@ Web UI からの呼び出しと `--report` も含めません。
 
 ただし [7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)のとおり、macOS のエージェントは暫定であり、v1.0 の保証に含まれない。
 この節の記述のうち、macOS での挙動は設計の意図であって、実機で確かめた事実ではありません。
-Windows の `agent doctor` は、稼働中と停止中の実行と `--json` を Windows 11 の実機で確かめ、[7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)の保証に含めた(改訂の記録 2026-09-27)。
+Windows の `agent doctor` は、稼働中と停止中の実行と `--json` を Windows 11 の実機で確かめ、[7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)の保証に含めた([以前の検証 2026-09-27](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L3260))。
 管理者の権限での実行は期待する結果を定めておらず、`control socket` が OK、終了コードが 0 になったことを観察しただけです。
 
 `server doctor` の自宅側の確認が要る所見は、`wgft agent doctor` を案内します。

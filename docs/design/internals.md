@@ -17,6 +17,6 @@
 - <a id="7a5-resource-guard"></a> [7a5-resource-guard](architecture/admission-resources.md#7a5-resource-guard)
 - <a id="7a6-維持する外部仕様と互換性"></a> [7a6-維持する外部仕様と互換性](architecture/wire-compatibility.md#7a6-維持する外部仕様と互換性)
 - <a id="7a7-package-配置"></a> [7a7-package-配置](architecture/packages.md#7a7-package-配置)
-- <a id="7a8-移行の段取り"></a> [7a8-移行の段取り](history/architecture-migration.md#7a8-移行の段取り) <!-- docs-history -->
+- <a id="7a8-移行の段取り"></a> [7a8-移行の段取り](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#7a8-移行の段取り) <!-- docs-history -->
 
 </details>

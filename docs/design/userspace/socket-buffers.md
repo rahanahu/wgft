@@ -11,7 +11,7 @@ wgft はホストの sysctl を自動では変更しません。
 <a id="ソケットのバッファの条件"></a>
 - ソケットのバッファの条件:ユーザー空間モードは、WireGuard の UDP ソケットが、wireguard-go の要求する受信と送信のバッファを実際に得ることを動作条件とします。
   推奨ではなく条件です。
-  後述の[「netstack の出力」](udp-accounting.md#netstack-の出力)の構造は、この条件を満たす環境での評価に基づいて採用しており(改訂の記録 2026-09-27)、満たさない環境での過負荷の見え方は未確認であるためです。
+  後述の[「netstack の出力」](udp-accounting.md#netstack-の出力)の構造は、この条件を満たす環境での評価に基づいて採用しており([以前の検証 2026-09-27](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L667))、満たさない環境での過負荷の見え方は未確認であるためです。
   条件は `vpsd` のユーザー空間モード([6.3 節](../vps/userspace.md#63-ユーザー空間モード))にも同じく当てはまる
 <a id="linux-でのバッファの条件"></a>
 - Linux でのバッファの条件:wireguard-go は、UDP ソケットを開くときに受信と送信のバッファをそれぞれ 7 MiB 要求します。
@@ -84,7 +84,7 @@ wgft はホストの sysctl を自動では変更しません。
   同じ Debian 12 の VM の rootful の podman 4.3 でも、ホストの値を上げるとコンテナの中のソケットが条件を満たした。
   Fedora 44 のホスト(カーネル 7.2)の Docker 29 では、`--sysctl` と特権のコンテナの中からの書き込みがどちらも拒まれ、付属の compose ファイルと同じ権限のコンテナはホストの値の 2 倍を得た。
   user namespace を分けた `unshare` と rootless の podman では、`CAP_NET_ADMIN` を持たせても FORCE が拒まれた。
-  非特権の Incus のコンテナ(Incus の既定のままで、security の設定も nesting も無い)では、付属の `agent.service` で capability を持たずに動くエージェントが、既定の値では条件の未達を示し、コンテナのホストで両方の sysctl を 7340032 にしてエージェントを再起動すると条件を満たした(改訂の記録 2026-09-27)。
+  非特権の Incus のコンテナ(Incus の既定のままで、security の設定も nesting も無い)では、付属の `agent.service` で capability を持たずに動くエージェントが、既定の値では条件の未達を示し、コンテナのホストで両方の sysctl を 7340032 にしてエージェントを再起動すると条件を満たした([以前の検証 2026-09-27](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L667))。
   Proxmox VE のコンテナ、nesting を有効にしたコンテナ、rootless のコンテナ、非特権の LXC や Incus のコンテナの中のユーザー空間モードの `vpsd` は対象から外さないが、条件を満たせるかどうかは未確認です
 <a id="linux-以外でのバッファの条件"></a>
 - Linux 以外でのバッファの条件:Windows と macOS の wireguard-go も 7 MiB を要求するが、FORCE を使いません。

@@ -45,7 +45,7 @@ UDP で自宅側のサービスに元 IP を渡す機能は持ちません。
   この筋書きはコードから判断したもので、照合は単体試験だけで確かめた
 - SQLite を開く接続は、busy_timeout を journal_mode の変更や foreign_keys の設定より先に効かせる(`modernc.org/sqlite` の DSN パラメータ `_busy_timeout`・`_journal_mode`・`_foreign_keys` を使い、この 3 つを別々の `PRAGMA` 文で順に送らない)。
   ただし、journal_mode を初めて WAL に切り替える 1 手だけは、busy_timeout を先に効かせても SQLite 自身がリトライしません。
-  再起動やバイナリの入れ替え、`wgft server teardown`、CLI の一操作など、他のプロセスがファイルを数ミリ秒だけ保持している瞬間にこの接続確立がぶつかると、待たずに `SQLITE_BUSY`(`database is locked`)で失敗していた(改訂の記録 2026-09-20)。
+  再起動やバイナリの入れ替え、`wgft server teardown`、CLI の一操作など、他のプロセスがファイルを数ミリ秒だけ保持している瞬間にこの接続確立がぶつかると、待たずに `SQLITE_BUSY`(`database is locked`)で失敗していた([以前の検証 2026-09-20](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L2061))。
   この 1 手だけは `Open` が `SQLITE_BUSY` を検出して自前で最大 5 秒待ち直す
 - 新しい版が書いた SQLite(`PRAGMA user_version` がこの版の移行の数より大きい)は、この版では読めないので起動を拒否します。
   運用者がその新しい版を入れ直すか、この版で取った控えを戻すまで同じ結果になるので、種別 `prerequisite` の拒否として終了コード 3 で止まる([11b 節](security/startup.md#11b-起動の失敗の意味論))
@@ -89,7 +89,7 @@ UDP で自宅側のサービスに元 IP を渡す機能は持ちません。
 - `vpsd` は起動時に conntrack の UDP タイムアウト 2 値(`nf_conntrack_udp_timeout`、`nf_conntrack_udp_timeout_stream`。
   [4 節](network.md#4-ネットワーク))を読むが、この読み取りは `table inet wgft` を適用した**後**に行います。
   このテーブルは `ct` 式を持つため、適用の netlink 書き込みが、`nft` コマンドで同じテーブルを書いたときと同じく、カーネルに `nf_conntrack`(と `nft_ct`、`nf_nat`)を初めて自動ロードさせる。
-  適用より前に読むと、他に何もこのモジュールをロードしないホスト(新規インストール、モジュール状態を毎起動で失うホスト)でこの読み取りが失敗し、カーネルモードの起動そのものが止まっていた(改訂の記録 2026-09-20)。
+  適用より前に読むと、他に何もこのモジュールをロードしないホスト(新規インストール、モジュール状態を毎起動で失うホスト)でこの読み取りが失敗し、カーネルモードの起動そのものが止まっていた([以前の検証 2026-09-20](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L2061))。
   テーブルの適用後もなおこの sysctl が読めない場合(この sysctl 自体が無いカーネル、読む権限が無いなど)は、終了コード 1 で終わり、unit の再起動に任せる。
   適用の後に読めないことが永続する環境は実機でもラボでも見ていない一方で、別の network namespace への登録やコンテナの `/proc/sys` の隠蔽のように、再起動で変わりうる原因を否定できません。
   [11b 節](security/startup.md#11b-起動の失敗の意味論)の非対称の規則により、示せない失敗は終了コード 1 とします。

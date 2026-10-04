@@ -20,8 +20,8 @@
 - <a id="メモリのソフト上限との関係"></a> [メモリのソフト上限との関係](resource/integration.md#メモリのソフト上限との関係)
 - <a id="kernel-側の保護"></a> [kernel-側の保護](resource/integration.md#kernel-側の保護)
 - <a id="agent-への適用"></a> [agent-への適用](resource/integration.md#agent-への適用)
-- <a id="phase-6-の移行の手順"></a> [phase-6-の移行の手順](history/resource-guard-migration.md#phase-6-の移行の手順) <!-- docs-history -->
-- <a id="利用者から見て変わらないものと変わるもの"></a> [利用者から見て変わらないものと変わるもの](history/resource-guard-migration.md#利用者から見て変わらないものと変わるもの) <!-- docs-history -->
+- <a id="phase-6-の移行の手順"></a> [phase-6-の移行の手順](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#phase-6-の移行の手順) <!-- docs-history -->
+- <a id="利用者から見て変わらないものと変わるもの"></a> [利用者から見て変わらないものと変わるもの](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#利用者から見て変わらないものと変わるもの-1) <!-- docs-history -->
 - <a id="ホストで確かめることとラボで確かめること"></a> [ホストで確かめることとラボで確かめること](resource/validation.md#ホストで確かめることとラボで確かめること)
 
 </details>

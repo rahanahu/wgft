@@ -30,11 +30,9 @@
 - ピアだけの更新:kernel の server は、公開鍵の変更でも wgft テーブルを差し替え、meter と ct count の状態を作り直します。
   Plan が同じ場合に差し替えを省くトランザクションは未設計で、Observe の比較、ピアの操作順、修復の規則を決める必要があります。
 
-## 当初の計画
+## 旧リンクの参照先
 
-当初のマイルストーンと期限を含む提案は[初期の計画](history/README.md)へ移しました。
-<!-- docs-history -->
 <a id="12-マイルストーン"></a>
-[当初のマイルストーン](history/initial-milestones.md)を参照できます。 <!-- docs-history -->
+[当初のマイルストーン](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#12-マイルストーン)は旧版の文書を参照します。
 <a id="13-未決事項"></a>
-[当時の未決事項](history/proposals-through-v1.3.md)を参照できます。 <!-- docs-history -->
+[当時の未決事項](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#13-未決事項)は旧版の文書を参照します。
