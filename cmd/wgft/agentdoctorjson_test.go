@@ -510,10 +510,10 @@ func agentReasonValues(t *testing.T) map[string]string {
 	return out
 }
 
-// designAgentDoctorOutput は agent doctor の出力の正本を返す。
-func designAgentDoctorOutput(t *testing.T) string {
+// agentDoctorDesign は agent doctor の指定した仕様の正本を返す。
+func agentDoctorDesign(t *testing.T, name string) string {
 	t.Helper()
-	b, err := os.ReadFile("../../docs/design/diagnosis/agent-output.md")
+	b, err := os.ReadFile(filepath.Join("../../docs/design/diagnosis", name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +557,7 @@ func TestAgentDoctorReasonsMatchTheDesign(t *testing.T) {
 			t.Errorf("the reason code %q is held by %v; one code names one fact", v, names)
 		}
 	}
-	design := designTableColumn(t, designAgentDoctorOutput(t), "| 理由の符号 |")
+	design := designTableColumn(t, agentDoctorDesign(t, "agent-output.md"), "| 理由の符号 |")
 	inDesign := map[string]bool{}
 	for _, v := range design {
 		if inDesign[v] {
@@ -577,7 +577,7 @@ func TestAgentDoctorReasonsMatchTheDesign(t *testing.T) {
 
 // 検査の ID も、実装と設計文書の表で同じ並びである。
 func TestAgentDoctorCheckIDsMatchTheDesign(t *testing.T) {
-	design := designTableColumn(t, designAgentDoctorOutput(t), "| 検査の ID |")
+	design := designTableColumn(t, agentDoctorDesign(t, "agent-evidence.md"), "| 検査の ID |")
 	if !reflect.DeepEqual(design, agentCheckOrder) {
 		t.Errorf("design.md's 10.2c table lists %v, the implementation %v", design, agentCheckOrder)
 	}
@@ -761,7 +761,7 @@ func TestAgentDoctorJSONWritesNothingWhenNoReportIsBuilt(t *testing.T) {
 // 設計文書 10.2c 節の「機械向けの出力」の例は、節が定める規則を満たす。例は値を省いているので
 // JSON としては読まず、最上位の status、検査の id の並び、フィールドの名前だけを取り出して照らす。
 func TestAgentDoctorJSONDesignExampleFollowsTheRules(t *testing.T) {
-	sec := designAgentDoctorOutput(t)
+	sec := agentDoctorDesign(t, "agent-output.md")
 	i := strings.Index(sec, "#### 機械向けの出力")
 	if i < 0 {
 		t.Fatal("design.md's 10.2c section has no 機械向けの出力 subsection")
