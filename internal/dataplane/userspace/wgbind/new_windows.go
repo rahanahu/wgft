@@ -8,8 +8,8 @@ import (
 
 // New は wireguard-go の device に渡す UDP のバインドを作る。Windows でだけ conn.NewDefaultBind() の
 // 既定(Registered I/O を使う WinRingBind)を避け、conn.NewStdNetBind() を明示して使う。他の OS と
-// 同じく BatchOne に通すが、Windows の StdNetBind は BatchSize が 1 なので包まれず、そのまま device
-// に渡る(設計文書 7 節の「WireGuard の受信の 1 回の件数」)。
+// 同じく BatchOne に通すが、Windows の StdNetBind は BatchSize が 1 なので BatchOne 自体には
+// 包まれない。NewDevice は OS にかかわらず、その外側に送信元の件数の制限を付ける。
 //
 // WinRingBind は Winsock のソケットを自前で開き、SIO_UDP_CONNRESET を無効にしない。
 // このため、到達できない宛先へ送った UDP に対して Windows 自身のスタックが生成する

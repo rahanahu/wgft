@@ -36,7 +36,7 @@ type Config struct {
 // Tunnel は動いているサーバ側トンネル。
 type Tunnel struct {
 	cfg  Config
-	dev  *device.Device
+	dev  *wgbind.Device
 	tnet *nettun.Device
 
 	mu    sync.Mutex
@@ -59,7 +59,10 @@ func New(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
 	t := &Tunnel{cfg: cfg, tnet: tnet, peers: map[wgtypes.Key]netip.Addr{}}
-	t.dev = device.NewDevice(tnet, wgbind.New(), device.NewLogger(device.LogLevelError, "wg: "))
+	t.dev, err = wgbind.NewDevice(tnet, wgbind.New(), device.NewLogger(device.LogLevelError, "wg: "))
+	if err != nil {
+		return nil, fmt.Errorf("wireguard source guard: %w", err)
+	}
 	ipc := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(cfg.PrivateKey[:]), cfg.ListenPort)
 	if err := t.dev.IpcSet(ipc); err != nil {
 		t.dev.Close()
