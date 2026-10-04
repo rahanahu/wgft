@@ -2,17 +2,17 @@
 
 [日本語](wireguard-sources.ja.md)
 
-This branch proposes a default admission threshold of 1024 source IPs per userspace WireGuard Device.
-The threshold and loss of new-source handshakes at exhaustion require product review before merging.
-This guard applies to the server and agent on Linux, Windows and macOS, without modifying wireguard-go.
+Each userspace WireGuard Device uses an admission threshold of 1024 source IP keys.
+The guard applies the same admission and recovery policy to userspace servers and agents on Linux, Windows and macOS, without modifying wireguard-go.
 
 ## Admission and recovery
 
 An outer single-datagram bind checks only exact initiation packets of 148 bytes and response packets of 92 bytes.
 It reads the pinned wireguard-go limiter's one combined IPv4/IPv6 map under its actual `sync.RWMutex`.
 The exact `StdNetEndpoint.DstIP()` key is used without normalization.
-An existing key passes; an unseen key is dropped when the map contains at least 1024 keys.
+An existing key passes the capacity check; an unseen key is dropped when the map contains at least 1024 keys.
 A busy table lock or unsupported candidate endpoint also drops only that candidate.
+The `TryRLock` check does not wait for the limiter lock, so lock contention does not hold up the receive path.
 Cookie replies, transport data, malformed packets and receive errors retain the dependency's handling.
 The guard does not authenticate packets or replace WireGuard's cryptography or token bucket.
 It retains no source-keyed ledger or diagnostic history.
@@ -55,6 +55,7 @@ Device.Close does not join handshake workers: bounded pending work in a retired 
 This guard does not establish that dependency shutdown cannot panic.
 
 Benign unit fixtures cover exact packet and key boundaries, the real limiter lock, exhaustion and garbage collection recovery, early attachment, reopen and permanent detach.
-Platform runtime behavior and allocator coefficient sufficiency remain unmeasured; cross-platform static checks do not replace native runtime tests.
+Allocator coefficient sufficiency remains unmeasured.
+Platform checks do not establish the coefficient's sufficiency or a universal memory limit.
 
 [Userspace specification](README.md)
