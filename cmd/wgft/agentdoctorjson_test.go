@@ -513,7 +513,7 @@ func agentReasonValues(t *testing.T) map[string]string {
 // designSection10_2c は設計文書の 10.2c 節の本文を返す。
 func designSection10_2c(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile("../../docs/design.md")
+	b, err := os.ReadFile("../../docs/design/agent-doctor.md")
 	if err != nil {
 		t.Fatal(err)
 	}

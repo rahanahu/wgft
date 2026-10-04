@@ -41,7 +41,7 @@ lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定す
 lab/lab exec vm bash /wgft/lab/rcvwin.sh         # ユーザー空間モードの中継が、穴の後ろの順序外のデータを持つ公開側のソケットの boost の枠を返さず、穴が埋まった後に返すことを確認(userspace だけ)
 lab/lab exec vm bash /wgft/lab/version-skew.sh         # 版の組み合わせ(新旧の server・agent、legacy v0)。旧い側は直前のリリース(既定は v1.4.0。`lab/lab exec vm env WGFT_SKEW_OLD_VERSION=1.3.0 bash /wgft/lab/version-skew.sh` のように変えられる)と、agent の無効化より前の最後のリリースの v1.1.3。旧いバイナリは GitHub の Releases から取得しキャッシュする(スクリプト冒頭のコメント参照)
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel       # 旧版からの更新(D4)。既定は v1.1.3 のデータに現在のビルドを重ね、ルール・鍵・認証情報が保たれ、転送が戻ることを確認。`lab/lab exec vm env WGFT_UPGRADE_OLD_VERSION=0.4.0 bash /wgft/lab/upgrade.sh kernel` のように変数を VM の中に渡すと、release notes が更新を約束するもう一方の版でも同じ確認を流せる。userspace も同じ
-lab/lab exec vm bash /wgft/lab/scale.sh kernel         # 規模の試験(C3)。1 台の server と 5 台のエージェントで、ルール数を 10 から 1000 まで段階的に増やし、適用時間・全体状態の大きさ・RSS を測定。kernel モードも userspace モードも 1000 本まで通る(kernel モードが 100 本前後で失敗していた netlink のバッファの問題は解決済み。[設計文書の 6.1 節](../docs/design-vps-dataplane.md)と[改訂の記録](../docs/design-revisions.md)を参照)
+lab/lab exec vm bash /wgft/lab/scale.sh kernel         # 規模の試験(C3)。1 台の server と 5 台のエージェントで、ルール数を 10 から 1000 まで段階的に増やし、適用時間・全体状態の大きさ・RSS を測定。kernel モードも userspace モードも 1000 本まで通る(kernel モードが 100 本前後で失敗していた netlink のバッファの問題は解決済み。[設計文書の 6.1 節](../docs/design/vps-dataplane.md)と[改訂の記録](../docs/design/revisions.md)を参照)
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
 lab/lab destroy                 # VM ごと消す
 ```
@@ -78,10 +78,10 @@ WGFT_LAB_IMAGE=images:fedora/44 WGFT_LAB_VM=wgft-lab-fedora lab/lab up
 Ubuntu 24.04(カーネル 6.8.0、nftables v1.0.9)と Fedora 44(カーネル 7.2.5、nftables v1.1.6)は、
 どちらも `labhost run -parallel 8 all` の判定が既定の Debian 12(カーネル 6.1.0、nftables v1.0.6)と
 一致する(PASS 291、FAIL 0、SKIP 16、確認ごとの内訳も一致)ことを確かめてある
-([docs/testing.md](../docs/testing.md) の C4)。ただし Incus の `images:fedora/44` イメージには
+([docs/development/testing.md](../docs/development/testing.md) の C4)。ただし Incus の `images:fedora/44` イメージには
 `firewalld` も SELinux のポリシーも既定で入っていないので、この確認は firewalld が動かず SELinux も
 enforcing でない状態で流したものである。その 2 つが実機の Fedora のように有効な状態でラボが動くかは
-未確認で、詳細は [docs/testing.md](../docs/testing.md) の C4 にある。
+未確認で、詳細は [docs/development/testing.md](../docs/development/testing.md) の C4 にある。
 
 ## トポロジ
 
@@ -109,7 +109,7 @@ client と vps だけが IPv6(ドキュメント用のプレフィクス `2001:d
 
 - `vps` の `ip_forward` は設定しない。`vpsd` が起動時に設定する(仕様 6.1 節)
 - netns はメモリ上にしかないので、VM を再起動すると消える。`lab up` か `lab net up` で立て直す
-- `netns.sh` は Incus に依存しない。GitHub の runner の上で root としてラボの一式を流す案はあるが、v1 では採っていない([docs/testing.md](../docs/testing.md) の「CI とラボの関係」)
+- `netns.sh` は Incus に依存しない。GitHub の runner の上で root としてラボの一式を流す案はあるが、v1 では採っていない([docs/development/testing.md](../docs/development/testing.md) の「CI とラボの関係」)
 
 ## 既知の問題:VM が IPv4 で外に出られない
 
@@ -236,7 +236,7 @@ check 9 はかつて `exclusive-timing` でした。check 9c は、何も変え�
 戻ったことしか確認しておらず、それぞれの応答が残す "applied"/drift のログ行そのものは確認していませんでした。
 隣の Sandbox の負荷でそのログ行の書き込みが遅れると、区間の中に紛れ込み、無関係な apply に見えました
 (実測は単独で 20 回中 20 回成功、8 並列のプールで 20 回中 17 回成功、一式の中で 20 回中 18 回成功で、
-失敗はいつも `no apply was logged in the window`)。[docs/testing.md](../docs/testing.md) の規範に
+失敗はいつも `no apply was logged in the window`)。[docs/development/testing.md](../docs/development/testing.md) の規範に
 従い、区間の基準値を取る前に、直前の 2 つの応答それぞれの "applied"/drift のログ行を実際に確認するよう
 直しました。直した後の実測は、単独で 20 回中 20 回成功、8 並列のプール (この 8 並列は本節の表にある
 `parallel` の確認一式を隣に置いた状態) で 20 回中 20 回成功だったので、分類を `parallel` に移しました。
@@ -330,7 +330,7 @@ check 9 を `parallel` に移した前後を 1 回ずつ実測すると、移す
 縮んだ差で、10 回の実測ではなく前後 1 回ずつの比較です。単独で流す確認は、check 9 を移した時点では
 8 個で、一式の所要時間のうち約 240 秒がそれを 1 つずつ流す時間でした。その後 `exclusive-global`
 の check 12 が加わっており、この時間は測り直していません。今の一式全体の所要時間は
-[docs/testing.md](../docs/testing.md) の「マージの前に流すテスト」にあります。
+[docs/development/testing.md](../docs/development/testing.md) の「マージの前に流すテスト」にあります。
 
 CPU は、この実測の範囲では制約になっていません。2 vCPU のまま並列数を 1 から 32 まで上げても、
 1 つあたりの確認の壁時計の時間はほぼ変わらず (約 39 秒から 42 秒)、並列数に応じて全体の時間が

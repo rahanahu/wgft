@@ -48,13 +48,13 @@ VPS 側の server は Linux、agent は Linux、Windows amd64、Apple シリコ�
 | 権限 | `CAP_NET_ADMIN` が必要 | 通常は root 権限と TUN デバイスが不要 |
 | wgft プロセス停止中 | 設定済みの転送は継続 | 転送も停止 |
 
-VPS で root が使える場合は、カーネルモードを使います。root やカーネル WireGuard が使えない場合、またはコンテナ内だけで動かす場合はユーザー空間モードを使います。カーネルモードには Linux 6.1 以降と nftables 1.0.6 以降が必要です。agent はユーザー空間モードが既定です。Linux の agent をカーネルモードで動かす条件と手順は [カーネルモードのエージェント](docs/agent-kernel.ja.md)にあります。
+VPS で root が使える場合は、カーネルモードを使います。root やカーネル WireGuard が使えない場合、またはコンテナ内だけで動かす場合はユーザー空間モードを使います。カーネルモードには Linux 6.1 以降と nftables 1.0.6 以降が必要です。agent はユーザー空間モードが既定です。Linux の agent をカーネルモードで動かす条件と手順は [カーネルモードのエージェント](docs/manual/agent-kernel.ja.md)にあります。
 
-Linux のユーザー空間モードでは、ホストのソケットのバッファの設定が必要になる場合があります。また、既定のフロー数の上限では、agent が 1 つ、TCP の転送ポートが 1 つの server に約 5.9 GiB のホストメモリが必要です。この値は設計文書に記載した最悪値の見積もりで、計算に数えたフローの状態やバッファなどが、攻撃によってそれぞれの上限まで同時に埋まった場合のものです。この値は普段の使用量の予想ではありません。フロー数の上限を下げても、この要件は約 2.9 GiB 未満にはなりません。設定方法と条件は [VPS のユーザー空間モード](docs/setup-server-userspace.ja.md)、内訳は [設計文書](docs/design-agent-dataplane.md#7-データプレーン自宅側)を参照してください。
+Linux のユーザー空間モードでは、ホストのソケットのバッファの設定が必要になる場合があります。また、既定のフロー数の上限では、agent が 1 つ、TCP の転送ポートが 1 つの server に約 5.9 GiB のホストメモリが必要です。この値は設計文書に記載した最悪値の見積もりで、計算に数えたフローの状態やバッファなどが、攻撃によってそれぞれの上限まで同時に埋まった場合のものです。この値は普段の使用量の予想ではありません。フロー数の上限を下げても、この要件は約 2.9 GiB 未満にはなりません。設定方法と条件は [VPS のユーザー空間モード](docs/manual/setup-server-userspace.ja.md)、内訳は [設計文書](docs/design/agent-dataplane.md#7-データプレーン自宅側)を参照してください。
 
 ## クイックスタート
 
-Linux VPS のカーネルモードと、Linux の agent を使う例です。[Windows](docs/setup-desktop.ja.md#windows-で-agent-を実行する) と [macOS](docs/setup-desktop.ja.md#macos-で-agent-を実行する) の agent、Docker などの手順は[環境別の導入](docs/setup-alternatives.ja.md)から選べます。Linux の systemd 手順は[セットアップガイド](docs/setup.ja.md)にあります。
+Linux VPS のカーネルモードと、Linux の agent を使う例です。[Windows](docs/manual/setup-desktop.ja.md#windows-で-agent-を実行する) と [macOS](docs/manual/setup-desktop.ja.md#macos-で-agent-を実行する) の agent、Docker などの手順は[環境別の導入](docs/manual/setup-alternatives.ja.md)から選べます。Linux の systemd 手順は[セットアップガイド](docs/manual/setup.ja.md)にあります。
 
 ### 1. wgft を入手する
 
@@ -86,7 +86,7 @@ sudo wgft server run
 sudo wgft agent join-string --name home
 ```
 
-Web UI から接続文字列を発行する方法も[セットアップガイド](docs/setup.ja.md#接続文字列を発行する)にあります。
+Web UI から接続文字列を発行する方法も[セットアップガイド](docs/manual/setup.ja.md#接続文字列を発行する)にあります。
 
 ### 3. 自宅側 agent を起動する
 
@@ -123,22 +123,22 @@ ssh -L 8686:/run/wgft/admin.sock root@vps
 
 転送が届かないときは、VPS で `sudo wgft server doctor` を実行します。[Web UI の診断画面](docs/images/doctor-rule.ja.png)でも、ルールごとに通信が止まった箇所を確認できます。agent 側は [agent doctor](docs/cli.md#wgft-agent-doctor) で調べます。agent の転送を一時的に止める場合は、[agent disable](docs/cli.md#wgft-agent-disable) を使います。
 
-agent が接続できる LAN の宛先は、[`WGFT_AGENT_ALLOW_TARGETS`](docs/operations.ja.md#エージェントの転送先を制限する) で限定できます。
+agent が接続できる LAN の宛先は、[`WGFT_AGENT_ALLOW_TARGETS`](docs/manual/operations.ja.md#エージェントの転送先を制限する) で限定できます。
 
 ## 詳しい手順
 
-- [セットアップガイド](docs/setup.ja.md): Linux の server と agent を systemd で常駐させ、最初のルールを追加する手順
-- [環境別の導入](docs/setup-alternatives.ja.md): Windows、macOS、Docker、root 権限のない VPS
-- [運用ガイド](docs/operations.ja.md): Web UI、HTTPS、ログ、削除方法
+- [セットアップガイド](docs/manual/setup.ja.md): Linux の server と agent を systemd で常駐させ、最初のルールを追加する手順
+- [環境別の導入](docs/manual/setup-alternatives.ja.md): Windows、macOS、Docker、root 権限のない VPS
+- [運用ガイド](docs/manual/operations.ja.md): Web UI、HTTPS、ログ、削除方法
 - [CLI リファレンス](docs/cli.md): 各コマンドと使用例
 - [文書の索引](docs/README.ja.md): 手順、設計の各節、開発資料
-- [設計文書](docs/design.md)と[アーキテクチャ](docs/architecture.md): 転送動作と実装
+- [設計文書](docs/design/README.ja.md)と[アーキテクチャ](docs/development/architecture.md): 転送動作と実装
 - [開発上の約束](CLAUDE.md): テスト環境と変更の進め方
 - [セキュリティポリシー](SECURITY.md): 脆弱性の報告方法
 
 ## 開発状況
 
-v1.4.1。v1.0 からの互換性の保証は Linux の server と agent、Windows 11 の実機で確認した範囲の Windows agent に適用します。macOS の agent は実機で基本動作を確認済みですが、再接続を決める新しい判定は実機で未確認のため、保証の対象外です。対応範囲の定義は [設計文書の 7a.11 節](docs/design-compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)にあります。
+v1.4.1。v1.0 からの互換性の保証は Linux の server と agent、Windows 11 の実機で確認した範囲の Windows agent に適用します。macOS の agent は実機で基本動作を確認済みですが、再接続を決める新しい判定は実機で未確認のため、保証の対象外です。対応範囲の定義は [設計文書の 7a.11 節](docs/design/compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)にあります。
 
 更新後に旧版へ戻すことは保証しません。更新前にサーバのデータディレクトリをバックアップしてください。v1.2.0 以降のサーバのデータベースはスキーマの版 9 を使い、v1.1.x 以前の server は開きません。
 

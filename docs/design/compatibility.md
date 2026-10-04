@@ -116,7 +116,7 @@ UDP の応答の観測(10.2a 節)は、`server doctor --json` の `rule.target` 
 
 保たないものは、値の構文検査の追加・強化である。検査を新設・強化して今まで通っていた誤った値を拒むようにすることは、11a 節の「設定起因の失敗は終了コード 3」の原則に沿う限り互換の維持とみなす。値そのものの意味を変えることは互換でない。
 
-**ログ出力。** 保証は無い。秘密(登録トークン、恒久トークン、秘密鍵、`Authorization`、接続文字列全体)をログに出さないことは 10.4 節の約束だが、これは互換性の保証ではなく安全側の性質である。行の書式、語順、`journalctl` で拾える語彙は、いつでも変えてよい。`scripts/check-log-tokens.sh` は CI の内部検査であり、トークンらしき文字列がログに紛れていないかを人が確認した一覧と照合するだけで、ログの形式を外部に約束するものではない。`journalctl -u wgft | grep 'rules: '`(docs/setup.md)のような固定の接頭辞に頼る運用があっても、それは wgft の保証ではなく運用側の前提である。
+**ログ出力。** 保証は無い。秘密(登録トークン、恒久トークン、秘密鍵、`Authorization`、接続文字列全体)をログに出さないことは 10.4 節の約束だが、これは互換性の保証ではなく安全側の性質である。行の書式、語順、`journalctl` で拾える語彙は、いつでも変えてよい。`scripts/check-log-tokens.sh` は CI の内部検査であり、トークンらしき文字列がログに紛れていないかを人が確認した一覧と照合するだけで、ログの形式を外部に約束するものではない。`journalctl -u wgft | grep 'rules: '`(docs/manual/setup.md)のような固定の接頭辞に頼る運用があっても、それは wgft の保証ではなく運用側の前提である。
 
 **agent-server の wire protocol と capability。** 7a.6 節が定めるとおり、`pubkey`(agent → server)と `state`(server → agent)の既存フィールドの意味は変えない。版の交渉の仕組み(`protocol_min`/`protocol_max`/`capabilities`、`server_protocol_version`/`server_capabilities`、legacy v0)そのものが約束であり、これによって将来の版で全体状態の形を変えても、直前の版までの実装と rolling upgrade できる。保つものは、`pubkey`/`state` の JSON フィールド名と型、legacy v0 の判定規則(両方のフィールドが無ければ legacy)、malformed な advertisement と共通部分が無い場合を別の WebSocket close コード(`4003`/`4004`、`proto/stream.go`)で区別することである。保たないものは capability 文字列の語彙(まだ何も定義されていない)と、エージェント用 API のエラー文言である。既存のフィールドに新しい値を足すことは、wire の上では加算として扱わない。受け取る側の旧い実装がその値を許容すると確かめられていなければ、capability で交渉する変更として扱う(7a.6 節。旧い側が表せないルールは理由付きの `not_active` にする)。
 
@@ -130,7 +130,7 @@ UDP の応答の観測(10.2a 節)は、`server doctor --json` の `rule.target` 
 
 **`deploy/` の同梱物。** 保つものは、systemd の unit ファイル名(`server.service`・`agent.service`。それぞれの中身にある `ExecStart`・`RestartPreventExitStatus=3`)、エージェントのカーネルモードの drop-in のファイル名(`agent.kernel.conf`。利用者が手順の中でパスで参照するため)、compose ファイルが使う環境変数名とボリュームパス、macOS の plist の `Label`(`io.github.rahanahu.wgft.agent`)である。保たないものは、サンドボックス化の詳細(`ProtectSystem=strict` などの個々の設定)で、守りを強める変更は互換の維持とみなす。
 
-**リリース成果物とコンテナイメージ。** 保つものは、バイナリ名の形式 `wgft-{os}-{arch}`(Windows だけ `.exe` が付く)と、対応する `.sha256`・`.spdx.json` が付くこと、コンテナイメージ名 `ghcr.io/rahanahu/wgft-server`・`ghcr.io/rahanahu/wgft-agent` とその版タグ(`vX.Y.Z`)と、リリースのバイナリの `wgft version` の 1 行目がそのリリースのタグ(`vX.Y.Z`)そのものであることである。docs/setup.md の手順は、この行で systemd の unit のファイルをバイナリと同じタグから取得する。保たないものは、`:latest` タグの中身(常に最新の版を指すので固定した参照ではない)と、対応する OS・アーキテクチャの組み合わせ(11a 節が明記するとおり、実機で検証できた組み合わせだけを増減する)である。この項は配布物の名前と付随物の形の約束であり、本節冒頭の暫定の扱いはこの項に影響しない。Windows と macOS の agent を暫定とすること自体は、現在配っているバイナリの配布を取りやめる決定ではない。配布する成果物については、この項の名前と付随物の形式を保つ。
+**リリース成果物とコンテナイメージ。** 保つものは、バイナリ名の形式 `wgft-{os}-{arch}`(Windows だけ `.exe` が付く)と、対応する `.sha256`・`.spdx.json` が付くこと、コンテナイメージ名 `ghcr.io/rahanahu/wgft-server`・`ghcr.io/rahanahu/wgft-agent` とその版タグ(`vX.Y.Z`)と、リリースのバイナリの `wgft version` の 1 行目がそのリリースのタグ(`vX.Y.Z`)そのものであることである。docs/manual/setup.md の手順は、この行で systemd の unit のファイルをバイナリと同じタグから取得する。保たないものは、`:latest` タグの中身(常に最新の版を指すので固定した参照ではない)と、対応する OS・アーキテクチャの組み合わせ(11a 節が明記するとおり、実機で検証できた組み合わせだけを増減する)である。この項は配布物の名前と付随物の形の約束であり、本節冒頭の暫定の扱いはこの項に影響しない。Windows と macOS の agent を暫定とすること自体は、現在配っているバイナリの配布を取りやめる決定ではない。配布する成果物については、この項の名前と付随物の形式を保つ。
 
 **Go モジュールとパッケージ(`proto/`、`cmd/`)。** `proto/` は `internal/` の外にあるため Go のコードとして外部から import できるが、README(英日とも)はこれをライブラリとして使えるとは謳っておらず、CLI とコンテナイメージだけを配布物として説明している。この文書は `proto/` の Go の型・関数を外部向けの API とは約束しない。約束しているのは `proto` パッケージが生成する JSON の形(ルールのスキーマ、wire protocol のメッセージ)であり、それは上記の各節で個別に保証している。Go のシグネチャの変更(フィールドの型、メソッドの追加)はこの節の対象外である。
 
