@@ -7,6 +7,7 @@ package proxyrelay
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
@@ -73,8 +74,10 @@ type Options struct {
 // Manager は現在のプロキシ中継のリスナー集合を持ち、宣言に収束させる。
 type Manager struct {
 	opts Options
-	mu   sync.Mutex
-	ls   map[uint16]*listener
+	// testHeaderWriter decorates only header writes; up retains its real connection identity.
+	testHeaderWriter func(net.Conn) io.Writer
+	mu               sync.Mutex
+	ls               map[uint16]*listener
 	// retiring は fail-closed にしたルールの待ち受け(待ち受けソケットは閉じ、成立済みの接続だけを
 	// 持つ。設計文書 7a.3 節の StopAccepting と Retire)。
 	retiring []*listener
@@ -105,6 +108,8 @@ type listener struct {
 	// pending は枠を取ってから track するまでの接続の数(エージェントへの接続中)。Retiring の
 	// 待ち受けを閉じてよいか(idle)の判定に使う
 	pending int
+	// testHookPendingRegistration pauses the locked pending-to-record transition.
+	testHookPendingRegistration func()
 	// gen は実効宛先(エージェントのアドレスと待ち受けポート)を差し替えた回数。admission は accept の
 	// 時点の値を控え、track のときに値が変わっていれば、その接続は旧い実効宛先へつながっているので
 	// 中継を始めずに閉じる(仕様 6.2 節の実効宛先の変更)
@@ -150,7 +155,9 @@ func (d delivering) cut(c net.Conn) {
 // up を先に切る。公開側を先に閉じると、netpipe がその読み取りの失敗を受けて up を通常の Close で
 // 閉じ、RST の前に FIN が出ることがあるため
 func (r relayed) cut(c net.Conn) {
-	abortUpstream(r.up)
+	if r.up != nil {
+		abortUpstream(r.up)
+	}
 	c.Close()
 }
 
@@ -605,26 +612,69 @@ func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 		}
 	}
 	defer unpend()
+	// A completed setup error becomes a delivery record only in userspace mode. Pending
+	// ownership stays with this worker until registration or the existing intentional cut.
+	failed := func(up net.Conn) {
+		if !m.opts.HoldUntilDelivered {
+			c.Close()
+			if up != nil {
+				up.Close()
+			}
+			return
+		}
+		wake, ok := l.finishPending(a, up, true)
+		if !ok {
+			relayed{up: up}.cut(c)
+			return
+		}
+		pending = false
+		if up != nil {
+			// A partial header still ends gracefully; its real endpoint stays in the record.
+			up.Close()
+		}
+		netpipe.StopForDelivery(c)
+		pair := []net.Conn{c}
+		if up != nil {
+			pair = append(pair, up)
+		}
+		netpipe.AwaitDelivered(wake, pair...)
+		l.endDelivery(c)
+		c.Close()
+		if up != nil {
+			up.Close()
+		}
+	}
 	up, err := m.opts.Dial(net.JoinHostPort(rule.AgentAddr.String(), itoa(rule.AgentPort)))
 	if err != nil {
 		if l.dialLog.Allow() {
 			m.opts.Logf("proxy: %d: cannot connect to agent %s:%d: %v", rule.ListenPort, rule.AgentAddr, rule.AgentPort, err)
 		}
-		c.Close()
+		failed(nil)
 		return
 	}
 	if rule.ProxyProtocol {
 		hdr := proxyproto.HeaderProxyFromAddrs(2, c.RemoteAddr(), c.LocalAddr())
-		if _, err := hdr.WriteTo(up); err != nil {
-			c.Close()
-			up.Close()
+		var writer io.Writer = up
+		if m.testHeaderWriter != nil {
+			writer = m.testHeaderWriter(up)
+		}
+		if _, err := hdr.WriteTo(writer); err != nil {
+			failed(up)
 			return
 		}
 	}
-	unpend()
-	if !l.track(c, up, src, gen) {
-		// 実効宛先が変わった後にこの接続を残すと、旧いエージェントへ中継し続ける
-		return
+	if m.opts.HoldUntilDelivered {
+		if _, ok := l.finishPending(a, up, false); !ok {
+			relayed{up: up}.cut(c)
+			return
+		}
+		pending = false
+	} else {
+		unpend()
+		if !l.track(c, up, src, gen) {
+			// 実効宛先が変わった後にこの接続を残すと、旧いエージェントへ中継し続ける
+			return
+		}
 	}
 	defer l.untrack(c)
 	// ユーザー空間モードでは、公開側のカーネルのソケットの受信のバッファを netstack の接続 up の boost の
@@ -647,6 +697,30 @@ func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 	}
 	c.Close()
 	up.Close()
+}
+
+// finishPending atomically moves a userspace worker from pending to its active or failed
+// delivery record. Retirement and source-only updates retain the existing pending exception.
+// If close or retarget won, the caller keeps pending until it has cut the returned pair.
+func (l *listener) finishPending(a *admitted, up net.Conn, failed bool) (chan struct{}, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed || l.gen != a.gen {
+		return nil, false
+	}
+	r := relayed{src: a.src.String(), up: up}
+	l.pending--
+	if l.testHookPendingRegistration != nil {
+		l.testHookPendingRegistration()
+	}
+	var wake chan struct{}
+	if failed {
+		wake = make(chan struct{})
+		l.delivering[a.c] = delivering{relayed: r, wake: wake}
+	} else {
+		l.conns[a.c] = r
+	}
+	return wake, true
 }
 
 // beginDelivery は、中継を終えた組を conns から delivering へ移し、待ちを起こす channel を返す。切る経路が

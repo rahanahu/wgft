@@ -23,6 +23,17 @@ const (
 // (nettun.TCPConn.Delivered)。
 type deliverer interface{ Delivered() bool }
 
+// StopForDelivery は、届け終えるまで保持する接続の読み書きを止める。Linux のカーネルの TCP は
+// 受信のメモリを確かめて止めるか RST で終え、それ以外は通常の Close で閉じる。中継の開始前に
+// 失敗した接続にも使う。呼び出し側が接続を登録したまま AwaitDelivered で待ち、枠を返す。
+func StopForDelivery(c net.Conn) {
+	if tc, ok := holdable(c); ok {
+		stopKernel(tc)
+	} else {
+		c.Close()
+	}
+}
+
 // PipeHold は PipeResetB と同じく中継する。違いは終わり方で、Linux のカーネルの TCP の接続
 // (*net.TCPConn)を閉じずに返す。そのような接続は、受信のメモリ(順序外のキューを含む)を持てば RST で
 // 即座に終え、それ以外は shutdown(SHUT_RDWR)で読み書きだけを止め、送信のキューの後ろに FIN を置いた
@@ -37,13 +48,7 @@ type deliverer interface{ Delivered() bool }
 func PipeHold(a, b net.Conn, resetB func()) {
 	var once [2]sync.Once
 	stop := func(i int, c net.Conn) {
-		once[i].Do(func() {
-			if tc, ok := holdable(c); ok {
-				stopKernel(tc)
-			} else {
-				c.Close()
-			}
-		})
+		once[i].Do(func() { StopForDelivery(c) })
 	}
 	end := func() {
 		_, ha := holdable(a)
