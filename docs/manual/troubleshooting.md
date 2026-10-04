@@ -77,13 +77,8 @@ Its last-reply value is an observation and does not change that verdict.
 
 For TCP, `server doctor` can optionally open one connection through the tunnel and agent to the target:
 
-```sh
-sudo wgft server doctor r_01M2R009 --probe --from 203.0.113.7
-```
-
-Replace the rule ID and source address with the values being investigated.
 `--probe` creates a real target connection and accepts one TCP rule at a time.
-`--from` evaluates that address against the rule's source allow/deny lists; it does not impersonate an external client or test the public firewall.
+`--from` evaluates the supplied address against the rule's source allow/deny lists; it does not impersonate an external client or test the public firewall.
 Without `--probe`, `server doctor` does not dial a target.
 
 ## Common findings
