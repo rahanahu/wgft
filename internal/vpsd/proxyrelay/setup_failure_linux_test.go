@@ -246,8 +246,8 @@ func TestSetupFailedPendingPolicyException(t *testing.T) {
 	for _, op := range []string{"retire", "source restriction"} {
 		t.Run(op, func(t *testing.T) {
 			r := newSetupWorker(t, true)
-			r.l.beginStopAccepting()
 			if op == "retire" {
+				r.l.beginStopAccepting()
 				r.l.retire(func(netip.Addr) bool { return false })
 			} else {
 				rule := r.l.rule
