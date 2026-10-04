@@ -1,121 +1,86 @@
 # wgft の開発の約束
 
-This file holds the project conventions, in Japanese, for anyone changing the code, including Claude Code, which reads it automatically. The README, SECURITY.md and all tool output are in English, and issues and pull requests in English are welcome.
+These project conventions apply to everyone changing the repository, including coding agents.
+README, SECURITY.md, tool output, issues, pull requests and commits use English; paired Japanese documents are maintained alongside their English originals.
 
-wgft の VPS 側はカーネルの nftables、WireGuard、conntrack を直接操作します。そのため、この操作を確かめる開発環境と、変更の進め方に関する約束があります。
+## 作業前の参照と権限
 
-## 開発用ラボの立て方
+[文書の索引](docs/README.ja.md)から、変更する分野の正本を選びます。
+設計と互換性の変更は[設計索引](docs/design/README.ja.md)、コードの対応は[アーキテクチャ](docs/development/architecture.md)、導入と運用は[利用者向け索引](docs/manual/README.ja.md)を参照します。
+すべての変更で[テストの規範](docs/development/testing.md)と[文書の更新手順](docs/development/documentation.ja.md)の該当条件を確認します。
+ローカルの追加の約束がある場合も、作業前に確認します。
+所有者の明示的な LGTM を得てから main へマージし、本番への操作は所有者の明示的な指示がある場合だけ行います。
+秘密情報と非公開の情報を公開ファイルに書きません。
+`git status` に他の作業者の変更がある場合は、自分の変更に混ぜず、触らずに保持します。
 
-コードの編集と `go test` はホストで行います。nftables、wg0、conntrack が絡む実験と、通しの結合テストは、Incus の VM `wgft-lab` の中の network namespace で行います。ホストや Docker でカーネル機能を試すと、ホスト自身のカーネルバージョンや、Docker が有効にする `br_netfilter` 経由のルールと conntrack が結果に混ざるため、VM に切り分けます。
+<a id="開発用ラボの立て方"></a>
+<a id="テストの分け方"></a>
+<a id="ci-が通す検査"></a>
+<a id="単体テストのカバレッジが低いパッケージ"></a>
+## 開発環境とテスト
 
-ラボの起動は `lab/lab up` の 1 コマンドで済みます。Incus が入っていて自分が `incus-admin` グループに属していれば、VM の作成、パッケージの導入、`client - vps - homerouter(NAT) - home` と homerouter の先の `lan` の 5 つの network namespace によるトポロジの構築までがこの 1 コマンドに含まれます。ビルドは `lab/lab build` がホスト上の Go コードを VM の `/usr/local/bin` にインストールし、`lab/lab exec <ns> <コマンド>` で各 namespace 内のプロセスを起動します。壊れた状態になったら `lab/lab reset` でスナップショットに戻せます。VM の名前は `WGFT_LAB_VM` で変えられ、既定は `wgft-lab` です。名前を変えると複数の VM を並べて立てられます。
+コードの編集と root 権限を要しない `go test ./...` はホストで行います。
+nftables、WireGuard、conntrack を使う実験と結合テストは、Incus の VM の network namespace で行います。
+ホストと Docker のカーネル設定が結果に混ざるため、カーネル機能の開発環境に Docker を使いません。
+配布用イメージの確認は別に実施します。
+ラボの構築と実行は[lab/README.md](lab/README.md)に従います。
 
-マージの前に流すラボの一式は、1 台の VM を Lab Host とし、Lab Host の中に使い捨ての Sandbox を並べて流します。Sandbox は確認ごとの network namespace、作業ディレクトリ、プロセスをひとまとまりに持つ隔離の単位で、発行と後片付けは [tools/labhost](tools/labhost) が担います。一式は `lab/lab build` のあとに `lab/lab exec vm labhost run -parallel 8 all` の 1 コマンドで流し、結果を PR の本文に書きます。詳しい手順は [lab/README.md](lab/README.md) に、一式の位置づけは [docs/development/testing.md](docs/development/testing.md) の「マージの前に流すテスト」にあります。
+コードを変える PR は、マージの前にラボの一式を両モードで流し、結果を PR の本文に書きます。
+既定の実行は `lab/lab build` の後の `lab/lab exec vm labhost run -parallel 8 all` です。
+文書だけの PR ではラボを流しません。
+「コード」の範囲、CI の条件、追加の B 類、段階完了時、リリース候補、実機の関門は[テストの規範](docs/development/testing.md)に従います。
+CI はラボの結合テストを実行しないため、CI の合格だけでラボの関門を満たしたとは判断しません。
+`internal/vpsd` と `internal/dataplane/linuxkernel/wg` はカーネルと実ネットワークの配線を扱い、単体テストの低いカバレッジをラボの結合テストで補います。
 
-## テストの分け方
+<a id="実験の置き場所"></a>
+<a id="設計文書を先に直す順序"></a>
+<a id="コミットの粒度"></a>
+## 設計、実験、コミット、リリース
 
-`go test ./...` はホストで実行する単体テストで、ネットワーク namespace や root 権限を必要としません。`lab/` 配下の結合テストは Incus の VM を必要とするため、CI では実行されません。開発者はコードを変える PR のマージの前にラボの結合テストの一式を流します。CI は単体テストと静的検査のほか、Windows と macOS でのテスト、リリースの成果物の検査、既知の脆弱性の検査を、変更の内容に応じて流します。文書だけを変える PR では、ラボを流しません。どのテストをどの変更と時点で流すかは [docs/development/testing.md](docs/development/testing.md) に定めてあります。
+決定事項を変えるときは、現行の設計を先に直してから実装します。
+実験で前提が崩れた場合も、設計と改訂記録を直してから実装します。
+使い捨ての実験コードはリポジトリに含めず、結果、設計への影響、未確認の点を設計の改訂記録に書きます。
+測定値の一覧、試行回数、所要時間の詳細は PR の本文に書きます。
 
-## 実験の置き場所
+1 コミットは 1 話題にし、英語の Conventional Commits を使います。
+設計の改訂を伴う実装は同じコミットに含め、PR のタイトルも同じ形式にします。
+詳細と使える type は[コミットの約束](docs/development/commits.md)に従います。
+main へはスカッシュでマージします。
+リリースは版の記述を更新する `chore(release): vX.Y.Z` のコミットに `vX.Y.Z` を付けます。
+版の選択、保守ブランチ、Latest とコンテナの `:latest` の扱いは[リリースの手順](docs/development/releases.md)に従います。
 
-nftables や WireGuard の挙動を確かめる使い捨ての実験コードは、このリポジトリには含めていません。実験はラボで行い、結果の要約と、設計と仕様への影響を [docs/design/revisions.md](docs/design/revisions.md) の「改訂の記録」に書きます。要約は、何を確かめて何が分かったかと、未確認の点です。試行の回数、所要時間、測定値の一覧などの詳細はプルリクエストの本文に書き、改訂の記録には書きません。
-
-## 設計文書を先に直す順序
-
-決定事項を変えるときは、[設計文書の索引](docs/design/README.ja.md)から該当する節を開き、その規範を先に直してから実装します。ラボでの実験によって設計の前提が崩れた場合も、設計文書の改訂(改訂の記録への追記を含む)、実装、の順で進めます。
-
-## コミットの粒度
-
-1 つのコミットは 1 つの話題にします。コミットメッセージは英語で書き、1 行目は Conventional Commits の形にします。
-
-```
-<type>(<scope>): <要点>       1 行目。72 文字以内、命令形、末尾にピリオドを付けない
-
-<なぜ変えたか。何を確かめたか>  本文。省略可
-```
-
-`type` は次の 8 つだけを使います。`scope` は任意で、`server`、`agent`、`nft`、`wg`、`ui`、`cli`、`docker`、`deps` のようにパッケージや対象を短く書きます。
-
-| type | 使いどころ |
-|---|---|
-| `feat` | 利用者から見える機能の追加 |
-| `fix` | 不具合の修正。守りの穴を塞ぐ変更も含みます |
-| `docs` | README、設計文書、コメントだけの変更 |
-| `refactor` | 挙動を変えないコードの整理 |
-| `test` | テストだけの変更 |
-| `build` | ビルド、GoReleaser、Dockerfile、go.mod |
-| `ci` | GitHub Actions と検査スクリプト |
-| `chore` | 上のどれでもない雑務 |
-
-設計文書の改訂を伴う実装は、その改訂と実装を同じコミットに含めます。type は変更の性質で選び、機能追加は `feat`、不具合の修正は `fix`、挙動を変えないコードの整理は `refactor` にします。設計文書だけを変えるときは `docs` です。
-
-プルリクエストのタイトルも、コミットの 1 行目と同じ形 (`<type>(<scope>): <要点>`) にします。複数のコミットを含むときは、主な変更の `type` を使います。main にはスカッシュでマージします。このリポジトリの現在の設定 (GitHub の既定の「コミットが 1 つならその 1 行目、複数ならタイトル」) では、main のコミットの 1 行目は、コミットが 1 つだけのプルリクエストではそのコミットの 1 行目、複数のときはタイトルになります。このため、タイトルとコミットの 1 行目の両方をこの形にします。
-
-リリースは、版の記述 (README の Status の節) を直すコミットを `chore(release): vX.Y.Z` の形で main に入れ、そのコミットにタグ `vX.Y.Z` を打ちます。版の上げ方は、前回のタグ以降に互換を崩す変更があれば major、`feat` があれば minor、`fix` だけなら patch です。`feat` が無くても、まとまった内部の改善を含むリリースは、所有者の判断で minor にできます。
-
-パッチだけを当てて出すリリースは、main がすでに次の版の未リリースの変更を持っていて、そのパッチに含めてはいけないときに、メンテナンスブランチ `release-vX.Y` で行います。これには、より新しい版をすでにリリースした後で古い系列にパッチを当てる場合も含みます。v1.1.2 は前者でした。main は v1.2 の未リリースの変更をすでに持っていました。その系列の最後のタグから `release-vX.Y` を切り出し、当てる修正は PR でこのブランチへバックポートします。`chore(release): vX.Y.Z` のコミットは main ではなくこのブランチに置き、タグもそこで打ちます。
-
-そのパッチが最新のリリースになるときだけ、main の README の Status の節をこの版番号まで進める小さな PR を別に出します。最新のリリースにならないときは、節を戻しません。
-
-より新しい版をすでにリリースした後で古い系列にパッチを当てるときだけ、GitHub の「Latest」表示とコンテナイメージの `:latest` タグに注意が要ります。何もしなければ、この表示とタグは、より新しい main 系列のリリースではなく、この古い系列のパッチを指すことになります。このリリースの前に、`.goreleaser.yaml` に `release.make_latest` を false として設定します。現在の `.goreleaser.yaml` にはこの項目がありません。`.github/workflows/release.yml` も、agent-image と server-image の両方のジョブが `:latest` へ無条件で push している箇所を変えます。
-
-別のセッションや別の人が同時に作業していることがあります。`git status` で自分のものではない未コミットの変更を見つけたら、自分の変更と混ぜずに、触らないでおきます。
-
-## CI が通す検査
-
-`.github/workflows/ci.yml` は main への push と pull request のたびに、変更されたパスに応じて次のジョブを流します。流す条件の決め方は [docs/development/testing.md](docs/development/testing.md) の「CI とラボの関係」にあります。
-
-- `build-test`:`gofmt -l` によるフォーマットの確認、`go mod tidy` が `go.mod` と `go.sum` を変えないことの確認、`go vet`、ビルドと `go test ./...`、Windows と macOS 向けのクロスビルドと `go vet`、`staticcheck` による静的解析です。Markdown の文書と `docs/images/` の画像だけを変える変更では流しません。ヘルプから生成する `docs/cli.md` を変える変更は、文書だけの変更に当たりません
-- `windows-test` と `macos-test`:Windows と macOS の runner で、[scripts/portable-test-packages.sh](scripts/portable-test-packages.sh) が選ぶ package のテストを流します。Windows ではテストの前に全体のビルドと `go vet` も流します。Go のソースファイル、`go.mod`、`go.sum`、このスクリプトのどれかを変える変更で流します
-- `release-snapshot`:GoReleaser を snapshot のモードで動かし、成果物の名前とチェックサムを確かめます。GoReleaser の設定、リリースに関わるスクリプト、`deploy/` の Dockerfile と compose のファイル、`go.mod`、`go.sum`、`.github/workflows/` のどれかを変える変更で流します
-- `govulncheck`:既知の脆弱性の検査です。`release-snapshot` を流す変更と Go のソースファイルの変更で流します。週に 1 回の定期実行でも流し、定期実行で流す検査はこれだけです
-- `lint-output`:文字列リテラルへの日本語混入の検査([scripts/check-japanese](scripts/check-japanese)。ツールの出力は英語だけを使う約束のためです)、公開対象ファイルの全角記号の検査([scripts/check-ascii-punct.sh](scripts/check-ascii-punct.sh))、トークンの値をログに出す行の検査([scripts/check-log-tokens.sh](scripts/check-log-tokens.sh))です。どの変更でも流します
-
-変更されたパスを判定できないとき、手動で実行したとき (`workflow_dispatch`)、`.github/workflows/` を変えたときは、すべてのジョブを流します。ラボの結合テストは Incus の VM を必要とするため、CI には含まれません。
-
-## 内部構造の固定の終了後も効く制約
-
-v1.0 までの内部構造の固定は、v1.0.0 のリリース (2026-09-23) をもって終了しました。
-
-固定の終了後も、次の 3 つの制約が別の理由で効きます。
-
-- 依存の向き:規範は [docs/design/internals.md](docs/design/internals.md#7a7-package-配置) の 7a.7 節で、`internal/dataplane/deps_test.go` の `TestDependencyDirection`、`TestPureLayersStayPure`、`TestVpsdSubpackagesDoNotImportVpsd` が検査します
-- Admission Policy のコンパイラの import の境界:規範は [docs/design/policy.md](docs/design/policy.md#7a9-admission-policy-のコンパイラ) の 7a.9 節で、`internal/policy/nftables` が `google/nftables` を import しないことを、同じ `internal/dataplane/deps_test.go` の `TestPolicyNftablesDoesNotImportGoogleNftables` が検査します
-- 外部仕様の互換性の保証:規範は [docs/design/compatibility.md](docs/design/compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧) の 7a.11 節です。この保証は v1.0 のリリースをもって始まりました。内部の作りは変えられますが、公開しているサーフェスの約束は保ちます
-
+<a id="内部構造の固定の終了後も効く制約"></a>
 ## コードと出力の約束
 
-- ツールの出力 (ログ、エラー、CLI のヘルプと結果) は英語だけで書きます。i18n は持ちません。Web UI だけが `internal/vpsd/admin/i18n.go` で日英を切り替えます。コードのコメントは日本語のままで構いません
-- 設定は `WGFT_*` の環境変数で受け取ります。ファイルはその dotenv、フラグはその別名です。`--force`、`--purge`、`--adopt-existing`、`--yes`、`--dry-run` のような 1 回限りの操作はフラグでしか渡せません。規範は [docs/design/security.md](docs/design/security.md#11a-設定の渡し方) の 11a 節です
-- 利用者に見える呼び名とコードの識別子を対応させます。agent の `agent.json` は「認証情報 (credentials)」で、パッケージも `internal/agent/credentials` です。server の SQLite は「サーバのデータベース」(`DBPath`) です。設計文書だけは「状態ファイル」と呼びます (3 節の用語)。VPS 側のデーモンは設計文書と内部では `vpsd`、利用者に見える名前は `server` です
-- 環境を見て挙動を推測しません。モードもファイアウォールも、明示された値に従うか、提示して止まります
+- 出力:ログ、エラー、CLI のヘルプと結果は英語だけにします。i18n は Web UI の `internal/vpsd/admin/i18n.go` だけが持ちます。コードのコメントは日本語で構いません。
+- 設定:`WGFT_*` の環境変数で受け取り、dotenv はそのファイル表現、フラグはその別名です。`--force`、`--purge`、`--adopt-existing`、`--yes`、`--dry-run` のような 1 回限りの操作はフラグだけで渡します。規範は[設定の設計](docs/design/security.md#11a-設定の渡し方)に従います。
+- 呼び名:agent の `agent.json` は「認証情報 (credentials)」で、`internal/agent/credentials` に対応します。server の SQLite は「サーバのデータベース」(`DBPath`)です。設計だけは用語の「状態ファイル」を使います。VPS 側のデーモンは設計と内部で `vpsd`、利用者向けでは `server` と呼びます。
+- 明示的な選択:モードとファイアウォールの挙動を環境から推測せず、指定された値に従うか、提示して停止します。
 
-## 文書の約束
+v1.0 までの内部構造の固定は v1.0.0 のリリースで終了しました。
+依存の向きは[内部アーキテクチャ](docs/design/internals.md#7a7-package-配置)、Admission Policy の import の境界は[ポリシーの設計](docs/design/policy.md#7a9-admission-policy-のコンパイラ)、公開サーフェスの互換性は[互換性の保証](docs/design/compatibility.md)に従います。
+前 2 つは `internal/dataplane/deps_test.go` が検査します。
+内部の構造を変えても公開サーフェスの約束を保ちます。
 
-- README は `README.md` (英語) と `README.ja.md` (日本語) の 2 本です。構成と情報量を同じにし、片方を直したらもう片方も直します。英語は英語として自然な書き方で構いません
-- 日本語の文書は次の規範に従います。書く前に読み直します
-  - https://raw.githubusercontent.com/megmogmog1965/claude-code-writing-style/main/plugins/writing-style/skills/style-review/references/rules.md
-  - https://gist.githubusercontent.com/k16shikano/fd287c3133457c4fd8f5601d34aa817d/raw (日本語技術文書の文章規範)
-  - https://gist.githubusercontent.com/k16shikano/eb2929f13ed19c97188393d297be8432/raw (「駄文の見分け方」の部分だけ使います。文書自身を語る文は削ります)
-- 要点は次のとおりです。です・ます体で書きます。項目を主語にした定義文にします。体言止め、指示語 (ここ、そこ)、擬人化 (プログラムに「教える」)、翻訳調 (「前面に出して」) を使いません。くだけた語 (足す、消す、上げる) は書き言葉にします。見出しは内容を特定する名詞句にします。箇条書きのラベルは名詞句とコロンにします。未確認のことは「未確認」と書きます
-- 英語の語を日本語に開くときは、語ごとの置き換えをしません。定着した日本語が無い語は、意味を担う日本語の語を選ぶか、具体的に書き下します。例えば end-to-end test を「端から端までのテスト」と機械的に置き換えず、文脈に応じて「通しテスト」のように書きます。開いた結果が不自然な日本語になる言い換えは採りません
-- 括弧とコロンは ASCII にします。README では括弧による補足をできるだけ使わず、別の文にします。図は README なら Mermaid にします
-- 試していないことを手順として書きません。ラボか実機で通したものだけを書きます
+<a id="文書の約束"></a>
+<a id="コマンドのヘルプとリファレンスの直し方"></a>
+<a id="web-ui-のスクリーンショットの撮り直し方"></a>
+## 文書、生成する CLI、画像
 
-## コマンドのヘルプとリファレンスの直し方
+日英の対は同じ構成と情報量を保持し、片方を直したらもう片方も直します。
+日本語は[文書の表記規範](docs/development/documentation.ja.md#日本語と公開表記の規範)を執筆前に読み直し、です・ます体、ASCII の括弧とコロンで書きます。
+試していないことを実行済みの手順として書かず、未確認と明記します。
 
-コマンドの長い説明と使用例は `cmd/wgft/helptext.go` の表にまとめてあります。コマンドの定義には 1 行の `Short` だけを置きます。[docs/cli.md](docs/cli.md) はこのヘルプから生成した文書で、手では編集しません。ヘルプを変えたら、次のコマンドで生成し直して同じコミットに入れます。
+コマンドの長い説明と使用例は `cmd/wgft/helptext.go` に置き、コマンドの定義には 1 行の `Short` だけを置きます。
+`docs/cli.md` は手で編集しません。
+ヘルプを変えた場合は次のコマンドで生成し直し、同じコミットに含めます。
 
-```
+```sh
 go test ./cmd/wgft -run TestCLIDocUpToDate -update
 ```
 
-`go test` は docs/cli.md がヘルプと一致しているかを照合するので、生成を忘れると CI が落ちます。実行できるコマンドに使用例が無い場合も、テストが落ちます。ヘルプに挙動を書くときは、ラボで確かめたことだけを書きます。README の日英にはコマンド一覧の表を置いておらず、コマンドの説明は docs/cli.md と `wgft <command> --help` に一本化しています。
-
-## Web UI のスクリーンショットの撮り直し方
-
-Web UI のテンプレートや文言を変えたとき、サンプルデータの形を変えたときは、`scripts/screenshot-ui.sh` を実行して撮り直します。撮り直したら、`git diff --stat` で差分の大きさを確かめてからコミットしてください。詳しい手順と前提条件は、そのスクリプトの冒頭にあります。
-
-## 単体テストのカバレッジが低いパッケージ
-
-`internal/vpsd` と `internal/dataplane/linuxkernel/wg` は、単体テストのカバレッジが意図的に低いパッケージです。これらはカーネルの nftables や WireGuard、実ネットワークとの配線を担う層であり、モックに置き換えると確かめられる範囲が狭くなります。この層は `lab/` の結合テストで、実機に近い環境での動作を確かめる方針を取っています。
+テストはヘルプとの一致と、実行可能なコマンドの使用例を検査します。
+ヘルプの挙動はラボで確認したことだけを書きます。
+README はコマンド一覧を重複させず、`docs/cli.md` と `wgft <command> --help` に案内します。
+Web UI のテンプレート、文言、サンプルデータを変更した場合は `scripts/screenshot-ui.sh` で撮り直し、`git diff --stat` で差分の大きさを確認してからコミットします。
+前提と手順はスクリプトの冒頭に従います。

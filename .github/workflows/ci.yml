@@ -420,5 +420,9 @@ jobs:
         run: go run ./scripts/check-japanese/
       - name: ASCII punctuation in public files
         run: bash scripts/check-ascii-punct.sh
+      - name: documentation links and navigation
+        run: python3 scripts/check-docs.py
+      - name: documentation checker regression tests
+        run: python3 scripts/check-docs-test.py
       - name: no token values in logs
         run: bash scripts/check-log-tokens.sh
