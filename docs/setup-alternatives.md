@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Choose your deployment
 
 [Current document](manual/setup-alternatives.md)

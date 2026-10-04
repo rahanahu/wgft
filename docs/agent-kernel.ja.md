@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Linux エージェントのカーネルモード
 
 [現在の文書](manual/agent-kernel.ja.md)

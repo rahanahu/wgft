@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # セットアップ
 
 [現在の文書](manual/setup.ja.md)

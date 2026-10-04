@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Windows と macOS のエージェント
 
 [現在の文書](manual/setup-desktop.ja.md)

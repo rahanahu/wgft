@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # 環境別の導入
 
 [現在の文書](manual/setup-alternatives.ja.md)

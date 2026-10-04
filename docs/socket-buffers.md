@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Linux socket buffers
 
 [Current document](manual/socket-buffers.md)

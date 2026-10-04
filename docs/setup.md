@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Setup
 
 [Current document](manual/setup.md)

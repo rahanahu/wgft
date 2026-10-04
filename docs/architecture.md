@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # wgft アーキテクチャ
 
 [現在の文書](development/architecture.md)

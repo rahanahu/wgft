@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Linux のソケットのバッファ
 
 [現在の文書](manual/socket-buffers.ja.md)

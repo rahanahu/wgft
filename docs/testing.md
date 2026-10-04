@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # テストの分類と実行の契機
 
 [現在の文書](development/testing.md)

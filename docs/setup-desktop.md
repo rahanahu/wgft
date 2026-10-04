@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Windows and macOS agents
 
 [Current document](manual/setup-desktop.md)

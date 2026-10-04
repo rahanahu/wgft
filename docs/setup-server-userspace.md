@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Run the VPS in userspace mode
 
 [Current document](manual/setup-server-userspace.md)

@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Docker で動かす
 
 [現在の文書](manual/setup-docker.ja.md)

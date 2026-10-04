@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Kernel mode for the Linux agent
 
 [Current document](manual/agent-kernel.md)

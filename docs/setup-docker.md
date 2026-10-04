@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Run with Docker
 
 [Current document](manual/setup-docker.md)

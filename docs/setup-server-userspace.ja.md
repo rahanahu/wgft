@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # VPS をユーザー空間モードで動かす
 
 [現在の文書](manual/setup-server-userspace.ja.md)

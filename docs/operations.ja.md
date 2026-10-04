@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # 転送と運用
 
 [現在の文書](manual/operations.ja.md)

@@ -1,3 +1,5 @@
+<!-- docs-status: deprecated -->
+
 # Forwarding and operations
 
 [Current document](manual/operations.md)
