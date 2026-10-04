@@ -18,7 +18,7 @@ The guard does not authenticate packets or replace WireGuard's cryptography or t
 It retains no source-keyed ledger or diagnostic history.
 
 At exhaustion, a new agent or an agent whose public IP changed can lose handshake attempts.
-Ongoing existing-source traffic can retain occupancy.
+Existing-source handshakes can retain occupancy when they reach the limiter under load.
 After candidate traffic stops and bounded pending handshakes finish, the dependency's existing garbage collector removes idle entries and admission recovers without recreating the Device.
 Recovery depends on scheduler and queue progress; no fixed recovery deadline or fairness guarantee is promised.
 
