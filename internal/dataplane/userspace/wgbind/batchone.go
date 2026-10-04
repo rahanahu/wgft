@@ -65,6 +65,14 @@ func (b *batchOne) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if err != nil {
 		return nil, actual, err
 	}
+	// Preserve the gate's receive-function validation before wrapping would
+	// turn a nil inner function into a nonnil receiver method.
+	for _, fn := range fns {
+		if fn == nil {
+			_ = b.Bind.Close()
+			return nil, 0, errReceiveLayout
+		}
+	}
 	gen := &generation{}
 	b.mu.Lock()
 	b.cur = gen

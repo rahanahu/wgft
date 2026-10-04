@@ -48,7 +48,7 @@ type Config struct {
 // Tunnel は動いているトンネル。relay.Network として netstack 上にリスナーを開ける。
 type Tunnel struct {
 	cfg  Config
-	dev  *device.Device
+	dev  *wgbind.Device
 	tnet *nettun.Device
 
 	// bufs は、このトンネルを立てた直後に測った WireGuard の UDP ソケットのバッファである
@@ -93,7 +93,10 @@ func New(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
 	t := &Tunnel{cfg: cfg, tnet: tnet}
-	t.dev = device.NewDevice(tnet, bindForDevice(), device.NewLogger(device.LogLevelError, "wg: "))
+	t.dev, err = wgbind.NewDevice(tnet, bindForDevice(), device.NewLogger(device.LogLevelError, "wg: "))
+	if err != nil {
+		return nil, fmt.Errorf("wireguard source guard: %w", err)
+	}
 
 	ep, err := resolve(cfg.Endpoint)
 	if err != nil {
