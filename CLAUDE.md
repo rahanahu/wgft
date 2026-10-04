@@ -18,11 +18,11 @@ wgft の VPS 側はカーネルの nftables、WireGuard、conntrack を直接操
 
 ## 実験の置き場所
 
-nftables や WireGuard の挙動を確かめる使い捨ての実験コードは、このリポジトリには含めていません。実験はラボで行い、結果の要約と、設計と仕様への影響を [docs/design.md](docs/design.md) の「改訂の記録」に書きます。要約は、何を確かめて何が分かったかと、未確認の点です。試行の回数、所要時間、測定値の一覧などの詳細はプルリクエストの本文に書き、改訂の記録には書きません。
+nftables や WireGuard の挙動を確かめる使い捨ての実験コードは、このリポジトリには含めていません。実験はラボで行い、結果の要約と、設計と仕様への影響を [docs/design-revisions.md](docs/design-revisions.md) の「改訂の記録」に書きます。要約は、何を確かめて何が分かったかと、未確認の点です。試行の回数、所要時間、測定値の一覧などの詳細はプルリクエストの本文に書き、改訂の記録には書きません。
 
 ## 設計文書を先に直す順序
 
-決定事項を変えるときは、設計文書([docs/design.md](docs/design.md))を先に直してから実装します。ラボでの実験によって設計の前提が崩れた場合も、設計文書の改訂(改訂の記録への追記を含む)、実装、の順で進めます。
+決定事項を変えるときは、[設計文書の索引](docs/design.md)から該当する節を開き、その規範を先に直してから実装します。ラボでの実験によって設計の前提が崩れた場合も、設計文書の改訂(改訂の記録への追記を含む)、実装、の順で進めます。
 
 ## コミットの粒度
 
@@ -79,14 +79,14 @@ v1.0 までの内部構造の固定は、v1.0.0 のリリース (2026-09-23) を
 
 固定の終了後も、次の 3 つの制約が別の理由で効きます。
 
-- 依存の向き:規範は [docs/design.md](docs/design.md) の 7a.7 節で、`internal/dataplane/deps_test.go` の `TestDependencyDirection`、`TestPureLayersStayPure`、`TestVpsdSubpackagesDoNotImportVpsd` が検査します
-- Admission Policy のコンパイラの import の境界:規範は [docs/design.md](docs/design.md) の 7a.9 節で、`internal/policy/nftables` が `google/nftables` を import しないことを、同じ `internal/dataplane/deps_test.go` の `TestPolicyNftablesDoesNotImportGoogleNftables` が検査します
-- 外部仕様の互換性の保証:規範は [docs/design.md](docs/design.md) の 7a.11 節です。この保証は v1.0 のリリースをもって始まりました。内部の作りは変えられますが、公開しているサーフェスの約束は保ちます
+- 依存の向き:規範は [docs/design-internals.md](docs/design-internals.md#7a7-package-配置) の 7a.7 節で、`internal/dataplane/deps_test.go` の `TestDependencyDirection`、`TestPureLayersStayPure`、`TestVpsdSubpackagesDoNotImportVpsd` が検査します
+- Admission Policy のコンパイラの import の境界:規範は [docs/design-policy.md](docs/design-policy.md#7a9-admission-policy-のコンパイラ) の 7a.9 節で、`internal/policy/nftables` が `google/nftables` を import しないことを、同じ `internal/dataplane/deps_test.go` の `TestPolicyNftablesDoesNotImportGoogleNftables` が検査します
+- 外部仕様の互換性の保証:規範は [docs/design-compatibility.md](docs/design-compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧) の 7a.11 節です。この保証は v1.0 のリリースをもって始まりました。内部の作りは変えられますが、公開しているサーフェスの約束は保ちます
 
 ## コードと出力の約束
 
 - ツールの出力 (ログ、エラー、CLI のヘルプと結果) は英語だけで書きます。i18n は持ちません。Web UI だけが `internal/vpsd/admin/i18n.go` で日英を切り替えます。コードのコメントは日本語のままで構いません
-- 設定は `WGFT_*` の環境変数で受け取ります。ファイルはその dotenv、フラグはその別名です。`--force`、`--purge`、`--adopt-existing`、`--yes`、`--dry-run` のような 1 回限りの操作はフラグでしか渡せません。規範は [docs/design.md](docs/design.md) の 11a 節です
+- 設定は `WGFT_*` の環境変数で受け取ります。ファイルはその dotenv、フラグはその別名です。`--force`、`--purge`、`--adopt-existing`、`--yes`、`--dry-run` のような 1 回限りの操作はフラグでしか渡せません。規範は [docs/design-security.md](docs/design-security.md#11a-設定の渡し方) の 11a 節です
 - 利用者に見える呼び名とコードの識別子を対応させます。agent の `agent.json` は「認証情報 (credentials)」で、パッケージも `internal/agent/credentials` です。server の SQLite は「サーバのデータベース」(`DBPath`) です。設計文書だけは「状態ファイル」と呼びます (3 節の用語)。VPS 側のデーモンは設計文書と内部では `vpsd`、利用者に見える名前は `server` です
 - 環境を見て挙動を推測しません。モードもファイアウォールも、明示された値に従うか、提示して止まります
 

@@ -41,7 +41,7 @@ lab/lab exec vm bash /wgft/lab/ipv6.sh kernel    # IPv6 の送信元が判定す
 lab/lab exec vm bash /wgft/lab/rcvwin.sh         # ユーザー空間モードの中継が、穴の後ろの順序外のデータを持つ公開側のソケットの boost の枠を返さず、穴が埋まった後に返すことを確認(userspace だけ)
 lab/lab exec vm bash /wgft/lab/version-skew.sh         # 版の組み合わせ(新旧の server・agent、legacy v0)。旧い側は直前のリリース(既定は v1.4.0。`lab/lab exec vm env WGFT_SKEW_OLD_VERSION=1.3.0 bash /wgft/lab/version-skew.sh` のように変えられる)と、agent の無効化より前の最後のリリースの v1.1.3。旧いバイナリは GitHub の Releases から取得しキャッシュする(スクリプト冒頭のコメント参照)
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel       # 旧版からの更新(D4)。既定は v1.1.3 のデータに現在のビルドを重ね、ルール・鍵・認証情報が保たれ、転送が戻ることを確認。`lab/lab exec vm env WGFT_UPGRADE_OLD_VERSION=0.4.0 bash /wgft/lab/upgrade.sh kernel` のように変数を VM の中に渡すと、release notes が更新を約束するもう一方の版でも同じ確認を流せる。userspace も同じ
-lab/lab exec vm bash /wgft/lab/scale.sh kernel         # 規模の試験(C3)。1 台の server と 5 台のエージェントで、ルール数を 10 から 1000 まで段階的に増やし、適用時間・全体状態の大きさ・RSS を測定。kernel モードも userspace モードも 1000 本まで通る(kernel モードが 100 本前後で失敗していた netlink のバッファの問題は解決済み。design.md の 6.1 節と改訂の記録を参照)
+lab/lab exec vm bash /wgft/lab/scale.sh kernel         # 規模の試験(C3)。1 台の server と 5 台のエージェントで、ルール数を 10 から 1000 まで段階的に増やし、適用時間・全体状態の大きさ・RSS を測定。kernel モードも userspace モードも 1000 本まで通る(kernel モードが 100 本前後で失敗していた netlink のバッファの問題は解決済み。[設計文書の 6.1 節](../docs/design-vps-dataplane.md)と[改訂の記録](../docs/design-revisions.md)を参照)
 lab/lab reset                   # 実験で壊したらスナップショットに戻す
 lab/lab destroy                 # VM ごと消す
 ```

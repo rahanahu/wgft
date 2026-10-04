@@ -8,7 +8,7 @@ At the default flow limits, the server needs about 5.9 GiB of host memory even w
 This is the documented worst-case estimate: the flow state, buffers and other holdings counted in the calculation, each filled to its limit at once by an attack.
 It is not a normal-use estimate.
 Lower flow limits cannot bring this below about 2.9 GiB.
-The [design document](design.md) gives the calculation.
+The [design document](design-agent-dataplane.md) gives the calculation.
 Check the Linux [socket buffer requirement](socket-buffers.md) too.
 
 ## Run with systemd

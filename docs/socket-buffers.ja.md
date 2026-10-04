@@ -51,4 +51,4 @@ server 自身が記録する警告を確認してください。
 `warning: the public UDP socket` が出る場合も、ホストの `net.core.wmem_max` を上げます。
 このソケットでは `CAP_NET_ADMIN` だけでは警告を防げません。
 
-検証した環境と仕組みは[設計文書](design.md)にあります。
+検証した環境と仕組みは[設計文書](design-agent-dataplane.md)にあります。

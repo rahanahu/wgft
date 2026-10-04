@@ -50,7 +50,7 @@ The server runs on Linux. The agent runs on Linux, Windows amd64, and Apple sili
 
 Use kernel mode on a VPS where you have root. Userspace mode is available without root or kernel WireGuard and can run in a container. Kernel mode requires Linux 6.1+ and nftables 1.0.6+. The agent defaults to userspace mode. The [kernel-mode agent guide](docs/agent-kernel.md) covers the requirements for a Linux agent in kernel mode.
 
-Linux userspace mode may need higher host socket buffer limits. With the default flow limits, a server with one agent and one forwarded TCP port needs about 5.9 GiB of host memory. That figure is the documented worst-case estimate: the flow state, buffers and other holdings counted in the design's calculation, each filled to its limit at once by an attack. It is not an estimate of normal use. Lower flow limits cannot bring that requirement below about 2.9 GiB. See [userspace mode on the VPS](docs/setup-server-userspace.md) for the requirement and the [design](docs/design.md#7a-内部アーキテクチャ) for the calculation.
+Linux userspace mode may need higher host socket buffer limits. With the default flow limits, a server with one agent and one forwarded TCP port needs about 5.9 GiB of host memory. That figure is the documented worst-case estimate: the flow state, buffers and other holdings counted in the design's calculation, each filled to its limit at once by an attack. It is not an estimate of normal use. Lower flow limits cannot bring that requirement below about 2.9 GiB. See [userspace mode on the VPS](docs/setup-server-userspace.md) for the requirement and the [design](docs/design-agent-dataplane.md#7-データプレーン自宅側) for the calculation.
 
 ## Quick start
 
@@ -131,13 +131,14 @@ You can restrict the LAN targets the agent will reach with [`WGFT_AGENT_ALLOW_TA
 - [Deployment options](docs/setup-alternatives.md): Windows, macOS, Docker, and VPS hosts without root
 - [Operations guide](docs/operations.md): Web UI, HTTPS, logs, and teardown
 - [CLI reference](docs/cli.md): commands and examples
+- [Documentation index](docs/README.md): guides, design sections, and development references
 - [Design](docs/design.md) and [architecture](docs/architecture.md): forwarding behavior and implementation
 - [Development conventions](CLAUDE.md): test environment and change process
 - [Security policy](SECURITY.md): vulnerability reporting
 
 ## Status
 
-v1.4.1. The compatibility contract in effect since v1.0 covers the Linux server and agent, plus the Windows agent within the range verified on Windows 11 hardware. The macOS agent has been verified for basic operation on real hardware, but its newer reconnect liveness check has not been verified there, so it remains outside the contract. The covered behavior is defined in [design section 7a.11](docs/design.md#7a11-v10-の互換性の保証サーフェスごとの一覧).
+v1.4.1. The compatibility contract in effect since v1.0 covers the Linux server and agent, plus the Windows agent within the range verified on Windows 11 hardware. The macOS agent has been verified for basic operation on real hardware, but its newer reconnect liveness check has not been verified there, so it remains outside the contract. The covered behavior is defined in [design section 7a.11](docs/design-compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧).
 
 Downgrading after an upgrade is not guaranteed. Back up the server data directory before upgrading. The server database uses schema version 9 from v1.2.0 onward; v1.1.x and earlier servers cannot open it.
 

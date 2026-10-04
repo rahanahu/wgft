@@ -51,4 +51,4 @@ A userspace-mode server also requests a separate send buffer for each public UDP
 If it logs `warning: the public UDP socket`, raise the host's `net.core.wmem_max` as above.
 `CAP_NET_ADMIN` alone does not prevent this warning for that socket.
 
-The [design document](design.md) records the verified environments and mechanism.
+The [design document](design-agent-dataplane.md) records the verified environments and mechanism.

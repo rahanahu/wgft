@@ -6,7 +6,7 @@ wgft のテストは、実行の費用、所要時間、必要な機材、再現
 
 - A 類 (すべての PR):数分で終わり、結果の再現性が高く、日常の退行を捉えるテストです。CI の検査はすべての PR で、ラボの一式はコードを変える PR のマージの前に流します
 - B 類 (関係する変更の関門):ラボの一式に含まれず、特定の領域を変えた PR とリリースの候補でだけ流すテストです。どの変更がどのテストを流すかは、後述の「変更の契機と対象のパス」の表で決まります
-- C 類 (段階の完了の関門):[設計文書](design.md) 7a.8 節の段階 (Phase 5、6、7 など) を終えるときに流すテストです。悪い条件のネットワーク、クラッシュからの回復、別のディストリビューションでのラボの一式、長時間の通信、小さいメモリの環境を含みます。v1 の前に一度流し、以後は関係する変更を含む段階の完了時に流し直す項目は、この類に置きます
+- C 類 (段階の完了の関門):[設計文書](design-internals.md#7a8-移行の段取り) 7a.8 節の段階 (Phase 5、6、7 など) を終えるときに流すテストです。悪い条件のネットワーク、クラッシュからの回復、別のディストリビューションでのラボの一式、長時間の通信、小さいメモリの環境を含みます。v1 の前に一度流し、以後は関係する変更を含む段階の完了時に流し直す項目は、この類に置きます
 - D 類 (リリース候補の関門):リリースの候補の版ごとに流すテストです。Windows と macOS のエージェント、旧版からの更新、リリースの成果物を確かめます
 - E 類 (手作業と実機の関門):実 VPS、実回線の自宅ルータ、Windows と Mac の実機、実アプリケーションでの長時間の利用のように、再現用の環境では作れない条件を人が確かめる関門です
 - F 類 (調査だけの実験):回帰テストに含めない実験です。仕様の根拠 (測定値や挙動の確認) を得たら、必要な範囲だけを小さな回帰テストに置き換え、高価な実験そのものは繰り返しません
@@ -158,11 +158,11 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | L11 | `lab/split-merge.sh` (kernel と userspace) | Web UI の分割と統合で流れている UDP のセッションが切れること | ラボ | `rule-ops` | A9 として | 約 50 秒 | 自動 |
 | L12 | `lab/import-export.sh` (kernel と userspace) | Web UI の書き出しと読み込みの形式の食い違い、確認後の変更の見落とし | ラボ | `rule-ops` | A9 として | 約 20 秒 | 自動 |
 | L13 | `lab/ipv6.sh` (kernel と userspace) | IPv6 の送信元が deny をすり抜けること、IPv6 のフラッドが集約のレートのトークンを使うこと | ラボ (IPv6 を加えた netns) | `admission`、`relay` | A9 として | モードごとに約 25 秒 | 自動 |
-| L14 | `lab/lifecycle.sh` check 10 (kernel と userspace) | エージェントの停止後も、`agent ls` と Web UI の一覧が最後のハートビートを生きた状態のまま示すこと (design.md の 5.2 節) | ラボ | `rule-ops`、`protocol`、`agent-platform` | A9 として | モードごとに約 1 秒から 2 秒 | 自動 |
-| L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと (design.md の 5.1 節)、無効なエージェントのルールで `server doctor` と `status` が失敗を報告すること、削除したエージェントに残ったルールの `server doctor` と `status` の結果が変わること (design.md の 10.2a、10.2b 節) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 単独で kernel モードは約 5 秒、userspace モードは約 40 秒 (userspace は server の再起動の後のトンネルの張り直しを待つ)。kernel モードの約 5 秒は、保持していたテーブルの削除の通知ですぐに公開し直す最善の場合です。通知で公開し直さなければ 30 秒ごとの再試行を待ち、確認はその待ちに 40 秒を許します | 自動 |
-| L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、resolve、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧とループバックの拒否、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (design.md の 7b、9、10.3 節) | ラボ | `agent-platform` | A9 として | kernel モードは 1 組あたり数十秒から約 5 分、userspace モードは同じ組で数十秒から約 5 分 (reconnect と stale は kernel モードだけの検査で、userspace モードでは SKIP になり数秒で終わります) | 自動 |
-| L17 | `lab/agentdoctor.sh` (kernel と userspace) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと (design.md の 10.2c 節) | ラボ | `agent-platform` | A9 として | モードごとに約 1 分 | 自動 |
-| L18 | `lab/lifecycle.sh` check 12 (kernel と userspace) | ユーザー空間モードの WireGuard のソケットのバッファの条件 (design.md の 7 節) を、`agent doctor` とログが実際のソケットの値で示さないこと、条件に届かないときに `agent doctor` の終了コードが 0 でなくなること、セットアップの文書の `/etc/sysctl.d` の手順で条件を満たせないこと、`rotate-key` で開き直したソケットを測らないこと | ラボ (VM 全体の sysctl を変えるので単独で) | `userspace`、`agent-platform` | A9 として | モードごとに約 2 秒 | 自動 |
+| L14 | `lab/lifecycle.sh` check 10 (kernel と userspace) | エージェントの停止後も、`agent ls` と Web UI の一覧が最後のハートビートを生きた状態のまま示すこと ([設計文書の 5.2 節](design-overview.md#52-全体状態の配信とハートビート)) | ラボ | `rule-ops`、`protocol`、`agent-platform` | A9 として | モードごとに約 1 秒から 2 秒 | 自動 |
+| L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと ([設計文書の 5.1 節](design-overview.md#51-登録))、無効なエージェントのルールで `server doctor` と `status` が失敗を報告すること、削除したエージェントに残ったルールの `server doctor` と `status` の結果が変わること (設計文書の [10.2a 節](design-server-doctor.md)と[10.2b 節](design-status.md)) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 単独で kernel モードは約 5 秒、userspace モードは約 40 秒 (userspace は server の再起動の後のトンネルの張り直しを待つ)。kernel モードの約 5 秒は、保持していたテーブルの削除の通知ですぐに公開し直す最善の場合です。通知で公開し直さなければ 30 秒ごとの再試行を待ち、確認はその待ちに 40 秒を許します | 自動 |
+| L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、resolve、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧とループバックの拒否、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (設計文書の [7b 節](design-agent-kernel.md)、[9 節](design-state.md#9-状態の保存と再起動)、[10.3 節](design-interface.md#103-運用の流れ)) | ラボ | `agent-platform` | A9 として | kernel モードは 1 組あたり数十秒から約 5 分、userspace モードは同じ組で数十秒から約 5 分 (reconnect と stale は kernel モードだけの検査で、userspace モードでは SKIP になり数秒で終わります) | 自動 |
+| L17 | `lab/agentdoctor.sh` (kernel と userspace) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと ([設計文書の 10.2c 節](design.md#102c-エージェント側の診断-wgft-agent-doctor)) | ラボ | `agent-platform` | A9 として | モードごとに約 1 分 | 自動 |
+| L18 | `lab/lifecycle.sh` check 12 (kernel と userspace) | ユーザー空間モードの WireGuard のソケットのバッファの条件 ([設計文書の 7 節](design-agent-dataplane.md#7-データプレーン自宅側)) を、`agent doctor` とログが実際のソケットの値で示さないこと、条件に届かないときに `agent doctor` の終了コードが 0 でなくなること、セットアップの文書の `/etc/sysctl.d` の手順で条件を満たせないこと、`rotate-key` で開き直したソケットを測らないこと | ラボ (VM 全体の sysctl を変えるので単独で) | `userspace`、`agent-platform` | A9 として | モードごとに約 2 秒 | 自動 |
 
 ### B 類 (関係する変更の関門)
 
@@ -178,7 +178,7 @@ network namespace が隔てない部分、つまり作業ディレクトリと�
 | B8 | CI の `macos-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む) | macOS でだけ通る経路 (UDP の送信バッファの既定 9216 バイトを超えるデータグラムの書き込み) の退行 (D2 の一部の置き換え。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | CI (macOS の runner) | `agent-platform`、`rc` | 契機に当たる PR の更新ごと | 1 分から 2 分 (初回の実行は 1 分 15 秒) | 自動 |
 | B9 | 配布物の VM 試験 (`scripts/dist-vm.sh`) | 同梱の unit で起動しないこと、VM の再起動の後に転送が戻らないこと、設定の誤りで再起動を繰り返すこと | 2 台の VM (server と agent) | `deploy`、`rc` | 契機に当たる PR ごとに 1 つのディストリビューションで、リリース候補ごとに 3 つのディストリビューションで | 約 4 分 (Debian 12、Ubuntu 24.04、Fedora 44 のいずれも) | 自動 (開発者が起動) |
 | B10 | Docker のイメージの疎通 (`scripts/docker-smoke.sh`) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (ホスト、CI の runner、ラボの VM のどれでも可) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | キャッシュが温まっていれば約 8 秒、初回はイメージの取得を含めて約 30 秒 | 自動 (開発者が起動) |
-| B11 | `lab/rcvwin.sh` | ユーザー空間モードの中継で、`vpsd` の公開側のカーネルの TCP ソケットが、穴の後ろの順序外のデータとして floor を超える受信のメモリを持ったまま boost の枠を返すこと。穴が埋まった後に、その枠が別の接続へ戻らないこと (design.md の 7 節) | ラボ | `resource`、`userspace` | 契機に当たる PR ごとに 1 回 | 約 20 秒 | 自動 (開発者が起動) |
+| B11 | `lab/rcvwin.sh` | ユーザー空間モードの中継で、`vpsd` の公開側のカーネルの TCP ソケットが、穴の後ろの順序外のデータとして floor を超える受信のメモリを持ったまま boost の枠を返すこと。穴が埋まった後に、その枠が別の接続へ戻らないこと ([設計文書の 7 節](design-agent-dataplane.md#7-データプレーン自宅側)) | ラボ | `resource`、`userspace` | 契機に当たる PR ごとに 1 回 | 約 20 秒 | 自動 (開発者が起動) |
 
 ### C 類 (段階の完了の関門)
 
@@ -258,7 +258,7 @@ Fedora 44 (カーネル 7.2.5、nftables v1.1.6) でも同じ一式を既定の�
 
 ## 更新と戻しの約束
 
-更新の経路は保証します。旧版への戻しは互換性の保証に含めず、各版で観測した挙動だけを記録します。戻す必要があるときは、更新の前に取ったデータの置き場のバックアップから戻します。戻しを約束すると、サーバのデータベースのスキーマ、migration、知らないフィールドの保存、状態ファイル、wire protocol の変更を、旧い版が読める形に永久に縛るためです ([設計文書](design.md) 7a.6 節)。D4 はこの約束に従い、更新を確かめ、戻しについては挙動を記録するだけにします。
+更新の経路は保証します。旧版への戻しは互換性の保証に含めず、各版で観測した挙動だけを記録します。戻す必要があるときは、更新の前に取ったデータの置き場のバックアップから戻します。戻しを約束すると、サーバのデータベースのスキーマ、migration、知らないフィールドの保存、状態ファイル、wire protocol の変更を、旧い版が読める形に永久に縛るためです ([設計文書](design-internals.md#7a6-維持する外部仕様と互換性) 7a.6 節)。D4 はこの約束に従い、更新を確かめ、戻しについては挙動を記録するだけにします。
 
 ## 新設と自動化が未了の項目
 
@@ -438,7 +438,7 @@ VPS 側は `userspace.Backend` という型そのものではなく、`Backend` 
 
 「userspace の server 側のコードが Windows と macOS でビルドできるか」は確かめました。`internal/dataplane/userspace` とその下位パッケージ (`utun` を含む) は、4 つの対象 (windows/amd64、windows/arm64、darwin/amd64、darwin/arm64) で `go build` と `go vet` を通ります。ビルドできないのは `internal/vpsd` そのもの (google/nftables など Linux 限定の依存を持つ、カーネルの nftables を操作する層) で、`internal/dataplane/userspace` はその依存を持ちません。
 
-このテストは、以前は Windows でだけ結果を判定せず SKIP していました。原因は、wireguard-go の `conn.NewDefaultBind()` が Windows で返す `WinRingBind` が `SIO_UDP_CONNRESET` を無効にせず、届いた ICMP port unreachable が `WSAECONNRESET` として次の受信に現れ、`device.RoutineReceiveIncoming` がこれを回復不能な誤りと判定して受信ループを止めることでした (詳しい経緯は [design.md](design.md) の改訂の記録にあります)。この不具合は Pull Request #107 が直し、`internal/dataplane/userspace/tunnel` と `internal/dataplane/userspace/utun` が共有する `internal/dataplane/userspace/wgbind` の `New()` は、Windows でだけ `conn.NewStdNetBind()` を明示して使います。この修正を当てて SKIP を外した状態を Windows の実機で 13 回実行した実験では 10 回通り、残る 3 回の失敗はトンネル側の不具合ではなく、テスト自身が wg の `listen_port` をホストが決めた範囲から連続 50 個走査して選んでいた弱さ (空きポートが見つからない) によるものでした。この走査は、`ListenPort` に 0 を渡して OS に選ばせ、実際に割り当てられたポートを `IpcGet` で読み返す形に変え、SKIP も外しています。この形にした後、CI の `windows-test` でこのテストは 5 回続けて通りました。Windows の実機での再実行は未確認です。
+このテストは、以前は Windows でだけ結果を判定せず SKIP していました。原因は、wireguard-go の `conn.NewDefaultBind()` が Windows で返す `WinRingBind` が `SIO_UDP_CONNRESET` を無効にせず、届いた ICMP port unreachable が `WSAECONNRESET` として次の受信に現れ、`device.RoutineReceiveIncoming` がこれを回復不能な誤りと判定して受信ループを止めることでした (詳しい経緯は [改訂の記録](design-revisions.md)にあります)。この不具合は Pull Request #107 が直し、`internal/dataplane/userspace/tunnel` と `internal/dataplane/userspace/utun` が共有する `internal/dataplane/userspace/wgbind` の `New()` は、Windows でだけ `conn.NewStdNetBind()` を明示して使います。この修正を当てて SKIP を外した状態を Windows の実機で 13 回実行した実験では 10 回通り、残る 3 回の失敗はトンネル側の不具合ではなく、テスト自身が wg の `listen_port` をホストが決めた範囲から連続 50 個走査して選んでいた弱さ (空きポートが見つからない) によるものでした。この走査は、`ListenPort` に 0 を渡して OS に選ばせ、実際に割り当てられたポートを `IpcGet` で読み返す形に変え、SKIP も外しています。この形にした後、CI の `windows-test` でこのテストは 5 回続けて通りました。Windows の実機での再実行は未確認です。
 
 このテストの後も、launchd での起動、認証情報ファイルの ACL、スリープと復帰、ネットワークアダプタの変化、リリースの実バイナリそのものの確認、D1 の「UDP の受信の固着」(実サーバーに対する実機での通しの確認がまだ無いため。改訂の記録を参照) は実機に残ります (D1、D2、E4、E5)。
 
