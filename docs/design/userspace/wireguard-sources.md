@@ -31,7 +31,7 @@ Later limiter insertion only promotes a pending key into the table.
 Deletion and recreation by garbage collection do not add another overshoot term.
 The live table therefore contains at most H keys, with at most `H+W+1` entry objects including worker and collector locals.
 
-A proposed planning allowance is `64 KiB + 256*(H+W+1)` bytes.
+The planning allowance is `64 KiB + 256*(H+W+1)` bytes.
 For C1024 and R2 this is `64 KiB + 256*(2051+2W)`: about 609 KiB at W64, 705 KiB at W256 and 833 KiB at W512.
 The coefficient is a deliberately loose engineering allowance, not an allocator theorem.
 Map backing, previous growth allocations and Go garbage collection headroom remain ordinary operational residuals.
