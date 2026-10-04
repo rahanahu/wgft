@@ -61,11 +61,13 @@ func cutConn(c net.Conn) {
 
 // tcpEntry は中継中の接続 1 本の記録である。公開側の接続の記録は接続元 src を持ち、宛先への接続を
 // 登録した後は peer にその接続を持つ。宛先への接続の記録は src がゼロ値で、peer に公開側の接続を持つ。
-// cut は sweep がこの中継を切ったことを示す。公開側の記録にだけ立て、mu で守る。
+// cut は sweep がこの中継を切ったことを示す。公開側の記録にだけ立て、mu で守る。wake は、中継が終わって
+// 送り残しを届けている途中の組の待ちを、切る経路が起こすための channel で、delivering に載せるときに作る。
 type tcpEntry struct {
 	src  netip.Addr
 	peer net.Conn
 	cut  bool
+	wake chan struct{}
 }
 
 // cutPair は中継中の 1 組を切る。宛先への接続がまだ無ければ(dial の最中)公開側だけを切る。
@@ -97,7 +99,8 @@ const (
 func nextRetry(d time.Duration) time.Duration { return min(max(2*d, retryMin), retryMax) }
 
 // tcpServer は TCP の待ち受け 1 つの中継の状態である。serveTCP が作り、メソッド sessions、sweep、
-// stopAccept、close を listenerOps の同じ名前の欄(close は closeF)に差し込む。accept のループ
+// stopAccept、close、deliveringCount を listenerOps の欄(close は closeF、deliveringCount は
+// delivering)に差し込む。accept のループ
 // (acceptLoop)と接続ごとの goroutine(serveConn)もこの型のメソッドである。
 type tcpServer struct {
 	m  *Manager
@@ -106,8 +109,12 @@ type tcpServer struct {
 
 	mu    sync.Mutex
 	conns map[net.Conn]*tcpEntry // 公開側の接続と宛先への接続の両方を持つ
-	done  chan struct{}
-	once  sync.Once
+	// delivering は、中継が終わり、送り残しを相手に届けている途中の組である(設計文書 7 節の「中継が
+	// 終わった後の末尾の配送」)。公開側の接続を鍵にする。組は Resource Guard の枠を持ったままだが、
+	// sessions には数えない。closeF と sweep は、conns と同じくこの組も切る
+	delivering map[net.Conn]*tcpEntry
+	done       chan struct{}
+	once       sync.Once
 	// closed は closeF が中継中の接続を切った後に真になる。mu で守る。done は stopAccept でも
 	// 閉じる(Retiring の待ち受けは成立済みの接続を残す)ので、宛先への接続の登録は done ではなく
 	// これで判定する
@@ -122,23 +129,28 @@ type tcpServer struct {
 // Prepare/Commit の経路の Prepare)が済ませてある。
 func (m *Manager) serveTCP(l *listener, ln net.Listener) {
 	s := &tcpServer{
-		m:     m,
-		l:     l,
-		ln:    ln,
-		conns: map[net.Conn]*tcpEntry{},
-		done:  make(chan struct{}),
+		m:          m,
+		l:          l,
+		ln:         ln,
+		conns:      map[net.Conn]*tcpEntry{},
+		delivering: map[net.Conn]*tcpEntry{},
+		done:       make(chan struct{}),
 	}
 	l.listenerOps = listenerOps{
 		closeF:     s.close,
 		stopAccept: s.stopAccept,
 		sweep:      s.sweep,
 		sessions:   s.sessions,
+		delivering: s.deliveringCount,
 	}
 	go s.acceptLoop()
 }
 
 // sessions は中継中の接続の数を返す。公開側の接続と宛先への接続の両方を数える。
 func (s *tcpServer) sessions() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.conns) }
+
+// deliveringCount は、送り残しを届けている途中の組の数を返す。
+func (s *tcpServer) deliveringCount() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.delivering) }
 
 // sweep は keep が偽を返す接続元の中継を切り、切った組の数を返す。
 func (s *tcpServer) sweep(keep func(src netip.Addr) bool) int {
@@ -162,6 +174,15 @@ func (s *tcpServer) sweep(keep func(src netip.Addr) bool) int {
 			delete(s.conns, e.peer)
 		}
 		n++
+	}
+	// 送り残しを届けている途中の組も切る。中継は終わっているので、閉じたセッションの数には入れない
+	for c, e := range s.delivering {
+		if keep(e.src) {
+			continue
+		}
+		cutPair(c, e.peer)
+		close(e.wake)
+		delete(s.delivering, c)
 	}
 	return n
 }
@@ -192,6 +213,12 @@ func (s *tcpServer) close() {
 			cutConn(c)
 		}
 	}
+	// 送り残しを届けている途中の組も切り、待ちを起こす。枠は組の goroutine が返す
+	for c, e := range s.delivering {
+		cutPair(c, e.peer)
+		close(e.wake)
+	}
+	clear(s.delivering)
 	s.mu.Unlock()
 }
 
@@ -332,6 +359,9 @@ func (s *tcpServer) serveConn(c net.Conn, entry *tcpEntry, charge *resource.Char
 		} else {
 			c.Close()
 		}
+		// 通常の close で閉じた netstack の接続は、Close の前に届いた順序外のデータを持って FIN_WAIT_2 に
+		// 残りうるので、中継の終わりと同じく届け終えるまで枠を持つ(設計文書 7 節)
+		s.deliver(c, entry, c)
 		return
 	}
 	// dial の間に closeF か sweep が走っていれば、どちらも公開側の接続 c を切ったが、まだ登録
@@ -364,5 +394,37 @@ func (s *tcpServer) serveConn(c net.Conn, entry *tcpEntry, charge *resource.Char
 	if a, ok := t.(aborter); ok {
 		resetT = a.Abort
 	}
-	netpipe.PipeResetB(c, t, resetT)
+	// 中継が終わっても、Linux のカーネルの接続は閉じずに止めて残る(netpipe.PipeHold)。フローの 2 つの枠
+	// (Resource Guard の枠と送信元ごとの枠)は、組が送り残しを届け終えた後に上の defer がまとめて返す
+	// (設計文書 7 節の「中継が終わった後の末尾の配送」)
+	netpipe.PipeHold(c, t, resetT)
+	s.deliver(c, entry, c, t)
+}
+
+// deliver は、中継を終えた組を conns から delivering へ移し、pair のすべてが送り残しを届け終えるまで
+// 待ってから閉じる。c は公開側の接続で、entry はその記録である。待つ間は錠を持たない。closeF か sweep が
+// 組を切ると待ちが起こされる。組がすでに切られていれば待たない。フローの枠は、呼び出し側が戻った後に
+// まとめて返す。
+func (s *tcpServer) deliver(c net.Conn, entry *tcpEntry, pair ...net.Conn) {
+	s.mu.Lock()
+	delete(s.conns, c)
+	if entry.peer != nil {
+		delete(s.conns, entry.peer)
+	}
+	var wake chan struct{}
+	if !s.closed && !entry.cut {
+		wake = make(chan struct{})
+		entry.wake = wake
+		s.delivering[c] = entry
+	}
+	s.mu.Unlock()
+	if wake != nil {
+		netpipe.AwaitDelivered(wake, pair...)
+		s.mu.Lock()
+		delete(s.delivering, c)
+		s.mu.Unlock()
+	}
+	for _, x := range pair {
+		x.Close()
+	}
 }
