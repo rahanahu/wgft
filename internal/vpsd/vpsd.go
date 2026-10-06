@@ -247,6 +247,13 @@ func Run(opts Options) error {
 	if d.reserved, err = reservedPorts(opts); err != nil {
 		return fmt.Errorf("reserved ports: %w", err)
 	}
+	// 構文は入口(cmd/wgft の buildServerOptions)で弾いてあるので、ここへ届くのは入口を通らない
+	// 呼び出しだけである。二重の守りとして、届いた場合も設定の値の誤りとして拒否する
+	// (設計文書 11b 節。かつてはここがただのエラーで、終了コード 1 の再起動の繰り返しになっていた)。
+	// 誤った値を meta に記録しないよう、reconcileModeAndAddress と鍵の作成より前に行う。
+	if d.network, err = startup.ParseServerPrefix(opts.WGAddress); err != nil {
+		return startup.Config("WGFT_WG_ADDRESS", "%v", err)
+	}
 	// モードとアドレス帯の初回記録・照合は、鍵やインタフェースを作る前に済ませる(仕様 9・11a 節)。
 	_, keyErr := st.GetMeta(store.MetaServerKey)
 	hadServerKey := keyErr == nil
@@ -275,12 +282,6 @@ func Run(opts Options) error {
 	}
 	if other, ok := d.dp.OtherDeviceWithKey(d.serverKey); ok {
 		log.Printf("warning: another WireGuard device %q with the same server key exists; suspect leftovers from changing WGFT_WG_INTERFACE, remove it with server teardown", other)
-	}
-	// 構文は入口(cmd/wgft の buildServerOptions)で弾いてあるので、ここへ届くのは入口を通らない
-	// 呼び出しだけである。二重の守りとして、届いた場合も設定の値の誤りとして拒否する
-	// (設計文書 11b 節。かつてはここがただのエラーで、終了コード 1 の再起動の繰り返しになっていた)。
-	if d.network, err = netip.ParsePrefix(opts.WGAddress); err != nil {
-		return startup.Config("WGFT_WG_ADDRESS", "%q is not a valid address/prefix such as 10.200.0.1/24: %v", opts.WGAddress, err)
 	}
 	if err := d.bringUpWG(); err != nil {
 		return err
