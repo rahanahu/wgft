@@ -64,7 +64,10 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		stack: stack.New(stack.Options{
 			NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
 			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
-			HandleLocal:        true,
+			// この Device 宛ての packet を stack の中で折り返さない。自分宛ては TUN へ出る。
+			// false のとき gVisor は送信元が自分のアドレスの入力を捨てないので、そうした packet を
+			// 入れない守りは WireGuard の AllowedIPs(両側の /32)だけである
+			HandleLocal: false,
 		}),
 		events:     make(chan tun.Event, 10),
 		readCtx:    readCtx,
@@ -84,7 +87,7 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 	if err := setTCPBufferRanges(dev.stack); err != nil {
 		return fail(err)
 	}
-	sack := tcpip.TCPSACKEnabled(true) // 既定では無効
+	sack := tcpip.TCPSACKEnabled(true) // gVisor の既定でも有効だが、固定版に依らないよう明示する
 	if err := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
 		return fail(fmt.Errorf("could not enable TCP SACK: %v", err))
 	}

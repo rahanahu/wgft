@@ -64,10 +64,14 @@ netstack の出力にも滞留の上限とキューの隔離を設けます。
 - UDP の endpoint の作り方:Device の UDP の endpoint は、`DialUDP` と `ListenUDP` が登録表を通して作り、作ると同時に会計に登録します。
   Device は gVisor の stack を外に出さない。
   登録表の外で作った UDP の endpoint は予約の無い datagram を受け取り、会計の不変条件を壊すためです。
-  netstack の中でこの Device のアドレスに宛てた UDP の送信も、TUN の入口と同じ予約、配送、判定を通す
+  Device は gVisor の `HandleLocal` を無効にしており、この Device のアドレス宛ての packet を netstack の中で折り返さない。
+  自分宛ての送信は TUN の出力に出るだけで、受信の会計に入る経路は TUN の `Write` だけです。
+  `HandleLocal` が無効だと、gVisor は送信元がこの Device のアドレスの入力を捨てません。
+  そうした packet をトンネルから入れない守りは、WireGuard の AllowedIPs(両側の /32)だけです。
+  製品の経路に自分宛ての通信は無く、サーバの Device は agent のアドレスにだけ接続し、agent の Device は待ち受けとサーバへの ping だけを行います
 <a id="udp-の接続"></a>
 - UDP の接続:`DialUDP` と `ListenUDP` は、gVisor の `gonet.UDPConn` の代わりに wgft の接続を返します。
-  読み取りと自分宛ての送信を会計に通すためです。
+  読み取りを会計に通すためです。
   期限、短い読み取り、誤りの形は `gonet.UDPConn` と同じにした(試験で同じ手順を与えて比べた)。
   違いは、`Close` の後の読み取りと、`Close` で解かれた読み取りの待ちが `net.ErrClosed` を返すことです。
   `gonet.UDPConn` はこの場合に `io.EOF` を返した
@@ -80,7 +84,7 @@ netstack の出力にも滞留の上限とキューの隔離を設けます。
 <a id="会計の不整合"></a>
 - 会計の不整合:会計は、予約の無い datagram を読み取った場合、読み取った datagram の長さが予約と一致しない場合、1 回の配送で 2 件以上を受け取ったと読める場合、統計が逆に動いた場合を、不変条件の違反として扱う。
   違反を検出すると、その Device の UDP を止めます。
-  以後、この Device 宛ての UDP を捨て、自分宛ての UDP の送信、`DialUDP`、`ListenUDP` は誤りを返します。
+  以後、この Device 宛ての UDP を捨て、`DialUDP` と `ListenUDP` は誤りを返します。
   TCP は止めません。
   止まった状態は Device を閉じるまで続き、プロセスを再起動すれば戻る。
   検出したときは、違反の内容と再起動の案内を含む英語の行をログに 1 回だけ出す。

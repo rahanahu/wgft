@@ -254,12 +254,11 @@ func TestUDPRegistryUnknownBindAndRebind(t *testing.T) {
 	assertRegistryUsage(t, r, 0, 0)
 }
 
-func TestUDPRegistryLocalReflexiveZeroAndShortRead(t *testing.T) {
+func TestUDPRegistryZeroAndShortRead(t *testing.T) {
 	_, r := registryFixture(t)
 	c := registryListen(t, r, accountingPort)
-	addr := &net.UDPAddr{IP: net.IP(accountingLocal.AsSlice()), Port: int(accountingPort)}
-	if n, err := c.WriteTo([]byte("abcde"), addr); err != nil || n != 5 {
-		t.Fatalf("self WriteTo = %d/%v", n, err)
+	if accepted, err := r.inject(registryPacket([]byte("abcde"), 41000, accountingPort)); err != nil || !accepted {
+		t.Fatalf("input = %v/%v", accepted, err)
 	}
 	if accepted, err := r.inject(registryPacket(nil, 41000, accountingPort)); err != nil || !accepted {
 		t.Fatalf("zero input = %v/%v", accepted, err)

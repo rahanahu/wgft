@@ -13,7 +13,6 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 
@@ -308,81 +307,15 @@ func (t *udpAccounting) accountedSend(receiver *rawUDPAdapter, g *udpGeneration,
 	return kept, false, err
 }
 
-// errUDPBudget is returned to a local writer whose datagram to a local
-// receiver was refused by the receive budget.
-var errUDPBudget = errors.New("UDP receive budget exceeded")
-
-// localWrite is rawUDPAdapter.WriteTo under accounting. A destination that is
-// not this Device's address never loops back (the stack has one address and
-// picks the loopback route only for it), so it is written with no lock. A
-// managed local receiver gets the reserve, window, settle shape of an
-// injection under the receiver's opMu; the sender's own opMu is not taken, so
-// a reflexive write holds one lock once. The sender's write deadline is
-// checked again inside the window so an expired write that waited for the
-// receiver's lock sends nothing.
-func (t *udpAccounting) localWrite(sender *rawUDPAdapter, data []byte, opts tcpip.WriteOptions) (int64, tcpip.Error, error) {
+// write is rawUDPAdapter.WriteTo. The Device never routes a packet to itself
+// inside the stack (HandleLocal is off), so every write goes out to the TUN,
+// touches no ledger and takes no lock.
+func (t *udpAccounting) write(sender *rawUDPAdapter, data []byte, opts tcpip.WriteOptions) (int64, tcpip.Error, error) {
 	if t.device.closed.Load() {
 		return 0, nil, errDeviceClosed
 	}
-	dst := opts.To
-	if dst == nil {
-		a, err := sender.ep.GetRemoteAddress()
-		if err != nil {
-			return 0, nil, errors.New(err.String())
-		}
-		dst = &a
-	}
-	if dst.Addr != tcpip.AddrFromSlice(t.local.AsSlice()) {
-		n, terr := sender.ep.Write(bytes.NewReader(data), opts)
-		return n, terr, nil
-	}
-	for {
-		t.mu.Lock()
-		if t.fault != nil {
-			t.mu.Unlock()
-			return 0, nil, t.fault
-		}
-		receiver := t.localPorts[dst.Port]
-		if receiver == nil {
-			// A local port nobody registered: gVisor answers with Port
-			// Unreachable. Stay under mu so a concurrent open cannot
-			// register this port and receive the datagram unreserved.
-			if t.sendUnmanagedHook != nil {
-				t.sendUnmanagedHook()
-			}
-			n, terr := sender.ep.Write(bytes.NewReader(data), opts)
-			t.mu.Unlock()
-			return n, terr, nil
-		}
-		g := t.generations[receiver]
-		r, why := t.reserveLocked(g, len(data))
-		t.mu.Unlock()
-		if why != udpReserved {
-			t.noteRefusal(why)
-			return 0, nil, errUDPBudget
-		}
-		var n int64
-		var terr tcpip.Error
-		expired := false
-		_, stale, err := t.accountedSend(receiver, g, r, func() {
-			if at, _ := sender.deadline(false); !at.IsZero() && !time.Now().Before(at) {
-				expired = true
-				return
-			}
-			n, terr = sender.ep.Write(bytes.NewReader(data), opts)
-		})
-		if stale {
-			continue
-		}
-		if err != nil {
-			t.reportFault()
-			return n, terr, err
-		}
-		if expired {
-			return 0, nil, osDeadlineError{}
-		}
-		return n, terr, nil
-	}
+	n, terr := sender.ep.Write(bytes.NewReader(data), opts)
+	return n, terr, nil
 }
 
 // afterRead charges exactly one dequeue, including zero-length packets and

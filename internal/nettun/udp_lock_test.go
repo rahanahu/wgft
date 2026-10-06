@@ -211,30 +211,18 @@ func TestUDPLockUnrelatedPathsProgressWhileAccountingLocked(t *testing.T) {
 }
 
 // Invariant: one endpoint's lock serializes only that endpoint. Another
-// managed endpoint keeps receiving from the TUN and from a local write.
+// managed endpoint keeps receiving from the TUN.
 func TestUDPLockOtherEndpointProgressesWhileOneIsLocked(t *testing.T) {
 	d := ingressDevice(t)
 	x := listenAdapter(t, d, accountingPort)
 	y := listenAdapter(t, d, accountingPort+1)
-	toY := dialAdapter(t, d, netip.AddrPortFrom(accountingLocal, accountingPort+1))
 	x.opMu.Lock()
 	release := releaseOnce(t, x.opMu.Unlock)
 	viaTUN := startTimed("UDP to other endpoint", writeOne(d, registryPacket([]byte("tun"), 41000, accountingPort+1)))
-	viaLocal := startTimed("local write to other endpoint", func() error { _, err := toY.Write([]byte("loc")); return err })
 	toX := startTimed("UDP to locked endpoint", writeOne(d, registryPacket([]byte("x"), 41000, accountingPort)))
 	viaTUN.within(t, time.Second)
-	viaLocal.within(t, time.Second)
-	got := map[string]bool{}
-	for i := 0; i < 2; i++ {
-		b := make([]byte, 8)
-		n, _, err := y.ReadFrom(b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got[string(b[:n])] = true
-	}
-	if !got["tun"] || !got["loc"] {
-		t.Fatalf("other endpoint received %v", got)
+	if n, _, err := y.ReadFrom(make([]byte, 8)); err != nil || n != 3 {
+		t.Fatalf("other endpoint received %d/%v", n, err)
 	}
 	toX.stillPending(t, 50*time.Millisecond)
 	release()
@@ -250,12 +238,10 @@ func TestUDPLockOtherEndpointProgressesWhileOneIsLocked(t *testing.T) {
 func TestUDPLockReassemblyMutexDoesNotBlockUDPOrTCP(t *testing.T) {
 	d := ingressDevice(t)
 	x := listenAdapter(t, d, accountingPort)
-	sender := dialAdapter(t, d, netip.AddrPortFrom(accountingLocal, accountingPort))
 	d.reassembly.mu.Lock()
 	release := releaseOnce(t, d.reassembly.mu.Unlock)
 	free := []timed{
 		startTimed("UDP to managed port", writeOne(d, registryPacket([]byte("udp"), 41000, accountingPort))),
-		startTimed("local write", func() error { _, err := sender.Write([]byte("loc")); return err }),
 		startTimed("TCP SYN", writeOne(d, lockTestTCPSYN())),
 	}
 	first, _ := splitIngressIPv4(registryPacket([]byte("abcdefgh12345678"), 41000, accountingPort), 16)
@@ -266,10 +252,8 @@ func TestUDPLockReassemblyMutexDoesNotBlockUDPOrTCP(t *testing.T) {
 	frag.stillPending(t, 50*time.Millisecond)
 	release()
 	frag.within(t, time.Second)
-	for i := 0; i < 2; i++ {
-		if _, _, err := x.ReadFrom(make([]byte, 8)); err != nil {
-			t.Fatal(err)
-		}
+	if _, _, err := x.ReadFrom(make([]byte, 8)); err != nil {
+		t.Fatal(err)
 	}
 	assertDeviceUsage(t, d, 0, 0)
 }
@@ -406,9 +390,8 @@ func TestUDPLockRevalidatesGenerationAfterClose(t *testing.T) {
 	assertDeviceUsage(t, d, 0, 0)
 }
 
-// The counterexample as a test. Eight senders (TUN injections and local
-// writes) and two readers share one endpoint whose receive buffer is small
-// enough to overflow. If the [Stats, send, Stats] window were not serialized
+// The counterexample as a test. Four senders (TUN injections) and two readers
+// share one endpoint whose receive buffer is small enough to overflow. If the [Stats, send, Stats] window were not serialized
 // per endpoint, two senders would read one combined delta and the ledger
 // would end with a fault (accepted > 1, FIFO payload mismatch or unreserved
 // dequeue) or leak. Run with -race as well.
@@ -437,20 +420,6 @@ func TestUDPLockConcurrentSendersAndReadersOneEndpoint(t *testing.T) {
 				}
 			}
 		}(s)
-	}
-	for s := 0; s < 4; s++ {
-		sender := dialAdapter(t, d, netip.AddrPortFrom(accountingLocal, accountingPort))
-		wg.Add(1)
-		go func(s int, sender *rawUDPAdapter) {
-			defer wg.Done()
-			for i := 0; i < perSender; i++ {
-				payload := bytes.Repeat([]byte{byte('A' + s)}, sizes[(s+2*i)%len(sizes)])
-				if _, err := sender.Write(payload); err != nil {
-					sendErr.set(err)
-					return
-				}
-			}
-		}(s, sender)
 	}
 	stop := make(chan struct{})
 	var reads atomic.Int64
@@ -541,46 +510,9 @@ func TestUDPLockCloseDuringConcurrentInjectionsRefundsAll(t *testing.T) {
 	}
 }
 
-// Notification re-entry: a local write holds the receiver's lock while gVisor
-// delivers synchronously and wakes the reader; the reader then waits for that
-// same lock. The writer never waits for the reader, so both finish.
-func TestUDPLockLocalWriterAndReaderDoNotDeadlock(t *testing.T) {
-	d := ingressDevice(t)
-	x := listenAdapter(t, d, accountingPort)
-	sender := dialAdapter(t, d, netip.AddrPortFrom(accountingLocal, accountingPort))
-	const count = 300
-	writer := startTimed("writer", func() error {
-		for i := 0; i < count; i++ {
-			if _, err := sender.Write([]byte("ping")); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	reader := startTimed("reader", func() error {
-		b := make([]byte, 8)
-		for i := 0; i < count; i++ {
-			if i%2 == 0 {
-				if err := x.WaitReadable(); err != nil {
-					return err
-				}
-			}
-			if _, _, err := x.ReadFrom(b); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	writer.within(t, 5*time.Second)
-	reader.within(t, 5*time.Second)
-	assertDeviceUsage(t, d, 0, 0)
-}
-
-// HandleLocal, third form: a self-addressed send to a port nobody registered
-// (TUN input and adapter write) is handed to gVisor while the accounting lock
+// A datagram from the TUN to a port nobody registered is handed to gVisor while the accounting lock
 // is held, so a port registered concurrently cannot receive it unreserved.
-// The synchronous EventErr callback takes no lock, so the write returns.
-func TestUDPLockUnmanagedLocalSendStaysUnderAccountingLock(t *testing.T) {
+func TestUDPLockUnmanagedSendStaysUnderAccountingLock(t *testing.T) {
 	d := ingressDevice(t)
 	acc := d.registry.accounting
 	var calls, unlocked atomic.Int32
@@ -595,17 +527,8 @@ func TestUDPLockUnmanagedLocalSendStaysUnderAccountingLock(t *testing.T) {
 	p := registryPacket([]byte("nobody"), 41000, port)
 	sendIngress(t, d, p)
 	requirePortUnreachable(t, d, p)
-	sender := dialAdapter(t, d, netip.AddrPortFrom(accountingLocal, port))
-	if n, err := sender.Write([]byte("lost")); err != nil || n != 4 {
-		t.Fatalf("self-addressed write to an unregistered port = %d/%v", n, err)
-	}
-	ready := startTimed("WaitReadable after ICMP error", sender.WaitReadable)
-	ready.within(t, time.Second)
-	if _, err := sender.Read(make([]byte, 8)); err == nil {
-		t.Fatal("Read after the local Port Unreachable returned no error")
-	}
-	if calls.Load() != 2 || unlocked.Load() != 0 {
-		t.Fatalf("unmanaged sends = %d, of which %d ran without the accounting lock", calls.Load(), unlocked.Load())
+	if calls.Load() != 1 || unlocked.Load() != 0 {
+		t.Fatalf("unmanaged injections = %d, of which %d ran without the accounting lock", calls.Load(), unlocked.Load())
 	}
 	assertDeviceUsage(t, d, 0, 0)
 	late := listenAdapter(t, d, port)
@@ -673,7 +596,7 @@ func TestUDPLockOrderEndpointThenAccounting(t *testing.T) {
 }
 
 // The send window holds the receiver's endpoint lock and nothing else. gVisor
-// delivers a local datagram synchronously and notifies the receiver's waiters
+// delivers a datagram synchronously and notifies the receiver's waiters
 // inside that delivery, so a function entry on the receiver's queue runs
 // inside the window and can observe which locks are held there: the
 // accounting lock must be free (another endpoint's reservation can proceed
@@ -682,7 +605,6 @@ func TestUDPLockSendWindowHoldsOnlyTheEndpointLock(t *testing.T) {
 	d := ingressDevice(t)
 	acc := d.registry.accounting
 	x := listenAdapter(t, d, accountingPort)
-	sender := dialAdapter(t, d, netip.AddrPortFrom(accountingLocal, accountingPort))
 	type seen struct{ accountingFree, endpointHeld bool }
 	observed := make(chan seen, 4)
 	entry := waiter.NewFunctionEntry(waiter.ReadableEvents, func(waiter.EventMask) {
@@ -710,11 +632,6 @@ func TestUDPLockSendWindowHoldsOnlyTheEndpointLock(t *testing.T) {
 		send func()
 	}{
 		{"TUN injection", func() { sendIngress(t, d, registryPacket([]byte("tun"), 41000, accountingPort)) }},
-		{"local write", func() {
-			if _, err := sender.Write([]byte("loc")); err != nil {
-				t.Fatal(err)
-			}
-		}},
 	} {
 		step.send()
 		select {
@@ -820,63 +737,6 @@ func TestUDPLockCloseMarksClosedBeforeListingEndpoints(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("iteration %d: ListenUDP did not return after Device.Close", iter)
 		}
-	}
-}
-
-// A local write whose receiver is closed between the lookup and the endpoint
-// lock must look the port up again, like a TUN injection. With the port gone,
-// gVisor answers the sender with a synchronous Port Unreachable, which the
-// sender observes as an error; a write that returned success without sending
-// would leave the sender waiting. Close is queued on the endpoint lock before
-// the write so Close wins; the branch is checked by the receiver's Stats.
-func TestUDPLockLocalWriteRelooksUpAfterClose(t *testing.T) {
-	d := ingressDevice(t)
-	local := netip.AddrPortFrom(accountingLocal, accountingPort)
-	closeFirst := 0
-	const iterations = 10
-	for iter := 0; iter < iterations; iter++ {
-		x := listenAdapter(t, d, accountingPort)
-		sender := dialAdapter(t, d, local)
-		x.opMu.Lock()
-		release := releaseOnce(t, x.opMu.Unlock)
-		closing := startTimed("Close", x.Close)
-		time.Sleep(2 * time.Millisecond)
-		writing := startTimed("local Write", func() error { _, err := sender.Write([]byte("late")); return err })
-		deadline := time.Now().Add(time.Second)
-		for {
-			if _, packets, _ := d.registry.usage(); packets == 1 {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("iteration %d: the local write did not reserve while waiting for the endpoint lock", iter)
-			}
-			time.Sleep(time.Millisecond)
-		}
-		release()
-		closing.within(t, time.Second)
-		var writeErr error
-		select {
-		case writeErr = <-writing.done:
-		case <-time.After(time.Second):
-			t.Fatalf("iteration %d: local Write did not return", iter)
-		}
-		if writeErr != nil {
-			t.Fatalf("iteration %d: local Write = %v", iter, writeErr)
-		}
-		if x.ep.Stats().(*tcpip.TransportEndpointStats).PacketsReceived.Value() == 0 {
-			closeFirst++
-			ready := startTimed("WaitReadable", sender.WaitReadable)
-			ready.within(t, time.Second)
-			if _, err := sender.Read(make([]byte, 8)); err == nil {
-				t.Fatalf("iteration %d: no Port Unreachable reached the sender after its receiver closed", iter)
-			}
-		}
-		assertDeviceUsage(t, d, 0, 0)
-		sender.Close()
-	}
-	t.Logf("Close won in %d of %d iterations", closeFirst, iterations)
-	if closeFirst == 0 {
-		t.Fatal("Close never won the endpoint lock although it was queued first")
 	}
 }
 
