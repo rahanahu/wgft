@@ -84,6 +84,9 @@ type Manager struct {
 	// bindFail は bind に失敗し続けているポートの、最後に記録した理由と失敗の回数。適用は 30 秒ごとに
 	// 再試行されるので、同じ理由の失敗はログに 1 回だけ出し、開けたときに 1 回だけ回復を出す。
 	bindFail map[uint16]*failure
+	// closed は Close の後か。Close より前に Prepare した Prepared の Commit は、開いた待ち受けを閉じて
+	// 何も公開しない(Close の後に残る待ち受けを閉じる経路は無いため)。
+	closed bool
 }
 
 // failure は bind の失敗が続いている 1 つのポートの記録。
@@ -314,6 +317,13 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 	m := p.m
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		for port, ln := range p.opened {
+			ln.Close()
+			m.opts.Logf("proxy: released listener for %d: the relay is closed", port)
+		}
+		return
+	}
 	var stopped []*listener
 	kept := make([]*listener, 0, len(m.retiring))
 	for _, l := range m.retiring {
@@ -426,10 +436,12 @@ func (m *Manager) CloseAgent(agent string) {
 	m.retiring = kept
 }
 
-// Close stops every listener before joining any admission call.
+// Close stops every listener before joining any admission call. A later Commit releases the
+// listeners its Prepare opened and starts nothing.
 func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.closed = true
 	for _, l := range m.ls {
 		l.beginClose()
 	}

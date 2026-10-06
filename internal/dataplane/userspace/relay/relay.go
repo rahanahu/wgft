@@ -150,6 +150,9 @@ type Manager struct {
 
 	mu        sync.Mutex
 	listeners map[Key]*listener
+	// closed は Close の後か。Close の後の Apply と、Close より前に Prepare した Staged の Commit は、
+	// 待ち受けを開かない(Close の後に残る待ち受けを閉じる経路は無いため)。mu が守る
+	closed bool
 
 	// 次の 3 つは単体テストだけが New の後に書き換える差し込み口で、本番では nil である。停止や適用と
 	// 取得が重なる窓は、止める位置を外から決められないと繰り返して確かめられないので残す
@@ -547,10 +550,11 @@ func addrOf(a net.Addr) netip.Addr {
 	return netip.Addr{}
 }
 
-// Close は全リスナーを閉じる。Retiring の待ち受けも閉じる。
+// Close は全リスナーを閉じる。Retiring の待ち受けも閉じる。後の Apply と Staged の Commit は何も開かない。
 func (m *Manager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.closed = true
 	for k := range m.listeners {
 		m.closeLocked(k)
 	}
