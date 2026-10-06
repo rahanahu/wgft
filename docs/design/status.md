@@ -31,7 +31,7 @@ Agents 行も、`Connected` に加えて `Tunnel`・`LastHandshake` を読む(20
 `AgentInfo.Warnings` はエージェント個別の窃取検知の警告であり、配置全体の件数を数えるための節点ではないためです。
 
 <a id="4-行の意味"></a>
-#### 行の意味
+#### 4 行の意味
 
 状態の語彙は healthy・degraded・unknown の 3 つです。
 証拠が無い項目は、健全でも故障でもなく unknown とします。
