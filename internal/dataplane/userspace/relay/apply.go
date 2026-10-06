@@ -50,6 +50,10 @@ func plan(current map[Key]*listener, desired map[Key]Desired) []Action {
 // Apply はその結果を待ってから戻るので、ルールの最初の状態は適用の直後のハートビートに載る。
 func (m *Manager) Apply(desired map[Key]Desired) []Action {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
 	acts := plan(m.listeners, desired)
 	var probes []targetProbe
 	for _, a := range acts {

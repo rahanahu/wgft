@@ -151,6 +151,14 @@ func (s *Staged) Commit(retiring map[string]func(src netip.Addr) bool) {
 	// 届くかどうかは、エージェントが自分の確認の結果として報告する
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		// Close が Retiring の待ち受けも閉じたので、revived の待ち受けも残っていない
+		for k, sock := range s.opened {
+			sock.close()
+			m.opts.Logf("listener %s released: the relay is closed", k)
+		}
+		return
+	}
 	// Retiring から宣言に戻った UDP の待ち受けは、ソケットを持ち続けているのでそのまま戻す
 	for k := range s.revived {
 		m.reviveLocked(k, s.desired[k])
