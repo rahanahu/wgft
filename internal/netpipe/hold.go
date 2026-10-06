@@ -23,25 +23,42 @@ const (
 // (nettun.TCPConn.Delivered)。
 type deliverer interface{ Delivered() bool }
 
+// deliveryCloser は、届け終えるまで枠を持つ間の閉じ方を別に持つ netstack の接続が満たす
+// (nettun.TCPConn.CloseForDelivery)。その方法で閉じた接続は、後の Close で Device の閉じた後の接続の
+// 表に入る(設計文書 7 節)。
+type deliveryCloser interface{ CloseForDelivery() error }
+
 // StopForDelivery は、届け終えるまで保持する接続の読み書きを止める。Linux のカーネルの TCP は
-// 受信のメモリを確かめて止めるか RST で終え、それ以外は通常の Close で閉じる。中継の開始前に
-// 失敗した接続にも使う。呼び出し側が接続を登録したまま AwaitDelivered で待ち、枠を返す。
+// 受信のメモリを確かめて止めるか RST で終え、それ以外は CloseForDelivery で閉じる。中継の開始前に
+// 失敗した接続にも使う。呼び出し側が接続を登録したまま AwaitDelivered で待ち、枠を返すときに Close する。
 func StopForDelivery(c net.Conn) {
 	if tc, ok := holdable(c); ok {
 		stopKernel(tc)
 	} else {
-		c.Close()
+		CloseForDelivery(c)
 	}
+}
+
+// CloseForDelivery は、届け終えるまで枠を持つ接続を閉じる。netstack の接続は、閉じた後の接続の表に
+// まだ入れずに閉じ、呼び出し側が枠を返すときの Close で表に入る。それ以外の接続は通常の Close で閉じる。
+func CloseForDelivery(c net.Conn) {
+	if d, ok := c.(deliveryCloser); ok {
+		d.CloseForDelivery()
+		return
+	}
+	c.Close()
 }
 
 // PipeHold は PipeResetB と同じく中継する。違いは終わり方で、Linux のカーネルの TCP の接続
 // (*net.TCPConn)を閉じずに返す。そのような接続は、受信のメモリ(順序外のキューを含む)を持てば RST で
 // 即座に終え、それ以外は shutdown(SHUT_RDWR)で読み書きだけを止め、送信のキューの後ろに FIN を置いた
 // まま残す(stopKernel)。呼び出し側は AwaitDelivered で待った後か、中継を切るときに
-// Close で閉じる。それ以外の接続(netstack の接続と、Linux 以外のカーネルの接続)は PipeResetB と同じく
-// Close で閉じる。終わるときは、閉じる接続を先に閉じてから、カーネルの接続を止める。止める方を先に
-// すると、もう一方の向きが EOF を受けて netstack の接続に FIN を送り、resetB の RST の前に FIN が
-// 出うるためである。
+// Close で閉じる。netstack の接続は CloseForDelivery で閉じ、Device の閉じた後の接続の表にはまだ入れない。
+// 表に入るのは、呼び出し側が届け終えた後か中継を切るときに呼ぶ最後の Close である。届けている途中に
+// 通常の Close を足すと、その接続が表に入り、満杯のときの追い出し(Abort)が届け終えていない末尾を
+// 切りうる。Linux 以外のカーネルの接続は PipeResetB と同じく Close で閉じる。終わるときは、閉じる接続を
+// 先に閉じてから、カーネルの接続を止める。止める方を先にすると、もう一方の向きが EOF を受けて
+// netstack の接続に FIN を送り、resetB の RST の前に FIN が出うるためである。
 //
 // 止めるのに読み書きの期限を使わないのは、copyBulk が読みの期限を自分で置き直し、終わるときに消すので、
 // 外から置いた期限が消えて向きが終わらなくなるためである。

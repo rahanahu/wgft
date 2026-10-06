@@ -16,7 +16,7 @@ The sender, receiver and RACK sources are unchanged from the preceding pin.
 The update therefore does not fix the known [slow recovery after short outages](../vps/userspace.md#63-ユーザー空間モード).
 The dependency still admits zero-payload TCP segments independently of its receive-memory threshold.
 Stale receive-memory accounting and the acceptance of particular payload-bearing handshake forms remain separate limitations.
-A Device-wide table that bounds post-close TCP endpoints remains separate work.
+A fixed Device-wide table bounds post-close TCP endpoints; see [TCP retention](tcp-retention.md#閉じた後の接続の表).
 This version pin does not establish an aggregate retained-memory or process RSS bound.
 
 The TCP buffer adapter validates the actual type of the private atomic receive-memory field before reading it.

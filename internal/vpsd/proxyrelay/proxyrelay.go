@@ -642,7 +642,7 @@ func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 		pending = false
 		if up != nil {
 			// A partial header still ends gracefully; its real endpoint stays in the record.
-			up.Close()
+			netpipe.CloseForDelivery(up)
 		}
 		netpipe.StopForDelivery(c)
 		pair := []net.Conn{c}

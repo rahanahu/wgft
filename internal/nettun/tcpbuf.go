@@ -281,11 +281,17 @@ func (h *writeHistory) sum(s int64) (int64, bool) {
 // X が Write の中なら X.wmu も持つ。
 // 今の登録元は netpipe.FollowBoost だけで、その関数は組にしたカーネルのソケットのオプションを
 // RawConn.Control の中で読み書きするだけで、wgft の錠を取らない。
+//
+// Close は接続の錠をすべて放した後に、閉じた後の接続の表(postclose.go)に入れる。表の錠は末端で、
+// 満杯のときの別の接続の Abort は表の錠の外で行う。
 type tcpConn struct {
 	gc   *gonet.TCPConn
 	ep   tcpip.Endpoint
 	wq   *waiter.Queue
 	pool *boostPool
+	// postClose は閉じた後の接続の表(postclose.go)。Close が 1 回だけ endpoint を入れる
+	postClose *postCloseTable
+	retired   atomic.Bool
 
 	cmu     sync.Mutex // バッファの設定と閉じ始めの短い排他
 	closing bool
@@ -327,7 +333,7 @@ func (c *TCPConn) Abort() { c.abort() }
 // 自動調整が止まる。握手の間は自動調整を残すので、窓の scale は受信の上限(boost)から決まる。
 // 呼び出し側は、最初の読み取りの前にこれを通す(gVisor は読み取りのときにだけ受信のバッファを
 // 広げる)。失敗したら呼び出し側が endpoint を閉じる。
-func newTCPConn(wq *waiter.Queue, ep tcpip.Endpoint, pool *boostPool) (*tcpConn, error) {
+func newTCPConn(wq *waiter.Queue, ep tcpip.Endpoint, pool *boostPool, postClose *postCloseTable) (*tcpConn, error) {
 	so := ep.SocketOptions()
 	so.SetReceiveBufferSize(tcpRecvFloor, true)
 	so.SetSendBufferSize(tcpSendFloor, true)
@@ -335,12 +341,13 @@ func newTCPConn(wq *waiter.Queue, ep tcpip.Endpoint, pool *boostPool) (*tcpConn,
 		return nil, errors.New("could not set the TCP buffer floor")
 	}
 	return &tcpConn{
-		gc:      gonet.NewTCPConn(wq, ep),
-		ep:      ep,
-		wq:      wq,
-		pool:    pool,
-		wdlCh:   make(chan struct{}),
-		closeCh: make(chan struct{}),
+		gc:        gonet.NewTCPConn(wq, ep),
+		ep:        ep,
+		wq:        wq,
+		pool:      pool,
+		postClose: postClose,
+		wdlCh:     make(chan struct{}),
+		closeCh:   make(chan struct{}),
 	}, nil
 }
 
@@ -591,6 +598,11 @@ func (c *tcpConn) Write(b []byte) (int, error) {
 		if ch != nil {
 			c.wq.EventUnregister(&entry)
 		}
+		// 固定版の gVisor の endpoint は、最後の書き込みの io.Reader(ここでは r)を次の書き込みのために
+		// 持ち続ける(endpoint.go の limRdr)。r が b を指したままだと、閉じた後の endpoint が呼び出し側の
+		// バッファ(中継の 32 KiB のバッファなど)を TIME_WAIT の間ずっと手放さない。gVisor は Write の
+		// 中でだけ r を読み、Write は wmu の中で直列なので、戻る前に空にしてよい
+		r.Reset(nil)
 	}()
 	for total < len(b) {
 		s := int64(tcpSendFloor)
@@ -674,8 +686,20 @@ func (c *tcpConn) markClosing() {
 	c.closeOnce.Do(func() { close(c.closeCh) })
 }
 
-// Close は net.Conn の実装。待っている書き込みを解いてから endpoint を閉じる。
+// Close は net.Conn の実装。待っている書き込みを解いてから endpoint を閉じ、Device の閉じた後の接続の
+// 表に入れる(postclose.go)。表に入れるのは最初の Close の 1 回だけで、CloseForDelivery は入れない。
 func (c *tcpConn) Close() error {
+	err := c.CloseForDelivery()
+	if c.postClose != nil && c.retired.CompareAndSwap(false, true) {
+		c.postClose.add(c.ep)
+	}
+	return err
+}
+
+// CloseForDelivery は Close と同じく閉じるが、閉じた後の接続の表に入れない。中継は、末尾を届け終えるまで
+// フローの枠を持つ間この方法で閉じ、届け終えて枠を返すときに Close を呼ぶ(netpipe.CloseForDelivery)。
+// 表が満杯のときの追い出し(Abort)で、届けている途中の末尾を失わないためである。
+func (c *tcpConn) CloseForDelivery() error {
 	c.markClosing()
 	err := c.gc.Close()
 	c.closed.Store(true)
@@ -725,7 +749,7 @@ func (t *Device) DialTCP(ctx context.Context, ap netip.AddrPort) (net.Conn, erro
 		ep.Close()
 		return nil, &net.OpError{Op: "connect", Net: "tcp", Addr: net.TCPAddrFromAddrPort(ap), Err: errors.New(terr.String())}
 	}
-	c, err := newTCPConn(&wq, ep, t.pool)
+	c, err := newTCPConn(&wq, ep, t.pool, t.postClose)
 	if err != nil {
 		ep.Abort()
 		return nil, err

@@ -24,9 +24,10 @@ func (t *Device) ListenUDP(ap netip.AddrPort) (net.PacketConn, error) {
 // TCPListener は、Accept が *TCPConn を返す net.Listener。呼び出し側は、拒む接続をグレース
 // フルクローズの代わりに RST(TCPConn.Abort)で終えられる。
 type TCPListener struct {
-	ep   tcpip.Endpoint
-	wq   *waiter.Queue
-	pool *boostPool
+	ep        tcpip.Endpoint
+	wq        *waiter.Queue
+	pool      *boostPool
+	postClose *postCloseTable
 }
 
 // ListenTCP は ap で TCP リスナーを開く。gonet.ListenTCP の Bind+Listen をそのまま写したもの
@@ -47,7 +48,7 @@ func (t *Device) ListenTCP(ap netip.AddrPort) (*TCPListener, error) {
 		ep.Close()
 		return nil, &net.OpError{Op: "listen", Net: "tcp", Addr: net.TCPAddrFromAddrPort(ap), Err: errors.New(err.String())}
 	}
-	return &TCPListener{ep: ep, wq: &wq, pool: t.pool}, nil
+	return &TCPListener{ep: ep, wq: &wq, pool: t.pool, postClose: t.postClose}, nil
 }
 
 // Accept は net.Listener の実装。返す接続には握手の後に TCP のバッファの floor を設定する
@@ -59,7 +60,7 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		c, herr := newTCPConn(wq, n, l.pool)
+		c, herr := newTCPConn(wq, n, l.pool, l.postClose)
 		if herr != nil {
 			n.Abort()
 			continue
