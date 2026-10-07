@@ -4,10 +4,10 @@ Use userspace mode on a VPS without root or kernel WireGuard.
 The `wgft server` process forwards traffic, so forwarding stops when it stops.
 Allow WireGuard UDP 51820, agent API TCP 8443, and every forwarded port in the VPS firewall.
 
-At the default flow limits, the server needs about 5.9 GiB of host memory even with one agent and one forwarded TCP port.
+At the default flow limits, the server needs about 9.8 GiB of host memory even with one agent and one forwarded TCP port.
 This is the documented worst-case estimate: the flow state, buffers and other holdings counted in the calculation, each filled to its limit at once by an attack.
 It is not a normal-use estimate.
-Lower flow limits cannot bring this below about 2.9 GiB.
+Lower flow limits cannot bring this below about 2.6 GiB.
 The [design document](../design/agent-dataplane.md) gives the calculation.
 Check the Linux [socket buffer requirement](socket-buffers.md) too.
 

@@ -15,7 +15,11 @@ RACK loss detection remains enabled, and wgft continues to enable SACK.
 The sender, receiver and RACK sources are unchanged from the preceding pin.
 The update therefore does not fix the known [slow recovery after short outages](../vps/userspace.md#63-ユーザー空間モード).
 The dependency still admits zero-payload TCP segments independently of its receive-memory threshold.
-Stale receive-memory accounting and the acceptance of particular payload-bearing handshake forms remain separate limitations.
+When a listener hands a segment to a new endpoint, the dependency's `segment.setOwner` does not subtract that segment from the previous owner's receive-memory accounting.
+On the SYN-cookie path the listener's accounting can exceed its receive buffer, after which the listener rejects payload-bearing segments permanently.
+[The agent's accept-queue limitation](memory-agent-host.md#syn-cookie-の経路の受信のメモリの会計) describes when that path is reached.
+Lowering the listen backlog to 256 (about 64 MiB of receive floor per listener) requires a gVisor version that releases the previous owner's accounting; this is rechecked when gVisor is updated.
+The acceptance of particular payload-bearing handshake forms remains a separate limitation.
 A fixed Device-wide table bounds post-close TCP endpoints; see [TCP retention](tcp-retention.md#閉じた後の接続の表).
 This version pin does not establish an aggregate retained-memory or process RSS bound.
 
