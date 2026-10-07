@@ -1,6 +1,6 @@
-# IPv4 の断片と ICMP の検査
+# IPv4 の断片、ICMP、TCP の MSS の検査
 
-トンネルの入口で IPv4 の断片と ICMP の誤りを検査します。
+トンネルの入口で IPv4 の断片、ICMP の誤り、TCP のハンドシェイクの MSS を検査します。
 再組み立てには予算があり、表が満杯になった場合の拒否を区別します。
 
 
@@ -47,7 +47,7 @@
   断片を ICMP を送らずに黙って捨てる方式にはしません
 <a id="tun-の-write-の誤り"></a>
 - TUN の `Write` の誤り:`Write` はバッチの中の 1 件を処理できなくても残りを処理し、受け取った件数と最初の誤りを返します。
-  断片を捨てたことと、後述の UDP の受信の会計が datagram を捨てたことは、誤りとして返さない。
+  断片を捨てたこと、後述の UDP の受信の会計が datagram を捨てたこと、後述の MSS の下限で segment を捨てたことは、誤りとして返さない。
   wireguard-go は `Write` の誤りをバッチごとに回数を絞らずログへ出すので、断片や UDP の入力でログが埋まらないようにするためです。
   誤りを返すのは、閉じた後の `Write` と IPv4 でない packet だけです
 <a id="ipv4-の-total-length"></a>
@@ -76,12 +76,42 @@
   宛先のホスト自身のインタフェースの MTU が 552 より小さい場合は、そのホストが SYN-ACK で示す MSS が `vpsd` の segment を抑えるので、この誤りに頼らない。
   552 より小さいのが途中の区間だけの場合は、`vpsd` の側の PMTU を下げられないので、大きな segment は届かない([7b.7 節](../kernel-agent/limits.md#7b7-未確認の点)の、LAN の側の小さい MTU の区間と同じ場合である)。
   Linux は `min_pmtu` より小さい MTU を受けると、誤りを捨てずに PMTU を 552 に固定し、以後は DF を立てずに送るので、途中のルータの断片化で届く。
-  wgft は誤りを捨てるので、この点で Linux と異なる
+  wgft は誤りを捨てるので、この点で Linux と異なる。
+  この下限の経路での 1 segment の中身の下限は、後述の[TCP の MSS の下限](#tcp-の-mss-の下限)の項に書きます
 <a id="捨てた-icmp-の誤り"></a>
 - 捨てた ICMP の誤り:ICMP を返さず、ログにも出さない。
   gVisor が自分で捨てる誤りと同じ扱いです。
   Device は IPv4 だけを扱い、IPv6 の packet は `Write` の誤りになるので、ICMPv6 の誤りに当たる確認は持ちません。
   エージェントの Device にも同じ確認が効く。
   エージェントに packet を送れるピアは `vpsd` だけで、`vpsd` の netstack が出す誤りの送信元は `vpsd` のトンネルのアドレスなので、エージェントの側で正当な誤りを捨てることはありません
+<a id="tcp-の-mss-の下限"></a>
+- TCP の MSS の下限:TUN の `Write` は、完成した IPv4 の datagram のうち SYN の立った TCP の segment(SYN と SYN-ACK)を、MSS の option の値が 536 より小さいときに捨てます。
+  固定版の gVisor は、送った segment を確認されるまで 1 つずつ管理の構造ごと持ち、その構造は 1 つで約 0.62 KiB(`tcp.SegOverheadSize`)です。
+  相手の MSS は 48 まで受け入れ、segment の中身の上限は MSS から option の枠の最大の 40 byte を引いた値です。
+  wgft は SACK を有効にしているので、相手が SYN で timestamp と SACK を示すと、中身の上限は 8 byte まで下がります。
+  同じ送り残しの byte で、segment の数は後述の下限の 496 byte のときの約 62 倍、MTU 1420 のときの約 170 倍になります。
+  エージェントの netstack は待ち受けるので SYN を受け、`vpsd` の netstack はエージェントへ dial するので SYN-ACK を受けます。
+  カーネルモードの `vpsd` の後ろのユーザー空間のエージェントでは、SYN の MSS を選ぶのは `vpsd` の DNAT を通る公開側の利用者であり、WireGuard の鍵の持ち主を信頼しても防げないので、どちらの向きにも同じ検査を掛けます。
+  MSS は、固定版の gVisor が SYN と SYN-ACK の option を読むのと同じ `header.ParseSynOptions` で読み、gVisor が使う値を検査します。
+  MSS の option が無い segment、MSS の値が 0 の segment、MSS の値を読む前に読めない形の option で gVisor が読み終える segment は、gVisor が既定の 536 を使うので通します。
+  48 より小さい値は gVisor が 48 に上げるので捨てます。
+  断片で届いた SYN は再組み立ての後に確かめる。
+  IPv4 か TCP のヘッダーの壊れた packet は検査せずに netstack に渡し、gVisor が捨てます。
+  TCP の checksum は確かめない。
+  checksum の誤った segment は、この検査で捨てても gVisor が捨てても netstack の状態を変えないためです。
+  捨てた segment には ICMP も RST も返しません。
+  捨てた数を Device ごとに数え、1 分に 1 回まで、それまでの数と最後の送信元をログに出します。
+  536 は MSS の option が無いときの既定値(RFC 1122)で、`WGFT_MTU` の下限 576 の netstack が示す MSS でもあるので、wgft の netstack どうしの接続は捨てません。
+  値は設定項目にしません。
+  MSS が 536 より小さい相手とは接続できません。
+  segment の中身の上限は、gVisor が送り残しを segment に分ける大きさ(`MaxPayloadSize`)です。
+  これを相手の入力で下げる経路は、SYN の MSS と、前述の Fragmentation Needed の 2 つです。
+  MSS の経路では、下限の 536 から option の枠の 40 byte を引くので、上限は 496 byte 以上です。
+  Fragmentation Needed の経路では、gVisor は next-hop MTU の 552 から IPv4 のヘッダーの 20 byte、TCP のヘッダーの 20 byte、option の枠の 40 byte を引くので、上限は 472 byte 以上です。
+  このため、送り残しを分ける大きさは 472 byte を下回りません。
+  これより小さい segment も送られます。
+  確認を待つ segment が無いとき、gVisor は相手の受信の窓の大きさで分けるので、窓が 1 byte なら 1 byte の segment を送ります。
+  ただし、そのとき確認を待つ segment は 1 つだけです。
+  小さな書き込みの数は、送信のキューの[書き込みの数の上限](tcp-buffers.md#書き込みの数の上限)が抑えます
 
 [ユーザー空間の仕様](README.md)

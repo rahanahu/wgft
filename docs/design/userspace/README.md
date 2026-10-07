@@ -9,7 +9,7 @@
 - [上界に含めない保持点と測定の限界](memory-limits.md)
 - [server のメモリの上界](memory-server.md)
 - [送信元の制限とモードの選択](mode-selection.md)
-- [IPv4 の断片と ICMP の検査](packet-validation.md)
+- [IPv4 の断片、ICMP、TCP の MSS の検査](packet-validation.md)
 - [WireGuard のソケットの動作条件](socket-buffers.md)
 - [WireGuard のハンドシェイクの送信元の保持](wireguard-sources.ja.md) · [English](wireguard-sources.md)
 - [待ち受けの失敗と宛先の許可](targets.md)

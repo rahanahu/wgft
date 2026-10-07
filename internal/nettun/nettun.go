@@ -51,6 +51,8 @@ type Device struct {
 	sweepDone  chan struct{}
 	closed     atomic.Bool
 	pool       *boostPool // TCP のバッファの枠。プロセスで 1 つ(tcpbuf.go)
+	// MSS の下限で捨てた SYN と SYN-ACK の数とログの門(ingress.go)
+	synMSS synMSSFloor
 }
 
 // Create は addr (IPv4 のみ) を唯一のアドレスとする Device を作る。

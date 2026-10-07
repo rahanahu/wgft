@@ -5,7 +5,8 @@ package nettun
 // 断片化された datagram ごとに取り消されない 30 秒のタイマーを残し、保持する量が到着の速さで
 // 決まるので、断片を gVisor に一度も渡さない(設計文書 7 節)。この Device 宛ての完成した UDP は
 // 登録表(udp_registry.go)を通し、受信の会計の予約を持って endpoint に届ける。ICMP の誤りは、
-// 外側の送信元が引用の宛先と一致するものだけを gVisor に渡す(admitICMPv4Error)。
+// 外側の送信元が引用の宛先と一致するものだけを gVisor に渡す(admitICMPv4Error)。TCP の SYN と
+// SYN-ACK は、MSS の option が下限より小さいものを捨てる(tcpSynMSSBelowFloor)。
 
 import (
 	"bytes"
@@ -13,6 +14,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -20,6 +22,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+
+	"github.com/rahanahu/wgft/internal/lograte"
 )
 
 // 再組み立ての表の上限。値は設計文書 7 節に書く。
@@ -166,6 +170,10 @@ func (t *Device) writeIPv4(packet []byte) error {
 	if !admitICMPv4Error(packet) {
 		return nil
 	}
+	if tcpSynMSSBelowFloor(packet) {
+		t.synMSS.drop(packet)
+		return nil
+	}
 	if ipHeaderLen, err := parseLocalUDP(packet, t.local); err == nil {
 		// A refusal by the receive budget and a stopped accounting are drops,
 		// not Write errors, for the same reason as a refused fragment.
@@ -222,6 +230,65 @@ func admitICMPv4Error(packet []byte) bool {
 		return false
 	}
 	return true
+}
+
+// tcpSynMinMSS は、TUN の入口が受け入れる SYN と SYN-ACK の MSS の下限。gVisor は送った segment を
+// 確認されるまで 1 つずつ管理の構造ごと持ち、相手の MSS を 48 まで受け入れるので、小さい MSS の相手は
+// 同じ送り残しの byte で保持を数十倍に増やせる。536 は MSS の option が無いときの既定値
+// (RFC 1122、gVisor の header.TCPDefaultMSS)で、wgft の MTU の下限 576 の netstack が示す値でもある。
+// 値は設定項目にしない(設計文書 7 節)。
+const tcpSynMinMSS = 536
+
+// tcpSynMSSBelowFloor reports whether packet is a TCP segment with SYN set,
+// a SYN or a SYN-ACK, whose MSS is below tcpSynMinMSS as gVisor reads it.
+// It parses the options with gVisor's own header.ParseSynOptions, which the
+// pinned gVisor uses for every SYN it acts on, so the value checked is the
+// value the endpoint would use: an absent, zero or malformed MSS option
+// leaves gVisor's default of 536, and a value below 48 counts as 48. packet
+// is a complete datagram, so a fragmented SYN is checked after reassembly.
+// A packet whose IPv4 or TCP header is malformed passes, as gVisor drops it;
+// the TCP checksum is not checked, since gVisor drops a bad one either way.
+func tcpSynMSSBelowFloor(packet []byte) bool {
+	ip := header.IPv4(packet)
+	if !ip.IsValid(len(packet)) || ip.Protocol() != uint8(header.TCPProtocolNumber) {
+		return false
+	}
+	hlen, tlen := int(ip.HeaderLength()), int(ip.TotalLength())
+	if tlen-hlen < header.TCPMinimumSize {
+		return false
+	}
+	tcp := header.TCP(packet[hlen:tlen])
+	flags := tcp.Flags()
+	if !flags.Contains(header.TCPFlagSyn) {
+		return false
+	}
+	off := int(tcp.DataOffset())
+	if off < header.TCPMinimumSize || off > len(tcp) {
+		return false
+	}
+	return header.ParseSynOptions(tcp[header.TCPMinimumSize:off], flags.Contains(header.TCPFlagAck)).MSS < tcpSynMinMSS
+}
+
+// synMSSFloor counts the SYN and SYN-ACK segments the MSS floor drops and
+// logs them at most once a minute. The zero value is ready to use.
+type synMSSFloor struct {
+	dropped atomic.Uint64
+	log     lograte.Gate
+}
+
+// drop counts one dropped segment and may log it. packet has passed
+// tcpSynMSSBelowFloor, so its IPv4 and TCP headers are whole.
+func (f *synMSSFloor) drop(packet []byte) {
+	n := f.dropped.Add(1)
+	if !f.log.Allow() {
+		return
+	}
+	ip := header.IPv4(packet)
+	tcp := header.TCP(packet[ip.HeaderLength():])
+	src := netip.AddrPortFrom(netip.AddrFrom4(ip.SourceAddress().As4()), tcp.SourcePort())
+	logf("userspace tunnel: dropped TCP handshakes that advertise an MSS below %d; "+
+		"%d dropped since the tunnel was built, the latest from %s; peers that advertise a smaller MSS cannot connect through this tunnel",
+		tcpSynMinMSS, n, src)
 }
 
 // The reasons parseLocalUDP refuses a packet, in the order it checks them.
