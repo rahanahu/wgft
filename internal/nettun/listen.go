@@ -28,6 +28,7 @@ type TCPListener struct {
 	wq        *waiter.Queue
 	pool      *boostPool
 	postClose *postCloseTable
+	acks      *ackBudgets
 }
 
 // ListenTCP は ap で TCP リスナーを開く。gonet.ListenTCP の Bind+Listen をそのまま写したもの
@@ -48,7 +49,7 @@ func (t *Device) ListenTCP(ap netip.AddrPort) (*TCPListener, error) {
 		ep.Close()
 		return nil, &net.OpError{Op: "listen", Net: "tcp", Addr: net.TCPAddrFromAddrPort(ap), Err: errors.New(err.String())}
 	}
-	return &TCPListener{ep: ep, wq: &wq, pool: t.pool, postClose: t.postClose}, nil
+	return &TCPListener{ep: ep, wq: &wq, pool: t.pool, postClose: t.postClose, acks: t.acks}, nil
 }
 
 // Accept は net.Listener の実装。返す接続には握手の後に TCP のバッファの floor を設定する
@@ -65,6 +66,7 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 			n.Abort()
 			continue
 		}
+		l.acks.register(c)
 		return &TCPConn{c}, nil
 	}
 }

@@ -55,6 +55,8 @@ type Device struct {
 	synMSS synMSSFloor
 	// postClose は閉じた後の TCP の接続の表(postclose.go)
 	postClose *postCloseTable
+	// acks は中身の無い ACK の予算の表(ackbudget.go)
+	acks *ackBudgets
 }
 
 // Create は addr (IPv4 のみ) を唯一のアドレスとする Device を作る。
@@ -80,6 +82,7 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		local:      addr,
 		pool:       processTCPBoost,
 		postClose:  newPostCloseTable(postCloseEntries),
+		acks:       newAckBudgets(addr),
 	}
 	// 失敗したときは、ここまでに作った stack と NIC を閉じ、goroutine の終了を待ってから誤りを返す。
 	// 成功した Device の Close と同じ片付けである
@@ -152,6 +155,7 @@ func (t *Device) Read(buf [][]byte, sizes []int, offset int) (int, error) {
 		return 0, err
 	}
 	sizes[0] = n
+	t.acks.outbound(buf[0][offset : offset+n])
 	return 1, nil
 }
 

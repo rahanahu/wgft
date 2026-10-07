@@ -14,6 +14,11 @@ Windows、macOS、Docker などを使う場合は、先に[環境別の導入](s
 
 Linux の agent でソケットのバッファについて警告が出た場合は、[ホスト側の設定](socket-buffers.ja.md)を確認してください。
 
+カーネルモードの VPS の後ろのユーザー空間モードの agent には、既知の制限があります。
+送り残しの多い TCP の接続に公開側の利用者が中身の無い ACK を送り続けると、agent のメモリが増え続けることがあります。
+Linux の agent は、[カーネルモード](agent-kernel.ja.md)で動かせばこの制限を受けません。
+詳細は[設計文書](../design/userspace/memory-limits.md#中身の無い-segment-の処理待ち)を参照してください。
+
 ## 1. バイナリをインストールする
 
 VPS と自宅側の Linux マシンで実行します。

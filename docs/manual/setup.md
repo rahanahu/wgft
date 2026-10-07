@@ -14,6 +14,11 @@ For Windows, macOS, Docker, or other environments, first choose a procedure from
 
 If the Linux agent logs a socket buffer warning, check the [host settings](socket-buffers.md).
 
+A userspace-mode agent behind a kernel-mode VPS has a known limitation.
+On a TCP connection with much unacknowledged data, a public client that keeps sending acknowledgments without data can make the agent's memory keep growing.
+[Kernel mode for the Linux agent](agent-kernel.md) avoids it.
+The [design document](../design/userspace/memory-limits.md#中身の無い-segment-の処理待ち) describes the limitation.
+
 ## 1. Install the binary
 
 Run this on both the VPS and the home Linux machine.

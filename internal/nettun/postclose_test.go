@@ -289,9 +289,11 @@ func rowHeap(t *testing.T, n int, finWait2 bool) float64 {
 	for _, ep := range eps {
 		waitFor(t, 10*time.Second, want.String(), func() bool { return stateOf(ep) == want })
 	}
-	// 受けた側の LAST_ACK の行は、CLOSED になった後の sweep で外れる
+	// 受けた側の LAST_ACK の行は、CLOSED になった後の sweep で外れる。中身の無い ACK の予算の表の行も
+	// 同じ sweeper が外す(ackbudget.go)
 	waitFor(t, 10*time.Second, "the accepted side's rows to leave", func() bool {
 		p.b.postClose.sweep()
+		p.b.acks.sweep()
 		return p.b.postClose.len() <= 1
 	})
 	eps = nil
