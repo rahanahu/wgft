@@ -87,6 +87,7 @@
 <a id="tcp-の-mss-の下限"></a>
 - TCP の MSS の下限:TUN の `Write` は、完成した IPv4 の datagram のうち SYN の立った TCP の segment(SYN と SYN-ACK)を、MSS の option の値が 536 より小さいときに捨てます。
   固定版の gVisor は、送った segment を確認されるまで 1 つずつ管理の構造ごと持ち、その構造は 1 つで約 0.62 KiB(`tcp.SegOverheadSize`)です。
+  メモリの上界は、view を含めて 1 つ約 0.7 KiB で数えます([TCP のフロー 1 本の上界](memory-server.md#tcp-のフロー-1-本の上界))。
   相手の MSS は 48 まで受け入れ、segment の中身の上限は MSS から option の枠の最大の 40 byte を引いた値です。
   wgft は SACK を有効にしているので、相手が SYN で timestamp と SACK を示すと、中身の上限は 8 byte まで下がります。
   同じ送り残しの byte で、segment の数は後述の下限の 496 byte のときの約 62 倍、MTU 1420 のときの約 170 倍になります。
