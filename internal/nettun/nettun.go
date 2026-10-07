@@ -53,6 +53,8 @@ type Device struct {
 	pool       *boostPool // TCP のバッファの枠。プロセスで 1 つ(tcpbuf.go)
 	// MSS の下限で捨てた SYN と SYN-ACK の数とログの門(ingress.go)
 	synMSS synMSSFloor
+	// postClose は閉じた後の TCP の接続の表(postclose.go)
+	postClose *postCloseTable
 }
 
 // Create は addr (IPv4 のみ) を唯一のアドレスとする Device を作る。
@@ -77,6 +79,7 @@ func Create(addr netip.Addr, mtu int) (*Device, error) {
 		mtu:        mtu,
 		local:      addr,
 		pool:       processTCPBoost,
+		postClose:  newPostCloseTable(postCloseEntries),
 	}
 	// 失敗したときは、ここまでに作った stack と NIC を閉じ、goroutine の終了を待ってから誤りを返す。
 	// 成功した Device の Close と同じ片付けである
@@ -182,14 +185,16 @@ func (t *Device) Write(buf [][]byte, offset int) (int, error) {
 
 // Close は device を閉じる。2 回目以降の呼び出しは何もしない。
 //
-// 読み取りの取り消しを先に行い、停止中の TUN.Read を解除する。再組み立ての sweeper は stack を
-// 閉じる前に止めて待つ。UDP の endpoint は、閉じた印を付けてから全部閉じる。
+// 読み取りの取り消しを先に行い、停止中の TUN.Read を解除する。再組み立てと閉じた後の接続の表の
+// sweeper は stack を閉じる前に止めて待つ。UDP の endpoint は、閉じた印を付けてから全部閉じる。
+// 閉じた後の接続の表は stack を閉じた後に捨てる。表の行の Abort は待たない。
 func (t *Device) Close() error {
 	t.closeOnce.Do(func() {
 		t.cancelRead()
 		t.closeIngress()
 		t.stack.RemoveNIC(1)
 		t.stack.Close()
+		t.postClose.close()
 		t.ep.Close()
 		close(t.events)
 	})

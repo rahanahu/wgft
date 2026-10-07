@@ -88,6 +88,8 @@ func (t *Device) sweepReassembly() {
 			for _, n := range t.reassembly.Sweep(now) {
 				t.fragmentNotice(n, nil)
 			}
+			// 閉じた後の TCP の接続の表から、CLOSED か ERROR になった行を外す(postclose.go)
+			t.postClose.sweep()
 		}
 	}
 }
