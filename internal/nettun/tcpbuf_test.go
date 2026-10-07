@@ -449,7 +449,15 @@ func TestTCPBoostCap(t *testing.T) {
 			maxA, maxB = max(maxA, p.a.pool.inUse()), max(maxB, p.b.pool.inUse())
 			for _, cc := range conns {
 				for _, x := range cc {
-					snd, rcv := bufSizes(x)
+					// 書き込みは、確かめの間だけ送信のバッファを floor より小さい値にする。書き込みの
+					// 外にいる接続の送信のバッファだけを見る
+					snd, rcv := int64(tcpSendFloor), int64(0)
+					if xc := connOf(x); xc.wmu.TryLock() {
+						snd, rcv = bufSizes(x)
+						xc.wmu.Unlock()
+					} else {
+						_, rcv = bufSizes(x)
+					}
 					if snd < tcpSendFloor || rcv < tcpRecvFloor {
 						belowFloor++
 					}

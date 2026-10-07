@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math/bits"
 	"net"
 	"net/netip"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"unsafe"
 
 	"gvisor.dev/gvisor/pkg/atomicbitops"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
@@ -563,12 +565,36 @@ func (c *tcpConn) wait(ch <-chan struct{}) error {
 	return nil
 }
 
+// chunkMin は gVisor の buffer の最小の chunk の大きさ(固定版の pkg/buffer の baseChunkSize)。
+const chunkMin = 64
+
+// writePiece は、n byte のうち 1 回の gVisor の書き込みに渡す長さを返す。gVisor は書き込みごとに
+// 64 KiB の chunk と、残りを 2 の冪に切り上げた chunk を確保するので、長さによっては chunk の大きさが
+// byte のほぼ 2 倍になる。返す長さは、chunk の余りが長さの 1/4 以下になるもので、余りが大きければ
+// 1 つ小さい 2 の冪で切り、残りは次の書き込みに回す。chunkMin 以下の長さは切っても chunk が縮まない。
+func writePiece(n int) int {
+	if n >= buffer.MaxChunkSize {
+		return n &^ (buffer.MaxChunkSize - 1)
+	}
+	if n <= chunkMin {
+		return n
+	}
+	c := 1 << bits.Len(uint(n-1))
+	if c-n <= n/4 {
+		return n
+	}
+	return c / 2
+}
+
 // Write は byte の上限 S と、確認されていない書き込みの数の上限 W = S/tcpWriteUnit を守る。
 // gVisor に書く前に、キューに残る byte が直前 W-1 回に受け入れた長さの和 X より少ないことを
 // 確かめる。キューは送った byte の列の末尾なので、それより前の書き込みはすべて確認済みで、
-// 残る書き込みは今回を含めて W 回以内になる。確かめ方は、送信のバッファを X にし、書き込める
-// 状態かを見て読み返し、成り立てば min(S, X+残り) に開いて 1 回だけ書くことである。記録が
-// W-1 回に満たないか X >= S なら、確かめるまでもなく成り立つ。
+// 残る書き込みは今回を含めて W 回以内になる。記録が W-1 回に満たないか X >= S なら、確かめる
+// までもなく成り立つ。1 回の gVisor の書き込みには、chunk の余りの小さい長さ k(writePiece)を渡し、
+// gVisor が k を短く切らないように、キューに残る byte が S-k 以下であることも同時に確かめる。
+// 確かめ方は、送信のバッファを X と S-k+1 の小さい方にし、書き込める状態かを見て読み返すことで、
+// 成り立てば、X で確かめたときは min(S, X+残り)、それ以外は S に開いて k byte を書く。k が入り
+// 切らないときは、tcpWriteUnit まで k を半分にして試し、それでも入らなければ待つ。
 func (c *tcpConn) Write(b []byte) (int, error) {
 	c.inflight.Add(1)
 	defer c.inflight.Add(-1)
@@ -604,6 +630,7 @@ func (c *tcpConn) Write(b []byte) (int, error) {
 		// 中でだけ r を読み、Write は wmu の中で直列なので、戻る前に空にしてよい
 		r.Reset(nil)
 	}()
+	pieceMax := len(b) // k が入り切らなかったときに半分にする、k の上限
 	for total < len(b) {
 		s := int64(tcpSendFloor)
 		if c.boosted.Load() {
@@ -614,36 +641,50 @@ func (c *tcpConn) Write(b []byte) (int, error) {
 			h(c)
 		}
 		x, full := c.hist.sum(s)
-		rest := int64(len(b) - total)
-		if !full || x >= s {
-			if so.GetSendBufferSize() != s {
+		k := writePiece(min(len(b)-total, pieceMax, int(s)))
+		// キューに残る byte が lim より少なければ、k byte が S に入り切り、数の確かめも成り立つ。
+		// 送信の向きを閉じた後は Readiness が常に書き込める状態を返し、確かめは何も示さないが、
+		// そのときは続く gVisor の書き込みが失敗してキューに何も入らないので、上限は崩れない
+		lim, counted := s-int64(k)+1, full && x < s
+		byCount := counted && x < lim
+		if byCount {
+			lim = x
+		}
+		so.SetSendBufferSize(lim, true)
+		ready := c.ep.Readiness(waiter.WritableEvents)&waiter.WritableEvents != 0
+		if so.GetSendBufferSize() != lim {
+			// 読み返しが違うのは、並行する設定が値を変えたとき。数回試し、だめなら通知を待つ
+			if retries++; retries < 4 {
+				continue
+			}
+			retries = 0
+			if err := waitWritable(); err != nil {
+				return total, err
+			}
+			continue
+		}
+		if !ready {
+			// k が入り切らないだけなら、半分の長さを試す。tcpWriteUnit より短くはしない
+			if !byCount && k > tcpWriteUnit {
+				pieceMax = k / 2
+				continue
+			}
+			if !byCount {
+				// 待つ間は送信のバッファを S に戻す。gVisor は送信のバッファの半分が空いたときに通知する
 				so.SetSendBufferSize(s, true)
 			}
-		} else {
-			// 送信の向きを閉じた後は Readiness が常に書き込める状態を返し、確かめは何も示さないが、
-			// そのときは続く gVisor の書き込みが失敗してキューに何も入らないので、上限は崩れない
-			so.SetSendBufferSize(x, true)
-			ready := c.ep.Readiness(waiter.WritableEvents)&waiter.WritableEvents != 0
-			if so.GetSendBufferSize() != x {
-				// 読み返しが違うのは、並行する設定が値を変えたとき。数回試し、だめなら通知を待つ
-				if retries++; retries < 4 {
-					continue
-				}
-				retries = 0
-				if err := waitWritable(); err != nil {
-					return total, err
-				}
-				continue
+			if err := waitWritable(); err != nil {
+				return total, err
 			}
-			if !ready {
-				if err := waitWritable(); err != nil {
-					return total, err
-				}
-				continue
-			}
-			so.SetSendBufferSize(min(s, x+rest), true)
+			pieceMax = len(b)
+			continue
 		}
-		r.Reset(b[total:])
+		if counted {
+			so.SetSendBufferSize(min(s, x+int64(len(b)-total)), true)
+		} else {
+			so.SetSendBufferSize(s, true)
+		}
+		r.Reset(b[total : total+k])
 		n, err := c.ep.Write(&r, tcpip.WriteOptions{})
 		if n > 0 {
 			c.hist.add(int(n))
