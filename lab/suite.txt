@@ -24,11 +24,14 @@
 #                             check 12 is the one check in this class today.
 #   default  yes              part of `labhost run all`
 #            no               run it by naming it (it needs something the Lab Host cannot always
-#                             provide, e.g. release binaries fetched from the network)
+#                             provide, e.g. release binaries fetched from the network, or it is a
+#                             long check that docs/testing.md runs at a phase or a release
+#                             candidate instead)
 #
 # The set of jobs with default=yes covers exactly what the per-test suite covers: both modes of
-# e2e, ipv6, rates and lifecycle, plus split-merge, import-export and connlimit in the one mode
-# each of them has. lifecycle is listed per check, so a check can have its own class.
+# e2e, ipv6, rates, lifecycle and usage, plus split-merge, import-export and connlimit in the one
+# mode each of them has, and exhaustion's checks in the modes they apply to. lifecycle is listed
+# per check, so a check can have its own class.
 #
 # The check 5 family floods thousands of connections and datagrams. 5, 5b and 5e read RSS under that
 # load and run alone. 5c and 5d assert on an admission decision instead, and 20 repetitions of each
@@ -79,6 +82,22 @@
 # lifecycle.sh check 12 sets net.core.rmem_max and net.core.wmem_max, which are one value for the
 # whole VM, and writes /etc/sysctl.d/90-wgft.conf, so it runs alone and restores both at its end.
 #
+# exhaustion.sh drives the userspace dataplane's retained resources with external input (see its
+# header). postclose, acceptq, ackflood and wgstall assert on, or print for a person to read, a live
+# heap, an RSS, a round-trip time or an achieved connection rate under a flood, so they run alone.
+# postclose is the longest job of the file, a little over three minutes: its load runs until the
+# second eviction log line, a minute after the table fills, and its drain is a 60 s TIME_WAIT. It
+# runs by default in userspace mode only; the kernel-mode run exercises the same table on the
+# agent's listening side and is run by name at a phase or a release candidate (docs/testing.md
+# L19), to keep the suite's wall time down. mss asserts only on a handshake
+# being dropped and on transfers completing, and touches only its own namespaces, so it runs in the
+# pool. acceptq and ackflood need a kernel-mode server in front of the agent and wgstall a userspace
+# one; they are listed for that mode only, rather than registered for both modes to print SKIP.
+#
+# usage.sh puts the ordinary kinds of traffic through a rule (HTTP, keystrokes, game-like UDP, bulk)
+# and asserts only that they arrive whole; the round-trip times and rates it prints are not
+# assertions, so it runs in the pool.
+#
 # version-skew.sh needs the v0.3.0, v1.1.3 and immediately-previous release binaries (v1.4.0 is
 # OLD_VERSION's default as of this revision; see the script's own header comment). A lab VM on a
 # host without outbound IPv4 cannot fetch them (GitHub has no IPv6), so they have to be staged
@@ -105,6 +124,10 @@ parallel         yes  lifecycle.sh userspace 11
 parallel         yes  lifecycle.sh kernel 9
 parallel         yes  e2e.sh kernel
 parallel         yes  e2e.sh userspace
+parallel         yes  usage.sh kernel
+parallel         yes  usage.sh userspace
+parallel         yes  exhaustion.sh kernel mss
+parallel         yes  exhaustion.sh userspace mss
 parallel         yes  agentkernel.sh kernel stale
 parallel         yes  lifecycle.sh kernel 6
 parallel         yes  connlimit.sh
@@ -147,5 +170,10 @@ exclusive-global yes  lifecycle.sh kernel 12
 exclusive-global yes  lifecycle.sh userspace 12
 exclusive-heavy  yes  rates.sh kernel
 exclusive-heavy  yes  rates.sh userspace
+exclusive-heavy  yes  exhaustion.sh userspace postclose
+exclusive-heavy  yes  exhaustion.sh kernel acceptq
+exclusive-heavy  yes  exhaustion.sh kernel ackflood
+exclusive-heavy  yes  exhaustion.sh userspace wgstall
 
 parallel         no   version-skew.sh
+exclusive-heavy  no   exhaustion.sh kernel postclose
