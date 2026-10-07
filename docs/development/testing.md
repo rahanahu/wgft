@@ -42,7 +42,7 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 ## マージの前に流すテスト
 
 コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。
-ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L18 です。
+ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L20 です。
 流し方は、1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行することです。
 この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。
 文書だけを変える PR は、ラボを流しません。
@@ -73,10 +73,10 @@ B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧�
 | `nft-emit` | `internal/policy/nftables/**`、`internal/dataplane/linuxkernel/nft/**`、`internal/policy/*.go`、`internal/planner/**` | B1 | L2、L3 (kernel モード) |
 | `kernel` | `internal/dataplane/linuxkernel/**`、`internal/platform/linux/**`、`internal/vpsd/teardown/**`、`lab/netns.sh`、`lab/lab` | B1、B2 | L2、L4、L5、L7、L10 (kernel モード) |
 | `admission` | `internal/policy/**`、`proto/rate.go`、`proto/source.go` | B1 | L2、L3、L13 |
-| `resource` | `internal/resource/**`、`internal/lograte/**`、`internal/dataplane/userspace/**`、`internal/netpipe/**`、`internal/nettun/**`、`cmd/wgft/limits.go` | B11 (C5 と C6 は次の段階の完了時に流し直す) | L8 (両モード) |
+| `resource` | `internal/resource/**`、`internal/lograte/**`、`internal/dataplane/userspace/**`、`internal/netpipe/**`、`internal/nettun/**`、`cmd/wgft/limits.go` | B11 (C5 と C6 は次の段階の完了時に流し直す) | L8、L19 (両モード) |
 | `reconcile` | `internal/reconcile/**`、`internal/planner/**`、`internal/model/**`、`internal/dataplane/*.go`、`internal/vpsd/apply.go`、`internal/vpsd/watch.go`、`internal/vpsd/dataplane*.go` | 無し (C2 は次の段階の完了時に流し直す) | L4、L5、L6、L9、L10、L15 (両モード) |
 | `relay` | `internal/vpsd/proxyrelay/**` | B3 | L1、L3、L6、L9、L13 |
-| `userspace` | `internal/dataplane/userspace/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` | B11 | L1、L3、L4、L8、L18 (userspace モード) |
+| `userspace` | `internal/dataplane/userspace/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` | B11 | L1、L3、L4、L8、L18、L19、L20 (userspace モード) |
 | `rule-ops` | `internal/vpsd/admin/**`、`internal/vpsd/agent_disable.go`、`proto/rule.go`、`proto/splitmerge.go`、`proto/importdiff.go`、`cmd/wgft/rule.go` | 無し | L5、L11、L12、L14、L15 (両モード) |
 | `protocol` | `proto/stream.go`、`proto/state.go`、`proto/version.go`、`internal/vpsd/stream/**`、`internal/vpsd/agentapi/**`、`internal/agent/**` | B7 | L1、L4、L14、L15 |
 | `agent-platform` | `internal/agent/**`、`internal/flock/**`、`internal/dataplane/userspace/relay/**`、`internal/dataplane/userspace/tunnel/**`、`cmd/wgft/**`、`*_windows.go`、`*_darwin.go` | B4、B8 | L1、L14、L16、L17、L18 |
@@ -97,9 +97,10 @@ CI (`.github/workflows/ci.yml`) は、ホストで完結する A1 から A8 と�
 
 ラボの実行手順は[lab/README.md](../../lab/README.md)にあります。
 `labhost run all` は `lab/suite.txt` の分類に従い、並列の確認の後に単独の確認を流します。
-複数の VM に分けてフラッドの確認を流す場合は、`lifecycle.sh` の check 5、5b、5c、5d、5e と `rates.sh` に他の VM と CPU を取り合わない VM を使います。
+複数の VM に分けてフラッドの確認を流す場合は、`lifecycle.sh` の check 5、5b、5c、5d、5e、`rates.sh`、`exhaustion.sh` の postclose、acceptq、ackflood、wgstall に他の VM と CPU を取り合わない VM を使います。
 
 開発の途中でラボの確認を流し直すときは、`lab/lifecycle.sh` に確認の番号を指定して、その確認だけを流せます (`lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b`)。
+`lab/exhaustion.sh` も確認の名前で同じように選べます (`lab/lab exec vm bash /wgft/lab/exhaustion.sh userspace postclose`)。
 
 CI は、`build-test` (A1 から A7)、B4 (`windows-test`)、B5 (`release-snapshot`)、B6 (`govulncheck`)、B8 (`macos-test`) を、変更の内容に応じてだけ流します。
 振り分けは `.github/workflows/ci.yml` の `changes` という 1 つのジョブが担い、`dorny/paths-filter` で変更されたパスを調べます。
@@ -235,7 +236,7 @@ suite.txt は `parallel` の確認を
 | A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
 | A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
 | A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`、`scripts/check-docs.py` とその fixture) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力、リンク切れ、日英の対の欠け、旧参照先の喪失 | CI (Linux) | すべての PR | PR の更新ごと | 自動 |
-| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L18。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。関係する実装の段階の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 自動 (開発者が起動) |
+| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L20。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。関係する実装の段階の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 自動 (開発者が起動) |
 
 ### ラボの一式の内訳
 
@@ -259,6 +260,8 @@ suite.txt は `parallel` の確認を
 | L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、resolve、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧とループバックの拒否、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (設計文書の [7b 節](../design/agent-kernel.md)、[9 節](../design/state.md#9-状態の保存と再起動)、[10.3 節](../design/interface.md#103-運用の流れ)) | ラボ | `agent-platform` | A9 として | 自動 |
 | L17 | `lab/agentdoctor.sh` (kernel と userspace) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと ([設計文書の 10.2c 節](../design/agent-doctor.md#102c-エージェント側の診断-wgft-agent-doctor)) | ラボ | `agent-platform` | A9 として | 自動 |
 | L18 | `lab/lifecycle.sh` check 12 (kernel と userspace) | ユーザー空間モードの WireGuard のソケットのバッファの条件 ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) を、`agent doctor` とログが実際のソケットの値で示さないこと、条件に届かないときに `agent doctor` の終了コードが 0 でなくなること、セットアップの文書の `/etc/sysctl.d` の手順で条件を満たせないこと、`rotate-key` で開き直したソケットを測らないこと | ラボ (VM 全体の sysctl を変えるので単独で) | `userspace`、`agent-platform` | A9 として | 自動 |
+| L19 | `lab/exhaustion.sh` の postclose (userspace)、mss (kernel と userspace)、acceptq と ackflood (kernel)、wgstall (userspace)。postclose の kernel モードは一式の外で、名前を指定して流します | 外からの入力で[閉じた後の接続の表](../design/userspace/tcp-retention.md#閉じた後の接続の表)の行が M を超えて生きているヒープを増やし続けること、追い出しが数えられずログに出ないこと、負荷が止まった後に作り直し無しで表が空かないこと、その負荷の間に別のフローが止まること、[MSS が 536 未満](../design/userspace/packet-validation.md#tcp-の-mss-の下限)のハンドシェイクで接続ができること、MTU 576 の経路で通常の TCP が通らないこと、カーネルモードの server の後ろの accept の待ち行列、中身の無い ACK の洪水、[WireGuard の受信の待ち](../design/userspace/flow-limits.md)の後に転送が戻らないこと。accept の待ち行列の長さと、洪水と受信の待ちの間のヒープと別のフローの遅れは測って示すだけで、判定に使いません | ラボ (CPU を占有できる VM) | `resource`、`userspace`、`phase`、`rc` | A9 として。kernel モードの postclose は、`internal/nettun` の閉じた後の接続の表 (`postclose.go` とその呼び出し) を変える PR ごとと、段階の完了時とリリース候補ごとに 1 回 | 自動 (kernel モードの postclose は開発者が起動) |
+| L20 | `lab/usage.sh` (kernel と userspace) | 通常の利用の形 (HTTP の並列の取得、SSH のような 1 文字ずつの往復、ゲームのような一定の間隔の UDP、大きな送受信) のどれかが欠けるか壊れること | ラボ | `userspace` | A9 として | 自動 |
 
 L15 は server の 30 秒ごとの再試行を待つ場合に、確認の待ち時間として 40 秒を許します。
 通知による早期の公開は、必ず起きる条件として扱いません。
