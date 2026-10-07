@@ -98,7 +98,7 @@ server の入口は `cmd/wgft` の `buildServerOptions`、エージェントの�
 この形の穴は 3 つの設定項目で続けて見つかっている([以前の検証 2026-09-20 と 2026-09-21](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L3794))。
 
 server の入口が判定する項目は次のとおりです。
-`WGFT_MODE` の値(`kernel` か `userspace` か)、`WGFT_DATA_DIR` が空でないこと、`WGFT_WG_INTERFACE` がカーネルの受け付ける名前であること、`WGFT_WG_PORT` が 1 から 65535 の整数であること、`WGFT_MTU` が 576 から 9216 の整数であること、`WGFT_WG_ADDRESS` が `netip.ParsePrefix` の通る形であること、`WGFT_AGENT_API` と `WGFT_ADMIN` が待ち受けられる形であること、`WGFT_WG_ENDPOINT` と `WGFT_AGENT_API_HOST` が `host:port` の形でホストが空でないこと、`WGFT_AGENT_API_HOST` のポートが 1 から 65535 を 10 進の数字で書いた値であること、`WGFT_WG_ENDPOINT` のポートが UDP のポートとして 1 から 65535 の番号に直せること、`WGFT_ADMIN_TAILSCALE` が真偽値であること、同時フロー数の 4 つの上限が範囲内であること、`run` では `WGFT_WG_ENDPOINT` があることです。
+`WGFT_MODE` の値(`kernel` か `userspace` か)、`WGFT_DATA_DIR` が空でないこと、`WGFT_WG_INTERFACE` がカーネルの受け付ける名前であること、`WGFT_WG_PORT` が 1 から 65535 の整数であること、`WGFT_MTU` が 576 から 9216 の整数であること、`WGFT_WG_ADDRESS` が `netip.ParsePrefix` の通る IPv4 の形で、アドレス部分が帯の先頭の次であり、長さが `/30` 以下であること、`WGFT_AGENT_API` と `WGFT_ADMIN` が待ち受けられる形であること、`WGFT_WG_ENDPOINT` と `WGFT_AGENT_API_HOST` が `host:port` の形でホストが空でないこと、`WGFT_AGENT_API_HOST` のポートが 1 から 65535 を 10 進の数字で書いた値であること、`WGFT_WG_ENDPOINT` のポートが UDP のポートとして 1 から 65535 の番号に直せること、`WGFT_ADMIN_TAILSCALE` が真偽値であること、同時フロー数の 4 つの上限が範囲内であること、`run` では `WGFT_WG_ENDPOINT` があることです。
 エージェントの入口は、`WGFT_DATA_DIR` が空でないこと、`WGFT_MODE` の値、Linux 以外のビルドで `kernel` を指定したこと、`WGFT_WG_INTERFACE` がカーネルの受け付ける名前であること、同時フロー数の上限、`WGFT_AGENT_ALLOW_TARGETS` の構文を判定します。
 Linux 以外のビルドでの `kernel` の指定は種別 `prerequisite` の拒否で、他は種別 `config` の拒否です。
 `WGFT_WG_INTERFACE` はカーネルモードでだけ使うが、値だけで判定できるので、モードによらず判定します。

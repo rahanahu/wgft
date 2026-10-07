@@ -1356,7 +1356,7 @@ Flags:
       --max-udp-flows-per-source int   cap on concurrent UDP sessions from one source address, summed over all rules, env WGFT_MAX_UDP_FLOWS_PER_SOURCE; 0 disables the per-source cap (default 256)
       --mode string                    forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter
       --mtu int                        wg MTU, env WGFT_MTU (default 1420)
-      --wg-address string              wg address range, env WGFT_WG_ADDRESS (default "10.200.0.1/24")
+      --wg-address string              wg address range with the server as its first host address, env WGFT_WG_ADDRESS (default "10.200.0.1/24")
       --wg-endpoint string             WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT
       --wg-interface string            WireGuard interface name, env WGFT_WG_INTERFACE (default "wgft0")
       --wg-port uint16                 WireGuard listen UDP port, env WGFT_WG_PORT (default 51820)
@@ -1519,7 +1519,7 @@ Flags:
       --max-udp-flows-per-source int   cap on concurrent UDP sessions from one source address, summed over all rules, env WGFT_MAX_UDP_FLOWS_PER_SOURCE; 0 disables the per-source cap (default 256)
       --mode string                    forwarding mode kernel or userspace, env WGFT_MODE; recorded on first run and checked thereafter
       --mtu int                        wg MTU, env WGFT_MTU (default 1420)
-      --wg-address string              wg address range, env WGFT_WG_ADDRESS (default "10.200.0.1/24")
+      --wg-address string              wg address range with the server as its first host address, env WGFT_WG_ADDRESS (default "10.200.0.1/24")
       --wg-endpoint string             WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT
       --wg-interface string            WireGuard interface name, env WGFT_WG_INTERFACE (default "wgft0")
       --wg-port uint16                 WireGuard listen UDP port, env WGFT_WG_PORT (default 51820)

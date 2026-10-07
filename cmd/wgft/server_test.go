@@ -35,6 +35,9 @@ func TestServerConfigErrorsExitCode(t *testing.T) {
 		{"per-source flows", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_MAX_UDP_FLOWS_PER_SOURCE": "-1"}, nil},
 		{"no endpoint", map[string]string{"WGFT_WG_ENDPOINT": ""}, nil},
 		{"wg address not a prefix", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_ADDRESS": "not-an-address"}, nil},
+		{"wg address not the first host", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_ADDRESS": "10.200.0.5/24"}, nil},
+		{"wg address is the network address", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_ADDRESS": "10.200.0.0/24"}, nil},
+		{"wg address range too small", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_ADDRESS": "10.200.0.1/31"}, nil},
 		{"wg address missing prefix length", map[string]string{"WGFT_WG_ENDPOINT": "vps.example.com:51820", "WGFT_WG_ADDRESS": "10.200.0.1"}, nil},
 		// userspace モード:agent-api/admin の構文の誤りは applyNFT より後(admin.Listen/agentAPI.Listen)
 		// でしか気付けなかったので、kernel モードで確かめると非 root では bringUpWG の CAP_NET_ADMIN 不足

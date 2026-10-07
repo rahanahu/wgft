@@ -5,13 +5,13 @@ package main
 import (
 	"fmt"
 	"net"
-	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/rahanahu/wgft/internal/startup"
 	"github.com/rahanahu/wgft/internal/vpsd"
 	"github.com/rahanahu/wgft/internal/vpsd/servercheck"
 	"github.com/rahanahu/wgft/internal/vpsd/teardown"
@@ -35,7 +35,7 @@ func serverSpecs() []spec {
 		{Env: "WGFT_WG_PORT", Flag: "wg-port", Default: "51820", Kind: flagUint16,
 			Usage: "WireGuard listen UDP port, env WGFT_WG_PORT"},
 		{Env: "WGFT_WG_ADDRESS", Flag: "wg-address", Default: "10.200.0.1/24",
-			Usage: "wg address range, env WGFT_WG_ADDRESS"},
+			Usage: "wg address range with the server as its first host address, env WGFT_WG_ADDRESS"},
 		{Env: "WGFT_WG_ENDPOINT", Flag: "wg-endpoint", Default: "",
 			Usage: "WireGuard reachable host:port handed to agents, env WGFT_WG_ENDPOINT"},
 		{Env: "WGFT_MTU", Flag: "mtu", Default: "1420", Kind: flagInt,
@@ -103,8 +103,10 @@ func buildServerOptions(cmd *cobra.Command) (vpsd.Options, *config, error) {
 	// WGFT_WG_ADDRESS の構文は、値そのものが原因の失敗であり、環境には触れていないここで弾く。
 	// これを弾かずに進むと internal/vpsd.Run の netip.ParsePrefix まで届く(改訂の記録 2026-09-20)。
 	// 食い違い(記録済みの帯との不一致)の判定は従来どおり internal/vpsd 側で行う。
-	if _, err := netip.ParsePrefix(c.str("WGFT_WG_ADDRESS")); err != nil {
-		return vpsd.Options{}, nil, configErrorf("WGFT_WG_ADDRESS", "%q is not a valid address/prefix such as 10.200.0.1/24: %v", c.str("WGFT_WG_ADDRESS"), err)
+	// 構文に加え、server のアドレスが帯の先頭の次であることも見る。エージェントは server をそこと
+	// 決め打ちするので、別のアドレスでは動かない。
+	if _, err := startup.ParseServerPrefix(c.str("WGFT_WG_ADDRESS")); err != nil {
+		return vpsd.Options{}, nil, configErrorf("WGFT_WG_ADDRESS", "%v", err)
 	}
 	if err := validateListenAddr("WGFT_AGENT_API", c.str("WGFT_AGENT_API"), false); err != nil {
 		return vpsd.Options{}, nil, err
