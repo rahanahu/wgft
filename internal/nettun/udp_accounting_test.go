@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/netip"
 	"testing"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -16,6 +17,7 @@ import (
 const accountingPort = 32000
 
 var accountingLocal = netip.MustParseAddr("10.99.0.1")
+
 var accountingRemote = netip.MustParseAddr("10.99.0.2")
 
 type udpCounters struct {
@@ -206,7 +208,9 @@ func TestUDPAccountingZeroPayloadAndRebind(t *testing.T) {
 	}
 }
 
-func TestUDPAccountingHandleLocalBypassesTUNWrite(t *testing.T) {
+// Device は自分のアドレス宛ての packet を stack の中で折り返さない。自分宛ての UDP の送信は
+// 受信側の endpoint に届かず、TUN の出力に出る。
+func TestDeviceDoesNotLoopSelfAddressedUDPBack(t *testing.T) {
 	dev, ep, stats := newAccountingEndpoint(t)
 	before := snapshotUDPStats(stats)
 	c, err := dev.DialUDP(netip.AddrPortFrom(accountingLocal, accountingPort))
@@ -217,14 +221,35 @@ func TestUDPAccountingHandleLocalBypassesTUNWrite(t *testing.T) {
 	if n, err := c.Write([]byte("self")); err != nil || n != 4 {
 		t.Fatalf("self UDP Write = (%d, %v)", n, err)
 	}
-	if got := snapshotUDPStats(stats).acceptedSince(before); got != 1 {
-		t.Fatalf("self UDP received delta = %d, want 1", got)
+	if got := snapshotUDPStats(stats).acceptedSince(before); got != 0 {
+		t.Fatalf("self UDP was delivered inside the stack: received delta = %d", got)
 	}
-	res, b, readErr := readAccountingDatagram(ep, 4)
-	if readErr != nil || res.Total != 4 || !bytes.Equal(b, []byte("self")) {
-		t.Fatalf("self UDP Read = (%+v, %q, %v)", res, b, readErr)
+	if _, _, rerr := readAccountingDatagram(ep, 4); rerr == nil {
+		t.Fatal("the bound endpoint read a self-addressed datagram")
 	}
-	if got := dev.ep.NumQueued(); got != 0 {
-		t.Fatalf("self UDP left %d packets in TUN output queue", got)
+	// 出力は TUN に出る。送信元も宛先もこの Device のアドレスである
+	buf := make([]byte, 1500)
+	sizes := []int{0}
+	type readResult struct {
+		n   int
+		err error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		n, err := dev.Read([][]byte{buf}, sizes, 0)
+		done <- readResult{n, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil || r.n != 1 {
+			t.Fatalf("TUN Read = (%d, %v)", r.n, r.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("self-addressed UDP did not reach the TUN output")
+	}
+	ip := header.IPv4(buf[:sizes[0]])
+	if ip.Protocol() != uint8(udp.ProtocolNumber) || ip.SourceAddress() != tcpip.AddrFromSlice(accountingLocal.AsSlice()) ||
+		ip.DestinationAddress() != tcpip.AddrFromSlice(accountingLocal.AsSlice()) {
+		t.Fatalf("TUN packet = proto %d %v -> %v", ip.Protocol(), ip.SourceAddress(), ip.DestinationAddress())
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,25 +129,58 @@ func TestRawUDPAdapterRealWouldBlockDeadlineAndClose(t *testing.T) {
 	}
 }
 
-func adapterPair(t *testing.T) (*Device, *rawUDPAdapter, *rawUDPAdapter) {
+// udpDevicePair は、2 つの Device の TUN を背中合わせにつなぐ。a の出力は b の Write へ、b の出力は a の Write へ渡る。
+// Device は自分宛ての packet を stack の中で折り返さないので、2 つの endpoint の間の UDP は必ず TUN を通る。
+func udpDevicePair(t *testing.T) (a, b *Device) {
 	t.Helper()
-	dev, err := Create(accountingLocal, 1420)
+	a, err := Create(accountingLocal, 1420)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { dev.Close() })
+	b, err = Create(accountingRemote, 1420)
+	if err != nil {
+		a.Close()
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	fwd := func(from, to *Device) {
+		defer wg.Done()
+		buf := make([]byte, 1500)
+		sizes := []int{0}
+		for {
+			if n, err := from.Read([][]byte{buf}, sizes, 0); err != nil || n != 1 {
+				return
+			}
+			to.Write([][]byte{buf[:sizes[0]]}, 0)
+		}
+	}
+	wg.Add(2)
+	go fwd(a, b)
+	go fwd(b, a)
+	t.Cleanup(func() {
+		a.Close()
+		b.Close()
+		wg.Wait()
+	})
+	return a, b
+}
+
+// adapterPair は、a の listener と、b の client(listener へ接続済み)を返す。
+func adapterPair(t *testing.T) (*Device, *rawUDPAdapter, *rawUDPAdapter) {
+	t.Helper()
+	a, b := udpDevicePair(t)
 	listenAddr := netip.AddrPortFrom(accountingLocal, accountingPort)
-	listener, err := newRawUDPAdapter(dev, &listenAddr, nil)
+	listener, err := newRawUDPAdapter(a, &listenAddr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { listener.Close() })
-	client, err := newRawUDPAdapter(dev, nil, &listenAddr)
+	client, err := newRawUDPAdapter(b, nil, &listenAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { client.Close() })
-	return dev, listener, client
+	return a, listener, client
 }
 
 func TestRawUDPAdapterReadWriteAndAddresses(t *testing.T) {
@@ -418,46 +452,6 @@ func TestRawUDPAdapterDeadlineExpiresWhileOperationLockHeld(t *testing.T) {
 	if terr != nil || result.Count != 6 || !bytes.Equal(b[:6], []byte("queued")) {
 		t.Fatalf("raw Read after timeout = (%+v, %q, %v)", result, b, terr)
 	}
-	// A local write waits for the receiver's lock, not the sender's. Under
-	// accounting, an expired write that waited must deliver nothing.
-	_, r := registryFixture(t)
-	managed := registryListen(t, r, accountingPort+1)
-	sender := registryDial(t, r, netip.AddrPortFrom(accountingLocal, accountingPort+1))
-	managed.opMu.Lock()
-	release := releaseOnce(t, managed.opMu.Unlock)
-	if err := sender.SetWriteDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
-	writeStarted := make(chan struct{})
-	writeDone := make(chan error, 1)
-	go func() {
-		close(writeStarted)
-		_, err := sender.Write([]byte("late"))
-		writeDone <- err
-	}()
-	<-writeStarted
-	time.Sleep(250 * time.Millisecond)
-	select {
-	case err := <-writeDone:
-		t.Fatalf("Write returned while the receiver lock was held: %v", err)
-	default:
-	}
-	release()
-	select {
-	case err := <-writeDone:
-		if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
-			t.Fatalf("Write after lock delay = %v, want timeout", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Write remained blocked after lock release")
-	}
-	w = tcpip.SliceWriter(make([]byte, 8))
-	if _, terr := managed.ep.Read(&w, tcpip.ReadOptions{}); terr == nil {
-		t.Fatal("expired Write delivered a datagram")
-	} else if _, ok := terr.(*tcpip.ErrWouldBlock); !ok {
-		t.Fatalf("empty receiver after expired Write: %v", terr)
-	}
-	assertRegistryUsage(t, r, 0, 0)
 }
 
 func TestRawUDPAdapterStaleTimerUsesCurrentDeadline(t *testing.T) {
@@ -493,19 +487,16 @@ func TestRawUDPAdapterStaleTimerUsesCurrentDeadline(t *testing.T) {
 }
 
 func TestRawUDPAdapterWaitReadableOnICMPError(t *testing.T) {
-	dev, err := Create(accountingLocal, 1420)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer dev.Close()
+	// a に待ち受けが無いポートへ b から送ると、a の stack が Port Unreachable を返す
+	_, b := udpDevicePair(t)
 	remote := netip.AddrPortFrom(accountingLocal, accountingPort)
-	c, err := newRawUDPAdapter(dev, nil, &remote)
+	c, err := newRawUDPAdapter(b, nil, &remote)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
 	if n, err := c.Write([]byte("lost")); err != nil || n != 4 {
-		t.Fatalf("local Write = (%d, %v)", n, err)
+		t.Fatalf("Write = (%d, %v)", n, err)
 	}
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- c.WaitReadable() }()

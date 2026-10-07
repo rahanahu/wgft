@@ -49,7 +49,7 @@ func captureLog(t *testing.T) func() []string {
 	}
 }
 
-func TestUDPIngressReassembledAndLocalDatagramsAreAccounted(t *testing.T) {
+func TestUDPIngressReassembledDatagramsAreAccounted(t *testing.T) {
 	d := ingressDevice(t)
 	local := netip.AddrPortFrom(accountingLocal, accountingPort)
 	pc, err := d.ListenUDP(local)
@@ -65,19 +65,6 @@ func TestUDPIngressReassembledAndLocalDatagramsAreAccounted(t *testing.T) {
 	b := make([]byte, 16)
 	if n, _, err := pc.ReadFrom(b); err != nil || n != 16 || !bytes.Equal(b, []byte("abcdefgh12345678")) {
 		t.Fatalf("reassembled ReadFrom = %d/%q/%v", n, b, err)
-	}
-	assertDeviceUsage(t, d, 0, 0)
-	connected, err := d.DialUDP(local)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connected.Close()
-	if n, err := connected.Write([]byte("local")); err != nil || n != 5 {
-		t.Fatalf("connected local Write = %d/%v", n, err)
-	}
-	assertDeviceUsage(t, d, 5+udpDatagramCharge, 1)
-	if n, _, err := pc.ReadFrom(b); err != nil || n != 5 || string(b[:n]) != "local" {
-		t.Fatalf("local ReadFrom = %d/%q/%v", n, b[:n], err)
 	}
 	assertDeviceUsage(t, d, 0, 0)
 }
@@ -230,27 +217,21 @@ func TestUDPIngressCutsBytesPastTotalLength(t *testing.T) {
 
 // Each reservation matches one delivered datagram: after every Read, the
 // usage falls by exactly that datagram's payload and charge, whatever the
-// reader's buffer, in the order the datagrams arrived, from the TUN and from
-// local writes.
+// reader's buffer, in the order the datagrams arrived, whole and fragmented.
 func TestUDPIngressReservationMatchesEachDatagram(t *testing.T) {
 	d := ingressDevice(t)
 	x := listenAdapter(t, d, accountingPort)
-	sender := dialAdapter(t, d, netip.AddrPortFrom(accountingLocal, accountingPort))
 	sizes := []int{0, 1, 7, 300, 1400, 5000, 65507}
 	total, count := 0, 0
 	for i, n := range sizes {
 		payload := bytes.Repeat([]byte{byte('a' + i)}, n)
-		if i%2 == 0 {
-			p := registryPacket(payload, 41000, accountingPort)
-			if len(p) > 1420 {
-				for _, part := range fragmentIngressIPv4(p, 1420) {
-					sendIngress(t, d, part)
-				}
-			} else {
-				sendIngress(t, d, p)
+		p := registryPacket(payload, 41000, accountingPort)
+		if len(p) > 1420 {
+			for _, part := range fragmentIngressIPv4(p, 1420) {
+				sendIngress(t, d, part)
 			}
-		} else if _, err := sender.Write(payload); err != nil {
-			t.Fatal(err)
+		} else {
+			sendIngress(t, d, p)
 		}
 		total += n + udpDatagramCharge
 		count++

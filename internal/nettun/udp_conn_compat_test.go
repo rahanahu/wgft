@@ -12,6 +12,9 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 )
 
+// The listener is on one Device and the client on another, joined back to
+// back, because a Device does not route a packet to itself.
+//
 // DialUDP and ListenUDP returned gonet.UDPConn before the accounting. These
 // tests run the same steps on gonet.UDPConn and on the Device's connections
 // and require the same observable result for deadlines, short reads, error
@@ -65,11 +68,11 @@ var udpConnImpls = []udpConnImpl{
 func forEachUDPConn(t *testing.T, fn func(t *testing.T, impl udpConnImpl, d *Device, listener net.PacketConn, client net.Conn)) {
 	for _, impl := range udpConnImpls {
 		t.Run(impl.name, func(t *testing.T) {
-			d := ingressDevice(t)
+			d, peer := udpDevicePair(t)
 			ap := netip.AddrPortFrom(accountingLocal, accountingPort)
 			listener := impl.listen(t, d, ap)
 			t.Cleanup(func() { listener.Close() })
-			client := impl.dial(t, d, ap)
+			client := impl.dial(t, peer, ap)
 			t.Cleanup(func() { client.Close() })
 			fn(t, impl, d, listener, client)
 		})
@@ -153,21 +156,27 @@ func TestUDPConnCompatShortReadAndAddresses(t *testing.T) {
 	})
 }
 
-// A connected socket whose peer answered Port Unreachable reads the same
-// error text from both.
+// A connected socket whose peer answered Port Unreachable reads the refusal.
+// The error arrives from the TUN after the write, and a gonet.UDPConn is not
+// woken by it, so the read is retried with short deadlines until it returns.
 func TestUDPConnCompatRefusedPeer(t *testing.T) {
 	for _, impl := range udpConnImpls {
 		t.Run(impl.name, func(t *testing.T) {
-			d := ingressDevice(t)
-			c := impl.dial(t, d, netip.AddrPortFrom(accountingLocal, accountingPort+5))
+			_, peer := udpDevicePair(t)
+			c := impl.dial(t, peer, netip.AddrPortFrom(accountingLocal, accountingPort+5))
 			defer c.Close()
 			if _, err := c.Write([]byte("nobody")); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-				t.Fatal(err)
+			var err error
+			for end := time.Now().Add(2 * time.Second); time.Now().Before(end); {
+				if err := c.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = c.Read(make([]byte, 8)); !isTimeout(err) {
+					break
+				}
 			}
-			_, err := c.Read(make([]byte, 8))
 			var oe *net.OpError
 			if !errors.As(err, &oe) || oe.Op != "read" || oe.Net != "udp" || oe.Err.Error() != "connection was refused" {
 				t.Fatalf("Read after Port Unreachable = %#v", err)
@@ -217,4 +226,9 @@ func TestUDPConnCompatClose(t *testing.T) {
 			t.Fatal("Write after Close returned no error")
 		}
 	})
+}
+
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

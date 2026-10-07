@@ -17,7 +17,7 @@ import (
 
 // rawUDPAdapter is the Device's UDP connection, the net.Conn of DialUDP and
 // the net.PacketConn of ListenUDP. It replaces gonet.UDPConn so that every
-// Read and every local write passes the accounting. opMu is this endpoint's
+// Read passes the accounting. opMu is this endpoint's
 // (generation's) lock: it serializes deliveries into this endpoint with each
 // other, with Read and with Close, so that the accounting can attribute the
 // endpoint's public Stats delta to one delivery. It is held for one
@@ -223,9 +223,8 @@ func udpAddress(a tcpip.FullAddress) net.Addr {
 
 func (c *rawUDPAdapter) Write(b []byte) (int, error) { return c.WriteTo(b, nil) }
 
-// WriteTo does not take this adapter's own opMu: a write into another local
-// endpoint is serialized by that receiver's lock inside the accounting, and a
-// remote write needs no lock. A closed sender is refused before writing; a
+// WriteTo does not take this adapter's own opMu: a write goes out to the TUN
+// and needs no lock. A closed sender is refused before writing; a
 // Close that races the write makes the endpoint itself refuse it.
 func (c *rawUDPAdapter) WriteTo(b []byte, addr net.Addr) (int, error) {
 	var opts tcpip.WriteOptions
@@ -253,7 +252,7 @@ func (c *rawUDPAdapter) WriteTo(b []byte, addr net.Addr) (int, error) {
 		var terr tcpip.Error
 		var accountingErr error
 		if c.accounting != nil {
-			n, terr, accountingErr = c.accounting.localWrite(c, b, opts)
+			n, terr, accountingErr = c.accounting.write(c, b, opts)
 		} else {
 			n, terr = c.ep.Write(bytes.NewReader(b), opts)
 		}
@@ -280,8 +279,8 @@ func (c *rawUDPAdapter) WriteTo(b []byte, addr net.Addr) (int, error) {
 }
 
 // WaitReadable returns when the next Read can return data or an endpoint error
-// without waiting. It also observes EventErr so a synchronous ICMP failure
-// does not leave a relay waiting.
+// without waiting. It also observes EventErr so an ICMP failure that arrives
+// from the TUN does not leave a relay waiting.
 func (c *rawUDPAdapter) WaitReadable() error {
 	entry, notify := waiter.NewChannelEntry(waiter.ReadableEvents | waiter.EventErr | waiter.EventHUp)
 	c.wq.EventRegister(&entry)

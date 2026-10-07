@@ -15,7 +15,7 @@ import (
 
 // These tests pin the ledger with small budgets, through a registry of their
 // own on a Device, so every datagram enters by the registry's inject or a
-// local write, as in the product path.
+// product path.
 
 func newLedger(t *testing.T, bytesLimit, packetLimit int) *udpRegistry {
 	t.Helper()
@@ -189,31 +189,6 @@ func TestUDPAccountingLedgerExactTupleOnly(t *testing.T) {
 	assertRegistryUsage(t, r, 0, 0)
 }
 
-func TestUDPAccountingLedgerLocalAndReflexive(t *testing.T) {
-	r := newLedger(t, 1000, 3)
-	rx := ledgerReceiver(t, r)
-	remote := netip.AddrPortFrom(accountingLocal, accountingPort)
-	tx := ledgerOpen(t, r, nil, &remote)
-	if n, err := tx.Write([]byte("local")); err != nil || n != 5 {
-		t.Fatalf("local Write = (%d, %v)", n, err)
-	}
-	assertRegistryUsage(t, r, 69, 1)
-	if n, _, err := rx.ReadFrom(make([]byte, 5)); err != nil || n != 5 {
-		t.Fatalf("local ReadFrom = (%d, %v)", n, err)
-	}
-	assertRegistryUsage(t, r, 0, 0)
-	selfAddr := netip.AddrPortFrom(accountingLocal, accountingPort+1)
-	self := ledgerOpen(t, r, &selfAddr, &selfAddr)
-	if n, err := self.Write([]byte("self")); err != nil || n != 4 {
-		t.Fatalf("reflexive Write = (%d, %v)", n, err)
-	}
-	assertRegistryUsage(t, r, 68, 1)
-	if n, _, err := self.ReadFrom(make([]byte, 4)); err != nil || n != 4 {
-		t.Fatalf("reflexive ReadFrom = (%d, %v)", n, err)
-	}
-	assertRegistryUsage(t, r, 0, 0)
-}
-
 func TestUDPAccountingLedgerCloseRaceAndNewGeneration(t *testing.T) {
 	r := newLedger(t, 1000, 3)
 	old := ledgerReceiver(t, r)
@@ -290,33 +265,6 @@ func TestUDPAccountingLedgerFailStopAndInvalidBudget(t *testing.T) {
 			t.Fatalf("budget %+v was accepted", c)
 		}
 	}
-}
-
-// A local write that the budget refuses fails with the budget error, sends
-// nothing and is counted like a refused injection.
-func TestUDPAccountingLedgerLocalWriteRefusedByTheBudget(t *testing.T) {
-	r := newLedger(t, 1000, 2)
-	rx := ledgerReceiver(t, r)
-	remote := netip.AddrPortFrom(accountingLocal, accountingPort)
-	tx := ledgerOpen(t, r, nil, &remote)
-	for i := 0; i < 2; i++ {
-		if _, err := tx.Write([]byte("ok")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := tx.Write([]byte("no")); err == nil || !errors.Is(err, errUDPBudget) {
-		t.Fatalf("Write past the budget = %v, want %v", err, errUDPBudget)
-	}
-	if got := r.accounting.refusedEndpoint.Load() + r.accounting.refusedDevice.Load(); got != 1 {
-		t.Fatalf("refusals = %d, want 1", got)
-	}
-	assertRegistryUsage(t, r, 2*66, 2)
-	for i := 0; i < 2; i++ {
-		if n, _, err := rx.ReadFrom(make([]byte, 4)); err != nil || n != 2 {
-			t.Fatalf("ReadFrom %d = %d/%v", i, n, err)
-		}
-	}
-	assertRegistryUsage(t, r, 0, 0)
 }
 
 // attach is attachLocked with t.mu taken.
