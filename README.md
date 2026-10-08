@@ -50,7 +50,7 @@ The server runs on Linux. The agent runs on Linux, Windows amd64, and Apple sili
 
 Use kernel mode on a VPS where you have root. Userspace mode is available without root or kernel WireGuard and can run in a container. Kernel mode requires Linux 6.1+ and nftables 1.0.6+. The agent defaults to userspace mode. The [kernel-mode agent guide](docs/manual/agent-kernel.md) covers the requirements for a Linux agent in kernel mode.
 
-Linux userspace mode may need higher host socket buffer limits. With the default flow limits, a server with one agent and one forwarded TCP port needs about 9.8 GiB of host memory. That figure is the documented worst-case estimate: the flow state, buffers and other holdings counted in the design's calculation, each filled to its limit at once by an attack. It is not an estimate of normal use. Lower flow limits cannot bring that requirement below about 2.6 GiB. See [userspace mode on the VPS](docs/manual/setup-server-userspace.md) for the requirement and the [design](docs/design/agent-dataplane.md#7-データプレーン自宅側) for the calculation.
+Linux userspace mode may need higher host socket buffer limits. With the default flow limits, a server with one agent and one forwarded TCP port needs about 10.1 GiB of host memory. That figure is the documented worst-case estimate: the flow state, buffers and other holdings counted in the design's calculation, each filled to its limit at once by an attack. It is not an estimate of normal use. Lower flow limits cannot bring that requirement below about 3.0 GiB. See [userspace mode on the VPS](docs/manual/setup-server-userspace.md) for the requirement and the [design](docs/design/agent-dataplane.md#7-データプレーン自宅側) for the calculation.
 
 ## Quick start
 
