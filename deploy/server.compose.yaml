@@ -63,10 +63,10 @@ services:
       # connections). They cap how many flows the server holds at once under an attack that opens
       # flows and holds them; the memory soft limit printed at startup is derived from them, but a
       # soft limit is a GC target, not a memory bound. With the default caps, one agent and one
-      # forwarded TCP port, this server needs a host with about 9.8 GiB of memory. That is the
+      # forwarded TCP port, this server needs a host with about 10.1 GiB of memory. That is the
       # documented worst-case estimate: the flow state, buffers and other holdings counted in
       # docs/design/userspace/memory-server.md, each filled to its limit at once by an attack; it is
-      # not a normal-use estimate. Lower caps shrink it, but not below about 2.6 GiB.
+      # not a normal-use estimate. Lower caps shrink it, but not below about 3.0 GiB.
       # docs/design/userspace/memory-agent-host.md gives a table of lower caps for smaller hosts.
       # WGFT_MAX_UDP_FLOWS: "8192"
       # WGFT_MAX_TCP_FLOWS: "2048"
