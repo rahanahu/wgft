@@ -245,8 +245,19 @@ jobs:
             GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/wgft
             GOOS=${target%/*} GOARCH=${target#*/} go vet ./...
           done
+      # staticcheck 2026.2.1 cannot read the export data Go 1.27.2 writes for the standard
+      # library (dominikh/go-tools#1832): every package import fails with "export data
+      # version 5 is greater than maximum supported version 4". go.mod stays at go 1.27.2 for
+      # every other step; only this one asks the go command for the go1.27.1 toolchain, which
+      # still writes the version 4 format staticcheck understands, and `git checkout` restores
+      # go.mod to go.mod's committed go 1.27.2 afterward since it is the last step in the job.
+      # Remove this workaround once a staticcheck release reads version 5: bump the pin above
+      # and drop the go mod edit, the GOTOOLCHAIN override and the restore.
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
+        run: |
+          go mod edit -go=1.27.1
+          GOTOOLCHAIN=go1.27.1 go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
+          git checkout -- go.mod
 
   windows-test:
     # Builds and vets the whole tree on native Windows first: the top-level internal/vpsd
