@@ -26,6 +26,23 @@ The `socket buffers` item under `Tunnel` reads `OK` when the requirement is met.
 The agent still forwards when it reads `FAILED`, but logs `warning: the WireGuard UDP sockets`.
 On Windows and macOS the agent does not measure the buffers, and `agent doctor` reads `NOT TESTED`.
 
+## Slow transfers when the requirement is not met
+
+Without the requirement, a burst of tunnel traffic can overflow the WireGuard socket's receive buffer, and Linux drops the packets that do not fit.
+Linux counts these drops as `UdpRcvbufErrors`, together with those of every other UDP socket in the same network namespace.
+`nstat -az UdpRcvbufErrors` shows the count for the network namespace it runs in.
+This was checked on a Linux host and in the lab VM's network namespaces.
+For a container with its own network namespace, `sudo nsenter -t <pid> -n nstat -az UdpRcvbufErrors` reads that namespace, where `<pid>` is the agent or server process's PID as seen from the host, for example from `docker inspect -f '{{.State.Pid}}' <container>`.
+This has not been tried with a container.
+A TCP connection that loses packets this way can enter a recovery state of the gVisor TCP stack that userspace mode uses, where it sends only a few segments per retransmission timeout.
+In the lab, a 1 MiB HTTP download in this state took up to about a minute, and a 32 MiB transfer ran at a few Mbit/s instead of over 100 Mbit/s.
+This is a limitation of gVisor's TCP sender, and wgft does not patch it.
+With both sysctls at 7340032, the lab's ordinary-traffic check saw none of these drops at the server, and slow transfers became rare.
+In one of 40 lab runs a slow transfer still occurred with no drops at the server; its cause is unknown.
+Under sustained overload, a socket that meets the requirement can still overflow by the design's reasoning, although the lab has not observed it.
+The [flow limits design](../design/userspace/flow-limits.md) describes that case.
+The [userspace design](../design/vps/userspace.md#63-ユーザー空間モード) describes the recovery state.
+
 ## Containers
 
 For an unprivileged Docker, LXC, or Incus container, set the sysctls on the **container host**.
