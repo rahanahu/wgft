@@ -133,9 +133,24 @@ cmd_destroy() {
   inc delete "$VM" --force
 }
 
+# sysctl_up:ユーザー空間モードの動作条件(docs/manual/socket-buffers.md)のとおり、VM 全体の
+# net.core.rmem_max と net.core.wmem_max を 7340032 にする。ラボは server と agent を権限のない
+# 利用者 wgftlab でも動かすので、既定の 212992 のままでは WireGuard の UDP の受信のバッファが溢れ、
+# gVisor の TCP が回復の状態で止まりかけて、usage.sh などの転送がときどき遅くなる。
+# 値は network namespace で隔てられないので、Sandbox ごとに呼ばれる netns.sh ではなく、確認を流す
+# 前の共有の準備であるここで 1 回だけ書く。/etc/sysctl.d に置くので、VM を再起動しても値が戻る。
+# 手順書と同じ書き方にするが、ファイル名は手順書の 90-wgft.conf と分ける。そのファイルは
+# lifecycle.sh の check 12 が自分で書いて消すためである。check 12 は値を一時的に下げ、この
+# ファイルを確認の間だけ別の場所へ移し、終わると両方を開始時に戻す(lab/suite.txt の exclusive-global)。
+# labhost run は、プールと単独の仕事の前に値がこれを下回れば警告する
+sysctl_up() {
+  in_vm sh -c 'printf "net.core.rmem_max = 7340032\nnet.core.wmem_max = 7340032\n" > /etc/sysctl.d/80-wgft-lab.conf && sysctl -q -p /etc/sysctl.d/80-wgft-lab.conf'
+}
+
 cmd_net() {
   case "${1:-}" in
-    up | down | status) ensure_running; in_vm "$SHARE/lab/netns.sh" "$1" ;;
+    up) ensure_running; sysctl_up; in_vm "$SHARE/lab/netns.sh" up ;;
+    down | status) ensure_running; in_vm "$SHARE/lab/netns.sh" "$1" ;;
     *) die "usage: lab net up|down|status" ;;
   esac
 }

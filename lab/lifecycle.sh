@@ -116,7 +116,9 @@
 #      another port. The two sysctls are global to the VM, not per network namespace, so this
 #      check writes them from the initial network namespace, restores them and removes the file on
 #      every way out, early returns and a stopped script included, and runs alone
-#      (lab/suite.txt's exclusive-global).
+#      (lab/suite.txt's exclusive-global). The lab's own sysctl file from `lab/lab net up`, which
+#      sets the same values, is moved aside for the check, so that only the guide's file can make
+#      sysctl --system raise them.
 #
 # Requires `lab/lab build` (wgft and echo in /usr/local/bin of the VM) and the netns topology
 # (`lab/lab net up`). Leftovers from earlier runs are killed first. Wherever a step waits on
@@ -3143,13 +3145,24 @@ stop_sb_agent() {
     fi
   done
 }
-# The sysctls check 12 found at its start, and sb_restore, which puts them back and removes the
-# setup guide's file. check12 calls it on every way out of the check: after check12_body returns,
-# whether it finished or returned early, and from traps if the script itself is stopped midway,
-# so that a timeout or a kill does not leave the VM with the raised values for later jobs.
+# The sysctls check 12 found at its start, and sb_restore, which puts them back, removes the
+# setup guide's file and puts the lab's own file back. The values found at the start are the lab's
+# baseline, 7340032 from `lab/lab net up`, and check 12 lowers them to 212992; the hazard is
+# leaving 212992 behind, which later jobs would not fail on but would run in the condition the
+# baseline exists to avoid (labhost warns before a job when it finds the values below the
+# baseline). check12 calls sb_restore on every way out of the check: after check12_body returns,
+# whether it finished or returned early, and from traps if the script itself is stopped midway.
+# A SIGKILL skips it; `lab/lab net up` writes the baseline again.
+#
+# lab/lab's /etc/sysctl.d/80-wgft-lab.conf sets the same two values, and `sysctl --system` in the
+# setup guide's step would apply it too, so the guide's step would read as working even with a
+# broken 90-wgft.conf. check12 moves the lab's file out of the directories sysctl --system reads
+# for the whole check, and sb_restore moves it back.
 SB_RMEM0=; SB_WMEM0=
+SB_LABCONF=/etc/sysctl.d/80-wgft-lab.conf SB_LABCONF_ASIDE=/var/lib/wgft-lab/80-wgft-lab.conf.check12
 sb_restore() {
   rm -f /etc/sysctl.d/90-wgft.conf
+  [ -f "$SB_LABCONF_ASIDE" ] && mv -f "$SB_LABCONF_ASIDE" "$SB_LABCONF"
   [ -n "$SB_RMEM0" ] && init_ns sysctl -qw net.core.rmem_max="$SB_RMEM0" net.core.wmem_max="$SB_WMEM0"
 }
 check12() {
@@ -3157,6 +3170,7 @@ check12() {
   trap sb_restore EXIT
   trap 'sb_restore; exit 130' INT
   trap 'sb_restore; exit 143' TERM
+  if [ -f "$SB_LABCONF" ]; then mkdir -p "${SB_LABCONF_ASIDE%/*}" && mv -f "$SB_LABCONF" "$SB_LABCONF_ASIDE"; fi
   check12_body
   kill_all; vps wgft server teardown --data-dir "$W/wgft-lifecycle-c12" --purge --yes >/dev/null 2>&1; reset_kernel_state
   rm -rf "$W/wgft-lifecycle-c12" "$W/wgft-lifecycle-c12-agent"
