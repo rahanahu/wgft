@@ -26,6 +26,11 @@ lab/lab exec vm labhost run -parallel 8 all
 
 初回の `up` は VM の作成、パッケージの導入、スナップショット、トポロジの構築を行います。
 2 回目以降は起動とトポロジの構築を行います。
+トポロジの構築では、VM の `net.core.rmem_max` と `net.core.wmem_max` を[ソケットのバッファの手順](../docs/manual/socket-buffers.ja.md)の 7340032 に設定します。
+ラボは server と agent を権限のない利用者でも動かすため、ユーザー空間モードの動作条件を満たした状態で確認を流します。
+この 2 つの値を下げる確認は `lifecycle.sh` の check 12 だけで、単独で流れ、終了時に値を戻します。
+`labhost run` は、プールの前と単独の確認の前にこの 2 つの値が 7340032 を下回る場合に警告し、`summary.json` の `warnings` にも記録します。
+警告が出た VM では `lab/lab net up` を実行し直します。
 `build` はホストでビルドし、VM の `/usr/local/bin` にインストールします。
 `run all` の対象は [lab/suite.txt](suite.txt) の `default=yes` の確認で、両モードを含みます。
 結果は PR の本文に記録します。

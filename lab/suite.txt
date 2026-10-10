@@ -81,6 +81,11 @@
 #
 # lifecycle.sh check 12 sets net.core.rmem_max and net.core.wmem_max, which are one value for the
 # whole VM, and writes /etc/sysctl.d/90-wgft.conf, so it runs alone and restores both at its end.
+# The value it restores is the lab's baseline: `lab/lab net up` sets both to 7340032, the setup
+# guide's value (docs/manual/socket-buffers.md), before any job runs. Every other job therefore
+# runs with userspace mode's socket buffer requirement met, also where it starts the server or the
+# agent as the unprivileged user wgftlab; only check 12 lowers the values, and only while it runs
+# alone.
 #
 # exhaustion.sh drives the userspace dataplane's retained resources with external input (see its
 # header). postclose, acceptq, ackflood and wgstall assert on, or print for a person to read, a live

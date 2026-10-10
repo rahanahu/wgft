@@ -14,6 +14,10 @@ Normal close retains the dependency's TIME_WAIT behavior.
 RACK loss detection remains enabled, and wgft continues to enable SACK.
 The sender, receiver and RACK sources are unchanged from the preceding pin.
 The update therefore does not fix the known [slow recovery after short outages](../vps/userspace.md#63-ユーザー空間モード).
+The same recovery state also follows packets that Linux drops when a WireGuard socket's receive buffer overflows.
+Meeting the [socket buffer requirement](socket-buffers.md#ソケットのバッファの条件) made those drops disappear at the server in the lab's ordinary-traffic check.
+By the design's reasoning, a socket that meets it can still overflow under sustained overload ([flow limits](flow-limits.md)); the lab has not observed that.
+Upstream gVisor master on 2026-10-10 still counts in-flight segments without subtracting those RACK marked lost.
 The dependency still admits zero-payload TCP segments independently of its receive-memory threshold.
 When a listener hands a segment to a new endpoint, the dependency's `segment.setOwner` does not subtract that segment from the previous owner's receive-memory accounting.
 On the SYN-cookie path the listener's accounting can exceed its receive buffer, after which the listener rejects payload-bearing segments permanently.

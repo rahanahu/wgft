@@ -152,6 +152,7 @@ type summary struct {
 	LeftoverProcs    []string          `json:"leftover_processes,omitempty"`
 	LeftoverLinks    []string          `json:"leftover_links,omitempty"`
 	LeftoverFailures []string          `json:"leftover_failures,omitempty"`
+	Warnings         []string          `json:"warnings,omitempty"`
 	Results          []jobResult       `json:"results"`
 }
 
@@ -312,6 +313,18 @@ func cmdRun(args []string) error {
 	sum.ParallelJobs, sum.ExclusiveJobs = len(parallelPlan), len(exclusivePlan)
 	fmt.Printf("plan: %d parallel jobs, pool of %d; %d exclusive jobs, one at a time\n",
 		len(parallelPlan), *parallel, len(exclusivePlan))
+	// VM 全体の socket buffer の基準を、プールの前と単独の仕事の前に確かめる。単独の仕事の前にも
+	// 見るのは、lifecycle.sh の check 12 が値を下げたまま止まると、後の単独の仕事に効くため
+	sbw := newSockbufWatch()
+	warn := func(before string) {
+		if msg := sbw.check(before); msg != "" {
+			fmt.Fprintln(os.Stderr, "labhost: warning: "+msg)
+			sum.Warnings = append(sum.Warnings, msg)
+		}
+	}
+	if len(parallelPlan) > 0 {
+		warn("the pool")
+	}
 
 	results := make(chan jobResult, len(plan)+1)
 	jobs := make(chan jobResult)
@@ -341,6 +354,7 @@ func cmdRun(args []string) error {
 		if ctx.Err() != nil {
 			break
 		}
+		warn(j.Scenario)
 		results <- runOne(ctx, j, *prefix, *root, *repo, outDir, *timeout, *keepFailed)
 	}
 	close(results)
@@ -718,6 +732,9 @@ func printSummary(s *summary, outDir string) {
 		fmt.Printf("   %-30s runs=%d PASS=%d FAIL=%d SKIP=%d\n", v.Scenario, v.Runs, v.PassLines, v.FailLines, v.SkipLines)
 	}
 	fmt.Printf("   leftovers: namespaces=%v workdirs=%v processes=%v links=%v\n", s.LeftoverNS, s.LeftoverWorkdirs, s.LeftoverProcs, s.LeftoverLinks)
+	for _, w := range s.Warnings {
+		fmt.Printf("   WARNING: %s\n", w)
+	}
 	for _, f := range s.LeftoverFailures {
 		fmt.Printf("   LEFTOVER FAILURE: the harness did not clean up; not a scenario failure: %s\n", f)
 	}

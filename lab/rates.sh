@@ -245,8 +245,10 @@ unlimited_burst=$(burst 500)
 echo "   echoes: $unlimited_burst"
 # A wide-open lower bound: an unlimited burst of 500 back-to-back datagrams can lose a good
 # fraction to socket buffers and scheduling under host load (observed as low as ~280 of 500 in the
-# lab), which is not what this block is testing; what matters is that it clearly beats the limited
-# case below, checked as a ratio (not a fixed gap) for the same reason.
+# lab while the VM's net.core.rmem_max and wmem_max were still the kernel's 212992, before
+# `lab/lab net up` raised them to the userspace requirement), which is not what this block is
+# testing; what matters is that it clearly beats the limited case below, checked as a ratio (not a
+# fixed gap) for the same reason.
 bound "packet: unlimited burst gets a clear majority of datagrams echoed" "$unlimited_burst" 150 500
 echo "-- packet_rate 10/second (burst 5, so a 3s window allows at most 5 + ceil(3*10) refills)"
 vps wgft rule rate packet "$u" 10/second --admin "$ADMIN" >/dev/null; sleep 2

@@ -94,6 +94,7 @@ TCP の場合は、server からトンネルと agent を通して転送先へ 1
 | agent が転送先を拒否した | 稼働中の agent の `WGFT_AGENT_ALLOW_TARGETS` とルールを照合します。両モードでブロードキャストとマルチキャストを拒み、カーネルモードには LAN の転送先の条件もあります。[転送先の制限](operations.ja.md#エージェントの転送先を制限する)と[カーネルモードの転送先](agent-kernel.ja.md)を確認します。 |
 | ユーザー空間モードで `bind failed` と `not active` | ポートを使っているプロセスを確認します。公開ポートがホストの一時ポートと重なる場合は、範囲外のポートを選ぶか `net.ipv4.ip_local_reserved_ports` で予約します。 |
 | Linux のソケットバッファの警告 | [ソケットバッファの手順](socket-buffers.ja.md)でホストを設定し、agent または server を再起動してソケットを開き直します。Docker ではコンテナのホストを設定します。agent のバッファの検査は失敗しても終了コードを変えません。 |
+| ユーザー空間モードの TCP の転送がときどき極端に遅い | agent または server が動く network namespace で `nstat -az UdpRcvbufErrors` の値が増えていれば、そこで UDP のソケットがパケットを捨てています。[条件を満たさないときの転送の遅れ](socket-buffers.ja.md#条件を満たさないときの転送の遅れ)で条件を確かめます。 |
 | server のログに `startup hold` | 保存済みのルールを適用できず、管理 API を開いたまま再試行しています。`wgft rule rm` または `wgft rule disable` で原因のルールを修正します。カーネルモードではプロセスの再起動後も旧い転送が残る場合があるため、`wgft server nft` で確認します。 |
 | `ip-flapping` | 直近 10 分以内に使ったネットワークへの復帰で警告が出ました。予定どおりの移動なら `sudo wgft agent dismiss-warning home ip-flapping` で削除します。それ以外は鍵や恒久トークンの複製を疑い、`wgft agent warnings --help` を確認します。 |
 

@@ -12,6 +12,7 @@ wgft はホストの sysctl を自動では変更しません。
 - ソケットのバッファの条件:ユーザー空間モードは、WireGuard の UDP ソケットが、wireguard-go の要求する受信と送信のバッファを実際に得ることを動作条件とします。
   推奨ではなく条件です。
   後述の[「netstack の出力」](udp-accounting.md#netstack-の出力)の構造は、この条件を満たす環境での評価に基づいて採用しており([以前の検証 2026-09-27](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L667))、満たさない環境での過負荷の見え方は未確認であるためです。
+  その後、満たさない環境では、WireGuard のソケットの受信の溢れが TCP の転送を[短い障害の後と同じ遅い回復](../vps/userspace.md#63-ユーザー空間モード)に入れることを、ラボで観測しました(2026-10)。
   条件は `vpsd` のユーザー空間モード([6.3 節](../vps/userspace.md#63-ユーザー空間モード))にも同じく当てはまる
 <a id="linux-でのバッファの条件"></a>
 - Linux でのバッファの条件:wireguard-go は、UDP ソケットを開くときに受信と送信のバッファをそれぞれ 7 MiB 要求します。

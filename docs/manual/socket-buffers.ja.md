@@ -26,6 +26,26 @@ sudo runuser -u wgft -- wgft agent doctor
 `FAILED` でも agent は転送を続けますが、ログに `warning: the WireGuard UDP sockets` が出ます。
 Windows と macOS ではバッファを測らず、`agent doctor` は `NOT TESTED` と表示します。
 
+## 条件を満たさないときの転送の遅れ
+
+条件を満たさないと、トンネルの通信が集中したときに WireGuard のソケットの受信のバッファが溢れ、Linux は入りきらないパケットを捨てます。
+Linux はこの欠落を、同じ network namespace の他の UDP のソケットの欠落と合わせて `UdpRcvbufErrors` に数えます。
+`nstat -az UdpRcvbufErrors` は、実行した network namespace の値を表示します。
+この手順は、Linux のホストと、ラボの VM とその network namespace で確かめました。
+自分の network namespace を持つコンテナでは、`sudo nsenter -t <pid> -n nstat -az UdpRcvbufErrors` がその namespace の値を読みます。
+`<pid>` は、ホストから見た agent または server のプロセスの PID で、たとえば `docker inspect -f '{{.State.Pid}}' <container>` で得られます。
+コンテナでのこの手順は未確認です。
+この欠落でパケットを失った TCP の接続は、ユーザー空間モードが使う gVisor の TCP の回復の状態に入り、再送のタイマーが切れるたびに数個の segment しか送らなくなることがあります。
+ラボでは、この状態で 1 MiB の HTTP のダウンロードに最長で約 1 分かかり、32 MiB の転送は 100 Mbit/s を超える速さではなく数 Mbit/s になりました。
+この遅れは gVisor の TCP の送り手の制限であり、wgft はこれにパッチを当てません。
+両方の sysctl を 7340032 にすると、ラボの通常の通信の確認では server でこの欠落が起きなくなり、遅い転送もまれになりました。
+ラボの 40 回のうち 1 回では、server でこの欠落が無いまま遅い転送が起きました。
+この 1 回の原因は未確認です。
+設計の推論では、条件を満たすソケットでも、持続する過負荷では受信のバッファが溢れることがあります。
+この溢れはラボでは観測していません。
+この場合は[フロー数とメモリの設計](../design/userspace/flow-limits.md)で説明します。
+回復の状態は[ユーザー空間モードの設計](../design/vps/userspace.md#63-ユーザー空間モード)に書いてあります。
+
 ## コンテナで使う場合
 
 Docker、LXC、Incus の非特権コンテナでは、**コンテナのホスト**で sysctl を設定します。
