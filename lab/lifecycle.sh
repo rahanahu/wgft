@@ -284,6 +284,10 @@ tcp_flow_up() { [ "$(flows_established "$1")" -ge 1 ]; }
 # log_has <log-file> <substring>: the log already contains the line an okcheck/check is about to
 # grep for, so we stop polling the moment the server has actually written it.
 log_has() { grep -q "$2" "$1" 2>/dev/null; }
+# log_has_after <log-file> <line-count> <substring>: like log_has, but only among the lines written
+# after the first <line-count> lines (a `wc -l` taken before the step that writes the line). A line
+# an earlier step already wrote would otherwise end the wait before the step it is about happened.
+log_has_after() { tail -n +"$(($2 + 1))" "$1" 2>/dev/null | grep -q "$3"; }
 # proc_gone <pid>: the process no longer exists (kill_server and check3b's foreign nft -i use it).
 proc_gone() { ! kill -0 "$1" 2>/dev/null; }
 
@@ -1126,6 +1130,7 @@ check3b() {
     rm -rf "$DATA" "$ADATA"
     return
   fi
+  local log_swap; log_swap=$(wc -l < $W/wgft-lifecycle-c3b-server.log)
   echo 'add table inet wgft; delete table inet wgft; add table inet wgft { flags owner; }' > $W/wgft-lifecycle-c3b-fifo
   foreign_owner_table_present() { vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner'; }
   # bare wait_until: re-checked by the okcheck right after (same condition).
@@ -1133,13 +1138,27 @@ check3b() {
   local owner_pid; owner_pid=$(sandbox_pids_named nft | head -1)
   okcheck "a foreign table with flags owner exists before we provoke the swap failure" \
     "$(vps nft list table inet wgft 2>/dev/null | grep -q 'flags owner' && echo 1 || echo 0)"
+  # The server applies on its own schedule as well as when the CLI asks: the nftables
+  # notification of the swap wakes it after a debounce (design 7a.3 section, 実際の状態への収束),
+  # and while an apply has failed, the periodic retry runs every 30 s from the server's start.
+  # Each such apply fails against the foreign owner like the applies below, and its Prepare opens
+  # the listener of every declared rule that is not listening yet before its Rollback closes it
+  # again. Wait here for the one the swap triggers, so that it does not land between the rule add
+  # and the 8463 probe; the probe below still tolerates a periodic retry meeting it. must_wait:
+  # nothing re-checks this line. Only its first appearance counts: the server logs a repeated
+  # failure once.
+  must_wait "check3b: the server noticed the foreign table and its own apply failed" 10 \
+    log_has_after $W/wgft-lifecycle-c3b-server.log "$log_swap" "applying the rules again: failed to apply nftables"
 
   echo "-- delete the existing proxy rule and add a new one while the table is owned by someone else"
+  tcp_refused() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 10 - TCP:198.51.100.1:$1" 2>&1)" == *"Connection refused"* ]]; }
   vps wgft rule rm "$r_del" --admin "$ADMIN" >/dev/null 2>&1
   vps wgft rule add --agent home --tcp 8463 --to 192.168.50.3:25597 --proxy --admin "$ADMIN" >/dev/null 2>&1
-  # bare wait_until: re-checked by "the swap failure is logged" check() a few lines down (same
-  # log, same substring).
-  wait_until 5 log_has $W/wgft-lifecycle-c3b-server.log "failed to apply nftables"
+  # The CLI returns once the server's apply for the rule add failed and rolled back, so this
+  # line is already there; the wait names the rule add's own line, not the one the rule rm or the
+  # server's own apply above already wrote. Bare wait_until: re-checked by "the swap failure is
+  # logged" check() a few lines down (same log, a substring of this line).
+  wait_until 5 log_has_after $W/wgft-lifecycle-c3b-server.log "$log_swap" "rules: cli rule add: applying the data plane failed: failed to apply nftables"
   local r_add
   r_add=$(vps wgft rule ls --admin "$ADMIN" --json | python3 -c "
 import json, sys
@@ -1151,6 +1170,10 @@ for r in d['rules']:
   check "the swap failure is logged" "failed to apply nftables" "$(tail -8 $W/wgft-lifecycle-c3b-server.log)"
   check "the deleted rule's listener is kept (fail-static; only Commit closes removed listeners, and it did not run)" \
     "tcp-echo" "$(client 'echo hi | timeout -k 5 20 socat -t 3 -T 10 - TCP:198.51.100.1:8462')"
+  # A server apply in flight (the periodic retry above) opens 8463 for a moment and closes it
+  # again; a listener that Rollback leaves open stays open, so polling for the refusal tells the
+  # two apart. Bare wait_until: re-checked by the check() right after (same probe, same port).
+  wait_until 10 tcp_refused 8463
   check "the newly-added rule's listener is not left open (Rollback closed what Prepare opened)" \
     "Connection refused" "$(client 'echo hi | timeout -k 5 20 socat -t 2 -T 10 - TCP:198.51.100.1:8463' 2>&1)"
 
@@ -1169,7 +1192,6 @@ for r in d['rules']:
   # behaviour), so a disable that silently never applied would not be caught any other way.
   must_wait "check3b: rule (re)add disable applied" 3 rule_field_is "$r_add" enabled "False"
   vps wgft rule enable "$r_add" --admin "$ADMIN" >/dev/null 2>&1
-  tcp_refused() { [[ "$(client "echo hi | timeout -k 5 20 socat -t 1 -T 10 - TCP:198.51.100.1:$1" 2>&1)" == *"Connection refused"* ]]; }
   # bare wait_until: re-checked by the check() right after (same probe, same port).
   wait_until 10 tcp_refused 8462
   check "once the owner is gone, the deleted rule's listener is finally closed" "Connection refused" "$(client 'echo hi | timeout -k 5 20 socat -t 2 -T 10 - TCP:198.51.100.1:8462' 2>&1)"
@@ -1627,6 +1649,24 @@ refusal_count() {
   vps wgft rule ls --json --admin "$ADMIN" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('resource_refusals', {}).get('$1', {}).get('$2', 0))"
 }
 
+# c5_held <port>: the connections ss shows ESTABLISHED on the rule's listen port in the VPS
+# namespace. That includes connections still waiting in the accept queue (see c5_settled).
+c5_held() { vps ss -tn state established "( sport = :$1 )" | grep -c ":$1"; }
+# c5_acceptq <port>: the connections the kernel has completed on the port's listener that the
+# relay has not accepted yet (Recv-Q of a LISTEN socket is its accept queue length).
+c5_acceptq() { vps ss -ltn "( sport = :$1 )" | awk 'NR > 1 { n += $2 } END { print n + 0 }'; }
+# c5_settled <port> <min>: the relay has caught up with every connection the kernel completed on
+# the port, and holds at least <min>. The accept queue is empty and the held count is the same
+# across two samples half a second apart, so a connection the accept loop took but has not yet
+# admitted or reset (at most one at a time) is not read either.
+c5_settled() {
+  local q1 n1 q2 n2
+  q1=$(c5_acceptq "$1"); n1=$(c5_held "$1")
+  sleep 0.5
+  q2=$(c5_acceptq "$1"); n2=$(c5_held "$1")
+  [ "$q1" = 0 ] && [ "$q2" = 0 ] && [ "$n1" = "$n2" ] && [ "$n2" -ge "$2" ]
+}
+
 resource_isolation_case() {
   local tag=$1 nrules=$2 a_hold=$3 m=$4
   local DATA="$W/wgft-lifecycle-$tag" ADATA="$W/wgft-lifecycle-$tag-agent"
@@ -1669,16 +1709,17 @@ resource_isolation_case() {
   ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 "${ports[0]}" "$addrs" 40 25 \
     > "$W/wgft-lifecycle-$tag-floodA.log" 2>&1 &
   local pidA=$!
-  # Wait for the flood to finish ATTEMPTING every connection before reading ss: accept() makes a
-  # socket ESTABLISHED at the OS level before this relay's own goroutine has run the admission
-  # check and possibly closed it again, so sampling mid-burst can catch a transient overshoot
-  # (observed in the lab: held briefly read as the full attempted count, not the cap) that has
-  # nothing to do with whether the cap actually holds once the relay catches up. Same fix as check
-  # 5's own must_wait pair (finish attempting, only then check the held count).
+  # Wait for the flood to finish ATTEMPTING every connection, and then for the relay to settle,
+  # before reading ss. The kernel completes the handshake and counts the socket ESTABLISHED while
+  # it still waits in the listener's accept queue, before this relay's accept loop has taken it,
+  # run the admission check and possibly reset it. The flood's line only says the client side is
+  # done: under CPU contention the relay can still be hundreds of connections behind, and ss then
+  # reads the cap plus the backlog, a transient overshoot that has nothing to do with whether the
+  # cap holds once the relay catches up (observed in the lab: held briefly read as the full
+  # attempted count, not the cap). c5_settled waits for that backlog to drain.
   must_wait "$tag: rule A's flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-floodA.log" "tcp: attempted="
-  c5_iso_a_held() { [ "$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")" -ge $((a_hold - 24)) ]; }
-  must_wait "$tag: rule A's flood reaches $a_hold, where the other rules' minimums and the spare begin" 10 c5_iso_a_held
-  local heldA; heldA=$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")
+  must_wait "$tag: rule A's flood reaches $a_hold, where the other rules' minimums and the spare begin" 10 c5_settled "${ports[0]}" $((a_hold - 24))
+  local heldA; heldA=$(c5_held "${ports[0]}")
 
   local -a otherPids=() otherHeld=()
   for i in $(seq 1 $((nrules - 1))); do
@@ -1687,12 +1728,16 @@ resource_isolation_case() {
       > "$W/wgft-lifecycle-$tag-flood$i.log" 2>&1 &
     otherPids+=($!)
     must_wait "$tag: rule $((i + 1))'s flood finished attempting all connections" 10 log_has "$W/wgft-lifecycle-$tag-flood$i.log" "tcp: attempted="
-    c5_iso_other_held() { [ "$(vps ss -tn state established "( sport = :$p )" | grep -c ":$p")" -ge $((m - 24)) ]; }
-    must_wait "$tag: rule $((i + 1)) (${ids[$i]}) opens new connections up to its minimum m=$m while A is flooded" 10 c5_iso_other_held
+    # c5_settled: the same accept-queue overshoot as rule A's above
+    must_wait "$tag: rule $((i + 1)) (${ids[$i]}) opens new connections up to its minimum m=$m while A is flooded" 10 c5_settled "$p" $((m - 24))
     # captured HERE, before any wait below closes these connections back down
-    otherHeld+=("$(vps ss -tn state established "( sport = :$p )" | grep -c ":$p")")
+    otherHeld+=("$(c5_held "$p")")
   done
-  local heldA_after; heldA_after=$(vps ss -tn state established "( sport = :${ports[0]} )" | grep -c ":${ports[0]}")
+  local heldA_after; heldA_after=$(c5_held "${ports[0]}")
+  # Flood A holds its connections for 25 s and then closes them and exits. If the settles above
+  # took that long, heldA_after is read after the hold, and a drop there is the test's timing, not
+  # an eviction; report that instead of the eviction check.
+  local a_holding=0; kill -0 "$pidA" 2>/dev/null && a_holding=1
   local spareA; spareA=$(refusal_count "${ids[0]}" spare)
   local -a otherSpare=()
   for i in $(seq 1 $((nrules - 1))); do otherSpare+=("$(refusal_count "${ids[$i]}" spare)"); done
@@ -1704,7 +1749,11 @@ resource_isolation_case() {
   echo "   $tag: held $held_desc (before/after A: $heldA/$heldA_after; A stops at $a_hold, m=$m)"
   okcheck "$tag: rule A (flooded) stops where the other rules' minimums and the spare begin" \
     "$([ "$heldA" -ge $((a_hold - 24)) ] && [ "$heldA" -le "$a_hold" ] && echo 1 || echo 0)"
-  eqcheck "$tag: rule A's held connections are not evicted by the other rule(s)' admission" "$heldA" "$heldA_after"
+  if [ "$a_holding" = 1 ]; then
+    eqcheck "$tag: rule A's held connections are not evicted by the other rule(s)' admission" "$heldA" "$heldA_after"
+  else
+    echo "FAIL  $tag: rule A's flood had stopped holding before its count was re-read; test timing, not an eviction"; fail=1
+  fi
   okcheck "$tag: rule A's refusals are counted as reason spare ($spareA)" "$([ "${spareA:-0}" -gt 0 ] && echo 1 || echo 0)"
   spare_refusals_only "$tag: rule A's refusal is logged with reason spare" "$LOG" "${ids[0]}"
   for i in $(seq 1 $((nrules - 1))); do
