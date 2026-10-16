@@ -551,8 +551,10 @@ WGFT_MODE=kernel, on Linux only, puts a kernel WireGuard interface, wgft0
 unless WGFT_WG_INTERFACE names another, and table inet wgft_agent on this host
 and forwards with DNAT to the LAN targets; the process relays nothing, so
 forwarding goes on while the agent is stopped or restarting. Kernel mode needs
-root or CAP_NET_ADMIN, forwards only to IPv4 targets and refuses loopback
-targets; to reach a service on this host, target this host's LAN address. The
+root or CAP_NET_ADMIN and forwards only to IPv4 targets. It forwards to a
+loopback target such as 127.0.0.1:25565 only when WGFT_AGENT_ALLOW_TARGETS
+names it with an entry inside 127.0.0.0/8, and then sets route_localnet to 1
+on its WireGuard interface alone; otherwise target this host's LAN address. The
 mode is recorded in agent.json and checked on every start. A kernel-mode start
 without CAP_NET_ADMIN or kernel WireGuard support stops before it records the
 mode or uses the join string, so the agent then starts in userspace mode once

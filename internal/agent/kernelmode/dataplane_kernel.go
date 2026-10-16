@@ -49,11 +49,14 @@ type Ops struct {
 	Probe          func(ctx context.Context, dest netip.AddrPort) error
 	ReadIPForward  func() (bool, error)
 	WriteIPForward func() error
-	LocalAddrs     func() (map[netip.Addr]bool, error)
-	Now            func() time.Time
-	SendDatagram   func(dst netip.AddrPort) error
-	RouteIface     func(dst netip.Addr) (string, error)
-	ConvergeFlows  func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error)
+	// ReadRouteLocalnet と WriteRouteLocalnet は wgft0 の route_localnet を読み書きする(7b.2 節)
+	ReadRouteLocalnet  func(iface string) (bool, error)
+	WriteRouteLocalnet func(iface string, on bool) error
+	LocalAddrs         func() (map[netip.Addr]bool, error)
+	Now                func() time.Time
+	SendDatagram       func(dst netip.AddrPort) error
+	RouteIface         func(dst netip.Addr) (string, error)
+	ConvergeFlows      func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error)
 	// Notify はカーネルの変更の通知の購読である(7b.4 節の変更の通知)。vpsd の kernel backend と同じ購読を使う
 	Notify dataplane.Sensor
 }
@@ -76,10 +79,12 @@ func defaultKernelOps() Ops {
 			}
 			return c.Close()
 		},
-		ReadIPForward:  linux.ReadIPForward,
-		WriteIPForward: linux.WriteIPForward,
-		LocalAddrs:     hostAddrs,
-		Now:            time.Now,
+		ReadIPForward:      linux.ReadIPForward,
+		WriteIPForward:     linux.WriteIPForward,
+		ReadRouteLocalnet:  linux.ReadRouteLocalnet,
+		WriteRouteLocalnet: linux.WriteRouteLocalnet,
+		LocalAddrs:         hostAddrs,
+		Now:                time.Now,
 		SendDatagram: func(dst netip.AddrPort) error {
 			c, err := net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(dst))
 			if err != nil {
@@ -210,6 +215,11 @@ type Dataplane struct {
 	forwardWriteErr error
 	// local はホスト自身のアドレスである。forwardErr があるときだけ読む
 	local map[netip.Addr]bool
+	// localnetErr は、ループバックの宛先のために wgft0 の route_localnet を 1 にできなかった理由である
+	// (7b.2 節)。空なら 1 にできたか、1 にする必要が無い。localnetOffErr は 0 に戻せなかった理由で、
+	// 変わったときだけ 1 行出す
+	localnetErr    string
+	localnetOffErr string
 }
 
 // runtime はこれらの任意の interface を型アサーションだけで探し、満たさなければ黙ってその処理を
@@ -354,8 +364,24 @@ func (d *Dataplane) nftConfig() nft.AgentConfig {
 	c := nft.AgentConfig{WGInterface: d.iface, RefuseTarget: d.unicast.Refuse}
 	if d.allow != nil {
 		c.AllowTarget, c.AllowTargetSource = d.allow.Allows, allowtargets.Env
+		// ループバックの宛先は、許可一覧が 127.0.0.0/8 の中の項目で名指すときだけ公開する(7b.2 節)。
+		// 一覧が無ければ公開しない
+		c.AllowLoopback = d.allow.AllowsLoopback
 	}
 	return c
+}
+
+// targetAllowed は、DNAT の宛先 ap へ今も転送してよいかどうかである。公開の判定(PlanAgent)と同じく、
+// ブロードキャストとマルチキャストを拒み、ループバックは許可一覧の明示だけで、それ以外は許可一覧で判定する。
+// conntrack の収束が、今の判定の外へ DNAT したフローを閉じるのに使う(7b.4 節)。
+func (d *Dataplane) targetAllowed(ap netip.AddrPort) bool {
+	if d.unicast.Refuse(ap.Addr()) != "" {
+		return false
+	}
+	if ap.Addr().Unmap().IsLoopback() {
+		return d.allow.AllowsLoopback(ap)
+	}
+	return d.allow == nil || d.allow.Allows(ap)
 }
 
 // Close はカーネルに何もしない。wgft0 とテーブルは停止の間も残し、転送を続ける(7b.4 節)。撤去は

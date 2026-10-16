@@ -56,7 +56,19 @@ func TestPlanAgent(t *testing.T) {
 	}
 	cfg := AgentConfig{WGInterface: "wgft0", AllowTarget: allow.Allows, AllowTargetSource: allowtargets.Env}
 	open := &AgentConfig{WGInterface: "wgft0"}
+	lo, err := allowtargets.Parse("127.0.0.1:80,127.0.0.2:80-81,192.168.1.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loopback := &AgentConfig{WGInterface: "wgft0", AllowTarget: lo.Allows, AllowTargetSource: allowtargets.Env, AllowLoopback: lo.AllowsLoopback}
+	all, err := allowtargets.Parse("0.0.0.0/0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wide := &AgentConfig{WGInterface: "wgft0", AllowTarget: all.Allows, AllowTargetSource: allowtargets.Env, AllowLoopback: all.AllowsLoopback}
 	resolved := map[string]Resolution{
+		"localhost":  {Addrs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}},
+		"both.lan":   {Addrs: []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("192.168.1.22")}},
 		"nas.lan":    {Addrs: []netip.Addr{netip.MustParseAddr("192.168.1.30")}},
 		"gone.lan":   {Err: errors.New("lookup gone.lan: no such host")},
 		"v6only.lan": {Err: errOnlyIPv6},
@@ -94,9 +106,25 @@ func TestPlanAgent(t *testing.T) {
 		{name: "full-width range is one range", rule: agentRule("r", proto.UDP, 1, 65535, "10.0.0.1:1"),
 			cfg: open, wantRanges: []AgentRange{rng(1, 65535, "10.0.0.1:1")}},
 		{name: "loopback is refused", rule: agentRule("r", proto.TCP, 8080, 8080, "127.0.0.1:80"),
-			wantReason: "loopback"},
+			wantReason: "target 127.0.0.1 is a loopback address; kernel mode " + reasontext.LoopbackUnsupported + " unless " + allowtargets.Env},
 		{name: "any 127/8 address is loopback", rule: agentRule("r", proto.TCP, 8080, 8080, "127.1.2.3:80"),
 			cfg: open, wantReason: "loopback"},
+		{name: "loopback the operator names", rule: agentRule("r", proto.TCP, 8080, 8080, "127.0.0.1:80"),
+			cfg: loopback, wantRanges: []AgentRange{rng(8080, 8080, "127.0.0.1:80")}},
+		{name: "loopback range the operator names in part", rule: agentRule("r", proto.UDP, 8080, 8082, "127.0.0.2:80"),
+			cfg: loopback, wantRanges: []AgentRange{rng(8080, 8081, "127.0.0.2:80")},
+			wantReason: "target 127.0.0.2 is a loopback address; kernel mode " + reasontext.LoopbackUnsupported + " unless " + allowtargets.Env +
+				" on the agent host names them with an entry inside 127.0.0.0/8"},
+		{name: "a wide entry does not name loopback", rule: agentRule("r", proto.TCP, 8080, 8080, "127.0.0.1:80"),
+			cfg: wide, wantReason: reasontext.LoopbackUnsupported},
+		{name: "name resolving to loopback the operator does not name", rule: agentRule("r", proto.TCP, 8080, 8080, "localhost:80"),
+			cfg: open, wantReason: "target host \"localhost\" resolved to the loopback address 127.0.0.1; kernel mode " + reasontext.LoopbackUnsupported},
+		{name: "name resolving to loopback the operator names", rule: agentRule("r", proto.TCP, 8080, 8080, "localhost:80"),
+			cfg: loopback, wantRanges: []AgentRange{rng(8080, 8080, "127.0.0.1:80")}},
+		{name: "loopback beside a LAN address falls back to the LAN address", rule: agentRule("r", proto.TCP, 8080, 8080, "both.lan:80"),
+			cfg: open, wantRanges: []AgentRange{rng(8080, 8080, "192.168.1.22:80")}},
+		{name: "loopback beside a LAN address, both allowed, takes the smaller", rule: agentRule("r", proto.TCP, 8080, 8080, "both.lan:80"),
+			cfg: loopback, wantRanges: []AgentRange{rng(8080, 8080, "127.0.0.1:80")}},
 		{name: "unspecified address is refused", rule: agentRule("r", proto.TCP, 8080, 8080, "0.0.0.0:80"),
 			cfg: open, wantReason: "unspecified"},
 		{name: "IPv6 literal target is refused", rule: agentRule("r", proto.TCP, 80, 80, "[fd00::1]:80"),
@@ -1211,4 +1239,18 @@ func TestInspectAgentCountsAMissingDNATRowOnce(t *testing.T) {
 func (i AgentInspection) Matches() bool {
 	return i.Unrecognized == 0 && len(i.MissingDNATs) == 0 && len(i.ExtraDNATs) == 0 &&
 		len(i.Missing) == 0 && len(i.Unexpected) == 0 && len(i.Moved) == 0
+}
+
+// HasLoopback は、公開した DNAT の宛先にループバックがあるときだけ真である(7b.2 節)。拒んだループバックの
+// 宛先は数えない。
+func TestAgentPublicationHasLoopback(t *testing.T) {
+	lan := AgentRuleResult{RuleID: "a", Ranges: []AgentRange{rng(80, 80, "192.168.1.22:80")}}
+	refused := AgentRuleResult{RuleID: "b", Target: "127.0.0.1:80", Reason: "loopback"}
+	lo := AgentRuleResult{RuleID: "c", Ranges: []AgentRange{rng(81, 81, "192.168.1.22:81"), rng(82, 82, "127.0.0.5:82")}}
+	if (AgentPublication{Rules: []AgentRuleResult{lan, refused}}).HasLoopback() {
+		t.Error("a publication without a loopback DNAT reports one")
+	}
+	if !(AgentPublication{Rules: []AgentRuleResult{lan, lo}}).HasLoopback() {
+		t.Error("a publication with a loopback DNAT does not report it")
+	}
 }

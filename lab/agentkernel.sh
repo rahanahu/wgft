@@ -20,7 +20,8 @@
 #   19. a retarget closes the established flows to the old target, and a delete closes the
 #       deleted rule's flows; the agent's conntrack convergence does it, not the table.
 #   22. the guards: a target outside WGFT_AGENT_ALLOW_TARGETS gets no DNAT and is reported, a
-#       loopback target is an error, a DNAT to the agent host's own LAN address works and the
+#       loopback target the allowlist does not name is an error, a DNAT to the agent host's own LAN
+#       address works and the
 #       service sees the VPS tunnel address as the source, nothing else on the agent host is
 #       reachable from wgft0, not even through another table's DNAT, while the same service and
 #       DNAT answer from the LAN and a published port answers from wgft0, and another table's
@@ -29,6 +30,12 @@
 #       in each direction.
 #   25. disabling the agent on the server removes the home DNAT and closes the agent's flows, also
 #       when the agent was stopped at the time and learns of it after a restart and reconnect.
+#   loopback. loopback targets the allowlist names (design 7b.2): TCP and UDP reach services that
+#       listen on 127.0.0.1 only, the service sees the VPS tunnel address, and forwarding goes on while
+#       the agent is stopped; route_localnet is 1 on wgft0 alone while such a rule is published and 0
+#       once it is removed; a packet to 127.0.0.1 sent to the agent host from the LAN, and with a
+#       kernel-mode server one sent into the tunnel by a VPS taken over, reaches no loopback service,
+#       while the same VPS path reaches a published port and the agent host itself reaches the service.
 #   resolve. the 30-second check resolves a rule's host name again: a change that keeps the chosen
 #       address publishes nothing, a changed address moves new flows to it, and a name that stops
 #       resolving keeps forwarding to the last good address and says so in the rule's state. The
@@ -104,7 +111,7 @@ ELOG=$W/wgft-ak-echo.log
 ADMIN=127.0.0.1:8686
 SERVER_MODE=kernel
 case "${1:-}" in kernel|userspace) SERVER_MODE=$1; shift ;; esac
-CHECKS=${*:-16 17 18 19 22 24 25 resolve drift notify session route pin reconnect stale teardown}
+CHECKS=${*:-16 17 18 19 22 24 25 loopback resolve drift notify session route pin reconnect stale teardown}
 HOSTS=/etc/netns/$HOME_NS/hosts
 fail=0
 
@@ -162,6 +169,8 @@ cleanup() {
   ip netns exec "$ROUTER_NS" nft delete table inet ak_cutwg 2>/dev/null
   lan nft delete table inet noicmp 2>/dev/null
   home nft delete table inet stalereject 2>/dev/null
+  lan nft delete table ip ak_lo 2>/dev/null
+  vps nft delete table ip ak_lo 2>/dev/null
   lan ip addr del 192.168.50.200/24 dev eth0 2>/dev/null
   home ip route del 0.0.0.0/1 2>/dev/null
   home ip route del 128.0.0.0/1 2>/dev/null
@@ -171,9 +180,10 @@ cleanup() {
 # starts a process, so the file is rewritten in place to keep the running agent's view of it.
 set_hosts() { printf '127.0.0.1 localhost\n' > "$HOSTS"; printf '%s\n' "$@" >> "$HOSTS"; }
 
-# The allowlist holds every target the rules use except the one that must be refused. 127.0.0.1 is
-# in it, so the loopback rule is refused for being loopback, not for the list.
-ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.3:25570,192.168.50.2:25580,192.168.50.2:25565,192.168.50.4:25565,192.168.50.5:25565,127.0.0.1:25565
+# The allowlist holds every target the rules use except the ones that must be refused. It names the
+# loopback targets of check loopback, 127.0.0.1:25566, 19133 and 19134, and not 127.0.0.1:25565, so
+# check 22's loopback rule is refused for a loopback target the list does not name (design 7b.2).
+ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.3:25570,192.168.50.2:25580,192.168.50.2:25565,192.168.50.4:25565,192.168.50.5:25565,127.0.0.1:25566,127.0.0.1:19133-19134
 start_agent() { # start_agent [mode]: kernel unless given
   WGFT_MODE=${1:-kernel} WGFT_JOIN="${JOIN:-}" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
     home setsid nohup wgft agent run --data-dir "$ADATA" >> "$ALOG" 2>&1 < /dev/null &
@@ -377,7 +387,7 @@ check_22() {
   echo "== 22: guards"
   not_forwarded "no DNAT to a target outside the allowlist" "tcp-echo" "$(tcp_echo 39972)"
   check "the refused target is reported" "WGFT_AGENT_ALLOW_TARGETS" "$(rule_status "$R_OUT")"
-  check "a loopback target is an error" "loopback" "$(rule_status "$R_LO")"
+  check "a loopback target the allowlist does not name is an error" "loopback address; kernel mode does not forward to loopback targets unless WGFT_AGENT_ALLOW_TARGETS" "$(rule_status "$R_LO")"
   check "DNAT to the agent host's own LAN address" "tcp-echo" "$(tcp_echo 39974)"
   check "the host's own service sees the VPS tunnel address" "from=10.200.0.1" "$(tcp_echo 39974)"
   # Each negative check below has a positive control in the same step: the same path reaches a
@@ -430,6 +440,125 @@ NFT
   check "another table's forward policy drop is in the log" "drops forwarded packets by default" "$(cat "$ALOG")"
   home nft delete table inet otherfw
   wait_until 30 caught_up
+}
+
+localnet_is() { [ "$(home cat /proc/sys/net/ipv4/conf/wgft0/route_localnet 2>/dev/null)" = "$1" ]; }
+check_loopback() {
+  echo "== loopback: targets on the agent host's loopback"
+  local log=$W/wgft-ak-lolog r_tcp r_udp r_log pub
+  rm -f "$log"
+  # services that listen on 127.0.0.1 only: an echo for the rules, a UDP and a TCP listener that log
+  # what reaches them and that no rule publishes on their own ports; the TCP one is the positive control
+# of the agent host reaching its own loopback
+  home setsid nohup echo -bind 127.0.0.1 -tcp 25566 -udp 19133 >> "$ELOG" 2>&1 < /dev/null &
+  disown
+  home setsid nohup python3 -c '
+import socket, sys, threading
+log = sys.argv[1]
+def note(s):
+    with open(log, "a") as f: f.write(s + "\n")
+def udp():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 19134))
+    while True:
+        d, a = s.recvfrom(2000); note("udp %s %r" % (a[0], d))
+def tcp():
+    ls = socket.socket(); ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    ls.bind(("127.0.0.1", 22223)); ls.listen(8)
+    while True:
+        c, a = ls.accept(); note("tcp %s" % a[0]); c.sendall(b"loopback-private\n"); c.close()
+threading.Thread(target=udp, daemon=True).start()
+tcp()
+' "$log" > /dev/null 2>&1 < /dev/null &
+  disown
+  sleep 1
+  r_tcp=$(add_rule --tcp 39981 --to 127.0.0.1:25566)
+  r_udp=$(add_rule --udp 39982 --to 127.0.0.1:19133)
+  r_log=$(add_rule --udp 39983 --to 127.0.0.1:19134)
+  wait_until 30 caught_up
+  wait_until 30 localnet_is 1
+  eqcheck "route_localnet is 1 on wgft0" 1 "$(home cat /proc/sys/net/ipv4/conf/wgft0/route_localnet)"
+  eqcheck "route_localnet stays 0 on eth0" 0 "$(home cat /proc/sys/net/ipv4/conf/eth0/route_localnet)"
+  eqcheck "route_localnet stays 0 for all" 0 "$(home cat /proc/sys/net/ipv4/conf/all/route_localnet)"
+  check "the change is in the agent's log" "set net.ipv4.conf.wgft0.route_localnet to 1" "$(cat "$ALOG")"
+  check "tcp to a service on 127.0.0.1 through the VPS" "tcp-echo 127.0.0.1:25566" "$(tcp_echo 39981)"
+  check "the loopback service sees the VPS tunnel address" "from=10.200.0.1" "$(tcp_echo 39981)"
+  check "udp to a service on 127.0.0.1 through the VPS" "udp-echo 127.0.0.1:19133" "$(udp_echo 39982)"
+  wait_until 40 rule_state_ok "$r_tcp"
+  check "the tcp loopback rule is ok" "ok" "$(rule_status "$r_tcp")"
+  check "the udp loopback rule is ok" "ok" "$(rule_status "$r_udp")"
+  stop_agent
+  check "tcp to loopback while the agent is stopped" "tcp-echo 127.0.0.1:25566" "$(tcp_echo 39981)"
+  check "udp to loopback while the agent is stopped" "udp-echo 127.0.0.1:19133" "$(udp_echo 39982)"
+  start_agent
+  wait_until 30 caught_up
+
+  # From the LAN: a datagram addressed to 127.0.0.1 and sent to the agent host's MAC. Positive control:
+  # the agent host itself reaches the same listeners. The probes are UDP: a TCP SYN that got through
+  # would be answered from 127.0.0.1, a martian source at the sender, so no connection could tell.
+  check "the agent host itself reaches its loopback service" "loopback-private" \
+    "$(home timeout -k 2 8 socat -T 3 - TCP:127.0.0.1:22223,connect-timeout=3 2>&1)"
+  rm -f "$log"
+  lan nft -f - <<'NFT'
+table ip ak_lo {
+  chain post {
+    type filter hook postrouting priority 0;
+    ip daddr 192.168.50.2 udp dport 19134 ip daddr set 127.0.0.1 counter
+  }
+}
+NFT
+  lan bash -c 'echo from-lan | timeout 2 socat -u - UDP:192.168.50.2:19134' 2>/dev/null
+  sleep 1
+  check "the LAN sent its packets to 127.0.0.1" "packets 1" "$(lan nft list table ip ak_lo | grep 'dport 19134')"
+  eqcheck "nothing from the LAN reached a loopback service" "" "$(cat "$log" 2>/dev/null)"
+  lan nft delete table ip ak_lo
+
+  # From the tunnel, as a VPS taken over would: the server's peer for the agent takes 127.0.0.0/8 and
+  # packets are rewritten to 127.0.0.1 after routing. Unpublished loopback ports stay closed; the same
+  # path to a published port reaches the rule's target, which shows the packets got there. The server
+  # is stopped meanwhile: a kernel-mode server's interface stays, and its 30-second check would put
+  # the peer's AllowedIPs back in the middle of the check.
+  if [ "$SERVER_MODE" = userspace ]; then
+    skip "a VPS taken over reaches no unpublished loopback port" "a userspace-mode server has no tunnel interface in the vps namespace's kernel"
+  else
+    stop_server
+    pub=$(vps wg show wgft0 allowed-ips | awk '$2 == "10.200.0.2/32" {print $1}')
+    rm -f "$log"
+    vps nft -f - <<'NFT'
+table ip ak_lo {
+  chain post {
+    type filter hook postrouting priority 0;
+    ip daddr 10.200.0.2 udp dport { 19134, 39983 } ip daddr set 127.0.0.1 counter
+  }
+}
+NFT
+    vps wg set wgft0 peer "$pub" allowed-ips 10.200.0.2/32,127.0.0.0/8
+    check "the server's peer for the agent takes 127.0.0.0/8" "127.0.0.0/8" "$(vps wg show wgft0 allowed-ips)"
+    # The published port first and last: both reaching the target shows that the path delivered
+    # packets to 127.0.0.1 all along, so the unpublished ports in between were tried for real.
+    vps bash -c 'echo to-published | timeout 2 socat -u - UDP:10.200.0.2:39983' 2>/dev/null
+    sleep 1
+    check "the same path reaches a published port's loopback target" "to-published" "$(cat "$log" 2>/dev/null)"
+    rm -f "$log"
+    vps bash -c 'echo to-unpublished | timeout 2 socat -u - UDP:10.200.0.2:19134' 2>/dev/null
+    sleep 1
+    eqcheck "a VPS taken over reaches no unpublished loopback port" "" "$(cat "$log" 2>/dev/null)"
+    vps bash -c 'echo to-published-again | timeout 2 socat -u - UDP:10.200.0.2:39983' 2>/dev/null
+    sleep 1
+    check "the path still reaches the published port afterwards" "to-published-again" "$(cat "$log" 2>/dev/null)"
+    echo "INFO  rewritten at the VPS: $(vps nft list table ip ak_lo | grep -oE 'dport [^ ]+( [^ ]+ [^ ]+ [^ ]+)? ip daddr set 127.0.0.1 counter packets [0-9]+' | sed 's/ ip daddr set 127.0.0.1 counter//' | tr '\n' ';')"
+    vps wg set wgft0 peer "$pub" allowed-ips 10.200.0.2/32
+    vps nft delete table ip ak_lo
+    start_server
+    wait_until 30 vps wgft agent ls --admin "$ADMIN" || echo "!! the server did not come back"
+    wait_until 120 agent_connected || echo "!! the agent did not reconnect"
+  fi
+
+  vps wgft rule rm "$r_tcp" --admin "$ADMIN" >/dev/null
+  vps wgft rule rm "$r_udp" --admin "$ADMIN" >/dev/null
+  vps wgft rule rm "$r_log" --admin "$ADMIN" >/dev/null
+  wait_until 30 caught_up
+  wait_until 30 localnet_is 0
+  eqcheck "route_localnet is back at 0 once no rule forwards to loopback" 0 "$(home cat /proc/sys/net/ipv4/conf/wgft0/route_localnet)"
 }
 
 check_24() {
@@ -1271,7 +1400,7 @@ handshake_after() { local h; h=$(agent_field last_handshake); [ -n "$h" ] && [ "
 
 for c in $CHECKS; do
   case "$c" in
-    16|17|18|19|22|24|25|resolve|drift|notify|session|route|pin|reconnect|stale|teardown) "check_$c" ;;
+    16|17|18|19|22|24|25|loopback|resolve|drift|notify|session|route|pin|reconnect|stale|teardown) "check_$c" ;;
     *) echo "FAIL  unknown check $c"; fail=1 ;;
   esac
 done

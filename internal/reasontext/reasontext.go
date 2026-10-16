@@ -47,7 +47,7 @@ const (
 )
 
 // LoopbackUnsupported は、カーネルモードがループバックの宛先を転送しないことを述べる理由が含む句で
-// ある(設計文書 7b.2 節)。
+// ある(設計文書 7b.2 節)。許可一覧が名指さないループバックの宛先と未指定のアドレスの理由が含む。
 const LoopbackUnsupported = "does not forward to loopback targets"
 
 // UnicastOnly は、エージェントがブロードキャストかマルチキャストの宛先を拒んだ理由が含む句である

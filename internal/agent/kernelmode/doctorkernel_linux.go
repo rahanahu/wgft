@@ -268,6 +268,9 @@ func readKernelTable(ops DoctorOps, iface string, raw json.RawMessage, st *proto
 		var guard []string
 		var names []string
 		missing, guard, names = splitMissing(ins.MissingItems, want, ops.LocalAddrs)
+		if m := localnetMissing(ops, iface, want); m != "" {
+			missing = append(missing, m)
+		}
 		t.GuardEffects, t.GuardClosed = guardEffects(names)
 		t.GuardMissingCount, t.GuardMissing = len(guard), capItems(guard)
 		t.MovedCount, t.Moved = len(ins.Moved), capItems(ins.Moved)
@@ -281,6 +284,24 @@ func readKernelTable(ops DoctorOps, iface string, raw json.RawMessage, st *proto
 	return t
 }
 
+// localnetMissing は、記録にループバックの宛先の DNAT があるのに wgft0 の route_localnet が 1 でないことの
+// 説明である(7b.2 節、10.2c 節)。カーネルはその DNAT のパケットを捨てるので、欠けた転送の行と同じく
+// 転送の停止として数える。値を読めなければ、読めないことを示す。DNAT が無ければ空である。
+func localnetMissing(ops DoctorOps, iface string, pub nft.AgentPublication) string {
+	if !pub.HasLoopback() {
+		return ""
+	}
+	name := linux.RouteLocalnetName(iface)
+	v, err := ops.ReadSysctl("conf/" + iface + "/route_localnet")
+	switch {
+	case err != nil:
+		return fmt.Sprintf("%s at 1, which the DNAT to loopback targets needs; it could not be read: %v", name, err)
+	case v != "1":
+		return fmt.Sprintf("%s at 1, which the DNAT to loopback targets needs; it is %s", name, v)
+	}
+	return ""
+}
+
 // splitMissing は欠けた行を、転送を止めるものと止めないもの(守りの行)に分ける(設計文書 10.2c 節の
 // 「dataplane.table の判定」)。宛先がホスト自身でないルールだけが通る行と、ホスト自身のルールだけが通る
 // 行は、記録にその宛先のルールがあるときだけ転送を止める側に数える。ホスト自身のアドレスを読めなければ、
@@ -292,7 +313,8 @@ func splitMissing(items []nft.MissingItem, pub nft.AgentPublication, localAddrs 
 	if local, err := localAddrs(); err == nil {
 		self, lan = false, false
 		for _, d := range pub.DNATs() {
-			if local[d.Dest.Addr()] {
+			// ループバックの宛先はホスト自身で、input を通る。一覧は lo の 127.0.0.1 しか持たない(7b.2 節)
+			if local[d.Dest.Addr()] || d.Dest.Addr().IsLoopback() {
 				self = true
 			} else {
 				lan = true

@@ -85,6 +85,33 @@ func (l *List) Allows(ap netip.AddrPort) bool {
 	return false
 }
 
+// ipv4Loopback は IPv4 のループバックの帯である。
+var ipv4Loopback = netip.MustParsePrefix("127.0.0.0/8")
+
+// AllowsLoopback は、IPv4 のループバックの宛先 ap を、一覧がループバックの項目で名指しているかを返す
+// (設計文書 7b.2 節)。カーネルモードは、この判定が真の宛先にだけループバックへの DNAT を作る。項目の帯が
+// 127.0.0.0/8 の中にあり、ap のアドレスとポートを含むときだけ真である。0.0.0.0/0 のように帯がループバックを
+// 含むだけの項目は数えない。ループバックへの転送はホストの設定(wgft0 の route_localnet)を変えるので、
+// 運用者が明示した宛先にだけ行う。受け手が nil(一覧が無い)なら偽である。ap がループバックでなければ偽である。
+func (l *List) AllowsLoopback(ap netip.AddrPort) bool {
+	if l == nil {
+		return false
+	}
+	addr := ap.Addr().Unmap()
+	if !addr.Is4() || !ipv4Loopback.Contains(addr) {
+		return false
+	}
+	for _, e := range l.entries {
+		if !e.prefix.Addr().Is4() || e.prefix.Bits() < ipv4Loopback.Bits() || !e.prefix.Contains(addr) {
+			continue
+		}
+		if e.lo == 0 || (ap.Port() >= e.lo && ap.Port() <= e.hi) {
+			return true
+		}
+	}
+	return false
+}
+
 // String は正規化した一覧をコンマ区切りで返す。起動ログに出す。
 func (l *List) String() string {
 	if l == nil {

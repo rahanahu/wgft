@@ -134,3 +134,43 @@ func TestListMatchingNothingDeniesAll(t *testing.T) {
 		}
 	}
 }
+
+// ループバックの宛先は、一覧が 127.0.0.0/8 の中の項目で名指すときだけ明示とみなす(設計文書 7b.2 節)。
+// 帯がループバックを含むだけの項目と、一覧が無いことは明示ではない。
+func TestAllowsLoopback(t *testing.T) {
+	l, err := Parse("127.0.0.1:25565,127.0.1.0/24,0.0.0.0/0,192.168.1.20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		target string
+		want   bool
+	}{
+		{"127.0.0.1:25565", true},
+		{"127.0.0.1:25566", false}, // 項目のポートの外。0.0.0.0/0 は明示に数えない
+		{"127.0.1.9:22", true},     // ポートを書かない 127.0.1.0/24
+		{"127.0.2.1:22", false},
+		{"[::ffff:127.0.0.1]:25565", true}, // IPv4 射影は IPv4 として照合する
+		{"192.168.1.20:25565", false},      // ループバックでない宛先
+		{"[::1]:25565", false},             // IPv6 のループバックは扱わない
+	}
+	for _, tt := range tests {
+		if got := l.AllowsLoopback(netip.MustParseAddrPort(tt.target)); got != tt.want {
+			t.Errorf("AllowsLoopback(%s) = %v, want %v", tt.target, got, tt.want)
+		}
+	}
+	var none *List
+	if none.AllowsLoopback(netip.MustParseAddrPort("127.0.0.1:25565")) {
+		t.Error("a missing list named a loopback target")
+	}
+	wide, err := Parse("0.0.0.0/0,127.0.0.0/7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wide.AllowsLoopback(netip.MustParseAddrPort("127.0.0.1:25565")) {
+		t.Error("entries wider than 127.0.0.0/8 counted as naming a loopback target")
+	}
+	if !wide.Allows(netip.MustParseAddrPort("127.0.0.1:25565")) {
+		t.Error("Allows changed for loopback targets")
+	}
+}

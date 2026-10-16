@@ -36,6 +36,10 @@ func TestKernelReasonsAreReadByServerDoctor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wide, err := allowtargets.Parse("0.0.0.0/0")
+	if err != nil {
+		t.Fatal(err)
+	}
 	type step int
 	const (
 		resolveThenFail step = iota + 1 // 1 回目は解決でき、2 回目の適用で解決に失敗する
@@ -63,6 +67,13 @@ func TestKernelReasonsAreReadByServerDoctor(t *testing.T) {
 		{name: "every resolved address outside the allowlist", host: "multi.lan", target: "multi.lan:25565",
 			addrs: []string{"192.168.9.9", "192.168.9.10"}, allow: narrow, wantTarget: doctor.ReasonTargetNotAllowed},
 		{name: "loopback target", target: "127.0.0.1:25565", wantTarget: doctor.ReasonTargetLoopbackUnsupported},
+		// 許可一覧の設定の名前を含むが、許可一覧ではなくループバックの符号になる(7b.2 節)
+		{name: "loopback target the allowlist does not name", target: "127.0.0.1:25565", allow: narrow,
+			wantTarget: doctor.ReasonTargetLoopbackUnsupported},
+		{name: "loopback target only a wide entry covers", target: "127.0.0.1:25565", allow: wide,
+			wantTarget: doctor.ReasonTargetLoopbackUnsupported},
+		{name: "host name resolving to loopback", host: "localhost", target: "localhost:25565", addrs: []string{"127.0.0.1"},
+			wantTarget: doctor.ReasonTargetLoopbackUnsupported},
 		{name: "unspecified target", target: "0.0.0.0:25565", wantTarget: doctor.ReasonTargetLoopbackUnsupported},
 		{name: "multicast target", target: "239.1.2.3:25565", wantTarget: doctor.ReasonTargetNotUnicast},
 		{name: "limited broadcast target", target: "255.255.255.255:25565", wantTarget: doctor.ReasonTargetNotUnicast},

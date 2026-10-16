@@ -972,6 +972,15 @@ func reportAge(at string, now time.Time) (time.Duration, bool) {
 // 当てはまらないものは target_error にまとめる。符号は増やせるが、意味は変えない。
 func targetReasonCode(reason string) string {
 	switch {
+	case strings.Contains(reason, reasontext.LoopbackUnsupported):
+		// カーネルモードのエージェントの文言(internal/dataplane/linuxkernel/nft の loopbackReason と
+		// targetAddrs)。ループバックの宛先を明示する設定の名前(WGFT_AGENT_ALLOW_TARGETS)を含むので、
+		// 許可一覧より先に当てる。名前の解決に失敗して直前のアドレスも使えない場合は、この変更の前と同じく
+		// 解決の失敗の側に当てる
+		if looksLikeResolveFailure(reason) {
+			return ReasonResolveFailed
+		}
+		return ReasonTargetLoopbackUnsupported
 	case strings.Contains(reason, reasontext.AllowTargetsEnv) || strings.Contains(reason, reasontext.NotAllowed):
 		return ReasonTargetNotAllowed
 	case strings.Contains(reason, reasontext.IPForward):
@@ -986,10 +995,6 @@ func targetReasonCode(reason string) string {
 		// エージェントの宛先の判定(internal/agent/allowtargets の Unicast)の文言。2 つのモードが同じ文言を
 		// 書く。ループバックと同じく、名前の解決に失敗して直前のアドレスも使えない場合は解決の失敗の側を先に当てる
 		return ReasonTargetNotUnicast
-	case strings.Contains(reason, reasontext.LoopbackUnsupported):
-		// カーネルモードのエージェントの文言(internal/dataplane/linuxkernel/nft の targetAddrs)。名前の
-		// 解決に失敗して直前のアドレスも使えない場合は、解決の失敗の側を先に当てる
-		return ReasonTargetLoopbackUnsupported
 	case strings.Contains(reason, "connection refused"):
 		return ReasonConnectionRefused
 	case strings.Contains(reason, "timeout") || strings.Contains(reason, "timed out") || strings.Contains(reason, reasontext.DidNotAnswer):
@@ -1060,7 +1065,10 @@ func agentRuleNextStep(reason string, r proto.Rule) string {
 			"remove what blocks the write, such as a read-only /proc or a container limit, and then set it. If it is back at 0 later, "+
 			"find what sets it, such as a file in /etc/sysctl.d. wgft agent doctor on that host shows it under forwarding", r.Agent, r.TargetDisplay())
 	case ReasonTargetLoopbackUnsupported:
-		return "the agent runs in kernel mode, which does not forward to a loopback target. Point the rule at the agent host's LAN address instead of " + r.TargetDisplay() + "."
+		return "the agent runs in kernel mode and did not forward to the loopback target " + r.TargetDisplay() + ". " +
+			"A kernel-mode agent forwards to a loopback target only when " + reasontext.AllowTargetsEnv + " on the agent host names it " +
+			"with an entry inside 127.0.0.0/8, such as 127.0.0.1:25565 for that one port; agents from before this support refuse loopback targets in kernel mode in any case. " +
+			"Otherwise point the rule at the agent host's LAN address."
 	}
 	return "the tunnel and the agent are healthy up to this point. Check that a service is listening on " + r.TargetDisplay() +
 		" and accepts connections from the agent host; the agent retries every 30s and clears the error on its own."

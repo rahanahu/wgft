@@ -62,6 +62,10 @@ func (d *Dataplane) ruleStatuses() []proto.RuleStatus {
 			if e := d.probeErr[r.RuleID]; e != "" {
 				parts = append(parts, e)
 			}
+			if d.localnetErr != "" && anyLoopback(r) {
+				// 理由は VPS の上で読まれるので、どのホストの値かを名指す(ip_forward と同じ)
+				parts = append(parts, "on the agent host, "+d.localnetErr+"; its kernel drops the forwarded packets to a loopback target")
+			}
 			if d.forwardErr != nil && !d.allLocal(r) {
 				// 理由は server の診断、`status`、`agent ls`、Web UI で VPS の上で読まれる。「このホスト」と
 				// 書くと VPS と読めるので、エージェントのホストであることを名指す(設計文書 10.2a 節)。
@@ -81,13 +85,26 @@ func (d *Dataplane) ruleStatuses() []proto.RuleStatus {
 	return out
 }
 
+// allLocal は、ルールの DNAT の宛先がすべてホスト自身かどうかである。ループバックの宛先はホスト自身で
+// あり、input を通るので ip_forward に依らない(7b.2 節)。ホストのアドレスの一覧は lo の 127.0.0.1 しか
+// 持たないので、127.0.0.0/8 は一覧に依らずに数える。
 func (d *Dataplane) allLocal(r nft.AgentRuleResult) bool {
 	for _, rg := range r.Ranges {
-		if !d.local[rg.Dest.Addr()] {
+		if a := rg.Dest.Addr(); !a.IsLoopback() && !d.local[a] {
 			return false
 		}
 	}
 	return len(r.Ranges) > 0
+}
+
+// anyLoopback は、ルールの DNAT の宛先にループバックのアドレスがあるかどうかである。
+func anyLoopback(r nft.AgentRuleResult) bool {
+	for _, rg := range r.Ranges {
+		if rg.Dest.Addr().IsLoopback() {
+			return true
+		}
+	}
+	return false
 }
 
 // DoctorKernel は agent doctor のためにカーネルを読む(設計文書 10.2c 節)。停止中の agent doctor と同じ

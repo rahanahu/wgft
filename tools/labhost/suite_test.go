@@ -57,7 +57,7 @@ func TestRepoManifestIsValid(t *testing.T) {
 			"drift 22 25 16 teardown",
 			"route session",
 			"resolve",
-			"24 17 18 19",
+			"24 17 18 19 loopback",
 			"notify pin reconnect",
 			"stale",
 		} {
