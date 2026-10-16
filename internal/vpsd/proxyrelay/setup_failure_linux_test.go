@@ -99,12 +99,13 @@ func newSetupWorker(t *testing.T, header bool) *setupWorker {
 			}
 			return nil, errors.New("dial failure")
 		}})
-	r.m.testHeaderWriter = func(up net.Conn) io.Writer {
+	r.m.seams.headerWriter = func(up net.Conn) io.Writer {
 		if up != r.up {
 			t.Error("header writer lost real upstream")
 		}
 		return setupHeaderError{up}
 	}
+	r.l.seams = r.m.seams
 	r.m.ls[r.l.rule.ListenPort] = r.l
 	r.a = r.m.admitAccepted(r.l, r.c)
 	if r.a == nil {
@@ -198,7 +199,7 @@ func TestSetupFailureCutOrders(t *testing.T) {
 			var once sync.Once
 			resume := func() { once.Do(func() { close(proceed) }) }
 			t.Cleanup(resume)
-			r.m.testHeaderWriter = func(up net.Conn) io.Writer { return setupBlockedHeader{setupHeaderError{up}, entered, proceed} }
+			r.m.seams.headerWriter = func(up net.Conn) io.Writer { return setupBlockedHeader{setupHeaderError{up}, entered, proceed} }
 			r.start()
 			setupWait(t, 5*time.Second, entered)
 			if kind == "closed before header returns" {
@@ -278,7 +279,7 @@ func TestSetupPendingRegistrationIsAtomicForIdle(t *testing.T) {
 			var once sync.Once
 			resume := func() { once.Do(func() { close(proceed) }) }
 			t.Cleanup(resume)
-			r.l.testHookPendingRegistration = func() { close(entered); <-proceed }
+			r.l.seams.pendingRegistration = func() { close(entered); <-proceed }
 			go func() {
 				wake, ok := r.l.finishPending(r.a, r.up, failed)
 				if !ok || failed != (wake != nil) {
