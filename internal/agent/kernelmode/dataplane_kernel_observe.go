@@ -126,6 +126,16 @@ func (d *Dataplane) repair(gen uint64, rules []proto.AgentRule, op *observePrepa
 	if err != nil {
 		return false, false, err
 	}
+	switch {
+	case tableDrift != "":
+		// テーブルが消えたか変わった間は、wgft0 から DNAT を経ずにループバックへ届く面を開けないよう、
+		// route_localnet を先に 0 に戻す。公開し直した後の publish が 1 に戻す(7b.2 節)
+		d.syncLocalnet(false, false)
+	case linkDrift == "":
+		// テーブルと wgft0 が宣言どおりなら、外から変えられた route_localnet だけを戻す。wgft0 が食い違う
+		// 間は、公開し直しが合わせる
+		d.syncLocalnet(d.Pub.HasLoopback(), true)
+	}
 	d.watchHandshake(link)
 	drift := strings.Join(nonEmpty(tableDrift, linkDrift), "; ")
 	fresh := drift != "" && drift != d.driftSeen

@@ -122,7 +122,8 @@ const (
 	// の報告が示すのはリスナーを開けたことだけで、宛先が応えたことではない(設計文書 10.2a 節)。
 	ReasonUDPListenerOnly = "udp_listener_only"
 	// ReasonTargetLoopbackUnsupported は、カーネルモードのエージェントがループバックか未指定のアドレスの
-	// 宛先を公開しないことである(設計文書 7b.2・7b.3 節)。宛先をホストの LAN のアドレスに直せば通る。
+	// 宛先を公開しなかったことである(設計文書 7b.2・7b.3 節)。宛先をホストの LAN のアドレスに直すか、
+	// ループバックの宛先をエージェントのホストの許可一覧で名指せば通る。
 	ReasonTargetLoopbackUnsupported = "target_loopback_unsupported"
 	// ReasonTargetNotUnicast は、エージェントがブロードキャストかマルチキャストのアドレスの宛先を拒んだ
 	// ことである(設計文書 7・7b.3 節)。2 つのモードに共通である。許可一覧に加えても通らないので、

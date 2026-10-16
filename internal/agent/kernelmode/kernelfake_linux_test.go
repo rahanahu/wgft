@@ -57,6 +57,12 @@ type fakeKernel struct {
 	forwardWriteEr error
 	forwardWrites  int
 	local          map[netip.Addr]bool
+	// localnet は wgft0 の route_localnet の今の値、localnetReadEr と localnetWriteEr は読み書きの
+	// 誤りである。localnetWrites は書いた値の記録である
+	localnet        bool
+	localnetReadEr  error
+	localnetWriteEr error
+	localnetWrites  []bool
 	// datagrams は keepalive ごとのデータグラムの宛先である。別の goroutine が送るので、mu が守る
 	datagrams []netip.AddrPort
 	// sendErr は、設定すればデータグラムの n 回目(0 から)の送信の誤りを返す。mu が守る
@@ -136,6 +142,15 @@ func (k *fakeKernel) ops() Ops {
 				return k.forwardWriteEr
 			}
 			k.forwardOn = true
+			return nil
+		},
+		ReadRouteLocalnet: func(string) (bool, error) { return k.localnet, k.localnetReadEr },
+		WriteRouteLocalnet: func(_ string, on bool) error {
+			k.localnetWrites = append(k.localnetWrites, on)
+			if k.localnetWriteEr != nil {
+				return k.localnetWriteEr
+			}
+			k.localnet = on
 			return nil
 		},
 		LocalAddrs: func() (map[netip.Addr]bool, error) { return k.local, nil },

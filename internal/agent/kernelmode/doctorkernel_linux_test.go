@@ -415,3 +415,49 @@ func TestDeclaredAgentLinkRejectsOutOfRangeKeepalive(t *testing.T) {
 		})
 	}
 }
+
+// 記録にループバックの宛先の DNAT があり、wgft0 の route_localnet が 1 でなければ、転送を止める欠けとして
+// 数える(設計文書 7b.2、10.2c 節)。1 なら数えず、ループバックの宛先が無ければ値を読まない。
+func TestReadKernelTableNeedsRouteLocalnetForLoopback(t *testing.T) {
+	f := kernelDoctorCreds(t, tcpRule("lo", "127.0.0.1:25565", 39975, 39975))
+	pub := nft.AgentPublication{Generation: 5, Rules: []nft.AgentRuleResult{{RuleID: "lo", Proto: proto.TCP,
+		ListenPort: proto.PortRange{Lo: 39975, Hi: 39975}, Target: "127.0.0.1:25565",
+		Ranges: []nft.AgentRange{{Ports: proto.PortRange{Lo: 39975, Hi: 39975}, Dest: netip.MustParseAddrPort("127.0.0.1:25565")}}}}}
+	raw, err := json.Marshal(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.KernelPublication = raw
+	for _, tc := range []struct {
+		name  string
+		value string // 空なら読めない
+		want  string // Missing に含む文言。空なら欠けが無い
+	}{
+		{"set", "1", ""},
+		{"cleared", "0", "net.ipv4.conf.wgft0.route_localnet at 1, which the DNAT to loopback targets needs; it is 0"},
+		{"unreadable", "", "net.ipv4.conf.wgft0.route_localnet at 1, which the DNAT to loopback targets needs; it could not be read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := healthyKernel(t, f)
+			if tc.value != "" {
+				k.sysctl["conf/wgft0/route_localnet"] = tc.value
+			}
+			withKernelDoctor(t, k)
+			got := ReadKernel(f, "wgft0").Table
+			switch {
+			case tc.want == "" && got.MissingCount != 0:
+				t.Errorf("missing = %v, want none", got.Missing)
+			case tc.want != "" && (got.MissingCount != 1 || !strings.Contains(strings.Join(got.Missing, "\n"), tc.want)):
+				t.Errorf("missing = %d %v, want %q", got.MissingCount, got.Missing, tc.want)
+			}
+		})
+	}
+	// ループバックの宛先が無ければ値を見ない
+	f.KernelPublication = []byte(`{"generation":5,"rules":[]}`)
+	k := healthyKernel(t, f)
+	k.sysctl["conf/wgft0/route_localnet"] = "0"
+	withKernelDoctor(t, k)
+	if got := ReadKernel(f, "wgft0").Table; got.MissingCount != 0 {
+		t.Errorf("missing = %v without a loopback target", got.Missing)
+	}
+}

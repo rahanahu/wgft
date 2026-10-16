@@ -104,6 +104,21 @@ func TestTargetReasonCode(t *testing.T) {
 			want:   ReasonTargetLoopbackUnsupported,
 		},
 		{
+			name:   "kernel-mode loopback target the allowlist does not name",
+			reason: "target 127.0.0.1 is a loopback address; kernel mode does not forward to loopback targets unless WGFT_AGENT_ALLOW_TARGETS on the agent host names them with an entry inside 127.0.0.0/8",
+			want:   ReasonTargetLoopbackUnsupported,
+		},
+		{
+			name:   "kernel-mode name that resolves to loopback",
+			reason: "target host \"localhost\" resolved to the loopback address 127.0.0.1; kernel mode does not forward to loopback targets unless WGFT_AGENT_ALLOW_TARGETS on the agent host names them with an entry inside 127.0.0.0/8",
+			want:   ReasonTargetLoopbackUnsupported,
+		},
+		{
+			name:   "kernel-mode name that stopped resolving and whose last address is a loopback target the allowlist does not name",
+			reason: "name resolution of target host \"a.lan\" failed: no such host; the address from the last successful resolution is not usable either: target 127.0.0.1 is a loopback address; kernel mode does not forward to loopback targets unless WGFT_AGENT_ALLOW_TARGETS on the agent host names them with an entry inside 127.0.0.0/8",
+			want:   ReasonResolveFailed,
+		},
+		{
 			name:   "kernel-mode unspecified target",
 			reason: "target 0.0.0.0 is the unspecified address, which reaches this host's loopback; kernel mode does not forward to loopback targets, use this host's LAN address",
 			want:   ReasonTargetLoopbackUnsupported,

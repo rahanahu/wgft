@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/netip"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	"github.com/rahanahu/wgft/internal/agent/agentdp"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/conntrack"
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
+	"github.com/rahanahu/wgft/internal/platform/linux"
 	"github.com/rahanahu/wgft/internal/reasontext"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -84,6 +86,8 @@ func (d *Dataplane) publish(pub nft.AgentPublication) error {
 	// (7a.3 節の指紋の読み直しの失敗と同じ扱い)
 	fp, present, err := d.Ops.Fingerprint(nft.AgentTableName)
 	d.fp, d.fpKnown = fp, err == nil && present
+	// route_localnet は、守りの行を含むテーブルを公開した後に合わせる(7b.2 節)
+	d.syncLocalnet(pub.HasLoopback(), true)
 	if prev != nil {
 		d.unconverged = appendUnconverged(d.unconverged, *prev)
 	}
@@ -145,9 +149,7 @@ func (d *Dataplane) convergeFlows() {
 		return
 	}
 	// 許可一覧の外と、ブロードキャストかマルチキャストのアドレスへ DNAT したフローを残さない(7 節)
-	scope := conntrack.AgentScope{Local: addr.Addr(), Peer: d.server, AllowTarget: func(ap netip.AddrPort) bool {
-		return d.unicast.Refuse(ap.Addr()) == "" && (d.allow == nil || d.allow.Allows(ap))
-	}}
+	scope := conntrack.AgentScope{Local: addr.Addr(), Peer: d.server, AllowTarget: d.targetAllowed}
 	res, err := d.Ops.ConvergeFlows(d.unconverged, *d.Pub, scope)
 	// 閉じたフローがあれば出す。閉じられなかったフローは誤りに数が入るので、誤りと同じく変わったときだけ
 	// 出す。同じ削除の失敗が 30 秒ごとに繰り返す間、同じ行を出し続けないためである
@@ -330,4 +332,81 @@ func changedRules(a, b nft.AgentPublication) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// syncLocalnet は wgft0 の route_localnet を want に合わせる(7b.2 節)。want は、公開したテーブルに
+// ループバックの宛先の DNAT があり、そのテーブルが今あることである。tableOK は、wgft の守りの行を持つ
+// テーブルが今あるかどうかで、0 に戻せなかったときの警告の文言を決める。値が want と同じなら何も書かない。
+// 0 に合わせるとき、値を読めず、直前の公開にループバックの宛先も無ければ書かない。ループバックの宛先を
+// 持たない配置で、wgft0 が無い間などに毎回の警告を出さないためである。wgft0 が無ければ値も無いので書かない。
+// 1 にできなければ、ループバックの宛先のルールの error の理由に載せる(ruleStatuses)。0 に戻せなければ、
+// 警告を変わったときだけ 1 行出す。
+func (d *Dataplane) syncLocalnet(want, tableOK bool) {
+	name := linux.RouteLocalnetName(d.iface)
+	cur, rerr := d.Ops.ReadRouteLocalnet(d.iface)
+	switch {
+	case rerr == nil && cur == want:
+		d.noteLocalnet(want, tableOK, nil)
+		return
+	case rerr != nil && !want && (errors.Is(rerr, fs.ErrNotExist) || d.Pub == nil || !d.Pub.HasLoopback()):
+		d.noteLocalnet(want, tableOK, nil)
+		return
+	}
+	if werr := d.Ops.WriteRouteLocalnet(d.iface, want); werr != nil {
+		d.noteLocalnet(want, tableOK, werr)
+		return
+	}
+	d.noteLocalnet(want, tableOK, nil)
+	switch {
+	case want:
+		log.Printf("kernel mode: set %s to 1, so that the kernel delivers the DNAT to loopback targets; it goes away with %s", name, d.iface)
+	case !tableOK:
+		// 公開した表が無いか変わった間である(repair と起動時)
+		log.Printf("kernel mode: set %s to 0 until table inet %s is published again", name, nft.AgentTableName)
+	default:
+		log.Printf("kernel mode: set %s to 0; no published rule forwards to a loopback target now", name)
+	}
+}
+
+// noteLocalnet は route_localnet を want に合わせた結果を控える。err は書き込みの誤りで、nil なら合った。
+func (d *Dataplane) noteLocalnet(want, tableOK bool, err error) {
+	name := linux.RouteLocalnetName(d.iface)
+	if want {
+		d.localnetOffErr = ""
+		if err == nil {
+			d.localnetErr = ""
+			return
+		}
+		msg := fmt.Sprintf("%s cannot be set to 1: %v", name, err)
+		if msg != d.localnetErr {
+			log.Printf("warning: kernel mode: %s; rules whose target is a loopback address are reported as errors until it is 1", msg)
+		}
+		d.localnetErr = msg
+		return
+	}
+	d.localnetErr = ""
+	if err == nil {
+		d.localnetOffErr = ""
+		return
+	}
+	msg := fmt.Sprintf("%s cannot be set to 0: %v", name, err)
+	if msg != d.localnetOffErr {
+		if tableOK {
+			log.Printf("warning: kernel mode: %s; the input and filter_pre rows of table inet %s still drop packets from %s to loopback that no DNAT sent there", msg, nft.AgentTableName, d.iface)
+		} else {
+			log.Printf("warning: kernel mode: %s; until table inet %s is published again, packets from %s may reach services that listen on this host's loopback", msg, nft.AgentTableName, d.iface)
+		}
+	}
+	d.localnetOffErr = msg
+}
+
+// closeLocalnetWithoutTable は、起動時に table inet wgft_agent が無いか読めなければ、wgft0 の
+// route_localnet を 0 にする(7b.2 節)。最初の公開までに全体状態が届かない間も、DNAT を経ない
+// ループバックへの面を開けたままにしないためである。テーブルがあれば、その守りの行に任せて値を残す。
+// 最初の公開が値を合わせ直す。
+func (d *Dataplane) closeLocalnetWithoutTable() {
+	if _, present, err := d.Ops.Fingerprint(nft.AgentTableName); err == nil && present {
+		return
+	}
+	d.syncLocalnet(false, false)
 }

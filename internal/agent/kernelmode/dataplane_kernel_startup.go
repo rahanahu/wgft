@@ -40,6 +40,7 @@ func checkKernelPrerequisites(readTables func() (bool, error), wireGuard func() 
 
 // Startup は起動時に、何かを書く前に行う検査と準備である(7b.1・7b.4 節)。wgft0 の所有を判定し、
 // 他の所有者のものなら終了コード 1 の誤りを返す。権限が足りなければ種別 prerequisite の拒否を返す。
+// 自分の wgft0 があってテーブルが無ければ、wgft0 の route_localnet を 0 にする。
 // 続けて、別の名前で自分の鍵を持つインタフェースを警告し、ip_forward を 1 にし、ホストの設定の
 // 手掛かりを 1 行ずつ出す。save は認証情報ファイルを保存する。ip_forward を変える記録に使う。
 func (d *Dataplane) Startup(priv wgtypes.Key, save func() error) error {
@@ -54,6 +55,11 @@ func (d *Dataplane) Startup(priv wgtypes.Key, save func() error) error {
 	if st.Exists && !st.Ownership.Ours() {
 		return &wg.NotOursError{Interface: d.iface, Ownership: st.Ownership, Kind: st.Kind,
 			Keyless: st.Kind == "wireguard" && st.PublicKey == wgtypes.Key{}}
+	}
+	if st.Exists {
+		// 全体状態が届くまで公開は始まらないので、テーブルの無い wgft0 に route_localnet の 1 を残さない
+		// (7b.2 節)。VPS を奪った攻撃者は全体状態を送らずにおける
+		d.closeLocalnetWithoutTable()
 	}
 	if st.Ownership == wg.OwnedByPreviousKey {
 		log.Printf("kernel mode: %s holds the previous key; the first convergence moves it to the current key", d.iface)

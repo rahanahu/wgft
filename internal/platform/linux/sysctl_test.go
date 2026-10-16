@@ -143,3 +143,47 @@ func TestIPForwardReadAndWrite(t *testing.T) {
 		}
 	}
 }
+
+// route_localnet はインタフェースごとのファイルを読み書きし、インタフェース名がファイルの外を指さない。
+func TestRouteLocalnet(t *testing.T) {
+	dir := t.TempDir()
+	old := confDir
+	confDir = dir
+	t.Cleanup(func() { confDir = old })
+	if err := os.MkdirAll(filepath.Join(dir, "wgft0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(dir, "wgft0", "route_localnet")
+	if err := os.WriteFile(f, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := ReadRouteLocalnet("wgft0"); err != nil || on {
+		t.Fatalf("ReadRouteLocalnet = %v, %v; want false, nil", on, err)
+	}
+	if err := WriteRouteLocalnet("wgft0", true); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(f); string(b) != "1\n" {
+		t.Errorf("file holds %q after writing 1", b)
+	}
+	if on, err := ReadRouteLocalnet("wgft0"); err != nil || !on {
+		t.Fatalf("ReadRouteLocalnet = %v, %v; want true, nil", on, err)
+	}
+	if err := WriteRouteLocalnet("wgft0", false); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(f); string(b) != "0\n" {
+		t.Errorf("file holds %q after writing 0", b)
+	}
+	if _, err := ReadRouteLocalnet("absent0"); err == nil {
+		t.Error("reading the value of an absent interface did not fail")
+	}
+	for _, bad := range []string{"", ".", "..", "../all", "a/b"} {
+		if err := WriteRouteLocalnet(bad, true); err == nil {
+			t.Errorf("WriteRouteLocalnet(%q) did not fail", bad)
+		}
+	}
+	if got := RouteLocalnetName("wgft0"); got != "net.ipv4.conf.wgft0.route_localnet" {
+		t.Errorf("RouteLocalnetName = %q", got)
+	}
+}

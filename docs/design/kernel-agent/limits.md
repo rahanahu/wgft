@@ -7,6 +7,10 @@
 
 - LAN の側に wgft0 の MTU より小さい区間がある場合の MSS。
   `rt mtu` はその区間の MTU を反映しません
+- ループバックの宛先で、ループバックからの接続だけを受け付けるサービスと、ループバックからの接続を信頼するサービスの扱い([7b.2 節](targets.md#ループバックの宛先))。
+  サービスから見た送信元は VPS のトンネルアドレスで、個々のサービスでは確かめていません
+- 同梱の unit(`deploy/agent.kernel.conf`)で動くエージェントが wgft0 の `route_localnet` を書けること。
+  ラボでは、root でない利用者に `CAP_NET_ADMIN` だけを与えたシェルで書けることを確かめました
 - ホスト自身の LAN のアドレスへの DNAT での TCP の MSS。
   ホストの TCP が wgft0 の経路の MTU から MSS を決めると見込んでいる
 - wgft0 から入る向きの SYN でも `rt mtu` が wgft0 の MTU から決まる理由。

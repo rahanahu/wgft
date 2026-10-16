@@ -44,6 +44,23 @@ type AgentConfig struct {
 	// ブロードキャストとマルチキャストの宛先を拒むために渡す(7 節、7b.2 節)。理由はユーザー空間モードの
 	// 中継と同じ文言である。nil なら判定しない。
 	RefuseTarget func(netip.Addr) string
+	// AllowLoopback は、IPv4 のループバックの宛先を運用者が明示したかの判定である(7b.2 節、
+	// allowtargets の AllowsLoopback)。ループバックの宛先には AllowTarget の代わりにこれを使う。nil なら
+	// ループバックの宛先へ DNAT を作らない。
+	AllowLoopback func(netip.AddrPort) bool
+}
+
+// HasLoopback は、公開した DNAT の宛先にループバックのアドレスがあるかどうかである。あれば、エージェントは
+// wgft0 の route_localnet を 1 にする(7b.2 節)。
+func (p AgentPublication) HasLoopback() bool {
+	for _, r := range p.Rules {
+		for _, rg := range r.Ranges {
+			if rg.Dest.Addr().IsLoopback() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Resolution は、ルールの宛先のホスト名を解決した結果である(7b.2 節)。ResolveAgentTargets が作る。
@@ -130,9 +147,10 @@ func sortDNATs(d []AgentDNAT) {
 //
 //   - 宛先のホスト名を解決できない場合、または IPv4 のアドレスを持たない場合
 //   - 宛先が IPv6 のアドレスの場合。カーネルモードは IPv4 の宛先だけを扱う
-//   - 宛先がループバック(127.0.0.0/8)か未指定のアドレス(0.0.0.0)の場合
+//   - 宛先が未指定のアドレス(0.0.0.0)の場合
 //   - 宛先がブロードキャストかマルチキャストのアドレスの場合(cfg.RefuseTarget の判定)
 //
+// ループバック(127.0.0.0/8)の宛先は、cfg.AllowLoopback が真のポートにだけ DNAT を作る。
 // 宛先の許可一覧はポートごとの実効宛先で判定する。ホスト名が複数のアドレスに解決されたときは、ポートごとに
 // 一覧が通すアドレスだけを残し、その中で最も小さいアドレスを使う(7b.2 節)。どのアドレスも通らない
 // ポートにだけ DNAT を作らない。
@@ -185,7 +203,7 @@ func planAgentRule(r proto.AgentRule, resolved map[string]Resolution, cfg AgentC
 	run := -1         // res.Ranges のうち、伸ばしている最後の範囲。-1 なら無い
 	for p := int(r.ListenPort.Lo); p <= int(r.ListenPort.Hi); p++ {
 		to := uint16(base + p - int(r.ListenPort.Lo))
-		dest, ok := pickDest(addrs, to, cfg.AllowTarget)
+		dest, ok := pickDest(addrs, to, cfg)
 		if !ok {
 			refused = append(refused, p)
 			run = -1
@@ -203,7 +221,12 @@ func planAgentRule(r proto.AgentRule, resolved map[string]Resolution, cfg AgentC
 		run = len(res.Ranges) - 1
 	}
 	if len(refused) > 0 {
-		res.Reason = refusedReason(host, addrs, uint16(base+refused[0]-int(r.ListenPort.Lo)), cfg.AllowTargetSource)
+		to := uint16(base + refused[0] - int(r.ListenPort.Lo))
+		if allLoopback(addrs) {
+			res.Reason = loopbackReason(host, addrs)
+		} else {
+			res.Reason = refusedReason(host, addrs, to, cfg.AllowTargetSource)
+		}
 		if len(refused) > 1 {
 			res.Reason += fmt.Sprintf("; %d of the rule's %d ports are not published", len(refused), r.ListenPort.Len())
 		}
@@ -212,15 +235,44 @@ func planAgentRule(r proto.AgentRule, resolved map[string]Resolution, cfg AgentC
 }
 
 // pickDest は、実効宛先のポート to について、許可一覧が通すアドレスのうち最も小さいものを選ぶ。
-// addrs は昇順に並んでいる。許可一覧が無ければ最も小さいアドレスである。
-func pickDest(addrs []netip.Addr, to uint16, allow func(netip.AddrPort) bool) (netip.AddrPort, bool) {
+// addrs は昇順に並んでいる。許可一覧が無ければ最も小さいアドレスである。ループバックのアドレスは、
+// 運用者が明示したとき(cfg.AllowLoopback)だけ選ぶ(7b.2 節)。
+func pickDest(addrs []netip.Addr, to uint16, cfg AgentConfig) (netip.AddrPort, bool) {
 	for _, a := range addrs {
 		d := netip.AddrPortFrom(a, to)
-		if allow == nil || allow(d) {
+		if a.IsLoopback() {
+			if cfg.AllowLoopback != nil && cfg.AllowLoopback(d) {
+				return d, true
+			}
+			continue
+		}
+		if cfg.AllowTarget == nil || cfg.AllowTarget(d) {
 			return d, true
 		}
 	}
 	return netip.AddrPort{}, false
+}
+
+// allLoopback は、宛先の候補のアドレスがすべてループバックかどうかである。
+func allLoopback(addrs []netip.Addr) bool {
+	for _, a := range addrs {
+		if !a.IsLoopback() {
+			return false
+		}
+	}
+	return len(addrs) > 0
+}
+
+// loopbackReason は、ループバックの宛先を運用者が明示していないために DNAT を作らなかった理由である
+// (7b.2 節)。server doctor は reasontext.LoopbackUnsupported の句で target_loopback_unsupported に分類する。
+// 許可一覧の設定の名前も含むので、doctor はこの句を許可一覧の名前より先に見る。
+func loopbackReason(host string, addrs []netip.Addr) string {
+	const unless = "kernel mode " + reasontext.LoopbackUnsupported + " unless " + reasontext.AllowTargetsEnv +
+		" on the agent host names them with an entry inside 127.0.0.0/8"
+	if _, err := netip.ParseAddr(host); err == nil {
+		return fmt.Sprintf("target %s is a loopback address; %s", addrs[0], unless)
+	}
+	return fmt.Sprintf("target host %q resolved to the loopback address %s; %s", host, addrs[0], unless)
 }
 
 // refusedReason は、実効宛先のポート to にどのアドレスも使えなかった理由である。文言は中継の拒否
@@ -257,7 +309,8 @@ func refusedReason(host string, addrs []netip.Addr, to uint16, source string) st
 const maxRefusedAddrs = 4
 
 // targetAddrs は宛先のホストを、DNAT に使える IPv4 のアドレスの昇順の並びにする。使えなければ理由を返す。
-// ホスト名の解決の結果にループバック、未指定、refuse が拒むアドレスが混ざっていれば、それを除いて残りを使う。
+// ホスト名の解決の結果に未指定、refuse が拒むアドレスが混ざっていれば、それを除いて残りを使う。
+// ループバックのアドレスは残す。使うかどうかは、運用者が明示したかを見て pickDest が決める。
 func targetAddrs(host string, resolved map[string]Resolution, refuse func(netip.Addr) string) ([]netip.Addr, string) {
 	var cands []netip.Addr
 	if addr, err := netip.ParseAddr(host); err == nil {
@@ -291,12 +344,12 @@ func targetAddrs(host string, resolved map[string]Resolution, refuse func(netip.
 		case !a.Is4():
 			// カーネルモードは IPv4 の宛先だけを扱う。実装の制限ではなく、モードの機能の違いである(7b.2 節)
 			reason = fmt.Sprintf("target %s is an IPv6 address; kernel mode forwards only to IPv4 targets", a)
-		case a.IsLoopback():
-			// カーネルは DNAT でループバックへ向けたパケットを捨てる。route_localnet は使わない(7b.2 節)
-			reason = fmt.Sprintf("target %s is a loopback address; kernel mode "+reasontext.LoopbackUnsupported+", use this host's LAN address", a)
 		case a.IsUnspecified():
-			// ユーザー空間モードでは 0.0.0.0 への接続はホスト自身に届くので、ループバックと同じく拒む(7b.2 節)
-			reason = fmt.Sprintf("target %s is the unspecified address, which reaches this host's loopback; kernel mode "+reasontext.LoopbackUnsupported+", use this host's LAN address", a)
+			// ユーザー空間モードでは 0.0.0.0 への接続はホスト自身に届く。カーネルモードは DNAT の宛先に
+			// できないので拒む(7b.2 節)。server doctor が target_loopback_unsupported に分類できるよう、
+			// reasontext.LoopbackUnsupported の句を含める
+			reason = fmt.Sprintf("target %s is the unspecified address, which reaches this host's loopback; kernel mode "+reasontext.LoopbackUnsupported+
+				" through it; target 127.0.0.1 named in "+reasontext.AllowTargetsEnv+" or this host's LAN address instead", a)
 		default:
 			usable = append(usable, a)
 		}

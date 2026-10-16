@@ -86,7 +86,7 @@ table inet wgft_agent {
   wgft0 が絡まない転送には触れない
 - input:wgft0 から入る新規の接続のうち、DNAT していないものを落とす([11 節](../security/admin-transport.md#11-セキュリティ))。
   filter_pre の後ろの二重の守りです。
-  エージェントのホスト自身の LAN のアドレスへの DNAT は forward ではなく input を通るので、input は `ct status dnat` のフローを通す([7b.2 節](targets.md#7b2-宛先の扱い))
+  エージェントのホスト自身の LAN のアドレスとループバックの宛先への DNAT は forward ではなく input を通るので、input は `ct status dnat` のフローを通す([7b.2 節](targets.md#7b2-宛先の扱い))
 - MSS:wgft0 を通る SYN の MSS を、入る向きと出る向きの両方で `rt mtu` にクランプします。
   カーネルモードは TCP を終端しないので、LAN のサーバと利用者は自分のインタフェースの MTU から MSS を合意し、wgft0 の MTU を超えるセグメントを送りうる。
   この場合、PMTUD の ICMP を落とすホストが経路に 1 台あるだけで、大きな TCP がその向きで止まります。
@@ -136,6 +136,10 @@ google/nftables v0.3.0 は MSS の行の `rt` と `byteorder` の式を読み戻
 `agent doctor` の `host.forwarding` はこの状態を FAILED とする([10.2c 節](../diagnosis/agent-evidence.md#102c-エージェント側の診断-wgft-agent-doctor))。
 エージェントは値を 30 秒ごとに読み直し、1 になればルールの `error` を消す。
 自宅のホストがルータとして振る舞える状態になることの影響は [11 節](../security/admin-transport.md#11-セキュリティ)に書きます。
+
+エージェントは、ループバックの宛先の DNAT を公開している間、wgft0 の `net.ipv4.conf.wgft0.route_localnet` を 1 にします。
+値は wgft0 だけのもので、wgft0 と一緒に消えます。
+扱いは [7b.2 節](targets.md#ループバックの宛先)に定めます。
 
 `rp_filter` の strict は、受信したインタフェースが送信元への戻りの経路と異なるパケットを拒むため、複数の LAN セグメントを持つホストで転送を壊し得ます。
 エージェントはこの値と、他のテーブルの forward の `policy drop` を検査して提示し、書き換えない([6.1 節](../vps/kernel.md#61-カーネルモード)と同じ方針)。

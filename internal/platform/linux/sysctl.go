@@ -3,7 +3,8 @@
 package linux
 
 // sysctl の読み書き:conntrack の UDP タイムアウト、net.ipv4.ip_forward、conntrack テーブルの
-// 大きさ(仕様 4, 6.1 節)。WriteIPForward だけが実際に書き込む。
+// 大きさ(仕様 4, 6.1 節)、エージェントの WireGuard インタフェースの route_localnet(7b.2 節)。
+// 書き込むのは WriteIPForward と WriteRouteLocalnet だけである。
 
 import (
 	"fmt"
@@ -49,6 +50,52 @@ const IPForwardPath = "/proc/sys/net/ipv4/ip_forward"
 // ipForwardPath は ReadIPForward と WriteIPForward が読み書きするファイルである。値は IPForwardPath で、
 // テストだけが差し替える。
 var ipForwardPath = IPForwardPath
+
+// confDir は net.ipv4.conf の下のインタフェースごとの sysctl の置き場である。テストだけが差し替える。
+var confDir = "/proc/sys/net/ipv4/conf"
+
+// RouteLocalnetName は、インタフェース iface の route_localnet の sysctl の名前である。ログと理由に出す。
+func RouteLocalnetName(iface string) string {
+	return "net.ipv4.conf." + iface + ".route_localnet"
+}
+
+// routeLocalnetPath は iface の route_localnet のファイルである。インタフェース名はカーネルが受け付ける
+// 名前に限る(11a 節の WGFT_WG_INTERFACE の検査)ので、"/" を含まない。"." はそのままファイル名になる。
+func routeLocalnetPath(iface string) (string, error) {
+	if iface == "" || iface == "." || iface == ".." || strings.ContainsAny(iface, "/\x00") {
+		return "", fmt.Errorf("interface name %q cannot name a sysctl", iface)
+	}
+	return confDir + "/" + iface + "/route_localnet", nil
+}
+
+// ReadRouteLocalnet は、インタフェース iface の route_localnet が 1 かどうかを読む(7b.2 節)。値はその
+// インタフェースだけのもので、all の値は合わせない。インタフェースが無ければ誤りを返す。
+func ReadRouteLocalnet(iface string) (bool, error) {
+	p, err := routeLocalnetPath(iface)
+	if err != nil {
+		return false, err
+	}
+	cur, err := os.ReadFile(p)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(cur)) == "1", nil
+}
+
+// WriteRouteLocalnet は、インタフェース iface の route_localnet に on なら 1、そうでなければ 0 を書く
+// (7b.2 節)。値はインタフェースと一緒に消えるので、インタフェースを消せば元に戻る。書き込みには
+// CAP_NET_ADMIN が要る。
+func WriteRouteLocalnet(iface string, on bool) error {
+	p, err := routeLocalnetPath(iface)
+	if err != nil {
+		return err
+	}
+	v := "0\n"
+	if on {
+		v = "1\n"
+	}
+	return os.WriteFile(p, []byte(v), 0)
+}
 
 // ReadIPForward は net.ipv4.ip_forward が 1 かどうかを読む。
 func ReadIPForward() (on bool, err error) {
