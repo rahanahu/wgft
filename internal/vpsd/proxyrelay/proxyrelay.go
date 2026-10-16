@@ -74,10 +74,10 @@ type Options struct {
 // Manager は現在のプロキシ中継のリスナー集合を持ち、宣言に収束させる。
 type Manager struct {
 	opts Options
-	// testHeaderWriter decorates only header writes; up retains its real connection identity.
-	testHeaderWriter func(net.Conn) io.Writer
-	mu               sync.Mutex
-	ls               map[uint16]*listener
+	// seams はテストが差し替える点。本番は New が既定値で作り、差し替えない
+	seams *seams
+	mu    sync.Mutex
+	ls    map[uint16]*listener
 	// retiring は fail-closed にしたルールの待ち受け(待ち受けソケットは閉じ、成立済みの接続だけを
 	// 持つ。設計文書 7a.3 節の StopAccepting と Retire)。
 	retiring []*listener
@@ -87,6 +87,22 @@ type Manager struct {
 	// closed は Close の後か。Close より前に Prepare した Prepared の Commit は、開いた待ち受けを閉じて
 	// 何も公開しない(Close の後に残る待ち受けを閉じる経路は無いため)。
 	closed bool
+}
+
+// seams は中継の競合をテストで再現するための差し込み点で、本番の Manager は既定値(何もしない)で動く。
+// Options に出さないのは、利用者向けの設定ではないため。
+type seams struct {
+	// headerWriter は PROXY ヘッダの書き込みだけを飾る。up は実際の接続のまま渡す
+	headerWriter func(up net.Conn) io.Writer
+	// pendingRegistration は、ロックの下での pending から記録への移行を止める
+	pendingRegistration func()
+}
+
+func newSeams() *seams {
+	return &seams{
+		headerWriter:        func(up net.Conn) io.Writer { return up },
+		pendingRegistration: func() {},
+	}
 }
 
 // failure は bind の失敗が続いている 1 つのポートの記録。
@@ -111,8 +127,8 @@ type listener struct {
 	// pending は枠を取ってから track するまでの接続の数(エージェントへの接続中)。Retiring の
 	// 待ち受けを閉じてよいか(idle)の判定に使う
 	pending int
-	// testHookPendingRegistration pauses the locked pending-to-record transition.
-	testHookPendingRegistration func()
+	// seams は Manager のものを共有する。テストが直接作るリスナーでは nil で、そのときは既定の動作になる
+	seams *seams
 	// gen は実効宛先(エージェントのアドレスと待ち受けポート)を差し替えた回数。admission は accept の
 	// 時点の値を控え、track のときに値が変わっていれば、その接続は旧い実効宛先へつながっているので
 	// 中継を始めずに閉じる(仕様 6.2 節の実効宛先の変更)
@@ -219,7 +235,7 @@ func New(opts Options) *Manager {
 		lim := resource.Limits{}.WithDefaults()
 		opts.Pool = resource.NewPool(lim.TCPTotal)
 	}
-	return &Manager{opts: opts, ls: map[uint16]*listener{}, bindFail: map[uint16]*failure{}}
+	return &Manager{opts: opts, seams: newSeams(), ls: map[uint16]*listener{}, bindFail: map[uint16]*failure{}}
 }
 
 // Pool is the TCP flow budget this Manager judges new connections against (design.md 7a.10 節
@@ -379,7 +395,7 @@ func (p *Prepared) Commit(retiring map[string]func(src netip.Addr) bool) {
 		// 枠は bind の済んだ待ち受けにだけ付け、中継を始める前に付ける。Prepare で bind に失敗した
 		// ポートはここに来ないので、そのルールは受け付けているルールの集合 A に入らない
 		// (設計文書 7a.10 節)
-		l := &listener{rule: r, ln: ln, conns: map[net.Conn]relayed{}, delivering: map[net.Conn]delivering{}, budget: m.opts.Pool.Listener(r.ID), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
+		l := &listener{rule: r, ln: ln, seams: m.seams, conns: map[net.Conn]relayed{}, delivering: map[net.Conn]delivering{}, budget: m.opts.Pool.Listener(r.ID), stopAccept: make(chan struct{}), serveDone: make(chan struct{})}
 		m.ls[port] = l
 		go m.serve(l)
 		m.opts.Logf("proxy: opened relay %d -> %s:%d proxy_protocol=%v", port, r.AgentAddr, r.AgentPort, r.ProxyProtocol)
@@ -666,11 +682,7 @@ func (m *Manager) relayAdmitted(l *listener, a *admitted) {
 	}
 	if rule.ProxyProtocol {
 		hdr := proxyproto.HeaderProxyFromAddrs(2, c.RemoteAddr(), c.LocalAddr())
-		var writer io.Writer = up
-		if m.testHeaderWriter != nil {
-			writer = m.testHeaderWriter(up)
-		}
-		if _, err := hdr.WriteTo(writer); err != nil {
+		if _, err := hdr.WriteTo(m.seams.headerWriter(up)); err != nil {
 			failed(up)
 			return
 		}
@@ -722,8 +734,8 @@ func (l *listener) finishPending(a *admitted, up net.Conn, failed bool) (chan st
 	}
 	r := relayed{src: a.src.String(), up: up}
 	l.pending--
-	if l.testHookPendingRegistration != nil {
-		l.testHookPendingRegistration()
+	if l.seams != nil {
+		l.seams.pendingRegistration()
 	}
 	var wake chan struct{}
 	if failed {
