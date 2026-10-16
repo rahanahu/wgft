@@ -13,6 +13,10 @@ Loopback addresses such as `127.0.0.1` cannot be used.
 A UDP service on the agent host itself must listen on that host's LAN address.
 If it listens on all addresses, replies will not match the forwarded flow and will not reach the client.
 
+Kernel mode avoids a known limitation of a userspace-mode agent behind a kernel-mode VPS.
+In userspace mode, a public client of a TCP rule that keeps sending acknowledgments without data on a connection with much unacknowledged data can make the agent's memory keep growing.
+The [design document](../design/userspace/memory-limits.md#中身の無い-segment-の処理待ち) describes the limitation.
+
 ## systemd configuration
 
 Use the unit from the [basic Linux agent guide](setup.md#3-run-the-linux-agent-with-systemd).

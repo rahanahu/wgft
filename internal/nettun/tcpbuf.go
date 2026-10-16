@@ -299,7 +299,9 @@ type tcpConn struct {
 	// onBoost は OnBoost で登録した関数。枠を得たときと floor に戻るときに cmu の中で呼ぶ
 	onBoost func(boosted bool) bool
 
-	boosted    atomic.Bool
+	// boosted は枠を持つ印。中身の無い ACK の予算の表(ackbudget.go)も参照するので別に確保し、表の行が
+	// 接続全体を持ち続けないようにする
+	boosted    *atomic.Bool
 	acquiring  atomic.Bool  // 読み取りと書き込みが同時に枠を求めないため
 	closed     atomic.Bool  // 最後の Close か Abort が戻った
 	inflight   atomic.Int32 // 実行中の読み取りと書き込み
@@ -346,6 +348,7 @@ func newTCPConn(wq *waiter.Queue, ep tcpip.Endpoint, pool *boostPool, postClose 
 		wq:        wq,
 		pool:      pool,
 		postClose: postClose,
+		boosted:   new(atomic.Bool),
 		wdlCh:     make(chan struct{}),
 		closeCh:   make(chan struct{}),
 	}, nil
@@ -754,5 +757,6 @@ func (t *Device) DialTCP(ctx context.Context, ap netip.AddrPort) (net.Conn, erro
 		ep.Abort()
 		return nil, err
 	}
+	t.acks.register(c)
 	return &TCPConn{c}, nil
 }

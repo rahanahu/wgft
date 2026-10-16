@@ -4,11 +4,16 @@ On a VPS without root or kernel WireGuard, use userspace mode instead of the rec
 The `wgft server` process forwards traffic, so forwarding stops when it stops.
 Allow WireGuard UDP 51820, agent API TCP 8443, and every forwarded port in the VPS firewall.
 
-At the default flow limits, the server needs about 10.1 GiB of host memory even with one agent and one forwarded TCP port.
+At the default flow limits, the server needs about 12.7 GiB of host memory even with one agent and one forwarded TCP port.
 This is the documented worst-case estimate: the flow state, buffers and other holdings counted in the calculation, each filled to its limit at once by an attack.
 It is not a normal-use estimate.
-Lower flow limits cannot bring this below about 3.0 GiB.
+Lower flow limits cannot bring this below about 3.2 GiB.
 The [design document](../design/agent-dataplane.md) gives the calculation.
+Userspace mode does not guarantee that memory stays within the worst-case estimate.
+On a TCP connection of the netstack with much unacknowledged data, a peer that keeps sending acknowledgments without data can grow memory beyond the estimate.
+The design describes this [known limitation](../design/userspace/memory-limits.md#中身の無い-segment-の処理待ち).
+On a userspace-mode server, public clients reach host sockets and only agents talk to the netstack, so the trigger needs an agent's WireGuard key.
+Use kernel mode on the server where its agents are not trusted.
 Check the Linux [socket buffer requirement](socket-buffers.md) too.
 
 ## Run with systemd

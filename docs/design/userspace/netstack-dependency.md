@@ -19,6 +19,9 @@ Meeting the [socket buffer requirement](socket-buffers.md#ソケットのバッ�
 By the design's reasoning, a socket that meets it can still overflow under sustained overload ([flow limits](flow-limits.md)); the lab has not observed that.
 Upstream gVisor master on 2026-10-10 still counts in-flight segments without subtracting those RACK marked lost.
 The dependency still admits zero-payload TCP segments independently of its receive-memory threshold.
+wgft limits zero-payload ACKs per connection at the tunnel ingress ([the empty-ACK budget](packet-validation.md#中身の無い-ack-の予算)).
+The budget does not give each endpoint's queue of those ACKs a structural bound.
+Userspace mode keeps the rest as [a known limitation](memory-limits.md#中身の無い-segment-の処理待ち).
 When a listener hands a segment to a new endpoint, the dependency's `segment.setOwner` does not subtract that segment from the previous owner's receive-memory accounting.
 On the SYN-cookie path the listener's accounting can exceed its receive buffer, after which the listener rejects payload-bearing segments permanently.
 [The agent's accept-queue limitation](memory-agent-host.md#syn-cookie-の経路の受信のメモリの会計) describes when that path is reached.

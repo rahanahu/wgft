@@ -6,7 +6,8 @@ package nettun
 // 決まるので、断片を gVisor に一度も渡さない(設計文書 7 節)。この Device 宛ての完成した UDP は
 // 登録表(udp_registry.go)を通し、受信の会計の予約を持って endpoint に届ける。ICMP の誤りは、
 // 外側の送信元が引用の宛先と一致するものだけを gVisor に渡す(admitICMPv4Error)。TCP の SYN と
-// SYN-ACK は、MSS の option が下限より小さいものを捨てる(tcpSynMSSBelowFloor)。
+// SYN-ACK は、MSS の option が下限より小さいものを捨てる(tcpSynMSSBelowFloor)。中身の無い ACK は、
+// 接続ごとの予算の範囲だけ渡す(ackbudget.go)。
 
 import (
 	"bytes"
@@ -90,6 +91,8 @@ func (t *Device) sweepReassembly() {
 			}
 			// 閉じた後の TCP の接続の表から、CLOSED か ERROR になった行を外す(postclose.go)
 			t.postClose.sweep()
+			// 中身の無い ACK の予算の表から、CLOSED か ERROR になった行を外す(ackbudget.go)
+			t.acks.sweep()
 		}
 	}
 }
@@ -182,6 +185,9 @@ func (t *Device) writeIPv4(packet []byte) error {
 		if _, err := t.registry.injectLocal(packet, ipHeaderLen); errors.Is(err, os.ErrClosed) {
 			return os.ErrClosed
 		}
+		return nil
+	}
+	if !t.acks.admit(packet) {
 		return nil
 	}
 	injectInbound(t.ep, packet)

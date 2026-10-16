@@ -20,6 +20,9 @@ RACK の損失検出を有効なまま保ち、wgft は引き続き SACK を有�
 この溢れはラボでは観測していません。
 2026-10-10 の時点の上流の gVisor の master も、送信中の segment を数えるときに RACK が損失と判定した分を差し引きません。
 依存は、payload が 0 の TCP segment を受信のメモリのしきい値とは別に受け入れます。
+wgft はトンネルの入口で、payload の無い ACK を接続ごとに抑えます([中身の無い ACK の予算](packet-validation.md#中身の無い-ack-の予算))。
+予算は、この ACK の endpoint ごとの処理待ちに構造上の上限を与えません。
+ユーザー空間モードは残りを[既知の制限](memory-limits.md#中身の無い-segment-の処理待ち)とします。
 待ち受けが segment を新しい endpoint に渡すとき、依存の `segment.setOwner` は前の持ち主の受信のメモリの会計から、その segment の分を引きません。
 SYN cookie の経路では、待ち受けの会計が受信のバッファを超えることがあり、その後の待ち受けは payload を持つ segment を拒み続けます。
 この経路に入る条件は[エージェントの accept の待ち行列の制限](memory-agent-host.md#syn-cookie-の経路の受信のメモリの会計)に書きます。
