@@ -103,7 +103,9 @@ sudo systemctl enable --now wgft-agent
 登録後の認証情報は `/var/lib/wgft/agent.json` に保存されます。
 Web UI のエージェント一覧か、VPS の `sudo wgft agent ls` で接続を確認します。
 
-Linux のエージェントをカーネルモードで使う場合は、[カーネルモードのエージェント](agent-kernel.ja.md)を参照してください。
+Linux のエージェントには、カーネルモードを推奨します。
+カーネルモードでは、エージェントの停止中や更新の間も転送が続きます。
+切り替える手順は[カーネルモードのエージェント](agent-kernel.ja.md)にあります。
 
 ## 4. 転送ルールを追加する
 

@@ -1,6 +1,6 @@
 # VPS をユーザー空間モードで動かす
 
-root やカーネル WireGuard が使えない VPS では、ユーザー空間モードを使います。
+root やカーネル WireGuard が使えない VPS では、推奨のカーネルモードの代わりにユーザー空間モードを使います。
 転送は `wgft server` が行うため、プロセスが止まると転送も止まります。
 VPS の firewall では、WireGuard の UDP 51820、agent API の TCP 8443 と、すべての転送ポートを許可してください。
 

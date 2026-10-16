@@ -103,7 +103,9 @@ sudo systemctl enable --now wgft-agent
 The agent stores its credentials in `/var/lib/wgft/agent.json`.
 Check the connection in the Web UI agent list or with `sudo wgft agent ls` on the VPS.
 
-To use kernel mode on the Linux agent, see [kernel-mode agent](agent-kernel.md).
+Kernel mode is recommended for the Linux agent.
+Forwarding then continues while the agent is stopped or being updated.
+See [kernel-mode agent](agent-kernel.md) for the switch.
 
 ## 4. Add a forwarding rule
 

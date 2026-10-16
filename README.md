@@ -48,13 +48,13 @@ The server runs on Linux. The agent runs on Linux, Windows amd64, and Apple sili
 | Privileges | Requires `CAP_NET_ADMIN` | Normally needs neither root nor a TUN device |
 | If the wgft process stops | Configured forwarding continues | Forwarding stops |
 
-Use kernel mode on a VPS where you have root. Userspace mode is available without root or kernel WireGuard and can run in a container. Kernel mode requires Linux 6.1+ and nftables 1.0.6+. The agent defaults to userspace mode. The [kernel-mode agent guide](docs/manual/agent-kernel.md) covers the requirements for a Linux agent in kernel mode.
+Kernel mode is recommended for the server and for a Linux agent. Userspace mode is the alternative with weaker guarantees: use it on a VPS without root or kernel WireGuard, in Docker, or for an agent on Windows, macOS, or Linux without root. Kernel mode requires Linux 6.1+ and nftables 1.0.6+. The agent defaults to userspace mode for compatibility and because that mode needs no root, so a Linux agent runs in kernel mode only when you select it. The [kernel-mode agent guide](docs/manual/agent-kernel.md) covers the requirements and steps. The [userspace design](docs/design/userspace/README.md) covers the limits of userspace mode.
 
 Linux userspace mode may need higher host socket buffer limits. With the default flow limits, a server with one agent and one forwarded TCP port needs about 10.1 GiB of host memory. That figure is the documented worst-case estimate: the flow state, buffers and other holdings counted in the design's calculation, each filled to its limit at once by an attack. It is not an estimate of normal use. Lower flow limits cannot bring that requirement below about 3.0 GiB. See [userspace mode on the VPS](docs/manual/setup-server-userspace.md) for the requirement and the [design](docs/design/agent-dataplane.md#7-データプレーン自宅側) for the calculation.
 
 ## Quick start
 
-This example uses kernel mode on a Linux VPS and a Linux home agent. Choose from [deployment options](docs/manual/setup-alternatives.md) for [Windows](docs/manual/setup-desktop.md#run-the-agent-on-windows), [macOS](docs/manual/setup-desktop.md#run-the-agent-on-macos), Docker, and other environments. The [setup guide](docs/manual/setup.md) covers Linux systemd.
+This example runs the server in kernel mode on a Linux VPS and the agent in its default userspace mode on a home Linux machine. Choose from [deployment options](docs/manual/setup-alternatives.md) for [Windows](docs/manual/setup-desktop.md#run-the-agent-on-windows), [macOS](docs/manual/setup-desktop.md#run-the-agent-on-macos), Docker, and other environments. For a Linux agent that keeps running, kernel mode is recommended: run it with systemd as in the [setup guide](docs/manual/setup.md) and select kernel mode with the [kernel-mode agent guide](docs/manual/agent-kernel.md).
 
 ### 1. Download wgft
 

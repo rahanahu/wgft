@@ -62,6 +62,7 @@ VPS から自宅へのポート転送に必要な nftables と WireGuard の手�
 `agent` は 2 つのモードを持ちます。
 既定のユーザー空間モードは、wireguard-go と gVisor の netstack でトンネルをユーザー空間に持ち、カーネルの設定を変更しない([7 節](agent-dataplane.md#7-データプレーン自宅側))。
 Linux のエージェントだけが明示して選べるカーネルモードは、カーネルの WireGuard インタフェースと nftables の DNAT で転送し、`vpsd` と同じく wgctrl-go、google/nftables、ti-mo/conntrack でカーネルを直接操作する([7b 節](agent-kernel.md#7b-データプレーン自宅側カーネルモード))。
+Linux のエージェントにはカーネルモードを推奨し、既定は互換性のためユーザー空間モードのままとする([モードの推奨と既定](userspace/mode-selection.md#モードの推奨と既定))。
 
 <a id="3-用語"></a>
 ## 用語
