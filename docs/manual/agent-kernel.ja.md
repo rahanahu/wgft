@@ -1,5 +1,7 @@
 # Linux エージェントのカーネルモード
 
+Linux の agent には、カーネルモードを推奨します。
+agent の既定はユーザー空間モードなので、以下の手順でカーネルモードを明示して選びます。
 Linux の agent をカーネルモードにすると、ホストの WireGuard と nftables が転送します。
 agent のプロセスを再起動している間も、既に設定した転送は続きます。
 Linux のカーネル WireGuard と `CAP_NET_ADMIN` が必要です。

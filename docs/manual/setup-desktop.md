@@ -1,5 +1,9 @@
 # Windows and macOS agents
 
+The recommended kernel mode is available only on a Linux agent, so Windows and macOS agents run in userspace mode.
+Forwarding stops when the agent process stops.
+The [userspace design](../design/userspace/README.md) covers the other limits.
+
 Issue a secret [join string with the procedure for your VPS](setup-alternatives.md#issue-a-join-string) and use it on the agent machine.
 It can be used once and expires after one hour.
 

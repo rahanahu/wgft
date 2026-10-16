@@ -1,17 +1,20 @@
 # Choose your deployment
 
 Choose a procedure for the VPS and one for the home agent.
+Kernel mode is recommended on the VPS and on a Linux agent.
+Userspace mode is for environments where kernel mode cannot be used, and its guarantees are weaker: forwarding stops when the wgft process stops.
+The [userspace design](../design/userspace/README.md) covers its limits.
 With any combination, finish by [adding a forwarding rule](setup.md#4-add-a-forwarding-rule).
 
-| Location | Environment | Procedure |
-|---|---|---|
-| VPS | Linux with root | [Basic systemd steps](setup.md#2-run-the-vps-server-with-systemd) |
-| VPS | No root or kernel WireGuard | [Userspace mode](setup-server-userspace.md) |
-| VPS | Docker | [Docker server](setup-docker.md#vps-server) |
-| Home | Linux with systemd | [Basic systemd steps](setup.md#3-run-the-linux-agent-with-systemd) |
-| Home | Linux, kernel mode | [Kernel-mode agent](agent-kernel.md) |
-| Home | Windows or macOS | [Desktop agents](setup-desktop.md) |
-| Home | Docker | [Docker agent](setup-docker.md#home-agent) |
+| Location | Environment | Mode | Procedure |
+|---|---|---|---|
+| VPS | Linux with root | Kernel: recommended | [Basic systemd steps](setup.md#2-run-the-vps-server-with-systemd) |
+| VPS | No root or kernel WireGuard | Userspace | [Userspace mode](setup-server-userspace.md) |
+| VPS | Docker | Userspace | [Docker server](setup-docker.md#vps-server) |
+| Home | Linux with systemd | Kernel: recommended | [Basic systemd steps](setup.md#3-run-the-linux-agent-with-systemd), adding the [kernel-mode agent](agent-kernel.md) settings before enabling the service |
+| Home | Linux with systemd | Userspace | [Basic systemd steps](setup.md#3-run-the-linux-agent-with-systemd) |
+| Home | Windows or macOS | Userspace | [Desktop agents](setup-desktop.md) |
+| Home | Docker | Userspace | [Docker agent](setup-docker.md#home-agent) |
 
 ## Issue a join string
 

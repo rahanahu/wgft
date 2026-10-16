@@ -48,13 +48,13 @@ VPS 側の server は Linux、agent は Linux、Windows amd64、Apple シリコ�
 | 権限 | `CAP_NET_ADMIN` が必要 | 通常は root 権限と TUN デバイスが不要 |
 | wgft プロセス停止中 | 設定済みの転送は継続 | 転送も停止 |
 
-VPS で root が使える場合は、カーネルモードを使います。root やカーネル WireGuard が使えない場合、またはコンテナ内だけで動かす場合はユーザー空間モードを使います。カーネルモードには Linux 6.1 以降と nftables 1.0.6 以降が必要です。agent はユーザー空間モードが既定です。Linux の agent をカーネルモードで動かす条件と手順は [カーネルモードのエージェント](docs/manual/agent-kernel.ja.md)にあります。
+server と Linux の agent には、カーネルモードを推奨します。ユーザー空間モードは、カーネルモードを使えない環境で使うモードです。転送の保証はカーネルモードより弱くなります。root やカーネル WireGuard が使えない VPS、Docker、Windows と macOS の agent、root 権限のない Linux の agent では、ユーザー空間モードを使います。カーネルモードには Linux 6.1 以降と nftables 1.0.6 以降が必要です。互換性を保つため、agent の既定は root 権限を要しないユーザー空間モードのままです。このため、Linux の agent はカーネルモードを指定したときだけカーネルモードで動きます。条件と手順は[カーネルモードのエージェント](docs/manual/agent-kernel.ja.md)にあります。ユーザー空間モードの制約は[ユーザー空間の設計](docs/design/userspace/README.md)にあります。
 
 Linux のユーザー空間モードでは、ホストのソケットのバッファの設定が必要になる場合があります。また、既定のフロー数の上限では、agent が 1 つ、TCP の転送ポートが 1 つの server に約 10.1 GiB のホストメモリが必要です。この値は設計文書に記載した最悪値の見積もりで、計算に数えたフローの状態やバッファなどが、攻撃によってそれぞれの上限まで同時に埋まった場合のものです。この値は普段の使用量の予想ではありません。フロー数の上限を下げても、この要件は約 3.0 GiB 未満にはなりません。設定方法と条件は [VPS のユーザー空間モード](docs/manual/setup-server-userspace.ja.md)、内訳は [設計文書](docs/design/agent-dataplane.md#7-データプレーン自宅側)を参照してください。
 
 ## クイックスタート
 
-Linux VPS のカーネルモードと、Linux の agent を使う例です。[Windows](docs/manual/setup-desktop.ja.md#windows-で-agent-を実行する) と [macOS](docs/manual/setup-desktop.ja.md#macos-で-agent-を実行する) の agent、Docker などの手順は[環境別の導入](docs/manual/setup-alternatives.ja.md)から選べます。Linux の systemd 手順は[セットアップガイド](docs/manual/setup.ja.md)にあります。
+Linux VPS の server をカーネルモードで、自宅の Linux の agent を既定のユーザー空間モードで動かす例です。[Windows](docs/manual/setup-desktop.ja.md#windows-で-agent-を実行する) と [macOS](docs/manual/setup-desktop.ja.md#macos-で-agent-を実行する) の agent、Docker などの手順は[環境別の導入](docs/manual/setup-alternatives.ja.md)から選べます。常駐させる Linux の agent には、カーネルモードを推奨します。[セットアップガイド](docs/manual/setup.ja.md)のとおり systemd で動かし、[カーネルモードのエージェント](docs/manual/agent-kernel.ja.md)の手順でカーネルモードを選びます。
 
 ### 1. wgft を入手する
 

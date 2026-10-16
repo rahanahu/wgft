@@ -1,5 +1,7 @@
 # Kernel mode for the Linux agent
 
+Kernel mode is the recommended mode for a Linux agent.
+The agent defaults to userspace mode, so select kernel mode explicitly with the steps below.
 In kernel mode, the Linux host's WireGuard and nftables handle forwarding.
 Configured forwarding continues while the agent process restarts.
 This requires kernel WireGuard and `CAP_NET_ADMIN`.

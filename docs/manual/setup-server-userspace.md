@@ -1,6 +1,6 @@
 # Run the VPS in userspace mode
 
-Use userspace mode on a VPS without root or kernel WireGuard.
+On a VPS without root or kernel WireGuard, use userspace mode instead of the recommended kernel mode.
 The `wgft server` process forwards traffic, so forwarding stops when it stops.
 Allow WireGuard UDP 51820, agent API TCP 8443, and every forwarded port in the VPS firewall.
 

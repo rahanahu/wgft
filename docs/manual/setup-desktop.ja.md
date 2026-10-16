@@ -1,5 +1,9 @@
 # Windows と macOS のエージェント
 
+推奨のカーネルモードは Linux の agent だけが使えるため、Windows と macOS の agent はユーザー空間モードで動きます。
+agent のプロセスが止まると転送も止まります。
+ほかの制約は[ユーザー空間の設計](../design/userspace/README.md)にあります。
+
 VPS の[起動方法に合う手順](setup-alternatives.ja.md#接続文字列の発行)で接続文字列を発行し、取得した秘密の join string を使います。
 接続文字列は 1 回だけ使用でき、1 時間で期限切れになります。
 
