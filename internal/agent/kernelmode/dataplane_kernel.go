@@ -57,6 +57,8 @@ type Ops struct {
 	SendDatagram       func(dst netip.AddrPort) error
 	RouteIface         func(dst netip.Addr) (string, error)
 	ConvergeFlows      func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error)
+	// CloseLeft は、UDP のルールが離れたアドレスへの conntrack のエントリを消す(7b.2 節の他のアドレスへの切り替え)
+	CloseLeft func(left []conntrack.AgentLeft, scope conntrack.AgentScope) (int, error)
 	// Notify はカーネルの変更の通知の購読である(7b.4 節の変更の通知)。vpsd の kernel backend と同じ購読を使う
 	Notify dataplane.Sensor
 }
@@ -96,6 +98,7 @@ func defaultKernelOps() Ops {
 		},
 		RouteIface:    wg.AgentRouteInterface,
 		ConvergeFlows: conntrack.ConvergeAgent,
+		CloseLeft:     conntrack.CloseAgentLeft,
 		Notify:        linuxkernel.Notifications{},
 	}
 }
@@ -201,6 +204,19 @@ type Dataplane struct {
 	// lkg はルールごとの、直前に解決できた宛先のアドレスである(7b.2 節)。宣言の宛先の文字列が
 	// 同じ間だけ使う
 	lkg map[string]lkgEntry
+	// pin はルールごとの、最も小さいアドレスの代わりに使うアドレスである(7b.2 節の他のアドレスへの
+	// 切り替え)。宣言の宛先の文字列が同じ間だけ使う。公開の記録の Pinned から再起動の後も読む
+	pin map[string]pinEntry
+	// failed は、30 秒ごとの見直しの接続確認に失敗した、ルールの公開した最初の範囲の宛先である。
+	// 次の見直しで同じ宛先がまた失敗すれば、他のアドレスへ切り替える(7b.2 節)
+	failed map[string]failEntry
+	// failoverLast は、前の見直しの切り替えが最後に試したルールである。次の見直しはその次のルールから
+	// 試す。nil なら先頭から試す
+	failoverLast *nft.AgentRuleResult
+	// leaving は、切り替えで TCP のルールが離れたアドレスの集合を、宛先の名前の小文字ごとに持つ。次に
+	// 公開に成功したときに、同じ名前の UDP のルールがこのアドレスから離れたポートのフローの conntrack の
+	// エントリを消し、空にする。公開に失敗している間は持ち続ける
+	leaving map[string]map[netip.Addr]bool
 	// probeErr は TCP のルールの宛先の試し接続の誤りである(7b.3 節の 2 つ目の種類)。ルール ID ごと
 	probeErr map[string]string
 	// forwardErr は net.ipv4.ip_forward が 1 でない、または 1 かどうか分からないことの理由である
@@ -239,6 +255,20 @@ type lkgEntry struct {
 	addrs  []netip.Addr
 }
 
+// pinEntry は、ルールの宛先の名前の、切り替えた先のアドレスである。切り替えるのは TCP のルールだけである。
+type pinEntry struct {
+	target string
+	addr   netip.Addr
+}
+
+// failEntry は、接続確認に失敗した宛先である。noted は、他に応えるアドレスが無いことをログに出した
+// かどうかで、同じ宛先が失敗し続ける間は 1 行だけ出す。
+type failEntry struct {
+	dest   netip.AddrPort
+	target string
+	noted  bool
+}
+
 // startupFatal は、最初の収束で起きたときにプロセスを終える誤りかどうかである。
 func startupFatal(err error) bool {
 	var notOurs *wg.NotOursError
@@ -255,7 +285,7 @@ func New(ctx context.Context, iface string, allow *allowtargets.List, f *credent
 // New が defaultKernelOps で呼ぶ。試験は偽物の ops を渡す。
 func NewWithOps(ctx context.Context, iface string, allow *allowtargets.List, f *credentials.Credentials, save func() error, ops Ops) *Dataplane {
 	d := &Dataplane{Ops: ops, iface: iface, allow: allow, unicast: allowtargets.NewUnicast(nil, nil), f: f, ctx: ctx, save: save,
-		lkg: map[string]lkgEntry{}, probeErr: map[string]string{}}
+		lkg: map[string]lkgEntry{}, pin: map[string]pinEntry{}, failed: map[string]failEntry{}, probeErr: map[string]string{}}
 	d.loadRecord()
 	return d
 }
@@ -292,6 +322,9 @@ func (d *Dataplane) loadRecord() {
 			addrs = append(addrs, rg.Dest.Addr())
 		}
 		d.lkg[r.RuleID] = lkgEntry{target: r.Target, addrs: sortedAddrs(addrs)}
+		if r.Pinned.IsValid() {
+			d.pin[r.RuleID] = pinEntry{target: r.Target, addr: r.Pinned}
+		}
 	}
 }
 

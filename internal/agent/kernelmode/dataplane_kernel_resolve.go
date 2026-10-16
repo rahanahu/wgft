@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/rahanahu/wgft/internal/dataplane/linuxkernel/nft"
@@ -163,21 +164,70 @@ func resolveEndpointAddr(ctx context.Context, endpoint string, lookup nft.Lookup
 // 文字列が同じ間だけ、直前に解決できたアドレスを使い続ける(2026-09-24 の所有者の決定)。使い続けるときも
 // 今の許可一覧、IPv4 だけの規則、ループバックと未指定のアドレスの拒否を当てはめ直し、そのことを理由に
 // 示す。一度も解決できていないルールは公開しない。
+//
+// 他のアドレスへ切り替えた TCP のルールは、宣言の宛先の文字列が同じ間だけ、そのアドレスを使う(7b.2 節)。
+// 計画がそのアドレスを使わなかったルール、つまりそのアドレスが解決の結果か許可一覧から外れたルールと、
+// UDP に変わったルールは、切り替えを忘れて最も小さいアドレスの規則へ戻る。名前を引けない間は直前の
+// 解決の結果を使うので、記録だけから再起動した後も切り替えは残る。
+//
+// UDP のルールは自分では切り替えず、宛先の名前が同じ TCP のルールが切り替えたアドレスに従う(2026-10-17、
+// 所有者の決定)。従う先は、計画でそのアドレスを使った TCP のルールのうち、公開の記録の順で最初のもの
+// である。UDP のルールのポートで許可一覧が通さなければ、そのポートは最も小さいアドレスの規則のままである。
 func (d *Dataplane) planWith(gen uint64, rules []proto.AgentRule, resolved map[string]nft.Resolution) nft.AgentPublication {
+	prefer := map[string]netip.Addr{}
+	for _, r := range rules {
+		// 切り替えは TCP のルールだけである。UDP に変わったルールは切り替えを忘れる
+		if p, ok := d.pin[r.ID]; ok && p.target == r.Target && r.Proto == proto.TCP {
+			prefer[r.ID] = p.addr
+		}
+	}
+	pub, lkg := d.planRules(gen, rules, resolved, prefer)
+	// TCP のルールの計画が決めた切り替えに、同じ名前の UDP のルールを従わせて計画し直す
+	byHost := map[string]netip.Addr{}
+	for _, res := range pub.Rules {
+		if host, named := targetHostName(res.Target); named && res.Proto == proto.TCP && res.Pinned.IsValid() {
+			if _, done := byHost[strings.ToLower(host)]; !done {
+				byHost[strings.ToLower(host)] = res.Pinned
+			}
+		}
+	}
+	follow := false
+	for _, r := range rules {
+		if host, named := targetHostName(r.Target); named && r.Proto == proto.UDP {
+			if a, ok := byHost[strings.ToLower(host)]; ok {
+				prefer[r.ID], follow = a, true
+			}
+		}
+	}
+	if follow {
+		pub, lkg = d.planRules(gen, rules, resolved, prefer)
+	}
+	d.lkg = lkg
+	pins := map[string]pinEntry{}
+	for _, res := range pub.Rules {
+		if res.Pinned.IsValid() && res.Proto == proto.TCP {
+			pins[res.RuleID] = pinEntry{target: res.Target, addr: res.Pinned}
+		}
+	}
+	d.pin = pins
+	d.pruneFailed(pub)
+	return pub
+}
+
+// planRules は planWith の 1 回の計画である。prefer はルールごとに使うアドレスで、名前を引けないルールは
+// 直前に解決できた結果で計画する。返すのは計画と、次に使う直前に解決できた結果である。
+func (d *Dataplane) planRules(gen uint64, rules []proto.AgentRule, resolved map[string]nft.Resolution, prefer map[string]netip.Addr) (nft.AgentPublication, map[string]lkgEntry) {
 	cfg := d.nftConfig()
-	pub := nft.PlanAgent(nft.AgentInput{Generation: gen, Rules: rules, Resolved: resolved}, cfg)
 	byID := make(map[string]proto.AgentRule, len(rules))
 	for _, r := range rules {
 		byID[r.ID] = r
 	}
+	pub := nft.PlanAgent(nft.AgentInput{Generation: gen, Rules: rules, Resolved: resolved, Prefer: prefer}, cfg)
 	lkg := map[string]lkgEntry{}
 	for i, res := range pub.Rules {
 		r := byID[res.RuleID]
-		host, _, err := net.SplitHostPort(r.Target)
-		if err != nil {
-			continue
-		}
-		if _, err := netip.ParseAddr(host); err == nil {
+		host, named := targetHostName(r.Target)
+		if !named {
 			continue
 		}
 		rs := resolved[host]
@@ -193,12 +243,11 @@ func (d *Dataplane) planWith(gen uint64, rules []proto.AgentRule, resolved map[s
 		}
 		lkg[r.ID] = old
 		again := nft.PlanAgent(nft.AgentInput{Generation: gen, Rules: []proto.AgentRule{r},
-			Resolved: map[string]nft.Resolution{host: {Addrs: old.addrs}}}, cfg).Rules[0]
+			Resolved: map[string]nft.Resolution{host: {Addrs: old.addrs}}, Prefer: prefer}, cfg).Rules[0]
 		again.Reason = staleReason(host, rs.Err, again)
 		pub.Rules[i] = again
 	}
-	d.lkg = lkg
-	return pub
+	return pub, lkg
 }
 
 // staleReasonLimit は、ハートビートの理由に許す長さ(proto.ReasonMaxBytes)である。エージェントは送る前に、

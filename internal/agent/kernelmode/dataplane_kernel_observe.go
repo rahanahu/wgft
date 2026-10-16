@@ -116,6 +116,8 @@ func (d *Dataplane) compare(gen uint64, rules []proto.AgentRule, op *observePrep
 func (d *Dataplane) repair(gen uint64, rules []proto.AgentRule, op *observePrepared) (saved, held bool, err error) {
 	next, changedDNAT := *d.Pub, false
 	if op != nil {
+		// 前の見直しの接続確認に失敗した宛先を確かめ、他のアドレスへ切り替えてから計画する(7b.2 節)
+		d.failover(op.resolved)
 		next = d.planWith(gen, rules, op.resolved)
 		changedDNAT = !sameDNATs(*d.Pub, next)
 		if !changedDNAT {
@@ -167,7 +169,7 @@ func (d *Dataplane) repair(gen uint64, rules []proto.AgentRule, op *observePrepa
 	d.checkRoute()
 	switch {
 	case changedDNAT:
-		log.Printf("kernel mode: target resolution changed the DNAT of %s; publishing the table again", strings.Join(changedRules(*d.Pub, next), ", "))
+		log.Printf("kernel mode: the TCP check or target resolution changed the DNAT of %s; publishing the table again", strings.Join(changedRules(*d.Pub, next), ", "))
 	case drift != "":
 	default:
 		if reflect.DeepEqual(d.Pub.Rules, next.Rules) {

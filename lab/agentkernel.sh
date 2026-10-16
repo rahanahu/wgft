@@ -46,6 +46,11 @@
 #       target resolve. agent doctor's dataplane.table agrees: once check 22's refused rules are
 #       removed, unknown resolve_failed and exit 0 while the rule still forwards, and failed
 #       listener_error and exit 1 once the old address refuses. The refused rules are not put back.
+#       Last, a TCP rule to a name with two allowed addresses whose smallest drops every SYN moves to
+#       the other address after two failed 30-second checks, logs it, records it, keeps it once the
+#       smallest answers again, and keeps it across an agent restart while the name does not resolve
+#       and after the name returns. A UDP rule to the same name follows the switch, and a UDP client
+#       that keeps sending from one source port reaches the new address after it.
 #   drift. the agent repairs changes made outside wgft: a deleted table, a deleted row, a changed
 #       MTU and a deleted wgft0, without a route warning while wgft0 is gone.
 #   notify. the kernel's change notifications bring a deleted table and a deleted wgft0 back within
@@ -171,6 +176,7 @@ cleanup() {
   home nft delete table inet stalereject 2>/dev/null
   lan nft delete table ip ak_lo 2>/dev/null
   vps nft delete table ip ak_lo 2>/dev/null
+  home nft delete table inet failoverdrop 2>/dev/null
   lan ip addr del 192.168.50.200/24 dev eth0 2>/dev/null
   home ip route del 0.0.0.0/1 2>/dev/null
   home ip route del 128.0.0.0/1 2>/dev/null
@@ -183,7 +189,9 @@ set_hosts() { printf '127.0.0.1 localhost\n' > "$HOSTS"; printf '%s\n' "$@" >> "
 # The allowlist holds every target the rules use except the ones that must be refused. It names the
 # loopback targets of check loopback, 127.0.0.1:25566, 19133 and 19134, and not 127.0.0.1:25565, so
 # check 22's loopback rule is refused for a loopback target the list does not name (design 7b.2).
-ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.3:25570,192.168.50.2:25580,192.168.50.2:25565,192.168.50.4:25565,192.168.50.5:25565,127.0.0.1:25566,127.0.0.1:19133-19134
+# 192.168.50.2:19132, where nothing listens, is there for the UDP rule of the resolve check's failover
+# step.
+ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.2:19132,192.168.50.3:25570,192.168.50.2:25580,192.168.50.2:25565,192.168.50.4:25565,192.168.50.5:25565,127.0.0.1:25566,127.0.0.1:19133-19134
 start_agent() { # start_agent [mode]: kernel unless given
   WGFT_MODE=${1:-kernel} WGFT_JOIN="${JOIN:-}" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
     home setsid nohup wgft agent run --data-dir "$ADATA" >> "$ALOG" 2>&1 < /dev/null &
@@ -705,6 +713,98 @@ NFT
   set_hosts "192.168.50.3 game.lan"
   wait_until 60 rule_state_ok "$R_NAME"
   check "the name resolves again" "ok" "$(rule_status "$R_NAME")"
+  check_resolve_failover
+}
+# check_resolve_failover: a name with two allowed addresses, 192.168.50.2 and .3, where the smallest
+# drops every SYN to the target port, as a host that went away would. The agent pins .2 first, sees
+# it fail two 30-second checks in a row, and moves new flows to .3 (design 7b.2).
+check_resolve_failover() {
+  echo "== resolve: failover to another address of the name"
+  home nft -f - <<'NFT'
+table inet failoverdrop {
+  chain in {
+    type filter hook input priority -10; policy accept;
+    ip daddr 192.168.50.2 tcp dport 25565 drop
+  }
+}
+NFT
+  set_hosts "192.168.50.3 game.lan" "192.168.50.3 fo.lan" "192.168.50.2 fo.lan"
+  # Go's resolver reads a changed hosts file again after at most 5 s; let the first apply see the name
+  sleep 6
+  local fo fu t0 took
+  fo=$(add_rule --tcp 39979 --to fo.lan:25565)
+  # a UDP rule to the same name follows the TCP rule's switch; nothing answers UDP on .2
+  fu=$(add_rule --udp 27016 --to fo.lan:19132)
+  wait_until 30 caught_up
+  eqcheck "the rule starts on the smallest address" "192.168.50.2:25565 -" "$(recorded_dest "$fo")"
+  eqcheck "the UDP rule starts there too" "192.168.50.2:19132 -" "$(recorded_dest "$fu")"
+  # a UDP client that keeps sending from one source port: conntrack keeps its unreplied entry to .2
+  # alive, so it reaches .3 only if the agent closes that entry when the UDP rule follows the switch
+  local keep=$W/wgft-ak-udpkeep
+  rm -f "$keep"
+  client "python3 - > $keep 2>&1 <<'PY' &
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('0.0.0.0', 45123)); s.settimeout(1)
+end = time.time() + 150
+while time.time() < end:
+    s.sendto(b'hi', ('198.51.100.1', 27016))
+    try:
+        print('got', s.recv(200).decode(errors='replace'), flush=True)
+        break
+    except OSError:
+        pass
+PY"
+  t0=$SECONDS
+  wait_until 100 grep -q "rule $fo: target 192.168.50.2:25565 failed the TCP check twice in a row; new flows go to 192.168.50.3:25565" "$ALOG"
+  took=$((SECONDS - t0))
+  check "the agent logs the switch" "rule $fo: target 192.168.50.2:25565 failed the TCP check twice in a row; new flows go to 192.168.50.3:25565, another address of \"fo.lan\" that answers" "$(cat "$ALOG")"
+  echo "INFO  switched ${took}s after the rule was applied"
+  check "new flows reach the other address" "tcp-echo 0.0.0.0:25565" "$(tcp_echo 39979)"
+  eqcheck "agent.json records the switched address" "192.168.50.3:25565 192.168.50.3" "$(recorded_dest "$fo")"
+  eqcheck "the UDP rule to the same name follows" "192.168.50.3:19132 192.168.50.3" "$(recorded_dest "$fu")"
+  check "new UDP flows reach the other address" "udp-echo" "$(udp_echo 27016)"
+  wait_until 15 grep -q udp-echo "$keep"
+  check "a UDP client that kept one source port reaches it too" "udp-echo" "$(cat "$keep" 2>/dev/null)"
+  # a userspace-mode server's relay can reach the agent from several source ports, so count any number
+  okcheck "the agent logs the closed UDP flows" \
+    "$(grep -qE "closed [0-9]+ UDP flows of $fu to the address the TCP check left" "$ALOG" && echo 1 || echo 0)"
+  wait_until 70 rule_state_ok "$fo"
+  check "the rule is ok on the other address" "ok" "$(rule_status "$fo")"
+  # the smallest answers again: the rule stays where it is
+  home nft delete table inet failoverdrop
+  sleep 40
+  eqcheck "it stays on the switched address once the smallest answers" "192.168.50.3:25565 192.168.50.3" "$(recorded_dest "$fo")"
+  check "and new flows still go there" "tcp-echo 0.0.0.0:25565" "$(tcp_echo 39979)"
+  # a restart while the name does not resolve keeps the switched address, and so does the name's
+  # return afterwards, although the smallest address answers by then
+  local applied
+  applied=$(grep -c "applied generation" "$ALOG")
+  stop_agent
+  set_hosts "192.168.50.3 game.lan"
+  start_agent
+  wait_until 30 applied_since "$applied"
+  eqcheck "a restart while the name does not resolve keeps the switched address" "192.168.50.3:25565 192.168.50.3" "$(recorded_dest "$fo")"
+  check "and new flows after the restart go there" "tcp-echo 0.0.0.0:25565" "$(tcp_echo 39979)"
+  set_hosts "192.168.50.3 game.lan" "192.168.50.3 fo.lan" "192.168.50.2 fo.lan"
+  sleep 40
+  eqcheck "the name's return keeps the switched address" "192.168.50.3:25565 192.168.50.3" "$(recorded_dest "$fo")"
+  check "and new flows still go there after the name returns" "tcp-echo 0.0.0.0:25565" "$(tcp_echo 39979)"
+  eqcheck "the UDP rule still follows after the restart and the name's return" "192.168.50.3:19132 192.168.50.3" "$(recorded_dest "$fu")"
+  vps wgft rule rm "$fo" --admin "$ADMIN" >/dev/null
+  vps wgft rule rm "$fu" --admin "$ADMIN" >/dev/null
+  wait_until 30 caught_up
+  set_hosts "192.168.50.3 game.lan"
+}
+# recorded_dest <rule-id>: "<dest> <pinned>" of the rule's first range in agent.json's publication
+# record, "-" for an empty value.
+recorded_dest() {
+  python3 - "$ADATA/agent.json" "$1" <<'PY'
+import json, sys
+pub = json.load(open(sys.argv[1])).get("kernel_publication") or {}
+r = next((x for x in pub.get("rules") or [] if x.get("rule_id") == sys.argv[2]), {})
+print(((r.get("ranges") or [{}])[0]).get("dest") or "-", r.get("pinned") or "-")
+PY
 }
 rule_reason_has() { [[ "$(rule_status "$1")" == *"$2"* ]]; }
 rule_reason_lacks() { [[ "$(rule_status "$1")" != *"$2"* ]]; }

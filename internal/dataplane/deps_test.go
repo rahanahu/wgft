@@ -552,7 +552,7 @@ var modeTestSeams = map[string]map[string]bool{
 		"Ops.Publish": true, "Ops.Fingerprint": true, "Ops.Lookup": true, "Ops.Probe": true,
 		"Ops.ReadIPForward": true, "Ops.WriteIPForward": true, "Ops.LocalAddrs": true, "Ops.Now": true,
 		"Ops.ReadRouteLocalnet": true, "Ops.WriteRouteLocalnet": true,
-		"Ops.SendDatagram": true, "Ops.RouteIface": true, "Ops.ConvergeFlows": true, "Ops.Notify": true,
+		"Ops.SendDatagram": true, "Ops.RouteIface": true, "Ops.ConvergeFlows": true, "Ops.CloseLeft": true, "Ops.Notify": true,
 		"MaxUnconverged": true,
 		"DoctorOps":      true, "DoctorOps.Link": true, "DoctorOps.InspectLink": true,
 		"DoctorOps.InspectTable": true, "DoctorOps.ReadSysctl": true, "DoctorOps.ForwardDrops": true,
