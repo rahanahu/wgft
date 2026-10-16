@@ -340,3 +340,40 @@ func TestSetupDialStillRunsAfterCommittedClose(t *testing.T) {
 		t.Fatal("close skipped the committed Dial")
 	}
 }
+
+// ユーザー空間モードの relayAdmitted は、ダイヤルとヘッダ書き込みに成功した組を finishPending で
+// pending から conns へ 1 回のロックで移す。unpend してから track する経路に置き換えると、その間に
+// idle が真になり、Retiring の待ち受けが閉じられ、成立済みの組が track で切られる。
+func TestRelayAdmittedUserspaceSuccessGoesThroughFinishPending(t *testing.T) {
+	r := newSetupWorker(t, true)
+	r.m.seams.headerWriter = func(up net.Conn) io.Writer { return up }
+	entered, proceed := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	resume := func() { once.Do(func() { close(proceed) }) }
+	t.Cleanup(resume)
+	r.l.seams.pendingRegistration = func() { close(entered); <-proceed }
+	r.start()
+	setupWait(t, 5*time.Second, entered)
+	idle := make(chan bool, 1)
+	go func() { idle <- r.l.idle() }()
+	select {
+	case got := <-idle:
+		t.Fatalf("idle observed the gap before registration: %v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+	resume()
+	select {
+	case got := <-idle:
+		if got {
+			t.Fatal("registered active pair appeared idle")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("idle query stalled after transition")
+	}
+	r.l.beginClose()
+	select {
+	case <-r.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("worker did not end after close")
+	}
+}
