@@ -3,165 +3,117 @@ package wgbind
 import (
 	"encoding/binary"
 	"errors"
-	"math"
-	"net"
+	"hash/maphash"
 	"net/netip"
-	"reflect"
-	"sync"
-	"sync/atomic"
-	"unsafe"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/ratelimiter"
 	"golang.zx2c4.com/wireguard/tun"
 )
 
-// Proposed default; see docs/design/userspace/wireguard-sources.md. The limiter
-// can overshoot by its fixed handshake queue, workers and receive locals.
-const sourceThreshold = 1024
+// sourceBuckets は handshake の limiter が持てるキーの数 K。設計は
+// docs/design/userspace/wireguard-sources.md。2 の冪にして、ハッシュの下位のビットで選ぶ。
+const sourceBuckets = 1024
 
-var (
-	errLimiterLayout = errors.New("unsupported WireGuard limiter layout")
-	errReceiveLayout = errors.New("unsupported WireGuard receive layout")
-)
+var errReceiveLayout = errors.New("unsupported WireGuard receive layout")
 
-// Device owns the observer's lifecycle as well as the underlying Device. Close
-// joins receive routines before releasing the observer; it does not join the
-// dependency's handshake workers.
-type Device struct {
-	*device.Device
-	gate *sourceGate
-}
-
-// NewDevice attaches before returning or configuring the Device. An early TUN
-// EventUp can reach Open during device.NewDevice, so Open waits for attachment.
-func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *device.Logger) (*Device, error) {
-	g := newSourceGate(bind)
-	d := device.NewDevice(tunDevice, g, logger)
-	if err := g.attach(d); err != nil {
-		// attach has already woken Open, including an early EventUp holding
-		// device state/net locks. Closing before that would deadlock.
-		d.Close()
-		g.detach()
-		return nil, err
+// bucketAddrs は K 個の合成のアドレスで、limiter のキーにだけ使う。送信の前には包みを外すので、
+// 送信先にはならない。240.0.0.0/4 は予約済みで、誤って使われても実在の宛先に届かない。
+var bucketAddrs = func() (a [sourceBuckets]netip.Addr) {
+	for i := range a {
+		a[i] = netip.AddrFrom4([4]byte{240, 0, byte(i >> 8), byte(i)})
 	}
-	return &Device{Device: d, gate: g}, nil
+	return a
+}()
+
+// NewDevice は、handshake の packet の endpoint を包むバインドで wireguard-go の Device を作る。
+// 固定した版の wireguard-go は、受信した endpoint の DstIP を handshake の limiter のキーにだけ
+// 使う。包みの DstIP は K 個の合成のアドレスのどれかを返すので、limiter の表は K 件を超えない。
+func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *device.Logger) *device.Device {
+	return device.NewDevice(tunDevice, newSourceGate(bind), logger)
 }
 
-func (d *Device) Close() {
-	d.Device.Close()
-	d.gate.detach()
-}
-
-// SourceDrops is one saturating aggregate, with no source-keyed history.
-func (d *Device) SourceDrops() uint64 { return d.gate.drops.Load() }
-
+// sourceGate は、受信した initiation と response の endpoint を bucketEndpoint に包み、送信の前に
+// 包みを外す。packet は捨てず、送信元ごとの状態も持たない。
 type sourceGate struct {
 	conn.Bind
-	ready      chan struct{}
-	attachOnce sync.Once
-	attachErr  error // published by ready close; never subsequently changed
-	observer   atomic.Pointer[limiterObserver]
-	detached   atomic.Bool
-	drops      atomic.Uint64
-	mu         sync.Mutex // only protects cur; never spans limiter observation
-	cur        *generation
+	seed maphash.Seed // Device ごとの鍵。どの送信元がどの bucket に入るかを外から予測させない
 }
 
 func newSourceGate(inner conn.Bind) *sourceGate {
-	return &sourceGate{Bind: BatchOne(inner), ready: make(chan struct{})}
+	return &sourceGate{Bind: BatchOne(inner), seed: maphash.MakeSeed()}
 }
 
-func (g *sourceGate) attach(d *device.Device) error {
-	g.attachOnce.Do(func() {
-		o, err := observeLimiter(d)
-		g.attachErr = err
-		if err == nil {
-			g.observer.Store(o)
-			if g.detached.Load() {
-				g.observer.Store(nil)
-			}
-		}
-		close(g.ready)
-	})
-	return g.attachErr
+// bucketEndpoint は DstIP だけを合成のアドレスに置き換える。MAC2 の検査と cookie reply が使う
+// DstToBytes、UAPI の DstToString、ClearSrc などは内側の endpoint のものをそのまま使う。
+type bucketEndpoint struct {
+	conn.Endpoint
+	bucket netip.Addr
 }
 
-func (g *sourceGate) detach() {
-	g.detached.Store(true)
-	g.observer.Store(nil)
-}
-
-func (*sourceGate) BatchSize() int { return 1 }
+func (e *bucketEndpoint) DstIP() netip.Addr { return e.bucket }
 
 func (g *sourceGate) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
-	<-g.ready
-	if g.attachErr != nil {
-		return nil, 0, g.attachErr
-	}
-	if g.detached.Load() {
-		return nil, 0, net.ErrClosed
-	}
-	if g.Bind.BatchSize() != 1 {
-		return nil, 0, errReceiveLayout
-	}
 	fns, actualPort, err := g.Bind.Open(port)
 	if err != nil {
 		return nil, actualPort, err
 	}
-	valid := len(fns) >= 1 && len(fns) <= 2
+	// nil の関数を包むと nil でない関数になり、呼んだときに panic する。
 	for _, fn := range fns {
-		valid = valid && fn != nil
+		if fn == nil {
+			_ = g.Bind.Close()
+			return nil, 0, errReceiveLayout
+		}
 	}
-	if !valid {
-		_ = g.Bind.Close()
-		return nil, 0, errReceiveLayout
-	}
-	gen := &generation{}
-	g.mu.Lock()
-	g.cur = gen
-	g.mu.Unlock()
 	for i, inner := range fns {
 		fns[i] = func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
-			if gen.closed.Load() || g.detached.Load() {
-				return 0, net.ErrClosed
-			}
 			n, err := inner(bufs, sizes, eps)
-			if err != nil {
-				return n, err
-			}
-			if n < 0 || n > 1 {
+			if n > len(bufs) || n > len(sizes) || n > len(eps) {
 				return 0, errReceiveLayout
 			}
-			if gen.closed.Load() || g.detached.Load() {
-				if len(eps) > 0 {
-					eps[0] = nil
-				}
-				return 0, net.ErrClosed
-			}
-			if n == 1 && len(bufs) > 0 && len(sizes) > 0 && len(eps) > 0 && candidate(bufs[0], sizes[0]) {
-				if !g.admit(eps[0]) {
-					saturatingIncrement(&g.drops)
-					sizes[0], eps[0] = 0, nil
+			for j := 0; j < n; j++ {
+				if eps[j] != nil && candidate(bufs[j], sizes[j]) {
+					eps[j] = g.wrap(eps[j])
 				}
 			}
-			return n, nil
+			return n, err
 		}
 	}
 	return fns, actualPort, nil
 }
 
-// BindUpdate calls Close even before its first Open. It must not cancel ready.
-func (g *sourceGate) Close() error {
-	g.mu.Lock()
-	if g.cur != nil {
-		g.cur.closed.Store(true)
+// Send は包みを外してから内側に渡す。peer は handshake の endpoint を包みのまま保存する。
+// 標準のバインドは *conn.StdNetEndpoint を前提にし、DstIP で IPv4 と IPv6 のソケットを選ぶ。
+func (g *sourceGate) Send(bufs [][]byte, ep conn.Endpoint) error {
+	if b, ok := ep.(*bucketEndpoint); ok {
+		ep = b.Endpoint
 	}
-	g.mu.Unlock()
-	return g.Bind.Close()
+	return g.Bind.Send(bufs, ep)
 }
 
+func (g *sourceGate) wrap(ep conn.Endpoint) conn.Endpoint {
+	if b, ok := ep.(*bucketEndpoint); ok {
+		ep = b.Endpoint
+	}
+	return &bucketEndpoint{Endpoint: ep, bucket: bucketAddrs[g.bucketOf(ep.DstIP())]}
+}
+
+// bucketOf は送信元の bucket を選ぶ。IPv6 は /64 の prefix を使い、1 台が持つ /64 の中のアドレスを
+// 1 つの送信元として扱う (カーネルの WireGuard の limiter と同じ)。IPv4 と IPv4-mapped IPv6 は
+// アドレス全体を使い、両者は別の入力になる。zone は使わない。
+func (g *sourceGate) bucketOf(ip netip.Addr) int {
+	var b [17]byte
+	a := ip.As16()
+	if ip.Is6() && !ip.Is4In6() {
+		clear(a[8:])
+	}
+	copy(b[:16], a[:])
+	b[16] = byte(ip.BitLen() >> 5) // 0: 無効、1: IPv4、4: IPv6
+	return int(maphash.Bytes(g.seed, b[:]) & (sourceBuckets - 1))
+}
+
+// candidate は、wireguard-go が handshake のキューに入れて limiter に渡しうる packet を選ぶ。
+// 受信の経路は、この大きさの initiation と response だけを handshake のキューに入れる。
 func candidate(buf []byte, size int) bool {
 	if size < 4 || size > len(buf) {
 		return false
@@ -169,69 +121,4 @@ func candidate(buf []byte, size int) bool {
 	typ := binary.LittleEndian.Uint32(buf[:4])
 	return typ == device.MessageInitiationType && size == device.MessageInitiationSize ||
 		typ == device.MessageResponseType && size == device.MessageResponseSize
-}
-
-func (g *sourceGate) admit(ep conn.Endpoint) bool {
-	// StdNetBind gives every datagram its own endpoint. AddrPort is immutable
-	// throughout the dependency's receive/handshake path; ClearSrc changes src.
-	e, ok := ep.(*conn.StdNetEndpoint)
-	if !ok || e == nil || !e.DstIP().IsValid() {
-		return false
-	}
-	o := g.observer.Load()
-	return o != nil && o.admit(e.DstIP())
-}
-
-func saturatingIncrement(v *atomic.Uint64) {
-	for old := v.Load(); old != math.MaxUint64; old = v.Load() {
-		if v.CompareAndSwap(old, old+1) {
-			return
-		}
-	}
-}
-
-// limiterObserver is a read-only shim for pinned wireguard-go ecfc5a8d5446.
-// table is the actual map field, so replacements under mu are also observed.
-// owner keeps the field addresses alive until detach; no private fields are set.
-type limiterObserver struct {
-	owner *device.Device
-	mu    *sync.RWMutex
-	table reflect.Value
-}
-
-func observeLimiter(d *device.Device) (*limiterObserver, error) {
-	if d == nil {
-		return nil, errLimiterLayout
-	}
-	v := reflect.ValueOf(d).Elem()
-	rate := v.FieldByName("rate")
-	if !rate.IsValid() || rate.Kind() != reflect.Struct {
-		return nil, errLimiterLayout
-	}
-	limiter := rate.FieldByName("limiter")
-	if !limiter.IsValid() || limiter.Type() != reflect.TypeFor[ratelimiter.Ratelimiter]() || !limiter.CanAddr() {
-		return nil, errLimiterLayout
-	}
-	return observerFields(d, limiter)
-}
-
-func observerFields(d *device.Device, limiter reflect.Value) (*limiterObserver, error) {
-	mu, table := limiter.FieldByName("mu"), limiter.FieldByName("table")
-	if !mu.IsValid() || mu.Type() != reflect.TypeFor[sync.RWMutex]() || !mu.CanAddr() ||
-		!table.IsValid() || table.Type() != reflect.TypeFor[map[netip.Addr]*ratelimiter.RatelimiterEntry]() || !table.CanAddr() {
-		return nil, errLimiterLayout
-	}
-	// NewAt preserves each validated field's exact type and points to the
-	// original storage, particularly the real sync.RWMutex, never a copy/cast.
-	actualMu := reflect.NewAt(mu.Type(), unsafe.Pointer(mu.UnsafeAddr())).Interface().(*sync.RWMutex)
-	actualTable := reflect.NewAt(table.Type(), unsafe.Pointer(table.UnsafeAddr())).Elem()
-	return &limiterObserver{owner: d, mu: actualMu, table: actualTable}, nil
-}
-
-func (o *limiterObserver) admit(ip netip.Addr) bool {
-	if !o.mu.TryRLock() {
-		return false
-	}
-	defer o.mu.RUnlock()
-	return o.table.MapIndex(reflect.ValueOf(ip)).IsValid() || o.table.Len() < sourceThreshold
 }
