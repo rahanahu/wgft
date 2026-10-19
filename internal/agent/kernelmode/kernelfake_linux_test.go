@@ -78,6 +78,8 @@ type fakeKernel struct {
 	converged   []convergeCall
 	convergeErr error
 	convergeRes conntrack.AgentResult
+	// closedLeft は、UDP のルールが離れたアドレスへのフローを消す呼び出しの記録である
+	closedLeft [][]conntrack.AgentLeft
 }
 
 type convergeCall struct {
@@ -166,6 +168,10 @@ func (k *fakeKernel) ops() Ops {
 		ConvergeFlows: func(prev []nft.AgentPublication, cur nft.AgentPublication, scope conntrack.AgentScope) (conntrack.AgentResult, error) {
 			k.converged = append(k.converged, convergeCall{append([]nft.AgentPublication(nil), prev...), cur, scope})
 			return k.convergeRes, k.convergeErr
+		},
+		CloseLeft: func(left []conntrack.AgentLeft, _ conntrack.AgentScope) (int, error) {
+			k.closedLeft = append(k.closedLeft, left)
+			return len(left), nil
 		},
 		RouteIface: func(netip.Addr) (string, error) {
 			if k.route == "" {

@@ -79,6 +79,10 @@ type AgentInput struct {
 	// Resolved は、宛先のホスト名からその解決の結果への対応である。IP リテラルの宛先は引かない。
 	// 対応の無いホスト名は解決できなかったものとして扱う。
 	Resolved map[string]Resolution
+	// Prefer は、ルール ID から、そのルールで最も小さいアドレスの代わりに使うアドレスへの対応である
+	// (7b.2 節の他のアドレスへの切り替え)。エージェントは、TCP の接続確認で切り替えたアドレスを渡す。
+	// 解決の結果に無いアドレスと、ポートの実効宛先を許可一覧が通さないアドレスは使わない。
+	Prefer map[string]netip.Addr
 }
 
 // AgentPublication は 1 回の組み立ての結果であり、公開の記録である(7b.4 節)。ルールごとに、DNAT を
@@ -99,6 +103,11 @@ type AgentRuleResult struct {
 	Target string       `json:"target"`
 	Ranges []AgentRange `json:"ranges,omitempty"`
 	Reason string       `json:"reason,omitempty"`
+	// Pinned は、切り替えたアドレスとして使ったアドレスである(AgentInput.Prefer)。そのアドレスを宛先に
+	// したポートが 1 つでもあれば持つ。最も小さいアドレスと同じでも持つので、名前を引けない間の再起動で
+	// 解決の結果が記録のアドレスだけになっても、切り替えたことが残る。エージェントは再起動の後もこの
+	// アドレスを使い続ける(7b.2 節)
+	Pinned netip.Addr `json:"pinned,omitzero"`
 }
 
 // AgentRange は DNAT を公開した連続するポートと、その先頭のポートの実効宛先である。範囲の i 番目の
@@ -152,8 +161,8 @@ func sortDNATs(d []AgentDNAT) {
 //
 // ループバック(127.0.0.0/8)の宛先は、cfg.AllowLoopback が真のポートにだけ DNAT を作る。
 // 宛先の許可一覧はポートごとの実効宛先で判定する。ホスト名が複数のアドレスに解決されたときは、ポートごとに
-// 一覧が通すアドレスだけを残し、その中で最も小さいアドレスを使う(7b.2 節)。どのアドレスも通らない
-// ポートにだけ DNAT を作らない。
+// 一覧が通すアドレスだけを残し、その中で最も小さいアドレスを使う(7b.2 節)。in.Prefer にルールのアドレスが
+// あり、一覧がそのポートで通せば、そのアドレスを使う。どのアドレスも通らないポートにだけ DNAT を作らない。
 // 結果は (Proto, ListenPort.Lo, RuleID) の順に並ぶ。この順がテーブルの行の順になる。
 func PlanAgent(in AgentInput, cfg AgentConfig) AgentPublication {
 	rules := make([]proto.AgentRule, 0, len(in.Rules))
@@ -174,12 +183,12 @@ func PlanAgent(in AgentInput, cfg AgentConfig) AgentPublication {
 	})
 	out := AgentPublication{Generation: in.Generation, Rules: make([]AgentRuleResult, 0, len(rules))}
 	for _, r := range rules {
-		out.Rules = append(out.Rules, planAgentRule(r, in.Resolved, cfg))
+		out.Rules = append(out.Rules, planAgentRule(r, in.Resolved, in.Prefer[r.ID], cfg))
 	}
 	return out
 }
 
-func planAgentRule(r proto.AgentRule, resolved map[string]Resolution, cfg AgentConfig) AgentRuleResult {
+func planAgentRule(r proto.AgentRule, resolved map[string]Resolution, prefer netip.Addr, cfg AgentConfig) AgentRuleResult {
 	res := AgentRuleResult{RuleID: r.ID, Proto: r.Proto, ListenPort: r.ListenPort, Target: r.Target}
 	host, portStr, err := net.SplitHostPort(r.Target)
 	n, perr := strconv.ParseUint(portStr, 10, 16)
@@ -198,7 +207,11 @@ func planAgentRule(r proto.AgentRule, resolved map[string]Resolution, cfg AgentC
 		return res
 	}
 	// 許可一覧は実効宛先ごとに判定する。ポートごとに、一覧が通すアドレスのうち最も小さいものを使う
-	// (7b.2 節)。どのアドレスも通らないポートは作らず、範囲の他のポートは公開する
+	// (7b.2 節)。切り替えたアドレス prefer があり、一覧がそのポートで通せば、そちらを使う。どのアドレスも
+	// 通らないポートは作らず、範囲の他のポートは公開する
+	if !slices.Contains(addrs, prefer) {
+		prefer = netip.Addr{}
+	}
 	var refused []int // どのアドレスも許可一覧が通さなかったポート
 	run := -1         // res.Ranges のうち、伸ばしている最後の範囲。-1 なら無い
 	for p := int(r.ListenPort.Lo); p <= int(r.ListenPort.Hi); p++ {
@@ -208,6 +221,9 @@ func planAgentRule(r proto.AgentRule, resolved map[string]Resolution, cfg AgentC
 			refused = append(refused, p)
 			run = -1
 			continue
+		}
+		if pd := netip.AddrPortFrom(prefer, to); prefer.IsValid() && destAllowed(pd, cfg) {
+			dest, res.Pinned = pd, prefer
 		}
 		if run >= 0 {
 			last := &res.Ranges[run]
@@ -239,18 +255,20 @@ func planAgentRule(r proto.AgentRule, resolved map[string]Resolution, cfg AgentC
 // 運用者が明示したとき(cfg.AllowLoopback)だけ選ぶ(7b.2 節)。
 func pickDest(addrs []netip.Addr, to uint16, cfg AgentConfig) (netip.AddrPort, bool) {
 	for _, a := range addrs {
-		d := netip.AddrPortFrom(a, to)
-		if a.IsLoopback() {
-			if cfg.AllowLoopback != nil && cfg.AllowLoopback(d) {
-				return d, true
-			}
-			continue
-		}
-		if cfg.AllowTarget == nil || cfg.AllowTarget(d) {
+		if d := netip.AddrPortFrom(a, to); destAllowed(d, cfg) {
 			return d, true
 		}
 	}
 	return netip.AddrPort{}, false
+}
+
+// destAllowed は、実効宛先 d を DNAT の宛先にしてよいかである。ループバックのアドレスは運用者が明示した
+// とき(cfg.AllowLoopback)だけ、他のアドレスは許可一覧が通すか一覧が無いときに通す(7b.2 節)。
+func destAllowed(d netip.AddrPort, cfg AgentConfig) bool {
+	if d.Addr().IsLoopback() {
+		return cfg.AllowLoopback != nil && cfg.AllowLoopback(d)
+	}
+	return cfg.AllowTarget == nil || cfg.AllowTarget(d)
 }
 
 // allLoopback は、宛先の候補のアドレスがすべてループバックかどうかである。
@@ -360,6 +378,24 @@ func targetAddrs(host string, resolved map[string]Resolution, refuse func(netip.
 	// 選び方を DNS の応答の順によらせない。順が回るたびにテーブルを公開し直さないためである(7b.2 節)
 	sort.Slice(usable, func(i, j int) bool { return usable[i].Less(usable[j]) })
 	return slices.Compact(usable), ""
+}
+
+// AgentCandidates は、ホスト名 host の解決の結果 addrs のうち、実効宛先のポート to への DNAT に使える
+// アドレスを昇順に返す。PlanAgent と同じ規則で、IPv4 でないアドレス、未指定、cfg.RefuseTarget が拒む
+// アドレス、許可一覧が通さないアドレス、運用者が明示していないループバックのアドレスを除く。エージェントは、TCP の接続確認に失敗したアドレスの
+// 代わりの候補をこれで選ぶ(7b.2 節の他のアドレスへの切り替え)。
+func AgentCandidates(host string, addrs []netip.Addr, to uint16, cfg AgentConfig) []netip.Addr {
+	usable, reason := targetAddrs(host, map[string]Resolution{host: {Addrs: addrs}}, cfg.RefuseTarget)
+	if reason != "" {
+		return nil
+	}
+	var out []netip.Addr
+	for _, a := range usable {
+		if destAllowed(netip.AddrPortFrom(a, to), cfg) {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // errOnlyIPv6 は、ホスト名が IPv6 のアドレスだけに解決されたことを表す。

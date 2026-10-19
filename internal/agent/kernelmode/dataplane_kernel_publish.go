@@ -80,6 +80,12 @@ func (d *Dataplane) publish(pub nft.AgentPublication) error {
 	}
 	d.gate.Succeeded()
 	prev := d.Pub
+	// 切り替えで離れたアドレスは、DNAT を変えた公開に成功したときに使って空にする。同じ DNAT を置き直す
+	// 修復の公開では UDP のルールはまだ動いていないので、持ち続ける(7b.2 節)
+	if prev != nil && !sameDNATs(*prev, pub) {
+		d.closeLeftUDP(*prev, pub)
+		d.leaving = nil
+	}
 	d.Pub = &pub
 	d.writeRecord(recordPublication, &d.f.KernelPublication, pub)
 	// 指紋を読めなければ、比べる基準が分からない。次の見直しは食い違いとして公開し直し、読み直す
@@ -210,28 +216,51 @@ func (d *Dataplane) writeRecord(what string, dst *json.RawMessage, v any) bool {
 // probeAll は、公開した TCP のルールの宛先へ試し接続する(7b.3 節の 2 つ目の種類)。試すのは、連続する
 // ポートと宛先の範囲(公開の記録の AgentRange)ごとに、その先頭のポートの 1 つだけである(2026-09-24 の
 // 所有者の決定)。ユーザー空間モードはポートごとに試す。失敗は報告にだけ使い、DNAT は残す。
-func (d *Dataplane) probeAll() {
+// 返すのは、ルールごとの公開した最初の範囲の宛先のうち、失敗したものである。30 秒ごとの見直しは
+// これを他のアドレスへの切り替えに使う(7b.2 節)。
+func (d *Dataplane) probeAll() map[string]netip.AddrPort {
 	d.probeErr = map[string]string{}
 	if d.Pub == nil {
-		return
+		return nil
 	}
 	type job struct {
-		rule string
-		dest netip.AddrPort
+		rule  string
+		dest  netip.AddrPort
+		first bool
 	}
 	var jobs []job
+	var dests []netip.AddrPort
 	for _, r := range d.Pub.Rules {
 		if r.Proto != proto.TCP {
 			continue
 		}
-		for _, rg := range r.Ranges {
-			jobs = append(jobs, job{r.RuleID, rg.Dest})
+		for i, rg := range r.Ranges {
+			jobs = append(jobs, job{r.RuleID, rg.Dest, i == 0})
+			dests = append(dests, rg.Dest)
 		}
 	}
-	errs := make([]error, len(jobs))
+	errs := d.probeEach(dests)
+	failedFirst := map[string]netip.AddrPort{}
+	for i, j := range jobs {
+		if errs[i] != nil {
+			if _, done := d.probeErr[j.rule]; !done {
+				d.probeErr[j.rule] = fmt.Sprintf("target %s: %v", j.dest, errs[i])
+			}
+			if j.first {
+				failedFirst[j.rule] = j.dest
+			}
+		}
+	}
+	return failedFirst
+}
+
+// probeEach は dests のそれぞれへ同時に試し接続し、同じ順に誤りを返す。期限と同時に試す数は
+// probeAll と同じである。
+func (d *Dataplane) probeEach(dests []netip.AddrPort) []error {
+	errs := make([]error, len(dests))
 	sem := make(chan struct{}, kernelProbeConcurrent)
 	var wg sync.WaitGroup
-	for i, j := range jobs {
+	for i, dest := range dests {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -239,17 +268,11 @@ func (d *Dataplane) probeAll() {
 			defer func() { <-sem }()
 			ctx, cancel := context.WithTimeout(d.ctx, kernelProbeTimeout)
 			defer cancel()
-			errs[i] = d.Ops.Probe(ctx, j.dest)
+			errs[i] = d.Ops.Probe(ctx, dest)
 		}()
 	}
 	wg.Wait()
-	for i, j := range jobs {
-		if errs[i] != nil {
-			if _, done := d.probeErr[j.rule]; !done {
-				d.probeErr[j.rule] = fmt.Sprintf("target %s: %v", j.dest, errs[i])
-			}
-		}
-	}
+	return errs
 }
 
 // summary は適用のログの 1 行に載せる要約である。
@@ -267,6 +290,7 @@ func (d *Dataplane) summary() string {
 }
 
 // Refresh は 30 秒ごとの見直しである。TCP の宛先へ試し接続し直し、ip_forward を読み直す(7b.1・7b.3 節)。
+// 失敗した宛先は、次の見直しで他のアドレスへ切り替えるかを決めるために控える(7b.2 節)。
 func (d *Dataplane) Refresh() {
 	if !d.have {
 		return
@@ -301,7 +325,7 @@ func (d *Dataplane) Refresh() {
 			}
 		}
 	}
-	d.probeAll()
+	d.noteFailures(d.probeAll())
 }
 
 // sameDNATs は、2 つの公開が同じ DNAT を持つかどうかである。世代と理由の文言は比べない。

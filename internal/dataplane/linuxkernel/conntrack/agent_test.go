@@ -5,6 +5,7 @@ package conntrack
 import (
 	"errors"
 	"net/netip"
+	"reflect"
 	"testing"
 
 	"github.com/ti-mo/conntrack"
@@ -356,5 +357,43 @@ func TestConvergeAgentScope(t *testing.T) {
 		if _, err := convergeAgent(c, nil, nft.AgentPublication{}, s); err == nil {
 			t.Errorf("scope %+v: want an error", s)
 		}
+	}
+}
+
+// CloseAgentLeft は、離れた範囲のポートへ入り、その範囲の前の宛先そのものへ DNAT されたフローだけを消す。
+// 同じポートの新しい宛先へのフロー、他のプロトコル、他のポート、wgft0 から入っていないフローには触れない。
+func TestCloseAgentLeft(t *testing.T) {
+	left := []AgentLeft{{Proto: proto.UDP, Range: nft.AgentRange{Ports: proto.PortRange{Lo: 27015, Hi: 27016}, Dest: netip.MustParseAddrPort("192.168.1.3:2456")}}}
+	stale := agentFlow(unix.IPPROTO_UDP, 27015, "192.168.1.3:2456")
+	staleHi := agentFlow(unix.IPPROTO_UDP, 27016, "192.168.1.3:2457")
+	keep := []conntrack.Flow{
+		agentFlow(unix.IPPROTO_UDP, 27015, "192.168.1.4:2456"),                                  // 新しい宛先
+		agentFlow(unix.IPPROTO_TCP, 27015, "192.168.1.3:2456"),                                  // TCP
+		agentFlow(unix.IPPROTO_UDP, 27017, "192.168.1.3:2458"),                                  // 範囲の外
+		agentFlow(unix.IPPROTO_UDP, 27016, "192.168.1.3:2456"),                                  // ポートの位置が合わない
+		rawFlow(unix.IPPROTO_UDP, "10.0.0.9", "10.200.0.2", 27015, "192.168.1.3:2456", true),    // wgft0 の外
+		rawFlow(unix.IPPROTO_UDP, "10.200.0.1", "10.200.0.2", 27015, "192.168.1.3:2456", false), // DNAT の印が無い
+	}
+	gone := agentFlow(unix.IPPROTO_UDP, 27015, "192.168.1.3:2456")
+	gone.TupleOrig.Proto.SourcePort = 40001
+	c := &fakeAgentConn{flows: append([]conntrack.Flow{stale, staleHi, gone}, keep...), delErr: func(f conntrack.Flow) error {
+		if f.TupleOrig.Proto.SourcePort == 40001 {
+			return unix.ENOENT
+		}
+		return nil
+	}}
+	n, err := closeAgentLeft(c, left, agentScope)
+	if err != nil || n != 3 || len(c.deleted) != 2 {
+		t.Fatalf("closed %d (%v), deleted %d; want 3 counted, 2 deleted and the vanished one counted", n, err, len(c.deleted))
+	}
+	if !reflect.DeepEqual(c.deleted, []conntrack.Flow{stale, staleHi}) {
+		t.Errorf("deleted %v, want the two flows to the left destinations", c.deleted)
+	}
+	c = &fakeAgentConn{flows: []conntrack.Flow{stale}, delErr: func(conntrack.Flow) error { return unix.EPERM }}
+	if _, err := closeAgentLeft(c, left, agentScope); err == nil {
+		t.Error("a failed delete returned no error")
+	}
+	if n, err := closeAgentLeft(&fakeAgentConn{dumpErr: errors.New("dump")}, left, agentScope); err == nil || n != 0 {
+		t.Errorf("a failed dump = %d, %v", n, err)
 	}
 }

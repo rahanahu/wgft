@@ -1254,3 +1254,92 @@ func TestAgentPublicationHasLoopback(t *testing.T) {
 		t.Error("a publication with a loopback DNAT does not report it")
 	}
 }
+
+// 切り替えたアドレス(AgentInput.Prefer)は、解決の結果にあり、許可一覧がそのポートで通すときだけ使い、
+// 使ったときだけ、最も小さいアドレスと同じでも Pinned に残す(7b.2 節の他のアドレスへの切り替え)。通さないポートは最も小さいアドレスの
+// 規則のままである。
+func TestPlanAgentPrefer(t *testing.T) {
+	a := netip.MustParseAddr
+	resolved := map[string]Resolution{"svc.lan": {Addrs: []netip.Addr{a("192.168.1.3"), a("192.168.1.9"), a("192.168.1.12")}}}
+	plan := func(rule proto.AgentRule, prefer netip.Addr, c AgentConfig) AgentRuleResult {
+		t.Helper()
+		pub := PlanAgent(AgentInput{Rules: []proto.AgentRule{rule}, Resolved: resolved, Prefer: map[string]netip.Addr{"r": prefer}}, c)
+		return pub.Rules[0]
+	}
+	open := AgentConfig{WGInterface: "wgft0"}
+	t.Run("a preferred address in the resolution", func(t *testing.T) {
+		got := plan(agentRule("r", proto.TCP, 80, 80, "svc.lan:80"), a("192.168.1.9"), open)
+		if want := []AgentRange{rng(80, 80, "192.168.1.9:80")}; !reflect.DeepEqual(got.Ranges, want) || got.Pinned != a("192.168.1.9") {
+			t.Errorf("result = %+v, want %v pinned to 192.168.1.9", got, want)
+		}
+	})
+	t.Run("a preferred smallest address is still recorded", func(t *testing.T) {
+		got := plan(agentRule("r", proto.TCP, 80, 80, "svc.lan:80"), a("192.168.1.3"), open)
+		if want := []AgentRange{rng(80, 80, "192.168.1.3:80")}; !reflect.DeepEqual(got.Ranges, want) || got.Pinned != a("192.168.1.3") {
+			t.Errorf("result = %+v, want %v pinned to 192.168.1.3", got, want)
+		}
+	})
+	t.Run("an address outside the resolution is ignored", func(t *testing.T) {
+		got := plan(agentRule("r", proto.TCP, 80, 80, "svc.lan:80"), a("192.168.1.50"), open)
+		if want := []AgentRange{rng(80, 80, "192.168.1.3:80")}; !reflect.DeepEqual(got.Ranges, want) || got.Pinned.IsValid() {
+			t.Errorf("result = %+v, want %v and no pinned address", got, want)
+		}
+	})
+	t.Run("ports the allowlist refuses it keep the smallest allowed", func(t *testing.T) {
+		allow, err := allowtargets.Parse("192.168.1.3,192.168.1.9:7001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := AgentConfig{WGInterface: "wgft0", AllowTarget: allow.Allows, AllowTargetSource: allowtargets.Env}
+		got := plan(agentRule("r", proto.TCP, 7000, 7002, "svc.lan:7000"), a("192.168.1.9"), cfg)
+		want := []AgentRange{rng(7000, 7000, "192.168.1.3:7000"), rng(7001, 7001, "192.168.1.9:7001"), rng(7002, 7002, "192.168.1.3:7002")}
+		if !reflect.DeepEqual(got.Ranges, want) || got.Pinned != a("192.168.1.9") || got.Reason != "" {
+			t.Errorf("result = %+v, want %v pinned to 192.168.1.9", got, want)
+		}
+	})
+	t.Run("the record keeps the pinned address", func(t *testing.T) {
+		got := plan(agentRule("r", proto.TCP, 80, 80, "svc.lan:80"), a("192.168.1.12"), open)
+		b, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back AgentRuleResult
+		if err := json.Unmarshal(b, &back); err != nil || !reflect.DeepEqual(back, got) {
+			t.Errorf("round trip = %+v (%v), want %+v", back, err, got)
+		}
+		b, _ = json.Marshal(plan(agentRule("r", proto.TCP, 80, 80, "svc.lan:80"), netip.Addr{}, open))
+		if strings.Contains(string(b), "pinned") {
+			t.Errorf("a record without a pinned address = %s, want no pinned field", b)
+		}
+	})
+}
+
+// AgentCandidates は PlanAgent と同じ規則で使えないアドレスを除き、ポートで許可一覧が通すアドレスを昇順に返す。
+func TestAgentCandidates(t *testing.T) {
+	a := netip.MustParseAddr
+	allow, err := allowtargets.Parse("192.168.1.0/24:80,127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := AgentConfig{AllowTarget: allow.Allows, RefuseTarget: func(x netip.Addr) string {
+		if x == a("192.168.1.255") {
+			return "broadcast"
+		}
+		return ""
+	}}
+	addrs := []netip.Addr{a("192.168.1.9"), a("127.0.0.1"), a("192.168.1.255"), a("10.0.0.1"), a("192.168.1.3")}
+	if got, want := AgentCandidates("svc.lan", addrs, 80, cfg), []netip.Addr{a("192.168.1.3"), a("192.168.1.9")}; !slices.Equal(got, want) {
+		t.Errorf("port 80 = %v, want %v", got, want)
+	}
+	if got := AgentCandidates("svc.lan", addrs, 81, cfg); len(got) != 0 {
+		t.Errorf("port 81 = %v, want none", got)
+	}
+	if got := AgentCandidates("svc.lan", nil, 80, cfg); len(got) != 0 {
+		t.Errorf("no addresses = %v, want none", got)
+	}
+	// ループバックは運用者が明示したときだけ候補になる
+	cfg.AllowLoopback = allow.AllowsLoopback
+	if got, want := AgentCandidates("svc.lan", addrs, 80, cfg), []netip.Addr{a("127.0.0.1"), a("192.168.1.3"), a("192.168.1.9")}; !slices.Equal(got, want) {
+		t.Errorf("port 80 with loopback named = %v, want %v", got, want)
+	}
+}

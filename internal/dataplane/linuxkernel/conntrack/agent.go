@@ -343,3 +343,76 @@ func (idx agentIndex) lookup(p proto.Proto, port uint16) agentDecl {
 	}
 	return agentDecl{}
 }
+
+// AgentLeft は、エージェントが DNAT の宛先を離れた範囲である(設計文書 7b.2 節の他のアドレスへの切り替え)。
+// Range は前の公開の範囲で、範囲の i 番目のポートのフローの DNAT の宛先は Range.Dest のポート + i である。
+type AgentLeft struct {
+	Proto proto.Proto
+	Range nft.AgentRange
+}
+
+// CloseAgentLeft は、wgft0 から入って DNAT されたフローのうち、left の範囲のポートへ入り、DNAT の宛先が
+// その範囲の前の宛先そのものであるフローを消す。他のフローには触れない。消した数を返す。
+//
+// UDP のルールが TCP のルールの切り替えに従ったときに使う。conntrack は、元の向きのパケットが続く間
+// 応答の無い UDP のエントリも残すので、同じ送信元のポートから送り続ける利用者は、消さなければ応えない
+// アドレスへ向かい続ける。既に消えていたエントリは消したのと同じに扱う。
+func CloseAgentLeft(left []AgentLeft, scope AgentScope) (int, error) {
+	if len(left) == 0 {
+		return 0, nil
+	}
+	c, err := conntrack.Dial(nil)
+	if err != nil {
+		return 0, fmt.Errorf("conntrack: %w", err)
+	}
+	defer c.Close()
+	return closeAgentLeft(c, left, scope)
+}
+
+func closeAgentLeft(c agentConn, left []AgentLeft, scope AgentScope) (int, error) {
+	if err := scope.validate(); err != nil {
+		return 0, err
+	}
+	flows, err := c.DumpFilter(ipv4Only, nil)
+	if err != nil {
+		return 0, fmt.Errorf("conntrack dump: %w", err)
+	}
+	closed, failed := 0, 0
+	var firstErr error
+	for _, f := range flows {
+		if !leftFlow(f, left, scope) {
+			continue
+		}
+		if err := c.Delete(f); err != nil && !errors.Is(err, unix.ENOENT) {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		closed++
+	}
+	if firstErr != nil {
+		return closed, fmt.Errorf("conntrack delete: closing %d flows to a left address failed, the first with: %w", failed, firstErr)
+	}
+	return closed, nil
+}
+
+// leftFlow は、f が wgft0 から入り、left のどれかの範囲の前の宛先へ DNAT されたフローかどうかである。
+func leftFlow(f conntrack.Flow, left []AgentLeft, scope AgentScope) bool {
+	orig, reply := f.TupleOrig, f.TupleReply
+	if !f.Status.DstNAT() || orig.IP.SourceAddress.Unmap() != scope.Peer || orig.IP.DestinationAddress.Unmap() != scope.Local {
+		return false
+	}
+	p, port := protoOf(orig.Proto.Protocol), orig.Proto.DestinationPort
+	to := netip.AddrPortFrom(reply.IP.SourceAddress.Unmap(), reply.Proto.SourcePort)
+	for _, l := range left {
+		if l.Proto != p || !l.Range.Ports.Contains(port) {
+			continue
+		}
+		if to == netip.AddrPortFrom(l.Range.Dest.Addr().Unmap(), l.Range.Dest.Port()+(port-l.Range.Ports.Lo)) {
+			return true
+		}
+	}
+	return false
+}
