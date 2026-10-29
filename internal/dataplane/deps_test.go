@@ -870,8 +870,9 @@ func TestTCPHarnessStaysInTests(t *testing.T) {
 		t.Errorf("%s imports %v from the module; the core imports nothing from it", harness, deps)
 	}
 	adapters := map[string]map[string]bool{
-		harness + "/gvisordut": {harness: true, module + "/internal/nettun": true},
-		harness + "/linuxdut":  {harness: true},
+		harness + "/gvisordut":  {harness: true, module + "/internal/nettun": true},
+		harness + "/linuxdut":   {harness: true},
+		harness + "/wgstackdut": {harness: true, module + "/internal/wgstack": true},
 	}
 	for _, pkg := range packagesUnder(t, root, "internal/tcpharness") {
 		if pkg == harness {

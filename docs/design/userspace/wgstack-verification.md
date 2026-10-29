@@ -122,7 +122,9 @@ gVisor の一覧は、gVisor を基準でなく比較の対象として扱うた
 ラボの VM の 6.1 のカーネルでは、`tcp_congestion_control`、`tcp_rmem`、`tcp_wmem` が写しになり、`tcp_frto`、`tcp_sack`、`tcp_recovery`、`tcp_autocorking` は既定の値になりました。
 どの値が写しになるかはカーネルの版で変わりうるので、`linuxdut` は[参照の Linux の設定](#参照の-linux-の設定)の値をすべて書き込み、読み戻して確かめます。
 待ち受けのソケットには floor と同じ 256 KiB を送信と受信のバッファとして与えます。
-wgstack の DUT も同じ形の package にし、本番と同じ方法で実装を作る `New(addr, mtu)` と、期待した差の一覧を受け取る `Engine` を持たせます。
+`internal/tcpharness/wgstackdut` は、手で進める時計(`ManualClock`)と台本の種から作った乱数の源を渡して wgstack の Device を作ります。
+この Device は goroutine を作らず、DUT は `Write`、`Poll`、`Tick` で Device を進める `ClockedDUT` です。
+wgstack の台本の実行は、実装する人が直している確かめが残る間、環境変数 `WGFT_TEST_WGSTACK_CONFORMANCE=1` を与えたときだけ流します。
 本番の package はどれも `internal/tcpharness` とその下を import しません。
 `internal/dataplane/deps_test.go` がこれらの規則を検査します。
 
