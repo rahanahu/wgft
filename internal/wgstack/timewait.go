@@ -101,7 +101,8 @@ func (s *stack) removeTWRow(id int32) {
 	t.n--
 }
 
-// addTWRow は接続の枠 c の状態を行に移す。満杯なら最も古い行を外して数える。tmu を持って呼ぶ。
+// addTWRow は接続の枠 c の状態を行に移す。満杯なら最も古い行を外して数える。枠が送るはずだった ACK
+// (例えば自分の FIN を確認する相手の FIN への ACK)は、行が送る。tmu を持って呼ぶ。
 func (s *stack) addTWRow(c *tcb, state uint8, deadline, now int64) {
 	t := &s.tw
 	if len(t.free) == 0 {
@@ -129,6 +130,9 @@ func (s *stack) addTWRow(c *tcb, state uint8, deadline, now int64) {
 	t.pushBack(id)
 	t.n++
 	s.noteDeadline(deadline)
+	if c.ackNow {
+		s.twAck(id, now, false)
+	}
 }
 
 // expireTWRows は先頭から期限を過ぎた行を外す。tmu を持って呼ぶ。
@@ -204,7 +208,10 @@ func (s *stack) twInput(id int32, seg *segment, now int64, reuse *reuseISS) bool
 	}
 	// TIME_WAIT
 	if seg.has(flagFIN) && seg.seq+uint32(len(seg.payload))+1 == r.rcvNxt {
-		// 再送された FIN。ACK を返し、Linux と同じく期限を数え直す
+		// 再送された FIN。ACK を返し、Linux と同じく期限を数え直す。ACK はこの FIN の TSval を返す
+		if r.tsOK && seg.opt.hasTS && seqGE(seg.opt.tsVal, r.tsRecent) {
+			r.tsRecent = seg.opt.tsVal
+		}
 		r.deadline = now + int64(twTimeout)
 		s.tw.unlink(id)
 		s.tw.pushBack(id)
