@@ -722,3 +722,27 @@ func TestCloseWithPendingDataRetiresAfterDelivery(t *testing.T) {
 		t.Fatal("not delivered")
 	}
 }
+
+func TestFINIntoZeroWindowIsRetransmitted(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	l := listen(t, n, 80)
+	p := n.handshake(40000, 80, true, false, true)
+	c := acceptOne(t, l)
+	n.drain()
+	p.wnd = 0
+	p.ack(nil)
+	c.CloseWrite()
+	outs := n.drain()
+	if len(outs) != 1 || !outs[0].seg.has(flagFIN) {
+		t.Fatalf("FIN into a zero window %v", outs)
+	}
+	// FIN を失ったとして、再送を待つ
+	var got []out
+	for i := 0; i < 5000 && len(got) == 0; i++ {
+		n.advance(time.Millisecond)
+		got = n.drain()
+	}
+	if len(got) == 0 || !got[0].seg.has(flagFIN) || got[0].seg.seq != outs[0].seg.seq {
+		t.Fatalf("FIN not retransmitted: %v", got)
+	}
+}

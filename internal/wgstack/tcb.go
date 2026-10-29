@@ -883,6 +883,9 @@ func (c *tcb) onPersist(now int64) {
 	if c.sndWnd != 0 || !c.hasUnsent() {
 		c.persist = false
 		c.backoff = 0
+		if c.sndUna != c.sndMax {
+			c.arm(tmrRetrans, now+c.curRTO())
+		}
 		return
 	}
 	c.probesOut++

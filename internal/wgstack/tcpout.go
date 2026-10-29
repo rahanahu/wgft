@@ -193,7 +193,13 @@ func (c *tcb) buildNew(b []byte, space int, now int64) int {
 	c.recs.push(record{seq: seq, length: uint16(length), sentAt: now, flags: rf, prev: -1, next: -1})
 	c.sndNxt = seq + uint32(length)
 	c.sndMax = seqMax(c.sndMax, c.sndNxt)
-	if c.tdl[tmrRetrans] == 0 && !c.persist {
+	if c.persist {
+		// 窓が 0 の間に送った FIN は窓の probe ではなく再送のタイマーで守る
+		c.persist = false
+		c.backoff = 0
+		c.disarm(tmrRetrans)
+	}
+	if c.tdl[tmrRetrans] == 0 {
 		c.arm(tmrRetrans, now+c.curRTO())
 	}
 	c.lastSendAt = now
