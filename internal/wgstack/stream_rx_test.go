@@ -214,9 +214,9 @@ func runRx(t *testing.T, cfg rxCfg) {
 }
 
 func TestReceiveStreamIntegrity(t *testing.T) {
-	seeds := uint64(2000)
-	if testing.Short() || raceEnabled {
-		seeds = 100
+	seeds := uint64(100)
+	if streamSeedsFull() {
+		seeds = 2000
 	}
 	for seed := uint64(1); seed <= seeds; seed++ {
 		cfg := rxCfg{
