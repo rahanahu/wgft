@@ -170,7 +170,7 @@ dataplane の実装と 2 つの制御プレーンのどこからも見える必�
 
 `internal/tcpharness` は TCP の適合の試験の台本を持ち、テストだけが使います([wgstack の検証](../userspace/wgstack-verification.md#試験の置き場所と-dut))。
 台本の核はモジュールの中の何も import しないので、台本は実装のコードに頼れません。
-実装ごとの DUT の package(`gvisordut`、`linuxdut`)は、核と自分が作る実装だけを import します。
+実装ごとの DUT の package(`gvisordut`、`linuxdut`、`wgstackdut`)は、核と自分が作る実装だけを import します。
 `internal/tcpharness` の外の package は、テスト以外のファイルから `internal/tcpharness` とその下を import しません。
 `internal/dataplane/deps_test.go` の `TestTCPHarnessStaysInTests` がこれらを検査します。
 
