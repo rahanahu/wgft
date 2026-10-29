@@ -906,3 +906,34 @@ func TestTCPHarnessStaysInTests(t *testing.T) {
 		}
 	}
 }
+
+// TestWgstackImports checks the placement rules of docs/design/userspace/wgstack.md for
+// internal/wgstack, the wgft-owned netstack of the agent's userspace mode: from outside the module
+// it imports only the standard library and golang.zx2c4.com/wireguard/tun, and nothing from the
+// module: its log gate counts on the core clock, so it does not use internal/lograte. It never
+// reaches gVisor, internal/nettun, internal/dataplane, the agent or vpsd. The kernel-mode packages of the agent, internal/agent/kernelmode and internal/agent/agentdp,
+// do not depend on internal/wgstack through any import, which keeps the kernel mode isolated from
+// it by structure (I7).
+func TestWgstackImports(t *testing.T) {
+	root := moduleRoot(t)
+	const pkg = module + "/internal/wgstack"
+	if _, err := os.Stat(filepath.Join(root, strings.TrimPrefix(pkg, module))); err != nil {
+		t.Fatalf("%s: %v; did it move?", pkg, err)
+	}
+	for _, imp := range directImports(t, root, pkg) {
+		inModule := imp == module || strings.HasPrefix(imp, module+"/")
+		switch {
+		case inModule:
+			t.Errorf("%s imports %s; wgstack.md allows nothing from the module", pkg, imp)
+		case !inModule && strings.Contains(strings.Split(imp, "/")[0], ".") && imp != "golang.zx2c4.com/wireguard/tun":
+			t.Errorf("%s imports %s; wgstack.md allows only the standard library and wireguard/tun", pkg, imp)
+		}
+	}
+	for _, p := range []string{module + "/internal/agent/kernelmode", module + "/internal/agent/agentdp"} {
+		for _, dep := range deps(t, root, p) {
+			if dep == pkg || strings.HasPrefix(dep, pkg+"/") {
+				t.Errorf("%s depends on %s; the kernel mode must not reach wgstack (wgstack.md, I7)", p, dep)
+			}
+		}
+	}
+}
