@@ -538,12 +538,18 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
   D-SACK(RFC 2883)は返しません。
   送り手としては受け取った SACK の block を検査するだけで、回復には使いません。
   RFC 2018 は送り手が SACK の情報を使わないことを許すので、後の段階で送り手の側だけを足せます
-- 窓の probe:相手の窓が 0 の間は persist のタイマーで probe を送り、相手が probe に応える間は打ち切りません
+- 窓の probe:相手の窓が 0 の間は persist のタイマーで probe を送り、相手が probe に応える間は打ち切りません。
+  persist に入るときと persist の間の ACK で、再送の打ち切りを数える起点と RTO の後退を消します。
+  前の RTO の起点が残ると、長い persist の後の最初の RTO で打ち切りの時間を過ぎたと数えるためです
 - 遅延 ACK:Linux と同じく、MSS 2 つ分ごとか遅延の期限で ACK を返します
 - Nagle:使いません。
   Go の `net.TCPConn` の既定の `TCP_NODELAY` と同じ扱いで、適合の試験の Linux の側にも同じ設定を与えます
 - 再送の打ち切り:握手の後は Linux の `tcp_retries2`、SYN-ACK は `tcp_synack_retries` の既定の回数で打ち切ります
-- ISN:RFC 6528 の鍵付きの hash で作ります
+- ISN:RFC 6528 の鍵付きの hash で作ります。
+  TIME_WAIT の 4 つ組を新しい SYN が使い直すときは、Linux と同じく ISN を前の接続の SND.NXT の 65537 先より前に置きません。
+  前の接続の古い segment が新しい接続の番号の空間に入らないためです(RFC 1122 4.2.2.13)
+- timestamp の offset:Linux の `secure_tcp_ts_off` と同じく、アドレスの組の鍵付きの hash から作ります。
+  同じ相手との接続の TSval は接続を作り直しても増え続け、相手の PAWS が前の接続の segment を捨てられます
 
 keepalive は、今の中継が無通信のタイムアウトを持たず([TCP の中継と終了](tcp-relay.md))、今の gVisor の接続も keepalive を使わないので、完成に含めません。
 タイマーの節は枠に用意し、必要になった時に有効にします。
@@ -626,5 +632,16 @@ ECN は交渉しません。
   その間に相手が新しいデータを送れば RST で終えます
 - 閉じた後の再送の打ち切り:閉じていない接続と同じ `tcp_retries2` の時間の模型(924.6 秒)を使い、`tcp_orphan_retries` を使いません(前述の未決の点)
 - 制御の組の配分:byte の deficit round robin で 1 回の番に MTU 1 つ分を使うので、MTU 1420 では中身の無い RST が 1 回の番で約 35 個出てから次の組に移ります
+- challenge ACK の速さ:Device 全体の 1 つの token bucket で、1 秒に 1000 を基にした数までに抑えます。
+  Linux 6.x の既定は全体の上限を `INT_MAX` にし、`tcp_oow_rate_limited` で接続ごとに 500 ms に 1 回までに抑えると読めます
+- 待ち受けへの SYN と FIN の組:SYN と FIN の両方を持つ segment にも握手の途中の行を作ります。
+  Linux はこの segment を捨てると読めます
+- TIME_WAIT の 4 つ組の使い直し:前の接続が timestamp を使い、SYN が timestamp を持つときは、timestamp が大きいことだけを求めます([RFC 6191](#time_wait-の表))。
+  Linux は番号か timestamp のどちらかが大きければ受け入れると読めます。
+  適合の試験にこの場合の台本があります
+- FIN_WAIT_2 の行への窓の内側の SYN:challenge ACK を返します。
+  Linux は RST を返すと読めます
+- 回復の終わりの後の RTO:累積の確認がちょうど `recover` に届いて NewReno の回復を終えた後に、余分な RTO が 1 回起きる場合があります。
+  起きる条件と Linux の挙動は確かめていません
 
 [ユーザー空間の仕様](README.md)
