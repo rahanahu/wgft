@@ -80,12 +80,6 @@ func (c *tcb) nextNew(payCap int) (int, bool) {
 		avail = end - c.sndNxt
 	}
 	finPending := c.sndShut && seqLE(c.sndNxt, c.finSeq())
-	if avail == 0 {
-		return 0, finPending // FIN だけの segment は窓によらず送る
-	}
-	if c.persist && c.sndWnd == 0 {
-		return 0, false
-	}
 	inflight := c.sndNxt - c.sndUna
 	var usable, room uint32
 	if c.sndWnd > inflight {
@@ -93,6 +87,14 @@ func (c *tcb) nextNew(payCap int) (int, bool) {
 	}
 	if c.cwnd > inflight {
 		room = c.cwnd - inflight
+	}
+	if avail == 0 {
+		// FIN は番号を 1 つ使うので、Linux と同じく窓に 1 byte の余地があるときだけ送る。窓が 0 の間は
+		// 窓の probe を続ける。RFC 9293 の受け入れの判定では、窓が 0 の受け手は長さ 1 の segment を捨てる
+		return 0, finPending && usable > 0
+	}
+	if c.persist && c.sndWnd == 0 {
+		return 0, false
 	}
 	want := min(avail, uint32(payCap))
 	if room < want && inflight > 0 {
@@ -103,7 +105,8 @@ func (c *tcb) nextNew(payCap int) (int, bool) {
 	case n == 0:
 		return 0, false
 	case n == want, n >= c.maxSndWnd/2, inflight == 0:
-		return int(n), finPending && n == avail
+		// 中身の後ろに FIN を付けるのは、FIN の 1 も窓に入るときだけ
+		return int(n), finPending && n == avail && n < usable
 	}
 	return 0, false
 }
@@ -193,13 +196,7 @@ func (c *tcb) buildNew(b []byte, space int, now int64) int {
 	c.recs.push(record{seq: seq, length: uint16(length), sentAt: now, flags: rf, prev: -1, next: -1})
 	c.sndNxt = seq + uint32(length)
 	c.sndMax = seqMax(c.sndMax, c.sndNxt)
-	if c.persist {
-		// 窓が 0 の間に送った FIN は窓の probe ではなく再送のタイマーで守る
-		c.persist = false
-		c.backoff = 0
-		c.disarm(tmrRetrans)
-	}
-	if c.tdl[tmrRetrans] == 0 {
+	if c.tdl[tmrRetrans] == 0 && !c.persist {
 		c.arm(tmrRetrans, now+c.curRTO())
 	}
 	c.lastSendAt = now

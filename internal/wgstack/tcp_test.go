@@ -723,7 +723,7 @@ func TestCloseWithPendingDataRetiresAfterDelivery(t *testing.T) {
 	}
 }
 
-func TestFINIntoZeroWindowIsRetransmitted(t *testing.T) {
+func TestFINHeldWhileWindowIsZero(t *testing.T) {
 	n := newTestNet(t, smallLimits())
 	l := listen(t, n, 80)
 	p := n.handshake(40000, 80, true, false, true)
@@ -732,17 +732,50 @@ func TestFINIntoZeroWindowIsRetransmitted(t *testing.T) {
 	p.wnd = 0
 	p.ack(nil)
 	c.CloseWrite()
-	outs := n.drain()
-	if len(outs) != 1 || !outs[0].seg.has(flagFIN) {
-		t.Fatalf("FIN into a zero window %v", outs)
+	if outs := n.drain(); len(outs) != 0 {
+		t.Fatalf("sent into a zero window: %v", outs)
 	}
-	// FIN を失ったとして、再送を待つ
-	var got []out
-	for i := 0; i < 5000 && len(got) == 0; i++ {
+	// 窓の probe を続ける
+	probes := 0
+	for i := 0; i < 3000 && probes < 2; i++ {
 		n.advance(time.Millisecond)
-		got = n.drain()
+		for _, o := range n.drain() {
+			if o.seg.has(flagFIN) || o.seg.seq != p.rcv-1 {
+				t.Fatalf("expected a window probe, got %v", o)
+			}
+			probes++
+			p.ack(nil)
+		}
 	}
-	if len(got) == 0 || !got[0].seg.has(flagFIN) || got[0].seg.seq != outs[0].seg.seq {
-		t.Fatalf("FIN not retransmitted: %v", got)
+	if probes < 2 {
+		t.Fatal("no window probes while the FIN is held")
+	}
+	p.wnd = 100
+	p.ack(nil)
+	outs := n.drain()
+	if len(outs) != 1 || !outs[0].seg.has(flagFIN) || outs[0].seg.seq != p.rcv {
+		t.Fatalf("FIN after the window opened: %v", outs)
+	}
+}
+
+func TestFINNotPiggybackedBeyondTheWindow(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	l := listen(t, n, 80)
+	p := n.handshake(40000, 80, true, false, true)
+	c := acceptOne(t, l)
+	n.drain()
+	p.wnd = 1 // scale 7 で 128 byte
+	p.ack(nil)
+	c.Write(make([]byte, 128))
+	c.CloseWrite()
+	outs := n.drain()
+	if len(outs) != 1 || len(outs[0].seg.payload) != 128 || outs[0].seg.has(flagFIN) {
+		t.Fatalf("data that fills the window: %v", outs)
+	}
+	p.absorb(outs)
+	p.ack(nil)
+	outs = n.drain()
+	if len(outs) != 1 || !outs[0].seg.has(flagFIN) {
+		t.Fatalf("FIN after the data was acknowledged: %v", outs)
 	}
 }

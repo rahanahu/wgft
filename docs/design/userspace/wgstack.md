@@ -541,6 +541,10 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
 - 窓の probe:相手の窓が 0 の間は persist のタイマーで probe を送り、相手が probe に応える間は打ち切りません。
   persist に入るときと persist の間の ACK で、再送の打ち切りを数える起点と RTO の後退を消します。
   前の RTO の起点が残ると、長い persist の後の最初の RTO で打ち切りの時間を過ぎたと数えるためです
+- FIN と窓:FIN は番号を 1 つ使うので、Linux と同じく相手の窓に 1 byte の余地があるときだけ送ります。
+  RFC 9293 の受け入れの判定では、窓が 0 の受け手は長さ 1 の segment を捨てるので、窓が 0 の間に送った FIN は届きません。
+  窓が 0 の間は FIN を持ったまま窓の probe を続け、窓が開いてから FIN を送ります。
+  中身の後ろに FIN を付けるのも、FIN の 1 が窓に入るときだけです
 - 遅延 ACK:Linux と同じく、MSS 2 つ分ごとか遅延の期限で ACK を返します
 - Nagle:使いません。
   Go の `net.TCPConn` の既定の `TCP_NODELAY` と同じ扱いで、適合の試験の Linux の側にも同じ設定を与えます
@@ -621,7 +625,6 @@ ECN は交渉しません。
   Linux の `tcp_write_err` は RST を送らないと読めます
 - SYN-RCVD への別の番号の SYN:窓の内側なら RST を返して行を外し、窓の外なら ACK を返します。
   Linux の `tcp_check_req` を読んで選び、流していません
-- 窓が 0 の間の FIN:相手の窓によらず FIN を送ります
 - quickack:接続の始めと黙った後も、遅延 ACK の規則で ACK します([参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定)の外せない差)
 - 握手の後の窓:最初の ACK から受信の floor の 256 KiB を広告します。
   Linux は約 64 KiB から広げます
