@@ -59,6 +59,7 @@ func publicPortCheck(r proto.Rule, in Input) Check {
 			c.Detail = fmt.Sprintf("%s; the kernel may not forward %s %s into the tunnel although the server publishes it",
 				forwardDropClause(drops), r.Proto, r.ListenPort)
 			c.Next = forwardPolicyNext(drops)
+			c.resultLine = "another table's forward chain may drop this rule's traffic before it reaches the tunnel; if it does not arrive, add the lines shown under public port"
 			return c
 		}
 		c.Status, c.Reason = StatusNotTested, ReasonExternalNotTested
@@ -142,6 +143,12 @@ func DataplaneCheck(in Input) Check {
 	}
 	stop := IPForwardStop(res)
 	drop := ForwardPolicyDropNote(res)
+	// policyNote は、他の理由で判定した所見に添える句である。止まりうるルールがあれば drop を、
+	// 無ければ後から加えるルールへの注意を添える
+	policyNote := forwardPolicyIdleNote(res)
+	if drop != "" {
+		policyNote = "; " + drop
+	}
 	if gap := GenerationGap(res); gap != "" {
 		c.Status, c.Reason = StatusFailed, ReasonNotPublished
 		c.Detail = "the last change has not reached the forwarding path: " + gap
@@ -151,9 +158,7 @@ func DataplaneCheck(in Input) Check {
 		if stop != "" {
 			c.Detail += "; " + stop
 		}
-		if drop != "" {
-			c.Detail += "; " + drop
-		}
+		c.Detail += policyNote
 		c.Next = "free whatever the reason names; the server retries every 30s and publishes the change when it succeeds"
 		return c
 	}
@@ -166,9 +171,7 @@ func DataplaneCheck(in Input) Check {
 		if res.ApplyError != "" {
 			c.Detail += "; apply error: " + res.ApplyError
 		}
-		if drop != "" {
-			c.Detail += "; " + drop
-		}
+		c.Detail += policyNote
 		c.Next = ipForwardNext
 		return c
 	}
@@ -178,24 +181,20 @@ func DataplaneCheck(in Input) Check {
 		if res.ApplyError != "" {
 			c.Detail += ": " + res.ApplyError
 		}
-		if drop != "" {
-			c.Detail += "; " + drop
-		}
+		c.Detail += policyNote
 		c.Next = "fix the apply error; the server retries every 30s. Check agent State after the retry succeeds"
 		return c
 	}
 	if res.ApplyError != "" {
 		c.Status, c.Reason = StatusUnknown, ReasonRepairFailed
-		c.Detail = "the rules are published, but a repair after that failed: " + res.ApplyError + ipForwardIdleNote(res)
-		if drop != "" {
-			c.Detail += "; " + drop
-		}
+		c.Detail = "the rules are published, but a repair after that failed: " + res.ApplyError + ipForwardIdleNote(res) + policyNote
 		c.Next = "new traffic follows the current rules; connections that should have been cut may still run. The server retries every 30s."
 		return c
 	}
 	if drop != "" {
 		c.Status, c.Reason = StatusUnknown, ReasonForwardPolicyDrop
-		c.Detail = drop + ipForwardIdleNote(res)
+		// ip_forward が 0 なら stop が先に返しているので、ここで ip_forward の句は要らない
+		c.Detail = drop
 		c.Next = forwardPolicyNext(forwardDrops(res))
 		return c
 	}
@@ -277,16 +276,17 @@ func forwardDrops(res *adminapi.BatchResponse) []adminapi.ForwardPolicyDrop {
 	return res.ForwardPolicy.Drops
 }
 
-// forwardDropClause は、落とすチェーンを名指す句である。
+// forwardDropClause は、落とすチェーンを名指す句である。チェーンは、wgft の転送の 2 つの向きを
+// どちらも accept すると検査が判定できなかったときに並ぶので、accept が無いとは言わない。
 func forwardDropClause(drops []adminapi.ForwardPolicyDrop) string {
 	if len(drops) == 1 {
-		return drops[0].Where + " drops forwarded packets by default and accepts none of wgft's forwarding"
+		return drops[0].Where + " drops forwarded packets by default, and no accept for all of wgft's forwarding was found there"
 	}
 	where := make([]string, 0, len(drops))
 	for _, d := range drops {
 		where = append(where, d.Where)
 	}
-	return strings.Join(where, " and ") + " drop forwarded packets by default and accept none of wgft's forwarding"
+	return strings.Join(where, " and ") + " drop forwarded packets by default, and no accept for all of wgft's forwarding was found there"
 }
 
 // kernelRulesPublished は、カーネルで転送する公開中のルールの数である。IPForwardStop と

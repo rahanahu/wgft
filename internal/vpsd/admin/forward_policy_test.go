@@ -2,7 +2,10 @@ package admin
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/vpsd/store"
@@ -46,5 +49,21 @@ func TestRulesResponseForwardPolicy(t *testing.T) {
 	got = getRulesJSON(t, &forwardPolicyBackend{fakeBackend: base, ok: true}, st)
 	if string(got["forward_policy"]) != "{}" {
 		t.Errorf("a clear check = %s, want {}", got["forward_policy"])
+	}
+
+	// POST /api/v1/rules/batch shares BatchResponse and carries the same field
+	srv := httptest.NewServer(New(&forwardPolicyBackend{fakeBackend: base, st: ForwardPolicyStatus{Drops: []ForwardPolicyDrop{want}}, ok: true}))
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/api/v1/rules/batch", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var batchGot map[string]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&batchGot); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(batchGot["forward_policy"]), `"where":"ip filter FORWARD"`) {
+		t.Errorf("POST /api/v1/rules/batch forward_policy = %s, want the drop", batchGot["forward_policy"])
 	}
 }

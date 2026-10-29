@@ -114,3 +114,42 @@ func TestForwardPolicyDropAlongsideIPForwardOff(t *testing.T) {
 		t.Errorf("dataplane detail does not add the chain: %q", dp.Detail)
 	}
 }
+
+// 世代の遅れと重なれば、世代の遅れの FAILED を先に示し、所見にチェーンを添える。
+func TestForwardPolicyDropAlongsideAGenerationGap(t *testing.T) {
+	r := tcpRule()
+	in := withForwardPolicy(healthyInput(r), dockerDrop)
+	in.Rules.ActiveGeneration = u64(9)
+	dp := dataplaneCheck(in)
+	if dp.Status != statusFailed || dp.Reason != reasonNotPublished {
+		t.Fatalf("dataplane = %s/%s, want failed/%s", dp.Status, dp.Reason, reasonNotPublished)
+	}
+	if !strings.Contains(dp.Detail, "generation 9") || !strings.Contains(dp.Detail, "ip filter FORWARD drops") {
+		t.Errorf("dataplane detail does not name both: %q", dp.Detail)
+	}
+}
+
+// 修復の失敗の UNKNOWN と重なり、止まりうるルールが無ければ、後から加えるルールへの注意を添える。
+func TestForwardPolicyIdleNoteWithARepairFailure(t *testing.T) {
+	r := tcpRule()
+	r.VPSMode = proto.ModeProxy
+	in := healthyInput(r)
+	in.Rules.Rules = []proto.Rule{r}
+	in = withForwardPolicy(in, dockerDrop)
+	in.Rules.ApplyError = "conntrack: operation not permitted"
+	dp := dataplaneCheck(in)
+	if dp.Status != statusUnknown || dp.Reason != doctor.ReasonRepairFailed || !strings.Contains(dp.Detail, "affects no rule now") {
+		t.Errorf("dataplane = %s/%s %q, want unknown/%s with the idle note", dp.Status, dp.Reason, dp.Detail, doctor.ReasonRepairFailed)
+	}
+}
+
+// 1 本のルールの結論の行は、証拠が古いとは言わず、他のテーブルの forward を名指す。
+func TestForwardPolicyDropRuleResult(t *testing.T) {
+	r := tcpRule()
+	in := withForwardPolicy(healthyInput(r), dockerDrop)
+	rep := buildReport([]proto.Rule{r}, in)
+	note := rep.RuleResultNote(r.ID)
+	if !strings.Contains(note, "another table's forward chain may drop this rule's traffic") {
+		t.Errorf("result note = %q, want the forward chain named", note)
+	}
+}

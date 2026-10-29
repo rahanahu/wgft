@@ -101,7 +101,7 @@ v1.0 以降、CLI の機械向けの挙動を保証するなら、一発実行�
 エージェント用 API の登録(`POST /api/v1/agents/register`)と stream は別の仕様で、無効なトークンを 401、二重登録を 409、送信元ごとのレート制限と、エージェントごとの確立の前の stream の数の上限([11 節](security/admin-transport.md#11-セキュリティ))を 429、backend 自体の失敗(SQLite の一時的な失敗など)を 500 で区別します。
 日常的な認証拒否と backend 自体の失敗を同じコードにしないことが約束であり、これを取り違えると削除されていない agent が誤って復帰経路([5.1 節](control/registration.md#51-登録))に入ります。
 
-`BatchResponse` の `desired_generation`・`active_generation`・`rule_states`・`drift`・`apply_error`・`flow_budget`・`resource_refusals`・`agent_rule_states`・`udp_replies` は、それぞれ `ApplyStatusBackend`・`ResourceStatusBackend`・`AgentRuleStatusBackend`・`UDPReplyBackend` を実装する Backend のときだけ加わる加算的なフィールドで、実装しない Backend(`fakeBackend`、`tools/uidemo`)には現れない。
+`BatchResponse` の `desired_generation`・`active_generation`・`rule_states`・`drift`・`apply_error`・`flow_budget`・`resource_refusals`・`agent_rule_states`・`udp_replies`・`ip_forward`・`forward_policy` は、それぞれ `ApplyStatusBackend`・`ResourceStatusBackend`・`AgentRuleStatusBackend`・`UDPReplyBackend`・`IPForwardBackend`・`ForwardPolicyBackend` を実装する Backend のときだけ加わる加算的なフィールドで、実装しない Backend(`fakeBackend`、`tools/uidemo`)には現れない。
 「実装すれば増える、しなければ元の応答のまま」という形自体が約束であり、今後の加算もこの形を保つ。
 `rule ls` の REFUSED 列と `resource_refusals` は Resource Guard によるフロー予算の拒否だけを数え、意味を変えません。
 フロー予算の判定がルールのフローを受け付けたときのルールの登録で数え、退役した登録のフローを帰属の規則で移すこと([7a.10 節](resource/admission.md#7a10-resource-guard-の再設計))は、この意味の変更に当たらない(2026-09-29、所有者の決定)。

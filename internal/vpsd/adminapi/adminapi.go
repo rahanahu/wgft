@@ -129,8 +129,8 @@ type BatchResponse struct {
 // just now (design.md 6.1、10.2a 節). A chain that drops by default and does not accept wgft's
 // forwarding may keep every rule the kernel forwards from reaching the tunnel.
 type ForwardPolicyStatus struct {
-	// Drops lists the forward chains that drop by default and accept neither direction of wgft's
-	// forwarding. Omitted when there is none or the check could not run.
+	// Drops lists the forward chains that drop by default and in which the check found no accept for
+	// both directions of wgft's forwarding. Omitted when there is none or the check could not run.
 	Drops []ForwardPolicyDrop `json:"drops,omitempty"`
 	// Error says why the check could not run. Omitted when it ran.
 	Error string `json:"error,omitempty"`

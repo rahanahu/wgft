@@ -285,7 +285,7 @@ Docker が `ip_forward` を自分で 1 にしたホストでは、iptables の F
 
 管理用 API の `GET /api/v1/rules` は、カーネルモードの server が応答を組むときに行った検査の結果を `forward_policy` として返す([7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧))。
 検査は `server check` と起動時の検査([6.1 節](../vps/kernel.md#61-カーネルモード))と同じ関数で行います。
-`drops` は、既定で落とし、wgft の転送の 2 つの向きを accept しないチェーンの列です。
+`drops` は、既定で落とし、wgft の転送の 2 つの向きをどちらも accept すると検査が判定できなかったチェーンの列です。
 各項目は、チェーンの場所 `where` と、足す行 `suggest` を持ちます。
 検査できなかった場合は、`error` に理由を返します。
 ユーザー空間モードの server は返しません。
@@ -294,7 +294,8 @@ Docker が `ip_forward` を自分で 1 にしたホストでは、iptables の F
 `drops` が空でないとき、次のとおり判定します(2026-10-30)。
 
 - `rule.public_port`:カーネルで転送するルールで、`apply_state` が `active` なら UNKNOWN とし、理由の符号を `forward_policy_drop` とします。
-  `ip_forward_off` の FAILED があれば、そちらを先に示します
+  `ip_forward_off` の FAILED があれば、そちらを先に示します。
+  1 本のルールの結論の行は、証拠が古いとは述べず、他のテーブルの forward が転送を落としうることと、足す行の場所を述べます
 - `server.dataplane`:カーネルで転送する公開中のルールが 1 本以上あれば UNKNOWN とし、理由の符号を `forward_policy_drop` とします。
   1 本も無ければ状態を変えず、所見に、後から加えるカーネルモードのルールが落とされうることを添えます。
   世代の遅れ、`ip_forward_off`、`agent_state_pending`、`repair_failed` のどれかが同時にあれば、そちらの状態と理由の符号を先に示し、所見にチェーンの場所を添えます

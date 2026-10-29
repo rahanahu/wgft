@@ -86,7 +86,7 @@
 - `server doctor --json`:`checks[].reason` に `forward_policy_drop` を加える。
   `rule.public_port` と `server.dataplane` に付き、状態は UNKNOWN です。
   最上位の `status` と終了コードは変わりません。
-  この VPS の他のテーブルの forward が wgft の転送を accept しない実行は、これまで `server.dataplane` が OK でした
+  この VPS の他のテーブルの forward に wgft の転送の accept が見つからない実行は、これまで `server.dataplane` が OK でした
 - 管理用 API:`GET /api/v1/rules` と `POST /api/v1/rules/batch` の応答に `forward_policy` を加える。
   `drops`(チェーンの場所 `where` と足す行 `suggest` の組の列)と、検査できなかった場合の `error` を持ちます。
   `ForwardPolicyBackend` を実装し、カーネルモードで動く Backend のときだけ加わり、ユーザー空間モードの server と実装しない Backend では現れません
