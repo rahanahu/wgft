@@ -325,6 +325,7 @@ func (s *stack) replyRST(seg *segment) {
 	if seg.has(flagRST) {
 		return
 	}
+
 	h := tcpHeader{tup: seg.tup, flags: flagRST}
 	if seg.has(flagACK) {
 		h.seq = seg.ack

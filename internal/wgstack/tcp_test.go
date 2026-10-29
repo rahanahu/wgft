@@ -696,3 +696,29 @@ func TestDeviceContract(t *testing.T) {
 	}
 	d.Close()
 }
+
+func TestCloseWithPendingDataRetiresAfterDelivery(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	l := listen(t, n, 80)
+	p := n.handshake(40000, 80, true, false, true)
+	c := acceptOne(t, l)
+	n.drain()
+	go func() {
+		c.Write(make([]byte, 100000))
+		c.Close()
+	}()
+	total := 0
+	for i := 0; i < 2000 && n.d.Stats().TWRows == 0; i++ {
+		got := p.absorb(n.drain())
+		total += len(got)
+		p.ack(nil)
+		n.advance(time.Millisecond)
+	}
+	st := n.d.Stats()
+	if total != 100000 || st.TWRows != 1 || st.Conns != 0 {
+		t.Fatalf("delivered %d, stats %+v", total, st)
+	}
+	if !c.Delivered() {
+		t.Fatal("not delivered")
+	}
+}
