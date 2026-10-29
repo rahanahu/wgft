@@ -355,7 +355,14 @@ conntrack の操作は「宣言状態に収束させる」1 手順だけを持�
 
 - `ip` `ip6` `inet` の全ファミリで forward フックの base chain を列挙し、`policy drop` があれば、そのチェーンに足す 2 行(`oifname "wg0" accept` と `iifname "wg0" ct state established,related accept`)を提示します。
   ufw の残骸が `ip filter FORWARD` にある場合もこれで拾う。
-  この手作業は 1 回きりでポートに依存しません
+  この手作業は 1 回きりでポートに依存しません。
+  そのチェーンか、そのチェーンが一致条件なしで jump する先(Docker の `DOCKER-USER`)が 2 行に当たる accept を既に持つ場合は、提示しません。
+  iptables の `-o wg0 -j ACCEPT` と `-i wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT` も同じ accept として読みます。
+  インタフェースを問わない established の accept は返りの行に、一致条件の無い accept は 2 行の両方に数えます。
+  ポートや送信元などの一致条件を他にも持つ accept と、インタフェース名の前方一致は数えません。
+  それらの accept が wgft の転送のすべてを通すとは判定できないためです。
+  この判定が入る前は、2 行を足して転送が通った後も、同じ提示が残っていました(2026-10-30)。
+  エージェントの手掛かり([10.2c 節](../diagnosis/agent-kernel-host.md#hostforwarding-の判定))は accept を探さず、既定で落とすチェーンをそのまま示します
 - input フックの base chain で `ct state established` が accept されているかを確認し、されていなければ提示します。
   `vpsd` から wg0 経由で張る接続の返りが通るために必要です
 - 他テーブルの nat prerouting チェーンに同じポートの DNAT があれば、そのルールの追加を拒否します。

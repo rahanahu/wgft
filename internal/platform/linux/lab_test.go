@@ -72,7 +72,7 @@ func TestInspectSynthetic(t *testing.T) {
 		t.Fatalf("nft -f: %v\n%s", err, out)
 	}
 
-	rep, err := Inspect("wg0", "wgft")
+	rep, err := Inspect("wg0", "wgft", ForwardToTunnel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +99,35 @@ func TestInspectSynthetic(t *testing.T) {
 		if !found {
 			t.Errorf("no finding for %s", where)
 		}
+	}
+	// 提示した行を実際に実行すると、forward の所見は出なくなる。iptables-nft が `-o`、`-i`、
+	// `-m conntrack` を書く式の形を、この VM の iptables で確かめる。DOCKER-USER の末尾の RETURN は
+	// Docker が置くものと同じ形で、提示の行は `-I` なのでその前に入る
+	run(t, "iptables", "-A", "DOCKER-USER", "-j", "RETURN")
+	for _, f := range rep.Findings {
+		if f.Hook != HookForward {
+			continue
+		}
+		for _, l := range f.Suggest {
+			run(t, "sh", "-c", l)
+		}
+	}
+	after, err := Inspect("wg0", "wgft", ForwardToTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range after.Findings {
+		if f.Hook == HookForward {
+			t.Errorf("forward finding after running its own suggestion: %s", f)
+		}
+	}
+	// エージェントの向きは、accept があっても手掛かりを出す
+	agent, err := Inspect("wg0", "wgft", ForwardFromTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countHook(agent.Findings, HookForward); n != 2 {
+		t.Errorf("agent direction: %d forward findings, want 2: %v", n, agent.Findings)
 	}
 	// input は両方とも established の accept を持つので警告しない
 	for _, f := range rep.Findings {
@@ -147,4 +176,14 @@ func TestInspectSynthetic(t *testing.T) {
 	if len(bound.Conflicts(proto.TCP, proto.PortRange{Lo: 3333, Hi: 3333})) != 0 {
 		t.Errorf("loopback 3333 should be excluded: %v", bound[proto.TCP])
 	}
+}
+
+func countHook(fs []Finding, hook string) int {
+	n := 0
+	for _, f := range fs {
+		if f.Hook == hook {
+			n++
+		}
+	}
+	return n
 }

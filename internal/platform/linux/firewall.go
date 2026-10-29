@@ -172,9 +172,23 @@ func ruleVerdictAccept(exprs []expr.Any) bool {
 	return false
 }
 
+// ForwardDirection は、wgft の転送が wg インタフェースを通る向きである。forward の検査が、提示する
+// accept の行が既にあるかを見るかどうかを決める。
+type ForwardDirection int
+
+const (
+	// ForwardToTunnel は server の向きである。公開側から来た接続を wg インタフェースへ出し、その返りを
+	// wg インタフェースから受ける。提示する 2 行に当たる accept を既に持つチェーンは所見にしない
+	// (仕様 6.1 節)。
+	ForwardToTunnel ForwardDirection = iota
+	// ForwardFromTunnel はエージェントの向きである。エージェントは既定で落とすチェーンを accept の
+	// 有無によらず手掛かりとして示す(設計文書 10.2c 節の forward_policy_drop)ので、accept を探さない。
+	ForwardFromTunnel
+)
+
 // Inspect は wgft(または agent の kernel backend)以外の全テーブルの base chain を調べる。
-// ownTable は自分の table の名前で、検査から除く。
-func Inspect(wgIface, ownTable string) (*Report, error) {
+// ownTable は自分の table の名前で、検査から除く。dir は forward の検査の向きである。
+func Inspect(wgIface, ownTable string, dir ForwardDirection) (*Report, error) {
 	c, err := nftables.New()
 	if err != nil {
 		return nil, err
@@ -194,7 +208,13 @@ func Inspect(wgIface, ownTable string) (*Report, error) {
 		}
 		switch {
 		case *ch.Hooknum == unix.NF_INET_FORWARD && ch.Type == nftables.ChainTypeFilter:
-			rep.inspectForward(ch, rules, wgIface)
+			// 一致条件なしの jump の先(Docker の DOCKER-USER)は、提示の行を足す先であり、足した行も
+			// そこにある。読めなければ空として扱い、所見を出す側に倒す
+			var jumped []*nftables.Rule
+			if t := jumpTarget(rules); t != "" && dir == ForwardToTunnel {
+				jumped, _ = c.GetRules(ch.Table, &nftables.Chain{Name: t, Table: ch.Table})
+			}
+			rep.inspectForward(ch, rules, jumped, wgIface, dir)
 		case *ch.Hooknum == unix.NF_INET_LOCAL_IN && ch.Type == nftables.ChainTypeFilter:
 			rep.inspectInput(ch, rules)
 		case *ch.Hooknum == unix.NF_INET_PRE_ROUTING && ch.Type == nftables.ChainTypeNAT:
@@ -277,18 +297,30 @@ func iptablesManaged(ch *nftables.Chain) bool {
 	return ch.Name == strings.ToUpper(ch.Name) && (ch.Table.Family == nftables.TableFamilyIPv4 || ch.Table.Family == nftables.TableFamilyIPv6)
 }
 
-func (r *Report) inspectForward(ch *nftables.Chain, rules []*nftables.Rule, wg string) {
+// jumpTarget は、rules の中で最初の一致条件なしの jump の先を返す。無ければ空である。
+func jumpTarget(rules []*nftables.Rule) string {
+	for _, rl := range rules {
+		if t := jumpOnly(rl.Exprs); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// inspectForward は forward フックの base chain 1 つを調べる。jumped は、ch の最初の一致条件なしの
+// jump の先のチェーンの規則である(無ければ nil)。
+func (r *Report) inspectForward(ch *nftables.Chain, rules, jumped []*nftables.Rule, wg string, dir ForwardDirection) {
 	blocks, how := blocksByDefault(ch, rules)
 	if !blocks {
 		return
 	}
+	if dir == ForwardToTunnel && passesToTunnel(rules, jumped, wg) {
+		return
+	}
 	// 足す先:一致条件なしの jump があればその先(DOCKER-USER)、なければこのチェーンの先頭
 	into := ch.Name
-	for _, rl := range rules {
-		if t := jumpOnly(rl.Exprs); t != "" {
-			into = t
-			break
-		}
+	if t := jumpTarget(rules); t != "" {
+		into = t
 	}
 	var suggest []string
 	if iptablesManaged(ch) {
@@ -313,6 +345,159 @@ func (r *Report) inspectForward(ch *nftables.Chain, rules []*nftables.Rule, wg s
 		Problem: fmt.Sprintf("forward is %s, so wgft's forwarding is dropped: public IF -> %s and its replies. add these 2 lines once, port-independent", how, wg),
 		Suggest: suggest,
 	})
+}
+
+// passesToTunnel は、既定で落とす forward のチェーンが、server の転送の 2 つの向きをどちらも accept
+// するかを判定する。1 つは wg へ出るパケットの accept(提示の `oifname "wg0" accept`)、もう 1 つは wg から
+// 入る established のパケットの accept(提示の `iifname "wg0" ct state established,related accept`)で
+// ある。iptables の `-o wg0 -j ACCEPT` と `-i wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT`
+// も同じ形として読む。インタフェースを問わない established の accept も返りの向きに数え、一致条件の
+// 無い accept は両方の向きに数える。
+//
+// 規則はチェーンの順に読み、一致条件なしの jump の位置で jumped を読む。一致条件なしの drop、reject、
+// return より後の規則は評価されないので読まない。一致条件が他にもある規則(ポート、送信元、別の
+// インタフェース)と、名前の前方一致(`wg+`)は数えない。wgft の転送のすべてを通すとは言えないので、
+// 所見を出す側に倒す。
+func passesToTunnel(rules, jumped []*nftables.Rule, wg string) bool {
+	out, back := false, false
+	// scan は 1 つのチェーンの規則を順に読む。一致条件なしの return でそのチェーンの読み取りを終え、
+	// 一致条件なしの drop と reject では、その後のどのチェーンも評価されないので false を返す
+	var scan func(rules, jumped []*nftables.Rule) bool
+	scan = func(rules, jumped []*nftables.Rule) bool {
+		for _, rl := range rules {
+			if t := jumpOnly(rl.Exprs); t != "" && jumped != nil {
+				if !scan(jumped, nil) {
+					return false
+				}
+				jumped = nil
+				continue
+			}
+			m := readForwardMatch(rl.Exprs)
+			if m.other {
+				continue
+			}
+			unconditional := m.iif == "" && m.oif == "" && !m.established
+			switch {
+			case unconditional && m.ret:
+				return true
+			case unconditional && m.verdict && !m.accept:
+				return false
+			case !m.accept:
+			case unconditional:
+				out, back = true, true
+			case m.oif == wg && m.iif == "" && !m.established:
+				out = true
+			case m.established && m.oif == "" && (m.iif == wg || m.iif == ""):
+				back = true
+			}
+		}
+		return true
+	}
+	scan(rules, jumped)
+	return out && back
+}
+
+// forwardMatch は forward の規則 1 つの一致条件と verdict を読んだ結果である。
+type forwardMatch struct {
+	iif, oif    string // iifname と oifname の完全一致。無ければ空
+	established bool   // ct state が established を含む
+	other       bool   // 上のどれでもない一致条件か、読めない式がある
+	verdict     bool   // 終端の verdict(accept、drop、reject、return)を持つ
+	accept      bool   // その verdict が accept である
+	ret         bool   // その verdict が return である
+}
+
+// readForwardMatch は exprs を forwardMatch に読む。nft の `iifname "wg0"`、`oifname "wg0"`、
+// `ct state established,related`(マスクか無名 set)と、iptables-nft の `-i`、`-o`、
+// `-m conntrack --ctstate` の形を読む。
+func readForwardMatch(exprs []expr.Any) forwardMatch {
+	const established = 0x2 // IP_CT_ESTABLISHED のビット(nft も xt_conntrack も同じ)
+	var m forwardMatch
+	var ifKey expr.MetaKey
+	ifPending, ctPending, ctMasked := false, false, false
+	for _, e := range exprs {
+		switch x := e.(type) {
+		case *expr.Counter, *expr.Log:
+		case *expr.Meta:
+			if x.Key == expr.MetaKeyIIFNAME || x.Key == expr.MetaKeyOIFNAME {
+				ifKey, ifPending = x.Key, true
+			} else {
+				m.other = true
+			}
+		case *expr.Cmp:
+			switch {
+			case ifPending && x.Op == expr.CmpOpEq && len(x.Data) > 0 && x.Data[len(x.Data)-1] == 0:
+				// 完全一致は名前の後ろに NUL を持つ。前方一致(`wg+`、`"wg*"`)は持たないので数えない
+				name := strings.TrimRight(string(x.Data), "\x00")
+				if ifKey == expr.MetaKeyIIFNAME {
+					m.iif = name
+				} else {
+					m.oif = name
+				}
+				ifPending = false
+			case ctMasked && x.Op == expr.CmpOpNeq:
+				ctMasked = false
+			default:
+				m.other = true
+			}
+		case *expr.Ct:
+			if x.Key == expr.CtKeySTATE {
+				ctPending = true
+			} else {
+				m.other = true
+			}
+		case *expr.Bitwise:
+			if ctPending && len(x.Mask) == 4 && binary.NativeEndian.Uint32(x.Mask)&established != 0 {
+				m.established, ctPending, ctMasked = true, false, true
+			} else {
+				m.other = true
+			}
+		case *expr.Lookup:
+			if ctPending { // set の中身は読まず、established を含むものとみなす(acceptsEstablished と同じ)
+				m.established, ctPending = true, false
+			} else {
+				m.other = true
+			}
+		case *expr.Match:
+			if x.Name == "conntrack" && conntrackStateMask(x.Info)&established != 0 {
+				m.established = true
+			} else {
+				m.other = true
+			}
+		case *expr.Reject:
+			m.verdict = true
+		case *expr.Verdict:
+			switch x.Kind {
+			case expr.VerdictAccept:
+				m.verdict, m.accept = true, true
+			case expr.VerdictDrop:
+				m.verdict = true
+			case expr.VerdictReturn:
+				m.verdict, m.ret = true, true
+			default:
+				m.other = true
+			}
+		default:
+			m.other = true
+		}
+	}
+	if ifPending || ctPending || ctMasked {
+		m.other = true
+	}
+	return m
+}
+
+// conntrackStateMask は xt の conntrack の一致条件の状態のマスクである。読めなければ 0 である。
+func conntrackStateMask(info xt.InfoAny) uint16 {
+	switch i := info.(type) {
+	case *xt.ConntrackMtinfo1:
+		return uint16(i.StateMask)
+	case *xt.ConntrackMtinfo2:
+		return i.StateMask
+	case *xt.ConntrackMtinfo3:
+		return i.StateMask
+	}
+	return 0
 }
 
 func (r *Report) inspectInput(ch *nftables.Chain, rules []*nftables.Rule) {
@@ -357,19 +542,8 @@ func acceptsEstablished(exprs []expr.Any) bool {
 				matches = true
 			}
 		case *expr.Match:
-			if x.Name == "conntrack" {
-				var mask uint16
-				switch info := x.Info.(type) {
-				case *xt.ConntrackMtinfo1:
-					mask = uint16(info.StateMask)
-				case *xt.ConntrackMtinfo2:
-					mask = info.StateMask
-				case *xt.ConntrackMtinfo3:
-					mask = info.StateMask
-				}
-				if mask&established != 0 {
-					matches = true
-				}
+			if x.Name == "conntrack" && conntrackStateMask(x.Info)&established != 0 {
+				matches = true
 			}
 		case *expr.Verdict:
 			accept = x.Kind == expr.VerdictAccept

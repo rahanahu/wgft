@@ -289,7 +289,7 @@ func TestSuggestionsForms(t *testing.T) {
 	drop := nftables.ChainPolicyDrop
 	ipt := &nftables.Chain{Name: "FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "filter"}, Policy: &drop}
 	rep := &Report{}
-	rep.inspectForward(ipt, []*nftables.Rule{{Exprs: []expr.Any{&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictJump, Chain: "DOCKER-USER"}}}}, "wg0")
+	rep.inspectForward(ipt, []*nftables.Rule{{Exprs: []expr.Any{&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictJump, Chain: "DOCKER-USER"}}}}, nil, "wg0", ForwardToTunnel)
 	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Suggest[0], "iptables -I DOCKER-USER -o wg0 -j ACCEPT") {
 		t.Errorf("docker form: %+v", rep.Findings)
 	}
@@ -299,13 +299,122 @@ func TestSuggestionsForms(t *testing.T) {
 	accept := nftables.ChainPolicyAccept
 	fw := &nftables.Chain{Name: "filter_FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "firewalld"}, Policy: &accept}
 	rep = &Report{}
-	rep.inspectForward(fw, []*nftables.Rule{{Exprs: []expr.Any{&expr.Reject{}}}}, "wg0")
+	rep.inspectForward(fw, []*nftables.Rule{{Exprs: []expr.Any{&expr.Reject{}}}}, nil, "wg0", ForwardToTunnel)
 	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Problem, "reject") || !strings.Contains(rep.Findings[0].Suggest[0], `nft insert rule inet firewalld filter_FORWARD oifname "wg0" accept`) {
 		t.Errorf("firewalld form: %+v", rep.Findings)
 	}
 	rep = &Report{}
-	rep.inspectForward(fw, []*nftables.Rule{{Exprs: []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}}}, "wg0")
+	rep.inspectForward(fw, []*nftables.Rule{{Exprs: []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}}}, nil, "wg0", ForwardToTunnel)
 	if len(rep.Findings) != 0 {
 		t.Errorf("accept-by-default chain must not warn: %+v", rep.Findings)
+	}
+}
+
+// ifName は iifname か oifname の完全一致の式である。iptables-nft は名前の後ろに NUL を 1 つ付け、
+// nft は 16 バイトまで NUL で埋める。prefix は前方一致(`-o wg+`)の形で、NUL を付けない。
+func ifName(key expr.MetaKey, name string, form string) []expr.Any {
+	data := []byte(name)
+	switch form {
+	case "iptables":
+		data = append(data, 0)
+	case "nft":
+		data = append(data, make([]byte, 16-len(data))...)
+	}
+	return []expr.Any{&expr.Meta{Key: key, Register: 1}, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: data}}
+}
+
+func ctEstablishedNative() []expr.Any {
+	return []expr.Any{
+		&expr.Ct{Key: expr.CtKeySTATE, Register: 1},
+		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: binaryutil.NativeEndian.PutUint32(0x6), Xor: binaryutil.NativeEndian.PutUint32(0)},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(0)},
+	}
+}
+
+func ctEstablishedXT() []expr.Any {
+	return []expr.Any{&expr.Match{Name: "conntrack", Rev: 3, Info: &xt.ConntrackMtinfo3{ConntrackMtinfo2: xt.ConntrackMtinfo2{StateMask: 0x6}}}}
+}
+
+func rule(parts ...[]expr.Any) *nftables.Rule {
+	var exprs []expr.Any
+	for _, p := range parts {
+		exprs = append(exprs, p...)
+	}
+	return &nftables.Rule{Exprs: exprs}
+}
+
+var (
+	counter   = []expr.Any{&expr.Counter{}}
+	acceptV   = []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}
+	returnV   = []expr.Any{&expr.Verdict{Kind: expr.VerdictReturn}}
+	dropV     = []expr.Any{&expr.Verdict{Kind: expr.VerdictDrop}}
+	jumpUser  = []expr.Any{&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictJump, Chain: "DOCKER-USER"}}
+	jumpOther = []expr.Any{&expr.Counter{}, &expr.Verdict{Kind: expr.VerdictJump, Chain: "DOCKER-ISOLATION-STAGE-1"}}
+)
+
+// server check が提示した 2 行を足した後に、同じ所見を出し続けないこと。Docker が ip_forward を
+// 自分で 1 にしたホストの iptables の FORWARD の policy drop で、DOCKER-USER に 2 行を足すと転送が
+// 通るのに、警告が残っていた。
+func TestForwardAcceptsSuppressFinding(t *testing.T) {
+	drop := nftables.ChainPolicyDrop
+	accept := nftables.ChainPolicyAccept
+	ipt := &nftables.Chain{Name: "FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "filter"}, Policy: &drop}
+	fw := &nftables.Chain{Name: "filter_FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "firewalld"}, Policy: &accept}
+	reject := []expr.Any{&expr.Reject{}}
+
+	// Docker の FORWARD の形:先頭で DOCKER-USER へ jump し、続いて別の jump と docker0 の行が並ぶ
+	dockerForward := []*nftables.Rule{
+		{Exprs: jumpUser},
+		{Exprs: jumpOther},
+		rule(ifName(expr.MetaKeyOIFNAME, "docker0", "iptables"), ctEstablishedXT(), counter, acceptV),
+	}
+	outIPT := rule(ifName(expr.MetaKeyOIFNAME, "wgft0", "iptables"), counter, acceptV)
+	backIPT := rule(ifName(expr.MetaKeyIIFNAME, "wgft0", "iptables"), ctEstablishedXT(), counter, acceptV)
+	backIPTNative := rule(ifName(expr.MetaKeyIIFNAME, "wgft0", "iptables"), ctEstablishedNative(), counter, acceptV)
+	userReturn := rule(counter, returnV)
+
+	outNFT := rule(ifName(expr.MetaKeyOIFNAME, "wgft0", "nft"), acceptV)
+	backNFT := rule(ifName(expr.MetaKeyIIFNAME, "wgft0", "nft"), ctEstablishedNative(), acceptV)
+	anyEstablished := rule(ctEstablishedNative(), acceptV)
+
+	for name, tt := range map[string]struct {
+		ch     *nftables.Chain
+		rules  []*nftables.Rule
+		jumped []*nftables.Rule
+		warn   bool
+	}{
+		"docker, nothing added":                      {ipt, dockerForward, []*nftables.Rule{userReturn}, true},
+		"docker, both lines in DOCKER-USER":          {ipt, dockerForward, []*nftables.Rule{outIPT, backIPT, userReturn}, false},
+		"docker, ct state in the native form":        {ipt, dockerForward, []*nftables.Rule{backIPTNative, outIPT, userReturn}, false},
+		"docker, only the outgoing line":             {ipt, dockerForward, []*nftables.Rule{outIPT, userReturn}, true},
+		"docker, only the reply line":                {ipt, dockerForward, []*nftables.Rule{backIPT, userReturn}, true},
+		"docker, lines after the return":             {ipt, dockerForward, []*nftables.Rule{userReturn, outIPT, backIPT}, true},
+		"docker, DOCKER-USER could not be read":      {ipt, dockerForward, nil, true},
+		"docker, lines for another interface":        {ipt, dockerForward, []*nftables.Rule{rule(ifName(expr.MetaKeyOIFNAME, "wg1", "iptables"), counter, acceptV), backIPT, userReturn}, true},
+		"docker, a prefix match":                     {ipt, dockerForward, []*nftables.Rule{rule(ifName(expr.MetaKeyOIFNAME, "wgft", "prefix"), counter, acceptV), backIPT, userReturn}, true},
+		"lines in FORWARD itself":                    {ipt, []*nftables.Rule{outIPT, backIPT}, nil, false},
+		"lines in FORWARD after a jump that returns": {ipt, []*nftables.Rule{{Exprs: jumpUser}, outIPT, backIPT}, []*nftables.Rule{userReturn}, false},
+		"lines after an unconditional drop":          {ipt, []*nftables.Rule{rule(counter, dropV), outIPT, backIPT}, nil, true},
+		"an outgoing line with a port condition": {ipt, []*nftables.Rule{
+			rule(ifName(expr.MetaKeyOIFNAME, "wgft0", "iptables"), l4(unix.IPPROTO_TCP), []expr.Any{dport(), &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(2456)}}, acceptV),
+			backIPT,
+		}, nil, true},
+		"firewalld form, nothing added":                {fw, []*nftables.Rule{anyEstablished, {Exprs: reject}}, nil, true},
+		"firewalld form, both lines":                   {fw, []*nftables.Rule{outNFT, backNFT, {Exprs: reject}}, nil, false},
+		"firewalld form, outgoing and any established": {fw, []*nftables.Rule{anyEstablished, outNFT, {Exprs: reject}}, nil, false},
+		"an unconditional accept":                      {ipt, []*nftables.Rule{rule(counter, acceptV)}, nil, false},
+	} {
+		rep := &Report{}
+		rep.inspectForward(tt.ch, tt.rules, tt.jumped, "wgft0", ForwardToTunnel)
+		if got := len(rep.Findings) == 1; got != tt.warn {
+			t.Errorf("%s: warns %v, want %v: %+v", name, got, tt.warn, rep.Findings)
+		}
+	}
+
+	// エージェントの向きでは accept の有無によらず手掛かりを出す(設計文書 10.2c 節)
+	rep := &Report{}
+	rep.inspectForward(ipt, dockerForward, []*nftables.Rule{outIPT, backIPT, userReturn}, "wgft0", ForwardFromTunnel)
+	if len(rep.Findings) != 1 {
+		t.Errorf("agent direction must keep the hint: %+v", rep.Findings)
 	}
 }

@@ -78,7 +78,7 @@ func (k *kernelDataplane) ReadUDPTimeouts() (linux.UDPTimeouts, error) {
 	return linux.ReadUDPTimeouts()
 }
 func (k *kernelDataplane) Inspect() (*linux.Report, error) {
-	return linux.Inspect(k.iface, nft.TableName)
+	return linux.Inspect(k.iface, nft.TableName, linux.ForwardToTunnel)
 }
 func (k *kernelDataplane) BoundPorts() (linux.Bound, error) { return linux.BoundPorts() }
 func (k *kernelDataplane) InputPortSuggestions(pr proto.PortRange, p proto.Proto) ([]string, error) {
