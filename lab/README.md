@@ -130,6 +130,8 @@ B7、B11、B12、C3、D4 など一式の外の試験は、契機に従って追�
 lab/lab exec vm labhost run version-skew.sh
 lab/lab exec vm bash /wgft/lab/rcvwin.sh
 lab/lab test internal/nettun vps -test.run='^(TestRelayHold|TestSetupFailure)OutOfOrderKernelData$'
+lab/lab test internal/tcpharness/linuxdut
+lab/lab exec vm bash /wgft/lab/tcpquality.sh
 lab/lab exec vm bash /wgft/lab/scale.sh kernel
 lab/lab exec vm bash /wgft/lab/scale.sh userspace
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel
