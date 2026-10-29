@@ -178,6 +178,12 @@ func (s *stack) twInput(id int32, seg *segment, now int64, reuse *reuseISS) bool
 	}
 	if seg.has(flagSYN) {
 		if !seg.has(flagACK) && r.state == twStateTimeWait && rfc6191(seg, r.tsOK, r.tsRecent, r.rcvNxt) {
+			// 行を外す前に、新しい行を作れるかを確かめる。作れないまま外すと、相手が再送した SYN は
+			// 前の接続の番号を知らない時計だけの ISN を受ける
+			if !s.synRoom(s.listeners[seg.tup.local()]) {
+				s.refuseReuse(now)
+				return true
+			}
 			*reuse = reuseISS{ok: true, sndNxt: r.sndNxt}
 			s.removeTWRow(id)
 			return false

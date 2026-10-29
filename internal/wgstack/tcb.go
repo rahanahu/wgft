@@ -401,6 +401,16 @@ func (c *tcb) timeWaitInput(seg *segment, now int64, reuse *reuseISS) bool {
 	}
 	if seg.has(flagSYN) {
 		if !seg.has(flagACK) && rfc6191(seg, c.tsOK, c.tsRecent, c.rcvNxt) {
+			s := c.s
+			s.tmu.Lock()
+			room := s.synRoom(s.listeners[seg.tup.local()])
+			if !room {
+				s.refuseReuse(now)
+			}
+			s.tmu.Unlock()
+			if !room {
+				return false // 枠の TIME_WAIT を保ち、相手の SYN の再送を待つ
+			}
 			// 接続は CLOSED になり、アプリケーションはそれまでのデータと io.EOF を読める
 			*reuse = reuseISS{ok: true, sndNxt: c.sndMax}
 			c.toClosed(nil)
