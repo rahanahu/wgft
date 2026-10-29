@@ -318,10 +318,11 @@ func (c *tcb) challengeAck(now int64) {
 }
 
 // input は接続の枠への segment を処理する。mu を持って呼ぶ。真を返したら、呼び出し側は segment を
-// もう一度表から引く(TIME_WAIT の接続が RFC 6191 の SYN を受けて CLOSED になった)。
-func (c *tcb) input(seg *segment, now int64) bool {
+// もう一度表から引く(TIME_WAIT の接続が RFC 6191 の SYN を受けて CLOSED になった)。そのとき reuse に
+// 前の接続の SND.NXT を書く。
+func (c *tcb) input(seg *segment, now int64, reuse *reuseISS) bool {
 	if c.state == stTimeWait {
-		again := c.timeWaitInput(seg, now)
+		again := c.timeWaitInput(seg, now, reuse)
 		c.afterInput(now)
 		return again
 	}
@@ -381,7 +382,7 @@ func (c *tcb) input(seg *segment, now int64) bool {
 }
 
 // timeWaitInput は枠に残る TIME_WAIT の接続への segment を処理する。
-func (c *tcb) timeWaitInput(seg *segment, now int64) bool {
+func (c *tcb) timeWaitInput(seg *segment, now int64, reuse *reuseISS) bool {
 	if seg.has(flagRST) {
 		if seg.seq == c.rcvNxt {
 			c.toClosed(nil)
@@ -391,6 +392,7 @@ func (c *tcb) timeWaitInput(seg *segment, now int64) bool {
 	if seg.has(flagSYN) {
 		if !seg.has(flagACK) && rfc6191(seg, c.tsOK, c.tsRecent, c.rcvNxt) {
 			// 接続は CLOSED になり、アプリケーションはそれまでのデータと io.EOF を読める
+			*reuse = reuseISS{ok: true, sndNxt: c.sndMax}
 			c.toClosed(nil)
 			return true
 		}

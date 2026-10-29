@@ -158,8 +158,8 @@ func rfc6191(seg *segment, tsOK bool, tsRecent, rcvNxt uint32) bool {
 
 // twInput は行への segment を処理し、処理し終えたかを返す。偽を返すのは、TIME_WAIT の行が RFC 6191 の
 // 条件を満たす SYN を受けて行を外したか、期限を過ぎた行を外したときで、呼び出し側はその segment を
-// どの行にも当たらない segment として扱う。tmu を持って呼ぶ。
-func (s *stack) twInput(id int32, seg *segment, now int64) bool {
+// どの行にも当たらない segment として扱う。SYN で行を外したときは reuse に前の接続の SND.NXT を書く。tmu を持って呼ぶ。
+func (s *stack) twInput(id int32, seg *segment, now int64, reuse *reuseISS) bool {
 	r := &s.tw.rows[id]
 	if r.deadline <= now {
 		s.removeTWRow(id)
@@ -174,6 +174,7 @@ func (s *stack) twInput(id int32, seg *segment, now int64) bool {
 	}
 	if seg.has(flagSYN) {
 		if !seg.has(flagACK) && r.state == twStateTimeWait && rfc6191(seg, r.tsOK, r.tsRecent, r.rcvNxt) {
+			*reuse = reuseISS{ok: true, sndNxt: r.sndNxt}
 			s.removeTWRow(id)
 			return false
 		}
