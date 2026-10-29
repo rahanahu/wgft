@@ -113,7 +113,7 @@ for mode in $MODES; do
   : > "$results"
   for run in $(seq 1 "$RUNS"); do
     mark=$W/wgft-tq-mark-$mode
-    rm -f "$mark"
+    rm -f "$mark" "$W/wgft-tq-samples-$mode"
     netem delay "${DELAY_MS}ms" loss "${LOSS_PCT}%"
     ip netns exec "$CLIENT_NS" $Q fetch 198.51.100.1 41800 "$W/wgft-tq-samples-$mode" "$OUTAGE_AFTER" "$mark" \
       > "$W/wgft-tq-fetch-$mode.log" 2>&1 &

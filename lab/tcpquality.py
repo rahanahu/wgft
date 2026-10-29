@@ -78,7 +78,10 @@ def fetch(ip, port, samplefile, markbytes, markfile):
 
 def analyze(samplefile, start, end):
     start, end = float(start), float(end)
-    rows = [tuple(map(float, l.split())) for l in open(samplefile)]
+    try:
+        rows = [tuple(map(float, l.split())) for l in open(samplefile)]
+    except FileNotFoundError:
+        rows = []
     times = [t for t, _ in rows]
     if not any(t < start for t in times) or not any(t > end for t in times):
         print("undetermined=1 samples=%d" % len(rows))
