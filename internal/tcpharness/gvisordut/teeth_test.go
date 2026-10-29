@@ -32,7 +32,12 @@ func mutant(name string, wrap func(tcpharness.DUT) tcpharness.DUT) tcpharness.En
 
 func wantOutcome(t *testing.T, got map[string][]string, key, want string) {
 	t.Helper()
-	if o := got[key]; len(o) == 0 || o[0] != want {
+	o := got[key]
+	bad := len(o) == 0
+	for _, v := range o {
+		bad = bad || v != want
+	}
+	if bad {
 		t.Errorf("%s: outcome %q, want %q; all outcomes: %v", key, got[key], want, got)
 	}
 }
