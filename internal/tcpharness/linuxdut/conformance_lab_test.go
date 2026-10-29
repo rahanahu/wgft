@@ -16,6 +16,11 @@ import (
 // Known lists where Linux, the reference, is known to differ from the scenarios' expectations.
 // A scenario that checks a choice of wgstack's design beyond the RFCs keeps that check here.
 var Known = map[string]tcpharness.Known{
+	"ack-unsent/ack-reply": {
+		Observed: "no ACK in time",
+		Reason: "Linux drops a segment that acknowledges unsent bytes without a reply, tcp_ack's ACK_UNSENT_DATA; " +
+			"RFC 9293 3.10.7.4 and wgstack.md answer it with an ACK",
+	},
 	"listener-close/half-open.rst-at-close": {
 		Observed: "no RST at the close",
 		Reason: "Linux drops a closed listener's request sockets without a RST; the final ACK then draws the closed " +

@@ -27,7 +27,13 @@ var Scenarios = []Scenario{
 	{Name: "fin-passive-close", Refs: "RFC 9293 3.6 and 3.10.7.4 CLOSE-WAIT and LAST-ACK", Run: finPassiveClose},
 	{Name: "half-close", Refs: "RFC 9293 3.6, 3.8.1 and 3.10.7.4 FIN-WAIT-1, FIN-WAIT-2 and TIME-WAIT; packetimpact tcp_fin_retransmission", Run: halfClose},
 	{Name: "close-unread-rst", Refs: "RFC 9293 3.6, RFC 2525 2.17", Run: closeUnreadRST},
+	{Name: "active-close-fin-ack", Refs: "RFC 9293 3.6 and 3.10.7.4 FIN-WAIT-1, RFC 1122 4.2.3.2", Run: activeCloseFINACK},
 	{Name: "timewait-reuse", Refs: "RFC 6191 2 and 3, RFC 9293 3.10.7.4 TIME-WAIT; packetimpact tcp_timewait_reset", Run: timeWaitReuse},
+	{Name: "early-ack", Refs: "RFC 1122 4.2.3.2, RFC 9293 3.8.6.3; wgstack.md, the choices not yet checked against Linux: quickack, the window after the handshake, the IP ID", Run: earlyACK},
+	{Name: "ack-unsent", Refs: "RFC 9293 3.10.7.4, RFC 5961 5.2; packetimpact tcp_unacc_seq_ack", Run: ackUnsent},
+	{Name: "synrcvd-syn", Refs: "RFC 9293 3.10.7.4 SYN-RECEIVED, RFC 5961 4; packetimpact tcp_synrcvd_reset", Run: synRcvdSYN},
+	{Name: "close-ooo-only", Refs: "RFC 9293 3.6, RFC 2525 2.17; wgstack.md: Close with only out-of-order data", Run: closeOOOOnly},
+	{Name: "fin-zero-window", Refs: "RFC 9293 3.8.6.1; wgstack.md: the FIN while the window is 0", Run: finZeroWindow},
 	{Name: "listener-close", Refs: "RFC 9293 3.10.4 and 3.10.7.1; packetimpact tcp_noaccept_close_rst, tcp_listen_backlog", Run: listenerClose},
 }
 
@@ -182,6 +188,18 @@ func handshakeBare(h *H) {
 func handshakeMSSFloor(h *H) {
 	const port = 8003
 	h.Listen(port)
+	// An MSS option of 0 is read as no option: 536, RFC 9293 3.7.1; the floor does not apply.
+	mss0 := h.NewPeer(port)
+	o0 := NoOptions()
+	zero := uint16(0)
+	o0.MSS = &zero
+	mss0.Send(Segment{Src: mss0.Local, Dst: mss0.Remote, Seq: mss0.ISS, Flags: FlagSYN, Window: 65535, Opts: o0})
+	sa0, ok0 := mss0.Await(time.Second, func(s Segment) bool { return s.Has(FlagSYN | FlagACK) })
+	ok0 = ok0 && sa0.Ack == mss0.ISS+1
+	h.Check("mss0.synack", ok0, "a SYN with an MSS option of 0 is answered within 1 s", synackString(mss0, sa0, ok0))
+	if ok0 {
+		mss0.Send(Segment{Src: mss0.Local, Dst: mss0.Remote, Seq: mss0.ISS + 1, Flags: FlagRST})
+	}
 	for _, mss := range []uint16{536, 535} {
 		p := h.NewPeer(port)
 		o := NoOptions()

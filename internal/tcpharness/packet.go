@@ -67,6 +67,7 @@ type Segment struct {
 	Payload  []byte
 	TTL      uint8
 	DF       bool
+	ID       uint16 // the IPv4 identification
 }
 
 // Has reports whether every flag in f is set.
@@ -206,6 +207,7 @@ func (s Segment) Marshal() []byte {
 	if s.DF {
 		ip[6] = 0x40
 	}
+	binary.BigEndian.PutUint16(ip[4:], s.ID)
 	ip[8] = s.TTL
 	if ip[8] == 0 {
 		ip[8] = 64
@@ -282,5 +284,6 @@ func Parse(pkt []byte) (Segment, error) {
 		Payload: append([]byte(nil), t[off:]...),
 		TTL:     pkt[8],
 		DF:      pkt[6]&0x40 != 0,
+		ID:      binary.BigEndian.Uint16(pkt[4:]),
 	}, nil
 }

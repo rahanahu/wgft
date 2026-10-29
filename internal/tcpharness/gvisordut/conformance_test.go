@@ -28,6 +28,18 @@ var Known = map[string]tcpharness.Known{
 		Reason: "gVisor drops a closed listener's half-open handshakes without a RST; the final ACK then draws the closed " +
 			"port's RST. wgstack.md resets them at the close",
 	},
+	"ack-unsent/ack-reply": {
+		Observed: "ACK of base+4",
+		Reason:   "the pinned gVisor accepts data on a segment that acknowledges unsent bytes and acknowledges that data, against RFC 9293 3.10.7.4",
+	},
+	"ack-unsent/not-delivered": {
+		Observed: "4 bytes, error nil",
+		Reason:   "the pinned gVisor accepts data on a segment that acknowledges unsent bytes and delivers it, against RFC 9293 3.10.7.4",
+	},
+	"synrcvd-syn/same-syn.synack-again": {
+		Observed: "no SYN-ACK",
+		Reason:   "gVisor answers a retransmitted SYN in SYN-RECEIVED with an ACK; Linux and wgstack retransmit the SYN-ACK",
+	},
 	"paws/old.dupack": {
 		Observed: "ACK of base+4",
 		Reason:   "the pinned gVisor does not implement PAWS, gVisor's rcv.go: it accepts the old segment and acknowledges it",

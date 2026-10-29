@@ -134,11 +134,35 @@ func closeToTimeWait(h *H, l Listener, port uint16) *Peer {
 	c.Close()
 	f, ok := p.Await(time.Second, isFIN)
 	h.Require("close.fin", ok && f.Seq == p.RcvNxt, "Close sends a FIN", segDesc(f, ok))
+	// The FIN is acknowledged first and the testbench's own FIN follows, through FIN-WAIT-2; the
+	// combined FIN|ACK is the active-close-fin-ack scenario's.
 	p.RcvNxt = f.Seq + 1
+	p.SendAck()
 	p.SendFIN(nil)
 	a, ok := p.Await(time.Second, acks(p.SndNxt))
 	h.Require("time-wait.entered", ok, "the DUT acknowledges the testbench's FIN and enters TIME-WAIT", segDesc(a, ok))
 	return p
+}
+
+// activeCloseFINACK closes from the application first and answers with one segment that both
+// acknowledges the DUT's FIN and carries the testbench's FIN, as a peer whose application closes
+// at once does. RFC 9293 3.10.7.4 FIN-WAIT-1: the DUT enters TIME-WAIT and acknowledges the FIN;
+// the ACK may be delayed, so it is bounded by RFC 1122's 500 ms.
+func activeCloseFINACK(h *H) {
+	const port = 8016
+	l := h.Listen(port)
+	p, _, c := h.Connect(l, port, StandardSYN())
+	c.Close()
+	f, ok := p.Await(time.Second, isFIN)
+	h.Require("fin", ok && f.Seq == p.RcvNxt, "Close sends a FIN", segDesc(f, ok))
+	p.RcvNxt = f.Seq + 1
+	p.SendFIN(nil)
+	a, ok := p.Await(500*time.Millisecond, acks(p.SndNxt))
+	h.Check("fin-ack.acked", ok, "a FIN that also acknowledges the DUT's FIN is acknowledged within 500 ms", segDesc(a, ok))
+	p.Send(p.Segment(FlagFIN|FlagACK, p.SndNxt-1, nil))
+	a, ok = p.Await(h.Prompt(), acks(p.SndNxt))
+	h.Check("time-wait.reacks-fin", ok, "a retransmitted FIN in TIME-WAIT is acknowledged again at once", segDesc(a, ok))
+	delivered(h, "delivered", c)
 }
 
 // timeWaitReuse sends new SYNs to a four-tuple in TIME-WAIT at the DUT. RFC 6191 accepts one
