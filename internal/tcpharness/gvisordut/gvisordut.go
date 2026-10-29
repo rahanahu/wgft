@@ -139,4 +139,16 @@ func (l *listener) Accept(ctx context.Context) (tcpharness.Conn, error) {
 // so the scenarios find them by type assertion as the relay does.
 type conn struct{ *nettun.TCPConn }
 
+// The adapter meets the harness's interfaces, including the optional methods the relay looks up
+// by type assertion; a change of signature on either side fails the build here instead of
+// silently skipping a check.
+var (
+	_ tcpharness.DUT            = (*DUT)(nil)
+	_ tcpharness.Listener       = (*listener)(nil)
+	_ tcpharness.Conn           = conn{}
+	_ tcpharness.Deliverer      = conn{}
+	_ tcpharness.DeliveryCloser = conn{}
+	_ tcpharness.Booster        = conn{}
+)
+
 func (c conn) Abort() error { c.TCPConn.Abort(); return nil }

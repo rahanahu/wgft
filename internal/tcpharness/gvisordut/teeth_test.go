@@ -2,6 +2,7 @@ package gvisordut
 
 import (
 	"encoding/binary"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,9 +30,9 @@ func mutant(name string, wrap func(tcpharness.DUT) tcpharness.DUT) tcpharness.En
 	}}
 }
 
-func wantOutcome(t *testing.T, got map[string]string, key, want string) {
+func wantOutcome(t *testing.T, got map[string][]string, key, want string) {
 	t.Helper()
-	if got[key] != want {
+	if o := got[key]; len(o) == 0 || o[0] != want {
 		t.Errorf("%s: outcome %q, want %q; all outcomes: %v", key, got[key], want, got)
 	}
 }
@@ -83,4 +84,50 @@ func TestHarnessCatchesMSSFloorDropForAnotherReason(t *testing.T) {
 	e := mutant("gvisor-bad-checksum", func(d tcpharness.DUT) tcpharness.DUT { return corruptMSS536{d} })
 	got := tcpharness.Record(t, e, scenario(t, "handshake-mss-floor"), 1)
 	wantOutcome(t, got, "handshake-mss-floor/mss536.synack", tcpharness.OutcomeFail)
+}
+
+// unscaledReceiver drops every injected data segment that starts more than 64 KiB past the
+// latest acknowledgment the engine sent, as a receiver that read its own window unscaled would.
+type unscaledReceiver struct {
+	tcpharness.DUT
+	out chan []byte
+	mu  sync.Mutex
+	ack map[uint16]uint32 // by the testbench's port
+}
+
+func (d *unscaledReceiver) Emitted() <-chan []byte { return d.out }
+
+func (d *unscaledReceiver) Inject(pkt []byte) error {
+	if s, err := tcpharness.Parse(pkt); err == nil && len(s.Payload) > 0 {
+		d.mu.Lock()
+		ack, ok := d.ack[s.Src.Port()]
+		d.mu.Unlock()
+		if ok && int32(s.Seq-ack) > 65535 {
+			return nil
+		}
+	}
+	return d.DUT.Inject(pkt)
+}
+
+func dropBeyond64K(inner tcpharness.DUT) tcpharness.DUT {
+	d := &unscaledReceiver{DUT: inner, out: make(chan []byte, 1024), ack: map[uint16]uint32{}}
+	go func() {
+		defer close(d.out)
+		for pkt := range inner.Emitted() {
+			if s, err := tcpharness.Parse(pkt); err == nil && s.Has(tcpharness.FlagACK) {
+				d.mu.Lock()
+				if a, ok := d.ack[s.Dst.Port()]; !ok || int32(s.Ack-a) > 0 {
+					d.ack[s.Dst.Port()] = s.Ack
+				}
+				d.mu.Unlock()
+			}
+			d.out <- pkt
+		}
+	}()
+	return d
+}
+
+func TestHarnessCatchesUnscaledReceiveWindow(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-unscaled-receiver", dropBeyond64K), scenario(t, "window-scale"), 1)
+	wantOutcome(t, got, "window-scale/own-scale.span-held", tcpharness.OutcomeFail)
 }

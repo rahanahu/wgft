@@ -5,9 +5,11 @@
 // listen on it. It needs CAP_NET_ADMIN in that namespace, so its tests run only in the lab VM,
 // under the build tag lab, in a network namespace of their own.
 //
-// A new network namespace does not start from the kernel's compiled-in TCP defaults: it copies
-// many net.ipv4.tcp_* values from the namespace that created it. PinReference therefore sets every
-// value of the reference configuration in docs/design/userspace/wgstack-verification.md
+// A new network namespace takes most net.ipv4.tcp_* values from the kernel's compiled-in
+// defaults, but copies some from the initial namespace: on the lab VM's 6.1 kernel
+// tcp_congestion_control, tcp_rmem and tcp_wmem follow it, while tcp_frto, tcp_sack, tcp_recovery
+// and tcp_autocorking do not. Which values follow may change between kernels, so PinReference
+// sets every value of the reference configuration in docs/design/userspace/wgstack-verification.md
 // explicitly and reads each one back.
 package linuxdut
 
@@ -249,6 +251,13 @@ func (l listener) Accept(ctx context.Context) (tcpharness.Conn, error) {
 }
 
 type conn struct{ *net.TCPConn }
+
+// The adapter meets the harness's interfaces; a change of signature fails the build here.
+var (
+	_ tcpharness.DUT      = (*DUT)(nil)
+	_ tcpharness.Listener = listener{}
+	_ tcpharness.Conn     = conn{}
+)
 
 func (c conn) Abort() error {
 	c.SetLinger(0)

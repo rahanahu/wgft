@@ -18,6 +18,16 @@ var Known = map[string]tcpharness.Known{
 		Reason: "gVisor's default loss detection is RACK-TLP, RFC 8985: the first retransmission is a tail loss probe " +
 			"after 2 SRTT plus 200 ms, and the RTO that follows starts unbacked; the reference Linux has TLP off",
 	},
+	"timewait-reuse/newer-ts-smaller-isn.synack": {
+		Observed: "no SYN-ACK",
+		Reason: "the pinned gVisor reuses a TIME-WAIT four-tuple only for a SYN beyond the old RCV.NXT, the sequence rule of " +
+			"RFC 1122; it ignores the newer timestamp that RFC 6191 2 accepts, and drops the SYN without a reply",
+	},
+	"listener-close/half-open.rst-at-close": {
+		Observed: "no RST at the close",
+		Reason: "gVisor drops a closed listener's half-open handshakes without a RST; the final ACK then draws the closed " +
+			"port's RST. wgstack.md resets them at the close",
+	},
 	"paws/old.dupack": {
 		Observed: "ACK of base+4",
 		Reason:   "the pinned gVisor does not implement PAWS, gVisor's rcv.go: it accepts the old segment and acknowledges it",

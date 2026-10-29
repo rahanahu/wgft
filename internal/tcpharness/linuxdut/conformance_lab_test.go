@@ -14,7 +14,14 @@ import (
 )
 
 // Known lists where Linux, the reference, is known to differ from the scenarios' expectations.
-var Known = map[string]tcpharness.Known{}
+// A scenario that checks a choice of wgstack's design beyond the RFCs keeps that check here.
+var Known = map[string]tcpharness.Known{
+	"listener-close/half-open.rst-at-close": {
+		Observed: "no RST at the close",
+		Reason: "Linux drops a closed listener's request sockets without a RST; the final ACK then draws the closed " +
+			"port's RST. wgstack.md resets them at the close",
+	},
+}
 
 // TestConformance runs the scenarios against the Linux kernel's TCP through a TUN device. It
 // re-runs itself in a new user and network namespace with the reference sysctls pinned, so

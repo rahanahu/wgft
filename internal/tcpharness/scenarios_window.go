@@ -3,7 +3,7 @@ package tcpharness
 import (
 	"bytes"
 	"fmt"
-	"io"
+	"sync"
 	"time"
 )
 
@@ -70,40 +70,66 @@ func sendWithin(h *H, id string, p *Peer, c Conn, window int, data []byte) {
 		fmt.Sprintf("%d bytes, equal %v", len(got), bytes.Equal(got, data)))
 }
 
-// ownScale sends the DUT as much as its advertised window allows while the application reads,
-// and checks that every byte is acknowledged.
+// ownScale checks the DUT's own window scale as a receiver. A warm-up sends in-order data while
+// the application reads, until every byte is acknowledged and the DUT advertises a window that
+// reaches more than 64 KiB past RCV.NXT. The testbench then holds back one segment and sends the
+// span after it out of order, so the span ends more than 64 KiB past RCV.NXT: a receiver that
+// read its own advertised window unscaled would drop the far end of it. Once the DUT's SACK shows
+// it holds the whole span, the held-back segment must draw at once a cumulative ACK of
+// everything. The testbench resends nothing in that phase, so a dropped segment cannot be hidden.
 func ownScale(h *H, p *Peer, c Conn) {
 	h.T.Helper()
-	const total = 400 << 10
-	data := pattern(total, 0x73)
-	read := make(chan []byte, 1)
-	go func() {
-		c.SetReadDeadline(time.Now().Add(10 * time.Second))
-		b, _ := io.ReadAll(io.LimitReader(c, total))
-		read <- b
-	}()
 	mss := MTU - 40
+	span := 65536 + 16*mss // ends past 64 KiB even after the held-back segment
+	need := mss + span     // the window the hold-back phase needs
+	const warmMax = 2 << 20
+	data := pattern(warmMax+need, 0x73)
+
+	var mu sync.Mutex
+	var read []byte
+	go func() {
+		buf := make([]byte, 64<<10)
+		c.SetReadDeadline(time.Now().Add(20 * time.Second))
+		for {
+			n, err := c.Read(buf)
+			mu.Lock()
+			read = append(read, buf[:n]...)
+			mu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+	readLen := func() int { mu.Lock(); defer mu.Unlock(); return len(read) }
+
 	start := p.SndNxt
-	maxWindow, maxFlight := p.DutWindow, 0
-	stalled, resent := 0, 0
-	for p.SndNxt-start < total && stalled < 20 {
-		// Send a whole window at once, then take the ACKs that have come in.
+	maxWindow, resent, stalled := 0, 0, 0
+	for p.SndNxt-start < warmMax && stalled < 20 {
+		if p.DutAck == p.SndNxt && p.DutWindow >= need {
+			break
+		}
 		avail := int(p.DutAck + uint32(p.DutWindow) - p.SndNxt)
-		if avail <= 0 {
-			if _, ok := p.Await(300*time.Millisecond, func(s Segment) bool { return s.Has(FlagACK) }); !ok {
+		if p.SndNxt != p.DutAck && (avail <= 0 || p.DutWindow < need) {
+			// wait for the ACK of everything, and resend what it does not cover, as a sender would
+			if _, ok := p.Await(300*time.Millisecond, acks(p.SndNxt)); !ok && p.DutAck != p.SndNxt {
 				stalled++
 				resent += resend(p, data, start)
 			}
 			maxWindow = max(maxWindow, p.DutWindow)
 			continue
 		}
-		for avail > 0 && p.SndNxt-start < total {
+		if avail <= 0 { // everything acknowledged into a closed window: wait for an update
+			if _, ok := p.Await(300*time.Millisecond, func(s Segment) bool { return s.Has(FlagACK) }); !ok {
+				stalled++
+			}
+			continue
+		}
+		for avail > 0 && p.SndNxt-start < warmMax {
 			off := int(p.SndNxt - start)
-			n := min(avail, mss, total-off)
+			n := min(avail, mss)
 			p.SendData(data[off : off+n])
 			avail -= n
 		}
-		maxFlight = max(maxFlight, int(p.SndNxt-p.DutAck))
 		for {
 			if _, ok := p.Next(20 * time.Millisecond); !ok {
 				break
@@ -111,29 +137,44 @@ func ownScale(h *H, p *Peer, c Conn) {
 			maxWindow = max(maxWindow, p.DutWindow)
 		}
 	}
-	ok := false
-	for range 10 {
-		if _, ok = p.Await(300*time.Millisecond, acks(p.SndNxt)); ok || p.DutAck == p.SndNxt {
-			ok = true
-			break
-		}
-		resent += resend(p, data, start)
-	}
 	h.Measure("own-scale.largest-window", maxWindow)
-	h.Measure("own-scale.largest-flight", maxFlight)
-	// A receiver may drop in-window segments, so the testbench retransmits what is not
-	// acknowledged after 300 ms, as a sender would; how often it had to is a measurement.
+	h.Measure("own-scale.warm-up-bytes", p.SndNxt-start)
 	h.Measure("own-scale.testbench-resent-segments", resent)
-	h.Check("own-scale.all-acked", ok && p.SndNxt-start == total, fmt.Sprintf("all %d bytes sent within the DUT's window are acknowledged", total),
-		fmt.Sprintf("%d bytes sent, all acknowledged %v", p.SndNxt-start, ok))
-	if maxFlight > 65535 {
-		h.Check("own-scale.beyond-64k", ok, "a flight past 64 KiB, possible only with a scaled window, is accepted", yesNo(ok, "accepted", "not acknowledged"))
-	} else {
-		h.T.Logf("the DUT never offered more than 64 KiB in flight, %d bytes; own-scale.beyond-64k not reached", maxFlight)
+	ready := p.DutAck == p.SndNxt && p.DutWindow >= need
+	h.Require("own-scale.window-past-64k", ready, fmt.Sprintf("after the warm-up the DUT acknowledges everything and advertises at least %d bytes", need),
+		yesNo(ready, "it does", "it does not"))
+
+	base := p.SndNxt
+	off := int(base - start)
+	end := base + uint32(need)
+	for o := mss; o < need; o += mss {
+		k := min(mss, need-o)
+		p.Send(p.Segment(FlagACK|FlagPSH, base+uint32(o), data[off+o:off+o+k]))
 	}
-	got := <-read
-	h.Check("own-scale.delivered", bytes.Equal(got, data), "the application reads every byte in order",
-		fmt.Sprintf("%d bytes, equal %v", len(got), bytes.Equal(got, data)))
+	held, ok := p.Await(time.Second, func(s Segment) bool {
+		for _, b := range s.Opts.SACK {
+			if b.Left == base+uint32(mss) && b.Right == end {
+				return true
+			}
+		}
+		return false
+	})
+	h.Check("own-scale.span-held", ok, "the DUT holds the whole out-of-order span past 64 KiB, as its SACK shows", sackDesc(held, ok, base))
+	p.Send(p.Segment(FlagACK|FlagPSH, base, data[off:off+mss]))
+	p.SndNxt = end
+	a, ok := p.Await(h.Prompt(), func(s Segment) bool { return s.Has(FlagACK) && s.Ack == end })
+	h.Check("own-scale.beyond-64k", ok, "filling the hole acknowledges everything up to more than 64 KiB past RCV.NXT at once", ackDesc(a, ok, base))
+
+	want := data[:int(end-start)]
+	deadline := time.Now().Add(2 * time.Second)
+	for readLen() < len(want) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	got := append([]byte(nil), read...)
+	mu.Unlock()
+	h.Check("own-scale.delivered", bytes.Equal(got, want), "the application reads every byte in order",
+		fmt.Sprintf("%d of %d bytes, equal %v", len(got), len(want), bytes.Equal(got, want)))
 }
 
 // paws sends a data segment whose timestamp is older than the last one the DUT accepted. RFC
@@ -152,8 +193,8 @@ func paws(h *H) {
 	old := p.Segment(FlagACK|FlagPSH, p.SndNxt, []byte("OLD!"))
 	old.Opts.TS.Val = p.TSVal() - 100000 // 100 s older than the clock
 	p.Send(old)
-	a, ok = p.Await(time.Second, func(s Segment) bool { return s.Has(FlagACK) })
-	h.Check("old.dupack", ok && a.Ack == p.SndNxt, "the old segment draws an ACK that does not cover it", ackDesc(a, ok, p.SndNxt))
+	a, ok = p.Await(h.Prompt(), func(s Segment) bool { return s.Has(FlagACK) })
+	h.Check("old.dupack", ok && a.Ack == p.SndNxt, "the old segment draws at once an ACK that does not cover it", ackDesc(a, ok, p.SndNxt))
 	got, err = readFull(c, 4, 300*time.Millisecond)
 	dropped := len(got) == 0 && errKind(err) == "timeout"
 	h.Check("old.not-delivered", dropped, "the old segment's bytes are not delivered", fmt.Sprintf("%d bytes, error %s", len(got), errKind(err)))

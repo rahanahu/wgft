@@ -126,6 +126,7 @@ func TestKnownDifferences(t *testing.T) {
 	}}
 	s := Scenario{Name: "s", Run: func(h *H) {
 		h.Check("pass", true, "ok", "ok")
+		h.Check("pass", false, "ok", "bad the second time")
 		h.Check("fail", false, "ok", "bad")
 		h.Check("known", false, "answered", "dropped")
 		h.Check("changed", false, "answered", "reset")
@@ -134,9 +135,9 @@ func TestKnownDifferences(t *testing.T) {
 		h.Check("after-require", true, "never reached", "")
 	}}
 	got := Record(t, e, s, 1)
-	want := map[string]string{
-		"s/pass": OutcomePass, "s/fail": OutcomeFail, "s/known": OutcomeKnown, "s/changed": OutcomeChanged,
-		"s/unexpected": OutcomeUnexpected, "s/required": OutcomeKnown,
+	want := map[string][]string{
+		"s/pass": {OutcomePass, OutcomeFail}, "s/fail": {OutcomeFail}, "s/known": {OutcomeKnown}, "s/changed": {OutcomeChanged},
+		"s/unexpected": {OutcomeUnexpected}, "s/required": {OutcomeKnown},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("outcomes:\n got %v\nwant %v", got, want)

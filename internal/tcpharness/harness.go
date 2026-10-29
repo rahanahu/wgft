@@ -120,10 +120,10 @@ const (
 	OutcomeChanged    = "changed-difference"
 )
 
-// Record runs one scenario against a fresh DUT of e without failing t, and returns each check's
-// outcome by key. It lets the harness test itself: a scenario run against a deliberately wrong
+// Record runs one scenario against a fresh DUT of e without failing t, and returns the outcomes
+// of each check by key, one per time the scenario ran the check, in order. It lets the harness test itself: a scenario run against a deliberately wrong
 // engine must fail the check meant to catch the fault.
-func Record(t *testing.T, e Engine, s Scenario, seed uint64) map[string]string {
+func Record(t *testing.T, e Engine, s Scenario, seed uint64) map[string][]string {
 	rec := &recorder{TB: t}
 	var h *H
 	done := make(chan struct{})
@@ -169,14 +169,14 @@ type H struct {
 	DUT      DUT
 	engine   Engine
 	scenario string
-	outcome  map[string]string
+	outcome  map[string][]string
 	rng      *rand.Rand
 	nextPort uint16
 }
 
 func newH(t testing.TB, e Engine, scenario string, d DUT, seed uint64) *H {
 	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
-	return &H{T: t, DUT: d, engine: e, scenario: scenario, outcome: map[string]string{}, rng: rng,
+	return &H{T: t, DUT: d, engine: e, scenario: scenario, outcome: map[string][]string{}, rng: rng,
 		nextPort: uint16(40000 + rng.IntN(20000))}
 }
 
@@ -189,19 +189,19 @@ func (h *H) Check(id string, ok bool, what, got string) bool {
 	k, known := h.engine.Known[key]
 	switch {
 	case ok && !known:
-		h.outcome[key] = OutcomePass
+		h.outcome[key] = append(h.outcome[key], OutcomePass)
 		h.T.Logf("PASS  %s: %s; got: %s", key, what, got)
 	case ok && known:
-		h.outcome[key] = OutcomeUnexpected
+		h.outcome[key] = append(h.outcome[key], OutcomeUnexpected)
 		h.T.Errorf("UNEXPECTED PASS  %s on %s: %s; got: %s; the list says: %s; remove the entry", key, h.engine.Name, what, got, k.Observed)
 	case !ok && known && got == k.Observed:
-		h.outcome[key] = OutcomeKnown
+		h.outcome[key] = append(h.outcome[key], OutcomeKnown)
 		h.T.Logf("KNOWN DIFFERENCE  %s on %s: %s; got: %s; reason: %s", key, h.engine.Name, what, got, k.Reason)
 	case !ok && known:
-		h.outcome[key] = OutcomeChanged
+		h.outcome[key] = append(h.outcome[key], OutcomeChanged)
 		h.T.Errorf("CHANGED DIFFERENCE  %s on %s: %s; got: %s; the list says: %s", key, h.engine.Name, what, got, k.Observed)
 	default:
-		h.outcome[key] = OutcomeFail
+		h.outcome[key] = append(h.outcome[key], OutcomeFail)
 		h.T.Errorf("FAIL  %s on %s: %s; got: %s", key, h.engine.Name, what, got)
 	}
 	return ok
@@ -214,7 +214,7 @@ func (h *H) Require(id string, ok bool, what, got string) {
 	if h.Check(id, ok, what, got) {
 		return
 	}
-	if h.outcome[h.scenario+"/"+id] == OutcomeKnown {
+	if o := h.outcome[h.scenario+"/"+id]; o[len(o)-1] == OutcomeKnown {
 		h.T.SkipNow()
 	}
 	h.T.FailNow()
@@ -409,6 +409,23 @@ func (p *Peer) Next(d time.Duration) (Segment, bool) {
 		}
 		p.h.T.Logf("<- %v", s)
 		return s, true
+	}
+}
+
+// Collect returns every well-formed TCP segment the DUT emits within d, of any flow, so a
+// scenario can watch several flows at once without Next dropping the others.
+func (h *H) Collect(d time.Duration) []Segment {
+	var out []Segment
+	deadline := h.Now().Add(d)
+	for {
+		pkt, ok := h.next(max(deadline.Sub(h.Now()), 0))
+		if !ok {
+			return out
+		}
+		if s, err := Parse(pkt); err == nil {
+			h.T.Logf("<- %v", s)
+			out = append(out, s)
+		}
 	}
 }
 

@@ -36,8 +36,8 @@ func finPassiveClose(h *H) {
 	l := h.Listen(port)
 	p, _, c := h.Connect(l, port, StandardSYN())
 	p.SendFIN([]byte("bye"))
-	a, ok := p.Await(time.Second, acks(p.SndNxt))
-	h.Check("fin.acked", ok, "the DUT acknowledges the data and the FIN", segDesc(a, ok))
+	a, ok := p.Await(h.Prompt(), acks(p.SndNxt))
+	h.Check("fin.acked", ok, "the DUT acknowledges the data and the FIN at once", segDesc(a, ok))
 	got, err := readFull(c, 3, time.Second)
 	h.Check("data-before-fin", err == nil && string(got) == "bye", "the application reads the data that came with the FIN", fmt.Sprintf("%q, error %s", got, errKind(err)))
 	_, err = readFull(c, 1, time.Second)
@@ -97,8 +97,8 @@ func halfClose(h *H) {
 	h.Check("eof", errKind(err) == "EOF", "the application's read returns EOF", "error "+errKind(err))
 
 	p.Send(p.Segment(FlagFIN|FlagACK, p.SndNxt-1, nil)) // the testbench's FIN once more
-	a, ok = p.Await(time.Second, acks(p.SndNxt))
-	h.Check("time-wait.reacks-fin", ok, "a retransmitted FIN in TIME-WAIT is acknowledged again", segDesc(a, ok))
+	a, ok = p.Await(h.Prompt(), acks(p.SndNxt))
+	h.Check("time-wait.reacks-fin", ok, "a retransmitted FIN in TIME-WAIT is acknowledged again at once", segDesc(a, ok))
 
 	c.Close()
 	s, quiet := p.Quiet(300 * time.Millisecond)
@@ -161,6 +161,24 @@ func timeWaitReuse(h *H) {
 		alive(h, "newer", n, h.Accept(l))
 	}
 
+	// RFC 6191 2 takes a newer timestamp as enough, even with an ISN below the old connection's
+	// RCV.NXT, where RFC 1122's sequence rule alone would refuse the SYN.
+	old = closeToTimeWait(h, l, port)
+	m := old.Reincarnate(old.SndNxt - 100000)
+	syn = StandardSYN()
+	syn.TS = &Timestamps{Val: m.TSVal()}
+	m.WS = syn.WS
+	m.Send(Segment{Src: m.Local, Dst: m.Remote, Seq: m.ISS, Flags: FlagSYN, Window: 65535, Opts: syn})
+	sa, ok = m.Next(time.Second)
+	ok = ok && sa.Has(FlagSYN|FlagACK) && sa.Ack == m.ISS+1
+	h.Check("newer-ts-smaller-isn.synack", ok, "a SYN with a newer timestamp and a smaller ISN opens a new connection", synackString(m, sa, ok))
+	h.Measure("newer-ts-smaller-isn.reply", segDesc(sa, sa.Src.IsValid()))
+	if ok {
+		m.adopt(syn, sa)
+		m.SendAck()
+		alive(h, "newer-ts-smaller-isn", m, h.Accept(l))
+	}
+
 	old = closeToTimeWait(h, l, port)
 	o := old.Reincarnate(old.SndNxt - 100000)
 	o.tsBase = old.TSVal() - 100000
@@ -173,9 +191,8 @@ func timeWaitReuse(h *H) {
 }
 
 // listenerClose closes a listener that holds an established connection nobody accepted and a
-// handshake that has not finished. The established one is reset at once; the half-open one is
-// reset at the close or when its final ACK arrives. The port then refuses SYNs with a RST and
-// can be listened on again at once.
+// handshake that has not finished. wgstack.md resets both at the close. The port then refuses
+// SYNs with a RST and can be listened on again at once.
 func listenerClose(h *H) {
 	const port = 8015
 	l, err := h.DUT.Listen(port)
@@ -196,23 +213,31 @@ func listenerClose(h *H) {
 	half.WS = syn.WS
 	half.adopt(syn, sa)
 
+	// Both flows are watched together: Peer.Next would drop the other flow's segments.
 	l.Close()
-	r, ok := queued.Await(time.Second, isRST)
-	h.Check("queued.rst", ok && r.Seq == queued.RcvNxt, "the unaccepted connection is reset at SND.NXT", segDesc(r, ok))
-
-	r, ok = half.Await(300*time.Millisecond, isRST)
-	when := "at the close"
-	if !ok {
-		half.SendAck()
-		r, ok = half.Await(time.Second, isRST)
-		when = "on its final ACK"
+	var qr, hr *Segment
+	for _, s := range h.Collect(500 * time.Millisecond) {
+		switch {
+		case s.Dst == queued.Local && isRST(s) && qr == nil:
+			qr = &s
+		case s.Dst == half.Local && isRST(s) && hr == nil:
+			hr = &s
+		}
 	}
-	h.Check("half-open.rst", ok, "the half-open connection is reset", segDesc(r, ok))
-	h.Measure("half-open.rst-when", yesNo(ok, when, "never"))
+	h.Check("queued.rst", qr != nil && qr.Seq == queued.RcvNxt, "the unaccepted connection is reset at SND.NXT at the close",
+		yesNo(qr == nil, "no RST at the close", yesNo(qr != nil && qr.Seq == queued.RcvNxt, "RST at SND.NXT", "RST at another number")))
+	// wgstack.md: the listener's Close resets its half-open rows at once.
+	h.Check("half-open.rst-at-close", hr != nil, "the half-open connection is reset at the close", yesNo(hr != nil, "RST at the close", "no RST at the close"))
+	if hr == nil {
+		// Whatever the engine did with the row, the closed port answers the final ACK.
+		half.SendAck()
+		r, ok := half.Await(time.Second, isRST)
+		h.Measure("half-open.final-ack-reply", segDesc(r, ok))
+	}
 
 	closed := h.NewPeer(port)
 	closed.Send(Segment{Src: closed.Local, Dst: closed.Remote, Seq: closed.ISS, Flags: FlagSYN, Window: 65535, Opts: StandardSYN()})
-	r, ok = closed.Next(time.Second)
+	r, ok := closed.Next(time.Second)
 	h.Check("closed-port.rst", ok && r.Has(FlagRST|FlagACK) && r.Ack == closed.ISS+1, "a SYN to the closed port draws RST|ACK", segDesc(r, ok))
 
 	l2, err := h.DUT.Listen(port)

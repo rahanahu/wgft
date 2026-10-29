@@ -95,21 +95,26 @@ func alive(h *H, id string, p *Peer, c Conn) {
 }
 
 // receive collects the DUT's data until n bytes have arrived in order, acknowledging each
-// in-order segment, and returns them.
-func receive(p *Peer, n int, d time.Duration) []byte {
+// in-order segment, and returns them with the number of segments that repeated bytes already
+// received.
+func receive(p *Peer, n int, d time.Duration) ([]byte, int) {
 	var got []byte
+	dups := 0
 	for len(got) < n {
 		s, ok := p.Await(d, isData)
 		if !ok {
 			break
 		}
-		if s.Seq == p.RcvNxt {
+		switch {
+		case s.Seq == p.RcvNxt:
 			got = append(got, s.Payload...)
 			p.RcvNxt += uint32(len(s.Payload))
 			p.SendAck()
+		case int32(s.Seq-p.RcvNxt) < 0:
+			dups++
 		}
 	}
-	return got
+	return got, dups
 }
 
 func handshakeOptions(h *H) {

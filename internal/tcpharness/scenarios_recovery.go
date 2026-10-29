@@ -149,7 +149,11 @@ func newRenoRecovery(h *H) {
 	p.RcvNxt = base + high
 	p.SendAck()
 	if left := len(data) - int(high); left > 0 {
-		got[high] = receive(p, left, 2*time.Second)
+		var dups int
+		got[high], dups = receive(p, left, 2*time.Second)
+		for range dups {
+			rexmits = append(rexmits, 0) // a retransmission after the full ACK
+		}
 	}
 	s, quiet := p.Quiet(300 * time.Millisecond)
 	h.Check("stops-after-full-ack", quiet, "no retransmission after the full ACK", segDesc(s, !quiet))
