@@ -36,8 +36,10 @@ func finPassiveClose(h *H) {
 	l := h.Listen(port)
 	p, _, c := h.Connect(l, port, StandardSYN())
 	p.SendFIN([]byte("bye"))
-	a, ok := p.Await(h.Prompt(), acks(p.SndNxt))
-	h.Check("fin.acked", ok, "the DUT acknowledges the data and the FIN at once", segDesc(a, ok))
+	// RFC 9293 does not ask for an immediate ACK here, and Linux delays it by its delayed-ACK
+	// timer, about 40 ms; RFC 1122 4.2.3.2 bounds a delayed ACK at 500 ms.
+	a, ok := p.Await(500*time.Millisecond, acks(p.SndNxt))
+	h.Check("fin.acked", ok, "the DUT acknowledges the data and the FIN within the 500 ms delayed-ACK bound", segDesc(a, ok))
 	got, err := readFull(c, 3, time.Second)
 	h.Check("data-before-fin", err == nil && string(got) == "bye", "the application reads the data that came with the FIN", fmt.Sprintf("%q, error %s", got, errKind(err)))
 	_, err = readFull(c, 1, time.Second)
