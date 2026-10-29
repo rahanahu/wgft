@@ -52,6 +52,7 @@ type stack struct {
 	addr   uint32         // 自分のアドレス(集合の最初のアドレス)
 	clock  func() int64
 	isnKey sipKey
+	tsKey  sipKey
 
 	tmu       sync.Mutex
 	closed    bool
@@ -168,6 +169,7 @@ func newStack(local []netip.Prefix, mtu int, lim limits, clock func() int64, ran
 	var chachaSeed [32]byte
 	copy(chachaSeed[:], seed[32:])
 	s.rng = mrand.NewChaCha8(chachaSeed)
+	s.tsKey = sipKey{s.rng.Uint64(), s.rng.Uint64()}
 	s.ipID.Store(uint32(s.rng.Uint64()))
 
 	n := lim.conns()
@@ -207,12 +209,6 @@ func (s *stack) isLocal(a uint32) bool {
 	return false
 }
 
-func (s *stack) random32() uint32 {
-	s.rngMu.Lock()
-	defer s.rngMu.Unlock()
-	return uint32(s.rng.Uint64())
-}
-
 func (s *stack) randomN(n int) int {
 	s.rngMu.Lock()
 	defer s.rngMu.Unlock()
@@ -222,9 +218,29 @@ func (s *stack) randomN(n int) int {
 
 func (s *stack) nextID() uint16 { return uint16(s.ipID.Add(1)) }
 
-// isn は RFC 6528 の鍵付きの hash で ISN を作る。M は 4 µs ごとに進む時計である。
-func (s *stack) isn(t tuple, now int64) uint32 {
-	return uint32(now/4000) + uint32(s.isnKey.hashTuple(t))
+// isn は RFC 6528 の鍵付きの hash で ISN を作る。M は 4 µs ごとに進む時計である。reuse は TIME_WAIT の
+// 4 つ組を新しい SYN が使い直すときの前の接続の SND.NXT で、Linux と同じく ISN をその 65537 先より
+// 前に置かない。前の接続の古い segment が新しい接続の番号の空間に入らないためである(RFC 1122 4.2.2.13)。
+func (s *stack) isn(t tuple, now int64, reuse reuseISS) uint32 {
+	iss := uint32(now/4000) + uint32(s.isnKey.hashTuple(t))
+	if reuse.ok {
+		if floor := reuse.sndNxt + 65537; seqLT(iss, floor) {
+			iss = floor
+		}
+	}
+	return iss
+}
+
+// reuseISS は、TIME_WAIT の 4 つ組を使い直す SYN に渡す前の接続の SND.NXT。
+type reuseISS struct {
+	ok     bool
+	sndNxt uint32
+}
+
+// tsOffset は timestamp の値に足す offset。Linux の secure_tcp_ts_off と同じくアドレスの組の鍵付きの hash
+// から作るので、同じ相手との接続の TSval は接続を作り直しても増え続け、相手の PAWS が働く。
+func (s *stack) tsOffset(t tuple) uint32 {
+	return uint32(s.tsKey.sum(uint64(t.laddr)|uint64(t.raddr)<<32, 0))
 }
 
 // challengeAllowed は Device 全体の challenge ACK の token bucket から 1 つ取れたかを返す。Linux と
@@ -357,6 +373,7 @@ func (s *stack) inputTCP(seg *segment, now int64) {
 		s.dropMSS(seg, now)
 		return
 	}
+	var reuse reuseISS
 	for range 3 {
 		s.tmu.Lock()
 		if s.closed {
@@ -371,7 +388,7 @@ func (s *stack) inputTCP(seg *segment, now int64) {
 				c.mu.Unlock()
 				continue
 			}
-			again := c.input(seg, now)
+			again := c.input(seg, now, &reuse)
 			c.mu.Unlock()
 			if again {
 				continue // TIME_WAIT の接続が新しい SYN を受けた(RFC 6191)
@@ -379,7 +396,7 @@ func (s *stack) inputTCP(seg *segment, now int64) {
 			return
 		}
 		if r := s.tw.find(seg.tup); r >= 0 {
-			if s.twInput(r, seg, now) {
+			if s.twInput(r, seg, now, &reuse) {
 				s.tmu.Unlock()
 				return
 			}
@@ -395,7 +412,7 @@ func (s *stack) inputTCP(seg *segment, now int64) {
 		}
 		l := s.listeners[seg.tup.local()]
 		if l != nil && seg.flags&(flagSYN|flagACK|flagRST) == flagSYN {
-			s.newSynRow(l, seg, now)
+			s.newSynRow(l, seg, now, reuse)
 			s.tmu.Unlock()
 			return
 		}

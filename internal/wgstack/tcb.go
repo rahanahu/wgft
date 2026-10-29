@@ -228,7 +228,7 @@ func (c *tcb) establish(r *synRow, seg *segment, now int64) {
 	if c.tsOK && seg.opt.hasTS {
 		c.tsRecent = seg.opt.tsVal
 		if seg.opt.tsEcr != 0 {
-			c.rttSample(int64(tsClock(now)+c.tsOffset-seg.opt.tsEcr) * int64(time.Millisecond))
+			c.tsRTTSample(seg.opt.tsEcr, now)
 		}
 	} else if !r.rtx && r.sentAt != 0 {
 		c.rttSample(now - r.sentAt)
@@ -260,6 +260,16 @@ func (c *tcb) rttSample(r int64) {
 	}
 	rto := c.srtt + max(int64(time.Millisecond), 4*c.rttvar)
 	c.rto = min(max(rto, int64(rtoMin)), int64(rtoMax))
+}
+
+// tsRTTSample は、相手が返した自分の TSval(TSecr)から RTT を測る(RFC 7323 4.1)。自分の今の TSval より
+// 先の TSecr は、自分が送っていない値なので使わない。
+func (c *tcb) tsRTTSample(tsEcr uint32, now int64) {
+	d := int32(tsClock(now) + c.tsOffset - tsEcr)
+	if d < 0 {
+		return
+	}
+	c.rttSample(int64(d) * int64(time.Millisecond))
 }
 
 // curRTO は今の後退を含めた RTO。
@@ -318,10 +328,11 @@ func (c *tcb) challengeAck(now int64) {
 }
 
 // input は接続の枠への segment を処理する。mu を持って呼ぶ。真を返したら、呼び出し側は segment を
-// もう一度表から引く(TIME_WAIT の接続が RFC 6191 の SYN を受けて CLOSED になった)。
-func (c *tcb) input(seg *segment, now int64) bool {
+// もう一度表から引く(TIME_WAIT の接続が RFC 6191 の SYN を受けて CLOSED になった)。そのとき reuse に
+// 前の接続の SND.NXT を書く。
+func (c *tcb) input(seg *segment, now int64, reuse *reuseISS) bool {
 	if c.state == stTimeWait {
-		again := c.timeWaitInput(seg, now)
+		again := c.timeWaitInput(seg, now, reuse)
 		c.afterInput(now)
 		return again
 	}
@@ -381,7 +392,7 @@ func (c *tcb) input(seg *segment, now int64) bool {
 }
 
 // timeWaitInput は枠に残る TIME_WAIT の接続への segment を処理する。
-func (c *tcb) timeWaitInput(seg *segment, now int64) bool {
+func (c *tcb) timeWaitInput(seg *segment, now int64, reuse *reuseISS) bool {
 	if seg.has(flagRST) {
 		if seg.seq == c.rcvNxt {
 			c.toClosed(nil)
@@ -391,6 +402,7 @@ func (c *tcb) timeWaitInput(seg *segment, now int64) bool {
 	if seg.has(flagSYN) {
 		if !seg.has(flagACK) && rfc6191(seg, c.tsOK, c.tsRecent, c.rcvNxt) {
 			// 接続は CLOSED になり、アプリケーションはそれまでのデータと io.EOF を読める
+			*reuse = reuseISS{ok: true, sndNxt: c.sndMax}
 			c.toClosed(nil)
 			return true
 		}
@@ -413,6 +425,9 @@ func (c *tcb) timeWaitInput(seg *segment, now int64) bool {
 func (c *tcb) processAck(seg *segment, now int64) {
 	ack := seg.ack
 	c.probesOut = 0
+	if c.persist {
+		c.retransStart = 0 // 相手は probe に応えている
+	}
 	wndChanged := false
 	if seqLT(c.sndWl1, seg.seq) || (c.sndWl1 == seg.seq && seqLE(c.sndWl2, ack)) {
 		w := uint32(seg.wnd) << c.sndWscale
@@ -478,7 +493,7 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 		c.recs.pop()
 	}
 	if c.tsOK && seg.opt.hasTS && seg.opt.tsEcr != 0 {
-		c.rttSample(int64(tsClock(now)+c.tsOffset-seg.opt.tsEcr) * int64(time.Millisecond))
+		c.tsRTTSample(seg.opt.tsEcr, now)
 	} else if sample >= 0 {
 		c.rttSample(sample)
 	}
@@ -676,7 +691,11 @@ func (c *tcb) afterInput(now int64) {
 	}
 	// 窓が 0 で送るものがあり、確認を待つものが無ければ窓の probe を張る
 	if c.sndWnd == 0 && !c.persist && c.sndNxt == c.sndUna && c.hasUnsent() && c.state != stClosed {
+		// 確認を待つものが無いので、前の RTO の起点と後退を持ち越さない。持ち越すと、相手が probe に
+		// 応え続けた長い persist の後の最初の RTO で、再送の打ち切りの時間を過ぎたと数える
 		c.persist = true
+		c.retransStart = 0
+		c.backoff = 0
 		c.disarm(tmrRetrans)
 		c.arm(tmrRetrans, now+c.curRTO())
 	}
@@ -820,6 +839,9 @@ func (c *tcb) freeSlotLocked() {
 	}
 	c.gen++
 	c.state = stFree
+	if s.closed {
+		c.floorRecs = nil // 閉じた Device では、Close と競った確立が確保した輪も残さない
+	}
 	if c.rch != nil {
 		close(c.rch)
 		close(c.wch)

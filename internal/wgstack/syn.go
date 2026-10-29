@@ -100,7 +100,7 @@ func (t *synTable) nextDeadline() int64 {
 
 // newSynRow は待ち受け l への SYN から行を作り、SYN-ACK を送る。表が満杯か、待ち受けが N_syn の半分を
 // 使っていれば、状態を作らずに捨てる。tmu を持って呼ぶ。
-func (s *stack) newSynRow(l *listener, seg *segment, now int64) {
+func (s *stack) newSynRow(l *listener, seg *segment, now int64, reuse reuseISS) {
 	t := &s.syn
 	if len(t.free) == 0 || l.synCount >= s.lim.synRows/2 {
 		s.refused(&s.synFull, &s.synGate, now, "dropped SYNs because the half-open table was full")
@@ -112,7 +112,7 @@ func (s *stack) newSynRow(l *listener, seg *segment, now int64) {
 	*r = synRow{
 		tup:      seg.tup,
 		lst:      l,
-		iss:      s.isn(seg.tup, now),
+		iss:      s.isn(seg.tup, now, reuse),
 		irs:      seg.seq,
 		deadline: now + int64(synackRTO),
 		peerMSS:  minMSS,
@@ -127,7 +127,7 @@ func (s *stack) newSynRow(l *listener, seg *segment, now int64) {
 	}
 	r.sackOK = seg.opt.sackOK
 	if seg.opt.hasTS {
-		r.tsOK, r.tsRecent, r.tsOffset = true, seg.opt.tsVal, s.random32()
+		r.tsOK, r.tsRecent, r.tsOffset = true, seg.opt.tsVal, s.tsOffset(seg.tup)
 	}
 	r.rcvWnd = uint16(s.initialWindow(r.tsOK))
 	t.idx.insert(seg.tup, id, 0)

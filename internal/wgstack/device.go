@@ -288,6 +288,7 @@ func (s *stack) close() {
 	s.out.ctl.n = 0
 	s.out.mu.Unlock()
 	s.chunks.mu.Lock()
+	s.chunks.closed = true
 	s.chunks.free = nil
 	s.chunks.mu.Unlock()
 }

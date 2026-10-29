@@ -912,9 +912,10 @@ func TestTCPHarnessStaysInTests(t *testing.T) {
 // internal/wgstack, the wgft-owned netstack of the agent's userspace mode: from outside the module
 // it imports only the standard library and golang.zx2c4.com/wireguard/tun, and nothing from the
 // module: its log gate counts on the core clock, so it does not use internal/lograte. It never
-// reaches gVisor, internal/nettun, internal/dataplane, the agent or vpsd. The kernel-mode packages of the agent, internal/agent/kernelmode and internal/agent/agentdp,
-// do not depend on internal/wgstack through any import, which keeps the kernel mode isolated from
-// it by structure (I7).
+// reaches gVisor, internal/nettun, internal/dataplane, the agent or vpsd. The kernel-mode packages
+// of the agent, internal/agent/kernelmode and internal/agent/agentdp, do not depend on
+// internal/wgstack through any import, which keeps the kernel mode isolated from it by
+// structure (I7).
 func TestWgstackImports(t *testing.T) {
 	root := moduleRoot(t)
 	const pkg = module + "/internal/wgstack"
