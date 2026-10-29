@@ -209,12 +209,6 @@ func (s *stack) isLocal(a uint32) bool {
 	return false
 }
 
-func (s *stack) random32() uint32 {
-	s.rngMu.Lock()
-	defer s.rngMu.Unlock()
-	return uint32(s.rng.Uint64())
-}
-
 func (s *stack) randomN(n int) int {
 	s.rngMu.Lock()
 	defer s.rngMu.Unlock()
