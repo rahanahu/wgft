@@ -14,6 +14,7 @@
 | 管理 UI の public 待ち受け | 認証と TLS を備えた `public` の選択肢は未実装です。通常の TCP 待ち受けは `WGFT_ADMIN=0.0.0.0:8686` などの非ループバックでも開け、起動ログの警告だけで停止しません | `public` の選択肢に要る認証、TLS、試行の制限は[管理用 API の接続経路](security/admin-transport.md#11-セキュリティ)に定めます |
 | server へのエージェントのモードの通知 | `proto.Heartbeat` はモードのフィールドを持ちません | 手元の制御ソケットは `runtime_state.mode` を返しますが、server へは伝えません。wire、管理用 API、capability と経路図の変更は未実装です |
 | 診断の `--report` と遠隔の診断 | CLI の `--json` と Web UI の server の診断は実装済みです | [報告の許可一覧](proposals/diagnostic-report.md)と、遠隔の証拠を要求する通信は未実装です |
+| エージェントの wgft の netstack | ユーザー空間モードのエージェントは gVisor の netstack だけを使います | [wgstack の設計](userspace/wgstack.md)は未実装の提案です。性能の目標を満たすまで main に入れず、既定は gVisor のままです |
 
 ## 現在の制限と未確認事項
 
