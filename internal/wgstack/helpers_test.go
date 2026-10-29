@@ -261,3 +261,5 @@ func acceptOne(t testing.TB, l *TCPListener) *Conn {
 	}
 	return nil
 }
+
+func netipAP(port uint16) netip.AddrPort { return netip.AddrPortFrom(dutAddr, port) }
