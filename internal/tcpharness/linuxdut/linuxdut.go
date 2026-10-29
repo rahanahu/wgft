@@ -97,11 +97,12 @@ func configure(addr netip.Addr, mtu int) error {
 	return step("bringing the device up", unix.SIOCSIFFLAGS, func(r *unix.Ifreq) error { r.SetUint16(unix.IFF_UP | unix.IFF_RUNNING); return nil })
 }
 
-// Engine is the harness's description of this engine.
-func Engine(known map[string]string) tcpharness.Engine {
+// Engine is the harness's description of this engine. The seed is not used: the kernel takes
+// its randomness from its own source.
+func Engine(known map[string]tcpharness.Known) tcpharness.Engine {
 	return tcpharness.Engine{
 		Name: "linux",
-		New: func(tb testing.TB) tcpharness.DUT {
+		New: func(tb testing.TB, _ uint64) tcpharness.DUT {
 			d, err := New(tcpharness.DUTAddr, tcpharness.MTU)
 			if err != nil {
 				tb.Fatalf("linux DUT: %v", err)

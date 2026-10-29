@@ -7,9 +7,17 @@ import (
 )
 
 // Known lists where wgft's gVisor configuration is known to differ from the scenarios'
-// expectations, which follow the RFCs and Linux. Each entry needs a reason.
-var Known = map[string]string{
-	"handshake-mss-floor/synack": "wgft drops SYNs with an MSS below 536 at the TUN ingress on purpose (internal/nettun/ingress.go tcpSynMinMSS)",
+// expectations, which follow the RFCs and the pinned Linux reference.
+var Known = map[string]tcpharness.Known{
+	"handshake-mss-floor/mss535.synack": {
+		Observed: "no SYN-ACK",
+		Reason:   "wgft drops SYNs with an MSS below 536 at the TUN ingress on purpose: internal/nettun/ingress.go tcpSynMinMSS",
+	},
+	"retransmit-rto/backoff-from-first": {
+		Observed: "second gap / first gap below 1.5",
+		Reason: "gVisor's default loss detection is RACK-TLP, RFC 8985: the first retransmission is a tail loss probe " +
+			"after 2 SRTT plus 200 ms, and the RTO that follows starts unbacked; the reference Linux has TLP off",
+	},
 }
 
 // TestConformance runs the scenarios against nettun's gVisor Device. It needs no privileges.

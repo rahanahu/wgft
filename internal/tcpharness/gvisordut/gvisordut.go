@@ -36,11 +36,12 @@ func New(addr netip.Addr, mtu int) (*DUT, error) {
 	return d, nil
 }
 
-// Engine is the harness's description of this engine. Known is filled in by the caller.
-func Engine(known map[string]string) tcpharness.Engine {
+// Engine is the harness's description of this engine. Known is filled in by the caller. The
+// seed is not used: gVisor takes its randomness from the stack's own source.
+func Engine(known map[string]tcpharness.Known) tcpharness.Engine {
 	return tcpharness.Engine{
 		Name: "gvisor",
-		New: func(tb testing.TB) tcpharness.DUT {
+		New: func(tb testing.TB, _ uint64) tcpharness.DUT {
 			d, err := New(tcpharness.DUTAddr, tcpharness.MTU)
 			if err != nil {
 				tb.Fatalf("nettun.Create: %v", err)
@@ -134,6 +135,8 @@ func (l *listener) Accept(ctx context.Context) (tcpharness.Conn, error) {
 	}
 }
 
+// conn is the accepted *nettun.TCPConn. Its Delivered, CloseForDelivery and OnBoost are promoted,
+// so the scenarios find them by type assertion as the relay does.
 type conn struct{ *nettun.TCPConn }
 
 func (c conn) Abort() error { c.TCPConn.Abort(); return nil }

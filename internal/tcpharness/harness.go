@@ -4,15 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"math/rand/v2"
 	"net/netip"
+	"os"
+	"runtime"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 )
 
-// The addresses and the MTU every DUT is built with. The MTU is wgft's default tunnel MTU
-// (WGFT_MTU), so an MSS of 1380 is what the agent advertises in production.
+// The addresses and the MTU every DUT is built with. The MTU is wgft's default tunnel MTU,
+// WGFT_MTU, so an MSS of 1380 is what the agent advertises in production.
 var (
 	DUTAddr  = netip.MustParseAddr("10.200.0.2")
 	PeerAddr = netip.MustParseAddr("10.200.0.1")
@@ -20,14 +24,24 @@ var (
 
 const MTU = 1420
 
-// Engine names one TCP engine and how to build a fresh DUT of it. Known is the engine's
-// expected-difference list: the checks, as "scenario/check", that are known to fail on this
-// engine, each with the reason. A listed check that passes is reported as an error, so the list
-// cannot go stale silently.
+// SeedEnv names the environment variable that fixes the run's seed, to replay a failure.
+const SeedEnv = "WGFT_TEST_TCPHARNESS_SEED"
+
+// Known is one entry of an engine's expected-difference list: what the engine is known to do
+// instead, and why that is accepted. Observed must equal the failing check's observation, so a
+// difference that changes shape fails the run instead of hiding behind the entry.
+type Known struct {
+	Observed string
+	Reason   string
+}
+
+// Engine names one TCP engine and how to build a fresh DUT of it. New gets the scenario's seed;
+// an engine that takes randomness, such as an ISN key, uses it so a run can be replayed. Known
+// maps "scenario/check" to the engine's expected differences.
 type Engine struct {
 	Name  string
-	New   func(tb testing.TB) DUT
-	Known map[string]string
+	New   func(tb testing.TB, seed uint64) DUT
+	Known map[string]Known
 }
 
 // Scenario is one engine-neutral conformance scenario.
@@ -38,31 +52,116 @@ type Scenario struct {
 	Run  func(h *H)
 }
 
-// Run runs every scenario as a subtest against a fresh DUT of e.
+// runSeed is the run's seed: SeedEnv's value, or a random one that the run logs.
+func runSeed(t testing.TB) uint64 {
+	if v := os.Getenv(SeedEnv); v != "" {
+		s, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			t.Fatalf("%s=%q is not an unsigned integer", SeedEnv, v)
+		}
+		return s
+	}
+	return rand.Uint64()
+}
+
+// ScenarioSeed derives a scenario's seed from the run's seed and the scenario's name, so a
+// scenario run alone with -run gets the seed it had in the full run.
+func ScenarioSeed(run uint64, scenario string) uint64 {
+	f := fnv.New64a()
+	f.Write([]byte(scenario))
+	return run ^ f.Sum64()
+}
+
+// Run runs every scenario as a subtest against a fresh DUT of e. A listed difference that no
+// check reached is an error when every scenario ran, and only logged when -run left some out.
 func Run(t *testing.T, e Engine, scenarios []Scenario) {
+	seed := runSeed(t)
+	t.Logf("run seed: %d; replay with %s=%d", seed, SeedEnv, seed)
 	seen := map[string]bool{}
+	ran := 0
 	for _, s := range scenarios {
 		t.Run(s.Name, func(t *testing.T) {
+			ran++
+			ss := ScenarioSeed(seed, s.Name)
 			t.Logf("refs: %s", s.Refs)
-			d := e.New(t)
-			h := newH(t, e, s.Name, d)
+			t.Logf("scenario seed: %d", ss)
+			h := newH(t, e, s.Name, e.New(t, ss), ss)
+			// a deferred call also runs when Require ends the scenario through SkipNow or FailNow
+			defer func() {
+				for k := range h.outcome {
+					seen[k] = true
+				}
+			}()
 			s.Run(h)
-			for k := range h.checked {
-				seen[k] = true
-			}
 		})
 	}
-	var stale []string
+	var unreached []string
 	for k := range e.Known {
 		if !seen[k] {
-			stale = append(stale, k)
+			unreached = append(unreached, k)
 		}
 	}
-	sort.Strings(stale)
-	for _, k := range stale {
-		t.Logf("known difference %s was not exercised in this run", k)
+	sort.Strings(unreached)
+	for _, k := range unreached {
+		if ran == len(scenarios) {
+			t.Errorf("known difference %s on %s: no check reached it; fix its key or remove it", k, e.Name)
+		} else {
+			t.Logf("known difference %s: not reached; -run left scenarios out", k)
+		}
 	}
 }
+
+// Outcome of one check.
+const (
+	OutcomePass       = "pass"
+	OutcomeFail       = "fail"
+	OutcomeKnown      = "known"
+	OutcomeUnexpected = "unexpected-pass"
+	OutcomeChanged    = "changed-difference"
+)
+
+// Record runs one scenario against a fresh DUT of e without failing t, and returns each check's
+// outcome by key. It lets the harness test itself: a scenario run against a deliberately wrong
+// engine must fail the check meant to catch the fault.
+func Record(t *testing.T, e Engine, s Scenario, seed uint64) map[string]string {
+	rec := &recorder{TB: t}
+	var h *H
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h = newH(rec, e, s.Name, e.New(rec, seed), seed)
+		s.Run(h)
+	}()
+	<-done
+	if h == nil {
+		t.Fatalf("scenario %s did not start: %v", s.Name, rec.msgs)
+	}
+	return h.outcome
+}
+
+// recorder is a testing.TB that logs failures instead of failing, and ends the scenario's
+// goroutine where the real one would stop the test.
+type recorder struct {
+	testing.TB
+	msgs []string
+}
+
+func (r *recorder) Errorf(format string, args ...any) {
+	m := fmt.Sprintf(format, args...)
+	r.msgs = append(r.msgs, m)
+	r.TB.Logf("recorded: %s", m)
+}
+func (r *recorder) Error(args ...any) { r.Errorf("%s", fmt.Sprint(args...)) }
+func (r *recorder) Fatalf(format string, args ...any) {
+	r.Errorf(format, args...)
+	runtime.Goexit()
+}
+func (r *recorder) Fatal(args ...any)                { r.Fatalf("%s", fmt.Sprint(args...)) }
+func (r *recorder) Fail()                            {}
+func (r *recorder) FailNow()                         { runtime.Goexit() }
+func (r *recorder) SkipNow()                         { runtime.Goexit() }
+func (r *recorder) Skipf(format string, args ...any) { r.TB.Logf(format, args...); runtime.Goexit() }
+func (r *recorder) Skip(args ...any)                 { r.TB.Log(args...); runtime.Goexit() }
 
 // H is the context of one scenario on one DUT.
 type H struct {
@@ -70,48 +169,72 @@ type H struct {
 	DUT      DUT
 	engine   Engine
 	scenario string
-	checked  map[string]bool
+	outcome  map[string]string
+	rng      *rand.Rand
 	nextPort uint16
 }
 
-func newH(t testing.TB, e Engine, scenario string, d DUT) *H {
-	h := &H{T: t, DUT: d, engine: e, scenario: scenario, checked: map[string]bool{},
-		nextPort: uint16(40000 + rand.IntN(20000))}
-	return h
+func newH(t testing.TB, e Engine, scenario string, d DUT, seed uint64) *H {
+	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
+	return &H{T: t, DUT: d, engine: e, scenario: scenario, outcome: map[string]string{}, rng: rng,
+		nextPort: uint16(40000 + rng.IntN(20000))}
 }
 
-// Check records the outcome of one check against the engine's expected-difference list.
-func (h *H) Check(id string, ok bool, format string, args ...any) bool {
+// Check records one check against the engine's expected-difference list. what states the
+// expectation. got is the observation; it is compared with a listed difference's Observed, so it
+// names behaviour and leaves out values that change from run to run, such as sequence numbers.
+func (h *H) Check(id string, ok bool, what, got string) bool {
 	h.T.Helper()
 	key := h.scenario + "/" + id
-	h.checked[key] = true
-	detail := fmt.Sprintf(format, args...)
-	reason, known := h.engine.Known[key]
+	k, known := h.engine.Known[key]
 	switch {
 	case ok && !known:
-		h.T.Logf("PASS  %s: %s", key, detail)
+		h.outcome[key] = OutcomePass
+		h.T.Logf("PASS  %s: %s; got: %s", key, what, got)
 	case ok && known:
-		h.T.Errorf("UNEXPECTED PASS  %s on %s: %s; remove it from the expected-difference list (%s)", key, h.engine.Name, detail, reason)
+		h.outcome[key] = OutcomeUnexpected
+		h.T.Errorf("UNEXPECTED PASS  %s on %s: %s; got: %s; the list says: %s; remove the entry", key, h.engine.Name, what, got, k.Observed)
+	case !ok && known && got == k.Observed:
+		h.outcome[key] = OutcomeKnown
+		h.T.Logf("KNOWN DIFFERENCE  %s on %s: %s; got: %s; reason: %s", key, h.engine.Name, what, got, k.Reason)
 	case !ok && known:
-		h.T.Logf("KNOWN DIFFERENCE  %s on %s: %s (%s)", key, h.engine.Name, detail, reason)
+		h.outcome[key] = OutcomeChanged
+		h.T.Errorf("CHANGED DIFFERENCE  %s on %s: %s; got: %s; the list says: %s", key, h.engine.Name, what, got, k.Observed)
 	default:
-		h.T.Errorf("FAIL  %s on %s: %s", key, h.engine.Name, detail)
+		h.outcome[key] = OutcomeFail
+		h.T.Errorf("FAIL  %s on %s: %s; got: %s", key, h.engine.Name, what, got)
 	}
 	return ok
 }
 
-// Require is Check, but the scenario stops when the check fails.
-func (h *H) Require(id string, ok bool, format string, args ...any) {
+// Require is Check, but the scenario stops when the check fails. A known difference ends it as
+// a skip; any other failure ends it as a failure.
+func (h *H) Require(id string, ok bool, what, got string) {
 	h.T.Helper()
-	if !h.Check(id, ok, format, args...) {
-		h.T.SkipNow() // a failure is already recorded; a known difference ends the scenario quietly
+	if h.Check(id, ok, what, got) {
+		return
 	}
+	if h.outcome[h.scenario+"/"+id] == OutcomeKnown {
+		h.T.SkipNow()
+	}
+	h.T.FailNow()
 }
 
 // Measure reports a value for the comparison tables. It asserts nothing.
 func (h *H) Measure(name string, v any) {
 	h.T.Helper()
 	h.T.Logf("MEASURE engine=%s %s/%s=%v", h.engine.Name, h.scenario, name, v)
+}
+
+// Prompt is how soon the DUT must answer where the RFCs ask for an immediate segment, such as
+// the duplicate ACK for an out-of-order segment. On real time it is far below the 200 ms floor of
+// a delayed ACK and of the RTO, so a delayed answer fails. On a ClockedDUT it is zero: the answer
+// must be ready before the clock moves.
+func (h *H) Prompt() time.Duration {
+	if _, ok := h.DUT.(ClockedDUT); ok {
+		return 0
+	}
+	return 100 * time.Millisecond
 }
 
 // Listen opens a listener on the DUT and closes it at the end of the scenario.
@@ -146,22 +269,33 @@ type Peer struct {
 	tsBase   uint32
 	TSRecent uint32 // the latest TSval of the DUT
 	SynTSVal uint32 // the TSval of the testbench's SYN
+
+	DutAck    uint32 // the latest acknowledgment number from the DUT
+	DutWindow int    // the latest window the DUT advertised, in bytes
 }
 
-// NewPeer makes a testbench endpoint towards the DUT's port with a fresh source port and ISS.
+// NewPeer makes a testbench endpoint towards the DUT's port with a fresh source port and ISS
+// from the scenario's seed.
 func (h *H) NewPeer(dutPort uint16) *Peer {
 	h.nextPort++
 	return &Peer{
 		h:       h,
 		Local:   netip.AddrPortFrom(PeerAddr, h.nextPort),
 		Remote:  netip.AddrPortFrom(h.DUT.Addr(), dutPort),
-		ISS:     rand.Uint32(),
+		ISS:     h.rng.Uint32(),
 		WS:      -1,
 		Window:  65535,
 		DutWS:   -1,
 		tsStart: h.Now(),
-		tsBase:  rand.Uint32(),
+		tsBase:  h.rng.Uint32(),
 	}
+}
+
+// Reincarnate makes a new peer on the same four-tuple as p, for a new connection after p's has
+// closed, with the given ISS and a timestamp clock that continues p's 1000 ticks later.
+func (p *Peer) Reincarnate(iss uint32) *Peer {
+	return &Peer{h: p.h, Local: p.Local, Remote: p.Remote, ISS: iss, WS: -1, Window: 65535, DutWS: -1,
+		tsStart: p.h.Now(), tsBase: p.TSVal() + 1000}
 }
 
 // TSVal is the testbench's timestamp clock, 1 ms per tick.
@@ -179,6 +313,7 @@ func (p *Peer) Segment(flags uint8, seq uint32, payload []byte) Segment {
 // Send injects s into the DUT.
 func (p *Peer) Send(s Segment) {
 	p.h.T.Helper()
+	p.h.T.Logf("-> %v", s)
 	if err := p.h.DUT.Inject(s.Marshal()); err != nil {
 		p.h.T.Fatalf("inject %v: %v", s, err)
 	}
@@ -197,6 +332,13 @@ func (p *Peer) SendAck() {
 	p.Send(p.Segment(FlagACK, p.SndNxt, nil))
 }
 
+// SendFIN sends a FIN, with payload if any, and advances SndNxt past it.
+func (p *Peer) SendFIN(payload []byte) {
+	p.h.T.Helper()
+	p.Send(p.Segment(FlagFIN|FlagACK|FlagPSH, p.SndNxt, payload))
+	p.SndNxt += uint32(len(payload)) + 1
+}
+
 // Now is the scenario's clock: the engine's clock when the DUT is a ClockedDUT, else real time.
 func (h *H) Now() time.Time {
 	if c, ok := h.DUT.(ClockedDUT); ok {
@@ -208,47 +350,47 @@ func (h *H) Now() time.Time {
 // clockStep is how far Next moves a ClockedDUT's clock between looks at its output.
 const clockStep = time.Millisecond
 
+// next returns the DUT's next packet within d of the scenario's clock.
+func (h *H) next(d time.Duration) ([]byte, bool) {
+	if c, ok := h.DUT.(ClockedDUT); ok {
+		deadline := c.Now().Add(d)
+		for {
+			if pkt, ok := c.Poll(); ok {
+				return pkt, true
+			}
+			if !c.Now().Before(deadline) {
+				return nil, false
+			}
+			c.Advance(clockStep)
+		}
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case pkt, ok := <-h.DUT.Emitted():
+		return pkt, ok
+	case <-timer.C:
+		return nil, false
+	}
+}
+
 // Next returns the next segment of this flow the DUT emits within d of the scenario's clock.
 // Packets of other flows, and packets that are not well-formed IPv4 TCP, are logged and dropped.
-// With a ClockedDUT, Next takes what the engine has already emitted and otherwise advances the
-// engine's clock in steps of clockStep until d has passed, so no real time is spent waiting.
+// A packet larger than the MTU fails the scenario: the harness compares segments as TCP alone
+// cut them, with no offload in between.
 func (p *Peer) Next(d time.Duration) (Segment, bool) {
-	clocked, isClocked := p.h.DUT.(ClockedDUT)
-	var timeout <-chan time.Time
-	var deadline time.Time
-	if isClocked {
-		deadline = clocked.Now().Add(d)
-	} else {
-		timer := time.NewTimer(d)
-		defer timer.Stop()
-		timeout = timer.C
-	}
+	deadline := p.h.Now().Add(d)
 	for {
-		var pkt []byte
-		var ok bool
-		if isClocked {
-			select {
-			case pkt, ok = <-p.h.DUT.Emitted():
-			default:
-				if !clocked.Now().Before(deadline) {
-					return Segment{}, false
-				}
-				clocked.Advance(clockStep)
-				continue
-			}
-		} else {
-			select {
-			case pkt, ok = <-p.h.DUT.Emitted():
-			case <-timeout:
-				return Segment{}, false
-			}
-		}
+		pkt, ok := p.h.next(max(deadline.Sub(p.h.Now()), 0))
 		if !ok {
 			return Segment{}, false
 		}
+		if len(pkt) > p.h.DUT.MTU() {
+			p.h.T.Errorf("FAIL  emitted packet on %s: at most the MTU of %d bytes; got: %d bytes", p.h.engine.Name, p.h.DUT.MTU(), len(pkt))
+		}
 		s, err := Parse(pkt)
 		if err != nil {
-			p.h.T.Logf("emitted packet ignored: %v (% x)", err, pkt[:min(len(pkt), 40)])
+			p.h.T.Logf("emitted packet ignored: %v: % x", err, pkt[:min(len(pkt), 40)])
 			continue
 		}
 		if s.Src != p.Remote || s.Dst != p.Local {
@@ -257,6 +399,13 @@ func (p *Peer) Next(d time.Duration) (Segment, bool) {
 		}
 		if s.Opts.TS != nil {
 			p.TSRecent = s.Opts.TS.Val
+		}
+		if s.Has(FlagACK) {
+			p.DutAck = s.Ack
+			p.DutWindow = int(s.Window)
+			if p.DutWS >= 0 && !s.Has(FlagSYN) {
+				p.DutWindow <<= p.DutWS
+			}
 		}
 		p.h.T.Logf("<- %v", s)
 		return s, true
@@ -268,11 +417,7 @@ func (p *Peer) Next(d time.Duration) (Segment, bool) {
 func (p *Peer) Await(d time.Duration, match func(Segment) bool) (Segment, bool) {
 	deadline := p.h.Now().Add(d)
 	for {
-		left := deadline.Sub(p.h.Now())
-		if left <= 0 {
-			return Segment{}, false
-		}
-		s, ok := p.Next(left)
+		s, ok := p.Next(max(deadline.Sub(p.h.Now()), 0))
 		if !ok {
 			return Segment{}, false
 		}
@@ -288,21 +433,51 @@ func (p *Peer) Quiet(d time.Duration) (Segment, bool) {
 	return s, !ok
 }
 
-// Connect opens a connection to l from a new peer with the given SYN options and returns the
-// peer, the SYN-ACK and the accepted connection. The final ACK carries window field win.
-func (h *H) Connect(l Listener, port uint16, syn Options) (*Peer, Segment, Conn) {
+// Dial describes the testbench's side of a handshake.
+type Dial struct {
+	SYN Options
+	// Window is the window field of every segment after the SYN; zero means 65535.
+	Window uint16
+	// SynWindow is the SYN's window field, which is never scaled; zero means Window.
+	SynWindow uint16
+}
+
+// Handshake runs a three-way handshake from a new peer to port and returns the peer and the
+// SYN-ACK. It does not accept the connection.
+func (h *H) Handshake(port uint16, d Dial) (*Peer, Segment) {
 	h.T.Helper()
 	p := h.NewPeer(port)
-	p.WS = syn.WS
+	return p, h.HandshakeFrom(p, d)
+}
+
+// HandshakeFrom runs a three-way handshake from p, which may be a reincarnated peer.
+func (h *H) HandshakeFrom(p *Peer, d Dial) Segment {
+	h.T.Helper()
+	p.Window = 65535
+	if d.Window != 0 {
+		p.Window = d.Window
+	}
+	synWin := p.Window
+	if d.SynWindow != 0 {
+		synWin = d.SynWindow
+	}
+	p.WS = d.SYN.WS
+	syn := d.SYN
 	if syn.TS != nil {
-		// the SYN's TSval comes from the peer's clock, so later segments pass PAWS (RFC 7323 5)
+		// the SYN's TSval comes from the peer's clock, so later segments pass PAWS
 		syn.TS = &Timestamps{Val: p.TSVal(), Ecr: 0}
 		p.SynTSVal = syn.TS.Val
 	}
-	s := Segment{Src: p.Local, Dst: p.Remote, Seq: p.ISS, Flags: FlagSYN, Window: 65535, Opts: syn}
-	p.Send(s)
+	p.Send(Segment{Src: p.Local, Dst: p.Remote, Seq: p.ISS, Flags: FlagSYN, Window: synWin, Opts: syn})
 	synack, ok := p.Await(2*time.Second, func(s Segment) bool { return s.Has(FlagSYN | FlagACK) })
-	h.Require("handshake.synack", ok && synack.Ack == p.ISS+1, "SYN-ACK acknowledging ISS+1 within 2 s: %v", synack)
+	h.Require("handshake.synack", ok && synack.Ack == p.ISS+1, "a SYN-ACK acknowledging ISS+1 within 2 s", synackString(p, synack, ok))
+	p.adopt(syn, synack)
+	p.SendAck()
+	return synack
+}
+
+// adopt takes the connection's parameters from the SYN the peer sent and the SYN-ACK.
+func (p *Peer) adopt(syn Options, synack Segment) {
 	p.SndNxt = p.ISS + 1
 	p.DutISS = synack.Seq
 	p.RcvNxt = synack.Seq + 1
@@ -310,26 +485,61 @@ func (h *H) Connect(l Listener, port uint16, syn Options) (*Peer, Segment, Conn)
 	p.SACK = syn.SACKPermitted && synack.Opts.SACKPermitted
 	p.TS = syn.TS != nil && synack.Opts.TS != nil
 	if p.WS < 0 || p.DutWS < 0 {
-		p.WS, p.DutWS = -1, -1 // window scaling is used only when both sides offered it (RFC 7323 2.2)
+		p.WS, p.DutWS = -1, -1 // window scaling is used only when both sides offered it, RFC 7323 2.2
 	}
 	if p.TS {
 		p.TSRecent = synack.Opts.TS.Val
 	}
-	p.SendAck()
+}
 
+func synackString(p *Peer, s Segment, ok bool) string {
+	switch {
+	case !ok:
+		return "no SYN-ACK"
+	case s.Ack != p.ISS+1:
+		return "a SYN-ACK acknowledging another number"
+	}
+	return "a SYN-ACK acknowledging ISS+1"
+}
+
+// Connect opens a connection to l from a new peer with the given SYN options and returns the
+// peer, the SYN-ACK and the accepted connection.
+func (h *H) Connect(l Listener, port uint16, syn Options) (*Peer, Segment, Conn) {
+	h.T.Helper()
+	return h.ConnectWith(l, port, Dial{SYN: syn})
+}
+
+// ConnectWith is Connect with the whole Dial.
+func (h *H) ConnectWith(l Listener, port uint16, d Dial) (*Peer, Segment, Conn) {
+	h.T.Helper()
+	p, synack := h.Handshake(port, d)
+	return p, synack, h.Accept(l)
+}
+
+// Accept accepts the next connection within 2 s and aborts it at the end of the scenario.
+func (h *H) Accept(l Listener) Conn {
+	h.T.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := l.Accept(ctx)
-	h.Require("handshake.accept", err == nil, "accept within 2 s after the final ACK: err=%v", err)
+	h.Require("handshake.accept", err == nil, "accept within 2 s after the final ACK", "error "+errString(err))
 	h.T.Cleanup(func() { c.Abort() })
-	return p, synack, c
+	return c
 }
 
 // StandardSYN is the SYN options a modern client sends: MSS for wgft's MTU, window scale 7,
-// SACK-permitted and timestamps. Connect fills in the timestamp value.
+// SACK-permitted and timestamps. Handshake fills in the timestamp value.
 func StandardSYN() Options {
 	mss := uint16(MTU - 40)
 	return Options{MSS: &mss, WS: 7, SACKPermitted: true, TS: &Timestamps{}}
+}
+
+// NoSACKSYN is StandardSYN without SACK-permitted, for the loss-recovery scenarios: both ends
+// then recover as NewReno.
+func NoSACKSYN() Options {
+	o := StandardSYN()
+	o.SACKPermitted = false
+	return o
 }
 
 // readFull reads n bytes from c within d of real time. Socket deadlines are real time on every
@@ -349,7 +559,7 @@ func readFull(c Conn, n int, d time.Duration) ([]byte, error) {
 	return buf, nil
 }
 
-// errString formats an error for a check's detail.
+// errString names an error for a check's observation: nil, timeout, EOF or the error's text.
 func errString(err error) string {
 	if err == nil {
 		return "nil"

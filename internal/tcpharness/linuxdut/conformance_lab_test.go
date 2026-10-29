@@ -13,7 +13,7 @@ import (
 )
 
 // Known lists where Linux, the reference, is known to differ from the scenarios' expectations.
-var Known = map[string]string{}
+var Known = map[string]tcpharness.Known{}
 
 // TestConformance runs the scenarios against the Linux kernel's TCP through a TUN device. It
 // re-runs itself in a new user and network namespace, so the kernel's defaults for a new
