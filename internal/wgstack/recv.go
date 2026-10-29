@@ -137,13 +137,6 @@ func (b *recvBuf) read(dst []byte) int {
 	return n
 }
 
-// discard は未読のデータと順序外のデータをすべて捨てる。
-func (b *recvBuf) discard() {
-	b.readOff = b.nxtOff
-	b.n = 0
-	b.r.release()
-}
-
 // sackBlocks は、最も新しく伸びた区間を先頭に、区間を最大 len(dst) 個の SACK の block にする
 // (RFC 2018 4 節)。base は offset 0 のシーケンス番号である。
 func (b *recvBuf) sackBlocks(dst []sackBlock, base uint32) []sackBlock {

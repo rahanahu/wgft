@@ -2,7 +2,6 @@ package wgstack
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"net/netip"
@@ -238,8 +237,6 @@ func (p *peerConn) absorb(outs []out) []byte {
 	}
 	return data
 }
-
-func u16(b []byte) uint16 { return binary.BigEndian.Uint16(b) }
 
 // acceptOne は待ち受けから 1 つ受け取る。
 func acceptOne(t testing.TB, l *TCPListener) *Conn {
