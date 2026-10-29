@@ -231,8 +231,12 @@ func (c *tcb) buildRtx(b []byte, space int, now int64) int {
 	if fin {
 		length++
 	}
-	if c.recs.n > 0 && c.recs.at(0).seq == seq {
-		r := c.recs.at(0)
+	// 再送する範囲に掛かる記録をすべて再送の印にする(Karn の規則)
+	for i := 0; i < c.recs.n; i++ {
+		r := c.recs.at(i)
+		if !seqLT(r.seq, seq+length) {
+			break
+		}
 		r.flags |= recRetransmitted
 		r.sentAt = now
 	}

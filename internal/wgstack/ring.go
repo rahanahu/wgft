@@ -9,9 +9,10 @@ type chunk [chunkSize]byte
 // 確保に使い回す。上限を超えて返った chunk は GC に任せる。置き場の chunk はどの予約にも数えず、
 // 上限の分を M_fix に数える。held は輪が今持つ chunk の数である。
 type chunkPool struct {
-	mu   sync.Mutex
-	free []*chunk
-	held int64
+	mu     sync.Mutex
+	free   []*chunk
+	held   int64
+	closed bool // Device を閉じた後は置き場に残さない
 }
 
 const chunkPoolKeep = 64 // 置き場に残す chunk の上限(1 MiB)
@@ -33,7 +34,7 @@ func (p *chunkPool) put(c *chunk) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.held--
-	if len(p.free) < chunkPoolKeep {
+	if !p.closed && len(p.free) < chunkPoolKeep {
 		p.free = append(p.free, c)
 	}
 }

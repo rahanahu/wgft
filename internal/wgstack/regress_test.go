@@ -85,3 +85,75 @@ func TestTimeWaitSlotReuseISS(t *testing.T) {
 		t.Errorf("new ISS %d is not 65537 beyond the old SND.NXT %d", sa.seg.seq, oldNxt)
 	}
 }
+
+// TestFutureTSEcrIsIgnored は、自分の今の TSval より先の TSecr を RTT の測定に使わないことを確かめる。
+func TestFutureTSEcrIsIgnored(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	l := listen(t, n, 80)
+	p := n.handshake(40000, 80, true, false, true)
+	c := acceptOne(t, l)
+	n.drain()
+	c.Write([]byte("x"))
+	p.absorb(n.drain())
+	cs := &n.d.s.conns[c.c.id]
+	before := cs.rto
+	s := p.seg(flagACK, nil)
+	s.tsEcr = p.dutTS + 1_000_000
+	n.inject(s)
+	if cs.rto != before {
+		t.Fatalf("RTO changed from %v to %v on a TSecr from the future", before, cs.rto)
+	}
+}
+
+// TestFastRetransmitMarksEveryRecord は、高速の再送が覆うすべての送信の記録に再送の印を付けることを
+// 確かめる(Karn の規則)。
+func TestFastRetransmitMarksEveryRecord(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	l := listen(t, n, 80)
+	p := n.handshake(40000, 80, true, false, true)
+	c := acceptOne(t, l)
+	n.drain()
+	for range 20 {
+		c.Write([]byte{1, 2, 3}) // 小さな segment を 20 個
+		n.drain()
+	}
+	for range 3 {
+		p.ack(nil)
+	}
+	got := n.drain()
+	if len(got) == 0 || len(got[0].seg.payload) != 60 {
+		t.Fatalf("fast retransmit %v", got)
+	}
+	cs := &n.d.s.conns[c.c.id]
+	for i := 0; i < cs.recs.n; i++ {
+		if cs.recs.at(i).flags&recRetransmitted == 0 {
+			t.Fatalf("record %d of %d is not marked retransmitted", i, cs.recs.n)
+		}
+	}
+}
+
+// TestPromoteAfterCloseLeavesNothing は、Device の Close と競って最後の ACK の処理が接続を確立しても、
+// 記録の輪と chunk が残らないことを確かめる。
+func TestPromoteAfterCloseLeavesNothing(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	listen(t, n, 80)
+	n.inject(tseg{sport: 9, dport: 80, seq: 1, flags: flagSYN, wnd: 65535, mss: 1380, ws: 7})
+	sa := n.drain()[0]
+	pkt := buildPeer(tseg{sport: 9, dport: 80, seq: 2, ack: sa.seg.seq + 1, flags: flagACK, wnd: 65535, ws: -1, payload: []byte("data")})
+	ip, _ := parseIPv4(pkt)
+	seg, _ := parseTCP(&ip)
+	s := n.d.s
+	s.tmu.Lock()
+	pr, ok := s.synInput(s.syn.find(seg.tup), &seg, 0)
+	s.tmu.Unlock()
+	if !ok {
+		t.Fatal("no promotion")
+	}
+	n.d.Close()
+	s.promote(pr, &seg, 0)
+	s.chunks.put(new(chunk))
+	s.chunks.held++
+	if st := s.stats(); st.RecordBytes != 0 || st.ChunkBytes != 0 || st.Conns != 0 || len(s.chunks.free) != 0 {
+		t.Fatalf("after a promotion that lost the race with Close: %+v, %d pooled chunks", st, len(s.chunks.free))
+	}
+}
