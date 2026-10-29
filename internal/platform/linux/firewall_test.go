@@ -108,7 +108,7 @@ func TestAcceptsEstablished(t *testing.T) {
 		&expr.Verdict{Kind: expr.VerdictAccept},
 	}
 	anonSet := []expr.Any{&expr.Ct{Register: 1, Key: expr.CtKeySTATE}, &expr.Lookup{SourceRegister: 1, SetName: "__set0"}, &expr.Verdict{Kind: expr.VerdictAccept}}
-	xtMatch := []expr.Any{&expr.Match{Name: "conntrack", Rev: 3, Info: &xt.ConntrackMtinfo3{ConntrackMtinfo2: xt.ConntrackMtinfo2{StateMask: 0x6}}}, &expr.Counter{}, &expr.Verdict{Kind: expr.VerdictAccept}}
+	xtMatch := []expr.Any{&expr.Match{Name: "conntrack", Rev: 3, Info: &xt.ConntrackMtinfo3{ConntrackMtinfo2: xt.ConntrackMtinfo2{ConntrackMtinfoBase: xt.ConntrackMtinfoBase{MatchFlags: uint16(xt.ConntrackState)}, StateMask: 0x6}}}, &expr.Counter{}, &expr.Verdict{Kind: expr.VerdictAccept}}
 	nativeDrop := append(native[:3:3], &expr.Verdict{Kind: expr.VerdictDrop})
 	for name, tt := range map[string]struct {
 		exprs []expr.Any
@@ -332,7 +332,7 @@ func ctEstablishedNative() []expr.Any {
 }
 
 func ctEstablishedXT() []expr.Any {
-	return []expr.Any{&expr.Match{Name: "conntrack", Rev: 3, Info: &xt.ConntrackMtinfo3{ConntrackMtinfo2: xt.ConntrackMtinfo2{StateMask: 0x6}}}}
+	return []expr.Any{&expr.Match{Name: "conntrack", Rev: 3, Info: &xt.ConntrackMtinfo3{ConntrackMtinfo2: xt.ConntrackMtinfo2{ConntrackMtinfoBase: xt.ConntrackMtinfoBase{MatchFlags: uint16(xt.ConntrackState)}, StateMask: 0x6}}}}
 }
 
 func rule(parts ...[]expr.Any) *nftables.Rule {
@@ -416,5 +416,114 @@ func TestForwardAcceptsSuppressFinding(t *testing.T) {
 	rep.inspectForward(ipt, dockerForward, []*nftables.Rule{outIPT, backIPT, userReturn}, "wgft0", ForwardFromTunnel)
 	if len(rep.Findings) != 1 {
 		t.Errorf("agent direction must keep the hint: %+v", rep.Findings)
+	}
+}
+
+func ctStateNative(mask uint32, op expr.CmpOp) []expr.Any {
+	return []expr.Any{
+		&expr.Ct{Key: expr.CtKeySTATE, Register: 1},
+		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: binaryutil.NativeEndian.PutUint32(mask), Xor: binaryutil.NativeEndian.PutUint32(0)},
+		&expr.Cmp{Op: op, Register: 1, Data: binaryutil.NativeEndian.PutUint32(0)},
+	}
+}
+
+func ctStateXT(mask uint16, invert bool) []expr.Any {
+	base := xt.ConntrackMtinfoBase{MatchFlags: uint16(xt.ConntrackState)}
+	if invert {
+		base.InvertFlags = uint16(xt.ConntrackState)
+	}
+	return []expr.Any{&expr.Match{Name: "conntrack", Rev: 3, Info: &xt.ConntrackMtinfo3{ConntrackMtinfo2: xt.ConntrackMtinfo2{ConntrackMtinfoBase: base, StateMask: mask}}}}
+}
+
+func ctStatusDNATNative() []expr.Any {
+	return []expr.Any{
+		&expr.Ct{Key: expr.CtKeySTATUS, Register: 1},
+		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: binaryutil.NativeEndian.PutUint32(ctStatusDNAT), Xor: binaryutil.NativeEndian.PutUint32(0)},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(0)},
+	}
+}
+
+// `! -s 192.0.2.250` の形:送信元アドレスの否定の一致
+func notSource() []expr.Any {
+	return []expr.Any{
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 12, Len: 4},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{192, 0, 2, 250}},
+	}
+}
+
+// 落としうる規則や読まない行き先が 2 行より前にあれば、2 行を数えない。数える向きを外す一致条件
+// (インタフェース、ct state)を持つ規則だけを通り過ぎる。数え方そのものの境界も確かめる。
+func TestForwardAcceptsOrderAndShapes(t *testing.T) {
+	drop := nftables.ChainPolicyDrop
+	accept := nftables.ChainPolicyAccept
+	ipt := &nftables.Chain{Name: "FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyIPv4, Name: "filter"}, Policy: &drop}
+	fw := &nftables.Chain{Name: "filter_FORWARD", Table: &nftables.Table{Family: nftables.TableFamilyINet, Name: "firewalld"}, Policy: &accept}
+	reject := rule([]expr.Any{&expr.Reject{}})
+	forward := []*nftables.Rule{{Exprs: jumpUser}, {Exprs: jumpOther}}
+	out := rule(ifName(expr.MetaKeyOIFNAME, "wgft0", "iptables"), counter, acceptV)
+	back := rule(ifName(expr.MetaKeyIIFNAME, "wgft0", "iptables"), ctStateXT(0x6, false), counter, acceptV)
+	ret := rule(counter, returnV)
+	user := func(rs ...*nftables.Rule) []*nftables.Rule { return append(rs, ret) }
+	gotoV := []expr.Any{&expr.Verdict{Kind: expr.VerdictGoto, Chain: "elsewhere"}}
+	jumpV := []expr.Any{&expr.Verdict{Kind: expr.VerdictJump, Chain: "elsewhere"}}
+	backWith := func(ct []expr.Any) *nftables.Rule {
+		return rule(ifName(expr.MetaKeyIIFNAME, "wgft0", "iptables"), ct, counter, acceptV)
+	}
+
+	for name, tt := range map[string]struct {
+		ch     *nftables.Chain
+		rules  []*nftables.Rule
+		jumped []*nftables.Rule
+		warn   bool
+	}{
+		// 実際の Docker の文書の制限の行と、wg へ出るパケットを落とす行(レビューで再現した)
+		"a conditional drop on the public side above the lines":  {ipt, forward, user(rule(ifName(expr.MetaKeyIIFNAME, "pub0", "iptables"), notSource(), counter, dropV), out, back), true},
+		"a drop out to wg above the lines":                       {ipt, forward, user(rule(ifName(expr.MetaKeyOIFNAME, "wgft0", "iptables"), counter, dropV), out, back), true},
+		"a drop for another tunnel's input above the lines":      {ipt, forward, user(rule(ifName(expr.MetaKeyIIFNAME, "wg9", "iptables"), counter, dropV), rule(ifName(expr.MetaKeyOIFNAME, "wg9", "iptables"), counter, dropV), out, back), true},
+		"a drop in from wg above the lines":                      {ipt, forward, user(rule(ifName(expr.MetaKeyIIFNAME, "wgft0", "iptables"), counter, dropV), out, back), true},
+		"a drop in from another interface after the lines":       {ipt, forward, user(out, back, rule(ifName(expr.MetaKeyIIFNAME, "pub0", "iptables"), counter, dropV)), false},
+		"an unconditional goto before the lines":                 {ipt, append([]*nftables.Rule{rule(counter, gotoV)}, out, back), nil, true},
+		"an unread second jump before the lines":                 {ipt, append(append([]*nftables.Rule{}, forward...), out, back), user(), true},
+		"a conditional return above the lines in DOCKER-USER":    {ipt, forward, user(rule(ifName(expr.MetaKeyOIFNAME, "wgft0", "iptables"), counter, returnV), out, back), true},
+		"ct state invalid drop above the lines":                  {ipt, forward, user(rule(ctStateNative(expr.CtStateBitINVALID, expr.CmpOpNeq), dropV), out, back), false},
+		"an unconditional drop in DOCKER-USER, lines in FORWARD": {ipt, []*nftables.Rule{{Exprs: jumpUser}, out, back}, []*nftables.Rule{rule(counter, dropV)}, true},
+		"an unconditional reject before the lines":               {ipt, []*nftables.Rule{reject, out, back}, nil, true},
+		"an inverted conntrack reply line":                       {ipt, forward, user(out, backWith(ctStateXT(0x6, true))), true},
+		"an inverted native ct reply line":                       {ipt, forward, user(out, backWith(ctStateNative(0x6, expr.CmpOpEq))), true},
+		"a native ct reply line":                                 {ipt, forward, user(out, backWith(ctStateNative(0x6, expr.CmpOpNeq))), false},
+		"a reply line with ct state invalid, native":             {ipt, forward, user(out, backWith(ctStateNative(expr.CtStateBitINVALID, expr.CmpOpNeq))), true},
+		"a reply line with ct state new, xt":                     {ipt, forward, user(out, backWith(ctStateXT(0x8, false))), true},
+		"a reply line with another comparison after the mask": {ipt, forward, user(out, backWith([]expr.Any{
+			&expr.Ct{Key: expr.CtKeySTATE, Register: 1},
+			&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: binaryutil.NativeEndian.PutUint32(0x6), Xor: binaryutil.NativeEndian.PutUint32(0)},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(0x2)},
+		})), true},
+		"a conntrack match with a further condition": {ipt, forward, user(out, backWith([]expr.Any{&expr.Match{Name: "conntrack", Rev: 3, Info: &xt.ConntrackMtinfo3{ConntrackMtinfo2: xt.ConntrackMtinfo2{
+			ConntrackMtinfoBase: xt.ConntrackMtinfoBase{MatchFlags: uint16(xt.ConntrackState | xt.ConntrackOrigSrc)}, StateMask: 0x6}}}})), true},
+		"a reply line with an inverted ct set":                         {ipt, forward, user(out, backWith([]expr.Any{&expr.Ct{Key: expr.CtKeySTATE, Register: 1}, &expr.Lookup{SourceRegister: 1, SetName: "__set0", Invert: true}})), true},
+		"an outgoing line with a set lookup":                           {ipt, forward, user(rule(ifName(expr.MetaKeyOIFNAME, "wgft0", "iptables"), notSource()[:1], []expr.Any{&expr.Lookup{SourceRegister: 1, SetName: "allowed"}}, acceptV), back), true},
+		"oifname wg0 ct state established accept as the outgoing line": {ipt, forward, user(rule(ifName(expr.MetaKeyOIFNAME, "wgft0", "iptables"), ctStateXT(0x6, false), acceptV), back), true},
+		"a prefix outgoing accept":                                     {ipt, forward, user(rule(ifName(expr.MetaKeyOIFNAME, "wg", "prefix"), counter, acceptV), back), true},
+		"a prefix drop matching wg":                                    {ipt, forward, user(rule(ifName(expr.MetaKeyOIFNAME, "wg", "prefix"), counter, dropV), out, back), true},
+		"a prefix drop out to another side":                            {ipt, forward, user(rule(ifName(expr.MetaKeyOIFNAME, "eth", "prefix"), counter, dropV), out, back), true},
+		"a prefix drop between other interfaces":                       {ipt, forward, user(rule(ifName(expr.MetaKeyIIFNAME, "docker", "prefix"), ifName(expr.MetaKeyOIFNAME, "docker", "prefix"), counter, dropV), out, back), false},
+		"firewalld form with ct status dnat":                           {fw, []*nftables.Rule{rule(ctEstablishedNative(), acceptV), rule(ctStatusDNATNative(), acceptV), rule(ctStateNative(expr.CtStateBitINVALID, expr.CmpOpNeq), dropV), reject}, nil, false},
+		"ct status dnat alone":                                         {fw, []*nftables.Rule{rule(ctStatusDNATNative(), acceptV), reject}, nil, false},
+		"a non-terminal LOG target before the lines":                   {ipt, forward, user(rule([]expr.Any{&expr.Target{Name: "LOG"}}), out, back), false},
+		"an unknown target before the lines":                           {ipt, forward, user(rule([]expr.Any{&expr.Target{Name: "NFQUEUE"}}), out, back), true},
+		"an unread jump with an interface that rules it out":           {ipt, forward, user(rule(ifName(expr.MetaKeyIIFNAME, "docker0", "iptables"), ifName(expr.MetaKeyOIFNAME, "docker0", "iptables"), jumpV), out, back), false},
+		"a drop of new packets in from wg above the lines":             {ipt, forward, user(rule(ifName(expr.MetaKeyIIFNAME, "wgft0", "iptables"), ctStateXT(0x8, false), counter, dropV), out, back), false},
+		"a conditional return ahead of a drop in DOCKER-USER": {ipt, []*nftables.Rule{{Exprs: jumpUser}, out, back},
+			[]*nftables.Rule{rule(ifName(expr.MetaKeyIIFNAME, "pub0", "iptables"), notSource(), counter, returnV), rule(counter, dropV)}, true},
+		"a prefix drop on both sides":              {ipt, forward, user(rule(ifName(expr.MetaKeyIIFNAME, "wg", "prefix"), ifName(expr.MetaKeyOIFNAME, "wg", "prefix"), counter, dropV), out, back), true},
+		"ct status with another bit":               {fw, []*nftables.Rule{rule([]expr.Any{&expr.Ct{Key: expr.CtKeySTATUS, Register: 1}, &expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: binaryutil.NativeEndian.PutUint32(0x10), Xor: binaryutil.NativeEndian.PutUint32(0)}, &expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(0)}}, acceptV), reject}, nil, true},
+		"a conntrack match without the state flag": {ipt, forward, user(out, backWith([]expr.Any{&expr.Match{Name: "conntrack", Rev: 3, Info: &xt.ConntrackMtinfo3{ConntrackMtinfo2: xt.ConntrackMtinfo2{StateMask: 0x6}}}})), true},
+		"a reply line with a set lookup":           {ipt, forward, user(out, rule(ifName(expr.MetaKeyIIFNAME, "wgft0", "iptables"), notSource()[:1], []expr.Any{&expr.Lookup{SourceRegister: 1, SetName: "allowed"}}, acceptV)), true},
+	} {
+		rep := &Report{}
+		rep.inspectForward(tt.ch, tt.rules, tt.jumped, "wgft0", ForwardToTunnel)
+		if got := len(rep.Findings) == 1; got != tt.warn {
+			t.Errorf("%s: warns %v, want %v", name, got, tt.warn)
+		}
 	}
 }

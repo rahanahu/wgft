@@ -37,7 +37,9 @@ func TestInspectSynthetic(t *testing.T) {
 		exec.Command("iptables", "-F").Run()
 		exec.Command("iptables", "-X").Run()
 		exec.Command("iptables", "-t", "nat", "-F").Run()
-		exec.Command("nft", "delete", "table", "inet", "labfw").Run()
+		for _, tbl := range []string{"labfw", "labfw2", "labfw3", "labfw4"} {
+			exec.Command("nft", "delete", "table", "inet", tbl).Run()
+		}
 	}
 	cleanup()
 	t.Cleanup(cleanup)
@@ -121,13 +123,59 @@ func TestInspectSynthetic(t *testing.T) {
 			t.Errorf("forward finding after running its own suggestion: %s", f)
 		}
 	}
+	// nft の ct state のマスクの形と ct status dnat は所見を消し、2 行より前の drop は所見を戻す。
+	// iptables の DOCKER-USER でも、Docker の文書が示す送信元の制限の行を 2 行の上に入れると所見が戻る
+	c = exec.Command("nft", "-f", "-")
+	c.Stdin = strings.NewReader(`table inet labfw2 {
+  chain f {
+    type filter hook forward priority 20; policy drop;
+    oifname "wg0" accept
+    iifname "wg0" ct state established accept
+  }
+}
+table inet labfw3 {
+  chain f {
+    type filter hook forward priority 30; policy drop;
+    ct state invalid drop
+    ct status dnat accept
+  }
+}
+table inet labfw4 {
+  chain f {
+    type filter hook forward priority 40; policy drop;
+    oifname "wg0" drop
+    oifname "wg0" accept
+    iifname "wg0" ct state established accept
+  }
+}
+`)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("nft -f: %v\n%s", err, out)
+	}
+	run(t, "iptables", "-I", "DOCKER-USER", "-i", "eth9", "!", "-s", "192.0.2.250", "-j", "DROP")
+	shapes, err := Inspect("wg0", "wgft", ForwardToTunnel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range shapes.Findings {
+		if f.Hook == HookForward {
+			got[f.Where] = true
+		}
+	}
+	for where, want := range map[string]bool{"ip filter FORWARD": true, "inet labfw filter_FORWARD": false, "inet labfw2 f": false, "inet labfw3 f": false, "inet labfw4 f": true} {
+		if got[where] != want {
+			t.Errorf("%s: forward finding %v, want %v (findings %v)", where, got[where], want, shapes.Findings)
+		}
+	}
+	run(t, "iptables", "-D", "DOCKER-USER", "1")
 	// エージェントの向きは、accept があっても手掛かりを出す
 	agent, err := Inspect("wg0", "wgft", ForwardFromTunnel)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := countHook(agent.Findings, HookForward); n != 2 {
-		t.Errorf("agent direction: %d forward findings, want 2: %v", n, agent.Findings)
+	if n := countHook(agent.Findings, HookForward); n != 5 {
+		t.Errorf("agent direction: %d forward findings, want 5: %v", n, agent.Findings)
 	}
 	// input は両方とも established の accept を持つので警告しない
 	for _, f := range rep.Findings {
