@@ -103,6 +103,8 @@ func (d *Device) timers() {
 	t := time.NewTimer(time.Hour)
 	defer t.Stop()
 	for {
+		// 期限を求め終えるまでに入った期限は、sleepUntil が 0 の間 kick を残すので見落とさない
+		d.s.sleepUntil.Store(0)
 		now := int64(d.clock.Now())
 		d.s.advance(now)
 		next := d.s.nextDeadline()
