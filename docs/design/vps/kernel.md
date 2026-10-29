@@ -366,7 +366,10 @@ conntrack の操作は「宣言状態に収束させる」1 手順だけを持�
   ポートや送信元などの一致条件を他にも持つ accept と、インタフェース名の前方一致(`wg+`)の accept は数えません。
   前方一致は wg0 の名前に当てはまりうるが、wgft の転送のすべてを通すとは判定できないので、所見を出す側に倒します。
   drop、reject、return、goto、読まない jump、未知の verdict の規則が、その向きのパケットに当てはまりうる場合は、そこから後の accept を数えません。
+  未知の verdict には、verdict map(`iifname vmap { "pub0" : drop }`)と queue が含まれます。
   インタフェースか ct state がその向きを外す規則(たとえば `ct state invalid drop`)だけが、この扱いを受けません。
+  `ct state` の set(`ct state { established, related }`)は中身を読まず、established と related の集合とみなします。
+  `related` を含まない `ct state established accept` も返りの向きに数えるので、その場合は RELATED の ICMP が落ちることがあります。
   したがって、一致条件なしの drop の後と、一致条件なしの jump の先の `RETURN` の後にある行は数えません。
   jump の先の、その向きのすべてのパケットに当てはまる `RETURN` は、jump の元のチェーンの続きへ戻ります。
   検査は nftables のテーブルだけを読みます。

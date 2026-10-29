@@ -561,7 +561,11 @@ func readForwardRule(exprs []expr.Any) forwardRule {
 			}
 			pend, masked = pendNone, false
 		case *expr.Lookup:
-			if pend == pendCtState && !masked && !x.Invert {
+			if x.IsDestRegSet && x.DestRegister == 0 {
+				// verdict map(`iifname vmap { "pub0" : drop }`)。どの verdict に当たるかは set の中身に
+				// よるので、落としうる verdict として扱う
+				m.verdict = verdictStop
+			} else if pend == pendCtState && !masked && !x.Invert {
 				// set の中身は読まず、established と related の集合とみなす(firewalld の形、acceptsEstablished と同じ)
 				m.conds = append(m.conds, forwardCond{kind: condCtState, mask: expr.CtStateBitESTABLISHED | expr.CtStateBitRELATED})
 			} else {
@@ -579,7 +583,7 @@ func readForwardRule(exprs []expr.Any) forwardRule {
 				}
 			}
 			unknown()
-		case *expr.Reject:
+		case *expr.Reject, *expr.Queue:
 			m.verdict = verdictStop
 		case *expr.Target:
 			switch x.Name {

@@ -37,7 +37,7 @@ func TestInspectSynthetic(t *testing.T) {
 		exec.Command("iptables", "-F").Run()
 		exec.Command("iptables", "-X").Run()
 		exec.Command("iptables", "-t", "nat", "-F").Run()
-		for _, tbl := range []string{"labfw", "labfw2", "labfw3", "labfw4"} {
+		for _, tbl := range []string{"labfw", "labfw2", "labfw3", "labfw4", "labfw5"} {
 			exec.Command("nft", "delete", "table", "inet", tbl).Run()
 		}
 	}
@@ -140,6 +140,14 @@ table inet labfw3 {
     ct status dnat accept
   }
 }
+table inet labfw5 {
+  chain f {
+    type filter hook forward priority 50; policy drop;
+    iifname vmap { "eth9" : drop }
+    oifname "wg0" accept
+    iifname "wg0" ct state established accept
+  }
+}
 table inet labfw4 {
   chain f {
     type filter hook forward priority 40; policy drop;
@@ -163,7 +171,7 @@ table inet labfw4 {
 			got[f.Where] = true
 		}
 	}
-	for where, want := range map[string]bool{"ip filter FORWARD": true, "inet labfw filter_FORWARD": false, "inet labfw2 f": false, "inet labfw3 f": false, "inet labfw4 f": true} {
+	for where, want := range map[string]bool{"ip filter FORWARD": true, "inet labfw filter_FORWARD": false, "inet labfw2 f": false, "inet labfw3 f": false, "inet labfw4 f": true, "inet labfw5 f": true} {
 		if got[where] != want {
 			t.Errorf("%s: forward finding %v, want %v (findings %v)", where, got[where], want, shapes.Findings)
 		}
@@ -174,8 +182,8 @@ table inet labfw4 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := countHook(agent.Findings, HookForward); n != 5 {
-		t.Errorf("agent direction: %d forward findings, want 5: %v", n, agent.Findings)
+	if n := countHook(agent.Findings, HookForward); n != 6 {
+		t.Errorf("agent direction: %d forward findings, want 6: %v", n, agent.Findings)
 	}
 	// input は両方とも established の accept を持つので警告しない
 	for _, f := range rep.Findings {
