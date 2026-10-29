@@ -275,4 +275,44 @@ server 自身が wg0 へ接続し、カーネルの転送を経ないためで�
 稼働中の server は自分では戻さない([6.1 節](../vps/kernel.md#61-カーネルモード))。
 値を読めなかった場合は状態を変えず、`--verbose` の内部の値に読めなかった理由を示します。
 
+#### この VPS の他のテーブルの forward
+
+カーネルモードの server が転送するパケットは、`table inet wgft` のほかに、他のテーブルの forward のチェーンも通ります。
+他のテーブルのチェーンが既定で落とし、wgft の転送を accept しなければ、カーネルは公開中のルールを wg0 へ転送しません。
+Docker が `ip_forward` を自分で 1 にしたホストでは、iptables の FORWARD の policy が drop になります。
+2026-10-30 まで、この状態の `server doctor` は `server.dataplane` を OK とし、失敗の無い報告を返していました。
+同じ状態を `server check` と起動時のログは警告していましたが、`server doctor` が読む管理用 API の応答は、この検査の結果を含んでいなかったためです。
+
+管理用 API の `GET /api/v1/rules` は、カーネルモードの server が応答を組むときに行った検査の結果を `forward_policy` として返す([7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧))。
+検査は `server check` と起動時の検査([6.1 節](../vps/kernel.md#61-カーネルモード))と同じ関数で行います。
+`drops` は、既定で落とし、wgft の転送の 2 つの向きを accept しないチェーンの列です。
+各項目は、チェーンの場所 `where` と、足す行 `suggest` を持ちます。
+検査できなかった場合は、`error` に理由を返します。
+ユーザー空間モードの server は返しません。
+ユーザー空間モードはカーネルで転送しないためです。
+読む節点は増えません。
+`drops` が空でないとき、次のとおり判定します(2026-10-30)。
+
+- `rule.public_port`:カーネルで転送するルールで、`apply_state` が `active` なら UNKNOWN とし、理由の符号を `forward_policy_drop` とします。
+  `ip_forward_off` の FAILED があれば、そちらを先に示します
+- `server.dataplane`:カーネルで転送する公開中のルールが 1 本以上あれば UNKNOWN とし、理由の符号を `forward_policy_drop` とします。
+  1 本も無ければ状態を変えず、所見に、後から加えるカーネルモードのルールが落とされうることを添えます。
+  世代の遅れ、`ip_forward_off`、`agent_state_pending`、`repair_failed` のどれかが同時にあれば、そちらの状態と理由の符号を先に示し、所見にチェーンの場所を添えます
+
+状態を FAILED にしない理由は、検査が規則の形から推定するものであり、転送の停止の観測ではないためです。
+検査が読まない accept でも転送は通ります。
+たとえば、検査が規則を読まないチェーンに置いた accept や、送信元やポートの条件を持つ accept が当たります。
+エージェントの `host.forwarding` の `forward_policy_drop`([10.2c 節](agent-kernel-host.md#hostforwarding-の判定))と同じく、手掛かりとして示します。
+FAILED は転送の停止そのものを観測した検査にだけ使います([検査どうしの優先順位](server-failures.md#検査どうしの優先順位))。
+UNKNOWN なので、この状態だけでは終了コードは 0 のままです。
+`wgft status` の Server 行も変えません。
+`status` が degraded と数えるのは劣化を観測した場合だけであり、この所見は観測ではないためです。
+
+次の一手は、所見が名指すチェーンに `suggest` の行を足すことです。
+wgft は他のテーブルを変更しません。
+`sudo wgft server check` も同じ行を示します。
+`--probe` の疎通確認は、この状態でも成功します。
+server 自身が wg0 へ接続し、forward のフックを経ないためです。
+検査できなかった場合は状態を変えず、`--verbose` の内部の値に理由を示します。
+
 [診断](README.md)

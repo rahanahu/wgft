@@ -52,6 +52,15 @@ func publicPortCheck(r proto.Rule, in Input) Check {
 			c.Next = ipForwardNext
 			return c
 		}
+		if drops := forwardDrops(res); len(drops) > 0 && kernelForwarded(r) {
+			// DNAT は公開してあるが、他のテーブルの forward が落とすかもしれない。規則の形からの推定なので
+			// UNKNOWN にとどめる(設計文書 10.2a 節)。一覧の 1 行には最初の句だけが出る。
+			c.Status, c.Reason = StatusUnknown, ReasonForwardPolicyDrop
+			c.Detail = fmt.Sprintf("%s; the kernel may not forward %s %s into the tunnel although the server publishes it",
+				forwardDropClause(drops), r.Proto, r.ListenPort)
+			c.Next = forwardPolicyNext(drops)
+			return c
+		}
 		c.Status, c.Reason = StatusNotTested, ReasonExternalNotTested
 		c.Detail = fmt.Sprintf("serving %s %s; reachability from outside was not tested", r.Proto, r.ListenPort)
 		if d := driftNote(r.ID, res.Drift); d != "" {
@@ -124,7 +133,15 @@ func DataplaneCheck(in Input) Check {
 			c.Internal = append(c.Internal, "ip_forward "+f.Value)
 		}
 	}
+	if f := res.ForwardPolicy; f != nil {
+		if f.Error != "" {
+			c.Internal = append(c.Internal, "forward policy could not be checked: "+f.Error)
+		} else {
+			c.Internal = append(c.Internal, fmt.Sprintf("forward chains that drop wgft's forwarding: %d", len(f.Drops)))
+		}
+	}
 	stop := IPForwardStop(res)
+	drop := ForwardPolicyDropNote(res)
 	if gap := GenerationGap(res); gap != "" {
 		c.Status, c.Reason = StatusFailed, ReasonNotPublished
 		c.Detail = "the last change has not reached the forwarding path: " + gap
@@ -133,6 +150,9 @@ func DataplaneCheck(in Input) Check {
 		}
 		if stop != "" {
 			c.Detail += "; " + stop
+		}
+		if drop != "" {
+			c.Detail += "; " + drop
 		}
 		c.Next = "free whatever the reason names; the server retries every 30s and publishes the change when it succeeds"
 		return c
@@ -146,6 +166,9 @@ func DataplaneCheck(in Input) Check {
 		if res.ApplyError != "" {
 			c.Detail += "; apply error: " + res.ApplyError
 		}
+		if drop != "" {
+			c.Detail += "; " + drop
+		}
 		c.Next = ipForwardNext
 		return c
 	}
@@ -155,17 +178,30 @@ func DataplaneCheck(in Input) Check {
 		if res.ApplyError != "" {
 			c.Detail += ": " + res.ApplyError
 		}
+		if drop != "" {
+			c.Detail += "; " + drop
+		}
 		c.Next = "fix the apply error; the server retries every 30s. Check agent State after the retry succeeds"
 		return c
 	}
 	if res.ApplyError != "" {
 		c.Status, c.Reason = StatusUnknown, ReasonRepairFailed
 		c.Detail = "the rules are published, but a repair after that failed: " + res.ApplyError + ipForwardIdleNote(res)
+		if drop != "" {
+			c.Detail += "; " + drop
+		}
 		c.Next = "new traffic follows the current rules; connections that should have been cut may still run. The server retries every 30s."
 		return c
 	}
+	if drop != "" {
+		c.Status, c.Reason = StatusUnknown, ReasonForwardPolicyDrop
+		c.Detail = drop + ipForwardIdleNote(res)
+		c.Next = forwardPolicyNext(forwardDrops(res))
+		return c
+	}
 	c.Status = StatusOK
-	c.Detail = fmt.Sprintf("the server's forwarding matches the current rules, generation %d, read just now", res.Generation) + ipForwardIdleNote(res)
+	c.Detail = fmt.Sprintf("the server's forwarding matches the current rules, generation %d, read just now", res.Generation) +
+		ipForwardIdleNote(res) + forwardPolicyIdleNote(res)
 	return c
 }
 
@@ -215,16 +251,7 @@ func IPForwardStop(res *adminapi.BatchResponse) string {
 	if !ipForwardOff(res) {
 		return ""
 	}
-	n := 0
-	for _, r := range res.Rules {
-		if !r.Enabled || !kernelForwarded(r) {
-			continue
-		}
-		if st, ok := res.RuleStates[r.ID]; ok && st.ApplyState != adminapi.ApplyActive {
-			continue
-		}
-		n++
-	}
+	n := kernelRulesPublished(res)
 	if n == 0 {
 		return ""
 	}
@@ -238,6 +265,83 @@ func ipForwardIdleNote(res *adminapi.BatchResponse) string {
 		return ""
 	}
 	return "; net.ipv4.ip_forward on this VPS is " + res.IPForward.Value + ", which stops no rule now since none is forwarded by the kernel, but a kernel-mode rule added later would not forward"
+}
+
+// forwardDrops は、この VPS の他のテーブルで既定で落とし、wgft の転送を accept しないと server が
+// 報告した forward のチェーンである。報告の無い server(ユーザー空間モード、旧い版)と、検査できなかった
+// 報告では空である。
+func forwardDrops(res *adminapi.BatchResponse) []adminapi.ForwardPolicyDrop {
+	if res == nil || res.ForwardPolicy == nil {
+		return nil
+	}
+	return res.ForwardPolicy.Drops
+}
+
+// forwardDropClause は、落とすチェーンを名指す句である。
+func forwardDropClause(drops []adminapi.ForwardPolicyDrop) string {
+	if len(drops) == 1 {
+		return drops[0].Where + " drops forwarded packets by default and accepts none of wgft's forwarding"
+	}
+	where := make([]string, 0, len(drops))
+	for _, d := range drops {
+		where = append(where, d.Where)
+	}
+	return strings.Join(where, " and ") + " drop forwarded packets by default and accept none of wgft's forwarding"
+}
+
+// kernelRulesPublished は、カーネルで転送する公開中のルールの数である。IPForwardStop と
+// ForwardPolicyDropNote が使う。
+func kernelRulesPublished(res *adminapi.BatchResponse) int {
+	n := 0
+	for _, r := range res.Rules {
+		if !r.Enabled || !kernelForwarded(r) {
+			continue
+		}
+		if st, ok := res.RuleStates[r.ID]; ok && st.ApplyState != adminapi.ApplyActive {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// ForwardPolicyDropNote は、この VPS の他のテーブルの forward が wgft の転送を accept せず、カーネルで
+// 転送する公開中のルールがあるときに、それを 1 文で返す。無ければ空文字を返す。規則の形からの推定なので
+// 「転送しない」とは言わない(設計文書 10.2a 節)。
+func ForwardPolicyDropNote(res *adminapi.BatchResponse) string {
+	drops := forwardDrops(res)
+	if len(drops) == 0 {
+		return ""
+	}
+	n := kernelRulesPublished(res)
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s, so the kernel may forward none of the %d published kernel-mode rule%s", forwardDropClause(drops), n, pluralS(n))
+}
+
+// forwardPolicyIdleNote は、他のテーブルの forward が落としても、止まりうるルールが無い実行に添える句である。
+func forwardPolicyIdleNote(res *adminapi.BatchResponse) string {
+	drops := forwardDrops(res)
+	if len(drops) == 0 {
+		return ""
+	}
+	return "; " + forwardDropClause(drops) + ", which affects no rule now since none is forwarded by the kernel, but a kernel-mode rule added later may not forward"
+}
+
+// forwardPolicyNext は、他のテーブルの forward が wgft の転送を accept しないときの次の一手である。
+// server check が示すのと同じ行を並べる。wgft は他のテーブルを変えない(設計文書 6.1 節)。検査が読まない
+// accept でも転送は通るので、転送が届いていれば直す必要が無いことも添える。
+func forwardPolicyNext(drops []adminapi.ForwardPolicyDrop) string {
+	var lines []string
+	for _, d := range drops {
+		lines = append(lines, d.Suggest...)
+	}
+	next := "make that chain accept wgft's forwarding; sudo wgft server check shows the lines to add"
+	if len(lines) > 0 {
+		next = "add these lines once to accept wgft's forwarding there, as sudo wgft server check also shows: " + strings.Join(lines, "; ")
+	}
+	return next + ". wgft does not change other tables. If traffic already arrives, an accept this check does not read lets it through"
 }
 
 // GenerationGap は desired と active の世代の食い違いを 1 文で返す。差が無ければ空文字を返す。
