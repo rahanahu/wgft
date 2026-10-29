@@ -415,6 +415,9 @@ func (c *tcb) timeWaitInput(seg *segment, now int64, reuse *reuseISS) bool {
 func (c *tcb) processAck(seg *segment, now int64) {
 	ack := seg.ack
 	c.probesOut = 0
+	if c.persist {
+		c.retransStart = 0 // 相手は probe に応えている
+	}
 	wndChanged := false
 	if seqLT(c.sndWl1, seg.seq) || (c.sndWl1 == seg.seq && seqLE(c.sndWl2, ack)) {
 		w := uint32(seg.wnd) << c.sndWscale
@@ -678,7 +681,11 @@ func (c *tcb) afterInput(now int64) {
 	}
 	// 窓が 0 で送るものがあり、確認を待つものが無ければ窓の probe を張る
 	if c.sndWnd == 0 && !c.persist && c.sndNxt == c.sndUna && c.hasUnsent() && c.state != stClosed {
+		// 確認を待つものが無いので、前の RTO の起点と後退を持ち越さない。持ち越すと、相手が probe に
+		// 応え続けた長い persist の後の最初の RTO で、再送の打ち切りの時間を過ぎたと数える
 		c.persist = true
+		c.retransStart = 0
+		c.backoff = 0
 		c.disarm(tmrRetrans)
 		c.arm(tmrRetrans, now+c.curRTO())
 	}
