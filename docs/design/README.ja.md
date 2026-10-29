@@ -1,7 +1,7 @@
 # 設計仕様
 
 wgft は、VPS の公開ポートから WireGuard 経由で自宅へ TCP と UDP を転送します。
-現行 main の仕様には、最新のリリース v1.4.1 の後の変更も含みます。
+現行 main の仕様には、最新のリリース v1.5.0 の後の変更も含みます。
 特定のリリースの動作を確認するときは、そのタグの文書を参照してください。
 互換性の保証は Linux の server と agent、Windows 11 の実機で確認した範囲の Windows agent を対象とし、macOS agent は対象外です。
 
