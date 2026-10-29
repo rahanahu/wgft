@@ -2,9 +2,15 @@
 
 // Package linuxdut is the tcpharness DUT for the Linux kernel's TCP, the reference engine: a TUN
 // device in the caller's network namespace carries the testbench's packets, and ordinary sockets
-// listen on it. It needs CAP_NET_ADMIN in that namespace, so its tests run only in the lab VM
-// (build tag lab), in a network namespace of their own, with the kernel's default TCP settings
-// for a new namespace. Those are the settings of the LAN host a kernel-mode agent forwards to.
+// listen on it. It needs CAP_NET_ADMIN in that namespace, so its tests run only in the lab VM,
+// under the build tag lab, in a network namespace of their own.
+//
+// A new network namespace takes most net.ipv4.tcp_* values from the kernel's compiled-in
+// defaults, but copies some from the initial namespace: on the lab VM's 6.1 kernel
+// tcp_congestion_control, tcp_rmem and tcp_wmem follow it, while tcp_frto, tcp_sack, tcp_recovery
+// and tcp_autocorking do not. Which values follow may change between kernels, so PinReference
+// sets every value of the reference configuration in docs/design/userspace/wgstack-verification.md
+// explicitly and reads each one back.
 package linuxdut
 
 import (
@@ -14,6 +20,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,6 +32,47 @@ import (
 
 // IfName is the TUN device's name. One DUT exists at a time in a namespace.
 const IfName = "wgfth0"
+
+// ReferenceSysctls is the reference Linux configuration of wgstack-verification.md: the recovery
+// mechanisms outside wgstack's completion feature set are off, so a loss-recovery scenario means
+// the same on Linux and on wgstack. The order is the order PinReference writes them in.
+var ReferenceSysctls = [][2]string{
+	{"net/ipv4/tcp_congestion_control", "reno"},
+	{"net/ipv4/tcp_recovery", "0"},
+	{"net/ipv4/tcp_early_retrans", "0"},
+	{"net/ipv4/tcp_frto", "0"},
+	{"net/ipv4/tcp_ecn", "0"},
+	{"net/ipv4/tcp_fastopen", "0"},
+	{"net/ipv4/tcp_syncookies", "0"},
+	{"net/ipv4/tcp_dsack", "0"},
+	{"net/ipv4/tcp_no_metrics_save", "1"},
+	{"net/ipv4/tcp_moderate_rcvbuf", "0"},
+	{"net/ipv4/tcp_autocorking", "0"},
+}
+
+// SocketFloor is the send and receive buffer each listening socket gets, the size of the floor
+// every connection of wgft's agent is guaranteed: tcpSendFloor and tcpRecvFloor in
+// internal/nettun. Linux doubles the value it is given to cover its bookkeeping, so the data it
+// holds is about the floor.
+const SocketFloor = 256 << 10
+
+// PinReference writes ReferenceSysctls in the calling network namespace and reads each back.
+func PinReference() error {
+	for _, kv := range ReferenceSysctls {
+		path := "/proc/sys/" + kv[0]
+		if err := os.WriteFile(path, []byte(kv[1]), 0); err != nil {
+			return fmt.Errorf("setting %s to %s: %w", kv[0], kv[1], err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if v := strings.TrimSpace(string(got)); v != kv[1] {
+			return fmt.Errorf("%s reads %q after writing %q", kv[0], v, kv[1])
+		}
+	}
+	return nil
+}
 
 // DUT is one TUN device and the sockets on its address.
 type DUT struct {
@@ -50,6 +99,12 @@ func New(addr netip.Addr, mtu int) (*DUT, error) {
 	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
 		unix.Close(fd)
 		return nil, fmt.Errorf("TUNSETIFF: %w", err)
+	}
+	// No offload: without IFF_VNET_HDR the device takes none, and the zero makes it explicit, so
+	// segments are as TCP cut them and the harness can hold every packet to the MTU.
+	if err := unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, 0); err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("TUNSETOFFLOAD: %w", err)
 	}
 	tun := os.NewFile(uintptr(fd), "/dev/net/tun")
 	if err := configure(addr, mtu); err != nil {
@@ -97,11 +152,12 @@ func configure(addr netip.Addr, mtu int) error {
 	return step("bringing the device up", unix.SIOCSIFFLAGS, func(r *unix.Ifreq) error { r.SetUint16(unix.IFF_UP | unix.IFF_RUNNING); return nil })
 }
 
-// Engine is the harness's description of this engine.
-func Engine(known map[string]string) tcpharness.Engine {
+// Engine is the harness's description of this engine. The seed is not used: the kernel takes
+// its randomness from its own source.
+func Engine(known map[string]tcpharness.Known) tcpharness.Engine {
 	return tcpharness.Engine{
 		Name: "linux",
-		New: func(tb testing.TB) tcpharness.DUT {
+		New: func(tb testing.TB, _ uint64) tcpharness.DUT {
 			d, err := New(tcpharness.DUTAddr, tcpharness.MTU)
 			if err != nil {
 				tb.Fatalf("linux DUT: %v", err)
@@ -155,12 +211,26 @@ func (d *DUT) Close() error {
 	return err
 }
 
+// Listen opens a listener whose send and receive buffers are SocketFloor; accepted sockets
+// inherit them. Go's accepted connections have TCP_NODELAY set, as wgstack has no Nagle.
 func (d *DUT) Listen(port uint16) (tcpharness.Listener, error) {
-	l, err := net.ListenTCP("tcp4", net.TCPAddrFromAddrPort(netip.AddrPortFrom(d.addr, port)))
+	lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
+		var serr error
+		err := rc.Control(func(fd uintptr) {
+			if serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, SocketFloor); serr == nil {
+				serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, SocketFloor)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		return serr
+	}}
+	l, err := lc.Listen(context.Background(), "tcp4", netip.AddrPortFrom(d.addr, port).String())
 	if err != nil {
 		return nil, err
 	}
-	return listener{l}, nil
+	return listener{l.(*net.TCPListener)}, nil
 }
 
 type listener struct{ l *net.TCPListener }
@@ -181,6 +251,13 @@ func (l listener) Accept(ctx context.Context) (tcpharness.Conn, error) {
 }
 
 type conn struct{ *net.TCPConn }
+
+// The adapter meets the harness's interfaces; a change of signature fails the build here.
+var (
+	_ tcpharness.DUT      = (*DUT)(nil)
+	_ tcpharness.Listener = listener{}
+	_ tcpharness.Conn     = conn{}
+)
 
 func (c conn) Abort() error {
 	c.SetLinger(0)

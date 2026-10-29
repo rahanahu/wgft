@@ -1,0 +1,138 @@
+package gvisordut
+
+import (
+	"encoding/binary"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/rahanahu/wgft/internal/tcpharness"
+)
+
+// The tests in this file run a scenario against a deliberately wrong engine, gVisor behind a
+// wrapper that injects one fault, and require the check meant to catch that fault to fail. They
+// keep the harness's bounds from loosening until a fault passes.
+
+func scenario(t *testing.T, name string) tcpharness.Scenario {
+	for _, s := range tcpharness.Scenarios {
+		if s.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("no scenario %s", name)
+	return tcpharness.Scenario{}
+}
+
+func mutant(name string, wrap func(tcpharness.DUT) tcpharness.DUT) tcpharness.Engine {
+	base := Engine(nil)
+	return tcpharness.Engine{Name: name, New: func(tb testing.TB, seed uint64) tcpharness.DUT {
+		return wrap(base.New(tb, seed))
+	}}
+}
+
+func wantOutcome(t *testing.T, got map[string][]string, key, want string) {
+	t.Helper()
+	o := got[key]
+	bad := len(o) == 0
+	for _, v := range o {
+		bad = bad || v != want
+	}
+	if bad {
+		t.Errorf("%s: outcome %q, want %q; all outcomes: %v", key, got[key], want, got)
+	}
+}
+
+// delayedACKs holds every pure ACK the engine emits for delay before passing it on, the way a
+// receiver that delays the ACK of an out-of-order segment would.
+type delayedACKs struct {
+	tcpharness.DUT
+	out chan []byte
+}
+
+func (d *delayedACKs) Emitted() <-chan []byte { return d.out }
+
+func delayACKs(delay time.Duration) func(tcpharness.DUT) tcpharness.DUT {
+	return func(inner tcpharness.DUT) tcpharness.DUT {
+		d := &delayedACKs{DUT: inner, out: make(chan []byte, 1024)}
+		go func() {
+			defer close(d.out)
+			for pkt := range inner.Emitted() {
+				if s, err := tcpharness.Parse(pkt); err == nil && s.Flags == tcpharness.FlagACK && len(s.Payload) == 0 {
+					time.Sleep(delay)
+				}
+				d.out <- pkt
+			}
+		}()
+		return d
+	}
+}
+
+func TestHarnessCatchesDelayedDuplicateACK(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-delayed-ack", delayACKs(300*time.Millisecond)), scenario(t, "ooo-sack"), 1)
+	wantOutcome(t, got, "ooo-sack/dupack1", tcpharness.OutcomeFail)
+}
+
+// corruptMSS536 breaks the TCP checksum of every SYN that offers an MSS of 536, so the engine
+// drops the SYN for a reason that has nothing to do with the MSS floor.
+type corruptMSS536 struct{ tcpharness.DUT }
+
+func (d corruptMSS536) Inject(pkt []byte) error {
+	if s, err := tcpharness.Parse(pkt); err == nil && s.Flags == tcpharness.FlagSYN && s.Opts.MSS != nil && *s.Opts.MSS == 536 {
+		pkt = append([]byte(nil), pkt...)
+		sum := binary.BigEndian.Uint16(pkt[36:])
+		binary.BigEndian.PutUint16(pkt[36:], sum^0xffff^1)
+	}
+	return d.DUT.Inject(pkt)
+}
+
+func TestHarnessCatchesMSSFloorDropForAnotherReason(t *testing.T) {
+	e := mutant("gvisor-bad-checksum", func(d tcpharness.DUT) tcpharness.DUT { return corruptMSS536{d} })
+	got := tcpharness.Record(t, e, scenario(t, "handshake-mss-floor"), 1)
+	wantOutcome(t, got, "handshake-mss-floor/mss536.synack", tcpharness.OutcomeFail)
+}
+
+// unscaledReceiver drops every injected data segment that starts more than 64 KiB past the
+// latest acknowledgment the engine sent, as a receiver that read its own window unscaled would.
+type unscaledReceiver struct {
+	tcpharness.DUT
+	out chan []byte
+	mu  sync.Mutex
+	ack map[uint16]uint32 // by the testbench's port
+}
+
+func (d *unscaledReceiver) Emitted() <-chan []byte { return d.out }
+
+func (d *unscaledReceiver) Inject(pkt []byte) error {
+	if s, err := tcpharness.Parse(pkt); err == nil && len(s.Payload) > 0 {
+		d.mu.Lock()
+		ack, ok := d.ack[s.Src.Port()]
+		d.mu.Unlock()
+		if ok && int32(s.Seq-ack) > 65535 {
+			return nil
+		}
+	}
+	return d.DUT.Inject(pkt)
+}
+
+func dropBeyond64K(inner tcpharness.DUT) tcpharness.DUT {
+	d := &unscaledReceiver{DUT: inner, out: make(chan []byte, 1024), ack: map[uint16]uint32{}}
+	go func() {
+		defer close(d.out)
+		for pkt := range inner.Emitted() {
+			if s, err := tcpharness.Parse(pkt); err == nil && s.Has(tcpharness.FlagACK) {
+				d.mu.Lock()
+				if a, ok := d.ack[s.Dst.Port()]; !ok || int32(s.Ack-a) > 0 {
+					d.ack[s.Dst.Port()] = s.Ack
+				}
+				d.mu.Unlock()
+			}
+			d.out <- pkt
+		}
+	}()
+	return d
+}
+
+func TestHarnessCatchesUnscaledReceiveWindow(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-unscaled-receiver", dropBeyond64K), scenario(t, "window-scale"), 1)
+	wantOutcome(t, got, "window-scale/own-scale.span-held", tcpharness.OutcomeFail)
+}

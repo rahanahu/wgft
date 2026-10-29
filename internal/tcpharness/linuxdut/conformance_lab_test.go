@@ -4,6 +4,7 @@ package linuxdut
 
 import (
 	"errors"
+	"flag"
 	"os"
 	"os/exec"
 	"syscall"
@@ -13,16 +14,28 @@ import (
 )
 
 // Known lists where Linux, the reference, is known to differ from the scenarios' expectations.
-var Known = map[string]string{}
+// A scenario that checks a choice of wgstack's design beyond the RFCs keeps that check here.
+var Known = map[string]tcpharness.Known{
+	"listener-close/half-open.rst-at-close": {
+		Observed: "no RST at the close",
+		Reason: "Linux drops a closed listener's request sockets without a RST; the final ACK then draws the closed " +
+			"port's RST. wgstack.md resets them at the close",
+	},
+}
 
 // TestConformance runs the scenarios against the Linux kernel's TCP through a TUN device. It
-// re-runs itself in a new user and network namespace, so the kernel's defaults for a new
-// namespace apply and nothing outside the namespace is touched. Run it in the lab VM:
+// re-runs itself in a new user and network namespace with the reference sysctls pinned, so
+// nothing outside the namespace is touched. Run it in the lab VM:
 //
 //	lab/lab test internal/tcpharness/linuxdut
+//	lab/lab test internal/tcpharness/linuxdut vps -test.run=TestConformance/paws
 func TestConformance(t *testing.T) {
 	if os.Getenv("WGFT_TEST_IN_NETNS") != "1" {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestConformance$", "-test.v", "-test.count=1")
+		run := "^TestConformance$"
+		if f := flag.Lookup("test.run"); f != nil && f.Value.String() != "" {
+			run = f.Value.String() // the scenario filter passes through
+		}
+		cmd := exec.Command(os.Args[0], "-test.run="+run, "-test.v", "-test.count=1")
 		cmd.Env = append(os.Environ(), "WGFT_TEST_IN_NETNS=1")
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
@@ -39,6 +52,12 @@ func TestConformance(t *testing.T) {
 			t.Fatalf("the scenarios failed in the namespace: %v", err)
 		}
 		return
+	}
+	if err := PinReference(); err != nil {
+		t.Fatalf("pinning the reference sysctls: %v", err)
+	}
+	for _, kv := range ReferenceSysctls {
+		t.Logf("sysctl %s = %s", kv[0], kv[1])
 	}
 	tcpharness.Run(t, Engine(Known), tcpharness.Scenarios)
 }

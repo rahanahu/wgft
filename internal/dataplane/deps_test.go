@@ -857,3 +857,52 @@ func TestControlPlanesDoNotImportEachOther(t *testing.T) {
 		}
 	}
 }
+
+// TestTCPHarnessStaysInTests checks the placement of internal/tcpharness, the TCP conformance
+// harness of docs/design/userspace/wgstack-verification.md. The core imports nothing from the
+// module, so a scenario cannot lean on an engine's code; each engine adapter imports the core and
+// only the engine it builds; and no package outside internal/tcpharness imports any of it from a
+// non-test file, so the harness never reaches a production binary.
+func TestTCPHarnessStaysInTests(t *testing.T) {
+	root := moduleRoot(t)
+	const harness = module + "/internal/tcpharness"
+	if deps := moduleImports(t, root, harness); len(deps) > 0 {
+		t.Errorf("%s imports %v from the module; the core imports nothing from it", harness, deps)
+	}
+	adapters := map[string]map[string]bool{
+		harness + "/gvisordut": {harness: true, module + "/internal/nettun": true},
+		harness + "/linuxdut":  {harness: true},
+	}
+	for _, pkg := range packagesUnder(t, root, "internal/tcpharness") {
+		if pkg == harness {
+			continue
+		}
+		allowed, ok := adapters[pkg]
+		if !ok {
+			t.Errorf("%s is not a known engine adapter; add it to this test with the imports it may have", pkg)
+			continue
+		}
+		for _, dep := range moduleImports(t, root, pkg) {
+			if !allowed[dep] {
+				t.Errorf("%s imports %s; an engine adapter imports the core and the engine it builds only", pkg, dep)
+			}
+		}
+	}
+	var outside []string
+	for _, dir := range []string{"cmd", "internal", "proto", "tools"} {
+		outside = append(outside, packagesUnder(t, root, dir)...)
+	}
+	if len(outside) < 20 {
+		t.Fatalf("found only %d packages; did the layout change?", len(outside))
+	}
+	for _, pkg := range outside {
+		if pkg == harness || strings.HasPrefix(pkg, harness+"/") {
+			continue
+		}
+		for _, dep := range moduleImports(t, root, pkg) {
+			if dep == harness || strings.HasPrefix(dep, harness+"/") {
+				t.Errorf("%s imports %s from a non-test file; the harness stays in tests", pkg, dep)
+			}
+		}
+	}
+}

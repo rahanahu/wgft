@@ -139,6 +139,8 @@ lab/lab exec vm bash /wgft/lab/upgrade.sh userspace
 ```
 
 これらの直接実行は共有トポロジを使うため、同じ VM の他の実行が終了してから行います。
+`lab/lab test` はテストのバイナリをその場で作ります。
+ほかの行は VM にインストールしたバイナリを使うので、先に `lab/lab build` を実行します。
 D4 の旧版の選択と確認範囲は[追加テストの台帳](../docs/development/testing-catalog.md#d4-旧版からの更新)に従います。
 
 ### 確認の分類

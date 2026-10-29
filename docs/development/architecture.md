@@ -18,6 +18,8 @@ wgft のコードは、[設計文書の索引](../design/README.ja.md)にある�
 | `internal/policy/goengine` | 6.3, 7a.9 | Admission Policy の IR から作る Go の評価器です。userspace モードの中継が、新しいフローと成立済みの UDP セッションのデータグラムをこの評価器で判定します。送信元ごとの同時フロー数と drop カウンタもこの評価器が数えます |
 | `internal/dataplane/userspace/relay` | 6.3, 7 | エージェントの netstack 上のリスナーと LAN 内 `target` への中継を持ちます。`vpsd` のユーザー空間モードも、公開ポートの待ち受けと netstack 越しのエージェントへの中継に同じパッケージを使います |
 | `internal/dataplane/userspace/tunnel` | 7 | エージェント側が wireguard-go と gVisor の netstack でユーザー空間に持つトンネルです。`internal/dataplane/userspace/utun`(vpsd 側)と対になります |
+| `internal/tcpharness` | 7 | TCP の適合の試験の台本、試験の側の IPv4 と TCP の組み立てと解釈、実装を差し替える DUT の interface を持ちます。モジュールの中の何も import せず、テストだけが使います([wgstack の検証](../design/userspace/wgstack-verification.md#試験の置き場所と-dut)) |
+| `internal/tcpharness/gvisordut`、`internal/tcpharness/linuxdut` | 7 | 適合の試験を gVisor と Linux に流す DUT です。`gvisordut` は `internal/nettun` の Device を本番と同じ方法で作り、`linuxdut` はラボの VM の TUN と Linux のソケットを使います |
 | `internal/vpsd/stream` | 5.2 | エージェントごとの stream(WebSocket)を持ち、全体状態の配信とハートビートの記録を行います |
 | `internal/vpsd/agentapi` | 5.1 | エージェント用 API(登録と stream の公開エンドポイント、自己署名証明書)を持ちます |
 | `internal/vpsd/store` | 9 | vpsd の永続状態を SQLite 1 ファイルに保存します |

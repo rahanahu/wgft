@@ -168,6 +168,12 @@ dataplane の実装と 2 つの制御プレーンのどこからも見える必�
 エージェントの宛先の許可一覧の設定の名前も拒否の理由に入るので、この package に置き、`internal/agent/allowtargets` はその値を使います。
 `internal/dataplane/deps_test.go` の `TestPureLayersStayPure` が、この package がモジュールの中を import しないことを検査します。
 
+`internal/tcpharness` は TCP の適合の試験の台本を持ち、テストだけが使います([wgstack の検証](../userspace/wgstack-verification.md#試験の置き場所と-dut))。
+台本の核はモジュールの中の何も import しないので、台本は実装のコードに頼れません。
+実装ごとの DUT の package(`gvisordut`、`linuxdut`)は、核と自分が作る実装だけを import します。
+`internal/tcpharness` の外の package は、テスト以外のファイルから `internal/tcpharness` とその下を import しません。
+`internal/dataplane/deps_test.go` の `TestTCPHarnessStaysInTests` がこれらを検査します。
+
 2 つの制御プレーンは互いを import しません。
 `internal/vpsd` の下のどの package も `internal/agent` の下の package に依存せず、その逆もありません。
 両側が共有するものは、`internal/reasontext` のような下の層に置く。

@@ -26,7 +26,7 @@ type DUT interface {
 	// Inject hands one IPv4 packet to the engine as if it had arrived from the tunnel.
 	Inject(pkt []byte) error
 	// Emitted carries every IPv4 packet the engine sends towards the tunnel, in order. The
-	// channel is closed when the DUT is closed.
+	// channel is closed when the DUT is closed. A ClockedDUT may return nil: it is read with Poll.
 	Emitted() <-chan []byte
 	// Listen opens a TCP listener on the DUT's address and port.
 	Listen(port uint16) (Listener, error)
@@ -35,15 +35,22 @@ type DUT interface {
 }
 
 // ClockedDUT is a DUT whose engine runs its timers on a clock the harness drives, as a stack
-// written for wgft can. The harness then never sleeps: Peer.Next advances the clock in small steps
-// and looks at Emitted between them. The engine must be synchronous towards the harness:
-// whatever Inject or Advance makes it send is in Emitted before the call returns.
+// written for wgft can. The harness then never sleeps: Peer.Next pulls packets with Poll and,
+// when there are none, advances the clock in small steps.
+//
+// The engine is synchronous towards the harness: Inject and Advance return after the engine has
+// handled them, and what they make the engine send waits inside the engine until Poll takes it,
+// the way wireguard-go's Read pulls packets from a tun.Device. Because the engine never pushes
+// into a channel of fixed capacity, a scenario that injects many segments before it reads cannot
+// block its own goroutine inside Inject.
 type ClockedDUT interface {
 	DUT
 	// Now is the engine's current time.
 	Now() time.Time
 	// Advance moves the engine's clock forward by d and fires the timers that fall due.
 	Advance(d time.Duration)
+	// Poll returns the next packet the engine sends now, or false when it has none.
+	Poll() ([]byte, bool)
 }
 
 // Listener is a listening socket of a DUT.
@@ -60,3 +67,17 @@ type Conn interface {
 	// Abort closes the connection with a RST instead of a FIN.
 	Abort() error
 }
+
+// The relay and internal/netpipe look these methods up on a connection by type assertion, so an
+// engine for the agent offers them and the reference engine does not. A scenario checks them
+// only where the engine offers them.
+type (
+	// Deliverer reports whether a closed connection has delivered everything it had to send.
+	Deliverer interface{ Delivered() bool }
+	// DeliveryCloser closes a connection that keeps its slot until it has delivered its data.
+	DeliveryCloser interface{ CloseForDelivery() error }
+	// Booster registers f to learn when the connection gets or loses its large buffers.
+	Booster interface {
+		OnBoost(f func(boosted bool) bool)
+	}
+)
