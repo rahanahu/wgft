@@ -59,8 +59,10 @@ func boostedConn(t *testing.T) (*testNet, *Conn, *peerConn) {
 	p := n.handshake(40000, 80, true, false, true)
 	c := acceptOne(t, l)
 	n.drain()
-	go c.Write(make([]byte, demandBytes))
-	for i := 0; i < 10000 && (c.c.tailOff < demandBytes || c.c.unaOff != c.c.tailOff); i++ {
+	if _, err := c.Write(make([]byte, demandBytes)); err != nil { // floor に収まるので待たない
+		t.Fatal(err)
+	}
+	for i := 0; i < 10000 && c.c.unaOff != c.c.tailOff; i++ {
 		p.absorb(n.drain())
 		p.ack(nil)
 	}
