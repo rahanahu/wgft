@@ -102,7 +102,7 @@ func (t *synTable) nextDeadline() int64 {
 // 使っていれば、状態を作らずに捨てる。tmu を持って呼ぶ。
 func (s *stack) newSynRow(l *listener, seg *segment, now int64, reuse reuseISS) {
 	t := &s.syn
-	if len(t.free) == 0 || l.synCount >= s.lim.synRows/2 {
+	if !s.synRoom(l) {
 		s.refused(&s.synFull, &s.synGate, now, "dropped SYNs because the half-open table was full")
 		return
 	}
@@ -136,6 +136,17 @@ func (s *stack) newSynRow(l *listener, seg *segment, now int64, reuse reuseISS) 
 	l.synCount++
 	s.out.queueRow(id)
 	s.noteDeadline(r.deadline)
+}
+
+// synRoom は、待ち受け l への新しい SYN に握手の途中の行を作れるかを返す。tmu を持って呼ぶ。
+func (s *stack) synRoom(l *listener) bool {
+	return l != nil && !l.closed && len(s.syn.free) > 0 && l.synCount < s.lim.synRows/2
+}
+
+// refuseReuse は、TIME_WAIT の 4 つ組を使い直す SYN を、握手の途中の行を作れないので捨てたことを数える。
+// 行は外さないので、相手が再送した SYN も前の接続の SND.NXT の先から ISN を受ける。tmu を持って呼ぶ。
+func (s *stack) refuseReuse(now int64) {
+	s.refused(&s.synFull, &s.synGate, now, "dropped SYNs because the half-open table was full")
 }
 
 // ourMSS は自分が示す MSS。MTU から IPv4 と TCP の header の 40 byte を引いた値である。

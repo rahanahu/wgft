@@ -238,9 +238,9 @@ func runTx(t *testing.T, cfg txCfg) {
 }
 
 func TestSendStreamIntegrity(t *testing.T) {
-	seeds := uint64(600)
-	if testing.Short() || raceEnabled {
-		seeds = 50
+	seeds := uint64(80)
+	if streamSeedsFull() {
+		seeds = 600
 	}
 	for seed := uint64(1); seed <= seeds; seed++ {
 		ws := []int{-1, 0, 2, 7, 14}[seed%5]
