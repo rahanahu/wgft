@@ -35,8 +35,13 @@ type testNet struct {
 
 func newTestNet(t testing.TB, lim limits) *testNet {
 	t.Helper()
+	return newTestNetPool(t, lim, newBoostPool(boostSlots))
+}
+
+func newTestNetPool(t testing.TB, lim limits, pool *boostPool) *testNet {
+	t.Helper()
 	clk := NewManualClock()
-	d, err := newDevice(Config{Addr: dutAddr, MTU: testMTU, Clock: clk, Rand: seededRand()}, lim, newBoostPool(boostSlots))
+	d, err := newDevice(Config{Addr: dutAddr, MTU: testMTU, Clock: clk, Rand: seededRand()}, lim, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
