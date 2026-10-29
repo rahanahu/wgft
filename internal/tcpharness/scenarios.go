@@ -19,8 +19,16 @@ var Scenarios = []Scenario{
 	{Name: "handshake-mss-floor", Refs: "RFC 9293 3.7.1; wgft's TUN-ingress floor of 536, packet-validation.md", Run: handshakeMSSFloor},
 	{Name: "ooo-sack", Refs: "RFC 9293 3.10.7.4, RFC 2018 3 and 4, RFC 5681 4.2; gVisor e2e tcp_sack_test.go", Run: oooSACK},
 	{Name: "retransmit-rto", Refs: "RFC 6298 5; packetimpact tcp_retransmits", Run: retransmitRTO},
+	{Name: "newreno-recovery", Refs: "RFC 5681 3.2, RFC 6582 3.2; packetimpact tcp_rack for the RACK variant", Run: newRenoRecovery},
+	{Name: "window-scale", Refs: "RFC 7323 2.2 and 2.3, RFC 9293 3.8.6", Run: windowScale},
+	{Name: "paws", Refs: "RFC 7323 5.3; packetimpact tcp_paws_mechanism", Run: paws},
 	{Name: "zero-window-probe", Refs: "RFC 9293 3.8.6.1; packetimpact tcp_zero_window_probe, tcp_zero_window_probe_retransmit", Run: zeroWindowProbe},
 	{Name: "rfc5961", Refs: "RFC 5961 3.2 and 4.2, RFC 9293 3.10.7.4; packetimpact tcp_outside_the_window, tcp_unacc_seq_ack", Run: rfc5961},
+	{Name: "fin-passive-close", Refs: "RFC 9293 3.6 and 3.10.7.4 CLOSE-WAIT and LAST-ACK", Run: finPassiveClose},
+	{Name: "half-close", Refs: "RFC 9293 3.6, 3.8.1 and 3.10.7.4 FIN-WAIT-1, FIN-WAIT-2 and TIME-WAIT; packetimpact tcp_fin_retransmission", Run: halfClose},
+	{Name: "close-unread-rst", Refs: "RFC 9293 3.6, RFC 2525 2.17", Run: closeUnreadRST},
+	{Name: "timewait-reuse", Refs: "RFC 6191 2 and 3, RFC 9293 3.10.7.4 TIME-WAIT; packetimpact tcp_timewait_reset", Run: timeWaitReuse},
+	{Name: "listener-close", Refs: "RFC 9293 3.10.4 and 3.10.7.1; packetimpact tcp_noaccept_close_rst, tcp_listen_backlog", Run: listenerClose},
 }
 
 func pattern(n int, salt byte) []byte {
@@ -84,6 +92,24 @@ func alive(h *H, id string, p *Peer, c Conn) {
 	got, err := readFull(c, 4, 2*time.Second)
 	h.Check(id+".dut-receives", err == nil && string(got) == "pong", "the application reads the testbench's data",
 		fmt.Sprintf("%d bytes, error %s", len(got), errKind(err)))
+}
+
+// receive collects the DUT's data until n bytes have arrived in order, acknowledging each
+// in-order segment, and returns them.
+func receive(p *Peer, n int, d time.Duration) []byte {
+	var got []byte
+	for len(got) < n {
+		s, ok := p.Await(d, isData)
+		if !ok {
+			break
+		}
+		if s.Seq == p.RcvNxt {
+			got = append(got, s.Payload...)
+			p.RcvNxt += uint32(len(s.Payload))
+			p.SendAck()
+		}
+	}
+	return got
 }
 
 func handshakeOptions(h *H) {
