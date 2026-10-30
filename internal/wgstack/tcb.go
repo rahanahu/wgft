@@ -153,6 +153,10 @@ type tcbState struct {
 	dupAcks        int
 	caAcc          uint32
 	cubic          cubicCC // CUBIC の状態(cc.go)。NewReno を選んだ接続では使わない
+	cwndBlocked    bool    // 最後の nextNew を輻輳の窓が止めた
+	cwndLimited    bool    // この窓の間に輻輳の窓が送るのを止めた(cwndval.go)
+	maxFlight      uint32  // この窓の間の送り残しの最大
+	cwndUsageSeq   uint32  // この窓の終わりの番号
 	hs             hystart // HyStart++ の状態(hystart.go)
 	lastSendAt     int64
 
@@ -621,6 +625,8 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 			}
 			c.cwnd = max(c.cwnd, mss)
 		}
+	} else if !c.isCwndLimited() {
+		// アプリケーションに制限された間は窓を増やさない(RFC 7661、Linux の tcp_is_cwnd_limited)
 	} else if c.cwnd < c.ssthresh {
 		c.slowStartAck(ack, acked, ackRTT, now)
 	} else {

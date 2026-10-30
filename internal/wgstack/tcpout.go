@@ -109,6 +109,7 @@ func (c *tcb) nextNew(payCap int, force bool) (int, bool) {
 	}
 	want := min(avail, uint32(payCap))
 	if room < want && pipe > 0 {
+		c.cwndBlocked = true // 送るデータがあるのに輻輳の窓が止めた
 		return 0, false
 	}
 	n := min(want, usable)
@@ -205,8 +206,12 @@ func (c *tcb) buildNew(b []byte, space int, now int64, force bool) int {
 		c.ccFor().onIdle(c, now-c.lastSendAt, now)
 	}
 	o := c.options(now, true)
+	c.cwndBlocked = false
 	n, fin := c.nextNew(c.payloadCap(&o, space), force)
 	if n == 0 && !fin {
+		if c.cwndBlocked {
+			c.noteCwndUse(true)
+		}
 		return 0
 	}
 	seq := c.sndNxt
@@ -233,6 +238,9 @@ func (c *tcb) buildNew(b []byte, space int, now int64, force bool) int {
 	c.listAppend(&c.tList, c.recs.n-1, c.recs.at(c.recs.n-1), recInT)
 	c.sndNxt = seq + uint32(length)
 	c.sndMax = seqMax(c.sndMax, c.sndNxt)
+	// 送った後の輻輳の窓に 1 segment の余地が無ければ、その窓は輻輳の窓に制限されている(Linux の tcp_write_xmit
+	// が packet で数える tcp_packets_in_flight >= cwnd と同じ)
+	c.noteCwndUse(c.pipe()+uint32(c.segMSS()) > c.cwnd)
 	if c.rtoAt == 0 && !c.persist {
 		c.rtoAt = now + c.curRTO()
 	}
