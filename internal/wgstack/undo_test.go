@@ -276,3 +276,87 @@ func TestFRTOEndsWhenOneAckPassesRecover(t *testing.T) {
 		t.Fatalf("a real loss was undone: cwnd %d stats %+v", cs.cwnd, st)
 	}
 }
+
+// TestTLPProbeEndIsForgottenOnceResolved は、片付いた probe の後に、probe と同じ範囲で終わる D-SACK を probe のもの
+// とみなさないことを確かめる。
+func TestTLPProbeEndIsForgottenOnceResolved(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	q.deliver(outs[:8], nil)
+	var probe []out
+	for i := 0; i < 1000 && len(probe) == 0; i++ {
+		n.advance(time.Millisecond)
+		probe = n.drain()
+	}
+	if len(probe) != 1 || probe[0].seg.seq != outs[9].seg.seq {
+		t.Fatalf("probe %v", probe)
+	}
+	q.deliver(outs[8:], nil)
+	b := sackBlock{outs[9].seg.seq, outs[9].seg.seq + uint32(len(outs[9].seg.payload))}
+	dsack := func() {
+		s := q.p.seg(flagACK, nil)
+		s.sack = []sackBlock{b}
+		n.inject(s)
+	}
+	dsack() // probe への D-SACK:probe が片付く
+	if cs.tlpActive || cs.tlpRetrans || n.d.Stats().DSACKsIn != 0 {
+		t.Fatalf("after the probe's D-SACK: active %v retrans %v stats %+v", cs.tlpActive, cs.tlpRetrans, n.d.Stats())
+	}
+	cs.mu.Lock()
+	cs.totalRetrans = 10 // 後の再送を送ったことにする
+	cs.mu.Unlock()
+	dsack() // 同じ範囲で終わる後の D-SACK は probe のものではない
+	if n.d.Stats().DSACKsIn != 1 {
+		t.Fatalf("a later D-SACK ending at an old probe's end was taken for the probe's: stats %+v", n.d.Stats())
+	}
+}
+
+// TestDSACKWiderThanTheWindowIsIgnored は、相手が示した窓の最大より広い D-SACK の block を使わないことを確かめる。
+func TestDSACKWiderThanTheWindowIsIgnored(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	q.deliver(outs[:2], nil)
+	cs.mu.Lock()
+	cs.totalRetrans = 1 << 20 // 再送の累計の上限には掛からない
+	b := sackBlock{cs.sndUna - cs.maxSndWnd, cs.sndUna + uint32(testSegPayload)}
+	cs.mu.Unlock()
+	s := q.p.seg(flagACK, nil)
+	s.sack = []sackBlock{b, b} // 2 つ目の block の内側なので D-SACK
+	n.inject(s)
+	if n.d.Stats().DSACKsIn != 0 || cs.dsackDups != 0 {
+		t.Fatalf("a D-SACK wider than the peer's largest window was used: dups %d stats %+v", cs.dsackDups, n.d.Stats())
+	}
+}
+
+// TestNoUndoBeforeARetransmission は、印の後に再送を送る前に回復が終わっても、数による取り消しをしないことを
+// 確かめる(数は -1 から始まる)。
+func TestNoUndoBeforeARetransmission(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	q.deliver(outs, func(i int, o out) bool { return i == 1 })
+	if !cs.inRecovery || cs.undoRetrans != -1 {
+		t.Fatalf("recovery %v, count %d", cs.inRecovery, cs.undoRetrans)
+	}
+	q.deliver(outs[1:2], nil) // 再送を作る前に元の segment が届き、回復が終わる
+	if cs.inRecovery || n.d.Stats().RetransFast != 0 || n.d.Stats().SpuriousUndos != 0 {
+		t.Fatalf("recovery %v stats %+v", cs.inRecovery, n.d.Stats())
+	}
+}
+
+// TestDSACKOfDataThisAckAcknowledgesIsNotCounted は、確認済みの範囲の D-SACK を、この ACK の前の SND.UNA と比べる
+// ことを確かめる。同じ ACK が確認するデータの D-SACK は、確認済みのデータの重複ではないので数えない。
+func TestDSACKOfDataThisAckAcknowledgesIsNotCounted(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	q.deliver(outs, func(i int, o out) bool { return i == 1 || i == 3 })
+	resent := n.drain()
+	if len(resent) < 2 || cs.undoRetrans != 2 {
+		t.Fatalf("resent %d, count %d", len(resent), cs.undoRetrans)
+	}
+	q.recv(resent[0]) // 再送が最初の穴を埋める。その ACK に、埋めた segment の D-SACK を偽って載せる
+	s := q.p.seg(flagACK, nil)
+	s.sack = append([]sackBlock{{outs[1].seg.seq, outs[1].seg.seq + uint32(len(outs[1].seg.payload))}}, q.blocks(2)...)
+	n.inject(s)
+	if cs.sndUna != outs[3].seg.seq || !cs.inRecovery {
+		t.Fatalf("una %d, recovery %v", cs.sndUna-cs.iss, cs.inRecovery)
+	}
+	if cs.undoRetrans != 2 {
+		t.Fatalf("a D-SACK of data the same ACK acknowledges was counted: %d left", cs.undoRetrans)
+	}
+}

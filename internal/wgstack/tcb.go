@@ -863,7 +863,7 @@ func (c *tcb) afterInput(now int64) {
 		// 確認を待つものが無いので、前の RTO の起点と後退を持ち越さない。持ち越すと、相手が probe に
 		// 応え続けた長い persist の後の最初の RTO で、再送の打ち切りの時間を過ぎたと数える
 		c.clearRetransTimers()
-		c.tlpActive, c.tlpProbe = false, false
+		c.tlpActive, c.tlpProbe, c.tlpRetrans = false, false, false
 		c.persist = true
 		c.retransStart = 0
 		c.backoff = 0
@@ -1104,7 +1104,7 @@ func (c *tcb) onRTO(now int64) {
 		c.markAllLost(rtxRTO)
 	}
 	c.reoAt, c.tlpAt = 0, 0
-	c.tlpActive, c.tlpProbe = false, false
+	c.tlpActive, c.tlpProbe, c.tlpRetrans = false, false, false
 	c.setRTO(now + c.curRTO())
 	if c.s.trace != nil {
 		c.traceEvent(TraceRTO, now)
