@@ -93,7 +93,6 @@ GSO が有効だと、Linux の TCP は複数の segment を 1 つの buffer に
 
 - 回復の間の送る量:Linux は回復の間の送る量を PRR(RFC 6937)で決め、RFC 6582 の窓の膨らませ方を使いません。
   回復の台本は、再送する範囲と順、回復の終わる位置、byte の列の一致を確かめ、回復の間の輻輳の窓の値は比べません
-- quickack:Linux は接続の始めと黙った後に、遅延なしで ACK を返す期間を持ちます
 - 黙った後の窓:Linux の `tcp_slow_start_after_idle` は RFC 5681 の 4.1 節と異なる計算で窓を戻します
 - 閉じた後の打ち切り:Linux は閉じた接続の再送と probe を `tcp_orphan_retries` で打ち切ります。
   wgstack は閉じた接続の窓の probe を Linux と同じく後退の回数が 8 以上で、後退を含めた RTO が上限の 120 秒に届いたときに打ち切り、再送は `tcp_retries2` のままです([未確認の点と未決の点](wgstack.md#未確認の点と未決の点))
@@ -116,7 +115,6 @@ wgstack の一覧に最初から入る差は、[wgstack の設計](wgstack.md#tc
 - SYN cookie を持たないこと(参照の Linux の設定でも切ります)
 - ECN を交渉しないこと
 - 緊急のデータを通常のデータとして渡すこと
-- D-SACK を返さないこと(参照の Linux の設定でも切ります)
 - 前節の設定で外せない Linux の挙動
 
 gVisor の一覧は、今の `internal/nettun` の試験が固定している gVisor との差(例えば[断片に対する ICMP](packet-validation.md#断片に対する-icmp)の 3 つの差)とは別のものです。

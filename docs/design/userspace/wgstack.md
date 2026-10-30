@@ -684,7 +684,9 @@ ECN は交渉しません。
   Linux の `tcp_write_err` は RST を送らないと読めます
 - SYN-RCVD への別の番号の SYN:窓の内側なら RST を返して行を外し、窓の外なら ACK を返します。
   Linux の `tcp_check_req` を読んで選び、流していません
-- quickack:接続の始めと黙った後も、遅延 ACK の規則で ACK します([参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定)の外せない差)
+- quickack:Linux と同じく、接続の始めと黙った後に遅延なしで ACK を返す期間を持ちます。
+  期間の長さが Linux と一致するかは台本で確かめていません。
+  qbench の受ける向きの記録では、接続の始めの期間は wgstack が約 8 segment、Linux が 15 から 24 segment でした
 - 握手の後の窓:最初の ACK から受信の floor の 256 KiB を広告します。
   Linux は約 64 KiB から広げます
 - IP の ID:Device 全体の 1 つの数え上げを乱数の値から始めます。
