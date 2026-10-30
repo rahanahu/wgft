@@ -153,6 +153,7 @@ type tcbState struct {
 	dupAcks        int
 	caAcc          uint32
 	cubic          cubicCC // CUBIC の状態(cc.go)。NewReno を選んだ接続では使わない
+	hs             hystart // HyStart++ の状態(hystart.go)
 	lastSendAt     int64
 
 	fastRtx      bool  // 先頭の segment を再送する
@@ -317,12 +318,14 @@ func (c *tcb) rttSample(r int64) {
 
 // tsRTTSample は、相手が返した自分の TSval(TSecr)から RTT を測る(RFC 7323 4.1)。自分の今の TSval より
 // 先の TSecr は、自分が送っていない値なので使わない。
-func (c *tcb) tsRTTSample(tsEcr uint32, now int64) {
+func (c *tcb) tsRTTSample(tsEcr uint32, now int64) int64 {
 	d := int32(tsClock(now) + c.tsOffset - tsEcr)
 	if d < 0 {
-		return
+		return -1
 	}
-	c.rttSample(int64(d) * int64(time.Millisecond))
+	r := int64(d) * int64(time.Millisecond)
+	c.rttSample(r)
+	return r
 }
 
 // curRTO は今の後退を含めた RTO。
@@ -583,10 +586,12 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 	if seqLT(c.sndNxt, ack) {
 		c.sndNxt = ack
 	}
+	ackRTT := int64(-1) // この ACK で測った RTT(HyStart++ が使う)
 	if c.tsOK && seg.opt.hasTS && seg.opt.tsEcr != 0 {
-		c.tsRTTSample(seg.opt.tsEcr, now)
+		ackRTT = c.tsRTTSample(seg.opt.tsEcr, now)
 	} else if sample >= 0 && !rtxAcked {
 		c.rttSample(sample)
+		ackRTT = sample
 	}
 	c.backoff = 0
 	c.retransStart = 0
@@ -617,7 +622,7 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 			c.cwnd = max(c.cwnd, mss)
 		}
 	} else if c.cwnd < c.ssthresh {
-		c.cwnd += min(acked, 2*mss)
+		c.slowStartAck(ack, acked, ackRTT, now)
 	} else {
 		c.ccFor().congAvoid(c, acked, now)
 	}
