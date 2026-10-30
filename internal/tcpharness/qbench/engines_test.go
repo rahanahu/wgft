@@ -37,16 +37,24 @@ type DUT struct {
 	Dev    tun.Device
 	Listen func(port uint16) (Listener, error)
 	Close  func()
+	// Stats, when set, describes the engine's own counters for the run's log line, with the RTO
+	// in use at outageEnd; it is called after the transfer and before Close.
+	Stats func(outageEnd time.Time) string
 }
 
 func newWgstack() (*DUT, error) {
-	d, err := wgstack.Create(dutAddr, mtu)
+	tr := &traceRTO{}
+	cfg := wgstack.Config{Addr: dutAddr, MTU: mtu, Trace: tr.record}
+	setBoost(&cfg)
+	d, err := wgstack.New(cfg)
 	if err != nil {
 		return nil, err
 	}
 	return &DUT{Name: "wgstack", Dev: d,
 		Listen: func(p uint16) (Listener, error) { return d.ListenTCP(netip.AddrPortFrom(dutAddr, p)) },
-		Close:  func() { d.Close(); d.Wait() }}, nil
+		Close:  func() { d.Close(); d.Wait() },
+		Stats:  func(end time.Time) string { return wgstackStats(d.Stats()) + " rto_at_outage_end=" + tr.rtoBefore(end) },
+	}, nil
 }
 
 func newGvisor() (*DUT, error) {
