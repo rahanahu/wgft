@@ -1,7 +1,7 @@
 # wgstack の性能の段階
 
 [エージェントの wgft の netstack](wgstack.md)(wgstack)は完成の段階を NewReno で判定し、性能の目標を完成の後に追います([完成と性能の目標](wgstack.md#完成と性能の目標))。
-性能の段階のうち実装したのは、観測の段の wgstack の側(`Stats` の数、接続の記録、boost の切り替え)、SACK による回復の段、RACK-TLP の段です。
+性能の段階のうち実装したのは、観測の段の wgstack の側(`Stats` の数、接続の記録、boost の切り替え)、SACK による回復の段、RACK-TLP の段、CUBIC の段です。
 測った差の診断の方法、変更の優先順位、判定の測定、段階の順序をここで決め、値と個々の構造の細部は実装の時に決めます。
 正しさの検証は[wgstack の検証](wgstack-verification.md)に従い、この文書は性能のために足す試験と測定だけを定めます。
 
@@ -303,9 +303,18 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
 
 ### CUBIC
 
-- 規格:RFC 9438 です
-- 使う構造:輻輳の制御を、ACK、損失、RTO の 3 つの知らせを受ける interface の後ろに置き、NewReno を最初の実装にします([後の段階の機能](wgstack.md#後の段階の機能))。
-  状態は接続の枠の中に値として埋め込み、接続ごとの確保を作りません
+- 規格:RFC 9438 です。
+  fast convergence を使い、β は 0.7、C は 0.4 です
+- 使う構造:輻輳の制御を interface の後ろに置き、CUBIC を既定、NewReno を試験だけが選べる実装にします(`Config.TestCongestion`)。
+  interface が受ける知らせは、輻輳の回避の ACK、輻輳の事象の ssthresh、RTO、送り残しの無い間の休みの 4 つです。
+  slow start(RFC 3465 の L = 2)、回復の間の窓(PRR と NewReno の窓の膨らませ方)、RTO の後の 1 segment は共通の処理のままです。
+  CUBIC の状態(W_max、cwnd_prior、epoch の始まり、K、3 次の式の原点、W_est、byte の端数)は接続の枠の中に値として埋め込み、接続ごとの確保を作りません。
+  NewReno は状態を持たず、完成の段階の `caAcc` を使います
+- 輻輳の事象:回復に入る時、TLP の probe が損失を直した時、最初の RTO で、ssthresh を送り残しの β 倍(下限 2 SMSS)にし、W_max と cwnd_prior を記録して epoch を終えます。
+  窓が前の W_max より小さければ、W_max を (1 + β) / 2 倍に縮めます(4.7 節)
+- 輻輳の回避:epoch の最初の ACK で K と原点を決め、1 RTT 先の W_cubic を [cwnd, 1.5 cwnd] に収めた目標へ ACK ごとに近づけます。
+  W_cubic(t) が W_est より小さい間は W_est に従います(4.3 節)。
+  RTO の後は Linux の `bictcp_reset` と同じく状態を消し、送り残しの無い休みの後は Linux の `CA_EVENT_TX_START` と同じく休んだ時間だけ epoch を後ろへずらします
 - 不変条件:影響は輻輳の窓の値だけで、送る量は今と同じく相手の窓と送信の輪で抑えます
 - 危険:正しさへの危険は低く、主な危険は窓の急な増加によるまとまった送信です
 - 期待する効果:20 Mbit/s と往復 50 ms では BDP が小さいので、主に損失への応じ方(0.7 倍)で損失 1% の速さに効きます。
@@ -477,12 +486,12 @@ CUBIC、RACK-TLP、SACK、D-SACK、F-RTO、受信のバッファの自動調整�
    挙動を変えずに 3 つの実装の基準の値を測り、[測った差の診断](#測った差の診断)の仮説を確かめます
 2. SACK による回復:Limited Transmit と PRR を含みます
 3. RACK-TLP
-4. HyStart++
-5. 受信の窓と boost の方針:前の段と独立しているので、診断の結果によっては 2 の段と並べて進めます
-6. 受け手の ACK と D-SACK
-7. 輻輳の制御の interface と CUBIC
+4. 輻輳の制御の interface と CUBIC:RACK-TLP の後の日常の行列で、損失 1% と 5% の送る向きの差が損失への応じ方に残ったので、HyStart++ より前に置きます
+5. HyStart++
+6. 受信の窓と boost の方針:前の段と独立しているので、診断の結果によっては 2 の段と並べて進めます
+7. 受け手の ACK と D-SACK
 8. CPU の仕事:区間の数に比例する手間が損失の場合のプロファイルで目立てば、2 の段の後に前倒しします
-9. 必要なら加える変更:7 と 8 の段の後の関門の行列で要否を決めます
+9. 必要なら加える変更:4 と 8 の段の後の関門の行列で要否を決めます
 
 適合の試験の新しい台本は、試験の書き手が規格と Linux の挙動から書き、wgstack を実装する人は書きません([検証の原則](wgstack-verification.md#検証の原則))。
 台本は Linux で通ってから試験の一式に入ります。

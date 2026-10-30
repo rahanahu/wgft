@@ -230,8 +230,7 @@ func (c *tcb) tlpOnAck(ack uint32, unaAdvanced bool, newlySacked uint32) {
 	case seqGT(ack, c.tlpEnd):
 		c.tlpActive = false
 		if !c.inRecovery {
-			mss := uint32(c.segMSS())
-			c.ssthresh = max(c.cwnd/2, 2*mss)
+			c.ssthresh = c.ccFor().lossThresh(c)
 			c.cwnd = c.ssthresh
 			c.s.tlpRecoveries.Add(1)
 		}

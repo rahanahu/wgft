@@ -147,6 +147,7 @@ type tcbState struct {
 	inRecovery     bool
 	dupAcks        int
 	caAcc          uint32
+	cubic          cubicCC // CUBIC の状態(cc.go)。NewReno を選んだ接続では使わない
 	lastSendAt     int64
 
 	fastRtx      bool  // 先頭の segment を再送する
@@ -613,11 +614,7 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 	} else if c.cwnd < c.ssthresh {
 		c.cwnd += min(acked, 2*mss)
 	} else {
-		c.caAcc += acked
-		if c.caAcc >= c.cwnd {
-			c.caAcc -= c.cwnd
-			c.cwnd += mss
-		}
+		c.ccFor().congAvoid(c, acked, now)
 	}
 	c.cwnd = min(c.cwnd, 1<<30)
 	c.dupAcks = 0
@@ -656,8 +653,7 @@ func (c *tcb) dupAck(now int64) {
 		return
 	}
 	if c.dupAcks == 3 && seqGT(c.sndUna, c.recover) {
-		flight := c.sndMax - c.sndUna
-		c.ssthresh = max(flight/2, 2*mss)
+		c.ssthresh = c.ccFor().lossThresh(c)
 		c.recover = c.sndMax
 		c.cwnd = c.ssthresh + 3*mss
 		c.inRecovery = true
@@ -1010,11 +1006,10 @@ func (c *tcb) onRTO(now int64) {
 	}
 	mss := uint32(c.segMSS())
 	if c.backoff == 0 {
-		flight := c.sndMax - c.sndUna
-		c.ssthresh = max(flight/2, 2*mss)
+		c.ssthresh = c.ccFor().lossThresh(c)
 	}
+	c.ccFor().onRTO(c)
 	c.cwnd = mss
-	c.caAcc = 0
 	c.recover = c.sndMax
 	c.inRecovery = false
 	c.dupAcks = 0
