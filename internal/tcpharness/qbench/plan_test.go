@@ -708,7 +708,8 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 const minPairs = 5
 
 // pairedRatios is, for each seed that wgstack, Linux and, when it was measured, gVisor all
-// finished, wgstack's Mbit/s over that seed's line, max(0.8 x Linux, gVisor). The engines run
+// finished, wgstack's Mbit/s over that seed's line, max(0.8 x Linux, gVisor). Each ratio comes
+// from one seed's triple of runs, so resampling the ratios resamples the triples together. The engines run
 // the same seeds, so a seed's loss pattern is the same for all three, and the ratio leaves out
 // the spread that comes from how many losses a seed draws.
 func pairedRatios(wg, gv, lx Summary, haveG bool) []float64 {
@@ -1196,16 +1197,17 @@ func TestJudgeRules(t *testing.T) {
 			t.Errorf("interval %v to %v against 150: %q, doubling %v; want %s", tc.lo, tc.hi, v.Result, near(v), tc.want)
 		}
 	}
-	// Nine runs of 400 samples where one run in three has a tail: a sample-level interval would be
-	// narrow around the pooled p99, while whole runs drawn with replacement can miss or double the
-	// tail runs, so the interval spans both.
+	// Nine runs of 400 samples where two carry a tail of 12 samples at 500 ms: 24 of 3,600 pooled
+	// samples, below the 36 the p99 needs. Drawing samples, the tail rarely reaches 36 and the
+	// interval stays at 30 ms; drawing runs, three or more tail runs come up in about a third of
+	// the draws, and the interval reaches 500 ms. A sample-level bootstrap fails this case.
 	var runs [][]time.Duration
 	for i := range 9 {
 		l := make([]time.Duration, 400)
 		for j := range l {
 			l[j] = 30 * time.Millisecond
 		}
-		if i%3 == 0 {
+		if i < 2 {
 			for j := range 12 {
 				l[j] = 500 * time.Millisecond
 			}
