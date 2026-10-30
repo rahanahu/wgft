@@ -30,8 +30,15 @@ func (c *tcb) wantOutput() bool {
 		return false
 	}
 	o := c.options(0, false)
-	n, fin := c.nextNew(c.payloadCap(&o, c.pmtu))
-	return n > 0 || fin
+	pc := c.payloadCap(&o, c.pmtu)
+	if i := c.nextResend(); i >= 0 && c.resendAllowed(i, pc) {
+		return true
+	}
+	if n, fin := c.nextNew(pc); n > 0 || fin {
+		return true
+	}
+	i := c.nextRule3()
+	return i >= 0 && c.resendAllowed(i, pc)
 }
 
 // options は segment の option を作る。sack が真なら、順序外の区間があるときに SACK の block を足す。
@@ -81,12 +88,13 @@ func (c *tcb) nextNew(payCap int) (int, bool) {
 	}
 	finPending := c.sndShut && seqLE(c.sndNxt, c.finSeq())
 	inflight := c.sndNxt - c.sndUna
+	pipe := c.pipe()
 	var usable, room uint32
 	if c.sndWnd > inflight {
 		usable = c.sndWnd - inflight
 	}
-	if c.cwnd > inflight {
-		room = c.cwnd - inflight
+	if c.cwnd > pipe {
+		room = c.cwnd - pipe
 	}
 	if avail == 0 {
 		// FIN は番号を 1 つ使うので、Linux と同じく窓に 1 byte の余地があるときだけ送る。窓が 0 の間は
@@ -97,7 +105,7 @@ func (c *tcb) nextNew(payCap int) (int, bool) {
 		return 0, false
 	}
 	want := min(avail, uint32(payCap))
-	if room < want && inflight > 0 {
+	if room < want && pipe > 0 {
 		return 0, false
 	}
 	n := min(want, usable)
@@ -128,7 +136,13 @@ func (c *tcb) build(b []byte, now int64) int {
 		return c.buildBare(b, c.sndUna-1, now)
 	}
 	if c.state != stTimeWait {
+		if n := c.buildResend(b, space, now, c.nextResend()); n > 0 {
+			return n
+		}
 		if n := c.buildNew(b, space, now); n > 0 {
+			return n
+		}
+		if n := c.buildResend(b, space, now, c.nextRule3()); n > 0 {
 			return n
 		}
 	}
@@ -171,7 +185,7 @@ func (c *tcb) buildBare(b []byte, seq uint32, now int64) int {
 	return c.emit(b, seq, 0, &o, 0, 0, now)
 }
 
-// buildNew は新しいデータか、RTO の後に SND.NXT から送り直すデータを segment にする。
+// buildNew は SND.MAX から新しいデータを segment にする(RFC 6675 の NextSeg の規則 2)。
 func (c *tcb) buildNew(b []byte, space int, now int64) int {
 	// 黙った後の輻輳の窓(RFC 5681 4.1)
 	if c.sndUna == c.sndMax && now-c.lastSendAt > c.curRTO() {
@@ -190,19 +204,16 @@ func (c *tcb) buildNew(b []byte, space int, now int64) int {
 	if fin {
 		flags |= flagFIN
 	}
-	rtx := seqLT(seq, c.sndMax)
 	off := c.unaOff + uint64(seq-c.sndUna)
 	length := n
 	if fin {
 		length++
 		c.finSent = true
 	}
-	var rf uint8
-	if rtx {
-		rf = recRetransmitted
-		c.s.retrans[c.resendCause].Add(1)
+	if c.inRecovery {
+		c.prrOut += uint32(length)
 	}
-	c.recs.push(record{seq: seq, length: uint16(length), sentAt: now, flags: rf, prev: -1, next: -1})
+	c.recs.push(record{seq: seq, length: uint16(length), sentAt: now, prev: -1, next: -1, skip: 1})
 	c.sndNxt = seq + uint32(length)
 	c.sndMax = seqMax(c.sndMax, c.sndNxt)
 	if c.tdl[tmrRetrans] == 0 && !c.persist {
@@ -212,7 +223,71 @@ func (c *tcb) buildNew(b []byte, space int, now int64) int {
 	return c.emit(b, seq, flags, &o, off, n, now)
 }
 
-// buildRtx は SND.UNA からの 1 segment を再送する(高速の再送と NewReno の部分の確認)。
+// resendAllowed は記録 i の再送を輻輳の窓が許すかを返す。payCap は segment の中身の上限である。
+func (c *tcb) resendAllowed(i int, payCap int) bool {
+	n, fin := c.resendLen(i, payCap)
+	if n == 0 && !fin {
+		return false
+	}
+	if fin {
+		n++
+	}
+	// 窓の外から始まる記録は送らない。先頭の記録は窓の probe を兼ねて送る(Linux の tcp_retransmit_skb)。
+	// 窓の probe を張っている間は送らない
+	seq := c.recs.at(i).seq + c.rxtOff
+	if c.persist || (seq != c.sndUna && !seqLT(seq, c.sndUna+c.sndWnd)) {
+		return false
+	}
+	pipe := c.pipe()
+	return pipe == 0 || c.cwnd >= pipe+n
+}
+
+// buildResend は記録 i(NextSeg の規則 1 か 3 が選んだ記録)を再送する。記録は SND.UNA から番号の順に
+// 選ばれ、SACK 済みの記録は飛ばす。新しい segment の大きさを超える記録は複数の segment に分けて送り、
+// 記録は分けない。
+func (c *tcb) buildResend(b []byte, space int, now int64, i int) int {
+	if i < 0 {
+		return 0
+	}
+	o := c.options(now, true)
+	pc := c.payloadCap(&o, space)
+	if !c.resendAllowed(i, pc) {
+		return 0
+	}
+	n, fin := c.resendLen(i, pc)
+	r := c.recs.at(i)
+	seq := r.seq + c.rxtOff
+	length := n
+	flags := uint8(0)
+	if fin {
+		flags |= flagFIN
+		length++
+	}
+	if !c.rtxLive(r) {
+		r.flags |= recRtx
+		r.rtxGen = c.rtxGen
+		c.rtxBytes += uint32(r.length)
+	}
+	r.flags |= recRetransmitted
+	r.sentAt = now
+	c.rxtOff += length
+	c.rxtMid = c.rxtOff < uint32(r.length)
+	if !c.rxtMid {
+		c.rxtIdx++
+		c.rxtOff = 0
+	}
+	if c.inRecovery {
+		c.prrOut += length
+	}
+	c.s.retrans[c.resendCause].Add(1)
+	if c.tdl[tmrRetrans] == 0 && !c.persist {
+		c.arm(tmrRetrans, now+c.curRTO())
+	}
+	c.lastSendAt = now
+	return c.emit(b, seq, flags, &o, c.unaOff+uint64(seq-c.sndUna), int(n), now)
+}
+
+// buildRtx は SND.UNA からの 1 segment を再送する(SACK を交渉しない接続の高速の再送と NewReno の部分の確認)。
 func (c *tcb) buildRtx(b []byte, space int, now int64) int {
 	if c.sndUna == c.sndMax {
 		return 0
@@ -222,13 +297,14 @@ func (c *tcb) buildRtx(b []byte, space int, now int64) int {
 	if pc <= 0 {
 		return 0
 	}
+	// 送ったことのある範囲(SND.MAX まで)だけを送り直す。記録は SND.MAX まで隙間なく並ぶ
 	seq := c.sndUna
 	var left uint32
 	if end := c.dataEndSeq(); seqLT(seq, end) {
-		left = end - seq
+		left = seqMin(end, c.sndMax) - seq
 	}
 	n := min(left, uint32(pc))
-	fin := c.finSent && n == left
+	fin := c.finSent && seq+n == c.dataEndSeq() && seqGT(c.sndMax, c.dataEndSeq())
 	flags := uint8(0)
 	if fin {
 		flags |= flagFIN
@@ -245,9 +321,6 @@ func (c *tcb) buildRtx(b []byte, space int, now int64) int {
 		}
 		r.flags |= recRetransmitted
 		r.sentAt = now
-	}
-	if end := seq + length; seqLT(c.sndNxt, end) {
-		c.sndNxt = end
 	}
 	c.lastSendAt = now
 	c.s.retrans[c.rtxCause].Add(1)

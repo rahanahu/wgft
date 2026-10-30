@@ -53,6 +53,7 @@ type Stats struct {
 	DupAcksIn            uint64 // 受けた重複した ACK
 	AcksDelayed          uint64 // 遅延 ACK のタイマーが求めた ACK を運んだ segment
 	AcksImmediate        uint64 // 即座に求めた ACK を運んだ segment
+	SACKReneging         uint64 // RTO の処理で SACK 済みの印を取り消した回数
 	HeldChunksInPool     int64  // 輪が持つ chunk の数(chunkPool の会計)
 	ReclaimableInBoost   int    // プロセスの boost の枠のうち使っている数
 }
@@ -136,6 +137,7 @@ func (s *stack) stats() Stats {
 	st.DupAcksIn = s.dupAcksIn.Load()
 	st.AcksDelayed = s.acksDelayed.Load()
 	st.AcksImmediate = s.acksImmediate.Load()
+	st.SACKReneging = s.sackReneging.Load()
 	return st
 }
 

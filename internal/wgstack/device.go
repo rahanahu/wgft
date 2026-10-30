@@ -28,7 +28,8 @@ type Config struct {
 	// crypto/rand を使う。試験は固定の byte の列を渡す。
 	Rand io.Reader
 	// Trace は試験と性能の測定だけが設定する観測の関数。nil でなければ、接続が ACK を 1 つ処理するたびと
-	// RTO のたびに、接続の錠を持ったまま呼ぶ。関数は Device を呼び返さない。本番は nil のままにする。
+	// RTO のたびに、接続の錠を持ったまま呼ぶ。関数は Device を呼び返さず、panic しない(panic は接続の錠を
+	// 持ったまま巻き戻る)。本番は nil のままにする。
 	Trace func(TraceEvent)
 	// TestBoost は試験と性能の測定だけが使う boost の与え方。本番は既定の BoostOnDemand のままにする。
 	TestBoost BoostPolicy

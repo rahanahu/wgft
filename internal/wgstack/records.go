@@ -1,20 +1,25 @@
 package wgstack
 
-// record は送った segment 1 つの記録。開始の番号、長さ、送った時刻、印を持つ。prev と next は、後の
-// 段階の RACK が送った時刻の順にたどる list の節で、今は使わない(設計文書の「後の段階の機能」)。
+// record は送った segment 1 つの記録。開始の番号、長さ、送った時刻、印を持つ。記録の境目は送った時のまま
+// 変えず、再送は既存の記録をたどる(wgstack-performance.md の「scoreboard の記録の扱い」)。prev と next は、
+// 後の段階の RACK が送った時刻の順にたどる list の節で、今は使わない。skip、sackGen、rtxGen は SACK の
+// scoreboard の欄で、scoreboard.go が使う。
 type record struct {
-	sentAt int64  // 送った時刻(ns)
-	seq    uint32 // 開始のシーケンス番号
-	prev   int32
-	next   int32
-	length uint16 // 中身の長さ。FIN を含む segment は FIN の 1 を足す
-	flags  uint8
+	sentAt  int64  // 送った時刻(ns)。再送のたびに更新する
+	seq     uint32 // 開始のシーケンス番号
+	prev    int32
+	next    int32
+	skip    int32  // SACK 済みの記録から、SACK 済みでないかもしれない次の記録までの数
+	length  uint16 // 中身の長さ。FIN を含む segment は FIN の 1 を足す
+	flags   uint8
+	sackGen uint8 // recSacked を付けた時の接続の SACK の世代
+	rtxGen  uint8 // recRtx を付けた時の接続の再送の世代
 }
 
 const (
-	recRetransmitted uint8 = 1 << iota
-	recSacked              // 後の段階の SACK の scoreboard の印
-	recLost                // 後の段階の損失の印
+	recRetransmitted uint8 = 1 << iota // 1 度でも再送した(Karn の規則)
+	recSacked                          // SACK 済み。sackGen が接続の世代と等しいときだけ有効
+	recRtx                             // 再送が送り残し(pipe)に入っている。rtxGen が接続の世代と等しいときだけ有効
 )
 
 // recordRing は送信の記録の固定の容量の輪。容量は送信のバッファの予約を minSegPayload で割った数で、
@@ -38,8 +43,6 @@ func (r *recordRing) pop() {
 	r.head = (r.head + 1) % len(r.recs)
 	r.n--
 }
-
-func (r *recordRing) reset() { r.head, r.n = 0, 0 }
 
 // resize は容量を newRecs 件の配列に移す。呼び出し側は r.n <= len(newRecs) を保証する。
 func (r *recordRing) resize(newRecs []record) {

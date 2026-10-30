@@ -192,10 +192,11 @@ func TestConfigSetsTraceAndTestBoost(t *testing.T) {
 
 // TestTraceDoesNotChangeOutput は、観測の関数を設定しても Device の出力が 1 byte も変わらないことを確かめる。
 func TestTraceDoesNotChangeOutput(t *testing.T) {
+	var evs *[]TraceEvent
 	run := func(trace bool) [][]byte {
 		n := newTestNet(t, smallLimits())
 		if trace {
-			traceInto(n)
+			evs = traceInto(n)
 		}
 		l := listen(t, n, 80)
 		p := n.handshake(40000, 80, true, true, true)
@@ -218,6 +219,9 @@ func TestTraceDoesNotChangeOutput(t *testing.T) {
 		return got
 	}
 	a, b := run(false), run(true)
+	if len(*evs) == 0 || countKind(*evs, TraceRTO) == 0 {
+		t.Fatalf("the traced run produced %d events, %d of them RTOs", len(*evs), countKind(*evs, TraceRTO))
+	}
 	if len(a) < 12 || len(a) != len(b) {
 		t.Fatalf("%d packets without the trace, %d with it", len(a), len(b))
 	}
