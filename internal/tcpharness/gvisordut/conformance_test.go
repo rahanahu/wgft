@@ -90,6 +90,31 @@ var Known = map[string]tcpharness.Known{
 			"otherwise RACK resends it at once and recovery ends about 145 ms after the ACK, as it did in 4 of 12 runs",
 		Sometimes: true,
 	},
+	"chained-recovery/reduced": {
+		Observed: "above the bound",
+		Reason: "gVisor makes no second reduction for a hole it resends inside the first recovery: TCPInfo showed ssthresh at " +
+			"40, half the 80-segment window, from the first recovery through the rounds after the second, where Linux halves " +
+			"again to 20. After the recovery gVisor's window then about doubles each round in congestion avoidance, TCPInfo " +
+			"showing cwnd 45, 91 and 183 with ssthresh 40; the cause of that growth in gVisor's sender is not identified",
+	},
+	"reorder-wait-recovery/reduced": {
+		Observed: "above the bound",
+		Reason: "gVisor reduces to half the window, 72 to 36, but in congestion avoidance after the recovery its window about " +
+			"doubles each round, as in chained-recovery/reduced: the third round after the recovery carries 76 segments against " +
+			"a bound of 54; the cause of that growth in gVisor's sender is not identified",
+	},
+	"rto-after-burst/ssthresh.not-collapsed": {
+		Observed: "below it",
+		Reason: "gVisor's Reno sets ssthresh at an RTO to Outstanding/2, reno.go reduceSlowStartThreshold, Outstanding being " +
+			"the pipe SetPipe computed; in the failing runs TCPInfo showed ssthresh 2 after the RTO and gVisor sent one or two " +
+			"segments a round. Other runs go on to about 17 segments; what decides between them is not identified",
+		Sometimes: true,
+	},
+	"rto-after-burst/completes": {
+		Observed:  "not acknowledged",
+		Reason:    "as rto-after-burst/ssthresh.not-collapsed: sending one or two segments a round, gVisor does not repair the burst within the rounds the scenario runs",
+		Sometimes: true,
+	},
 	"paws/old.dupack": {
 		Observed: "ACK of base+4",
 		Reason:   "the pinned gVisor does not implement PAWS, gVisor's rcv.go: it accepts the old segment and acknowledges it",

@@ -64,6 +64,9 @@ var Scenarios = []Scenario{
 	{Name: "rfc2525-stretch-ack", Refs: "RFC 2525 2.13, RFC 5681 4.2, RFC 1122 4.2.3.2", Run: rfc2525StretchACK},
 	{Name: "rfc2525-close-fin", Refs: "RFC 2525 2.15", Run: rfc2525CloseFIN},
 	{Name: "rfc2525-data-after-close", Refs: "RFC 2525 2.16, RFC 9293 3.6", Run: rfc2525DataAfterClose},
+	{Name: "chained-recovery", Refs: "RFC 5681 3.1, RFC 6675 5, RFC 9438 4.6, which allow up to beta x FlightSize; the bound is the reference Linux's, tcp_enter_recovery and tcp_fastretrans_alert", Run: chainedRecovery},
+	{Name: "reorder-wait-recovery", Refs: "RFC 8985 6.2, RFC 5681 3.1, RFC 9438 4.6, which allow up to beta x FlightSize; the bound is the reference Linux's, tcp_enter_recovery", Run: reorderWaitRecovery, Linux: rackLinux},
+	{Name: "rto-after-burst", Refs: "RFC 5681 3.1, RFC 6298 5; the band is the reference Linux's, tcp_enter_loss", Run: rtoAfterBurst},
 }
 
 func pattern(n int, salt byte) []byte {
