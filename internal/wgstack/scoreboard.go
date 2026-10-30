@@ -105,8 +105,13 @@ func (c *tcb) markSACK(seg *segment, now int64) uint32 {
 		return 0
 	}
 	if b0 := seg.opt.sack[0]; !seqGT(b0.right, c.sndUna) || (n >= 2 && seqLE(seg.opt.sack[1].left, b0.left) && seqLE(b0.right, seg.opt.sack[1].right)) {
-		c.rackDSACK() // 先頭の block が確認済みの範囲か 2 つ目の block の内側なら D-SACK(RFC 2883 4 節)
-		c.noteUndoDSACK()
+		// 先頭の block が確認済みの範囲か 2 つ目の block の内側なら D-SACK(RFC 2883 4 節)
+		if dup, tlp := c.dsackSeen(b0); dup > 0 {
+			if !tlp {
+				c.rackDSACK()
+			}
+			c.noteUndoDSACK(b0, dup, tlp)
+		}
 	}
 	if c.recs.n == 0 {
 		return 0

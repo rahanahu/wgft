@@ -104,6 +104,11 @@ type tcbState struct {
 	dsackRound    uint32 // D-SACK で倍率を上げた往復の終わり(dsack_round)
 	dsackRoundOn  bool
 	undoMarker    bool   // 取り消しの印(undo.go)
+	undoSeq       uint32 // 印を付けた時の SND.UNA(Linux の undo_marker)
+	priorUna      uint32 // 処理中の ACK の前の SND.UNA
+	totalRetrans  uint32 // 接続の再送の累計(Linux の total_retrans)
+	dsackDups     uint32 // D-SACK で知らされた重複の累計(Linux の dsack_dups)
+	rtoEpisode    bool   // RTO の後の回復の最中
 	undoCwnd      uint32 // 覚えた輻輳の窓
 	undoSsthresh  uint32
 	undoRetrans   int32  // D-SACK で知らされていない再送の数
@@ -537,6 +542,7 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	rackX, rackE := c.rackXmit, c.rackEnd
 	c.origDelivered = false
 	advanced := seqGT(ack, c.sndUna)
+	c.priorUna = c.sndUna
 	switch {
 	case advanced:
 		delivered = int64(ack - c.sndUna)
@@ -556,6 +562,8 @@ func (c *tcb) processAck(seg *segment, now int64) {
 		c.rackDetect(now)
 		if c.frto != 0 && seqLT(c.sndUna, c.recover) {
 			c.frtoAfterAck(seg, advanced, newly > 0 || (!advanced && c.sndUna != c.sndMax))
+		} else if c.rtoEpisode && seqGE(c.sndUna, c.recover) {
+			c.rtoRecovered(seg)
 		}
 		c.tlpOnAck(ack, advanced, newly)
 		c.sackAfterAck(uint32(max(delivered, 0)))
@@ -1082,6 +1090,7 @@ func (c *tcb) onRTO(now int64) {
 	c.backoff++
 	// 記録は消さずに残し、SACK 済みでない記録を損失にして SND.UNA から順に送り直す(RFC 6675 5.1 節)。F-RTO では
 	// 先頭の記録だけを損失にして、次の ACK で RTO が不要だったかを決める(RFC 5682)
+	c.rtoEpisode = true
 	if frto {
 		c.frto, c.frtoHigh = 1, c.sndMax
 		c.markHeadLost(rtxRTO)

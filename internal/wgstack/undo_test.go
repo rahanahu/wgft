@@ -127,3 +127,152 @@ func TestFRTOFallsBackOnRealLoss(t *testing.T) {
 	}
 	_ = outs
 }
+
+// TestForgedDSACKDoesNotUndoARealLoss は、再送していない、回復の前に確認済みのデータの D-SACK では、本当の損失の
+// 窓の縮小を取り消さないことを確かめる(D-SACK は印の後に終わる範囲だけを数える)。
+func TestForgedDSACKDoesNotUndoARealLoss(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	q.deliver(outs, func(i int, o out) bool { return i == 1 })
+	if !cs.inRecovery {
+		t.Fatal("not in recovery")
+	}
+	resent := n.drain()
+	n.advance(testRTT)
+	// 再送が届く前の重複した ACK に、確認済みの segment 0 の D-SACK を偽って載せ、続けて再送を届ける
+	// (元の segment は失われた)
+	s := q.p.seg(flagACK, nil)
+	s.sack = append([]sackBlock{{outs[0].seg.seq, outs[0].seg.seq + uint32(len(outs[0].seg.payload))}}, q.blocks(2)...)
+	q.p.n.inject(s)
+	n.drain()
+	q.recv(resent[0])
+	q.ack()
+	if cs.inRecovery || n.d.Stats().SpuriousUndos != 0 {
+		t.Fatalf("a D-SACK for data that was never retransmitted undid the reduction of a real loss: cwnd %d", cs.cwnd)
+	}
+}
+
+// TestForgedDSACKAboveTheAckDoesNotUndo は、SND.UNA より先の、再送していない記録の D-SACK では、本当の損失の窓の
+// 縮小を取り消さないことを確かめる(SND.UNA より先の D-SACK は再送した記録だけを数える)。
+func TestForgedDSACKAboveTheAckDoesNotUndo(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	q.deliver(outs, func(i int, o out) bool { return i == 1 })
+	resent := n.drain()
+	n.advance(testRTT)
+	cs.mu.Lock()
+	cs.retransTSOK = false // timestamp による判定を使わない
+	cs.mu.Unlock()
+	// SACK 済みで再送していない segment 5 の D-SACK(2 つ目の block の内側)を偽って載せる
+	b5 := sackBlock{outs[5].seg.seq, outs[5].seg.seq + uint32(len(outs[5].seg.payload))}
+	s := q.p.seg(flagACK, nil)
+	s.sack = append([]sackBlock{b5}, q.blocks(2)...)
+	q.p.n.inject(s)
+	n.drain()
+	q.recv(resent[0])
+	q.ack()
+	if cs.inRecovery || n.d.Stats().SpuriousUndos != 0 {
+		t.Fatalf("a D-SACK for a record that was never retransmitted undid a real loss: cwnd %d", cs.cwnd)
+	}
+}
+
+// TestStaleDSACKDoesNotUndoALaterRecovery は、前の回復の不要な再送への遅れた D-SACK を、次の回復の再送に数えない
+// ことを確かめる。D-SACK の範囲は次の回復の印(回復に入った時の SND.UNA)より前に終わる。
+func TestStaleDSACKDoesNotUndoALaterRecovery(t *testing.T) {
+	n, c, cs, q, outs := rackConnApp(t, 10)
+	c.Write(make([]byte, 10*testSegPayload))
+	// 1 回目の回復:segment 1 が遅れ、再送は不要だった。遅れた D-SACK のために再送の範囲を覚えておく
+	q.deliver(outs, func(i int, o out) bool { return i == 1 })
+	resent := n.drain()
+	stale := sackBlock{outs[1].seg.seq, outs[1].seg.seq + uint32(len(outs[1].seg.payload))}
+	q.deliver(outs[1:2], nil)
+	q.deliver(resent, func(i int, o out) bool { return o.seg.seq == stale.left }) // 再送は届かない(重複の知らせも無い)
+	if cs.inRecovery {
+		t.Fatal("first recovery did not end")
+	}
+	undos := n.d.Stats().SpuriousUndos
+	// 2 回目の回復:本当の損失
+	n.advance(testRTT)
+	outs2 := n.drain()
+	if len(outs2) < 4 {
+		t.Fatalf("only %d new segments", len(outs2))
+	}
+	q.deliver(outs2, func(i int, o out) bool { return i == 0 })
+	if !cs.inRecovery {
+		t.Fatal("not in the second recovery")
+	}
+	resent2 := n.drain()
+	cs.mu.Lock()
+	cs.retransTSOK = false // timestamp による判定を使わない
+	cs.mu.Unlock()
+	// 1 回目の回復の再送への遅れた D-SACK が届き、続けて 2 回目の回復の再送が届く
+	s := q.p.seg(flagACK, nil)
+	s.sack = append([]sackBlock{stale}, q.blocks(2)...)
+	q.p.n.inject(s)
+	n.drain()
+	q.deliver(resent2[:1], nil)
+	if cs.inRecovery || n.d.Stats().SpuriousUndos != undos {
+		t.Fatalf("a stale D-SACK from an earlier recovery undid a real loss: recovery %v undos %d (was %d)", cs.inRecovery, n.d.Stats().SpuriousUndos, undos)
+	}
+}
+
+// TestTLPProbeDSACKIsNotCounted は、TLP の probe の D-SACK を回復の再送に数えず、並べ替えの窓も広げないことを
+// 確かめる(Linux の FLAG_DSACK_TLP)。
+func TestTLPProbeDSACKIsNotCounted(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	cs.mu.Lock()
+	cs.reorderSeen = true
+	cs.mu.Unlock()
+	// 最後の 2 つの segment の確認が遅れ、TLP が最後の segment を再送する
+	q.deliver(outs[:8], nil)
+	if cs.tlpAt == 0 {
+		t.Fatal("no PTO armed")
+	}
+	var probe []out
+	for i := 0; i < 1000 && len(probe) == 0; i++ {
+		n.advance(time.Millisecond)
+		probe = n.drain()
+	}
+	if n.d.Stats().TLPProbes != 1 || len(probe) != 1 || probe[0].seg.seq != outs[9].seg.seq {
+		t.Fatalf("probe %v, stats %+v", probe, n.d.Stats())
+	}
+	cs.mu.Lock()
+	cs.initUndo() // probe より前に取り消しの印を付け、印の後の再送が 1 つあるとする
+	cs.undoRetrans = 1
+	cs.mu.Unlock()
+	q.deliver(outs[8:], nil) // 元の segment が届く
+	mult := cs.reoWndMult
+	s := q.p.seg(flagACK, nil)
+	s.sack = []sackBlock{{outs[9].seg.seq, outs[9].seg.seq + uint32(len(outs[9].seg.payload))}}
+	n.inject(s) // probe への D-SACK
+	if cs.reoWndMult != mult || n.d.Stats().DSACKsIn != 0 {
+		t.Fatalf("a TLP probe's D-SACK widened the reorder window: mult %d (was %d)", cs.reoWndMult, mult)
+	}
+	if cs.undoRetrans != 1 {
+		t.Fatalf("a TLP probe's D-SACK was counted as a spurious retransmission: %d left", cs.undoRetrans)
+	}
+	if cs.dsackDups == 0 {
+		t.Fatal("the probe's D-SACK was not seen")
+	}
+}
+
+// TestFRTOEndsWhenOneAckPassesRecover は、1 つの ACK が RTO の時の SND.MAX を越えた時に F-RTO と RTO の後の回復を
+// 終え、本当の損失なら窓を戻さないことを確かめる。F-RTO の段階が残ると、先頭の再送が輻輳の窓によらず送られる。
+func TestFRTOEndsWhenOneAckPassesRecover(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	for _, o := range outs[1:] {
+		q.recv(o) // 相手は 1 から 9 を受けたが、その ACK は失われた
+	}
+	for n.d.Stats().RTOs == 0 {
+		n.advance(5 * time.Millisecond)
+	}
+	if cs.frto != 1 {
+		t.Fatalf("F-RTO %d after the RTO", cs.frto)
+	}
+	resent := n.drain()
+	q.deliver(resent, nil) // 先頭の再送が届き、1 つの ACK がすべてを確認する
+	if cs.sndUna != cs.sndMax || cs.frto != 0 || cs.rtoEpisode || cs.undoMarker {
+		t.Fatalf("after one ACK past recover: una %d max %d frto %d episode %v marker %v", cs.sndUna-cs.iss, cs.sndMax-cs.iss, cs.frto, cs.rtoEpisode, cs.undoMarker)
+	}
+	if st := n.d.Stats(); st.SpuriousRTOs != 0 || st.SpuriousUndos != 0 || cs.cwnd > uint32(4*cs.segMSS()) {
+		t.Fatalf("a real loss was undone: cwnd %d stats %+v", cs.cwnd, st)
+	}
+}

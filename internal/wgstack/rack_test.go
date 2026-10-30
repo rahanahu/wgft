@@ -320,6 +320,13 @@ func TestDSACKWidensTheReorderWindow(t *testing.T) {
 		s.sack = []sackBlock{{outs[0].seg.seq, outs[0].seg.seq + uint32(testSegPayload)}} // 確認済みの範囲
 		n.inject(s)
 	}
+	dsack() // 再送していないデータの D-SACK は疑わしいので使わない(Linux の tcp_dsack_seen)
+	if cs.reoWndMult > 1 || n.d.Stats().DSACKsIn != 0 {
+		t.Fatalf("a D-SACK with no retransmissions raised the multiplier to %d", cs.reoWndMult)
+	}
+	cs.mu.Lock()
+	cs.totalRetrans = 100 // 再送を送ったことにする
+	cs.mu.Unlock()
 	dsack()
 	if cs.reoWndMult != 2 || n.d.Stats().DSACKsIn != 1 || cs.reoWnd() != min(2*w1, cs.srtt) {
 		t.Fatalf("after one D-SACK: mult %d, window %d, was %d", cs.reoWndMult, cs.reoWnd(), w1)
