@@ -56,12 +56,16 @@ func finPassiveClose(h *H) {
 	c.Close()
 	f, ok := p.Await(time.Second, isFIN)
 	h.Check("last-ack.fin", ok && f.Seq == p.RcvNxt, "Close sends a FIN after the data", segDesc(f, ok))
+	var ackTS uint32
 	if ok {
 		p.RcvNxt = f.Seq + f.Len()
-		p.SendAck()
+		ackTS = p.SendFreshAck()
 	}
-	s, quiet := p.Quiet(500 * time.Millisecond)
+	// A FIN resent before the ACK got there, as a tail loss probe on a loaded machine, is passed
+	// over; anything sent once the DUT had the ACK fails the check.
+	s, quiet, stale := p.QuietSince(500*time.Millisecond, ackTS)
 	h.Check("closed.quiet", quiet, "nothing follows the ACK of the DUT's FIN", segDesc(s, !quiet))
+	h.Measure("resent-before-the-ack", stale)
 	delivered(h, "delivered", c)
 }
 
