@@ -1,6 +1,9 @@
 package wgstack
 
-import "unsafe"
+import (
+	"sync"
+	"unsafe"
+)
 
 // Stats は Device が数える保持と事象。保持の欄は会計が数える今の量で、上界の試験と fuzzing が上界の式と
 // 比べる。数は `wgft status`、管理用 API、wire protocol に載せない(設計文書の「尽きたときの動作」)。
@@ -11,8 +14,8 @@ type Stats struct {
 	AcceptQueued  int   // accept の待ち行列の接続(移している途中の行を含む)
 	CtlQueued     int   // 制御の輪に積んだ packet
 	ChunkBytes    int64 // 送信と受信の輪が持つ chunk の byte
-	RecordBytes   int64 // 送信の記録の輪の byte(floor の輪と boost の輪)
-	IntervalBytes int64 // 順序外の区間の表の byte(floor の表と boost の表)
+	RecordBytes   int64 // 送信の記録の輪がヒープに持つ byte(floor の輪と boost の輪。heapBytes で切り上げる)
+	IntervalBytes int64 // 順序外の区間の表がヒープに持つ byte(floor の表と boost の表。heapBytes で切り上げる)
 	Boosted       int   // boost の枠を持つこの Device の接続
 	Reserved      int64 // 使っている接続の枠の送信と受信の容量の和
 
@@ -74,27 +77,18 @@ func (d *Device) Stats() Stats { return d.s.stats() }
 
 func (s *stack) stats() Stats {
 	var st Stats
-	recSize := int64(unsafe.Sizeof(record{}))
-	ivSize := int64(unsafe.Sizeof(interval{}))
 	for i := range s.conns {
 		c := &s.conns[i]
 		c.mu.Lock()
-		if c.floorRecs != nil {
-			st.RecordBytes += int64(len(c.floorRecs)) * recSize
-		}
-		if c.floorIv != nil {
-			st.IntervalBytes += int64(len(c.floorIv)) * ivSize
-		}
+		r, iv := c.arrayBytes()
+		st.RecordBytes += r
+		st.IntervalBytes += iv
 		if c.state != stFree {
 			st.Conns++
 			st.ChunkBytes += int64(c.snd.heldChunks()+c.rcv.r.heldChunks()) * chunkSize
 			st.Reserved += int64(c.sndCap + c.rcvCap)
 			if c.boosted {
 				st.Boosted++
-				st.RecordBytes += int64(len(c.recs.recs)) * recSize
-			}
-			if c.rcvBoost {
-				st.IntervalBytes += int64(len(c.rcv.iv)) * ivSize
 			}
 		}
 		c.mu.Unlock()
@@ -163,56 +157,134 @@ func (s *stack) stats() Stats {
 	return st
 }
 
-// Bound は上界の式(設計文書の「上界の式」)の TCP の項を、この Device の表の大きさと、この build の構造の
-// 大きさで求めた値。UDP、ICMP、再組み立ての項はこの段階に無いので含めない。boost の項は、プロセスの枠の
-// すべてをこの Device が持つとして数える。
+// arrayBytes は枠が持つ送信の記録の輪と区間の表がヒープに持つ byte を返す。floor の輪と表は枠と共に
+// 持ち続ける。今使っている輪と表が floor のものでなければ、boost の段の配列としてそれも数える。段の印では
+// なく配列の同一性で見るので、印を消した後に残った boost の配列も数える。mu を持って呼ぶ。
+func (c *tcb) arrayBytes() (recs, ivs int64) {
+	recs = recordsBytes(len(c.floorRecs))
+	if len(c.recs.recs) > 0 && (len(c.floorRecs) == 0 || &c.recs.recs[0] != &c.floorRecs[0]) {
+		recs += recordsBytes(len(c.recs.recs))
+	}
+	ivs = intervalsBytes(len(c.floorIv))
+	if len(c.rcv.iv) > 0 && (len(c.floorIv) == 0 || &c.rcv.iv[0] != &c.floorIv[0]) {
+		ivs += intervalsBytes(len(c.rcv.iv))
+	}
+	return recs, ivs
+}
+
+// recordsBytes と intervalsBytes は配列の長さから数え、上界の項(terms)を使わない。会計を項から独立に
+// 数えるので、項の誤りは上界の試験で比べたときに現れる。
+func recordsBytes(n int) int64   { return heapBytes(int64(n) * int64(unsafe.Sizeof(record{}))) }
+func intervalsBytes(n int) int64 { return heapBytes(int64(n) * int64(unsafe.Sizeof(interval{}))) }
+
+// mallocHeader は Go のヒープがポインタを含む小さな object に足す管理の頭の大きさ。
+const mallocHeader = 8
+
+var heapRound sync.Map // 要求の byte 数から、切り上げた大きさへ
+
+// heapBytes は n byte の配列 1 つを Go のヒープが持つ大きさの上界を返す(設計文書の「上界の式」の確保の
+// 丸め)。ヒープは object を大きさの区分(32 KiB まで)か 8 KiB の page の倍数(それより大きい)に切り上げて
+// 持ち、ポインタを含む小さな object には管理の頭を足す。切り上げは runtime の表を読まずに、append が同じ
+// 切り上げで決める []byte の容量で測る。管理の頭はポインタの有無によらず足す(上に振れるだけ)。
+// 大きさごとに 1 回だけ測る。
+func heapBytes(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	if v, ok := heapRound.Load(n); ok {
+		return v.(int64)
+	}
+	m := int64(cap(append([]byte(nil), make([]byte, n+mallocHeader)...)))
+	heapRound.Store(n, m)
+	return m
+}
+
+// chunkHeap は chunk 1 つがヒープに持つ大きさ。chunk はポインタを含まないので管理の頭を足さない。
+var chunkHeap = sync.OnceValue(func() int64 {
+	return int64(cap(append([]byte(nil), make([]byte, chunkSize)...)))
+})
+
+// ringBytes は容量 n byte の chunk の輪がヒープに持つ大きさの上界。
+func ringBytes(n int64) int64 { return n / chunkSize * chunkHeap() }
+
+// slotTerms は接続の枠 1 つと boost の枠 1 つの項(設計文書の「上界の式」)を、ヒープが持つ大きさで数えた値。
+type slotTerms struct {
+	fs, fr, rf, hf   int64 // floor の送信と受信の輪、floor の記録の輪、floor の区間の表
+	ds, dr, drec, dh int64 // boost が送信と受信の輪に加える分、boost の記録の輪の全体、boost の区間の表の全体
+}
+
+func (t slotTerms) floor() int64 { return t.fs + t.fr + t.rf + t.hf }
+func (t slotTerms) boost() int64 { return t.ds + t.dr + t.drec + t.dh }
+
+// terms は枠の項を返す。boost の間も floor の記録の輪と区間の表は枠に残るので、d_rec と d_h は floor との
+// 差ではなく boost の配列の全体である。送信と受信の輪は段を変えるときに古い chunk を返すので、d_s と d_r は
+// floor との差である。
+var terms = sync.OnceValue(func() slotTerms {
+	return slotTerms{
+		fs: ringBytes(sendFloor), fr: ringBytes(recvFloor),
+		rf: heapBytes(floorRecords * int64(unsafe.Sizeof(record{}))), hf: heapBytes(floorIntervals * int64(unsafe.Sizeof(interval{}))),
+		ds: ringBytes(boostSize) - ringBytes(sendFloor), dr: ringBytes(boostSize) - ringBytes(recvFloor),
+		drec: heapBytes(boostRecords * int64(unsafe.Sizeof(record{}))), dh: heapBytes(boostIntervals * int64(unsafe.Sizeof(interval{}))),
+	}
+})
+
+// Bound は上界の式(設計文書の「上界の式」)の値を、この Device の表の大きさと、この build の構造の大きさで
+// 求めた値。配列はヒープが持つ切り上げた大きさで数える(heapBytes)。boost の項は、プロセスの枠のすべてを
+// この Device が持つとして数える。
 type Bound struct {
 	Fix       int64 // M_fix:核の構造(事象の数と観測の関数を含む)、接続の枠の構造、hash の表、行の表、タイマーの輪、出力の list と制御の輪、chunk の置き場
-	FloorConn int64 // N_c x (f_s + f_r + r_f)
-	Boost     int64 // B x (d_s + d_r + d_rec + d_h)
+	FloorConn int64 // N_c x (f_s + f_r + r_f + h_f)
+	Boost     int64 // B x (d_s + d_r + d_rec + d_h)。d_rec と d_h は boost の輪と表の全体で、floor の輪と表は枠に残るので FloorConn が数える
 	UDPRx     int64 // M_udp_rx:受信の予算と管理の配列
 	UDPTx     int64 // M_udp_tx:送信の予算と管理の配列
 	Frag      int64 // M_frag:再組み立ての表の保持 byte の上限
 	Ping      int64 // N_ping x c_ping
 	Total     int64
-	// 移す間の一時の保持:boost を得るときと floor に戻るときに、送信と受信の輪の生きている範囲を新しい
-	// chunk に写す間、古い chunk を合わせて持つ。1 本の接続の錠の中で起きるので、同時に起きる数は boost の
-	// 枠の数以下で、最大で B x (f_s + f_r) である
+	// 段を変える間の一時の保持(設計文書の「上界の式」が式に含めない項)。1 本の接続の錠の中で起きるので、
+	// 同時に起きる数は boost の枠の数以下で、B x (f_s + f_r) で抑える
 	Transient int64
 }
 
-// slotRuntime は接続の枠 1 つが表の外に持つランタイムの構造の見積もり(推定)。読み書きを起こす 2 つの
-// channel、アプリケーションの handle の Conn、読み書きの期限のタイマーで、合わせて 0.5 KiB 程度である。
-const slotRuntime = 512
+// slotRuntime は接続の枠 1 つが表の外に持つ構造の上界。linux/amd64 の Go 1.27 で測ると、アプリケーションの
+// handle の Conn と 2 つの TCPAddr が 176 byte、読み書きを起こす 2 つの channel が 224 byte、読み書きの
+// 期限の 2 つの channel が 224 byte、2 つの期限のタイマーが 256 byte で、合わせて 880 byte である。
+const slotRuntime = 1024
 
 // Bound はこの Device の上界の式の値を返す。
 func (d *Device) Bound() Bound { return d.s.bound() }
 
+// bound は表の大きさが作成の時に決まるので、1 回だけ数える。
 func (s *stack) bound() Bound {
+	s.boundOnce.Do(func() { s.boundVal = s.countBound() })
+	return s.boundVal
+}
+
+func (s *stack) countBound() Bound {
 	n := int64(len(s.conns))
-	recSize := int64(unsafe.Sizeof(record{}))
-	ivSize := int64(unsafe.Sizeof(interval{}))
+	b4 := func(k int) int64 { return heapBytes(int64(k) * 4) }
+	idx := func(x index) int64 { return heapBytes(int64(len(x.ents)) * int64(unsafe.Sizeof(indexEnt{}))) }
+	dl := func(x dlist) int64 { return b4(len(x.next)) + b4(len(x.prev)) + heapBytes(int64(len(x.in))) }
 	var b Bound
-	b.Fix = int64(unsafe.Sizeof(stack{})) + n*int64(unsafe.Sizeof(tcb{})) +
-		int64(len(s.connIdx.ents)+len(s.syn.idx.ents)+len(s.tw.idx.ents))*int64(unsafe.Sizeof(indexEnt{})) +
-		int64(len(s.syn.rows))*int64(unsafe.Sizeof(synRow{})) + int64(len(s.syn.free))*4 +
-		int64(len(s.tw.rows))*int64(unsafe.Sizeof(twRow{})) + int64(len(s.tw.free))*4 +
-		int64(len(s.free))*4 +
-		int64(len(s.wheel.dl))*(8+4+4+2) +
-		int64(len(s.out.conns.next)+len(s.out.rows.next))*(4+4+1) +
-		int64(len(s.out.ctl.buf)) + int64(len(s.out.ctl.lens))*8 +
-		int64(cap(s.fired))*4 +
-		chunkPoolKeep*chunkSize +
+	b.Fix = heapBytes(int64(unsafe.Sizeof(stack{}))) + heapBytes(n*int64(unsafe.Sizeof(tcb{}))) + b4(len(s.free)) +
+		idx(s.connIdx) + idx(s.syn.idx) + idx(s.tw.idx) +
+		heapBytes(int64(len(s.syn.rows))*int64(unsafe.Sizeof(synRow{}))) + b4(len(s.syn.free)) +
+		heapBytes(int64(len(s.tw.rows))*int64(unsafe.Sizeof(twRow{}))) + b4(len(s.tw.free)) +
+		heapBytes(int64(len(s.wheel.dl))*8) + b4(len(s.wheel.next)) + b4(len(s.wheel.prev)) + heapBytes(int64(len(s.wheel.where))*2) +
+		dl(s.out.conns) + dl(s.out.rows) +
+		heapBytes(int64(len(s.out.ctl.buf))) + heapBytes(int64(len(s.out.ctl.lens))*int64(unsafe.Sizeof(int(0)))) +
+		b4(cap(s.fired)) +
+		chunkPoolKeep*chunkHeap() + heapBytes(chunkPoolKeep*int64(unsafe.Sizeof((*chunk)(nil)))) +
 		n*slotRuntime
-	b.FloorConn = n * (sendFloor + recvFloor + floorRecords*recSize + floorIntervals*ivSize)
-	b.Boost = int64(len(s.pool.slots)) * ((boostSize - sendFloor) + (boostSize - recvFloor) + (boostRecords-floorRecords)*recSize + (boostIntervals-floorIntervals)*ivSize)
+	t := terms()
+	b.FloorConn = n * t.floor()
+	b.Boost = int64(len(s.pool.slots)) * t.boost()
 	dg := int64(unsafe.Sizeof(udpDgram{}))
-	ck := int64(unsafe.Sizeof(udpChunkRec{}))
-	b.UDPRx = udpRxBytes + int64(len(s.udp.dg[dirRx]))*(dg+4) + int64(len(s.udp.ck))*(ck+4)/2
-	b.UDPTx = udpTxBytes + int64(len(s.udp.dg[dirTx]))*(dg+4) + int64(len(s.udp.ck))*(ck+4)/2
+	ck := heapBytes(int64(len(s.udp.ck))*int64(unsafe.Sizeof(udpChunkRec{}))) + b4(len(s.udp.ckFree))
+	b.UDPRx = ringBytes(udpRxBytes) + heapBytes(int64(len(s.udp.dg[dirRx]))*dg) + b4(len(s.udp.dgFree[dirRx])) + (ck+1)/2
+	b.UDPTx = ringBytes(udpTxBytes) + heapBytes(int64(len(s.udp.dg[dirTx]))*dg) + b4(len(s.udp.dgFree[dirTx])) + ck/2
 	b.Frag = int64(fragLimits.Bytes)
-	b.Ping = pingEndpoints * (int64(s.mtu) + int64(unsafe.Sizeof(pingEP{})))
+	b.Ping = pingEndpoints * (heapBytes(int64(s.mtu)) + int64(unsafe.Sizeof(pingEP{})))
 	b.Total = b.Fix + b.FloorConn + b.Boost + b.UDPRx + b.UDPTx + b.Frag + b.Ping
-	b.Transient = int64(len(s.pool.slots)) * (sendFloor + recvFloor)
+	b.Transient = int64(len(s.pool.slots)) * (t.fs + t.fr)
 	return b
 }

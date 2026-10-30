@@ -1032,6 +1032,7 @@ func (c *tcb) freeSlotLocked() {
 	if s.closed {
 		c.floorRecs = nil // 閉じた Device では、Close と競った確立が確保した輪も残さない
 		c.floorIv = nil
+		c.rcv.iv = nil // 受信のバッファは tcbState の外にあり、区間の表を指したまま残るため
 	}
 	if c.rch != nil {
 		close(c.rch)

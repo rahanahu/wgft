@@ -12,3 +12,6 @@
 # go build ./cmd/wgft/(引数が単一 main だと cwd に wgft を吐く)
 /wgft
 /check-japanese
+
+# Python のバイトコード (lab/agentmem.py などを import したときにできる)
+__pycache__/
