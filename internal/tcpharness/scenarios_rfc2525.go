@@ -47,18 +47,22 @@ func rfc2525InitialWindow(h *H) {
 		if _, err := c.Write(pattern(30*int(mss), 0xd1)); err != nil {
 			h.T.Fatalf("write: %v", err)
 		}
+		id := fmt.Sprintf("mss%d", mss)
 		all, _ := burst(p)
 		segs := atOnce(h, all)
 		sent := 0
 		for _, s := range segs {
 			sent += len(s.Payload)
 		}
-		h.Measure(fmt.Sprintf("mss%d-later-new-segments", mss), len(all)-len(segs))
+		later := len(all) - len(segs)
+		h.Measure(fmt.Sprintf("mss%d-later-new-segments", mss), later)
+		// one later segment is a tail loss probe of new data; more would be a second window
+		h.Check(id+".one-probe-at-most", later <= 1 && len(all) <= 11, "after the first window, at most one more new segment comes before any ACK: a tail loss probe",
+			fmt.Sprintf("%d later segments, %d in all", later, len(all)))
 		largest := 0
 		for _, s := range segs {
 			largest = max(largest, len(s.Payload))
 		}
-		id := fmt.Sprintf("mss%d", mss)
 		h.Check(id+".at-most-iw10", len(segs) <= 10 && sent <= 10*int(mss), fmt.Sprintf("RFC 2525 2.1 and 2.3: the first burst is at most ten segments of at most %d bytes", mss),
 			fmt.Sprintf("%d segments, %d bytes, the largest %d", len(segs), sent, largest))
 		h.Check(id+".segment-size", largest <= int(mss), "no segment carries more than the peer's MSS", fmt.Sprintf("the largest %d bytes", largest))
@@ -169,10 +173,13 @@ func rfc2525WindowDeflation(h *H) {
 	p.SendAck()
 	all, _ := burst(p)
 	released := atOnce(h, all)
-	// ssthresh is half the flight for NewReno and 0.7 of it for CUBIC; one segment more allows
-	// for rounding. A window still inflated by the eight duplicate ACKs would let out more.
-	bound := (7*flight+9)/10 + 1
-	h.Check("deflated", len(released) <= bound, fmt.Sprintf("RFC 2525 2.8: the ACK that ends recovery lets out at most ssthresh and one more: %d for a flight of %d at 0.7", bound, flight),
+	// ssthresh is half the flight for NewReno and 0.7 of it for CUBIC. A window still inflated by
+	// the eight duplicate ACKs lets out ssthresh and about eight more: 15 for a flight of 10 at
+	// 0.7, 13 at 0.5. The bound sits between, at ssthresh and three more, room for a sender that
+	// rounds up and sends a segment or two beyond ssthresh as it leaves recovery, as gVisor's
+	// seven of ten does.
+	bound := (7*flight+9)/10 + 3
+	h.Check("deflated", len(released) <= bound, fmt.Sprintf("RFC 2525 2.8: the ACK that ends recovery lets out at most ssthresh and three more: %d for a flight of %d at 0.7", bound, flight),
 		fmt.Sprintf("%d segments at once", len(released)))
 	h.Measure("segments-after-recovery", len(released))
 	h.Measure("flight-at-loss", flight)
@@ -209,15 +216,18 @@ func rfc2525StretchACK(h *H) {
 		fmt.Sprintf("the widest ACK covers %d segments; %v", worst, yesNo(last == p.SndNxt, "all acknowledged", "not all acknowledged")))
 }
 
-// rfc2525CloseFIN closes a connection whose sent data is acknowledged. 2.15, failure to send FIN
-// notification promptly: the FIN goes at once.
+// rfc2525CloseFIN writes three segments, holds their ACK back and closes. 2.15, failure to send
+// FIN notification promptly: the FIN goes at once after the data, within the window, not after
+// the data is acknowledged.
 func rfc2525CloseFIN(h *H) {
 	const port = 8306
 	l := h.Listen(port)
 	p, _, c := h.Connect(l, port, StandardSYN())
+	segs, data := flight(h, p, c, 3, 0xd6)
+	end := segs[0].Seq + uint32(len(data))
 	c.Close()
 	f, ok := p.Await(h.Prompt(), isFIN)
-	h.Check("fin-prompt", ok && f.Seq == p.RcvNxt, "RFC 2525 2.15: Close sends the FIN at once", segDesc(f, ok))
+	h.Check("fin-prompt", ok && f.Seq+uint32(len(f.Payload)) == end || ok && f.Seq == end, "RFC 2525 2.15: Close sends the FIN at once after the unacknowledged data", segDesc(f, ok))
 }
 
 // rfc2525DataAfterClose closes the application's side fully, lets the testbench acknowledge the
@@ -233,6 +243,11 @@ func rfc2525DataAfterClose(h *H) {
 	p.RcvNxt = f.Seq + f.Len()
 	p.SendAck()
 	p.SendData([]byte("late"))
+	// Await looks only at this connection's four-tuple, the FIN_WAIT_2 one
 	r, ok := p.Await(time.Second, isRST)
 	h.Check("rst", ok, "RFC 2525 2.16: data for a closed application draws a RST", segDesc(r, ok))
+	if ok {
+		h.Check("rst.seq", r.Seq == p.RcvNxt, "the RST carries SND.NXT, past the FIN, as RFC 9293 3.10.7.4 asks for a segment that acknowledges it",
+			yesNo(r.Seq == p.RcvNxt, "SND.NXT", "another number"))
+	}
 }

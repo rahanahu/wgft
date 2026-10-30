@@ -66,24 +66,25 @@ wgstack は受け身の open だけの IPv4 の TCP ですが、中継のため�
 | 2.4 | 再送の中身が元と違う | 当てはまる | `retransmit-rto` の `same-data` | 通る |
 | 2.5 | 順序の先のデータを保たない | 当てはまる | `ooo-sack` | 通る |
 | 2.6 | 輻輳の回避に余分な定数を足す | 当てはまる | `cubic-after-loss`(wgstack だけ、RFC 9438 の式と比べます) | 通る |
-| 2.7 | 最初の RTO が短すぎる | 当てはまる | `rfc2525-synack-rto` | 3 つとも答えの無い SYN-ACK を約 1 秒後に送り直す |
+| 2.7 | 最初の RTO が短すぎる | 当てはまる | `rfc2525-synack-rto`(SYN-ACK の timer だけ。データの RTO は `retransmit-rto` が確かめます) | 3 つとも答えの無い SYN-ACK を約 1 秒後に送り直す |
 | 2.8 | 回復の後に窓を縮めない | 当てはまる | `rfc2525-window-deflation` | 3 つとも通る(後述) |
 | 2.9 | keepalive の打ち切りが早すぎる | 当てはまらない | なし | wgstack は TCP の keepalive を持ちません([完成に含める機能](wgstack.md#完成に含める機能)) |
 | 2.10 | RTO を倍にしない | 当てはまる | `retransmit-rto` の `backoff` | 通る |
 | 2.11 | keepalive の間隔が短すぎる | 当てはまらない | なし | 2.9 と同じ |
 | 2.12 | 窓の probe の行き詰まり | 当てはまる | `zero-window-probe` | 通る |
 | 2.13 | 2 segment を超えてまとめて確認する | 当てはまる | `rfc2525-stretch-ack` | 3 つとも 1 つの ACK が確認するのは 2 segment 以下 |
-| 2.14 | 再送で複数の packet を送る | 当てはまる | `rfc2525-rto-slow-start` | 2.2 と同じ |
-| 2.15 | FIN をすぐ送らない | 当てはまる | `rfc2525-close-fin` | 3 つとも `Close` ですぐ FIN を送る |
-| 2.16 | 半分の close の後に RST を送らない | 当てはまる | `rfc2525-data-after-close` | 3 つとも閉じた後のデータに RST を返す |
+| 2.14 | 再送で複数の packet を送る | 当てはまる | `rfc2525-rto-slow-start`(RTO の再送だけ。高速の再送の側は台本がありません) | 2.2 と同じ |
+| 2.15 | FIN をすぐ送らない | 当てはまる | `rfc2525-close-fin` | 3 つとも、確認されていないデータの後に `Close` ですぐ FIN を送る |
+| 2.16 | 半分の close の後に RST を送らない | 当てはまる | `rfc2525-data-after-close` | 3 つとも、FIN_WAIT_2 の接続へのデータに SND.NXT の RST を返す |
 | 2.17 | 未読のデータを持った close で RST を送らない | 当てはまる | `close-unread-rst` | 通る |
 | 2.18 | MSS の計算に option を含めない | 当てはまる | すべての台本の MTU の確かめと `rfc2525-initial-window` の `segment-size` | 通る |
 
-2.1 と 2.3 の確かめでは、DUT が同じ時刻に送った segment だけを最初の窓として数えます。
+2.1 と 2.3 の確かめでは、DUT が同じ時刻に送った segment だけを最初の窓として数え、その後の新しい segment は TLP の probe の 1 つまでとします。
 wgstack は試験台の RTT がほぼ 0 の時、約 1 ms 後に TLP の probe として新しい segment を 1 つ送り(RFC 8985 7.3)、これを最初の窓に数えると 11 segment に見えるためです。
 2.8 の確かめでは、回復を終える ACK の timestamp に、DUT が最後に送った segment の TSval を返します。
 古い TSval を返すと、Linux と wgstack は再送した segment の元が届いたと見て窓の縮小を取り消し(RFC 3522)、窓を縮めない送り手と見分けられなくなるためです。
-上限は、回復に入った時の送り残しの 0.7 倍(CUBIC の β)に 1 を足した segment の数で、NewReno の 0.5 倍の送り手にも使います。
+上限は、回復に入った時の送り残しの 0.7 倍(CUBIC の β)に 3 を足した segment の数で、NewReno の 0.5 倍の送り手にも使います。
+窓が 8 つの重複した ACK で膨らんだままなら、送り残しが 10 の時に 0.7 倍で 15、0.5 倍で 13 segment を送り、上限の 10 を超えます。
 回復を終えた ACK の後に送った segment の数は、Linux が 6、gVisor が 7、wgstack が 2 でした。
 
 ### 参照の Linux の設定
