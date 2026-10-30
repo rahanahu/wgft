@@ -43,7 +43,7 @@ type DUT struct {
 	Stats func(outageEnd time.Time) string
 	// OnAccept, when set, sees the accepted connection; RTOAt then returns the sender's RTO in
 	// use at a moment, backoff included, or a negative value when the engine cannot tell.
-	OnAccept func(net.Conn)
+	OnAccept func(net.Conn) error
 	RTOAt    func(at time.Time) time.Duration
 }
 

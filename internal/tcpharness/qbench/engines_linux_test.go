@@ -53,6 +53,7 @@ func (l linuxListener) Close() error              { return l.l.Close() }
 // RTO in use at the end of an outage, tcpi_rto with its backoff, can be read afterwards.
 type rtoSampler struct {
 	mu      sync.Mutex
+	err     error // the last TCP_INFO error, if any
 	samples []struct {
 		at  time.Time
 		rto time.Duration
@@ -61,14 +62,14 @@ type rtoSampler struct {
 	once sync.Once
 }
 
-func (r *rtoSampler) start(c net.Conn) {
+func (r *rtoSampler) start(c net.Conn) error {
 	sc, ok := c.(syscall.Conn)
 	if !ok {
-		return
+		return fmt.Errorf("the accepted %T has no file descriptor for TCP_INFO", c)
 	}
 	raw, err := sc.SyscallConn()
 	if err != nil {
-		return
+		return fmt.Errorf("TCP_INFO: %w", err)
 	}
 	r.done = make(chan struct{})
 	go func() {
@@ -81,8 +82,12 @@ func (r *rtoSampler) start(c net.Conn) {
 			case <-t.C:
 			}
 			var info *unix.TCPInfo
-			raw.Control(func(fd uintptr) { info, _ = unix.GetsockoptTCPInfo(int(fd), unix.SOL_TCP, unix.TCP_INFO) })
+			var gerr error
+			raw.Control(func(fd uintptr) { info, gerr = unix.GetsockoptTCPInfo(int(fd), unix.SOL_TCP, unix.TCP_INFO) })
 			if info == nil {
+				r.mu.Lock()
+				r.err = gerr
+				r.mu.Unlock()
 				continue
 			}
 			r.mu.Lock()
@@ -93,6 +98,7 @@ func (r *rtoSampler) start(c net.Conn) {
 			r.mu.Unlock()
 		}
 	}()
+	return nil
 }
 
 func (r *rtoSampler) stop() {
@@ -166,9 +172,14 @@ func pinLinux(t *testing.T, engines []string) string {
 	if err := linuxdut.PinPerformance(); err != nil {
 		t.Fatalf("pinning the performance sysctls: %v", err)
 	}
+	// record the values as the kernel reads them back, not as written
 	var vals []string
 	for _, kv := range linuxdut.PerformanceSysctls {
-		vals = append(vals, kv[0]+"="+strings.ReplaceAll(kv[1], "\t", " "))
+		b, err := os.ReadFile("/proc/sys/" + kv[0])
+		if err != nil {
+			t.Fatalf("reading %s back: %v", kv[0], err)
+		}
+		vals = append(vals, kv[0]+"="+strings.Join(strings.Fields(string(b)), " "))
 	}
 	where += "; " + strings.Join(vals, ", ")
 	fmt.Printf("QBENCH-META where=%q\n", where)
