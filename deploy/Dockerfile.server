@@ -2,8 +2,14 @@
 # 6.3): wireguard-go + gVisor netstack, so it needs neither a TUN device, NET_ADMIN, nftables,
 # nor host networking. The Docker host needs net.core.rmem_max and net.core.wmem_max of 7340032 or
 # more, which a container cannot set itself; see docs/socket-buffers.md.
-# Kernel mode (section 6.1) configures wg0 and nftables over netlink and is
-# not supported in a container; run it as the systemd unit in deploy/server.service instead.
+# Kernel mode (section 6.1) configures wg0 and nftables over netlink. This image is built and
+# supported for the userspace mode only; run kernel mode as the systemd unit in
+# deploy/server.service. A manual check on Debian 12 with docker.io 20.10.24 did see kernel mode
+# forward from this image when run as root with --network host and --cap-add NET_ADMIN, and with
+# net.ipv4.ip_forward already 1 on the host or with --security-opt systempaths=unconfined and
+# --security-opt apparmor=unconfined so the server could set it. Docker sets the host's iptables
+# FORWARD policy to drop, so that run also needed the two lines wgft server check prints. The
+# image has no nft binary, so wgft server nft fails inside it.
 #
 #   docker build -f deploy/Dockerfile.server -t wgft-server:latest .
 #   docker build -f deploy/Dockerfile.server --build-arg VERSION=v0.1.0 -t wgft-server:v0.1.0 .
