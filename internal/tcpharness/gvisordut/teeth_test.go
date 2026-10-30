@@ -214,6 +214,7 @@ type finAfterAck struct {
 	stale bool // keep the FIN's own TSecr, as a probe sent before the ACK arrived
 	// change, when set, alters the resent copy: data instead of the FIN, or another number
 	change func(*tcpharness.Segment)
+	after  time.Duration // how long after the FIN the copy goes; 100 ms when zero
 	out    chan []byte
 	mu     sync.Mutex
 	tsval  uint32
@@ -245,8 +246,16 @@ func resendChanged(inner tcpharness.DUT, stale bool, change func(*tcpharness.Seg
 			if s, err := tcpharness.Parse(pkt); err == nil && s.Has(tcpharness.FlagFIN) && s.Opts.TS != nil && !d.resent {
 				d.resent = true
 				d.wg.Add(1)
-				time.AfterFunc(100*time.Millisecond, func() {
+				after := d.after
+				if after == 0 {
+					after = 100 * time.Millisecond
+				}
+				time.AfterFunc(after, func() {
 					defer d.wg.Done()
+					if d.change != nil && d.after > 0 {
+						// the copy's TSval says when the engine would have sent it
+						s.Opts.TS.Val += uint32(after / time.Millisecond)
+					}
 					if !d.stale {
 						d.mu.Lock()
 						s.Opts.TS.Ecr = d.tsval
@@ -473,4 +482,17 @@ func TestHarnessCatchesStaleSegmentsOtherThanTheFIN(t *testing.T) {
 		got := tcpharness.Record(t, e, scenario(t, "fin-passive-close"), 1)
 		wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
 	}
+}
+
+// A FIN resent 300 ms after the first, past the 250 ms in which a tail loss probe comes, is not
+// passed over even with its stale TSecr: it is what a DUT that never had the ACK sends at its RTO.
+func TestHarnessCatchesStaleFINPastTheProbeWindow(t *testing.T) {
+	t.Parallel()
+	e := mutant("gvisor-stale-fin-300ms", func(inner tcpharness.DUT) tcpharness.DUT {
+		d := resendChanged(inner, true, func(*tcpharness.Segment) {}).(*finAfterAck)
+		d.after = 300 * time.Millisecond
+		return d
+	})
+	got := tcpharness.Record(t, e, scenario(t, "fin-passive-close"), 1)
+	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
 }

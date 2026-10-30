@@ -634,8 +634,14 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time) 
 		if !ok {
 			return Segment{}, true, stale
 		}
+		// How long after the FIN the DUT sent the resend: from the DUT's own timestamps where it
+		// has them, which a stalled testbench cannot stretch, else from when each arrived here.
+		since := p.h.Now().Sub(fAt)
+		if s.Opts.TS != nil && f.Opts.TS != nil {
+			since = time.Duration(int32(s.Opts.TS.Val-f.Opts.TS.Val)) * time.Millisecond
+		}
 		probe := s.Has(FlagFIN) && s.Flags&^(FlagFIN|FlagACK|FlagPSH) == 0 && s.Seq == f.Seq && len(s.Payload) == 0 &&
-			p.h.Now().Sub(fAt) <= probeWindow
+			since <= probeWindow
 		if !clocked && stale == 0 && probe && p.TS && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-ts) < 0 {
 			p.h.T.Logf("the FIN resent before the DUT had the testbench's latest segment, passed over once: %v", s)
 			stale++
