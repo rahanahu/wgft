@@ -40,6 +40,7 @@ type Result struct {
 	DataPkts     int
 	QDrops       int
 	RandDrops    int
+	EngineStats  string // the engine's own counters, or "-"
 }
 
 type gap struct{ from, to time.Time }
@@ -207,6 +208,10 @@ func runOne(engine string, c Case, seed int64, size int64, limit time.Duration) 
 	}
 	st := rig.L.Stats(dataDir)
 	res.Retrans, res.DataPkts, res.QDrops, res.RandDrops = st.Retrans, st.DataPkts, st.QDrops, st.Dropped
+	res.EngineStats = "-"
+	if rig.D.Stats != nil {
+		res.EngineStats = rig.D.Stats(oe)
+	}
 	return
 }
 
@@ -221,6 +226,15 @@ func envInt(k string, d int) int {
 		return v
 	}
 	return d
+}
+
+// engines is QBENCH_ENGINES, a comma-separated list, or both engines. The routine run of
+// wgstack-performance.md measures wgstack alone against saved medians: QBENCH_ENGINES=wgstack.
+func engines() []string {
+	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
+		return strings.Split(v, ",")
+	}
+	return []string{"wgstack", "gvisor"}
 }
 
 func TestQBench(t *testing.T) {
@@ -245,13 +259,14 @@ func TestQBench(t *testing.T) {
 		if only != "" && !strings.Contains(c.Name, only) {
 			continue
 		}
-		for _, eng := range []string{"wgstack", "gvisor"} {
+		for _, eng := range engines() {
 			for run := 0; run < runs; run++ {
 				seed := int64(run+1)*7919 + int64(len(c.Name))*131 + int64(c.Loss*1000)
 				fmt.Printf("QBENCH-START engine=%s case=%s run=%d seed=%d\n", eng, c.Name, run, seed)
 				r := runOne(eng, c, seed, size, limit)
 				fmt.Printf("QBENCH-RUN engine=%s case=%s run=%d seed=%d bytes=%d/%d dur=%s mbps=%.2f hash_ok=%v recovery=%s stall=%s retrans=%d/%d qdrop=%d randdrop=%d err=%q\n",
 					eng, c.Name, run, seed, r.Bytes, r.Want, r.Dur.Round(time.Millisecond), r.Mbps, r.HashOK, r.Recovery.Round(time.Millisecond), r.Stall.Round(time.Millisecond), r.Retrans, r.DataPkts, r.QDrops, r.RandDrops, r.Err)
+				fmt.Printf("QBENCH-STATS engine=%s case=%s run=%d seed=%d %s\n", eng, c.Name, run, seed, r.EngineStats)
 				all = append(all, r)
 				k := eng + "|" + c.Name
 				byKey[k] = append(byKey[k], r)
@@ -265,7 +280,7 @@ func TestQBench(t *testing.T) {
 	fmt.Println("| case | engine | ok/runs | Mbit/s (median) | duration | recovery after outage | longest stall | retransmits (data pkts) | queue drops |")
 	fmt.Println("|---|---|---|---|---|---|---|---|---|")
 	for _, c := range cases {
-		for _, eng := range []string{"wgstack", "gvisor"} {
+		for _, eng := range engines() {
 			rs := byKey[eng+"|"+c.Name]
 			if len(rs) == 0 {
 				continue

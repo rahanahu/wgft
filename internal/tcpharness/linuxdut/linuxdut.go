@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -59,17 +60,25 @@ const SocketFloor = 256 << 10
 // PinReference writes ReferenceSysctls in the calling network namespace and reads each back.
 func PinReference() error {
 	for _, kv := range ReferenceSysctls {
-		path := "/proc/sys/" + kv[0]
-		if err := os.WriteFile(path, []byte(kv[1]), 0); err != nil {
-			return fmt.Errorf("setting %s to %s: %w", kv[0], kv[1], err)
-		}
-		got, err := os.ReadFile(path)
-		if err != nil {
+		if err := writeSysctl(kv[0], kv[1]); err != nil {
 			return err
 		}
-		if v := strings.TrimSpace(string(got)); v != kv[1] {
-			return fmt.Errorf("%s reads %q after writing %q", kv[0], v, kv[1])
-		}
+	}
+	return nil
+}
+
+// writeSysctl writes one value under /proc/sys and reads it back.
+func writeSysctl(name, value string) error {
+	path := "/proc/sys/" + name
+	if err := os.WriteFile(path, []byte(value), 0); err != nil {
+		return fmt.Errorf("setting %s to %s: %w", name, value, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if v := strings.TrimSpace(string(got)); v != value {
+		return fmt.Errorf("%s reads %q after writing %q", name, v, value)
 	}
 	return nil
 }
@@ -105,6 +114,10 @@ func New(addr netip.Addr, mtu int) (*DUT, error) {
 	if err := unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, 0); err != nil {
 		unix.Close(fd)
 		return nil, fmt.Errorf("TUNSETOFFLOAD: %w", err)
+	}
+	if err := gsoOff(); err != nil {
+		unix.Close(fd)
+		return nil, err
 	}
 	tun := os.NewFile(uintptr(fd), "/dev/net/tun")
 	if err := configure(addr, mtu); err != nil {
@@ -166,6 +179,18 @@ func Engine(known map[string]tcpharness.Known) tcpharness.Engine {
 			return d
 		},
 		Known: known,
+		// Each scenario starts from the pinned reference and adds its family's settings.
+		Prepare: func(tb testing.TB, s tcpharness.Scenario) {
+			if err := PinReference(); err != nil {
+				tb.Fatalf("pinning the reference sysctls: %v", err)
+			}
+			for _, kv := range s.Linux {
+				if err := writeSysctl(kv[0], kv[1]); err != nil {
+					tb.Fatalf("setting the scenario's sysctl: %v", err)
+				}
+				tb.Logf("scenario sysctl %s = %s", kv[0], kv[1])
+			}
+		},
 	}
 }
 
@@ -262,4 +287,27 @@ var (
 func (c conn) Abort() error {
 	c.SetLinger(0)
 	return c.Close()
+}
+
+// gsoOff turns off generic segmentation offload on the TUN device. With it on, the kernel's TCP
+// builds multi-segment buffers and its TSO deferral can hold a segment the congestion window
+// allows, a timing the scenarios would read as TCP's own.
+func gsoOff() error {
+	s, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(s)
+	v := struct{ cmd, data uint32 }{unix.ETHTOOL_SGSO, 0}
+	var ifr struct {
+		name [unix.IFNAMSIZ]byte
+		data unsafe.Pointer
+		_    [16]byte
+	}
+	copy(ifr.name[:], IfName)
+	ifr.data = unsafe.Pointer(&v)
+	if _, _, e := unix.Syscall(unix.SYS_IOCTL, uintptr(s), unix.SIOCETHTOOL, uintptr(unsafe.Pointer(&ifr))); e != 0 {
+		return fmt.Errorf("turning GSO off on %s: %w", IfName, e)
+	}
+	return nil
 }

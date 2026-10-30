@@ -22,7 +22,7 @@ const RunEnv = "WGFT_TEST_WGSTACK_CONFORMANCE"
 // TestConformance runs the scenarios against wgstack on a ManualClock.
 func TestConformance(t *testing.T) {
 	if os.Getenv(RunEnv) != "1" {
-		t.Skipf("set %s=1 to run: wgstack still fails conformance checks that its implementer is fixing", RunEnv)
+		t.Skipf("set %s=1 to run: wgstack still fails the SACK recovery and RACK-TLP scenarios its implementer is building", RunEnv)
 	}
 	tcpharness.Run(t, Engine(Known), tcpharness.Scenarios)
 }

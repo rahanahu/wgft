@@ -287,3 +287,26 @@ func Parse(pkt []byte) (Segment, error) {
 		ID:      binary.BigEndian.Uint16(pkt[4:]),
 	}, nil
 }
+
+// FragNeeded builds the ICMP Destination Unreachable, Fragmentation Needed message that a router
+// at from sends back to the sender of orig, an emitted IPv4 packet, with the next-hop MTU mtu.
+// The message quotes orig's IPv4 header and the first 8 bytes of its payload.
+func FragNeeded(from netip.Addr, orig []byte, mtu uint16) []byte {
+	ihl := int(orig[0]&0x0f) * 4
+	quote := orig[:min(len(orig), ihl+8)]
+	icmp := make([]byte, 8+len(quote))
+	icmp[0], icmp[1] = 3, 4
+	binary.BigEndian.PutUint16(icmp[6:], mtu)
+	copy(icmp[8:], quote)
+	binary.BigEndian.PutUint16(icmp[2:], fold(checksum(0, icmp)))
+	pkt := make([]byte, 20+len(icmp))
+	pkt[0] = 0x45
+	binary.BigEndian.PutUint16(pkt[2:], uint16(len(pkt)))
+	pkt[8], pkt[9] = 64, 1
+	src := from.As4()
+	copy(pkt[12:16], src[:])
+	copy(pkt[16:20], orig[12:16]) // back to the original sender
+	binary.BigEndian.PutUint16(pkt[10:], fold(checksum(0, pkt[:20])))
+	copy(pkt[20:], icmp)
+	return pkt
+}
