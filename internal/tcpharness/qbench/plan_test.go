@@ -38,6 +38,8 @@ type Cell struct {
 	Outage  bool    // a 2 s cut from 2 s after the first data byte
 	Reorder bool    // 1% of packets held back long enough for three duplicate ACKs
 	Len     time.Duration
+	// NotJudged, when set, says why the cell is measured but not judged.
+	NotJudged string
 }
 
 // The run lengths. A thin-stream run is longer than a bulk one, so 5 routine runs pool at least
@@ -79,16 +81,26 @@ func gateCells() []Cell {
 	cells = append(cells,
 		bulk("recv/loss5%", false, 0.05),
 		Cell{Name: "recv/reorder", Reorder: true, Len: bulkLen},
-		Cell{Name: "recv/outage2s", Outage: true, Len: outageLen},
+		Cell{Name: "recv/outage2s", Outage: true, Len: outageLen, NotJudged: clientSends},
 		thin("thin-send/loss0%", true, 0, false),
 		thin("thin-send/loss5%", true, 0.05, false),
 		thin("thin-send/outage2s", true, 0, true),
 		thin("thin-recv/loss0%", false, 0, false),
 		thin("thin-recv/loss1%", false, 0.01, false),
 		thin("thin-recv/loss5%", false, 0.05, false),
-		thin("thin-recv/outage2s", false, 0, true),
+		withNotJudged(thin("thin-recv/outage2s", false, 0, true), clientSends),
 	)
 	return cells
+}
+
+// clientSends is why the outage cells in which the DUT receives are not judged: the sender is
+// the gVisor client, whose RTO the bench cannot read and which, sending a thin stream, stalls
+// for seconds after an outage whatever the DUT, so the cell measures the client.
+const clientSends = "the gVisor client sends; it stalls after an outage and its RTO is unknown"
+
+func withNotJudged(c Cell, why string) Cell {
+	c.NotJudged = why
+	return c
 }
 
 // Run is one measured run.
@@ -440,6 +452,9 @@ type Verdict struct {
 
 // judge applies the rule of c's kind to wgstack's summary against gVisor's and Linux's.
 func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
+	if c.NotJudged != "" {
+		return Verdict{Rule: "-", Result: "NOT JUDGED: " + c.NotJudged}
+	}
 	if !haveL {
 		return Verdict{Rule: "-", Result: "no Linux reference"}
 	}

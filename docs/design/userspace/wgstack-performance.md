@@ -412,6 +412,10 @@ CUBIC、RACK-TLP、SACK、D-SACK、F-RTO、受信のバッファの自動調整�
 - CPU:`lab/tcpquality.sh` の経路で測った byte あたりの CPU 時間が、gVisor の 1.2 倍以下です
 
 場合を判定から外せるのは所有者だけです。
+今は、DUT が受ける向きの途絶の場合 2 つ(`recv/outage2s` と `thin-recv/outage2s`)を判定から外しています。
+この 2 つでは qbench の相手の gVisor が送り手になり、qbench はその RTO を読めません。
+また、相手の gVisor は通信量の少ない stream を送ると途絶の後に DUT によらず数秒止まるので、2 つの場合の値は相手の挙動を測ります。
+別の相手、例えばラボの Linux の client を使えるようになるまで、この扱いを続けます。
 最大と最小の比が 2 を超える場合は、前述のとおり判定せずに診断して流し直します。
 
 ### 種と参照の値
