@@ -10,6 +10,8 @@ import (
 	"math"
 	"net"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -24,7 +26,10 @@ import (
 //
 //	go test -tags qbench -run TestQBenchRoutine -v ./internal/tcpharness/qbench
 //	go test -c -tags qbench -o bin/qbench.test ./internal/tcpharness/qbench
-//	lab VM, as root: QBENCH_WRITE_REF=/tmp/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//	lab VM, as root: QBENCH_WRITE_REF=/var/tmp/qref/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//
+// The reference file is written from inside the user namespace, so it needs a directory without
+// the sticky bit that the namespace's user can write, such as one made with mkdir -m 777.
 //
 // The linux engine needs a network namespace it can configure, so a test that asks for it re-runs
 // itself in a new user and network namespace with the performance sysctls pinned.
@@ -110,12 +115,12 @@ type Run struct {
 	Err          string
 	Bytes        int64
 	Mbps         float64
-	Verified     bool          // every byte read matched the sender's seeded stream
-	Recovery     time.Duration // from the outage's end to the next read; -1 without one
-	RTO          time.Duration // the sender's RTO in use at the outage's end; -1 if unknown
-	Stall        time.Duration // the longest gap between reads outside the outage
-	Lat          []time.Duration
-	Lost         int // thin messages written but never delivered
+	Verified     bool            // every byte read matched the sender's seeded stream
+	Recovery     time.Duration   // from the outage's end to the next read; -1 without one
+	RTO          time.Duration   // the sender's RTO in use at the outage's end; -1 if unknown
+	Stall        time.Duration   // the longest gap between reads outside the outage
+	Lat          []time.Duration // per thin message; an undelivered one counts until the receiver gave up
+	Lost         int             // thin messages never delivered, written or not
 	Retrans      int
 	DataPkts     int
 	QDrops       int
@@ -155,7 +160,12 @@ func open(engine string, imp Impair, seed int64) (*Rig, net.Conn, net.Conn, erro
 			return nil, nil, nil, fmt.Errorf("accept: %w", a.err)
 		}
 		if rig.D.OnAccept != nil {
-			rig.D.OnAccept(a.c)
+			if err := rig.D.OnAccept(a.c); err != nil {
+				a.c.Close()
+				cc.Close()
+				rig.Close()
+				return nil, nil, nil, err
+			}
 		}
 		return rig, cc, a.c, nil
 	case <-ctx.Done():
@@ -214,6 +224,10 @@ func runCell(engine string, c Cell, seed int64) (r Run) {
 	}
 	if c.DUTSend && !oe.IsZero() && rig.D.RTOAt != nil {
 		r.RTO = rig.D.RTOAt(oe)
+		if r.RTO < 0 && engine == "linux" && r.Err == "" {
+			// the judgment needs Linux's RTO; a run without it must not pass as measured
+			r.Err = "no TCP_INFO RTO sample before the outage's end"
+		}
 	}
 	st := rig.L.Stats(impair(c).DataDir)
 	r.Retrans, r.DataPkts, r.QDrops = st.Retrans, st.DataPkts, st.QDrops
@@ -281,26 +295,29 @@ const (
 // runThin writes 200 seeded bytes every 20 ms for c.Len and measures, per message, the time from
 // the write to the read that completes it.
 func runThin(r *Run, c Cell, seed int64, snd, rcv net.Conn) []time.Time {
-	end := time.Now().Add(c.Len)
+	// Each message has a slot every thinEvery and is timed from its slot, not from its write: a
+	// write that blocks delays the messages behind it, and their latency includes the wait.
+	start := time.Now()
+	end := start.Add(c.Len)
+	slots := int((c.Len + thinEvery - 1) / thinEvery)
+	slot := func(i int) time.Time { return start.Add(time.Duration(i) * thinEvery) }
 	var mu sync.Mutex
-	var written []time.Time
+	written := 0
 	go func() {
 		g := gen(seed)
 		msg := make([]byte, thinSize)
-		t := time.NewTicker(thinEvery)
-		defer t.Stop()
-		for time.Now().Before(end) {
+		for i := 0; i < slots; i++ {
+			time.Sleep(time.Until(slot(i)))
 			g.Read(msg)
 			mu.Lock()
-			written = append(written, time.Now())
+			written++
 			mu.Unlock()
 			if _, err := snd.Write(msg); err != nil {
 				return
 			}
-			<-t.C
 		}
 	}()
-	// read until every message written by end has arrived, or 5 s after end
+	// read until every slot's message has arrived, or 5 s after end
 	rcv.SetReadDeadline(end.Add(5 * time.Second))
 	exp := gen(seed)
 	buf := make([]byte, 64<<10)
@@ -320,11 +337,11 @@ func runThin(r *Run, c Cell, seed int64, snd, rcv net.Conn) []time.Time {
 			got += int64(n)
 			reads = append(reads, now)
 			mu.Lock()
-			for done < len(written) && int64(done+1)*thinSize <= got {
-				r.Lat = append(r.Lat, now.Sub(written[done]))
+			for done < written && int64(done+1)*thinSize <= got {
+				r.Lat = append(r.Lat, now.Sub(slot(done)))
 				done++
 			}
-			all := !now.Before(end) && done == len(written)
+			all := done == slots
 			mu.Unlock()
 			if all {
 				break
@@ -334,9 +351,14 @@ func runThin(r *Run, c Cell, seed int64, snd, rcv net.Conn) []time.Time {
 			break
 		}
 	}
-	mu.Lock()
-	r.Lost = len(written) - done
-	mu.Unlock()
+	// A message that never arrives, written or still waiting for a blocked write, counts in the
+	// pool at the latency it had reached when the receiver gave up, so the percentiles show the
+	// stall instead of leaving it out.
+	giveUp := end.Add(5 * time.Second)
+	r.Lost = slots - done
+	for i := done; i < slots; i++ {
+		r.Lat = append(r.Lat, giveUp.Sub(slot(i)))
+	}
 	r.Bytes = got
 	if !r.Verified {
 		r.Err = "STREAM MISMATCH"
@@ -346,17 +368,23 @@ func runThin(r *Run, c Cell, seed int64, snd, rcv net.Conn) []time.Time {
 
 // Summary is the medians of one engine in one cell, the values the judgment compares.
 type Summary struct {
-	Runs       int     `json:"runs"`
-	OK         int     `json:"ok"`
-	Mbps       float64 `json:"mbps"`
-	RecoveryMS float64 `json:"recovery_ms"` // -1 without an outage
-	RTOMS      float64 `json:"rto_ms"`      // -1 if unknown
-	P50MS      float64 `json:"p50_ms"`      // thin stream, all runs pooled
-	P99MS      float64 `json:"p99_ms"`
-	MaxMS      float64 `json:"max_ms"`
-	Samples    int     `json:"samples"`
-	Spread     float64 `json:"spread"` // max over min of the judged value across runs
+	Runs        int     `json:"runs"`
+	OK          int     `json:"ok"`
+	Mbps        float64 `json:"mbps"`
+	RecoveryMS  float64 `json:"recovery_ms"` // -1 without an outage
+	RTOMS       float64 `json:"rto_ms"`      // -1 if unknown
+	P50MS       float64 `json:"p50_ms"`      // thin stream, all runs pooled
+	P99MS       float64 `json:"p99_ms"`
+	MaxMS       float64 `json:"max_ms"`
+	Samples     int     `json:"samples"`
+	Lost        int     `json:"lost"`        // thin messages never delivered, all runs
+	Unrecovered int     `json:"unrecovered"` // outage runs with no read after the outage
+	Spread      float64 `json:"spread"`      // max over min of the judged value across runs; spreadInf for a missing value
 }
+
+// spreadInf stands for an infinite spread, which JSON cannot carry: a run without a judged value,
+// such as one that never recovered from the outage.
+const spreadInf = 1e9
 
 func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
@@ -377,15 +405,17 @@ func quantile(s []time.Duration, q float64) time.Duration {
 	return s[max(0, min(i, len(s)-1))]
 }
 
+// spread is the max over the min of v. A value of zero or below, a run without a usable value,
+// makes it spreadInf, so a stuck run cannot hide.
 func spread(v []float64) float64 {
 	lo, hi := math.Inf(1), 0.0
 	for _, x := range v {
 		if x <= 0 {
-			continue
+			return spreadInf
 		}
 		lo, hi = math.Min(lo, x), math.Max(hi, x)
 	}
-	if hi == 0 || math.IsInf(lo, 1) {
+	if hi == 0 {
 		return 0
 	}
 	return hi / lo
@@ -396,26 +426,28 @@ func summarize(c Cell, runs []Run) Summary {
 	var mb, rec, rto, judged []float64
 	var lat []time.Duration
 	for _, r := range runs {
-		if r.Err == "" {
-			s.OK++
+		if r.Err != "" {
+			continue // a failed run stays out of every median
 		}
+		s.OK++
 		mb = append(mb, r.Mbps)
 		if r.Recovery >= 0 {
 			rec = append(rec, ms(r.Recovery))
+		} else if c.Outage {
+			s.Unrecovered++
 		}
 		if r.RTO >= 0 {
 			rto = append(rto, ms(r.RTO))
 		}
 		lat = append(lat, r.Lat...)
+		s.Lost += r.Lost
 		switch {
 		case c.Thin:
 			l := append([]time.Duration(nil), r.Lat...)
 			sort.Slice(l, func(i, j int) bool { return l[i] < l[j] })
 			judged = append(judged, ms(quantile(l, 0.99)))
 		case c.Outage:
-			if r.Recovery >= 0 {
-				judged = append(judged, ms(r.Recovery))
-			}
+			judged = append(judged, ms(r.Recovery)) // -1 for a run that never recovered
 		default:
 			judged = append(judged, r.Mbps)
 		}
@@ -433,15 +465,49 @@ func summarize(c Cell, runs []Run) Summary {
 		s.Samples = len(lat)
 	}
 	s.Spread = spread(judged)
+	if s.OK < s.Runs {
+		s.Spread = spreadInf // a failed run makes the cell undetermined
+	}
 	return s
 }
 
-// Reference is the stored medians the routine mode compares wgstack with.
+// Reference is the stored medians the routine mode compares wgstack with. Each cell carries the
+// provenance of the run that measured it, so a partial re-run can replace some cells.
 type Reference struct {
 	Measured string                        `json:"measured"`
 	Where    string                        `json:"where"`
-	Runs     int                           `json:"runs"`
+	BaseRuns int                           `json:"base_runs"` // per cell before doubling; each summary has its own runs
 	Cells    map[string]map[string]Summary `json:"cells"`
+	CellMeta map[string]Provenance         `json:"cell_meta"`
+}
+
+// Provenance says what measured a cell.
+type Provenance struct {
+	Measured string `json:"measured"`
+	Commit   string `json:"commit"`
+	Go       string `json:"go"`
+	GVisor   string `json:"gvisor"`
+	Where    string `json:"where"`
+}
+
+func provenance(where string) Provenance {
+	p := Provenance{Measured: time.Now().UTC().Format(time.RFC3339), Commit: os.Getenv("QBENCH_COMMIT"), Go: runtime.Version(), Where: where}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, d := range bi.Deps {
+			if d.Path == "gvisor.dev/gvisor" {
+				p.GVisor = d.Version
+			}
+		}
+		for _, st := range bi.Settings {
+			if st.Key == "vcs.revision" && p.Commit == "" {
+				p.Commit = st.Value
+			}
+		}
+	}
+	if p.Commit == "" {
+		p.Commit = "unknown; set QBENCH_COMMIT"
+	}
+	return p
 }
 
 // Verdict is the judgment of one cell by 判定の規則.
@@ -464,6 +530,9 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 		v = Verdict{Rule: "p99 <= 1.5 x Linux", Value: wg.P99MS, Line: 1.5 * lx.P99MS}
 		v.Result = yes(v.Value <= v.Line)
 	case c.Outage:
+		if wg.Unrecovered > 0 {
+			return Verdict{Rule: "recovery <= Linux + Linux RTO", Result: fmt.Sprintf("FAIL: %d runs never recovered", wg.Unrecovered)}
+		}
 		if lx.RTOMS < 0 {
 			return Verdict{Rule: "recovery <= Linux + Linux RTO", Result: "no Linux RTO"}
 		}
@@ -534,8 +603,15 @@ func measure(t *testing.T, c Cell, ci int, engines []string, runs, from int) map
 }
 
 func printSummary(c Cell, eng string, s Summary) {
-	fmt.Printf("QBENCH-SUMMARY engine=%s cell=%s runs=%d ok=%d mbps=%.2f recovery_ms=%.0f rto_ms=%.0f p50_ms=%.1f p99_ms=%.1f max_ms=%.1f samples=%d spread=%.2f\n",
-		eng, c.Name, s.Runs, s.OK, s.Mbps, s.RecoveryMS, s.RTOMS, s.P50MS, s.P99MS, s.MaxMS, s.Samples, s.Spread)
+	fmt.Printf("QBENCH-SUMMARY engine=%s cell=%s runs=%d ok=%d mbps=%.2f recovery_ms=%.0f rto_ms=%.0f unrecovered=%d p50_ms=%.1f p99_ms=%.1f max_ms=%.1f samples=%d lost=%d spread=%.2f\n",
+		eng, c.Name, s.Runs, s.OK, s.Mbps, s.RecoveryMS, s.RTOMS, s.Unrecovered, s.P50MS, s.P99MS, s.MaxMS, s.Samples, s.Lost, s.Spread)
+}
+
+// checkPool fails the test when a thin cell's pool is below the plan's 1,000 samples.
+func checkPool(t *testing.T, c Cell, eng string, s Summary) {
+	if c.Thin && s.Samples < 1000 {
+		t.Errorf("%s %s: %d thin-stream samples pooled, below the plan's 1,000", eng, c.Name, s.Samples)
+	}
 }
 
 func has(list []string, s string) bool {
@@ -572,7 +648,7 @@ func loadReference(t *testing.T) *Reference {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Logf("no stored reference at %s: %v", path, err)
-		return &Reference{Cells: map[string]map[string]Summary{}}
+		return &Reference{Cells: map[string]map[string]Summary{}, CellMeta: map[string]Provenance{}}
 	}
 	var ref Reference
 	if err := json.Unmarshal(b, &ref); err != nil {
@@ -594,7 +670,7 @@ func TestQBenchRoutine(t *testing.T) {
 	}
 	pinLinux(t, engines)
 	ref := loadReference(t)
-	fmt.Printf("QBENCH-META mode=routine reference=%q measured=%q runs_ref=%d\n", ref.Where, ref.Measured, ref.Runs)
+	fmt.Printf("QBENCH-META mode=routine reference=%q measured=%q base_runs=%d\n", ref.Where, ref.Measured, ref.BaseRuns)
 	runs := envInt("QBENCH_RUNS", 5)
 	cells := cellFilter(routineCells())
 	var table []string
@@ -602,6 +678,7 @@ func TestQBenchRoutine(t *testing.T) {
 		res := measure(t, c, ci, engines, runs, 0)
 		wg := summarize(c, res["wgstack"])
 		printSummary(c, "wgstack", wg)
+		checkPool(t, c, "wgstack", wg)
 		gv, haveG := ref.Cells[c.Name]["gvisor"]
 		lx, haveL := ref.Cells[c.Name]["linux"]
 		v := judge(c, wg, gv, lx, haveG, haveL)
@@ -631,7 +708,32 @@ func TestQBenchGate(t *testing.T) {
 	where := pinLinux(t, engines)
 	runs := envInt("QBENCH_RUNS", 9)
 	cells := cellFilter(gateCells())
-	ref := &Reference{Measured: time.Now().UTC().Format(time.RFC3339), Where: where, Runs: runs, Cells: map[string]map[string]Summary{}}
+	prov := provenance(where)
+	ref := &Reference{Cells: map[string]map[string]Summary{}, CellMeta: map[string]Provenance{}}
+	if path := os.Getenv("QBENCH_WRITE_REF"); path != "" {
+		// fail now rather than after the runs if the file cannot be written
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644)
+		if err != nil {
+			t.Fatalf("the reference file is not writable: %v", err)
+		}
+		f.Close()
+		// a partial run replaces its own cells and keeps the others
+		if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
+			if err := json.Unmarshal(b, ref); err != nil {
+				t.Fatalf("reading %s: %v", path, err)
+			}
+			if ref.CellMeta == nil {
+				ref.CellMeta = map[string]Provenance{}
+			}
+			// the cells this run keeps carry the provenance they were measured with
+			for name := range ref.Cells {
+				if _, ok := ref.CellMeta[name]; !ok {
+					ref.CellMeta[name] = Provenance{Measured: ref.Measured, Where: ref.Where, Commit: "not recorded", Go: "not recorded", GVisor: "not recorded"}
+				}
+			}
+		}
+	}
+	ref.Measured, ref.Where, ref.BaseRuns = prov.Measured, where, runs
 	var table []string
 	for ci, c := range cells {
 		res := measure(t, c, ci, engines, runs, 0)
@@ -640,6 +742,7 @@ func TestQBenchGate(t *testing.T) {
 			for _, e := range engines {
 				m[e] = summarize(c, res[e])
 				printSummary(c, e, m[e])
+				checkPool(t, c, e, m[e])
 			}
 			return m
 		}
@@ -658,6 +761,7 @@ func TestQBenchGate(t *testing.T) {
 			v.Result += " after doubling"
 		}
 		ref.Cells[c.Name] = map[string]Summary{}
+		ref.CellMeta[c.Name] = prov
 		for _, e := range engines {
 			if e != "wgstack" {
 				ref.Cells[c.Name][e] = m[e]
@@ -681,13 +785,17 @@ func row(c Cell, wg, gv, lx Summary, v Verdict) string {
 		case s.Runs == 0:
 			return "-"
 		case c.Thin:
-			return fmt.Sprintf("%.0f / %.0f / %.0f ms", s.P50MS, s.P99MS, s.MaxMS)
+			return fmt.Sprintf("%.0f / %.0f / %.0f ms, %d lost", s.P50MS, s.P99MS, s.MaxMS, s.Lost)
 		case c.Outage:
 			return fmt.Sprintf("%.0f ms, RTO %.0f ms, %.2f Mbit/s", s.RecoveryMS, s.RTOMS, s.Mbps)
 		}
 		return fmt.Sprintf("%.2f Mbit/s", s.Mbps)
 	}
-	return fmt.Sprintf("| %s | %s | %s | %s | %s: %.1f vs %.1f | %s |", c.Name, val(wg), val(gv), val(lx), v.Rule, v.Value, v.Line, v.Result)
+	rule := fmt.Sprintf("%s: %.1f vs %.1f", v.Rule, v.Value, v.Line)
+	if c.NotJudged != "" {
+		rule = "-"
+	}
+	return fmt.Sprintf("| %s | %s | %s | %s | %s | %s |", c.Name, val(wg), val(gv), val(lx), rule, v.Result)
 }
 
 func printTable(rows []string) {
@@ -698,4 +806,40 @@ func printTable(rows []string) {
 		fmt.Println(r)
 	}
 	fmt.Println("QBENCH-DONE")
+}
+
+// TestJudgeRules checks the summary and judgment rules on made-up runs, without a network.
+func TestJudgeRules(t *testing.T) {
+	out := Cell{Name: "send/outage2s", DUTSend: true, Outage: true}
+	rec := func(d time.Duration) Run { return Run{Recovery: d, RTO: time.Second} }
+
+	stuck := summarize(out, []Run{rec(time.Second), rec(time.Second), rec(-1)})
+	if stuck.Unrecovered != 1 || stuck.Spread != spreadInf {
+		t.Errorf("a run that never recovered: unrecovered %d, spread %v; want 1 and infinite", stuck.Unrecovered, stuck.Spread)
+	}
+	lx := summarize(out, []Run{rec(time.Second)})
+	if v := judge(out, stuck, Summary{}, lx, false, true); !strings.HasPrefix(v.Result, "FAIL") {
+		t.Errorf("wgstack with an unrecovered run: %q, want FAIL", v.Result)
+	}
+
+	failed := summarize(out, []Run{rec(time.Second), {Err: "boom", Recovery: 10 * time.Second}})
+	if failed.OK != 1 || failed.RecoveryMS != 1000 || failed.Spread != spreadInf {
+		t.Errorf("a failed run: ok %d, recovery %v ms, spread %v; want 1, 1000 and infinite", failed.OK, failed.RecoveryMS, failed.Spread)
+	}
+
+	thin := Cell{Name: "thin-send/loss0%", DUTSend: true, Thin: true}
+	lat := make([]time.Duration, 100)
+	for i := range lat {
+		lat[i] = 10 * time.Millisecond
+	}
+	lat[99] = 5 * time.Second // what runThin appends for an undelivered message
+	s := summarize(thin, []Run{{Lat: lat, Lost: 1}})
+	if s.Lost != 1 || s.MaxMS != 5000 {
+		t.Errorf("an undelivered message: lost %d, max %v ms; want 1 and 5000", s.Lost, s.MaxMS)
+	}
+
+	nj := Cell{Name: "recv/outage2s", Outage: true, NotJudged: clientSends}
+	if v := judge(nj, stuck, Summary{}, lx, false, true); !strings.HasPrefix(v.Result, "NOT JUDGED") {
+		t.Errorf("recv/outage2s: %q, want NOT JUDGED", v.Result)
+	}
 }
