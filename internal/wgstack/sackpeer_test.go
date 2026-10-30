@@ -129,6 +129,74 @@ func checkScoreboard(t testing.TB, c *tcb) {
 	if int(c.lossIdx) > c.recs.n || int(c.rxtIdx) > c.recs.n {
 		t.Fatalf("lossIdx %d rxtIdx %d beyond %d records", c.lossIdx, c.rxtIdx, c.recs.n)
 	}
+	// list を先頭からたどり、節と印と数が合うこと、送った時刻の順の list が時刻の順であることを確かめる
+	checkList := func(name string, l recList, flag uint8, timeOrder bool) {
+		var n int32
+		last := int64(-1 << 62)
+		for k, a := 0, l.head; k < int(l.n); k++ {
+			i := c.recIdx(a)
+			if i < 0 || i >= c.recs.n {
+				t.Fatalf("%s entry %d at record %d of %d", name, k, i, c.recs.n)
+			}
+			r := c.recs.at(i)
+			if !c.genFlag(r, flag) || c.isSacked(r) {
+				t.Fatalf("%s holds record %d without its flag or SACKed", name, i)
+			}
+			if timeOrder && r.sentAt < last {
+				t.Fatalf("%s out of transmit order at record %d", name, i)
+			}
+			last = r.sentAt
+			n++
+			if k == int(l.n)-1 {
+				if a != l.tail || r.next != 0 {
+					t.Fatalf("%s tail mismatch", name)
+				}
+				break
+			}
+			if r.next == 0 {
+				for j := 0; j < c.recs.n; j++ {
+					x := c.recs.at(j)
+					t.Logf("rec %d abs %d prev %d next %d flags %x gen %d/%d", j, c.recAbs(j), x.prev, x.next, x.flags, x.rtxGen, c.rtxGen)
+				}
+				t.Fatalf("%s ends after %d of %d (head %d tail %d base %d)", name, k+1, l.n, l.head, l.tail, c.recBase)
+			}
+			a += uint32(r.next)
+		}
+		cnt := int32(0)
+		for i := 0; i < c.recs.n; i++ {
+			if c.genFlag(c.recs.at(i), flag) {
+				cnt++
+			}
+		}
+		if cnt != l.n || n != l.n {
+			t.Fatalf("%s has %d entries, %d flagged records", name, l.n, cnt)
+		}
+	}
+	checkList("transmit list", c.tList, recInT, true)
+	checkList("lost queue", c.lostQ, recInQ, false)
+	var rackBeyond uint32
+	var sackedRecs int32
+	for i := 0; i < c.recs.n; i++ {
+		r := c.recs.at(i)
+		if c.isSacked(r) {
+			sackedRecs++
+			continue
+		}
+		if c.rackLost(r) && i >= int(c.lossIdx) {
+			rackBeyond += uint32(r.length)
+		}
+		// SACK 済みでない記録は、送り残しの list か損失の待ち行列にあるか、境目の手前で送り直しを待つ
+		inT, inQ := c.genFlag(r, recInT), c.genFlag(r, recInQ)
+		if inT && inQ {
+			t.Fatalf("record %d is in both lists", i)
+		}
+		if !inT && !inQ && !(i < int(c.lossIdx) && !c.rtxLive(r)) {
+			t.Fatalf("record %d is in no list", i)
+		}
+	}
+	if rackBeyond != c.rackLostBeyond || sackedRecs != c.sackedRecs {
+		t.Fatalf("RACK lost beyond %d/%d, SACKed records %d/%d", c.rackLostBeyond, rackBeyond, c.sackedRecs, sackedRecs)
+	}
 	// pipe を RFC 6675 の定義どおりに求める
 	var pipe int64
 	for i := 0; i < c.recs.n; i++ {
@@ -136,7 +204,7 @@ func checkScoreboard(t testing.TB, c *tcb) {
 		if c.isSacked(r) {
 			continue
 		}
-		if i >= int(c.lossIdx) {
+		if i >= int(c.lossIdx) && !c.rackLost(r) {
 			pipe += int64(r.length)
 		}
 		if c.rtxLive(r) {

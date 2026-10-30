@@ -27,13 +27,14 @@ func (c *tcb) isSacked(r *record) bool { return r.flags&recSacked != 0 && r.sack
 
 func (c *tcb) rtxLive(r *record) bool { return r.flags&recRtx != 0 && r.rtxGen == c.rtxGen }
 
-// lostBytes は境目より手前の SACK 済みでない byte。
+// lostBytes は失われた byte。境目より手前の SACK 済みでない byte と、境目から先で RACK が失われたとみなした
+// byte の和である。
 func (c *tcb) lostBytes() uint32 {
 	front := c.sndMax
 	if int(c.lossIdx) < c.recs.n {
 		front = c.recs.at(int(c.lossIdx)).seq
 	}
-	return (front - c.sndUna) - (c.sacked - c.beyondBytes)
+	return (front - c.sndUna) - (c.sacked - c.beyondBytes) + c.rackLostBeyond
 }
 
 // pipe は RFC 6675 の送り残しの量。SACK を交渉しない接続では、回復の外の重複した ACK 2 つまでを
@@ -90,7 +91,7 @@ func (c *tcb) nextUnsacked(i int) int {
 
 // markSACK は segment の SACK の block で記録に印を付け、損失の境目を進める。新しく SACK 済みになった
 // byte を返す。block の 1 つでも範囲の外にあれば、segment の block をすべて捨てる。
-func (c *tcb) markSACK(seg *segment) uint32 {
+func (c *tcb) markSACK(seg *segment, now int64) uint32 {
 	n := seg.opt.nsack
 	if n == 0 {
 		return 0
@@ -123,7 +124,7 @@ func (c *tcb) markSACK(seg *segment) uint32 {
 				i = c.nextUnsacked(i)
 				continue
 			}
-			c.setSacked(i, r)
+			c.setSacked(i, r, now)
 			i++
 		}
 	}
@@ -132,8 +133,17 @@ func (c *tcb) markSACK(seg *segment) uint32 {
 }
 
 // setSacked は位置 i の記録 r に SACK 済みの印を付け、欄を更新する。
-func (c *tcb) setSacked(i int, r *record) {
+func (c *tcb) setSacked(i int, r *record, now int64) {
 	l := uint32(r.length)
+	c.rackDelivered(r, now)
+	c.unlinkRec(i, r)
+	if c.rackLost(r) {
+		if i >= int(c.lossIdx) {
+			c.rackLostBeyond -= l
+		}
+		r.flags &^= recLost // SACK の取り消しの後に損失の印が残らないように消す
+	}
+	c.sackedRecs++
 	r.flags |= recSacked
 	r.sackGen = c.sackGen
 	r.skip = 1
@@ -175,6 +185,13 @@ func (c *tcb) passLoss(r *record, s bool) {
 	if s {
 		c.beyondCnt--
 		c.beyondBytes -= uint32(r.length)
+	} else {
+		if c.rackLost(r) {
+			c.rackLostBeyond -= uint32(r.length) // 境目の手前の損失として数え直す
+		}
+		if c.genFlag(r, recInT) && !c.rtxLive(r) {
+			c.listRemove(&c.tList, int(c.lossIdx), r, recInT) // 送り直しを待つので送り残しの list から外す
+		}
 	}
 	c.lossIdx++
 	c.scoreSteps++
@@ -188,9 +205,11 @@ func (c *tcb) markAllLost(cause uint8) {
 	c.rtxGen++
 	if c.rtxGen == 0 {
 		for i := range c.recs.recs {
-			c.recs.recs[i].flags &^= recRtx
+			c.recs.recs[i].flags &^= recRtx | recInT | recInQ | recLost
 		}
 	}
+	c.tList, c.lostQ = recList{}, recList{}
+	c.rackLostBeyond, c.qOff, c.qMid = 0, 0, false
 	c.rtxBytes = 0
 	c.rxtIdx, c.rxtOff, c.rxtMid = 0, 0, false
 	c.resendCause = cause
@@ -204,14 +223,26 @@ func (c *tcb) clearSACK() {
 			c.recs.recs[i].flags &^= recSacked
 		}
 	}
-	c.sacked, c.beyondBytes, c.beyondCnt = 0, 0, 0
+	c.sacked, c.beyondBytes, c.beyondCnt, c.sackedRecs = 0, 0, 0, 0
 	c.s.sackReneging.Add(1)
 }
 
-// dropHead は累積の確認で外す先頭の記録 r の分を欄から引き、位置の欄を 1 つ前へずらす。
-func (c *tcb) dropHead(r *record) {
+// dropHead は累積の確認で外す先頭の記録 r の分を欄から引き、位置の欄を 1 つ前へずらす。呼び出し側は
+// この後に記録を輪から外し、recBase を 1 つ進める。
+func (c *tcb) dropHead(r *record, now int64) {
 	l := uint32(r.length)
+	if !c.isSacked(r) {
+		c.rackDelivered(r, now)
+	}
+	if c.lostQ.n > 0 && c.lostQ.head == c.recBase {
+		c.qOff, c.qMid = 0, false
+	}
+	c.unlinkRec(0, r)
+	if c.rackLost(r) && c.lossIdx == 0 {
+		c.rackLostBeyond -= l
+	}
 	if c.isSacked(r) {
+		c.sackedRecs--
 		c.sacked -= l
 		if c.lossIdx == 0 {
 			c.beyondBytes -= l
@@ -242,11 +273,63 @@ func (c *tcb) trimHead(r *record, d uint32) {
 	if c.rtxLive(r) {
 		c.rtxBytes -= d
 	}
+	if c.rackLost(r) && c.lossIdx == 0 {
+		c.rackLostBeyond -= d
+	}
+	if c.lostQ.n > 0 && c.lostQ.head == c.recBase {
+		c.qOff -= min(c.qOff, d)
+	}
 	r.seq += d
 	r.length -= uint16(d)
 	if c.rxtIdx == 0 {
 		c.rxtOff -= min(c.rxtOff, d)
 	}
+}
+
+// 再送する記録の選び方。srcQueue は RACK の損失の待ち行列、srcPos は番号の順の手がかり(損失の境目より
+// 手前と規則 3)、srcTLP は TLP の probe である。
+const (
+	srcPos uint8 = iota
+	srcQueue
+	srcTLP
+)
+
+type resendPick struct {
+	i   int
+	src uint8
+}
+
+var noPick = resendPick{i: -1}
+
+// pickRule1 は NextSeg の規則 1 の記録を、RACK の損失の待ち行列の先頭と、番号の順の手がかりのうち番号の
+// 小さい方から選ぶ。Linux と同じく番号の小さい穴から直すので、先頭の穴を先に送り直す。
+func (c *tcb) pickRule1() resendPick {
+	q, p := c.nextQueued(), c.nextResend()
+	switch {
+	case q >= 0 && (p < 0 || q < p):
+		return resendPick{q, srcQueue}
+	case p >= 0:
+		return resendPick{p, srcPos}
+	}
+	return noPick
+}
+
+func (c *tcb) pickRule3() resendPick {
+	if i := c.nextRule3(); i >= 0 {
+		return resendPick{i, srcPos}
+	}
+	return noPick
+}
+
+// pickOff は選んだ記録の中で送り終えた byte。
+func (c *tcb) pickOff(p resendPick) uint32 {
+	switch p.src {
+	case srcQueue:
+		return c.qOff
+	case srcPos:
+		return c.rxtOff
+	}
+	return 0
 }
 
 // nextResend は RFC 6675 の NextSeg の規則 1 の記録(SACK 済みでなく、失われ、今の世代で再送していない
@@ -284,10 +367,10 @@ func (c *tcb) nextResendUpTo(limit int) int {
 	return -1
 }
 
-// resendLen は記録 i の再送で次に送る segment の中身の長さと、FIN を付けるかを返す。
-func (c *tcb) resendLen(i int, payCap int) (uint32, bool) {
+// resendLen は記録 i の中の off byte 目から再送する segment の中身の長さと、FIN を付けるかを返す。
+func (c *tcb) resendLen(i int, off uint32, payCap int) (uint32, bool) {
 	r := c.recs.at(i)
-	start := r.seq + c.rxtOff
+	start := r.seq + off
 	end := r.seq + uint32(r.length)
 	var left uint32
 	if de := c.dataEndSeq(); seqLT(start, de) {
@@ -309,7 +392,7 @@ func (c *tcb) enterRecovery() {
 	c.recoverFS = flight
 	c.rxtIdx, c.rxtOff, c.rxtMid = 0, 0, false
 	c.resendCause = rtxFast
-	if c.lossIdx == 0 && c.recs.n > 0 {
+	if c.lossIdx == 0 && c.rackLostBeyond == 0 && c.lostQ.n == 0 && c.recs.n > 0 {
 		r := c.recs.at(0)
 		c.passLoss(r, c.isSacked(r))
 		c.advanceLoss()
@@ -341,7 +424,8 @@ func (c *tcb) prrUpdate(delivered uint32) {
 
 // sackAfterAck は SACK を交渉した接続で、ACK の処理の後に回復に入るかを決め、回復の中なら窓を決める。
 func (c *tcb) sackAfterAck(delivered uint32) {
-	if !c.inRecovery && c.sndUna != c.sndMax && seqGE(c.sndUna, c.recover) && (c.dupAcks >= dupThresh || c.lossIdx > 0) {
+	lost := c.lossIdx > 0 || c.rackLostBeyond > 0 || c.lostQ.n > 0
+	if !c.inRecovery && c.sndUna != c.sndMax && seqGE(c.sndUna, c.recover) && (c.dupAcks >= dupThresh || lost) {
 		c.enterRecovery()
 	}
 	if c.inRecovery {
@@ -356,7 +440,7 @@ func (c *tcb) renegeTimer(now int64) {
 		return
 	}
 	at := now + max(c.srtt/2, int64(renegeDelayMin))
-	if c.tdl[tmrRetrans] == 0 || at < c.tdl[tmrRetrans] {
-		c.arm(tmrRetrans, at)
+	if c.rtoAt == 0 || at < c.rtoAt {
+		c.setRTO(at)
 	}
 }

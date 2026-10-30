@@ -254,7 +254,7 @@ boost は今と同じくプロセスで 16 本の枠から予約し、得られ�
   中身は累積の確認で外し、SACK で確認された分も累積の確認まで保持します。
   再送はこの輪から segment を作り直します
 - 送信の記録:送った segment ごとに、開始の番号、長さ、送った時刻、印(再送、SACK 済み、生きている再送)、SACK の scoreboard の欄を持つ固定の容量の輪です([scoreboard の記録の扱い](wgstack-performance.md#scoreboard-の記録の扱い))。
-  記録は、後の段階の RACK が送った時刻の順にたどるための list の節も今から持ちます。
+  記録は、RACK が送った時刻の順にたどる list の節も持ちます。
   容量は送信のバッファの予約を、送り残しを分ける大きさの下限の 472 byte([TCP の MSS の下限](packet-validation.md#tcp-の-mss-の下限))で割った数です。
   記録の輪が満杯なら、確認で空くまで新しい segment を送りません
 - 受信のバッファ:予約した容量の byte の輪で、順序どおりの未読のデータと順序外のデータを同じ輪に置きます。
@@ -424,6 +424,7 @@ accept の待ち行列は Device 全体で Q 本、待ち受け 1 つで Q の�
 節はタイマーの輪(timing wheel)に入れ直すだけで、タイマーを張るたびに確保しません。
 TIME_WAIT の表と握手の途中の表は、前述の順序つきの list で期限を管理し、行ごとのタイマーを持ちません。
 このため、タイマーの数は N_c と枠の中の節の数の積を超えず、入力が止まった後に新しいタイマーは生まれません。
+RTO、RACK の並べ替えの期限、TLP の probe の期限は、再送の節 1 つを分け合います([RACK-TLP](wgstack-performance.md#rack-tlp))。
 
 ## 上界の式
 
@@ -461,10 +462,10 @@ M_wgstack = M_fix
 初期の値は動作を確かめるための値であり、最適値として探した値ではありません。
 どの値も設定項目にしません。
 
-linux/amd64 の build で測った大きさは、c_conn が 4,928 byte、記録 1 件が 32 byte、区間 1 つが 12 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
+linux/amd64 の build で測った大きさは、c_conn が 5,064 byte、記録 1 件が 32 byte、区間 1 つが 12 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
 記録 1 件は、性能の段階の SACK の scoreboard の欄で 24 byte から 32 byte になりました([ACK 1 つの手間の上界](wgstack-performance.md#ack-1-つの手間の上界))。
-既定の K の 2048 では、Device の `Bound` の `Total` は約 1,490 MiB で、そのうち TCP の項の和は約 1,477 MiB です。
-内訳は M_fix が約 21.8 MiB、floor の項が約 1,330.6 MiB、boost の項が約 124.7 MiB です。
+既定の K の 2048 では、Device の `Bound` の `Total` は約 1,490 MiB で、そのうち TCP の項の和は約 1,478 MiB です。
+内訳は M_fix が約 22.1 MiB、floor の項が約 1,330.6 MiB、boost の項が約 124.7 MiB です。
 送信の記録は floor の項に約 43.4 MiB、boost の項に約 4.1 MiB を加えます。
 区間の表は floor の項に約 7.2 MiB、boost の項に約 0.7 MiB を加えます。
 M_fix は核の構造(事象の数と観測の関数を含みます)、接続の枠、3 つの hash の表、行の表、空きの list、タイマーの節、出力の list、制御の輪、chunk の置き場に残す 1 MiB を数えます。
@@ -604,8 +605,8 @@ ECN は交渉しません。
 
 - SACK による損失の回復(RFC 2018、RFC 6675):性能の段階で実装しました。
   扱いは[SACK による回復](wgstack-performance.md#sack-による回復)に従います
-- RACK-TLP(RFC 8985):送信の記録の輪の送った時刻と、記録が今から持つ送った時刻の順の list の節を使います。
-  最小の RTT を持つ欄は、RTT の推定の構造に今から置きます
+- RACK-TLP(RFC 8985):性能の段階で実装しました。
+  扱いは[RACK-TLP](wgstack-performance.md#rack-tlp)に従います
 - D-SACK(RFC 2883):受け手として返す側を加えます
 - CUBIC(RFC 9438):輻輳の制御は、ACK、損失、RTO の 3 つの知らせを受ける interface の後ろに置き、NewReno をその最初の実装にします
 

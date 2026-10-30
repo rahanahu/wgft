@@ -21,6 +21,7 @@ type txCfg struct {
 	zeroWnd  bool
 	small    bool // 相手の窓を小さくする
 	boost    bool
+	lie      int // 0: 正直、1: 嘘の SACK、2: 嘘と取り消し
 }
 
 func runTx(t *testing.T, cfg txCfg) {
@@ -73,6 +74,13 @@ func runTx(t *testing.T, cfg txCfg) {
 			}
 		}
 	}
+	var c0 *Conn
+	c0sndMax := func() uint32 {
+		if c0 == nil {
+			return base
+		}
+		return c0.c.sndMax
+	}
 	mkAck := func() tseg {
 		s := tseg{sport: 5000, dport: 80, seq: peerISS + 1, ack: base + uint32(rcvOff), flags: flagACK, wnd: wndField, ws: -1, ts: cfg.ts, tsVal: tsVal, tsEcr: dutTS}
 		if finGot {
@@ -85,6 +93,24 @@ func runTx(t *testing.T, cfg txCfg) {
 				}
 			}
 		}
+		if cfg.lie > 0 && rng.IntN(3) == 0 {
+			hi := int(c0sndMax() - base)
+			pick := func() uint32 { return base + uint32(rng.IntN(hi+3000)) - 1000 }
+			for len(s.sack) < 3 && rng.IntN(2) == 0 {
+				a, b := pick(), pick()
+				switch rng.IntN(5) {
+				case 0: // 逆向き
+					s.sack = append(s.sack, sackBlock{b, a})
+				case 1: // SND.MAX の先
+					s.sack = append(s.sack, sackBlock{a, base + uint32(hi) + uint32(1+rng.IntN(5000))})
+				default:
+					if seqGT(a, b) {
+						a, b = b, a
+					}
+					s.sack = append(s.sack, sackBlock{a, b})
+				}
+			}
+		}
 		if e := rcvOff + int(wndField)<<sh; e > maxEdge {
 			maxEdge = e
 		}
@@ -92,6 +118,7 @@ func runTx(t *testing.T, cfg txCfg) {
 	}
 	n.inject(mkAck())
 	c := acceptOne(t, l)
+	c0 = c
 	gen := c.gen
 	written := 0
 	closed := false
@@ -228,6 +255,8 @@ func runTx(t *testing.T, cfg txCfg) {
 				}
 			}
 			c.c.mu.Unlock()
+		case r < 89 && cfg.lie == 2:
+			ooo = nil // 相手が順序外のデータを捨てる
 		case r < 92: // 窓の更新
 			pickWnd()
 			n.inject(mkAck())
@@ -238,6 +267,10 @@ func runTx(t *testing.T, cfg txCfg) {
 	}
 	if !finGot || rcvOff != cfg.length {
 		t.Fatalf("seed %d: after %d steps peer has %d of %d, fin %v, written %d, state %v", cfg.seed, steps, rcvOff, cfg.length, finGot, written, c.c.state)
+	}
+	if cfg.lie > 0 && cfg.seed%30 == 0 {
+		st := n.d.Stats()
+		t.Logf("seed %d lie %d: reneging %d fast %d rtos %d steps %d", cfg.seed, cfg.lie, st.SACKReneging, st.FastRecoveries, st.RTOs, steps)
 	}
 	if violations > 0 {
 		t.Logf("seed %d: %d segments beyond the largest advertised right edge", cfg.seed, violations)
@@ -262,6 +295,33 @@ func TestSendStreamIntegrity(t *testing.T) {
 			zeroWnd: seed%7 == 0,
 			small:   seed%11 == 0,
 			boost:   seed%2 == 1,
+		}
+		runTx(t, cfg)
+		if t.Failed() {
+			return
+		}
+	}
+}
+
+// TestSendStreamWithLyingSACK は、範囲の外や逆向きの SACK の block を混ぜ、順序外のデータを捨てる相手に
+// 対しても、送信の stream が一致して届くことを確かめる。
+func TestSendStreamWithLyingSACK(t *testing.T) {
+	seeds := uint64(60)
+	if streamSeedsFull() {
+		seeds = 300
+	}
+	for seed := uint64(1); seed <= seeds; seed++ {
+		cfg := txCfg{
+			seed:   seed,
+			ts:     seed%2 == 0,
+			sack:   true,
+			ws:     []int{-1, 0, 2, 7, 14}[seed%5],
+			dutISS: uint32(0xffffffff - (seed*5000)%300000),
+			length: 5000 + int(seed*6151)%300000,
+			loss:   []int{0, 3, 10, 25}[seed%4],
+			small:  seed%11 == 0,
+			boost:  seed%2 == 1,
+			lie:    1 + int(seed%2),
 		}
 		runTx(t, cfg)
 		if t.Failed() {

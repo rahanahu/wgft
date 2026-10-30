@@ -114,11 +114,32 @@ type tcbState struct {
 	rxtOff          uint32
 	highSack        uint32
 	rxtMid          bool
-	rtxBytes        uint32
-	prrDelivered    uint32 // PRR(RFC 6937)
-	prrOut          uint32
-	recoverFS       uint32
-	scoreSteps      uint64 // 試験だけが読む scoreboard の手間の数
+	recBase         uint32  // 輪の先頭の記録の通し番号
+	tList, lostQ    recList // RACK の送った時刻の順の list と損失の待ち行列(rack.go)
+	rackLostBeyond  uint32  // 損失の境目から先で RACK が失われたとみなした byte
+	qOff            uint32  // 損失の待ち行列の先頭の記録の中で送り終えた byte
+	qMid            bool
+	sackedRecs      int32 // SACK 済みの記録の数
+
+	// RACK-TLP(RFC 8985、rack.go)
+	rackXmit                        int64 // 届いた記録のうち最も後に送った記録の送った時刻
+	rackEnd                         uint32
+	rackRTT                         int64
+	rackOK                          bool
+	rackFack                        uint32 // 届いた記録の最も右の端
+	rackFackOK                      bool
+	reorderSeen                     bool
+	rackChanges                     uint64 // 試験だけが読む、RACK の状態を変えた ACK の数
+	minRTT                          int64
+	hasMinRTT                       bool
+	rtoAt, reoAt, tlpAt             int64 // 再送のタイマーの節が分け合う期限
+	tlpActive, tlpRetrans, tlpProbe bool
+	tlpEnd                          uint32
+	rtxBytes                        uint32
+	prrDelivered                    uint32 // PRR(RFC 6937)
+	prrOut                          uint32
+	recoverFS                       uint32
+	scoreSteps                      uint64 // 試験だけが読む scoreboard の手間の数
 
 	// 輻輳の制御(RFC 5681、RFC 6582、RFC 6675、RFC 6937)
 	cwnd, ssthresh uint32
@@ -280,6 +301,9 @@ func (c *tcb) rttSample(r int64) {
 		}
 		c.rttvar = (3*c.rttvar + d) / 4
 		c.srtt = (7*c.srtt + r) / 8
+	}
+	if !c.hasMinRTT || r < c.minRTT {
+		c.minRTT, c.hasMinRTT = r, true
 	}
 	rto := c.srtt + max(int64(time.Millisecond), 4*c.rttvar)
 	c.rto = min(max(rto, int64(rtoMin)), int64(rtoMax))
@@ -472,10 +496,15 @@ func (c *tcb) processAck(seg *segment, now int64) {
 		c.sndWnd, c.sndWl1, c.sndWl2 = w, seg.seq, ack
 		c.maxSndWnd = max(c.maxSndWnd, w)
 	}
-	var delivered uint32
+	// RFC 6937 の DeliveredData は SND.UNA の差と SACK 済みの byte の差の和である。累積の確認が先に SACK した
+	// byte を覆うと SACK 済みの byte は減るので、差は確認の前の値から取る
+	var delivered int64
+	sackedBefore := c.sacked
+	rackX, rackE := c.rackXmit, c.rackEnd
+	advanced := seqGT(ack, c.sndUna)
 	switch {
-	case seqGT(ack, c.sndUna):
-		delivered = ack - c.sndUna
+	case advanced:
+		delivered = int64(ack - c.sndUna)
 		c.newAck(seg, ack, now)
 	case ack == c.sndUna && len(seg.payload) == 0 && !seg.has(flagFIN) && !wndChanged && c.sndMax != c.sndUna:
 		c.dupAck(now)
@@ -483,16 +512,28 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	if c.state == stFree || c.state == stClosed {
 		return
 	}
-	delivered += c.markSACK(seg)
+	newly := c.markSACK(seg, now)
+	delivered += int64(c.sacked) - int64(sackedBefore)
 	if c.sackOK {
-		c.sackAfterAck(delivered)
+		if c.rackXmit != rackX || c.rackEnd != rackE {
+			c.rackChanges++
+		}
+		c.rackDetect(now)
+		c.tlpOnAck(ack, advanced, newly)
+		c.sackAfterAck(uint32(max(delivered, 0)))
+		if advanced {
+			c.scheduleTLP(now)
+		} else if c.inRecovery {
+			c.tlpAt = 0
+		}
+		c.rearmRetrans()
 	}
 	if c.sndWnd > 0 && c.persist {
 		c.persist = false
 		c.backoff = 0
-		c.disarm(tmrRetrans)
+		c.clearRetransTimers()
 		if c.sndUna != c.sndMax {
-			c.arm(tmrRetrans, now+c.curRTO())
+			c.setRTO(now + c.curRTO())
 		}
 	}
 	if c.s.trace != nil {
@@ -528,8 +569,9 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 		} else {
 			rtxAcked = true
 		}
-		c.dropHead(r)
+		c.dropHead(r, now)
 		c.recs.pop()
+		c.recBase++
 	}
 	c.sndUna = ack
 	if seqLT(c.sndNxt, ack) {
@@ -582,9 +624,9 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 	// 再送のタイマー(RFC 6298 5.2、5.3)
 	if !c.persist {
 		if c.sndUna == c.sndMax {
-			c.disarm(tmrRetrans)
+			c.clearRetransTimers()
 		} else {
-			c.arm(tmrRetrans, now+c.curRTO())
+			c.setRTO(now + c.curRTO())
 			c.renegeTimer(now)
 		}
 	}
@@ -713,8 +755,8 @@ func (c *tcb) finRecv(now int64) {
 func (c *tcb) enterTimeWait(now int64) {
 	c.state = stTimeWait
 	c.twEnter = now
-	c.disarm(tmrRetrans)
 	c.persist = false
+	c.clearRetransTimers()
 	c.arm(tmrClose, now+int64(twTimeout))
 }
 
@@ -754,17 +796,18 @@ func (c *tcb) afterInput(now int64) {
 	if c.sndWnd == 0 && !c.persist && c.pipe() == 0 && c.hasUnsent() && c.state != stClosed {
 		// 確認を待つものが無いので、前の RTO の起点と後退を持ち越さない。持ち越すと、相手が probe に
 		// 応え続けた長い persist の後の最初の RTO で、再送の打ち切りの時間を過ぎたと数える
+		c.clearRetransTimers()
+		c.tlpActive, c.tlpProbe = false, false
 		c.persist = true
 		c.retransStart = 0
 		c.backoff = 0
-		c.disarm(tmrRetrans)
 		c.arm(tmrRetrans, now+c.curRTO())
 	}
 }
 
 // hasUnsent は、未送信のデータか未送信の FIN か、送り直しを待つ失われた記録があるかを返す。
 func (c *tcb) hasUnsent() bool {
-	if c.nextResend() >= 0 {
+	if c.pickRule1().i >= 0 {
 		return true
 	}
 	if seqLT(c.sndNxt, c.dataEndSeq()) {
@@ -923,7 +966,7 @@ func (c *tcb) onTimer(kind int, now int64) {
 		if c.persist {
 			c.onPersist(now)
 		} else {
-			c.onRTO(now)
+			c.onRetransTimer(now)
 		}
 	case tmrDelack:
 		if !c.ackNow {
@@ -978,7 +1021,9 @@ func (c *tcb) onRTO(now int64) {
 	c.backoff++
 	// 記録は消さずに残し、SACK 済みでない記録を損失にして SND.UNA から順に送り直す(RFC 6675 5.1 節)
 	c.markAllLost(rtxRTO)
-	c.arm(tmrRetrans, now+c.curRTO())
+	c.reoAt, c.tlpAt = 0, 0
+	c.tlpActive, c.tlpProbe = false, false
+	c.setRTO(now + c.curRTO())
 	if c.s.trace != nil {
 		c.traceEvent(TraceRTO, now)
 	}
@@ -990,7 +1035,7 @@ func (c *tcb) onPersist(now int64) {
 		c.persist = false
 		c.backoff = 0
 		if c.sndUna != c.sndMax {
-			c.arm(tmrRetrans, now+c.curRTO())
+			c.setRTO(now + c.curRTO())
 		}
 		return
 	}
