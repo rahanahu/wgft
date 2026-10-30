@@ -472,10 +472,13 @@ func (c *tcb) processAck(seg *segment, now int64) {
 		c.sndWnd, c.sndWl1, c.sndWl2 = w, seg.seq, ack
 		c.maxSndWnd = max(c.maxSndWnd, w)
 	}
-	var delivered uint32
+	// RFC 6937 の DeliveredData は SND.UNA の差と SACK 済みの byte の差の和である。累積の確認が先に SACK した
+	// byte を覆うと SACK 済みの byte は減るので、差は確認の前の値から取る
+	var delivered int64
+	sackedBefore := c.sacked
 	switch {
 	case seqGT(ack, c.sndUna):
-		delivered = ack - c.sndUna
+		delivered = int64(ack - c.sndUna)
 		c.newAck(seg, ack, now)
 	case ack == c.sndUna && len(seg.payload) == 0 && !seg.has(flagFIN) && !wndChanged && c.sndMax != c.sndUna:
 		c.dupAck(now)
@@ -483,9 +486,10 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	if c.state == stFree || c.state == stClosed {
 		return
 	}
-	delivered += c.markSACK(seg)
+	c.markSACK(seg)
+	delivered += int64(c.sacked) - int64(sackedBefore)
 	if c.sackOK {
-		c.sackAfterAck(delivered)
+		c.sackAfterAck(uint32(max(delivered, 0)))
 	}
 	if c.sndWnd > 0 && c.persist {
 		c.persist = false
