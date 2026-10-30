@@ -273,6 +273,9 @@ func (c *tcb) tlpOnAck(ack uint32, unaAdvanced bool, newlySacked uint32) {
 	case !unaAdvanced && newlySacked == 0:
 		c.tlpActive = false // 元の segment と probe の両方が届いた
 	}
+	if !c.tlpActive {
+		c.tlpRetrans = false // 片付いた probe の終わりで後の D-SACK を probe のものとみなさない
+	}
 }
 
 // setRTO は RTO の期限を at にする。0 なら RTO の期限を消す。

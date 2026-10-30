@@ -383,6 +383,7 @@ accept の待ち行列は Device 全体で Q 本、待ち受け 1 つで Q の�
   endpoint 1 つが持つ応答は 1 つだけで、読まれる前に届いた次の応答は捨てます。
   表が満杯なら `DialPing` は誤りを返します。
   自分のアドレス宛ての echo request には、後述の制御の出力の輪から応答します。
+  応答は DF を立てません。Linux も echo の応答に PMTU discovery を使わず、DF を立てません(試験の書き手の説明による)。
   表は 16 件で、endpoint 1 つは MTU の大きさの応答の枠を 1 つ持ちます
 - ICMP の誤り:Fragmentation Needed は、引用された TCP の番号が SND.UNA から SND.NXT の範囲にあるときだけ受け入れます(RFC 5927)。
   範囲の外の誤りは、送信元の確認を通っても捨てます

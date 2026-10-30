@@ -30,6 +30,10 @@ type hystart struct {
 	css          bool
 	cssBaseline  int64
 	cssRounds    int
+	// sndNxt は処理中の ACK の前に、ACK のたびに送る送り手なら送り終えていた番号(sendableEnd)。往復を
+	// 始めた時の SND.NXT として使う
+	sndNxt   uint32
+	sndNxtOK bool
 }
 
 // hystartOn は最初の slow start の間だけ真を返す(RFC 9406 4.3。RTO や損失の後の slow start では使わない)。
@@ -44,8 +48,13 @@ func (c *tcb) slowStartAck(ack, acked uint32, sample, now int64) {
 		return
 	}
 	h := &c.hs
+	start := c.sndNxt
+	if h.sndNxtOK && seqGT(h.sndNxt, start) {
+		start = h.sndNxt
+	}
+	h.sndNxtOK = false
 	if !h.started {
-		*h = hystart{started: true, windowEnd: c.sndNxt, lastRoundMin: hsNoRTT, curRoundMin: hsNoRTT, cssBaseline: hsNoRTT}
+		*h = hystart{started: true, windowEnd: start, lastRoundMin: hsNoRTT, curRoundMin: hsNoRTT, cssBaseline: hsNoRTT}
 	}
 	if h.css {
 		inc /= hsCSSGrowthDiv
@@ -69,7 +78,8 @@ func (c *tcb) slowStartAck(ack, acked uint32, sample, now int64) {
 	}
 	// 往復の終わり:windowEnd を確認した ACK で次の往復を始める
 	if seqGE(ack, h.windowEnd) {
-		h.lastRoundMin, h.curRoundMin, h.samples, h.windowEnd = h.curRoundMin, hsNoRTT, 0, c.sndNxt
+		// 往復を始めた時の SND.NXT は、まとめて届いた ACK が許してまだ作っていない segment を含む(lazyegress.go)
+		h.lastRoundMin, h.curRoundMin, h.samples, h.windowEnd = h.curRoundMin, hsNoRTT, 0, start
 		if h.css {
 			h.cssRounds++
 			if h.cssRounds >= hsCSSRounds {

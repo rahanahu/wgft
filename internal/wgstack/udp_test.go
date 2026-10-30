@@ -312,6 +312,10 @@ func TestICMPEcho(t *testing.T) {
 	if ip.proto != protoICMP || ip.dst != addrBits(peerAddr) || m[0] != icmpEchoReply || !bytes.Equal(m[4:], req[4:]) || ^checksum(0, m) != 0 {
 		t.Fatalf("echo reply %x", pkts[0])
 	}
+	// echo の応答は DF を立てず、IPv4 の header の checksum は正しい
+	if pkts[0][6]&0x40 != 0 || ^checksum(0, pkts[0][:ipHeaderLen]) != 0 {
+		t.Fatalf("echo reply header %x: DF set or bad checksum", pkts[0][:ipHeaderLen])
+	}
 }
 
 func TestDialPing(t *testing.T) {

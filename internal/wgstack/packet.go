@@ -255,6 +255,13 @@ func writeIPv4Header(b []byte, total int, id uint16, proto uint8, src, dst uint3
 	binary.BigEndian.PutUint16(b[10:12], ^checksum(0, b[:20]))
 }
 
+// clearDF は writeIPv4Header で書いた b[:20] の DF を下ろし、checksum を直す。
+func clearDF(b []byte) {
+	b[6] &^= 0x40
+	b[10], b[11] = 0, 0
+	binary.BigEndian.PutUint16(b[10:12], ^checksum(0, b[:20]))
+}
+
 // tcpHeader は組み立てる TCP の header の値。
 type tcpHeader struct {
 	tup   tuple

@@ -524,6 +524,9 @@ func (c *tcb) timeWaitInput(seg *segment, now int64, reuse *reuseISS) bool {
 // processAck は ACK の欄を処理する(RFC 9293、RFC 5681、RFC 6582)。
 func (c *tcb) processAck(seg *segment, now int64) {
 	ack := seg.ack
+	if c.hystartOn() {
+		c.hs.sndNxt, c.hs.sndNxtOK = c.sendableEnd(), true // この ACK の前の SND.NXT(lazyegress.go)
+	}
 	c.probesOut = 0
 	if c.persist {
 		c.retransStart = 0 // 相手は probe に応えている
@@ -573,6 +576,9 @@ func (c *tcb) processAck(seg *segment, now int64) {
 			c.tlpAt = 0
 		}
 		c.rearmRetrans()
+	}
+	if advanced {
+		c.noteDrainedWithData(now)
 	}
 	if c.sndWnd > 0 && c.persist {
 		c.persist = false
@@ -857,7 +863,7 @@ func (c *tcb) afterInput(now int64) {
 		// 確認を待つものが無いので、前の RTO の起点と後退を持ち越さない。持ち越すと、相手が probe に
 		// 応え続けた長い persist の後の最初の RTO で、再送の打ち切りの時間を過ぎたと数える
 		c.clearRetransTimers()
-		c.tlpActive, c.tlpProbe = false, false
+		c.tlpActive, c.tlpProbe, c.tlpRetrans = false, false, false
 		c.persist = true
 		c.retransStart = 0
 		c.backoff = 0
@@ -1098,7 +1104,7 @@ func (c *tcb) onRTO(now int64) {
 		c.markAllLost(rtxRTO)
 	}
 	c.reoAt, c.tlpAt = 0, 0
-	c.tlpActive, c.tlpProbe = false, false
+	c.tlpActive, c.tlpProbe, c.tlpRetrans = false, false, false
 	c.setRTO(now + c.curRTO())
 	if c.s.trace != nil {
 		c.traceEvent(TraceRTO, now)
