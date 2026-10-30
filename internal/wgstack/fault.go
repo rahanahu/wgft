@@ -24,3 +24,11 @@ func (c *tcb) accountingFault(now int64) {
 	c.sendRST()
 	c.abortWith(errAccounting)
 }
+
+// ended は接続が CLOSED か空きの枠になったかを返す。segment を作る途中で会計の不整合が接続を閉じた後に、
+// 残りの処理を止めるために使う。
+func (c *tcb) ended() bool { return c.state == stClosed || c.state == stFree }
+
+// requeueEmptyForTest は、何も作らなかった接続を出力の list に入れ直す昔の振る舞いに戻す。stack.poll の
+// 繰り返しの上限を試験で確かめるためだけに使う。
+var requeueEmptyForTest = false

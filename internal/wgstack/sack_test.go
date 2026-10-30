@@ -323,3 +323,43 @@ func TestRecoveryStaysWithinCwnd(t *testing.T) {
 		t.Fatal("RTO during recovery")
 	}
 }
+
+// TestPMTUDropKeepsRecordsThatFit は、PMTU の引き下げで、新しい大きさに入る記録を送り直さないことを確かめる
+// (入る記録は届いているかもしれない。Linux の tcp_simple_retransmit と同じ)。
+func TestPMTUDropKeepsRecordsThatFit(t *testing.T) {
+	n, c, _, outs := sackConn(t, 2)
+	cs := c.c
+	c.Write(make([]byte, 100)) // 新しい大きさに入る小さな記録
+	small := n.drain()
+	if len(small) != 1 || len(small[0].seg.payload) != 100 {
+		t.Fatalf("small write sent %v", small)
+	}
+	cs.mu.Lock()
+	cs.pmtuDrop(outs[0].seg.seq, 600, int64(n.clk.Now()))
+	cs.mu.Unlock()
+	for _, o := range n.drain() {
+		if o.seg.seq == small[0].seg.seq && len(o.seg.payload) > 0 {
+			t.Fatalf("resent the %d-byte record that fits the new PMTU", len(o.seg.payload))
+		}
+	}
+	checkScoreboard(t, cs)
+}
+
+// TestPMTUDropRestartsAHeadResentInPieces は、古い大きさで分けて送っている途中の先頭の記録が PMTU の引き下げで
+// 損失になったとき、分けた位置を捨てて新しい大きさで初めから送り直すことを確かめる。
+func TestPMTUDropRestartsAHeadResentInPieces(t *testing.T) {
+	n, c, _, outs := sackConn(t, 3)
+	cs := c.c
+	cs.mu.Lock()
+	cs.rxtIdx, cs.rxtOff, cs.rxtMid = 0, 500, true // 先頭を古い大きさで途中まで送った
+	cs.pmtuDrop(outs[0].seg.seq, 600, int64(n.clk.Now()))
+	idx, off, mid := cs.rxtIdx, cs.rxtOff, cs.rxtMid
+	cs.mu.Unlock()
+	if idx != 0 || off != 0 || mid {
+		t.Fatalf("the split position survived the PMTU drop: idx %d off %d mid %v", idx, off, mid)
+	}
+	got := n.drain()
+	if len(got) == 0 || got[0].seg.seq != outs[0].seg.seq {
+		t.Fatalf("the first resend after the PMTU drop is %v, want the head from its start", got)
+	}
+}

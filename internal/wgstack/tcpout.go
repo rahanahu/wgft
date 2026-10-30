@@ -13,7 +13,7 @@ func (c *tcb) poll(b []byte, now int64) int {
 	n := c.build(b, now)
 	// 何も作らなかった項目は入れ直さない。入れ直すと stack.poll が同じ項目を回り続ける。送るものが後で
 	// できれば、入力、タイマー、書き込みが入れ直す
-	if n > 0 && c.wantOutput() {
+	if (n > 0 || requeueEmptyForTest) && c.wantOutput() {
 		c.s.out.queueConn(c.id)
 	}
 	return n
@@ -138,7 +138,7 @@ func (c *tcb) build(b []byte, now int64) int {
 	}
 	if c.fastRtx {
 		c.fastRtx = false
-		if n := c.buildRtx(b, space, now); n > 0 {
+		if n := c.buildRtx(b, space, now); n > 0 || c.ended() {
 			return n
 		}
 	}
@@ -147,19 +147,21 @@ func (c *tcb) build(b []byte, now int64) int {
 		return c.buildBare(b, c.sndUna-1, now)
 	}
 	if c.state != stTimeWait {
+		// 作る処理が会計の不整合で接続を閉じたら、残りの処理を続けない。続けると閉じた接続の欄で次の segment
+		// を作り、不整合を重ねて数え、RST を重ねて送る
 		if c.tlpProbe {
 			c.tlpProbe = false
-			if n := c.buildTLP(b, space, now); n > 0 {
+			if n := c.buildTLP(b, space, now); n > 0 || c.ended() {
 				return n
 			}
 		}
-		if n := c.buildResend(b, space, now, c.pickRule1(), false); n > 0 {
+		if n := c.buildResend(b, space, now, c.pickRule1(), false); n > 0 || c.ended() {
 			return n
 		}
-		if n := c.buildNew(b, space, now, false); n > 0 {
+		if n := c.buildNew(b, space, now, false); n > 0 || c.ended() {
 			return n
 		}
-		if n := c.buildResend(b, space, now, c.pickRule3(), false); n > 0 {
+		if n := c.buildResend(b, space, now, c.pickRule3(), false); n > 0 || c.ended() {
 			return n
 		}
 	}
@@ -385,6 +387,9 @@ func (c *tcb) buildResend(b []byte, space int, now int64, p resendPick, force bo
 func (c *tcb) buildTLP(b []byte, space int, now int64) int {
 	retrans := false
 	n := c.buildNew(b, space, now, true)
+	if c.ended() {
+		return 0
+	}
 	if n == 0 {
 		i := c.recs.n - 1
 		if i < 0 || c.isSacked(c.recs.at(i)) {

@@ -25,6 +25,7 @@ type twRow struct {
 	prev     int32
 	next     int32
 	wnd      uint16
+	wscale   uint8 // 広告する窓の scale
 	state    uint8
 	tsOK     bool
 	used     bool
@@ -122,6 +123,7 @@ func (s *stack) addTWRow(c *tcb, state uint8, deadline, now int64) {
 		origin:   c.id,
 		gen:      c.gen,
 		wnd:      c.windowField(),
+		wscale:   c.rcvWscale,
 		state:    state,
 		tsOK:     c.tsOK,
 		used:     true,
@@ -148,6 +150,23 @@ func (s *stack) twAck(id int32, now int64, limited bool) {
 	}
 	s.tw.rows[id].pending = true
 	s.out.queueRow(s.twRowID(id))
+}
+
+// acceptable は行への segment が RFC 9293 3.10.7.4 の受け入れの範囲にあるかを返す。窓は行に移した時に
+// 広告した窓である。
+func (r *twRow) acceptable(seg *segment) bool {
+	wnd := uint32(r.wnd) << r.wscale
+	n := seg.seqLen()
+	inWnd := func(x uint32) bool { return seqGE(x, r.rcvNxt) && seqLT(x, r.rcvNxt+wnd) }
+	switch {
+	case n == 0 && wnd == 0:
+		return seg.seq == r.rcvNxt
+	case n == 0:
+		return inWnd(seg.seq)
+	case wnd == 0:
+		return false
+	}
+	return inWnd(seg.seq) || inWnd(seg.seq+n-1)
 }
 
 // rfc6191 は、TIME_WAIT の 4 つ組への新しい SYN を受け入れてよいかを返す(RFC 6191 2 節)。前の接続が
@@ -196,6 +215,12 @@ func (s *stack) twInput(id int32, seg *segment, now int64, reuse *reuseISS) bool
 		return true
 	}
 	if r.state == twStateFinWait2 {
+		// 確立した接続と同じく、PAWS と窓の外の segment には速さを抑えた ACK を返すだけにする(RFC 7323 5.3、
+		// RFC 9293 3.10.7.4)。窓の外の古い data で行を外させない
+		if (r.tsOK && seg.opt.hasTS && seqLT(seg.opt.tsVal, r.tsRecent)) || !r.acceptable(seg) {
+			s.twAck(id, now, true)
+			return true
+		}
 		if len(seg.payload) > 0 && seqGT(seg.seq+uint32(len(seg.payload)), r.rcvNxt) {
 			// 閉じた後に届いたデータ。Linux と同じく RST を返して行を外す
 			s.replyRST(seg)

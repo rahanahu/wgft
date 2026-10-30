@@ -31,6 +31,7 @@ func TestRecvBufAgainstModel(t *testing.T) {
 		have := make([]bool, span) // 順序外で届いた offset - start
 		haveN := 0
 		lastNxt := start
+		var lastTouch uint64 // 最後に区間に触れた segment の位置。0 は無し
 		var got []byte
 		boosted := false
 		for step := 0; step < 4000; step++ {
@@ -50,7 +51,11 @@ func TestRecvBufAgainstModel(t *testing.T) {
 				}
 				limit := b.readOff + capB
 				nIv := b.n
+				before := b.nxtOff
 				res := b.insert(off, stream[off-start:off-start+uint64(ln)], limit)
+				if res.ooo || (res.duplicate && off >= before) {
+					lastTouch = max(off, before)
+				}
 				if res.dropped {
 					if nIv != h {
 						t.Fatalf("seed %d: dropped with %d of %d intervals", seed, nIv, h)
@@ -89,8 +94,12 @@ func TestRecvBufAgainstModel(t *testing.T) {
 			// 区間が模型の集合と一致し、整列していること
 			cnt := 0
 			prevEnd := b.nxtOff
-			for k := range b.n {
-				s, e := b.ivStart(k), b.ivEnd(k)
+			ivs := b.intervals(nil)
+			if len(ivs) != b.n {
+				t.Fatalf("seed %d step %d: %d intervals in the tree, count %d", seed, step, len(ivs), b.n)
+			}
+			for k, iv := range ivs {
+				s, e := iv[0], iv[1]
 				if s <= prevEnd && !(k == 0 && s > b.nxtOff) {
 					t.Fatalf("seed %d step %d: interval %d [%d,%d) not after %d", seed, step, k, s, e, prevEnd)
 				}
@@ -107,7 +116,7 @@ func TestRecvBufAgainstModel(t *testing.T) {
 			}
 			// 区間の中身を輪から読み、stream と比べる
 			for k := range min(b.n, 3) {
-				s, e := b.ivStart(k), b.ivEnd(k)
+				s, e := ivs[k][0], ivs[k][1]
 				tmp := make([]byte, e-s)
 				b.r.read(s, tmp)
 				if !bytes.Equal(tmp, stream[s-start:e-start]) {
@@ -122,18 +131,31 @@ func TestRecvBufAgainstModel(t *testing.T) {
 			if b.n > 0 && len(blocks) == 0 {
 				t.Fatalf("seed %d: no SACK blocks with %d intervals", seed, b.n)
 			}
-			// 先頭の block は最も新しく触れた区間
-			if b.n > 0 {
-				best := 0
-				for k := range b.n {
-					if b.touch-b.iv[k].touched < b.touch-b.iv[best].touched {
-						best = k
+			// 先頭の block は最も新しく触れた区間(まだ順序外にあるとき)
+			if lastTouch != 0 && lastTouch >= b.nxtOff && b.n > 0 {
+				if x := uint32(lastTouch); len(blocks) == 0 || !seqLE(blocks[0].left, x) || !seqLT(x, blocks[0].right) {
+					t.Fatalf("seed %d step %d: first SACK block %v does not hold the last touched offset %d", seed, step, blocks, uint32(lastTouch))
+				}
+			}
+			// block は区間と一致し、重ならない
+			for i, x := range blocks {
+				found := false
+				for _, iv := range ivs {
+					if x == (sackBlock{uint32(iv[0]), uint32(iv[1])}) {
+						found = true
 					}
 				}
-				want := sackBlock{uint32(b.ivStart(best)), uint32(b.ivEnd(best))}
-				if blocks[0] != want {
-					t.Fatalf("seed %d: first SACK block %v, want %v", seed, blocks[0], want)
+				for _, y := range blocks[:i] {
+					if y == x {
+						t.Fatalf("seed %d step %d: block %v repeated", seed, step, x)
+					}
 				}
+				if !found {
+					t.Fatalf("seed %d step %d: block %v is not an interval", seed, step, x)
+				}
+			}
+			if want := min(b.n, 4); len(blocks) != want {
+				t.Fatalf("seed %d step %d: %d blocks for %d intervals", seed, step, len(blocks), b.n)
 			}
 		}
 	})

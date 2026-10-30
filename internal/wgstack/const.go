@@ -81,3 +81,6 @@ var retransmitDeadline = func() time.Duration {
 	}
 	return total
 }()
+
+// pawsIdle は、TS.Recent を古いとみなすまでの時間(RFC 7323 5.5 の 24 日)。
+const pawsIdle = 24 * 24 * time.Hour
