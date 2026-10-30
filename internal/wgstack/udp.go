@@ -113,11 +113,18 @@ type udpState struct {
 	dropGate                  gate
 }
 
-func (u *udpState) init() {
+// init は datagram の枠の数を決める。0 は本番の値で、小さな値は試験だけが渡す。
+func (u *udpState) init(rxDgrams, txDgrams int) {
+	if rxDgrams == 0 {
+		rxDgrams = udpRxDatagrams
+	}
+	if txDgrams == 0 {
+		txDgrams = udpTxDatagrams
+	}
 	u.eps = map[netip.AddrPort]*udpEndpoint{}
 	u.txHead, u.txTail = -1, -1
 	u.txSpace = make(chan struct{})
-	sizes := [2]int{udpRxDatagrams, udpTxDatagrams}
+	sizes := [2]int{rxDgrams, txDgrams}
 	for d := range 2 {
 		u.dg[d] = make([]udpDgram, sizes[d])
 		u.dgFree[d] = make([]int32, sizes[d])
@@ -125,8 +132,8 @@ func (u *udpState) init() {
 			u.dgFree[d][i] = int32(sizes[d] - 1 - i)
 		}
 	}
-	u.budget[dirRx] = udpBudget{maxBytes: udpRxBytes, maxCount: udpRxDatagrams}
-	u.budget[dirTx] = udpBudget{maxBytes: udpTxBytes, maxCount: udpTxDatagrams}
+	u.budget[dirRx] = udpBudget{maxBytes: udpRxBytes, maxCount: int64(rxDgrams)}
+	u.budget[dirTx] = udpBudget{maxBytes: udpTxBytes, maxCount: int64(txDgrams)}
 	n := (udpRxBytes + udpTxBytes) / chunkSize
 	u.ck = make([]udpChunkRec, n)
 	u.ckFree = make([]int32, n)
