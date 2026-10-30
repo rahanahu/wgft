@@ -120,7 +120,7 @@ func TestUserspaceReasonsAreReadByServerDoctor(t *testing.T) {
 			want: doctor.ReasonTargetTimeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d := usermode.New(tc.allow, resource.Limits{})
+			d := usermode.New(tc.allow, resource.Limits{}, "")
 			opts := d.RelayOptions(proto.WGConfig{})
 			if tc.source == "-" {
 				opts.AllowTargetSource = ""
@@ -165,7 +165,7 @@ func TestAllowTargetsNameReachesServerDoctorNextStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := reasonTCPRule("r1", "192.168.9.9:25565", 25565)
-	d := usermode.New(narrow, resource.Limits{})
+	d := usermode.New(narrow, resource.Limits{}, "")
 	opts := d.RelayOptions(proto.WGConfig{})
 	opts.Logf = func(string, ...any) {}
 	m := relay.New(reasonNetwork{}, opts)

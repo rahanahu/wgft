@@ -31,6 +31,9 @@ type Options struct {
 	// Mode は設定の WGFT_MODE の値である(仕様 11a 節)。kernel か userspace で、空なら省略されており
 	// userspace を指す。起動時に認証情報ファイルの記録と照合する(mode.go)
 	Mode string
+	// Netstack はユーザー空間モードの netstack の実装(WGFT_AGENT_NETSTACK、仕様 11a 節と wgstack.md)。
+	// gvisor か wgstack で、空は gvisor を指す。カーネルモードでは使わない
+	Netstack string
 	// WGInterface はカーネルモードの WireGuard インタフェースの名前である(WGFT_WG_INTERFACE、既定 wgft0。
 	// 仕様 7b.1・11a 節)。ユーザー空間モードでは使わない
 	WGInterface string

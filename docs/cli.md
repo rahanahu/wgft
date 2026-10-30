@@ -639,6 +639,12 @@ without CAP_NET_ADMIN or kernel WireGuard support stops before it records the
 mode or uses the join string, so the agent then starts in userspace mode once
 WGFT_MODE is unset or set to userspace.
 
+WGFT_AGENT_NETSTACK chooses the network stack of the userspace mode: gvisor,
+the default when unset or empty, or wgstack, wgft's own TCP/IP stack, which is
+experimental and logs a warning at start. Any other value stops the agent with
+exit code 3. Kernel mode runs no network stack, logs that the setting is unused
+and starts.
+
 ```text
 wgft agent run [flags]
 ```
@@ -655,6 +661,7 @@ Flags:
 
 ```text
       --agent-allow-targets string   comma-separated targets the server may send traffic to, env WGFT_AGENT_ALLOW_TARGETS; entries are CIDR, CIDR:port or CIDR:lo-hi; unset means no restriction
+      --agent-netstack string        userspace-mode network stack gvisor or wgstack, env WGFT_AGENT_NETSTACK; unset means gvisor, and wgstack is experimental
       --config string                dotenv config file (default "/etc/wgft/agent.env")
       --data-dir string              data dir, env WGFT_DATA_DIR; holds agent.json (default "/var/lib/wgft")
       --join string                  join string wgft://host:port/token#sha256:..., env WGFT_JOIN

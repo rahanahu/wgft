@@ -158,7 +158,7 @@ func newRuntime(opts Options, f *credentials.Credentials, priv wgtypes.Key) *run
 		handshakeWake:            make(chan struct{}, 1),
 		kernelWake:               make(chan struct{}, 1),
 		notifyDebounce:           reconcile.DefaultTriggers.Debounce,
-		dp:                       usermode.New(opts.AllowTargets, opts.Limits),
+		dp:                       usermode.New(opts.AllowTargets, opts.Limits, opts.Netstack),
 		rebuild:                  rebuildState{after: defaultRebuildAfter, backoffMax: defaultRebuildBackoffMax},
 	}
 	rt.setPrivKey(priv)
