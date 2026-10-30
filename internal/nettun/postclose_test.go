@@ -244,6 +244,10 @@ func TestPostCloseRowHeap(t *testing.T) {
 // rowHeap returns the live heap per row of n dialed connections that carried 64 KiB each way and
 // then closed first. For FIN_WAIT_2, the accepted side is reset with its reset dropped, so the
 // dialed side keeps nothing to receive and its peer keeps nothing.
+//
+// The accepted side closes only after its connection has acknowledged the dialed side's FIN.
+// A Close before the FIN arrives is a simultaneous close, and the accepted side then keeps its
+// own row in TIME_WAIT for the 60 s default, in the heap that this measures.
 func rowHeap(t *testing.T, n int, finWait2 bool) float64 {
 	var dropRST atomic.Bool
 	p := newTCPPairOpts(t, 16, nil, func(pkt []byte) bool {
@@ -258,6 +262,7 @@ func rowHeap(t *testing.T, n int, finWait2 bool) float64 {
 	warm, warmPeer := p.dial(t)
 	bulk(t, warm, warmPeer, 64<<10)
 	warm.Close()
+	waitFor(t, 10*time.Second, "FIN_WAIT_2", func() bool { return stateOf(connOf(warm).ep) == tcp.StateFinWait2 })
 	warmPeer.Close()
 	base := liveHeap()
 	eps := make([]tcpip.Endpoint, 0, n)
@@ -270,12 +275,12 @@ func rowHeap(t *testing.T, n int, finWait2 bool) float64 {
 		peers = append(peers, s)
 		c.Close()
 	}
+	for _, ep := range eps {
+		waitFor(t, 10*time.Second, "FIN_WAIT_2", func() bool { return stateOf(ep) == tcp.StateFinWait2 })
+	}
 	want := tcp.StateTimeWait
 	if finWait2 {
 		want = tcp.StateFinWait2
-		for _, ep := range eps {
-			waitFor(t, 10*time.Second, "FIN_WAIT_2", func() bool { return stateOf(ep) == want })
-		}
 		dropRST.Store(true)
 		for _, s := range peers {
 			s.(*TCPConn).Abort()
@@ -290,11 +295,11 @@ func rowHeap(t *testing.T, n int, finWait2 bool) float64 {
 		waitFor(t, 10*time.Second, want.String(), func() bool { return stateOf(ep) == want })
 	}
 	// 受けた側の LAST_ACK の行は、CLOSED になった後の sweep で外れる。中身の無い ACK の予算の表の行も
-	// 同じ sweeper が外す(ackbudget.go)
+	// 同じ sweeper が外す(ackbudget.go)。受けた側は FIN を確認してから閉じたので、TIME_WAIT の行は残らない
 	waitFor(t, 10*time.Second, "the accepted side's rows to leave", func() bool {
 		p.b.postClose.sweep()
 		p.b.acks.sweep()
-		return p.b.postClose.len() <= 1
+		return p.b.postClose.len() == 0
 	})
 	eps = nil
 	per := float64(int64(liveHeap())-int64(base)) / float64(n)

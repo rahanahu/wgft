@@ -14,6 +14,7 @@ import (
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
 // sackOption is two NOPs and one SACK block.
@@ -409,9 +410,17 @@ func TestAckBudgetFollowsBoost(t *testing.T) {
 	t.Run("delivered", func(t *testing.T) {
 		p := newTCPPair(t, 1)
 		c, s, k := boostAndRefill(t, p)
+		// Each segment the connection sends to the TUN adds one token, so the count below meets
+		// the floor limit only when nothing is sent during it. The accepted side closes after it
+		// has acknowledged the dialed side's FIN, so neither side closes simultaneously, and the
+		// count waits until the accepted side is CLOSED: the dialed side's last ACK has then
+		// passed the TUN.
 		c.Close()
-		s.Close()
 		waitFor(t, 10*time.Second, "the dialed side's FIN to be acknowledged", func() bool { return finAcked(connOf(c).ep) })
+		s.Close()
+		waitFor(t, 10*time.Second, "the close to settle", func() bool {
+			return stateOf(connOf(c).ep) == tcp.StateTimeWait && stateOf(connOf(s).ep) == tcp.StateClose
+		})
 		if got := rowTokens(p.a.acks, k); got < 0 {
 			t.Skip("the row left before the check; the endpoint is already CLOSED")
 		}
