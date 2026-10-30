@@ -20,6 +20,9 @@ type recList struct {
 	n          int32
 }
 
+// rackReoPersist は D-SACK で上げた倍率を保つ回復の数(RFC 8985 の 16)。
+const rackReoPersist = 16
+
 const (
 	tlpOneSegExtra = 200 * time.Millisecond // RFC 8985 7.2 の WCDelAckT
 	tlpNoRTT       = time.Second            // RTT を測る前の PTO
@@ -115,12 +118,37 @@ func (c *tcb) rackDelivered(r *record, now int64) {
 	}
 }
 
-// reoWnd は並べ替えの窓(RFC 8985 6.2 の手順 4、D-SACK による広げ方は持たない)。
+// reoWnd は並べ替えの窓(RFC 8985 6.2 の手順 4)。D-SACK を受けた往復ごとに倍率を 1 つ上げる。
 func (c *tcb) reoWnd() int64 {
 	if !c.reorderSeen && (c.inRecovery || c.sackedRecs >= dupThresh) {
 		return 0
 	}
-	return min(c.minRTT/4, c.srtt)
+	return min(max(c.reoWndMult, 1)*c.minRTT/4, c.srtt)
+}
+
+// rackDSACK は D-SACK を受けた ACK で並べ替えの窓の倍率を上げる。1 往復に 1 回だけ上げ、16 回の回復の間
+// 保つ(RFC 8985 6.2 の手順 4)。
+func (c *tcb) rackDSACK() {
+	if c.dsackRoundOn && seqGE(c.sndUna, c.dsackRound) {
+		c.dsackRoundOn = false
+	}
+	if c.dsackRoundOn {
+		return
+	}
+	c.dsackRound, c.dsackRoundOn = c.sndMax, true
+	c.reoWndMult = max(c.reoWndMult, 1) + 1
+	c.reoPersist = rackReoPersist
+	c.s.dsacksIn.Add(1)
+}
+
+// rackRecoveryDone は回復を終えるたびに倍率を保つ残りを減らし、尽きたら倍率を 1 に戻す。
+func (c *tcb) rackRecoveryDone() {
+	if c.reoPersist > 0 {
+		c.reoPersist--
+		if c.reoPersist == 0 {
+			c.reoWndMult = 1
+		}
+	}
 }
 
 // rackDetect は送った時刻の順の list の先頭から、RACK の時刻で失われた記録に印を付けて損失の待ち行列へ

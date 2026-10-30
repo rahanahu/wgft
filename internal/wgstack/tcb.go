@@ -91,11 +91,18 @@ type tcbState struct {
 	oooFin       bool
 	oooFinOff    uint64
 	rcvSinceAck  int
-	rcvMSSEst    uint32 // 相手の segment の大きさの推定(Linux の icsk_ack.rcv_mss)
-	ackPushed    bool   // 遅延 ACK を待つ間に、推定より小さな segment を順序どおりに受けた
-	pingpong     bool   // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
-	lastDataRcvd int64  // 最後に中身を受け入れた時刻
-	rcvdData     bool   // lastDataRcvd が有効
+	rcvMSSEst    uint32    // 相手の segment の大きさの推定(Linux の icsk_ack.rcv_mss)
+	ackPushed    bool      // 遅延 ACK を待つ間に、推定より小さな segment を順序どおりに受けた
+	pingpong     bool      // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
+	lastDataRcvd int64     // 最後に中身を受け入れた時刻
+	rcvdData     bool      // lastDataRcvd が有効
+	quickAcks    uint8     // 遅らせずに返す ACK の残り(Linux の icsk_ack.quick)
+	dsack        sackBlock // 次の ACK の先頭に載せる D-SACK の block(RFC 2883)
+	dsackPending bool
+	reoWndMult   int64  // RACK の並べ替えの窓の倍率(RFC 8985 6.2 の reo_wnd_mult)
+	reoPersist   int    // 倍率を保つ残りの回復の数(reo_wnd_persist)
+	dsackRound   uint32 // D-SACK で倍率を上げた往復の終わり(dsack_round)
+	dsackRoundOn bool
 
 	tsRecent, tsOffset uint32
 	lastAckSent        uint32
@@ -377,6 +384,10 @@ func (c *tcb) oowAck(seg *segment, now int64) {
 		}
 		c.lastOOW = now
 	}
+	// 中身がすべて RCV.NXT より前にある重複は、範囲を D-SACK で知らせる(RFC 2883)
+	if n := uint32(len(seg.payload)); n > 0 && !seg.has(flagSYN) && seqLE(seg.seq+n, c.rcvNxt) {
+		c.noteDuplicate(seg.seq, n, now)
+	}
 	c.ackNow = true
 }
 
@@ -605,6 +616,7 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 		if seqGE(ack, c.recover) {
 			// 回復の終わり。SACK では RFC 6937 の cwnd = ssthresh、SACK が無ければ RFC 6582 3.2 の 3
 			c.inRecovery = false
+			c.rackRecoveryDone()
 			if c.sackOK {
 				c.cwnd = c.ssthresh
 			} else {
@@ -707,6 +719,9 @@ func (c *tcb) inputData(seg *segment, now int64) {
 	}
 	limit := min(c.advRight, c.rcv.readOff+c.rcvCap)
 	res := c.rcv.insert(uint64(off), seg.payload, limit)
+	if res.duplicate {
+		c.noteDuplicate(seg.seq, uint32(n), now)
+	}
 	if res.dropped {
 		c.s.refused(&c.s.oooDropped, &c.s.oooGate, now, "dropped out-of-order segments that would need more than the fixed number of receive intervals")
 	}
@@ -736,7 +751,9 @@ func (c *tcb) inputData(seg *segment, now int64) {
 	case res.advanced:
 		c.rcvSinceAck += res.accepted
 		c.notePushed(n)
-		if c.rcvSinceAck >= 2*c.rcvMSS() {
+		c.noteQuickack(now)
+		// 推定した相手の MSS より多くの byte を確認していなければ ACK を遅らせる(Linux の __tcp_ack_snd_check)
+		if c.rcvSinceAck > int(c.rcvMSSEst) || (c.quickAcks > 0 && !c.pingpong) {
 			c.ackNow = true
 		} else if c.tdl[tmrDelack] == 0 {
 			c.arm(tmrDelack, now+int64(delackTimeout))
