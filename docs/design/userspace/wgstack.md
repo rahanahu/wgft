@@ -607,7 +607,10 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
   Linux も `tcp_close` の後の segment の窓を `tcp_select_window` の通常の規則で決めると読めます。
   窓の右端は後ろへ戻さないので、閉じた時に広告済みの窓は縮められません。
   閉じた後に届く新しいデータには RST を返して接続を終えるので、窓が大きくても受信のバッファは増えません
-- 遅延 ACK:Linux と同じく、MSS 2 つ分ごとか遅延の期限で ACK を返します
+- 遅延 ACK:読み手が遅れて受信のバッファにデータが残る間は、Linux と同じく推定した MSS 2 つ分ごとか遅延の期限で ACK を返します。
+  遅延 ACK を待つ間にアプリケーションの読み取りが受信のバッファを空にしたときは、対話の流れでなければ segment の大きさによらず ACK をすぐ返します([受け手の ACK と D-SACK](wgstack-performance.md#受け手の-ack-と-d-sack))。
+  これは Linux との意図した違いです。
+  Linux は読み終えた時の ACK を、推定した MSS より小さな segment を受けた後に限ります
 - Nagle:使いません。
   Go の `net.TCPConn` の既定の `TCP_NODELAY` と同じ扱いで、適合の試験の Linux の側にも同じ設定を与えます
 - 再送の打ち切り:握手の後は Linux の `tcp_retries2`、SYN-ACK は `tcp_synack_retries` の既定の回数で打ち切ります
