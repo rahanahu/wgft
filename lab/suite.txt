@@ -54,11 +54,12 @@
 # checks run in the given order. teardown removes the agent's WireGuard interface, table and
 # records that the group's earlier checks depend on, so it must be a group's last check; 22 leaves
 # rules that resolve then removes, so a group must not run both (this file avoids that by keeping
-# them in different groups). resolve is a job of its own: it waits on the agent's 30-second check
-# again and again, which makes it one of the longest checks, and a group that runs other checks
-# after it becomes the longest job of the suite, the one the pool ends up waiting for. 24, 17, 18,
-# 19 and loopback are a group without it, and so run right after the setup, before resolve, as they
-# do in the script's own default list. reconnect and stale only apply with a kernel-mode server and print
+# them in different groups). resolve and failover are jobs of their own: each waits on the agent's
+# 30-second check again and again, which makes them the longest checks, and a group that runs other
+# checks after one of them becomes the longest job of the suite, the one the pool ends up waiting
+# for; for the same reason the two are not one group, which would be longer than any other job.
+# 24, 17, 18, 19 and loopback are a group without them, and so run right after the setup, before
+# resolve, as they do in the script's own default list. reconnect and stale only apply with a kernel-mode server and print
 # SKIP with a userspace-mode one; they are still registered for both modes, the same as this file
 # already does for lifecycle.sh's mode-specific checks. Every group runs well inside labhost's
 # per-job timeout. See docs/testing.md for L16.
@@ -116,6 +117,8 @@ parallel         yes  agentkernel.sh kernel route session
 parallel         yes  agentkernel.sh userspace resolve
 parallel         yes  agentkernel.sh kernel drift 22 25 16 teardown
 parallel         yes  agentkernel.sh userspace drift 22 25 16 teardown
+parallel         yes  agentkernel.sh kernel failover
+parallel         yes  agentkernel.sh userspace failover
 parallel         yes  agentkernel.sh kernel 24 17 18 19 loopback
 parallel         yes  agentdoctor.sh kernel
 parallel         yes  lifecycle.sh kernel 2
