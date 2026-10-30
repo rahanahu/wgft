@@ -157,6 +157,7 @@ func (h *Conn) Read(b []byte) (int, error) {
 		if c.rcv.unread() > 0 {
 			n := c.rcv.read(b)
 			now := s.clock()
+			c.ackOnDrain()
 			c.windowUpdate()
 			boost := c.rdem.add(now, n) && c.noteDemand(boostRecv, now)
 			c.afterInput(now)

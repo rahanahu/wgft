@@ -295,6 +295,11 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
   Linux と同じく、接続の始めに segment ごとに ACK を返す quickack を持ちます。
   重複した segment には D-SACK の block を先頭に返します
 - 使う構造:推定した MSS、quickack の残り、返す D-SACK の block 1 つを接続の欄に置きます
+- 読み終えた時の ACK(実装済み):遅延 ACK を待つ間に推定した MSS より小さな segment を順序どおりに受け、アプリケーションの読み取りが受信のバッファを空にしたときは、対話の流れでなければ ACK をすぐ送ります(Linux の `tcp_cleanup_rbuf`)。
+  対話の流れは、データを受けてから遅延 ACK の時間の内にデータを送ったときに印を付け、遅延 ACK の期限で印を外します(Linux の pingpong)。
+  推定した MSS は初期の値を min(536, 自分の MSS) とし、推定以上の segment で更新します(Linux の `tcp_measure_rcv_mss`)。
+  この規則が無いと、通信量の少ない stream の受け手は 2 つ目の segment を待たずに遅延 ACK の期限でだけ ACK を返し、送り手の ACK の数が半分になります。
+  gVisor の送り手は、輻輳の窓が埋まって新しいデータを送れない間もアプリケーションの書き込みのたびに PTO を張り直すので、末尾の損失と ACK の損失が重なると、書き込みが止まるまで probe も RTO も送らず、損失 5% の通信量の少ない stream の p99 が数秒になりました
 - 不変条件:ACK の数は受けた segment の数を超えないので、I5 に触れません
 - 危険:低いです。
   quickack と D-SACK は今の[期待した差の一覧](wgstack-verification.md#期待した差の一覧)の行を消すので、一覧の更新を試験の書き手と所有者が行います
