@@ -13,7 +13,7 @@ func TestRecvBufAgainstModel(t *testing.T) {
 	if streamSeedsFull() {
 		seeds = 120
 	}
-	for seed := uint64(0); seed < seeds; seed++ {
+	forSeeds(t, 0, seeds-1, func(t *testing.T, seed uint64) {
 		rng := rand.New(rand.NewPCG(seed, 7))
 		var p chunkPool
 		start := uint64(1<<32) - uint64(rng.IntN(300000))
@@ -136,7 +136,7 @@ func TestRecvBufAgainstModel(t *testing.T) {
 				}
 			}
 		}
-	}
+	})
 }
 
 // 1 byte の segment を 1 byte おきに送ると、予約の内側でも H を使い切ることを確かめる。捨てる segment は SACK で

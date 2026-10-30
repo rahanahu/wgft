@@ -15,7 +15,7 @@ func TestScoreboardAgainstRecount(t *testing.T) {
 	if streamSeedsFull() {
 		seeds = 400
 	}
-	for seed := uint64(1); seed <= seeds; seed++ {
+	forSeeds(t, 1, seeds, func(t *testing.T, seed uint64) {
 		rng := rand.New(rand.NewPCG(seed, 99))
 		n := newTestNet(t, smallLimits())
 		l := listen(t, n, 80)
@@ -76,7 +76,7 @@ func TestScoreboardAgainstRecount(t *testing.T) {
 			t.Fatalf("seed %d: sent %d of %d, una %d max %d", seed, written, total, cs.sndUna, cs.sndMax)
 		}
 		checkHeld(t, n)
-	}
+	})
 }
 
 // checkLossFrontier は、境目より先の SACK 済みの記録の数と byte が、境目の記録を損失とみなす RFC 6675 の
