@@ -71,6 +71,11 @@ func (b *recvBuf) setIntervals(iv []interval) bool {
 	return true
 }
 
+// clearIntervals は順序外の区間をすべて捨て、木と節の置き場と最近の区間を空にする。
+func (b *recvBuf) clearIntervals() {
+	b.n, b.root, b.free, b.used, b.nrecent = 0, 0, 0, 0, 0
+}
+
 // alloc は節を 1 つ取り、区間 [s, e) を入れて返す。空きが無ければ 0 を返す。
 func (b *recvBuf) alloc(s, e uint64) int16 {
 	k := b.free
@@ -187,19 +192,28 @@ func (b *recvBuf) containing(x uint64) int16 {
 	return 0
 }
 
-// touchRecent は始まりが s の区間を最も新しく触れた区間として覚える。
-func (b *recvBuf) touchRecent(s uint64) {
-	v := uint32(s)
+// touchRecent は区間 [s, e) を最も新しく触れた区間として覚える。その区間の内側を指す古い印は外し、同じ区間で
+// 印の枠を使わないようにする。
+func (b *recvBuf) touchRecent(s, e uint64) {
+	b.forgetRecent(func(x uint64) bool { return x >= s && x < e })
+	if b.nrecent == sackRecent {
+		b.nrecent--
+	}
+	copy(b.recent[1:b.nrecent+1], b.recent[:b.nrecent])
+	b.recent[0] = uint32(s)
+	b.nrecent++
+}
+
+// forgetRecent は、offset が drop に当たる最近の区間の印を順を保って外す。
+func (b *recvBuf) forgetRecent(drop func(x uint64) bool) {
 	k := 0
-	for k < b.nrecent-1 && b.recent[k] != v {
-		k++
+	for i := 0; i < b.nrecent; i++ {
+		if !drop(b.full(b.recent[i])) {
+			b.recent[k] = b.recent[i]
+			k++
+		}
 	}
-	if b.nrecent < sackRecent && (b.nrecent == 0 || b.recent[k] != v) {
-		k = b.nrecent
-		b.nrecent++
-	}
-	copy(b.recent[1:k+1], b.recent[:k])
-	b.recent[0] = v
+	b.nrecent = k
 }
 
 // intervals は区間を始まりの順に dst に足して返す。
@@ -275,6 +289,7 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 			end = max(end, b.kEnd(b.lastNode(m)))
 			b.n -= b.release(m)
 			res.filled = true
+			b.forgetRecent(func(x uint64) bool { return x < end }) // 順序どおりの範囲に入った区間の印
 		}
 		b.root = rest
 		b.nxtOff = end
@@ -292,13 +307,13 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 		}
 		b.n++
 		b.root = b.merge(b.merge(l, k), r)
-		b.touchRecent(off)
+		b.touchRecent(off, end)
 	} else {
 		f, g := b.firstNode(m), b.lastNode(m)
 		if f == g && b.kStart(f) <= off && end <= b.kEnd(f) {
 			// すべて既に届いている。RFC 2018 の順のために最近の印だけ付け直す
 			b.root = b.merge(b.merge(l, m), r)
-			b.touchRecent(b.kStart(f))
+			b.touchRecent(b.kStart(f), b.kEnd(f))
 			res.duplicate = true
 			res.dupLo, res.dupHi = off, end
 			return res
@@ -311,7 +326,7 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 		k := b.alloc(ns, ne) // 返したばかりの節があるので取れる
 		b.n++
 		b.root = b.merge(b.merge(l, k), r)
-		b.touchRecent(ns)
+		b.touchRecent(ns, ne)
 	}
 	b.r.write(off, data)
 	res.accepted = len(data)

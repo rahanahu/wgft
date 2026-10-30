@@ -836,3 +836,32 @@ func TestPAWSForgetsTSRecentAfter24Days(t *testing.T) {
 		t.Fatalf("after 25 idle days the segment was rejected: %q %v", buf[:k], err)
 	}
 }
+
+// TestPAWSAppliesRightAfterALateHandshake は、時計が 24 日を超えて進んだ後に確立した接続でも、確立の時から
+// PAWS で古い segment を捨てることを確かめる(TS.Recent の時刻を確立の時に記録する)。
+func TestPAWSAppliesRightAfterALateHandshake(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	n.clk.Advance(30 * 24 * time.Hour)
+	l := listen(t, n, 80)
+	// 握手の最後の ACK は timestamp を持たない(SYN と SYN-ACK では交渉した)
+	p := &peerConn{n: n, sport: 40000, dport: 80, iss: 1000, ts: true, tsVal: 5000, wnd: 65535, wsOK: true}
+	n.inject(tseg{sport: 40000, dport: 80, seq: p.iss, flags: flagSYN, wnd: 65535, mss: 1380, ws: 7, ts: true, tsVal: p.tsVal})
+	sa := n.drain()
+	if len(sa) != 1 || sa[0].seg.flags != flagSYN|flagACK {
+		t.Fatalf("SYN-ACK %v", sa)
+	}
+	p.snd, p.rcv, p.dutTS = p.iss+1, sa[0].seg.seq+1, sa[0].seg.opt.tsVal
+	fin := p.seg(flagACK, nil)
+	fin.ts = false
+	n.inject(fin)
+	c := acceptOne(t, l)
+	n.drain()
+	s := p.seg(flagACK, []byte("old"))
+	s.tsVal = 1
+	n.inject(s)
+	n.drain()
+	c.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	if _, err := c.Read(make([]byte, 10)); !isTimeout(err) {
+		t.Fatalf("PAWS-rejected data was delivered right after the handshake: %v", err)
+	}
+}

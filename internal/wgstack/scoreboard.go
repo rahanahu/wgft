@@ -239,6 +239,13 @@ func (c *tcb) markLostLonger(payload int, cause uint8) {
 		if int(r.length) <= payload || c.isSacked(r) || !c.genFlag(r, recInT) {
 			continue
 		}
+		if i == 0 {
+			// 先頭を古い大きさで分けて送っていた位置は捨て、新しい大きさで初めから送り直す
+			if c.lostQ.n > 0 && c.lostQ.head == c.recAbs(0) {
+				c.qOff, c.qMid = 0, false
+			}
+			c.rxtIdx, c.rxtOff, c.rxtMid = 0, 0, false
+		}
 		c.markRackLost(i, r)
 	}
 	c.resendCause = cause

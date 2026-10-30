@@ -263,29 +263,30 @@ func (c *tcb) signalWrite() {
 func (c *tcb) establish(r *synRow, seg *segment, now int64) {
 	s := c.s
 	c.tcbState = tcbState{
-		state:    stEstablished,
-		tup:      r.tup,
-		iss:      r.iss,
-		irs:      r.irs,
-		sndUna:   r.iss + 1,
-		sndNxt:   r.iss + 1,
-		sndMax:   r.iss + 1,
-		wsOK:     r.wsOK,
-		sackOK:   r.sackOK,
-		tsOK:     r.tsOK,
-		peerMSS:  int(r.peerMSS),
-		pmtu:     s.mtu,
-		sndCap:   sendFloor,
-		rcvNxt:   r.irs + 1,
-		rcvCap:   recvFloor,
-		advRight: uint64(r.rcvWnd),
-		tsRecent: r.tsRecent,
-		tsOffset: r.tsOffset,
-		rto:      int64(rtoInit),
-		ssthresh: ^uint32(0),
-		recover:  r.iss,
-		rch:      make(chan struct{}, 1),
-		wch:      make(chan struct{}, 1),
+		state:      stEstablished,
+		tup:        r.tup,
+		iss:        r.iss,
+		irs:        r.irs,
+		sndUna:     r.iss + 1,
+		sndNxt:     r.iss + 1,
+		sndMax:     r.iss + 1,
+		wsOK:       r.wsOK,
+		sackOK:     r.sackOK,
+		tsOK:       r.tsOK,
+		peerMSS:    int(r.peerMSS),
+		pmtu:       s.mtu,
+		sndCap:     sendFloor,
+		rcvNxt:     r.irs + 1,
+		rcvCap:     recvFloor,
+		advRight:   uint64(r.rcvWnd),
+		tsRecent:   r.tsRecent,
+		tsRecentAt: now,
+		tsOffset:   r.tsOffset,
+		rto:        int64(rtoInit),
+		ssthresh:   ^uint32(0),
+		recover:    r.iss,
+		rch:        make(chan struct{}, 1),
+		wch:        make(chan struct{}, 1),
 	}
 	c.lastAckSent = c.rcvNxt
 	if c.wsOK {
@@ -956,7 +957,7 @@ func (c *tcb) toClosed(err error) {
 	// 送信の輪はもう使わない。受信の未読のデータは読ませるために残し、順序外のデータは捨てる
 	c.snd.release()
 	c.unaOff = c.tailOff
-	c.rcv.n = 0
+	c.rcv.clearIntervals()
 	c.rcv.r.retain(c.rcv.readOff, c.rcv.nxtOff)
 	// boost の枠は、boost の大きさの未読のデータを持ちうるので、枠を返すまで持つ
 	s := c.s
@@ -999,7 +1000,7 @@ func (c *tcb) dropResources() {
 	c.s.out.unqueueConn(c.id)
 	c.snd.release()
 	c.rcv.r.release()
-	c.rcv.n = 0
+	c.rcv.clearIntervals()
 	c.releaseBoost()
 	c.recs = recordRing{recs: c.floorRecs}
 	c.rcv.iv = c.floorIv
