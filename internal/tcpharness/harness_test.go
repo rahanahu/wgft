@@ -1,6 +1,7 @@
 package tcpharness
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
 	"reflect"
@@ -177,5 +178,49 @@ func TestSometimesKnown(t *testing.T) {
 		if got := Record(t, e, s, 1); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s outcomes:\n got %v\nwant %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestRetryAfterStall checks Run's rule for a scenario that failed: it runs again only on real
+// time, only after a stall, and at most scenarioAttempts times in all.
+func TestRetryAfterStall(t *testing.T) {
+	for _, c := range []struct {
+		a    attemptResult
+		n    int
+		want bool
+	}{
+		{attemptResult{failed: true, stall: stallLimit}, 1, true},
+		{attemptResult{failed: true, stall: stallLimit}, scenarioAttempts - 1, true},
+		{attemptResult{failed: true, stall: stallLimit}, scenarioAttempts, false},
+		{attemptResult{failed: true, stall: stallLimit - time.Millisecond}, 1, false},
+		{attemptResult{failed: false, stall: time.Second}, 1, false},
+		{attemptResult{failed: true, stall: time.Second, clocked: true}, 1, false},
+	} {
+		if got := c.a.retry(c.n); got != c.want {
+			t.Errorf("retry(%+v, attempt %d) = %v, want %v", c.a, c.n, got, c.want)
+		}
+	}
+
+	// A scenario on real time that fails its first attempt and passes its second passes, and the
+	// DUT of the failed attempt is closed before the second starts.
+	old := stallLimit
+	stallLimit = 0 // every oversleep of the watch counts as a stall
+	t.Cleanup(func() { stallLimit = old })
+	attempts, open := 0, 0
+	e := Engine{Name: "stub-real-time", New: func(tb testing.TB, _ uint64) DUT {
+		open++
+		tb.Cleanup(func() { open-- })
+		return stubRealTime{&stubClocked{}}
+	}}
+	Run(t, e, []Scenario{{Name: "flaky", Run: func(h *H) {
+		attempts++
+		if open != 1 {
+			h.T.Errorf("%d DUTs open in attempt %d", open, attempts)
+		}
+		time.Sleep(3 * time.Millisecond)
+		h.Check("once", attempts > 1, "passes from the second attempt on", fmt.Sprintf("attempt %d", attempts))
+	}}})
+	if attempts != 2 {
+		t.Errorf("the scenario ran %d times, want 2", attempts)
 	}
 }
