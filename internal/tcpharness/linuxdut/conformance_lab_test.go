@@ -21,6 +21,21 @@ var Known = map[string]tcpharness.Known{
 		Reason: "Linux drops a segment that acknowledges unsent bytes without a reply, tcp_ack's ACK_UNSENT_DATA; " +
 			"RFC 9293 3.10.7.4 and wgstack.md answer it with an ACK",
 	},
+	"icmp-frag-needed-source/ignored": {
+		Observed: "applied: largest packet 1000 bytes",
+		Reason: "Linux takes Fragmentation Needed from any router on the path; packet-validation.md accepts an error only " +
+			"from the quoted datagram's destination, since no router sits inside the tunnel",
+	},
+	"icmp-frag-needed-floor/ignored": {
+		Observed: "applied: largest packet 552 bytes",
+		Reason: "Linux sets the path MTU to min_pmtu, 552, and sends without DF; packet-validation.md drops a " +
+			"Fragmentation Needed below 552, so the MTU stays",
+	},
+	"udp-datagram/reply.df-clear": {
+		Observed: "DF set",
+		Reason: "Linux's default IP_PMTUDISC_WANT sets DF on a UDP datagram that fits the path MTU; wgstack.md sends UDP " +
+			"without DF, as gVisor does with path MTU discovery off",
+	},
 	"listener-close/half-open.rst-at-close": {
 		Observed: "no RST at the close",
 		Reason: "Linux drops a closed listener's request sockets without a RST; the final ACK then draws the closed " +

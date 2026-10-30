@@ -1,6 +1,7 @@
 package tcpharness
 
 import (
+	"net"
 	"net/netip"
 	"reflect"
 	"testing"
@@ -40,14 +41,15 @@ type stubClocked struct {
 	ready   [][]byte
 }
 
-func (s *stubClocked) Name() string                    { return "stub" }
-func (s *stubClocked) Addr() netip.Addr                { return DUTAddr }
-func (s *stubClocked) MTU() int                        { return MTU }
-func (s *stubClocked) Inject([]byte) error             { return nil }
-func (s *stubClocked) Emitted() <-chan []byte          { return nil }
-func (s *stubClocked) Listen(uint16) (Listener, error) { return nil, nil }
-func (s *stubClocked) Close() error                    { return nil }
-func (s *stubClocked) Now() time.Time                  { return s.now }
+func (s *stubClocked) Name() string                             { return "stub" }
+func (s *stubClocked) Addr() netip.Addr                         { return DUTAddr }
+func (s *stubClocked) MTU() int                                 { return MTU }
+func (s *stubClocked) Inject([]byte) error                      { return nil }
+func (s *stubClocked) Emitted() <-chan []byte                   { return nil }
+func (s *stubClocked) Listen(uint16) (Listener, error)          { return nil, nil }
+func (s *stubClocked) ListenUDP(uint16) (net.PacketConn, error) { return nil, nil }
+func (s *stubClocked) Close() error                             { return nil }
+func (s *stubClocked) Now() time.Time                           { return s.now }
 func (s *stubClocked) Advance(d time.Duration) {
 	s.now = s.now.Add(d)
 	if s.pkt != nil && !s.now.Before(s.at) {

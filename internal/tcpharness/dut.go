@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// DUT is one TCP engine under test, seen from the tunnel side the way wgft's agent sees it: IPv4
+// DUT is one engine under test, seen from the tunnel side the way wgft's agent sees it: IPv4
 // packets go in and come out, and a passive-open socket API sits on top. A DUT owns one IPv4
 // address and a fixed MTU, and the testbench is the only peer.
 //
@@ -30,6 +30,9 @@ type DUT interface {
 	Emitted() <-chan []byte
 	// Listen opens a TCP listener on the DUT's address and port.
 	Listen(port uint16) (Listener, error)
+	// ListenUDP opens an unconnected UDP socket on the DUT's address and port, the way wgft's
+	// relay receives UDP. Datagrams come from ReadFrom with the sender's *net.UDPAddr.
+	ListenUDP(port uint16) (net.PacketConn, error)
 	// Close releases the engine. Every Listener and Conn of it stops working.
 	Close() error
 }

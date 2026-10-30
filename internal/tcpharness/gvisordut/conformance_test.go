@@ -9,6 +9,15 @@ import (
 // Known lists where wgft's gVisor configuration is known to differ from the scenarios'
 // expectations, which follow the RFCs and the pinned Linux reference.
 var Known = map[string]tcpharness.Known{
+	"icmp-frag-needed-acked/ignored": {
+		Observed: "applied: largest packet 972 bytes",
+		Reason: "gVisor does not check the quoted sequence number of Fragmentation Needed, RFC 5927 4.1; " +
+			"packet-validation.md, the ICMP error ingress, notes this. wgstack checks it",
+	},
+	"icmp-frag-needed-unsent/ignored": {
+		Observed: "applied: largest packet 972 bytes",
+		Reason:   "as icmp-frag-needed-acked/ignored, for a sequence number beyond SND.NXT",
+	},
 	"handshake-mss-floor/mss535.synack": {
 		Observed: "no SYN-ACK",
 		Reason:   "wgft drops SYNs with an MSS below 536 at the TUN ingress on purpose: internal/nettun/ingress.go tcpSynMinMSS",

@@ -11,8 +11,8 @@ import (
 )
 
 // Scenarios is the conformance set, in the order of how much a wrong TCP in wgstack's completion
-// feature set would break the relay. Every scenario is a passive open on IPv4 at the fixed MTU,
-// the only shape of TCP wgft's agent terminates.
+// feature set would break the relay. Every TCP scenario is a passive open on IPv4 at the fixed
+// MTU, the only shape of TCP wgft's agent terminates. The ICMP and UDP families follow.
 var Scenarios = []Scenario{
 	{Name: "handshake-options", Refs: "RFC 9293 3.5 and 3.7.1, RFC 7323 2.2 and 3.2, RFC 2018 2; packetimpact tcp_handshake_window_size", Run: handshakeOptions},
 	{Name: "handshake-bare", Refs: "RFC 9293 3.7.1 MUST-15 default send MSS 536, RFC 7323 2.2 and 3.2, RFC 2018 2", Run: handshakeBare},
@@ -45,6 +45,18 @@ var Scenarios = []Scenario{
 	{Name: "close-ooo-only", Refs: "RFC 9293 3.6, RFC 2525 2.17; wgstack.md: Close with only out-of-order data", Run: closeOOOOnly},
 	{Name: "fin-zero-window", Refs: "RFC 9293 3.8.6.1; wgstack.md: the FIN while the window is 0", Run: finZeroWindow},
 	{Name: "listener-close", Refs: "RFC 9293 3.10.4 and 3.10.7.1; packetimpact tcp_noaccept_close_rst, tcp_listen_backlog", Run: listenerClose},
+	{Name: "icmp-frag-needed", Refs: "RFC 1191, RFC 5927 4.1; wgstack.md, ICMP errors", Run: icmpFragNeeded},
+	{Name: "icmp-frag-needed-acked", Refs: "RFC 5927 4.1; wgstack.md, ICMP errors", Run: icmpFragNeededAcked},
+	{Name: "icmp-frag-needed-unsent", Refs: "RFC 5927 4.1; wgstack.md, ICMP errors", Run: icmpFragNeededUnsent},
+	{Name: "icmp-frag-needed-source", Refs: "packet-validation.md, the ICMP error ingress", Run: icmpFragNeededSource},
+	{Name: "icmp-frag-needed-other-flow", Refs: "RFC 5927 4.1; RFC 1122 3.2.2", Run: icmpFragNeededOtherFlow},
+	{Name: "icmp-frag-needed-floor", Refs: "RFC 1191 3; packet-validation.md, the Fragmentation Needed floor of 552", Run: icmpFragNeededFloor},
+	{Name: "icmp-echo", Refs: "RFC 792, RFC 1122 3.2.2.6; wgstack.md, the echo request over the MTU", Run: icmpEcho},
+	{Name: "udp-datagram", Refs: "RFC 768, RFC 1122 4.1.3; wgstack.md, the DF of sent UDP", Run: udpDatagram},
+	{Name: "udp-large", Refs: "RFC 768, RFC 791 3.2; udp-accounting.md, UDP fragmentation on send", Run: udpLarge},
+	{Name: "udp-reassembly", Refs: "RFC 791 3.2, RFC 815; packet-validation.md, the fragment checks", Run: udpReassembly},
+	{Name: "udp-reassembly-timeout", Refs: "RFC 792, RFC 1122 3.3.2; packet-validation.md, ICMP for fragments", Run: udpReassemblyTimeout},
+	{Name: "udp-closed-port", Refs: "RFC 1122 4.1.3.1; wgstack.md, UDP receive", Run: udpClosedPort},
 }
 
 func pattern(n int, salt byte) []byte {

@@ -101,6 +101,10 @@ func (d *DUT) Listen(port uint16) (tcpharness.Listener, error) {
 	return &listener{l: l}, nil
 }
 
+func (d *DUT) ListenUDP(port uint16) (net.PacketConn, error) {
+	return d.dev.ListenUDP(netip.AddrPortFrom(d.addr, port))
+}
+
 type listener struct{ l *nettun.TCPListener }
 
 func (l *listener) Close() error { return l.l.Close() }
