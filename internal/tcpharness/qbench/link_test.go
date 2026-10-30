@@ -2,9 +2,12 @@
 
 // Package qbench is a rough in-process TCP quality benchmark that compares wgstack with the
 // gVisor netstack in internal/nettun over an impaired in-memory link. It is test-only (every
-// file is a _test.go file behind the qbench build tag) and is run by hand:
+// file is a _test.go file behind the qbench build tag) and is run by hand. plan_test.go holds
+// the measurement plan of docs/design/userspace/wgstack-performance.md, with a routine mode and a
+// gate mode that adds the reference Linux; TestQBench is the older fixed-size transfer.
 //
-//	go test -tags qbench -run TestQBench -timeout 90m -v ./internal/tcpharness/qbench
+//	go test -tags qbench -run TestQBenchRoutine -v ./internal/tcpharness/qbench
+//	go test -tags qbench -run 'TestQBench$' -timeout 90m -v ./internal/tcpharness/qbench
 package qbench
 
 import (
@@ -22,9 +25,10 @@ type Impair struct {
 	Loss        float64       // random loss probability per packet, each direction
 	Reorder     float64       // probability that a packet is held back by ReorderExtra
 	ReorderGap  time.Duration
-	RateBps     int64 // bits per second per direction; 0 means unlimited
-	QueuePkts   int   // drop-tail queue length in packets at the rate limit
-	OutageAfter int64 // payload bytes in the data direction before the outage starts; 0 disables
+	RateBps     int64         // bits per second per direction; 0 means unlimited
+	QueuePkts   int           // drop-tail queue length in packets at the rate limit
+	OutageAfter int64         // payload bytes in the data direction before the outage starts; 0 disables
+	OutageAt    time.Duration // time after the first payload byte in the data direction; 0 disables
 	OutageLen   time.Duration
 	DataDir     int // direction (0: A to B, 1: B to A) whose payload bytes trigger the outage
 }
@@ -75,6 +79,7 @@ type Link struct {
 
 	outStart, outEnd time.Time
 	outCut           bool
+	firstData        time.Time
 
 	st [2]dirStats
 
@@ -156,6 +161,15 @@ func (l *Link) Send(d int, pkt []byte) {
 		if l.imp.OutageAfter > 0 && !l.outCut && d == l.imp.DataDir && s.PayloadBytes >= l.imp.OutageAfter {
 			l.outCut = true
 			l.outStart, l.outEnd = now, now.Add(l.imp.OutageLen)
+		}
+		if l.imp.OutageAt > 0 && !l.outCut && d == l.imp.DataDir {
+			if l.firstData.IsZero() {
+				l.firstData = now
+			}
+			if now.Sub(l.firstData) >= l.imp.OutageAt {
+				l.outCut = true
+				l.outStart, l.outEnd = now, now.Add(l.imp.OutageLen)
+			}
 		}
 	}
 	if l.outCut && !now.Before(l.outStart) && now.Before(l.outEnd) {

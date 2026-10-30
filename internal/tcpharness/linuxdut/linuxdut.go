@@ -85,6 +85,7 @@ func writeSysctl(name, value string) error {
 
 // DUT is one TUN device and the sockets on its address.
 type DUT struct {
+	plain   bool // listening sockets keep the kernel's buffer autotuning
 	tun     *os.File
 	addr    netip.Addr
 	mtu     int
@@ -165,6 +166,46 @@ func configure(addr netip.Addr, mtu int) error {
 	return step("bringing the device up", unix.SIOCSIFFLAGS, func(r *unix.Ifreq) error { r.SetUint16(unix.IFF_UP | unix.IFF_RUNNING); return nil })
 }
 
+// NewPerformance is New for the performance measurements of wgstack-performance.md: listening
+// sockets get no SO_RCVBUF or SO_SNDBUF, which would stop the kernel's buffer autotuning.
+func NewPerformance(addr netip.Addr, mtu int) (*DUT, error) {
+	d, err := New(addr, mtu)
+	if err != nil {
+		return nil, err
+	}
+	d.plain = true
+	return d, nil
+}
+
+// PerformanceSysctls is the reference Linux of wgstack-performance.md's measurement plan: the
+// kernel's defaults for recovery and congestion control, written out so a namespace does not
+// inherit other values, with tcp_no_metrics_save and tcp_ecn fixed and the buffer limits at the
+// 4 MiB of wgstack's boost.
+var PerformanceSysctls = [][2]string{
+	{"net/ipv4/tcp_congestion_control", "cubic"},
+	{"net/ipv4/tcp_sack", "1"},
+	{"net/ipv4/tcp_dsack", "1"},
+	{"net/ipv4/tcp_recovery", "1"},
+	{"net/ipv4/tcp_early_retrans", "3"},
+	{"net/ipv4/tcp_frto", "2"},
+	{"net/ipv4/tcp_moderate_rcvbuf", "1"},
+	{"net/ipv4/tcp_autocorking", "1"},
+	{"net/ipv4/tcp_no_metrics_save", "1"},
+	{"net/ipv4/tcp_ecn", "0"},
+	{"net/ipv4/tcp_rmem", "4096\t131072\t4194304"},
+	{"net/ipv4/tcp_wmem", "4096\t16384\t4194304"},
+}
+
+// PinPerformance writes PerformanceSysctls in the calling network namespace and reads each back.
+func PinPerformance() error {
+	for _, kv := range PerformanceSysctls {
+		if err := writeSysctl(kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Engine is the harness's description of this engine. The seed is not used: the kernel takes
 // its randomness from its own source.
 func Engine(known map[string]tcpharness.Known) tcpharness.Engine {
@@ -240,6 +281,9 @@ func (d *DUT) Close() error {
 // inherit them. Go's accepted connections have TCP_NODELAY set, as wgstack has no Nagle.
 func (d *DUT) Listen(port uint16) (tcpharness.Listener, error) {
 	lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
+		if d.plain {
+			return nil
+		}
 		var serr error
 		err := rc.Control(func(fd uintptr) {
 			if serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, SocketFloor); serr == nil {
