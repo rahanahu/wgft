@@ -31,7 +31,14 @@ wait_agent() { timeout 300 bash -c "$(declare -f inc); $(printf '%q ' inc wait "
 # agent は IP アドレスが付く前に応答するので、起動直後に外と通信するなら別に待つ。
 # 付かなくてもトポロジ(VM 内の netns)には影響しないので、止めずに警告だけ出す
 wait_net() { timeout 120 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$VM" ip --interval 2)" || info "VM に IP アドレスが付かない(外部との通信は失敗する)"; }
-in_vm() { inc exec "$VM" --cwd "$SHARE" -- "$@"; }
+# WGFT_LAB_AGENT_NETSTACK はユーザー空間モードのエージェントの netstack(gvisor か wgstack)を選ぶ。
+# 値があれば VM の中のコマンドに WGFT_AGENT_NETSTACK として渡し、ラボの確認が起動するエージェントがそれを継ぐ。
+# 未設定なら何も渡さず、エージェントは既定の gvisor で動く
+in_vm() {
+  local env=()
+  [[ -n ${WGFT_LAB_AGENT_NETSTACK:-} ]] && env=(--env "WGFT_AGENT_NETSTACK=$WGFT_LAB_AGENT_NETSTACK")
+  inc exec "$VM" "${env[@]}" --cwd "$SHARE" -- "$@"
+}
 
 ensure_running() {
   vm_exists || die "VM '$VM' がない(lab up で作る)"
