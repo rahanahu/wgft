@@ -297,7 +297,8 @@ func (c *tcb) establish(r *synRow, seg *segment, now int64) {
 	if c.floorIv == nil {
 		c.floorIv = make([]interval, floorIntervals)
 	}
-	c.rcv = recvBuf{r: ring{pool: &s.chunks, cap: recvFloor}, iv: c.floorIv}
+	// 区間の木の優先度の種は接続ごとの秘密で、相手が木の形を選べないようにする
+	c.rcv = recvBuf{r: ring{pool: &s.chunks, cap: recvFloor}, iv: c.floorIv, seed: uint64(s.randomN(1 << 62))}
 	if c.floorRecs == nil {
 		c.floorRecs = make([]record, floorRecords)
 	}
