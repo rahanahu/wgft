@@ -172,6 +172,10 @@ func runTx(t *testing.T, cfg txCfg) {
 			}
 		case r < 45: // DUT の出力を網へ
 			for _, o := range n.drain() {
+				// 送り直しも含めて、DUT は SND.MAX より先のデータを送らない
+				if e := o.seg.seq + uint32(len(o.seg.payload)); seqGT(e, c.c.sndMax) {
+					t.Fatalf("seed %d: segment %v ends past SND.MAX", cfg.seed, o)
+				}
 				if o.seg.has(flagRST) {
 					t.Fatalf("seed %d: DUT sent RST %v (rcvOff %d of %d)", cfg.seed, o, rcvOff, cfg.length)
 				}
@@ -211,6 +215,9 @@ func runTx(t *testing.T, cfg txCfg) {
 			a := acks[i]
 			acks = append(acks[:i], acks[i+1:]...)
 			n.inject(a)
+			if c.c.gen == gen && c.c.state != stFree && c.c.state != stClosed {
+				checkScoreboard(t, c.c)
+			}
 		case r < 88 && cfg.boost:
 			n.d.s.tryBoost(c.c, gen, boostSend)
 			c.c.mu.Lock()

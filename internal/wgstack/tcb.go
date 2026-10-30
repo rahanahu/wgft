@@ -104,7 +104,23 @@ type tcbState struct {
 	persist           bool // 再送のタイマーを窓の probe に使っている
 	probesOut         int
 
-	// 輻輳の制御(RFC 5681、RFC 6582)
+	// SACK の scoreboard(scoreboard.go)
+	sackGen, rtxGen uint8
+	sacked          uint32
+	beyondBytes     uint32
+	beyondCnt       int32
+	lossIdx         int32
+	rxtIdx          int32
+	rxtOff          uint32
+	highSack        uint32
+	rxtMid          bool
+	rtxBytes        uint32
+	prrDelivered    uint32 // PRR(RFC 6937)
+	prrOut          uint32
+	recoverFS       uint32
+	scoreSteps      uint64 // 試験だけが読む scoreboard の手間の数
+
+	// 輻輳の制御(RFC 5681、RFC 6582、RFC 6675、RFC 6937)
 	cwnd, ssthresh uint32
 	recover        uint32
 	inRecovery     bool
@@ -456,12 +472,20 @@ func (c *tcb) processAck(seg *segment, now int64) {
 		c.sndWnd, c.sndWl1, c.sndWl2 = w, seg.seq, ack
 		c.maxSndWnd = max(c.maxSndWnd, w)
 	}
-	c.checkSACK(seg)
+	var delivered uint32
 	switch {
 	case seqGT(ack, c.sndUna):
+		delivered = ack - c.sndUna
 		c.newAck(seg, ack, now)
 	case ack == c.sndUna && len(seg.payload) == 0 && !seg.has(flagFIN) && !wndChanged && c.sndMax != c.sndUna:
 		c.dupAck(now)
+	}
+	if c.state == stFree || c.state == stClosed {
+		return
+	}
+	delivered += c.markSACK(seg)
+	if c.sackOK {
+		c.sackAfterAck(delivered)
 	}
 	if c.sndWnd > 0 && c.persist {
 		c.persist = false
@@ -476,16 +500,6 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	}
 }
 
-// checkSACK は受けた SACK の block を検査するだけで、回復には使わない(RFC 2018 は送り手が使わないことを
-// 許す。設計文書の「完成に含める機能」)。
-func (c *tcb) checkSACK(seg *segment) {
-	for _, b := range seg.opt.sack[:seg.opt.nsack] {
-		if !seqLT(b.left, b.right) || seqLT(b.left, c.sndUna-c.maxSndWnd) || seqGT(b.right, c.sndMax) {
-			return
-		}
-	}
-}
-
 // newAck は累積の確認を進める ACK を処理する。
 func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 	acked := ack - c.sndUna
@@ -494,31 +508,36 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 	old := c.unaOff
 	c.unaOff += dataAcked
 	c.snd.trim(old, c.unaOff, c.tailOff)
-	c.sndUna = ack
-	if seqLT(c.sndNxt, ack) {
-		c.sndNxt = ack
-	}
-	// 記録を外し、timestamp が無ければ再送していない記録で RTT を測る(Karn)
+	// 記録を外し、timestamp が無ければ再送していない記録で RTT を測る(Karn)。この ACK が再送した記録を
+	// 1 つでも確認したら測らない(Linux の FLAG_RETRANS_DATA_ACKED)。記録は RTO の後も残るので、再送を待つ間に
+	// 届いていた元の segment で測ると、穴が埋まるまでの時間を RTT に含めてしまう。欄の更新は記録を外す前に
+	// 古い SND.UNA で行う
 	var sample int64 = -1
+	rtxAcked := false
 	for c.recs.n > 0 {
 		r := c.recs.at(0)
 		end := r.seq + uint32(r.length)
 		if seqGT(end, ack) {
 			if seqLT(r.seq, ack) {
-				d := ack - r.seq
-				r.seq = ack
-				r.length -= uint16(d)
+				c.trimHead(r, ack-r.seq)
 			}
 			break
 		}
 		if r.flags&recRetransmitted == 0 {
 			sample = now - r.sentAt
+		} else {
+			rtxAcked = true
 		}
+		c.dropHead(r)
 		c.recs.pop()
+	}
+	c.sndUna = ack
+	if seqLT(c.sndNxt, ack) {
+		c.sndNxt = ack
 	}
 	if c.tsOK && seg.opt.hasTS && seg.opt.tsEcr != 0 {
 		c.tsRTTSample(seg.opt.tsEcr, now)
-	} else if sample >= 0 {
+	} else if sample >= 0 && !rtxAcked {
 		c.rttSample(sample)
 	}
 	c.backoff = 0
@@ -527,9 +546,16 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 	flight := c.sndMax - c.sndUna
 	if c.inRecovery {
 		if seqGE(ack, c.recover) {
-			// 回復の終わり(RFC 6582 3.2 の 3)
+			// 回復の終わり。SACK では RFC 6937 の cwnd = ssthresh、SACK が無ければ RFC 6582 3.2 の 3
 			c.inRecovery = false
-			c.cwnd = min(c.ssthresh, max(flight, mss)+mss)
+			if c.sackOK {
+				c.cwnd = c.ssthresh
+			} else {
+				c.cwnd = min(c.ssthresh, max(flight, mss)+mss)
+			}
+		} else if c.sackOK {
+			// SACK による回復の部分の確認。再送は NextSeg が選び、窓は PRR が決める
+			c.s.partialAcks.Add(1)
 		} else {
 			// 部分の確認(RFC 6582 3.2 の 5):次の穴を再送し、確認された分だけ窓を縮め、1 SMSS 以上を
 			// 確認したら SMSS を足し戻す
@@ -559,6 +585,7 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 			c.disarm(tmrRetrans)
 		} else {
 			c.arm(tmrRetrans, now+c.curRTO())
+			c.renegeTimer(now)
 		}
 	}
 	if c.finAcked() {
@@ -578,6 +605,9 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 func (c *tcb) dupAck(now int64) {
 	c.s.dupAcksIn.Add(1)
 	c.dupAcks++
+	if c.sackOK {
+		return // 回復に入るかは sackAfterAck が決める
+	}
 	mss := uint32(c.segMSS())
 	if c.inRecovery {
 		c.cwnd += mss
@@ -689,7 +719,8 @@ func (c *tcb) enterTimeWait(now int64) {
 }
 
 // pmtuDrop は Fragmentation Needed による PMTU の引き下げ(RFC 1191)。引用された番号が SND.UNA から
-// SND.NXT の範囲にあるときだけ受け入れる(RFC 5927)。送り残しは小さな segment で送り直す。
+// SND.NXT の範囲にあるときだけ受け入れる(RFC 5927)。送り残しは小さな segment で送り直す。SND.NXT は
+// 再送で戻さないので、いつも SND.MAX と等しい。
 func (c *tcb) pmtuDrop(seq uint32, mtu int, now int64) {
 	if !seqGE(seq, c.sndUna) || !seqLT(seq, c.sndNxt) {
 		c.s.icmpDropped.Add(1)
@@ -699,10 +730,9 @@ func (c *tcb) pmtuDrop(seq uint32, mtu int, now int64) {
 		return
 	}
 	c.pmtu = mtu
-	if c.sndNxt != c.sndUna {
-		c.sndNxt = c.sndUna
-		c.resendCause = rtxPMTU
-		c.recs.reset()
+	if c.sndMax != c.sndUna {
+		// 記録の境目は保ち、SACK 済みでない記録を損失にして新しい大きさの segment で送り直す
+		c.markAllLost(rtxPMTU)
 	}
 	c.afterInput(now)
 }
@@ -720,7 +750,8 @@ func (c *tcb) afterInput(now int64) {
 		c.s.out.queueConn(c.id)
 	}
 	// 窓が 0 で送るものがあり、確認を待つものが無ければ窓の probe を張る
-	if c.sndWnd == 0 && !c.persist && c.sndNxt == c.sndUna && c.hasUnsent() && c.state != stClosed {
+	// 送り残しの量が 0 の間だけ張る。RTO の後に失われた記録だけが残る間は、送り直しを待つ記録も送るものに数える
+	if c.sndWnd == 0 && !c.persist && c.pipe() == 0 && c.hasUnsent() && c.state != stClosed {
 		// 確認を待つものが無いので、前の RTO の起点と後退を持ち越さない。持ち越すと、相手が probe に
 		// 応え続けた長い persist の後の最初の RTO で、再送の打ち切りの時間を過ぎたと数える
 		c.persist = true
@@ -731,8 +762,11 @@ func (c *tcb) afterInput(now int64) {
 	}
 }
 
-// hasUnsent は、未送信のデータか未送信の FIN があるかを返す。
+// hasUnsent は、未送信のデータか未送信の FIN か、送り直しを待つ失われた記録があるかを返す。
 func (c *tcb) hasUnsent() bool {
+	if c.nextResend() >= 0 {
+		return true
+	}
 	if seqLT(c.sndNxt, c.dataEndSeq()) {
 		return true
 	}
@@ -926,6 +960,11 @@ func (c *tcb) onRTO(now int64) {
 	if !c.inRecovery && c.dupAcks > 0 && c.dupAcks < 3 {
 		c.s.rtosShortOfDupThresh.Add(1)
 	}
+	// SACK の取り消し:先頭の記録が SACK 済みのままか、同じ SND.UNA で 2 回目の RTO なら、相手が SACK 済みの
+	// データを捨てたとみなす(Linux の tcp_timeout_mark_lost と wgstack-performance.md の「scoreboard の記録の扱い」)
+	if c.sackOK && (c.backoff > 0 || (c.recs.n > 0 && c.isSacked(c.recs.at(0)))) && c.sacked > 0 {
+		c.clearSACK()
+	}
 	mss := uint32(c.segMSS())
 	if c.backoff == 0 {
 		flight := c.sndMax - c.sndUna
@@ -937,9 +976,8 @@ func (c *tcb) onRTO(now int64) {
 	c.inRecovery = false
 	c.dupAcks = 0
 	c.backoff++
-	c.sndNxt = c.sndUna
-	c.resendCause = rtxRTO
-	c.recs.reset()
+	// 記録は消さずに残し、SACK 済みでない記録を損失にして SND.UNA から順に送り直す(RFC 6675 5.1 節)
+	c.markAllLost(rtxRTO)
 	c.arm(tmrRetrans, now+c.curRTO())
 	if c.s.trace != nil {
 		c.traceEvent(TraceRTO, now)

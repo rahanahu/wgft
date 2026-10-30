@@ -24,6 +24,8 @@ type TraceEvent struct {
 	Cwnd          uint32
 	Ssthresh      uint32
 	Flight        uint32 // SND.MAX - SND.UNA
+	Pipe          uint32 // RFC 6675 の pipe
+	Sacked        uint32 // SACK 済みの byte
 	SndUna        uint32
 	SndNxt        uint32
 	SndMax        uint32
@@ -67,6 +69,8 @@ func (c *tcb) traceEvent(kind TraceKind, now int64) {
 		Cwnd:       c.cwnd,
 		Ssthresh:   c.ssthresh,
 		Flight:     c.sndMax - c.sndUna,
+		Pipe:       c.pipe(),
+		Sacked:     c.sacked,
 		SndUna:     c.sndUna,
 		SndNxt:     c.sndNxt,
 		SndMax:     c.sndMax,

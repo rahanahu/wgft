@@ -131,6 +131,7 @@ type counters struct {
 	fastRecoveries, partialAcks               atomic.Uint64
 	retrans                                   [numRtxCauses]atomic.Uint64
 	dupAcksIn, acksDelayed, acksImmediate     atomic.Uint64
+	sackReneging                              atomic.Uint64
 
 	mssGate, synGate, acceptGate, twGate, ctlGate, oooGate gate
 }

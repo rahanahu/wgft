@@ -253,7 +253,7 @@ boost は今と同じくプロセスで 16 本の枠から予約し、得られ�
 - 送信のバッファ:予約した容量の byte の輪です。
   中身は累積の確認で外し、SACK で確認された分も累積の確認まで保持します。
   再送はこの輪から segment を作り直します
-- 送信の記録:送った segment ごとに、開始の番号、長さ、送った時刻、印(再送、後の段階の SACK 済みと損失)を持つ固定の容量の輪です。
+- 送信の記録:送った segment ごとに、開始の番号、長さ、送った時刻、印(再送、SACK 済み、生きている再送)、SACK の scoreboard の欄を持つ固定の容量の輪です([scoreboard の記録の扱い](wgstack-performance.md#scoreboard-の記録の扱い))。
   記録は、後の段階の RACK が送った時刻の順にたどるための list の節も今から持ちます。
   容量は送信のバッファの予約を、送り残しを分ける大きさの下限の 472 byte([TCP の MSS の下限](packet-validation.md#tcp-の-mss-の下限))で割った数です。
   記録の輪が満杯なら、確認で空くまで新しい segment を送りません
@@ -461,12 +461,14 @@ M_wgstack = M_fix
 初期の値は動作を確かめるための値であり、最適値として探した値ではありません。
 どの値も設定項目にしません。
 
-linux/amd64 の build で測った大きさは、c_conn が 4,864 byte、記録 1 件が 24 byte、区間 1 つが 12 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
-既定の K の 2048 では、Device の `Bound` が返す項の和は約 1,465 MiB です。
-内訳は M_fix が約 21.6 MiB、floor の項が約 1,319.8 MiB、boost の項が約 123.7 MiB です。
+linux/amd64 の build で測った大きさは、c_conn が 4,928 byte、記録 1 件が 32 byte、区間 1 つが 12 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
+記録 1 件は、性能の段階の SACK の scoreboard の欄で 24 byte から 32 byte になりました([ACK 1 つの手間の上界](wgstack-performance.md#ack-1-つの手間の上界))。
+既定の K の 2048 では、Device の `Bound` の `Total` は約 1,490 MiB で、そのうち TCP の項の和は約 1,477 MiB です。
+内訳は M_fix が約 21.8 MiB、floor の項が約 1,330.6 MiB、boost の項が約 124.7 MiB です。
+送信の記録は floor の項に約 43.4 MiB、boost の項に約 4.1 MiB を加えます。
 区間の表は floor の項に約 7.2 MiB、boost の項に約 0.7 MiB を加えます。
 M_fix は核の構造(事象の数と観測の関数を含みます)、接続の枠、3 つの hash の表、行の表、空きの list、タイマーの節、出力の list、制御の輪、chunk の置き場に残す 1 MiB を数えます。
-本番の大きさの表(K は 256)で 256 本の接続に floor いっぱいの受信のデータを持たせた試験では、生きているヒープの増加は約 83.8 MB で、会計が数えた chunk、記録、M_fix の和の約 84.7 MB に収まりました。
+本番の大きさの表(K は 256)で 256 本の接続に floor いっぱいの受信のデータを持たせた試験(記録 1 件が 24 byte だった完成の段階の測定)では、生きているヒープの増加は約 83.8 MB で、会計が数えた chunk、記録、M_fix の和の約 84.7 MB に収まりました。
 今のエージェントの上界の式では、カーネルモードの `vpsd` の後ろで、TCP の待ち受け 1 つごとに accept の待ち行列の項(約 1,790 MiB)が加わります([エージェントとホストのメモリの条件](memory-agent-host.md#accept-の待ち行列))。
 wgstack の accept の待ち行列は Device 全体で Q 本なので、この式に待ち受けの数に比例する項はありません。
 
@@ -551,13 +553,13 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
 - MSS:相手の MSS に従い、MSS の option の無い SYN では 536 を使います。
   入口の[MSS の下限](packet-validation.md#tcp-の-mss-の下限)と、Fragmentation Needed による PMTU の引き下げ(下限 552)を持ちます。
   自分が示す MSS は MTU から 40 byte を引いた値です
-- 輻輳の制御:RFC 5681 の slow start と輻輳の回避、RFC 6582 の NewReno の高速の再送と回復を持ちます。
+- 輻輳の制御:RFC 5681 の slow start と輻輳の回避を持ちます。
+  SACK を交渉した接続は RFC 6675 の SACK による回復と RFC 6937 の PRR、交渉しない接続は RFC 6582 の NewReno の高速の再送と回復を使い、どちらも RFC 3042 の Limited Transmit を持ちます([SACK による回復](wgstack-performance.md#sack-による回復))。
   初期の輻輳の窓は Linux と同じ 10 segment(RFC 6928)にし、黙った後の窓は RFC 5681 の 4.1 節に従って戻します。
   SYN か SYN-ACK を再送した接続の初期の窓は、RFC 5681 の 3.1 節と Linux と同じく 1 segment です
 - SACK:握手で SACK を交渉し、受け手として区間の表から SACK の block を返します。
   D-SACK(RFC 2883)は返しません。
-  送り手としては受け取った SACK の block を検査するだけで、回復には使いません。
-  RFC 2018 は送り手が SACK の情報を使わないことを許すので、後の段階で送り手の側だけを足せます
+  送り手としては受け取った SACK の block で送信の記録に印を付け、回復に使います
 - 窓の probe:相手の窓が 0 の間は persist のタイマーで probe を送り、相手が probe に応える間は打ち切りません。
   persist に入るときと persist の間の ACK で、再送の打ち切りを数える起点と RTO の後退を消します。
   前の RTO の起点が残ると、長い persist の後の最初の RTO で打ち切りの時間を過ぎたと数えるためです
@@ -600,10 +602,8 @@ ECN は交渉しません。
 
 次の機能は完成に含めず、性能の段階で加えます。
 
-- SACK による損失の回復(RFC 2018、RFC 6675):送信の記録の輪の印を scoreboard にします。
-  印を付けるのは SACK の block が全体を覆う記録だけです。
-  ACK 1 つの印付けと次に送る segment の選択(RFC 6675 の NextSeg)は、前回の位置の手がかりを持って、送り残しの記録の数に比例しない手間に均します。
-  均せない場合は、中身の無い ACK の予算([中身の無い ACK の予算](packet-validation.md#中身の無い-ack-の予算))を wgstack に戻すことを、その時に判断します
+- SACK による損失の回復(RFC 2018、RFC 6675):性能の段階で実装しました。
+  扱いは[SACK による回復](wgstack-performance.md#sack-による回復)に従います
 - RACK-TLP(RFC 8985):送信の記録の輪の送った時刻と、記録が今から持つ送った時刻の順の list の節を使います。
   最小の RTT を持つ欄は、RTT の推定の構造に今から置きます
 - D-SACK(RFC 2883):受け手として返す側を加えます
