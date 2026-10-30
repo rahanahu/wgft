@@ -24,24 +24,43 @@ import (
 	"github.com/rahanahu/wgft/internal/tcpharness/linuxdut"
 )
 
-// newLinux is the reference Linux DUT: a TUN device in the test's network namespace, which must
-// be one the process can configure, with the kernel's TCP on its sockets. TestQBenchGate and
-// TestQBenchRoutine re-run themselves in such a namespace when the linux engine is asked for.
+// newLinux is the reference Linux DUT: a TUN device with the kernel's TCP on its sockets, in a
+// network namespace of its own with the pinned sysctls, so runs can go on at once and none
+// inherits another's sockets or route state. The namespace lives on one locked OS thread, as the
+// Linux client's does, and the listening socket is made there. The test's own namespace must be
+// one the process can configure: TestQBenchGate and TestQBenchRoutine re-run themselves in such
+// a namespace when the linux engine is asked for.
 func newLinux() (*DUT, error) {
-	d, err := linuxdut.NewPerformance(dutAddr, mtu)
+	ns, err := newNetnsThread()
 	if err != nil {
+		return nil, err
+	}
+	var d *linuxdut.DUT
+	if err := ns.do(func() error {
+		if err := linuxdut.PinPerformance(); err != nil {
+			return err
+		}
+		var err error
+		d, err = linuxdut.NewPerformance(dutAddr, mtu)
+		return err
+	}); err != nil {
+		ns.stop()
 		return nil, err
 	}
 	rs := &rtoSampler{}
 	return &DUT{Name: "linux", Dev: newTunAdapter(d),
 		Listen: func(p uint16) (Listener, error) {
-			l, err := d.Listen(p)
-			if err != nil {
+			var l tcpharness.Listener
+			if err := ns.do(func() error {
+				var err error
+				l, err = d.Listen(p)
+				return err
+			}); err != nil {
 				return nil, err
 			}
 			return linuxListener{l}, nil
 		},
-		Close:    func() { rs.stop(); d.Close() },
+		Close:    func() { rs.stop(); d.Close(); ns.stop() },
 		OnAccept: rs.start,
 		RTOAt:    rs.at,
 		RTOErr:   rs.lastErr,
