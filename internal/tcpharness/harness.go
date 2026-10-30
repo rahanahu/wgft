@@ -33,6 +33,11 @@ const SeedEnv = "WGFT_TEST_TCPHARNESS_SEED"
 type Known struct {
 	Observed string
 	Reason   string
+	// Sometimes marks a difference that a real-time engine shows on some runs and not on others,
+	// because it turns on timing the testbench does not control. A run without it is then logged
+	// as a pass, not reported as an unexpected one. A ClockedDUT runs the same way every time, so
+	// on one an entry with Sometimes is itself an error.
+	Sometimes bool
 }
 
 // Engine names one TCP engine and how to build a fresh DUT of it. New gets the scenario's seed;
@@ -204,9 +209,15 @@ func (h *H) Check(id string, ok bool, what, got string) bool {
 	case ok && !known:
 		h.outcome[key] = append(h.outcome[key], OutcomePass)
 		h.T.Logf("PASS  %s: %s; got: %s", key, what, got)
+	case ok && known && k.Sometimes && !h.clocked():
+		h.outcome[key] = append(h.outcome[key], OutcomePass)
+		h.T.Logf("PASS  %s: %s; got: %s; the known difference, which shows only on some runs, did not show on this one", key, what, got)
 	case ok && known:
 		h.outcome[key] = append(h.outcome[key], OutcomeUnexpected)
 		h.T.Errorf("UNEXPECTED PASS  %s on %s: %s; got: %s; the list says: %s; remove the entry", key, h.engine.Name, what, got, k.Observed)
+	case !ok && known && k.Sometimes && h.clocked():
+		h.outcome[key] = append(h.outcome[key], OutcomeChanged)
+		h.T.Errorf("CHANGED DIFFERENCE  %s on %s: %s; got: %s; the list marks it as shown only on some runs, which a DUT on the harness's clock cannot be", key, h.engine.Name, what, got)
 	case !ok && known && got == k.Observed:
 		h.outcome[key] = append(h.outcome[key], OutcomeKnown)
 		h.T.Logf("KNOWN DIFFERENCE  %s on %s: %s; got: %s; reason: %s", key, h.engine.Name, what, got, k.Reason)
@@ -231,6 +242,12 @@ func (h *H) Require(id string, ok bool, what, got string) {
 		h.T.SkipNow()
 	}
 	h.T.FailNow()
+}
+
+// clocked reports whether the DUT runs on the harness's clock.
+func (h *H) clocked() bool {
+	_, ok := h.DUT.(ClockedDUT)
+	return ok
 }
 
 // Measure reports a value for the comparison tables. It asserts nothing.

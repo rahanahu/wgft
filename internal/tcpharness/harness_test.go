@@ -145,3 +145,37 @@ func TestKnownDifferences(t *testing.T) {
 		t.Fatalf("outcomes:\n got %v\nwant %v", got, want)
 	}
 }
+
+// stubRealTime is stubClocked seen only through DUT, without its clock: a DUT on real time.
+type stubRealTime struct{ DUT }
+
+// TestSometimesKnown checks a difference listed as shown only on some runs: on real time both a
+// pass and the listed difference are accepted, a changed difference still fails, and on a
+// ClockedDUT the entry is an error either way.
+func TestSometimesKnown(t *testing.T) {
+	known := map[string]Known{
+		"s/shown":     {Observed: "dropped", Reason: "timing", Sometimes: true},
+		"s/not-shown": {Observed: "dropped", Reason: "timing", Sometimes: true},
+		"s/changed":   {Observed: "dropped", Reason: "timing", Sometimes: true},
+	}
+	s := Scenario{Name: "s", Run: func(h *H) {
+		h.Check("shown", false, "answered", "dropped")
+		h.Check("not-shown", true, "answered", "answered")
+		h.Check("changed", false, "answered", "reset")
+	}}
+	for _, c := range []struct {
+		name string
+		dut  func() DUT
+		want map[string][]string
+	}{
+		{"real-time", func() DUT { return stubRealTime{&stubClocked{}} }, map[string][]string{
+			"s/shown": {OutcomeKnown}, "s/not-shown": {OutcomePass}, "s/changed": {OutcomeChanged}}},
+		{"clocked", func() DUT { return &stubClocked{} }, map[string][]string{
+			"s/shown": {OutcomeChanged}, "s/not-shown": {OutcomeUnexpected}, "s/changed": {OutcomeChanged}}},
+	} {
+		e := Engine{Name: c.name, New: func(testing.TB, uint64) DUT { return c.dut() }, Known: known}
+		if got := Record(t, e, s, 1); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s outcomes:\n got %v\nwant %v", c.name, got, c.want)
+		}
+	}
+}

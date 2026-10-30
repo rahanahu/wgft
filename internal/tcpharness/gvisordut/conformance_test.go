@@ -83,9 +83,12 @@ var Known = map[string]tcpharness.Known{
 	},
 	"tlp-tail-loss/recovers-before-rto": {
 		Observed: "recovered at the RTO floor plus one RTT or later",
-		Reason: "gVisor sends the tail loss probe at about 2 SRTT, but probeTimerExpired calls postXmit(dataSent, false), " +
-			"which arms the RTO rather than RACK's reorder timer, so after the probe's SACK the other tail segment is " +
-			"resent only at the RTO, about 200 ms later: gVisor's tcp/rack.go",
+		Reason: "gVisor's RACK ignores the ACK of a retransmission whose RTT is below its minimum RTT, and takes that minimum " +
+			"from data ACKs only, not from the handshake: update in gVisor's tcp/rack.go. On this path the probe's ACK comes " +
+			"back after the same 50 ms as the flight's, so a sub-millisecond difference decides. When the sample is ignored, " +
+			"the probe's SACK marks nothing lost and the other tail segment waits for the RTO, about 200 ms after the probe; " +
+			"otherwise RACK resends it at once and recovery ends about 145 ms after the ACK, as it did in 4 of 12 runs",
+		Sometimes: true,
 	},
 	"paws/old.dupack": {
 		Observed: "ACK of base+4",

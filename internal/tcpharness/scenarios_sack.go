@@ -48,7 +48,7 @@ func flightOf(h *H, p *Peer, c Conn, size, n int, salt byte) ([]Segment, []byte)
 	if _, err := c.Write(data); err != nil {
 		h.T.Fatalf("write: %v", err)
 	}
-	segs, sent := burst(p)
+	segs, sent := burstUntil(p, len(data))
 	h.Require("flight", sent == len(data) && len(segs) >= n, fmt.Sprintf("the %d bytes leave in one initial burst of at least %d segments", len(data), n),
 		fmt.Sprintf("%d bytes in %d segments", sent, len(segs)))
 	return segs, data
@@ -56,11 +56,18 @@ func flightOf(h *H, p *Peer, c Conn, size, n int, salt byte) ([]Segment, []byte)
 
 // burst collects the new data segments the DUT sends until it pauses for 30 ms. A segment that
 // repeats earlier bytes, such as gVisor's tail loss probe on a near-zero RTT, is left out.
-func burst(p *Peer) ([]Segment, int) {
+func burst(p *Peer) ([]Segment, int) { return burstUntil(p, 0) }
+
+// burstUntil is burst, but it returns as soon as n bytes of new data are in, when n is above 0.
+// A scenario that emulates a path delay answers the flight then, not 30 ms later: the pause would
+// lengthen the RTT the DUT sees on that flight past the one it measured on the handshake, and on
+// a loaded machine let the tail loss probe, due about 2 SRTT after the flight, fire before the
+// answer arrives.
+func burstUntil(p *Peer, n int) ([]Segment, int) {
 	var segs []Segment
 	sent := 0
 	high := p.RcvNxt
-	for {
+	for n <= 0 || sent < n {
 		s, ok := p.Await(30*time.Millisecond, isData)
 		if !ok {
 			return segs, sent
@@ -73,6 +80,7 @@ func burst(p *Peer) ([]Segment, int) {
 		sent += len(s.Payload)
 		high = s.Seq + uint32(len(s.Payload))
 	}
+	return segs, sent
 }
 
 // dataEnd is the sequence number after the last byte of data written from r's base.
@@ -226,12 +234,29 @@ func sackMultiHole(h *H) {
 	w.informed, w.informedTS = true, p.TSVal()
 	p.Send(r.ack(p.TSRecent))
 	dupacks(r, segs, arriving(segs, 1, 3, 5)...) // the second, fourth and sixth segments are lost
-	collect(p, h.Prompt()+50*time.Millisecond, w, r)
-	all := w.has(segs[1].Seq) && w.has(segs[3].Seq) && w.has(segs[5].Seq)
+	holes := func() bool { return w.has(segs[1].Seq) && w.has(segs[3].Seq) && w.has(segs[5].Seq) }
+	// the time the last hole arrived, not the end of the watch, which ends 150 ms after start
+	var allAt time.Time
+	deadline := h.Now().Add(h.Prompt() + 50*time.Millisecond)
+	for {
+		s, ok := p.Next(max(deadline.Sub(h.Now()), 0))
+		if !ok {
+			break
+		}
+		w.note(s)
+		r.take(s)
+		if allAt.IsZero() && holes() {
+			allAt = h.Now()
+		}
+	}
+	all := !allAt.IsZero()
 	h.Check("all-holes-in-one-round", all, "the three holes are resent before any new cumulative ACK",
 		fmt.Sprintf("holes resent: %v %v %v", w.has(segs[1].Seq), w.has(segs[3].Seq), w.has(segs[5].Seq)))
-	h.Check("before-rto", all && h.Now().Sub(start) < 180*time.Millisecond, "the holes are resent before an RTO could fire",
-		yesNo(all && h.Now().Sub(start) < 180*time.Millisecond, "before 180 ms", "not before 180 ms"))
+	if all {
+		h.Measure("holes-resent_ms", allAt.Sub(start).Milliseconds())
+	}
+	h.Check("before-rto", all && allAt.Sub(start) < 180*time.Millisecond, "the holes are resent before an RTO could fire",
+		yesNo(all && allAt.Sub(start) < 180*time.Millisecond, "before 180 ms", "not before 180 ms"))
 	ok := finish(p, r, w, dataEnd(r, data), 2*time.Second)
 	h.Check("completes", ok, "everything is acknowledged within 2 s", yesNo(ok, "complete", "incomplete"))
 	before := len(w.seen)

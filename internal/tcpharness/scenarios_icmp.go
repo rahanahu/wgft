@@ -89,6 +89,9 @@ func pmtuFlight(h *H, port uint16) (*Peer, Conn, []Segment) {
 	l := h.Listen(port)
 	p, _, c := h.Connect(l, port, StandardSYN())
 	segs, _ := flight(h, p, c, 4, byte(port))
+	// The handshake's RTT is near zero, so a tail loss probe may follow the flight at once; it is
+	// taken here, before the error, and not counted as a packet sent after it.
+	burst(p)
 	p.RcvNxt = segs[1].Seq + uint32(len(segs[1].Payload))
 	p.SendAck()
 	return p, c, segs

@@ -393,3 +393,36 @@ func TestHarnessCatchesResendAtSecondDupack(t *testing.T) {
 	got := tcpharness.Record(t, mutant("gvisor-dupthresh-2", resendAtDupack(2)), scenario(t, "limited-transmit-rack"), 1)
 	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomeFail)
 }
+
+// A sender with no reorder window resends the late segment at the first SACK.
+func TestHarnessCatchesResendWithinTheReorderWindow(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-no-reorder-window", resendAtDupack(1)), scenario(t, "rack-reorder"), 1)
+	wantOutcome(t, got, "rack-reorder/within-window.no-retransmit", tcpharness.OutcomeFail)
+}
+
+// delayResends holds every data segment that repeats a sequence number already sent for delay,
+// as a sender that resends a lost segment only on its probe or its RTO would be late.
+func delayResends(delay time.Duration) func(tcpharness.DUT) tcpharness.DUT {
+	return func(inner tcpharness.DUT) tcpharness.DUT {
+		d := &delayedACKs{DUT: inner, out: make(chan []byte, 1024)}
+		go func() {
+			defer close(d.out)
+			sent := map[uint32]bool{}
+			for pkt := range inner.Emitted() {
+				if s, err := tcpharness.Parse(pkt); err == nil && len(s.Payload) > 0 {
+					if sent[s.Seq] {
+						time.Sleep(delay)
+					}
+					sent[s.Seq] = true
+				}
+				d.out <- pkt
+			}
+		}()
+		return d
+	}
+}
+
+func TestHarnessCatchesLateRACKResend(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-late-resend", delayResends(150*time.Millisecond)), scenario(t, "rack-reorder"), 1)
+	wantOutcome(t, got, "rack-reorder/beyond-window.resent-early", tcpharness.OutcomeFail)
+}
