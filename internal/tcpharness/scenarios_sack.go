@@ -11,6 +11,19 @@ import (
 // pinned configuration, in which SACK is on and RACK, TLP and F-RTO are off, so its recovery is
 // RFC 6675's duplicate-threshold rule with PRR.
 
+// sackRTT is the handshake RTT of the SACK family. A minimum RTT above zero gives a RACK sender a
+// reorder window above zero: with a zero window and a clock too coarse to order the segments of
+// one burst, as on Windows, gVisor's RACK marks segments sent in the same tick as the latest
+// SACKed one lost, and resends segments a later ACK of the same burst SACKs.
+const sackRTT = 20 * time.Millisecond
+
+// sackConnect opens a connection for the SACK family, with its handshake RTT.
+func sackConnect(h *H, l Listener, port uint16) (*Peer, Conn) {
+	h.T.Helper()
+	p, _, c := h.ConnectWith(l, port, Dial{SYN: StandardSYN(), AckDelay: sackRTT})
+	return p, c
+}
+
 // segSize is the payload the DUT puts in a full segment to p: MSS less the timestamps option.
 func segSize(p *Peer) int {
 	n := MTU - 40
@@ -192,7 +205,7 @@ func intact(h *H, r *receiver, data []byte) {
 func sackMultiHole(h *H) {
 	const port = 8030
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	segs, data := flight(h, p, c, 9, 0xa1)
 	start := h.Now()
@@ -225,7 +238,7 @@ func sackMultiHole(h *H) {
 func sackRTOKeepsSACKed(h *H) {
 	const port = 8031
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	segs, data := flight(h, p, c, 8, 0xa2)
 	r := newReceiver(p)
@@ -263,7 +276,7 @@ func sackRTOKeepsSACKed(h *H) {
 func sackRTOIslands(h *H) {
 	const port = 8035
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	// 13400 bytes: ten segments on every engine, gVisor's 1340-byte segments included
 	segs, data := flightOf(h, p, c, 10*1340, 10, 0xa6)
@@ -298,7 +311,7 @@ func sackPMTUSplit(h *H) {
 	const port = 8032
 	const newMTU = 1000
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	segs, data := flight(h, p, c, 8, 0xa3)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	r := newReceiver(p)
@@ -366,7 +379,7 @@ func sackPMTUSplit(h *H) {
 func sackRenege(h *H) {
 	const port = 8033
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	segs, data := flight(h, p, c, 8, 0xa4)
 	r := newReceiver(p)
