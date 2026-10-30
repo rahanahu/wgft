@@ -524,6 +524,9 @@ func (c *tcb) timeWaitInput(seg *segment, now int64, reuse *reuseISS) bool {
 // processAck は ACK の欄を処理する(RFC 9293、RFC 5681、RFC 6582)。
 func (c *tcb) processAck(seg *segment, now int64) {
 	ack := seg.ack
+	if c.hystartOn() {
+		c.hs.sndNxt, c.hs.sndNxtOK = c.sendableEnd(), true // この ACK の前の SND.NXT(lazyegress.go)
+	}
 	c.probesOut = 0
 	if c.persist {
 		c.retransStart = 0 // 相手は probe に応えている
@@ -573,6 +576,9 @@ func (c *tcb) processAck(seg *segment, now int64) {
 			c.tlpAt = 0
 		}
 		c.rearmRetrans()
+	}
+	if advanced {
+		c.noteDrainedWithData(now)
 	}
 	if c.sndWnd > 0 && c.persist {
 		c.persist = false
