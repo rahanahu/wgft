@@ -55,7 +55,7 @@ func Check(opts Options, out io.Writer) error {
 		fmt.Fprintln(out, "nft check: not used in userspace mode; rules are relayed by the wgft process")
 	} else if !root {
 		fmt.Fprintln(out, "nft check: skipped because not root; run sudo wgft server check")
-	} else if rep, err := linux.Inspect(opts.WGInterface, nft.TableName); err != nil {
+	} else if rep, err := linux.Inspect(opts.WGInterface, nft.TableName, linux.ForwardToTunnel); err != nil {
 		fmt.Fprintf(out, "nft check: cannot run: %v\n", err)
 	} else if len(rep.Findings) == 0 {
 		fmt.Fprintln(out, "nft check: no problems")
