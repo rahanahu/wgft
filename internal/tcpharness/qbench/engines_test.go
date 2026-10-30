@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
 	"time"
 
@@ -74,10 +75,17 @@ func newGvisor() (*DUT, error) {
 		Close:  func() { d.Close(); d.Wait() }}, nil
 }
 
-// Client is gVisor's netstack from wireguard-go, which dials.
+// Client is the side that dials: gVisor's netstack from wireguard-go by default, or the Linux
+// kernel in a network namespace of its own (newLinuxClient).
 type Client struct {
-	Dev tun.Device
-	Net *netstack.Net
+	Name  string
+	Dev   tun.Device
+	dial  func(ctx context.Context) (net.Conn, error)
+	close func()
+	// RTOAt, when set, returns the client's RTO in use at a moment, as DUT.RTOAt does: the
+	// sender's RTO in the cells where the DUT receives.
+	RTOAt  func(at time.Time) time.Duration
+	RTOErr func() error
 }
 
 func newClient() (*Client, error) {
@@ -85,11 +93,25 @@ func newClient() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{Dev: dev, Net: n}, nil
+	return &Client{Name: "gvisor", Dev: dev,
+		dial: func(ctx context.Context) (net.Conn, error) {
+			return n.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(dutAddr, port))
+		},
+		close: func() { dev.Close() },
+	}, nil
 }
 
-func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
-	return c.Net.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(dutAddr, port))
+func (c *Client) Dial(ctx context.Context) (net.Conn, error) { return c.dial(ctx) }
+
+// clientFor builds the client a rig asks for.
+func clientFor(name string) (*Client, error) {
+	switch name {
+	case "", "gvisor":
+		return newClient()
+	case "linux":
+		return newLinuxClient()
+	}
+	return nil, fmt.Errorf("unknown client %q", name)
 }
 
 // pump reads packets a device emits and hands them to send until the device closes.
@@ -114,15 +136,20 @@ func writeTo(dev tun.Device) func([]byte) {
 
 // Rig is one client, one DUT and the link between them.
 type Rig struct {
-	C  *Client
-	D  *DUT
-	L  *Link
-	wg sync.WaitGroup
+	C     *Client
+	D     *DUT
+	L     *Link
+	wg    sync.WaitGroup
+	trace *os.File
 }
 
-// newRig joins client (direction 0 leaves the client) and DUT.
-func newRig(engine string, imp Impair, seed int64) (*Rig, error) {
-	c, err := newClient()
+// tracePath, when set, is where the next rig writes its link's packet log: QBENCH_TRACE names a
+// directory, and runCell names a file in it for each run.
+var tracePath string
+
+// newRig joins a client of the given kind (direction 0 leaves the client) and DUT.
+func newRig(engine, client string, imp Impair, seed int64) (*Rig, error) {
+	c, err := clientFor(client)
 	if err != nil {
 		return nil, err
 	}
@@ -138,21 +165,33 @@ func newRig(engine string, imp Impair, seed int64) (*Rig, error) {
 		err = fmt.Errorf("unknown engine %q", engine)
 	}
 	if err != nil {
-		c.Dev.Close()
+		c.close()
 		return nil, err
 	}
 	r := &Rig{C: c, D: d}
 	r.L = NewLink(imp, seed, writeTo(d.Dev), writeTo(c.Dev))
+	if tracePath != "" {
+		f, err := os.Create(tracePath)
+		if err != nil {
+			r.Close()
+			return nil, err
+		}
+		r.trace = f
+		r.L.SetTrace(f)
+	}
 	pump(c.Dev, func(p []byte) { r.L.Send(0, p) }, &r.wg)
 	pump(d.Dev, func(p []byte) { r.L.Send(1, p) }, &r.wg)
 	return r, nil
 }
 
 func (r *Rig) Close() {
-	r.C.Dev.Close()
+	r.C.close()
 	r.D.Close()
 	r.wg.Wait()
 	r.L.Close()
+	if r.trace != nil {
+		r.trace.Close()
+	}
 }
 
 var _ = time.Second

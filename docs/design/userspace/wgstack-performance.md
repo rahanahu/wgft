@@ -479,7 +479,11 @@ CUBIC、RACK-TLP、SACK、D-SACK、F-RTO、受信のバッファの自動調整�
 今は、DUT が受ける向きの途絶の場合 2 つ(`recv/outage2s` と `thin-recv/outage2s`)を判定から外しています。
 この 2 つでは qbench の相手の gVisor が送り手になり、qbench はその RTO を読めません。
 また、相手の gVisor は通信量の少ない stream を送ると途絶の後に DUT によらず数秒止まるので、2 つの場合の値は相手の挙動を測ります。
-別の相手、例えばラボの Linux の client を使えるようになるまで、この扱いを続けます。
+`QBENCH_CLIENT=linux` を与えると、DUT が受ける向きの場合は、自分の network namespace に置いた Linux の client が送ります。
+この場合は送り手の RTO を `TCP_INFO` で読めるので、2 つの場合も判定します。
+場合の名前には `/linux-client` が付き、gVisor の client の値とは別の参照になります。
+Linux の client はラボの VM の network namespace の中でだけ動くので、関門の行列で受ける向きの場合を Linux の client に替えるかは、日常の行列の扱いと合わせて所有者が決めます。
+決まるまでは今の扱いを続けます。
 最大と最小の比が 2 を超える場合は、前述のとおり判定せずに診断して流し直します。
 
 ### 種と参照の値

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -28,6 +29,11 @@ import (
 //	go test -tags qbench -run TestQBenchRoutine -v ./internal/tcpharness/qbench
 //	go test -c -tags qbench -o bin/qbench.test ./internal/tcpharness/qbench
 //	lab VM, as root: QBENCH_COMMIT=<commit> QBENCH_WRITE_REF=/var/tmp/qref/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//
+// QBENCH_CLIENT=linux has a Linux client send in the cells where the DUT receives, from a network
+// namespace of its own, so the lab VM only. QBENCH_TRACE=<dir> writes each run's packet log there,
+// one line per TCP packet the link carries: times, direction, fate, flags, numbers, window, SACK
+// blocks and timestamps.
 //
 // Writing the reference needs the commit: the test reads it with git, which a lab VM's share of a
 // worktree does not have, so pass QBENCH_COMMIT from the host, for example
@@ -50,6 +56,8 @@ type Cell struct {
 	Len     time.Duration
 	// NotJudged, when set, says why the cell is measured but not judged.
 	NotJudged string
+	// Client is the dialing side's engine: "" for gVisor's netstack, or "linux".
+	Client string
 }
 
 // The run lengths. A thin-stream run is longer than a bulk one, so 5 routine runs pool at least
@@ -133,8 +141,8 @@ type Run struct {
 }
 
 // open builds the rig, connects and accepts.
-func open(engine string, imp Impair, seed int64) (*Rig, net.Conn, net.Conn, error) {
-	rig, err := newRig(engine, imp, seed)
+func open(engine, client string, imp Impair, seed int64) (*Rig, net.Conn, net.Conn, error) {
+	rig, err := newRig(engine, client, imp, seed)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("setup: %w", err)
 	}
@@ -198,14 +206,19 @@ func impair(c Cell) Impair {
 // runCell measures one run of c on engine.
 func runCell(engine string, c Cell, seed int64) (r Run) {
 	r = Run{Engine: engine, Cell: c.Name, Seed: seed, Recovery: -1, RTO: -1}
-	rig, cc, dc, err := open(engine, impair(c), seed)
+	tracePath = ""
+	if dir := os.Getenv("QBENCH_TRACE"); dir != "" {
+		tracePath = filepath.Join(dir, fmt.Sprintf("%s_%s_%d.tsv", engine, strings.NewReplacer("/", "_", "%", "pct").Replace(c.Name), seed))
+	}
+	rig, cc, dc, err := open(engine, c.Client, impair(c), seed)
 	if err != nil {
 		r.Err = err.Error()
 		return
 	}
 	defer rig.Close()
-	defer cc.Close()
-	defer dc.Close()
+	// a kernel socket closed with data left keeps sending, into the next run's rig
+	defer abort(cc)
+	defer abort(dc)
 	snd, rcv := cc, dc
 	if c.DUTSend {
 		snd, rcv = dc, cc
@@ -227,13 +240,18 @@ func runCell(engine string, c Cell, seed int64) (r Run) {
 		}
 		r.Stall = max(r.Stall, b.Sub(a))
 	}
-	if c.DUTSend && !oe.IsZero() && rig.D.RTOAt != nil {
-		r.RTO = rig.D.RTOAt(oe)
-		if r.RTO <= 0 && engine == "linux" && r.Err == "" {
-			// the judgment needs Linux's RTO; a run without it must not pass as measured
+	// the sender's RTO at the outage's end: the DUT's where it sends, the client's where it receives
+	rtoAt, rtoErr, kernel := rig.D.RTOAt, rig.D.RTOErr, engine == "linux"
+	if !c.DUTSend {
+		rtoAt, rtoErr, kernel = rig.C.RTOAt, rig.C.RTOErr, rig.C.Name == "linux"
+	}
+	if !oe.IsZero() && rtoAt != nil {
+		r.RTO = rtoAt(oe)
+		if r.RTO <= 0 && kernel && r.Err == "" {
+			// the judgment needs the kernel sender's RTO; a run without it must not pass as measured
 			r.Err = "no TCP_INFO RTO sample before the outage's end"
-			if rig.D.RTOErr != nil && rig.D.RTOErr() != nil {
-				r.Err += "; the last TCP_INFO read: " + rig.D.RTOErr().Error()
+			if rtoErr != nil && rtoErr() != nil {
+				r.Err += "; the last TCP_INFO read: " + rtoErr().Error()
 			}
 		}
 	}
@@ -244,6 +262,19 @@ func runCell(engine string, c Cell, seed int64) (r Run) {
 		r.Stats = rig.D.Stats(oe)
 	}
 	return
+}
+
+// abort closes c with a RST where the engine offers it, and closes it otherwise.
+func abort(c net.Conn) {
+	switch a := c.(type) {
+	case interface{ Abort() error }:
+		a.Abort()
+	case interface{ Abort() }:
+		a.Abort()
+	case *net.TCPConn:
+		a.SetLinger(0)
+	}
+	c.Close()
 }
 
 // runBulk sends the seeded stream for c.Len after the handshake and counts what the receiver
@@ -612,9 +643,15 @@ func dur(d time.Duration) string {
 }
 
 func printRun(r Run) {
-	fmt.Printf("QBENCH-RUN engine=%s cell=%s seed=%d bytes=%d mbps=%.2f verified=%v recovery=%s rto=%s stall=%s samples=%d lost=%d retrans=%d/%d qdrop=%d err=%q\n",
+	p99 := "-"
+	if len(r.Lat) > 0 {
+		l := append([]time.Duration(nil), r.Lat...)
+		sort.Slice(l, func(i, j int) bool { return l[i] < l[j] })
+		p99 = dur(quantile(l, 0.99))
+	}
+	fmt.Printf("QBENCH-RUN engine=%s cell=%s seed=%d bytes=%d mbps=%.2f verified=%v recovery=%s rto=%s stall=%s samples=%d p99=%s lost=%d retrans=%d/%d qdrop=%d err=%q\n",
 		r.Engine, r.Cell, r.Seed, r.Bytes, r.Mbps, r.Verified, dur(r.Recovery), dur(r.RTO),
-		r.Stall.Round(time.Millisecond), len(r.Lat), r.Lost, r.Retrans, r.DataPkts, r.QDrops, r.Err)
+		r.Stall.Round(time.Millisecond), len(r.Lat), p99, r.Lost, r.Retrans, r.DataPkts, r.QDrops, r.Err)
 	if r.Stats != "-" {
 		fmt.Printf("QBENCH-STATS engine=%s cell=%s seed=%d %s\n", r.Engine, r.Cell, r.Seed, r.Stats)
 	}
@@ -659,6 +696,28 @@ func has(list []string, s string) bool {
 }
 
 func cellFilter(cells []Cell) []Cell {
+	return withClient(nameFilter(cells), os.Getenv("QBENCH_CLIENT"))
+}
+
+// withClient gives the cells in which the DUT receives the client named by QBENCH_CLIENT. With the
+// Linux client the sender's RTO is the kernel's and can be read, so the receiving outage cells are
+// judged. The cells' names say the client, since their values differ from the gVisor client's.
+func withClient(cells []Cell, client string) []Cell {
+	if client == "" || client == "gvisor" {
+		return cells
+	}
+	out := append([]Cell(nil), cells...)
+	for i := range out {
+		if !out[i].DUTSend {
+			out[i].Client = client
+			out[i].Name += "/" + client + "-client"
+			out[i].NotJudged = ""
+		}
+	}
+	return out
+}
+
+func nameFilter(cells []Cell) []Cell {
 	only := os.Getenv("QBENCH_CELLS")
 	if only == "" {
 		return cells
@@ -700,7 +759,7 @@ func TestQBenchRoutine(t *testing.T) {
 	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
 		engines = strings.Split(v, ",")
 	}
-	if has(engines, "linux") && !inNetns(t) {
+	if (has(engines, "linux") || os.Getenv("QBENCH_CLIENT") == "linux") && !inNetns(t) {
 		return
 	}
 	pinLinux(t, engines)
@@ -737,7 +796,7 @@ func TestQBenchGate(t *testing.T) {
 	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
 		engines = strings.Split(v, ",")
 	}
-	if has(engines, "linux") && !inNetns(t) {
+	if (has(engines, "linux") || os.Getenv("QBENCH_CLIENT") == "linux") && !inNetns(t) {
 		return
 	}
 	where := pinLinux(t, engines)
