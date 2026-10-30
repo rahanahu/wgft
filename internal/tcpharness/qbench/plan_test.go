@@ -642,6 +642,13 @@ type Verdict struct {
 // 0.99 of the binding line, so a cell where every engine fills the link does not fail on noise.
 const throughputTolerance = 0.99
 
+// throughputLinuxFactor is the share of Linux's Mbit/s that wgstack must reach; the line is
+// max(throughputLinuxFactor x Linux, gVisor).
+const throughputLinuxFactor = 0.9
+
+// factorText is the factor as the verdict rules print it.
+var factorText = strconv.FormatFloat(throughputLinuxFactor, 'f', -1, 64)
+
 // judge applies the rule of c's kind to wgstack's summary against gVisor's and Linux's.
 func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 	if c.NotJudged != "" {
@@ -687,10 +694,10 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 			return judgePaired(ratios, wg, gv, lx)
 		}
 		// without per-seed values, as in a reference stored before they were: the medians,
-		// 0.8 x Linux, or gVisor's value where gVisor is above it
-		line, rule := 0.8*lx.Mbps, "Mbit/s >= 0.99 x 0.8 x Linux; gVisor is below"
+		// the factor x Linux, or gVisor's value where gVisor is above it
+		line, rule := throughputLinuxFactor*lx.Mbps, "Mbit/s >= 0.99 x "+factorText+" x Linux; gVisor is below"
 		if haveG && gv.Mbps > line {
-			line, rule = gv.Mbps, "Mbit/s >= 0.99 x gVisor; gVisor is above 0.8 x Linux"
+			line, rule = gv.Mbps, "Mbit/s >= 0.99 x gVisor; gVisor is above "+factorText+" x Linux"
 		}
 		v = Verdict{Rule: rule, Value: wg.Mbps, Line: line}
 		v.Result = yes(v.Value >= throughputTolerance*v.Line)
@@ -708,7 +715,7 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 const minPairs = 5
 
 // pairedRatios is, for each seed that wgstack, Linux and, when it was measured, gVisor all
-// finished, wgstack's Mbit/s over that seed's line, max(0.8 x Linux, gVisor). Each ratio comes
+// finished, wgstack's Mbit/s over that seed's line, max(factor x Linux, gVisor). Each ratio comes
 // from one seed's triple of runs, so resampling the ratios resamples the triples together. The engines run
 // the same seeds, so a seed's loss pattern is the same for all three, and the ratio leaves out
 // the spread that comes from how many losses a seed draws.
@@ -724,7 +731,7 @@ func pairedRatios(wg, gv, lx Summary, haveG bool) []float64 {
 		if !ok {
 			continue
 		}
-		line := 0.8 * l
+		line := throughputLinuxFactor * l
 		if haveG {
 			g, ok := gv.PerSeed[k]
 			if !ok {
@@ -746,7 +753,7 @@ func pairedRatios(wg, gv, lx Summary, haveG bool) []float64 {
 func judgePaired(ratios []float64, wg, gv, lx Summary) Verdict {
 	med := medianF(ratios)
 	lo, hi := medianInterval(ratios)
-	v := Verdict{Rule: "per-seed wgstack / max(0.8 x Linux, gVisor), median and 95% interval vs 0.99", Value: med, Line: throughputTolerance}
+	v := Verdict{Rule: "per-seed wgstack / max(" + factorText + " x Linux, gVisor), median and 95% interval vs 0.99", Value: med, Line: throughputTolerance}
 	switch {
 	case wg.OK < wg.Runs || lx.OK < lx.Runs || gv.OK < gv.Runs:
 		v.Result = "UNDETERMINED: a run failed, diagnose and rerun"
@@ -1257,17 +1264,17 @@ func TestJudgeRules(t *testing.T) {
 		return Summary{Runs: len(vals), OK: len(vals), Mbps: medianF(vals), PerSeed: m}
 	}
 	lxS := seeded(4, 2, 6, 3, 5, 4, 2, 6)              // Linux's spread is 3, as at 1% loss
-	gvS := seeded(3, 1, 4, 2, 4, 3, 1, 4)              // below 0.8 x Linux on every seed
+	gvS := seeded(3, 1, 4, 2, 4, 3, 1, 4)              // below 0.9 x Linux on every seed
 	pass := seeded(4, 2, 6, 3, 5, 4, 2, 6)             // equal to Linux seed by seed
-	fail := seeded(3, 1.5, 4.5, 2.2, 3.7, 3, 1.5, 4.5) // about 0.75 x Linux, 0.94 of the line
+	fail := seeded(3, 1.5, 4.5, 2.2, 3.7, 3, 1.5, 4.5) // about 0.75 x Linux, 0.83 of the line
 	if v := judge(bulkC, pass, gvS, lxS, true, true); v.Result != "PASS" {
 		t.Errorf("wgstack equal to Linux per seed, with spreads of 3: %q, want PASS", v.Result)
 	}
 	if v := judge(bulkC, fail, gvS, lxS, true, true); v.Result != "FAIL" {
 		t.Errorf("wgstack at 0.75 x Linux per seed: %q, want FAIL", v.Result)
 	}
-	// ratios to 0.8 x Linux of 0.9 to 1.1 around 0.99
-	mixed := seeded(2.88, 1.76, 4.56, 2.52, 3.88, 3.264, 1.472, 5.184)
+	// ratios to 0.9 x Linux of 0.9 to 1.1 around 0.99
+	mixed := seeded(3.24, 1.98, 5.13, 2.835, 4.365, 3.672, 1.656, 5.832)
 	if v := judge(bulkC, mixed, gvS, lxS, true, true); !strings.HasPrefix(v.Result, "UNDETERMINED") || !near(v) {
 		t.Errorf("wgstack around the line: %q, doubling %v; want UNDETERMINED and doubling", v.Result, near(v))
 	}
