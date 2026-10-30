@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"runtime"
 	"runtime/metrics"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -24,6 +25,13 @@ func checkHeld(t testing.TB, n *testNet) Stats {
 	if held := st.ChunkBytes + st.RecordBytes + st.IntervalBytes; held > b.FloorConn+b.Boost {
 		t.Fatalf("held buffers %d exceed the bound %d", held, b.FloorConn+b.Boost)
 	}
+	tm := terms()
+	if b.FloorConn != int64(len(s.conns))*tm.floor() || b.Boost != int64(len(s.pool.slots))*tm.boost() {
+		t.Fatalf("Bound does not use the slot terms: floor %d boost %d, terms %+v", b.FloorConn, b.Boost, tm)
+	}
+	if st.Boosted > len(s.pool.slots) {
+		t.Fatalf("%d boosted connections with %d boost slots", st.Boosted, len(s.pool.slots))
+	}
 	if st.UDPRxBytes > udpRxBytes || st.UDPRxDatagrams > udpRxDatagrams || st.UDPTxBytes > udpTxBytes || st.UDPTxDatagrams > udpTxDatagrams ||
 		int64(st.FragBytes) > b.Frag || st.PingEndpoints > pingEndpoints {
 		t.Fatalf("UDP, reassembly or ping beyond the bound: %+v", st)
@@ -34,11 +42,14 @@ func checkHeld(t testing.TB, n *testNet) Stats {
 	for i := range s.conns {
 		c := &s.conns[i]
 		c.mu.Lock()
+		// 空きの枠の輪は chunk を持たない(持てば置き場の会計の比べで分かる)
+		var sndHeld, rcvHeld int64
 		if c.state != stFree {
-			if got := uint64(c.snd.heldChunks()) * chunkSize; got > c.sndCap {
+			sndHeld, rcvHeld = int64(c.snd.heldChunks()), int64(c.rcv.r.heldChunks())
+			if got := uint64(sndHeld) * chunkSize; got > c.sndCap {
 				t.Errorf("conn %d send ring holds %d > %d", i, got, c.sndCap)
 			}
-			if got := uint64(c.rcv.r.heldChunks()) * chunkSize; got > c.rcvCap {
+			if got := uint64(rcvHeld) * chunkSize; got > c.rcvCap {
 				t.Errorf("conn %d receive ring holds %d > %d", i, got, c.rcvCap)
 			}
 			if c.tailOff-c.unaOff > c.sndCap || c.rcv.rightmost()-c.rcv.readOff > max(c.rcvCap, c.advRight-c.rcv.readOff) {
@@ -47,6 +58,20 @@ func checkHeld(t testing.TB, n *testNet) Stats {
 			if c.rcv.n > len(c.rcv.iv) || c.recs.n > len(c.recs.recs) {
 				t.Errorf("conn %d intervals %d records %d", i, c.rcv.n, c.recs.n)
 			}
+		}
+		// 枠ごとに、向きごとの予約(か持つ chunk)と配列を、その枠の項と比べる。floor の配列は空きの枠も持つ
+		recs, ivs := c.arrayBytes()
+		snd := max(ringBytes(int64(c.sndCap)), sndHeld*chunkHeap()) + recs
+		rcv := max(ringBytes(int64(c.rcvCap)), rcvHeld*chunkHeap()) + ivs
+		sndLim, rcvLim := tm.fs+tm.rf, tm.fr+tm.hf
+		if c.boosted && c.state != stFree {
+			sndLim += tm.ds + tm.drec
+		}
+		if c.rcvBoost && c.state != stFree {
+			rcvLim += tm.dr + tm.dh
+		}
+		if snd > sndLim || rcv > rcvLim {
+			t.Errorf("slot %d holds send %d of %d, receive %d of %d (boosted %v %v)", i, snd, sndLim, rcv, rcvLim, c.boosted, c.rcvBoost)
 		}
 		c.mu.Unlock()
 	}
@@ -338,6 +363,32 @@ func TestBoundOutputStall(t *testing.T) {
 	n.drain()
 }
 
+// TestBoundCountsBoostedSlot は、両方の向きの boost を持つ接続 1 本の予約、記録の輪、区間の表を、枠 1 つの
+// floor の項と枠 1 つの集まりの boost の項の和と比べる。boost の間も floor の記録の輪と区間の表は枠に残るので、
+// boost の項が floor との差で数えると、この和を超える。
+func TestBoundCountsBoostedSlot(t *testing.T) {
+	n := newTestNetPool(t, smallLimits(), newBoostPool(1))
+	l := listen(t, n, 80)
+	p := n.handshake(40000, 80, true, false, true)
+	c := acceptOne(t, l)
+	p.sendBulk(demandBytes)
+	readN(t, c, demandBytes)
+	cs := &n.d.s.conns[c.c.id]
+	if !cs.boosted || !cs.rcvBoost || len(cs.recs.recs) != boostRecords || len(cs.rcv.iv) != boostIntervals {
+		t.Fatalf("not boosted in both directions: boosted %v rcvBoost %v records %d intervals %d", cs.boosted, cs.rcvBoost, len(cs.recs.recs), len(cs.rcv.iv))
+	}
+	st := n.d.Stats()
+	b := n.d.Bound()
+	if st.Conns != 1 || st.Boosted != 1 {
+		t.Fatalf("conns %d boosted %d", st.Conns, st.Boosted)
+	}
+	slot := b.FloorConn / int64(n.d.s.lim.conns())
+	held := st.Reserved + st.RecordBytes + st.IntervalBytes
+	if held > slot+b.Boost {
+		t.Fatalf("a boosted slot holds %d bytes of reservation, records and intervals; the bound counts %d (floor %d, boost %d)", held, slot+b.Boost, slot, b.Boost)
+	}
+}
+
 func TestCloseReturnsEverything(t *testing.T) {
 	pool := newBoostPool(boostSlots)
 	n := newTestNetPool(t, smallLimits(), pool)
@@ -359,18 +410,112 @@ func TestCloseReturnsEverything(t *testing.T) {
 	}
 }
 
+// liveHeap は GC の後の生きているヒープの byte を返す。
+func liveHeap() int64 {
+	runtime.GC()
+	s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	metrics.Read(s)
+	return int64(s[0].Value.Uint64())
+}
+
+// quietHeap は liveHeap を数回測った最小を返す。finalizer を持つ object は 2 回目の GC で消えるので、
+// 1 回の GC の後には前の試験の残りが含まれる。
+func quietHeap() int64 {
+	m := liveHeap()
+	for range 3 {
+		m = min(m, liveHeap())
+	}
+	return m
+}
+
+// boostFull は接続を 1 本作り、両方の向きの boost を持たせて送信と受信の輪を満たす。
+func boostFull(t *testing.T, n *testNet, l *TCPListener, port uint16) (*Conn, *peerConn) {
+	t.Helper()
+	p := n.handshake(port, 80, true, false, true)
+	// 待ち行列に接続があるので Accept は待たない。acceptOne の goroutine とタイマーを測る範囲に入れない
+	nc, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := nc.(*Conn)
+	p.sendBulk(demandBytes)
+	readN(t, c, demandBytes)
+	p.absorb(n.drain())
+	p.wnd = 0
+	p.ack(nil)
+	// 窓が閉じているので、送信の輪をちょうど満たす書き込みは送らずに戻る
+	if k, err := c.Write(make([]byte, boostSize)); k != boostSize || err != nil {
+		t.Fatalf("Write to a closed window: %d, %v", k, err)
+	}
+	p.sendBulk(boostSize)
+	cs := &n.d.s.conns[c.c.id]
+	if !cs.boosted || !cs.rcvBoost || cs.snd.heldChunks()*chunkSize != boostSize || cs.rcv.r.heldChunks()*chunkSize != boostSize {
+		t.Fatalf("port %d: boosted %v %v, send ring %d, receive ring %d chunks", port, cs.boosted, cs.rcvBoost, cs.snd.heldChunks(), cs.rcv.r.heldChunks())
+	}
+	return c, p
+}
+
+// osThreads は runtime が作った OS の thread の数を返す。
+func osThreads() int64 {
+	s := []metrics.Sample{{Name: "/sched/threads/total:threads"}}
+	metrics.Read(s)
+	return int64(s[0].Value.Uint64())
+}
+
+// threadRuntime は runtime が新しい thread 1 つに確保する構造(m、g0、signal の g、profile の stack)の見積もり。
+// linux/amd64 の Go 1.27 で約 5.5 KiB を測った。上界の式の外のランタイムの費用である。
+const threadRuntime = 8 << 10
+
+// TestHeapWithinBoundBoosted は、k 本の接続に両方の向きの boost を持たせて送信と受信の輪を満たし、生きて
+// いるヒープの増加を、その k 本の枠の floor の項と boost の項と枠の外のランタイムの構造の和と比べる。
+// 配列はヒープが切り上げた大きさで持つので、長さと要素の大きさの積で数えた項はこの和を超える。
+func TestHeapWithinBoundBoosted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates 8 MiB for each boosted connection")
+	}
+	tm := terms()
+	// 測る前に同じ操作を別の Device で 1 回行い、ランタイムが一度だけ広げる構造(タイマーの heap など)を
+	// 先に広げておく。前の試験が残したタイマーの数によって、広げる量が変わるため
+	{
+		n := newTestNetPool(t, smallLimits(), newBoostPool(1))
+		boostFull(t, n, listen(t, n, 80), 39999)
+		n.d.Close()
+	}
+	for _, k := range []int{1, 4, 16} {
+		t.Run(strconv.Itoa(k), func(t *testing.T) {
+			n := newTestNetPool(t, smallLimits(), newBoostPool(k))
+			l := listen(t, n, 80)
+			threads := osThreads()
+			before := quietHeap()
+			conns := make([]*Conn, 0, k)
+			peers := make([]*peerConn, 0, k)
+			for i := range k {
+				c, p := boostFull(t, n, l, uint16(40000+i))
+				conns, peers = append(conns, c), append(peers, p)
+			}
+			after := quietHeap()
+			// 測る間に runtime が thread を作れば、その構造は式の外なので除く。試験の側の相手の構造(peerConn は
+			// 240 byte)と、1 度だけ広がる構造(chunk の置き場の空きの list、runtime のタイマーの heap)も除く
+			rt := max(0, osThreads()-threads) * threadRuntime
+			harness := int64(k)*512 + 4<<10
+			bound := int64(k) * (tm.floor() + tm.boost() + slotRuntime)
+			t.Logf("%d boosted connections: live heap grew by %d bytes; the slot terms count %d; new threads' runtime %d, test harness %d", k, after-before, bound, rt, harness)
+			if after-before-rt-harness > bound {
+				t.Errorf("live heap grew by %d bytes, beyond the %d the slot terms count with %d of new threads and %d of test harness", after-before, bound, rt, harness)
+			}
+			runtime.KeepAlive(conns)
+			runtime.KeepAlive(peers)
+		})
+	}
+}
+
 // TestHeapWithinBound は、本番の大きさの表を持つ Device に接続を満たしたときの生きているヒープを
 // runtime/metrics で測り、上界の式の値と比べる。差は Go のランタイムの費用で、記録であり保証ではない。
 func TestHeapWithinBound(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocates the production-sized tables")
 	}
-	heap := func() int64 {
-		runtime.GC()
-		s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
-		metrics.Read(s)
-		return int64(s[0].Value.Uint64())
-	}
+	heap := liveHeap
 	before := heap()
 	lim := defaultLimits(256)
 	clk := NewManualClock()

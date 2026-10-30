@@ -53,6 +53,9 @@ func (l limits) conns() int { return l.maxFlows + l.acceptQ } // N_c = K + Q
 // 待ち行列を守る。ある接続の処理が別の接続に触れるとき(boost の回収)は、自分の錠を離してから相手の錠を
 // TryLock で取る。
 type stack struct {
+	boundOnce sync.Once // Bound の値(stats.go)。表の大きさは作成の時に決まる
+	boundVal  Bound
+
 	lim    limits
 	mtu    int
 	local  []netip.Prefix // 受け付ける宛先の集合
