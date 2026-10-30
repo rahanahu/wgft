@@ -50,6 +50,7 @@ func gen(seed int64) *rand.Rand { return rand.New(rand.NewSource(seed)) }
 func runOne(engine string, c Case, seed int64, size int64, limit time.Duration) (res Result) {
 	res = Result{Engine: engine, Case: c.Name, Seed: seed, Want: size, Recovery: -1}
 	imp := Impair{Delay: 25 * time.Millisecond, Loss: c.Loss, RateBps: int64(envInt("QBENCH_RATE_MBIT", 20)) * 1_000_000, QueuePkts: envInt("QBENCH_QUEUE_PKTS", 200)}
+	imp.LossModel, _ = envLossModel()
 	dataDir := 0
 	if c.DUTSend {
 		dataDir = 1
@@ -238,6 +239,7 @@ func engines() []string {
 }
 
 func TestQBench(t *testing.T) {
+	checkLossModel(t)
 	runs := envInt("QBENCH_RUNS", 3)
 	size := int64(envInt("QBENCH_MIB", 8)) << 20
 	limit := time.Duration(envInt("QBENCH_LIMIT_S", 150)) * time.Second
