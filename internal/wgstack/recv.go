@@ -38,10 +38,15 @@ func (b *recvBuf) rightmost() uint64 {
 // empty は、順序どおりの未読のデータも順序外のデータも持たないかを返す。
 func (b *recvBuf) empty() bool { return b.nxtOff == b.readOff && b.n == 0 }
 
-// setIntervals は区間の表を iv に移す。呼び出し側は b.n <= len(iv) を保証する。
-func (b *recvBuf) setIntervals(iv []interval) {
+// setIntervals は区間の表を iv に移し、移せたかを返す。使っている区間が iv に入らなければ、区間を切り捨てずに
+// 今の表を持ち続けて偽を返す。切り捨てると b.n が表の長さを超え、次の insert が表の外を指す。
+func (b *recvBuf) setIntervals(iv []interval) bool {
+	if b.n > len(iv) {
+		return false
+	}
 	copy(iv, b.iv[:b.n])
 	b.iv = iv
+	return true
 }
 
 // insertResult は insert の結果。
