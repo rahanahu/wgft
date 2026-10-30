@@ -478,10 +478,14 @@ func (p *Peer) SendFreshAck() uint32 {
 	return p.lastTS
 }
 
-// QuietSince is Quiet, but it passes over segments whose TSecr is older than ts: segments the DUT
-// sent before it had the segment that carried ts, such as a tail loss probe that a slow testbench
-// let fire before its ACK arrived. It returns how many it passed over.
+// QuietSince is Quiet, but it passes over one segment whose TSecr is older than ts: a segment
+// the DUT sent before it had the segment that carried ts, such as a tail loss probe that a slow
+// testbench let fire before its ACK arrived. The wait of d starts again after it. A second such
+// segment fails the quiet: a DUT that dropped the testbench's segment keeps echoing the old TSval
+// as it resends. On a ClockedDUT nothing is passed over, since Inject returns after the engine
+// handled the segment and the race cannot happen. It returns how many it passed over.
 func (p *Peer) QuietSince(d time.Duration, ts uint32) (Segment, bool, int) {
+	_, clocked := p.h.DUT.(ClockedDUT)
 	stale := 0
 	deadline := p.h.Now().Add(d)
 	for {
@@ -489,9 +493,10 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32) (Segment, bool, int) {
 		if !ok {
 			return Segment{}, true, stale
 		}
-		if p.TS && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-ts) < 0 {
-			p.h.T.Logf("sent before the DUT had the testbench's latest segment, passed over: %v", s)
+		if !clocked && stale == 0 && p.TS && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-ts) < 0 {
+			p.h.T.Logf("sent before the DUT had the testbench's latest segment, passed over once: %v", s)
 			stale++
+			deadline = p.h.Now().Add(d)
 			continue
 		}
 		return s, false, stale

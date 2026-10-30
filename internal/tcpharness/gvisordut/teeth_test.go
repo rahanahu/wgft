@@ -271,3 +271,49 @@ func TestHarnessPassesOverAFINSentBeforeTheAck(t *testing.T) {
 	got := tcpharness.Record(t, e, scenario(t, "fin-passive-close"), 1)
 	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomePass)
 }
+
+// dropFinalAck drops the testbench's pure ACK of the engine's FIN, so the engine stays in LAST-ACK
+// and resends its FIN, each time echoing the TSval it had before.
+type dropFinalAck struct {
+	tcpharness.DUT
+	mu   sync.Mutex
+	fin  uint32 // the sequence number after the engine's FIN, once it has sent one
+	seen bool
+	out  chan []byte
+}
+
+func (d *dropFinalAck) Emitted() <-chan []byte { return d.out }
+
+func (d *dropFinalAck) Inject(pkt []byte) error {
+	if s, err := tcpharness.Parse(pkt); err == nil && s.Flags == tcpharness.FlagACK && len(s.Payload) == 0 {
+		d.mu.Lock()
+		drop := d.seen && s.Ack == d.fin
+		d.mu.Unlock()
+		if drop {
+			return nil
+		}
+	}
+	return d.DUT.Inject(pkt)
+}
+
+func dropAckOfFIN(inner tcpharness.DUT) tcpharness.DUT {
+	d := &dropFinalAck{DUT: inner, out: make(chan []byte, 1024)}
+	go func() {
+		defer close(d.out)
+		for pkt := range inner.Emitted() {
+			if s, err := tcpharness.Parse(pkt); err == nil && s.Has(tcpharness.FlagFIN) {
+				d.mu.Lock()
+				d.fin, d.seen = s.Seq+s.Len(), true
+				d.mu.Unlock()
+			}
+			d.out <- pkt
+		}
+	}()
+	return d
+}
+
+func TestHarnessCatchesFINResentAfterADroppedAck(t *testing.T) {
+	t.Parallel()
+	got := tcpharness.Record(t, mutant("gvisor-drops-final-ack", dropAckOfFIN), scenario(t, "fin-passive-close"), 1)
+	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
+}
