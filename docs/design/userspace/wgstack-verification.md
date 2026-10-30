@@ -223,11 +223,6 @@ Go の fuzzing で 2 種類の対象を持ちます。
   各段の後に、予約の合計が上界の式の値以下であること、表の数と予約が一致すること、Device の `Close` の後に予約が 0 に戻ることを確かめます
 
 fuzzing で見つけた入力は、回帰の試験の入力として残します。
-関門(`scripts/wgstack-gate.sh`)では、実行回数を `-fuzztime Nx` で決めます。
-`FuzzCore` は 5,000,000x を `-parallel 4` で、`FuzzAdversarialSender` は 30,000x を `-parallel 8` で流します。
-`FuzzCore` は worker を増やしても 8 付近から速くならず、`FuzzAdversarialSender` は worker の数にほぼ比例して速くなります。
-関門の `FuzzAdversarialSender` は壊れていないことを確かめる量に留め、深さは別のマシンでの長い fuzzing で得ます。
-関門の表には、fuzz の段ごとに 1 秒あたりの実行の回数を出します。
 
 乱数の stream の試験は、既知の byte の列を相手が任意に分け、並べ替え、重ね、失って送り、届いた byte が列と一致することを確かめます。
 受信の向き(`TestReceiveStreamIntegrity`)と送信の向き(`TestSendStreamIntegrity`)の 2 つを持ちます。
@@ -236,12 +231,16 @@ fuzzing で見つけた入力は、回帰の試験の入力として残します
 
 ### 関門での並列数と実行回数
 
-関門では `-fuzztime Nx` で実行回数を指定し、`-parallel 4` を使います。
-`FuzzCore` は 5,000,000x、`FuzzAdversarialSender` は 150,000x です。
+関門(`scripts/wgstack-gate.sh`)では `-fuzztime Nx` で実行回数を指定します。
+`FuzzCore` は 5,000,000x を `-parallel 4` で、`FuzzAdversarialSender` は 30,000x を `-parallel 8` で流します。
+関門の `FuzzAdversarialSender` は壊れていないことを確かめる量に留め、深さは別のマシンでの長い fuzzing で得ます。
+150,000x を `-parallel 4` で流した関門では、標本の集まりが大きくなるにつれて 1 回が重くなり、ほかの段が約 4 分で終わる中でこの段だけが 24 分を超えたためです。
+関門の表には、fuzz の段ごとに 1 秒あたりの実行の回数を出します。
 `-fuzztime` を秒で指定すると、ホストの負荷で回数が変わり、結果を比べられません。
 
 - `FuzzParse` と `FuzzAdversarialSender`:worker の数にほぼ比例して速くなります。
   並列数は、ホストを分け合う他の仕事の数で決めます。
+  関門の `FuzzAdversarialSender` は 8 を使います。
 - `FuzzCore`:worker の数に比例して速くならず、8 worker 付近から伸びが鈍ります。
   1 回ごとに Device を作り、表と輪を確保して捨てるので、確保と GC の走査が CPU の時間の大半を占めるためです(原因の特定は単一 worker の pprof で、並列での頭打ちの機構は未確認です)。
   関門では 4 を使い、8 を超える並列数は効果が小さいので使いません。
@@ -251,7 +250,7 @@ fuzzing で見つけた入力は、回帰の試験の入力として残します
 - `FuzzCore` の 1 core での速さは、`BenchmarkFuzzCore` で測れます。
   1 core のマシンで長く流すときは、`-parallel 1` とし、回数は 1 core の速さから見積もります。
 
-実行回数は、`-parallel 4` での 1 秒あたりの回数を測ってから、所要時間が関門の枠に収まるように決めます。
+実行回数は、関門の並列数での 1 秒あたりの回数を測ってから、所要時間が関門の枠に収まるように決めます。
 
 ## 敵対的な保持の試験
 
