@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -425,20 +426,23 @@ func runThin(r *Run, c Cell, seed int64, snd, rcv net.Conn) []time.Time {
 
 // Summary is the medians of one engine in one cell, the values the judgment compares.
 type Summary struct {
-	Runs        int     `json:"runs"`
-	OK          int     `json:"ok"`
-	Mbps        float64 `json:"mbps"`
-	RecoveryMS  float64 `json:"recovery_ms"` // -1 without an outage
-	RTOMS       float64 `json:"rto_ms"`      // -1 if unknown
-	P50MS       float64 `json:"p50_ms"`      // thin stream, all runs pooled
-	P99MS       float64 `json:"p99_ms"`
-	P99LoMS     float64 `json:"p99_lo_ms,omitempty"` // thin stream: the bootstrap 95% interval of the pooled p99
-	P99HiMS     float64 `json:"p99_hi_ms,omitempty"`
-	MaxMS       float64 `json:"max_ms"`
-	Samples     int     `json:"samples"`
-	Lost        int     `json:"lost"`        // thin messages never delivered, all runs
-	Unrecovered int     `json:"unrecovered"` // outage runs with no read after the outage
-	Spread      float64 `json:"spread"`      // max over min of the judged value across runs; spreadInf for a missing value; 0 for a thin stream
+	Runs       int     `json:"runs"`
+	OK         int     `json:"ok"`
+	Mbps       float64 `json:"mbps"`
+	RecoveryMS float64 `json:"recovery_ms"` // -1 without an outage
+	RTOMS      float64 `json:"rto_ms"`      // -1 if unknown
+	P50MS      float64 `json:"p50_ms"`      // thin stream, all runs pooled
+	P99MS      float64 `json:"p99_ms"`
+	P99LoMS    float64 `json:"p99_lo_ms,omitempty"` // thin stream: the bootstrap 95% interval of the pooled p99
+	P99HiMS    float64 `json:"p99_hi_ms,omitempty"`
+	// PerSeed is each finished run's Mbit/s by its seed, for a bulk cell: the engines run the same
+	// seeds, so judge compares them seed by seed.
+	PerSeed     map[string]float64 `json:"per_seed_mbps,omitempty"`
+	MaxMS       float64            `json:"max_ms"`
+	Samples     int                `json:"samples"`
+	Lost        int                `json:"lost"`        // thin messages never delivered, all runs
+	Unrecovered int                `json:"unrecovered"` // outage runs with no read after the outage
+	Spread      float64            `json:"spread"`      // max over min of the judged value across runs; spreadInf for a missing value; 0 for a thin stream
 }
 
 // spreadInf stands for an infinite spread, which JSON cannot carry: a run without a judged value,
@@ -491,6 +495,12 @@ func summarize(c Cell, runs []Run) Summary {
 		}
 		s.OK++
 		mb = append(mb, r.Mbps)
+		if !c.Thin && !c.Outage {
+			if s.PerSeed == nil {
+				s.PerSeed = map[string]float64{}
+			}
+			s.PerSeed[strconv.FormatInt(r.Seed, 10)] = r.Mbps
+		}
 		if r.Recovery >= 0 {
 			rec = append(rec, ms(r.Recovery))
 		} else if c.Outage {
@@ -673,6 +683,10 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 		v = Verdict{Rule: "recovery <= Linux + Linux RTO", Value: wg.RecoveryMS, Line: lx.RecoveryMS + lx.RTOMS}
 		v.Result = yes(v.Value >= 0 && v.Value <= v.Line)
 	default:
+		if ratios := pairedRatios(wg, gv, lx, haveG); len(ratios) >= minPairs {
+			return judgePaired(ratios, wg, gv, lx)
+		}
+		// without per-seed values, as in a reference stored before they were: the medians,
 		// 0.8 x Linux, or gVisor's value where gVisor is above it
 		line, rule := 0.8*lx.Mbps, "Mbit/s >= 0.99 x 0.8 x Linux; gVisor is below"
 		if haveG && gv.Mbps > line {
@@ -688,6 +702,78 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 		}
 	}
 	return v
+}
+
+// minPairs is how many seeds the paired rule needs; with fewer, judge uses the medians.
+const minPairs = 5
+
+// pairedRatios is, for each seed that wgstack, Linux and, when it was measured, gVisor all
+// finished, wgstack's Mbit/s over that seed's line, max(0.8 x Linux, gVisor). The engines run
+// the same seeds, so a seed's loss pattern is the same for all three, and the ratio leaves out
+// the spread that comes from how many losses a seed draws.
+func pairedRatios(wg, gv, lx Summary, haveG bool) []float64 {
+	var seeds []string
+	for k := range wg.PerSeed {
+		seeds = append(seeds, k)
+	}
+	sort.Strings(seeds)
+	var out []float64
+	for _, k := range seeds {
+		l, ok := lx.PerSeed[k]
+		if !ok {
+			continue
+		}
+		line := 0.8 * l
+		if haveG {
+			g, ok := gv.PerSeed[k]
+			if !ok {
+				continue
+			}
+			line = max(line, g)
+		}
+		if line > 0 {
+			out = append(out, wg.PerSeed[k]/line)
+		}
+	}
+	return out
+}
+
+// judgePaired is the throughput rule on the paired ratios: PASS when the run-level bootstrap 95%
+// interval of their median is at or above the 0.99 tolerance, FAIL when it is below, and
+// otherwise undetermined, which doubles the runs. A failed run of any engine leaves the cell
+// undetermined, as the spread rule did.
+func judgePaired(ratios []float64, wg, gv, lx Summary) Verdict {
+	med := medianF(ratios)
+	lo, hi := medianInterval(ratios)
+	v := Verdict{Rule: "per-seed wgstack / max(0.8 x Linux, gVisor), median and 95% interval vs 0.99", Value: med, Line: throughputTolerance}
+	switch {
+	case wg.OK < wg.Runs || lx.OK < lx.Runs || gv.OK < gv.Runs:
+		v.Result = "UNDETERMINED: a run failed, diagnose and rerun"
+	case lo >= throughputTolerance:
+		v.Result = "PASS"
+	case hi < throughputTolerance:
+		v.Result = "FAIL"
+	default:
+		v.Straddles = true
+		v.Result = fmt.Sprintf("UNDETERMINED: the 95%% interval %.3f to %.3f contains 0.99", lo, hi)
+	}
+	return v
+}
+
+// medianInterval is the run-level bootstrap 95% interval of v's median: v's values, one per seed,
+// drawn with replacement, 1,000 times with a fixed seed.
+func medianInterval(v []float64) (lo, hi float64) {
+	r := rand.New(rand.NewSource(1))
+	est := make([]float64, bootstrapResamples)
+	b := make([]float64, len(v))
+	for i := range est {
+		for j := range b {
+			b[j] = v[r.Intn(len(v))]
+		}
+		est[i] = medianF(b)
+	}
+	sort.Float64s(est)
+	return est[int(0.025*float64(len(est)))], est[int(0.975*float64(len(est)))-1]
 }
 
 func yes(ok bool) string {
@@ -1030,6 +1116,9 @@ func row(c Cell, wg, gv, lx Summary, v Verdict) string {
 		return fmt.Sprintf("%.2f Mbit/s", s.Mbps)
 	}
 	rule := fmt.Sprintf("%s: %.1f vs %.1f", v.Rule, v.Value, v.Line)
+	if v.Line > 0 && v.Line < 2 {
+		rule = fmt.Sprintf("%s: %.3f vs %.2f", v.Rule, v.Value, v.Line) // a ratio
+	}
 	if c.NotJudged != "" {
 		rule = "-"
 	}
@@ -1135,6 +1224,30 @@ func TestJudgeRules(t *testing.T) {
 	}
 	if v := judge(bulkC, Summary{Runs: 5, OK: 5, Mbps: 18.6, Spread: 1}, gvBulk, lx19, true, true); v.Result != "FAIL" {
 		t.Errorf("18.6 against gVisor's 18.87: %q, want FAIL", v.Result)
+	}
+
+	// bulk cells with per-seed values: paired ratios to that seed's line
+	seeded := func(vals ...float64) Summary {
+		m := map[string]float64{}
+		for i, x := range vals {
+			m[strconv.Itoa(i)] = x
+		}
+		return Summary{Runs: len(vals), OK: len(vals), Mbps: medianF(vals), PerSeed: m}
+	}
+	lxS := seeded(4, 2, 6, 3, 5, 4, 2, 6)              // Linux's spread is 3, as at 1% loss
+	gvS := seeded(3, 1, 4, 2, 4, 3, 1, 4)              // below 0.8 x Linux on every seed
+	pass := seeded(4, 2, 6, 3, 5, 4, 2, 6)             // equal to Linux seed by seed
+	fail := seeded(3, 1.5, 4.5, 2.2, 3.7, 3, 1.5, 4.5) // about 0.75 x Linux, 0.94 of the line
+	if v := judge(bulkC, pass, gvS, lxS, true, true); v.Result != "PASS" {
+		t.Errorf("wgstack equal to Linux per seed, with spreads of 3: %q, want PASS", v.Result)
+	}
+	if v := judge(bulkC, fail, gvS, lxS, true, true); v.Result != "FAIL" {
+		t.Errorf("wgstack at 0.75 x Linux per seed: %q, want FAIL", v.Result)
+	}
+	// ratios to 0.8 x Linux of 0.9 to 1.1 around 0.99
+	mixed := seeded(2.88, 1.76, 4.56, 2.52, 3.88, 3.264, 1.472, 5.184)
+	if v := judge(bulkC, mixed, gvS, lxS, true, true); !strings.HasPrefix(v.Result, "UNDETERMINED") || !near(v) {
+		t.Errorf("wgstack around the line: %q, doubling %v; want UNDETERMINED and doubling", v.Result, near(v))
 	}
 
 	// the gate judges every receiving cell with the Linux client and keeps the gVisor one aside
