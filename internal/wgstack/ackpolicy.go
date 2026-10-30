@@ -28,20 +28,35 @@ func (c *tcb) noteQuickack(now int64) {
 	if c.rcvdData && now-c.lastDataRcvd <= c.curRTO() {
 		return
 	}
-	q := uint64(c.rcvWindow()) / (2 * uint64(max(c.rcvMSSEst, 1)))
-	c.quickAcks = uint8(min(max(q, 2), quickackMax))
+	c.raiseQuickack()
 }
 
-// noteDuplicate は、すべて届いていた segment を受けたとき、その範囲を D-SACK の block として次の ACK の
-// 先頭に載せ(RFC 2883)、ACK を遅らせない(Linux の tcp_enter_quickack_mode)。mu を持って呼ぶ。
+// raiseQuickack は遅らせずに返す ACK の数を、広告した窓の 2 MSS ごとに 1 つ、2 から quickackMax の間の数まで
+// 上げる。進んでいる数は下げない(Linux の tcp_incr_quickack)。
+func (c *tcb) raiseQuickack() {
+	q := uint64(c.rcvWindow()) / (2 * uint64(max(c.rcvMSSEst, 1)))
+	c.quickAcks = max(c.quickAcks, uint8(min(max(q, 2), quickackMax)))
+}
+
+// noteDuplicate は、既に届いていた [seq, seq+n) を受けたとき、その範囲を D-SACK の block として次の ACK の
+// 先頭に載せ(RFC 2883)、quickack に入って対話の印を外す(Linux の tcp_dsack_set、tcp_dsack_extend、
+// tcp_enter_quickack_mode)。ACK を送る前に次の重複が届けば、接するか重なるときだけ block を広げる。mu を
+// 持って呼ぶ。
 func (c *tcb) noteDuplicate(seq, n uint32, now int64) {
 	if n == 0 {
 		return
 	}
 	if c.sackOK {
-		c.dsack, c.dsackPending = sackBlock{seq, seq + n}, true
+		b := sackBlock{seq, seq + n}
+		switch {
+		case !c.dsackPending:
+			c.dsack, c.dsackPending = b, true
+		case seqLE(b.left, c.dsack.right) && seqLE(c.dsack.left, b.right):
+			c.dsack = sackBlock{seqMin(b.left, c.dsack.left), seqMax(b.right, c.dsack.right)}
+		}
 	}
-	c.quickAcks = max(c.quickAcks, 2)
+	c.raiseQuickack()
+	c.pingpong = false
 }
 
 // ackOnDrain は、アプリケーションの読み取りが受信のバッファを空にし、遅延 ACK を待つ小さな segment がある

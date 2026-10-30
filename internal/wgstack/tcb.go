@@ -394,9 +394,9 @@ func (c *tcb) oowAck(seg *segment, now int64) {
 		}
 		c.lastOOW = now
 	}
-	// 中身がすべて RCV.NXT より前にある重複は、範囲を D-SACK で知らせる(RFC 2883)
-	if n := uint32(len(seg.payload)); n > 0 && !seg.has(flagSYN) && seqLE(seg.seq+n, c.rcvNxt) {
-		c.noteDuplicate(seg.seq, n, now)
+	// RCV.NXT より前にある重複の部分は、範囲を D-SACK で知らせる(RFC 2883、Linux の tcp_dsack_set)
+	if n := uint32(len(seg.payload)); n > 0 && !seg.has(flagSYN) && seqLT(seg.seq, c.rcvNxt) {
+		c.noteDuplicate(seg.seq, seqMin(seg.seq+n, c.rcvNxt)-seg.seq, now)
 	}
 	c.ackNow = true
 }
@@ -738,8 +738,8 @@ func (c *tcb) inputData(seg *segment, now int64) {
 	}
 	limit := min(c.advRight, c.rcv.readOff+c.rcvCap)
 	res := c.rcv.insert(uint64(off), seg.payload, limit)
-	if res.duplicate {
-		c.noteDuplicate(seg.seq, uint32(n), now)
+	if res.dupHi > res.dupLo {
+		c.noteDuplicate(base+uint32(res.dupLo), uint32(res.dupHi-res.dupLo), now)
 	}
 	if res.dropped {
 		c.s.refused(&c.s.oooDropped, &c.s.oooGate, now, "dropped out-of-order segments that would need more than the fixed number of receive intervals")

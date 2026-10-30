@@ -23,6 +23,9 @@ type recList struct {
 // rackReoPersist は D-SACK で上げた倍率を保つ回復の数(RFC 8985 の 16)。
 const rackReoPersist = 16
 
+// rackReoMultMax は倍率の上限(Linux の reo_wnd_steps と同じ 255)。倍率と最小の RTT の積が溢れないようにする。
+const rackReoMultMax = 255
+
 const (
 	tlpOneSegExtra = 200 * time.Millisecond // RFC 8985 7.2 の WCDelAckT
 	tlpNoRTT       = time.Second            // RTT を測る前の PTO
@@ -141,7 +144,7 @@ func (c *tcb) rackDSACK() {
 		return
 	}
 	c.dsackRound, c.dsackRoundOn = c.sndMax, true
-	c.reoWndMult = max(c.reoWndMult, 1) + 1
+	c.reoWndMult = min(max(c.reoWndMult, 1)+1, rackReoMultMax)
 	c.reoPersist = rackReoPersist
 	c.s.dsacksIn.Add(1)
 }
