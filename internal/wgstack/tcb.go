@@ -112,9 +112,12 @@ type tcbState struct {
 	caAcc          uint32
 	lastSendAt     int64
 
-	fastRtx      bool // 先頭の segment を再送する
-	probePending bool // 窓の probe を送る
-	ackNow       bool // ACK を送る
+	fastRtx      bool  // 先頭の segment を再送する
+	rtxCause     uint8 // fastRtx の原因(rtxFast か rtxPartial)
+	resendCause  uint8 // SND.NXT を SND.UNA に戻した原因(rtxRTO か rtxPMTU)
+	ackDelayed   bool  // 送る ACK は遅延 ACK のタイマーが求めた
+	probePending bool  // 窓の probe を送る
+	ackNow       bool  // ACK を送る
 
 	tdl     [numTimers]int64
 	twEnter int64
@@ -468,6 +471,9 @@ func (c *tcb) processAck(seg *segment, now int64) {
 			c.arm(tmrRetrans, now+c.curRTO())
 		}
 	}
+	if c.s.trace != nil {
+		c.traceEvent(TraceAck, now)
+	}
 }
 
 // checkSACK は受けた SACK の block を検査するだけで、回復には使わない(RFC 2018 は送り手が使わないことを
@@ -528,6 +534,8 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 			// 部分の確認(RFC 6582 3.2 の 5):次の穴を再送し、確認された分だけ窓を縮め、1 SMSS 以上を
 			// 確認したら SMSS を足し戻す
 			c.fastRtx = true
+			c.rtxCause = rtxPartial
+			c.s.partialAcks.Add(1)
 			c.cwnd -= min(c.cwnd, acked)
 			if acked >= mss {
 				c.cwnd += mss
@@ -568,6 +576,7 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 
 // dupAck は重複した ACK を処理する(RFC 5681 3.2、RFC 6582)。
 func (c *tcb) dupAck(now int64) {
+	c.s.dupAcksIn.Add(1)
 	c.dupAcks++
 	mss := uint32(c.segMSS())
 	if c.inRecovery {
@@ -581,6 +590,8 @@ func (c *tcb) dupAck(now int64) {
 		c.cwnd = c.ssthresh + 3*mss
 		c.inRecovery = true
 		c.fastRtx = true
+		c.rtxCause = rtxFast
+		c.s.fastRecoveries.Add(1)
 	}
 }
 
@@ -690,6 +701,7 @@ func (c *tcb) pmtuDrop(seq uint32, mtu int, now int64) {
 	c.pmtu = mtu
 	if c.sndNxt != c.sndUna {
 		c.sndNxt = c.sndUna
+		c.resendCause = rtxPMTU
 		c.recs.reset()
 	}
 	c.afterInput(now)
@@ -880,6 +892,9 @@ func (c *tcb) onTimer(kind int, now int64) {
 			c.onRTO(now)
 		}
 	case tmrDelack:
+		if !c.ackNow {
+			c.ackDelayed = true
+		}
 		c.ackNow = true
 	case tmrClose:
 		switch c.state {
@@ -904,6 +919,13 @@ func (c *tcb) onRTO(now int64) {
 		c.abortWith(syscall.ETIMEDOUT)
 		return
 	}
+	c.s.rtos.Add(1)
+	if c.backoff > 0 {
+		c.s.rtosBackedOff.Add(1)
+	}
+	if !c.inRecovery && c.dupAcks > 0 && c.dupAcks < 3 {
+		c.s.rtosShortOfDupThresh.Add(1)
+	}
 	mss := uint32(c.segMSS())
 	if c.backoff == 0 {
 		flight := c.sndMax - c.sndUna
@@ -916,8 +938,12 @@ func (c *tcb) onRTO(now int64) {
 	c.dupAcks = 0
 	c.backoff++
 	c.sndNxt = c.sndUna
+	c.resendCause = rtxRTO
 	c.recs.reset()
 	c.arm(tmrRetrans, now+c.curRTO())
+	if c.s.trace != nil {
+		c.traceEvent(TraceRTO, now)
+	}
 }
 
 // onPersist は窓の probe のタイマーの期限。相手が probe に応える間は打ち切らない。

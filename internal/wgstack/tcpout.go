@@ -151,6 +151,14 @@ func (c *tcb) emit(b []byte, seq uint32, flags uint8, o *optWriter, off uint64, 
 
 // ackSent は ACK を運ぶ segment を送った後の状態を整える。
 func (c *tcb) ackSent() {
+	if c.ackNow {
+		if c.ackDelayed {
+			c.s.acksDelayed.Add(1)
+		} else {
+			c.s.acksImmediate.Add(1)
+		}
+	}
+	c.ackDelayed = false
 	c.ackNow = false
 	c.rcvSinceAck = 0
 	c.disarm(tmrDelack)
@@ -192,6 +200,7 @@ func (c *tcb) buildNew(b []byte, space int, now int64) int {
 	var rf uint8
 	if rtx {
 		rf = recRetransmitted
+		c.s.retrans[c.resendCause].Add(1)
 	}
 	c.recs.push(record{seq: seq, length: uint16(length), sentAt: now, flags: rf, prev: -1, next: -1})
 	c.sndNxt = seq + uint32(length)
@@ -241,5 +250,6 @@ func (c *tcb) buildRtx(b []byte, space int, now int64) int {
 		c.sndNxt = end
 	}
 	c.lastSendAt = now
+	c.s.retrans[c.rtxCause].Add(1)
 	return c.emit(b, seq, flags, &o, c.unaOff, int(n), now)
 }
