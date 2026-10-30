@@ -184,15 +184,258 @@ cmd_shell() {
 # 9p 上の bin/ を VM で直接 exec すると、そのバイナリを実行中のプロセスがいる間にホストで上書きしたとき、
 # ページキャッシュに残った古いページと新しいページが混ざって SIGSEGV になる(実験で確認)。
 # install(1) は unlink してから書くので、実行中のプロセスは古い inode のまま動き続け、新しい exec は新しい方を読む
-cmd_build() {
+host_build() {
   [[ -f $REPO/go.mod ]] || die "go.mod がまだない"
   # WGFT_LAB_BUILD_TAGS は go build の -tags に渡す。lab/agentmem.sh は labmemprobe を付けた build を要る
   (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ${WGFT_LAB_BUILD_TAGS:+-tags "$WGFT_LAB_BUILD_TAGS"} -o bin/ ./cmd/... ./tools/...)
   info "built into $REPO/bin/"
-  if vm_exists && [[ $(vm_state) == RUNNING ]]; then
-    in_vm sh -c 'for b in /wgft/bin/*; do [ -f "$b" ] && [ -x "$b" ] && case "$b" in *.test) ;; *) install -m 0755 "$b" /usr/local/bin/;; esac; done; ls /usr/local/bin/'
-    info "installed into VM /usr/local/bin (use plain command names in the VM)"
+}
+vm_install() {
+  in_vm sh -c 'for b in /wgft/bin/*; do [ -f "$b" ] && [ -x "$b" ] && case "$b" in *.test) ;; *) install -m 0755 "$b" /usr/local/bin/;; esac; done; ls /usr/local/bin/'
+  info "installed into VM $VM /usr/local/bin (use plain command names in the VM)"
+}
+cmd_build() {
+  host_build
+  if vm_exists && [[ $(vm_state) == RUNNING ]]; then vm_install; fi
+}
+
+
+# ---- lab suite:一時的な VM を N 台立て、一式を shard に分けて同時に流し、1 つの判定にまとめる ----
+# 一時的な VM は WGFT_LAB_TEMPLATE(既定は WGFT_LAB_VM)のスナップショット clean の複製で、リポジトリの
+# 共有はこの作業ツリーを指す。CPU とメモリの上限はスナップショットのまま継ぐ。スナップショットが
+# 無ければ lab up と同じ手順で新規に作る(遅い)。
+# 作った VM には user.wgft-lab-suite=<この lab の PID> を付ける。正常終了、INT、TERM、HUP では trap が
+# 全部消す。SIGKILL や電源断で残った VM は、PID が死んでいれば次の lab suite の開始時と lab suite-gc が消す
+SUITE_VMS=()
+SUITE_CLEANING=0
+
+# suite_alive <pid>:その PID のプロセスがあるか。kill -0 は他の利用者のプロセスに EPERM で失敗し、
+# 生きている run を死んだと読んでその VM を消してしまうので、/proc で見る
+suite_alive() { [[ -d /proc/$1 ]]; }
+
+suite_delete_vms() { # suite_delete_vms <name...>:並行して強制削除する。削除の失敗は終了コードに入れない
+  local n
+  for n in "$@"; do inc delete "$n" --force >/dev/null 2>&1 & done
+  wait
+}
+
+cmd_suite_gc() {
+  local name pid dead=()
+  # 名前の前方一致ではなく、印の user.wgft-lab-suite で選ぶ
+  while IFS=, read -r name pid; do
+    [[ -n $name && -n $pid ]] || continue
+    suite_alive "$pid" || dead+=("$name")
+  done < <(inc list -f csv -c n,user.wgft-lab-suite 2>/dev/null | grep -E ',[0-9]+$' || true)
+  if ((${#dead[@]})); then
+    info "deleting suite VMs whose lab process is gone: ${dead[*]}"
+    suite_delete_vms "${dead[@]}"
   fi
+}
+
+suite_cleanup() {
+  ((SUITE_CLEANING)) && return
+  SUITE_CLEANING=1
+  trap '' INT TERM HUP
+  local p
+  for p in $(jobs -p); do kill "$p" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+  if ((${#SUITE_VMS[@]})) && [[ -z ${SUITE_KEEP:-} ]]; then
+    info "deleting the suite VMs: ${SUITE_VMS[*]}"
+    suite_delete_vms "${SUITE_VMS[@]}"
+    [[ -n ${SUITE_T0:-} ]] && info "suite wall time with VM deletion: $((SECONDS - SUITE_T0)) s"
+  elif ((${#SUITE_VMS[@]})); then
+    info "--keep: leaving the suite VMs ${SUITE_VMS[*]}; delete them with incus delete --force"
+  fi
+}
+
+# suite_timeout <秒> <コマンド...>:シェル関数の in_vm と inc も timeout で止められるよう、子の bash で流す。
+# 1 台の VM の agent や incus exec が固まっても、run 全体が止まったままにならない
+suite_timeout() {
+  local sec=$1; shift
+  timeout -k 30 "$sec" bash -c "$(declare -f inc in_vm); VM=$(printf %q "$VM"); SHARE=$(printf %q "$SHARE"); WGFT_LAB_AGENT_NETSTACK=$(printf %q "${WGFT_LAB_AGENT_NETSTACK:-}"); \"\$@\"" suite_timeout "$@"
+}
+
+# suite_boot:VM を起動し、agent が応答するまで待つ。複数の VM を同時に起こすと agent が上がらない
+# VM が出たことがあるので(試した 1 回で 300 秒待っても上がらなかった)、90 秒で見切って強制停止し、起動し直す
+suite_boot() {
+  local try
+  for try in 1 2 3; do
+    inc start "$VM" >/dev/null 2>&1 || true
+    if timeout 90 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$VM" agent)" >/dev/null 2>&1; then
+      wait_net
+      return 0
+    fi
+    info "the agent of $VM did not answer within 90 s, try $try; stopping it and starting again"
+    inc stop "$VM" --force >/dev/null 2>&1 || true
+  done
+  info "$VM does not start"
+  return 1
+}
+
+# suite_make_vm <name>:複製を作って起動する。作った名前は呼び出し側が先に SUITE_VMS に入れ、途中で止まっても trap が消せるようにする
+suite_make_vm() {
+  local name=$1 tmpl=$SUITE_TEMPLATE
+  VM=$name
+  if inc snapshot list "$tmpl" -f csv -c n 2>/dev/null | grep -qx "$SNAPSHOT"; then
+    inc copy "$tmpl/$SNAPSHOT" "$name" -d "repo,source=$REPO" -c "user.wgft-lab-suite=$$" >/dev/null || return 1
+    suite_boot || return 1
+    cmd_net up
+  else
+    info "template '$tmpl' has no snapshot '$SNAPSHOT'; provisioning '$name' from $IMAGE instead, which is slow"
+    # 印は provision の前に付ける。provision の途中で SIGKILL されても suite-gc が見つけられるように
+    inc init "$IMAGE" "$name" --vm -c "limits.cpu=$CPU" -c "limits.memory=$MEM" -c "user.wgft-lab-suite=$$" >/dev/null || return 1
+    inc config device add "$name" repo disk source="$REPO" path="$SHARE" readonly=true >/dev/null || return 1
+    cmd_up
+  fi
+}
+
+# suite_barrier <dir...>:すべての shard の VM が用意できる (ready) か、用意に失敗する (failed) まで待つ。
+# labhost run -shard は単独の仕事の時間窓を、台がそろって始まる前提の見積もりで決めるので、始まりをそろえる
+suite_barrier() {
+  local d waited=0
+  while :; do
+    local pending=0
+    for d in "$@"; do [[ -f $d/ready || -f $d/failed ]] || pending=1; done
+    ((pending)) || return 0
+    if ((waited >= SUITE_BARRIER_MAX)); then
+      echo "lab: some shard VMs were not ready after $SUITE_BARRIER_MAX s; starting without them"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# suite_shard_body <name> <dir> <k> <n> <durations> <all dirs...>:1 台分。VM の起動から結果の回収まで。
+# 呼び出し側が || で受けるため set -e が効かない。失敗しうる行は自分で || return する
+suite_shard_body() {
+  local name=$1 dir=$2 k=$3 n=$4 dur=$5 t0=$SECONDS t1 rc=0
+  shift 5
+  suite_make_vm "$name" || return 1
+  vm_install >/dev/null || return 1
+  local extra=()
+  if [[ -n $dur ]]; then
+    inc file push "$dur" "$name/tmp/wgft-lab-durations.json" || return 1
+    extra=(-durations /tmp/wgft-lab-durations.json)
+  fi
+  touch "$dir/ready"
+  suite_barrier "$@"
+  t1=$SECONDS
+  echo "lab: shard $k/$n: VM ready after $((t1 - t0)) s; running"
+  suite_timeout "$SUITE_TIMEOUT" in_vm labhost run -out /tmp/wgft-lab/suite -shard "$k/$n" -parallel "$SUITE_PARALLEL" "${extra[@]}" all || rc=$?
+  echo "lab: shard $k/$n: labhost exited $rc after $((SECONDS - t1)) s"
+  # 124 は timeout が止めたとき。137 は SIGKILL で、timeout -k の後のほか、VM の中の OOM killer でもなる
+  if ((rc == 124 || rc == 137)); then
+    if ((rc == 124)); then
+      echo "lab: shard $k/$n: labhost did not finish within $SUITE_TIMEOUT s; stopped it, and the shard has no summary"
+    else
+      echo "lab: shard $k/$n: labhost or incus exec was killed, by the timeout's KILL or by the OOM killer in the VM; the shard has no summary"
+    fi
+    suite_timeout 300 inc file pull -r "$name/tmp/wgft-lab/suite/logs" "$dir/" >/dev/null 2>&1 || true
+    return 1
+  fi
+  suite_timeout 300 inc file pull "$name/tmp/wgft-lab/suite/summary.json" "$dir/summary.json" || return 1
+  suite_timeout 300 inc file pull -r "$name/tmp/wgft-lab/suite/logs" "$dir/" >/dev/null 2>&1 || true
+  echo "$((t1 - t0)) $((SECONDS - t1)) $rc" > "$dir/times"
+}
+
+# suite_shard <name> <dir> <netstack> <k> <n> <durations> <all dirs...>:バックグラウンドで呼ぶ。
+# 本体を子のシェルで流すのは、cmd_up などの die が exit しても failed の印を残すため
+suite_shard() {
+  local name=$1 dir=$2
+  VM=$name
+  WGFT_LAB_AGENT_NETSTACK=$3
+  mkdir -p "$dir"
+  shift 3
+  (suite_shard_body "$name" "$dir" "$@") > "$dir/shard.log" 2>&1 || echo failed > "$dir/failed"
+  return 0
+}
+
+cmd_suite() {
+  local vms=3 netstack=default keep= durations= out= parallel=8 timeout_s=${WGFT_LAB_SHARD_TIMEOUT:-3600}
+  while (($#)); do
+    case $1 in
+      --vms) vms=${2:?--vms N}; shift 2 ;;
+      --netstack) netstack=${2:?--netstack default|wgstack|both}; shift 2 ;;
+      --durations) durations=${2:?--durations FILE}; shift 2 ;;
+      --parallel) parallel=${2:?--parallel N}; shift 2 ;;
+      --shard-timeout) timeout_s=${2:?--shard-timeout SEC}; shift 2 ;;
+      --out) out=${2:?--out DIR}; shift 2 ;;
+      --keep) keep=1; shift ;;
+      *) die "usage: lab suite [--vms N] [--netstack default|wgstack|both] [--durations summary.json] [--parallel N] [--shard-timeout SEC] [--out DIR] [--keep]" ;;
+    esac
+  done
+  [[ $vms =~ ^[1-9][0-9]*$ ]] || die "--vms wants a whole number of 1 or more"
+  [[ $parallel =~ ^[1-9][0-9]*$ ]] || die "--parallel wants a whole number of 1 or more"
+  [[ $timeout_s =~ ^[1-9][0-9]*$ ]] || die "--shard-timeout wants a whole number of seconds"
+  local cfgs=()
+  case $netstack in
+    default) cfgs=(default) ;;
+    wgstack) cfgs=(wgstack) ;;
+    both) cfgs=(default wgstack) ;;
+    *) die "--netstack wants default, wgstack or both" ;;
+  esac
+  [[ -z $durations || -f $durations ]] || die "no such --durations file: $durations"
+  [[ -n $durations ]] && durations=$(cd "$(dirname "$durations")" && pwd)/$(basename "$durations")
+  SUITE_KEEP=$keep
+  SUITE_TEMPLATE=${WGFT_LAB_TEMPLATE:-$VM}  # suite_shard が VM を複製の名前に差し替える前に決める
+  SUITE_PARALLEL=$parallel
+  SUITE_TIMEOUT=$timeout_s
+  SUITE_BARRIER_MAX=900
+  out=${out:-${TMPDIR:-/tmp}/wgft-lab-suite-$(date +%Y%m%d-%H%M%S)}
+  mkdir -p "$out"
+  out=$(cd "$out" && pwd)
+  SUITE_T0=$SECONDS
+  trap suite_cleanup EXIT
+  trap 'info "interrupted; deleting the suite VMs"; exit 130' INT TERM HUP
+  cmd_suite_gc
+  host_build
+  local total=$(( vms * ${#cfgs[@]} )) c k
+  local names=() dirs=()
+  for c in "${cfgs[@]}"; do
+    for ((k = 1; k <= vms; k++)); do
+      names+=("wgft-suite-$$-$c-$k")
+      dirs+=("$out/$c/shard-$k")
+    done
+  done
+  SUITE_VMS=("${names[@]}")
+  info "running on $total suite VMs: ${names[*]}; results in $out"
+  local i=0
+  for c in "${cfgs[@]}"; do
+    local ns=""
+    [[ $c == default ]] || ns=$c
+    for ((k = 1; k <= vms; k++)); do
+      suite_shard "${names[i]}" "${dirs[i]}" "$ns" "$k" "$vms" "$durations" "${dirs[@]}" &
+      i=$((i + 1))
+    done
+  done
+  wait
+  local rc=0
+  for c in "${cfgs[@]}"; do
+    echo
+    echo "==== lab suite: netstack=$c, $vms VMs"
+    local sums=()
+    for ((k = 1; k <= vms; k++)); do
+      local d=$out/$c/shard-$k ready ran src
+      if [[ -f $d/times ]]; then
+        read -r ready ran src < "$d/times"
+        echo "shard $k/$vms: VM start and install ${ready} s, run ${ran} s, exit ${src}"
+      else
+        echo "shard $k/$vms: did not finish; see $d/shard.log"
+      fi
+      if [[ -f $d/summary.json ]]; then sums+=("$d/summary.json"); else rc=1; fi
+    done
+    # summary が欠けても、ある分を統合する。統合はどの shard でも流れなかった仕事を名前で出す
+    if ((${#sums[@]})); then
+      "$REPO/bin/labhost" merge -out "$out/$c" "${sums[@]}" || rc=1
+    else
+      echo "lab: nothing to merge for netstack=$c: no shard summary" >&2
+      rc=1
+    fi
+  done
+  echo
+  echo "lab: suite wall time from the start to the merge: $((SECONDS - SUITE_T0)) s; VM deletion follows. Logs: $out"
+  return $rc
 }
 
 # lab test <pkg> [ns] [go test flags...]:ホストで build tag lab 付きのテストバイナリを作り、VM の ns(既定 vps)で実行する
@@ -251,6 +494,9 @@ usage: lab <command>
   shell [ns|vm]       VM 内(ns 指定ならその netns 内)で bash を開く
   build               ホストで ./cmd/... ./tools/... を静的ビルドして bin/ に置き、VM の /usr/local/bin に install する
   test <pkg> [ns]     build tag lab 付きでテストバイナリを作り、VM の ns(既定 vps)で実行する
+  suite [--vms N] [--netstack default|wgstack|both] [--durations FILE] [--parallel N] [--shard-timeout SEC] [--out DIR] [--keep]
+                      一時 VM を N 台 (既定 3) 立てて一式を shard に分けて同時に流し、1 つの判定にまとめて VM を消す
+  suite-gc            持ち主のいない一時 VM(lab suite が残したもの)を消す
   host-fix            ホストの firewalld / Docker を設定して VM の IPv4 を通す(sudo)
 
 ns: ${NAMESPACES[*]}
@@ -269,6 +515,8 @@ case "$sub" in
   shell) cmd_shell "$@" ;;
   build) cmd_build ;;
   test) cmd_test "$@" ;;
+  suite) cmd_suite "$@" ;;
+  suite-gc) cmd_suite_gc ;;
   host-fix) cmd_host_fix ;;
   "" | -h | --help | help) usage ;;
   *) usage >&2; exit 2 ;;
