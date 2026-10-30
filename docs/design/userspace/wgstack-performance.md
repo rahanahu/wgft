@@ -1,7 +1,7 @@
 # wgstack の性能の段階
 
 [エージェントの wgft の netstack](wgstack.md)(wgstack)は完成の段階を NewReno で判定し、性能の目標を完成の後に追います([完成と性能の目標](wgstack.md#完成と性能の目標))。
-性能の段階のうち実装したのは、観測の段の wgstack の側(`Stats` の数、接続の記録、boost の切り替え)、SACK による回復の段、RACK-TLP の段、CUBIC の段です。
+性能の段階のうち実装したのは、観測の段の wgstack の側(`Stats` の数、接続の記録、boost の切り替え)、SACK による回復の段、RACK-TLP の段、CUBIC の段、HyStart++ の段です。
 測った差の診断の方法、変更の優先順位、判定の測定、段階の順序をここで決め、値と個々の構造の細部は実装の時に決めます。
 正しさの検証は[wgstack の検証](wgstack-verification.md)に従い、この文書は性能のために足す試験と測定だけを定めます。
 
@@ -265,8 +265,14 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
 
 - 規格:RFC 9406 です。
   輻輳の制御の種類によらないので、NewReno のままでも使えます
-- 使う構造:slow start の往復ごとの最小の RTT と、慎重な slow start の状態を接続の欄に置きます。
-  RTT の測定は今の timestamp と送信の記録を使います
+- 使う構造:slow start の往復ごとの最小の RTT と、慎重な slow start(CSS)の状態を接続の欄に置きます。
+  RTT の測定は timestamp と送信の記録で ACK ごとに測った値を使います
+- 規則:最初の slow start(ssthresh が初期の値のまま)だけで使い、損失か RTO の後の slow start では使いません。
+  往復は、往復を始めた時の SND.NXT を確認した ACK で終えます。
+  往復の RTT の標本が 8 つ以上あり、往復の最小の RTT が前の往復の最小より max(4 ms, min(前の最小 / 8, 16 ms)) 以上大きければ CSS に入ります。
+  CSS の間の窓の増え方は slow start の 4 分の 1 で、往復の最小の RTT が CSS に入った時の値より小さくなれば slow start に戻り、5 往復続けば ssthresh を今の窓にして輻輳の回避に移ります。
+  slow start の 1 ACK の増え方は RFC 3465 の L = 2 のままにします。
+  RFC 9406 は pacing の無い送り手に L = 8 を勧めますが、遅延 ACK の 2 segment ごとの ACK では L = 2 で窓が往復ごとに 2 倍になり、L は相手がまとめて確認する場合の送り出す量だけを変えるためです
 - 不変条件:新しい保持を作らず、影響は輻輳の窓の値だけです
 - 危険:正しさへの危険は低いです。
   早く終えすぎると立ち上がりが遅くなります。
