@@ -258,7 +258,9 @@ func (c *tcb) onTLP(now int64) {
 }
 
 // tlpOnAck は probe の確認を処理する(RFC 8985 7.4、Linux の tcp_process_tlp_ack)。probe が再送で、
-// 確認が probe より先まで進んだときは、probe が損失を直したとみなして輻輳の窓を下げる。
+// 確認が probe より先まで進んだときは、probe が損失を直したとみなして、この ACK の前の窓で輻輳の窓を下げる。
+// この縮小は今の SND.MAX までに送ったデータの輻輳の事象なので、SND.UNA がそこへ届く前に入る回復は窓を下げ直さず、
+// その番号で終わる(enterRecovery)。
 func (c *tcb) tlpOnAck(ack uint32, unaAdvanced bool, newlySacked uint32) {
 	if !c.tlpActive || seqLT(ack, c.tlpEnd) {
 		return
@@ -268,9 +270,15 @@ func (c *tcb) tlpOnAck(ack uint32, unaAdvanced bool, newlySacked uint32) {
 		c.tlpActive = false
 	case seqGT(ack, c.tlpEnd):
 		c.tlpActive = false
-		if !c.inRecovery {
-			c.ssthresh = c.ccFor().lossThresh(c)
+		// probe を送った後に回復か RTO が始まっていれば、その応答が probe の前の損失への輻輳の事象なので、
+		// 下げ直さない(RFC 8985 7.4.1)。probe を送れたのは SND.UNA >= recover の時なので、recover が probe の
+		// 終わりに届いているのは、その後に回復か RTO が recover を進めたときである
+		if !c.inRecovery && !seqGE(c.recover, c.tlpEnd) {
+			// 窓は損失を見つけた ACK の前の値で決める。この ACK が probe の後のデータまで確認すると、ACK の後の
+			// 送り残しは 0 に近く、窓が下限まで落ちる。TLP は回復の外だけで働くので、送り手の窓は輻輳の窓である
+			c.ssthresh = c.ccFor().lossThresh(c, c.priorCwnd, min(c.sndMax-c.priorUna, c.priorCwnd))
 			c.cwnd = c.ssthresh
+			c.tlpCut, c.tlpCutSeq = true, c.sndMax
 			c.s.tlpRecoveries.Add(1)
 		}
 	case !unaAdvanced && newlySacked == 0:
