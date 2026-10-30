@@ -43,6 +43,7 @@ const (
 	rtxPartial              // 回復の中の部分の確認による再送
 	rtxRTO                  // RTO の後に SND.UNA から送り直した segment
 	rtxPMTU                 // PMTU の引き下げの後に SND.UNA から送り直した segment
+	rtxTLP                  // TLP の probe として送り直した最後の記録
 	numRtxCauses
 )
 

@@ -23,7 +23,7 @@ func (c *tcb) wantOutput() bool {
 	case stFree, stClosed:
 		return false
 	}
-	if c.fastRtx || c.probePending || c.ackNow {
+	if c.fastRtx || c.probePending || c.ackNow || c.tlpProbe {
 		return true
 	}
 	if c.state == stTimeWait {
@@ -31,14 +31,14 @@ func (c *tcb) wantOutput() bool {
 	}
 	o := c.options(0, false)
 	pc := c.payloadCap(&o, c.pmtu)
-	if i := c.nextResend(); i >= 0 && c.resendAllowed(i, pc) {
+	if p := c.pickRule1(); p.i >= 0 && c.resendAllowed(p, pc, false) {
 		return true
 	}
-	if n, fin := c.nextNew(pc); n > 0 || fin {
+	if n, fin := c.nextNew(pc, false); n > 0 || fin {
 		return true
 	}
-	i := c.nextRule3()
-	return i >= 0 && c.resendAllowed(i, pc)
+	p := c.pickRule3()
+	return p.i >= 0 && c.resendAllowed(p, pc, false)
 }
 
 // options は segment の option を作る。sack が真なら、順序外の区間があるときに SACK の block を足す。
@@ -77,8 +77,8 @@ func (c *tcb) windowField() uint16 {
 }
 
 // nextNew は、窓と輻輳の窓と送り手の SWS の回避(RFC 9293 3.8.6.2.1、Nagle を使わない)が許す新しいデータの
-// 長さと、FIN を付けるかを返す。
-func (c *tcb) nextNew(payCap int) (int, bool) {
+// 長さと、FIN を付けるかを返す。force が真なら輻輳の窓を見ない(TLP の probe、RFC 8985 7.3)。
+func (c *tcb) nextNew(payCap int, force bool) (int, bool) {
 	if payCap <= 0 || c.recs.full() {
 		return 0, false
 	}
@@ -95,6 +95,9 @@ func (c *tcb) nextNew(payCap int) (int, bool) {
 	}
 	if c.cwnd > pipe {
 		room = c.cwnd - pipe
+	}
+	if force {
+		room = ^uint32(0)
 	}
 	if avail == 0 {
 		// FIN は番号を 1 つ使うので、Linux と同じく窓に 1 byte の余地があるときだけ送る。窓が 0 の間は
@@ -136,13 +139,19 @@ func (c *tcb) build(b []byte, now int64) int {
 		return c.buildBare(b, c.sndUna-1, now)
 	}
 	if c.state != stTimeWait {
-		if n := c.buildResend(b, space, now, c.nextResend()); n > 0 {
+		if c.tlpProbe {
+			c.tlpProbe = false
+			if n := c.buildTLP(b, space, now); n > 0 {
+				return n
+			}
+		}
+		if n := c.buildResend(b, space, now, c.pickRule1(), false); n > 0 {
 			return n
 		}
-		if n := c.buildNew(b, space, now); n > 0 {
+		if n := c.buildNew(b, space, now, false); n > 0 {
 			return n
 		}
-		if n := c.buildResend(b, space, now, c.nextRule3()); n > 0 {
+		if n := c.buildResend(b, space, now, c.pickRule3(), false); n > 0 {
 			return n
 		}
 	}
@@ -185,14 +194,14 @@ func (c *tcb) buildBare(b []byte, seq uint32, now int64) int {
 	return c.emit(b, seq, 0, &o, 0, 0, now)
 }
 
-// buildNew は SND.MAX から新しいデータを segment にする(RFC 6675 の NextSeg の規則 2)。
-func (c *tcb) buildNew(b []byte, space int, now int64) int {
+// buildNew は SND.MAX から新しいデータを segment にする(RFC 6675 の NextSeg の規則 2)。force は nextNew と同じ。
+func (c *tcb) buildNew(b []byte, space int, now int64, force bool) int {
 	// 黙った後の輻輳の窓(RFC 5681 4.1)
 	if c.sndUna == c.sndMax && now-c.lastSendAt > c.curRTO() {
 		c.cwnd = min(c.cwnd, uint32(initialWindowSegs*c.segMSS()))
 	}
 	o := c.options(now, true)
-	n, fin := c.nextNew(c.payloadCap(&o, space))
+	n, fin := c.nextNew(c.payloadCap(&o, space), force)
 	if n == 0 && !fin {
 		return 0
 	}
@@ -213,19 +222,26 @@ func (c *tcb) buildNew(b []byte, space int, now int64) int {
 	if c.inRecovery {
 		c.prrOut += uint32(length)
 	}
-	c.recs.push(record{seq: seq, length: uint16(length), sentAt: now, prev: -1, next: -1, skip: 1})
+	c.recs.push(record{seq: seq, length: uint16(length), sentAt: now, skip: 1, rtxGen: c.rtxGen})
+	c.listAppend(&c.tList, c.recs.n-1, c.recs.at(c.recs.n-1), recInT)
 	c.sndNxt = seq + uint32(length)
 	c.sndMax = seqMax(c.sndMax, c.sndNxt)
-	if c.tdl[tmrRetrans] == 0 && !c.persist {
-		c.arm(tmrRetrans, now+c.curRTO())
+	if c.rtoAt == 0 && !c.persist {
+		c.rtoAt = now + c.curRTO()
 	}
+	if !force {
+		c.scheduleTLP(now) // 新しいデータの後に PTO を張り直す(RFC 8985 7.2)
+	}
+	c.rearmRetrans()
 	c.lastSendAt = now
 	return c.emit(b, seq, flags, &o, off, n, now)
 }
 
-// resendAllowed は記録 i の再送を輻輳の窓が許すかを返す。payCap は segment の中身の上限である。
-func (c *tcb) resendAllowed(i int, payCap int) bool {
-	n, fin := c.resendLen(i, payCap)
+// resendAllowed は選んだ記録の再送を窓と輻輳の窓が許すかを返す。payCap は segment の中身の上限である。
+// force が真なら輻輳の窓を見ない(TLP の probe)。
+func (c *tcb) resendAllowed(p resendPick, payCap int, force bool) bool {
+	i := p.i
+	n, fin := c.resendLen(i, c.pickOff(p), payCap)
 	if n == 0 && !fin {
 		return false
 	}
@@ -234,57 +250,112 @@ func (c *tcb) resendAllowed(i int, payCap int) bool {
 	}
 	// 窓の外から始まる記録は送らない。先頭の記録は窓の probe を兼ねて送る(Linux の tcp_retransmit_skb)。
 	// 窓の probe を張っている間は送らない
-	seq := c.recs.at(i).seq + c.rxtOff
+	seq := c.recs.at(i).seq + c.pickOff(p)
 	if c.persist || (seq != c.sndUna && !seqLT(seq, c.sndUna+c.sndWnd)) {
 		return false
 	}
 	pipe := c.pipe()
-	return pipe == 0 || c.cwnd >= pipe+n
+	return force || pipe == 0 || c.cwnd >= pipe+n
 }
 
 // buildResend は記録 i(NextSeg の規則 1 か 3 が選んだ記録)を再送する。記録は SND.UNA から番号の順に
 // 選ばれ、SACK 済みの記録は飛ばす。新しい segment の大きさを超える記録は複数の segment に分けて送り、
 // 記録は分けない。
-func (c *tcb) buildResend(b []byte, space int, now int64, i int) int {
+func (c *tcb) buildResend(b []byte, space int, now int64, p resendPick, force bool) int {
+	i := p.i
 	if i < 0 {
 		return 0
 	}
 	o := c.options(now, true)
 	pc := c.payloadCap(&o, space)
-	if !c.resendAllowed(i, pc) {
+	if !c.resendAllowed(p, pc, force) {
 		return 0
 	}
-	n, fin := c.resendLen(i, pc)
+	off := c.pickOff(p)
+	n, fin := c.resendLen(i, off, pc)
 	r := c.recs.at(i)
-	seq := r.seq + c.rxtOff
+	seq := r.seq + off
 	length := n
 	flags := uint8(0)
 	if fin {
 		flags |= flagFIN
 		length++
 	}
+	c.adoptGen(r)
 	if !c.rtxLive(r) {
 		r.flags |= recRtx
-		r.rtxGen = c.rtxGen
 		c.rtxBytes += uint32(r.length)
 	}
 	r.flags |= recRetransmitted
 	r.sentAt = now
-	c.rxtOff += length
-	c.rxtMid = c.rxtOff < uint32(r.length)
-	if !c.rxtMid {
-		c.rxtIdx++
-		c.rxtOff = 0
+	// 再送した記録は送った時刻の順の list の末尾へ移す(RFC 8985)。記録の節は 1 つの list にしか使えないので、
+	// 損失の待ち行列から外してから足す。待ち行列の記録を分けて送る間は、送り終えるまで待ち行列に残す
+	toT := true
+	switch p.src {
+	case srcPos:
+		c.rxtOff += length
+		c.rxtMid = c.rxtOff < uint32(r.length)
+		if !c.rxtMid {
+			c.rxtIdx++
+			c.rxtOff = 0
+		}
+	case srcQueue:
+		c.qOff += length
+		c.qMid = c.qOff < uint32(r.length)
+		toT = !c.qMid
+		if !c.qMid {
+			c.qOff = 0
+		}
+	}
+	if toT {
+		if c.genFlag(r, recInQ) {
+			if c.lostQ.head == c.recAbs(i) {
+				c.qOff, c.qMid = 0, false
+			}
+			c.listRemove(&c.lostQ, i, r, recInQ)
+		}
+		if c.genFlag(r, recInT) {
+			c.listRemove(&c.tList, i, r, recInT)
+		}
+		c.listAppend(&c.tList, i, r, recInT)
 	}
 	if c.inRecovery {
 		c.prrOut += length
 	}
-	c.s.retrans[c.resendCause].Add(1)
-	if c.tdl[tmrRetrans] == 0 && !c.persist {
-		c.arm(tmrRetrans, now+c.curRTO())
+	cause := c.resendCause
+	if p.src == srcTLP {
+		cause = rtxTLP
+	}
+	c.s.retrans[cause].Add(1)
+	if (c.rtoAt == 0 || i == 0) && !c.persist {
+		// 先頭の記録を送り直したら RTO を張り直す(Linux の tcp_xmit_retransmit_queue)。張り直さないと、回復の
+		// 途中で先頭を再送した直後に、前の累積の確認から数えた RTO が起きる
+		c.setRTO(now + c.curRTO())
 	}
 	c.lastSendAt = now
 	return c.emit(b, seq, flags, &o, c.unaOff+uint64(seq-c.sndUna), int(n), now)
+}
+
+// buildTLP は TLP の probe を 1 つ送る(RFC 8985 7.3)。窓が許せば新しいデータを、許さなければ最も番号の
+// 大きい記録を送る。どちらも輻輳の窓を見ない。probe の確認を待つ間は次の probe を張らない(I5)。
+func (c *tcb) buildTLP(b []byte, space int, now int64) int {
+	retrans := false
+	n := c.buildNew(b, space, now, true)
+	if n == 0 {
+		i := c.recs.n - 1
+		if i < 0 || c.isSacked(c.recs.at(i)) {
+			return 0
+		}
+		n = c.buildResend(b, space, now, resendPick{i, srcTLP}, true)
+		retrans = true
+	}
+	if n > 0 {
+		c.tlpActive, c.tlpRetrans, c.tlpEnd = true, retrans, c.sndMax
+		c.tlpAt = 0
+		c.s.tlpProbes.Add(1)
+		c.rearmRetrans()
+	}
+	return n
 }
 
 // buildRtx は SND.UNA からの 1 segment を再送する(SACK を交渉しない接続の高速の再送と NewReno の部分の確認)。
@@ -321,6 +392,11 @@ func (c *tcb) buildRtx(b []byte, space int, now int64) int {
 		}
 		r.flags |= recRetransmitted
 		r.sentAt = now
+		if c.genFlag(r, recInT) {
+			// 送った時刻の順を保つ
+			c.listRemove(&c.tList, i, r, recInT)
+			c.listAppend(&c.tList, i, r, recInT)
+		}
 	}
 	c.lastSendAt = now
 	c.s.retrans[c.rtxCause].Add(1)

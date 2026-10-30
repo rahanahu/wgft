@@ -249,6 +249,9 @@ func TestLimitedTransmit(t *testing.T) {
 		n.drain()
 		c.Write(make([]byte, 20*testSegPayload))
 		outs := n.drain()
+		// RTT を 20 ms にする。手で進める時計の握手は RTT が 0 で、RACK の並べ替えの窓が 0 になる
+		n.advance(20 * time.Millisecond)
+		c.c.minRTT, c.c.srtt = int64(20*time.Millisecond), int64(20*time.Millisecond)
 		q := newSackPeer(p)
 		// 1 つ目を確認する。slow start でさらに 2 つ送る
 		q.recv(outs[0])
