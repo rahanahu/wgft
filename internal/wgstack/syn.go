@@ -143,6 +143,25 @@ func (s *stack) synRoom(l *listener) bool {
 	return l != nil && !l.closed && len(s.syn.free) > 0 && l.synCount < s.lim.synRows/2
 }
 
+// reuse の判定。
+const (
+	reuseOK         = iota // 行を作れる
+	reuseNoListener        // 開いた待ち受けが無い。TIME_WAIT の ACK を返す(Linux と同じ)
+	reuseFull              // 握手の途中の行を作れない。SYN を捨てて TIME_WAIT を残す
+)
+
+// reuseVerdict は、TIME_WAIT の 4 つ組を使い直す SYN を待ち受けに渡せるかを返す。tmu を持って呼ぶ。
+func (s *stack) reuseVerdict(seg *segment) int {
+	l := s.listeners[seg.tup.local()]
+	switch {
+	case l == nil || l.closed:
+		return reuseNoListener
+	case !s.synRoom(l):
+		return reuseFull
+	}
+	return reuseOK
+}
+
 // refuseReuse は、TIME_WAIT の 4 つ組を使い直す SYN を、握手の途中の行を作れないので捨てたことを数える。
 // 行は外さないので、相手が再送した SYN も前の接続の SND.NXT の先から ISN を受ける。tmu を持って呼ぶ。
 func (s *stack) refuseReuse(now int64) {
