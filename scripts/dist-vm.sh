@@ -31,6 +31,18 @@
 #   scripts/dist-vm.sh --keep-failed            # leave the VMs behind for inspection on failure
 #   scripts/dist-vm.sh --upgrade                # also run the upgrade-from-a-previous-release phase
 #   scripts/dist-vm.sh --agent-kernel           # run the agent in kernel mode with deploy/agent.kernel.conf
+#   WGFT_DIST_VM_SLOT=1 scripts/dist-vm.sh      # a run in slot 1, which can run beside other slots
+#
+# Parallel runs: WGFT_DIST_VM_SLOT=<n>, n from 0 to 9, opts a run into slot n. A slot has its own
+# lock, its own static IPv4 range on the bridge (100+10n to 109+10n of the bridge's /24) and its
+# own VM name prefix (wgft-dist-s<n>-), so runs in different slots never pick the same address or
+# name and may run at the same time, for example one distribution per slot. A second run in the
+# same slot is refused with exit 4, as before. A run without WGFT_DIST_VM_SLOT keeps the host-wide
+# lock, the addresses from 200 and the wgft-dist- prefix. Those addresses lie outside every slot's,
+# but with goreleaser such a run builds into and installs from $REPO/dist, which a slotted build
+# from the same checkout replaces, so give every run of a parallel set a slot. A slotted build waits
+# for the other slots' builds and installs from its own copy. The host capacity check below still
+# counts every VM.
 #
 # docs/testing.md calls for one distribution per PR and three per release candidate; this script
 # takes the distribution as a parameter instead of hard-coding a loop, so a release candidate runs
@@ -155,9 +167,11 @@
 #
 # One run at a time, host-wide: a host lock (see the "host-wide mutual exclusion" section below,
 # right after the -h/--help handling) refuses a second concurrent dist-vm.sh outright, with no
-# wait, before it creates anything. This is separate from, and not bypassed by, --force.
+# wait, before it creates anything. This is separate from, and not bypassed by, --force. With
+# WGFT_DIST_VM_SLOT the same holds per slot instead (see "Parallel runs" above).
 #
-# VM budget: creates at most 2 VMs, named wgft-dist-<id>-server / -agent (a prefix distinct from
+# VM budget: creates at most 2 VMs, named wgft-dist-<id>-server / -agent, or
+# wgft-dist-s<n>-<id>-server / -agent in slot n (a prefix distinct from
 # lab/'s wgft-eph- ephemeral VMs and the shared wgft-lab* dev VMs), and never touches an instance
 # it did not create. Before launching, it checks the host's total running instance count (shared
 # with everyone else's lab VMs, not just this script's own) and its 1-minute load average, and
@@ -185,7 +199,7 @@ while [ $# -gt 0 ]; do
     --upgrade) UPGRADE=1; shift ;;
     --agent-kernel) AGENT_KERNEL=1; shift ;;
     -h | --help)
-      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "dist-vm: unknown argument: $1" >&2; exit 2 ;;
@@ -202,6 +216,25 @@ need incus
 need go
 need ping
 need flock
+
+# --- WGFT_DIST_VM_SLOT: the opt-in slot of a parallel run (see the header comment) ----------------
+# Unset or empty keeps the defaults below exactly as they were: the host-wide lock, addresses from
+# .200 and VM names wgft-dist-<id>-server/agent.
+SLOT=${WGFT_DIST_VM_SLOT:-}
+LOCK_NAME=wgft-dist-vm.lock
+VM_PREFIX=wgft-dist-
+IP_FIRST=200
+IP_LAST=250
+if [ -n "$SLOT" ]; then
+  case "$SLOT" in
+    [0-9]) ;;
+    *) echo "dist-vm: WGFT_DIST_VM_SLOT must be a single digit from 0 to 9, got '$SLOT'" >&2; exit 2 ;;
+  esac
+  LOCK_NAME=wgft-dist-vm-slot$SLOT.lock
+  VM_PREFIX=wgft-dist-s$SLOT-
+  IP_FIRST=$((100 + 10 * SLOT))
+  IP_LAST=$((IP_FIRST + 9))
+fi
 
 # --- host-wide mutual exclusion: only one dist-vm.sh run at a time -------------------------------
 # Serialises the whole of B9 per host. Static IP selection below picks a free address by pinging
@@ -238,13 +271,17 @@ need flock
 # selection is already an unsupported scenario this script does not otherwise guard against
 # either (see the "Networking workaround" note above). A single fixed /tmp path shared by every
 # user would over-serialise unrelated users' runs instead, which is worse for the common case here.
-LOCK_PATH="${XDG_RUNTIME_DIR:-/tmp}/wgft-dist-vm.lock"
+#
+# With WGFT_DIST_VM_SLOT the lock is the slot's own, wgft-dist-vm-slot<n>.lock in the same directory:
+# a slot only ever picks addresses from its own range, so only another run in the same slot can race
+# it on them.
+LOCK_PATH="${XDG_RUNTIME_DIR:-/tmp}/$LOCK_NAME"
 # <> (not >): must not truncate a file another, currently-lock-holding run might read from or
 # write to; this process only ever writes to it after flock below proves it is the sole holder.
 exec {LOCK_FD}<>"$LOCK_PATH" || { echo "dist-vm: cannot open lock file $LOCK_PATH" >&2; exit 2; }
 if ! flock -n "$LOCK_FD"; then
   holder=$(cat "$LOCK_PATH" 2>/dev/null)
-  echo "dist-vm: another dist-vm.sh run holds the lock ($LOCK_PATH)${holder:+, pid $holder}; refusing to start (this run does not wait for it to finish)." >&2
+  echo "dist-vm: another dist-vm.sh run${SLOT:+ in slot $SLOT} holds the lock ($LOCK_PATH)${holder:+, pid $holder}; refusing to start (this run does not wait for it to finish)." >&2
   exit 4
 fi
 printf '%s\n' "$$" >"$LOCK_PATH"
@@ -253,10 +290,11 @@ printf '%s\n' "$$" >"$LOCK_PATH"
 # cleanup trap, so its VMs outlive it) do not stale-lock the run above - the flock already proved
 # no dist-vm.sh is currently running - but they do sit around consuming the shared VM budget.
 # Report them by name; never delete them here automatically, since a name match alone is not proof
-# by itself. The pid embedded in the name (wgft-dist-<timestamp>-<pid>-server/agent) is: if that
-# pid is not running, the VM is provably not owned by any live dist-vm.sh (pid reuse by the OS
-# aside, which is rare enough not to guard against here).
-for leftover in $(incus list -c n -f csv 2>/dev/null | grep -E '^wgft-dist-[0-9]+-[0-9]+-(server|agent)$'); do
+# by itself. The pid embedded in the name (wgft-dist-<timestamp>-<pid>-server/agent, or
+# wgft-dist-s<n>-<timestamp>-<pid>-server/agent from a slot) is: if that pid is not running, the VM
+# is provably not owned by any live dist-vm.sh (pid reuse by the OS aside, which is rare enough not
+# to guard against here). Every slot's leftovers are reported, not only this run's slot.
+for leftover in $(incus list -c n -f csv 2>/dev/null | grep -E '^wgft-dist-(s[0-9]-)?[0-9]+-[0-9]+-(server|agent)$'); do
   leftover_pid=${leftover%-server}
   leftover_pid=${leftover_pid%-agent}
   leftover_pid=${leftover_pid##*-}
@@ -266,8 +304,8 @@ for leftover in $(incus list -c n -f csv 2>/dev/null | grep -E '^wgft-dist-[0-9]
 done
 
 id="$(date +%Y%m%d%H%M%S)-$$"
-server_vm="wgft-dist-$id-server"
-agent_vm="wgft-dist-$id-agent"
+server_vm="$VM_PREFIX$id-server"
+agent_vm="$VM_PREFIX$id-agent"
 tmp=$(mktemp -d)
 started=$(date +%s)
 
@@ -342,7 +380,7 @@ trap 'exit 143' TERM
 
 agent_mode=userspace
 [ "$AGENT_KERNEL" = 1 ] && agent_mode=kernel
-echo "== dist-vm: image=$IMAGE server=$server_vm agent=$agent_vm agent-mode=$agent_mode"
+echo "== dist-vm: image=$IMAGE server=$server_vm agent=$agent_vm agent-mode=$agent_mode${SLOT:+ slot=$SLOT}"
 
 # --- host capacity: shared with everyone else's VMs, so check before creating any ---------------
 # Hard rule (the host's owner set an explicit ceiling of 16 running instances in total, shared
@@ -385,15 +423,35 @@ check_capacity || exit 2
 version="v0.0.0-dist-test-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo dev)"
 if command -v goreleaser >/dev/null 2>&1; then
   echo "== build: goreleaser (installed on this host, snapshot mode)"
-  ( cd "$REPO" && goreleaser release --snapshot --clean --skip=publish ) >"$tmp/build.log" 2>&1
-  build_rc=$?
-  if [ "$build_rc" -ne 0 ] || [ ! -f "$REPO/dist/wgft-linux-amd64" ]; then
-    tail -n 60 "$tmp/build.log" >&2
-    echo "FAIL  build wgft via goreleaser"
-    exit 1
+  if [ -z "$SLOT" ]; then
+    ( cd "$REPO" && goreleaser release --snapshot --clean --skip=publish ) >"$tmp/build.log" 2>&1
+    build_rc=$?
+    if [ "$build_rc" -ne 0 ] || [ ! -f "$REPO/dist/wgft-linux-amd64" ]; then
+      tail -n 60 "$tmp/build.log" >&2
+      echo "FAIL  build wgft via goreleaser"
+      exit 1
+    fi
+    server_bin="$REPO/dist/wgft-linux-amd64"
+    server_sum="$REPO/dist/wgft-linux-amd64.sha256"
+  else
+    # Runs in other slots may build from the same checkout, and --clean empties $REPO/dist, so a
+    # slotted build waits for the shared build lock and copies this run's artefacts into $tmp before
+    # it lets go. The lock covers the build alone, not the run.
+    mkdir -p "$tmp/dist"
+    (
+      flock 9 || exit 1
+      ( cd "$REPO" && goreleaser release --snapshot --clean --skip=publish ) || exit 1
+      cp "$REPO/dist/wgft-linux-amd64" "$REPO/dist/wgft-linux-amd64.sha256" "$tmp/dist/"
+    ) 9>"${XDG_RUNTIME_DIR:-/tmp}/wgft-dist-vm-build.lock" >"$tmp/build.log" 2>&1
+    build_rc=$?
+    if [ "$build_rc" -ne 0 ] || [ ! -f "$tmp/dist/wgft-linux-amd64" ]; then
+      tail -n 60 "$tmp/build.log" >&2
+      echo "FAIL  build wgft via goreleaser"
+      exit 1
+    fi
+    server_bin="$tmp/dist/wgft-linux-amd64"
+    server_sum="$tmp/dist/wgft-linux-amd64.sha256"
   fi
-  server_bin="$REPO/dist/wgft-linux-amd64"
-  server_sum="$REPO/dist/wgft-linux-amd64.sha256"
 else
   echo "== build: goreleaser not installed on this host; falling back to 'go build' with the"
   echo "   same flags .goreleaser.yaml uses (CGO_ENABLED=0, -trimpath, matching -ldflags)"
@@ -454,15 +512,15 @@ bridge_cidr=$(incus network get "$bridge_net" ipv4.address 2>/dev/null)
 net_base=${bridge_cidr%.*}          # e.g. 10.151.78 from 10.151.78.1/24
 net_prefix=${bridge_cidr#*/}        # e.g. 24
 
-pick_ip() { # pick_ip <start>: first address in [start,250] on this subnet that does not answer a ping.
+pick_ip() { # pick_ip <start>: first address in [start,IP_LAST] on this subnet that does not answer a ping.
   local i
-  for i in $(seq "$1" 250); do
+  for i in $(seq "$1" "$IP_LAST"); do
     local cand="$net_base.$i"
     ping -c1 -W1 "$cand" >/dev/null 2>&1 || { echo "$cand"; return 0; }
   done
   return 1
 }
-server_ip=$(pick_ip 200) || { echo "FAIL  no free address for $server_vm on $bridge_cidr"; exit 1; }
+server_ip=$(pick_ip "$IP_FIRST") || { echo "FAIL  no free address for $server_vm on $bridge_cidr"; exit 1; }
 agent_ip=$(pick_ip $((${server_ip##*.} + 1))) || { echo "FAIL  no free address for $agent_vm on $bridge_cidr"; exit 1; }
 
 cat >"$tmp/netstatic.sh" <<'NETEOF'
