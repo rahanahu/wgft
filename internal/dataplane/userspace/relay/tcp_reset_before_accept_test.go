@@ -14,7 +14,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 
-	"github.com/rahanahu/wgft/internal/nettun"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -79,13 +78,13 @@ func (l *holdFirstListener) Accept() (net.Conn, error) {
 // rawPeer plays the client side of TCP by hand on a netstack device: the test writes the client's
 // segments into the device and reads the netstack's replies from it, in place of WireGuard.
 type rawPeer struct {
-	dev  *nettun.Device
+	dev  agentDev
 	src  netip.Addr
 	dst  netip.AddrPort
 	pkts chan []byte
 }
 
-func newRawPeer(dev *nettun.Device, src netip.Addr, dst netip.AddrPort) *rawPeer {
+func newRawPeer(dev agentDev, src netip.Addr, dst netip.AddrPort) *rawPeer {
 	p := &rawPeer{dev: dev, src: src, dst: dst, pkts: make(chan []byte, 64)}
 	go func() {
 		bufs := [][]byte{make([]byte, 65535)}
@@ -155,21 +154,15 @@ func (p *rawPeer) handshake(t *testing.T, srcPort uint16) uint32 {
 
 // A client can complete the handshake and reset the connection before the relay's accept loop gets
 // to it, for example while the loop works through a burst of connections. gVisor keeps such a
-// connection in the accept queue and Accept returns it, and gonet's RemoteAddr returns nil because
+// connection in the accept queue and Accept returns it (wgstack removes it from the queue instead;
+// TestTCPConnResetInAcceptQueueIsDropped checks that), and gonet's RemoteAddr returns nil because
 // the endpoint is no longer connected. The accept loop must refuse the connection without taking a
 // flow slot or asking the Admission Policy, and keep accepting. Before the fix, addrOf called
 // String on the nil address and the panic ended the agent.
 func TestTCPConnResetBeforeAcceptIsRefused(t *testing.T) {
 	const port = 7003
 	k := Key{proto.TCP, port}
-	agent, err := nettun.Create(cutAgentAddr, 1420)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		agent.Close()
-		agent.Wait()
-	})
+	agent := newAgentDev(t, "gvisor", cutAgentAddr)
 	peer := newRawPeer(agent, cutClientAddr, netip.AddrPortFrom(cutAgentAddr, port))
 
 	var (
@@ -284,5 +277,107 @@ func TestTCPConnResetBeforeAcceptIsRefused(t *testing.T) {
 	}
 	if !refusedLogged {
 		t.Errorf("no log line for the refused connection; logs: %q", logs)
+	}
+}
+
+// holdAcceptNet wraps a Network so that its TCP listener does not call Accept until the test
+// releases it. Connections that complete the handshake meanwhile wait in the netstack's accept queue.
+type holdAcceptNet struct {
+	Network
+	release chan struct{}
+}
+
+func (h holdAcceptNet) ListenTCP(port uint16) (net.Listener, error) {
+	ln, err := h.Network.ListenTCP(port)
+	if err != nil {
+		return nil, err
+	}
+	return &holdAcceptListener{Listener: ln, release: h.release}, nil
+}
+
+type holdAcceptListener struct {
+	net.Listener
+	release chan struct{}
+}
+
+func (l *holdAcceptListener) Accept() (net.Conn, error) {
+	<-l.release
+	return l.Listener.Accept()
+}
+
+// wgstack removes a connection that is reset while it waits in the accept queue and returns its
+// slot (wgstack.md, "中継から見える違い"), so the relay's accept loop never sees it: only the next
+// connection reaches the Admission Policy, and every slot is free once that one ends too.
+func TestTCPConnResetInAcceptQueueIsDropped(t *testing.T) {
+	const port = 7005
+	k := Key{proto.TCP, port}
+	agent := newAgentDev(t, "wgstack", cutAgentAddr)
+	peer := newRawPeer(agent, cutClientAddr, netip.AddrPortFrom(cutAgentAddr, port))
+	var (
+		mu       sync.Mutex
+		admitted []netip.Addr
+		released int
+	)
+	release := make(chan struct{})
+	pool := resource.NewPool(8)
+	m := New(holdAcceptNet{Network: netstackNet{dev: agent, addr: cutAgentAddr}, release: release}, Options{
+		TCPPool: pool,
+		Logf:    testLogf(t),
+		Admit: func(ruleID string, src netip.Addr, size int) (func(), bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			admitted = append(admitted, src)
+			return func() {
+				mu.Lock()
+				released++
+				mu.Unlock()
+			}, true
+		},
+	})
+	defer m.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	m.Apply(map[Key]Desired{k: {tcpEcho(t), "r1"}})
+	if st := statusOf(t, m, k); !st.Listening {
+		t.Fatalf("the listener did not open: %v", st.Err)
+	}
+	m.mu.Lock()
+	l := m.listeners[k]
+	m.mu.Unlock()
+
+	next := peer.handshake(t, 40001) // waits in the accept queue
+	peer.send(t, 40001, next, 0, header.TCPFlagRst)
+	close(release)
+	next = peer.handshake(t, 40002)
+	waitFor := func(what string, done func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !done() {
+			if time.Now().After(deadline) {
+				t.Fatal(what)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitFor("the accept loop did not take the next connection", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(admitted) > 0
+	})
+	peer.send(t, 40002, next, 0, header.TCPFlagRst)
+	waitFor("the slots were not returned after the connection ended", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return pool.InUse() == 0 && released == 1 && l.sessions() == 0
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(admitted) != 1 || admitted[0] != cutClientAddr {
+		t.Errorf("admitted sources = %v, want only %s for the second connection", admitted, cutClientAddr)
 	}
 }

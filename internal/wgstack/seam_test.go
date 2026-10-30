@@ -17,14 +17,8 @@ var (
 	_ interface{ UDPReceiveFault() error }  = (*Device)(nil)
 )
 
-func TestStubsReturnErrors(t *testing.T) {
+func TestListenErrors(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	if _, err := n.d.ListenUDP(netipAP(53)); err == nil {
-		t.Error("ListenUDP did not fail")
-	}
-	if _, err := n.d.DialPing(dutAddr, peerAddr); err == nil {
-		t.Error("DialPing did not fail")
-	}
 	if n.d.UDPReceiveFault() != nil {
 		t.Error("UDPReceiveFault")
 	}
@@ -34,6 +28,15 @@ func TestStubsReturnErrors(t *testing.T) {
 	listen(t, n, 80)
 	if _, err := n.d.ListenTCP(netipAP(80)); err == nil {
 		t.Error("second ListenTCP on the same port")
+	}
+	if _, err := n.d.ListenUDP(netipAP(0)); err == nil {
+		t.Error("ListenUDP on port 0")
+	}
+	if _, err := n.d.ListenUDP(netipAP(53)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.d.ListenUDP(netipAP(53)); err == nil {
+		t.Error("second ListenUDP on the same port")
 	}
 }
 

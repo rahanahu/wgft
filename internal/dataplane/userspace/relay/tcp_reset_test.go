@@ -13,7 +13,6 @@ import (
 
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 
-	"github.com/rahanahu/wgft/internal/nettun"
 	"github.com/rahanahu/wgft/internal/resource"
 	"github.com/rahanahu/wgft/proto"
 )
@@ -135,16 +134,13 @@ func waitUntil(t *testing.T, what func() string, done func() bool) {
 // that treats the reset like a FIN only half-closes the target connection and keeps reading from
 // it, so the session and both slots stay until the target closes.
 func TestTCPResetFromTheTunnelEndsTheSession(t *testing.T) {
+	forEachAgentEngine(t, testTCPResetFromTheTunnelEndsTheSession)
+}
+
+func testTCPResetFromTheTunnelEndsTheSession(t *testing.T, engine string) {
 	const port = 7004
 	k := Key{proto.TCP, port}
-	agent, err := nettun.Create(cutAgentAddr, 1420)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		agent.Close()
-		agent.Wait()
-	})
+	agent := newAgentDev(t, engine, cutAgentAddr)
 	peer := newRawPeer(agent, cutClientAddr, netip.AddrPortFrom(cutAgentAddr, port))
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -194,6 +190,10 @@ func TestTCPResetFromTheTunnelEndsTheSession(t *testing.T) {
 // that comes while the relay is still dialling the agent must reset the conn the dial returns:
 // relaying it would let netpipe close it with a FIN on the public side's read failure.
 func TestTCPCutReachesTheAgentAsReset(t *testing.T) {
+	forEachAgentEngine(t, testTCPCutReachesTheAgentAsReset)
+}
+
+func testTCPCutReachesTheAgentAsReset(t *testing.T, engine string) {
 	closeSessions := func(m *Manager) {
 		if n := m.CloseSessions(func(string, netip.Addr) bool { return false }); n != 1 {
 			t.Errorf("CloseSessions = %d, want 1", n)
@@ -211,7 +211,7 @@ func TestTCPCutReachesTheAgentAsReset(t *testing.T) {
 		{"rule removed while dialing", true, func(m *Manager) { m.Apply(nil) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client, agentNet := netstackPair(t)
+			client, agentNet := netstackPair(t, engine)
 			const agentPort = 7005
 			ln, err := agentNet.dev.ListenTCP(netip.AddrPortFrom(cutAgentAddr, agentPort))
 			if err != nil {

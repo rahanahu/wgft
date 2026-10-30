@@ -67,6 +67,8 @@ func agentSpecs() []spec {
 		{Env: "WGFT_MODE", Flag: "mode", Default: "",
 			Usage: "forwarding mode userspace or kernel, env WGFT_MODE; unset means userspace, and kernel is Linux only"},
 		agentWGInterfaceSpec().withUsage("kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE; unused in userspace mode"),
+		{Env: "WGFT_AGENT_NETSTACK", Flag: "agent-netstack", Default: "",
+			Usage: "userspace-mode network stack gvisor or wgstack, env WGFT_AGENT_NETSTACK; unset means gvisor, and wgstack is experimental"},
 		{Env: allowtargets.Env, Flag: "agent-allow-targets", Default: "", Slice: true,
 			Usage: "comma-separated targets the server may send traffic to, env " + allowtargets.Env + "; entries are CIDR, CIDR:port or CIDR:lo-hi; unset means no restriction"},
 	}, limitSpecs()...)
@@ -89,6 +91,9 @@ func agentTeardownSpecs() []spec {
 func logUnusedKernelLimits(opts agent.Options, c *config) {
 	if opts.Mode != "kernel" {
 		return
+	}
+	if c.source("WGFT_AGENT_NETSTACK") != "default" {
+		log.Printf("WGFT_AGENT_NETSTACK: unused in kernel mode, which runs no network stack in the process; the setting is kept so the same agent.env works in both modes")
 	}
 	var set []string
 	for _, env := range []string{"WGFT_MAX_UDP_FLOWS", "WGFT_MAX_TCP_FLOWS"} {
@@ -145,6 +150,12 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 	if err := validateInterfaceName("WGFT_WG_INTERFACE", c.str("WGFT_WG_INTERFACE")); err != nil {
 		return agent.Options{}, nil, err
 	}
+	// WGFT_AGENT_NETSTACK は値そのものの誤りをここで弾く。カーネルモードでは使わないが、モードを切り替えたときに
+	// 起動の後半で初めて失敗しないよう、モードによらず確かめる(wgstack.md の「実装の選択」)
+	netstack := c.str("WGFT_AGENT_NETSTACK")
+	if netstack != "" && netstack != "gvisor" && netstack != "wgstack" {
+		return agent.Options{}, nil, configErrorf("WGFT_AGENT_NETSTACK", "must be gvisor or wgstack, not %q", netstack)
+	}
 	limits, err := limitsFromConfig(c)
 	if err != nil {
 		return agent.Options{}, nil, err
@@ -166,6 +177,7 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 		Join:            join,
 		Mode:            mode,
 		Name:            c.str("WGFT_NAME"),
+		Netstack:        netstack,
 		Version:         effectiveVersion(),
 		WGInterface:     c.str("WGFT_WG_INTERFACE"),
 	}, c, nil
@@ -222,6 +234,9 @@ On the VPS, against the admin API:
 			c.print(os.Stderr)
 			applyMemoryLimit(os.Stderr, opts.Limits, true)
 			logUnusedKernelLimits(opts, c)
+			if opts.Mode != "kernel" && opts.Netstack == "wgstack" {
+				log.Printf("warning: WGFT_AGENT_NETSTACK=wgstack selects wgft's own TCP/IP stack for the userspace mode; it is experimental, and its transfer quality and resource behavior are not covered by the compatibility guarantee")
+			}
 			return agent.Run(opts)
 		},
 	}

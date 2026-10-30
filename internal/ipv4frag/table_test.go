@@ -1,4 +1,4 @@
-package nettun
+package ipv4frag
 
 import (
 	"bytes"
@@ -26,13 +26,13 @@ func reasmIPv4Fragment(proto byte, id uint16, offset int, more bool, tos byte, o
 	copy(p[16:20], []byte{10, 1, 1, 2})
 	copy(p[20:], options)
 	copy(p[hlen:], data)
-	ipv4SetChecksum(p[:hlen])
+	SetChecksum(p[:hlen])
 	return p
 }
 
-func reasmReassembler(t *testing.T, entries, pieces, budget int) *ipv4Reassembly {
+func reasmReassembler(t *testing.T, entries, pieces, budget int) *Table {
 	t.Helper()
-	r, err := newIPv4Reassembly(ipv4ReassemblyLimits{Entries: entries, Fragments: pieces, Bytes: budget, Lifetime: 2 * time.Second})
+	r, err := New(Limits{Entries: entries, Fragments: pieces, Bytes: budget, Lifetime: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +44,8 @@ func TestIPv4ReassemblyRejectsDontFragmentWithFragments(t *testing.T) {
 	r := reasmReassembler(t, 1, 2, 1024)
 	p := reasmIPv4Fragment(17, 7, 0, true, 0, nil, []byte("abcdefgh"))
 	binary.BigEndian.PutUint16(p[6:], 0x6000)
-	ipv4SetChecksum(p[:20])
-	if got := r.Process(p, time.Unix(100, 0)); got.Status != ipv4FragmentRejected || got.Notice.Reason != ipv4ReasonMalformed {
+	SetChecksum(p[:20])
+	if got := r.Process(p, time.Unix(100, 0)); got.Status != Rejected || got.Notice.Reason != ReasonMalformed {
 		t.Fatalf("DF+MF fragment = %+v, want malformed rejection", got)
 	}
 }
@@ -60,18 +60,18 @@ func TestIPv4ReassemblyAllProtocolsOptionsAndECN(t *testing.T) {
 			laterOpts := []byte{0x82, 4, 7, 9} // copied TLV data may mutate in transit
 			first := reasmIPv4Fragment(proto, 7, 0, true, 2, firstOpts, []byte("abcdefgh"))
 			last := reasmIPv4Fragment(proto, 7, 8, false, 3, laterOpts, []byte("ijk"))
-			if got := r.Process(last, now).Status; got != ipv4FragmentHeld {
+			if got := r.Process(last, now).Status; got != Held {
 				t.Fatalf("last first: %v", got)
 			}
-			if got := r.Process(last, now).Status; got != ipv4FragmentDuplicate {
+			if got := r.Process(last, now).Status; got != Duplicate {
 				t.Fatalf("duplicate: %v", got)
 			}
 			res := r.Process(first, now)
-			if res.Status != ipv4FragmentComplete {
+			if res.Status != Complete {
 				t.Fatalf("complete: %v / %+v", res.Status, res.Notice)
 			}
 			out := res.Packet
-			if !bytes.Equal(out[20:28], firstOpts) || !bytes.Equal(out[28:], []byte("abcdefghijk")) || out[1]&3 != 3 || !ipv4ChecksumOK(out[:28]) || binary.BigEndian.Uint16(out[6:]) != 0 || binary.BigEndian.Uint16(out[2:]) != uint16(len(out)) || out[9] != proto {
+			if !bytes.Equal(out[20:28], firstOpts) || !bytes.Equal(out[28:], []byte("abcdefghijk")) || out[1]&3 != 3 || !ChecksumOK(out[:28]) || binary.BigEndian.Uint16(out[6:]) != 0 || binary.BigEndian.Uint16(out[2:]) != uint16(len(out)) || out[9] != proto {
 				t.Fatalf("bad completed packet: %x", out)
 			}
 			used, entries, pieces := r.Usage()
@@ -90,11 +90,11 @@ func TestIPv4ReassemblyMixedECTKeepsFirstOrCE(t *testing.T) {
 		r := reasmReassembler(t, 1, 2, 1024)
 		first := reasmIPv4Fragment(6, 1, 0, true, tc.first, nil, []byte("abcdefgh"))
 		last := reasmIPv4Fragment(6, 1, 8, false, tc.later, nil, []byte("i"))
-		if got := r.Process(last, now).Status; got != ipv4FragmentHeld {
+		if got := r.Process(last, now).Status; got != Held {
 			t.Fatal(got)
 		}
 		res := r.Process(first, now)
-		if res.Status != ipv4FragmentComplete || res.Packet[1]&3 != tc.want {
+		if res.Status != Complete || res.Packet[1]&3 != tc.want {
 			t.Fatalf("ECN %d/%d: status %v, want %d", tc.first, tc.later, res.Status, tc.want)
 		}
 	}
@@ -105,20 +105,20 @@ func TestIPv4ReassemblyOverlapConflictAndDuplicate(t *testing.T) {
 	first := reasmIPv4Fragment(17, 1, 0, true, 2, []byte{0x82, 4, 7, 8}, []byte("abcdefghabcdefgh"))
 	partial := reasmIPv4Fragment(17, 1, 8, false, 2, []byte{0x82, 4, 7, 9}, []byte("xxxxxxxx"))
 	r := reasmReassembler(t, 1, 3, 2048)
-	if got := r.Process(first, now).Status; got != ipv4FragmentHeld {
+	if got := r.Process(first, now).Status; got != Held {
 		t.Fatal(got)
 	}
-	if got := r.Process(first, now).Status; got != ipv4FragmentDuplicate {
+	if got := r.Process(first, now).Status; got != Duplicate {
 		t.Fatal(got)
 	}
 	marked := append([]byte(nil), first...)
 	marked[1] = (marked[1] &^ 3) | 3
 	marked[23] = 9
-	ipv4SetChecksum(marked[:24])
-	if got := r.Process(marked, now).Status; got != ipv4FragmentDuplicate {
+	SetChecksum(marked[:24])
+	if got := r.Process(marked, now).Status; got != Duplicate {
 		t.Fatalf("CE-marked duplicate: %v", got)
 	}
-	if res := r.Process(partial, now); res.Status != ipv4FragmentRejected || res.Notice.Reason != ipv4ReasonOverlap {
+	if res := r.Process(partial, now); res.Status != Rejected || res.Notice.Reason != ReasonOverlap {
 		t.Fatalf("overlap: %+v", res)
 	}
 	if _, e, p := r.Usage(); e != 0 || p != 0 {
@@ -126,10 +126,10 @@ func TestIPv4ReassemblyOverlapConflictAndDuplicate(t *testing.T) {
 	}
 	first = reasmIPv4Fragment(17, 2, 0, true, 0, nil, []byte("abcdefgh"))
 	last := reasmIPv4Fragment(17, 2, 8, false, 0, nil, []byte("ijk"))
-	if got := r.Process(first, now).Status; got != ipv4FragmentHeld {
+	if got := r.Process(first, now).Status; got != Held {
 		t.Fatal(got)
 	}
-	if got := r.Process(last, now).Status; got != ipv4FragmentComplete {
+	if got := r.Process(last, now).Status; got != Complete {
 		t.Fatal(got)
 	}
 }
@@ -138,22 +138,22 @@ func TestIPv4ReassemblyLateFirstLengthAndLastConflict(t *testing.T) {
 	now := time.Unix(100, 0)
 	r := reasmReassembler(t, 1, 3, 2048)
 	far := reasmIPv4Fragment(6, 9, 65496, false, 0, []byte{0x82, 4, 7, 8}, []byte("abcdefghijklmnop"))
-	if got := r.Process(far, now).Status; got != ipv4FragmentHeld {
+	if got := r.Process(far, now).Status; got != Held {
 		t.Fatal(got)
 	}
 	first := reasmIPv4Fragment(6, 9, 0, true, 0, []byte{0x82, 4, 7, 8, 0, 0, 0, 0}, []byte("abcdefgh"))
-	if res := r.Process(first, now); res.Status != ipv4FragmentRejected || res.Notice.Reason != ipv4ReasonConflict {
+	if res := r.Process(first, now); res.Status != Rejected || res.Notice.Reason != ReasonConflict {
 		t.Fatalf("late IHL: %+v", res)
 	}
 	if _, e, p := r.Usage(); e != 0 || p != 0 {
 		t.Fatalf("late IHL retained: %d/%d", e, p)
 	}
 	far = reasmIPv4Fragment(6, 10, 16, true, 0, nil, []byte("abcdefgh"))
-	if got := r.Process(far, now).Status; got != ipv4FragmentHeld {
+	if got := r.Process(far, now).Status; got != Held {
 		t.Fatal(got)
 	}
 	last := reasmIPv4Fragment(6, 10, 8, false, 0, nil, []byte("12345678"))
-	if res := r.Process(last, now); res.Status != ipv4FragmentRejected || res.Notice.Reason != ipv4ReasonConflict {
+	if res := r.Process(last, now); res.Status != Rejected || res.Notice.Reason != ReasonConflict {
 		t.Fatalf("last below prior part: %+v", res)
 	}
 }
@@ -163,38 +163,38 @@ func TestIPv4ReassemblyCapacityExpiryAndClose(t *testing.T) {
 	r := reasmReassembler(t, 1, 1, 1024)
 	first := reasmIPv4Fragment(6, 1, 0, true, 0, nil, []byte("abcdefgh"))
 	other := reasmIPv4Fragment(1, 2, 0, true, 0, nil, []byte("abcdefgh"))
-	if got := r.Process(first, now).Status; got != ipv4FragmentHeld {
+	if got := r.Process(first, now).Status; got != Held {
 		t.Fatal(got)
 	}
 	// The one-key table is full: the new key evicts the older one instead of
 	// being refused. The duplicate below is the retained (new) key.
-	if res := r.Process(other, now); res.Status != ipv4FragmentHeld || res.Notice != (ipv4FragmentNotice{}) {
+	if res := r.Process(other, now); res.Status != Held || res.Notice != (Notice{}) {
 		t.Fatalf("second key: %+v", res)
 	}
 	if got := r.Evicted(); got != 1 {
 		t.Fatalf("evicted = %d, want 1", got)
 	}
-	if got := r.Process(other, now).Status; got != ipv4FragmentDuplicate {
+	if got := r.Process(other, now).Status; got != Duplicate {
 		t.Fatal(got)
 	}
 	if got := r.Sweep(now.Add(time.Second)); len(got) != 0 {
 		t.Fatalf("early expiry: %+v", got)
 	}
 	got := r.Sweep(now.Add(2 * time.Second))
-	if len(got) != 1 || !got[0].HasFirst || got[0].Reason != ipv4ReasonExpired || got[0].QuoteLen != 28 {
+	if len(got) != 1 || !got[0].HasFirst || got[0].Reason != ReasonExpired || got[0].QuoteLen != 28 {
 		t.Fatalf("expiry: %+v", got)
 	}
 	if used, e, p := r.Usage(); used != r.baseCost || e != 0 || p != 0 {
 		t.Fatalf("expiry retained: %d/%d/%d", used, e, p)
 	}
-	if got := r.Process(first, now.Add(3*time.Second)).Status; got != ipv4FragmentHeld {
+	if got := r.Process(first, now.Add(3*time.Second)).Status; got != Held {
 		t.Fatal(got)
 	}
 	r.Close()
 	if _, e, p := r.Usage(); e != 0 || p != 0 {
 		t.Fatalf("close retained: %d/%d", e, p)
 	}
-	if got := r.Process(first, now.Add(4*time.Second)).Status; got != ipv4FragmentClosed {
+	if got := r.Process(first, now.Add(4*time.Second)).Status; got != Closed {
 		t.Fatal(got)
 	}
 }
@@ -204,35 +204,35 @@ func TestIPv4ReassemblyMalformedOptionsAndLengths(t *testing.T) {
 	r := reasmReassembler(t, 1, 3, 2048)
 	p := reasmIPv4Fragment(17, 1, 0, true, 0, nil, []byte("abcdefgh"))
 	p[10] ^= 1
-	if res := r.Process(p, now); res.Status != ipv4FragmentRejected || res.Notice.Reason != ipv4ReasonMalformed {
+	if res := r.Process(p, now); res.Status != Rejected || res.Notice.Reason != ReasonMalformed {
 		t.Fatalf("checksum: %+v", res)
 	}
 	p = reasmIPv4Fragment(17, 1, 0, true, 0, nil, []byte("abcdefg"))
-	if res := r.Process(p, now); res.Status != ipv4FragmentRejected {
+	if res := r.Process(p, now); res.Status != Rejected {
 		t.Fatalf("alignment: %+v", res)
 	}
 	p = reasmIPv4Fragment(17, 1, 8, false, 0, []byte{0x44, 4, 1, 2}, []byte("x"))
-	if res := r.Process(p, now); res.Status != ipv4FragmentRejected || res.Notice.Reason != ipv4ReasonOptions {
+	if res := r.Process(p, now); res.Status != Rejected || res.Notice.Reason != ReasonOptions {
 		t.Fatalf("noncopied: %+v", res)
 	}
 	p = reasmIPv4Fragment(17, 1, 8, false, 0, []byte{0x82, 1, 0, 0}, []byte("x"))
-	if res := r.Process(p, now); res.Status != ipv4FragmentRejected || res.Notice.Pointer != 20 {
+	if res := r.Process(p, now); res.Status != Rejected || res.Notice.Pointer != 20 {
 		t.Fatalf("bad option: %+v", res)
 	}
 	first := reasmIPv4Fragment(17, 2, 0, true, 0, []byte{0x82, 4, 7, 8}, []byte("abcdefgh"))
 	later := reasmIPv4Fragment(17, 2, 8, false, 0, []byte{0x83, 4, 7, 8}, []byte("x"))
-	if got := r.Process(first, now).Status; got != ipv4FragmentHeld {
+	if got := r.Process(first, now).Status; got != Held {
 		t.Fatal(got)
 	}
-	if res := r.Process(later, now); res.Status != ipv4FragmentRejected || res.Notice.Reason != ipv4ReasonOptions {
+	if res := r.Process(later, now); res.Status != Rejected || res.Notice.Reason != ReasonOptions {
 		t.Fatalf("copied type mismatch: %+v", res)
 	}
 }
 
 func TestIPv4ReassemblyCompletionCopyBudget(t *testing.T) {
 	now := time.Unix(100, 0)
-	limits := ipv4ReassemblyLimits{Entries: 1, Fragments: 2, Bytes: 1024, Lifetime: time.Second}
-	r, err := newIPv4Reassembly(limits)
+	limits := Limits{Entries: 1, Fragments: 2, Bytes: 1024, Lifetime: time.Second}
+	r, err := New(limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,10 +241,10 @@ func TestIPv4ReassemblyCompletionCopyBudget(t *testing.T) {
 	r.limits.Bytes = r.baseCost + 8 + 3 + 31 - 1
 	first := reasmIPv4Fragment(17, 1, 0, true, 0, nil, []byte("abcdefgh"))
 	last := reasmIPv4Fragment(17, 1, 8, false, 0, nil, []byte("ijk"))
-	if got := r.Process(first, now).Status; got != ipv4FragmentHeld {
+	if got := r.Process(first, now).Status; got != Held {
 		t.Fatal(got)
 	}
-	if got := r.Process(last, now).Status; got != ipv4FragmentCapacity {
+	if got := r.Process(last, now).Status; got != Capacity {
 		t.Fatalf("copy reservation: %v", got)
 	}
 	if _, e, p := r.Usage(); e != 1 || p != 1 {
@@ -253,7 +253,7 @@ func TestIPv4ReassemblyCompletionCopyBudget(t *testing.T) {
 }
 
 // reasmHeldIDs returns the IDs of the keys the table currently retains.
-func reasmHeldIDs(r *ipv4Reassembly) map[uint16]bool {
+func reasmHeldIDs(r *Table) map[uint16]bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ids := map[uint16]bool{}
@@ -265,21 +265,21 @@ func reasmHeldIDs(r *ipv4Reassembly) map[uint16]bool {
 	return ids
 }
 
-func reasmHold(t *testing.T, r *ipv4Reassembly, packet []byte, now time.Time) {
+func reasmHold(t *testing.T, r *Table, packet []byte, now time.Time) {
 	t.Helper()
-	if res := r.Process(packet, now); res.Status != ipv4FragmentHeld || res.Notice != (ipv4FragmentNotice{}) {
+	if res := r.Process(packet, now); res.Status != Held || res.Notice != (Notice{}) {
 		t.Fatalf("hold: %+v", res)
 	}
 }
 
-func reasmWantEvicted(t *testing.T, r *ipv4Reassembly, want uint64) {
+func reasmWantEvicted(t *testing.T, r *Table, want uint64) {
 	t.Helper()
 	if got := r.Evicted(); got != want {
 		t.Fatalf("evicted = %d, want %d", got, want)
 	}
 }
 
-func reasmWantIDs(t *testing.T, r *ipv4Reassembly, want ...uint16) {
+func reasmWantIDs(t *testing.T, r *Table, want ...uint16) {
 	t.Helper()
 	got := reasmHeldIDs(r)
 	if len(got) != len(want) {
@@ -337,8 +337,8 @@ func TestIPv4ReassemblyEvictsOldestForBytes(t *testing.T) {
 
 func TestIPv4ReassemblyEvictsOldestForCompletionCopy(t *testing.T) {
 	t0 := time.Unix(100, 0)
-	limits := ipv4ReassemblyLimits{Entries: 2, Fragments: 3, Bytes: 1024, Lifetime: time.Second}
-	r, err := newIPv4Reassembly(limits)
+	limits := Limits{Entries: 2, Fragments: 3, Bytes: 1024, Lifetime: time.Second}
+	r, err := New(limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestIPv4ReassemblyEvictsOldestForCompletionCopy(t *testing.T) {
 	reasmHold(t, r, reasmIPv4Fragment(17, 9, 0, true, 0, nil, []byte("oldoldol")), t0)
 	reasmHold(t, r, reasmIPv4Fragment(17, 1, 0, true, 0, nil, []byte("abcdefgh")), t0.Add(time.Millisecond))
 	res := r.Process(reasmIPv4Fragment(17, 1, 8, false, 0, nil, []byte("ijk")), t0.Add(2*time.Millisecond))
-	if res.Status != ipv4FragmentComplete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijk")) {
+	if res.Status != Complete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijk")) {
 		t.Fatalf("completion after eviction: %+v", res)
 	}
 	reasmWantIDs(t, r)
@@ -388,7 +388,7 @@ func TestIPv4ReassemblyExactCompletionCopyFitDoesNotEvict(t *testing.T) {
 		r.limits.Bytes = r.baseCost + 8 + 3 + 31
 		reasmHold(t, r, first, t0)
 		res := r.Process(last, t0)
-		if res.Status != ipv4FragmentComplete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijk")) {
+		if res.Status != Complete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijk")) {
 			t.Fatalf("exact completion fit alone: %+v", res)
 		}
 		reasmWantEvicted(t, r, 0)
@@ -399,7 +399,7 @@ func TestIPv4ReassemblyExactCompletionCopyFitDoesNotEvict(t *testing.T) {
 		reasmHold(t, r, reasmIPv4Fragment(17, 9, 0, true, 0, nil, []byte("oldoldol")), t0)
 		reasmHold(t, r, first, t0.Add(time.Millisecond))
 		res := r.Process(last, t0.Add(2*time.Millisecond))
-		if res.Status != ipv4FragmentComplete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijk")) {
+		if res.Status != Complete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijk")) {
 			t.Fatalf("exact completion fit with an older key: %+v", res)
 		}
 		reasmWantIDs(t, r, 9)
@@ -422,7 +422,7 @@ func TestIPv4ReassemblyNonCompletingFragmentDoesNotEvictForCopy(t *testing.T) {
 	reasmWantIDs(t, r, 9, 1)
 	reasmWantEvicted(t, r, 0)
 	res := r.Process(reasmIPv4Fragment(17, 1, 8, true, 0, nil, []byte("ijklmnop")), t0.Add(3*time.Millisecond))
-	if res.Status != ipv4FragmentComplete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijklmnopqrs")) {
+	if res.Status != Complete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijklmnopqrs")) {
 		t.Fatalf("completing fragment: %+v", res)
 	}
 	reasmWantIDs(t, r)
@@ -435,7 +435,7 @@ func TestIPv4ReassemblyNeverEvictsCurrentKey(t *testing.T) {
 	r := reasmReassembler(t, 2, 4, 4096)
 	r.limits.Bytes = r.baseCost + 8 + 4
 	reasmHold(t, r, reasmIPv4Fragment(17, 1, 0, true, 0, nil, []byte("aaaaaaaa")), t0)
-	if res := r.Process(reasmIPv4Fragment(17, 1, 16, true, 0, nil, []byte("AAAAAAAA")), t0); res.Status != ipv4FragmentCapacity {
+	if res := r.Process(reasmIPv4Fragment(17, 1, 16, true, 0, nil, []byte("AAAAAAAA")), t0); res.Status != Capacity {
 		t.Fatalf("current key alone: %+v", res)
 	}
 	reasmWantIDs(t, r, 1)
@@ -446,7 +446,7 @@ func TestIPv4ReassemblyNeverEvictsCurrentKey(t *testing.T) {
 	// The per-datagram fragment cap equals the whole table and stays a refusal.
 	r = reasmReassembler(t, 1, 1, 4096)
 	reasmHold(t, r, reasmIPv4Fragment(17, 1, 0, true, 0, nil, []byte("aaaaaaaa")), t0)
-	if res := r.Process(reasmIPv4Fragment(17, 1, 16, true, 0, nil, []byte("AAAAAAAA")), t0); res.Status != ipv4FragmentCapacity {
+	if res := r.Process(reasmIPv4Fragment(17, 1, 16, true, 0, nil, []byte("AAAAAAAA")), t0); res.Status != Capacity {
 		t.Fatalf("one-slot table: %+v", res)
 	}
 	reasmWantIDs(t, r, 1)
@@ -460,7 +460,7 @@ func TestIPv4ReassemblyNoEvictableEntry(t *testing.T) {
 	r := reasmReassembler(t, 2, 2, 4096)
 	reasmHold(t, r, reasmIPv4Fragment(17, 1, 0, true, 0, nil, []byte("aaaaaaaa")), t0)
 	reasmHold(t, r, reasmIPv4Fragment(17, 1, 16, true, 0, nil, []byte("AAAAAAAA")), t0)
-	if res := r.Process(reasmIPv4Fragment(17, 1, 32, true, 0, nil, []byte("xxxxxxxx")), t0); res.Status != ipv4FragmentCapacity || res.Notice.Reason != ipv4ReasonCapacity {
+	if res := r.Process(reasmIPv4Fragment(17, 1, 32, true, 0, nil, []byte("xxxxxxxx")), t0); res.Status != Capacity || res.Notice.Reason != ReasonCapacity {
 		t.Fatalf("slot-bound datagram: %+v", res)
 	}
 	reasmWantIDs(t, r, 1)
@@ -469,7 +469,7 @@ func TestIPv4ReassemblyNoEvictableEntry(t *testing.T) {
 	// refused and not retained.
 	r = reasmReassembler(t, 2, 2, 4096)
 	r.limits.Bytes = r.baseCost + 7
-	if res := r.Process(reasmIPv4Fragment(17, 2, 0, true, 0, nil, []byte("bbbbbbbb")), t0); res.Status != ipv4FragmentCapacity {
+	if res := r.Process(reasmIPv4Fragment(17, 2, 0, true, 0, nil, []byte("bbbbbbbb")), t0); res.Status != Capacity {
 		t.Fatalf("oversized new key: %+v", res)
 	}
 	reasmWantIDs(t, r)
@@ -534,7 +534,7 @@ func TestIPv4ReassemblyAdjacentFragmentsCompleteInFullTable(t *testing.T) {
 	}
 	reasmHold(t, r, reasmIPv4Fragment(17, 1, 0, true, 0, nil, []byte("abcdefgh")), t0.Add(time.Second))
 	res := r.Process(reasmIPv4Fragment(17, 1, 8, false, 0, nil, []byte("ijk")), t0.Add(time.Second))
-	if res.Status != ipv4FragmentComplete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijk")) {
+	if res.Status != Complete || !bytes.Equal(res.Packet[20:], []byte("abcdefghijk")) {
 		t.Fatalf("adjacent fragments in a full table: %+v", res)
 	}
 	reasmWantEvicted(t, r, 2)
@@ -545,7 +545,7 @@ func TestIPv4ReassemblyAdjacentFragmentsCompleteInFullTable(t *testing.T) {
 }
 
 // reasmCheckLedger checks the structural invariants the eviction path must keep.
-func reasmCheckLedger(t *testing.T, r *ipv4Reassembly, step int) {
+func reasmCheckLedger(t *testing.T, r *Table, step int) {
 	t.Helper()
 	r.mu.Lock()
 	sum, pieces, entries := 0, 0, 0
@@ -618,12 +618,12 @@ func TestIPv4ReassemblyEvictionLedgerInvariant(t *testing.T) {
 			if rng.IntN(2) == 0 {
 				first, last = last, first
 			}
-			if res := r.Process(first, now); res.Status != ipv4FragmentHeld {
+			if res := r.Process(first, now); res.Status != Held {
 				t.Fatalf("step %d: legit first: %+v", step, res)
 			}
 			res := r.Process(last, now)
 			want := append(append([]byte(nil), payload...), tail...)
-			if res.Status != ipv4FragmentComplete || !bytes.Equal(res.Packet[20:], want) {
+			if res.Status != Complete || !bytes.Equal(res.Packet[20:], want) {
 				t.Fatalf("step %d: legit datagram: %+v", step, res)
 			}
 			counts["complete"]++
@@ -664,7 +664,7 @@ func TestIPv4ReassemblyEvictionLedgerInvariant(t *testing.T) {
 	t.Logf("evicted %d, counts %v", lastEvicted, counts)
 }
 
-func statusName(s ipv4FragmentStatus) string {
+func statusName(s Status) string {
 	return [...]string{"held", "complete", "duplicate", "rejected", "capacity", "closed"}[s]
 }
 

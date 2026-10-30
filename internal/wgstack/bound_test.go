@@ -24,7 +24,11 @@ func checkHeld(t *testing.T, n *testNet) Stats {
 	if held := st.ChunkBytes + st.RecordBytes + st.IntervalBytes; held > b.FloorConn+b.Boost {
 		t.Fatalf("held buffers %d exceed the bound %d", held, b.FloorConn+b.Boost)
 	}
-	if st.HeldChunksInPool*chunkSize != st.ChunkBytes {
+	if st.UDPRxBytes > udpRxBytes || st.UDPRxDatagrams > udpRxDatagrams || st.UDPTxBytes > udpTxBytes || st.UDPTxDatagrams > udpTxDatagrams ||
+		int64(st.FragBytes) > b.Frag || st.PingEndpoints > pingEndpoints {
+		t.Fatalf("UDP, reassembly or ping beyond the bound: %+v", st)
+	}
+	if st.HeldChunksInPool*chunkSize != st.ChunkBytes+st.UDPRxBytes+st.UDPTxBytes {
 		t.Fatalf("chunk accounting: pool says %d chunks, rings hold %d bytes", st.HeldChunksInPool, st.ChunkBytes)
 	}
 	for i := range s.conns {

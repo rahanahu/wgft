@@ -2,6 +2,7 @@ package wgstack
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/netip"
@@ -263,3 +264,60 @@ func acceptOne(t testing.TB, l *TCPListener) *Conn {
 }
 
 func netipAP(port uint16) netip.AddrPort { return netip.AddrPortFrom(dutAddr, port) }
+
+// drainRaw は Device が今送る packet をそのまま読む。
+func (n *testNet) drainRaw() [][]byte {
+	n.t.Helper()
+	var res [][]byte
+	for range 100000 {
+		k := n.d.Poll(n.buf)
+		if k == 0 {
+			return res
+		}
+		if k > testMTU {
+			n.t.Fatalf("packet of %d bytes exceeds the MTU", k)
+		}
+		if _, d := parseIPv4(n.buf[:k]); d != ipv4OK {
+			n.t.Fatalf("Device sent a bad IPv4 packet: %v", d)
+		}
+		res = append(res, append([]byte(nil), n.buf[:k]...))
+	}
+	n.t.Fatal("Device kept sending")
+	return nil
+}
+
+// buildUDP は peer から Device への UDP の datagram を作る。
+func buildUDP(src netip.AddrPort, dport uint16, payload []byte) []byte {
+	ulen := udpHeaderLen + len(payload)
+	b := make([]byte, ipHeaderLen+ulen)
+	writeIPv4Header(b, len(b), 7, protoUDP, addrBits(src.Addr()), addrBits(dutAddr))
+	u := b[ipHeaderLen:]
+	binary.BigEndian.PutUint16(u[0:2], src.Port())
+	binary.BigEndian.PutUint16(u[2:4], dport)
+	binary.BigEndian.PutUint16(u[4:6], uint16(ulen))
+	copy(u[8:], payload)
+	cs := ^checksum(pseudoSum(addrBits(src.Addr()), addrBits(dutAddr), protoUDP, ulen), u)
+	if cs == 0 {
+		cs = 0xffff
+	}
+	binary.BigEndian.PutUint16(u[6:8], cs)
+	return b
+}
+
+// buildICMP は peer から Device への ICMP の message を作る。
+func buildICMP(src netip.Addr, msg []byte) []byte {
+	b := make([]byte, ipHeaderLen+len(msg))
+	writeIPv4Header(b, len(b), 9, protoICMP, addrBits(src), addrBits(dutAddr))
+	m := b[ipHeaderLen:]
+	copy(m, msg)
+	m[2], m[3] = 0, 0
+	binary.BigEndian.PutUint16(m[2:4], ^checksum(0, m))
+	return b
+}
+
+func (n *testNet) write(pkt []byte) {
+	n.t.Helper()
+	if _, err := n.d.Write([][]byte{pkt}, 0); err != nil {
+		n.t.Fatalf("Write: %v", err)
+	}
+}

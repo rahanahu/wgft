@@ -88,7 +88,7 @@ func TestAgentCommandsRegisterTheSpecsTheyResolve(t *testing.T) {
 	root := newRootCmd()
 	assertRegistersSpecs(t, commandAt(t, root, "agent", "run"), agentSpecs(), nil)
 	assertRegistersSpecs(t, commandAt(t, root, "agent", "doctor"), agentSpecs(),
-		map[string]bool{"join": true, "name": true, "mode": true, "wg-interface": true, "agent-allow-targets": true})
+		map[string]bool{"join": true, "name": true, "mode": true, "wg-interface": true, "agent-allow-targets": true, "agent-netstack": true})
 	assertRegistersSpecs(t, commandAt(t, root, "agent", "teardown"), agentTeardownSpecs(), nil)
 	assertRegistersSpecs(t, commandAt(t, root, "agent", "pubkey"), agentCredentialsSpecs(), nil)
 	assertRegistersSpecs(t, commandAt(t, root, "agent", "rotate-key"), agentCredentialsSpecs(), nil)

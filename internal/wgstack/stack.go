@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/ipv4frag"
 )
 
 var logf = log.Printf
@@ -64,10 +66,14 @@ type stack struct {
 	listeners map[netip.AddrPort]*listener
 	queued    int // accept の待ち行列の全体の数
 
-	out    output
-	wheel  *wheel
-	chunks chunkPool
-	pool   *boostPool
+	out output
+	udp udpState
+
+	frag          *ipv4frag.Table
+	fragNextSweep atomic.Int64
+	wheel         *wheel
+	chunks        chunkPool
+	pool          *boostPool
 
 	rngMu sync.Mutex
 	rng   *mrand.ChaCha8
@@ -75,6 +81,11 @@ type stack struct {
 	chMu    sync.Mutex
 	chSec   int64
 	chCount int
+
+	icmpMu    sync.Mutex
+	icmpSec   int64
+	icmpCount int
+	ping      pingTable
 
 	ipID atomic.Uint32
 
@@ -100,6 +111,7 @@ type counters struct {
 	oooDropped     atomic.Uint64
 	rcvTrimmed     atomic.Uint64
 	challengeLimit atomic.Uint64
+	icmpLimited    atomic.Uint64
 	fragments      atomic.Uint64
 	udpDropped     atomic.Uint64
 	icmpDropped    atomic.Uint64
@@ -164,6 +176,7 @@ func newStack(local []netip.Prefix, mtu int, lim limits, clock func() int64, ran
 		pool:      pool,
 		done:      make(chan struct{}),
 		chSec:     -1,
+		icmpSec:   -1,
 	}
 	tableKey := sipKey{le.Uint64(seed[16:]), le.Uint64(seed[24:])}
 	var chachaSeed [32]byte
@@ -194,6 +207,12 @@ func newStack(local []netip.Prefix, mtu int, lim limits, clock func() int64, ran
 		notify: make(chan struct{}, 1),
 	}
 	s.wheel = newWheel(n * numTimers)
+	s.udp.init()
+	frag, err := ipv4frag.New(fragLimits)
+	if err != nil {
+		return nil, err
+	}
+	s.frag = frag
 	s.fired = make([]int32, 0, n*numTimers)
 	return s, nil
 }
@@ -313,13 +332,6 @@ func (s *stack) input(pkt []byte, now int64) {
 	}
 }
 
-// inputFragment は IPv4 の断片の入口。再組み立ての表を internal/nettun と共有するのは次の段階で、
-// この段階では断片を数えて捨てる。
-func (s *stack) inputFragment(_ *ipv4, _ int64) { s.fragments.Add(1) }
-
-// inputUDP は UDP の入口。UDP の受信の予算と endpoint は次の段階で加え、この段階では数えて捨てる。
-func (s *stack) inputUDP(_ *ipv4, _ int64) { s.udpDropped.Add(1) }
-
 // dropMSS は MSS の下限で SYN を捨てたことを数え、1 分に 1 回までログに出す。
 func (s *stack) dropMSS(seg *segment, now int64) {
 	n := s.mssFloor.Add(1)
@@ -425,57 +437,6 @@ func (s *stack) inputTCP(seg *segment, now int64) {
 	}
 }
 
-// inputICMP は ICMP の入口。この段階では、TCP の接続の Fragmentation Needed(RFC 1191、RFC 5927)だけを
-// 扱い、ほかは数えて捨てる。echo と UDP の Port Unreachable は次の段階で加える。
-func (s *stack) inputICMP(ip *ipv4, now int64) {
-	b := ip.payload
-	if len(b) < 8 || ^checksum(0, b) != 0 {
-		s.icmpDropped.Add(1)
-		return
-	}
-	if b[0] != 3 || b[1] != 4 {
-		s.icmpDropped.Add(1)
-		return
-	}
-	q := b[8:]
-	if len(q) < ipHeaderLen+8 || q[0]>>4 != 4 {
-		s.icmpDropped.Add(1)
-		return
-	}
-	qhl := int(q[0]&0x0f) * 4
-	if qhl < ipHeaderLen || len(q) < qhl+8 || q[9] != protoTCP {
-		s.icmpDropped.Add(1)
-		return
-	}
-	qsrc, qdst := binary.BigEndian.Uint32(q[12:16]), binary.BigEndian.Uint32(q[16:20])
-	// 外側の送信元が引用の宛先と一致するときだけ受け入れる(packet-validation.md の ICMP の誤りの入口)
-	if qdst != ip.src || qsrc != ip.dst {
-		s.icmpDropped.Add(1)
-		return
-	}
-	mtu := int(binary.BigEndian.Uint16(b[6:8]))
-	if mtu < minPMTU {
-		s.icmpDropped.Add(1)
-		return
-	}
-	t := q[qhl:]
-	tup := tuple{laddr: qsrc, raddr: qdst, lport: binary.BigEndian.Uint16(t[0:2]), rport: binary.BigEndian.Uint16(t[2:4])}
-	seq := binary.BigEndian.Uint32(t[4:8])
-	s.tmu.Lock()
-	id, gen := s.connIdx.find(tup)
-	s.tmu.Unlock()
-	if id < 0 {
-		s.icmpDropped.Add(1)
-		return
-	}
-	c := &s.conns[id]
-	c.mu.Lock()
-	if c.gen == gen && c.inIndex {
-		c.pmtuDrop(seq, mtu, now)
-	}
-	c.mu.Unlock()
-}
-
 // advance は時刻を now まで進め、期限の来た接続のタイマーと行の期限を処理する。
 func (s *stack) advance(now int64) {
 	s.advMu.Lock()
@@ -493,11 +454,15 @@ func (s *stack) advance(now int64) {
 	}
 	s.fired = fired[:0]
 	s.tmu.Lock()
-	if !s.closed {
+	closed := s.closed
+	if !closed {
 		s.expireSynRows(now)
 		s.expireTWRows(now)
 	}
 	s.tmu.Unlock()
+	if !closed {
+		s.sweepFrag(now)
+	}
 }
 
 // nextDeadline は次にタイマーか行の期限が来うる最も早い時刻(ns)を返す。無ければ 0 を返す。
@@ -505,6 +470,11 @@ func (s *stack) nextDeadline() int64 {
 	next := int64(0)
 	if t := s.wheel.nextTick(); t != noTick {
 		next = t * tickNs
+	}
+	if _, entries, _ := s.frag.Usage(); entries > 0 {
+		if d := s.fragNextSweep.Load(); next == 0 || d < next {
+			next = d
+		}
 	}
 	s.tmu.Lock()
 	for _, d := range [2]int64{s.syn.nextDeadline(), s.tw.nextDeadline()} {
@@ -556,6 +526,9 @@ func (s *stack) poll(b []byte, now int64) int {
 			id := o.rows.popFront()
 			o.mu.Unlock()
 			n = s.pollRow(id, b, now)
+		case classUDP:
+			o.mu.Unlock()
+			n = s.pollUDP(b)
 		default:
 			o.mu.Unlock()
 		}

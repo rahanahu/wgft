@@ -1,6 +1,7 @@
 // Package wgstack は、ユーザー空間モードのエージェントが gVisor の netstack の代わりに選べる、wgft が持つ
-// netstack である(docs/design/userspace/wgstack.md)。この段階は TCP の核と Device を持ち、UDP、ICMP の echo、
-// 断片の再組み立ての共有、WGFT_AGENT_NETSTACK の設定、トンネルへの組み込みは次の段階で加える。
+// netstack である(docs/design/userspace/wgstack.md)。TCP の核と Device に加えて、UDP、ICMP の echo と ping、
+// internal/nettun と共有する断片の再組み立ての表(internal/ipv4frag)を持つ。エージェントは
+// WGFT_AGENT_NETSTACK=wgstack でこれを選び、トンネルは非公開の interface を通して使う。
 //
 // # 構造
 //

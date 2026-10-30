@@ -558,7 +558,13 @@ on its WireGuard interface alone; otherwise target this host's LAN address. The
 mode is recorded in agent.json and checked on every start. A kernel-mode start
 without CAP_NET_ADMIN or kernel WireGuard support stops before it records the
 mode or uses the join string, so the agent then starts in userspace mode once
-WGFT_MODE is unset or set to userspace.`,
+WGFT_MODE is unset or set to userspace.
+
+WGFT_AGENT_NETSTACK chooses the network stack of the userspace mode: gvisor,
+the default when unset or empty, or wgstack, wgft's own TCP/IP stack, which is
+experimental and logs a warning at start. Any other value stops the agent with
+exit code 3. Kernel mode runs no network stack, logs that the setting is unused
+and starts.`,
 		Example: `  WGFT_JOIN='wgft://vps.example.com:8443/TOKEN#sha256:...' wgft agent run
   wgft agent run --config /etc/wgft/agent.env
   WGFT_AGENT_ALLOW_TARGETS=192.168.1.20:25565,192.168.1.21:2456-2458 wgft agent run`,

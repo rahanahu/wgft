@@ -16,6 +16,11 @@ type Stats struct {
 	Boosted       int   // boost の枠を持つこの Device の接続
 	Reserved      int64 // 使っている接続の枠の送信と受信の容量の和
 
+	UDPRxBytes, UDPRxDatagrams int64 // UDP の受信が持つ chunk の byte と datagram の数
+	UDPTxBytes, UDPTxDatagrams int64 // UDP の送信が持つ chunk の byte と datagram の数
+	FragBytes                  int   // 再組み立ての表が数える保持 byte(固定の管理領域を含む)
+	PingEndpoints              int   // 使っている echo の endpoint
+
 	MSSFloorDrops      uint64
 	SynTableFull       uint64
 	AcceptOverflow     uint64
@@ -76,6 +81,15 @@ func (s *stack) stats() Stats {
 	s.out.mu.Lock()
 	st.CtlQueued = s.out.ctl.n
 	s.out.mu.Unlock()
+	st.UDPRxBytes, st.UDPRxDatagrams, st.UDPTxBytes, st.UDPTxDatagrams = s.udpHeld()
+	st.FragBytes, _, _ = s.frag.Usage()
+	s.ping.mu.Lock()
+	for i := range s.ping.eps {
+		if s.ping.eps[i].used {
+			st.PingEndpoints++
+		}
+	}
+	s.ping.mu.Unlock()
 	st.HeldChunksInPool = s.chunks.heldChunks()
 	st.ReclaimableInBoost = s.pool.held()
 	st.MSSFloorDrops = s.mssFloor.Load()
@@ -105,7 +119,11 @@ func (s *stack) stats() Stats {
 type Bound struct {
 	Fix       int64 // M_fix:接続の枠の構造、hash の表、行の表、タイマーの輪、出力の list と制御の輪、chunk の置き場
 	FloorConn int64 // N_c x (f_s + f_r + r_f)
-	Boost     int64 // B x (d_s + d_r + d_rec)
+	Boost     int64 // B x (d_s + d_r + d_rec + d_h)
+	UDPRx     int64 // M_udp_rx:受信の予算と管理の配列
+	UDPTx     int64 // M_udp_tx:送信の予算と管理の配列
+	Frag      int64 // M_frag:再組み立ての表の保持 byte の上限
+	Ping      int64 // N_ping x c_ping
 	Total     int64
 	// 移す間の一時の保持:boost を得るときと floor に戻るときに、送信と受信の輪の生きている範囲を新しい
 	// chunk に写す間、古い chunk を合わせて持つ。1 本の接続の錠の中で起きるので、同時に起きる数は boost の
@@ -133,7 +151,13 @@ func (s *stack) bound() Bound {
 		chunkPoolKeep*chunkSize
 	b.FloorConn = n * (sendFloor + recvFloor + floorRecords*recSize + floorIntervals*ivSize)
 	b.Boost = int64(len(s.pool.slots)) * ((boostSize - sendFloor) + (boostSize - recvFloor) + (boostRecords-floorRecords)*recSize + (boostIntervals-floorIntervals)*ivSize)
-	b.Total = b.Fix + b.FloorConn + b.Boost
+	dg := int64(unsafe.Sizeof(udpDgram{}))
+	ck := int64(unsafe.Sizeof(udpChunkRec{}))
+	b.UDPRx = udpRxBytes + int64(len(s.udp.dg[dirRx]))*(dg+4) + int64(len(s.udp.ck))*(ck+4)/2
+	b.UDPTx = udpTxBytes + int64(len(s.udp.dg[dirTx]))*(dg+4) + int64(len(s.udp.ck))*(ck+4)/2
+	b.Frag = int64(fragLimits.Bytes)
+	b.Ping = pingEndpoints * (int64(s.mtu) + int64(unsafe.Sizeof(pingEP{})))
+	b.Total = b.Fix + b.FloorConn + b.Boost + b.UDPRx + b.UDPTx + b.Frag + b.Ping
 	b.Transient = int64(len(s.pool.slots)) * (sendFloor + recvFloor)
 	return b
 }

@@ -35,6 +35,17 @@ lab/lab exec vm labhost run -parallel 8 all
 `run all` の対象は [lab/suite.txt](suite.txt) の `default=yes` の確認で、両モードを含みます。
 結果は PR の本文に記録します。
 
+ユーザー空間モードのエージェントを wgstack で動かすときは、ホストで `WGFT_LAB_AGENT_NETSTACK=wgstack` を付けて実行します。
+`lab/lab` はこの値を VM の中のコマンドに `WGFT_AGENT_NETSTACK` として渡し、確認が起動するエージェントがそれを継ぎます。
+カーネルモードのエージェントは、値を使わない旨を出して起動します。
+wgstack の選択で一式を流して確かめたのは、ユーザー空間モードのエージェントを使う行です。
+カーネルモードのエージェントを使う `agentkernel.sh` の行は、2 行だけをこの選択で試しました。
+未設定なら何も渡さず、既定の gvisor で動きます。
+
+```sh
+WGFT_LAB_AGENT_NETSTACK=wgstack lab/lab exec vm labhost run -parallel 8 all
+```
+
 ```sh
 lab/lab test internal/dataplane/linuxkernel/nft
 lab/lab exec client ping 198.51.100.1

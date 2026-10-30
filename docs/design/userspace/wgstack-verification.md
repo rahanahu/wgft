@@ -227,7 +227,7 @@ Windows、macOS、スマートフォン、ゲーム機の TCP を相手に、本
 
 - 既定の経路:既定は gVisor のままなので、ラボの一式(A9)を今までどおり両モードで流します
 - wgstack の経路:ユーザー空間モードのエージェントを wgstack で動かすラボの一式の実行を加えます。
-  ラボにこの選択を渡す仕組みは未実装で、実装の時に足します
+  ホストで `WGFT_LAB_AGENT_NETSTACK=wgstack` を付けると、`lab/lab` がこの選択を VM の中の確認に渡します([ラボの手順](../../../lab/README.md))
 - 中継の試験:`internal/dataplane/userspace/relay` と `internal/netpipe` の試験のうち netstack の接続を使うものを、両方の実装に流します。
   今の試験の一部は `nettun.Create` を直接呼ぶので、実装を選んで Device を作る試験用の関数を足します。
   `tcp_reset_before_accept_test` は、accept の待ち行列で RST を受けた接続を gVisor が `Accept` で返す挙動を確かめているので、wgstack では待ち行列から外す挙動を確かめる形に分けます

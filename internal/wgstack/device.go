@@ -3,7 +3,6 @@ package wgstack
 import (
 	"errors"
 	"io"
-	"net"
 	"net/netip"
 	"os"
 	"sync"
@@ -232,21 +231,6 @@ func (d *Device) Close() error {
 	return nil
 }
 
-// ListenUDP は次の段階で加える。今は誤りを返す。
-func (d *Device) ListenUDP(ap netip.AddrPort) (net.PacketConn, error) {
-	return nil, &net.OpError{Op: "listen", Net: "udp", Addr: net.UDPAddrFromAddrPort(ap), Err: errNotImplemented}
-}
-
-// DialPing は次の段階で加える。今は誤りを返す。
-func (d *Device) DialPing(laddr, raddr netip.Addr) (net.Conn, error) {
-	return nil, &net.OpError{Op: "dial", Net: "ping4", Err: errNotImplemented}
-}
-
-// UDPReceiveFault は UDP の受信の会計の故障を返す。UDP は次の段階で加えるので、今は常に nil である。
-func (d *Device) UDPReceiveFault() error { return nil }
-
-var errNotImplemented = errors.New("not implemented in this wgstack stage")
-
 var _ tun.Device = (*Device)(nil)
 
 // close は核を閉じる。待っている操作を解き、接続の枠、行、boost の枠をすべて返す。
@@ -273,6 +257,8 @@ func (s *stack) close() {
 		s.removeTWRow(s.tw.head)
 	}
 	s.tmu.Unlock()
+	s.udpClose()
+	s.frag.Close()
 	for i := range s.conns {
 		c := &s.conns[i]
 		c.mu.Lock()

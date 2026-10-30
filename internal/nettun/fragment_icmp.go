@@ -19,16 +19,11 @@ import (
 // read the immutable local address and call the stack, whose ICMP output is
 // a nonblocking write into the finite channel queue.
 func (t *Device) emitReassemblyTimeout(n ipv4FragmentNotice) {
-	if !n.HasFirst || n.QuoteLen < 28 {
+	quote, ok := n.TimeoutQuote(t.local.As4())
+	if !ok {
 		return
 	}
-	quote := n.Quote[:n.QuoteLen]
 	hlen := int(quote[0]&15) * 4
-	if hlen < 20 || hlen > 60 || len(quote) < hlen+8 || !ipv4ChecksumOK(quote[:hlen]) ||
-		quote[6]&0x1f != 0 || quote[7] != 0 ||
-		!bytes.Equal(quote[16:20], t.local.AsSlice()) {
-		return
-	}
 	proto := t.stack.NetworkProtocolInstance(ipv4.ProtocolNumber)
 	handler, ok := proto.(interface{ OnReassemblyTimeout(*stack.PacketBuffer) })
 	if !ok {
@@ -55,57 +50,13 @@ func (t *Device) emitReassemblyTimeout(n ipv4FragmentNotice) {
 // quote can be copied synchronously up to gVisor's 576/route-MTU bound without
 // increasing the retained reassembly notice budget.
 func (t *Device) emitOptionParameterProblem(n ipv4FragmentNotice, offending []byte) {
-	if n.Pointer < 20 || len(offending) < header.IPv4MinimumSize {
+	hlen, ok := n.ParamProblemOK(offending, t.local.As4())
+	if !ok {
 		return
 	}
-	var saved []byte
+	saved := offending
 	if n.HasFirst {
-		if n.QuoteLen < header.IPv4MinimumSize {
-			return
-		}
 		saved = n.Quote[:n.QuoteLen]
-	} else {
-		// No first-fragment quote exists for a malformed option on a later
-		// fragment. Use that same offending fragment during this Write call.
-		saved = offending
-	}
-	hlen := int(saved[0]&15) * 4
-	if hlen < 20 || hlen > 60 || len(saved) < hlen || len(offending) < hlen || int(n.Pointer) >= hlen {
-		return
-	}
-	// The fixed stack can quote an actual payload shorter than eight bytes.
-	// A fragment with no payload is dropped before it checks options.
-	if len(saved) == hlen || len(offending) == hlen {
-		return
-	}
-	quotePrefixLen := hlen + header.ICMPv4MinimumErrorPayloadSize
-	if quotePrefixLen > len(saved) {
-		quotePrefixLen = len(saved)
-	}
-	if len(offending) < quotePrefixLen {
-		return
-	}
-	// A copied-option shape conflict can carry the saved first quote although
-	// the offending input was later. Only the exact original first is eligible.
-	if (n.HasFirst && (!bytes.Equal(offending[:quotePrefixLen], saved[:quotePrefixLen]) ||
-		offending[6]&0x1f != 0 || offending[7] != 0)) ||
-		!ipv4ChecksumOK(saved[:hlen]) ||
-		int(header.IPv4(offending).TotalLength()) != len(offending) {
-		return
-	}
-	if bytes.Equal(saved[12:16], []byte{0, 0, 0, 0}) ||
-		saved[16]&0xf0 == 0xe0 || bytes.Equal(saved[16:20], []byte{255, 255, 255, 255}) ||
-		!bytes.Equal(saved[16:20], t.local.AsSlice()) {
-		return
-	}
-	if saved[9] == byte(header.ICMPv4ProtocolNumber) {
-		switch header.ICMPv4Type(saved[hlen]) {
-		case header.ICMPv4EchoReply, header.ICMPv4Echo,
-			header.ICMPv4Timestamp, header.ICMPv4TimestampReply,
-			header.ICMPv4InfoRequest, header.ICMPv4InfoReply:
-		default:
-			return
-		}
 	}
 	route, err := t.stack.FindRoute(1, tcpip.AddrFromSlice(saved[16:20]), tcpip.AddrFromSlice(saved[12:16]), ipv4.ProtocolNumber, false)
 	if err != nil {
