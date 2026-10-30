@@ -1,12 +1,13 @@
-// Package tcpharness runs the same TCP scenarios against several TCP engines, so that an engine
-// for wgft's agent can be judged against Linux, the reference, by numbers. The rules it follows
-// are in docs/design/userspace/wgstack-verification.md.
+// Package tcpharness runs the same TCP, UDP and ICMP scenarios against several engines, so that
+// an engine for wgft's agent can be judged against Linux, the reference, by numbers. The rules it
+// follows are in docs/design/userspace/wgstack-verification.md.
 //
 // The testbench speaks raw IPv4 to a DUT (dut.go), the way the WireGuard tunnel does: it injects
-// crafted segments and checks what the engine emits, while the DUT's socket API plays wgft's
-// relay. Only the shapes of TCP the agent terminates are in scope: passive open, IPv4, the fixed
-// tunnel MTU. Each engine has an adapter package, gvisordut for internal/nettun's gVisor Device
-// and linuxdut for the kernel through a TUN device, and an expected-difference list keyed by
+// crafted packets and checks what the engine emits, while the DUT's socket API plays wgft's
+// relay. Only the shapes the agent terminates are in scope: passive-open TCP on IPv4 at the fixed
+// tunnel MTU, UDP to unconnected sockets, and IPv4 fragments and ICMP. Each engine has an adapter
+// package, gvisordut for internal/nettun's gVisor Device, linuxdut for the kernel through a TUN
+// device and wgstackdut for internal/wgstack, and an expected-difference list keyed by
 // "scenario/check" whose entries record what the engine does instead and why.
 //
 // Check lines are logged as PASS, FAIL, KNOWN DIFFERENCE, CHANGED DIFFERENCE or UNEXPECTED PASS,

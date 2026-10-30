@@ -302,6 +302,11 @@ func (d *DUT) Listen(port uint16) (tcpharness.Listener, error) {
 	return listener{l.(*net.TCPListener)}, nil
 }
 
+// ListenUDP opens an ordinary UDP socket on the DUT's address.
+func (d *DUT) ListenUDP(port uint16) (net.PacketConn, error) {
+	return net.ListenUDP("udp4", net.UDPAddrFromAddrPort(netip.AddrPortFrom(d.addr, port)))
+}
+
 type listener struct{ l *net.TCPListener }
 
 func (l listener) Close() error { return l.l.Close() }

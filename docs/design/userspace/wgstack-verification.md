@@ -47,6 +47,11 @@ ISN、timestamp の値、IP の ID のように実装ごとに決まる値は、
 - ICMP:誤りの送信元の確認、Fragmentation Needed と MTU の下限、Port Unreachable、echo
 - UDP と断片:受信の予算、送信時の断片化、再組み立ての表の満杯と期限
 
+ICMP と UDP の台本は、UDP の配送と送信元、65,507 byte の datagram の断片化、順序外と重複と重なりの断片の再組み立て、期限の Time Exceeded、Port Unreachable、echo、TCP への Fragmentation Needed を確かめます。
+Fragmentation Needed の台本は、MTU の下限、RFC 5927 の番号の確認、誤りの送信元の確認、別のフローを引用した誤りを 1 つずつ別の接続で確かめます。
+受信の予算と再組み立ての表の満杯は、まだ台本がありません。
+Linux の上限はソケットの `SO_RCVBUF` と `net.ipv4.ipfrag_high_thresh` で決まり、同じ台本で比べる値が無いためです。
+
 ### 参照の Linux の設定
 
 Linux の既定は、完成に含めない回復の仕組みを有効にしています。
