@@ -58,6 +58,7 @@ const (
 	synackRTO     = time.Second // 最初の SYN-ACK の再送までの時間(Linux の TCP_TIMEOUT_INIT)
 	retries2      = 15          // Linux の tcp_retries2
 	probeRetries  = 15          // 応答の無い窓の probe の上限(Linux の tcp_retries2 を使う)
+	orphanRetries = 8           // 閉じた接続の窓の probe の後退の上限(Linux の tcp_orphan_retries の既定 0 が使う値)
 
 	initialWindowSegs = 10 // IW10(RFC 6928、Linux の既定)
 

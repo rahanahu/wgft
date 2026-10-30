@@ -74,7 +74,7 @@ SACK を交渉する台本は、受け手として返す SACK の block の内�
 - quickack:Linux は接続の始めと黙った後に、遅延なしで ACK を返す期間を持ちます
 - 黙った後の窓:Linux の `tcp_slow_start_after_idle` は RFC 5681 の 4.1 節と異なる計算で窓を戻します
 - 閉じた後の打ち切り:Linux は閉じた接続の再送と probe を `tcp_orphan_retries` で打ち切ります。
-  wgstack の扱いは未決です([未確認の点と未決の点](wgstack.md#未確認の点と未決の点))
+  wgstack は閉じた接続の窓の probe を後退の回数 8 で打ち切り、再送は `tcp_retries2` のままです([未確認の点と未決の点](wgstack.md#未確認の点と未決の点))
 - RTO の計算:最小の RTO と RTTVAR の扱いの細部が違うので、時刻は RTO の回数の範囲で比べます
 - 送る量が足りない間の窓:Linux は、アプリケーションが送る量の足りない間に輻輳の窓を広げない独自の検証を持ちます
 

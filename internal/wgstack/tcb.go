@@ -921,7 +921,10 @@ func (c *tcb) onPersist(now int64) {
 		return
 	}
 	c.probesOut++
-	if c.probesOut > probeRetries {
+	// アプリケーションが閉じた接続は、Linux の tcp_orphan_retries と同じく、相手が応えても戻らない後退の回数で
+	// 打ち切る。閉じた接続の FIN は窓が開くまで送らないので、打ち切らなければ窓を 0 のまま probe に応える相手が
+	// 枠をいつまでも持たせる
+	if c.probesOut > probeRetries || (c.appClosed && c.backoff >= orphanRetries) {
 		c.s.probeAborted.Add(1)
 		c.sendRST()
 		c.abortWith(syscall.ETIMEDOUT)
