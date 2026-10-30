@@ -38,10 +38,27 @@ has_test() { go test -list "^$2\$" "$1" 2>/dev/null | grep -qx "$2"; }
 
 # copy_tree copies the tracked and untracked, not ignored, files into a new directory $tmp, removed
 # when the step ends: a step that edits go.mod works there, out of reach of the steps beside it.
+# With an argument, the copy goes there and stays.
 copy_tree() {
-  tmp=$(mktemp -d) || return 1
-  trap 'rm -rf "$tmp"' EXIT
+  if [[ -n ${1:-} ]]; then
+    tmp=$1
+    rm -rf "$tmp" && mkdir -p "$tmp" || return 1
+  else
+    tmp=$(mktemp -d) || return 1
+    trap 'rm -rf "$tmp"' EXIT
+  fi
   { git ls-files -z; git ls-files -z -o --exclude-standard; } | xargs -0 cp --parents -t "$tmp"
+}
+
+# fuzz runs a fuzz target on its own copy of the tree, kept in the log directory: a failing input
+# is written to the copy's testdata, where the steps beside it would otherwise run it as a seed.
+fuzz() {
+  local target=$1 times=$2
+  has_test ./internal/wgstack "$target" || { echo "SKIP: no $target in this tree"; return 0; }
+  copy_tree "$logdir/$target-tree" && cd "$tmp" || return 1
+  go test ./internal/wgstack -run '^$' -fuzz "^$target\$" -fuzztime "$times" -parallel 4 && return 0
+  echo "the failing input is under $tmp/internal/wgstack/testdata/fuzz/$target"
+  return 1
 }
 
 # The steps, as name and command. A command that prints "SKIP: reason" and exits 0 counts as
@@ -64,15 +81,16 @@ step staticcheck 'copy_tree && cd "$tmp" && go mod edit -go=1.27.1 && GOTOOLCHAI
 step conformance-seeds 'for s in 1 2 3 4 5; do WGFT_TEST_WGSTACK_CONFORMANCE=1 WGFT_TEST_TCPHARNESS_SEED=$s go test -count=1 ./internal/tcpharness/wgstackdut || exit 1; done'
 step stream-seeds-full 'WGFT_WGSTACK_STREAM_SEEDS=full go test -count=1 ./internal/wgstack -run "Stream|Scoreboard|RecvBuf"'
 step adversarial-seeds 'has_test ./internal/wgstack TestAdversarialSender || { echo "SKIP: no TestAdversarialSender in this tree"; exit 0; }; WGFT_WGSTACK_AUDIT_SEEDS=3000 go test -count=1 ./internal/wgstack -run TestAdversarialSender'
-step fuzz-core 'has_test ./internal/wgstack FuzzCore || { echo "SKIP: no FuzzCore in this tree"; exit 0; }; go test ./internal/wgstack -run "^$" -fuzz "^FuzzCore$" -fuzztime 5000000x -parallel 4'
-step fuzz-adversarial 'has_test ./internal/wgstack FuzzAdversarialSender || { echo "SKIP: no FuzzAdversarialSender in this tree"; exit 0; }; go test ./internal/wgstack -run "^$" -fuzz "^FuzzAdversarialSender$" -fuzztime 150000x -parallel 4'
+step fuzz-core 'fuzz FuzzCore 5000000x'
+step fuzz-adversarial 'fuzz FuzzAdversarialSender 150000x'
 step docs 'go run ./scripts/check-japanese/ && bash scripts/check-ascii-punct.sh && python3 scripts/check-docs.py && python3 scripts/check-docs-test.py && bash scripts/check-log-tokens.sh'
 step mod-tidy 'copy_tree && mkdir -p "$tmp/.orig" && cp go.mod go.sum "$tmp/.orig/" && cd "$tmp" && go mod tidy && cmp go.mod .orig/go.mod && cmp go.sum .orig/go.sum || { echo "go mod tidy changes go.mod or go.sum"; exit 1; }'
 if ((lab)); then
   step lab 'if grep -q "^  suite)" lab/lab; then lab/lab suite --vms 2; else lab/lab build && lab/lab exec vm labhost run -parallel 8 all; fi'
 fi
 
-export -f has_test copy_tree
+export logdir
+export -f has_test copy_tree fuzz
 
 declare -A start dur result
 running=()
