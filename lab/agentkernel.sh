@@ -760,8 +760,10 @@ PY"
   # The agent logs the switch before it publishes the table, and saves agent.json only after the
   # publication and the TCP probes that follow it, so wait for the saved record before observing
   # the switch's effects (docs/development/testing.md).
-  wait_until 15 recorded_is "$fo" "192.168.50.3:25565 192.168.50.3"
-  wait_until 15 recorded_is "$fu" "192.168.50.3:19132 192.168.50.3"
+  wait_until 15 recorded_is "$fo" "192.168.50.3:25565 192.168.50.3" ||
+    echo "!! agent.json did not record the TCP rule's switch within 15 s of the log line"
+  wait_until 15 recorded_is "$fu" "192.168.50.3:19132 192.168.50.3" ||
+    echo "!! agent.json did not record the UDP rule's switch within 15 s of the log line"
   check "the agent logs the switch" "rule $fo: target 192.168.50.2:25565 failed the TCP check twice in a row; new flows go to 192.168.50.3:25565, another address of \"fo.lan\" that answers" "$(cat "$ALOG")"
   echo "INFO  switched ${took}s after the rule was applied"
   check "new flows reach the other address" "tcp-echo 0.0.0.0:25565" "$(tcp_echo 39979)"
