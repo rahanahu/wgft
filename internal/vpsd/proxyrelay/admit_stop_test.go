@@ -235,6 +235,7 @@ func TestStopDuringAdmit(t *testing.T) {
 // Admission Policy の判定に短い待ちを入れて窓を広げる。受け付けていない handle からの取得が 0 回で
 // あること、帳簿の整合、最後に u が 0 を確かめる。
 func TestLedgerUnderConfigChurn(t *testing.T) {
+	t.Parallel()
 	r := newAdmitRig(t, 16, false)
 	f := func(string) {
 		if n := rand.IntN(4); n > 0 {

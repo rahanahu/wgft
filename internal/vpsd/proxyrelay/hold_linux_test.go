@@ -203,6 +203,7 @@ func holdEstablished(t *testing.T, scene func(t *testing.T) error) {
 // the pool slot and the per-source slot are held while the client
 // does not read; the client then gets every byte and EOF, and both slots are returned, once.
 func TestHoldCountsTheTail(t *testing.T) {
+	t.Parallel()
 	holdEstablished(t, func(t *testing.T) error {
 		r := newHoldRig(t, true)
 		pub, err := r.leaveTail(t)
@@ -239,6 +240,8 @@ func TestHoldCountsTheTail(t *testing.T) {
 
 // the paths that cut relays, and a reset from the client, free a pair
 // whose tail is being delivered.
+// 並列にしない: 切断から 500 ms 以内に枠が戻ることが主張そのもので、2 s ごとの見直しで戻る場合と
+// 区別する。他の試験の負荷で起こされた待ちが 500 ms を超えると誤って落ちる。
 func TestHoldCutsAndResetFreeThePair(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -315,6 +318,7 @@ func publicOrphanWithData(t *testing.T, port uint16) bool {
 
 // in kernel mode the relay returns both slots when it ends, although the public socket still
 // holds data the client has not read, as before this change.
+// 並列にしない: 中継の終わりから 1 s 以内に枠が戻ることが主張そのもので、他の試験の負荷で揺れる。
 func TestKernelModeReturnsSlotsAtTheEnd(t *testing.T) {
 	holdEstablished(t, func(t *testing.T) error {
 		r := newHoldRig(t, false)
@@ -336,6 +340,7 @@ func TestKernelModeReturnsSlotsAtTheEnd(t *testing.T) {
 // A Retiring relay keeps a pair whose tail is being delivered while its
 // declaration keeps the source, and closes only once the tail is delivered; a re-check that refuses
 // the source cuts the pair at once.
+// 並列にしない: source refused は、見直しから 500 ms 以内に枠が戻ることが主張そのもので、他の試験の負荷で揺れる。
 func TestHoldRetiringWaitsForTheTail(t *testing.T) {
 	for _, keepSource := range []bool{true, false} {
 		name := "source kept"

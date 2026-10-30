@@ -9,6 +9,7 @@ import (
 
 // 再組み立ての表を internal/ipv4frag に移した後、この package の試験が表の上限と処理の長さを変えるための口。
 
+// setReassemblyLifetime と setReassemblyBytesToBaseCost は package の変数を書き換えるので、これを使う試験は並列にしない。
 // setReassemblyLifetime は、この試験の間に作る Device の表の期限を d にする。
 func setReassemblyLifetime(t *testing.T, d time.Duration) {
 	t.Helper()
@@ -34,6 +35,8 @@ func setReassemblyBytesToBaseCost(t *testing.T) {
 
 // holdReassembly は、Device が表の Process と Sweep を呼ぶ前で止まるようにし、止めを解く関数を返す。
 // 表の処理が長くかかる場合を模す。
+// package の reassemblyHook を差し替えるので、止めている間は process のすべての Device の掃除と断片の処理が
+// 止まり、Close も掃除の終わりを待って止まる。これを使う試験は並列にしない。
 func holdReassembly(t *testing.T) (release func()) {
 	t.Helper()
 	gate := make(chan struct{})
