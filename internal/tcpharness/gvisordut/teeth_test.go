@@ -501,3 +501,39 @@ func TestHarnessCatchesStaleFINPastTheProbeWindow(t *testing.T) {
 	got := tcpharness.Record(t, e, scenario(t, "fin-passive-close"), 1)
 	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
 }
+
+// A probe held back 110 ms comes after 195 ms, where the bound stops however late the testbench
+// was, so a sender whose first resend comes at RTO-like times cannot pass under load.
+func TestHarnessCatchesProbeAtTheRTOFloor(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-probe-at-rto", delayResends(110*time.Millisecond)), scenario(t, "tlp-tail-loss"), 1)
+	wantOutcome(t, got, "tlp-tail-loss/probe-at-2srtt", tcpharness.OutcomeFail)
+}
+
+// dropFirstResend drops the first segment the engine sends again, so its tail loss probe is lost
+// and the next resend is the RTO's, from SND.UNA.
+func dropFirstResend(inner tcpharness.DUT) tcpharness.DUT {
+	d := &delayedACKs{DUT: inner, out: make(chan []byte, 1024)}
+	go func() {
+		defer close(d.out)
+		sent := map[uint32]bool{}
+		dropped := false
+		for pkt := range inner.Emitted() {
+			if s, err := tcpharness.Parse(pkt); err == nil && len(s.Payload) > 0 {
+				if sent[s.Seq] && !dropped {
+					dropped = true
+					continue
+				}
+				sent[s.Seq] = true
+			}
+			d.out <- pkt
+		}
+	}()
+	return d
+}
+
+// With the probe lost, the first resend the testbench sees is the RTO's of the first tail segment,
+// which the probe check tells apart by its sequence number, not by its time.
+func TestHarnessCatchesRTOInPlaceOfAProbe(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-no-probe", dropFirstResend), scenario(t, "tlp-tail-loss"), 1)
+	wantOutcome(t, got, "tlp-tail-loss/probe-at-2srtt", tcpharness.OutcomeFail)
+}
