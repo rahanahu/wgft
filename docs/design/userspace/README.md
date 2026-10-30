@@ -23,3 +23,4 @@
 - [UDP の中継と応答のバッファ](udp-relay.md)
 - [エージェントの wgft の netstack(実装の途中)](wgstack.md)
 - [wgstack の検証(未実装)](wgstack-verification.md)
+- [wgstack の性能の段階(未実装)](wgstack-performance.md)
