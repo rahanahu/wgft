@@ -53,7 +53,8 @@ type tcb struct {
 
 	snd       ring
 	rcv       recvBuf
-	floorRecs []record // floor の送信の記録の輪。枠が最初に使われたときに確保し、枠と共に持ち続ける
+	floorRecs []record   // floor の送信の記録の輪。枠が最初に使われたときに確保し、枠と共に持ち続ける
+	floorIv   []interval // floor の順序外の区間の表。floorRecs と同じく枠と共に持ち続ける
 	rdl, wdl  deadline
 
 	tcbState
@@ -220,7 +221,10 @@ func (c *tcb) establish(r *synRow, seg *segment, now int64) {
 	c.maxSndWnd = c.sndWnd
 	c.sndWl1, c.sndWl2 = seg.seq, seg.ack
 	c.snd = ring{pool: &s.chunks, cap: sendFloor}
-	c.rcv = recvBuf{r: ring{pool: &s.chunks, cap: recvFloor}}
+	if c.floorIv == nil {
+		c.floorIv = make([]interval, floorIntervals)
+	}
+	c.rcv = recvBuf{r: ring{pool: &s.chunks, cap: recvFloor}, iv: c.floorIv}
 	if c.floorRecs == nil {
 		c.floorRecs = make([]record, floorRecords)
 	}
@@ -827,6 +831,7 @@ func (c *tcb) dropResources() {
 	c.rcv.n = 0
 	c.releaseBoost()
 	c.recs = recordRing{recs: c.floorRecs}
+	c.rcv.iv = c.floorIv
 }
 
 // release は枠を返す。アプリケーションの待ちを解き、世代を進める。
@@ -855,6 +860,7 @@ func (c *tcb) freeSlotLocked() {
 	c.state = stFree
 	if s.closed {
 		c.floorRecs = nil // 閉じた Device では、Close と競った確立が確保した輪も残さない
+		c.floorIv = nil
 	}
 	if c.rch != nil {
 		close(c.rch)

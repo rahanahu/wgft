@@ -116,7 +116,7 @@ func FuzzCore(f *testing.F) {
 		n.drain()
 		n.d.Close()
 		st := n.d.s.stats()
-		if st.Conns != 0 || st.SynRows != 0 || st.TWRows != 0 || st.ChunkBytes != 0 || st.HeldChunksInPool != 0 || st.RecordBytes != 0 {
+		if st.Conns != 0 || st.SynRows != 0 || st.TWRows != 0 || st.ChunkBytes != 0 || st.HeldChunksInPool != 0 || st.RecordBytes != 0 || st.IntervalBytes != 0 {
 			t.Fatalf("after Close %+v", st)
 		}
 	})

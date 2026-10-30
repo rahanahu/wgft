@@ -282,6 +282,7 @@ func (s *stack) close() {
 			c.release()
 		}
 		c.floorRecs = nil
+		c.floorIv = nil
 		c.mu.Unlock()
 	}
 	s.out.mu.Lock()

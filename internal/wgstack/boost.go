@@ -92,6 +92,7 @@ func (s *stack) tryBoost(c *tcb, gen uint32, dir boostDir) {
 func (c *tcb) growRecv() {
 	c.rcvBoost = true
 	c.rcv.r.resize(boostSize, c.rcv.written())
+	c.rcv.setIntervals(make([]interval, boostIntervals))
 	c.rcvCap = boostSize
 	// 広げた窓を早く知らせる
 	if uint64(c.rcvWindow())*2 <= c.rcvCap {
@@ -118,7 +119,7 @@ func (c *tcb) demote(now int64) bool {
 	if !c.boosted || now-c.lastDemand < int64(idleReclaim) {
 		return false
 	}
-	if c.rcv.rightmost()-c.rcv.readOff > recvFloor {
+	if c.rcv.rightmost()-c.rcv.readOff > recvFloor || c.rcv.n > floorIntervals {
 		return false
 	}
 	if c.tailOff-c.unaOff > sendFloor || c.recs.n > floorRecords {
@@ -131,6 +132,7 @@ func (c *tcb) demote(now int64) bool {
 	c.snd.resize(sendFloor, [][2]uint64{{c.unaOff, c.tailOff}})
 	c.sndCap = sendFloor
 	c.rcv.r.resize(recvFloor, c.rcv.written())
+	c.rcv.setIntervals(c.floorIv)
 	c.rcvCap = recvFloor
 	c.recs.resize(c.floorRecs)
 	c.s.boostReclaimed.Add(1)
