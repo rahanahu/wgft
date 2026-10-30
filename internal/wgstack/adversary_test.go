@@ -12,8 +12,7 @@ import (
 )
 
 // guardedDrain は期限つきで送る packet を引き取り、Poll が回り続けたら試験を落とす。
-func guardedDrain(t *testing.T, n *testNet, what string) []out {
-	t.Helper()
+func guardedDrain(t *testing.T, n *testNet, buf []byte, seed uint64, step int) []out {
 	type res struct {
 		o   []out
 		err string
@@ -21,7 +20,6 @@ func guardedDrain(t *testing.T, n *testNet, what string) []out {
 	ch := make(chan res, 1)
 	go func() {
 		var r []out
-		buf := make([]byte, 65536)
 		for i := 0; i < 200000; i++ {
 			k := n.d.Poll(buf)
 			if k == 0 {
@@ -49,11 +47,11 @@ func guardedDrain(t *testing.T, n *testNet, what string) []out {
 	select {
 	case r := <-ch:
 		if r.err != "" {
-			t.Fatalf("%s: %s", what, r.err)
+			t.Fatalf("seed %d step %d: %s", seed, step, r.err)
 		}
 		return r.o
 	case <-time.After(5 * time.Second):
-		t.Fatalf("%s: Poll livelocked", what)
+		t.Fatalf("seed %d step %d: Poll livelocked", seed, step)
 	}
 	return nil
 }
@@ -110,8 +108,17 @@ func runAudit(t *testing.T, cfg auditCfg) {
 	closed := false
 	var netq []out
 	alive := func() bool { return cs.gen == gen && cs.state != stFree && cs.state != stClosed }
+	drainBuf := make([]byte, 65536)
+	// checkScoreboard と checkHeld の失敗は seed も step も持たないので、どの歩のどの検査かを覚えておき、
+	// 落ちたときに 1 回だけ載せる。毎ステップの defer や Sprintf は払わない
+	heavyStep, heavyWhat := -1, ""
+	defer func() {
+		if t.Failed() && heavyStep >= 0 {
+			t.Logf("seed %d step %d %s: the check above failed here", cfg.seed, heavyStep, heavyWhat)
+		}
+	}()
+	// 失敗は seed と step を含む文言で報告するので、毎ステップの t.Helper(runtime.Callers)は呼ばない
 	check := func(step int, what string) {
-		t.Helper()
 		if alive() {
 			if seqGT(cs.sndUna, cs.sndNxt) || seqGT(cs.sndNxt, cs.sndMax) {
 				t.Fatalf("seed %d step %d %s: una %d nxt %d max %d", cfg.seed, step, what, cs.sndUna, cs.sndNxt, cs.sndMax)
@@ -122,7 +129,9 @@ func runAudit(t *testing.T, cfg auditCfg) {
 			if cs.pipe() > (cs.sndMax-cs.sndUna)*2+1 {
 				t.Fatalf("seed %d step %d %s: pipe %d flight %d", cfg.seed, step, what, cs.pipe(), cs.sndMax-cs.sndUna)
 			}
+			heavyStep, heavyWhat = step, what
 			checkScoreboard(t, cs)
+			heavyStep = -1
 			if cs.qMid {
 				if cs.lostQ.n == 0 {
 					t.Fatalf("seed %d step %d %s: qMid with empty lost queue (qOff %d)", cfg.seed, step, what, cs.qOff)
@@ -137,7 +146,12 @@ func runAudit(t *testing.T, cfg auditCfg) {
 				}
 			}
 		}
+		heavyStep, heavyWhat = step, what
 		checkHeld(t, n)
+		if t.Failed() { // checkHeld は t.Errorf で続けるので、最初の失敗の歩で止める
+			t.FailNow()
+		}
+		heavyStep = -1
 	}
 	recv := func(o out) {
 		if o.seg.tup.lport != 40000 {
@@ -156,7 +170,9 @@ func runAudit(t *testing.T, cfg auditCfg) {
 	var oooEnd uint32
 	haveOOO := false
 	steps := cfg.advSteps + 40000
+	lastStep := 0
 	for step := 0; step < steps; step++ {
+		lastStep = step
 		if step == cfg.advSteps {
 			honest = true
 			p.wnd = 65535
@@ -194,7 +210,7 @@ func runAudit(t *testing.T, cfg auditCfg) {
 				}
 			}
 		case r < 35:
-			for _, o := range guardedDrain(t, n, fmt.Sprintf("seed %d step %d", cfg.seed, step)) {
+			for _, o := range guardedDrain(t, n, drainBuf, cfg.seed, step) {
 				if e := o.seg.seq + uint32(len(o.seg.payload)); len(o.seg.payload) > 0 && seqGT(e, cs.sndMax) && alive() {
 					t.Fatalf("seed %d step %d: segment past SND.MAX %v", cfg.seed, step, o)
 				}
@@ -300,6 +316,7 @@ func runAudit(t *testing.T, cfg auditCfg) {
 		}
 		check(step, "after op")
 	}
+	check(lastStep, "end")
 	if f := n.d.Stats().AccountingFaults; f != 0 {
 		t.Fatalf("seed %d: %d accounting faults", cfg.seed, f)
 	}
