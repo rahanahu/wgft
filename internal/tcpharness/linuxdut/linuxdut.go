@@ -49,6 +49,14 @@ var ReferenceSysctls = [][2]string{
 	{"net/ipv4/tcp_no_metrics_save", "1"},
 	{"net/ipv4/tcp_moderate_rcvbuf", "0"},
 	{"net/ipv4/tcp_autocorking", "0"},
+	// The UDP, reassembly and ICMP scenarios depend on these IP-level values, pinned at the 6.1
+	// defaults: the fragment lifetime of 30 s, the path MTU floor of 552, path MTU discovery on,
+	// and ICMP errors limited to 1 per second per destination for the types in the default mask.
+	{"net/ipv4/ipfrag_time", "30"},
+	{"net/ipv4/route/min_pmtu", "552"},
+	{"net/ipv4/ip_no_pmtu_disc", "0"},
+	{"net/ipv4/icmp_ratelimit", "1000"},
+	{"net/ipv4/icmp_ratemask", "6168"},
 }
 
 // SocketFloor is the send and receive buffer each listening socket gets, the size of the floor

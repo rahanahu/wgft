@@ -23,18 +23,19 @@ var Known = map[string]tcpharness.Known{
 	},
 	"icmp-frag-needed-source/ignored": {
 		Observed: "applied: largest packet 1000 bytes",
-		Reason: "Linux takes Fragmentation Needed from any router on the path; packet-validation.md accepts an error only " +
+		Reason: "Linux takes Fragmentation Needed from any router on the path: tcp_v4_err checks the quoted sequence " +
+			"number but not the outer source, v6.1:net/ipv4/tcp_ipv4.c:473-554; packet-validation.md accepts an error only " +
 			"from the quoted datagram's destination, since no router sits inside the tunnel",
 	},
 	"icmp-frag-needed-floor/ignored": {
 		Observed: "applied: largest packet 552 bytes",
-		Reason: "Linux sets the path MTU to min_pmtu, 552, and sends without DF; packet-validation.md drops a " +
-			"Fragmentation Needed below 552, so the MTU stays",
+		Reason: "Linux sets the path MTU to min_pmtu, 552, locks it and then sends without DF, " +
+			"v6.1:net/ipv4/route.c:1036-1038; packet-validation.md drops a Fragmentation Needed below 552, so the MTU stays",
 	},
 	"udp-datagram/reply.df-clear": {
 		Observed: "DF set",
-		Reason: "Linux's default IP_PMTUDISC_WANT sets DF on a UDP datagram that fits the path MTU; wgstack.md sends UDP " +
-			"without DF, as gVisor does with path MTU discovery off",
+		Reason: "Linux's default IP_PMTUDISC_WANT sets DF on a UDP datagram that fits an unlocked path MTU, " +
+			"v6.1:include/net/ip.h:416-421; wgstack.md sends UDP without DF, as gVisor does with path MTU discovery off",
 	},
 	"listener-close/half-open.rst-at-close": {
 		Observed: "no RST at the close",

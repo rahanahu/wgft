@@ -126,6 +126,7 @@ func Frag(p IPv4, from, to int) IPv4 {
 type UDP struct {
 	Src, Dst netip.AddrPort
 	Payload  []byte
+	Checksum uint16 // the header's field; 0 means the sender computed none
 }
 
 // UDPPacket builds an unfragmented IPv4 packet that carries payload from src to dst with a valid
@@ -170,9 +171,10 @@ func ParseUDP(p IPv4) (UDP, error) {
 		return UDP{}, errors.New("bad UDP checksum")
 	}
 	return UDP{
-		Src:     netip.AddrPortFrom(p.Src, binary.BigEndian.Uint16(b[0:])),
-		Dst:     netip.AddrPortFrom(p.Dst, binary.BigEndian.Uint16(b[2:])),
-		Payload: append([]byte(nil), b[8:]...),
+		Src:      netip.AddrPortFrom(p.Src, binary.BigEndian.Uint16(b[0:])),
+		Dst:      netip.AddrPortFrom(p.Dst, binary.BigEndian.Uint16(b[2:])),
+		Payload:  append([]byte(nil), b[8:]...),
+		Checksum: binary.BigEndian.Uint16(b[6:]),
 	}, nil
 }
 
