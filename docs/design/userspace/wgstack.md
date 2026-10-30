@@ -687,6 +687,10 @@ ECN は交渉しません。
 - TIME_WAIT の 4 つ組の使い直し:前の接続が timestamp を使い、SYN が timestamp を持つときは、timestamp が大きいことだけを求めます([RFC 6191](#time_wait-の表))。
   Linux は番号か timestamp のどちらかが大きければ受け入れると読めます。
   適合の試験にこの場合の台本があります
+- MTU を超える echo request:断片で届いて組み立てた echo request の応答が MTU を超えるときは応答しません。
+  Linux と gVisor は応答を断片に分けて返すと読めます
+- 送る UDP の DF:wgstack は UDP の datagram に DF を立てません。
+  gVisor は PMTU discovery を切った endpoint で DF を下げるので、同じ結果だと見込みます
 - FIN_WAIT_2 の行への窓の内側の SYN:challenge ACK を返します。
   Linux は RST を返すと読めます
 - 回復の終わりの後の RTO:累積の確認がちょうど `recover` に届いて NewReno の回復を終えた後に、余分な RTO が 1 回起きる場合があります。
