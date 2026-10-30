@@ -26,7 +26,10 @@ import (
 //
 //	go test -tags qbench -run TestQBenchRoutine -v ./internal/tcpharness/qbench
 //	go test -c -tags qbench -o bin/qbench.test ./internal/tcpharness/qbench
-//	lab VM, as root: QBENCH_WRITE_REF=/tmp/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//	lab VM, as root: QBENCH_WRITE_REF=/var/tmp/qref/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//
+// The reference file is written from inside the user namespace, so it needs a directory without
+// the sticky bit that the namespace's user can write, such as one made with mkdir -m 777.
 //
 // The linux engine needs a network namespace it can configure, so a test that asks for it re-runs
 // itself in a new user and network namespace with the performance sysctls pinned.
