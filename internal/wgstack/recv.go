@@ -1,35 +1,48 @@
 package wgstack
 
 // recvBuf は受信のバッファ。順序どおりの未読のデータ [readOff, nxtOff) と順序外のデータを同じ輪の
-// 位置に置き、順序外の届いた範囲を固定の数 H の区間の表で持つ(設計文書の「接続ごとのバッファ」)。
-// offset は接続の受信の始め(相手の ISN + 1)から数える。
+// 位置に置き、順序外の届いた範囲を区間の表で持つ(設計文書の「接続ごとのバッファ」)。区間の数の上限は
+// 受信の予約から決め(floorIntervals と boostIntervals)、表は予約の段ごとの固定の配列である。offset は
+// 接続の受信の始め(相手の ISN + 1)から数える。
 type recvBuf struct {
 	r       ring
 	readOff uint64 // 最も古い未読の byte
 	nxtOff  uint64 // 次に順序どおりに受ける byte(RCV.NXT)
-	iv      [oooIntervals]interval
+	iv      []interval
 	n       int    // 使っている区間の数。iv[:n] は start の順
-	touch   uint64 // 区間を最後に伸ばした順を数える
+	touch   uint32 // 区間を最後に伸ばした順を数える
 }
 
-// interval は順序外の 1 つの区間 [start, end)。touched が大きいほど最近伸びた。
+// interval は順序外の 1 つの区間 [start, end)。位置は offset の下位 32 bit で持つ。区間はどれも nxtOff
+// から受信の予約(4 MiB 以下)の内側にあるので、nxtOff から元の offset を復元できる。touched は最後に
+// 伸びた順で、touch との差が小さいほど最近である。
 type interval struct {
-	start, end uint64
-	touched    uint64
+	start, end uint32
+	touched    uint32
 }
+
+func (b *recvBuf) full(x uint32) uint64 { return b.nxtOff + uint64(x-uint32(b.nxtOff)) }
+func (b *recvBuf) ivStart(k int) uint64 { return b.full(b.iv[k].start) }
+func (b *recvBuf) ivEnd(k int) uint64   { return b.full(b.iv[k].end) }
 
 func (b *recvBuf) unread() uint64 { return b.nxtOff - b.readOff }
 
 // rightmost は保持する最も右の byte の次の offset(順序外のデータを含む)。
 func (b *recvBuf) rightmost() uint64 {
 	if b.n > 0 {
-		return max(b.nxtOff, b.iv[b.n-1].end)
+		return max(b.nxtOff, b.ivEnd(b.n-1))
 	}
 	return b.nxtOff
 }
 
 // empty は、順序どおりの未読のデータも順序外のデータも持たないかを返す。
 func (b *recvBuf) empty() bool { return b.nxtOff == b.readOff && b.n == 0 }
+
+// setIntervals は区間の表を iv に移す。呼び出し側は b.n <= len(iv) を保証する。
+func (b *recvBuf) setIntervals(iv []interval) {
+	copy(iv, b.iv[:b.n])
+	b.iv = iv
+}
 
 // insertResult は insert の結果。
 type insertResult struct {
@@ -71,28 +84,39 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 	if off == b.nxtOff {
 		b.r.write(off, data)
 		res.accepted = len(data)
-		b.nxtOff = end
 		res.advanced = true
-		// 届いた順序外の区間を取り込む
+		// 届いた順序外の区間を取り込む。区間の位置は nxtOff を動かす前の値で復元する
+		old := b.nxtOff
 		k := 0
-		for k < b.n && b.iv[k].start <= b.nxtOff {
-			b.nxtOff = max(b.nxtOff, b.iv[k].end)
+		for k < b.n {
+			st := old + uint64(b.iv[k].start-uint32(old))
+			if st > end {
+				break
+			}
+			end = max(end, old+uint64(b.iv[k].end-uint32(old)))
 			k++
 		}
+		b.nxtOff = end
 		if k > 0 {
-			copy(b.iv[:], b.iv[k:b.n])
+			copy(b.iv, b.iv[k:b.n])
 			b.n -= k
 			res.filled = true
 		}
 		return res
 	}
-	// 順序外:重なるか接する区間 [i, j) を探す
-	i := 0
-	for i < b.n && b.iv[i].end < off {
-		i++
+	// 順序外:重なるか接する区間 [i, j) を二分探索で探す
+	lo, hi := 0, b.n
+	for lo < hi {
+		m := (lo + hi) / 2
+		if b.ivEnd(m) < off {
+			lo = m + 1
+		} else {
+			hi = m
+		}
 	}
+	i := lo
 	j := i
-	for j < b.n && b.iv[j].start <= end {
+	for j < b.n && b.ivStart(j) <= end {
 		j++
 	}
 	if i == j {
@@ -103,18 +127,18 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 		copy(b.iv[i+1:b.n+1], b.iv[i:b.n])
 		b.n++
 		b.touch++
-		b.iv[i] = interval{start: off, end: end, touched: b.touch}
+		b.iv[i] = interval{start: uint32(off), end: uint32(end), touched: b.touch}
 	} else {
-		if b.iv[i].start <= off && end <= b.iv[i].end && j == i+1 {
+		if b.ivStart(i) <= off && end <= b.ivEnd(i) && j == i+1 {
 			// すべて既に届いている。RFC 2018 の順のために最近の印だけ付け直す
 			b.touch++
 			b.iv[i].touched = b.touch
 			res.duplicate = true
 			return res
 		}
-		ns, ne := min(off, b.iv[i].start), max(end, b.iv[j-1].end)
+		ns, ne := min(off, b.ivStart(i)), max(end, b.ivEnd(j-1))
 		b.touch++
-		b.iv[i] = interval{start: ns, end: ne, touched: b.touch}
+		b.iv[i] = interval{start: uint32(ns), end: uint32(ne), touched: b.touch}
 		copy(b.iv[i+1:], b.iv[j:b.n])
 		b.n -= j - i - 1
 	}
@@ -143,21 +167,23 @@ func (b *recvBuf) sackBlocks(dst []sackBlock, base uint32) []sackBlock {
 	if b.n == 0 {
 		return dst[:0]
 	}
-	// 新しい順に選ぶ。block は高々 4 つなので、毎回最大を選ぶ
+	// 新しい順に選ぶ。block は高々 4 つなので、毎回最も新しいものを選ぶ。新しさは touch との差で比べる
 	out := dst[:0]
-	var bound uint64 = ^uint64(0)
+	bound := ^uint32(0)
 	for len(out) < cap(dst) {
 		best := -1
+		var bestAge uint32
 		for k := range b.n {
-			if t := b.iv[k].touched; t < bound && (best < 0 || t > b.iv[best].touched) {
-				best = k
+			age := b.touch - b.iv[k].touched
+			if (bound == ^uint32(0) || age > bound) && (best < 0 || age < bestAge) {
+				best, bestAge = k, age
 			}
 		}
 		if best < 0 {
 			break
 		}
-		bound = b.iv[best].touched
-		out = append(out, sackBlock{base + uint32(b.iv[best].start), base + uint32(b.iv[best].end)})
+		bound = bestAge
+		out = append(out, sackBlock{base + uint32(b.ivStart(best)), base + uint32(b.ivEnd(best))})
 	}
 	return out
 }
@@ -168,8 +194,8 @@ func (b *recvBuf) written() [][2]uint64 {
 	if b.nxtOff > b.readOff {
 		w = append(w, [2]uint64{b.readOff, b.nxtOff})
 	}
-	for _, v := range b.iv[:b.n] {
-		w = append(w, [2]uint64{v.start, v.end})
+	for k := range b.n {
+		w = append(w, [2]uint64{b.ivStart(k), b.ivEnd(k)})
 	}
 	return w
 }

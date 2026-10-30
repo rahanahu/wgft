@@ -153,7 +153,7 @@ func TestPromoteAfterCloseLeavesNothing(t *testing.T) {
 	s.promote(pr, &seg, 0)
 	s.chunks.put(new(chunk))
 	s.chunks.held++
-	if st := s.stats(); st.RecordBytes != 0 || st.ChunkBytes != 0 || st.Conns != 0 || len(s.chunks.free) != 0 {
+	if st := s.stats(); st.RecordBytes != 0 || st.IntervalBytes != 0 || st.ChunkBytes != 0 || st.Conns != 0 || len(s.chunks.free) != 0 {
 		t.Fatalf("after a promotion that lost the race with Close: %+v, %d pooled chunks", st, len(s.chunks.free))
 	}
 }

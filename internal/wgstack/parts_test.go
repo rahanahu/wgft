@@ -128,16 +128,16 @@ func TestRingResizeAndTrim(t *testing.T) {
 
 func TestRecvIntervals(t *testing.T) {
 	var p chunkPool
-	b := recvBuf{r: ring{pool: &p, cap: recvFloor}}
+	b := recvBuf{r: ring{pool: &p, cap: recvFloor}, iv: make([]interval, floorIntervals)}
 	limit := uint64(recvFloor)
 	// H を超える区間を作る segment は捨てる
-	for i := range oooIntervals {
+	for i := range floorIntervals {
 		res := b.insert(uint64(100+i*10), []byte{1}, limit)
 		if !res.ooo {
 			t.Fatalf("interval %d not accepted", i)
 		}
 	}
-	if res := b.insert(1000, []byte{1}, limit); !res.dropped {
+	if res := b.insert(uint64(100+floorIntervals*10+5), []byte{1}, limit); !res.dropped {
 		t.Fatal("interval beyond H accepted")
 	}
 	// 既存の区間を伸ばす segment は受け入れる
@@ -153,9 +153,29 @@ func TestRecvIntervals(t *testing.T) {
 	if !res.filled || b.nxtOff != 102 {
 		t.Fatalf("fill %+v nxt=%d", res, b.nxtOff)
 	}
+	last := uint32(100 + (floorIntervals-1)*10)
 	blocks := b.sackBlocks(make([]sackBlock, 0, 4), 0)
-	if len(blocks) != 4 || blocks[0] != (sackBlock{410, 411}) {
+	if len(blocks) != 4 || blocks[0] != (sackBlock{last, last + 1}) || blocks[1] != (sackBlock{last - 10, last - 9}) {
 		t.Fatalf("blocks %v", blocks)
+	}
+}
+
+// TestRecvIntervalsCoverAFullBuffer は、MSS の下限の segment が 1 つおきに失われても、受信のバッファが
+// 満ちるまで区間が尽きないことを確かめる。
+func TestRecvIntervalsCoverAFullBuffer(t *testing.T) {
+	for _, tier := range []struct {
+		cap uint64
+		h   int
+	}{{recvFloor, floorIntervals}, {boostSize, boostIntervals}} {
+		var p chunkPool
+		b := recvBuf{r: ring{pool: &p, cap: tier.cap}, iv: make([]interval, tier.h)}
+		seg := make([]byte, minMSS)
+		for off := uint64(minMSS); off+minMSS <= tier.cap; off += 2 * minMSS {
+			if res := b.insert(off, seg, tier.cap); res.dropped {
+				t.Fatalf("capacity %d: segment at %d dropped with %d intervals", tier.cap, off, b.n)
+			}
+		}
+		b.r.release()
 	}
 }
 

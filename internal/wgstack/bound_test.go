@@ -21,7 +21,7 @@ func checkHeld(t *testing.T, n *testNet) Stats {
 	if st.SynRows > lim.synRows || st.TWRows > lim.twRows || st.AcceptQueued > lim.acceptQ || st.CtlQueued > lim.ctlSlots || st.Conns > lim.conns() {
 		t.Fatalf("a table exceeds its size: %+v", st)
 	}
-	if held := st.ChunkBytes + st.RecordBytes; held > b.FloorConn+b.Boost {
+	if held := st.ChunkBytes + st.RecordBytes + st.IntervalBytes; held > b.FloorConn+b.Boost {
 		t.Fatalf("held buffers %d exceed the bound %d", held, b.FloorConn+b.Boost)
 	}
 	if st.HeldChunksInPool*chunkSize != st.ChunkBytes {
@@ -40,7 +40,7 @@ func checkHeld(t *testing.T, n *testNet) Stats {
 			if c.tailOff-c.unaOff > c.sndCap || c.rcv.rightmost()-c.rcv.readOff > max(c.rcvCap, c.advRight-c.rcv.readOff) {
 				t.Errorf("conn %d holds bytes beyond its reservation", i)
 			}
-			if c.rcv.n > oooIntervals || c.recs.n > len(c.recs.recs) {
+			if c.rcv.n > len(c.rcv.iv) || c.recs.n > len(c.recs.recs) {
 				t.Errorf("conn %d intervals %d records %d", i, c.rcv.n, c.recs.n)
 			}
 		}
@@ -129,7 +129,7 @@ func TestBoundOutOfOrderFlood(t *testing.T) {
 		t.Fatalf("after the flood %+v", st)
 	}
 	c := &n.d.s.conns[0]
-	if c.rcv.n != oooIntervals {
+	if c.rcv.n != floorIntervals {
 		t.Fatalf("intervals %d", c.rcv.n)
 	}
 }
@@ -350,7 +350,7 @@ func TestCloseReturnsEverything(t *testing.T) {
 	}
 	n.d.Close()
 	st := n.d.s.stats()
-	if st.Conns != 0 || st.SynRows != 0 || st.TWRows != 0 || st.AcceptQueued != 0 || st.ChunkBytes != 0 || st.HeldChunksInPool != 0 || st.RecordBytes != 0 || pool.held() != 0 {
+	if st.Conns != 0 || st.SynRows != 0 || st.TWRows != 0 || st.AcceptQueued != 0 || st.ChunkBytes != 0 || st.HeldChunksInPool != 0 || st.RecordBytes != 0 || st.IntervalBytes != 0 || pool.held() != 0 {
 		t.Fatalf("after Close %+v pool %d", st, pool.held())
 	}
 }

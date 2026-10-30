@@ -5,15 +5,16 @@ import "unsafe"
 // Stats は Device が数える保持と事象。保持の欄は会計が数える今の量で、上界の試験と fuzzing が上界の式と
 // 比べる。数は `wgft status`、管理用 API、wire protocol に載せない(設計文書の「尽きたときの動作」)。
 type Stats struct {
-	Conns        int   // 使っている接続の枠
-	SynRows      int   // 握手の途中の行
-	TWRows       int   // TIME_WAIT と FIN_WAIT_2 の行
-	AcceptQueued int   // accept の待ち行列の接続(移している途中の行を含む)
-	CtlQueued    int   // 制御の輪に積んだ packet
-	ChunkBytes   int64 // 送信と受信の輪が持つ chunk の byte
-	RecordBytes  int64 // 送信の記録の輪の byte(floor の輪と boost の輪)
-	Boosted      int   // boost の枠を持つこの Device の接続
-	Reserved     int64 // 使っている接続の枠の送信と受信の容量の和
+	Conns         int   // 使っている接続の枠
+	SynRows       int   // 握手の途中の行
+	TWRows        int   // TIME_WAIT と FIN_WAIT_2 の行
+	AcceptQueued  int   // accept の待ち行列の接続(移している途中の行を含む)
+	CtlQueued     int   // 制御の輪に積んだ packet
+	ChunkBytes    int64 // 送信と受信の輪が持つ chunk の byte
+	RecordBytes   int64 // 送信の記録の輪の byte(floor の輪と boost の輪)
+	IntervalBytes int64 // 順序外の区間の表の byte(floor の表と boost の表)
+	Boosted       int   // boost の枠を持つこの Device の接続
+	Reserved      int64 // 使っている接続の枠の送信と受信の容量の和
 
 	MSSFloorDrops      uint64
 	SynTableFull       uint64
@@ -43,11 +44,15 @@ func (d *Device) Stats() Stats { return d.s.stats() }
 func (s *stack) stats() Stats {
 	var st Stats
 	recSize := int64(unsafe.Sizeof(record{}))
+	ivSize := int64(unsafe.Sizeof(interval{}))
 	for i := range s.conns {
 		c := &s.conns[i]
 		c.mu.Lock()
 		if c.floorRecs != nil {
 			st.RecordBytes += int64(len(c.floorRecs)) * recSize
+		}
+		if c.floorIv != nil {
+			st.IntervalBytes += int64(len(c.floorIv)) * ivSize
 		}
 		if c.state != stFree {
 			st.Conns++
@@ -56,6 +61,9 @@ func (s *stack) stats() Stats {
 			if c.boosted {
 				st.Boosted++
 				st.RecordBytes += int64(len(c.recs.recs)) * recSize
+			}
+			if c.rcvBoost {
+				st.IntervalBytes += int64(len(c.rcv.iv)) * ivSize
 			}
 		}
 		c.mu.Unlock()
@@ -111,6 +119,7 @@ func (d *Device) Bound() Bound { return d.s.bound() }
 func (s *stack) bound() Bound {
 	n := int64(len(s.conns))
 	recSize := int64(unsafe.Sizeof(record{}))
+	ivSize := int64(unsafe.Sizeof(interval{}))
 	var b Bound
 	b.Fix = n*int64(unsafe.Sizeof(tcb{})) +
 		int64(len(s.connIdx.ents)+len(s.syn.idx.ents)+len(s.tw.idx.ents))*int64(unsafe.Sizeof(indexEnt{})) +
@@ -122,8 +131,8 @@ func (s *stack) bound() Bound {
 		int64(len(s.out.ctl.buf)) + int64(len(s.out.ctl.lens))*8 +
 		int64(cap(s.fired))*4 +
 		chunkPoolKeep*chunkSize
-	b.FloorConn = n * (sendFloor + recvFloor + floorRecords*recSize)
-	b.Boost = int64(len(s.pool.slots)) * ((boostSize - sendFloor) + (boostSize - recvFloor) + (boostRecords-floorRecords)*recSize)
+	b.FloorConn = n * (sendFloor + recvFloor + floorRecords*recSize + floorIntervals*ivSize)
+	b.Boost = int64(len(s.pool.slots)) * ((boostSize - sendFloor) + (boostSize - recvFloor) + (boostRecords-floorRecords)*recSize + (boostIntervals-floorIntervals)*ivSize)
 	b.Total = b.Fix + b.FloorConn + b.Boost
 	b.Transient = int64(len(s.pool.slots)) * (sendFloor + recvFloor)
 	return b

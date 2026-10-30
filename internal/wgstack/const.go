@@ -32,8 +32,11 @@ const (
 	acceptQueueAll  = 512   // Q。Device 全体の accept の待ち行列
 	synRowsAll      = 1024  // N_syn。握手の途中の表の行
 	twRowsAll       = 65536 // M。TIME_WAIT と FIN_WAIT_2 の行
-	oooIntervals    = 32    // H。受信のバッファの順序外の区間
-	ctlSlots        = 256   // Q_ctl。制御の出力の輪の枠
+	// H。受信のバッファの順序外の区間の数の上限。MSS の下限の segment が 1 つおきに失われる最悪の場合を
+	// 覆う ceil(予約 / (2 × 536)) で、区間が尽きるのは受信のバッファが満ちた後だけである
+	floorIntervals = (recvFloor + 2*minMSS - 1) / (2 * minMSS) // 245
+	boostIntervals = (boostSize + 2*minMSS - 1) / (2 * minMSS) // 3,913
+	ctlSlots       = 256                                       // Q_ctl。制御の出力の輪の枠
 )
 
 // TCP の値。参照の実装の Linux の既定に合わせる(設計文書の「TCP の機能」)。
