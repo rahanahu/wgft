@@ -708,8 +708,14 @@ func TestQBenchGate(t *testing.T) {
 	prov := provenance(where)
 	ref := &Reference{Cells: map[string]map[string]Summary{}, CellMeta: map[string]Provenance{}}
 	if path := os.Getenv("QBENCH_WRITE_REF"); path != "" {
+		// fail now rather than after the runs if the file cannot be written
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644)
+		if err != nil {
+			t.Fatalf("the reference file is not writable: %v", err)
+		}
+		f.Close()
 		// a partial run replaces its own cells and keeps the others
-		if b, err := os.ReadFile(path); err == nil {
+		if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
 			if err := json.Unmarshal(b, ref); err != nil {
 				t.Fatalf("reading %s: %v", path, err)
 			}
@@ -782,7 +788,11 @@ func row(c Cell, wg, gv, lx Summary, v Verdict) string {
 		}
 		return fmt.Sprintf("%.2f Mbit/s", s.Mbps)
 	}
-	return fmt.Sprintf("| %s | %s | %s | %s | %s: %.1f vs %.1f | %s |", c.Name, val(wg), val(gv), val(lx), v.Rule, v.Value, v.Line, v.Result)
+	rule := fmt.Sprintf("%s: %.1f vs %.1f", v.Rule, v.Value, v.Line)
+	if c.NotJudged != "" {
+		rule = "-"
+	}
+	return fmt.Sprintf("| %s | %s | %s | %s | %s | %s |", c.Name, val(wg), val(gv), val(lx), rule, v.Result)
 }
 
 func printTable(rows []string) {
