@@ -27,7 +27,10 @@ func (s *stack) inputFragment(ip *ipv4, now int64) {
 		res = s.frag.Process(pkt, coreTime(now))
 	}
 	switch res.Status {
-	case ipv4frag.Held, ipv4frag.Duplicate, ipv4frag.Closed:
+	case ipv4frag.Held:
+		s.fragments.Add(1)
+		s.noteFragSweep(now)
+	case ipv4frag.Duplicate, ipv4frag.Closed:
 		s.fragments.Add(1)
 	case ipv4frag.Complete:
 		s.input(res.Packet, now)
@@ -64,6 +67,18 @@ func (s *stack) fragNotice(n ipv4frag.Notice, offending []byte, now int64) {
 		return
 	}
 	s.sendICMPErrorRaw(offending, icmpParamProblem, 0, uint32(n.Pointer)<<24, now, true)
+}
+
+// noteFragSweep は、断片を保持した後に次の掃除の期限をタイマーの goroutine に知らせる。goroutine は眠る前に
+// 表が空なら掃除の期限を数えないので、知らせないと何も起きない Device では最長 1 時間眠り、寿命の 30 秒を過ぎても
+// 項目を外さない。期限が過ぎていれば今から 1 秒後にする。
+func (s *stack) noteFragSweep(now int64) {
+	d := s.fragNextSweep.Load()
+	if d <= now {
+		d = now + fragSweep
+		s.fragNextSweep.Store(d)
+	}
+	s.noteDeadline(d)
 }
 
 // sweepFrag は 1 秒ごとに期限を過ぎた項目を外し、Time Exceeded を返す。advance から呼ぶ。
