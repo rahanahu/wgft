@@ -4,6 +4,7 @@ package qbench
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -40,6 +41,10 @@ type DUT struct {
 	// Stats, when set, describes the engine's own counters for the run's log line, with the RTO
 	// in use at outageEnd; it is called after the transfer and before Close.
 	Stats func(outageEnd time.Time) string
+	// OnAccept, when set, sees the accepted connection; RTOAt then returns the sender's RTO in
+	// use at a moment, backoff included, or a negative value when the engine cannot tell.
+	OnAccept func(net.Conn)
+	RTOAt    func(at time.Time) time.Duration
 }
 
 func newWgstack() (*DUT, error) {
@@ -54,6 +59,7 @@ func newWgstack() (*DUT, error) {
 		Listen: func(p uint16) (Listener, error) { return d.ListenTCP(netip.AddrPortFrom(dutAddr, p)) },
 		Close:  func() { d.Close(); d.Wait() },
 		Stats:  func(end time.Time) string { return wgstackStats(d.Stats()) + " rto_at_outage_end=" + tr.rtoBefore(end) },
+		RTOAt:  tr.rtoAt,
 	}, nil
 }
 
@@ -120,10 +126,15 @@ func newRig(engine string, imp Impair, seed int64) (*Rig, error) {
 		return nil, err
 	}
 	var d *DUT
-	if engine == "wgstack" {
+	switch engine {
+	case "wgstack":
 		d, err = newWgstack()
-	} else {
+	case "gvisor":
 		d, err = newGvisor()
+	case "linux":
+		d, err = newLinux()
+	default:
+		err = fmt.Errorf("unknown engine %q", engine)
 	}
 	if err != nil {
 		c.Dev.Close()

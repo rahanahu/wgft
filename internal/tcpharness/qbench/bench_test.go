@@ -253,7 +253,6 @@ func TestQBench(t *testing.T) {
 		}
 		cases = append(cases, Case{Name: "outage2s/" + dn, DUTSend: dir, Outage: true})
 	}
-	var all []Result
 	byKey := map[string][]Result{}
 	for _, c := range cases {
 		if only != "" && !strings.Contains(c.Name, only) {
@@ -267,7 +266,6 @@ func TestQBench(t *testing.T) {
 				fmt.Printf("QBENCH-RUN engine=%s case=%s run=%d seed=%d bytes=%d/%d dur=%s mbps=%.2f hash_ok=%v recovery=%s stall=%s retrans=%d/%d qdrop=%d randdrop=%d err=%q\n",
 					eng, c.Name, run, seed, r.Bytes, r.Want, r.Dur.Round(time.Millisecond), r.Mbps, r.HashOK, r.Recovery.Round(time.Millisecond), r.Stall.Round(time.Millisecond), r.Retrans, r.DataPkts, r.QDrops, r.RandDrops, r.Err)
 				fmt.Printf("QBENCH-STATS engine=%s case=%s run=%d seed=%d %s\n", eng, c.Name, run, seed, r.EngineStats)
-				all = append(all, r)
 				k := eng + "|" + c.Name
 				byKey[k] = append(byKey[k], r)
 				if r.Err != "" {

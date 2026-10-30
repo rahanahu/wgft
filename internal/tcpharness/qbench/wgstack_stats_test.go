@@ -74,3 +74,16 @@ func (t *traceRTO) rtoBefore(end time.Time) string {
 	}
 	return out
 }
+
+// rtoAt is the RTO of the last TraceRTO before at, or -1.
+func (t *traceRTO) rtoAt(at time.Time) time.Duration {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := time.Duration(-1)
+	for _, r := range t.rto {
+		if r.at.Before(at) {
+			out = r.rto
+		}
+	}
+	return out
+}

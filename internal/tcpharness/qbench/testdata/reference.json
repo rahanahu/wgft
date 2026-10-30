@@ -1,0 +1,475 @@
+{
+  "measured": "2026-10-30T04:49:52Z",
+  "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+  "runs": 9,
+  "cells": {
+    "recv/loss0%": {
+      "gvisor": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 18.431130239874967,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 6.094683573964001
+      },
+      "linux": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 18.476473161995894,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.0295611521305865
+      }
+    },
+    "recv/loss1%": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 4.715312954902415,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.8561111099874918
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 4.78839336403772,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.8312750179293251
+      }
+    },
+    "recv/loss5%": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 1.484581971499998,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.2855313682657472
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 1.407937047930683,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.5880245514405227
+      }
+    },
+    "recv/outage2s": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 8.223199854667639,
+        "recovery_ms": 1257.926997,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.0537336358535048
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 4.304864329264626,
+        "recovery_ms": 1241.748522,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.056348389949361
+      }
+    },
+    "recv/reorder": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 8.786633863054996,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 2.433855245950781
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 7.930260056689753,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 2.7706578242420465
+      }
+    },
+    "send/loss0%": {
+      "gvisor": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 18.694900089353087,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.0010982783491913
+      },
+      "linux": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 18.723539474474805,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.010425577911215
+      }
+    },
+    "send/loss1%": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 3.945278099252892,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.4547184478698056
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 3.418843862570296,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.9847928805861907
+      }
+    },
+    "send/loss5%": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 1.5450368537674346,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.3885460751259053
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 1.0628029514453472,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.8129797296951353
+      }
+    },
+    "send/outage2s": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 10.988883491930164,
+        "recovery_ms": 1322.938638,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.021295379703015
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 12.38117544443625,
+        "recovery_ms": 974.189756,
+        "rto_ms": 1424,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.027428947224726
+      }
+    },
+    "send/reorder": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 8.249956056629976,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 2.8601474568276593
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 18.787682922572895,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "spread": 1.0091977656787978
+      }
+    },
+    "thin-recv/loss0%": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.813759,
+        "p99_ms": 26.387295,
+        "max_ms": 26.615487,
+        "samples": 3600,
+        "spread": 1.0099707906509352
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.88589,
+        "p99_ms": 26.32133,
+        "max_ms": 26.586127,
+        "samples": 3600,
+        "spread": 1.0042323607751293
+      }
+    },
+    "thin-recv/loss1%": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.849601,
+        "p99_ms": 96.049051,
+        "max_ms": 117.566009,
+        "samples": 3600,
+        "spread": 3.722985929882044
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.863722,
+        "p99_ms": 96.013498,
+        "max_ms": 117.577722,
+        "samples": 3600,
+        "spread": 3.697804029393989
+      }
+    },
+    "thin-recv/loss5%": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.957529,
+        "p99_ms": 128.280049,
+        "max_ms": 211.888575,
+        "samples": 3600,
+        "spread": 1.6019227324462229
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.986496,
+        "p99_ms": 136.226867,
+        "max_ms": 211.790321,
+        "samples": 3600,
+        "spread": 1.6037448472995093
+      }
+    },
+    "thin-recv/outage2s": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": 98.527898,
+        "rto_ms": -1,
+        "p50_ms": 26.070381,
+        "p99_ms": 9693.995721,
+        "max_ms": 9754.147096,
+        "samples": 1431,
+        "spread": 1.0041820179111527
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": 97.358814,
+        "rto_ms": -1,
+        "p50_ms": 26.108653,
+        "p99_ms": 9719.824225,
+        "max_ms": 9775.510844,
+        "samples": 1432,
+        "spread": 1.0028511466795424
+      }
+    },
+    "thin-send/loss0%": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.869488,
+        "p99_ms": 26.370447,
+        "max_ms": 28.395667,
+        "samples": 3600,
+        "spread": 1.0110648908208377
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.893296,
+        "p99_ms": 26.462124,
+        "max_ms": 26.663507,
+        "samples": 3600,
+        "spread": 1.0073101250682417
+      }
+    },
+    "thin-send/loss1%": {
+      "gvisor": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.866612,
+        "p99_ms": 96.40047,
+        "max_ms": 157.380447,
+        "samples": 7200,
+        "spread": 2.685414270931843
+      },
+      "linux": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.8843,
+        "p99_ms": 95.80931,
+        "max_ms": 169.28784,
+        "samples": 7200,
+        "spread": 2.6242952502401278
+      }
+    },
+    "thin-send/loss5%": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 25.979948,
+        "p99_ms": 1834.214418,
+        "max_ms": 2500.169568,
+        "samples": 3600,
+        "spread": 24.72643448183032
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 26.134955,
+        "p99_ms": 156.374897,
+        "max_ms": 397.008824,
+        "samples": 3600,
+        "spread": 3.2376492304230604
+      }
+    },
+    "thin-send/outage2s": {
+      "gvisor": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 0,
+        "recovery_ms": 98.312824,
+        "rto_ms": -1,
+        "p50_ms": 26.091881,
+        "p99_ms": 9702.418098,
+        "max_ms": 9759.234173,
+        "samples": 2862,
+        "spread": 1.0045704085174672
+      },
+      "linux": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 0,
+        "recovery_ms": 64.499511,
+        "rto_ms": 1008,
+        "p50_ms": 26.094443,
+        "p99_ms": 2039.922716,
+        "max_ms": 2085.253117,
+        "samples": 7200,
+        "spread": 1.0167616669652164
+      }
+    }
+  }
+}
