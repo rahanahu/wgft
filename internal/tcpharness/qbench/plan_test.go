@@ -484,6 +484,7 @@ func summarize(c Cell, runs []Run) Summary {
 	s := Summary{Runs: len(runs), RecoveryMS: -1, RTOMS: -1, P50MS: -1, P99MS: -1, MaxMS: -1}
 	var mb, rec, rto, judged []float64
 	var lat []time.Duration
+	var perRun [][]time.Duration
 	for _, r := range runs {
 		if r.Err != "" {
 			continue // a failed run stays out of every median
@@ -499,6 +500,9 @@ func summarize(c Cell, runs []Run) Summary {
 			rto = append(rto, ms(r.RTO))
 		}
 		lat = append(lat, r.Lat...)
+		if len(r.Lat) > 0 {
+			perRun = append(perRun, r.Lat)
+		}
 		s.Lost += r.Lost
 		switch {
 		case c.Thin:
@@ -521,7 +525,7 @@ func summarize(c Cell, runs []Run) Summary {
 		s.P50MS, s.P99MS, s.MaxMS = ms(quantile(lat, 0.5)), ms(quantile(lat, 0.99)), ms(lat[len(lat)-1])
 		s.Samples = len(lat)
 		if c.Thin {
-			s.P99LoMS, s.P99HiMS = p99Interval(lat)
+			s.P99LoMS, s.P99HiMS = p99Interval(perRun)
 		}
 	}
 	s.Spread = spread(judged)
@@ -534,21 +538,25 @@ func summarize(c Cell, runs []Run) Summary {
 // bootstrapResamples is how many resamples p99Interval draws.
 const bootstrapResamples = 1000
 
-// p99Interval is the bootstrap 95% interval of the p99 of the sorted pool, in ms: the 2.5th and
-// 97.5th percentiles of the p99 over resamples of the pool's size drawn with replacement. The
-// seed is fixed, so the same pool gives the same interval.
-func p99Interval(sorted []time.Duration) (lo, hi float64) {
+// p99Interval is the run-level bootstrap 95% interval of the pooled p99, in ms: the 2.5th and
+// 97.5th percentiles of the pooled p99 over resamples that draw whole runs with replacement, as
+// many as there are. The samples of one run share its losses and are not independent, so drawing
+// samples instead of runs makes the interval too narrow: on one cell it missed the p99 of another
+// seed set by half again. The seed is fixed, so the same runs give the same interval.
+func p99Interval(runs [][]time.Duration) (lo, hi float64) {
+	if len(runs) == 0 {
+		return -1, -1
+	}
 	r := rand.New(rand.NewSource(1))
-	n := len(sorted)
-	idx := make([]int, n)
 	est := make([]float64, bootstrapResamples)
+	var pool []time.Duration
 	for i := range est {
-		for j := range idx {
-			idx[j] = r.Intn(n)
+		pool = pool[:0]
+		for range runs {
+			pool = append(pool, runs[r.Intn(len(runs))]...)
 		}
-		sort.Ints(idx) // a resample of indices into the sorted pool is sorted by value
-		k := int(math.Ceil(0.99*float64(n))) - 1
-		est[i] = ms(sorted[idx[max(k, 0)]])
+		sort.Slice(pool, func(a, b int) bool { return pool[a] < pool[b] })
+		est[i] = ms(quantile(pool, 0.99))
 	}
 	sort.Float64s(est)
 	return est[int(0.025*float64(len(est)))], est[int(0.975*float64(len(est)))-1]
@@ -1099,12 +1107,24 @@ func TestJudgeRules(t *testing.T) {
 			t.Errorf("interval %v to %v against 150: %q, doubling %v; want %s", tc.lo, tc.hi, v.Result, near(v), tc.want)
 		}
 	}
-	pool := make([]time.Duration, 2000)
-	for i := range pool {
-		pool[i] = time.Duration(i) * time.Millisecond
+	// Nine runs of 400 samples where one run in three has a tail: a sample-level interval would be
+	// narrow around the pooled p99, while whole runs drawn with replacement can miss or double the
+	// tail runs, so the interval spans both.
+	var runs [][]time.Duration
+	for i := range 9 {
+		l := make([]time.Duration, 400)
+		for j := range l {
+			l[j] = 30 * time.Millisecond
+		}
+		if i%3 == 0 {
+			for j := range 12 {
+				l[j] = 500 * time.Millisecond
+			}
+		}
+		runs = append(runs, l)
 	}
-	if lo, hi := p99Interval(pool); !(lo < 1980 && hi > 1980 && lo > 1960 && hi < 2000) {
-		t.Errorf("the p99 interval of 0 to 1999 ms is %v to %v; want about 1980 inside it", lo, hi)
+	if lo, hi := p99Interval(runs); !(lo <= 30 && hi >= 500) {
+		t.Errorf("the run-level p99 interval is %v to %v ms; want it to span 30 to 500 ms", lo, hi)
 	}
 
 	// throughput: 1% measurement tolerance under the binding line
