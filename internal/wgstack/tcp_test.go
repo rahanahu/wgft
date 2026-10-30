@@ -703,10 +703,12 @@ func TestCloseWithPendingDataRetiresAfterDelivery(t *testing.T) {
 	p := n.handshake(40000, 80, true, false, true)
 	c := acceptOne(t, l)
 	n.drain()
-	go func() {
-		c.Write(make([]byte, 100000))
-		c.Close()
-	}()
+	// 100000 byte は送信の floor に収まるので Write は待たず、Close も待たない。goroutine で書くと、GOMAXPROCS が
+	// 1 の時に下の繰り返しが書く前に終わる
+	if k, err := c.Write(make([]byte, 100000)); k != 100000 || err != nil {
+		t.Fatalf("Write %d, %v", k, err)
+	}
+	c.Close()
 	total := 0
 	for i := 0; i < 2000 && n.d.Stats().TWRows == 0; i++ {
 		got := p.absorb(n.drain())
