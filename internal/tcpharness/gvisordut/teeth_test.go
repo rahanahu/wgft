@@ -564,3 +564,151 @@ func TestHarnessCatchesResendAfterTheSecondDupack(t *testing.T) {
 	got := tcpharness.Record(t, e, scenario(t, "limited-transmit-rack"), 1)
 	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomeFail)
 }
+
+// emitFilter passes every emitted packet through f, which returns the packets to send in its
+// place: none drops it, more adds copies, each optionally after a delay.
+type emitFilter struct {
+	tcpharness.DUT
+	out chan []byte
+	wg  sync.WaitGroup
+}
+
+func (d *emitFilter) Emitted() <-chan []byte { return d.out }
+
+type delayed struct {
+	pkt   []byte
+	after time.Duration
+}
+
+func filterEmitted(f func(pkt []byte) []delayed) func(tcpharness.DUT) tcpharness.DUT {
+	return func(inner tcpharness.DUT) tcpharness.DUT {
+		d := &emitFilter{DUT: inner, out: make(chan []byte, 1024)}
+		go func() {
+			for pkt := range inner.Emitted() {
+				for _, e := range f(pkt) {
+					if e.after == 0 {
+						d.out <- e.pkt
+						continue
+					}
+					d.wg.Add(1)
+					time.AfterFunc(e.after, func() { defer d.wg.Done(); d.out <- e.pkt })
+				}
+			}
+			d.wg.Wait()
+			close(d.out)
+		}()
+		return d
+	}
+}
+
+func rfc2525Record(t *testing.T, name string, f func(pkt []byte) []delayed, scen, key string) {
+	t.Helper()
+	got := tcpharness.Record(t, mutant(name, filterEmitted(f)), scenario(t, scen), 1)
+	wantOutcome(t, got, key, tcpharness.OutcomeFail)
+}
+
+// Stamping the initial window's last five segments 6 ms later makes them a second window, which
+// the initial-window check must not let pass as a probe.
+func TestHarnessCatchesASecondInitialWindow(t *testing.T) {
+	var mu sync.Mutex
+	n := map[uint16]int{}
+	rfc2525Record(t, "gvisor-split-window", func(pkt []byte) []delayed {
+		s, err := tcpharness.Parse(pkt)
+		if err != nil || len(s.Payload) == 0 || s.Opts.TS == nil {
+			return []delayed{{pkt, 0}}
+		}
+		mu.Lock()
+		n[s.Dst.Port()]++
+		k := n[s.Dst.Port()]
+		mu.Unlock()
+		if k > 5 {
+			s.Opts.TS.Val += 6
+			pkt = s.Marshal()
+		}
+		return []delayed{{pkt, 0}}
+	}, "rfc2525-initial-window", "rfc2525-initial-window/mss1380.one-probe-at-most")
+}
+
+// A resend that brings a second segment with it fails the RTO's one-segment check.
+func TestHarnessCatchesAnRTOOfTwoSegments(t *testing.T) {
+	var mu sync.Mutex
+	sent := map[uint32]tcpharness.Segment{}
+	var order []uint32
+	rfc2525Record(t, "gvisor-rto-two", func(pkt []byte) []delayed {
+		s, err := tcpharness.Parse(pkt)
+		if err != nil || len(s.Payload) == 0 {
+			return []delayed{{pkt, 0}}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if _, seen := sent[s.Seq]; !seen {
+			sent[s.Seq] = s
+			order = append(order, s.Seq)
+			return []delayed{{pkt, 0}}
+		}
+		for i, q := range order {
+			if q == s.Seq && i+1 < len(order) {
+				return []delayed{{pkt, 0}, {sent[order[i+1]].Marshal(), 0}}
+			}
+		}
+		return []delayed{{pkt, 0}}
+	}, "rfc2525-rto-slow-start", "rfc2525-rto-slow-start/one-segment")
+}
+
+// A SYN-ACK resent after 300 ms is below the initial RTO of 1 s.
+func TestHarnessCatchesAnEarlySynAckResend(t *testing.T) {
+	rfc2525Record(t, "gvisor-synack-300ms", func(pkt []byte) []delayed {
+		s, err := tcpharness.Parse(pkt)
+		if err == nil && s.Has(tcpharness.FlagSYN|tcpharness.FlagACK) {
+			return []delayed{{pkt, 0}, {pkt, 300 * time.Millisecond}}
+		}
+		return []delayed{{pkt, 0}}
+	}, "rfc2525-synack-rto", "rfc2525-synack-rto/initial-rto")
+}
+
+// Dropping two of every three pure ACKs makes one ACK cover three segments.
+func TestHarnessCatchesStretchACKs(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	rfc2525Record(t, "gvisor-stretch-ack", func(pkt []byte) []delayed {
+		s, err := tcpharness.Parse(pkt)
+		if err == nil && s.Flags == tcpharness.FlagACK && len(s.Payload) == 0 {
+			mu.Lock()
+			n++
+			keep := n%3 == 0
+			mu.Unlock()
+			if !keep {
+				return nil
+			}
+		}
+		return []delayed{{pkt, 0}}
+	}, "rfc2525-stretch-ack", "rfc2525-stretch-ack/every-second-segment")
+}
+
+// A FIN held back 300 ms is not prompt.
+func TestHarnessCatchesALateFIN(t *testing.T) {
+	rfc2525Record(t, "gvisor-late-fin", func(pkt []byte) []delayed {
+		s, err := tcpharness.Parse(pkt)
+		if err == nil && s.Has(tcpharness.FlagFIN) {
+			return []delayed{{pkt, 300 * time.Millisecond}}
+		}
+		return []delayed{{pkt, 0}}
+	}, "rfc2525-close-fin", "rfc2525-close-fin/fin-prompt")
+}
+
+// A lost RST, and a RST with another sequence number, fail the data-after-close checks.
+func TestHarnessCatchesNoOrWrongRSTAfterClose(t *testing.T) {
+	rfc2525Record(t, "gvisor-no-rst", func(pkt []byte) []delayed {
+		if s, err := tcpharness.Parse(pkt); err == nil && s.Has(tcpharness.FlagRST) {
+			return nil
+		}
+		return []delayed{{pkt, 0}}
+	}, "rfc2525-data-after-close", "rfc2525-data-after-close/rst")
+	rfc2525Record(t, "gvisor-rst-off-by-one", func(pkt []byte) []delayed {
+		if s, err := tcpharness.Parse(pkt); err == nil && s.Has(tcpharness.FlagRST) {
+			s.Seq++
+			return []delayed{{s.Marshal(), 0}}
+		}
+		return []delayed{{pkt, 0}}
+	}, "rfc2525-data-after-close", "rfc2525-data-after-close/rst.seq")
+}
