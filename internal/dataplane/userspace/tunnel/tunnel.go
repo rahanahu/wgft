@@ -96,6 +96,7 @@ func New(cfg Config) (*Tunnel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
+	startMemProbe(tnet)
 	t := &Tunnel{cfg: cfg, tnet: tnet}
 	t.dev = wgbind.NewDevice(tnet, bindForDevice(), device.NewLogger(device.LogLevelError, "wg: "))
 

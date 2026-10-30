@@ -99,6 +99,13 @@
 # pool. acceptq and ackflood need a kernel-mode server in front of the agent and wgstall a userspace
 # one; they are listed for that mode only, rather than registered for both modes to print SKIP.
 #
+# agentmem.sh measures the userspace agent's peak RSS and live heap under seven hostile loads for one
+# netstack (gvisor or wgstack) and prints them beside the design's bound for the same settings. It
+# reads a memory peak, so it runs alone, and it is not in `labhost run all` because it needs a build
+# with the labmemprobe tag (`WGFT_LAB_BUILD_TAGS=labmemprobe lab/lab build`), which no other job
+# wants, and takes about six minutes for each netstack, inside labhost's default per-scenario timeout of 10 minutes (the two netstacks are two jobs for that reason). It is run by name when the agent's memory
+# bound or a netstack changes (docs/development/testing.md).
+#
 # usage.sh puts the ordinary kinds of traffic through a rule (HTTP, keystrokes, game-like UDP, bulk)
 # and asserts only that they arrive whole; the round-trip times and rates it prints are not
 # assertions, so it runs in the pool.
@@ -182,3 +189,5 @@ exclusive-heavy  yes  exhaustion.sh userspace wgstall
 
 parallel         no   version-skew.sh
 exclusive-heavy  no   exhaustion.sh kernel postclose
+exclusive-heavy  no   agentmem.sh gvisor
+exclusive-heavy  no   agentmem.sh wgstack

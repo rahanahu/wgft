@@ -186,7 +186,8 @@ cmd_shell() {
 # install(1) は unlink してから書くので、実行中のプロセスは古い inode のまま動き続け、新しい exec は新しい方を読む
 cmd_build() {
   [[ -f $REPO/go.mod ]] || die "go.mod がまだない"
-  (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/ ./cmd/... ./tools/...)
+  # WGFT_LAB_BUILD_TAGS は go build の -tags に渡す。lab/agentmem.sh は labmemprobe を付けた build を要る
+  (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ${WGFT_LAB_BUILD_TAGS:+-tags "$WGFT_LAB_BUILD_TAGS"} -o bin/ ./cmd/... ./tools/...)
   info "built into $REPO/bin/"
   if vm_exists && [[ $(vm_state) == RUNNING ]]; then
     in_vm sh -c 'for b in /wgft/bin/*; do [ -f "$b" ] && [ -x "$b" ] && case "$b" in *.test) ;; *) install -m 0755 "$b" /usr/local/bin/;; esac; done; ls /usr/local/bin/'
