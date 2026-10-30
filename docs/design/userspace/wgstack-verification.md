@@ -93,7 +93,6 @@ GSO が有効だと、Linux の TCP は複数の segment を 1 つの buffer に
 
 - 回復の間の送る量:Linux は回復の間の送る量を PRR(RFC 6937)で決め、RFC 6582 の窓の膨らませ方を使いません。
   回復の台本は、再送する範囲と順、回復の終わる位置、byte の列の一致を確かめ、回復の間の輻輳の窓の値は比べません
-- quickack:Linux は接続の始めと黙った後に、遅延なしで ACK を返す期間を持ちます
 - 黙った後の窓:Linux の `tcp_slow_start_after_idle` は RFC 5681 の 4.1 節と異なる計算で窓を戻します
 - 閉じた後の打ち切り:Linux は閉じた接続の再送と probe を `tcp_orphan_retries` で打ち切ります。
   wgstack は閉じた接続の窓の probe を Linux と同じく後退の回数が 8 以上で、後退を含めた RTO が上限の 120 秒に届いたときに打ち切り、再送は `tcp_retries2` のままです([未確認の点と未決の点](wgstack.md#未確認の点と未決の点))
@@ -116,7 +115,6 @@ wgstack の一覧に最初から入る差は、[wgstack の設計](wgstack.md#tc
 - SYN cookie を持たないこと(参照の Linux の設定でも切ります)
 - ECN を交渉しないこと
 - 緊急のデータを通常のデータとして渡すこと
-- D-SACK を返さないこと(参照の Linux の設定でも切ります)
 - 前節の設定で外せない Linux の挙動
 
 gVisor の一覧は、今の `internal/nettun` の試験が固定している gVisor との差(例えば[断片に対する ICMP](packet-validation.md#断片に対する-icmp)の 3 つの差)とは別のものです。
@@ -233,12 +231,16 @@ fuzzing で見つけた入力は、回帰の試験の入力として残します
 
 ### 関門での並列数と実行回数
 
-関門では `-fuzztime Nx` で実行回数を指定し、`-parallel 4` を使います。
-`FuzzCore` は 5,000,000x、`FuzzAdversarialSender` は 150,000x です。
+関門(`scripts/wgstack-gate.sh`)では `-fuzztime Nx` で実行回数を指定します。
+`FuzzCore` は 5,000,000x を `-parallel 4` で、`FuzzAdversarialSender` は 30,000x を `-parallel 8` で流します。
+関門の `FuzzAdversarialSender` は壊れていないことを確かめる量に留め、深さは別のマシンでの長い fuzzing で得ます。
+150,000x を `-parallel 4` で流した関門では、標本の集まりが大きくなるにつれて 1 回が重くなり、ほかの段が約 4 分で終わる中でこの段だけが 24 分を超えたためです。
+関門の表には、fuzz の段ごとに 1 秒あたりの実行の回数を出します。
 `-fuzztime` を秒で指定すると、ホストの負荷で回数が変わり、結果を比べられません。
 
 - `FuzzParse` と `FuzzAdversarialSender`:worker の数にほぼ比例して速くなります。
   並列数は、ホストを分け合う他の仕事の数で決めます。
+  関門の `FuzzAdversarialSender` は 8 を使います。
 - `FuzzCore`:worker の数に比例して速くならず、8 worker 付近から伸びが鈍ります。
   1 回ごとに Device を作り、表と輪を確保して捨てるので、確保と GC の走査が CPU の時間の大半を占めるためです(原因の特定は単一 worker の pprof で、並列での頭打ちの機構は未確認です)。
   関門では 4 を使い、8 を超える並列数は効果が小さいので使いません。
@@ -248,7 +250,7 @@ fuzzing で見つけた入力は、回帰の試験の入力として残します
 - `FuzzCore` の 1 core での速さは、`BenchmarkFuzzCore` で測れます。
   1 core のマシンで長く流すときは、`-parallel 1` とし、回数は 1 core の速さから見積もります。
 
-実行回数は、`-parallel 4` での 1 秒あたりの回数を測ってから、所要時間が関門の枠に収まるように決めます。
+実行回数は、関門の並列数での 1 秒あたりの回数を測ってから、所要時間が関門の枠に収まるように決めます。
 
 ## 敵対的な保持の試験
 

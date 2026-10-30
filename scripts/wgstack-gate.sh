@@ -44,7 +44,7 @@ done
 
 cd "$(dirname "$0")/.." || exit 2
 [[ -n $logdir ]] || logdir=$(mktemp -d "${TMPDIR:-/tmp}/wgstack-gate.XXXXXX")
-mkdir -p "$logdir" || exit 2
+mkdir -p "$logdir" && logdir=$(cd "$logdir" && pwd) || exit 2
 
 # has_test reports whether package $1 has a test or fuzz target named $2: 0 if it has, 1 if it
 # has not, and 2, with the reason, when go test -list fails, such as when the package does not
@@ -84,15 +84,34 @@ copy_tree() {
   { git ls-files -z; git ls-files -z -o --exclude-standard; } | xargs -0 cp --parents -t "$tmp"
 }
 
-# fuzz runs a fuzz target on its own copy of the tree, kept in the log directory: a failing input
-# is written to the copy's testdata, where the steps beside it would otherwise run it as a seed.
+# fuzz runs a fuzz target, $3 workers at once, on its own copy of the tree, kept in the log
+# directory: a failing input is written to the copy's testdata, where the steps beside it would
+# otherwise run it as a seed. It ends with a NOTE line of the executions per second, which the
+# table shows.
 fuzz() {
-  local target=$1 times=$2
+  local target=$1 times=$2 workers=$3 rc
   need_test ./internal/wgstack "$target"
   copy_tree "$logdir/$target-tree" && cd "$tmp" || return 1
-  go test ./internal/wgstack -run '^$' -fuzz "^$target\$" -fuzztime "$times" -parallel 4 && return 0
+  go test ./internal/wgstack -run '^$' -fuzz "^$target\$" -fuzztime "$times" -parallel "$workers"
+  rc=$?
+  fuzz_rate
+  ((rc == 0)) && return 0
   echo "the failing input is under $tmp/internal/wgstack/testdata/fuzz/$target"
   return 1
+}
+
+# fuzz_rate reads the last progress line of the fuzzing output above it in the step's log, such
+# as "fuzz: elapsed: 1m6s, execs: 205209 (3498/sec)", and prints the run's executions per second.
+fuzz_rate() {
+  awk '/^fuzz: elapsed: / { el = $3; ex = $5 } END {
+    sub(/,$/, "", el); sub(/,$/, "", ex); t = 0; n = ""
+    for (i = 1; i <= length(el); i++) {
+      c = substr(el, i, 1)
+      if (c ~ /[0-9.]/) { n = n c; continue }
+      t += n * (c == "h" ? 3600 : c == "m" ? 60 : 1); n = ""
+    }
+    if (t > 0) printf "NOTE: %d execs in %ds, %.0f/s\n", ex, t, ex / t
+  }' "$logdir/${FUZZ_STEP:-fuzz}.log"
 }
 
 # The steps, as name and command. A command that prints "SKIP: reason" and exits 0 counts as
@@ -115,8 +134,10 @@ step staticcheck 'copy_tree && cd "$tmp" && go mod edit -go=1.27.1 && GOTOOLCHAI
 step conformance-seeds 'for s in 1 2 3 4 5; do WGFT_TEST_WGSTACK_CONFORMANCE=1 WGFT_TEST_TCPHARNESS_SEED=$s go test -count=1 ./internal/tcpharness/wgstackdut || exit 1; done'
 step stream-seeds-full 'WGFT_WGSTACK_STREAM_SEEDS=full go test -count=1 ./internal/wgstack -run "Stream|Scoreboard|RecvBuf"'
 step adversarial-seeds 'need_test ./internal/wgstack TestAdversarialSender; WGFT_WGSTACK_AUDIT_SEEDS=3000 go test -count=1 ./internal/wgstack -run TestAdversarialSender'
-step fuzz-core 'fuzz FuzzCore 5000000x'
-step fuzz-adversarial 'fuzz FuzzAdversarialSender 150000x'
+# FuzzCore barely speeds up past 8 workers and runs at 4; FuzzAdversarialSender scales with them
+# and runs at 8 for a smoke amount, since the long fuzzing runs on a separate machine.
+step fuzz-core 'FUZZ_STEP=fuzz-core fuzz FuzzCore 5000000x 4'
+step fuzz-adversarial 'FUZZ_STEP=fuzz-adversarial fuzz FuzzAdversarialSender 30000x 8'
 step docs 'go run ./scripts/check-japanese/ && bash scripts/check-ascii-punct.sh && python3 scripts/check-docs.py && python3 scripts/check-docs-test.py && bash scripts/check-log-tokens.sh'
 step mod-tidy 'copy_tree && mkdir -p "$tmp/.orig" && cp go.mod go.sum "$tmp/.orig/" && cd "$tmp" && go mod tidy && cmp go.mod .orig/go.mod && cmp go.sum .orig/go.sum || { echo "go mod tidy changes go.mod or go.sum"; exit 1; }'
 if ((lab)); then
@@ -124,9 +145,9 @@ if ((lab)); then
 fi
 
 export logdir
-export -f has_test need_test copy_tree fuzz
+export -f has_test need_test copy_tree fuzz fuzz_rate
 
-declare -A start dur result
+declare -A start dur result note
 running=()
 
 # launch starts step $1 in the background, its output in its log, in a session of its own so
@@ -151,7 +172,8 @@ finish() {
   if ((rc != 0)); then result[$i]=FAIL
   elif grep -q '^SKIP: ' "$logdir/${names[$i]}.log"; then result[$i]=SKIP
   else result[$i]=PASS; fi
-  printf '%-20s %-4s %5ds\n' "${names[$i]}" "${result[$i]}" "${dur[$i]}"
+  note[$i]=$(sed -n 's/^NOTE: //p' "$logdir/${names[$i]}.log" | tail -1)
+  printf '%-20s %-4s %5ds %s\n' "${names[$i]}" "${result[$i]}" "${dur[$i]}" "${note[$i]}"
 }
 
 # reap waits for one running step to end and records it. When wait reports no pid, as after a
@@ -209,11 +231,11 @@ done
 while ((${#running[@]})); do reap; done
 
 echo
-printf '%-20s %-4s %8s  %s\n' step result seconds log
+printf '%-20s %-4s %8s  %-30s %s\n' step result seconds note log
 failed=0
 for i in "${!names[@]}"; do
   [[ -n ${result[$i]:-} ]] || continue
-  printf '%-20s %-4s %8d  %s\n' "${names[$i]}" "${result[$i]}" "${dur[$i]}" "$logdir/${names[$i]}.log"
+  printf '%-20s %-4s %8d  %-30s %s\n' "${names[$i]}" "${result[$i]}" "${dur[$i]}" "${note[$i]:-}" "$logdir/${names[$i]}.log"
   [[ ${result[$i]} == FAIL ]] && failed=1
 done
 echo "wall time $(($(date +%s) - t0))s"
