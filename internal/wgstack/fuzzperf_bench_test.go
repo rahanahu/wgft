@@ -1,9 +1,6 @@
 package wgstack
 
-import (
-	"fmt"
-	"testing"
-)
+import "testing"
 
 var fuzzCoreSeeds = [][]byte{
 	{0, 1, 3, 0, 1, 1, 0, 2, 5, 3, 1, 4, 2, 9, 3, 2, 1, 5, 6, 7},
@@ -22,7 +19,7 @@ type opFatal struct{}
 func (o *opTB) Cleanup(f func()) { o.cleanups = append(o.cleanups, f) }
 func (o *opTB) Fatal(a ...any)   { o.TB.Error(a...); panic(opFatal{}) }
 func (o *opTB) Fatalf(f string, a ...any) {
-	o.TB.Error(fmt.Sprintf(f, a...))
+	o.TB.Errorf(f, a...)
 	panic(opFatal{})
 }
 
