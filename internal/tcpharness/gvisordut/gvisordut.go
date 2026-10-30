@@ -51,7 +51,9 @@ func Engine(known map[string]tcpharness.Known) tcpharness.Engine {
 		},
 		Known: known,
 		// every scenario builds its own Device, so they can overlap; the reassembly timeout waits
-		// 30 s of real time and starts first
+		// 30 s of real time and starts first. The Devices of one process still share nettun's
+		// processTCPBoost, its 16 boost slots, so scenarios that run at once compete for them: a
+		// scenario that needs a boost must not assume it gets one at once
 		Parallel:  true,
 		SlowFirst: []string{"udp-reassembly-timeout"},
 	}

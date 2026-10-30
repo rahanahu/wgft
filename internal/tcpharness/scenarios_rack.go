@@ -140,13 +140,14 @@ func tlpTailLoss(h *H) {
 		feed(s)
 	}
 	var ackAt, probeAt time.Time
+	var probe Segment
 	lp.after(rackRTT, func() { ackAt = h.Now() }) // the last ACK, of all but the two tail segments
 	w := newWatch(segs)
 	on := answerAfter(lp, p, r, w, rackRTT, nil, nil)
 	end := dataEnd(r, data)
 	lp.run(p, 3*time.Second, func(s Segment) {
 		if isData(s) && probeAt.IsZero() {
-			probeAt = h.Now()
+			probeAt, probe = h.Now(), s
 		}
 		on(s)
 	}, func() bool { return !after(end, r.cum) })
@@ -162,18 +163,32 @@ func tlpTailLoss(h *H) {
 	excess := max(lp.late, p.AckHeld-(rackRTT-5*time.Millisecond), 0)
 	h.Measure("path-delay-excess_ms", excess.Milliseconds())
 	// The probe comes about 2 SRTT after the ACK; an RTO would come no earlier than its 200 ms
-	// floor, so 170 ms leaves the RTO out with a margin.
-	probeBound := 170*time.Millisecond + 2*excess
-	ok := !probeAt.IsZero() && pto >= rackRTT*3/2 && pto <= probeBound
-	h.Check("probe-at-2srtt", ok, "the first segment after the ACK of the rest is a probe about 2 SRTT later, from 1.5 RTT to 170 ms and twice the testbench's excess delay",
-		yesNo(probeAt.IsZero(), "nothing sent", yesNo(ok, "from 1.5 RTT to the bound", "outside 1.5 RTT to the bound")))
+	// floor, so 170 ms leaves the RTO out with a margin. The bound grows with the testbench's
+	// excess delay but stays below the RTO floor, so a sender that only has an RTO cannot pass
+	// under load. A probe resends the last segment, RFC 8985 7.3; an RTO resends from SND.UNA,
+	// the first tail segment, whenever it comes.
+	probeBound := min(170*time.Millisecond+2*excess, 195*time.Millisecond)
+	isProbe := probe.Seq == segs[n-1].Seq
+	ok := !probeAt.IsZero() && isProbe && pto >= rackRTT*3/2 && pto <= probeBound
+	got := "nothing sent"
+	switch {
+	case probeAt.IsZero():
+	case !isProbe:
+		got = "the first resend is of the first unacknowledged segment, as an RTO's"
+	case ok:
+		got = "from 1.5 RTT to the bound"
+	default:
+		got = "outside 1.5 RTT to the bound"
+	}
+	h.Check("probe-at-2srtt", ok, "the first segment after the ACK of the rest is a probe of the last segment about 2 SRTT later, from 1.5 RTT to 170 ms and twice the testbench's excess delay, below the 200 ms RTO floor", got)
 	done := !after(end, r.cum)
 	took := h.Now().Sub(ackAt)
 	h.Measure("recovered-after-ack_ms", took.Milliseconds())
 	// Through the probe, recovery ends near 2 SRTT plus one RTT after the ACK; through an RTO, no
 	// earlier than the 200 ms floor plus one RTT, 250 ms.
-	fast, rto := 225*time.Millisecond+3*excess, 250*time.Millisecond+excess
-	got := "within the probe's bound"
+	// The bound grows with the excess but stays below the RTO path's 250 ms.
+	fast, rto := min(225*time.Millisecond+3*excess, 245*time.Millisecond), 250*time.Millisecond+excess
+	got = "within the probe's bound"
 	switch {
 	case !done:
 		got = "not recovered"

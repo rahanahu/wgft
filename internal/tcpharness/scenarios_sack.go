@@ -460,8 +460,9 @@ func limitedTransmit(h *H) { limitedTransmitAt(h, 8034, 0) }
 func limitedTransmitRACK(h *H) { limitedTransmitAt(h, 8036, ltRTT) }
 
 // ltRTT is the path delay of limitedTransmitRACK. The handshake's RTT, 5 ms less, is the minimum
-// RTT, so the reorder window is at least ltReorder, about 99 ms: 59 ms more than the 40 ms from
-// the first duplicate ACK to the end of the checks, room for a slow testbench.
+// RTT, so the reorder window is at least ltReorder, about 99 ms. The checks watch from the first
+// duplicate ACK to the end of that window; the second duplicate ACK goes 20 ms after the first,
+// leaving the rest of the window for a slow testbench.
 const ltRTT = 400 * time.Millisecond
 
 // ltReorder is the shortest reorder window a RACK sender can have on ltRTT's path: a quarter of
@@ -504,7 +505,11 @@ func limitedTransmitAt(h *H, port uint16, rtt time.Duration) {
 		h.Measure("resent-after-the-reorder-window", o.late)
 	}
 	for i, id := range []string{"first-dupack.new-data", "second-dupack.new-data"} {
-		h.Check(id, o.fresh[i] == 1, "the duplicate ACK lets exactly one new segment out within 20 ms", fmt.Sprintf("%d new segments", o.fresh[i]))
+		what := "the duplicate ACK lets exactly one new segment out within 20 ms"
+		if rtt > 0 && i == 1 {
+			what = "the duplicate ACK lets exactly one new segment out before the reorder window ends"
+		}
+		h.Check(id, o.fresh[i] == 1, what, fmt.Sprintf("%d new segments", o.fresh[i]))
 	}
 	h.Check("no-retransmit-before-third", o.rexmits == 0, "nothing is resent after two duplicate ACKs", fmt.Sprintf("%d retransmissions", o.rexmits))
 }
@@ -555,6 +560,12 @@ func limitedTransmitOnce(h *H, l Listener, port uint16, rtt time.Duration) ltObs
 		}
 		dupacks(r, segs, 1+i)
 		deadline := h.Now().Add(20 * time.Millisecond)
+		if rtt > 0 && i == 1 && window.After(deadline) {
+			// On the long path, the watch after the second duplicate ACK runs to the end of the
+			// reorder window, so a retransmission or a second new segment it causes later than
+			// 20 ms is still caught; past the window, RACK may resend and nothing is checked.
+			deadline = window
+		}
 		for {
 			s, ok := p.Next(max(deadline.Sub(h.Now()), 0))
 			if !ok {
