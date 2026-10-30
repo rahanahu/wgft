@@ -70,7 +70,7 @@ var Known = map[string]tcpharness.Known{
 	},
 	"limited-transmit-rack/first-dupack.new-data": {
 		Observed: "0 new segments",
-		Reason: "on a 200 ms path, with RACK's reorder window keeping the first segment unmarked, gVisor sends no " +
+		Reason: "on a 400 ms path, with RACK's reorder window keeping the first segment unmarked, gVisor sends no " +
 			"new data on the first two duplicate ACKs in this scenario",
 	},
 	"limited-transmit-rack/second-dupack.new-data": {

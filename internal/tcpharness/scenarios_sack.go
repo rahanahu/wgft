@@ -434,12 +434,55 @@ func limitedTransmit(h *H) { limitedTransmitAt(h, 8034, 0) }
 // first segment unmarked and Limited Transmit applies as on a real path.
 func limitedTransmitRACK(h *H) { limitedTransmitAt(h, 8036, ltRTT) }
 
-// ltRTT is the path delay of limitedTransmitRACK: a reorder window of about 49 ms, more than the
-// 40 ms from the first duplicate ACK to the end of the checks.
-const ltRTT = 200 * time.Millisecond
+// ltRTT is the path delay of limitedTransmitRACK. The handshake's RTT, 5 ms less, is the minimum
+// RTT, so the reorder window is at least ltReorder, about 99 ms: 59 ms more than the 40 ms from
+// the first duplicate ACK to the end of the checks, room for a slow testbench.
+const ltRTT = 400 * time.Millisecond
+
+// ltReorder is the shortest reorder window a RACK sender can have on ltRTT's path: a quarter of
+// the handshake's RTT, less 1 ms for a clock that counts whole milliseconds.
+const ltReorder = (ltRTT-5*time.Millisecond)/4 - time.Millisecond
+
+// ltAttempts bounds how often limitedTransmitRACK starts over when the testbench was too slow
+// for its checks to mean anything.
+const ltAttempts = 3
+
+// ltObservation is what one attempt of limitedTransmitAt saw: the new segments after each
+// duplicate ACK and the retransmissions, counting only what reached the testbench before the
+// reorder window could have ended.
+type ltObservation struct {
+	fresh   [2]int
+	rexmits int
+	// late counts the retransmissions that came once the reorder window could have ended, which
+	// RFC 8985 allows; they are measured, not checked.
+	late int
+	// slow is set when the testbench sent the second duplicate ACK so late that a retransmission
+	// it caused could only arrive after the reorder window, out of the checks' reach.
+	slow bool
+}
 
 func limitedTransmitAt(h *H, port uint16, rtt time.Duration) {
 	l := h.Listen(port)
+	var o ltObservation
+	for i := 1; ; i++ {
+		o = limitedTransmitOnce(h, l, port, rtt)
+		if !o.slow || i == ltAttempts {
+			break
+		}
+		h.T.Logf("attempt %d: the testbench sent the second duplicate ACK too late for the reorder window; starting over", i)
+	}
+	h.Measure("testbench-too-slow", o.slow)
+	if rtt > 0 {
+		h.Measure("resent-after-the-reorder-window", o.late)
+	}
+	for i, id := range []string{"first-dupack.new-data", "second-dupack.new-data"} {
+		h.Check(id, o.fresh[i] == 1, "the duplicate ACK lets exactly one new segment out within 20 ms", fmt.Sprintf("%d new segments", o.fresh[i]))
+	}
+	h.Check("no-retransmit-before-third", o.rexmits == 0, "nothing is resent after two duplicate ACKs", fmt.Sprintf("%d retransmissions", o.rexmits))
+}
+
+// limitedTransmitOnce runs limitedTransmitAt on a new connection.
+func limitedTransmitOnce(h *H, l Listener, port uint16, rtt time.Duration) ltObservation {
 	d := Dial{SYN: StandardSYN()}
 	if rtt > 0 {
 		d.AckDelay = rtt - 5*time.Millisecond // the minimum RTT, below every later sample
@@ -459,13 +502,41 @@ func limitedTransmitAt(h *H, port uint16, rtt time.Duration) {
 		// the first duplicate ACK comes back one path delay after the flight left
 		collect(p, rtt, w, nil)
 	}
+	// On RACK's path, a RACK sender may resend the first segment once the reorder window from
+	// the first duplicate ACK is over; whatever reaches the testbench before then is checked.
+	// Without a path delay the reorder window is about zero, so everything is checked.
+	o := ltObservation{rexmits: len(w.seen)}
+	var window time.Time
+	in := func() bool { return rtt == 0 || h.Now().Before(window) }
 	// 20 ms between the duplicate ACKs, as segments arriving one after another space them; sent
 	// back to back, the second reaches Linux before it has sent the first new segment on.
-	for i, id := range []string{"first-dupack.new-data", "second-dupack.new-data"} {
-		before := w.fresh
+	for i := range 2 {
+		if i == 0 {
+			window = h.Now().Add(ltReorder)
+		} else if rtt > 0 && h.Now().After(window.Add(-ltReorder/2)) {
+			// a retransmission this ACK caused could reach the testbench only after the window
+			o.slow = true
+		}
 		dupacks(r, segs, 1+i)
-		collect(p, 20*time.Millisecond, w, nil)
-		h.Check(id, w.fresh-before == 1, "the duplicate ACK lets exactly one new segment out within 20 ms", fmt.Sprintf("%d new segments", w.fresh-before))
+		deadline := h.Now().Add(20 * time.Millisecond)
+		for {
+			s, ok := p.Next(max(deadline.Sub(h.Now()), 0))
+			if !ok {
+				break
+			}
+			before, resent := w.fresh, len(w.seen)
+			w.note(s)
+			switch {
+			case !in():
+				o.late += len(w.seen) - resent
+			default:
+				o.fresh[i] += w.fresh - before
+				o.rexmits += len(w.seen) - resent
+			}
+		}
 	}
-	h.Check("no-retransmit-before-third", len(w.seen) == 0, "nothing is resent after two duplicate ACKs", fmt.Sprintf("%d retransmissions", len(w.seen)))
+	if o.slow {
+		c.Abort()
+	}
+	return o
 }

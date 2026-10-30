@@ -317,3 +317,79 @@ func TestHarnessCatchesFINResentAfterADroppedAck(t *testing.T) {
 	got := tcpharness.Record(t, mutant("gvisor-drops-final-ack", dropAckOfFIN), scenario(t, "fin-passive-close"), 1)
 	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
 }
+
+// earlyResend resends the engine's lowest unacknowledged data segment the moment the n-th
+// duplicate ACK with SACK blocks reaches it, as a sender that counted n duplicate ACKs as the
+// threshold, or that ran RACK with no reorder window, would.
+type earlyResend struct {
+	tcpharness.DUT
+	n   int
+	out chan []byte
+	mu  sync.Mutex
+	// by the testbench's port: the data segments sent, by sequence number, and the duplicate
+	// ACKs counted for the latest acknowledgment number
+	sent   map[uint16]map[uint32][]byte
+	ack    map[uint16]uint32
+	dups   map[uint16]int
+	closed bool
+}
+
+func (d *earlyResend) Emitted() <-chan []byte { return d.out }
+
+func (d *earlyResend) Inject(pkt []byte) error {
+	err := d.DUT.Inject(pkt)
+	s, perr := tcpharness.Parse(pkt)
+	if perr != nil || s.Flags != tcpharness.FlagACK || len(s.Payload) > 0 || len(s.Opts.SACK) == 0 {
+		return err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	port := s.Src.Port()
+	if a, ok := d.ack[port]; !ok || a != s.Ack {
+		d.ack[port], d.dups[port] = s.Ack, 0
+	}
+	d.dups[port]++
+	if seg, ok := d.sent[port][s.Ack]; ok && d.dups[port] == d.n && !d.closed {
+		d.out <- seg
+	}
+	return err
+}
+
+func resendAtDupack(n int) func(tcpharness.DUT) tcpharness.DUT {
+	return func(inner tcpharness.DUT) tcpharness.DUT {
+		d := &earlyResend{DUT: inner, n: n, out: make(chan []byte, 1024),
+			sent: map[uint16]map[uint32][]byte{}, ack: map[uint16]uint32{}, dups: map[uint16]int{}}
+		go func() {
+			for pkt := range inner.Emitted() {
+				if s, err := tcpharness.Parse(pkt); err == nil && len(s.Payload) > 0 {
+					d.mu.Lock()
+					if d.sent[s.Dst.Port()] == nil {
+						d.sent[s.Dst.Port()] = map[uint32][]byte{}
+					}
+					if _, ok := d.sent[s.Dst.Port()][s.Seq]; !ok {
+						d.sent[s.Dst.Port()][s.Seq] = pkt
+					}
+					d.mu.Unlock()
+				}
+				d.out <- pkt
+			}
+			d.mu.Lock()
+			d.closed = true
+			close(d.out)
+			d.mu.Unlock()
+		}()
+		return d
+	}
+}
+
+// On limited-transmit-rack's path, RACK's reorder window outlasts the checks, so a resend at
+// the first or the second duplicate ACK is one no correct sender makes.
+func TestHarnessCatchesResendAtFirstDupack(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-dupthresh-1", resendAtDupack(1)), scenario(t, "limited-transmit-rack"), 1)
+	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomeFail)
+}
+
+func TestHarnessCatchesResendAtSecondDupack(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-dupthresh-2", resendAtDupack(2)), scenario(t, "limited-transmit-rack"), 1)
+	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomeFail)
+}
