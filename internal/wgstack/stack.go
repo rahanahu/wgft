@@ -134,6 +134,7 @@ type counters struct {
 	dupAcksIn, acksDelayed, acksImmediate           atomic.Uint64
 	sackReneging                                    atomic.Uint64
 	rackLost, reoTimeouts, tlpProbes, tlpRecoveries atomic.Uint64
+	hystartCSS, hystartExits                        atomic.Uint64
 
 	mssGate, synGate, acceptGate, twGate, ctlGate, oooGate gate
 }

@@ -59,6 +59,8 @@ type Stats struct {
 	TLPProbes            uint64 // 送った TLP の probe
 	TLPRecoveries        uint64 // probe が損失を直したとみなして輻輳の窓を下げた回数
 	RetransTLP           uint64 // TLP の probe として送り直した segment
+	HyStartCSS           uint64 // HyStart++ が Conservative Slow Start に入った回数
+	HyStartExits         uint64 // HyStart++ が CSS の後に slow start を終えた回数
 	HeldChunksInPool     int64  // 輪が持つ chunk の数(chunkPool の会計)
 	ReclaimableInBoost   int    // プロセスの boost の枠のうち使っている数
 }
@@ -148,6 +150,8 @@ func (s *stack) stats() Stats {
 	st.TLPProbes = s.tlpProbes.Load()
 	st.TLPRecoveries = s.tlpRecoveries.Load()
 	st.RetransTLP = s.retrans[rtxTLP].Load()
+	st.HyStartCSS = s.hystartCSS.Load()
+	st.HyStartExits = s.hystartExits.Load()
 	return st
 }
 
