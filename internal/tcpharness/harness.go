@@ -418,6 +418,9 @@ type Peer struct {
 	tsBase   uint32
 	TSRecent uint32 // the latest TSval of the DUT
 	SynTSVal uint32 // the TSval of the testbench's SYN
+	// AckHeld is how long the testbench actually held the final ACK of the handshake back for
+	// Dial.AckDelay: longer than asked when a loaded machine stopped it.
+	AckHeld time.Duration
 
 	DutAck    uint32 // the latest acknowledgment number from the DUT
 	DutWindow int    // the latest window the DUT advertised, in bytes
@@ -688,7 +691,9 @@ func (h *H) HandshakeFrom(p *Peer, d Dial) Segment {
 	h.Require("handshake.synack", ok && synack.Ack == p.ISS+1, "a SYN-ACK acknowledging ISS+1 within 2 s", synackString(p, synack, ok))
 	p.adopt(syn, synack)
 	if d.AckDelay > 0 {
+		start := h.Now()
 		p.Quiet(d.AckDelay)
+		p.AckHeld = h.Now().Sub(start)
 	}
 	p.SendAck()
 	return synack

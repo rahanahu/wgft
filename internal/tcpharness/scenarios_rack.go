@@ -154,26 +154,36 @@ func tlpTailLoss(h *H) {
 	if !probeAt.IsZero() {
 		h.Measure("probe-after-ack_ms", pto.Milliseconds())
 	}
+	// A loaded machine can stop the testbench while it holds an ACK back, so that the handshake's
+	// ACK or the flight's leave late. The DUT then measures a longer RTT than rackRTT, and its
+	// probe and its recovery come later by twice and three times the excess. The upper bounds
+	// follow the RTT the testbench actually gave; the lower bound does not, since a late ACK
+	// cannot make the probe early. On a ClockedDUT the excess is zero.
+	excess := max(lp.late, p.AckHeld-(rackRTT-5*time.Millisecond), 0)
+	h.Measure("path-delay-excess_ms", excess.Milliseconds())
 	// The probe comes about 2 SRTT after the ACK; an RTO would come no earlier than its 200 ms
 	// floor, so 170 ms leaves the RTO out with a margin.
-	ok := !probeAt.IsZero() && pto >= rackRTT*3/2 && pto <= 170*time.Millisecond
-	h.Check("probe-at-2srtt", ok, "the first segment after the ACK of the rest is a probe about 2 SRTT later, from 1.5 RTT to 170 ms",
-		yesNo(probeAt.IsZero(), "nothing sent", yesNo(ok, "from 1.5 RTT to 170 ms", "outside 1.5 RTT to 170 ms")))
+	probeBound := 170*time.Millisecond + 2*excess
+	ok := !probeAt.IsZero() && pto >= rackRTT*3/2 && pto <= probeBound
+	h.Check("probe-at-2srtt", ok, "the first segment after the ACK of the rest is a probe about 2 SRTT later, from 1.5 RTT to 170 ms and twice the testbench's excess delay",
+		yesNo(probeAt.IsZero(), "nothing sent", yesNo(ok, "from 1.5 RTT to the bound", "outside 1.5 RTT to the bound")))
 	done := !after(end, r.cum)
 	took := h.Now().Sub(ackAt)
 	h.Measure("recovered-after-ack_ms", took.Milliseconds())
 	// Through the probe, recovery ends near 2 SRTT plus one RTT after the ACK; through an RTO, no
 	// earlier than the 200 ms floor plus one RTT, 250 ms.
-	got := "within 225 ms"
+	fast, rto := 225*time.Millisecond+3*excess, 250*time.Millisecond+excess
+	got := "within the probe's bound"
 	switch {
 	case !done:
 		got = "not recovered"
-	case took >= 250*time.Millisecond:
+	case took < fast:
+	case took >= rto:
 		got = "recovered at the RTO floor plus one RTT or later"
-	case took >= 225*time.Millisecond:
-		got = "recovered between 225 and 250 ms"
+	default:
+		got = "recovered between the probe's bound and the RTO floor plus one RTT"
 	}
-	h.Check("recovers-before-rto", done && took < 225*time.Millisecond, "both tail segments are acknowledged within 225 ms of the ACK, sooner than an RTO of at least 200 ms and one RTT could", got)
+	h.Check("recovers-before-rto", done && took < fast, "both tail segments are acknowledged within 225 ms of the ACK and three times the testbench's excess delay, sooner than an RTO of at least 200 ms and one RTT could", got)
 	intact(h, r, data)
 }
 

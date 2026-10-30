@@ -442,3 +442,10 @@ func TestHarnessCatchesLateRACKResend(t *testing.T) {
 	got := tcpharness.Record(t, mutant("gvisor-late-resend", delayResends(150*time.Millisecond)), scenario(t, "rack-reorder"), 1)
 	wantOutcome(t, got, "rack-reorder/beyond-window.resent-early", tcpharness.OutcomeFail)
 }
+
+// A probe held back 400 ms comes after the RTO could, and fails tlp-tail-loss's probe check even
+// when a stalled testbench widens its bound.
+func TestHarnessCatchesLateTailLossProbe(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-late-probe", delayResends(400*time.Millisecond)), scenario(t, "tlp-tail-loss"), 1)
+	wantOutcome(t, got, "tlp-tail-loss/probe-at-2srtt", tcpharness.OutcomeFail)
+}

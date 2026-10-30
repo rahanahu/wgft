@@ -122,6 +122,9 @@ func (r *receiver) stream(n int) []byte {
 type loop struct {
 	h  *H
 	ev []event
+	// late is the longest an event fired after its time, as on a loaded machine that stopped the
+	// testbench: the path delay the DUT saw was then longer than the one scheduled.
+	late time.Duration
 }
 
 type event struct {
@@ -157,6 +160,7 @@ func (l *loop) run(p *Peer, d time.Duration, on func(Segment), done func() bool)
 		var due []event
 		for _, e := range l.ev {
 			if !e.at.After(now) {
+				l.late = max(l.late, now.Sub(e.at))
 				due = append(due, e)
 			} else {
 				rest = append(rest, e)
