@@ -481,6 +481,8 @@ type ltObservation struct {
 	// late counts the retransmissions that came once the reorder window could have ended, which
 	// RFC 8985 allows; they are measured, not checked.
 	late int
+	// probes counts the resends sent before the DUT had the first duplicate ACK.
+	probes int
 	// slow is set when the testbench sent the second duplicate ACK so late that a retransmission
 	// it caused could only arrive after the reorder window, out of the checks' reach.
 	slow bool
@@ -497,6 +499,7 @@ func limitedTransmitAt(h *H, port uint16, rtt time.Duration) {
 		h.T.Logf("attempt %d: the testbench sent the second duplicate ACK too late for the reorder window; starting over", i)
 	}
 	h.Measure("testbench-too-slow", o.slow)
+	h.Measure("resends-before-the-first-dupack", o.probes)
 	if rtt > 0 {
 		h.Measure("resent-after-the-reorder-window", o.late)
 	}
@@ -535,6 +538,14 @@ func limitedTransmitOnce(h *H, l Listener, port uint16, rtt time.Duration) ltObs
 	in := func() bool { return rtt == 0 || h.Now().Before(window) }
 	// 20 ms between the duplicate ACKs, as segments arriving one after another space them; sent
 	// back to back, the second reaches Linux before it has sent the first new segment on.
+	// A resend whose TSecr is older than the first duplicate ACK was sent before the DUT had it,
+	// such as a tail loss probe a slow testbench let fire; it answers no duplicate ACK and is
+	// measured, not counted.
+	w.informed, w.informedTS = true, p.TSVal()
+	resent := map[uint32]bool{}
+	for seq := range w.seen {
+		resent[seq] = true
+	}
 	for i := range 2 {
 		if i == 0 {
 			window = h.Now().Add(ltReorder)
@@ -549,17 +560,25 @@ func limitedTransmitOnce(h *H, l Listener, port uint16, rtt time.Duration) ltObs
 			if !ok {
 				break
 			}
-			before, resent := w.fresh, len(w.seen)
+			high, fresh, probes := w.high, w.fresh, w.probes
 			w.note(s)
+			again := isData(s) && after(high, s.Seq) && w.probes == probes && !resent[s.Seq]
+			if again {
+				resent[s.Seq] = true
+			}
 			switch {
+			case !in() && again:
+				o.late++
 			case !in():
-				o.late += len(w.seen) - resent
+			case again:
+				o.fresh[i] += w.fresh - fresh
+				o.rexmits++
 			default:
-				o.fresh[i] += w.fresh - before
-				o.rexmits += len(w.seen) - resent
+				o.fresh[i] += w.fresh - fresh
 			}
 		}
 	}
+	o.probes = w.probes
 	if o.slow {
 		c.Abort()
 	}

@@ -319,16 +319,18 @@ func TestHarnessCatchesFINResentAfterADroppedAck(t *testing.T) {
 }
 
 // earlyResend resends the engine's lowest unacknowledged data segment the moment the n-th
-// duplicate ACK with SACK blocks reaches it, as a sender that counted n duplicate ACKs as the
-// threshold, or that ran RACK with no reorder window, would.
+// duplicate ACK with SACK blocks reaches it, echoing that ACK's TSval, as a sender that counted n
+// duplicate ACKs as the threshold, or that ran RACK with no reorder window, would.
 type earlyResend struct {
 	tcpharness.DUT
-	n   int
-	out chan []byte
-	mu  sync.Mutex
+	n int
+	// stale keeps the segment's own TSecr, as a probe the engine sent before the ACK arrived
+	stale bool
+	out   chan []byte
+	mu    sync.Mutex
 	// by the testbench's port: the data segments sent, by sequence number, and the duplicate
 	// ACKs counted for the latest acknowledgment number
-	sent   map[uint16]map[uint32][]byte
+	sent   map[uint16]map[uint32]tcpharness.Segment
 	ack    map[uint16]uint32
 	dups   map[uint16]int
 	closed bool
@@ -350,24 +352,31 @@ func (d *earlyResend) Inject(pkt []byte) error {
 	}
 	d.dups[port]++
 	if seg, ok := d.sent[port][s.Ack]; ok && d.dups[port] == d.n && !d.closed {
-		d.out <- seg
+		if seg.Opts.TS != nil && s.Opts.TS != nil && !d.stale {
+			ts := *seg.Opts.TS
+			ts.Ecr = s.Opts.TS.Val
+			seg.Opts.TS = &ts
+		}
+		d.out <- seg.Marshal()
 	}
 	return err
 }
 
-func resendAtDupack(n int) func(tcpharness.DUT) tcpharness.DUT {
+func resendAtDupack(n int) func(tcpharness.DUT) tcpharness.DUT { return resendAt(n, false) }
+
+func resendAt(n int, stale bool) func(tcpharness.DUT) tcpharness.DUT {
 	return func(inner tcpharness.DUT) tcpharness.DUT {
-		d := &earlyResend{DUT: inner, n: n, out: make(chan []byte, 1024),
-			sent: map[uint16]map[uint32][]byte{}, ack: map[uint16]uint32{}, dups: map[uint16]int{}}
+		d := &earlyResend{DUT: inner, n: n, stale: stale, out: make(chan []byte, 1024),
+			sent: map[uint16]map[uint32]tcpharness.Segment{}, ack: map[uint16]uint32{}, dups: map[uint16]int{}}
 		go func() {
 			for pkt := range inner.Emitted() {
 				if s, err := tcpharness.Parse(pkt); err == nil && len(s.Payload) > 0 {
 					d.mu.Lock()
 					if d.sent[s.Dst.Port()] == nil {
-						d.sent[s.Dst.Port()] = map[uint32][]byte{}
+						d.sent[s.Dst.Port()] = map[uint32]tcpharness.Segment{}
 					}
 					if _, ok := d.sent[s.Dst.Port()][s.Seq]; !ok {
-						d.sent[s.Dst.Port()][s.Seq] = pkt
+						d.sent[s.Dst.Port()][s.Seq] = s
 					}
 					d.mu.Unlock()
 				}
@@ -387,6 +396,13 @@ func resendAtDupack(n int) func(tcpharness.DUT) tcpharness.DUT {
 func TestHarnessCatchesResendAtFirstDupack(t *testing.T) {
 	got := tcpharness.Record(t, mutant("gvisor-dupthresh-1", resendAtDupack(1)), scenario(t, "limited-transmit-rack"), 1)
 	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomeFail)
+}
+
+// A resend that echoes a TSecr older than the first duplicate ACK left before that ACK arrived,
+// as a probe on a loaded machine does; it answers no duplicate ACK and does not fail the check.
+func TestHarnessPassesOverAResendBeforeTheDupack(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-stale-probe", resendAt(1, true)), scenario(t, "limited-transmit-rack"), 1)
+	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomePass)
 }
 
 func TestHarnessCatchesResendAtSecondDupack(t *testing.T) {
