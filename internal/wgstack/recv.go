@@ -58,6 +58,9 @@ type insertResult struct {
 	filled    bool // 順序外の区間を順序どおりの範囲に取り込んだ
 	advanced  bool // nxtOff が進んだ
 	duplicate bool // 中身がすべて既に届いていた
+	// dupLo と dupHi は、既に届いていた部分の最初の範囲(offset)。dupHi > dupLo のときだけ意味を持つ。D-SACK
+	// の block にする(RFC 2883、Linux の tcp_dsack_set)
+	dupLo, dupHi uint64
 }
 
 // insert は offset off からの data を入れる。limit を超える分は捨てる。limit は広告した窓の右端と
@@ -78,8 +81,10 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 	if off < b.nxtOff {
 		if end <= b.nxtOff {
 			res.duplicate = len(data) > 0
+			res.dupLo, res.dupHi = off, end
 			return res
 		}
+		res.dupLo, res.dupHi = off, b.nxtOff // 前半だけが重複
 		data = data[b.nxtOff-off:]
 		off = b.nxtOff
 	}
@@ -97,6 +102,9 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 			st := old + uint64(b.iv[k].start-uint32(old))
 			if st > end {
 				break
+			}
+			if en := old + uint64(b.iv[k].end-uint32(old)); st < end && res.dupHi <= res.dupLo {
+				res.dupLo, res.dupHi = st, min(end, en) // 届いていた区間と重なる部分
 			}
 			end = max(end, old+uint64(b.iv[k].end-uint32(old)))
 			k++
@@ -139,7 +147,11 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 			b.touch++
 			b.iv[i].touched = b.touch
 			res.duplicate = true
+			res.dupLo, res.dupHi = off, end
 			return res
+		}
+		if lo, hi := max(off, b.ivStart(i)), min(end, b.ivEnd(i)); lo < hi && res.dupHi <= res.dupLo {
+			res.dupLo, res.dupHi = lo, hi // 既存の区間と重なる部分
 		}
 		ns, ne := min(off, b.ivStart(i)), max(end, b.ivEnd(j-1))
 		b.touch++

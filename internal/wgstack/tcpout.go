@@ -101,8 +101,8 @@ func (c *tcb) nextNew(payCap int, force bool) (int, bool) {
 	if c.cwnd > pipe {
 		room = c.cwnd - pipe
 	}
-	if force {
-		room = ^uint32(0)
+	if force || (c.frto == 2 && c.frtoNew > 0) {
+		room = ^uint32(0) // TLP の probe と F-RTO の 2 の段(RFC 5682 2b)
 	}
 	if avail == 0 {
 		// FIN は番号を 1 つ使うので、Linux と同じく窓に 1 byte の余地があるときだけ送る。窓が 0 の間は
@@ -243,6 +243,9 @@ func (c *tcb) buildNew(b []byte, space int, now int64, force bool) int {
 	if n > 0 && c.rcvdData && now-c.lastDataRcvd < int64(delackTimeout) {
 		c.pingpong = true // 受けた直後に応える対話の流れ(Linux の tcp_event_data_sent)
 	}
+	if c.frto == 2 && c.frtoNew > 0 {
+		c.frtoNew--
+	}
 	c.recs.push(record{seq: seq, length: uint16(length), sentAt: now, skip: 1, rtxGen: c.rtxGen})
 	c.listAppend(&c.tList, c.recs.n-1, c.recs.at(c.recs.n-1), recInT)
 	c.sndNxt = seq + uint32(length)
@@ -279,7 +282,8 @@ func (c *tcb) resendAllowed(p resendPick, payCap int, force bool) bool {
 		return false
 	}
 	pipe := c.pipe()
-	return force || pipe == 0 || c.cwnd >= pipe+n
+	// F-RTO の RTO の後の先頭の再送は輻輳の窓によらず送る(RFC 5682 の 1 の段)。ほかの記録はまだ送り残しに数える
+	return force || pipe == 0 || c.cwnd >= pipe+n || (c.frto == 1 && i == 0)
 }
 
 // buildResend は記録 i(NextSeg の規則 1 か 3 が選んだ記録)を再送する。記録は SND.UNA から番号の順に
@@ -350,6 +354,7 @@ func (c *tcb) buildResend(b []byte, space int, now int64, p resendPick, force bo
 	if p.src == srcTLP {
 		cause = rtxTLP
 	}
+	c.noteRetransmit(now)
 	c.s.retrans[cause].Add(1)
 	if (c.rtoAt == 0 || i == 0) && !c.persist {
 		// 先頭の記録を送り直したら RTO を張り直す(Linux の tcp_xmit_retransmit_queue)。張り直さないと、回復の
@@ -427,5 +432,6 @@ func (c *tcb) buildRtx(b []byte, space int, now int64) int {
 	}
 	c.lastSendAt = now
 	c.s.retrans[c.rtxCause].Add(1)
+	c.noteRetransmit(now)
 	return c.emit(b, seq, flags, &o, c.unaOff, int(n), now)
 }

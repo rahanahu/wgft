@@ -105,7 +105,13 @@ func (c *tcb) markSACK(seg *segment, now int64) uint32 {
 		return 0
 	}
 	if b0 := seg.opt.sack[0]; !seqGT(b0.right, c.sndUna) || (n >= 2 && seqLE(seg.opt.sack[1].left, b0.left) && seqLE(b0.right, seg.opt.sack[1].right)) {
-		c.rackDSACK() // 先頭の block が確認済みの範囲か 2 つ目の block の内側なら D-SACK(RFC 2883 4 節)
+		// 先頭の block が確認済みの範囲か 2 つ目の block の内側なら D-SACK(RFC 2883 4 節)
+		if dup, tlp := c.dsackSeen(b0); dup > 0 {
+			if !tlp {
+				c.rackDSACK()
+			}
+			c.noteUndoDSACK(b0, dup, tlp)
+		}
 	}
 	if c.recs.n == 0 {
 		return 0
@@ -170,6 +176,9 @@ func (c *tcb) setSacked(i int, r *record, now int64) {
 // advanceLoss は、境目の記録より先の SACK 済みの量が RFC 6675 の閾値(DupThresh 個の記録か
 // (DupThresh - 1) x SMSS byte を超える量)に届く間、境目を先へ進める。境目は後ろへ戻らない。
 func (c *tcb) advanceLoss() {
+	if c.reorderSeen {
+		return // 並べ替えを見た後は RACK だけで損失を決める(Linux の tcp_time_to_recover)
+	}
 	limit := uint32((dupThresh - 1) * c.segMSS())
 	for int(c.lossIdx) < c.recs.n {
 		r := c.recs.at(int(c.lossIdx))
@@ -389,6 +398,7 @@ func (c *tcb) resendLen(i int, off uint32, payCap int) (uint32, bool) {
 
 // enterRecovery は SACK による回復に入る(RFC 6675 5 節、RFC 6937)。先頭の記録は損失とみなす。
 func (c *tcb) enterRecovery() {
+	c.initUndo()
 	flight := c.sndMax - c.sndUna
 	c.ssthresh = c.ccFor().lossThresh(c)
 	c.recover = c.sndMax
@@ -430,7 +440,8 @@ func (c *tcb) prrUpdate(delivered uint32) {
 // sackAfterAck は SACK を交渉した接続で、ACK の処理の後に回復に入るかを決め、回復の中なら窓を決める。
 func (c *tcb) sackAfterAck(delivered uint32) {
 	lost := c.lossIdx > 0 || c.rackLostBeyond > 0 || c.lostQ.n > 0
-	if !c.inRecovery && c.sndUna != c.sndMax && seqGE(c.sndUna, c.recover) && (c.dupAcks >= dupThresh || lost) {
+	dupEntry := c.dupAcks >= dupThresh && !c.reorderSeen
+	if !c.inRecovery && c.sndUna != c.sndMax && seqGE(c.sndUna, c.recover) && (dupEntry || lost) {
 		c.enterRecovery()
 	}
 	if c.inRecovery {
