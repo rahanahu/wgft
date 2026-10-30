@@ -40,3 +40,13 @@ func TestConformance(t *testing.T) {
 	}
 	tcpharness.Run(t, Engine(Known), tcpharness.Scenarios)
 }
+
+// TestCongestion checks wgstack's CUBIC and HyStart++ against RFC 9438 and RFC 9406 with the
+// testbench as the path. wgstack-performance.md assigns these checks to the test author in
+// place of a comparison with Linux.
+func TestCongestion(t *testing.T) {
+	if os.Getenv(RunEnv) != "1" {
+		t.Skipf("set %s=1 to run", RunEnv)
+	}
+	tcpharness.Run(t, Engine(nil), tcpharness.CongestionScenarios)
+}

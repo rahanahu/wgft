@@ -533,6 +533,13 @@ CUBIC、RACK-TLP、SACK、D-SACK、F-RTO、受信のバッファの自動調整�
 - 受け手の ACK と D-SACK:接続の始めの quickack、自分の MSS より小さな segment での遅延 ACK の間隔、重複した segment への D-SACK の block の内容と順
 - CUBIC:損失の後の輻輳の窓の値は台本で比べず、試験の書き手が RFC 9438 の式から単体の試験を書きます
 
+HyStart++ と CUBIC の試験は `tcpharness.CongestionScenarios` にあり、wgstack の手で進める時計の上で流します(`WGFT_TEST_WGSTACK_CONFORMANCE=1` の `TestCongestion`)。
+試験台は経路として ACK を決めた往復の時間だけ止め、1 往復に送られたデータの量を窓として読みます。
+CUBIC は、損失の後の窓と往復ごとの窓を RFC 9438 の式(4.2 節の W_cubic、4.3 節の W_est、4.7 節の fast convergence)から求めた値と比べます。
+HyStart++ は、RTT を閾値より上げた後の CSS の窓の増え方と往復の数、RTT を戻した後の slow start への戻りを確かめます。
+どちらも、トンネルが ACK ごとに読む場合と、往復の ACK をまとめて渡してから読む場合を持ちます。
+後者は、wireguard-go が受けたバッチを Device に書いてから読む場合に当たります。
+
 stream の一致の試験も、SACK を交渉する相手と並べ替える相手を含むように試験の書き手が広げます。
 
 ## 未確認の点と未決の点
