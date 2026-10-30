@@ -24,6 +24,11 @@ var Known = map[string]tcpharness.Known{
 		Observed: "1 retransmissions",
 		Reason:   "wgstack-performance.md, RACK-TLP: RACK, always on, resends the first segment before any duplicate-ACK threshold",
 	},
+	"icmp-echo/oversized": {
+		Observed: "no reply",
+		Reason: "wgstack.md, Linux との一致を確かめていない選択, MTU を超える echo request: wgstack does not fragment what it " +
+			"sends, so it does not answer an echo whose reply exceeds the MTU; Linux and gVisor send it in fragments",
+	},
 	"handshake-mss-floor/mss535.synack": {
 		Observed: "no SYN-ACK",
 		Reason:   "wgstack.md, TCP の機能, MSS, and packet-validation.md, TCP の MSS の下限: the ingress drops SYNs with an MSS of 1 to 535",
