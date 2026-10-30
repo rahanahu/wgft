@@ -337,7 +337,8 @@ func (c *tcb) buildResend(b []byte, space int, now int64, p resendPick, force bo
 }
 
 // buildTLP は TLP の probe を 1 つ送る(RFC 8985 7.3)。窓が許せば新しいデータを、許さなければ最も番号の
-// 大きい記録を送る。どちらも輻輳の窓を見ない。probe の確認を待つ間は次の probe を張らない(I5)。
+// 大きい記録を送る。どちらも輻輳の窓を見ない。probe の確認を待つ間は次の probe を張らない(I5)。probe の後は
+// RTO を張り直す。
 func (c *tcb) buildTLP(b []byte, space int, now int64) int {
 	retrans := false
 	n := c.buildNew(b, space, now, true)
@@ -353,7 +354,9 @@ func (c *tcb) buildTLP(b []byte, space int, now int64) int {
 		c.tlpActive, c.tlpRetrans, c.tlpEnd = true, retrans, c.sndMax
 		c.tlpAt = 0
 		c.s.tlpProbes.Add(1)
-		c.rearmRetrans()
+		// probe の後は RTO を今から張り直す(RFC 8985 7.3、Linux の tcp_send_loss_probe)。前の累積の確認から
+		// 数えた期限のままだと、SRTT が RTO の 3 分の 1 を超える経路では probe の確認が届く前に RTO が起きる
+		c.setRTO(now + c.curRTO())
 	}
 	return n
 }

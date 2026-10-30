@@ -247,8 +247,9 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
   probe が再送で、累積の確認が probe の先まで進んだときは、probe が損失を直したとみなして ssthresh と輻輳の窓を輻輳の窓の半分にします。
   probe を送った時の SND.NXT の確認が、SND.UNA を進めず新しい SACK も無い重複した ACK なら、損失は無かったとみなします(Linux の `tcp_process_tlp_ack`)
 - タイマーの規則:RTO の期限は接続の欄に別に持ち、再送のタイマーの節には、RTO、並べ替えの期限、TLP の probe の期限のうち最も早いものを張ります。
-  並べ替えの期限か TLP の期限で起きたときは、処理の後に残る期限のうち最も早いものを張り直すので、RTO の期限を後ろへずらしません。
-  RFC 8985 7.3 は probe の後に RTO を張り直すとしますが、wgstack は RTO の期限を保ちます。
+  並べ替えの期限で起きたときは、処理の後に残る期限のうち最も早いものを張り直すので、RTO の期限を後ろへずらしません。
+  TLP の probe を送った後は、RFC 8985 7.3 と Linux の `tcp_send_loss_probe` と同じく RTO を今から張り直します。
+  前の累積の確認から数えた RTO の期限を保つと、PTO が 2 × SRTT なので、SRTT が RTO の 3 分の 1 を超える経路(RTO の下限の 200 ms で SRTT が約 67 ms より長い経路)では、probe の確認が戻る前に RTO が起きて輻輳の窓を 1 segment にします。
   先頭の記録を再送したときは、Linux の `tcp_xmit_retransmit_queue` と同じく RTO を張り直します。
   窓の probe(persist)は確認を待つデータの無いときだけ使うので、RACK と TLP の期限と同時には張りません。
   使っていない keepalive の節は、keepalive を有効にするときのために残します
@@ -509,6 +510,8 @@ stream の一致の試験も、SACK を交渉する相手と並べ替える相�
 - 時間で区切る実行:決まった量の転送から時間で区切る実行に替えて、今の測定との比べ方が変わらないかは未確認です
 - CPU の分け方:qbench の中で DUT の CPU を pprof の label で分ける方法が、gVisor の内部の goroutine を含められるかは未確認です
 - バッチの費用:`BatchSize` を大きくしたときの wireguard-go の保持の増え方は未測定です
+- 最小の RTT の窓:最小の RTT は接続の始めからの最小で、経路が変わっても大きくなりません。
+  Linux の `tcp_min_rtt_wlen`(300 秒)のような窓のある最小にするかを、後の段で決めます
 - SACK の手間の均し:相手が選ぶ SACK の block で、ACK 1 つの手間を均せない入力があるかは未確認です
 - RTO の後の SACK 済みの範囲:Linux が RTO の後に SACK の印を保つかどうかは、試験の書き手が Linux で確かめます
 - pacing:要否は、前の段の後の測定で決めます

@@ -272,7 +272,8 @@ func (c *tcb) rearmRetrans() {
 	}
 }
 
-// onRetransTimer は再送のタイマーの節の期限。期限の来た種類を 1 つ処理し、残る期限を張り直す。
+// onRetransTimer は再送のタイマーの節の期限。期限の来た種類を 1 つ処理し、残る期限を張り直す。並べ替えの
+// 期限は RTO の期限を動かさない。TLP の probe を送った時だけ、buildTLP が RTO を張り直す。
 func (c *tcb) onRetransTimer(now int64) {
 	switch {
 	case c.rtoAt != 0 && now >= c.rtoAt:

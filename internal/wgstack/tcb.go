@@ -129,6 +129,7 @@ type tcbState struct {
 	rackFack                        uint32 // 届いた記録の最も右の端
 	rackFackOK                      bool
 	reorderSeen                     bool
+	rackChanges                     uint64 // 試験だけが読む、RACK の状態を変えた ACK の数
 	minRTT                          int64
 	hasMinRTT                       bool
 	rtoAt, reoAt, tlpAt             int64 // 再送のタイマーの節が分け合う期限
@@ -499,6 +500,7 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	// byte を覆うと SACK 済みの byte は減るので、差は確認の前の値から取る
 	var delivered int64
 	sackedBefore := c.sacked
+	rackX, rackE := c.rackXmit, c.rackEnd
 	advanced := seqGT(ack, c.sndUna)
 	switch {
 	case advanced:
@@ -513,6 +515,9 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	newly := c.markSACK(seg, now)
 	delivered += int64(c.sacked) - int64(sackedBefore)
 	if c.sackOK {
+		if c.rackXmit != rackX || c.rackEnd != rackE {
+			c.rackChanges++
+		}
 		c.rackDetect(now)
 		c.tlpOnAck(ack, advanced, newly)
 		c.sackAfterAck(uint32(max(delivered, 0)))

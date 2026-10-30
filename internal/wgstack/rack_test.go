@@ -164,19 +164,28 @@ func TestTLPOneProbePerTail(t *testing.T) {
 	checkScoreboard(t, cs)
 }
 
-// TestRTODeadlineIsNotPushedByReorderOrTLP は、並べ替えと TLP の期限で起きた処理が RTO の期限を後ろへ
-// ずらさないことを確かめる。
+// TestRTODeadlineIsNotPushedByReorderOrTLP は、並べ替えの期限の処理が RTO の期限を動かさず、TLP の probe が
+// RTO を probe の時刻から張り直すことを確かめる。
 func TestRTODeadlineIsNotPushedByReorderOrTLP(t *testing.T) {
-	n, cs, q, outs := rackConn(t, 10)
-	q.deliver(outs[:8], nil)
+	n, cs, q, outs := rackConn(t, 3)
+	q.deliver(outs, func(i int, o out) bool { return i == 1 })
 	rto := cs.rtoAt
-	for cs.tlpAt != 0 || cs.reoAt != 0 {
-		next := cs.tdl[tmrRetrans]
-		n.advance(time.Duration(next - int64(n.clk.Now())))
-		n.drain()
-		if cs.rtoAt != rto && n.d.Stats().RTOs == 0 {
-			t.Fatalf("RTO deadline moved from %d to %d", rto, cs.rtoAt)
-		}
+	if cs.reoAt == 0 || cs.reoAt >= rto {
+		t.Fatalf("reorder deadline %d, RTO %d", cs.reoAt, rto)
+	}
+	n.advance(time.Duration(cs.reoAt - int64(n.clk.Now())))
+	if n.d.Stats().ReorderTimeouts != 1 || cs.rtoAt != rto {
+		t.Fatalf("after the reorder deadline: RTO %d, was %d", cs.rtoAt, rto)
+	}
+
+	n, cs, q, outs = rackConn(t, 10)
+	q.deliver(outs[:8], nil)
+	n.advance(time.Duration(cs.tlpAt - int64(n.clk.Now())))
+	if got := n.drain(); len(got) != 1 {
+		t.Fatalf("probe %v", got)
+	}
+	if want := int64(n.clk.Now()) + cs.curRTO(); cs.rtoAt != want {
+		t.Fatalf("RTO deadline %d after the probe, want %d", cs.rtoAt, want)
 	}
 }
 
@@ -223,23 +232,14 @@ func TestRACKTimersStayBoundedUnderAdversarialACKs(t *testing.T) {
 	}
 	st := n.d.Stats()
 	t.Logf("%d records: %d ACKs, %d reorder timeouts, %d RACK losses, %d probes, %d RTOs", nrec, acks, st.ReorderTimeouts, st.RACKLost, st.TLPProbes, st.RTOs)
-	if st.ReorderTimeouts > st.RACKLost+uint64(acks) {
-		t.Fatalf("%d reorder timeouts for %d losses and %d ACKs", st.ReorderTimeouts, st.RACKLost, acks)
+	if st.ReorderTimeouts > st.RACKLost+cs.rackChanges {
+		t.Fatalf("%d reorder timeouts for %d losses and %d ACKs that changed the RACK state", st.ReorderTimeouts, st.RACKLost, cs.rackChanges)
 	}
 	if st.TLPProbes > uint64(advances)+st.RTOs+1 {
 		t.Fatalf("%d probes for %d advancing ACKs", st.TLPProbes, advances)
 	}
 	if steps := cs.scoreSteps - steps0; steps > uint64(acks)*64+uint64(nrec)*16 {
 		t.Fatalf("%d scoreboard steps for %d ACKs and %d records", steps, acks, nrec)
-	}
-	armed := 0
-	for k := 0; k < numTimers; k++ {
-		if cs.tdl[k] != 0 {
-			armed++
-		}
-	}
-	if armed > numTimers {
-		t.Fatalf("%d timers armed", armed)
 	}
 	checkScoreboard(t, cs)
 	checkHeld(t, n)
@@ -259,4 +259,49 @@ func TestHolesResentInSequenceOrderAndHeadRearmsRTO(t *testing.T) {
 		t.Fatalf("RTO deadline %d after resending the head, want %d", cs.rtoAt, want)
 	}
 	checkScoreboard(t, cs)
+}
+
+// TestOneProbeWhileACKsAdvanceBelowTheProbe は、再送の probe の後に累積の確認が probe の手前まで進み続けても、
+// probe の確認を待つ間は次の PTO を張らず、probe が 1 つだけであることを確かめる(I5)。
+func TestOneProbeWhileACKsAdvanceBelowTheProbe(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	q.deliver(outs[:2], nil)
+	n.advance(time.Duration(cs.tlpAt - int64(n.clk.Now())))
+	probe := n.drain()
+	if len(probe) != 1 || probe[0].seg.seq != outs[9].seg.seq || !cs.tlpActive || !cs.tlpRetrans {
+		t.Fatalf("probe %v active %v retrans %v", probe, cs.tlpActive, cs.tlpRetrans)
+	}
+	// 2 から 7 の確認が 1 つずつ遅れて届き、累積の確認は probe の手前で止まる
+	for i := 2; i < 8; i++ {
+		n.advance(time.Duration(2 * cs.curRTO() / 10))
+		q.recv(outs[i])
+		q.ack()
+		n.drain()
+		n.advance(time.Duration(max(cs.tlpAt-int64(n.clk.Now()), 0)))
+		n.drain()
+	}
+	if st := n.d.Stats(); st.TLPProbes != 1 {
+		t.Fatalf("%d probes while ACKs advanced below the probe", st.TLPProbes)
+	}
+}
+
+// TestReorderTimeoutsNeedRACKProgress は、RACK の状態を変えない重複した ACK を何度受けても、並べ替えの期限の
+// 処理が損失の印と RACK の状態を変えた ACK の数を超えて起きないことを確かめる。
+func TestReorderTimeoutsNeedRACKProgress(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 3)
+	q.deliver(outs, func(i int, o out) bool { return i == 1 })
+	n.advance(time.Duration(cs.reoAt - int64(n.clk.Now())))
+	n.drain() // RACK が穴を失われたとみなして送り直す。送り直しも失う
+	for range 300 {
+		n.advance(time.Millisecond)
+		q.ack() // 同じ SACK の block を繰り返す
+		n.drain()
+	}
+	st := n.d.Stats()
+	if st.ReorderTimeouts > st.RACKLost+cs.rackChanges {
+		t.Fatalf("%d reorder timeouts for %d losses and %d ACKs that changed the RACK state", st.ReorderTimeouts, st.RACKLost, cs.rackChanges)
+	}
+	if st.ReorderTimeouts == 0 || st.RACKLost == 0 {
+		t.Fatalf("stats %+v", st)
+	}
 }
