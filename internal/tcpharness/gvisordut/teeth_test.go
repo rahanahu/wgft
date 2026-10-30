@@ -206,3 +206,68 @@ func TestHarnessCatchesEarlyReassemblyTimeout(t *testing.T) {
 	got := tcpharness.Record(t, e, scenario(t, "udp-reassembly-timeout"), 1)
 	wantOutcome(t, got, "udp-reassembly-timeout/time-exceeded.not-early", tcpharness.OutcomeFail)
 }
+
+// finAfterAck sends the engine's FIN once more 100 ms after it left, echoing the latest TSval
+// the testbench sent, as an engine that resends after the testbench's ACK arrived would.
+type finAfterAck struct {
+	tcpharness.DUT
+	stale  bool // keep the FIN's own TSecr, as a probe sent before the ACK arrived
+	out    chan []byte
+	mu     sync.Mutex
+	tsval  uint32
+	wg     sync.WaitGroup
+	resent bool
+}
+
+func (d *finAfterAck) Emitted() <-chan []byte { return d.out }
+
+func (d *finAfterAck) Inject(pkt []byte) error {
+	if s, err := tcpharness.Parse(pkt); err == nil && s.Opts.TS != nil {
+		d.mu.Lock()
+		d.tsval = s.Opts.TS.Val
+		d.mu.Unlock()
+	}
+	return d.DUT.Inject(pkt)
+}
+
+func resendFINAfterAck(inner tcpharness.DUT) tcpharness.DUT { return resendFIN(inner, false) }
+
+func resendFIN(inner tcpharness.DUT, stale bool) tcpharness.DUT {
+	d := &finAfterAck{DUT: inner, stale: stale, out: make(chan []byte, 1024)}
+	go func() {
+		for pkt := range inner.Emitted() {
+			if s, err := tcpharness.Parse(pkt); err == nil && s.Has(tcpharness.FlagFIN) && s.Opts.TS != nil && !d.resent {
+				d.resent = true
+				d.wg.Add(1)
+				time.AfterFunc(100*time.Millisecond, func() {
+					defer d.wg.Done()
+					if !d.stale {
+						d.mu.Lock()
+						s.Opts.TS.Ecr = d.tsval
+						d.mu.Unlock()
+					}
+					d.out <- s.Marshal()
+				})
+			}
+			d.out <- pkt
+		}
+		d.wg.Wait()
+		close(d.out)
+	}()
+	return d
+}
+
+func TestHarnessCatchesFINAfterTheAck(t *testing.T) {
+	t.Parallel()
+	got := tcpharness.Record(t, mutant("gvisor-fin-after-ack", resendFINAfterAck), scenario(t, "fin-passive-close"), 1)
+	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
+}
+
+// A FIN resent with the TSecr it had, which the DUT sent before it had the testbench's ACK, is
+// the tail loss probe a loaded machine lets fire; the scenario passes over it.
+func TestHarnessPassesOverAFINSentBeforeTheAck(t *testing.T) {
+	t.Parallel()
+	e := mutant("gvisor-fin-probe", func(d tcpharness.DUT) tcpharness.DUT { return resendFIN(d, true) })
+	got := tcpharness.Record(t, e, scenario(t, "fin-passive-close"), 1)
+	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomePass)
+}

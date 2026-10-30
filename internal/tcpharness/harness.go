@@ -285,6 +285,8 @@ type Peer struct {
 
 	DutAck    uint32 // the latest acknowledgment number from the DUT
 	DutWindow int    // the latest window the DUT advertised, in bytes
+
+	lastTS uint32 // the TSval of the latest segment sent with timestamps
 }
 
 // NewPeer makes a testbench endpoint towards the DUT's port with a fresh source port and ISS
@@ -326,6 +328,9 @@ func (p *Peer) Segment(flags uint8, seq uint32, payload []byte) Segment {
 // Send injects s into the DUT.
 func (p *Peer) Send(s Segment) {
 	p.h.T.Helper()
+	if s.Opts.TS != nil {
+		p.lastTS = s.Opts.TS.Val
+	}
 	p.h.T.Logf("-> %v", s)
 	if err := p.h.DUT.Inject(s.Marshal()); err != nil {
 		p.h.T.Fatalf("inject %v: %v", s, err)
@@ -454,6 +459,42 @@ func (p *Peer) Await(d time.Duration, match func(Segment) bool) (Segment, bool) 
 		if match(s) {
 			return s, true
 		}
+	}
+}
+
+// SendFreshAck sends a pure ACK whose TSval is above every TSval sent before, waiting for the
+// timestamp clock to tick when it must, and returns that TSval. A segment the DUT sent before it
+// had this ACK echoes an older TSval, which QuietSince tells apart.
+func (p *Peer) SendFreshAck() uint32 {
+	p.h.T.Helper()
+	for p.TS && int32(p.TSVal()-p.lastTS) <= 0 {
+		if c, ok := p.h.DUT.(ClockedDUT); ok {
+			c.Advance(time.Millisecond)
+		} else {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	p.SendAck()
+	return p.lastTS
+}
+
+// QuietSince is Quiet, but it passes over segments whose TSecr is older than ts: segments the DUT
+// sent before it had the segment that carried ts, such as a tail loss probe that a slow testbench
+// let fire before its ACK arrived. It returns how many it passed over.
+func (p *Peer) QuietSince(d time.Duration, ts uint32) (Segment, bool, int) {
+	stale := 0
+	deadline := p.h.Now().Add(d)
+	for {
+		s, ok := p.Next(max(deadline.Sub(p.h.Now()), 0))
+		if !ok {
+			return Segment{}, true, stale
+		}
+		if p.TS && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-ts) < 0 {
+			p.h.T.Logf("sent before the DUT had the testbench's latest segment, passed over: %v", s)
+			stale++
+			continue
+		}
+		return s, false, stale
 	}
 }
 
