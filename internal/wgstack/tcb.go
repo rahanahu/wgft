@@ -84,13 +84,18 @@ type tcbState struct {
 	recs                        recordRing
 
 	// 受信
-	irs, rcvNxt uint32
-	rcvCap      uint64
-	advRight    uint64 // 広告した窓の右端(受信の offset)。後ろへ戻さない
-	finRcvd     bool
-	oooFin      bool
-	oooFinOff   uint64
-	rcvSinceAck int
+	irs, rcvNxt  uint32
+	rcvCap       uint64
+	advRight     uint64 // 広告した窓の右端(受信の offset)。後ろへ戻さない
+	finRcvd      bool
+	oooFin       bool
+	oooFinOff    uint64
+	rcvSinceAck  int
+	rcvMSSEst    uint32 // 相手の segment の大きさの推定(Linux の icsk_ack.rcv_mss)
+	ackPushed    bool   // 遅延 ACK を待つ間に、推定より小さな segment を順序どおりに受けた
+	pingpong     bool   // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
+	lastDataRcvd int64  // 最後に中身を受け入れた時刻
+	rcvdData     bool   // lastDataRcvd が有効
 
 	tsRecent, tsOffset uint32
 	lastAckSent        uint32
@@ -719,11 +724,15 @@ func (c *tcb) inputData(seg *segment, now int64) {
 		c.ackNow = true
 	case res.advanced:
 		c.rcvSinceAck += res.accepted
+		c.notePushed(n)
 		if c.rcvSinceAck >= 2*c.rcvMSS() {
 			c.ackNow = true
 		} else if c.tdl[tmrDelack] == 0 {
 			c.arm(tmrDelack, now+int64(delackTimeout))
 		}
+	}
+	if res.accepted > 0 {
+		c.lastDataRcvd, c.rcvdData = now, true
 	}
 }
 
@@ -969,6 +978,7 @@ func (c *tcb) onTimer(kind int, now int64) {
 			c.ackDelayed = true
 		}
 		c.ackNow = true
+		c.pingpong = false // Linux の tcp_delack_timer_handler と同じく対話の印を外す
 	case tmrClose:
 		switch c.state {
 		case stTimeWait, stFinWait2:

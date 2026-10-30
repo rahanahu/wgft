@@ -183,6 +183,7 @@ func (c *tcb) ackSent() {
 	}
 	c.ackDelayed = false
 	c.ackNow = false
+	c.ackPushed = false
 	c.rcvSinceAck = 0
 	c.disarm(tmrDelack)
 	c.lastAckSent = c.rcvNxt
@@ -224,6 +225,9 @@ func (c *tcb) buildNew(b []byte, space int, now int64, force bool) int {
 	}
 	if c.inRecovery {
 		c.prrOut += uint32(length)
+	}
+	if n > 0 && c.rcvdData && now-c.lastDataRcvd < int64(delackTimeout) {
+		c.pingpong = true // 受けた直後に応える対話の流れ(Linux の tcp_event_data_sent)
 	}
 	c.recs.push(record{seq: seq, length: uint16(length), sentAt: now, skip: 1, rtxGen: c.rtxGen})
 	c.listAppend(&c.tList, c.recs.n-1, c.recs.at(c.recs.n-1), recInT)
