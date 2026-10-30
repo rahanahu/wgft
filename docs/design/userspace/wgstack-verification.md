@@ -225,6 +225,11 @@ Go の fuzzing で 2 種類の対象を持ちます。
   各段の後に、予約の合計が上界の式の値以下であること、表の数と予約が一致すること、Device の `Close` の後に予約が 0 に戻ることを確かめます
 
 fuzzing で見つけた入力は、回帰の試験の入力として残します。
+関門(`scripts/wgstack-gate.sh`)では、実行回数を `-fuzztime Nx` で決めます。
+`FuzzCore` は 5,000,000x を `-parallel 4` で、`FuzzAdversarialSender` は 30,000x を `-parallel 8` で流します。
+`FuzzCore` は worker を増やしても 8 付近から速くならず、`FuzzAdversarialSender` は worker の数にほぼ比例して速くなります。
+関門の `FuzzAdversarialSender` は壊れていないことを確かめる量に留め、深さは別のマシンでの長い fuzzing で得ます。
+関門の表には、fuzz の段ごとに 1 秒あたりの実行の回数を出します。
 
 乱数の stream の試験は、既知の byte の列を相手が任意に分け、並べ替え、重ね、失って送り、届いた byte が列と一致することを確かめます。
 受信の向き(`TestReceiveStreamIntegrity`)と送信の向き(`TestSendStreamIntegrity`)の 2 つを持ちます。
