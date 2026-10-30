@@ -42,7 +42,8 @@
 # but with goreleaser such a run builds into and installs from $REPO/dist, which a slotted build
 # from the same checkout replaces, so give every run of a parallel set a slot. A slotted build waits
 # for the other slots' builds and installs from its own copy. The host capacity check below still
-# counts every VM.
+# counts every VM, and a slotted run checks it again under a shared lock that it holds until both
+# of its VMs are launched, so slots started together cannot pass the ceiling between them.
 #
 # docs/testing.md calls for one distribution per PR and three per release candidate; this script
 # takes the distribution as a parameter instead of hard-coding a loop, so a release candidate runs
@@ -199,7 +200,7 @@ while [ $# -gt 0 ]; do
     --upgrade) UPGRADE=1; shift ;;
     --agent-kernel) AGENT_KERNEL=1; shift ;;
     -h | --help)
-      sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "dist-vm: unknown argument: $1" >&2; exit 2 ;;
@@ -436,14 +437,21 @@ if command -v goreleaser >/dev/null 2>&1; then
   else
     # Runs in other slots may build from the same checkout, and --clean empties $REPO/dist, so a
     # slotted build waits for the shared build lock and copies this run's artefacts into $tmp before
-    # it lets go. The lock covers the build alone, not the run.
+    # it lets go. The lock covers the build alone, not the run. The wait for it is bounded, so a
+    # build that hangs in one slot fails the others with a clear message instead of blocking them.
     mkdir -p "$tmp/dist"
+    build_lock="${XDG_RUNTIME_DIR:-/tmp}/wgft-dist-vm-build.lock"
+    build_lock_wait=900
     (
-      flock 9 || exit 1
+      flock -w "$build_lock_wait" 9 || exit 75
       ( cd "$REPO" && goreleaser release --snapshot --clean --skip=publish ) || exit 1
       cp "$REPO/dist/wgft-linux-amd64" "$REPO/dist/wgft-linux-amd64.sha256" "$tmp/dist/"
-    ) 9>"${XDG_RUNTIME_DIR:-/tmp}/wgft-dist-vm-build.lock" >"$tmp/build.log" 2>&1
+    ) 9>"$build_lock" >"$tmp/build.log" 2>&1
     build_rc=$?
+    if [ "$build_rc" = 75 ]; then
+      echo "FAIL  build wgft via goreleaser: another slot's build held $build_lock for over ${build_lock_wait}s"
+      exit 1
+    fi
     if [ "$build_rc" -ne 0 ] || [ ! -f "$tmp/dist/wgft-linux-amd64" ]; then
       tail -n 60 "$tmp/build.log" >&2
       echo "FAIL  build wgft via goreleaser"
@@ -486,6 +494,21 @@ fi
 echo "PASS  build tools/echo and tools/probe (test-only helpers, not release artefacts)"
 
 # --- launch the two VMs ---------------------------------------------------------------------
+# Slots: check_capacity above ran once, before the build, so runs started together can each see room
+# for their 2 VMs and then launch them all past the ceiling. A slotted run therefore takes a shared
+# launch lock, checks the capacity again under it, and holds it until both of its VMs are launched,
+# so the next slot's check counts them. The wait is bounded: past check_capacity's own 300 s window
+# and two launches, a holder is stuck, and this run fails with the lock named instead of waiting on.
+if [ -n "$SLOT" ]; then
+  launch_lock="${XDG_RUNTIME_DIR:-/tmp}/wgft-dist-vm-launch.lock"
+  launch_lock_wait=900
+  exec {LAUNCH_FD}<>"$launch_lock" || { echo "dist-vm: cannot open lock file $launch_lock" >&2; exit 2; }
+  if ! flock -w "$launch_lock_wait" "$LAUNCH_FD"; then
+    echo "FAIL  another slot held $launch_lock for over ${launch_lock_wait}s while launching its VMs"
+    exit 1
+  fi
+  check_capacity || exit 2
+fi
 echo "== launch $server_vm and $agent_vm ($IMAGE)"
 if ! incus launch "$IMAGE" "$server_vm" --vm -c limits.cpu=1 -c limits.memory=1GiB >"$tmp/launch.log" 2>&1; then
   cat "$tmp/launch.log" >&2
@@ -497,6 +520,8 @@ if ! incus launch "$IMAGE" "$agent_vm" --vm -c limits.cpu=1 -c limits.memory=1Gi
   echo "FAIL  launch $agent_vm"
   exit 1
 fi
+# both VMs are RUNNING now, so the next slot's capacity check counts them
+[ -n "$SLOT" ] && exec {LAUNCH_FD}>&-
 
 wait_ready() { # wait_ready <vm>: the incus-agent inside a freshly created VM needs a moment.
   retry 180 incus exec "$1" -- true
