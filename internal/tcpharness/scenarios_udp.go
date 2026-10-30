@@ -116,13 +116,27 @@ func udpDatagram(h *H) {
 	}
 	p, ok := h.Packet(time.Second, func(p IPv4) bool { return toPeer(p) && p.Proto == ProtoUDP })
 	u, perr := ParseUDP(p)
-	h.Check("reply", ok && perr == nil && u.Src == dst && u.Dst == src && bytes.Equal(u.Payload, reply),
-		"the reply leaves from the socket's port to the sender with a valid checksum",
-		yesNo(ok && perr == nil && bytes.Equal(u.Payload, reply), "valid reply", fmt.Sprintf("packet %v, error %v", ok, perr)))
+	h.Check("reply", ok && perr == nil && u.Checksum != 0 && u.Src == dst && u.Dst == src && bytes.Equal(u.Payload, reply),
+		"the reply leaves from the socket's port to the sender with a valid, nonzero checksum, as Linux and gVisor send",
+		replyDesc(ok, perr, u, reply))
 	if ok {
 		h.Check("reply.df-clear", !p.DF, "wgstack.md, UDP is sent without DF", yesNo(p.DF, "DF set", "DF clear"))
 		h.Measure("reply-ttl", p.TTL)
 	}
+}
+
+func replyDesc(ok bool, err error, u UDP, want []byte) string {
+	switch {
+	case !ok:
+		return "no reply"
+	case err != nil:
+		return err.Error()
+	case u.Checksum == 0:
+		return "no checksum"
+	case !bytes.Equal(u.Payload, want):
+		return fmt.Sprintf("%d bytes, different", len(u.Payload))
+	}
+	return "valid reply"
 }
 
 // udpLarge sends the largest UDP datagram IPv4 carries in MTU-sized fragments, and has the
@@ -165,9 +179,9 @@ func udpLarge(h *H) {
 			back, done = r.add(p)
 		}
 		u, perr := ParseUDP(back)
-		h.Check("reply.reassembles", done && perr == nil && bytes.Equal(u.Payload, msg),
-			"the fragments of the reply reassemble into the 65,507 bytes with a valid checksum",
-			yesNo(done && perr == nil && bytes.Equal(u.Payload, msg), "intact", fmt.Sprintf("complete %v, error %v", done, perr)))
+		h.Check("reply.reassembles", done && perr == nil && u.Checksum != 0 && bytes.Equal(u.Payload, msg),
+			"the fragments of the reply reassemble into the 65,507 bytes with a valid, nonzero checksum",
+			replyDesc(done, perr, u, msg))
 		h.Check("reply.df-clear", !df, "no fragment carries DF", yesNo(df, "DF set", "DF clear"))
 		h.Check("reply.id-nonzero", !zeroID, "the fragments carry a nonzero IP ID", yesNo(zeroID, "ID 0", "nonzero"))
 		h.Measure("reply-fragments", frags)
@@ -229,6 +243,11 @@ func udpReassembly(h *H) {
 	h.InjectIP(Frag(whole, 992, 2000))
 	h.InjectIP(fs[2])
 	none("overlap-dropped", "packet-validation.md and Linux since 4.19: an overlapping fragment drops the datagram")
+	// The missing piece, exactly: a stack that dropped only the overlapping fragment completes the
+	// datagram now; one that dropped the datagram, as Linux kills the queue
+	// (v6.1:net/ipv4/ip_fragment.c:383-391), has only the later pieces left and delivers nothing.
+	h.InjectIP(fs[1])
+	none("overlap-drops-datagram", "the overlap dropped the whole datagram, not only the overlapping fragment")
 
 	msg, fs = fragmented(src, dst, 305, 3000, 0x75)
 	for _, f := range fs {
@@ -266,6 +285,9 @@ func udpReassemblyTimeout(h *H) {
 		yesNo(ok, fmt.Sprintf("code %d quoting ID %d", m.Code, q.ID), "no Time Exceeded"))
 	if ok {
 		h.Measure("time-exceeded-after-ms", waited.Milliseconds())
+		h.Check("time-exceeded.not-early", waited >= 25*time.Second,
+			"the incomplete datagram is kept about 30 s, the lifetime of packet-validation.md and Linux's ipfrag_time, before Time Exceeded",
+			fmt.Sprintf("after %.0f s", waited.Seconds()))
 		h.Measure("time-exceeded-quote-bytes", q.Bytes)
 		h.Check("time-exceeded.quote", qok && q.Offset == 0 && len(q.Payload) >= 8, "the quote is the first fragment's header and at least 8 bytes of it",
 			fmt.Sprintf("offset %d, %d payload bytes", q.Offset, len(q.Payload)))

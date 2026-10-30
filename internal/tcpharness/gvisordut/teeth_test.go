@@ -136,3 +136,73 @@ func TestHarnessCatchesUnscaledReceiveWindow(t *testing.T) {
 	got := tcpharness.Record(t, mutant("gvisor-unscaled-receiver", dropBeyond64K), scenario(t, "window-scale"), 1)
 	wantOutcome(t, got, "window-scale/own-scale.span-held", tcpharness.OutcomeFail)
 }
+
+// rewritten passes every emitted packet through f on its way to the testbench.
+type rewritten struct {
+	tcpharness.DUT
+	out chan []byte
+}
+
+func (d *rewritten) Emitted() <-chan []byte { return d.out }
+
+func rewrite(f func([]byte) []byte) func(tcpharness.DUT) tcpharness.DUT {
+	return func(inner tcpharness.DUT) tcpharness.DUT {
+		d := &rewritten{DUT: inner, out: make(chan []byte, 1024)}
+		go func() {
+			defer close(d.out)
+			for pkt := range inner.Emitted() {
+				d.out <- f(pkt)
+			}
+		}()
+		return d
+	}
+}
+
+// zeroUDPChecksum clears the checksum of every UDP datagram the engine sends, in its first
+// fragment when it is fragmented: a valid datagram that no longer carries a checksum.
+func zeroUDPChecksum(pkt []byte) []byte {
+	p, err := tcpharness.ParseIPv4(pkt)
+	if err != nil || p.Proto != tcpharness.ProtoUDP || p.Offset != 0 {
+		return pkt
+	}
+	pkt = append([]byte(nil), pkt...)
+	ihl := int(pkt[0]&0x0f) * 4
+	pkt[ihl+6], pkt[ihl+7] = 0, 0
+	return pkt
+}
+
+func TestHarnessCatchesUDPReplyWithoutChecksum(t *testing.T) {
+	e := mutant("gvisor-no-udp-checksum", rewrite(zeroUDPChecksum))
+	got := tcpharness.Record(t, e, scenario(t, "udp-datagram"), 1)
+	wantOutcome(t, got, "udp-datagram/reply", tcpharness.OutcomeFail)
+	got = tcpharness.Record(t, e, scenario(t, "udp-large"), 1)
+	wantOutcome(t, got, "udp-large/reply.reassembles", tcpharness.OutcomeFail)
+}
+
+// earlyTimeExceeded answers the first fragment of the timeout scenario's datagram with Time
+// Exceeded after 5 s, as a reassembly table with a 5 s lifetime would.
+type earlyTimeExceeded struct {
+	*rewritten
+	once sync.Once
+}
+
+func (d *earlyTimeExceeded) Inject(pkt []byte) error {
+	if p, err := tcpharness.ParseIPv4(pkt); err == nil && p.Proto == tcpharness.ProtoUDP && p.MF && p.Offset == 0 && p.ID == 401 {
+		quote := append([]byte(nil), pkt[:28]...)
+		d.once.Do(func() {
+			time.AfterFunc(5*time.Second, func() {
+				te := tcpharness.ICMPPacket(p.Dst, p.Src, 1, tcpharness.ICMP{Type: tcpharness.ICMPTimeExceeded, Code: tcpharness.CodeReassemblyTime, Body: quote})
+				d.out <- te.Marshal()
+			})
+		})
+	}
+	return d.rewritten.Inject(pkt)
+}
+
+func TestHarnessCatchesEarlyReassemblyTimeout(t *testing.T) {
+	e := mutant("gvisor-5s-reassembly", func(inner tcpharness.DUT) tcpharness.DUT {
+		return &earlyTimeExceeded{rewritten: rewrite(func(p []byte) []byte { return p })(inner).(*rewritten)}
+	})
+	got := tcpharness.Record(t, e, scenario(t, "udp-reassembly-timeout"), 1)
+	wantOutcome(t, got, "udp-reassembly-timeout/time-exceeded.not-early", tcpharness.OutcomeFail)
+}

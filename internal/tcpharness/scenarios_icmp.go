@@ -12,28 +12,28 @@ import (
 
 // echo sends an echo request with payload, split at cuts when there are any, and returns the
 // reassembled reply.
-func echo(h *H, ipid uint16, ident, seq uint16, payload []byte, cuts ...int) (ICMP, int, bool) {
+func echo(h *H, ipid uint16, ident, seq uint16, payload []byte, cuts ...int) (m ICMP, frags int, df, ok bool) {
 	h.T.Helper()
 	req := ICMPPacket(PeerAddr, DUTAddr, ipid, ICMP{Type: ICMPEchoRequest, Rest: uint32(ident)<<16 | uint32(seq), Body: payload})
 	for _, f := range Fragments(req, cuts...) {
 		h.InjectIP(f)
 	}
 	r := newReassembler()
-	frags := 0
 	deadline := h.Now().Add(time.Second)
 	for {
-		p, ok := h.Packet(max(deadline.Sub(h.Now()), 0), func(p IPv4) bool { return toPeer(p) && p.Proto == ProtoICMP })
-		if !ok {
-			return ICMP{}, frags, false
+		p, got := h.Packet(max(deadline.Sub(h.Now()), 0), func(p IPv4) bool { return toPeer(p) && p.Proto == ProtoICMP })
+		if !got {
+			return ICMP{}, frags, df, false
 		}
 		frags++
+		df = df || p.DF
 		if whole, done := r.add(p); done {
 			m, err := ParseICMP(whole)
 			if err != nil {
 				h.T.Logf("reply ignored: %v", err)
 				continue
 			}
-			return m, frags, true
+			return m, frags, df, true
 		}
 	}
 }
@@ -52,18 +52,23 @@ func echoDesc(m ICMP, ok bool, ident, seq uint16, payload []byte) (bool, string)
 // one larger than the MTU among the choices not checked against Linux.
 func icmpEcho(h *H) {
 	small := pattern(56, 0xa1)
-	m, _, ok := echo(h, 601, 0x1234, 1, small)
+	m, _, df, ok := echo(h, 601, 0x1234, 1, small)
 	good, got := echoDesc(m, ok, 0x1234, 1, small)
 	h.Check("reply", good, "an echo request draws a reply with its identifier, sequence and data", got)
+	if ok {
+		// Linux answers from a socket whose path MTU discovery is off, IP_PMTUDISC_DONT
+		// (v6.1:net/ipv4/icmp.c:1499), so its replies carry no DF
+		h.Check("reply.df-clear", !df, "as Linux, the reply carries no DF", yesNo(df, "DF set", "DF clear"))
+	}
 
 	full := pattern(h.DUT.MTU()-28, 0xa2)
-	m, frags, ok := echo(h, 602, 0x1234, 2, full)
+	m, frags, _, ok := echo(h, 602, 0x1234, 2, full)
 	good, got = echoDesc(m, ok, 0x1234, 2, full)
 	h.Check("full-mtu", good && frags == 1, "a request that fills the MTU draws one unfragmented reply",
 		fmt.Sprintf("%s, %d packets", got, frags))
 
 	big := pattern(3000, 0xa3)
-	m, frags, ok = echo(h, 603, 0x1234, 3, big, 1400, 2800)
+	m, frags, _, ok = echo(h, 603, 0x1234, 3, big, 1400, 2800)
 	good, got = echoDesc(m, ok, 0x1234, 3, big)
 	h.Check("oversized", good, "RFC 1122 3.2.2.6: a request reassembled from fragments draws the whole reply, fragmented as the MTU needs", got)
 	if ok {

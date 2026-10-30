@@ -67,6 +67,8 @@ Linux の既定は、完成に含めない回復の仕組みを有効にして�
   前の台本の RTT と輻輳の窓が次の台本に残らないようにします
 - 受信のバッファ:`net.ipv4.tcp_moderate_rcvbuf=0` とし、台本の側のソケットに floor と同じ大きさを与えます
 - 小さな書き込みのまとめ:`net.ipv4.tcp_autocorking=0`
+- UDP、再組み立て、ICMP の台本が頼る IP の値:断片の期限 `net.ipv4.ipfrag_time=30`、path MTU の下限 `net.ipv4.route.min_pmtu=552`、path MTU discovery `net.ipv4.ip_no_pmtu_disc=0`、ICMP の誤りの速さ `net.ipv4.icmp_ratelimit=1000` と `net.ipv4.icmp_ratemask=6168`。
+  どれも Linux 6.1 の既定の値で、namespace ごとの値なので明示して固定します
 
 損失の回復を確かめる台本は、相手の SYN で SACK を許さず、両者を NewReno の動作にします。
 SACK を交渉する台本は、受け手として返す SACK の block の内容と順を確かめます。
