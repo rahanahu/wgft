@@ -129,6 +129,7 @@ func (s *stack) echoReply(ip *ipv4, now int64) {
 	id := s.nextID()
 	ok := s.out.pushCtl(func(b []byte) int {
 		writeIPv4Header(b, total, id, protoICMP, ip.dst, ip.src)
+		clearDF(b) // echo の応答は DF を立てない(Linux と同じく PMTU discovery を使わない)
 		m := b[ipHeaderLen:total]
 		copy(m, ip.payload)
 		m[0], m[2], m[3] = icmpEchoReply, 0, 0
