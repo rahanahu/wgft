@@ -37,6 +37,9 @@ import (
 // CPUs if fewer, in the gate, whose VM should have 8 vCPUs (incus config set <vm> limits.cpu=8).
 // 計測の計画 says how to choose it and when to measure a cell with 1.
 //
+// QBENCH_LOSS_MODEL=arrival drops by the earlier per-packet draws in arrival order instead of
+// the default content-keyed loss, which drops the same stream data on every engine (LossModel).
+//
 // QBENCH_CLIENT=linux has a Linux client send in the cells where the DUT receives, from a network
 // namespace of its own, so the lab VM only. QBENCH_TRACE=<dir> writes each run's packet log there,
 // one line per TCP packet the link carries: times, direction, fate, flags, numbers, window, SACK
@@ -209,6 +212,11 @@ func open(engine, client string, imp Impair, seed int64, trace string) (*Rig, ne
 
 func impair(c Cell) Impair {
 	imp := Impair{Delay: 25 * time.Millisecond, Loss: c.Loss, RateBps: int64(envInt("QBENCH_RATE_MBIT", 20)) * 1_000_000, QueuePkts: envInt("QBENCH_QUEUE_PKTS", 200)}
+	imp.LossModel, _ = envLossModel()
+	if c.Thin {
+		// a block per message, so a message is lost with probability Loss as a packet was
+		imp.LossBlock = thinSize
+	}
 	if c.DUTSend {
 		imp.DataDir = 1
 	}
@@ -220,6 +228,27 @@ func impair(c Cell) Impair {
 		imp.Reorder, imp.ReorderGap = 0.01, 3*time.Millisecond
 	}
 	return imp
+}
+
+// envLossModel is QBENCH_LOSS_MODEL: "content", the default, or "arrival".
+func envLossModel() (LossModel, error) {
+	switch v := os.Getenv("QBENCH_LOSS_MODEL"); v {
+	case "", "content":
+		return LossContent, nil
+	case "arrival":
+		return LossArrival, nil
+	default:
+		return LossContent, fmt.Errorf("QBENCH_LOSS_MODEL=%q: want content or arrival", v)
+	}
+}
+
+// checkLossModel fails the test on an unknown QBENCH_LOSS_MODEL and returns the model.
+func checkLossModel(t *testing.T) LossModel {
+	m, err := envLossModel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
 }
 
 // runCell measures one run of c on engine.
@@ -589,10 +618,14 @@ type Provenance struct {
 	Go       string `json:"go"`
 	GVisor   string `json:"gvisor"`
 	Where    string `json:"where"`
+	// LossModel is the link's loss model; a cell stored before the field was measured with
+	// "arrival".
+	LossModel string `json:"loss_model,omitempty"`
 }
 
 func provenance(where string) Provenance {
-	p := Provenance{Measured: time.Now().UTC().Format(time.RFC3339), Commit: os.Getenv("QBENCH_COMMIT"), Go: runtime.Version(), Where: where}
+	m, _ := envLossModel()
+	p := Provenance{Measured: time.Now().UTC().Format(time.RFC3339), Commit: os.Getenv("QBENCH_COMMIT"), Go: runtime.Version(), Where: where, LossModel: m.String()}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		for _, d := range bi.Deps {
 			if d.Path == "gvisor.dev/gvisor" {
@@ -963,6 +996,15 @@ func loadReference(t *testing.T) *Reference {
 	return &ref
 }
 
+// refLossModel is the loss model a stored reference cell was measured with: "arrival" for a
+// cell stored before the reference recorded it.
+func refLossModel(ref *Reference, cell string) string {
+	if m := ref.CellMeta[cell].LossModel; m != "" {
+		return m
+	}
+	return LossArrival.String()
+}
+
 // TestQBenchRoutine is the routine matrix: wgstack alone, 5 runs per cell, judged against the
 // stored gVisor and Linux medians in testdata/reference.json. A cell within 5% of its line is
 // measured again with twice the runs. It takes about 5 minutes; verdicts are printed, not failed.
@@ -976,12 +1018,18 @@ func TestQBenchRoutine(t *testing.T) {
 		return
 	}
 	pinLinux(t, engines)
+	model := checkLossModel(t)
 	ref := loadReference(t)
-	fmt.Printf("QBENCH-META mode=routine reference=%q measured=%q base_runs=%d\n", ref.Where, ref.Measured, ref.BaseRuns)
+	fmt.Printf("QBENCH-META mode=routine loss_model=%s reference=%q measured=%q base_runs=%d\n", model, ref.Where, ref.Measured, ref.BaseRuns)
 	runs := envInt("QBENCH_RUNS", 5)
 	cells := cellFilter(routineCells())
 	var table []string
 	for ci, c := range cells {
+		if _, have := ref.Cells[c.Name]; have && c.Loss > 0 {
+			if stored := refLossModel(ref, c.Name); stored != model.String() {
+				fmt.Printf("QBENCH-WARN cell=%s the reference was measured with the %s loss model, this run uses %s\n", c.Name, stored, model)
+			}
+		}
 		res := measure(t, c, ci, engines, runs, 0, par)
 		wg := summarize(c, res["wgstack"])
 		printSummary(c, "wgstack", wg)
@@ -1023,10 +1071,11 @@ func TestQBenchGate(t *testing.T) {
 	if (has(engines, "linux") || linuxClient) && !inNetns(t) {
 		return
 	}
+	model := checkLossModel(t)
 	where := pinLinux(t, engines)
 	runs := envInt("QBENCH_RUNS", 9)
 	par := envInt("QBENCH_PARALLEL", gatePar())
-	fmt.Printf("QBENCH-META mode=gate parallel=%d cpus=%d %s\n", par, runtime.NumCPU(), hostLoad())
+	fmt.Printf("QBENCH-META mode=gate loss_model=%s parallel=%d cpus=%d %s\n", model, par, runtime.NumCPU(), hostLoad())
 	prov := provenance(where)
 	if os.Getenv("QBENCH_WRITE_REF") != "" {
 		if prov.Commit == "" {

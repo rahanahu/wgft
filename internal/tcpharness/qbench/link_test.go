@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"strings"
 	"sync"
@@ -25,9 +26,15 @@ import (
 // Impair describes the link. Everything is applied per direction, except the outage, which
 // cuts both directions.
 type Impair struct {
-	Delay       time.Duration // one-way delay
-	Loss        float64       // random loss probability per packet, each direction
-	Reorder     float64       // probability that a packet is held back by ReorderExtra
+	Delay time.Duration // one-way delay
+	// Loss is the random loss probability, each direction: per data segment and per block of
+	// stream data, and per non-data packet, with LossContent; per packet with LossArrival.
+	Loss      float64
+	LossModel LossModel
+	// LossBlock is LossContent's block in bytes; 0 takes the payload of a full segment from the
+	// SYNs. The thin stream sets its message size.
+	LossBlock   int
+	Reorder     float64 // probability that a packet is held back by ReorderExtra
 	ReorderGap  time.Duration
 	RateBps     int64         // bits per second per direction; 0 means unlimited
 	QueuePkts   int           // drop-tail queue length in packets at the rate limit
@@ -35,6 +42,37 @@ type Impair struct {
 	OutageAt    time.Duration // time after the first payload byte in the data direction; 0 disables
 	OutageLen   time.Duration
 	DataDir     int // direction (0: A to B, 1: B to A) whose payload bytes trigger the outage
+}
+
+// LossModel is how the random loss picks the packets it drops.
+type LossModel int
+
+const (
+	// LossContent, the default, keys each decision on what the packet carries, so every engine
+	// loses the same data whatever its segment boundaries and timing. A data segment is dropped
+	// when it covers the first byte of a block, counted from the ISN of its direction, whose
+	// draw for this transmission of that byte fires: draw(seed, direction, block, n) for the
+	// n-th transmission the loss stage sees, below Loss for a segment with one block start and
+	// below 1-(1-Loss)^(1/k) for one with k, so every segment is lost with probability Loss.
+	// The draws of each transmission are independent, so a block whose first transmission is
+	// lost is not lost forever, and every engine meets the same sequence of fates for the same
+	// block. A packet without data, such as a pure
+	// ACK, is keyed on its flags, its acknowledgment relative to the peer's ISN and how many such
+	// packets came before it, so engines that acknowledge the same byte meet the same fate. A
+	// packet of another flow, or one that arrives before its direction's ISN is known, falls
+	// back to the per-direction generator.
+	LossContent LossModel = iota
+	// LossArrival is the earlier model: one draw per packet in arrival order, per direction, so
+	// the n-th packet is dropped on every engine whatever it carries. QBENCH_LOSS_MODEL=arrival
+	// selects it, for comparison.
+	LossArrival
+)
+
+func (m LossModel) String() string {
+	if m == LossArrival {
+		return "arrival"
+	}
+	return "content"
 }
 
 type timed struct {
@@ -94,6 +132,18 @@ type Link struct {
 
 	trace *bufio.Writer // SetTrace's packet log; nil without one
 
+	seed int64
+	// LossContent's state, per direction: the ISN and the SYN's options, how many times the loss
+	// stage saw the first byte of each block, and how many times it saw each non-data packet key.
+	isn     [2]uint32
+	haveISN [2]bool
+	synMSS  [2]int
+	synTS   [2]bool
+	block   int
+	txCount [2]map[int64]uint32
+	hiEnd   [2]int64 // the highest stream end seen, which unwraps the next segment's offset
+	ctlSeen [2]map[ctlKey]uint32
+
 	st [2]dirStats
 
 	deliver [2]func([]byte)
@@ -108,7 +158,7 @@ type Link struct {
 }
 
 func NewLink(imp Impair, seed int64, deliverAB, deliverBA func([]byte)) *Link {
-	l := &Link{imp: imp, stop: make(chan struct{}), t0: time.Now()}
+	l := &Link{imp: imp, stop: make(chan struct{}), t0: time.Now(), seed: seed}
 	l.rng[0] = rand.New(rand.NewSource(seed))
 	l.rng[1] = rand.New(rand.NewSource(seed ^ 0x5bd1e995))
 	l.deliver = [2]func([]byte){deliverAB, deliverBA}
@@ -240,33 +290,189 @@ func (l *Link) Stats(d int) dirStats {
 	return l.st[d]
 }
 
-// payload parses an IPv4/TCP packet into its two ports, sequence number and payload length. ok
-// is false for anything else.
-func payload(p []byte) (ports, seq uint32, n int, ok bool) {
+// tcpInfo is what the link reads from an IPv4/TCP packet.
+type tcpInfo struct {
+	ports    uint32 // source and destination port
+	seq, ack uint32
+	flags    byte
+	n        int // payload length
+	mss      int // the MSS option, 0 without one
+	ts       bool
+}
+
+const (
+	flagFIN = 0x01
+	flagSYN = 0x02
+	flagRST = 0x04
+	flagACK = 0x10
+)
+
+// parseTCP parses an IPv4/TCP packet. ok is false for anything else.
+func parseTCP(p []byte) (ti tcpInfo, ok bool) {
 	if len(p) < 20 || p[0]>>4 != 4 || p[9] != 6 {
-		return 0, 0, 0, false
+		return ti, false
 	}
 	ihl := int(p[0]&15) * 4
 	tot := int(binary.BigEndian.Uint16(p[2:4]))
 	if tot > len(p) || len(p) < ihl+20 {
-		return 0, 0, 0, false
+		return ti, false
 	}
-	off := int(p[ihl+12]>>4) * 4
-	if ihl+off > tot {
-		return 0, 0, 0, false
+	t := p[ihl:tot]
+	if len(t) < 20 {
+		return ti, false
 	}
-	return binary.BigEndian.Uint32(p[ihl:]), binary.BigEndian.Uint32(p[ihl+4:]), tot - ihl - off, true
+	off := int(t[12]>>4) * 4
+	if off < 20 || off > len(t) {
+		return ti, false
+	}
+	ti = tcpInfo{ports: binary.BigEndian.Uint32(t), seq: binary.BigEndian.Uint32(t[4:]), ack: binary.BigEndian.Uint32(t[8:]), flags: t[13], n: len(t) - off}
+	for o := t[20:off]; len(o) > 0 && o[0] != 0; {
+		if o[0] == 1 {
+			o = o[1:]
+			continue
+		}
+		if len(o) < 2 || int(o[1]) < 2 || int(o[1]) > len(o) {
+			break
+		}
+		switch {
+		case o[0] == 2 && o[1] == 4:
+			ti.mss = int(binary.BigEndian.Uint16(o[2:]))
+		case o[0] == 8 && o[1] == 10:
+			ti.ts = true
+		}
+		o = o[o[1]:]
+	}
+	return ti, true
+}
+
+// ctlKey is LossContent's key of a packet without data: its SYN, FIN, RST and ACK flags and its
+// acknowledgment relative to the peer's ISN.
+type ctlKey struct {
+	flags byte
+	ack   uint32
+}
+
+// draw is LossContent's uniform value in [0, 1) for a key: splitmix64 over the seed and the
+// key's words, so a decision depends on nothing but the key.
+func draw(seed int64, words ...uint64) float64 {
+	h := uint64(seed)
+	for _, w := range words {
+		h ^= w
+		h += 0x9e3779b97f4a7c15
+		h = (h ^ h>>30) * 0xbf58476d1ce4e5b9
+		h = (h ^ h>>27) * 0x94d049bb133111eb
+		h ^= h >> 31
+	}
+	return float64(h>>11) / (1 << 53)
+}
+
+// learnLocked records the ISN and the options of the rig's SYN in direction d. l.mu is held.
+func (l *Link) learnLocked(d int, ti tcpInfo) {
+	if ti.flags&flagSYN == 0 || l.haveISN[d] {
+		return
+	}
+	l.isn[d], l.haveISN[d] = ti.seq, true
+	l.synMSS[d], l.synTS[d] = ti.mss, ti.ts
+}
+
+// blockLocked is LossContent's block: Impair.LossBlock, or the payload of a full segment, the
+// smaller MSS of the two SYNs less the 12 bytes of the timestamp option when both SYNs carry it.
+// The two SYNs are the same for every engine at the same MTU, so the blocks are too. l.mu is held.
+func (l *Link) blockLocked() int {
+	if l.block > 0 {
+		return l.block
+	}
+	if l.imp.LossBlock > 0 {
+		l.block = l.imp.LossBlock
+		return l.block
+	}
+	mss := 0
+	for _, m := range l.synMSS {
+		if m > 0 && (mss == 0 || m < mss) {
+			mss = m
+		}
+	}
+	if mss == 0 {
+		mss = 536
+	}
+	if l.synTS[0] && l.synTS[1] {
+		mss -= 12
+	}
+	l.block = mss
+	return l.block
+}
+
+// lostLocked decides the random loss of a packet that reached the loss stage in direction d.
+// l.mu is held.
+func (l *Link) lostLocked(d int, ti tcpInfo, ok, ours bool) bool {
+	if l.imp.LossModel == LossArrival || !ok || !ours || !l.haveISN[d] {
+		return l.rng[d].Float64() < l.imp.Loss
+	}
+	if ti.n == 0 || ti.flags&flagSYN != 0 {
+		k := ctlKey{flags: ti.flags & (flagSYN | flagFIN | flagRST | flagACK)}
+		if ti.flags&flagACK != 0 && l.haveISN[1-d] {
+			k.ack = ti.ack - l.isn[1-d]
+		}
+		if l.ctlSeen[d] == nil {
+			l.ctlSeen[d] = map[ctlKey]uint32{}
+		}
+		l.ctlSeen[d][k]++
+		return draw(l.seed, uint64(d), 2, uint64(k.flags), uint64(k.ack), uint64(l.ctlSeen[d][k])) < l.imp.Loss
+	}
+	// the payload's stream offsets from the first data byte after the SYN, unwrapped against the
+	// highest end seen so far, so a stream longer than the sequence space keeps counting
+	b := int64(l.blockLocked())
+	rel := ti.seq - l.isn[d] - 1
+	s := l.hiEnd[d] + int64(int32(rel-uint32(l.hiEnd[d])))
+	e := s + int64(ti.n)
+	l.hiEnd[d] = max(l.hiEnd[d], e)
+	first, last := ceilDiv(s, b), ceilDiv(e, b) // the block starts in [s, e) are first..last-1
+	if first >= last {
+		return false
+	}
+	if l.txCount[d] == nil {
+		l.txCount[d] = map[int64]uint32{}
+	}
+	// A segment that carries k block starts is dropped when any of their draws is below
+	// 1-(1-Loss)^(1/k), so the segment, and each block in it, is lost with probability Loss
+	// however many messages an engine coalesces. For k = 1 the threshold is Loss.
+	q := l.imp.Loss
+	if k := last - first; k > 1 {
+		q = 1 - math.Pow(1-l.imp.Loss, 1/float64(k))
+	}
+	lost := false
+	// every block whose first byte the segment carries counts this transmission
+	for i := first; i < last; i++ {
+		l.txCount[d][i]++
+		if draw(l.seed, uint64(d), 1, uint64(i), uint64(l.txCount[d][i])) < q {
+			lost = true
+		}
+	}
+	return lost
+}
+
+// ceilDiv is x/b rounded up, for any sign of x.
+func ceilDiv(x, b int64) int64 {
+	q := x / b
+	if x%b > 0 {
+		q++
+	}
+	return q
 }
 
 // Send puts a packet that entered on direction d into the link.
 func (l *Link) Send(d int, pkt []byte) {
 	now := time.Now()
-	ports, seq, n, ok := payload(pkt)
+	ti, ok := parseTCP(pkt)
+	ports, seq, n := ti.ports, ti.seq, ti.n
 	l.mu.Lock()
-	if ok && d == 0 && !l.haveFlow && len(pkt) > 33 && pkt[int(pkt[0]&15)*4+13]&0x12 == 0x02 {
+	if ok && d == 0 && !l.haveFlow && ti.flags&(flagSYN|flagACK) == flagSYN {
 		l.flow, l.haveFlow = ports, true
 	}
 	ours := ok && l.haveFlow && (d == 0 && ports == l.flow || d == 1 && ports == l.flow<<16|l.flow>>16)
+	if ours {
+		l.learnLocked(d, ti)
+	}
 	s := &l.st[d]
 	if ours {
 		s.Pkts++
@@ -303,7 +509,7 @@ func (l *Link) Send(d int, pkt []byte) {
 		l.mu.Unlock()
 		return
 	}
-	if l.imp.Loss > 0 && l.rng[d].Float64() < l.imp.Loss {
+	if l.imp.Loss > 0 && l.lostLocked(d, ti, ok, ours) {
 		s.Dropped++
 		l.traceLocked(d, now, time.Time{}, "loss", pkt)
 		l.mu.Unlock()
