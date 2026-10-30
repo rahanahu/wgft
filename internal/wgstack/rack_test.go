@@ -350,3 +350,256 @@ func TestDSACKWidensTheReorderWindow(t *testing.T) {
 		t.Fatalf("multiplier %d after %d recoveries", cs.reoWndMult, rackReoPersist)
 	}
 }
+
+// tlpCutConn は、末尾の 2 segment を失った接続で TLP の probe に末尾を送り直させ、続けて新しいデータを newSegs
+// segment 書かせる。返す more は probe の後に送った新しい segment である。
+func tlpCutConn(t *testing.T, newSegs int) (*testNet, *Conn, *tcb, *sackPeer, []out, out, []out) {
+	t.Helper()
+	n, c, cs, q, outs := rackConnApp(t, 10)
+	for i := 0; i < 8; i++ {
+		n.advance(time.Millisecond)
+		q.recv(outs[i])
+		q.ack()
+		n.drain()
+	}
+	n.advance(time.Duration(max(cs.tlpAt-int64(n.clk.Now()), 0)) + 2*time.Millisecond)
+	probe := n.drain()
+	if len(probe) != 1 || !cs.tlpRetrans || probe[0].seg.seq != outs[9].seg.seq {
+		t.Fatalf("setup: probe %d, retransmission %v", len(probe), cs.tlpRetrans)
+	}
+	if _, err := c.Write(make([]byte, newSegs*testSegPayload)); err != nil {
+		t.Fatal(err)
+	}
+	more := n.drain()
+	if len(more) != newSegs {
+		t.Fatalf("setup: %d new segments after the probe, want %d", len(more), newSegs)
+	}
+	n.advance(5 * time.Millisecond)
+	return n, c, cs, q, outs, probe[0], more
+}
+
+// tlpCutWant は、ACK の前の送り残し flight と輻輳の窓 w で起きた輻輳の事象の ssthresh(CUBIC)である。
+func tlpCutWant(cs *tcb, flight, w uint32) uint32 {
+	return max(uint32(float64(min(flight, w))*cubicBeta), 2*uint32(cs.segMSS()))
+}
+
+// TestTLPRepairAndLossOnOneACKReduceOnce は、TLP の probe が損失を直したと分かる ACK が、probe の後に送った
+// データの損失も RACK で知らせるとき、輻輳の窓を 1 回だけ下げることを確かめる(wgstack-performance.md の
+// 「RACK-TLP」、RFC 8985 7.4、RFC 5681 3.2)。probe の縮小の後に回復に入る時に下げ直すと、β の 2 乗になる。
+func TestTLPRepairAndLossOnOneACKReduceOnce(t *testing.T) {
+	_, _, cs, q, outs, probe, more := tlpCutConn(t, 15)
+	// 1 つの ACK:遅れた 8、probe、more[0] が届き、more[1] は失われ、残りは SACK される
+	q.recv(outs[8])
+	q.recv(probe)
+	q.recv(more[0])
+	for _, o := range more[2:] {
+		q.recv(o)
+	}
+	w, flight := cs.cwnd, cs.sndMax-cs.sndUna
+	tlp0, fast0 := cs.s.tlpRecoveries.Load(), cs.s.fastRecoveries.Load()
+	q.ack()
+	if cs.s.tlpRecoveries.Load() != tlp0+1 || cs.s.fastRecoveries.Load() != fast0+1 || !cs.inRecovery {
+		t.Fatalf("setup: TLP reductions +%d, fast recoveries +%d, in recovery %v",
+			cs.s.tlpRecoveries.Load()-tlp0, cs.s.fastRecoveries.Load()-fast0, cs.inRecovery)
+	}
+	if want := tlpCutWant(cs, flight, w); cs.ssthresh != want {
+		t.Errorf("ssthresh %d after one ACK, want one reduction %d from the window %d and flight %d before the ACK", cs.ssthresh, want, w, flight)
+	}
+	// W_max は損失の前の窓で、この ACK の slow start の増分を含まない
+	if want := float64(w) / float64(cs.segMSS()); cs.cubic.wMax != want || cs.cubic.cwndPrior != want {
+		t.Errorf("W_max %v, cwnd_prior %v, want the window %v before the ACK", cs.cubic.wMax, cs.cubic.cwndPrior, want)
+	}
+}
+
+// TestLossAfterTLPRepairInTheSameWindowReducesOnce は、probe の縮小の後の ACK が、縮小の時までに送ったデータの
+// 損失で回復に入るとき、ssthresh を下げ直さないことを確かめる。
+func TestLossAfterTLPRepairInTheSameWindowReducesOnce(t *testing.T) {
+	n, _, cs, q, outs, probe, more := tlpCutConn(t, 15)
+	// probe の確認:累積の確認が probe と more[1] まで進み、窓を 1 回下げる
+	q.recv(outs[8])
+	q.recv(probe)
+	q.recv(more[0])
+	q.recv(more[1])
+	tlp0 := cs.s.tlpRecoveries.Load()
+	q.ack()
+	if cs.s.tlpRecoveries.Load() != tlp0+1 || cs.inRecovery {
+		t.Fatalf("setup: TLP reductions +%d, in recovery %v", cs.s.tlpRecoveries.Load()-tlp0, cs.inRecovery)
+	}
+	ss := cs.ssthresh
+	// 次の ACK 群:more[2] が失われ、残りは SACK される。どれも縮小の前に送ったデータである
+	fast0 := cs.s.fastRecoveries.Load()
+	q.deliver(more[3:], nil)
+	if cs.s.fastRecoveries.Load() != fast0+1 || !cs.inRecovery {
+		t.Fatalf("setup: fast recoveries +%d, in recovery %v", cs.s.fastRecoveries.Load()-fast0, cs.inRecovery)
+	}
+	if cs.ssthresh != ss || cs.recover != cs.tlpCutSeq {
+		t.Errorf("ssthresh %d, recover %d after a loss in the window the probe's reduction covers, want %d and the cut point %d", cs.ssthresh, cs.recover, ss, cs.tlpCutSeq)
+	}
+	// 穴の再送が届き、累積の確認が縮小の時の SND.MAX を越えると、縮小の印は消える
+	for _, o := range n.drain() {
+		q.recv(o)
+	}
+	q.ack()
+	if !seqGE(cs.sndUna, cs.tlpCutSeq) || cs.tlpCut {
+		t.Errorf("after the window is acknowledged: SND.UNA %d, cut at %d, mark %v", cs.sndUna, cs.tlpCutSeq, cs.tlpCut)
+	}
+}
+
+// TestLossBeyondTheTLPCutReducesAgain は、縮小の時までのデータの損失で入った回復が縮小の時の SND.MAX で終わり、
+// その先に送ったデータの損失が次の回復で窓を下げることを確かめる(RFC 6582 の 1 つの窓に 1 回の縮小)。
+func TestLossBeyondTheTLPCutReducesAgain(t *testing.T) {
+	n, c, cs, q, outs, probe, more := tlpCutConn(t, 15)
+	q.recv(outs[8])
+	q.recv(probe)
+	q.recv(more[0])
+	q.ack()
+	ss := cs.ssthresh
+	cut := cs.tlpCutSeq
+	if !cs.tlpCut || cut != more[len(more)-1].seg.seq+uint32(len(more[len(more)-1].seg.payload)) {
+		t.Fatalf("setup: mark %v at %d", cs.tlpCut, cut)
+	}
+	if _, err := c.Write(make([]byte, 20*testSegPayload)); err != nil {
+		t.Fatal(err)
+	}
+	// more[1..7] の確認が順に届き、窓が開いて縮小の後のデータ post が出る
+	var post []out
+	for _, o := range more[1:8] {
+		q.recv(o)
+		q.ack()
+		post = append(post, n.drain()...)
+	}
+	if len(post) < 5 {
+		t.Fatalf("setup: %d segments after the cut", len(post))
+	}
+	// 縮小の前の more[8] と縮小の後の post[1] を失い、残りを SACK で知らせる
+	fast0 := cs.s.fastRecoveries.Load()
+	lostPost := post[1].seg.seq
+	for _, o := range more[9:] {
+		q.recv(o)
+		q.ack()
+	}
+	for i, o := range post {
+		if i != 1 {
+			q.recv(o)
+			q.ack()
+		}
+	}
+	if !cs.inRecovery || cs.ssthresh != ss || cs.recover != cut {
+		t.Fatalf("held recovery: in recovery %v, ssthresh %d want %d, recover %d want the cut point %d", cs.inRecovery, cs.ssthresh, ss, cs.recover, cut)
+	}
+	// more[8] の再送だけが届く。post[1] は送り直しも失う。累積の確認は縮小の時の SND.MAX を越えて回復が終わり、
+	// 同じ ACK で post[1] の損失の回復に入って窓を下げる
+	var held out
+	for range 4 {
+		for _, o := range n.drain() {
+			if o.seg.seq == more[8].seg.seq && len(o.seg.payload) > 0 {
+				held = o
+			}
+		}
+		if len(held.seg.payload) > 0 {
+			break
+		}
+		n.advance(5 * time.Millisecond)
+	}
+	if len(held.seg.payload) == 0 {
+		t.Fatal("setup: no retransmission of more[8]")
+	}
+	q.recv(held)
+	w := cs.cwnd
+	q.ack()
+	t.Logf("ssthresh %d at the cut, %d after the loss beyond it; window %d; fast recoveries +%d", ss, cs.ssthresh, w, cs.s.fastRecoveries.Load()-fast0)
+	if cs.s.fastRecoveries.Load() != fast0+2 || !cs.inRecovery || !seqGT(cs.recover, cut) || cs.sndUna != lostPost {
+		t.Fatalf("no second recovery for the loss beyond the cut: fast recoveries +%d, in recovery %v, recover %d, SND.UNA %d at %d",
+			cs.s.fastRecoveries.Load()-fast0, cs.inRecovery, cs.recover, cs.sndUna, lostPost)
+	}
+	if cs.ssthresh >= ss {
+		t.Errorf("ssthresh %d after a loss beyond the cut, want below %d", cs.ssthresh, ss)
+	}
+}
+
+// TestTLPCutUsesTheWindowBeforeTheACK は、probe の確認が probe の後のデータまで確認するとき、縮小が ACK の前の
+// 窓で決まり、ACK の後の送り残し(0)で下限に落ちないことを確かめる。続けて、縮小がすべてを確認した後に送った
+// 最初の segment を失うと、縮小の窓の外の損失として窓を下げ直すことを確かめる。
+func TestTLPCutUsesTheWindowBeforeTheACK(t *testing.T) {
+	n, c, cs, q, outs, probe, more := tlpCutConn(t, 3)
+	mss := uint32(cs.segMSS())
+	q.recv(outs[8])
+	q.recv(probe)
+	for _, o := range more {
+		q.recv(o)
+	}
+	w, flight := cs.cwnd, cs.sndMax-cs.sndUna
+	tlp0 := cs.s.tlpRecoveries.Load()
+	q.ack()
+	if cs.s.tlpRecoveries.Load() != tlp0+1 || cs.sndUna != cs.sndMax {
+		t.Fatalf("setup: TLP reductions +%d, flight %d", cs.s.tlpRecoveries.Load()-tlp0, cs.sndMax-cs.sndUna)
+	}
+	ss := cs.ssthresh
+	if want := tlpCutWant(cs, flight, w); ss != want || ss <= 2*mss {
+		t.Fatalf("ssthresh %d after an ACK that covers everything, want %d from the flight %d and window %d before it", ss, want, flight, w)
+	}
+	// 縮小の時の SND.MAX はすべて確認された。その後に送った最初の segment を失い、残りを SACK で知らせる
+	if _, err := c.Write(make([]byte, 10*testSegPayload)); err != nil {
+		t.Fatal(err)
+	}
+	post := n.drain()
+	if len(post) < 3 {
+		t.Fatalf("setup: %d segments after the cut", len(post))
+	}
+	fast0 := cs.s.fastRecoveries.Load()
+	for _, o := range post[1:] {
+		q.recv(o)
+		q.ack()
+	}
+	n.advance(time.Duration(max(cs.reoAt-int64(n.clk.Now()), 0)) + time.Millisecond)
+	if cs.s.fastRecoveries.Load() != fast0+1 || !cs.inRecovery {
+		t.Fatalf("setup: fast recoveries +%d, in recovery %v", cs.s.fastRecoveries.Load()-fast0, cs.inRecovery)
+	}
+	if cs.ssthresh >= ss {
+		t.Errorf("ssthresh %d after a loss in data sent after the cut, want below %d", cs.ssthresh, ss)
+	}
+}
+
+// TestRecoveryDuringAProbeIsTheOnlyCut は、probe の確認を待つ間に RACK が回復に入ったとき、回復を終える ACK が
+// probe の先まで確認しても TLP の縮小を重ねないことを確かめる(RFC 8985 7.4.1)。回復の応答が probe の前の損失
+// への輻輳の事象であり、ACK の前の輻輳の窓は PRR の途中の値である。
+func TestRecoveryDuringAProbeIsTheOnlyCut(t *testing.T) {
+	n, _, cs, q, outs, probe, more := tlpCutConn(t, 12)
+	// outs[8] を失ったまま、probe と新しい 12 segment を届ける。RACK が回復に入る
+	q.recv(probe)
+	q.ack()
+	q.deliver(more, nil)
+	if !cs.inRecovery || !cs.tlpActive {
+		t.Fatalf("setup: in recovery %v, probe outstanding %v", cs.inRecovery, cs.tlpActive)
+	}
+	ss := cs.ssthresh
+	tlp0, fast0 := cs.s.tlpRecoveries.Load(), cs.s.fastRecoveries.Load()
+	// outs[8] の再送が届き、累積の確認が probe と回復の点を越える
+	var rtx out
+	for range 4 {
+		for _, o := range n.drain() {
+			if o.seg.seq == outs[8].seg.seq && len(o.seg.payload) > 0 {
+				rtx = o
+			}
+		}
+		if len(rtx.seg.payload) > 0 {
+			break
+		}
+		n.advance(5 * time.Millisecond)
+	}
+	if len(rtx.seg.payload) == 0 {
+		t.Fatal("setup: no retransmission of outs[8]")
+	}
+	q.recv(rtx)
+	q.ack()
+	if cs.inRecovery || !seqGT(cs.sndUna, cs.tlpEnd) {
+		t.Fatalf("setup: in recovery %v, SND.UNA %d, probe end %d", cs.inRecovery, cs.sndUna, cs.tlpEnd)
+	}
+	t.Logf("ssthresh %d segments in the recovery, %d after it ended past the probe", ss/uint32(cs.segMSS()), cs.ssthresh/uint32(cs.segMSS()))
+	if got := cs.s.tlpRecoveries.Load() - tlp0; got != 0 || cs.ssthresh != ss {
+		t.Errorf("TLP reductions +%d, ssthresh %d after the recovery ended past the probe, want no TLP cut and %d", got, cs.ssthresh, ss)
+	}
+	if cs.s.fastRecoveries.Load() != fast0 {
+		t.Errorf("fast recoveries +%d", cs.s.fastRecoveries.Load()-fast0)
+	}
+}

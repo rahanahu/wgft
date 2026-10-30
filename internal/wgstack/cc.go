@@ -21,8 +21,9 @@ const (
 type ccAlgo interface {
 	// congAvoid は、回復の外で cwnd >= ssthresh の間に acked byte を確認した ACK で窓を増やす
 	congAvoid(c *tcb, acked uint32, now int64)
-	// lossThresh は輻輳の事象(回復に入る時、TLP の probe が損失を直した時、最初の RTO)の新しい ssthresh
-	lossThresh(c *tcb) uint32
+	// lossThresh は輻輳の事象(回復に入る時、TLP の probe が損失を直した時、最初の RTO)の新しい ssthresh。
+	// cwnd は事象の直前の輻輳の窓(W_max と cwnd_prior)、base は β 倍する量(lossBase)である
+	lossThresh(c *tcb, cwnd, base uint32) uint32
 	// onRTO は RTO の後の状態を整える。ssthresh は呼び出し側が lossThresh で決める
 	onRTO(c *tcb)
 	// onIdle は、送り残しが無いまま idle ns の間何も送らなかった後に、時刻 now に送り始める時に呼ぶ
@@ -40,8 +41,8 @@ func (newRenoCC) congAvoid(c *tcb, acked uint32, now int64) {
 	}
 }
 
-func (newRenoCC) lossThresh(c *tcb) uint32 {
-	return max(c.lossBase()/2, 2*uint32(c.segMSS()))
+func (newRenoCC) lossThresh(c *tcb, cwnd, base uint32) uint32 {
+	return max(base/2, 2*uint32(c.segMSS()))
 }
 
 func (newRenoCC) onRTO(c *tcb)                   { c.caAcc = 0 }
@@ -104,18 +105,18 @@ func (k *cubicCC) congAvoid(c *tcb, acked uint32, now int64) {
 	}
 }
 
-// lossThresh は RFC 9438 4.6 と 4.7(fast convergence)。ssthresh は lossBase の β 倍である。
-func (k *cubicCC) lossThresh(c *tcb) uint32 {
+// lossThresh は RFC 9438 4.6 と 4.7(fast convergence)。ssthresh は base の β 倍である。
+func (k *cubicCC) lossThresh(c *tcb, cwnd, base uint32) uint32 {
 	mss := float64(c.segMSS())
-	cwnd := float64(c.cwnd) / mss
-	if cwnd < k.wMax {
-		k.wMax = cwnd * (1 + cubicBeta) / 2
+	w := float64(cwnd) / mss
+	if w < k.wMax {
+		k.wMax = w * (1 + cubicBeta) / 2
 	} else {
-		k.wMax = cwnd
+		k.wMax = w
 	}
-	k.cwndPrior = cwnd
+	k.cwndPrior = w
 	k.epoch, k.frac = 0, 0
-	return max(uint32(float64(c.lossBase())*cubicBeta), 2*uint32(c.segMSS()))
+	return max(uint32(float64(base)*cubicBeta), 2*uint32(c.segMSS()))
 }
 
 // onRTO は Linux の bictcp_reset と同じく、RTO の後の epoch を 3 次の式の原点から始め直す。
@@ -145,6 +146,9 @@ func (c *tcb) lossBase() uint32 {
 	}
 	return min(c.sndMax-c.sndUna, w)
 }
+
+// lossThresh は今の状態で起きた輻輳の事象の新しい ssthresh を返す。
+func (c *tcb) lossThresh() uint32 { return c.ccFor().lossThresh(c, c.cwnd, c.lossBase()) }
 
 // ccFor は接続 c の輻輳の制御を返す。
 func (c *tcb) ccFor() ccAlgo {

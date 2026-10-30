@@ -424,8 +424,15 @@ func (c *tcb) resendLen(i int, off uint32, payCap int) (uint32, bool) {
 // 損失とみなす。delivered は回復に入る ACK が累積の確認と SACK で新しく届けたと知らせた byte である。
 func (c *tcb) enterRecovery(delivered uint32) {
 	c.initUndo()
-	c.ssthresh = c.ccFor().lossThresh(c)
-	c.recover = c.sndMax
+	// TLP の probe が直した損失と同じ窓のデータの損失なら、その縮小が輻輳の事象なので ssthresh を下げ直さず、
+	// 回復は縮小の時の SND.MAX で終える。その先のデータの損失は、次の回復で窓を下げる
+	// (wgstack-performance.md の「RACK-TLP」)
+	if c.tlpCut && seqLT(c.sndUna, c.tlpCutSeq) {
+		c.recover = c.tlpCutSeq
+	} else {
+		c.ssthresh = c.lossThresh()
+		c.recover = c.sndMax
+	}
 	c.inRecovery = true
 	c.prrDelivered, c.prrOut = 0, 0
 	// RFC 9937 6.1 の RecoverFS:回復の間に届くかもしれない byte。回復の前に SACK 済みの byte は回復の間に届いたと

@@ -24,13 +24,13 @@ func TestCubicLossThreshAndFastConvergence(t *testing.T) {
 	mss := uint32(c.segMSS())
 	c.cwnd = 100 * mss
 	c.sndMax = c.sndUna + 100*mss
-	if ss := c.ccFor().lossThresh(c); ss != 70*mss || c.cubic.wMax != 100 {
+	if ss := c.lossThresh(); ss != 70*mss || c.cubic.wMax != 100 {
 		t.Fatalf("ssthresh %d segments, W_max %v", ss/mss, c.cubic.wMax)
 	}
 	// 前の W_max より小さな窓での次の損失は、W_max を (1 + β) / 2 倍に縮める(fast convergence)
 	c.cwnd = 80 * mss
 	c.sndMax = c.sndUna + 80*mss
-	c.ccFor().lossThresh(c)
+	c.lossThresh()
 	if want := 80 * (1 + cubicBeta) / 2; math.Abs(c.cubic.wMax-want) > 1e-9 || c.cubic.cwndPrior != 80 {
 		t.Fatalf("W_max %v, want %v", c.cubic.wMax, want)
 	}
@@ -61,7 +61,7 @@ func TestCubicWindowFollowsTheCubicFunction(t *testing.T) {
 	c.srtt = int64(rtt)
 	c.cwnd = 100 * mss
 	c.sndMax = c.sndUna + 100*mss
-	c.ssthresh = c.ccFor().lossThresh(c)
+	c.ssthresh = c.lossThresh()
 	c.cwnd = c.ssthresh // 回復の後の窓
 	now := int64(time.Hour)
 	k := math.Cbrt((100 - 70) / cubicC)
@@ -91,7 +91,7 @@ func TestCubicRenoFriendlyRegion(t *testing.T) {
 	c.srtt = int64(rtt)
 	c.cwnd = 20 * mss
 	c.sndMax = c.sndUna + 20*mss
-	c.ssthresh = c.ccFor().lossThresh(c)
+	c.ssthresh = c.lossThresh()
 	c.cwnd = c.ssthresh
 	// 100 RTT の間、W_cubic は 0.2 秒しか進まないので W_max(20)に届かない。W_est は 14 から RTT ごとに約
 	// 0.53 segment 増えて約 11 RTT で cwnd_prior(20)を超え、その後は RTT ごとに 1 segment 増えて約 109 になる
@@ -113,7 +113,7 @@ func TestCubicIdleShiftsTheEpoch(t *testing.T) {
 	c.srtt = int64(100 * time.Millisecond)
 	c.cwnd = 50 * mss
 	c.sndMax = c.sndUna + 50*mss
-	c.ssthresh = c.ccFor().lossThresh(c)
+	c.ssthresh = c.lossThresh()
 	c.cwnd = c.ssthresh
 	c.ccFor().congAvoid(c, mss, int64(time.Hour))
 	epoch := c.cubic.epoch
@@ -130,7 +130,7 @@ func TestCubicRTOResetsTheEpoch(t *testing.T) {
 	mss := uint32(c.segMSS())
 	c.cwnd = 50 * mss
 	c.sndMax = c.sndUna + 50*mss
-	c.ccFor().lossThresh(c)
+	c.lossThresh()
 	c.ccFor().onRTO(c)
 	if c.cubic != (cubicCC{}) {
 		t.Fatalf("state after RTO %+v", c.cubic)
@@ -144,7 +144,7 @@ func TestNewRenoStaysSelectable(t *testing.T) {
 	mss := uint32(c.segMSS())
 	c.cwnd = 100 * mss
 	c.sndMax = c.sndUna + 100*mss
-	if ss := c.ccFor().lossThresh(c); ss != 50*mss {
+	if ss := c.lossThresh(); ss != 50*mss {
 		t.Fatalf("NewReno ssthresh %d segments", ss/mss)
 	}
 	c.cwnd = 10 * mss
@@ -207,7 +207,7 @@ func TestRecoveryRightAfterRecoveryReducesTheWindow(t *testing.T) {
 			mss := uint32(c.segMSS())
 			c.cwnd = 2 * mss
 			c.sndMax = c.sndUna + 40*mss
-			if ss := c.ccFor().lossThresh(c); ss != 2*mss {
+			if ss := c.lossThresh(); ss != 2*mss {
 				t.Fatalf("ssthresh %d with a window of 2 segments, want the floor %d", ss, 2*mss)
 			}
 		})

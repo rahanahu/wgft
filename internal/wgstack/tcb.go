@@ -105,6 +105,7 @@ type tcbState struct {
 	undoMarker    bool   // 取り消しの印(undo.go)
 	undoSeq       uint32 // 印を付けた時の SND.UNA(Linux の undo_marker)
 	priorUna      uint32 // 処理中の ACK の前の SND.UNA
+	priorCwnd     uint32 // 処理中の ACK の前の輻輳の窓
 	totalRetrans  uint32 // 接続の再送の累計(Linux の total_retrans)
 	dsackDups     uint32 // D-SACK で知らされた重複の累計(Linux の dsack_dups)
 	rtoEpisode    bool   // RTO の後の回復の最中
@@ -162,6 +163,8 @@ type tcbState struct {
 	rtoAt, reoAt, tlpAt             int64 // 再送のタイマーの節が分け合う期限
 	tlpActive, tlpRetrans, tlpProbe bool
 	tlpEnd                          uint32
+	tlpCutSeq                       uint32 // TLP の probe が窓を下げた時の SND.MAX。tlpCut の間だけ意味を持つ
+	tlpCut                          bool   // SND.UNA が tlpCutSeq に届く前の損失は、TLP の縮小と同じ輻輳の事象である
 	rtxBytes                        uint32
 	prrDelivered                    uint32 // PRR(RFC 6937)
 	prrOut                          uint32
@@ -548,7 +551,7 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	rackX, rackE := c.rackXmit, c.rackEnd
 	c.origDelivered = false
 	advanced := seqGT(ack, c.sndUna)
-	c.priorUna = c.sndUna
+	c.priorUna, c.priorCwnd = c.sndUna, c.cwnd
 	switch {
 	case advanced:
 		delivered = int64(ack - c.sndUna)
@@ -629,6 +632,9 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 		c.recBase++
 	}
 	c.sndUna = ack
+	if c.tlpCut && seqGE(ack, c.tlpCutSeq) {
+		c.tlpCut = false // 縮小が覆う窓のデータはすべて確認された。番号が 1 周した後に古い番号と比べない
+	}
 	if seqLT(c.sndNxt, ack) {
 		c.sndNxt = ack
 	}
@@ -717,7 +723,7 @@ func (c *tcb) dupAck(now int64) {
 	}
 	if c.dupAcks == 3 && seqGT(c.sndUna, c.recover) {
 		c.initUndo()
-		c.ssthresh = c.ccFor().lossThresh(c)
+		c.ssthresh = c.lossThresh()
 		c.recover = c.sndMax
 		c.cwnd = c.ssthresh + 3*mss
 		c.inRecovery = true
@@ -1103,7 +1109,7 @@ func (c *tcb) onRTO(now int64) {
 		c.frto = 0
 	}
 	if c.backoff == 0 {
-		c.ssthresh = c.ccFor().lossThresh(c)
+		c.ssthresh = c.lossThresh()
 	}
 	c.fastRtx = false // RTO の規則が SND.UNA から送り直すので、待っている高速の再送で先頭を 2 度送らない
 	c.ccFor().onRTO(c)
