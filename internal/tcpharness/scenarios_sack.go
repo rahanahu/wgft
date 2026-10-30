@@ -396,12 +396,29 @@ func sackRenege(h *H) {
 
 // limitedTransmit has the application write more than the initial window and loses the first
 // segment. RFC 3042: each of the first two duplicate ACKs lets the sender send one new segment,
-// and it retransmits nothing before the third. The duplicate ACKs come 20
-// ms apart, as the arrivals of the segments that cause them would space them.
-func limitedTransmit(h *H) {
-	const port = 8034
+// and it retransmits nothing before the third. The duplicate ACKs come 20 ms apart, as the
+// arrivals of the segments that cause them would space them. This variant runs at the
+// testbench's near-zero RTT with the reference Linux's RACK off, so it covers RFC 3042 under the
+// duplicate-threshold rule alone.
+func limitedTransmit(h *H) { limitedTransmitAt(h, 8034, 0) }
+
+// limitedTransmitRACK is limitedTransmit on a path with an RTT of ltRTT and the reference
+// Linux's RACK on. RFC 8985's reorder window, a quarter of the minimum RTT, is then longer than
+// the two duplicate ACKs and the time the checks watch after them, so a RACK sender keeps the
+// first segment unmarked and Limited Transmit applies as on a real path.
+func limitedTransmitRACK(h *H) { limitedTransmitAt(h, 8036, ltRTT) }
+
+// ltRTT is the path delay of limitedTransmitRACK: a reorder window of about 49 ms, more than the
+// 40 ms from the first duplicate ACK to the end of the checks.
+const ltRTT = 200 * time.Millisecond
+
+func limitedTransmitAt(h *H, port uint16, rtt time.Duration) {
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	d := Dial{SYN: StandardSYN()}
+	if rtt > 0 {
+		d.AckDelay = rtt - 5*time.Millisecond // the minimum RTT, below every later sample
+	}
+	p, _, c := h.ConnectWith(l, port, d)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	data := pattern(15*segSize(p), 0xa5)
 	if _, err := c.Write(data); err != nil {
@@ -412,6 +429,10 @@ func limitedTransmit(h *H) {
 		fmt.Sprintf("%d of %d bytes in %d segments", sent, len(data), len(segs)))
 	r := newReceiver(p)
 	w := newWatch(segs)
+	if rtt > 0 {
+		// the first duplicate ACK comes back one path delay after the flight left
+		collect(p, rtt, w, nil)
+	}
 	// 20 ms between the duplicate ACKs, as segments arriving one after another space them; sent
 	// back to back, the second reaches Linux before it has sent the first new segment on.
 	for i, id := range []string{"first-dupack.new-data", "second-dupack.new-data"} {
