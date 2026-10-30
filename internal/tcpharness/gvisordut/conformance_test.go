@@ -61,8 +61,8 @@ var Known = map[string]tcpharness.Known{
 	},
 	"limited-transmit-rack/first-dupack.new-data": {
 		Observed: "0 new segments",
-		Reason: "gVisor sends no new segment on a duplicate ACK while RACK's reorder window keeps the first segment " +
-			"unmarked: it has no RFC 3042 Limited Transmit. On a 200 ms path the two duplicate ACKs draw nothing",
+		Reason: "on a 200 ms path, with RACK's reorder window keeping the first segment unmarked, gVisor sends no " +
+			"new data on the first two duplicate ACKs in this scenario",
 	},
 	"limited-transmit-rack/second-dupack.new-data": {
 		Observed: "0 new segments",
