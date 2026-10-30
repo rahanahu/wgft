@@ -299,6 +299,7 @@ func TestICMPFragNeededFromAnotherPeerKeepsTCPSegments(t *testing.T) {
 // the endpoint while it is still connecting; the retransmitted SYN then
 // completes the connect.
 func TestICMPErrorFromAnotherPeerKeepsTCPConnect(t *testing.T) {
+	t.Parallel()
 	p := newPeerNet(t)
 	target := netip.AddrPortFrom(p.agent.local, 7100)
 	ln, err := p.agent.ListenTCP(target)

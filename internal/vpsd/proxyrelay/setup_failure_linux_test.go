@@ -152,6 +152,7 @@ func TestSetupDialFailurePreservesEmptyPeerEOF(t *testing.T) {
 }
 
 func TestSetupHeaderFailureHoldsTheRealUpstream(t *testing.T) {
+	t.Parallel()
 	r := newSetupWorker(t, true)
 	r.start()
 	setupWait(t, 5*time.Second, r.up.closed)
@@ -191,6 +192,8 @@ func TestSetupHeaderFailureReturnsWhenTheUpstreamIsSafe(t *testing.T) {
 	}
 }
 
+// 並列にしない: agent after delivery は、4 s 待った後の切断から 500 ms 以内に枠が戻ることを確かめる。
+// 他の試験の負荷で起こされた待ちが 500 ms を超えると誤って落ちる。
 func TestSetupFailureCutOrders(t *testing.T) {
 	for _, kind := range []string{"closed before header returns", "retarget before header returns", "agent after delivery"} {
 		t.Run(kind, func(t *testing.T) {
@@ -243,6 +246,8 @@ func (w setupBlockedHeader) Write(b []byte) (int, error) {
 	return w.setupHeaderError.Write(b)
 }
 
+// 並列にしない: 4 s 待った後の見直しから 500 ms 以内に枠が戻ることを確かめる。他の試験の負荷で起こされた
+// 待ちが 500 ms を超えると誤って落ちる。
 func TestSetupFailedPendingPolicyException(t *testing.T) {
 	for _, op := range []string{"retire", "source restriction"} {
 		t.Run(op, func(t *testing.T) {

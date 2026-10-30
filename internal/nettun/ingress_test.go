@@ -276,6 +276,7 @@ func TestIngressCloseDuringWrites(t *testing.T) {
 // closes the stack, so a timeout notice never reaches a closing stack. The
 // test holds the table's mutex until the sweeper blocks in Sweep; Close must
 // then wait with the stack still open.
+// 並列にしない: holdReassembly が package の reassemblyHook を差し替え、process のすべての Device の掃除を止める。
 func TestIngressCloseJoinsSweeperBeforeStack(t *testing.T) {
 	d, err := Create(ingressLocal, 1420)
 	if err != nil {
@@ -457,6 +458,7 @@ func TestIngressNonlocalTimeoutHasNoFalseLocalICMP(t *testing.T) {
 	}
 }
 
+// 並列にしない: setReassemblyLifetime が package の reassemblyLimits を書き換える。
 func TestIngressTimeoutSuppressesNoninitialAndICMPError(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

@@ -31,6 +31,7 @@ import (
 // gVisor, and that no UDP endpoint exists outside the registry.
 
 // captureLog replaces the accounting's log for one test.
+// captureLog は package の logf を差し替えるので、これを使う試験は並列にしない。
 func captureLog(t *testing.T) func() []string {
 	t.Helper()
 	var mu sync.Mutex

@@ -300,6 +300,7 @@ func TestLedgerSplitRemainderAndRename(t *testing.T) {
 // なら p2 の旧い接続は B の退役で D へ移り、その後の付け替えでは動かない。付け替えが先なら B の退役
 // で E へ移る。
 func TestLedgerOneCommitOrder(t *testing.T) {
+	t.Parallel()
 	n := 300
 	if testing.Short() {
 		n = 30
