@@ -97,6 +97,7 @@ func TestDelayedAck(t *testing.T) {
 	listen(t, n, 80)
 	p := n.handshake(40000, 80, true, false, true)
 	n.drain()
+	skipQuickack(n)
 	p.ack(make([]byte, 100))
 	if outs := n.drain(); len(outs) != 0 {
 		t.Fatalf("immediate ACK for one small segment: %v", outs)

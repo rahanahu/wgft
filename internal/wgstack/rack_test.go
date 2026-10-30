@@ -305,3 +305,41 @@ func TestReorderTimeoutsNeedRACKProgress(t *testing.T) {
 		t.Fatalf("stats %+v", st)
 	}
 }
+
+// TestDSACKWidensTheReorderWindow は、D-SACK を受けた往復ごとに並べ替えの窓の倍率を 1 つ上げ、16 回の回復の後に
+// 1 に戻すことを確かめる(RFC 8985 6.2 の手順 4)。
+func TestDSACKWidensTheReorderWindow(t *testing.T) {
+	n, cs, q, outs := rackConn(t, 10)
+	q.deliver(outs[:2], nil)
+	cs.mu.Lock()
+	cs.reorderSeen = true
+	cs.mu.Unlock()
+	w1 := cs.reoWnd()
+	dsack := func() {
+		s := q.p.seg(flagACK, nil)
+		s.sack = []sackBlock{{outs[0].seg.seq, outs[0].seg.seq + uint32(testSegPayload)}} // 確認済みの範囲
+		n.inject(s)
+	}
+	dsack()
+	if cs.reoWndMult != 2 || n.d.Stats().DSACKsIn != 1 || cs.reoWnd() != min(2*w1, cs.srtt) {
+		t.Fatalf("after one D-SACK: mult %d, window %d, was %d", cs.reoWndMult, cs.reoWnd(), w1)
+	}
+	dsack() // 同じ往復の 2 つ目は数えない
+	if cs.reoWndMult != 2 {
+		t.Fatalf("second D-SACK in the round raised the multiplier to %d", cs.reoWndMult)
+	}
+	q.deliver(outs[2:], nil) // 往復を終える
+	n.drain()
+	dsack()
+	if cs.reoWndMult != 3 {
+		t.Fatalf("D-SACK in the next round: multiplier %d", cs.reoWndMult)
+	}
+	cs.mu.Lock()
+	for range rackReoPersist {
+		cs.rackRecoveryDone()
+	}
+	cs.mu.Unlock()
+	if cs.reoWndMult != 1 {
+		t.Fatalf("multiplier %d after %d recoveries", cs.reoWndMult, rackReoPersist)
+	}
+}

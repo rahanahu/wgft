@@ -61,6 +61,7 @@ type Stats struct {
 	RetransTLP           uint64 // TLP の probe として送り直した segment
 	HyStartCSS           uint64 // HyStart++ が Conservative Slow Start に入った回数
 	HyStartExits         uint64 // HyStart++ が CSS の後に slow start を終えた回数
+	DSACKsIn             uint64 // 並べ替えの窓を広げた D-SACK の往復
 	HeldChunksInPool     int64  // 輪が持つ chunk の数(chunkPool の会計)
 	ReclaimableInBoost   int    // プロセスの boost の枠のうち使っている数
 }
@@ -152,6 +153,7 @@ func (s *stack) stats() Stats {
 	st.RetransTLP = s.retrans[rtxTLP].Load()
 	st.HyStartCSS = s.hystartCSS.Load()
 	st.HyStartExits = s.hystartExits.Load()
+	st.DSACKsIn = s.dsacksIn.Load()
 	return st
 }
 

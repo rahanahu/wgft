@@ -47,9 +47,14 @@ func (c *tcb) options(now int64, sack bool) optWriter {
 	if c.tsOK {
 		o.ts(tsClock(now)+c.tsOffset, c.tsRecent)
 	}
-	if sack && c.sackOK && c.rcv.n > 0 {
+	if sack && c.sackOK && (c.rcv.n > 0 || c.dsackPending) {
 		var blocks [4]sackBlock
-		o.sack(c.rcv.sackBlocks(blocks[:], c.irs+1))
+		bs := blocks[:0]
+		if c.dsackPending {
+			bs = append(bs, c.dsack) // D-SACK は先頭の block(RFC 2883)
+		}
+		bs = append(bs, c.rcv.sackBlocks(blocks[len(bs):], c.irs+1)...)
+		o.sack(bs)
 	}
 	o.pad()
 	return o
@@ -182,9 +187,13 @@ func (c *tcb) ackSent() {
 			c.s.acksImmediate.Add(1)
 		}
 	}
+	if c.quickAcks > 0 && c.ackNow && !c.ackDelayed {
+		c.quickAcks--
+	}
 	c.ackDelayed = false
 	c.ackNow = false
 	c.ackPushed = false
+	c.dsackPending = false
 	c.rcvSinceAck = 0
 	c.disarm(tmrDelack)
 	c.lastAckSent = c.rcvNxt

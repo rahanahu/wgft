@@ -113,6 +113,7 @@ func TestStatsCountDelayedAndImmediateAcks(t *testing.T) {
 	listen(t, n, 80)
 	p := n.handshake(40000, 80, true, false, true)
 	n.drain()
+	skipQuickack(n)
 	base := n.d.Stats()
 	p.ack(make([]byte, 100))
 	n.advance(delackTimeout)
