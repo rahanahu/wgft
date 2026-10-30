@@ -203,7 +203,7 @@ func (s *stack) twInput(id int32, seg *segment, now int64, reuse *reuseISS) bool
 			return true
 		}
 		if seg.has(flagFIN) && seg.seq+uint32(len(seg.payload)) == r.rcvNxt {
-			if r.tsOK && seg.opt.hasTS {
+			if r.tsOK && seg.opt.hasTS && seqGE(seg.opt.tsVal, r.tsRecent) {
 				r.tsRecent = seg.opt.tsVal
 			}
 			r.rcvNxt++
