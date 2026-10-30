@@ -403,12 +403,16 @@ func (c *tcb) timeWaitInput(seg *segment, now int64, reuse *reuseISS) bool {
 		if !seg.has(flagACK) && rfc6191(seg, c.tsOK, c.tsRecent, c.rcvNxt) {
 			s := c.s
 			s.tmu.Lock()
-			room := s.synRoom(s.listeners[seg.tup.local()])
-			if !room {
+			verdict := s.reuseVerdict(seg)
+			if verdict == reuseFull {
 				s.refuseReuse(now)
 			}
 			s.tmu.Unlock()
-			if !room {
+			switch verdict {
+			case reuseNoListener:
+				c.challengeAck(now) // Linux と同じく TIME_WAIT の ACK を返す
+				return false
+			case reuseFull:
 				return false // 枠の TIME_WAIT を保ち、相手の SYN の再送を待つ
 			}
 			// 接続は CLOSED になり、アプリケーションはそれまでのデータと io.EOF を読める
@@ -921,7 +925,10 @@ func (c *tcb) onPersist(now int64) {
 		return
 	}
 	c.probesOut++
-	if c.probesOut > probeRetries {
+	// アプリケーションが閉じた接続は、Linux の tcp_orphan_retries と同じく、相手が応えても戻らない後退の回数で
+	// 打ち切る。閉じた接続の FIN は窓が開くまで送らないので、打ち切らなければ窓を 0 のまま probe に応える相手が
+	// 枠をいつまでも持たせる
+	if c.probesOut > probeRetries || (c.appClosed && c.backoff >= orphanRetries) {
 		c.s.probeAborted.Add(1)
 		c.sendRST()
 		c.abortWith(syscall.ETIMEDOUT)
