@@ -84,6 +84,12 @@ type rexmitWatch struct {
 	seen   map[uint32]int
 	ranges []SACKBlock // the byte ranges sent again
 	fresh  int         // new segments, beyond high
+	// informed, when set, keeps out of ranges a resend whose TSecr is older than informedTS: one
+	// the DUT sent before it had the ACK that carried the SACK blocks, such as a tail loss probe
+	// that fires while a slow testbench is still answering.
+	informed   bool
+	informedTS uint32
+	probes     int // resends kept out of ranges
 }
 
 func newWatch(segs []Segment) *rexmitWatch {
@@ -97,6 +103,10 @@ func (w *rexmitWatch) note(s Segment) {
 	}
 	if after(w.high, s.Seq) {
 		w.seen[s.Seq]++
+		if w.informed && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-w.informedTS) < 0 {
+			w.probes++
+			return
+		}
 		w.ranges = append(w.ranges, SACKBlock{s.Seq, s.Seq + uint32(len(s.Payload))})
 		return
 	}
@@ -212,6 +222,8 @@ func sackMultiHole(h *H) {
 	r := newReceiver(p)
 	w := newWatch(segs)
 	r.take(segs[0])
+	// a resend the DUT makes before it has these ACKs knows nothing of their SACK blocks
+	w.informed, w.informedTS = true, p.TSVal()
 	p.Send(r.ack(p.TSRecent))
 	dupacks(r, segs, arriving(segs, 1, 3, 5)...) // the second, fourth and sixth segments are lost
 	collect(p, h.Prompt()+50*time.Millisecond, w, r)
@@ -225,8 +237,9 @@ func sackMultiHole(h *H) {
 	before := len(w.seen)
 	collect(p, 300*time.Millisecond, w, nil)
 	sacked := rangesOf(segs, arriving(segs, 1, 3, 5)...)
-	h.Check("sacked-not-resent", !w.resentIn(sacked...), "no SACKed byte is sent again",
+	h.Check("sacked-not-resent", !w.resentIn(sacked...), "no SACKed byte is sent again once the SACK blocks are in",
 		yesNo(w.resentIn(sacked...), "SACKed resent", "none"))
+	h.Measure("resends-before-the-sack", w.probes)
 	h.Check("quiet-after", len(w.seen) == before, "nothing is resent after the full ACK", fmt.Sprintf("%d more", len(w.seen)-before))
 	intact(h, r, data)
 }
