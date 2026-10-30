@@ -226,6 +226,25 @@ Go の fuzzing で 2 種類の対象を持ちます。
 
 fuzzing で見つけた入力は、回帰の試験の入力として残します。
 
+### 関門での並列数と実行回数
+
+関門では `-fuzztime Nx` で実行回数を指定し、`-parallel 4` を使います。
+`FuzzCore` は 5,000,000x、`FuzzAdversarialSender` は 150,000x です。
+`-fuzztime` を秒で指定すると、ホストの負荷で回数が変わり、結果を比べられません。
+
+- `FuzzParse` と `FuzzAdversarialSender`:worker の数にほぼ比例して速くなります。
+  並列数は、ホストを分け合う他の仕事の数で決めます。
+- `FuzzCore`:worker の数に比例して速くならず、8 worker 付近から伸びが鈍ります。
+  1 回ごとに Device を作り、表と輪を確保して捨てるので、確保と GC の走査が CPU の時間の大半を占めるためです(原因の特定は単一 worker の pprof で、並列での頭打ちの機構は未確認です)。
+  関門では 4 を使い、8 を超える並列数は効果が小さいので使いません。
+  1 回の Device の作成を軽くするため、`FuzzCore` は `fuzzLimits` を使います。
+  `FuzzCore` が触れない UDP の datagram の枠と断片の表を小さくし、K と Q も小さくしています。
+  同じ入力に対する被覆は変わらないことを確かめています。
+- `FuzzCore` の 1 core での速さは、`BenchmarkFuzzCore` で測れます。
+  1 core のマシンで長く流すときは、`-parallel 1` とし、回数は 1 core の速さから見積もります。
+
+実行回数は、`-parallel 4` での 1 秒あたりの回数を測ってから、所要時間が関門の枠に収まるように決めます。
+
 乱数の stream の試験は、既知の byte の列を相手が任意に分け、並べ替え、重ね、失って送り、届いた byte が列と一致することを確かめます。
 受信の向き(`TestReceiveStreamIntegrity`)と送信の向き(`TestSendStreamIntegrity`)の 2 つを持ちます。
 `go test ./...` の既定は受信 100、送信 80 の種で、送信の数はレビューで中身を壊す変異が落ちた種(37、43、49)より余裕を持たせた値です。
