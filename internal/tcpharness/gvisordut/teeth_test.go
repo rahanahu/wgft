@@ -216,7 +216,10 @@ func TestHarnessCatchesEarlyReassemblyTimeout(t *testing.T) {
 // the testbench sent, as an engine that resends after the testbench's ACK arrived would.
 type finAfterAck struct {
 	tcpharness.DUT
-	stale  bool // keep the FIN's own TSecr, as a probe sent before the ACK arrived
+	stale bool // keep the FIN's own TSecr, as a probe sent before the ACK arrived
+	// change, when set, alters the resent copy: data instead of the FIN, or another number
+	change func(*tcpharness.Segment)
+	after  time.Duration // how long after the FIN the copy goes; 100 ms when zero
 	out    chan []byte
 	mu     sync.Mutex
 	tsval  uint32
@@ -238,18 +241,33 @@ func (d *finAfterAck) Inject(pkt []byte) error {
 func resendFINAfterAck(inner tcpharness.DUT) tcpharness.DUT { return resendFIN(inner, false) }
 
 func resendFIN(inner tcpharness.DUT, stale bool) tcpharness.DUT {
-	d := &finAfterAck{DUT: inner, stale: stale, out: make(chan []byte, 1024)}
+	return resendChanged(inner, stale, nil)
+}
+
+func resendChanged(inner tcpharness.DUT, stale bool, change func(*tcpharness.Segment)) tcpharness.DUT {
+	d := &finAfterAck{DUT: inner, stale: stale, change: change, out: make(chan []byte, 1024)}
 	go func() {
 		for pkt := range inner.Emitted() {
 			if s, err := tcpharness.Parse(pkt); err == nil && s.Has(tcpharness.FlagFIN) && s.Opts.TS != nil && !d.resent {
 				d.resent = true
 				d.wg.Add(1)
-				time.AfterFunc(100*time.Millisecond, func() {
+				after := d.after
+				if after == 0 {
+					after = 100 * time.Millisecond
+				}
+				time.AfterFunc(after, func() {
 					defer d.wg.Done()
+					if d.change != nil && d.after > 0 {
+						// the copy's TSval says when the engine would have sent it
+						s.Opts.TS.Val += uint32(after / time.Millisecond)
+					}
 					if !d.stale {
 						d.mu.Lock()
 						s.Opts.TS.Ecr = d.tsval
 						d.mu.Unlock()
+					}
+					if d.change != nil {
+						d.change(&s)
 					}
 					d.out <- s.Marshal()
 				})
@@ -453,4 +471,33 @@ func TestHarnessCatchesLateRACKResend(t *testing.T) {
 func TestHarnessCatchesLateTailLossProbe(t *testing.T) {
 	got := tcpharness.Record(t, mutant("gvisor-late-probe", delayResends(400*time.Millisecond)), scenario(t, "tlp-tail-loss"), 1)
 	wantOutcome(t, got, "tlp-tail-loss/probe-at-2srtt", tcpharness.OutcomeFail)
+}
+
+// Only an unchanged resend of the FIN is passed over: a stale-TSecr segment that carries data, or
+// a FIN at another sequence number, still fails the check.
+func TestHarnessCatchesStaleSegmentsOtherThanTheFIN(t *testing.T) {
+	t.Parallel()
+	for name, change := range map[string]func(*tcpharness.Segment){
+		"data": func(s *tcpharness.Segment) {
+			s.Flags, s.Payload = tcpharness.FlagACK|tcpharness.FlagPSH, []byte("x")
+		},
+		"another-seq": func(s *tcpharness.Segment) { s.Seq++ },
+	} {
+		e := mutant("gvisor-stale-"+name, func(d tcpharness.DUT) tcpharness.DUT { return resendChanged(d, true, change) })
+		got := tcpharness.Record(t, e, scenario(t, "fin-passive-close"), 1)
+		wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
+	}
+}
+
+// A FIN resent 300 ms after the first, past the 250 ms in which a tail loss probe comes, is not
+// passed over even with its stale TSecr: it is what a DUT that never had the ACK sends at its RTO.
+func TestHarnessCatchesStaleFINPastTheProbeWindow(t *testing.T) {
+	t.Parallel()
+	e := mutant("gvisor-stale-fin-300ms", func(inner tcpharness.DUT) tcpharness.DUT {
+		d := resendChanged(inner, true, func(*tcpharness.Segment) {}).(*finAfterAck)
+		d.after = 300 * time.Millisecond
+		return d
+	})
+	got := tcpharness.Record(t, e, scenario(t, "fin-passive-close"), 1)
+	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
 }

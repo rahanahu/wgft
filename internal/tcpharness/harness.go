@@ -662,13 +662,15 @@ func (p *Peer) SendFreshAck() uint32 {
 	return p.lastTS
 }
 
-// QuietSince is Quiet, but it passes over one segment whose TSecr is older than ts: a segment
-// the DUT sent before it had the segment that carried ts, such as a tail loss probe that a slow
-// testbench let fire before its ACK arrived. The wait of d starts again after it. A second such
-// segment fails the quiet: a DUT that dropped the testbench's segment keeps echoing the old TSval
-// as it resends. On a ClockedDUT nothing is passed over, since Inject returns after the engine
-// handled the segment and the race cannot happen. It returns how many it passed over.
-func (p *Peer) QuietSince(d time.Duration, ts uint32) (Segment, bool, int) {
+// QuietSince is Quiet, but it passes over one segment that resends the FIN f unchanged and
+// echoes a TSecr older than ts: a FIN the DUT sent before it had the segment that carried ts, such
+// as a tail loss probe that a slow testbench let fire before its ACK arrived. Only a segment with
+// f's sequence number, no payload, flags among FIN, ACK and PSH, and within probeWindow of f is
+// passed over, and the wait of d starts again after it. A second such segment, or any other,
+// fails the quiet: a DUT that dropped the testbench's ACK keeps resending with the old TSecr. On
+// a ClockedDUT nothing is passed over, since Inject returns after the engine handled the segment
+// and the race cannot happen. fAt is when f arrived. It returns how many it passed over.
+func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time) (Segment, bool, int) {
 	_, clocked := p.h.DUT.(ClockedDUT)
 	stale := 0
 	deadline := p.h.Now().Add(d)
@@ -677,8 +679,16 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32) (Segment, bool, int) {
 		if !ok {
 			return Segment{}, true, stale
 		}
-		if !clocked && stale == 0 && p.TS && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-ts) < 0 {
-			p.h.T.Logf("sent before the DUT had the testbench's latest segment, passed over once: %v", s)
+		// How long after the FIN the DUT sent the resend: from the DUT's own timestamps where it
+		// has them, which a stalled testbench cannot stretch, else from when each arrived here.
+		since := p.h.Now().Sub(fAt)
+		if s.Opts.TS != nil && f.Opts.TS != nil {
+			since = time.Duration(int32(s.Opts.TS.Val-f.Opts.TS.Val)) * time.Millisecond
+		}
+		probe := s.Has(FlagFIN) && s.Flags&^(FlagFIN|FlagACK|FlagPSH) == 0 && s.Seq == f.Seq && len(s.Payload) == 0 &&
+			since <= probeWindow
+		if !clocked && stale == 0 && probe && p.TS && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-ts) < 0 {
+			p.h.T.Logf("the FIN resent before the DUT had the testbench's latest segment, passed over once: %v", s)
 			stale++
 			deadline = p.h.Now().Add(d)
 			continue
@@ -686,6 +696,10 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32) (Segment, bool, int) {
 		return s, false, stale
 	}
 }
+
+// probeWindow is how long after a FIN QuietSince accepts its resend as sent before the ACK: about
+// one minimum RTO. A tail loss probe on a near-zero RTT comes within a few milliseconds.
+const probeWindow = 250 * time.Millisecond
 
 // Quiet reports whether the DUT emits nothing on this flow for d.
 func (p *Peer) Quiet(d time.Duration) (Segment, bool) {
