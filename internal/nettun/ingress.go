@@ -1,7 +1,7 @@
 package nettun
 
 // TUN の入口(wireguard-go から netstack への向き)。IPv4 の断片はすべて有限な再組み立て
-// (reassembly.go)に渡し、完成した datagram だけを gVisor に渡す。gVisor の再組み立ては、
+// (internal/ipv4frag)に渡し、完成した datagram だけを gVisor に渡す。gVisor の再組み立ては、
 // 断片化された datagram ごとに取り消されない 30 秒のタイマーを残し、保持する量が到着の速さで
 // 決まるので、断片を gVisor に一度も渡さない(設計文書 7 節)。この Device 宛ての完成した UDP は
 // 登録表(udp_registry.go)を通し、受信の会計の予約を持って endpoint に届ける。ICMP の誤りは、
@@ -61,9 +61,7 @@ func (t *Device) initUDP() error {
 }
 
 func (t *Device) initReassembly() error {
-	fragments, err := newIPv4Reassembly(ipv4ReassemblyLimits{
-		Entries: reassemblyEntries, Fragments: reassemblyFragments, Bytes: reassemblyBytes, Lifetime: reassemblyLifetime,
-	})
+	fragments, err := newIPv4Reassembly(reassemblyLimits)
 	if err != nil {
 		return err
 	}
@@ -86,6 +84,7 @@ func (t *Device) sweepReassembly() {
 			// Sweep takes only the reassembly mutex; the timeout ICMP handoff
 			// takes no lock. Close joins this goroutine before it closes the
 			// stack, so no notice reaches a closing stack.
+			callReassemblyHook()
 			for _, n := range t.reassembly.Sweep(now) {
 				t.fragmentNotice(n, nil)
 			}
@@ -149,6 +148,7 @@ func (t *Device) writeIPv4(packet []byte) error {
 		}
 	}
 	if isIPv4Fragment(packet) {
+		callReassemblyHook()
 		result := t.reassembly.Process(packet, time.Now())
 		if result.Status == ipv4FragmentRejected && result.Notice.Reason == ipv4ReasonExpired {
 			t.fragmentNotice(result.Notice, nil)

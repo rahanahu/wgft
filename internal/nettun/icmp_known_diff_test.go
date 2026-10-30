@@ -161,10 +161,8 @@ func TestICMPKnownDifferencesFromPinnedStack(t *testing.T) {
 // ICMP, and at expiry it yields Time Exceeded like any held first fragment.
 // The lifetime is shortened for the test.
 func TestICMPKnownDifferenceFirstFragmentAlone(t *testing.T) {
+	setReassemblyLifetime(t, 300*time.Millisecond)
 	d := ingressDevice(t)
-	d.reassembly.mu.Lock()
-	d.reassembly.limits.Lifetime = 300 * time.Millisecond
-	d.reassembly.mu.Unlock()
 	first, _ := knownDiffFragments([]byte{0x44, 4, 1, 2}, nil)
 	sendIngress(t, d, first)
 	if got := d.ep.NumQueued(); got != 0 {

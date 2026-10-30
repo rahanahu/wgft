@@ -281,13 +281,13 @@ func TestIngressCloseJoinsSweeperBeforeStack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.reassembly.mu.Lock()
+	unhold := holdReassembly(t)
 	time.Sleep(2*reassemblySweep + 500*time.Millisecond) // the sweeper is now blocked in Sweep
 	done := make(chan struct{})
 	go func() { d.Close(); close(done) }()
 	time.Sleep(100 * time.Millisecond)
 	closedEarly, nicGone := d.closed.Load(), !d.stack.HasNIC(1)
-	d.reassembly.mu.Unlock()
+	unhold()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -306,10 +306,8 @@ func TestIngressCloseJoinsSweeperBeforeStack(t *testing.T) {
 // The sweeper expires a held fragment with no further traffic, and Close
 // stops it.
 func TestIngressSweeperRunsWithoutTraffic(t *testing.T) {
+	setReassemblyLifetime(t, 20*time.Millisecond)
 	d := ingressDevice(t)
-	d.reassembly.mu.Lock()
-	d.reassembly.limits.Lifetime = 20 * time.Millisecond
-	d.reassembly.mu.Unlock()
 	first, _ := splitIngressIPv4(ingressUDP([]byte("abcdefgh12345678"), 41000, ingressPort), 16)
 	copy(first[16:20], []byte{10, 1, 1, 99}) // nonlocal: no ICMP output
 	ipv4SetChecksum(first[:20])
@@ -369,10 +367,8 @@ func readIngressOutput(t *testing.T, d *Device, wait time.Duration) []byte {
 }
 
 func TestIngressFragmentTimeoutICMP(t *testing.T) {
+	setReassemblyLifetime(t, 20*time.Millisecond)
 	d := ingressDevice(t)
-	d.reassembly.mu.Lock()
-	d.reassembly.limits.Lifetime = 20 * time.Millisecond
-	d.reassembly.mu.Unlock()
 	first, _ := splitIngressIPv4(ingressUDP([]byte("abcdefgh12345678"), 41000, ingressPort), 16)
 	sendIngress(t, d, first)
 	out := readIngressOutput(t, d, 3*time.Second)
@@ -386,6 +382,7 @@ func TestIngressFragmentTimeoutICMP(t *testing.T) {
 // A fragment whose key expired but was not yet swept reports the timeout and
 // then starts a new entry.
 func TestIngressExpiredKeyRetriesFragment(t *testing.T) {
+	setReassemblyLifetime(t, 20*time.Millisecond)
 	d := ingressDevice(t)
 	pc, err := d.ListenUDP(netip.AddrPortFrom(ingressLocal, ingressPort))
 	if err != nil {
@@ -395,9 +392,6 @@ func TestIngressExpiredKeyRetriesFragment(t *testing.T) {
 	close(d.sweepStop) // stop the sweeper so only Write sees the expiry
 	<-d.sweepDone
 	d.sweepStop = nil
-	d.reassembly.mu.Lock()
-	d.reassembly.limits.Lifetime = 20 * time.Millisecond
-	d.reassembly.mu.Unlock()
 	first, last := splitIngressIPv4(ingressUDP([]byte("abcdefgh12345678"), 41000, ingressPort), 16)
 	sendIngress(t, d, first)
 	time.Sleep(50 * time.Millisecond)
@@ -451,10 +445,8 @@ func TestIngressLaterOptionConflictDoesNotQuoteFirst(t *testing.T) {
 }
 
 func TestIngressNonlocalTimeoutHasNoFalseLocalICMP(t *testing.T) {
+	setReassemblyLifetime(t, 20*time.Millisecond)
 	d := ingressDevice(t)
-	d.reassembly.mu.Lock()
-	d.reassembly.limits.Lifetime = 20 * time.Millisecond
-	d.reassembly.mu.Unlock()
 	first, _ := splitIngressIPv4(ingressUDP([]byte("abcdefgh12345678"), 41000, ingressPort), 16)
 	copy(first[16:20], []byte{10, 1, 1, 99})
 	ipv4SetChecksum(first[:20])
@@ -474,10 +466,8 @@ func TestIngressTimeoutSuppressesNoninitialAndICMPError(t *testing.T) {
 		{name: "ICMP error", packet: reasmIPv4Fragment(1, 82, 0, true, 0, nil, []byte{3, 3, 0, 0, 0, 0, 0, 0})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			setReassemblyLifetime(t, 20*time.Millisecond)
 			d := ingressDevice(t)
-			d.reassembly.mu.Lock()
-			d.reassembly.limits.Lifetime = 20 * time.Millisecond
-			d.reassembly.mu.Unlock()
 			copy(tc.packet[16:20], ingressLocal.AsSlice())
 			ipv4SetChecksum(tc.packet[:20])
 			sendIngress(t, d, tc.packet)
@@ -494,6 +484,9 @@ func TestIngressTimeoutSuppressesNoninitialAndICMPError(t *testing.T) {
 func TestIngressBatchContinuesAfterRefusedFragment(t *testing.T) {
 	for _, name := range []string{"malformed", "capacity", "overlap", "option"} {
 		t.Run(name, func(t *testing.T) {
+			if name == "capacity" {
+				setReassemblyBytesToBaseCost(t)
+			}
 			d := ingressDevice(t)
 			pc, err := d.ListenUDP(netip.AddrPortFrom(ingressLocal, ingressPort))
 			if err != nil {
@@ -507,9 +500,7 @@ func TestIngressBatchContinuesAfterRefusedFragment(t *testing.T) {
 				bad[10] ^= 1 // checksum failure; no ICMP output obscures the result.
 			case "capacity":
 				// Leave space for metadata but none for a fragment payload.
-				d.reassembly.mu.Lock()
-				d.reassembly.limits.Bytes = d.reassembly.baseCost
-				d.reassembly.mu.Unlock()
+				// setReassemblyBytesToBaseCost が Device を作る前に置いた
 			case "overlap":
 				over := reasmIPv4Fragment(17, 4242, 8, false, 0, nil, []byte("xxxxxxxxxxxx"))
 				copy(over[12:20], bad[12:20])

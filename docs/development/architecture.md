@@ -18,7 +18,8 @@ wgft のコードは、[設計文書の索引](../design/README.ja.md)にある�
 | `internal/policy/goengine` | 6.3, 7a.9 | Admission Policy の IR から作る Go の評価器です。userspace モードの中継が、新しいフローと成立済みの UDP セッションのデータグラムをこの評価器で判定します。送信元ごとの同時フロー数と drop カウンタもこの評価器が数えます |
 | `internal/dataplane/userspace/relay` | 6.3, 7 | エージェントの netstack 上のリスナーと LAN 内 `target` への中継を持ちます。`vpsd` のユーザー空間モードも、公開ポートの待ち受けと netstack 越しのエージェントへの中継に同じパッケージを使います |
 | `internal/dataplane/userspace/tunnel` | 7 | エージェント側が wireguard-go と gVisor の netstack でユーザー空間に持つトンネルです。`internal/dataplane/userspace/utun`(vpsd 側)と対になります |
-| `internal/wgstack` | 7 | ユーザー空間モードのエージェントが gVisor の代わりに選べる wgft の netstack です。決定的な TCP の核と、それを wireguard-go の `tun.Device` として動かす Device を持ちます。標準ライブラリと `wireguard/tun` だけを import し、モジュールの中の package を import しません([エージェントの wgft の netstack](../design/userspace/wgstack.md)) |
+| `internal/ipv4frag` | 7 | IPv4 の断片の有限な再組み立ての表と、断片へ ICMP の誤りを返す条件を持ちます。`internal/nettun` と `internal/wgstack` が共有し、モジュールの中の何も import しません([再組み立ての表](../design/userspace/packet-validation.md#再組み立ての表)) |
+| `internal/wgstack` | 7 | ユーザー空間モードのエージェントが gVisor の代わりに選べる wgft の netstack です。決定的な TCP の核と、それを wireguard-go の `tun.Device` として動かす Device を持ちます。標準ライブラリと `wireguard/tun` を import し、モジュールの中では `internal/ipv4frag` だけを import します([エージェントの wgft の netstack](../design/userspace/wgstack.md)) |
 | `internal/tcpharness` | 7 | TCP の適合の試験の台本、試験の側の IPv4 と TCP の組み立てと解釈、実装を差し替える DUT の interface を持ちます。モジュールの中の何も import せず、テストだけが使います([wgstack の検証](../design/userspace/wgstack-verification.md#試験の置き場所と-dut)) |
 | `internal/tcpharness/gvisordut`、`internal/tcpharness/linuxdut`、`internal/tcpharness/wgstackdut` | 7 | 適合の試験を gVisor、Linux、wgstack に流す DUT です。`gvisordut` は `internal/nettun` の Device を本番と同じ方法で作り、`linuxdut` はラボの VM の TUN と Linux のソケットを使い、`wgstackdut` は手で進める時計を渡した `internal/wgstack` の Device を使います |
 | `internal/vpsd/stream` | 5.2 | エージェントごとの stream(WebSocket)を持ち、全体状態の配信とハートビートの記録を行います |
