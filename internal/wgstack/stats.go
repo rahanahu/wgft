@@ -64,6 +64,7 @@ type Stats struct {
 	DSACKsIn             uint64 // 並べ替えの窓を広げた D-SACK の往復
 	SpuriousUndos        uint64 // 再送が不要だったと分かり輻輳の窓を戻した回数
 	SpuriousRTOs         uint64 // F-RTO が不要と決めた RTO
+	AccountingFaults     uint64 // 会計の不整合で閉じた接続
 	HeldChunksInPool     int64  // 輪が持つ chunk の数(chunkPool の会計)
 	ReclaimableInBoost   int    // プロセスの boost の枠のうち使っている数
 }
@@ -158,6 +159,7 @@ func (s *stack) stats() Stats {
 	st.DSACKsIn = s.dsacksIn.Load()
 	st.SpuriousUndos = s.spuriousUndos.Load()
 	st.SpuriousRTOs = s.spuriousRTOs.Load()
+	st.AccountingFaults = s.accountingFaults.Load()
 	return st
 }
 

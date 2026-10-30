@@ -823,6 +823,10 @@ func (c *tcb) enterTimeWait(now int64) {
 	c.twEnter = now
 	c.persist = false
 	c.clearRetransTimers()
+	// TIME_WAIT の接続は ACK だけを送る。送り残しの probe と再送の印を残すと、build が何も作らないのに
+	// wantOutput が送るものがあると答え続ける
+	c.tlpProbe, c.tlpActive, c.tlpRetrans = false, false, false
+	c.fastRtx, c.probePending = false, false
 	c.arm(tmrClose, now+int64(twTimeout))
 }
 
@@ -937,6 +941,7 @@ func (c *tcb) toClosed(err error) {
 	}
 	c.s.out.unqueueConn(c.id)
 	c.fastRtx, c.probePending, c.ackNow = false, false, false
+	c.tlpProbe, c.tlpActive, c.tlpRetrans = false, false, false
 	// 送信の輪はもう使わない。受信の未読のデータは読ませるために残し、順序外のデータは捨てる
 	c.snd.release()
 	c.unaOff = c.tailOff

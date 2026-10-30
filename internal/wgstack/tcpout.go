@@ -11,7 +11,9 @@ func (c *tcb) poll(b []byte, now int64) int {
 		return 0
 	}
 	n := c.build(b, now)
-	if c.wantOutput() {
+	// 何も作らなかった項目は入れ直さない。入れ直すと stack.poll が同じ項目を回り続ける。送るものが後で
+	// できれば、入力、タイマー、書き込みが入れ直す
+	if n > 0 && c.wantOutput() {
 		c.s.out.queueConn(c.id)
 	}
 	return n
@@ -23,11 +25,11 @@ func (c *tcb) wantOutput() bool {
 	case stFree, stClosed:
 		return false
 	}
+	if c.state == stTimeWait {
+		return c.ackNow // TIME_WAIT の接続は ACK だけを送る(build と同じ)
+	}
 	if c.fastRtx || c.probePending || c.ackNow || c.tlpProbe {
 		return true
-	}
-	if c.state == stTimeWait {
-		return false
 	}
 	o := c.options(0, false)
 	pc := c.payloadCap(&o, c.pmtu)
@@ -169,6 +171,11 @@ func (c *tcb) build(b []byte, now int64) int {
 
 // emit は header と option を書き、送信の輪の offset off から n byte を中身にして packet を作る。
 func (c *tcb) emit(b []byte, seq uint32, flags uint8, o *optWriter, off uint64, n int, now int64) int {
+	if n > 0 && (off < c.unaOff || off+uint64(n) > c.tailOff) {
+		// 送信の輪の生きている範囲の外を読もうとした:会計の不整合なので接続を閉じる
+		c.accountingFault(now)
+		return 0
+	}
 	h := tcpHeader{tup: c.tup, seq: seq, ack: c.rcvNxt, flags: flags | flagACK, wnd: c.windowField()}
 	p := writeTCP(b, c.s.nextID(), h, o, n)
 	if n > 0 {
@@ -301,8 +308,15 @@ func (c *tcb) buildResend(b []byte, space int, now int64, p resendPick, force bo
 	}
 	off := c.pickOff(p)
 	n, fin := c.resendLen(i, off, pc)
+	if n == 0 && !fin {
+		return 0
+	}
 	r := c.recs.at(i)
 	seq := r.seq + off
+	if !c.sendRangeOK(seq, n) {
+		c.accountingFault(now)
+		return 0
+	}
 	length := n
 	flags := uint8(0)
 	if fin {

@@ -31,6 +31,7 @@ func (p *chunkPool) get() *chunk {
 }
 
 func (p *chunkPool) put(c *chunk) {
+	clear(c[:]) // 次に使う接続に前の中身を残さない
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.held--

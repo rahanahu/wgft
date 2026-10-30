@@ -385,6 +385,9 @@ func (c *tcb) nextResendUpTo(limit int) int {
 // resendLen は記録 i の中の off byte 目から再送する segment の中身の長さと、FIN を付けるかを返す。
 func (c *tcb) resendLen(i int, off uint32, payCap int) (uint32, bool) {
 	r := c.recs.at(i)
+	if off >= uint32(r.length) {
+		return 0, false // 位置が記録の外:送るものは無い
+	}
 	start := r.seq + off
 	end := r.seq + uint32(r.length)
 	var left uint32
