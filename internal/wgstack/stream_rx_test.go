@@ -218,7 +218,7 @@ func TestReceiveStreamIntegrity(t *testing.T) {
 	if streamSeedsFull() {
 		seeds = 2000
 	}
-	for seed := uint64(1); seed <= seeds; seed++ {
+	forSeeds(t, 1, seeds, func(t *testing.T, seed uint64) {
 		cfg := rxCfg{
 			seed:      seed,
 			ts:        seed%2 == 0,
@@ -232,8 +232,5 @@ func TestReceiveStreamIntegrity(t *testing.T) {
 			halfClose: seed%7 < 3,
 		}
 		runRx(t, cfg)
-		if t.Failed() {
-			return
-		}
-	}
+	})
 }

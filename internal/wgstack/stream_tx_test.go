@@ -282,7 +282,7 @@ func TestSendStreamIntegrity(t *testing.T) {
 	if streamSeedsFull() {
 		seeds = 600
 	}
-	for seed := uint64(1); seed <= seeds; seed++ {
+	forSeeds(t, 1, seeds, func(t *testing.T, seed uint64) {
 		ws := []int{-1, 0, 2, 7, 14}[seed%5]
 		cfg := txCfg{
 			seed:    seed,
@@ -297,10 +297,7 @@ func TestSendStreamIntegrity(t *testing.T) {
 			boost:   seed%2 == 1,
 		}
 		runTx(t, cfg)
-		if t.Failed() {
-			return
-		}
-	}
+	})
 }
 
 // TestSendStreamWithLyingSACK は、範囲の外や逆向きの SACK の block を混ぜ、順序外のデータを捨てる相手に
@@ -310,7 +307,7 @@ func TestSendStreamWithLyingSACK(t *testing.T) {
 	if streamSeedsFull() {
 		seeds = 300
 	}
-	for seed := uint64(1); seed <= seeds; seed++ {
+	forSeeds(t, 1, seeds, func(t *testing.T, seed uint64) {
 		cfg := txCfg{
 			seed:   seed,
 			ts:     seed%2 == 0,
@@ -324,8 +321,5 @@ func TestSendStreamWithLyingSACK(t *testing.T) {
 			lie:    1 + int(seed%2),
 		}
 		runTx(t, cfg)
-		if t.Failed() {
-			return
-		}
-	}
+	})
 }
