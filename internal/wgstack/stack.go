@@ -128,16 +128,16 @@ type counters struct {
 	boostReclaimed atomic.Uint64
 
 	// 送り手の事象(wgstack-performance.md の「安く確かめる手順」)
-	rtos, rtosBackedOff, rtosShortOfDupThresh       atomic.Uint64
-	fastRecoveries, partialAcks                     atomic.Uint64
-	retrans                                         [numRtxCauses]atomic.Uint64
-	dupAcksIn, acksDelayed, acksImmediate           atomic.Uint64
-	sackReneging                                    atomic.Uint64
-	rackLost, reoTimeouts, tlpProbes, tlpRecoveries atomic.Uint64
-	hystartCSS, hystartExits                        atomic.Uint64
-	dsacksIn, spuriousUndos, spuriousRTOs           atomic.Uint64
+	rtos, rtosBackedOff, rtosShortOfDupThresh               atomic.Uint64
+	fastRecoveries, partialAcks                             atomic.Uint64
+	retrans                                                 [numRtxCauses]atomic.Uint64
+	dupAcksIn, acksDelayed, acksImmediate                   atomic.Uint64
+	sackReneging                                            atomic.Uint64
+	rackLost, reoTimeouts, tlpProbes, tlpRecoveries         atomic.Uint64
+	hystartCSS, hystartExits                                atomic.Uint64
+	dsacksIn, spuriousUndos, spuriousRTOs, accountingFaults atomic.Uint64
 
-	mssGate, synGate, acceptGate, twGate, ctlGate, oooGate gate
+	mssGate, synGate, acceptGate, twGate, ctlGate, oooGate, faultGate gate
 }
 
 // gate は lograte.Gate と同じく 1 分に 1 回までの門だが、核の時刻で判定する。
@@ -505,9 +505,14 @@ func (s *stack) nextDeadline() int64 {
 func (s *stack) poll(b []byte, now int64) int {
 	o := &s.out
 	quantum := s.mtu
-	// 取り出した項目が何も作らなければ次を見る。項目は取り出すと list から外れるので、この繰り返しは
-	// 有限である
-	for {
+	// 取り出した項目が何も作らなければ次を見る。項目は取り出すと list から外れ、何も作らない項目は入れ直さない
+	// ので、この繰り返しは有限である。守りを重ねるため、list に入りうる項目の数を超えて何も作らなければ、
+	// 入れ直した項目があっても諦めて 0 を返す
+	limit := len(s.conns) + len(s.syn.rows) + len(s.tw.rows) + numClasses
+	for tries := 0; ; tries++ {
+		if tries > limit {
+			return 0
+		}
 		o.mu.Lock()
 		cls := -1
 		for range numClasses {

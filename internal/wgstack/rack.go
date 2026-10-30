@@ -64,6 +64,9 @@ func (c *tcb) listAppend(l *recList, i int, r *record, flag uint8) {
 
 func (c *tcb) listRemove(l *recList, i int, r *record, flag uint8) {
 	a := c.recAbs(i)
+	if l == &c.lostQ && l.head == a {
+		c.qOff, c.qMid = 0, false // 分けて送っていた先頭の記録が待ち行列を出た
+	}
 	pa, na := a+uint32(r.prev), a+uint32(r.next)
 	switch {
 	case r.prev != 0 && r.next != 0:
