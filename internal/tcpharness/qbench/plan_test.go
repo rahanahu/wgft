@@ -804,15 +804,33 @@ func printRun(r Run) {
 		sort.Slice(l, func(i, j int) bool { return l[i] < l[j] })
 		p99 = dur(quantile(l, 0.99))
 	}
-	fmt.Printf("QBENCH-RUN engine=%s cell=%s seed=%d bytes=%d mbps=%.2f verified=%v recovery=%s rto=%s stall=%s samples=%d p99=%s lost=%d retrans=%d/%d qdrop=%d err=%q\n",
-		r.Engine, r.Cell, r.Seed, r.Bytes, r.Mbps, r.Verified, dur(r.Recovery), dur(r.RTO),
-		r.Stall.Round(time.Millisecond), len(r.Lat), p99, r.Lost, r.Retrans, r.DataPkts, r.QDrops, r.Err)
+	stats := ""
 	if r.Stats != "-" {
-		fmt.Printf("QBENCH-STATS engine=%s cell=%s seed=%d %s\n", r.Engine, r.Cell, r.Seed, r.Stats)
+		stats = fmt.Sprintf("QBENCH-STATS engine=%s cell=%s seed=%d %s\n", r.Engine, r.Cell, r.Seed, r.Stats)
 	}
+	// one Printf, so the lines of runs measured at once do not interleave
+	fmt.Printf("QBENCH-RUN engine=%s cell=%s seed=%d bytes=%d mbps=%.2f verified=%v recovery=%s rto=%s stall=%s samples=%d p99=%s lost=%d retrans=%d/%d qdrop=%d err=%q\n%s",
+		r.Engine, r.Cell, r.Seed, r.Bytes, r.Mbps, r.Verified, dur(r.Recovery), dur(r.RTO),
+		r.Stall.Round(time.Millisecond), len(r.Lat), p99, r.Lost, r.Retrans, r.DataPkts, r.QDrops, r.Err, stats)
 }
 
-// measure runs every engine runs times in c, with the same seeds for every engine.
+// hostLoad is the machine's 1-minute load average and the CPU time the hypervisor took from
+// this VM, its steal time, so far: verdicts need a quiet host, and the gate prints both per cell.
+// Off Linux it returns "-".
+func hostLoad() string {
+	la, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return "-"
+	}
+	steal := "-"
+	if st, err := os.ReadFile("/proc/stat"); err == nil {
+		if f := strings.Fields(strings.SplitN(string(st), "\n", 2)[0]); len(f) > 8 && f[0] == "cpu" {
+			steal = f[8] // in USER_HZ ticks
+		}
+	}
+	return fmt.Sprintf("load1=%s steal_ticks=%s", strings.Fields(string(la))[0], steal)
+}
+
 // cellSeed is run i's seed in a cell. It depends on the cell's name, not its place in the list,
 // so a cell measured alone with QBENCH_CELLS gets the seeds it has in the whole matrix.
 func cellSeed(name string, i int) int64 {
@@ -821,7 +839,8 @@ func cellSeed(name string, i int) int64 {
 	return int64(i+1)*7919 + int64(h.Sum32()%100000)*131
 }
 
-// par runs are measured at once. Each run has its own rig, link and, for Linux, network
+// measure runs every engine runs times in c, with the same seeds for every engine. par runs are
+// measured at once. Each run has its own rig, link and, for Linux, network
 // namespaces, so they share nothing but the machine; 計測の計画 records the check that medians do
 // not move with the number.
 func measure(t *testing.T, c Cell, ci int, engines []string, runs, from, par int) map[string][]Run {
@@ -1000,7 +1019,7 @@ func TestQBenchGate(t *testing.T) {
 	where := pinLinux(t, engines)
 	runs := envInt("QBENCH_RUNS", 9)
 	par := envInt("QBENCH_PARALLEL", gatePar())
-	fmt.Printf("QBENCH-META mode=gate parallel=%d cpus=%d\n", par, runtime.NumCPU())
+	fmt.Printf("QBENCH-META mode=gate parallel=%d cpus=%d %s\n", par, runtime.NumCPU(), hostLoad())
 	prov := provenance(where)
 	if os.Getenv("QBENCH_WRITE_REF") != "" {
 		if prov.Commit == "" {
@@ -1037,6 +1056,7 @@ func TestQBenchGate(t *testing.T) {
 	ref.Measured, ref.Where, ref.BaseRuns = prov.Measured, where, runs
 	var table []string
 	for ci, c := range cells {
+		fmt.Printf("QBENCH-HOST cell=%s %s\n", c.Name, hostLoad())
 		res := measure(t, c, ci, engines, runs, 0, par)
 		sum := func() map[string]Summary {
 			m := map[string]Summary{}
