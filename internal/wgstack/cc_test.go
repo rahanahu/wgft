@@ -186,3 +186,154 @@ func TestCubicIdleShiftStaysBehindNow(t *testing.T) {
 		t.Fatalf("epoch %v is %v after now", time.Duration(k.epoch), time.Duration(k.epoch-now))
 	}
 }
+
+// TestRecoveryRightAfterRecoveryReducesTheWindow は、回復を終える ACK がそのまま次の回復に入る場合に、輻輳の
+// 事象が窓を下げることを確かめる(RFC 5681 と RFC 9438 4.6 の乗算の減少、wgstack-performance.md の「CUBIC」)。
+// 最初の回復の間に回復の点より先へ送ったデータが失われると、その穴より先の SACK 済みのデータは累積で確認されない
+// まま SND.MAX - SND.UNA に残る。この量の β 倍を ssthresh にすると、ssthresh が輻輳の窓より大きくなり、損失の
+// たびに送る量が増えていた。RecoverFS は RFC 9937 6.1 のとおり、回復の前に SACK 済みの byte を含まない。
+func TestRecoveryRightAfterRecoveryReducesTheWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cc   CongestionControl
+		beta float64
+	}{{"cubic", CongestionCubic, cubicBeta}, {"newreno", CongestionNewReno, 0.5}} {
+		t.Run(tc.name, func(t *testing.T) { testRecoveryAfterRecovery(t, tc.cc, tc.beta) })
+		t.Run(tc.name+"_floor", func(t *testing.T) {
+			// 窓が 2 segment なら、β 倍は 2 SMSS の下限を下回るので ssthresh は下限になる
+			c := ccConn(t, tc.cc)
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			mss := uint32(c.segMSS())
+			c.cwnd = 2 * mss
+			c.sndMax = c.sndUna + 40*mss
+			if ss := c.ccFor().lossThresh(c); ss != 2*mss {
+				t.Fatalf("ssthresh %d with a window of 2 segments, want the floor %d", ss, 2*mss)
+			}
+		})
+	}
+}
+
+func testRecoveryAfterRecovery(t *testing.T, cc CongestionControl, beta float64) {
+	n, c, q, outs := sackConn(t, 150)
+	cs := c.c
+	cs.s.ccPolicy = cc
+	if len(outs) != 10 {
+		t.Fatalf("IW10 sent %d", len(outs))
+	}
+	mss := uint32(cs.segMSS())
+	// 先頭の segment を失い、残りの 9 つを SACK で知らせる:ssthresh が 10 segment の β 倍の回復に入る
+	q.deliver(outs, func(i int, o out) bool { return i == 0 })
+	if !cs.inRecovery {
+		t.Fatal("not in recovery")
+	}
+	head, recover := outs[0].seg.seq, cs.recover
+	// 先頭の再送を止めておく間に、回復の点より先の最初の新しい segment を失い、ほかはすべて届けて SACK で
+	// 知らせる。PRR は SACK された分だけ新しいデータを送るので、穴の先の SACK 済みのデータが積もる
+	var held []out
+	var lostSeq uint32
+	lostSet := false
+	for range 6 {
+		n.advance(10 * time.Millisecond)
+		for _, o := range n.drain() {
+			if len(o.seg.payload) == 0 {
+				continue
+			}
+			switch s := o.seg.seq; {
+			case s == head:
+				held = append(held, o)
+			case !lostSet && seqGE(s, recover):
+				lostSeq, lostSet = s, true
+			case lostSet && s == lostSeq:
+				// 失った segment の再送も失う
+			default:
+				q.recv(o)
+				q.ack()
+			}
+		}
+	}
+	if !lostSet || len(held) == 0 || !cs.inRecovery {
+		t.Fatalf("setup: lost new segment %v, held %d, in recovery %v", lostSet, len(held), cs.inRecovery)
+	}
+	ss := cs.ssthresh
+	priorUna, priorMax, priorSacked := cs.sndUna, cs.sndMax, cs.sacked
+	// 先頭の再送を届ける。累積の確認は回復の点を越えて失った segment で止まり、回復を終えた同じ ACK で
+	// 次の回復に入る
+	q.recv(held[0])
+	q.ack()
+	flight := cs.sndMax - cs.sndUna
+	t.Logf("old ssthresh %d segments; at the new recovery: flight %d segments, sacked %d, ssthresh %d, cwnd %d",
+		ss/mss, flight/mss, cs.sacked/mss, cs.ssthresh/mss, cs.cwnd/mss)
+	if !cs.inRecovery || cs.recover == recover {
+		t.Fatalf("no new recovery: in recovery %v, recover %d", cs.inRecovery, cs.recover)
+	}
+	if flight <= ss {
+		t.Fatalf("setup: flight %d is not above the window %d at the second loss", flight, ss)
+	}
+	// 回復を終えた時の窓は ssthresh である。次の輻輳の事象は、その窓を β 倍に下げなければならない
+	if want := uint32(float64(ss) * beta); cs.ssthresh > want {
+		t.Errorf("ssthresh %d after a second loss, want at most %d: beta times the window %d, not the flight %d", cs.ssthresh, want, ss, flight)
+	}
+	if cs.cwnd > ss {
+		t.Errorf("cwnd %d above the window %d at the loss", cs.cwnd, ss)
+	}
+	// RFC 9937 6.1:RecoverFS は ACK の前の送り残しから、ACK の前に SACK 済みの byte を引いた量である
+	if want := priorMax - priorUna - priorSacked; cs.recoverFS != want {
+		t.Errorf("RecoverFS %d, want %d: the flight before the ACK less the %d bytes SACKed before recovery", cs.recoverFS, want, priorSacked)
+	}
+}
+
+// TestRTODuringRecoveryKeepsTheRecoveryWindow は、SACK による回復の中の RTO が、PRR の途中の輻輳の窓ではなく
+// 回復が目指す ssthresh を β 倍することを確かめる(wgstack-performance.md の「CUBIC」)。まとまった損失の後は
+// pipe がほぼ 0 なので、PRR の窓は数 segment で、それを β 倍すると ssthresh が 2 SMSS の下限まで落ちる。
+// RTO の後の回復の中で、新しい ACK が後退を 0 に戻した後の RTO も、slow start の途中の窓ではなく ssthresh を使う。
+func TestRTODuringRecoveryKeepsTheRecoveryWindow(t *testing.T) {
+	n, c, q, outs := sackConn(t, 150)
+	cs := c.c
+	if len(outs) != 10 {
+		t.Fatalf("IW10 sent %d", len(outs))
+	}
+	// 先頭の 7 つを失い、残りの 3 つを SACK で知らせる:回復に入り、pipe はほぼ 0 になる
+	q.deliver(outs, func(i int, o out) bool { return i < 7 })
+	if !cs.inRecovery {
+		t.Fatal("not in recovery")
+	}
+	ss0, flight0 := cs.ssthresh, cs.sndMax-cs.sndUna
+	n.drain() // 再送はすべて失う
+	t.Logf("in recovery: ssthresh %d, PRR cwnd %d, flight %d", ss0, cs.cwnd, flight0)
+	n.advance(time.Second) // RTO
+	if cs.s.rtos.Load() != 1 {
+		t.Fatalf("RTOs %d after a second", cs.s.rtos.Load())
+	}
+	want := uint32(float64(min(ss0, flight0)) * cubicBeta)
+	if cs.ssthresh != want {
+		t.Fatalf("ssthresh %d after an RTO in recovery, want %d: beta times the recovery's ssthresh %d", cs.ssthresh, want, ss0)
+	}
+	// RTO の後の回復の中で、先頭の再送だけが届く。累積の確認が進んで後退は 0 に戻るが、SND.UNA は RTO の時の
+	// SND.MAX に届かない
+	ss1 := cs.ssthresh
+	var head out
+	for _, o := range n.drain() {
+		if o.seg.seq == outs[0].seg.seq && len(o.seg.payload) > 0 {
+			head = o
+		}
+	}
+	if len(head.seg.payload) == 0 {
+		t.Fatal("no retransmission of the head after the RTO")
+	}
+	q.recv(head)
+	q.ack()
+	if cs.backoff != 0 || !cs.rtoEpisode || !seqLT(cs.sndUna, cs.recover) {
+		t.Fatalf("setup: backoff %d, RTO episode %v", cs.backoff, cs.rtoEpisode)
+	}
+	flight1 := cs.sndMax - cs.sndUna
+	n.drain()
+	n.advance(time.Second) // 2 回目の RTO。後退は 0 から数える
+	if cs.s.rtos.Load() < 2 {
+		t.Fatalf("RTOs %d", cs.s.rtos.Load())
+	}
+	want = max(uint32(float64(min(ss1, flight1))*cubicBeta), 2*uint32(cs.segMSS()))
+	if cs.ssthresh != want {
+		t.Fatalf("ssthresh %d after an RTO in the RTO's recovery, want %d: beta times the ssthresh %d", cs.ssthresh, want, ss1)
+	}
+}

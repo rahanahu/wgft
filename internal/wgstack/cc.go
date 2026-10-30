@@ -41,7 +41,7 @@ func (newRenoCC) congAvoid(c *tcb, acked uint32, now int64) {
 }
 
 func (newRenoCC) lossThresh(c *tcb) uint32 {
-	return max((c.sndMax-c.sndUna)/2, 2*uint32(c.segMSS()))
+	return max(c.lossBase()/2, 2*uint32(c.segMSS()))
 }
 
 func (newRenoCC) onRTO(c *tcb)                   { c.caAcc = 0 }
@@ -104,7 +104,7 @@ func (k *cubicCC) congAvoid(c *tcb, acked uint32, now int64) {
 	}
 }
 
-// lossThresh は RFC 9438 4.6 と 4.7(fast convergence)。ssthresh は送り残しの β 倍である。
+// lossThresh は RFC 9438 4.6 と 4.7(fast convergence)。ssthresh は lossBase の β 倍である。
 func (k *cubicCC) lossThresh(c *tcb) uint32 {
 	mss := float64(c.segMSS())
 	cwnd := float64(c.cwnd) / mss
@@ -115,7 +115,7 @@ func (k *cubicCC) lossThresh(c *tcb) uint32 {
 	}
 	k.cwndPrior = cwnd
 	k.epoch, k.frac = 0, 0
-	return max(uint32(float64(c.sndMax-c.sndUna)*cubicBeta), 2*uint32(c.segMSS()))
+	return max(uint32(float64(c.lossBase())*cubicBeta), 2*uint32(c.segMSS()))
 }
 
 // onRTO は Linux の bictcp_reset と同じく、RTO の後の epoch を 3 次の式の原点から始め直す。
@@ -131,6 +131,19 @@ func (k *cubicCC) onIdle(c *tcb, idle, now int64) {
 	if k.epoch != 0 && idle > 0 {
 		k.epoch = min(k.epoch+idle, now)
 	}
+}
+
+// lossBase は輻輳の事象で β 倍する量で、送り残し(RFC 5681 の FlightSize)と送り手の窓の小さい方である
+// (wgstack-performance.md の「CUBIC」)。RFC 5681 は ssthresh を FlightSize の式の値「以下」にすることを求める
+// ので、小さい方を使っても規格の内側にある。wgstack は pipe で送る量を抑えるので、穴があると送り残しは穴の先の
+// SACK 済みのデータを含み、窓より大きくなる。送り手の窓は、回復の外では輻輳の窓である。回復の中と RTO の後の
+// 回復の中では、輻輳の窓は PRR か slow start の途中の値なので、回復が目指す ssthresh を使う。
+func (c *tcb) lossBase() uint32 {
+	w := c.cwnd
+	if c.inRecovery || (c.rtoEpisode && seqLT(c.sndUna, c.recover)) {
+		w = c.ssthresh
+	}
+	return min(c.sndMax-c.sndUna, w)
 }
 
 // ccFor は接続 c の輻輳の制御を返す。
