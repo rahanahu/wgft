@@ -4,6 +4,7 @@ package qbench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -41,6 +42,7 @@ func newLinux() (*DUT, error) {
 		Close:    func() { rs.stop(); d.Close() },
 		OnAccept: rs.start,
 		RTOAt:    rs.at,
+		RTOErr:   rs.lastErr,
 	}, nil
 }
 
@@ -84,7 +86,10 @@ func (r *rtoSampler) start(c net.Conn) error {
 			var info *unix.TCPInfo
 			var gerr error
 			raw.Control(func(fd uintptr) { info, gerr = unix.GetsockoptTCPInfo(int(fd), unix.SOL_TCP, unix.TCP_INFO) })
-			if info == nil {
+			if info == nil || info.Rto == 0 {
+				if gerr == nil {
+					gerr = errors.New("TCP_INFO reports an RTO of 0")
+				}
 				r.mu.Lock()
 				r.err = gerr
 				r.mu.Unlock()
@@ -107,6 +112,13 @@ func (r *rtoSampler) stop() {
 			close(r.done)
 		}
 	})
+}
+
+// lastErr is the last error a TCP_INFO read gave, or nil.
+func (r *rtoSampler) lastErr() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err
 }
 
 func (r *rtoSampler) at(t time.Time) time.Duration {

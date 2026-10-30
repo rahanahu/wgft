@@ -10,6 +10,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -26,7 +27,11 @@ import (
 //
 //	go test -tags qbench -run TestQBenchRoutine -v ./internal/tcpharness/qbench
 //	go test -c -tags qbench -o bin/qbench.test ./internal/tcpharness/qbench
-//	lab VM, as root: QBENCH_WRITE_REF=/var/tmp/qref/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//	lab VM, as root: QBENCH_COMMIT=<commit> QBENCH_WRITE_REF=/var/tmp/qref/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//
+// Writing the reference needs the commit: the test reads it with git, which a lab VM's share of a
+// worktree does not have, so pass QBENCH_COMMIT from the host, for example
+// "$(git rev-parse HEAD)$(git diff --quiet HEAD || echo -dirty)".
 //
 // The reference file is written from inside the user namespace, so it needs a directory without
 // the sticky bit that the namespace's user can write, such as one made with mkdir -m 777.
@@ -224,9 +229,12 @@ func runCell(engine string, c Cell, seed int64) (r Run) {
 	}
 	if c.DUTSend && !oe.IsZero() && rig.D.RTOAt != nil {
 		r.RTO = rig.D.RTOAt(oe)
-		if r.RTO < 0 && engine == "linux" && r.Err == "" {
+		if r.RTO <= 0 && engine == "linux" && r.Err == "" {
 			// the judgment needs Linux's RTO; a run without it must not pass as measured
 			r.Err = "no TCP_INFO RTO sample before the outage's end"
+			if rig.D.RTOErr != nil && rig.D.RTOErr() != nil {
+				r.Err += "; the last TCP_INFO read: " + rig.D.RTOErr().Error()
+			}
 		}
 	}
 	st := rig.L.Stats(impair(c).DataDir)
@@ -505,9 +513,27 @@ func provenance(where string) Provenance {
 		}
 	}
 	if p.Commit == "" {
-		p.Commit = "unknown; set QBENCH_COMMIT"
+		p.Commit = gitCommit()
 	}
 	return p
+}
+
+// gitCommit is the checked-out commit of the tree the test runs in, with "-dirty" when the tree
+// has changes, or "" when git cannot tell.
+func gitCommit() string {
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	c := strings.TrimSpace(string(out))
+	st, err := exec.Command("git", "status", "--porcelain", "--untracked-files=no").Output()
+	if err != nil {
+		return ""
+	}
+	if len(bytes.TrimSpace(st)) > 0 {
+		c += "-dirty"
+	}
+	return c
 }
 
 // Verdict is the judgment of one cell by 判定の規則.
@@ -523,6 +549,15 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 	}
 	if !haveL {
 		return Verdict{Rule: "-", Result: "no Linux reference"}
+	}
+	// wgstack's own failures decide the cell whatever the spread
+	switch {
+	case wg.OK == 0:
+		return Verdict{Rule: "-", Result: fmt.Sprintf("FAIL: none of %d wgstack runs finished", wg.Runs)}
+	case !c.Thin && !c.Outage && wg.Mbps <= 0:
+		return Verdict{Rule: "-", Result: "FAIL: wgstack's median is 0 Mbit/s"}
+	case c.Thin && !c.Outage && wg.Lost > 0:
+		return Verdict{Rule: "-", Result: fmt.Sprintf("FAIL: wgstack lost %d thin messages without an outage", wg.Lost)}
 	}
 	var v Verdict
 	switch {
@@ -709,6 +744,14 @@ func TestQBenchGate(t *testing.T) {
 	runs := envInt("QBENCH_RUNS", 9)
 	cells := cellFilter(gateCells())
 	prov := provenance(where)
+	if os.Getenv("QBENCH_WRITE_REF") != "" {
+		if prov.Commit == "" {
+			t.Fatalf("the commit is unknown: run in the git tree or set QBENCH_COMMIT")
+		}
+		if strings.HasSuffix(prov.Commit, "-dirty") {
+			t.Logf("WARNING: the tree has uncommitted changes; the reference records %s", prov.Commit)
+		}
+	}
 	ref := &Reference{Cells: map[string]map[string]Summary{}, CellMeta: map[string]Provenance{}}
 	if path := os.Getenv("QBENCH_WRITE_REF"); path != "" {
 		// fail now rather than after the runs if the file cannot be written
@@ -760,11 +803,17 @@ func TestQBenchGate(t *testing.T) {
 			v = judge(c, m["wgstack"], gv, lx, haveG, haveL)
 			v.Result += " after doubling"
 		}
-		ref.Cells[c.Name] = map[string]Summary{}
-		ref.CellMeta[c.Name] = prov
-		for _, e := range engines {
-			if e != "wgstack" {
-				ref.Cells[c.Name][e] = m[e]
+		// a reference that failed or spreads too far is not stored; the cell keeps what it had
+		if bad := unstorable(engines, m); bad != "" {
+			fmt.Printf("QBENCH-WARN cell=%s reference not stored: %s\n", c.Name, bad)
+			t.Logf("WARNING: %s: reference not stored: %s", c.Name, bad)
+		} else {
+			ref.Cells[c.Name] = map[string]Summary{}
+			ref.CellMeta[c.Name] = prov
+			for _, e := range engines {
+				if e != "wgstack" {
+					ref.Cells[c.Name][e] = m[e]
+				}
 			}
 		}
 		table = append(table, row(c, m["wgstack"], gv, lx, v))
@@ -777,6 +826,24 @@ func TestQBenchGate(t *testing.T) {
 		}
 		fmt.Printf("QBENCH-REF written to %s\n", path)
 	}
+}
+
+// unstorable says why the gVisor and Linux summaries of a cell must not become the reference, or
+// returns "" when they may.
+func unstorable(engines []string, m map[string]Summary) string {
+	for _, e := range engines {
+		if e == "wgstack" {
+			continue
+		}
+		s := m[e]
+		switch {
+		case s.OK < s.Runs:
+			return fmt.Sprintf("%s: %d of %d runs failed", e, s.Runs-s.OK, s.Runs)
+		case s.Spread > 2:
+			return fmt.Sprintf("%s: max/min %.2f is above 2", e, s.Spread)
+		}
+	}
+	return ""
 }
 
 func row(c Cell, wg, gv, lx Summary, v Verdict) string {
@@ -836,6 +903,25 @@ func TestJudgeRules(t *testing.T) {
 	s := summarize(thin, []Run{{Lat: lat, Lost: 1}})
 	if s.Lost != 1 || s.MaxMS != 5000 {
 		t.Errorf("an undelivered message: lost %d, max %v ms; want 1 and 5000", s.Lost, s.MaxMS)
+	}
+
+	bulkC := Cell{Name: "send/loss0%", DUTSend: true}
+	lxBulk := Summary{Runs: 1, OK: 1, Mbps: 10}
+	if v := judge(bulkC, Summary{Runs: 5}, Summary{}, lxBulk, false, true); !strings.HasPrefix(v.Result, "FAIL") {
+		t.Errorf("no wgstack run finished: %q, want FAIL", v.Result)
+	}
+	if v := judge(bulkC, Summary{Runs: 5, OK: 5, Spread: spreadInf}, Summary{}, lxBulk, false, true); !strings.HasPrefix(v.Result, "FAIL") {
+		t.Errorf("wgstack at 0 Mbit/s: %q, want FAIL", v.Result)
+	}
+	lossy := Summary{Runs: 5, OK: 5, P99MS: 10, Lost: 1, Spread: 1}
+	if v := judge(thin, lossy, Summary{}, Summary{Runs: 5, OK: 5, P99MS: 100, Spread: 1}, false, true); !strings.HasPrefix(v.Result, "FAIL") {
+		t.Errorf("a lost thin message without an outage: %q, want FAIL", v.Result)
+	}
+	if bad := unstorable([]string{"wgstack", "linux"}, map[string]Summary{"linux": {Runs: 9, OK: 8}}); bad == "" {
+		t.Error("a Linux summary with a failed run would be stored")
+	}
+	if bad := unstorable([]string{"gvisor"}, map[string]Summary{"gvisor": {Runs: 9, OK: 9, Spread: 2.5}}); bad == "" {
+		t.Error("a gVisor summary spreading above 2 would be stored")
 	}
 
 	nj := Cell{Name: "recv/outage2s", Outage: true, NotJudged: clientSends}

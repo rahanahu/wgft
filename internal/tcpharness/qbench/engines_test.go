@@ -45,6 +45,7 @@ type DUT struct {
 	// use at a moment, backoff included, or a negative value when the engine cannot tell.
 	OnAccept func(net.Conn) error
 	RTOAt    func(at time.Time) time.Duration
+	RTOErr   func() error // the last error reading the RTO, if any
 }
 
 func newWgstack() (*DUT, error) {
