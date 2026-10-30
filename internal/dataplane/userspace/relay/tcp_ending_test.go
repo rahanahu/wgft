@@ -64,9 +64,9 @@ type endingRig struct {
 	agent    net.Conn
 }
 
-func newEndingRig(t *testing.T) *endingRig {
+func newEndingRig(t *testing.T, engine string) *endingRig {
 	t.Helper()
-	clientDev, agentNet := netstackPair(t)
+	clientDev, agentNet := netstackPair(t, engine)
 	const agentPort = 7006
 	ln, err := agentNet.dev.ListenTCP(netip.AddrPortFrom(cutAgentAddr, agentPort))
 	if err != nil {
@@ -229,6 +229,10 @@ func wantObs(t *testing.T, side string, got, want endObs) {
 // Besides the relay's own cuts, only a reset from the public client reaches the agent as a
 // reset; the client's side is closed normally in every case.
 func TestTCPEndingByCauseAndDirection(t *testing.T) {
+	forEachAgentEngine(t, testTCPEndingByCauseAndDirection)
+}
+
+func testTCPEndingByCauseAndDirection(t *testing.T, engine string) {
 	cases := []struct {
 		name string
 		run  func(t *testing.T, r *endingRig)
@@ -303,7 +307,7 @@ func TestTCPEndingByCauseAndDirection(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.run(t, newEndingRig(t))
+			tc.run(t, newEndingRig(t, engine))
 		})
 	}
 }
@@ -317,9 +321,9 @@ type agentEndingRig struct {
 	target net.Conn
 }
 
-func newAgentEndingRig(t *testing.T) *agentEndingRig {
+func newAgentEndingRig(t *testing.T, engine string) *agentEndingRig {
 	t.Helper()
-	serverDev, agentNet := netstackPair(t)
+	serverDev, agentNet := netstackPair(t, engine)
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -408,8 +412,12 @@ func newAgentEndingRig(t *testing.T) *agentEndingRig {
 // server is a half-close toward the target, and a reset from the server ends the flow at once and
 // closes the target's connection normally, so the target sees EOF.
 func TestTCPAgentEndingFromTheServer(t *testing.T) {
+	forEachAgentEngine(t, testTCPAgentEndingFromTheServer)
+}
+
+func testTCPAgentEndingFromTheServer(t *testing.T, engine string) {
 	t.Run("server close", func(t *testing.T) {
-		r := newAgentEndingRig(t)
+		r := newAgentEndingRig(t, engine)
 		r.server.Close()
 		wantObs(t, "target", observe(r.target, 5*time.Second), obsEOF)
 		time.Sleep(heldFor)
@@ -418,7 +426,7 @@ func TestTCPAgentEndingFromTheServer(t *testing.T) {
 		r.wantReturned(t, "after the target closed too")
 	})
 	t.Run("server reset", func(t *testing.T) {
-		r := newAgentEndingRig(t)
+		r := newAgentEndingRig(t, engine)
 		r.server.(aborter).Abort()
 		r.wantReturned(t, "after the server's reset, while the target stays open")
 		wantObs(t, "target", observe(r.target, 5*time.Second), obsEOF)

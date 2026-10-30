@@ -51,6 +51,14 @@ import (
 // Windows では wgbind.New() が conn.NewStdNetBind() を使う (wgbind/new_windows.go)。wireguard-go の既定の
 // WinRingBind では、このテストのエージェント側が受信を止めた (docs/design.md の改訂の記録)。
 func TestAgentServerInProcessForwarding(t *testing.T) {
+	// エージェントの netstack の両方の実装で流す(設計文書 wgstack.md の「退行の確認」)。Windows と macOS の
+	// CI でも、本物の wireguard-go と UDP の上で wgstack が動く
+	for _, netstack := range []string{tunnel.NetstackGVisor, tunnel.NetstackWgstack} {
+		t.Run(netstack, func(t *testing.T) { testAgentServerInProcessForwarding(t, netstack) })
+	}
+}
+
+func testAgentServerInProcessForwarding(t *testing.T, netstack string) {
 	quiet := func(string, ...any) {}
 
 	// 1. echo の対象 (TCP と UDP)。エージェントの中継が実際に接続する宛先で、実機の LAN の機器の
@@ -115,7 +123,7 @@ func TestAgentServerInProcessForwarding(t *testing.T) {
 		{ID: "tcp1", Proto: proto.TCP, ListenPort: proto.PortRange{Lo: tcpPort, Hi: tcpPort}, Target: targetTCPAddr, Enabled: true},
 		{ID: "udp1", Proto: proto.UDP, ListenPort: proto.PortRange{Lo: udpPort, Hi: udpPort}, Target: targetUDPAddr, Enabled: true},
 	}
-	agentTun, agentCancel := newAgentTunnel(t, agentPriv, srvPriv.PublicKey(), wgPort, agentAddr, serverAddr)
+	agentTun, agentCancel := newAgentTunnel(t, agentPriv, srvPriv.PublicKey(), wgPort, agentAddr, serverAddr, netstack)
 	agentRelay := relay.New(agentTun, relay.Options{Logf: quiet})
 	agentRelay.Apply(relay.DesiredFromRules(agentRules))
 
@@ -138,7 +146,7 @@ func TestAgentServerInProcessForwarding(t *testing.T) {
 
 	checkUDPRoundTripFails(t, udpAddr, 2*time.Second)
 
-	agentTun2, agentCancel2 := newAgentTunnel(t, agentPriv, srvPriv.PublicKey(), wgPort, agentAddr, serverAddr)
+	agentTun2, agentCancel2 := newAgentTunnel(t, agentPriv, srvPriv.PublicKey(), wgPort, agentAddr, serverAddr, netstack)
 	agentRelay2 := relay.New(agentTun2, relay.Options{Logf: quiet})
 	agentRelay2.Apply(relay.DesiredFromRules(agentRules))
 
@@ -205,7 +213,7 @@ func newServerTunnel(t *testing.T, priv wgtypes.Key, addr netip.Addr) (*Tunnel, 
 // newAgentTunnel はエージェント側のトンネルを立てて Run を回す (internal/agent/apply.go の
 // runtime.apply と同じ: tunnel.New に続けて Run を goroutine で回す)。戻り値の cancel は Run を
 // 止めるだけで、Close は呼び出し側が行う (internal/agent/agent.go の runtime.closeLocked と同じ順序)。
-func newAgentTunnel(t *testing.T, priv, serverPub wgtypes.Key, serverPort uint16, addr, serverAddr netip.Addr) (*tunnel.Tunnel, context.CancelFunc) {
+func newAgentTunnel(t *testing.T, priv, serverPub wgtypes.Key, serverPort uint16, addr, serverAddr netip.Addr, netstack string) (*tunnel.Tunnel, context.CancelFunc) {
 	t.Helper()
 	quiet := func(string, ...any) {}
 	tun, err := tunnel.New(tunnel.Config{
@@ -216,6 +224,7 @@ func newAgentTunnel(t *testing.T, priv, serverPub wgtypes.Key, serverPort uint16
 		MTU:           1420,
 		Keepalive:     time.Second, // 短くして、握手を待つ区間を短く保つ (utun_test.go と同じ)
 		Logf:          quiet,
+		Netstack:      netstack,
 	})
 	if err != nil {
 		t.Fatalf("agent tunnel: %v", err)

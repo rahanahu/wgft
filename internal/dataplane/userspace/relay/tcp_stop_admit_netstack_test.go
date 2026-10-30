@@ -13,12 +13,16 @@ import (
 
 // TestTCPStopWhileAdmitting の netstack 版 (エージェントの公開側): 止めた worker の接続が RST で終わる。
 func TestTCPStopWhileAdmittingNetstack(t *testing.T) {
+	forEachAgentEngine(t, testTCPStopWhileAdmittingNetstack)
+}
+
+func testTCPStopWhileAdmittingNetstack(t *testing.T, engine string) {
 	const port = 7100
 	k := Key{proto.TCP, port}
 	for _, op := range []string{"Apply close", "Apply reopen"} {
 		for _, at := range []string{"before Take", "after Take"} {
 			t.Run(op+"/"+at, func(t *testing.T) {
-				client, agent := netstackPair(t)
+				client, agent := netstackPair(t, engine)
 				target, other := tcpEcho(t), tcpEcho(t)
 				pool := resource.NewPool(8)
 				var armAdmit, armTake atomic.Bool
