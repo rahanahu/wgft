@@ -57,7 +57,7 @@ func runOne(engine string, c Case, seed int64, size int64, limit time.Duration) 
 	if c.Outage {
 		imp.OutageAfter, imp.OutageLen, imp.DataDir = 2<<20, 2*time.Second, dataDir
 	}
-	rig, err := newRig(engine, imp, seed)
+	rig, err := newRig(engine, "gvisor", imp, seed)
 	if err != nil {
 		res.Err = "setup: " + err.Error()
 		return

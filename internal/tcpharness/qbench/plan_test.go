@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -26,7 +29,16 @@ import (
 //
 //	go test -tags qbench -run TestQBenchRoutine -v ./internal/tcpharness/qbench
 //	go test -c -tags qbench -o bin/qbench.test ./internal/tcpharness/qbench
-//	lab VM, as root: QBENCH_WRITE_REF=/var/tmp/qref/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//	lab VM, as root: QBENCH_COMMIT=<commit> QBENCH_WRITE_REF=/var/tmp/qref/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//
+// QBENCH_CLIENT=linux has a Linux client send in the cells where the DUT receives, from a network
+// namespace of its own, so the lab VM only. QBENCH_TRACE=<dir> writes each run's packet log there,
+// one line per TCP packet the link carries: times, direction, fate, flags, numbers, window, SACK
+// blocks and timestamps.
+//
+// Writing the reference needs the commit: the test reads it with git, which a lab VM's share of a
+// worktree does not have, so pass QBENCH_COMMIT from the host, for example
+// "$(git rev-parse HEAD)$(git diff --quiet HEAD || echo -dirty)".
 //
 // The reference file is written from inside the user namespace, so it needs a directory without
 // the sticky bit that the namespace's user can write, such as one made with mkdir -m 777.
@@ -45,6 +57,8 @@ type Cell struct {
 	Len     time.Duration
 	// NotJudged, when set, says why the cell is measured but not judged.
 	NotJudged string
+	// Client is the dialing side's engine: "" for gVisor's netstack, or "linux".
+	Client string
 }
 
 // The run lengths. A thin-stream run is longer than a bulk one, so 5 routine runs pool at least
@@ -81,27 +95,39 @@ func routineCells() []Cell {
 
 // gateCells adds both directions of the rest: loss 5%, reordering and the outage for the
 // receiving DUT, and the thin stream at loss 0, 1 and 5% and with an outage in both directions.
+//
+// In the gate, every cell where the DUT receives runs twice: with the Linux client, judged, and
+// with the gVisor client, measured for information only. The gVisor client wedges and then
+// measures itself, and its RTO cannot be read (the supervisor's decision; the owner can revise
+// it). The routine mode, on the host, keeps the gVisor client as a quick indicator.
 func gateCells() []Cell {
-	cells := routineCells()
-	cells = append(cells,
+	cells := append(routineCells(),
 		bulk("recv/loss5%", false, 0.05),
 		Cell{Name: "recv/reorder", Reorder: true, Len: bulkLen},
-		Cell{Name: "recv/outage2s", Outage: true, Len: outageLen, NotJudged: clientSends},
+		Cell{Name: "recv/outage2s", Outage: true, Len: outageLen},
 		thin("thin-send/loss0%", true, 0, false),
 		thin("thin-send/loss5%", true, 0.05, false),
 		thin("thin-send/outage2s", true, 0, true),
 		thin("thin-recv/loss0%", false, 0, false),
 		thin("thin-recv/loss1%", false, 0.01, false),
 		thin("thin-recv/loss5%", false, 0.05, false),
-		withNotJudged(thin("thin-recv/outage2s", false, 0, true), clientSends),
+		thin("thin-recv/outage2s", false, 0, true),
 	)
-	return cells
+	var out []Cell
+	for _, c := range cells {
+		if c.DUTSend {
+			out = append(out, c)
+			continue
+		}
+		out = append(out, withNotJudged(c, clientSends), withClient([]Cell{c}, "linux")[0])
+	}
+	return out
 }
 
-// clientSends is why the outage cells in which the DUT receives are not judged: the sender is
-// the gVisor client, whose RTO the bench cannot read and which, sending a thin stream, stalls
-// for seconds after an outage whatever the DUT, so the cell measures the client.
-const clientSends = "the gVisor client sends; it stalls after an outage and its RTO is unknown"
+// clientSends is why a cell in which the gVisor client sends is not judged in the gate: the
+// client wedges after losses and outages whatever the DUT, so the cell measures the client, and
+// its RTO cannot be read. The same cell with the Linux client is judged.
+const clientSends = "informational; the gVisor client sends and can wedge; the gate judges the /linux-client cell"
 
 func withNotJudged(c Cell, why string) Cell {
 	c.NotJudged = why
@@ -128,8 +154,8 @@ type Run struct {
 }
 
 // open builds the rig, connects and accepts.
-func open(engine string, imp Impair, seed int64) (*Rig, net.Conn, net.Conn, error) {
-	rig, err := newRig(engine, imp, seed)
+func open(engine, client string, imp Impair, seed int64) (*Rig, net.Conn, net.Conn, error) {
+	rig, err := newRig(engine, client, imp, seed)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("setup: %w", err)
 	}
@@ -193,14 +219,19 @@ func impair(c Cell) Impair {
 // runCell measures one run of c on engine.
 func runCell(engine string, c Cell, seed int64) (r Run) {
 	r = Run{Engine: engine, Cell: c.Name, Seed: seed, Recovery: -1, RTO: -1}
-	rig, cc, dc, err := open(engine, impair(c), seed)
+	tracePath = ""
+	if dir := os.Getenv("QBENCH_TRACE"); dir != "" {
+		tracePath = filepath.Join(dir, fmt.Sprintf("%s_%s_%d.tsv", engine, strings.NewReplacer("/", "_", "%", "pct").Replace(c.Name), seed))
+	}
+	rig, cc, dc, err := open(engine, c.Client, impair(c), seed)
 	if err != nil {
 		r.Err = err.Error()
 		return
 	}
 	defer rig.Close()
-	defer cc.Close()
-	defer dc.Close()
+	// a kernel socket closed with data left keeps sending, into the next run's rig
+	defer abort(cc)
+	defer abort(dc)
 	snd, rcv := cc, dc
 	if c.DUTSend {
 		snd, rcv = dc, cc
@@ -222,11 +253,19 @@ func runCell(engine string, c Cell, seed int64) (r Run) {
 		}
 		r.Stall = max(r.Stall, b.Sub(a))
 	}
-	if c.DUTSend && !oe.IsZero() && rig.D.RTOAt != nil {
-		r.RTO = rig.D.RTOAt(oe)
-		if r.RTO < 0 && engine == "linux" && r.Err == "" {
-			// the judgment needs Linux's RTO; a run without it must not pass as measured
+	// the sender's RTO at the outage's end: the DUT's where it sends, the client's where it receives
+	rtoAt, rtoErr, kernel := rig.D.RTOAt, rig.D.RTOErr, engine == "linux"
+	if !c.DUTSend {
+		rtoAt, rtoErr, kernel = rig.C.RTOAt, rig.C.RTOErr, rig.C.Name == "linux"
+	}
+	if !oe.IsZero() && rtoAt != nil {
+		r.RTO = rtoAt(oe)
+		if r.RTO <= 0 && kernel && r.Err == "" {
+			// the judgment needs the kernel sender's RTO; a run without it must not pass as measured
 			r.Err = "no TCP_INFO RTO sample before the outage's end"
+			if rtoErr != nil && rtoErr() != nil {
+				r.Err += "; the last TCP_INFO read: " + rtoErr().Error()
+			}
 		}
 	}
 	st := rig.L.Stats(impair(c).DataDir)
@@ -236,6 +275,19 @@ func runCell(engine string, c Cell, seed int64) (r Run) {
 		r.Stats = rig.D.Stats(oe)
 	}
 	return
+}
+
+// abort closes c with a RST where the engine offers it, and closes it otherwise.
+func abort(c net.Conn) {
+	switch a := c.(type) {
+	case interface{ Abort() error }:
+		a.Abort()
+	case interface{ Abort() }:
+		a.Abort()
+	case *net.TCPConn:
+		a.SetLinger(0)
+	}
+	c.Close()
 }
 
 // runBulk sends the seeded stream for c.Len after the handshake and counts what the receiver
@@ -375,11 +427,13 @@ type Summary struct {
 	RTOMS       float64 `json:"rto_ms"`      // -1 if unknown
 	P50MS       float64 `json:"p50_ms"`      // thin stream, all runs pooled
 	P99MS       float64 `json:"p99_ms"`
+	P99LoMS     float64 `json:"p99_lo_ms,omitempty"` // thin stream: the bootstrap 95% interval of the pooled p99
+	P99HiMS     float64 `json:"p99_hi_ms,omitempty"`
 	MaxMS       float64 `json:"max_ms"`
 	Samples     int     `json:"samples"`
 	Lost        int     `json:"lost"`        // thin messages never delivered, all runs
 	Unrecovered int     `json:"unrecovered"` // outage runs with no read after the outage
-	Spread      float64 `json:"spread"`      // max over min of the judged value across runs; spreadInf for a missing value
+	Spread      float64 `json:"spread"`      // max over min of the judged value across runs; spreadInf for a missing value; 0 for a thin stream
 }
 
 // spreadInf stands for an infinite spread, which JSON cannot carry: a run without a judged value,
@@ -443,9 +497,7 @@ func summarize(c Cell, runs []Run) Summary {
 		s.Lost += r.Lost
 		switch {
 		case c.Thin:
-			l := append([]time.Duration(nil), r.Lat...)
-			sort.Slice(l, func(i, j int) bool { return l[i] < l[j] })
-			judged = append(judged, ms(quantile(l, 0.99)))
+			// judged on the pooled p99 and its interval, not on the per-run spread
 		case c.Outage:
 			judged = append(judged, ms(r.Recovery)) // -1 for a run that never recovered
 		default:
@@ -463,12 +515,38 @@ func summarize(c Cell, runs []Run) Summary {
 		sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
 		s.P50MS, s.P99MS, s.MaxMS = ms(quantile(lat, 0.5)), ms(quantile(lat, 0.99)), ms(lat[len(lat)-1])
 		s.Samples = len(lat)
+		if c.Thin {
+			s.P99LoMS, s.P99HiMS = p99Interval(lat)
+		}
 	}
 	s.Spread = spread(judged)
 	if s.OK < s.Runs {
 		s.Spread = spreadInf // a failed run makes the cell undetermined
 	}
 	return s
+}
+
+// bootstrapResamples is how many resamples p99Interval draws.
+const bootstrapResamples = 1000
+
+// p99Interval is the bootstrap 95% interval of the p99 of the sorted pool, in ms: the 2.5th and
+// 97.5th percentiles of the p99 over resamples of the pool's size drawn with replacement. The
+// seed is fixed, so the same pool gives the same interval.
+func p99Interval(sorted []time.Duration) (lo, hi float64) {
+	r := rand.New(rand.NewSource(1))
+	n := len(sorted)
+	idx := make([]int, n)
+	est := make([]float64, bootstrapResamples)
+	for i := range est {
+		for j := range idx {
+			idx[j] = r.Intn(n)
+		}
+		sort.Ints(idx) // a resample of indices into the sorted pool is sorted by value
+		k := int(math.Ceil(0.99*float64(n))) - 1
+		est[i] = ms(sorted[idx[max(k, 0)]])
+	}
+	sort.Float64s(est)
+	return est[int(0.025*float64(len(est)))], est[int(0.975*float64(len(est)))-1]
 }
 
 // Reference is the stored medians the routine mode compares wgstack with. Each cell carries the
@@ -505,16 +583,41 @@ func provenance(where string) Provenance {
 		}
 	}
 	if p.Commit == "" {
-		p.Commit = "unknown; set QBENCH_COMMIT"
+		p.Commit = gitCommit()
 	}
 	return p
+}
+
+// gitCommit is the checked-out commit of the tree the test runs in, with "-dirty" when the tree
+// has changes, or "" when git cannot tell.
+func gitCommit() string {
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	c := strings.TrimSpace(string(out))
+	st, err := exec.Command("git", "status", "--porcelain", "--untracked-files=no").Output()
+	if err != nil {
+		return ""
+	}
+	if len(bytes.TrimSpace(st)) > 0 {
+		c += "-dirty"
+	}
+	return c
 }
 
 // Verdict is the judgment of one cell by 判定の規則.
 type Verdict struct {
 	Rule, Result string
 	Value, Line  float64
+	// Straddles is set for a thin stream whose p99 interval contains the line, where the plan
+	// doubles the runs as it does for a value near the line.
+	Straddles bool
 }
+
+// throughputTolerance is the measurement tolerance of the throughput rule: wgstack passes at
+// 0.99 of the binding line, so a cell where every engine fills the link does not fail on noise.
+const throughputTolerance = 0.99
 
 // judge applies the rule of c's kind to wgstack's summary against gVisor's and Linux's.
 func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
@@ -524,11 +627,29 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 	if !haveL {
 		return Verdict{Rule: "-", Result: "no Linux reference"}
 	}
+	// wgstack's own failures decide the cell whatever the spread
+	switch {
+	case wg.OK == 0:
+		return Verdict{Rule: "-", Result: fmt.Sprintf("FAIL: none of %d wgstack runs finished", wg.Runs)}
+	case !c.Thin && !c.Outage && wg.Mbps <= 0:
+		return Verdict{Rule: "-", Result: "FAIL: wgstack's median is 0 Mbit/s"}
+	case c.Thin && !c.Outage && wg.Lost > 0:
+		return Verdict{Rule: "-", Result: fmt.Sprintf("FAIL: wgstack lost %d thin messages without an outage", wg.Lost)}
+	}
 	var v Verdict
 	switch {
 	case c.Thin:
-		v = Verdict{Rule: "p99 <= 1.5 x Linux", Value: wg.P99MS, Line: 1.5 * lx.P99MS}
-		v.Result = yes(v.Value <= v.Line)
+		v = Verdict{Rule: "p99 95% interval vs 1.5 x Linux", Value: wg.P99MS, Line: 1.5 * lx.P99MS}
+		switch {
+		case wg.P99HiMS <= v.Line:
+			v.Result = "PASS"
+		case wg.P99LoMS > v.Line:
+			v.Result = "FAIL"
+		default:
+			v.Straddles = true
+			v.Result = fmt.Sprintf("UNDETERMINED: the 95%% interval %.0f to %.0f ms contains the line", wg.P99LoMS, wg.P99HiMS)
+		}
+		return v
 	case c.Outage:
 		if wg.Unrecovered > 0 {
 			return Verdict{Rule: "recovery <= Linux + Linux RTO", Result: fmt.Sprintf("FAIL: %d runs never recovered", wg.Unrecovered)}
@@ -540,12 +661,12 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 		v.Result = yes(v.Value >= 0 && v.Value <= v.Line)
 	default:
 		// 0.8 x Linux, or gVisor's value where gVisor is above it
-		line, rule := 0.8*lx.Mbps, "Mbit/s >= 0.8 x Linux; gVisor is below"
+		line, rule := 0.8*lx.Mbps, "Mbit/s >= 0.99 x 0.8 x Linux; gVisor is below"
 		if haveG && gv.Mbps > line {
-			line, rule = gv.Mbps, "Mbit/s >= gVisor; gVisor is above 0.8 x Linux"
+			line, rule = gv.Mbps, "Mbit/s >= 0.99 x gVisor; gVisor is above 0.8 x Linux"
 		}
 		v = Verdict{Rule: rule, Value: wg.Mbps, Line: line}
-		v.Result = yes(v.Value >= v.Line)
+		v.Result = yes(v.Value >= throughputTolerance*v.Line)
 	}
 	for _, s := range []Summary{wg, gv, lx} {
 		if s.Spread > 2 {
@@ -566,7 +687,7 @@ func yes(ok bool) string {
 // near reports whether a verdict's value is within 5% of its line, where the plan doubles the
 // runs and judges again.
 func near(v Verdict) bool {
-	return v.Line > 0 && v.Value >= 0 && math.Abs(v.Value/v.Line-1) <= 0.05
+	return v.Straddles || (v.Line > 0 && v.Value >= 0 && math.Abs(v.Value/v.Line-1) <= 0.05)
 }
 
 func dur(d time.Duration) string {
@@ -577,9 +698,15 @@ func dur(d time.Duration) string {
 }
 
 func printRun(r Run) {
-	fmt.Printf("QBENCH-RUN engine=%s cell=%s seed=%d bytes=%d mbps=%.2f verified=%v recovery=%s rto=%s stall=%s samples=%d lost=%d retrans=%d/%d qdrop=%d err=%q\n",
+	p99 := "-"
+	if len(r.Lat) > 0 {
+		l := append([]time.Duration(nil), r.Lat...)
+		sort.Slice(l, func(i, j int) bool { return l[i] < l[j] })
+		p99 = dur(quantile(l, 0.99))
+	}
+	fmt.Printf("QBENCH-RUN engine=%s cell=%s seed=%d bytes=%d mbps=%.2f verified=%v recovery=%s rto=%s stall=%s samples=%d p99=%s lost=%d retrans=%d/%d qdrop=%d err=%q\n",
 		r.Engine, r.Cell, r.Seed, r.Bytes, r.Mbps, r.Verified, dur(r.Recovery), dur(r.RTO),
-		r.Stall.Round(time.Millisecond), len(r.Lat), r.Lost, r.Retrans, r.DataPkts, r.QDrops, r.Err)
+		r.Stall.Round(time.Millisecond), len(r.Lat), p99, r.Lost, r.Retrans, r.DataPkts, r.QDrops, r.Err)
 	if r.Stats != "-" {
 		fmt.Printf("QBENCH-STATS engine=%s cell=%s seed=%d %s\n", r.Engine, r.Cell, r.Seed, r.Stats)
 	}
@@ -603,8 +730,8 @@ func measure(t *testing.T, c Cell, ci int, engines []string, runs, from int) map
 }
 
 func printSummary(c Cell, eng string, s Summary) {
-	fmt.Printf("QBENCH-SUMMARY engine=%s cell=%s runs=%d ok=%d mbps=%.2f recovery_ms=%.0f rto_ms=%.0f unrecovered=%d p50_ms=%.1f p99_ms=%.1f max_ms=%.1f samples=%d lost=%d spread=%.2f\n",
-		eng, c.Name, s.Runs, s.OK, s.Mbps, s.RecoveryMS, s.RTOMS, s.Unrecovered, s.P50MS, s.P99MS, s.MaxMS, s.Samples, s.Lost, s.Spread)
+	fmt.Printf("QBENCH-SUMMARY engine=%s cell=%s runs=%d ok=%d mbps=%.2f recovery_ms=%.0f rto_ms=%.0f unrecovered=%d p50_ms=%.1f p99_ms=%.1f p99_ci_ms=%.1f-%.1f max_ms=%.1f samples=%d lost=%d spread=%.2f\n",
+		eng, c.Name, s.Runs, s.OK, s.Mbps, s.RecoveryMS, s.RTOMS, s.Unrecovered, s.P50MS, s.P99MS, s.P99LoMS, s.P99HiMS, s.MaxMS, s.Samples, s.Lost, s.Spread)
 }
 
 // checkPool fails the test when a thin cell's pool is below the plan's 1,000 samples.
@@ -624,6 +751,28 @@ func has(list []string, s string) bool {
 }
 
 func cellFilter(cells []Cell) []Cell {
+	return withClient(nameFilter(cells), os.Getenv("QBENCH_CLIENT"))
+}
+
+// withClient gives the cells in which the DUT receives the client named by QBENCH_CLIENT. With the
+// Linux client the sender's RTO is the kernel's and can be read, so the receiving outage cells are
+// judged. The cells' names say the client, since their values differ from the gVisor client's.
+func withClient(cells []Cell, client string) []Cell {
+	if client == "" || client == "gvisor" {
+		return cells
+	}
+	out := append([]Cell(nil), cells...)
+	for i := range out {
+		if !out[i].DUTSend {
+			out[i].Client = client
+			out[i].Name += "/" + client + "-client"
+			out[i].NotJudged = ""
+		}
+	}
+	return out
+}
+
+func nameFilter(cells []Cell) []Cell {
 	only := os.Getenv("QBENCH_CELLS")
 	if only == "" {
 		return cells
@@ -665,7 +814,7 @@ func TestQBenchRoutine(t *testing.T) {
 	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
 		engines = strings.Split(v, ",")
 	}
-	if has(engines, "linux") && !inNetns(t) {
+	if (has(engines, "linux") || os.Getenv("QBENCH_CLIENT") == "linux") && !inNetns(t) {
 		return
 	}
 	pinLinux(t, engines)
@@ -695,20 +844,34 @@ func TestQBenchRoutine(t *testing.T) {
 }
 
 // TestQBenchGate is the gate matrix: wgstack, gVisor and Linux in the same process and VM, 9 runs
-// per cell, judged by 判定の規則, with the runs doubled for a cell within 5% of its line.
+// per cell, judged by 判定の規則, with the runs doubled for a cell within 5% of its line or, for a
+// thin stream, with a p99 interval that contains the line.
 // QBENCH_WRITE_REF names a file to store the gVisor and Linux medians in, for the routine mode.
 func TestQBenchGate(t *testing.T) {
 	engines := []string{"wgstack", "gvisor", "linux"}
 	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
 		engines = strings.Split(v, ",")
 	}
-	if has(engines, "linux") && !inNetns(t) {
+	// the gate fixes each cell's client itself, so QBENCH_CLIENT does not apply
+	cells := nameFilter(gateCells())
+	linuxClient := false
+	for _, c := range cells {
+		linuxClient = linuxClient || c.Client == "linux"
+	}
+	if (has(engines, "linux") || linuxClient) && !inNetns(t) {
 		return
 	}
 	where := pinLinux(t, engines)
 	runs := envInt("QBENCH_RUNS", 9)
-	cells := cellFilter(gateCells())
 	prov := provenance(where)
+	if os.Getenv("QBENCH_WRITE_REF") != "" {
+		if prov.Commit == "" {
+			t.Fatalf("the commit is unknown: run in the git tree or set QBENCH_COMMIT")
+		}
+		if strings.HasSuffix(prov.Commit, "-dirty") {
+			t.Logf("WARNING: the tree has uncommitted changes; the reference records %s", prov.Commit)
+		}
+	}
 	ref := &Reference{Cells: map[string]map[string]Summary{}, CellMeta: map[string]Provenance{}}
 	if path := os.Getenv("QBENCH_WRITE_REF"); path != "" {
 		// fail now rather than after the runs if the file cannot be written
@@ -760,11 +923,17 @@ func TestQBenchGate(t *testing.T) {
 			v = judge(c, m["wgstack"], gv, lx, haveG, haveL)
 			v.Result += " after doubling"
 		}
-		ref.Cells[c.Name] = map[string]Summary{}
-		ref.CellMeta[c.Name] = prov
-		for _, e := range engines {
-			if e != "wgstack" {
-				ref.Cells[c.Name][e] = m[e]
+		// a reference that failed or spreads too far is not stored; the cell keeps what it had
+		if bad := unstorable(engines, m); bad != "" {
+			fmt.Printf("QBENCH-WARN cell=%s reference not stored: %s\n", c.Name, bad)
+			t.Logf("WARNING: %s: reference not stored: %s", c.Name, bad)
+		} else {
+			ref.Cells[c.Name] = map[string]Summary{}
+			ref.CellMeta[c.Name] = prov
+			for _, e := range engines {
+				if e != "wgstack" {
+					ref.Cells[c.Name][e] = m[e]
+				}
 			}
 		}
 		table = append(table, row(c, m["wgstack"], gv, lx, v))
@@ -779,13 +948,31 @@ func TestQBenchGate(t *testing.T) {
 	}
 }
 
+// unstorable says why the gVisor and Linux summaries of a cell must not become the reference, or
+// returns "" when they may.
+func unstorable(engines []string, m map[string]Summary) string {
+	for _, e := range engines {
+		if e == "wgstack" {
+			continue
+		}
+		s := m[e]
+		switch {
+		case s.OK < s.Runs:
+			return fmt.Sprintf("%s: %d of %d runs failed", e, s.Runs-s.OK, s.Runs)
+		case s.Spread > 2:
+			return fmt.Sprintf("%s: max/min %.2f is above 2", e, s.Spread)
+		}
+	}
+	return ""
+}
+
 func row(c Cell, wg, gv, lx Summary, v Verdict) string {
 	val := func(s Summary) string {
 		switch {
 		case s.Runs == 0:
 			return "-"
 		case c.Thin:
-			return fmt.Sprintf("%.0f / %.0f / %.0f ms, %d lost", s.P50MS, s.P99MS, s.MaxMS, s.Lost)
+			return fmt.Sprintf("%.0f / %.0f (%.0f to %.0f) / %.0f ms, %d lost", s.P50MS, s.P99MS, s.P99LoMS, s.P99HiMS, s.MaxMS, s.Lost)
 		case c.Outage:
 			return fmt.Sprintf("%.0f ms, RTO %.0f ms, %.2f Mbit/s", s.RecoveryMS, s.RTOMS, s.Mbps)
 		}
@@ -836,6 +1023,66 @@ func TestJudgeRules(t *testing.T) {
 	s := summarize(thin, []Run{{Lat: lat, Lost: 1}})
 	if s.Lost != 1 || s.MaxMS != 5000 {
 		t.Errorf("an undelivered message: lost %d, max %v ms; want 1 and 5000", s.Lost, s.MaxMS)
+	}
+
+	bulkC := Cell{Name: "send/loss0%", DUTSend: true}
+	lxBulk := Summary{Runs: 1, OK: 1, Mbps: 10}
+	if v := judge(bulkC, Summary{Runs: 5}, Summary{}, lxBulk, false, true); !strings.HasPrefix(v.Result, "FAIL") {
+		t.Errorf("no wgstack run finished: %q, want FAIL", v.Result)
+	}
+	if v := judge(bulkC, Summary{Runs: 5, OK: 5, Spread: spreadInf}, Summary{}, lxBulk, false, true); !strings.HasPrefix(v.Result, "FAIL") {
+		t.Errorf("wgstack at 0 Mbit/s: %q, want FAIL", v.Result)
+	}
+	lossy := Summary{Runs: 5, OK: 5, P99MS: 10, Lost: 1, Spread: 1}
+	if v := judge(thin, lossy, Summary{}, Summary{Runs: 5, OK: 5, P99MS: 100, Spread: 1}, false, true); !strings.HasPrefix(v.Result, "FAIL") {
+		t.Errorf("a lost thin message without an outage: %q, want FAIL", v.Result)
+	}
+	if bad := unstorable([]string{"wgstack", "linux"}, map[string]Summary{"linux": {Runs: 9, OK: 8}}); bad == "" {
+		t.Error("a Linux summary with a failed run would be stored")
+	}
+	if bad := unstorable([]string{"gvisor"}, map[string]Summary{"gvisor": {Runs: 9, OK: 9, Spread: 2.5}}); bad == "" {
+		t.Error("a gVisor summary spreading above 2 would be stored")
+	}
+
+	// thin streams: the pooled p99's interval against 1.5 x Linux
+	lxThin := Summary{Runs: 5, OK: 5, P99MS: 100}
+	for _, tc := range []struct {
+		lo, hi float64
+		want   string
+	}{{100, 140, "PASS"}, {160, 200, "FAIL"}, {140, 160, "UNDETERMINED"}} {
+		wgThin := Summary{Runs: 5, OK: 5, P99MS: (tc.lo + tc.hi) / 2, P99LoMS: tc.lo, P99HiMS: tc.hi}
+		v := judge(thin, wgThin, Summary{}, lxThin, false, true)
+		if !strings.HasPrefix(v.Result, tc.want) || (tc.want == "UNDETERMINED") != near(v) {
+			t.Errorf("interval %v to %v against 150: %q, doubling %v; want %s", tc.lo, tc.hi, v.Result, near(v), tc.want)
+		}
+	}
+	pool := make([]time.Duration, 2000)
+	for i := range pool {
+		pool[i] = time.Duration(i) * time.Millisecond
+	}
+	if lo, hi := p99Interval(pool); !(lo < 1980 && hi > 1980 && lo > 1960 && hi < 2000) {
+		t.Errorf("the p99 interval of 0 to 1999 ms is %v to %v; want about 1980 inside it", lo, hi)
+	}
+
+	// throughput: 1% measurement tolerance under the binding line
+	gvBulk := Summary{Runs: 5, OK: 5, Mbps: 18.87, Spread: 1}
+	lx19 := Summary{Runs: 5, OK: 5, Mbps: 18.87, Spread: 1}
+	if v := judge(bulkC, Summary{Runs: 5, OK: 5, Mbps: 18.86, Spread: 1}, gvBulk, lx19, true, true); v.Result != "PASS" {
+		t.Errorf("18.86 against gVisor's 18.87: %q, want PASS", v.Result)
+	}
+	if v := judge(bulkC, Summary{Runs: 5, OK: 5, Mbps: 18.6, Spread: 1}, gvBulk, lx19, true, true); v.Result != "FAIL" {
+		t.Errorf("18.6 against gVisor's 18.87: %q, want FAIL", v.Result)
+	}
+
+	// the gate judges every receiving cell with the Linux client and keeps the gVisor one aside
+	for _, c := range gateCells() {
+		switch {
+		case c.DUTSend:
+		case c.Client == "linux" && c.NotJudged != "":
+			t.Errorf("%s: the Linux-client cell is not judged", c.Name)
+		case c.Client == "" && c.NotJudged == "":
+			t.Errorf("%s: the gVisor-client cell is judged", c.Name)
+		}
 	}
 
 	nj := Cell{Name: "recv/outage2s", Outage: true, NotJudged: clientSends}

@@ -4,10 +4,13 @@ package qbench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -41,8 +44,96 @@ func newLinux() (*DUT, error) {
 		Close:    func() { rs.stop(); d.Close() },
 		OnAccept: rs.start,
 		RTOAt:    rs.at,
+		RTOErr:   rs.lastErr,
 	}, nil
 }
+
+// newLinuxClient builds a client whose TCP is the kernel's, in a network namespace of its own,
+// so its packets to the DUT cross the rig's link even when the DUT is the kernel too. The
+// namespace gets the same pinned sysctls as the linux engine's. It lives on one locked OS thread
+// and goes away with it, the TUN device and the sockets.
+func newLinuxClient() (*Client, error) {
+	ns, err := newNetnsThread()
+	if err != nil {
+		return nil, err
+	}
+	var d *linuxdut.DUT
+	if err := ns.do(func() error {
+		if err := linuxdut.PinPerformance(); err != nil {
+			return err
+		}
+		var err error
+		d, err = linuxdut.NewPerformance(clientAddr, mtu)
+		return err
+	}); err != nil {
+		ns.stop()
+		return nil, err
+	}
+	rs := &rtoSampler{}
+	return &Client{Name: "linux", Dev: newTunAdapter(d),
+		dial: func(ctx context.Context) (net.Conn, error) {
+			var c net.Conn
+			// the socket belongs to the namespace of the thread that creates it
+			if err := ns.do(func() error {
+				var err error
+				c, err = (&net.Dialer{}).DialContext(ctx, "tcp4", netip.AddrPortFrom(dutAddr, port).String())
+				return err
+			}); err != nil {
+				return nil, err
+			}
+			if err := rs.start(c); err != nil {
+				c.Close()
+				return nil, err
+			}
+			return c, nil
+		},
+		close:  func() { rs.stop(); d.Close(); ns.stop() },
+		RTOAt:  rs.at,
+		RTOErr: rs.lastErr,
+	}, nil
+}
+
+// netnsThread runs functions on one OS thread that has a network namespace of its own.
+type netnsThread struct {
+	work chan func()
+	done chan struct{}
+	once sync.Once
+}
+
+func newNetnsThread() (*netnsThread, error) {
+	t := &netnsThread{work: make(chan func()), done: make(chan struct{})}
+	errc := make(chan error, 1)
+	go func() {
+		// never unlocked: the thread ends with this goroutine and the runtime does not reuse it
+		runtime.LockOSThread()
+		if err := unix.Unshare(unix.CLONE_NEWNET); err != nil {
+			errc <- fmt.Errorf("a network namespace for the client: %w", err)
+			return
+		}
+		errc <- nil
+		for {
+			select {
+			case f := <-t.work:
+				f()
+			case <-t.done:
+				return
+			}
+		}
+	}()
+	return t, <-errc
+}
+
+func (t *netnsThread) do(f func() error) error {
+	errc := make(chan error, 1)
+	select {
+	case t.work <- func() { errc <- f() }:
+	case <-t.done:
+		return errors.New("the client's namespace is gone")
+	}
+	return <-errc
+}
+
+func (t *netnsThread) stop() { t.once.Do(func() { close(t.done) }) }
 
 type linuxListener struct{ l tcpharness.Listener }
 
@@ -84,7 +175,10 @@ func (r *rtoSampler) start(c net.Conn) error {
 			var info *unix.TCPInfo
 			var gerr error
 			raw.Control(func(fd uintptr) { info, gerr = unix.GetsockoptTCPInfo(int(fd), unix.SOL_TCP, unix.TCP_INFO) })
-			if info == nil {
+			if info == nil || info.Rto == 0 {
+				if gerr == nil {
+					gerr = errors.New("TCP_INFO reports an RTO of 0")
+				}
 				r.mu.Lock()
 				r.err = gerr
 				r.mu.Unlock()
@@ -107,6 +201,13 @@ func (r *rtoSampler) stop() {
 			close(r.done)
 		}
 	})
+}
+
+// lastErr is the last error a TCP_INFO read gave, or nil.
+func (r *rtoSampler) lastErr() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err
 }
 
 func (r *rtoSampler) at(t time.Time) time.Duration {
