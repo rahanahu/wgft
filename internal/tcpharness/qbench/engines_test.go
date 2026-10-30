@@ -143,12 +143,9 @@ type Rig struct {
 	trace *os.File
 }
 
-// tracePath, when set, is where the next rig writes its link's packet log: QBENCH_TRACE names a
-// directory, and runCell names a file in it for each run.
-var tracePath string
-
 // newRig joins a client of the given kind (direction 0 leaves the client) and DUT.
-func newRig(engine, client string, imp Impair, seed int64) (*Rig, error) {
+// trace, when set, is where the rig writes its link's packet log.
+func newRig(engine, client string, imp Impair, seed int64, trace string) (*Rig, error) {
 	c, err := clientFor(client)
 	if err != nil {
 		return nil, err
@@ -170,8 +167,8 @@ func newRig(engine, client string, imp Impair, seed int64) (*Rig, error) {
 	}
 	r := &Rig{C: c, D: d}
 	r.L = NewLink(imp, seed, writeTo(d.Dev), writeTo(c.Dev))
-	if tracePath != "" {
-		f, err := os.Create(tracePath)
+	if trace != "" {
+		f, err := os.Create(trace)
 		if err != nil {
 			r.Close()
 			return nil, err

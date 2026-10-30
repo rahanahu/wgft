@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"math/rand"
 	"net"
@@ -30,6 +31,10 @@ import (
 //	go test -tags qbench -run TestQBenchRoutine -v ./internal/tcpharness/qbench
 //	go test -c -tags qbench -o bin/qbench.test ./internal/tcpharness/qbench
 //	lab VM, as root: QBENCH_COMMIT=<commit> QBENCH_WRITE_REF=/var/tmp/qref/reference.json /wgft/bin/qbench.test -test.run TestQBenchGate -test.v -test.timeout 4h
+//
+// QBENCH_PARALLEL runs that many runs at once: by default 1 in the routine mode and 8, or the
+// CPUs if fewer, in the gate, whose VM should have 8 vCPUs (incus config set <vm> limits.cpu=8).
+// 計測の計画 says how to choose it and when to measure a cell with 1.
 //
 // QBENCH_CLIENT=linux has a Linux client send in the cells where the DUT receives, from a network
 // namespace of its own, so the lab VM only. QBENCH_TRACE=<dir> writes each run's packet log there,
@@ -154,8 +159,8 @@ type Run struct {
 }
 
 // open builds the rig, connects and accepts.
-func open(engine, client string, imp Impair, seed int64) (*Rig, net.Conn, net.Conn, error) {
-	rig, err := newRig(engine, client, imp, seed)
+func open(engine, client string, imp Impair, seed int64, trace string) (*Rig, net.Conn, net.Conn, error) {
+	rig, err := newRig(engine, client, imp, seed, trace)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("setup: %w", err)
 	}
@@ -219,11 +224,11 @@ func impair(c Cell) Impair {
 // runCell measures one run of c on engine.
 func runCell(engine string, c Cell, seed int64) (r Run) {
 	r = Run{Engine: engine, Cell: c.Name, Seed: seed, Recovery: -1, RTO: -1}
-	tracePath = ""
+	trace := ""
 	if dir := os.Getenv("QBENCH_TRACE"); dir != "" {
-		tracePath = filepath.Join(dir, fmt.Sprintf("%s_%s_%d.tsv", engine, strings.NewReplacer("/", "_", "%", "pct").Replace(c.Name), seed))
+		trace = filepath.Join(dir, fmt.Sprintf("%s_%s_%d.tsv", engine, strings.NewReplacer("/", "_", "%", "pct").Replace(c.Name), seed))
 	}
-	rig, cc, dc, err := open(engine, c.Client, impair(c), seed)
+	rig, cc, dc, err := open(engine, c.Client, impair(c), seed, trace)
 	if err != nil {
 		r.Err = err.Error()
 		return
@@ -713,18 +718,49 @@ func printRun(r Run) {
 }
 
 // measure runs every engine runs times in c, with the same seeds for every engine.
-func measure(t *testing.T, c Cell, ci int, engines []string, runs, from int) map[string][]Run {
-	out := map[string][]Run{}
+// cellSeed is run i's seed in a cell. It depends on the cell's name, not its place in the list,
+// so a cell measured alone with QBENCH_CELLS gets the seeds it has in the whole matrix.
+func cellSeed(name string, i int) int64 {
+	h := fnv.New32a()
+	h.Write([]byte(name))
+	return int64(i+1)*7919 + int64(h.Sum32()%100000)*131
+}
+
+// par runs are measured at once. Each run has its own rig, link and, for Linux, network
+// namespaces, so they share nothing but the machine; 計測の計画 records the check that medians do
+// not move with the number.
+func measure(t *testing.T, c Cell, ci int, engines []string, runs, from, par int) map[string][]Run {
+	type job struct {
+		eng  string
+		i    int
+		seed int64
+	}
+	var jobs []job
 	for _, eng := range engines {
 		for i := from; i < from+runs; i++ {
-			seed := int64(i+1)*7919 + int64(ci)*131
-			r := runCell(eng, c, seed)
+			jobs = append(jobs, job{eng, i - from, cellSeed(c.Name, i)})
+		}
+	}
+	res := make([]Run, len(jobs))
+	sem := make(chan struct{}, max(par, 1))
+	var wg sync.WaitGroup
+	for k, j := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			r := runCell(j.eng, c, j.seed)
 			printRun(r)
 			if r.Err != "" {
-				t.Errorf("%s %s seed %d: %s", eng, c.Name, seed, r.Err)
+				t.Errorf("%s %s seed %d: %s", j.eng, c.Name, j.seed, r.Err)
 			}
-			out[eng] = append(out[eng], r)
-		}
+			res[k] = r
+		}()
+	}
+	wg.Wait()
+	out := map[string][]Run{}
+	for k, j := range jobs {
+		out[j.eng] = append(out[j.eng], res[k])
 	}
 	return out
 }
@@ -810,6 +846,7 @@ func loadReference(t *testing.T) *Reference {
 // stored gVisor and Linux medians in testdata/reference.json. A cell within 5% of its line is
 // measured again with twice the runs. It takes about 5 minutes; verdicts are printed, not failed.
 func TestQBenchRoutine(t *testing.T) {
+	par := envInt("QBENCH_PARALLEL", 1)
 	engines := []string{"wgstack"}
 	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
 		engines = strings.Split(v, ",")
@@ -824,7 +861,7 @@ func TestQBenchRoutine(t *testing.T) {
 	cells := cellFilter(routineCells())
 	var table []string
 	for ci, c := range cells {
-		res := measure(t, c, ci, engines, runs, 0)
+		res := measure(t, c, ci, engines, runs, 0, par)
 		wg := summarize(c, res["wgstack"])
 		printSummary(c, "wgstack", wg)
 		checkPool(t, c, "wgstack", wg)
@@ -832,7 +869,7 @@ func TestQBenchRoutine(t *testing.T) {
 		lx, haveL := ref.Cells[c.Name]["linux"]
 		v := judge(c, wg, gv, lx, haveG, haveL)
 		if near(v) {
-			more := measure(t, c, ci, []string{"wgstack"}, runs, runs)
+			more := measure(t, c, ci, []string{"wgstack"}, runs, runs, par)
 			wg = summarize(c, append(res["wgstack"], more["wgstack"]...))
 			printSummary(c, "wgstack", wg)
 			v = judge(c, wg, gv, lx, haveG, haveL)
@@ -847,6 +884,10 @@ func TestQBenchRoutine(t *testing.T) {
 // per cell, judged by 判定の規則, with the runs doubled for a cell within 5% of its line or, for a
 // thin stream, with a p99 interval that contains the line.
 // QBENCH_WRITE_REF names a file to store the gVisor and Linux medians in, for the routine mode.
+// gatePar is the gate's default number of runs at once: 8, the number 計測の計画 checked, or the
+// machine's CPUs when it has fewer.
+func gatePar() int { return min(8, runtime.NumCPU()) }
+
 func TestQBenchGate(t *testing.T) {
 	engines := []string{"wgstack", "gvisor", "linux"}
 	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
@@ -863,6 +904,8 @@ func TestQBenchGate(t *testing.T) {
 	}
 	where := pinLinux(t, engines)
 	runs := envInt("QBENCH_RUNS", 9)
+	par := envInt("QBENCH_PARALLEL", gatePar())
+	fmt.Printf("QBENCH-META mode=gate parallel=%d cpus=%d\n", par, runtime.NumCPU())
 	prov := provenance(where)
 	if os.Getenv("QBENCH_WRITE_REF") != "" {
 		if prov.Commit == "" {
@@ -899,7 +942,7 @@ func TestQBenchGate(t *testing.T) {
 	ref.Measured, ref.Where, ref.BaseRuns = prov.Measured, where, runs
 	var table []string
 	for ci, c := range cells {
-		res := measure(t, c, ci, engines, runs, 0)
+		res := measure(t, c, ci, engines, runs, 0, par)
 		sum := func() map[string]Summary {
 			m := map[string]Summary{}
 			for _, e := range engines {
@@ -914,7 +957,7 @@ func TestQBenchGate(t *testing.T) {
 		lx, haveL := m["linux"]
 		v := judge(c, m["wgstack"], gv, lx, haveG, haveL)
 		if near(v) {
-			more := measure(t, c, ci, engines, runs, runs)
+			more := measure(t, c, ci, engines, runs, runs, par)
 			for e, rs := range more {
 				res[e] = append(res[e], rs...)
 			}
