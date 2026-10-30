@@ -92,7 +92,6 @@ type tcbState struct {
 	oooFinOff     uint64
 	rcvSinceAck   int
 	rcvMSSEst     uint32    // 相手の segment の大きさの推定(Linux の icsk_ack.rcv_mss)
-	ackPushed     bool      // 遅延 ACK を待つ間に、推定より小さな segment を順序どおりに受けた
 	pingpong      bool      // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
 	lastDataRcvd  int64     // 最後に中身を受け入れた時刻
 	rcvdData      bool      // lastDataRcvd が有効
@@ -787,7 +786,7 @@ func (c *tcb) inputData(seg *segment, now int64) {
 		c.ackNow = true
 	case res.advanced:
 		c.rcvSinceAck += res.accepted
-		c.notePushed(n)
+		c.measureRcvMSS(n)
 		c.noteQuickack(now)
 		// 推定した相手の MSS より多くの byte を確認していなければ ACK を遅らせる(Linux の __tcp_ack_snd_check)
 		if c.rcvSinceAck > int(c.rcvMSSEst) || (c.quickAcks > 0 && !c.pingpong) {

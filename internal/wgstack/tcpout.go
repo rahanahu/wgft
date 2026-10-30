@@ -201,7 +201,6 @@ func (c *tcb) ackSent() {
 	}
 	c.ackDelayed = false
 	c.ackNow = false
-	c.ackPushed = false
 	c.dsackPending = false
 	c.rcvSinceAck = 0
 	c.disarm(tmrDelack)

@@ -5,17 +5,15 @@ package wgstack
 // minRcvMSSEst は相手の segment の大きさの推定の初期値の上限(Linux の TCP_MSS_DEFAULT)。
 const minRcvMSSEst = 536
 
-// notePushed は順序どおりに受けた n byte の segment で相手の segment の大きさの推定を更新し、推定より小さな
-// segment なら印を付ける(Linux の tcp_measure_rcv_mss と ICSK_ACK_PUSHED)。mu を持って呼ぶ。
-func (c *tcb) notePushed(n int) {
+// measureRcvMSS は順序どおりに受けた n byte の segment で相手の segment の大きさの推定を更新する(Linux の
+// tcp_measure_rcv_mss)。mu を持って呼ぶ。
+func (c *tcb) measureRcvMSS(n int) {
 	if c.rcvMSSEst == 0 {
 		c.rcvMSSEst = uint32(min(minRcvMSSEst, c.rcvMSS()))
 	}
 	if uint32(n) >= c.rcvMSSEst {
 		c.rcvMSSEst = uint32(min(n, c.rcvMSS()))
-		return
 	}
-	c.ackPushed = true
 }
 
 // quickackMax は遅らせずに返す ACK の数の上限(Linux の TCP_MAX_QUICKACKS)。
@@ -59,11 +57,14 @@ func (c *tcb) noteDuplicate(seq, n uint32, now int64) {
 	c.pingpong = false
 }
 
-// ackOnDrain は、アプリケーションの読み取りが受信のバッファを空にし、遅延 ACK を待つ小さな segment がある
-// とき、対話の流れでなければ ACK をすぐ送る(Linux の tcp_cleanup_rbuf)。通信量の少ない stream の受け手は
-// segment ごとに ACK を返すので、送り手は ACK を待って新しいデータを止めない。mu を持って呼ぶ。
+// ackOnDrain は、アプリケーションの読み取りが受信のバッファを空にし、遅延 ACK を待つ segment があるとき、
+// 対話の流れでなければ ACK をすぐ送る。遅延 ACK はアプリケーションに窓を更新させ、応答を同じ segment に
+// 載せる機会を与えるために待つ(RFC 1122 4.2.3.2)。読み取りで窓は更新済みで、対話の流れでなければ応答も
+// 来ないので、待つ理由が残らない。segment の大きさによらない。読み手が追いつく間は segment ごとに ACK を
+// 返し(RFC 5681 4.2 の「少なくとも 2 つ目ごと」の内側)、読み手が遅れる間は 2 segment ごとの規則に戻る。
+// mu を持って呼ぶ。
 func (c *tcb) ackOnDrain() {
-	if c.ackPushed && !c.pingpong && c.rcv.unread() == 0 && c.tdl[tmrDelack] != 0 {
+	if !c.pingpong && c.rcv.unread() == 0 && c.tdl[tmrDelack] != 0 {
 		c.ackNow = true
 	}
 }
