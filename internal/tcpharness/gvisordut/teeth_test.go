@@ -288,8 +288,9 @@ func TestHarnessCatchesFINAfterTheAck(t *testing.T) {
 
 // A FIN resent with the TSecr it had, which the DUT sent before it had the testbench's ACK, is
 // the tail loss probe a loaded machine lets fire; the scenario passes over it.
+// It runs alone, not in the parallel group: it needs a PASS from one attempt with a resend 100 ms
+// after the FIN on real time, which a loaded neighbour could delay.
 func TestHarnessPassesOverAFINSentBeforeTheAck(t *testing.T) {
-	t.Parallel()
 	e := mutant("gvisor-fin-probe", func(d tcpharness.DUT) tcpharness.DUT { return resendFIN(d, true) })
 	got := tcpharness.Record(t, e, scenario(t, "fin-passive-close"), 1)
 	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomePass)
@@ -349,6 +350,8 @@ type earlyResend struct {
 	n int
 	// stale keeps the segment's own TSecr, as a probe the engine sent before the ACK arrived
 	stale bool
+	// delay, when set, holds the resend that long after the n-th duplicate ACK
+	delay time.Duration
 	out   chan []byte
 	mu    sync.Mutex
 	// by the testbench's port: the data segments sent, by sequence number, and the duplicate
@@ -380,7 +383,18 @@ func (d *earlyResend) Inject(pkt []byte) error {
 			ts.Ecr = s.Opts.TS.Val
 			seg.Opts.TS = &ts
 		}
-		d.out <- seg.Marshal()
+		if d.delay == 0 {
+			d.out <- seg.Marshal()
+		} else {
+			pkt := seg.Marshal()
+			time.AfterFunc(d.delay, func() {
+				d.mu.Lock()
+				defer d.mu.Unlock()
+				if !d.closed {
+					d.out <- pkt
+				}
+			})
+		}
 	}
 	return err
 }
@@ -536,4 +550,17 @@ func dropFirstResend(inner tcpharness.DUT) tcpharness.DUT {
 func TestHarnessCatchesRTOInPlaceOfAProbe(t *testing.T) {
 	got := tcpharness.Record(t, mutant("gvisor-no-probe", dropFirstResend), scenario(t, "tlp-tail-loss"), 1)
 	wantOutcome(t, got, "tlp-tail-loss/probe-at-2srtt", tcpharness.OutcomeFail)
+}
+
+// On limited-transmit-rack's path, a resend 38 ms after the second duplicate ACK still comes
+// inside RACK's reorder window, where the watch now runs; with the old 20 ms watch it went
+// unseen.
+func TestHarnessCatchesResendAfterTheSecondDupack(t *testing.T) {
+	e := mutant("gvisor-resend-38ms-after-dupack2", func(inner tcpharness.DUT) tcpharness.DUT {
+		d := resendAt(2, false)(inner).(*earlyResend)
+		d.delay = 38 * time.Millisecond
+		return d
+	})
+	got := tcpharness.Record(t, e, scenario(t, "limited-transmit-rack"), 1)
+	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomeFail)
 }
