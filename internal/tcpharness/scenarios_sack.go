@@ -48,7 +48,7 @@ func flightOf(h *H, p *Peer, c Conn, size, n int, salt byte) ([]Segment, []byte)
 	if _, err := c.Write(data); err != nil {
 		h.T.Fatalf("write: %v", err)
 	}
-	segs, sent := burst(p)
+	segs, sent := burstUntil(p, len(data))
 	h.Require("flight", sent == len(data) && len(segs) >= n, fmt.Sprintf("the %d bytes leave in one initial burst of at least %d segments", len(data), n),
 		fmt.Sprintf("%d bytes in %d segments", sent, len(segs)))
 	return segs, data
@@ -56,11 +56,18 @@ func flightOf(h *H, p *Peer, c Conn, size, n int, salt byte) ([]Segment, []byte)
 
 // burst collects the new data segments the DUT sends until it pauses for 30 ms. A segment that
 // repeats earlier bytes, such as gVisor's tail loss probe on a near-zero RTT, is left out.
-func burst(p *Peer) ([]Segment, int) {
+func burst(p *Peer) ([]Segment, int) { return burstUntil(p, 0) }
+
+// burstUntil is burst, but it returns as soon as n bytes of new data are in, when n is above 0.
+// A scenario that emulates a path delay answers the flight then, not 30 ms later: the pause would
+// lengthen the RTT the DUT sees on that flight past the one it measured on the handshake, and on
+// a loaded machine let the tail loss probe, due about 2 SRTT after the flight, fire before the
+// answer arrives.
+func burstUntil(p *Peer, n int) ([]Segment, int) {
 	var segs []Segment
 	sent := 0
 	high := p.RcvNxt
-	for {
+	for n <= 0 || sent < n {
 		s, ok := p.Await(30*time.Millisecond, isData)
 		if !ok {
 			return segs, sent
@@ -73,6 +80,7 @@ func burst(p *Peer) ([]Segment, int) {
 		sent += len(s.Payload)
 		high = s.Seq + uint32(len(s.Payload))
 	}
+	return segs, sent
 }
 
 // dataEnd is the sequence number after the last byte of data written from r's base.
@@ -226,12 +234,29 @@ func sackMultiHole(h *H) {
 	w.informed, w.informedTS = true, p.TSVal()
 	p.Send(r.ack(p.TSRecent))
 	dupacks(r, segs, arriving(segs, 1, 3, 5)...) // the second, fourth and sixth segments are lost
-	collect(p, h.Prompt()+50*time.Millisecond, w, r)
-	all := w.has(segs[1].Seq) && w.has(segs[3].Seq) && w.has(segs[5].Seq)
+	holes := func() bool { return w.has(segs[1].Seq) && w.has(segs[3].Seq) && w.has(segs[5].Seq) }
+	// the time the last hole arrived, not the end of the watch, which ends 150 ms after start
+	var allAt time.Time
+	deadline := h.Now().Add(h.Prompt() + 50*time.Millisecond)
+	for {
+		s, ok := p.Next(max(deadline.Sub(h.Now()), 0))
+		if !ok {
+			break
+		}
+		w.note(s)
+		r.take(s)
+		if allAt.IsZero() && holes() {
+			allAt = h.Now()
+		}
+	}
+	all := !allAt.IsZero()
 	h.Check("all-holes-in-one-round", all, "the three holes are resent before any new cumulative ACK",
 		fmt.Sprintf("holes resent: %v %v %v", w.has(segs[1].Seq), w.has(segs[3].Seq), w.has(segs[5].Seq)))
-	h.Check("before-rto", all && h.Now().Sub(start) < 180*time.Millisecond, "the holes are resent before an RTO could fire",
-		yesNo(all && h.Now().Sub(start) < 180*time.Millisecond, "before 180 ms", "not before 180 ms"))
+	if all {
+		h.Measure("holes-resent_ms", allAt.Sub(start).Milliseconds())
+	}
+	h.Check("before-rto", all && allAt.Sub(start) < 180*time.Millisecond, "the holes are resent before an RTO could fire",
+		yesNo(all && allAt.Sub(start) < 180*time.Millisecond, "before 180 ms", "not before 180 ms"))
 	ok := finish(p, r, w, dataEnd(r, data), 2*time.Second)
 	h.Check("completes", ok, "everything is acknowledged within 2 s", yesNo(ok, "complete", "incomplete"))
 	before := len(w.seen)
@@ -434,12 +459,58 @@ func limitedTransmit(h *H) { limitedTransmitAt(h, 8034, 0) }
 // first segment unmarked and Limited Transmit applies as on a real path.
 func limitedTransmitRACK(h *H) { limitedTransmitAt(h, 8036, ltRTT) }
 
-// ltRTT is the path delay of limitedTransmitRACK: a reorder window of about 49 ms, more than the
-// 40 ms from the first duplicate ACK to the end of the checks.
-const ltRTT = 200 * time.Millisecond
+// ltRTT is the path delay of limitedTransmitRACK. The handshake's RTT, 5 ms less, is the minimum
+// RTT, so the reorder window is at least ltReorder, about 99 ms: 59 ms more than the 40 ms from
+// the first duplicate ACK to the end of the checks, room for a slow testbench.
+const ltRTT = 400 * time.Millisecond
+
+// ltReorder is the shortest reorder window a RACK sender can have on ltRTT's path: a quarter of
+// the handshake's RTT, less 1 ms for a clock that counts whole milliseconds.
+const ltReorder = (ltRTT-5*time.Millisecond)/4 - time.Millisecond
+
+// ltAttempts bounds how often limitedTransmitRACK starts over when the testbench was too slow
+// for its checks to mean anything.
+const ltAttempts = 3
+
+// ltObservation is what one attempt of limitedTransmitAt saw: the new segments after each
+// duplicate ACK and the retransmissions, counting only what reached the testbench before the
+// reorder window could have ended.
+type ltObservation struct {
+	fresh   [2]int
+	rexmits int
+	// late counts the retransmissions that came once the reorder window could have ended, which
+	// RFC 8985 allows; they are measured, not checked.
+	late int
+	// probes counts the resends sent before the DUT had the first duplicate ACK.
+	probes int
+	// slow is set when the testbench sent the second duplicate ACK so late that a retransmission
+	// it caused could only arrive after the reorder window, out of the checks' reach.
+	slow bool
+}
 
 func limitedTransmitAt(h *H, port uint16, rtt time.Duration) {
 	l := h.Listen(port)
+	var o ltObservation
+	for i := 1; ; i++ {
+		o = limitedTransmitOnce(h, l, port, rtt)
+		if !o.slow || i == ltAttempts {
+			break
+		}
+		h.T.Logf("attempt %d: the testbench sent the second duplicate ACK too late for the reorder window; starting over", i)
+	}
+	h.Measure("testbench-too-slow", o.slow)
+	h.Measure("resends-before-the-first-dupack", o.probes)
+	if rtt > 0 {
+		h.Measure("resent-after-the-reorder-window", o.late)
+	}
+	for i, id := range []string{"first-dupack.new-data", "second-dupack.new-data"} {
+		h.Check(id, o.fresh[i] == 1, "the duplicate ACK lets exactly one new segment out within 20 ms", fmt.Sprintf("%d new segments", o.fresh[i]))
+	}
+	h.Check("no-retransmit-before-third", o.rexmits == 0, "nothing is resent after two duplicate ACKs", fmt.Sprintf("%d retransmissions", o.rexmits))
+}
+
+// limitedTransmitOnce runs limitedTransmitAt on a new connection.
+func limitedTransmitOnce(h *H, l Listener, port uint16, rtt time.Duration) ltObservation {
 	d := Dial{SYN: StandardSYN()}
 	if rtt > 0 {
 		d.AckDelay = rtt - 5*time.Millisecond // the minimum RTT, below every later sample
@@ -459,13 +530,57 @@ func limitedTransmitAt(h *H, port uint16, rtt time.Duration) {
 		// the first duplicate ACK comes back one path delay after the flight left
 		collect(p, rtt, w, nil)
 	}
+	// On RACK's path, a RACK sender may resend the first segment once the reorder window from
+	// the first duplicate ACK is over; whatever reaches the testbench before then is checked.
+	// Without a path delay the reorder window is about zero, so everything is checked.
+	o := ltObservation{rexmits: len(w.seen)}
+	var window time.Time
+	in := func() bool { return rtt == 0 || h.Now().Before(window) }
 	// 20 ms between the duplicate ACKs, as segments arriving one after another space them; sent
 	// back to back, the second reaches Linux before it has sent the first new segment on.
-	for i, id := range []string{"first-dupack.new-data", "second-dupack.new-data"} {
-		before := w.fresh
-		dupacks(r, segs, 1+i)
-		collect(p, 20*time.Millisecond, w, nil)
-		h.Check(id, w.fresh-before == 1, "the duplicate ACK lets exactly one new segment out within 20 ms", fmt.Sprintf("%d new segments", w.fresh-before))
+	// A resend whose TSecr is older than the first duplicate ACK was sent before the DUT had it,
+	// such as a tail loss probe a slow testbench let fire; it answers no duplicate ACK and is
+	// measured, not counted.
+	w.informed, w.informedTS = true, p.TSVal()
+	resent := map[uint32]bool{}
+	for seq := range w.seen {
+		resent[seq] = true
 	}
-	h.Check("no-retransmit-before-third", len(w.seen) == 0, "nothing is resent after two duplicate ACKs", fmt.Sprintf("%d retransmissions", len(w.seen)))
+	for i := range 2 {
+		if i == 0 {
+			window = h.Now().Add(ltReorder)
+		} else if rtt > 0 && h.Now().After(window.Add(-ltReorder/2)) {
+			// a retransmission this ACK caused could reach the testbench only after the window
+			o.slow = true
+		}
+		dupacks(r, segs, 1+i)
+		deadline := h.Now().Add(20 * time.Millisecond)
+		for {
+			s, ok := p.Next(max(deadline.Sub(h.Now()), 0))
+			if !ok {
+				break
+			}
+			high, fresh, probes := w.high, w.fresh, w.probes
+			w.note(s)
+			again := isData(s) && after(high, s.Seq) && w.probes == probes && !resent[s.Seq]
+			if again {
+				resent[s.Seq] = true
+			}
+			switch {
+			case !in() && again:
+				o.late++
+			case !in():
+			case again:
+				o.fresh[i] += w.fresh - fresh
+				o.rexmits++
+			default:
+				o.fresh[i] += w.fresh - fresh
+			}
+		}
+	}
+	o.probes = w.probes
+	if o.slow {
+		c.Abort()
+	}
+	return o
 }

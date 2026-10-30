@@ -317,3 +317,135 @@ func TestHarnessCatchesFINResentAfterADroppedAck(t *testing.T) {
 	got := tcpharness.Record(t, mutant("gvisor-drops-final-ack", dropAckOfFIN), scenario(t, "fin-passive-close"), 1)
 	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
 }
+
+// earlyResend resends the engine's lowest unacknowledged data segment the moment the n-th
+// duplicate ACK with SACK blocks reaches it, echoing that ACK's TSval, as a sender that counted n
+// duplicate ACKs as the threshold, or that ran RACK with no reorder window, would.
+type earlyResend struct {
+	tcpharness.DUT
+	n int
+	// stale keeps the segment's own TSecr, as a probe the engine sent before the ACK arrived
+	stale bool
+	out   chan []byte
+	mu    sync.Mutex
+	// by the testbench's port: the data segments sent, by sequence number, and the duplicate
+	// ACKs counted for the latest acknowledgment number
+	sent   map[uint16]map[uint32]tcpharness.Segment
+	ack    map[uint16]uint32
+	dups   map[uint16]int
+	closed bool
+}
+
+func (d *earlyResend) Emitted() <-chan []byte { return d.out }
+
+func (d *earlyResend) Inject(pkt []byte) error {
+	err := d.DUT.Inject(pkt)
+	s, perr := tcpharness.Parse(pkt)
+	if perr != nil || s.Flags != tcpharness.FlagACK || len(s.Payload) > 0 || len(s.Opts.SACK) == 0 {
+		return err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	port := s.Src.Port()
+	if a, ok := d.ack[port]; !ok || a != s.Ack {
+		d.ack[port], d.dups[port] = s.Ack, 0
+	}
+	d.dups[port]++
+	if seg, ok := d.sent[port][s.Ack]; ok && d.dups[port] == d.n && !d.closed {
+		if seg.Opts.TS != nil && s.Opts.TS != nil && !d.stale {
+			ts := *seg.Opts.TS
+			ts.Ecr = s.Opts.TS.Val
+			seg.Opts.TS = &ts
+		}
+		d.out <- seg.Marshal()
+	}
+	return err
+}
+
+func resendAtDupack(n int) func(tcpharness.DUT) tcpharness.DUT { return resendAt(n, false) }
+
+func resendAt(n int, stale bool) func(tcpharness.DUT) tcpharness.DUT {
+	return func(inner tcpharness.DUT) tcpharness.DUT {
+		d := &earlyResend{DUT: inner, n: n, stale: stale, out: make(chan []byte, 1024),
+			sent: map[uint16]map[uint32]tcpharness.Segment{}, ack: map[uint16]uint32{}, dups: map[uint16]int{}}
+		go func() {
+			for pkt := range inner.Emitted() {
+				if s, err := tcpharness.Parse(pkt); err == nil && len(s.Payload) > 0 {
+					d.mu.Lock()
+					if d.sent[s.Dst.Port()] == nil {
+						d.sent[s.Dst.Port()] = map[uint32]tcpharness.Segment{}
+					}
+					if _, ok := d.sent[s.Dst.Port()][s.Seq]; !ok {
+						d.sent[s.Dst.Port()][s.Seq] = s
+					}
+					d.mu.Unlock()
+				}
+				d.out <- pkt
+			}
+			d.mu.Lock()
+			d.closed = true
+			close(d.out)
+			d.mu.Unlock()
+		}()
+		return d
+	}
+}
+
+// On limited-transmit-rack's path, RACK's reorder window outlasts the checks, so a resend at
+// the first or the second duplicate ACK is one no correct sender makes.
+func TestHarnessCatchesResendAtFirstDupack(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-dupthresh-1", resendAtDupack(1)), scenario(t, "limited-transmit-rack"), 1)
+	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomeFail)
+}
+
+// A resend that echoes a TSecr older than the first duplicate ACK left before that ACK arrived,
+// as a probe on a loaded machine does; it answers no duplicate ACK and does not fail the check.
+func TestHarnessPassesOverAResendBeforeTheDupack(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-stale-probe", resendAt(1, true)), scenario(t, "limited-transmit-rack"), 1)
+	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomePass)
+}
+
+func TestHarnessCatchesResendAtSecondDupack(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-dupthresh-2", resendAtDupack(2)), scenario(t, "limited-transmit-rack"), 1)
+	wantOutcome(t, got, "limited-transmit-rack/no-retransmit-before-third", tcpharness.OutcomeFail)
+}
+
+// A sender with no reorder window resends the late segment at the first SACK.
+func TestHarnessCatchesResendWithinTheReorderWindow(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-no-reorder-window", resendAtDupack(1)), scenario(t, "rack-reorder"), 1)
+	wantOutcome(t, got, "rack-reorder/within-window.no-retransmit", tcpharness.OutcomeFail)
+}
+
+// delayResends holds every data segment that repeats a sequence number already sent for delay,
+// as a sender that resends a lost segment only on its probe or its RTO would be late.
+func delayResends(delay time.Duration) func(tcpharness.DUT) tcpharness.DUT {
+	return func(inner tcpharness.DUT) tcpharness.DUT {
+		d := &delayedACKs{DUT: inner, out: make(chan []byte, 1024)}
+		go func() {
+			defer close(d.out)
+			sent := map[uint32]bool{}
+			for pkt := range inner.Emitted() {
+				if s, err := tcpharness.Parse(pkt); err == nil && len(s.Payload) > 0 {
+					if sent[s.Seq] {
+						time.Sleep(delay)
+					}
+					sent[s.Seq] = true
+				}
+				d.out <- pkt
+			}
+		}()
+		return d
+	}
+}
+
+func TestHarnessCatchesLateRACKResend(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-late-resend", delayResends(150*time.Millisecond)), scenario(t, "rack-reorder"), 1)
+	wantOutcome(t, got, "rack-reorder/beyond-window.resent-early", tcpharness.OutcomeFail)
+}
+
+// A probe held back 400 ms comes after the RTO could, and fails tlp-tail-loss's probe check even
+// when a stalled testbench widens its bound.
+func TestHarnessCatchesLateTailLossProbe(t *testing.T) {
+	got := tcpharness.Record(t, mutant("gvisor-late-probe", delayResends(400*time.Millisecond)), scenario(t, "tlp-tail-loss"), 1)
+	wantOutcome(t, got, "tlp-tail-loss/probe-at-2srtt", tcpharness.OutcomeFail)
+}

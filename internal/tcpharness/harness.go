@@ -33,6 +33,11 @@ const SeedEnv = "WGFT_TEST_TCPHARNESS_SEED"
 type Known struct {
 	Observed string
 	Reason   string
+	// Sometimes marks a difference that a real-time engine shows on some runs and not on others,
+	// because it turns on timing the testbench does not control. A run without it is then logged
+	// as a pass, not reported as an unexpected one. A ClockedDUT runs the same way every time, so
+	// on one an entry with Sometimes is itself an error.
+	Sometimes bool
 }
 
 // Engine names one TCP engine and how to build a fresh DUT of it. New gets the scenario's seed;
@@ -81,6 +86,13 @@ func ScenarioSeed(run uint64, scenario string) uint64 {
 
 // Run runs every scenario as a subtest against a fresh DUT of e. A listed difference that no
 // check reached is an error when every scenario ran, and only logged when -run left some out.
+//
+// On a DUT on real time, a scenario that fails while the test process went stallLimit or longer
+// without running is run again on a fresh DUT, up to scenarioAttempts times in all: a loaded
+// machine that stops the testbench can make a correct DUT miss a bound, and the check cannot tell
+// that apart from the DUT's fault. The failed attempt stays in the log. A DUT that fails the same
+// way every time still fails, since only the last attempt counts; a DUT on the harness's clock is
+// never run again.
 func Run(t *testing.T, e Engine, scenarios []Scenario) {
 	seed := runSeed(t)
 	t.Logf("run seed: %d; replay with %s=%d", seed, SeedEnv, seed)
@@ -92,17 +104,19 @@ func Run(t *testing.T, e Engine, scenarios []Scenario) {
 			ss := ScenarioSeed(seed, s.Name)
 			t.Logf("refs: %s", s.Refs)
 			t.Logf("scenario seed: %d", ss)
-			if e.Prepare != nil {
-				e.Prepare(t, s)
-			}
-			h := newH(t, e, s.Name, e.New(t, ss), ss)
-			// a deferred call also runs when Require ends the scenario through SkipNow or FailNow
-			defer func() {
-				for k := range h.outcome {
+			for n := 1; ; n++ {
+				a := attempt(t, e, s, ss)
+				for k := range a.outcome {
 					seen[k] = true
 				}
-			}()
-			s.Run(h)
+				if a.retry(n) {
+					t.Logf("RETRY  %s on %s: attempt %d failed while the test process went %v without running; the scenario runs again on a fresh DUT",
+						s.Name, e.Name, n, a.stall.Round(time.Millisecond))
+					continue
+				}
+				a.report(t)
+				return
+			}
 		})
 	}
 	var unreached []string
@@ -131,50 +145,160 @@ const (
 )
 
 // Record runs one scenario against a fresh DUT of e without failing t, and returns the outcomes
-// of each check by key, one per time the scenario ran the check, in order. It lets the harness test itself: a scenario run against a deliberately wrong
-// engine must fail the check meant to catch the fault.
+// of each check by key, one per time the scenario ran the check, in order. It lets the harness
+// test itself: a scenario run against a deliberately wrong engine must fail the check meant to
+// catch the fault.
 func Record(t *testing.T, e Engine, s Scenario, seed uint64) map[string][]string {
+	a := attempt(t, e, s, seed)
+	if a.outcome == nil {
+		t.Fatalf("scenario %s did not start: %v", s.Name, a.msgs)
+	}
+	return a.outcome
+}
+
+// stallLimit and scenarioAttempts are Run's rule for running a failed scenario again. 10 ms is
+// below the margin every timed check leaves a correct DUT, and above the few milliseconds an idle
+// machine's scheduler takes.
+var stallLimit = 10 * time.Millisecond
+
+const scenarioAttempts = 3
+
+// attemptResult is one run of a scenario.
+type attemptResult struct {
+	outcome map[string][]string // nil when the scenario did not start
+	msgs    []string            // the failures, in order
+	failed  bool
+	skipped bool
+	clocked bool
+	stall   time.Duration // the longest the test process went without running, on real time
+}
+
+// attempt runs s once against a fresh DUT of e with a recorder, and closes the DUT and whatever
+// else the scenario registered for cleanup before it returns, so another attempt can follow.
+func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
 	rec := &recorder{TB: t}
-	var h *H
+	var a attemptResult
+	var w *stallWatch
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		if e.Prepare != nil {
 			e.Prepare(rec, s)
 		}
-		h = newH(rec, e, s.Name, e.New(rec, seed), seed)
+		d := e.New(rec, seed)
+		_, a.clocked = d.(ClockedDUT)
+		h := newH(rec, e, s.Name, d, seed)
+		a.outcome = h.outcome
+		if !a.clocked {
+			w = watchStalls()
+		}
 		s.Run(h)
 	}()
 	<-done
-	if h == nil {
-		t.Fatalf("scenario %s did not start: %v", s.Name, rec.msgs)
+	if w != nil {
+		a.stall = w.end()
 	}
-	return h.outcome
+	rec.cleanup()
+	a.msgs, a.failed, a.skipped = rec.msgs, rec.failed, rec.skipped
+	return a
 }
 
-// recorder is a testing.TB that logs failures instead of failing, and ends the scenario's
-// goroutine where the real one would stop the test.
+// retry reports whether Run runs the scenario again after its n-th attempt.
+func (a attemptResult) retry(n int) bool {
+	return a.failed && !a.clocked && a.stall >= stallLimit && n < scenarioAttempts
+}
+
+// report hands the attempt's result to t, as if the scenario had run on t itself.
+func (a attemptResult) report(t testing.TB) {
+	t.Helper()
+	for _, m := range a.msgs {
+		t.Error(m)
+	}
+	switch {
+	case a.failed && len(a.msgs) == 0:
+		t.FailNow()
+	case a.skipped:
+		t.SkipNow()
+	}
+}
+
+// recorder is a testing.TB that logs failures instead of failing, ends the scenario's goroutine
+// where the real one would stop the test, and keeps the cleanups for attempt to run.
 type recorder struct {
 	testing.TB
-	msgs []string
+	msgs     []string
+	failed   bool
+	skipped  bool
+	cleanups []func()
 }
 
 func (r *recorder) Errorf(format string, args ...any) {
+	r.TB.Helper()
 	m := fmt.Sprintf(format, args...)
 	r.msgs = append(r.msgs, m)
+	r.failed = true
 	r.TB.Logf("recorded: %s", m)
 }
-func (r *recorder) Error(args ...any) { r.Errorf("%s", fmt.Sprint(args...)) }
+func (r *recorder) Error(args ...any) { r.TB.Helper(); r.Errorf("%s", fmt.Sprint(args...)) }
 func (r *recorder) Fatalf(format string, args ...any) {
+	r.TB.Helper()
 	r.Errorf(format, args...)
 	runtime.Goexit()
 }
-func (r *recorder) Fatal(args ...any)                { r.Fatalf("%s", fmt.Sprint(args...)) }
-func (r *recorder) Fail()                            {}
-func (r *recorder) FailNow()                         { runtime.Goexit() }
-func (r *recorder) SkipNow()                         { runtime.Goexit() }
-func (r *recorder) Skipf(format string, args ...any) { r.TB.Logf(format, args...); runtime.Goexit() }
-func (r *recorder) Skip(args ...any)                 { r.TB.Log(args...); runtime.Goexit() }
+func (r *recorder) Fatal(args ...any) { r.TB.Helper(); r.Fatalf("%s", fmt.Sprint(args...)) }
+func (r *recorder) Fail()             { r.failed = true }
+func (r *recorder) Failed() bool      { return r.failed }
+func (r *recorder) FailNow()          { r.failed = true; runtime.Goexit() }
+func (r *recorder) SkipNow()          { r.skipped = true; runtime.Goexit() }
+func (r *recorder) Skipped() bool     { return r.skipped }
+func (r *recorder) Skipf(format string, args ...any) {
+	r.TB.Helper()
+	r.TB.Logf(format, args...)
+	r.SkipNow()
+}
+func (r *recorder) Skip(args ...any) { r.TB.Helper(); r.TB.Log(args...); r.SkipNow() }
+func (r *recorder) Cleanup(f func()) { r.cleanups = append(r.cleanups, f) }
+func (r *recorder) cleanup() {
+	for i := len(r.cleanups) - 1; i >= 0; i-- {
+		r.cleanups[i]()
+	}
+	r.cleanups = nil
+}
+
+// stallWatch measures the longest the test process went without running: the longest a goroutine
+// that sleeps 1 ms at a time overslept, which a loaded machine's scheduler, a CPU quota or a
+// stopped virtual CPU stretches for every goroutine at once.
+type stallWatch struct {
+	stop  chan struct{}
+	done  chan struct{}
+	worst time.Duration
+}
+
+func watchStalls() *stallWatch {
+	w := &stallWatch{stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(w.done)
+		last := time.Now()
+		for {
+			select {
+			case <-w.stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			now := time.Now()
+			w.worst = max(w.worst, now.Sub(last)-time.Millisecond)
+			last = now
+		}
+	}()
+	return w
+}
+
+// end stops the watch and returns the longest stall it saw.
+func (w *stallWatch) end() time.Duration {
+	close(w.stop)
+	<-w.done
+	return w.worst
+}
 
 // H is the context of one scenario on one DUT.
 type H struct {
@@ -204,9 +328,15 @@ func (h *H) Check(id string, ok bool, what, got string) bool {
 	case ok && !known:
 		h.outcome[key] = append(h.outcome[key], OutcomePass)
 		h.T.Logf("PASS  %s: %s; got: %s", key, what, got)
+	case ok && known && k.Sometimes && !h.clocked():
+		h.outcome[key] = append(h.outcome[key], OutcomePass)
+		h.T.Logf("PASS  %s: %s; got: %s; the known difference, which shows only on some runs, did not show on this one", key, what, got)
 	case ok && known:
 		h.outcome[key] = append(h.outcome[key], OutcomeUnexpected)
 		h.T.Errorf("UNEXPECTED PASS  %s on %s: %s; got: %s; the list says: %s; remove the entry", key, h.engine.Name, what, got, k.Observed)
+	case !ok && known && k.Sometimes && h.clocked():
+		h.outcome[key] = append(h.outcome[key], OutcomeChanged)
+		h.T.Errorf("CHANGED DIFFERENCE  %s on %s: %s; got: %s; the list marks it as shown only on some runs, which a DUT on the harness's clock cannot be", key, h.engine.Name, what, got)
 	case !ok && known && got == k.Observed:
 		h.outcome[key] = append(h.outcome[key], OutcomeKnown)
 		h.T.Logf("KNOWN DIFFERENCE  %s on %s: %s; got: %s; reason: %s", key, h.engine.Name, what, got, k.Reason)
@@ -231,6 +361,12 @@ func (h *H) Require(id string, ok bool, what, got string) {
 		h.T.SkipNow()
 	}
 	h.T.FailNow()
+}
+
+// clocked reports whether the DUT runs on the harness's clock.
+func (h *H) clocked() bool {
+	_, ok := h.DUT.(ClockedDUT)
+	return ok
 }
 
 // Measure reports a value for the comparison tables. It asserts nothing.
@@ -282,6 +418,9 @@ type Peer struct {
 	tsBase   uint32
 	TSRecent uint32 // the latest TSval of the DUT
 	SynTSVal uint32 // the TSval of the testbench's SYN
+	// AckHeld is how long the testbench actually held the final ACK of the handshake back for
+	// Dial.AckDelay: longer than asked when a loaded machine stopped it.
+	AckHeld time.Duration
 
 	DutAck    uint32 // the latest acknowledgment number from the DUT
 	DutWindow int    // the latest window the DUT advertised, in bytes
@@ -552,7 +691,9 @@ func (h *H) HandshakeFrom(p *Peer, d Dial) Segment {
 	h.Require("handshake.synack", ok && synack.Ack == p.ISS+1, "a SYN-ACK acknowledging ISS+1 within 2 s", synackString(p, synack, ok))
 	p.adopt(syn, synack)
 	if d.AckDelay > 0 {
+		start := h.Now()
 		p.Quiet(d.AckDelay)
+		p.AckHeld = h.Now().Sub(start)
 	}
 	p.SendAck()
 	return synack
