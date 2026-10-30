@@ -11,6 +11,19 @@ import (
 // pinned configuration, in which SACK is on and RACK, TLP and F-RTO are off, so its recovery is
 // RFC 6675's duplicate-threshold rule with PRR.
 
+// sackRTT is the handshake RTT of the SACK family. A minimum RTT above zero gives a RACK sender a
+// reorder window above zero: with a zero window and a clock too coarse to order the segments of
+// one burst, as on Windows, gVisor's RACK marks segments sent in the same tick as the latest
+// SACKed one lost, and resends segments a later ACK of the same burst SACKs.
+const sackRTT = 20 * time.Millisecond
+
+// sackConnect opens a connection for the SACK family, with its handshake RTT.
+func sackConnect(h *H, l Listener, port uint16) (*Peer, Conn) {
+	h.T.Helper()
+	p, _, c := h.ConnectWith(l, port, Dial{SYN: StandardSYN(), AckDelay: sackRTT})
+	return p, c
+}
+
 // segSize is the payload the DUT puts in a full segment to p: MSS less the timestamps option.
 func segSize(p *Peer) int {
 	n := MTU - 40
@@ -192,7 +205,7 @@ func intact(h *H, r *receiver, data []byte) {
 func sackMultiHole(h *H) {
 	const port = 8030
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	segs, data := flight(h, p, c, 9, 0xa1)
 	start := h.Now()
@@ -225,7 +238,7 @@ func sackMultiHole(h *H) {
 func sackRTOKeepsSACKed(h *H) {
 	const port = 8031
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	segs, data := flight(h, p, c, 8, 0xa2)
 	r := newReceiver(p)
@@ -263,7 +276,7 @@ func sackRTOKeepsSACKed(h *H) {
 func sackRTOIslands(h *H) {
 	const port = 8035
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	// 13400 bytes: ten segments on every engine, gVisor's 1340-byte segments included
 	segs, data := flightOf(h, p, c, 10*1340, 10, 0xa6)
@@ -298,7 +311,7 @@ func sackPMTUSplit(h *H) {
 	const port = 8032
 	const newMTU = 1000
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	segs, data := flight(h, p, c, 8, 0xa3)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	r := newReceiver(p)
@@ -366,7 +379,7 @@ func sackPMTUSplit(h *H) {
 func sackRenege(h *H) {
 	const port = 8033
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, c := sackConnect(h, l, port)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	segs, data := flight(h, p, c, 8, 0xa4)
 	r := newReceiver(p)
@@ -396,12 +409,29 @@ func sackRenege(h *H) {
 
 // limitedTransmit has the application write more than the initial window and loses the first
 // segment. RFC 3042: each of the first two duplicate ACKs lets the sender send one new segment,
-// and it retransmits nothing before the third. The duplicate ACKs come 20
-// ms apart, as the arrivals of the segments that cause them would space them.
-func limitedTransmit(h *H) {
-	const port = 8034
+// and it retransmits nothing before the third. The duplicate ACKs come 20 ms apart, as the
+// arrivals of the segments that cause them would space them. This variant runs at the
+// testbench's near-zero RTT with the reference Linux's RACK off, so it covers RFC 3042 under the
+// duplicate-threshold rule alone.
+func limitedTransmit(h *H) { limitedTransmitAt(h, 8034, 0) }
+
+// limitedTransmitRACK is limitedTransmit on a path with an RTT of ltRTT and the reference
+// Linux's RACK on. RFC 8985's reorder window, a quarter of the minimum RTT, is then longer than
+// the two duplicate ACKs and the time the checks watch after them, so a RACK sender keeps the
+// first segment unmarked and Limited Transmit applies as on a real path.
+func limitedTransmitRACK(h *H) { limitedTransmitAt(h, 8036, ltRTT) }
+
+// ltRTT is the path delay of limitedTransmitRACK: a reorder window of about 49 ms, more than the
+// 40 ms from the first duplicate ACK to the end of the checks.
+const ltRTT = 200 * time.Millisecond
+
+func limitedTransmitAt(h *H, port uint16, rtt time.Duration) {
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	d := Dial{SYN: StandardSYN()}
+	if rtt > 0 {
+		d.AckDelay = rtt - 5*time.Millisecond // the minimum RTT, below every later sample
+	}
+	p, _, c := h.ConnectWith(l, port, d)
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	data := pattern(15*segSize(p), 0xa5)
 	if _, err := c.Write(data); err != nil {
@@ -412,6 +442,10 @@ func limitedTransmit(h *H) {
 		fmt.Sprintf("%d of %d bytes in %d segments", sent, len(data), len(segs)))
 	r := newReceiver(p)
 	w := newWatch(segs)
+	if rtt > 0 {
+		// the first duplicate ACK comes back one path delay after the flight left
+		collect(p, rtt, w, nil)
+	}
 	// 20 ms between the duplicate ACKs, as segments arriving one after another space them; sent
 	// back to back, the second reaches Linux before it has sent the first new segment on.
 	for i, id := range []string{"first-dupack.new-data", "second-dupack.new-data"} {

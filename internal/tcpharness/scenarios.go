@@ -26,6 +26,7 @@ var Scenarios = []Scenario{
 	{Name: "sack-pmtu-split", Refs: "RFC 1191, RFC 9293 3.7.3; wgstack-performance.md, the scoreboard records", Run: sackPMTUSplit},
 	{Name: "sack-renege", Refs: "RFC 2018 8, RFC 6675 5.1; Linux tcp_check_sack_reneging; wgstack-performance.md, the scoreboard records", Run: sackRenege},
 	{Name: "limited-transmit", Refs: "RFC 3042, RFC 6675 5", Run: limitedTransmit},
+	{Name: "limited-transmit-rack", Refs: "RFC 3042, RFC 8985 6.2", Run: limitedTransmitRACK, Linux: rackLinux},
 	{Name: "rack-reorder", Refs: "RFC 8985 6.2 and 7; wgstack-performance.md, RACK-TLP", Run: rackReorder, Linux: rackLinux},
 	{Name: "tlp-tail-loss", Refs: "RFC 8985 7; packetimpact tcp_rack", Run: tlpTailLoss, Linux: rackLinux},
 	{Name: "thin-stream-loss", Refs: "RFC 8985 6 and 7; wgstack-performance.md, thin streams", Run: thinStream, Linux: rackLinux},

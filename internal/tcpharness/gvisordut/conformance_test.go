@@ -59,6 +59,15 @@ var Known = map[string]tcpharness.Known{
 		Observed: "0 new segments",
 		Reason:   "as limited-transmit/first-dupack.new-data: the first segment was already resent by RACK",
 	},
+	"limited-transmit-rack/first-dupack.new-data": {
+		Observed: "0 new segments",
+		Reason: "on a 200 ms path, with RACK's reorder window keeping the first segment unmarked, gVisor sends no " +
+			"new data on the first two duplicate ACKs in this scenario",
+	},
+	"limited-transmit-rack/second-dupack.new-data": {
+		Observed: "0 new segments",
+		Reason:   "as limited-transmit-rack/first-dupack.new-data",
+	},
 	"limited-transmit/no-retransmit-before-third": {
 		Observed: "1 retransmissions",
 		Reason:   "gVisor's RACK resends the first segment at the first SACK, before any duplicate-ACK threshold",

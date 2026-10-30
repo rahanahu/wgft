@@ -10,6 +10,20 @@ import (
 // Known is wgstack's expected-difference list. Only the test author and the owner add entries
 // (wgstack-verification.md); each entry cites the wgstack.md choice it follows.
 var Known = map[string]tcpharness.Known{
+	"limited-transmit/first-dupack.new-data": {
+		Observed: "0 new segments",
+		Reason: "wgstack-performance.md, RACK-TLP: wgstack always runs RACK, and at the testbench's near-zero RTT its reorder " +
+			"window is about zero, so it resends the first segment at the first SACK instead of sending new data; " +
+			"limited-transmit-rack checks Limited Transmit on a path with an RTT",
+	},
+	"limited-transmit/second-dupack.new-data": {
+		Observed: "0 new segments",
+		Reason:   "as limited-transmit/first-dupack.new-data: RACK has already resent the first segment",
+	},
+	"limited-transmit/no-retransmit-before-third": {
+		Observed: "1 retransmissions",
+		Reason:   "wgstack-performance.md, RACK-TLP: RACK, always on, resends the first segment before any duplicate-ACK threshold",
+	},
 	"handshake-mss-floor/mss535.synack": {
 		Observed: "no SYN-ACK",
 		Reason:   "wgstack.md, TCP の機能, MSS, and packet-validation.md, TCP の MSS の下限: the ingress drops SYNs with an MSS of 1 to 535",

@@ -69,6 +69,10 @@ SACK を交渉する台本は、受け手として返す SACK の block の内�
 台本の族は、固定の値の上に族の値を重ねられます。
 SACK による回復の族は固定の値のまま流すので、Linux は RACK と TLP を使わずに、RFC 6675 の重複の閾値の規則と PRR で回復します。
 RACK-TLP の族は `net.ipv4.tcp_recovery=1` と `net.ipv4.tcp_early_retrans=3` を重ねます。
+Limited Transmit は 2 つの台本で確かめます。
+1 つは RACK を切った固定の値で、往復の時間をほぼ 0 にして流します。
+もう 1 つは RACK を有効にし、往復 200 ms の経路で流します。
+RACK の並べ替えの窓は最小の RTT の 4 分の 1 なので、往復の時間がほぼ 0 だと RACK は最初の重複した ACK の直後に穴を損失と判定し、Limited Transmit の働く余地が無くなるためです。
 `linuxdut` は TUN の GSO も切ります。
 GSO が有効だと、Linux の TCP は複数の segment を 1 つの buffer にまとめ、TSO の先送りで輻輳の窓が許す segment の送信を遅らせます。
 この遅れは回復と輻輳の制御の規則から生じたものではないので、台本の時間の確かめに入れません。
