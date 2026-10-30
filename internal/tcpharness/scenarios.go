@@ -22,6 +22,7 @@ var Scenarios = []Scenario{
 	{Name: "newreno-recovery", Refs: "RFC 5681 3.2, RFC 6582 3.2; packetimpact tcp_rack for the RACK variant", Run: newRenoRecovery},
 	{Name: "sack-multi-hole", Refs: "RFC 6675 4 and 5, RFC 6937; wgstack-performance.md, SACK recovery", Run: sackMultiHole},
 	{Name: "sack-rto-keeps-sacked", Refs: "RFC 6675 5.1; wgstack-performance.md, the scoreboard records", Run: sackRTOKeepsSACKed},
+	{Name: "sack-rto-islands", Refs: "RFC 6675 5.1, RFC 2018 4; wgstack-performance.md, the scoreboard records", Run: sackRTOIslands},
 	{Name: "sack-pmtu-split", Refs: "RFC 1191, RFC 9293 3.7.3; wgstack-performance.md, the scoreboard records", Run: sackPMTUSplit},
 	{Name: "sack-renege", Refs: "RFC 2018 8, RFC 6675 5.1; Linux tcp_check_sack_reneging; wgstack-performance.md, the scoreboard records", Run: sackRenege},
 	{Name: "limited-transmit", Refs: "RFC 3042, RFC 6675 5", Run: limitedTransmit},

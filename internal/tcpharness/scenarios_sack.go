@@ -25,7 +25,13 @@ func segSize(p *Peer) int {
 // gVisor leaving room for SACK blocks, so the scenarios work from the segments the DUT sent.
 func flight(h *H, p *Peer, c Conn, n int, salt byte) ([]Segment, []byte) {
 	h.T.Helper()
-	data := pattern(n*segSize(p), salt)
+	return flightOf(h, p, c, n*segSize(p), n, salt)
+}
+
+// flightOf is flight for size bytes in at least n segments.
+func flightOf(h *H, p *Peer, c Conn, size, n int, salt byte) ([]Segment, []byte) {
+	h.T.Helper()
+	data := pattern(size, salt)
 	if _, err := c.Write(data); err != nil {
 		h.T.Fatalf("write: %v", err)
 	}
@@ -61,9 +67,10 @@ func dataEnd(r *receiver, data []byte) uint32 { return r.base + uint32(len(data)
 
 // rexmitWatch notes which sequence numbers below high the DUT sends again.
 type rexmitWatch struct {
-	high  uint32
-	seen  map[uint32]int
-	fresh int // new segments, beyond high
+	high   uint32
+	seen   map[uint32]int
+	ranges []SACKBlock // the byte ranges sent again
+	fresh  int         // new segments, beyond high
 }
 
 func newWatch(segs []Segment) *rexmitWatch {
@@ -77,6 +84,7 @@ func (w *rexmitWatch) note(s Segment) {
 	}
 	if after(w.high, s.Seq) {
 		w.seen[s.Seq]++
+		w.ranges = append(w.ranges, SACKBlock{s.Seq, s.Seq + uint32(len(s.Payload))})
 		return
 	}
 	w.high = max32(w.high, s.Seq+uint32(len(s.Payload)))
@@ -85,18 +93,30 @@ func (w *rexmitWatch) note(s Segment) {
 
 func (w *rexmitWatch) has(seq uint32) bool { return w.seen[seq] > 0 }
 
-// onlyOf reports whether every retransmission is at one of the allowed sequence numbers.
-func (w *rexmitWatch) onlyOf(allowed ...uint32) bool {
-	ok := map[uint32]bool{}
-	for _, a := range allowed {
-		ok[a] = true
-	}
-	for s := range w.seen {
-		if !ok[s] {
-			return false
+// resentIn reports whether a byte of any of the ranges was sent again. Ranges, not sequence
+// numbers, are compared, because a resend may be cut differently from the original, as after
+// a lower path MTU.
+func (w *rexmitWatch) resentIn(ranges ...SACKBlock) bool {
+	for _, x := range w.ranges {
+		for _, r := range ranges {
+			if after(x.Right, r.Left) && after(r.Right, x.Left) {
+				return true
+			}
 		}
 	}
-	return true
+	return false
+}
+
+// reset forgets the retransmissions seen so far.
+func (w *rexmitWatch) reset() { w.seen, w.ranges = map[uint32]int{}, nil }
+
+// rangesOf returns the byte ranges of the listed segments.
+func rangesOf(segs []Segment, idx ...int) []SACKBlock {
+	var out []SACKBlock
+	for _, i := range idx {
+		out = append(out, SACKBlock{segs[i].Seq, segs[i].Seq + uint32(len(segs[i].Payload))})
+	}
+	return out
 }
 
 // dupacks has the receiver take each listed segment and answer with an ACK carrying its SACK
@@ -191,8 +211,9 @@ func sackMultiHole(h *H) {
 	h.Check("completes", ok, "everything is acknowledged within 2 s", yesNo(ok, "complete", "incomplete"))
 	before := len(w.seen)
 	collect(p, 300*time.Millisecond, w, nil)
-	h.Check("sacked-not-resent", w.onlyOf(segs[1].Seq, segs[3].Seq, segs[5].Seq), "no SACKed segment is sent again",
-		fmt.Sprintf("%d distinct segments resent", len(w.seen)))
+	sacked := rangesOf(segs, arriving(segs, 1, 3, 5)...)
+	h.Check("sacked-not-resent", !w.resentIn(sacked...), "no SACKed byte is sent again",
+		yesNo(w.resentIn(sacked...), "SACKed resent", "none"))
 	h.Check("quiet-after", len(w.seen) == before, "nothing is resent after the full ACK", fmt.Sprintf("%d more", len(w.seen)-before))
 	intact(h, r, data)
 }
@@ -219,14 +240,54 @@ func sackRTOKeepsSACKed(h *H) {
 	before := w.seen[segs[1].Seq]
 	rto, ok := p.Await(3*time.Second, func(s Segment) bool { w.note(s); return isData(s) && s.Seq == segs[1].Seq })
 	h.Require("rto", ok && w.seen[segs[1].Seq] > before, "an RTO resends the first hole", segDesc(rto, ok))
-	w.seen = map[uint32]int{} // count only what follows the RTO
-	w.seen[segs[1].Seq] = 1
+	w.reset() // count only what follows the RTO
 	r.take(rto)
+	// The ACK of the repaired hole opens the window after the RTO. The testbench takes the burst
+	// it lets out before it answers again, so a go-back-N resend of SACKed data shows.
+	p.Send(r.ack(p.TSRecent))
+	collect(p, 50*time.Millisecond, w, r)
 	ok = finish(p, r, w, dataEnd(r, data), 3*time.Second)
 	h.Check("completes", ok, "everything is acknowledged within 3 s of the RTO", yesNo(ok, "complete", "incomplete"))
-	collect(p, 300*time.Millisecond, w, nil) // a go-back-N resend arrives after the cumulative ACK
-	h.Check("sacked-not-resent-after-rto", w.onlyOf(segs[1].Seq, segs[5].Seq), "after the RTO only the two holes are resent",
-		fmt.Sprintf("%d distinct segments resent after the RTO", len(w.seen)))
+	collect(p, 300*time.Millisecond, w, nil)
+	sacked := rangesOf(segs, arriving(segs, 1, 5)...)
+	h.Check("sacked-not-resent-after-rto", !w.resentIn(sacked...), "after the RTO no SACKed byte is resent",
+		yesNo(w.resentIn(sacked...), "SACKed resent", "none"))
+	intact(h, r, data)
+}
+
+// sackRTOIslands loses every other segment of a ten-segment flight, the first included, so the
+// RTO comes with five SACKed islands. After the RTO resend repairs the first hole, the island
+// after it joins the cumulative ACK and four remain, one more than the three SACK blocks an ACK
+// carries with timestamps. A sender that kept its scoreboard across the RTO still skips the
+// island no ACK mentions any more; one that rebuilt it from the latest ACK resends it.
+func sackRTOIslands(h *H) {
+	const port = 8035
+	l := h.Listen(port)
+	p, _, c := h.Connect(l, port, StandardSYN())
+	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
+	// 13400 bytes: ten segments on every engine, gVisor's 1340-byte segments included
+	segs, data := flightOf(h, p, c, 10*1340, 10, 0xa6)
+	h.Require("ten-segments", len(segs) == 10, "ten segments", fmt.Sprintf("%d segments", len(segs)))
+	r := newReceiver(p)
+	w := newWatch(segs)
+	islands := []int{1, 3, 5, 7, 9}
+	dupacks(r, segs, islands...)
+	collect(p, h.Prompt()+50*time.Millisecond, w, nil) // the fast retransmissions are lost
+	before := w.seen[segs[0].Seq]
+	rto, ok := p.Await(3*time.Second, func(s Segment) bool { w.note(s); return isData(s) && s.Seq == segs[0].Seq })
+	h.Require("rto", ok && w.seen[segs[0].Seq] > before, "an RTO resends the first segment", segDesc(rto, ok))
+	w.reset()
+	r.take(rto)
+	a := r.ack(p.TSRecent)
+	h.Measure("sack-blocks-after-rto", len(a.Opts.SACK))
+	p.Send(a)
+	collect(p, 50*time.Millisecond, w, r)
+	ok = finish(p, r, w, dataEnd(r, data), 3*time.Second)
+	h.Check("completes", ok, "everything is acknowledged within 3 s of the RTO", yesNo(ok, "complete", "incomplete"))
+	collect(p, 300*time.Millisecond, w, nil)
+	sacked := rangesOf(segs, islands...)
+	h.Check("islands-not-resent", !w.resentIn(sacked...), "after the RTO no island is resent, not even the one the ACKs no longer mention",
+		yesNo(w.resentIn(sacked...), "SACKed resent", "none"))
 	intact(h, r, data)
 }
 
@@ -251,7 +312,26 @@ func sackPMTUSplit(h *H) {
 	p.h.DUT.Inject(FragNeeded(PeerAddr, segs[1].Marshal(), newMTU))
 	start := h.Now()
 	over := 0
+	// The burst the ICMP lets out is taken whole before the testbench answers, so a sender that
+	// builds segments as they are pulled still shows whether it resends SACKed bytes.
+	w.reset()
 	deadline := h.Now().Add(3 * time.Second)
+	for {
+		s, ok := p.Next(50 * time.Millisecond)
+		if !ok {
+			break
+		}
+		w.note(s)
+		if isData(s) {
+			if len(s.Marshal()) > newMTU {
+				over++
+			}
+			r.take(s)
+		}
+	}
+	sackedRange := SACKBlock{segs[2].Seq, segs[3].Seq + uint32(len(segs[3].Payload))}
+	resentSACKed := w.resentIn(sackedRange)
+	p.Send(r.ack(p.TSRecent))
 	end := dataEnd(r, data)
 	for after(end, r.cum) {
 		s, ok := p.Next(max(deadline.Sub(h.Now()), 0))
@@ -273,8 +353,9 @@ func sackPMTUSplit(h *H) {
 	h.Check("completes", done, "the flight is resent and acknowledged within 3 s", yesNo(done, "complete", "incomplete"))
 	h.Check("within-new-mtu", over == 0, fmt.Sprintf("every segment after the ICMP fits the new MTU of %d", newMTU), fmt.Sprintf("%d segments too large", over))
 	collect(p, 300*time.Millisecond, w, nil)
-	h.Check("sacked-not-resent", !w.has(segs[2].Seq) && !w.has(segs[3].Seq), "the two SACKed segments are not resent",
-		fmt.Sprintf("SACKed segments resent: %v %v", w.has(segs[2].Seq), w.has(segs[3].Seq)))
+	resentSACKed = resentSACKed || w.resentIn(sackedRange)
+	h.Check("sacked-not-resent", !resentSACKed, "no byte of the two SACKed segments is resent",
+		yesNo(resentSACKed, "SACKed resent", "none"))
 	intact(h, r, data)
 }
 
@@ -302,8 +383,9 @@ func sackRenege(h *H) {
 	fresh.take(segs[0])
 	fresh.take(hole)
 	p.Send(fresh.ack(p.TSRecent))
-	s3, ok := p.Await(time.Second, func(s Segment) bool { w.note(s); return isData(s) && s.Seq == segs[2].Seq })
-	h.Check("resends-sacked", ok, "the first segment the receiver dropped is resent within 1 s", segDesc(s3, ok))
+	// Linux re-arms its timer to max(SRTT/2, 10 ms) on a renege; 150 ms is below the RTO floor.
+	s3, ok := p.Await(150*time.Millisecond, func(s Segment) bool { w.note(s); return isData(s) && s.Seq == segs[2].Seq })
+	h.Check("resends-sacked", ok, "the first segment the receiver dropped is resent within 150 ms, before an RTO", segDesc(s3, ok))
 	if ok {
 		fresh.take(s3)
 	}

@@ -20,7 +20,10 @@ var rackLinux = [][2]string{
 // rackConnect opens a connection whose handshake RTT is rackRTT.
 func rackConnect(h *H, l Listener, port uint16) (*Peer, Conn) {
 	h.T.Helper()
-	p, _, c := h.ConnectWith(l, port, Dial{SYN: StandardSYN(), AckDelay: rackRTT})
+	// 5 ms short of rackRTT: the handshake sets the minimum RTT, and RACK ignores the ACK of a
+	// retransmission that comes back faster than the minimum RTT, which a later sample a little
+	// under rackRTT would otherwise be.
+	p, _, c := h.ConnectWith(l, port, Dial{SYN: StandardSYN(), AckDelay: rackRTT - 5*time.Millisecond})
 	h.Require("sack", p.SACK, "SACK negotiated", yesNo(p.SACK, "SACK", "no SACK"))
 	return p, c
 }
@@ -143,17 +146,25 @@ func tlpTailLoss(h *H) {
 		h.Measure("probe-after-ack_ms", pto.Milliseconds())
 	}
 	// The probe comes about 2 SRTT after the ACK; an RTO would come no earlier than its 200 ms
-	// floor.
-	ok := !probeAt.IsZero() && pto >= rackRTT*3/2 && pto < 200*time.Millisecond
-	h.Check("probe-at-2srtt", ok, "the first segment after the ACK of the rest is a probe about 2 SRTT later, from 1.5 RTT to below the 200 ms RTO floor",
-		yesNo(probeAt.IsZero(), "nothing sent", yesNo(ok, "from 1.5 RTT to below 200 ms", "outside 1.5 RTT to 200 ms")))
+	// floor, so 170 ms leaves the RTO out with a margin.
+	ok := !probeAt.IsZero() && pto >= rackRTT*3/2 && pto <= 170*time.Millisecond
+	h.Check("probe-at-2srtt", ok, "the first segment after the ACK of the rest is a probe about 2 SRTT later, from 1.5 RTT to 170 ms",
+		yesNo(probeAt.IsZero(), "nothing sent", yesNo(ok, "from 1.5 RTT to 170 ms", "outside 1.5 RTT to 170 ms")))
 	done := !after(end, r.cum)
 	took := h.Now().Sub(ackAt)
 	h.Measure("recovered-after-ack_ms", took.Milliseconds())
 	// Through the probe, recovery ends near 2 SRTT plus one RTT after the ACK; through an RTO, no
 	// earlier than the 200 ms floor plus one RTT, 250 ms.
-	h.Check("recovers-before-rto", done && took < 225*time.Millisecond, "both tail segments are acknowledged within 225 ms of the ACK, sooner than an RTO of at least 200 ms and one RTT could",
-		yesNo(done && took < 225*time.Millisecond, "within 225 ms", "not within 225 ms"))
+	got := "within 225 ms"
+	switch {
+	case !done:
+		got = "not recovered"
+	case took >= 250*time.Millisecond:
+		got = "recovered at the RTO floor plus one RTT or later"
+	case took >= 225*time.Millisecond:
+		got = "recovered between 225 and 250 ms"
+	}
+	h.Check("recovers-before-rto", done && took < 225*time.Millisecond, "both tail segments are acknowledged within 225 ms of the ACK, sooner than an RTO of at least 200 ms and one RTT could", got)
 	intact(h, r, data)
 }
 

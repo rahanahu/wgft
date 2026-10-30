@@ -40,6 +40,16 @@ var Known = map[string]tcpharness.Known{
 		Observed: "no SYN-ACK",
 		Reason:   "gVisor answers a retransmitted SYN in SYN-RECEIVED with an ACK; Linux and wgstack retransmit the SYN-ACK",
 	},
+	"sack-rto-islands/islands-not-resent": {
+		Observed: "SACKed resent",
+		Reason: "gVisor's RTO expunges its SACK scoreboard, retransmitTimerExpired calling scoreboard.Reset in tcp/snd.go, " +
+			"so after the RTO it resends the island the latest ACK no longer lists",
+	},
+	"sack-renege/resends-sacked": {
+		Observed: "no segment",
+		Reason: "gVisor does not detect a renege; it resends the dropped data only at its RTO, about 200 ms after the " +
+			"reneging ACK, where Linux's tcp_check_sack_reneging re-arms the timer to max(SRTT/2, 10 ms)",
+	},
 	"limited-transmit/first-dupack.new-data": {
 		Observed: "0 new segments",
 		Reason: "gVisor's default RACK, on the testbench's near-zero RTT, marks the first segment lost at the first SACK " +
@@ -54,9 +64,10 @@ var Known = map[string]tcpharness.Known{
 		Reason:   "gVisor's RACK resends the first segment at the first SACK, before any duplicate-ACK threshold",
 	},
 	"tlp-tail-loss/recovers-before-rto": {
-		Observed: "not within 225 ms",
-		Reason: "gVisor sends the tail loss probe at about 2 SRTT, but after the probe's SACK it resends the other tail " +
-			"segment only about 200 ms later, at its RTO, so recovery takes about 300 ms",
+		Observed: "recovered at the RTO floor plus one RTT or later",
+		Reason: "gVisor sends the tail loss probe at about 2 SRTT, but probeTimerExpired calls postXmit(dataSent, false), " +
+			"which arms the RTO rather than RACK's reorder timer, so after the probe's SACK the other tail segment is " +
+			"resent only at the RTO, about 200 ms later: gVisor's tcp/rack.go",
 	},
 	"paws/old.dupack": {
 		Observed: "ACK of base+4",
