@@ -33,6 +33,8 @@ type Config struct {
 	Trace func(TraceEvent)
 	// TestBoost は試験と性能の測定だけが使う boost の与え方。本番は既定の BoostOnDemand のままにする。
 	TestBoost BoostPolicy
+	// TestCongestion は試験と性能の測定だけが使う輻輳の制御。本番は既定の CongestionCubic のままにする。
+	TestCongestion CongestionControl
 }
 
 // processStart は本番の時計の起点。プロセスのすべての Device が同じ起点を使うので、boost の回収が
@@ -89,6 +91,7 @@ func newDevice(cfg Config, lim limits, pool *boostPool) (*Device, error) {
 	d.s = s
 	s.trace = cfg.Trace
 	s.boostPolicy = cfg.TestBoost
+	s.ccPolicy = cfg.TestCongestion
 	if d.manual {
 		close(d.done)
 	} else {

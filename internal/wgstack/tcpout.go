@@ -197,8 +197,11 @@ func (c *tcb) buildBare(b []byte, seq uint32, now int64) int {
 // buildNew は SND.MAX から新しいデータを segment にする(RFC 6675 の NextSeg の規則 2)。force は nextNew と同じ。
 func (c *tcb) buildNew(b []byte, space int, now int64, force bool) int {
 	// 黙った後の輻輳の窓(RFC 5681 4.1)
-	if c.sndUna == c.sndMax && now-c.lastSendAt > c.curRTO() {
-		c.cwnd = min(c.cwnd, uint32(initialWindowSegs*c.segMSS()))
+	if c.sndUna == c.sndMax {
+		if now-c.lastSendAt > c.curRTO() {
+			c.cwnd = min(c.cwnd, uint32(initialWindowSegs*c.segMSS()))
+		}
+		c.ccFor().onIdle(c, now-c.lastSendAt)
 	}
 	o := c.options(now, true)
 	n, fin := c.nextNew(c.payloadCap(&o, space), force)

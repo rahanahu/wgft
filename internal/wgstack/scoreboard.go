@@ -383,9 +383,8 @@ func (c *tcb) resendLen(i int, off uint32, payCap int) (uint32, bool) {
 
 // enterRecovery は SACK による回復に入る(RFC 6675 5 節、RFC 6937)。先頭の記録は損失とみなす。
 func (c *tcb) enterRecovery() {
-	mss := uint32(c.segMSS())
 	flight := c.sndMax - c.sndUna
-	c.ssthresh = max(flight/2, 2*mss)
+	c.ssthresh = c.ccFor().lossThresh(c)
 	c.recover = c.sndMax
 	c.inRecovery = true
 	c.prrDelivered, c.prrOut = 0, 0

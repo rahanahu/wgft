@@ -98,8 +98,9 @@ type stack struct {
 
 	done chan struct{} // Device の Close で閉じる
 
-	trace       func(TraceEvent) // Config.Trace
-	boostPolicy BoostPolicy      // Config.TestBoost
+	trace       func(TraceEvent)  // Config.Trace
+	boostPolicy BoostPolicy       // Config.TestBoost
+	ccPolicy    CongestionControl // Config.TestCongestion
 
 	counters
 }

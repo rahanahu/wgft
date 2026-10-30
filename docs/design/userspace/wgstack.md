@@ -462,10 +462,10 @@ M_wgstack = M_fix
 初期の値は動作を確かめるための値であり、最適値として探した値ではありません。
 どの値も設定項目にしません。
 
-linux/amd64 の build で測った大きさは、c_conn が 5,064 byte、記録 1 件が 32 byte、区間 1 つが 12 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
+linux/amd64 の build で測った大きさは、c_conn が 5,112 byte、記録 1 件が 32 byte、区間 1 つが 12 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
 記録 1 件は、性能の段階の SACK の scoreboard の欄で 24 byte から 32 byte になりました([ACK 1 つの手間の上界](wgstack-performance.md#ack-1-つの手間の上界))。
 既定の K の 2048 では、Device の `Bound` の `Total` は約 1,490 MiB で、そのうち TCP の項の和は約 1,478 MiB です。
-内訳は M_fix が約 22.1 MiB、floor の項が約 1,330.6 MiB、boost の項が約 124.7 MiB です。
+内訳は M_fix が約 22.2 MiB、floor の項が約 1,330.6 MiB、boost の項が約 124.7 MiB です。
 送信の記録は floor の項に約 43.4 MiB、boost の項に約 4.1 MiB を加えます。
 区間の表は floor の項に約 7.2 MiB、boost の項に約 0.7 MiB を加えます。
 M_fix は核の構造(事象の数と観測の関数を含みます)、接続の枠、3 つの hash の表、行の表、空きの list、タイマーの節、出力の list、制御の輪、chunk の置き場に残す 1 MiB を数えます。
@@ -554,7 +554,7 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
 - MSS:相手の MSS に従い、MSS の option の無い SYN では 536 を使います。
   入口の[MSS の下限](packet-validation.md#tcp-の-mss-の下限)と、Fragmentation Needed による PMTU の引き下げ(下限 552)を持ちます。
   自分が示す MSS は MTU から 40 byte を引いた値です
-- 輻輳の制御:RFC 5681 の slow start と輻輳の回避を持ちます。
+- 輻輳の制御:RFC 5681 の slow start を持ち、輻輳の回避は既定で RFC 9438 の CUBIC です([CUBIC](wgstack-performance.md#cubic))。
   SACK を交渉した接続は RFC 6675 の SACK による回復と RFC 6937 の PRR、交渉しない接続は RFC 6582 の NewReno の高速の再送と回復を使い、どちらも RFC 3042 の Limited Transmit を持ちます([SACK による回復](wgstack-performance.md#sack-による回復))。
   初期の輻輳の窓は Linux と同じ 10 segment(RFC 6928)にし、黙った後の窓は RFC 5681 の 4.1 節に従って戻します。
   SYN か SYN-ACK を再送した接続の初期の窓は、RFC 5681 の 3.1 節と Linux と同じく 1 segment です
@@ -608,7 +608,8 @@ ECN は交渉しません。
 - RACK-TLP(RFC 8985):性能の段階で実装しました。
   扱いは[RACK-TLP](wgstack-performance.md#rack-tlp)に従います
 - D-SACK(RFC 2883):受け手として返す側を加えます
-- CUBIC(RFC 9438):輻輳の制御は、ACK、損失、RTO の 3 つの知らせを受ける interface の後ろに置き、NewReno をその最初の実装にします
+- CUBIC(RFC 9438):性能の段階で実装し、既定の輻輳の制御にしました。
+  扱いは[CUBIC](wgstack-performance.md#cubic)に従います
 
 次の機能は性能の目標とは別に、既定を gVisor から替える判断の前に要否を決めます。
 
