@@ -148,6 +148,7 @@ qbench の実行は接続が 1 本なので、floor への戻りは別の接続�
 ### SACK による回復
 
 - 規格:RFC 6675 の SACK による損失の回復、RFC 6937 の PRR による回復の間の送る量、RFC 3042 の Limited Transmit です。
+  RecoverFS だけは RFC 6937 を置き換えた RFC 9937 に従います([CUBIC](#cubic)の「回復の間に届く量」)。
   RTO の後は RFC 6675 5.1 節に従い、SACK で確認された segment を送り直しません
 - 使う構造:送信の記録の輪の印(SACK 済み、損失)を scoreboard にします。
   記録の扱いと ACK 1 つの手間の上界は、この節の後に定めます
@@ -353,8 +354,23 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
   slow start(RFC 3465 の L = 2)、回復の間の窓(PRR と NewReno の窓の膨らませ方)、RTO の後の 1 segment は共通の処理のままです。
   CUBIC の状態(W_max、cwnd_prior、epoch の始まり、K、3 次の式の原点、W_est、byte の端数)は接続の枠の中に値として埋め込み、接続ごとの確保を作りません。
   NewReno は状態を持たず、完成の段階の `caAcc` を使います
-- 輻輳の事象:回復に入る時、TLP の probe が損失を直した時、最初の RTO で、ssthresh を送り残しの β 倍(下限 2 SMSS)にし、W_max と cwnd_prior を記録して epoch を終えます。
-  窓が前の W_max より小さければ、W_max を (1 + β) / 2 倍に縮めます(4.7 節)
+- 輻輳の事象:回復に入る時、TLP の probe が損失を直した時、最初の RTO で、ssthresh を送り残しと送り手の窓の小さい方の β 倍(下限 2 SMSS)にし、W_max と cwnd_prior を記録して epoch を終えます。
+  窓が前の W_max より小さければ、W_max を (1 + β) / 2 倍に縮めます(4.7 節)。
+  NewReno も同じ量の半分を ssthresh にします
+- 送り手の窓:回復の外では輻輳の窓です。
+  高速の回復の中と RTO の後の回復の中(SND.UNA が RTO の時の SND.MAX に届く前)では、回復が目指す ssthresh です。
+  回復の中の輻輳の窓は PRR が送る量を刻む途中の値で、まとまった損失の後は pipe とともに数 segment に落ちます。
+  RTO の後の回復の中の輻輳の窓は slow start の途中の値です。
+  どちらも窓の見積もりではないので、回復の中の RTO と、新しい ACK が後退を 0 に戻した後の RTO は ssthresh を β 倍します
+- 基準の量の理由:RFC 5681 の 3.1 と 3.2 は、ssthresh を FlightSize の半分の式の値「以下」にすることを求めます。
+  小さい方を使う ssthresh は送り残しの β 倍を超えないので、RFC 5681 の規則の内側にあり、RFC 9438 4.6 の送り残しの β 倍も超えません。
+  wgstack は回復の内でも外でも pipe で送る量を抑えるので、穴がある間の送り残しは穴の先の SACK 済みのデータを含み、送り手の窓を超えます。
+  例えば、回復を終えた ACK でそのまま次の回復に入る場合です。
+  最初の回復の間に回復の点より先へ送ったデータが失われると、その穴より先の SACK 済みのデータは累積で確認されないまま送り残しに残ります。
+  送り残しだけを β 倍すると ssthresh が送り手の窓を超え、PRR が pipe を ssthresh まで満たすので、輻輳の事象が送る量を増やします
+- 回復の間に届く量:PRR の RecoverFS は RFC 9937 6.1 に従い、回復に入る時の SND.MAX - SND.UNA から SACK 済みの byte を引き、回復に入る ACK が届けた byte を足します。
+  回復の前に SACK 済みの byte は回復の間に届いたと数えないので、RFC 6937 の SND.MAX - SND.UNA のままでは、ssthresh と RecoverFS の比が β より小さくなり、回復の始めに送る量を減らしすぎます。
+  RFC 9937 の SafeACK による PRR-SSRB と PRR-CRB の切り替えは持たず、送る量は RFC 6937 の PRR-SSRB のままです
 - 輻輳の回避:epoch の最初の ACK で K と原点を決め、1 RTT 先の W_cubic を [cwnd, 1.5 cwnd] に収めた目標へ ACK ごとに近づけます。
   W_cubic(t) が W_est より小さい間は W_est に従います(4.3 節)。
   RTO の後は Linux の `bictcp_reset` と同じく状態を消し、送り残しの無い休みの後は Linux の `CA_EVENT_TX_START` と同じく休んだ時間だけ epoch を後ろへずらし、今より先へはずらしません
@@ -789,9 +805,9 @@ stream の一致の試験も、SACK を交渉する相手と並べ替える相�
 - 受ける向きの損失のある場合:損失 1% と 5% の受ける向きの差の原因は、診断の段の後まで分かりません
 - 損失の模型と参照:`testdata/reference.json` は以前の到着の順の模型で測った値です。
   データで決める模型で測り直すまで、日常の行列は損失のある場合で警告を出します
-- 損失のある場合の wgstack の速すぎる実行:損失 1% と 5% の一部の種で、wgstack が経路の速さに近い値に達します。
-  同じ種の gVisor と Linux は 1.5 から 6 Mbit/s で、同じ種の再実行でも再現しました。
-  輻輳の窓を下げない経路があるかは未確認です
+- 損失 1% のやや速い種:輻輳の事象の基準を送り手の窓にした後、損失のある場合に経路の速さに近づく実行は無くなりました([CUBIC](#cubic))。
+  損失 1% の一部の種では、wgstack が約 6 Mbit/s で、同じ種の gVisor と Linux(3 から 6 Mbit/s)をわずかに上回ります。
+  CUBIC の通常の窓の増え方によるのか、窓を下げない別の経路があるのかは未確認です
 - 時間で区切る実行:決まった量の転送から時間で区切る実行に替えて、今の測定との比べ方が変わらないかは未確認です
 - CPU の分け方:qbench の中で DUT の CPU を pprof の label で分ける方法が、gVisor の内部の goroutine を含められるかは未確認です
 - バッチの費用:`BatchSize` を大きくしたときの wireguard-go の保持の増え方は未測定です

@@ -420,15 +420,17 @@ func (c *tcb) resendLen(i int, off uint32, payCap int) (uint32, bool) {
 	return n, fin
 }
 
-// enterRecovery は SACK による回復に入る(RFC 6675 5 節、RFC 6937)。先頭の記録は損失とみなす。
-func (c *tcb) enterRecovery() {
+// enterRecovery は SACK による回復に入る(RFC 6675 5 節、RFC 6937。RecoverFS は RFC 9937)。先頭の記録は
+// 損失とみなす。delivered は回復に入る ACK が累積の確認と SACK で新しく届けたと知らせた byte である。
+func (c *tcb) enterRecovery(delivered uint32) {
 	c.initUndo()
-	flight := c.sndMax - c.sndUna
 	c.ssthresh = c.ccFor().lossThresh(c)
 	c.recover = c.sndMax
 	c.inRecovery = true
 	c.prrDelivered, c.prrOut = 0, 0
-	c.recoverFS = flight
+	// RFC 9937 6.1 の RecoverFS:回復の間に届くかもしれない byte。回復の前に SACK 済みの byte は回復の間に届いたと
+	// 数えないので引き、この ACK が届けた byte は足す
+	c.recoverFS = c.sndMax - c.sndUna - c.sacked + delivered
 	c.rxtIdx, c.rxtOff, c.rxtMid = 0, 0, false
 	c.resendCause = rtxFast
 	if c.lossIdx == 0 && c.rackLostBeyond == 0 && c.lostQ.n == 0 && c.recs.n > 0 {
@@ -466,7 +468,7 @@ func (c *tcb) sackAfterAck(delivered uint32) {
 	lost := c.lossIdx > 0 || c.rackLostBeyond > 0 || c.lostQ.n > 0
 	dupEntry := c.dupAcks >= dupThresh && !c.reorderSeen
 	if !c.inRecovery && c.sndUna != c.sndMax && seqGE(c.sndUna, c.recover) && (dupEntry || lost) {
-		c.enterRecovery()
+		c.enterRecovery(delivered)
 	}
 	if c.inRecovery {
 		c.prrUpdate(delivered)
