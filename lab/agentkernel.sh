@@ -46,11 +46,12 @@
 #       target resolve. agent doctor's dataplane.table agrees: once check 22's refused rules are
 #       removed, unknown resolve_failed and exit 0 while the rule still forwards, and failed
 #       listener_error and exit 1 once the old address refuses. The refused rules are not put back.
-#       Last, a TCP rule to a name with two allowed addresses whose smallest drops every SYN moves to
+#   failover. a TCP rule to a name with two allowed addresses whose smallest drops every SYN moves to
 #       the other address after two failed 30-second checks, logs it, records it, keeps it once the
 #       smallest answers again, and keeps it across an agent restart while the name does not resolve
 #       and after the name returns. A UDP rule to the same name follows the switch, and a UDP client
-#       that keeps sending from one source port reaches the new address after it.
+#       that keeps sending from one source port reaches the new address after it. It uses its own
+#       name and rules, so it does not depend on check resolve and runs before or after it, or alone.
 #   drift. the agent repairs changes made outside wgft: a deleted table, a deleted row, a changed
 #       MTU and a deleted wgft0, without a route warning while wgft0 is gone.
 #   notify. the kernel's change notifications bring a deleted table and a deleted wgft0 back within
@@ -116,7 +117,7 @@ ELOG=$W/wgft-ak-echo.log
 ADMIN=127.0.0.1:8686
 SERVER_MODE=kernel
 case "${1:-}" in kernel|userspace) SERVER_MODE=$1; shift ;; esac
-CHECKS=${*:-16 17 18 19 22 24 25 loopback resolve drift notify session route pin reconnect stale teardown}
+CHECKS=${*:-16 17 18 19 22 24 25 loopback resolve failover drift notify session route pin reconnect stale teardown}
 HOSTS=/etc/netns/$HOME_NS/hosts
 fail=0
 
@@ -189,8 +190,7 @@ set_hosts() { printf '127.0.0.1 localhost\n' > "$HOSTS"; printf '%s\n' "$@" >> "
 # The allowlist holds every target the rules use except the ones that must be refused. It names the
 # loopback targets of check loopback, 127.0.0.1:25566, 19133 and 19134, and not 127.0.0.1:25565, so
 # check 22's loopback rule is refused for a loopback target the list does not name (design 7b.2).
-# 192.168.50.2:19132, where nothing listens, is there for the UDP rule of the resolve check's failover
-# step.
+# 192.168.50.2:19132, where nothing listens, is there for the UDP rule of check failover.
 ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.2:19132,192.168.50.3:25570,192.168.50.2:25580,192.168.50.2:25565,192.168.50.4:25565,192.168.50.5:25565,127.0.0.1:25566,127.0.0.1:19133-19134
 start_agent() { # start_agent [mode]: kernel unless given
   WGFT_MODE=${1:-kernel} WGFT_JOIN="${JOIN:-}" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
@@ -713,13 +713,12 @@ NFT
   set_hosts "192.168.50.3 game.lan"
   wait_until 60 rule_state_ok "$R_NAME"
   check "the name resolves again" "ok" "$(rule_status "$R_NAME")"
-  check_resolve_failover
 }
-# check_resolve_failover: a name with two allowed addresses, 192.168.50.2 and .3, where the smallest
-# drops every SYN to the target port, as a host that went away would. The agent pins .2 first, sees
-# it fail two 30-second checks in a row, and moves new flows to .3 (design 7b.2).
-check_resolve_failover() {
-  echo "== resolve: failover to another address of the name"
+# check_failover: a name with two allowed addresses, 192.168.50.2 and .3, where the smallest drops
+# every SYN to the target port, as a host that went away would. The agent pins .2 first, sees it fail
+# two 30-second checks in a row, and moves new flows to .3 (design 7b.2).
+check_failover() {
+  echo "== failover: to another address of the name"
   home nft -f - <<'NFT'
 table inet failoverdrop {
   chain in {
@@ -758,6 +757,13 @@ PY"
   t0=$SECONDS
   wait_until 100 grep -q "rule $fo: target 192.168.50.2:25565 failed the TCP check twice in a row; new flows go to 192.168.50.3:25565" "$ALOG"
   took=$((SECONDS - t0))
+  # The agent logs the switch before it publishes the table, and saves agent.json only after the
+  # publication and the TCP probes that follow it, so wait for the saved record before observing
+  # the switch's effects (docs/development/testing.md).
+  wait_until 15 recorded_is "$fo" "192.168.50.3:25565 192.168.50.3" ||
+    echo "!! agent.json did not record the TCP rule's switch within 15 s of the log line"
+  wait_until 15 recorded_is "$fu" "192.168.50.3:19132 192.168.50.3" ||
+    echo "!! agent.json did not record the UDP rule's switch within 15 s of the log line"
   check "the agent logs the switch" "rule $fo: target 192.168.50.2:25565 failed the TCP check twice in a row; new flows go to 192.168.50.3:25565, another address of \"fo.lan\" that answers" "$(cat "$ALOG")"
   echo "INFO  switched ${took}s after the rule was applied"
   check "new flows reach the other address" "tcp-echo 0.0.0.0:25565" "$(tcp_echo 39979)"
@@ -806,6 +812,7 @@ r = next((x for x in pub.get("rules") or [] if x.get("rule_id") == sys.argv[2]),
 print(((r.get("ranges") or [{}])[0]).get("dest") or "-", r.get("pinned") or "-")
 PY
 }
+recorded_is() { [ "$(recorded_dest "$1")" = "$2" ]; } # recorded_is <rule-id> <"<dest> <pinned>">
 rule_reason_has() { [[ "$(rule_status "$1")" == *"$2"* ]]; }
 rule_reason_lacks() { [[ "$(rule_status "$1")" != *"$2"* ]]; }
 eqcheck() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: want '$2', got '$3'"; fail=1; fi; }
@@ -1500,7 +1507,7 @@ handshake_after() { local h; h=$(agent_field last_handshake); [ -n "$h" ] && [ "
 
 for c in $CHECKS; do
   case "$c" in
-    16|17|18|19|22|24|25|loopback|resolve|drift|notify|session|route|pin|reconnect|stale|teardown) "check_$c" ;;
+    16|17|18|19|22|24|25|loopback|resolve|failover|drift|notify|session|route|pin|reconnect|stale|teardown) "check_$c" ;;
     *) echo "FAIL  unknown check $c"; fail=1 ;;
   esac
 done
