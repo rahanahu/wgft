@@ -229,6 +229,7 @@ func wantObs(t *testing.T, side string, got, want endObs) {
 // Besides the relay's own cuts, only a reset from the public client reaches the agent as a
 // reset; the client's side is closed normally in every case.
 func TestTCPEndingByCauseAndDirection(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		run  func(t *testing.T, r *endingRig)
@@ -303,6 +304,7 @@ func TestTCPEndingByCauseAndDirection(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			tc.run(t, newEndingRig(t))
 		})
 	}

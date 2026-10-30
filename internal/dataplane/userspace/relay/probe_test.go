@@ -88,6 +88,7 @@ func roundTrip(t *testing.T, port uint16) {
 // 黙って捨てる target への到達確認が走っている間も、健全なルールを通る接続は最後まで中継される
 // (設計文書 5.2 節)。確認が Manager の錠を持っていた版では、accept した接続が ruleOf と targetOf で
 // 止まり、黙って捨てる target 1 つにつき dial の期限だけ中継が進まなかった。
+// 並列にしない: 中継が dial の期限より短い時間で進むことを測るので、他の試験の負荷で揺れる。
 func TestProbeDoesNotStallRelayingDuringASweep(t *testing.T) {
 	bh := newBlackhole(t, "127.0.0.1:9")
 	echo := tcpEcho(t)
@@ -118,6 +119,7 @@ func TestProbeDoesNotStallRelayingDuringASweep(t *testing.T) {
 
 // 適用も同じ作りである。黙って捨てる target を持つルールを適用している間も、既に開いている健全な
 // ルールは中継を続ける。
+// 並列にしない: 中継が dial の期限より短い時間で進むことを測るので、他の試験の負荷で揺れる。
 func TestApplyDoesNotStallRelayingWhileItProbes(t *testing.T) {
 	bh := newBlackhole(t, "127.0.0.1:9")
 	echo := tcpEcho(t)

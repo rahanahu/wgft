@@ -26,6 +26,7 @@ import (
 // 捨てる(設計文書 6.3 節の記述どおり。途中のセッションは表を引いた時点で記す)。次のデータグラムは
 // 新しい宛先へのセッションを作る。
 func TestUDPNewSourceAcrossSweep(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		// pauseInAdmit が真なら Admit で、偽なら Dial で読み取りのループを止める
@@ -43,6 +44,7 @@ func TestUDPNewSourceAcrossSweep(t *testing.T) {
 		{"sweep that keeps the source while dialing", false, (*sweepUDPRig).keepAll, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			r := newSweepUDPRig(t, tc.pauseInAdmit)
 			fresh := r.client(t)
 			r.armed.Store(true)

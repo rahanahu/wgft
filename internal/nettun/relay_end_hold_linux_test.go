@@ -65,6 +65,8 @@ type holdEnv struct {
 	tgtLn  net.Listener
 	kfix   func(*net.TCPConn) // run on each relay kernel conn as it is captured
 	kfixMu sync.Mutex
+
+	reserved *reservedTCP // server: the rules' listeners until the relay opens them
 }
 
 type holdLog struct {
@@ -123,7 +125,7 @@ func (l captureListener) Accept() (net.Conn, error) {
 type holdServerNet struct{ env *holdEnv }
 
 func (n holdServerNet) ListenTCP(port uint16) (net.Listener, error) {
-	ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
+	ln, err := n.env.reserved.listen(port)
 	if err != nil {
 		return nil, err
 	}
@@ -235,14 +237,10 @@ func newHoldEnv(t *testing.T, agent bool, total int, rules ...string) *holdEnv {
 			}
 			return c, err
 		}
+		e.reserved = newReservedTCP(t)
 		e.m = relay.New(holdServerNet{e}, opts)
 		for _, r := range rules {
-			l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
-			if err != nil {
-				t.Fatal(err)
-			}
-			port := uint16(l.Addr().(*net.TCPAddr).Port)
-			l.Close()
+			port := e.reserved.reserve(t)
 			e.ports[r] = port
 			want[relay.Key{Proto: proto.TCP, Port: port}] = relay.Desired{Target: netip.AddrPortFrom(p.b.local, 9000).String(), RuleID: r}
 		}
@@ -503,6 +501,7 @@ func established(t *testing.T, scene func(t *testing.T) error) {
 // the reader does not read, and in the server's role its per-source slot too. When the reader
 // reads, the tail and EOF arrive and both slots are returned, each once.
 func TestRelayHoldCountsTheTail(t *testing.T) {
+	t.Parallel()
 	for _, agent := range []bool{true, false} {
 		for _, side := range []tailSide{netstackTail, kernelTail} {
 			role := "server"
@@ -510,6 +509,7 @@ func TestRelayHoldCountsTheTail(t *testing.T) {
 				role = "agent"
 			}
 			t.Run(role+"/"+side.String(), func(t *testing.T) {
+				t.Parallel()
 				established(t, func(t *testing.T) error {
 					e := newHoldEnv(t, agent, 8, "r1")
 					pr := e.open("r1")
@@ -565,12 +565,14 @@ func TestRelayHoldCountsTheTail(t *testing.T) {
 // a reader on the kernel side that keeps reading slowly gets every byte and EOF after the
 // relay ended with a tail in its kernel socket.
 func TestRelayHoldDeliversKernelTailToSlowReader(t *testing.T) {
+	t.Parallel()
 	for _, agent := range []bool{true, false} {
 		role := "server"
 		if agent {
 			role = "agent"
 		}
 		t.Run(role, func(t *testing.T) {
+			t.Parallel()
 			established(t, func(t *testing.T) error {
 				e := newHoldEnv(t, agent, 8, "r1")
 				pr := e.open("r1")
@@ -595,6 +597,8 @@ func TestRelayHoldDeliversKernelTailToSlowReader(t *testing.T) {
 }
 
 // the paths that cut relays also cut a pair whose tail is being delivered, at once.
+// 並列にしない: 切断から 500 ms 以内に枠が戻ることが主張そのもので、2 s ごとの見直しで戻る場合と
+// 区別する。他の試験の負荷で起こされた待ちが 500 ms を超えると誤って落ちる。
 func TestRelayHoldCutPathsFreeThePair(t *testing.T) {
 	cuts := []struct {
 		name string
@@ -657,6 +661,7 @@ func TestRelayHoldCutPathsFreeThePair(t *testing.T) {
 
 // a peer that resets the connection while the tail is held ends the hold.
 func TestRelayHoldPeerReset(t *testing.T) {
+	t.Parallel()
 	for _, agent := range []bool{true, false} {
 		for _, side := range []tailSide{netstackTail, kernelTail} {
 			role := "server"
@@ -664,6 +669,7 @@ func TestRelayHoldPeerReset(t *testing.T) {
 				role = "agent"
 			}
 			t.Run(role+"/"+side.String(), func(t *testing.T) {
+				t.Parallel()
 				established(t, func(t *testing.T) error {
 					e := newHoldEnv(t, agent, 8, "r1")
 					pr := e.open("r1")
@@ -704,6 +710,7 @@ func TestRelayHoldPeerReset(t *testing.T) {
 // netstack side gets a small TCPMaxRetriesOption on the relay's stack only in this test, so that
 // gVisor itself aborts it. The real times are not checked here.
 func TestRelayHoldUnresponsivePeer(t *testing.T) {
+	t.Parallel()
 	for _, agent := range []bool{true, false} {
 		for _, side := range []tailSide{netstackTail, kernelTail} {
 			role := "server"
@@ -711,6 +718,7 @@ func TestRelayHoldUnresponsivePeer(t *testing.T) {
 				role = "agent"
 			}
 			t.Run(role+"/"+side.String(), func(t *testing.T) {
+				t.Parallel()
 				established(t, func(t *testing.T) error {
 					e := newHoldEnv(t, agent, 8, "r1")
 					if side == kernelTail {
@@ -771,6 +779,7 @@ func TestRelayHoldUnresponsivePeer(t *testing.T) {
 // in the agent's role, a target that resets leaves the relay's netstack conn with a tail in
 // FIN_WAIT_1; the pair is counted until the peer reads it.
 func TestRelayHoldTargetReset(t *testing.T) {
+	t.Parallel()
 	established(t, func(t *testing.T) error {
 		e := newHoldEnv(t, true, 8, "r1")
 		pr := e.open("r1")
@@ -809,9 +818,11 @@ func TestRelayHoldTargetReset(t *testing.T) {
 // without data (the relay closes the conn after the relay ends) and the dial to the target fails
 // (the relay closes the accepted conn without relaying).
 func TestRelayHoldFinWait2(t *testing.T) {
+	t.Parallel()
 	for _, exit := range []string{"target reset", "dial failed"} {
 		for _, mem := range []string{"memory 0", "memory forced"} {
 			t.Run(exit+"/"+mem, func(t *testing.T) {
+				t.Parallel()
 				established(t, func(t *testing.T) error {
 					e := newHoldEnv(t, true, 8, "r1")
 					var forced atomic.Bool
@@ -881,6 +892,7 @@ func TestRelayHoldFinWait2(t *testing.T) {
 
 // with the pool full of r1's tails, r1 is refused and r2, which has its minimum, still
 // relays a small transfer in normal time.
+// 並列にしない: 小さい転送の所要時間を無負荷のときの 2 倍と比べるので、他の試験の負荷で揺れる。
 func TestRelayHoldCapRefusesOnlyTheFullRule(t *testing.T) {
 	established(t, func(t *testing.T) error {
 		e := newHoldEnv(t, false, 8, "r1", "r2")
@@ -915,6 +927,7 @@ func TestRelayHoldCapRefusesOnlyTheFullRule(t *testing.T) {
 
 // smallTransfer sends 64 KiB from the kernel end to the peer and back on a new pair of rule and
 // returns how long the round trip took.
+// smallTransfer を使う試験は並列にしない (所要時間の比較に負荷が混ざる)。
 func smallTransfer(t *testing.T, e *holdEnv, rule string) time.Duration {
 	t.Helper()
 	pr := e.open(rule)
@@ -994,9 +1007,11 @@ func kernelOrphans(t *testing.T, port uint16) int {
 // repeating the "leave a tail" operation 3K times never leaves more than K pairs holding a
 // tail, on either side, and all are released when the readers read.
 func TestRelayHoldCountIsBounded(t *testing.T) {
+	t.Parallel()
 	const k = 4
 	for _, side := range []tailSide{netstackTail, kernelTail} {
 		t.Run(side.String(), func(t *testing.T) {
+			t.Parallel()
 			established(t, func(t *testing.T) error {
 				e := newHoldEnv(t, false, k, "r1")
 				port := e.ports["r1"]
@@ -1051,6 +1066,7 @@ func TestRelayHoldCountIsBounded(t *testing.T) {
 
 // many pairs waiting for their tails do not hold locks that stop unrelated work, and closing
 // the manager ends every wait.
+// 並列にしない: Status と Apply が 100 ms 以内に戻ることを測るので、他の試験の負荷で揺れる。
 func TestRelayHoldDoesNotStallTheProcess(t *testing.T) {
 	established(t, func(t *testing.T) error {
 		e := newHoldEnv(t, false, 40, "r1", "r2")
@@ -1120,6 +1136,7 @@ func TestRelayHoldDoesNotStallTheProcess(t *testing.T) {
 // Not pre-registered, added with the change: a Retiring listener stays until
 // the pair whose tail it is delivering has delivered it, and its next re-check closes it then.
 func TestRelayHoldRetiringWaitsForTheTail(t *testing.T) {
+	t.Parallel()
 	established(t, func(t *testing.T) error {
 		e := newHoldEnv(t, false, 8, "r1")
 		pr := e.open("r1")
@@ -1154,9 +1171,11 @@ func TestRelayHoldRetiringWaitsForTheTail(t *testing.T) {
 // refused further connections until its peers read them; then K and the per-source count return to
 // 0, each released once.
 func TestRelayHoldKeepsThePerSourceLimit(t *testing.T) {
+	t.Parallel()
 	const limit = 3
 	for _, side := range []tailSide{netstackTail, kernelTail} {
 		t.Run(side.String(), func(t *testing.T) {
+			t.Parallel()
 			established(t, func(t *testing.T) error {
 				e := newHoldEnv(t, false, 16, "r1")
 				e.srcLimit.Store(limit)

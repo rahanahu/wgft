@@ -316,6 +316,7 @@ func TestTCPRetiringKeepsRegisteredConns(t *testing.T) {
 // 並行の組: 多数のクライアントが接続し続ける間に、閉鎖、開き直し、Retiring、統合、分割を繰り返す。
 // 毎回の Commit の後に帳簿の整合を確かめ、最後に全部を閉じて u が 0、二重返却 0 であることを確かめる。
 func TestTCPLedgerUnderConfigChurn(t *testing.T) {
+	t.Parallel()
 	r := newStopRigT(t, true, "r1", true, 64, true)
 	var (
 		stop    = make(chan struct{})

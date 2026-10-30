@@ -36,6 +36,7 @@ func (s *sendtoScript) sendto(fd int, p []byte, flags int, to syscall.Sockaddr) 
 	return syscall.Sendto(fd, p, flags, to)
 }
 
+// installSendto は package の sendto を差し替えるので、これを使う試験は並列にしない。
 func installSendto(t *testing.T, errs ...error) *sendtoScript {
 	t.Helper()
 	s := &sendtoScript{errs: errs}
