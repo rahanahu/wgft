@@ -1,7 +1,7 @@
 # wgstack の性能の段階
 
 [エージェントの wgft の netstack](wgstack.md)(wgstack)は完成の段階を NewReno で判定し、性能の目標を完成の後に追います([完成と性能の目標](wgstack.md#完成と性能の目標))。
-性能の段階は未実装です。
+性能の段階のうち実装したのは、観測の段の wgstack の側(`Stats` の数、接続の記録、boost の切り替え)だけです。
 測った差の診断の方法、変更の優先順位、判定の測定、段階の順序をここで決め、値と個々の構造の細部は実装の時に決めます。
 正しさの検証は[wgstack の検証](wgstack-verification.md)に従い、この文書は性能のために足す試験と測定だけを定めます。
 
@@ -104,15 +104,28 @@ qbench の実行は接続が 1 本なので、floor への戻りは別の接続�
 観測の追加は挙動を変えないので、適合の試験と上界の試験に影響しません。
 
 - Device の数:`Stats` に送り手の事象を足します。
-  RTO の回数、高速の回復に入った回数、部分の確認、原因ごとの再送の segment(高速、部分の確認、RTO)、受けた重複の ACK、送った ACK のうち遅延したものと即座のものを候補にします。
-  数は Device の atomic なので、M_fix に定数として入ります
-- 接続の記録:試験だけが設定する観測の関数を核に持たせ、ACK を処理するたびに時刻、輻輳の窓、ssthresh、送り残しの量、回復の状態、広告した窓を渡します。
+  数は Device の atomic なので、M_fix に定数として入ります。
+  欄は次のとおりです
+  - `RTOs`:再送のタイマーの期限で送り直した回数です。窓の probe は数えません
+  - `RTOsBackedOff`:累積の確認が進む前に続いた RTO で、再送した segment も失われたことを示します
+  - `RTOsShortOfDupThresh`:回復の外で、重複した ACK を 1 つか 2 つ受けた後の RTO です
+  - `FastRecoveries`、`PartialAcks`:高速の回復に入った回数と、回復の中の部分の確認です
+  - `RetransFast`、`RetransPartial`、`RetransRTO`、`RetransPMTU`:原因ごとの再送の segment です。
+    後の 2 つは、RTO と PMTU の引き下げで SND.NXT を戻した後に SND.MAX より手前を送り直した segment で、受け手が持っていたデータも含みます
+  - `DupAcksIn`:受けた重複した ACK です
+  - `AcksDelayed`、`AcksImmediate`:求められた ACK を運んだ segment を、遅延 ACK のタイマーが求めたものと即座に求めたものに分けて数えます。
+    中身と共に運んだ ACK も含み、遅延 ACK を待つ間に中身と共に運んだ確認は数えません
+- 接続の記録:試験だけが設定する観測の関数(`Config.Trace`)を核に持たせ、ACK を処理するたびと RTO のたびに `TraceEvent` を渡します。
+  欄は種類(`TraceAck` か `TraceRTO`)、核の時刻、接続の両端、輻輳の窓、ssthresh、送り残しの量(SND.MAX - SND.UNA)、SND.UNA、SND.NXT、SND.MAX、回復の状態、重複した ACK の数、相手の窓、自分が広告した窓、SRTT、後退を含めた RTO です。
+  途絶の終わりの時点の RTO は、途絶の終わりより前の最後の `TraceRTO` の RTO です。
+  関数は接続の錠を持ったまま呼ぶので、Device を呼び返しません。
   本番では nil のままで、確認 1 回の手間だけを加えます
 - 経路の記録:qbench の経路が packet ごとに時刻、向き、番号、確認の番号、広告の窓、待ち行列の長さ、捨てた理由を書きます。
   経路は 3 つの実装に共通なので、Linux の挙動も同じ形で比べられます。
   経路はすでに届けた範囲を知っているので、受け手が持っていたデータの再送(不要な再送)も数えます
 - bench の切り替え:待ち行列の長さ、速さ、損失は環境変数で変えられます。
-  並べ替え(`Impair.Reorder`)の環境変数、試験だけの boost の切り替え、実行の時間の上限を足します
+  並べ替え(`Impair.Reorder`)の環境変数、試験だけの boost の切り替え、実行の時間の上限を足します。
+  boost の切り替えは wgstack の `Config.TestBoost` で、既定の `BoostOnDemand`、`Accept` が接続を返す時に両方の向きの boost を求める `BoostAtAccept`、boost を求めない `BoostNever` です
 - 相手の統計:qbench の相手を、wireguard-go の `netstack` ではなく gVisor の stack を直接作る形にし、相手の設定(SACK、RACK、輻輳の制御)を固定して、再送と RTO の統計を読めるようにします
 
 診断で確かめる組は次のとおりです。

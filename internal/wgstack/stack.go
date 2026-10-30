@@ -98,6 +98,9 @@ type stack struct {
 
 	done chan struct{} // Device の Close で閉じる
 
+	trace       func(TraceEvent) // Config.Trace
+	boostPolicy BoostPolicy      // Config.TestBoost
+
 	counters
 }
 
@@ -122,6 +125,12 @@ type counters struct {
 	probeAborted   atomic.Uint64
 	boostGranted   atomic.Uint64
 	boostReclaimed atomic.Uint64
+
+	// 送り手の事象(wgstack-performance.md の「安く確かめる手順」)
+	rtos, rtosBackedOff, rtosShortOfDupThresh atomic.Uint64
+	fastRecoveries, partialAcks               atomic.Uint64
+	retrans                                   [numRtxCauses]atomic.Uint64
+	dupAcksIn, acksDelayed, acksImmediate     atomic.Uint64
 
 	mssGate, synGate, acceptGate, twGate, ctlGate, oooGate gate
 }

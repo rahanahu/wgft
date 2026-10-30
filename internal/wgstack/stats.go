@@ -21,26 +21,40 @@ type Stats struct {
 	FragBytes                  int   // 再組み立ての表が数える保持 byte(固定の管理領域を含む)
 	PingEndpoints              int   // 使っている echo の endpoint
 
-	MSSFloorDrops      uint64
-	SynTableFull       uint64
-	AcceptOverflow     uint64
-	TWEvicted          uint64
-	CtlDropped         uint64
-	OOODropped         uint64
-	RecvTrimmed        uint64
-	ChallengeLimited   uint64
-	FragmentsDropped   uint64
-	UDPDropped         uint64
-	ICMPDropped        uint64
-	Malformed          uint64
-	BadChecksum        uint64
-	NotLocal           uint64
-	RetransmitAborts   uint64
-	ProbeAborts        uint64
-	BoostGranted       uint64
-	BoostReclaimed     uint64
-	HeldChunksInPool   int64 // 輪が持つ chunk の数(chunkPool の会計)
-	ReclaimableInBoost int   // プロセスの boost の枠のうち使っている数
+	MSSFloorDrops    uint64
+	SynTableFull     uint64
+	AcceptOverflow   uint64
+	TWEvicted        uint64
+	CtlDropped       uint64
+	OOODropped       uint64
+	RecvTrimmed      uint64
+	ChallengeLimited uint64
+	FragmentsDropped uint64
+	UDPDropped       uint64
+	ICMPDropped      uint64
+	Malformed        uint64
+	BadChecksum      uint64
+	NotLocal         uint64
+	RetransmitAborts uint64
+	ProbeAborts      uint64
+	BoostGranted     uint64
+	BoostReclaimed   uint64
+
+	// 送り手の事象(wgstack-performance.md の「安く確かめる手順」)
+	RTOs                 uint64 // 再送のタイマーの期限で送り直した回数。窓の probe は数えない
+	RTOsBackedOff        uint64 // 累積の確認が進む前に続いた RTO(再送した segment も失われた)
+	RTOsShortOfDupThresh uint64 // 回復の外で、重複した ACK を 1 つか 2 つ受けた後の RTO
+	FastRecoveries       uint64 // 高速の回復に入った回数
+	PartialAcks          uint64 // 回復の中の部分の確認
+	RetransFast          uint64 // 高速の再送の segment
+	RetransPartial       uint64 // 部分の確認による再送の segment
+	RetransRTO           uint64 // RTO の後に SND.MAX より手前を送り直した segment
+	RetransPMTU          uint64 // PMTU の引き下げの後に SND.MAX より手前を送り直した segment
+	DupAcksIn            uint64 // 受けた重複した ACK
+	AcksDelayed          uint64 // 遅延 ACK のタイマーが求めた ACK を運んだ segment
+	AcksImmediate        uint64 // 即座に求めた ACK を運んだ segment
+	HeldChunksInPool     int64  // 輪が持つ chunk の数(chunkPool の会計)
+	ReclaimableInBoost   int    // プロセスの boost の枠のうち使っている数
 }
 
 // Stats は今の保持と数を返す。
@@ -110,6 +124,18 @@ func (s *stack) stats() Stats {
 	st.ProbeAborts = s.probeAborted.Load()
 	st.BoostGranted = s.boostGranted.Load()
 	st.BoostReclaimed = s.boostReclaimed.Load()
+	st.RTOs = s.rtos.Load()
+	st.RTOsBackedOff = s.rtosBackedOff.Load()
+	st.RTOsShortOfDupThresh = s.rtosShortOfDupThresh.Load()
+	st.FastRecoveries = s.fastRecoveries.Load()
+	st.PartialAcks = s.partialAcks.Load()
+	st.RetransFast = s.retrans[rtxFast].Load()
+	st.RetransPartial = s.retrans[rtxPartial].Load()
+	st.RetransRTO = s.retrans[rtxRTO].Load()
+	st.RetransPMTU = s.retrans[rtxPMTU].Load()
+	st.DupAcksIn = s.dupAcksIn.Load()
+	st.AcksDelayed = s.acksDelayed.Load()
+	st.AcksImmediate = s.acksImmediate.Load()
 	return st
 }
 
@@ -117,7 +143,7 @@ func (s *stack) stats() Stats {
 // 大きさで求めた値。UDP、ICMP、再組み立ての項はこの段階に無いので含めない。boost の項は、プロセスの枠の
 // すべてをこの Device が持つとして数える。
 type Bound struct {
-	Fix       int64 // M_fix:接続の枠の構造、hash の表、行の表、タイマーの輪、出力の list と制御の輪、chunk の置き場
+	Fix       int64 // M_fix:核の構造(事象の数と観測の関数を含む)、接続の枠の構造、hash の表、行の表、タイマーの輪、出力の list と制御の輪、chunk の置き場
 	FloorConn int64 // N_c x (f_s + f_r + r_f)
 	Boost     int64 // B x (d_s + d_r + d_rec + d_h)
 	UDPRx     int64 // M_udp_rx:受信の予算と管理の配列
@@ -139,7 +165,7 @@ func (s *stack) bound() Bound {
 	recSize := int64(unsafe.Sizeof(record{}))
 	ivSize := int64(unsafe.Sizeof(interval{}))
 	var b Bound
-	b.Fix = n*int64(unsafe.Sizeof(tcb{})) +
+	b.Fix = int64(unsafe.Sizeof(stack{})) + n*int64(unsafe.Sizeof(tcb{})) +
 		int64(len(s.connIdx.ents)+len(s.syn.idx.ents)+len(s.tw.idx.ents))*int64(unsafe.Sizeof(indexEnt{})) +
 		int64(len(s.syn.rows))*int64(unsafe.Sizeof(synRow{})) + int64(len(s.syn.free))*4 +
 		int64(len(s.tw.rows))*int64(unsafe.Sizeof(twRow{})) + int64(len(s.tw.free))*4 +

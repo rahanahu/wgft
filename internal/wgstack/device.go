@@ -27,6 +27,11 @@ type Config struct {
 	// Rand は ISN の鍵、表の hash の種、challenge ACK の揺らぎなどの乱数の種を読む元。nil なら
 	// crypto/rand を使う。試験は固定の byte の列を渡す。
 	Rand io.Reader
+	// Trace は試験と性能の測定だけが設定する観測の関数。nil でなければ、接続が ACK を 1 つ処理するたびと
+	// RTO のたびに、接続の錠を持ったまま呼ぶ。関数は Device を呼び返さない。本番は nil のままにする。
+	Trace func(TraceEvent)
+	// TestBoost は試験と性能の測定だけが使う boost の与え方。本番は既定の BoostOnDemand のままにする。
+	TestBoost BoostPolicy
 }
 
 // processStart は本番の時計の起点。プロセスのすべての Device が同じ起点を使うので、boost の回収が
@@ -81,6 +86,8 @@ func newDevice(cfg Config, lim limits, pool *boostPool) (*Device, error) {
 		return nil, errors.New("wgstack: " + err.Error())
 	}
 	d.s = s
+	s.trace = cfg.Trace
+	s.boostPolicy = cfg.TestBoost
 	if d.manual {
 		close(d.done)
 	} else {

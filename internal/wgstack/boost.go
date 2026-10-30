@@ -53,6 +53,9 @@ const (
 // 広げる。mu を持って呼ぶ。
 func (c *tcb) noteDemand(dir boostDir, now int64) bool {
 	c.lastDemand = now
+	if c.s.boostPolicy == BoostNever {
+		return false
+	}
 	if !c.boosted {
 		return true
 	}

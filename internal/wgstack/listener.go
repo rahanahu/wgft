@@ -119,7 +119,14 @@ func (t *TCPListener) Accept() (net.Conn, error) {
 			}
 			c.accepted = true
 			h := newConn(c, gen)
+			atAccept := s.boostPolicy == BoostAtAccept
+			if atAccept {
+				c.lastDemand = s.clock()
+			}
 			c.mu.Unlock()
+			if atAccept {
+				s.tryBoost(c, gen, boostRecv)
+			}
 			return h, nil
 		}
 		s.tmu.Unlock()
