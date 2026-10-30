@@ -46,11 +46,13 @@
 #       target resolve. agent doctor's dataplane.table agrees: once check 22's refused rules are
 #       removed, unknown resolve_failed and exit 0 while the rule still forwards, and failed
 #       listener_error and exit 1 once the old address refuses. The refused rules are not put back.
-#       Last, a TCP rule to a name with two allowed addresses whose smallest drops every SYN moves to
-#       the other address after two failed 30-second checks, logs it, records it, keeps it once the
-#       smallest answers again, and keeps it across an agent restart while the name does not resolve
-#       and after the name returns. A UDP rule to the same name follows the switch, and a UDP client
-#       that keeps sending from one source port reaches the new address after it.
+#   failover. a TCP rule to a name with two allowed addresses whose smallest drops every SYN moves
+#       to the other address after two failed 30-second checks, logs it, records it, keeps it once
+#       the smallest answers again, and keeps it across an agent restart while the name does not
+#       resolve and after the name returns. A UDP rule to the same name follows the switch, and a
+#       UDP client that keeps sending from one source port reaches the new address after it. It
+#       needs nothing resolve leaves behind. Run without resolve, it finds check 22's refused rules
+#       still in place; none of its checks reads state of the whole table.
 #   drift. the agent repairs changes made outside wgft: a deleted table, a deleted row, a changed
 #       MTU and a deleted wgft0, without a route warning while wgft0 is gone.
 #   notify. the kernel's change notifications bring a deleted table and a deleted wgft0 back within
@@ -116,7 +118,7 @@ ELOG=$W/wgft-ak-echo.log
 ADMIN=127.0.0.1:8686
 SERVER_MODE=kernel
 case "${1:-}" in kernel|userspace) SERVER_MODE=$1; shift ;; esac
-CHECKS=${*:-16 17 18 19 22 24 25 loopback resolve drift notify session route pin reconnect stale teardown}
+CHECKS=${*:-16 17 18 19 22 24 25 loopback resolve failover drift notify session route pin reconnect stale teardown}
 HOSTS=/etc/netns/$HOME_NS/hosts
 fail=0
 
@@ -189,8 +191,7 @@ set_hosts() { printf '127.0.0.1 localhost\n' > "$HOSTS"; printf '%s\n' "$@" >> "
 # The allowlist holds every target the rules use except the ones that must be refused. It names the
 # loopback targets of check loopback, 127.0.0.1:25566, 19133 and 19134, and not 127.0.0.1:25565, so
 # check 22's loopback rule is refused for a loopback target the list does not name (design 7b.2).
-# 192.168.50.2:19132, where nothing listens, is there for the UDP rule of the resolve check's failover
-# step.
+# 192.168.50.2:19132, where nothing listens, is there for the UDP rule of check failover.
 ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.2:19132,192.168.50.3:25570,192.168.50.2:25580,192.168.50.2:25565,192.168.50.4:25565,192.168.50.5:25565,127.0.0.1:25566,127.0.0.1:19133-19134
 start_agent() { # start_agent [mode]: kernel unless given
   WGFT_MODE=${1:-kernel} WGFT_JOIN="${JOIN:-}" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
@@ -713,13 +714,12 @@ NFT
   set_hosts "192.168.50.3 game.lan"
   wait_until 60 rule_state_ok "$R_NAME"
   check "the name resolves again" "ok" "$(rule_status "$R_NAME")"
-  check_resolve_failover
 }
-# check_resolve_failover: a name with two allowed addresses, 192.168.50.2 and .3, where the smallest
+# check_failover: a name with two allowed addresses, 192.168.50.2 and .3, where the smallest
 # drops every SYN to the target port, as a host that went away would. The agent pins .2 first, sees
 # it fail two 30-second checks in a row, and moves new flows to .3 (design 7b.2).
-check_resolve_failover() {
-  echo "== resolve: failover to another address of the name"
+check_failover() {
+  echo "== failover: failover to another address of the name"
   home nft -f - <<'NFT'
 table inet failoverdrop {
   chain in {
@@ -1500,7 +1500,7 @@ handshake_after() { local h; h=$(agent_field last_handshake); [ -n "$h" ] && [ "
 
 for c in $CHECKS; do
   case "$c" in
-    16|17|18|19|22|24|25|loopback|resolve|drift|notify|session|route|pin|reconnect|stale|teardown) "check_$c" ;;
+    16|17|18|19|22|24|25|loopback|resolve|failover|drift|notify|session|route|pin|reconnect|stale|teardown) "check_$c" ;;
     *) echo "FAIL  unknown check $c"; fail=1 ;;
   esac
 done
