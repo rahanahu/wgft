@@ -97,9 +97,57 @@ func (l relayEndListener) Accept() (net.Conn, error) {
 }
 
 // relayEndLoopback opens the relay's listeners on the kernel's loopback, as vpsd's public side.
-type relayEndLoopback struct{}
+type relayEndLoopback struct{ tcp *reservedTCP }
 
-func (relayEndLoopback) ListenTCP(port uint16) (net.Listener, error) {
+func (n relayEndLoopback) ListenTCP(port uint16) (net.Listener, error) {
+	return n.tcp.listen(port)
+}
+
+// reservedTCP holds loopback listeners bound to port 0 for the relay's rules. The relay's
+// ListenTCP on the same port takes the open listener. Closing it and letting the relay bind the
+// number later leaves a gap in which another socket of the process can take the port; the relay
+// package's loopback avoids the same gap.
+type reservedTCP struct {
+	mu sync.Mutex
+	ls map[uint16]*net.TCPListener
+}
+
+// newReservedTCP closes, at the end of the test, the listeners the relay did not take.
+func newReservedTCP(t *testing.T) *reservedTCP {
+	r := &reservedTCP{ls: map[uint16]*net.TCPListener{}}
+	t.Cleanup(func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, l := range r.ls {
+			l.Close()
+		}
+	})
+	return r
+}
+
+// reserve binds a loopback listener to a free port and keeps it open for the relay.
+func (r *reservedTCP) reserve(t *testing.T) uint16 {
+	t.Helper()
+	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(l.Addr().(*net.TCPAddr).Port)
+	r.mu.Lock()
+	r.ls[port] = l
+	r.mu.Unlock()
+	return port
+}
+
+// listen hands over the listener reserved for port, or binds the port if none is reserved.
+func (r *reservedTCP) listen(port uint16) (*net.TCPListener, error) {
+	r.mu.Lock()
+	l, ok := r.ls[port]
+	delete(r.ls, port)
+	r.mu.Unlock()
+	if ok {
+		return l, nil
+	}
 	return net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(port)})
 }
 
@@ -310,7 +358,8 @@ func newServerRelayEnd(t *testing.T, slots int) *relayEndRig {
 	}()
 	var armed atomic.Bool
 	dialed := make(chan net.Conn, 1)
-	m := relay.New(relayEndLoopback{}, relay.Options{
+	reserved := newReservedTCP(t)
+	m := relay.New(relayEndLoopback{reserved}, relay.Options{
 		Logf: relayEndLogf(t),
 		Dial: func(network, addr string) (net.Conn, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -323,13 +372,8 @@ func newServerRelayEnd(t *testing.T, slots int) *relayEndRig {
 		},
 	})
 	t.Cleanup(m.Close)
-	// a free port on the loopback for the relay's listener
-	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := uint16(l.Addr().(*net.TCPAddr).Port)
-	l.Close()
+	// a free port on the loopback for the relay's listener, kept open until the relay takes it
+	port := reserved.reserve(t)
 	k := relay.Key{Proto: proto.TCP, Port: port}
 	m.Apply(map[relay.Key]relay.Desired{k: {Target: netip.AddrPortFrom(p.b.local, 9000).String(), RuleID: "r1"}})
 	armed.Store(true)
@@ -525,6 +569,7 @@ func runRelayEnd(t *testing.T, r *relayEndRig, outage outageAt) {
 // connection is at the floor (no boost slot) or a boost holder, in the agent's role (the relay's
 // netstack connection is the first argument of netpipe.Pipe) and the server's (the second).
 func TestRelayEndDeliversToSlowReader(t *testing.T) {
+	t.Parallel()
 	for _, role := range []struct {
 		name string
 		rig  func(*testing.T, int) *relayEndRig
@@ -535,6 +580,7 @@ func TestRelayEndDeliversToSlowReader(t *testing.T) {
 				name = role.name + "/boost"
 			}
 			t.Run(name, func(t *testing.T) {
+				t.Parallel()
 				r := role.rig(t, slots)
 				runRelayEnd(t, r, noOutage)
 			})
@@ -546,6 +592,7 @@ func TestRelayEndDeliversToSlowReader(t *testing.T) {
 // transfer recovers and the peer, which keeps reading, receives every byte and then EOF. The
 // relay's connection is at the floor, in both roles.
 func TestRelayEndRecoversFromShortOutage(t *testing.T) {
+	t.Parallel()
 	for _, role := range []struct {
 		name string
 		rig  func(*testing.T, int) *relayEndRig
@@ -555,6 +602,7 @@ func TestRelayEndRecoversFromShortOutage(t *testing.T) {
 			at   outageAt
 		}{{"before the end", outageBeforeEnd}, {"after the end", outageAfterEnd}} {
 			t.Run(role.name+"/"+o.name, func(t *testing.T) {
+				t.Parallel()
 				r := role.rig(t, 0)
 				runRelayEnd(t, r, o.at)
 			})

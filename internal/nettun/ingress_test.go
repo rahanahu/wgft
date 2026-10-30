@@ -277,6 +277,7 @@ func TestIngressCloseDuringWrites(t *testing.T) {
 // test holds the table's mutex until the sweeper blocks in Sweep; Close must
 // then wait with the stack still open.
 func TestIngressCloseJoinsSweeperBeforeStack(t *testing.T) {
+	t.Parallel()
 	d, err := Create(ingressLocal, 1420)
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +307,7 @@ func TestIngressCloseJoinsSweeperBeforeStack(t *testing.T) {
 // The sweeper expires a held fragment with no further traffic, and Close
 // stops it.
 func TestIngressSweeperRunsWithoutTraffic(t *testing.T) {
+	t.Parallel()
 	d := ingressDevice(t)
 	d.reassembly.mu.Lock()
 	d.reassembly.limits.Lifetime = 20 * time.Millisecond
@@ -369,6 +371,7 @@ func readIngressOutput(t *testing.T, d *Device, wait time.Duration) []byte {
 }
 
 func TestIngressFragmentTimeoutICMP(t *testing.T) {
+	t.Parallel()
 	d := ingressDevice(t)
 	d.reassembly.mu.Lock()
 	d.reassembly.limits.Lifetime = 20 * time.Millisecond
@@ -451,6 +454,7 @@ func TestIngressLaterOptionConflictDoesNotQuoteFirst(t *testing.T) {
 }
 
 func TestIngressNonlocalTimeoutHasNoFalseLocalICMP(t *testing.T) {
+	t.Parallel()
 	d := ingressDevice(t)
 	d.reassembly.mu.Lock()
 	d.reassembly.limits.Lifetime = 20 * time.Millisecond
@@ -466,6 +470,7 @@ func TestIngressNonlocalTimeoutHasNoFalseLocalICMP(t *testing.T) {
 }
 
 func TestIngressTimeoutSuppressesNoninitialAndICMPError(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		packet []byte
@@ -474,6 +479,7 @@ func TestIngressTimeoutSuppressesNoninitialAndICMPError(t *testing.T) {
 		{name: "ICMP error", packet: reasmIPv4Fragment(1, 82, 0, true, 0, nil, []byte{3, 3, 0, 0, 0, 0, 0, 0})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			d := ingressDevice(t)
 			d.reassembly.mu.Lock()
 			d.reassembly.limits.Lifetime = 20 * time.Millisecond

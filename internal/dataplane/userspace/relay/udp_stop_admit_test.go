@@ -296,6 +296,7 @@ func TestUDPResumeJoinMovesSessions(t *testing.T) {
 
 // 並行の組: 多数の送信元が送り続ける間に Retiring、再開、閉鎖、開き直し、付け替えを繰り返す。
 func TestUDPLedgerUnderConfigChurn(t *testing.T) {
+	t.Parallel()
 	r := newUDPRig(t, 64)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup

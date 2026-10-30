@@ -489,6 +489,7 @@ func TestTCPBoostCap(t *testing.T) {
 // bulk の転送は、止まっても期限で試験を落として戻る。2 つの Device の間を渡る packet をすべて捨てて
 // 転送を止める。書き手と読み手がともに待つとき、書き終えた後に読み手だけが待つとき、書き込みが
 // 途中で失敗したときのどれでも、期限か失敗の後に戻り、読み手の goroutine を残さない。
+// 並列にしない: 全 goroutine の stack から bulkRead の残りを探すので、他の試験の転送が混ざると誤る。
 func TestBulkStopsWhenStalled(t *testing.T) {
 	const budget = time.Second
 	stalled := func(t *testing.T) (net.Conn, net.Conn) {
@@ -660,6 +661,8 @@ func TestTCPNoReturnFinWait2(t *testing.T) {
 // 転送を終えた Q 本が開いたまま枠を持つ。直後の新しい転送は floor のまま(保有者に需要が残る)。
 // tcpIdleReclaim の後は、各側で 1 本を floor に戻して枠を受け取る。戻された保有者は、需要が戻ると
 // 枠を求め直す。
+// 並列にしない: 16 本の保有者の準備が tcpIdleReclaim の間に終わることを前提にするので、他の試験の負荷で
+// 準備が延びると、需要の残る保有者から回収したように見えて誤って落ちる。
 func TestTCPIdleReclaim(t *testing.T) {
 	p := newTCPPair(t, tcpBoostSlots)
 	var conns [][2]net.Conn
@@ -719,6 +722,8 @@ func TestTCPIdleReclaim(t *testing.T) {
 }
 
 // 転送を続けている保有者からは回収しない。
+// 並列にしない: 書き手の goroutine が tcpIdleReclaim より短い間隔で需要を示し続けることを前提にするので、
+// 他の試験の負荷で書き手が止まると、需要の無い保有者として回収されて誤って落ちる。
 func TestTCPNoReclaimBusy(t *testing.T) {
 	p := newTCPPair(t, 1)
 	hc, hs := p.dial(t)
@@ -755,6 +760,8 @@ func TestTCPNoReclaimBusy(t *testing.T) {
 
 // 需要は無いが、送信のキューが floor を超える保有者(相手が読まない)と、受信のキューにデータが
 // 残る保有者は floor に戻さない。
+// 並列にしない: tcpIdleReclaim を壁時計で待った後に、試験の hook ではなく gVisor の実際の状態で
+// 保有者が枠を持ち続けることを確かめる。他の試験の負荷が待ちと確かめに混ざらないようにする。
 func TestTCPNoReclaimQueued(t *testing.T) {
 	p := newTCPPair(t, 1)
 	hc, hs := p.dial(t)
@@ -780,6 +787,8 @@ func TestTCPNoReclaimQueued(t *testing.T) {
 // 送信の向きを閉じた保有者は floor に戻さない。gVisor は送信を閉じた endpoint を、キューに
 // データが残っていても書き込める状態と答える。戻すと、boost の大きさのデータを持つ接続が
 // floor の扱いになる。netpipe は EOF を CloseWrite で伝えるので、相手が読むのを止めた転送で起こる。
+// 並列にしない: tcpIdleReclaim を壁時計で待った後に、試験の hook ではなく gVisor の実際の状態で
+// 保有者が枠を持ち続けることを確かめる。他の試験の負荷が待ちと確かめに混ざらないようにする。
 func TestTCPNoDemoteAfterCloseWrite(t *testing.T) {
 	p := newTCPPair(t, 1)
 	c, s := p.dial(t)
@@ -813,6 +822,7 @@ func TestTCPNoDemoteAfterCloseWrite(t *testing.T) {
 // 進む書き込みが、boost を返した接続に boost の大きさの送信のバッファを残す。保有者の書き込みを
 // hook で止めた間に、別の接続が同じ枠の集まりに枠を求める。
 func TestTCPDemoteSkipsWriteInProgress(t *testing.T) {
+	t.Parallel()
 	var holder atomic.Pointer[tcpConn]
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -858,6 +868,7 @@ func TestTCPDemoteSkipsWriteInProgress(t *testing.T) {
 // 書き込みは floor では 256 回、boost では 4096 回以内に止まる。boost を回収された保有者は
 // floor の 256 回に戻る。
 func TestTCPSmallWriteFlood(t *testing.T) {
+	t.Parallel()
 	check := func(t *testing.T, w, peer net.Conn, want int) {
 		t.Helper()
 		acc := floodOneByte(w)
@@ -868,6 +879,7 @@ func TestTCPSmallWriteFlood(t *testing.T) {
 		}
 	}
 	t.Run("floor", func(t *testing.T) {
+		t.Parallel()
 		p := newTCPPair(t, 1)
 		c, s := p.dial(t)
 		defer c.Close()
@@ -875,6 +887,7 @@ func TestTCPSmallWriteFlood(t *testing.T) {
 		check(t, s, c, tcpSendFloor/tcpWriteUnit)
 	})
 	t.Run("boost", func(t *testing.T) {
+		t.Parallel()
 		p := newTCPPair(t, 1)
 		c, s := p.dial(t)
 		defer c.Close()
@@ -886,6 +899,7 @@ func TestTCPSmallWriteFlood(t *testing.T) {
 		check(t, s, c, tcpBoostSize/tcpWriteUnit)
 	})
 	t.Run("after reclaim", func(t *testing.T) {
+		t.Parallel()
 		p := newTCPPair(t, 1)
 		hc, hs := p.dial(t)
 		defer hc.Close()
@@ -925,6 +939,7 @@ func TestTCPManyIdleNoBoost(t *testing.T) {
 
 // 遅い読み手の接続は、送信と受信のバッファを超えて保持しない。隣の接続は転送を終える。
 func TestTCPSlowReader(t *testing.T) {
+	t.Parallel()
 	p := newTCPPair(t, tcpBoostSlots)
 	sc, ss := p.dial(t)
 	defer sc.Close()
@@ -1079,6 +1094,7 @@ func TestWriteHistorySums(t *testing.T) {
 // OnBoost は登録の時点の状態で 1 回呼び、枠を得たときに真を、需要の無い保有者として floor に戻った
 // ときに偽を知らせる。中継はこれで組にしたカーネルのソケットの受信のバッファを合わせる(設計文書 7 節)。
 func TestTCPOnBoostReportsSlot(t *testing.T) {
+	t.Parallel()
 	p := newTCPPair(t, 1)
 	c, s := p.dial(t)
 	defer c.Close()
@@ -1184,6 +1200,7 @@ func TestTCPOnBoostSilentWithoutSlot(t *testing.T) {
 // 組にしたカーネルのソケットが floor への戻りを断る保有者からは回収しない。保有者は boost のまま枠を
 // 持つ。断りが止めば、次に別の接続が枠を求めたときに改めて試され、回収される(設計文書 7 節)。
 func TestTCPReclaimWaitsForKernelSide(t *testing.T) {
+	t.Parallel()
 	p := newTCPPair(t, 1)
 	hc, hs := p.dial(t)
 	defer hc.Close()
@@ -1227,6 +1244,8 @@ func TestTCPReclaimWaitsForKernelSide(t *testing.T) {
 
 // 組にしたカーネルのソケットに floor への戻りを聞くのは、gVisor の側の確かめがすべて通った後だけで
 // ある。先に聞くと、gVisor の側が断ったときに、枠を持つ接続のカーネルのソケットだけが floor に残る。
+// 並列にしない: tcpIdleReclaim を壁時計で待った後に、試験の hook ではなく gVisor の実際の状態で
+// 保有者が枠を持ち続けることを確かめる。他の試験の負荷が待ちと確かめに混ざらないようにする。
 func TestTCPKernelSideAskedLast(t *testing.T) {
 	p := newTCPPair(t, 1)
 	hc, hs := p.dial(t)

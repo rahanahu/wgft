@@ -123,6 +123,7 @@ func (p *ackPeer) ack(ack uint32, opts []byte) {
 // sends duplicate or one-byte-advancing ACKs with a SACK block. Without the
 // budget each ACK costs time in proportion to the segments in flight and the
 // endpoint's queue grows by about 0.75 KiB per ACK.
+// 並列にしない: liveHeap で heap の増え方を測るので、他の試験の確保と解放が測定に混ざる。
 func TestAckBudgetBoundsAckFlood(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -359,6 +360,8 @@ func emptyACK(local [4]byte, k ackFlowKey) []byte {
 // A connection that leaves boost, by demote or by delivering everything after
 // its close, drops to the floor limit, and tokens it earned under boost do not
 // let more ACKs through than the floor limit.
+// 並列にしない: demote は tcpIdleReclaim を壁時計で待って保有者を floor に戻すので、tcpIdleReclaim の
+// 回収を壁時計で確かめるほかの試験と同じく、他の試験の負荷を混ぜない。
 func TestAckBudgetFollowsBoost(t *testing.T) {
 	floorLimit := tcpSendFloor/ackSegmentFloor + ackBurst
 	boostLimit := tcpBoostSize/ackSegmentFloor + ackBurst
@@ -462,6 +465,7 @@ func TestAckBudgetAcceptedConnection(t *testing.T) {
 // The Device's own sweeper removes the rows of connections that end; no
 // test calls sweep here.
 func TestAckBudgetSweeperRemovesRows(t *testing.T) {
+	t.Parallel()
 	p := newTCPPair(t, 0)
 	c, s := p.dial(t)
 	defer s.Close()

@@ -463,6 +463,7 @@ func TestSaturatedOutputDropsTCPAndRecovers(t *testing.T) {
 // The dial begins while the return path is full and remains the same pending
 // attempt after drain. Its eventual completion depends on TCP retransmission.
 func TestSaturatedOutputPendingTCPAfterDrain(t *testing.T) {
+	t.Parallel()
 	p := newSaturationPair(t)
 	ln, err := p.responder.ListenTCP(netip.MustParseAddrPort("10.99.0.2:19020"))
 	if err != nil {

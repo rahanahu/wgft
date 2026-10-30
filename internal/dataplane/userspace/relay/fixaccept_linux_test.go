@@ -138,6 +138,7 @@ func (n orderNet) ListenTCP(port uint16) (net.Listener, error) {
 // startOrderRelay は、vpsd の公開側と同じ形の中継(カーネルの待ち受け)を、Admission と dial を
 // 記録する形で立てる。fix は accept の直後の固定と確かめ(fixAtAccept)の代わりに呼ばれる。
 // 戻り値の port に繋げば、本物の accept のループ(serveTCP)を通る。
+// startOrderRelay は package の fixAtAccept を差し替えるので、これを使う試験は並列にしない。
 func startOrderRelay(t *testing.T, fix func(net.Conn) bool) (*acceptOrder, uint16) {
 	t.Helper()
 	o := &acceptOrder{}

@@ -150,6 +150,7 @@ func TestPostCloseSweepKeepsOrder(t *testing.T) {
 // After the load stops, the Device's own sweeper empties the table within the TIME_WAIT period,
 // without rebuilding the Device, and new connections still work.
 func TestPostCloseDrainsAfterTimeWait(t *testing.T) {
+	t.Parallel()
 	const timeWait = 500 * time.Millisecond
 	p := newPostClosePair(t, 8, timeWait)
 	for i := 0; i < 20; i++ {
@@ -309,6 +310,7 @@ func rowHeap(t *testing.T, n int, finWait2 bool) float64 {
 	return per
 }
 
+// liveHeap で heap を測る試験は並列にしない: 他の試験の確保が測定に混ざる。
 func liveHeap() uint64 {
 	var m runtime.MemStats
 	runtime.GC()

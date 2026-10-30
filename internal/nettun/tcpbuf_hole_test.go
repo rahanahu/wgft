@@ -344,6 +344,8 @@ func TestGVisorRecvMemLayout(t *testing.T) {
 // 受け手の受信のバッファを、順序外を積んだ後の受信のメモリ M に対して B に縮め、穴を埋める再送を
 // 通す。gVisor の enqueue は受信のメモリが B 以下のときだけデータの segment を受け入れるので、
 // B >= M なら読み進め、B < M なら何も受け入れず止まる。回収は B = floor で、M <= floor のときだけ縮める。
+// 並列にしない: B が M に近いと、読み手が読むのが遅れた間は受信のメモリが B を超え、受け手が届いた
+// segment を拒む。読み手の速さが CPU の負荷で変わるので、他の試験の負荷を混ぜない。
 func TestGVisorShrinkBoundary(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -448,6 +450,8 @@ func TestGVisorShrinkBoundary(t *testing.T) {
 // 回収の場面: boost を得た受け手に穴を作り順序外を積み、需要が止まってから別の流れが枠を求める。
 // 順序外が floor 以下なら floor に戻して枠を渡し、穴が埋まれば読み進める。floor を超えていれば
 // 戻さず、枠を持ったまま読み進める。
+// 並列にしない: over the floor では、tcpIdleReclaim を壁時計で待った後に、試験の hook ではなく gVisor の
+// 実際の状態で保有者が枠を持ち続けることを確かめる。他の試験の負荷が待ちと確かめに混ざらないようにする。
 func TestTCPReclaimWithHole(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -495,6 +499,7 @@ func TestTCPReclaimWithHole(t *testing.T) {
 // 回収の判定の境界。受信のメモリが floor ちょうどなら縮め、floor より 1 byte 多ければ縮めない。
 // 読めなければ縮めない。
 func TestTCPReclaimRecvMemBoundary(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		mem     int
@@ -507,6 +512,7 @@ func TestTCPReclaimRecvMemBoundary(t *testing.T) {
 		{"unreadable", 0, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			p := newTCPPair(t, 1)
 			p.b.pool.recvMemHook = func(tcpip.Endpoint) (int, bool) { return tc.mem, tc.ok }
 			hc, hs := p.dial(t)
