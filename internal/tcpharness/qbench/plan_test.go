@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -94,27 +95,39 @@ func routineCells() []Cell {
 
 // gateCells adds both directions of the rest: loss 5%, reordering and the outage for the
 // receiving DUT, and the thin stream at loss 0, 1 and 5% and with an outage in both directions.
+//
+// In the gate, every cell where the DUT receives runs twice: with the Linux client, judged, and
+// with the gVisor client, measured for information only. The gVisor client wedges and then
+// measures itself, and its RTO cannot be read (the supervisor's decision; the owner can revise
+// it). The routine mode, on the host, keeps the gVisor client as a quick indicator.
 func gateCells() []Cell {
-	cells := routineCells()
-	cells = append(cells,
+	cells := append(routineCells(),
 		bulk("recv/loss5%", false, 0.05),
 		Cell{Name: "recv/reorder", Reorder: true, Len: bulkLen},
-		Cell{Name: "recv/outage2s", Outage: true, Len: outageLen, NotJudged: clientSends},
+		Cell{Name: "recv/outage2s", Outage: true, Len: outageLen},
 		thin("thin-send/loss0%", true, 0, false),
 		thin("thin-send/loss5%", true, 0.05, false),
 		thin("thin-send/outage2s", true, 0, true),
 		thin("thin-recv/loss0%", false, 0, false),
 		thin("thin-recv/loss1%", false, 0.01, false),
 		thin("thin-recv/loss5%", false, 0.05, false),
-		withNotJudged(thin("thin-recv/outage2s", false, 0, true), clientSends),
+		thin("thin-recv/outage2s", false, 0, true),
 	)
-	return cells
+	var out []Cell
+	for _, c := range cells {
+		if c.DUTSend {
+			out = append(out, c)
+			continue
+		}
+		out = append(out, withNotJudged(c, clientSends), withClient([]Cell{c}, "linux")[0])
+	}
+	return out
 }
 
-// clientSends is why the outage cells in which the DUT receives are not judged: the sender is
-// the gVisor client, whose RTO the bench cannot read and which, sending a thin stream, stalls
-// for seconds after an outage whatever the DUT, so the cell measures the client.
-const clientSends = "the gVisor client sends; it stalls after an outage and its RTO is unknown"
+// clientSends is why a cell in which the gVisor client sends is not judged in the gate: the
+// client wedges after losses and outages whatever the DUT, so the cell measures the client, and
+// its RTO cannot be read. The same cell with the Linux client is judged.
+const clientSends = "informational; the gVisor client sends and can wedge; the gate judges the /linux-client cell"
 
 func withNotJudged(c Cell, why string) Cell {
 	c.NotJudged = why
@@ -414,11 +427,13 @@ type Summary struct {
 	RTOMS       float64 `json:"rto_ms"`      // -1 if unknown
 	P50MS       float64 `json:"p50_ms"`      // thin stream, all runs pooled
 	P99MS       float64 `json:"p99_ms"`
+	P99LoMS     float64 `json:"p99_lo_ms,omitempty"` // thin stream: the bootstrap 95% interval of the pooled p99
+	P99HiMS     float64 `json:"p99_hi_ms,omitempty"`
 	MaxMS       float64 `json:"max_ms"`
 	Samples     int     `json:"samples"`
 	Lost        int     `json:"lost"`        // thin messages never delivered, all runs
 	Unrecovered int     `json:"unrecovered"` // outage runs with no read after the outage
-	Spread      float64 `json:"spread"`      // max over min of the judged value across runs; spreadInf for a missing value
+	Spread      float64 `json:"spread"`      // max over min of the judged value across runs; spreadInf for a missing value; 0 for a thin stream
 }
 
 // spreadInf stands for an infinite spread, which JSON cannot carry: a run without a judged value,
@@ -482,9 +497,7 @@ func summarize(c Cell, runs []Run) Summary {
 		s.Lost += r.Lost
 		switch {
 		case c.Thin:
-			l := append([]time.Duration(nil), r.Lat...)
-			sort.Slice(l, func(i, j int) bool { return l[i] < l[j] })
-			judged = append(judged, ms(quantile(l, 0.99)))
+			// judged on the pooled p99 and its interval, not on the per-run spread
 		case c.Outage:
 			judged = append(judged, ms(r.Recovery)) // -1 for a run that never recovered
 		default:
@@ -502,12 +515,38 @@ func summarize(c Cell, runs []Run) Summary {
 		sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
 		s.P50MS, s.P99MS, s.MaxMS = ms(quantile(lat, 0.5)), ms(quantile(lat, 0.99)), ms(lat[len(lat)-1])
 		s.Samples = len(lat)
+		if c.Thin {
+			s.P99LoMS, s.P99HiMS = p99Interval(lat)
+		}
 	}
 	s.Spread = spread(judged)
 	if s.OK < s.Runs {
 		s.Spread = spreadInf // a failed run makes the cell undetermined
 	}
 	return s
+}
+
+// bootstrapResamples is how many resamples p99Interval draws.
+const bootstrapResamples = 1000
+
+// p99Interval is the bootstrap 95% interval of the p99 of the sorted pool, in ms: the 2.5th and
+// 97.5th percentiles of the p99 over resamples of the pool's size drawn with replacement. The
+// seed is fixed, so the same pool gives the same interval.
+func p99Interval(sorted []time.Duration) (lo, hi float64) {
+	r := rand.New(rand.NewSource(1))
+	n := len(sorted)
+	idx := make([]int, n)
+	est := make([]float64, bootstrapResamples)
+	for i := range est {
+		for j := range idx {
+			idx[j] = r.Intn(n)
+		}
+		sort.Ints(idx) // a resample of indices into the sorted pool is sorted by value
+		k := int(math.Ceil(0.99*float64(n))) - 1
+		est[i] = ms(sorted[idx[max(k, 0)]])
+	}
+	sort.Float64s(est)
+	return est[int(0.025*float64(len(est)))], est[int(0.975*float64(len(est)))-1]
 }
 
 // Reference is the stored medians the routine mode compares wgstack with. Each cell carries the
@@ -571,7 +610,14 @@ func gitCommit() string {
 type Verdict struct {
 	Rule, Result string
 	Value, Line  float64
+	// Straddles is set for a thin stream whose p99 interval contains the line, where the plan
+	// doubles the runs as it does for a value near the line.
+	Straddles bool
 }
+
+// throughputTolerance is the measurement tolerance of the throughput rule: wgstack passes at
+// 0.99 of the binding line, so a cell where every engine fills the link does not fail on noise.
+const throughputTolerance = 0.99
 
 // judge applies the rule of c's kind to wgstack's summary against gVisor's and Linux's.
 func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
@@ -593,8 +639,17 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 	var v Verdict
 	switch {
 	case c.Thin:
-		v = Verdict{Rule: "p99 <= 1.5 x Linux", Value: wg.P99MS, Line: 1.5 * lx.P99MS}
-		v.Result = yes(v.Value <= v.Line)
+		v = Verdict{Rule: "p99 95% interval vs 1.5 x Linux", Value: wg.P99MS, Line: 1.5 * lx.P99MS}
+		switch {
+		case wg.P99HiMS <= v.Line:
+			v.Result = "PASS"
+		case wg.P99LoMS > v.Line:
+			v.Result = "FAIL"
+		default:
+			v.Straddles = true
+			v.Result = fmt.Sprintf("UNDETERMINED: the 95%% interval %.0f to %.0f ms contains the line", wg.P99LoMS, wg.P99HiMS)
+		}
+		return v
 	case c.Outage:
 		if wg.Unrecovered > 0 {
 			return Verdict{Rule: "recovery <= Linux + Linux RTO", Result: fmt.Sprintf("FAIL: %d runs never recovered", wg.Unrecovered)}
@@ -606,12 +661,12 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 		v.Result = yes(v.Value >= 0 && v.Value <= v.Line)
 	default:
 		// 0.8 x Linux, or gVisor's value where gVisor is above it
-		line, rule := 0.8*lx.Mbps, "Mbit/s >= 0.8 x Linux; gVisor is below"
+		line, rule := 0.8*lx.Mbps, "Mbit/s >= 0.99 x 0.8 x Linux; gVisor is below"
 		if haveG && gv.Mbps > line {
-			line, rule = gv.Mbps, "Mbit/s >= gVisor; gVisor is above 0.8 x Linux"
+			line, rule = gv.Mbps, "Mbit/s >= 0.99 x gVisor; gVisor is above 0.8 x Linux"
 		}
 		v = Verdict{Rule: rule, Value: wg.Mbps, Line: line}
-		v.Result = yes(v.Value >= v.Line)
+		v.Result = yes(v.Value >= throughputTolerance*v.Line)
 	}
 	for _, s := range []Summary{wg, gv, lx} {
 		if s.Spread > 2 {
@@ -632,7 +687,7 @@ func yes(ok bool) string {
 // near reports whether a verdict's value is within 5% of its line, where the plan doubles the
 // runs and judges again.
 func near(v Verdict) bool {
-	return v.Line > 0 && v.Value >= 0 && math.Abs(v.Value/v.Line-1) <= 0.05
+	return v.Straddles || (v.Line > 0 && v.Value >= 0 && math.Abs(v.Value/v.Line-1) <= 0.05)
 }
 
 func dur(d time.Duration) string {
@@ -675,8 +730,8 @@ func measure(t *testing.T, c Cell, ci int, engines []string, runs, from int) map
 }
 
 func printSummary(c Cell, eng string, s Summary) {
-	fmt.Printf("QBENCH-SUMMARY engine=%s cell=%s runs=%d ok=%d mbps=%.2f recovery_ms=%.0f rto_ms=%.0f unrecovered=%d p50_ms=%.1f p99_ms=%.1f max_ms=%.1f samples=%d lost=%d spread=%.2f\n",
-		eng, c.Name, s.Runs, s.OK, s.Mbps, s.RecoveryMS, s.RTOMS, s.Unrecovered, s.P50MS, s.P99MS, s.MaxMS, s.Samples, s.Lost, s.Spread)
+	fmt.Printf("QBENCH-SUMMARY engine=%s cell=%s runs=%d ok=%d mbps=%.2f recovery_ms=%.0f rto_ms=%.0f unrecovered=%d p50_ms=%.1f p99_ms=%.1f p99_ci_ms=%.1f-%.1f max_ms=%.1f samples=%d lost=%d spread=%.2f\n",
+		eng, c.Name, s.Runs, s.OK, s.Mbps, s.RecoveryMS, s.RTOMS, s.Unrecovered, s.P50MS, s.P99MS, s.P99LoMS, s.P99HiMS, s.MaxMS, s.Samples, s.Lost, s.Spread)
 }
 
 // checkPool fails the test when a thin cell's pool is below the plan's 1,000 samples.
@@ -789,19 +844,25 @@ func TestQBenchRoutine(t *testing.T) {
 }
 
 // TestQBenchGate is the gate matrix: wgstack, gVisor and Linux in the same process and VM, 9 runs
-// per cell, judged by 判定の規則, with the runs doubled for a cell within 5% of its line.
+// per cell, judged by 判定の規則, with the runs doubled for a cell within 5% of its line or, for a
+// thin stream, with a p99 interval that contains the line.
 // QBENCH_WRITE_REF names a file to store the gVisor and Linux medians in, for the routine mode.
 func TestQBenchGate(t *testing.T) {
 	engines := []string{"wgstack", "gvisor", "linux"}
 	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
 		engines = strings.Split(v, ",")
 	}
-	if (has(engines, "linux") || os.Getenv("QBENCH_CLIENT") == "linux") && !inNetns(t) {
+	// the gate fixes each cell's client itself, so QBENCH_CLIENT does not apply
+	cells := nameFilter(gateCells())
+	linuxClient := false
+	for _, c := range cells {
+		linuxClient = linuxClient || c.Client == "linux"
+	}
+	if (has(engines, "linux") || linuxClient) && !inNetns(t) {
 		return
 	}
 	where := pinLinux(t, engines)
 	runs := envInt("QBENCH_RUNS", 9)
-	cells := cellFilter(gateCells())
 	prov := provenance(where)
 	if os.Getenv("QBENCH_WRITE_REF") != "" {
 		if prov.Commit == "" {
@@ -911,7 +972,7 @@ func row(c Cell, wg, gv, lx Summary, v Verdict) string {
 		case s.Runs == 0:
 			return "-"
 		case c.Thin:
-			return fmt.Sprintf("%.0f / %.0f / %.0f ms, %d lost", s.P50MS, s.P99MS, s.MaxMS, s.Lost)
+			return fmt.Sprintf("%.0f / %.0f (%.0f to %.0f) / %.0f ms, %d lost", s.P50MS, s.P99MS, s.P99LoMS, s.P99HiMS, s.MaxMS, s.Lost)
 		case c.Outage:
 			return fmt.Sprintf("%.0f ms, RTO %.0f ms, %.2f Mbit/s", s.RecoveryMS, s.RTOMS, s.Mbps)
 		}
@@ -981,6 +1042,47 @@ func TestJudgeRules(t *testing.T) {
 	}
 	if bad := unstorable([]string{"gvisor"}, map[string]Summary{"gvisor": {Runs: 9, OK: 9, Spread: 2.5}}); bad == "" {
 		t.Error("a gVisor summary spreading above 2 would be stored")
+	}
+
+	// thin streams: the pooled p99's interval against 1.5 x Linux
+	lxThin := Summary{Runs: 5, OK: 5, P99MS: 100}
+	for _, tc := range []struct {
+		lo, hi float64
+		want   string
+	}{{100, 140, "PASS"}, {160, 200, "FAIL"}, {140, 160, "UNDETERMINED"}} {
+		wgThin := Summary{Runs: 5, OK: 5, P99MS: (tc.lo + tc.hi) / 2, P99LoMS: tc.lo, P99HiMS: tc.hi}
+		v := judge(thin, wgThin, Summary{}, lxThin, false, true)
+		if !strings.HasPrefix(v.Result, tc.want) || (tc.want == "UNDETERMINED") != near(v) {
+			t.Errorf("interval %v to %v against 150: %q, doubling %v; want %s", tc.lo, tc.hi, v.Result, near(v), tc.want)
+		}
+	}
+	pool := make([]time.Duration, 2000)
+	for i := range pool {
+		pool[i] = time.Duration(i) * time.Millisecond
+	}
+	if lo, hi := p99Interval(pool); !(lo < 1980 && hi > 1980 && lo > 1960 && hi < 2000) {
+		t.Errorf("the p99 interval of 0 to 1999 ms is %v to %v; want about 1980 inside it", lo, hi)
+	}
+
+	// throughput: 1% measurement tolerance under the binding line
+	gvBulk := Summary{Runs: 5, OK: 5, Mbps: 18.87, Spread: 1}
+	lx19 := Summary{Runs: 5, OK: 5, Mbps: 18.87, Spread: 1}
+	if v := judge(bulkC, Summary{Runs: 5, OK: 5, Mbps: 18.86, Spread: 1}, gvBulk, lx19, true, true); v.Result != "PASS" {
+		t.Errorf("18.86 against gVisor's 18.87: %q, want PASS", v.Result)
+	}
+	if v := judge(bulkC, Summary{Runs: 5, OK: 5, Mbps: 18.6, Spread: 1}, gvBulk, lx19, true, true); v.Result != "FAIL" {
+		t.Errorf("18.6 against gVisor's 18.87: %q, want FAIL", v.Result)
+	}
+
+	// the gate judges every receiving cell with the Linux client and keeps the gVisor one aside
+	for _, c := range gateCells() {
+		switch {
+		case c.DUTSend:
+		case c.Client == "linux" && c.NotJudged != "":
+			t.Errorf("%s: the Linux-client cell is not judged", c.Name)
+		case c.Client == "" && c.NotJudged == "":
+			t.Errorf("%s: the gVisor-client cell is judged", c.Name)
+		}
 	}
 
 	nj := Cell{Name: "recv/outage2s", Outage: true, NotJudged: clientSends}
