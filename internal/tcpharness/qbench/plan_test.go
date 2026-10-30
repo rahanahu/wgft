@@ -117,7 +117,7 @@ type Run struct {
 	RTO          time.Duration   // the sender's RTO in use at the outage's end; -1 if unknown
 	Stall        time.Duration   // the longest gap between reads outside the outage
 	Lat          []time.Duration // per thin message; an undelivered one counts until the receiver gave up
-	Lost         int             // thin messages written but never delivered
+	Lost         int             // thin messages never delivered, written or not
 	Retrans      int
 	DataPkts     int
 	QDrops       int
@@ -292,26 +292,29 @@ const (
 // runThin writes 200 seeded bytes every 20 ms for c.Len and measures, per message, the time from
 // the write to the read that completes it.
 func runThin(r *Run, c Cell, seed int64, snd, rcv net.Conn) []time.Time {
-	end := time.Now().Add(c.Len)
+	// Each message has a slot every thinEvery and is timed from its slot, not from its write: a
+	// write that blocks delays the messages behind it, and their latency includes the wait.
+	start := time.Now()
+	end := start.Add(c.Len)
+	slots := int((c.Len + thinEvery - 1) / thinEvery)
+	slot := func(i int) time.Time { return start.Add(time.Duration(i) * thinEvery) }
 	var mu sync.Mutex
-	var written []time.Time
+	written := 0
 	go func() {
 		g := gen(seed)
 		msg := make([]byte, thinSize)
-		t := time.NewTicker(thinEvery)
-		defer t.Stop()
-		for time.Now().Before(end) {
+		for i := 0; i < slots; i++ {
+			time.Sleep(time.Until(slot(i)))
 			g.Read(msg)
 			mu.Lock()
-			written = append(written, time.Now())
+			written++
 			mu.Unlock()
 			if _, err := snd.Write(msg); err != nil {
 				return
 			}
-			<-t.C
 		}
 	}()
-	// read until every message written by end has arrived, or 5 s after end
+	// read until every slot's message has arrived, or 5 s after end
 	rcv.SetReadDeadline(end.Add(5 * time.Second))
 	exp := gen(seed)
 	buf := make([]byte, 64<<10)
@@ -331,11 +334,11 @@ func runThin(r *Run, c Cell, seed int64, snd, rcv net.Conn) []time.Time {
 			got += int64(n)
 			reads = append(reads, now)
 			mu.Lock()
-			for done < len(written) && int64(done+1)*thinSize <= got {
-				r.Lat = append(r.Lat, now.Sub(written[done]))
+			for done < written && int64(done+1)*thinSize <= got {
+				r.Lat = append(r.Lat, now.Sub(slot(done)))
 				done++
 			}
-			all := !now.Before(end) && done == len(written)
+			all := done == slots
 			mu.Unlock()
 			if all {
 				break
@@ -345,15 +348,14 @@ func runThin(r *Run, c Cell, seed int64, snd, rcv net.Conn) []time.Time {
 			break
 		}
 	}
-	// A message that never arrives counts in the pool at the latency it had reached when the
-	// receiver gave up, so the percentiles show the stall instead of leaving it out.
+	// A message that never arrives, written or still waiting for a blocked write, counts in the
+	// pool at the latency it had reached when the receiver gave up, so the percentiles show the
+	// stall instead of leaving it out.
 	giveUp := end.Add(5 * time.Second)
-	mu.Lock()
-	r.Lost = len(written) - done
-	for _, w := range written[done:] {
-		r.Lat = append(r.Lat, giveUp.Sub(w))
+	r.Lost = slots - done
+	for i := done; i < slots; i++ {
+		r.Lat = append(r.Lat, giveUp.Sub(slot(i)))
 	}
-	mu.Unlock()
 	r.Bytes = got
 	if !r.Verified {
 		r.Err = "STREAM MISMATCH"
@@ -714,6 +716,12 @@ func TestQBenchGate(t *testing.T) {
 			if ref.CellMeta == nil {
 				ref.CellMeta = map[string]Provenance{}
 			}
+			// the cells this run keeps carry the provenance they were measured with
+			for name := range ref.Cells {
+				if _, ok := ref.CellMeta[name]; !ok {
+					ref.CellMeta[name] = Provenance{Measured: ref.Measured, Where: ref.Where, Commit: "not recorded", Go: "not recorded", GVisor: "not recorded"}
+				}
+			}
 		}
 	}
 	ref.Measured, ref.Where, ref.BaseRuns = prov.Measured, where, runs
@@ -785,4 +793,40 @@ func printTable(rows []string) {
 		fmt.Println(r)
 	}
 	fmt.Println("QBENCH-DONE")
+}
+
+// TestJudgeRules checks the summary and judgment rules on made-up runs, without a network.
+func TestJudgeRules(t *testing.T) {
+	out := Cell{Name: "send/outage2s", DUTSend: true, Outage: true}
+	rec := func(d time.Duration) Run { return Run{Recovery: d, RTO: time.Second} }
+
+	stuck := summarize(out, []Run{rec(time.Second), rec(time.Second), rec(-1)})
+	if stuck.Unrecovered != 1 || stuck.Spread != spreadInf {
+		t.Errorf("a run that never recovered: unrecovered %d, spread %v; want 1 and infinite", stuck.Unrecovered, stuck.Spread)
+	}
+	lx := summarize(out, []Run{rec(time.Second)})
+	if v := judge(out, stuck, Summary{}, lx, false, true); !strings.HasPrefix(v.Result, "FAIL") {
+		t.Errorf("wgstack with an unrecovered run: %q, want FAIL", v.Result)
+	}
+
+	failed := summarize(out, []Run{rec(time.Second), {Err: "boom", Recovery: 10 * time.Second}})
+	if failed.OK != 1 || failed.RecoveryMS != 1000 || failed.Spread != spreadInf {
+		t.Errorf("a failed run: ok %d, recovery %v ms, spread %v; want 1, 1000 and infinite", failed.OK, failed.RecoveryMS, failed.Spread)
+	}
+
+	thin := Cell{Name: "thin-send/loss0%", DUTSend: true, Thin: true}
+	lat := make([]time.Duration, 100)
+	for i := range lat {
+		lat[i] = 10 * time.Millisecond
+	}
+	lat[99] = 5 * time.Second // what runThin appends for an undelivered message
+	s := summarize(thin, []Run{{Lat: lat, Lost: 1}})
+	if s.Lost != 1 || s.MaxMS != 5000 {
+		t.Errorf("an undelivered message: lost %d, max %v ms; want 1 and 5000", s.Lost, s.MaxMS)
+	}
+
+	nj := Cell{Name: "recv/outage2s", Outage: true, NotJudged: clientSends}
+	if v := judge(nj, stuck, Summary{}, lx, false, true); !strings.HasPrefix(v.Result, "NOT JUDGED") {
+		t.Errorf("recv/outage2s: %q, want NOT JUDGED", v.Result)
+	}
 }
