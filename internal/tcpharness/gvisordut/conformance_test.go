@@ -40,6 +40,24 @@ var Known = map[string]tcpharness.Known{
 		Observed: "no SYN-ACK",
 		Reason:   "gVisor answers a retransmitted SYN in SYN-RECEIVED with an ACK; Linux and wgstack retransmit the SYN-ACK",
 	},
+	"limited-transmit/first-dupack.new-data": {
+		Observed: "0 new segments",
+		Reason: "gVisor's default RACK, on the testbench's near-zero RTT, marks the first segment lost at the first SACK " +
+			"and resends it instead of sending new data; Limited Transmit belongs to the duplicate-threshold rule",
+	},
+	"limited-transmit/second-dupack.new-data": {
+		Observed: "0 new segments",
+		Reason:   "as limited-transmit/first-dupack.new-data: the first segment was already resent by RACK",
+	},
+	"limited-transmit/no-retransmit-before-third": {
+		Observed: "1 retransmissions",
+		Reason:   "gVisor's RACK resends the first segment at the first SACK, before any duplicate-ACK threshold",
+	},
+	"tlp-tail-loss/recovers-before-rto": {
+		Observed: "not within 225 ms",
+		Reason: "gVisor sends the tail loss probe at about 2 SRTT, but after the probe's SACK it resends the other tail " +
+			"segment only about 200 ms later, at its RTO, so recovery takes about 300 ms",
+	},
 	"paws/old.dupack": {
 		Observed: "ACK of base+4",
 		Reason:   "the pinned gVisor does not implement PAWS, gVisor's rcv.go: it accepts the old segment and acknowledges it",

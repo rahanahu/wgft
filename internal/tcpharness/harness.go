@@ -42,6 +42,9 @@ type Engine struct {
 	Name  string
 	New   func(tb testing.TB, seed uint64) DUT
 	Known map[string]Known
+	// Prepare, when set, runs before New for each scenario, so an engine can apply the scenario's
+	// own settings: the Linux reference applies Scenario.Linux.
+	Prepare func(tb testing.TB, s Scenario)
 }
 
 // Scenario is one engine-neutral conformance scenario.
@@ -50,6 +53,10 @@ type Scenario struct {
 	// Refs names the RFC sections and the gVisor packetimpact tests the scenario follows.
 	Refs string
 	Run  func(h *H)
+	// Linux holds sysctls, as path and value under /proc/sys, that the reference Linux uses for
+	// this scenario on top of its pinned configuration. A scenario family that checks a mechanism
+	// the pinned configuration switches off, such as RACK-TLP, turns it back on here.
+	Linux [][2]string
 }
 
 // runSeed is the run's seed: SeedEnv's value, or a random one that the run logs.
@@ -85,6 +92,9 @@ func Run(t *testing.T, e Engine, scenarios []Scenario) {
 			ss := ScenarioSeed(seed, s.Name)
 			t.Logf("refs: %s", s.Refs)
 			t.Logf("scenario seed: %d", ss)
+			if e.Prepare != nil {
+				e.Prepare(t, s)
+			}
 			h := newH(t, e, s.Name, e.New(t, ss), ss)
 			// a deferred call also runs when Require ends the scenario through SkipNow or FailNow
 			defer func() {
@@ -129,6 +139,9 @@ func Record(t *testing.T, e Engine, s Scenario, seed uint64) map[string][]string
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		if e.Prepare != nil {
+			e.Prepare(rec, s)
+		}
 		h = newH(rec, e, s.Name, e.New(rec, seed), seed)
 		s.Run(h)
 	}()
@@ -457,6 +470,9 @@ type Dial struct {
 	Window uint16
 	// SynWindow is the SYN's window field, which is never scaled; zero means Window.
 	SynWindow uint16
+	// AckDelay holds the final ACK of the handshake back, so the DUT's first RTT sample, and
+	// with RTT the RACK and TLP timers, has a path delay to work with.
+	AckDelay time.Duration
 }
 
 // Handshake runs a three-way handshake from a new peer to port and returns the peer and the
@@ -489,6 +505,9 @@ func (h *H) HandshakeFrom(p *Peer, d Dial) Segment {
 	synack, ok := p.Await(2*time.Second, func(s Segment) bool { return s.Has(FlagSYN | FlagACK) })
 	h.Require("handshake.synack", ok && synack.Ack == p.ISS+1, "a SYN-ACK acknowledging ISS+1 within 2 s", synackString(p, synack, ok))
 	p.adopt(syn, synack)
+	if d.AckDelay > 0 {
+		p.Quiet(d.AckDelay)
+	}
 	p.SendAck()
 	return synack
 }
