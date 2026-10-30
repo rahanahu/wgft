@@ -102,6 +102,7 @@ var Known = map[string]tcpharness.Known{
 
 // TestConformance runs the scenarios against nettun's gVisor Device. It needs no privileges.
 func TestConformance(t *testing.T) {
+	t.Parallel() // independent Devices; the package then takes about as long as its longest test
 	if testing.Short() {
 		t.Skip("real-time TCP scenarios; skipped with -short")
 	}

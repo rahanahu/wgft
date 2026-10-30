@@ -50,6 +50,10 @@ func Engine(known map[string]tcpharness.Known) tcpharness.Engine {
 			return d
 		},
 		Known: known,
+		// every scenario builds its own Device, so they can overlap; the reassembly timeout waits
+		// 30 s of real time and starts first
+		Parallel:  true,
+		SlowFirst: []string{"udp-reassembly-timeout"},
 	}
 }
 

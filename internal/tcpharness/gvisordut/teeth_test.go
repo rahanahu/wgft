@@ -68,6 +68,7 @@ func delayACKs(delay time.Duration) func(tcpharness.DUT) tcpharness.DUT {
 }
 
 func TestHarnessCatchesDelayedDuplicateACK(t *testing.T) {
+	t.Parallel() // independent Devices; the package then takes about as long as its longest test
 	got := tcpharness.Record(t, mutant("gvisor-delayed-ack", delayACKs(300*time.Millisecond)), scenario(t, "ooo-sack"), 1)
 	wantOutcome(t, got, "ooo-sack/dupack1", tcpharness.OutcomeFail)
 }
@@ -86,6 +87,7 @@ func (d corruptMSS536) Inject(pkt []byte) error {
 }
 
 func TestHarnessCatchesMSSFloorDropForAnotherReason(t *testing.T) {
+	t.Parallel() // independent Devices; the package then takes about as long as its longest test
 	e := mutant("gvisor-bad-checksum", func(d tcpharness.DUT) tcpharness.DUT { return corruptMSS536{d} })
 	got := tcpharness.Record(t, e, scenario(t, "handshake-mss-floor"), 1)
 	wantOutcome(t, got, "handshake-mss-floor/mss536.synack", tcpharness.OutcomeFail)
@@ -133,6 +135,7 @@ func dropBeyond64K(inner tcpharness.DUT) tcpharness.DUT {
 }
 
 func TestHarnessCatchesUnscaledReceiveWindow(t *testing.T) {
+	t.Parallel() // independent Devices; the package then takes about as long as its longest test
 	got := tcpharness.Record(t, mutant("gvisor-unscaled-receiver", dropBeyond64K), scenario(t, "window-scale"), 1)
 	wantOutcome(t, got, "window-scale/own-scale.span-held", tcpharness.OutcomeFail)
 }
@@ -172,6 +175,7 @@ func zeroUDPChecksum(pkt []byte) []byte {
 }
 
 func TestHarnessCatchesUDPReplyWithoutChecksum(t *testing.T) {
+	t.Parallel()
 	e := mutant("gvisor-no-udp-checksum", rewrite(zeroUDPChecksum))
 	got := tcpharness.Record(t, e, scenario(t, "udp-datagram"), 1)
 	wantOutcome(t, got, "udp-datagram/reply", tcpharness.OutcomeFail)
@@ -200,6 +204,7 @@ func (d *earlyTimeExceeded) Inject(pkt []byte) error {
 }
 
 func TestHarnessCatchesEarlyReassemblyTimeout(t *testing.T) {
+	t.Parallel()
 	e := mutant("gvisor-5s-reassembly", func(inner tcpharness.DUT) tcpharness.DUT {
 		return &earlyTimeExceeded{rewritten: rewrite(func(p []byte) []byte { return p })(inner).(*rewritten)}
 	})

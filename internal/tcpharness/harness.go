@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -50,6 +51,13 @@ type Engine struct {
 	// Prepare, when set, runs before New for each scenario, so an engine can apply the scenario's
 	// own settings: the Linux reference applies Scenario.Linux.
 	Prepare func(tb testing.TB, s Scenario)
+	// Parallel runs the scenarios concurrently, each against its own DUT. Only an engine whose
+	// DUTs share nothing may set it: the Linux reference shares one namespace, its sysctls and
+	// its device name.
+	Parallel bool
+	// SlowFirst names scenarios a parallel engine starts first because they wait long in real
+	// time, such as for a 30 s timer, so the others run while they wait.
+	SlowFirst []string
 }
 
 // Scenario is one engine-neutral conformance scenario.
@@ -96,19 +104,30 @@ func ScenarioSeed(run uint64, scenario string) uint64 {
 func Run(t *testing.T, e Engine, scenarios []Scenario) {
 	seed := runSeed(t)
 	t.Logf("run seed: %d; replay with %s=%d", seed, SeedEnv, seed)
+	var mu sync.Mutex
 	seen := map[string]bool{}
 	ran := 0
-	for _, s := range scenarios {
+	// parallel subtests run after this function returns, so the list is checked in a cleanup,
+	// which runs once every subtest has finished
+	t.Cleanup(func() { checkUnreached(t, e, seen, ran == len(scenarios)) })
+	for _, s := range runOrder(e, scenarios) {
 		t.Run(s.Name, func(t *testing.T) {
+			if e.Parallel {
+				t.Parallel()
+			}
+			mu.Lock()
 			ran++
+			mu.Unlock()
 			ss := ScenarioSeed(seed, s.Name)
 			t.Logf("refs: %s", s.Refs)
 			t.Logf("scenario seed: %d", ss)
 			for n := 1; ; n++ {
 				a := attempt(t, e, s, ss)
+				mu.Lock()
 				for k := range a.outcome {
 					seen[k] = true
 				}
+				mu.Unlock()
 				if a.retry(n) {
 					t.Logf("RETRY  %s on %s: attempt %d failed while the test process went %v without running; the scenario runs again on a fresh DUT",
 						s.Name, e.Name, n, a.stall.Round(time.Millisecond))
@@ -119,6 +138,32 @@ func Run(t *testing.T, e Engine, scenarios []Scenario) {
 			}
 		})
 	}
+}
+
+// runOrder is the order Run starts the scenarios in: as listed, except that a parallel engine
+// starts the ones it names in SlowFirst first.
+func runOrder(e Engine, scenarios []Scenario) []Scenario {
+	if !e.Parallel || len(e.SlowFirst) == 0 {
+		return scenarios
+	}
+	slow := map[string]bool{}
+	for _, n := range e.SlowFirst {
+		slow[n] = true
+	}
+	var order []Scenario
+	for _, first := range []bool{true, false} {
+		for _, s := range scenarios {
+			if slow[s.Name] == first {
+				order = append(order, s)
+			}
+		}
+	}
+	return order
+}
+
+// checkUnreached reports listed differences no check reached: an error when every scenario ran,
+// and a log line when -run left some out.
+func checkUnreached(t *testing.T, e Engine, seen map[string]bool, all bool) {
 	var unreached []string
 	for k := range e.Known {
 		if !seen[k] {
@@ -127,7 +172,7 @@ func Run(t *testing.T, e Engine, scenarios []Scenario) {
 	}
 	sort.Strings(unreached)
 	for _, k := range unreached {
-		if ran == len(scenarios) {
+		if all {
 			t.Errorf("known difference %s on %s: no check reached it; fix its key or remove it", k, e.Name)
 		} else {
 			t.Logf("known difference %s: not reached; -run left scenarios out", k)
