@@ -239,6 +239,7 @@ lab/lab exec vm bash /wgft/lab/rcvwin.sh
 lab/lab test internal/nettun vps -test.run='^(TestRelayHold|TestSetupFailure)OutOfOrderKernelData$'
 lab/lab test internal/tcpharness/linuxdut
 lab/lab exec vm bash /wgft/lab/tcpquality.sh
+lab/lab exec vm bash /wgft/lab/tcpquality-cpu.sh fast
 lab/lab exec vm bash /wgft/lab/scale.sh kernel
 lab/lab exec vm bash /wgft/lab/scale.sh userspace
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel
