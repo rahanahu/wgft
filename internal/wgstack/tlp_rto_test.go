@@ -48,3 +48,41 @@ func TestNoRTOBeforeTheProbeCanBeAcked(t *testing.T) {
 		t.Errorf("RTO fired %v after the probe, before its ACK could return one RTT later", time.Duration(cs.rtoAt))
 	}
 }
+
+// TestRTOWithAPendingFastRetransmitSendsTheHeadOnce は、SACK の無い接続で高速の再送を作る前に RTO が来ても、
+// 先頭の segment を 1 度だけ送り直すことを確かめる。RTO の規則が SND.UNA から送り直すので、待っていた高速の
+// 再送の印を消す。
+func TestRTOWithAPendingFastRetransmitSendsTheHeadOnce(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	l := listen(t, n, 80)
+	p := n.handshake(40000, 80, true, false, true)
+	c := acceptOne(t, l)
+	n.drain()
+	cs := c.c
+	c.Write(make([]byte, 10*testSegPayload))
+	outs := n.drain()
+	if len(outs) < 5 {
+		t.Fatalf("sent %d segments", len(outs))
+	}
+	head := outs[0].seg.seq
+	for range 3 {
+		p.ack(nil) // 先頭が失われた重複の ACK
+	}
+	if !cs.fastRtx {
+		t.Fatal("no fast retransmit pending after three duplicate ACKs")
+	}
+	cs.mu.Lock()
+	at := cs.rtoAt
+	cs.mu.Unlock()
+	n.clk.Advance(time.Duration(at-int64(n.clk.Now())) + time.Millisecond)
+	n.d.Tick()
+	heads := 0
+	for _, o := range n.drain() {
+		if o.seg.seq == head && len(o.seg.payload) > 0 {
+			heads++
+		}
+	}
+	if heads != 1 {
+		t.Fatalf("the head was sent %d times after the RTO", heads)
+	}
+}

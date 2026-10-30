@@ -323,3 +323,24 @@ func TestRecoveryStaysWithinCwnd(t *testing.T) {
 		t.Fatal("RTO during recovery")
 	}
 }
+
+// TestPMTUDropKeepsRecordsThatFit は、PMTU の引き下げで、新しい大きさに入る記録を送り直さないことを確かめる
+// (入る記録は届いているかもしれない。Linux の tcp_simple_retransmit と同じ)。
+func TestPMTUDropKeepsRecordsThatFit(t *testing.T) {
+	n, c, _, outs := sackConn(t, 2)
+	cs := c.c
+	c.Write(make([]byte, 100)) // 新しい大きさに入る小さな記録
+	small := n.drain()
+	if len(small) != 1 || len(small[0].seg.payload) != 100 {
+		t.Fatalf("small write sent %v", small)
+	}
+	cs.mu.Lock()
+	cs.pmtuDrop(outs[0].seg.seq, 600, int64(n.clk.Now()))
+	cs.mu.Unlock()
+	for _, o := range n.drain() {
+		if o.seg.seq == small[0].seg.seq && len(o.seg.payload) > 0 {
+			t.Fatalf("resent the %d-byte record that fits the new PMTU", len(o.seg.payload))
+		}
+	}
+	checkScoreboard(t, cs)
+}

@@ -334,6 +334,8 @@ RFC 6191 の条件を満たす新しい SYN を受けたら、行を外して待
 このとき枠の接続は CLOSED になり、アプリケーションの読み取りには、それまでに受けたデータと `io.EOF` を返します。
 CLOSED になってアプリケーションがまだ閉じていない枠は、4 つ組の hash の表から外れるので、同じ 4 つ組の新しい SYN を妨げません。
 FIN_WAIT_2 の行にデータが届いたら、Linux と同じく RST を返して行を外します。
+その前に、行は確立した接続と同じく PAWS と受け入れの範囲を確かめ、PAWS で古い segment と、行に移した時に広告した窓の外の segment には、速さを抑えた ACK を返すだけにします(RFC 7323 5.3、RFC 9293 3.10.7.4)。
+窓の外の古いデータで行を外させないためで、行は広告した窓の scale を持ちます。
 
 #### 行に移る条件
 
@@ -479,14 +481,15 @@ M_wgstack = M_fix
 初期の値は動作を確かめるための値であり、最適値として探した値ではありません。
 どの値も設定項目にしません。
 
-linux/amd64 の build で測った大きさは、c_conn が 5,344 byte、記録 1 件が 32 byte、区間 1 つが 16 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
+linux/amd64 の build で測った大きさは、c_conn が 5,352 byte、記録 1 件が 32 byte、区間 1 つが 16 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
 記録 1 件は、性能の段階の SACK の scoreboard の欄で 24 byte から 32 byte になりました([ACK 1 つの手間の上界](wgstack-performance.md#ack-1-つの手間の上界))。
-既定の K の 2048 では、Device の `Bound` の `Total` は約 1,493.3 MiB で、そのうち TCP の項の和は約 1,480.8 MiB です。
-内訳は M_fix が約 22.8 MiB、floor の項が約 1,333.0 MiB、boost の項が約 125.0 MiB です。
+既定の K の 2048 では、Device の `Bound` の `Total` は約 1,494.6 MiB で、そのうち TCP の項の和は約 1,482.1 MiB です。
+内訳は M_fix が約 24.1 MiB、floor の項が約 1,333.0 MiB、boost の項が約 125.0 MiB です。
 送信の記録は floor の項に約 43.4 MiB、boost の項に約 4.1 MiB を加えます。
 区間の表は floor の項に約 9.6 MiB、boost の項に約 0.9 MiB を加えます。
 区間 1 つは、区間の treap の節(子の位置と優先度)の分で 12 byte から 16 byte になりました。
 M_fix は核の構造(事象の数と観測の関数を含みます)、接続の枠、3 つの hash の表、行の表、空きの list、タイマーの節、出力の list、制御の輪、chunk の置き場に残す 1 MiB を数えます。
+接続の枠 1 つが表の外に持つランタイムの構造(読み書きを起こす 2 つの channel、アプリケーションの handle、読み書きの期限のタイマー)も、枠 1 つあたり 0.5 KiB の推定で M_fix に数えます。
 本番の大きさの表(K は 256)で 256 本の接続に floor いっぱいの受信のデータを持たせた試験(記録 1 件が 24 byte だった完成の段階の測定)では、生きているヒープの増加は約 83.8 MB で、会計が数えた chunk、記録、M_fix の和の約 84.7 MB に収まりました。
 今のエージェントの上界の式では、カーネルモードの `vpsd` の後ろで、TCP の待ち受け 1 つごとに accept の待ち行列の項(約 1,790 MiB)が加わります([エージェントとホストのメモリの条件](memory-agent-host.md#accept-の待ち行列))。
 wgstack の accept の待ち行列は Device 全体で Q 本なので、この式に待ち受けの数に比例する項はありません。
@@ -561,6 +564,7 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
 - RFC 6298:SRTT と RTTVAR から RTO を求め、再送ごとに倍にします。
   最小の RTO は Linux と同じ 200 ms、最大は 120 秒です
 - RFC 7323:窓の scale、timestamp による RTT の測定、PAWS を持ちます。
+  TS.Recent を 24 日を超えて更新していない接続は、PAWS で比べずに受け入れます(5.5 節)。
   窓の scale は boost の 4 MiB を広告できる値を握手の時に決めます。
   広告する窓の欄は、窓の右端までの byte を scale で割って切り下げた値です。
   右端そのものは後ろへ戻さず、切り下げで右端が最大 2^scale - 1 byte 手前に見えることは窓の scale の性質として受け入れます。
@@ -571,6 +575,9 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
   challenge ACK の速さは Device 全体の token bucket で抑えます
 - MSS:相手の MSS に従い、MSS の option の無い SYN では 536 を使います。
   入口の[MSS の下限](packet-validation.md#tcp-の-mss-の下限)と、Fragmentation Needed による PMTU の引き下げ(下限 552)を持ちます。
+  引き下げでは、SACK を交渉した接続は新しい大きさに入らない記録だけを損失にして送り直し、交渉しない接続は SND.UNA から送り直します。
+  引き下げた PMTU を時間で戻す仕組み(RFC 1191 の 10 分の後の試し)は持ちません。
+  wgstack はトンネルの内側で動き、トンネルの MTU は決まっているので、引き下げが起きるのは相手の経路の MTU が小さいときだけで、戻らなくても遅くなるだけです
   自分が示す MSS は MTU から 40 byte を引いた値です
 - 輻輳の制御:RFC 5681 の slow start と、最初の slow start の RFC 9406 の HyStart++ を持ち、輻輳の回避は既定で RFC 9438 の CUBIC です([CUBIC](wgstack-performance.md#cubic)、[HyStart++](wgstack-performance.md#hystart))。
   SACK を交渉した接続は RFC 6675 の SACK による回復と RFC 6937 の PRR、交渉しない接続は RFC 6582 の NewReno の高速の再送と回復を使い、どちらも RFC 3042 の Limited Transmit を持ちます([SACK による回復](wgstack-performance.md#sack-による回復))。
@@ -668,6 +675,9 @@ ECN は交渉しません。
 - floor に戻った後の読み手の停止:広告済みの右端が floor の先に残る間に読み手が止まると、相手は窓の probe ではなく RTO の後退に入ります。
   Windows のクライアントは `TcpMaxDataRetransmissions` で再送を打ち切るので、Linux より早く接続を諦めることがあります。
   直す候補は、floor が満ちている間だけ窓を 0 として広告することです
+- 閉じた接続の boost の返し方:アプリケーションが閉じた後も末尾を届けている boost の接続は、送り残しの記録が floor の記録の輪の容量(556 件)を超える間、floor に戻れず枠を持ち続けます。
+  末尾は相手の確認で減り、届け終えるか再送と窓の probe の打ち切り([閉じた後の再送の打ち切り](#未確認の点と未決の点))で接続が終わると枠を返すので、持ち続ける時間には上限があります。
+  枠の数は B で抑えられ、上界は変わらないので、この形のまま受け入れます
 - 再組み立ての表の共有:表を葉の package に移すと、既定の gVisor の経路のコードも動きます。
   移さずに写す案は、規則の正本が 2 つになるので採りません
 - 中継の前提:中継とその試験が、前述の 4 点のほかに gVisor の挙動を前提にしているかは未確認です。

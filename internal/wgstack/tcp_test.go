@@ -782,3 +782,57 @@ func TestFINNotPiggybackedBeyondTheWindow(t *testing.T) {
 		t.Fatalf("FIN after the data was acknowledged: %v", outs)
 	}
 }
+
+// TestFinWait2RowIgnoresOutOfWindowAndPAWS は、FIN_WAIT_2 の行が窓の外の data と PAWS で古い data では行を外さず、
+// 速さを抑えた ACK を返すだけにすることを確かめる。窓の内側の新しい data では今までどおり RST で外す。
+func TestFinWait2RowIgnoresOutOfWindowAndPAWS(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	l := listen(t, n, 80)
+	p := n.handshake(40000, 80, true, false, true)
+	c := acceptOne(t, l)
+	n.drain()
+	c.Close()
+	p.absorb(n.drain())
+	p.ack(nil)
+	// 窓の外の data
+	s := p.seg(flagACK, []byte("far"))
+	s.seq += 1 << 30
+	n.inject(s)
+	n.drain()
+	if n.d.Stats().TWRows != 1 {
+		t.Fatal("an out-of-window segment removed the FIN_WAIT_2 row")
+	}
+	// PAWS で古い data
+	s = p.seg(flagACK, []byte("old"))
+	s.tsVal = 1
+	n.inject(s)
+	n.drain()
+	if n.d.Stats().TWRows != 1 {
+		t.Fatal("a PAWS-rejected segment removed the FIN_WAIT_2 row")
+	}
+	p.ack([]byte("late"))
+	outs := n.drain()
+	if len(outs) != 1 || !outs[0].seg.has(flagRST) || n.d.Stats().TWRows != 0 {
+		t.Fatalf("in-window data to the FIN_WAIT_2 row: %v, rows %d", outs, n.d.Stats().TWRows)
+	}
+}
+
+// TestPAWSForgetsTSRecentAfter24Days は、24 日を超えて TS.Recent を更新しなかった接続が、古い timestamp の
+// segment を PAWS で捨てずに受け入れることを確かめる(RFC 7323 5.5)。
+func TestPAWSForgetsTSRecentAfter24Days(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	l := listen(t, n, 80)
+	p := n.handshake(40000, 80, true, false, true)
+	c := acceptOne(t, l)
+	n.drain()
+	n.clk.Advance(25 * 24 * time.Hour)
+	s := p.seg(flagACK, []byte("new"))
+	s.tsVal = 1 // 相手の時計が一周した後の値
+	n.inject(s)
+	n.drain()
+	c.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 10)
+	if k, err := c.Read(buf); err != nil || string(buf[:k]) != "new" {
+		t.Fatalf("after 25 idle days the segment was rejected: %q %v", buf[:k], err)
+	}
+}

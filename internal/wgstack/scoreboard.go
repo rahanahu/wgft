@@ -230,6 +230,20 @@ func (c *tcb) markAllLost(cause uint8) {
 	c.resendCause = cause
 }
 
+// markLostLonger は、中身が payload byte を超える、SACK 済みでも損失の待ち行列にもない記録を損失にする
+// (PMTU の引き下げ)。記録の数に比例する手間だが、PMTU は下がる向きにしか変わらず 552 の下限で止まるので、
+// 接続ごとに起きる回数は限られる。
+func (c *tcb) markLostLonger(payload int, cause uint8) {
+	for i := 0; i < c.recs.n; i++ {
+		r := c.recs.at(i)
+		if int(r.length) <= payload || c.isSacked(r) || !c.genFlag(r, recInT) {
+			continue
+		}
+		c.markRackLost(i, r)
+	}
+	c.resendCause = cause
+}
+
 // clearSACK は SACK の取り消しで、すべての記録の SACK 済みの印を世代の番号で消す。
 func (c *tcb) clearSACK() {
 	c.sackGen++

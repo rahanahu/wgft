@@ -120,6 +120,7 @@ type tcbState struct {
 	origDelivered bool   // 処理中の ACK が再送していない記録を届けた
 
 	tsRecent, tsOffset uint32
+	tsRecentAt         int64 // TS.Recent を最後に更新した時刻(RFC 7323 5.5 の 24 日の規則)
 	lastAckSent        uint32
 	lastOOW            int64
 
@@ -304,7 +305,7 @@ func (c *tcb) establish(r *synRow, seg *segment, now int64) {
 	}
 	c.recs = recordRing{recs: c.floorRecs}
 	if c.tsOK && seg.opt.hasTS {
-		c.tsRecent = seg.opt.tsVal
+		c.tsRecent, c.tsRecentAt = seg.opt.tsVal, now
 		if seg.opt.tsEcr != 0 {
 			c.tsRTTSample(seg.opt.tsEcr, now)
 		}
@@ -423,8 +424,9 @@ func (c *tcb) input(seg *segment, now int64, reuse *reuseISS) bool {
 		c.afterInput(now)
 		return again
 	}
-	// PAWS(RFC 7323 5.3)
-	if c.tsOK && seg.opt.hasTS && !seg.has(flagRST) && seqLT(seg.opt.tsVal, c.tsRecent) {
+	// PAWS(RFC 7323 5.3)。24 日を超えて TS.Recent を更新していなければ、相手の時計が一周しうるので
+	// TS.Recent を古いとみなして比べない(RFC 7323 5.5)
+	if c.tsOK && seg.opt.hasTS && !seg.has(flagRST) && seqLT(seg.opt.tsVal, c.tsRecent) && now-c.tsRecentAt <= int64(pawsIdle) {
 		c.oowAck(seg, now)
 		c.afterInput(now)
 		return false
@@ -467,7 +469,7 @@ func (c *tcb) input(seg *segment, now int64, reuse *reuseISS) bool {
 	}
 	// TS.Recent の更新(RFC 7323 4.3)
 	if c.tsOK && seg.opt.hasTS && seqLE(seg.seq, c.lastAckSent) {
-		c.tsRecent = seg.opt.tsVal
+		c.tsRecent, c.tsRecentAt = seg.opt.tsVal, now
 	}
 	c.processAck(seg, now)
 	if c.state == stFree || c.state == stClosed {
@@ -844,8 +846,16 @@ func (c *tcb) pmtuDrop(seq uint32, mtu int, now int64) {
 	}
 	c.pmtu = mtu
 	if c.sndMax != c.sndUna {
-		// 記録の境目は保ち、SACK 済みでない記録を損失にして新しい大きさの segment で送り直す
-		c.markAllLost(rtxPMTU)
+		// 記録の境目は保ち、新しい大きさに入らない記録だけを損失にして送り直す(Linux の
+		// tcp_simple_retransmit と同じ)。入る記録は届いているかもしれないので、損失の印を付けない。SACK の
+		// 無い接続は記録の印を使わないので、今までどおり SND.UNA から送り直す
+		c.fastRtx = false
+		if c.sackOK {
+			c.markLostLonger(c.segMSS(), rtxPMTU)
+			c.advanceLoss() // 小さくなった MSS で DupThresh の byte の規則を数え直す
+		} else {
+			c.markAllLost(rtxPMTU)
+		}
 	}
 	c.afterInput(now)
 }
@@ -1094,6 +1104,7 @@ func (c *tcb) onRTO(now int64) {
 	if c.backoff == 0 {
 		c.ssthresh = c.ccFor().lossThresh(c)
 	}
+	c.fastRtx = false // RTO の規則が SND.UNA から送り直すので、待っている高速の再送で先頭を 2 度送らない
 	c.ccFor().onRTO(c)
 	c.cwnd = mss
 	c.recover = c.sndMax

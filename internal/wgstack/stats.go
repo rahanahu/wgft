@@ -181,6 +181,10 @@ type Bound struct {
 	Transient int64
 }
 
+// slotRuntime は接続の枠 1 つが表の外に持つランタイムの構造の見積もり(推定)。読み書きを起こす 2 つの
+// channel、アプリケーションの handle の Conn、読み書きの期限のタイマーで、合わせて 0.5 KiB 程度である。
+const slotRuntime = 512
+
 // Bound はこの Device の上界の式の値を返す。
 func (d *Device) Bound() Bound { return d.s.bound() }
 
@@ -198,7 +202,8 @@ func (s *stack) bound() Bound {
 		int64(len(s.out.conns.next)+len(s.out.rows.next))*(4+4+1) +
 		int64(len(s.out.ctl.buf)) + int64(len(s.out.ctl.lens))*8 +
 		int64(cap(s.fired))*4 +
-		chunkPoolKeep*chunkSize
+		chunkPoolKeep*chunkSize +
+		n*slotRuntime
 	b.FloorConn = n * (sendFloor + recvFloor + floorRecords*recSize + floorIntervals*ivSize)
 	b.Boost = int64(len(s.pool.slots)) * ((boostSize - sendFloor) + (boostSize - recvFloor) + (boostRecords-floorRecords)*recSize + (boostIntervals-floorIntervals)*ivSize)
 	dg := int64(unsafe.Sizeof(udpDgram{}))
