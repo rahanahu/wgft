@@ -50,6 +50,8 @@ func main() {
 	switch sub {
 	case "run":
 		err = cmdRun(args)
+	case "merge":
+		err = cmdMerge(args)
 	case "gc":
 		err = cmdGC(args)
 	case "list":
@@ -77,13 +79,18 @@ func usage() {
   run [flags] "<script> <args...>"...  run scenarios in disposable sandboxes
   run [flags] all                      run every job of `+manifestPath+`: parallel pool, then the
                                        exclusive jobs one at a time
+  run -shard K/N [-durations FILE] all  run only shard K of N of that plan; every exclusive job
+                                       stays alone within its shard's VM; exclusive jobs of other
+                                       shards are planned around the rate=measure jobs
+  merge [-out DIR] SUMMARY...          merge the summary.json of all N shards into one verdict
   gc [flags]                           remove leftovers of dead runs: namespaces, processes, workdirs
   list                                 list the sandboxes that exist now
   create [-id ID]                      create one sandbox and print its environment
   destroy <ID>                         destroy one sandbox
 
 run flags: -parallel N -repeat R -timeout DUR -keep-failed -no-gc -out DIR -prefix P -root DIR
-           -repo DIR -manifest FILE -with-optional -run-lock PATH -wait DUR
+           -repo DIR -manifest FILE -with-optional -run-lock PATH -wait DUR -shard K/N -durations FILE
+           -rate-margin DUR
 gc flags:  -prefix P -root DIR -keep-workdirs -run-lock PATH -wait DUR
 
 One run per Lab Host VM: run and gc take a lock, `+defaultRunLock+`.lock by default, and refuse at
@@ -99,6 +106,7 @@ workdir or link, was left behind: cleaning up is the harness's own job.
 type jobResult struct {
 	Index       int           `json:"index"`
 	Class       class         `json:"class"`
+	Rate        string        `json:"rate,omitempty"` // manifest の rate=。統合のときに時間窓の実際の重なりを見るため
 	PassLines   int           `json:"pass_lines"`
 	FailLines   int           `json:"fail_lines"`
 	SkipLines   int           `json:"skip_lines"`
@@ -126,6 +134,15 @@ type scenarioVerdict struct {
 // summary は 1 回の run 全体の記録。
 type summary struct {
 	Scenarios        []string          `json:"scenarios"`
+	Shard            string            `json:"shard,omitempty"`           // "K/N" of run -shard, "merged/N" after merge
+	PlanJobs         int               `json:"plan_jobs,omitempty"`       // jobs in the whole plan before -shard cut it
+	PlanDigest       string            `json:"plan_digest,omitempty"`     // hash of the cut plan; every shard of one run has the same
+	PlanScenarios    []string          `json:"plan_scenarios,omitempty"`  // the whole plan's scenarios by job index, to name a missing job
+	Netstack         string            `json:"netstack"`                  // WGFT_AGENT_NETSTACK the scenarios ran with; "default" when unset
+	MissingJobs      int               `json:"missing_jobs,omitempty"`    // merge: jobs of the plan that ran in no shard
+	MergeProblems    []string          `json:"merge_problems,omitempty"`  // merge: missing, duplicated or mismatched shards
+	RateMarginSec    float64           `json:"rate_margin_sec,omitempty"` // -rate-margin of the shards
+	RateWindow       string            `json:"rate_window,omitempty"`     // merge: what the real start times say about the rate window
 	Manifest         string            `json:"manifest,omitempty"`
 	ParallelJobs     int               `json:"parallel_jobs"`
 	ExclusiveJobs    int               `json:"exclusive_jobs"`
@@ -171,6 +188,9 @@ func cmdRun(args []string) error {
 	runLockPath := fs.String("run-lock", defaultRunLock, "base path of the Lab Host lock that keeps one run per VM")
 	wait := fs.Duration("wait", 0, "wait this long for the Lab Host lock instead of refusing at once")
 	withOptional := fs.Bool("with-optional", false, "also run the manifest's default=no jobs")
+	shardSpec := fs.String("shard", "", "run only shard K of N, written K/N, of the plan of `all`, cut by -durations or the manifest's weights")
+	rateMargin := fs.Duration("rate-margin", 30*time.Second, "with -shard, how long after the estimated end of the rate window an exclusive job of another shard may start")
+	durations := fs.String("durations", "", "summary.json of an earlier run; its job durations balance -shard")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -191,10 +211,14 @@ func cmdRun(args []string) error {
 		manifestFile = filepath.Join(*repo, manifestPath)
 	}
 	var plan []jobResult // Index, Class, Scenario だけを先に決める
+	manifestJobs := map[string]job{}
 	if runAll {
 		jobs, err := loadManifest(manifestFile)
 		if err != nil {
 			return err
+		}
+		for _, j := range jobs {
+			manifestJobs[j.Scenario] = j
 		}
 		n := 0
 		for r := 0; r < *repeat; r++ {
@@ -202,7 +226,7 @@ func cmdRun(args []string) error {
 				if !j.Default && !*withOptional {
 					continue
 				}
-				plan = append(plan, jobResult{Index: n, Class: j.Class, Scenario: j.Scenario})
+				plan = append(plan, jobResult{Index: n, Class: j.Class, Scenario: j.Scenario, Rate: j.Rate})
 				n++
 			}
 		}
@@ -219,6 +243,66 @@ func cmdRun(args []string) error {
 	// 「流したつもりで exit 0」を作らない
 	if len(plan) == 0 {
 		return fmt.Errorf("nothing to run: the plan is empty; check the manifest's default column, or pass -with-optional")
+	}
+	planJobs, shardName, digest := 0, "", ""
+	var planScenarios, shardWarnings []string
+	if *shardSpec != "" {
+		if !runAll {
+			return fmt.Errorf("-shard cuts the plan of `all`; it does not apply to named scenarios")
+		}
+		k, n, err := parseShard(*shardSpec)
+		if err != nil {
+			return err
+		}
+		weights := map[string]float64{}
+		if *durations != "" {
+			if weights, err = loadDurations(*durations); err != nil {
+				return err
+			}
+		}
+		in := shardInput{
+			Plan: plan,
+			Weight: func(j jobResult) float64 {
+				if w := weights[j.Scenario]; w > 0 {
+					return w
+				}
+				if w := manifestJobs[j.Scenario].Weight; w > 0 {
+					return w
+				}
+				return defaultWeightSec
+			},
+			Rate:   func(j jobResult) string { return manifestJobs[j.Scenario].Rate },
+			N:      n,
+			Pool:   *parallel,
+			Margin: rateMargin.Seconds(),
+		}
+		l := assignShards(in)
+		planJobs, shardName, digest = len(plan), fmt.Sprintf("%d/%d", k, n), planDigest(in, l)
+		for _, j := range plan {
+			planScenarios = append(planScenarios, j.Scenario)
+		}
+		var mine []jobResult
+		for _, j := range plan {
+			if l.Assign[j.Index] == k-1 {
+				mine = append(mine, j)
+			}
+		}
+		fmt.Printf("shard %s: %d of %d jobs; estimated seconds per shard: %s; plan digest %s\n", shardName, len(mine), len(plan), fmtFloats(l.Est), digest)
+		if l.RateVM >= 0 {
+			fmt.Printf("shard %s: rate window in shard %d/%d, estimated from %.0f s to %.0f s; guarded jobs of other shards are planned at least %.0f s away from it\n",
+				shardName, l.RateVM+1, n, l.Window[0], l.Window[1], in.Margin)
+		}
+		for _, p := range l.Problems {
+			msg := "rate window not kept: " + p
+			fmt.Fprintln(os.Stderr, "labhost: warning: "+msg)
+			shardWarnings = append(shardWarnings, msg)
+		}
+		if len(mine) == 0 {
+			return fmt.Errorf("shard %s has no job; use fewer shards", shardName)
+		}
+		plan = shardOrder(mine, in.Rate)
+	} else if *durations != "" {
+		return fmt.Errorf("-durations balances -shard; give -shard too")
 	}
 	outDir := *out
 	if outDir == "" {
@@ -246,7 +330,12 @@ func cmdRun(args []string) error {
 		fmt.Fprintln(os.Stderr, "labhost: warning: "+err.Error())
 	}
 
-	sum := summary{Scenarios: scenarios, Parallel: *parallel, Repeat: *repeat, StartedAt: time.Now()}
+	margin := 0.0
+	if shardName != "" {
+		margin = rateMargin.Seconds()
+	}
+	sum := summary{Shard: shardName, PlanJobs: planJobs, RateMarginSec: margin, PlanDigest: digest, PlanScenarios: planScenarios, Netstack: netstackName(),
+		Scenarios: scenarios, Parallel: *parallel, Repeat: *repeat, StartedAt: time.Now(), Warnings: shardWarnings}
 	sum.VCPUs = numCPU()
 	sum.MemTotalKB = meminfoKB("MemTotal")
 
@@ -365,6 +454,35 @@ func cmdRun(args []string) error {
 		sum.Results = append(sum.Results, r)
 	}
 	sort.Slice(sum.Results, func(i, j int) bool { return sum.Results[i].Index < sum.Results[j].Index })
+	nPar, nExcl := sum.ParallelJobs, sum.ExclusiveJobs
+	finishSummary(&sum)
+	sum.ParallelJobs, sum.ExclusiveJobs = nPar, nExcl
+	if runAll {
+		sum.Manifest = manifestFile
+	}
+	sum.WallSec = time.Since(sum.StartedAt).Seconds()
+	sum.PeakMemUsedKB, sum.PeakLoad1 = peakUsed, peakLoad
+	sum.Interrupted = ctx.Err() != nil
+	sum.LeftoverNS, sum.LeftoverWorkdirs, sum.LeftoverProcs, sum.LeftoverLinks = leakCheck(*prefix, *root)
+	sum.LeftoverFailures = leftoverFailures(&sum)
+
+	b, _ := json.MarshalIndent(sum, "", "  ")
+	if err := os.WriteFile(filepath.Join(outDir, "summary.json"), b, 0o644); err != nil {
+		return err
+	}
+	printSummary(&sum, outDir)
+	// 後片付けに漏れがあれば、確認がすべて PASS でも run は失敗である。片付けの正しさは
+	// harness 自身の責任で、漏れは次の run を汚す。終了コードはシナリオの失敗と同じ 1 にする。
+	// ラボの道具は非 0 を等しく失敗として扱い、別の番号は「失敗ではない」と読まれかねない
+	if sum.Fail > 0 || sum.Interrupted || len(sum.LeftoverFailures) > 0 {
+		os.Exit(1)
+	}
+	return nil
+}
+
+// finishSummary は Results から件数、シナリオごとの行数、最も遅い仕事を数え直す。
+// shard の統合でも同じ数え方を使うので、1 台で流した run と同じ形の summary になる。
+func finishSummary(sum *summary) {
 	for _, r := range sum.Results {
 		if r.Exit == 0 && r.SetupErr == "" {
 			sum.Pass++
@@ -397,28 +515,15 @@ func cmdRun(args []string) error {
 	for _, k := range order {
 		sum.Verdicts = append(sum.Verdicts, *byScenario[k])
 	}
-	if runAll {
-		sum.Manifest = manifestFile
-	}
 	sum.Jobs = len(sum.Results)
-	sum.WallSec = time.Since(sum.StartedAt).Seconds()
-	sum.PeakMemUsedKB, sum.PeakLoad1 = peakUsed, peakLoad
-	sum.Interrupted = ctx.Err() != nil
-	sum.LeftoverNS, sum.LeftoverWorkdirs, sum.LeftoverProcs, sum.LeftoverLinks = leakCheck(*prefix, *root)
-	sum.LeftoverFailures = leftoverFailures(&sum)
-
-	b, _ := json.MarshalIndent(sum, "", "  ")
-	if err := os.WriteFile(filepath.Join(outDir, "summary.json"), b, 0o644); err != nil {
-		return err
+	sum.ParallelJobs, sum.ExclusiveJobs = 0, 0
+	for _, r := range sum.Results {
+		if r.Class.exclusive() {
+			sum.ExclusiveJobs++
+		} else {
+			sum.ParallelJobs++
+		}
 	}
-	printSummary(&sum, outDir)
-	// 後片付けに漏れがあれば、確認がすべて PASS でも run は失敗である。片付けの正しさは
-	// harness 自身の責任で、漏れは次の run を汚す。終了コードはシナリオの失敗と同じ 1 にする。
-	// ラボの道具は非 0 を等しく失敗として扱い、別の番号は「失敗ではない」と読まれかねない
-	if sum.Fail > 0 || sum.Interrupted || len(sum.LeftoverFailures) > 0 {
-		os.Exit(1)
-	}
-	return nil
 }
 
 // validateRunCounts は -parallel と -repeat の範囲を確かめる。-parallel 0 は worker を 1 つも
@@ -707,7 +812,18 @@ func leftoverFailures(s *summary) []string {
 }
 
 func printSummary(s *summary, outDir string) {
-	fmt.Printf("\n== labhost run: %d jobs, parallel=%d, pass=%d fail=%d, wall=%.1fs\n", s.Jobs, s.Parallel, s.Pass, s.Fail, s.WallSec)
+	missing := ""
+	if s.MissingJobs > 0 {
+		missing = fmt.Sprintf(" missing=%d", s.MissingJobs)
+	}
+	verb := "run"
+	if strings.HasPrefix(s.Shard, "merged/") {
+		verb = "merge"
+	}
+	fmt.Printf("\n== labhost %s: %d jobs, parallel=%d, pass=%d fail=%d%s, wall=%.1fs\n", verb, s.Jobs, s.Parallel, s.Pass, s.Fail, missing, s.WallSec)
+	if s.Shard != "" {
+		fmt.Printf("   shard: %s of a plan of %d jobs, digest %s, netstack %s\n", s.Shard, s.PlanJobs, s.PlanDigest, s.Netstack)
+	}
 	fmt.Printf("   vm: vcpus=%d cpu_seconds=%.1f mem_total=%dMiB peak_mem_used=%dMiB peak_load1=%.2f\n",
 		s.VCPUs, s.VMCPUSeconds, s.MemTotalKB/1024, s.PeakMemUsedKB/1024, s.PeakLoad1)
 	var min, max, total float64
@@ -735,6 +851,12 @@ func printSummary(s *summary, outDir string) {
 	for _, w := range s.Warnings {
 		fmt.Printf("   WARNING: %s\n", w)
 	}
+	if s.RateWindow != "" {
+		fmt.Printf("   rate window: %s\n", s.RateWindow)
+	}
+	for _, f := range s.MergeProblems {
+		fmt.Printf("   MERGE FAILURE: %s\n", f)
+	}
 	for _, f := range s.LeftoverFailures {
 		fmt.Printf("   LEFTOVER FAILURE: the harness did not clean up; not a scenario failure: %s\n", f)
 	}
@@ -744,7 +866,9 @@ func printSummary(s *summary, outDir string) {
 				r.Index, r.Scenario, r.SandboxID, r.Exit, r.TimedOut, r.SetupErr, r.Log, r.Cleanup)
 		}
 	}
-	fmt.Printf("   summary: %s\n", filepath.Join(outDir, "summary.json"))
+	if outDir != "" {
+		fmt.Printf("   summary: %s\n", filepath.Join(outDir, "summary.json"))
+	}
 }
 
 func numCPU() int {
@@ -818,4 +942,62 @@ func countSandboxNS(prefix string) int {
 		}
 	}
 	return len(ids)
+}
+
+// netstackName は確認が動かすエージェントの netstack。lab/lab は WGFT_LAB_AGENT_NETSTACK を
+// WGFT_AGENT_NETSTACK として渡し、未設定ならエージェントの既定で動く。
+func netstackName() string {
+	if v := os.Getenv("WGFT_AGENT_NETSTACK"); v != "" {
+		return v
+	}
+	return "default"
+}
+
+func fmtFloats(v []float64) string {
+	p := make([]string, len(v))
+	for i, f := range v {
+		p[i] = fmt.Sprintf("%.0f", f)
+	}
+	return strings.Join(p, " / ")
+}
+
+// cmdMerge は run -shard K/N の summary.json を N 個受け取り、1 つの判定にまとめる。
+// 台が足りない、重なる、計画を覆わない場合と、どれかが失敗か後片付けの漏れを出した場合は非 0。
+func cmdMerge(args []string) error {
+	fs := flag.NewFlagSet("merge", flag.ExitOnError)
+	out := fs.String("out", "", "directory for the merged summary.json; default: only print")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: labhost merge [-out DIR] SUMMARY_JSON [SUMMARY_JSON ...]")
+	}
+	var parts []*summary
+	for _, p := range fs.Args() {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		var s summary
+		if err := json.Unmarshal(b, &s); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+		parts = append(parts, &s)
+	}
+	m := mergeSummaries(parts)
+	dir := *out
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		b, _ := json.MarshalIndent(m, "", "  ")
+		if err := os.WriteFile(filepath.Join(dir, "summary.json"), b, 0o644); err != nil {
+			return err
+		}
+	}
+	printSummary(m, dir)
+	if m.Fail > 0 || m.Interrupted || len(m.LeftoverFailures) > 0 || len(m.MergeProblems) > 0 {
+		os.Exit(1)
+	}
+	return nil
 }

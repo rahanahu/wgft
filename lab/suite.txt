@@ -1,7 +1,46 @@
 # suite.txt lists every lab check with the class that decides how it may be scheduled.
 # tools/labhost reads it for `labhost run all`.
 #
-# Format, one job per line:  <class> <default> <scenario> [args...]
+# Format, one job per line:  <class> <default> [key=value...] <scenario> [args...]
+#
+#   The keys before the scenario only matter to `labhost run -shard K/N all`, which `lab/lab suite`
+#   uses to spread the suite over several VMs. They never change what runs, and inside one VM they
+#   never change the order beyond what is said under rate.
+#
+#   weight   the job's estimated seconds, the longest of earlier lab runs. -shard balances the
+#            shards with it when no -durations summary.json of an earlier run is given; a job
+#            without one counts as 10 s.
+#   rate     the rate window. The VMs of a sharded run share one host, so a flood in one VM can
+#            move a rate measured in another. The time the rate=measure jobs run is the rate
+#            window, and -shard plans around it:
+#              measure  exclusive: the job compares a limited flow with what an unlimited flow
+#                       gets through.
+#              group    exclusive: the job runs in the same VM as the measure jobs. In that VM,
+#                       the measure jobs come first among the exclusive jobs.
+#              overlap  exclusive: the job may run in another VM during the window.
+#              flood    parallel: the job puts a flood or a bulk transfer through the host. It
+#                       may run anywhere in its VM's pool, so the whole pool counts as its time.
+#            Every exclusive job without rate=overlap and every rate=flood job is guarded: in
+#            another VM, its estimated time must end labhost's -rate-margin, 30 s by default,
+#            before the window starts, or start that long after the window ends. A guarded job
+#            that would not is moved to the VM, among those where it fits, that keeps the slowest
+#            VM shortest. The window's VM always fits, since its pool runs before the window and
+#            its exclusive jobs one at a time after it, and is the fallback when moves elsewhere
+#            do not settle. The plan uses the estimates above, so a job that runs shorter or
+#            longer than its estimate can still overlap; `labhost merge` reads the real start
+#            times afterwards and warns when it did. Parallel jobs without rate=flood are not held
+#            back.
+#            rates.sh is the rate-measuring check. lifecycle.sh's exclusive checks include floods
+#            of thousands of connections and datagrams, and join its VM. exhaustion.sh userspace
+#            postclose is the one job allowed to overlap the window, as in earlier multi-VM gate
+#            runs; whether it moves rates.sh's numbers has not been measured. The rate=flood jobs
+#            are connlimit.sh, which opens 160 to 320 flows from one address as fast as it can;
+#            lifecycle.sh userspace 5c and 5d, floods of thousands of connections and datagrams;
+#            and usage.sh, which moves 32 MiB each way unpaced beside its other traffic.
+#            The largest loads in the other parallel jobs are ipv6.sh's 40 flows and 300
+#            datagrams, about what rates.sh sends itself, and about 2 MB each way in exhaustion.sh
+#            mss and agentkernel.sh's check 24. The kernel-mode rows of lifecycle.sh 5c and 5d only
+#            print SKIP.
 #
 #   class    parallel         may run beside any number of other parallel jobs, each in its own
 #                             sandbox. Nothing it touches is shared outside its own namespaces
@@ -41,10 +80,12 @@
 #
 # Order: `labhost run all` hands the parallel jobs to its pool in the order of this file, and runs
 # the exclusive jobs one at a time, in the order of this file, once the pool is empty. The parallel
-# jobs are therefore listed longest first, so that the jobs that take minutes start at once and
-# the short ones fill the pool around them; listed in any other order, one of the long jobs can
-# start last, and the pool then waits for it alone. A new parallel job goes where its running time
-# puts it. Where the exclusive jobs are listed does not change when they run; they come last.
+# jobs are therefore listed roughly longest first, so that the jobs that take minutes start at
+# once and the short ones fill the pool around them; listed in any other order, one of the long
+# jobs can start last, and the pool then waits for it alone. Only the long jobs' order matters;
+# below about a minute, the rows are not kept in weight order. A new parallel job goes where its
+# running time puts it. Where the exclusive jobs are listed does not change when they run; they
+# come last.
 #
 # agentkernel.sh runs the kernel-mode agent's checks (design section 7b) against the given server
 # mode, taking the checks to run as a space-separated list of its own. Its default list of checks
@@ -60,9 +101,9 @@
 # waiting for. failover needs nothing resolve leaves behind; as one job, the two took about 390 s.
 # 24, 17, 18, 19 and loopback are a group without resolve, and so run right after the setup,
 # before resolve, as they do in the script's own default list. reconnect and stale only apply with
-# a kernel-mode server and print SKIP with a userspace-mode one; they are still registered for both modes, the same as this file
-# already does for lifecycle.sh's mode-specific checks. Every group runs well inside labhost's
-# per-job timeout. See docs/testing.md for L16.
+# a kernel-mode server and print SKIP with a userspace-mode one; they are still registered for
+# both modes, the same as this file already does for lifecycle.sh's mode-specific checks. Every
+# group runs well inside labhost's per-job timeout. See docs/testing.md for L16.
 #
 # agentdoctor.sh runs `wgft agent doctor` against a kernel-mode agent (design section 10.2c), with
 # the server in the given mode, one job per mode, the same granularity as e2e.sh and ipv6.sh.
@@ -104,8 +145,9 @@
 # netstack (gvisor or wgstack) and prints them beside the design's bound for the same settings. It
 # reads a memory peak, so it runs alone, and it is not in `labhost run all` because it needs a build
 # with the labmemprobe tag (`WGFT_LAB_BUILD_TAGS=labmemprobe lab/lab build`), which no other job
-# wants, and takes about six minutes for each netstack, inside labhost's default per-scenario timeout of 10 minutes (the two netstacks are two jobs for that reason). It is run by name when the agent's memory
-# bound or a netstack changes (docs/development/testing.md).
+# wants, and takes about six minutes for each netstack, inside labhost's default per-scenario
+# timeout of 10 minutes (the two netstacks are two jobs for that reason). It is run by name when
+# the agent's memory bound or a netstack changes (docs/development/testing.md).
 #
 # usage.sh puts the ordinary kinds of traffic through a rule (HTTP, keystrokes, game-like UDP, bulk)
 # and asserts only that they arrive whole; the round-trip times and rates it prints are not
@@ -117,78 +159,78 @@
 # into the VM first, and the check is opt-in for that reason, exactly as it is in the per-VM suite
 # today.
 
-parallel         yes  agentkernel.sh kernel resolve
-parallel         yes  agentkernel.sh userspace route session
-parallel         yes  agentkernel.sh kernel notify pin reconnect
-parallel         yes  agentkernel.sh kernel route session
-parallel         yes  agentkernel.sh userspace resolve
-parallel         yes  agentkernel.sh kernel failover
-parallel         yes  agentkernel.sh userspace failover
-parallel         yes  agentkernel.sh kernel drift 22 25 16 teardown
-parallel         yes  agentkernel.sh userspace drift 22 25 16 teardown
-parallel         yes  agentkernel.sh kernel 24 17 18 19 loopback
-parallel         yes  agentdoctor.sh kernel
-parallel         yes  lifecycle.sh kernel 2
-parallel         yes  lifecycle.sh kernel 8
-parallel         yes  lifecycle.sh userspace 2
-parallel         yes  lifecycle.sh userspace 8
-parallel         yes  agentkernel.sh userspace 24 17 18 19 loopback
-parallel         yes  split-merge.sh kernel
-parallel         yes  agentkernel.sh userspace notify pin reconnect
-parallel         yes  lifecycle.sh userspace 11
-parallel         yes  lifecycle.sh kernel 9
-parallel         yes  e2e.sh kernel
-parallel         yes  e2e.sh userspace
-parallel         yes  usage.sh kernel
-parallel         yes  usage.sh userspace
-parallel         yes  exhaustion.sh kernel mss
-parallel         yes  exhaustion.sh userspace mss
-parallel         yes  agentkernel.sh kernel stale
-parallel         yes  lifecycle.sh kernel 6
-parallel         yes  connlimit.sh
-parallel         yes  lifecycle.sh userspace 1
-parallel         yes  lifecycle.sh userspace 5c
-parallel         yes  lifecycle.sh userspace 5d
-parallel         yes  ipv6.sh kernel
-parallel         yes  ipv6.sh userspace
-parallel         yes  agentdoctor.sh userspace
-parallel         yes  import-export.sh kernel
-parallel         yes  lifecycle.sh kernel 1
-parallel         yes  agentkernel.sh userspace stale
-parallel         yes  lifecycle.sh kernel 7
-parallel         yes  lifecycle.sh kernel 11
-parallel         yes  lifecycle.sh kernel 3
-parallel         yes  lifecycle.sh userspace 10
-parallel         yes  lifecycle.sh kernel 3b
-parallel         yes  lifecycle.sh kernel 4
-parallel         yes  lifecycle.sh kernel 10
-parallel         yes  lifecycle.sh userspace 6
-parallel         yes  lifecycle.sh kernel 5c
-parallel         yes  lifecycle.sh kernel 5d
-parallel         yes  lifecycle.sh kernel 5f
-parallel         yes  lifecycle.sh kernel 5g
-parallel         yes  lifecycle.sh userspace 3
-parallel         yes  lifecycle.sh userspace 3b
-parallel         yes  lifecycle.sh userspace 4
-parallel         yes  lifecycle.sh userspace 7
-parallel         yes  lifecycle.sh userspace 9
+parallel         yes  weight=245 agentkernel.sh kernel resolve
+parallel         yes  weight=245 agentkernel.sh userspace route session
+parallel         yes  weight=238 agentkernel.sh kernel notify pin reconnect
+parallel         yes  weight=222 agentkernel.sh kernel route session
+parallel         yes  weight=245 agentkernel.sh userspace resolve
+parallel         yes  weight=150 agentkernel.sh kernel failover
+parallel         yes  weight=150 agentkernel.sh userspace failover
+parallel         yes  weight=132 agentkernel.sh kernel drift 22 25 16 teardown
+parallel         yes  weight=105 agentkernel.sh userspace drift 22 25 16 teardown
+parallel         yes  weight=97 agentkernel.sh kernel 24 17 18 19 loopback
+parallel         yes  weight=73 agentdoctor.sh kernel
+parallel         yes  weight=63 lifecycle.sh kernel 2
+parallel         yes  weight=63 lifecycle.sh kernel 8
+parallel         yes  weight=63 lifecycle.sh userspace 2
+parallel         yes  weight=62 lifecycle.sh userspace 8
+parallel         yes  weight=50 agentkernel.sh userspace 24 17 18 19 loopback
+parallel         yes  weight=48 split-merge.sh kernel
+parallel         yes  weight=45 agentkernel.sh userspace notify pin reconnect
+parallel         yes  weight=43 lifecycle.sh userspace 11
+parallel         yes  weight=38 lifecycle.sh kernel 9
+parallel         yes  weight=37 e2e.sh kernel
+parallel         yes  weight=37 e2e.sh userspace
+parallel         yes  weight=15 rate=flood usage.sh kernel
+parallel         yes  weight=60 rate=flood usage.sh userspace
+parallel         yes  weight=16 exhaustion.sh kernel mss
+parallel         yes  weight=25 exhaustion.sh userspace mss
+parallel         yes  weight=34 agentkernel.sh kernel stale
+parallel         yes  weight=32 lifecycle.sh kernel 6
+parallel         yes  weight=31 rate=flood connlimit.sh
+parallel         yes  weight=30 lifecycle.sh userspace 1
+parallel         yes  weight=29 rate=flood lifecycle.sh userspace 5c
+parallel         yes  weight=29 rate=flood lifecycle.sh userspace 5d
+parallel         yes  weight=26 ipv6.sh kernel
+parallel         yes  weight=25 ipv6.sh userspace
+parallel         yes  weight=23 agentdoctor.sh userspace
+parallel         yes  weight=23 import-export.sh kernel
+parallel         yes  weight=21 lifecycle.sh kernel 1
+parallel         yes  weight=16 agentkernel.sh userspace stale
+parallel         yes  weight=7 lifecycle.sh kernel 7
+parallel         yes  weight=8 lifecycle.sh kernel 11
+parallel         yes  weight=4 lifecycle.sh kernel 3
+parallel         yes  weight=3 lifecycle.sh userspace 10
+parallel         yes  weight=3 lifecycle.sh kernel 3b
+parallel         yes  weight=3 lifecycle.sh kernel 4
+parallel         yes  weight=3 lifecycle.sh kernel 10
+parallel         yes  weight=3 lifecycle.sh userspace 6
+parallel         yes  weight=1 lifecycle.sh kernel 5c
+parallel         yes  weight=1 lifecycle.sh kernel 5d
+parallel         yes  weight=1 lifecycle.sh kernel 5f
+parallel         yes  weight=1 lifecycle.sh kernel 5g
+parallel         yes  weight=1 lifecycle.sh userspace 3
+parallel         yes  weight=1 lifecycle.sh userspace 3b
+parallel         yes  weight=1 lifecycle.sh userspace 4
+parallel         yes  weight=1 lifecycle.sh userspace 7
+parallel         yes  weight=1 lifecycle.sh userspace 9
 
-exclusive-heavy  yes  lifecycle.sh kernel 5
-exclusive-heavy  yes  lifecycle.sh kernel 5b
-exclusive-heavy  yes  lifecycle.sh kernel 5e
-exclusive-heavy  yes  lifecycle.sh userspace 5
-exclusive-heavy  yes  lifecycle.sh userspace 5b
-exclusive-heavy  yes  lifecycle.sh userspace 5e
-exclusive-heavy  yes  lifecycle.sh userspace 5f
-exclusive-heavy  yes  lifecycle.sh userspace 5g
-exclusive-global yes  lifecycle.sh kernel 12
-exclusive-global yes  lifecycle.sh userspace 12
-exclusive-heavy  yes  rates.sh kernel
-exclusive-heavy  yes  rates.sh userspace
-exclusive-heavy  yes  exhaustion.sh userspace postclose
-exclusive-heavy  yes  exhaustion.sh kernel acceptq
-exclusive-heavy  yes  exhaustion.sh kernel ackflood
-exclusive-heavy  yes  exhaustion.sh userspace wgstall
+exclusive-heavy  yes  weight=12 rate=group lifecycle.sh kernel 5
+exclusive-heavy  yes  weight=15 rate=group lifecycle.sh kernel 5b
+exclusive-heavy  yes  weight=53 rate=group lifecycle.sh kernel 5e
+exclusive-heavy  yes  weight=12 rate=group lifecycle.sh userspace 5
+exclusive-heavy  yes  weight=13 rate=group lifecycle.sh userspace 5b
+exclusive-heavy  yes  weight=1 rate=group lifecycle.sh userspace 5e
+exclusive-heavy  yes  weight=21 rate=group lifecycle.sh userspace 5f
+exclusive-heavy  yes  weight=8 rate=group lifecycle.sh userspace 5g
+exclusive-global yes  weight=2 rate=group lifecycle.sh kernel 12
+exclusive-global yes  weight=2 rate=group lifecycle.sh userspace 12
+exclusive-heavy  yes  weight=53 rate=measure rates.sh kernel
+exclusive-heavy  yes  weight=49 rate=measure rates.sh userspace
+exclusive-heavy  yes  weight=228 rate=overlap exhaustion.sh userspace postclose
+exclusive-heavy  yes  weight=18 exhaustion.sh kernel acceptq
+exclusive-heavy  yes  weight=28 exhaustion.sh kernel ackflood
+exclusive-heavy  yes  weight=38 exhaustion.sh userspace wgstall
 
 parallel         no   version-skew.sh
 exclusive-heavy  no   exhaustion.sh kernel postclose
