@@ -112,6 +112,8 @@ type output struct {
 	conns dlist // 送るもののある接続の枠
 	rows  dlist // 送るもののある行。握手の途中の行は 0 から、TIME_WAIT の行は synRows から
 	ctl   ctlRing
+	// udpQueued は UDP の送信の FIFO にある datagram の数。FIFO は UDP の錠が守る
+	udpQueued int
 	// deficit round robin の状態。Read の錠(Device.readMu)の中でだけ使う
 	cur     int
 	deficit [numClasses]int
@@ -186,6 +188,8 @@ func (o *output) classEmpty(c int) bool {
 		return o.rows.n == 0
 	case classCtl:
 		return o.ctl.n == 0
+	case classUDP:
+		return o.udpQueued == 0
 	}
 	return true
 }

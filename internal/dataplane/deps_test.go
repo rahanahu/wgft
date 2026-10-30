@@ -193,8 +193,9 @@ func TestDependencyDirection(t *testing.T) {
 // its sub-packages, the nftables-row and Go-evaluator Admission Policy compilers, design.md 7a.7
 // 節's package layout) and internal/planner "know nothing about the OS, nftables, or gVisor": inside
 // the module, they import only proto and each other, never dataplane/*, frontend/*, platform/*,
-// vpsd or agent. internal/resource, internal/lograte, internal/startup, internal/textsafe and
-// internal/reasontext are even stricter and import nothing at all from the module (design.md 7a.7 節).
+// vpsd or agent. internal/resource, internal/lograte, internal/startup, internal/textsafe,
+// internal/reasontext and internal/ipv4frag are even stricter and import nothing at all from the
+// module (design.md 7a.7 節, wgstack.md).
 func TestPureLayersStayPure(t *testing.T) {
 	root := moduleRoot(t)
 	var pure []string
@@ -220,7 +221,7 @@ func TestPureLayersStayPure(t *testing.T) {
 	// by cmd/wgft, internal/vpsd, internal/agent and internal/dataplane/linuxkernel/wg alike, so it
 	// stays a leaf. If it grew an import of, say, internal/vpsd/store, every one of those layers
 	// would pull the control plane in through it and the direction of 7a.7 節 would break.
-	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup", "internal/textsafe", "internal/reasontext"} {
+	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup", "internal/textsafe", "internal/reasontext", "internal/ipv4frag"} {
 		pkgs := packagesUnder(t, root, name)
 		if len(pkgs) == 0 {
 			t.Fatalf("found no packages under %s; did it move?", name)
@@ -911,11 +912,11 @@ func TestTCPHarnessStaysInTests(t *testing.T) {
 // TestWgstackImports checks the placement rules of docs/design/userspace/wgstack.md for
 // internal/wgstack, the wgft-owned netstack of the agent's userspace mode: from outside the module
 // it imports only the standard library and golang.zx2c4.com/wireguard/tun, and nothing from the
-// module: its log gate counts on the core clock, so it does not use internal/lograte. It never
-// reaches gVisor, internal/nettun, internal/dataplane, the agent or vpsd. The kernel-mode packages
-// of the agent, internal/agent/kernelmode and internal/agent/agentdp, do not depend on
-// internal/wgstack through any import, which keeps the kernel mode isolated from it by
-// structure (I7).
+// module but internal/ipv4frag, the reassembly table it shares with internal/nettun: its log gate
+// counts on the core clock, so it does not use internal/lograte. It never reaches gVisor,
+// internal/nettun, internal/dataplane, the agent or vpsd. The kernel-mode packages of the agent,
+// internal/agent/kernelmode and internal/agent/agentdp, do not depend on internal/wgstack through
+// any import, which keeps the kernel mode isolated from it by structure (I7).
 func TestWgstackImports(t *testing.T) {
 	root := moduleRoot(t)
 	const pkg = module + "/internal/wgstack"
@@ -925,8 +926,8 @@ func TestWgstackImports(t *testing.T) {
 	for _, imp := range directImports(t, root, pkg) {
 		inModule := imp == module || strings.HasPrefix(imp, module+"/")
 		switch {
-		case inModule:
-			t.Errorf("%s imports %s; wgstack.md allows nothing from the module", pkg, imp)
+		case inModule && imp != module+"/internal/ipv4frag":
+			t.Errorf("%s imports %s; wgstack.md allows only internal/ipv4frag from the module", pkg, imp)
 		case !inModule && strings.Contains(strings.Split(imp, "/")[0], ".") && imp != "golang.zx2c4.com/wireguard/tun":
 			t.Errorf("%s imports %s; wgstack.md allows only the standard library and wireguard/tun", pkg, imp)
 		}

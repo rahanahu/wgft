@@ -1,8 +1,8 @@
 # エージェントの wgft の netstack
 
 wgstack は、ユーザー空間モードのエージェントが gVisor の netstack の代わりに選べる、wgft が持つ netstack です。
-wgstack は実装の途中です。
-TCP の核と Device は `internal/wgstack` に実装し、UDP、ICMP の echo、断片の再組み立ての共有、`WGFT_AGENT_NETSTACK` の設定、トンネルへの組み込みは未実装です。
+wgstack は `internal/wgstack` に実装し、`WGFT_AGENT_NETSTACK=wgstack` で選べます。
+実装は TCP の核、UDP、ICMP、共有の再組み立ての表、トンネルへの組み込みを持ちます。
 構造と上界の形をここで決め、値と細部は実装の時に決めます。
 検証の計画は[wgstack の検証](wgstack-verification.md)に分けます。
 
@@ -172,12 +172,14 @@ MSS の下限の検査は、gVisor の option の読み方ではなく、wgstack
 
 - `internal/wgstack`:wgstack の本体です。
   後述の決定的な核と、それを `tun.Device` として動かす Device を持ちます。
-  モジュールの外からは標準ライブラリと `golang.zx2c4.com/wireguard/tun`(`tun.Device` と `tun.Event` の型)だけを import し、モジュールの中の package は import しません。
+  モジュールの外からは標準ライブラリと `golang.zx2c4.com/wireguard/tun`(`tun.Device` と `tun.Event` の型)だけを import し、モジュールの中では再組み立ての表の葉の package `internal/ipv4frag` だけを import します。
   拒否のログを 1 分に 1 回までに絞る門は、核の時刻で数える wgstack 自身の門です。
   `internal/lograte` の門は壁時計を読み、核は時計を直接読まないので、使いません
   `gvisor.dev/gvisor`、`internal/nettun`、`internal/dataplane` とその下位、`internal/agent`、`internal/vpsd` を import しません
-- 再組み立ての表:今の `internal/nettun` の再組み立ての表は gVisor を import しないので、葉の package に移して 2 つの実装で共有します。
-  移すのは表だけで、gVisor の Time Exceeded の経路は `internal/nettun` に残ります
+- 再組み立ての表:今の `internal/nettun` の再組み立ての表は gVisor を import しないので、葉の package `internal/ipv4frag` に移して 2 つの実装で共有します。
+  断片への ICMP の誤りを送る条件(期限の Time Exceeded と option の誤りの Parameter Problem)も同じ package に置き、誤りを作って送るのは各実装の Device です。
+  `internal/ipv4frag` はモジュールの中の何も import しません。
+  gVisor の Time Exceeded の送り方は `internal/nettun` に残ります
 - `internal/dataplane/userspace/tunnel`:2 つの実装が満たす非公開の interface を持ち、宣言の値で実装を選びます。
   `internal/nettun` と `internal/wgstack` の両方を import する唯一の package です
 
@@ -360,7 +362,7 @@ accept の待ち行列は Device 全体で Q 本、待ち受け 1 つで Q の�
 ### UDP、ICMP、再組み立て
 
 - UDP の受信:Device の予算(4 MiB と 4096 件)と endpoint 1 つの上限(予算の 1/4)を今と同じ値で持ちます([UDP の受信の予算](udp-accounting.md#udp-の受信の予算))。
-  datagram の中身は、chunk を大きさの区分ごとの枠(例えば 256 byte、2 KiB、16 KiB と、それを超える datagram のための chunk の列)に分けて置きます。
+  datagram の中身は、chunk を大きさの区分ごとの枠(256 byte、2 KiB、16 KiB と、それを超える datagram のための chunk の列)に分けて置きます。
   chunk は 1 つの endpoint だけが持ち、endpoint の間で共有しません。
   会計は chunk の単位で数え、chunk の中に生きている枠が 1 つでもある間は、その chunk 全体を endpoint と Device の予算に数えます。
   生きている枠 1 つが 16 KiB の chunk を留めても、留めた分は予算の内側にあるので、生きているヒープの上界は崩れません。
@@ -368,18 +370,25 @@ accept の待ち行列は Device 全体で Q 本、待ち受け 1 つで Q の�
   小さな datagram 4096 件が 4096 個の chunk を使い、4 MiB の予算に対して 64 MiB を持つことを防ぐためです。
   管理の情報は 4096 件の固定の配列に置きます。
   会計は保持そのものなので、gVisor の統計の差から受理を判定する手順は要りません。
-  枠の大きさで数えるので、予算に入る datagram の数は今の会計(中身に 64 byte を足して数える)と異なります
+  枠の大きさで数えるので、予算に入る datagram の数は今の会計(中身に 64 byte を足して数える)と異なります。
+  例えば 100 byte の datagram は 256 byte の枠に入り、Device の予算には件数の 4096 件まで入ります。
+  9000 byte の datagram は 16 KiB の枠を 1 つずつ使うので、予算には 256 件まで入ります。
+  受け付ける宛先の endpoint が無い datagram には、制御の輪から Port Unreachable を返します。
+  エージェントの UDP の待ち受けは接続しないので、届いた Port Unreachable は誰にも知らせずに捨てます
+- UDP の会計の不整合:会計が自分の数の不整合(返す予約が無い、数が負になる)を検出したら、今と同じくその Device の UDP を止め、`UDPReceiveFault` がその誤りを返します([会計の不整合](udp-accounting.md#会計の不整合))
 - UDP の送信:Device の予算(4 MiB と 1024 件)と endpoint 1 つの上限(予算の 1/4)を持ち、受信と同じ枠と chunk の単位で数えます。
   `WriteTo` は予約できるまで待ちます。
   MTU を超える datagram は、DF を立てず、0 でない ID で断片に分けて送ります(今の[UDP の送信時の断片化](udp-accounting.md#udp-の送信時の断片化)と同じ結果です)
 - ICMP の echo:`DialPing` の endpoint は固定の数の表に置き、識別子を `Close` で返します。
   endpoint 1 つが持つ応答は 1 つだけで、読まれる前に届いた次の応答は捨てます。
   表が満杯なら `DialPing` は誤りを返します。
-  自分のアドレス宛ての echo request には、後述の制御の出力の輪から応答します
+  自分のアドレス宛ての echo request には、後述の制御の出力の輪から応答します。
+  表は 16 件で、endpoint 1 つは MTU の大きさの応答の枠を 1 つ持ちます
 - ICMP の誤り:Fragmentation Needed は、引用された TCP の番号が SND.UNA から SND.NXT の範囲にあるときだけ受け入れます(RFC 5927)。
   範囲の外の誤りは、送信元の確認を通っても捨てます
 - 再組み立て:今の表(未完成の datagram 128 件、断片 512 個、保持 4 MiB、期限 30 秒)を共有して使います([再組み立ての表](packet-validation.md#再組み立ての表))。
-  Time Exceeded と Parameter Problem は wgstack が自分で作ります
+  Time Exceeded と Parameter Problem は wgstack が自分で作り、送る条件は表と同じ package(`internal/ipv4frag`)が `internal/nettun` と共有します。
+  wgstack が送る ICMP の誤りは、Device 全体で 1 秒に 1000 までに抑えます
 
 ### 出力
 
