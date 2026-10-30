@@ -57,6 +57,13 @@ var Scenarios = []Scenario{
 	{Name: "udp-reassembly", Refs: "RFC 791 3.2, RFC 815; packet-validation.md, the fragment checks", Run: udpReassembly},
 	{Name: "udp-reassembly-timeout", Refs: "RFC 792, RFC 1122 3.3.2; packet-validation.md, ICMP for fragments", Run: udpReassemblyTimeout},
 	{Name: "udp-closed-port", Refs: "RFC 1122 4.1.3.1; wgstack.md, UDP receive", Run: udpClosedPort},
+	{Name: "rfc2525-initial-window", Refs: "RFC 2525 2.1 and 2.3, RFC 6928", Run: rfc2525InitialWindow},
+	{Name: "rfc2525-rto-slow-start", Refs: "RFC 2525 2.2 and 2.14, RFC 5681 3.1", Run: rfc2525RTOSlowStart},
+	{Name: "rfc2525-synack-rto", Refs: "RFC 2525 2.7, RFC 6298 2.1", Run: rfc2525SynAckRTO},
+	{Name: "rfc2525-window-deflation", Refs: "RFC 2525 2.8, RFC 6582 3.2", Run: rfc2525WindowDeflation},
+	{Name: "rfc2525-stretch-ack", Refs: "RFC 2525 2.13, RFC 5681 4.2, RFC 1122 4.2.3.2", Run: rfc2525StretchACK},
+	{Name: "rfc2525-close-fin", Refs: "RFC 2525 2.15", Run: rfc2525CloseFIN},
+	{Name: "rfc2525-data-after-close", Refs: "RFC 2525 2.16, RFC 9293 3.6", Run: rfc2525DataAfterClose},
 }
 
 func pattern(n int, salt byte) []byte {
