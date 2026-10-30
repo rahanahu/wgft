@@ -12,10 +12,7 @@ import (
 
 type (
 	ipv4ReassemblyLimits = ipv4frag.Limits
-	ipv4FragmentStatus   = ipv4frag.Status
-	ipv4FragmentReason   = ipv4frag.Reason
 	ipv4FragmentNotice   = ipv4frag.Notice
-	ipv4FragmentResult   = ipv4frag.Result
 	ipv4Reassembly       = ipv4frag.Table
 )
 
@@ -38,8 +35,7 @@ const (
 
 var newIPv4Reassembly = ipv4frag.New
 
-func ipv4ChecksumOK(h []byte) bool { return ipv4frag.ChecksumOK(h) }
-func ipv4SetChecksum(h []byte)     { ipv4frag.SetChecksum(h) }
+func ipv4SetChecksum(h []byte) { ipv4frag.SetChecksum(h) }
 
 // reassemblyLimits は Device が作る再組み立ての表の上限。値は設計文書の値で、試験だけが Device を作る前に
 // 置き換える。
