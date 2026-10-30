@@ -135,7 +135,7 @@ type counters struct {
 	sackReneging                                    atomic.Uint64
 	rackLost, reoTimeouts, tlpProbes, tlpRecoveries atomic.Uint64
 	hystartCSS, hystartExits                        atomic.Uint64
-	dsacksIn                                        atomic.Uint64
+	dsacksIn, spuriousUndos, spuriousRTOs           atomic.Uint64
 
 	mssGate, synGate, acceptGate, twGate, ctlGate, oooGate gate
 }

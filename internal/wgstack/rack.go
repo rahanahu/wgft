@@ -107,8 +107,13 @@ func (c *tcb) rackDelivered(r *record, now int64) {
 		if now-r.sentAt < c.minRTT {
 			return
 		}
-	} else if c.rackFackOK && seqLT(end, c.rackFack) {
-		c.reorderSeen = true
+	} else {
+		if seqLE(end, c.recover) {
+			c.origDelivered = true // RTO の前に送り、再送していないデータ(Linux の FLAG_ORIG_SACK_ACKED)
+		}
+		if c.rackFackOK && seqLT(end, c.rackFack) {
+			c.reorderSeen = true
+		}
 	}
 	if !c.rackFackOK || seqGT(end, c.rackFack) {
 		c.rackFack, c.rackFackOK = end, true

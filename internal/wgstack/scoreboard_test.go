@@ -84,8 +84,8 @@ func TestScoreboardAgainstRecount(t *testing.T) {
 func checkLossFrontier(t testing.TB, c *tcb) {
 	t.Helper()
 	i := int(c.lossIdx)
-	if i >= c.recs.n {
-		return
+	if i >= c.recs.n || c.reorderSeen {
+		return // 並べ替えを見た後は RACK だけが損失を決める
 	}
 	var cnt int
 	var by uint32

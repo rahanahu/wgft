@@ -62,6 +62,8 @@ type Stats struct {
 	HyStartCSS           uint64 // HyStart++ が Conservative Slow Start に入った回数
 	HyStartExits         uint64 // HyStart++ が CSS の後に slow start を終えた回数
 	DSACKsIn             uint64 // 並べ替えの窓を広げた D-SACK の往復
+	SpuriousUndos        uint64 // 再送が不要だったと分かり輻輳の窓を戻した回数
+	SpuriousRTOs         uint64 // F-RTO が不要と決めた RTO
 	HeldChunksInPool     int64  // 輪が持つ chunk の数(chunkPool の会計)
 	ReclaimableInBoost   int    // プロセスの boost の枠のうち使っている数
 }
@@ -154,6 +156,8 @@ func (s *stack) stats() Stats {
 	st.HyStartCSS = s.hystartCSS.Load()
 	st.HyStartExits = s.hystartExits.Load()
 	st.DSACKsIn = s.dsacksIn.Load()
+	st.SpuriousUndos = s.spuriousUndos.Load()
+	st.SpuriousRTOs = s.spuriousRTOs.Load()
 	return st
 }
 

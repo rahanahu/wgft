@@ -84,25 +84,35 @@ type tcbState struct {
 	recs                        recordRing
 
 	// 受信
-	irs, rcvNxt  uint32
-	rcvCap       uint64
-	advRight     uint64 // 広告した窓の右端(受信の offset)。後ろへ戻さない
-	finRcvd      bool
-	oooFin       bool
-	oooFinOff    uint64
-	rcvSinceAck  int
-	rcvMSSEst    uint32    // 相手の segment の大きさの推定(Linux の icsk_ack.rcv_mss)
-	ackPushed    bool      // 遅延 ACK を待つ間に、推定より小さな segment を順序どおりに受けた
-	pingpong     bool      // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
-	lastDataRcvd int64     // 最後に中身を受け入れた時刻
-	rcvdData     bool      // lastDataRcvd が有効
-	quickAcks    uint8     // 遅らせずに返す ACK の残り(Linux の icsk_ack.quick)
-	dsack        sackBlock // 次の ACK の先頭に載せる D-SACK の block(RFC 2883)
-	dsackPending bool
-	reoWndMult   int64  // RACK の並べ替えの窓の倍率(RFC 8985 6.2 の reo_wnd_mult)
-	reoPersist   int    // 倍率を保つ残りの回復の数(reo_wnd_persist)
-	dsackRound   uint32 // D-SACK で倍率を上げた往復の終わり(dsack_round)
-	dsackRoundOn bool
+	irs, rcvNxt   uint32
+	rcvCap        uint64
+	advRight      uint64 // 広告した窓の右端(受信の offset)。後ろへ戻さない
+	finRcvd       bool
+	oooFin        bool
+	oooFinOff     uint64
+	rcvSinceAck   int
+	rcvMSSEst     uint32    // 相手の segment の大きさの推定(Linux の icsk_ack.rcv_mss)
+	ackPushed     bool      // 遅延 ACK を待つ間に、推定より小さな segment を順序どおりに受けた
+	pingpong      bool      // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
+	lastDataRcvd  int64     // 最後に中身を受け入れた時刻
+	rcvdData      bool      // lastDataRcvd が有効
+	quickAcks     uint8     // 遅らせずに返す ACK の残り(Linux の icsk_ack.quick)
+	dsack         sackBlock // 次の ACK の先頭に載せる D-SACK の block(RFC 2883)
+	dsackPending  bool
+	reoWndMult    int64  // RACK の並べ替えの窓の倍率(RFC 8985 6.2 の reo_wnd_mult)
+	reoPersist    int    // 倍率を保つ残りの回復の数(reo_wnd_persist)
+	dsackRound    uint32 // D-SACK で倍率を上げた往復の終わり(dsack_round)
+	dsackRoundOn  bool
+	undoMarker    bool   // 取り消しの印(undo.go)
+	undoCwnd      uint32 // 覚えた輻輳の窓
+	undoSsthresh  uint32
+	undoRetrans   int32  // D-SACK で知らされていない再送の数
+	retransTS     uint32 // 最初の再送の時刻(自分の TSval)
+	retransTSOK   bool
+	frto          uint8  // F-RTO の段階。0 は使っていない
+	frtoHigh      uint32 // F-RTO の 2 の段の SND.MAX
+	frtoNew       uint8  // F-RTO の 2 の段で輻輳の窓によらず送れる新しい segment の数
+	origDelivered bool   // 処理中の ACK が再送していない記録を届けた
 
 	tsRecent, tsOffset uint32
 	lastAckSent        uint32
@@ -525,6 +535,7 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	var delivered int64
 	sackedBefore := c.sacked
 	rackX, rackE := c.rackXmit, c.rackEnd
+	c.origDelivered = false
 	advanced := seqGT(ack, c.sndUna)
 	switch {
 	case advanced:
@@ -543,6 +554,9 @@ func (c *tcb) processAck(seg *segment, now int64) {
 			c.rackChanges++
 		}
 		c.rackDetect(now)
+		if c.frto != 0 && seqLT(c.sndUna, c.recover) {
+			c.frtoAfterAck(seg, advanced, newly > 0 || (!advanced && c.sndUna != c.sndMax))
+		}
 		c.tlpOnAck(ack, advanced, newly)
 		c.sackAfterAck(uint32(max(delivered, 0)))
 		if advanced {
@@ -622,6 +636,10 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 			} else {
 				c.cwnd = min(c.ssthresh, max(flight, mss)+mss)
 			}
+			if c.mayUndo(seg) {
+				c.undo() // 回復の再送は不要だった(Linux の tcp_try_undo_recovery)
+			}
+			c.undoMarker = false
 		} else if c.sackOK {
 			// SACK による回復の部分の確認。再送は NextSeg が選び、窓は PRR が決める
 			c.s.partialAcks.Add(1)
@@ -681,6 +699,7 @@ func (c *tcb) dupAck(now int64) {
 		return
 	}
 	if c.dupAcks == 3 && seqGT(c.sndUna, c.recover) {
+		c.initUndo()
 		c.ssthresh = c.ccFor().lossThresh(c)
 		c.recover = c.sndMax
 		c.cwnd = c.ssthresh + 3*mss
@@ -1039,10 +1058,19 @@ func (c *tcb) onRTO(now int64) {
 	}
 	// SACK の取り消し:先頭の記録が SACK 済みのままか、同じ SND.UNA で 2 回目の RTO なら、相手が SACK 済みの
 	// データを捨てたとみなす(Linux の tcp_timeout_mark_lost と wgstack-performance.md の「scoreboard の記録の扱い」)
+	reneged := false
 	if c.sackOK && (c.backoff > 0 || (c.recs.n > 0 && c.isSacked(c.recs.at(0)))) && c.sacked > 0 {
 		c.clearSACK()
+		reneged = true
 	}
 	mss := uint32(c.segMSS())
+	frto := c.frtoEligible() && !reneged // 取り消した SACK の記録は損失にして送り直す
+	if !c.inRecovery && c.backoff == 0 {
+		c.initUndo()
+	}
+	if c.backoff > 0 {
+		c.frto = 0
+	}
 	if c.backoff == 0 {
 		c.ssthresh = c.ccFor().lossThresh(c)
 	}
@@ -1052,8 +1080,14 @@ func (c *tcb) onRTO(now int64) {
 	c.inRecovery = false
 	c.dupAcks = 0
 	c.backoff++
-	// 記録は消さずに残し、SACK 済みでない記録を損失にして SND.UNA から順に送り直す(RFC 6675 5.1 節)
-	c.markAllLost(rtxRTO)
+	// 記録は消さずに残し、SACK 済みでない記録を損失にして SND.UNA から順に送り直す(RFC 6675 5.1 節)。F-RTO では
+	// 先頭の記録だけを損失にして、次の ACK で RTO が不要だったかを決める(RFC 5682)
+	if frto {
+		c.frto, c.frtoHigh = 1, c.sndMax
+		c.markHeadLost(rtxRTO)
+	} else {
+		c.markAllLost(rtxRTO)
+	}
 	c.reoAt, c.tlpAt = 0, 0
 	c.tlpActive, c.tlpProbe = false, false
 	c.setRTO(now + c.curRTO())
