@@ -26,6 +26,11 @@ type limits struct {
 	synRows  int // N_syn
 	twRows   int // M
 	ctlSlots int // Q_ctl
+
+	// 次の 4 つは試験だけが小さくする。0 は本番の値(udpRxDatagrams、udpTxDatagrams、fragLimits)である。
+	// 本番の値の表は Device ごとに数百 KB になり、1 回ごとに Device を作る fuzzing の速さを決める。
+	udpRxDgrams, udpTxDgrams int
+	fragEntries, fragPieces  int
 }
 
 func defaultLimits(k int) limits {
@@ -221,8 +226,15 @@ func newStack(local []netip.Prefix, mtu int, lim limits, clock func() int64, ran
 		notify: make(chan struct{}, 1),
 	}
 	s.wheel = newWheel(n * numTimers)
-	s.udp.init()
-	frag, err := ipv4frag.New(fragLimits)
+	s.udp.init(lim.udpRxDgrams, lim.udpTxDgrams)
+	fl := fragLimits
+	if lim.fragEntries > 0 {
+		fl.Entries = lim.fragEntries
+	}
+	if lim.fragPieces > 0 {
+		fl.Fragments = lim.fragPieces
+	}
+	frag, err := ipv4frag.New(fl)
 	if err != nil {
 		return nil, err
 	}

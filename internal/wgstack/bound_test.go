@@ -12,7 +12,7 @@ import (
 // 比べ、入力が止まった後に元の値へ戻ることを確かめる。
 
 // checkHeld は Device が今持つ量を数え直し、上界の式の項と比べる。
-func checkHeld(t *testing.T, n *testNet) Stats {
+func checkHeld(t testing.TB, n *testNet) Stats {
 	t.Helper()
 	s := n.d.s
 	st := n.d.Stats()
