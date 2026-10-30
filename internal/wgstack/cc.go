@@ -25,8 +25,8 @@ type ccAlgo interface {
 	lossThresh(c *tcb) uint32
 	// onRTO は RTO の後の状態を整える。ssthresh は呼び出し側が lossThresh で決める
 	onRTO(c *tcb)
-	// onIdle は、送り残しが無いまま idle ns の間何も送らなかった後に送り始める時に呼ぶ
-	onIdle(c *tcb, idle int64)
+	// onIdle は、送り残しが無いまま idle ns の間何も送らなかった後に、時刻 now に送り始める時に呼ぶ
+	onIdle(c *tcb, idle, now int64)
 }
 
 // newRenoCC は RFC 5681 の輻輳の回避。状態は接続の caAcc だけを使う。
@@ -44,8 +44,8 @@ func (newRenoCC) lossThresh(c *tcb) uint32 {
 	return max((c.sndMax-c.sndUna)/2, 2*uint32(c.segMSS()))
 }
 
-func (newRenoCC) onRTO(c *tcb)              { c.caAcc = 0 }
-func (newRenoCC) onIdle(c *tcb, idle int64) {}
+func (newRenoCC) onRTO(c *tcb)                   { c.caAcc = 0 }
+func (newRenoCC) onIdle(c *tcb, idle, now int64) {}
 
 // CUBIC の定数(RFC 9438 4.6 と 5)。
 const (
@@ -125,9 +125,11 @@ func (k *cubicCC) onRTO(c *tcb) {
 
 // onIdle は送らなかった時間だけ epoch を後ろへずらす(Linux の CA_EVENT_TX_START)。ずらさないと、黙った後の
 // 最初の ACK で 3 次の式が先へ進んだ窓を一度に求める。
-func (k *cubicCC) onIdle(c *tcb, idle int64) {
+// epoch は今より先へずらさない(Linux と同じく epoch_start を now で抑える)。送り残しが空になるたびに送り
+// 始める、アプリケーションに制限された流れでは、最後に送ってからの時間が確認を待つ時間を含むためである。
+func (k *cubicCC) onIdle(c *tcb, idle, now int64) {
 	if k.epoch != 0 && idle > 0 {
-		k.epoch += idle
+		k.epoch = min(k.epoch+idle, now)
 	}
 }
 

@@ -117,7 +117,7 @@ func TestCubicIdleShiftsTheEpoch(t *testing.T) {
 	c.cwnd = c.ssthresh
 	c.ccFor().congAvoid(c, mss, int64(time.Hour))
 	epoch := c.cubic.epoch
-	c.ccFor().onIdle(c, int64(3*time.Second))
+	c.ccFor().onIdle(c, int64(3*time.Second), int64(time.Hour+10*time.Second))
 	if c.cubic.epoch != epoch+int64(3*time.Second) {
 		t.Fatalf("epoch %d, want %d", c.cubic.epoch, epoch+int64(3*time.Second))
 	}
@@ -162,5 +162,27 @@ func TestNewRenoStaysSelectable(t *testing.T) {
 	defer d.Close()
 	if d.s.ccPolicy != CongestionNewReno {
 		t.Fatal("Config.TestCongestion not applied")
+	}
+}
+
+// TestCubicIdleShiftStaysBehindNow は、送り残しが空になるたびに送り始める流れで、epoch が今より先へ
+// ずれないことを確かめる(Linux の CA_EVENT_TX_START)。
+func TestCubicIdleShiftStaysBehindNow(t *testing.T) {
+	c := ccConn(t, CongestionCubic)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := &c.cubic
+	mss := uint32(c.segMSS())
+	c.cwnd, c.ssthresh, c.srtt = 20*mss, 10*mss, int64(50*time.Millisecond)
+	now := int64(10 * time.Second)
+	for range 50 {
+		last := now                         // 1 segment を送る
+		now += int64(50 * time.Millisecond) // 1 RTT の後に確認が届く
+		k.congAvoid(c, mss, now)
+		now += int64(10 * time.Millisecond) // 次の書き込み
+		k.onIdle(c, now-last, now)          // buildNew が渡す値:最後に送ってからの時間
+	}
+	if k.epoch > now {
+		t.Fatalf("epoch %v is %v after now", time.Duration(k.epoch), time.Duration(k.epoch-now))
 	}
 }

@@ -201,7 +201,7 @@ func (c *tcb) buildNew(b []byte, space int, now int64, force bool) int {
 		if now-c.lastSendAt > c.curRTO() {
 			c.cwnd = min(c.cwnd, uint32(initialWindowSegs*c.segMSS()))
 		}
-		c.ccFor().onIdle(c, now-c.lastSendAt)
+		c.ccFor().onIdle(c, now-c.lastSendAt, now)
 	}
 	o := c.options(now, true)
 	n, fin := c.nextNew(c.payloadCap(&o, space), force)
