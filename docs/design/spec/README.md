@@ -44,6 +44,7 @@ fixture は Go の v1 が実際に出すか受ける値です。
 読む側は末尾の改行を 1 つだけ除いて比べます。
 HTTP の本文の fixture は本文そのもので、Go の v1 の本文は改行で終わります。
 `agent.json` の fixture はファイルの中身そのもので、末尾に改行を持ちません。
+改行は LF で、`testdata/spec/.gitattributes` が checkout での変換を止めます。
 Go の試験は、Go の実装が fixture と同じ値を出すことと、fixture を受けて同じ意味に読むことを確かめます。
 仕様と Go の v1 が黙って離れないようにするためです。
 
