@@ -100,6 +100,8 @@ pub(crate) struct Agent {
     /// stream の外の経路 (トンネルの立て直し) が状態を変えたことを、接続中の stream に伝え、
     /// ハートビートを 1 回送らせる。
     pub(crate) state_changed: Arc<Notify>,
+    /// トンネルの外殻のループが終わったことを、見張りに伝える。
+    tunnel_dead: Arc<Notify>,
 }
 
 // 鍵と恒久トークンを Debug に出さない
@@ -134,6 +136,13 @@ impl Agent {
             let cfg = tunnel::Config::from_wg(&st.wg).map_err(|e| format!("wireguard: {e}"))?;
             let open = OpenPorts::default();
             let server = cfg.server_address;
+            // ホストに既にあるアドレスはトンネルに使わない。ホストのアドレスに bind できるかで確かめる
+            if std::net::UdpSocket::bind((cfg.address, 0)).is_ok() {
+                return Err(format!(
+                    "wireguard: address {} is already assigned on this host; the server must assign a tunnel address the host does not use",
+                    cfg.address
+                ));
+            }
             let clock = self.opts.clock_path();
             match Tunnel::start(
                 &self.private_key,
@@ -141,6 +150,7 @@ impl Agent {
                 cfg,
                 open.clone(),
                 Some(&clock),
+                Arc::clone(&self.tunnel_dead),
             )
             .await
             {
@@ -273,7 +283,7 @@ impl Agent {
     /// 30 秒ごとの見回り。作成に失敗したトンネルを時刻が来たら立て直し、開けなかったリスナーを
     /// 開き直す。立て直せたら、接続中の stream にハートビートを送らせる。
     async fn tick(&mut self) {
-        self.watch_tunnel().await;
+        self.watch_tunnel(false).await;
         if let Some(st) = self.retry.clone()
             && self.retry_at.is_none_or(|at| Instant::now() >= at)
         {
@@ -297,11 +307,11 @@ impl Agent {
     /// 時間は、最後に見たハンドシェイクを観測した時刻とトンネルを立てた時刻の遅い方から単調な時計で
     /// 測る。閾値は 300 秒で、作り直すたびに 2 倍にし、900 秒で止める。新しいハンドシェイクを見たら
     /// 300 秒に戻す。あわせて、時刻の印の高い水位を残し、入口の検査が捨てた数をログに出す。
-    async fn watch_tunnel(&mut self) {
+    async fn watch_tunnel(&mut self, stopped: bool) {
         let Some(t) = &self.tunnel else { return };
         t.persist_clock().await;
         let counts = t.filter_counts();
-        let finished = t.is_finished();
+        let finished = stopped || t.is_finished();
         let started = t.started_at();
         let hs = t.read().await.handshake_observed_at;
         let now = Instant::now();
@@ -395,6 +405,7 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         seen_at: None,
         refused_logged: (0, None),
         state_changed: Arc::new(Notify::new()),
+        tunnel_dead: Arc::new(Notify::new()),
     }));
     {
         let mut a = agent.lock().await;
@@ -410,6 +421,7 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
             logf!("no saved full state; waiting for full state from stream");
         }
     }
+    let tunnel_dead = Arc::clone(&agent.lock().await.tunnel_dead);
     let mut stream_task = tokio::spawn(stream::stream_loop(Arc::clone(&agent)));
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     tick.tick().await;
@@ -426,6 +438,9 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
                     Ok(Ok(())) => Ok(()),
                     Err(e) => Err(AgentError::Other(format!("stream task: {e}"))),
                 };
+            }
+            () = tunnel_dead.notified() => {
+                agent.lock().await.watch_tunnel(true).await;
             }
             _ = tick.tick() => {
                 let mut a = agent.lock().await;
@@ -676,6 +691,7 @@ mod tests {
             seen_at: None,
             refused_logged: (0, None),
             state_changed: Arc::new(Notify::new()),
+            tunnel_dead: Arc::new(Notify::new()),
         }
     }
 

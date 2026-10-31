@@ -65,6 +65,15 @@ impl Config {
                 w.address
             ));
         }
+        // 特別な帯のアドレスはトンネルに使わない
+        let first_octet = address.octets()[0];
+        if first_octet == 0 || address.is_loopback() || address.is_multicast() || first_octet >= 240
+        {
+            return Err(format!(
+                "address {:?} is in 0.0.0.0/8, 127.0.0.0/8, 224.0.0.0/4 or 240.0.0.0/4",
+                w.address
+            ));
+        }
         let mask = if prefix_len == 0 {
             0
         } else {
@@ -185,6 +194,7 @@ impl Tunnel {
         cfg: Config,
         open: OpenPorts,
         clock: Option<&Path>,
+        dead: Arc<tokio::sync::Notify>,
     ) -> Result<Tunnel, String> {
         let shared = Arc::new(Mutex::new(Reading::default()));
         let ep = resolve(&cfg.endpoint).await;
@@ -214,6 +224,7 @@ impl Tunnel {
             Arc::clone(&shared),
             Arc::clone(&device),
             tun_name.to_owned(),
+            dead,
         ));
         Ok(Tunnel {
             cfg,
@@ -247,7 +258,7 @@ impl Tunnel {
     /// handshake の時刻の印の高い水位をファイルに残す。
     pub async fn persist_clock(&self) {
         if let Ok(d) = device::read(&self.device).await {
-            stamp::record(self.clock.as_deref(), d.unix_high_water);
+            stamp::record(self.clock.as_deref(), d.unix_high_water, true);
         }
     }
 
@@ -280,7 +291,9 @@ impl Tunnel {
 
     /// 閉じる。TUN を消す。
     pub async fn close(self) {
-        self.persist_clock().await;
+        if let Ok(d) = device::read(&self.device).await {
+            stamp::record(self.clock.as_deref(), d.unix_high_water, false);
+        }
         self.monitor.abort();
         let _ = self.monitor.await;
         match Arc::try_unwrap(self.device) {
@@ -317,12 +330,21 @@ async fn monitor(
     shared: Arc<Mutex<Reading>>,
     dev: Arc<wgft_wireguard_tun::Handle>,
     tun_name: String,
+    dead: Arc<tokio::sync::Notify>,
 ) {
     let mut tick = tokio::time::interval(cfg.keepalive);
     tick.tick().await;
     let mut pinged: Option<bool> = None;
     loop {
-        tick.tick().await;
+        tokio::select! {
+            _ = tick.tick() => {}
+            () = dev.finished() => {
+                // 外殻のループが終わった。agent に作り直させる
+                logf!("tunnel: the tunnel device stopped");
+                dead.notify_one();
+                return;
+            }
+        }
         let hs = device::read(&dev)
             .await
             .ok()
@@ -575,6 +597,13 @@ mod stamp {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    /// 定期に残す値に足す余裕。水位は 30 秒ごとに残すので、それより長くする。前に残してから落ちる
+    /// までに使った印も、次の下限が超えるようにするためである。
+    pub(super) const SAVE_MARGIN: Duration = Duration::from_mins(1);
+
+    /// device が受ける下限の上限。これ以上の値は壊れた記録として捨てる。
+    const FLOOR_LIMIT: u64 = 1 << 40;
+
     /// プロセスの中で見た最も高い水位。
     static HIGH: Mutex<Duration> = Mutex::new(Duration::ZERO);
 
@@ -583,16 +612,30 @@ mod stamp {
         text.trim().parse::<u64>().ok().map(Duration::from_secs)
     }
 
-    /// 新しい device に渡す下限。
+    /// 新しい device に渡す下限。残した値が読めないか大きすぎれば、1 行を出して捨て、壁時計から始める。
     pub(super) fn floor(file: Option<&Path>) -> Duration {
         let high = *HIGH
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        high.max(read(file).unwrap_or_default())
+        let saved = match (file, read(file)) {
+            (_, Some(s)) if s.as_secs() < FLOOR_LIMIT => s,
+            (Some(f), None) if !f.exists() => Duration::ZERO,
+            (Some(f), _) => {
+                crate::logf!(
+                    "the handshake clock in {} is unreadable or out of range; starting from the wall clock",
+                    f.display()
+                );
+                let _ = std::fs::remove_file(f);
+                Duration::ZERO
+            }
+            (None, _) => Duration::ZERO,
+        };
+        high.max(saved)
     }
 
-    /// device が返した高い水位を覚え、ファイルに残す。書けなくても動作は続ける。
-    pub(super) fn record(file: Option<&Path>, high_water: Duration) {
+    /// device が返した高い水位を覚え、ファイルに残す。`margin` が真なら [`SAVE_MARGIN`] を足す (定期の
+    /// 保存)。偽なら水位そのものを残す (閉じるとき)。書けなくても動作は続ける。
+    pub(super) fn record(file: Option<&Path>, high_water: Duration, margin: bool) {
         let high = {
             let mut h = HIGH
                 .lock()
@@ -602,8 +645,11 @@ mod stamp {
         };
         let Some(file) = file else { return };
         // 秒を切り上げ、下限が使った印より古くならないようにする
-        let secs = high.as_secs() + u64::from(high.subsec_nanos() > 0);
-        if read(Some(file)).is_some_and(|saved| saved.as_secs() >= secs) {
+        let mut secs = high.as_secs() + u64::from(high.subsec_nanos() > 0);
+        if margin {
+            secs += SAVE_MARGIN.as_secs();
+        }
+        if read(Some(file)).is_some_and(|saved| saved.as_secs() == secs) {
             return;
         }
         let tmp = file.with_extension("tmp");
@@ -627,12 +673,19 @@ mod stamp {
             std::fs::create_dir_all(&dir).unwrap();
             let f = dir.join("agent.json.clock");
             let future = Duration::from_secs(4_000_000_000);
-            record(Some(&f), future + Duration::from_millis(500));
+            record(Some(&f), future + Duration::from_millis(500), true);
+            let saved = future + Duration::from_secs(1) + SAVE_MARGIN;
+            assert_eq!(read(Some(&f)), Some(saved));
+            assert!(floor(Some(&f)) >= saved);
+            // 閉じるときは余裕を足さない。プロセスの中の水位は下がらない
+            record(Some(&f), Duration::from_secs(10), false);
             assert_eq!(read(Some(&f)), Some(future + Duration::from_secs(1)));
             assert!(floor(Some(&f)) >= future);
-            // 低い水位はファイルを戻さない
-            record(Some(&f), Duration::from_secs(10));
-            assert_eq!(read(Some(&f)), Some(future + Duration::from_secs(1)));
+            // 壊れた記録は捨てる
+            std::fs::write(&f, format!("{}\n", 1u64 << 41)).unwrap();
+            let fl = floor(Some(&f));
+            assert!(fl < Duration::from_secs(1 << 40));
+            assert!(!f.exists());
             std::fs::remove_dir_all(dir).unwrap();
         }
     }
@@ -806,6 +859,15 @@ mod tests {
 
     #[test]
     fn rejects_addresses_that_cannot_hold_agent_and_server() {
+        for a in [
+            "0.0.0.2/24",
+            "127.0.0.2/24",
+            "224.0.0.2/24",
+            "240.0.0.2/24",
+            "255.255.255.255/24",
+        ] {
+            assert!(Config::from_wg(&wg(a, 25)).is_err(), "{a}");
+        }
         for a in [
             "10.200.0.0/24",
             "10.200.0.1/24",
