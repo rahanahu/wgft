@@ -255,7 +255,8 @@ rcv_ssthresh を一度に上限まで広げる故障、目標が rcv_ssthresh �
 `lab/lab` が package の版まで固定し、trixie-backports が版を入れ替えても取れるように snapshot.debian.org の 20261101T000000Z の trixie-backports から入れ、基の VM の snapshot がその状態を保ちます。
 VM の image は `images:debian/13` の 20261029_05:24 で作りました。
 2026-11-01 に、Debian 12 の 6.1(`6.1.0-53-amd64`、package の版 6.1.187-1)から移りました。
-版を上げるときは、`lab/lab` の固定とこの記録を同じ変更で直し、基の VM を作り直して、Linux の台本を流し直します。
+版を上げるときは、`lab/lab` の固定、`linuxdut.ReferenceRelease`、この記録を同じ変更で直し、基の VM を作り直して、Linux の台本を流し直します。
+Linux の期待した差の一覧はこの版のものなので、`linuxdut` は動いているカーネルの版を記録し、参照でない版で落ちた時はその旨を誤りの文に含めます。
 
 Linux の既定は、完成に含めない回復の仕組みを有効にしています。
 既定のままでは、損失の回復の台本は Linux の上で常に wgstack と違う結果になるか、違いを吸収するまで条件を緩めて正誤を見分けられなくなります。
@@ -265,7 +266,8 @@ Linux の既定は、完成に含めない回復の仕組みを有効にして�
 - RACK と TLP:`net.ipv4.tcp_recovery=0`、`net.ipv4.tcp_early_retrans=0`。
   TLP は `tcp_early_retrans=0` で止まります。
   RACK の損失の検出は、6.1 では `tcp_recovery=0` で止まりましたが、7.2 では止まりません(v6.17 で RFC 6675 の損失の検出が除かれました)。
-  7.2 でも 0 を固定するのは、RACK の並べ替えの窓を DSACK で広げる動きと、SACK した segment が重複の閾値に届いた時に窓を 0 にする規則を、既定のとおりに保つためです
+  7.2 は `tcp_recovery` の RACK の bit(0x1)を読まないので、0 は既定の 1 と同じに働きます。
+  固定を残すのは、6.1 では RACK を切り、参照の設定を 2 つの版で同じにするためです
 - F-RTO:`net.ipv4.tcp_frto=0`
 - ECN、TFO、SYN cookie:`net.ipv4.tcp_ecn=0`、`net.ipv4.tcp_fastopen=0`、`net.ipv4.tcp_syncookies=0`
 - D-SACK:`net.ipv4.tcp_dsack=0`
@@ -368,7 +370,7 @@ gVisor の一覧は、gVisor を基準でなく比較の対象として扱うた
 `internal/tcpharness/linuxdut` は、ラボの VM の network namespace の中の TUN と Linux のソケットを使います。
 新しい network namespace の `net.ipv4.tcp_*` の値は、多くがカーネルに組み込まれた既定の値になり、一部が最初の namespace の値の写しになります。
 ラボの VM の 6.1 と 7.2 のカーネルでは、`tcp_congestion_control`、`tcp_rmem`、`tcp_wmem` が写しになり、`tcp_frto`、`tcp_sack`、`tcp_recovery`、`tcp_autocorking` は既定の値になりました。
-写しになる `tcp_rmem` の 3 つ目の値は、6.1 では 6291456、7.2 では VM のメモリから決まる約 14 MB です(2 GiB の VM で 13968768 から 14025216)。
+写しになる `tcp_rmem` の 3 つ目の値は、6.1 では 6291456、7.2 では VM のメモリから決まる約 14 MB です(2 GiB の VM で 13968672 から 14025216)。
 固定の値の台本は待ち受けに `SO_RCVBUF` を与えるので、この値は窓に効きません。
 どの値が写しになるかはカーネルの版で変わりうるので、`linuxdut` は[参照の Linux の設定](#参照の-linux-の設定)の値をすべて書き込み、読み戻して確かめます。
 待ち受けのソケットには floor と同じ 256 KiB を送信と受信のバッファとして与えます。

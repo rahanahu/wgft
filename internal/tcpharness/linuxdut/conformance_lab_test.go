@@ -64,6 +64,8 @@ var Known = map[string]tcpharness.Known{
 //	lab/lab test internal/tcpharness/linuxdut vps -test.run=TestConformance/paws
 func TestConformance(t *testing.T) {
 	if os.Getenv("WGFT_TEST_IN_NETNS") != "1" {
+		release := KernelRelease()
+		t.Logf("kernel %s; the expected differences are recorded for the reference kernel %s", release, ReferenceRelease)
 		run := "^TestConformance$"
 		if f := flag.Lookup("test.run"); f != nil && f.Value.String() != "" {
 			run = f.Value.String() // the scenario filter passes through
@@ -80,6 +82,12 @@ func TestConformance(t *testing.T) {
 		var pe *os.PathError
 		if errors.As(err, &pe) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EINVAL) {
 			t.Fatalf("undetermined: cannot create a user and network namespace here: %v", err)
+		}
+		if err != nil && release != ReferenceRelease {
+			t.Fatalf("the scenarios failed in the namespace: %v; this kernel %s is not the reference %s, "+
+				"and the expected differences are recorded for the reference kernel, so a failure here may "+
+				"be a difference of this kernel rather than of the scenarios; run it on the lab's reference VM",
+				err, release, ReferenceRelease)
 		}
 		if err != nil {
 			t.Fatalf("the scenarios failed in the namespace: %v", err)
