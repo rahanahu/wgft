@@ -110,8 +110,8 @@ type udpState struct {
 	fault    error
 	closed   bool
 
-	epDrops, devDrops, noPort uint64
-	dropGate                  gate
+	epDrops, devDrops uint64
+	dropGate          gate
 }
 
 // init は datagram の枠の数を決める。0 は本番の値で、小さな値は試験だけが渡す。
@@ -349,7 +349,6 @@ func (s *stack) inputUDP(ip *ipv4, now int64) {
 	}
 	ep := u.eps[dst]
 	if ep == nil || ep.closed {
-		u.noPort++
 		u.mu.Unlock()
 		s.sendICMPError(ip, 3, 3, 0, now) // Port Unreachable
 		return
@@ -549,26 +548,14 @@ func (s *stack) udpChecksum(id int32, from, to netip.AddrPort) uint16 {
 	binary.BigEndian.PutUint16(h[0:2], from.Port())
 	binary.BigEndian.PutUint16(h[2:4], to.Port())
 	binary.BigEndian.PutUint16(h[4:6], uint16(ulen))
-	sum += uint32(checksum(0, h[:]))
+	sum = uint32(checksum(sum, h[:]))
+	// 中身は buf の大きさずつ足す。udpGet は最後の断片のほかは buf をちょうど埋めるので、断片の境目は偶数の位置に
+	// あり、16 bit の語の並びは 1 回で足したときと同じである
 	var buf [1024]byte
-	pos := 0
 	for off := 0; off < g.n; {
 		k := s.udpGet(dirTx, id, off, buf[:])
-		for _, x := range buf[:k] {
-			if pos&1 == 0 {
-				sum += uint32(x) << 8
-			} else {
-				sum += uint32(x)
-			}
-			pos++
-		}
+		sum = uint32(checksum(sum, buf[:k]))
 		off += k
-		for sum>>16 != 0 {
-			sum = sum&0xffff + sum>>16
-		}
-	}
-	for sum>>16 != 0 {
-		sum = sum&0xffff + sum>>16
 	}
 	cs := ^uint16(sum)
 	if cs == 0 {
@@ -605,9 +592,7 @@ func (s *stack) pollUDP(b []byte) int {
 	if more {
 		flags |= 0x2000
 	}
-	binary.BigEndian.PutUint16(p[6:8], flags) // DF は立てない
-	p[10], p[11] = 0, 0
-	binary.BigEndian.PutUint16(p[10:12], ^checksum(0, p[:ipHeaderLen]))
+	setFragField(p, flags) // DF は立てない
 	body := p[ipHeaderLen:]
 	off := g.sent
 	if off == 0 {
