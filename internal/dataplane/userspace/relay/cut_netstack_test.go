@@ -36,21 +36,45 @@ var (
 	cutAgentAddr  = netip.MustParseAddr("10.99.0.2")
 )
 
-// netstackPair joins two netstack devices back to back: packets one writes out are delivered to
-// the other, in place of WireGuard. The client dials from the first, a gVisor netstack; the relay
-// listens on the second, built by engine.
-func netstackPair(t *testing.T, engine string) (*nettun.Device, netstackNet) {
+// vpsDialer is what the tests need from the vpsd side of the pair: dialing toward the agent, the
+// way the vpsd tunnel's DialContext does. The tests name this interface, not internal/nettun, so
+// another netstack can take the role.
+type vpsDialer interface {
+	DialTCP(ctx context.Context, ap netip.AddrPort) (net.Conn, error)
+	DialUDP(ap netip.AddrPort) (net.Conn, error)
+}
+
+// vpsDev is a vpsd-role device: a dialer that also carries packets, so the pumps can join it to
+// the agent's device.
+type vpsDev interface {
+	vpsDialer
+	Read(bufs [][]byte, sizes []int, offset int) (int, error)
+	Write(bufs [][]byte, offset int) (int, error)
+}
+
+// newVpsDev builds the vpsd-role device on gVisor, the only implementation of that role so far,
+// and closes it after the test.
+func newVpsDev(t *testing.T, addr netip.Addr) vpsDev {
 	t.Helper()
-	client, err := nettun.Create(cutClientAddr, 1420)
+	d, err := nettun.Create(addr, 1420)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		// Close the client, which also ends the pumps' Read, then wait for its stack's
+		// Close the device, which also ends the pumps' Read, then wait for its stack's
 		// goroutines. newAgentDev closes the agent's device the same way.
-		client.Close()
-		client.Wait()
+		d.Close()
+		d.Wait()
 	})
+	return d
+}
+
+// netstackPair joins two netstack devices back to back: packets one writes out are delivered to
+// the other, in place of WireGuard. The client dials from the first, a gVisor netstack; the relay
+// listens on the second, built by engine.
+func netstackPair(t *testing.T, engine string) (vpsDialer, netstackNet) {
+	t.Helper()
+	client := newVpsDev(t, cutClientAddr)
 	agent := newAgentDev(t, engine, cutAgentAddr)
 	type dev interface {
 		Read(bufs [][]byte, sizes []int, offset int) (int, error)
@@ -75,7 +99,7 @@ func netstackPair(t *testing.T, engine string) (*nettun.Device, netstackNet) {
 }
 
 // dialNetstackEcho connects from the client's netstack to the relay's port and checks one echo.
-func dialNetstackEcho(t *testing.T, client *nettun.Device, port uint16) net.Conn {
+func dialNetstackEcho(t *testing.T, client vpsDialer, port uint16) net.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
