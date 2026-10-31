@@ -42,7 +42,7 @@ SQLite の宣言は、適用に成功するまで転送面の Active 状態と�
   `Transparent` は今の `vps_mode=kernel` に当たります。
   `Relay` は `vpsd` 自身が TCP を終端して中継する方式で、今の `vps_mode=proxy` に当たります。
   `Forwarding` は、server・agent 全体の転送方式(今の `WGFT_MODE`)とは別の軸です。
-  `WGFT_MODE` は `internal/vpsd/store` が持つ `ModeKernel`/`ModeUserspace` の文字列の語彙であり、この層の型ではありません。
+  この転送方式は `internal/vpsd/store` が持つ `ModeKernel`/`ModeUserspace` の文字列の語彙であり、この層の型ではありません。
   これと紛れる「kernel」という語を、ルール単位の選択には使いません
 - `SourceMetadata`:送信元の情報を付けるかどうかを選びます。
   `None`(付けない)と `ProxyV2` の 2 値を持ちます。
@@ -146,7 +146,7 @@ agent が `Runtime` を共有する案は未実装で、現在の境界は[packa
 | `internal/dataplane/linuxkernel/wg`(Phase 3 で `internal/vpsd/wg` から移した。`Ensure` の差分適用) | kernel `Backend` の WireGuard 収束 | 現在の値と宣言を突き合わせて差分だけ変える実装なので、ほぼそのまま引き継ぎました。インタフェース名と `--adopt-existing` は `Backend` の構築時の値になり、`dataplane.WGConfig`(宣言)には含めません |
 | `internal/dataplane/linuxkernel/conntrack`(Phase 3 で `internal/vpsd/conntrack` から移した) | kernel `Backend` の conntrack 収束 | `Backend.Converge` が `RulesFromPlan` で `Plan` の Transparent なポートから収束の判定材料を作ります。呼び出し側(`vpsd`)はもうルール集合を組み立て直しません |
 | `internal/platform/linux`(Phase 3 で `internal/vpsd/check` から移した) | host 側の前段検査 | kernel `Backend` に同梱しません。agent の kernel backend(Phase 7)からも同じ検査を呼ぶためです。`ip_forward` の確認・書き込み、conntrack テーブルの大きさ、conntrack の UDP タイムアウトの読み取り(旧 `internal/vpsd/wg` の一部)もここに合わせて移しました |
-| `internal/resource`(Phase 6 の移行の手順 1 で `internal/flowcap` から改めた) | `Resource Guard` | `Limits` はプロセス全体の予算だけを持つ。接続元ごとの上限は `internal/policy` の `AdmissionLimits` へ、ログを間引く門は `internal/lograte` へ移しました([7a.5 節](admission-resources.md#7a5-resource-guard)、[7a.10 節](../resource/admission.md#7a10-resource-guard-の再設計)) |
+| `internal/resource`(Phase 6 の移行の手順 1 で `internal/flowcap` から改めた) | `Resource Guard` | `Limits` はプロセス全体の予算だけを持ちます。接続元ごとの上限は `internal/policy` の `AdmissionLimits` へ、ログを間引く門は `internal/lograte` へ移しました([7a.5 節](admission-resources.md#7a5-resource-guard)、[7a.10 節](../resource/admission.md#7a10-resource-guard-の再設計)) |
 | `internal/dataplane/userspace/relay`(Phase 2 で `internal/agent/relay` から移した)の `plan`/`Action` | `internal/reconcile` の骨格のひな型 | agent が `Runtime` を使う場合に共有する案で、agent の移行は未実装です |
 | `internal/dataplane/userspace/tunnel`(`internal/agent/tunnel` から移した)、`internal/dataplane/userspace/utun`(Phase 2 で `internal/vpsd/utun` から移した)、`internal/nettun` | userspace `Backend` の下位実装 | プラットフォーム配線そのままです |
 | `internal/vpsd/agentapi`、`internal/vpsd/stream`、`internal/vpsd/store`、`internal/vpsd/admin` | `vpsd` の制御プレーン | 変更なし(登録、配信、永続化、admin API) |
