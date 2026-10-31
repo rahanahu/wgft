@@ -71,6 +71,8 @@ var Scenarios = []Scenario{
 	{Name: "rcv-overflow-read-all", Refs: ovfRefs, Run: rcvOverflowRead(false)},
 	{Name: "rcv-overflow-hold-perf", Refs: ovfRefs, Run: rcvOverflowHold, Performance: true},
 	{Name: "rcv-overflow-read-half-perf", Refs: ovfRefs, Run: rcvOverflowRead(true), Performance: true},
+	{Name: "rcv-window-pacing", Refs: pacingRefs, Run: rcvWindowPacing(true), Performance: true},
+	{Name: "rcv-window-pacing-fixed", Refs: pacingRefs, Run: rcvWindowPacing(false)},
 	{Name: "rto-after-burst", Refs: "RFC 5681 3.1, RFC 6298 5; the band is the reference Linux's, tcp_enter_loss", Run: rtoAfterBurst},
 }
 

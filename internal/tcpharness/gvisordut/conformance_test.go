@@ -128,10 +128,18 @@ var Known = map[string]tcpharness.Known{
 		Observed: "no ACK in time",
 		Reason:   "as rcv-overflow-hold/read-hole.window-update: no ACK follows the read",
 	},
-	"rcv-overflow-hold/edge.dropped":                  ovfBeyond,
-	"rcv-overflow-hold/hole.ack":                      ovfBeyondAck,
-	"rcv-overflow-hold-perf/edge.dropped":             ovfBeyond,
-	"rcv-overflow-hold-perf/hole.ack":                 ovfBeyondAck,
+	"rcv-overflow-hold/edge.dropped":      ovfBeyond,
+	"rcv-overflow-hold/hole.ack":          ovfBeyondAck,
+	"rcv-overflow-hold-perf/edge.dropped": ovfBeyond,
+	"rcv-overflow-hold-perf/hole.ack":     ovfBeyondAck,
+	"rcv-window-pacing/window.step":       pacingJump,
+	"rcv-window-pacing/window.band": {
+		Observed: "above the band",
+		Reason:   "as rcv-window-pacing/window.step: gVisor's window settles at about 2 MB, three to four times the reference Linux's",
+	},
+	"rcv-window-pacing/loss.edge-kept":                pacingEdge,
+	"rcv-window-pacing-fixed/loss.edge-kept":          pacingEdge,
+	"rcv-window-pacing-fixed/window.step":             pacingJump,
 	"rcv-overflow-read-half/fill.window-honored":      ovfShrink,
 	"rcv-overflow-read-all/fill.window-honored":       ovfShrink,
 	"rcv-overflow-read-half-perf/fill.window-honored": ovfShrink,
@@ -152,6 +160,23 @@ var ovfShrink = tcpharness.Known{
 		"short of a right edge it advertised before and drops what the testbench sent up to that edge; RFC 7323 2.4 has " +
 		"the receiver honor every segment in window for any ACK it sent, and Linux and wgstack take it. Whether the drop " +
 		"happens turns on how the segments and gVisor's ACKs interleave",
+	Sometimes: true,
+}
+
+// pacingJump is gVisor opening its window at once.
+var pacingJump = tcpharness.Known{
+	Observed: "some do",
+	Reason: "gVisor's receive buffer moderation opens the advertised window by about 2 MB in one ACK once the reads " +
+		"have measured the path, where Linux and wgstack open it by rcv_ssthresh's step per arriving segment; " +
+		"a step of this kind is what wgstack-performance.md found behind the slow recovery after a queue overflow when " +
+		"an earlier window growth of wgstack's took it",
+}
+
+// pacingEdge is gVisor's right edge moving on while a hole stays.
+var pacingEdge = tcpharness.Known{
+	Observed: "it grows",
+	Reason: "on some runs gVisor moves its right edge on by some hundred bytes while the first hole of the loss round " +
+		"stays, which Linux and wgstack, their window at its limit, do not; what decides it is not identified",
 	Sometimes: true,
 }
 
