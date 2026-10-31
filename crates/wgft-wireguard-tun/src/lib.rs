@@ -41,6 +41,10 @@ pub struct Status {
     pub send_errors: u64,
 }
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(dead_code, reason = "only the Linux event loop reads the commands")
+)]
 pub(crate) enum Command {
     Status(oneshot::Sender<Status>),
     SetEndpoint(SocketAddr),
