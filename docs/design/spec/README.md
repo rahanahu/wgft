@@ -29,10 +29,10 @@ Rust の実装はこの文書群を契約として従います。
 | 登録 | [接続文字列、登録、証明書のピン](join.md) | `wgft://` の形、`POST /api/v1/agents/register`、TLS の検証 |
 | stream | [stream の接続と寿命](stream.md) | 認証、最初のメッセージ、読む量の上限、close の符号、版の交渉、再接続、鍵の変更の頻度、ping |
 | stream のメッセージ | [pubkey、state、heartbeat](messages.md) | メッセージの形、`WGConfig`、`AgentRule`、`agent_disabled`、理由の切り詰め |
-| 認証情報 | agent.json と .lock と .sock (未作成、credentials.md) | 置き場所、キーと型と省略、書き方、ロック、Windows の DACL |
-| 制御ソケット | 制御ソケットと agent doctor --json (未作成、control-socket.md) | 要求の行、応答の JSON、上限、`agent doctor --json` の形 |
-| CLI と設定 | agent の CLI と設定 (未作成、cli-config.md) | コマンドとフラグ、`WGFT_*`、優先順位、dotenv、終了コード、起動ログ、秘密を伏せる規則 |
-| トンネルの中 | トンネルの中の約束 (未作成、tunnel.md) | アドレス、MTU、keepalive の ping、ハンドシェイクの監視、疎通確認、ルールのポート、中継、UDP の timeout、IPv4 の断片 |
+| 認証情報 | [agent.json と .lock と .sock](credentials.md) | 置き場所、キーと型と省略、書き方、ロック、Windows の DACL |
+| 制御ソケット | [制御ソケットと agent doctor --json](control-socket.md) | 要求の行、応答の JSON、上限、`agent doctor --json` の形 |
+| CLI と設定 | [agent の CLI と設定](cli-config.md) | コマンドとフラグ、`WGFT_*`、優先順位、dotenv、終了コード、起動ログ、秘密を伏せる規則 |
+| トンネルの中 | [トンネルの中の約束](tunnel.md) | アドレス、MTU、keepalive の ping、ハンドシェイクの監視、疎通確認、ルールのポート、中継、UDP の timeout、IPv4 の断片 |
 
 server の側だけの面、つまり管理用 API、サーバのデータベース、Admission Policy の IR、nftables の出力は、Rust の server に着手する前に別に書きます。
 
@@ -43,6 +43,7 @@ fixture は Go の v1 が実際に出すか受ける値です。
 メッセージの fixture は、送る byte 列の後に改行を 1 つ付けたファイルです。
 読む側は末尾の改行を 1 つだけ除いて比べます。
 HTTP の本文の fixture は本文そのもので、Go の v1 の本文は改行で終わります。
+`agent.json` の fixture はファイルの中身そのもので、末尾に改行を持ちません。
 Go の試験は、Go の実装が fixture と同じ値を出すことと、fixture を受けて同じ意味に読むことを確かめます。
 仕様と Go の v1 が黙って離れないようにするためです。
 
@@ -51,8 +52,9 @@ Go の試験は、Go の実装が fixture と同じ値を出すことと、fixtu
 | `testdata/spec/wire/` | `pubkey`、`state`、`heartbeat` のメッセージ、close の理由、版の交渉 | `proto`、`internal/agent`、`internal/vpsd/stream` の `spec_test.go` |
 | `testdata/spec/join/` | 接続文字列の正と誤り、登録の要求と応答 | `internal/agent/enroll`、`internal/vpsd/agentapi` の `spec_test.go` |
 | `testdata/spec/credentials/` | v1 の `agent.json` の写し (秘密は置き換え済み) | `internal/agent/credentials` の `spec_test.go` |
-| `testdata/spec/control/` | 制御ソケットの `doctor` の応答と `agent doctor --json` | `internal/agent/controlapi`、`cmd/wgft` の `spec_test.go` |
-| `testdata/spec/config/` | dotenv の正と誤り、起動ログの有効な設定の行 | `cmd/wgft` の `spec_test.go` |
+| `testdata/spec/control/` | 制御ソケットの `doctor` の応答と `agent doctor --json` | `internal/agent/controlapi` の `spec_test.go`、`cmd/wgft` の `spec_doctor_test.go` |
+| `testdata/spec/config/` | dotenv の正と誤り、設定の値の検査、宛先の許可一覧、拒否の文言、起動ログの有効な設定の行 | `cmd/wgft` の `spec_config_test.go` |
+| `testdata/spec/tunnel/` | 全体状態からのトンネルの設定、endpoint の解決、UAPI のピア、ルールから待ち受けへの写し、中継の時間 | `internal/agent/usermode`、`internal/dataplane/userspace/tunnel`、`internal/dataplane/userspace/relay` の `spec_test.go` |
 
 fixture を書き換えるのは、Go の v1 の振る舞いを意図して変えたときだけです。
 その場合は同じコミットでこの文書群も直します。

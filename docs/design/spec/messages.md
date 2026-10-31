@@ -79,7 +79,7 @@ server が送る全体状態です。
 - server のアドレス:全体状態は server のトンネルのアドレスを持ちません。
   agent は `address` の帯の先頭のホストのアドレス (`10.200.0.1`) を server のアドレスとみなします
 
-各値を agent がどう使うか、0 と範囲の外の値をどう扱うかは tunnel.md (未作成、tunnel.md) にあります。
+各値を agent がどう使うか、0 と範囲の外の値をどう扱うかは [tunnel.md](tunnel.md) にあります。
 
 ### AgentRule
 
@@ -143,7 +143,8 @@ dataplane の全体の失敗で適用できなかった世代では進めませ�
 | `endpoint` | 文字列 | 空なら省きます | 名前を解決した server の `ip:port` |
 | `last_handshake` | 時刻 | 省きません | 今のトンネルの最終ハンドシェイク。成立していなければ `0001-01-01T00:00:00Z` です |
 
-トンネルの理由のうち、server と `agent doctor` が文言で見分けるものは固定です。
+トンネルの理由のうち、agent 自身の追送りと `agent doctor` が文言で見分けるものは固定です。
+server はトンネルの理由を見分けません。
 
 | 理由 | 場合 |
 | --- | --- |
@@ -178,7 +179,7 @@ Rust の agent は、同じ場合の理由に次の語を含めなければな�
 
 | 場合 | 理由に含める語 | v1 の agent の理由の例 |
 | --- | --- | --- |
-| 待ち受けを開けない | `bind failed`。`bind tcp ` か `bind udp ` でも当たります | `tcp/8080: bind failed: bind tcp 10.200.0.2:8080: port is in use` |
+| 待ち受けを開けない | `bind failed`。`bind tcp ` か `bind udp ` でも当たります | `tcp/8080: bind tcp 10.200.0.2:8080: port is in use` |
 | 宛先の許可一覧が拒んだ | `WGFT_AGENT_ALLOW_TARGETS` か `is not allowed` | `tcp/8080: target 192.168.1.10:80 is not in WGFT_AGENT_ALLOW_TARGETS` |
 | ブロードキャストとマルチキャストの宛先 | `the agent forwards only to unicast targets` | `udp/9000: target 192.168.1.255:9000 is the broadcast address of 192.168.1.0/24 on this host; the agent forwards only to unicast targets` |
 | 名前の解決の失敗 | `name resolution`、`no such host`、`lookup `、`server misbehaving` のどれか | `tcp/8080: dial tcp: lookup nas.lan on 127.0.0.53:53: no such host` |
