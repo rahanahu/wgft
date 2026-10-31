@@ -49,6 +49,11 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 VM の間では単独の確認の約束が弱まるため、1 台で流す形が厳密です。
 違いは[単独の確認の扱い](../../lab/README.md#単独の確認の扱い)にあります。
 
+ラボの既定の VM は Debian 13 と参照のカーネル 7.2 です([対応する VPS の環境](../../lab/README.md#対応する-vps-の環境))。
+[セットアップの前提](../manual/setup.md)の下限(Linux 6.1、nftables 1.0.6)は、`WGFT_LAB_IMAGE=images:debian/12` で作った VM で確かめます。
+後述の契機のうち `nft-emit` か `kernel` に当たる PR は、マージの前に Debian 12 の VM でもラボの一式と B1 を流します。
+ラボの一式は、`WGFT_LAB_TEMPLATE` にその VM を指定した `lab/lab suite` で流します。
+
 文書だけを変える PR は、ラボを流しません。
 CI の検査のうち A8 は、どちらの PR でも流します。
 A1 から A7 は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。
