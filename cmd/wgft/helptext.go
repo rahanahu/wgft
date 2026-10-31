@@ -874,7 +874,8 @@ that never changes the status.
 
 --probe opens one real TCP connection from the server, through the tunnel and
 the agent, to the target, so it takes one rule at a time and the target sees a
-connection. Without it nothing is dialled. --verbose adds the internal detail:
+connection. A target that stays silent until the client speaks takes about 11
+seconds to confirm. Without it nothing is dialled. --verbose adds the internal detail:
 generations, apply state, endpoints, counters. --from <address> evaluates the
 deny and allow lists against one client address.
 

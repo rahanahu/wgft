@@ -13,6 +13,8 @@ import (
 	"net"
 	"syscall"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/dataplane/userspace/relay"
 )
 
 // Result は疎通確認の結果。
@@ -30,28 +32,35 @@ const (
 	ReachNone   = "none"
 )
 
+// DefaultObserveTime は ObserveTime の既定である。エージェントの中継は、接続を受けてから target へ
+// 最長 relay.TargetDialTimeout の間ダイヤルし、黙って捨てる target ではその間 server からの接続を閉じずに無言で保つ。
+// 様子を見る時間がそれより短いと、捨てられている target を「無言で生存」と取り違えて到達と報告してしまうので、
+// 中継の期限を少し超える長さにする。その代わり、無言のまま生きる(多くのプロトコルが該当する)正常な target の
+// 確認は、この時間いっぱいかかる。
+const DefaultObserveTime = relay.TargetDialTimeout + time.Second
+
 // Dialer は接続に使う関数(テストで差し替える)。本番は net.Dialer.Dial。
 type Dialer func(network, addr string) (net.Conn, error)
 
 // Options は調整値。
 type Options struct {
 	DialTimeout time.Duration // エージェントのリスナーへの接続のタイムアウト(既定 5 秒)
-	ObserveTime time.Duration // 接続後、切れないか様子を見る時間(既定 3 秒)
+	ObserveTime time.Duration // 接続後、切れないか様子を見る時間(既定は DefaultObserveTime)
 	Dial        Dialer
 }
 
 // Check は addr(エージェントのリスナー 10.200.0.x:port)へ接続し、3 分類で結果を返す。
 //
-// 判定:エージェントの中継は、接続を受けると target へダイヤルし、失敗すると即座にこちらの接続を閉じる。
+// 判定:エージェントの中継は、接続を受けると target へダイヤルし、失敗すると即座に server からの接続を閉じる。
 //   - 接続自体が失敗 → none(トンネル/エージェント/リスナーの問題)
-//   - 接続でき、ObserveTime の間に切れない(or 相手がデータを返す)→ target(内側の経路 OK)
+//   - 接続でき、ObserveTime(既定は中継の target への期限を超える長さ)の間に切れない(or 相手がデータを返す)→ target(内側の経路 OK)
 //   - 接続でき、すぐ EOF/RST → agent(エージェントまでは行くが target に届かない)
 func Check(addr string, opts Options) Result {
 	if opts.DialTimeout <= 0 {
 		opts.DialTimeout = 5 * time.Second
 	}
 	if opts.ObserveTime <= 0 {
-		opts.ObserveTime = 3 * time.Second
+		opts.ObserveTime = DefaultObserveTime
 	}
 	dial := opts.Dial
 	if dial == nil {
