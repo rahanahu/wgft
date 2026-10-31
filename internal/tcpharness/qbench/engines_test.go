@@ -86,6 +86,9 @@ type Client struct {
 	// sender's RTO in the cells where the DUT receives.
 	RTOAt  func(at time.Time) time.Duration
 	RTOErr func() error
+	// Kernel is whether the client's TCP is the Linux kernel's, so a run without an RTO sample
+	// must not pass as measured.
+	Kernel bool
 }
 
 func newClient() (*Client, error) {
@@ -103,13 +106,18 @@ func newClient() (*Client, error) {
 
 func (c *Client) Dial(ctx context.Context) (net.Conn, error) { return c.dial(ctx) }
 
+// clientBuilders maps a client name to its constructor, as newRig's engine switch does for the
+// DUT. A new client engine takes one entry here and nothing else in the rig.
+var clientBuilders = map[string]func() (*Client, error){
+	"":       newClient,
+	"gvisor": newClient,
+	"linux":  newLinuxClient,
+}
+
 // clientFor builds the client a rig asks for.
 func clientFor(name string) (*Client, error) {
-	switch name {
-	case "", "gvisor":
-		return newClient()
-	case "linux":
-		return newLinuxClient()
+	if b, ok := clientBuilders[name]; ok {
+		return b()
 	}
 	return nil, fmt.Errorf("unknown client %q", name)
 }
