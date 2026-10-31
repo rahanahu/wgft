@@ -5,7 +5,7 @@
 agent doctor は、エージェントのホストで、停止中も読める状態と稼働中の制御ソケットの証拠を診断します。
 server 無しでも、読めた範囲で判定します。
 
-現行の各仕様は[agent doctorの索引](diagnosis/README.md)から参照できます。
+現行の各仕様は[agent doctor の索引](diagnosis/README.md)から参照できます。
 
 <details>
 <summary>旧見出しの参照先</summary>
