@@ -171,10 +171,13 @@ func NewLink(imp Impair, seed int64, deliverAB, deliverBA func([]byte)) *Link {
 	return l
 }
 
-// Halt stops the link's delivery and returns once nothing is delivered any more. Packets sent
-// afterwards are counted and traced but never delivered. A rig halts its link before it closes
+// Halt stops the link's delivery and returns once nothing is delivered any more, within one
+// write in flight. Packets sent afterwards are counted and traced but never delivered, so the
+// trace's tail can list packets the link took after Halt. A rig halts its link before it closes
 // the devices, so no packet reaches a closed device: a closed gVisor client that is handed a
-// packet answers it into its closed queue and panics.
+// packet answers it into its closed queue and panics. Halt removes only the link as a source:
+// the gVisor client stack's own goroutines and timers can still write while wireguard's
+// tun/netstack closes its device, which only a change there could rule out.
 func (l *Link) Halt() {
 	l.stopOnce.Do(func() { close(l.stop) })
 	l.wg.Wait()
@@ -581,6 +584,12 @@ func (l *Link) run(d int) {
 		}
 		q.mu.Unlock()
 		for _, it := range due {
+			// a halted link delivers nothing more, so Halt returns within one write
+			select {
+			case <-l.stop:
+				return
+			default:
+			}
 			l.deliver[d](it.pkt)
 		}
 		if len(due) > 0 {
