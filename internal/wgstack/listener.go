@@ -144,7 +144,7 @@ func (t *TCPListener) Close() error {
 	s := l.s
 	type ref struct {
 		id  int32
-		gen uint32
+		gen uint64
 	}
 	var queued []ref
 	s.tmu.Lock()

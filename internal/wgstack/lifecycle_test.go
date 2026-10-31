@@ -44,6 +44,41 @@ func TestStaleHandleDoesNotReadTheNextConnection(t *testing.T) {
 	}
 }
 
+// 世代は 64 bit なので、枠の再利用がちょうど 2^32 回進んでも古い handle は次の接続に届かない。32 bit の世代では
+// この回数で一周して、古い handle の Read が次の接続の byte を返していた。一周を再現するため、解放した枠の世代を
+// 2^32 だけ(解放の分を含めて)進めてから、同じ枠を使う接続 B を張る。
+func TestStaleHandleRejectedAfterGenerationAdvancesBy2Pow32(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	l := listen(t, n, 80)
+	n.handshake(40000, 80, true, true, true)
+	a := acceptOne(t, l)
+	n.drain()
+	slot := a.c.id
+	a.Abort()
+	n.drain()
+	cs := &n.d.s.conns[slot]
+	cs.mu.Lock()
+	n.d.s.tmu.Lock()
+	cs.gen += 1<<32 - 1 // 解放で 1 進んでいるので、a の世代からちょうど 2^32 進む
+	n.d.s.tmu.Unlock()
+	cs.mu.Unlock()
+	pb := n.handshake(40001, 80, true, true, true)
+	b := acceptOne(t, l)
+	n.drain()
+	if b.c.id != slot || b.gen != a.gen+1<<32 {
+		t.Fatalf("setup: slot %d gen %d, want slot %d and a gen exactly 2^32 above the stale handle's", b.c.id, b.gen, slot)
+	}
+	pb.ack([]byte("secret-of-b"))
+	n.drain()
+	buf := make([]byte, 64)
+	if k, err := readWithin(t, a, buf); k != 0 || !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Read on the stale handle = %d %q, %v; want 0 and net.ErrClosed", k, buf[:k], err)
+	}
+	if _, err := a.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Write on the stale handle: %v, want net.ErrClosed", err)
+	}
+}
+
 // readWithin は c.Read を呼び、5 秒以内に戻らなければ試験を失敗にする。退行で読み取りが待ち続けても、試験が
 // 止まらずに失敗するためである。待ち続けた読み取りは、試験の後の Device の Close が解く。
 func readWithin(t *testing.T, c *Conn, buf []byte) (int, error) {

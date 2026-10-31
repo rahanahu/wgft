@@ -279,8 +279,8 @@ type Bound struct {
 }
 
 // slotRuntime は接続の枠 1 つが表の外に持つ構造の上界。linux/amd64 の Go 1.27 で測ると、アプリケーションの
-// handle の Conn と 2 つの TCPAddr が 176 byte、読み書きを起こす 2 つの channel が 224 byte、読み書きの
-// 期限の 2 つの channel が 224 byte、2 つの期限のタイマーが 256 byte で、合わせて 880 byte である。
+// handle の Conn と 2 つの TCPAddr が 192 byte、読み書きを起こす 2 つの channel が 224 byte、読み書きの
+// 期限の 2 つの channel が 224 byte、2 つの期限のタイマーが 256 byte で、合わせて 896 byte である。
 const slotRuntime = 1024
 
 // Bound はこの Device の上界の式の値を返す。
@@ -299,7 +299,7 @@ func (s *stack) countBound() Bound {
 	dl := func(x dlist) int64 { return sliceBytes(x.next) + sliceBytes(x.prev) + sliceBytes(x.in) }
 	var b Bound
 	b.Fix = heapBytes(int64(unsafe.Sizeof(stack{}))) + sliceBytes(s.conns) + sliceBytes(s.free[:cap(s.free)]) +
-		sliceBytes(s.connIdx.ents) + sliceBytes(s.syn.idx.ents) + sliceBytes(s.tw.idx.ents) +
+		sliceBytes(s.connIdx.ents) + sliceBytes(s.connIdx.gens) + sliceBytes(s.syn.idx.ents) + sliceBytes(s.tw.idx.ents) +
 		sliceBytes(s.syn.rows) + sliceBytes(s.syn.free[:cap(s.syn.free)]) +
 		sliceBytes(s.tw.rows) + sliceBytes(s.tw.free[:cap(s.tw.free)]) +
 		sliceBytes(s.wheel.dl) + sliceBytes(s.wheel.next) + sliceBytes(s.wheel.prev) + sliceBytes(s.wheel.where) +

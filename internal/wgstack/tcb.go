@@ -42,7 +42,7 @@ type tcb struct {
 	mu      sync.Mutex
 	s       *stack
 	id      int32
-	gen     uint32
+	gen     uint64
 	inIndex bool
 
 	// accept の待ち行列の節(表の錠)

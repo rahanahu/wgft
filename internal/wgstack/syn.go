@@ -43,7 +43,7 @@ type synTable struct {
 }
 
 func newSynTable(n int, key sipKey) synTable {
-	t := synTable{rows: make([]synRow, n), idx: newIndex(n, key), free: make([]int32, n)}
+	t := synTable{rows: make([]synRow, n), idx: newIndex(n, key, false), free: make([]int32, n)}
 	for i := range t.free {
 		t.free[i] = int32(n - 1 - i)
 	}
@@ -130,7 +130,7 @@ func (s *stack) newSynRow(l *listener, seg *segment, now int64, reuse reuseISS) 
 		r.tsOK, r.tsRecent, r.tsOffset = true, seg.opt.tsVal, s.tsOffset(seg.tup)
 	}
 	r.rcvWnd = uint16(s.initialWindow(r.tsOK))
-	t.idx.insert(seg.tup, id, 0)
+	t.idx.insert(seg.tup, id, 0) // 世代は持たない
 	t.listPush(id)
 	t.n++
 	l.synCount++
@@ -202,7 +202,6 @@ type promotion struct {
 	row   synRow
 	rowID int32
 	slot  int32
-	gen   uint32
 }
 
 // synInput は握手の途中の行への segment を処理する。握手の最後の ACK で接続の枠と accept の待ち行列の
@@ -264,7 +263,7 @@ func (s *stack) synInput(id int32, seg *segment, now int64) (promotion, bool) {
 	r.promoting = true
 	s.queued++
 	l.qLen++
-	return promotion{row: *r, rowID: id, slot: slot, gen: s.conns[slot].gen}, true
+	return promotion{row: *r, rowID: id, slot: slot}, true
 }
 
 // rowAck は行から ACK を送る。challenge ACK と同じ速さの制限を受ける。

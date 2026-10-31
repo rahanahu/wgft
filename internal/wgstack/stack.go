@@ -250,7 +250,7 @@ func newStack(local []netip.Prefix, mtu int, lim limits, clock func() int64, ran
 		c.rcv.r.pool = &s.chunks
 		s.free[i] = int32(n - 1 - i) // 小さい番号から使う
 	}
-	s.connIdx = newIndex(n, tableKey)
+	s.connIdx = newIndex(n, tableKey, true)
 	s.syn = newSynTable(lim.synRows, tableKey)
 	s.tw = newTWTable(lim.twRows, tableKey)
 	s.out = output{

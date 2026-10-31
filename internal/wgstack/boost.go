@@ -66,7 +66,7 @@ func (c *tcb) noteDemand(dir boostDir, now int64) bool {
 }
 
 // tryBoost は接続 c(世代 gen)に枠を求める。錠を持たずに呼ぶ。
-func (s *stack) tryBoost(c *tcb, gen uint32, dir boostDir) {
+func (s *stack) tryBoost(c *tcb, gen uint64, dir boostDir) {
 	if !s.pool.acquire(c) {
 		return
 	}
