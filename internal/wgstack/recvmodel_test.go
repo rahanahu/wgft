@@ -165,10 +165,7 @@ func TestRecvBufAgainstModel(t *testing.T) {
 // 知らせていないので、I4 に反しない(設計文書の「接続ごとのバッファ」)。
 func TestSmallSegmentsCanUseUpIntervalsBeforeTheBufferFills(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	acceptOne(t, l)
-	n.drain()
+	_, p := n.accepted(true, true)
 	for i := 0; i < 1000; i++ {
 		s := p.seg(flagACK, []byte{byte(i)})
 		s.seq = p.snd + 1 + uint32(2*i)

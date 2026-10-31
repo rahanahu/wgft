@@ -10,10 +10,7 @@ import (
 // 上限で打ち切り、RST で枠を返すことを確かめる。
 func TestOrphanHeldFINIsBoundedAgainstAZeroWindowPeer(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	p.wnd = 0
 	p.ack(nil)
 	c.Close()
@@ -47,10 +44,7 @@ func TestOrphanHeldFINIsBoundedAgainstAZeroWindowPeer(t *testing.T) {
 // 相手の FIN|ACK が自分の FIN を確認して行に移るとき、ACK は 1 つだけで、TSecr はその FIN の TSval であること。
 func TestRowACKOnceEchoingTheFINTSval(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Close()
 	p.absorb(n.drain()) // DUT の FIN
 	p.tsVal += 77
@@ -118,10 +112,7 @@ func TestReuseSYNWithoutListenerGetsTheRowACK(t *testing.T) {
 // appClose が真なら書いた後に Close、偽なら CloseWrite する。届いた byte、RST を受けたか、最後の枠の数を返す。
 func flapWindow(t *testing.T, gap time.Duration, appClose bool) (delivered int, reset bool, conns int) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	const total = 200000
 	c.Write(make([]byte, total))
 	p.wnd = 0
@@ -186,10 +177,7 @@ func TestFlappingWindowDeliversTheTail(t *testing.T) {
 // 1 時間でも打ち切らないことを確かめる。
 func TestOpenConnNotOrphanLimited(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	p.wnd = 0
 	p.ack(nil)
 	c.Write(make([]byte, 5000)) // 送れないデータを持つ
@@ -211,10 +199,7 @@ func TestOpenConnNotOrphanLimited(t *testing.T) {
 // 打ち切りが数えられることを確かめる。打ち切りは閉じた後に起き、後退を含めた RTO が上限に届く前には起きない。
 func TestOrphanAbortDeliveredAndSlot(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	p.wnd = 0
 	p.ack(nil)
 	c.Write(make([]byte, 5000))

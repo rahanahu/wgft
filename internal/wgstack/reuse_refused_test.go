@@ -9,10 +9,7 @@ import (
 // SYN も前の接続の SND.NXT の 65537 先から ISS を受けることを確かめる。
 func TestReuseISSKeptWhenTheReuseSYNIsRefused(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	go func() {
 		c.Write(make([]byte, 1<<20))
 		c.Close()
@@ -72,10 +69,7 @@ func TestReuseISSKeptWhenTheReuseSYNIsRefused(t *testing.T) {
 // 上限で捨てるときも、枠を TIME_WAIT のまま保つことを確かめる。
 func TestReuseSYNRefusedKeepsTheTimeWaitSlot(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.CloseWrite()
 	p.absorb(n.drain())
 	p.ack(nil)

@@ -17,10 +17,7 @@ func appLimitedRun(t *testing.T, cc CongestionControl) {
 	const rtt = 50 * time.Millisecond
 	n := newTestNet(t, smallLimits())
 	n.d.s.ccPolicy = cc
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	cs := c.c
 	cs.mu.Lock()
 	cs.srtt, cs.rttvar, cs.hasRTT = int64(rtt), int64(5*time.Millisecond), true
@@ -49,10 +46,7 @@ func TestCwndGrowsWhenTheWindowIsFull(t *testing.T) {
 		const rtt = 50 * time.Millisecond
 		n := newTestNet(t, smallLimits())
 		n.d.s.ccPolicy = cc
-		l := listen(t, n, 80)
-		p := n.handshake(40000, 80, true, true, true)
-		c := acceptOne(t, l)
-		n.drain()
+		c, p := n.accepted(true, true)
 		cs := c.c
 		cs.mu.Lock()
 		cs.srtt, cs.rttvar, cs.hasRTT = int64(rtt), int64(5*time.Millisecond), true

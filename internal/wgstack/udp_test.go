@@ -382,10 +382,7 @@ func TestDialPing(t *testing.T) {
 
 func TestICMPErrorSourceCheck(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Write(make([]byte, 3000))
 	outs := n.drain()
 	quote := append(append([]byte(nil), outs[0].ip.header...), outs[0].ip.payload[:8]...)

@@ -9,10 +9,7 @@ import (
 // (Linux は tw_snd_nxt + 65537 を使う)、TSval が前の接続より大きいことを確かめる。
 func TestTimeWaitReuseISSAndTimestampAdvance(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	const size = 1 << 20
 	go func() {
 		c.Write(make([]byte, size))
@@ -54,10 +51,7 @@ func TestTimeWaitReuseISSAndTimestampAdvance(t *testing.T) {
 // いない)を RFC 6191 の SYN が使い直すときも、新しい ISS が前の接続の SND.NXT より先にあることを確かめる。
 func TestTimeWaitSlotReuseISS(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Write(make([]byte, 50000))
 	c.CloseWrite()
 	for i := 0; i < 1000 && !n.d.s.conns[c.c.id].finAcked(); i++ {
@@ -89,10 +83,7 @@ func TestTimeWaitSlotReuseISS(t *testing.T) {
 // TestFutureTSEcrIsIgnored は、自分の今の TSval より先の TSecr を RTT の測定に使わないことを確かめる。
 func TestFutureTSEcrIsIgnored(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Write([]byte("x"))
 	p.absorb(n.drain())
 	cs := &n.d.s.conns[c.c.id]
@@ -109,10 +100,7 @@ func TestFutureTSEcrIsIgnored(t *testing.T) {
 // 確かめる(Karn の規則)。
 func TestFastRetransmitMarksEveryRecord(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	for range 20 {
 		c.Write([]byte{1, 2, 3}) // 小さな segment を 20 個
 		n.drain()

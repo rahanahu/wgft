@@ -9,10 +9,7 @@ import (
 // 1 つの損失で接続を終えないことを確かめる。persist に入るときに再送の打ち切りの起点を消す。
 func TestPersistDoesNotKeepAStaleRetransmitStart(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Write(make([]byte, 3000))
 	outs := n.drain() // 相手は受けない(失う)
 	if len(outs) == 0 {

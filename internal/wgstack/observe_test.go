@@ -16,10 +16,7 @@ func traceInto(n *testNet) *[]TraceEvent {
 func TestStatsCountFastRecoveryAndPartialAck(t *testing.T) {
 	n := newTestNet(t, smallLimits())
 	evs := traceInto(n)
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	mss := testMTU - 40 - 12
 	c.Write(make([]byte, 10*mss))
 	outs := n.drain()
@@ -50,10 +47,7 @@ func TestStatsCountFastRecoveryAndPartialAck(t *testing.T) {
 func TestStatsCountRTOsAndBackoff(t *testing.T) {
 	n := newTestNet(t, smallLimits())
 	evs := traceInto(n)
-	l := listen(t, n, 80)
-	n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, _ := n.accepted(true, false)
 	c.Write([]byte("data"))
 	n.drain()
 	for countKind(*evs, TraceRTO) < 2 {
@@ -87,10 +81,7 @@ func countKind(evs []TraceEvent, k TraceKind) int {
 
 func TestStatsCountRTOShortOfDupThresh(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	mss := testMTU - 40 - 12
 	c.Write(make([]byte, 3*mss))
 	outs := n.drain()
@@ -130,10 +121,7 @@ func TestStatsCountDelayedAndImmediateAcks(t *testing.T) {
 
 func TestStatsCountPMTUResend(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, _ := n.accepted(true, false)
 	c.Write(make([]byte, 3000))
 	outs := n.drain()
 	cs := c.c

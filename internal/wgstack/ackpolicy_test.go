@@ -9,10 +9,7 @@ import (
 
 func TestSmallSegmentACKedWhenReadDrainsTheBuffer(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	skipQuickack(n)
 	for i := range 3 {
 		p.ack(make([]byte, 200))
@@ -33,10 +30,7 @@ func TestSmallSegmentACKedWhenReadDrainsTheBuffer(t *testing.T) {
 // 推定した MSS の大きさの segment にも ACK をすぐ返し、2 つ目の segment と遅延 ACK の期限を待たないことを確かめる。
 func TestFullSegmentACKedWhenReadDrainsTheBuffer(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	skipQuickack(n)
 	full := testMTU - 40 - 12
 	for i := range 3 {
@@ -59,10 +53,7 @@ func TestFullSegmentACKedWhenReadDrainsTheBuffer(t *testing.T) {
 // 足さず、応えるデータに ACK を載せることを確かめる。
 func TestNoDrainACKInInteractiveFlow(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	p.ack(make([]byte, 200))
 	readN(t, c, 200)
 	n.drain()
@@ -92,10 +83,7 @@ func skipQuickack(n *testNet) {
 // 返し、その数が quickackMax で止まることを確かめる(Linux の tcp_incr_quickack)。
 func TestQuickackAtStartAndAfterAGap(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	full := testMTU - 40 - 12
 	immediate := 0
 	// 読み手が遅れる間を確かめるので、読み終えた時の ACK が起きないように最後にまとめて読む。40 segment は floor の
@@ -123,10 +111,7 @@ func TestQuickackAtStartAndAfterAGap(t *testing.T) {
 // ACK を返すことを確かめる(RFC 2883)。順序外の区間の内側の重複では、区間の block が後に続く。
 func TestDuplicateSegmentGetsADSACK(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	acceptOne(t, l)
-	n.drain()
+	_, p := n.accepted(true, true)
 	base := p.snd
 	p.ack(make([]byte, 500))
 	n.drain()
@@ -161,10 +146,7 @@ func TestDuplicateSegmentGetsADSACK(t *testing.T) {
 // あっても ACK を足さないことを確かめる。読み手が遅れる間は 2 segment ごとの規則に戻る。
 func TestNoDrainACKWhileDataIsUnread(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	skipQuickack(n)
 	// 1 往復を済ませ、floor の窓を広告させる。以後の読み取りは窓の更新の ACK を起こさない
 	p.ack(make([]byte, 200))
@@ -188,10 +170,7 @@ func TestNoDrainACKWhileDataIsUnread(t *testing.T) {
 // 同じ番号の ACK を繰り返さないことを確かめる。遅延 ACK を待つ segment が無いためである。
 func TestNoDrainACKAfterAnImmediateACK(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	for i := range 3 {
 		p.ack(make([]byte, 200))
 		if outs := n.drain(); len(outs) != 1 || outs[0].seg.ack != p.snd {

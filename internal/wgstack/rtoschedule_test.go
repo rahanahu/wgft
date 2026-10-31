@@ -41,10 +41,7 @@ func TestRTOFloorAppliesToTheVarianceTerm(t *testing.T) {
 func TestThinStreamProbesAtTheRTODeadline(t *testing.T) {
 	const srtt = 50 * time.Millisecond
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	cs := c.c
 	cs.mu.Lock()
 	cs.srtt, cs.rttvar, cs.minRTT, cs.hasRTT, cs.hasMinRTT = int64(srtt), int64(time.Millisecond), int64(srtt), true, true
@@ -116,10 +113,7 @@ func TestThinStreamProbesAtTheRTODeadline(t *testing.T) {
 func TestProbeAtTheRTODeadlineRearmsTheRTO(t *testing.T) {
 	const srtt = 50 * time.Millisecond
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, _ := n.accepted(true, true)
 	cs := c.c
 	cs.mu.Lock()
 	cs.srtt, cs.rttvar, cs.minRTT, cs.hasRTT, cs.hasMinRTT = int64(srtt), int64(time.Millisecond), int64(srtt), true, true

@@ -167,10 +167,7 @@ func TestOutOfOrderSACK(t *testing.T) {
 
 func TestRetransmitBackoff(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Write([]byte("data"))
 	first := n.drain()
 	if len(first) != 1 {
@@ -214,10 +211,7 @@ func TestRetransmitBackoff(t *testing.T) {
 
 func TestFastRetransmitNewReno(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	mss := testMTU - 40 - 12
 	c.Write(make([]byte, 10*mss))
 	outs := n.drain()
@@ -257,10 +251,7 @@ func TestFastRetransmitNewReno(t *testing.T) {
 
 func TestZeroWindowProbe(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	p.wnd = 0
 	p.ack(nil)
 	n.drain()
@@ -298,10 +289,7 @@ func TestZeroWindowProbe(t *testing.T) {
 
 func TestRFC5961(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	// 窓の内側で番号の合わない RST には challenge ACK
 	s := p.seg(flagRST, nil)
 	s.seq += 100
@@ -337,10 +325,7 @@ func TestRFC5961(t *testing.T) {
 
 func TestPAWS(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	s := p.seg(flagACK, []byte("old"))
 	s.tsVal = 1 // 前の timestamp より古い
 	n.inject(s)
@@ -361,10 +346,7 @@ func isTimeout(err error) bool {
 
 func TestHalfCloseAndTimeWaitRow(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Write([]byte("bye"))
 	if err := c.CloseWrite(); err != nil {
 		t.Fatal(err)
@@ -438,10 +420,7 @@ func TestHalfCloseAndTimeWaitRow(t *testing.T) {
 
 func TestStaleAbortSendsRSTForRow(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Close()
 	p.absorb(n.drain())
 	p.ack(nil) // FIN を確認する -> FIN_WAIT_2 の行
@@ -460,10 +439,7 @@ func TestStaleAbortSendsRSTForRow(t *testing.T) {
 
 func TestFinWait2RowDataRST(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Close()
 	p.absorb(n.drain())
 	p.ack(nil)
@@ -496,10 +472,7 @@ func TestCloseWithUnreadDataSendsRST(t *testing.T) {
 
 func TestAbort(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Abort()
 	outs := n.drain()
 	if len(outs) != 1 || outs[0].seg.flags != flagRST|flagACK || outs[0].seg.seq != p.rcv {
@@ -700,10 +673,7 @@ func TestDeviceContract(t *testing.T) {
 
 func TestCloseWithPendingDataRetiresAfterDelivery(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	// 100000 byte は送信の floor に収まるので Write は待たず、Close も待たない。goroutine で書くと、GOMAXPROCS が
 	// 1 の時に下の繰り返しが書く前に終わる
 	if k, err := c.Write(make([]byte, 100000)); k != 100000 || err != nil {
@@ -728,10 +698,7 @@ func TestCloseWithPendingDataRetiresAfterDelivery(t *testing.T) {
 
 func TestFINHeldWhileWindowIsZero(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	p.wnd = 0
 	p.ack(nil)
 	c.CloseWrite()
@@ -763,10 +730,7 @@ func TestFINHeldWhileWindowIsZero(t *testing.T) {
 
 func TestFINNotPiggybackedBeyondTheWindow(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	p.wnd = 1 // scale 7 で 128 byte
 	p.ack(nil)
 	c.Write(make([]byte, 128))
@@ -787,10 +751,7 @@ func TestFINNotPiggybackedBeyondTheWindow(t *testing.T) {
 // 速さを抑えた ACK を返すだけにすることを確かめる。窓の内側の新しい data では今までどおり RST で外す。
 func TestFinWait2RowIgnoresOutOfWindowAndPAWS(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Close()
 	p.absorb(n.drain())
 	p.ack(nil)
@@ -821,10 +782,7 @@ func TestFinWait2RowIgnoresOutOfWindowAndPAWS(t *testing.T) {
 // segment を PAWS で捨てずに受け入れることを確かめる(RFC 7323 5.5)。
 func TestPAWSForgetsTSRecentAfter24Days(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	n.clk.Advance(25 * 24 * time.Hour)
 	s := p.seg(flagACK, []byte("new"))
 	s.tsVal = 1 // 相手の時計が一周した後の値
