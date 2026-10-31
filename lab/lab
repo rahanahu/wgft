@@ -3,7 +3,13 @@
 set -euo pipefail
 
 VM=${WGFT_LAB_VM:-wgft-lab}
-IMAGE=${WGFT_LAB_IMAGE:-images:debian/12}
+IMAGE=${WGFT_LAB_IMAGE:-images:debian/13}
+# ラボの参照のカーネル。Debian 13 (trixie) の VM には trixie-backports のこの版を入れて起動する。
+# 版は package の版まで固定し、docs/design/userspace/wgstack-verification.md の「参照の Linux の設定」に
+# 記録する。上げるときはここと記録を同じ変更で直し、基の VM を作り直す。trixie 以外の image
+# (WGFT_LAB_IMAGE=images:debian/12 など) には入れず、image のカーネルのまま動かす
+LAB_KERNEL_ABI=7.2.11+deb13-amd64
+LAB_KERNEL_VERSION=7.2.11-1~bpo13+1
 CPU=${WGFT_LAB_CPU:-2}
 MEM=${WGFT_LAB_MEM:-2GiB}
 # WGFT_LAB_CPUS はホストの CPU の集合(例 0-7 や 0-3,8)。値があれば、lab が作る VM の vCPU をこの中の
@@ -125,7 +131,7 @@ ensure_running() {
 
 provision() {
   info "VM に開発用パッケージを入れる"
-  inc exec "$VM" -- bash -s <<'EOF'
+  inc exec "$VM" --env "LAB_KERNEL_ABI=$LAB_KERNEL_ABI" --env "LAB_KERNEL_VERSION=$LAB_KERNEL_VERSION" -- bash -s <<'EOF'
 set -euo pipefail
 # ホストの firewalld / Docker の影響で IPv4 の DNS が引けない場合は、IPv6 の DNS に切り替える(lab/README.md)
 # /etc/resolv.conf は /run(tmpfs)へのシンボリックリンクなので、直接書くと再起動で消える。resolved の設定に書く
@@ -157,6 +163,18 @@ case "$ID" in
     apt-get "${apt_opts[@]}" update
     apt-get "${apt_opts[@]}" install -y --no-install-recommends \
       nftables iptables wireguard-tools conntrack iproute2 procps tcpdump iperf3 socat curl podman
+    if [[ $ID == debian && ${VERSION_CODENAME:-} == trixie ]]; then
+      # 参照のカーネル (lab/lab の LAB_KERNEL_ABI) を trixie-backports から版を固定して入れる。
+      # 依存の linux-base も backports の版が要るので -t で backports を優先する。GRUB は新しい版を
+      # 先に起動するので、6.12 を残しても次の起動はこの版になる。起動した版は cmd_up が確かめる
+      echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/wgft-lab-backports.list
+      apt-get "${apt_opts[@]}" update
+      apt-get "${apt_opts[@]}" install -y --no-install-recommends -t trixie-backports \
+        "linux-image-$LAB_KERNEL_ABI=$LAB_KERNEL_VERSION"
+      # Debian 13 は /tmp を tmpfs にする。Debian 12 と同じくディスクに置き、確認のログと一時ファイルが
+      # 2 GiB の VM のメモリを使わないようにする。次の起動から効く
+      systemctl mask tmp.mount
+    fi
     ;;
   fedora)
     # conntrack のコマンドは conntrack-tools、iproute2 相当は iproute、procps 相当は procps-ng という
@@ -175,6 +193,23 @@ mkdir -p /var/lib/wgft-lab && touch /var/lib/wgft-lab/provisioned
 EOF
 }
 
+# kernel_up:Debian 13 の VM が参照のカーネル (LAB_KERNEL_ABI) で動いていなければ、再起動してそれで起こす。
+# 再起動の後も違えば止まる。スナップショットはこの後に取るので、clean には参照のカーネルで動く状態が残る
+kernel_up() {
+  local codename running
+  codename=$(inc exec "$VM" -- sh -c '. /etc/os-release; echo "$ID/${VERSION_CODENAME:-}"')
+  [[ $codename == debian/trixie ]] || return 0
+  running=$(inc exec "$VM" -- uname -r)
+  [[ $running == "$LAB_KERNEL_ABI" ]] && return 0
+  info "restarting '$VM' to boot the reference kernel $LAB_KERNEL_ABI; it runs $running"
+  inc restart "$VM"
+  wait_agent
+  wait_net
+  running=$(inc exec "$VM" -- uname -r)
+  [[ $running == "$LAB_KERNEL_ABI" ]] \
+    || die "'$VM' runs kernel $running after the restart, not the reference $LAB_KERNEL_ABI; check its GRUB entries"
+}
+
 cmd_up() {
   if ! vm_exists; then
     local lcpu=$CPU
@@ -191,6 +226,7 @@ cmd_up() {
   fi
   ensure_running
   inc exec "$VM" -- test -f /var/lib/wgft-lab/provisioned || provision
+  kernel_up
   if ! has_snapshot; then
     info "スナップショット '$SNAPSHOT' を作る"
     # 直前の書き込み(provisioned の印など)がディスクに届く前に取ると、巻き戻したときに消える
@@ -396,6 +432,8 @@ suite_shard_body() {
   shift 5
   suite_make_vm "$name" || return 1
   vm_install >/dev/null || return 1
+  # 一式の判定がどのカーネルの上のものかを、結果の要約に出す
+  in_vm uname -r > "$dir/kernel" || return 1
   local extra=()
   if [[ -n $dur ]]; then
     inc file push "$dur" "$name/tmp/wgft-lab-durations.json" || return 1
@@ -525,7 +563,7 @@ cmd_suite() {
       local d=$out/$c/shard-$k ready ran src
       if [[ -f $d/times ]]; then
         read -r ready ran src < "$d/times"
-        echo "shard $k/$vms: VM start and install ${ready} s, run ${ran} s, exit ${src}"
+        echo "shard $k/$vms: kernel $(cat "$d/kernel" 2>/dev/null), VM start and install ${ready} s, run ${ran} s, exit ${src}"
       else
         echo "shard $k/$vms: did not finish; see $d/shard.log"
       fi
