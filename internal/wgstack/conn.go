@@ -124,15 +124,6 @@ func (h *Conn) lock() bool {
 	return true
 }
 
-func (h *Conn) deviceClosed() bool {
-	select {
-	case <-h.s.done:
-		return true
-	default:
-		return false
-	}
-}
-
 // Read は net.Conn の実装。期限を過ぎた読み取りは Timeout() が真の net.Error を返し、相手の FIN の後は
 // 受けたデータを読み終えてから io.EOF を返す。
 func (h *Conn) Read(b []byte) (int, error) {
@@ -142,7 +133,7 @@ func (h *Conn) Read(b []byte) (int, error) {
 			return 0, h.opErr("read", net.ErrClosed)
 		}
 		c := h.c
-		if c.appClosed || h.deviceClosed() {
+		if c.appClosed || h.s.isClosed() {
 			c.mu.Unlock()
 			return 0, h.opErr("read", net.ErrClosed)
 		}
@@ -196,7 +187,7 @@ func (h *Conn) Write(b []byte) (int, error) {
 			return total, h.opErr("write", net.ErrClosed)
 		}
 		c := h.c
-		if c.appClosed || h.deviceClosed() {
+		if c.appClosed || h.s.isClosed() {
 			c.mu.Unlock()
 			return total, h.opErr("write", net.ErrClosed)
 		}

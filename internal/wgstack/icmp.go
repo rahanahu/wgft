@@ -290,15 +290,6 @@ func (d *Device) DialPing(laddr, raddr netip.Addr) (net.Conn, error) {
 	return &PingConn{s: s, i: free, gen: e.gen, l: net.IPAddr{IP: laddr.AsSlice()}, r: net.IPAddr{IP: raddr.AsSlice()}}, nil
 }
 
-func (s *stack) isClosed() bool {
-	select {
-	case <-s.done:
-		return true
-	default:
-		return false
-	}
-}
-
 // ep は endpoint を返す。閉じていれば nil。ping.mu を持って呼ぶ。
 func (c *PingConn) ep() *pingEP {
 	e := &c.s.ping.eps[c.i]

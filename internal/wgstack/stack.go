@@ -600,6 +600,16 @@ func (s *stack) poll(b []byte, now int64) int {
 	}
 }
 
+// isClosed は Device の Close が核を閉じたかを返す。
+func (s *stack) isClosed() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // close は核を閉じる。待っている操作を解き、接続の枠、行、boost の枠をすべて返す。
 func (s *stack) close() {
 	s.tmu.Lock()
@@ -634,9 +644,7 @@ func (s *stack) close() {
 			c.signalWrite()
 			c.release()
 		}
-		c.floorRecs = nil
-		c.floorIv = nil
-		c.rcv.iv = nil
+		c.forgetSlotArrays()
 		c.recs.recs = nil
 		c.mu.Unlock()
 	}

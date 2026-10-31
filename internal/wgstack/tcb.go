@@ -401,8 +401,7 @@ func (c *tcb) tryRetire(now int64) bool {
 	c.dropResources()
 	s.tmu.Lock()
 	if !s.closed && c.inIndex {
-		s.connIdx.remove(c.tup)
-		c.inIndex = false
+		c.unindexLocked()
 		s.addTWRow(c, state, deadline, now)
 	}
 	c.freeSlotLocked()
@@ -420,10 +419,7 @@ func (c *tcb) toClosed(err error) {
 	if err != nil && c.err == nil {
 		c.err = err
 	}
-	for k := range c.tdl {
-		c.disarm(k)
-	}
-	c.s.out.unqueueConn(c.id)
+	c.stopTimersAndOutput()
 	c.cancelSends()
 	c.ackNow = false
 	// 送信の輪はもう使わない。受信の未読のデータは読ませるために残し、順序外のデータは捨てる
@@ -434,10 +430,7 @@ func (c *tcb) toClosed(err error) {
 	// boost の枠は、boost の大きさの未読のデータを持ちうるので、枠を返すまで持つ
 	s := c.s
 	s.tmu.Lock()
-	if c.inIndex {
-		s.connIdx.remove(c.tup)
-		c.inIndex = false
-	}
+	c.unindexLocked()
 	if c.queued {
 		c.lst.dequeue(c)
 	}
@@ -464,12 +457,47 @@ func (c *tcb) sendRST() {
 	c.s.sendCtl(tcpHeader{tup: c.tup, seq: c.sndNxt, ack: c.rcvNxt, flags: flagRST | flagACK})
 }
 
-// dropResources は枠のバッファ、タイマー、出力の節、boost の枠を返す。
-func (c *tcb) dropResources() {
+// 枠の資源の返し方(I3、I6)。どの関数も mu を持って呼ぶ。
+//
+//   - toClosed:プロトコルを終えた接続(CLOSED)。タイマー、出力の節、送る予定の印、送信の輪、順序外の区間と
+//     その中身、4 つ組の hash の表の項、accept の待ち行列の節を返す。未読のデータを持つ受信の輪、boost の枠、
+//     記録の輪と区間の表は、アプリケーションが閉じて枠を返すまで持つ。アプリケーションが閉じていれば、続けて
+//     release で枠を返す
+//   - dropResources:枠を返す前に、タイマー、出力の節、送信と受信の輪、順序外の区間、boost の枠を返し、
+//     記録の輪と区間の表を枠と共に持つ floor のものに戻す
+//   - release:dropResources の後に、表の錠の中で 4 つ組の hash の表の項を外して枠を返す
+//   - tryRetire:dropResources の後に、表の錠の中で TIME_WAIT の表の行に移して枠を返す。閉じた Device では
+//     行を作らない
+//   - freeSlotLocked:表の錠の中で、accept の待ち行列の節を外し、世代を進め、通知の channel を閉じ、欄を 0 に
+//     戻して空きの list に返す。閉じた Device では floor の配列も手放す
+//   - stack.close:閉じた Device のすべての枠を release し、floor の配列と記録の輪を手放す
+
+// stopTimersAndOutput はタイマーをすべて止め、接続の組の出力の list から外す。
+func (c *tcb) stopTimersAndOutput() {
 	for k := range c.tdl {
 		c.disarm(k)
 	}
 	c.s.out.unqueueConn(c.id)
+}
+
+// unindexLocked は接続が 4 つ組の hash の表にあれば外す。tmu を持って呼ぶ。
+func (c *tcb) unindexLocked() {
+	if c.inIndex {
+		c.s.connIdx.remove(c.tup)
+		c.inIndex = false
+	}
+}
+
+// forgetSlotArrays は枠と共に持つ floor の記録の輪と区間の表を手放す。閉じた Device で使う。
+func (c *tcb) forgetSlotArrays() {
+	c.floorRecs = nil
+	c.floorIv = nil
+	c.rcv.iv = nil // 受信のバッファは tcbState の外にあり、区間の表を指したまま残るため
+}
+
+// dropResources は枠のバッファ、タイマー、出力の節、boost の枠を返す。
+func (c *tcb) dropResources() {
+	c.stopTimersAndOutput()
 	c.snd.release()
 	c.rcv.r.release()
 	c.rcv.clearIntervals()
@@ -486,10 +514,7 @@ func (c *tcb) release() {
 	c.dropResources()
 	s := c.s
 	s.tmu.Lock()
-	if c.inIndex {
-		s.connIdx.remove(c.tup)
-		c.inIndex = false
-	}
+	c.unindexLocked()
 	c.freeSlotLocked()
 	s.tmu.Unlock()
 }
@@ -503,9 +528,7 @@ func (c *tcb) freeSlotLocked() {
 	c.gen++
 	c.state = stFree
 	if s.closed {
-		c.floorRecs = nil // 閉じた Device では、Close と競った確立が確保した輪も残さない
-		c.floorIv = nil
-		c.rcv.iv = nil // 受信のバッファは tcbState の外にあり、区間の表を指したまま残るため
+		c.forgetSlotArrays() // 閉じた Device では、Close と競った確立が確保した輪も残さない
 	}
 	if c.rch != nil {
 		close(c.rch)
