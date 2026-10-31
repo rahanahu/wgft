@@ -24,20 +24,25 @@ info() { echo "lab: $*" >&2; }
 # 1 つの CPU の集合は数と区別できないので、Incus の決まりどおり N-N と書く
 
 # cpus_expand:WGFT_LAB_CPUS を CPU の番号の並び CPU_LIST にする ("0-3,8" なら 0 1 2 3 8)。
-# 書式の誤り、逆順の範囲、ホストに無い CPU で止まる。die が効くよう、コマンド置換の中で呼ばない
+# 書式の誤り、逆順の範囲、オンラインでない CPU で止まる。die が効くよう、コマンド置換の中で呼ばない
 CPU_LIST=()
 cpus_expand() {
-  local part a b i max seen=" "
+  local part a b i online on=" " seen=" "
   CPU_LIST=()
   [[ $CPUS =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] \
     || die "WGFT_LAB_CPUS='$CPUS' is not a CPU set; write it like 0-7 or 0-3,8"
-  max=$(getconf _NPROCESSORS_CONF)
+  # オンラインの CPU の集合 (例 0-23)。番号が飛ぶことがあるので、数ではなく集合で確かめる
+  online=$(cat /sys/devices/system/cpu/online)
+  IFS=, read -ra parts <<<"$online"
+  for part in "${parts[@]}"; do
+    for ((i = 10#${part%-*}; i <= 10#${part#*-}; i++)); do on+="$i "; done
+  done
   IFS=, read -ra parts <<<"$CPUS"
   for part in "${parts[@]}"; do
     a=$((10#${part%-*})) b=$((10#${part#*-}))
     ((a <= b)) || die "WGFT_LAB_CPUS='$CPUS': the range $part goes backwards"
-    ((b < max)) || die "WGFT_LAB_CPUS='$CPUS': CPU $b does not exist; this host has CPUs 0-$((max - 1))"
     for ((i = a; i <= b; i++)); do
+      [[ $on == *" $i "* ]] || die "WGFT_LAB_CPUS='$CPUS': CPU $i is not online; the online CPUs are $online"
       [[ $seen == *" $i "* ]] && continue
       seen+="$i "
       CPU_LIST+=("$i")
@@ -464,7 +469,11 @@ cmd_suite() {
   # 1 台の vCPU の数は複製のもとのスナップショットの limits.cpu (無ければ WGFT_LAB_CPU) のまま変えない
   local total=$(( vms * ${#cfgs[@]} )) tcpu per pins=()
   if inc snapshot list "$SUITE_TEMPLATE" -f csv -c n 2>/dev/null | grep -qx "$SNAPSHOT"; then
-    tcpu=$(inc config get --expanded "$SUITE_TEMPLATE/$SNAPSHOT" limits.cpu 2>/dev/null) || tcpu=""
+    # 固定するときは読めないまま進まない。空を Incus の既定の 1 と読み、2 vCPU のテンプレートを 1 vCPU で固定してしまう
+    if ! tcpu=$(inc config get --expanded "$SUITE_TEMPLATE/$SNAPSHOT" limits.cpu 2>/dev/null); then
+      [[ -z $CPUS ]] || die "cannot read limits.cpu of $SUITE_TEMPLATE/$SNAPSHOT, which WGFT_LAB_CPUS needs to keep each VM's vCPU count"
+      tcpu=""
+    fi
   else
     tcpu=$CPU
   fi
