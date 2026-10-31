@@ -484,7 +484,7 @@ M_wgstack = M_fix
 初期の値は動作を確かめるための値であり、最適値として探した値ではありません。
 どの値も設定項目にしません。
 
-公開する 4 つの target(linux/amd64、linux/arm64、windows/amd64、darwin/arm64)の build で確かめた大きさは、c_conn が 5,352 byte、記録 1 件が 32 byte、区間 1 つが 16 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
+公開する 4 つの target(linux/amd64、linux/arm64、windows/amd64、darwin/arm64)の build で確かめた大きさは、c_conn が 5,360 byte、記録 1 件が 32 byte、区間 1 つが 16 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
 どの target でも同じ大きさであることは、大きさを定数で比べる一時の試験を 4 つの target の build でコンパイルして確かめました。
 記録 1 件は SACK の scoreboard の欄を含みます([ACK 1 つの手間の上界](wgstack-performance.md#ack-1-つの手間の上界))。
 
@@ -506,6 +506,7 @@ M_fix の表、UDP の管理の配列、echo の応答の枠も同じく切り�
 区間の表は floor の項に約 10.0 MiB、boost の項に約 1.0 MiB を加えます。
 区間 1 つは区間の treap の節(子の位置と優先度)を含みます。
 M_fix は核の構造(事象の数と観測の関数を含みます)、接続の枠、3 つの hash の表、行の表、空きの list、タイマーの節、出力の list、制御の輪、chunk の置き場に残す 1 MiB を数えます。
+空きの list は枠や行を使うと短くなりますが、配列は作成の時の大きさのまま残るので、UDP の管理の配列の空きの list とともに作成の時の大きさで数えます。
 接続の枠 1 つが表の外に持つ構造も M_fix に数えます。
 linux/amd64 の Go 1.27 で測ると、アプリケーションの handle と 2 つのアドレスが 176 byte、読み書きを起こす 2 つの channel と読み書きの期限の 2 つの channel が 448 byte、期限の 2 つのタイマーが 256 byte で、合わせて 880 byte です。
 枠 1 つあたり 1 KiB として数えます。

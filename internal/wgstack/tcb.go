@@ -114,10 +114,9 @@ type tcbState struct {
 	undoRetrans   int32  // D-SACK で知らされていない再送の数
 	retransTS     uint32 // 最初の再送の時刻(自分の TSval)
 	retransTSOK   bool
-	frto          uint8  // F-RTO の段階。0 は使っていない
-	frtoHigh      uint32 // F-RTO の 2 の段の SND.MAX
-	frtoNew       uint8  // F-RTO の 2 の段で輻輳の窓によらず送れる新しい segment の数
-	origDelivered bool   // 処理中の ACK が再送していない記録を届けた
+	frto          uint8 // F-RTO の段階。0 は使っていない
+	frtoNew       uint8 // F-RTO の 2 の段で輻輳の窓によらず送れる新しい segment の数
+	origDelivered bool  // 処理中の ACK が再送していない記録を届けた
 
 	tsRecent, tsOffset uint32
 	tsRecentAt         int64 // TS.Recent を最後に更新した時刻(RFC 7323 5.5 の 24 日の規則)
@@ -303,7 +302,7 @@ func (c *tcb) establish(r *synRow, seg *segment, now int64) {
 		c.floorIv = make([]interval, floorIntervals)
 	}
 	// 区間の木の優先度の種は接続ごとの秘密で、相手が木の形を選べないようにする
-	c.rcv = recvBuf{r: ring{pool: &s.chunks, cap: recvFloor}, iv: c.floorIv, seed: uint64(s.randomN(1 << 62))}
+	c.rcv = recvBuf{r: ring{pool: &s.chunks, cap: recvFloor}, iv: c.floorIv, seed: s.randomU64N(1 << 62)}
 	if c.floorRecs == nil {
 		c.floorRecs = make([]record, floorRecords)
 	}
@@ -585,6 +584,10 @@ func (c *tcb) processAck(seg *segment, now int64) {
 			c.tlpAt = 0
 		}
 		c.rearmRetrans()
+	} else if c.rtoEpisode && seqGE(c.sndUna, c.recover) {
+		// SACK を交渉しない接続の RTO の後の回復の終わり。SND.UNA が recover から 2^31 先へ進んだ後に、番号の
+		// 比べで回復の中に戻ったとみなさないように、印を消す
+		c.rtoEpisode = false
 	}
 	if advanced {
 		c.noteDrainedWithData(now)
@@ -1137,7 +1140,7 @@ func (c *tcb) onRTO(now int64) {
 	// 先頭の記録だけを損失にして、次の ACK で RTO が不要だったかを決める(RFC 5682)
 	c.rtoEpisode = true
 	if frto {
-		c.frto, c.frtoHigh = 1, c.sndMax
+		c.frto = 1
 		c.markHeadLost(rtxRTO)
 	} else {
 		c.markAllLost(rtxRTO)

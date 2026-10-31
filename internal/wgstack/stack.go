@@ -257,11 +257,14 @@ func (s *stack) isLocal(a uint32) bool {
 	return false
 }
 
-func (s *stack) randomN(n int) int {
+func (s *stack) randomN(n int) int { return int(s.randomU64N(uint64(n))) }
+
+// randomU64N は [0, n) の乱数を uint64 で返す。int の幅を超える範囲(区間の木の種)に使う。
+func (s *stack) randomU64N(n uint64) uint64 {
 	s.rngMu.Lock()
 	defer s.rngMu.Unlock()
-	hi, _ := bits.Mul64(s.rng.Uint64(), uint64(n))
-	return int(hi)
+	hi, _ := bits.Mul64(s.rng.Uint64(), n)
+	return hi
 }
 
 func (s *stack) nextID() uint16 { return uint16(s.ipID.Add(1)) }

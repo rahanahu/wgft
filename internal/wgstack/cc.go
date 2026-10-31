@@ -158,9 +158,9 @@ func (c *tcb) lossThresh() uint32 { return c.ccFor().lossThresh(c, c.cwnd, c.los
 
 // enterFastRecovery は高速の回復に入り、輻輳の事象として ssthresh を下げ、回復の終わりを SND.MAX にする。
 // 窓を下げる前に取り消しの印を付ける。TLP の probe が直した損失と同じ窓のデータの損失なら、その縮小が輻輳の
-// 事象なので ssthresh を下げ直さず、回復は縮小の時の SND.MAX で終える。その先のデータの損失は、次の回復で
-// 窓を下げる(wgstack-performance.md の「RACK-TLP」)。TLP は SACK を交渉した接続だけで使うので、SACK の無い
-// 接続では tlpCut は立たない。
+// 事象なので ssthresh を下げ直さず、回復は縮小の時の SND.MAX(tlpCutSeq)で終える。その先のデータの損失は、
+// 次の回復で窓を下げる(wgstack-performance.md の「RACK-TLP」の TLP の項)。TLP は SACK を交渉した接続だけで
+// 使うので、SACK の無い接続では tlpCut は立たない。
 func (c *tcb) enterFastRecovery() {
 	c.initUndo()
 	if c.tlpCut && seqLT(c.sndUna, c.tlpCutSeq) {
