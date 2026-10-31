@@ -29,7 +29,7 @@ func TestStaleHandleDoesNotReadTheNextConnection(t *testing.T) {
 	pb.ack(secret)
 	n.drain()
 	buf := make([]byte, 64)
-	if k, err := a.Read(buf); k != 0 || !errors.Is(err, net.ErrClosed) {
+	if k, err := readWithin(t, a, buf); k != 0 || !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("Read on the aborted connection's handle = %d %q, %v; want 0 and net.ErrClosed", k, buf[:k], err)
 	}
 	if _, err := a.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
@@ -38,9 +38,31 @@ func TestStaleHandleDoesNotReadTheNextConnection(t *testing.T) {
 	if !a.Delivered() {
 		t.Fatal("the aborted connection's handle is not Delivered")
 	}
-	k, err := b.Read(buf)
+	k, err := readWithin(t, b, buf)
 	if err != nil || string(buf[:k]) != string(secret) {
 		t.Fatalf("the second connection read %q, %v", buf[:k], err)
+	}
+}
+
+// readWithin は c.Read を呼び、5 秒以内に戻らなければ試験を失敗にする。退行で読み取りが待ち続けても、試験が
+// 止まらずに失敗するためである。待ち続けた読み取りは、試験の後の Device の Close が解く。
+func readWithin(t *testing.T, c *Conn, buf []byte) (int, error) {
+	t.Helper()
+	type res struct {
+		n   int
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		k, err := c.Read(buf)
+		ch <- res{k, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.n, r.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read did not return within 5 s")
+		return 0, nil
 	}
 }
 
@@ -90,6 +112,16 @@ func TestRetireRacingDeviceCloseAddsNoRow(t *testing.T) {
 	}
 	outs := n.drain()
 	p.absorb(outs)
+	// 相手の FIN の確認。接続の錠を取る前に作る(錠を持ったまま試験を止めると、Device の Close が待ち続ける)
+	pkt := buildPeer(p.seg(flagACK, nil))
+	ip, d := parseIPv4(pkt)
+	if d != ipv4OK {
+		t.Fatal(d)
+	}
+	seg, td := parseTCP(&ip)
+	if td != tcpOK {
+		t.Fatal(td)
+	}
 	s := n.d.s
 	cs := &s.conns[c.c.id]
 	cs.mu.Lock()
@@ -115,16 +147,7 @@ func TestRetireRacingDeviceCloseAddsNoRow(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// 相手の FIN の確認。FIN_WAIT_2 になり、受信のバッファは空なので行に移る条件を満たす
-	pkt := buildPeer(p.seg(flagACK, nil))
-	ip, d := parseIPv4(pkt)
-	if d != ipv4OK {
-		t.Fatal(d)
-	}
-	seg, td := parseTCP(&ip)
-	if td != tcpOK {
-		t.Fatal(td)
-	}
+	// 相手の FIN の確認で FIN_WAIT_2 になり、受信のバッファは空なので行に移る条件を満たす
 	var reuse reuseISS
 	cs.input(&seg, int64(n.clk.Now()), &reuse)
 	state := cs.state

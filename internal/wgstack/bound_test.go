@@ -13,7 +13,9 @@ import (
 // 敵対的な保持の試験(wgstack-verification.md)。どの試験も会計が数える保持を、構造の上限と上界の式の値と
 // 比べ、入力が止まった後に元の値へ戻ることを確かめる。
 
-// checkHeld は Device が今持つ量を数え直し、上界の式の項と比べる。
+// checkHeld は Device が今持つ量を数え直し、上界の式の項と比べる。空きの枠と 4 つ組の hash の表の照合は、開いた
+// Device でだけ行う。閉じた Device では、tryRetire が inIndex を真のまま枠を返すことがある(tcb.go の枠の資源の
+// 返し方)。
 func checkHeld(t testing.TB, n *testNet) Stats {
 	t.Helper()
 	s := n.d.s
@@ -40,6 +42,9 @@ func checkHeld(t testing.TB, n *testNet) Stats {
 	if st.HeldChunksInPool*chunkSize != st.ChunkBytes+st.UDPRxBytes+st.UDPTxBytes {
 		t.Fatalf("chunk accounting: pool says %d chunks, rings hold %d bytes", st.HeldChunksInPool, st.ChunkBytes)
 	}
+	s.tmu.Lock()
+	closed := s.closed
+	s.tmu.Unlock()
 	indexed := 0
 	for i := range s.conns {
 		c := &s.conns[i]
@@ -79,7 +84,7 @@ func checkHeld(t testing.TB, n *testNet) Stats {
 			indexed++
 		}
 		// 空きの枠はタイマーの節、接続の組の出力の list の節、4 つ組の hash の表の項を持たない
-		if c.state == stFree {
+		if c.state == stFree && !closed {
 			s.wheel.mu.Lock()
 			for k := range numTimers {
 				if s.wheel.where[c.timerNode(k)] != -1 {
@@ -98,6 +103,9 @@ func checkHeld(t testing.TB, n *testNet) Stats {
 			}
 		}
 		c.mu.Unlock()
+	}
+	if closed {
+		return st
 	}
 	// 4 つ組の hash の表の項は、inIndex の枠と 1 対 1 で、項の世代と 4 つ組がその枠の今の接続と合う
 	s.tmu.Lock()
