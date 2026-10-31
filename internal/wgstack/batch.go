@@ -18,7 +18,8 @@ type SendBatch struct {
 	// Size は k_tx で、BatchSize が返す値。2 以上 MaxSendBatch 以下でバッチを使う
 	Size int
 	// Callers は C で、wireguard-go の SendStagedPackets を同じピアについて同時に動かしうる呼び出しの数。
-	// device を作る時の runtime.NumCPU() + 6 である。1 以上
+	// device を作る時の runtime.NumCPU() + 6 である。2 以上でバッチを使う(1 以下はバッチを使わない)。
+	// 台帳は、ピアが 1 つで差し替わらない device の前提で作っている
 	Callers int
 	// BufferSize は wireguard-go が Read に渡す buffer の大きさ S(MaxMessageSize)。印を書ける条件の判定に
 	// 使う
@@ -29,6 +30,12 @@ type SendBatch struct {
 // これを超える buffer を 1 回の Send に渡すと配列の外を指す。トンネルの試験が依存の値と一致することを
 // 確かめる。
 const MaxSendBatch = 128
+
+// maxSendPackets は Packets の上限。トンネルは P_upper = N_tx × k_tx で丸めて渡すが、台帳の輪(⌊P_max / 2⌋ 行)
+// の大きさを渡す側の丸めに頼らないよう、init でも丸める。N_tx = 1024 + 128 + 1 + CPU の数 + 6 で、CPU が
+// 1,000 個なら約 2,160、P_upper は k_tx が 32 なら約 69,000、128 なら約 276,000 である。この上限が効くのは
+// CPU が約 31,600 個を超えるときで、実際の設定は丸めに触れない。
+const maxSendPackets = 1 << 20
 
 const (
 	tagSize = 16
@@ -70,20 +77,25 @@ type sendLedger struct {
 	issued  atomic.Uint64 // 最後に出した番号。0 はまだ何も出していない
 	acked   atomic.Uint64 // W:知らされた番号の最大。0 はまだ何も知らされていない
 	pending atomic.Uint64 // Send を見る層の手元の番号。data の message の Send を呼ぶ goroutine だけが更新する
+	// off は Read が印を書けない buffer を受け取ったときに立て、立てたら戻さない。立った後は Read が印を
+	// 書かず、observe が印を受け入れないので、古い印が W を進めることはない
+	off atomic.Bool
 }
+
+// clampPackets は init が Packets に課す上限を適用した P_max を返す。
+func clampPackets(packets int) int { return min(packets, maxSendPackets) }
 
 // init は cfg から台帳を作る。バッチを使えない設定なら on を偽のままにし、BatchSize は 1 になる。
 func (l *sendLedger) init(cfg SendBatch, mtu int) {
 	l.next = 1
 	l.size = 1
-	if cfg.Packets <= 0 || cfg.Size < 2 || cfg.Callers < 1 {
+	// Callers が 1 以下の設定は、並行して動く呼び出しを持たないので k_eff の式が成り立たず、使わない
+	if cfg.Packets <= 0 || cfg.Size < 2 || cfg.Callers < 2 {
 		return
 	}
+	cfg.Packets = clampPackets(cfg.Packets)
 	size := min(cfg.Size, MaxSendBatch)
-	keff := size
-	if cfg.Callers > 1 {
-		keff = min(size, cfg.Packets/(2*(cfg.Callers-1)))
-	}
+	keff := min(size, cfg.Packets/(2*(cfg.Callers-1)))
 	// 印を書ける条件:offset(wireguard-go の MessageTransportHeaderSize の 16)+ packet の長さ + 詰め物 + 認証の
 	// tag ≤ buffer の容量 - 16。Read は呼ぶたびに実際の offset と buffer の長さでも確かめる
 	if keff < 2 || 16+mtu+sealOverhead > cfg.BufferSize-tagSize {
@@ -102,9 +114,10 @@ func (l *sendLedger) init(cfg SendBatch, mtu int) {
 }
 
 // fits は buf に offset から MTU の packet を作り、wireguard-go が詰め物と認証の tag を足しても、末尾の
-// 16 byte の印に届かないかを返す。
+// 16 byte の印に届かないかを返す。長さが容量より短い buffer には合わない。印は長さの末尾に書くが、
+// observe は容量の末尾を読むので、2 つが違う位置を指すからである。
 func (l *sendLedger) fits(buf []byte, offset int) bool {
-	return offset >= 0 && offset+l.mtu+sealOverhead <= len(buf)-tagSize
+	return len(buf) == cap(buf) && offset >= 0 && offset+l.mtu+sealOverhead <= len(buf)-tagSize
 }
 
 // limit は台帳から W 以下の行を外し、次の Read が作ってよい packet の数を返す。値は 1 以上 avail 以下で、
@@ -176,6 +189,9 @@ func (l *sendLedger) readTag(msg []byte) uint64 {
 // 持つ呼び出しで読んだ最大の番号を W に知らせ(1 回遅れの知らせ)、この呼び出しで読んだ最大の番号を手元に
 // 置く。
 func (l *sendLedger) observe(bufs [][]byte) {
+	if l.off.Load() {
+		return
+	}
 	issued := l.issued.Load()
 	var top uint64
 	data := false
@@ -203,7 +219,7 @@ func (l *sendLedger) observe(bufs [][]byte) {
 // ObserveSend は wireguard-go のバインドの Send を見る層が、内側の Send を呼ぶ前に、Send が受けた message
 // の列を渡す関数。message を読むだけで、書き換えず、保持しない。バッチを使わない Device では何もしない。
 func (d *Device) ObserveSend(bufs [][]byte) {
-	if d.s.txb.on {
+	if d.s.txb.on && !d.s.txb.off.Load() {
 		d.s.txb.observe(bufs)
 	}
 }
@@ -216,7 +232,12 @@ func (d *Device) Batching() bool { return d.s.txb.on }
 func (d *Device) readBatch(bufs [][]byte, sizes []int, offset int, now int64) int {
 	l := &d.s.txb
 	first := bufs[0]
-	if !l.on || !l.fits(first, offset) {
+	if l.on && !l.off.Load() && !l.fits(first, offset) {
+		// 印を書けない buffer を受け取ったら、この Device はバッチを止める。前の Read の印が配列に残って
+		// いても、長さが容量より短くても、以後 observe が印を受け入れないので W は進まない
+		l.off.Store(true)
+	}
+	if !l.on || l.off.Load() {
 		n := d.s.poll(first[offset:], now)
 		if n > 0 {
 			sizes[0] = n
