@@ -1,0 +1,120 @@
+{
+  "description": "The effective config block that wgft agent run writes to stderr, for fixed inputs. config says how the dotenv file is named: flag means --config PATH, env means WGFT_CONFIG=PATH. dotenv is the file's content, or null for a file that does not exist. env lists variables to set; every other WGFT_* variable, WGFT_CONFIG and GOMEMLIMIT are unset. args are the flags given to agent run, without --config. want is the whole block, header included.",
+  "cases": [
+    {
+      "name": "defaults",
+      "note": "Only WGFT_DATA_DIR is set, so that no line depends on the operating system's default.",
+      "config": "flag",
+      "dotenv": null,
+      "env": {
+        "WGFT_DATA_DIR": "/srv/wgft"
+      },
+      "args": [],
+      "want": "effective config:\n  WGFT_AGENT_ALLOW_TARGETS =                              from default\n  WGFT_AGENT_BATCH_MIB   =                              from default\n  WGFT_AGENT_NETSTACK    =                              from default\n  WGFT_DATA_DIR          = /srv/wgft                    from env\n  WGFT_JOIN              =                              from default\n  WGFT_MAX_TCP_FLOWS     = 2048                         from default\n  WGFT_MAX_UDP_FLOWS     = 8192                         from default\n  WGFT_MODE              =                              from default\n  WGFT_NAME              =                              from default\n  WGFT_WG_INTERFACE      = wgft0                        from default\n"
+    },
+    {
+      "name": "precedence",
+      "note": "A flag beats the environment, the environment beats the file, the file beats the default.",
+      "config": "flag",
+      "dotenv": "WGFT_DATA_DIR=/file/data\nWGFT_NAME=from-file\nWGFT_MODE=kernel\nWGFT_MAX_UDP_FLOWS=1000\nWGFT_JOIN=wgft://vps.example.com:8443/TOKEN#sha256:0000\n",
+      "env": {
+        "WGFT_DATA_DIR": "/env/data",
+        "WGFT_MODE": "userspace",
+        "WGFT_MAX_UDP_FLOWS": "2000"
+      },
+      "args": [
+        "--max-udp-flows",
+        "3000"
+      ],
+      "want": "effective config:\n  WGFT_AGENT_ALLOW_TARGETS =                              from default\n  WGFT_AGENT_BATCH_MIB   =                              from default\n  WGFT_AGENT_NETSTACK    =                              from default\n  WGFT_DATA_DIR          = /env/data                    from env\n  WGFT_JOIN              = ****                         from file\n  WGFT_MAX_TCP_FLOWS     = 2048                         from default\n  WGFT_MAX_UDP_FLOWS     = 3000                         from flag\n  WGFT_MODE              = userspace                    from env\n  WGFT_NAME              = from-file                    from file\n  WGFT_WG_INTERFACE      = wgft0                        from default\n"
+    },
+    {
+      "name": "empty environment value wins",
+      "note": "A variable that is present in the environment with an empty value still takes precedence over the file. An empty secret is shown empty, not as ****.",
+      "config": "flag",
+      "dotenv": "WGFT_DATA_DIR=/srv/wgft\nWGFT_NAME=home\nWGFT_JOIN=wgft://vps.example.com:8443/TOKEN#sha256:0000\n",
+      "env": {
+        "WGFT_NAME": "",
+        "WGFT_JOIN": ""
+      },
+      "args": [],
+      "want": "effective config:\n  WGFT_AGENT_ALLOW_TARGETS =                              from default\n  WGFT_AGENT_BATCH_MIB   =                              from default\n  WGFT_AGENT_NETSTACK    =                              from default\n  WGFT_DATA_DIR          = /srv/wgft                    from file\n  WGFT_JOIN              =                              from env\n  WGFT_MAX_TCP_FLOWS     = 2048                         from default\n  WGFT_MAX_UDP_FLOWS     = 8192                         from default\n  WGFT_MODE              =                              from default\n  WGFT_NAME              =                              from env\n  WGFT_WG_INTERFACE      = wgft0                        from default\n"
+    },
+    {
+      "name": "flag equal to the default",
+      "note": "A flag given on the command line is the source even when its value equals the default.",
+      "config": "flag",
+      "dotenv": null,
+      "env": {},
+      "args": [
+        "--wg-interface",
+        "wgft0",
+        "--data-dir",
+        "/srv/wgft"
+      ],
+      "want": "effective config:\n  WGFT_AGENT_ALLOW_TARGETS =                              from default\n  WGFT_AGENT_BATCH_MIB   =                              from default\n  WGFT_AGENT_NETSTACK    =                              from default\n  WGFT_DATA_DIR          = /srv/wgft                    from flag\n  WGFT_JOIN              =                              from default\n  WGFT_MAX_TCP_FLOWS     = 2048                         from default\n  WGFT_MAX_UDP_FLOWS     = 8192                         from default\n  WGFT_MODE              =                              from default\n  WGFT_NAME              =                              from default\n  WGFT_WG_INTERFACE      = wgft0                        from flag\n"
+    },
+    {
+      "name": "foreign and unknown names",
+      "note": "Names the agent does not read are ignored without a message. Keys are case-sensitive. A UTF-8 byte order mark becomes part of the first key, so that line sets nothing.",
+      "config": "flag",
+      "dotenv": "\ufeffWGFT_NAME=home\nWGFT_DATA_DIR=/srv/wgft\nWGFT_ADMIN=http://127.0.0.1:8686\nWGFT_WG_ADDRESS=10.200.0.1/24\nWGFT_UNKNOWN=1\nwgft_mode=kernel\n",
+      "env": {
+        "WGFT_UNKNOWN_FROM_ENV": "1"
+      },
+      "args": [],
+      "want": "effective config:\n  WGFT_AGENT_ALLOW_TARGETS =                              from default\n  WGFT_AGENT_BATCH_MIB   =                              from default\n  WGFT_AGENT_NETSTACK    =                              from default\n  WGFT_DATA_DIR          = /srv/wgft                    from file\n  WGFT_JOIN              =                              from default\n  WGFT_MAX_TCP_FLOWS     = 2048                         from default\n  WGFT_MAX_UDP_FLOWS     = 8192                         from default\n  WGFT_MODE              =                              from default\n  WGFT_NAME              =                              from default\n  WGFT_WG_INTERFACE      = wgft0                        from default\n"
+    },
+    {
+      "name": "integer flag printed as parsed",
+      "note": "An integer flag shows the parsed value in decimal, not the text given.",
+      "config": "flag",
+      "dotenv": null,
+      "env": {},
+      "args": [
+        "--max-tcp-flows",
+        "0x100",
+        "--data-dir",
+        "/srv/wgft"
+      ],
+      "want": "effective config:\n  WGFT_AGENT_ALLOW_TARGETS =                              from default\n  WGFT_AGENT_BATCH_MIB   =                              from default\n  WGFT_AGENT_NETSTACK    =                              from default\n  WGFT_DATA_DIR          = /srv/wgft                    from flag\n  WGFT_JOIN              =                              from default\n  WGFT_MAX_TCP_FLOWS     = 256                          from flag\n  WGFT_MAX_UDP_FLOWS     = 8192                         from default\n  WGFT_MODE              =                              from default\n  WGFT_NAME              =                              from default\n  WGFT_WG_INTERFACE      = wgft0                        from default\n"
+    },
+    {
+      "name": "long name and long value",
+      "note": "A name longer than 22 characters and a value longer than 28 characters are not cut; the value is shown as given, not normalised.",
+      "config": "flag",
+      "dotenv": null,
+      "env": {
+        "WGFT_DATA_DIR": "/srv/wgft"
+      },
+      "args": [
+        "--agent-allow-targets",
+        "192.168.1.20:25565,192.168.1.21:2456-2458"
+      ],
+      "want": "effective config:\n  WGFT_AGENT_ALLOW_TARGETS = 192.168.1.20:25565,192.168.1.21:2456-2458 from flag\n  WGFT_AGENT_BATCH_MIB   =                              from default\n  WGFT_AGENT_NETSTACK    =                              from default\n  WGFT_DATA_DIR          = /srv/wgft                    from env\n  WGFT_JOIN              =                              from default\n  WGFT_MAX_TCP_FLOWS     = 2048                         from default\n  WGFT_MAX_UDP_FLOWS     = 8192                         from default\n  WGFT_MODE              =                              from default\n  WGFT_NAME              =                              from default\n  WGFT_WG_INTERFACE      = wgft0                        from default\n"
+    },
+    {
+      "name": "config file named by WGFT_CONFIG",
+      "note": "The dotenv file is found through WGFT_CONFIG instead of --config.",
+      "config": "env",
+      "dotenv": "WGFT_DATA_DIR=/srv/wgft\nWGFT_AGENT_NETSTACK=wgstack\n",
+      "env": {},
+      "args": [],
+      "want": "effective config:\n  WGFT_AGENT_ALLOW_TARGETS =                              from default\n  WGFT_AGENT_BATCH_MIB   =                              from default\n  WGFT_AGENT_NETSTACK    = wgstack                      from file\n  WGFT_DATA_DIR          = /srv/wgft                    from file\n  WGFT_JOIN              =                              from default\n  WGFT_MAX_TCP_FLOWS     = 2048                         from default\n  WGFT_MAX_UDP_FLOWS     = 8192                         from default\n  WGFT_MODE              =                              from default\n  WGFT_NAME              =                              from default\n  WGFT_WG_INTERFACE      = wgft0                        from default\n"
+    },
+    {
+      "name": "join from a flag",
+      "note": "A secret is masked whatever its source.",
+      "config": "flag",
+      "dotenv": null,
+      "env": {},
+      "args": [
+        "--join",
+        "x",
+        "--data-dir",
+        "/srv/wgft"
+      ],
+      "want": "effective config:\n  WGFT_AGENT_ALLOW_TARGETS =                              from default\n  WGFT_AGENT_BATCH_MIB   =                              from default\n  WGFT_AGENT_NETSTACK    =                              from default\n  WGFT_DATA_DIR          = /srv/wgft                    from flag\n  WGFT_JOIN              = ****                         from flag\n  WGFT_MAX_TCP_FLOWS     = 2048                         from default\n  WGFT_MAX_UDP_FLOWS     = 8192                         from default\n  WGFT_MODE              =                              from default\n  WGFT_NAME              =                              from default\n  WGFT_WG_INTERFACE      = wgft0                        from default\n"
+    }
+  ]
+}
