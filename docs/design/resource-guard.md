@@ -4,7 +4,7 @@
 
 新規フローは、Admission Policy に通った後に、共有予算、ルールの上限、登録の最低分と予備で判定します。
 
-現行の各仕様は[Resource Guardの索引](resource/README.md)から参照できます。
+現行の各仕様は[Resource Guard の索引](resource/README.md)から参照できます。
 
 <details>
 <summary>旧見出しの参照先</summary>
