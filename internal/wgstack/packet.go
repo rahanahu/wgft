@@ -2,6 +2,7 @@ package wgstack
 
 import (
 	"encoding/binary"
+	"math/bits"
 	"net/netip"
 )
 
@@ -88,18 +89,34 @@ func parseIPv4(b []byte) (ipv4, ipv4Drop) {
 }
 
 // checksum は b を 16 bit の 1 の補数で足した値を sum に足して畳む。結果の補数が checksum である。
+// 1 の補数の和は語の幅によらないので、8 byte ずつ繰り上がりを回して足し、最後に 16 bit に畳む(RFC 1071 2 節)。
 func checksum(sum uint32, b []byte) uint16 {
+	acc, c := uint64(sum), uint64(0)
+	for len(b) >= 32 {
+		acc, c = bits.Add64(acc, binary.BigEndian.Uint64(b[0:8]), c)
+		acc, c = bits.Add64(acc, binary.BigEndian.Uint64(b[8:16]), c)
+		acc, c = bits.Add64(acc, binary.BigEndian.Uint64(b[16:24]), c)
+		acc, c = bits.Add64(acc, binary.BigEndian.Uint64(b[24:32]), c)
+		b = b[32:]
+	}
+	for len(b) >= 8 {
+		acc, c = bits.Add64(acc, binary.BigEndian.Uint64(b[0:8]), c)
+		b = b[8:]
+	}
+	// 繰り上がりが残るとき acc は 2^64 - 2 以下なので、足しても溢れない
+	acc += c
+	acc = acc>>32 + acc&0xffffffff // 33 bit 以下
 	for len(b) >= 2 {
-		sum += uint32(b[0])<<8 | uint32(b[1])
+		acc += uint64(b[0])<<8 | uint64(b[1])
 		b = b[2:]
 	}
 	if len(b) == 1 {
-		sum += uint32(b[0]) << 8
+		acc += uint64(b[0]) << 8
 	}
-	for sum>>16 != 0 {
-		sum = sum&0xffff + sum>>16
+	for acc>>16 != 0 {
+		acc = acc&0xffff + acc>>16
 	}
-	return uint16(sum)
+	return uint16(acc)
 }
 
 // pseudoSum は TCP と UDP の擬似 header の和。

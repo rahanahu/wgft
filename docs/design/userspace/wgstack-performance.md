@@ -863,8 +863,9 @@ CPU の目標は、qbench の待ち行列の大きな測定で定常の速さが
   wireguard-go との約束、ACK の決め方、wireguard-go の滞留の上界、OS ごとの挙動、実装の順序は[wgstack のバッチと segment のまとめ](wgstack-batching.md)に分けます
 - 錠の競合:入力、出力、アプリケーション、タイマーの goroutine が接続の錠を取り合います。
   mutex のプロファイルで競合を確かめてから分け方を決め、錠の順(接続の錠、表の錠、末端の錠)は変えません
-- checksum:今の `checksum` は 2 byte ずつ足します。
-  プロファイルで目立てば、8 byte ずつ足す形にします
+- checksum(実装済み):`checksum` は 8 byte ずつ繰り上がりを回して足し、最後に 16 bit に畳みます(RFC 1071 2 節)。
+  2 byte ずつ足していた形は、受ける向きの fast の経路のプロファイルでエージェントの CPU の約 11% を占めたので、直しました([実装の順序](wgstack-batching.md#実装の順序))。
+  結果は 2 byte ずつの定義どおりの和と同じで、試験と fuzzing(`FuzzParse`)が比べます
 
 危険は、区間の構造の誤りによる受信の byte の列の誤りと、錠の変更による競合と止まりです。
 区間の構造は今の fuzzing と受信の模型の試験で、錠の変更は `-race` の負荷の試験で確かめます。
