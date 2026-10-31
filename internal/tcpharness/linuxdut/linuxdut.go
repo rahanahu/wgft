@@ -6,7 +6,7 @@
 // under the build tag lab, in a network namespace of their own.
 //
 // A new network namespace takes most net.ipv4.tcp_* values from the kernel's compiled-in
-// defaults, but copies some from the initial namespace: on the lab VM's 6.1 kernel
+// defaults, but copies some from the initial namespace: on the lab VM's 6.1 and 7.2 kernels
 // tcp_congestion_control, tcp_rmem and tcp_wmem follow it, while tcp_frto, tcp_sack, tcp_recovery
 // and tcp_autocorking do not. Which values follow may change between kernels, so PinReference
 // sets every value of the reference configuration in docs/design/userspace/wgstack-verification.md
@@ -31,6 +31,20 @@ import (
 	"github.com/rahanahu/wgft/internal/tcpharness"
 )
 
+// ReferenceRelease is the kernel release of the reference Linux, the lab VM's kernel that
+// lab/lab pins as LAB_KERNEL_ABI and wgstack-verification.md records. The expected differences
+// in the Linux conformance test are recorded for this kernel.
+const ReferenceRelease = "7.2.11+deb13-amd64"
+
+// KernelRelease returns the running kernel's release, as uname -r prints it, or "unknown".
+func KernelRelease() string {
+	b, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // IfName is the TUN device's name. One DUT exists at a time in a namespace.
 const IfName = "wgfth0"
 
@@ -39,6 +53,9 @@ const IfName = "wgfth0"
 // the same on Linux and on wgstack. The order is the order PinReference writes them in.
 var ReferenceSysctls = [][2]string{
 	{"net/ipv4/tcp_congestion_control", "reno"},
+	// From v6.17 the kernel no longer reads tcp_recovery's RACK bit, 0x1, so on 7.2 0 works as the
+	// default 1 and RACK detects losses. The pin stays so 6.1 still turns RACK off and the
+	// reference configuration is the same on both kernels.
 	{"net/ipv4/tcp_recovery", "0"},
 	{"net/ipv4/tcp_early_retrans", "0"},
 	{"net/ipv4/tcp_frto", "0"},
@@ -50,7 +67,7 @@ var ReferenceSysctls = [][2]string{
 	{"net/ipv4/tcp_moderate_rcvbuf", "0"},
 	{"net/ipv4/tcp_autocorking", "0"},
 	// The UDP, reassembly and ICMP scenarios depend on these IP-level values, pinned at the 6.1
-	// defaults: the fragment lifetime of 30 s, the path MTU floor of 552, path MTU discovery on,
+	// defaults, which 7.2 keeps: the fragment lifetime of 30 s, the path MTU floor of 552, path MTU discovery on,
 	// and ICMP errors limited to 1 per second per destination for the types in the default mask.
 	{"net/ipv4/ipfrag_time", "30"},
 	{"net/ipv4/route/min_pmtu", "552"},

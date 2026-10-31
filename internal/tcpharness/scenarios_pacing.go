@@ -38,6 +38,10 @@ const pacingSteadyRounds = 2
 // times the largest, over the runs measured. Linux's buffer autotuning sets its window limit from
 // what the application read in one RTT (tcp_rcv_space_adjust), and wgstack-performance.md has
 // wgstack follow the same rule; how far Linux gets turns on where its RTT intervals fall.
+// The values are 6.1's. The reference 7.2 sizes its buffer more tightly and reached 329,856 to
+// 372,480 bytes over 18 runs, inside the band. The band keeps 6.1's values: the same rule applied
+// to 7.2 would put the lower edge below wgstack's 256 KiB floor, where it no longer catches a
+// receiver that never raises its window limit.
 const (
 	pacingLinuxLow  = 401_000
 	pacingLinuxHigh = 737_000

@@ -24,7 +24,7 @@ lab/lab build
 lab/lab exec vm labhost run -parallel 8 all
 ```
 
-初回の `up` は VM の作成、パッケージの導入、スナップショット、トポロジの構築を行います。
+初回の `up` は VM の作成、パッケージとカーネルの導入、スナップショット、トポロジの構築を行います。
 2 回目以降は起動とトポロジの構築を行います。
 トポロジの構築では、VM の `net.core.rmem_max` と `net.core.wmem_max` を[ソケットのバッファの手順](../docs/manual/socket-buffers.ja.md)の 7340032 に設定します。
 ラボは server と agent を権限のない利用者でも動かすため、ユーザー空間モードの動作条件を満たした状態で確認を流します。
@@ -155,7 +155,8 @@ shard の割り当ては `labhost run -shard K/N all` が決めます。
 
 ### 結果と終了コード
 
-各 shard の結果は `--out` の下の `<netstack>/shard-K/` に残り、`summary.json`、`logs/`、`shard.log` があります。
+各 shard の結果は `--out` の下の `<netstack>/shard-K/` に残り、`summary.json`、`logs/`、`shard.log`、VM のカーネルの版を書いた `kernel` があります。
+統合の前の shard ごとの行にも、カーネルの版が出ます。
 `--out` の既定は `/tmp/wgft-lab-suite-<日時>` です。
 統合した判定は `<netstack>/summary.json` です。
 各 shard の `summary.json` は、割り当ての要約の `plan_digest` と、確認が使った `netstack` を記録します。
@@ -184,10 +185,18 @@ labhost merge -out merged shard-1/summary.json shard-2/summary.json shard-3/summ
 ## 対応する VPS の環境
 
 カーネルと nftables の対応範囲は[セットアップの前提](../docs/manual/setup.md)に従います。
-既定の VM は `images:debian/12` です。
+既定の VM は `images:debian/13` です。
+Debian 13 の VM には、`lab/lab` の `LAB_KERNEL_ABI` と `LAB_KERNEL_VERSION` が固定する trixie-backports のカーネルを入れ、そのカーネルで起動し直してからスナップショットを取ります。
+trixie-backports は新しい版が出ると古い版を消すので、package は snapshot.debian.org の `LAB_KERNEL_SNAPSHOT` の時刻の trixie-backports から取ります。
+起動し直した後に別のカーネルで動いていれば、`up` は止まります。
+固定を上げた後に、前の版で作った VM で `up` が止まった場合は、`lab/lab destroy` と `lab/lab up` で作り直します。
+このカーネルは wgstack の適合の試験の参照の Linux で、版の記録は[参照の Linux の設定](../docs/design/userspace/wgstack-verification.md#参照の-linux-の設定)にあります。
+Debian 13 は `/tmp` を tmpfs にしますが、ラボの VM では Debian 12 と同じくディスクに置きます。
 別のディストリビューションの VM は、イメージと名前を指定して作成します。
+Debian 13 以外のイメージには固定したカーネルを入れず、イメージのカーネルのまま動かします。
 
 ```sh
+WGFT_LAB_IMAGE=images:debian/12 WGFT_LAB_VM=wgft-lab-debian12 lab/lab up
 WGFT_LAB_IMAGE=images:ubuntu/24.04 WGFT_LAB_VM=wgft-lab-ubuntu lab/lab up
 WGFT_LAB_IMAGE=images:fedora/44 WGFT_LAB_VM=wgft-lab-fedora lab/lab up
 ```

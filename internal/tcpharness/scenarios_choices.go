@@ -32,7 +32,8 @@ func earlyACK(h *H) {
 
 // ackUnsent sends data whose ACK acknowledges bytes the DUT never sent. RFC 9293 3.10.7.4 drops
 // the segment and sends an ACK; RFC 5961 5.2 keeps the ACK. wgstack sends it within its rate
-// limit; the design reads Linux as dropping silently.
+// limit. Linux dropped it silently up to v7.0 and answers with a rate-limited challenge ACK from
+// v7.1, so the reference 7.2 passes.
 func ackUnsent(h *H) {
 	const port = 8018
 	l := h.Listen(port)

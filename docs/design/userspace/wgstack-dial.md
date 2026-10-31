@@ -13,7 +13,7 @@
 2. リファクタリングと脆弱性の検査を、ラボのカーネルの更新、基準の取り直し、Linux の挙動の仕様と並行に行います
 3. 核のファイルと UDP に触れる実装を、リファクタリングの後に始めます
 
-参照の Linux は、第 2 段階が main に入った直後、dial の実装の前に、Debian 13 の trixie-backports の 7.2 のカーネルに移ります([決めたこと](#決めたこと))。
+参照の Linux は、第 2 段階が main に入った直後の 2026-11-01 に、Debian 13 の trixie-backports の 7.2 のカーネルに移りました([決めたこと](#決めたこと)、[参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定))。
 能動の open の Linux の挙動は、[接続を張る Linux](wgstack-dial-linux.md)(6.1 と 7.2 を扱います)にまとめます。
 wgstack が Linux に倣うか RFC に倣うかを選ぶ点は、その仕様の[wgstack で選ぶ点](wgstack-dial-linux.md#wgstack-で選ぶ点)にあります。
 この文書はその仕様を写さず、wgstack が従う規則の骨格だけを書きます。
@@ -316,9 +316,8 @@ dial の側で加わるものは次のとおりです。
 ## 検証
 
 [wgstack の検証](wgstack-verification.md)の原則(Linux が参照、試験の書き手の分離、Linux で先に通すこと、決定的な実行)を dial の側にも当てます。
-参照の Linux は、移った後のラボのカーネル(Debian 13 の trixie-backports の 7.2)です。
-[wgstack の検証](wgstack-verification.md)の[参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定)と[試験の置き場所と DUT](wgstack-verification.md#試験の置き場所と-dut)は、ラボのカーネルを移す時に直します。
-第 2 段階は今の 6.1 で閉じるので、それまでは 6.1 の記述のままです。
+参照の Linux は、ラボのカーネル(Debian 13 の trixie-backports の 7.2.11)です。
+[wgstack の検証](wgstack-verification.md)の[参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定)と[試験の置き場所と DUT](wgstack-verification.md#試験の置き場所と-dut)は、移した時に 7.2 の記述に直しました。
 
 - 適合の試験:`Dial` と `DialUDP` を持つ DUT の任意の面を加えます。
   参照の opener は Linux で、ラボの network namespace の TUN の中から Linux のソケットが接続し、試験の側が待ち受けの役で SYN を受けます。
