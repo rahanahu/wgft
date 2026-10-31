@@ -77,6 +77,12 @@ fn ip(args: &[&str]) -> io::Result<()> {
 fn configure(tun: &TunSettings) -> io::Result<()> {
     let addr = format!("{}/{}", tun.address, tun.prefix_len);
     let mtu = tun.mtu.to_string();
+    // トンネルは IPv4 だけを運ぶ。カーネルが link up で送る IPv6 の近隣探索を TUN に流さない。
+    // IPv6 の無いカーネルでは file が無いので、失敗は無視する
+    let _ = std::fs::write(
+        format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", tun.name),
+        "1",
+    );
     ip(&["addr", "add", &addr, "dev", &tun.name])?;
     ip(&["link", "set", "dev", &tun.name, "mtu", &mtu, "up"])
 }
