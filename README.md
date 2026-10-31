@@ -57,7 +57,7 @@ Linux userspace mode may need higher host socket buffer limits. With the default
 Userspace mode does not guarantee that memory stays within the worst-case estimate: on a TCP connection with much unacknowledged data, a peer that keeps sending acknowledgments without data can grow the process's memory beyond the estimate. Who can trigger this depends on which side runs in userspace mode:
 
 - Userspace-mode server: public clients reach host sockets and only agents talk to its netstack, so the trigger needs an agent's WireGuard key. Run the server in kernel mode where its agents are not trusted.
-- Userspace-mode agent: even behind a kernel-mode server, the agent has the same limitation toward the public clients of its TCP rules. A Linux agent avoids it in kernel mode.
+- Userspace-mode agent behind a kernel-mode server: the agent has the same limitation toward the public clients of its TCP rules. A Linux agent avoids it in kernel mode.
 
 The [known limitation](docs/design/userspace/memory-limits.md#中身の無い-segment-の処理待ち) gives the details.
 

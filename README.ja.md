@@ -48,7 +48,7 @@ VPS 側の server は Linux、agent は Linux、Windows amd64、Apple シリコ�
 | 権限 | `CAP_NET_ADMIN` が必要 | 通常は root 権限と TUN デバイスが不要 |
 | wgft プロセス停止中 | 設定済みの転送は継続 | 転送も停止 |
 
-server と Linux の agent には、カーネルモードを推奨します。ユーザー空間モードはカーネルモードを使えない環境のためのモードで、転送の保証はカーネルモードより弱くなります。root やカーネル WireGuard が使えない VPS、Docker、Windows と macOS の agent、root 権限のない Linux の agent では、ユーザー空間モードを使います。カーネルモードには Linux 6.1 以降と nftables 1.0.6 以降が必要です。
+server と Linux の agent には、カーネルモードを推奨します。ユーザー空間モードはカーネルモードを使えない環境のためのモードです。転送の保証はカーネルモードより弱くなります。root やカーネル WireGuard が使えない VPS、Docker、Windows と macOS の agent、root 権限のない Linux の agent では、ユーザー空間モードを使います。カーネルモードには Linux 6.1 以降と nftables 1.0.6 以降が必要です。
 
 互換性を保つため、agent の既定は root 権限を要しないユーザー空間モードのままです。このため、Linux の agent はカーネルモードを指定したときだけカーネルモードで動きます。条件と手順は[カーネルモードのエージェント](docs/manual/agent-kernel.ja.md)にあります。ユーザー空間モードの制約は[ユーザー空間の設計](docs/design/userspace/README.md)にあります。
 
@@ -56,8 +56,8 @@ Linux のユーザー空間モードでは、ホストのソケットのバッ�
 
 ユーザー空間モードは、メモリの使用量が最悪値の見積もりを超えないことを保証しません。ACK を待つデータの多い TCP の接続で、相手がデータを含まない ACK を送り続けると、プロセスのメモリが見積もりを超えて増えることがあります。この増加を起こせる相手は、どちらがユーザー空間モードかで変わります。
 
-- ユーザー空間モードの server: 公開側の利用者はホストのソケットに接続し、netstack と通信するのは agent だけです。このため、この増加を起こすには agent の WireGuard の鍵が要ります。agent を信頼できない場合は、server をカーネルモードで動かしてください。
-- ユーザー空間モードの agent: server がカーネルモードでも、TCP のルールの公開側の利用者に対して同じ制限があります。Linux の agent はカーネルモードで動かせばこの制限を受けません。
+- ユーザー空間モードの server: 公開側の利用者はホストのソケットに接続し、netstack と通信するのは agent だけです。このため、増加を起こすには agent の WireGuard の鍵が要ります。agent を信頼できない場合は、server をカーネルモードで動かしてください。
+- ユーザー空間モードの agent: server がカーネルモードのとき、TCP のルールの公開側の利用者に対して同じ制限があります。Linux の agent はカーネルモードで動かせばこの制限を受けません。
 
 詳細は[既知の制限](docs/design/userspace/memory-limits.md#中身の無い-segment-の処理待ち)を参照してください。
 
@@ -124,7 +124,7 @@ Web UI の「+ ルールを追加」からも同じ転送を設定できます�
 
 ![wgft のダッシュボード](docs/images/dashboard.ja.png)
 
-Web UI では agent とルールの状態を確認し、ルールの追加や通信の診断ができます。管理 API は既定では外部に公開されません。SSH のポート転送で手元のマシンへ転送し、`http://localhost:8686` を開きます。
+Web UI では agent とルールの状態を確認し、ルールの追加や通信の診断ができます。管理 API は既定では外部に公開されません。SSH のポート転送を使い、手元のマシンで `http://localhost:8686` を開きます。
 
 ```sh
 ssh -L 8686:/run/wgft/admin.sock root@vps
