@@ -22,11 +22,12 @@ The server database contains keys and certificates, and agent credentials contai
 Keep backups private and retain their ownership and permissions.
 
 Back up the server's whole data directory before updating, along with configuration and the agent's data directory.
+The supplied server unit's data-directory symlink means that a backup must include the directory contents, not only the symlink.
 For a filesystem copy of the SQLite database, stop the server so the database and any WAL files are not changing during the copy.
 Stop the agent before copying its credentials for the same reason.
 Confirm that the backup exists and that you can read it before replacing the binary.
+
 Resume the existing services after the backup so the binary-only sequence below starts with both sides running.
-The supplied server unit's data-directory symlink means that a backup must include the directory contents, not only the symlink.
 
 ## Linux binary and systemd update
 
@@ -56,6 +57,7 @@ sudo runuser -u wgft -- wgft agent doctor
 
 Check the rule with the real service client from outside the VPS.
 Use [troubleshooting](troubleshooting.md) if startup or forwarding does not recover.
+
 Userspace forwarding stops with its process.
 Kernel forwarding can remain while the process restarts, but an update does not guarantee uninterrupted existing sessions or a fixed recovery time.
 
