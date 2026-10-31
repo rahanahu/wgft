@@ -69,6 +69,7 @@ func agentSpecs() []spec {
 		agentWGInterfaceSpec().withUsage("kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE; unused in userspace mode"),
 		{Env: "WGFT_AGENT_NETSTACK", Flag: "agent-netstack", Default: "",
 			Usage: "userspace-mode network stack gvisor or wgstack, env WGFT_AGENT_NETSTACK; unset means gvisor, and wgstack is experimental"},
+		agentBatchSpec(),
 		{Env: allowtargets.Env, Flag: "agent-allow-targets", Default: "", Slice: true,
 			Usage: "comma-separated targets the server may send traffic to, env " + allowtargets.Env + "; entries are CIDR, CIDR:port or CIDR:lo-hi; unset means no restriction"},
 	}, limitSpecs()...)
@@ -160,6 +161,11 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 	if err != nil {
 		return agent.Options{}, nil, err
 	}
+	// WGFT_AGENT_BATCH_MIB も、使わないモードと netstack でも値そのものの誤りをここで弾く
+	batch, err := sendBatchFromConfig(c, limits)
+	if err != nil {
+		return agent.Options{}, nil, err
+	}
 	allow, err := allowTargetsFromConfig(c)
 	if err != nil {
 		return agent.Options{}, nil, err
@@ -178,6 +184,7 @@ func buildAgentOptions(cmd *cobra.Command) (agent.Options, *config, error) {
 		Mode:            mode,
 		Name:            c.str("WGFT_NAME"),
 		Netstack:        netstack,
+		SendBatch:       batch.packets,
 		Version:         effectiveVersion(),
 		WGInterface:     c.str("WGFT_WG_INTERFACE"),
 	}, c, nil
@@ -233,6 +240,9 @@ On the VPS, against the admin API:
 			fmt.Fprintln(os.Stderr, "effective config:")
 			c.print(os.Stderr)
 			applyMemoryLimit(os.Stderr, opts.Limits, true)
+			if b, err := sendBatchFromConfig(c, opts.Limits); err == nil {
+				logSendBatch(os.Stderr, opts.Mode, opts.Netstack, b)
+			}
 			logUnusedKernelLimits(opts, c)
 			if opts.Mode != "kernel" && opts.Netstack == "wgstack" {
 				log.Printf("warning: WGFT_AGENT_NETSTACK=wgstack selects wgft's own TCP/IP stack for the userspace mode; it is experimental, and its transfer quality and resource behavior are not covered by the compatibility guarantee")

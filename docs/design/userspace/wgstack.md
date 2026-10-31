@@ -73,9 +73,10 @@ wgstack は同じ面と挙動を持ち、トンネルの中で差し替えます
 
 - 作成:`nettun.Create(addr, mtu)` が Device を作ります
 - wireguard-go との境目:Device は `tun.Device` を満たし、`wgbind.NewDevice` が wireguard-go の device に組み込みます。
-  使うのは `Name`、`File`(nil)、`Events`、`MTU`、`BatchSize`(1)、`Read`、`Write`、`Close` です。
+  使うのは `Name`、`File`(nil)、`Events`、`MTU`、`BatchSize`、`Read`、`Write`、`Close` です。
+  `BatchSize` は gVisor では 1 で、wgstack では送信の向きのバッチの k_tx(バッチを使わない Device では 1)です([Device の約束](wgstack-batching.md#device-の約束))。
   `Events` は作成の直後に `EventUp` を 1 つ持ち、`Close` で閉じます
-- `Read`:1 回に 1 件を返します。
+- `Read`:gVisor は 1 回に 1 件を返し、wgstack は 1 件以上 k_eff 件以下を返します。
   誤りを返すのは `Close` の後の `os.ErrClosed` だけです。
   wireguard-go は `Read` がほかの誤りを返すと device を閉じるので、packet を作れなかったときは誤りにせず、その packet を飛ばして次を待ちます
 - `Write`:バッチの 1 件が失敗しても残りを処理し、受け取った件数と最初の誤りを返します。
@@ -510,7 +511,7 @@ M_fix の表、UDP の管理の配列、echo の応答の枠も同じく切り�
 送信の記録は floor の項に約 45.0 MiB、boost の項に約 4.4 MiB を加えます。
 区間の表は floor の項に約 10.0 MiB、boost の項に約 1.0 MiB を加えます。
 区間 1 つは区間の treap の節(子の位置と優先度)を含みます。
-M_fix は核の構造(事象の数と観測の関数を含みます)、接続の枠、3 つの hash の表、行の表、空きの list、タイマーの節、出力の list、制御の輪、chunk の置き場に残す 1 MiB を数えます。
+M_fix は核の構造(事象の数と観測の関数を含みます)、接続の枠、3 つの hash の表、行の表、空きの list、タイマーの節、出力の list、制御の輪、chunk の置き場に残す 1 MiB、送信の向きのバッチの台帳の輪([数えの規則](wgstack-batching.md#数えの規則))を数えます。
 空きの list は枠や行を使うと短くなりますが、配列は作成の時の大きさのまま残るので、UDP の管理の配列の空きの list とともに作成の時の大きさで数えます。
 接続の枠 1 つが表の外に持つ構造も M_fix に数えます。
 linux/amd64 の Go 1.27 で測ると、アプリケーションの handle と 2 つのアドレスが 176 byte、読み書きを起こす 2 つの channel と読み書きの期限の 2 つの channel が 448 byte、期限の 2 つのタイマーが 256 byte で、合わせて 880 byte です。

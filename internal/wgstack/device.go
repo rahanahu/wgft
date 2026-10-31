@@ -35,6 +35,8 @@ type Config struct {
 	TestBoost BoostPolicy
 	// TestCongestion は試験と性能の測定だけが使う輻輳の制御。本番は既定の CongestionCubic のままにする。
 	TestCongestion CongestionControl
+	// SendBatch は送信の向きのバッチ(wgstack-batching.md)。ゼロ値はバッチを使わない。
+	SendBatch SendBatch
 }
 
 // processStart は本番の時計の起点。プロセスのすべての Device が同じ起点を使うので、boost の回収が
@@ -89,6 +91,7 @@ func newDevice(cfg Config, lim limits, pool *boostPool) (*Device, error) {
 		return nil, errors.New("wgstack: " + err.Error())
 	}
 	d.s = s
+	s.txb.init(cfg.SendBatch, s.mtu)
 	s.trace = cfg.Trace
 	s.boostPolicy = cfg.TestBoost
 	s.ccPolicy = cfg.TestCongestion
@@ -153,7 +156,9 @@ func (d *Device) Name() (string, error)    { return "wgstack", nil }
 func (d *Device) File() *os.File           { return nil }
 func (d *Device) Events() <-chan tun.Event { return d.events }
 func (d *Device) MTU() (int, error)        { return d.s.mtu, nil }
-func (d *Device) BatchSize() int           { return 1 }
+
+// BatchSize は作成の時に決めた k_tx を返す。バッチを使わない Device では 1 である。
+func (d *Device) BatchSize() int { return d.s.txb.size }
 
 func (d *Device) isClosed() bool {
 	select {
@@ -164,9 +169,10 @@ func (d *Device) isClosed() bool {
 	}
 }
 
-// Read は次に送る packet を 1 つ作って bufs[0][offset:] に書く。送るものが無ければ待つ。誤りを返すのは
-// Close の後の os.ErrClosed だけで、packet を作れなかったときは誤りにせず次を待つ。wireguard-go は Read が
-// ほかの誤りを返すと device を閉じるためである。
+// Read は次に送る packet を 1 個以上、min(len(bufs), len(sizes), k_eff) 個以下作って bufs[i][offset:] に
+// 書く(wgstack-batching.md の「Device の約束」)。送るものが無ければ待ち、1 個作った後は待たない。誤りを
+// 返すのは Close の後の os.ErrClosed だけで、packet を作れなかったときは誤りにせず次を待つ。wireguard-go は
+// Read がほかの誤りを返すと device を閉じるためである。
 func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	if len(bufs) == 0 || len(sizes) == 0 {
 		return 0, nil
@@ -176,11 +182,10 @@ func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 			return 0, os.ErrClosed
 		}
 		d.readMu.Lock()
-		n := d.s.poll(bufs[0][offset:], int64(d.clock.Now()))
+		n := d.readBatch(bufs, sizes, offset, int64(d.clock.Now()))
 		d.readMu.Unlock()
 		if n > 0 {
-			sizes[0] = n
-			return 1, nil
+			return n, nil
 		}
 		select {
 		case <-d.s.out.notify:

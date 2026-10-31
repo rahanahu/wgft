@@ -106,6 +106,8 @@ type stack struct {
 
 	done chan struct{} // Device の Close で閉じる
 
+	txb sendLedger // 送信の向きのバッチの予算(batch.go)。Device の readMu の中で使う
+
 	trace       func(TraceEvent)  // Config.Trace
 	boostPolicy BoostPolicy       // Config.TestBoost
 	ccPolicy    CongestionControl // Config.TestCongestion
