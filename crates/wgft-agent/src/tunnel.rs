@@ -190,7 +190,7 @@ impl Tunnel {
         let ep = resolve(&cfg.endpoint).await;
         set_endpoint(&shared, ep.clone());
         let counts = Arc::new(Counts::default());
-        let unix = stamp::start(clock);
+        let floor = stamp::floor(clock);
         let device = Arc::new(
             device::start(
                 private_key,
@@ -199,7 +199,7 @@ impl Tunnel {
                 ep.ok(),
                 open,
                 Arc::clone(&counts),
-                unix,
+                floor,
             )
             .await?,
         );
@@ -245,8 +245,10 @@ impl Tunnel {
     }
 
     /// handshake の時刻の印の高い水位をファイルに残す。
-    pub fn persist_clock(&self) {
-        stamp::persist(self.clock.as_deref());
+    pub async fn persist_clock(&self) {
+        if let Ok(d) = device::read(&self.device).await {
+            stamp::record(self.clock.as_deref(), d.unix_high_water);
+        }
     }
 
     /// 自分のトンネルのアドレス。
@@ -278,7 +280,7 @@ impl Tunnel {
 
     /// 閉じる。TUN を消す。
     pub async fn close(self) {
-        stamp::persist(self.clock.as_deref());
+        self.persist_clock().await;
         self.monitor.abort();
         let _ = self.monitor.await;
         match Arc::try_unwrap(self.device) {
@@ -562,62 +564,51 @@ fn checksum(b: &[u8]) -> u16 {
 
 /// handshake の時刻の印 (TAI64N) の高い水位。
 ///
-/// device は handshake の初めの送信に、作ったときに渡した壁時計の値に経過時間を足した時刻の印を付ける。
-/// 相手の WireGuard (Linux と wireguard-go) は、前に受けた印より古い印の handshake を捨てる。壁時計が
-/// 前の device の作成より戻っていると (RTC の無いホストの NTP の前、時計の巻き戻し)、handshake が
-/// 通らなくなる。そこで、プロセスの中で前の device の印より 1 秒新しい値と、データディレクトリの
-/// ファイルに残した印の大きい方を下限にする。ファイルは agent.json と分ける。Go の agent が agent.json を
-/// 書き直すと、知らないキーを捨てるためである。
+/// device は handshake の初めの送信に時刻の印を付け、相手の WireGuard (Linux と wireguard-go) は前に
+/// 受けた印より古い印の handshake を捨てる。壁時計が前の device より戻っていると (RTC の無いホストの
+/// NTP の前、時計の巻き戻し)、handshake が通らなくなる。device は作るときに渡した下限より 1 秒新しい
+/// 値と壁時計の大きい方から印を作り、使った印の高い水位を返す。この module は、プロセスの中で見た
+/// 最も高い水位と、データディレクトリのファイルに残した水位の大きい方を下限として渡す。ファイルは
+/// agent.json と分ける。Go の agent が agent.json を書き直すと、知らないキーを捨てるためである。
 mod stamp {
     use std::path::Path;
     use std::sync::Mutex;
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::Duration;
 
-    /// 前の device に渡した値と、渡した時刻。
-    static LAST: Mutex<Option<(Duration, Instant)>> = Mutex::new(None);
-
-    fn now_unix() -> Duration {
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-    }
-
-    fn current() -> Option<Duration> {
-        let last = *LAST
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        last.map(|(unix, at)| unix + at.elapsed())
-    }
+    /// プロセスの中で見た最も高い水位。
+    static HIGH: Mutex<Duration> = Mutex::new(Duration::ZERO);
 
     fn read(file: Option<&Path>) -> Option<Duration> {
         let text = std::fs::read_to_string(file?).ok()?;
         text.trim().parse::<u64>().ok().map(Duration::from_secs)
     }
 
-    /// 新しい device に渡す値を決めて覚え、ファイルに残す。
-    pub(super) fn start(file: Option<&Path>) -> Duration {
-        let mut unix = now_unix();
-        if let Some(prev) = current() {
-            unix = unix.max(prev + Duration::from_secs(1));
-        }
-        if let Some(saved) = read(file) {
-            unix = unix.max(saved + Duration::from_secs(1));
-        }
-        *LAST
+    /// 新しい device に渡す下限。
+    pub(super) fn floor(file: Option<&Path>) -> Duration {
+        let high = *HIGH
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((unix, Instant::now()));
-        persist(file);
-        unix
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        high.max(read(file).unwrap_or_default())
     }
 
-    /// 今の印をファイルに残す。書けなくても動作は続ける。
-    pub(super) fn persist(file: Option<&Path>) {
-        let (Some(file), Some(stamp)) = (file, current()) else {
-            return;
+    /// device が返した高い水位を覚え、ファイルに残す。書けなくても動作は続ける。
+    pub(super) fn record(file: Option<&Path>, high_water: Duration) {
+        let high = {
+            let mut h = HIGH
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *h = (*h).max(high_water);
+            *h
         };
+        let Some(file) = file else { return };
+        // 秒を切り上げ、下限が使った印より古くならないようにする
+        let secs = high.as_secs() + u64::from(high.subsec_nanos() > 0);
+        if read(Some(file)).is_some_and(|saved| saved.as_secs() >= secs) {
+            return;
+        }
         let tmp = file.with_extension("tmp");
-        let ok = std::fs::write(&tmp, format!("{}\n", stamp.as_secs()))
-            .and_then(|()| std::fs::rename(&tmp, file));
+        let ok =
+            std::fs::write(&tmp, format!("{secs}\n")).and_then(|()| std::fs::rename(&tmp, file));
         if let Err(e) = ok {
             crate::logf!(
                 "cannot record the handshake clock in {}: {e}",
@@ -631,18 +622,17 @@ mod stamp {
         use super::*;
 
         #[test]
-        fn never_goes_back() {
+        fn the_floor_never_goes_back() {
             let dir = std::env::temp_dir().join(format!("wgft-stamp-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let f = dir.join("agent.json.clock");
-            // ファイルに未来の印があれば、それより新しい値を使う
-            let future = now_unix().as_secs() + 3600;
-            std::fs::write(&f, format!("{future}\n")).unwrap();
-            let a = start(Some(&f));
-            assert!(a.as_secs() > future);
-            let b = start(Some(&f));
-            assert!(b >= a + Duration::from_secs(1));
-            assert!(read(Some(&f)).unwrap().as_secs() >= b.as_secs());
+            let future = Duration::from_secs(4_000_000_000);
+            record(Some(&f), future + Duration::from_millis(500));
+            assert_eq!(read(Some(&f)), Some(future + Duration::from_secs(1)));
+            assert!(floor(Some(&f)) >= future);
+            // 低い水位はファイルを戻さない
+            record(Some(&f), Duration::from_secs(10));
+            assert_eq!(read(Some(&f)), Some(future + Duration::from_secs(1)));
             std::fs::remove_dir_all(dir).unwrap();
         }
     }
@@ -663,6 +653,7 @@ mod device {
     pub(super) struct DeviceReading {
         pub(super) last_handshake: Option<SystemTime>,
         pub(super) last_handshake_at: Option<Instant>,
+        pub(super) unix_high_water: std::time::Duration,
         pub(super) rx_bytes: u64,
         pub(super) tx_bytes: u64,
     }
@@ -674,7 +665,7 @@ mod device {
         endpoint: Option<SocketAddrV4>,
         open: crate::relay::OpenPorts,
         counts: std::sync::Arc<crate::inbound::Counts>,
-        unix: std::time::Duration,
+        unix_floor: std::time::Duration,
     ) -> Result<Handle, String> {
         let key =
             PrivateKey::from_base64(private_key).map_err(|e| format!("wg_private_key: {e}"))?;
@@ -688,15 +679,8 @@ mod device {
             cfg.keepalive,
         );
         dc.mtu = cfg.mtu;
-        let tun = TunSettings {
-            name: tun_name.to_owned(),
-            address: cfg.address,
-            prefix_len: cfg.prefix_len,
-            mtu: cfg.mtu,
-        };
-        let mut seed = wgft_wireguard::Zeroizing::new([0u8; 32]);
-        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut seed[..])
-            .map_err(|_| "no randomness for the device seed".to_owned())?;
+        // アドレスは /32 で link に付き、server への経路は外殻の専用の経路表に入る
+        let tun = TunSettings::agent(tun_name, cfg.address, cfg.server_address, cfg.mtu);
         // トンネルの入口の検査。TUN に書く前に、ルールのポートと ping の答えだけを通す
         let inbound = crate::inbound::Inbound {
             addr: cfg.address,
@@ -708,8 +692,7 @@ mod device {
             dc,
             tun,
             SocketAddr::from(([0, 0, 0, 0], 0)),
-            seed,
-            unix,
+            unix_floor,
             filter,
         )
         .await
@@ -722,7 +705,10 @@ mod device {
             .await
             .map_err(|e| format!("read the tunnel device: {e}"))?;
         let Some(p) = st.peer else {
-            return Ok(DeviceReading::default());
+            return Ok(DeviceReading {
+                unix_high_water: st.unix_high_water,
+                ..DeviceReading::default()
+            });
         };
         // 単調な時計の値を壁時計に直す
         let last_handshake = p.last_handshake.and_then(|t| {
@@ -731,6 +717,7 @@ mod device {
         Ok(DeviceReading {
             last_handshake,
             last_handshake_at: p.last_handshake,
+            unix_high_water: st.unix_high_water,
             rx_bytes: p.rx_bytes,
             tx_bytes: p.tx_bytes,
         })

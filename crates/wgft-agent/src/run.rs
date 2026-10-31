@@ -299,7 +299,7 @@ impl Agent {
     /// 300 秒に戻す。あわせて、時刻の印の高い水位を残し、入口の検査が捨てた数をログに出す。
     async fn watch_tunnel(&mut self) {
         let Some(t) = &self.tunnel else { return };
-        t.persist_clock();
+        t.persist_clock().await;
         let counts = t.filter_counts();
         let finished = t.is_finished();
         let started = t.started_at();

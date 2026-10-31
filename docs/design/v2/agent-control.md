@@ -168,8 +168,12 @@ keepalive の秒が 1 から 65535 の外なら 25 秒を使います。
 
 試作のトンネルは Linux の TUN とカーネルの TCP/IP を使います。
 所有者の判断で、Rust の wgstack ができるまでの試作の形です。
-`tunnel` の module は `wgft-wireguard-tun` の外殻で device を動かし、外殻が TUN を作り、全体状態の `wg.address` と MTU を付けて link を上げます。
-カーネルは帯の経路を TUN に向けるので、server のアドレスへの packet は TUN を通ります。
+`tunnel` の module は `wgft-wireguard-tun` の外殻で device を動かします。
+外殻は TUN を作り、agent のトンネルのアドレスを /32 で付けて link を上げます。
+server のアドレスへの経路は外殻の専用の経路表に入れ、agent のアドレスを送信元とする packet だけがその表を引きます。
+主の経路表は変えません。
+このため、中継のリスナーと ping のソケットは agent のトンネルのアドレスに bind します。
+外殻の作りは [WireGuard の device の層](wireguard-device.md) にあります。
 TUN を作るには root か `CAP_NET_ADMIN` と `ip` のコマンドが要ります。
 v1 のユーザー空間モードの agent は特権を要らないので、この点は製品の形と違います。
 
@@ -195,11 +199,12 @@ ping はカーネルの ICMP のデータグラムのソケットをトンネル
 閾値は 300 秒で、作り直すたびに 2 倍にして 900 秒で止め、新しいハンドシェイクを見たら 300 秒に戻します。
 仕様のハンドシェイクの監視と作り直しのとおりです。
 
-handshake の初めの送信の時刻の印 (TAI64N) は、device を作るときに渡す壁時計の値に経過時間を足したものです。
+handshake の初めの送信の時刻の印 (TAI64N) は device が作ります。
 相手の WireGuard は前に受けた印より古い印の handshake を捨てるので、壁時計が前の device より戻っていると handshake が通らなくなります。
 RTC の無いホストが NTP の前に起動した場合や、時計を巻き戻した場合に当たります。
-そこで、プロセスの中で前の device の印より 1 秒新しい値と、データディレクトリの `agent.json.clock` に残した印より 1 秒新しい値と、今の壁時計の最も大きい値を渡します。
-印は device を作るときと 30 秒ごとと閉じるときに残します。
+device は、作るときに渡す下限より 1 秒新しい値と壁時計の大きい方から印を作り、使った印の高い水位を返します。
+agent は、プロセスの中で見た最も高い水位と、データディレクトリの `agent.json.clock` に残した水位の大きい方を下限として渡します。
+水位は 30 秒ごとと閉じるときに読み、秒に切り上げて `agent.json.clock` に残します。
 `agent.json` に入れないのは、Go の v1 の agent が `agent.json` を書き直すと知らないキーを捨てるためです。
 
 ### トンネルの入口の検査
