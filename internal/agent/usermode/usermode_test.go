@@ -71,7 +71,7 @@ func TestSecondsToDuration(t *testing.T) {
 // RelayOptions が wg.udp_timeout_stream をそのまま `* time.Second` していた場合、この巻き戻った
 // 512ns が UDPIdleTimeout に渡り、relay.New はそれを 0 以下としては直さない(relay.go:189-191)。
 func TestRelayOptionsUDPTimeoutStreamOverflow(t *testing.T) {
-	d := New(nil, resource.Limits{}, "")
+	d := New(nil, resource.Limits{}, "", 0)
 
 	var overflowSeconds int64 = 20211507185753197
 	if !fitsInt(overflowSeconds) {
@@ -146,14 +146,14 @@ func TestTunnelConfigKeepaliveOverflow(t *testing.T) {
 // 設定したときは判定と設定の名前を渡す。
 func TestRelayOptionsAllowTargets(t *testing.T) {
 	st := &proto.State{WG: proto.WGConfig{UDPTimeoutStream: 120}}
-	if o := New(nil, resource.Limits{}, "").RelayOptions(st.WG); o.AllowTarget != nil || o.AllowTargetSource != "" {
+	if o := New(nil, resource.Limits{}, "", 0).RelayOptions(st.WG); o.AllowTarget != nil || o.AllowTargetSource != "" {
 		t.Errorf("without a list: AllowTarget=%v source=%q, want none", o.AllowTarget != nil, o.AllowTargetSource)
 	}
 	list, err := allowtargets.Parse("192.168.1.20:25565")
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := New(list, resource.Limits{}, "").RelayOptions(st.WG)
+	o := New(list, resource.Limits{}, "", 0).RelayOptions(st.WG)
 	if o.AllowTarget == nil {
 		t.Fatal("with a list: AllowTarget is nil")
 	}
@@ -221,7 +221,7 @@ func TestCloseOrder(t *testing.T) {
 		ServerPubkey: srvKey.PublicKey().String(), Endpoint: "127.0.0.1:9",
 		Address: "10.200.0.2/24", MTU: 1420, Keepalive: 1, UDPTimeoutStream: 120,
 	}
-	d := New(nil, resource.Limits{}, "")
+	d := New(nil, resource.Limits{}, "", 0)
 	if _, err := d.Build(priv, wg); err != nil {
 		t.Fatalf("Build: %v", err)
 	}

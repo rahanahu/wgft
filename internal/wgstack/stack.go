@@ -44,14 +44,43 @@ func (l limits) conns() int { return l.maxFlows + l.acceptQ } // N_c = K + Q
 
 // stack は決定的な核。goroutine を作らず、時計と乱数を直接読まない。操作は「packet と時刻を受けて
 // 状態を変え、出力を返す」(input と poll)、「時刻を受けてタイマーを進める」(advance)、アプリケーションの
-// 操作(conn.go と listener.go)の 3 種類だけである。例外は boost の回収で、別の Device の接続の需要を
-// 確かめるとき、その接続の Device の時計(clock)を読む。
+// 操作(conn.go と listener.go)の 3 種類だけである。例外は次の 3 つである。
 //
-// 錠は表の錠 tmu と接続ごとの錠 tcb.mu の 2 段で、ほかは末端の錠(output.mu、wheel.mu、chunkPool.mu、
-// boostPool.mu、rngMu、chMu)である。順は tcb.mu -> tmu -> 末端で、tmu を持ったまま tcb.mu を取らない。
-// 表の錠は 4 つ組の hash の表、空きの枠の list、握手の途中の表、TIME_WAIT の表、待ち受けの表と accept の
-// 待ち行列を守る。ある接続の処理が別の接続に触れるとき(boost の回収)は、自分の錠を離してから相手の錠を
-// TryLock で取る。
+//   - boost の回収は、別の Device の接続の需要を確かめるとき、その接続の Device の時計(clock)を読む
+//   - アプリケーションの読み書きの期限(conn.go の deadline)は壁時計で測る
+//   - 送信の向きのバッチの印の鍵(sendLedger.key)は、作成の時に Config.Rand ではなく crypto/rand から読む。
+//     鍵は秘密で、再現する必要が無いためである
+//
+// ほかの乱数(ISN と timestamp の鍵、表の hash の種、challenge ACK の揺らぎ、区間の木の優先度の種、IP の ID の
+// 始めの値)は Config.Rand から作る。
+//
+// 錠は次の順で取り、後の錠を持ったまま前の錠を取らない。末端の錠は中で錠を取らない。
+//
+//   - Device.readMu:出力(Read と Poll)を直列にする。中で出力の組の選び方(output の cur と deficit)と送信の
+//     向きの台帳(txb)の Read の側を使い、tcb.mu、tmu、udp.mu を取る
+//   - advMu:タイマーと行の期限を進める advance を直列にする。中で tcb.mu と tmu を取る
+//   - tcb.mu:接続の錠で、枠のすべての欄を守る。中で tmu、boostPool.mu、chMu と末端の錠を取る
+//   - tmu:表の錠で、4 つ組の hash の表、空きの枠の list、握手の途中の表、TIME_WAIT の表、待ち受けの表と
+//     accept の待ち行列を守る。中で chMu と末端の錠を取る。tmu を持ったまま tcb.mu を取らない
+//   - udp.mu:UDP の状態。中で output.mu、chunkPool.mu、deadline.mu を取る。tcb.mu と tmu とは入れ子にしない
+//   - boostPool.mu:boost の枠の集まり。acquire は boostPool.mu を離してから保有者の tcb.mu を TryLock で取り、
+//     取れなければその保有者を見送る。保有者の錠の中で boostPool.mu を取り直す
+//   - chMu:challenge ACK の token bucket。中で rngMu を取る
+//   - ping.mu:echo の endpoint の表。中で deadline.mu を取る
+//   - 末端:output.mu、wheel.mu、chunkPool.mu、rngMu、icmpMu、gate.mu、deadline.mu。再組み立ての表
+//     (ipv4frag.Table)の錠はその package の中で閉じ、wgstack を呼び返さない
+//
+// boostPool はプロセスで 1 つなので、TryLock で取る保有者は別の Device の接続のことがある。
+//
+// 錠の中で、wgstack の外のコードを呼ぶところがある。どれも待たずに戻り、Device を呼び返してはいけない。
+//
+//   - 時計(Config.Clock の Now):readMu の中(Read と Poll)、tcb.mu の中(tryBoost、Accept、Conn の Read、
+//     Write、Close など)、boost の回収で別の Device の接続の tcb.mu の中で読む。ManualClock の錠は末端の錠である
+//   - Config.Trace と OnBoost で登録した関数:tcb.mu の中で呼ぶ
+//
+// ある接続の処理が別の接続に触れるとき(boost の回収)は、自分の錠を離してから相手の錠を TryLock で取る。
+// 錠を持たずに atomic で使う値は、counters、ipID、sleepUntil、fragNextSweep と、台帳のうち Send を見る層と
+// 分け合う issued、acked、pending である。
 type stack struct {
 	boundOnce sync.Once // Bound の値(stats.go)。表の大きさは作成の時に決まる
 	boundVal  Bound
@@ -106,6 +135,8 @@ type stack struct {
 
 	done chan struct{} // Device の Close で閉じる
 
+	txb sendLedger // 送信の向きのバッチの予算(batch.go)。Read の側は Device の readMu の中で、Send を見る層は atomic の欄だけを使う
+
 	trace       func(TraceEvent)  // Config.Trace
 	boostPolicy BoostPolicy       // Config.TestBoost
 	ccPolicy    CongestionControl // Config.TestCongestion
@@ -134,6 +165,7 @@ type counters struct {
 	probeAborted   atomic.Uint64
 	boostGranted   atomic.Uint64
 	boostReclaimed atomic.Uint64
+	boostReneged   atomic.Uint64
 
 	// 送り手の事象(wgstack-performance.md の「安く確かめる手順」)
 	rtos, rtosBackedOff, rtosShortOfDupThresh               atomic.Uint64
@@ -219,7 +251,7 @@ func newStack(local []netip.Prefix, mtu int, lim limits, clock func() int64, ran
 		c.rcv.r.pool = &s.chunks
 		s.free[i] = int32(n - 1 - i) // 小さい番号から使う
 	}
-	s.connIdx = newIndex(n, tableKey)
+	s.connIdx = newIndex(n, tableKey, true)
 	s.syn = newSynTable(lim.synRows, tableKey)
 	s.tw = newTWTable(lim.twRows, tableKey)
 	s.out = output{
@@ -580,4 +612,61 @@ func (s *stack) poll(b []byte, now int64) int {
 		o.mu.Unlock()
 		return n
 	}
+}
+
+// isClosed は Device の Close が核を閉じたかを返す。
+func (s *stack) isClosed() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// close は核を閉じる。待っている操作を解き、接続の枠、行、boost の枠をすべて返す。
+func (s *stack) close() {
+	s.tmu.Lock()
+	if s.closed {
+		s.tmu.Unlock()
+		return
+	}
+	s.closed = true
+	close(s.done)
+	for _, l := range s.listeners {
+		l.closed = true
+		close(l.closeCh)
+	}
+	clear(s.listeners)
+	for id := range s.syn.rows {
+		if s.syn.rows[id].used {
+			s.syn.rows[id].promoting = false
+			s.removeSynRow(int32(id))
+		}
+	}
+	for s.tw.head >= 0 {
+		s.removeTWRow(s.tw.head)
+	}
+	s.tmu.Unlock()
+	s.udpClose()
+	s.frag.Close()
+	for i := range s.conns {
+		c := &s.conns[i]
+		c.mu.Lock()
+		if c.state != stFree {
+			c.signalRead()
+			c.signalWrite()
+			c.release()
+		}
+		c.forgetSlotArrays()
+		c.recs.recs = nil
+		c.mu.Unlock()
+	}
+	s.out.mu.Lock()
+	s.out.ctl.n = 0
+	s.out.mu.Unlock()
+	s.chunks.mu.Lock()
+	s.chunks.closed = true
+	s.chunks.free = nil
+	s.chunks.mu.Unlock()
 }

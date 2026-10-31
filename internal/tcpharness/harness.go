@@ -58,6 +58,10 @@ type Engine struct {
 	// SlowFirst names scenarios a parallel engine starts first because they wait long in real
 	// time, such as for a 30 s timer, so the others run while they wait.
 	SlowFirst []string
+	// NewPerformance, when set, builds the DUT for a Performance scenario: the engine as the
+	// measurement plan of wgstack-performance.md runs it. An engine without it runs such a
+	// scenario on New.
+	NewPerformance func(tb testing.TB, seed uint64) DUT
 }
 
 // Scenario is one engine-neutral conformance scenario.
@@ -70,6 +74,10 @@ type Scenario struct {
 	// this scenario on top of its pinned configuration. A scenario family that checks a mechanism
 	// the pinned configuration switches off, such as RACK-TLP, turns it back on here.
 	Linux [][2]string
+	// Performance runs the scenario on each engine's performance configuration, Engine's
+	// NewPerformance, in place of the pinned conformance one: the reference Linux of the
+	// measurement plan, whose buffers autotune, and wgstack with its boost from the accept.
+	Performance bool
 }
 
 // runSeed is the run's seed: SeedEnv's value, or a random one that the run logs.
@@ -201,6 +209,16 @@ func Record(t *testing.T, e Engine, s Scenario, seed uint64) map[string][]string
 	return a.outcome
 }
 
+// RecordFailures is Record, and it also returns the recorded failure messages, which name each
+// failed check's observation, so a teeth test can tell why a check failed.
+func RecordFailures(t *testing.T, e Engine, s Scenario, seed uint64) (map[string][]string, []string) {
+	a := attempt(t, e, s, seed)
+	if a.outcome == nil {
+		t.Fatalf("scenario %s did not start: %v", s.Name, a.msgs)
+	}
+	return a.outcome, a.msgs
+}
+
 // stallLimit and scenarioAttempts are Run's rule for running a failed scenario again. 10 ms is
 // below the margin every timed check leaves a correct DUT, and above the few milliseconds an idle
 // machine's scheduler takes.
@@ -230,7 +248,11 @@ func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
 		if e.Prepare != nil {
 			e.Prepare(rec, s)
 		}
-		d := e.New(rec, seed)
+		build := e.New
+		if s.Performance && e.NewPerformance != nil {
+			build = e.NewPerformance
+		}
+		d := build(rec, seed)
 		_, a.clocked = d.(ClockedDUT)
 		h := newH(rec, e, s.Name, d, seed)
 		a.outcome = h.outcome
@@ -354,6 +376,11 @@ type H struct {
 	outcome  map[string][]string
 	rng      *rand.Rand
 	nextPort uint16
+	// closed is set once a real-time DUT's Emitted channel has been closed: nothing more can come
+	closed bool
+	// wall, when set, replaces time.Now as the clock of a real-time DUT. Tests set it to a coarse
+	// clock, such as the Windows runner's, to check that no decision rests on its resolution.
+	wall func() time.Time
 }
 
 func newH(t testing.TB, e Engine, scenario string, d DUT, seed uint64) *H {
@@ -546,6 +573,9 @@ func (h *H) Now() time.Time {
 	if c, ok := h.DUT.(ClockedDUT); ok {
 		return c.Now()
 	}
+	if h.wall != nil {
+		return h.wall()
+	}
 	return time.Now()
 }
 
@@ -570,6 +600,9 @@ func (h *H) next(d time.Duration) ([]byte, bool) {
 	defer timer.Stop()
 	select {
 	case pkt, ok := <-h.DUT.Emitted():
+		if !ok {
+			h.closed = true
+		}
 		return pkt, ok
 	case <-timer.C:
 		return nil, false
@@ -666,18 +699,51 @@ func (p *Peer) SendFreshAck() uint32 {
 // echoes a TSecr older than ts: a FIN the DUT sent before it had the segment that carried ts, such
 // as a tail loss probe that a slow testbench let fire before its ACK arrived. Only a segment with
 // f's sequence number, no payload, flags among FIN, ACK and PSH, and within probeWindow of f is
-// passed over, and the wait of d starts again after it. A second such segment, or any other,
-// fails the quiet: a DUT that dropped the testbench's ACK keeps resending with the old TSecr. On
-// a ClockedDUT nothing is passed over, since Inject returns after the engine handled the segment
-// and the race cannot happen. fAt is when f arrived. It returns how many it passed over.
-func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time) (Segment, bool, int) {
+// passed over. A second such segment, or any other, fails the quiet: a DUT that dropped the
+// testbench's ACK keeps resending with the old TSecr. On a ClockedDUT nothing is passed over,
+// since Inject returns after the engine handled the segment and the race cannot happen. fAt is
+// when f arrived. It returns how many it passed over, and timedOut when the wait for Delivered
+// below ended the quiet.
+//
+// The wait of d is the interval of a negative claim, so it starts only once the DUT has the ACK:
+// where c is a Deliverer on a real-time DUT, QuietSince first waits, for at most settleBudget,
+// until c reports Delivered, which it does once the ACK has moved it out of LAST-ACK. A segment
+// that comes during that wait is judged as above. Without that wait, a DUT that dropped the ACK
+// and passed one probe could leave d before its next retransmission: when the FIN went out
+// before the DUT had the ACK of the data in front of it, the probe comes at once and the
+// retransmission after a further probe timeout and RTO, 400 ms or more on an idle machine, and
+// more on a loaded runner (over 3.5 s once on the Windows runner). A DUT that has not reported
+// Delivered when settleBudget ends fails the quiet with timedOut: the interval cannot start,
+// since nothing shows the DUT has the ACK. The interval trusts the DUT's Delivered: a DUT that
+// reports Delivered while it still lacks the ACK gets the interval at once, as it did before
+// QuietSince waited for it.
+func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, c Conn) (seg Segment, quiet bool, stale int, timedOut bool) {
 	_, clocked := p.h.DUT.(ClockedDUT)
-	stale := 0
-	deadline := p.h.Now().Add(d)
+	delivered := func() bool { return true }
+	if dl, ok := c.(Deliverer); ok && !clocked {
+		delivered = dl.Delivered
+	}
+	settleBy := p.h.Now().Add(settleBudget)
+	var deadline time.Time // zero until the DUT has the ACK
 	for {
-		s, ok := p.Next(max(deadline.Sub(p.h.Now()), 0))
+		if deadline.IsZero() {
+			if delivered() {
+				deadline = p.h.Now().Add(d)
+			} else if !p.h.Now().Before(settleBy) {
+				return Segment{}, false, stale, true
+			}
+		}
+		wait := settlePoll
+		if !deadline.IsZero() {
+			wait = max(deadline.Sub(p.h.Now()), 0)
+		}
+		s, ok := p.Next(wait)
 		if !ok {
-			return Segment{}, true, stale
+			// past the deadline, or the DUT closed its output and nothing more can come
+			if !deadline.IsZero() || p.h.closed {
+				return Segment{}, true, stale, false
+			}
+			continue
 		}
 		// How long after the FIN the DUT sent the resend: from the DUT's own timestamps where it
 		// has them, which a stalled testbench cannot stretch, else from when each arrived here.
@@ -690,12 +756,21 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time) 
 		if !clocked && stale == 0 && probe && p.TS && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-ts) < 0 {
 			p.h.T.Logf("the FIN resent before the DUT had the testbench's latest segment, passed over once: %v", s)
 			stale++
-			deadline = p.h.Now().Add(d)
+			if !deadline.IsZero() {
+				deadline = p.h.Now().Add(d)
+			}
 			continue
 		}
-		return s, false, stale
+		return s, false, stale, false
 	}
 }
+
+// settleBudget bounds QuietSince's wait for the DUT to report the ACK; a conformant engine reports
+// it within milliseconds of the ACK. settlePoll is how often QuietSince asks in the meantime.
+const (
+	settleBudget = 3 * time.Second
+	settlePoll   = 10 * time.Millisecond
+)
 
 // probeWindow is how long after a FIN QuietSince accepts its resend as sent before the ACK: about
 // one minimum RTO. A tail loss probe on a near-zero RTT comes within a few milliseconds.

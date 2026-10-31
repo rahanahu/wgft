@@ -15,6 +15,7 @@ type recvBuf struct {
 	nxtOff  uint64 // 次に順序どおりに受ける byte(RCV.NXT)
 	iv      []interval
 	n       int    // 使っている区間の数
+	ooo     uint64 // 区間が持つ順序外の byte の合計
 	root    int16  // 木の根の節。節の番号は iv の位置 + 1 で、0 は無し
 	free    int16  // 空きの節の list の頭
 	used    int16  // iv のうち一度でも節に使った数
@@ -73,7 +74,35 @@ func (b *recvBuf) setIntervals(iv []interval) bool {
 
 // clearIntervals は順序外の区間をすべて捨て、木と節の置き場と最近の区間を空にする。
 func (b *recvBuf) clearIntervals() {
-	b.n, b.root, b.free, b.used, b.nrecent = 0, 0, 0, 0, 0
+	b.n, b.root, b.free, b.used, b.nrecent, b.ooo = 0, 0, 0, 0, 0, 0
+}
+
+// renege は順序外のデータのうち、limit 以降の byte と、始まりの順で maxN 個目より後の区間を捨てる(RFC 2018
+// 8 節の取り消し)。limit をまたぐ区間は limit で切る。捨てた区間の最近の印も外すので、後の SACK の block は
+// 捨てた範囲を知らせない。順序どおりのデータは捨てない。呼び出し側は nxtOff <= limit を保証する。捨てた byte
+// の数を返す。輪の中身は消さないので、呼び出し側は続けて輪を移す(setRecvStage は残った範囲だけを写す)。
+func (b *recvBuf) renege(limit uint64, maxN int) uint64 {
+	if b.n > maxN {
+		ivs := b.walk(b.root, make([][2]uint64, 0, maxN+1), maxN+1)
+		limit = min(limit, ivs[maxN][0])
+	}
+	if b.root == 0 || b.rightmost() <= limit {
+		return 0
+	}
+	before := b.ooo
+	// 始まりが limit より前の区間を残す。limit は呼び出し側の readOff + floor か、nxtOff より後の区間の始まりなので
+	// 1 以上である
+	keep, drop := b.splitStartUpTo(b.root, limit-1)
+	b.n -= b.release(drop)
+	if keep != 0 {
+		if x := b.node(b.lastNode(keep)); b.full(x.end) > limit {
+			b.ooo -= b.full(x.end) - limit
+			x.end = uint32(limit)
+		}
+	}
+	b.root = keep
+	b.forgetRecent(func(x uint64) bool { return x >= limit })
+	return before - b.ooo
 }
 
 // alloc は節を 1 つ取り、区間 [s, e) を入れて返す。空きが無ければ 0 を返す。
@@ -101,12 +130,13 @@ func splitmix64(x uint64) uint64 {
 	return x ^ (x >> 31)
 }
 
-// release は木 t の節をすべて空きに返し、その数を返す。
+// release は木 t の節をすべて空きに返し、その数を返す。返した区間の byte を順序外の byte の合計から引く。
 func (b *recvBuf) release(t int16) int {
 	if t == 0 {
 		return 0
 	}
 	x := b.node(t)
+	b.ooo -= uint64(x.end - x.start)
 	l, r := x.l, x.r
 	x.l, x.r = b.free, 0
 	b.free = t
@@ -306,6 +336,7 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 			return res
 		}
 		b.n++
+		b.ooo += end - off
 		b.root = b.merge(b.merge(l, k), r)
 		b.touchRecent(off, end)
 	} else {
@@ -325,6 +356,7 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 		b.n -= b.release(m)
 		k := b.alloc(ns, ne) // 返したばかりの節があるので取れる
 		b.n++
+		b.ooo += ne - ns
 		b.root = b.merge(b.merge(l, k), r)
 		b.touchRecent(ns, ne)
 	}

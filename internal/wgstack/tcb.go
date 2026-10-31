@@ -3,7 +3,6 @@ package wgstack
 import (
 	"sync"
 	"syscall"
-	"time"
 )
 
 // tcpState は接続の枠の状態。握手の途中(SYN-RCVD)は行(syn.go)、行に移った TIME_WAIT と FIN_WAIT_2 は
@@ -43,7 +42,7 @@ type tcb struct {
 	mu      sync.Mutex
 	s       *stack
 	id      int32
-	gen     uint32
+	gen     uint64
 	inIndex bool
 
 	// accept の待ち行列の節(表の錠)
@@ -87,11 +86,20 @@ type tcbState struct {
 	irs, rcvNxt   uint32
 	rcvCap        uint64
 	advRight      uint64 // 広告した窓の右端(受信の offset)。後ろへ戻さない
+	rcvSsthresh   uint64 // 広告する窓の歩みの上限(Linux の rcv_ssthresh、rcvwin.go)
+	rcvWant       uint64 // 受け手の往復ごとの測定が求めた窓の上限。下げない
+	rsTime        int64  // 窓の自動調整の区間の始めの時刻
+	rsSeq         uint64 // 数え始めた時の readOff
+	rsSpace       uint64 // 前の区間に読んだ量
+	rcvRTT        int64  // 受け手の RTT の推定。0 は推定が無い
+	rttWinSeq     uint64 // 窓による標本の終わりの offset
+	rttWinTime    int64  // 窓による標本の始めの時刻。0 は標本を始めていない
+	rttTsecr      uint32 // 前の timestamp による標本の TSecr
 	finRcvd       bool
 	oooFin        bool
 	oooFinOff     uint64
 	rcvSinceAck   int
-	rcvMSSEst     uint32    // 相手の segment の大きさの推定(Linux の icsk_ack.rcv_mss)
+	rcvMSSEst     uint32    // 相手の segment の大きさの推定(Linux の rcv_mss)
 	pingpong      bool      // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
 	lastDataRcvd  int64     // 最後に中身を受け入れた時刻
 	rcvdData      bool      // lastDataRcvd が有効
@@ -265,30 +273,31 @@ func (c *tcb) signalWrite() {
 func (c *tcb) establish(r *synRow, seg *segment, now int64) {
 	s := c.s
 	c.tcbState = tcbState{
-		state:      stEstablished,
-		tup:        r.tup,
-		iss:        r.iss,
-		irs:        r.irs,
-		sndUna:     r.iss + 1,
-		sndNxt:     r.iss + 1,
-		sndMax:     r.iss + 1,
-		wsOK:       r.wsOK,
-		sackOK:     r.sackOK,
-		tsOK:       r.tsOK,
-		peerMSS:    int(r.peerMSS),
-		pmtu:       s.mtu,
-		sndCap:     sendFloor,
-		rcvNxt:     r.irs + 1,
-		rcvCap:     recvFloor,
-		advRight:   uint64(r.rcvWnd),
-		tsRecent:   r.tsRecent,
-		tsRecentAt: now,
-		tsOffset:   r.tsOffset,
-		rto:        int64(rtoInit),
-		ssthresh:   ^uint32(0),
-		recover:    r.iss,
-		rch:        make(chan struct{}, 1),
-		wch:        make(chan struct{}, 1),
+		state:       stEstablished,
+		tup:         r.tup,
+		iss:         r.iss,
+		irs:         r.irs,
+		sndUna:      r.iss + 1,
+		sndNxt:      r.iss + 1,
+		sndMax:      r.iss + 1,
+		wsOK:        r.wsOK,
+		sackOK:      r.sackOK,
+		tsOK:        r.tsOK,
+		peerMSS:     int(r.peerMSS),
+		pmtu:        s.mtu,
+		sndCap:      sendFloor,
+		rcvNxt:      r.irs + 1,
+		rcvCap:      recvFloor,
+		rcvSsthresh: recvFloor,
+		advRight:    uint64(r.rcvWnd),
+		tsRecent:    r.tsRecent,
+		tsRecentAt:  now,
+		tsOffset:    r.tsOffset,
+		rto:         int64(rtoInit),
+		ssthresh:    ^uint32(0),
+		recover:     r.iss,
+		rch:         make(chan struct{}, 1),
+		wch:         make(chan struct{}, 1),
 	}
 	c.lastAckSent = c.rcvNxt
 	if c.wsOK {
@@ -325,544 +334,6 @@ func (c *tcb) establish(r *synRow, seg *segment, now int64) {
 	c.wdl.reset()
 }
 
-// rttSample は RTT の測定値 r(ns)で SRTT、RTTVAR、RTO を更新する(RFC 6298 2 節)。
-func (c *tcb) rttSample(r int64) {
-	if r < 0 {
-		return
-	}
-	c.tlpSampled = true
-	if !c.hasRTT {
-		c.srtt, c.rttvar, c.hasRTT = r, r/2, true
-	} else {
-		d := c.srtt - r
-		if d < 0 {
-			d = -d
-		}
-		c.rttvar = (3*c.rttvar + d) / 4
-		c.srtt = (7*c.srtt + r) / 8
-	}
-	if !c.hasMinRTT || r < c.minRTT {
-		c.minRTT, c.hasMinRTT = r, true
-	}
-	// 下限は RTO 全体ではなく RTTVAR の項に掛ける(Linux と同じ)。RFC 6298 の式の値以上で、RTTVAR の小さな
-	// 経路でも Linux より早く RTO を起こさない(wgstack-performance.md の「RACK-TLP」のタイマーの規則)
-	c.rto = min(c.srtt+max(4*c.rttvar, int64(rtoMin)), int64(rtoMax))
-}
-
-// tsRTTSample は、相手が返した自分の TSval(TSecr)から RTT を測る(RFC 7323 4.1)。自分の今の TSval より
-// 先の TSecr は、自分が送っていない値なので使わない。
-func (c *tcb) tsRTTSample(tsEcr uint32, now int64) int64 {
-	d := int32(tsClock(now) + c.tsOffset - tsEcr)
-	if d < 0 {
-		return -1
-	}
-	r := int64(d) * int64(time.Millisecond)
-	c.rttSample(r)
-	return r
-}
-
-// curRTO は今の後退を含めた RTO。
-func (c *tcb) curRTO() int64 {
-	r := c.rto
-	for range c.backoff {
-		r *= 2
-		if r >= int64(rtoMax) {
-			return int64(rtoMax)
-		}
-	}
-	return r
-}
-
-// rcvWindow は今広告している窓の大きさ(byte)。
-func (c *tcb) rcvWindow() uint32 {
-	if c.advRight <= c.rcv.nxtOff {
-		return 0
-	}
-	return uint32(min(c.advRight-c.rcv.nxtOff, 1<<30))
-}
-
-// acceptable は RFC 9293 3.10.7.4 の segment の受け入れの判定。窓が 0 のときは、番号が RCV.NXT と一致する
-// segment を ACK と RST のために受け入れ、中身は後で窓の外として捨てる。
-func (c *tcb) acceptable(seg *segment) bool {
-	wnd := c.rcvWindow()
-	n := seg.seqLen()
-	in := func(x uint32) bool { return seqGE(x, c.rcvNxt) && seqLT(x, c.rcvNxt+wnd) }
-	switch {
-	case wnd == 0:
-		return seg.seq == c.rcvNxt
-	case n == 0:
-		return in(seg.seq)
-	default:
-		return in(seg.seq) || in(seg.seq+n-1)
-	}
-}
-
-// oowAck は受け入れられない segment に ACK を返す。Linux の tcp_oow_rate_limited と同じく、中身のある
-// segment には制限なく返し、中身の無い segment には接続ごとに 500 ms に 1 回まで返す。
-func (c *tcb) oowAck(seg *segment, now int64) {
-	if len(seg.payload) == 0 || seg.has(flagSYN) {
-		if c.lastOOW != 0 && now-c.lastOOW < int64(500*time.Millisecond) {
-			return
-		}
-		c.lastOOW = now
-	}
-	// RCV.NXT より前にある重複の部分は、範囲を D-SACK で知らせる(RFC 2883、Linux の tcp_dsack_set)
-	if n := uint32(len(seg.payload)); n > 0 && !seg.has(flagSYN) && seqLT(seg.seq, c.rcvNxt) {
-		c.noteDuplicate(seg.seq, seqMin(seg.seq+n, c.rcvNxt)-seg.seq, now)
-	}
-	c.ackNow = true
-}
-
-// challengeAck は RFC 5961 の challenge ACK を、Device 全体の速さの制限の内側で送る。
-func (c *tcb) challengeAck(now int64) {
-	if c.s.challengeAllowed(now) {
-		c.ackNow = true
-	}
-}
-
-// input は接続の枠への segment を処理する。mu を持って呼ぶ。真を返したら、呼び出し側は segment を
-// もう一度表から引く(TIME_WAIT の接続が RFC 6191 の SYN を受けて CLOSED になった)。そのとき reuse に
-// 前の接続の SND.NXT を書く。
-func (c *tcb) input(seg *segment, now int64, reuse *reuseISS) bool {
-	if c.state == stTimeWait {
-		again := c.timeWaitInput(seg, now, reuse)
-		c.afterInput(now)
-		return again
-	}
-	// PAWS(RFC 7323 5.3)。24 日を超えて TS.Recent を更新していなければ、相手の時計が一周しうるので
-	// TS.Recent を古いとみなして比べない(RFC 7323 5.5)
-	if c.tsOK && seg.opt.hasTS && !seg.has(flagRST) && seqLT(seg.opt.tsVal, c.tsRecent) && now-c.tsRecentAt <= int64(pawsIdle) {
-		c.oowAck(seg, now)
-		c.afterInput(now)
-		return false
-	}
-	if !c.acceptable(seg) {
-		if !seg.has(flagRST) {
-			if seg.has(flagSYN) {
-				c.challengeAck(now)
-			} else {
-				c.oowAck(seg, now)
-			}
-		}
-		c.afterInput(now)
-		return false
-	}
-	// RST(RFC 5961 3.2)
-	if seg.has(flagRST) {
-		if seg.seq == c.rcvNxt {
-			c.resetByPeer()
-			return false
-		}
-		c.challengeAck(now)
-		c.afterInput(now)
-		return false
-	}
-	// 確立した後の SYN(RFC 5961 4.2)
-	if seg.has(flagSYN) {
-		c.challengeAck(now)
-		c.afterInput(now)
-		return false
-	}
-	if !seg.has(flagACK) {
-		return false
-	}
-	// ACK の受け入れの範囲(RFC 5961 5.2)
-	if seqGT(seg.ack, c.sndMax) || seqLT(seg.ack, c.sndUna-c.maxSndWnd) {
-		c.challengeAck(now)
-		c.afterInput(now)
-		return false
-	}
-	// TS.Recent の更新(RFC 7323 4.3)
-	if c.tsOK && seg.opt.hasTS && seqLE(seg.seq, c.lastAckSent) {
-		c.tsRecent, c.tsRecentAt = seg.opt.tsVal, now
-	}
-	c.processAck(seg, now)
-	if c.state == stFree || c.state == stClosed {
-		return false
-	}
-	c.inputData(seg, now)
-	c.afterInput(now)
-	return false
-}
-
-// timeWaitInput は枠に残る TIME_WAIT の接続への segment を処理する。
-func (c *tcb) timeWaitInput(seg *segment, now int64, reuse *reuseISS) bool {
-	if seg.has(flagRST) {
-		if seg.seq == c.rcvNxt {
-			c.toClosed(nil)
-		}
-		return false
-	}
-	if seg.has(flagSYN) {
-		if !seg.has(flagACK) && rfc6191(seg, c.tsOK, c.tsRecent, c.rcvNxt) {
-			s := c.s
-			s.tmu.Lock()
-			verdict := s.reuseVerdict(seg)
-			if verdict == reuseFull {
-				s.refuseReuse(now)
-			}
-			s.tmu.Unlock()
-			switch verdict {
-			case reuseNoListener:
-				c.challengeAck(now) // Linux と同じく TIME_WAIT の ACK を返す
-				return false
-			case reuseFull:
-				return false // 枠の TIME_WAIT を保ち、相手の SYN の再送を待つ
-			}
-			// 接続は CLOSED になり、アプリケーションはそれまでのデータと io.EOF を読める
-			*reuse = reuseISS{ok: true, sndNxt: c.sndMax}
-			c.toClosed(nil)
-			return true
-		}
-		c.challengeAck(now)
-		return false
-	}
-	if seg.has(flagFIN) && seg.seq+uint32(len(seg.payload))+1 == c.rcvNxt {
-		c.ackNow = true
-		c.twEnter = now
-		c.arm(tmrClose, now+int64(twTimeout))
-		return false
-	}
-	if seg.seqLen() > 0 || seg.seq != c.rcvNxt {
-		c.oowAck(seg, now)
-	}
-	return false
-}
-
-// processAck は ACK の欄を処理する(RFC 9293、RFC 5681、RFC 6582)。
-func (c *tcb) processAck(seg *segment, now int64) {
-	ack := seg.ack
-	if c.hystartOn() {
-		c.hs.sndNxt, c.hs.sndNxtOK = c.sendableEnd(), true // この ACK の前の SND.NXT(lazyegress.go)
-	}
-	c.probesOut = 0
-	if c.persist {
-		c.retransStart = 0 // 相手は probe に応えている
-	}
-	wndChanged := false
-	if seqLT(c.sndWl1, seg.seq) || (c.sndWl1 == seg.seq && seqLE(c.sndWl2, ack)) {
-		w := uint32(seg.wnd) << c.sndWscale
-		wndChanged = w != c.sndWnd
-		c.sndWnd, c.sndWl1, c.sndWl2 = w, seg.seq, ack
-		c.maxSndWnd = max(c.maxSndWnd, w)
-	}
-	// RFC 6937 の DeliveredData は SND.UNA の差と SACK 済みの byte の差の和である。累積の確認が先に SACK した
-	// byte を覆うと SACK 済みの byte は減るので、差は確認の前の値から取る
-	var delivered int64
-	sackedBefore := c.sacked
-	rackX, rackE := c.rackXmit, c.rackEnd
-	c.origDelivered = false
-	advanced := seqGT(ack, c.sndUna)
-	c.priorUna, c.priorCwnd = c.sndUna, c.cwnd
-	switch {
-	case advanced:
-		delivered = int64(ack - c.sndUna)
-		c.newAck(seg, ack, now)
-	case ack == c.sndUna && len(seg.payload) == 0 && !seg.has(flagFIN) && !wndChanged && c.sndMax != c.sndUna:
-		c.dupAck(now)
-	}
-	if c.state == stFree || c.state == stClosed {
-		return
-	}
-	newly := c.markSACK(seg, now)
-	delivered += int64(c.sacked) - int64(sackedBefore)
-	if c.sackOK {
-		if c.rackXmit != rackX || c.rackEnd != rackE {
-			c.rackChanges++
-		}
-		c.rackDetect(now)
-		if c.frto != 0 && seqLT(c.sndUna, c.recover) {
-			c.frtoAfterAck(seg, advanced, newly > 0 || (!advanced && c.sndUna != c.sndMax))
-		} else if c.rtoEpisode && seqGE(c.sndUna, c.recover) {
-			c.rtoRecovered(seg)
-		}
-		c.tlpOnAck(ack, advanced, newly)
-		c.sackAfterAck(uint32(max(delivered, 0)))
-		if advanced {
-			c.scheduleTLP(now)
-		} else if c.inRecovery {
-			c.tlpAt = 0
-		}
-		c.rearmRetrans()
-	} else if c.rtoEpisode && seqGE(c.sndUna, c.recover) {
-		// SACK を交渉しない接続の RTO の後の回復の終わり。SND.UNA が recover から 2^31 先へ進んだ後に、番号の
-		// 比べで回復の中に戻ったとみなさないように、印を消す
-		c.rtoEpisode = false
-	}
-	if advanced {
-		c.noteDrainedWithData(now)
-	}
-	if c.sndWnd > 0 && c.persist {
-		c.clearRetransTimers()
-		c.leavePersist(now)
-	}
-	if c.s.trace != nil {
-		c.traceEvent(TraceAck, now)
-	}
-}
-
-// newAck は累積の確認を進める ACK を処理する。
-func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
-	acked := ack - c.sndUna
-	// 確認された byte を送信の輪から外す。FIN の 1 は byte に数えない
-	dataAcked := min(uint64(acked), c.tailOff-c.unaOff)
-	old := c.unaOff
-	c.unaOff += dataAcked
-	c.snd.trim(old, c.unaOff, c.tailOff)
-	// 記録を外し、timestamp が無ければ再送していない記録で RTT を測る(Karn)。この ACK が再送した記録を
-	// 1 つでも確認したら測らない(Linux の FLAG_RETRANS_DATA_ACKED)。記録は RTO の後も残るので、再送を待つ間に
-	// 届いていた元の segment で測ると、穴が埋まるまでの時間を RTT に含めてしまう。欄の更新は記録を外す前に
-	// 古い SND.UNA で行う
-	var sample int64 = -1
-	rtxAcked := false
-	for c.recs.n > 0 {
-		r := c.recs.at(0)
-		end := r.seq + uint32(r.length)
-		if seqGT(end, ack) {
-			if seqLT(r.seq, ack) {
-				c.trimHead(r, ack-r.seq)
-			}
-			break
-		}
-		if r.flags&recRetransmitted == 0 {
-			sample = now - r.sentAt
-		} else {
-			rtxAcked = true
-		}
-		c.dropHead(r, now)
-		c.recs.pop()
-		c.recBase++
-	}
-	c.sndUna = ack
-	if c.tlpCut && seqGE(ack, c.tlpCutSeq) {
-		c.tlpCut = false // 縮小が覆う窓のデータはすべて確認された。番号が 1 周した後に古い番号と比べない
-	}
-	if seqLT(c.sndNxt, ack) {
-		c.sndNxt = ack
-	}
-	ackRTT := int64(-1) // この ACK で測った RTT(HyStart++ が使う)
-	if c.tsOK && seg.opt.hasTS && seg.opt.tsEcr != 0 {
-		ackRTT = c.tsRTTSample(seg.opt.tsEcr, now)
-	} else if sample >= 0 && !rtxAcked {
-		c.rttSample(sample)
-		ackRTT = sample
-	}
-	c.backoff = 0
-	c.retransStart = 0
-	mss := uint32(c.segMSS())
-	flight := c.sndMax - c.sndUna
-	if c.inRecovery {
-		if seqGE(ack, c.recover) {
-			// 回復の終わり。SACK では RFC 6937 の cwnd = ssthresh、SACK が無ければ RFC 6582 3.2 の 3
-			c.inRecovery = false
-			c.rackRecoveryDone()
-			if c.sackOK {
-				c.cwnd = c.ssthresh
-			} else {
-				c.cwnd = min(c.ssthresh, max(flight, mss)+mss)
-			}
-			if c.mayUndo(seg) {
-				c.undo() // 回復の再送は不要だった(Linux の tcp_try_undo_recovery)
-			}
-			c.undoMarker = false
-		} else if c.sackOK {
-			// SACK による回復の部分の確認。再送は NextSeg が選び、窓は PRR が決める
-			c.s.partialAcks.Add(1)
-		} else {
-			// 部分の確認(RFC 6582 3.2 の 5):次の穴を再送し、確認された分だけ窓を縮め、1 SMSS 以上を
-			// 確認したら SMSS を足し戻す
-			c.fastRtx = true
-			c.rtxCause = rtxPartial
-			c.s.partialAcks.Add(1)
-			c.cwnd -= min(c.cwnd, acked)
-			if acked >= mss {
-				c.cwnd += mss
-			}
-			c.cwnd = max(c.cwnd, mss)
-		}
-	} else if !c.isCwndLimited() {
-		// アプリケーションに制限された間は窓を増やさない(RFC 7661、Linux の tcp_is_cwnd_limited)
-	} else if c.cwnd < c.ssthresh {
-		c.slowStartAck(ack, acked, ackRTT, now)
-	} else {
-		c.ccFor().congAvoid(c, acked, now)
-	}
-	c.cwnd = min(c.cwnd, 1<<30)
-	c.dupAcks = 0
-	// 再送のタイマー(RFC 6298 5.2、5.3)
-	if !c.persist {
-		if c.sndUna == c.sndMax {
-			c.clearRetransTimers()
-		} else {
-			c.setRTO(now + c.curRTO())
-			c.renegeTimer(now)
-		}
-	}
-	if c.finAcked() {
-		switch c.state {
-		case stFinWait1:
-			c.state = stFinWait2
-		case stClosing:
-			c.enterTimeWait(now)
-		case stLastAck:
-			c.toClosed(nil)
-		}
-	}
-	c.signalWrite()
-}
-
-// dupAck は重複した ACK を処理する(RFC 5681 3.2、RFC 6582)。
-func (c *tcb) dupAck(now int64) {
-	c.s.dupAcksIn.Add(1)
-	c.dupAcks++
-	if c.sackOK {
-		return // 回復に入るかは sackAfterAck が決める
-	}
-	mss := uint32(c.segMSS())
-	if c.inRecovery {
-		c.cwnd += mss
-		return
-	}
-	if c.dupAcks == 3 && seqGT(c.sndUna, c.recover) {
-		c.enterFastRecovery()
-		c.cwnd = c.ssthresh + 3*mss
-		c.fastRtx = true
-		c.rtxCause = rtxFast
-	}
-}
-
-// inputData は segment の中身と FIN を受信のバッファに入れ、ACK の送り方を決める。
-func (c *tcb) inputData(seg *segment, now int64) {
-	n := len(seg.payload)
-	if n == 0 && !seg.has(flagFIN) {
-		return
-	}
-	switch c.state {
-	case stEstablished, stFinWait1, stFinWait2:
-	default:
-		// 相手の FIN の後に届いた segment。重複なら ACK を返す
-		if seg.seqLen() > 0 {
-			c.ackNow = true
-		}
-		return
-	}
-	if c.appClosed && n > 0 && seqGT(seg.seq+uint32(n), c.rcvNxt) {
-		// 閉じた後に届いたデータ。Linux と同じく RST で終える
-		c.sendRST()
-		c.release()
-		return
-	}
-	base := c.irs + 1
-	off := int64(c.rcv.nxtOff) + int64(int32(seg.seq-(base+uint32(c.rcv.nxtOff))))
-	if off < 0 {
-		return
-	}
-	limit := min(c.advRight, c.rcv.readOff+c.rcvCap)
-	res := c.rcv.insert(uint64(off), seg.payload, limit)
-	if res.dupHi > res.dupLo {
-		c.noteDuplicate(base+uint32(res.dupLo), uint32(res.dupHi-res.dupLo), now)
-	}
-	if res.dropped {
-		c.s.refused(&c.s.oooDropped, &c.s.oooGate, now, "dropped out-of-order segments that would need more than the fixed number of receive intervals")
-	}
-	if res.trimmed {
-		c.s.rcvTrimmed.Add(1)
-	}
-	if res.accepted > 0 {
-		c.signalRead()
-	}
-	if seg.has(flagFIN) && !res.trimmed && !res.dropped {
-		finOff := uint64(off) + uint64(n)
-		if finOff == c.rcv.nxtOff {
-			c.finRecv(now)
-		} else if finOff > c.rcv.nxtOff {
-			c.oooFin, c.oooFinOff = true, finOff
-		}
-	}
-	if c.oooFin && !c.finRcvd && c.rcv.nxtOff == c.oooFinOff {
-		c.finRecv(now)
-	}
-	if !c.finRcvd {
-		c.rcvNxt = base + uint32(c.rcv.nxtOff)
-	}
-	switch {
-	case res.ooo || res.dropped || res.trimmed || res.duplicate || res.filled || c.rcv.n > 0:
-		c.ackNow = true
-	case res.advanced:
-		c.rcvSinceAck += res.accepted
-		c.measureRcvMSS(n)
-		c.noteQuickack(now)
-		// 推定した相手の MSS より多くの byte を確認していなければ ACK を遅らせる(Linux の __tcp_ack_snd_check)
-		if c.rcvSinceAck > int(c.rcvMSSEst) || (c.quickAcks > 0 && !c.pingpong) {
-			c.ackNow = true
-		} else if c.tdl[tmrDelack] == 0 {
-			c.arm(tmrDelack, now+int64(delackTimeout))
-		}
-	}
-	if res.accepted > 0 {
-		c.lastDataRcvd, c.rcvdData = now, true
-	}
-}
-
-// finRecv は相手の FIN を順序どおりに受けた後の遷移を行う。
-func (c *tcb) finRecv(now int64) {
-	c.finRcvd = true
-	c.oooFin = false
-	c.rcvNxt = c.irs + 1 + uint32(c.rcv.nxtOff) + 1
-	c.ackNow = true
-	switch c.state {
-	case stEstablished:
-		c.state = stCloseWait
-	case stFinWait1:
-		if c.finAcked() {
-			c.enterTimeWait(now)
-		} else {
-			c.state = stClosing
-		}
-	case stFinWait2:
-		c.enterTimeWait(now)
-	}
-	c.signalRead()
-}
-
-func (c *tcb) enterTimeWait(now int64) {
-	c.state = stTimeWait
-	c.twEnter = now
-	c.persist = false
-	c.clearRetransTimers()
-	// TIME_WAIT の接続は ACK だけを送る。送り残しの probe と再送の印を残すと、build が何も作らないのに
-	// wantOutput が送るものがあると答え続ける
-	c.cancelSends()
-	c.arm(tmrClose, now+int64(twTimeout))
-}
-
-// pmtuDrop は Fragmentation Needed による PMTU の引き下げ(RFC 1191)。引用された番号が SND.UNA から
-// SND.NXT の範囲にあるときだけ受け入れる(RFC 5927)。送り残しは小さな segment で送り直す。SND.NXT は
-// 再送で戻さないので、いつも SND.MAX と等しい。
-func (c *tcb) pmtuDrop(seq uint32, mtu int, now int64) {
-	if !seqGE(seq, c.sndUna) || !seqLT(seq, c.sndNxt) {
-		c.s.icmpDropped.Add(1)
-		return
-	}
-	if mtu >= c.pmtu {
-		return
-	}
-	c.pmtu = mtu
-	if c.sndMax != c.sndUna {
-		// 記録の境目は保ち、新しい大きさに入らない記録だけを損失にして送り直す(Linux の
-		// tcp_simple_retransmit と同じ)。入る記録は届いているかもしれないので、損失の印を付けない。SACK の
-		// 無い接続は記録の印を使わないので、今までどおり SND.UNA から送り直す
-		c.fastRtx = false
-		if c.sackOK {
-			c.markLostLonger(c.segMSS(), rtxPMTU)
-			c.advanceLoss() // 小さくなった MSS で DupThresh の byte の規則を数え直す
-		} else {
-			c.markAllLost(rtxPMTU)
-		}
-	}
-	c.afterInput(now)
-}
-
 // afterInput は入力、タイマー、アプリケーションの操作の後に、枠を返すか行に移すかを決め、送るものが
 // あれば接続の組に並べる。
 func (c *tcb) afterInput(now int64) {
@@ -879,28 +350,6 @@ func (c *tcb) afterInput(now int64) {
 	// 送り残しの量が 0 の間だけ張る。RTO の後に失われた記録だけが残る間は、送り直しを待つ記録も送るものに数える
 	if c.sndWnd == 0 && !c.persist && c.pipe() == 0 && c.hasUnsent() && c.state != stClosed {
 		c.enterPersist(now)
-	}
-}
-
-// enterPersist は再送のタイマーの節を窓の probe に使い始める。RTO、並べ替え、TLP の期限と TLP の probe の
-// 印を消す。確認を待つものが無いので、前の RTO の起点と後退を持ち越さない。持ち越すと、相手が probe に
-// 応え続けた長い persist の後の最初の RTO で、再送の打ち切りの時間を過ぎたと数える。
-func (c *tcb) enterPersist(now int64) {
-	c.clearRetransTimers()
-	c.cancelTLP()
-	c.persist = true
-	c.retransStart = 0
-	c.backoff = 0
-	c.arm(tmrRetrans, now+c.curRTO())
-}
-
-// leavePersist は窓の probe を終え、確認を待つデータがあれば RTO を今から張る。再送のタイマーの節の古い
-// 期限を消すかは呼び出し側が決める。
-func (c *tcb) leavePersist(now int64) {
-	c.persist = false
-	c.backoff = 0
-	if c.sndUna != c.sndMax {
-		c.setRTO(now + c.curRTO())
 	}
 }
 
@@ -952,8 +401,7 @@ func (c *tcb) tryRetire(now int64) bool {
 	c.dropResources()
 	s.tmu.Lock()
 	if !s.closed && c.inIndex {
-		s.connIdx.remove(c.tup)
-		c.inIndex = false
+		c.unindexLocked()
 		s.addTWRow(c, state, deadline, now)
 	}
 	c.freeSlotLocked()
@@ -971,10 +419,7 @@ func (c *tcb) toClosed(err error) {
 	if err != nil && c.err == nil {
 		c.err = err
 	}
-	for k := range c.tdl {
-		c.disarm(k)
-	}
-	c.s.out.unqueueConn(c.id)
+	c.stopTimersAndOutput()
 	c.cancelSends()
 	c.ackNow = false
 	// 送信の輪はもう使わない。受信の未読のデータは読ませるために残し、順序外のデータは捨てる
@@ -985,10 +430,7 @@ func (c *tcb) toClosed(err error) {
 	// boost の枠は、boost の大きさの未読のデータを持ちうるので、枠を返すまで持つ
 	s := c.s
 	s.tmu.Lock()
-	if c.inIndex {
-		s.connIdx.remove(c.tup)
-		c.inIndex = false
-	}
+	c.unindexLocked()
 	if c.queued {
 		c.lst.dequeue(c)
 	}
@@ -1015,12 +457,49 @@ func (c *tcb) sendRST() {
 	c.s.sendCtl(tcpHeader{tup: c.tup, seq: c.sndNxt, ack: c.rcvNxt, flags: flagRST | flagACK})
 }
 
-// dropResources は枠のバッファ、タイマー、出力の節、boost の枠を返す。
-func (c *tcb) dropResources() {
+// 枠の資源の返し方(I3、I6)。stack.close のほかは mu を持って呼ぶ。stack.close は枠ごとに mu を自分で取る。
+// freeSlotLocked と unindexLocked は tmu も持って呼ぶ。
+//
+//   - toClosed:プロトコルを終えた接続(CLOSED)。タイマー、出力の節、送る予定の印、送信の輪、順序外の区間と
+//     その中身、4 つ組の hash の表の項、accept の待ち行列の節を返す。未読のデータを持つ受信の輪、boost の枠、
+//     記録の輪と区間の表は、アプリケーションが閉じて枠を返すまで持つ。アプリケーションが閉じていれば、続けて
+//     release で枠を返す
+//   - dropResources:枠を返す前に、タイマー、出力の節、送信と受信の輪、順序外の区間、boost の枠を返し、
+//     記録の輪と区間の表を枠と共に持つ floor のものに戻す
+//   - release:dropResources の後に、表の錠の中で 4 つ組の hash の表の項を外して枠を返す
+//   - tryRetire:dropResources の後に、表の錠の中で TIME_WAIT の表の行に移して枠を返す。閉じた Device では
+//     行を作らず、4 つ組の hash の表の項も外さないので、枠を返した後も inIndex は真のまま残る。アプリケーションの
+//     Close と Device の Close が競ったときだけ起き、閉じた Device はその表をもう引かないので害は無い
+//   - freeSlotLocked:表の錠の中で、accept の待ち行列の節を外し、世代を進め、通知の channel を閉じ、欄を 0 に
+//     戻して空きの list に返す。閉じた Device では floor の配列も手放す
+//   - stack.close:閉じた Device のすべての枠を release し、floor の配列と記録の輪を手放す
+
+// stopTimersAndOutput はタイマーをすべて止め、接続の組の出力の list から外す。
+func (c *tcb) stopTimersAndOutput() {
 	for k := range c.tdl {
 		c.disarm(k)
 	}
 	c.s.out.unqueueConn(c.id)
+}
+
+// unindexLocked は接続が 4 つ組の hash の表にあれば外す。tmu を持って呼ぶ。
+func (c *tcb) unindexLocked() {
+	if c.inIndex {
+		c.s.connIdx.remove(c.tup)
+		c.inIndex = false
+	}
+}
+
+// forgetSlotArrays は枠と共に持つ floor の記録の輪と区間の表を手放す。閉じた Device で使う。
+func (c *tcb) forgetSlotArrays() {
+	c.floorRecs = nil
+	c.floorIv = nil
+	c.rcv.iv = nil // 受信のバッファは tcbState の外にあり、区間の表を指したまま残るため
+}
+
+// dropResources は枠のバッファ、タイマー、出力の節、boost の枠を返す。
+func (c *tcb) dropResources() {
+	c.stopTimersAndOutput()
 	c.snd.release()
 	c.rcv.r.release()
 	c.rcv.clearIntervals()
@@ -1037,10 +516,7 @@ func (c *tcb) release() {
 	c.dropResources()
 	s := c.s
 	s.tmu.Lock()
-	if c.inIndex {
-		s.connIdx.remove(c.tup)
-		c.inIndex = false
-	}
+	c.unindexLocked()
 	c.freeSlotLocked()
 	s.tmu.Unlock()
 }
@@ -1054,9 +530,7 @@ func (c *tcb) freeSlotLocked() {
 	c.gen++
 	c.state = stFree
 	if s.closed {
-		c.floorRecs = nil // 閉じた Device では、Close と競った確立が確保した輪も残さない
-		c.floorIv = nil
-		c.rcv.iv = nil // 受信のバッファは tcbState の外にあり、区間の表を指したまま残るため
+		c.forgetSlotArrays() // 閉じた Device では、Close と競った確立が確保した輪も残さない
 	}
 	if c.rch != nil {
 		close(c.rch)
@@ -1064,114 +538,6 @@ func (c *tcb) freeSlotLocked() {
 	}
 	c.tcbState = tcbState{}
 	s.free = append(s.free, c.id)
-}
-
-// onTimer はタイマーの節 kind の期限を処理する。
-func (c *tcb) onTimer(kind int, now int64) {
-	switch kind {
-	case tmrRetrans:
-		if c.persist {
-			c.onPersist(now)
-		} else {
-			c.onRetransTimer(now)
-		}
-	case tmrDelack:
-		if !c.ackNow {
-			c.ackDelayed = true
-		}
-		c.ackNow = true
-		c.pingpong = false // Linux の tcp_delack_timer_handler と同じく対話の印を外す
-	case tmrClose:
-		switch c.state {
-		case stTimeWait, stFinWait2:
-			c.toClosed(nil)
-		}
-	}
-	c.afterInput(now)
-}
-
-// onRTO は再送のタイマーの期限(RFC 6298 5.4 から 5.7、RFC 5681 3.1)。
-func (c *tcb) onRTO(now int64) {
-	if c.sndUna == c.sndMax || c.state == stClosed {
-		return
-	}
-	if c.retransStart == 0 {
-		c.retransStart = now - c.curRTO()
-	}
-	if now-c.retransStart >= int64(retransmitDeadline) {
-		c.s.rtxAborted.Add(1)
-		c.sendRST()
-		c.abortWith(syscall.ETIMEDOUT)
-		return
-	}
-	c.s.rtos.Add(1)
-	if c.backoff > 0 {
-		c.s.rtosBackedOff.Add(1)
-	}
-	if !c.inRecovery && c.dupAcks > 0 && c.dupAcks < 3 {
-		c.s.rtosShortOfDupThresh.Add(1)
-	}
-	// SACK の取り消し:先頭の記録が SACK 済みのままか、同じ SND.UNA で 2 回目の RTO なら、相手が SACK 済みの
-	// データを捨てたとみなす(Linux の tcp_timeout_mark_lost と wgstack-performance.md の「scoreboard の記録の扱い」)
-	reneged := false
-	if c.sackOK && (c.backoff > 0 || (c.recs.n > 0 && c.isSacked(c.recs.at(0)))) && c.sacked > 0 {
-		c.clearSACK()
-		reneged = true
-	}
-	mss := uint32(c.segMSS())
-	frto := c.frtoEligible() && !reneged // 取り消した SACK の記録は損失にして送り直す
-	if c.backoff == 0 {
-		// 最初の RTO が輻輳の事象として ssthresh を下げる。続く RTO は ssthresh を下げ直さず、F-RTO を終える
-		if !c.inRecovery {
-			c.initUndo()
-		}
-		c.ssthresh = c.lossThresh()
-	} else {
-		c.frto = 0
-	}
-	c.fastRtx = false // RTO の規則が SND.UNA から送り直すので、待っている高速の再送で先頭を 2 度送らない
-	c.ccFor().onRTO(c)
-	c.cwnd = mss
-	c.recover = c.sndMax
-	c.inRecovery = false
-	c.dupAcks = 0
-	c.backoff++
-	// 記録は消さずに残し、SACK 済みでない記録を損失にして SND.UNA から順に送り直す(RFC 6675 5.1 節)。F-RTO では
-	// 先頭の記録だけを損失にして、次の ACK で RTO が不要だったかを決める(RFC 5682)
-	c.rtoEpisode = true
-	if frto {
-		c.frto = 1
-		c.markHeadLost(rtxRTO)
-	} else {
-		c.markAllLost(rtxRTO)
-	}
-	c.reoAt, c.tlpAt = 0, 0
-	c.cancelTLP()
-	c.setRTO(now + c.curRTO())
-	if c.s.trace != nil {
-		c.traceEvent(TraceRTO, now)
-	}
-}
-
-// onPersist は窓の probe のタイマーの期限。相手が probe に応える間は打ち切らない。
-func (c *tcb) onPersist(now int64) {
-	if c.sndWnd != 0 || !c.hasUnsent() {
-		c.leavePersist(now)
-		return
-	}
-	c.probesOut++
-	// アプリケーションが閉じた接続は、Linux の tcp_probe_timer と同じく、相手が応えても戻らない後退の回数が
-	// orphanRetries 以上で、後退を含めた RTO が上限に届いた(生きていない)ときに打ち切る。閉じた接続の FIN は
-	// 窓が開くまで送らないので、打ち切らなければ窓を 0 のまま probe に応える相手が枠をいつまでも持たせる
-	if c.probesOut > probeRetries || (c.appClosed && c.backoff >= orphanRetries && c.curRTO() >= int64(rtoMax)) {
-		c.s.probeAborted.Add(1)
-		c.sendRST()
-		c.abortWith(syscall.ETIMEDOUT)
-		return
-	}
-	c.probePending = true
-	c.backoff++
-	c.arm(tmrRetrans, now+c.curRTO())
 }
 
 // abortWith は TCP の義務を果たせない接続を終える。アプリケーションが閉じていれば枠を返し、閉じていなければ

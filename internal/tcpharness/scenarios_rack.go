@@ -127,9 +127,97 @@ func rackReorder(h *H) {
 // tlpTailLoss loses the last two segments of a flight. Nothing after them can show the loss, so
 // RFC 8985's tail loss probe resends the last segment about 2 SRTT after the ACK of the rest,
 // before the RTO, and the probe's SACK reveals the other loss.
+//
+// The probe's and the recovery's upper bounds grow with the testbench's excess delay, which a
+// loaded machine adds to the RTT the DUT measures, but stop below the RTO path's 200 and 250 ms,
+// so that a sender with only an RTO, or a probe as late as the RTO, cannot pass under load. Once
+// the excess is large enough for a cap to bind, a correct DUT's 2 SRTT is itself past the cap,
+// and the attempt cannot tell a probe at 2 SRTT from one at the RTO; it starts over on a new
+// connection, as limited-transmit-rack does when the testbench is too slow, and the last attempt
+// is checked whatever its excess.
 func tlpTailLoss(h *H) {
 	const port = 8041
 	l := h.Listen(port)
+	var o tlpObservation
+	for i := 1; ; i++ {
+		o = tlpTailLossOnce(h, l, port)
+		if !o.slow() || i == tlpAttempts {
+			break
+		}
+		h.T.Logf("attempt %d: the testbench's excess delay of %v puts a correct probe past the bounds' caps; starting over", i, o.excess)
+		o.c.Abort()
+	}
+	h.Measure("testbench-too-slow", o.slow())
+	if !o.probeAt.IsZero() {
+		h.Measure("probe-after-ack_ms", o.pto.Milliseconds())
+	}
+	h.Measure("path-delay-excess_ms", o.excess.Milliseconds())
+	probeBound, _ := tlpBounds(o.excess)
+	isProbe := o.probe.Seq == o.last
+	ok := !o.probeAt.IsZero() && isProbe && o.pto >= rackRTT*3/2 && o.pto <= probeBound
+	got := "nothing sent"
+	switch {
+	case o.probeAt.IsZero():
+	case !isProbe:
+		got = "the first resend is of the first unacknowledged segment, as an RTO's"
+	case ok:
+		got = "from 1.5 RTT to the bound"
+	default:
+		got = "outside 1.5 RTT to the bound"
+	}
+	h.Check("probe-at-2srtt", ok, "the first segment after the ACK of the rest is a probe of the last segment about 2 SRTT later, from 1.5 RTT to 170 ms and twice the testbench's excess delay, below the 200 ms RTO floor", got)
+	h.Measure("recovered-after-ack_ms", o.took.Milliseconds())
+	// Through the probe, recovery ends near 2 SRTT plus one RTT after the ACK; through an RTO, no
+	// earlier than the 200 ms floor plus one RTT, 250 ms.
+	// The bound grows with the excess but stays below the RTO path's 250 ms.
+	_, fast := tlpBounds(o.excess)
+	rto := 250*time.Millisecond + o.excess
+	got = "within the probe's bound"
+	switch {
+	case !o.done:
+		got = "not recovered"
+	case o.took < fast:
+	case o.took >= rto:
+		got = "recovered at the RTO floor plus one RTT or later"
+	default:
+		got = "recovered between the probe's bound and the RTO floor plus one RTT"
+	}
+	h.Check("recovers-before-rto", o.done && o.took < fast, "both tail segments are acknowledged within 225 ms of the ACK and three times the testbench's excess delay, sooner than an RTO of at least 200 ms and one RTT could", got)
+	intact(h, o.r, o.data)
+}
+
+// tlpAttempts bounds how often tlpTailLoss starts over when the testbench was too slow for its
+// bounds to mean anything.
+const tlpAttempts = 3
+
+// tlpBounds returns the probe's and the recovery's upper bounds for the testbench's excess delay:
+// they grow by twice and three times the excess, and stop below the RTO path's 200 and 250 ms.
+func tlpBounds(excess time.Duration) (probe, recovery time.Duration) {
+	return min(170*time.Millisecond+2*excess, 195*time.Millisecond), min(225*time.Millisecond+3*excess, 245*time.Millisecond)
+}
+
+// tlpObservation is what one attempt of tlpTailLoss saw.
+type tlpObservation struct {
+	c              Conn
+	r              *receiver
+	data           []byte
+	last           uint32 // the sequence number of the flight's last segment
+	ackAt, probeAt time.Time
+	probe          Segment
+	pto, took      time.Duration
+	excess         time.Duration
+	done           bool
+}
+
+// slow reports that the excess delay made a cap bind, so that a correct DUT's 2 SRTT and the RTO
+// path's times no longer sit on the two sides of a bound.
+func (o tlpObservation) slow() bool {
+	p, r := tlpBounds(o.excess)
+	return p < 170*time.Millisecond+2*o.excess || r < 225*time.Millisecond+3*o.excess
+}
+
+// tlpTailLossOnce runs tlpTailLoss on a new connection.
+func tlpTailLossOnce(h *H, l Listener, port uint16) tlpObservation {
 	p, c := rackConnect(h, l, port, rackRTT)
 	segs, data := flight(h, p, c, 8, 0xb3)
 	r := newReceiver(p)
@@ -139,67 +227,27 @@ func tlpTailLoss(h *H) {
 	for _, s := range segs {
 		feed(s)
 	}
-	var ackAt, probeAt time.Time
-	var probe Segment
-	lp.after(rackRTT, func() { ackAt = h.Now() }) // the last ACK, of all but the two tail segments
+	o := tlpObservation{c: c, r: r, data: data, last: segs[n-1].Seq}
+	lp.after(rackRTT, func() { o.ackAt = h.Now() }) // the last ACK, of all but the two tail segments
 	w := newWatch(segs)
 	on := answerAfter(lp, p, r, w, rackRTT, nil, nil)
 	end := dataEnd(r, data)
 	lp.run(p, 3*time.Second, func(s Segment) {
-		if isData(s) && probeAt.IsZero() {
-			probeAt, probe = h.Now(), s
+		if isData(s) && o.probeAt.IsZero() {
+			o.probeAt, o.probe = h.Now(), s
 		}
 		on(s)
 	}, func() bool { return !after(end, r.cum) })
-	pto := probeAt.Sub(ackAt)
-	if !probeAt.IsZero() {
-		h.Measure("probe-after-ack_ms", pto.Milliseconds())
-	}
+	o.pto = o.probeAt.Sub(o.ackAt)
 	// A loaded machine can stop the testbench while it holds an ACK back, so that the handshake's
 	// ACK or the flight's leave late. The DUT then measures a longer RTT than rackRTT, and its
 	// probe and its recovery come later by twice and three times the excess. The upper bounds
 	// follow the RTT the testbench actually gave; the lower bound does not, since a late ACK
 	// cannot make the probe early. On a ClockedDUT the excess is zero.
-	excess := max(lp.late, p.AckHeld-(rackRTT-5*time.Millisecond), 0)
-	h.Measure("path-delay-excess_ms", excess.Milliseconds())
-	// The probe comes about 2 SRTT after the ACK; an RTO would come no earlier than its 200 ms
-	// floor, so 170 ms leaves the RTO out with a margin. The bound grows with the testbench's
-	// excess delay but stays below the RTO floor, so a sender that only has an RTO cannot pass
-	// under load. A probe resends the last segment, RFC 8985 7.3; an RTO resends from SND.UNA,
-	// the first tail segment, whenever it comes.
-	probeBound := min(170*time.Millisecond+2*excess, 195*time.Millisecond)
-	isProbe := probe.Seq == segs[n-1].Seq
-	ok := !probeAt.IsZero() && isProbe && pto >= rackRTT*3/2 && pto <= probeBound
-	got := "nothing sent"
-	switch {
-	case probeAt.IsZero():
-	case !isProbe:
-		got = "the first resend is of the first unacknowledged segment, as an RTO's"
-	case ok:
-		got = "from 1.5 RTT to the bound"
-	default:
-		got = "outside 1.5 RTT to the bound"
-	}
-	h.Check("probe-at-2srtt", ok, "the first segment after the ACK of the rest is a probe of the last segment about 2 SRTT later, from 1.5 RTT to 170 ms and twice the testbench's excess delay, below the 200 ms RTO floor", got)
-	done := !after(end, r.cum)
-	took := h.Now().Sub(ackAt)
-	h.Measure("recovered-after-ack_ms", took.Milliseconds())
-	// Through the probe, recovery ends near 2 SRTT plus one RTT after the ACK; through an RTO, no
-	// earlier than the 200 ms floor plus one RTT, 250 ms.
-	// The bound grows with the excess but stays below the RTO path's 250 ms.
-	fast, rto := min(225*time.Millisecond+3*excess, 245*time.Millisecond), 250*time.Millisecond+excess
-	got = "within the probe's bound"
-	switch {
-	case !done:
-		got = "not recovered"
-	case took < fast:
-	case took >= rto:
-		got = "recovered at the RTO floor plus one RTT or later"
-	default:
-		got = "recovered between the probe's bound and the RTO floor plus one RTT"
-	}
-	h.Check("recovers-before-rto", done && took < fast, "both tail segments are acknowledged within 225 ms of the ACK and three times the testbench's excess delay, sooner than an RTO of at least 200 ms and one RTT could", got)
-	intact(h, r, data)
+	o.excess = max(lp.late, p.AckHeld-(rackRTT-5*time.Millisecond), 0)
+	o.done = !after(end, r.cum)
+	o.took = h.Now().Sub(o.ackAt)
+	return o
 }
 
 // thinStream writes four 200-byte messages 20 ms apart, as a game or an SSH session does, and loses

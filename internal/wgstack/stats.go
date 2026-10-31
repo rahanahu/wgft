@@ -42,6 +42,8 @@ type Stats struct {
 	ProbeAborts      uint64
 	BoostGranted     uint64
 	BoostReclaimed   uint64
+	// BoostRenegedBytes は、floor に戻す時に取り消した順序外の byte の合計(設計文書の「boost の取得と floor への戻り」)
+	BoostRenegedBytes uint64
 
 	// 送り手の事象(wgstack-performance.md の「安く確かめる手順」)
 	RTOs                 uint64 // 再送のタイマーの期限で送り直した回数。窓の probe は数えない
@@ -130,6 +132,7 @@ func (s *stack) stats() Stats {
 	st.ProbeAborts = s.probeAborted.Load()
 	st.BoostGranted = s.boostGranted.Load()
 	st.BoostReclaimed = s.boostReclaimed.Load()
+	st.BoostRenegedBytes = s.boostReneged.Load()
 	st.RTOs = s.rtos.Load()
 	st.RTOsBackedOff = s.rtosBackedOff.Load()
 	st.RTOsShortOfDupThresh = s.rtosShortOfDupThresh.Load()
@@ -279,8 +282,8 @@ type Bound struct {
 }
 
 // slotRuntime は接続の枠 1 つが表の外に持つ構造の上界。linux/amd64 の Go 1.27 で測ると、アプリケーションの
-// handle の Conn と 2 つの TCPAddr が 176 byte、読み書きを起こす 2 つの channel が 224 byte、読み書きの
-// 期限の 2 つの channel が 224 byte、2 つの期限のタイマーが 256 byte で、合わせて 880 byte である。
+// handle の Conn と 2 つの TCPAddr が 192 byte、読み書きを起こす 2 つの channel が 224 byte、読み書きの
+// 期限の 2 つの channel が 224 byte、2 つの期限のタイマーが 256 byte で、合わせて 896 byte である。
 const slotRuntime = 1024
 
 // Bound はこの Device の上界の式の値を返す。
@@ -299,13 +302,13 @@ func (s *stack) countBound() Bound {
 	dl := func(x dlist) int64 { return sliceBytes(x.next) + sliceBytes(x.prev) + sliceBytes(x.in) }
 	var b Bound
 	b.Fix = heapBytes(int64(unsafe.Sizeof(stack{}))) + sliceBytes(s.conns) + sliceBytes(s.free[:cap(s.free)]) +
-		sliceBytes(s.connIdx.ents) + sliceBytes(s.syn.idx.ents) + sliceBytes(s.tw.idx.ents) +
+		sliceBytes(s.connIdx.ents) + sliceBytes(s.connIdx.gens) + sliceBytes(s.syn.idx.ents) + sliceBytes(s.tw.idx.ents) +
 		sliceBytes(s.syn.rows) + sliceBytes(s.syn.free[:cap(s.syn.free)]) +
 		sliceBytes(s.tw.rows) + sliceBytes(s.tw.free[:cap(s.tw.free)]) +
 		sliceBytes(s.wheel.dl) + sliceBytes(s.wheel.next) + sliceBytes(s.wheel.prev) + sliceBytes(s.wheel.where) +
 		dl(s.out.conns) + dl(s.out.rows) +
 		sliceBytes(s.out.ctl.buf) + sliceBytes(s.out.ctl.lens) +
-		sliceBytes(s.fired[:cap(s.fired)]) +
+		sliceBytes(s.fired[:cap(s.fired)]) + sliceBytes(s.txb.rows) +
 		chunkPoolKeep*chunkHeap() + heapBytes(chunkPoolKeep*int64(unsafe.Sizeof((*chunk)(nil)))) +
 		n*slotRuntime
 	t := terms()

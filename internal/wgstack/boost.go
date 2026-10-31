@@ -66,7 +66,7 @@ func (c *tcb) noteDemand(dir boostDir, now int64) bool {
 }
 
 // tryBoost は接続 c(世代 gen)に枠を求める。錠を持たずに呼ぶ。
-func (s *stack) tryBoost(c *tcb, gen uint32, dir boostDir) {
+func (s *stack) tryBoost(c *tcb, gen uint64, dir boostDir) {
 	if !s.pool.acquire(c) {
 		return
 	}
@@ -78,9 +78,7 @@ func (s *stack) tryBoost(c *tcb, gen uint32, dir boostDir) {
 	}
 	s.boostGranted.Add(1)
 	c.boosted = true
-	c.recs.resize(make([]record, boostRecords))
-	c.snd.resize(boostSize, [][2]uint64{{c.unaOff, c.tailOff}})
-	c.sndCap = boostSize
+	c.setSendStage(boostSize, make([]record, boostRecords))
 	if dir == boostRecv {
 		c.growRecv()
 	}
@@ -94,13 +92,8 @@ func (s *stack) tryBoost(c *tcb, gen uint32, dir boostDir) {
 // growRecv は受信の窓を floor より先へ開く。mu を持ち、枠を持つ接続で呼ぶ。
 func (c *tcb) growRecv() {
 	c.rcvBoost = true
-	c.rcv.r.resize(boostSize, c.rcv.written())
-	c.rcv.setIntervals(make([]interval, boostIntervals))
-	c.rcvCap = boostSize
-	// 広げた窓を早く知らせる
-	if uint64(c.rcvWindow())*2 <= c.rcvCap {
-		c.ackNow = true
-	}
+	c.setRecvStage(boostSize, make([]interval, boostIntervals))
+	// 広告する窓は一度に開かない。窓の上限は測定で上がり、窓は届いた segment ごとに広がる(rcvwin.go)
 }
 
 // releaseBoost は枠を持っていれば返す。f は呼ばない(閉じた接続の枠を返すときには呼ばない約束)。
@@ -113,16 +106,19 @@ func (c *tcb) releaseBoost() {
 	c.s.pool.release(c)
 }
 
-// demote は需要の無い保有者を floor に戻せたかを返す。戻すのは次の条件がすべて成り立つときだけである。
-// 受信は、保持する最も右の byte(順序外のデータを含む)が最も古い未読の byte から floor の内側にあること。
-// 送信は、送信の輪の byte が floor 以下で、確認を待つ記録の数が floor の記録の輪の容量以下であること。
-// 最後に、OnBoost で登録した関数が f(false) に真を返すこと。戻した後も広告した右端は縮めず、floor の
-// 外に届いたデータは受信のバッファに入れずに捨てる(inputData の limit)。mu を持って呼ぶ。
+// demote は需要の無い保有者を floor に戻せたかを返す。呼ぶのは、空きの枠が無いときの acquire だけである
+// (枠の取り合い)。戻すのは次の条件がすべて成り立つときだけである。受信は、順序どおりの未読の byte が floor
+// 以下であること。送信は、送信の輪の byte が floor 以下で、確認を待つ記録の数が floor の記録の輪の容量以下で
+// あること。最後に、OnBoost で登録した関数が f(false) に真を返すこと。
+// 戻すときに順序外のデータが floor の外にあるか、区間が floor の表に入らなければ、その分を取り消す(RFC 2018
+// 8 節、設計文書の「boost の取得と floor への戻り」)。相手は累積の確認まで送ったデータを持つので、取り消した
+// データは再送で届く。戻した後も広告した右端は縮めず、floor の外に届いたデータは受信のバッファに入れずに
+// 捨てる(inputData の limit)。mu を持って呼ぶ。
 func (c *tcb) demote(now int64) bool {
 	if !c.boosted || now-c.lastDemand < int64(idleReclaim) {
 		return false
 	}
-	if c.rcv.rightmost()-c.rcv.readOff > recvFloor || c.rcv.n > floorIntervals {
+	if c.rcv.unread() > recvFloor {
 		return false
 	}
 	if c.tailOff-c.unaOff > sendFloor || c.recs.n > floorRecords {
@@ -131,15 +127,37 @@ func (c *tcb) demote(now int64) bool {
 	if c.onBoost != nil && !c.onBoost(false) {
 		return false
 	}
+	c.s.boostReneged.Add(c.rcv.renege(c.rcv.readOff+recvFloor, floorIntervals))
 	c.boosted, c.rcvBoost = false, false
-	c.snd.resize(sendFloor, [][2]uint64{{c.unaOff, c.tailOff}})
-	c.sndCap = sendFloor
-	c.rcv.r.resize(recvFloor, c.rcv.written())
-	c.rcv.setIntervals(c.floorIv)
-	c.rcvCap = recvFloor
-	c.recs.resize(c.floorRecs)
+	c.setSendStage(sendFloor, c.floorRecs)
+	c.setRecvStage(recvFloor, c.floorIv)
+	c.rcvSsthresh = min(c.rcvSsthresh, recvFloor)
 	c.s.boostReclaimed.Add(1)
 	return true
+}
+
+// 予約の段を移す(設計文書の「boost の取得と floor への戻り」と「上界の式」の段を変える間の一時の保持)。輪は
+// 生きている範囲を新しい chunk へ写し、写す間だけ古い chunk と合わせて持つ。1 本の接続は送信の輪を移してから
+// 受信の輪を移し、どちらの輪も次の輪を移す前に古い chunk を返す。枠を返すときの dropResources は、この 2 つを
+// 通らずに記録の輪と区間の表を floor のものに戻すので、段の移し方を変えるときは dropResources も直す。
+
+// setSendStage は送信の向きを容量 capacity の段に移す。送信の輪の生きている範囲を写し、確認を待つ記録を
+// recs に移す。呼び出し側は、送信の輪の byte が capacity 以下で、記録の数が len(recs) 以下であることを
+// 保証する(floor へ戻すときは demote が確かめる)。mu を持って呼ぶ。
+func (c *tcb) setSendStage(capacity uint64, recs []record) {
+	c.snd.resize(capacity, [][2]uint64{{c.unaOff, c.tailOff}})
+	c.sndCap = capacity
+	c.recs.resize(recs)
+}
+
+// setRecvStage は受信の向きを容量 capacity の段に移す。受信の輪の書いた範囲(未読と順序外)を写し、順序外の
+// 区間を iv に移す。呼び出し側は、保持する最も右の byte が最も古い未読の byte から capacity の内側にあり、
+// 使っている区間が iv に入ることを保証する(floor へ戻すときは demote が取り消しで満たす)。そのため
+// setIntervals は区間を持ち続けて偽を返すことが無く、その値を見ない。mu を持って呼ぶ。
+func (c *tcb) setRecvStage(capacity uint64, iv []interval) {
+	c.rcv.r.resize(capacity, c.rcv.written())
+	c.rcv.setIntervals(iv)
+	c.rcvCap = capacity
 }
 
 // acquire は c に枠を 1 つ貸す。空きが無ければ、写しの保有者を順に TryLock で取り、需要の無い保有者を

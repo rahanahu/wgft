@@ -93,13 +93,13 @@ func (d *deadline) expired() bool {
 type Conn struct {
 	s     *stack
 	c     *tcb
-	gen   uint32
+	gen   uint64
 	tup   tuple
 	laddr *net.TCPAddr
 	raddr *net.TCPAddr
 }
 
-func newConn(c *tcb, gen uint32) *Conn {
+func newConn(c *tcb, gen uint64) *Conn {
 	return &Conn{
 		s:     c.s,
 		c:     c,
@@ -124,15 +124,6 @@ func (h *Conn) lock() bool {
 	return true
 }
 
-func (h *Conn) deviceClosed() bool {
-	select {
-	case <-h.s.done:
-		return true
-	default:
-		return false
-	}
-}
-
 // Read は net.Conn の実装。期限を過ぎた読み取りは Timeout() が真の net.Error を返し、相手の FIN の後は
 // 受けたデータを読み終えてから io.EOF を返す。
 func (h *Conn) Read(b []byte) (int, error) {
@@ -142,7 +133,7 @@ func (h *Conn) Read(b []byte) (int, error) {
 			return 0, h.opErr("read", net.ErrClosed)
 		}
 		c := h.c
-		if c.appClosed || h.deviceClosed() {
+		if c.appClosed || h.s.isClosed() {
 			c.mu.Unlock()
 			return 0, h.opErr("read", net.ErrClosed)
 		}
@@ -157,6 +148,7 @@ func (h *Conn) Read(b []byte) (int, error) {
 		if c.rcv.unread() > 0 {
 			n := c.rcv.read(b)
 			now := s.clock()
+			c.rcvSpaceAdjust(now)
 			c.ackOnDrain()
 			c.windowUpdate()
 			boost := c.rdem.add(now, n) && c.noteDemand(boostRecv, now)
@@ -186,23 +178,6 @@ func (h *Conn) Read(b []byte) (int, error) {
 	}
 }
 
-// windowUpdate は、読み取りで空いた受信のバッファが広告する窓を大きく広げるときに ACK を送る。Linux の
-// tcp_cleanup_rbuf と同じく、今の窓が容量の半分以下で、広げた後の窓が今の窓の 2 倍以上になるときである。
-func (c *tcb) windowUpdate() {
-	cur := uint64(c.rcvWindow())
-	if 2*cur > c.rcvCap {
-		return
-	}
-	target := min(c.rcv.readOff+c.rcvCap, c.rcv.nxtOff+uint64(65535)<<c.rcvWscale)
-	if target <= c.rcv.nxtOff {
-		return
-	}
-	next := target - c.rcv.nxtOff
-	if next >= 2*cur && next-cur >= uint64(c.rcvMSS()) {
-		c.ackNow = true
-	}
-}
-
 // Write は net.Conn の実装。送信のバッファに空きができるまで待つ。
 func (h *Conn) Write(b []byte) (int, error) {
 	s := h.s
@@ -212,7 +187,7 @@ func (h *Conn) Write(b []byte) (int, error) {
 			return total, h.opErr("write", net.ErrClosed)
 		}
 		c := h.c
-		if c.appClosed || h.deviceClosed() {
+		if c.appClosed || h.s.isClosed() {
 			c.mu.Unlock()
 			return total, h.opErr("write", net.ErrClosed)
 		}

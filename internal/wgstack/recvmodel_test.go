@@ -86,7 +86,23 @@ func TestRecvBufAgainstModel(t *testing.T) {
 				b.r.resize(boostSize, b.written())
 				b.setIntervals(make([]interval, boostIntervals))
 				capB, h, boosted = boostSize, boostIntervals, true
-			case r < 99 && boosted && b.rightmost()-b.readOff <= recvFloor && b.n <= floorIntervals:
+			case r < 99 && boosted && b.unread() <= recvFloor &&
+				(r == 98 || b.rightmost()-b.readOff <= recvFloor && b.n <= floorIntervals):
+				// floor に戻る。floor の外のデータと floor の表に入らない右の区間を取り消す(RFC 2018 8 節)
+				cut := b.readOff + recvFloor
+				if pre := b.intervals(nil); len(pre) > floorIntervals {
+					cut = min(cut, pre[floorIntervals][0])
+				}
+				for x := cut; x < b.rightmost(); x++ {
+					if have[x-start] {
+						have[x-start] = false
+						haveN--
+					}
+				}
+				if lastTouch >= cut {
+					lastTouch = 0
+				}
+				b.renege(b.readOff+recvFloor, floorIntervals)
 				b.r.resize(recvFloor, b.written())
 				b.setIntervals(make([]interval, floorIntervals))
 				capB, h, boosted = recvFloor, floorIntervals, false
@@ -111,8 +127,14 @@ func TestRecvBufAgainstModel(t *testing.T) {
 				cnt += int(e - s)
 				prevEnd = e
 			}
-			if cnt != haveN {
-				t.Fatalf("seed %d step %d: intervals cover %d bytes, model %d", seed, step, cnt, haveN)
+			// 最近の区間の印は、どれも区間の始まりを指す
+			for _, x := range b.recent[:b.nrecent] {
+				if k := b.containing(b.full(x)); k == 0 || b.kStart(k) != b.full(x) {
+					t.Fatalf("seed %d step %d: recent-interval mark %d is not the start of an interval", seed, step, x)
+				}
+			}
+			if cnt != haveN || uint64(cnt) != b.ooo {
+				t.Fatalf("seed %d step %d: intervals cover %d bytes, model %d, counted %d", seed, step, cnt, haveN, b.ooo)
 			}
 			// 区間の中身を輪から読み、stream と比べる
 			for k := range min(b.n, 3) {

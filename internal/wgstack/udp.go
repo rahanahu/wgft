@@ -96,21 +96,22 @@ type udpEndpoint struct {
 
 // udpState は Device の UDP の状態。
 type udpState struct {
-	mu      sync.Mutex
-	eps     map[netip.AddrPort]*udpEndpoint
-	dg      [2][]udpDgram
-	dgFree  [2][]int32
-	ck      []udpChunkRec
-	ckFree  []int32
-	budget  [2]udpBudget
-	txHead  int32
-	txTail  int32
-	txSpace chan struct{} // 送信の予約が返ったときに閉じて作り直す
-	fault   error
-	closed  bool
+	mu       sync.Mutex
+	eps      map[netip.AddrPort]*udpEndpoint
+	dg       [2][]udpDgram
+	dgFree   [2][]int32
+	ck       []udpChunkRec
+	ckFree   []int32
+	budget   [2]udpBudget
+	txHead   int32
+	txTail   int32
+	txSpace  chan struct{} // 送信の予約が返ったときに閉じて作り直す。待つ書き手がいるときだけ(txWaited)
+	txWaited bool          // txSpace を待つ書き手がいる。偽なら閉じずに使い続け、datagram ごとに作り直さない
+	fault    error
+	closed   bool
 
-	epDrops, devDrops, noPort uint64
-	dropGate                  gate
+	epDrops, devDrops uint64
+	dropGate          gate
 }
 
 // init は datagram の枠の数を決める。0 は本番の値で、小さな値は試験だけが渡す。
@@ -142,7 +143,7 @@ func (u *udpState) init(rxDgrams, txDgrams int) {
 	}
 }
 
-// failLocked は会計の不整合を記録し、この Device の UDP を止める(udp-accounting.md の会計の不整合)。
+// udpFailLocked は会計の不整合を記録し、この Device の UDP を止める(udp-accounting.md の会計の不整合)。
 // 最初の違反を保つ。udp.mu を持って呼ぶ。
 func (s *stack) udpFailLocked(err error) {
 	u := &s.udp
@@ -161,7 +162,7 @@ func (d *Device) UDPReceiveFault() error {
 	return d.s.udp.fault
 }
 
-// reserve は endpoint ep の向き dir に n byte の datagram の置き場を予約し、datagram の番号を返す。
+// udpReserve は endpoint ep の向き dir に n byte の datagram の置き場を予約し、datagram の番号を返す。
 // 予約できなければ -1 と、Device の予算で拒んだかを返す。udp.mu を持って呼ぶ。
 func (s *stack) udpReserve(ep *udpEndpoint, dir, n int) (int32, bool) {
 	u := &s.udp
@@ -270,12 +271,22 @@ func (s *stack) udpRelease(dir int, id int32) {
 	*g = udpDgram{}
 	u.dgFree[dir] = append(u.dgFree[dir], id)
 	if dir == dirTx {
-		close(u.txSpace)
-		u.txSpace = make(chan struct{})
+		u.wakeTx()
 	}
 }
 
-// udpWrite は datagram id の中身を data にする。
+// wakeTx は送信の予約の空きを待つ書き手を起こす。待つ書き手がいなければ何もしないので、Read が datagram を
+// 送るたびに channel を作らない。u.mu の中で呼ぶ。
+func (u *udpState) wakeTx() {
+	if !u.txWaited {
+		return
+	}
+	u.txWaited = false
+	close(u.txSpace)
+	u.txSpace = make(chan struct{})
+}
+
+// udpPut は datagram id の中身を data にする。
 func (s *stack) udpPut(dir int, id int32, data []byte) {
 	u := &s.udp
 	g := &u.dg[dir][id]
@@ -338,7 +349,6 @@ func (s *stack) inputUDP(ip *ipv4, now int64) {
 	}
 	ep := u.eps[dst]
 	if ep == nil || ep.closed {
-		u.noPort++
 		u.mu.Unlock()
 		s.sendICMPError(ip, 3, 3, 0, now) // Port Unreachable
 		return
@@ -519,6 +529,7 @@ func (c *UDPConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 			return len(b), nil
 		}
 		space, dl := u.txSpace, ep.wdl.wait()
+		u.txWaited = true
 		u.mu.Unlock()
 		select {
 		case <-space:
@@ -537,26 +548,14 @@ func (s *stack) udpChecksum(id int32, from, to netip.AddrPort) uint16 {
 	binary.BigEndian.PutUint16(h[0:2], from.Port())
 	binary.BigEndian.PutUint16(h[2:4], to.Port())
 	binary.BigEndian.PutUint16(h[4:6], uint16(ulen))
-	sum += uint32(checksum(0, h[:]))
+	sum = uint32(checksum(sum, h[:]))
+	// 中身は buf の大きさずつ足す。udpGet は最後の断片のほかは buf をちょうど埋めるので、断片の境目は偶数の位置に
+	// あり、16 bit の語の並びは 1 回で足したときと同じである
 	var buf [1024]byte
-	pos := 0
 	for off := 0; off < g.n; {
 		k := s.udpGet(dirTx, id, off, buf[:])
-		for _, x := range buf[:k] {
-			if pos&1 == 0 {
-				sum += uint32(x) << 8
-			} else {
-				sum += uint32(x)
-			}
-			pos++
-		}
+		sum = uint32(checksum(sum, buf[:k]))
 		off += k
-		for sum>>16 != 0 {
-			sum = sum&0xffff + sum>>16
-		}
-	}
-	for sum>>16 != 0 {
-		sum = sum&0xffff + sum>>16
 	}
 	cs := ^uint16(sum)
 	if cs == 0 {
@@ -593,9 +592,7 @@ func (s *stack) pollUDP(b []byte) int {
 	if more {
 		flags |= 0x2000
 	}
-	binary.BigEndian.PutUint16(p[6:8], flags) // DF は立てない
-	p[10], p[11] = 0, 0
-	binary.BigEndian.PutUint16(p[10:12], ^checksum(0, p[:ipHeaderLen]))
+	setFragField(p, flags) // DF は立てない
 	body := p[ipHeaderLen:]
 	off := g.sent
 	if off == 0 {
@@ -649,8 +646,7 @@ func (s *stack) udpCloseLocked(ep *udpEndpoint) {
 	ep.rxHead, ep.rxTail = -1, -1
 	close(ep.rch)
 	ep.rch = make(chan struct{}, 1)
-	close(u.txSpace)
-	u.txSpace = make(chan struct{})
+	u.wakeTx()
 }
 
 func (c *UDPConn) SetDeadline(t time.Time) error {
@@ -678,8 +674,7 @@ func (c *UDPConn) wake() {
 	case c.ep.rch <- struct{}{}:
 	default:
 	}
-	close(u.txSpace)
-	u.txSpace = make(chan struct{})
+	u.wakeTx()
 	u.mu.Unlock()
 }
 

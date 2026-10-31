@@ -6,7 +6,7 @@ func seqLE(a, b uint32) bool { return int32(a-b) <= 0 }
 func seqGT(a, b uint32) bool { return int32(a-b) > 0 }
 func seqGE(a, b uint32) bool { return int32(a-b) >= 0 }
 
-// seqMax は a と b の後ろの方を返す。
+// seqMin は a と b の前の方を返す。
 func seqMin(a, b uint32) uint32 {
 	if seqLT(a, b) {
 		return a
@@ -14,6 +14,7 @@ func seqMin(a, b uint32) uint32 {
 	return b
 }
 
+// seqMax は a と b の後ろの方を返す。
 func seqMax(a, b uint32) uint32 {
 	if seqGT(a, b) {
 		return a
@@ -29,27 +30,33 @@ type index struct {
 	key  sipKey
 	mask uint32
 	ents []indexEnt
+	// gens は ents と同じ位置の世代。接続の表だけが持ち、握手の途中と TIME_WAIT の表は持たない(nil)。
+	gens []uint64
 }
 
 type indexEnt struct {
 	tup  tuple
 	hash uint32
 	id   int32 // 行の番号 + 1。0 は空き
-	gen  uint32
 }
 
-func newIndex(rows int, key sipKey) index {
+// withGen が真なら、項ごとに 64 bit の世代を持つ。
+func newIndex(rows int, key sipKey, withGen bool) index {
 	n := 1
 	for n < 2*rows {
 		n <<= 1
 	}
-	return index{key: key, mask: uint32(n - 1), ents: make([]indexEnt, n)}
+	x := index{key: key, mask: uint32(n - 1), ents: make([]indexEnt, n)}
+	if withGen {
+		x.gens = make([]uint64, n)
+	}
+	return x
 }
 
 func (x *index) hash(t tuple) uint32 { return uint32(x.key.hashTuple(t)) }
 
 // find は t の行の番号と、入れた時の世代を返す。無ければ -1 を返す。
-func (x *index) find(t tuple) (int32, uint32) {
+func (x *index) find(t tuple) (int32, uint64) {
 	h := x.hash(t)
 	for i := h & x.mask; ; i = (i + 1) & x.mask {
 		e := &x.ents[i]
@@ -57,19 +64,25 @@ func (x *index) find(t tuple) (int32, uint32) {
 			return -1, 0
 		}
 		if e.hash == h && e.tup == t {
-			return e.id - 1, e.gen
+			if x.gens == nil {
+				return e.id - 1, 0
+			}
+			return e.id - 1, x.gens[i]
 		}
 	}
 }
 
 // insert は t を行 id として入れる。同じ t が既にあれば入れ替える。表は行の数の 2 倍以上の
 // 容量を持つので満杯にならない。
-func (x *index) insert(t tuple, id int32, gen uint32) {
+func (x *index) insert(t tuple, id int32, gen uint64) {
 	h := x.hash(t)
 	for i := h & x.mask; ; i = (i + 1) & x.mask {
 		e := &x.ents[i]
 		if e.id == 0 || (e.hash == h && e.tup == t) {
-			*e = indexEnt{tup: t, hash: h, id: id + 1, gen: gen}
+			*e = indexEnt{tup: t, hash: h, id: id + 1}
+			if x.gens != nil {
+				x.gens[i] = gen
+			}
 			return
 		}
 	}
@@ -92,6 +105,9 @@ func (x *index) remove(t tuple) bool {
 	}
 	for {
 		x.ents[i] = indexEnt{}
+		if x.gens != nil {
+			x.gens[i] = 0
+		}
 		j := i
 		for {
 			j = (j + 1) & x.mask
@@ -103,6 +119,9 @@ func (x *index) remove(t tuple) bool {
 			// home が (i, j] の巡回の区間に入るなら、e は i へ動かせない
 			if (j > i && (home <= i || home > j)) || (j < i && home <= i && home > j) {
 				x.ents[i] = *e
+				if x.gens != nil {
+					x.gens[i] = x.gens[j]
+				}
 				i = j
 				break
 			}

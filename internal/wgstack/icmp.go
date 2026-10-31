@@ -45,7 +45,7 @@ func (s *stack) icmpAllowed(now int64) bool {
 	return true
 }
 
-// sendICMPError は、届いた packet orig への ICMP の誤り(Destination Unreachable、Time Exceeded、Parameter
+// sendICMPErrorRaw は、届いた packet orig への ICMP の誤り(Destination Unreachable、Time Exceeded、Parameter
 // Problem)を制御の輪に積む。rest は ICMP の header の後半の 4 byte(pointer など)である。誤りの packet、
 // 先頭でない断片、自分のアドレスでない宛先、broadcast と multicast の送信元には送らない(RFC 1122 3.2.2)。
 // laterFragment が真なら、先頭でない断片にも送る(後続の断片の option の誤りへの Parameter Problem)。
@@ -85,15 +85,21 @@ func (s *stack) sendICMPErrorRaw(orig []byte, typ, code uint8, rest uint32, now 
 		}
 		writeIPv4Header(b, total, id, protoICMP, dst, src)
 		m := b[ipHeaderLen:total]
-		m[0], m[1], m[2], m[3] = typ, code, 0, 0
+		m[0], m[1] = typ, code
 		binary.BigEndian.PutUint32(m[4:8], rest)
 		copy(m[8:], quote)
-		binary.BigEndian.PutUint16(m[2:4], ^checksum(0, m))
+		finishICMP(m)
 		return total
 	})
 	if !ok {
 		s.refused(&s.ctlDropped, &s.ctlGate, now, "dropped control packets because the control output ring was full")
 	}
+}
+
+// finishICMP は ICMP の message m の checksum の欄を 0 にしてから、m 全体の checksum を書く。
+func finishICMP(m []byte) {
+	m[2], m[3] = 0, 0
+	binary.BigEndian.PutUint16(m[2:4], ^checksum(0, m))
 }
 
 func (s *stack) sendICMPError(ip *ipv4, typ, code uint8, rest uint32, now int64) {
@@ -132,8 +138,8 @@ func (s *stack) echoReply(ip *ipv4, now int64) {
 		clearDF(b) // echo の応答は DF を立てない(Linux と同じく PMTU discovery を使わない)
 		m := b[ipHeaderLen:total]
 		copy(m, ip.payload)
-		m[0], m[2], m[3] = icmpEchoReply, 0, 0
-		binary.BigEndian.PutUint16(m[2:4], ^checksum(0, m))
+		m[0] = icmpEchoReply
+		finishICMP(m)
 		return total
 	})
 	if !ok {
@@ -197,7 +203,7 @@ type pingTable struct {
 
 type pingEP struct {
 	used  bool
-	gen   uint32
+	gen   uint64
 	ident uint16
 	laddr uint32
 	raddr uint32
@@ -237,7 +243,7 @@ func (s *stack) pingReply(ip *ipv4) {
 type PingConn struct {
 	s   *stack
 	i   int
-	gen uint32
+	gen uint64
 	l   net.IPAddr
 	r   net.IPAddr
 }
@@ -290,15 +296,6 @@ func (d *Device) DialPing(laddr, raddr netip.Addr) (net.Conn, error) {
 	return &PingConn{s: s, i: free, gen: e.gen, l: net.IPAddr{IP: laddr.AsSlice()}, r: net.IPAddr{IP: raddr.AsSlice()}}, nil
 }
 
-func (s *stack) isClosed() bool {
-	select {
-	case <-s.done:
-		return true
-	default:
-		return false
-	}
-}
-
 // ep は endpoint を返す。閉じていれば nil。ping.mu を持って呼ぶ。
 func (c *PingConn) ep() *pingEP {
 	e := &c.s.ping.eps[c.i]
@@ -333,9 +330,8 @@ func (c *PingConn) Write(b []byte) (int, error) {
 		writeIPv4Header(buf, total, id, protoICMP, src, dst)
 		m := buf[ipHeaderLen:total]
 		copy(m, b)
-		m[2], m[3] = 0, 0
 		binary.BigEndian.PutUint16(m[4:6], ident)
-		binary.BigEndian.PutUint16(m[2:4], ^checksum(0, m))
+		finishICMP(m)
 		return total
 	})
 	if !ok {

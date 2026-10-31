@@ -48,6 +48,10 @@
 # kernel, whose WireGuard work is not in any process, and a sender near one CPU means the fast path
 # measured the sender, not the agent.
 #
+# During the run the agent's eth0 has UDP segmentation offload off, so the router's netem queues
+# and drops the datagrams one by one, as a real bottleneck does, and the agent pays for segmenting
+# them; the reasons are at the code that turns it off.
+#
 # NETEM_SEED fixes netem's loss pattern where tc and the kernel accept netem's seed option; where
 # they do not, the script says so and the loss differs from run to run.
 #
@@ -90,7 +94,10 @@ import json, sys
 sys.exit(0 if any(a.get('name') == 'home' and a.get('last_handshake') for a in json.load(sys.stdin)) else 1)"
 }
 served() { [ "$(grep -c sha256 "$W/wgft-tq-serve-$1.log")" -ge "$2" ]; } # served <mode> <runs>
-rule_ok() { [ "$(ip netns exec "$CLIENT_NS" bash -c 'echo ping | timeout 3 socat -t 2 - TCP:198.51.100.1:41800' 2>/dev/null)" = pong ]; }
+# rule_ok reads the reply line and returns at once. socat after the end of its input waits out its
+# -t time even when the reply has come, which spent 2 s on every successful probe; timeout 3 bounds
+# a probe that gets no reply.
+rule_ok() { [ "$(ip netns exec "$CLIENT_NS" timeout 3 bash -c 'exec 3<>/dev/tcp/198.51.100.1/41800 && echo ping >&3 && IFS= read -r l <&3 && echo "$l"' 2>/dev/null)" = pong ]; }
 netem() { # netem <netem args...>: the same qdisc on both ends of the vps-homerouter link
   vps tc qdisc replace dev pub1 root netem "$@" "${RATE_ARGS[@]}" "${SEED_ARGS[@]}"
   router tc qdisc replace dev wan0 root netem "$@" "${RATE_ARGS[@]}" "${SEED_ARGS[@]}"
@@ -139,10 +146,21 @@ if [ -n "$NETEM_SEED" ]; then
   fi
   vps tc qdisc del dev pub1 root 2>/dev/null
 fi
+tq_pids() { # the tcpquality.py processes of this sandbox
+  local p
+  if [ -z "$SANDBOX" ]; then pgrep -f -- '/tcpquality.py '; return 0; fi
+  for p in $(sandbox_pids); do
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '/tcpquality.py ' && echo "$p"
+  done
+  return 0
+}
+none_running() { ! sandbox_any_named wgft && [ -z "$(tq_pids)" ]; }
 cleanup() {
   sandbox_kill_named wgft
   sandbox_kill_cmdline '/tcpquality.py '
-  sleep 1
+  # the teardown below and the next mode's start want the killed processes gone, which takes well
+  # under a second; 10 s bounds a process that does not stop
+  wait_until 10 none_running
   vps tc qdisc del dev pub1 root 2>/dev/null
   router tc qdisc del dev wan0 root 2>/dev/null
   rmdir "$CG_ROOT"-* 2>/dev/null
@@ -163,6 +181,41 @@ case "$DIRECTION" in
   up) transfer=upload reader="the LAN host" writer="the client" dir_field="direction=up " ;;
   *) echo "tcpquality.sh: DIRECTION is down or up" >&2; exit 2 ;;
 esac
+# The agent's UDP segmentation offload is off on every path, for two reasons:
+# - netem: wireguard-go's Linux bind sends a run of same-sized datagrams as one UDP GSO packet, and
+#   the agent's veth hands it whole to the router. netem counts it as one packet against the queue,
+#   releases all its datagrams together after the whole run's transmission time, and decides loss
+#   for the packet as a whole, so up to 64 datagrams are delayed or lost together. A real link
+#   carries the datagrams one by one, so no bottleneck past it does that.
+# - CPU: without netem the GSO packet would cross the veth and the router namespace whole and never
+#   be segmented, while every real host without UDP segmentation offload pays for that. With the
+#   offload off, the agent's kernel segments the datagrams before they leave the namespace, as on a
+#   host whose NIC lacks the offload: the conservative case. A host with the offload lies between
+#   the two. Whether the router namespace's forwarding is counted in the agent's cgroup is not
+#   verified.
+# The trap that restores the starting state is set before the change, so a partial change is undone
+# too; a failed restore makes the run fail. The helper reads the state back and fails loudly if the
+# offload stays on.
+gso_was=$(ip netns exec "$HOME_NS" $Q udpgso eth0 show | grep -o 'requested=[a-z]*' | cut -d= -f2)
+if [ "$gso_was" != on ]; then
+  echo "WARN  UDP segmentation offload on the agent's eth0 is ${gso_was:-unreadable} at the start; it is not turned back on at exit"
+fi
+restore_gso() {
+  [ "$gso_was" = on ] || return 0
+  ip netns exec "$HOME_NS" $Q udpgso eth0 on >/dev/null && return 0
+  echo "FAIL  cannot turn UDP segmentation offload back on on the agent's eth0"
+  return 1
+}
+on_exit() {
+  local rc=$?
+  cleanup
+  restore_gso || rc=1
+  exit "$rc"
+}
+trap on_exit EXIT
+gso_now=$(ip netns exec "$HOME_NS" $Q udpgso eth0 off) ||
+  { echo "FAIL  cannot turn off UDP segmentation offload on the agent's eth0: $gso_now"; exit 1; }
+echo "   agent eth0: $gso_now"
 for mode in $MODES; do
   agent_env=(-u WGFT_AGENT_NETSTACK WGFT_MODE="$mode")
   case "$mode" in gvisor|wgstack) agent_env=(WGFT_MODE=userspace WGFT_AGENT_NETSTACK="$mode");; esac

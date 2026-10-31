@@ -73,7 +73,7 @@ func TestBothModesRefuseBroadcastAndMulticastAlike(t *testing.T) {
 
 			// ユーザー空間モード。ブロードキャストとマルチキャストの判定は usermode が常に渡す。ここでは
 			// ホストの帯を決めるために、同じ判定に差し替える
-			d := usermode.New(nil, resource.Limits{}, "")
+			d := usermode.New(nil, resource.Limits{}, "", 0)
 			opts := d.RelayOptions(proto.WGConfig{})
 			if opts.RefuseTarget == nil {
 				t.Fatal("usermode must always pass the broadcast and multicast check to the relay")

@@ -34,6 +34,10 @@ type Options struct {
 	// Netstack はユーザー空間モードの netstack の実装(WGFT_AGENT_NETSTACK、仕様 11a 節と wgstack.md)。
 	// gvisor か wgstack で、空は gvisor を指す。カーネルモードでは使わない
 	Netstack string
+	// SendBatch は wgstack の送信の向きの予算 P_max で、2 個以上の packet の入れ物が持てる buffer の数である
+	// (WGFT_AGENT_BATCH_MIB から cmd/wgft が求める値、wgstack-batching.md)。0 はバッチを使わない。wgstack を
+	// 使うユーザー空間モードだけが使う
+	SendBatch int
 	// WGInterface はカーネルモードの WireGuard インタフェースの名前である(WGFT_WG_INTERFACE、既定 wgft0。
 	// 仕様 7b.1・11a 節)。ユーザー空間モードでは使わない
 	WGInterface string

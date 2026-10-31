@@ -10,16 +10,42 @@
 # that sum (GOGC 100) plus the goroutine stacks plus the runtime's 10 MiB and 5 % of the live heap.
 # With gVisor the accept queue is 1790 MiB for each TCP listener (an untrusted public side); with
 # wgstack the netstack terms come from Device.Bound, which the probe file records.
+#
+# The wireguard-go queues depend on the CPU count C = CPUs + 6 of the agent host: the send side holds
+# N_tx = 1153 + C buffers of 64 KiB, the receive side 1027, and with wgstack the send batching budget
+# adds W_tx: P_max more buffers, plus the k_tx = 32 buffers the TUN reader keeps
+# (docs/design/userspace/wgstack-batching.md). CPUs is this host's count unless AGENTMEM_CPUS sets
+# it; P_max is the agent's default for K and U (0.15 of the memory soft limit) unless WGFT_AGENT_BATCH_MIB sets it in MiB.
 import json
+import os
 import sys
 
 MIB = 1.0
+BUF = 64 / 1024  # MiB of one wireguard-go buffer on Linux
+K_TX = 32
+
+
+def cpus():
+    return int(os.environ.get('AGENTMEM_CPUS') or os.cpu_count() or 1)
+
+
+def n_tx():
+    return 1153 + cpus() + 6
+
+
+def p_max(K, U):
+    upper = n_tx() * K_TX
+    mib = os.environ.get('WGFT_AGENT_BATCH_MIB', '')
+    if mib != '':
+        return min(int(int(mib) / BUF), upper)
+    # M_soft in bytes, then beta = 3/20 (0.15) in integers, as cmd/wgft/limits.go does
+    soft = (32 * 1024 + U * 12 + K * 44) * 1024
+    return min(soft * 3 // 20 // (64 * 1024), upper)
 
 
 def common(K, U, Ltcp, Lcud):
     return {
         'fixed (runtime, tunnel)': 20,
-        'wireguard-go queues': 136.3 + 65,
         'responses and UDP listener reads': 7 + 0.46 * Lcud,
         'UDP sessions': 1.2 * U / 1024,
     }
@@ -28,6 +54,7 @@ def common(K, U, Ltcp, Lcud):
 def gvisor_terms(K, U, Ltcp, Lcud):
     t = common(K, U, Ltcp, Lcud)
     t.update({
+        'wireguard-go queues ((N_tx + 1027) x 64 KiB + 65 MiB)': (n_tx() + 1027) * BUF + 65,
         'reassembly and peer': 4 + 0.15,
         'UDP receive accounting': 10.4,
         'netstack output queue': 64,
@@ -44,6 +71,8 @@ def gvisor_terms(K, U, Ltcp, Lcud):
 def wgstack_terms(K, U, Ltcp, Lcud, total, transient, mfix):
     t = common(K, U, Ltcp, Lcud)
     t.update({
+        'wireguard-go queues ((N_tx + k_tx + P_max + 1027) x 64 KiB + 65 MiB)':
+            (n_tx() + K_TX + p_max(K, U) + 1027) * BUF + 65,
         'peer wait': 0.15,
         'TCP relay share (74 KiB x K)': 74 * K / 1024,
         'trial dials, one old generation (4.4 MiB + M_fix)': 4.4 + mfix,

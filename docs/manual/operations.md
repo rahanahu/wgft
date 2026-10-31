@@ -109,6 +109,25 @@ Unset or empty means `gvisor`, and any other value stops the agent with exit cod
 Kernel mode runs no network stack; it logs that the setting is unused and starts.
 After changing the setting, run `sudo systemctl restart wgft-agent`.
 
+wgstack hands packets to WireGuard in batches to save CPU.
+`WGFT_AGENT_BATCH_MIB` limits the memory those batches may hold while they wait to be encrypted and sent, in MiB:
+
+```text
+WGFT_AGENT_BATCH_MIB=32
+```
+
+Unset or empty derives the limit from `WGFT_MAX_UDP_FLOWS` and `WGFT_MAX_TCP_FLOWS`, about 32 MiB with the default caps on Linux and macOS, 0.15 of the memory soft limit; on Windows, whose buffers are small, it is the cap, about 73 MiB with 8 CPUs.
+`0` turns batching off.
+The value limits only the batched part.
+WireGuard's queues of single packets keep their own size whatever the value, about 73 MiB on Linux with 8 CPUs.
+A value above the cap for the host's CPU count is lowered to the cap, and the agent logs the budget it uses when it starts.
+Batching needs a budget of at least 4 x CPUs + 20 buffers; on Linux and macOS a buffer is 64 KiB, so that is 1.75 MiB with 2 CPUs and 3.25 MiB with 8 CPUs.
+Below that floor wgstack sends one packet at a time, and the start line says that batching is off and why.
+With the default flow caps, the default falls below the floor only on hosts with more than about 210 CPUs.
+On Windows, batching is also off when the tunnel MTU is above 1953, and the agent logs that when it brings the tunnel up.
+A value that is not a whole number of at least 0 stops the agent with exit code 3.
+With gVisor or in kernel mode the setting is unused; the agent logs that and starts.
+
 ## Logs and diagnostics
 
 The provided systemd units write logs to journald:

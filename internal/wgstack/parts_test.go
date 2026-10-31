@@ -54,6 +54,13 @@ func FuzzParse(f *testing.F) {
 	f.Add(buildPeer(tseg{sport: 1, dport: 2, flags: flagSYN, mss: 1380, ws: 7, sackOK: true, ts: true}))
 	f.Add(buildPeer(tseg{sport: 1, dport: 2, flags: flagACK, ws: -1, sack: []sackBlock{{1, 2}, {3, 4}}}))
 	f.Fuzz(func(t *testing.T, b []byte) {
+		// 8 byte ずつの和は、どの長さでも 2 byte ずつの定義どおりの和と一致する(checksum_test.go)。初めの値は 4 つで、
+		// 0xffff の倍数(0xffff や 0xffffffff)は 1 の補数の和で 0 とほぼ同じなので、0 のほかは倍数でない値にする
+		for _, s := range [...]uint32{0, 0x1234, 0xfffffffe, pseudoSum(0x0a090002, 0x0a090001, protoTCP, len(b))} {
+			if got, want := checksum(s, b), refChecksum(s, b); got != want {
+				t.Fatalf("checksum(%#x, %d bytes) = %#04x, the definition gives %#04x", s, len(b), got, want)
+			}
+		}
 		ip, d := parseIPv4(b)
 		if d != ipv4OK {
 			return
@@ -66,9 +73,16 @@ func FuzzParse(f *testing.F) {
 }
 
 func TestIndexBackwardShift(t *testing.T) {
-	x := newIndex(64, sipKey{1, 2})
+	for _, withGen := range []bool{false, true} {
+		t.Run(map[bool]string{false: "gen-less", true: "with-gen"}[withGen], func(t *testing.T) { indexBackwardShift(t, withGen) })
+	}
+}
+
+func indexBackwardShift(t *testing.T, withGen bool) {
+	x := newIndex(64, sipKey{1, 2}, withGen)
 	r := rand.New(rand.NewPCG(1, 2))
 	ref := map[tuple]int32{}
+	refGen := map[tuple]uint64{}
 	for i := 0; i < 20000; i++ {
 		tup := tuple{laddr: 1, raddr: uint32(r.IntN(8)), lport: 80, rport: uint16(r.IntN(16))}
 		if _, ok := ref[tup]; ok && r.IntN(2) == 0 {
@@ -76,14 +90,23 @@ func TestIndexBackwardShift(t *testing.T) {
 				t.Fatal("remove failed")
 			}
 			delete(ref, tup)
+			delete(refGen, tup)
 		} else if len(ref) < 64 {
 			id := int32(r.IntN(1000))
-			x.insert(tup, id, 0)
+			g := r.Uint64()
+			x.insert(tup, id, g)
 			ref[tup] = id
+			if withGen {
+				refGen[tup] = g
+			}
 		}
 		for k, v := range ref {
-			if got, _ := x.find(k); got != v {
+			got, gen := x.find(k)
+			if got != v {
 				t.Fatalf("step %d: find %v = %d, want %d", i, k, got, v)
+			}
+			if gen != refGen[k] {
+				t.Fatalf("step %d: find %v gen = %d, want %d", i, k, gen, refGen[k])
 			}
 		}
 		used := 0

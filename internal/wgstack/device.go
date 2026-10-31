@@ -35,6 +35,8 @@ type Config struct {
 	TestBoost BoostPolicy
 	// TestCongestion は試験と性能の測定だけが使う輻輳の制御。本番は既定の CongestionCubic のままにする。
 	TestCongestion CongestionControl
+	// SendBatch は送信の向きのバッチ(wgstack-batching.md)。ゼロ値はバッチを使わない。
+	SendBatch SendBatch
 }
 
 // processStart は本番の時計の起点。プロセスのすべての Device が同じ起点を使うので、boost の回収が
@@ -89,6 +91,7 @@ func newDevice(cfg Config, lim limits, pool *boostPool) (*Device, error) {
 		return nil, errors.New("wgstack: " + err.Error())
 	}
 	d.s = s
+	s.txb.init(cfg.SendBatch, s.mtu)
 	s.trace = cfg.Trace
 	s.boostPolicy = cfg.TestBoost
 	s.ccPolicy = cfg.TestCongestion
@@ -153,34 +156,27 @@ func (d *Device) Name() (string, error)    { return "wgstack", nil }
 func (d *Device) File() *os.File           { return nil }
 func (d *Device) Events() <-chan tun.Event { return d.events }
 func (d *Device) MTU() (int, error)        { return d.s.mtu, nil }
-func (d *Device) BatchSize() int           { return 1 }
 
-func (d *Device) isClosed() bool {
-	select {
-	case <-d.s.done:
-		return true
-	default:
-		return false
-	}
-}
+// BatchSize は作成の時に決めた k_tx を返す。バッチを使わない Device では 1 である。
+func (d *Device) BatchSize() int { return d.s.txb.size }
 
-// Read は次に送る packet を 1 つ作って bufs[0][offset:] に書く。送るものが無ければ待つ。誤りを返すのは
-// Close の後の os.ErrClosed だけで、packet を作れなかったときは誤りにせず次を待つ。wireguard-go は Read が
-// ほかの誤りを返すと device を閉じるためである。
+// Read は次に送る packet を 1 個以上、min(len(bufs), len(sizes), k_eff) 個以下作って bufs[i][offset:] に
+// 書く(wgstack-batching.md の「Device の約束」)。送るものが無ければ待ち、1 個作った後は待たない。誤りを
+// 返すのは Close の後の os.ErrClosed だけで、packet を作れなかったときは誤りにせず次を待つ。wireguard-go は
+// Read がほかの誤りを返すと device を閉じるためである。
 func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	if len(bufs) == 0 || len(sizes) == 0 {
 		return 0, nil
 	}
 	for {
-		if d.isClosed() {
+		if d.s.isClosed() {
 			return 0, os.ErrClosed
 		}
 		d.readMu.Lock()
-		n := d.s.poll(bufs[0][offset:], int64(d.clock.Now()))
+		n := d.readBatch(bufs, sizes, offset, int64(d.clock.Now()))
 		d.readMu.Unlock()
 		if n > 0 {
-			sizes[0] = n
-			return 1, nil
+			return n, nil
 		}
 		select {
 		case <-d.s.out.notify:
@@ -192,7 +188,7 @@ func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 // Poll は待たずに次の packet を 1 つ作り、その長さを返す。送るものが無ければ 0 を返す。試験と、Config.Clock を
 // 渡した Device の呼び出し側が使う。
 func (d *Device) Poll(buf []byte) int {
-	if d.isClosed() {
+	if d.s.isClosed() {
 		return 0
 	}
 	d.readMu.Lock()
@@ -218,7 +214,7 @@ func (d *Device) Write(bufs [][]byte, offset int) (int, error) {
 			}
 			continue
 		}
-		if d.isClosed() {
+		if d.s.isClosed() {
 			if first == nil {
 				first = os.ErrClosed
 			}
@@ -243,52 +239,3 @@ func (d *Device) Close() error {
 }
 
 var _ tun.Device = (*Device)(nil)
-
-// close は核を閉じる。待っている操作を解き、接続の枠、行、boost の枠をすべて返す。
-func (s *stack) close() {
-	s.tmu.Lock()
-	if s.closed {
-		s.tmu.Unlock()
-		return
-	}
-	s.closed = true
-	close(s.done)
-	for _, l := range s.listeners {
-		l.closed = true
-		close(l.closeCh)
-	}
-	clear(s.listeners)
-	for id := range s.syn.rows {
-		if s.syn.rows[id].used {
-			s.syn.rows[id].promoting = false
-			s.removeSynRow(int32(id))
-		}
-	}
-	for s.tw.head >= 0 {
-		s.removeTWRow(s.tw.head)
-	}
-	s.tmu.Unlock()
-	s.udpClose()
-	s.frag.Close()
-	for i := range s.conns {
-		c := &s.conns[i]
-		c.mu.Lock()
-		if c.state != stFree {
-			c.signalRead()
-			c.signalWrite()
-			c.release()
-		}
-		c.floorRecs = nil
-		c.floorIv = nil
-		c.rcv.iv = nil
-		c.recs.recs = nil
-		c.mu.Unlock()
-	}
-	s.out.mu.Lock()
-	s.out.ctl.n = 0
-	s.out.mu.Unlock()
-	s.chunks.mu.Lock()
-	s.chunks.closed = true
-	s.chunks.free = nil
-	s.chunks.mu.Unlock()
-}
