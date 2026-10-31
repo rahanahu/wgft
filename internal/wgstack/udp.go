@@ -143,7 +143,7 @@ func (u *udpState) init(rxDgrams, txDgrams int) {
 	}
 }
 
-// failLocked は会計の不整合を記録し、この Device の UDP を止める(udp-accounting.md の会計の不整合)。
+// udpFailLocked は会計の不整合を記録し、この Device の UDP を止める(udp-accounting.md の会計の不整合)。
 // 最初の違反を保つ。udp.mu を持って呼ぶ。
 func (s *stack) udpFailLocked(err error) {
 	u := &s.udp
@@ -162,7 +162,7 @@ func (d *Device) UDPReceiveFault() error {
 	return d.s.udp.fault
 }
 
-// reserve は endpoint ep の向き dir に n byte の datagram の置き場を予約し、datagram の番号を返す。
+// udpReserve は endpoint ep の向き dir に n byte の datagram の置き場を予約し、datagram の番号を返す。
 // 予約できなければ -1 と、Device の予算で拒んだかを返す。udp.mu を持って呼ぶ。
 func (s *stack) udpReserve(ep *udpEndpoint, dir, n int) (int32, bool) {
 	u := &s.udp
@@ -286,7 +286,7 @@ func (u *udpState) wakeTx() {
 	u.txSpace = make(chan struct{})
 }
 
-// udpWrite は datagram id の中身を data にする。
+// udpPut は datagram id の中身を data にする。
 func (s *stack) udpPut(dir int, id int32, data []byte) {
 	u := &s.udp
 	g := &u.dg[dir][id]

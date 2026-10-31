@@ -5,13 +5,13 @@ import "sync"
 // 出力の組(設計文書の「出力」)。接続の組と行の組は packet を待ち行列に積まず、送るものがある枠と行の
 // 番号を順番の list に並べ、Read の時に先頭の 1 つが packet を 1 つ作る。list の節は固定の配列に置くので、
 // 出力の保持は接続と行の数で決まる。制御の組だけが、MTU の大きさの枠を固定の数だけ持つ輪に packet を
-// 積む。UDP の組は次の段階で加える。Read は送るもののある組の間で、MTU 1 つ分ずつの byte の
-// deficit round robin で組を選ぶ。
+// 積む。UDP の組は UDP の送信の FIFO(udp.go)から datagram とその断片を作る。Read は送るもののある組の間で、
+// MTU 1 つ分ずつの byte の deficit round robin で組を選ぶ。
 
 const (
 	classConn = iota // 接続の枠の segment
 	classRow         // 握手の途中の行と TIME_WAIT の行の segment
-	classUDP         // UDP の datagram(次の段階)
+	classUDP         // UDP の datagram とその断片
 	classCtl         // 制御の輪
 	numClasses
 )

@@ -48,8 +48,10 @@ type ledgerRow struct {
 	n   int64
 }
 
-// sendLedger は送信の向きの予算の状態。rows、head、count、held、next は Read の goroutine だけが readMu の
-// 中で触れる。issued、acked、pending は atomic で、Send を見る層も触れる。
+// sendLedger は送信の向きの予算の状態。持ち主で欄が 3 つに分かれる。on から key までは init が作成の時に
+// 決め、後で変えない。rows、head、count、held、next は Read の goroutine だけが readMu の中で触れる。issued、
+// acked、pending は atomic で、Send を見る層も触れる。key は秘密なので Config.Rand ではなく crypto/rand から
+// 読む(stack の説明の乱数の例外)。
 type sendLedger struct {
 	on      bool
 	size    int    // k_tx
@@ -82,7 +84,8 @@ func (l *sendLedger) init(cfg SendBatch, mtu int) {
 	if cfg.Callers > 1 {
 		keff = min(size, cfg.Packets/(2*(cfg.Callers-1)))
 	}
-	// 印を書ける条件:offset(16)+ packet の長さ + 詰め物 + 認証の tag ≤ buffer の容量 - 16。Read は呼ぶ
+	// 印を書ける条件:offset(wireguard-go の MessageTransportHeaderSize の 16)+ packet の長さ + 詰め物 + 認証の
+	// tag ≤ buffer の容量 - 16。Read は呼ぶ
 	// たびに実際の offset と buffer の長さでも確かめる
 	if keff < 2 || 16+mtu+sealOverhead > cfg.BufferSize-tagSize {
 		return
