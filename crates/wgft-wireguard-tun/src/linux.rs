@@ -257,7 +257,12 @@ async fn configure(tun: &TunSettings, fd: OwnedFd) -> io::Result<(OwnedFd, Rules
         )));
     }
     // 専用の表は空でなければならない。ほかのソフトの表なら、経路を混ぜずに止まる
-    let routes = ip_output(&tool, &["-4", "route", "show", "table", &table]).await?;
+    // 使ったことの無い表は存在せず、ip は誤りで答える。そのときは空とみなす
+    let routes = match ip_output(&tool, &["-4", "route", "show", "table", &table]).await {
+        Ok(routes) => routes,
+        Err(e) if e.to_string().contains("does not exist") => String::new(),
+        Err(e) => return Err(e),
+    };
     if !routes.trim().is_empty() {
         return Err(io::Error::other(format!(
             "routing table {table} is not empty; choose another table"
