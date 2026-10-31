@@ -26,6 +26,7 @@ use crate::ip::{IPV4_MIN_HEADER, parse_ipv4};
 use crate::keys::PublicKey;
 use crate::protocol::{DATA_OVERHEAD, Inbound, PADDING, PeerId, ProtoEvent, Protocol};
 use crate::queue::{BoundedQueue, ByteLen};
+use zeroize::Zeroizing;
 
 /// The smallest MTU that carries an IPv4 packet.
 const MIN_MTU: u16 = 68;
@@ -41,7 +42,7 @@ pub struct Transmit {
 
 impl ByteLen for Transmit {
     fn byte_len(&self) -> usize {
-        self.payload.len()
+        self.payload.capacity()
     }
 }
 
@@ -118,9 +119,10 @@ struct Peer {
     keepalive: Option<Duration>,
     /// ハンドシェイクを待つ送信の packet。
     staged: BoundedQueue<Vec<u8>>,
-    /// こちらからハンドシェイクを始める時刻。起動の直後と期限切れの後に、persistent keepalive
-    /// を持つピアにだけ置く (wireguard-go は設定の時と keepalive の timer で同じことをする)。
-    contact_at: Option<Instant>,
+    /// persistent keepalive の期限。このピアへ送るか、このピアから認証した datagram を受けるたびに
+    /// 間隔だけ先へ延ばす (wireguard-go の persistent keepalive の timer と同じ規則)。期限が来たときは、
+    /// 使えるセッションが無いので、ハンドシェイクを始める。persistent keepalive を持たないピアには置かない。
+    keepalive_at: Option<Instant>,
     rx_bytes: u64,
     tx_bytes: u64,
 }
@@ -152,29 +154,19 @@ impl Device {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] for duplicate or invalid peer keys, a tiny MTU or a zero limit.
+    /// Returns [`ConfigError`] for duplicate or invalid peer keys, a tiny MTU, a zero limit, a
+    /// keepalive outside 1 to 65535 seconds or timer overrides outside the protocol's bounds.
     pub fn new(
         config: DeviceConfig,
-        seed: [u8; 32],
+        seed: Zeroizing<[u8; 32]>,
         now: Instant,
         unix: Duration,
     ) -> Result<Self, ConfigError> {
         if config.mtu < MIN_MTU {
             return Err(ConfigError::Mtu(config.mtu));
         }
+        config.validate()?;
         let l = config.limits;
-        for (name, v) in [
-            ("staged_packets", l.staged_packets),
-            ("transmit_packets", l.transmit_packets),
-            ("transmit_bytes", l.transmit_bytes),
-            ("deliver_packets", l.deliver_packets),
-            ("deliver_bytes", l.deliver_bytes),
-            ("events", l.events),
-        ] {
-            if v == 0 {
-                return Err(ConfigError::ZeroLimit(name));
-            }
-        }
         let keys: Vec<_> = config
             .peers
             .iter()
@@ -190,13 +182,13 @@ impl Device {
                 routes.insert(*prefix, id);
             }
             by_key.insert(p.public_key, id);
-            let keepalive = p.persistent_keepalive.filter(|d| !d.is_zero());
+            let keepalive = p.persistent_keepalive;
             peers.push(Peer {
                 key: p.public_key,
                 endpoint: p.endpoint,
                 keepalive,
                 staged: BoundedQueue::new(l.staged_packets, l.staged_packets * mtu),
-                contact_at: (keepalive.is_some() && p.endpoint.is_some()).then_some(now),
+                keepalive_at: (keepalive.is_some() && p.endpoint.is_some()).then_some(now),
                 rx_bytes: 0,
                 tx_bytes: 0,
             });
@@ -266,7 +258,7 @@ impl Device {
             }
             Inbound::Data { peer, plaintext } => {
                 self.accepted_from(peer, from, rx);
-                self.deliver(peer, plaintext);
+                self.deliver(peer, &plaintext);
                 self.flush_staged(peer, now);
                 self.drain_proto_events(peer, now);
             }
@@ -275,8 +267,10 @@ impl Device {
 
     /// 認証した datagram の後だけ endpoint を動かす。
     fn accepted_from(&mut self, peer: PeerId, from: SocketAddr, rx: u64) {
+        let now = self.now;
         let p = &mut self.peers[peer];
         p.rx_bytes = p.rx_bytes.saturating_add(rx);
+        p.keepalive_at = p.keepalive.map(|interval| now + interval);
         if p.endpoint != Some(from) {
             p.endpoint = Some(from);
             let event = Event::EndpointChanged {
@@ -287,8 +281,8 @@ impl Device {
         }
     }
 
-    fn deliver(&mut self, peer: PeerId, mut plaintext: Vec<u8>) {
-        let Some(header) = parse_ipv4(&plaintext) else {
+    fn deliver(&mut self, peer: PeerId, plaintext: &[u8]) {
+        let Some(header) = parse_ipv4(plaintext) else {
             self.drops.add(DropReason::InvalidInnerPacket, 1);
             return;
         };
@@ -296,8 +290,9 @@ impl Device {
             self.drops.add(DropReason::DisallowedSource, 1);
             return;
         }
-        plaintext.truncate(header.total_len);
-        if !self.packets.push(plaintext) {
+        // 詰め物を除いた長さの新しいバッファに写す。復号のバッファは datagram の長さで、相手は
+        // 短い packet を長い詰め物で送れるので、そのまま持つと容量がキューの上限を超える
+        if !self.packets.push(plaintext[..header.total_len].to_vec()) {
             self.drops.add(DropReason::DeliverOverflow, 1);
         }
     }
@@ -362,14 +357,23 @@ impl Device {
     pub fn handle_timeout(&mut self, now: Instant) {
         let now = self.clock(now);
         for peer in 0..self.peers.len() {
-            if self.peers[peer].contact_at.is_some_and(|at| at <= now) {
-                self.peers[peer].contact_at = None;
-                if let Some(initiation) = self.proto.initiate(peer, now) {
+            self.proto.handle_timeout(peer, now);
+            self.drain_proto_events(peer, now);
+            // sanstun は使えるセッションがある間、persistent keepalive を間隔ごとに送り、その送信が
+            // この期限を延ばす。sanstun を先に進めた後でも期限が来ているのは、間隔の間なにも送って
+            // いない、つまり使えるセッションが無いときだけである。応答の側のセッションが 180 秒で切れた
+            // 後もここで始める
+            let p = &mut self.peers[peer];
+            if let (Some(at), Some(interval)) = (p.keepalive_at, p.keepalive)
+                && at <= now
+            {
+                p.keepalive_at = Some(now + interval);
+                if p.endpoint.is_some()
+                    && let Some(initiation) = self.proto.initiate(peer, now)
+                {
                     self.send_to_peer(peer, initiation);
                 }
             }
-            self.proto.handle_timeout(peer, now);
-            self.drain_proto_events(peer, now);
         }
     }
 
@@ -383,15 +387,20 @@ impl Device {
                     peer: self.peers[peer].key,
                     took,
                 }),
-                ProtoEvent::Expired => {
+                ProtoEvent::Expired { used } => {
                     let p = &mut self.peers[peer];
                     let lost = p.staged.clear();
                     if let (Some(interval), Some(_)) = (p.keepalive, p.endpoint) {
-                        p.contact_at = Some(now + interval);
+                        p.keepalive_at = Some(now + interval);
                     }
                     let key = p.key;
                     self.drops.add(DropReason::NoSession, lost as u64);
-                    self.push_event(Event::PeerExpired { peer: key });
+                    // 一度も使わなかったトンネル (ハンドシェイクを始めも受けもしていない) の期限切れは
+                    // 知らせない。sanstun は作成から 540 秒で切るので、そのまま知らせると待つだけの
+                    // ピアについて 9 分ごとに event が出る
+                    if used {
+                        self.push_event(Event::PeerExpired { peer: key });
+                    }
                 }
             }
         }
@@ -404,8 +413,10 @@ impl Device {
         };
         let len = payload.len() as u64;
         if self.transmits.push(Transmit { to, payload }) {
+            let now = self.now;
             let p = &mut self.peers[peer];
             p.tx_bytes = p.tx_bytes.saturating_add(len);
+            p.keepalive_at = p.keepalive.map(|interval| now + interval);
         } else {
             self.drops.add(DropReason::TransmitOverflow, 1);
         }
@@ -445,7 +456,7 @@ impl Device {
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
         (0..self.peers.len())
-            .flat_map(|peer| [self.proto.poll_timeout(peer), self.peers[peer].contact_at])
+            .flat_map(|peer| [self.proto.poll_timeout(peer), self.peers[peer].keepalive_at])
             .flatten()
             .min()
     }
@@ -461,7 +472,7 @@ impl Device {
         let first = p.endpoint.is_none();
         p.endpoint = Some(endpoint);
         if first && p.keepalive.is_some() {
-            p.contact_at = Some(now);
+            p.keepalive_at = Some(now);
         }
         true
     }
@@ -477,6 +488,21 @@ impl Device {
             rx_bytes: p.rx_bytes,
             tx_bytes: p.tx_bytes,
         })
+    }
+
+    /// Encrypts `packet` for the peer as it is, without the checks of [`Device::handle_packet`],
+    /// so a fuzz target can send arbitrary inner packets. Not part of the API.
+    #[cfg(feature = "fuzzing")]
+    #[doc(hidden)]
+    pub fn encapsulate_unchecked(
+        &mut self,
+        now: Instant,
+        peer: &PublicKey,
+        packet: &[u8],
+    ) -> Option<Vec<u8>> {
+        let now = self.clock(now);
+        let &id = self.by_key.get(peer)?;
+        self.proto.encapsulate(id, now, packet).ok().flatten()
     }
 
     /// The configured peers' keys, in configuration order.

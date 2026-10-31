@@ -6,9 +6,10 @@ pub(crate) trait ByteLen {
     fn byte_len(&self) -> usize;
 }
 
+/// 上限は割り当てた容量で数える。長さで数えると、短く切った大きなバッファが上限をすり抜ける。
 impl ByteLen for Vec<u8> {
     fn byte_len(&self) -> usize {
-        self.len()
+        self.capacity()
     }
 }
 

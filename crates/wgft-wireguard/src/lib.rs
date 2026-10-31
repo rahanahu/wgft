@@ -8,7 +8,7 @@
 //! ```
 //! use std::net::Ipv4Addr;
 //! use std::time::{Duration, Instant};
-//! use wgft_wireguard::{DeviceConfig, Device, PrivateKey, DEFAULT_KEEPALIVE};
+//! use wgft_wireguard::{DeviceConfig, Device, PrivateKey, Zeroizing, DEFAULT_KEEPALIVE};
 //!
 //! let agent_key = PrivateKey::generate([1; 32]);
 //! let server_key = PrivateKey::generate([2; 32]).public_key();
@@ -20,7 +20,7 @@
 //!     DEFAULT_KEEPALIVE,
 //! );
 //! let now = Instant::now();
-//! let mut device = Device::new(config, [3; 32], now, Duration::from_hours(500_000)).unwrap();
+//! let mut device = Device::new(config, Zeroizing::new([3; 32]), now, Duration::from_hours(500_000)).unwrap();
 //!
 //! // A peer with a persistent keepalive is contacted right away.
 //! device.handle_timeout(device.poll_timeout().unwrap());
@@ -39,9 +39,10 @@ mod protocol;
 mod queue;
 
 pub use config::{
-    ConfigError, DEFAULT_KEEPALIVE, DEFAULT_MTU, DeviceConfig, Ipv4Prefix, Limits, PeerConfig,
-    ProtocolTimers,
+    ConfigError, DEFAULT_KEEPALIVE, DEFAULT_MTU, DeviceConfig, Ipv4Prefix, Limits, MAX_KEEPALIVE,
+    PeerConfig, ProtocolTimers,
 };
 pub use device::{Device, Event, Held, PeerStatus, Transmit};
 pub use drops::{DropReason, Drops};
 pub use keys::{KEY_LEN, KeyError, PrivateKey, PublicKey};
+pub use zeroize::Zeroizing;

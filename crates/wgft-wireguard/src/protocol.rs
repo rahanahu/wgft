@@ -63,14 +63,17 @@ pub(crate) enum ProtoEvent {
     SendKeepalive(Vec<u8>),
     /// このピアとの最初のセッションが確かめられた。`took` はハンドシェイクにかかった時間。
     Established { took: Duration },
-    /// 接続が期限切れになった。状態は捨て、新しいトンネルに取り替えた。
-    Expired,
+    /// 接続が期限切れになった。状態は捨て、新しいトンネルに取り替えた。`used` は、そのトンネルが
+    /// ハンドシェイクを始めたか受けたかである。
+    Expired { used: bool },
 }
 
 struct PeerProto {
     remote: sanstun::PublicKey,
     keepalive: Option<Duration>,
     tunnel: Tunnel,
+    /// このトンネルでハンドシェイクを始めたか受けたか。
+    used: bool,
 }
 
 pub(crate) struct Protocol {
@@ -117,13 +120,12 @@ impl Protocol {
         private_key: &PrivateKey,
         peers: &[(PublicKey, Option<Duration>)],
         timers: ProtocolTimers,
-        seed: [u8; 32],
+        seed: Zeroizing<[u8; 32]>,
         now: Instant,
         unix: Duration,
     ) -> Result<Self, ConfigError> {
         let secret = StaticSecret::from(Zeroizing::new(*private_key.as_bytes()));
-        let mut interface =
-            Interface::new(Zeroizing::new(seed), now, unix).with_static_private(secret);
+        let mut interface = Interface::new(seed, now, unix).with_static_private(secret);
         let own = interface.static_public();
         let mut list = Vec::with_capacity(peers.len());
         let mut by_key = HashMap::with_capacity(peers.len());
@@ -143,6 +145,7 @@ impl Protocol {
                 remote,
                 keepalive,
                 tunnel,
+                used: false,
             });
         }
         Ok(Self {
@@ -187,6 +190,7 @@ impl Protocol {
                     .tunnel
                     .handle_handshake_initiation(init, now)
                     .map_err(|e| map_error(&e))?;
+                self.peers[peer].used = true;
                 Ok(Inbound::InitiationAnswered {
                     peer,
                     response: response.to_vec(),
@@ -263,10 +267,10 @@ impl Protocol {
 
     /// ハンドシェイクを始める。進行中なら `None`。
     pub(crate) fn initiate(&mut self, peer: PeerId, now: Instant) -> Option<Vec<u8>> {
-        self.peers[peer]
-            .tunnel
-            .initiate_handshake(now)
-            .map(|d| d.to_vec())
+        let p = &mut self.peers[peer];
+        let initiation = p.tunnel.initiate_handshake(now)?;
+        p.used = true;
+        Some(initiation.to_vec())
     }
 
     pub(crate) fn handle_timeout(&mut self, peer: PeerId, now: Instant) {
@@ -281,7 +285,10 @@ impl Protocol {
     pub(crate) fn poll_event(&mut self, peer: PeerId, now: Instant) -> Option<ProtoEvent> {
         let event = self.peers[peer].tunnel.poll_event()?;
         Some(match event {
-            SanstunEvent::SendHandshakeInitiation(d) => ProtoEvent::SendInitiation(d.to_vec()),
+            SanstunEvent::SendHandshakeInitiation(d) => {
+                self.peers[peer].used = true;
+                ProtoEvent::SendInitiation(d.to_vec())
+            }
             SanstunEvent::SendKeepalive(d) => ProtoEvent::SendKeepalive(d.to_vec()),
             SanstunEvent::Established {
                 started_at,
@@ -290,8 +297,10 @@ impl Protocol {
                 took: confirmed_at.saturating_duration_since(started_at),
             },
             SanstunEvent::ConnectionExpired => {
+                let used = self.peers[peer].used;
+                // 期限の切れたトンネルはハンドシェイクを受けないので、使っていなくても取り替える
                 self.renew(peer, now);
-                ProtoEvent::Expired
+                ProtoEvent::Expired { used }
             }
         })
     }
@@ -305,6 +314,7 @@ impl Protocol {
             self.by_tunnel.remove(&old);
             self.by_tunnel.insert(tunnel.id(), peer);
             self.peers[peer].tunnel = tunnel;
+            self.peers[peer].used = false;
         }
     }
 
@@ -329,10 +339,17 @@ fn new_tunnel(
         config = config.with_persistent_keepalive(interval);
     }
     let mut tunnel = interface.new_tunnel(remote, config, now)?;
+    // sanstun は 2 つの和が 180 秒以下であることを、設定するたびに今の値で確かめる。和は
+    // ProtocolTimers::validate で確かめたので、途中の和も超えない順に設定する
+    let keepalive_first =
+        timers.effective_keepalive_timeout() <= ProtocolTimers::default_keepalive_timeout();
+    if keepalive_first && let Some(t) = timers.keepalive_timeout {
+        tunnel.set_keepalive_timeout(t);
+    }
     if let Some(t) = timers.rekey_timeout {
         tunnel.set_rekey_timeout(t);
     }
-    if let Some(t) = timers.keepalive_timeout {
+    if !keepalive_first && let Some(t) = timers.keepalive_timeout {
         tunnel.set_keepalive_timeout(t);
     }
     if let Some(t) = timers.rekey_attempt_time {

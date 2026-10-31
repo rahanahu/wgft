@@ -9,6 +9,7 @@ use crate::device::{Device, Event};
 use crate::drops::DropReason;
 use crate::ip::tests::ipv4_packet;
 use crate::keys::{PrivateKey, PublicKey};
+use zeroize::Zeroizing;
 
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
 const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
@@ -38,6 +39,8 @@ struct Net {
     b_up: bool,
     /// 運んだ datagram の数。
     carried: usize,
+    /// A が datagram を出した時刻。
+    a_sent_at: Vec<Duration>,
 }
 
 fn agent_config(a_key: &PrivateKey, b_pub: PublicKey, b_addr: SocketAddr) -> DeviceConfig {
@@ -80,8 +83,8 @@ impl Net {
         Self {
             base,
             t: Duration::ZERO,
-            a: Device::new(ca, [1; 32], base, UNIX).unwrap(),
-            b: Device::new(cb, [2; 32], base, UNIX).unwrap(),
+            a: Device::new(ca, Zeroizing::new([1; 32]), base, UNIX).unwrap(),
+            b: Device::new(cb, Zeroizing::new([2; 32]), base, UNIX).unwrap(),
             a_key,
             b_key,
             a_addr,
@@ -92,6 +95,7 @@ impl Net {
             b_events: Vec::new(),
             b_up: true,
             carried: 0,
+            a_sent_at: Vec::new(),
         }
     }
 
@@ -135,6 +139,7 @@ impl Net {
             let mut moved = false;
             while let Some(tx) = self.a.poll_transmit() {
                 moved = true;
+                self.a_sent_at.push(self.t);
                 if self.b_up && tx.to == self.b_addr {
                     self.carried += 1;
                     self.b.handle_datagram(now, self.a_addr, &tx.payload);
@@ -362,7 +367,7 @@ fn an_initiation_from_an_unknown_key_gets_no_answer() {
     let stranger_key = PrivateKey::generate([0xcc; 32]);
     let mut c = Device::new(
         agent_config(&stranger_key, n.b_pub(), n.b_addr),
-        [9; 32],
+        Zeroizing::new([9; 32]),
         n.base,
         UNIX,
     )
@@ -539,7 +544,7 @@ fn a_restarted_server_is_reached_again_by_traffic() {
     n.t += Duration::from_secs(3);
     n.b = Device::new(
         server_config(&n.b_key, n.a_pub()),
-        [7; 32],
+        Zeroizing::new([7; 32]),
         n.now(),
         UNIX + n.t,
     )
@@ -570,7 +575,7 @@ fn a_restarted_agent_needs_a_later_wall_clock() {
     // 壁時計の戻った agent の開始は、古い開始の再送と見分けられず、捨てられる
     n.a = Device::new(
         agent_config(&n.a_key, n.b_pub(), n.b_addr),
-        [5; 32],
+        Zeroizing::new([5; 32]),
         n.now(),
         UNIX,
     )
@@ -582,7 +587,7 @@ fn a_restarted_agent_needs_a_later_wall_clock() {
     // 進んだ壁時計なら受け付ける
     n.a = Device::new(
         agent_config(&n.a_key, n.b_pub(), n.b_addr),
-        [6; 32],
+        Zeroizing::new([6; 32]),
         n.now(),
         UNIX + n.t,
     )
@@ -657,7 +662,7 @@ fn bad_configurations_are_refused() {
     let peer = PrivateKey::generate([2; 32]).public_key();
     let base = || DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, KEEPALIVE);
     let now = Instant::now();
-    let try_new = |c: DeviceConfig| Device::new(c, [0; 32], now, UNIX).unwrap_err();
+    let try_new = |c: DeviceConfig| Device::new(c, Zeroizing::new([0; 32]), now, UNIX).unwrap_err();
 
     let mut c = base();
     c.peers.push(c.peers[0].clone());
@@ -684,4 +689,156 @@ fn max_transmit_len_covers_a_full_packet() {
     n.a.handle_packet(n.now(), &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1400]));
     let tx = n.a.poll_transmit().unwrap();
     assert_eq!(tx.payload.len(), n.a.max_transmit_len());
+}
+
+#[test]
+fn an_idle_responder_keeps_contacting_the_server() {
+    // server の側 (B) が始めたセッションで、agent (A) は応答の側になる。B は keepalive を持たず、
+    // データを送らない限りハンドシェイクを始めない (Linux の WireGuard の server と同じ)
+    let mut n = Net::with(
+        |a| a.peers[0].endpoint = None,
+        |b| b.peers[0].endpoint = Some(addr("198.51.100.2:40000")),
+    );
+    n.b_sends(b"hello");
+    assert_eq!(n.a_got.len(), 1);
+    assert_eq!(n.b.drops().total(), 0);
+    let start = n.t;
+    n.a_sent_at.clear();
+    n.run(Duration::from_secs(600), Duration::from_secs(1));
+    let mut last = start;
+    let mut widest = Duration::ZERO;
+    for &at in n.a_sent_at.iter().chain([n.t].iter()) {
+        widest = widest.max(at.saturating_sub(last));
+        last = at;
+    }
+    // 応答の側のセッションは 180 秒で切れる。その後も keepalive の間隔ごとに何かを送る
+    assert!(
+        widest <= Duration::from_secs(40),
+        "the agent was silent for {widest:?}"
+    );
+    n.b_sends(b"still there");
+    assert_eq!(n.a_got.len(), 2);
+}
+
+#[test]
+fn padded_packets_are_held_at_their_own_size() {
+    let mut n = Net::new();
+    n.connect();
+    let now = n.now();
+    // 21 バイトの packet を約 60 KB の詰め物で送る。B の検査を通さずに暗号化する
+    let mut padded = ipv4_packet(SERVER_IP, AGENT_IP, b"x");
+    padded.resize(60_000, 0);
+    for _ in 0..300 {
+        let datagram = n.b.proto.encapsulate(0, now, &padded).unwrap().unwrap();
+        n.a.handle_datagram(now, n.b_addr, &datagram);
+    }
+    let held = n.a.held();
+    let limits = n.a.limits();
+    assert_eq!(held.deliver_packets, limits.deliver_packets);
+    assert!(held.deliver_bytes <= limits.deliver_bytes);
+    assert_eq!(held.deliver_bytes, limits.deliver_packets * 21);
+    let p = n.a.poll_packet().unwrap();
+    assert_eq!((p.len(), p.capacity()), (21, 21));
+}
+
+#[test]
+fn keepalives_and_timer_overrides_outside_their_bounds_are_refused() {
+    use crate::config::ConfigError;
+    let key = PrivateKey::generate([1; 32]);
+    let peer = PrivateKey::generate([2; 32]).public_key();
+    let now = Instant::now();
+    let make = |keepalive: Duration, timers: ProtocolTimers| {
+        let mut c = DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, keepalive);
+        c.timers = timers;
+        Device::new(c, Zeroizing::new([0; 32]), now, UNIX).map(|_| ())
+    };
+    let secs = Duration::from_secs;
+    let none = ProtocolTimers::default();
+    for bad in [Duration::ZERO, Duration::from_millis(500), secs(65_536)] {
+        assert_eq!(make(bad, none), Err(ConfigError::Keepalive(bad)));
+    }
+    assert_eq!(make(secs(1), none), Ok(()));
+    assert_eq!(make(secs(65_535), none), Ok(()));
+
+    let t = |rekey: Option<u64>, keepalive: Option<u64>, attempt: Option<u64>| ProtocolTimers {
+        rekey_timeout: rekey.map(secs),
+        keepalive_timeout: keepalive.map(secs),
+        rekey_attempt_time: attempt.map(secs),
+    };
+    let err = |name| Err(ConfigError::Timer(name));
+    assert_eq!(
+        make(KEEPALIVE, t(Some(0), None, None)),
+        err("rekey_timeout")
+    );
+    assert_eq!(
+        make(KEEPALIVE, t(None, Some(0), None)),
+        err("keepalive_timeout")
+    );
+    assert_eq!(
+        make(KEEPALIVE, t(None, None, Some(0))),
+        err("rekey_attempt_time")
+    );
+    assert_eq!(
+        make(KEEPALIVE, t(None, None, Some(541))),
+        err("rekey_attempt_time")
+    );
+    assert_eq!(make(KEEPALIVE, t(None, None, Some(540))), Ok(()));
+    let sum = "rekey_timeout + keepalive_timeout";
+    assert_eq!(make(KEEPALIVE, t(Some(171), None, None)), err(sum));
+    assert_eq!(make(KEEPALIVE, t(None, Some(176), None)), err(sum));
+    // 和が 180 秒以内なら、どちらを既定より大きくしても sanstun の検査に当たらない
+    assert_eq!(make(KEEPALIVE, t(Some(175), Some(5), None)), Ok(()));
+    assert_eq!(make(KEEPALIVE, t(Some(5), Some(175), None)), Ok(()));
+    assert_eq!(make(KEEPALIVE, t(Some(170), None, None)), Ok(()));
+}
+
+#[test]
+fn a_replayed_initiation_from_elsewhere_gets_no_answer() {
+    let mut n = Net::new();
+    let now = n.now();
+    n.a.handle_timeout(now);
+    let init = n.a.poll_transmit().unwrap();
+    n.b.handle_datagram(now, n.a_addr, &init.payload);
+    assert!(n.b.poll_transmit().is_some());
+    let stranger = addr("192.0.2.66:9999");
+    n.b.handle_datagram(now, stranger, &init.payload);
+    assert!(n.b.poll_transmit().is_none());
+    assert_eq!(n.b.drops().get(DropReason::Replayed), 1);
+    assert_eq!(
+        n.b.peer_status(&n.a_pub(), now).unwrap().endpoint,
+        Some(n.a_addr)
+    );
+}
+
+#[test]
+fn a_replayed_response_gets_no_answer() {
+    let mut n = Net::new();
+    let now = n.now();
+    n.a.handle_timeout(now);
+    let init = n.a.poll_transmit().unwrap();
+    n.b.handle_datagram(now, n.a_addr, &init.payload);
+    let response = n.b.poll_transmit().unwrap();
+    n.a.handle_datagram(now, n.b_addr, &response.payload);
+    assert!(n.a.poll_transmit().is_some(), "the confirming keepalive");
+    let stranger = addr("192.0.2.66:9999");
+    n.a.handle_datagram(now, stranger, &response.payload);
+    assert!(n.a.poll_transmit().is_none());
+    assert_eq!(n.a.drops().total(), 1);
+    assert_eq!(
+        n.a.peer_status(&n.b_pub(), now).unwrap().endpoint,
+        Some(n.b_addr)
+    );
+}
+
+#[test]
+fn a_tunnel_that_was_never_used_expires_quietly_and_still_answers() {
+    let mut n = Net::with(|a| a.peers[0].endpoint = None, |_| {});
+    n.run(Duration::from_secs(600), Duration::from_secs(1));
+    assert_eq!(n.b_events, vec![]);
+    assert_eq!(n.a_events, vec![]);
+    let b_pub = n.b_pub();
+    assert!(n.a.set_endpoint(n.now(), &b_pub, n.b_addr));
+    n.connect();
+    n.a_sends(b"late");
+    assert_eq!(n.b_got.len(), 1);
 }

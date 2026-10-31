@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use libfuzzer_sys::fuzz_target;
 use wgft_wireguard::{
-    Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers,
+    Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers, Zeroizing,
 };
 
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
@@ -56,6 +56,7 @@ fn check(device: &Device) {
     assert!(held.deliver_bytes <= limits.deliver_bytes);
     assert!(held.events <= limits.events);
     assert!(held.staged_packets_max <= limits.staged_packets);
+    assert!(held.staged_bytes_max <= limits.staged_packets * device.mtu());
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -96,13 +97,14 @@ fuzz_target!(|data: &[u8]| {
         limits: Limits::default(),
         timers: ProtocolTimers::default(),
     };
-    let mut a = Device::new(ca, [1; 32], base, unix).unwrap();
-    let mut b = Device::new(cb, [2; 32], base, unix).unwrap();
+    let a_pub = a_key.public_key();
+    let mut a = Device::new(ca, Zeroizing::new([1; 32]), base, unix).unwrap();
+    let mut b = Device::new(cb, Zeroizing::new([2; 32]), base, unix).unwrap();
     let mut t = Duration::ZERO;
 
     while let Some(op) = input.byte() {
         let now = base + t;
-        match op % 9 {
+        match op % 10 {
             0 => t += Duration::from_millis(u64::from(input.byte().unwrap_or(0)) * 20),
             1 => t += Duration::from_secs(u64::from(input.byte().unwrap_or(0))),
             2 => {
@@ -146,6 +148,15 @@ fuzz_target!(|data: &[u8]| {
             7 => {
                 a.handle_timeout(now);
                 b.handle_timeout(now);
+            }
+            8 => {
+                // B の検査を通さない任意の中身を暗号化して A へ渡す。受信の側の中身の検査と
+                // AllowedIPs の検査が任意の packet を見る
+                let len = usize::from(input.byte().unwrap_or(0)) * 2;
+                let raw = input.bytes(len).to_vec();
+                if let Some(d) = b.encapsulate_unchecked(now, &a_pub, &raw) {
+                    a.handle_datagram(now, b_addr, &d);
+                }
             }
             _ => {
                 while a.poll_packet().is_some() {}

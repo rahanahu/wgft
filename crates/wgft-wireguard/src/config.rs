@@ -13,6 +13,14 @@ pub const DEFAULT_MTU: u16 = 1420;
 /// The persistent keepalive the v1 agent uses when the server sends none.
 pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(25);
 
+/// The largest persistent keepalive, as `wg` accepts it.
+pub const MAX_KEEPALIVE: Duration = Duration::from_secs(65535);
+
+// WireGuard の論文の timer の既定値と、sanstun が上書きに課す上限
+const REKEY_TIMEOUT: Duration = Duration::from_secs(5);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+const REJECT_AFTER_TIME: Duration = Duration::from_secs(180);
+
 /// An IPv4 network in CIDR form. Host bits are cleared when it is made, as `wg` does.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ipv4Prefix {
@@ -103,8 +111,9 @@ pub struct PeerConfig {
     pub endpoint: Option<SocketAddr>,
     /// The inner addresses this peer may send from and that are routed to it.
     pub allowed_ips: Vec<Ipv4Prefix>,
-    /// The persistent keepalive interval. A peer with one and an endpoint is contacted as soon as
-    /// the device starts, and again after a failed handshake, as wireguard-go does.
+    /// The persistent keepalive interval, 1 to 65535 seconds. As with wireguard-go, a peer with one
+    /// and an endpoint is contacted as soon as the device starts, and the device starts a handshake
+    /// whenever nothing has been sent to or received from the peer for one interval.
     pub persistent_keepalive: Option<Duration>,
 }
 
@@ -118,6 +127,54 @@ pub struct ProtocolTimers {
     pub keepalive_timeout: Option<Duration>,
     /// `REKEY_ATTEMPT_TIME`, 90 seconds by default: how long to retry a handshake.
     pub rekey_attempt_time: Option<Duration>,
+}
+
+impl ProtocolTimers {
+    /// The rekey timeout in effect.
+    #[must_use]
+    pub fn effective_rekey_timeout(&self) -> Duration {
+        self.rekey_timeout.unwrap_or(REKEY_TIMEOUT)
+    }
+
+    /// The keepalive timeout in effect.
+    #[must_use]
+    pub fn effective_keepalive_timeout(&self) -> Duration {
+        self.keepalive_timeout.unwrap_or(KEEPALIVE_TIMEOUT)
+    }
+
+    /// The keepalive timeout of the WireGuard paper.
+    #[must_use]
+    pub fn default_keepalive_timeout() -> Duration {
+        KEEPALIVE_TIMEOUT
+    }
+
+    /// sanstun の上書きの前提 (0 でない、`REKEY_ATTEMPT_TIME` は 540 秒まで、`REKEY_TIMEOUT` と
+    /// `KEEPALIVE_TIMEOUT` の和は 180 秒まで) を確かめる。外れた値は sanstun の debug の検査に当たる。
+    fn validate(&self) -> Result<(), ConfigError> {
+        for (name, value) in [
+            ("rekey_timeout", self.rekey_timeout),
+            ("keepalive_timeout", self.keepalive_timeout),
+            ("rekey_attempt_time", self.rekey_attempt_time),
+        ] {
+            if value.is_some_and(|d| d.is_zero()) {
+                return Err(ConfigError::Timer(name));
+            }
+        }
+        if self
+            .rekey_attempt_time
+            .is_some_and(|d| d > REJECT_AFTER_TIME * 3)
+        {
+            return Err(ConfigError::Timer("rekey_attempt_time"));
+        }
+        if self
+            .effective_rekey_timeout()
+            .checked_add(self.effective_keepalive_timeout())
+            .is_none_or(|sum| sum > REJECT_AFTER_TIME)
+        {
+            return Err(ConfigError::Timer("rekey_timeout + keepalive_timeout"));
+        }
+        Ok(())
+    }
 }
 
 /// Upper bounds on everything the device holds between calls. Each queue drops what does not
@@ -168,6 +225,35 @@ pub struct DeviceConfig {
 }
 
 impl DeviceConfig {
+    /// Checks the limits, keepalives and timer overrides. [`crate::Device::new`] calls it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`ConfigError`] found.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let l = &self.limits;
+        for (name, v) in [
+            ("staged_packets", l.staged_packets),
+            ("transmit_packets", l.transmit_packets),
+            ("transmit_bytes", l.transmit_bytes),
+            ("deliver_packets", l.deliver_packets),
+            ("deliver_bytes", l.deliver_bytes),
+            ("events", l.events),
+        ] {
+            if v == 0 {
+                return Err(ConfigError::ZeroLimit(name));
+            }
+        }
+        for p in &self.peers {
+            if let Some(k) = p.persistent_keepalive
+                && !(Duration::from_secs(1)..=MAX_KEEPALIVE).contains(&k)
+            {
+                return Err(ConfigError::Keepalive(k));
+            }
+        }
+        self.timers.validate()
+    }
+
     /// The v1 agent's configuration: one peer, the server, that may use only its own tunnel
     /// address, with MTU 1420. It matches the UAPI text the Go agent gives wireguard-go.
     #[must_use]
@@ -210,6 +296,10 @@ pub enum ConfigError {
     Mtu(u16),
     /// A limit is zero.
     ZeroLimit(&'static str),
+    /// A persistent keepalive outside 1 to 65535 seconds.
+    Keepalive(Duration),
+    /// A timer override that is zero or outside the protocol's bounds.
+    Timer(&'static str),
 }
 
 impl fmt::Display for ConfigError {
@@ -222,6 +312,18 @@ impl fmt::Display for ConfigError {
             ConfigError::LowOrderKey(k) => write!(f, "peer key {k} is a low-order point"),
             ConfigError::Mtu(m) => write!(f, "MTU {m} is below the IPv4 minimum of 68"),
             ConfigError::ZeroLimit(name) => write!(f, "limit {name} is zero"),
+            ConfigError::Keepalive(d) => {
+                write!(
+                    f,
+                    "persistent keepalive {d:?} is outside 1 to 65535 seconds"
+                )
+            }
+            ConfigError::Timer(name) => {
+                write!(
+                    f,
+                    "timer override {name} is zero or outside the protocol bounds"
+                )
+            }
         }
     }
 }

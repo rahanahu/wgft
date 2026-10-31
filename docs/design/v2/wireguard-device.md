@@ -15,7 +15,7 @@ device の層は sanstun が持たない部分を持ちます。
 具体的には、ピアの表、暗号鍵の経路表 (AllowedIPs)、endpoint、ハンドシェイクを待つ packet、出力のキューです。
 
 TCP と UDP の中継の層 (Rust の wgstack と制御プレーン) はこの crate の上に載ります。
-この crate はそれらを知りません。
+この crate はそれらに依存しません。
 
 ## sanstun の隔離
 
@@ -68,7 +68,7 @@ sanstun を別の実装に替える必要が出た場合は、`protocol.rs` を�
 
 ### 乱数
 
-`Device::new` は 32 バイトの種を受け取ります。
+`Device::new` は 32 バイトの種を `Zeroizing` に包んで受け取ります。
 鍵の交換の一時鍵、index、cookie の秘密、timer の揺らぎは、すべてこの種から作ります。
 製品ではオペレーティングシステムの乱数から毎回新しい種を作ります。
 試験は固定の種を使い、同じ種から同じバイト列が出ることを確かめています。
@@ -89,6 +89,11 @@ v1 の agent は wireguard-go に次の UAPI の設定を渡します (`tunnel.g
 
 ピアは server の 1 つだけです。
 preshared key は v1 が使わないので持ちません。
+
+`Device::new` は設定を確かめ、範囲の外の値を `ConfigError` で拒みます。
+persistent keepalive は `wg` と同じ 1 から 65535 秒です。
+timer の上書きは試験のためのもので、0 を拒み、`REKEY_ATTEMPT_TIME` は 540 秒まで、`REKEY_TIMEOUT` と `KEEPALIVE_TIMEOUT` の和は 180 秒までです。
+この範囲の外の値は sanstun の前提に反し、debug の build では sanstun の検査が panic します。
 
 ピアの表は、公開鍵からピアを引く表と、受信の index からピアを引く表の 2 つを持ちます。
 暗号鍵の経路表は prefix の長さごとの hash の表で、1 回の引きはピアの数に依りません。
@@ -113,13 +118,17 @@ device の層は次のように果たします。
 
 トンネルが運ぶのは IPv4 だけです。
 復号した IPv4 でない packet は捨てます。
+IPv4 の断片は再組み立てせず、そのまま渡します。
+再組み立てと[packet の検査](../userspace/packet-validation.md)は上の層が行います。
+v1 で wireguard-go が netstack の TUN の Write に渡したときと同じ分担です。
 ヘッダの checksum は確かめません。
 wireguard-go と Linux の WireGuard も確かめず、packet を受け取る IP の層が確かめます。
 
 送信の packet が MTU より長い場合は捨てます。
 受信の packet の長さには MTU の上限を置きません。
 Linux の WireGuard と wireguard-go と同じ扱いです。
-受信の packet が持つメモリは、渡すキューのバイト数の上限で抑えます。
+受信の packet は、詰め物を除いた長さの新しいバッファに写してから渡すキューに入れます。
+キューはバイト数を割り当てた容量で数えるので、短い packet を長い詰め物で送られても、キューの上限を超えて持ちません。
 
 ## キューと上界
 
@@ -147,22 +156,34 @@ device が呼び出しの間に持つものと、既定の上限は次のとお�
 - トンネルへ渡す packet:512 KiB
 
 このほかに sanstun の状態と、1 回の呼び出しの中で使う一時的なバッファがあります。
-一時的なバッファは datagram 1 つ分で、呼び出しが返ると解放します。
+一時的なバッファは復号に使う datagram 1 つ分で、中身を写した後、呼び出しが返る前に解放します。
 sanstun の状態は、設定したピアの数と、作り直したトンネルの index に比例します。
 sanstun が設定に無い鍵のために状態を増やさないことは、sanstun の試験 (`initiations_from_unknown_peers_leave_no_state`) が確かめています。
 上の和に sanstun の状態を足した値は測っていません。
 
 ## 起動、再試行、期限切れ
 
-sanstun の persistent keepalive は、セッションがあるときだけ働きます。
-wireguard-go は、persistent keepalive を持つピアに設定の直後に keepalive を送り、セッションが無ければハンドシェイクを始めます。
-device の層はこの挙動を次の規則で写します。
+sanstun の persistent keepalive は、使えるセッションがあるときだけ送ります。
+wireguard-go の persistent keepalive は、ピアへ送るか、ピアから認証した packet を受けるたびに間隔だけ先へ延びる timer です。
+期限が来たときにセッションが無ければ、wireguard-go はハンドシェイクを始めます。
+device の層はこの timer をピアごとに持ちます。
 
-- 起動:persistent keepalive と endpoint を持つピアに、すぐにハンドシェイクを始めます。
-- 期限切れ:sanstun が接続の期限切れ (`REKEY_ATTEMPT_TIME` の 90 秒の間に応答が無い、または最後のハンドシェイクから 540 秒) を知らせたら、そのピアの状態と待っている packet を捨て、同じ設定の新しいトンネルに替えます。persistent keepalive を持つピアには、keepalive の間隔の後に再びハンドシェイクを始めます。
+- 起動:persistent keepalive と endpoint を持つピアの期限を、作成の時刻に置きます。最初の `handle_timeout` でハンドシェイクを始めます。
+- 期限:sanstun の timer を先に進めます。使えるセッションがあれば、sanstun の keepalive の送信が期限を延ばします。それでも期限が来ていれば、間隔の間なにも送っていないので、ハンドシェイクを始めます。
+- 期限切れ:sanstun が接続の期限切れ (`REKEY_ATTEMPT_TIME` の 90 秒の間に応答が無い、または最後のハンドシェイクから 540 秒) を知らせたら、そのピアの状態と待っている packet を捨て、同じ設定の新しいトンネルに替えます。期限は keepalive の間隔の後に置き直します。
 - 送信:セッションの無いピアへの packet は、待たせてハンドシェイクを始めます。
 
-応答しない server に対して、agent は 5 秒ごとの再送を 90 秒続け、keepalive の間隔だけ休んでから繰り返します。
+server が始めたセッションでは、agent は応答の側です。
+応答の側のセッションは 180 秒で使えなくなり、sanstun は応答の側から新しいハンドシェイクを始めません。
+Linux の WireGuard の server は、送るデータが無ければハンドシェイクを始めません。
+上の期限の規則が、この場合に agent の側からハンドシェイクを始めます。
+試験 `an_idle_responder_keeps_contacting_the_server` は、600 秒の間に agent の送信が 40 秒より長く途切れないことを確かめています。
+
+応答しない server に対しては、5 秒ごとの再送が 90 秒続き、keepalive の間隔の後に同じ再送が始まります。
+
+sanstun は、ハンドシェイクを一度もしていないトンネルも作成から 540 秒で期限切れにします。
+期限の切れたトンネルはハンドシェイクを受けないので、device の層は同じように取り替えます。
+ハンドシェイクを始めも受けもしていないトンネルの期限切れは、`PeerExpired` で知らせません。
 
 server が再起動してセッションを失った場合、agent の keepalive だけでは新しいハンドシェイクが始まりません。
 v1 の agent は keepalive の間隔ごとにトンネルの中で ping を送り、返事の無いデータの 15 秒後に始まるハンドシェイクで回復します (`tunnel.go` の `Run`)。
@@ -172,21 +193,22 @@ device の層の試験 `a_restarted_server_is_reached_again_by_traffic` は、�
 ## 試験
 
 - 単体の試験:鍵、prefix、経路表、IPv4 の検査、キュー。経路表は wireguard-go の `TestTrieIPv4` (Linux の `selftest/allowedips.h` から移したもの) の場合を写し、素朴な最長一致の模型との一致を proptest で確かめます。
-- device の試験:2 つの `Device` を偽の時計と手で運ぶネットワークで向かい合わせます。ハンドシェイク、双方向のデータ、詰め物の除去、AllowedIPs の外の送信元、経路の無い宛先、MTU、IPv4 でない中身、誤りに返事をしないこと、再送された datagram で endpoint が動かないこと、roaming、知らない鍵、待つ packet の上界と順序、キューの上界、鍵の更新、persistent keepalive、期限切れと再試行、timer の短縮、両側の再起動、時刻の戻り、決定性、設定の誤りを確かめます。
-- fuzz:`crates/wgft-wireguard/fuzz` の `inbound` です。本物の相手の datagram を壊したものと任意のバイト列を agent の側に渡し、時計を進めます。panic しないことと、持つものが `Limits` の中にあることを毎回確かめます。cargo-fuzz と nightly が要ります。
+- device の試験:2 つの `Device` を偽の時計と手で運ぶネットワークで向かい合わせます。ハンドシェイク、双方向のデータ、詰め物の除去、AllowedIPs の外の送信元、経路の無い宛先、MTU、IPv4 でない中身、誤りに返事をしないこと、再送された datagram、ハンドシェイクの開始、応答で endpoint が動かず返事もしないこと、roaming、知らない鍵、詰め物の長い packet の保持量、待つ packet の上界と順序、キューの上界、鍵の更新、persistent keepalive、応答の側で待つ間の keepalive の規則、期限切れと再試行、一度も使わなかったトンネルの期限切れ、timer の短縮、両側の再起動、時刻の戻り、決定性、設定の誤りと範囲の外の値を確かめます。
+- fuzz:`crates/wgft-wireguard/fuzz` の `inbound` です。本物の相手の datagram を壊したもの、任意のバイト列、相手が検査を通さずに暗号化した任意の中身を agent の側に渡し、時計を進めます。
+任意の中身は crate の feature の `fuzzing` が開ける口で暗号化します。panic しないことと、持つものが `Limits` の中にあることを毎回確かめます。cargo-fuzz と nightly が要ります。
 
 ```sh
 cd crates/wgft-wireguard
 cargo +nightly fuzz run inbound -- -max_len=4096
 ```
 
-Linux の WireGuard と wireguard-go との相互運用はラボで確かめます。
+Linux の WireGuard と wireguard-go との相互運用は、この crate の上に積んだ TUN の殻と `lab/wg-interop.sh` で確かめます。
 
 ## 判断と理由
 
 - 暗号の処理を呼び出しの中で済ませます。理由はキューと上界の節に書きました。
 - 出力は呼び手が取り出す形にし、件数とバイト数の上限を置きます。上限で捨てたものは理由ごとに数えます。上限を超えて持たないことを、呼び手の振る舞いに依らず保証するためです。
-- 起動と期限切れの後のハンドシェイクを device の層が始めます。sanstun の persistent keepalive がセッションの無いときに働かないためです。
+- persistent keepalive の期限で、device の層がハンドシェイクを始めます。sanstun の persistent keepalive がセッションの無いときに働かないためです。規則は wireguard-go の timer に合わせました。
 - 経路表は prefix の長さごとの hash の表です。agent のピアは 1 つで、server の役でもピアの数に依らない引きの費用で足りるためです。
 - 送信の packet の長さを MTU で抑え、受信の packet の長さは抑えません。受信の側を相手の MTU に合わせて絞ると、相手の設定の違いで黙って通らなくなるためです。
 
@@ -197,3 +219,4 @@ Linux の WireGuard と wireguard-go との相互運用はラボで確かめま�
 - 性能 (packet ごとの割り当て、1 秒あたりの packet の数、CPU) は測っていません。
 - device のキューと sanstun の状態を合わせたメモリの保持量は測っていません。
 - Windows と macOS では、CI が build と単体の試験を流すだけです。実機の相互運用は確かめていません。
+- ホストの一時停止:Rust の `Instant` は、Linux では停止の間に進まない `CLOCK_MONOTONIC`、macOS でも停止の間に進まない時計です。停止の後、device は壁時計では 180 秒より古いセッションをまだ新しいとみなし、相手は捨てます。返事の無いデータの 15 秒後に始まるハンドシェイクか、セッションの寿命で回復すると見込みますが、確かめていません。停止の間も進む時計 (Linux の `CLOCK_BOOTTIME`) から時刻を作る方法は、`Device` の API が `Instant` を受ける限りありません。

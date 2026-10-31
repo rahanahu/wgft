@@ -16,13 +16,6 @@ pub(crate) struct AllowedIps<V> {
     lens: Vec<u8>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the server role removes peers at run time; the agent never does"
-    )
-)]
 impl<V: Copy + Eq> AllowedIps<V> {
     pub(crate) fn new() -> Self {
         Self {
@@ -40,42 +33,12 @@ impl<V: Copy + Eq> AllowedIps<V> {
         }
     }
 
-    /// `prefix` が `owner` のものなら外す。
-    pub(crate) fn remove(&mut self, prefix: Ipv4Prefix, owner: V) {
-        let len = prefix.len();
-        let table = &mut self.tables[usize::from(len)];
-        let key = u32::from(prefix.addr());
-        if table.get(&key) == Some(&owner) {
-            table.remove(&key);
-            self.forget_empty(len);
-        }
-    }
-
-    /// `owner` の prefix をすべて外す。
-    pub(crate) fn remove_owner(&mut self, owner: V) {
-        for len in self.lens.clone() {
-            self.tables[usize::from(len)].retain(|_, v| *v != owner);
-            self.forget_empty(len);
-        }
-    }
-
-    fn forget_empty(&mut self, len: u8) {
-        if self.tables[usize::from(len)].is_empty() {
-            self.lens.retain(|l| *l != len);
-        }
-    }
-
     pub(crate) fn lookup(&self, ip: Ipv4Addr) -> Option<V> {
         let bits = u32::from(ip);
         self.lens
             .iter()
             .find_map(|&len| self.tables[usize::from(len)].get(&(bits & mask(len))))
             .copied()
-    }
-
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.lens.is_empty()
     }
 }
 
@@ -92,7 +55,8 @@ mod tests {
         Ipv4Addr::new(a, b, c, d)
     }
 
-    // wireguard-go の TestTrieIPv4 (Linux の selftest/allowedips.h から移したもの) の場合を写す。
+    // wireguard-go の TestTrieIPv4 (Linux の selftest/allowedips.h から移したもの) の引きの場合を写す。
+    // 外す操作の場合は、外す操作を持たないので写さない。
     #[test]
     #[expect(
         clippy::many_single_char_names,
@@ -131,37 +95,6 @@ mod tests {
         for first in [1, 64, 128, 192, 255] {
             assert_eq!(t.lookup(ip(first, 0, 0, 0)), Some(a));
         }
-        t.remove_owner(a);
-        for first in [1, 64, 128, 192, 255] {
-            assert_ne!(t.lookup(ip(first, 0, 0, 0)), Some(a));
-        }
-
-        for owner in [a, b, c, d, e, g, h] {
-            t.remove_owner(owner);
-        }
-        assert!(t.is_empty(), "removing every owner leaves an empty table");
-
-        t.insert(p(192, 168, 0, 0, 16), a);
-        t.insert(p(192, 168, 0, 0, 24), a);
-        t.remove_owner(a);
-        assert_eq!(t.lookup(ip(192, 168, 0, 1)), None);
-
-        t.insert(p(1, 0, 0, 0, 32), a);
-        t.insert(p(192, 0, 0, 0, 24), a);
-        assert_eq!(t.lookup(ip(1, 0, 0, 0)), Some(a));
-        assert_eq!(t.lookup(ip(192, 0, 0, 1)), Some(a));
-        t.remove(p(192, 0, 0, 0, 32), a);
-        assert_eq!(t.lookup(ip(192, 0, 0, 1)), Some(a));
-        t.remove(p(192, 0, 0, 0, 24), b);
-        assert_eq!(
-            t.lookup(ip(192, 0, 0, 1)),
-            Some(a),
-            "only the owner removes a prefix"
-        );
-        t.remove(p(192, 0, 0, 0, 24), a);
-        assert_eq!(t.lookup(ip(192, 0, 0, 1)), None);
-        t.remove(p(1, 0, 0, 0, 32), a);
-        assert_eq!(t.lookup(ip(1, 0, 0, 0)), None);
     }
 
     #[test]
