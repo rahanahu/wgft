@@ -824,8 +824,9 @@ ECN は交渉しません。
   1 から 535 は入口の下限で捨てます。
   Linux で確かめた結果、Linux もこの SYN に SYN-ACK を返します(`handshake-bare` の `mss0.synack`)
 - SND.NXT より先を確認する ACK(理由を付けて受け入れる):RFC 9293 と RFC 5961 5.2 に従い、速さの制限の内側で ACK を返して捨てます。
-  Linux で確かめた結果、Linux は何も返しません(`ack-unsent` の `reply`)。
-  RFC 9293 の規則に従う側を選び、返す ACK は接続ごとに 500 ms に 1 回までに抑えます
+  Linux で確かめた結果、6.1 は何も返しません(`ack-unsent` の `reply`)。
+  RFC 9293 の規則に従う側を選び、返す ACK は接続ごとに 500 ms に 1 回までに抑えます。
+  参照を移した後の 7.2 は、速さを制限した challenge ACK を返し、wgstack と同じ結果になりました(2026-11-01、v7.1 からの挙動)
 - 再送の打ち切り(理由を付けて受け入れる):設計どおり RST を送ります。
   Linux の `tcp_write_err` は RST を送らないと読めます。
   相手が残っていれば接続の終わりを早く知るので、RST を送る側を選びます。
@@ -838,7 +839,9 @@ ECN は交渉しません。
   qbench の受ける向きの記録では、接続の始めの期間は wgstack が約 8 segment、Linux が 15 から 24 segment でした。
   この長さと、定常の間に 1 segment ごとに ACK を返す割合の Linux との差は、性能の段階で扱います([性能の段階の未確認の点](wgstack-performance.md#未確認の点と未決の点))
 - 握手の後の窓(性能の段階へ送る):最初の ACK から受信の floor の 256 KiB を広告します。
-  Linux で確かめた結果、最初のデータの後に Linux が広告する窓は 65,536 byte で、wgstack は 262,016 byte です(`early-ack` の `first-data.window`)。
+  Linux で確かめた結果、最初のデータの後に Linux が広告する窓は 6.1 で 65,536 byte、wgstack は 262,016 byte です(`early-ack` の `first-data.window`)。
+  参照の 7.2 は 261,192 byte で、待ち受けの `SO_RCVBUF` の 256 KiB から最初の ACK で窓を開き、wgstack に近くなりました。
+  受信の窓の最初の値の 64 KB の上限が v6.10 で外れたためです(SYN と SYN-ACK の窓の欄は 65535 のままです)
   小さく始める受信の窓の案は[性能の段階の未確認の点](wgstack-performance.md#未確認の点と未決の点)に残します。
   [需要で育つバッファ](wgstack-buffers.md#予約と予算)の設計(未実装)は、予算に余りがある間は今と同じ 256 KiB から始めます
 - IP の ID(理由を付けて受け入れる):Device 全体の 1 つの数え上げを乱数の値から始めます。

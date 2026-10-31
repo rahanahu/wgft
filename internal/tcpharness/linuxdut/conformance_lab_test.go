@@ -16,10 +16,22 @@ import (
 // Known lists where Linux, the reference, is known to differ from the scenarios' expectations.
 // A scenario that checks a choice of wgstack's design beyond the RFCs keeps that check here.
 var Known = map[string]tcpharness.Known{
-	"ack-unsent/ack-reply": {
-		Observed: "no ACK in time",
-		Reason: "Linux drops a segment that acknowledges unsent bytes without a reply, tcp_ack's ACK_UNSENT_DATA; " +
-			"RFC 9293 3.10.7.4 and wgstack.md answer it with an ACK",
+	// limited-transmit runs at the testbench's near-zero RTT for RFC 3042 under the duplicate
+	// threshold rule. From v6.17 Linux detects SACK losses only with RACK, RFC 8985, and
+	// tcp_recovery=0 no longer turns it off. With a minimum RTT near zero its reorder window is
+	// about zero, so the first SACK marks the first segment lost and Linux resends it before the
+	// second duplicate ACK. limited-transmit-rack checks RFC 3042 on Linux on a 400 ms path.
+	"limited-transmit/second-dupack.new-data": {
+		Observed: "0 new segments",
+		Reason: "Linux from v6.17 always runs RACK loss detection on SACK connections, and its reorder window " +
+			"at a near-zero RTT marks the hole lost on the first SACK; RFC 8985 allows this, and " +
+			"limited-transmit-rack covers RFC 3042 on Linux",
+	},
+	"limited-transmit/no-retransmit-before-third": {
+		Observed: "1 retransmissions",
+		Reason: "Linux from v6.17 always runs RACK loss detection on SACK connections, and its reorder window " +
+			"at a near-zero RTT marks the hole lost on the first SACK, so it resends before the third " +
+			"duplicate ACK; RFC 8985 allows this",
 	},
 	"icmp-frag-needed-source/ignored": {
 		Observed: "applied: largest packet 1000 bytes",

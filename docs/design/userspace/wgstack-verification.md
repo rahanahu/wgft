@@ -139,7 +139,7 @@ wgstack は `chained-recovery` で 2 つ目の穴が見える往復に 2 segment
 
 アプリケーションが読まない間に試験の側が送り続けた時の受け手を、次の台本で確かめます。
 確かめる挙動は、[溢れた後の Linux の受け手](wgstack-performance.md#溢れた後の-linux-の受け手)が定める Linux の受け手の挙動です。
-窓の大きさは、Linux が約 64 KB から、wgstack が floor の 256 KiB から始まって違うので、台本は窓の大きさではなく関係を確かめます。
+窓の大きさは、Linux の性能の族が約 64 KB から、wgstack が floor の 256 KiB から始まって違うので、台本は窓の大きさではなく関係を確かめます。
 試験の側は送り手として、最新の ACK の窓の内側だけに新しいデータを送ります(RFC 7323 2.4)。
 
 - `rcv-overflow-hold`:アプリケーションが読まない間に、順序どおりのデータを右端の 30 segment 手前まで送ります。
@@ -166,18 +166,21 @@ RFC 7323 2.4 は、この丸めで右端が前の右端より手前に見える�
 
 `rcv-overflow-hold-perf` と `rcv-overflow-read-half-perf` は、同じ台本を性能の族で流します([参照の Linux の設定](#参照の-linux-の設定))。
 boost を得た wgstack が、読まない接続にも予約の 4 MiB へ向けて窓を開くと、512 KiB の確かめで落ちます。
-512 KiB は Linux の右端(固定の値で 303,679 byte)と共通の上限なので、捉えるのは予約の 4 MiB へ向けて開く場合だけです。
+512 KiB は Linux の右端(固定の値で、6.1 は 303,679 byte、7.2 は 313,455 byte)と共通の上限なので、捉えるのは予約の 4 MiB へ向けて開く場合だけです。
 読まない間に窓の上限が floor に留まる不変条件は、wgstack の単体の試験(`TestRecvWindowWithoutReadsStaysAtFloor`)が確かめます。
 
-結果は 2026-10-31 のものです。
+結果は、Linux が 2026-11-01 の 7.2、gVisor と wgstack が 2026-10-31 のものです。
+Linux の 6.1 の値は括弧に残します。
+7.2 の窓が 6.1 より大きいのは、受信のメモリを窓に換算する比を、半分の固定から、受けた segment の中身と確保の大きさの比に替えたためです(v6.6)。
+7.2 は 5 回とも同じ値でした。
 
 | 台本 | Linux | gVisor | wgstack |
 |---|---|---|---|
-| `rcv-overflow-hold` | 通る。最大の窓は 203,512 byte、読まない間の右端は最初の未読の byte から 303,679 byte。右端からの segment を受け入れない | 穴が残る間の読み取りに ACK を返さず、2 つの確かめが期待した差になる。右端から始まる segment を丸ごと受け入れる実行がある(期待した差) | 通る。右端は 262,128 byte。右端からの segment の 16 byte を受け入れる |
-| `rcv-overflow-read-half`、`rcv-overflow-read-all` | 通る。読み取りの後の窓は、半分で 133,120 byte、すべてで 203,512 byte | 窓が埋まる間に、前に広告した右端の手前で窓を閉じ、その先のデータを捨てる実行がある(期待した差) | 通る。閉じた窓への segment の 88 byte を受け入れる。読み取りの後の窓は 131,072 byte と 262,144 byte |
-| `-perf` の 2 つ | 通る。最大の窓は 64,256 byte、右端は 75,688 byte まで | 固定の値の台本と同じ | 通る。boost を得ても、読まない間の右端は floor の 256 KiB に留まる |
+| `rcv-overflow-hold` | 通る。最大の窓は 295,448 byte(6.1 は 203,512)、読まない間の右端は最初の未読の byte から 313,455 byte(6.1 は 303,679)。右端からの segment を受け入れない | 穴が残る間の読み取りに ACK を返さず、2 つの確かめが期待した差になる。右端から始まる segment を丸ごと受け入れる実行がある(期待した差) | 通る。右端は 262,128 byte。右端からの segment の 16 byte を受け入れる |
+| `rcv-overflow-read-half`、`rcv-overflow-read-all` | 通る。読み取りの後の窓は、半分で 156,360 byte(6.1 は 133,120)、すべてで 295,448 byte(6.1 は 203,512) | 窓が埋まる間に、前に広告した右端の手前で窓を閉じ、その先のデータを捨てる実行がある(期待した差) | 通る。閉じた窓への segment の 88 byte を受け入れる。読み取りの後の窓は 131,072 byte と 262,144 byte |
+| `-perf` の 2 つ | 通る。最大の窓は 72,832 byte(6.1 は 64,256)、右端は 80,040 byte(6.1 は 75,688)まで | 固定の値の台本と同じ | 通る。boost を得ても、読まない間の右端は floor の 256 KiB に留まる |
 
-Linux は、右端の後退、右端からの受け入れ、窓の内側の破棄のどれも 0 でした。
+Linux は 6.1 と 7.2 のどちらでも、右端の後退、右端からの受け入れ、窓の内側の破棄のどれも 0 でした。
 wgstack の受け入れる byte は、窓の欄の切り下げで隠れた分です。
 gVisor の広告する右端は、単位の 1 つ未満だけ前の右端より手前に見えることがあります。
 台本の有効さは、wgstack のコードに手で故障を 1 つずつ入れて確かめました。
@@ -208,13 +211,16 @@ segment の間隔は 0.5 ms です。
 - `window.step`:握手の後の最初のデータの ACK より後のどの ACK でも、窓が、それまでに広告した最大の窓に、前の ACK から送った segment の数(0 なら 1)の 2 MSS 倍と窓の scale の単位 1 つを足した量以下であることを確かめます。
   Linux は rcv_ssthresh を受けた segment ごとに MSS の 2 倍までしか広げず、空きより小さい間だけ広げるので、それまでより大きな窓はこの歩みからだけ出ます。
   segment の ACK が、segment の読まれる前の空きで歩みの一部しか見せないことがあり、読み取りの後の更新が残りを見せます。
-  Linux はこの更新で最大 2,816 byte 広げたので、segment を送っていない ACK にも 1 segment 分を許します。
+  6.1 はこの更新で最大 2,816 byte 広げたので、segment を送っていない ACK にも 1 segment 分を許します。
   読み取りの後の更新と穴を埋めた ACK も外さないので、どの ACK の大きな窓も捉えます。
   SYN-ACK の窓の欄は scale を持たないので、最初のデータの ACK の窓を基準にします
 - `steady`:失わせる往復の前の 2 つの往復で、往復の中の最大の窓が前の往復より大きくならないことを前提として求めます(Require)。
   窓が窓の上限に届き、窓の上限が後の確かめを決めるようにするためです
 - `window.band`:性能の族だけで、失わせる往復の前の往復の最大の窓が 300,750 から 1,105,500 byte の間にあることを確かめます。
-  参照の Linux はこの台本の 13 回の実行で 401 から 737 KB に止まり、帯はその最小の 4 分の 3 から最大の 1.5 倍です。
+  帯は、6.1 がこの台本の 13 回の実行で止まった 401 から 737 KB の、最小の 4 分の 3 から最大の 1.5 倍です。
+  参照の 7.2 は、受信のバッファの見込みを 6.1 より小さく取り(v6.16 から)、18 回の実行で 329,856 から 372,480 byte に止まり、帯の内側にあります。
+  帯は 6.1 の値のまま保ちます。
+  同じ規則を 7.2 の値に当てると下限が 247,392 byte になり、wgstack の floor の 256 KiB より下に来て、測定で窓の上限を上げない受け手を捉えなくなるためです。
   Linux の止まる値は、受け手の RTT の区間がどこに落ちるかで変わります
 - `loss.edge-kept`:1 つ目の穴が残る間に、右端が失わせる往復の始めの位置から単位の 1 つ以上進まないことを確かめます。
   窓が窓の上限にあるので、順序外のデータは空きを減らすだけです
@@ -222,17 +228,17 @@ segment の間隔は 0.5 ms です。
   右端の伸びが、アプリケーションの読んだ 10 個の segment から順序外のデータの半分を引いた量(負なら 0)に 1 MSS を足した量以下であることを確かめます。
   Linux の空きは順序外のデータを確保の大きさで、つまり中身の長さ以上で数え、それを半分に換算するので、少なくとも中身の半分を減らします。
   この確かめが捉えるのは、順序外のデータを中身の約 43% 未満で数える受け手です(半分から、余裕の 1 MSS を 15 個の segment で割った分を引いた値)。
-  1 MSS は窓の欄の丸めと受け手の SWS の回避の余裕で、Linux はここで性能の族で 104 byte、固定の値で 0 byte 開きました
+  1 MSS は窓の欄の丸めと受け手の SWS の回避の余裕で、Linux は 6.1 と 7.2 のどちらでも、ここで性能の族で 104 byte、固定の値で 0 byte 開きました
 - `hole.ack`:2 つ目の穴を埋めると、すべてを確認し SACK の block を持たない ACK がすぐに出ることを確かめます
 
 どちらの台本も、右端が単位の 1 つ以上後ろへ戻らないことと、アプリケーションがすべての byte を受け取ることを確かめます。
 
-結果は 2026-10-31 のものです。
+結果は、Linux が 2026-11-01 の 7.2、gVisor と wgstack が 2026-10-31 のものです。
 
 | 台本 | Linux | gVisor | wgstack |
 |---|---|---|---|
-| `rcv-window-pacing` | 今の確かめで 10 回とも通る。最大の窓は 13 回の実行で 401 から 737 KB、`partial.window` で 104 byte 開く | 1 つの ACK で窓を約 2 MB 広げ、`window.step` と `window.band` が期待した差になる。一部の実行で穴が残る間に右端が進む(期待した差) | 通る。最大の窓は 395,392 byte、`partial.window` で窓を開かない |
-| `rcv-window-pacing-fixed` | 今の確かめで 10 回とも通る。最大の窓は 260,776 byte、`partial.window` で窓を開かない | 性能の族と同じ(`window.band` は確かめない) | 性能の族と同じ |
+| `rcv-window-pacing` | 18 回とも通る。最大の窓は 329,856 から 372,480 byte(6.1 は 13 回で 401 から 737 KB)、`partial.window` で 104 byte 開く | 1 つの ACK で窓を約 2 MB 広げ、`window.step` と `window.band` が期待した差になる。一部の実行で穴が残る間に右端が進む(期待した差) | 通る。最大の窓は 395,392 byte、`partial.window` で窓を開かない |
+| `rcv-window-pacing-fixed` | 5 回とも通る。最大の窓は 311,968 byte(6.1 は 260,776)、`partial.window` で窓を開かない | 性能の族と同じ(`window.band` は確かめない) | 性能の族と同じ |
 
 台本の有効さは、wgstack のコードに手で故障を入れて確かめました。
 rcv_ssthresh を一度に上限まで広げる故障、目標が rcv_ssthresh を見ない故障、読み取りで rcv_ssthresh を上限まで広げる故障、歩みを 4 MSS にする故障、最後の穴を埋めた時に右端を予約まで進める故障は `window.step` で落ちます。
@@ -245,12 +251,21 @@ rcv_ssthresh を一度に上限まで広げる故障、目標が rcv_ssthresh �
 
 ### 参照の Linux の設定
 
+参照の Linux は、ラボの VM の Debian 13(trixie)に trixie-backports から入れたカーネルで、`linux-image-7.2.11+deb13-amd64` の package の版 7.2.11-1~bpo13+1 です。
+`lab/lab` が package の版まで固定して入れ、基の VM の snapshot がその状態を保ちます。
+VM の image は `images:debian/13` の 20261029_05:24 で作りました。
+2026-11-01 に、Debian 12 の 6.1(`6.1.0-53-amd64`、package の版 6.1.187-1)から移りました。
+版を上げるときは、`lab/lab` の固定とこの記録を同じ変更で直し、基の VM を作り直して、Linux の台本を流し直します。
+
 Linux の既定は、完成に含めない回復の仕組みを有効にしています。
 既定のままでは、損失の回復の台本は Linux の上で常に wgstack と違う結果になるか、違いを吸収するまで条件を緩めて正誤を見分けられなくなります。
 このため、参照の Linux の namespace では、完成の機能に合わせて次の値に固定します。
 
 - 輻輳の制御:`net.ipv4.tcp_congestion_control=reno`
-- RACK と TLP:`net.ipv4.tcp_recovery=0`、`net.ipv4.tcp_early_retrans=0`
+- RACK と TLP:`net.ipv4.tcp_recovery=0`、`net.ipv4.tcp_early_retrans=0`。
+  TLP は `tcp_early_retrans=0` で止まります。
+  RACK の損失の検出は、6.1 では `tcp_recovery=0` で止まりましたが、7.2 では止まりません(v6.17 で RFC 6675 の損失の検出が除かれました)。
+  7.2 でも 0 を固定するのは、RACK の並べ替えの窓を DSACK で広げる動きと、SACK した segment が重複の閾値に届いた時に窓を 0 にする規則を、既定のとおりに保つためです
 - F-RTO:`net.ipv4.tcp_frto=0`
 - ECN、TFO、SYN cookie:`net.ipv4.tcp_ecn=0`、`net.ipv4.tcp_fastopen=0`、`net.ipv4.tcp_syncookies=0`
 - D-SACK:`net.ipv4.tcp_dsack=0`
@@ -259,7 +274,7 @@ Linux の既定は、完成に含めない回復の仕組みを有効にして�
 - 受信のバッファ:`net.ipv4.tcp_moderate_rcvbuf=0` とし、台本の側のソケットに floor と同じ大きさを与えます
 - 小さな書き込みのまとめ:`net.ipv4.tcp_autocorking=0`
 - UDP、再組み立て、ICMP の台本が頼る IP の値:断片の期限 `net.ipv4.ipfrag_time=30`、path MTU の下限 `net.ipv4.route.min_pmtu=552`、path MTU discovery `net.ipv4.ip_no_pmtu_disc=0`、ICMP の誤りの速さ `net.ipv4.icmp_ratelimit=1000` と `net.ipv4.icmp_ratemask=6168`。
-  どれも Linux 6.1 の既定の値で、namespace ごとの値なので明示して固定します
+  どれも Linux 6.1 と 7.2 の既定の値で、namespace ごとの値なので明示して固定します
 
 損失の回復を確かめる台本は、相手の SYN で SACK を許さず、両者を NewReno の動作にします。
 RTO の倍化を確かめる `retransmit-rto` も SACK を許さず、TLP の probe が最初の期限を使わないようにします。
@@ -273,12 +288,20 @@ SACK を交渉する台本は、受け手として返す SACK の block の内�
 wgstack は `Accept` が接続を返す時に boost を得ます(`BoostAtAccept`)。
 gVisor は固定の値と同じ Device のままです。
 `tcp_rmem` のように固定の値に無い値は、台本の終わりに元の値へ戻します。
-SACK による回復の族は固定の値のまま流すので、Linux は RACK と TLP を使わずに、RFC 6675 の重複の閾値の規則と PRR で回復します。
+SACK による回復の族は固定の値のまま流すので、Linux は TLP を使わず、PRR で回復します。
+損失の検出は RACK です。
+並べ替えを見ていない接続では、SACK した segment が重複の閾値(`tcp_reordering` の 3)に届くと並べ替えの窓が 0 になるので、3 つ目の重複した ACK で回復に入り、RFC 6675 の重複の閾値の規則と同じ時に再送します。
+それより前の穴は、最も新しく確認した segment の RTT に最小の RTT の 4 分の 1 を足した時間が送信から過ぎると損失になります。
+族の台本は握手の RTT を 20 ms にしてこの窓を 5 ms 以上にし、6.1 と 7.2 の両方で通ります。
 RACK-TLP の族は `net.ipv4.tcp_recovery=1` と `net.ipv4.tcp_early_retrans=3` を重ねます。
 Limited Transmit は 2 つの台本で確かめます。
-1 つは RACK を切った固定の値で、往復の時間をほぼ 0 にして流します。
+1 つは固定の値で、往復の時間をほぼ 0 にして流します。
 もう 1 つは RACK を有効にし、往復 400 ms の経路で流します。
 RACK の並べ替えの窓は最小の RTT の 4 分の 1 なので、往復の時間がほぼ 0 だと RACK は最初の重複した ACK の直後に穴を損失と判定し、Limited Transmit の働く余地が無くなるためです。
+参照の Linux は、6.1 では RACK を切って往復 0 の台本を通りました。
+7.2 は RACK を切れないので、往復 0 の台本で最初の SACK の後に穴を再送し、2 つ目の重複した ACK の新しい segment と 3 つ目より前に再送しない確かめが、Linux の期待した差になります。
+RFC 8985 はこの再送を認めます。
+Linux の上の RFC 3042 は往復 400 ms の台本で確かめ、往復 0 の台本は wgstack と gVisor の重複の閾値の規則の下の Limited Transmit を確かめます。
 往復 400 ms の経路では並べ替えの窓が約 99 ms になり、最初の重複した ACK から確かめの終わりまでの 40 ms より長くなります。
 台本は、最初の重複した ACK から並べ替えの窓の下限までに届いた segment だけを確かめに数えます。
 窓が終わった後の再送は RFC 8985 が認めるので、確かめに入れずに測ります。
@@ -297,6 +320,8 @@ GSO が有効だと、Linux の TCP は複数の segment を 1 つの buffer に
   wgstack は閉じた接続の窓の probe を Linux と同じく後退の回数が 8 以上で、後退を含めた RTO が上限の 120 秒に届いたときに打ち切り、再送は `tcp_retries2` のままです([未確認の点と未決の点](wgstack.md#未確認の点と未決の点))
 - RTO の計算:最小の RTO と RTTVAR の扱いの細部が違うので、時刻は RTO の回数の範囲で比べます
 - 送る量が足りない間の窓:Linux は、アプリケーションが送る量の足りない間に輻輳の窓を広げない独自の検証を持ちます
+- RACK の損失の検出:7.2 は SACK を交渉した接続の損失を常に RACK(RFC 8985)で判定し、設定で RFC 6675 の規則に戻せません。
+  往復の時間がほぼ 0 の経路では、最初の SACK で穴を損失と判定します
 
 ### 期待した差の一覧
 
@@ -342,7 +367,9 @@ gVisor の一覧は、gVisor を基準でなく比較の対象として扱うた
 `internal/tcpharness/gvisordut` は `internal/nettun` の公開の面だけで Device を作り、wgft の SACK の設定、バッファの範囲、入口の検査、中身の無い ACK の予算をそのまま試験に含めます。
 `internal/tcpharness/linuxdut` は、ラボの VM の network namespace の中の TUN と Linux のソケットを使います。
 新しい network namespace の `net.ipv4.tcp_*` の値は、多くがカーネルに組み込まれた既定の値になり、一部が最初の namespace の値の写しになります。
-ラボの VM の 6.1 のカーネルでは、`tcp_congestion_control`、`tcp_rmem`、`tcp_wmem` が写しになり、`tcp_frto`、`tcp_sack`、`tcp_recovery`、`tcp_autocorking` は既定の値になりました。
+ラボの VM の 6.1 と 7.2 のカーネルでは、`tcp_congestion_control`、`tcp_rmem`、`tcp_wmem` が写しになり、`tcp_frto`、`tcp_sack`、`tcp_recovery`、`tcp_autocorking` は既定の値になりました。
+写しになる `tcp_rmem` の 3 つ目の値は、6.1 では 6291456、7.2 では VM のメモリから決まる約 14 MB です(2 GiB の VM で 13968768 から 14025216)。
+固定の値の台本は待ち受けに `SO_RCVBUF` を与えるので、この値は窓に効きません。
 どの値が写しになるかはカーネルの版で変わりうるので、`linuxdut` は[参照の Linux の設定](#参照の-linux-の設定)の値をすべて書き込み、読み戻して確かめます。
 待ち受けのソケットには floor と同じ 256 KiB を送信と受信のバッファとして与えます。
 `internal/tcpharness/wgstackdut` は、手で進める時計(`ManualClock`)と台本の種から作った乱数の源を渡して wgstack の Device を作ります。

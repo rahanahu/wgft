@@ -8,8 +8,10 @@ import (
 
 // The SACK recovery family: RFC 6675 loss recovery with RFC 6937 PRR and RFC 3042 Limited
 // Transmit, as wgstack-performance.md's SACK step asks. The reference Linux runs these with its
-// pinned configuration, in which SACK is on and RACK, TLP and F-RTO are off, so its recovery is
-// RFC 6675's duplicate-threshold rule with PRR.
+// pinned configuration, in which SACK is on and TLP and F-RTO are off. Its loss detection is RACK
+// even so, since tcp_recovery=0 stopped turning RACK off in v6.17; with no reordering seen, RACK's
+// reorder window is zero once DupThresh segments are SACKed, so the third duplicate ACK starts
+// recovery as RFC 6675's rule does, and the recovery sends what PRR allows.
 
 // sackRTT is the handshake RTT of the SACK family. A minimum RTT above zero gives a RACK sender a
 // reorder window above zero: with a zero window and a clock too coarse to order the segments of
@@ -449,12 +451,13 @@ func sackRenege(h *H) {
 // segment. RFC 3042: each of the first two duplicate ACKs lets the sender send one new segment,
 // and it retransmits nothing before the third. The duplicate ACKs come 20 ms apart, as the
 // arrivals of the segments that cause them would space them. This variant runs at the
-// testbench's near-zero RTT with the reference Linux's RACK off, so it covers RFC 3042 under the
-// duplicate-threshold rule alone.
+// testbench's near-zero RTT, so it covers RFC 3042 under the duplicate-threshold rule alone. The
+// reference Linux passed it on 6.1 with RACK off; on 7.2 RACK cannot be turned off and resends on
+// the first SACK, an expected difference in linuxdut's list.
 func limitedTransmit(h *H) { limitedTransmitAt(h, 8034, 0) }
 
 // limitedTransmitRACK is limitedTransmit on a path with an RTT of ltRTT and the reference
-// Linux's RACK on. RFC 8985's reorder window, a quarter of the minimum RTT, is then longer than
+// Linux's RACK on, the variant the reference Linux passes. RFC 8985's reorder window, a quarter of the minimum RTT, is then longer than
 // the two duplicate ACKs and the time the checks watch after them, so a RACK sender keeps the
 // first segment unmarked and Limited Transmit applies as on a real path.
 func limitedTransmitRACK(h *H) { limitedTransmitAt(h, 8036, ltRTT) }

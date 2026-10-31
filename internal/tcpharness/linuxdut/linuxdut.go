@@ -6,7 +6,7 @@
 // under the build tag lab, in a network namespace of their own.
 //
 // A new network namespace takes most net.ipv4.tcp_* values from the kernel's compiled-in
-// defaults, but copies some from the initial namespace: on the lab VM's 6.1 kernel
+// defaults, but copies some from the initial namespace: on the lab VM's 6.1 and 7.2 kernels
 // tcp_congestion_control, tcp_rmem and tcp_wmem follow it, while tcp_frto, tcp_sack, tcp_recovery
 // and tcp_autocorking do not. Which values follow may change between kernels, so PinReference
 // sets every value of the reference configuration in docs/design/userspace/wgstack-verification.md
@@ -39,6 +39,8 @@ const IfName = "wgfth0"
 // the same on Linux and on wgstack. The order is the order PinReference writes them in.
 var ReferenceSysctls = [][2]string{
 	{"net/ipv4/tcp_congestion_control", "reno"},
+	// From v6.17 tcp_recovery=0 no longer turns RACK loss detection off; it still keeps RACK's
+	// reorder window dynamic and the duplicate threshold on, as on 6.1 with RACK on.
 	{"net/ipv4/tcp_recovery", "0"},
 	{"net/ipv4/tcp_early_retrans", "0"},
 	{"net/ipv4/tcp_frto", "0"},
@@ -50,7 +52,7 @@ var ReferenceSysctls = [][2]string{
 	{"net/ipv4/tcp_moderate_rcvbuf", "0"},
 	{"net/ipv4/tcp_autocorking", "0"},
 	// The UDP, reassembly and ICMP scenarios depend on these IP-level values, pinned at the 6.1
-	// defaults: the fragment lifetime of 30 s, the path MTU floor of 552, path MTU discovery on,
+	// defaults, which 7.2 keeps: the fragment lifetime of 30 s, the path MTU floor of 552, path MTU discovery on,
 	// and ICMP errors limited to 1 per second per destination for the types in the default mask.
 	{"net/ipv4/ipfrag_time", "30"},
 	{"net/ipv4/route/min_pmtu", "552"},
