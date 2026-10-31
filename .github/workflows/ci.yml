@@ -42,6 +42,14 @@ name: CI
 #               This second part widens the table's own build-only mapping for B6, for the
 #               same reachability reason as go_code above.
 #
+#   rust_code -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml, deny.toml
+#               -> gates rust-check, rust-windows, rust-macos (B13, B14) and rust-deny (B15).
+#               The Rust workspace is the v2 migration's build (docs/development/architecture.md);
+#               it shares nothing with the Go jobs above, so a Go-only or document-only change
+#               leaves these jobs skipped and a Rust-only change leaves the Go jobs to
+#               build-test's own rule. rust-deny additionally runs on the weekly schedule,
+#               because new RustSec advisories affect code nobody touched.
+#
 # A change to .github/workflows/** (the `workflows` filter below) additionally forces every
 # gated job to run, on top of what `build` and `go_code` already cover: a ci.yml change can
 # change how the other jobs behave, so path filtering must not be trusted to judge its own
@@ -101,6 +109,7 @@ jobs:
       run_all: ${{ steps.decide.outputs.run_all }}
       docs_only: ${{ steps.decide.outputs.docs_only }}
       go_code: ${{ steps.filter.outputs.go_code }}
+      rust_code: ${{ steps.filter.outputs.rust_code }}
       build: ${{ steps.filter.outputs.build }}
     steps:
       - uses: actions/checkout@v7
@@ -136,6 +145,12 @@ jobs:
               # The script that decides which packages windows-test and macos-test run. A
               # change to it changes what those two jobs test, so it has to run them.
               - 'scripts/portable-test-packages.sh'
+            rust_code:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'deny.toml'
             build:
               - '.goreleaser.yaml'
               - 'scripts/build-release.sh'
@@ -345,6 +360,102 @@ jobs:
         run: |
           pkgs=$(bash scripts/portable-test-packages.sh)
           go test $pkgs
+
+  rust-check:
+    # B13 (see docs/testing.md). Formatting, lints as errors and the tests of the Rust
+    # workspace on Linux. The toolchain, its components and its targets come from
+    # rust-toolchain.toml, which rustup on the runner reads, so CI and a developer's host
+    # use the same compiler. Gated by rust_code; see the header comment.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.rust_code == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: nextest
+        run: cargo nextest run --workspace --locked
+
+  rust-deny:
+    # B15. cargo-deny: licence allowlist, RustSec advisories, duplicate versions, and
+    # sources restricted to crates.io, all from deny.toml. The advisories part is the audit,
+    # so cargo-audit is not run separately. Also runs weekly and on workflow_dispatch, since
+    # a new advisory does not wait for a change to the Rust code.
+    needs: changes
+    if: >-
+      !cancelled() && (
+        github.event_name == 'schedule' ||
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.rust_code == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --locked
+
+  rust-windows:
+    # B14. Builds and tests the Rust workspace on native Windows. Gated by rust_code.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.rust_code == 'true'
+      )
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: toolchain from rust-toolchain.toml
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: build
+        run: cargo build --workspace --all-targets --locked
+      - name: nextest
+        run: cargo nextest run --workspace --locked
+
+  rust-macos:
+    # B14. The same as rust-windows, on GitHub's Apple silicon runner.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.rust_code == 'true'
+      )
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: build
+        run: cargo build --workspace --all-targets --locked
+      - name: nextest
+        run: cargo nextest run --workspace --locked
 
   release-snapshot:
     # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,
