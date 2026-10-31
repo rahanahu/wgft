@@ -4,12 +4,6 @@
 //! 形は Go の `encoding/json` が書き読みするものに合わせる。合わせ方と、合わせていない細部は
 //! `docs/design/v2/agent-control.md` に書く。
 
-// 日本語の文書に英語の固有名詞 (WireGuard など) が混ざるので、backtick を求める lint を外す
-#![allow(
-    clippy::doc_markdown,
-    reason = "Japanese docs name English terms such as WireGuard without backticks"
-)]
-
 pub mod gotime;
 pub mod join;
 pub mod register;
