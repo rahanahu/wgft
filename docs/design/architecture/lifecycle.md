@@ -48,7 +48,8 @@ admin API・CLI・Web UI は、ルール集合を `Desired` の値で示しま�
 dataplane への適用は、その時点の宣言を normalize/validate した結果から組み立てた `Plan` を渡し、再起動時の収束も `Desired` との差分で行います([9 節](../state.md#9-状態の保存と再起動)の突き合わせと同じ)。
 `Active` は「直近の `Commit` が成功して実際に転送している値」を指す、読み取り専用の派生値です。
 
-失敗の意味論は、失敗の及ぶ範囲によって次の 2 つに分かれます。
+失敗の意味論は、失敗の及ぶ範囲によって、ルール単位で閉じる失敗と backend 全体に及ぶ失敗の 2 つに分かれます。
+その後の項は、適用途中のクラッシュ、シャットダウンと撤去、conntrack を伴う更新の扱いです。
 
 - ルール単位で閉じる失敗(1 つの listener の bind、1 つの target の名前解決):既存のルールを置き換える `Prepare` が失敗した場合、そのルールは新しい `Active` の値になりません。
   旧い `Active` の値は、他のルールの `Commit` までは残って構いません。
@@ -68,7 +69,7 @@ dataplane への適用は、その時点の宣言を normalize/validate した�
   このため、カーネルがバッチを拒んだ場合と、送信が拒まれた場合は、テーブル全体が旧いまま残ります。
   例外は、commit の後の応答の受信に失敗した場合([6.1 節](../vps/kernel.md#61-カーネルモード)の受信側の壁)と、差し替えの後に読み直した送信元の一覧の set が送った要素を持たない場合([6.1 節](../vps/kernel.md#61-カーネルモード))です。
   どちらの場合もテーブルが差し替わった後で誤りが返るので、`Active` 世代とテーブルが食い違います。
-  この食い違いは drift として検出し、`Active` 世代の再公開で収束させます([7a.3 節](lifecycle.md#7a3-状態遷移と失敗の意味論))。
+  この食い違いは drift として検出し、`Active` 世代の再公開で収束させます(本節の「実際の状態への収束」)。
   新しく開いた listener があれば `Rollback` します
 - 適用途中のクラッシュ:再起動時に `Observe`([9 節](../state.md#9-状態の保存と再起動)の突き合わせ)を行い、`Desired` との差分だけを `Prepare`・`Commit` し直します。
   kernel dataplane は停止していた間も wg0 とテーブルを残すため([9 節](../state.md#9-状態の保存と再起動))、収束は差分だけで済みます
@@ -95,7 +96,7 @@ dataplane への適用は、その時点の宣言を normalize/validate した�
 kernel backend でも、削除したルールの DNAT に合うフローは conntrack の収束([6.1 節](../vps/kernel.md#61-カーネルモード))が削除し、この挙動はラボの lifecycle テストで固定しています。
 削除は利用者がその通信を止める宣言であり、宣言を反映できないときの fail-closed とは意味が違います。
 
-Phase 4 の実装で、[7a.3 節](lifecycle.md#7a3-状態遷移と失敗の意味論)の意味論の細部を次のとおり定めました。
+Phase 4 の実装で、本節の意味論の細部を次のとおり定めました。
 
 - 適用状態の値:`apply_state` は `active`、`pending`、`not_active` の 3 値です。
   `active` は、そのルールの `Desired` の値が転送中の値と一致する状態です。
@@ -107,7 +108,7 @@ Phase 4 の実装で、[7a.3 節](lifecycle.md#7a3-状態遷移と失敗の意�
   既存のフィールドは変えません。
   配信用の全体状態については別に `agent_state_generation`(最後に全体の適用に成功した世代)と `agent_state_pending`(保存済みの全体宣言に対応する適用がまだ成功していないか)を加えます。
   報告する server は `agent_state_pending` の偽も明示し、報告しない旧版では両フィールドを省きます。
-  無効化だけを先に重ねたときの送信上の世代は、`agent_state_generation` より進むことがあります。
+  無効化だけは保存の確定時に配信用の写しへ世代を先に反映するので([5.2 節](../control/connection.md#52-全体状態の配信とハートビート))、エージェントへ送った全体状態の世代は `agent_state_generation` より進むことがあります。
   `rule ls --json` は応答をそのまま出力するので、同じキーが増えます。
   Web UI は、ルール一覧と詳細の状態の欄に、server で公開できていないルールを理由付きで示します
 - 世代:`desired_generation` は、最後に適用を試みた宣言の SQLite の世代です([5.4 節](../control/batches.md#54-ルールのバッチ操作))。
@@ -115,17 +116,17 @@ Phase 4 の実装で、[7a.3 節](lifecycle.md#7a3-状態遷移と失敗の意�
   ルールごとの `active_generation` は、そのルールの転送中の値が公開された世代で、値が変わらない限り進みません。
   エージェントの登録のように世代を進めない変更でもトランザクションは実行され、その場合の `active_generation` は同じ番号のままです
 
-転送面が NoOp と判定して `active_generation` が進んでも、配信用の全体状態が異なれば明示的な適用を 1 回試みます。
-その適用が失敗した場合、転送面の `active_generation` を配信用の全体状態が公開された世代とは呼びません。
-`agent_state_pending` は真で、`agent_state_generation` は前の成功値のままです。
-診断はこのとき配信用の全体状態まで完了したとは報告しません。
+  転送面が NoOp と判定して `active_generation` が進んでも、配信用の全体状態が異なれば明示的な適用を 1 回試みます。
+  その適用が失敗した場合、転送面の `active_generation` を配信用の全体状態が公開された世代とは呼びません。
+  `agent_state_pending` は真で、`agent_state_generation` は前の成功値のままです。
+  診断はこのとき配信用の全体状態まで完了したとは報告しません。
 
-これらの値を報告する server は、正常時にも管理用 API の `active_generation`、`agent_state_generation`、`agent_state_pending` を返します。
-`status` と `server doctor` の通常の人向け表示では、2 つの世代が異なるとき、または `agent_state_pending` が真のときだけ、両方の世代を名前付きで示します。
-数値が等しくても pending が真なら未公開の所見を残し、両方を示します。
-この表示条件で一方の数値が欠けていれば、その値を未報告と示します。
-世代の数値が異なることだけでは判定を変えません。
-正常で両世代が等しく pending が偽なら、通常の出力に世代を加えません。
+  これらの値を報告する server は、正常時にも管理用 API の `active_generation`、`agent_state_generation`、`agent_state_pending` を返します。
+  `status` と `server doctor` の通常の人向け表示では、2 つの世代が異なるとき、または `agent_state_pending` が真のときだけ、両方の世代を名前付きで示します。
+  数値が等しくても pending が真なら未公開の所見を残し、両方を示します。
+  この表示条件で一方の数値が欠けていれば、その値を未報告と示します。
+  世代の数値が異なることだけでは判定を変えません。
+  正常で両世代が等しく pending が偽なら、通常の出力に世代を加えません。
 - 差分と公開の範囲:トランザクションは毎回 `Plan` の全体を公開します。
   nftables は全体の差し替えです([6.1 節](../vps/kernel.md#61-カーネルモード))。
   `Active` との差分は、ルールごとの状態の報告と、fail-closed にしたルールの `Retiring` の値の決定に使い、公開する範囲の絞り込みには使いません
