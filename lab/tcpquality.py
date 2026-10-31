@@ -35,11 +35,20 @@
 #       and CPU shares, then the ratio of the wgstack and gVisor medians with a bootstrap 95%
 #       interval, resampling each netstack's runs on their own 10,000 times. A run whose sender
 #       used SENDER_BOUND or more of one CPU measured the sender, and is left out and counted.
+#   udpgso <ifname> on|off|show
+#       sets or reads the device's tx-udp-segmentation feature through the SIOCETHTOOL ioctl, as
+#       `ethtool -K <ifname> tx-udp-segmentation off` would, for lab VMs without ethtool; run it in
+#       the device's network namespace. It prints the feature's requested and active state read
+#       back from the device, and fails with a message when an ioctl fails or the state read back
+#       differs from the one asked for.
+import ctypes
+import fcntl
 import hashlib
 import os
 import random
 import socket
 import statistics
+import struct
 import sys
 import time
 
@@ -215,7 +224,55 @@ def cpuratio(logfile):
     return 0
 
 
+SIOCETHTOOL = 0x8946
+ETHTOOL_GSTRINGS, ETHTOOL_GSSET_INFO, ETHTOOL_GFEATURES, ETHTOOL_SFEATURES = 0x1B, 0x37, 0x3A, 0x3B
+ETH_SS_FEATURES, ETH_GSTRING_LEN = 4, 32
+UDP_GSO_FEATURE = "tx-udp-segmentation"
+
+
+def ethtool(sock, ifname, buf):
+    # struct ifreq: the name, then ifr_data pointing at the ethtool command, padded to 40 bytes
+    ifr = bytearray(struct.pack("16sP", ifname.encode(), ctypes.addressof(buf)).ljust(40, b"\0"))
+    fcntl.ioctl(sock.fileno(), SIOCETHTOOL, ifr)
+
+
+def udpgso(ifname, op):
+    if op not in ("on", "off", "show"):
+        print("usage: udpgso <ifname> on|off|show", file=sys.stderr)
+        return 2
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        info = ctypes.create_string_buffer(struct.pack("IIQI", ETHTOOL_GSSET_INFO, 0, 1 << ETH_SS_FEATURES, 0))
+        ethtool(s, ifname, info)
+        count = struct.unpack_from("I", info, 16)[0]
+        names = ctypes.create_string_buffer(struct.pack("III", ETHTOOL_GSTRINGS, ETH_SS_FEATURES, count)
+                                            + bytes(count * ETH_GSTRING_LEN))
+        ethtool(s, ifname, names)
+        raw = names.raw[12:]
+        idx = [raw[i * ETH_GSTRING_LEN:(i + 1) * ETH_GSTRING_LEN].split(b"\0")[0].decode()
+               for i in range(count)].index(UDP_GSO_FEATURE)
+        blocks, blk, bit = (count + 31) // 32, idx // 32, 1 << (idx % 32)
+        if op != "show":
+            body = b"".join(struct.pack("II", bit if b == blk else 0, bit if b == blk and op == "on" else 0)
+                            for b in range(blocks))
+            ethtool(s, ifname, ctypes.create_string_buffer(struct.pack("II", ETHTOOL_SFEATURES, blocks) + body))
+        feats = ctypes.create_string_buffer(struct.pack("II", ETHTOOL_GFEATURES, blocks) + bytes(16 * blocks))
+        ethtool(s, ifname, feats)
+        _, requested, active, _ = struct.unpack_from("IIII", feats, 8 + 16 * blk)
+    except (OSError, ValueError) as e:
+        print("udpgso: %s: %s" % (ifname, e), file=sys.stderr)
+        return 1
+    state = lambda m: "on" if m & bit else "off"
+    print("feature=%s requested=%s active=%s" % (UDP_GSO_FEATURE, state(requested), state(active)))
+    # the set command reports a change it could not make only in its return flags, so the state is
+    # read back and compared instead
+    if op != "show" and (state(requested) != op or state(active) != op):
+        print("udpgso: %s: %s stays %s" % (ifname, UDP_GSO_FEATURE, state(active)), file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
     cmd, args = sys.argv[1], sys.argv[2:]
     sys.exit({"serve": serve, "fetch": fetch, "push": push, "analyze": analyze, "median": median,
-              "cpuratio": cpuratio}[cmd](*args))
+              "cpuratio": cpuratio, "udpgso": udpgso}[cmd](*args))

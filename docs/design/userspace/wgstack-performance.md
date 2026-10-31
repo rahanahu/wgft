@@ -998,6 +998,14 @@ CUBIC、RACK-TLP、SACK、D-SACK、F-RTO、受信のバッファの自動調整�
   受ける向きの値は、エージェントが返す ACK の暗号と送信の CPU を含みます。
   速さを固定した場合は片道 25 ms、20 Mbit/s、200 packet の待ち行列で、損失と途絶を入れません。
   速さを制限しない場合は経路に netem を置きません。
+  どちらの場合も、`tcpquality.sh` はエージェントの network namespace の `eth0` の UDP の segmentation offload を切り、datagram をカーネルが namespace の外へ出す前に分けます。
+  切らない場合、wireguard-go の Linux のバインドが同じ大きさの datagram の列を 1 つの UDP の GSO の packet で送り、veth はこの packet を分けずにルータへ渡します。
+  ルータの netem はこの packet を待ち行列の 1 つとして数え、含まれる datagram を列全体の送出の時間の後にまとめて出します。
+  実際の回線は datagram を 1 つずつ運ぶので、その先の待ち行列にこの遅れは生じません。
+  切らずに測った送信の向きのバッチ([wgstack のバッチ](wgstack-batching.md))では、まとめて届いた datagram の ACK もまとめて返り、次の列がさらに長くなりました。
+  その結果、速さを固定した経路の送る向きでは、列の遅れで HyStart++ が最初の slow start を早く終えて速さが約 5% 下がり、byte あたりの CPU の比は分けた場合より大きく下がりました。
+  分けた経路の値は、UDP の segmentation offload を持たない NIC のホストに相当します。
+  datagram を分ける CPU と、VM の中のルータの namespace の転送の手間がエージェントの CPU にどれだけ数えられるかは、未確認です。
   送り手のプロセス(送る向きでは LAN のホスト、受ける向きでは client)の CPU も記録します。
   送り手が 1 つの CPU の 0.7 以上を使った実行は送り手の速さを測ったとみなし、判定に使いません。
   gVisor と wgstack は同じ VM の同じ時間帯に流します。
