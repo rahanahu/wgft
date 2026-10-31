@@ -592,7 +592,11 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
   未読のデータを持ったまま閉じた接続は Linux と同じく RST で終えます。
   緊急のデータは、通常のデータとして扱い、知らせません
 - RFC 6298:SRTT と RTTVAR から RTO を求め、再送ごとに倍にします。
-  最小の RTO は Linux と同じ 200 ms、最大は 120 秒です
+  RTO は SRTT に 4 × RTTVAR と 200 ms の大きい方を足した値で、最大は 120 秒です。
+  200 ms は Linux の最小の RTO で、Linux と同じく RTTVAR の項の下限に置き、RTTVAR の小さな経路でも Linux より早く RTO を起こしません([RACK-TLP](wgstack-performance.md#rack-tlp)のタイマーの規則)。
+  RFC 6298 2.4 は 1 秒未満の RTO を 1 秒に切り上げるよう求めます(SHOULD)。
+  Linux に合わせた 200 ms の下限はこれから外れる意図した選択で、RTTVAR の項に掛けた分だけ RFC の値に近づきます。
+  RTO の値は、黙った後の輻輳の窓の戻し(RFC 5681 4.1)の閾値、窓の probe の間隔、黙った後に遅らせずに返す ACK(quickack)の閾値にも使います
 - RFC 7323:窓の scale、timestamp による RTT の測定、PAWS を持ちます。
   TS.Recent を 24 日を超えて更新していない接続は、PAWS で比べずに受け入れます(5.5 節)。
   窓の scale は boost の 4 MiB を広告できる値を握手の時に決めます。

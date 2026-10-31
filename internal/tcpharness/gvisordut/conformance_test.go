@@ -22,11 +22,6 @@ var Known = map[string]tcpharness.Known{
 		Observed: "no SYN-ACK",
 		Reason:   "wgft drops SYNs with an MSS below 536 at the TUN ingress on purpose: internal/nettun/ingress.go tcpSynMinMSS",
 	},
-	"retransmit-rto/backoff-from-first": {
-		Observed: "second gap / first gap below 1.5",
-		Reason: "gVisor's default loss detection is RACK-TLP, RFC 8985: the first retransmission is a tail loss probe " +
-			"after 2 SRTT plus 200 ms, and the RTO that follows starts unbacked; the reference Linux has TLP off",
-	},
 	"timewait-reuse/newer-ts-smaller-isn.synack": {
 		Observed: "no SYN-ACK",
 		Reason: "the pinned gVisor reuses a TIME-WAIT four-tuple only for a SYN beyond the old RCV.NXT, the sequence rule of " +
