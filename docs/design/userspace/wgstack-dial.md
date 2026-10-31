@@ -13,10 +13,10 @@
 2. リファクタリングと脆弱性の検査を、ラボのカーネルの更新、基準の取り直し、Linux の挙動の仕様と並行に行います
 3. 核のファイルと UDP に触れる実装を、リファクタリングの後に始めます
 
-参照のカーネルは 7.x に移ります。
-能動の open の Linux の挙動は、別に書く Linux の opener の挙動の仕様(v6.1 と v7.2 の両方を扱う、作成中)を正本にします。
+参照の Linux は、第 2 段階が main に入った直後、dial の実装の前に、Debian 13 の trixie-backports の 7.2 のカーネルに移ります([決めたこと](#決めたこと))。
+能動の open の Linux の挙動は、別の PR で書いている Linux の opener の挙動の仕様(v6.1 と v7.2 を扱います)にまとめます。
+その仕様が入るまでは、RFC 9293 とこの文書の規則に従います。
 この文書はその仕様を写さず、wgstack が従う規則の骨格だけを書きます。
-検証の参照は、更新した後のラボのカーネルです。
 
 ## 目的と範囲
 
@@ -76,7 +76,7 @@ I7 は、カーネルモードの `vpsd` が wgstack を作らず、そのコー
 
 ## TCP の能動の open
 
-能動の open の規則は、Linux の opener の挙動の仕様と RFC 9293 に従います。
+能動の open の規則は RFC 9293 とこの文書の規則に従い、別の PR で書いている Linux の opener の挙動の仕様が入った後はその仕様にも合わせます。
 Linux と違う挙動を選ぶ点は、[期待した差](wgstack-verification.md#期待した差の一覧)に記録します。
 
 ### SYN-SENT の置き場
@@ -126,7 +126,7 @@ RFC 9293 3.10.7.3 の SYN-SENT の規則に従います。
 ### client の側の option
 
 SYN に MSS、SACK-permitted、timestamp、窓の scale を載せます。
-並びは Linux の opener の挙動の仕様に合わせます。
+並びは、別の PR で書いている Linux の opener の挙動の仕様が入った後に、その仕様に合わせます。
 使うかどうかは SYN-ACK で決めます。
 
 - MSS:SYN-ACK の値に従い、値 0 と欠落では 536 を使います
@@ -316,11 +316,13 @@ dial の側で加わるものは次のとおりです。
 ## 検証
 
 [wgstack の検証](wgstack-verification.md)の原則(Linux が参照、試験の書き手の分離、Linux で先に通すこと、決定的な実行)を dial の側にも当てます。
-参照の Linux は、更新した後のラボのカーネル(7.x)です。
+参照の Linux は、移った後のラボのカーネル(Debian 13 の trixie-backports の 7.2)です。
+[wgstack の検証](wgstack-verification.md)の[参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定)と[試験の置き場所と DUT](wgstack-verification.md#試験の置き場所と-dut)は、ラボのカーネルを移す時に直します。
+第 2 段階は今の 6.1 で閉じるので、それまでは 6.1 の記述のままです。
 
 - 適合の試験:`Dial` と `DialUDP` を持つ DUT の任意の面を加えます。
   参照の opener は Linux で、ラボの network namespace の TUN の中から Linux のソケットが接続し、試験の側が待ち受けの役で SYN を受けます。
-  台本の期待は、Linux の opener の挙動の仕様に従います。
+  台本の期待は、別の PR で書いている Linux の opener の挙動の仕様に従い、それが入るまでは RFC 9293 とこの文書の規則に従います。
   台本は、SYN の option と並び、SYN の再送の間隔と打ち切り、option の無い SYN-ACK、窓の scale の無い SYN-ACK、MSS 0 と欠落、窓 0 の SYN-ACK、誤った ACK への RST、RST による拒否、SYN-SENT の間の ICMP、同時の open、データを持つ SYN-ACK、確立した後の重複の SYN-ACK、[dial の誤りの約束](#dial-の誤りの約束)を扱います。
   同時の open の台本では、wgstack の dial の失敗を期待した差にします。
   データ、窓、再送、終わり方の台本は、確立の段を能動の open に替えて同じ台本を流します
@@ -373,6 +375,9 @@ dial と多くのピアは攻撃の面を変えるので、検査の最中には
 
 所有者が 2026-10-31 に次の点を決めました。
 
+- 参照の Linux:Debian 13 と trixie-backports の 7.2 のカーネルに移ります。
+  版はラボの基の image の snapshot で固定して記録します。
+  移すのは第 2 段階が main に入った直後で、dial の実装の前です
 - 同時の open:持ちません。
   SYN-SENT で ACK の無い SYN を受けた dial は失敗します([SYN-SENT での RST と ACK](#syn-sent-での-rst-と-ack))
 - 設定:`WGFT_NETSTACK`(`--netstack`)で、`WGFT_MODE=userspace` のときだけ使い、既定は 1.x の間 `gvisor` です。
