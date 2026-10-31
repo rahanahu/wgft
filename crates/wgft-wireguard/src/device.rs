@@ -260,7 +260,11 @@ impl Device {
     }
 
     /// The Unix time the device would stamp on a handshake initiation now: an upper bound of every
-    /// stamp it has sent. Persist it and pass it as `unix_floor` to the next [`Device::new`].
+    /// stamp it has sent. Pass a persisted value as `unix_floor` to the next [`Device::new`].
+    ///
+    /// Save it on a clean shutdown. While running, save `unix_high_water() + interval` every
+    /// `interval`, so that the saved value stays above every stamp until the next save; a plain
+    /// periodic save of `unix_high_water()` is not a floor after a crash.
     #[must_use]
     pub fn unix_high_water(&self) -> Duration {
         self.unix_at_start + self.now.saturating_duration_since(self.start)
@@ -461,8 +465,11 @@ impl Device {
                 ProtoEvent::Expired { used } => {
                     let p = &mut self.peers[peer];
                     let lost = p.staged.clear();
-                    if p.roaming == Roaming::NotByInitiation {
+                    let mut reset = None;
+                    if p.roaming == Roaming::NotByInitiation && p.endpoint != p.configured_endpoint
+                    {
                         p.endpoint = p.configured_endpoint;
+                        reset = p.endpoint;
                     }
                     if let (Some(interval), Some(_)) = (p.keepalive, p.endpoint) {
                         p.keepalive_at = Some(now + interval);
@@ -474,6 +481,12 @@ impl Device {
                     // ピアについて 9 分ごとに event が出る
                     if used {
                         self.push_event(Event::PeerExpired { peer: key });
+                    }
+                    if let Some(endpoint) = reset {
+                        self.push_event(Event::EndpointChanged {
+                            peer: key,
+                            endpoint,
+                        });
                     }
                 }
             }

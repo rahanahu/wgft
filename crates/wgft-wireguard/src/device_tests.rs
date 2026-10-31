@@ -932,6 +932,10 @@ fn the_agent_returns_to_the_configured_endpoint_when_the_server_expires() {
         n.a.peer_status(&n.b_pub(), n.now()).unwrap().endpoint,
         Some(configured)
     );
+    assert!(n.a_events.iter().any(|e| matches!(
+        e,
+        Event::EndpointChanged { endpoint, .. } if *endpoint == configured
+    )));
 }
 
 #[test]
