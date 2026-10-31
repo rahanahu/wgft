@@ -118,7 +118,7 @@ wgstack は CPU を減らすために、パケットをまとめて WireGuard �
 WGFT_AGENT_BATCH_MIB=32
 ```
 
-省略と空の値では `WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS` から導き、既定の上限の Linux と macOS では 54 MiB です。
+省略と空の値では `WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS` から導き、既定の上限の Linux と macOS ではメモリのソフト上限の 0.15 倍で、約 32 MiB です。
 バッファの小さい Windows では後述の上限の値で、CPU が 8 個なら約 73 MiB です。
 `0` はまとめを使いません。
 この値が抑えるのは、まとめた分だけです。

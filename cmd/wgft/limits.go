@@ -100,9 +100,13 @@ func agentBatchSpec() spec {
 		Usage: "send batching budget of the wgstack network stack in MiB, env WGFT_AGENT_BATCH_MIB; unset derives it from the flow caps, and 0 turns batching off"}
 }
 
-// sendBatchShare は β の逆数で、メモリのソフト上限のうち送信の向きの予算に当てる割合を 1/4 にする。β は
-// P_max を変えた測定の後に所有者が決める値で、それまでの仮の値である(wgstack-batching.md)。
-const sendBatchShare = 4
+// sendBatchShareNum と sendBatchShareDen は β = 3/20 (0.15) で、メモリのソフト上限のうち送信の向きの予算に
+// 当てる割合である。小数にせず整数の比にして、P_max を環境によらず決まる値にする。値の根拠は P_max を変えた
+// 測定で、wgstack-batching.md の「P_max の決め方」に書く。
+const (
+	sendBatchShareNum = 3
+	sendBatchShareDen = 20
+)
 
 // sendBatch は WGFT_AGENT_BATCH_MIB から求めた予算である。
 type sendBatch struct {
@@ -122,7 +126,7 @@ func sendBatchFromConfig(c *config, l resource.Limits) (sendBatch, error) {
 	if v == "" {
 		p := upper
 		if runtime.GOOS != "windows" {
-			p = int(min(l.MemoryLimit()/sendBatchShare/s, int64(upper)))
+			p = int(min(l.MemoryLimit()*sendBatchShareNum/sendBatchShareDen/s, int64(upper)))
 		}
 		return sendBatch{packets: p}, nil
 	}

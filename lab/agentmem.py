@@ -15,7 +15,7 @@
 # N_tx = 1153 + C buffers of 64 KiB, the receive side 1027, and with wgstack the send batching budget
 # adds W_tx: P_max more buffers, plus the k_tx = 32 buffers the TUN reader keeps
 # (docs/design/userspace/wgstack-batching.md). CPUs is this host's count unless AGENTMEM_CPUS sets
-# it; P_max is the agent's default for K and U unless WGFT_AGENT_BATCH_MIB sets it in MiB.
+# it; P_max is the agent's default for K and U (0.15 of the memory soft limit) unless WGFT_AGENT_BATCH_MIB sets it in MiB.
 import json
 import os
 import sys
@@ -38,8 +38,9 @@ def p_max(K, U):
     mib = os.environ.get('WGFT_AGENT_BATCH_MIB', '')
     if mib != '':
         return min(int(int(mib) / BUF), upper)
-    soft = 32 + U * 12 / 1024 + K * 44 / 1024
-    return min(int(soft / 4 / BUF), upper)
+    # M_soft in bytes, then beta = 3/20 (0.15) in integers, as cmd/wgft/limits.go does
+    soft = (32 * 1024 + U * 12 + K * 44) * 1024
+    return min(soft * 3 // 20 // (64 * 1024), upper)
 
 
 def common(K, U, Ltcp, Lcud):

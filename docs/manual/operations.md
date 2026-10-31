@@ -111,7 +111,7 @@ wgstack hands packets to WireGuard in batches to save CPU.
 WGFT_AGENT_BATCH_MIB=32
 ```
 
-Unset or empty derives the limit from `WGFT_MAX_UDP_FLOWS` and `WGFT_MAX_TCP_FLOWS`, 54 MiB with the default caps on Linux and macOS; on Windows, whose buffers are small, it is the cap, about 73 MiB with 8 CPUs.
+Unset or empty derives the limit from `WGFT_MAX_UDP_FLOWS` and `WGFT_MAX_TCP_FLOWS`, about 32 MiB with the default caps on Linux and macOS, 0.15 of the memory soft limit; on Windows, whose buffers are small, it is the cap, about 73 MiB with 8 CPUs.
 `0` turns batching off.
 The value limits only the batched part.
 WireGuard's queues of single packets keep their own size whatever the value, about 73 MiB on Linux with 8 CPUs.
