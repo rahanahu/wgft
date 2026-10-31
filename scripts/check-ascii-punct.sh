@@ -14,8 +14,8 @@ pattern='[\x{FF01}-\x{FF5E}\x{2010}-\x{2015}\x{2212}\x{301C}\x{3000}]'
 
 mapfile -t files < <(
   find . \
-    -type d \( -name .git -o -name .claude -o -name experiments -o -name notes -o -name node_modules -o -name dist -o -name bin \) -prune -o \
-    -type f \( -name '*.go' -o -name '*.md' -o -name '*.yaml' -o -name '*.yml' -o -name '*.sh' -o -name '*.gohtml' -o -name '*.service' -o -name '*.example' -o -path ./lab/lab \) -print \
+    -type d \( -name .git -o -name .claude -o -name experiments -o -name notes -o -name node_modules -o -name dist -o -name bin -o -name target \) -prune -o \
+    -type f \( -name '*.go' -o -name '*.rs' -o -name '*.toml' -o -name '*.md' -o -name '*.yaml' -o -name '*.yml' -o -name '*.sh' -o -name '*.gohtml' -o -name '*.service' -o -name '*.example' -o -path ./lab/lab \) -print \
   | { if [ -s scripts/check-ascii-punct.exclude ]; then grep -vEf scripts/check-ascii-punct.exclude; else cat; fi; }
 )
 
