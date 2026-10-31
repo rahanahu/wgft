@@ -54,6 +54,13 @@ func FuzzParse(f *testing.F) {
 	f.Add(buildPeer(tseg{sport: 1, dport: 2, flags: flagSYN, mss: 1380, ws: 7, sackOK: true, ts: true}))
 	f.Add(buildPeer(tseg{sport: 1, dport: 2, flags: flagACK, ws: -1, sack: []sackBlock{{1, 2}, {3, 4}}}))
 	f.Fuzz(func(t *testing.T, b []byte) {
+		// 8 byte ずつの和は、どの長さでも 2 byte ずつの定義どおりの和と一致する(checksum_test.go)。初めの値は 4 つで、
+		// 0xffff の倍数(0xffff や 0xffffffff)は 1 の補数の和で 0 とほぼ同じなので、0 のほかは倍数でない値にする
+		for _, s := range [...]uint32{0, 0x1234, 0xfffffffe, pseudoSum(0x0a090002, 0x0a090001, protoTCP, len(b))} {
+			if got, want := checksum(s, b), refChecksum(s, b); got != want {
+				t.Fatalf("checksum(%#x, %d bytes) = %#04x, the definition gives %#04x", s, len(b), got, want)
+			}
+		}
 		ip, d := parseIPv4(b)
 		if d != ipv4OK {
 			return

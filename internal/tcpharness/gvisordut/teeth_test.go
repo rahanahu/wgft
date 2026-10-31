@@ -299,9 +299,11 @@ func TestHarnessPassesOverAFINSentBeforeTheAck(t *testing.T) {
 
 // dropFinalAck drops the testbench's pure ACK of the engine's FIN, so the engine stays in LAST-ACK
 // and resends its FIN, each time echoing the TSval it had before. From the engine's first resend
-// after a drop on, it also repeats that resend every repeatEvery, as an engine that keeps resending
+// of its FIN on, it also repeats that resend every repeatEvery, as an engine that keeps resending
 // without the ACK does: gVisor's own next resend can come seconds later on a loaded runner (over
-// 3.5 s once on the Windows runner), and the tests below need a resend to judge. With holdData set,
+// 3.5 s twice on the Windows runner), and the tests below need a resend to judge. The repeat does
+// not wait for the drop: the first resend can be a probe that leaves before the testbench's ACK
+// reaches this wrapper, and on the Windows runner it did, so the repeat never started. With holdData set,
 // it also holds the testbench's pure ACK of the engine's last data segment that long before the
 // engine sees it, as a loaded machine that processes the ACK late does: the FIN then goes out with
 // that data still unacknowledged, and its first resend is a probe that comes at once.
@@ -312,8 +314,7 @@ type dropFinalAck struct {
 	mu          sync.Mutex
 	fin         uint32 // the sequence number after the engine's FIN, once it has sent one
 	seen        bool
-	dropped     bool   // an ACK of the FIN was dropped
-	repeating   bool   // the engine's first resend after a drop is being repeated
+	repeating   bool   // the engine's first resend of its FIN is being repeated
 	closed      bool   // out is closed
 	dataEnd     uint32 // the sequence number after the engine's latest data segment
 	out         chan []byte
@@ -325,7 +326,6 @@ func (d *dropFinalAck) Inject(pkt []byte) error {
 	if s, err := tcpharness.Parse(pkt); err == nil && s.Flags == tcpharness.FlagACK && len(s.Payload) == 0 {
 		d.mu.Lock()
 		drop := d.seen && s.Ack == d.fin
-		d.dropped = d.dropped || drop
 		hold := d.holdData > 0 && !d.seen && d.dataEnd != 0 && s.Ack == d.dataEnd
 		d.mu.Unlock()
 		if drop {
@@ -376,7 +376,7 @@ func dropAckOfFINHolding(inner tcpharness.DUT, holdData, repeatEvery time.Durati
 					d.dataEnd = s.Seq + uint32(len(s.Payload))
 				}
 				if s.Has(tcpharness.FlagFIN) {
-					if d.dropped && !d.repeating && d.fin == s.Seq+s.Len() {
+					if d.seen && !d.repeating && d.fin == s.Seq+s.Len() {
 						d.repeating = true
 						go d.repeat(append([]byte(nil), pkt...))
 					}
@@ -639,13 +639,18 @@ func TestHarnessCatchesRTOInPlaceOfAProbe(t *testing.T) {
 	wantOutcome(t, got, "tlp-tail-loss/probe-at-2srtt", tcpharness.OutcomeFail)
 }
 
-// On limited-transmit-rack's path, a resend 38 ms after the second duplicate ACK still comes
+// On limited-transmit-rack's path, a resend 25 ms after the second duplicate ACK still comes
 // inside RACK's reorder window, where the watch now runs; with the old 20 ms watch it went
-// unseen.
+// unseen. The resend must come after that old watch and reach the testbench before the window
+// ends, about 97 ms after the first duplicate ACK. 25 ms leaves 5 ms past the old watch and about
+// 50 ms before the window ends when the duplicate ACKs are 20 ms apart. With 38 ms the Windows
+// runner once counted the resend past the window: its 15.6 ms clock tick stretched the gap between
+// the duplicate ACKs to 32 ms and can delay the resend's timer and the testbench's reading of the
+// clock by a tick each.
 func TestHarnessCatchesResendAfterTheSecondDupack(t *testing.T) {
-	e := mutant("gvisor-resend-38ms-after-dupack2", func(inner tcpharness.DUT) tcpharness.DUT {
+	e := mutant("gvisor-resend-25ms-after-dupack2", func(inner tcpharness.DUT) tcpharness.DUT {
 		d := resendAt(2, false)(inner).(*earlyResend)
-		d.delay = 38 * time.Millisecond
+		d.delay = 25 * time.Millisecond
 		return d
 	})
 	got := tcpharness.Record(t, e, scenario(t, "limited-transmit-rack"), 1)

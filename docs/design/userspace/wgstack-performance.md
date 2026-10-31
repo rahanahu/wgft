@@ -414,7 +414,7 @@ wgstack との違いと適合の場面は、決定ではなく計画と未確認
 - `tcp: fix initial tp->rcvq_space.space value for passive TS enabled flows`(6.1.147-1 から):受信の窓の自動調整の最初の値が少し小さくなります(後述)
 - `tcp: fix tcp_ofo_queue() to avoid including too much DUP SACK range`(6.1.148-1 から):順序外のデータを順序どおりにする時の D-SACK の範囲を重なりだけにします
 
-VM で確かめるには、`uname -v` で Debian の package の版を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.Debian.gz` を上の件名で探します。
+VM で確かめるには、`uname -v` で Debian の package の版を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` を上の件名で探します。
 上の Debian の版は bookworm の changelog の値で、VM の上ではまだ確かめていません。
 
 値は、性能の参照の Linux(`linuxdut.PinPerformance`)が既定のまま使う sysctl の値です。
@@ -866,13 +866,16 @@ CPU の目標は、qbench の待ち行列の大きな測定で定常の速さが
 - 区間の数に比例する手間(実装済み):相手の順序外の segment で CPU を使わせる攻撃になるので、性能の段階を待たずに完成の条件として直しました。
   最近触れた区間の短い list で block を選び、区間の表を固定の配列を置き場にした treap にしました([接続ごとのバッファ](wgstack.md#接続ごとのバッファ))。
   表は予約の段ごとの固定の配列のままで、節は 16 byte になり、h_f と d_h はその大きさで数えます
-- バッチと segment のまとめ:`BatchSize` を 1 より大きくし、`Read` が 1 回に複数の packet を作り、`Write` が複数の packet を受けます。
-  受信では 1 本の接続の続く segment を連なりとして処理し、送信では 1 本の接続の segment をまとめて作ります。
-  wireguard-go との約束、ACK の決め方、wireguard-go の滞留の上界、OS ごとの挙動、実装の順序は[wgstack のバッチと segment のまとめ](wgstack-batching.md)に分けます
+- バッチと segment のまとめ:`BatchSize` を 1 より大きくし、`Read` が 1 回に複数の packet を作ります。
+  送信では 1 本の接続の segment をまとめて作ります。
+  wireguard-go との約束、ACK の決め方、wireguard-go の滞留の上界、OS ごとの挙動、実装の順序は[wgstack のバッチと segment のまとめ](wgstack-batching.md)に分けます。
+  受ける向きの連なりと ACK の控えは、ラボの経路で効果が無かったので実装しないと決め、k_rx は 1 のままにしました。
+  受ける向きの比は、wgstack の中の時間を 0 にしても約 0.57 から 0.6 で、残りは gVisor と共有する wireguard-go とカーネルの手間です([受信の向きの決定](wgstack-batching.md#受信の向きの決定))
 - 錠の競合:入力、出力、アプリケーション、タイマーの goroutine が接続の錠を取り合います。
   mutex のプロファイルで競合を確かめてから分け方を決め、錠の順(接続の錠、表の錠、末端の錠)は変えません
-- checksum:今の `checksum` は 2 byte ずつ足します。
-  プロファイルで目立てば、8 byte ずつ足す形にします
+- checksum(実装済み):`checksum` は 8 byte ずつ繰り上がりを回して足し、最後に 16 bit に畳みます(RFC 1071 2 節)。
+  2 byte ずつ足していた形は、受ける向きの fast の経路のプロファイルでエージェントの CPU の約 11% を占めたので、直しました([実装の順序](wgstack-batching.md#実装の順序))。
+  結果は 2 byte ずつの定義どおりの和と同じで、試験と fuzzing(`FuzzParse`)が比べます
 
 危険は、区間の構造の誤りによる受信の byte の列の誤りと、錠の変更による競合と止まりです。
 区間の構造は今の fuzzing と受信の模型の試験で、錠の変更は `-race` の負荷の試験で確かめます。
