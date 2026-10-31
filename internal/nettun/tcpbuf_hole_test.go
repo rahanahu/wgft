@@ -266,6 +266,8 @@ func readProgress(r net.Conn, n int, idle func() time.Duration) (int, error) {
 func makeHole(t *testing.T, p *tcpPair, h *holeFilter, c, s net.Conn, ooo int) int {
 	t.Helper()
 	syncWindow(t, c, s)
+	seg := openCwnd(t, p, c, s, ooo)
+	wnd := int(tcpStateOf(c, "snd", "SndWnd")[0])
 	h.start(c)
 	c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if _, err := c.Write(make([]byte, ooo)); err != nil {
@@ -283,6 +285,11 @@ func makeHole(t *testing.T, p *tcpPair, h *holeFilter, c, s net.Conn, ooo int) i
 	// 送り手が送り終え、受け手が積み終えるまで待つ
 	settle(t, "setup: the burst behind the hole", func() [3]int { return [3]int{recvMemOf(t, s), int(sndNxtOf(c)), 0} })
 	h.frozen.Store(true)
+	// openCwnd の後は、書いた分のうち受け手の窓に収まる分が 1 回の輻輳の窓で出る。それより手前で
+	// 止まった送り手は、比べる M を試験の想定より小さくする
+	if sent := int(sndNxtOf(c) - h.holeSeq.Load()); sent < min(ooo, wnd)-seg {
+		t.Fatalf("setup: the sender sent %d of the %d bytes behind the hole, with a window of %d, before it stopped: %s", sent, ooo, wnd, holeDiag(t, p, c, s))
+	}
 	// 捨て始める前に渡った segment を受け手が処理し終えると、受信のメモリは順序外のキューの byte に
 	// 等しく、受信のキューは空になる。以後は何も届かないので、この値は穴を埋めるまで変わらない
 	v := settle(t, "setup: the receiver", func() [3]int { pb, _ := pendingOf(s); return [3]int{recvMemOf(t, s), pb, recvQueue(s)} })
@@ -294,6 +301,40 @@ func makeHole(t *testing.T, p *tcpPair, h *holeFilter, c, s net.Conn, ooo int) i
 		t.Fatalf("setup: sender %v with the hole open: %v", st, connOf(c).ep.LastError())
 	}
 	return m
+}
+
+// openCwnd は、送り手 c が大きさ ooo の書き込みを輻輳の窓の 1 回分で送れるようにしてから戻る。
+// 穴を開けている間、送り手の SndUna は進まないので、再送の時計は穴の segment を送った時点から
+// 止まらずに進む。窓が小さいと、送り手は SACK を受けながら少しずつ先を送り、負荷の下では書いた分を
+// 送り終える前に RTO が来る。RTO の後は窓が 1 segment に戻り、捨て続ける穴の segment だけを送り
+// 直すので、順序外はそこで止まり、試験が想定するより小さい順序外で B と M を比べることになる。
+// gVisor は RTO より長く送らなかった送り手の窓を初期値の 10 segment に戻す(syncWindow の待ちで
+// 起きうる)ので、1 segment を送って今の窓を確かめ、足りなければ転送で広げ、窓を知らせ直してから
+// 確かめ直す。確かめた直後に穴の書き込みを送る。返すのは 1 segment の大きさの見積もりである。
+func openCwnd(t *testing.T, p *tcpPair, c, s net.Conn, ooo int) (seg int) {
+	t.Helper()
+	seg = p.a.mtu - header.IPv4MinimumSize - header.TCPMinimumSize - 12 // 12 は timestamp の option
+	want := uint32((ooo+seg-1)/seg + 2)
+	var ti tcpip.TCPInfoOption
+	for deadline := time.Now().Add(time.Minute); ; {
+		c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_, err := c.Write(make([]byte, seg))
+		c.SetWriteDeadline(time.Time{})
+		if err != nil {
+			t.Fatalf("setup: write one segment: %v", err)
+		}
+		if _, err := readAllErr(s, seg, 10*time.Second); err != nil {
+			t.Fatalf("setup: read one segment: %v", err)
+		}
+		if connOf(c).ep.GetSockOpt(&ti); ti.SndCwnd >= want {
+			return seg
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("setup: the sender's congestion window stayed at %d segments within 1m, want %d to send %d bytes at once", ti.SndCwnd, want, ooo)
+		}
+		bulk(t, c, s, max(2*ooo, 1<<20))
+		syncWindow(t, c, s)
+	}
 }
 
 // gVisor の rcvMemUsed の名前と型が、このビルドの前提と合う(go.mod の固定の版)。gVisor を更新して
