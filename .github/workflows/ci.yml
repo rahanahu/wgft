@@ -42,13 +42,14 @@ name: CI
 #               This second part widens the table's own build-only mapping for B6, for the
 #               same reachability reason as go_code above.
 #
-#   rust -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml, deny.toml
-#               -> gates rust-check, rust-windows, rust-macos (B13, B14) and rust-deny (B15).
-#               The Rust workspace is the v2 migration's build (docs/development/architecture.md);
-#               it shares nothing with the Go jobs above, so a Go-only or document-only change
-#               leaves these jobs skipped and a Rust-only change leaves the Go jobs to
-#               build-test's own rule. rust-deny additionally runs on the weekly schedule,
-#               because new RustSec advisories affect code nobody touched.
+#   rust    -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml, deny.toml
+#               -> gates rust-check, rust-windows, rust-macos (B13, B14) and rust-deny
+#               (B15). The Rust workspace is the v2 migration's build
+#               (docs/development/architecture.md); it shares nothing with the Go jobs
+#               above, so a Go-only or document-only change leaves these jobs skipped and
+#               a Rust-only change leaves the Go jobs to build-test's own rule. rust-deny
+#               additionally runs on the weekly schedule, because new RustSec advisories
+#               affect code nobody touched.
 #
 # A change to .github/workflows/** (the `workflows` filter below) additionally forces every
 # gated job to run, on top of what `build` and `go_code` already cover: a ci.yml change can
@@ -87,12 +88,14 @@ on:
   pull_request:
   schedule:
     # Weekly govulncheck (B6) and cargo-deny (B15), independent of any PR: new advisories
-    # affect code nobody touched. 03:17 UTC Tuesday is away from the UTC-midnight rush GitHub's scheduling
-    # documentation warns can delay jobs, and away from any release-day activity.
+    # affect code nobody touched. 03:17 UTC Tuesday is away from the UTC-midnight rush
+    # GitHub's scheduling documentation warns can delay jobs, and away from any
+    # release-day activity.
     - cron: "17 3 * * 2"
   workflow_dispatch:
-    # Lets a human re-run govulncheck and cargo-deny on demand (a new advisory doesn't wait for the
-    # weekly schedule or a qualifying code change), or force a full run of every job.
+    # Lets a human re-run govulncheck and cargo-deny on demand (a new advisory doesn't
+    # wait for the weekly schedule or a qualifying code change), or force a full run of
+    # every job.
 
 permissions:
   contents: read
@@ -124,8 +127,9 @@ jobs:
         # file and in release.yml (actions/checkout@v7, goreleaser/goreleaser-action@v7,
         # docker/setup-buildx-action@v4, docker/login-action@v4, anchore/sbom-action@v0,
         # actions/attest-build-provenance@v4, actions/attest-sbom@v4,
-        # Swatinem/rust-cache@v2, taiki-e/install-action@v2, EmbarkStudios/cargo-deny-action@v2)
-        # is pinned the same way, so a lone SHA pin here would be an inconsistency rather than an improvement.
+        # Swatinem/rust-cache@v2, taiki-e/install-action@v2,
+        # EmbarkStudios/cargo-deny-action@v2) is pinned the same way, so a lone SHA pin
+        # here would be an inconsistency rather than an improvement.
         uses: dorny/paths-filter@v4
         continue-on-error: true
         with:
@@ -171,7 +175,8 @@ jobs:
         # no base to diff against either, and by nature asks for a full run. A change to
         # the workflow files themselves (the `workflows` filter) also sets run_all, for the
         # reason in the header comment. A schedule event never sets run_all: its only
-        # purpose is the govulncheck and rust-deny runs below, which checks github.event_name directly.
+        # purpose is the govulncheck and rust-deny runs below, which check github.event_name
+        # directly.
         #
         # docs_only follows the same fail-open rule from the other side: it stays false
         # unless the file list is present and every entry in it is a document, so every
