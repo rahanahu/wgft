@@ -13,7 +13,9 @@ Use IPv4 addresses for targets.
 A service on the agent host that listens only on `127.0.0.1` can be a target, such as `127.0.0.1:25565`.
 Kernel mode forwards to a loopback target only when `WGFT_AGENT_ALLOW_TARGETS` on the agent host names it with an entry inside `127.0.0.0/8`, for example `WGFT_AGENT_ALLOW_TARGETS=127.0.0.1:25565`.
 The list then also limits every other target, so add the LAN targets your rules use to it.
+
 Name each loopback service by address and port: an entry such as `127.0.0.0/8` lets a compromised VPS point a rule at any service that listens on this host's loopback.
+
 While a rule forwards to a loopback target, the agent sets `net.ipv4.conf.wgft0.route_localnet` to 1; it leaves the value of every other interface alone, and the value goes away with `wgft0`.
 The service sees connections from the VPS's tunnel address, such as `10.200.0.1`, not from `127.0.0.1`.
 

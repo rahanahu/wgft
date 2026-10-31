@@ -53,6 +53,7 @@ For a foreground agent using the README's directory, invoke `agent doctor` with 
 The [data-directory option](../cli.md#wgft-agent-doctor) must name the running agent's directory.
 If it reports missing credentials, check that path before issuing another join string or revoking the agent.
 A new registration under an existing name is refused, and revocation disconnects the existing agent.
+
 On Windows or macOS, use the same account and credentials location as in the [desktop setup](setup-desktop.md).
 For Docker, the [agent setup](setup-docker.md#home-agent) includes the diagnostic command inside the container.
 
