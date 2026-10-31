@@ -3,7 +3,8 @@
 [English](README.md) | 日本語
 
 server と Linux の agent には、カーネルモードを推奨します。
-ユーザー空間モードはカーネルモードを使えない環境のためのモードで、転送の保証はカーネルモードより弱くなります。
+ユーザー空間モードはカーネルモードを使えない環境のためのモードです。
+転送の保証はカーネルモードより弱くなります。
 Linux VPS に root 権限がある場合は、[Linux のセットアップ](setup.ja.md)で server と agent を常駐させ、最初のルールを追加します。
 Windows、macOS、Docker、root 権限のない VPS では、[環境別の導入](setup-alternatives.ja.md)からユーザー空間モードの手順を選びます。
 
