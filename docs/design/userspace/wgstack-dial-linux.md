@@ -97,6 +97,7 @@ TIME_WAIT の 4 つ組を使い直す接続は、hash を使わず、前の接�
 
 timestamp の offset は、`tcp_timestamps=1` のときだけ乱数にし、それ以外では 0 です。
 timestamp の時計は 1 ms ごとに進みます。
+v6.7 からは、経路に `tcp_usec_ts` の印を付けると 1 µs の時計を使えますが、既定では使いません。
 offset の求め方は版で違います。
 
 - 6.1:アドレスの組の鍵付きの hash です(`secure_tcp_ts_off`)。
@@ -122,7 +123,8 @@ Linux は RFC 6056 3.3.4 の Algorithm 4(double-hash)を変えた形でポート
 - 鍵:自分のアドレス、相手のアドレス、相手のポートと、10 秒ごとに変わる値の鍵付きの hash から、表の位置と最初の offset を決めます
 - 探し方:offset から、幅の下端と同じ偶奇のポート(既定では偶数)を 2 つ飛びに探し、無ければ反対の偶奇を探します。
   `bind` で選ぶ一時ポートは反対の偶奇を先に探すので、`connect` と `bind` のポートは分かれます
-- 進め方:見つけた後、表の値を、試したポートの数と 0 から 7 の乱数の 2 倍の大きい方に 2 を足しただけ進めます
+- 進め方:ポートを見つけるたびに、表の値を少し進めます。
+  空きの多い間は 2 から 16 の乱数の幅で進み、使われたポートを多く飛ばした後はその分だけ大きく進みます
 
 RFC 6056 の Algorithm 4 の例は表の値を 1 ずつ進め、表の長さに 10 を挙げます。
 Linux は表を大きくし、偶奇で分け、乱数で進めます。
@@ -174,6 +176,7 @@ Linux は表を大きくし、偶奇で分け、乱数で進めます。
 6.1 では TSval の offset がアドレスの組で決まり、7.2 では 4 つ組で決まるので、どちらも同じ 4 つ組の TSval は続きます。
 
 `bind` で決めたポートから張る接続は、待ちと sysctl によらず、前の接続が timestamp を使っていれば使い直します。
+この経路は FIN_WAIT_2 の行も使い直し、FIN_WAIT_2 の除外は `tcp_tw_reuse` の経路だけに掛かります。
 この経路はソースからだけ読み、観測していません。
 
 観測(6.1 とホストの 7.2 で同じ):
@@ -208,7 +211,12 @@ timestamp を使わない設定では、MSS、NOP、NOP、SACK-permitted、NOP�
 6.1 では、Fragmentation Needed で path MTU が下がった後の再送の SYN は、下がった path MTU から求めた MSS を載せました(1000 に対して 960)。
 同じ宛先への後の接続の SYN も同じ MSS でした。
 ホストの 7.2 では、同じ ICMP の後も SYN の MSS が 1380 のままでした。
-この違いの原因は確かめていません。
+`v7.2` のタグのソースは 6.1 と同じく、SYN ごとに学んだ path MTU から MSS を求め直します。
+v7.3-rc1 の `net: advertise TCP MSS from the configured MTU, not the learned PMTU` は、学んだ path MTU で示す MSS を下げない変更で、stable にも送られました。
+その後の mainline はこの変更を戻しました(`Revert "net: advertise TCP MSS from the configured MTU, not the learned PMTU"`)。
+戻した理由は、ICMP を捨てる中継の後ろの相手が大きな segment を送り、握手の後に止まったことです(RFC 2923 2.1 の path MTU の black hole)。
+ホストの 7.2 が 1380 を示したのは、Fedora の 7.2.13 がこの stable の変更を含むためと見込みますが、確かめていません。
+参照の Debian の 7.2 の挙動は、その point release がこの変更とその取り消しのどちらを含むかで決まるので、ラボを更新した後に観測して決めます。
 
 ### 窓と IP の欄
 
@@ -289,7 +297,7 @@ SYN-ACK の option は、自分の SYN に載せた種類だけを読みます�
   2500 ms で、6.1 は SYN を 0、1 秒に送り 2.52 秒に打ち切り、ホストの 7.2 は 0、1、2 秒に送り 2.50 秒に打ち切りました
 
 打ち切りの errno は ETIMEDOUT です。
-ソケットをアプリケーションが持つ間に ICMP の誤りが届いていた場合は、その誤りの errno になります([SYN-SENT での ICMP の誤り](#syn-sent-での-icmp-の誤り))。
+ICMP の誤りが、別の system call がソケットの錠を持つ瞬間に届いて柔らかい誤りとして残った場合は、その誤りの errno になります([SYN-SENT での ICMP の誤り](#syn-sent-での-icmp-の誤り))。
 
 RFC 1122 4.2.3.5 と RFC 9293 3.8.3 は、SYN の R2 を 3 分以上にすることを求めます(MUST-23)。
 Linux の既定の約 2 分はこの求めより短く、Linux の RFC からの逸脱です。
@@ -336,7 +344,7 @@ SYN-SENT の接続は、届いた segment を次の順に確かめます(`tcp_rc
 2. 早い再送:受け入れられない ACK を受けた時にまだ SYN を再送していなければ、SYN の再送を約 2 jiffy の後にします。
    この ACK は RST を伴う segment でも同じです。
    相手が古い接続を持っていると見て、返した RST で古い接続を消させ、すぐに SYN を送り直すためです(RFC 9293 3.5.1 の半開きの接続の回復)。
-   この早い再送は再送の 1 回に数えるので、6.1 では次の再送が 2 秒の後になります
+   この早い再送は再送の 1 回に数えるので、次の再送は 6.1 では 2 秒の後、7.2 では最初の 4 回を 1 秒に保つので 1 秒の後になります
 3. timestamp の確かめ:segment が 0 でない TSecr を持つとき、TSecr が最初の SYN を送った時から今までの範囲に無ければ、受け入れられない ACK と同じく RST を返して捨てます。
    早い再送はしません。
    TSecr が 0 なら確かめません
@@ -398,8 +406,10 @@ ICMP の誤りは、引用された TCP の header の 4 つ組で接続を探�
 外側の送信元は確かめません。
 
 - Destination Unreachable(code 15 以下で、Fragmentation Needed を除く)、Time Exceeded、Parameter Problem:接続をすぐに閉じ、`connect` は[errno の一覧](#errno-の一覧)の errno を返します
-- アプリケーションがその時にソケットを持っていた場合:接続を閉じず、誤りを柔らかい誤りとして覚えます。
-  後の打ち切りの errno がこの誤りになります
+- 届いた瞬間に別の system call(例えば `getsockopt`)がソケットの錠を持っていた場合:接続を閉じず、誤りを柔らかい誤りとして覚えます。
+  後の打ち切りの errno がこの誤りになります。
+  これは system call と ICMP の到着の競合で起き、アプリケーションがソケットを開いていることとは関係しません。
+  wgstack の同期の入力にはこの競合に当たるものがありません
 - Fragmentation Needed:path MTU を下げ、接続を閉じません
 - Source Quench:捨てます(RFC 6633)
 - 範囲の外の番号:捨てます
@@ -410,7 +420,8 @@ ICMP の誤りは、引用された TCP の header の 4 つ組で接続を探�
 - 引用の宛先と違う送信元(経路の途中のルーターに当たるアドレス)からの code 1 と Time Exceeded:同じく誤りを返しました
 - 引用の番号を ISS+100 にした code 1、Source Quench、Fragmentation Needed:接続は続き、1 秒後に SYN を再送しました
 
-RFC 1122 4.2.3.9 は、Destination Unreachable の code 0、1、5 と Time Exceeded と Parameter Problem を柔らかい誤りとし、接続を打ち切らないことを求めます(MUST NOT)。
+RFC 1122 4.2.3.9 は、Destination Unreachable の code 0、1、5 を柔らかい誤りとし、接続を打ち切らないことを求めます(MUST NOT)。
+同じ節は Time Exceeded と Parameter Problem を同じように扱うよう書き(should)、code 6 から 15 は分類しません。
 Linux は SYN-SENT と SYN-RECEIVED でこれらを打ち切りの誤りとして扱い、この求めから逸脱します。
 RFC 5461 4.1 は、この扱いを Linux が 2.0 から持つ標準でない挙動として記録し、標準は変えていません。
 mainline の v6.8 で一部の code の打ち切りをやめる変更が入り、同じ版の中で戻されたので、7.2 の挙動は 6.1 と同じです。
@@ -426,7 +437,9 @@ mainline の v6.8 で一部の code の打ち切りをやめる変更が入り�
 - RTT:timestamp を使う接続は、SYN を再送していても TSecr から最初の RTT を測ります。
   timestamp を使わない接続は、SYN を再送していなければ SYN の往復から測り、再送していれば測りません(Karn の規則)。
   観測では、SYN を 2 回再送した timestamp の接続の最初の RTO は 3 秒でなく約 0.4 秒でした(後述の初期の輻輳の窓)
-- RTO:RTT を測れなければ 3 秒にします(RFC 6298 5.7)。
+- RTO:RTT を測れなければ 3 秒にします。
+  RFC 6298 5.7 は、SYN の期限が切れた接続の RTO を、データを送り始める時に 3 秒に戻すことを求めます(MUST)。
+  Linux は timestamp の接続では SYN を再送しても TSecr から RTT を測るので、3 秒に戻すのは RTT を測れない場合だけで、この求めから逸脱します。
   閉じた前の接続の RTT を宛先ごとに覚えている場合(既定の `tcp_no_metrics_save=0`)は、その RTT が SYN の往復より大きければ、最初の RTO をその RTT から求めます。
   同じエージェントへ張り直す接続はこの値を受けます。
   ソースからだけ読みました
@@ -455,7 +468,7 @@ SYN-ACK が持つデータは、Fast Open を使わない接続では捨てま�
 最初の ACK は SYN だけを確認し、相手はデータを再送します。
 観測(6.1 とホストの 7.2):5 byte のデータを持つ SYN-ACK に SYN だけを確認する ACK を返し、アプリケーションは何も読めず、再送された同じデータは受け入れました。
 SYN-ACK の FIN も同じく捨てると読めますが、観測していません。
-RFC 9293 3.10.7.3 は SYN-ACK のデータを 6 番目の手順で処理すると定め、Linux の破棄はこの手順からの逸脱です。
+RFC 9293 3.10.7.3 は SYN-ACK のデータを、3.10.7.4 の 6 番目の手順(URG の確かめ)から処理を続けると定め、Linux の破棄はこの手順からの逸脱です。
 データは再送で届くので、相互運用は保たれます。
 
 ### 初期の輻輳の窓
@@ -464,6 +477,7 @@ RFC 9293 3.10.7.3 は SYN-ACK のデータを 6 番目の手順で処理する�
 経路の `initcwnd` があればその値です。
 RFC 6928 の上限の式(10 MSS と 14600 byte と 2 MSS の組み合わせ)を Linux は使わず、MSS によらず 10 segment にします。
 MTU 1420 のトンネルでは 10 segment が 14600 byte より小さいので、この違いは現れません。
+`WGFT_MTU` は 9216 まで取れ、MSS が 1460 を超える MTU では、Linux の 10 segment が RFC 6928 の 14600 byte の上限を超えます。
 
 SYN を再送した接続は、次の両方のときだけ cwnd を 1 にします。
 
@@ -516,7 +530,8 @@ RFC 1337 は、この RST で TIME-WAIT が早く終わる危険を挙げて RST
 
 TIME_WAIT の数は `tcp_max_tw_buckets` までです。
 既定は接続の hash の表の大きさの半分で、ラボの VM では 8192、ホストでは 131072 です。
-上限に届いた後に閉じる接続は TIME_WAIT を持たずに消え、速さを制限したログ(`TCP: time wait bucket table overflow`)を出します。
+上限に届いた後に閉じる接続は TIME_WAIT を持たずに消え、数え(`TCPTimeWaitOverflow`)を 1 増やします。
+6.1 と 7.2 はどちらもログを出しません。
 その接続のポートはすぐに空きます。
 ソースからだけ読み、観測していません。
 
@@ -554,7 +569,7 @@ TIME_WAIT の数は `tcp_max_tw_buckets` までです。
 | TIME_WAIT の使い直しの待ち(`tcp_tw_reuse=1`) | TS.Recent の更新の秒より後の秒(0 から 1 秒) | TIME_WAIT に入ってから 1000 ms(`tcp_tw_reuse_delay`) | v6.14 `tcp: Measure TIME-WAIT reuse delay with millisecond precision` | 0.3 秒で拒み 1.4 秒で使い直しを観測 |
 | 一時ポートの歩幅の乱数化 | 無し | `ip_local_port_step_width`、既定 0 で無効 | v7.1 | 既定の 0 を観測 |
 | ソケットごとのポートの幅の偶奇 | 偶奇で分けます | `IP_LOCAL_PORT_RANGE` の接続は分けません | v6.8 | 観測していません |
-| Fragmentation Needed の後の SYN の MSS | 下がった path MTU に従う(観測) | ソースからは決めていません | 未確認 | 1380 のまま |
+| Fragmentation Needed の後の SYN の MSS | 下がった path MTU に従う(観測) | 6.1 と同じ(ソース) | v7.3-rc1 で変わり、後に戻りました。stable への送りで point release ごとに違いえます | 1380 のまま(stable の変更を含むと見込みます) |
 
 次の項目は `v6.1` のタグと違いますが、ラボの 6.1.0-53 は Debian の修正で 7.2 と同じ挙動です。
 
@@ -572,6 +587,7 @@ TIME_WAIT の数は `tcp_max_tw_buckets` までです。
 - 待ち受けの SYN-RECEIVED の RST:7.2 は、番号が RCV.NXT と一致しない窓の内側の RST に challenge ACK を返します(v7.2)。
   6.1 は握手の途中の行を消します
 - 確立した 4 つ組への PAWS に落ちる SYN:v6.4 から challenge ACK を返します
+- 待ち受けの SYN-ACK の timestamp の offset:6.1 はアドレスの組、7.2 は 4 つ組で求めます(v7.0)
 - 窓の右端を越える segment:7.2 は受信の待ち行列が空でなければ捨てます(v6.17)
 - まだ送っていない番号を確認する ACK:7.2 は速さを制限した challenge ACK を返します(v7.1)。
   6.1 は黙って捨てます
@@ -584,6 +600,7 @@ TIME_WAIT の数は `tcp_max_tw_buckets` までです。
   BPF を使わなければ変わりません
 - v7.3:経路の advmss の下限を 88 にします。
   通常の MTU では変わりません
+- v7.3-rc1 と、v7.3 の後の取り消し:SYN と SYN-ACK の MSS を学んだ path MTU で下げない変更が入り、stable にも送られ、その後の mainline で戻されました([SYN の option と並び](#option-と並び))
 - v7.3:受け入れた古い ACK でも TS.Recent を更新します。
   確立した後の挙動です
 
@@ -596,12 +613,13 @@ TIME_WAIT の数は `tcp_max_tw_buckets` までです。
 | 一時ポートの表 | RFC 6056 の Algorithm 4 の例は表の長さ 10、1 ずつ進めます | 65536 の表、偶奇で分け、乱数で進めます |
 | SYN の再送の打ち切り | RFC 1122 4.2.3.5、RFC 9293 3.8.3 は 3 分以上(MUST-23) | 約 127 秒(6.1)、約 131 秒(7.2) |
 | SYN の再送の間隔 | RFC 6298 5.5 は再送のたびに倍 | 7.2 は最初の 4 回を倍にしません |
-| SYN-SENT の柔らかい ICMP の誤り | RFC 1122 4.2.3.9 は打ち切らない(MUST NOT) | 打ち切ります(RFC 5461 4.1 が記録した挙動) |
+| SYN-SENT の柔らかい ICMP の誤り | RFC 1122 4.2.3.9 は code 0、1、5 で打ち切らない(MUST NOT)、Time Exceeded と Parameter Problem も同じに扱う(should) | 打ち切ります(RFC 5461 4.1 が記録した挙動) |
 | SYN-SENT の RST の番号 | RFC 9293 3.10.7.3 は RCV.NXT との一致を勧めます | 確かめません(RFC 5961 3.2 に従います) |
 | SYN-ACK のデータ | RFC 9293 3.10.7.3 は処理を続けます | 捨てます |
 | 同時の open の SYN のデータ | RFC 9293 3.10.7.3 は確立の後のために残します | 捨てます |
 | SYN を失った後の初期の窓 | RFC 5681 3.1 は 1 segment(MUST) | 2 回以上の再送の後だけ 1(RFC 6928 の勧め) |
 | 初期の窓の上限 | RFC 6928 は 14600 byte の式 | MSS によらず 10 segment |
+| SYN の再送の後の RTO | RFC 6298 5.7 はデータの始めに 3 秒に戻す(MUST) | timestamp の接続は TSecr の RTT から求めます |
 | TIME-WAIT の長さ | RFC 9293 3.6.1 は 2 MSL(4 分) | 60 秒 |
 | TIME-WAIT の RST | RFC 1337 は無視を勧めます | 既定で TIME_WAIT を終えます(RFC 9293 3.10.7.4 に従います) |
 | 自分の TIME-WAIT の 4 つ組の使い直し | 定め無し | `tcp_tw_reuse` と timestamp の条件で使い直します |
@@ -620,17 +638,20 @@ TIME_WAIT の数は `tcp_max_tw_buckets` までです。
    幅は Linux と同じ 32768 から 60999 か、より広い幅かを選びます
 3. TIME_WAIT の 4 つ組の使い直し:Linux の既定に倣って使い直さないか、`tcp_tw_reuse=1` の条件(timestamp、FIN_WAIT_2 の除外、待ち、ISN と TS.Recent の引き継ぎ)で使い直すかを選びます。
    使い直さなければ、1 つの宛先への入れ替わりの限度は約 470 本毎秒です。
-   wgstack の TIME_WAIT の表は古い行を追い出すので、追い出された 4 つ組は TIME_WAIT を持たずに使えるようになります
+   wgstack の TIME_WAIT の表は満ちると最も古い行を追い出し、Linux は上限を超えた接続に TIME_WAIT を持たせません。
+   どちらも 4 つ組が TIME_WAIT を持たずに使えるようになりますが、失う行が違うので、期待した差として記録します
 4. SYN の窓:Linux は 64 KB 程度を広告し、wgstack の受け手は floor の 256 KiB を最初から使います。
    SYN の欄は 65535 を超えられないので、SYN の欄の値と窓の scale を Linux に揃えるかを選びます
-5. SYN の再送の間隔:参照の 7.2 に倣って最初の 4 回を 1 秒に保つか、RFC 6298 5.5 に倣って倍にするかを選びます。
+5. SYN の再送の間隔:[dial の側の骨格](wgstack-dial.md#syn-の再送と期限)は再送ごとに倍にすると書いています。
+   参照の 7.2 に倣って最初の 4 回を 1 秒に保つか、骨格と RFC 6298 5.5 のとおり倍にするかを選びます。
    5 秒の期限の中の SYN の数は、7.2 の形で 5 回、倍にする形で 3 回です
 6. 再送の回数の上限と打ち切りの errno:`vpsd` の期限は 5 秒なので、回数の上限は期限より先に来ません。
    上限を Linux と同じにするか、期限に任せるかを選びます
 7. 受け入れられない ACK の後の早い再送:Linux に倣うかを選びます。
    エージェントが古い接続を持つ場合の回復が約 1 秒速くなります
 8. SYN-SENT の TSecr の確かめ:Linux の拡張に倣うかを選びます
-9. SYN-SENT の ICMP の誤り:Linux に倣ってすぐ打ち切るか、RFC 1122 に倣って柔らかい誤りとして期限の誤りに添えるかを選びます。
+9. SYN-SENT の ICMP の誤り:[dial の側の骨格](wgstack-dial.md#syn-sent-での-rst-と-ack)は柔らかい誤りとし、dial は期限の誤りになると書いています。
+   骨格と RFC 1122 のままにするか、Linux に倣ってすぐ打ち切るかを選びます。
    [ICMP の誤りの入口](packet-validation.md#icmp-の誤りの入口)は引用の宛先からの誤りだけを受け入れるので、Linux と違い、経路の途中からの誤りは届きません
 10. 同時の open:持たないと決まり、SYN-SENT で ACK の無い SYN を受けた dial は失敗します([dial の側の決めたこと](wgstack-dial.md#決めたこと))。
     6.1.0-53 と 7.2 は相手の SYN-ACK と ACK のどちらでも確立するので、この点は Linux との期待した差になります
@@ -642,6 +663,9 @@ TIME_WAIT の数は `tcp_max_tw_buckets` までです。
     wgstack はこの記録を持たないので、違いとして記録するかを選びます
 14. TIME_WAIT の長さと RST:wgstack の TIME_WAIT は Linux と同じく 60 秒で、受動の側で確立した規則を共有します。
     先に閉じる側でも同じ規則のままにするかを確かめます
+15. SYN の再送の後の RTO:RFC 6298 5.7 に倣ってデータの始めに 3 秒に戻すか、Linux に倣って TSecr の RTT から求めるかを選びます
+16. Fragmentation Needed の後の SYN の MSS:[dial の側の骨格](wgstack-dial.md#受信の機械と共有するもの新しいもの)は示す MSS を `WGFT_MTU` から 40 を引いた値に固定し、これは v7.3-rc1 の変更の形で、`v7.2` のタグとは違います。
+    参照の Debian の 7.2 で観測した後に、期待した差とするか `dial-icmp` で確かめるかを決めます
 
 ## 適合の台本の案
 
@@ -652,6 +676,7 @@ DUT の面に `Dial` を加え、Linux の DUT は network namespace の中の�
 ラボの更新の前に書く台本は 6.1 で通し、更新の後に 7.2 で測り直します。
 
 - `dial-syn-options`:SYN の option の並び、MSS、窓の scale、窓の欄、ECN の印の無いこと、TSecr 0 を確かめます。
+  SYN-ACK の後の最初の ACK がすぐに出る中身の無い ACK であることと、その窓の欄も確かめます。
   窓の欄と窓の scale は、選ぶ点 4 の結果で範囲を決めます
 - `dial-syn-retransmit`:応えない相手への SYN の再送の時刻と回数、期限で閉じた後に segment を送らないこと、遅れて届いた SYN-ACK への RST の番号を確かめます。
   6.1 と 7.2 で間隔が違うので、期待の値は 7.2 で測ります
@@ -660,13 +685,15 @@ DUT の面に `Dial` を加え、Linux の DUT は network namespace の中の�
   早い再送の有無は選ぶ点 7 で決めます
 - `dial-bad-tsecr`:範囲の外の TSecr の SYN-ACK への応答と、TSecr 0 の SYN-ACK での確立を確かめます
 - `dial-icmp`:引用の番号が合う Destination Unreachable の各 code、Time Exceeded、Parameter Problem、Source Quench への応答と時刻、番号の合わない誤りの無視を確かめます。
-  経路の途中の送信元からの誤りは、wgstack の入口の規則で Linux と違う結果になるので、期待した差に記録します
+  経路の途中の送信元からの誤りは、wgstack の入口の規則で Linux と違う結果になるので、期待した差に記録します。
+  Fragmentation Needed の後に再送する SYN の MSS も測ります(選ぶ点 16)
 - `dial-synack-options`:option の無い SYN-ACK、MSS 0、MSS 1、窓の scale 15、SACK-permitted の無い SYN-ACK の後の segment の大きさと option の使い方を確かめます
 - `dial-synack-data`:SYN-ACK のデータの扱いと、再送されたデータの受け入れを確かめます
 - `dial-dup-synack`:確立の後の重複の SYN-ACK への challenge ACK と、その速さの制限を確かめます
 - `dial-simultaneous`:ACK の無い SYN を受けた dial が失敗し、SYN-ACK を送らないことを確かめます。
   Linux は確立するので、Linux の結果は期待した差に記録します
-- `dial-iw`:確立の後の最初の送り出しの segment の数と、SYN を 1 回と 2 回再送した接続の初期の窓を確かめます
+- `dial-iw`:確立の後の最初の送り出しの segment の数と、SYN を 1 回と 2 回再送した接続の初期の窓を確かめます。
+  SYN を再送した接続の最初の RTO も測ります(選ぶ点 15)
 - `dial-zero-window`:窓 0 の SYN-ACK の後の確立と窓の probe を確かめます
 - `dial-time-wait`:先に閉じた後の TIME_WAIT の長さ、再送された FIN への ACK、RST で終わること、同じ 4 つ組の接続の扱いを確かめます。
   一時ポートの幅を DUT ごとに狭める設定を DUT の面に加えます
