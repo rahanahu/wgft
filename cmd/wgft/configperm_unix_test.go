@@ -99,3 +99,30 @@ func TestLoadConfigWarnsOnInsecureSecretFile(t *testing.T) {
 		t.Errorf("loadConfig did not warn about the insecure, secret-holding file; stderr = %q", out)
 	}
 }
+
+// 警告が案内する文書は、リポジトリに実在しなければならない。旧見出しの転送だけを持つ docs/design.md や、
+// 日本語だけの設計文書ではなく、英語の導入手順を指す。
+func TestInsecureConfigWarningPointsToAnExistingDocument(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(p, []byte("WGFT_JOIN=x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config{
+		specs: []spec{{Env: "WGFT_JOIN", Secret: true}},
+		vals:  map[string]resolved{"WGFT_JOIN": {value: "x", source: "file"}},
+	}
+	var buf bytes.Buffer
+	warnInsecureConfigFile(&buf, p, cfg)
+	_, rest, ok := strings.Cut(buf.String(), "see ")
+	if !ok {
+		t.Fatalf("warning has no document reference: %q", buf.String())
+	}
+	ref, _, _ := strings.Cut(strings.Fields(rest)[0], ",")
+	if ref != "docs/manual/setup.md" {
+		t.Errorf("the warning points to %q, want docs/manual/setup.md", ref)
+	}
+	if _, err := os.Stat(filepath.Join("..", "..", filepath.FromSlash(ref))); err != nil {
+		t.Errorf("the warning points to %q, which does not exist: %v", ref, err)
+	}
+}
