@@ -170,7 +170,9 @@ func (r *ring) resize(newCap uint64, written [][2]uint64) {
 
 func (r *ring) heldChunks() int {
 	n := 0
-	for _, c := range r.chunks {
+	// 位置 i は p>>chunkShift < slots() だけに書くので、cap の外の要素は nil のまま。cap の外に chunk が残れば、
+	// 置き場の held と輪の合計が合わず、Stats の比べに現れる。
+	for _, c := range r.chunks[:r.slots()] {
 		if c != nil {
 			n++
 		}
