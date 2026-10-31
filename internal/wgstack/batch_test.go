@@ -911,8 +911,8 @@ func TestUDPBlockedWriterWakes(t *testing.T) {
 }
 
 // 受ける向きの速い経路も確保しない(wgstack-batching.md の「確保しない計画」)。確立した接続への順序どおりの data
-// の segment を 1 回の Write に 1 個ずつ渡し、Read で ACK を作り、アプリケーションが Conn.Read で読む。相手の
-// segment は測る前に作る。
+// の segment を 1 回の Write に 1 個ずつ渡し、Poll で ACK を作り、アプリケーションが Conn.Read で読む。相手の
+// segment は測る前に作る。どの回も ACK を少なくとも 1 つ作ることも確かめる。
 func TestReceiveFastPathAllocs(t *testing.T) {
 	const perRound, rounds = 8, 120
 	n := newTestNet(t, smallLimits())
@@ -952,8 +952,8 @@ func TestReceiveFastPathAllocs(t *testing.T) {
 	}
 	round()
 	allocs := testing.AllocsPerRun(rounds-2, round)
-	if acks == 0 {
-		t.Fatal("the receiver sent no ACK")
+	if acks < rounds {
+		t.Fatalf("the receiver sent %d ACKs over %d rounds, want at least one a round", acks, rounds)
 	}
 	if allocs != 0 {
 		t.Fatalf("%.1f allocations per round of %d in-order segments, their ACKs and the application's reads, want 0", allocs, perRound)
