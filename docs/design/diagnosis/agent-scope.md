@@ -12,23 +12,23 @@ Web UI からの呼び出しと `--report` も含めません。
 [10.2a 節](server-observations.md#102a-転送の診断-server-doctor)が定めた順序は `agent doctor`、Web UI、`--report`、遠隔の診断です。
 
 エージェントの回線から VPS の WireGuard の UDP ポートとエージェント用 API のポートへ届くかどうかを、エージェント側から能動的に確かめる機能も含めません。
-[10.2a 節](server-observations.md#102a-転送の診断-server-doctor)が「切り分けられない所見」として残した穴、つまり最終ハンドシェイクが無い原因を VPS の側からは 1 つに決められないという穴を埋める候補ではあります。
-`--probe` に当たるものをエージェント側に置くかどうかは、`agent doctor` を実際に使ってから決める。
+[10.2a 節](server-observations.md#102a-転送の診断-server-doctor)が「切り分けられない所見」として残した点、つまり最終ハンドシェイクが無い原因を VPS の側からは 1 つに決められない点を補う候補ではあります。
+`--probe` に当たるものをエージェント側に置くかどうかは、`agent doctor` を実際に使ってから決めます。
 
 `agent doctor` は、エージェントの設定の全体を出所付きで印字する機能を持ちません。
-`wgft server check` に当たるものをエージェント側に置くかどうかは、この節では決めない。
+`wgft server check` に当たるものをエージェント側に置くかどうかは、この節では決めません。
 起動ログの先頭が有効な設定を出所付きで印字することは [11a 節](../security/configuration.md#11a-設定の渡し方)のとおりであり、そちらで足りるかどうかは実際に使ってから判断します。
 
 #### 置き場所
 
-`agent doctor` は `agent` の一群の下に置く。
-`server doctor` が `server` の下にあるのと対称になり、[7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)が保つコマンドの構成 (`server`、`agent`、`rule`、`status`、`version` とその下位) にもそのまま収まる。
+`agent doctor` は `agent` の一群の下に置きます。
+`server doctor` が `server` の下にあるのと対称になり、[7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)が保つコマンドの構成 (`server`、`agent`、`rule`、`status`、`version` とその下位) にもそのまま収まります。
 `agent` の一群は build tag を持たず (`cmd/wgft/agent.go`)、Windows と macOS のバイナリにも入ります。
-実装は `cmd/wgft` の専用のファイルに置き、build tag を持たせない。
+実装は `cmd/wgft` の専用のファイルに置き、build tag を持たせません。
 
-ただし [7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)のとおり、macOS のエージェントは暫定であり、v1.0 の保証に含まれない。
+ただし [7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)のとおり、macOS のエージェントは暫定であり、v1.0 の保証に含まれません。
 この節の記述のうち、macOS での挙動は設計の意図であって、実機で確かめた事実ではありません。
-Windows の `agent doctor` は、稼働中と停止中の実行と `--json` を Windows 11 の実機で確かめ、[7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)の保証に含めた([以前の検証 2026-09-27](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L3260))。
+Windows の `agent doctor` は、稼働中と停止中の実行と `--json` を Windows 11 の実機で確かめ、[7a.11 節](../compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)の保証に含めました ([以前の検証 2026-09-27](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L3260))。
 管理者の権限での実行は期待する結果を定めておらず、`control socket` が OK、終了コードが 0 になったことを観察しただけです。
 
 `server doctor` の自宅側の確認が要る所見は、`wgft agent doctor` を案内します。
