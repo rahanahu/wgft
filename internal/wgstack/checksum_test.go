@@ -146,3 +146,33 @@ func TestUDPChecksumMatchesByteSum(t *testing.T) {
 	}
 	t.Logf("%d datagrams", cases)
 }
+
+// 送る UDP の checksum の和が 0xffff に畳まれると補数は 0 になるが、0 は「checksum 無し」を表すので 0xffff を
+// 送る(RFC 768)。和がちょうど 0xffff になる 2 byte の中身を作り、送った datagram の欄を確かめる。
+func TestUDPChecksumZeroIsSentAsAllOnes(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	pc := listenUDP(t, n, 53)
+	to := peerUDP
+	from := pc.ep.local
+	ulen := udpHeaderLen + 2
+	var h [udpHeaderLen]byte
+	binary.BigEndian.PutUint16(h[0:2], from.Port())
+	binary.BigEndian.PutUint16(h[2:4], to.Port())
+	binary.BigEndian.PutUint16(h[4:6], uint16(ulen))
+	sum0 := refChecksum(pseudoSum(addrBits(from.Addr()), addrBits(to.Addr()), protoUDP, ulen), h[:])
+	payload := make([]byte, 2)
+	binary.BigEndian.PutUint16(payload, 0xffff-sum0)
+	if got := refUDPChecksum(from, to, payload); got != 0xffff {
+		t.Fatalf("the constructed datagram's checksum is %#04x, the test needs a sum of 0xffff", got)
+	}
+	if _, err := pc.WriteTo(payload, net.UDPAddrFromAddrPort(to)); err != nil {
+		t.Fatal(err)
+	}
+	k := n.d.Poll(n.buf)
+	if k != ipHeaderLen+ulen {
+		t.Fatalf("sent %d bytes, want %d", k, ipHeaderLen+ulen)
+	}
+	if cs := binary.BigEndian.Uint16(n.buf[ipHeaderLen+6:]); cs != 0xffff {
+		t.Fatalf("UDP checksum field %#04x, want 0xffff", cs)
+	}
+}

@@ -40,6 +40,7 @@ func checkHeld(t testing.TB, n *testNet) Stats {
 	if st.HeldChunksInPool*chunkSize != st.ChunkBytes+st.UDPRxBytes+st.UDPTxBytes {
 		t.Fatalf("chunk accounting: pool says %d chunks, rings hold %d bytes", st.HeldChunksInPool, st.ChunkBytes)
 	}
+	indexed := 0
 	for i := range s.conns {
 		c := &s.conns[i]
 		c.mu.Lock()
@@ -73,6 +74,48 @@ func checkHeld(t testing.TB, n *testNet) Stats {
 		}
 		if snd > sndLim || rcv > rcvLim {
 			t.Errorf("slot %d holds send %d of %d, receive %d of %d (boosted %v %v)", i, snd, sndLim, rcv, rcvLim, c.boosted, c.rcvBoost)
+		}
+		if c.inIndex {
+			indexed++
+		}
+		// 空きの枠はタイマーの節、接続の組の出力の list の節、4 つ組の hash の表の項を持たない
+		if c.state == stFree {
+			s.wheel.mu.Lock()
+			for k := range numTimers {
+				if s.wheel.where[c.timerNode(k)] != -1 {
+					t.Errorf("free slot %d still has timer %d in the wheel", i, k)
+				}
+			}
+			s.wheel.mu.Unlock()
+			s.out.mu.Lock()
+			queued := s.out.conns.in[i]
+			s.out.mu.Unlock()
+			if queued {
+				t.Errorf("free slot %d is still on the connection output list", i)
+			}
+			if c.inIndex {
+				t.Errorf("free slot %d is still in the connection index", i)
+			}
+		}
+		c.mu.Unlock()
+	}
+	// 4 つ組の hash の表の項は、inIndex の枠と 1 対 1 で、項の世代と 4 つ組がその枠の今の接続と合う
+	s.tmu.Lock()
+	ents := make([]indexEnt, 0, len(s.conns))
+	for _, e := range s.connIdx.ents {
+		if e.id != 0 {
+			ents = append(ents, e)
+		}
+	}
+	s.tmu.Unlock()
+	if len(ents) != indexed {
+		t.Errorf("the connection index has %d entries, %d slots are marked inIndex", len(ents), indexed)
+	}
+	for _, e := range ents {
+		c := &s.conns[e.id-1]
+		c.mu.Lock()
+		if !c.inIndex || c.state == stFree || c.gen != e.gen || c.tup != e.tup {
+			t.Errorf("index entry for slot %d does not match it: inIndex %v state %v gen %d/%d", e.id-1, c.inIndex, c.state, c.gen, e.gen)
 		}
 		c.mu.Unlock()
 	}
