@@ -94,7 +94,10 @@ import json, sys
 sys.exit(0 if any(a.get('name') == 'home' and a.get('last_handshake') for a in json.load(sys.stdin)) else 1)"
 }
 served() { [ "$(grep -c sha256 "$W/wgft-tq-serve-$1.log")" -ge "$2" ]; } # served <mode> <runs>
-rule_ok() { [ "$(ip netns exec "$CLIENT_NS" bash -c 'echo ping | timeout 3 socat -t 2 - TCP:198.51.100.1:41800' 2>/dev/null)" = pong ]; }
+# rule_ok reads the reply line and returns at once. socat after the end of its input waits out its
+# -t time even when the reply has come, which spent 2 s on every successful probe; timeout 3 bounds
+# a probe that gets no reply.
+rule_ok() { [ "$(ip netns exec "$CLIENT_NS" timeout 3 bash -c 'exec 3<>/dev/tcp/198.51.100.1/41800 && echo ping >&3 && IFS= read -r l <&3 && echo "$l"' 2>/dev/null)" = pong ]; }
 netem() { # netem <netem args...>: the same qdisc on both ends of the vps-homerouter link
   vps tc qdisc replace dev pub1 root netem "$@" "${RATE_ARGS[@]}" "${SEED_ARGS[@]}"
   router tc qdisc replace dev wan0 root netem "$@" "${RATE_ARGS[@]}" "${SEED_ARGS[@]}"
@@ -143,10 +146,21 @@ if [ -n "$NETEM_SEED" ]; then
   fi
   vps tc qdisc del dev pub1 root 2>/dev/null
 fi
+tq_pids() { # the tcpquality.py processes of this sandbox
+  local p
+  if [ -z "$SANDBOX" ]; then pgrep -f -- '/tcpquality.py '; return 0; fi
+  for p in $(sandbox_pids); do
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '/tcpquality.py ' && echo "$p"
+  done
+  return 0
+}
+none_running() { ! sandbox_any_named wgft && [ -z "$(tq_pids)" ]; }
 cleanup() {
   sandbox_kill_named wgft
   sandbox_kill_cmdline '/tcpquality.py '
-  sleep 1
+  # the teardown below and the next mode's start want the killed processes gone, which takes well
+  # under a second; 10 s bounds a process that does not stop
+  wait_until 10 none_running
   vps tc qdisc del dev pub1 root 2>/dev/null
   router tc qdisc del dev wan0 root 2>/dev/null
   rmdir "$CG_ROOT"-* 2>/dev/null
