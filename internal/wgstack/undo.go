@@ -123,23 +123,12 @@ func (c *tcb) markHeadLost(cause uint8) {
 		return
 	}
 	r := c.recs.at(0)
-	if c.rtxLive(r) {
-		r.flags &^= recRtx
-		c.rtxBytes -= uint32(r.length)
-	}
+	c.clearRtx(r)
 	if c.lossIdx == 0 {
 		c.passLoss(r, c.isSacked(r))
 	}
-	if c.genFlag(r, recInT) {
-		c.listRemove(&c.tList, 0, r, recInT)
-	}
-	if c.genFlag(r, recInQ) {
-		if c.lostQ.head == c.recBase {
-			c.qOff, c.qMid = 0, false
-		}
-		c.listRemove(&c.lostQ, 0, r, recInQ)
-	}
-	c.rxtIdx, c.rxtOff, c.rxtMid = 0, 0, false
+	c.unlinkRec(0, r)
+	c.resetRxt()
 	c.resendCause = cause
 }
 

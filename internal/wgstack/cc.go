@@ -150,6 +150,29 @@ func (c *tcb) lossBase() uint32 {
 // lossThresh は今の状態で起きた輻輳の事象の新しい ssthresh を返す。
 func (c *tcb) lossThresh() uint32 { return c.ccFor().lossThresh(c, c.cwnd, c.lossBase()) }
 
+// ssthresh を下げる輻輳の事象は次の 3 つである。
+//   - 高速の回復に入る時(enterFastRecovery。SACK を交渉しない接続は dupAck、SACK を交渉した接続は enterRecovery
+//     から呼ぶ)
+//   - 後退していない RTO(onRTO)。後退した RTO は下げ直さない
+//   - TLP の probe が損失を直した時(tlpOnAck)。窓は確認の前の値で決める
+
+// enterFastRecovery は高速の回復に入り、輻輳の事象として ssthresh を下げ、回復の終わりを SND.MAX にする。
+// 窓を下げる前に取り消しの印を付ける。TLP の probe が直した損失と同じ窓のデータの損失なら、その縮小が輻輳の
+// 事象なので ssthresh を下げ直さず、回復は縮小の時の SND.MAX で終える。その先のデータの損失は、次の回復で
+// 窓を下げる(wgstack-performance.md の「RACK-TLP」)。TLP は SACK を交渉した接続だけで使うので、SACK の無い
+// 接続では tlpCut は立たない。
+func (c *tcb) enterFastRecovery() {
+	c.initUndo()
+	if c.tlpCut && seqLT(c.sndUna, c.tlpCutSeq) {
+		c.recover = c.tlpCutSeq
+	} else {
+		c.ssthresh = c.lossThresh()
+		c.recover = c.sndMax
+	}
+	c.inRecovery = true
+	c.s.fastRecoveries.Add(1)
+}
+
 // ccFor は接続 c の輻輳の制御を返す。
 func (c *tcb) ccFor() ccAlgo {
 	if c.s.ccPolicy == CongestionNewReno {

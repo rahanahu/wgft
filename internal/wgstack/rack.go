@@ -62,6 +62,8 @@ func (c *tcb) listAppend(l *recList, i int, r *record, flag uint8) {
 	l.n++
 }
 
+// listRemove は記録 i を list l から外す。損失の待ち行列の先頭を外すときは、先頭の記録の中で送り終えた位置
+// (qOff、qMid)も 0 に戻す。
 func (c *tcb) listRemove(l *recList, i int, r *record, flag uint8) {
 	a := c.recAbs(i)
 	if l == &c.lostQ && l.head == a {
@@ -193,10 +195,7 @@ func (c *tcb) rackDetect(now int64) bool {
 func (c *tcb) markRackLost(i int, r *record) {
 	c.listRemove(&c.tList, i, r, recInT)
 	l := uint32(r.length)
-	if c.rtxLive(r) {
-		r.flags &^= recRtx
-		c.rtxBytes -= l
-	}
+	c.clearRtx(r)
 	if !c.rackLost(r) {
 		r.flags |= recLost
 		if i >= int(c.lossIdx) {
@@ -216,8 +215,7 @@ func (c *tcb) nextQueued() int {
 		if !c.isSacked(r) && (!c.rtxLive(r) || c.qMid) {
 			return i
 		}
-		c.listRemove(&c.lostQ, i, r, recInQ)
-		c.qOff, c.qMid = 0, false
+		c.listRemove(&c.lostQ, i, r, recInQ) // 先頭なので、分けて送った位置も戻す
 	}
 	return -1
 }
@@ -261,7 +259,7 @@ func (c *tcb) cancelTLP() { c.tlpProbe, c.tlpActive, c.tlpRetrans = false, false
 // tlpOnAck は probe の確認を処理する(RFC 8985 7.4、Linux の tcp_process_tlp_ack)。probe が再送で、
 // 確認が probe より先まで進んだときは、probe が損失を直したとみなして、この ACK の前の窓で輻輳の窓を下げる。
 // この縮小は今の SND.MAX までに送ったデータの輻輳の事象なので、SND.UNA がそこへ届く前に入る回復は窓を下げ直さず、
-// その番号で終わる(enterRecovery)。
+// その番号で終わる(enterFastRecovery)。
 func (c *tcb) tlpOnAck(ack uint32, unaAdvanced bool, newlySacked uint32) {
 	if !c.tlpActive || seqLT(ack, c.tlpEnd) {
 		return

@@ -27,6 +27,17 @@ func (c *tcb) isSacked(r *record) bool { return r.flags&recSacked != 0 && r.sack
 
 func (c *tcb) rtxLive(r *record) bool { return r.flags&recRtx != 0 && r.rtxGen == c.rtxGen }
 
+// clearRtx は記録 r が今の再送の世代で送り残しに入っていれば外す(損失か SACK 済みになった)。
+func (c *tcb) clearRtx(r *record) {
+	if c.rtxLive(r) {
+		r.flags &^= recRtx
+		c.rtxBytes -= uint32(r.length)
+	}
+}
+
+// resetRxt は番号の順の再送の手がかり(RFC 6675 の HighRxt)を SND.UNA の記録の初めに戻す。
+func (c *tcb) resetRxt() { c.rxtIdx, c.rxtOff, c.rxtMid = 0, 0, false }
+
 // lostBytes は失われた byte。境目より手前の SACK 済みでない byte と、境目から先で RACK が失われたとみなした
 // byte の和である。
 func (c *tcb) lostBytes() uint32 {
@@ -167,10 +178,7 @@ func (c *tcb) setSacked(i int, r *record, now int64) {
 		c.beyondBytes += l
 		c.beyondCnt++
 	}
-	if c.rtxLive(r) {
-		r.flags &^= recRtx
-		c.rtxBytes -= l
-	}
+	c.clearRtx(r)
 }
 
 // advanceLoss は、境目の記録より先の SACK 済みの量が RFC 6675 の閾値(DupThresh 個の記録か
@@ -226,7 +234,7 @@ func (c *tcb) markAllLost(cause uint8) {
 	c.tList, c.lostQ = recList{}, recList{}
 	c.rackLostBeyond, c.qOff, c.qMid = 0, 0, false
 	c.rtxBytes = 0
-	c.rxtIdx, c.rxtOff, c.rxtMid = 0, 0, false
+	c.resetRxt()
 	c.resendCause = cause
 }
 
@@ -244,7 +252,7 @@ func (c *tcb) markLostLonger(payload int, cause uint8) {
 			if c.lostQ.n > 0 && c.lostQ.head == c.recAbs(0) {
 				c.qOff, c.qMid = 0, false
 			}
-			c.rxtIdx, c.rxtOff, c.rxtMid = 0, 0, false
+			c.resetRxt()
 		}
 		c.markRackLost(i, r)
 	}
@@ -423,29 +431,18 @@ func (c *tcb) resendLen(i int, off uint32, payCap int) (uint32, bool) {
 // enterRecovery は SACK による回復に入る(RFC 6675 5 節、RFC 6937。RecoverFS は RFC 9937)。先頭の記録は
 // 損失とみなす。delivered は回復に入る ACK が累積の確認と SACK で新しく届けたと知らせた byte である。
 func (c *tcb) enterRecovery(delivered uint32) {
-	c.initUndo()
-	// TLP の probe が直した損失と同じ窓のデータの損失なら、その縮小が輻輳の事象なので ssthresh を下げ直さず、
-	// 回復は縮小の時の SND.MAX で終える。その先のデータの損失は、次の回復で窓を下げる
-	// (wgstack-performance.md の「RACK-TLP」)
-	if c.tlpCut && seqLT(c.sndUna, c.tlpCutSeq) {
-		c.recover = c.tlpCutSeq
-	} else {
-		c.ssthresh = c.lossThresh()
-		c.recover = c.sndMax
-	}
-	c.inRecovery = true
+	c.enterFastRecovery()
 	c.prrDelivered, c.prrOut = 0, 0
 	// RFC 9937 6.1 の RecoverFS:回復の間に届くかもしれない byte。回復の前に SACK 済みの byte は回復の間に届いたと
 	// 数えないので引き、この ACK が届けた byte は足す
 	c.recoverFS = c.sndMax - c.sndUna - c.sacked + delivered
-	c.rxtIdx, c.rxtOff, c.rxtMid = 0, 0, false
+	c.resetRxt()
 	c.resendCause = rtxFast
 	if c.lossIdx == 0 && c.rackLostBeyond == 0 && c.lostQ.n == 0 && c.recs.n > 0 {
 		r := c.recs.at(0)
 		c.passLoss(r, c.isSacked(r))
 		c.advanceLoss()
 	}
-	c.s.fastRecoveries.Add(1)
 }
 
 // prrUpdate は回復の中の ACK ごとに、PRR(RFC 6937 の PRR-SSRB)で輻輳の窓を決める。delivered はこの ACK
