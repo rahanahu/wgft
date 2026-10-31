@@ -3,36 +3,31 @@
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::process::Command as Process;
 use std::time::Instant;
 
 use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket;
+use tokio::process::Command as Process;
 use tokio::sync::mpsc;
 use wgft_wireguard::{Device, Event};
 
 use crate::{Command, Status, TunSettings};
 
-/// `_IOW('T', 202, int)`。`linux/if_tun.h` の値。
-const TUNSETIFF: libc::Ioctl = 0x4004_54ca;
-const IFNAMSIZ: usize = 16;
 /// `IFF_TUN | IFF_NO_PI`。値は `c_short` に収まる。
 #[expect(clippy::cast_possible_truncation, reason = "0x1001 fits in a c_short")]
 const TUN_FLAGS: libc::c_short = (libc::IFF_TUN | libc::IFF_NO_PI) as libc::c_short;
 
-/// struct ifreq のうち TUNSETIFF が読む部分。全体は 40 バイト。
-#[repr(C)]
-struct IfReq {
-    name: [u8; IFNAMSIZ],
-    flags: libc::c_short,
-    _pad: [u8; 22],
-}
-
 fn open_tun(name: &str) -> io::Result<OwnedFd> {
-    if name.is_empty() || name.len() >= IFNAMSIZ || name.as_bytes().contains(&0) {
+    // カーネルは % を含む名前を番号の型として扱い、別の名前で作る。設定は渡した名前で行うので拒む
+    if name.is_empty()
+        || name.len() >= libc::IFNAMSIZ
+        || name
+            .bytes()
+            .any(|b| b == 0 || b == b'%' || b == b'/' || b.is_ascii_whitespace())
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("TUN name {name:?} must be 1 to 15 bytes"),
+            format!("TUN name {name:?} must be 1 to 15 bytes without %, / or spaces"),
         ));
     }
     // SAFETY: open に NUL で終わる定数の path を渡す。戻り値は下で確かめる
@@ -47,22 +42,22 @@ fn open_tun(name: &str) -> io::Result<OwnedFd> {
     }
     // SAFETY: fd は直前に開いた、ほかに持ち主のいない記述子
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let mut req = IfReq {
-        name: [0; IFNAMSIZ],
-        flags: TUN_FLAGS,
-        _pad: [0; 22],
-    };
-    req.name[..name.len()].copy_from_slice(name.as_bytes());
-    // SAFETY: req は TUNSETIFF が読み書きする struct ifreq と同じ配置で、呼び出しの間生きている
-    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETIFF, &raw mut req) };
+    // SAFETY: ifreq は整数、配列、ポインタの union だけを持ち、すべて 0 のバイト列は正しい値である
+    let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (dst, src) in req.ifr_name.iter_mut().zip(name.bytes()) {
+        *dst = libc::c_char::from_ne_bytes([src]);
+    }
+    req.ifr_ifru.ifru_flags = TUN_FLAGS;
+    // SAFETY: req は TUNSETIFF が読み書きする struct ifreq で、呼び出しの間生きている
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TUNSETIFF, &raw mut req) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(fd)
 }
 
-fn ip(args: &[&str]) -> io::Result<()> {
-    let out = Process::new("ip").args(args).output()?;
+async fn ip(args: &[&str]) -> io::Result<()> {
+    let out = Process::new("ip").args(args).output().await?;
     if out.status.success() {
         return Ok(());
     }
@@ -73,17 +68,23 @@ fn ip(args: &[&str]) -> io::Result<()> {
     )))
 }
 
-fn configure(tun: &TunSettings) -> io::Result<()> {
+async fn configure(tun: &TunSettings) -> io::Result<()> {
     let addr = format!("{}/{}", tun.address, tun.prefix_len);
     let mtu = tun.mtu.to_string();
     // トンネルは IPv4 だけを運ぶ。カーネルが link up で送る IPv6 の近隣探索を TUN に流さない。
-    // IPv6 の無いカーネルでは file が無いので、失敗は無視する
-    let _ = std::fs::write(
-        format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", tun.name),
-        "1",
-    );
-    ip(&["addr", "add", &addr, "dev", &tun.name])?;
-    ip(&["link", "set", "dev", &tun.name, "mtu", &mtu, "up"])
+    // IPv6 の無いカーネルでは file が無い。そのときだけ無視する
+    let path = format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", tun.name);
+    match tokio::fs::write(&path, "1").await {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            return Err(io::Error::other(format!(
+                "turn IPv6 off on {}: {e}",
+                tun.name
+            )));
+        }
+        _ => {}
+    }
+    ip(&["addr", "add", &addr, "dev", &tun.name]).await?;
+    ip(&["link", "set", "dev", &tun.name, "mtu", &mtu, "up"]).await
 }
 
 fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
@@ -104,6 +105,7 @@ pub(crate) struct Shell {
     udp: UdpSocket,
     events: mpsc::Sender<Event>,
     send_errors: u64,
+    tun_write_errors: u64,
 }
 
 impl Shell {
@@ -114,7 +116,7 @@ impl Shell {
         events: mpsc::Sender<Event>,
     ) -> io::Result<Self> {
         let fd = open_tun(&tun.name)?;
-        configure(tun)?;
+        configure(tun).await?;
         let udp = UdpSocket::bind(listen).await?;
         // SAFETY: OwnedFd は開いた記述子を持ち、AsyncFd が持つ間は同じ記述子を返し続ける
         let tun = unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)?;
@@ -124,6 +126,7 @@ impl Shell {
             udp,
             events,
             send_errors: 0,
+            tun_write_errors: 0,
         })
     }
 
@@ -142,6 +145,7 @@ impl Shell {
                 .local_addr()
                 .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0))),
             send_errors: self.send_errors,
+            tun_write_errors: self.tun_write_errors,
         }
     }
 
@@ -156,8 +160,11 @@ impl Shell {
             loop {
                 let mut guard = self.tun.writable().await?;
                 match guard.try_io(|fd| write_fd(fd.as_raw_fd(), &packet)) {
+                    // 1 つの packet の書き込みの失敗でループを止めない。数えて次へ進む
                     Ok(result) => {
-                        result?;
+                        if result.is_err() {
+                            self.tun_write_errors += 1;
+                        }
                         break;
                     }
                     Err(_would_block) => {}

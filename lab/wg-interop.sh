@@ -14,11 +14,12 @@
 # Checks, in order, for each peer: the handshake, ping in both directions, a TCP transfer of 8 MiB
 # each way compared by SHA-256, the Rust side roaming to a new UDP port, the peer moving to a new
 # listen port, the peer restarting with the same key, the Rust side restarting, and, unless
-# `quick` is given, a rekey after REKEY_AFTER_TIME, 120 s, under steady ping. The rekey wait is
-# fixed by the protocol; sanstun does not let it be shortened.
+# `quick` is given, a rekey after REKEY_AFTER_TIME, 120 s, under steady ping. Last, the final status
+# must show no dropped invalid inner packet and no refused TUN write. The rekey wait is fixed by the
+# protocol; sanstun does not let it be shortened.
 #
 # Needs root in the VM, wireguard-tools, socat, and the wgft-wireguard-tun and wireguard-go
-# binaries that `lab/lab build` installs when WGFT_LAB_RUST=1 is set on the host.
+# binaries that `lab/lab build` builds into bin/rust/ and installs when WGFT_LAB_RUST=1 is set on the host.
 set -u
 peers=${1:-all}
 quick=${2:-}
@@ -204,8 +205,16 @@ run_peer() {
     fi
   fi
 
+  # 9. the kernel sends nothing but IPv4 into the TUN, so the device dropped no invalid inner packet
   kill -USR1 "$shell_pid"; sleep 0.3
-  grep '^status' "$log" | tail -1
+  local status
+  status=$(grep '^status' "$log" | tail -1)
+  echo "$status"
+  if [[ -n $status && $status != *drop_invalid-inner-packet* && $status != *tun_write_errors=[1-9]* ]]; then
+    pass "$kind: no invalid inner packets or TUN write errors"
+  else
+    fail "$kind: final status $status"
+  fi
   if ((failures > 0)); then
     echo "--- Rust shell log for $kind"; tail -40 "$log"
   fi

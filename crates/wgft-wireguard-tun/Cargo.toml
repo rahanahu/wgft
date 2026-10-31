@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 clap.workspace = true
 getrandom.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros", "signal", "process", "fs"] }
 wgft-wireguard.workspace = true
 
 [lints]

@@ -39,6 +39,8 @@ pub struct Status {
     pub local: SocketAddr,
     /// Datagrams the socket refused to send.
     pub send_errors: u64,
+    /// Packets the TUN device refused to take.
+    pub tun_write_errors: u64,
 }
 
 #[cfg_attr(

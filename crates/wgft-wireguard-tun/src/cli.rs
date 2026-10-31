@@ -138,6 +138,7 @@ async fn print_status(handle: &Handle) {
         let _ = write!(line, " drop_{}={n}", reason.name());
     }
     let _ = write!(line, " send_errors={}", status.send_errors);
+    let _ = write!(line, " tun_write_errors={}", status.tun_write_errors);
     eprintln!("{line}");
 }
 
@@ -151,7 +152,6 @@ async fn serve(mut handle: Handle) -> std::io::Result<()> {
     let mut int = signal(SignalKind::interrupt())?;
     loop {
         tokio::select! {
-            Some(event) = events.recv() => log_event(&event, start),
             _ = usr1.recv() => print_status(&handle).await,
             _ = usr2.recv() => {
                 let status = handle.status().await?;
@@ -161,7 +161,11 @@ async fn serve(mut handle: Handle) -> std::io::Result<()> {
             }
             _ = term.recv() => break,
             _ = int.recv() => break,
-            () = tokio::time::sleep(Duration::from_millis(200)), if handle.is_finished() => break,
+            // ループが終わると event の送り手が閉じる。終わった理由は stop が返す
+            event = events.recv() => match event {
+                Some(event) => log_event(&event, start),
+                None => break,
+            },
         }
     }
     handle.stop().await
