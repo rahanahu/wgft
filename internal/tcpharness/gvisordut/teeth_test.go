@@ -297,13 +297,19 @@ func TestHarnessPassesOverAFINSentBeforeTheAck(t *testing.T) {
 }
 
 // dropFinalAck drops the testbench's pure ACK of the engine's FIN, so the engine stays in LAST-ACK
-// and resends its FIN, each time echoing the TSval it had before.
+// and resends its FIN, each time echoing the TSval it had before. With holdData set, it also holds
+// the testbench's pure ACK of the engine's last data segment that long before the engine sees it,
+// as a loaded machine that processes the ACK late does: the FIN then goes out with that data
+// still unacknowledged, its first resend is a probe that comes at once, and the next one comes
+// only after a further probe timeout and RTO.
 type dropFinalAck struct {
 	tcpharness.DUT
-	mu   sync.Mutex
-	fin  uint32 // the sequence number after the engine's FIN, once it has sent one
-	seen bool
-	out  chan []byte
+	holdData time.Duration
+	mu       sync.Mutex
+	fin      uint32 // the sequence number after the engine's FIN, once it has sent one
+	seen     bool
+	dataEnd  uint32 // the sequence number after the engine's latest data segment
+	out      chan []byte
 }
 
 func (d *dropFinalAck) Emitted() <-chan []byte { return d.out }
@@ -312,22 +318,34 @@ func (d *dropFinalAck) Inject(pkt []byte) error {
 	if s, err := tcpharness.Parse(pkt); err == nil && s.Flags == tcpharness.FlagACK && len(s.Payload) == 0 {
 		d.mu.Lock()
 		drop := d.seen && s.Ack == d.fin
+		hold := d.holdData > 0 && !d.seen && d.dataEnd != 0 && s.Ack == d.dataEnd
 		d.mu.Unlock()
 		if drop {
+			return nil
+		}
+		if hold {
+			time.AfterFunc(d.holdData, func() { d.DUT.Inject(pkt) })
 			return nil
 		}
 	}
 	return d.DUT.Inject(pkt)
 }
 
-func dropAckOfFIN(inner tcpharness.DUT) tcpharness.DUT {
-	d := &dropFinalAck{DUT: inner, out: make(chan []byte, 1024)}
+func dropAckOfFIN(inner tcpharness.DUT) tcpharness.DUT { return dropAckOfFINHolding(inner, 0) }
+
+func dropAckOfFINHolding(inner tcpharness.DUT, holdData time.Duration) tcpharness.DUT {
+	d := &dropFinalAck{DUT: inner, holdData: holdData, out: make(chan []byte, 1024)}
 	go func() {
 		defer close(d.out)
 		for pkt := range inner.Emitted() {
-			if s, err := tcpharness.Parse(pkt); err == nil && s.Has(tcpharness.FlagFIN) {
+			if s, err := tcpharness.Parse(pkt); err == nil {
 				d.mu.Lock()
-				d.fin, d.seen = s.Seq+s.Len(), true
+				if len(s.Payload) > 0 {
+					d.dataEnd = s.Seq + uint32(len(s.Payload))
+				}
+				if s.Has(tcpharness.FlagFIN) {
+					d.fin, d.seen = s.Seq+s.Len(), true
+				}
 				d.mu.Unlock()
 			}
 			d.out <- pkt
@@ -339,6 +357,17 @@ func dropAckOfFIN(inner tcpharness.DUT) tcpharness.DUT {
 func TestHarnessCatchesFINResentAfterADroppedAck(t *testing.T) {
 	t.Parallel()
 	got := tcpharness.Record(t, mutant("gvisor-drops-final-ack", dropAckOfFIN), scenario(t, "fin-passive-close"), 1)
+	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
+}
+
+// The engine has the ACK of the CLOSE-WAIT data only 100 ms after its FIN went out, and drops the
+// ACK of the FIN. Its first resend is a probe sent before it had the ACK, which the scenario
+// passes over; its next resend comes about 520 ms after that, past the quiet interval, so the
+// scenario catches it only by waiting until the engine has the ACK before the interval starts.
+func TestHarnessCatchesFINResentAfterADroppedAckWhenTheDataAckIsLate(t *testing.T) {
+	t.Parallel()
+	late := func(d tcpharness.DUT) tcpharness.DUT { return dropAckOfFINHolding(d, 100*time.Millisecond) }
+	got := tcpharness.Record(t, mutant("gvisor-late-data-ack-drops-final-ack", late), scenario(t, "fin-passive-close"), 1)
 	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
 }
 

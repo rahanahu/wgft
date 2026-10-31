@@ -678,18 +678,43 @@ func (p *Peer) SendFreshAck() uint32 {
 // echoes a TSecr older than ts: a FIN the DUT sent before it had the segment that carried ts, such
 // as a tail loss probe that a slow testbench let fire before its ACK arrived. Only a segment with
 // f's sequence number, no payload, flags among FIN, ACK and PSH, and within probeWindow of f is
-// passed over, and the wait of d starts again after it. A second such segment, or any other,
-// fails the quiet: a DUT that dropped the testbench's ACK keeps resending with the old TSecr. On
-// a ClockedDUT nothing is passed over, since Inject returns after the engine handled the segment
-// and the race cannot happen. fAt is when f arrived. It returns how many it passed over.
-func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time) (Segment, bool, int) {
+// passed over. A second such segment, or any other, fails the quiet: a DUT that dropped the
+// testbench's ACK keeps resending with the old TSecr. On a ClockedDUT nothing is passed over,
+// since Inject returns after the engine handled the segment and the race cannot happen. fAt is
+// when f arrived. It returns how many it passed over.
+//
+// The wait of d is the interval of a negative claim, so it starts only once the DUT has the ACK:
+// where c is a Deliverer on a real-time DUT, QuietSince first waits, for at most settleBudget,
+// until c reports Delivered, which it does once the ACK has moved it out of LAST-ACK. A segment
+// that comes during that wait is judged as above. Without that wait, a DUT that dropped the ACK
+// and passed one probe could leave d before its next retransmission: when the FIN went out
+// before the DUT had the ACK of the data in front of it, the probe comes at once and the
+// retransmission after a further probe timeout and RTO, 400 ms or more on an idle machine.
+func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, c Conn) (Segment, bool, int) {
 	_, clocked := p.h.DUT.(ClockedDUT)
+	settled := func() bool { return true }
+	if dl, ok := c.(Deliverer); ok && !clocked {
+		settled = dl.Delivered
+	}
 	stale := 0
-	deadline := p.h.Now().Add(d)
+	settleBy := p.h.Now().Add(settleBudget)
+	var deadline time.Time // zero until the DUT has the ACK or settleBudget has passed
 	for {
-		s, ok := p.Next(max(deadline.Sub(p.h.Now()), 0))
+		if deadline.IsZero() && (settled() || !p.h.Now().Before(settleBy)) {
+			deadline = p.h.Now().Add(d)
+		}
+		wait := settlePoll
+		if !deadline.IsZero() {
+			wait = max(deadline.Sub(p.h.Now()), 0)
+		}
+		before := p.h.Now()
+		s, ok := p.Next(wait)
 		if !ok {
-			return Segment{}, true, stale
+			// past the deadline, or the DUT closed its output and nothing more can come
+			if !deadline.IsZero() || p.h.Now().Sub(before) < wait/2 {
+				return Segment{}, true, stale
+			}
+			continue
 		}
 		// How long after the FIN the DUT sent the resend: from the DUT's own timestamps where it
 		// has them, which a stalled testbench cannot stretch, else from when each arrived here.
@@ -702,12 +727,23 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time) 
 		if !clocked && stale == 0 && probe && p.TS && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-ts) < 0 {
 			p.h.T.Logf("the FIN resent before the DUT had the testbench's latest segment, passed over once: %v", s)
 			stale++
-			deadline = p.h.Now().Add(d)
+			if !deadline.IsZero() {
+				deadline = p.h.Now().Add(d)
+			}
 			continue
 		}
 		return s, false, stale
 	}
 }
+
+// settleBudget bounds QuietSince's wait for the DUT to report the ACK. A DUT that never reports
+// it, because it lost the ACK, resends its FIN well within it; the budget only ends the wait for
+// a DUT that neither reports nor resends, whose Delivered check then fails on its own.
+// settlePoll is how often QuietSince asks in the meantime.
+const (
+	settleBudget = 3 * time.Second
+	settlePoll   = 10 * time.Millisecond
+)
 
 // probeWindow is how long after a FIN QuietSince accepts its resend as sent before the ACK: about
 // one minimum RTO. A tail loss probe on a near-zero RTT comes within a few milliseconds.

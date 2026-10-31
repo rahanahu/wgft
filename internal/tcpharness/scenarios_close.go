@@ -64,7 +64,7 @@ func finPassiveClose(h *H) {
 	}
 	// A FIN resent before the ACK got there, as a tail loss probe on a loaded machine, is passed
 	// over; anything sent once the DUT had the ACK fails the check.
-	s, quiet, stale := p.QuietSince(500*time.Millisecond, ackTS, f, fAt)
+	s, quiet, stale := p.QuietSince(500*time.Millisecond, ackTS, f, fAt, c)
 	h.Check("closed.quiet", quiet, "nothing follows the ACK of the DUT's FIN", segDesc(s, !quiet))
 	h.Measure("resent-before-the-ack", stale)
 	delivered(h, "delivered", c)
