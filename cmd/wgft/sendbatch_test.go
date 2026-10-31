@@ -36,10 +36,10 @@ func TestSendBatchFromConfig(t *testing.T) {
 	s, upper := tunnel.SendBatchBufferBytes(), tunnel.SendBatchCap()
 	def := upper
 	if runtime.GOOS != "windows" {
-		def = int(min(resource.Limits{}.MemoryLimit()/4/s, int64(upper)))
+		def = int(min(resource.Limits{}.MemoryLimit()*3/20/s, int64(upper)))
 	}
-	if runtime.GOOS == "linux" && s == 64<<10 && def != 864 && upper >= 864 {
-		t.Errorf("default P_max on Linux with the default caps = %d, want 864", def)
+	if runtime.GOOS == "linux" && s == 64<<10 && def != 518 && upper >= 518 {
+		t.Errorf("default P_max on Linux with the default caps = %d, want 518", def)
 	}
 	upperMiB := int64(upper) * s >> 20
 	for _, tc := range []struct {
@@ -89,7 +89,7 @@ func TestLogSendBatch(t *testing.T) {
 		b                    sendBatch
 		want                 string
 	}{
-		{"wgstack default", "", "wgstack", sendBatch{packets: 864}, "send batch budget: "},
+		{"wgstack default", "", "wgstack", sendBatch{packets: 518}, "send batch budget: "},
 		{"wgstack set", "userspace", "wgstack", sendBatch{packets: tunnel.SendBatchMin(), set: true, requestedMiB: 2}, "buffers, from WGFT_AGENT_BATCH_MIB\n"},
 		{"wgstack below the floor", "userspace", "wgstack", sendBatch{packets: tunnel.SendBatchMin() - 1, set: true, requestedMiB: 1},
 			fmt.Sprintf("from WGFT_AGENT_BATCH_MIB; send batching is off because this host's %d CPUs need at least %d buffers", runtime.NumCPU(), tunnel.SendBatchMin())},
@@ -98,9 +98,9 @@ func TestLogSendBatch(t *testing.T) {
 		{"wgstack capped", "", "wgstack", sendBatch{packets: 100, set: true, capped: true}, "lowered to the cap for this host's"},
 		{"wgstack off", "", "wgstack", sendBatch{set: true}, "WGFT_AGENT_BATCH_MIB=0 turns send batching off"},
 		{"gvisor set", "", "", sendBatch{packets: 16, set: true}, "WGFT_AGENT_BATCH_MIB: unused with the gvisor network stack"},
-		{"gvisor unset", "", "gvisor", sendBatch{packets: 864}, ""},
+		{"gvisor unset", "", "gvisor", sendBatch{packets: 518}, ""},
 		{"kernel set", "kernel", "wgstack", sendBatch{packets: 16, set: true}, "WGFT_AGENT_BATCH_MIB: unused in kernel mode"},
-		{"kernel unset", "kernel", "wgstack", sendBatch{packets: 864}, ""},
+		{"kernel unset", "kernel", "wgstack", sendBatch{packets: 518}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
