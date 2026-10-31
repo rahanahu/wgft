@@ -1,9 +1,9 @@
 name: CI
 
 # Trigger names in the comments below are the ones docs/testing.md's "変更の契機と対象のパス"
-# table defines, except go_code (see below). Two of that table's triggers gate a job that
-# actually runs on GitHub's runners; the rest gate lab-only B-class tests (B1, B2, B3, B7, B9,
-# B10) that need Incus and never run here.
+# table defines, except go_code (see below). Some of that table's triggers gate a job that
+# actually runs on GitHub's runners (go_code, build, rust); the rest gate lab-only B-class
+# tests (B1, B2, B3, B7, B9, B10) that need Incus and never run here.
 #
 #   go_code -> **/*.go, go.mod, go.sum, scripts/portable-test-packages.sh
 #               -> gates windows-test (B4), macos-test (B8)
@@ -42,7 +42,7 @@ name: CI
 #               This second part widens the table's own build-only mapping for B6, for the
 #               same reachability reason as go_code above.
 #
-#   rust_code -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml, deny.toml
+#   rust -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml, deny.toml
 #               -> gates rust-check, rust-windows, rust-macos (B13, B14) and rust-deny (B15).
 #               The Rust workspace is the v2 migration's build (docs/development/architecture.md);
 #               it shares nothing with the Go jobs above, so a Go-only or document-only change
@@ -86,12 +86,12 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Weekly govulncheck (B6), independent of any PR: new advisories affect code nobody
-    # touched. 03:17 UTC Tuesday is away from the UTC-midnight rush GitHub's scheduling
+    # Weekly govulncheck (B6) and cargo-deny (B15), independent of any PR: new advisories
+    # affect code nobody touched. 03:17 UTC Tuesday is away from the UTC-midnight rush GitHub's scheduling
     # documentation warns can delay jobs, and away from any release-day activity.
     - cron: "17 3 * * 2"
   workflow_dispatch:
-    # Lets a human re-run govulncheck on demand (a new advisory doesn't wait for the
+    # Lets a human re-run govulncheck and cargo-deny on demand (a new advisory doesn't wait for the
     # weekly schedule or a qualifying code change), or force a full run of every job.
 
 permissions:
@@ -109,7 +109,7 @@ jobs:
       run_all: ${{ steps.decide.outputs.run_all }}
       docs_only: ${{ steps.decide.outputs.docs_only }}
       go_code: ${{ steps.filter.outputs.go_code }}
-      rust_code: ${{ steps.filter.outputs.rust_code }}
+      rust: ${{ steps.filter.outputs.rust }}
       build: ${{ steps.filter.outputs.build }}
     steps:
       - uses: actions/checkout@v7
@@ -123,8 +123,9 @@ jobs:
         # major-version tag. This is not a full commit SHA: every action already in this
         # file and in release.yml (actions/checkout@v7, goreleaser/goreleaser-action@v7,
         # docker/setup-buildx-action@v4, docker/login-action@v4, anchore/sbom-action@v0,
-        # actions/attest-build-provenance@v4, actions/attest-sbom@v4) is pinned the same
-        # way, so a lone SHA pin here would be an inconsistency rather than an improvement.
+        # actions/attest-build-provenance@v4, actions/attest-sbom@v4,
+        # Swatinem/rust-cache@v2, taiki-e/install-action@v2, EmbarkStudios/cargo-deny-action@v2)
+        # is pinned the same way, so a lone SHA pin here would be an inconsistency rather than an improvement.
         uses: dorny/paths-filter@v4
         continue-on-error: true
         with:
@@ -145,7 +146,7 @@ jobs:
               # The script that decides which packages windows-test and macos-test run. A
               # change to it changes what those two jobs test, so it has to run them.
               - 'scripts/portable-test-packages.sh'
-            rust_code:
+            rust:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -170,7 +171,7 @@ jobs:
         # no base to diff against either, and by nature asks for a full run. A change to
         # the workflow files themselves (the `workflows` filter) also sets run_all, for the
         # reason in the header comment. A schedule event never sets run_all: its only
-        # purpose is the govulncheck run below, which checks github.event_name directly.
+        # purpose is the govulncheck and rust-deny runs below, which checks github.event_name directly.
         #
         # docs_only follows the same fail-open rule from the other side: it stays false
         # unless the file list is present and every entry in it is a document, so every
@@ -219,7 +220,7 @@ jobs:
     # go.sum or a file the Go tests load, so a change that touches nothing but documents and
     # images cannot alter its result. Skipped in exactly that case and run otherwise,
     # including whenever the changes job could not decide; see the header comment. Not run on
-    # the weekly schedule (that event exists only to drive govulncheck below).
+    # the weekly schedule (that event exists only to drive govulncheck and rust-deny below).
     needs: changes
     if: >-
       !cancelled() && github.event_name != 'schedule' && (
@@ -365,19 +366,19 @@ jobs:
     # B13 (see docs/testing.md). Formatting, lints as errors and the tests of the Rust
     # workspace on Linux. The toolchain, its components and its targets come from
     # rust-toolchain.toml, which rustup on the runner reads, so CI and a developer's host
-    # use the same compiler. Gated by rust_code; see the header comment.
+    # use the same compiler. Gated by rust; see the header comment.
     needs: changes
     if: >-
       !cancelled() && github.event_name != 'schedule' && (
         needs.changes.result != 'success' ||
         needs.changes.outputs.run_all == 'true' ||
-        needs.changes.outputs.rust_code == 'true'
+        needs.changes.outputs.rust == 'true'
       )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: toolchain from rust-toolchain.toml
-        run: rustup show active-toolchain || rustup toolchain install
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -388,6 +389,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: nextest
         run: cargo nextest run --workspace --locked
+      # nextest does not run doctests.
+      - name: doctests
+        run: cargo test --workspace --doc --locked
 
   rust-deny:
     # B15. cargo-deny: licence allowlist, RustSec advisories, duplicate versions, and
@@ -400,7 +404,7 @@ jobs:
         github.event_name == 'schedule' ||
         needs.changes.result != 'success' ||
         needs.changes.outputs.run_all == 'true' ||
-        needs.changes.outputs.rust_code == 'true'
+        needs.changes.outputs.rust == 'true'
       )
     runs-on: ubuntu-latest
     steps:
@@ -411,26 +415,26 @@ jobs:
           arguments: --locked
 
   rust-windows:
-    # B14. Builds and tests the Rust workspace on native Windows. Gated by rust_code.
+    # B14. Lints and tests the Rust workspace on native Windows. Gated by rust.
     needs: changes
     if: >-
       !cancelled() && github.event_name != 'schedule' && (
         needs.changes.result != 'success' ||
         needs.changes.outputs.run_all == 'true' ||
-        needs.changes.outputs.rust_code == 'true'
+        needs.changes.outputs.rust == 'true'
       )
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - name: toolchain from rust-toolchain.toml
         shell: bash
-        run: rustup show active-toolchain || rustup toolchain install
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: build
-        run: cargo build --workspace --all-targets --locked
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: nextest
         run: cargo nextest run --workspace --locked
 
@@ -441,19 +445,19 @@ jobs:
       !cancelled() && github.event_name != 'schedule' && (
         needs.changes.result != 'success' ||
         needs.changes.outputs.run_all == 'true' ||
-        needs.changes.outputs.rust_code == 'true'
+        needs.changes.outputs.rust == 'true'
       )
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - name: toolchain from rust-toolchain.toml
-        run: rustup show active-toolchain || rustup toolchain install
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: build
-        run: cargo build --workspace --all-targets --locked
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: nextest
         run: cargo nextest run --workspace --locked
 
@@ -530,7 +534,7 @@ jobs:
     # Not gated: A8 runs on every PR regardless of what changed, including a
     # documentation-only change, since this is what catches full-width punctuation
     # creeping into README.md, docs/*.md and similar public files. Not run on the
-    # weekly schedule, which exists only to drive govulncheck above.
+    # weekly schedule, which exists only to drive govulncheck and rust-deny.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
