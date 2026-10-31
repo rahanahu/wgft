@@ -556,3 +556,24 @@ func TestSendBatchOffReason(t *testing.T) {
 		t.Fatalf("MTU %d: BatchSize %d, want %d", tooBig-1, ns.BatchSize(), sendBatchSize)
 	}
 }
+
+// SendBatchMin は Device がバッチを使い始める予算そのものである。cmd/wgft の起動の行はこの値で下限を出す。
+func TestSendBatchMinMatchesTheDevice(t *testing.T) {
+	for _, tc := range []struct {
+		packets int
+		want    int
+	}{
+		{SendBatchMin() - 1, 1},
+		{SendBatchMin(), sendBatchSize},
+	} {
+		ns, err := newNetstack(Config{Netstack: NetstackWgstack, Address: rigAgentAddr, MTU: 1420, SendBatchPackets: tc.packets})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := ns.BatchSize()
+		ns.Close()
+		if got != tc.want {
+			t.Fatalf("P_max %d with floor %d: BatchSize %d, want %d", tc.packets, SendBatchMin(), got, tc.want)
+		}
+	}
+}
