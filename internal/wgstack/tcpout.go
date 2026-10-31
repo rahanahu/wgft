@@ -67,23 +67,6 @@ func (c *tcb) payloadCap(o *optWriter, space int) int {
 	return min(c.peerMSS, c.pmtu-ipHeaderLen-tcpHeaderLen, space-ipHeaderLen-tcpHeaderLen) - o.n
 }
 
-// windowField は広告する窓の欄を返し、広告した右端を更新する。右端は rcvTarget に向けて広げ、後ろへ戻さない。
-// 右端を広げるのは、広げる量が min(窓の上限の半分, MSS) 以上のときだけである(受け手の SWS の回避、
-// RFC 9293 3.8.6.2.2)。
-// 窓の scale で切り捨てた分だけ欄の右端が論理の右端より手前に見えることは scale の性質で、論理の右端の
-// 手前までのデータは受け入れる。
-func (c *tcb) windowField() uint16 {
-	nxt := c.rcv.nxtOff
-	target := c.rcvTarget()
-	if target > c.advRight && target-c.advRight >= min(c.rcvClamp()/2, uint64(c.rcvMSS())) {
-		c.advRight = target
-	}
-	if c.advRight <= nxt {
-		return 0
-	}
-	return uint16(min((c.advRight-nxt)>>c.rcvWscale, 65535))
-}
-
 // nextNew は、窓と輻輳の窓と送り手の SWS の回避(RFC 9293 3.8.6.2.1、Nagle を使わない)が許す新しいデータの
 // 長さと、FIN を付けるかを返す。force が真なら輻輳の窓を見ない(TLP の probe、RFC 8985 7.3)。
 func (c *tcb) nextNew(payCap int, force bool) (int, bool) {

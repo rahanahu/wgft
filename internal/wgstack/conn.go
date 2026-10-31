@@ -187,23 +187,6 @@ func (h *Conn) Read(b []byte) (int, error) {
 	}
 }
 
-// windowUpdate は、読み取りで空いた受信のバッファが広告する窓を大きく広げるときに ACK を送る。Linux の
-// tcp_cleanup_rbuf と同じく、今の窓が窓の上限の半分以下で、広げた後の窓が今の窓の 2 倍以上になるときである。
-func (c *tcb) windowUpdate() {
-	cur := uint64(c.rcvWindow())
-	if 2*cur > c.rcvClamp() {
-		return
-	}
-	target := c.rcvTarget()
-	if target <= c.rcv.nxtOff {
-		return
-	}
-	next := target - c.rcv.nxtOff
-	if next >= 2*cur && next-cur >= uint64(c.rcvMSS()) {
-		c.ackNow = true
-	}
-}
-
 // Write は net.Conn の実装。送信のバッファに空きができるまで待つ。
 func (h *Conn) Write(b []byte) (int, error) {
 	s := h.s

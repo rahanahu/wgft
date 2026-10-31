@@ -583,3 +583,52 @@ func (s *stack) poll(b []byte, now int64) int {
 		return n
 	}
 }
+
+// close は核を閉じる。待っている操作を解き、接続の枠、行、boost の枠をすべて返す。
+func (s *stack) close() {
+	s.tmu.Lock()
+	if s.closed {
+		s.tmu.Unlock()
+		return
+	}
+	s.closed = true
+	close(s.done)
+	for _, l := range s.listeners {
+		l.closed = true
+		close(l.closeCh)
+	}
+	clear(s.listeners)
+	for id := range s.syn.rows {
+		if s.syn.rows[id].used {
+			s.syn.rows[id].promoting = false
+			s.removeSynRow(int32(id))
+		}
+	}
+	for s.tw.head >= 0 {
+		s.removeTWRow(s.tw.head)
+	}
+	s.tmu.Unlock()
+	s.udpClose()
+	s.frag.Close()
+	for i := range s.conns {
+		c := &s.conns[i]
+		c.mu.Lock()
+		if c.state != stFree {
+			c.signalRead()
+			c.signalWrite()
+			c.release()
+		}
+		c.floorRecs = nil
+		c.floorIv = nil
+		c.rcv.iv = nil
+		c.recs.recs = nil
+		c.mu.Unlock()
+	}
+	s.out.mu.Lock()
+	s.out.ctl.n = 0
+	s.out.mu.Unlock()
+	s.chunks.mu.Lock()
+	s.chunks.closed = true
+	s.chunks.free = nil
+	s.chunks.mu.Unlock()
+}
