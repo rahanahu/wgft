@@ -160,15 +160,6 @@ func (d *Device) MTU() (int, error)        { return d.s.mtu, nil }
 // BatchSize は作成の時に決めた k_tx を返す。バッチを使わない Device では 1 である。
 func (d *Device) BatchSize() int { return d.s.txb.size }
 
-func (d *Device) isClosed() bool {
-	select {
-	case <-d.s.done:
-		return true
-	default:
-		return false
-	}
-}
-
 // Read は次に送る packet を 1 個以上、min(len(bufs), len(sizes), k_eff) 個以下作って bufs[i][offset:] に
 // 書く(wgstack-batching.md の「Device の約束」)。送るものが無ければ待ち、1 個作った後は待たない。誤りを
 // 返すのは Close の後の os.ErrClosed だけで、packet を作れなかったときは誤りにせず次を待つ。wireguard-go は
@@ -178,7 +169,7 @@ func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 		return 0, nil
 	}
 	for {
-		if d.isClosed() {
+		if d.s.isClosed() {
 			return 0, os.ErrClosed
 		}
 		d.readMu.Lock()
@@ -197,7 +188,7 @@ func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 // Poll は待たずに次の packet を 1 つ作り、その長さを返す。送るものが無ければ 0 を返す。試験と、Config.Clock を
 // 渡した Device の呼び出し側が使う。
 func (d *Device) Poll(buf []byte) int {
-	if d.isClosed() {
+	if d.s.isClosed() {
 		return 0
 	}
 	d.readMu.Lock()
@@ -223,7 +214,7 @@ func (d *Device) Write(bufs [][]byte, offset int) (int, error) {
 			}
 			continue
 		}
-		if d.isClosed() {
+		if d.s.isClosed() {
 			if first == nil {
 				first = os.ErrClosed
 			}
