@@ -252,7 +252,7 @@ rcv_ssthresh を一度に上限まで広げる故障、目標が rcv_ssthresh �
 ### 参照の Linux の設定
 
 参照の Linux は、ラボの VM の Debian 13(trixie)に trixie-backports から入れたカーネルで、`linux-image-7.2.11+deb13-amd64` の package の版 7.2.11-1~bpo13+1 です。
-`lab/lab` が package の版まで固定して入れ、基の VM の snapshot がその状態を保ちます。
+`lab/lab` が package の版まで固定し、trixie-backports が版を入れ替えても取れるように snapshot.debian.org の 20261101T000000Z の trixie-backports から入れ、基の VM の snapshot がその状態を保ちます。
 VM の image は `images:debian/13` の 20261029_05:24 で作りました。
 2026-11-01 に、Debian 12 の 6.1(`6.1.0-53-amd64`、package の版 6.1.187-1)から移りました。
 版を上げるときは、`lab/lab` の固定とこの記録を同じ変更で直し、基の VM を作り直して、Linux の台本を流し直します。

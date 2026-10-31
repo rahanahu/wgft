@@ -187,7 +187,9 @@ labhost merge -out merged shard-1/summary.json shard-2/summary.json shard-3/summ
 カーネルと nftables の対応範囲は[セットアップの前提](../docs/manual/setup.md)に従います。
 既定の VM は `images:debian/13` です。
 Debian 13 の VM には、`lab/lab` の `LAB_KERNEL_ABI` と `LAB_KERNEL_VERSION` が固定する trixie-backports のカーネルを入れ、そのカーネルで起動し直してからスナップショットを取ります。
+trixie-backports は新しい版が出ると古い版を消すので、package は snapshot.debian.org の `LAB_KERNEL_SNAPSHOT` の時刻の trixie-backports から取ります。
 起動し直した後に別のカーネルで動いていれば、`up` は止まります。
+固定を上げた後に、前の版で作った VM で `up` が止まった場合は、`lab/lab destroy` と `lab/lab up` で作り直します。
 このカーネルは wgstack の適合の試験の参照の Linux で、版の記録は[参照の Linux の設定](../docs/design/userspace/wgstack-verification.md#参照の-linux-の設定)にあります。
 Debian 13 は `/tmp` を tmpfs にしますが、ラボの VM では Debian 12 と同じくディスクに置きます。
 別のディストリビューションの VM は、イメージと名前を指定して作成します。

@@ -6,10 +6,14 @@ VM=${WGFT_LAB_VM:-wgft-lab}
 IMAGE=${WGFT_LAB_IMAGE:-images:debian/13}
 # ラボの参照のカーネル。Debian 13 (trixie) の VM には trixie-backports のこの版を入れて起動する。
 # 版は package の版まで固定し、docs/design/userspace/wgstack-verification.md の「参照の Linux の設定」に
-# 記録する。上げるときはここと記録を同じ変更で直し、基の VM を作り直す。trixie 以外の image
+# 記録する。上げるときはここと記録と internal/tcpharness/linuxdut の ReferenceRelease を同じ変更で
+# 直し、基の VM を作り直す。trixie 以外の image
 # (WGFT_LAB_IMAGE=images:debian/12 など) には入れず、image のカーネルのまま動かす
+# trixie-backports は新しい版が出ると古い版を消すので、package は snapshot.debian.org のこの時刻の
+# trixie-backports から取る。時刻はこの版が載っている間の時刻にする
 LAB_KERNEL_ABI=7.2.11+deb13-amd64
 LAB_KERNEL_VERSION=7.2.11-1~bpo13+1
+LAB_KERNEL_SNAPSHOT=20261101T000000Z
 CPU=${WGFT_LAB_CPU:-2}
 MEM=${WGFT_LAB_MEM:-2GiB}
 # WGFT_LAB_CPUS はホストの CPU の集合(例 0-7 や 0-3,8)。値があれば、lab が作る VM の vCPU をこの中の
@@ -131,7 +135,8 @@ ensure_running() {
 
 provision() {
   info "VM に開発用パッケージを入れる"
-  inc exec "$VM" --env "LAB_KERNEL_ABI=$LAB_KERNEL_ABI" --env "LAB_KERNEL_VERSION=$LAB_KERNEL_VERSION" -- bash -s <<'EOF'
+  inc exec "$VM" --env "LAB_KERNEL_ABI=$LAB_KERNEL_ABI" --env "LAB_KERNEL_VERSION=$LAB_KERNEL_VERSION" \
+    --env "LAB_KERNEL_SNAPSHOT=$LAB_KERNEL_SNAPSHOT" -- bash -s <<'EOF'
 set -euo pipefail
 # ホストの firewalld / Docker の影響で IPv4 の DNS が引けない場合は、IPv6 の DNS に切り替える(lab/README.md)
 # /etc/resolv.conf は /run(tmpfs)へのシンボリックリンクなので、直接書くと再起動で消える。resolved の設定に書く
@@ -164,12 +169,14 @@ case "$ID" in
     apt-get "${apt_opts[@]}" install -y --no-install-recommends \
       nftables iptables wireguard-tools conntrack iproute2 procps tcpdump iperf3 socat curl podman
     if [[ $ID == debian && ${VERSION_CODENAME:-} == trixie ]]; then
-      # 参照のカーネル (lab/lab の LAB_KERNEL_ABI) を trixie-backports から版を固定して入れる。
-      # 依存の linux-base も backports の版が要るので -t で backports を優先する。GRUB は新しい版を
+      # 参照のカーネル (lab/lab の LAB_KERNEL_ABI) を、snapshot.debian.org の固定した時刻の
+      # trixie-backports から版を固定して入れる。依存の linux-base も同じ時刻の backports の版になる。
+      # snapshot の Release は期限が切れているので check-valid-until=no にする。GRUB は新しい版を
       # 先に起動するので、6.12 を残しても次の起動はこの版になる。起動した版は cmd_up が確かめる
-      echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/wgft-lab-backports.list
-      apt-get "${apt_opts[@]}" update
-      apt-get "${apt_opts[@]}" install -y --no-install-recommends -t trixie-backports \
+      echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/$LAB_KERNEL_SNAPSHOT/ trixie-backports main" \
+        > /etc/apt/sources.list.d/wgft-lab-backports.list
+      apt-get "${apt_opts[@]}" -o Acquire::Retries=3 update
+      apt-get "${apt_opts[@]}" -o Acquire::Retries=3 install -y --no-install-recommends -t trixie-backports \
         "linux-image-$LAB_KERNEL_ABI=$LAB_KERNEL_VERSION"
       # Debian 13 は /tmp を tmpfs にする。Debian 12 と同じくディスクに置き、確認のログと一時ファイルが
       # 2 GiB の VM のメモリを使わないようにする。次の起動から効く
@@ -207,7 +214,7 @@ kernel_up() {
   wait_net
   running=$(inc exec "$VM" -- uname -r)
   [[ $running == "$LAB_KERNEL_ABI" ]] \
-    || die "'$VM' runs kernel $running after the restart, not the reference $LAB_KERNEL_ABI; check its GRUB entries"
+    || die "'$VM' runs kernel $running after the restart, not the reference $LAB_KERNEL_ABI; a VM provisioned for another kernel keeps it, so rebuild it with lab destroy and lab up"
 }
 
 cmd_up() {
