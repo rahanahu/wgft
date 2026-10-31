@@ -6,6 +6,10 @@ VM=${WGFT_LAB_VM:-wgft-lab}
 IMAGE=${WGFT_LAB_IMAGE:-images:debian/12}
 CPU=${WGFT_LAB_CPU:-2}
 MEM=${WGFT_LAB_MEM:-2GiB}
+# WGFT_LAB_CPUS はホストの CPU の集合(例 0-7 や 0-3,8)。値があれば、lab が作る VM の vCPU をこの中の
+# CPU に 1 対 1 で固定する。vCPU の数は変えず、lab suite の VM には重ならない別々の CPU を割り当てる。
+# 足りなければ VM を作らずに止まる。未設定なら固定せず、数だけの limits.cpu で今までどおり作る
+CPUS=${WGFT_LAB_CPUS:-}
 SNAPSHOT=clean
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 SHARE=/wgft  # VM 内でのリポジトリの場所(読み取り専用)
@@ -13,6 +17,74 @@ NAMESPACES=(client vps homerouter home lan)
 
 die() { echo "lab: $*" >&2; exit 1; }
 info() { echo "lab: $*" >&2; }
+
+# ---- WGFT_LAB_CPUS:VM の vCPU を CPU の集合に固定する ----
+# Incus の limits.cpu は数 (2) なら vCPU の数だけを決めて CPU は浮かせ、集合 (0-1 や 0,2) なら
+# 集合の CPU の数を vCPU の数にして 1 対 1 で固定する。固定は起動の前にしか変えられない。
+# 1 つの CPU の集合は数と区別できないので、Incus の決まりどおり N-N と書く
+
+# cpus_expand:WGFT_LAB_CPUS を CPU の番号の並び CPU_LIST にする ("0-3,8" なら 0 1 2 3 8)。
+# 書式の誤り、逆順の範囲、オンラインでない CPU で止まる。die が効くよう、コマンド置換の中で呼ばない
+CPU_LIST=()
+cpus_expand() {
+  local part a b i online on=" " seen=" "
+  CPU_LIST=()
+  [[ $CPUS =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] \
+    || die "WGFT_LAB_CPUS='$CPUS' is not a CPU set; write it like 0-7 or 0-3,8"
+  # オンラインの CPU の集合 (例 0-23)。番号が飛ぶことがあるので、数ではなく集合で確かめる
+  online=$(cat /sys/devices/system/cpu/online)
+  IFS=, read -ra parts <<<"$online"
+  for part in "${parts[@]}"; do
+    for ((i = 10#${part%-*}; i <= 10#${part#*-}; i++)); do on+="$i "; done
+  done
+  IFS=, read -ra parts <<<"$CPUS"
+  for part in "${parts[@]}"; do
+    a=$((10#${part%-*})) b=$((10#${part#*-}))
+    ((a <= b)) || die "WGFT_LAB_CPUS='$CPUS': the range $part goes backwards"
+    for ((i = a; i <= b; i++)); do
+      [[ $on == *" $i "* ]] || die "WGFT_LAB_CPUS='$CPUS': CPU $i is not online; the online CPUs are $online"
+      [[ $seen == *" $i "* ]] && continue
+      seen+="$i "
+      CPU_LIST+=("$i")
+    done
+  done
+}
+
+# cpus_join <CPU...>:"0 1 2 5" を limits.cpu の集合 "0-2,5" にする。1 つだけなら "5-5"
+cpus_join() {
+  local out="" s=$1 p=$1 x
+  shift
+  for x in "$@"; do
+    if ((x == p + 1)); then p=$x; continue; fi
+    if [[ $s == "$p" ]]; then out+="${out:+,}$s"; else out+="${out:+,}$s-$p"; fi
+    s=$x p=$x
+  done
+  if [[ $s == "$p" ]]; then out+="${out:+,}$s"; else out+="${out:+,}$s-$p"; fi
+  [[ $out == *[,-]* ]] || out="$out-$out"
+  echo "$out"
+}
+
+# vcpu_count <limits.cpu の値>:VM の vCPU の数。空は Incus の既定の 1、集合はその CPU の数
+vcpu_count() {
+  local v=$1 part n=0
+  if [[ -z $v ]]; then echo 1; return; fi
+  if [[ $v =~ ^[0-9]+$ ]]; then echo "$v"; return; fi
+  IFS=, read -ra parts <<<"$v"
+  for part in "${parts[@]}"; do n=$((n + 10#${part#*-} - 10#${part%-*} + 1)); done
+  echo "$n"
+}
+
+# cpus_plan <VM の数> <1 台の vCPU の数>:WGFT_LAB_CPUS を先頭から順に切り分け、1 台に 1 つの集合を
+# CPU_PLAN に入れる。足りなければ止まる。重ねて固定することはしない
+CPU_PLAN=()
+cpus_plan() {
+  local vms=$1 per=$2 i
+  cpus_expand
+  ((vms * per <= ${#CPU_LIST[@]})) \
+    || die "WGFT_LAB_CPUS=$CPUS has ${#CPU_LIST[@]} CPUs, but $vms VM(s) of $per vCPUs need $((vms * per)); widen the set, use fewer VMs, or unset WGFT_LAB_CPUS"
+  CPU_PLAN=()
+  for ((i = 0; i < vms; i++)); do CPU_PLAN+=("$(cpus_join "${CPU_LIST[@]:i*per:per}")"); done
+}
 
 # incus-admin グループへの追加が今のログインセッションに反映されていなくても動くようにする
 if incus info >/dev/null 2>&1; then
@@ -105,8 +177,15 @@ EOF
 
 cmd_up() {
   if ! vm_exists; then
-    info "VM '$VM' を作る($IMAGE, cpu=$CPU, mem=$MEM)"
-    inc init "$IMAGE" "$VM" --vm -c "limits.cpu=$CPU" -c "limits.memory=$MEM"
+    local lcpu=$CPU
+    if [[ -n $CPUS ]]; then
+      [[ $CPU =~ ^[1-9][0-9]*$ ]] || die "WGFT_LAB_CPU=$CPU must be a count of vCPUs when WGFT_LAB_CPUS is set"
+      cpus_plan 1 "$CPU"
+      lcpu=${CPU_PLAN[0]}
+      info "pinning the $CPU vCPUs of '$VM' to CPUs $lcpu of WGFT_LAB_CPUS=$CPUS"
+    fi
+    info "VM '$VM' を作る($IMAGE, cpu=$lcpu, mem=$MEM)"
+    inc init "$IMAGE" "$VM" --vm -c "limits.cpu=$lcpu" -c "limits.memory=$MEM"
     # 9p はホットプラグできないので、起動前に追加する
     inc config device add "$VM" repo disk source="$REPO" path="$SHARE" readonly=true
   fi
@@ -202,12 +281,14 @@ cmd_build() {
 
 # ---- lab suite:一時的な VM を N 台立て、一式を shard に分けて同時に流し、1 つの判定にまとめる ----
 # 一時的な VM は WGFT_LAB_TEMPLATE(既定は WGFT_LAB_VM)のスナップショット clean の複製で、リポジトリの
-# 共有はこの作業ツリーを指す。CPU とメモリの上限はスナップショットのまま継ぐ。スナップショットが
+# 共有はこの作業ツリーを指す。CPU とメモリの上限はスナップショットのまま継ぐ。WGFT_LAB_CPUS があれば、
+# vCPU の数はそのままに、各 VM を集合の別々の CPU に固定する。スナップショットが
 # 無ければ lab up と同じ手順で新規に作る(遅い)。
 # 作った VM には user.wgft-lab-suite=<この lab の PID> を付ける。正常終了、INT、TERM、HUP では trap が
 # 全部消す。SIGKILL や電源断で残った VM は、PID が死んでいれば次の lab suite の開始時と lab suite-gc が消す
 SUITE_VMS=()
 SUITE_CLEANING=0
+SUITE_PIN=""
 
 # suite_alive <pid>:その PID のプロセスがあるか。kill -0 は他の利用者のプロセスに EPERM で失敗し、
 # 生きている run を死んだと読んでその VM を消してしまうので、/proc で見る
@@ -273,17 +354,19 @@ suite_boot() {
 }
 
 # suite_make_vm <name>:複製を作って起動する。作った名前は呼び出し側が先に SUITE_VMS に入れ、途中で止まっても trap が消せるようにする
+# WGFT_LAB_CPUS があれば、cmd_suite がこの VM に割り当てた集合 SUITE_PIN を起動の前に limits.cpu に入れる
 suite_make_vm() {
-  local name=$1 tmpl=$SUITE_TEMPLATE
+  local name=$1 tmpl=$SUITE_TEMPLATE pin=()
   VM=$name
+  [[ -n $SUITE_PIN ]] && pin=(-c "limits.cpu=$SUITE_PIN")
   if inc snapshot list "$tmpl" -f csv -c n 2>/dev/null | grep -qx "$SNAPSHOT"; then
-    inc copy "$tmpl/$SNAPSHOT" "$name" -d "repo,source=$REPO" -c "user.wgft-lab-suite=$$" >/dev/null || return 1
+    inc copy "$tmpl/$SNAPSHOT" "$name" -d "repo,source=$REPO" -c "user.wgft-lab-suite=$$" "${pin[@]}" >/dev/null || return 1
     suite_boot || return 1
     cmd_net up
   else
     info "template '$tmpl' has no snapshot '$SNAPSHOT'; provisioning '$name' from $IMAGE instead, which is slow"
     # 印は provision の前に付ける。provision の途中で SIGKILL されても suite-gc が見つけられるように
-    inc init "$IMAGE" "$name" --vm -c "limits.cpu=$CPU" -c "limits.memory=$MEM" -c "user.wgft-lab-suite=$$" >/dev/null || return 1
+    inc init "$IMAGE" "$name" --vm -c "limits.cpu=${SUITE_PIN:-$CPU}" -c "limits.memory=$MEM" -c "user.wgft-lab-suite=$$" >/dev/null || return 1
     inc config device add "$name" repo disk source="$REPO" path="$SHARE" readonly=true >/dev/null || return 1
     cmd_up
   fi
@@ -382,6 +465,28 @@ cmd_suite() {
   SUITE_PARALLEL=$parallel
   SUITE_TIMEOUT=$timeout_s
   SUITE_BARRIER_MAX=900
+  # WGFT_LAB_CPUS:VM を作る前に全台の集合を決める。足りなければ何も作らずに止まる。
+  # 1 台の vCPU の数は複製のもとのスナップショットの limits.cpu (無ければ WGFT_LAB_CPU) のまま変えない
+  local total=$(( vms * ${#cfgs[@]} )) tcpu per pins=()
+  if inc snapshot list "$SUITE_TEMPLATE" -f csv -c n 2>/dev/null | grep -qx "$SNAPSHOT"; then
+    # 固定するときは読めないまま進まない。空を Incus の既定の 1 と読み、2 vCPU のテンプレートを 1 vCPU で固定してしまう
+    if ! tcpu=$(inc config get --expanded "$SUITE_TEMPLATE/$SNAPSHOT" limits.cpu 2>/dev/null); then
+      [[ -z $CPUS ]] || die "cannot read limits.cpu of $SUITE_TEMPLATE/$SNAPSHOT, which WGFT_LAB_CPUS needs to keep each VM's vCPU count"
+      tcpu=""
+    fi
+  else
+    tcpu=$CPU
+  fi
+  if [[ -n $CPUS ]]; then
+    [[ -z $tcpu || $tcpu =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] \
+      || die "cannot tell the vCPU count of the suite VMs from limits.cpu=$tcpu"
+    per=$(vcpu_count "$tcpu")
+    cpus_plan "$total" "$per"
+    pins=("${CPU_PLAN[@]}")
+    info "pinning $total suite VMs of $per vCPUs inside WGFT_LAB_CPUS=$CPUS: ${pins[*]}"
+  elif [[ $tcpu =~ [,-] ]]; then
+    info "note: the template's limits.cpu is the CPU set $tcpu, so every suite VM is pinned to those same CPUs; set WGFT_LAB_CPUS to give each VM its own CPUs"
+  fi
   out=${out:-${TMPDIR:-/tmp}/wgft-lab-suite-$(date +%Y%m%d-%H%M%S)}
   mkdir -p "$out"
   out=$(cd "$out" && pwd)
@@ -390,7 +495,7 @@ cmd_suite() {
   trap 'info "interrupted; deleting the suite VMs"; exit 130' INT TERM HUP
   cmd_suite_gc
   host_build
-  local total=$(( vms * ${#cfgs[@]} )) c k
+  local c k
   local names=() dirs=()
   for c in "${cfgs[@]}"; do
     for ((k = 1; k <= vms; k++)); do
@@ -405,6 +510,7 @@ cmd_suite() {
     local ns=""
     [[ $c == default ]] || ns=$c
     for ((k = 1; k <= vms; k++)); do
+      SUITE_PIN=${pins[i]:-}
       suite_shard "${names[i]}" "${dirs[i]}" "$ns" "$k" "$vms" "$durations" "${dirs[@]}" &
       i=$((i + 1))
     done
@@ -500,7 +606,7 @@ usage: lab <command>
   host-fix            ホストの firewalld / Docker を設定して VM の IPv4 を通す(sudo)
 
 ns: ${NAMESPACES[*]}
-env: WGFT_LAB_VM=$VM WGFT_LAB_IMAGE=$IMAGE WGFT_LAB_CPU=$CPU WGFT_LAB_MEM=$MEM
+env: WGFT_LAB_VM=$VM WGFT_LAB_IMAGE=$IMAGE WGFT_LAB_CPU=$CPU WGFT_LAB_MEM=$MEM WGFT_LAB_CPUS=${CPUS:-<unset: not pinned>}
 EOF
 }
 
