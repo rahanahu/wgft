@@ -1,0 +1,2 @@
+# doc_markdown (pedantic) が製品名をコードとして扱わないようにする。".." は既定の一覧を残す。
+doc-valid-idents = ["WireGuard", "AllowedIPs", "IPv4", "IPv6", ".."]

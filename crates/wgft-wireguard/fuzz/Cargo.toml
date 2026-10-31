@@ -1,0 +1,23 @@
+[package]
+name = "wgft-wireguard-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+# ワークスペースの外に置く。nightly と libFuzzer を要るので、stable の CI の build に入れない
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+wgft-wireguard = { version = "0.1.0", path = ".." }
+
+[[bin]]
+name = "inbound"
+path = "fuzz_targets/inbound.rs"
+test = false
+doc = false
+bench = false

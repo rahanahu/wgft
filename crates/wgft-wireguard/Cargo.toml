@@ -1,0 +1,20 @@
+[package]
+name = "wgft-wireguard"
+description = "The WireGuard device layer of the wgft agent, built on sanstun"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+sanstun = "0.1.0"
+zeroize = "1.9.1"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12.0"
