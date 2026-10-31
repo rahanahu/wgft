@@ -137,6 +137,11 @@ const (
 	// 10.2a 節)。server は起動時にだけ 1 にするので、稼働中に外から 0 にされると、カーネルで
 	// 転送するルールは 1 に戻るまで止まる。
 	ReasonIPForwardOff = "ip_forward_off"
+	// ReasonForwardPolicyDrop は、この VPS の他のテーブルの forward のチェーンが既定で落とし、wgft の
+	// 転送を accept しないと server が報告したことである(設計文書 6.1・10.2a 節)。規則の形からの推定で
+	// あり、転送の停止の観測ではないので UNKNOWN に付く。エージェントの host.forwarding の同じ名前の
+	// 符号(10.2c 節)と同じ事実を、VPS の側で表す。
+	ReasonForwardPolicyDrop = "forward_policy_drop"
 	// ReasonKeyChangeLimited は、server が鍵の変更の頻度の上限でエージェントの公開鍵の宣言を断り、
 	// その後にそのエージェントの公開鍵の宣言を受け付けていないことである(設計文書 5.2・10.2a 節)。
 	// server doctor が使うのは、記録が KeyChangeRefusalCurrent より新しい場合だけである。agent doctor の

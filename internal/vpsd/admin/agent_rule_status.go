@@ -92,6 +92,34 @@ func (s *Server) withIPForward(resp *BatchResponse) {
 	}
 }
 
+// ForwardPolicyStatus is the server's check of the other tables' forward chains (design.md 6.1、
+// 10.2a 節). 宣言は internal/vpsd/adminapi にある。
+type ForwardPolicyStatus = adminapi.ForwardPolicyStatus
+
+// ForwardPolicyDrop is one chain of ForwardPolicyStatus.Drops.
+type ForwardPolicyDrop = adminapi.ForwardPolicyDrop
+
+// ForwardPolicyBackend is implemented by a Backend that forwards through the kernel and so passes
+// the other tables' forward chains (design.md 6.1、10.2a 節). It is optional like IPForwardBackend: a
+// Backend without it, and a userspace-mode server, serve the rules without forward_policy.
+type ForwardPolicyBackend interface {
+	// ForwardPolicy runs the check now. ok is false when this server does not forward through the
+	// kernel, so the chains would say nothing about its rules.
+	ForwardPolicy() (status ForwardPolicyStatus, ok bool)
+}
+
+// withForwardPolicy adds forward_policy to a rules response, when the Backend reports it
+// (design.md 10.2a、7a.11 節; additive to API v1).
+func (s *Server) withForwardPolicy(resp *BatchResponse) {
+	b, ok := s.backend.(ForwardPolicyBackend)
+	if !ok {
+		return
+	}
+	if st, ok := b.ForwardPolicy(); ok {
+		resp.ForwardPolicy = &st
+	}
+}
+
 // withUDPReplies adds udp_replies to a rules response, when the Backend observes them (design.md
 // 10.2a、7a.11 節; additive to API v1).
 func (s *Server) withUDPReplies(resp *BatchResponse) {

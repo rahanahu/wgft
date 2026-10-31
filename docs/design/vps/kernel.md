@@ -355,7 +355,27 @@ conntrack の操作は「宣言状態に収束させる」1 手順だけを持�
 
 - `ip` `ip6` `inet` の全ファミリで forward フックの base chain を列挙し、`policy drop` があれば、そのチェーンに足す 2 行(`oifname "wg0" accept` と `iifname "wg0" ct state established,related accept`)を提示します。
   ufw の残骸が `ip filter FORWARD` にある場合もこれで拾う。
-  この手作業は 1 回きりでポートに依存しません
+  この手作業は 1 回きりでポートに依存しません。
+  wgft の転送の 2 つの向きが、どちらも落としうる規則より先に accept される場合は、提示しません。
+  1 つは wg0 へ出る向き(公開側から来た接続の新しいパケットと established のパケット)、もう 1 つは wg0 から入る返りの向き(established のパケット)です。
+  規則はチェーンの順に読み、そのチェーンの最初の一致条件なしの jump の位置で、jump の先(Docker の `DOCKER-USER`)の規則を読みます。
+  数える accept は、その向きのすべてのパケットに当てはまるものだけです。
+  2 行のほか、iptables の `-o wg0 -j ACCEPT` と `-i wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT`、インタフェースを問わない established の accept(返りの向き)、firewalld の `ct status dnat accept`(両方の向き)、一致条件の無い accept(両方の向き)が当たります。
+  wgft のカーネルの転送はすべて DNAT 済みのフローなので、`ct status dnat accept` は両方の向きを通します。
+  この形を実際の firewalld のホストで確かめてはいません。
+  ポートや送信元などの一致条件を他にも持つ accept と、インタフェース名の前方一致(`wg+`)の accept は数えません。
+  前方一致は wg0 の名前に当てはまりうるが、wgft の転送のすべてを通すとは判定できないので、所見を出す側に倒します。
+  drop、reject、return、goto、読まない jump、未知の verdict の規則が、その向きのパケットに当てはまりうる場合は、そこから後の accept を数えません。
+  未知の verdict には、verdict map(`iifname vmap { "pub0" : drop }`)と queue が含まれます。
+  インタフェースか ct state がその向きを外す規則(たとえば `ct state invalid drop`)だけが、この扱いを受けません。
+  `ct state` の set(`ct state { established, related }`)は中身を読まず、established と related の集合とみなします。
+  `related` を含まない `ct state established accept` も返りの向きに数えるので、その場合は RELATED の ICMP が落ちることがあります。
+  したがって、一致条件なしの drop の後と、一致条件なしの jump の先の `RETURN` の後にある行は数えません。
+  jump の先の、その向きのすべてのパケットに当てはまる `RETURN` は、jump の元のチェーンの続きへ戻ります。
+  検査は nftables のテーブルだけを読みます。
+  iptables-legacy で FORWARD を DROP にしたホストでは、所見が出ません。
+  この判定が入る前は、2 行を足して転送が通った後も、同じ提示が残っていました(2026-10-30)。
+  エージェントの手掛かり([10.2c 節](../diagnosis/agent-kernel-host.md#hostforwarding-の判定))は accept を探さず、既定で落とすチェーンをそのまま示します
 - input フックの base chain で `ct state established` が accept されているかを確認し、されていなければ提示します。
   `vpsd` から wg0 経由で張る接続の返りが通るために必要です
 - 他テーブルの nat prerouting チェーンに同じポートの DNAT があれば、そのルールの追加を拒否します。

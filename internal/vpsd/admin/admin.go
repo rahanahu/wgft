@@ -393,6 +393,7 @@ func (s *Server) rulesResponse() (BatchResponse, error) {
 	s.withAgentRuleStatus(&resp)
 	s.withUDPReplies(&resp)
 	s.withIPForward(&resp)
+	s.withForwardPolicy(&resp)
 	return resp, nil
 }
 
@@ -426,6 +427,7 @@ func (s *Server) postBatch(w http.ResponseWriter, r *http.Request) {
 	s.withAgentRuleStatus(&resp)
 	s.withUDPReplies(&resp)
 	s.withIPForward(&resp)
+	s.withForwardPolicy(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 

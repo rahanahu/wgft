@@ -1,7 +1,7 @@
 # Design specification
 
 The body of the specification is written in Japanese. This index groups current contracts by the questions they answer.
-Current main includes changes after release v1.4.1; consult the documentation at a release tag for that release's behavior.
+Current main includes changes after release v1.5.0; consult the documentation at a release tag for that release's behavior.
 The compatibility contract covers the Linux server and agent, plus the Windows agent within the range verified on Windows 11 hardware. The macOS agent remains outside the contract.
 
 | Reader question | Topic and scope (Japanese body) |

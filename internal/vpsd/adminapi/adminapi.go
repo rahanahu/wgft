@@ -119,6 +119,29 @@ type BatchResponse struct {
 	// 10.2a 節、7a.11 節). v1 への加算で、カーネルモードの server だけが載せる。ユーザー空間モードの
 	// server と報告を持たない Backend では省く。
 	IPForward *IPForwardStatus `json:"ip_forward,omitempty"`
+	// ForwardPolicy is the check of the other nftables tables' forward chains on this VPS, run when
+	// the response is built (design.md 6.1、10.2a 節、7a.11 節). v1 への加算で、カーネルモードの server
+	// だけが載せる。ユーザー空間モードの server と報告を持たない Backend では省く。
+	ForwardPolicy *ForwardPolicyStatus `json:"forward_policy,omitempty"`
+}
+
+// ForwardPolicyStatus is the server check of the other tables' forward chains as the server ran it
+// just now (design.md 6.1、10.2a 節). A chain that drops by default and does not accept wgft's
+// forwarding may keep every rule the kernel forwards from reaching the tunnel.
+type ForwardPolicyStatus struct {
+	// Drops lists the forward chains that drop by default and in which the check found no accept for
+	// both directions of wgft's forwarding. Omitted when there is none or the check could not run.
+	Drops []ForwardPolicyDrop `json:"drops,omitempty"`
+	// Error says why the check could not run. Omitted when it ran.
+	Error string `json:"error,omitempty"`
+}
+
+// ForwardPolicyDrop is one forward chain of ForwardPolicyStatus.Drops.
+type ForwardPolicyDrop struct {
+	// Where names the chain, such as "ip filter FORWARD".
+	Where string `json:"where"`
+	// Suggest is the lines that make the chain accept wgft's forwarding, as server check prints them.
+	Suggest []string `json:"suggest,omitempty"`
 }
 
 // IPForwardStatus is net.ipv4.ip_forward as the server read it just now (design.md 6.1、10.2a 節).

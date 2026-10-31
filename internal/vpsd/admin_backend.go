@@ -542,6 +542,27 @@ func (d *Daemon) IPForward() (admin.IPForwardStatus, bool) {
 	return readIPForward(), true
 }
 
+// ForwardPolicy is admin.ForwardPolicyBackend's implementation (design.md 6.1、10.2a 節). Only a
+// kernel-mode server reports it: its DNAT rules reach wg0 only through every table's forward hook.
+// The check is the one server check and the startup log use, and only its forward findings are
+// reported.
+func (d *Daemon) ForwardPolicy() (admin.ForwardPolicyStatus, bool) {
+	if d.opts.Mode != store.ModeKernel {
+		return admin.ForwardPolicyStatus{}, false
+	}
+	rep, err := d.dp.Inspect()
+	if err != nil {
+		return admin.ForwardPolicyStatus{Error: err.Error()}, true
+	}
+	var st admin.ForwardPolicyStatus
+	for _, f := range rep.Findings {
+		if f.Hook == linux.HookForward {
+			st.Drops = append(st.Drops, admin.ForwardPolicyDrop{Where: f.Where, Suggest: f.Suggest})
+		}
+	}
+	return st, true
+}
+
 // readIPForward reads net.ipv4.ip_forward now, as the admin API reports it.
 func readIPForward() admin.IPForwardStatus {
 	v, _, err := linux.IPForwardStatus()
