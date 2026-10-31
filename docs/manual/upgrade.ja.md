@@ -10,7 +10,7 @@ wgft の入れ替えでは、server のデータディレクトリと agent の�
 
 | 導入方法 | 永続データ | 設定 |
 | --- | --- | --- |
-| Linux systemd server | `/var/lib/wgft`。付属の `DynamicUser` unit では、実体は `/var/lib/private/wgft` です | `/etc/wgft/server.env`、導入した unit、ローカルの drop-in |
+| Linux systemd server | `/var/lib/wgft`。付属の `DynamicUser` unit では、実体は `/var/lib/private/wgft` です。 | `/etc/wgft/server.env`、導入した unit、ローカルの drop-in |
 | Linux systemd agent | `/var/lib/wgft/agent.json` とデータディレクトリ | `/etc/wgft/agent.env`、導入した unit、カーネルモードの drop-in |
 | README の Linux フォアグラウンド agent | `~/.wgft` | 起動時のフラグと環境変数 |
 | Windows agent | `%ProgramData%\wgft\agent.json` | 起動する利用者、フラグ、環境変数 |
@@ -78,7 +78,7 @@ macOS では、[デスクトップの導入手順](setup-desktop.ja.md#macos-で
 認証情報のディレクトリと設定した `UserName` を保持します。
 この更新方法は導入手順に記載した導入、停止、起動の手順を組み合わせたもので、LaunchDaemon の更新としては未確認です。
 
-Docker では、コンテナの入れ替えや再作成の際に名前付きボリュームを両方とも保持し、対象の版のイメージと compose の変更を確認します。
+Docker では、コンテナの入れ替えや再作成の際に server と agent の名前付きボリュームを両方とも保持し、対象の版のイメージと compose の変更を確認します。
 `docker compose ... down -v` はボリュームを削除するため、更新ではなく削除の操作です。
 [Docker の導入手順](setup-docker.ja.md)は永続マウントとコンテナの起動を説明していますが、イメージの更新手順としては未確認です。
 
