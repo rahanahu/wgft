@@ -21,7 +21,7 @@ flowchart LR
   end
 ```
 
-wgft は、任意の TCP/UDP ポートをそのまま転送したい用途、特にゲームサーバの公開を主な用途にしています。HTTPS も転送できますが、TLS 終端や認証は行わず、自宅側のリバースプロキシに任せます。
+wgft は、任意の TCP/UDP ポートをそのまま転送する用途、特にゲームサーバの公開を主に想定しています。HTTPS も転送できますが、TLS 終端と認証は行わず、自宅側のリバースプロキシに任せます。
 
 ## 特徴
 
@@ -34,9 +34,9 @@ wgft は、任意の TCP/UDP ポートをそのまま転送したい用途、特
 
 ## wgft を作った理由
 
-wgft は Pangolin から着想を得ています。Pangolin を使って、VPS を入口に自宅ネットワークへトンネルする構成の便利さを知りました。一方、ゲームサーバなどの raw TCP/UDP 転送だけが目的なら、もっと小さく、ポート転送に特化したツールが欲しいと感じたのが wgft を作ったきっかけです。日本の IPv4 over IPv6 回線など、自宅側で任意の IPv4 ポートを外部公開できない環境も想定しています。
+wgft は Pangolin から着想を得ています。Pangolin を使い、VPS と自宅ネットワークをトンネルで接続する構成が便利だと知りました。一方、ゲームサーバなどの raw TCP/UDP 転送だけが目的なら、より小さくポート転送に特化したツールが欲しいと感じ、wgft を作りました。日本の IPv4 over IPv6 回線など、自宅側で任意の IPv4 ポートを外部公開できない環境も想定しています。
 
-そのため wgft は、WireGuard によるトンネル、nftables によるカーネル転送、シンプルな TCP/UDP ルールに機能を絞っています。必要な WireGuard と wgft 用 nftables ルールは wgft が管理するため、手作業でトンネルや DNAT ルールを組む必要はありません。TLS 終端、SSO、証明書管理、Web アプリ公開は扱わず、リバースプロキシなど別のソフトウェアに任せます。
+そのため wgft は、WireGuard によるトンネル、nftables によるカーネル転送、シンプルな TCP/UDP ルールに機能を絞っています。WireGuard の設定と wgft 用の nftables ルールは wgft が管理するため、手作業でトンネルや DNAT ルールを組む必要はありません。TLS 終端、SSO、証明書管理、Web アプリ公開は扱わず、リバースプロキシなど別のソフトウェアに任せます。
 
 ## 動作環境とモード
 
@@ -48,9 +48,18 @@ VPS 側の server は Linux、agent は Linux、Windows amd64、Apple シリコ�
 | 権限 | `CAP_NET_ADMIN` が必要 | 通常は root 権限と TUN デバイスが不要 |
 | wgft プロセス停止中 | 設定済みの転送は継続 | 転送も停止 |
 
-server と Linux の agent には、カーネルモードを推奨します。ユーザー空間モードは、カーネルモードを使えない環境で使うモードです。転送の保証はカーネルモードより弱くなります。root やカーネル WireGuard が使えない VPS、Docker、Windows と macOS の agent、root 権限のない Linux の agent では、ユーザー空間モードを使います。カーネルモードには Linux 6.1 以降と nftables 1.0.6 以降が必要です。互換性を保つため、agent の既定は root 権限を要しないユーザー空間モードのままです。このため、Linux の agent はカーネルモードを指定したときだけカーネルモードで動きます。条件と手順は[カーネルモードのエージェント](docs/manual/agent-kernel.ja.md)にあります。ユーザー空間モードの制約は[ユーザー空間の設計](docs/design/userspace/README.md)にあります。
+server と Linux の agent には、カーネルモードを推奨します。ユーザー空間モードはカーネルモードを使えない環境のためのモードです。転送の保証はカーネルモードより弱くなります。root やカーネル WireGuard が使えない VPS、Docker、Windows と macOS の agent、root 権限のない Linux の agent では、ユーザー空間モードを使います。カーネルモードには Linux 6.1 以降と nftables 1.0.6 以降が必要です。
 
-Linux のユーザー空間モードでは、ホストのソケットのバッファの設定が必要になる場合があります。また、既定のフロー数の上限では、agent が 1 つ、TCP の転送ポートが 1 つの server に約 12.7 GiB のホストメモリが必要です。この値は設計文書に記載した最悪値の見積もりで、計算に数えたフローの状態やバッファなどが、攻撃によってそれぞれの上限まで同時に埋まった場合のものです。この値は普段の使用量の予想ではありません。フロー数の上限を下げても、この要件は約 3.2 GiB 未満にはなりません。設定方法と条件は [VPS のユーザー空間モード](docs/manual/setup-server-userspace.ja.md)、内訳は [設計文書](docs/design/agent-dataplane.md#7-データプレーン自宅側)を参照してください。ユーザー空間モードは、メモリの使用量が最悪値の見積もりを超えないことを保証しません。送り残しの多い TCP の接続に相手が中身の無い ACK を送り続けると、プロセスのメモリは見積もりを超えて増えることがあります。ユーザー空間モードの server では、公開側の利用者はホストのソケットに接続し、netstack の相手は agent だけなので、この制限を起こすには agent の WireGuard の鍵が要ります。agent を信頼できない場合は、server をカーネルモードで動かしてください。カーネルモードの server の後ろのユーザー空間モードの agent にも、TCP のルールの公開側の利用者に対して同じ制限があります。Linux の agent はカーネルモードで動かせばこの制限を受けません。詳細は[既知の制限](docs/design/userspace/memory-limits.md#中身の無い-segment-の処理待ち)を参照してください。
+互換性を保つため、agent の既定は root 権限を要しないユーザー空間モードのままです。このため、Linux の agent はカーネルモードを指定したときだけカーネルモードで動きます。条件と手順は[カーネルモードのエージェント](docs/manual/agent-kernel.ja.md)にあります。ユーザー空間モードの制約は[ユーザー空間の設計](docs/design/userspace/README.md)にあります。
+
+Linux のユーザー空間モードでは、ホストのソケットのバッファの設定が必要になる場合があります。また、フロー数の上限が既定値のとき、agent が 1 つで TCP の転送ポートが 1 つの server には、約 12.7 GiB のホストメモリが必要です。この値は設計文書に記載した最悪値の見積もりです。計算に数えたフローの状態やバッファなどが、攻撃によってそれぞれの上限まで同時に埋まった場合を想定しており、普段の使用量の予想ではありません。フロー数の上限を下げても、必要なメモリは約 3.2 GiB より小さくなりません。設定方法と条件は [VPS のユーザー空間モード](docs/manual/setup-server-userspace.ja.md)、内訳は [設計文書](docs/design/agent-dataplane.md#7-データプレーン自宅側)を参照してください。
+
+ユーザー空間モードは、メモリの使用量が最悪値の見積もりを超えないことを保証しません。ACK を待つデータの多い TCP の接続で、相手がデータを含まない ACK を送り続けると、プロセスのメモリが見積もりを超えて増えることがあります。この増加を起こせる相手は、どちらがユーザー空間モードかで変わります。
+
+- ユーザー空間モードの server: 公開側の利用者はホストのソケットに接続し、netstack と通信するのは agent だけです。このため、増加を起こすには agent の WireGuard の鍵が要ります。agent を信頼できない場合は、server をカーネルモードで動かしてください。
+- ユーザー空間モードの agent: server がカーネルモードのとき、TCP のルールの公開側の利用者に対して同じ制限があります。Linux の agent はカーネルモードで動かせばこの制限を受けません。
+
+詳細は[既知の制限](docs/design/userspace/memory-limits.md#中身の無い-segment-の処理待ち)を参照してください。
 
 ## クイックスタート
 
@@ -78,7 +87,7 @@ sudo wgft server check
 sudo wgft server run
 ```
 
-`vps.example.com` を VPS の名前に置き換えます。VPS の firewall で UDP 51820 と TCP 8443 を開けてください。`wgft server check` は、既存の firewall で追加の許可が必要な場合にも知らせます。カーネルモードでは必要に応じて IPv4 forwarding を有効にします。`server.env` は秘密を含まないため、付属の systemd unit からも読める 0644 にします。
+`vps.example.com` を VPS の名前に置き換えます。VPS の firewall で UDP 51820 と TCP 8443 を開けてください。既存の firewall に追加の許可が必要な場合は、`wgft server check` がその旨も表示します。カーネルモードの server は、必要に応じて IPv4 forwarding を有効にします。`server.env` は秘密を含まないため、付属の systemd unit からも読める 0644 にします。
 
 別の VPS shell で、初回登録用の join string を発行します。
 
@@ -115,7 +124,7 @@ Web UI の「+ ルールを追加」からも同じ転送を設定できます�
 
 ![wgft のダッシュボード](docs/images/dashboard.ja.png)
 
-Web UI では agent とルールの状態を確認し、ルールの追加や通信の診断ができます。管理 API は既定では外部公開されません。SSH で手元へ転送して `http://localhost:8686` を開きます。
+Web UI では agent とルールの状態を確認し、ルールの追加や通信の診断ができます。管理 API は既定では外部に公開されません。SSH のポート転送を使い、手元のマシンで `http://localhost:8686` を開きます。
 
 ```sh
 ssh -L 8686:/run/wgft/admin.sock root@vps
@@ -140,10 +149,10 @@ agent が接続できる LAN の宛先は、[`WGFT_AGENT_ALLOW_TARGETS`](docs/ma
 
 ## 開発状況
 
-v1.5.0。v1.0 からの互換性の保証は Linux の server と agent、Windows 11 の実機で確認した範囲の Windows agent に適用します。macOS の agent は実機で基本動作を確認済みですが、再接続を決める新しい判定は実機で未確認のため、保証の対象外です。対応範囲の定義は [設計文書の 7a.11 節](docs/design/compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)にあります。
+現在の版は v1.5.0 です。v1.0 からの互換性の保証は Linux の server と agent、Windows 11 の実機で確認した範囲の Windows agent に適用します。macOS の agent は実機で基本動作を確認済みですが、再接続を決める新しい判定は実機で未確認のため、保証の対象外です。対応範囲の定義は [設計文書の 7a.11 節](docs/design/compatibility.md#7a11-v10-の互換性の保証サーフェスごとの一覧)にあります。
 
-更新後に旧版へ戻すことは保証しません。[更新手順](docs/manual/upgrade.ja.md)に従って、更新前にサーバのデータディレクトリをバックアップしてください。v1.2.0 以降のサーバのデータベースはスキーマの版 9 を使い、v1.1.x 以前の server は開きません。
+更新後に旧版へ戻すことは保証しません。[更新手順](docs/manual/upgrade.ja.md)に従って、更新前にサーバのデータディレクトリをバックアップしてください。v1.2.0 以降のサーバのデータベースはスキーマの版 9 を使い、v1.1.x 以前の server はこのデータベースを開けません。
 
 ## ライセンス
 
-[MIT](LICENSE)。バイナリに含まれる Go module のライセンスは `THIRD_PARTY_LICENSES.txt` にまとめ、release と container image にも含めています。
+ライセンスは [MIT](LICENSE) です。バイナリに含まれる Go module のライセンスは `THIRD_PARTY_LICENSES.txt` にまとめ、release と container image にも含めています。
