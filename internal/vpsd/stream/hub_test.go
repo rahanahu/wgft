@@ -133,6 +133,26 @@ func readMsg(t *testing.T, c *websocket.Conn) (proto.Message, error) {
 	return m, json.Unmarshal(b, &m)
 }
 
+// waitPendingReturned は、agent の確立前の stream の枠がすべて返るまで待つ。断った stream の serve は
+// WebSocket の close の手順を終えてから枠を返すので、クライアントが close を読んだ時点ではまだ枠を
+// 持っていることがある。待たずに次の dial を送ると、負荷の下では断った stream の枠が
+// maxPendingPerAgent に達したまま残り、次の dial が 429 で断られる。
+func waitPendingReturned(t *testing.T, h *Hub, agent, after string) {
+	t.Helper()
+	pending := func() int {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.pending[agent]
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for pending() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: the refused stream still holds %d pending slots of %s after 5s", after, pending(), agent)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestStream(t *testing.T) {
 	server, _ := wgtypes.GeneratePrivateKey()
 	b := &fakeBackend{server: server, keys: map[string]wgtypes.Key{}, gen: 5}
@@ -166,6 +186,7 @@ func TestStream(t *testing.T) {
 			t.Errorf("%s: want policy violation close, got %v", name, err)
 		}
 		c.CloseNow()
+		waitPendingReturned(t, h, "home", name)
 	}
 	if h.Status("home").Connected {
 		t.Error("rejected connections must not register")
