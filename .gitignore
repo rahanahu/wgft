@@ -15,4 +15,6 @@
 
 # Python のバイトコード (lab/agentmem.py などを import したときにできる)
 __pycache__/
+
+# cargo のビルド成果物 (v2 の Rust ワークスペース)
 /target/
