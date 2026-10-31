@@ -78,9 +78,7 @@ func (s *stack) tryBoost(c *tcb, gen uint32, dir boostDir) {
 	}
 	s.boostGranted.Add(1)
 	c.boosted = true
-	c.recs.resize(make([]record, boostRecords))
-	c.snd.resize(boostSize, [][2]uint64{{c.unaOff, c.tailOff}})
-	c.sndCap = boostSize
+	c.setSendStage(boostSize, make([]record, boostRecords))
 	if dir == boostRecv {
 		c.growRecv()
 	}
@@ -94,9 +92,7 @@ func (s *stack) tryBoost(c *tcb, gen uint32, dir boostDir) {
 // growRecv は受信の窓を floor より先へ開く。mu を持ち、枠を持つ接続で呼ぶ。
 func (c *tcb) growRecv() {
 	c.rcvBoost = true
-	c.rcv.r.resize(boostSize, c.rcv.written())
-	c.rcv.setIntervals(make([]interval, boostIntervals))
-	c.rcvCap = boostSize
+	c.setRecvStage(boostSize, make([]interval, boostIntervals))
 	// 広告する窓は一度に開かない。窓の上限は測定で上がり、窓は届いた segment ごとに広がる(rcvwin.go)
 }
 
@@ -129,15 +125,34 @@ func (c *tcb) demote(now int64) bool {
 		return false
 	}
 	c.boosted, c.rcvBoost = false, false
-	c.snd.resize(sendFloor, [][2]uint64{{c.unaOff, c.tailOff}})
-	c.sndCap = sendFloor
-	c.rcv.r.resize(recvFloor, c.rcv.written())
-	c.rcv.setIntervals(c.floorIv)
-	c.rcvCap = recvFloor
+	c.setSendStage(sendFloor, c.floorRecs)
+	c.setRecvStage(recvFloor, c.floorIv)
 	c.rcvSsthresh = min(c.rcvSsthresh, recvFloor)
-	c.recs.resize(c.floorRecs)
 	c.s.boostReclaimed.Add(1)
 	return true
+}
+
+// 予約の段を移す(設計文書の「boost の取得と floor への戻り」と「上界の式」の段を変える間の一時の保持)。輪は
+// 生きている範囲を新しい chunk へ写し、写す間だけ古い chunk と合わせて持つ。1 本の接続は送信の輪を移してから
+// 受信の輪を移し、どちらの輪も次の輪を移す前に古い chunk を返す。
+
+// setSendStage は送信の向きを容量 capacity の段に移す。送信の輪の生きている範囲を写し、確認を待つ記録を
+// recs に移す。呼び出し側は、送信の輪の byte が capacity 以下で、記録の数が len(recs) 以下であることを
+// 保証する(floor へ戻すときは demote が確かめる)。mu を持って呼ぶ。
+func (c *tcb) setSendStage(capacity uint64, recs []record) {
+	c.snd.resize(capacity, [][2]uint64{{c.unaOff, c.tailOff}})
+	c.sndCap = capacity
+	c.recs.resize(recs)
+}
+
+// setRecvStage は受信の向きを容量 capacity の段に移す。受信の輪の書いた範囲(未読と順序外)を写し、順序外の
+// 区間を iv に移す。呼び出し側は、保持する最も右の byte が最も古い未読の byte から capacity の内側にあり、
+// 使っている区間が iv に入ることを保証する(floor へ戻すときは demote が確かめる)。そのため setIntervals は
+// 区間を持ち続けて偽を返すことが無く、その値を見ない。mu を持って呼ぶ。
+func (c *tcb) setRecvStage(capacity uint64, iv []interval) {
+	c.rcv.r.resize(capacity, c.rcv.written())
+	c.rcv.setIntervals(iv)
+	c.rcvCap = capacity
 }
 
 // acquire は c に枠を 1 つ貸す。空きが無ければ、写しの保有者を順に TryLock で取り、需要の無い保有者を
