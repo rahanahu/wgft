@@ -254,6 +254,21 @@ RFC 9293 3.10.7.4 は窓 0 の時に ACK、URG、RST の受け入れを求め、
 
 ## qbench で見えた差
 
-QBENCH_PLACEHOLDER
+関門の行列(`TestQBenchGate`)を、同じ commit の wgstack でラボの 7.2 で 2 回流しました(2026-11-01)。
+最後の判定は、6.1 と同じくすべての場合で通りました。
+`recv/loss5%/linux-client` と `thin-recv/loss5%/linux-client` は、1 回目に 18 回の実行で判定できず、36 回から倍にした 72 回の実行で通りました。
+2 回目は `recv/loss5%/linux-client` が 18 回で通り、`thin-recv/loss5%/linux-client` は 18 回で判定できませんでした。
+6.1 でも、この 2 つの場合は線の近くにあり、流し直しで通っていました。
+
+Linux の DUT の値は、どの場合も 6.1 の揺れの範囲に収まりました。
+例えば `thin-recv/loss5%/linux-client` の Linux の p99 は、6.1 の関門とその流し直しで 383 ms と 525 ms、7.2 の 18 回の実行の 4 回で 410 から 418 ms、72 回の実行で 284 ms でした。
+
+この文書の受け手の変化の効果は、qbench の場合では見分けられませんでした。
+性能の族は `tcp_rmem` の上限を 4 MiB にし、qbench の経路の帯域と遅延の積(20 Mbit/s で往復 50 ms の約 125 KB)は窓の上限より十分小さいので、自動調整の目標の違いが速さを決めないためです。
+自動調整の変化を測るには、帯域と遅延の積が窓の上限に近い経路の場合が要ります。
+
+保存した参照の中央値(`internal/tcpharness/qbench/testdata/reference.json`)は、2 回目の実行で 7.2 の値に取り直しました。
+Linux か gVisor の最大と最小の比が 2 を超えた場合は保存しない規則なので、`send/loss1%`、`send/loss5%`、`recv/reorder` は 6.1 の値のままです。
+どの場合の値がどのカーネルで測ったものかは、ファイルの場合ごとの記録にあります。
 
 [ユーザー空間の仕様](README.md)
