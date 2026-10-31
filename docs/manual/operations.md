@@ -88,6 +88,22 @@ In userspace mode such packets may have reached the LAN before this check was ad
 When the agent runs in a container on a Docker bridge network, as `deploy/agent.compose.yaml` does by default, the agent host's networks are the container's own, so the broadcast address of your LAN is not refused as a broadcast address there.
 After changing the setting, run `sudo systemctl restart wgft-agent`.
 
+## Try the experimental network stack
+
+In userspace mode the agent terminates TCP and UDP from the tunnel in a network stack inside the process.
+The default is gVisor's.
+`WGFT_AGENT_NETSTACK=wgstack` selects wgstack, wgft's own TCP/IP stack, instead:
+
+```text
+WGFT_AGENT_NETSTACK=wgstack
+```
+
+wgstack is experimental.
+Its transfer quality and resource behavior are not covered by the compatibility guarantee, and the agent logs a warning line when it starts with it.
+Unset or empty means `gvisor`, and any other value stops the agent with exit code 3.
+Kernel mode runs no network stack; it logs that the setting is unused and starts.
+After changing the setting, run `sudo systemctl restart wgft-agent`.
+
 ## Logs and diagnostics
 
 The provided systemd units write logs to journald:

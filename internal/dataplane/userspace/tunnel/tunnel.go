@@ -1,5 +1,5 @@
-// Package tunnel は、エージェント側が wireguard-go と gVisor の netstack でユーザー空間に持つトンネル
-// (仕様 7 節)。カーネルの設定は変更しないので、特権も NET_ADMIN も要らない。ただしホストは、
+// Package tunnel は、エージェント側が wireguard-go と netstack でユーザー空間に持つトンネル(仕様 7 節)。
+// netstack は gVisor(internal/nettun)か wgstack(internal/wgstack)で、宣言の Netstack が選ぶ(netstack.go)。カーネルの設定は変更しないので、特権も NET_ADMIN も要らない。ただしホストは、
 // 7 節のソケットのバッファの条件を満たす必要がある。VPS 側の internal/dataplane/userspace/utun と
 // 対になる。
 package tunnel
@@ -27,7 +27,6 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgbind"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgipc"
 	"github.com/rahanahu/wgft/internal/lograte"
-	"github.com/rahanahu/wgft/internal/nettun"
 )
 
 // minKeepalive is the floor New applies to Config.Keepalive; see the comment at its use.
@@ -43,13 +42,18 @@ type Config struct {
 	MTU             int
 	Keepalive       time.Duration
 	Logf            func(format string, args ...any)
+	// Netstack は netstack の実装(WGFT_AGENT_NETSTACK)。空は gvisor である
+	Netstack string
+	// MaxTCPFlows は同時フロー数のプロセス全体の上限 K(WGFT_MAX_TCP_FLOWS)。wgstack が接続の枠の数を
+	// 決めるのに使う。0 は既定値である
+	MaxTCPFlows int
 }
 
 // Tunnel は動いているトンネル。relay.Network として netstack 上にリスナーを開ける。
 type Tunnel struct {
 	cfg  Config
 	dev  *device.Device
-	tnet *nettun.Device
+	tnet netstack
 
 	// bufs は、このトンネルを立てた直後に測った WireGuard の UDP ソケットのバッファである
 	// (設計文書 7 節の「ソケットのバッファの条件」)。値はソケットを開いたときに決まり、その後は
@@ -88,10 +92,11 @@ func New(cfg Config) (*Tunnel, error) {
 	if cfg.Keepalive < minKeepalive {
 		cfg.Keepalive = 25 * time.Second
 	}
-	tnet, err := nettun.Create(cfg.Address, cfg.MTU)
+	tnet, err := newNetstack(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
+	startMemProbe(tnet)
 	t := &Tunnel{cfg: cfg, tnet: tnet}
 	t.dev = wgbind.NewDevice(tnet, bindForDevice(), device.NewLogger(device.LogLevelError, "wg: "))
 
@@ -142,8 +147,8 @@ func (t *Tunnel) ListenUDP(port uint16) (net.PacketConn, error) {
 	return t.tnet.ListenUDP(netip.AddrPortFrom(t.cfg.Address, port))
 }
 
-// ListenTCP は netstack 上の自分のアドレスで TCP を待ち受ける。返す net.Listener の Accept は
-// *nettun.TCPConn を返し、上限で拒む接続を Abort (RST) できる(仕様 7 節、GitHub issue #25)。
+// ListenTCP は netstack 上の自分のアドレスで TCP を待ち受ける。返す net.Listener の Accept が返す接続は
+// Abort を持ち、上限で拒む接続を RST で終えられる(仕様 7 節、GitHub issue #25)。
 func (t *Tunnel) ListenTCP(port uint16) (net.Listener, error) {
 	return t.tnet.ListenTCP(netip.AddrPortFrom(t.cfg.Address, port))
 }

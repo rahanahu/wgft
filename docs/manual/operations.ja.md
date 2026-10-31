@@ -95,6 +95,22 @@ agent を Docker のブリッジネットワークのコンテナで動かす場
 そのため、コンテナの中の agent は、自宅の LAN のブロードキャストのアドレスをブロードキャストのアドレスとしては拒みません。
 設定を変更した後は `sudo systemctl restart wgft-agent` を実行します。
 
+## 実験的な netstack を試す
+
+ユーザー空間モードの agent は、トンネルから届く TCP と UDP をプロセスの中の netstack で終端します。
+既定は gVisor の netstack です。
+`WGFT_AGENT_NETSTACK=wgstack` を設定すると、代わりに wgft が持つ TCP/IP の実装の wgstack を使います。
+
+```text
+WGFT_AGENT_NETSTACK=wgstack
+```
+
+wgstack は実験的な選択肢です。
+転送の品質と資源の挙動は互換性の保証に含まれず、wgstack で起動すると agent は警告の行を 1 つ出します。
+省略と空の値は `gvisor` で、それ以外の値では agent は終了コード 3 で止まります。
+カーネルモードは netstack を使わないので、設定を使わない旨を出して起動します。
+設定を変えた後は `sudo systemctl restart wgft-agent` を実行します。
+
 ## ログと診断
 
 付属の systemd unit はログを journald に保存します。

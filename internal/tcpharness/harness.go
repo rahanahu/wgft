@@ -1,0 +1,854 @@
+package tcpharness
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"hash/fnv"
+	"math/rand/v2"
+	"net/netip"
+	"os"
+	"runtime"
+	"sort"
+	"strconv"
+	"sync"
+	"testing"
+	"time"
+)
+
+// The addresses and the MTU every DUT is built with. The MTU is wgft's default tunnel MTU,
+// WGFT_MTU, so an MSS of 1380 is what the agent advertises in production.
+var (
+	DUTAddr  = netip.MustParseAddr("10.200.0.2")
+	PeerAddr = netip.MustParseAddr("10.200.0.1")
+)
+
+const MTU = 1420
+
+// SeedEnv names the environment variable that fixes the run's seed, to replay a failure.
+const SeedEnv = "WGFT_TEST_TCPHARNESS_SEED"
+
+// Known is one entry of an engine's expected-difference list: what the engine is known to do
+// instead, and why that is accepted. Observed must equal the failing check's observation, so a
+// difference that changes shape fails the run instead of hiding behind the entry.
+type Known struct {
+	Observed string
+	Reason   string
+	// Sometimes marks a difference that a real-time engine shows on some runs and not on others,
+	// because it turns on timing the testbench does not control. A run without it is then logged
+	// as a pass, not reported as an unexpected one. A ClockedDUT runs the same way every time, so
+	// on one an entry with Sometimes is itself an error.
+	Sometimes bool
+}
+
+// Engine names one TCP engine and how to build a fresh DUT of it. New gets the scenario's seed;
+// an engine that takes randomness, such as an ISN key, uses it so a run can be replayed. Known
+// maps "scenario/check" to the engine's expected differences.
+type Engine struct {
+	Name  string
+	New   func(tb testing.TB, seed uint64) DUT
+	Known map[string]Known
+	// Prepare, when set, runs before New for each scenario, so an engine can apply the scenario's
+	// own settings: the Linux reference applies Scenario.Linux.
+	Prepare func(tb testing.TB, s Scenario)
+	// Parallel runs the scenarios concurrently, each against its own DUT. Only an engine whose
+	// DUTs share nothing may set it: the Linux reference shares one namespace, its sysctls and
+	// its device name.
+	Parallel bool
+	// SlowFirst names scenarios a parallel engine starts first because they wait long in real
+	// time, such as for a 30 s timer, so the others run while they wait.
+	SlowFirst []string
+}
+
+// Scenario is one engine-neutral conformance scenario.
+type Scenario struct {
+	Name string
+	// Refs names the RFC sections and the gVisor packetimpact tests the scenario follows.
+	Refs string
+	Run  func(h *H)
+	// Linux holds sysctls, as path and value under /proc/sys, that the reference Linux uses for
+	// this scenario on top of its pinned configuration. A scenario family that checks a mechanism
+	// the pinned configuration switches off, such as RACK-TLP, turns it back on here.
+	Linux [][2]string
+}
+
+// runSeed is the run's seed: SeedEnv's value, or a random one that the run logs.
+func runSeed(t testing.TB) uint64 {
+	if v := os.Getenv(SeedEnv); v != "" {
+		s, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			t.Fatalf("%s=%q is not an unsigned integer", SeedEnv, v)
+		}
+		return s
+	}
+	return rand.Uint64()
+}
+
+// ScenarioSeed derives a scenario's seed from the run's seed and the scenario's name, so a
+// scenario run alone with -run gets the seed it had in the full run.
+func ScenarioSeed(run uint64, scenario string) uint64 {
+	f := fnv.New64a()
+	f.Write([]byte(scenario))
+	return run ^ f.Sum64()
+}
+
+// Run runs every scenario as a subtest against a fresh DUT of e. A listed difference that no
+// check reached is an error when every scenario ran, and only logged when -run left some out.
+//
+// On a DUT on real time, a scenario that fails while the test process went stallLimit or longer
+// without running is run again on a fresh DUT, up to scenarioAttempts times in all: a loaded
+// machine that stops the testbench can make a correct DUT miss a bound, and the check cannot tell
+// that apart from the DUT's fault. The failed attempt stays in the log. A DUT that fails the same
+// way every time still fails, since only the last attempt counts; a DUT on the harness's clock is
+// never run again.
+func Run(t *testing.T, e Engine, scenarios []Scenario) {
+	seed := runSeed(t)
+	t.Logf("run seed: %d; replay with %s=%d", seed, SeedEnv, seed)
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	ran := 0
+	// parallel subtests run after this function returns, so the list is checked in a cleanup,
+	// which runs once every subtest has finished
+	t.Cleanup(func() { checkUnreached(t, e, seen, ran == len(scenarios)) })
+	for _, s := range runOrder(e, scenarios) {
+		t.Run(s.Name, func(t *testing.T) {
+			if e.Parallel {
+				t.Parallel()
+			}
+			mu.Lock()
+			ran++
+			mu.Unlock()
+			ss := ScenarioSeed(seed, s.Name)
+			t.Logf("refs: %s", s.Refs)
+			t.Logf("scenario seed: %d", ss)
+			for n := 1; ; n++ {
+				a := attempt(t, e, s, ss)
+				mu.Lock()
+				for k := range a.outcome {
+					seen[k] = true
+				}
+				mu.Unlock()
+				if a.retry(n) {
+					t.Logf("RETRY  %s on %s: attempt %d failed while the test process went %v without running; the scenario runs again on a fresh DUT",
+						s.Name, e.Name, n, a.stall.Round(time.Millisecond))
+					continue
+				}
+				a.report(t)
+				return
+			}
+		})
+	}
+}
+
+// runOrder is the order Run starts the scenarios in: as listed, except that a parallel engine
+// starts the ones it names in SlowFirst first.
+func runOrder(e Engine, scenarios []Scenario) []Scenario {
+	if !e.Parallel || len(e.SlowFirst) == 0 {
+		return scenarios
+	}
+	slow := map[string]bool{}
+	for _, n := range e.SlowFirst {
+		slow[n] = true
+	}
+	var order []Scenario
+	for _, first := range []bool{true, false} {
+		for _, s := range scenarios {
+			if slow[s.Name] == first {
+				order = append(order, s)
+			}
+		}
+	}
+	return order
+}
+
+// checkUnreached reports listed differences no check reached: an error when every scenario ran,
+// and a log line when -run left some out.
+func checkUnreached(t *testing.T, e Engine, seen map[string]bool, all bool) {
+	var unreached []string
+	for k := range e.Known {
+		if !seen[k] {
+			unreached = append(unreached, k)
+		}
+	}
+	sort.Strings(unreached)
+	for _, k := range unreached {
+		if all {
+			t.Errorf("known difference %s on %s: no check reached it; fix its key or remove it", k, e.Name)
+		} else {
+			t.Logf("known difference %s: not reached; -run left scenarios out", k)
+		}
+	}
+}
+
+// Outcome of one check.
+const (
+	OutcomePass       = "pass"
+	OutcomeFail       = "fail"
+	OutcomeKnown      = "known"
+	OutcomeUnexpected = "unexpected-pass"
+	OutcomeChanged    = "changed-difference"
+)
+
+// Record runs one scenario against a fresh DUT of e without failing t, and returns the outcomes
+// of each check by key, one per time the scenario ran the check, in order. It lets the harness
+// test itself: a scenario run against a deliberately wrong engine must fail the check meant to
+// catch the fault.
+func Record(t *testing.T, e Engine, s Scenario, seed uint64) map[string][]string {
+	a := attempt(t, e, s, seed)
+	if a.outcome == nil {
+		t.Fatalf("scenario %s did not start: %v", s.Name, a.msgs)
+	}
+	return a.outcome
+}
+
+// stallLimit and scenarioAttempts are Run's rule for running a failed scenario again. 10 ms is
+// below the margin every timed check leaves a correct DUT, and above the few milliseconds an idle
+// machine's scheduler takes.
+var stallLimit = 10 * time.Millisecond
+
+const scenarioAttempts = 3
+
+// attemptResult is one run of a scenario.
+type attemptResult struct {
+	outcome map[string][]string // nil when the scenario did not start
+	msgs    []string            // the failures, in order
+	failed  bool
+	skipped bool
+	clocked bool
+	stall   time.Duration // the longest the test process went without running, on real time
+}
+
+// attempt runs s once against a fresh DUT of e with a recorder, and closes the DUT and whatever
+// else the scenario registered for cleanup before it returns, so another attempt can follow.
+func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
+	rec := &recorder{TB: t}
+	var a attemptResult
+	var w *stallWatch
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if e.Prepare != nil {
+			e.Prepare(rec, s)
+		}
+		d := e.New(rec, seed)
+		_, a.clocked = d.(ClockedDUT)
+		h := newH(rec, e, s.Name, d, seed)
+		a.outcome = h.outcome
+		if !a.clocked {
+			w = watchStalls()
+		}
+		s.Run(h)
+	}()
+	<-done
+	if w != nil {
+		a.stall = w.end()
+	}
+	rec.cleanup()
+	a.msgs, a.failed, a.skipped = rec.msgs, rec.failed, rec.skipped
+	return a
+}
+
+// retry reports whether Run runs the scenario again after its n-th attempt.
+func (a attemptResult) retry(n int) bool {
+	return a.failed && !a.clocked && a.stall >= stallLimit && n < scenarioAttempts
+}
+
+// report hands the attempt's result to t, as if the scenario had run on t itself.
+func (a attemptResult) report(t testing.TB) {
+	t.Helper()
+	for _, m := range a.msgs {
+		t.Error(m)
+	}
+	switch {
+	case a.failed && len(a.msgs) == 0:
+		t.FailNow()
+	case a.skipped:
+		t.SkipNow()
+	}
+}
+
+// recorder is a testing.TB that logs failures instead of failing, ends the scenario's goroutine
+// where the real one would stop the test, and keeps the cleanups for attempt to run.
+type recorder struct {
+	testing.TB
+	msgs     []string
+	failed   bool
+	skipped  bool
+	cleanups []func()
+}
+
+func (r *recorder) Errorf(format string, args ...any) {
+	r.TB.Helper()
+	m := fmt.Sprintf(format, args...)
+	r.msgs = append(r.msgs, m)
+	r.failed = true
+	r.TB.Logf("recorded: %s", m)
+}
+func (r *recorder) Error(args ...any) { r.TB.Helper(); r.Errorf("%s", fmt.Sprint(args...)) }
+func (r *recorder) Fatalf(format string, args ...any) {
+	r.TB.Helper()
+	r.Errorf(format, args...)
+	runtime.Goexit()
+}
+func (r *recorder) Fatal(args ...any) { r.TB.Helper(); r.Fatalf("%s", fmt.Sprint(args...)) }
+func (r *recorder) Fail()             { r.failed = true }
+func (r *recorder) Failed() bool      { return r.failed }
+func (r *recorder) FailNow()          { r.failed = true; runtime.Goexit() }
+func (r *recorder) SkipNow()          { r.skipped = true; runtime.Goexit() }
+func (r *recorder) Skipped() bool     { return r.skipped }
+func (r *recorder) Skipf(format string, args ...any) {
+	r.TB.Helper()
+	r.TB.Logf(format, args...)
+	r.SkipNow()
+}
+func (r *recorder) Skip(args ...any) { r.TB.Helper(); r.TB.Log(args...); r.SkipNow() }
+func (r *recorder) Cleanup(f func()) { r.cleanups = append(r.cleanups, f) }
+func (r *recorder) cleanup() {
+	for i := len(r.cleanups) - 1; i >= 0; i-- {
+		r.cleanups[i]()
+	}
+	r.cleanups = nil
+}
+
+// stallWatch measures the longest the test process went without running: the longest a goroutine
+// that sleeps 1 ms at a time overslept, which a loaded machine's scheduler, a CPU quota or a
+// stopped virtual CPU stretches for every goroutine at once.
+type stallWatch struct {
+	stop  chan struct{}
+	done  chan struct{}
+	worst time.Duration
+}
+
+func watchStalls() *stallWatch {
+	w := &stallWatch{stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(w.done)
+		last := time.Now()
+		for {
+			select {
+			case <-w.stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			now := time.Now()
+			w.worst = max(w.worst, now.Sub(last)-time.Millisecond)
+			last = now
+		}
+	}()
+	return w
+}
+
+// end stops the watch and returns the longest stall it saw.
+func (w *stallWatch) end() time.Duration {
+	close(w.stop)
+	<-w.done
+	return w.worst
+}
+
+// H is the context of one scenario on one DUT.
+type H struct {
+	T        testing.TB
+	DUT      DUT
+	engine   Engine
+	scenario string
+	outcome  map[string][]string
+	rng      *rand.Rand
+	nextPort uint16
+}
+
+func newH(t testing.TB, e Engine, scenario string, d DUT, seed uint64) *H {
+	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
+	return &H{T: t, DUT: d, engine: e, scenario: scenario, outcome: map[string][]string{}, rng: rng,
+		nextPort: uint16(40000 + rng.IntN(20000))}
+}
+
+// Check records one check against the engine's expected-difference list. what states the
+// expectation. got is the observation; it is compared with a listed difference's Observed, so it
+// names behaviour and leaves out values that change from run to run, such as sequence numbers.
+func (h *H) Check(id string, ok bool, what, got string) bool {
+	h.T.Helper()
+	key := h.scenario + "/" + id
+	k, known := h.engine.Known[key]
+	switch {
+	case ok && !known:
+		h.outcome[key] = append(h.outcome[key], OutcomePass)
+		h.T.Logf("PASS  %s: %s; got: %s", key, what, got)
+	case ok && known && k.Sometimes && !h.clocked():
+		h.outcome[key] = append(h.outcome[key], OutcomePass)
+		h.T.Logf("PASS  %s: %s; got: %s; the known difference, which shows only on some runs, did not show on this one", key, what, got)
+	case ok && known:
+		h.outcome[key] = append(h.outcome[key], OutcomeUnexpected)
+		h.T.Errorf("UNEXPECTED PASS  %s on %s: %s; got: %s; the list says: %s; remove the entry", key, h.engine.Name, what, got, k.Observed)
+	case !ok && known && k.Sometimes && h.clocked():
+		h.outcome[key] = append(h.outcome[key], OutcomeChanged)
+		h.T.Errorf("CHANGED DIFFERENCE  %s on %s: %s; got: %s; the list marks it as shown only on some runs, which a DUT on the harness's clock cannot be", key, h.engine.Name, what, got)
+	case !ok && known && got == k.Observed:
+		h.outcome[key] = append(h.outcome[key], OutcomeKnown)
+		h.T.Logf("KNOWN DIFFERENCE  %s on %s: %s; got: %s; reason: %s", key, h.engine.Name, what, got, k.Reason)
+	case !ok && known:
+		h.outcome[key] = append(h.outcome[key], OutcomeChanged)
+		h.T.Errorf("CHANGED DIFFERENCE  %s on %s: %s; got: %s; the list says: %s", key, h.engine.Name, what, got, k.Observed)
+	default:
+		h.outcome[key] = append(h.outcome[key], OutcomeFail)
+		h.T.Errorf("FAIL  %s on %s: %s; got: %s", key, h.engine.Name, what, got)
+	}
+	return ok
+}
+
+// Require is Check, but the scenario stops when the check fails. A known difference ends it as
+// a skip; any other failure ends it as a failure.
+func (h *H) Require(id string, ok bool, what, got string) {
+	h.T.Helper()
+	if h.Check(id, ok, what, got) {
+		return
+	}
+	if o := h.outcome[h.scenario+"/"+id]; o[len(o)-1] == OutcomeKnown {
+		h.T.SkipNow()
+	}
+	h.T.FailNow()
+}
+
+// clocked reports whether the DUT runs on the harness's clock.
+func (h *H) clocked() bool {
+	_, ok := h.DUT.(ClockedDUT)
+	return ok
+}
+
+// Measure reports a value for the comparison tables. It asserts nothing.
+func (h *H) Measure(name string, v any) {
+	h.T.Helper()
+	h.T.Logf("MEASURE engine=%s %s/%s=%v", h.engine.Name, h.scenario, name, v)
+}
+
+// Prompt is how soon the DUT must answer where the RFCs ask for an immediate segment, such as
+// the duplicate ACK for an out-of-order segment. On real time it is far below the 200 ms floor of
+// a delayed ACK and of the RTO, so a delayed answer fails. On a ClockedDUT it is zero: the answer
+// must be ready before the clock moves.
+func (h *H) Prompt() time.Duration {
+	if _, ok := h.DUT.(ClockedDUT); ok {
+		return 0
+	}
+	return 100 * time.Millisecond
+}
+
+// Listen opens a listener on the DUT and closes it at the end of the scenario.
+func (h *H) Listen(port uint16) Listener {
+	h.T.Helper()
+	l, err := h.DUT.Listen(port)
+	if err != nil {
+		h.T.Fatalf("listen on %d: %v", port, err)
+	}
+	h.T.Cleanup(func() { l.Close() })
+	return l
+}
+
+// Peer is the testbench's end of one connection. Sequence numbers are absolute.
+type Peer struct {
+	h      *H
+	Local  netip.AddrPort
+	Remote netip.AddrPort
+
+	ISS    uint32 // the testbench's initial sequence number
+	SndNxt uint32 // the testbench's next sequence number
+	DutISS uint32
+	RcvNxt uint32 // the next DUT sequence number the testbench expects
+
+	WS     int    // the shift the testbench advertised; -1 for none
+	Window uint16 // the window field the testbench sends
+	DutWS  int    // the shift the DUT advertised; -1 for none
+	SACK   bool   // SACK was negotiated
+	TS     bool   // timestamps were negotiated
+
+	tsStart  time.Time
+	tsBase   uint32
+	TSRecent uint32 // the latest TSval of the DUT
+	SynTSVal uint32 // the TSval of the testbench's SYN
+	// AckHeld is how long the testbench actually held the final ACK of the handshake back for
+	// Dial.AckDelay: longer than asked when a loaded machine stopped it.
+	AckHeld time.Duration
+
+	DutAck    uint32 // the latest acknowledgment number from the DUT
+	DutWindow int    // the latest window the DUT advertised, in bytes
+
+	lastTS uint32 // the TSval of the latest segment sent with timestamps
+}
+
+// NewPeer makes a testbench endpoint towards the DUT's port with a fresh source port and ISS
+// from the scenario's seed.
+func (h *H) NewPeer(dutPort uint16) *Peer {
+	h.nextPort++
+	return &Peer{
+		h:       h,
+		Local:   netip.AddrPortFrom(PeerAddr, h.nextPort),
+		Remote:  netip.AddrPortFrom(h.DUT.Addr(), dutPort),
+		ISS:     h.rng.Uint32(),
+		WS:      -1,
+		Window:  65535,
+		DutWS:   -1,
+		tsStart: h.Now(),
+		tsBase:  h.rng.Uint32(),
+	}
+}
+
+// Reincarnate makes a new peer on the same four-tuple as p, for a new connection after p's has
+// closed, with the given ISS and a timestamp clock that continues p's 1000 ticks later.
+func (p *Peer) Reincarnate(iss uint32) *Peer {
+	return &Peer{h: p.h, Local: p.Local, Remote: p.Remote, ISS: iss, WS: -1, Window: 65535, DutWS: -1,
+		tsStart: p.h.Now(), tsBase: p.TSVal() + 1000}
+}
+
+// TSVal is the testbench's timestamp clock, 1 ms per tick.
+func (p *Peer) TSVal() uint32 { return p.tsBase + uint32(p.h.Now().Sub(p.tsStart)/time.Millisecond) }
+
+// Segment builds a segment of this flow. The timestamps option is added when negotiated.
+func (p *Peer) Segment(flags uint8, seq uint32, payload []byte) Segment {
+	o := NoOptions()
+	if p.TS {
+		o.TS = &Timestamps{Val: p.TSVal(), Ecr: p.TSRecent}
+	}
+	return Segment{Src: p.Local, Dst: p.Remote, Seq: seq, Ack: p.RcvNxt, Flags: flags, Window: p.Window, Opts: o, Payload: payload}
+}
+
+// Send injects s into the DUT.
+func (p *Peer) Send(s Segment) {
+	p.h.T.Helper()
+	if s.Opts.TS != nil {
+		p.lastTS = s.Opts.TS.Val
+	}
+	p.h.T.Logf("-> %v", s)
+	if err := p.h.DUT.Inject(s.Marshal()); err != nil {
+		p.h.T.Fatalf("inject %v: %v", s, err)
+	}
+}
+
+// SendData sends payload at the testbench's current SndNxt with ACK|PSH and advances SndNxt.
+func (p *Peer) SendData(payload []byte) {
+	p.h.T.Helper()
+	p.Send(p.Segment(FlagACK|FlagPSH, p.SndNxt, payload))
+	p.SndNxt += uint32(len(payload))
+}
+
+// SendAck sends a pure ACK of RcvNxt.
+func (p *Peer) SendAck() {
+	p.h.T.Helper()
+	p.Send(p.Segment(FlagACK, p.SndNxt, nil))
+}
+
+// SendFIN sends a FIN, with payload if any, and advances SndNxt past it.
+func (p *Peer) SendFIN(payload []byte) {
+	p.h.T.Helper()
+	p.Send(p.Segment(FlagFIN|FlagACK|FlagPSH, p.SndNxt, payload))
+	p.SndNxt += uint32(len(payload)) + 1
+}
+
+// Now is the scenario's clock: the engine's clock when the DUT is a ClockedDUT, else real time.
+func (h *H) Now() time.Time {
+	if c, ok := h.DUT.(ClockedDUT); ok {
+		return c.Now()
+	}
+	return time.Now()
+}
+
+// clockStep is how far Next moves a ClockedDUT's clock between looks at its output.
+const clockStep = time.Millisecond
+
+// next returns the DUT's next packet within d of the scenario's clock.
+func (h *H) next(d time.Duration) ([]byte, bool) {
+	if c, ok := h.DUT.(ClockedDUT); ok {
+		deadline := c.Now().Add(d)
+		for {
+			if pkt, ok := c.Poll(); ok {
+				return pkt, true
+			}
+			if !c.Now().Before(deadline) {
+				return nil, false
+			}
+			c.Advance(clockStep)
+		}
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case pkt, ok := <-h.DUT.Emitted():
+		return pkt, ok
+	case <-timer.C:
+		return nil, false
+	}
+}
+
+// Next returns the next segment of this flow the DUT emits within d of the scenario's clock.
+// Packets of other flows, and packets that are not well-formed IPv4 TCP, are logged and dropped.
+// A packet larger than the MTU fails the scenario: the harness compares segments as TCP alone
+// cut them, with no offload in between.
+func (p *Peer) Next(d time.Duration) (Segment, bool) {
+	deadline := p.h.Now().Add(d)
+	for {
+		pkt, ok := p.h.next(max(deadline.Sub(p.h.Now()), 0))
+		if !ok {
+			return Segment{}, false
+		}
+		if len(pkt) > p.h.DUT.MTU() {
+			p.h.T.Errorf("FAIL  emitted packet on %s: at most the MTU of %d bytes; got: %d bytes", p.h.engine.Name, p.h.DUT.MTU(), len(pkt))
+		}
+		s, err := Parse(pkt)
+		if err != nil {
+			p.h.T.Logf("emitted packet ignored: %v: % x", err, pkt[:min(len(pkt), 40)])
+			continue
+		}
+		if s.Src != p.Remote || s.Dst != p.Local {
+			p.h.T.Logf("segment of another flow ignored: %v", s)
+			continue
+		}
+		if s.Opts.TS != nil {
+			p.TSRecent = s.Opts.TS.Val
+		}
+		if s.Has(FlagACK) {
+			p.DutAck = s.Ack
+			p.DutWindow = int(s.Window)
+			if p.DutWS >= 0 && !s.Has(FlagSYN) {
+				p.DutWindow <<= p.DutWS
+			}
+		}
+		p.h.T.Logf("<- %v", s)
+		return s, true
+	}
+}
+
+// Collect returns every well-formed TCP segment the DUT emits within d, of any flow, so a
+// scenario can watch several flows at once without Next dropping the others.
+func (h *H) Collect(d time.Duration) []Segment {
+	var out []Segment
+	deadline := h.Now().Add(d)
+	for {
+		pkt, ok := h.next(max(deadline.Sub(h.Now()), 0))
+		if !ok {
+			return out
+		}
+		if s, err := Parse(pkt); err == nil {
+			h.T.Logf("<- %v", s)
+			out = append(out, s)
+		}
+	}
+}
+
+// Await returns the first segment of this flow within d that match accepts, logging the
+// segments it passes over.
+func (p *Peer) Await(d time.Duration, match func(Segment) bool) (Segment, bool) {
+	deadline := p.h.Now().Add(d)
+	for {
+		s, ok := p.Next(max(deadline.Sub(p.h.Now()), 0))
+		if !ok {
+			return Segment{}, false
+		}
+		if match(s) {
+			return s, true
+		}
+	}
+}
+
+// SendFreshAck sends a pure ACK whose TSval is above every TSval sent before, waiting for the
+// timestamp clock to tick when it must, and returns that TSval. A segment the DUT sent before it
+// had this ACK echoes an older TSval, which QuietSince tells apart.
+func (p *Peer) SendFreshAck() uint32 {
+	p.h.T.Helper()
+	for p.TS && int32(p.TSVal()-p.lastTS) <= 0 {
+		if c, ok := p.h.DUT.(ClockedDUT); ok {
+			c.Advance(time.Millisecond)
+		} else {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	p.SendAck()
+	return p.lastTS
+}
+
+// QuietSince is Quiet, but it passes over one segment that resends the FIN f unchanged and
+// echoes a TSecr older than ts: a FIN the DUT sent before it had the segment that carried ts, such
+// as a tail loss probe that a slow testbench let fire before its ACK arrived. Only a segment with
+// f's sequence number, no payload, flags among FIN, ACK and PSH, and within probeWindow of f is
+// passed over, and the wait of d starts again after it. A second such segment, or any other,
+// fails the quiet: a DUT that dropped the testbench's ACK keeps resending with the old TSecr. On
+// a ClockedDUT nothing is passed over, since Inject returns after the engine handled the segment
+// and the race cannot happen. fAt is when f arrived. It returns how many it passed over.
+func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time) (Segment, bool, int) {
+	_, clocked := p.h.DUT.(ClockedDUT)
+	stale := 0
+	deadline := p.h.Now().Add(d)
+	for {
+		s, ok := p.Next(max(deadline.Sub(p.h.Now()), 0))
+		if !ok {
+			return Segment{}, true, stale
+		}
+		// How long after the FIN the DUT sent the resend: from the DUT's own timestamps where it
+		// has them, which a stalled testbench cannot stretch, else from when each arrived here.
+		since := p.h.Now().Sub(fAt)
+		if s.Opts.TS != nil && f.Opts.TS != nil {
+			since = time.Duration(int32(s.Opts.TS.Val-f.Opts.TS.Val)) * time.Millisecond
+		}
+		probe := s.Has(FlagFIN) && s.Flags&^(FlagFIN|FlagACK|FlagPSH) == 0 && s.Seq == f.Seq && len(s.Payload) == 0 &&
+			since <= probeWindow
+		if !clocked && stale == 0 && probe && p.TS && s.Opts.TS != nil && int32(s.Opts.TS.Ecr-ts) < 0 {
+			p.h.T.Logf("the FIN resent before the DUT had the testbench's latest segment, passed over once: %v", s)
+			stale++
+			deadline = p.h.Now().Add(d)
+			continue
+		}
+		return s, false, stale
+	}
+}
+
+// probeWindow is how long after a FIN QuietSince accepts its resend as sent before the ACK: about
+// one minimum RTO. A tail loss probe on a near-zero RTT comes within a few milliseconds.
+const probeWindow = 250 * time.Millisecond
+
+// Quiet reports whether the DUT emits nothing on this flow for d.
+func (p *Peer) Quiet(d time.Duration) (Segment, bool) {
+	s, ok := p.Next(d)
+	return s, !ok
+}
+
+// Dial describes the testbench's side of a handshake.
+type Dial struct {
+	SYN Options
+	// Window is the window field of every segment after the SYN; zero means 65535.
+	Window uint16
+	// SynWindow is the SYN's window field, which is never scaled; zero means Window.
+	SynWindow uint16
+	// AckDelay holds the final ACK of the handshake back, so the DUT's first RTT sample, and
+	// with RTT the RACK and TLP timers, has a path delay to work with.
+	AckDelay time.Duration
+}
+
+// Handshake runs a three-way handshake from a new peer to port and returns the peer and the
+// SYN-ACK. It does not accept the connection.
+func (h *H) Handshake(port uint16, d Dial) (*Peer, Segment) {
+	h.T.Helper()
+	p := h.NewPeer(port)
+	return p, h.HandshakeFrom(p, d)
+}
+
+// HandshakeFrom runs a three-way handshake from p, which may be a reincarnated peer.
+func (h *H) HandshakeFrom(p *Peer, d Dial) Segment {
+	h.T.Helper()
+	p.Window = 65535
+	if d.Window != 0 {
+		p.Window = d.Window
+	}
+	synWin := p.Window
+	if d.SynWindow != 0 {
+		synWin = d.SynWindow
+	}
+	p.WS = d.SYN.WS
+	syn := d.SYN
+	if syn.TS != nil {
+		// the SYN's TSval comes from the peer's clock, so later segments pass PAWS
+		syn.TS = &Timestamps{Val: p.TSVal(), Ecr: 0}
+		p.SynTSVal = syn.TS.Val
+	}
+	p.Send(Segment{Src: p.Local, Dst: p.Remote, Seq: p.ISS, Flags: FlagSYN, Window: synWin, Opts: syn})
+	synack, ok := p.Await(2*time.Second, func(s Segment) bool { return s.Has(FlagSYN | FlagACK) })
+	h.Require("handshake.synack", ok && synack.Ack == p.ISS+1, "a SYN-ACK acknowledging ISS+1 within 2 s", synackString(p, synack, ok))
+	p.adopt(syn, synack)
+	if d.AckDelay > 0 {
+		start := h.Now()
+		p.Quiet(d.AckDelay)
+		p.AckHeld = h.Now().Sub(start)
+	}
+	p.SendAck()
+	return synack
+}
+
+// adopt takes the connection's parameters from the SYN the peer sent and the SYN-ACK.
+func (p *Peer) adopt(syn Options, synack Segment) {
+	p.SndNxt = p.ISS + 1
+	p.DutISS = synack.Seq
+	p.RcvNxt = synack.Seq + 1
+	p.DutWS = synack.Opts.WS
+	p.SACK = syn.SACKPermitted && synack.Opts.SACKPermitted
+	p.TS = syn.TS != nil && synack.Opts.TS != nil
+	if p.WS < 0 || p.DutWS < 0 {
+		p.WS, p.DutWS = -1, -1 // window scaling is used only when both sides offered it, RFC 7323 2.2
+	}
+	if p.TS {
+		p.TSRecent = synack.Opts.TS.Val
+	}
+}
+
+func synackString(p *Peer, s Segment, ok bool) string {
+	switch {
+	case !ok:
+		return "no SYN-ACK"
+	case s.Ack != p.ISS+1:
+		return "a SYN-ACK acknowledging another number"
+	}
+	return "a SYN-ACK acknowledging ISS+1"
+}
+
+// Connect opens a connection to l from a new peer with the given SYN options and returns the
+// peer, the SYN-ACK and the accepted connection.
+func (h *H) Connect(l Listener, port uint16, syn Options) (*Peer, Segment, Conn) {
+	h.T.Helper()
+	return h.ConnectWith(l, port, Dial{SYN: syn})
+}
+
+// ConnectWith is Connect with the whole Dial.
+func (h *H) ConnectWith(l Listener, port uint16, d Dial) (*Peer, Segment, Conn) {
+	h.T.Helper()
+	p, synack := h.Handshake(port, d)
+	return p, synack, h.Accept(l)
+}
+
+// Accept accepts the next connection within 2 s and aborts it at the end of the scenario.
+func (h *H) Accept(l Listener) Conn {
+	h.T.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := l.Accept(ctx)
+	h.Require("handshake.accept", err == nil, "accept within 2 s after the final ACK", "error "+errString(err))
+	h.T.Cleanup(func() { c.Abort() })
+	return c
+}
+
+// StandardSYN is the SYN options a modern client sends: MSS for wgft's MTU, window scale 7,
+// SACK-permitted and timestamps. Handshake fills in the timestamp value.
+func StandardSYN() Options {
+	mss := uint16(MTU - 40)
+	return Options{MSS: &mss, WS: 7, SACKPermitted: true, TS: &Timestamps{}}
+}
+
+// NoSACKSYN is StandardSYN without SACK-permitted, for the loss-recovery scenarios: both ends
+// then recover as NewReno.
+func NoSACKSYN() Options {
+	o := StandardSYN()
+	o.SACKPermitted = false
+	return o
+}
+
+// readFull reads n bytes from c within d of real time. Socket deadlines are real time on every
+// engine; a ClockedDUT is expected to hand data to its sockets as soon as it is injected.
+func readFull(c Conn, n int, d time.Duration) ([]byte, error) {
+	c.SetReadDeadline(time.Now().Add(d))
+	defer c.SetReadDeadline(time.Time{})
+	buf := make([]byte, n)
+	got := 0
+	for got < n {
+		k, err := c.Read(buf[got:])
+		got += k
+		if err != nil {
+			return buf[:got], err
+		}
+	}
+	return buf, nil
+}
+
+// errString names an error for a check's observation: nil, timeout, EOF or the error's text.
+func errString(err error) string {
+	if err == nil {
+		return "nil"
+	}
+	var ne interface{ Timeout() bool }
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timeout"
+	}
+	return err.Error()
+}

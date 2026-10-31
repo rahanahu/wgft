@@ -63,6 +63,8 @@ type Dataplane struct {
 	Allow *allowtargets.List
 	// Limits は同時フロー数のプロセス全体の予算(仕様 7 節)。ゼロ値は既定値
 	Limits resource.Limits
+	// netstack はトンネルの netstack の実装(WGFT_AGENT_NETSTACK)。空は gvisor である
+	netstack string
 	// unicast はブロードキャストとマルチキャストの宛先の判定である(仕様 7 節)。New がこのホストの
 	// インタフェースの一覧を読む判定を置く。nil なら一覧に依らない判定だけを行う
 	unicast *allowtargets.Unicast
@@ -73,9 +75,10 @@ type Dataplane struct {
 	Relay     *relay.Manager
 }
 
-// New は何も立てていないユーザー空間モードの dataplane を作る。
-func New(allow *allowtargets.List, limits resource.Limits) *Dataplane {
-	return &Dataplane{Allow: allow, Limits: limits, unicast: allowtargets.NewUnicast(nil, nil)}
+// New は何も立てていないユーザー空間モードの dataplane を作る。netstack はトンネルの netstack の実装の名前で、
+// 空は gvisor である。
+func New(allow *allowtargets.List, limits resource.Limits, netstack string) *Dataplane {
+	return &Dataplane{Allow: allow, Limits: limits, netstack: netstack, unicast: allowtargets.NewUnicast(nil, nil)}
 }
 
 // NewTunnel はトンネルを作る。値は tunnel.New で、テストだけが作成の失敗を模すために差し替える。
@@ -92,6 +95,8 @@ func (d *Dataplane) Build(priv wgtypes.Key, wg proto.WGConfig) (retryable bool, 
 	if err != nil {
 		return false, err
 	}
+	cfg.Netstack = d.netstack
+	cfg.MaxTCPFlows = d.Limits.WithDefaults().TCPTotal
 	tun, err := NewTunnel(cfg)
 	if err != nil {
 		return true, err // 資源の不足など、環境による失敗

@@ -46,12 +46,13 @@
 #       target resolve. agent doctor's dataplane.table agrees: once check 22's refused rules are
 #       removed, unknown resolve_failed and exit 0 while the rule still forwards, and failed
 #       listener_error and exit 1 once the old address refuses. The refused rules are not put back.
-#   failover. a TCP rule to a name with two allowed addresses whose smallest drops every SYN moves to
-#       the other address after two failed 30-second checks, logs it, records it, keeps it once the
-#       smallest answers again, and keeps it across an agent restart while the name does not resolve
-#       and after the name returns. A UDP rule to the same name follows the switch, and a UDP client
-#       that keeps sending from one source port reaches the new address after it. It uses its own
-#       name and rules, so it does not depend on check resolve and runs before or after it, or alone.
+#   failover. a TCP rule to a name with two allowed addresses whose smallest drops every SYN moves
+#       to the other address after two failed 30-second checks, logs it, records it, keeps it once
+#       the smallest answers again, and keeps it across an agent restart while the name does not
+#       resolve and after the name returns. A UDP rule to the same name follows the switch, and a
+#       UDP client that keeps sending from one source port reaches the new address after it. It
+#       needs nothing resolve leaves behind. Run without resolve, it finds check 22's refused rules
+#       still in place; none of its checks reads state of the whole table.
 #   drift. the agent repairs changes made outside wgft: a deleted table, a deleted row, a changed
 #       MTU and a deleted wgft0, without a route warning while wgft0 is gone.
 #   notify. the kernel's change notifications bring a deleted table and a deleted wgft0 back within
@@ -714,11 +715,11 @@ NFT
   wait_until 60 rule_state_ok "$R_NAME"
   check "the name resolves again" "ok" "$(rule_status "$R_NAME")"
 }
-# check_failover: a name with two allowed addresses, 192.168.50.2 and .3, where the smallest drops
-# every SYN to the target port, as a host that went away would. The agent pins .2 first, sees it fail
-# two 30-second checks in a row, and moves new flows to .3 (design 7b.2).
+# check_failover: a name with two allowed addresses, 192.168.50.2 and .3, where the smallest
+# drops every SYN to the target port, as a host that went away would. The agent pins .2 first, sees
+# it fail two 30-second checks in a row, and moves new flows to .3 (design 7b.2).
 check_failover() {
-  echo "== failover: to another address of the name"
+  echo "== failover: failover to another address of the name"
   home nft -f - <<'NFT'
 table inet failoverdrop {
   chain in {

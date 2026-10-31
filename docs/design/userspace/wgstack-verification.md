@@ -1,0 +1,395 @@
+# wgstack の検証
+
+[エージェントの wgft の netstack](wgstack.md)(wgstack)の完成は、Linux との適合、損なわれた経路での転送、fuzzing、敵対的な保持の試験、退行の確認で判定します。
+適合の試験は一部の台本が動き、損なわれた経路での試験は計測の骨組みが動きます。
+ほかの試験は未実装です。
+試験の形と判定の規則をここで決め、個々の試験の内容は実装の時に決めます。
+
+## 検証の原則
+
+- 参照の実装:正しさの基準は Linux の TCP/IP です。
+  gVisor は今の既定の実装として同じ試験に流し、差を記録しますが、基準にはしません
+- 書き手の分離:試験を書く人と wgstack を実装する人を分けます。
+  試験の書き手は規格と Linux の挙動から試験を書き、wgstack のコードを読みません。
+  wgstack の[期待した差の一覧](#期待した差の一覧)に行を足せるのは、試験の書き手と所有者だけです
+- Linux で先に通すこと:新しい試験は、ラボの Linux で通ってから試験の一式に入ります。
+  Linux で通らない試験は、試験の誤りとして直します
+- 決定的な実行:wgstack に対する試験は、手で進める時計と固定の乱数の種で核を直接進め、壁時計の待ちを使いません。
+  Linux と gVisor に対する試験は壁時計で動くので、[壁時計で測る区間を使うテストの規範](../../development/testing.md#壁時計で測る区間を使うテストの規範)に従います
+
+## 適合の試験
+
+適合の試験は、トンネルの側から IPv4 の packet を入れ、出てきた packet とアプリケーションの側の出来事を確かめる、packet の水準の台本です。
+台本の 1 行は、packet を入れる、packet を期待する、時刻を進める、アプリケーションの操作(`Accept`、読み取り、書き込み、`CloseWrite`、`Close`、`Abort`)を行う、のどれかです。
+同じ台本を 3 つの実装に流します。
+
+- wgstack:ホストの `go test` で流します。
+  核を直接進める実行と、手で進める時計を渡した Device の `tun.Device` の境目に流す実行の 2 つを持ちます。
+  後者は、核と Device の間の錠、通知、出力の選び方の誤りを捉えます
+- gVisor:ホストの `go test` で、`internal/nettun` の Device の `tun.Device` の境目に流します
+- Linux:ラボの VM の network namespace の中の TUN に流し、namespace の sysctl を後述の固定の値にしてから始めます。
+  TUN の offload は切り、segment の大きさを TCP の処理だけが決めるようにします。
+  root と TUN を要するので、ホストでは流しません
+
+ISN、timestamp の値、IP の ID のように実装ごとに決まる値は、台本で変数に束縛し、後の行では関係(前の値より大きい、前の値と同じ)で比べます。
+窓の大きさと時刻は、値そのものではなく台本が定める範囲で比べます。
+時刻の範囲は RTO の回数のように規格の単位で書きます。
+
+台本が扱う分野は次のとおりです。
+各分野の網羅の度合いは、実装の時に試験の書き手が決めます。
+
+- 握手:option の交渉、MSS の下限、握手の途中の表と accept の待ち行列の満杯、SYN に載ったデータ
+- データ:順序どおりの転送、順序外の到着と区間の表、窓の外のデータ、送り手と受け手の SWS の回避、遅延 ACK
+- 窓:0 の窓、persist の probe、窓の更新、窓の scale
+- 再送:RTO とその倍化、NewReno の高速の再送と回復、再送の打ち切り、損失の後の窓の縮小
+- RFC 7323 と RFC 5961:PAWS、challenge ACK、窓の外の RST と SYN
+- 終わり方:ハーフクローズ、同時の close、未読のデータを持った `Close`、`Abort`、TIME_WAIT と RFC 6191 の再利用、FIN_WAIT_2 へのデータ
+- ICMP:誤りの送信元の確認、Fragmentation Needed と MTU の下限、Port Unreachable、echo
+- UDP と断片:受信の予算、送信時の断片化、再組み立ての表の満杯と期限
+
+ICMP と UDP の台本は、UDP の配送と送信元、65,507 byte の datagram の断片化、順序外と重複と重なりの断片の再組み立て、期限の Time Exceeded、Port Unreachable、echo、TCP への Fragmentation Needed を確かめます。
+Fragmentation Needed の台本は、MTU の下限、RFC 5927 の番号の確認、誤りの送信元の確認、別のフローを引用した誤りを 1 つずつ別の接続で確かめます。
+受信の予算と再組み立ての表の満杯は、まだ台本がありません。
+Linux の上限はソケットの `SO_RCVBUF` と `net.ipv4.ipfrag_high_thresh` で決まり、同じ台本で比べる値が無いためです。
+
+### RFC 2525 の既知の問題
+
+RFC 2525 が挙げる TCP の実装の問題ごとに、wgstack に当てはまるかと、どの台本で確かめるかを次に示します。
+wgstack は受け身の open だけの IPv4 の TCP ですが、中継のためにデータを送りもするので、送り手の問題も当てはまります。
+結果は 2026-10-31 の Linux、gVisor、wgstack のものです。
+
+| 節 | 問題 | 当てはまるか | 確かめる台本 | 結果 |
+|---|---|---|---|---|
+| 2.1 | 最初の slow start が無い | 当てはまる | `rfc2525-initial-window` | 3 つとも最初の送信は 10 segment 以下 |
+| 2.2 | RTO の後に slow start しない | 当てはまる | `rfc2525-rto-slow-start` | 3 つとも RTO で 1 segment、その ACK で 2 segment |
+| 2.3 | CWND を初めに MSS の分かる前の値で決める | 当てはまる | `rfc2525-initial-window` の MSS 536 | 3 つとも 536 byte の 10 segment 以下 |
+| 2.4 | 再送の中身が元と違う | 当てはまる | `retransmit-rto` の `same-data` | 通る |
+| 2.5 | 順序の先のデータを保たない | 当てはまる | `ooo-sack` | 通る |
+| 2.6 | 輻輳の回避に余分な定数を足す | 当てはまる | `cubic-after-loss`(wgstack だけ、RFC 9438 の式と比べます) | 通る |
+| 2.7 | 最初の RTO が短すぎる | 当てはまる | `rfc2525-synack-rto`(SYN-ACK の timer だけ。データの RTO は `retransmit-rto` が確かめます) | 3 つとも答えの無い SYN-ACK を約 1 秒後に送り直す |
+| 2.8 | 回復の後に窓を縮めない | 当てはまる | `rfc2525-window-deflation` | 3 つとも通る(後述) |
+| 2.9 | keepalive の打ち切りが早すぎる | 当てはまらない | なし | wgstack は TCP の keepalive を持ちません([完成に含める機能](wgstack.md#完成に含める機能)) |
+| 2.10 | RTO を倍にしない | 当てはまる | `retransmit-rto` の `backoff` | 通る |
+| 2.11 | keepalive の間隔が短すぎる | 当てはまらない | なし | 2.9 と同じ |
+| 2.12 | 窓の probe の行き詰まり | 当てはまる | `zero-window-probe` | 通る |
+| 2.13 | 2 segment を超えてまとめて確認する | 当てはまる | `rfc2525-stretch-ack` | 3 つとも 1 つの ACK が確認するのは 2 segment 以下 |
+| 2.14 | 再送で複数の packet を送る | 当てはまる | `rfc2525-rto-slow-start`(RTO の再送だけ。高速の再送の側は台本がありません) | 2.2 と同じ |
+| 2.15 | FIN をすぐ送らない | 当てはまる | `rfc2525-close-fin` | 3 つとも、確認されていないデータの後に `Close` ですぐ FIN を送る |
+| 2.16 | 半分の close の後に RST を送らない | 当てはまる | `rfc2525-data-after-close` | 3 つとも、FIN_WAIT_2 の接続へのデータに SND.NXT の RST を返す |
+| 2.17 | 未読のデータを持った close で RST を送らない | 当てはまる | `close-unread-rst` | 通る |
+| 2.18 | MSS の計算に option を含めない | 当てはまる | すべての台本の MTU の確かめと `rfc2525-initial-window` の `segment-size` | 通る |
+
+2.1 と 2.3 の確かめでは、DUT が同じ時刻に送った segment だけを最初の窓として数え、その後の新しい segment は TLP の probe の 1 つまでとします。
+wgstack は試験台の RTT がほぼ 0 の時、約 1 ms 後に TLP の probe として新しい segment を 1 つ送り(RFC 8985 7.3)、これを最初の窓に数えると 11 segment に見えるためです。
+2.8 の確かめでは、回復を終える ACK の timestamp に、DUT が最後に送った segment の TSval を返します。
+古い TSval を返すと、Linux と wgstack は再送した segment の元が届いたと見て窓の縮小を取り消し(RFC 3522)、窓を縮めない送り手と見分けられなくなるためです。
+上限は、回復に入った時の送り残しの 0.7 倍(CUBIC の β)に 3 を足した segment の数で、NewReno の 0.5 倍の送り手にも使います。
+窓が 8 つの重複した ACK で膨らんだままなら、送り残しが 10 の時に 0.7 倍で 15、0.5 倍で 13 segment を送り、上限の 10 を超えます。
+回復を終えた ACK の後に送った segment の数は、Linux が 6、gVisor が 7、wgstack が 2 でした。
+
+### 損失への応答
+
+送り手が損失を検出した後に窓を縮めることを、次の台本で確かめます。
+RFC 5681 3.1 と RFC 9438 4.6 は、損失を検出した時の ssthresh を FlightSize の β 倍以下とします。
+β は Reno で 0.5、CUBIC で 0.7 です。
+FlightSize は送って累積の ACK で確認されていないデータなので、文字どおりに読むと SACK で確認された byte も含み、その sequence の幅の β 倍は縮小する前の窓より大きくなる場合があります。
+このとき、縮小のはずの応答が送る量を増やします。
+参照の Linux は、縮小した後の窓を輻輳の窓から計算し、固定の Reno ではその半分にします。
+RFC 9438 4.6 も、輻輳の窓から計算する実装を挙げています。
+台本の上限と下限は RFC の文面ではなく参照の Linux の挙動に基づき、損失の後に送る量を損失の前の窓の β 倍以下にすることを求めます。
+
+試験の側は、往復の時間が 100 ms の経路として振る舞います。
+1 往復の分の segment のそれぞれに ACK を 1 つずつ続けて返し、その後の 100 ms に DUT が送った segment を次の往復の分として集めます。
+どの実装も ACK への応答を 1 ms 以内に送るので、1 往復の分の segment の数がその往復の窓になります。
+100 ms の中には RACK の並べ替えの窓(最小の RTT の 4 分の 1)の終わりと ACK への応答が収まり、RTO の下限の 200 ms は入りません。
+縮小の上限は 0.7 倍に 3 segment を足した数で、3 segment は 2.8 の確かめと同じく、切り上げと回復を抜ける時に ssthresh を超えて送る分の余裕です。
+
+- `chained-recovery`:窓が 80 segment の往復の最初の segment を失い、その回復の間に DUT が送った最初の新しい segment も失います。
+  最初の損失の再送は往復の中で最後に届くので、最初の回復を終える ACK は 2 つ目の穴より上の SACK の block を既に持ち、2 つ目の回復がすぐに始まります。
+  2 つ目の回復の後の 2 往復の窓が、最初の回復の往復の窓の 0.7 倍に 3 segment を足した数以下であることを確かめます
+- `reorder-wait-recovery`:最初の往復で 4 つ目の segment を 5 つ目の後に届けて並べ替えを見せ、RACK が並べ替えの窓を保つようにします。
+  その後、窓が 40 segment 前後の往復の最初の segment を失います。
+  並べ替えの窓が終わるまでに DUT は残りの segment の SACK で空いた分の新しいデータを送るので、損失を検出した時の送り残しは窓の約 2 倍になります。
+  回復の後の 3 往復の窓が、損失の前の窓の 0.7 倍に 3 segment を足した数以下であることを確かめます。
+  3 往復目は、回復の後の輻輳の回避で窓が往復ごとに大きく増える送り手を捉えます
+- `rto-after-burst`:窓が 40 segment の往復の 4 分の 1 を続けて失い、その後は RTO までのすべての segment を失います。
+  RTO の後の slow start で、伸びが前の往復の 1.7 倍未満になった最初の往復の窓を、DUT の ssthresh とみなします。
+  伸びが 1.7 倍から 2 倍の間で ssthresh に達した場合は、輻輳の回避の 1 往復だけ遅れて読むので、1 segment 大きく見えます。
+  RFC 5681 3.1 は RTO の後の ssthresh を FlightSize の半分以下とし、RFC 6675 5.1 は RTO の後の ssthresh を定めないので、RFC の文面は 2 segment までを許します。
+  参照の Linux は、回復の途中の RTO では回復で下げた ssthresh を保ちます(`tcp_enter_loss`)。
+  この値が損失の前の窓以下で、その 4 分の 1 以上であることを確かめます。
+  上限を 0.7 倍でなく窓そのものにするのは、SACK で確認された幅を含めた FlightSize の半分を ssthresh にする送り手を通すためです。
+  下限は、回復と RTO で 2 回半分にする送り手も通す値です。
+  送り残しを 0 と数えて ssthresh を 2 segment にする送り手は下限で落ち、窓を縮めない送り手は上限で落ちます
+
+`reorder-wait-recovery` は RACK-TLP の族の値を重ね、ほかの台本は固定の値のまま流します。
+結果は 2026-10-31 のものです。
+gVisor の差は gVisor の[期待した差の一覧](#期待した差の一覧)に記録します。
+
+| 台本 | Linux | gVisor | wgstack |
+|---|---|---|---|
+| `chained-recovery` | 最初の回復の往復の 40 から 21 に縮めて通る | 2 つ目の縮小をせず、回復の後に窓が往復ごとに約 2 倍に増えて落ちる | 56 から 39 に縮めて通る |
+| `reorder-wait-recovery` | 76 から 38 に縮め、3 往復目でも 40 で通る。並べ替えの窓の間に新しい segment を 75 送る | 72 から 36 に縮めるが、回復の後の 3 往復目に 76 に増えて落ちる。並べ替えの窓の間に新しい segment を送らない | 40 から 28 に縮めて通る。並べ替えの窓の間に新しい segment を 39 送る |
+| `rto-after-burst` | 損失の前の窓 40 に対して 25 で通る | 多くの実行で TCPInfo の ssthresh が 2 になり、その後は往復ごとに 1 か 2 segment しか送らずに落ちる。台本の測る ssthresh は多くの実行で 1 | 16 で通る |
+
+wgstack は `chained-recovery` で 2 つ目の穴が見える往復に 2 segment しか送らないので、2 つ目の回復を始める時の送り残しの幅が窓とほぼ同じになります。
+このため、この台本では wgstack の幅による計算と窓による計算を区別できません。
+
+### 参照の Linux の設定
+
+Linux の既定は、完成に含めない回復の仕組みを有効にしています。
+既定のままでは、損失の回復の台本は Linux の上で常に wgstack と違う結果になるか、違いを吸収するまで条件を緩めて正誤を見分けられなくなります。
+このため、参照の Linux の namespace では、完成の機能に合わせて次の値に固定します。
+
+- 輻輳の制御:`net.ipv4.tcp_congestion_control=reno`
+- RACK と TLP:`net.ipv4.tcp_recovery=0`、`net.ipv4.tcp_early_retrans=0`
+- F-RTO:`net.ipv4.tcp_frto=0`
+- ECN、TFO、SYN cookie:`net.ipv4.tcp_ecn=0`、`net.ipv4.tcp_fastopen=0`、`net.ipv4.tcp_syncookies=0`
+- D-SACK:`net.ipv4.tcp_dsack=0`
+- 測定値の持ち越し:`net.ipv4.tcp_no_metrics_save=1`。
+  前の台本の RTT と輻輳の窓が次の台本に残らないようにします
+- 受信のバッファ:`net.ipv4.tcp_moderate_rcvbuf=0` とし、台本の側のソケットに floor と同じ大きさを与えます
+- 小さな書き込みのまとめ:`net.ipv4.tcp_autocorking=0`
+- UDP、再組み立て、ICMP の台本が頼る IP の値:断片の期限 `net.ipv4.ipfrag_time=30`、path MTU の下限 `net.ipv4.route.min_pmtu=552`、path MTU discovery `net.ipv4.ip_no_pmtu_disc=0`、ICMP の誤りの速さ `net.ipv4.icmp_ratelimit=1000` と `net.ipv4.icmp_ratemask=6168`。
+  どれも Linux 6.1 の既定の値で、namespace ごとの値なので明示して固定します
+
+損失の回復を確かめる台本は、相手の SYN で SACK を許さず、両者を NewReno の動作にします。
+RTO の倍化を確かめる `retransmit-rto` も SACK を許さず、TLP の probe が最初の期限を使わないようにします。
+wgstack と gVisor は SACK を交渉した接続だけで TLP を使い、RTO の期限に揃えた PTO では最初の再送が probe になるためです。
+RTO の期限に送る probe と、その後の RTO の間隔は、wgstack の単体の試験(`TestThinStreamProbesAtTheRTODeadline`)で確かめます。
+SACK を交渉する台本は、受け手として返す SACK の block の内容と順を確かめます。
+値の一覧は、試験の書き手が台本を足すときに増やします。
+台本の族は、固定の値の上に族の値を重ねられます。
+SACK による回復の族は固定の値のまま流すので、Linux は RACK と TLP を使わずに、RFC 6675 の重複の閾値の規則と PRR で回復します。
+RACK-TLP の族は `net.ipv4.tcp_recovery=1` と `net.ipv4.tcp_early_retrans=3` を重ねます。
+Limited Transmit は 2 つの台本で確かめます。
+1 つは RACK を切った固定の値で、往復の時間をほぼ 0 にして流します。
+もう 1 つは RACK を有効にし、往復 400 ms の経路で流します。
+RACK の並べ替えの窓は最小の RTT の 4 分の 1 なので、往復の時間がほぼ 0 だと RACK は最初の重複した ACK の直後に穴を損失と判定し、Limited Transmit の働く余地が無くなるためです。
+往復 400 ms の経路では並べ替えの窓が約 99 ms になり、最初の重複した ACK から確かめの終わりまでの 40 ms より長くなります。
+台本は、最初の重複した ACK から並べ替えの窓の下限までに届いた segment だけを確かめに数えます。
+窓が終わった後の再送は RFC 8985 が認めるので、確かめに入れずに測ります。
+TSecr が最初の重複した ACK の TSval より古い再送は、実装がその ACK を受ける前に送ったものなので、2 つの台本とも確かめに入れずに測ります。
+試験の側が 2 つ目の重複した ACK を送るのが遅れ、それが起こす再送が窓の中に届きえない場合は、新しい接続で 3 回までやり直します。
+`linuxdut` は TUN の GSO も切ります。
+GSO が有効だと、Linux の TCP は複数の segment を 1 つの buffer にまとめ、TSO の先送りで輻輳の窓が許す segment の送信を遅らせます。
+この遅れは回復と輻輳の制御の規則から生じたものではないので、台本の時間の確かめに入れません。
+
+設定で外せない Linux の挙動は、期待した差として扱います。
+
+- 回復の間の送る量:Linux は回復の間の送る量を PRR(RFC 6937)で決め、RFC 6582 の窓の膨らませ方を使いません。
+  回復の台本は、再送する範囲と順、回復の終わる位置、byte の列の一致を確かめ、回復の間の輻輳の窓の値は比べません
+- 黙った後の窓:Linux の `tcp_slow_start_after_idle` は RFC 5681 の 4.1 節と異なる計算で窓を戻します
+- 閉じた後の打ち切り:Linux は閉じた接続の再送と probe を `tcp_orphan_retries` で打ち切ります。
+  wgstack は閉じた接続の窓の probe を Linux と同じく後退の回数が 8 以上で、後退を含めた RTO が上限の 120 秒に届いたときに打ち切り、再送は `tcp_retries2` のままです([未確認の点と未決の点](wgstack.md#未確認の点と未決の点))
+- RTO の計算:最小の RTO と RTTVAR の扱いの細部が違うので、時刻は RTO の回数の範囲で比べます
+- 送る量が足りない間の窓:Linux は、アプリケーションが送る量の足りない間に輻輳の窓を広げない独自の検証を持ちます
+
+### 期待した差の一覧
+
+Linux との差は、実装ごとに 1 つの一覧で管理します。
+一覧の 1 行は、台本、行、差の内容、差を受け入れる理由を持ちます。
+一覧に無い差が出たら試験は落ち、一覧にあるのに差が出なくなった行も、一覧を直すまで試験を落とします。
+wgstack の一覧に行を足せるのは、試験の書き手と所有者だけです。
+実装する人は、差を見つけたら一覧を変えずに知らせ、書き手か所有者が受け入れるかを決めます。
+実装する人が一覧を変えられると、落ちた試験を一覧で黙らせられるためです。
+
+wgstack の一覧に最初から入る差は、[wgstack の設計](wgstack.md#tcp-の機能)が選んだ次の点です。
+
+- MSS が 536 より小さい SYN を捨てること([MSS の下限](packet-validation.md#tcp-の-mss-の下限))
+- next-hop MTU が 552 より小さい Fragmentation Needed を捨てること([Fragmentation Needed の MTU の下限](packet-validation.md#fragmentation-needed-の-mtu-の下限))
+- SYN cookie を持たないこと(参照の Linux の設定でも切ります)
+- ECN を交渉しないこと
+- 緊急のデータを通常のデータとして渡すこと
+- 前節の設定で外せない Linux の挙動
+
+gVisor の一覧は、今の `internal/nettun` の試験が固定している gVisor との差(例えば[断片に対する ICMP](packet-validation.md#断片に対する-icmp)の 3 つの差)とは別のものです。
+gVisor の一覧は、gVisor を基準でなく比較の対象として扱うために持ちます。
+
+試験の仕組みは、一覧を次の規則で照合します。
+
+- 鍵:一覧の行は台本の名前と確かめの名前を鍵にし、観測した差と受け入れる理由を持ちます。
+  観測した差は、確かめが落ちたときに実装が代わりにしたことを、実行ごとに変わる番号を含めずに書いたものです
+- 照合:確かめが落ち、その観測が行の観測と一致すれば、差として受け入れます。
+  一致しなければ、差の形が変わったとして試験を落とします
+- 一部の実行だけの差:壁時計で動く実装は、試験の側が制御できない時刻の差で、同じ台本でも差が出る実行と出ない実行を持つことがあります。
+  そのような行には印を付け、差が出なかった実行を通過として記録します。
+  観測が行と違う差は、印があっても試験を落とします。
+  手で進める時計の実装は毎回同じに動くので、印のある行が当たると試験を落とします
+- 古い行:行にある確かめが通ったら試験を落とします。
+  すべての台本を流した実行で、どの確かめも行の鍵に当たらなかった場合も、鍵の誤りか不要な行として試験を落とします。
+  `-run` で台本を絞った実行では、当たらなかった行をログに出すだけにします
+
+### 試験の置き場所と DUT
+
+適合の試験の台本は `internal/tcpharness` に置きます。
+この package は、試験の側の IPv4 と TCP の組み立てと解釈、台本、期待した差の照合を持ち、モジュールの中の何も import しません。
+台本が実装のコードに頼れないようにするためです。
+実装ごとの DUT は別の package に置き、その package は核と自分が作る実装だけを import します。
+`internal/tcpharness/gvisordut` は `internal/nettun` の公開の面だけで Device を作り、wgft の SACK の設定、バッファの範囲、入口の検査、中身の無い ACK の予算をそのまま試験に含めます。
+`internal/tcpharness/linuxdut` は、ラボの VM の network namespace の中の TUN と Linux のソケットを使います。
+新しい network namespace の `net.ipv4.tcp_*` の値は、多くがカーネルに組み込まれた既定の値になり、一部が最初の namespace の値の写しになります。
+ラボの VM の 6.1 のカーネルでは、`tcp_congestion_control`、`tcp_rmem`、`tcp_wmem` が写しになり、`tcp_frto`、`tcp_sack`、`tcp_recovery`、`tcp_autocorking` は既定の値になりました。
+どの値が写しになるかはカーネルの版で変わりうるので、`linuxdut` は[参照の Linux の設定](#参照の-linux-の設定)の値をすべて書き込み、読み戻して確かめます。
+待ち受けのソケットには floor と同じ 256 KiB を送信と受信のバッファとして与えます。
+`internal/tcpharness/wgstackdut` は、手で進める時計(`ManualClock`)と台本の種から作った乱数の源を渡して wgstack の Device を作ります。
+この Device は goroutine を作らず、DUT は `Write`、`Poll`、`Tick` で Device を進める `ClockedDUT` です。
+wgstack の台本の実行は、実装する人が直している確かめが残る間、環境変数 `WGFT_TEST_WGSTACK_CONFORMANCE=1` を与えたときだけ流します。
+本番の package はどれも `internal/tcpharness` とその下を import しません。
+`internal/dataplane/deps_test.go` がこれらの規則を検査します。
+
+DUT は次の操作を持ちます。
+
+- packet:`Inject` がトンネルから届いた IPv4 の packet を 1 つ渡し、`Emitted` が実装の送った packet を順に返します。
+  MTU を超える packet が出たら試験を落とします
+- アプリケーション:`Listen` と `Accept` が受動の open を行い、接続は `net.Conn` に加えて `CloseWrite` と `Abort` を持ちます。
+  中継が型アサーションで探す `Delivered`、`CloseForDelivery`、`OnBoost` は、実装が持つ場合だけ台本が確かめます
+- 手で進める時計:時計を渡せる実装は `ClockedDUT` として `Now`、`Advance`、`Poll` を持ちます。
+  台本は `Poll` で packet を引き取り、何もなければ時計を 1 ms ずつ進めるので、壁時計を待ちません。
+  実装は `Inject` と `Advance` の中で処理を終え、送る packet を `Poll` が引き取るまで自分の中に持ちます。
+  実装が容量の決まった channel へ送らないので、台本が読む前に多くの segment を入れても、台本の goroutine は `Inject` の中で止まりません
+
+台本の側の乱数は、試験の側のポート、ISN、timestamp の起点に使います。
+乱数は実行ごとの種と台本の名前から決め、種をログに出します。
+環境変数 `WGFT_TEST_TCPHARNESS_SEED` で同じ種を与えると、台本は同じ値を使います。
+DUT を作る関数も同じ種を受け取るので、wgstack の DUT はこの種を ISN の鍵と表の hash の種に使えます。
+Linux と gVisor の ISN と timestamp の起点は、それぞれの実装が持つ乱数の源から決まるので、種では固定できません。
+
+規格が直ちに返すとする segment について、台本は、壁時計では 100 ms 以内に、手で進める時計では時計を進める前に出ることを確かめます。
+順序外の segment への重複した ACK、穴を埋めた segment への ACK(窓の scale の台本で順序外の区間の後に穴を埋めたときを含みます)、3 つ目の重複した ACK による再送、PAWS で捨てた segment への重複した ACK、TIME-WAIT で再送された FIN への ACK がこれに当たります。
+相手の data と FIN への ACK は遅らせてよいので、RFC 1122 の遅延 ACK の上限の 500 ms で確かめます。
+Linux はこの ACK を遅延 ACK のタイマーで約 40 ms 遅らせます。
+100 ms は遅延 ACK と RTO の下限の 200 ms より短いので、遅延した応答はこの範囲に入りません。
+
+壁時計で動く実装では、負荷の高い機械が試験の過程を止めると、正しい実装でも時刻の範囲を外れることがあります。
+確かめは、これを実装の誤りと区別できません。
+このため、試験の仕組みは 1 ms ずつ眠る goroutine の寝過ごしから、試験の過程が動かなかった最も長い時間を台本ごとに測ります。
+台本が落ち、その時間が 10 ms 以上だった場合は、新しい DUT で台本を流し直し、合わせて 3 回まで流します。
+落ちた回の記録はログに残し、最後の回の結果だけを数えます。
+毎回同じように誤る実装は、最後の回でも落ちます。
+手で進める時計の実装は、流し直しません。
+10 ms は、どの時刻の確かめも正しい実装に残す余裕より短くしてあります。
+負荷が試験の側を止めると、試験の側が真似る経路の遅れそのものが延び、実装はその延びた RTT に従って正しく動きます。
+このため、RACK-TLP の族の tail loss probe の台本は、試験の側が実際に ACK を遅らせた時間を測り、予定を超えた分に合わせて probe と回復の時刻の上限を広げます。
+下限は広げません。
+遅れた ACK で probe が早まることはないためです。
+
+台本の確かめの有効さは、故障を入れた実装に台本を流して調べます。
+ホストの `go test` は、gVisor を包んで故障を 1 つずつ入れ、その故障を捉えるはずの確かめが落ちることを求めます。
+中身の無い ACK を 300 ms 遅らせる故障では、順序外の台本の重複した ACK の確かめが落ちます。
+MSS が 536 の SYN の checksum を壊す故障では、どの実装も答えるはずの MSS 536 の確かめが落ちます。
+RCV.NXT から 64 KiB より先の data を捨てる故障では、窓の scale の台本で順序外の区間を保持する確かめが落ちます。
+1 つ目か 2 つ目の重複した ACK で最初の segment を再送する故障では、往復 400 ms の Limited Transmit の台本で、3 つ目より前に再送しない確かめが落ちます。
+同じ再送が最初の segment の古い TSecr を持つ場合は、重複した ACK を受ける前の再送として確かめを通ります。
+最初の SACK で穴を再送する故障では、RACK の並べ替えの台本で、窓の中で遅れた segment を再送しない確かめが落ちます。
+再送を 150 ms 遅らせる故障では、同じ台本で、失った segment を 1 往復の内に再送する確かめが落ちます。
+再送を 400 ms 遅らせる故障では、tail loss probe の台本で、probe が約 2 SRTT 後に出る確かめが落ちます。
+損失への応答の台本は gVisor がその確かめの一部を自ら落とすので、gVisor を包む代わりに、`internal/tcpharness` の試験の中の小さな SACK の送り手のモデルで確かめます。
+参照の Linux と同じく窓から縮小するモデルは、すべての確かめを通ります。
+送り残しの幅の 0.7 倍に縮める故障と縮めない故障では、`chained-recovery` と `reorder-wait-recovery` の縮小の確かめが落ちます。
+RTO で ssthresh を 2 segment にする故障では `rto-after-burst` の下限の確かめが、RTO で送り残しの幅を ssthresh にする故障では上限の確かめが落ちます。
+
+## 損なわれた経路での試験
+
+ラボで、トンネルの外側の経路に netem で損失、並べ替え、重複、遅延、1 秒から数秒の途絶を入れ、転送した byte の列の hash が一致することを確かめます。
+完成の判定で求めるのは、byte の列の一致と、接続が誤りなく終わることです。
+回復の時間、スループット、遅れの p99、CPU は同じ構成で Linux と gVisor と並べて記録し、性能の段階の目標と比べます。
+記録の方法と回数は[wgstack の性能の段階](wgstack-performance.md#測定の計画)で決めます。
+
+ラボの `lab/tcpquality.sh` が、この試験の骨組みです。
+LAN のホストが同じ大きさの byte の列を送り、client が規則を通して受け取ります。
+エージェントはカーネルモード(TCP の終点は LAN のホストの Linux)とユーザー空間モード(TCP の終点はエージェントの netstack)の両方で流します。
+VPS と自宅の間の経路には netem の遅延と損失を入れます。
+受け手が決まった量を読んだ時点で経路を途絶させ、途絶の前か後に読み取りが無い実行は判定不能とします。
+1 回の実行ごとに、hash の一致、スループット、途絶の終わりから最初の byte までの時間、途絶をはさむ読み取りの間隔、途絶の外で最も長い読み取りの間隔を出し、複数の実行の中央値を出します。
+ラボの VM の tc とカーネルは netem の乱数の種を受け付けないので、損失の位置は実行ごとに変わります。
+
+## fuzzing
+
+Go の fuzzing で 2 種類の対象を持ちます。
+
+- packet の解釈:IPv4、TCP、UDP、ICMP のヘッダーと option の解釈が、どの byte の列でも panic せず、範囲の外を読まないこと
+- 核の packet の列:手で進める時計の下で、任意の packet と時刻の進みとアプリケーションの操作の列を核に与えます。
+  各段の後に、予約の合計が上界の式の値以下であること、表の数と予約が一致すること、Device の `Close` の後に予約が 0 に戻ることを確かめます
+
+fuzzing で見つけた入力は、回帰の試験の入力として残します。
+
+乱数の stream の試験は、既知の byte の列を相手が任意に分け、並べ替え、重ね、失って送り、届いた byte が列と一致することを確かめます。
+受信の向き(`TestReceiveStreamIntegrity`)と送信の向き(`TestSendStreamIntegrity`)の 2 つを持ちます。
+`go test ./...` の既定は受信 100、送信 80 の種で、送信の数はレビューで中身を壊す変異が落ちた種(37、43、49)より余裕を持たせた値です。
+段階の関門では `WGFT_WGSTACK_STREAM_SEEDS=full` を付け、受信 2000、送信 600 の種を流します。
+
+### 関門での並列数と実行回数
+
+関門(`scripts/wgstack-gate.sh`)では `-fuzztime Nx` で実行回数を指定します。
+`FuzzCore` は 5,000,000x を `-parallel 4` で、`FuzzAdversarialSender` は 30,000x を `-parallel 8` で流します。
+関門の `FuzzAdversarialSender` は壊れていないことを確かめる量に留め、深さは別のマシンでの長い fuzzing で得ます。
+150,000x を `-parallel 4` で流した関門では、標本の集まりが大きくなるにつれて 1 回が重くなり、ほかの段が約 4 分で終わる中でこの段だけが 24 分を超えたためです。
+関門の表には、fuzz の段ごとに 1 秒あたりの実行の回数を出します。
+`-fuzztime` を秒で指定すると、ホストの負荷で回数が変わり、結果を比べられません。
+
+- `FuzzParse` と `FuzzAdversarialSender`:worker の数にほぼ比例して速くなります。
+  並列数は、ホストを分け合う他の仕事の数で決めます。
+  関門の `FuzzAdversarialSender` は 8 を使います。
+- `FuzzCore`:worker の数に比例して速くならず、8 worker 付近から伸びが鈍ります。
+  1 回ごとに Device を作り、表と輪を確保して捨てるので、確保と GC の走査が CPU の時間の大半を占めるためです(原因の特定は単一 worker の pprof で、並列での頭打ちの機構は未確認です)。
+  関門では 4 を使い、8 を超える並列数は効果が小さいので使いません。
+  1 回の Device の作成を軽くするため、`FuzzCore` は `fuzzLimits` を使います。
+  `FuzzCore` が触れない UDP の datagram の枠と断片の表を小さくし、K と Q も小さくしています。
+  同じ入力に対する被覆は変わらないことを確かめています。
+- `FuzzCore` の 1 core での速さは、`BenchmarkFuzzCore` で測れます。
+  1 core のマシンで長く流すときは、`-parallel 1` とし、回数は 1 core の速さから見積もります。
+
+実行回数は、関門の並列数での 1 秒あたりの回数を測ってから、所要時間が関門の枠に収まるように決めます。
+
+## 敵対的な保持の試験
+
+次の入力のそれぞれで、wgstack の会計が数える保持が上界の式の値で止まり、入力が止まった後に元の値へ戻ることを確かめます。
+
+| 入力 | 確かめること |
+|---|---|
+| 中身の無い segment の洪水(重複した ACK、SACK block を持つ ACK、累積の確認を 1 byte ずつ進める ACK) | 処理待ちが生まれず、送り残しの多い接続でも保持が増えません |
+| 順序外の洪水(多数の穴を作る小さな segment) | 順序外の保持が受信の予約の内側に留まり、区間の数が H を超えません |
+| 読まない相手 | 送信の保持が送信の予約で止まり、窓の probe が続く間も増えません |
+| 偽の送信元からの SYN の洪水 | 握手の途中の表が N_syn で止まり、接続の枠とバッファを使いません |
+| 短い接続の入れ替わり | TIME_WAIT の表が M で止まり、追い出した数が数えられます |
+| 断片の洪水 | 再組み立ての表が今の上限で止まります |
+| 読まない UDP の endpoint への洪水 | endpoint の上限と Device の予算で止まります |
+| 握手を終えたまま `Accept` されない接続 | accept の待ち行列が Q と待ち受けごとの上限で止まり、超えた最後の ACK を捨てます |
+| どの接続にも当たらない segment の洪水 | 制御の輪だけが埋まり、SYN-ACK、TCP の data、UDP の出力が組の配分の分だけ進み続けます |
+| 需要の無いまま boost の枠を持つ接続 | 別の接続の取得の要求で枠が 1 秒の後に返り、黙った相手が古い窓へ送ったデータは捨てられて再送されます |
+| 遅い読み手への小さな書き込み(`TCP_NODELAY`) | 送信の記録の輪が容量で止まり、送信の輪の byte が予約を超えません |
+| floor に戻った保有者への送信の再開と、その後の読み手の停止(Windows の再送の回数を超える長さ) | 古い窓の先のデータを捨てるたびに重複した ACK を返し、相手が接続を諦める前に回復するか、諦めるまでの時間を記録します |
+| 出力の詰まり(wireguard-go が `Read` を呼ばない間) | 出力の保持が増えず、詰まりが解けた後に送り直しで回復します |
+
+会計の値は構造の上限を確かめるのに使います。
+生きているヒープも、GC を強制した後に `runtime/metrics` で測り、会計の値と M_fix の和からの差を記録します。
+この差の上限は Go のランタイムの費用として式の外にあり([上界の式](wgstack.md#上界の式))、記録は保証ではありません。
+ホストで流せる試験はホストの `go test` に置き、実際のトンネルを要する試験はラボに置きます。
+
+## 競合の試験
+
+`-race` を付けた `go test` で、多数の接続への同時の読み書き、`Close`、`Abort`、待ち受けの `Close`、Device の `Close`、boost の取得と回収、TIME_WAIT の表の追い出しを、入力と出力と並べて動かす負荷の試験を持ちます。
+確かめるのは、データの競合が無いこと、錠の待ちが止まらないこと、Device の `Close` の後に goroutine と予約が残らないことです。
+
+## 実機の OS との相互運用
+
+Windows、macOS、スマートフォン、ゲーム機の TCP を相手に、本番と同じ VPS を通した経路で wgstack を確かめます。
+所有者の実機を要するので、[テストの規範](../../development/testing.md)の E 類に置きます。
+未実装です。
+
+## 退行の確認
+
+- 既定の経路:既定は gVisor のままなので、ラボの一式(A9)を今までどおり両モードで流します
+- wgstack の経路:ユーザー空間モードのエージェントを wgstack で動かすラボの一式の実行を加えます。
+  ホストで `WGFT_LAB_AGENT_NETSTACK=wgstack` を付けると、`lab/lab` がこの選択を VM の中の確認に渡します([ラボの手順](../../../lab/README.md))
+- 中継の試験:`internal/dataplane/userspace/relay` と `internal/netpipe` の試験のうち netstack の接続を使うものを、両方の実装に流します。
+  今の試験の一部は `nettun.Create` を直接呼ぶので、実装を選んで Device を作る試験用の関数を足します。
+  `tcp_reset_before_accept_test` は、accept の待ち行列で RST を受けた接続を gVisor が `Accept` で返す挙動を確かめているので、wgstack では待ち行列から外す挙動を確かめる形に分けます
+- 公開のサーフェス:CLI のヘルプ、管理用 API、終了コード、`agent doctor` の JSON が、実装の選択によって変わらないことを確かめます
+
+新しい試験は[テストの規範](../../development/testing.md)の「新設」として[追加テストの台帳](../../development/testing-catalog.md)に記録し、実装された時点で類と契機を決めます。
+既定を gVisor から替える前に、ステージングの環境で長く動かして確かめます。
+期間と判定の基準は、その判断の時に所有者が決めます。
+
+[ユーザー空間の仕様](README.md)

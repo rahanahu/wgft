@@ -238,8 +238,7 @@ func TestUDPLockOtherEndpointProgressesWhileOneIsLocked(t *testing.T) {
 func TestUDPLockReassemblyMutexDoesNotBlockUDPOrTCP(t *testing.T) {
 	d := ingressDevice(t)
 	x := listenAdapter(t, d, accountingPort)
-	d.reassembly.mu.Lock()
-	release := releaseOnce(t, d.reassembly.mu.Unlock)
+	release := releaseOnce(t, holdReassembly(t))
 	free := []timed{
 		startTimed("UDP to managed port", writeOne(d, registryPacket([]byte("udp"), 41000, accountingPort))),
 		startTimed("TCP SYN", writeOne(d, lockTestTCPSYN())),
@@ -261,17 +260,12 @@ func TestUDPLockReassemblyMutexDoesNotBlockUDPOrTCP(t *testing.T) {
 // Invariant: the sweeper never waits for the accounting lock. An expired entry
 // is swept, and its Time Exceeded reaches the output, while the lock is held.
 func TestUDPLockSweeperRunsWhileAccountingLocked(t *testing.T) {
+	// 表の期限を短くし、項目が会計の錠を持つ間に期限を過ぎるようにする
+	setReassemblyLifetime(t, 600*time.Millisecond)
 	d := ingressDevice(t)
 	x := listenAdapter(t, d, accountingPort)
 	first, _ := splitIngressIPv4(registryPacket([]byte("abcdefgh12345678"), 41000, accountingPort), 16)
 	sendIngress(t, d, first)
-	d.reassembly.mu.Lock()
-	for i := range d.reassembly.entries {
-		if d.reassembly.entries[i].used {
-			d.reassembly.entries[i].deadline = time.Now().Add(-time.Second)
-		}
-	}
-	d.reassembly.mu.Unlock()
 	acc := d.registry.accounting
 	acc.mu.Lock()
 	x.opMu.Lock()

@@ -45,6 +45,9 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L20 です。
 流し方は、1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行することです。
 この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。
+`lab/lab suite --vms N` は同じ仕事を N 台の一時的な VM に分けて流し、1 つの判定にまとめます。
+VM の間では単独の確認の約束が弱まるため、1 台で流す形が厳密な形です。
+違いは[単独の確認の扱い](../../lab/README.md#単独の確認の扱い)にあります。
 文書だけを変える PR は、ラボを流しません。
 CI の検査のうち A8 は、どちらの PR でも流します。
 A1 から A7 は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。
@@ -211,6 +214,13 @@ suite.txt は `parallel` の確認を
 `exclusive-*` の確認は、
 並べた位置にかかわらずプールの後に流れます。
 
+`lab/lab suite` で一式を複数の VM に分けて流す場合も、`exclusive-*` の確認は割り当てられた VM の中で単独で流れます。
+VM の間ではホストを分け合うため、単独の確認も別の VM の確認と資源を取り合います。
+VM の間で守るのは、`rates.sh` がレートを測る時間窓だけです。
+別の VM の単独の確認と、suite.txt で `rate=flood` を持つフラッドの確認は、見積もりで時間窓の前後 30 秒に入らないように割り当て、`labhost merge` が実際の時刻で重なりを調べます。
+規則は[単独の確認の扱い](../../lab/README.md#単独の確認の扱い)にあります。
+1 台の VM で流す `labhost run -parallel 8 all` では、単独の確認の間に一式の他の確認が流れないので、こちらが厳密な形です。
+
 ## テストの一覧
 
 一覧の列は次の内容を示します。
@@ -257,7 +267,7 @@ suite.txt は `parallel` の確認を
 | L13 | `lab/ipv6.sh` (kernel と userspace) | IPv6 の送信元が deny をすり抜けること、IPv6 のフラッドが集約のレートのトークンを使うこと | ラボ (IPv6 を加えた netns) | `admission`、`relay` | A9 として | 自動 |
 | L14 | `lab/lifecycle.sh` check 10 (kernel と userspace) | エージェントの停止後も、`agent ls` と Web UI の一覧が最後のハートビートを生きた状態のまま示すこと ([設計文書の 5.2 節](../design/overview.md#52-全体状態の配信とハートビート)) | ラボ | `rule-ops`、`protocol`、`agent-platform` | A9 として | 自動 |
 | L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと ([設計文書の 5.1 節](../design/overview.md#51-登録))、無効なエージェントのルールで `server doctor` と `status` が失敗を報告すること、削除したエージェントに残ったルールの `server doctor` と `status` の結果が変わること (設計文書の [10.2a 節](../design/server-doctor.md)と[10.2b 節](../design/status.md)) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 自動 |
-| L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、loopback、resolve、failover、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧と、許可一覧が名指さないループバックの拒否、許可一覧が名指すループバックの宛先への TCP と UDP の転送とトンネルや LAN からのループバックの閉鎖、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、応えないアドレスから同じ名前の他のアドレスへの切り替え、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (設計文書の [7b 節](../design/agent-kernel.md)、[9 節](../design/state.md#9-状態の保存と再起動)、[10.3 節](../design/interface.md#103-運用の流れ)) | ラボ | `agent-platform` | A9 として | 自動 |
+| L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、loopback、resolve、failover、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧と、許可一覧が名指さないループバックの拒否、許可一覧が名指すループバックの宛先への TCP と UDP の転送とトンネルや LAN からのループバックの閉鎖、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、名前の最小のアドレスが応答しないときの別のアドレスへの切り替え、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (設計文書の [7b 節](../design/agent-kernel.md)、[9 節](../design/state.md#9-状態の保存と再起動)、[10.3 節](../design/interface.md#103-運用の流れ)) | ラボ | `agent-platform` | A9 として | 自動 |
 | L17 | `lab/agentdoctor.sh` (kernel と userspace) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと ([設計文書の 10.2c 節](../design/agent-doctor.md#102c-エージェント側の診断-wgft-agent-doctor)) | ラボ | `agent-platform` | A9 として | 自動 |
 | L18 | `lab/lifecycle.sh` check 12 (kernel と userspace) | ユーザー空間モードの WireGuard のソケットのバッファの条件 ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) を、`agent doctor` とログが実際のソケットの値で示さないこと、条件に届かないときに `agent doctor` の終了コードが 0 でなくなること、セットアップの文書の `/etc/sysctl.d` の手順で条件を満たせないこと、`rotate-key` で開き直したソケットを測らないこと | ラボ (VM 全体の sysctl を変えるので単独で) | `userspace`、`agent-platform` | A9 として | 自動 |
 | L19 | `lab/exhaustion.sh` の postclose (userspace)、mss (kernel と userspace)、acceptq と ackflood (kernel)、wgstall (userspace)。postclose の kernel モードは一式の外で、名前を指定して流します | 外からの入力で[閉じた後の接続の表](../design/userspace/tcp-retention.md#閉じた後の接続の表)の行が M を超えて生きているヒープを増やし続けること、追い出しが数えられずログに出ないこと、負荷が止まった後に作り直し無しで表が空かないこと、その負荷の間に別のフローが止まること、[MSS が 536 未満](../design/userspace/packet-validation.md#tcp-の-mss-の下限)のハンドシェイクで接続ができること、MTU 576 の経路で通常の TCP が通らないこと、カーネルモードの server の後ろの accept の待ち行列、中身の無い ACK の洪水、[WireGuard の受信の待ち](../design/userspace/flow-limits.md)の後に転送が戻らないこと。accept の待ち行列の長さと、洪水と受信の待ちの間のヒープと別のフローの遅れは測って示すだけで、判定に使いません | ラボ (CPU を占有できる VM) | `resource`、`userspace`、`phase`、`rc` | A9 として。kernel モードの postclose は、`internal/nettun` の閉じた後の接続の表 (`postclose.go` とその呼び出し) を変える PR ごとと、段階の完了時とリリース候補ごとに 1 回 | 自動 (kernel モードの postclose は開発者が起動) |

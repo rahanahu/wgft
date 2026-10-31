@@ -25,7 +25,7 @@ import (
 func (rt *runtime) us() *usermode.Dataplane { return rt.dp.(*usermode.Dataplane) }
 
 // newTestUserspace は、宛先の許可一覧も予算の指定も持たないユーザー空間モードの dataplane を作る。
-func newTestUserspace() *usermode.Dataplane { return usermode.New(nil, resource.Limits{}) }
+func newTestUserspace() *usermode.Dataplane { return usermode.New(nil, resource.Limits{}, "") }
 
 // fakeDataplane は runtime の境目の試験に使う記録器である。トンネルを本当に立てずに、runtime が
 // 境目をどう呼ぶかを確かめる。

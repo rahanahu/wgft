@@ -6,7 +6,7 @@
 
 - wireguard-go と gVisor の netstack でユーザー空間にトンネルを持ちます
 <a id="ipv4-の断片の入口"></a>
-- IPv4 の断片の入口:TUN の `Write` は、受け取った IPv4 の断片をすべて wgft の再組み立ての表(`internal/nettun`)に渡し、完成した datagram だけを netstack に渡す。
+- IPv4 の断片の入口:TUN の `Write` は、受け取った IPv4 の断片をすべて wgft の再組み立ての表(`internal/ipv4frag`)に渡し、完成した datagram だけを netstack に渡す。
   断片を gVisor の再組み立てには渡さない。
   固定版の gVisor の再組み立ては、断片化された datagram ごとに期限の処理のタイマーを取り消さずに残し、そのタイマーは期限の 30 秒まで生きるので、保持する量が上限ではなく断片の届く速さで決まるためである([以前の検証 2026-09-27](https://github.com/rahanahu/wgft/blob/c5a6dc454468733e9ff4b2a4eb2b5a17ed4bdf4e/docs/design.md#L676))
 <a id="再組み立ての表"></a>

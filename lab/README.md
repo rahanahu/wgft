@@ -35,6 +35,17 @@ lab/lab exec vm labhost run -parallel 8 all
 `run all` の対象は [lab/suite.txt](suite.txt) の `default=yes` の確認で、両モードを含みます。
 結果は PR の本文に記録します。
 
+ユーザー空間モードのエージェントを wgstack で動かすときは、ホストで `WGFT_LAB_AGENT_NETSTACK=wgstack` を付けて実行します。
+`lab/lab` はこの値を VM の中のコマンドに `WGFT_AGENT_NETSTACK` として渡し、確認が起動するエージェントがそれを継ぎます。
+カーネルモードのエージェントは、値を使わない旨を出して起動します。
+wgstack の選択で一式を流して確かめたのは、ユーザー空間モードのエージェントを使う行です。
+カーネルモードのエージェントを使う `agentkernel.sh` の行は、2 行だけをこの選択で試しました。
+未設定なら何も渡さず、既定の gvisor で動きます。
+
+```sh
+WGFT_LAB_AGENT_NETSTACK=wgstack lab/lab exec vm labhost run -parallel 8 all
+```
+
 ```sh
 lab/lab test internal/dataplane/linuxkernel/nft
 lab/lab exec client ping 198.51.100.1
@@ -47,6 +58,102 @@ VM の中ではインストールされた名前を使い、`/wgft/bin` のバ�
 
 `lab/lab reset` は VM をスナップショットに戻し、`lab/lab destroy` は VM を削除します。
 共有中の VM では、実行中の作業と所有者を確認してから行います。
+
+## 一式を複数の VM に分けて流す
+
+`lab/lab suite` は一時的な VM を作り、`run all` の仕事を shard に分けて同時に流します。
+各 shard の結果は 1 つの判定にまとめ、最後に VM を消します。
+VM の台数は `--vms` で指定し、既定は 3 台です。
+各 VM はテンプレートと同じ大きさで、`lab/lab up` の既定では 2 vCPU と 2 GiB のメモリを使います。
+`--vms 2` にすると VM 1 台分のメモリが空きますが、測った 1 回では統合までが 490 秒で、3 台の 329 秒より長くかかりました。
+レートの時間窓に最も近かった別の VM の守る確認との間隔も、測った 1 回ずつでは 2 台が 19 秒、3 台が 69 秒でした。
+1 台で流すより周期が短くなる代わりに、単独で流す確認の約束が VM の間で弱くなります。
+1 台の VM で流す `labhost run -parallel 8 all` が厳密な形です。
+
+```sh
+lab/lab suite
+lab/lab suite --vms 2
+lab/lab suite --vms 2 --netstack both
+lab/lab suite --vms 3 --netstack wgstack --durations earlier/summary.json
+```
+
+### 単独の確認の扱い
+
+VM の中では、`exclusive-*` の確認は 1 台で流す場合と同じく単独で流れます。
+VM の間ではホストの CPU、メモリ、ネットワークを分け合うので、単独の確認も別の VM の確認と同時に流れます。
+守るのはレートを測る時間窓だけです。
+時間窓は、[suite.txt](suite.txt) で `rate=measure` を持つ `rates.sh` の確認が走る間です。
+`rate=group` を持つ `lifecycle.sh` の単独の確認は、時間窓と同じ VM に置き、`rates.sh` の後に流します。
+
+別の VM で時間窓から離しておく確認は 2 種類です。
+1 つは `rate=overlap` を持たない単独の確認で、その VM の単独の段の中の自分の順番の時間で見ます。
+もう 1 つは `rate=flood` を持つ `parallel` の確認で、フラッドや大量の転送を流します。
+`connlimit.sh`、`lifecycle.sh userspace` の 5c と 5d、`usage.sh` がこれに当たり、選んだ理由は suite.txt にあります。
+プールのどこで走るかは決まらないので、プールの始まりから終わりの見積もりまでの全体をその時間とみなします。
+どちらも、見積もりの時間が時間窓の前後 30 秒の中に入らないように割り当てます。
+この秒数は `labhost run` の `-rate-margin` です。
+入りそうな確認は、入らない VM のうち全体が最も早く終わる VM へ移します。
+時間窓の VM はいつも移し先の候補で、その VM ではプールが時間窓の前に終わり、単独の確認は 1 つずつ流れます。
+移すので、VM を増やしても時間窓の VM より短い周期にはなりません。
+例外は `rate=overlap` を持つ `exhaustion.sh userspace postclose` で、時間窓と重なることがあります。
+`rate=flood` を持たない `parallel` の確認は、別の VM で時間窓の間も流れます。
+守れない割り当てになった場合は、守りを外さずに `labhost run` が警告を出し、`summary.json` の `warnings` に記録します。
+
+割り当ては見積もりに基づくので、実際の所要時間が見積もりと違えば、時間窓と重なることがあります。
+`labhost merge` は各確認の実際の開始の時刻と所要時間から重なりを調べ、統合した結果の `rate_window` に書きます。
+重なった場合は、その確認の名前と重なった秒数を `warnings` に記録します。
+重ならなかった場合は、時間窓に最も近かった確認とその間隔を書きます。
+`--netstack both` では 2 つの netstack の割り当てが同じになり、shard が同時に始まるので、2 つの `rates.sh` の時間窓が互いに重なります。
+時間窓はそれぞれの netstack の shard の間でだけ守ります。
+
+### 一時的な VM
+
+一時的な VM は `WGFT_LAB_TEMPLATE` のスナップショット `clean` の複製で、`WGFT_LAB_TEMPLATE` の既定は `WGFT_LAB_VM` です。
+`lab/lab up` で作った VM があれば足ります。
+複製は CPU とメモリの上限をスナップショットから継ぎ、リポジトリの共有はこの作業ツリーを指します。
+スナップショットが無い場合は `lab/lab up` と同じ手順で VM を新規に作るので、遅くなります。
+ビルドはホストで 1 回行い、各 VM にインストールします。
+各 VM の用意がそろってから、すべての shard が同時に `labhost run` を始めます。
+用意に 900 秒を超える VM があれば、その VM を待たずに始めます。
+`--netstack both` は既定の netstack と `wgstack` を同時に流すので、VM の台数は `--vms` の 2 倍です。
+ホストの空きに合わせて、同時に立てる VM は 4 台までを目安にし、`--netstack both` には `--vms 2` を付けます。
+
+### 割り当て
+
+shard の割り当ては `labhost run -shard K/N all` が決めます。
+重い仕事から順に、見積もりが最も小さい VM へ置きます。
+見積もりは `--durations` に渡した以前の `summary.json` の所要時間で、無い仕事は [suite.txt](suite.txt) の `weight=`、それも無い仕事は 10 秒です。
+割り当ては入力が同じなら同じです。
+最も長い仕事より短い周期にはならないので、台数を増やしても周期はそこで止まります。
+台数が多すぎて仕事の無い shard ができると、その shard は失敗します。
+
+### 結果と終了コード
+
+各 shard の結果は `--out` の下の `<netstack>/shard-K/` に残り、`summary.json`、`logs/`、`shard.log` があります。
+`--out` の既定は `/tmp/wgft-lab-suite-<日時>` です。
+統合した判定は `<netstack>/summary.json` です。
+各 shard の `summary.json` は、割り当ての要約の `plan_digest` と、確認が使った `netstack` を記録します。
+統合は、どの shard でも流れなかった仕事、2 つの shard で流れた仕事、足りない shard、`plan_digest` の違い、`netstack` の混在を失敗にします。
+これらは `MERGE FAILURE` として、仕事の名前とともに出ます。
+1 つの shard の `labhost run` は `--shard-timeout` の秒数で止め、その shard は `summary.json` の無い失敗になります。
+`summary.json` の無い shard があっても、ある分を統合し、どの shard でも流れなかった仕事を名前で出します。
+秒数の既定は 3600 で、環境変数 `WGFT_LAB_SHARD_TIMEOUT` でも指定できます。
+結果の回収は 1 回 300 秒で打ち切ります。
+終了コードは、どれかの shard の失敗、VM の中の後片付けの漏れ、中断、統合の不整合で非 0 です。
+VM の削除の失敗は、終了コードに入れません。
+最後に統合までの所要時間を出し、VM を消した後に削除までを含めた所要時間を出します。
+
+INT や TERM による中断と失敗でも VM を消します。
+SIGKILL で残った VM は、作った `lab/lab` のプロセスがもう無ければ、次の `lab suite` の開始時か `lab/lab suite-gc` が消します。
+生死は `/proc` で見るので、同じホストの他の利用者が実行中の `lab suite` の VM も消しません。
+`--keep` を付けると VM を残します。
+
+1 台の VM で 1 つの shard を流すことと、shard の統合は、次のように直接も行えます。
+
+```sh
+lab/lab exec vm labhost run -shard 1/3 -durations /tmp/earlier.json -parallel 8 all
+labhost merge -out merged shard-1/summary.json shard-2/summary.json shard-3/summary.json
+```
 
 ## 対応する VPS の環境
 
@@ -130,6 +237,9 @@ B7、B11、B12、C3、D4 など一式の外の試験は、契機に従って追�
 lab/lab exec vm labhost run version-skew.sh
 lab/lab exec vm bash /wgft/lab/rcvwin.sh
 lab/lab test internal/nettun vps -test.run='^(TestRelayHold|TestSetupFailure)OutOfOrderKernelData$'
+lab/lab test internal/tcpharness/linuxdut
+lab/lab exec vm bash /wgft/lab/tcpquality.sh
+lab/lab exec vm bash /wgft/lab/tcpquality-cpu.sh fast
 lab/lab exec vm bash /wgft/lab/scale.sh kernel
 lab/lab exec vm bash /wgft/lab/scale.sh userspace
 lab/lab exec vm bash /wgft/lab/upgrade.sh kernel
@@ -137,6 +247,8 @@ lab/lab exec vm bash /wgft/lab/upgrade.sh userspace
 ```
 
 これらの直接実行は共有トポロジを使うため、同じ VM の他の実行が終了してから行います。
+`lab/lab test` はテストのバイナリをその場で作ります。
+ほかの行は VM にインストールしたバイナリを使うので、先に `lab/lab build` を実行します。
 D4 の旧版の選択と確認範囲は[追加テストの台帳](../docs/development/testing-catalog.md#d4-旧版からの更新)に従います。
 
 ### 確認の分類

@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -26,10 +27,21 @@ func (c class) exclusive() bool { return c == classHeavy || c == classTiming || 
 
 // job は 1 回流すシナリオ。
 type job struct {
-	Class    class  `json:"class"`
-	Scenario string `json:"scenario"` // "lifecycle.sh kernel 3b" のような、スクリプト名と引数
-	Default  bool   `json:"default"`
+	Class    class   `json:"class"`
+	Scenario string  `json:"scenario"` // "lifecycle.sh kernel 3b" のような、スクリプト名と引数
+	Default  bool    `json:"default"`
+	Weight   float64 `json:"weight,omitempty"` // 見積もりの秒数。0 は未記載。-shard の釣り合いにだけ使う
+	Rate     string  `json:"rate,omitempty"`   // rateMeasure、rateGroup、rateOverlap、rateFlood か空。-shard の割り当てにだけ使う
 }
+
+// rate= の値。VM を分けた run では VM どうしがホストを分け合うので、別の VM のフラッドが
+// レートの測定値を動かしうる。-shard はこの印で測定の時間窓を守る (shard.go)
+const (
+	rateMeasure = "measure" // 制限の無い流れと比べてレートを測る。この仕事の走る間が時間窓
+	rateGroup   = "group"   // 測定の仕事と同じ VM で、その後に流す
+	rateOverlap = "overlap" // 別の VM で時間窓に重なってよい
+	rateFlood   = "flood"   // parallel の仕事のフラッドか大量の転送。プールのどこで走るか決まらないので、プール全体をその時間とみなす
+)
 
 // loadManifest は lab/suite.txt を読む。
 func loadManifest(path string) ([]job, error) {
@@ -64,7 +76,42 @@ func loadManifest(path string) ([]job, error) {
 		default:
 			return nil, fmt.Errorf("%s:%d: default must be yes or no, not %q", path, line, f[1])
 		}
-		jobs = append(jobs, job{Class: c, Scenario: strings.Join(f[2:], " "), Default: def})
+		// シナリオの前の key=value は割り当ての印。シナリオの前に置くので、引数と取り違えない
+		var weight float64
+		var rate string
+		rest := f[2:]
+		for len(rest) > 1 && strings.Contains(rest[0], "=") {
+			k, v, _ := strings.Cut(rest[0], "=")
+			switch k {
+			case "weight":
+				w, err := strconv.ParseFloat(v, 64)
+				if err != nil || w <= 0 {
+					return nil, fmt.Errorf("%s:%d: weight= wants a positive number of seconds", path, line)
+				}
+				weight = w
+			case "rate":
+				switch v {
+				case rateMeasure, rateGroup, rateOverlap:
+					if !c.exclusive() {
+						return nil, fmt.Errorf("%s:%d: rate=%s applies to exclusive jobs only", path, line, v)
+					}
+				case rateFlood:
+					if c.exclusive() {
+						return nil, fmt.Errorf("%s:%d: rate=%s applies to parallel jobs only", path, line, v)
+					}
+				default:
+					return nil, fmt.Errorf("%s:%d: rate= wants %s, %s, %s or %s, not %q", path, line, rateMeasure, rateGroup, rateOverlap, rateFlood, v)
+				}
+				rate = v
+			default:
+				return nil, fmt.Errorf("%s:%d: unknown key %q before the scenario", path, line, k)
+			}
+			rest = rest[1:]
+		}
+		if strings.Contains(rest[0], "=") {
+			return nil, fmt.Errorf("%s:%d: %q wants a scenario after it", path, line, rest[0])
+		}
+		jobs = append(jobs, job{Class: c, Scenario: strings.Join(rest, " "), Default: def, Weight: weight, Rate: rate})
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err

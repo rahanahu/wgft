@@ -35,7 +35,7 @@ func TestNewInstallsTheHostInterfaceReader(t *testing.T) {
 	if !ok {
 		t.Skip("this host has no IPv4 network of /30 or wider")
 	}
-	refuse := New(nil, resource.Limits{}).RelayOptions(proto.WGConfig{}).RefuseTarget
+	refuse := New(nil, resource.Limits{}, "").RelayOptions(proto.WGConfig{}).RefuseTarget
 	if refuse == nil {
 		t.Fatal("RelayOptions passes no RefuseTarget")
 	}

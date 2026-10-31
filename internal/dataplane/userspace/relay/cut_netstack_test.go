@@ -19,7 +19,7 @@ import (
 // an endpoint left in TIME_WAIT or FIN_WAIT_2 keeps its local port, and a new listener on that
 // port fails with "port is in use".
 type netstackNet struct {
-	dev  *nettun.Device
+	dev  agentDev
 	addr netip.Addr
 }
 
@@ -37,19 +37,26 @@ var (
 )
 
 // netstackPair joins two netstack devices back to back: packets one writes out are delivered to
-// the other, in place of WireGuard. The client dials from the first; the relay listens on the second.
-func netstackPair(t *testing.T) (*nettun.Device, netstackNet) {
+// the other, in place of WireGuard. The client dials from the first, a gVisor netstack; the relay
+// listens on the second, built by engine.
+func netstackPair(t *testing.T, engine string) (*nettun.Device, netstackNet) {
 	t.Helper()
 	client, err := nettun.Create(cutClientAddr, 1420)
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := nettun.Create(cutAgentAddr, 1420)
-	if err != nil {
+	t.Cleanup(func() {
+		// Close the client, which also ends the pumps' Read, then wait for its stack's
+		// goroutines. newAgentDev closes the agent's device the same way.
 		client.Close()
-		t.Fatal(err)
+		client.Wait()
+	})
+	agent := newAgentDev(t, engine, cutAgentAddr)
+	type dev interface {
+		Read(bufs [][]byte, sizes []int, offset int) (int, error)
+		Write(bufs [][]byte, offset int) (int, error)
 	}
-	pump := func(src, dst *nettun.Device) {
+	pump := func(src, dst dev) {
 		bufs := [][]byte{make([]byte, 65535)}
 		sizes := []int{0}
 		for {
@@ -64,16 +71,6 @@ func netstackPair(t *testing.T) (*nettun.Device, netstackNet) {
 	}
 	go pump(client, agent)
 	go pump(agent, client)
-	t.Cleanup(func() {
-		// Close both devices, which also ends the two pumps' Read, then wait for the stacks'
-		// goroutines.
-		for _, d := range []*nettun.Device{client, agent} {
-			d.Close()
-		}
-		for _, d := range []*nettun.Device{client, agent} {
-			d.Wait()
-		}
-	})
 	return client, netstackNet{dev: agent, addr: cutAgentAddr}
 }
 
@@ -105,6 +102,10 @@ func isCutByReset(err error) bool {
 // client never closes its side, and the new listener would fail with "port is in use" until
 // the hold ends (design.md 7 節). The client sees a reset rather than EOF.
 func TestTCPForcedCutFreesTheNetstackPortAtOnce(t *testing.T) {
+	forEachAgentEngine(t, testTCPForcedCutFreesTheNetstackPortAtOnce)
+}
+
+func testTCPForcedCutFreesTheNetstackPortAtOnce(t *testing.T, engine string) {
 	const port = 7000
 	k := Key{proto.TCP, port}
 	cases := []struct {
@@ -123,7 +124,7 @@ func TestTCPForcedCutFreesTheNetstackPortAtOnce(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			client, agent := netstackPair(t)
+			client, agent := netstackPair(t, engine)
 			target, other := tcpEcho(t), tcpEcho(t)
 			m := New(agent, Options{Logf: testLogf(t)})
 			defer m.Close()
@@ -156,9 +157,13 @@ func TestTCPForcedCutFreesTheNetstackPortAtOnce(t *testing.T) {
 // A UDP listener has no TIME_WAIT: after the rule is disabled with a live session, the same
 // port opens again at once.
 func TestUDPCloseFreesTheNetstackPortAtOnce(t *testing.T) {
+	forEachAgentEngine(t, testUDPCloseFreesTheNetstackPortAtOnce)
+}
+
+func testUDPCloseFreesTheNetstackPortAtOnce(t *testing.T, engine string) {
 	const port = 7001
 	k := Key{proto.UDP, port}
-	client, agent := netstackPair(t)
+	client, agent := netstackPair(t, engine)
 	target, _ := udpEcho(t)
 	m := New(agent, Options{Logf: testLogf(t)})
 	defer m.Close()
@@ -226,9 +231,13 @@ func (l signalListener) Accept() (net.Conn, error) {
 // could not bind until the client went away. The accept loop cuts it instead, so the next retry
 // opens the listener and the client sees a reset.
 func TestTCPConnAcceptedDuringCloseIsCut(t *testing.T) {
+	forEachAgentEngine(t, testTCPConnAcceptedDuringCloseIsCut)
+}
+
+func testTCPConnAcceptedDuringCloseIsCut(t *testing.T, engine string) {
 	const port = 7002
 	k := Key{proto.TCP, port}
-	client, agent := netstackPair(t)
+	client, agent := netstackPair(t, engine)
 	target, other := tcpEcho(t), tcpEcho(t)
 	accepted := make(chan struct{}, 1)
 	m := New(acceptSignal{agent, accepted}, Options{Logf: testLogf(t)})

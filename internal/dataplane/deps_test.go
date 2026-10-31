@@ -193,8 +193,9 @@ func TestDependencyDirection(t *testing.T) {
 // its sub-packages, the nftables-row and Go-evaluator Admission Policy compilers, design.md 7a.7
 // 節's package layout) and internal/planner "know nothing about the OS, nftables, or gVisor": inside
 // the module, they import only proto and each other, never dataplane/*, frontend/*, platform/*,
-// vpsd or agent. internal/resource, internal/lograte, internal/startup, internal/textsafe and
-// internal/reasontext are even stricter and import nothing at all from the module (design.md 7a.7 節).
+// vpsd or agent. internal/resource, internal/lograte, internal/startup, internal/textsafe,
+// internal/reasontext and internal/ipv4frag are even stricter and import nothing at all from the
+// module (design.md 7a.7 節, wgstack.md).
 func TestPureLayersStayPure(t *testing.T) {
 	root := moduleRoot(t)
 	var pure []string
@@ -220,7 +221,7 @@ func TestPureLayersStayPure(t *testing.T) {
 	// by cmd/wgft, internal/vpsd, internal/agent and internal/dataplane/linuxkernel/wg alike, so it
 	// stays a leaf. If it grew an import of, say, internal/vpsd/store, every one of those layers
 	// would pull the control plane in through it and the direction of 7a.7 節 would break.
-	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup", "internal/textsafe", "internal/reasontext"} {
+	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup", "internal/textsafe", "internal/reasontext", "internal/ipv4frag"} {
 		pkgs := packagesUnder(t, root, name)
 		if len(pkgs) == 0 {
 			t.Fatalf("found no packages under %s; did it move?", name)
@@ -853,6 +854,88 @@ func TestControlPlanesDoNotImportEachOther(t *testing.T) {
 				if dep == other || strings.HasPrefix(dep, other+"/") {
 					t.Errorf("%s imports %s (design.md 7a.7 節: one control plane does not import the other)", pkg, dep)
 				}
+			}
+		}
+	}
+}
+
+// TestTCPHarnessStaysInTests checks the placement of internal/tcpharness, the TCP conformance
+// harness of docs/design/userspace/wgstack-verification.md. The core imports nothing from the
+// module, so a scenario cannot lean on an engine's code; each engine adapter imports the core and
+// only the engine it builds; and no package outside internal/tcpharness imports any of it from a
+// non-test file, so the harness never reaches a production binary.
+func TestTCPHarnessStaysInTests(t *testing.T) {
+	root := moduleRoot(t)
+	const harness = module + "/internal/tcpharness"
+	if deps := moduleImports(t, root, harness); len(deps) > 0 {
+		t.Errorf("%s imports %v from the module; the core imports nothing from it", harness, deps)
+	}
+	adapters := map[string]map[string]bool{
+		harness + "/gvisordut":  {harness: true, module + "/internal/nettun": true},
+		harness + "/linuxdut":   {harness: true},
+		harness + "/wgstackdut": {harness: true, module + "/internal/wgstack": true},
+	}
+	for _, pkg := range packagesUnder(t, root, "internal/tcpharness") {
+		if pkg == harness {
+			continue
+		}
+		allowed, ok := adapters[pkg]
+		if !ok {
+			t.Errorf("%s is not a known engine adapter; add it to this test with the imports it may have", pkg)
+			continue
+		}
+		for _, dep := range moduleImports(t, root, pkg) {
+			if !allowed[dep] {
+				t.Errorf("%s imports %s; an engine adapter imports the core and the engine it builds only", pkg, dep)
+			}
+		}
+	}
+	var outside []string
+	for _, dir := range []string{"cmd", "internal", "proto", "tools"} {
+		outside = append(outside, packagesUnder(t, root, dir)...)
+	}
+	if len(outside) < 20 {
+		t.Fatalf("found only %d packages; did the layout change?", len(outside))
+	}
+	for _, pkg := range outside {
+		if pkg == harness || strings.HasPrefix(pkg, harness+"/") {
+			continue
+		}
+		for _, dep := range moduleImports(t, root, pkg) {
+			if dep == harness || strings.HasPrefix(dep, harness+"/") {
+				t.Errorf("%s imports %s from a non-test file; the harness stays in tests", pkg, dep)
+			}
+		}
+	}
+}
+
+// TestWgstackImports checks the placement rules of docs/design/userspace/wgstack.md for
+// internal/wgstack, the wgft-owned netstack of the agent's userspace mode: from outside the module
+// it imports only the standard library and golang.zx2c4.com/wireguard/tun, and nothing from the
+// module but internal/ipv4frag, the reassembly table it shares with internal/nettun: its log gate
+// counts on the core clock, so it does not use internal/lograte. It never reaches gVisor,
+// internal/nettun, internal/dataplane, the agent or vpsd. The kernel-mode packages of the agent,
+// internal/agent/kernelmode and internal/agent/agentdp, do not depend on internal/wgstack through
+// any import, which keeps the kernel mode isolated from it by structure (I7).
+func TestWgstackImports(t *testing.T) {
+	root := moduleRoot(t)
+	const pkg = module + "/internal/wgstack"
+	if _, err := os.Stat(filepath.Join(root, strings.TrimPrefix(pkg, module))); err != nil {
+		t.Fatalf("%s: %v; did it move?", pkg, err)
+	}
+	for _, imp := range directImports(t, root, pkg) {
+		inModule := imp == module || strings.HasPrefix(imp, module+"/")
+		switch {
+		case inModule && imp != module+"/internal/ipv4frag":
+			t.Errorf("%s imports %s; wgstack.md allows only internal/ipv4frag from the module", pkg, imp)
+		case !inModule && strings.Contains(strings.Split(imp, "/")[0], ".") && imp != "golang.zx2c4.com/wireguard/tun":
+			t.Errorf("%s imports %s; wgstack.md allows only the standard library and wireguard/tun", pkg, imp)
+		}
+	}
+	for _, p := range []string{module + "/internal/agent/kernelmode", module + "/internal/agent/agentdp"} {
+		for _, dep := range deps(t, root, p) {
+			if dep == pkg || strings.HasPrefix(dep, pkg+"/") {
+				t.Errorf("%s depends on %s; the kernel mode must not reach wgstack (wgstack.md, I7)", p, dep)
 			}
 		}
 	}
