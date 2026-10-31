@@ -99,7 +99,7 @@ type tcbState struct {
 	oooFin        bool
 	oooFinOff     uint64
 	rcvSinceAck   int
-	rcvMSSEst     uint32    // 相手の segment の大きさの推定(相手の segment の大きさの推定 rcv_mss)
+	rcvMSSEst     uint32    // 相手の segment の大きさの推定(Linux の rcv_mss)
 	pingpong      bool      // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
 	lastDataRcvd  int64     // 最後に中身を受け入れた時刻
 	rcvdData      bool      // lastDataRcvd が有効
