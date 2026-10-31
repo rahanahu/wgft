@@ -76,6 +76,8 @@ CLI は応答の文字列をすべて、表示できない文字を escape し�
 各キーの細部と、`kernel` の中身の形は `internal/agent/controlapi` の型が正本です。
 fixture の `testdata/spec/control/doctor-reply.json` (ユーザー空間モード) と `doctor-reply-kernel.json` (カーネルモード) は、ラボで稼働中の agent から読んだ応答です。
 `internal/agent/controlapi` の `spec_test.go` が、Go の v1 の型が知らないキー無しで読み、同じ 1 行に書き戻すことを確かめます。
+fixture が契約にするのは形で、値はラボで観測したものです。
+`socket_buffers` の値は Linux のカーネルが `SO_RCVBUF` を倍にして返す値とラボの `net.core.rmem_max` で決まり、転送量やポートの値も実行ごとに変わります。
 
 この応答は CLI の材料で、運用者向けの保証は次の `agent doctor --json` にあります。
 Rust の agent と Go の v1 の CLI を組ませる場合は、この応答の形も合わせなければなりません。

@@ -19,7 +19,8 @@ agent は次の要求で WebSocket を開きます。
   server は permessage-deflate を受けません
 - `Origin`:付けません。
   Go の性質として、server の WebSocket のライブラリ (`coder/websocket`) は、`Origin` があって `Host` と違う要求を拒みます
-- 期限:WebSocket の確立までを 30 秒で打ち切ります
+- 期限:WebSocket の確立までを 15 秒で打ち切ります。
+  v1 は確立の待ちに 30 秒の期限を置きますが、ピンを確かめる HTTP クライアントの 15 秒の期限が先に効きます
 
 確立の前に server が返す状態は次のとおりです。
 本文は Go の `http.Error` の形で、文言の後に改行が付きます。
@@ -37,7 +38,8 @@ agent は次の要求で WebSocket を開きます。
 - フレーム:1 つのメッセージは 1 つの WebSocket のテキストのメッセージで、中身は 1 つの JSON のオブジェクトです。
   v1 の両側はテキストで送ります。
   Go の性質として、両側はバイナリのメッセージも同じように読みますが、これは保証の外です
-- 書きの期限:両側とも 1 つのメッセージの書き込みを 10 秒で打ち切ります
+- 書きの期限:両側とも 1 つのメッセージの書き込みを 10 秒で打ち切ります。
+  Go の性質として、`coder/websocket` は書きの期限切れで close のフレームを送らずに接続を閉じます
 
 読む量の上限は次のとおりです。
 上限を超えるメッセージを受けた側は、WebSocket の close の符号 1009 で閉じます。
@@ -55,7 +57,10 @@ agent は次の要求で WebSocket を開きます。
 1. agent は確立の直後に `pubkey` を 1 通送ります。
    中身は自分の WireGuard の公開鍵と、対応する版の範囲と機能です ([messages.md](messages.md#pubkey))
 2. server は確立から 10 秒以内に届いた最初のメッセージだけを受けます。
-   10 秒以内に届かない、JSON として読めない、`type` が `pubkey` でない場合は、符号 1008 と理由 `first message must be pubkey` で閉じます
+   JSON として読めない場合と `type` が `pubkey` でない場合は、符号 1008 と理由 `first message must be pubkey` で閉じます。
+   10 秒以内に届かない場合は、close のフレームを送らずに接続を閉じます。
+   Go の性質として、`coder/websocket` は読みの期限切れで接続を閉じるので、その後の 1008 の close は送られません。
+   v1 の挙動で、v1.x の修正で 1008 を送るように変わることがあります
 3. server は公開鍵を確かめ、だめなら 1008 で閉じます。
    理由は `invalid public key`、`public key equals server key`、`public key belongs to another agent` のどれかです。
    他の agent の鍵を確かめる読み取りに失敗したら、1011 と `internal error` で閉じます
@@ -102,7 +107,7 @@ server の世代が戻った場合も、接続し直せば最初の全体状態�
 
 | 符号 | 閉じる側 | 理由の文字列 | 意味 |
 | --- | --- | --- | --- |
-| 1008 | server | `first message must be pubkey` | 最初のメッセージの期限切れ、読めない、`type` の違い |
+| 1008 | server | `first message must be pubkey` | 最初のメッセージが読めない、`type` の違い |
 | 1008 | server | `invalid public key` | 公開鍵を 32 byte の base64 として読めない |
 | 1008 | server | `public key equals server key` | server の公開鍵と同じ |
 | 1008 | server | `public key belongs to another agent` | 他の agent の保存した鍵と同じ |
@@ -115,11 +120,12 @@ server の世代が戻った場合も、接続し直せば最初の全体状態�
 | 4003 | server | `no overlapping protocol version: server supports [<min>,<max>], agent supports [<min>,<max>]` | 版の範囲に共通部分が無い |
 | 4004 | server | `malformed protocol advertisement: ...` | 版の宣言の形の誤り ([版の交渉](#版の交渉)) |
 
-- 1008 の見分け:server は 1008 を公開鍵の拒否にだけ使います。
+- 1008 の見分け:server は 1008 を最初のメッセージの誤りと公開鍵の拒否にだけ使います。
+  agent の `pubkey` は最初のメッセージの誤りに当たらないので、agent が受ける 1008 は公開鍵の拒否です。
   agent は再接続の待ちを 1008 の符号だけで判断し、理由の文字列を見ません。
   鍵の変更の頻度の上限かどうかだけは、理由の文字列が `public key changes are limited; retry later` と一致するかで見分け、`agent doctor` に示します
 - 1009 の文言:ライブラリの文言で、保証の外です
-- close のフレームの無い終わり:上の手順 6、読めないメッセージ、配る鍵の変化で、server は close のフレームを送らずに閉じます。
+- close のフレームの無い終わり:最初のメッセージの 10 秒の期限切れ、書きの期限切れ、上の手順 6、読めないメッセージ、配る鍵の変化で、server は close のフレームを送らずに閉じます。
   agent は通常の切断として扱います
 - agent の側の閉じ方:agent は close のフレームを送らずに閉じます。
   停止、ping の期限切れ、server の選んだ版の拒否が当たります。

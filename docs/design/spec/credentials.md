@@ -110,7 +110,8 @@ fixture は次のとおりです。
 
 - ファイルの開き方:無ければ権限 0600 で作り、symbolic link を辿らずに開き、通常のファイルでなければ誤りにします
 - Unix のロック:`flock(LOCK_EX | LOCK_NB)` です。
-  `fcntl` のロックと `flock` のロックは互いに見えないので、Go 以外の実装も `flock` を使わなければなりません
+  Linux のローカルのファイルシステムでは `fcntl` のロックと `flock` のロックは互いに見えないので、Go 以外の実装も `flock` を使わなければなりません。
+  NFS のようなネットワークのファイルシステムでの振る舞いは未確認です
 - Windows のロック:`LockFileEx(LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY)` で、範囲は offset 0 からの 1 byte です
 - 差し替えの検出:ロックを取った後、開いたファイルとそのパスのファイルが同じかを確かめます。
   違えば開き直し、4 回試してだめなら誤りにします

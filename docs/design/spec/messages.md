@@ -179,7 +179,7 @@ Rust の agent は、同じ場合の理由に次の語を含めなければな�
 
 | 場合 | 理由に含める語 | v1 の agent の理由の例 |
 | --- | --- | --- |
-| 待ち受けを開けない | `bind failed`。`bind tcp ` か `bind udp ` でも当たります | `tcp/8080: bind tcp 10.200.0.2:8080: port is in use` |
+| 待ち受けを開けない | `bind failed`。`bind tcp ` か `bind udp `、または `listen` と `bind:` の両方でも当たります | `tcp/8080: bind tcp 10.200.0.2:8080: port is in use` |
 | 宛先の許可一覧が拒んだ | `WGFT_AGENT_ALLOW_TARGETS` か `is not allowed` | `tcp/8080: target 192.168.1.10:80 is not in WGFT_AGENT_ALLOW_TARGETS` |
 | ブロードキャストとマルチキャストの宛先 | `the agent forwards only to unicast targets` | `udp/9000: target 192.168.1.255:9000 is the broadcast address of 192.168.1.0/24 on this host; the agent forwards only to unicast targets` |
 | 名前の解決の失敗 | `name resolution`、`no such host`、`lookup `、`server misbehaving` のどれか | `tcp/8080: dial tcp: lookup nas.lan on 127.0.0.53:53: no such host` |
@@ -192,8 +192,10 @@ Rust の agent は、同じ場合の理由に次の語を含めなければな�
 
 - 例の書き方:v1 のユーザー空間モードの agent の理由は `<proto>/<port>: <誤り>` の形です。
   `<誤り>` の多くは Go の `net` の誤りの文言そのもので、形は保証の外です
-- 判定の順:`server doctor` は表の下の 3 行のカーネルモードの語と許可一覧の語を、接続の誤りの語より先に見ます。
-  語の照合と順は `internal/vpsd/doctor` の `targetReasonCode` が正本で、語の値は `internal/reasontext` にあります
+- 判定の順:`server doctor` は次の順に当て、最初に当たった分類を採ります。
+  ループバックの語 (ただし名前の解決の失敗の語も含めば名前の解決の失敗)、許可一覧の語、`net.ipv4.ip_forward`、待ち受けを開けない語、名前の解決の失敗の語、ユニキャストの語、`connection refused`、応えない語、経路が無い語の順です。
+  直前の解決の結果で転送を続けている理由は、この分類の前に別に見分けます。
+  語の照合と順は `internal/vpsd/doctor` の `targetReasonCode` と `StaleResolution` が正本で、語の値は `internal/reasontext` にあります
 - 名前の解決の失敗の文言:v1 の agent は、問い合わせごとに変わる送信元とサーバのソケットの組 (`read udp <送信元>-><サーバ>: `) を文言から除きます。
   除かないと同じ誤りが 30 秒ごとに状態の変化として報告されるためです
 

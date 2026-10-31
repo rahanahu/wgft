@@ -28,13 +28,16 @@ func specMessage(t *testing.T, rel string) []byte {
 }
 
 // specQuirk は wire/quirks.json の 1 件である。input か input_base64 の片方を持つ。want は Go の v1 が
-// 読んだ値を json.Marshal で書き直したもので、error が真なら読みが誤りになる。
+// 読んだ値を json.Marshal で書き直したもので、error が真なら読みが誤りになる。rust は Go 以外の実装の
+// 扱いで、must-accept(Go の v1 の書き手が書く形なので受けなければならない)か may-reject(Go の書き手が
+// 書かない形なのでメッセージごと拒んでもよい)である(encoding.md の「読む側の規則」)。
 type specQuirk struct {
 	Name        string `json:"name"`
 	Input       string `json:"input,omitempty"`
 	InputBase64 string `json:"input_base64,omitempty"`
 	Want        string `json:"want,omitempty"`
 	Error       bool   `json:"error,omitempty"`
+	Rust        string `json:"rust"`
 }
 
 func (q specQuirk) raw(t *testing.T) []byte {
@@ -60,6 +63,12 @@ func TestSpecWireQuirks(t *testing.T) {
 		t.Fatal("no cases")
 	}
 	for _, q := range cases {
+		switch {
+		case q.Rust == "must-accept" && q.Error:
+			t.Errorf("%s: a form Go refuses cannot be must-accept", q.Name)
+		case q.Rust != "must-accept" && q.Rust != "may-reject":
+			t.Errorf("%s: rust = %q, want must-accept or may-reject", q.Name, q.Rust)
+		}
 		var m Message
 		err := json.Unmarshal(q.raw(t), &m)
 		if q.Error {

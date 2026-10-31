@@ -1,6 +1,7 @@
 [
   {"case":"first-not-pubkey","name":"the first message is not pubkey","first":"{\"type\":\"heartbeat\",\"heartbeat\":{\"generation\":0,\"tunnel\":{\"state\":\"ok\",\"last_handshake\":\"0001-01-01T00:00:00Z\"},\"rules\":[]}}","code":1008,"reason":"first message must be pubkey"},
   {"case":"first-unreadable","name":"the first message is not JSON","first":"pubkey","code":1008,"reason":"first message must be pubkey"},
+  {"case":"first-timeout","name":"no first message within 10 s; the connection ends without a close frame","first":"","code":-1,"reason":""},
   {"case":"invalid-key","name":"the public key is not 32 bytes of base64","first":"{\"type\":\"pubkey\",\"public_key\":\"not-a-key\",\"protocol_min\":1,\"protocol_max\":1,\"capabilities\":[]}","code":1008,"reason":"invalid public key"},
   {"case":"server-key","name":"the public key is the server's","first":"{\"type\":\"pubkey\",\"public_key\":\"8nKraqPrUYMdo9nGeV7VyzzTpNzywr5rlYZU2WKIDBU=\",\"protocol_min\":1,\"protocol_max\":1,\"capabilities\":[]}","code":1008,"reason":"public key equals server key"},
   {"case":"other-agent-key","name":"the public key is another agent's","first":"{\"type\":\"pubkey\",\"public_key\":\"BdPeyy13167Sr+s5NgOv2j6ddcWP0k2sbBmn7cU1M3w=\",\"protocol_min\":1,\"protocol_max\":1,\"capabilities\":[]}","code":1008,"reason":"public key belongs to another agent"},

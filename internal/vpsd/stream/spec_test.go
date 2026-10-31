@@ -147,13 +147,17 @@ func TestSpecWireCloseReasons(t *testing.T) {
 				b.setKeyErr = errors.New("saving failed")
 			case "heartbeat-timeout":
 				h.HeartbeatTimeout = 200 * time.Millisecond
+			case "first-timeout":
+				h.firstMessageTimeout = 200 * time.Millisecond
 			}
 			c, _, err := dial(t, url, token)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer c.CloseNow()
-			specWrite(t, c, []byte(tc.First))
+			if tc.First != "" {
+				specWrite(t, c, []byte(tc.First))
+			}
 			switch tc.Case {
 			case "superseded", "revoked", "heartbeat-timeout":
 				if _, err := specRead(c); err != nil {
@@ -177,6 +181,13 @@ func TestSpecWireCloseReasons(t *testing.T) {
 				if err != nil {
 					break
 				}
+			}
+			if tc.Code == -1 {
+				// 符号 -1 は close のフレームが届かずに接続が終わることを表す
+				if errors.As(err, &ce) {
+					t.Errorf("want no close frame, got %d %q", ce.Code, ce.Reason)
+				}
+				return
 			}
 			if !errors.As(err, &ce) {
 				t.Fatalf("want a close frame, got %v", err)
