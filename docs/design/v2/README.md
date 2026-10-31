@@ -4,7 +4,8 @@ v2 は、agent と server の両方を Rust で書き直し、製品から Go �
 この文書は移行の決定事項を定めます。
 Rust のコードは `crates/` 以下にあり、ビルドと検査は[テストの規範](../../development/testing.md)の B13 から B15 に従います。
 実装済みのものはワークスペース、CI、wire の版 1 の型 (`crates/wgft-proto`)、WireGuard の device の層です。
-他の節の決定はすべて未実装です。
+設計の制約のうち、WireGuard の隔離と sans-IO の核は device の層で実装しました。
+ほかの決定は未実装です。
 
 ## 動機
 
