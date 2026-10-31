@@ -66,6 +66,10 @@ type Cell struct {
 	Len     time.Duration
 	// NotJudged, when set, says why the cell is measured but not judged.
 	NotJudged string
+	// LinuxLine, when set, makes 0.9 x Linux the throughput line instead of
+	// max(0.9 x Linux, gVisor); gVisor is still measured and printed. It is set where gVisor's
+	// throughput comes from congestion behaviour outside the RFCs and Linux (see wgstack-verification.md).
+	LinuxLine bool
 	// Client is the dialing side's engine: "" for gVisor's netstack, or "linux".
 	Client string
 }
@@ -82,6 +86,12 @@ func bulk(name string, send bool, loss float64) Cell {
 	return Cell{Name: name, DUTSend: send, Loss: loss, Len: bulkLen}
 }
 
+// linuxLine judges c against 0.9 x Linux alone; gVisor's value is still measured and printed.
+func linuxLine(c Cell) Cell {
+	c.LinuxLine = true
+	return c
+}
+
 func thin(name string, send bool, loss float64, outage bool) Cell {
 	return Cell{Name: name, Thin: true, DUTSend: send, Loss: loss, Outage: outage, Len: thinLen}
 }
@@ -92,8 +102,8 @@ func thin(name string, send bool, loss float64, outage bool) Cell {
 func routineCells() []Cell {
 	return []Cell{
 		bulk("send/loss0%", true, 0),
-		bulk("send/loss1%", true, 0.01),
-		bulk("send/loss5%", true, 0.05),
+		linuxLine(bulk("send/loss1%", true, 0.01)),
+		linuxLine(bulk("send/loss5%", true, 0.05)),
 		{Name: "send/reorder", DUTSend: true, Reorder: true, Len: bulkLen},
 		{Name: "send/outage2s", DUTSend: true, Outage: true, Len: outageLen},
 		bulk("recv/loss0%", false, 0),
@@ -676,7 +686,8 @@ type Verdict struct {
 const throughputTolerance = 0.99
 
 // throughputLinuxFactor is the share of Linux's Mbit/s that wgstack must reach; the line is
-// max(throughputLinuxFactor x Linux, gVisor).
+// max(throughputLinuxFactor x Linux, gVisor), or throughputLinuxFactor x Linux alone in a cell
+// with LinuxLine.
 const throughputLinuxFactor = 0.9
 
 // factorText is the factor as the verdict rules print it.
@@ -723,19 +734,25 @@ func judge(c Cell, wg, gv, lx Summary, haveG, haveL bool) Verdict {
 		v = Verdict{Rule: "recovery <= Linux + Linux RTO", Value: wg.RecoveryMS, Line: lx.RecoveryMS + lx.RTOMS}
 		v.Result = yes(v.Value >= 0 && v.Value <= v.Line)
 	default:
-		if ratios := pairedRatios(wg, gv, lx, haveG); len(ratios) >= minPairs {
-			return judgePaired(ratios, wg, gv, lx)
+		if ratios := pairedRatios(wg, gv, lx, haveG && !c.LinuxLine); len(ratios) >= minPairs {
+			return judgePaired(ratios, wg, gv, lx, c.LinuxLine)
 		}
 		// without per-seed values, as in a reference stored before they were: the medians,
 		// the factor x Linux, or gVisor's value where gVisor is above it
 		line, rule := throughputLinuxFactor*lx.Mbps, "Mbit/s >= 0.99 x "+factorText+" x Linux; gVisor is below"
-		if haveG && gv.Mbps > line {
+		if c.LinuxLine {
+			rule = "Mbit/s >= 0.99 x " + factorText + " x Linux; gVisor is not in the line"
+		} else if haveG && gv.Mbps > line {
 			line, rule = gv.Mbps, "Mbit/s >= 0.99 x gVisor; gVisor is above "+factorText+" x Linux"
 		}
 		v = Verdict{Rule: rule, Value: wg.Mbps, Line: line}
 		v.Result = yes(v.Value >= throughputTolerance*v.Line)
 	}
-	for _, s := range []Summary{wg, gv, lx} {
+	spreads := []Summary{wg, gv, lx}
+	if c.LinuxLine {
+		spreads = []Summary{wg, lx} // gVisor is not in the line
+	}
+	for _, s := range spreads {
 		if s.Spread > 2 {
 			v.Result = "UNDETERMINED: max/min above 2, diagnose and rerun"
 			return v
@@ -783,12 +800,16 @@ func pairedRatios(wg, gv, lx Summary, haveG bool) []float64 {
 // interval of their median is at or above the 0.99 tolerance, FAIL when it is below, and
 // otherwise undetermined, which doubles the runs. A failed run of any engine leaves the cell
 // undetermined, as the spread rule did.
-func judgePaired(ratios []float64, wg, gv, lx Summary) Verdict {
+func judgePaired(ratios []float64, wg, gv, lx Summary, linuxLine bool) Verdict {
 	med := medianF(ratios)
 	lo, hi := medianInterval(ratios)
-	v := Verdict{Rule: "per-seed wgstack / max(" + factorText + " x Linux, gVisor), median and 95% interval vs 0.99", Value: med, Line: throughputTolerance}
+	line := "max(" + factorText + " x Linux, gVisor)"
+	if linuxLine {
+		line = factorText + " x Linux, gVisor not in the line"
+	}
+	v := Verdict{Rule: "per-seed wgstack / " + line + ", median and 95% interval vs 0.99", Value: med, Line: throughputTolerance}
 	switch {
-	case wg.OK < wg.Runs || lx.OK < lx.Runs || gv.OK < gv.Runs:
+	case wg.OK < wg.Runs || lx.OK < lx.Runs || (!linuxLine && gv.OK < gv.Runs):
 		v.Result = "UNDETERMINED: a run failed, diagnose and rerun"
 	case lo >= throughputTolerance:
 		v.Result = "PASS"
@@ -1326,6 +1347,36 @@ func TestJudgeRules(t *testing.T) {
 	mixed := seeded(3.24, 1.98, 5.13, 2.835, 4.365, 3.672, 1.656, 5.832)
 	if v := judge(bulkC, mixed, gvS, lxS, true, true); !strings.HasPrefix(v.Result, "UNDETERMINED") || !near(v) {
 		t.Errorf("wgstack around the line: %q, doubling %v; want UNDETERMINED and doubling", v.Result, near(v))
+	}
+
+	// a LinuxLine cell is judged against 0.9 x Linux alone; gVisor above that line does not fail it
+	gvHigh := seeded(5.5, 2.8, 8, 4, 7, 5.5, 2.8, 8) // above Linux on every seed
+	lineC := linuxLine(Cell{Name: "send/loss1%", DUTSend: true})
+	if v := judge(lineC, pass, gvHigh, lxS, true, true); v.Result != "PASS" || !strings.Contains(v.Rule, "gVisor not in the line") {
+		t.Errorf("LinuxLine cell, wgstack equal to Linux, gVisor above: %q (%s), want PASS on Linux alone", v.Result, v.Rule)
+	}
+	if v := judge(bulkC, pass, gvHigh, lxS, true, true); v.Result != "FAIL" || !strings.Contains(v.Rule, "max(") {
+		t.Errorf("ordinary cell, wgstack equal to Linux, gVisor above: %q (%s), want FAIL against max(...)", v.Result, v.Rule)
+	}
+	if v := judge(lineC, fail, gvHigh, lxS, true, true); v.Result != "FAIL" {
+		t.Errorf("LinuxLine cell, wgstack at 0.75 x Linux: %q, want FAIL", v.Result)
+	}
+	// without per-seed values the medians decide, and gVisor is still out of the line
+	lxM := Summary{Runs: 5, OK: 5, Mbps: 10, Spread: 1}
+	gvM := Summary{Runs: 5, OK: 5, Mbps: 15, Spread: 1}
+	wgM := Summary{Runs: 5, OK: 5, Mbps: 9.5, Spread: 1}
+	if v := judge(lineC, wgM, gvM, lxM, true, true); v.Result != "PASS" {
+		t.Errorf("LinuxLine cell by medians: %q, want PASS", v.Result)
+	}
+	if v := judge(bulkC, wgM, gvM, lxM, true, true); v.Result != "FAIL" {
+		t.Errorf("ordinary cell by medians: %q, want FAIL", v.Result)
+	}
+	// the flag is on exactly the two send loss cells of the gate
+	for _, c := range gateCells() {
+		want := c.Name == "send/loss1%" || c.Name == "send/loss5%"
+		if c.LinuxLine != want {
+			t.Errorf("cell %s: LinuxLine = %v, want %v", c.Name, c.LinuxLine, want)
+		}
 	}
 
 	// the gate judges every receiving cell with the Linux client and keeps the gVisor one aside
