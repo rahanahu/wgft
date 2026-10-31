@@ -7,11 +7,13 @@ wgstack との違いと適合の台本は、決定ではなく選ぶ点と案と
 
 各項目は、ラボの 6.1 と、参照の 7.2 の 2 つの版について書きます。
 参照の Linux は、第 2 段階が main に入った直後に Debian 13 の trixie-backports の 7.2 に移ると決まっています([dial の側の決めたこと](wgstack-dial.md#決めたこと))。
-7.2 の記述は、ラボを Debian の 7.2 に更新した後にそこで観測して確かめます。
+ラボは 2026-11-01 に Debian の 7.2 に移りました([wgstack の検証の参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定))。
+7.2 の記述は、ラボの 7.2 で観測した項目から順に確かめ、観測した値は「ラボの 7.2」と書きます。
 6.1 の観測は、移る前のラボの挙動と、版による違いの記録として残します。
 この文書の 6.1 はラボの 6.1.0-53 を指し、mainline の `v6.1` のタグとは「`v6.1` のタグ」と書いて区別します。
 6.1 の挙動は主にラボの VM で観測し、観測していない挙動はソースから読んだと書きます。
-7.2 の挙動は `v7.2` のタグのソースから読み、Debian の 7.2 ではまだ観測していません。
+7.2 の挙動は `v7.2` のタグのソースから読みました。
+ラボの 7.2 で観測したのは、sysctl の既定の値、SYN の option と並び、SYN の再送の間隔の始めの部分だけです。
 ホストの Fedora の 7.2.13 で同じ観測を参考に流した値は、「ホストの 7.2」と書きます。
 関数の名前は、Linux の挙動を確かめる人のための目印です。
 
@@ -33,9 +35,13 @@ VM で確かめるには、`uname -v` で `Debian 6.1.187-1` を読み、`/usr/s
 
 ### 7.2
 
-7.2 は、参照の Linux として決まった Debian 13(trixie)の trixie-backports のカーネルの版です。
+7.2 は、参照の Linux の Debian 13(trixie)の trixie-backports のカーネルで、`7.2.11+deb13-amd64`、package の版は 7.2.11-1~bpo13+1 です。
 この文書の 7.2 の挙動は `v7.2` のタグのソースから読み、各変化の最初の版を mainline のタグで示します。
-Debian の 7.2.11 の stable の修正は確かめていません。
+Debian の 7.2.11 の stable の修正は、VM の `/usr/share/doc/linux-image-$(uname -r)/changelog.Debian.gz` で、接続を張る側に効く次の 2 点だけを確かめました。
+
+- `tcp: refresh TS.Recent for accepted old ACKs`(7.2.10-1 から):mainline では v7.3 の変化で、[7.2 の後の変化](#72-の後の変化)の 1 つです
+- `net: advertise TCP MSS from the configured MTU, not the learned PMTU` とその取り消しは、7.2.11 までの changelog にありません。
+  SYN の MSS は `v7.2` のタグと同じく学んだ path MTU に従うと読めますが、観測していません([option と並び](#option-と並び))
 `v7.2` の後から読んだ時点の mainline までの変化は、[7.2 の後の変化](#72-の後の変化)に書きます。
 
 ホストの Fedora の 7.2.13 は、設定の値がラボと違います。
@@ -47,25 +53,28 @@ Debian の 7.2.11 の stable の修正は確かめていません。
 接続を張る側に関わる値は次のとおりです。
 新しい network namespace は多くの値をカーネルの既定から取り、`tcp_rmem` などを初めの namespace から写すので、値は観測した namespace の値です。
 
-| sysctl | ラボの 6.1 | ホストの 7.2 | 意味 |
-|---|---|---|---|
-| `tcp_syn_retries` | 6 | 6 | SYN の再送の回数 |
-| `tcp_syn_linear_timeouts` | 無し | 4 | SYN の再送の間隔を倍にしない回数(v6.5 から) |
-| `tcp_timestamps` | 1 | 1 | timestamp を使い、offset を乱数にします |
-| `tcp_sack`、`tcp_window_scaling` | 1 | 1 | SYN に載せます |
-| `tcp_rmem` | 4096 131072 6291456 | 4096 131072 33554432 | 2 つ目が最初の受信のバッファ、3 つ目が窓の scale の基準です |
-| `ip_local_port_range` | 32768 60999 | 32768 60999 | 一時ポートの幅 |
-| `ip_local_port_step_width` | 無し | 0 | 一時ポートを探す歩幅の乱数化(v7.1 から、0 で無効) |
-| `tcp_tw_reuse` | 2 | 2 | TIME_WAIT の 4 つ組の使い直し(2 は loopback だけ) |
-| `tcp_tw_reuse_delay` | 無し | 1000 | 使い直しまでの ms(v6.14 から) |
-| `tcp_fin_timeout` | 60 | 60 | 閉じたソケットの FIN_WAIT_2 の秒 |
-| `tcp_max_tw_buckets` | 8192 | 131072 | TIME_WAIT の数の上限(接続の hash の表の大きさの半分) |
-| `tcp_rfc1337` | 0 | 0 | TIME_WAIT で RST を受けると TIME_WAIT を終えます |
-| `tcp_ecn` | 2 | 2 | 接続を張る側では ECN を求めません |
-| `tcp_no_metrics_save` | 0 | 0 | 閉じた接続の RTT を宛先ごとに覚えます |
-| `tcp_min_snd_mss` | 48 | 48 | 送る MSS の下限 |
-| `tcp_invalid_ratelimit` | 500 | 500 | 窓の外への重複した ACK と challenge ACK の速さの制限(ms) |
-| `tcp_challenge_ack_limit` | 2147483647 | 2147483647 | 全体の challenge ACK の制限(既定は無制限) |
+| sysctl | ラボの 6.1 | ラボの 7.2 | ホストの 7.2 | 意味 |
+|---|---|---|---|---|
+| `tcp_syn_retries` | 6 | 6 | 6 | SYN の再送の回数 |
+| `tcp_syn_linear_timeouts` | 無し | 4 | 4 | SYN の再送の間隔を倍にしない回数(v6.5 から) |
+| `tcp_timestamps` | 1 | 1 | 1 | timestamp を使い、offset を乱数にします |
+| `tcp_sack`、`tcp_window_scaling` | 1 | 1 | 1 | SYN に載せます |
+| `tcp_rmem` | 4096 131072 6291456 | 4096 131072 約 14 MB | 4096 131072 33554432 | 2 つ目が最初の受信のバッファ、3 つ目が窓の scale の基準です |
+| `ip_local_port_range` | 32768 60999 | 32768 60999 | 32768 60999 | 一時ポートの幅 |
+| `ip_local_port_step_width` | 無し | 0 | 0 | 一時ポートを探す歩幅の乱数化(v7.1 から、0 で無効) |
+| `tcp_tw_reuse` | 2 | 2 | 2 | TIME_WAIT の 4 つ組の使い直し(2 は loopback だけ) |
+| `tcp_tw_reuse_delay` | 無し | 1000 | 1000 | 使い直しまでの ms(v6.14 から) |
+| `tcp_fin_timeout` | 60 | 60 | 60 | 閉じたソケットの FIN_WAIT_2 の秒 |
+| `tcp_max_tw_buckets` | 8192 | 8192 | 131072 | TIME_WAIT の数の上限(接続の hash の表の大きさの半分) |
+| `tcp_rfc1337` | 0 | 0 | 0 | TIME_WAIT で RST を受けると TIME_WAIT を終えます |
+| `tcp_ecn` | 2 | 2 | 2 | 接続を張る側では ECN を求めません |
+| `tcp_no_metrics_save` | 0 | 0 | 0 | 閉じた接続の RTT を宛先ごとに覚えます |
+| `tcp_min_snd_mss` | 48 | 48 | 48 | 送る MSS の下限 |
+| `tcp_invalid_ratelimit` | 500 | 500 | 500 | 窓の外への重複した ACK と challenge ACK の速さの制限(ms) |
+| `tcp_challenge_ack_limit` | 2147483647 | 2147483647 | 2147483647 | 全体の challenge ACK の制限(既定は無制限) |
+
+ラボの 7.2 の `tcp_rmem` の 3 つ目の値は VM のメモリから決まり、2 GiB の VM では起動ごとに 13968672 から 14025216 でした。
+`tcp_max_tw_buckets` は接続の hash の表の大きさから決まり、ラボの 6.1 と 7.2 の VM では同じ 8192 でした。
 
 ## 観測の方法
 
@@ -196,7 +205,7 @@ RFC 6191 は、その受ける側の判定に timestamp を使う方法です。
 SYN の option は、MSS、SACK-permitted、timestamp、NOP、窓の scale の順で、20 byte です(`tcp_syn_options`、`tcp_options_write`)。
 SACK-permitted と timestamp は 1 つの 4 byte の境界の組にまとめ、NOP を挟みません。
 timestamp を使わない設定では、MSS、NOP、NOP、SACK-permitted、NOP、窓の scale の順です。
-6.1 とホストの 7.2 で、どの SYN もこの並びでした。
+6.1、ラボの 7.2、ホストの 7.2 で、どの SYN もこの並びでした。
 
 - MSS:経路の MTU から 40 を引いた値です。
   TUN の MTU 1420 では 1380 です。
@@ -204,6 +213,7 @@ timestamp を使わない設定では、MSS、NOP、NOP、SACK-permitted、NOP�
   アプリケーションが `TCP_MAXSEG` を与えればその値で抑えます
 - 窓の scale:`tcp_rmem` の上限と `rmem_max` の大きい方を、65535 を左に移して覆える最小の移し幅です。
   6 MiB では 7、32 MiB では 10 です。
+  ラボの 7.2 は `tcp_rmem` の上限が約 14 MB なので 8 で、6.1 の 7 から変わりました(観測)。
   0 でも載せます
 - SACK-permitted、timestamp:sysctl が 1 なら載せます。
   TSval は今の時計に offset を足した値で、TSecr は 0 です
@@ -216,7 +226,8 @@ v7.3-rc1 の `net: advertise TCP MSS from the configured MTU, not the learned PM
 その後の mainline はこの変更を戻しました(`Revert "net: advertise TCP MSS from the configured MTU, not the learned PMTU"`)。
 戻した理由は、ICMP を捨てる中継の後ろの相手が大きな segment を送り、握手の後に止まったことです(RFC 2923 2.1 の path MTU の black hole)。
 ホストの 7.2 が 1380 を示したのは、Fedora の 7.2.13 がこの stable の変更を含むためと見込みますが、確かめていません。
-参照の Debian の 7.2 の挙動は、その point release がこの変更とその取り消しのどちらを含むかで決まるので、ラボを更新した後に観測して決めます。
+参照の Debian の 7.2.11 の changelog は、この変更も取り消しも含みません([7.2](#72))。
+ソースからは 6.1 と同じく下がった path MTU に従うと読めますが、ラボの 7.2 ではまだ観測していません。
 
 ### 窓と IP の欄
 
@@ -283,6 +294,8 @@ SYN-ACK の option は、自分の SYN に載せた種類だけを読みます�
 
 - 6.1:SYN を 0、1.01、3.03、7.22、15.41、31.54、64.05 秒に送り、129.6 秒に ETIMEDOUT でした
 - ホストの 7.2:SYN を 11 回、0 から 68.1 秒に送り、134.1 秒に ETIMEDOUT でした
+- ラボの 7.2:20 秒の間、SYN を 0、1.03、2.05、3.07、4.10、5.12、7.14、11.27、19.46 秒に送りました。
+  打ち切りまでは観測していません
 
 タイマーの遅れが再送ごとに積もるので、打ち切りは計算の値より数秒遅れます。
 
@@ -602,7 +615,8 @@ TIME_WAIT の数は `tcp_max_tw_buckets` までです。
   通常の MTU では変わりません
 - v7.3-rc1 と、v7.3 の後の取り消し:SYN と SYN-ACK の MSS を学んだ path MTU で下げない変更が入り、stable にも送られ、その後の mainline で戻されました([SYN の option と並び](#option-と並び))
 - v7.3:受け入れた古い ACK でも TS.Recent を更新します。
-  確立した後の挙動です
+  確立した後の挙動です。
+  参照の Debian の 7.2.11 は、この変更を stable の更新(7.2.10-1)で含みます
 
 ## RFC からの逸脱
 
