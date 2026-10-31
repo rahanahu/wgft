@@ -181,3 +181,25 @@ func checkObeysAgentAllowList(t *testing.T) (collision error) {
 	}
 	return nil
 }
+
+// deadlineConn は SetReadDeadline に渡された期限を覚え、無言のまま期限切れになる接続を模す。
+type deadlineConn struct {
+	fakeConn
+	deadline time.Time
+}
+
+func (c *deadlineConn) SetReadDeadline(t time.Time) error { c.deadline = t; return nil }
+
+// 既定の様子見の時間は、エージェントの中継が target へダイヤルする期限より長くなければならない。
+// 短いと、黙って捨てる target の間だけ無言で保たれた接続を「到達」と報告してしまう。
+func TestDefaultObserveOutlastsTheRelayDial(t *testing.T) {
+	c := &deadlineConn{fakeConn: fakeConn{readErr: timeoutErr{}}}
+	start := time.Now()
+	r := Check("10.200.0.2:25565", Options{Dial: func(string, string) (net.Conn, error) { return c, nil }})
+	if !r.OK || r.Reach != ReachTarget {
+		t.Fatalf("got OK=%v reach=%s, want the silent connection still reported as target", r.OK, r.Reach)
+	}
+	if got := c.deadline.Sub(start); got <= relay.TargetDialTimeout {
+		t.Errorf("observe window = %v, want more than the relay's target dial timeout %v", got, relay.TargetDialTimeout)
+	}
+}
