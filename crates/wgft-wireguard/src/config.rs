@@ -256,6 +256,9 @@ impl DeviceConfig {
 
     /// The v1 agent's configuration: one peer, the server, that may use only its own tunnel
     /// address, with MTU 1420. It matches the UAPI text the Go agent gives wireguard-go.
+    ///
+    /// `keepalive` must be 1 to 65535 seconds. Like Go's `tunnel.New`, the caller maps a keepalive
+    /// of 0 or below one second from the server to [`DEFAULT_KEEPALIVE`].
     #[must_use]
     pub fn agent(
         private_key: PrivateKey,

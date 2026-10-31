@@ -41,6 +41,8 @@ struct Net {
     carried: usize,
     /// A が datagram を出した時刻。
     a_sent_at: Vec<Duration>,
+    /// true の間は B から A へのハンドシェイクの開始を捨てる。
+    drop_b_initiations: bool,
 }
 
 fn agent_config(a_key: &PrivateKey, b_pub: PublicKey, b_addr: SocketAddr) -> DeviceConfig {
@@ -96,6 +98,7 @@ impl Net {
             b_up: true,
             carried: 0,
             a_sent_at: Vec::new(),
+            drop_b_initiations: false,
         }
     }
 
@@ -147,6 +150,10 @@ impl Net {
             }
             while let Some(tx) = self.b.poll_transmit() {
                 moved = true;
+                let initiation = tx.payload.len() == 148 && tx.payload[0] == 1;
+                if self.drop_b_initiations && initiation {
+                    continue;
+                }
                 if tx.to == self.a_addr {
                     self.carried += 1;
                     self.a.handle_datagram(now, self.b_addr, &tx.payload);
@@ -702,6 +709,9 @@ fn an_idle_responder_keeps_contacting_the_server() {
     n.b_sends(b"hello");
     assert_eq!(n.a_got.len(), 1);
     assert_eq!(n.b.drops().total(), 0);
+    // sanstun の B は、送るデータが無くても鍵の寿命の前に開始を送り直すことがある。agent の規則だけを
+    // 確かめるため、最初の交換の後の B からの開始を捨てる
+    n.drop_b_initiations = true;
     let start = n.t;
     n.a_sent_at.clear();
     n.run(Duration::from_secs(600), Duration::from_secs(1));

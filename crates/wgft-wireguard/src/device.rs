@@ -506,7 +506,7 @@ impl Device {
     }
 
     /// The configured peers' keys, in configuration order.
-    pub fn peers(&self) -> impl Iterator<Item = PublicKey> + '_ {
+    pub fn peers(&self) -> impl Iterator<Item = PublicKey> {
         self.peers.iter().map(|p| p.key)
     }
 

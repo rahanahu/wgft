@@ -105,7 +105,7 @@ impl Drops {
     }
 
     /// The reasons with a non-zero count and their counts.
-    pub fn nonzero(&self) -> impl Iterator<Item = (DropReason, u64)> + '_ {
+    pub fn nonzero(&self) -> impl Iterator<Item = (DropReason, u64)> {
         DropReason::ALL
             .iter()
             .map(|r| (*r, self.get(*r)))
