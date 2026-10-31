@@ -13,6 +13,9 @@ publish = false
 [workspace.dependencies]
 # 版はここだけに書き、各 crate は `name.workspace = true` で継ぐ
 wgft-wireguard = { path = "crates/wgft-wireguard" }
+wgft-wireguard-tun = { path = "crates/wgft-wireguard-tun" }
+wgft-proto = { path = "crates/wgft-proto" }
+wgft-agent = { path = "crates/wgft-agent" }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 getrandom = "0.4.3"
@@ -21,6 +24,19 @@ proptest = "1.12.0"
 sanstun = "0.1.0"
 tokio = "1.54.1"
 zeroize = "1.9.1"
+futures-util = { version = "0.3.34", default-features = false }
+http-body-util = "0.1.5"
+hyper = "1.12.0"
+hyper-util = "0.1.21"
+ring = "0.17.14"
+rustls = { version = "0.23.46", default-features = false }
+serde = "1.0.229"
+serde_json = "1.0.154"
+socket2 = "0.6.5"
+time = "0.3.55"
+tokio-rustls = { version = "0.26.6", default-features = false }
+tokio-tungstenite = { version = "0.30.0", default-features = false }
+unicode-general-category = "1.1.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -11,9 +11,15 @@ wire と `agent.json` の契約は [agent と server の境目の仕様](../spec
 | crate | 中身 |
 | --- | --- |
 | `crates/wgft-proto` | wire の版 1 の型。接続文字列の解釈、登録の要求と応答、stream のメッセージ、全体状態、close の符号、版の交渉、理由の整形 |
+| `crates/wgft-agent` | agent の制御プレーン。登録、認証情報、stream、全体状態の適用、ハートビート、トンネルの監視、TCP の中継 |
+| `crates/wgft` | コマンド。今は `wgft agent run` と `wgft version` だけを持ちます |
 
 `wgft-proto` は I/O を持たず、serde と serde_json と time だけに依ります。
 agent と、後で作る Rust の server の両方が使います。
+`wgft-agent` は tokio の上の async で書きます。
+所有者の決定のとおり、制御プレーンは通常の async で書き、データプレーンの核は sans-IO にします。
+WireGuard の device の層 (`crates/wgft-wireguard`) と Linux の TUN の外殻 (`crates/wgft-wireguard-tun`) を扱うのは `wgft-agent` の `tunnel` の module だけで、残りは wgft の型だけを見ます。
+device の層の作りは [WireGuard の device の層](wireguard-device.md) にあります。
 
 ## wire の型
 
@@ -59,6 +65,122 @@ crate の表の Unicode の版は `UNICODE_VERSION` で、Go の `unicode.Versio
 差は、片方の版だけで割り当てのある文字の扱いだけです。
 割り当ての無い文字は表示できない文字なので、Go の版が新しい間は、新しく割り当てられた文字を Rust だけが置き換えます。
 server は受け取った理由に同じ整形を自分でかけますが、置き換えた後の文言は元に戻らないので、その文字を含む理由は Go の agent が送った場合と違う文言で保存されます。
+
+## 登録と TLS
+
+登録は Go の agent と同じく `POST https://host:port/api/v1/agents/register` を呼び、本文は `{"name","token"}` です。
+TLS の検証は rustls の独自の検証器で行い、leaf の証明書の DER の SHA-256 がピンと一致するときだけ通します。
+CA、ホスト名、期限は検証しません。
+ハンドシェイクの署名は rustls の ring の provider で検証するので、相手が証明書の秘密鍵を持つことは確かめます。
+TLS は 1.2 と 1.3 を許し、ALPN を送らないので HTTP/1.1 で話します。
+暗号の provider は ring にし、rustls の既定の aws-lc-rs を使いません。
+aws-lc-rs は C と CMake の build を要し、クロスの build を重くするためです。
+
+応答は 4096 byte までを読みます。
+401、400、409 は送った値への判断で、再起動では直らないので、起動の拒否 (終了コード 3) にします。
+文言は Go の agent と同じです。
+それ以外の失敗は終了コード 1 です。
+
+登録の結果は Go の `enroll.Record` と同じ項目を `agent.json` に書きます。
+`used_join_token_sha256` はトークンの SHA-256 で、`compose` に残った使用済みの `WGFT_JOIN` を黙って無視するために使います。
+
+## 認証情報
+
+`agent.json` は Go の v1 の agent と同じファイルです。
+Rust の agent は Go の v1 の agent が書いたファイルをそのまま読み、Go の v1 の agent は Rust の agent が書いたファイルを読めます。
+フィールドの順と 2 文字の字下げは Go の `json.MarshalIndent` と同じにします。
+カーネルモードの記録 (`previous_wg_private_key`、`ip_forward_enabled_at`、`kernel_publication`、`kernel_unconverged`) は形を持たずに保存し直し、知らないキーも捨てずに保存し直します。
+Go の v1 の agent は知らないキーを捨てるので、ここは Go より保守的な扱いです。
+
+保存は同じディレクトリの一時ファイルに書いて rename します。
+一時ファイルの名前の接頭辞 `.wgft-credentials-` と、Unix で作った瞬間から 0600 にする扱いは Go と同じです。
+二重起動は隣の `agent.json.lock` の排他ロックで防ぎます。
+Rust の標準の `File::try_lock` は Unix で `flock`、Windows で `LockFileEx` を使い、Go の agent と同じ方式なので、Go の agent と Rust の agent は同じデータディレクトリで同時に動きません。
+
+`mode` が `kernel` の記録を持つファイルは、試作が扱わないので起動の拒否にします。
+
+## stream
+
+stream は Go の agent と同じ順で動きます。
+
+1. ピンで確かめた TLS の上で `GET /api/v1/agents/stream` の WebSocket に `Authorization: Bearer <恒久トークン>` で接続します
+2. 最初に `pubkey` を送ります。`protocol_min` と `protocol_max` は 1、`capabilities` は空の配列です
+3. 最初の `state` で server が選んだ版を確かめ、1 以上で agent の範囲に入らなければ接続を終えます
+4. `state` を受けるたびに適用し、適用の直後にハートビートを送ります。
+   古い世代は捨て、最後に適用したものと世代も中身も同じ全体状態は適用し直しません
+5. ハートビートは 30 秒ごとにも送ります。
+   適用の直後のハートビートがハンドシェイク待ちを報告したときは、済むまで 1 秒ごとに 10 秒まで送り直します
+6. 30 秒ごとに WebSocket の ping を送り、20 秒以内に pong が無ければ接続を終えます。
+   適用の間は読みが止まるので、適用の後に pong の期限を測り直します
+
+1 通の大きさの上限は 4 MiB です。
+接続が切れたら 1 秒から 5 分の指数の待ちで繋ぎ直し、1 分以上続いた接続の後は 1 秒から数え直します。
+最終ハンドシェイクが 180 秒より新しい間は、待ちの上限を 10 秒にします。
+Go と同じく、server が応答したうえで再試行では直らない食い違いを示した切断 (恒久トークンの拒否、置き換え、版の不一致、ピンの不一致、1008) には当てません。
+HTTP 401 は登録のし直しに入り、未使用の `WGFT_JOIN` が無ければ起動の拒否で終わります。
+ピンの不一致は、未使用でピンの違う `WGFT_JOIN` があるときだけ登録し直します。
+
+読めないメッセージは `Message::decode` が拒み、ログに出して読み飛ばします (Go の writer が書かない形の扱いは下の節)。
+ハートビートの理由は、送る前に server の受け口と同じ整形と 512 byte の上限にかけます。
+JSON は HTML のための書き換えをしない形で書きます。
+Go の agent の `SetEscapeHTML(false)` と同じ形です。
+
+## 全体状態の適用
+
+wg の設定が変わったときか、トンネルが無いときにトンネルを立て直し、ルールは変わったものだけを開閉します。
+トンネルを立てられなければ世代も `agent.json` も進めず、30 秒ごとに立て直します。
+トンネルが立った後はルールの一部が失敗しても世代を進めて `last_state` を保存します。
+起動のときに `last_state` があれば、stream に繋ぐ前にその全体状態でトンネルとリスナーを立てます。
+server のプロセスが止まっていても、server の側にピアが残っていれば転送が戻るようにするためです。
+
+server のトンネルのアドレスは、全体状態の `wg.address` の帯の先頭の次 (`10.200.0.1`) です。
+WireGuard のピアは server の 1 つで、AllowedIPs は server のアドレスの /32 です。
+keepalive の秒が 1 から 65535 の外なら 25 秒を使います。
+
+## トンネルと中継 (試作の形)
+
+試作のトンネルは Linux の TUN とカーネルの TCP/IP を使います。
+所有者の判断で、Rust の wgstack ができるまでの試作の形です。
+`tunnel` の module は `wgft-wireguard-tun` の外殻で device を動かし、外殻が TUN を作り、全体状態の `wg.address` と MTU を付けて link を上げます。
+カーネルは帯の経路を TUN に向けるので、server のアドレスへの packet は TUN を通ります。
+TUN を作るには root か `CAP_NET_ADMIN` と `ip` のコマンドが要ります。
+v1 のユーザー空間モードの agent は特権を要らないので、この点は製品の形と違います。
+
+TUN の名前は `WGFT_WG_INTERFACE` (既定 `wgft0`) から取ります。
+v1 ではカーネルモードの WireGuard のインタフェースの名前で、ユーザー空間モードでは使わない設定です。
+試作だけの読み替えです。
+
+エンドポイントの名前は起動のときに解決し、解決できなくてもトンネルを立てます。
+keepalive ごとに、最終ハンドシェイクが keepalive の 5 倍より古ければ名前を引き直し、変わっていれば device に設定し直します。
+続けて、server のトンネルのアドレスへ ICMP echo を 1 つ送ります。
+Go の agent の `tunnel.Run` と同じで、server がセッションを失っていれば鍵の寿命を待たずに新しいハンドシェイクが始まります。
+ping はカーネルの ICMP のデータグラムのソケットをトンネルのアドレスに bind して送り、答えの有無が変わったときだけ 1 行をログに出します。
+ハートビートの最終ハンドシェイクは、device が返す単調な時計の値を壁時計に直して書きます。
+
+中継はルールのポートごとに、トンネルのアドレスに bind したカーネルの TCP のソケットで待ち受けます。
+受けた接続は、ルールの範囲の中の位置を足した宛先へ 10 秒の期限で接続し、両方向に複写します。
+開けなかったリスナーはルールの状態を `error` にし、30 秒ごとに開き直します。
+
+## コマンドと設定
+
+`wgft agent run` は v1 と同じく `WGFT_*` の環境変数を受け、フラグはその別名です。
+試作が持つのは `WGFT_DATA_DIR`、`WGFT_JOIN`、`WGFT_NAME` です。
+`WGFT_MODE` は空か `userspace` だけを受けます。
+`WGFT_AGENT_NETSTACK` は `gvisor` と `wgstack` を受けて使わない旨を 1 行出します。
+所有者の決定の「`gvisor` は受け付けて wgstack で動かし 1 行出す」の試作の形です。
+`WGFT_WG_INTERFACE` は TUN の名前に使います ([トンネルと中継](#トンネルと中継-試作の形))。
+1 から 15 byte で、`/`、`%`、空白を含まない値だけを受けます。
+
+次の設定は試作に無く、値があれば黙って無視せずに設定の誤り (終了コード 3) で止めます。
+無視すると、許可一覧や上限のような守りを利用者の意図より緩めるためです。
+
+- `WGFT_CONFIG` と既定の dotenv (`/etc/wgft/agent.env`):dotenv を読みません
+- `WGFT_AGENT_ALLOW_TARGETS`:宛先の許可一覧
+- `WGFT_MAX_TCP_FLOWS`、`WGFT_MAX_UDP_FLOWS`:同時のフローの上限
+- `WGFT_AGENT_BATCH_MIB`:送信の向きのバッチ
+
+`agent doctor`、`agent pubkey`、`agent rotate-key`、`agent teardown`、制御ソケット (`agent.json.sock`)、server と rule と status のコマンドもありません。
+ログの 1 行の形は Go の `log` と同じ `2006/01/02 15:04:05 msg` です。
 
 ## Go の v1 との照合
 
@@ -108,7 +230,34 @@ Go の server と `agent.json` の書き手は `<`、`>`、`&` を `\u003c` の�
 serde_json はどれも書き換えず、JSON の値は同じです。
 接続文字列の差は上の不正な UTF-8 の扱いだけです。
 
+## 試作だけの扱い
+
+- 中継:TCP だけです。UDP のルールは状態を `error` にして報告します。
+  宛先の許可一覧、ブロードキャストとマルチキャストの宛先の拒否、フローの数の上限、試し接続による宛先の確認がありません
+- トンネルの立て直し:Go の agent の watchdog (ハンドシェイクが長く無いときのトンネルの作り直し) と、新しいハンドシェイクで stream の再接続の待ちを打ち切る扱いがありません
+- 特権:TUN を作るので root か `CAP_NET_ADMIN` で動かします
+- 一時ファイルの片付け:前の保存が残した一時ファイルを起動のときに消しません
+
+## ラボでの確認
+
+`lab/rust-agent.sh` は、使い捨てのラボの VM で、変更していない Go の v1 の server に対して Rust の agent を動かします。
+手順は [lab/README.md](../../../lab/README.md#v2-の-rust-の-agent-の試作) にあります。
+server のカーネルモードは Linux のカーネルの WireGuard と、ユーザー空間モードは wireguard-go と組む確認です。
+次の点を両方のモードで確かめました。
+
+- 登録:Rust の agent が接続文字列で自分を登録し、自分で作った鍵を送ること
+- stream:server が版 1 を選び、全体状態の適用の後のハートビートで、トンネルとルールの状態が server に届くこと
+- トンネル:TUN にトンネルのアドレスが付き、server が WireGuard のハンドシェイクを観測すること
+- keepalive の ping:ユーザー空間モードの server は答えること。
+  カーネルモードの server では、ping が server の `wgft0` に届き、nftables の `input` に落とされて答えが返らないこと
+- 中継:server の公開の側からの TCP の接続で、ルールの宛先へ 8 MiB を送り、宛先から 8 MiB を受け、SHA-256 が一致すること
+- 停止:止めると TUN が消えること
+- Go の agent:同じ server に Go の v1 の agent を登録し、同じ確認で転送できること
+- 認証情報の引き継ぎ:Go の agent が登録して書いた `agent.json` から、接続文字列なしで Rust の agent が起動し、同じ鍵でハンドシェイクして転送できること。
+  逆に、Rust の agent が書いた `agent.json` から Go の agent が起動して転送できること
+
 ## 未確認の点
 
-- Go の v1 の server との登録、stream、トンネル、中継は、制御のクライアントのラボの確認で確かめます。
-  型だけの単体の試験では、Go の v1 の server が実際に送る `state` を受けていません
+- UDP のルール、許可一覧、フローの数の上限は、試作に無いので確かめていません
+- 長い時間の動作、鍵の更新 (120 秒ごとの再ハンドシェイク) を跨ぐ転送、server の再起動からの戻りを確かめていません
+- Windows と macOS では build と単体の試験だけを CI で流し、動かしていません
