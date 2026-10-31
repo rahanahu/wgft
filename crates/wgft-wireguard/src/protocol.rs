@@ -32,8 +32,15 @@ pub(crate) const DATA_OVERHEAD: usize = DATA_HEADER_LEN + 16;
 /// データの message の平文は 16 バイトの倍数まで詰める。
 pub(crate) const PADDING: usize = 16;
 
+/// 秘密鍵を sanstun の型へ写す。写しは Zeroizing の中に直接作り、stack に裸の写しを残さない。
+fn static_secret(private: &PrivateKey) -> StaticSecret {
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    bytes.copy_from_slice(private.as_bytes());
+    StaticSecret::from(bytes)
+}
+
 pub(crate) fn derive_public_key(private: &PrivateKey) -> PublicKey {
-    let secret = StaticSecret::from(Zeroizing::new(*private.as_bytes()));
+    let secret = static_secret(private);
     PublicKey::from_bytes(sanstun::PublicKey::from(&secret).to_bytes())
 }
 
@@ -124,7 +131,7 @@ impl Protocol {
         now: Instant,
         unix: Duration,
     ) -> Result<Self, ConfigError> {
-        let secret = StaticSecret::from(Zeroizing::new(*private_key.as_bytes()));
+        let secret = static_secret(private_key);
         let mut interface = Interface::new(seed, now, unix).with_static_private(secret);
         let own = interface.static_public();
         let mut list = Vec::with_capacity(peers.len());

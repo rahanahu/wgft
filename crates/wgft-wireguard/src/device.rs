@@ -16,20 +16,18 @@
 //! - 誤り:相手には何も返さず、[`Drops`] で数える
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::allowed_ips::AllowedIps;
-use crate::config::{ConfigError, DeviceConfig, Limits};
+use crate::config::{ConfigError, DeviceConfig, Limits, MAX_UNIX_TIME, MIN_MTU, Roaming};
 use crate::drops::{DropReason, Drops};
 use crate::ip::{IPV4_MIN_HEADER, parse_ipv4};
 use crate::keys::PublicKey;
 use crate::protocol::{DATA_OVERHEAD, Inbound, PADDING, PeerId, ProtoEvent, Protocol};
 use crate::queue::{BoundedQueue, ByteLen};
 use zeroize::Zeroizing;
-
-/// The smallest MTU that carries an IPv4 packet.
-const MIN_MTU: u16 = 68;
 
 /// A UDP datagram for the caller to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,10 +110,12 @@ pub struct Held {
     pub staged_bytes_max: usize,
 }
 
-#[derive(Debug)]
 struct Peer {
     key: PublicKey,
     endpoint: Option<SocketAddr>,
+    /// 設定した endpoint。`Roaming::NotByInitiation` のピアは期限切れでここへ戻る。
+    configured_endpoint: Option<SocketAddr>,
+    roaming: Roaming,
     keepalive: Option<Duration>,
     /// ハンドシェイクを待つ送信の packet。
     staged: BoundedQueue<Vec<u8>>,
@@ -128,7 +128,6 @@ struct Peer {
 }
 
 /// A sans-IO WireGuard device.
-#[derive(Debug)]
 pub struct Device {
     proto: Protocol,
     peers: Vec<Peer>,
@@ -142,31 +141,79 @@ pub struct Device {
     drops: Drops,
     /// これまでに渡された最も新しい時刻。時刻が戻っても sanstun には戻さない。
     now: Instant,
+    /// 作成の時刻と、そのときの Unix 時刻。ハンドシェイクの開始の印の上限を求める。
+    start: Instant,
+    unix_at_start: Duration,
+}
+
+// 平文を持つキューを出さず、数だけを出す
+impl fmt::Debug for Device {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Device")
+            .field("peers", &self.peers.len())
+            .field("mtu", &self.mtu)
+            .field("held", &self.held())
+            .field("drops", &self.drops.total())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Device {
-    /// Makes a device.
+    /// Makes a device for production use.
     ///
-    /// `seed` is the source of every key, index and nonce the device draws; give it 32 bytes of
-    /// fresh operating-system entropy, never a reused value outside tests. `unix` is the wall
-    /// clock time since the Unix epoch at `now`; handshake initiations carry it, so it must not go
-    /// backwards across restarts or the peer drops them as replays.
+    /// It draws the seed for every key, index and nonce from the operating system and reads the
+    /// wall clock once. Handshake initiations carry a timestamp that the peer requires to grow
+    /// across restarts, so the device stamps them from `max(wall clock, unix_floor + 1 s)`.
+    /// `unix_floor` is the caller's persisted [`Device::unix_high_water`] of the previous run, or
+    /// zero; persisting it keeps initiations acceptable after the wall clock went back.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] for duplicate or invalid peer keys, a tiny MTU, a zero limit, a
-    /// keepalive outside 1 to 65535 seconds or timer overrides outside the protocol's bounds.
+    /// Returns [`ConfigError`] for duplicate or invalid peer keys, a tiny MTU, limits that are
+    /// zero or too large, a keepalive outside 1 to 65535 seconds, timer overrides outside the
+    /// protocol's bounds, a Unix time beyond [`MAX_UNIX_TIME`] or missing entropy.
     pub fn new(
+        config: DeviceConfig,
+        now: Instant,
+        unix_floor: Duration,
+    ) -> Result<Self, ConfigError> {
+        let mut seed = Zeroizing::new([0u8; 32]);
+        getrandom::fill(&mut seed[..]).map_err(|e| ConfigError::Entropy(e.to_string()))?;
+        let wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let unix = wall.max(unix_floor.saturating_add(Duration::from_secs(1)));
+        Self::build(config, seed, now, unix)
+    }
+
+    /// Makes a device from a caller's seed and Unix time, for deterministic tests and fuzzing.
+    /// Reusing a seed repeats keys and nonces; never use this in production.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Device::new`], except missing entropy.
+    #[cfg(any(test, feature = "deterministic"))]
+    pub fn with_seed(
         config: DeviceConfig,
         seed: Zeroizing<[u8; 32]>,
         now: Instant,
         unix: Duration,
     ) -> Result<Self, ConfigError> {
-        if config.mtu < MIN_MTU {
-            return Err(ConfigError::Mtu(config.mtu));
+        Self::build(config, seed, now, unix)
+    }
+
+    fn build(
+        config: DeviceConfig,
+        seed: Zeroizing<[u8; 32]>,
+        now: Instant,
+        unix: Duration,
+    ) -> Result<Self, ConfigError> {
+        if unix > MAX_UNIX_TIME {
+            return Err(ConfigError::UnixTime(unix));
         }
         config.validate()?;
         let l = config.limits;
+        let staged_bytes = l.staged_bytes(config.mtu).unwrap_or(usize::MAX);
         let keys: Vec<_> = config
             .peers
             .iter()
@@ -186,8 +233,10 @@ impl Device {
             peers.push(Peer {
                 key: p.public_key,
                 endpoint: p.endpoint,
+                configured_endpoint: p.endpoint,
+                roaming: p.roaming,
                 keepalive,
-                staged: BoundedQueue::new(l.staged_packets, l.staged_packets * mtu),
+                staged: BoundedQueue::new(l.staged_packets, staged_bytes),
                 keepalive_at: (keepalive.is_some() && p.endpoint.is_some()).then_some(now),
                 rx_bytes: 0,
                 tx_bytes: 0,
@@ -205,7 +254,16 @@ impl Device {
             events: VecDeque::new(),
             drops: Drops::default(),
             now,
+            start: now,
+            unix_at_start: unix,
         })
+    }
+
+    /// The Unix time the device would stamp on a handshake initiation now: an upper bound of every
+    /// stamp it has sent. Persist it and pass it as `unix_floor` to the next [`Device::new`].
+    #[must_use]
+    pub fn unix_high_water(&self) -> Duration {
+        self.unix_at_start + self.now.saturating_duration_since(self.start)
     }
 
     /// The longest datagram the device sends, for sizing receive buffers on the other side.
@@ -235,11 +293,18 @@ impl Device {
             Inbound::CookieReply(reply) => self.push_transmit(from, reply),
             Inbound::CookieStored => {}
             Inbound::InitiationAnswered { peer, response } => {
-                self.accepted_from(peer, from, rx);
+                if self.peers[peer].roaming == Roaming::Any {
+                    self.accepted_from(peer, from, rx);
+                    self.send_to_peer(peer, response);
+                } else {
+                    // 開始は古いものの再送でありうる (sanstun の再送の記録はプロセスの中だけにある)。
+                    // endpoint は動かさず、応答だけを送信元へ返す
+                    self.counted_from(peer, rx);
+                    self.send_to(peer, from, response);
+                }
                 self.push_event(Event::HandshakeAccepted {
                     peer: self.peers[peer].key,
                 });
-                self.send_to_peer(peer, response);
                 self.drain_proto_events(peer, now);
             }
             Inbound::ResponseAccepted { peer, keepalive } => {
@@ -265,12 +330,18 @@ impl Device {
         }
     }
 
-    /// 認証した datagram の後だけ endpoint を動かす。
-    fn accepted_from(&mut self, peer: PeerId, from: SocketAddr, rx: u64) {
+    /// 認証した datagram を数え、keepalive の期限を延ばす。
+    fn counted_from(&mut self, peer: PeerId, rx: u64) {
         let now = self.now;
         let p = &mut self.peers[peer];
         p.rx_bytes = p.rx_bytes.saturating_add(rx);
         p.keepalive_at = p.keepalive.map(|interval| now + interval);
+    }
+
+    /// 認証した datagram の後だけ endpoint を動かす。
+    fn accepted_from(&mut self, peer: PeerId, from: SocketAddr, rx: u64) {
+        self.counted_from(peer, rx);
+        let p = &mut self.peers[peer];
         if p.endpoint != Some(from) {
             p.endpoint = Some(from);
             let event = Event::EndpointChanged {
@@ -390,6 +461,9 @@ impl Device {
                 ProtoEvent::Expired { used } => {
                     let p = &mut self.peers[peer];
                     let lost = p.staged.clear();
+                    if p.roaming == Roaming::NotByInitiation {
+                        p.endpoint = p.configured_endpoint;
+                    }
                     if let (Some(interval), Some(_)) = (p.keepalive, p.endpoint) {
                         p.keepalive_at = Some(now + interval);
                     }
@@ -411,6 +485,10 @@ impl Device {
             self.drops.add(DropReason::NoEndpoint, 1);
             return;
         };
+        self.send_to(peer, to, payload);
+    }
+
+    fn send_to(&mut self, peer: PeerId, to: SocketAddr, payload: Vec<u8>) {
         let len = payload.len() as u64;
         if self.transmits.push(Transmit { to, payload }) {
             let now = self.now;
@@ -462,7 +540,8 @@ impl Device {
     }
 
     /// Points the peer at a new endpoint, as the control plane does after resolving the server's
-    /// name again. Returns `false` for an unknown key.
+    /// name again. It also becomes the configured endpoint that `Roaming::NotByInitiation` returns
+    /// to. Returns `false` for an unknown key.
     pub fn set_endpoint(&mut self, now: Instant, peer: &PublicKey, endpoint: SocketAddr) -> bool {
         let now = self.clock(now);
         let Some(&id) = self.by_key.get(peer) else {
@@ -471,6 +550,7 @@ impl Device {
         let p = &mut self.peers[id];
         let first = p.endpoint.is_none();
         p.endpoint = Some(endpoint);
+        p.configured_endpoint = Some(endpoint);
         if first && p.keepalive.is_some() {
             p.keepalive_at = Some(now);
         }

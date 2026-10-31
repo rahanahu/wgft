@@ -7,8 +7,20 @@ use std::time::Duration;
 
 use crate::keys::{PrivateKey, PublicKey};
 
+/// The smallest MTU that carries an IPv4 packet.
+pub const MIN_MTU: u16 = 68;
+
 /// The tunnel MTU of the v1 agent and server.
 pub const DEFAULT_MTU: u16 = 1420;
+
+/// The largest Unix time a device accepts, about 2^40 seconds; a larger one is a broken clock.
+pub const MAX_UNIX_TIME: Duration = Duration::from_secs(1 << 40);
+
+/// The largest packet count any queue limit may have.
+pub const MAX_LIMIT_PACKETS: usize = 1 << 16;
+
+/// The largest byte count any queue limit may have, 256 MiB.
+pub const MAX_LIMIT_BYTES: usize = 256 << 20;
 
 /// The persistent keepalive the v1 agent uses when the server sends none.
 pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(25);
@@ -115,6 +127,22 @@ pub struct PeerConfig {
     /// and an endpoint is contacted as soon as the device starts, and the device starts a handshake
     /// whenever nothing has been sent to or received from the peer for one interval.
     pub persistent_keepalive: Option<Duration>,
+    /// Which authenticated messages may move the endpoint.
+    pub roaming: Roaming,
+}
+
+/// Which authenticated messages from a peer may move its endpoint to their source address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Roaming {
+    /// WireGuard's rule: any accepted handshake or data message. For the peers of a server, whose
+    /// endpoints are learned from the peers.
+    Any,
+    /// The agent's rule for its server: accepted data and keepalives, and the response to a
+    /// handshake this side started, but not an initiation from the peer. The answer to an
+    /// initiation still goes to its source. When the peer expires, the endpoint returns to the
+    /// configured one. A replayed initiation therefore cannot pull the endpoint away, even after a
+    /// restart has emptied sanstun's in-memory replay record.
+    NotByInitiation,
 }
 
 /// Overrides of the protocol timers that sanstun lets a caller change. Unset fields keep the
@@ -195,6 +223,14 @@ pub struct Limits {
     pub events: usize,
 }
 
+impl Limits {
+    /// The byte bound of one peer's staged packets at `mtu`, or `None` on overflow.
+    #[must_use]
+    pub fn staged_bytes(&self, mtu: u16) -> Option<usize> {
+        self.staged_packets.checked_mul(usize::from(mtu))
+    }
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -231,18 +267,27 @@ impl DeviceConfig {
     ///
     /// Returns the first [`ConfigError`] found.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.mtu < MIN_MTU {
+            return Err(ConfigError::Mtu(self.mtu));
+        }
         let l = &self.limits;
-        for (name, v) in [
-            ("staged_packets", l.staged_packets),
-            ("transmit_packets", l.transmit_packets),
-            ("transmit_bytes", l.transmit_bytes),
-            ("deliver_packets", l.deliver_packets),
-            ("deliver_bytes", l.deliver_bytes),
-            ("events", l.events),
+        for (name, v, max) in [
+            ("staged_packets", l.staged_packets, MAX_LIMIT_PACKETS),
+            ("transmit_packets", l.transmit_packets, MAX_LIMIT_PACKETS),
+            ("transmit_bytes", l.transmit_bytes, MAX_LIMIT_BYTES),
+            ("deliver_packets", l.deliver_packets, MAX_LIMIT_PACKETS),
+            ("deliver_bytes", l.deliver_bytes, MAX_LIMIT_BYTES),
+            ("events", l.events, MAX_LIMIT_PACKETS),
         ] {
             if v == 0 {
                 return Err(ConfigError::ZeroLimit(name));
             }
+            if v > max {
+                return Err(ConfigError::LimitTooLarge(name));
+            }
+        }
+        if l.staged_bytes(self.mtu).is_none_or(|b| b > MAX_LIMIT_BYTES) {
+            return Err(ConfigError::LimitTooLarge("staged_packets"));
         }
         for p in &self.peers {
             if let Some(k) = p.persistent_keepalive
@@ -275,6 +320,7 @@ impl DeviceConfig {
                 endpoint: server_endpoint,
                 allowed_ips: vec![Ipv4Prefix::host(server_address)],
                 persistent_keepalive: Some(keepalive),
+                roaming: Roaming::NotByInitiation,
             }],
             limits: Limits::default(),
             timers: ProtocolTimers::default(),
@@ -303,6 +349,12 @@ pub enum ConfigError {
     Keepalive(Duration),
     /// A timer override that is zero or outside the protocol's bounds.
     Timer(&'static str),
+    /// A limit above its upper bound.
+    LimitTooLarge(&'static str),
+    /// The Unix time is above [`MAX_UNIX_TIME`].
+    UnixTime(Duration),
+    /// The operating system gave no entropy for the seed.
+    Entropy(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -321,6 +373,9 @@ impl fmt::Display for ConfigError {
                     "persistent keepalive {d:?} is outside 1 to 65535 seconds"
                 )
             }
+            ConfigError::LimitTooLarge(name) => write!(f, "limit {name} is above its bound"),
+            ConfigError::UnixTime(d) => write!(f, "Unix time {}s is beyond 2^40 s", d.as_secs()),
+            ConfigError::Entropy(e) => write!(f, "cannot read entropy for the seed: {e}"),
             ConfigError::Timer(name) => {
                 write!(
                     f,

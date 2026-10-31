@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use libfuzzer_sys::fuzz_target;
 use wgft_wireguard::{
-    Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers, Zeroizing,
+    Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers, Roaming,
+    Zeroizing,
 };
 
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
@@ -93,13 +94,14 @@ fuzz_target!(|data: &[u8]| {
             endpoint: None,
             allowed_ips: vec![Ipv4Prefix::host(AGENT_IP)],
             persistent_keepalive: None,
+            roaming: Roaming::Any,
         }],
         limits: Limits::default(),
         timers: ProtocolTimers::default(),
     };
     let a_pub = a_key.public_key();
-    let mut a = Device::new(ca, Zeroizing::new([1; 32]), base, unix).unwrap();
-    let mut b = Device::new(cb, Zeroizing::new([2; 32]), base, unix).unwrap();
+    let mut a = Device::with_seed(ca, Zeroizing::new([1; 32]), base, unix).unwrap();
+    let mut b = Device::with_seed(cb, Zeroizing::new([2; 32]), base, unix).unwrap();
     let mut t = Duration::ZERO;
 
     while let Some(op) = input.byte() {

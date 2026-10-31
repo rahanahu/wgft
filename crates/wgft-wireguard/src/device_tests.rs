@@ -4,7 +4,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use crate::config::{DeviceConfig, Ipv4Prefix, Limits, PeerConfig, ProtocolTimers};
+use crate::config::{DeviceConfig, Ipv4Prefix, Limits, PeerConfig, ProtocolTimers, Roaming};
 use crate::device::{Device, Event};
 use crate::drops::DropReason;
 use crate::ip::tests::ipv4_packet;
@@ -43,6 +43,8 @@ struct Net {
     a_sent_at: Vec<Duration>,
     /// true の間は B から A へのハンドシェイクの開始を捨てる。
     drop_b_initiations: bool,
+    /// B が出したハンドシェイクの開始。
+    b_initiations: Vec<Vec<u8>>,
 }
 
 fn agent_config(a_key: &PrivateKey, b_pub: PublicKey, b_addr: SocketAddr) -> DeviceConfig {
@@ -58,6 +60,7 @@ fn server_config(b_key: &PrivateKey, a_pub: PublicKey) -> DeviceConfig {
             endpoint: None,
             allowed_ips: vec![Ipv4Prefix::host(AGENT_IP)],
             persistent_keepalive: None,
+            roaming: Roaming::Any,
         }],
         limits: Limits::default(),
         timers: ProtocolTimers::default(),
@@ -85,8 +88,8 @@ impl Net {
         Self {
             base,
             t: Duration::ZERO,
-            a: Device::new(ca, Zeroizing::new([1; 32]), base, UNIX).unwrap(),
-            b: Device::new(cb, Zeroizing::new([2; 32]), base, UNIX).unwrap(),
+            a: Device::with_seed(ca, Zeroizing::new([1; 32]), base, UNIX).unwrap(),
+            b: Device::with_seed(cb, Zeroizing::new([2; 32]), base, UNIX).unwrap(),
             a_key,
             b_key,
             a_addr,
@@ -99,6 +102,7 @@ impl Net {
             carried: 0,
             a_sent_at: Vec::new(),
             drop_b_initiations: false,
+            b_initiations: Vec::new(),
         }
     }
 
@@ -151,6 +155,9 @@ impl Net {
             while let Some(tx) = self.b.poll_transmit() {
                 moved = true;
                 let initiation = tx.payload.len() == 148 && tx.payload[0] == 1;
+                if initiation {
+                    self.b_initiations.push(tx.payload.clone());
+                }
                 if self.drop_b_initiations && initiation {
                     continue;
                 }
@@ -372,7 +379,7 @@ fn the_endpoint_follows_authenticated_traffic_from_a_new_address() {
 fn an_initiation_from_an_unknown_key_gets_no_answer() {
     let mut n = Net::new();
     let stranger_key = PrivateKey::generate([0xcc; 32]);
-    let mut c = Device::new(
+    let mut c = Device::with_seed(
         agent_config(&stranger_key, n.b_pub(), n.b_addr),
         Zeroizing::new([9; 32]),
         n.base,
@@ -549,7 +556,7 @@ fn a_restarted_server_is_reached_again_by_traffic() {
     n.a_sends(b"before");
     // B を同じ鍵で作り直す。新しい B は A の endpoint もセッションも知らない
     n.t += Duration::from_secs(3);
-    n.b = Device::new(
+    n.b = Device::with_seed(
         server_config(&n.b_key, n.a_pub()),
         Zeroizing::new([7; 32]),
         n.now(),
@@ -580,7 +587,7 @@ fn a_restarted_agent_needs_a_later_wall_clock() {
     n.connect();
     n.t += Duration::from_secs(1);
     // 壁時計の戻った agent の開始は、古い開始の再送と見分けられず、捨てられる
-    n.a = Device::new(
+    n.a = Device::with_seed(
         agent_config(&n.a_key, n.b_pub(), n.b_addr),
         Zeroizing::new([5; 32]),
         n.now(),
@@ -592,7 +599,7 @@ fn a_restarted_agent_needs_a_later_wall_clock() {
     assert_eq!(n.b.drops().get(DropReason::Replayed), 1);
     assert_eq!(n.a_events, vec![]);
     // 進んだ壁時計なら受け付ける
-    n.a = Device::new(
+    n.a = Device::with_seed(
         agent_config(&n.a_key, n.b_pub(), n.b_addr),
         Zeroizing::new([6; 32]),
         n.now(),
@@ -669,7 +676,8 @@ fn bad_configurations_are_refused() {
     let peer = PrivateKey::generate([2; 32]).public_key();
     let base = || DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, KEEPALIVE);
     let now = Instant::now();
-    let try_new = |c: DeviceConfig| Device::new(c, Zeroizing::new([0; 32]), now, UNIX).unwrap_err();
+    let try_new =
+        |c: DeviceConfig| Device::with_seed(c, Zeroizing::new([0; 32]), now, UNIX).unwrap_err();
 
     let mut c = base();
     c.peers.push(c.peers[0].clone());
@@ -760,7 +768,7 @@ fn keepalives_and_timer_overrides_outside_their_bounds_are_refused() {
     let make = |keepalive: Duration, timers: ProtocolTimers| {
         let mut c = DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, keepalive);
         c.timers = timers;
-        Device::new(c, Zeroizing::new([0; 32]), now, UNIX).map(|_| ())
+        Device::with_seed(c, Zeroizing::new([0; 32]), now, UNIX).map(|_| ())
     };
     let secs = Duration::from_secs;
     let none = ProtocolTimers::default();
@@ -851,4 +859,142 @@ fn a_tunnel_that_was_never_used_expires_quietly_and_still_answers() {
     n.connect();
     n.a_sends(b"late");
     assert_eq!(n.b_got.len(), 1);
+}
+
+#[test]
+fn a_replayed_server_initiation_after_an_agent_restart_does_not_move_the_endpoint() {
+    // 攻撃者は server の開始を 1 つ記録している。agent が再起動すると、sanstun の再送の記録
+    // (開始の時刻の最大) はプロセスとともに消えるので、記録した開始は受け付けられる
+    let mut n = Net::with(
+        |a| a.peers[0].endpoint = None,
+        |b| b.peers[0].endpoint = Some(addr("198.51.100.2:40000")),
+    );
+    n.b_sends(b"first");
+    let recorded = n.b_initiations.first().cloned().expect("B initiated");
+    n.t += Duration::from_secs(5);
+    n.a = Device::with_seed(
+        agent_config(&n.a_key, n.b_pub(), n.b_addr),
+        Zeroizing::new([8; 32]),
+        n.now(),
+        UNIX + n.t,
+    )
+    .unwrap();
+    n.a_events.clear();
+    n.tick();
+    let now = n.now();
+    let attacker = addr("192.0.2.66:9999");
+    n.a.handle_datagram(now, attacker, &recorded);
+    // 応答は送信元へ返るが、endpoint は server のまま
+    let mut answered = false;
+    while let Some(tx) = n.a.poll_transmit() {
+        answered |= tx.to == attacker;
+    }
+    assert!(answered, "the initiation was accepted and answered");
+    assert_eq!(
+        n.a.peer_status(&n.b_pub(), now).unwrap().endpoint,
+        Some(n.b_addr)
+    );
+    n.pump();
+    assert!(
+        !n.a_events
+            .iter()
+            .any(|e| matches!(e, Event::EndpointChanged { endpoint, .. } if *endpoint == attacker))
+    );
+    n.run(Duration::from_secs(30), Duration::from_secs(1));
+    n.a_sends(b"still to the server");
+    assert_eq!(
+        n.b_got.last().unwrap(),
+        &ipv4_packet(AGENT_IP, SERVER_IP, b"still to the server")
+    );
+}
+
+#[test]
+fn the_agent_returns_to_the_configured_endpoint_when_the_server_expires() {
+    let mut n = Net::new();
+    n.connect();
+    let configured = n.b_addr;
+    // server が別のアドレスから認証したデータを送ると、agent はそちらへ移る
+    n.b_addr = addr("203.0.113.9:51820");
+    n.b_sends(b"moved");
+    let now = n.now();
+    assert_eq!(
+        n.a.peer_status(&n.b_pub(), now).unwrap().endpoint,
+        Some(n.b_addr)
+    );
+    n.b_up = false;
+    n.run(Duration::from_secs(400), Duration::from_secs(1));
+    assert!(
+        n.a_events
+            .iter()
+            .any(|e| matches!(e, Event::PeerExpired { .. }))
+    );
+    assert_eq!(
+        n.a.peer_status(&n.b_pub(), n.now()).unwrap().endpoint,
+        Some(configured)
+    );
+}
+
+#[test]
+fn production_devices_draw_their_seed_and_respect_the_unix_floor() {
+    let key = PrivateKey::generate([1; 32]);
+    let peer = PrivateKey::generate([2; 32]).public_key();
+    let cfg = || DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, KEEPALIVE);
+    let now = Instant::now();
+    // 壁時計より先の床は、床の 1 秒後から印を付ける
+    let floor = Duration::from_secs(1 << 39);
+    let d = Device::new(cfg(), now, floor).unwrap();
+    assert_eq!(d.unix_high_water(), floor + Duration::from_secs(1));
+    // 床が無ければ壁時計
+    let d = Device::new(cfg(), now, Duration::ZERO).unwrap();
+    assert!(d.unix_high_water() > Duration::from_secs(1_700_000_000));
+    assert!(matches!(
+        Device::new(cfg(), now, crate::config::MAX_UNIX_TIME),
+        Err(crate::config::ConfigError::UnixTime(_))
+    ));
+}
+
+#[test]
+fn debug_output_shows_counts_but_no_packet_bytes() {
+    let mut n = Net::new();
+    n.b_up = false;
+    let now = n.now();
+    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, b"SECRETPAYLOAD"));
+    assert_eq!(n.a.held().staged_packets_max, 1);
+    let text = format!("{:?}", n.a);
+    assert!(text.contains("peers: 1"), "{text}");
+    assert!(!text.contains("83, 69, 67"), "{text}");
+    assert!(!text.contains("SECRET"), "{text}");
+}
+
+#[test]
+fn limits_above_their_bounds_are_refused() {
+    use crate::config::{ConfigError, MAX_LIMIT_BYTES, MAX_LIMIT_PACKETS};
+    let key = PrivateKey::generate([1; 32]);
+    let peer = PrivateKey::generate([2; 32]).public_key();
+    let now = Instant::now();
+    let make = |edit: &dyn Fn(&mut DeviceConfig)| {
+        let mut c = DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, KEEPALIVE);
+        edit(&mut c);
+        Device::with_seed(c, Zeroizing::new([0; 32]), now, UNIX).map(|_| ())
+    };
+    assert_eq!(
+        make(&|c| c.limits.transmit_packets = MAX_LIMIT_PACKETS + 1),
+        Err(ConfigError::LimitTooLarge("transmit_packets"))
+    );
+    assert_eq!(
+        make(&|c| c.limits.deliver_bytes = MAX_LIMIT_BYTES + 1),
+        Err(ConfigError::LimitTooLarge("deliver_bytes"))
+    );
+    // 件数は上限の中でも、MTU を掛けたバイト数が上限を超える
+    assert_eq!(
+        make(&|c| {
+            c.limits.staged_packets = MAX_LIMIT_PACKETS;
+            c.mtu = u16::MAX;
+        }),
+        Err(ConfigError::LimitTooLarge("staged_packets"))
+    );
+    assert_eq!(
+        make(&|c| c.limits.staged_packets = MAX_LIMIT_PACKETS),
+        Ok(())
+    );
 }

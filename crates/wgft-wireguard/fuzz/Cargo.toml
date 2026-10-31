@@ -13,11 +13,18 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-wgft-wireguard = { version = "0.1.0", path = "..", features = ["fuzzing"] }
+wgft-wireguard = { version = "0.1.0", path = "..", features = ["fuzzing", "deterministic"] }
 
 [[bin]]
 name = "inbound"
 path = "fuzz_targets/inbound.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "build-corpus"
+path = "build_corpus.rs"
 test = false
 doc = false
 bench = false
