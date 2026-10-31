@@ -98,7 +98,11 @@ impl Join {
         let pin = decode_hex32_bytes(&u.fragment[colon + 1..]).ok_or(JoinError::BadPin)?;
         // Go の文字列は不正な UTF-8 を持てるので、%XX が作る不正な UTF-8 の host とトークンも受ける。
         // Rust の String は持てないので拒む。Go が受け Rust が拒む、意図した差である
-        let utf8 = |b: &[u8]| String::from_utf8(b.to_vec()).map_err(|_| JoinError::Scheme);
+        let utf8 = |b: &[u8]| {
+            str::from_utf8(b)
+                .map(str::to_owned)
+                .map_err(|_| JoinError::Scheme)
+        };
         Ok(Join {
             endpoint: utf8(&u.host)?,
             host: utf8(host)?,
@@ -162,7 +166,7 @@ fn parse_port(p: &[u8]) -> Option<u16> {
     if p.is_empty() || !p.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let n: u64 = std::str::from_utf8(p).ok()?.parse().ok()?;
+    let n: u64 = str::from_utf8(p).ok()?.parse().ok()?;
     if n > u64::from(u32::MAX) || !(1..=65535).contains(&n) {
         return None;
     }
@@ -361,7 +365,7 @@ fn is_ipv6_literal(s: &[u8]) -> bool {
     if zone.is_some_and(<[u8]>::is_empty) || !addr.contains(&b':') {
         return false;
     }
-    std::str::from_utf8(addr).is_ok_and(|a| a.parse::<std::net::Ipv6Addr>().is_ok())
+    str::from_utf8(addr).is_ok_and(|a| a.parse::<std::net::Ipv6Addr>().is_ok())
 }
 
 /// Go の `validOptionalPort`。

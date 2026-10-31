@@ -54,14 +54,14 @@ fn escape(c: char, out: &mut String) {
         '\r' => out.push_str("\\r"),
         '\t' => out.push_str("\\t"),
         '\u{0B}' => out.push_str("\\v"),
-        c if (c as u32) < 0x80 => {
-            let _ = write!(out, "\\x{:02x}", c as u32);
+        c if u32::from(c) < 0x80 => {
+            let _ = write!(out, "\\x{:02x}", u32::from(c));
         }
-        c if (c as u32) <= 0xFFFF => {
-            let _ = write!(out, "\\u{:04x}", c as u32);
+        c if u32::from(c) <= 0xFFFF => {
+            let _ = write!(out, "\\u{:04x}", u32::from(c));
         }
         c => {
-            let _ = write!(out, "\\U{:08x}", c as u32);
+            let _ = write!(out, "\\U{:08x}", u32::from(c));
         }
     }
 }

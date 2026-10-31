@@ -191,8 +191,8 @@ impl AgentRule {
 fn split_target(target: &str) -> Option<(&str, u16)> {
     let (host, port) = split_host_port(target.as_bytes())?;
     // split_host_port は ASCII の区切りで切るので、どちらも target の str の境目に当たる
-    let host = std::str::from_utf8(host).ok()?;
-    let port = std::str::from_utf8(port).ok()?;
+    let host = str::from_utf8(host).ok()?;
+    let port = str::from_utf8(port).ok()?;
     if host.is_empty() {
         return None;
     }
