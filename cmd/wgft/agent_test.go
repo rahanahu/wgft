@@ -410,15 +410,16 @@ func TestAgentJoinErrorsExitCode(t *testing.T) {
 // with the reason, so adding a setting without deciding this fails the test (docs/design.md 11b 節).
 func TestEveryAgentSettingIsCheckedAtTheDoor(t *testing.T) {
 	bad := map[string]string{
-		"WGFT_DATA_DIR":       "  ",
-		"WGFT_JOIN":           "",
-		"WGFT_NAME":           "",
-		"WGFT_MODE":           "kernal",
-		"WGFT_WG_INTERFACE":   "wg/ft0",
-		"WGFT_AGENT_NETSTACK": "lwip",
-		allowtargets.Env:      "192.168.1.0/33",
-		"WGFT_MAX_UDP_FLOWS":  "0",
-		"WGFT_MAX_TCP_FLOWS":  "one",
+		"WGFT_DATA_DIR":        "  ",
+		"WGFT_JOIN":            "",
+		"WGFT_NAME":            "",
+		"WGFT_MODE":            "kernal",
+		"WGFT_WG_INTERFACE":    "wg/ft0",
+		"WGFT_AGENT_NETSTACK":  "lwip",
+		"WGFT_AGENT_BATCH_MIB": "-1",
+		allowtargets.Env:       "192.168.1.0/33",
+		"WGFT_MAX_UDP_FLOWS":   "0",
+		"WGFT_MAX_TCP_FLOWS":   "one",
 	}
 	noBadValue := map[string]string{
 		"WGFT_JOIN": "malformed is judged at registration, not at the door: a registered agent never reads a stale value (11a 節), so refusing here would stop an agent that works",

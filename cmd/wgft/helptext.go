@@ -564,6 +564,17 @@ WGFT_AGENT_NETSTACK chooses the network stack of the userspace mode: gvisor,
 the default when unset or empty, or wgstack, wgft's own TCP/IP stack, which is
 experimental and logs a warning at start. Any other value stops the agent with
 exit code 3. Kernel mode runs no network stack, logs that the setting is unused
+and starts.
+
+WGFT_AGENT_BATCH_MIB is the send batching budget of wgstack in MiB: the memory
+that packets read from wgstack in batches of two or more may hold while they
+wait to be encrypted and sent. Unset or empty derives it from the flow caps,
+and 0 turns batching off. It bounds only the batched part: the queues of
+single packets keep their own bound, about 73 MiB on Linux with 8 CPUs,
+whatever the value. A value above the cap for this host's CPU count is
+lowered to the cap, and the agent logs the effective budget at start. A value
+that is not a whole number of at least 0 stops the agent with exit code 3.
+With gvisor or in kernel mode the setting is unused, and the agent logs that
 and starts.`,
 		Example: `  WGFT_JOIN='wgft://vps.example.com:8443/TOKEN#sha256:...' wgft agent run
   wgft agent run --config /etc/wgft/agent.env

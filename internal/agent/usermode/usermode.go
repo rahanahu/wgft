@@ -65,6 +65,8 @@ type Dataplane struct {
 	Limits resource.Limits
 	// netstack はトンネルの netstack の実装(WGFT_AGENT_NETSTACK)。空は gvisor である
 	netstack string
+	// sendBatch は wgstack の送信の向きの予算 P_max(WGFT_AGENT_BATCH_MIB)。0 はバッチを使わない
+	sendBatch int
 	// unicast はブロードキャストとマルチキャストの宛先の判定である(仕様 7 節)。New がこのホストの
 	// インタフェースの一覧を読む判定を置く。nil なら一覧に依らない判定だけを行う
 	unicast *allowtargets.Unicast
@@ -76,9 +78,9 @@ type Dataplane struct {
 }
 
 // New は何も立てていないユーザー空間モードの dataplane を作る。netstack はトンネルの netstack の実装の名前で、
-// 空は gvisor である。
-func New(allow *allowtargets.List, limits resource.Limits, netstack string) *Dataplane {
-	return &Dataplane{Allow: allow, Limits: limits, netstack: netstack, unicast: allowtargets.NewUnicast(nil, nil)}
+// 空は gvisor である。sendBatch は wgstack の送信の向きの予算 P_max で、0 はバッチを使わない。
+func New(allow *allowtargets.List, limits resource.Limits, netstack string, sendBatch int) *Dataplane {
+	return &Dataplane{Allow: allow, Limits: limits, netstack: netstack, sendBatch: sendBatch, unicast: allowtargets.NewUnicast(nil, nil)}
 }
 
 // NewTunnel はトンネルを作る。値は tunnel.New で、テストだけが作成の失敗を模すために差し替える。
@@ -96,6 +98,7 @@ func (d *Dataplane) Build(priv wgtypes.Key, wg proto.WGConfig) (retryable bool, 
 		return false, err
 	}
 	cfg.Netstack = d.netstack
+	cfg.SendBatchPackets = d.sendBatch
 	cfg.MaxTCPFlows = d.Limits.WithDefaults().TCPTotal
 	tun, err := NewTunnel(cfg)
 	if err != nil {
