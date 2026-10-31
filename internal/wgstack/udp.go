@@ -96,18 +96,19 @@ type udpEndpoint struct {
 
 // udpState は Device の UDP の状態。
 type udpState struct {
-	mu      sync.Mutex
-	eps     map[netip.AddrPort]*udpEndpoint
-	dg      [2][]udpDgram
-	dgFree  [2][]int32
-	ck      []udpChunkRec
-	ckFree  []int32
-	budget  [2]udpBudget
-	txHead  int32
-	txTail  int32
-	txSpace chan struct{} // 送信の予約が返ったときに閉じて作り直す
-	fault   error
-	closed  bool
+	mu       sync.Mutex
+	eps      map[netip.AddrPort]*udpEndpoint
+	dg       [2][]udpDgram
+	dgFree   [2][]int32
+	ck       []udpChunkRec
+	ckFree   []int32
+	budget   [2]udpBudget
+	txHead   int32
+	txTail   int32
+	txSpace  chan struct{} // 送信の予約が返ったときに閉じて作り直す。待つ書き手がいるときだけ(txWaited)
+	txWaited bool          // txSpace を待つ書き手がいる。偽なら閉じずに使い続け、datagram ごとに作り直さない
+	fault    error
+	closed   bool
 
 	epDrops, devDrops, noPort uint64
 	dropGate                  gate
@@ -270,9 +271,19 @@ func (s *stack) udpRelease(dir int, id int32) {
 	*g = udpDgram{}
 	u.dgFree[dir] = append(u.dgFree[dir], id)
 	if dir == dirTx {
-		close(u.txSpace)
-		u.txSpace = make(chan struct{})
+		u.wakeTx()
 	}
+}
+
+// wakeTx は送信の予約の空きを待つ書き手を起こす。待つ書き手がいなければ何もしないので、Read が datagram を
+// 送るたびに channel を作らない。u.mu の中で呼ぶ。
+func (u *udpState) wakeTx() {
+	if !u.txWaited {
+		return
+	}
+	u.txWaited = false
+	close(u.txSpace)
+	u.txSpace = make(chan struct{})
 }
 
 // udpWrite は datagram id の中身を data にする。
@@ -519,6 +530,7 @@ func (c *UDPConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 			return len(b), nil
 		}
 		space, dl := u.txSpace, ep.wdl.wait()
+		u.txWaited = true
 		u.mu.Unlock()
 		select {
 		case <-space:
@@ -649,8 +661,7 @@ func (s *stack) udpCloseLocked(ep *udpEndpoint) {
 	ep.rxHead, ep.rxTail = -1, -1
 	close(ep.rch)
 	ep.rch = make(chan struct{}, 1)
-	close(u.txSpace)
-	u.txSpace = make(chan struct{})
+	u.wakeTx()
 }
 
 func (c *UDPConn) SetDeadline(t time.Time) error {
@@ -678,8 +689,7 @@ func (c *UDPConn) wake() {
 	case c.ep.rch <- struct{}{}:
 	default:
 	}
-	close(u.txSpace)
-	u.txSpace = make(chan struct{})
+	u.wakeTx()
 	u.mu.Unlock()
 }
 

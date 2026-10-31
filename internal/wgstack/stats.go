@@ -305,7 +305,7 @@ func (s *stack) countBound() Bound {
 		sliceBytes(s.wheel.dl) + sliceBytes(s.wheel.next) + sliceBytes(s.wheel.prev) + sliceBytes(s.wheel.where) +
 		dl(s.out.conns) + dl(s.out.rows) +
 		sliceBytes(s.out.ctl.buf) + sliceBytes(s.out.ctl.lens) +
-		sliceBytes(s.fired[:cap(s.fired)]) +
+		sliceBytes(s.fired[:cap(s.fired)]) + sliceBytes(s.txb.rows) +
 		chunkPoolKeep*chunkHeap() + heapBytes(chunkPoolKeep*int64(unsafe.Sizeof((*chunk)(nil)))) +
 		n*slotRuntime
 	t := terms()

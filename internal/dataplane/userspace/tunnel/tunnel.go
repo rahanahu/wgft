@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
+	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -47,6 +48,9 @@ type Config struct {
 	// MaxTCPFlows は同時フロー数のプロセス全体の上限 K(WGFT_MAX_TCP_FLOWS)。wgstack が接続の枠の数を
 	// 決めるのに使う。0 は既定値である
 	MaxTCPFlows int
+	// SendBatchPackets は wgstack の送信の向きの予算 P_max(WGFT_AGENT_BATCH_MIB から cmd/wgft が求める
+	// buffer の数、wgstack-batching.md)。0 はバッチを使わない。gVisor では使わない
+	SendBatchPackets int
 }
 
 // Tunnel は動いているトンネル。relay.Network として netstack 上にリスナーを開ける。
@@ -78,6 +82,16 @@ type Status struct {
 // だけが受信の停止を模すために差し替える。
 var bindForDevice = wgbind.New
 
+// deviceBind は device に渡すバインドを決める。送信の向きのバッチを使う wgstack の Device では、Send を見る
+// 層を置いて送った番号を Device に知らせる(wgstack-batching.md の「Device の約束」)。gVisor と、バッチを
+// 使わない Device では bind をそのまま返す。受信の 1 回の件数はどちらでも bind のもののままである。
+func deviceBind(tnet netstack, bind conn.Bind) conn.Bind {
+	if w, ok := tnet.(wgstackNetstack); ok && w.Batching() {
+		return wgbind.WatchSend(bind, w.ObserveSend)
+	}
+	return bind
+}
+
 // New はトンネルを作って up する。エンドポイントの解決に失敗しても起こし、引き直しに任せる。
 func New(cfg Config) (*Tunnel, error) {
 	if cfg.Logf == nil {
@@ -98,7 +112,7 @@ func New(cfg Config) (*Tunnel, error) {
 	}
 	startMemProbe(tnet)
 	t := &Tunnel{cfg: cfg, tnet: tnet}
-	t.dev = wgbind.NewDevice(tnet, bindForDevice(), device.NewLogger(device.LogLevelError, "wg: "))
+	t.dev = wgbind.NewDevice(tnet, deviceBind(tnet, bindForDevice()), device.NewLogger(device.LogLevelError, "wg: "))
 
 	ep, err := resolve(cfg.Endpoint)
 	if err != nil {

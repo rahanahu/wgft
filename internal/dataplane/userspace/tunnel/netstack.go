@@ -60,7 +60,7 @@ func newNetstack(cfg Config) (netstack, error) {
 		}
 		return gvisorNetstack{d}, nil
 	case NetstackWgstack:
-		d, err := wgstack.New(wgstack.Config{Addr: cfg.Address, MTU: cfg.MTU, MaxFlows: cfg.MaxTCPFlows})
+		d, err := wgstack.New(wgstack.Config{Addr: cfg.Address, MTU: cfg.MTU, MaxFlows: cfg.MaxTCPFlows, SendBatch: sendBatchConfig(cfg.SendBatchPackets)})
 		if err != nil {
 			return nil, err
 		}
