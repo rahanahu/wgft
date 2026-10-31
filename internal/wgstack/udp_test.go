@@ -433,3 +433,82 @@ func TestBoundEchoFloodFillsOnlyTheControlRing(t *testing.T) {
 		t.Fatal("the UDP class was starved by the control ring")
 	}
 }
+
+// UDP の送信の予約の空きを待つ書き手は、Read が datagram を送って予約を返すと起き、期限を変えても起きる。
+// 待つ書き手がいなければ channel を作り直さない(wakeTx)。
+func TestUDPBlockedWriterWakes(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	pc := listenUDP(t, n, 53)
+	to := net.UDPAddrFromAddrPort(peerUDP)
+	for range udpTxDatagrams / udpEndpointShare {
+		if _, err := pc.WriteTo(make([]byte, 10), to); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := pc.WriteTo(make([]byte, 10), to)
+		done <- err
+	}()
+	waitWaited := func() {
+		for i := 0; ; i++ {
+			n.d.s.udp.mu.Lock()
+			w := n.d.s.udp.txWaited
+			n.d.s.udp.mu.Unlock()
+			if w {
+				return
+			}
+			if i > 2000 {
+				t.Fatal("the writer did not wait for space")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitWaited()
+	if n.d.Poll(n.buf) == 0 {
+		t.Fatal("nothing to send")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WriteTo after the space returned: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer was not woken when a reservation returned")
+	}
+	// 起こした後は待つ書き手がいないので、次に予約を返しても channel を作り直さない
+	n.d.s.udp.mu.Lock()
+	waited, space := n.d.s.udp.txWaited, n.d.s.udp.txSpace
+	n.d.s.udp.mu.Unlock()
+	if waited {
+		t.Fatal("txWaited is still set after the waiting writer was woken")
+	}
+	if n.d.Poll(n.buf) == 0 {
+		t.Fatal("nothing to send after the woken write")
+	}
+	n.d.s.udp.mu.Lock()
+	same := n.d.s.udp.txSpace == space
+	n.d.s.udp.mu.Unlock()
+	if !same {
+		t.Fatal("a returned reservation recreated the wake channel with no writer waiting")
+	}
+	// 返した予約を埋め直し、次の書き手がまた空きを待つようにする
+	if _, err := pc.WriteTo(make([]byte, 10), to); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_, err := pc.WriteTo(make([]byte, 10), to)
+		done <- err
+	}()
+	waitWaited()
+	pc.SetWriteDeadline(time.Now().Add(-time.Second))
+	select {
+	case err := <-done:
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Fatalf("WriteTo after the deadline passed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer was not woken by the deadline change")
+	}
+}

@@ -114,3 +114,45 @@ func (c *tcb) rcvSpaceAdjust(now int64) {
 	}
 	c.rsTime, c.rsSeq = now, c.rcv.readOff
 }
+
+// rcvWindow は今広告している窓の大きさ(byte)。
+func (c *tcb) rcvWindow() uint32 {
+	if c.advRight <= c.rcv.nxtOff {
+		return 0
+	}
+	return uint32(min(c.advRight-c.rcv.nxtOff, 1<<30))
+}
+
+// windowField は広告する窓の欄を返し、広告した右端を更新する。右端は rcvTarget に向けて広げ、後ろへ戻さない。
+// 右端を広げるのは、広げる量が min(窓の上限の半分, MSS) 以上のときだけである(受け手の SWS の回避、
+// RFC 9293 3.8.6.2.2)。
+// 窓の scale で切り捨てた分だけ欄の右端が論理の右端より手前に見えることは scale の性質で、論理の右端の
+// 手前までのデータは受け入れる。
+func (c *tcb) windowField() uint16 {
+	nxt := c.rcv.nxtOff
+	target := c.rcvTarget()
+	if target > c.advRight && target-c.advRight >= min(c.rcvClamp()/2, uint64(c.rcvMSS())) {
+		c.advRight = target
+	}
+	if c.advRight <= nxt {
+		return 0
+	}
+	return uint16(min((c.advRight-nxt)>>c.rcvWscale, 65535))
+}
+
+// windowUpdate は、読み取りで空いた受信のバッファが広告する窓を大きく広げるときに ACK を送る。Linux の
+// tcp_cleanup_rbuf と同じく、今の窓が窓の上限の半分以下で、広げた後の窓が今の窓の 2 倍以上になるときである。
+func (c *tcb) windowUpdate() {
+	cur := uint64(c.rcvWindow())
+	if 2*cur > c.rcvClamp() {
+		return
+	}
+	target := c.rcvTarget()
+	if target <= c.rcv.nxtOff {
+		return
+	}
+	next := target - c.rcv.nxtOff
+	if next >= 2*cur && next-cur >= uint64(c.rcvMSS()) {
+		c.ackNow = true
+	}
+}
