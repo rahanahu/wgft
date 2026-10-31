@@ -251,9 +251,41 @@ filter は packet ごとに、渡す、捨てる、返事を送る (例えば規
 何を通すかの判断は制御プレーンが持ち、殻は filter を呼んで数えるだけです。
 TUN から device への向きは filter に通しません。
 
+### 殻の経路
+
+乗っ取られた server がトンネルを通ってホストの別のサービスや LAN へ届かないように、殻は経路を次のように絞ります。
+
+- main の表を変えません。トンネルのアドレスは /32 でリンクに付けるので、アドレスの帯を TUN へ向ける経路はできません。
+  server が帯の広いアドレスを渡しても、LAN のルータのような帯の中のアドレスが TUN へ向くことはありません。
+- server の /32 は専用の表 (既定は 51820) に入れ、`from <トンネルのアドレス> lookup <表>` の rule (既定の優先度は 5180) でだけ引きます。
+  agent の中継の socket と ping の socket はトンネルのアドレスに bind するので、この rule に当たります。
+- `iif <TUN> blackhole` の rule (優先度は 1 つ後) で、TUN から来て、このホスト宛てでないものを捨てます。
+  このホスト宛ては優先度 0 の local の表で先に決まります。
+  IPv4 の転送が有効なホストでも、トンネルから LAN へは届きません。
+  殻は IPv4 の転送を変えません。
+- 2 つの rule は `protocol kernel` で足します。
+  systemd-networkd は、自分の設定に無い rule を起動し直しや reconfigure で消しますが、`kernel` の rule には触れません。
+- 足す前に、前の実行が残した同じ rule を消します。
+  殻が止まるとき (設定の途中で失敗したときを含む) にも消します。
+  表の経路はリンクとともに消えます。
+- トンネルのアドレス以外を宛先にする packet は、filter の前に捨てて `wrong_destination` で数えます。
+  server はそうした packet を送らないので、数が増えるのは server が乗っ取られたか壊れた兆しです。
+  filter が捨てた数と device が捨てた数 (`Drops`) も、後の doctor が示せるように `Status` に出します。
+
+strict の rp_filter でも受信が通ることは、`lab/wg-interop.sh` が strict にして確かめます。
+
+TUN は `IFF_TUN_EXCL` で作り、同じ名前の持続する TUN が既にあれば付かずに失敗します。
+`ip` は PATH を使わず、root が持ちほかの利用者が書けないシステムの場所 (`/usr/sbin`、`/sbin`、`/usr/bin`、`/bin`) から探します。
 殻は TUN を閉じるときにリンクを消します。
 カーネルが、持続の印の無い TUN のリンクを記述子とともに消すためです。
-アドレスと MTU とリンクの状態は `ip` のコマンドで設定します。
+
+filter の panic は、その packet を捨てて数えます。
+ただし、ワークスペースの release の build は panic で異常終了する設定なので、そこではプロセスが終わります。
+TUN の読み出しの誤りなどでループが終わると、`Handle::finished` が解け、`Handle::stop` がその誤りを返します。
+agent はトンネルを作り直します。
+
+`bind_to_device` は socket に `SO_BINDTODEVICE` で TUN を結び付けます。
+agent は待ち受けと ping の socket に使えます。
 
 ## 試験
 

@@ -201,7 +201,7 @@ lab/lab exec vm bash /wgft/lab/wg-interop.sh kernel quick
 `wgft-wireguard-tun` は cargo-zigbuild で musl の静的バイナリにするので、ホストに cargo-zigbuild と zig が要ります。
 `wireguard-go` は `go.mod` が要る版の upstream のコマンドです。
 
-確認は、相手ごとにハンドシェイク、両向きの ping、両向きの 8 MiB の TCP の転送と SHA-256 の比較、Rust の側の UDP のポートの移動、相手の listen のポートの移動、相手の再起動、Rust の側の再起動、ping を流し続けたままの鍵の更新と、最後の状態に中身の誤りと TUN の書き込みの誤りが無いことです。
+確認は、相手ごとにハンドシェイク、殻が入れる経路 (main の表を変えないこと、専用の表と rule、TUN から来た転送を捨てること)、両向きの ping、両向きの 8 MiB の TCP の転送と SHA-256 の比較、Rust の側の UDP のポートの移動、相手の listen のポートの移動、トンネルのアドレス以外への packet を捨てて数えること、相手の再起動、Rust の側の再起動、ping を流し続けたままの鍵の更新と、最後の状態に中身の誤りと TUN の書き込みの誤りが無いことです。
 鍵の更新はプロトコルの `REKEY_AFTER_TIME` の 120 秒を待つので、相手ごとに約 2 分かかります。
 `quick` はこの確認を省きます。
 

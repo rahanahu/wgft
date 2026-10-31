@@ -1,8 +1,11 @@
 //! Linux の TUN と UDP の socket で Device を回す。
 
 use std::io;
-use std::net::SocketAddr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::MetadataExt as _;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use tokio::io::unix::AsyncFd;
@@ -13,23 +16,16 @@ use wgft_wireguard::{Device, Event};
 
 use crate::{Command, InboundFilter, Status, TunSettings, Verdict};
 
-/// `IFF_TUN | IFF_NO_PI`。値は `c_short` に収まる。
-#[expect(clippy::cast_possible_truncation, reason = "0x1001 fits in a c_short")]
-const TUN_FLAGS: libc::c_short = (libc::IFF_TUN | libc::IFF_NO_PI) as libc::c_short;
+/// `IFF_TUN | IFF_NO_PI | IFF_TUN_EXCL`。EXCL は、同じ名前の持続する TUN が既にあれば作らずに
+/// 失敗させる。ほかのプロセスが作った TUN に付かないため。
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "TUNSETIFF reads the flags as a short; 0x9001 keeps its bits"
+)]
+const TUN_FLAGS: libc::c_short =
+    (libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_TUN_EXCL) as libc::c_short;
 
 fn open_tun(name: &str) -> io::Result<OwnedFd> {
-    // カーネルは % を含む名前を番号の型として扱い、別の名前で作る。設定は渡した名前で行うので拒む
-    if name.is_empty()
-        || name.len() >= libc::IFNAMSIZ
-        || name
-            .bytes()
-            .any(|b| b == 0 || b == b'%' || b == b'/' || b.is_ascii_whitespace())
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("TUN name {name:?} must be 1 to 15 bytes without %, / or spaces"),
-        ));
-    }
     // SAFETY: open に NUL で終わる定数の path を渡す。戻り値は下で確かめる
     let fd = unsafe {
         libc::open(
@@ -51,13 +47,55 @@ fn open_tun(name: &str) -> io::Result<OwnedFd> {
     // SAFETY: req は TUNSETIFF が読み書きする struct ifreq で、呼び出しの間生きている
     let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TUNSETIFF, &raw mut req) };
     if rc < 0 {
-        return Err(io::Error::last_os_error());
+        let e = io::Error::last_os_error();
+        return Err(io::Error::new(
+            e.kind(),
+            format!("create TUN {name}: {e}; a device of that name may already exist"),
+        ));
     }
     Ok(fd)
 }
 
-async fn ip(args: &[&str]) -> io::Result<()> {
-    let out = Process::new("ip").args(args).output().await?;
+pub(crate) fn bind_to_device(socket: &impl AsFd, name: &str) -> io::Result<()> {
+    let fd = socket.as_fd().as_raw_fd();
+    let len = libc::socklen_t::try_from(name.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "interface name too long"))?;
+    // SAFETY: name の領域は呼び出しの間生きていて、長さ len を読める
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_BINDTODEVICE,
+            name.as_ptr().cast(),
+            len,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// iproute2 の `ip` を、root が持ち、ほかの利用者が書けないシステムの場所から探す。PATH は使わない。
+fn find_ip() -> io::Result<PathBuf> {
+    for candidate in ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"] {
+        let path = Path::new(candidate);
+        let Ok(meta) = std::fs::metadata(path) else {
+            continue;
+        };
+        if meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0 && meta.mode() & 0o111 != 0
+        {
+            return Ok(path.to_owned());
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "no root-owned ip command of iproute2 in /usr/sbin, /sbin, /usr/bin or /bin",
+    ))
+}
+
+async fn ip(tool: &Path, args: &[&str]) -> io::Result<()> {
+    let out = Process::new(tool).args(args).output().await?;
     if out.status.success() {
         return Ok(());
     }
@@ -68,9 +106,83 @@ async fn ip(args: &[&str]) -> io::Result<()> {
     )))
 }
 
-async fn configure(tun: &TunSettings) -> io::Result<()> {
-    let addr = format!("{}/{}", tun.address, tun.prefix_len);
-    let mtu = tun.mtu.to_string();
+/// shell が足す 2 つの rule。落ちるときにも消すため、Drop で消す。
+struct Rules {
+    ip: PathBuf,
+    from: String,
+    table: String,
+    iif: String,
+    first: String,
+    second: String,
+}
+
+impl Rules {
+    fn new(ip: &Path, tun: &TunSettings) -> Self {
+        Self {
+            ip: ip.to_owned(),
+            from: format!("{}/32", tun.address),
+            table: tun.table.to_string(),
+            iif: tun.name.clone(),
+            first: tun.rule_priority.to_string(),
+            second: (tun.rule_priority + 1).to_string(),
+        }
+    }
+
+    fn lookup_rule(&self) -> [&str; 6] {
+        [
+            "from",
+            &self.from,
+            "lookup",
+            &self.table,
+            "priority",
+            &self.first,
+        ]
+    }
+
+    fn blackhole_rule(&self) -> [&str; 5] {
+        ["iif", &self.iif, "blackhole", "priority", &self.second]
+    }
+
+    /// 同じ rule を消せなくなるまで消す。前の実行が落ちて残したものも消える。
+    fn delete_blocking(&self) {
+        for rule in [&self.lookup_rule()[..], &self.blackhole_rule()[..]] {
+            for _ in 0..16 {
+                let deleted = std::process::Command::new(&self.ip)
+                    .args(["rule", "del"])
+                    .args(rule)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if !deleted {
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn add(&self) -> io::Result<()> {
+        let mut args = vec!["rule", "add"];
+        args.extend(self.lookup_rule());
+        args.extend(["protocol", "kernel"]);
+        ip(&self.ip, &args).await?;
+        let mut args = vec!["rule", "add"];
+        args.extend(self.blackhole_rule());
+        args.extend(["protocol", "kernel"]);
+        ip(&self.ip, &args).await
+    }
+}
+
+impl Drop for Rules {
+    fn drop(&mut self) {
+        self.delete_blocking();
+    }
+}
+
+/// TUN を作り、/32 のアドレス、MTU、リンクの状態、専用の表の経路、2 つの rule を設定する。
+/// main の表は変えない。失敗すると、TUN を閉じてリンクと経路を消し、rule も消す。
+async fn configure(tun: &TunSettings, fd: OwnedFd) -> io::Result<(OwnedFd, Rules)> {
+    let tool = find_ip()?;
     // トンネルは IPv4 だけを運ぶ。カーネルが link up で送る IPv6 の近隣探索を TUN に流さない。
     // IPv6 の無いカーネルでは file が無い。そのときだけ無視する
     let path = format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", tun.name);
@@ -83,8 +195,23 @@ async fn configure(tun: &TunSettings) -> io::Result<()> {
         }
         _ => {}
     }
-    ip(&["addr", "add", &addr, "dev", &tun.name]).await?;
-    ip(&["link", "set", "dev", &tun.name, "mtu", &mtu, "up"]).await
+    let addr = format!("{}/32", tun.address);
+    let mtu = tun.mtu.to_string();
+    let table = tun.table.to_string();
+    ip(&tool, &["addr", "add", &addr, "dev", &tun.name]).await?;
+    ip(&tool, &["link", "set", "dev", &tun.name, "mtu", &mtu, "up"]).await?;
+    for route in &tun.routes {
+        let route = route.to_string();
+        ip(
+            &tool,
+            &["route", "add", &route, "dev", &tun.name, "table", &table],
+        )
+        .await?;
+    }
+    let rules = Rules::new(&tool, tun);
+    rules.delete_blocking();
+    rules.add().await?;
+    Ok((fd, rules))
 }
 
 fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
@@ -101,7 +228,10 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
 
 pub(crate) struct Shell {
     device: Device,
+    address: Ipv4Addr,
     tun: AsyncFd<OwnedFd>,
+    /// TUN より後に落とす。リンクが消えてから rule を消す
+    _rules: Rules,
     udp: UdpSocket,
     events: mpsc::Sender<Event>,
     send_errors: u64,
@@ -109,6 +239,8 @@ pub(crate) struct Shell {
     filter: InboundFilter,
     filter_drops: u64,
     filter_replies: u64,
+    filter_panics: u64,
+    wrong_destination: u64,
 }
 
 impl Shell {
@@ -119,14 +251,17 @@ impl Shell {
         events: mpsc::Sender<Event>,
         filter: InboundFilter,
     ) -> io::Result<Self> {
+        let address = tun.address;
         let fd = open_tun(&tun.name)?;
-        configure(tun).await?;
+        let (fd, rules) = configure(tun, fd).await?;
         let udp = UdpSocket::bind(listen).await?;
         // SAFETY: OwnedFd は開いた記述子を持ち、AsyncFd が持つ間は同じ記述子を返し続ける
         let tun = unsafe { AsyncFd::register(fd) }.map_err(io::Error::from)?;
         Ok(Self {
             device,
+            address,
             tun,
+            _rules: rules,
             udp,
             events,
             send_errors: 0,
@@ -134,6 +269,8 @@ impl Shell {
             filter,
             filter_drops: 0,
             filter_replies: 0,
+            filter_panics: 0,
+            wrong_destination: 0,
         })
     }
 
@@ -155,6 +292,9 @@ impl Shell {
             tun_write_errors: self.tun_write_errors,
             filter_drops: self.filter_drops,
             filter_replies: self.filter_replies,
+            filter_panics: self.filter_panics,
+            wrong_destination: self.wrong_destination,
+            unix_high_water: self.device.unix_high_water(),
         }
     }
 
@@ -183,7 +323,18 @@ impl Shell {
     async fn deliver_packets(&mut self) -> io::Result<bool> {
         let mut replied = false;
         while let Some(packet) = self.device.poll_packet() {
-            match (self.filter)(&packet) {
+            // Device は検査済みの IPv4 だけを渡す。宛先がトンネルのアドレスでないものは、ホストの
+            // ほかのアドレスや LAN を狙ったもので、server は送らない。filter の前に捨てて数える
+            if packet.get(16..20) != Some(&self.address.octets()[..]) {
+                self.wrong_destination += 1;
+                continue;
+            }
+            let filter = &mut self.filter;
+            let Ok(verdict) = catch_unwind(AssertUnwindSafe(|| filter(&packet))) else {
+                self.filter_panics += 1;
+                continue;
+            };
+            match verdict {
                 Verdict::Deliver => {}
                 Verdict::Drop => {
                     self.filter_drops += 1;

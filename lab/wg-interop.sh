@@ -11,9 +11,13 @@
 # learns the endpoint from the handshake. The two sit in their own network namespaces, wgi-<peer>-a
 # and wgi-<peer>-b, joined by a veth pair; the lab's shared topology is not used.
 #
-# Checks, in order, for each peer: the handshake, ping in both directions, a TCP transfer of 8 MiB
-# each way compared by SHA-256, the Rust side roaming to a new UDP port, the peer moving to a new
-# listen port, the peer restarting with the same key, the Rust side restarting, and, unless
+# Checks, in order, for each peer: the handshake; the routing the shell installs (the tunnel
+# address as a /32, no route of the main table on the TUN, the peer's /32 only for traffic from the
+# tunnel address, and a blackhole for anything forwarded from the TUN, with strict reverse-path
+# filtering on); ping in both directions; a TCP transfer of 8 MiB each way compared by SHA-256; the
+# Rust side roaming to a new UDP port; the peer moving to a new listen port; packets for another
+# address dropped and counted; the peer restarting with the same key; the Rust side restarting,
+# with its rules gone while it is stopped; and, unless
 # `quick` is given, a rekey after REKEY_AFTER_TIME, 120 s, under steady ping. Last, the final status
 # must show no dropped invalid inner packet and no refused TUN write. The rekey wait is fixed by the
 # protocol; sanstun does not let it be shortened.
@@ -72,6 +76,8 @@ run_peer() {
   ip netns add "$na"; ip netns add "$nb"
   ip link add wgi-a netns "$na" type veth peer name wgi-b netns "$nb"
   ip -n "$na" addr add "$A_UDP/24" dev wgi-a; ip -n "$na" link set wgi-a up; ip -n "$na" link set lo up
+  # strict reverse-path filtering is the harshest case for the shell's rules
+  ip netns exec "$na" sysctl -qw net.ipv4.conf.all.rp_filter=1 net.ipv4.conf.default.rp_filter=1
   ip -n "$nb" addr add "$B_UDP/24" dev wgi-b; ip -n "$nb" link set wgi-b up; ip -n "$nb" link set lo up
 
   wg genkey > "$dir/a.key"; wg pubkey < "$dir/a.key" > "$dir/a.pub"
@@ -104,7 +110,7 @@ run_peer() {
   }
 
   start_shell() {
-    ip netns exec "$na" wgft-wireguard-tun --tun wgft-rs0 --address "$A_IP/24" \
+    ip netns exec "$na" wgft-wireguard-tun --tun wgft-rs0 --address "$A_IP" \
       --private-key-file "$dir/a.key" --peer-public-key "$(cat "$dir/b.pub")" \
       --endpoint "$B_UDP:$B_PORT" --allowed-ip "$B_IP/32" --keepalive 25 >>"$log" 2>&1 &
     shell_pid=$!
@@ -112,7 +118,13 @@ run_peer() {
 
   stop_shell() { kill "$shell_pid" 2>/dev/null; wait "$shell_pid" 2>/dev/null; shell_pid=""; }
 
-  pings() { ip netns exec "$1" ping -c "${3:-3}" -i 0.2 -W 2 -q "$2"; }
+  # The shell routes the tunnel only for traffic from the tunnel address, so the Rust side pings
+  # from it, as the agent's ping socket does.
+  pings() {
+    local src=()
+    [[ $1 == "$na" ]] && src=(-I "$A_IP")
+    ip netns exec "$1" ping "${src[@]}" -c "${3:-3}" -i 0.2 -W 2 -q "$2"
+  }
   established_count() { grep -c 'session-established' "$log" 2>/dev/null || true; }
   established_since() { (($(established_count) > $1)); }
   peer_endpoint() { ip netns exec "$nb" wg show "$ifb" endpoints | awk '{print $2}'; }
@@ -125,7 +137,26 @@ run_peer() {
   # 1. handshake
   if wait_for 10 grep -q 'session-established' "$log"; then pass "$kind: handshake"; else fail "$kind: handshake"; fi
 
-  # 2. ping both ways
+  # 2. routing: no route of the main table goes to the TUN, the server's /32 is reached only from
+  #    the tunnel address, and packets arriving on the TUN for anything but this host are
+  #    blackholed even with forwarding on
+  local rules route_main route_other route_from route_fwd
+  rules=$(ip -n "$na" rule show)
+  route_main=$(ip -n "$na" route show table main)
+  route_other=$(ip -n "$na" route get 10.200.0.3 2>&1)
+  route_from=$(ip -n "$na" route get "$B_IP" from "$A_IP" 2>&1)
+  ip netns exec "$na" sysctl -qw net.ipv4.ip_forward=1
+  route_fwd=$(ip -n "$na" route get "$B_UDP" from "$B_IP" iif wgft-rs0 2>&1)
+  ip netns exec "$na" sysctl -qw net.ipv4.ip_forward=0
+  if [[ $rules == *"from $A_IP lookup 51820"* && $rules == *"iif wgft-rs0"*blackhole* \
+        && $route_main != *wgft-rs0* && $route_other != *wgft-rs0* \
+        && $route_from == *"dev wgft-rs0"* && $route_fwd != *"dev wgi-a"* ]]; then
+    pass "$kind: routing stays inside the tunnel's own table"
+  else
+    fail "$kind: routing; rules [$rules] main [$route_main] other [$route_other] from [$route_from] forwarded [$route_fwd]"
+  fi
+
+  # 2b. ping both ways
   if pings "$na" "$B_IP" 5; then pass "$kind: ping to the peer"; else fail "$kind: ping to the peer"; fi
   if pings "$nb" "$A_IP" 5; then pass "$kind: ping from the peer"; else fail "$kind: ping from the peer"; fi
 
@@ -136,7 +167,7 @@ run_peer() {
   ip netns exec "$nb" timeout 60 socat -u TCP-LISTEN:5001,bind="$B_IP",reuseaddr OPEN:"$dir/recv-b",creat,trunc &
   local lp=$!
   sleep 0.5
-  ip netns exec "$na" timeout 60 socat -u OPEN:"$dir/send" TCP:"$B_IP":5001
+  ip netns exec "$na" timeout 60 socat -u OPEN:"$dir/send" TCP:"$B_IP":5001,bind="$A_IP"
   wait "$lp"
   got=$(sha256sum < "$dir/recv-b" | cut -d' ' -f1)
   if [[ $got == "$want" ]]; then pass "$kind: TCP 8 MiB to the peer"; else fail "$kind: TCP 8 MiB to the peer, sha256 $got want $want"; fi
@@ -172,6 +203,20 @@ run_peer() {
   ip netns exec "$nb" wg set "$ifb" listen-port "$B_PORT"
   pings "$nb" "$A_IP" 3 >/dev/null
 
+  # 5b. packets to an address other than the tunnel address are dropped before the kernel and
+  #     counted: let the peer route a neighbour address to the Rust side for a moment
+  ip netns exec "$nb" wg set "$ifb" peer "$(cat "$dir/a.pub")" allowed-ips "10.200.0.0/24"
+  ip -n "$nb" route replace 10.200.0.9/32 dev "$ifb"
+  ip netns exec "$nb" ping -c 2 -i 0.2 -W 1 -q 10.200.0.9 >/dev/null 2>&1
+  ip -n "$nb" route del 10.200.0.9/32 dev "$ifb"
+  ip netns exec "$nb" wg set "$ifb" peer "$(cat "$dir/a.pub")" allowed-ips "$A_IP/32"
+  kill -USR1 "$shell_pid"; sleep 0.3
+  if grep '^status' "$log" | tail -1 | grep -q 'wrong_destination=[1-9]'; then
+    pass "$kind: packets for another address are dropped and counted"
+  else
+    fail "$kind: wrong destination, $(grep '^status' "$log" | tail -1)"
+  fi
+
   # 6. the peer restarts with the same key and no endpoint. Data without a reply starts a new
   #    handshake after KEEPALIVE_TIMEOUT + REKEY_TIMEOUT, 15 s, so ping until it answers.
   stop_peer; start_peer
@@ -181,7 +226,13 @@ run_peer() {
   # 7. the Rust side restarts; its later wall clock makes the new initiation acceptable
   local n0
   n0=$(established_count)
-  stop_shell; start_shell
+  stop_shell
+  if ip -n "$na" rule show | grep -q 'lookup 51820\|iif wgft-rs0'; then
+    fail "$kind: the stopped shell left its rules: $(ip -n "$na" rule show | tr '\n' ';')"
+  else
+    pass "$kind: the stopped shell removed its rules"
+  fi
+  start_shell
   if wait_for 10 established_since "$n0" && pings "$na" "$B_IP" 3; then
     pass "$kind: Rust side restart"
   else
@@ -193,7 +244,7 @@ run_peer() {
     local h0 h1 accepted0 accepted1
     h0=$(peer_handshake)
     accepted0=$(grep -c 'handshake-accepted' "$log")
-    ip netns exec "$na" ping -c 135 -i 1 -W 2 -q "$B_IP" > "$dir/rekey-ping.txt" 2>&1
+    ip netns exec "$na" ping -I "$A_IP" -c 135 -i 1 -W 2 -q "$B_IP" > "$dir/rekey-ping.txt" 2>&1
     h1=$(peer_handshake)
     accepted1=$(grep -c 'handshake-accepted' "$log")
     local loss

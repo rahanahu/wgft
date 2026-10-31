@@ -1,15 +1,15 @@
 //! The command line of the TUN shell. Linux only.
 
 use std::fmt::Write as _;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use wgft_wireguard::{
     DeviceConfig, Event, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers, PublicKey,
-    Zeroizing,
+    Roaming,
 };
 use wgft_wireguard_tun::{Handle, TunSettings};
 
@@ -23,9 +23,9 @@ struct Args {
     /// The TUN device name.
     #[arg(long, default_value = "wgft-rs0")]
     tun: String,
-    /// This side's tunnel address and prefix length, such as 10.200.0.2/24.
+    /// This side's tunnel address, such as 10.200.0.2. It goes on the link as a /32.
     #[arg(long)]
-    address: String,
+    address: Ipv4Addr,
     /// The tunnel MTU.
     #[arg(long, default_value_t = 1420)]
     mtu: u16,
@@ -38,9 +38,16 @@ struct Args {
     /// The peer's endpoint, an IP address and port.
     #[arg(long)]
     endpoint: Option<SocketAddr>,
-    /// An IPv4 prefix the peer may use; repeat for more.
+    /// An IPv4 prefix the peer may use; repeat for more. Each is also routed through the tunnel,
+    /// for traffic from the tunnel address only.
     #[arg(long = "allowed-ip", required = true)]
     allowed_ips: Vec<Ipv4Prefix>,
+    /// The routing table for the tunnel routes.
+    #[arg(long, default_value_t = wgft_wireguard_tun::DEFAULT_TABLE)]
+    table: u32,
+    /// The priority of the first of the two routing rules.
+    #[arg(long, default_value_t = wgft_wireguard_tun::DEFAULT_RULE_PRIORITY)]
+    rule_priority: u32,
     /// The persistent keepalive interval in seconds; 0 turns it off.
     #[arg(long, default_value_t = 25)]
     keepalive: u64,
@@ -75,6 +82,7 @@ fn build_config(args: &Args) -> Result<DeviceConfig, String> {
             allowed_ips: args.allowed_ips.clone(),
             persistent_keepalive: Some(Duration::from_secs(args.keepalive))
                 .filter(|d| !d.is_zero()),
+            roaming: Roaming::NotByInitiation,
         }],
         limits: Limits::default(),
         timers: ProtocolTimers {
@@ -85,20 +93,15 @@ fn build_config(args: &Args) -> Result<DeviceConfig, String> {
     })
 }
 
-fn tun_settings(args: &Args) -> Result<TunSettings, String> {
-    let bad = || {
-        format!(
-            "address {:?} is not an IPv4 address with a prefix length",
-            args.address
-        )
-    };
-    let (addr, len) = args.address.split_once('/').ok_or_else(bad)?;
-    Ok(TunSettings {
+fn tun_settings(args: &Args) -> TunSettings {
+    TunSettings {
         name: args.tun.clone(),
-        address: addr.parse().map_err(|_| bad())?,
-        prefix_len: len.parse().ok().filter(|l| *l <= 32).ok_or_else(bad)?,
+        address: args.address,
+        routes: args.allowed_ips.clone(),
         mtu: args.mtu,
-    })
+        table: args.table,
+        rule_priority: args.rule_priority,
+    }
 }
 
 fn log_event(event: &Event, start: Instant) {
@@ -141,8 +144,8 @@ async fn print_status(handle: &Handle) {
     let _ = write!(line, " tun_write_errors={}", status.tun_write_errors);
     let _ = write!(
         line,
-        " filter_drops={} filter_replies={}",
-        status.filter_drops, status.filter_replies
+        " filter_drops={} filter_replies={} filter_panics={} wrong_destination={}",
+        status.filter_drops, status.filter_replies, status.filter_panics, status.wrong_destination
     );
     eprintln!("{line}");
 }
@@ -178,21 +181,14 @@ async fn serve(mut handle: Handle) -> std::io::Result<()> {
 
 pub(crate) fn run() -> ExitCode {
     let args = Args::parse();
-    let (config, tun) = match build_config(&args).and_then(|c| Ok((c, tun_settings(&args)?))) {
+    let tun = tun_settings(&args);
+    let config = match build_config(&args) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("wgft-wireguard-tun: {e}");
             return ExitCode::from(2);
         }
     };
-    let mut seed = Zeroizing::new([0u8; 32]);
-    if let Err(e) = getrandom::fill(&mut seed[..]) {
-        eprintln!("wgft-wireguard-tun: read entropy: {e}");
-        return ExitCode::FAILURE;
-    }
-    let unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -208,8 +204,8 @@ pub(crate) fn run() -> ExitCode {
             config,
             tun,
             args.listen,
-            seed,
-            unix,
+            // この道具は床を保存しない。壁時計が戻った後の再起動は、相手に拒まれうる
+            Duration::ZERO,
             wgft_wireguard_tun::deliver_all(),
         )
         .await?;
