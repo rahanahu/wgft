@@ -5,7 +5,7 @@
 server doctor は、server から見た転送の経路の失敗を診断します。
 制御の劣化だけでは転送の故障と数えません。
 
-現行の各仕様は[server doctorの索引](diagnosis/README.md)から参照できます。
+現行の各仕様は[server doctor の索引](diagnosis/README.md)から参照できます。
 
 <details>
 <summary>旧見出しの参照先</summary>
