@@ -257,15 +257,19 @@ TUN から device への向きは filter に通しません。
 
 - main の表を変えません。トンネルのアドレスは /32 でリンクに付けるので、アドレスの帯を TUN へ向ける経路はできません。
   server が帯の広いアドレスを渡しても、LAN のルータのような帯の中のアドレスが TUN へ向くことはありません。
-- server の /32 は専用の表 (既定は 51820) に入れ、`from <トンネルのアドレス> lookup <表>` の rule (既定の優先度は 5180) でだけ引きます。
+- server の /32 は専用の表 (既定は 5180) に入れ、`from <トンネルのアドレス> lookup <表>` の rule (既定の優先度は 5180) でだけ引きます。
   agent の中継の socket と ping の socket はトンネルのアドレスに bind するので、この rule に当たります。
-- `iif <TUN> blackhole` の rule (優先度は 1 つ後) で、TUN から来て、このホスト宛てでないものを捨てます。
+  表の番号は wg-quick の既定の 51820 を避けました。
+- 次の優先度の `from <トンネルのアドレス> unreachable` の rule で、トンネルのアドレスから表に無い宛先への通信を main の表へ落としません。
+- その次の優先度の `iif <TUN> blackhole` の rule で、TUN から来て、このホスト宛てでないものを捨てます。
   このホスト宛ては優先度 0 の local の表で先に決まります。
   IPv4 の転送が有効なホストでも、トンネルから LAN へは届きません。
   殻は IPv4 の転送を変えません。
-- 2 つの rule は `protocol kernel` で足します。
+- 3 つの rule は `protocol kernel` で足します。
   systemd-networkd は、自分の設定に無い rule を起動し直しや reconfigure で消しますが、`kernel` の rule には触れません。
 - 足す前に、前の実行が残した同じ rule を消します。
+  それでも 3 つの優先度のどれかにほかの rule が残っているか、専用の表に経路があれば、ほかのソフトのものなので、混ぜずに止まります。
+  トンネルのアドレスが既にこのホストにある場合も止まります。
   殻が止まるとき (設定の途中で失敗したときを含む) にも消します。
   表の経路はリンクとともに消えます。
 - トンネルのアドレス以外を宛先にする packet は、filter の前に捨てて `wrong_destination` で数えます。
@@ -280,7 +284,8 @@ TUN は `IFF_TUN_EXCL` で作り、同じ名前の持続する TUN が既にあ�
 カーネルが、持続の印の無い TUN のリンクを記述子とともに消すためです。
 
 filter の panic は、その packet を捨てて数えます。
-ただし、ワークスペースの release の build は panic で異常終了する設定なので、そこではプロセスが終わります。
+filter が packet ごとに panic しても出力が溢れないように、殻は filter の中の panic を 1 分に 1 行だけ書く panic の hook を、元の hook の前に差し込みます。
+`panic = "abort"` で build したときは、プロセスが終わります。
 TUN の読み出しの誤りなどでループが終わると、`Handle::finished` が解け、`Handle::stop` がその誤りを返します。
 agent はトンネルを作り直します。
 

@@ -1,12 +1,14 @@
 //! Linux の TUN と UDP の socket で Device を回す。
 
+use std::cell::Cell;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::{Mutex, Once};
+use std::time::{Duration, Instant};
 
 use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket;
@@ -56,6 +58,38 @@ fn open_tun(name: &str) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
+thread_local! {
+    /// filter を呼んでいる間だけ true。panic の hook が静かにする範囲を示す
+    static IN_FILTER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// filter の panic は数えて捨てる。既定の hook は panic ごとに stderr へ書くので、filter が
+/// packet ごとに panic すると出力が溢れる。filter の中の panic だけを 1 分に 1 行に絞る hook を、
+/// 元の hook の前に 1 度だけ差し込む。ほかの panic は元の hook に渡す。
+fn install_panic_hook() {
+    static ONCE: Once = Once::new();
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !IN_FILTER.get() {
+                previous(info);
+                return;
+            }
+            let Ok(mut last) = LAST.lock() else {
+                return;
+            };
+            let now = Instant::now();
+            if last.is_none_or(|at| now.duration_since(at) >= Duration::from_secs(60)) {
+                *last = Some(now);
+                eprintln!(
+                    "wgft-wireguard-tun: the inbound filter panicked and its packet was dropped: {info}; further panics within a minute are only counted"
+                );
+            }
+        }));
+    });
+}
+
 pub(crate) fn bind_to_device(socket: &impl AsFd, name: &str) -> io::Result<()> {
     let fd = socket.as_fd().as_raw_fd();
     let len = libc::socklen_t::try_from(name.len())
@@ -94,6 +128,18 @@ fn find_ip() -> io::Result<PathBuf> {
     ))
 }
 
+async fn ip_output(tool: &Path, args: &[&str]) -> io::Result<String> {
+    let out = Process::new(tool).args(args).output().await?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    Err(io::Error::other(format!(
+        "ip {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr).trim()
+    )))
+}
+
 async fn ip(tool: &Path, args: &[&str]) -> io::Result<()> {
     let out = Process::new(tool).args(args).output().await?;
     if out.status.success() {
@@ -106,46 +152,37 @@ async fn ip(tool: &Path, args: &[&str]) -> io::Result<()> {
     )))
 }
 
-/// shell が足す 2 つの rule。落ちるときにも消すため、Drop で消す。
+/// shell が足す 3 つの rule。落ちるときにも消すため、Drop で消す。
 struct Rules {
     ip: PathBuf,
-    from: String,
-    table: String,
-    iif: String,
-    first: String,
-    second: String,
+    /// 優先度の順の rule。どれも `ip rule add` と `ip rule del` にそのまま渡せる
+    specs: Vec<Vec<String>>,
+    priorities: Vec<String>,
 }
 
 impl Rules {
     fn new(ip: &Path, tun: &TunSettings) -> Self {
+        let from = format!("{}/32", tun.address);
+        let p = |offset: u32| (tun.rule_priority + offset).to_string();
+        let words = |list: &[&str]| list.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        let table = tun.table.to_string();
         Self {
             ip: ip.to_owned(),
-            from: format!("{}/32", tun.address),
-            table: tun.table.to_string(),
-            iif: tun.name.clone(),
-            first: tun.rule_priority.to_string(),
-            second: (tun.rule_priority + 1).to_string(),
+            specs: vec![
+                // トンネルのアドレスからは、専用の表だけを引く
+                words(&["from", &from, "lookup", &table, "priority", &p(0)]),
+                // 表に無い宛先は main へ落とさず、到達できないとする
+                words(&["from", &from, "unreachable", "priority", &p(1)]),
+                // TUN から来て、このホスト宛てでないものは捨てる
+                words(&["iif", &tun.name, "blackhole", "priority", &p(2)]),
+            ],
+            priorities: (0..3).map(p).collect(),
         }
-    }
-
-    fn lookup_rule(&self) -> [&str; 6] {
-        [
-            "from",
-            &self.from,
-            "lookup",
-            &self.table,
-            "priority",
-            &self.first,
-        ]
-    }
-
-    fn blackhole_rule(&self) -> [&str; 5] {
-        ["iif", &self.iif, "blackhole", "priority", &self.second]
     }
 
     /// 同じ rule を消せなくなるまで消す。前の実行が落ちて残したものも消える。
     fn delete_blocking(&self) {
-        for rule in [&self.lookup_rule()[..], &self.blackhole_rule()[..]] {
+        for rule in &self.specs {
             for _ in 0..16 {
                 let deleted = std::process::Command::new(&self.ip)
                     .args(["rule", "del"])
@@ -161,15 +198,28 @@ impl Rules {
         }
     }
 
+    /// 自分の rule を消した後も同じ優先度に rule が残っていれば、ほかのソフトのものなので止まる。
+    async fn refuse_foreign(&self) -> io::Result<()> {
+        for priority in &self.priorities {
+            let out = ip_output(&self.ip, &["rule", "list", "priority", priority]).await?;
+            if !out.trim().is_empty() {
+                return Err(io::Error::other(format!(
+                    "rule priority {priority} is taken by another rule: {}; choose another priority",
+                    out.trim()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     async fn add(&self) -> io::Result<()> {
-        let mut args = vec!["rule", "add"];
-        args.extend(self.lookup_rule());
-        args.extend(["protocol", "kernel"]);
-        ip(&self.ip, &args).await?;
-        let mut args = vec!["rule", "add"];
-        args.extend(self.blackhole_rule());
-        args.extend(["protocol", "kernel"]);
-        ip(&self.ip, &args).await
+        for rule in &self.specs {
+            let mut args: Vec<&str> = vec!["rule", "add"];
+            args.extend(rule.iter().map(String::as_str));
+            args.extend(["protocol", "kernel"]);
+            ip(&self.ip, &args).await?;
+        }
+        Ok(())
     }
 }
 
@@ -198,6 +248,24 @@ async fn configure(tun: &TunSettings, fd: OwnedFd) -> io::Result<(OwnedFd, Rules
     let addr = format!("{}/32", tun.address);
     let mtu = tun.mtu.to_string();
     let table = tun.table.to_string();
+    // このホストに既にあるアドレスをトンネルに付けると、そのアドレスの通信がトンネルの rule に当たる
+    let assigned = ip_output(&tool, &["-o", "-4", "addr", "show", "to", &addr]).await?;
+    if !assigned.trim().is_empty() {
+        return Err(io::Error::other(format!(
+            "tunnel address {} is already assigned on this host",
+            tun.address
+        )));
+    }
+    // 専用の表は空でなければならない。ほかのソフトの表なら、経路を混ぜずに止まる
+    let routes = ip_output(&tool, &["-4", "route", "show", "table", &table]).await?;
+    if !routes.trim().is_empty() {
+        return Err(io::Error::other(format!(
+            "routing table {table} is not empty; choose another table"
+        )));
+    }
+    let rules = Rules::new(&tool, tun);
+    rules.delete_blocking();
+    rules.refuse_foreign().await?;
     ip(&tool, &["addr", "add", &addr, "dev", &tun.name]).await?;
     ip(&tool, &["link", "set", "dev", &tun.name, "mtu", &mtu, "up"]).await?;
     for route in &tun.routes {
@@ -208,8 +276,6 @@ async fn configure(tun: &TunSettings, fd: OwnedFd) -> io::Result<(OwnedFd, Rules
         )
         .await?;
     }
-    let rules = Rules::new(&tool, tun);
-    rules.delete_blocking();
     rules.add().await?;
     Ok((fd, rules))
 }
@@ -251,6 +317,7 @@ impl Shell {
         events: mpsc::Sender<Event>,
         filter: InboundFilter,
     ) -> io::Result<Self> {
+        install_panic_hook();
         let address = tun.address;
         let fd = open_tun(&tun.name)?;
         let (fd, rules) = configure(tun, fd).await?;
@@ -330,7 +397,10 @@ impl Shell {
                 continue;
             }
             let filter = &mut self.filter;
-            let Ok(verdict) = catch_unwind(AssertUnwindSafe(|| filter(&packet))) else {
+            IN_FILTER.set(true);
+            let result = catch_unwind(AssertUnwindSafe(|| filter(&packet)));
+            IN_FILTER.set(false);
+            let Ok(verdict) = result else {
                 self.filter_panics += 1;
                 continue;
             };

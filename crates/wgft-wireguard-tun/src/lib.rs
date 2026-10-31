@@ -16,9 +16,9 @@ use wgft_wireguard::{DeviceConfig, Drops, Event, Ipv4Prefix, PeerStatus};
 mod linux;
 
 /// The routing table the shell uses by default.
-pub const DEFAULT_TABLE: u32 = 51820;
+pub const DEFAULT_TABLE: u32 = 5180;
 
-/// The priority of the first of the shell's two routing rules by default. Both come before the
+/// The priority of the first of the shell's three routing rules by default. All come before the
 /// main table's rule at 32766.
 pub const DEFAULT_RULE_PRIORITY: u32 = 5180;
 
@@ -26,10 +26,14 @@ pub const DEFAULT_RULE_PRIORITY: u32 = 5180;
 ///
 /// The shell changes no route of the main table. The address goes on the link as a /32, so no
 /// address band is routed to the tunnel. `routes` go into a table of their own that only traffic
-/// from `address` uses, through the rule `from address lookup table` at `rule_priority`. A second
-/// rule at `rule_priority + 1` blackholes whatever arrives on the TUN device and is not for this
-/// host, so the tunnel never reaches the LAN even with IPv4 forwarding on. Both rules use
-/// `protocol kernel`, which systemd-networkd leaves alone, and are removed when the shell stops.
+/// from `address` uses, through the rule `from address lookup table` at `rule_priority`. The rule
+/// `from address unreachable` at `rule_priority + 1` keeps traffic from the tunnel address to any
+/// other destination off the main table. The rule `iif name blackhole` at `rule_priority + 2`
+/// drops whatever arrives on the TUN device and is not for this host, so the tunnel never reaches
+/// the LAN even with IPv4 forwarding on. The rules use `protocol kernel`, which systemd-networkd
+/// leaves alone, and are removed when the shell stops. The shell refuses to start when the table
+/// is not empty, a foreign rule holds one of the priorities, or the address is already on the
+/// host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunSettings {
     /// The interface name, at most 15 bytes, without %, / or whitespace.
@@ -43,7 +47,7 @@ pub struct TunSettings {
     pub mtu: u16,
     /// The routing table for `routes`, from 1 to 252 or above 255.
     pub table: u32,
-    /// The priority of the first rule, from 1 to 32764.
+    /// The priority of the first rule, from 1 to 32763; the others follow it.
     pub rule_priority: u32,
 }
 
@@ -81,10 +85,17 @@ impl TunSettings {
                 self.table
             ));
         }
-        if !(1..=32764).contains(&self.rule_priority) {
+        if !(1..=32763).contains(&self.rule_priority) {
             return bad(format!(
-                "rule priority {} must be 1 to 32764",
+                "rule priority {} must be 1 to 32763",
                 self.rule_priority
+            ));
+        }
+        let [first, ..] = self.address.octets();
+        if first == 0 || first == 127 || first >= 224 {
+            return bad(format!(
+                "tunnel address {} is not a unicast host address",
+                self.address
             ));
         }
         if self.routes.is_empty() {
@@ -110,7 +121,8 @@ pub enum Verdict {
 /// would otherwise hand every such packet to any service listening on that address or on
 /// 0.0.0.0. Packets for any other address are dropped before the filter and counted in
 /// [`Status::wrong_destination`]. A panic in the filter drops the packet and is counted in
-/// [`Status::filter_panics`]; with `panic = "abort"` in the release profile it ends the process.
+/// [`Status::filter_panics`]; the shell's panic hook prints at most one line a minute for such
+/// panics. A build with `panic = "abort"` ends the process instead.
 pub type InboundFilter = Box<dyn FnMut(&[u8]) -> Verdict + Send>;
 
 /// An [`InboundFilter`] that delivers every packet, for lab tests of the device alone.
@@ -366,10 +378,21 @@ mod tests {
             t.table = table;
             assert!(t.validate().is_err(), "table {table}");
         }
-        for priority in [0, 32765, 32766] {
+        for priority in [0, 32764, 32765, 32766] {
             let mut t = agent();
             t.rule_priority = priority;
             assert!(t.validate().is_err(), "priority {priority}");
+        }
+        for address in [
+            "0.1.2.3",
+            "127.0.0.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "255.255.255.255",
+        ] {
+            let mut t = agent();
+            t.address = address.parse().unwrap();
+            assert!(t.validate().is_err(), "address {address}");
         }
         let mut t = agent();
         t.routes.clear();

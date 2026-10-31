@@ -13,8 +13,8 @@
 #
 # Checks, in order, for each peer: the handshake; the routing the shell installs (the tunnel
 # address as a /32, no route of the main table on the TUN, the peer's /32 only for traffic from the
-# tunnel address, and a blackhole for anything forwarded from the TUN, with strict reverse-path
-# filtering on); ping in both directions; a TCP transfer of 8 MiB each way compared by SHA-256; the
+# tunnel address, nothing else from the tunnel address, and a blackhole for anything forwarded from
+# the TUN, with strict reverse-path filtering on); ping in both directions; a TCP transfer of 8 MiB each way compared by SHA-256; the
 # Rust side roaming to a new UDP port; the peer moving to a new listen port; packets for another
 # address dropped and counted; the peer restarting with the same key; the Rust side restarting,
 # with its rules gone while it is stopped; and, unless
@@ -140,20 +140,22 @@ run_peer() {
   # 2. routing: no route of the main table goes to the TUN, the server's /32 is reached only from
   #    the tunnel address, and packets arriving on the TUN for anything but this host are
   #    blackholed even with forwarding on
-  local rules route_main route_other route_from route_fwd
+  local rules route_main route_other route_from route_lan route_fwd
   rules=$(ip -n "$na" rule show)
   route_main=$(ip -n "$na" route show table main)
   route_other=$(ip -n "$na" route get 10.200.0.3 2>&1)
   route_from=$(ip -n "$na" route get "$B_IP" from "$A_IP" 2>&1)
+  route_lan=$(ip -n "$na" route get "$B_UDP" from "$A_IP" 2>&1)
   ip netns exec "$na" sysctl -qw net.ipv4.ip_forward=1
   route_fwd=$(ip -n "$na" route get "$B_UDP" from "$B_IP" iif wgft-rs0 2>&1)
   ip netns exec "$na" sysctl -qw net.ipv4.ip_forward=0
-  if [[ $rules == *"from $A_IP lookup 51820"* && $rules == *"iif wgft-rs0"*blackhole* \
+  if [[ $rules == *"from $A_IP lookup 5180"* && $rules == *"from $A_IP unreachable"* \
+        && $rules == *"iif wgft-rs0"*blackhole* && $route_lan != *"dev wgi-a"* \
         && $route_main != *wgft-rs0* && $route_other != *wgft-rs0* \
         && $route_from == *"dev wgft-rs0"* && $route_fwd != *"dev wgi-a"* ]]; then
     pass "$kind: routing stays inside the tunnel's own table"
   else
-    fail "$kind: routing; rules [$rules] main [$route_main] other [$route_other] from [$route_from] forwarded [$route_fwd]"
+    fail "$kind: routing; rules [$rules] main [$route_main] other [$route_other] from [$route_from] lan [$route_lan] forwarded [$route_fwd]"
   fi
 
   # 2b. ping both ways
@@ -227,7 +229,7 @@ run_peer() {
   local n0
   n0=$(established_count)
   stop_shell
-  if ip -n "$na" rule show | grep -q 'lookup 51820\|iif wgft-rs0'; then
+  if ip -n "$na" rule show | grep -q "lookup 5180\|from $A_IP\|iif wgft-rs0"; then
     fail "$kind: the stopped shell left its rules: $(ip -n "$na" rule show | tr '\n' ';')"
   else
     pass "$kind: the stopped shell removed its rules"
