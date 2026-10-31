@@ -367,9 +367,60 @@ func TestSourceBucketsLegitimatePeersAndSharedBucket(t *testing.T) {
 	if !r.Allow(g.wrap(stdEndpoint(separate)).DstIP()) {
 		t.Fatal("a peer outside the flooded buckets was throttled")
 	}
-	if r.Allow(g.wrap(stdEndpoint(shared)).DstIP()) {
+	// 洪水は shared と bucket を共有する送信元から送り、確かめるのは shared の包みの DstIP で引く
+	var peers []netip.Addr
+	for i := 0; i < attackers; i++ {
+		if g.wrap(stdEndpoint(fixtureIP(i))).DstIP() == g.wrap(stdEndpoint(shared)).DstIP() {
+			peers = append(peers, fixtureIP(i))
+		}
+	}
+	flood := func(i int) bool { return r.Allow(g.wrap(stdEndpoint(peers[i%len(peers)])).DstIP()) }
+	check := func() bool { return r.Allow(g.wrap(stdEndpoint(shared)).DstIP()) }
+	if !sharedPeerThrottled(t, flood, check) {
 		t.Fatal("a peer sharing a flooded bucket was not throttled; the shared-bucket trade-off changed")
 	}
+}
+
+// limiterPacketCost は wireguard-go の ratelimiter が 1 packet に使う時間(毎秒 20 packet)。バケットは
+// 経過時間の分だけ補充され、残りがこの値を超えるときだけ通す。
+const limiterPacketCost = time.Second / 20
+
+// sharedPeerThrottled は、flood が洪水を送る bucket で check が絞られるかを返す。バケットは時間で補充
+// されるので、答えは洪水からいつ確かめたかで変わる。通らなくなったバケットはちょうど 1 packet 分の
+// 残りで止まり(通すのは 1 packet 分を超えるときだけ)、時計が 15.6 ms 刻みで進む Windows の runner では、
+// 確かめる前に時計が 1 刻み進んだだけで 1 packet 通す。そこで、洪水を続けてバケットがまた 1 packet
+// 通した直後に check を呼ぶ。そのときの残りは、直前の洪水の呼び出しから check までの補充分を超えない。
+// その時間が 1 packet 分の半分より短いと時計で確かめられたときだけ答えにし、長ければやり直す。
+func sharedPeerThrottled(t *testing.T, flood func(int) bool, check func() bool) bool {
+	t.Helper()
+	n := 0
+	for attempt := 0; attempt < 20; attempt++ {
+		// 通らなくなるまで洪水を続け、また 1 packet 通したところで止める。last は最後に通らなかった
+		// 呼び出しの前の時刻
+		var last time.Time
+		for deadline := time.Now().Add(2 * time.Second); ; n++ {
+			at := time.Now()
+			ok := flood(n)
+			if ok && !last.IsZero() {
+				break
+			}
+			if !ok {
+				last = at
+			}
+			if at.After(deadline) {
+				t.Fatal("the flooded bucket did not drain and refill within 2s")
+			}
+		}
+		n++
+		throttled := !check()
+		elapsed := time.Since(last)
+		if elapsed < limiterPacketCost/2 {
+			return throttled
+		}
+		t.Logf("attempt %d: %v from the flood's last refused packet to the check; trying again", attempt, elapsed)
+	}
+	t.Fatal("no attempt checked the shared peer within half a packet's time of the flood")
+	return false
 }
 
 // 2 本の受信と送信を同時に動かす。-race で包みと鍵の共有を確かめる。
