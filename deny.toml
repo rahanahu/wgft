@@ -1,0 +1,44 @@
+# cargo-deny の設定。許可するのは寛容な (permissive) ライセンスだけで、
+# MPL-2.0 と GPL 系は入れない。依存を足して拒否されたら、ここに足す前に依存を見直す。
+
+[graph]
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-unknown-linux-musl",
+  "x86_64-pc-windows-msvc",
+  "aarch64-apple-darwin",
+]
+
+[advisories]
+# RustSec の advisory-db を使う。無視する項目は理由を添えて ignore に書く。
+yanked = "deny"
+ignore = []
+
+[licenses]
+unused-allowed-license = "allow"
+confidence-threshold = 0.93
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "0BSD",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
