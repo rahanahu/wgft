@@ -42,9 +42,10 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 ## マージの前に流すテスト
 
 コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。
-v2 への移行の間、変更が `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、`.github/workflows/ci.yml` のうち Rust のジョブ (`rust-*`) と `changes` の `rust` の振り分けだけを変える変更、ラボが使わない CI 専用の検査スクリプト (`scripts/check-*`)、文書に限られる PR は、ラボの一式を流しません。
+v2 への移行の間、次のものだけを変える PR は、ラボの一式を流しません。
+`crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、文書、ラボが使わない CI 専用の検査スクリプト (`scripts/check-*`)、`.github/workflows/ci.yml` の Rust のジョブ (`rust-*`) と `changes` の `rust` の振り分けです。
 ラボはこれらをビルドも実行もしないためです。
-`lab/`、Go のコード、ラボが流すテスト、`deploy/`、ラボが使うスクリプトを変える PR は、これまでどおり流します。
+`lab/`、ラボが流すテスト、`deploy/`、ラボが使うスクリプトと、上記以外の Go のコードを変える PR は、これまでどおり流します。
 ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、現在は L1 から L20 です。
 1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行して流します。
 この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。
