@@ -153,8 +153,9 @@ type Link struct {
 		seq  uint64
 		wake chan struct{}
 	}
-	stop chan struct{}
-	wg   sync.WaitGroup
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 func NewLink(imp Impair, seed int64, deliverAB, deliverBA func([]byte)) *Link {
@@ -170,9 +171,18 @@ func NewLink(imp Impair, seed int64, deliverAB, deliverBA func([]byte)) *Link {
 	return l
 }
 
-func (l *Link) Close() {
-	close(l.stop)
+// Halt stops the link's delivery and returns once nothing is delivered any more. Packets sent
+// afterwards are counted and traced but never delivered. A rig halts its link before it closes
+// the devices, so no packet reaches a closed device: a closed gVisor client that is handed a
+// packet answers it into its closed queue and panics.
+func (l *Link) Halt() {
+	l.stopOnce.Do(func() { close(l.stop) })
 	l.wg.Wait()
+}
+
+// Close halts the link if it still runs and flushes its packet log.
+func (l *Link) Close() {
+	l.Halt()
 	l.mu.Lock()
 	if l.trace != nil {
 		l.trace.Flush()
