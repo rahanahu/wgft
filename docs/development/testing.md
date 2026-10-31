@@ -42,7 +42,7 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 ## マージの前に流すテスト
 
 コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。
-v2 への移行の間、変更が `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、Rust だけの CI のジョブ、文書に限られる PR は、ラボの一式を流しません。
+v2 への移行の間、変更が `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、`.github/workflows/ci.yml` のうち Rust のジョブ (`rust-*`) と `changes` の `rust` の振り分けだけを変える変更、ラボが使わない CI 専用の検査スクリプト (`scripts/check-*`)、文書に限られる PR は、ラボの一式を流しません。
 ラボはこれらをビルドも実行もしないためです。
 `lab/`、Go のコード、ラボが流すテスト、`deploy/`、ラボが使うスクリプトを変える PR は、これまでどおり流します。
 ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、現在は L1 から L20 です。
@@ -178,7 +178,9 @@ B6 は `build` の契機に加えて、Go のソースファイルの変更で�
 これは前節の表の `build` だけに絞った記述より広い判定です。
 
 Rust のワークスペース (`crates/` 以下) の B13 から B15 は、前節の表の `rust` の契機どおりに絞ります。
-B13 から B15 と Go のジョブは入力を共有しません。Go だけの変更では B13 から B15 を流さず、Rust だけの変更では B4、B5、B6、B8 を流しません。
+B13 から B15 と Go のジョブは入力を共有しません。
+Go だけの変更では B13 から B15 を流しません。
+Rust だけの変更では B4、B5、B6、B8 を流しません。
 ツールチェーンは `rust-toolchain.toml` の固定に従い、CI とホストで同じコンパイラを使います。
 B15 は `cargo deny check` で、ライセンスの許可リスト、RustSec の advisory、重複した版、crates.io 以外の依存元を検査します。
 advisory の検査が `cargo audit` を兼ねるため、`cargo audit` は別に流しません。
