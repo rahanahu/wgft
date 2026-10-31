@@ -21,7 +21,6 @@ import (
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/sockbuf"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgbind"
 	"github.com/rahanahu/wgft/internal/dataplane/userspace/wgipc"
-	"github.com/rahanahu/wgft/internal/nettun"
 )
 
 // Config はサーバ側トンネルの宣言。
@@ -37,7 +36,7 @@ type Config struct {
 type Tunnel struct {
 	cfg  Config
 	dev  *device.Device
-	tnet *nettun.Device
+	tnet netstack
 
 	mu    sync.Mutex
 	peers map[wgtypes.Key]netip.Addr // 宣言済みのピア(SetPeers の差分計算用)
@@ -54,7 +53,7 @@ func New(cfg Config) (*Tunnel, error) {
 	if cfg.MTU <= 0 {
 		cfg.MTU = 1420
 	}
-	tnet, err := nettun.Create(cfg.Address, cfg.MTU)
+	tnet, err := newNetstack(cfg.Address, cfg.MTU)
 	if err != nil {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
