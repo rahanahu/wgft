@@ -111,12 +111,33 @@ VM の間ではホストの CPU、メモリ、ネットワークを分け合う�
 一時的な VM は `WGFT_LAB_TEMPLATE` のスナップショット `clean` の複製で、`WGFT_LAB_TEMPLATE` の既定は `WGFT_LAB_VM` です。
 `lab/lab up` で作った VM があれば足ります。
 複製は CPU とメモリの上限をスナップショットから継ぎ、リポジトリの共有はこの作業ツリーを指します。
+CPU の固定は[VM の CPU の固定](#vm-の-cpu-の固定)に従います。
 スナップショットが無い場合は `lab/lab up` と同じ手順で VM を新規に作るので、遅くなります。
 ビルドはホストで 1 回行い、各 VM にインストールします。
 各 VM の用意がそろってから、すべての shard が同時に `labhost run` を始めます。
 用意に 900 秒を超える VM があれば、その VM を待たずに始めます。
 `--netstack both` は既定の netstack と `wgstack` を同時に流すので、VM の台数は `--vms` の 2 倍です。
 ホストの空きに合わせて、同時に立てる VM は 4 台までを目安にし、`--netstack both` には `--vms 2` を付けます。
+
+### VM の CPU の固定
+
+`WGFT_LAB_CPUS` にホストの CPU の集合を `0-7` や `0-3,8` の形で指定すると、`lab/lab` が作る VM の vCPU を集合の中の CPU に 1 対 1 で固定します。
+ホストの残りの CPU を計測などの別の仕事に空けておく場合に使います。
+対象は `lab/lab up` が新しく作る VM と、`lab suite` の一時的な VM です。
+既にある VM の固定は変えません。
+Incus は動いている VM の固定を変えられないので、固定を変える場合は VM を作り直します。
+vCPU の数は固定しない場合と同じです。
+`lab/lab up` は `WGFT_LAB_CPU` の数の CPU を集合の先頭から取ります。
+`lab suite` は複製のもとのスナップショットの vCPU の数を変えず、各 VM に集合の CPU を先頭から順に重ならないように割り当てます。
+集合の CPU が足りない場合は、VM を作る前に止まります。
+2 vCPU の VM では、`--vms 2 --netstack both` の 4 台が 8 個の CPU を使い、`0-7` に収まります。
+`--vms 3 --netstack both` は 12 個の CPU を使うので、`0-7` では止まります。
+未設定なら固定せず、`limits.cpu` に vCPU の数だけを指定して作ります。
+固定した VM を `WGFT_LAB_CPUS` を指定せずに複製すると、すべての一時的な VM が同じ CPU に固定されるので、`lab suite` はその旨を出します。
+
+```sh
+WGFT_LAB_CPUS=0-7 lab/lab suite --vms 2 --netstack both
+```
 
 ### 割り当て
 
@@ -312,6 +333,7 @@ VM 全体を見る `pkill`、`pgrep`、`pidof` は使いません。
 既定の 2 vCPU / 2 GiB で一式を並列数 8 で実行した記録があります。
 現在の一式の費用は実行時の `metrics.csv` で確認します。
 VM を大きくする場合は `WGFT_LAB_CPU` と `WGFT_LAB_MEM` を指定して新しく作成します。
+vCPU を特定の CPU に固定する場合は、同時に `WGFT_LAB_CPUS` を指定します([VM の CPU の固定](#vm-の-cpu-の固定))。
 実行中の `incus config set` の変更がゲストの `nproc` と `MemTotal` に反映されなかった記録があります。
 
 <a id="確認済み管理用-api-のアクセス経路2026-09-15"></a>
