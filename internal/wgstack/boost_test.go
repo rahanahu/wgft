@@ -40,11 +40,26 @@ func TestBoostOnReceiveDemand(t *testing.T) {
 	if len(calls) != 2 || calls[0] || !calls[1] {
 		t.Fatalf("OnBoost calls %v", calls)
 	}
-	// 広げた窓を知らせる
-	outs := n.drain()
-	if len(outs) == 0 || uint64(outs[len(outs)-1].seg.wnd)<<rcvWindowShft <= recvFloor {
-		t.Fatalf("window not opened beyond the floor: %v", outs)
+	// 予約は 4 MiB にするが、測定が窓の上限を上げるまで広告する窓は floor を超えない(rcvwin.go)
+	for _, o := range n.drain() {
+		if uint64(o.seg.wnd)<<rcvWindowShft > recvFloor {
+			t.Fatalf("window jumped beyond the floor on boost: %v", o)
+		}
 	}
+	if cs.rcvClamp() != recvFloor || cs.advRight > cs.rcv.readOff+recvFloor {
+		t.Fatalf("window clamp %d, edge %d past the floor from %d", cs.rcvClamp(), cs.advRight, cs.rcv.readOff)
+	}
+}
+
+// openWindow は boost の接続の窓の上限と歩みの上限を予約まで上げ、広げた窓を知らせる。窓の広げ方の外を
+// 確かめる試験が使う。
+func openWindow(n *testNet, cs *tcb) {
+	cs.mu.Lock()
+	cs.rcvWant, cs.rcvSsthresh = cs.rcvCap, cs.rcvCap
+	cs.ackNow = true
+	cs.afterInput(int64(n.clk.Now()))
+	cs.mu.Unlock()
+	n.drain()
 }
 
 func TestBoostOnSendDemandKeepsReceiveFloor(t *testing.T) {
@@ -90,6 +105,7 @@ func boostTwo(t *testing.T) (*testNet, *Conn, *peerConn, *Conn, *peerConn) {
 	if !n.d.s.conns[c1.c.id].boosted {
 		t.Fatal("first connection not boosted")
 	}
+	openWindow(n, &n.d.s.conns[c1.c.id])
 	return n, c1, p1, c2, p2
 }
 

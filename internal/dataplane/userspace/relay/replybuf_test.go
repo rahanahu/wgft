@@ -123,6 +123,14 @@ func TestUDPReplySlotsCapConcurrentBorrows(t *testing.T) {
 	if got := gn.inside(); got != 2 {
 		t.Fatalf("replies inside the public send = %d, want exactly the slot count 2", got)
 	}
+	// 待ちの時間が正であることを後で確かめるので、待ちが始まった後に単調時計が進んでから枠を空ける。
+	// Windows の単調時計は timer の割り込みの刻み(既定で 15.6 ms)でしか進まず、1 刻みより短い待ちは
+	// 0 と測られる。acquire は待ちの始まりの時刻を読んでから waits を数えるので、数えた後に読んだ
+	// 時刻は始まりより前にならない
+	waitFor(t, "the third reply's wait to be counted", 3*time.Second, func() bool { return m.replies.waits.Load() == 1 })
+	for began := time.Now(); !time.Now().After(began); {
+		time.Sleep(time.Millisecond)
+	}
 	// 開けると 3 つとも届く
 	close(gn.gate)
 	for i, c := range clients {

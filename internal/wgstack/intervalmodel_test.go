@@ -106,6 +106,7 @@ func checkTree(t *testing.T, b *recvBuf, ctx string) {
 	var prevEnd uint64
 	first := true
 	cnt := 0
+	var held uint64
 	var walk func(k int16, lo, hi uint64, maxPri uint32, depth int)
 	walk = func(k int16, lo, hi uint64, maxPri uint32, depth int) {
 		if k == 0 {
@@ -136,11 +137,15 @@ func checkTree(t *testing.T, b *recvBuf, ctx string) {
 		first = false
 		prevEnd = e
 		cnt++
+		held += e - s
 		walk(x.r, e, hi, x.pri, depth+1)
 	}
 	walk(b.root, 0, ^uint64(0), ^uint32(0), 0)
 	if cnt != b.n {
 		t.Fatalf("%s: tree has %d nodes, n=%d", ctx, cnt, b.n)
+	}
+	if held != b.ooo {
+		t.Fatalf("%s: intervals hold %d bytes, ooo=%d", ctx, held, b.ooo)
 	}
 	// free list
 	nf := 0

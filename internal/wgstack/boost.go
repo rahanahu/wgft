@@ -97,10 +97,7 @@ func (c *tcb) growRecv() {
 	c.rcv.r.resize(boostSize, c.rcv.written())
 	c.rcv.setIntervals(make([]interval, boostIntervals))
 	c.rcvCap = boostSize
-	// 広げた窓を早く知らせる
-	if uint64(c.rcvWindow())*2 <= c.rcvCap {
-		c.ackNow = true
-	}
+	// 広告する窓は一度に開かない。窓の上限は測定で上がり、窓は届いた segment ごとに広がる(rcvwin.go)
 }
 
 // releaseBoost は枠を持っていれば返す。f は呼ばない(閉じた接続の枠を返すときには呼ばない約束)。
@@ -137,6 +134,7 @@ func (c *tcb) demote(now int64) bool {
 	c.rcv.r.resize(recvFloor, c.rcv.written())
 	c.rcv.setIntervals(c.floorIv)
 	c.rcvCap = recvFloor
+	c.rcvSsthresh = min(c.rcvSsthresh, recvFloor)
 	c.recs.resize(c.floorRecs)
 	c.s.boostReclaimed.Add(1)
 	return true
