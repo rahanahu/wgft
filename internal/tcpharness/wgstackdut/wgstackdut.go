@@ -37,6 +37,16 @@ func (s randSource) Read(p []byte) (int, error) { return s.r.Read(p) }
 
 // New builds a Device at addr with the given MTU, a ManualClock and randomness from seed.
 func New(addr netip.Addr, mtu int, seed uint64) (*DUT, error) {
+	return newDUT(addr, mtu, seed, wgstack.BoostOnDemand)
+}
+
+// NewPerformance is New with the boost the measurement plan of wgstack-performance.md gives: both
+// directions' boost when Accept returns the connection, BoostAtAccept.
+func NewPerformance(addr netip.Addr, mtu int, seed uint64) (*DUT, error) {
+	return newDUT(addr, mtu, seed, wgstack.BoostAtAccept)
+}
+
+func newDUT(addr netip.Addr, mtu int, seed uint64, boost wgstack.BoostPolicy) (*DUT, error) {
 	var key [32]byte
 	for i := range 4 {
 		v := seed ^ uint64(i)*0x9e3779b97f4a7c15
@@ -45,7 +55,7 @@ func New(addr netip.Addr, mtu int, seed uint64) (*DUT, error) {
 		}
 	}
 	clk := wgstack.NewManualClock()
-	dev, err := wgstack.New(wgstack.Config{Addr: addr, MTU: mtu, Clock: clk, Rand: randSource{rand.NewChaCha8(key)}})
+	dev, err := wgstack.New(wgstack.Config{Addr: addr, MTU: mtu, Clock: clk, Rand: randSource{rand.NewChaCha8(key)}, TestBoost: boost})
 	if err != nil {
 		return nil, err
 	}
@@ -59,6 +69,14 @@ func Engine(known map[string]tcpharness.Known) tcpharness.Engine {
 		Name: "wgstack",
 		New: func(tb testing.TB, seed uint64) tcpharness.DUT {
 			d, err := New(tcpharness.DUTAddr, tcpharness.MTU, seed)
+			if err != nil {
+				tb.Fatalf("wgstack.New: %v", err)
+			}
+			tb.Cleanup(func() { d.Close() })
+			return d
+		},
+		NewPerformance: func(tb testing.TB, seed uint64) tcpharness.DUT {
+			d, err := NewPerformance(tcpharness.DUTAddr, tcpharness.MTU, seed)
 			if err != nil {
 				tb.Fatalf("wgstack.New: %v", err)
 			}

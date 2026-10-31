@@ -227,11 +227,46 @@ func Engine(known map[string]tcpharness.Known) tcpharness.Engine {
 			tb.Cleanup(func() { d.Close() })
 			return d
 		},
+		NewPerformance: func(tb testing.TB, _ uint64) tcpharness.DUT {
+			d, err := NewPerformance(tcpharness.DUTAddr, tcpharness.MTU)
+			if err != nil {
+				tb.Fatalf("linux DUT: %v", err)
+			}
+			tb.Cleanup(func() { d.Close() })
+			return d
+		},
 		Known: known,
-		// Each scenario starts from the pinned reference and adds its family's settings.
+		// Each scenario starts from the pinned reference and adds its family's settings. A
+		// Performance scenario adds PerformanceSysctls first; the values ReferenceSysctls does not
+		// pin, such as tcp_rmem, go back to what they were when the scenario ends.
 		Prepare: func(tb testing.TB, s tcpharness.Scenario) {
 			if err := PinReference(); err != nil {
 				tb.Fatalf("pinning the reference sysctls: %v", err)
+			}
+			if s.Performance {
+				pinned := map[string]bool{}
+				for _, kv := range ReferenceSysctls {
+					pinned[kv[0]] = true
+				}
+				for _, kv := range PerformanceSysctls {
+					if pinned[kv[0]] {
+						continue
+					}
+					old, err := os.ReadFile("/proc/sys/" + kv[0])
+					if err != nil {
+						tb.Fatalf("reading %s: %v", kv[0], err)
+					}
+					name, value := kv[0], strings.TrimSpace(string(old))
+					tb.Cleanup(func() {
+						if err := writeSysctl(name, value); err != nil {
+							tb.Errorf("restoring %s: %v", name, err)
+						}
+					})
+				}
+				if err := PinPerformance(); err != nil {
+					tb.Fatalf("pinning the performance sysctls: %v", err)
+				}
+				tb.Logf("scenario runs on the performance sysctls, listeners without SO_RCVBUF or SO_SNDBUF")
 			}
 			for _, kv := range s.Linux {
 				if err := writeSysctl(kv[0], kv[1]); err != nil {

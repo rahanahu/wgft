@@ -58,6 +58,10 @@ type Engine struct {
 	// SlowFirst names scenarios a parallel engine starts first because they wait long in real
 	// time, such as for a 30 s timer, so the others run while they wait.
 	SlowFirst []string
+	// NewPerformance, when set, builds the DUT for a Performance scenario: the engine as the
+	// measurement plan of wgstack-performance.md runs it. An engine without it runs such a
+	// scenario on New.
+	NewPerformance func(tb testing.TB, seed uint64) DUT
 }
 
 // Scenario is one engine-neutral conformance scenario.
@@ -70,6 +74,10 @@ type Scenario struct {
 	// this scenario on top of its pinned configuration. A scenario family that checks a mechanism
 	// the pinned configuration switches off, such as RACK-TLP, turns it back on here.
 	Linux [][2]string
+	// Performance runs the scenario on each engine's performance configuration, Engine's
+	// NewPerformance, in place of the pinned conformance one: the reference Linux of the
+	// measurement plan, whose buffers autotune, and wgstack with its boost from the accept.
+	Performance bool
 }
 
 // runSeed is the run's seed: SeedEnv's value, or a random one that the run logs.
@@ -230,7 +238,11 @@ func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
 		if e.Prepare != nil {
 			e.Prepare(rec, s)
 		}
-		d := e.New(rec, seed)
+		build := e.New
+		if s.Performance && e.NewPerformance != nil {
+			build = e.NewPerformance
+		}
+		d := build(rec, seed)
 		_, a.clocked = d.(ClockedDUT)
 		h := newH(rec, e, s.Name, d, seed)
 		a.outcome = h.outcome

@@ -66,6 +66,11 @@ var Scenarios = []Scenario{
 	{Name: "rfc2525-data-after-close", Refs: "RFC 2525 2.16, RFC 9293 3.6", Run: rfc2525DataAfterClose},
 	{Name: "chained-recovery", Refs: "RFC 5681 3.1, RFC 6675 5, RFC 9438 4.6, which allow up to beta x FlightSize; the bound is the reference Linux's, tcp_enter_recovery and tcp_fastretrans_alert", Run: chainedRecovery},
 	{Name: "reorder-wait-recovery", Refs: "RFC 8985 6.2, RFC 5681 3.1, RFC 9438 4.6, which allow up to beta x FlightSize; the bound is the reference Linux's, tcp_enter_recovery", Run: reorderWaitRecovery, Linux: rackLinux},
+	{Name: "rcv-overflow-hold", Refs: ovfRefs, Run: rcvOverflowHold},
+	{Name: "rcv-overflow-read-half", Refs: ovfRefs, Run: rcvOverflowRead(true)},
+	{Name: "rcv-overflow-read-all", Refs: ovfRefs, Run: rcvOverflowRead(false)},
+	{Name: "rcv-overflow-hold-perf", Refs: ovfRefs, Run: rcvOverflowHold, Performance: true},
+	{Name: "rcv-overflow-read-half-perf", Refs: ovfRefs, Run: rcvOverflowRead(true), Performance: true},
 	{Name: "rto-after-burst", Refs: "RFC 5681 3.1, RFC 6298 5; the band is the reference Linux's, tcp_enter_loss", Run: rtoAfterBurst},
 }
 
