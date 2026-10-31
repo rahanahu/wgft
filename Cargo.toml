@@ -6,7 +6,6 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/rahanahu/wgft"
 publish = false
@@ -18,16 +17,18 @@ unreachable_pub = "warn"
 unused_must_use = "deny"
 
 [workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# pedantic のうち、この規模では雑音になるものを個別に外す。cast_* は残す。
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+module_name_repetitions = "allow"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
-print_stdout = "allow"
 undocumented_unsafe_blocks = "deny"
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
-panic = "abort"
-strip = "symbols"
+# 局所的な許可は #[expect(..., reason = "...")] で理由を書く。
+allow_attributes_without_reason = "deny"
