@@ -67,7 +67,7 @@ func finPassiveClose(h *H) {
 	s, quiet, stale, timedOut := p.QuietSince(500*time.Millisecond, ackTS, f, fAt, c)
 	quietGot := segDesc(s, !quiet)
 	if timedOut {
-		quietGot = "no segment, and Delivered not reported within 3 s of the ACK"
+		quietGot = fmt.Sprintf("no segment, and Delivered not reported within %v of the ACK", settleBudget)
 	}
 	h.Check("closed.quiet", quiet, "nothing follows the ACK of the DUT's FIN", quietGot)
 	h.Measure("resent-before-the-ack", stale)

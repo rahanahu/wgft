@@ -209,6 +209,16 @@ func Record(t *testing.T, e Engine, s Scenario, seed uint64) map[string][]string
 	return a.outcome
 }
 
+// RecordFailures is Record, and it also returns the recorded failure messages, which name each
+// failed check's observation, so a teeth test can tell why a check failed.
+func RecordFailures(t *testing.T, e Engine, s Scenario, seed uint64) (map[string][]string, []string) {
+	a := attempt(t, e, s, seed)
+	if a.outcome == nil {
+		t.Fatalf("scenario %s did not start: %v", s.Name, a.msgs)
+	}
+	return a.outcome, a.msgs
+}
+
 // stallLimit and scenarioAttempts are Run's rule for running a failed scenario again. 10 ms is
 // below the margin every timed check leaves a correct DUT, and above the few milliseconds an idle
 // machine's scheduler takes.

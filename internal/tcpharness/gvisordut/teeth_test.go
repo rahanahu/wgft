@@ -2,6 +2,7 @@ package gvisordut
 
 import (
 	"encoding/binary"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -297,19 +298,25 @@ func TestHarnessPassesOverAFINSentBeforeTheAck(t *testing.T) {
 }
 
 // dropFinalAck drops the testbench's pure ACK of the engine's FIN, so the engine stays in LAST-ACK
-// and resends its FIN, each time echoing the TSval it had before. With holdData set, it also holds
-// the testbench's pure ACK of the engine's last data segment that long before the engine sees it,
-// as a loaded machine that processes the ACK late does: the FIN then goes out with that data
-// still unacknowledged, its first resend is a probe that comes at once, and the next one comes
-// only after a further probe timeout and RTO.
+// and resends its FIN, each time echoing the TSval it had before. From the engine's first resend
+// after a drop on, it also repeats that resend every repeatEvery, as an engine that keeps resending
+// without the ACK does: gVisor's own next resend can come seconds later on a loaded runner (over
+// 3.5 s once on the Windows runner), and the tests below need a resend to judge. With holdData set,
+// it also holds the testbench's pure ACK of the engine's last data segment that long before the
+// engine sees it, as a loaded machine that processes the ACK late does: the FIN then goes out with
+// that data still unacknowledged, and its first resend is a probe that comes at once.
 type dropFinalAck struct {
 	tcpharness.DUT
-	holdData time.Duration
-	mu       sync.Mutex
-	fin      uint32 // the sequence number after the engine's FIN, once it has sent one
-	seen     bool
-	dataEnd  uint32 // the sequence number after the engine's latest data segment
-	out      chan []byte
+	holdData    time.Duration
+	repeatEvery time.Duration
+	mu          sync.Mutex
+	fin         uint32 // the sequence number after the engine's FIN, once it has sent one
+	seen        bool
+	dropped     bool   // an ACK of the FIN was dropped
+	repeating   bool   // the engine's first resend after a drop is being repeated
+	closed      bool   // out is closed
+	dataEnd     uint32 // the sequence number after the engine's latest data segment
+	out         chan []byte
 }
 
 func (d *dropFinalAck) Emitted() <-chan []byte { return d.out }
@@ -318,6 +325,7 @@ func (d *dropFinalAck) Inject(pkt []byte) error {
 	if s, err := tcpharness.Parse(pkt); err == nil && s.Flags == tcpharness.FlagACK && len(s.Payload) == 0 {
 		d.mu.Lock()
 		drop := d.seen && s.Ack == d.fin
+		d.dropped = d.dropped || drop
 		hold := d.holdData > 0 && !d.seen && d.dataEnd != 0 && s.Ack == d.dataEnd
 		d.mu.Unlock()
 		if drop {
@@ -331,12 +339,36 @@ func (d *dropFinalAck) Inject(pkt []byte) error {
 	return d.DUT.Inject(pkt)
 }
 
-func dropAckOfFIN(inner tcpharness.DUT) tcpharness.DUT { return dropAckOfFINHolding(inner, 0) }
+// repeat sends pkt every repeatEvery until out closes.
+func (d *dropFinalAck) repeat(pkt []byte) {
+	for {
+		time.Sleep(d.repeatEvery)
+		d.mu.Lock()
+		if d.closed {
+			d.mu.Unlock()
+			return
+		}
+		select {
+		case d.out <- pkt:
+		default:
+		}
+		d.mu.Unlock()
+	}
+}
 
-func dropAckOfFINHolding(inner tcpharness.DUT, holdData time.Duration) tcpharness.DUT {
-	d := &dropFinalAck{DUT: inner, holdData: holdData, out: make(chan []byte, 1024)}
+func dropAckOfFIN(inner tcpharness.DUT) tcpharness.DUT {
+	return dropAckOfFINHolding(inner, 0, 100*time.Millisecond)
+}
+
+func dropAckOfFINHolding(inner tcpharness.DUT, holdData, repeatEvery time.Duration) tcpharness.DUT {
+	d := &dropFinalAck{DUT: inner, holdData: holdData, repeatEvery: repeatEvery, out: make(chan []byte, 1024)}
 	go func() {
-		defer close(d.out)
+		defer func() {
+			d.mu.Lock()
+			d.closed = true
+			close(d.out)
+			d.mu.Unlock()
+		}()
 		for pkt := range inner.Emitted() {
 			if s, err := tcpharness.Parse(pkt); err == nil {
 				d.mu.Lock()
@@ -344,6 +376,10 @@ func dropAckOfFINHolding(inner tcpharness.DUT, holdData time.Duration) tcpharnes
 					d.dataEnd = s.Seq + uint32(len(s.Payload))
 				}
 				if s.Has(tcpharness.FlagFIN) {
+					if d.dropped && !d.repeating && d.fin == s.Seq+s.Len() {
+						d.repeating = true
+						go d.repeat(append([]byte(nil), pkt...))
+					}
 					d.fin, d.seen = s.Seq+s.Len(), true
 				}
 				d.mu.Unlock()
@@ -354,21 +390,43 @@ func dropAckOfFINHolding(inner tcpharness.DUT, holdData time.Duration) tcpharnes
 	return d
 }
 
+// The two tests below need closed.quiet to fail on a resend, not on the end of the wait for
+// Delivered, which a DUT that lost the ACK reaches whatever it sends.
 func TestHarnessCatchesFINResentAfterADroppedAck(t *testing.T) {
 	t.Parallel()
-	got := tcpharness.Record(t, mutant("gvisor-drops-final-ack", dropAckOfFIN), scenario(t, "fin-passive-close"), 1)
+	got, failures := tcpharness.RecordFailures(t, mutant("gvisor-drops-final-ack", dropAckOfFIN), scenario(t, "fin-passive-close"), 1)
 	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
+	wantObserved(t, failures, "fin-passive-close/closed.quiet", "got: FIN|ACK")
 }
 
 // The engine has the ACK of the CLOSE-WAIT data only 100 ms after its FIN went out, and drops the
 // ACK of the FIN. Its first resend is a probe sent before it had the ACK, which the scenario
-// passes over; its next resend comes about 520 ms after that, past the quiet interval, so the
-// scenario catches it only by waiting until the engine has the ACK before the interval starts.
+// passes over; gVisor's own next resend comes about 520 ms after that, and the repeat 700 ms
+// after it, both past the 500 ms quiet interval. The scenario catches the resend because it
+// waits for the engine to report the ACK before the interval starts, and a resend in that wait
+// fails the check; the observation must be that resend, not the end of the wait.
 func TestHarnessCatchesFINResentAfterADroppedAckWhenTheDataAckIsLate(t *testing.T) {
 	t.Parallel()
-	late := func(d tcpharness.DUT) tcpharness.DUT { return dropAckOfFINHolding(d, 100*time.Millisecond) }
-	got := tcpharness.Record(t, mutant("gvisor-late-data-ack-drops-final-ack", late), scenario(t, "fin-passive-close"), 1)
+	late := func(d tcpharness.DUT) tcpharness.DUT {
+		return dropAckOfFINHolding(d, 100*time.Millisecond, 700*time.Millisecond)
+	}
+	got, failures := tcpharness.RecordFailures(t, mutant("gvisor-late-data-ack-drops-final-ack", late), scenario(t, "fin-passive-close"), 1)
 	wantOutcome(t, got, "fin-passive-close/closed.quiet", tcpharness.OutcomeFail)
+	wantObserved(t, failures, "fin-passive-close/closed.quiet", "got: FIN|ACK")
+}
+
+// wantObserved requires the recorded failure of check key to name the observation want.
+func wantObserved(t *testing.T, failures []string, key, want string) {
+	t.Helper()
+	for _, f := range failures {
+		if strings.Contains(f, " "+key+" ") || strings.Contains(f, " "+key+":") {
+			if !strings.Contains(f, want) {
+				t.Errorf("%s failed for another reason: %q, want an observation %q", key, f, want)
+			}
+			return
+		}
+	}
+	t.Errorf("%s: no recorded failure; failures: %q", key, failures)
 }
 
 // earlyResend resends the engine's lowest unacknowledged data segment the moment the n-th
