@@ -44,10 +44,15 @@ func (l limits) conns() int { return l.maxFlows + l.acceptQ } // N_c = K + Q
 
 // stack は決定的な核。goroutine を作らず、時計と乱数を直接読まない。操作は「packet と時刻を受けて
 // 状態を変え、出力を返す」(input と poll)、「時刻を受けてタイマーを進める」(advance)、アプリケーションの
-// 操作(conn.go と listener.go)の 3 種類だけである。例外は 2 つある。boost の回収は、別の Device の接続の
-// 需要を確かめるとき、その接続の Device の時計(clock)を読む。送信の向きのバッチの印の鍵(sendLedger.key)は、
-// 作成の時に Config.Rand ではなく crypto/rand から読む。鍵は秘密で、再現する必要が無いためである。ほかの乱数
-// (ISN と timestamp の鍵、表の hash の種、challenge ACK の揺らぎ、区間の木の優先度の種)は Config.Rand から作る。
+// 操作(conn.go と listener.go)の 3 種類だけである。例外は次の 3 つである。
+//
+//   - boost の回収は、別の Device の接続の需要を確かめるとき、その接続の Device の時計(clock)を読む
+//   - アプリケーションの読み書きの期限(conn.go の deadline)は壁時計で測る
+//   - 送信の向きのバッチの印の鍵(sendLedger.key)は、作成の時に Config.Rand ではなく crypto/rand から読む。
+//     鍵は秘密で、再現する必要が無いためである
+//
+// ほかの乱数(ISN と timestamp の鍵、表の hash の種、challenge ACK の揺らぎ、区間の木の優先度の種、IP の ID の
+// 始めの値)は Config.Rand から作る。
 //
 // 錠は次の順で取り、後の錠を持ったまま前の錠を取らない。末端の錠は中で錠を取らない。
 //
@@ -64,6 +69,14 @@ func (l limits) conns() int { return l.maxFlows + l.acceptQ } // N_c = K + Q
 //   - ping.mu:echo の endpoint の表。中で deadline.mu を取る
 //   - 末端:output.mu、wheel.mu、chunkPool.mu、rngMu、icmpMu、gate.mu、deadline.mu。再組み立ての表
 //     (ipv4frag.Table)の錠はその package の中で閉じ、wgstack を呼び返さない
+//
+// boostPool はプロセスで 1 つなので、TryLock で取る保有者は別の Device の接続のことがある。
+//
+// 錠の中で、wgstack の外のコードを呼ぶところがある。どれも待たずに戻り、Device を呼び返してはいけない。
+//
+//   - 時計(Config.Clock の Now):readMu の中(Read と Poll)、tcb.mu の中(tryBoost、Accept、Conn の Read、
+//     Write、Close など)、boost の回収で別の Device の接続の tcb.mu の中で読む。ManualClock の錠は末端の錠である
+//   - Config.Trace と OnBoost で登録した関数:tcb.mu の中で呼ぶ
 //
 // ある接続の処理が別の接続に触れるとき(boost の回収)は、自分の錠を離してから相手の錠を TryLock で取る。
 // 錠を持たずに atomic で使う値は、counters、ipID、sleepUntil、fragNextSweep と、台帳のうち Send を見る層と

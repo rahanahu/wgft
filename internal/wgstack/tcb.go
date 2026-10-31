@@ -457,7 +457,8 @@ func (c *tcb) sendRST() {
 	c.s.sendCtl(tcpHeader{tup: c.tup, seq: c.sndNxt, ack: c.rcvNxt, flags: flagRST | flagACK})
 }
 
-// 枠の資源の返し方(I3、I6)。どの関数も mu を持って呼ぶ。
+// 枠の資源の返し方(I3、I6)。stack.close のほかは mu を持って呼ぶ。stack.close は枠ごとに mu を自分で取る。
+// freeSlotLocked と unindexLocked は tmu も持って呼ぶ。
 //
 //   - toClosed:プロトコルを終えた接続(CLOSED)。タイマー、出力の節、送る予定の印、送信の輪、順序外の区間と
 //     その中身、4 つ組の hash の表の項、accept の待ち行列の節を返す。未読のデータを持つ受信の輪、boost の枠、
@@ -467,7 +468,8 @@ func (c *tcb) sendRST() {
 //     記録の輪と区間の表を枠と共に持つ floor のものに戻す
 //   - release:dropResources の後に、表の錠の中で 4 つ組の hash の表の項を外して枠を返す
 //   - tryRetire:dropResources の後に、表の錠の中で TIME_WAIT の表の行に移して枠を返す。閉じた Device では
-//     行を作らない
+//     行を作らず、4 つ組の hash の表の項も外さないので、枠を返した後も inIndex は真のまま残る。アプリケーションの
+//     Close と Device の Close が競ったときだけ起き、閉じた Device はその表をもう引かないので害は無い
 //   - freeSlotLocked:表の錠の中で、accept の待ち行列の節を外し、世代を進め、通知の channel を閉じ、欄を 0 に
 //     戻して空きの list に返す。閉じた Device では floor の配列も手放す
 //   - stack.close:閉じた Device のすべての枠を release し、floor の配列と記録の輪を手放す

@@ -6,7 +6,7 @@ func seqLE(a, b uint32) bool { return int32(a-b) <= 0 }
 func seqGT(a, b uint32) bool { return int32(a-b) > 0 }
 func seqGE(a, b uint32) bool { return int32(a-b) >= 0 }
 
-// seqMax は a と b の後ろの方を返す。
+// seqMin は a と b の前の方を返す。
 func seqMin(a, b uint32) uint32 {
 	if seqLT(a, b) {
 		return a
@@ -14,6 +14,7 @@ func seqMin(a, b uint32) uint32 {
 	return b
 }
 
+// seqMax は a と b の後ろの方を返す。
 func seqMax(a, b uint32) uint32 {
 	if seqGT(a, b) {
 		return a
