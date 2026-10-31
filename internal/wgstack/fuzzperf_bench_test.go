@@ -1,6 +1,9 @@
 package wgstack
 
-import "testing"
+import (
+	"math/rand/v2"
+	"testing"
+)
 
 var fuzzCoreSeeds = [][]byte{
 	{0, 1, 3, 0, 1, 1, 0, 2, 5, 3, 1, 4, 2, 9, 3, 2, 1, 5, 6, 7},
@@ -48,4 +51,23 @@ func BenchmarkFuzzCore(b *testing.B) {
 			i++
 		}
 	})
+}
+
+// BenchmarkFuzzCoreLong は固定の乱数で作った長い入力(500 step 前後)で本体を流す。fuzz が育てた後の入力に近い。
+func BenchmarkFuzzCoreLong(b *testing.B) {
+	b.ReportAllocs()
+	r := rand.New(rand.NewPCG(1, 2))
+	progs := make([][]byte, 16)
+	for i := range progs {
+		p := make([]byte, 600+r.IntN(400))
+		for j := range p {
+			p[j] = byte(r.IntN(256))
+		}
+		progs[i] = p
+	}
+	b.ResetTimer()
+	o := &opTB{TB: b}
+	for i := 0; i < b.N; i++ {
+		o.run(append([]byte(nil), progs[i%len(progs)]...))
+	}
 }
