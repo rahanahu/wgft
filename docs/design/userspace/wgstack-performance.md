@@ -404,6 +404,9 @@ wgstack との違いと適合の場面は、決定ではなく計画と未確認
 #### 参照のカーネル
 
 参照は、ラボの VM のカーネルの Debian の 6.1.0-53 の TCP の受け手です。
+この節の挙動は 6.1 から導きました。
+ラボの参照の Linux は、2026-11-01 から Debian の 7.2.11 です([参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定))。
+7.2 で変わった受け手の挙動のうち適合の台本で見えたもの(v6.6 の窓の換算、v6.10 の最初の窓、v6.16 の自動調整)は、[受信のバッファの溢れ](wgstack-verification.md#受信のバッファの溢れ)と[受信の窓の開き方](wgstack-verification.md#受信の窓の開き方)の結果と、[Linux との一致を確かめていない選択](wgstack.md#linux-との一致を確かめていない選択)の握手の後の窓に記録しています。
 基の版は mainline の `v6.1` のタグで、Debian の bookworm の changelog では 6.1.0-38 が 6.1.147-1 なので、6.1.0-53 は `v6.1` の後の次の修正を含みます。
 
 - `tcp: fix quick-ack counting to count actual ACKs of new data`(Debian 6.1.64-1 から):quickack の残りの減らし方が変わります(後述)
@@ -415,7 +418,8 @@ wgstack との違いと適合の場面は、決定ではなく計画と未確認
 - `tcp: fix tcp_ofo_queue() to avoid including too much DUP SACK range`(6.1.148-1 から):順序外のデータを順序どおりにする時の D-SACK の範囲を重なりだけにします
 
 VM で確かめるには、`uname -v` で Debian の package の版を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` を上の件名で探します。
-上の Debian の版は bookworm の changelog の値で、VM の上ではまだ確かめていません。
+上の Debian の版は bookworm の changelog の値です。
+VM の changelog では、受け手の RTT の推定の最小の取り方と自動調整の最初の値の 2 つを確かめ、ほかはまだ確かめていません。
 
 値は、性能の参照の Linux(`linuxdut.PinPerformance`)が既定のまま使う sysctl の値です。
 関わる値は `tcp_dsack=1`、`tcp_comp_sack_nr=44`、`tcp_comp_sack_delay_ns=1000000`(1 ms)、`tcp_comp_sack_slack_ns=100000`(100 µs)、`tcp_adv_win_scale=1`、`tcp_app_win=31`、`tcp_shrink_window=0`、`tcp_invalid_ratelimit=500`(ms)、`tcp_moderate_rcvbuf=1`、`tcp_rmem` の 3 つ目の値(性能の参照では 4 MiB)です。
@@ -1294,7 +1298,7 @@ stream の一致の試験も、SACK を交渉する相手と並べ替える相�
   違い 1 は、`rcv-window-pacing` の台本の確かめる範囲で Linux と同じく通りました([受信の窓の開き方](wgstack-verification.md#受信の窓の開き方))。
   違い 3 は受け入れた差です。
   読み終えた時の ACK が順序外のデータを数えるかと、違い 2 と 4 と、rcv_ssthresh を広げた segment ごとの quickack を入れるかは、Linux と比べる台本が無く未確認です。
-  ラボの 6.1.0-53 が含む `v6.1` の後の修正は、Debian の changelog の値で、VM の上ではまだ確かめていません
+  この仕様の基にした 6.1.0-53 が含む `v6.1` の後の修正は、Debian の changelog の値で、VM の上では 2 つだけを確かめました([参照のカーネル](#参照のカーネル))
 - 受け手の RTT の推定の初期:timestamp を持たない相手では、推定が出来るまで読んだ量の区間を始め直さないので、最初の測定は最初の読み取りからの全量を MSS の 10 倍と比べます。
   窓の上限は最初の測定で予約まで届きえます(試験では 256 KiB から 4 MiB)。
   Linux の挙動に合わせ、予約の内側なので保持の上界は守られますが、この相手では窓の上限が窓を抑えにくいことを確かめる測定はまだありません
