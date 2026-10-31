@@ -12,9 +12,15 @@ const rwMSS = testMTU - 40 - 12 // timestamp を使う接続の中身の大き�
 // rwBoosted は timestamp と、sack が真なら SACK を許した接続を開き、受信の向きの boost を得させる。
 func rwBoosted(t *testing.T, sack bool) (*testNet, *Conn, *peerConn, *tcb) {
 	t.Helper()
+	return rwBoostedTS(t, sack, true)
+}
+
+// rwBoostedTS は rwBoosted の timestamp を選べる版である。
+func rwBoostedTS(t *testing.T, sack, ts bool) (*testNet, *Conn, *peerConn, *tcb) {
+	t.Helper()
 	n := newTestNet(t, smallLimits())
 	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, sack, true)
+	p := n.handshake(40000, 80, ts, sack, true)
 	c := acceptOne(t, l)
 	p.sendBulk(demandBytes)
 	readN(t, c, demandBytes)
@@ -57,7 +63,17 @@ func rwCheck(t *testing.T, cs *tcb, prev uint64, ctx string) uint64 {
 // TestRecvWindowClampFollowsMeasuredReads は、窓の上限が受け手の RTT ごとに読んだ量が増えたときだけ上がり、
 // 読む量が増えなければ上がらず、測定で下がらないことを確かめる。相手は広告された窓の内側だけを送る。
 func TestRecvWindowClampFollowsMeasuredReads(t *testing.T) {
-	n, c, p, cs := rwBoosted(t, false)
+	t.Run("timestamps", func(t *testing.T) { recvClampFollowsReads(t, true) })
+	// timestamp を持たない相手(多くの Windows)は窓による標本だけで受け手の RTT を得る
+	t.Run("no-timestamps", func(t *testing.T) { recvClampFollowsReads(t, false) })
+}
+
+func recvClampFollowsReads(t *testing.T, ts bool) {
+	n, c, p, cs := rwBoostedTS(t, false, ts)
+	mss := rwMSS
+	if !ts {
+		mss = testMTU - 40
+	}
 	if cs.rcvClamp() != recvFloor {
 		t.Fatalf("clamp %d right after the boost", cs.rcvClamp())
 	}
@@ -71,7 +87,7 @@ func TestRecvWindowClampFollowsMeasuredReads(t *testing.T) {
 	for round, chunk := range chunks {
 		n.advance(50 * time.Millisecond)
 		for sent := 0; sent < chunk; {
-			k := min(chunk-sent, rwMSS, int(cs.advRight-cs.rcv.nxtOff))
+			k := min(chunk-sent, mss, int(cs.advRight-cs.rcv.nxtOff))
 			if k <= 0 {
 				t.Fatalf("round %d: window closed with the reader keeping up", round)
 			}
@@ -220,7 +236,9 @@ func TestRecvSsthreshStep(t *testing.T) {
 }
 
 // TestRecvWindowHeldOutOfOrder は、保持する順序外のデータが空きを減らし、歩みの上限が届いている間は重複した
-// ACK の右端と窓の欄が変わらないこと、穴を埋めても読むまで右端が進まないこと、読んだ後に進むことを確かめる。
+// ACK の右端と窓の欄が変わらないこと、穴を埋めても読むまで右端が進まないこと、読んだ後に進むことを確かめる。ここで確かめるのはこの状態だけである。順序外の
+// segment が多く、歩みの上限が大きい接続では、穴を埋めた segment で右端が読み取りなしに大きく進みうる(空きの
+// 式のとおり)。
 func TestRecvWindowHeldOutOfOrder(t *testing.T) {
 	n, c, p, cs := rwBoosted(t, true)
 	cs.rcvWant, cs.rcvSsthresh = recvFloor+64<<10, recvFloor+64<<10 // 歩みの上限が上限に届いた状態
