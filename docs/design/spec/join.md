@@ -92,7 +92,7 @@ agent は応答の本文を最大 4096 byte 読みます。
   `address` はトンネルのアドレスで、帯の長さを付けずに書きます
 - 誤りの本文:server は Go の `http.Error` で書くので、`Content-Type` は `text/plain; charset=utf-8` で、末尾に改行が付きます。
   agent は誤りの文言に、前後の空白を除いた本文を入れます
-- 終了コード 3 の拒否:拒否の文言の形と終了コードは cli-config.md (未作成、cli-config.md) にあります
+- 終了コード 3 の拒否:拒否の文言の形と終了コードは [cli-config.md](cli-config.md) にあります
 
 server は登録と stream の要求を、送信元の IP アドレスごとに毎秒 1 回、溜めて 5 回までに制限し、超えた要求に 429 を返します。
 IPv4 はアドレスで数え、IPv6 は /64 で数えます。
@@ -112,7 +112,7 @@ agent は登録に成功した時点で `agent.json` を書き換えます。
 | `used_join_token_sha256` | トークンの UTF-8 の byte の SHA-256 を小文字の 16 進 64 桁にした値 |
 | `tunnel_address` | 応答の `address` が IPv4 のアドレスならその値、IPv4 の CIDR ならその値、どちらでもなければ空 |
 
-各キーの意味は credentials.md (未作成、credentials.md) にあります。
+各キーの意味は [credentials.md](credentials.md) にあります。
 
 ### 登録をするかどうかの判定
 

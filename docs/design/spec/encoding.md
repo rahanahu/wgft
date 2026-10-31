@@ -4,7 +4,7 @@ agent と server の間の JSON と `agent.json` は、Go の `encoding/json` �
 正しい相手どうしでは、どの JSON の実装でも同じ値になります。
 壊れた入力と境界の値では、Go の `encoding/json` の性質が振る舞いを決めます。
 この文書はその性質と、Go 以外の実装が同じ結果を出すために要ることを定めます。
-`wire` は stream のメッセージと登録の要求と応答を指し、`agent.json` は認証情報 (未作成、credentials.md)を指します。
+`wire` は stream のメッセージと登録の要求と応答を指し、`agent.json` は[認証情報](credentials.md)を指します。
 
 ## 書く側の規則
 
