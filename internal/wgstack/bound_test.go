@@ -426,6 +426,7 @@ func boostFull(t *testing.T, n *testNet, l *TCPListener, port uint16) (*Conn, *p
 	c := nc.(*Conn)
 	p.sendBulk(demandBytes)
 	readN(t, c, demandBytes)
+	openWindow(n, &n.d.s.conns[c.c.id])
 	p.absorb(n.drain())
 	p.wnd = 0
 	p.ack(nil)

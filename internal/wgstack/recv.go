@@ -15,6 +15,7 @@ type recvBuf struct {
 	nxtOff  uint64 // 次に順序どおりに受ける byte(RCV.NXT)
 	iv      []interval
 	n       int    // 使っている区間の数
+	ooo     uint64 // 区間が持つ順序外の byte の合計
 	root    int16  // 木の根の節。節の番号は iv の位置 + 1 で、0 は無し
 	free    int16  // 空きの節の list の頭
 	used    int16  // iv のうち一度でも節に使った数
@@ -73,7 +74,7 @@ func (b *recvBuf) setIntervals(iv []interval) bool {
 
 // clearIntervals は順序外の区間をすべて捨て、木と節の置き場と最近の区間を空にする。
 func (b *recvBuf) clearIntervals() {
-	b.n, b.root, b.free, b.used, b.nrecent = 0, 0, 0, 0, 0
+	b.n, b.root, b.free, b.used, b.nrecent, b.ooo = 0, 0, 0, 0, 0, 0
 }
 
 // alloc は節を 1 つ取り、区間 [s, e) を入れて返す。空きが無ければ 0 を返す。
@@ -101,12 +102,13 @@ func splitmix64(x uint64) uint64 {
 	return x ^ (x >> 31)
 }
 
-// release は木 t の節をすべて空きに返し、その数を返す。
+// release は木 t の節をすべて空きに返し、その数を返す。返した区間の byte を順序外の byte の合計から引く。
 func (b *recvBuf) release(t int16) int {
 	if t == 0 {
 		return 0
 	}
 	x := b.node(t)
+	b.ooo -= uint64(x.end - x.start)
 	l, r := x.l, x.r
 	x.l, x.r = b.free, 0
 	b.free = t
@@ -306,6 +308,7 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 			return res
 		}
 		b.n++
+		b.ooo += end - off
 		b.root = b.merge(b.merge(l, k), r)
 		b.touchRecent(off, end)
 	} else {
@@ -325,6 +328,7 @@ func (b *recvBuf) insert(off uint64, data []byte, limit uint64) insertResult {
 		b.n -= b.release(m)
 		k := b.alloc(ns, ne) // 返したばかりの節があるので取れる
 		b.n++
+		b.ooo += ne - ns
 		b.root = b.merge(b.merge(l, k), r)
 		b.touchRecent(ns, ne)
 	}
