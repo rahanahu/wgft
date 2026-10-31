@@ -590,12 +590,8 @@ func (c *tcb) processAck(seg *segment, now int64) {
 		c.noteDrainedWithData(now)
 	}
 	if c.sndWnd > 0 && c.persist {
-		c.persist = false
-		c.backoff = 0
 		c.clearRetransTimers()
-		if c.sndUna != c.sndMax {
-			c.setRTO(now + c.curRTO())
-		}
+		c.leavePersist(now)
 	}
 	if c.s.trace != nil {
 		c.traceEvent(TraceAck, now)
@@ -837,8 +833,7 @@ func (c *tcb) enterTimeWait(now int64) {
 	c.clearRetransTimers()
 	// TIME_WAIT の接続は ACK だけを送る。送り残しの probe と再送の印を残すと、build が何も作らないのに
 	// wantOutput が送るものがあると答え続ける
-	c.tlpProbe, c.tlpActive, c.tlpRetrans = false, false, false
-	c.fastRtx, c.probePending = false, false
+	c.cancelSends()
 	c.arm(tmrClose, now+int64(twTimeout))
 }
 
@@ -884,15 +879,36 @@ func (c *tcb) afterInput(now int64) {
 	// 窓が 0 で送るものがあり、確認を待つものが無ければ窓の probe を張る
 	// 送り残しの量が 0 の間だけ張る。RTO の後に失われた記録だけが残る間は、送り直しを待つ記録も送るものに数える
 	if c.sndWnd == 0 && !c.persist && c.pipe() == 0 && c.hasUnsent() && c.state != stClosed {
-		// 確認を待つものが無いので、前の RTO の起点と後退を持ち越さない。持ち越すと、相手が probe に
-		// 応え続けた長い persist の後の最初の RTO で、再送の打ち切りの時間を過ぎたと数える
-		c.clearRetransTimers()
-		c.tlpActive, c.tlpProbe, c.tlpRetrans = false, false, false
-		c.persist = true
-		c.retransStart = 0
-		c.backoff = 0
-		c.arm(tmrRetrans, now+c.curRTO())
+		c.enterPersist(now)
 	}
+}
+
+// enterPersist は再送のタイマーの節を窓の probe に使い始める。RTO、並べ替え、TLP の期限と TLP の probe の
+// 印を消す。確認を待つものが無いので、前の RTO の起点と後退を持ち越さない。持ち越すと、相手が probe に
+// 応え続けた長い persist の後の最初の RTO で、再送の打ち切りの時間を過ぎたと数える。
+func (c *tcb) enterPersist(now int64) {
+	c.clearRetransTimers()
+	c.cancelTLP()
+	c.persist = true
+	c.retransStart = 0
+	c.backoff = 0
+	c.arm(tmrRetrans, now+c.curRTO())
+}
+
+// leavePersist は窓の probe を終え、確認を待つデータがあれば RTO を今から張る。再送のタイマーの節の古い
+// 期限を消すかは呼び出し側が決める。
+func (c *tcb) leavePersist(now int64) {
+	c.persist = false
+	c.backoff = 0
+	if c.sndUna != c.sndMax {
+		c.setRTO(now + c.curRTO())
+	}
+}
+
+// cancelSends は送る予定の高速の再送、窓の probe、TLP の probe と、確認を待つ TLP の probe の印を消す。
+func (c *tcb) cancelSends() {
+	c.cancelTLP()
+	c.fastRtx, c.probePending = false, false
 }
 
 // hasUnsent は、未送信のデータか未送信の FIN か、送り直しを待つ失われた記録があるかを返す。
@@ -960,8 +976,8 @@ func (c *tcb) toClosed(err error) {
 		c.disarm(k)
 	}
 	c.s.out.unqueueConn(c.id)
-	c.fastRtx, c.probePending, c.ackNow = false, false, false
-	c.tlpProbe, c.tlpActive, c.tlpRetrans = false, false, false
+	c.cancelSends()
+	c.ackNow = false
 	// 送信の輪はもう使わない。受信の未読のデータは読ませるために残し、順序外のデータは捨てる
 	c.snd.release()
 	c.unaOff = c.tailOff
@@ -1105,14 +1121,14 @@ func (c *tcb) onRTO(now int64) {
 	}
 	mss := uint32(c.segMSS())
 	frto := c.frtoEligible() && !reneged // 取り消した SACK の記録は損失にして送り直す
-	if !c.inRecovery && c.backoff == 0 {
-		c.initUndo()
-	}
-	if c.backoff > 0 {
-		c.frto = 0
-	}
 	if c.backoff == 0 {
+		// 最初の RTO が輻輳の事象として ssthresh を下げる。続く RTO は ssthresh を下げ直さず、F-RTO を終える
+		if !c.inRecovery {
+			c.initUndo()
+		}
 		c.ssthresh = c.lossThresh()
+	} else {
+		c.frto = 0
 	}
 	c.fastRtx = false // RTO の規則が SND.UNA から送り直すので、待っている高速の再送で先頭を 2 度送らない
 	c.ccFor().onRTO(c)
@@ -1131,7 +1147,7 @@ func (c *tcb) onRTO(now int64) {
 		c.markAllLost(rtxRTO)
 	}
 	c.reoAt, c.tlpAt = 0, 0
-	c.tlpActive, c.tlpProbe, c.tlpRetrans = false, false, false
+	c.cancelTLP()
 	c.setRTO(now + c.curRTO())
 	if c.s.trace != nil {
 		c.traceEvent(TraceRTO, now)
@@ -1141,11 +1157,7 @@ func (c *tcb) onRTO(now int64) {
 // onPersist は窓の probe のタイマーの期限。相手が probe に応える間は打ち切らない。
 func (c *tcb) onPersist(now int64) {
 	if c.sndWnd != 0 || !c.hasUnsent() {
-		c.persist = false
-		c.backoff = 0
-		if c.sndUna != c.sndMax {
-			c.setRTO(now + c.curRTO())
-		}
+		c.leavePersist(now)
 		return
 	}
 	c.probesOut++

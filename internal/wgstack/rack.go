@@ -251,21 +251,12 @@ func (c *tcb) scheduleTLP(now int64) {
 	c.tlpAt = at
 }
 
-// onTLP は PTO の期限。新しいデータか最後の記録の再送を probe として 1 つ送る(RFC 8985 7.3)。前の probe の
-// 後に RTT を測っていなければ(7.3 の条件 2)probe を送らない。RTO は最後の手段として残すので、張ってある
-// RTO の期限は動かさず、無いときだけ今から張る。動かすと、PTO を張り直す新しいデータが続く間 RTO が起きない。
-func (c *tcb) onTLP(now int64) {
-	if !c.tlpEligible() {
-		return
-	}
-	if !c.tlpSampled {
-		if c.rtoAt == 0 {
-			c.setRTO(now + c.curRTO())
-		}
-		return
-	}
-	c.tlpProbe = true
-}
+// tlpCanProbe は PTO の期限に probe を送れるかを返す。前の probe の後に RTT を測っていなければ(RFC 8985 7.3 の
+// 条件 2)送らない。
+func (c *tcb) tlpCanProbe() bool { return c.tlpEligible() && c.tlpSampled }
+
+// cancelTLP は送る前の TLP の probe と、確認を待つ probe の印を消す。PTO の期限(tlpAt)は消さない。
+func (c *tcb) cancelTLP() { c.tlpProbe, c.tlpActive, c.tlpRetrans = false, false, false }
 
 // tlpOnAck は probe の確認を処理する(RFC 8985 7.4、Linux の tcp_process_tlp_ack)。probe が再送で、
 // 確認が probe より先まで進んだときは、probe が損失を直したとみなして、この ACK の前の窓で輻輳の窓を下げる。
@@ -335,13 +326,13 @@ func (c *tcb) rearmRetrans() {
 // 期限は RTO の期限を動かさない。TLP の probe を送った時だけ、buildTLP が RTO を張り直す。
 func (c *tcb) onRetransTimer(now int64) {
 	switch {
-	case c.tlpAt != 0 && c.rtoAt != 0 && now >= c.rtoAt && c.tlpAt <= c.rtoAt && c.tlpEligible() && c.tlpSampled:
+	case c.tlpAt != 0 && c.rtoAt != 0 && now >= c.rtoAt && c.tlpAt <= c.rtoAt && c.tlpCanProbe():
 		// PTO を RTO の期限に揃えてある。RTO ではなく probe を送り、送れたかによらず RTO を今から張り直す
 		// (RFC 8985 7.2、7.3)。前の probe の後に RTT を測っていなければ probe を送れないので、その期限の RTO を
-		// 起こす
+		// 起こす(次の case)
 		c.tlpAt = 0
 		c.rtoAt = now + c.curRTO()
-		c.onTLP(now)
+		c.tlpProbe = true
 	case c.rtoAt != 0 && now >= c.rtoAt:
 		c.rtoAt = 0
 		c.onRTO(now)
@@ -352,8 +343,16 @@ func (c *tcb) onRetransTimer(now int64) {
 			c.sackAfterAck(0)
 		}
 	case c.tlpAt != 0 && now >= c.tlpAt:
+		// PTO の期限。新しいデータか最後の記録の再送を probe として 1 つ送る(RFC 8985 7.3)。probe を送れなければ、
+		// RTO は最後の手段として残すので、張ってある RTO の期限は動かさず、無いときだけ今から張る。動かすと、PTO を
+		// 張り直す新しいデータが続く間 RTO が起きない
 		c.tlpAt = 0
-		c.onTLP(now)
+		switch {
+		case c.tlpCanProbe():
+			c.tlpProbe = true
+		case c.tlpEligible() && c.rtoAt == 0:
+			c.rtoAt = now + c.curRTO()
+		}
 	}
 	c.rearmRetrans()
 }
