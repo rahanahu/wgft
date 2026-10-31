@@ -639,13 +639,18 @@ func TestHarnessCatchesRTOInPlaceOfAProbe(t *testing.T) {
 	wantOutcome(t, got, "tlp-tail-loss/probe-at-2srtt", tcpharness.OutcomeFail)
 }
 
-// On limited-transmit-rack's path, a resend 38 ms after the second duplicate ACK still comes
+// On limited-transmit-rack's path, a resend 25 ms after the second duplicate ACK still comes
 // inside RACK's reorder window, where the watch now runs; with the old 20 ms watch it went
-// unseen.
+// unseen. The resend must come after that old watch and reach the testbench before the window
+// ends, about 97 ms after the first duplicate ACK. 25 ms leaves 5 ms past the old watch and about
+// 50 ms before the window ends when the duplicate ACKs are 20 ms apart. With 38 ms the Windows
+// runner once counted the resend past the window: its 15.6 ms clock tick stretched the gap between
+// the duplicate ACKs to 32 ms and can delay the resend's timer and the testbench's reading of the
+// clock by a tick each.
 func TestHarnessCatchesResendAfterTheSecondDupack(t *testing.T) {
-	e := mutant("gvisor-resend-38ms-after-dupack2", func(inner tcpharness.DUT) tcpharness.DUT {
+	e := mutant("gvisor-resend-25ms-after-dupack2", func(inner tcpharness.DUT) tcpharness.DUT {
 		d := resendAt(2, false)(inner).(*earlyResend)
-		d.delay = 38 * time.Millisecond
+		d.delay = 25 * time.Millisecond
 		return d
 	})
 	got := tcpharness.Record(t, e, scenario(t, "limited-transmit-rack"), 1)
