@@ -49,7 +49,8 @@
 # measured the sender, not the agent.
 #
 # During the run the agent's eth0 has UDP segmentation offload off, so the router's netem queues
-# the datagrams one by one, as a real bottleneck does; the reason is at the code that turns it off.
+# and drops the datagrams one by one, as a real bottleneck does, and the agent pays for segmenting
+# them; the reasons are at the code that turns it off.
 #
 # NETEM_SEED fixes netem's loss pattern where tc and the kernel accept netem's seed option; where
 # they do not, the script says so and the loss differs from run to run.
@@ -166,19 +167,41 @@ case "$DIRECTION" in
   up) transfer=upload reader="the LAN host" writer="the client" dir_field="direction=up " ;;
   *) echo "tcpquality.sh: DIRECTION is down or up" >&2; exit 2 ;;
 esac
-# wireguard-go's Linux bind sends a run of same-sized datagrams as one UDP GSO packet, and the
-# agent's veth hands it whole to the router. netem there counts it as one packet against the queue
-# and releases all its datagrams together after the transmission time of the whole run, so each of
-# them is delayed by the run's length; no real bottleneck does that, since a link carries the
-# datagrams one by one. The agent's UDP segmentation offload is therefore turned off on every path:
-# its kernel splits the datagrams before they leave the namespace, as for a NIC without the
-# offload. The helper reads the state back and fails loudly if the offload stays on. The previous
-# state comes back at exit.
+# The agent's UDP segmentation offload is off on every path, for two reasons:
+# - netem: wireguard-go's Linux bind sends a run of same-sized datagrams as one UDP GSO packet, and
+#   the agent's veth hands it whole to the router. netem counts it as one packet against the queue,
+#   releases all its datagrams together after the whole run's transmission time, and decides loss
+#   for the packet as a whole, so up to 64 datagrams are delayed or lost together. A real link
+#   carries the datagrams one by one, so no bottleneck past it does that.
+# - CPU: without netem the GSO packet would cross the veth and the router namespace whole and never
+#   be segmented, while every real host without UDP segmentation offload pays for that. With the
+#   offload off, the agent's kernel segments the datagrams before they leave the namespace, as on a
+#   host whose NIC lacks the offload: the conservative case. A host with the offload lies between
+#   the two. Whether the router namespace's forwarding is counted in the agent's cgroup is not
+#   verified.
+# The trap that restores the starting state is set before the change, so a partial change is undone
+# too; a failed restore makes the run fail. The helper reads the state back and fails loudly if the
+# offload stays on.
 gso_was=$(ip netns exec "$HOME_NS" $Q udpgso eth0 show | grep -o 'requested=[a-z]*' | cut -d= -f2)
+if [ "$gso_was" != on ]; then
+  echo "WARN  UDP segmentation offload on the agent's eth0 is ${gso_was:-unreadable} at the start; it is not turned back on at exit"
+fi
+restore_gso() {
+  [ "$gso_was" = on ] || return 0
+  ip netns exec "$HOME_NS" $Q udpgso eth0 on >/dev/null && return 0
+  echo "FAIL  cannot turn UDP segmentation offload back on on the agent's eth0"
+  return 1
+}
+on_exit() {
+  local rc=$?
+  cleanup
+  restore_gso || rc=1
+  exit "$rc"
+}
+trap on_exit EXIT
 gso_now=$(ip netns exec "$HOME_NS" $Q udpgso eth0 off) ||
   { echo "FAIL  cannot turn off UDP segmentation offload on the agent's eth0: $gso_now"; exit 1; }
 echo "   agent eth0: $gso_now"
-trap 'cleanup; [ "$gso_was" = on ] && ip netns exec "$HOME_NS" $Q udpgso eth0 on >/dev/null' EXIT
 for mode in $MODES; do
   agent_env=(-u WGFT_AGENT_NETSTACK WGFT_MODE="$mode")
   case "$mode" in gvisor|wgstack) agent_env=(WGFT_MODE=userspace WGFT_AGENT_NETSTACK="$mode");; esac

@@ -249,8 +249,12 @@ def udpgso(ifname, op):
                                             + bytes(count * ETH_GSTRING_LEN))
         ethtool(s, ifname, names)
         raw = names.raw[12:]
-        idx = [raw[i * ETH_GSTRING_LEN:(i + 1) * ETH_GSTRING_LEN].split(b"\0")[0].decode()
-               for i in range(count)].index(UDP_GSO_FEATURE)
+        feature_names = [raw[i * ETH_GSTRING_LEN:(i + 1) * ETH_GSTRING_LEN].split(b"\0")[0].decode()
+                         for i in range(count)]
+        if UDP_GSO_FEATURE not in feature_names:
+            print("udpgso: %s: the device has no feature named %s" % (ifname, UDP_GSO_FEATURE), file=sys.stderr)
+            return 1
+        idx = feature_names.index(UDP_GSO_FEATURE)
         blocks, blk, bit = (count + 31) // 32, idx // 32, 1 << (idx % 32)
         if op != "show":
             body = b"".join(struct.pack("II", bit if b == blk else 0, bit if b == blk and op == "on" else 0)
@@ -259,7 +263,7 @@ def udpgso(ifname, op):
         feats = ctypes.create_string_buffer(struct.pack("II", ETHTOOL_GFEATURES, blocks) + bytes(16 * blocks))
         ethtool(s, ifname, feats)
         _, requested, active, _ = struct.unpack_from("IIII", feats, 8 + 16 * blk)
-    except (OSError, ValueError) as e:
+    except (OSError, UnicodeDecodeError) as e:
         print("udpgso: %s: %s" % (ifname, e), file=sys.stderr)
         return 1
     state = lambda m: "on" if m & bit else "off"

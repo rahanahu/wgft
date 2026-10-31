@@ -249,8 +249,8 @@ lab/lab exec vm bash /wgft/lab/upgrade.sh userspace
 これらの直接実行は共有トポロジを使うため、同じ VM の他の実行が終了してから行います。
 `tcpquality.sh` は、エージェントの namespace の `eth0` の UDP の segmentation offload を切ってから測り、終了時に元の状態に戻します。
 wireguard-go の Linux のバインドは同じ大きさの datagram の列を 1 つの UDP の GSO の packet で送り、veth はこの packet を分けずにルータへ渡します。
-ルータの netem はこの packet を待ち行列の 1 つとして数え、含まれる datagram を列全体の送出の時間の後にまとめて出すので、実際の回線の待ち行列には無い遅れが生じます。
-理由と測った値は[CPU の測り方](../docs/design/userspace/wgstack-performance.md#判定の行列)を参照してください。
+ルータの netem はこの packet を 1 つとして待ち行列に数え、損失も packet ごとに決めるので、実際の回線の待ち行列には無いまとまった遅れと損失が生じます。
+理由は[ラボの経路の UDP の GSO](../docs/design/userspace/wgstack-performance.md#ラボの経路の-udp-の-gso)を参照してください。
 `lab/lab test` はテストのバイナリをその場で作ります。
 ほかの行は VM にインストールしたバイナリを使うので、先に `lab/lab build` を実行します。
 D4 の旧版の選択と確認範囲は[追加テストの台帳](../docs/development/testing-catalog.md#d4-旧版からの更新)に従います。
