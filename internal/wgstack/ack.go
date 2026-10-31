@@ -50,13 +50,7 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	if c.persist {
 		c.retransStart = 0 // 相手は probe に応えている
 	}
-	wndChanged := false
-	if seqLT(c.sndWl1, seg.seq) || (c.sndWl1 == seg.seq && seqLE(c.sndWl2, ack)) {
-		w := uint32(seg.wnd) << c.sndWscale
-		wndChanged = w != c.sndWnd
-		c.sndWnd, c.sndWl1, c.sndWl2 = w, seg.seq, ack
-		c.maxSndWnd = max(c.maxSndWnd, w)
-	}
+	wndChanged := c.updateSendWindow(seg)
 	// RFC 6937 の DeliveredData は SND.UNA の差と SACK 済みの byte の差の和である。累積の確認が先に SACK した
 	// byte を覆うと SACK 済みの byte は減るので、差は確認の前の値から取る
 	var delivered int64
@@ -112,20 +106,53 @@ func (c *tcb) processAck(seg *segment, now int64) {
 	}
 }
 
-// newAck は累積の確認を進める ACK を処理する。
+// updateSendWindow は、segment が SND.WL1 と SND.WL2 より新しければ相手の窓を更新する(RFC 9293 3.10.7.4)。
+// 窓の大きさが変わったかを返す。
+func (c *tcb) updateSendWindow(seg *segment) bool {
+	if !(seqLT(c.sndWl1, seg.seq) || (c.sndWl1 == seg.seq && seqLE(c.sndWl2, seg.ack))) {
+		return false
+	}
+	w := uint32(seg.wnd) << c.sndWscale
+	changed := w != c.sndWnd
+	c.sndWnd, c.sndWl1, c.sndWl2 = w, seg.seq, seg.ack
+	c.maxSndWnd = max(c.maxSndWnd, w)
+	return changed
+}
+
+// newAck は累積の確認を進める ACK を処理する。確認された byte と記録を外し、RTT を測り、輻輳の窓、再送の
+// タイマー、自分の FIN の確認による状態の順に進める。
 func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 	acked := ack - c.sndUna
-	// 確認された byte を送信の輪から外す。FIN の 1 は byte に数えない
+	sample, rtxAcked := c.retireAcked(ack, now)
+	c.sndUna = ack
+	if c.tlpCut && seqGE(ack, c.tlpCutSeq) {
+		c.tlpCut = false // 縮小が覆う窓のデータはすべて確認された。番号が 1 周した後に古い番号と比べない
+	}
+	if seqLT(c.sndNxt, ack) {
+		c.sndNxt = ack
+	}
+	ackRTT := c.rttOnAck(seg, sample, rtxAcked, now)
+	c.backoff = 0
+	c.retransStart = 0
+	c.cwndOnAck(seg, ack, acked, ackRTT, now)
+	c.dupAcks = 0
+	c.retransTimerOnAck(now)
+	c.finAckedState(now)
+	c.signalWrite()
+}
+
+// retireAcked は SND.UNA から ack までに確認された byte を送信の輪から外し、確認された記録を外す。FIN の 1 は
+// byte に数えない。最後に外した再送していない記録の RTT の標本(無ければ -1)と、再送した記録を 1 つでも
+// 確認したかを返す(Karn。Linux の FLAG_RETRANS_DATA_ACKED)。記録は RTO の後も残るので、再送を待つ間に
+// 届いていた元の segment で測ると、穴が埋まるまでの時間を RTT に含めてしまう。欄の更新は記録を外す前に
+// 古い SND.UNA で行うので、SND.UNA を進める前に呼ぶ。
+func (c *tcb) retireAcked(ack uint32, now int64) (sample int64, rtxAcked bool) {
+	acked := ack - c.sndUna
 	dataAcked := min(uint64(acked), c.tailOff-c.unaOff)
 	old := c.unaOff
 	c.unaOff += dataAcked
 	c.snd.trim(old, c.unaOff, c.tailOff)
-	// 記録を外し、timestamp が無ければ再送していない記録で RTT を測る(Karn)。この ACK が再送した記録を
-	// 1 つでも確認したら測らない(Linux の FLAG_RETRANS_DATA_ACKED)。記録は RTO の後も残るので、再送を待つ間に
-	// 届いていた元の segment で測ると、穴が埋まるまでの時間を RTT に含めてしまう。欄の更新は記録を外す前に
-	// 古い SND.UNA で行う
-	var sample int64 = -1
-	rtxAcked := false
+	sample = -1
 	for c.recs.n > 0 {
 		r := c.recs.at(0)
 		end := r.seq + uint32(r.length)
@@ -144,22 +171,25 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 		c.recs.pop()
 		c.recBase++
 	}
-	c.sndUna = ack
-	if c.tlpCut && seqGE(ack, c.tlpCutSeq) {
-		c.tlpCut = false // 縮小が覆う窓のデータはすべて確認された。番号が 1 周した後に古い番号と比べない
-	}
-	if seqLT(c.sndNxt, ack) {
-		c.sndNxt = ack
-	}
-	ackRTT := int64(-1) // この ACK で測った RTT(HyStart++ が使う)
+	return sample, rtxAcked
+}
+
+// rttOnAck は ACK で RTT を測り、この ACK で測った RTT を返す(HyStart++ が使う。測らなければ -1)。timestamp
+// があればその TSecr で、無ければ retireAcked の標本で測る。再送した記録を確認した ACK の標本は使わない。
+func (c *tcb) rttOnAck(seg *segment, sample int64, rtxAcked bool, now int64) int64 {
 	if c.tsOK && seg.opt.hasTS && seg.opt.tsEcr != 0 {
-		ackRTT = c.tsRTTSample(seg.opt.tsEcr, now)
-	} else if sample >= 0 && !rtxAcked {
-		c.rttSample(sample)
-		ackRTT = sample
+		return c.tsRTTSample(seg.opt.tsEcr, now)
 	}
-	c.backoff = 0
-	c.retransStart = 0
+	if sample >= 0 && !rtxAcked {
+		c.rttSample(sample)
+		return sample
+	}
+	return -1
+}
+
+// cwndOnAck は累積の確認で輻輳の窓を進める。回復の中では回復の終わりか部分の確認を処理し、回復の外では
+// slow start か輻輳の回避で窓を増やす。SND.UNA を ack に進めた後に呼ぶ。
+func (c *tcb) cwndOnAck(seg *segment, ack, acked uint32, ackRTT, now int64) {
 	mss := uint32(c.segMSS())
 	flight := c.sndMax - c.sndUna
 	if c.inRecovery {
@@ -199,27 +229,35 @@ func (c *tcb) newAck(seg *segment, ack uint32, now int64) {
 		c.ccFor().congAvoid(c, acked, now)
 	}
 	c.cwnd = min(c.cwnd, 1<<30)
-	c.dupAcks = 0
-	// 再送のタイマー(RFC 6298 5.2、5.3)
-	if !c.persist {
-		if c.sndUna == c.sndMax {
-			c.clearRetransTimers()
-		} else {
-			c.setRTO(now + c.curRTO())
-			c.renegeTimer(now)
-		}
+}
+
+// retransTimerOnAck は累積の確認の後に再送のタイマーを張り直す(RFC 6298 5.2、5.3)。窓の probe の間は
+// 張り直さない。
+func (c *tcb) retransTimerOnAck(now int64) {
+	if c.persist {
+		return
 	}
-	if c.finAcked() {
-		switch c.state {
-		case stFinWait1:
-			c.state = stFinWait2
-		case stClosing:
-			c.enterTimeWait(now)
-		case stLastAck:
-			c.toClosed(nil)
-		}
+	if c.sndUna == c.sndMax {
+		c.clearRetransTimers()
+	} else {
+		c.setRTO(now + c.curRTO())
+		c.renegeTimer(now)
 	}
-	c.signalWrite()
+}
+
+// finAckedState は自分の FIN が確認されたときの状態の遷移を行う。
+func (c *tcb) finAckedState(now int64) {
+	if !c.finAcked() {
+		return
+	}
+	switch c.state {
+	case stFinWait1:
+		c.state = stFinWait2
+	case stClosing:
+		c.enterTimeWait(now)
+	case stLastAck:
+		c.toClosed(nil)
+	}
 }
 
 // dupAck は重複した ACK を処理する(RFC 5681 3.2、RFC 6582)。
