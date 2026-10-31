@@ -848,7 +848,11 @@ handshake. The public port therefore reads NOT TESTED even when the server
 serves it: DNAT applies to input from outside, so the server cannot reach its
 own public port from itself. Test that from another host: nc -vz for a TCP
 port, and the real client for a UDP port, since a bare UDP send such as nc -u
-cannot show whether the datagram arrived. A UDP rule's target
+cannot show whether the datagram arrived. For a rule the kernel forwards, the
+public port reads UNKNOWN with forward_policy_drop instead when another table's
+forward chain drops by default and no accept for all of wgft's forwarding was
+found there; the lines to add are the ones sudo wgft server check prints.
+A UDP rule's target
 reads at best NOT TESTED, never OK: the agent can report only that its listener
 is open, and a UDP send cannot tell whether the target received it or answered.
 Its target line also shows the last reply this server saw from the target;

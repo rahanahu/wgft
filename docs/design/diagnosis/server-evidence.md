@@ -11,9 +11,9 @@
 |---|---|---|---|
 | `rule.enabled` | enabled | `Rule.Enabled` | `GET /api/v1/rules` |
 | `agent.enabled` | agent enabled | `AgentInfo.Disabled`、`AgentInfo.DisabledAt` | `GET /api/v1/agents` |
-| `rule.public_port` | public port | `rule_states[id].apply_state` と `reason`、`drift`、`ip_forward` | `GET /api/v1/rules` |
+| `rule.public_port` | public port | `rule_states[id].apply_state` と `reason`、`drift`、`ip_forward`、`forward_policy` | `GET /api/v1/rules` |
 | `rule.source_filter` | source filter | `source_deny`、`source_allow` と `--from` の値 | `GET /api/v1/rules` |
-| `server.dataplane` | dataplane | `desired_generation`、`active_generation`、`agent_state_generation`、`agent_state_pending`、`apply_error`、`ip_forward` | `GET /api/v1/rules` |
+| `server.dataplane` | dataplane | `desired_generation`、`active_generation`、`agent_state_generation`、`agent_state_pending`、`apply_error`、`ip_forward`、`forward_policy` | `GET /api/v1/rules` |
 | `tunnel.handshake` | WireGuard | `AgentInfo.LastHandshake`、`AgentInfo.Tunnel` | `GET /api/v1/agents` |
 | `agent.connection` | connected | `AgentInfo.Connected`、`LastHeartbeat`、`StreamFrom`、`KeyChangeRefusedAt` | `GET /api/v1/agents` |
 | `agent.rules_received` | rule generation | `AgentInfo.Generation`、`AgentInfo.GenerationBehindSince` と応答の `generation` | `GET /api/v1/agents`、`GET /api/v1/rules` |

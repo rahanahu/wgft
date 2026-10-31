@@ -122,7 +122,7 @@
 set -u
 
 GH_REPO=rahanahu/wgft
-OLD_VERSION=${WGFT_SKEW_OLD_VERSION:-1.4.0}  # the immediately-previous release (see header
+OLD_VERSION=${WGFT_SKEW_OLD_VERSION:-1.5.0}  # the immediately-previous release (see header
   # comment); already speaks protocol v1 (design 7a.6). Move the default forward with each release.
 PREDISABLE_VERSION=1.1.3  # the last release before `wgft agent disable` (see header comment).
   # Fixed regardless of OLD_VERSION.
@@ -508,7 +508,7 @@ print(a.get('generation', ''))
     pre_pid=$(find_pid "$agent_bin" "agent run")
     # stream: connected to ... is logged once per successful stream connection, by every release
     # from v0.4.0 on and the current build (checked directly: `git grep "stream: connected to"
-    # <tag> -- internal/agent` finds the line for v0.4.0, v1.1.3 and v1.4.0). v0.3.0 (the legacy
+    # <tag> -- internal/agent` finds the line for v0.4.0, v1.1.3 and v1.5.0). v0.3.0 (the legacy
     # combination) predates this line entirely (the same grep finds nothing), so this counting
     # only works for v0.4.0 and later, which the OLD_VERSION check at the top enforces;
     # extending check_disable to the legacy combination would need a different signal for

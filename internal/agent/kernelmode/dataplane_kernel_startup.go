@@ -136,7 +136,7 @@ func (d *Dataplane) enableForwarding(save func() error) error {
 // logHostFindings は、エージェントの転送を妨げうるホストの設定を 1 行ずつ出す(7b.1 節)。どれも
 // 書き換えない。明示の accept や経路の組み方によっては転送が通るので、止めもしない。
 func logHostFindings(iface string) {
-	if rep, err := linux.Inspect(iface, nft.AgentTableName); err != nil {
+	if rep, err := linux.Inspect(iface, nft.AgentTableName, linux.ForwardFromTunnel); err != nil {
 		log.Printf("kernel mode: cannot read the other nftables tables to check their forward policy: %v", err)
 	} else {
 		for _, f := range rep.Findings {

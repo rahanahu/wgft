@@ -87,6 +87,17 @@
   これまでこの場合に付いていた `credentials_unreadable` は、ファイルがあって読めない場合だけに付く。
   どちらも層 2 で、最上位の `status` と終了コードは変わりません
 
+他のテーブルの forward の検査の結果を診断に加える変更([10.2a 節](../diagnosis/server-observations.md#この-vps-の他のテーブルの-forward)、2026-10-30)は、次のものを加えます。
+どれも開いた集合への値の加算であり、既存の値の意味は変えません。
+
+- `server doctor --json`:`checks[].reason` に `forward_policy_drop` を加える。
+  `rule.public_port` と `server.dataplane` に付き、状態は UNKNOWN です。
+  最上位の `status` と終了コードは変わりません。
+  この VPS の他のテーブルの forward に wgft の転送の accept が見つからない実行は、これまで `server.dataplane` が OK でした
+- 管理用 API:`GET /api/v1/rules` と `POST /api/v1/rules/batch` の応答に `forward_policy` を加える。
+  `drops`(チェーンの場所 `where` と足す行 `suggest` の組の列)と、検査できなかった場合の `error` を持ちます。
+  `ForwardPolicyBackend` を実装し、カーネルモードで動く Backend のときだけ加わり、ユーザー空間モードの server と実装しない Backend では現れません
+
 ソケットのバッファの条件の確かめ([7 節](../agent-dataplane.md#7-データプレーン自宅側)、2026-09-27、所有者の決定)は、次のものを加えます。
 どれも加算であり、既存の値の意味は変えません。
 

@@ -79,7 +79,7 @@ func defaultKernelDoctorOps() DoctorOps {
 			return strings.TrimSpace(string(b)), err
 		},
 		ForwardDrops: func(iface string) ([]string, error) {
-			rep, err := linux.Inspect(iface, nft.AgentTableName)
+			rep, err := linux.Inspect(iface, nft.AgentTableName, linux.ForwardFromTunnel)
 			if err != nil {
 				return nil, err
 			}

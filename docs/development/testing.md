@@ -294,6 +294,9 @@ L15 は server の 30 秒ごとの再試行を待つ場合に、確認の待ち�
 | B12 | `lab/lab test internal/nettun vps -test.run='^(TestRelayHold|TestSetupFailure)OutOfOrderKernelData$'` | 中継終了時と中継開始前の通常の失敗で、カーネル TCP ソケットの順序外の受信メモリが、フローと送信元ごとの枠を返した後にも残ること | 使い捨て VM の隔離した network namespace | `resource`、`userspace` | 契機に当たる PR ごとに 1 回 | 自動 (開発者が起動) |
 
 B9 は、リリース候補ごとに Debian 12、Ubuntu 24.04、Fedora 44 の 3 つで実行します。
+環境変数 `WGFT_DIST_VM_SLOT` に実行ごとに違う値を指定すると、複数のディストリビューションを並行して流せます。
+指定しない実行は 1 つずつ流します。
+値の範囲と、スロットごとのアドレスと VM の名前は `scripts/dist-vm.sh` の冒頭にあります。
 `deploy/agent.kernel.conf` を変える PR は、B9 を `scripts/dist-vm.sh --agent-kernel` で実行します。
 この追加の経路は過去に Debian 12 で確認しましたが、Ubuntu 24.04 と Fedora 44 では未確認です。
 
