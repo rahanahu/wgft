@@ -1,0 +1,55 @@
+{
+  "comment": "How a userspace agent derives its tunnel from state.wg. want is what the Go v1 agent uses; error means the agent builds no tunnel from that wg section and does not retry it with the same full state. udp_idle_seconds comes from udp_timeout_stream; udp_timeout is not used. The server key is a dummy value.",
+  "cases": [
+    {
+      "name": "values the server sends by default",
+      "wg": {"server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "endpoint": "vps.example.com:51820", "address": "10.200.0.2/24", "mtu": 1420, "keepalive": 25, "udp_timeout": 30, "udp_timeout_stream": 120},
+      "want": {"address": "10.200.0.2", "server_address": "10.200.0.1", "endpoint": "vps.example.com:51820", "mtu": 1420, "keepalive_seconds": 25, "udp_idle_seconds": 120}
+    },
+    {
+      "name": "server address is the first host of a wider range",
+      "wg": {"server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "endpoint": "203.0.113.10:51820", "address": "10.200.5.7/16", "mtu": 1380, "keepalive": 25, "udp_timeout": 30, "udp_timeout_stream": 180},
+      "want": {"address": "10.200.5.7", "server_address": "10.200.0.1", "endpoint": "203.0.113.10:51820", "mtu": 1380, "keepalive_seconds": 25, "udp_idle_seconds": 180}
+    },
+    {
+      "name": "zero values before the server has read its conntrack timeouts",
+      "wg": {"server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "endpoint": "vps.example.com:51820", "address": "10.200.0.3/24", "mtu": 1420, "keepalive": 0, "udp_timeout": 0, "udp_timeout_stream": 0},
+      "want": {"address": "10.200.0.3", "server_address": "10.200.0.1", "endpoint": "vps.example.com:51820", "mtu": 1420, "keepalive_seconds": 25, "udp_idle_seconds": 120}
+    },
+    {
+      "name": "empty endpoint is kept and left to the re-resolution",
+      "wg": {"server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "endpoint": "", "address": "10.200.0.2/24", "mtu": 1420, "keepalive": 25, "udp_timeout": 30, "udp_timeout_stream": 120},
+      "want": {"address": "10.200.0.2", "server_address": "10.200.0.1", "endpoint": "", "mtu": 1420, "keepalive_seconds": 25, "udp_idle_seconds": 120}
+    },
+    {
+      "name": "largest accepted keepalive and udp_timeout_stream",
+      "wg": {"server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "endpoint": "vps.example.com:51820", "address": "10.200.0.2/24", "mtu": 1420, "keepalive": 65535, "udp_timeout": 30, "udp_timeout_stream": 2147483647},
+      "want": {"address": "10.200.0.2", "server_address": "10.200.0.1", "endpoint": "vps.example.com:51820", "mtu": 1420, "keepalive_seconds": 65535, "udp_idle_seconds": 2147483647}
+    },
+    {
+      "name": "values out of range fall back to the defaults",
+      "wg": {"server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "endpoint": "vps.example.com:51820", "address": "10.200.0.2/24", "mtu": 1420, "keepalive": 65536, "udp_timeout": 30, "udp_timeout_stream": 2147483648},
+      "want": {"address": "10.200.0.2", "server_address": "10.200.0.1", "endpoint": "vps.example.com:51820", "mtu": 1420, "keepalive_seconds": 25, "udp_idle_seconds": 120}
+    },
+    {
+      "name": "negative values fall back to the defaults",
+      "wg": {"server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "endpoint": "vps.example.com:51820", "address": "10.200.0.2/24", "mtu": 1420, "keepalive": -1, "udp_timeout": -1, "udp_timeout_stream": -1},
+      "want": {"address": "10.200.0.2", "server_address": "10.200.0.1", "endpoint": "vps.example.com:51820", "mtu": 1420, "keepalive_seconds": 25, "udp_idle_seconds": 120}
+    },
+    {
+      "name": "address without a prefix length",
+      "wg": {"server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "endpoint": "vps.example.com:51820", "address": "10.200.0.2", "mtu": 1420, "keepalive": 25, "udp_timeout": 30, "udp_timeout_stream": 120},
+      "error": true
+    },
+    {
+      "name": "IPv6 address",
+      "wg": {"server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "endpoint": "vps.example.com:51820", "address": "fd00::2/64", "mtu": 1420, "keepalive": 25, "udp_timeout": 30, "udp_timeout_stream": 120},
+      "error": true
+    },
+    {
+      "name": "server key that is not 32 bytes of base64",
+      "wg": {"server_pubkey": "not-a-key", "endpoint": "vps.example.com:51820", "address": "10.200.0.2/24", "mtu": 1420, "keepalive": 25, "udp_timeout": 30, "udp_timeout_stream": 120},
+      "error": true
+    }
+  ]
+}

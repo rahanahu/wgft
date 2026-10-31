@@ -1,0 +1,19 @@
+{
+  "comment": "How a userspace agent turns state.wg.endpoint into the WireGuard peer endpoint. lookup is the list of A records the system resolver returns for the host; null means the host is an IP literal and no lookup happens. want is the endpoint the agent sets; error means the agent sets no endpoint and keeps re-resolving.",
+  "cases": [
+    {"name": "IPv4 literal", "endpoint": "203.0.113.10:51820", "lookup": null, "want": "203.0.113.10:51820"},
+    {"name": "host name with one A record", "endpoint": "vps.example.com:51820", "lookup": ["203.0.113.10"], "want": "203.0.113.10:51820"},
+    {"name": "host name with several A records takes the smallest address", "endpoint": "vps.example.com:51820", "lookup": ["203.0.113.20", "198.51.100.7", "203.0.113.3"], "want": "198.51.100.7:51820"},
+    {"name": "IPv4 literal in brackets", "endpoint": "[203.0.113.10]:51820", "lookup": null, "want": "203.0.113.10:51820"},
+    {"name": "leading zeros in the port", "endpoint": "203.0.113.10:051820", "lookup": null, "want": "203.0.113.10:51820"},
+    {"name": "port zero", "endpoint": "203.0.113.10:0", "lookup": null, "want": "203.0.113.10:0"},
+    {"name": "sign in the port", "endpoint": "203.0.113.10:+51820", "lookup": null, "error": true},
+    {"name": "service name as the port", "endpoint": "203.0.113.10:wireguard", "lookup": null, "error": true},
+    {"name": "port above 65535", "endpoint": "203.0.113.10:65536", "lookup": null, "error": true},
+    {"name": "IPv6 literal", "endpoint": "[2001:db8::1]:51820", "lookup": null, "error": true},
+    {"name": "IPv4-mapped IPv6 literal", "endpoint": "[::ffff:203.0.113.10]:51820", "lookup": null, "error": true},
+    {"name": "no port", "endpoint": "203.0.113.10", "lookup": null, "error": true},
+    {"name": "empty", "endpoint": "", "lookup": null, "error": true},
+    {"name": "host name without A records", "endpoint": "vps.example.com:51820", "lookup": [], "error": true}
+  ]
+}
