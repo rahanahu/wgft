@@ -173,9 +173,42 @@ func (c *tcb) arrayBytes() (recs, ivs int64) {
 }
 
 // recordsBytes と intervalsBytes は配列の長さから数え、上界の項(terms)を使わない。会計を項から独立に
-// 数えるので、項の誤りは上界の試験で比べたときに現れる。
-func recordsBytes(n int) int64   { return heapBytes(int64(n) * int64(unsafe.Sizeof(record{}))) }
-func intervalsBytes(n int) int64 { return heapBytes(int64(n) * int64(unsafe.Sizeof(interval{}))) }
+// 数えるので、項の誤りは上界の試験で比べたときに現れる。Stats は枠ごとに呼ぶので、枠が作る長さ(floor と
+// boost)の値は 1 回だけ測って持つ(stageArrays)。
+func recordsBytes(n int) int64 {
+	switch a := stageArrays(); n {
+	case floorRecords:
+		return a.floorRecs
+	case boostRecords:
+		return a.boostRecs
+	}
+	return heapBytes(int64(n) * int64(unsafe.Sizeof(record{})))
+}
+
+func intervalsBytes(n int) int64 {
+	switch a := stageArrays(); n {
+	case floorIntervals:
+		return a.floorIvs
+	case boostIntervals:
+		return a.boostIvs
+	}
+	return heapBytes(int64(n) * int64(unsafe.Sizeof(interval{})))
+}
+
+// stageArrays は floor と boost の段の記録の輪と区間の表がヒープに持つ大きさ。
+var stageArrays = sync.OnceValue(func() (a struct{ floorRecs, boostRecs, floorIvs, boostIvs int64 }) {
+	a.floorRecs = heapBytes(floorRecords * int64(unsafe.Sizeof(record{})))
+	a.boostRecs = heapBytes(boostRecords * int64(unsafe.Sizeof(record{})))
+	a.floorIvs = heapBytes(floorIntervals * int64(unsafe.Sizeof(interval{})))
+	a.boostIvs = heapBytes(boostIntervals * int64(unsafe.Sizeof(interval{})))
+	return a
+})
+
+// sliceBytes は s の長さの配列がヒープに持つ大きさ(heapBytes)を返す。
+func sliceBytes[T any](s []T) int64 {
+	var z T
+	return heapBytes(int64(len(s)) * int64(unsafe.Sizeof(z)))
+}
 
 // mallocHeader は Go のヒープがポインタを含む小さな object に足す管理の頭の大きさ。
 const mallocHeader = 8
@@ -261,27 +294,24 @@ func (s *stack) bound() Bound {
 
 func (s *stack) countBound() Bound {
 	n := int64(len(s.conns))
-	b4 := func(k int) int64 { return heapBytes(int64(k) * 4) }
-	idx := func(x index) int64 { return heapBytes(int64(len(x.ents)) * int64(unsafe.Sizeof(indexEnt{}))) }
-	dl := func(x dlist) int64 { return b4(len(x.next)) + b4(len(x.prev)) + heapBytes(int64(len(x.in))) }
+	dl := func(x dlist) int64 { return sliceBytes(x.next) + sliceBytes(x.prev) + sliceBytes(x.in) }
 	var b Bound
-	b.Fix = heapBytes(int64(unsafe.Sizeof(stack{}))) + heapBytes(n*int64(unsafe.Sizeof(tcb{}))) + b4(len(s.free)) +
-		idx(s.connIdx) + idx(s.syn.idx) + idx(s.tw.idx) +
-		heapBytes(int64(len(s.syn.rows))*int64(unsafe.Sizeof(synRow{}))) + b4(len(s.syn.free)) +
-		heapBytes(int64(len(s.tw.rows))*int64(unsafe.Sizeof(twRow{}))) + b4(len(s.tw.free)) +
-		heapBytes(int64(len(s.wheel.dl))*8) + b4(len(s.wheel.next)) + b4(len(s.wheel.prev)) + heapBytes(int64(len(s.wheel.where))*2) +
+	b.Fix = heapBytes(int64(unsafe.Sizeof(stack{}))) + sliceBytes(s.conns) + sliceBytes(s.free) +
+		sliceBytes(s.connIdx.ents) + sliceBytes(s.syn.idx.ents) + sliceBytes(s.tw.idx.ents) +
+		sliceBytes(s.syn.rows) + sliceBytes(s.syn.free) +
+		sliceBytes(s.tw.rows) + sliceBytes(s.tw.free) +
+		sliceBytes(s.wheel.dl) + sliceBytes(s.wheel.next) + sliceBytes(s.wheel.prev) + sliceBytes(s.wheel.where) +
 		dl(s.out.conns) + dl(s.out.rows) +
-		heapBytes(int64(len(s.out.ctl.buf))) + heapBytes(int64(len(s.out.ctl.lens))*int64(unsafe.Sizeof(int(0)))) +
-		b4(cap(s.fired)) +
+		sliceBytes(s.out.ctl.buf) + sliceBytes(s.out.ctl.lens) +
+		sliceBytes(s.fired[:cap(s.fired)]) +
 		chunkPoolKeep*chunkHeap() + heapBytes(chunkPoolKeep*int64(unsafe.Sizeof((*chunk)(nil)))) +
 		n*slotRuntime
 	t := terms()
 	b.FloorConn = n * t.floor()
 	b.Boost = int64(len(s.pool.slots)) * t.boost()
-	dg := int64(unsafe.Sizeof(udpDgram{}))
-	ck := heapBytes(int64(len(s.udp.ck))*int64(unsafe.Sizeof(udpChunkRec{}))) + b4(len(s.udp.ckFree))
-	b.UDPRx = ringBytes(udpRxBytes) + heapBytes(int64(len(s.udp.dg[dirRx]))*dg) + b4(len(s.udp.dgFree[dirRx])) + (ck+1)/2
-	b.UDPTx = ringBytes(udpTxBytes) + heapBytes(int64(len(s.udp.dg[dirTx]))*dg) + b4(len(s.udp.dgFree[dirTx])) + ck/2
+	ck := sliceBytes(s.udp.ck) + sliceBytes(s.udp.ckFree)
+	b.UDPRx = ringBytes(udpRxBytes) + sliceBytes(s.udp.dg[dirRx]) + sliceBytes(s.udp.dgFree[dirRx]) + (ck+1)/2
+	b.UDPTx = ringBytes(udpTxBytes) + sliceBytes(s.udp.dg[dirTx]) + sliceBytes(s.udp.dgFree[dirTx]) + ck/2
 	b.Frag = int64(fragLimits.Bytes)
 	b.Ping = pingEndpoints * (heapBytes(int64(s.mtu)) + int64(unsafe.Sizeof(pingEP{})))
 	b.Total = b.Fix + b.FloorConn + b.Boost + b.UDPRx + b.UDPTx + b.Frag + b.Ping
