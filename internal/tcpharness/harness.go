@@ -366,6 +366,11 @@ type H struct {
 	outcome  map[string][]string
 	rng      *rand.Rand
 	nextPort uint16
+	// closed is set once a real-time DUT's Emitted channel has been closed: nothing more can come
+	closed bool
+	// wall, when set, replaces time.Now as the clock of a real-time DUT. Tests set it to a coarse
+	// clock, such as the Windows runner's, to check that no decision rests on its resolution.
+	wall func() time.Time
 }
 
 func newH(t testing.TB, e Engine, scenario string, d DUT, seed uint64) *H {
@@ -558,6 +563,9 @@ func (h *H) Now() time.Time {
 	if c, ok := h.DUT.(ClockedDUT); ok {
 		return c.Now()
 	}
+	if h.wall != nil {
+		return h.wall()
+	}
 	return time.Now()
 }
 
@@ -582,6 +590,9 @@ func (h *H) next(d time.Duration) ([]byte, bool) {
 	defer timer.Stop()
 	select {
 	case pkt, ok := <-h.DUT.Emitted():
+		if !ok {
+			h.closed = true
+		}
 		return pkt, ok
 	case <-timer.C:
 		return nil, false
@@ -689,7 +700,9 @@ func (p *Peer) SendFreshAck() uint32 {
 // that comes during that wait is judged as above. Without that wait, a DUT that dropped the ACK
 // and passed one probe could leave d before its next retransmission: when the FIN went out
 // before the DUT had the ACK of the data in front of it, the probe comes at once and the
-// retransmission after a further probe timeout and RTO, 400 ms or more on an idle machine.
+// retransmission after a further probe timeout and RTO, 400 ms or more on an idle machine. The
+// interval trusts the DUT's Delivered: a DUT that reports Delivered while it still lacks the ACK
+// gets the interval at once, as it did before QuietSince waited for it.
 func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, c Conn) (Segment, bool, int) {
 	_, clocked := p.h.DUT.(ClockedDUT)
 	settled := func() bool { return true }
@@ -707,11 +720,10 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, 
 		if !deadline.IsZero() {
 			wait = max(deadline.Sub(p.h.Now()), 0)
 		}
-		before := p.h.Now()
 		s, ok := p.Next(wait)
 		if !ok {
 			// past the deadline, or the DUT closed its output and nothing more can come
-			if !deadline.IsZero() || p.h.Now().Sub(before) < wait/2 {
+			if !deadline.IsZero() || p.h.closed {
 				return Segment{}, true, stale
 			}
 			continue
