@@ -404,8 +404,6 @@ wgstack との違いと適合の場面は、決定ではなく計画と未確認
 #### 参照のカーネル
 
 この節の参照は、ラボの VM のカーネルだった Debian の 6.1.0-53 の TCP の受け手で、この節の挙動は 6.1 から導きました。
-ラボの参照の Linux は、2026-11-01 から Debian の 7.2.11 です([参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定))。
-7.2 で変わった受け手の挙動のうち適合の台本で見えたもの(v6.6 の窓の換算、v6.10 の最初の窓、v6.16 の自動調整)は、[受信のバッファの溢れ](wgstack-verification.md#受信のバッファの溢れ)と[受信の窓の開き方](wgstack-verification.md#受信の窓の開き方)の結果と、[Linux との一致を確かめていない選択](wgstack.md#linux-との一致を確かめていない選択)の握手の後の窓に記録しています。
 基の版は mainline の `v6.1` のタグで、Debian の bookworm の changelog では 6.1.0-38 が 6.1.147-1 なので、6.1.0-53 は `v6.1` の後の次の修正を含みます。
 
 - `tcp: fix quick-ack counting to count actual ACKs of new data`(Debian 6.1.64-1 から):quickack の残りの減らし方が変わります(後述)
@@ -419,6 +417,10 @@ wgstack との違いと適合の場面は、決定ではなく計画と未確認
 VM で確かめるには、`uname -v` で Debian の package の版を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` を上の件名で探します。
 上の Debian の版は bookworm の changelog の値です。
 VM の changelog では、受け手の RTT の推定の最小の取り方と自動調整の最初の値の 2 つを確かめ、ほかはまだ確かめていません。
+
+ラボの参照の Linux は、2026-11-01 から Debian の 7.2.11 です([参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定))。
+7.2 で変わった受け手の挙動と、wgstack が採るかの推奨は、[7.2 で変わった Linux の受け手](wgstack-receive-linux72.md)にまとめます。
+そのうち適合の台本で見えたもの(v6.6 の窓の換算、v6.10 の最初の窓、v6.16 の自動調整)の値は、[受信のバッファの溢れ](wgstack-verification.md#受信のバッファの溢れ)と[受信の窓の開き方](wgstack-verification.md#受信の窓の開き方)の結果と、[Linux との一致を確かめていない選択](wgstack.md#linux-との一致を確かめていない選択)の握手の後の窓にあります。
 
 値は、性能の参照の Linux(`linuxdut.PinPerformance`)が既定のまま使う sysctl の値です。
 関わる値は `tcp_dsack=1`、`tcp_comp_sack_nr=44`、`tcp_comp_sack_delay_ns=1000000`(1 ms)、`tcp_comp_sack_slack_ns=100000`(100 µs)、`tcp_adv_win_scale=1`、`tcp_app_win=31`、`tcp_shrink_window=0`、`tcp_invalid_ratelimit=500`(ms)、`tcp_moderate_rcvbuf=1`、`tcp_rmem` の 3 つ目の値(性能の参照では 4 MiB)です。

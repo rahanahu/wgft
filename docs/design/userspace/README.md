@@ -24,6 +24,7 @@
 - [エージェントの wgft の netstack(実装の途中)](wgstack.md)
 - [wgstack の検証(未実装)](wgstack-verification.md)
 - [wgstack の性能の段階(未実装)](wgstack-performance.md)
+- [7.2 で変わった Linux の受け手(受信の経路の参照の挙動の差)](wgstack-receive-linux72.md)
 - [wgstack のバッチと segment のまとめ(未実装)](wgstack-batching.md)
 - [wgstack の需要で育つバッファ(未実装)](wgstack-buffers.md)
 - [wgstack の dial の側(未実装)](wgstack-dial.md)

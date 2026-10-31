@@ -1,104 +1,240 @@
 {
-  "measured": "2026-10-30T07:29:21Z",
-  "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+  "measured": "2026-10-31T20:58:03Z",
+  "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
   "base_runs": 9,
   "cells": {
     "recv/loss0%": {
       "gvisor": {
-        "runs": 18,
-        "ok": 18,
-        "mbps": 18.431130239874967,
+        "runs": 9,
+        "ok": 9,
+        "mbps": 18.54446953918376,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "6615821": 18.614020041493486,
+          "6623740": 18.606834339625706,
+          "6631659": 18.566301086809943,
+          "6639578": 18.370506449049063,
+          "6647497": 18.352479935158623,
+          "6655416": 18.39818275010814,
+          "6663335": 18.5477341129021,
+          "6671254": 18.54446953918376,
+          "6679173": 18.522921158983696
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 6.094683573964001
+        "spread": 1.014250940867878
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 18.59944531065562,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "per_seed_mbps": {
+          "6615821": 18.70406525353714,
+          "6623740": 18.685132962649007,
+          "6631659": 18.69692005837819,
+          "6639578": 18.59944531065562,
+          "6647497": 18.44987812283961,
+          "6655416": 18.41126080354126,
+          "6663335": 18.532181706793043,
+          "6671254": 18.676702030800193,
+          "6679173": 18.438876930128977
+        },
+        "max_ms": -1,
+        "samples": 0,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 1.015903552348765
+      }
+    },
+    "recv/loss0%/linux-client": {
+      "gvisor": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 18.878144943758816,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "per_seed_mbps": {
+          "2291118": 18.879702890632398,
+          "2299037": 18.879634789948128,
+          "2306956": 18.883316763434614,
+          "2314875": 18.879482841257488,
+          "2322794": 18.883550067170507,
+          "2330713": 18.883836360689717,
+          "2338632": 18.879760650334525,
+          "2346551": 18.870322661118244,
+          "2354470": 18.878811824104897,
+          "2362389": 18.87744038781764,
+          "2370308": 18.877070008273236,
+          "2378227": 18.877343931930216,
+          "2386146": 18.877328401739558,
+          "2394065": 18.877199673434315,
+          "2401984": 18.87740902058358,
+          "2409903": 18.877355132392903,
+          "2417822": 18.874588048728302,
+          "2425741": 18.878144943758816
+        },
+        "max_ms": -1,
+        "samples": 0,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 1.0007161350557783
       },
       "linux": {
         "runs": 18,
         "ok": 18,
-        "mbps": 18.476473161995894,
+        "mbps": 18.877485732040913,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "2291118": 18.878719032489688,
+          "2299037": 18.87878989812428,
+          "2306956": 18.878639524181654,
+          "2314875": 18.87783283983093,
+          "2322794": 18.87846426633186,
+          "2330713": 18.879780116460957,
+          "2338632": 18.877485732040913,
+          "2346551": 18.872378350611523,
+          "2354470": 18.87716099204275,
+          "2362389": 18.87437297927011,
+          "2370308": 18.87806509268324,
+          "2378227": 18.874424771536077,
+          "2386146": 18.873880143937495,
+          "2394065": 18.877532624088886,
+          "2401984": 18.87437652096362,
+          "2409903": 18.876750774521447,
+          "2417822": 18.876373429443166,
+          "2425741": 18.87408898660336
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.0295611521305865
+        "spread": 1.0003922010099588
       }
     },
     "recv/loss1%": {
       "gvisor": {
         "runs": 9,
         "ok": 9,
-        "mbps": 4.715312954902415,
+        "mbps": 3.6636300745981836,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "5437476": 4.569437171245941,
+          "5445395": 3.7695086964783564,
+          "5453314": 3.6636300745981836,
+          "5461233": 4.700486063798105,
+          "5469152": 3.256382456168739,
+          "5477071": 3.528299658962468,
+          "5484990": 3.543015286359548,
+          "5492909": 3.7537815342223757,
+          "5500828": 3.5267470370991365
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.8561111099874918
+        "spread": 1.4434686733106927
       },
       "linux": {
         "runs": 9,
         "ok": 9,
-        "mbps": 4.78839336403772,
+        "mbps": 4.1270452644300395,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "5437476": 5.770472302711314,
+          "5445395": 4.0956564378223215,
+          "5453314": 3.597706696817506,
+          "5461233": 5.5330375078879115,
+          "5469152": 4.276574627489485,
+          "5477071": 4.086628223324682,
+          "5484990": 3.7740883598757113,
+          "5492909": 4.1270452644300395,
+          "5500828": 4.85272099707295
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.8312750179293251
+        "spread": 1.6039307228173474
       }
     },
     "recv/loss5%": {
       "gvisor": {
         "runs": 9,
         "ok": 9,
-        "mbps": 1.484581971499998,
+        "mbps": 1.4678243902482595,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "1001587": 1.7151584319671511,
+          "1009506": 1.518928082593515,
+          "1017425": 1.2243769717045418,
+          "1025344": 2.0767582290633877,
+          "961992": 1.4186651752532773,
+          "969911": 1.4240795460302007,
+          "977830": 1.4455405610598318,
+          "985749": 1.4678243902482595,
+          "993668": 1.7089822238177965
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.2855313682657472
+        "spread": 1.6961755056305785
       },
       "linux": {
         "runs": 9,
         "ok": 9,
-        "mbps": 1.407937047930683,
+        "mbps": 1.4294649302495972,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "1001587": 1.4294649302495972,
+          "1009506": 1.7221364325411195,
+          "1017425": 1.0890741118937664,
+          "1025344": 1.9910125835016712,
+          "961992": 1.299592864806444,
+          "969911": 1.3694472513991804,
+          "977830": 1.7312697630749028,
+          "985749": 1.2280099853685618,
+          "993668": 1.7420471476109678
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.5880245514405227
+        "spread": 1.8281699672757297
       }
     },
     "recv/outage2s": {
       "gvisor": {
         "runs": 9,
         "ok": 9,
-        "mbps": 8.223199854667639,
-        "recovery_ms": 1257.926997,
+        "mbps": 4.346277830615297,
+        "recovery_ms": 1232.210763,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
@@ -106,13 +242,13 @@
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.0537336358535048
+        "spread": 1.0687715485668792
       },
       "linux": {
         "runs": 9,
         "ok": 9,
-        "mbps": 4.304864329264626,
-        "recovery_ms": 1241.748522,
+        "mbps": 10.783842475850165,
+        "recovery_ms": 1279.992192,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
@@ -120,7 +256,37 @@
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.056348389949361
+        "spread": 1.066694625598031
+      }
+    },
+    "recv/outage2s/linux-client": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 12.395386371081726,
+        "recovery_ms": 971.67789,
+        "rto_ms": 1424,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 1.2720074180530851
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 12.355051462640219,
+        "recovery_ms": 987.459585,
+        "rto_ms": 1424,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "max_ms": -1,
+        "samples": 0,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 1.2904295726084711
       }
     },
     "recv/reorder": {
@@ -153,34 +319,144 @@
         "spread": 2.7706578242420465
       }
     },
-    "send/loss0%": {
+    "recv/reorder/linux-client": {
       "gvisor": {
         "runs": 18,
         "ok": 18,
-        "mbps": 18.694900089353087,
+        "mbps": 18.86280847440585,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "11618187": 18.851084226887775,
+          "11626106": 18.847050344332196,
+          "11634025": 18.873073808488765,
+          "11641944": 18.875925364078082,
+          "11649863": 18.87287764156764,
+          "11657782": 18.86152704136394,
+          "11665701": 18.85641762333485,
+          "11673620": 18.847396148292717,
+          "11681539": 18.87254281854102,
+          "11689458": 18.86280847440585,
+          "11697377": 18.8632761719016,
+          "11705296": 18.850383594163677,
+          "11713215": 18.86332469694341,
+          "11721134": 18.86324139809072,
+          "11729053": 18.79920356021644,
+          "11736972": 18.870347533362633,
+          "11744891": 18.847293303036714,
+          "11752810": 18.84666850962843
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.0010982783491913
+        "spread": 1.0040811199057391
       },
       "linux": {
         "runs": 18,
         "ok": 18,
-        "mbps": 18.723539474474805,
+        "mbps": 18.864705826575246,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "11618187": 18.847987915333935,
+          "11626106": 18.838869996671676,
+          "11634025": 18.864352325225326,
+          "11641944": 18.86815253800872,
+          "11649863": 18.86808431390491,
+          "11657782": 18.868284875606417,
+          "11665701": 18.84538523867404,
+          "11673620": 18.857118593094413,
+          "11681539": 18.878935075736482,
+          "11689458": 18.866504043736793,
+          "11697377": 18.86850240120215,
+          "11705296": 18.855565994633906,
+          "11713215": 18.867803246890837,
+          "11721134": 18.864705826575246,
+          "11729053": 18.798196730254155,
+          "11736972": 18.86652946776777,
+          "11744891": 18.859370923224454,
+          "11752810": 18.852362261158877
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.010425577911215
+        "spread": 1.0042950048156687
+      }
+    },
+    "send/loss0%": {
+      "gvisor": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 18.68899433015144,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "per_seed_mbps": {
+          "10348535": 18.687267079074466,
+          "10356454": 18.687583316489167,
+          "10364373": 18.68764665410778,
+          "10372292": 18.687636176543705,
+          "10380211": 18.687305605887946,
+          "10388130": 18.687713649475743,
+          "10396049": 18.68899433015144,
+          "10403968": 18.70411757643184,
+          "10411887": 18.700488495403405,
+          "10419806": 18.688761650327187,
+          "10427725": 18.690508602386494,
+          "10435644": 18.691128165535716,
+          "10443563": 18.685970029019202,
+          "10451482": 18.696088001198074,
+          "10459401": 18.690553011311465,
+          "10467320": 18.691385308585183,
+          "10475239": 18.687359984808076,
+          "10483158": 18.694057986989687
+        },
+        "max_ms": -1,
+        "samples": 0,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 1.0009711857283543
+      },
+      "linux": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 18.727634050398706,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": -1,
+        "p99_ms": -1,
+        "per_seed_mbps": {
+          "10348535": 18.732577308862595,
+          "10356454": 18.733005760691775,
+          "10364373": 18.72884887692447,
+          "10372292": 18.731856287450007,
+          "10380211": 18.732952694393852,
+          "10388130": 18.731420627336114,
+          "10396049": 18.71937444367907,
+          "10403968": 18.72345390472496,
+          "10411887": 18.723595452098095,
+          "10419806": 18.72250521638053,
+          "10427725": 18.72060720378468,
+          "10435644": 18.72327938679621,
+          "10443563": 18.72231165276159,
+          "10451482": 18.722688781338316,
+          "10459401": 18.727634050398706,
+          "10467320": 18.730819461290523,
+          "10475239": 18.724648368081965,
+          "10483158": 18.754447796744827
+        },
+        "max_ms": -1,
+        "samples": 0,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 1.0018736391630652
       }
     },
     "send/loss1%": {
@@ -247,8 +523,8 @@
       "gvisor": {
         "runs": 9,
         "ok": 9,
-        "mbps": 10.988883491930164,
-        "recovery_ms": 1322.938638,
+        "mbps": 10.998775156679821,
+        "recovery_ms": 1320.710788,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
@@ -256,51 +532,73 @@
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.021295379703015
+        "spread": 1.0052349766851503
       },
       "linux": {
         "runs": 9,
         "ok": 9,
-        "mbps": 12.38117544443625,
-        "recovery_ms": 974.189756,
-        "rto_ms": 1424,
+        "mbps": 12.83640393000108,
+        "recovery_ms": 633.317043,
+        "rto_ms": 1248,
         "p50_ms": -1,
         "p99_ms": -1,
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.027428947224726
+        "spread": 1.61428446591024
       }
     },
     "send/reorder": {
       "gvisor": {
         "runs": 9,
         "ok": 9,
-        "mbps": 8.249956056629976,
+        "mbps": 9.62938619230144,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "8227776": 9.62938619230144,
+          "8235695": 7.60620394397639,
+          "8243614": 10.493832132066158,
+          "8251533": 9.172785281825622,
+          "8259452": 8.560632188084664,
+          "8267371": 8.794796026381785,
+          "8275290": 13.779378702397821,
+          "8283209": 9.684512480011788,
+          "8291128": 12.566299503697948
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 2.8601474568276593
+        "spread": 1.8115973229077267
       },
       "linux": {
         "runs": 9,
         "ok": 9,
-        "mbps": 18.787682922572895,
+        "mbps": 18.82025043395514,
         "recovery_ms": -1,
         "rto_ms": -1,
         "p50_ms": -1,
         "p99_ms": -1,
+        "per_seed_mbps": {
+          "8227776": 18.86178470812221,
+          "8235695": 18.82025043395514,
+          "8243614": 18.764649192048292,
+          "8251533": 18.869080870053978,
+          "8259452": 18.870826298880974,
+          "8267371": 18.864731043905046,
+          "8275290": 18.698984283640034,
+          "8283209": 18.776621186311257,
+          "8291128": 18.809601544883325
+        },
         "max_ms": -1,
         "samples": 0,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.0091977656787978
+        "spread": 1.0091899117424943
       }
     },
     "thin-recv/loss0%": {
@@ -310,13 +608,15 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.813759,
-        "p99_ms": 26.387295,
-        "max_ms": 26.615487,
+        "p50_ms": 26.296598,
+        "p99_ms": 27.308802,
+        "p99_lo_ms": 27.25034,
+        "p99_hi_ms": 27.466949,
+        "max_ms": 29.865045,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.0099707906509352
+        "spread": 0
       },
       "linux": {
         "runs": 9,
@@ -324,13 +624,49 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.88589,
-        "p99_ms": 26.32133,
-        "max_ms": 26.586127,
+        "p50_ms": 26.301333,
+        "p99_ms": 27.267585,
+        "p99_lo_ms": 27.215598,
+        "p99_hi_ms": 27.302546,
+        "max_ms": 29.320117,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.0042323607751293
+        "spread": 0
+      }
+    },
+    "thin-recv/loss0%/linux-client": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 26.225555,
+        "p99_ms": 27.282676,
+        "p99_lo_ms": 27.262893,
+        "p99_hi_ms": 27.334442,
+        "max_ms": 28.159992,
+        "samples": 3600,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 0
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 26.326682,
+        "p99_ms": 27.415852,
+        "p99_lo_ms": 27.320379,
+        "p99_hi_ms": 27.494329,
+        "max_ms": 29.745629,
+        "samples": 3600,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 0
       }
     },
     "thin-recv/loss1%": {
@@ -340,13 +676,15 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.849601,
-        "p99_ms": 96.049051,
-        "max_ms": 117.566009,
+        "p50_ms": 26.288653,
+        "p99_ms": 77.947596,
+        "p99_lo_ms": 77.491242,
+        "p99_hi_ms": 96.26652,
+        "max_ms": 109.481883,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 3.722985929882044
+        "spread": 0
       },
       "linux": {
         "runs": 9,
@@ -354,13 +692,49 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.863722,
-        "p99_ms": 96.013498,
-        "max_ms": 117.577722,
+        "p50_ms": 26.27778,
+        "p99_ms": 78.154918,
+        "p99_lo_ms": 77.243975,
+        "p99_hi_ms": 96.122555,
+        "max_ms": 107.959136,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 3.697804029393989
+        "spread": 0
+      }
+    },
+    "thin-recv/loss1%/linux-client": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 26.297361,
+        "p99_ms": 96.690119,
+        "p99_lo_ms": 78.04417,
+        "p99_hi_ms": 97.209542,
+        "max_ms": 314.139503,
+        "samples": 3600,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 0
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 26.250451,
+        "p99_ms": 97.049194,
+        "p99_lo_ms": 78.208116,
+        "p99_hi_ms": 97.424559,
+        "max_ms": 317.436245,
+        "samples": 3600,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 0
       }
     },
     "thin-recv/loss5%": {
@@ -370,13 +744,15 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.957529,
-        "p99_ms": 128.280049,
-        "max_ms": 211.888575,
+        "p50_ms": 26.449488,
+        "p99_ms": 117.416012,
+        "p99_lo_ms": 98.802845,
+        "p99_hi_ms": 126.271424,
+        "max_ms": 228.812993,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.6019227324462229
+        "spread": 0
       },
       "linux": {
         "runs": 9,
@@ -384,13 +760,49 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.986496,
-        "p99_ms": 136.226867,
-        "max_ms": 211.790321,
+        "p50_ms": 26.459066,
+        "p99_ms": 117.33214,
+        "p99_lo_ms": 98.708477,
+        "p99_hi_ms": 128.576308,
+        "max_ms": 230.227921,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.6037448472995093
+        "spread": 0
+      }
+    },
+    "thin-recv/loss5%/linux-client": {
+      "gvisor": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 26.674322,
+        "p99_ms": 415.431425,
+        "p99_lo_ms": 169.476364,
+        "p99_hi_ms": 767.05167,
+        "max_ms": 955.431425,
+        "samples": 7200,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 0
+      },
+      "linux": {
+        "runs": 18,
+        "ok": 18,
+        "mbps": 0,
+        "recovery_ms": -1,
+        "rto_ms": -1,
+        "p50_ms": 26.657765,
+        "p99_ms": 417.605109,
+        "p99_lo_ms": 169.193537,
+        "p99_hi_ms": 776.428657,
+        "max_ms": 966.091037,
+        "samples": 7200,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 0
       }
     },
     "thin-recv/outage2s": {
@@ -398,29 +810,67 @@
         "runs": 9,
         "ok": 9,
         "mbps": 0,
-        "recovery_ms": 117.605094,
+        "recovery_ms": 96.724649,
         "rto_ms": -1,
-        "p50_ms": 6341.643574,
-        "p99_ms": 9760,
+        "p50_ms": 6340,
+        "p99_ms": 9750.761652,
+        "p99_lo_ms": 9749.160156,
+        "p99_hi_ms": 9750.761652,
         "max_ms": 9820,
         "samples": 3600,
         "lost": 2169,
         "unrecovered": 0,
-        "spread": 1.002053388090349
+        "spread": 0
       },
       "linux": {
         "runs": 9,
         "ok": 9,
         "mbps": 0,
-        "recovery_ms": 98.44891,
+        "recovery_ms": 117.286551,
         "rto_ms": -1,
-        "p50_ms": 6341.058463,
-        "p99_ms": 9760,
+        "p50_ms": 6340,
+        "p99_ms": 9752.44384,
+        "p99_lo_ms": 9752.354168,
+        "p99_hi_ms": 9752.44384,
         "max_ms": 9820,
         "samples": 3600,
         "lost": 2169,
         "unrecovered": 0,
-        "spread": 1.0019095967818132
+        "spread": 0
+      }
+    },
+    "thin-recv/outage2s/linux-client": {
+      "gvisor": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": 76.475663,
+        "rto_ms": 1008,
+        "p50_ms": 26.52793,
+        "p99_ms": 2044.661474,
+        "p99_lo_ms": 2043.322222,
+        "p99_hi_ms": 2044.722791,
+        "max_ms": 2084.722791,
+        "samples": 3600,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 0
+      },
+      "linux": {
+        "runs": 9,
+        "ok": 9,
+        "mbps": 0,
+        "recovery_ms": 72.515237,
+        "rto_ms": 1008,
+        "p50_ms": 26.460145,
+        "p99_ms": 2041.774274,
+        "p99_lo_ms": 2038.037727,
+        "p99_hi_ms": 2042.96107,
+        "max_ms": 2082.96107,
+        "samples": 3600,
+        "lost": 0,
+        "unrecovered": 0,
+        "spread": 0
       }
     },
     "thin-send/loss0%": {
@@ -430,13 +880,15 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.869488,
-        "p99_ms": 26.370447,
-        "max_ms": 28.395667,
+        "p50_ms": 26.265998,
+        "p99_ms": 27.874051,
+        "p99_lo_ms": 27.769465,
+        "p99_hi_ms": 28.030732,
+        "max_ms": 29.626465,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.0110648908208377
+        "spread": 0
       },
       "linux": {
         "runs": 9,
@@ -444,43 +896,49 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.893296,
-        "p99_ms": 26.462124,
-        "max_ms": 26.663507,
+        "p50_ms": 26.356161,
+        "p99_ms": 27.759993,
+        "p99_lo_ms": 27.512864,
+        "p99_hi_ms": 27.913369,
+        "max_ms": 29.867792,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.0073101250682417
+        "spread": 0
       }
     },
     "thin-send/loss1%": {
       "gvisor": {
-        "runs": 18,
-        "ok": 18,
+        "runs": 9,
+        "ok": 9,
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.866612,
-        "p99_ms": 96.40047,
-        "max_ms": 157.380447,
-        "samples": 7200,
+        "p50_ms": 26.301037,
+        "p99_ms": 96.16956,
+        "p99_lo_ms": 77.932085,
+        "p99_hi_ms": 97.314165,
+        "max_ms": 99.144047,
+        "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 2.685414270931843
+        "spread": 0
       },
       "linux": {
-        "runs": 18,
-        "ok": 18,
+        "runs": 9,
+        "ok": 9,
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.8843,
-        "p99_ms": 95.80931,
-        "max_ms": 169.28784,
-        "samples": 7200,
+        "p50_ms": 26.38298,
+        "p99_ms": 79.141021,
+        "p99_lo_ms": 77.576336,
+        "p99_hi_ms": 97.140656,
+        "max_ms": 99.141021,
+        "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 2.6242952502401278
+        "spread": 0
       }
     },
     "thin-send/loss5%": {
@@ -490,13 +948,15 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 25.979948,
-        "p99_ms": 1834.214418,
-        "max_ms": 2500.169568,
+        "p50_ms": 26.533417,
+        "p99_ms": 5298.353873,
+        "p99_lo_ms": 117.346834,
+        "p99_hi_ms": 5615.562395,
+        "max_ms": 5822.821748,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 24.72643448183032
+        "spread": 0
       },
       "linux": {
         "runs": 9,
@@ -504,74 +964,100 @@
         "mbps": 0,
         "recovery_ms": -1,
         "rto_ms": -1,
-        "p50_ms": 26.134955,
-        "p99_ms": 156.374897,
-        "max_ms": 397.008824,
+        "p50_ms": 26.630042,
+        "p99_ms": 369.384393,
+        "p99_lo_ms": 160.931648,
+        "p99_hi_ms": 658.79066,
+        "max_ms": 898.79066,
         "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 3.2376492304230604
+        "spread": 0
       }
     },
     "thin-send/outage2s": {
       "gvisor": {
-        "runs": 18,
-        "ok": 18,
+        "runs": 9,
+        "ok": 9,
         "mbps": 0,
-        "recovery_ms": 98.343502,
+        "recovery_ms": 99.527289,
         "rto_ms": -1,
         "p50_ms": 6340,
-        "p99_ms": 9756.297881,
+        "p99_ms": 9760,
+        "p99_lo_ms": 9744.861955,
+        "p99_hi_ms": 9760,
         "max_ms": 9820,
-        "samples": 7200,
-        "lost": 4337,
+        "samples": 3600,
+        "lost": 2169,
         "unrecovered": 0,
-        "spread": 1.0034798284858875
+        "spread": 0
       },
       "linux": {
-        "runs": 18,
-        "ok": 18,
+        "runs": 9,
+        "ok": 9,
         "mbps": 0,
-        "recovery_ms": 66.919811,
+        "recovery_ms": 58.262699,
         "rto_ms": 1008,
-        "p50_ms": 26.803785,
-        "p99_ms": 2037.282122,
-        "max_ms": 2081.437911,
-        "samples": 7200,
+        "p50_ms": 26.647177,
+        "p99_ms": 2034.004243,
+        "p99_lo_ms": 2025.134915,
+        "p99_hi_ms": 2034.004243,
+        "max_ms": 2074.004243,
+        "samples": 3600,
         "lost": 0,
         "unrecovered": 0,
-        "spread": 1.014276906065706
+        "spread": 0
       }
     }
   },
   "cell_meta": {
     "recv/loss0%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
+    "recv/loss0%/linux-client": {
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "recv/loss1%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "recv/loss5%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "recv/outage2s": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:58:03Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
+    "recv/outage2s/linux-client": {
+      "measured": "2026-10-31T20:58:03Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "recv/reorder": {
       "measured": "2026-10-30T04:49:52Z",
@@ -580,12 +1066,21 @@
       "gvisor": "not recorded",
       "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
     },
+    "recv/reorder/linux-client": {
+      "measured": "2026-10-31T20:58:03Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
     "send/loss0%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:53:04Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "send/loss1%": {
       "measured": "2026-10-30T04:49:52Z",
@@ -602,74 +1097,116 @@
       "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
     },
     "send/outage2s": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:53:04Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "send/reorder": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:53:04Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "thin-recv/loss0%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
+    "thin-recv/loss0%/linux-client": {
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "thin-recv/loss1%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
+    "thin-recv/loss1%/linux-client": {
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "thin-recv/loss5%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
+    "thin-recv/loss5%/linux-client": {
+      "measured": "2026-10-31T20:52:55Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "thin-recv/outage2s": {
-      "measured": "2026-10-30T07:29:21Z",
-      "commit": "6792bb61, rebased as 06f0bcee with the same internal/tcpharness and go.mod",
+      "measured": "2026-10-31T20:58:03Z",
+      "commit": "16c4a27c",
       "go": "go1.27.2",
       "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
+    "thin-recv/outage2s/linux-client": {
+      "measured": "2026-10-31T20:58:03Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     },
     "thin-send/loss0%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
-    },
-    "thin-send/loss1%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
-    },
-    "thin-send/loss5%": {
-      "measured": "2026-10-30T04:49:52Z",
-      "commit": "not recorded",
-      "go": "not recorded",
-      "gvisor": "not recorded",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
-    },
-    "thin-send/outage2s": {
-      "measured": "2026-10-30T07:29:21Z",
-      "commit": "6792bb61, rebased as 06f0bcee with the same internal/tcpharness and go.mod",
+      "measured": "2026-10-31T20:53:04Z",
+      "commit": "16c4a27c",
       "go": "go1.27.2",
       "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
-      "where": "linux 6.1.0-53-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304"
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
+    "thin-send/loss1%": {
+      "measured": "2026-10-31T20:53:04Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
+    "thin-send/loss5%": {
+      "measured": "2026-10-31T20:53:04Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
+    },
+    "thin-send/outage2s": {
+      "measured": "2026-10-31T20:53:04Z",
+      "commit": "16c4a27c",
+      "go": "go1.27.2",
+      "gvisor": "v0.0.0-20261004063249-f57b8fc79db4",
+      "where": "linux 7.2.11+deb13-amd64; net/ipv4/tcp_congestion_control=cubic, net/ipv4/tcp_sack=1, net/ipv4/tcp_dsack=1, net/ipv4/tcp_recovery=1, net/ipv4/tcp_early_retrans=3, net/ipv4/tcp_frto=2, net/ipv4/tcp_moderate_rcvbuf=1, net/ipv4/tcp_autocorking=1, net/ipv4/tcp_no_metrics_save=1, net/ipv4/tcp_ecn=0, net/ipv4/tcp_rmem=4096 131072 4194304, net/ipv4/tcp_wmem=4096 16384 4194304",
+      "loss_model": "content"
     }
   }
 }
