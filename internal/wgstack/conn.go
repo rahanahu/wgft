@@ -157,6 +157,7 @@ func (h *Conn) Read(b []byte) (int, error) {
 		if c.rcv.unread() > 0 {
 			n := c.rcv.read(b)
 			now := s.clock()
+			c.rcvSpaceAdjust(now)
 			c.ackOnDrain()
 			c.windowUpdate()
 			boost := c.rdem.add(now, n) && c.noteDemand(boostRecv, now)
@@ -187,13 +188,13 @@ func (h *Conn) Read(b []byte) (int, error) {
 }
 
 // windowUpdate は、読み取りで空いた受信のバッファが広告する窓を大きく広げるときに ACK を送る。Linux の
-// tcp_cleanup_rbuf と同じく、今の窓が容量の半分以下で、広げた後の窓が今の窓の 2 倍以上になるときである。
+// tcp_cleanup_rbuf と同じく、今の窓が窓の上限の半分以下で、広げた後の窓が今の窓の 2 倍以上になるときである。
 func (c *tcb) windowUpdate() {
 	cur := uint64(c.rcvWindow())
-	if 2*cur > c.rcvCap {
+	if 2*cur > c.rcvClamp() {
 		return
 	}
-	target := min(c.rcv.readOff+c.rcvCap, c.rcv.nxtOff+uint64(65535)<<c.rcvWscale)
+	target := c.rcvTarget()
 	if target <= c.rcv.nxtOff {
 		return
 	}

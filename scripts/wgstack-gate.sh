@@ -100,6 +100,134 @@ fuzz() {
   return 1
 }
 
+# fuzz_shards runs a fuzz target for $2 executions in all as $3 processes of one worker each, and
+# runs fuzz with $3 workers instead on a machine with fewer than $3 CPUs. One process with $3
+# workers is slower: under -fuzztime Nx the coordinator reserves the executions left for the calls
+# it has sent, the reservations drift apart and are not split again, so the end of the run goes on
+# fewer and fewer workers. Each shard has one reservation, so nothing drifts.
+#
+# The shards run with GOMAXPROCS=1 and are not pinned to CPUs: the gain comes from the split, and
+# fixed CPUs would collide with other gates and pinned VMs on the same host, while a job runner
+# that re-pins the step's processes would undo them anyway.
+#
+# Each shard starts from a copy of the fuzz cache go test uses, so that it does not rediscover
+# the inputs earlier runs kept; the shards do not share what they find while they run. When the
+# shards have exited, and when the step is stopped by its timeout or an interrupt, each shard's new
+# cache entries are copied into that cache. An entry is named after its content, so the union does
+# not depend on the order. When a shard fails, the others are interrupted, as one process stops at
+# its first failure. A failing input goes to the testdata of the tree copy, as with fuzz.
+#
+# When the step is stopped, the process group usually gets TERM, which ends the shards at once;
+# their cache entries are on disk already, as Go writes each one when found, and this function
+# merges them if its own shell survives the signal. If only this shell gets the signal, it
+# interrupts the shards first.
+#
+# Every shard minimizes the new inputs it finds, so the minimization is bounded by executions:
+# by default it may take 60 seconds, the shard makes no progress meanwhile, and a minimization that
+# runs out of time can be killed with its executions left uncounted. The bound covers a failing
+# input's minimization too.
+fuzz_shards() {
+  local target=$1 total=$2 k=$3 step=${FUZZ_STEP:-fuzz} i n rc=0 bin shared cache log t0 secs
+  local execs found sum=0 done_pid status first="" f src
+  local pids=() running=() failed=()
+  local -A shard_of=()
+  need_test ./internal/wgstack "$target"
+  if (($(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1) < k)); then
+    echo "fewer than $k CPUs; running one process with $k workers"
+    fuzz "$target" "${total}x" "$k"
+    return
+  fi
+  src=$PWD
+  copy_tree "$logdir/$target-tree" && cd "$tmp" || return 1
+  bin=$tmp/$target.test
+  go test -c -fuzz "^$target\$" -o "$bin" ./internal/wgstack || return 1
+  shared=$(go env GOCACHE)/fuzz/$(go list -f '{{.ImportPath}}' ./internal/wgstack)/$target
+  mkdir -p "$shared" || return 1
+  # Temporary files that a merge killed in the middle left beside the target's directory. Only old
+  # ones go, so that a gate merging at the same time keeps its own.
+  find "${shared%/*}" -maxdepth 1 -name ".$target.*.tmp" -mmin +60 -delete 2>/dev/null
+  echo "$k shards of one worker and GOMAXPROCS=1, $total execs in all, starting from the $(find "$shared" -type f | wc -l) inputs in $shared"
+  for ((i = 0; i < k; i++)); do
+    cache=$logdir/$step.shard$i.cache
+    rm -rf "$cache" && mkdir -p "$cache/$target" && cp -R "$shared/." "$cache/$target/" || return 1
+  done
+  # merge_shards copies the shards' new cache entries into the shared cache, each through a
+  # unique temporary name beside the target's directory, so that no partial entry is ever in it
+  # and gates merging the same entry at the same time do not share a file.
+  merge_shards() {
+    local i f name merged=0 t
+    for ((i = 0; i < k; i++)); do
+      for f in "$logdir/$step.shard$i.cache/$target"/*; do
+        name=${f##*/}
+        [[ -f $f && ! -e $shared/$name ]] || continue
+        t=$(mktemp "${shared%/*}/.$target.XXXXXX.tmp") || continue
+        if cp "$f" "$t" && chmod 644 "$t" && mv -f "$t" "$shared/$name"; then merged=$((merged + 1)); else rm -f "$t"; fi
+      done
+      rm -rf "$logdir/$step.shard$i.cache"
+    done
+    echo "copied $merged new inputs from the shards into $shared"
+  }
+  # On a timeout, timeout(1) and stop send TERM to the whole process group; Go does not handle
+  # TERM, so the shards die at once, and the entries they found are already on disk, as Go writes
+  # each one when it finds it. When only this shell gets the signal, the shards are interrupted.
+  trap 'echo "stopped; interrupting the shards if they still run, and keeping what they found"; kill -INT "${pids[@]}" 2>/dev/null; wait; merge_shards; exit 1' TERM INT
+  t0=$(date +%s)
+  for ((i = 0; i < k; i++)); do
+    n=$((total / k + (i < total % k ? 1 : 0)))
+    cache=$logdir/$step.shard$i.cache
+    # fuzzseed=N would give every shard the same mutator seed, so most executions would repeat.
+    (cd internal/wgstack && GODEBUG=$(sed -E 's/(^|,)fuzzseed=[^,]*//g; s/^,//' <<<"${GODEBUG:-}") GOMAXPROCS=1 exec "$bin" -test.run '^$' -test.fuzz "^$target\$" \
+      -test.fuzztime "${n}x" -test.fuzzminimizetime 5000x -test.parallel 1 -test.fuzzcachedir "$cache") >"$logdir/$step.shard$i.log" 2>&1 &
+    pids+=($!)
+    shard_of[$!]=$i
+  done
+  running=("${pids[@]}")
+  while ((${#running[@]})); do
+    done_pid=""
+    wait -n -p done_pid "${running[@]}"
+    status=$?
+    [[ -n $done_pid ]] || { rc=1; break; }
+    for i in "${!running[@]}"; do [[ ${running[$i]} == "$done_pid" ]] && unset 'running[i]'; done
+    running=("${running[@]}")
+    ((status == 0)) && continue
+    if [[ -n $first ]]; then
+      echo "shard ${shard_of[$done_pid]} was interrupted after shard $first failed; exit status $status"
+      continue
+    fi
+    rc=1 first=${shard_of[$done_pid]}
+    failed+=("$first")
+    echo "shard $first failed; interrupting the other shards"
+    kill -INT "${pids[@]}" 2>/dev/null
+  done
+  wait
+  trap - TERM INT
+  secs=$(($(date +%s) - t0))
+  for ((i = 0; i < k; i++)); do
+    log=$logdir/$step.shard$i.log
+    execs=$(grep -o 'execs: [0-9]*' "$log" | tail -1 | awk '{ print $2 + 0 }')
+    sum=$((sum + ${execs:-0}))
+    found=$(grep -o 'new interesting: [0-9]*' "$log" | tail -1 | awk '{ print $3 + 0 }')
+    echo "shard $i: ${execs:-0} execs, ${found:-0} new inputs; log $log"
+  done
+  merge_shards
+  for i in "${failed[@]}"; do
+    log=$logdir/$step.shard$i.log
+    echo "shard $i failed; the end of $log:"
+    tail -n 40 "$log"
+    f=$(sed -n 's/.*Failing input written to \(testdata\/fuzz\/[^ ]*\).*/\1/p' "$log" | tail -1)
+    [[ -z $f ]] || echo "the failing input of shard $i is $tmp/internal/wgstack/$f"
+  done
+  if ((${#failed[@]})); then
+    # Another shard may have found a crasher before the interrupt reached it.
+    echo "all inputs under $tmp/internal/wgstack/testdata/fuzz/$target that the source tree does not have:"
+    for f in "$tmp/internal/wgstack/testdata/fuzz/$target"/*; do
+      [[ -f $f && ! -e $src/internal/wgstack/testdata/fuzz/$target/${f##*/} ]] && echo "  $f"
+    done
+  fi
+  ((secs > 0)) && echo "NOTE: $sum execs in ${secs}s, $((sum / secs))/s, $k shards"
+  return $rc
+}
+
 # fuzz_rate reads the last progress line of the fuzzing output above it in the step's log, such
 # as "fuzz: elapsed: 1m6s, execs: 205209 (3498/sec)", and prints the run's executions per second.
 fuzz_rate() {
@@ -134,9 +262,10 @@ step staticcheck 'copy_tree && cd "$tmp" && go mod edit -go=1.27.1 && GOTOOLCHAI
 step conformance-seeds 'for s in 1 2 3 4 5; do WGFT_TEST_WGSTACK_CONFORMANCE=1 WGFT_TEST_TCPHARNESS_SEED=$s go test -count=1 ./internal/tcpharness/wgstackdut || exit 1; done'
 step stream-seeds-full 'WGFT_WGSTACK_STREAM_SEEDS=full go test -count=1 ./internal/wgstack -run "Stream|Scoreboard|RecvBuf"'
 step adversarial-seeds 'need_test ./internal/wgstack TestAdversarialSender; WGFT_WGSTACK_AUDIT_SEEDS=3000 go test -count=1 ./internal/wgstack -run TestAdversarialSender'
-# FuzzCore barely speeds up past 8 workers and runs at 4; FuzzAdversarialSender scales with them
-# and runs at 8 for a smoke amount, since the long fuzzing runs on a separate machine.
-step fuzz-core 'FUZZ_STEP=fuzz-core fuzz FuzzCore 5000000x 4'
+# FuzzCore runs as 4 single-worker shards, which finish the same executions sooner than one process with
+# 4 workers; FuzzAdversarialSender stays one process of 8 workers for a smoke amount, since every
+# shard would first rerun the whole cached corpus, and the long fuzzing runs on a separate machine.
+step fuzz-core 'FUZZ_STEP=fuzz-core fuzz_shards FuzzCore 5000000 4'
 step fuzz-adversarial 'FUZZ_STEP=fuzz-adversarial fuzz FuzzAdversarialSender 30000x 8'
 step docs 'go run ./scripts/check-japanese/ && bash scripts/check-ascii-punct.sh && python3 scripts/check-docs.py && python3 scripts/check-docs-test.py && bash scripts/check-log-tokens.sh'
 step mod-tidy 'copy_tree && mkdir -p "$tmp/.orig" && cp go.mod go.sum "$tmp/.orig/" && cd "$tmp" && go mod tidy && cmp go.mod .orig/go.mod && cmp go.sum .orig/go.sum || { echo "go mod tidy changes go.mod or go.sum"; exit 1; }'
@@ -145,7 +274,7 @@ if ((lab)); then
 fi
 
 export logdir
-export -f has_test need_test copy_tree fuzz fuzz_rate
+export -f has_test need_test copy_tree fuzz fuzz_rate fuzz_shards
 
 declare -A start dur result note
 running=()
