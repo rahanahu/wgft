@@ -88,19 +88,19 @@ type tcbState struct {
 	rcvCap        uint64
 	advRight      uint64 // 広告した窓の右端(受信の offset)。後ろへ戻さない
 	rcvSsthresh   uint64 // 広告する窓の歩みの上限(Linux の rcv_ssthresh、rcvwin.go)
-	rcvWant       uint64 // 受け手の往復ごとの測定が求めた窓の上限(Linux の window_clamp)。下げない
-	rsTime        int64  // 読んだ量を数え始めた時刻(Linux の rcvq_space.time)
+	rcvWant       uint64 // 受け手の往復ごとの測定が求めた窓の上限。下げない
+	rsTime        int64  // 窓の自動調整の区間の始めの時刻
 	rsSeq         uint64 // 数え始めた時の readOff
-	rsSpace       uint64 // 前の区間に読んだ量(Linux の rcvq_space.space)
-	rcvRTT        int64  // 受け手の RTT の推定(Linux の rcv_rtt_est.rtt_us)。0 は推定が無い
-	rttWinSeq     uint64 // 窓による標本の終わりの offset(Linux の rcv_rtt_est.seq)
+	rsSpace       uint64 // 前の区間に読んだ量
+	rcvRTT        int64  // 受け手の RTT の推定。0 は推定が無い
+	rttWinSeq     uint64 // 窓による標本の終わりの offset
 	rttWinTime    int64  // 窓による標本の始めの時刻。0 は標本を始めていない
 	rttTsecr      uint32 // 前の timestamp による標本の TSecr
 	finRcvd       bool
 	oooFin        bool
 	oooFinOff     uint64
 	rcvSinceAck   int
-	rcvMSSEst     uint32    // 相手の segment の大きさの推定(Linux の icsk_ack.rcv_mss)
+	rcvMSSEst     uint32    // 相手の segment の大きさの推定(相手の segment の大きさの推定 rcv_mss)
 	pingpong      bool      // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
 	lastDataRcvd  int64     // 最後に中身を受け入れた時刻
 	rcvdData      bool      // lastDataRcvd が有効
