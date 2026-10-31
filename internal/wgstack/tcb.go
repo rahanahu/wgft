@@ -725,14 +725,10 @@ func (c *tcb) dupAck(now int64) {
 		return
 	}
 	if c.dupAcks == 3 && seqGT(c.sndUna, c.recover) {
-		c.initUndo()
-		c.ssthresh = c.lossThresh()
-		c.recover = c.sndMax
+		c.enterFastRecovery()
 		c.cwnd = c.ssthresh + 3*mss
-		c.inRecovery = true
 		c.fastRtx = true
 		c.rtxCause = rtxFast
-		c.s.fastRecoveries.Add(1)
 	}
 }
 

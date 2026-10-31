@@ -351,15 +351,7 @@ func (c *tcb) buildResend(b []byte, space int, now int64, p resendPick, force bo
 		}
 	}
 	if toT {
-		if c.genFlag(r, recInQ) {
-			if c.lostQ.head == c.recAbs(i) {
-				c.qOff, c.qMid = 0, false
-			}
-			c.listRemove(&c.lostQ, i, r, recInQ)
-		}
-		if c.genFlag(r, recInT) {
-			c.listRemove(&c.tList, i, r, recInT)
-		}
+		c.unlinkRec(i, r)
 		c.listAppend(&c.tList, i, r, recInT)
 	}
 	if c.inRecovery {
