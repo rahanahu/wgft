@@ -66,13 +66,19 @@ impl GoTime {
         }
     }
 
-    /// RFC 3339 の文字列を読む。Go の零の値を表す瞬間は `None` にする。
+    /// RFC 3339 の文字列を読む。Go の零の値を表す瞬間は `None` にする。Go と同じく、`T` と `Z` は
+    /// 大文字だけを受ける。
     ///
     /// # Errors
     ///
     /// RFC 3339 として読めない文字列は誤りにする。
-    pub fn parse(s: &str) -> Result<Self, time::error::Parse> {
-        Ok(GoTime::from_offset(OffsetDateTime::parse(s, &Rfc3339)?))
+    pub fn parse(s: &str) -> Result<Self, String> {
+        if s.contains(['t', 'z']) {
+            return Err(format!("time {s:?} has a lower-case t or z"));
+        }
+        OffsetDateTime::parse(s, &Rfc3339)
+            .map(GoTime::from_offset)
+            .map_err(|e| e.to_string())
     }
 }
 

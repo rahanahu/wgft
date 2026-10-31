@@ -3,7 +3,7 @@
 この文書は、v2 の Rust の agent のうち制御プレーンの試作を定めます。
 制御プレーンは、wire の版 1 の型、接続文字列と登録、認証情報 (`agent.json`)、stream、全体状態の適用、ハートビートを受け持ちます。
 試作の目的は、変更していない Go の v1 の server に Rust の agent を登録し、トンネルを立て、ルールの TCP の接続を 1 本中継できることをラボで確かめることです。
-wire と `agent.json` の契約は、別に書く agent と server の境目の仕様 (`docs/design/spec/`) に従います。
+wire と `agent.json` の契約は [agent と server の境目の仕様](../spec/README.md) に従います。
 この文書は Rust の側の作りと、試作だけの扱いと、未確認の点を書きます。
 
 ## crate の分け方
@@ -69,21 +69,35 @@ Go の試験は `-update` で fixture を書き直し、`-update` が無けれ�
 | --- | --- | --- |
 | `testdata/spec/join/join-corpus.json` | `internal/agent/enroll` の `TestJoinCorpus` | `crates/wgft-proto/tests/join_corpus.rs` |
 | `testdata/spec/text/non-graphic.json` | `internal/textsafe` の `TestNonGraphicRanges` | `crates/wgft-proto/tests/non_graphic.rs` |
+| `testdata/spec/wire/` | 仕様の fixture。`proto` の `spec_test.go` が Go の型との往復を確かめる | `crates/wgft-proto/tests/spec_wire.rs` |
+| `testdata/spec/join/join-strings.json` と登録の本文 | 仕様の fixture。`internal/agent/enroll` の `spec_test.go` が確かめる | `crates/wgft-proto/tests/spec_join.rs` |
 
 `join-corpus.json` は、接続文字列の種の入力と、種から決まった手順で作った変異の入力に対する `ParseJoin` の結果です。
 Rust の試験は、受理、`endpoint`、トークン、ピン、誤りの文言のすべてで Go と一致することを確かめます。
 例外は上の不正な UTF-8 の入力だけで、fixture がその入力に印を付けます。
 `non-graphic.json` は `unicode.IsGraphic` が偽の code point の範囲で、Rust の試験は差が割り当ての無い文字だけであることを確かめます。
-wire のメッセージの byte 列の fixture は、仕様の PR が `testdata/spec/wire/` に置くものを使います (未着手)。
+仕様の wire の fixture では、Rust の試験は次を確かめます。
+
+- `pubkey`、`state`、`heartbeat` のメッセージは、Rust で読んで書くと同じ byte 列に戻ること
+- `quirks.json` の `must-accept` の例は Go と同じ値に読み、`may-reject` の例は拒むか Go と同じ値に読むこと。
+  Go と同じ値かは、Go が読んで書き直した形を Rust で読んだ値と比べます。
+  Go が誤りにする例は Rust も拒みます
+- `reasons.json` の理由の整形が Go と同じ文言になること。
+  不正な UTF-8 の入力の例は、Rust の文字列が持てないので照らしません
+- `close.json` の符号が、Rust の知る符号と 1008、1011、close のフレームの無いことのどれかであること
 
 ## Go の writer が書かない形
 
 仕様は、Go の v1 の writer が書く形をすべて受けることを求め、Go の writer が書かない形はメッセージごと拒んでよいとします。
 Rust の型は前者を受け、後者の次の形を拒みます。
-Go は受けるので、ここが Go の読み手と違う点です。
+拒む経路は Go の v1 の読みの誤りと同じで、agent は読めない `state` をログに出して捨てます。
 
-- 大文字と小文字だけが違うキーと、重複したキー:serde の既定のとおり、前者は知らないキーとして読み飛ばし、後者は構造体の誤りにします。
-  Unicode の case folding と重複したキーの重ね合わせは写しません
+- 大文字か ASCII でない文字を含むキー:`Message::decode` はメッセージごと拒みます。
+  Go はそのキーを Unicode の単純な case folding で既知のフィールドに当てるので、serde の既定のように知らないキーとして読み飛ばすと、Go と違う値になります。
+  Go の writer のキーは小文字の ASCII なので、知らないキーとして受けるのは小文字の ASCII のキーだけです
+- 重複したキー:既知のフィールドの重複は serde の構造体の誤りにします。
+  知らないキーの重複は、Go と同じく読み飛ばします
+- 時刻の小文字の `t` と `z`:Go と同じく誤りにします
 - 数、文字列、真偽、`PortRange` への `null`:上に挙げた `Option`、`rules`、時刻のほかは誤りにします
 - 欠けたフィールド:ルールの `id`、`proto`、`listen_port`、`target` と、ルールの状態の `id`、`state` が欠けたメッセージを誤りにします。
   Go の writer はこれらを省きません

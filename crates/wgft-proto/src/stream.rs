@@ -58,7 +58,45 @@ pub struct Message {
     pub capabilities: Option<Vec<String>>,
 }
 
+/// stream の 1 通を読んだときの誤り。
+#[derive(Debug)]
+pub struct DecodeError(String);
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
 impl Message {
+    /// stream の 1 通を読む。Go の writer が書く形はすべて受ける。Go の writer が書かない形のうち、
+    /// 大文字か ASCII でない文字を含むキーはメッセージごと拒む。Go はそのキーを case folding で既知の
+    /// フィールドに当てるので、serde の既定のように知らないキーとして読み飛ばすと、Go と違う値になる。
+    /// 重複したキー、スカラーの `null`、型の違いは serde の誤りで拒む
+    /// (`docs/design/spec/encoding.md` の「拒んでよい形」)。
+    ///
+    /// # Errors
+    ///
+    /// JSON として読めないか、上の形に当たれば誤りを返す。
+    pub fn decode(text: &str) -> Result<Message, DecodeError> {
+        let v: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))?;
+        check_keys(&v)?;
+        serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))
+    }
+
+    /// stream の 1 通を byte 列から読む。不正な UTF-8 は Go の writer が書かない形なので拒む。
+    /// WebSocket の text のフレームは UTF-8 なので、stream の上ではここに来る前に拒まれる。
+    ///
+    /// # Errors
+    ///
+    /// UTF-8 でないか、[`Message::decode`] の誤りに当たれば誤りを返す。
+    pub fn decode_bytes(b: &[u8]) -> Result<Message, DecodeError> {
+        Message::decode(str::from_utf8(b).map_err(|e| DecodeError(e.to_string()))?)
+    }
+
     /// 種類が `t` かどうか。
     #[must_use]
     pub fn is(&self, t: MessageType) -> bool {
@@ -68,6 +106,28 @@ impl Message {
 
 /// エージェントが stream を繋ぎ直す待ちの上限。
 pub const RECONNECT_BACKOFF_MAX: Duration = Duration::from_mins(5);
+
+/// オブジェクトのキーが、Go の writer が書く小文字の ASCII の形かどうかを確かめる。
+fn check_keys(v: &serde_json::Value) -> Result<(), DecodeError> {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, child) in m {
+                if !k
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+                {
+                    return Err(DecodeError(format!(
+                        "key {k:?} is not a lower-case key a Go writer emits"
+                    )));
+                }
+                check_keys(child)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(a) => a.iter().try_for_each(check_keys),
+        _ => Ok(()),
+    }
+}
 
 /// stream の 1 通の大きさの上限 (byte)。agent が読む全体状態はこの 1 通に収まる。
 pub const STREAM_READ_LIMIT: usize = 4 << 20;
