@@ -42,6 +42,8 @@ type Stats struct {
 	ProbeAborts      uint64
 	BoostGranted     uint64
 	BoostReclaimed   uint64
+	// BoostRenegedBytes は、floor に戻す時に取り消した順序外の byte の合計(設計文書の「boost の取得と floor への戻り」)
+	BoostRenegedBytes uint64
 
 	// 送り手の事象(wgstack-performance.md の「安く確かめる手順」)
 	RTOs                 uint64 // 再送のタイマーの期限で送り直した回数。窓の probe は数えない
@@ -130,6 +132,7 @@ func (s *stack) stats() Stats {
 	st.ProbeAborts = s.probeAborted.Load()
 	st.BoostGranted = s.boostGranted.Load()
 	st.BoostReclaimed = s.boostReclaimed.Load()
+	st.BoostRenegedBytes = s.boostReneged.Load()
 	st.RTOs = s.rtos.Load()
 	st.RTOsBackedOff = s.rtosBackedOff.Load()
 	st.RTOsShortOfDupThresh = s.rtosShortOfDupThresh.Load()
