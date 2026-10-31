@@ -444,11 +444,9 @@ CPU の目標は、qbench の待ち行列の大きな測定で定常の速さが
 - 区間の数に比例する手間(実装済み):相手の順序外の segment で CPU を使わせる攻撃になるので、性能の段階を待たずに完成の条件として直しました。
   最近触れた区間の短い list で block を選び、区間の表を固定の配列を置き場にした treap にしました([接続ごとのバッファ](wgstack.md#接続ごとのバッファ))。
   表は予約の段ごとの固定の配列のままで、節は 16 byte になり、h_f と d_h はその大きさで数えます
-- バッチ:`BatchSize` を 1 より大きくし、`Read` が 1 回に複数の packet を作り、`Write` が複数の packet を受けます。
-  wireguard-go の UDP の送受信がまとめて行われ、packet ごとの system call が減ります。
-  wgstack は packet を wireguard-go の buffer に直接作るので、wgstack の保持は増えません。
-  wireguard-go の buffer とキューは batch の大きさに応じて増えるので、[フロー数とメモリのソフト上限](flow-limits.md)の wireguard-go の項を測り直します。
-  `Read` の誤りの約束(誤りは `Close` の後の `os.ErrClosed` だけ)は保ちます
+- バッチと segment のまとめ:`BatchSize` を 1 より大きくし、`Read` が 1 回に複数の packet を作り、`Write` が複数の packet を受けます。
+  受信では 1 本の接続の続く segment を連なりとして処理し、送信では 1 本の接続の segment をまとめて作ります。
+  wireguard-go との約束、ACK の決め方、wireguard-go の滞留の上界、OS ごとの挙動、実装の順序は[wgstack のバッチと segment のまとめ](wgstack-batching.md)に分けます
 - 錠の競合:入力、出力、アプリケーション、タイマーの goroutine が接続の錠を取り合います。
   mutex のプロファイルで競合を確かめてから分け方を決め、錠の順(接続の錠、表の錠、末端の錠)は変えません
 - checksum:今の `checksum` は 2 byte ずつ足します。
@@ -530,7 +528,7 @@ Linux は RACK を使う間は DupThresh で損失を決めず(`tcp_time_to_reco
 | SACK 済みの範囲を飛ばす構造 | 記録 1 件の中の、飛ばす記録の数と 2 つの世代の番号。記録は 24 byte から 32 byte になります | r_f と d_rec |
 | `Stats` の数と接続の記録の関数 | Device の atomic と関数の値 | M_fix |
 | 区間の構造 | 区間の節の大きさ | h_f と d_h |
-| バッチ | batch の処理に使う固定の作業の配列 | M_fix。wireguard-go の buffer は式の外の項で、別に測ります |
+| バッチと segment のまとめ | 接続ごとの ACK の控えの固定の配列と、固定の作業の値 | 控えは新しい項 a_ack、作業の値は M_fix。wireguard-go の滞留は式の外の項です([上界の式への項](wgstack-batching.md#上界の式への項)) |
 | pacing | 接続ごとのタイマーの節 | M_fix(タイマーの輪の節の数が N_c に比例して増えます) |
 
 どの変更も入力の量に比例する保持を作らず、表と輪は作成の時の容量のままです。
@@ -806,7 +804,8 @@ commit が分からない時は書き出しを始めず、作業中の変更が�
 8. 受け手の ACK と D-SACK
 9. 並べ替えの下の不要な再送の取り消し:[並べ替えと不要な再送](#並べ替えと不要な再送)に従います。
    あわせて、まとめて届く ACK への補正を[ACK のまとまりと遅れた送り出し](#ack-のまとまりと遅れた送り出し)に従って加えます
-10. CPU の仕事:区間の数に比例する手間が損失の場合のプロファイルで目立てば、2 の段の後に前倒しします
+10. CPU の仕事:区間の数に比例する手間が損失の場合のプロファイルで目立てば、2 の段の後に前倒しします。
+    バッチと segment のまとめの段の順は[実装の順序](wgstack-batching.md#実装の順序)に従います
 11. 必要なら加える変更:4 と 10 の段の後の関門の行列で要否を決めます
 
 適合の試験の新しい台本は、試験の書き手が規格と Linux の挙動から書き、wgstack を実装する人は書きません([検証の原則](wgstack-verification.md#検証の原則))。
@@ -846,7 +845,7 @@ stream の一致の試験も、SACK を交渉する相手と並べ替える相�
   CUBIC の通常の窓の増え方によるのか、窓を下げない別の経路があるのかは未確認です
 - 時間で区切る実行:決まった量の転送から時間で区切る実行に替えて、今の測定との比べ方が変わらないかは未確認です
 - CPU の分け方:qbench の中で DUT の CPU を pprof の label で分ける方法が、gVisor の内部の goroutine を含められるかは未確認です
-- バッチの費用:`BatchSize` を大きくしたときの wireguard-go の保持の増え方は未測定です
+- バッチの費用:`BatchSize` を大きくしたときの wireguard-go の滞留の上界は[wireguard-go の滞留の上界](wgstack-batching.md#wireguard-go-の滞留の上界)で導き、抑え方は所有者が決めます
 - 最小の RTT の窓:最小の RTT は接続の始めからの最小で、経路が変わっても大きくなりません。
   Linux の `tcp_min_rtt_wlen`(300 秒)のような窓のある最小にするかを、後の段で決めます
 - SACK の手間の均し:相手が選ぶ SACK の block で、ACK 1 つの手間を均せない入力があるかは未確認です
