@@ -9,11 +9,13 @@ This is the documented worst-case estimate: the flow state, buffers and other ho
 It is not a normal-use estimate.
 Lower flow limits cannot bring this below about 3.2 GiB.
 The [design document](../design/agent-dataplane.md) gives the calculation.
+
 Userspace mode does not guarantee that memory stays within the worst-case estimate.
 On a TCP connection of the netstack with much unacknowledged data, a peer that keeps sending acknowledgments without data can grow memory beyond the estimate.
 The design describes this [known limitation](../design/userspace/memory-limits.md#中身の無い-segment-の処理待ち).
 On a userspace-mode server, public clients reach host sockets and only agents talk to the netstack, so the trigger needs an agent's WireGuard key.
 Use kernel mode on the server where its agents are not trusted.
+
 Check the Linux [socket buffer requirement](socket-buffers.md) too.
 
 ## Run with systemd

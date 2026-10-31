@@ -57,6 +57,8 @@ sudo ufw allow 51820/udp
 sudo ufw allow 8443/tcp
 ```
 
+With firewalld, run `sudo firewall-cmd --permanent --add-port=51820/udp --add-port=8443/tcp` and `sudo firewall-cmd --reload`.
+
 Get the systemd unit from the same release as the binary:
 
 ```sh
@@ -67,7 +69,6 @@ sudo systemctl enable --now wgft
 ```
 
 Check startup with `sudo systemctl status wgft`.
-With firewalld, run `sudo firewall-cmd --permanent --add-port=51820/udp --add-port=8443/tcp` and `sudo firewall-cmd --reload`.
 
 ## 3. Run the Linux agent with systemd
 

@@ -8,14 +8,14 @@ Windows、macOS、Docker などを使う場合は、先に[環境別の導入](s
 
 ## 動作環境
 
-- VPS: Linux 6.1 以上、nftables 1.0.6 以上、root 権限。カーネルの WireGuard が必要です。
-- エージェント: Linux。既定のユーザー空間モードでは root 権限と TUN デバイスは不要です。
-- 通信: IPv4 のみ。VPS の firewall で UDP 51820、TCP 8443 と公開する転送ポートを許可します。
+- VPS: Linux 6.1 以上、nftables 1.0.6 以上、root 権限、カーネルの WireGuard が必要です。
+- エージェント: Linux で動作します。既定のユーザー空間モードでは root 権限と TUN デバイスは不要です。
+- 通信: IPv4 だけに対応します。VPS の firewall で UDP 51820、TCP 8443 と公開する転送ポートを許可します。
 
 Linux の agent でソケットのバッファについて警告が出た場合は、[ホスト側の設定](socket-buffers.ja.md)を確認してください。
 
-カーネルモードの VPS の後ろのユーザー空間モードの agent には、既知の制限があります。
-送り残しの多い TCP の接続に公開側の利用者が中身の無い ACK を送り続けると、agent のメモリが増え続けることがあります。
+VPS がカーネルモードのとき、ユーザー空間モードの agent には既知の制限があります。
+ACK を待つデータの多い TCP の接続で、公開側の利用者がデータを含まない ACK を送り続けると、agent のメモリが増え続けることがあります。
 Linux の agent は、[カーネルモード](agent-kernel.ja.md)で動かせばこの制限を受けません。
 詳細は[設計文書](../design/userspace/memory-limits.md#中身の無い-segment-の処理待ち)を参照してください。
 
@@ -31,7 +31,7 @@ sha256sum -c wgft-linux-amd64.sha256
 ```
 
 arm64 では、ダウンロードから以下のインストールまで、ファイル名の `amd64` を `arm64` に置き換えます。
-VPS ではバイナリを配置します。
+VPS では、次のコマンドでバイナリを配置します。
 
 ```sh
 sudo install -m 0755 wgft-linux-amd64 /usr/local/bin/wgft
@@ -50,12 +50,14 @@ sudo wgft server check
 
 `server check` は設定と firewall の不足を表示しますが、firewall は変更しません。
 VPS の firewall で UDP 51820 と TCP 8443 を許可します。
-ufw を使う場合の例です。
+ufw では次のように許可します。
 
 ```sh
 sudo ufw allow 51820/udp
 sudo ufw allow 8443/tcp
 ```
+
+firewalld の場合は `sudo firewall-cmd --permanent --add-port=51820/udp --add-port=8443/tcp` と `sudo firewall-cmd --reload` を実行します。
 
 systemd の unit は、インストールしたバイナリと同じリリースから取得します。
 
@@ -67,13 +69,12 @@ sudo systemctl enable --now wgft
 ```
 
 起動状態は `sudo systemctl status wgft` で確かめます。
-firewalld の場合は `sudo firewall-cmd --permanent --add-port=51820/udp --add-port=8443/tcp` と `sudo firewall-cmd --reload` を実行します。
 
 ## 3. Linux のエージェントを systemd で常駐させる
 
 ### 接続文字列を発行する
 
-手元のマシンから VPS へ SSH 転送を開きます。
+手元のマシンから VPS への SSH のポート転送を開始します。
 
 ```sh
 ssh -L 8686:/run/wgft/admin.sock root@vps
@@ -84,7 +85,7 @@ ssh -L 8686:/run/wgft/admin.sock root@vps
 表示された接続文字列を控えます。
 root で SSH ログインできない場合は[Web UI の接続方法](operations.ja.md#web-ui)を参照してください。
 
-CLI なら VPS で `sudo wgft agent join-string --name home` を実行します。
+CLI を使う場合は、VPS で `sudo wgft agent join-string --name home` を実行します。
 接続文字列は秘密の値で、1 回だけ使用でき、1 時間で期限切れになります。
 
 ### agent の service を登録する
@@ -118,7 +119,7 @@ Linux のエージェントには、カーネルモードを推奨します。
 エージェントに `home`、プロトコルに `UDP`、公開ポートに `2456-2457`、転送先に `192.168.1.20:2456` を指定します。
 VPS の UDP 2456 と 2457 が、自宅の `192.168.1.20` の同じポートへ転送されます。
 
-CLI なら VPS で次を実行します。
+CLI を使う場合は、VPS で次のコマンドを実行します。
 
 ```sh
 sudo wgft rule add --agent home --udp 2456-2457 --to 192.168.1.20:2456 --group game

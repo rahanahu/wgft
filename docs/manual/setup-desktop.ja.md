@@ -4,8 +4,8 @@
 agent のプロセスが止まると転送も止まります。
 ほかの制約は[ユーザー空間の設計](../design/userspace/README.md)にあります。
 
-VPS の[起動方法に合う手順](setup-alternatives.ja.md#接続文字列の発行)で接続文字列を発行し、取得した秘密の join string を使います。
-接続文字列は 1 回だけ使用でき、1 時間で期限切れになります。
+VPS の[起動方法に合う手順](setup-alternatives.ja.md#接続文字列の発行)で接続文字列を発行し、agent のマシンで使います。
+接続文字列は秘密の値で、1 回だけ使用でき、1 時間で期限切れになります。
 
 ## Windows で agent を実行する
 
@@ -21,9 +21,11 @@ $env:WGFT_JOIN = '<join string>'
 .\wgft.exe agent run
 ```
 
-`<join string>` を発行した値に置き換えます。
-初回起動時に Windows Defender Firewall が受信の許可を求めることがあります。Windows 11 の実機では、許可してもキャンセルしても外向きのトンネルと転送は動作しました。
+`<join string>` は発行した接続文字列に置き換えます。
+初回起動時に Windows Defender Firewall が受信の許可を求めることがあります。
+Windows 11 の実機では、許可してもキャンセルしても外向きのトンネルと転送は動作しました。
 認証情報は `%ProgramData%\wgft\agent.json` に保存され、次回は `.\wgft.exe agent run` だけで起動できます。
+
 Windows のサービスや自動起動の機能は同梱していません。
 バイナリはコード署名されていません。
 実機では PowerShell からの起動で SmartScreen の警告は出ませんでしたが、組織のポリシーによって実行できない場合があります。
@@ -55,8 +57,8 @@ sudo install -m 0644 -o root -g wheel wgft-agent.plist /Library/LaunchDaemons/io
 sudo launchctl bootstrap system /Library/LaunchDaemons/io.github.rahanahu.wgft.agent.plist
 ```
 
-plist は全利用者が読めるため、join string を書かずに、最初の登録をターミナルで済ませます。
-動作とログは次で確認します。
+plist は全利用者が読めるため、join string は plist に書かず、最初の登録をターミナルで済ませます。
+動作とログは次のコマンドで確認します。
 
 ```sh
 sudo launchctl print system/io.github.rahanahu.wgft.agent | grep -E 'state|pid'
@@ -64,9 +66,11 @@ tail -f ~/Library/Logs/wgft-agent.log
 ```
 
 停止には `sudo launchctl bootout system/io.github.rahanahu.wgft.agent` を使います。
-plist が残っていると次回の起動時には再び起動します。
+plist が残っていると、次回の OS の起動時に agent が再び起動します。
+
 FileVault を有効にした実機では、最初のログイン後に起動しました。
 ログイン前の起動やログアウト後の稼働は未確認です。
-この構成は、LaunchAgent で LAN 内の接続に失敗した実測を踏まえています。
+
+LaunchDaemon を使うのは、LaunchAgent から LAN 内の宛先への接続に失敗したことを観測したためです。
 
 [English](setup-desktop.md)
