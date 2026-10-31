@@ -71,6 +71,6 @@ plist が残っていると、次回の OS の起動時に agent が再び起動
 FileVault を有効にした実機では、最初のログイン後に起動しました。
 ログイン前の起動やログアウト後の稼働は未確認です。
 
-LaunchDaemon を使うのは、LaunchAgent から LAN 内の宛先への接続に失敗したことを実機で観測したためです。
+LaunchDaemon を使うのは、LaunchAgent から LAN 内の宛先への接続に失敗したことを観測したためです。
 
 [English](setup-desktop.md)

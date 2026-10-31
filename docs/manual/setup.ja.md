@@ -14,7 +14,7 @@ Windows、macOS、Docker などを使う場合は、先に[環境別の導入](s
 
 Linux の agent でソケットのバッファについて警告が出た場合は、[ホスト側の設定](socket-buffers.ja.md)を確認してください。
 
-VPS がカーネルモードでも、ユーザー空間モードの agent には既知の制限があります。
+VPS がカーネルモードのとき、ユーザー空間モードの agent には既知の制限があります。
 ACK を待つデータの多い TCP の接続で、公開側の利用者がデータを含まない ACK を送り続けると、agent のメモリが増え続けることがあります。
 Linux の agent は、[カーネルモード](agent-kernel.ja.md)で動かせばこの制限を受けません。
 詳細は[設計文書](../design/userspace/memory-limits.md#中身の無い-segment-の処理待ち)を参照してください。
