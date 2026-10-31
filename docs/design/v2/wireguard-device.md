@@ -229,6 +229,25 @@ v1 の agent は keepalive の間隔ごとにトンネルの中で ping を送�
 v2 でも制御プレーンがこの ping を送ります。
 device の層の試験 `a_restarted_server_is_reached_again_by_traffic` は、この形の回復を偽の時計で確かめています。
 
+## 試作の外側の殻 (Linux の TUN)
+
+crate の `crates/wgft-wireguard-tun` は、`Device` を Linux の TUN と UDP の socket と tokio の event loop で動かす薄い殻です。
+ライブラリとして `spawn` と `Handle` (状態、endpoint の変更、socket の付け替え、event、停止) を持ち、同じ名前のバイナリを持ちます。
+ラボの試験と試作だけに使い、配布しません。
+Linux 以外では `spawn` が `Unsupported` の誤りを返します。
+
+試作は、Rust の wgstack ができるまで、この殻の TUN を通してカーネルの TCP/IP stack を使います。
+ラボの VM の中で、agent の中継はカーネルの socket を開きます。
+使い捨てのユーザー空間の TCP の stack は作りません。
+理由は 2 つです。
+1 つは、この段の目的が WireGuard の device の層と wire の相互運用を確かめることで、TCP の stack はその対象ではないためです。
+もう 1 つは、使い捨ての stack の試験と修正の費用が、Rust の wgstack ができた時点で無駄になるためです。
+この選択は試作の間だけのもので、v2 の agent のユーザー空間モードは TUN を使いません。
+
+殻は TUN を閉じるときにリンクを消します。
+カーネルが、持続の印の無い TUN のリンクを記述子とともに消すためです。
+アドレスと MTU とリンクの状態は `ip` のコマンドで設定します。
+
 ## 試験
 
 - 単体の試験:鍵、prefix、経路表、IPv4 の検査、キュー。経路表は wireguard-go の `TestTrieIPv4` (Linux の `selftest/allowedips.h` から移したもの) の場合を写し、素朴な最長一致の模型との一致を proptest で確かめます。
