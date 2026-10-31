@@ -110,6 +110,31 @@ var Known = map[string]tcpharness.Known{
 		Reason:    "as rto-after-burst/ssthresh.not-collapsed: sending one or two segments a round, gVisor does not repair the burst within the rounds the scenario runs",
 		Sometimes: true,
 	},
+	"rcv-overflow-hold/read-hole.window-update": {
+		Observed: "no such ACK in time",
+		Reason: "gVisor sends no ACK when a read frees its buffer while out-of-order data waits behind a hole; the window " +
+			"it opened reaches the sender only with the ACK of the segment that fills the hole. Linux's read updates the window " +
+			"at once, tcp_cleanup_rbuf, and so does wgstack",
+	},
+	"rcv-overflow-hold/read-hole.sack-kept": {
+		Observed: "no ACK in time",
+		Reason:   "as rcv-overflow-hold/read-hole.window-update: no ACK follows the read",
+	},
+	"rcv-overflow-hold-perf/read-hole.window-update": {
+		Observed: "no such ACK in time",
+		Reason:   "as rcv-overflow-hold/read-hole.window-update",
+	},
+	"rcv-overflow-hold-perf/read-hole.sack-kept": {
+		Observed: "no ACK in time",
+		Reason:   "as rcv-overflow-hold/read-hole.window-update: no ACK follows the read",
+	},
+	"rcv-overflow-hold/edge.dropped":                  ovfBeyond,
+	"rcv-overflow-hold/hole.ack":                      ovfBeyondAck,
+	"rcv-overflow-hold-perf/edge.dropped":             ovfBeyond,
+	"rcv-overflow-hold-perf/hole.ack":                 ovfBeyondAck,
+	"rcv-overflow-read-half/fill.window-honored":      ovfShrink,
+	"rcv-overflow-read-all/fill.window-honored":       ovfShrink,
+	"rcv-overflow-read-half-perf/fill.window-honored": ovfShrink,
 	"paws/old.dupack": {
 		Observed: "ACK of base+4",
 		Reason:   "the pinned gVisor does not implement PAWS, gVisor's rcv.go: it accepts the old segment and acknowledges it",
@@ -119,6 +144,32 @@ var Known = map[string]tcpharness.Known{
 		Reason:   "the pinned gVisor does not implement PAWS, gVisor's rcv.go: the old segment's bytes reach the application",
 	},
 }
+
+// ovfShrink is gVisor's shrinking window as its buffer fills.
+var ovfShrink = tcpharness.Known{
+	Observed: "it drops some",
+	Reason: "as its buffer fills with data the application does not read, gVisor closes its window less than a scale unit " +
+		"short of a right edge it advertised before and drops what the testbench sent up to that edge; RFC 7323 2.4 has " +
+		"the receiver honor every segment in window for any ACK it sent, and Linux and wgstack take it. Whether the drop " +
+		"happens turns on how the segments and gVisor's ACKs interleave",
+	Sometimes: true,
+}
+
+// ovfBeyond and ovfBeyondAck are gVisor taking a segment past its right edge.
+var (
+	ovfBeyond = tcpharness.Known{
+		Observed: "it reports data there",
+		Reason: "while its buffer still has room, gVisor takes the whole segment that starts at the right edge it advertised, " +
+			"whose window field is smaller than that room; Linux drops a segment that starts at its right edge, and wgstack " +
+			"takes only what its rounded window field hid. Whether the advertised edge lies short of the room turns on timing",
+		Sometimes: true,
+	}
+	ovfBeyondAck = tcpharness.Known{
+		Observed:  "ACK past the right edge",
+		Reason:    "as rcv-overflow-hold/edge.dropped: filling the hole also acknowledges the segment past the right edge",
+		Sometimes: true,
+	}
+)
 
 // TestConformance runs the scenarios against nettun's gVisor Device. It needs no privileges.
 func TestConformance(t *testing.T) {

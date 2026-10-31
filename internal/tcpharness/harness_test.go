@@ -224,3 +224,23 @@ func TestRetryAfterStall(t *testing.T) {
 		t.Errorf("the scenario ran %d times, want 2", attempts)
 	}
 }
+
+// TestPerformanceScenarioBuildsWithNewPerformance checks that a Performance scenario gets the
+// engine's NewPerformance DUT, that others get New, and that an engine without NewPerformance
+// runs a Performance scenario on New.
+func TestPerformanceScenarioBuildsWithNewPerformance(t *testing.T) {
+	var built []string
+	stub := func(name string) func(testing.TB, uint64) DUT {
+		return func(testing.TB, uint64) DUT { built = append(built, name); return &stubClocked{} }
+	}
+	run := func(e Engine, perf bool) {
+		Record(t, e, Scenario{Name: "s", Run: func(*H) {}, Performance: perf}, 1)
+	}
+	both := Engine{Name: "both", New: stub("new"), NewPerformance: stub("perf")}
+	run(both, false)
+	run(both, true)
+	run(Engine{Name: "plain", New: stub("new")}, true)
+	if want := []string{"new", "perf", "new"}; !reflect.DeepEqual(built, want) {
+		t.Fatalf("DUTs built: %v, want %v", built, want)
+	}
+}
