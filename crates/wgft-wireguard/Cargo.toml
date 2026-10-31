@@ -8,9 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-base64 = "0.23.1"
-sanstun = "0.1.0"
-zeroize = "1.9.1"
+base64.workspace = true
+sanstun.workspace = true
+zeroize.workspace = true
 
 [features]
 # fuzz の target だけが使う。検査を通さずに暗号化する口を開ける
@@ -20,4 +20,4 @@ fuzzing = []
 workspace = true
 
 [dev-dependencies]
-proptest = "1.12.0"
+proptest.workspace = true
