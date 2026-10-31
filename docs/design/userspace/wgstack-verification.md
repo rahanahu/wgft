@@ -145,7 +145,7 @@ wgstack は `chained-recovery` で 2 つ目の穴が見える往復に 2 segment
 - `rcv-overflow-hold`:アプリケーションが読まない間に、順序どおりのデータを右端の 30 segment 手前まで送ります。
   それまでの最大の窓の 4 分の 1 が 30 segment より小さければ、その 4 分の 1 の手前までにします。
   Linux は残りの窓の 2 倍が窓の上限以下のときだけ読み取りで窓を更新するので([ACK を返す時期](wgstack-performance.md#ack-を返す時期))、窓が約 64 KB の性能の族でも読み取りの確かめが働くようにするためです。
-  次に 1 segment を抜き、残りの窓を順序外の segment で 1 つずつ送ります。
+  次に 1 segment を抜き、広告した最大の右端までの残りを順序外の segment で 1 つずつ送ります。
   それぞれの segment に、その segment までの区間を先頭の SACK の block に持つ穴の番号の ACK がすぐに出ること、その ACK の窓の欄と右端が変わらないことを確かめます。
   続けて右端ちょうどからの 1 segment と、右端の 2 segment 先からの 1 segment を送り、前者がすぐに穴の番号の ACK を起こすこと、どちらも保持されないことを確かめます。
   アプリケーションが順序どおりのデータをすべて読むと、穴が残ったまま、残りの窓の 2 倍以上の窓を持ち、保持した区間を先頭の block に持つ ACK がすぐに出ることを確かめます。
@@ -166,6 +166,8 @@ RFC 7323 2.4 は、この丸めで右端が前の右端より手前に見える�
 
 `rcv-overflow-hold-perf` と `rcv-overflow-read-half-perf` は、同じ台本を性能の族で流します([参照の Linux の設定](#参照の-linux-の設定))。
 boost を得た wgstack が、読まない接続にも予約の 4 MiB へ向けて窓を開くと、512 KiB の確かめで落ちます。
+512 KiB は Linux の右端(固定の値で 303,679 byte)と共通の上限なので、捉えるのは予約の 4 MiB へ向けて開く場合だけです。
+読まない間に窓の上限が floor に留まる不変条件は、wgstack の単体の試験(`TestRecvWindowWithoutReadsStaysAtFloor`)が確かめます。
 
 結果は 2026-10-31 のものです。
 

@@ -331,12 +331,14 @@ func rcvOverflowHoldOn(h *H, port uint16) {
 	edge0 := f.last
 	h.Measure("ooo.window-bytes", int32(edge0-hole))
 
-	// The rest of the window, out of order, one segment at a time.
+	// The rest of the window, out of order, one segment at a time, up to the largest edge the DUT
+	// advertised: RFC 7323 2.4 has it honor what was in window for any ACK it sent, and the edge
+	// segment below starts there, so no gap is left between the two.
 	off := oooStart
 	missed, notFirst, sent := 0, 0, 0
 	windows := map[uint16]bool{}
-	for after(f.last, off) && sent < 80 {
-		n := min(mss, int(f.last-off))
+	for after(f.right, off) && sent < 80 {
+		n := min(mss, int(f.right-off))
 		p.Send(p.Segment(FlagACK|FlagPSH, off, f.at(off, n)))
 		sent++
 		l, r := off, off+uint32(n)
