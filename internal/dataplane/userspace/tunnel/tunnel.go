@@ -122,6 +122,9 @@ func New(cfg Config) (*Tunnel, error) {
 		t.lastErr = err
 		cfg.Logf("tunnel: cannot resolve endpoint %s: %v; will keep re-resolving", cfg.Endpoint, err)
 	}
+	// ピアはここで足す 1 つだけである。wgstack の送信の向きの台帳(wgstack-batching.md)は、同じピアについて
+	// 1 つの手元の番号を持ち、ピアが 2 つ以上、または差し替わる device では上界が成り立たない。ピアを足す
+	// 変更は、台帳を先に直すか、バッチを使わなくする。この前提は TestNewConfiguresOneWireGuardPeer で確かめる
 	var b strings.Builder
 	fmt.Fprintf(&b, "private_key=%s\n", hex.EncodeToString(cfg.PrivateKey[:]))
 	fmt.Fprintf(&b, "public_key=%s\n", hex.EncodeToString(cfg.ServerPublicKey[:]))
