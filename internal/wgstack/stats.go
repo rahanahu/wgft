@@ -292,14 +292,16 @@ func (s *stack) bound() Bound {
 	return s.boundVal
 }
 
+// 空きの list は使うほど短くなるが、配列は作成の時の容量のまま残るので、長さではなく容量で数える。Bound は
+// 最初の呼び出しで 1 回だけ数えるので、長さで数えると接続や datagram を持つ間に呼んだ値が小さくなる。
 func (s *stack) countBound() Bound {
 	n := int64(len(s.conns))
 	dl := func(x dlist) int64 { return sliceBytes(x.next) + sliceBytes(x.prev) + sliceBytes(x.in) }
 	var b Bound
-	b.Fix = heapBytes(int64(unsafe.Sizeof(stack{}))) + sliceBytes(s.conns) + sliceBytes(s.free) +
+	b.Fix = heapBytes(int64(unsafe.Sizeof(stack{}))) + sliceBytes(s.conns) + sliceBytes(s.free[:cap(s.free)]) +
 		sliceBytes(s.connIdx.ents) + sliceBytes(s.syn.idx.ents) + sliceBytes(s.tw.idx.ents) +
-		sliceBytes(s.syn.rows) + sliceBytes(s.syn.free) +
-		sliceBytes(s.tw.rows) + sliceBytes(s.tw.free) +
+		sliceBytes(s.syn.rows) + sliceBytes(s.syn.free[:cap(s.syn.free)]) +
+		sliceBytes(s.tw.rows) + sliceBytes(s.tw.free[:cap(s.tw.free)]) +
 		sliceBytes(s.wheel.dl) + sliceBytes(s.wheel.next) + sliceBytes(s.wheel.prev) + sliceBytes(s.wheel.where) +
 		dl(s.out.conns) + dl(s.out.rows) +
 		sliceBytes(s.out.ctl.buf) + sliceBytes(s.out.ctl.lens) +
@@ -309,9 +311,9 @@ func (s *stack) countBound() Bound {
 	t := terms()
 	b.FloorConn = n * t.floor()
 	b.Boost = int64(len(s.pool.slots)) * t.boost()
-	ck := sliceBytes(s.udp.ck) + sliceBytes(s.udp.ckFree)
-	b.UDPRx = ringBytes(udpRxBytes) + sliceBytes(s.udp.dg[dirRx]) + sliceBytes(s.udp.dgFree[dirRx]) + (ck+1)/2
-	b.UDPTx = ringBytes(udpTxBytes) + sliceBytes(s.udp.dg[dirTx]) + sliceBytes(s.udp.dgFree[dirTx]) + ck/2
+	ck := sliceBytes(s.udp.ck) + sliceBytes(s.udp.ckFree[:cap(s.udp.ckFree)])
+	b.UDPRx = ringBytes(udpRxBytes) + sliceBytes(s.udp.dg[dirRx]) + sliceBytes(s.udp.dgFree[dirRx][:cap(s.udp.dgFree[dirRx])]) + (ck+1)/2
+	b.UDPTx = ringBytes(udpTxBytes) + sliceBytes(s.udp.dg[dirTx]) + sliceBytes(s.udp.dgFree[dirTx][:cap(s.udp.dgFree[dirTx])]) + ck/2
 	b.Frag = int64(fragLimits.Bytes)
 	b.Ping = pingEndpoints * (heapBytes(int64(s.mtu)) + int64(unsafe.Sizeof(pingEP{})))
 	b.Total = b.Fix + b.FloorConn + b.Boost + b.UDPRx + b.UDPTx + b.Frag + b.Ping

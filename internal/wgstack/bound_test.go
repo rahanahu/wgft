@@ -1,6 +1,7 @@
 package wgstack
 
 import (
+	"net"
 	"net/netip"
 	"runtime"
 	"runtime/metrics"
@@ -532,5 +533,49 @@ func TestHeapWithinBound(t *testing.T) {
 	}
 	if st.ChunkBytes > int64(st.Conns)*recvFloor {
 		t.Errorf("chunks %d exceed %d connections at the floor", st.ChunkBytes, st.Conns)
+	}
+}
+
+// TestBoundDoesNotDependOnUse は、接続、握手の途中の行、TIME_WAIT の行、UDP の datagram が空きの list から枠を
+// 取った後に初めて求めた Bound が、使う前の Device の Bound と同じであることを確かめる。空きの list の配列は
+// 使っても作成の時の大きさのまま残る。
+func TestBoundDoesNotDependOnUse(t *testing.T) {
+	lim := smallLimits()
+	lim.udpRxDgrams, lim.udpTxDgrams = 32, 32 // 1 つの endpoint が 6 つを持てる大きさ
+	want := newTestNet(t, lim).d.Bound()
+
+	n := newTestNet(t, lim)
+	l := listen(t, n, 80)
+	// 接続の枠:24 本のうち 16 本を使い、うち 4 本を TIME_WAIT の行に移す
+	for i := range 16 {
+		p := n.handshake(uint16(40000+i), 80, true, false, true)
+		c := acceptOne(t, l)
+		n.drain()
+		if i < 4 {
+			c.Close()
+			p.absorb(n.drain())
+			p.fin()
+			n.drain()
+		}
+	}
+	// 握手の途中の行:16 行のうち、1 つの待ち受けが持てる 8 行
+	for i := range 8 {
+		n.inject(tseg{sport: uint16(41000 + i), dport: 80, seq: 1, flags: flagSYN, wnd: 65535, mss: 1380, ws: -1})
+	}
+	n.drain()
+	// UDP:受けて読まない datagram と、送って取り出さない datagram を 6 つずつ
+	pc := listenUDP(t, n, 53)
+	for i := range 6 {
+		n.write(buildUDP(netip.AddrPortFrom(peerAddr, uint16(5000+i)), 53, []byte{byte(i)}))
+		if _, err := pc.WriteTo([]byte{byte(i)}, net.UDPAddrFromAddrPort(netip.AddrPortFrom(peerAddr, 5000))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := n.d.Stats()
+	if st.Conns != 12 || st.TWRows != 4 || st.SynRows != 8 || st.UDPRxDatagrams != 6 || st.UDPTxDatagrams != 6 {
+		t.Fatalf("setup: %+v", st)
+	}
+	if got := n.d.Bound(); got != want {
+		t.Fatalf("Bound after use %+v, fresh %+v", got, want)
 	}
 }

@@ -148,7 +148,7 @@ func (c *tcb) frtoAfterAck(seg *segment, advanced, dup bool) {
 	case advanced:
 		// 2 の段:新しいデータを 2 つまで輻輳の窓によらず送る。送るデータか窓が無ければ今の RTO の規則に戻る
 		if c.hasNewData() {
-			c.frto, c.frtoHigh, c.frtoNew = 2, c.sndMax, 2
+			c.frto, c.frtoNew = 2, 2
 		} else {
 			c.frto = 0
 			c.markAllLost(rtxRTO)

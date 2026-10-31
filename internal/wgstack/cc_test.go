@@ -337,3 +337,32 @@ func TestRTODuringRecoveryKeepsTheRecoveryWindow(t *testing.T) {
 		t.Fatalf("ssthresh %d after an RTO in the RTO's recovery, want %d: beta times the ssthresh %d", cs.ssthresh, want, ss1)
 	}
 }
+
+// TestRTOEpisodeEndsWithoutSACK は、SACK を交渉しない接続でも、RTO の後に SND.UNA が recover に届いたら RTO の
+// 後の回復の印を消すことを確かめる。残すと、SND.UNA が recover から 2^31 先へ進んだ後に、輻輳の事象の
+// 送り手の窓を古い ssthresh で決める。
+func TestRTOEpisodeEndsWithoutSACK(t *testing.T) {
+	n := newTestNet(t, smallLimits())
+	c, p := n.accepted(true, false)
+	cs := c.c
+	if _, err := c.Write(make([]byte, 5*testSegPayload)); err != nil {
+		t.Fatal(err)
+	}
+	n.drain() // すべて失う
+	n.advance(2 * time.Second)
+	if cs.s.rtos.Load() == 0 || !cs.rtoEpisode || cs.sackOK {
+		t.Fatalf("setup: RTOs %d, RTO episode %v, SACK %v", cs.s.rtos.Load(), cs.rtoEpisode, cs.sackOK)
+	}
+	recover := cs.recover
+	for i := 0; i < 100 && cs.sndUna != cs.sndMax; i++ {
+		p.absorb(n.drain())
+		p.ack(nil)
+		n.advance(10 * time.Millisecond)
+	}
+	if !seqGE(cs.sndUna, recover) {
+		t.Fatalf("setup: SND.UNA %d short of recover %d", cs.sndUna, recover)
+	}
+	if cs.rtoEpisode {
+		t.Fatal("RTO episode still marked after SND.UNA reached recover")
+	}
+}
