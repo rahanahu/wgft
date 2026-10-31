@@ -381,7 +381,13 @@ func TestTCPBoostOnDemand(t *testing.T) {
 	}
 	// boost の受信のバッファが効く。読むのを止めた受信の側は、floor の受信のバッファでは入らない
 	// 量を受け入れる(gVisor はバッファの半分を窓として広告する)
+	// fillNonReader は書き込みが 300 ms 止まった時点で戻るが、負荷の下では、受け手の窓が閉じる前に
+	// 送り手の送信のバッファが詰まって止まることがある。送り手が受け手の閉じた窓を知るまで待ち、
+	// 受け手が受け入れ終えてから量を見る
 	fillNonReader(c)
+	waitFor(t, 10*time.Second, "the receiver that stopped reading to close its window", func() bool {
+		return tcpStateOf(c, "snd", "SndWnd")[0] == 0
+	})
 	if q := recvQueue(s); q < tcpBoostSize/2-tcpRecvFloor || q > tcpBoostSize {
 		t.Fatalf("boosted receiver that stopped reading holds %d, want about %d", q, tcpBoostSize/2)
 	}
