@@ -44,6 +44,10 @@ func TestSendBatchInit(t *testing.T) {
 	}{
 		{"zero value", SendBatch{}, 1420, false, 0},
 		{"P_max 0", SendBatch{Packets: 0, Size: 32, Callers: 14, BufferSize: 65535}, 1420, false, 0},
+		{"C 1", SendBatch{Packets: 1, Size: 32, Callers: 1, BufferSize: 65535}, 1420, false, 0},
+		{"C 1 large P_max", SendBatch{Packets: 1000, Size: 32, Callers: 1, BufferSize: 65535}, 1420, false, 0},
+		{"C 0", SendBatch{Packets: 1000, Size: 32, Callers: 0, BufferSize: 65535}, 1420, false, 0},
+		{"C 2", SendBatch{Packets: 4, Size: 32, Callers: 2, BufferSize: 65535}, 1420, true, 2},
 		{"k_tx 1", SendBatch{Packets: 1000, Size: 1, Callers: 14, BufferSize: 65535}, 1420, false, 0},
 		{"k_eff below 2", SendBatch{Packets: 4*13 - 1, Size: 32, Callers: 14, BufferSize: 65535}, 1420, false, 0},
 		{"k_eff exactly 2", SendBatch{Packets: 4 * 13, Size: 32, Callers: 14, BufferSize: 65535}, 1420, true, 2},
@@ -143,7 +147,8 @@ func TestSendBatchGate(t *testing.T) {
 
 // 輪が満杯なら行を足せないので 1 個だけを許す。R が 0 の C = 1 で、2 個の行だけで輪を埋める。
 func TestSendBatchRingFull(t *testing.T) {
-	l := newTestLedger(t, 9, 8, 1) // 輪は 4 行
+	l := newTestLedger(t, 9, 8, 2) // 輪は 4 行
+	l.keff, l.reserve = 8, 0       // C = 1 に当たる値を直接置く(init は C が 2 未満を受けない)
 	for range 4 {
 		if got := l.limit(2); got != 2 {
 			t.Fatalf("limit %d, want 2", got)
@@ -828,4 +833,93 @@ func TestSendBatchReadContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Packets は init が maxSendPackets で丸める。輪の大きさが渡す側の丸めに頼らない。大きな輪を作らずに
+// 丸めの関数で確かめる。
+func TestSendBatchInitCapsPackets(t *testing.T) {
+	if got := clampPackets(1 << 40); got != maxSendPackets {
+		t.Fatalf("clampPackets(1<<40) = %d, want %d", got, maxSendPackets)
+	}
+	if got := clampPackets(864); got != 864 {
+		t.Fatalf("clampPackets(864) = %d, want 864", got)
+	}
+	var l sendLedger
+	l.init(SendBatch{Packets: maxSendPackets, Size: 32, Callers: 14, BufferSize: 65535}, 1420)
+	if !l.on || l.pmax != maxSendPackets || len(l.rows) != maxSendPackets/2 {
+		t.Fatalf("on %v P_max %d rows %d", l.on, l.pmax, len(l.rows))
+	}
+}
+
+// 古い印を使った W の前進を防ぐ試験の下準備。k 個の packet を持つ 1 回目の Read の印が、65535 byte の
+// 配列の末尾に残っている。
+func staleTagSetup(t *testing.T) (*Device, [][]byte, []int) {
+	t.Helper()
+	const k = 8
+	n := newTestNet(t, smallLimits())
+	d := n.d
+	d.s.txb = sendLedger{}
+	d.s.txb.init(SendBatch{Packets: 1 << 10, Size: k, Callers: 3, BufferSize: 65535}, d.s.mtu)
+	if !d.s.txb.on {
+		t.Fatal("ledger is off")
+	}
+	pc := listenUDP(t, n, 5000)
+	to := net.UDPAddrFromAddrPort(netip.AddrPortFrom(peerAddr, 6000))
+	bufs := make([][]byte, k)
+	for i := range bufs {
+		bufs[i] = make([]byte, 65535)
+	}
+	sizes := make([]int, k)
+	for range 3 * k {
+		pc.WriteTo(make([]byte, 100), to)
+	}
+	if got, _ := d.Read(bufs, sizes, 16); got != k {
+		t.Fatalf("first Read %d packets, want %d", got, k)
+	}
+	if d.s.txb.issued.Load() != 1 || d.s.txb.held != k {
+		t.Fatalf("issued %d L %d", d.s.txb.issued.Load(), d.s.txb.held)
+	}
+	return d, bufs, sizes
+}
+
+// observeStale は bufs[0] を data の message として ObserveSend に 2 回渡し、W と手元の番号が進まないことを
+// 確かめる(1 回目で手元に置き、2 回目で W に知らせるため)。
+func observeStale(t *testing.T, d *Device, msg []byte) {
+	t.Helper()
+	binary.LittleEndian.PutUint32(msg, transportType)
+	d.ObserveSend([][]byte{msg[:keepaliveSize+1]})
+	d.ObserveSend([][]byte{msg[:keepaliveSize+1]})
+	if p, w := d.s.txb.pending.Load(), d.s.txb.acked.Load(); p != 0 || w != 0 {
+		t.Fatalf("a stale tag was accepted: pending %d W %d, want 0 and 0", p, w)
+	}
+}
+
+// 印を書けない最初の buffer(offset が大きすぎる)の経路は、前の Read の有効な印が残る配列を再利用されても、
+// その印で W を進めさせない。進むと、まだ待つ入れ物の行を台帳から外してしまう。
+func TestReadStaleTagOnNonFitPath(t *testing.T) {
+	d, bufs, sizes := staleTagSetup(t)
+	if got, _ := d.Read(bufs, sizes, 65535-16-d.s.mtu-20); got != 1 {
+		t.Fatalf("non-fit Read %d packets, want 1", got)
+	}
+	if !d.s.txb.off.Load() {
+		t.Fatal("batching is still on after a non-fit buffer")
+	}
+	observeStale(t, d, bufs[0])
+}
+
+// 長さが容量より短い buffer は、長さの末尾に印を書いても、observe は容量の末尾を読む。そこに前の Read の
+// 印が残っていても W を進めさせない。
+func TestReadStaleTagOnShortBuffer(t *testing.T) {
+	d, bufs, sizes := staleTagSetup(t)
+	short := make([][]byte, len(bufs))
+	for i := range bufs {
+		short[i] = bufs[i][:60000]
+	}
+	if got, _ := d.Read(short, sizes, 16); got != 1 {
+		t.Fatalf("short-buffer Read %d packets, want 1", got)
+	}
+	if !d.s.txb.off.Load() {
+		t.Fatal("batching is still on after a buffer shorter than its capacity")
+	}
+	observeStale(t, d, bufs[0])
 }

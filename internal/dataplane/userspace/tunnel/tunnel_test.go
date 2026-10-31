@@ -254,3 +254,30 @@ func TestNewFloorsATinyKeepalive(t *testing.T) {
 		})
 	}
 }
+
+// wgstack の送信の向きの台帳は、device のピアが 1 つで差し替わらないことに頼る(tunnel.go の New)。
+// New がピアを 2 つ以上設定する変更は、ここで失敗させる。
+func TestNewConfiguresOneWireGuardPeer(t *testing.T) {
+	srvKey, _ := wgtypes.GeneratePrivateKey()
+	agentKey, _ := wgtypes.GeneratePrivateKey()
+	tun, err := New(Config{
+		PrivateKey: agentKey, ServerPublicKey: srvKey.PublicKey(),
+		Address:          netip.MustParseAddr("10.200.0.2"),
+		ServerAddress:    netip.MustParseAddr("10.200.0.1"),
+		MTU:              1420,
+		Netstack:         NetstackWgstack,
+		SendBatchPackets: SendBatchMin(),
+		Logf:             func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer tun.Close()
+	out, err := tun.dev.IpcGet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(out, "public_key="); n != 1 {
+		t.Fatalf("device has %d peers, want exactly 1:\n%s", n, out)
+	}
+}
