@@ -89,7 +89,7 @@ func newLinuxClient() (*Client, error) {
 		return nil, err
 	}
 	rs := &rtoSampler{}
-	return &Client{Name: "linux", Dev: newTunAdapter(d),
+	return &Client{Name: "linux", Kernel: true, Dev: newTunAdapter(d),
 		dial: func(ctx context.Context) (net.Conn, error) {
 			var c net.Conn
 			// the socket belongs to the namespace of the thread that creates it

@@ -301,7 +301,7 @@ func runCell(engine string, c Cell, seed int64) (r Run) {
 	// the sender's RTO at the outage's end: the DUT's where it sends, the client's where it receives
 	rtoAt, rtoErr, kernel := rig.D.RTOAt, rig.D.RTOErr, engine == "linux"
 	if !c.DUTSend {
-		rtoAt, rtoErr, kernel = rig.C.RTOAt, rig.C.RTOErr, rig.C.Name == "linux"
+		rtoAt, rtoErr, kernel = rig.C.RTOAt, rig.C.RTOErr, rig.C.Kernel
 	}
 	if !oe.IsZero() && rtoAt != nil {
 		r.RTO = rtoAt(oe)
