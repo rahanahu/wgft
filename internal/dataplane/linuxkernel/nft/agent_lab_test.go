@@ -32,7 +32,9 @@ func agentNftList(t *testing.T) string {
 // agentNetlinkList は `nft --debug=netlink list` の式の列である。`nft list` の表示は式の一部を
 // 映さない。例えば map の DNAT のポートを読むレジスタを誤っても、表示は同じで、転送だけが壊れる
 // (ラボで確かめた)。map の要素の並びは読むたびに変わりうるので、set ごとに並べ替える。チェーンの
-// 見出しの handle は落とす。
+// 見出しの handle は落とす。nft 1.1 からの nft -f は、ポートの範囲を 1 つの range の式で書く。
+// 1.0.6 と google/nftables は同じ範囲を cmp gte と cmp lte の 2 つの式で書き、どちらも同じ packet に
+// 当たるので、range eq の式は 2 つの cmp の式に直してから比べる。
 func agentNetlinkList(t *testing.T) string {
 	t.Helper()
 	out, err := exec.Command("nft", "--debug=netlink", "list", "table", "inet", AgentTableName).CombinedOutput()
@@ -51,6 +53,10 @@ func agentNetlinkList(t *testing.T) string {
 			continue
 		}
 		flush()
+		if m := rangeEqRe.FindStringSubmatch(l); m != nil {
+			lines = append(lines, m[1]+"[ cmp gte reg "+m[2]+" "+m[3]+" ]", m[1]+"[ cmp lte reg "+m[2]+" "+m[4]+" ]")
+			continue
+		}
 		lines = append(lines, chainHeaderRe.ReplaceAllString(l, "$1"))
 	}
 	flush()
@@ -58,6 +64,9 @@ func agentNetlinkList(t *testing.T) string {
 }
 
 var chainHeaderRe = regexp.MustCompile(`^(inet ` + AgentTableName + ` [a-z_]+)( \d+)+$`)
+
+// rangeEqRe は nft の range eq の式で、レジスタと 1 語ずつの下限と上限を取る。
+var rangeEqRe = regexp.MustCompile(`^(\s*)\[ range eq reg (\d+) (0x[0-9a-f]+) (0x[0-9a-f]+) \]$`)
 
 func agentNftFile(t *testing.T, path string) {
 	t.Helper()
