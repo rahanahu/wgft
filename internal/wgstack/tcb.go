@@ -87,11 +87,20 @@ type tcbState struct {
 	irs, rcvNxt   uint32
 	rcvCap        uint64
 	advRight      uint64 // 広告した窓の右端(受信の offset)。後ろへ戻さない
+	rcvSsthresh   uint64 // 広告する窓の歩みの上限(Linux の rcv_ssthresh、rcvwin.go)
+	rcvWant       uint64 // 受け手の往復ごとの測定が求めた窓の上限。下げない
+	rsTime        int64  // 窓の自動調整の区間の始めの時刻
+	rsSeq         uint64 // 数え始めた時の readOff
+	rsSpace       uint64 // 前の区間に読んだ量
+	rcvRTT        int64  // 受け手の RTT の推定。0 は推定が無い
+	rttWinSeq     uint64 // 窓による標本の終わりの offset
+	rttWinTime    int64  // 窓による標本の始めの時刻。0 は標本を始めていない
+	rttTsecr      uint32 // 前の timestamp による標本の TSecr
 	finRcvd       bool
 	oooFin        bool
 	oooFinOff     uint64
 	rcvSinceAck   int
-	rcvMSSEst     uint32    // 相手の segment の大きさの推定(Linux の icsk_ack.rcv_mss)
+	rcvMSSEst     uint32    // 相手の segment の大きさの推定(相手の segment の大きさの推定 rcv_mss)
 	pingpong      bool      // 対話の印:データを受けてから遅延 ACK の時間の内にデータを送った
 	lastDataRcvd  int64     // 最後に中身を受け入れた時刻
 	rcvdData      bool      // lastDataRcvd が有効
@@ -265,30 +274,31 @@ func (c *tcb) signalWrite() {
 func (c *tcb) establish(r *synRow, seg *segment, now int64) {
 	s := c.s
 	c.tcbState = tcbState{
-		state:      stEstablished,
-		tup:        r.tup,
-		iss:        r.iss,
-		irs:        r.irs,
-		sndUna:     r.iss + 1,
-		sndNxt:     r.iss + 1,
-		sndMax:     r.iss + 1,
-		wsOK:       r.wsOK,
-		sackOK:     r.sackOK,
-		tsOK:       r.tsOK,
-		peerMSS:    int(r.peerMSS),
-		pmtu:       s.mtu,
-		sndCap:     sendFloor,
-		rcvNxt:     r.irs + 1,
-		rcvCap:     recvFloor,
-		advRight:   uint64(r.rcvWnd),
-		tsRecent:   r.tsRecent,
-		tsRecentAt: now,
-		tsOffset:   r.tsOffset,
-		rto:        int64(rtoInit),
-		ssthresh:   ^uint32(0),
-		recover:    r.iss,
-		rch:        make(chan struct{}, 1),
-		wch:        make(chan struct{}, 1),
+		state:       stEstablished,
+		tup:         r.tup,
+		iss:         r.iss,
+		irs:         r.irs,
+		sndUna:      r.iss + 1,
+		sndNxt:      r.iss + 1,
+		sndMax:      r.iss + 1,
+		wsOK:        r.wsOK,
+		sackOK:      r.sackOK,
+		tsOK:        r.tsOK,
+		peerMSS:     int(r.peerMSS),
+		pmtu:        s.mtu,
+		sndCap:      sendFloor,
+		rcvNxt:      r.irs + 1,
+		rcvCap:      recvFloor,
+		rcvSsthresh: recvFloor,
+		advRight:    uint64(r.rcvWnd),
+		tsRecent:    r.tsRecent,
+		tsRecentAt:  now,
+		tsOffset:    r.tsOffset,
+		rto:         int64(rtoInit),
+		ssthresh:    ^uint32(0),
+		recover:     r.iss,
+		rch:         make(chan struct{}, 1),
+		wch:         make(chan struct{}, 1),
 	}
 	c.lastAckSent = c.rcvNxt
 	if c.wsOK {
@@ -770,6 +780,9 @@ func (c *tcb) inputData(seg *segment, now int64) {
 	}
 	if res.accepted > 0 {
 		c.signalRead()
+		c.rcvGrow(res.accepted, res.ooo)
+		c.rcvRTTStamp(seg, n, now)
+		c.rcvRTTWindow(now)
 	}
 	if seg.has(flagFIN) && !res.trimmed && !res.dropped {
 		finOff := uint64(off) + uint64(n)
