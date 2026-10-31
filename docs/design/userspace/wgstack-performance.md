@@ -952,6 +952,7 @@ Linux の値は 2 つの経路で測ります。
   3 つの実装を同じ VM で流し、CPU と時計の違いを比べる値に混ぜません
 - ラボの `lab/tcpquality.sh`:エージェントのカーネルモード(TCP の終点は LAN のホストの Linux)、gVisor のユーザー空間モード、wgstack のユーザー空間モードを同じ経路で比べます。
   2 つのユーザー空間モードは、モードの名前 `gvisor` と `wgstack` で選びます。
+  どの実行でもエージェントの UDP の segmentation offload を切ります([ラボの経路の UDP の GSO](#ラボの経路の-udp-の-gso))。
   相手は client の namespace の Linux なので、gVisor ではない相手での値を得られます
 
 性能の参照の Linux は、適合の試験の固定の値([参照の Linux の設定](wgstack-verification.md#参照の-linux-の設定))ではなく、Linux の既定の回復と輻輳の制御を使います。
@@ -959,6 +960,26 @@ CUBIC、RACK-TLP、SACK、D-SACK、F-RTO、受信のバッファの自動調整�
 `tcp_no_metrics_save=1` と `tcp_ecn=0` を固定し、`tcp_rmem` と `tcp_wmem` の上限を boost と同じ 4 MiB にします。
 ソケットに `SO_RCVBUF` と `SO_SNDBUF` を与えると自動調整が止まるので、与えません。
 `linuxdut` は値を書き込んで読み戻し、VM のカーネルの版と値を結果と共に記録します。
+
+#### ラボの経路の UDP の GSO
+
+`lab/tcpquality.sh` は、品質の比較と CPU の測定のすべての実行で、エージェントの network namespace の `eth0` の UDP の segmentation offload を切り、終了時に元の状態に戻します。
+wireguard-go の Linux のバインドは同じ大きさの datagram の列を 1 つの UDP の GSO の packet で送り、veth はこの packet を分けずにルータへ渡します。
+切る理由は次の 2 つです。
+
+- netem の待ち行列と損失:ルータの netem は GSO の packet を待ち行列の 1 つとして数え、含まれる datagram を列全体の送出の時間の後にまとめて出します。
+  損失も packet ごとに決めるので、最大 64 個の datagram をまとめて落とします。
+  実際の回線は datagram を 1 つずつ運ぶので、その先の待ち行列にこの遅れとまとまった損失は生じません。
+  切らずに測った送信の向きのバッチ([wgstack のバッチ](wgstack-batching.md))では、まとめて届いた datagram の ACK もまとめて返り、次の列がさらに長くなりました。
+  その結果、速さを固定した経路の送る向きでは、列の遅れで HyStart++ が最初の slow start を早く終えて速さが約 5% 下がり、byte あたりの CPU の比は分けた場合より大きく下がりました。
+  損失のある経路でのまとまった損失は、ラボで観測していません
+- CPU:netem の無い経路でも、切らなければ GSO の packet は veth とルータの namespace を分けられずに通り、どこでも分けられません。
+  UDP の segmentation offload を持たない実際のホストは、この分ける手間を払います。
+  切ると、エージェントのカーネルが datagram を namespace の外へ出す前に分けるので、この手間をエージェントが払う控えめな場合になります。
+  offload を持つ NIC のホストの値は、2 つの場合の間にあると見込みます
+
+datagram を分ける手間はエージェントの CPU に数えます。
+VM の中のルータの namespace の転送の手間がエージェントの cgroup にどれだけ数えられるかは、未確認です。
 
 ### 判定の行列
 
@@ -998,6 +1019,7 @@ CUBIC、RACK-TLP、SACK、D-SACK、F-RTO、受信のバッファの自動調整�
   受ける向きの値は、エージェントが返す ACK の暗号と送信の CPU を含みます。
   速さを固定した場合は片道 25 ms、20 Mbit/s、200 packet の待ち行列で、損失と途絶を入れません。
   速さを制限しない場合は経路に netem を置きません。
+  `tcpquality.sh` は、この CPU の測定に限らず、品質の比較を含むすべての実行で、エージェントの network namespace の `eth0` の UDP の segmentation offload を切ります([ラボの経路の UDP の GSO](#ラボの経路の-udp-の-gso))。
   送り手のプロセス(送る向きでは LAN のホスト、受ける向きでは client)の CPU も記録します。
   送り手が 1 つの CPU の 0.7 以上を使った実行は送り手の速さを測ったとみなし、判定に使いません。
   gVisor と wgstack は同じ VM の同じ時間帯に流します。
