@@ -299,9 +299,11 @@ func TestHarnessPassesOverAFINSentBeforeTheAck(t *testing.T) {
 
 // dropFinalAck drops the testbench's pure ACK of the engine's FIN, so the engine stays in LAST-ACK
 // and resends its FIN, each time echoing the TSval it had before. From the engine's first resend
-// after a drop on, it also repeats that resend every repeatEvery, as an engine that keeps resending
+// of its FIN on, it also repeats that resend every repeatEvery, as an engine that keeps resending
 // without the ACK does: gVisor's own next resend can come seconds later on a loaded runner (over
-// 3.5 s once on the Windows runner), and the tests below need a resend to judge. With holdData set,
+// 3.5 s twice on the Windows runner), and the tests below need a resend to judge. The repeat does
+// not wait for the drop: the first resend can be a probe that leaves before the testbench's ACK
+// reaches this wrapper, and on the Windows runner it did, so the repeat never started. With holdData set,
 // it also holds the testbench's pure ACK of the engine's last data segment that long before the
 // engine sees it, as a loaded machine that processes the ACK late does: the FIN then goes out with
 // that data still unacknowledged, and its first resend is a probe that comes at once.
@@ -312,8 +314,7 @@ type dropFinalAck struct {
 	mu          sync.Mutex
 	fin         uint32 // the sequence number after the engine's FIN, once it has sent one
 	seen        bool
-	dropped     bool   // an ACK of the FIN was dropped
-	repeating   bool   // the engine's first resend after a drop is being repeated
+	repeating   bool   // the engine's first resend of its FIN is being repeated
 	closed      bool   // out is closed
 	dataEnd     uint32 // the sequence number after the engine's latest data segment
 	out         chan []byte
@@ -325,7 +326,6 @@ func (d *dropFinalAck) Inject(pkt []byte) error {
 	if s, err := tcpharness.Parse(pkt); err == nil && s.Flags == tcpharness.FlagACK && len(s.Payload) == 0 {
 		d.mu.Lock()
 		drop := d.seen && s.Ack == d.fin
-		d.dropped = d.dropped || drop
 		hold := d.holdData > 0 && !d.seen && d.dataEnd != 0 && s.Ack == d.dataEnd
 		d.mu.Unlock()
 		if drop {
@@ -376,7 +376,7 @@ func dropAckOfFINHolding(inner tcpharness.DUT, holdData, repeatEvery time.Durati
 					d.dataEnd = s.Seq + uint32(len(s.Payload))
 				}
 				if s.Has(tcpharness.FlagFIN) {
-					if d.dropped && !d.repeating && d.fin == s.Seq+s.Len() {
+					if d.seen && !d.repeating && d.fin == s.Seq+s.Len() {
 						d.repeating = true
 						go d.repeat(append([]byte(nil), pkt...))
 					}
