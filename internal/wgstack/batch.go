@@ -85,8 +85,7 @@ func (l *sendLedger) init(cfg SendBatch, mtu int) {
 		keff = min(size, cfg.Packets/(2*(cfg.Callers-1)))
 	}
 	// 印を書ける条件:offset(wireguard-go の MessageTransportHeaderSize の 16)+ packet の長さ + 詰め物 + 認証の
-	// tag ≤ buffer の容量 - 16。Read は呼ぶ
-	// たびに実際の offset と buffer の長さでも確かめる
+	// tag ≤ buffer の容量 - 16。Read は呼ぶたびに実際の offset と buffer の長さでも確かめる
 	if keff < 2 || 16+mtu+sealOverhead > cfg.BufferSize-tagSize {
 		return
 	}

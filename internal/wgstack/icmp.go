@@ -45,7 +45,7 @@ func (s *stack) icmpAllowed(now int64) bool {
 	return true
 }
 
-// sendICMPError は、届いた packet orig への ICMP の誤り(Destination Unreachable、Time Exceeded、Parameter
+// sendICMPErrorRaw は、届いた packet orig への ICMP の誤り(Destination Unreachable、Time Exceeded、Parameter
 // Problem)を制御の輪に積む。rest は ICMP の header の後半の 4 byte(pointer など)である。誤りの packet、
 // 先頭でない断片、自分のアドレスでない宛先、broadcast と multicast の送信元には送らない(RFC 1122 3.2.2)。
 // laterFragment が真なら、先頭でない断片にも送る(後続の断片の option の誤りへの Parameter Problem)。
