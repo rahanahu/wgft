@@ -18,6 +18,7 @@ The compatibility contract covers the Linux server and agent, plus the Windows a
 | What protects administration and startup? | [Security and configuration](security/README.md): trust boundaries, precedence, startup refusal, and retries |
 | How do operation and teardown work? | [Interface](interface.md) and [operations](operations/README.md): CLI/Web UI, logs, and owned-resource removal |
 | What remains compatible after an upgrade? | [Compatibility](compatibility.md): names and meanings of public surfaces |
+| What does the move to v2 decide? | [v2: move to Rust](v2/README.md): motivation, order, what stays unchanged, distribution, and design constraints (Japanese body) |
 | What remains unsupported or proposed? | [Limitations and proposals](roadmap.md): current limitations, unverified behavior, and unimplemented designs |
 
 ## Previous links
