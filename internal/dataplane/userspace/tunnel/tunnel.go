@@ -111,6 +111,9 @@ func New(cfg Config) (*Tunnel, error) {
 		return nil, fmt.Errorf("netstack: %w", err)
 	}
 	startMemProbe(tnet)
+	if msg := sendBatchOffReason(tnet, cfg); msg != "" {
+		cfg.Logf("%s", msg)
+	}
 	t := &Tunnel{cfg: cfg, tnet: tnet}
 	t.dev = wgbind.NewDevice(tnet, deviceBind(tnet, bindForDevice()), device.NewLogger(device.LogLevelError, "wg: "))
 

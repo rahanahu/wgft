@@ -159,17 +159,27 @@ func logSendBatch(w io.Writer, mode, netstack string, b sendBatch) {
 		}
 		return
 	}
-	mib := float64(int64(b.packets)*tunnel.SendBatchBufferBytes()) / (1 << 20)
-	switch {
-	case b.set && b.packets == 0:
+	if b.packets == 0 {
 		fmt.Fprintln(w, "send batch budget: 0 MiB; WGFT_AGENT_BATCH_MIB=0 turns send batching off")
-	case b.capped:
-		fmt.Fprintf(w, "send batch budget: %.1f MiB, %d buffers, from WGFT_AGENT_BATCH_MIB lowered to the cap for this host's %d CPUs\n", mib, b.packets, runtime.NumCPU())
-	case b.set:
-		fmt.Fprintf(w, "send batch budget: %.1f MiB, %d buffers, from WGFT_AGENT_BATCH_MIB\n", mib, b.packets)
-	case runtime.GOOS == "windows":
-		fmt.Fprintf(w, "send batch budget: %.1f MiB, %d buffers, the cap for this host's %d CPUs; set WGFT_AGENT_BATCH_MIB to override\n", mib, b.packets, runtime.NumCPU())
-	default:
-		fmt.Fprintf(w, "send batch budget: %.1f MiB, %d buffers, derived from the flow caps; set WGFT_AGENT_BATCH_MIB to override\n", mib, b.packets)
+		return
 	}
+	mib := float64(int64(b.packets)*tunnel.SendBatchBufferBytes()) / (1 << 20)
+	var src string
+	switch {
+	case b.capped:
+		src = fmt.Sprintf("from WGFT_AGENT_BATCH_MIB lowered to the cap for this host's %d CPUs", runtime.NumCPU())
+	case b.set:
+		src = "from WGFT_AGENT_BATCH_MIB"
+	case runtime.GOOS == "windows":
+		src = fmt.Sprintf("the cap for this host's %d CPUs; set WGFT_AGENT_BATCH_MIB to override", runtime.NumCPU())
+	default:
+		src = "derived from the flow caps; set WGFT_AGENT_BATCH_MIB to override"
+	}
+	// k_eff が 2 より小さい予算では Device はバッチを使わない(wgstack-batching.md の「下限」)
+	if floor := tunnel.SendBatchMin(); b.packets < floor {
+		fmt.Fprintf(w, "send batch budget: %.1f MiB, %d buffers, %s; send batching is off because this host's %d CPUs need at least %d buffers, %.1f MiB\n",
+			mib, b.packets, src, runtime.NumCPU(), floor, float64(int64(floor)*tunnel.SendBatchBufferBytes())/(1<<20))
+		return
+	}
+	fmt.Fprintf(w, "send batch budget: %.1f MiB, %d buffers, %s\n", mib, b.packets, src)
 }

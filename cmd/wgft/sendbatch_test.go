@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"math"
 	"os"
@@ -89,7 +90,11 @@ func TestLogSendBatch(t *testing.T) {
 		want                 string
 	}{
 		{"wgstack default", "", "wgstack", sendBatch{packets: 864}, "send batch budget: "},
-		{"wgstack set", "userspace", "wgstack", sendBatch{packets: 16, set: true, requestedMiB: 1}, "buffers, from WGFT_AGENT_BATCH_MIB\n"},
+		{"wgstack set", "userspace", "wgstack", sendBatch{packets: tunnel.SendBatchMin(), set: true, requestedMiB: 2}, "buffers, from WGFT_AGENT_BATCH_MIB\n"},
+		{"wgstack below the floor", "userspace", "wgstack", sendBatch{packets: tunnel.SendBatchMin() - 1, set: true, requestedMiB: 1},
+			fmt.Sprintf("from WGFT_AGENT_BATCH_MIB; send batching is off because this host's %d CPUs need at least %d buffers", runtime.NumCPU(), tunnel.SendBatchMin())},
+		{"wgstack default below the floor", "", "wgstack", sendBatch{packets: 1},
+			"to override; send batching is off because"},
 		{"wgstack capped", "", "wgstack", sendBatch{packets: 100, set: true, capped: true}, "lowered to the cap for this host's"},
 		{"wgstack off", "", "wgstack", sendBatch{set: true}, "WGFT_AGENT_BATCH_MIB=0 turns send batching off"},
 		{"gvisor set", "", "", sendBatch{packets: 16, set: true}, "WGFT_AGENT_BATCH_MIB: unused with the gvisor network stack"},

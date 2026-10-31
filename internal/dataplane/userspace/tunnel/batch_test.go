@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -507,5 +508,51 @@ func TestDeviceBindWatchesOnlyBatchingWgstack(t *testing.T) {
 	}
 	if got := deviceBind(on, inner).BatchSize(); got != inner.BatchSize() {
 		t.Fatalf("the Send watch changed the receive batch to %d", got)
+	}
+}
+
+// 予算を渡したのに MTU が印の余地を残さない wgstack の Device では、トンネルがバッチを使わない理由を 1 行で
+// 出す。gVisor、予算 0、予算が下限より小さい場合(cmd/wgft が起動の行で出す)、バッチを使う Device では出さない。
+func TestSendBatchOffReason(t *testing.T) {
+	// 16 + MTU + 31 が buffer の容量から 16 を引いた値を超える最小の MTU
+	tooBig := device.MaxMessageSize - 16 - 16 - 31 + 1
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"gvisor", Config{Netstack: NetstackGVisor, MTU: 1420, SendBatchPackets: 1000}, ""},
+		{"wgstack budget 0", Config{Netstack: NetstackWgstack, MTU: 1420}, ""},
+		{"wgstack below the floor", Config{Netstack: NetstackWgstack, MTU: 1420, SendBatchPackets: SendBatchMin() - 1}, ""},
+		{"wgstack batching", Config{Netstack: NetstackWgstack, MTU: 1420, SendBatchPackets: 1000}, ""},
+		{"wgstack MTU without room", Config{Netstack: NetstackWgstack, MTU: tooBig, SendBatchPackets: 1000},
+			fmt.Sprintf("tunnel: wgstack send batching is off: the tunnel MTU %d leaves no room for the batch tag in wireguard-go's %d-byte buffers", tooBig, device.MaxMessageSize)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cfg.Address = rigAgentAddr
+			ns, err := newNetstack(tc.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ns.Close()
+			if got := sendBatchOffReason(ns, tc.cfg); got != tc.want {
+				t.Fatalf("reason %q, want %q", got, tc.want)
+			}
+			if strings.ContainsAny(tc.want, "()") {
+				t.Fatalf("reason %q has parentheses", tc.want)
+			}
+		})
+	}
+	if tooBig-1 < 576 {
+		return
+	}
+	// 1 byte 小さい MTU ではバッチを使う
+	ns, err := newNetstack(Config{Netstack: NetstackWgstack, Address: rigAgentAddr, MTU: tooBig - 1, SendBatchPackets: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ns.Close()
+	if ns.BatchSize() != sendBatchSize {
+		t.Fatalf("MTU %d: BatchSize %d, want %d", tooBig-1, ns.BatchSize(), sendBatchSize)
 	}
 }

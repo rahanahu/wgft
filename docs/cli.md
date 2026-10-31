@@ -651,8 +651,11 @@ wait to be encrypted and sent. Unset or empty derives it from the flow caps,
 and 0 turns batching off. It bounds only the batched part: the queues of
 single packets keep their own bound, about 73 MiB on Linux with 8 CPUs,
 whatever the value. A value above the cap for this host's CPU count is
-lowered to the cap, and the agent logs the effective budget at start. A value
-that is not a whole number of at least 0 stops the agent with exit code 3.
+lowered to the cap, and the agent logs the effective budget at start.
+Batching needs a budget of at least 4 x CPUs + 20 buffers, 1.75 MiB with 2
+CPUs on Linux; below that wgstack sends one packet at a time, and the start
+line says that batching is off. A value that is not a whole number of at
+least 0 stops the agent with exit code 3.
 With gvisor or in kernel mode the setting is unused, and the agent logs that
 and starts.
 

@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"fmt"
 	"math/bits"
 	"runtime"
 
@@ -32,6 +33,10 @@ func sendBatchSingles() int {
 // これより大きな予算は P_upper と同じなので、設定の値はここで丸める。
 func SendBatchCap() int { return sendBatchSingles() * sendBatchSize }
 
+// SendBatchMin は送信の向きのバッチを使える最小の予算で、k_eff = ⌊P_max / (2 × (C - 1))⌋ が 2 以上になる
+// P_max = 4 × (C - 1) である。これより小さな予算の Device はバッチを使わず、1 個ずつ送る。
+func SendBatchMin() int { return 4 * (sendBatchCallers() - 1) }
+
 // SendBatchBufferBytes は S で、wireguard-go の buffer 1 つがヒープに持つ大きさである。MaxMessageSize
 // (Linux と macOS で 65,535 byte、Windows で 2,016 byte)をヒープの区分の 64 KiB と 2 KiB に切り上げる。
 func SendBatchBufferBytes() int64 { return 1 << bits.Len(uint(device.MaxMessageSize-1)) }
@@ -48,4 +53,15 @@ func sendBatchConfig(packets int) wgstack.SendBatch {
 		Callers:    sendBatchCallers(),
 		BufferSize: device.MaxMessageSize,
 	}
+}
+
+// sendBatchOffReason は、予算を渡したのに wgstack の Device がバッチを使わない理由のうち、起動の時に
+// cmd/wgft が出せない MTU の理由を 1 行で返す。予算が SendBatchMin より小さい場合は cmd/wgft が起動の行で
+// 出すので、ここでは出さない。gVisor、予算 0、バッチを使う Device では空を返す。
+func sendBatchOffReason(tnet netstack, cfg Config) string {
+	w, ok := tnet.(wgstackNetstack)
+	if !ok || w.Batching() || cfg.SendBatchPackets < SendBatchMin() {
+		return ""
+	}
+	return fmt.Sprintf("tunnel: wgstack send batching is off: the tunnel MTU %d leaves no room for the batch tag in wireguard-go's %d-byte buffers", cfg.MTU, device.MaxMessageSize)
 }
