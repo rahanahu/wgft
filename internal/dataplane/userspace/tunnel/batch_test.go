@@ -331,9 +331,13 @@ func newBatchRig(t *testing.T, pmax int, blackhole bool) *batchRig {
 	}()
 	ka, _ := wgtypes.GeneratePrivateKey()
 	kb, _ := wgtypes.GeneratePrivateKey()
-	ipc := func(d *device.Device, priv, peer wgtypes.Key, allowed netip.Addr, ep string) {
-		cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nallowed_ip=%s/32\nendpoint=%s\npersistent_keepalive_interval=1\n",
-			hex.EncodeToString(priv[:]), hex.EncodeToString(peer[:]), allowed, ep)
+	// 持続の keepalive は a だけに置く。b にも置くと、両方が Up で同時にハンドシェイクを始め、互いの開始に
+	// 応えた後で自分の開始への応答を古いものとして捨てる(wireguard-go の "Received invalid response
+	// message")。どちらのセッションもできず、次の再送の 5 秒後まで packet が届かない。負荷の下ではそれが
+	// 2 回続き、waitDelivered の 10 秒を超えた(macOS の CI で 2 回)。b は a の開始に応えるだけにする
+	ipc := func(d *device.Device, priv, peer wgtypes.Key, allowed netip.Addr, ep string, keepalive int) {
+		cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nallowed_ip=%s/32\nendpoint=%s\npersistent_keepalive_interval=%d\n",
+			hex.EncodeToString(priv[:]), hex.EncodeToString(peer[:]), allowed, ep, keepalive)
 		if err := d.IpcSet(cfg); err != nil {
 			t.Fatal(err)
 		}
@@ -341,8 +345,8 @@ func newBatchRig(t *testing.T, pmax int, blackhole bool) *batchRig {
 			t.Fatal(err)
 		}
 	}
-	ipc(r.b, kb, ka.PublicKey(), rigAgentAddr, "127.0.0.1:2")
-	ipc(r.a, ka, kb.PublicKey(), rigServerAddr, "127.0.0.1:1")
+	ipc(r.b, kb, ka.PublicKey(), rigAgentAddr, "127.0.0.1:2", 0)
+	ipc(r.a, ka, kb.PublicKey(), rigServerAddr, "127.0.0.1:1", 1)
 	t.Cleanup(func() {
 		r.a.Close()
 		r.b.Close()
